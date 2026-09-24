@@ -16,6 +16,8 @@
 //! 已知不覆盖（如实登记）：子窗口（preview / processManager / models）的
 //! 「建窗 → 加载 → 自关」链路依赖真实 WebView 行为，mock runtime 覆盖不到，
 //! 留 Phase 2 手动验收；**不**为此引入 WebDriver/tauri-driver 依赖。
+//! （审查 M1~M3 后补：子窗 label 的**来源校验档位**已可 mock 覆盖，见文件末尾
+//!  「子窗口来源校验档位」一组；仍不覆盖的是真实建窗与页面加载。）
 
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
@@ -44,8 +46,8 @@ fn main_window() -> WebviewWindow<MockRuntime> {
 ///   （`is_local_url` 据此判 Origin::Local，ACL 不拦自定义命令）；
 /// - `invoke_key` 用 `tauri::test::INVOKE_KEY`：与 `mock_builder` 注入的钥匙一致；
 /// - 参数名按既有约定用 camelCase（tauri 宏默认 `rename_all = "camelCase"`）。
-fn invoke(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Value {
-    let request = InvokeRequest {
+fn ipc_request(cmd: &str, args: Value) -> InvokeRequest {
+    InvokeRequest {
         cmd: cmd.to_string(),
         callback: CallbackFn(0),
         error: CallbackFn(1),
@@ -53,10 +55,26 @@ fn invoke(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Value 
         body: InvokeBody::Json(args),
         headers: Default::default(),
         invoke_key: INVOKE_KEY.to_string(),
-    };
-    match get_ipc_response(window, request) {
+    }
+}
+
+fn invoke(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Value {
+    match get_ipc_response(window, ipc_request(cmd, args)) {
         Ok(body) => body.deserialize::<Value>().expect("命令返回体不是合法 JSON"),
         Err(e) => panic!("{cmd} 被 IPC 层拒绝（命令未注册或 invoke_key 不符）: {e}"),
+    }
+}
+
+/// 同 `invoke`，但把回执压成文本返回。
+/// 命令签名是 `Result<_, String>` 时（来源校验失败即此类）回执不是 JSON 对象，
+/// `invoke` 会直接 panic —— 审查 M1~M3 的档位断言只看「有没有被拒杀」，用这个。
+fn invoke_text(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> String {
+    match get_ipc_response(window, ipc_request(cmd, args)) {
+        Ok(body) => match body.deserialize::<Value>() {
+            Ok(v) => v.to_string(),
+            Err(e) => format!("<非 JSON 回执 {e}>"),
+        },
+        Err(e) => e.to_string(),
     }
 }
 
@@ -234,6 +252,17 @@ fn finder_scan_bigfiles_small_dir() {
     );
     assert_eq!(res["success"], json!(true), "小目录 bigfiles 扫描应成功: {res}");
     assert!(res["data"].is_array(), "data 必须是数组: {res}");
+    // 审查 M8：回执必须自带「这份结果完不完整」的元数据。旧形状只有 success+data，
+    // 于是「整个目录没权限读」与「真的没有大文件」在渲染层长得一模一样。
+    assert!(
+        res["errors"].is_number(),
+        "errors 必须是数字（原生侧告警计数），回执 {res}"
+    );
+    assert!(
+        res["truncated"].is_boolean(),
+        "truncated 必须是布尔（是否撞到条目上限），回执 {res}"
+    );
+    assert_eq!(res["truncated"], json!(false), "小目录不该触发截断: {res}");
 }
 
 /// runtimes:collect 形状（`success` 为布尔）。
@@ -254,4 +283,62 @@ fn netcheck_collect_shape() {
     let w = main_window();
     let res = invoke(&w, "netcheck_collect", json!({}));
     assert!(res["success"].is_boolean(), "success 必须是布尔: {res}");
+}
+
+// ==================== 子窗口来源校验档位（审查 M1~M3 回归网） ====================
+//
+// 为什么单列一组：本文件此前**每条用例都建 label="main" 的窗口**，于是「子窗专属命令被
+// `guard::MAIN` 拒杀」这类缺陷在几十条绿灯里完全隐形——外设窗的 apply/restore、
+// 预览窗的 delete-file 全部 100% 不可用却测不出来（文件头的「已知不覆盖：子窗口」即此）。
+// 这些用例只打快速组，不建真实窗口、不跑 PowerShell。
+
+/// 建一个指定 label 的测试窗口（与生产同 label 集，见 `engine::guard::APP_WINDOWS`）。
+fn window_with_label(label: &str) -> WebviewWindow<MockRuntime> {
+    let app = trim_tauri_lib::build_app(mock_builder())
+        .build(mock_context(noop_assets()))
+        .expect("测试 App 构建失败");
+    WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+        .build()
+        .unwrap_or_else(|e| panic!("测试窗口 {label} 创建失败: {e}"))
+}
+
+/// 断言回执里**不是**来源校验失败（档位放对的判据）。
+fn assert_guard_passed(text: &str, ctx: &str) {
+    assert!(!text.contains("IPC 来源校验失败"), "{ctx}: 被来源校验拒杀，回执 {text}");
+}
+
+/// 外设子窗必须能调 `peripheral_apply`（非管理员时回 needAdmin，而不是被拒杀）。
+/// 传空 options → 三组都归一为 -1 → 命令在写注册表之前就返回「没有需要应用的设置」，
+/// 因此本用例在任何权限等级下都不会改动系统。
+#[test]
+fn peripheral_subwindow_can_call_apply() {
+    let w = window_with_label("peripheral");
+    let text = invoke_text(&w, "peripheral_apply", json!({ "options": {} }));
+    assert_guard_passed(&text, "peripheral_apply 应允许外设窗调用");
+}
+
+/// 提权仍是主窗专属红线（AGENTS.md §3）：子窗不得触发放开。
+#[test]
+fn subwindow_cannot_request_elevation() {
+    for label in ["peripheral", "preview", "processManager", "models"] {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "elevate_request", json!({}));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调 elevate_request 必须被拒（红线：提权只认主窗），回执 {text}"
+        );
+    }
+}
+
+/// 预览窗调 `fileclean_delete_file` 不得被档位拒杀（M2）：
+/// 没有扫描槽时在 `in_scope` 处返回「不在扫描范围内」，这一层才是真闸门。
+#[test]
+fn preview_subwindow_reaches_fileclean_delete() {
+    let w = window_with_label("preview");
+    let text = invoke_text(&w, "fileclean_delete_file", json!({ "filePath": "C:\\nope\\a.jpg" }));
+    assert_guard_passed(&text, "fileclean_delete_file 应允许预览窗调用（由 in_scope 收口）");
+    assert!(
+        text.contains("不在扫描范围"),
+        "预览窗删除必须由 in_scope 拦下，而不是放行任意路径，回执 {text}"
+    );
 }

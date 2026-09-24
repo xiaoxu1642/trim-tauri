@@ -245,7 +245,11 @@
       console.warn('[tauri-api] 未登记的 send 通道: ' + channel);
       return;
     }
-    invokeCore(cmd, args || {}).catch(function () {});
+    // 审查 L13：send 语义是「不等回执」，但**不等于出错也瞒着** —— 原先 `.catch(function(){})`
+    // 连一行日志都不留，通道名写错或 Rust 侧报错时完全无从发现。
+    invokeCore(cmd, args || {}).catch(function (e) {
+      console.error('[tauri-api] send 通道失败 ' + channel + ': ' + ((e && e.message) || e));
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -738,6 +742,12 @@
 
   function injectCaption() {
     if (document.querySelector('.tauri-caption')) return;
+    // 审查 M4：自绘 caption 只给主窗装。四个子窗（preview / models / processManager /
+    // peripheral）建窗时没关原生装饰，标题栏本来就由系统提供，这层叠加件在它们身上只是
+    // 一套「点了会去要 close/drag/resize 权限」的空壳 —— 正是它逼着 capabilities 给所有
+    // 窗口发 allow-close。去掉叠加件，权限就能收回主窗一处（见 capabilities/default.json
+    // 与 subwindows.json 的拆分）。
+    if (currentLabel() !== 'main') return;
     injectCaptionStyles();
 
     var bar = document.createElement('div');

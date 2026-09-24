@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 
-use crate::engine::{delete_manifest, guard, log, paths, sysinfo};
+use crate::engine::{delete_manifest, guard, log, paths, protect, sysinfo};
 use crate::pwsh;
 
 // ==================== 外置 PS 脚本（编译期嵌入，禁止手写） ====================
@@ -79,7 +79,7 @@ fn cache_file() -> std::path::PathBuf {
 
 /// 读持久缓存；CM-9：所有项必须带 nativeRegPath 字符串才可用
 fn load_cache() -> Option<Vec<Value>> {
-    let v = crate::security::read_json_or_quarantine(&cache_file());
+    let v = crate::security::read_json_or_default(&cache_file());
     let obj = v.as_object()?;
     let data = obj.get("data")?;
     let arr = data.as_array()?;
@@ -225,7 +225,7 @@ pub async fn contextmenu_scan<R: Runtime>(
         if let Some(cached) = load_cache() {
             let map = snapshot_by_id(&cached);
             snap_set(&label, map);
-            if let Some(ts) = crate::security::read_json_or_quarantine(&cache_file())
+            if let Some(ts) = crate::security::read_json_or_default(&cache_file())
                 .get("timestamp")
                 .and_then(|v| v.as_i64())
             {
@@ -370,6 +370,18 @@ pub async fn contextmenu_remove<R: Runtime>(
                 data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
                 data["results"].as_array_mut().unwrap().push(json!({
                     "id": id, "name": name, "status": "error", "message": "缺少文件路径"
+                }));
+                continue;
+            }
+            // 审查 M12：AGENTS §3 把「删除前先过 protect」写成无条件红线，本出口此前是唯一
+            // 没落的一处。目标其实已被两道闸收住（`validate_snapshot_items` 只认扫描快照里的
+            // id/值、且 cm_scan.ps1 把来源限死在 SendTo/WinX 两个根），补 protect 是**纵深**：
+            // 万一上游扫描脚本放宽了根目录，这里仍有一道兜底。SendTo/WinX 在 `exact` 语义下
+            // 属后代路径，不会被误拦。
+            if protect::is_path_protected(p) {
+                data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
+                data["results"].as_array_mut().unwrap().push(json!({
+                    "id": id, "name": name, "status": "error", "message": "该路径受保护，已拒绝删除"
                 }));
                 continue;
             }

@@ -84,6 +84,18 @@ pub fn read_json_or_quarantine(path: &Path) -> serde_json::Value {
     }
 }
 
+/// 读**只读缓存**（扫描结果、体检结果这类可重扫的产物）：损坏时静默返回空对象，不隔离。
+///
+/// 审查 M15：AGENTS §6 把两类文件分开 —— 用户配置损坏要留现场（走上面的 quarantine），
+/// 而可重扫缓存损坏时重扫即恢复，隔离只会不断堆积 `<file>.corrupt-<ts>` 垃圾、
+/// 还把「缓存过期」误报成「配置损坏」级别的 error 日志。
+pub fn read_json_or_default(path: &Path) -> serde_json::Value {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    }
+}
+
 /// 配置文件损坏隔离：改名 `<file>.corrupt-<ts>` 保留现场
 pub fn quarantine_file(path: &Path, reason: &str) {
     if !path.exists() {
@@ -104,6 +116,33 @@ pub fn quarantine_file(path: &Path, reason: &str) {
             &format!("配置文件损坏已隔离: {name} -> {} ({reason})", bak.file_name().unwrap_or_default().to_string_lossy()),
         );
     }
+}
+
+/// 清理隔离件：`<file>.corrupt-<ts>` 超过 30 天的删掉（审查 M15/G4）。
+///
+/// 为什么需要：`quarantine_file` 每次损坏都留下一个新文件，此前**没有任何回收路径** ——
+/// 配置反复损坏（例如磁盘写满）时会在数据目录里堆一排永远没人读的 `.corrupt-*`。
+/// 只删本模块自己产出的命名格式，且按文件名里的毫秒时间戳判龄期，不碰用户文件。
+pub fn prune_quarantined(dir: &Path) -> usize {
+    const KEEP_MS: u128 = 30 * 24 * 60 * 60 * 1000;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some((_, ts)) = name.rsplit_once(".corrupt-") else { continue };
+        let Ok(ts) = ts.trim_end_matches(".json").parse::<u128>() else { continue };
+        if now.saturating_sub(ts) > KEEP_MS && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        crate::engine::log::write_log("info", &format!("已清理过期隔离件 {removed} 个"));
+    }
+    removed
 }
 
 /// 递归把 SECRET_FIELDS 字段做变换（对齐 transformSecrets）

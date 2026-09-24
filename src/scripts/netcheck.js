@@ -30,11 +30,7 @@
   let collecting = false;
   let initialized = false;
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
 
   function toast(type, message, duration) {
     window.app?.toast?.(type, message, duration);

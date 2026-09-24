@@ -1,6 +1,7 @@
 // finder.js - 磁盘清理 · Rust 原生查找器（重复/大文件/空/AppData）
 // 四个子页共用一套「布尔进度 + @@PROGRESS:n@@ 上报管线」：
-// 主进程 spawn finder.exe 并以 finder:progress 推送进度，扫描完成一次性返回结果数组。
+// 扫描走进程内原生引擎（trim-finder lib 直调，不再 spawn finder.exe），
+// 进度以 finder:progress 事件推送，完成时一次性返回结果数组。
 // 样式完全复用 .card / .table-card / .opt-* / .summary-card 主题语义。
 (function () {
   'use strict';
@@ -57,9 +58,7 @@
     return v.toFixed(v < 10 && i > 0 ? 2 : v < 100 && i > 0 ? 1 : 0) + ' ' + units[i];
   }
 
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
+  function esc(s) { return window.ds.esc(s); }
 
   function middleEllipsis(s, max) {
     s = String(s || '');
@@ -347,7 +346,17 @@
       seedSelection(key);
       setProgress(cfg, 100, '扫描完成');
       render(key);
-      window.app?.toast?.('success', `扫描完成，找到 ${s.results.length} 项`);
+      // 审查 M8/B2：空结果不等于「没有重复」。原生侧读不到的目录会计进 errors、
+      // 条目到上限会置 truncated，两者都必须显式说出来，否则用户会把「没权限看」
+      // 当成「这个目录真干净」，进而相信清理结果是完整的。
+      const notes = [];
+      if (resp.truncated) notes.push('条目已达扫描上限，结果被截断');
+      const errCount = Number(resp.errors) || 0;
+      if (errCount > 0) notes.push(`${errCount} 处无法读取`);
+      window.app?.toast?.(
+        notes.length ? 'warning' : 'success',
+        `扫描完成，找到 ${s.results.length} 项` + (notes.length ? `（${notes.join('；')}）` : '')
+      );
     } catch (e) {
       hideProgress(cfg);
       window.app?.toast?.('error', '扫描失败: ' + e.message);

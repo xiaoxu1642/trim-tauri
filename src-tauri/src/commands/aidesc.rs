@@ -166,7 +166,14 @@ fn post_json(
     if target.host.is_empty() {
         return Err(format!("接口地址缺少主机名: {url}"));
     }
-    let agent = wide("Trim/3.7.3");
+    // K1：入口按私有地址口径拒一次。端点由用户在设置页自填，`models:save` 虽也校验，
+    // 但本函数还被 `models:test`/`aidesc:get` 直接复用；少一处复检，被注入的渲染层就能
+    // 借这里的 `Authorization: Bearer <明文密钥>` 打到本机回环服务并读回响应。
+    if settings::is_private_api_url(url) {
+        return Err("接口地址指向本机或内网，已按安全策略拒绝".into());
+    }
+    // 版本号取编译期常量：写死字面量就成了第 4 处需要手工同步的版本源
+    let agent = wide(&format!("Trim/{}", env!("CARGO_PKG_VERSION")));
     let host = wide(&target.host);
     let object = wide(&target.path);
     let header_text: String = headers
@@ -232,6 +239,19 @@ fn post_json(
         .map_err(|e| format!("HTTP 请求发送失败: {e}"))?;
         WinHttpReceiveResponse(request, std::ptr::null_mut())
             .map_err(|e| format!("HTTP 响应接收失败: {e}"))?;
+
+        // K1 复检终点：WinHTTP 默认跟随重定向，「初始 URL 公网 → 302 到 127.0.0.1」会让
+        // 上面那道入口校验形同虚设（跨主机跳转还会把 Authorization 头带过去）。
+        // 与 engine::winhttp 的下载链同一口径：终点必须重新过私有地址判定，且不得跨主机。
+        let final_url = crate::engine::winhttp::query_final_url(request)?;
+        if settings::is_private_api_url(&final_url) {
+            return Err("接口重定向终点指向本机或内网，已拒绝".into());
+        }
+        if let Some(f) = settings::parse_http_url(&final_url) {
+            if f.host != target.host {
+                return Err(format!("接口重定向跨主机（{} → {}），已拒绝", target.host, f.host));
+            }
+        }
 
         let mut status: u32 = 0;
         let mut status_len: u32 = std::mem::size_of::<u32>() as u32;

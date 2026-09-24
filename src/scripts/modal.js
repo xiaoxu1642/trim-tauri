@@ -8,10 +8,7 @@
 (function () {
   'use strict';
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text == null ? '' : text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   // ---------- 空状态组件（扫描型页面统一空态视觉） ----------
   // 用法：emptyState({ icon, title, desc, cta: { text, target } })

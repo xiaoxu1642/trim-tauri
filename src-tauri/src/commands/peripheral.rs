@@ -65,6 +65,8 @@ pub async fn peripheral_open_window<R: tauri::Runtime>(
                 crate::activate_window(&win);
             }
         });
+    // 审查 K4 复盘：子窗也必须透传浏览器参数，否则带调试端口启动时静默建不出窗
+    let builder = crate::with_browser_args(builder);
     match builder.parent(&window) {
         Ok(b) => match b.build() {
             Ok(_) => Ok(json!({ "success": true })),
@@ -136,12 +138,17 @@ pub struct ApplyOptions {
 }
 
 /// peripheral:apply —— 白名单校验后写 HKLM（成功修剪备份）
+///
+/// 审查 M3：档位是 `APP_WINDOWS` 而非 `MAIN` —— 本通道的**唯一**调用方就是外设子窗
+/// （`peripheral-window.js`），按 MAIN 校验等于把它自己锁死（100% 返回「来源校验失败」）。
+/// 上游 Electron 侧按 `file://` 来源判定（main.js:105-118 isTrustedRenderer），子窗本就可调，
+/// 故放开到全集不是降标准，而是与上游同等级；真正的闸门是下面的 `is_admin()` + 取值白名单。
 #[tauri::command]
 pub async fn peripheral_apply<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     options: Option<ApplyOptions>,
 ) -> Result<Value, String> {
-    guard::guard(&window, guard::MAIN)?;
+    guard::guard(&window, guard::APP_WINDOWS)?;
     if !crate::engine::sysinfo::is_admin() {
         return Ok(json!({
             "success": false, "needAdmin": true,
@@ -250,11 +257,14 @@ fn is_backup_name(name: &str) -> bool {
 }
 
 /// peripheral:restore-backup —— 导入最新一份备份 .reg
+///
+/// 档位同 `peripheral_apply`（审查 M3）：唯一调用方是外设子窗，真正的闸门是 `is_admin()`
+/// 与「备份文件名 26 位字面量 + 只保留 10 份」的自产文件约束，不含任意路径入参。
 #[tauri::command]
 pub async fn peripheral_restore_backup<R: tauri::Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<Value, String> {
-    guard::guard(&window, guard::MAIN)?;
+    guard::guard(&window, guard::APP_WINDOWS)?;
     if !crate::engine::sysinfo::is_admin() {
         return Ok(json!({
             "success": false, "needAdmin": true,

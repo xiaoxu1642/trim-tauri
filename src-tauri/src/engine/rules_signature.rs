@@ -217,20 +217,26 @@ mod tests {
     }
 
     /// 真实规则文件双端对拍（D6 规则 1）：本测试给出 Rust 侧结论，
-    /// 与 `node -e "require('C:/KaiFa/Trim/src/main/rules-signature').verifyRulesSignature(fs.readFileSync(...))"`
-    /// 的 JS 结论必须一致。文件不存在时跳过（不误报失败）。
+    /// 与 JS 侧 `vendor/upstream-js/src/main/rules-signature.js` 的 `verifyRulesSignature(...)`
+    /// 结论必须一致（JS 侧对拍命令：`node -e "const r=require('./vendor/upstream-js/src/main/rules-signature'),fs=require('fs');console.log(r.verifyRulesSignature(fs.readFileSync('src-tauri/data/cleanup-rules.json','utf8')))"`）。
+    ///
+    /// 审查 M13：路径改用 `CARGO_MANIFEST_DIR` 拼接（原先写 `..\src\data\...`，
+    /// 规则库随 M14 移出 frontendDist 后相对基准一变就**静默跳过**、却仍计入 passed）；
+    /// 该文件是仓库跟踪文件，找不到即真缺陷，故直接 panic 而不是 return。
     #[test]
     fn real_rules_file_verdict() {
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
         if let Ok(p) = std::env::var("TRIM_RULES_FILE") {
             candidates.push(std::path::PathBuf::from(p));
         }
-        candidates.push(std::path::PathBuf::from(r"..\src\data\cleanup-rules.json"));
-        candidates.push(std::path::PathBuf::from(r"C:\KaiFa\Trim\src\data\cleanup-rules.json"));
-        let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
-            eprintln!("[rules_signature] 未找到真实规则文件，跳过双端对拍");
-            return;
-        };
+        candidates.push(std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            r"\data\cleanup-rules.json"
+        )));
+        let path = candidates
+            .into_iter()
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("找不到内置规则库，双端对拍没跑（候选见上）"));
         let text = std::fs::read_to_string(&path).unwrap();
         let verdict = verify_rules_text(&text);
         eprintln!(

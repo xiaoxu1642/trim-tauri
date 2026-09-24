@@ -7,6 +7,7 @@
   <title>外设优化</title>
   <link rel="icon" href="./assets/ico/Trim.ico" />
   <link rel="stylesheet" href="styles/main.css" />
+  <link rel="stylesheet" href="styles/ds.css" />
 </head>
 <body class="peripheral-window">
   <div class="pv-topbar">
@@ -69,13 +70,16 @@
   <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——窗口材质件与业务件在加载期就会读
        window.api，必须先生效；Electron 下自动 no-op（由 preload.js 接管） -->
   <script src="scripts/tauri-api.js"></script>
+  <!-- 审查 L17：ds.js 提前到 window-material/theme 之前 —— AGENTS §2 的字面约束是
+       「ds.js 先于一切 window.ds 使用方」，theme.js:68 读 ds.GLASS_MAX_BLUR_PX。
+       此前它排在 theme.js 之后，靠"调用点都在 DOMContentLoaded 里"才没出问题；
+       排在前面就不依赖这个隐含时序了。 -->
+  <script src="scripts/ds.js"></script>
   <!-- 子窗口材质/主题同步：electron-mica + data-material + 主题类（预览窗不加载） -->
   <script src="scripts/window-material.js"></script>
   <script src="scripts/theme.js"></script>
   <!-- 液态玻璃引擎：子窗口与主窗共用四档效果（按钮折射/弹性形动），分段栏等选择器在子窗无命中自动跳过 -->
   <script src="scripts/liquid-glass.js"></script>
-  <!-- ds.js：data-tip 委托等设计系统基础件（复核 💭4：title= 违反 AGENTS §5，改 data-tip 后需此件） -->
-  <script src="scripts/ds.js"></script>
   <script src="scripts/peripheral-window.js"></script>
 </body>
 </html>

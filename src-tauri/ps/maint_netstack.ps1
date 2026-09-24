@@ -1,5 +1,5 @@
 # <<<PROVENANCE
-# 来源：C:/KaiFa/Trim/src/scripts-powershell/maintenance-scripts.js → run("netstack")
+# 来源：vendor/upstream-js/src/scripts-powershell/maintenance-scripts.js → run("netstack")
 # 生成：tools/sync-ps-from-js.mjs 直接取 JS **运行时字符串值**写入，无任何字符替换；
 #       改动本文件必须在源仓库改 JS 后重跑生成器（校验见 tools/check-ps-extraction.mjs）。
 # 说明：系统维护任务：重置网络栈 (Winsock/IP)（需管理员）

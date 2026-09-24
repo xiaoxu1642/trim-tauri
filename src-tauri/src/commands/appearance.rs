@@ -284,6 +284,19 @@ pub fn appearance_bg_import<R: Runtime>(window: WebviewWindow<R>) -> Result<Valu
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
         .unwrap_or_else(|| ".png".into());
     let dest = dir.join(format!("bg_{}{ext}", crate::engine::now_ms()));
+    // 审查 L9：先量体积再拷。扩展名白名单挡不住一个 4 GB 的 .png —— 这条命令是同步的
+    // （对话框本身要阻塞主线程），无上限的 fs::copy 会把 UI 钉死并写满数据盘。
+    const MAX_BG_BYTES: u64 = 50 * 1024 * 1024;
+    match std::fs::metadata(&src) {
+        Ok(m) if m.len() > MAX_BG_BYTES => {
+            return Ok(json!({
+                "success": false,
+                "message": format!("图片过大（{} MB），背景图上限 50 MB", m.len() / 1024 / 1024),
+            }));
+        }
+        Ok(_) => {}
+        Err(e) => return Ok(json!({ "success": false, "message": e.to_string() })),
+    }
     match std::fs::copy(&src, &dest) {
         Ok(_) => {
             let name = dest
@@ -338,6 +351,9 @@ pub fn appearance_bg_delete<R: Runtime>(
     if protect::is_path_protected(&p) {
         return Ok(json!({ "success": false, "message": "该路径受保护，已拒绝删除" }));
     }
+    // 审查 M11：删除前把缓冲日志刷盘（AGENTS §3）。此处是「用户文件进回收站」的出口，
+    // 若紧随其后的操作让进程异常退出，未落盘的日志会让这次删除无从追溯。
+    log::flush_sync();
     match trim_finder::scan::recycle::send_to_trash(&p) {
         Ok(()) => Ok(json!({ "success": true })),
         Err(e) => {

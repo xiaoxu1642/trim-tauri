@@ -3,7 +3,7 @@
 (function () {
   'use strict';
 
-  // 分类定义：唯一数据源为 src/data/cleanup-rules.json（P1-9 数据化）。
+  // 分类定义：唯一数据源为 src-tauri/data/cleanup-rules.json（编译期内嵌，不随前端目录分发）（P1-9 数据化）。
   // Electron 运行时经 IPC（cleanup.rules）读取该 JSON 构建 CATEGORIES；
   // 下方 FALLBACK 副本仅用于浏览器预览模式与 IPC 不可用时的兜底。
   // Windows 系统采用二级菜单分类（参考截图），其它仍为扁平。
@@ -230,9 +230,7 @@
     return sortStates[tableKey];
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
 
   function groupTotalSize(items) {
     return items.reduce((s, i) => s + (scanResults.get(i.id)?.size || 0), 0);
@@ -938,6 +936,9 @@
     } finally {
       isScanning = false;
       if (btnScan) btnScan.disabled = false;
+      // 审查 L14：模拟进度的定时器要在 finally 里关掉。Tauri 下 streaming 恒真、这段不执行，
+      // 但它是「扫完还在跑的 200ms 定时器」这种泄漏的现成形状，别留给下一次。
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
     }
   }
 
@@ -1288,7 +1289,7 @@
       itemName: item ? item.name : id
     };
     if (window.api?.previewWindow?.open) {
-      window.api.previewWindow.open(payload);
+      window.api.previewWindow.open(payload).catch(function (e) { window.app?.toast?.('error', '预览窗口打开失败：' + ((e && e.message) || e)); });
     } else {
       window.app?.toast('warning', '当前环境不支持打开图片预览窗口');
     }

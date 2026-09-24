@@ -56,9 +56,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
   let isInitialized = false;
   let modal = null;      // { ctrl, backdrop, body, hint }
 
-  function escapeAttr(s) {
-    return String(s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
+  function escapeAttr(s) { return window.ds.escAttr(s); }
 
   function getLabel(key) {
     for (const group of GROUPS) {
@@ -322,10 +320,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
   // ==================== 外观设置（强调色 / 背景图片 / 系统信息折叠） ====================
   const APPEARANCE_KEY = 'winclean-appearance';
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text == null ? '' : text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   function loadAppearance() {
     try {
@@ -481,7 +476,24 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
         btn.addEventListener('click', async (e) => {
           e.stopPropagation();
           const file = btn.dataset.file;
-          await window.api?.appearance?.deleteBg?.(file);
+          // 审查 M11：本文件此前是「唯一没走红色二次确认的删除出口」（AGENTS §2：删除类
+          // 操作必须红色确认；同文件其它删除与 app.js:339 的约定都遵守了）。
+          // 后端校验虽是全仓最严（直接子项 + 扩展名白名单 + 拒符号链接 + protect），
+          // 但误触即删掉用户自备素材这件事本身不该靠后端兜。
+          const name = String(file).split('\\').pop();
+          const ok = await window.app?.confirmDanger?.(
+            '删除背景图片',
+            `将删除「${name}」（移入回收站，可在回收站还原）。`,
+            '删除',
+            '取消',
+            '导入的图片被删除后，若它正被用作应用内渐变之外的自定义背景，背景会随即失效。'
+          );
+          if (!ok) return;
+          const resp = await window.api?.appearance?.deleteBg?.(file);
+          if (resp && resp.success === false) {
+            window.app?.toast?.('error', '删除失败：' + (resp.message || '未知原因'));
+            return;
+          }
           const ap2 = loadAppearance();
           if (ap2.bgPath === file) {
             delete ap2.bgPath;

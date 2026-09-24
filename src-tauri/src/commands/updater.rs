@@ -13,7 +13,7 @@
 //! **信任模型同构**：完整性锚点绝不以「下载通道自己说的话」为准，必须由应用内置公钥背书
 //! —— 通道被接管时可同时伪造清单与其所指产物，故清单里的值只能当待验对象。
 //! 差别只在：验签对象从「yml 原文」变成「安装包字节」，且由插件在 `download()` 返回前
-//! 强制执行（`updater.rs:746 verify_signature`），不给调用方漏掉这一步的机会。
+//! 强制执行（`tauri-plugin-updater` 的 `updater.rs:746 verify_signature`，非本文件），不给调用方漏掉这一步的机会。
 //!
 //! # 验签时点从 check 移到 download（断代带来的真实差异，勿当等价照抄）
 //!
@@ -193,6 +193,10 @@ async fn safe_check<R: Runtime>(app: AppHandle<R>, silent: bool) -> Value {
     push(&app, json!({ "phase": "checking" }));
     let pref = mirror_pref();
     let mut last_error = String::new();
+    // 审查 L8：签名判定要**跨线路累积**。只看循环结束后残留的那条错误，会出现
+    // 「GitHub 线路验签失败 + 镜像线路网络超时」= 最后一条是网络错 ⇒ 被报成可重试的
+    // 网络抖动，与 :255-260 自述的保守方向相反（用户会对着一个永远无解的签名问题反复点）。
+    let mut sig_failed_any = false;
 
     for (id, label, base) in ordered_feeds(&pref) {
         match check_once(&app, base).await {
@@ -232,13 +236,14 @@ async fn safe_check<R: Runtime>(app: AppHandle<R>, silent: bool) -> Value {
                 return json!({ "ok": true, "via": id });
             }
             Err(e) => {
+                sig_failed_any = sig_failed_any || is_signature_failure(&e);
                 last_error = e;
                 log::write_log("warn", &format!("[updater] 线路 {label} 检查失败: {last_error}"));
             }
         }
     }
 
-    let sig_failed = is_signature_failure(&last_error);
+    let sig_failed = sig_failed_any;
     log::write_log("error", &format!("[updater] 检查失败（全部线路）: {last_error}"));
     if !silent {
         let message = if sig_failed {

@@ -6,10 +6,7 @@
   'use strict';
 
   function el(id) { return document.getElementById(id); }
-  function escapeHtml(s) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(s == null ? '' : s).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
 
   function toast(type, message) {
     const host = el('pmGlobalHint');

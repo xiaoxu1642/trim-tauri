@@ -877,9 +877,10 @@ fn read_values_by_backup(want: &[Value]) -> Option<Vec<Value>> {
         ));
     }
     l.push("$out | ConvertTo-Json -Compress -Depth 5".into());
-    let path = pwsh::write_temp_script(&l.join("\n"), ".ps1").ok()?;
-    let out = pwsh::run_file(&path, std::time::Duration::from_secs(60), None).ok()?;
-    let _ = std::fs::remove_file(&path);
+    // 审查 L10：走 run_inline_ps —— 它先取结果再删脚本。原先的
+    // `run_file(..).ok()?` 在 remove_file 之前短路，超时/启动失败那次的 .ps1 会留在
+    // tmp 目录（一段期间内是可执行的真实脚本），只靠 1h 后的兜底清扫。
+    let out = run_inline_ps(&l.join("\n"), 60, None)?;
     if out.code != 0 {
         return None;
     }
@@ -898,9 +899,7 @@ fn svc_mem_current_kb() -> Option<i64> {
     let ps = "$ErrorActionPreference = \"SilentlyContinue\"\n\
 $v = (Get-ItemProperty -Path \"HKLM:\\SYSTEM\\ControlSet001\\Control\" -Name SvcHostSplitThresholdInKB -ErrorAction SilentlyContinue).SvcHostSplitThresholdInKB\n\
 if ($null -eq $v) { Write-Output \"NONE\" } else { Write-Output (\"KB|\" + [long]$v) }";
-    let path = pwsh::write_temp_script(ps, ".ps1").ok()?;
-    let out = pwsh::run_file(&path, std::time::Duration::from_secs(60), None).ok()?;
-    let _ = std::fs::remove_file(&path);
+    let out = run_inline_ps(ps, 60, None)?;
     out.stdout
         .lines()
         .map(str::trim)
@@ -1023,9 +1022,10 @@ fn read_reg_values(targets: &[RegTarget]) -> Option<Vec<Value>> {
         ));
     }
     l.push("$out | ConvertTo-Json -Compress -Depth 5".into());
-    let path = pwsh::write_temp_script(&l.join("\n"), ".ps1").ok()?;
-    let out = pwsh::run_file(&path, std::time::Duration::from_secs(60), None).ok()?;
-    let _ = std::fs::remove_file(&path);
+    // 审查 L10：走 run_inline_ps —— 它先取结果再删脚本。原先的
+    // `run_file(..).ok()?` 在 remove_file 之前短路，超时/启动失败那次的 .ps1 会留在
+    // tmp 目录（一段期间内是可执行的真实脚本），只靠 1h 后的兜底清扫。
+    let out = run_inline_ps(&l.join("\n"), 60, None)?;
     if out.code != 0 {
         return None;
     }

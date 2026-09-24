@@ -19,10 +19,13 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-const STRICT = process.argv.includes('--strict');
-const ORIGIN = 'C:/KaiFa/Trim';
-const TAURI_ROOT = new URL('..', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\');
+import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 
+const STRICT = process.argv.includes('--strict');
+const TAURI_ROOT = REPO_ROOT;
+
+// 通道契约基线：读**仓库内**的上游快照（审查 K2）。原先这里是硬编码 `C:/KaiFa/Trim`，
+// 干净克隆上加载即抛；快照与活源仓库是否已漂，由 tools/check-origin-drift.mjs 复核。
 const preload = readFileSync(join(ORIGIN, 'preload.js'), 'utf8');
 const adapter = readFileSync(join(TAURI_ROOT, 'src', 'scripts', 'tauri-api.js'), 'utf8');
 const libRs = readFileSync(join(TAURI_ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf8');
@@ -128,6 +131,37 @@ const registeredNoDecl = [...registered].filter(f => !declared.has(f));
 check(registeredNoDecl.length === 0,
   'D3. 注册的命令都有 #[tauri::command] 声明（防注册名拼错）',
   registeredNoDecl.length ? JSON.stringify(registeredNoDecl) : '');
+
+// ---- F. 高危优化清单双源对拍（审查 L6） ----
+// 后端 `HAZARD_IDS` 是「必须拿到 confirmedHighRisk 才放行」的闸门集合，前端
+// `HAZARD_OPTION_IDS` 是「弹红色警示」的集合。两边各写一份、无机器校验时，漂移方向是
+// **后端闸门失效**（前端不再弹警示、后端也不再要求确认），所以这里取交集差集判红。
+const idsIn = (text, marker) => {
+  const at = text.indexOf(marker);
+  if (at < 0) return null;
+  // 从 marker **末尾**起找收尾括号：Rust 的 `const HAZARD_IDS: &[&str] = &[` 中，
+  // 类型标注 `&[&str]` 自带一个 `]`，从 marker 起点找会停在那儿、解析出空集合（本条 F
+  // 第一次跑就是这么抓到自己的 bug 的）。
+  const from = at + marker.length;
+  const end = text.indexOf(']', from);
+  if (end < 0) return null;
+  return new Set([...text.slice(from, end).matchAll(/['"]([a-z0-9_]+)['"]/g)].map((m) => m[1]));
+};
+// 注意 marker 必须**吃到数组起始括号**：`const HAZARD_IDS: &[&str] = &[` 里的 `&[&str]`
+// 也含 `]`，marker 截短会让下面的 indexOf(']') 在类型标注处就收尾、解析出空集合。
+const rustHazard = idsIn(readFileSync(join(cmdDir, 'optimizer.rs'), 'utf8'), 'const HAZARD_IDS: &[&str] = &[');
+const jsHazard = idsIn(readFileSync(join(TAURI_ROOT, 'src', 'scripts', 'optimizer.js'), 'utf8'), 'const HAZARD_OPTION_IDS = new Set([');
+if (!rustHazard || !jsHazard) {
+  check(false, 'F. 高危清单双源对拍', '没找到 HAZARD_IDS / HAZARD_OPTION_IDS，清单被改名或删掉？');
+} else {
+  const onlyRust = [...rustHazard].filter((i) => !jsHazard.has(i));
+  const onlyJs = [...jsHazard].filter((i) => !rustHazard.has(i));
+  check(
+    rustHazard.size > 0 && onlyRust.length === 0 && onlyJs.length === 0,
+    `F. 高危清单双源一致（Rust ${rustHazard.size} / JS ${jsHazard.size}）`,
+    onlyRust.length || onlyJs.length ? `Rust 独有 ${JSON.stringify(onlyRust)} / JS 独有 ${JSON.stringify(onlyJs)}` : '',
+  );
+}
 
 // ---- 迁移进度报告 ----
 const migrated = [...mapped].filter(v => registered.has(v));

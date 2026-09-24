@@ -17,18 +17,9 @@
   };
 
   // ===== 格式化工具 =====
-  function fmtBytes(bytes) {
-    if (!isFinite(bytes) || bytes <= 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let i = 0, v = bytes;
-    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return (i <= 1 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
-  }
+  function fmtBytes(bytes) { return window.ds.fmtBytes(bytes); } // 审查 M18：真源在 ds
   function fmtPercent(p) { return (isFinite(p) ? Math.round(p) : 0) + '%'; }
-  function escapeHtml(s) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(s == null ? '' : s).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
   // 进度条风险分档：>=90 危险(danger) / >=75 警告(warning) / 否则正常(accent)。
   // 颜色统一由 CSS 根据 data-level 取语义 token，不在 JS 内写死颜色。
   function setBar(id, percent) {

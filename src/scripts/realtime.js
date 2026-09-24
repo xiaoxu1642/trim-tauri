@@ -172,13 +172,8 @@
     state.adapter = sel.value;
   }
 
-  function escapeHtml(s) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(s == null ? '' : s).replace(/[&<>"']/g, m => map[m]);
-  }
-  function escapeAttr(s) {
-    return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/</g, '&lt;');
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
+  function escapeAttr(s) { return window.ds.escAttr(s); }
 
   // 名称归一化：忽略大小写与空白/下划线/连字符差异，提升跨机器网卡名匹配鲁棒性
   function norm(s) {

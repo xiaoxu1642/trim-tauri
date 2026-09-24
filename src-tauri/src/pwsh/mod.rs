@@ -11,7 +11,9 @@
 //!
 //! 临时脚本写 `<数据目录>\tmp\`（当前用户 ACL 保护）而非 %TEMP%（全局可写，
 //! 提权执行时构成 TOCTOU 本地提权窗口，审查 A1）；`.ps1` 带 UTF-8 BOM
-//! （PS 5.1/7 均兼容，避免无 BOM 中文注释乱码解析失败）；mode 0600 双保险。
+//! （PS 5.1/7 均兼容，避免无 BOM 中文注释乱码解析失败）。
+//! 保护手段**只有那一条 ACL**：NTFS 没有 POSIX mode 位，`set_permissions(0o600)`
+//! 在 Windows 上只能改只读位、对同用户其他进程零约束，故不做也不声称。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,98 @@ pub struct PsOutput {
     pub stderr: String,
     pub code: i32,
     pub timed_out: bool,
+}
+
+// ==================== 子进程树兜底（审查 M6） ====================
+//
+// `child.kill()` 只杀 pwsh 本身。脚本里 `& dism.exe ... | Out-String`（cleanup_execute.ps1:573）、
+// `sfc`（maint_sfc.ps1:38）、`Start-Process -Wait` 起的安装器都是 pwsh 的**子孙**，
+// 它们继续握着 stdout 写端 → 读管道的线程不会返回 → `join()` 一直阻塞。
+// 实测：超时配 5s，真实耗时 24.4s，且成功路径（code=0）一样能被挂住 —— 「超时」形同虚设，
+// 用户看到「超时失败、可重试」后重试，第二个 DISM 就与不可回滚的 /ResetBase 并发跑。
+//
+// 解法是 Windows 的 Job Object：pwsh 一 spawn 就放进 job（子孙自动继承成员资格），
+// 超时那一刻 `TerminateJobObject` 一次干掉整棵树，管道写端全部关闭，读线程随即返回。
+//
+// **刻意不用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`**：多个脚本会用不带 -Wait 的
+// `Start-Process` 故意留下长命进程 —— cleanup_execute.ps1:276-277 重启刚被清理的应用、
+// cm_restart_explorer.ps1:25 拉起 explorer.exe、maint_store.ps1:38 跑 wsreset.exe。
+// 那些进程同样是 job 成员，若「关句柄即杀全树」，正常跑完时反而会把用户的 explorer /
+// 应用一起杀掉。所以只在**超时**这一条路径上显式 Terminate，成功路径只 CloseHandle。
+/// 一次性 Job Object 句柄；Drop 只关句柄（**不**杀成员，理由见上）。
+pub struct ProcessJob(windows::Win32::Foundation::HANDLE);
+
+impl ProcessJob {
+    /// 建 job 并把**已 spawn 的子进程**放进去。任一步失败都返回 `Err`，调用方降级为
+    /// 「只杀 pwsh」的旧行为 —— 建不了 job 不该让整条 PS 执行链失败。
+    fn create_for(child_pid: u32) -> Result<Self, String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW,
+        };
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+        unsafe {
+            let job = CreateJobObjectW(None, PCWSTR::null())
+                .map_err(|e| format!("建 Job 失败: {e}"))?;
+            // AssignProcessToJobObject 要求进程句柄带 PROCESS_SET_QUOTA | PROCESS_TERMINATE，
+            // std::process::Child 自带的那个权限位不足，故按 PID 另开一个。
+            // PID 复用窗口极小：就在 spawn 之后的这几微秒内，且子进程尚未退出。
+            let proc = match OpenProcess(
+                PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                child_pid,
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = CloseHandle(job);
+                    return Err(format!("打开子进程句柄失败: {e}"));
+                }
+            };
+            let assigned = AssignProcessToJobObject(job, proc);
+            let _ = CloseHandle(proc);
+            if let Err(e) = assigned {
+                let _ = CloseHandle(job);
+                return Err(format!("子进程入 Job 失败: {e}"));
+            }
+            Ok(Self(job))
+        }
+    }
+
+    /// 终止 job 内**全部**进程（含子孙）。超时专用。
+    fn terminate(&self) {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+        unsafe {
+            let _ = TerminateJobObject(self.0, 1);
+        }
+    }
+}
+
+impl Drop for ProcessJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// 读管道宽限期：pwsh 本体已不在跑，但子孙可能还占着 stdout/stderr 写端。
+/// 等 `READ_GRACE` 让正常输出冲刷完；等不到就终止子进程树再收一次。
+/// 返回空串只发生在「终止之后仍读不到」这一种情况下（此时线程已失控，宁可截断）。
+fn take_reader(rx: std::sync::mpsc::Receiver<String>, job: &Option<ProcessJob>) -> String {
+    const READ_GRACE: Duration = Duration::from_secs(5);
+    match rx.recv_timeout(READ_GRACE) {
+        Ok(s) => s,
+        Err(_) => {
+            if let Some(j) = job {
+                j.terminate();
+            }
+            log::write_log("warn", "子进程树占住输出管道超过宽限期，已终止后再收一次");
+            rx.recv_timeout(READ_GRACE).unwrap_or_default()
+        }
+    }
 }
 
 static CACHED_PWSH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -149,9 +243,10 @@ pub fn resolve_pwsh() -> Result<PathBuf, (String, String)> {
         }
     }
 
-    let msg = format!(
-        "未找到 PowerShell 7（pwsh.exe）。可安装 PowerShell 7 后重试，或在设置页点击「立即准备」使用内置运行时。"
-    );
+    // 审查 M9：不得承诺「内置运行时」——随包解压链在 Phase 4 才决定，当前仓库里没有
+    // 任何内置 zip 资产，`latest_ready_exe_path()` 恒为空。指向「设置页立即准备」同样
+    // 是错的（pwsh:prepare 只是重跑本候选链）。文案只说用户能做到的事。
+    let msg = "未找到 PowerShell 7（pwsh.exe）。请先安装 PowerShell 7（winget install Microsoft.PowerShell）后重试。".to_string();
     PROBE_FAILED_AT.store(crate::engine::now_ms(), Ordering::Relaxed);
     *PROBE_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
     Err(("PWSH7_NOT_FOUND".into(), msg))
@@ -281,10 +376,29 @@ fn run_file_impl(
         .spawn()
         .map_err(|e| format!("PowerShell 7 启动失败: {e}"))?;
 
+    // 审查 M6：立刻把 pwsh 塞进 Job Object（趁它还没来得及 spawn 子孙）。
+    // 建不了 job 时只降级、不失败：大不了退回「超时只杀 pwsh 本体」的旧行为，并在日志里留痕。
+    let job = match ProcessJob::create_for(child.id()) {
+        Ok(j) => Some(j),
+        Err(e) => {
+            log::write_log("warn", &format!("子进程树兜底不可用，超时将只能杀 pwsh 本体: {e}"));
+            None
+        }
+    };
+
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let stdout_handle = std::thread::spawn(move || read_all(stdout_pipe, on_line));
-    let stderr_handle = std::thread::spawn(move || read_all(stderr_pipe, None));
+    // 读线程用 channel 交结果，不用 `join()`：`join` 不可中断，只要还有子孙握着管道写端
+    // 就会无限期挂住 —— 实测 pwsh 已 `code=0` 退出，函数仍挂 19.7s（被一个 20s 的 ping 拖住）。
+    // 只有 channel 能做到「等一段，等不到就去终止子进程树」。
+    let (tx_out, rx_out) = std::sync::mpsc::channel();
+    let (tx_err, rx_err) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx_out.send(read_all(stdout_pipe, on_line));
+    });
+    std::thread::spawn(move || {
+        let _ = tx_err.send(read_all(stderr_pipe, None));
+    });
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
@@ -297,6 +411,12 @@ fn run_file_impl(
             }
             Ok(None) => {
                 if Instant::now() > deadline {
+                    // 顺序要紧：先终止整棵子进程树（管道写端随之全部关闭），再 kill/wait pwsh
+                    // 本体。只 kill 本体的话，读线程还在等 dism/sfc/安装器退出，
+                    // 循环之后的 join() 会把「超时」拖成「等子孙自己跑完」（实测 5s→24.4s）。
+                    if let Some(j) = &job {
+                        j.terminate();
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     timed_out = true;
@@ -308,8 +428,11 @@ fn run_file_impl(
         }
     }
 
-    let mut stdout = stdout_handle.join().unwrap_or_default();
-    let mut stderr = stderr_handle.join().unwrap_or_default();
+    // 本体已退出（或被终止），剩下的只是某个子孙还占着管道写端：给一段宽限期冲刷正常输出，
+    // 等不到就终止整棵树。宁可截断也不无限期挂住调用方 —— 清理/维护主循环等不起，
+    // 而且「超时了」的语义要求函数真的在超时点返回。
+    let mut stdout = take_reader(rx_out, &job);
+    let mut stderr = take_reader(rx_err, &job);
     if timed_out {
         stderr.push_str("\nPowerShell 7 执行超时");
         code = -1;
@@ -504,6 +627,56 @@ mod tests {
         for probe in ["@@PROGRESS:50@@", "正在扫描组件存储"] {
             assert!(out.stdout.contains(probe), "stdout 丢了 {probe}");
         }
+    }
+
+    /// 审查 M6 回归断言：**子孙进程握着 stdout 写端时，函数必须自己收回来**。
+    ///
+    /// 脚本用 `Start-Process -NoNewWindow`（不带 -Wait）拉起一个 20 秒的 ping：它继承 pwsh 的
+    /// 标准输出，pwsh 自己立刻 `exit 0`，但读线程要等这个子孙关掉写端才能返回。
+    /// 旧实现是 `join()`（不可中断）→ 实测 pwsh 早已 code=0 退出，函数仍挂 19.7s。
+    /// 现在走 channel + 宽限期 + `TerminateJobObject`，应在 5s 宽限期后把树杀掉并返回。
+    /// 断言只看墙上时间与退出码（ping 到 localhost，无副作用）。
+    #[test]
+    #[ignore = "真实启动 PowerShell 7 与子孙进程，发布前门禁跑"]
+    fn 子孙进程占住管道时函数必须自己收回来() {
+        let script = "$g = Start-Process -FilePath 'ping' -ArgumentList '-n','20','127.0.0.1' -NoNewWindow -PassThru\n\
+                      Write-Output '@@DONE@@'";
+        let path = write_temp_script(script, ".ps1").unwrap();
+        let started = Instant::now();
+        let out = run_file(&path, Duration::from_secs(60), None);
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_file(&path);
+
+        let out = out.expect("pwsh 执行链本身不应报错");
+        assert_eq!(out.code, 0, "本体是正常退出的，不该被记成失败: {}", out.stderr);
+        assert!(!out.timed_out, "本体没超时，不应判 timed_out");
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "应在宽限期后终止子进程树并返回（旧实现会等 ping 自己跑完 ≈20s），实耗 {elapsed:?}"
+        );
+        assert!(out.stdout.contains("@@DONE@@"), "正常输出不得被截断: {}", out.stdout);
+    }
+
+    /// 审查 M6 的另一半：**本体还在等子孙**（`& dism ... | Out-String` 那种）时，
+    /// 超时点必须真的把整棵树收回来并按时返回 —— 否则用户看到「超时失败，可重试」，
+    /// 实际第二个 DISM 正与不可回滚的 /ResetBase 并发跑。
+    #[test]
+    #[ignore = "真实启动 PowerShell 7 与子孙进程，发布前门禁跑"]
+    fn 超时必须按时收回整棵子进程树() {
+        let script = "& ping -n 20 127.0.0.1 | Out-String\nWrite-Output '@@DONE@@'";
+        let path = write_temp_script(script, ".ps1").unwrap();
+        let started = Instant::now();
+        let out = run_file(&path, Duration::from_secs(4), None);
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_file(&path);
+
+        let out = out.expect("pwsh 执行链本身不应报错");
+        assert!(out.timed_out, "4s 超时应判定时，实际 code={}", out.code);
+        assert!(
+            elapsed < Duration::from_secs(9),
+            "超时点之后应立刻收树返回（旧实现会被 ping 拖到 ≈20s），实耗 {elapsed:?}"
+        );
+        assert_eq!(out.code, -1, "超时统一按 -1 回执");
     }
 }
 

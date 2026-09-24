@@ -70,6 +70,16 @@
     }, 4000);
   }
 
+  /**
+   * 需要管理员权限时的统一出口（审查 M3）。
+   * 本窗**不能**调 elevate:request：AGENTS.md §3 的硬红线是「提权入口只认主窗口 label」，
+   * 子窗调用必被来源校验拒杀 —— 旧代码先 confirm 再提权，用户点了必然得到一条失败提示。
+   * 因此这里只把用户指回主窗口，不在子窗里碰提权通道。
+   */
+  function guideToMainElevation(action) {
+    toast('warning', `${action}需要管理员权限：请回到 Trim 主窗口点「以管理员身份运行」重启应用后再试。本次操作已取消。`);
+  }
+
   // ==================== 渲染 ====================
   function renderGroup(key) {
     const wrap = document.querySelector(`.peri-cards[data-group="${key}"]`);
@@ -146,20 +156,12 @@
       btn.disabled = true;
       try {
         const resp = await window.api.peripheralWindow.apply(payload);
-        // 复核 N3（提权半闭环，2026-09-16）：服务端 PE-4 门禁回传 needAdmin，
-        // 独立窗口无 app.js/modal.js，用原生 confirm 拿用户明示同意后走 elevate:request
+        // 复核 N3（提权半闭环，2026-09-16）：服务端 PE-4 门禁回传 needAdmin。
+        // 审查 M3：本窗**不得**直接调 elevate:request —— AGENTS.md §3 是硬红线
+        // 「提权入口只认主窗口 label」，子窗调用必被来源校验拒杀（此前正是因此死路一条：
+        // 界面引导用户点提权，点了必然失败）。提权请回主窗口做，这里只负责把话说明白。
         if (resp && resp.needAdmin) {
-          const go = window.confirm('应用这些调优需要管理员权限（写入 HKLM 注册表）。\n\n点击“确定”将弹出 UAC 提权确认，应用会以管理员身份重启。');
-          if (go && window.api?.elevate?.request) {
-            try {
-              const er = await window.api.elevate.request();
-              toast(er && er.success ? 'info' : 'warning', er && er.success ? '提权成功，应用将以管理员身份重启，重启后请重新打开本窗口' : (er.message || '提权请求已取消'));
-            } catch (er) {
-              toast('error', '提权请求失败：' + er.message);
-            }
-          } else {
-            toast('warning', '未提权，本次修改已取消（需要管理员权限）');
-          }
+          guideToMainElevation('应用这些调优（写入 HKLM 注册表）');
           return;
         }
         if (resp && resp.success) {
@@ -184,13 +186,7 @@
       try {
         const resp = await window.api.peripheralWindow.restoreBackup();
         if (resp && resp.needAdmin) {
-          const go = window.confirm('还原修改前的值需要管理员权限（导入备份 .reg）。\n\n点击“确定”将弹出 UAC 提权确认，应用会以管理员身份重启。');
-          if (go && window.api?.elevate?.request) {
-            const er = await window.api.elevate.request().catch(() => null);
-            toast(er && er.success ? 'info' : 'warning', er && er.success ? '提权成功，应用将以管理员身份重启，重启后请重试' : '提权请求已取消');
-          } else {
-            toast('warning', '未提权，还原已取消（需要管理员权限）');
-          }
+          guideToMainElevation('还原修改前的值（导入备份 .reg）');
           return;
         }
         if (resp && resp.success) {
@@ -218,13 +214,7 @@
         });
         // 复核 N3：提权半闭环收口（同「应用到注册表」）
         if (resp && resp.needAdmin) {
-          const go = window.confirm('恢复默认值需要管理员权限（写入 HKLM 注册表）。\n\n点击“确定”将弹出 UAC 提权确认，应用会以管理员身份重启。');
-          if (go && window.api?.elevate?.request) {
-            const er = await window.api.elevate.request().catch(() => null);
-            toast(er && er.success ? 'info' : 'warning', er && er.success ? '提权成功，应用将以管理员身份重启，重启后请重试' : '提权请求已取消');
-          } else {
-            toast('warning', '未提权，恢复已取消（需要管理员权限）');
-          }
+          guideToMainElevation('恢复默认值（写入 HKLM 注册表）');
           return;
         }
         if (resp && resp.success) {

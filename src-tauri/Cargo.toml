@@ -99,6 +99,12 @@ features = [
     "Win32_Networking_WinHttp",
     # E 批 appearance：GetSystemPowerStatus 判电池供电（亚克力系材质省电降级）
     "Win32_System_Power",
+    # 审查 M6：pwsh 子进程树关进 Job Object（CreateJobObjectW / AssignProcessToJobObject
+    # / JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE）；EXTENDED_LIMIT 结构含 IO_COUNTERS，
+    # 故连 Win32_System_Threading 一起开；CreateJobObjectW 的签名引用 SECURITY_ATTRIBUTES。
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Security",
     # windows 0.61 把 RtlGetVersion 划到 Wdk 命名空间
     "Wdk_System_SystemServices",
 ]

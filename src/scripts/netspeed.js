@@ -339,9 +339,7 @@
     } catch (e) { return fallback; }
   }
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
 
   // ==================== 加载外部测速站点 ====================
   function loadExternalTest(withDetect) {

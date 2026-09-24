@@ -1,23 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Phase 0 Spike 权限：默认能力 + 事件插件 + 自绘标题栏所需窗口命令。后续批次按 D6/7.3 收敛到逐窗口 label 白名单。",
-  "windows": ["*"],
+  "description": "主窗口能力：自绘 caption 需要的窗口命令 + 事件订阅。子窗见 subwindows.json。审查 M4：原 `windows:[\"*\"]` 把 close/set_position/emit-to 一并发给了四个子窗，且 5 项窗口权限全仓无人调用，已删。",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
     "core:window:allow-minimize",
-    "core:window:allow-unminimize",
-    "core:window:allow-is-minimized",
     "core:window:allow-toggle-maximize",
-    "core:window:allow-maximize",
-    "core:window:allow-unmaximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-start-resize-dragging",
-    "core:window:allow-set-size",
-    "core:window:allow-set-position",
-    "core:window:allow-center"
+    "core:event:deny-emit",
+    "core:event:deny-emit-to"
   ]
 }

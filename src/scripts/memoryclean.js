@@ -39,20 +39,9 @@
 
   let maximized = false;     // 窗口最大化（指标卡一行展示）
 
-  function escapeHtml(s) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(s == null ? '' : s).replace(/[&<>"']/g, m => map[m]);
-  }
-  function escapeAttr(s) {
-    return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/</g, '&lt;');
-  }
-  function fmtBytes(bytes) {
-    if (!isFinite(bytes) || bytes <= 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let i = 0, v = bytes;
-    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return (i <= 1 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
+  function escapeAttr(s) { return window.ds.escAttr(s); }
+  function fmtBytes(bytes) { return window.ds.fmtBytes(bytes); } // 审查 M18：真源在 ds
   function fmtPercent(p) { return (isFinite(p) ? Math.round(p) : 0) + '%'; }
   function barColor(p) {
     if (p >= 90) return 'linear-gradient(90deg, #DC2626, #EF4444)';

@@ -229,6 +229,9 @@ pub(crate) struct ParsedUrl {
     pub port: u16,
     pub path: String,
     pub secure: bool,
+    /// authority 段是否用方括号包了 IP 字面量。IPv6 判定需要这个信号：`[::1]` 剥掉括号后
+    /// 与畸形串（`[oops]`）在 host 上无从区分，而路径里出现 `[` 又不该触发 fail-closed。
+    pub bracketed: bool,
 }
 
 /// 解析 `scheme://[userinfo@]host[:port][/path][?query]`。
@@ -252,6 +255,7 @@ pub(crate) fn parse_http_url(raw: &str) -> Option<ParsedUrl> {
             port: default_port,
             path: "/".into(),
             secure,
+            bracketed: false,
         });
     }
     let after = &rest[2..];
@@ -280,9 +284,10 @@ pub(crate) fn parse_http_url(raw: &str) -> Option<ParsedUrl> {
             port: default_port,
             path,
             secure,
+            bracketed: false,
         });
     }
-    let (host, port) = if let Some(inner) = host_port.strip_prefix('[') {
+    let (host, port, bracketed) = if let Some(inner) = host_port.strip_prefix('[') {
         // IPv6 字面量必须带方括号
         let close = inner.find(']')?;
         let tail = &inner[close + 1..];
@@ -290,17 +295,18 @@ pub(crate) fn parse_http_url(raw: &str) -> Option<ParsedUrl> {
             Some(p) => p.parse::<u16>().ok()?,
             None => default_port,
         };
-        (inner[..close].to_string(), port)
+        (inner[..close].to_string(), port, true)
     } else {
         let colons = host_port.matches(':').count();
         if colons > 1 {
             // 未加方括号的 IPv6：浏览器视为非法 URL
             return None;
         }
-        match host_port.find(':') {
+        let (h, p) = match host_port.find(':') {
             Some(i) => (host_port[..i].to_string(), host_port[i + 1..].parse::<u16>().ok()?),
             None => (host_port.to_string(), default_port),
-        }
+        };
+        (h, p, false)
     };
     Some(ParsedUrl {
         scheme,
@@ -308,6 +314,7 @@ pub(crate) fn parse_http_url(raw: &str) -> Option<ParsedUrl> {
         port,
         path,
         secure,
+        bracketed,
     })
 }
 
@@ -333,8 +340,169 @@ fn is_ipv4(host: &str) -> Option<[u32; 4]> {
     Some(out)
 }
 
+/// `is_ipv4` 的严格四段十进制口径**收不到** `127.1`、`2130706433`、`0x7f000001`、`0177.0.0.1`
+/// 这类写法，而 Winsock / Node / 浏览器都会把它们解析成对应 IPv4 —— 审查 K1 的绕过点正是
+/// 这些字面量落到了「未知域名」分支被判公网。故按 `inet_aton` 语义补齐（不引新依赖）。
+///
+/// 段规则：无 `0x` 前缀时**只接受十进制数字**（这排除了一切域名，`cafe.babe` 不会误判），
+/// 前导 0 按八进制；首段可占剩余全部位宽，其余每段必须 ≤255。
+fn parse_ipv4_aton(host: &str) -> Option<[u32; 4]> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut vals = Vec::with_capacity(parts.len());
+    for p in &parts {
+        if p.is_empty() || p.len() > 11 {
+            return None;
+        }
+        let v = if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+            if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            u32::from_str_radix(hex, 16).ok()?
+        } else {
+            if !p.chars().all(|c| c.is_ascii_digit()) {
+                return None; // 含字母即域名
+            }
+            let radix = if p.len() > 1 && p.starts_with('0') { 8 } else { 10 };
+            u32::from_str_radix(p, radix).ok()?
+        };
+        vals.push(v);
+    }
+    let n = vals.len();
+    // 末 n-1 段各占一字节，首段占剩余位（n=1 时即整个 32 位）
+    for v in &vals[1..] {
+        if *v > 255 {
+            return None;
+        }
+    }
+    let bits = 32 - 8 * (n as u32 - 1);
+    let limit: u64 = if bits >= 32 { u32::MAX as u64 + 1 } else { 1u64 << bits };
+    if vals[0] as u64 >= limit {
+        return None;
+    }
+    let mut acc = vals[0];
+    for v in &vals[1..] {
+        acc = (acc << 8) | *v;
+    }
+    Some([(acc >> 24) & 255, (acc >> 16) & 255, (acc >> 8) & 255, acc & 255])
+}
+
+/// 标准 IPv6 文本（含 `::` 压缩与 `::ffff:1.2.3.4` 内嵌 IPv4 尾巴）展开成 16 字节。
+fn parse_ipv6(host: &str) -> Option<[u8; 16]> {
+    if host.contains('[') || host.contains(']') || host.is_empty() {
+        return None;
+    }
+    let (head_s, tail_s) = match host.split_once("::") {
+        Some((h, t)) => (h, Some(t)),
+        None => (host, None),
+    };
+    let group = |s: &str| -> Option<u16> {
+        if s.is_empty() || s.len() > 4 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        u16::from_str_radix(s, 16).ok()
+    };
+    let mut head: Vec<u16> = Vec::new();
+    if !head_s.is_empty() {
+        for g in head_s.split(':') {
+            head.push(group(g)?);
+        }
+    }
+    let mut tail: Vec<u16> = Vec::new();
+    if let Some(t) = &tail_s {
+        if !t.is_empty() {
+            let parts: Vec<&str> = t.split(':').collect();
+            let last = *parts.last()?;
+            let (v4_tail, mid) = if last.contains('.') {
+                (Some(last), &parts[..parts.len() - 1])
+            } else {
+                (None, &parts[..])
+            };
+            for g in mid {
+                tail.push(group(g)?);
+            }
+            if let Some(v4) = v4_tail {
+                // 内嵌 IPv4 占两个 16 位组（`::ffff:7f00:1` 与 `::ffff:127.0.0.1` 等价）
+                let o = is_ipv4(v4).or_else(|| parse_ipv4_aton(v4))?;
+                tail.push(((o[0] << 8) | o[1]) as u16);
+                tail.push(((o[2] << 8) | o[3]) as u16);
+            }
+        }
+    }
+    let mut out = [0u16; 8];
+    match tail_s {
+        None => {
+            if head.len() != 8 {
+                return None;
+            }
+            out.copy_from_slice(&head);
+        }
+        Some(_) => {
+            if head.len() + tail.len() > 7 {
+                // `::` 至少要代表一组零
+                return None;
+            }
+            for (i, v) in head.iter().enumerate() {
+                out[i] = *v;
+            }
+            for (i, v) in tail.iter().enumerate() {
+                out[8 - tail.len() + i] = *v;
+            }
+        }
+    }
+    let mut b = [0u8; 16];
+    for (i, g) in out.iter().enumerate() {
+        b[i * 2] = (g >> 8) as u8;
+        b[i * 2 + 1] = (g & 0xff) as u8;
+    }
+    Some(b)
+}
+
+/// IPv4 私有/特殊网段判定（原 `is_private_api_url` 内联逻辑提出，供两种字面量共用）
+fn ipv4_private(o: [u32; 4]) -> bool {
+    o[0] == 0
+        || o[0] == 10
+        || o[0] == 127
+        || (o[0] == 169 && o[1] == 254) // 链路本地（含 169.254.169.254 元数据地址）
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64/10
+}
+
+/// IPv6 侧私有判定。除逐网段比对外，**6to4 / Teredo 一律按私有处理**：两者都把 IPv4
+/// 地址编码进自身（`2002:v4::`、`2001:0::v4`），是隧道式绕过本机字面量校验的现成通道，
+/// 而没有任何一家模型服务会用裸 6to4/Teredo 字面量当 API 端点。
+fn ipv6_private(b: &[u8; 16]) -> bool {
+    if b[..] == [0u8; 16] {
+        return true; // `::` 未指定
+    }
+    if b[..15] == [0u8; 15] && b[15] == 1 {
+        return true; // `::1` 环回
+    }
+    if b[0] & 0xfe == 0xfc {
+        return true; // fc00::/7 唯一本地
+    }
+    if b[0] == 0xfe && b[1] & 0xc0 == 0x80 {
+        return true; // fe80::/10 链路本地
+    }
+    // IPv4 映射/兼容形式：取出内嵌 IPv4 再走 v4 网段判定
+    if (b[..10] == [0u8; 10] && b[10] == 0xff && b[11] == 0xff) || b[..12] == [0u8; 12] {
+        return ipv4_private([b[12] as u32, b[13] as u32, b[14] as u32, b[15] as u32]);
+    }
+    if b[0] == 0x20 && b[1] == 0x02 {
+        return true; // 6to4 2002::/16：内嵌 IPv4 可指向任意网段，直接拒
+    }
+    if b[..4] == [0x20, 0x01, 0x00, 0x00] {
+        return true; // Teredo 2001:0000::/32
+    }
+    false
+}
+
 /// `isPrivateApiUrl`（火眼眼审查 2026-09-14）：拒绝环回/私有/链路本地网段。
-/// **逐条对齐 JS**：协议非法或解析失败一律判私有；域名解析到内网 IP 的 rebinding 不在本防线内。
+/// 协议非法或解析失败一律判私有；**字面量形式一律归一化后再判**（审查 K1：整数型/缩写型/
+/// IPv4-mapped 曾落到「未知域名」分支被放行）。域名解析到内网 IP 的 rebinding 不在本防线内。
 pub(crate) fn is_private_api_url(raw: &str) -> bool {
     let Some(u) = parse_http_url(raw) else {
         return true; // 解析失败按私有处理（fail-safe）
@@ -348,36 +516,16 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
     if u.host == "localhost" || u.host.ends_with(".localhost") || u.host == "0.0.0.0" {
         return true;
     }
-    if let Some(o) = is_ipv4(&u.host) {
-        if o[0] == 0 || o[0] == 10 || o[0] == 127 {
-            return true;
-        }
-        if o[0] == 169 && o[1] == 254 {
-            return true; // 链路本地
-        }
-        if o[0] == 172 && (16..=31).contains(&o[1]) {
-            return true; // 172.16/12
-        }
-        if o[0] == 192 && o[1] == 168 {
-            return true; // 192.168/16
-        }
-        if o[0] == 100 && (64..=127).contains(&o[1]) {
-            return true; // CGNAT 100.64/10
-        }
-        return false;
+    if let Some(o) = is_ipv4(&u.host).or_else(|| parse_ipv4_aton(&u.host)) {
+        return ipv4_private(o);
     }
-    if u.host.contains(':') {
-        if u.host == "::" || u.host == "::1" {
-            return true;
-        }
-        let h = u.host.as_bytes();
-        if h[0] == b'f' && matches!(h.get(1), Some(b'c') | Some(b'd')) {
-            return true; // fc00::/7 唯一本地
-        }
-        if h.len() >= 3 && h[0] == b'f' && h[1] == b'e' && matches!(h[2], b'8' | b'9' | b'a' | b'b') {
-            return true; // fe80::/10 链路本地
-        }
-        return false;
+    if u.host.contains(':') || u.bracketed {
+        // 方括号里的东西只可能是 IPv6 字面量：解析不出来即畸形 → fail-closed，
+        // 不允许它退回去当域名放行。
+        return match parse_ipv6(&u.host) {
+            Some(b) => ipv6_private(&b),
+            None => true,
+        };
     }
     false
 }
@@ -1065,4 +1213,68 @@ pub fn settings_save<R: tauri::Runtime>(window: WebviewWindow<R>, settings: Opti
         "success": ok,
         "message": if ok { "" } else { "写入配置文件失败" }
     }))
+}
+
+#[cfg(test)]
+mod tests_private_url {
+    //! 审查 K1 回归断言：字面量归一化后必须落进私有判定。这些形式过去全部判「公网」放行，
+    //! 被注入的渲染层可借自定义模型端点把明文 Bearer 打到本机回环服务。
+    use super::is_private_api_url;
+
+    #[test]
+    fn ipv4_alternate_forms_are_private() {
+        for u in [
+            "http://2130706433:8080/",    // 单一十进制整数 = 127.0.0.1
+            "http://127.1/",              // 两段缩写
+            "http://10.1.2/",             // 三段缩写
+            "http://0x7f000001/",         // 十六进制
+            "http://0177.0.0.1/",         // 八进制
+            "http://127.0.0.1:8080/",
+            "http://169.254.169.254/latest/meta-data/", // 链路本地（云元数据）
+            "http://0.0.0.0/",
+        ] {
+            assert!(is_private_api_url(u), "{u} 应判私有");
+        }
+    }
+
+    #[test]
+    fn ipv6_mapped_and_tunnel_forms_are_private() {
+        for u in [
+            "http://[::1]:8080/",
+            "http://[::]/",
+            "http://[::ffff:127.0.0.1]:8080/",
+            "http://[0:0:0:0:0:ffff:7f00:1]/",
+            "http://[::7f00:1]/",                  // IPv4 兼容形式
+            "http://[fc00::1]/",
+            "http://[fd12:3456::1]/",
+            "http://[fe80::1%1]/",                 // 链路本地（含 zone id 即畸形 → fail-closed）
+            "http://[2002:7f00:1::]/",            // 6to4 内嵌 127.0.0.1
+            "http://[2001:0000:1f00:1::]/",       // Teredo
+            "http://[not-an-ipv6]/",              // 畸形一律拒
+        ] {
+            assert!(is_private_api_url(u), "{u} 应判私有");
+        }
+    }
+
+    #[test]
+    fn public_endpoints_still_allowed() {
+        // 反向断言：硬化不得把正常公网端点一起拒掉（否则模型服务全线不可用）
+        for u in [
+            "https://api.openai.com/v1/chat/completions",
+            "https://chatglm.cn/key",
+            "http://8.8.8.8/",
+            "http://cafe.babe/",        // 全十六进制字母的域名不得被当数字字面量
+            "https://[2606:4700:4700::1111]/", // 合法公网 IPv6
+            "http://api.example.com:8443/v1",
+        ] {
+            assert!(!is_private_api_url(u), "{u} 应放行");
+        }
+    }
+
+    #[test]
+    fn malformed_and_non_http_fail_closed() {
+        for u in ["", "ftp://127.0.0.1/", "http:/x", "not a url", "http:///path"] {
+            assert!(is_private_api_url(u), "{u} 应 fail-closed");
+        }
+    }
 }

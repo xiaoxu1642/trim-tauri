@@ -14,6 +14,8 @@ docs/
 # ==================== 构建产物 ====================
 # src-tauri/target 本机实测 19 GB，纯编译缓存
 src-tauri/target/
+# native-scanner 已 vendor 成独立（非 workspace）包，单独 cargo build 会生成不被上面规则覆盖的 target
+native-scanner/target/
 # tauri-build 构建期自动重新生成（acl-manifests / capabilities / *-schema.json）
 src-tauri/gen/
 node_modules/

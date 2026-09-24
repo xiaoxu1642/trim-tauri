@@ -410,6 +410,40 @@
   ds.focusTrap = focusTrap;
   ds.hWheel = hWheel;
 
+  // ---------- ⑩ 转义与字节格式化的唯一真源（审查 M18） ----------
+  // 全仓曾有 32 个本地 escape/escapeAttr、7 份字节格式化、7 份 toast —— 两派编码
+  // （`&#39;` 与 `&#039;`）并存，其中 5 个 escapeAttr 连单引号都不转义。
+  // 新代码一律用这三个；本地那份只作历史存量，不再扩散。
+  const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (m) => ESC_MAP[m]);
+  }
+  // 属性位专用：与 esc 同一套字符集（含单引号），因为「哪个引号包属性」是调用方决定的，
+  // 只按当前写法转一半等于把另一半留给下一次改动踩雷。
+  function escAttr(s) {
+    return esc(s);
+  }
+  // 1024 进制、B/KB/MB/GB/TB；非有限值与 ≤0 一律 0 B。
+  // 取的是四份本地实现（overview / memoryclean / processes / preview-window）**逐字相同**
+  // 的那一套口径：B/KB 取整、MB 起保留 1 位。
+  // 唯一被刻意统一的差异：四份里三份用裸 `isFinite`（会强转），preview 用
+  // `Number.isFinite`（不强转，字符串一律 0 B）—— 这里选强转，数字字符串也该出数字。
+  // 另有两派刻意不同、不并进来：
+  //   · cleanup.js / finder.js 的 formatSize —— 小于 10 保留 2 位（磁盘容量要看清零头）
+  //   · updater-ui.js —— 单位上限只到 GB（下载进度条位窄）
+  // 这两派要不要统一属产品口径，不是重复实现，故保留各自实现。
+  function fmtBytes(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0, v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (i <= 1 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
+  }
+  ds.esc = esc;
+  ds.escAttr = escAttr;
+  ds.fmtBytes = fmtBytes;
+
   // 自动初始化（裸 range 接管 + 横向滚动容器滚轮映射）
   const boot = () => { initSliders(document); hWheelAll(document); };
   if (document.readyState === 'loading') {

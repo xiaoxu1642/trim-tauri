@@ -7,6 +7,17 @@
   // 主进程收到后才显示主窗口，确保窗口出现即完整 UI）
   try { window.api?.window?.notifyFirstPaint?.(); } catch (e) {}
 
+  // 审查 L13：全局兜底未处理的 Promise 拒绝。此前渲染层一条 rejection 监听都没有，
+  // 任何漏了 catch 的异步调用都静默消失，用户侧就是「点了没反应、日志里也查不到」。
+  // 这里只记日志、不弹 toast：后台噪声糊到用户脸上是另一种体验事故，
+  // 而真正该给用户看错的调用点，各自补显式 catch。
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event && event.reason;
+    const text = reason && reason.message ? reason.message : String(reason);
+    console.error('[Trim] 未处理的 Promise 拒绝:', reason);
+    try { window.logger?.write?.('error', '未处理的 Promise 拒绝: ' + text); } catch (e) {}
+  });
+
   // 侧边栏折叠/展开
   const SIDEBAR_KEY = 'winclean-sidebar-collapsed';
 
@@ -109,7 +120,13 @@
     setNavSubExpanded(key, expanded);
     if (expanded) {
       // 展开后将子菜单滚动到导航可见区域，避免窗口较矮时看不到全部分类
-      document.querySelector(`[data-nav-submenu="${key}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      // 审查 L16：CSS 的 prefers-reduced-motion 通配归零管不到 JS 传进去的 scroll 选项，
+      // 必须在这里自己求值 —— 否则系统关掉动画的用户仍会被这段 smooth 滚动推着走。
+      const reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      document.querySelector(`[data-nav-submenu="${key}"]`)?.scrollIntoView({
+        block: 'nearest',
+        behavior: reduce ? 'auto' : 'smooth',
+      });
     }
     return expanded;
   }
@@ -157,6 +174,12 @@
   ];
   const _scriptLoaded = new Set();
   const _scriptLoading = new Map();
+  // 审查 K3：模块 init 必须「一次」。ensurePageScripts 每次进页都会重跑（脚本本身去重，
+  // 但 init 没有），于是第 N 次进页就有 N 个 click handler —— 磁盘基准/内存清理这类
+  // 带真实 IO 的按钮会被并发触发 N 遍，监听器与 IPC 订阅也只增不减。
+  // 记账放在调用前：init 抛错也不重试，因为抛错时往往已经绑了一半的监听器，
+  // 重试正好把「重复绑定」从 N+1 变成 N+2 —— 幂等责任留给模块自己的守卫。
+  const _initedModules = new Set();
 
   function loadScript(src) {
     if (_scriptLoaded.has(src)) return Promise.resolve();
@@ -188,10 +211,18 @@
 
   // 脚本加载完成后补一次 init（此前由 app.js 启动时的 safeInit 统一调用，
   // 改成按需加载后必须在这里补，否则模块只挂了 window.X 却没绑任何事件）
-  function initModuleOf(src) {
-    const name = String(src).split('/').pop().replace(/\.js$/, '');
-    if (!MODULES_NEEDING_INIT.has(name)) return;
+  // 审查 K3：按模块名记账，只放第一次过去。IDLE_SCRIPTS 与 PAGE_SCRIPTS 有交集
+  // （pathbinding 同时在两侧），单靠「脚本是否新加载」判不住重复。
+  function initModuleByName(name) {
+    if (!MODULES_NEEDING_INIT.has(name) || _initedModules.has(name)) return;
+    _initedModules.add(name);
+    // LG-7（2026-09-15）：init 必须逐个 try/catch——此前裸调用，任一模块抛错会让
+    // window.app 未及时挂载、所有 window.app?.toast?.() 静默变空操作，比卡死更难诊断。
     try { window[name]?.init?.(); } catch (e) { console.warn(`[Trim] 模块 ${name} 初始化失败:`, e); }
+  }
+
+  function initModuleOf(src) {
+    initModuleByName(String(src).split('/').pop().replace(/\.js$/, ''));
   }
 
   // 首帧空闲后预取的非关键脚本：视觉增强 + 自动更新 UI + 路径绑定。
@@ -285,7 +316,10 @@
     // 脚本未加载即 ReferenceError 并中断整个 app.js。改 window.xxx?. 后模块才可被移出首屏。
     if (pageName === 'logs') window.logger?.load?.();
     if (pageName === 'startup') window.startup?.load?.();
-    if (pageName === 'quickcmds') window.quickcmds?.init?.();
+    // 审查 K3：这两处原本是裸 `?.init?.()`，与 ensurePageScripts 的那次 init 叠在一起，
+    // 第一次进页就会绑两份监听器。quickcmds 的 renderTabs/renderList 只在首绑时需要
+    // （页面 DOM 是 display 切换、不重建），pathbinding.js 自带幂等守卫，语义不变。
+    if (pageName === 'quickcmds') initModuleByName('quickcmds');
     // v3.2.1：首次进入磁盘清理页自动检测规则库云端版本（右上角 toast 提示更新）
     if (pageName === 'cleanup') window.cleanup?.onPageEnter?.();
     if (pageName === 'memoryclean') {
@@ -580,10 +614,7 @@
     if (backdrop) backdrop.style.display = 'none';
   }
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   // 日志（暴露给其它模块）
   function log(level, message) {
@@ -611,10 +642,16 @@
       const info = await window.api.app.getInfo();
       setInfo('infoVersion', info.version);
       // v2.6.0（P2-9）：数据目录形态（程序目录存在 Trim.portable 标记 = 便携模式）
-      setInfo('infoPortable', info.portable ? '便携模式（程序目录\\data）' : '标准安装（%APPDATA%\\Trim）');
-      setInfo('infoElectron', info.electron);
-      setInfo('infoNode', info.node);
-      setInfo('infoChrome', info.chrome);
+      // 审查 M16：这里原先写死「标准安装（%APPDATA%\Trim）」—— 那是 **Electron 轨**的目录名，
+      // 本应用真实目录是 `%APPDATA%\com.xiaoxu.trim`（后端 info.dataDir 早就回传了，只是没人用）。
+      // 用户照着界面提示去找目录会找不到自己的配置，故改成回传的真实路径。
+      setInfo('infoPortable', info.portable
+        ? `便携模式（${info.dataDir || '程序目录\\data'}）`
+        : `标准安装（${info.dataDir || '%APPDATA%\\com.xiaoxu.trim'}）`);
+      // 审查 M16：`electron` 字段恒为 N/A（本实现没有 Electron），改为显示运行时（后端 runtime）
+      setInfo('infoElectron', info.runtime || info.electron || 'N/A');
+      setInfo('infoNode', info.node || 'N/A');
+      setInfo('infoChrome', info.chrome || 'N/A');
       setInfo('infoOS', `${info.osVersion} (${info.arch})`);
       setInfo('infoBuild', `Build ${info.osBuild || '未知'}`);
       const fluentText = { full: '完整支持 (Mica + Acrylic)', partial: '部分支持 (基础 Mica)', none: '不支持' };
@@ -811,15 +848,13 @@
     initPwshFeedback();
 
     // 初始化各模块
-    // LG-7（2026-09-15）：页面模块 init 逐个 try/catch——此前裸调用，任一模块抛错会
-    // 让 window.app 未及时挂载、所有 window.app?.toast?.() 静默变空操作，比卡死更难诊断。
-    const safeInit = (mod, name) => { try { mod?.init?.(); } catch (e) { console.warn(`[Trim] 模块 ${name} 初始化失败:`, e); } };
     // v3.7.0 议题五：只初始化首屏已加载的模块；其余改到 ensurePageScripts 加载后按需 init。
-    // 裸变量已在第 0 步统一改为 window.xxx?.，脚本缺席时只是空操作而不会中断 app.js。
-    safeInit(window.cleanup, 'cleanup');
-    safeInit(window.overview, 'overview');
-    safeInit(window.deviceinfo, 'deviceinfo');
-    safeInit(window.fontmanager, 'fontmanager');
+    // 审查 K3：这四个也走 initModuleByName —— 它们同样在 MODULES_NEEDING_INIT 里，
+    // 原先各走一条路径（这里一次 + 首次进页 ensurePageScripts 再一次）等于绑两份。
+    initModuleByName('cleanup');
+    initModuleByName('overview');
+    initModuleByName('deviceinfo');
+    initModuleByName('fontmanager');
 
     // 磁盘清理分段视图：分段栏点击切换（液态滑块由 liquid-glass.js 统一监听跟随）
     document.getElementById('cleanupTabs')?.addEventListener('click', async (e) => {

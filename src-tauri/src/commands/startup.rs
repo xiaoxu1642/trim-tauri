@@ -66,7 +66,7 @@ fn cache_file() -> std::path::PathBuf {
 }
 
 fn load_cache() -> Option<(Vec<Value>, i64)> {
-    let v = crate::security::read_json_or_quarantine(&cache_file());
+    let v = crate::security::read_json_or_default(&cache_file());
     let obj = v.as_object()?;
     let data = obj.get("data")?.as_array()?.clone();
     let ts = obj.get("timestamp")?.as_i64()?;

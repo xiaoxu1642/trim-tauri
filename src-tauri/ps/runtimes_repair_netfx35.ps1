@@ -1,5 +1,5 @@
 # <<<PROVENANCE
-# 来源：C:/KaiFa/Trim/src/scripts-powershell/runtimes-scripts.js → repair("netfx35", "")
+# 来源：vendor/upstream-js/src/scripts-powershell/runtimes-scripts.js → repair("netfx35", "")
 # 生成：tools/sync-ps-from-js.mjs 直接取 JS **运行时字符串值**写入，无任何字符替换；
 #       改动本文件必须在源仓库改 JS 后重跑生成器（校验见 tools/check-ps-extraction.mjs）。
 # 说明：启用 .NET Framework 3.5（DISM，不消费安装包）

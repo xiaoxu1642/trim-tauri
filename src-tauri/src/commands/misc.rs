@@ -17,7 +17,7 @@ use crate::security;
 static DWM_TOOL_HINT: Mutex<Option<String>> = Mutex::new(None);
 
 /// 内置简介库（离线，随应用分发，不联网、不上传任何本机信息）
-const ITEM_INTRO_JSON: &str = include_str!("../../../src/data/item-intro.json");
+const ITEM_INTRO_JSON: &str = include_str!("../../data/item-intro.json");
 
 /// diag:dwm-conflict — 第三方窗口美化工具痕迹（只读）
 #[tauri::command]

@@ -168,10 +168,7 @@
     return [item.category || '', item.regPath || item.location || '', item.name || '', item.clsid || ''].join('|');
   }
 
-  function escapeHtml(value) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(value ?? '').replace(/[&<>"']/g, ch => map[ch]);
-  }
+  function escapeHtml(value) { return window.ds.esc(value); }
 
   // 默认占位图标（无程序图标时使用）。带 data-icon-fallback 标记，
   // 由 icon-fallback 共享兜底升级为 Trim.ico（B2：全场景统一兜底）；

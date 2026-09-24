@@ -188,6 +188,12 @@ struct FinderSink<R: tauri::Runtime> {
     /// None = 不向前端发事件（删除通道）
     scan_type: Option<String>,
     items: Mutex<Vec<Value>>,
+    /// 审查 M8：原生侧每有一条 `warn`（打不开的目录、被跳过的项…）计一次。
+    /// 目的不是统计，而是让渲染层能区分「真的没有重复文件」与「没权限看所以什么都没列出来」——
+    /// 旧实现两者都回 `success:true, data:[]`，用户完全无从判断。
+    errors: std::sync::atomic::AtomicU64,
+    /// 审查 M7：结果是否因条目上限被截断（原生侧 `Sink::truncated` 通知）
+    truncated: std::sync::atomic::AtomicBool,
 }
 
 impl<R: tauri::Runtime> FinderSink<R> {
@@ -196,6 +202,8 @@ impl<R: tauri::Runtime> FinderSink<R> {
             window,
             scan_type: Some(scan_type.to_string()),
             items: Mutex::new(Vec::new()),
+            errors: std::sync::atomic::AtomicU64::new(0),
+            truncated: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -204,6 +212,8 @@ impl<R: tauri::Runtime> FinderSink<R> {
             window,
             scan_type: None,
             items: Mutex::new(Vec::new()),
+            errors: std::sync::atomic::AtomicU64::new(0),
+            truncated: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -240,7 +250,12 @@ impl<R: tauri::Runtime> Sink for FinderSink<R> {
     }
 
     fn warn(&self, msg: &str) {
+        self.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         log::write_log("warn", msg);
+    }
+
+    fn truncated(&self) {
+        self.truncated.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -347,11 +362,14 @@ pub async fn finder_scan<R: tauri::Runtime>(
             "empty" => scan::empty(&roots, &sink),
             _ => scan::appdata(min_size_mb_arg, &sink),
         }
-        sink.take_items()
+        // 审查 M8：把「受限结果」的元数据一并交回，别只交 items
+        let errors = sink.errors.load(std::sync::atomic::Ordering::Relaxed);
+        let truncated = sink.truncated.load(std::sync::atomic::Ordering::Relaxed);
+        (sink.take_items(), errors, truncated)
     })
     .await;
 
-    let items = match scanned {
+    let (items, errors, truncated) = match scanned {
         Ok(v) => v,
         Err(e) => {
             log::write_log("error", &format!("finder {scan_type} 失败: {e}"));
@@ -362,9 +380,16 @@ pub async fn finder_scan<R: tauri::Runtime>(
     let slot_size = store_snapshot(&label, &items, crate::engine::now_ms());
     log::write_log(
         "info",
-        &format!("finder {scan_type} 完成: {} 项（快照槽 {} 条）", items.len(), slot_size),
+        &format!(
+            "finder {scan_type} 完成: {} 项（快照槽 {} 条，告警 {errors} 条{}）",
+            items.len(),
+            slot_size,
+            if truncated { "，已截断" } else { "" }
+        ),
     );
-    json!({ "success": true, "data": items })
+    // `errors`/`truncated` 是给渲染层的判据：空结果 + errors>0 要说「有 N 处没能读到」，
+    // 而不是「没有重复文件」（B2 禁吞异常伪装空结果）。
+    json!({ "success": true, "data": items, "errors": errors, "truncated": truncated })
 }
 
 // ==================== finder:delete ====================

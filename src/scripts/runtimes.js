@@ -6,7 +6,7 @@
 (function () {
   'use strict';
 
-  const escapeHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const escapeHtml = (s) => window.ds.esc(s);
 
   // 条目元数据：名称 / 说明 / 雷达节点归属（node: vc | dx | net）
   const ITEM_META = {

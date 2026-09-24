@@ -13,7 +13,7 @@
 
   function text(value) { return String(value ?? '').trim() || '--'; }
   // 💭1：硬件/固件字符串来自 WMI，虽非用户输入，仍按项目惯例转义后再进 innerHTML，保持一致与纵深。
-  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+  function esc(s) { return window.ds.esc(s); }
   function render(data) {
     const rows = [
       ['系统', data.system], ['处理器', data.processor], ['显卡', data.graphics],

@@ -18,7 +18,6 @@
 
 use std::sync::Mutex;
 
-use serde_json::Value;
 
 #[derive(Default, Clone)]
 pub struct ProtectRoots {
@@ -38,6 +37,26 @@ pub struct Norm {
 }
 
 static ROOTS: Mutex<Option<ProtectRoots>> = Mutex::new(None);
+
+/// reparse point 判定：符号链接、junction、云占位符、NFS/LX 卷、WIM 归档**全部命中**。
+///
+/// 为什么不用 `file_type().is_symlink()`（审查 L12）：Windows 上 std 只对
+/// `IO_REPARSE_TAG_MOUNT_POINT` 与 `_SYMLINK` 两种 tag 返回 true，而
+/// `is_symlink=false && is_dir=true` 的非常规 reparse（OneDrive 云占位符等）会被判成
+/// 普通目录并**递归进去** —— 那等于穿透到另一块存储上遍历/删除。属性位
+/// `FILE_ATTRIBUTE_REPARSE_POINT`(0x400) 严格更强（附录 E 实测口径）。
+/// 原生扫描器 `trim_finder::is_reparse` 用的是同一个属性位，此处对齐三端口径（U1）。
+#[cfg(windows)]
+pub fn is_reparse(md: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+pub fn is_reparse(md: &std::fs::Metadata) -> bool {
+    md.file_type().is_symlink()
+}
 
 /// 环境变量取值（Windows 下 std::env::var 本身大小写不敏感，等价 JS 的三写法兜底）
 fn env(name: &str) -> String {
@@ -279,6 +298,16 @@ pub fn build_default_roots() -> ProtectRoots {
 
 /// 启动期补全：Electron 的 known folder 会被注册表/OneDrive 重定向，纯 env 推导覆盖不到。
 pub fn configure(extra_subtree: &[String], extra_exact: &[String], extra_any_drive: &[String]) -> ProtectRoots {
+    let roots = build_roots(extra_subtree, extra_exact, extra_any_drive);
+    *ROOTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(roots.clone());
+    roots
+}
+
+/// 审查 M13：把「算清单」与「写全局缓存」拆开。
+/// 原先 `configure()` 既返回清单又顺手覆盖 `ROOTS`，测试想拿一份扩展清单对拍，
+/// 就必然污染同进程里并发跑的其它 protect 断言（它们读的是全局 `ROOTS`）。
+/// 纯函数版本供测试与任何「只想要一份清单」的调用方使用，不碰全局状态。
+fn build_roots(extra_subtree: &[String], extra_exact: &[String], extra_any_drive: &[String]) -> ProtectRoots {
     let mut roots = build_default_roots();
     for r in extra_subtree {
         let n = normalize_for_compare(r);
@@ -298,7 +327,6 @@ pub fn configure(extra_subtree: &[String], extra_exact: &[String], extra_any_dri
             roots.any_drive.push(nm);
         }
     }
-    *ROOTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(roots.clone());
     roots
 }
 
@@ -378,27 +406,12 @@ pub fn json_of(r: &ProtectRoots) -> String {
     )
 }
 
-/// 供 `--protect <json>` 注入路径使用：解析 JSON 清单（解析失败返回 None，由调用方兜底）
-pub fn parse_roots_json(text: &str) -> Option<ProtectRoots> {
-    let v: Value = serde_json::from_str(text).ok()?;
-    let take = |key: &str| -> Vec<String> {
-        v.get(key)
-            .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str()).map(|s| s.to_ascii_lowercase()).collect())
-            .unwrap_or_default()
-    };
-    Some(ProtectRoots {
-        subtree: take("subtree"),
-        exact: take("exact"),
-        any_drive: take("anyDrive"),
-    })
-}
-
 // ==================== 与 JS 权威实现的三端同源对拍（cargo test 门禁） ====================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     /// 夹具由 `node tools/gen-protect-parity.mjs` 用 JS 权威实现（ps-protect-path.js）生成：
     /// 含清单 JSON 与 38 条向量的判定结果。任何一处口径漂移都会在这里失败——
@@ -414,7 +427,8 @@ mod tests {
                 .map(|a| a.iter().filter_map(|s| s.as_str()).map(String::from).collect())
                 .unwrap_or_default()
         };
-        let roots = configure(
+        // 用纯函数版：测试不得覆盖全局 ROOTS，否则会与同进程并发的其它 protect 断言互相污染
+        let roots = build_roots(
             &strvec(&extras["extraSubtree"]),
             &strvec(&extras["extraExact"]),
             &strvec(&extras["extraAnyDrive"]),

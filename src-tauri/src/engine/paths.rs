@@ -24,13 +24,15 @@ const PORTABLE_MARKER: &str = "Trim.portable";
 /// - `optimizer-backups.json` = 优化项的**值级注册表备份**；不搬过去，「还原」就只能
 ///   退化成反向判据，原来那个具体值再也回不来了（用户改完 Defender/UAC 想还原会失败）
 /// - `bench-history.json` = 用户的历史测速/测速记录，重跑成本高且属个人数据
-/// 不进清单的：`checkup.json` 之类扫描缓存（可重扫）、`cache`（可再生）、
+/// 不进清单的：`checkup.json` 之类扫描缓存（可重扫，见下方 `scan_cache_file`）、`cache`（可再生）、
 /// `redist`（可重下）、`logs`/`tmp`（运行期产物）。
 const MIGRATION_FILES: &[&str] = &[
     "appearance.json",
     "settings.json",
     "optimization-state.json",
-    "checkup.json",
+    // 审查 M15：`checkup.json` 原先在本清单里，而同一个文件块下方（`scan_cache_file`）
+    // 就把体检结果定义为「可重扫的扫描缓存」—— 与上面「丢了就恢复不了」的判据自相矛盾。
+    // 按判据移出：首次启动不带旧体检结果，用户重跑一次体检即可（只读、秒级）。
     "system-info.json",
     "paths.json",
     "Local State",
@@ -140,9 +142,11 @@ pub fn temp_script_dir() -> Result<PathBuf, String> {
     if !dir.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时脚本目录失败: {e}"))?;
     }
-    // 目录若被替换为符号链接/联接点，脚本内容可能被导向任意位置
+    // 目录若被替换为符号链接/联接点，脚本内容可能被导向任意位置。
+    // 审查 L12：判 reparse 属性位而不是 is_symlink —— 后者漏掉非 mount-point 类 tag
+    // （云占位符/其它 reparse），而这里被穿透的后果是提权脚本写到别处。
     if let Ok(meta) = std::fs::symlink_metadata(&dir) {
-        if meta.file_type().is_symlink() {
+        if super::protect::is_reparse(&meta) {
             return Err("临时脚本目录已被替换（符号链接/联接点），已拒绝写入".into());
         }
     }

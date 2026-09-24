@@ -1,5 +1,5 @@
 # <<<PROVENANCE
-# 来源：C:/KaiFa/Trim/src/scripts-powershell/runtimes-scripts.js → repair("vc-x64", "C:/KaiFa/Trim/src/scripts-powershell/runtimes-scripts.js")
+# 来源：vendor/upstream-js/src/scripts-powershell/runtimes-scripts.js → repair("vc-x64", "@@TRIM_INSTALLER_PATH@@")
 # 生成：tools/sync-ps-from-js.mjs 直接取 JS **运行时字符串值**写入，无任何字符替换；
 #       改动本文件必须在源仓库改 JS 后重跑生成器（校验见 tools/check-ps-extraction.mjs）。
 # 说明：静默执行本地安装包：VC++ 2015-2022 x64（哨兵模板：安装包路径）
@@ -34,7 +34,7 @@ trap {
 }
 
 Write-Output '正在安装 VC++ 2015-2022 x64（静默模式，请稍候）...'
-$result = Start-Process -FilePath 'C:/KaiFa/Trim/src/scripts-powershell/runtimes-scripts.js' -ArgumentList '/install /quiet /norestart' -Wait -PassThru
+$result = Start-Process -FilePath '@@TRIM_INSTALLER_PATH@@' -ArgumentList '/install /quiet /norestart' -Wait -PassThru
 Write-Output ('安装程序退出码: ' + $result.ExitCode)
 if ($result.ExitCode -eq 0) {
   Write-Output '@@RESULT@@ok'

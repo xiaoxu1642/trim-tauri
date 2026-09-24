@@ -72,6 +72,8 @@ pub async fn process_manager_open_window<R: tauri::Runtime>(
                 crate::activate_window(&window);
             }
         });
+    // 审查 K4 复盘：子窗也必须透传浏览器参数，否则带调试端口启动时静默建不出窗
+    let builder = crate::with_browser_args(builder);
     match builder.parent(&window) {
         Ok(builder) => match builder.build() {
             Ok(_) => Ok(json!({ "success": true })),

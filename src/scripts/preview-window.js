@@ -13,17 +13,8 @@
   let itemName = '图片预览';
 
   function $id(id) { return document.getElementById(id); }
-  function escapeHtml(s) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(s == null ? '' : s).replace(/[&<>"']/g, m => map[m]);
-  }
-  function formatSize(bytes) {
-    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let i = 0, v = bytes;
-    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return (i <= 1 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
+  function formatSize(bytes) { return window.ds.fmtBytes(bytes); } // 审查 M18：真源在 ds
   function toast(message) {
     const el = $id('pvFileInfo');
     if (el) el.textContent = message || '';
@@ -112,19 +103,24 @@
     if (!confirmed) return;
 
     let ok = false;
+    let reason = '';
     try {
       if (window.api?.fileclean?.deleteFile) {
         const resp = await window.api.fileclean.deleteFile(fileData.path);
         ok = !!resp.success;
+        reason = resp.message || '';
       } else {
         ok = true; // 浏览器预览模式模拟删除
       }
     } catch (e) {
       ok = false;
+      reason = e && e.message ? e.message : String(e);
     }
 
     if (!ok) {
-      toast('删除失败，请检查文件权限');
+      // 审查 M2：旧文案写死「请检查文件权限」，而真实的失败原因（来源校验/不在扫描范围/
+      // 回收站拒绝）全被吞掉，用户按提示去查权限是死路。后端已回 message，就照实说。
+      toast('删除失败' + (reason ? '：' + reason : '，请检查文件权限'));
       return;
     }
 

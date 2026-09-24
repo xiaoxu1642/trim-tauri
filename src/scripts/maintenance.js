@@ -14,9 +14,7 @@
   let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested } | null
   let outputBound = false;
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
 
   const STATUS_LABEL = {
     idle: '执行', running: '执行中…', ok: '已完成', warn: '部分完成', error: '失败'
@@ -24,7 +22,7 @@
 
   // ==================== 维护项详解弹窗内容（v3.2.0） ====================
   // 每项三段：是什么 / 什么情况下会用到它 / 用了之后应该达到的效果。
-  // 以任务 id 为键（数据源见 src/scripts-powershell/maintenance-scripts.js）；新增任务时此处需同步补文案，
+  // 以任务 id 为键（数据源见 vendor/upstream-js/src/scripts-powershell/maintenance-scripts.js）；新增任务时此处需同步补文案，
   // 未收录的 id 弹窗自动回落为 desc 单段展示，不会开天窗。
   const MAINT_INFO = {
     sfc: {

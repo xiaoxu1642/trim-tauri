@@ -22,10 +22,7 @@
 
   function el(id) { return document.getElementById(id); }
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   function truncate(text, len) {
     const s = String(text || '');

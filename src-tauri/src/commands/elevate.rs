@@ -94,14 +94,57 @@ fn write_phase(nonce: &str, phase: &str) -> bool {
     }
 }
 
-/// 读握手文件；损坏/缺失一律 None（交接是可损失路径，不隔离、不报错）
-fn read_handshake() -> Option<(String, String)> {
+/// 读握手文件，返回 `(nonce, phase, 写入方 pid)`；
+/// 损坏/缺失一律 None（交接是可损失路径，不隔离、不报错）
+fn read_handshake() -> Option<(String, String, u32)> {
     let text = std::fs::read_to_string(handshake_path()).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
     Some((
         v.get("nonce")?.as_str()?.to_string(),
         v.get("phase")?.as_str()?.to_string(),
+        // pid 缺失按 0 处理，交给 takeover_writer_gone 判（0 不是合法 pid）
+        v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32,
     ))
+}
+
+/// 握手记录里那个 pid 是否已给不出「还活着」的证据（审查 L2）。
+///
+/// 判据刻意设计成「只在拿到反证时才否决」（fail-open）：`OpenProcess` 只有返回
+/// `ERROR_INVALID_PARAMETER`（该 pid 不存在）才算确证死亡；其它失败（跨完整性级别、
+/// 句柄权限不足）一律当活着。因为误判"已死"的代价是**旧实例拒不让位**，会把这条
+/// 无法真机回归的提权交接路径弄坏，比放过一条伪造记录严重得多。
+///
+/// 买到什么：① 新实例写完 `ready` 就崩溃/秒退时，旧实例不再据此 `app.exit(0)`，
+/// 用户不会失去应用；② 只把 `phase` 改成 `ready` 的改文件者，pid 仍是旧实例自己的，
+/// 当场被识破。
+/// 买不到什么：伪造方填一个当时确实活着的 pid 即可绕过 —— 但那要求它已能写我们 ACL
+/// 保护的数据目录，`new_nonce` 的注释（:59-62）已把这种本机写者划在威胁模型之外。
+#[cfg(windows)]
+fn takeover_writer_gone(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid == 0 || pid == std::process::id() {
+        // 无 pid 字段，或写记录的就是本进程 —— 都不构成「另一个实例活着」的证据
+        return true;
+    }
+    match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(h) => {
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+            false
+        }
+        // 只有「参数无效」是这个 pid 不存在的确定反证；其余失败按活着处理
+        Err(_) => {
+            let last = unsafe { GetLastError() };
+            last == ERROR_INVALID_PARAMETER
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn takeover_writer_gone(_pid: u32) -> bool {
+    false
 }
 
 /// 握手是否属于本次请求：nonce 必须逐字相等。
@@ -118,9 +161,32 @@ fn clear_handshake() {
     }
 }
 
-/// 命令行是否带提权重启旗标（lib.rs 用它决定是否跳过单实例插件）
-pub fn is_relaunch_from_elevation() -> bool {
-    std::env::args().any(|a| a == RELAUNCH_FLAG || a.starts_with(&format!("{RELAUNCH_FLAG}=")))
+/// 审查 M5：是否真的有一次提权交接在进行 —— lib.rs 用它决定是否跳过单实例插件。
+///
+/// 旧判据是「命令行带 `--elevated-relaunch` 旗标」（`is_relaunch_from_elevation`，已删：
+/// 删掉后无人调用，留着就是审查 L19 那类零调用 pub fn），于是本机任何进程手敲这个旗标就能
+/// ① 让该会话不注册单实例（双开，且第二实例没有「唤回主窗」语义）、
+/// ② 在建窗前白等满交接超时。旗标是纯命令行参数，不构成任何凭据。
+/// 现在要求三件事同时成立：带 nonce + 自己是管理员令牌 + 握手文件里的 nonce 与命令行一致
+/// 且 phase 仍是 `requested`（旧实例刚发出请求、还没见到新实例报到）。
+/// 少任何一条都按普通启动处理：单实例保护照常注册。
+pub fn elevation_takeover_pending() -> bool {
+    takeover_pending(
+        relaunch_nonce().as_deref(),
+        crate::engine::sysinfo::is_admin(),
+        read_handshake().as_ref().map(|(n, p, _)| (n.as_str(), p.as_str())),
+    )
+}
+
+/// `elevation_takeover_pending` 的纯判据部分，单独拿出来是为了可测：
+/// 三条件全由环境（进程参数 / 令牌 / 数据目录里的文件）决定，测试里造不出来。
+fn takeover_pending(
+    nonce: Option<&str>,
+    admin: bool,
+    handshake: Option<(&str, &str)>,
+) -> bool {
+    let Some(nonce) = nonce else { return false };
+    admin && matches!(handshake, Some((n, p)) if n == nonce && p == PHASE_REQUESTED)
 }
 
 /// 取旗标里携带的 nonce（`--elevated-relaunch=<nonce>`）
@@ -147,7 +213,9 @@ pub fn take_over_as_elevated_instance() -> bool {
     }
     let started = std::time::Instant::now();
     loop {
-        if let Some((n, phase)) = read_handshake() {
+        // 这里**不**做 pid 存活判定：`released` 由旧实例写完后立刻 `app.exit(0)`，
+        // 写记录的那个进程按设计就是要消失。存活判定只用在旧实例等 `ready` 的一侧。
+        if let Some((n, phase, _pid)) = read_handshake() {
             if handshake_matches(&n, &phase, &nonce, PHASE_RELEASED) {
                 clear_handshake();
                 log::write_log("info", "旧实例已让位，提权实例继续启动");
@@ -176,14 +244,21 @@ fn arm_handshake<R: Runtime>(app: AppHandle<R>, nonce: String) {
         log::write_log("info", "等待提权后的新实例就绪");
         let started = std::time::Instant::now();
         loop {
-            if let Some((n, phase)) = read_handshake() {
+            if let Some((n, phase, pid)) = read_handshake() {
                 if handshake_matches(&n, &phase, &nonce, PHASE_READY) {
-                    log::write_log("info", "检测到提权后的新实例已启动，退出当前实例");
-                    // 先落 released 再退出：新实例在等这个标记才肯建窗
-                    write_phase(&nonce, PHASE_RELEASED);
-                    crate::on_app_exit();
-                    app.exit(0);
-                    return;
+                    if takeover_writer_gone(pid) {
+                        log::write_log(
+                            "warn",
+                            &format!("收到 ready 但写记录的进程 (pid {pid}) 已不在，不让位、继续等待"),
+                        );
+                    } else {
+                        log::write_log("info", "检测到提权后的新实例已启动，退出当前实例");
+                        // 先落 released 再退出：新实例在等这个标记才肯建窗
+                        write_phase(&nonce, PHASE_RELEASED);
+                        crate::on_app_exit();
+                        app.exit(0);
+                        return;
+                    }
                 }
             }
             if started.elapsed().as_millis() as u64 > HANDSHAKE_TIMEOUT_MS {
@@ -304,9 +379,27 @@ mod tests {
         assert!(!handshake_matches("a1b2", "released", "a1b2", "ready"));
     }
 
+    /// 审查 L2：ready 记录里的 pid 判据。
+    /// 「自己的 pid」与「0（无字段）」都必须判给不出存活证据 —— 前者正是「只把 phase
+    /// 改成 ready」的改文件者留下的形态（记录仍是旧实例自己写的）。
     #[test]
-    fn nonce_每次不同且为固定长度十六进制() {
-        let a = new_nonce();
+    fn 写记录者是自己或无pid时不算接管者() {
+        assert!(takeover_writer_gone(0));
+        assert!(takeover_writer_gone(std::process::id()));
+    }
+
+    /// fail-closed 的那一半：确证不存在的 pid 判死。
+    /// Windows 的 pid 必为 4 的倍数且上限不到 0xFFFFFFFF，故 u32::MAX 必然不存在；
+    /// 而判据只在 `ERROR_INVALID_PARAMETER` 时否决，其余失败按活着处理（fail-open），
+    /// 所以这条同时证明了「权限类失败不会被误当成进程已死」。
+    #[cfg(windows)]
+    #[test]
+    fn 不存在的pid判死而权限不足不否决() {
+        assert!(takeover_writer_gone(u32::MAX));
+    }
+
+    #[test]
+    fn nonce_每次不同且为固定长度十六进制() {        let a = new_nonce();
         let b = new_nonce();
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
@@ -315,11 +408,30 @@ mod tests {
 
     #[test]
     fn 旗标解析覆盖裸旗标与带值两种形式() {
-        // is_relaunch_from_elevation / relaunch_nonce 走 std::env::args，
+        // relaunch_nonce 走 std::env::args，
         // 这里只能断言前缀常量的契约不被写错
         assert!(RELAUNCH_FLAG.starts_with("--"));
         assert!(format!("{RELAUNCH_FLAG}=abc").starts_with(&format!("{RELAUNCH_FLAG}=")));
         assert!(!RELAUNCH_FLAG.contains(' '));
+    }
+
+    /// 审查 M5 回归断言：跳过单实例插件的判据必须是「nonce + 管理员令牌 + 握手文件对得上」
+    /// 三者齐全，**光有旗标不算**。旧实现只看旗标，本机任何进程手敲即可双开并白等超时。
+    #[test]
+    fn 交接判据要求三条件同时成立() {
+        // 正例：完整交接在途
+        assert!(takeover_pending(Some("n1"), true, Some(("n1", PHASE_REQUESTED))));
+        // 光有 nonce（命令行带旗标但没有旧实例写的握手文件）→ 不跳过单实例
+        assert!(!takeover_pending(Some("n1"), true, None));
+        // 握手文件是别人的 nonce → 不认（防手敲旗标蹭一次双开）
+        assert!(!takeover_pending(Some("n1"), true, Some(("n2", PHASE_REQUESTED))));
+        // 已经走到 ready/released 的旧文件不得再被当成本次请求
+        assert!(!takeover_pending(Some("n1"), true, Some(("n1", PHASE_READY))));
+        assert!(!takeover_pending(Some("n1"), true, Some(("n1", PHASE_RELEASED))));
+        // 非管理员令牌（旗标是别人塞的）→ 不跳过
+        assert!(!takeover_pending(Some("n1"), false, Some(("n1", PHASE_REQUESTED))));
+        // 裸旗标（无 nonce）→ 不跳过
+        assert!(!takeover_pending(None, true, Some(("n1", PHASE_REQUESTED))));
     }
 
     #[test]

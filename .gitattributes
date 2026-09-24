@@ -52,3 +52,11 @@
 *.yml text eol=lf
 *.lock text eol=lf
 *.manifest text eol=lf
+
+# ==================== 上游基线快照：字节即内容，禁止任何行尾转换（必须放在最后，后写覆盖先写） ====================
+# `vendor/upstream-js/` 是从 Electron 轨（源仓库 Trim）逐字节复制进来的**只读基线**：
+# `.ps1` 生成器与两套 PS 门禁会把它里面的模板字面量**按文本切片**再与 src-tauri/ps/*.ps1
+# 逐字节对拍。源仓库这些文件是 CRLF，模板里的换行是真实换行——一旦被上面的
+# `*.js text eol=lf` 归一成 LF，切出来的脚本就少掉 \r，对拍整批红（AGENTS.md §5.1 同一陷阱）。
+# 要改这份快照只能整文件重新复制，禁止手工编辑（要改逻辑请改源仓库后重拷）。
+vendor/upstream-js/** -text

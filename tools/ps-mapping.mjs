@@ -111,7 +111,34 @@ export function loadBody(entry, requireFn, readFileFn) {
   if (typeof fn !== 'function') throw new Error(`${entry.js} 未导出函数 ${entry.call}`);
   const out = fn(...(entry.args || []));
   if (typeof out !== 'string') throw new Error(`${entry.js}.${entry.call}() 未返回字符串`);
+  // 审查 M22：安装型脚本的「安装包路径」是运行期才已知的，上游 repair() 用
+  // `fs.existsSync` 做存在性校验，所以生成期**只能传一个真实存在的路径**当占位符——
+  // 后果是把开发者机器上的绝对路径烧进 .ps1、烧进发布的二进制，且坐标（ORIGIN）一变
+  // 文本层对拍就红。故在此统一换成唯一 token，Rust 侧运行前再替换成真实缓存包路径。
+  if (entry.sentinelPath) {
+    if (!out.includes(entry.sentinelPath)) {
+      throw new Error(`${entry.js}.${entry.call}() 产物里没有哨兵 ${entry.sentinelPath}（上游改了模板？）`);
+    }
+    return out.split(entry.sentinelPath).join(INSTALLER_PATH_TOKEN);
+  }
   return out;
+}
+
+/** 安装型脚本里的「安装包路径」占位符：必须全局唯一、且不是任何真实路径 */
+export const INSTALLER_PATH_TOKEN = '@@TRIM_INSTALLER_PATH@@';
+
+/**
+ * 把源坐标写成**仓库内相对路径**再进 PROVENANCE 头。
+ * 绝对路径进跟踪文件 = 泄露开发环境布局（M22），且换机器/换 clone 位置就产生无意义 diff。
+ */
+function relSource(absolute) {
+  const norm = String(absolute).replace(/\\/g, '/');
+  const i = norm.indexOf('/vendor/upstream-js/');
+  if (i >= 0) return norm.slice(i + 1);
+  if (norm.startsWith(REPO_ROOT.replace(/\\/g, '/'))) {
+    return norm.slice(REPO_ROOT.length + 1);
+  }
+  return norm;
 }
 
 /**
@@ -164,13 +191,17 @@ export function loadTemplate(tpl, requireFn, readFileFn) {
 
 /** 生成带来源标记的 .ps1 全文 */
 export function withProvenance(entry, body) {
+  // 源坐标一律走 relSource()：绝对路径不得进跟踪文件（审查 M22）
+  const argsText = (entry.args || [])
+    .map((a) => (entry.sentinelPath && a === entry.sentinelPath ? JSON.stringify(INSTALLER_PATH_TOKEN) : JSON.stringify(a)))
+    .join(', ');
   const source = entry.inline
-    ? `${entry.inline.file} → 常量 ${entry.inline.varName}（内联模板字面量）`
+    ? `${relSource(entry.inline.file)} → 常量 ${entry.inline.varName}（内联模板字面量）`
     : entry.template
-      ? `${entry.template.file} → 常量 ${entry.template.varName}（模板模式：占位符保留，运行前由 Rust 同口径替换）`
+      ? `${relSource(entry.template.file)} → 常量 ${entry.template.varName}（模板模式：占位符保留，运行前由 Rust 同口径替换）`
       : entry.const
-      ? `${entry.js} → 常量 ${entry.const}`
-      : `${entry.js} → ${entry.call}(${(entry.args || []).map(a => JSON.stringify(a)).join(', ')})`;
+      ? `${relSource(entry.js)} → 常量 ${entry.const}`
+      : `${relSource(entry.js)} → ${entry.call}(${argsText})`;
   const header = [
     PROVENANCE_BEGIN,
     `# 来源：${source}`,

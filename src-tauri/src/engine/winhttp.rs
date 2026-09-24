@@ -120,7 +120,7 @@ fn build_header_block(headers: &[(String, String)]) -> Vec<u16> {
 /// 取请求**重定向之后**的终点 URL（WinHTTP 在 ReceiveResponse 时已完成跳转）。
 /// 两次调用：先用空缓冲探出所需字节数（该次必然 FALSE，但长度已回填），再取回宽字符 URL。
 /// 这是「终点 host 白名单」闸门的输入源——白名单必须校验终点，不能只看初始 URL。
-fn query_final_url(request: *mut c_void) -> Result<String, String> {
+pub(crate) fn query_final_url(request: *mut c_void) -> Result<String, String> {
     let mut bytes: u32 = 0;
     let _ = unsafe { WinHttpQueryOption(request, WINHTTP_OPTION_URL, None, &mut bytes) };
     if bytes == 0 {
@@ -467,12 +467,3 @@ pub fn get_text(
     Ok(String::from_utf8_lossy(&out).to_string())
 }
 
-/// 取重定向终点的 host（供调用方自行判定白名单时复用）。
-pub fn final_host(
-    url: &str,
-    headers: &[(String, String)],
-    timeout: Duration,
-) -> Result<String, String> {
-    let resp = open_response(url, headers, timeout)?;
-    url_host(&resp.final_url).ok_or_else(|| "重定向终点地址无效".to_string())
-}

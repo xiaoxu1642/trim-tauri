@@ -45,36 +45,11 @@
     '系统精简': '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM8 9h8V7H8v2zm0 4h8v-2H8v2zm0 4h6v-2H8v2z"/>',
     '浏览器优化': '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>'
   };
-  const GROUP_COLORS = {
-    '系统调校': 'linear-gradient(135deg, #6B46C1, #553C9A)',
-    '性能调优': 'linear-gradient(135deg, #16A34A, #15803D)',
-    '内存优化': 'linear-gradient(135deg, #D97706, #B45309)',
-    '隐私防护': 'linear-gradient(135deg, #DC2626, #B91C1C)',
-    '显卡优化': 'linear-gradient(135deg, #7C3AED, #6D28D9)',
-    '外设调优': 'linear-gradient(135deg, #0D9488, #0F766E)',
-    '音频优化': 'linear-gradient(135deg, #EC4899, #BE185D)',
-    '桌面体验': 'linear-gradient(135deg, #14B8A6, #0F766E)',
-    '任务调度': 'linear-gradient(135deg, #8B8EE0, #6366C9)',
-    '系统服务': 'linear-gradient(135deg, #8B5CF6, #7C3AED)',
-    '系统精简': 'linear-gradient(135deg, #475569, #334155)',
-    '浏览器优化': 'linear-gradient(135deg, #0EA5E9, #0284C7)',
-    '游戏安全诊断': 'linear-gradient(135deg, #EF4444, #B91C1C)'
-  };
-  const GROUP_ACCENT = {
-    '系统调校': '#6B46C1',
-    '性能调优': '#16A34A',
-    '内存优化': '#D97706',
-    '隐私防护': '#DC2626',
-    '显卡优化': '#7C3AED',
-    '外设调优': '#0D9488',
-    '音频优化': '#EC4899',
-    '桌面体验': '#14B8A6',
-    '任务调度': '#8B8EE0',
-    '系统服务': '#8B5CF6',
-    '系统精简': '#475569',
-    '浏览器优化': '#0EA5E9',
-    '游戏安全诊断': '#EF4444'
-  };
+  // 审查 M20：原先这里有 GROUP_COLORS（13 条 linear-gradient）与 GROUP_ACCENT（13 个 hex），
+  // 前者全仓零引用（死表），后者的色值 13 个里 13 个在 main.css 找不到对应 token ——
+  // 直撞 AGENTS §2「禁彩色渐变」「只用 main.css 既有 token」。
+  // 分类列现在统一吃 `--c` 的 CSS 兜底（var(--accent)）与 .opt-detail-icon 的 token 底色，
+  // 分类靠标题与图标区分，不靠彩虹。
 
   const GEAR_ICON = '<path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>';
 
@@ -230,11 +205,7 @@
   }
 
   // ==================== 工具 ====================
-  function escapeHtml(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
+  function escapeHtml(s) { return window.ds.esc(s); }
 
   // 阶段三：风险徽章统一 design-system（ds-badge sm：低=ok 中=warn 高=bad）
   function riskBadge(risk) {
@@ -334,16 +305,16 @@
     const summary = document.getElementById('optimizerSummary');
     if (summary) summary.textContent = `共 ${totalItems} 项优化 · ${order.length} 个分类`;
     root.innerHTML = `<div class="opt-kanban">` + order.map(group => {
-      const accent = GROUP_ACCENT[group] || 'var(--accent)';
-      // 分类色实底（hex）配白字；accent 兜底时走 --accent-text 自动适配明暗主题对比度
-      const colFg = accent.startsWith('#') ? '#FFFFFF' : 'var(--accent-text)';
+      // 审查 M20：不再按分类注入离表 hex。`--c` / `--cf` 的 CSS 兜底本身就是
+      // `var(--accent)` / `var(--accent-text)`（main.css:6335、:2589），少注入一层
+      // 反而让主题与自定义 accent（pathbinding.applyAccent）能正常驱动看板配色。
       const items = byGroup[group];
       // 外设调优：列头提供「更多调优项」入口 → 打开外设优化窗口（Win32PrioritySeparation 等深度调优）
       const moreBtn = group === '外设调优'
         ? `<button type="button" class="opt-col-more" data-more-group="外设调优" data-tip="打开外设优化：处理器调度 / 键盘注册表 / 鼠标队列深度调优">更多调优项</button>`
         : '';
       return `
-      <section class="opt-col" style="--c:${accent};--cf:${colFg}">
+      <section class="opt-col">
         <div class="opt-col-head">
           <span class="opt-col-title">${escapeHtml(group)}</span>
           ${moreBtn}
@@ -568,9 +539,10 @@
     // 重复打开（如执行后刷新按钮态）先关旧实例，保证唯一 id 与事件不叠加
     if (optModal) { optModal.close(); optModal = null; }
     activeOption = o;
-    const accent = GROUP_ACCENT[displayGroup(o)] || 'var(--accent)';
+    // 审查 M20：原来是 `background:${hex}18;color:${hex}` —— 拼在离表 hex 后面当 alpha 用，
+    // 既不过 token 也无法随主题走。改用 --accent-soft 底 + --accent 前景。
+    const iconStyle = 'style="background:var(--accent-soft);color:var(--accent)"';
     const stepCount = (o.steps || []).length;
-    const iconStyle = `style="background:${accent}18;color:${accent}"`;
     const metaHtml =
       riskBadge(o.risk) + effectBadge(o.effect) + `<span class="opt-detail-count">${stepCount} 步操作</span>`;
     // v2.6.0（P2-7）：预期效果说明——诚实口径：经验分级，非本机实测数据
@@ -615,14 +587,9 @@
       footerHtml,
       bodyClass: 'opt-detail-body'
     });
-    // 分类强调色注入弹窗（既有行为：分类色着色 icon/徽章，较深分类色配白字）
-    if (accent.startsWith('#')) {
-      optModal.modal.style.setProperty('--accent', accent);
-      optModal.modal.style.setProperty('--accent-text', '#FFFFFF'); // 分类色均较深，白字 ≥ 4.5:1
-    } else {
-      optModal.modal.style.removeProperty('--accent');
-      optModal.modal.style.removeProperty('--accent-text'); // accent 兜底时沿用主题自动前景
-    }
+    // 审查 M20：这里原先把「分类强调色」覆盖进弹窗局部的 --accent/--accent-text，
+    // 等于让 13 个离表 hex 劫持一次主题变量（自定义 accent 在这层会被静默换掉）。
+    // 删掉覆盖后，弹窗内的强调色回到主题真源。
     const $ = (sel) => optModal.modal.querySelector(sel);
     $('.opt-detail-desc').textContent = o.desc || '（无描述）';
     $('.opt-detail-effect').textContent = effectHint;
@@ -1262,7 +1229,7 @@
       const moreBtn = e.target.closest('.opt-col-more');
       if (moreBtn) {
         if (window.api?.peripheralWindow?.openWindow) {
-          window.api.peripheralWindow.openWindow();
+          window.api.peripheralWindow.openWindow().catch(function (e) { window.app?.toast?.('error', '外设优化窗口打开失败：' + ((e && e.message) || e)); });
         } else {
           window.app?.toast('info', '外设优化窗口需在 Trim 应用内打开');
         }

@@ -9,10 +9,7 @@
 
   function q(sel) { return backdrop ? backdrop.querySelector(sel) : null; }
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   function fmtTime(iso) {
     if (!iso) return '-';

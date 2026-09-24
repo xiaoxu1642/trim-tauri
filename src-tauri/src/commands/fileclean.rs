@@ -59,6 +59,19 @@ fn scope_get(label: &str, ty: &str) -> Option<Scope> {
         .and_then(|m| m.get(&slot_key(label, ty)).cloned())
 }
 
+/// 审查 M1：扫描槽按「发起扫描的窗口 label」存，因此预览子窗按自己的 label 永远查不到
+/// 主窗扫出来的结果 —— 读图恒返回「路径不在扫描范围内」。这里把「谁能读谁的槽」显式列成
+/// 静态映射，而不是给子窗复制一份快照：复制会带两个新问题（主窗重扫后副本失真、
+/// 删完后两份槽不一致）。子窗可见的集合**仍然严格等于主窗当前那次扫描的集合**，
+/// 与上游 Electron 按 `file://` 来源放开的语义一致（`in_scope` 才是真闸门）。
+/// 新增只读子窗时必须在这里登记，别靠 `guard_readonly` 顺带放开。
+fn scope_owner(label: &str) -> &str {
+    match label {
+        "preview" => "main",
+        other => other,
+    }
+}
+
 /// 词法规范化（不触盘）：折叠 . / .. 组件、统一反斜杠、小写、去尾部分隔符。
 fn path_key(p: &str) -> String {
     let mut s: String = String::new();
@@ -151,7 +164,7 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize) {
         }
         let rd = match std::fs::symlink_metadata(&dir) {
             Ok(m) => {
-                if m.file_type().is_symlink() {
+                if crate::engine::protect::is_reparse(&m) {
                     continue;
                 }
                 match std::fs::read_dir(&dir) {
@@ -174,7 +187,9 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize) {
                 Err(_) => continue,
             };
             let sym = std::fs::symlink_metadata(&full)
-                .map(|m| m.file_type().is_symlink())
+                // 审查 L12：判 reparse 属性位而非 is_symlink —— 云占位符/NFS/LX 这类
+                // is_symlink=false 的 reparse 否则会被当成普通目录深入
+                .map(|m| crate::engine::protect::is_reparse(&m))
                 .unwrap_or(true);
             if sym {
                 continue;
@@ -258,7 +273,7 @@ pub async fn fileclean_scan<R: Runtime>(
             });
         }
     };
-    if !md.is_dir() || md.file_type().is_symlink() {
+    if !md.is_dir() || crate::engine::protect::is_reparse(&md) {
         return json!({ "success": false, "data": [], "message": "扫描路径必须是普通目录" });
     }
     let resolved = scan_path
@@ -370,7 +385,7 @@ pub async fn fileclean_read_image<R: Runtime>(
     // 找到包含该文件的槽（qq/wechat 任一）
     let scope = ["qq", "wechat"]
         .iter()
-        .find_map(|t| scope_get(window.label(), t).filter(|s| in_scope(s, &file_path)));
+        .find_map(|t| scope_get(scope_owner(window.label()), t).filter(|s| in_scope(s, &file_path)));
     let Some(scope) = scope else {
         return json!({ "success": false, "message": "路径不在扫描范围内，已拒绝访问" });
     };
@@ -408,12 +423,19 @@ fn recycle_one(file_path: &str) -> (bool, bool, String) {
 }
 
 /// fileclean:delete-file —— 预览窗删除当前图片
+///
+/// 审查 M2：档位从 `MAIN` 改为 `APP_WINDOWS`。这不是把删除放开成「任意窗口可删任意路径」，
+/// 四道闸门一条没少：① 只能删**主窗那次扫描结果内**的路径（`in_scope` + `scope_owner`）；
+/// ② 只进回收站（`recycle_one` 失败即报错，无永久删除兜底）；③ 渲染层红色二次确认
+/// （`preview-window.js` 的 `modal.confirm({danger:true})`）；④ 删除前 `flush_sync()` +
+/// 落 delete-manifest。上游 Electron 按 `file://` 来源判定，子窗本就可达此通道
+/// （通道名也在契约基线里），按 MAIN 校验等于把这条链整个锁死。
 #[tauri::command]
 pub async fn fileclean_delete_file<R: Runtime>(
     window: WebviewWindow<R>,
     file_path: String,
 ) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    if let Err(msg) = guard::guard(&window, guard::APP_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     if file_path.is_empty() || file_path.len() > MAX_PATH_LEN {
@@ -421,7 +443,11 @@ pub async fn fileclean_delete_file<R: Runtime>(
     }
     let ty = ["qq", "wechat"]
         .iter()
-        .find_map(|t| scope_get(window.label(), t).filter(|s| in_scope(s, &file_path)).map(|_| *t));
+        .find_map(|t| {
+            scope_get(scope_owner(window.label()), t)
+                .filter(|s| in_scope(s, &file_path))
+                .map(|_| *t)
+        });
     let Some(ty) = ty else {
         return json!({ "success": false, "message": "路径不在扫描范围内，已拒绝删除" });
     };
@@ -445,12 +471,14 @@ pub async fn fileclean_delete_file<R: Runtime>(
             "recycled": recycled
         });
         delete_manifest::save_delete_manifest(&batch, &[entry]);
-        // 从槽中移除
-        if let Some(mut s) = scope_get(window.label(), ty) {
+        // 从槽中移除（槽归发起扫描的主窗所有，见 `scope_owner`：预览窗删完必须让主窗的
+        // in_scope 集合同步收缩，否则同一次扫描里可以再「删」一次不存在的路径）
+        let owner = scope_owner(window.label());
+        if let Some(mut s) = scope_get(owner, ty) {
             s.files.remove(&path_key(&file_path));
             let mut g = SCOPES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = g.as_mut() {
-                m.insert(slot_key(window.label(), ty), s);
+                m.insert(slot_key(owner, ty), s);
             }
         }
         log::write_log(
@@ -602,6 +630,25 @@ mod tests {
     #[test]
     fn path_key_normalizes_sep_case_trailing() {
         assert_eq!(path_key("C:/A/B/"), "c:\\a\\b");
-        assert_eq!(path_key("c:\\A\\b"), "c:\\a\\b");
+        assert_eq!(path_key("c:\\a\\b"), "c:\\a\\b");
+    }
+
+    /// 审查 M1：预览窗读图/删图必须命中**主窗那次扫描**的槽。
+    /// 旧实现按调用窗 label 取槽 → `preview:*` 恒为空 → 读图永远返回「不在扫描范围内」。
+    /// 一并钉住两点：① 授权是显式映射（不是「任意窗口都能读任意槽」）；
+    /// ② 未登记的 label 不会因映射缺失而误拿到主窗的集合。
+    #[test]
+    fn preview_reads_main_slot_and_unknown_label_gets_nothing() {
+        let root = path_key(r"C:\FakeQqRoot");
+        let file = path_key(r"C:\FakeQqRoot\photo.jpg");
+        scope_store("main", "qq", root, [file].into_iter().collect());
+
+        assert_eq!(scope_owner("preview"), "main");
+        let shared = scope_get(scope_owner("preview"), "qq").expect("预览窗应读到主窗那次扫描的槽");
+        assert!(in_scope(&shared, r"C:\FakeQqRoot\photo.jpg"), "大小写/分隔符归一后仍须在范围内");
+        assert!(!in_scope(&shared, r"C:\Windows\x.jpg"), "范围外路径不得放行");
+
+        assert_eq!(scope_owner("attacker"), "attacker");
+        assert!(scope_get(scope_owner("attacker"), "qq").is_none());
     }
 }

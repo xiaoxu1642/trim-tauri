@@ -18,10 +18,7 @@
   let importedFamily = '';
   let importedUrl = '';
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text == null ? '' : text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   // ---------- 导入字体的动态 @font-face（单字体约束：同一时刻仅一条规则） ----------
   function injectImportedFace(family, url) {

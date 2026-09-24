@@ -35,28 +35,6 @@ fn parse_diag_line(line: &str) -> Option<serde_json::Value> {
         _ => None,
     }
 }
-
-/// 主进程原生操作（fs 等）直接构造四元组（对照 jsDiag）
-pub fn js_diag(stage: &str, mutation: &str, detail: &str) -> serde_json::Value {
-    serde_json::json!({
-        "failure_stage": stage,
-        "mutation_state": mutation,
-        "diagnostic_digest": digest(&format!("{stage}|{mutation}|{detail}")),
-        "native_error_code": 0,
-        "detail": detail,
-    })
-}
-
-/// JS 侧字符串摘要（与 PS GetHashCode 不要求一致，仅作日志去重指纹；同 31 进制 imul 口径）
-fn digest(s: &str) -> String {
-    let mut h: i32 = 0;
-    for c in s.chars() {
-        // Math.imul(31, h) + charCodeAt(i)，按 32 位有符号回绕
-        h = (h.wrapping_mul(31)).wrapping_add(c as i32);
-    }
-    format!("{:08X}", (h as i64).unsigned_abs() as u32)
-}
-
 /// 统一日志格式：[DIAG] op=<操作> stage=.. mutation=.. digest=.. native=.. detail=..
 pub fn format_diag(op: &str, d: &serde_json::Value) -> String {
     let get = |k: &str| -> String {

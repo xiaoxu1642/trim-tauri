@@ -38,9 +38,15 @@ const REPAIR_VC_X86_PS: &str = include_str!("../../ps/runtimes_repair_vc_x86.ps1
 const REPAIR_NETFX48_PS: &str = include_str!("../../ps/runtimes_repair_netfx48.ps1");
 const REPAIR_NETFX35_PS: &str = include_str!("../../ps/runtimes_repair_netfx35.ps1");
 
-/// 修复脚本里的**安装包路径哨兵**（生成期由 runtimes-scripts.js→repair(actionId, installerPath)
-/// 写入该占位值；运行前替换为真实缓存包路径，见 tools/sync-ps-from-js.mjs 的 PROVENANCE）。
-const RUNTIMES_PATH_SENTINEL: &str = "C:/KaiFa/Trim/src/scripts-powershell/runtimes-scripts.js";
+/// 修复脚本里的**安装包路径哨兵**（生成期由 `tools/ps-map/runtimes.mjs` + ps-mapping 的
+/// `sentinelPath` 写入该唯一 token；运行前替换为真实缓存包路径，见 `replace_installer_path`）。
+///
+/// 审查 M22：这里**刻意不再是一个路径**。旧值是「上游 `runtimes-scripts.js` 自身在本机的
+/// 绝对路径」（上游 `repair()` 用 `fs.existsSync` 校验入参，生成期只能借真实路径过闸），
+/// 于是开发者机器布局被写进 66 个 `.ps1` 并随 `include_str!` 编进发布的二进制；
+/// 而且门禁坐标一改（vendor 进仓库）文本层对拍就整批红。token 与本机无关、全局唯一，
+/// 「缺哨兵即 Err」的 fail-closed 判定保持不变。
+const RUNTIMES_PATH_SENTINEL: &str = "@@TRIM_INSTALLER_PATH@@";
 
 // ==================== 下载白名单 / 上限 / 缓存目录（逐项照抄 main.js 7506-7511） ====================
 const REDIST_HOST_WHITELIST: &[&str] = &[
@@ -325,20 +331,38 @@ fn download_redist<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str
 }
 
 // ==================== 修复脚本生成（哨兵替换） ====================
+/// `.ps1` 顶部来源说明块的结束标记（与 `cleanup.rs` 的 `PROVENANCE_END` 同一个约定）
+const PROVENANCE_END: &str = "# PROVENANCE>>>";
+
+/// 审查 L3：哨兵 token **同时出现在 PROVENANCE 注释行**（`ps/runtimes_repair_*.ps1:2` 的
+/// `repair("netfx48", "@@TRIM_INSTALLER_PATH@@")`），对它做全量 `replace` 会把真实安装包
+/// 路径注入进 `#` 注释，来源记录当场失真。故一律「只替换正文，来源块原样保留」，
+/// 哨兵有无也只看正文 —— 否则光靠注释行那个 token 就能骗过"模板带哨兵"的判定。
+fn split_provenance(template: &str) -> (&str, &str) {
+    match template.find(PROVENANCE_END) {
+        Some(i) => {
+            let cut = i + PROVENANCE_END.len();
+            template.split_at(cut)
+        }
+        None => ("", template),
+    }
+}
+
 /// 把脚本里的安装包路径哨兵替换为真实缓存包路径（单引号转义，PS 单引号字符串）
 fn replace_installer_path(template: &str, installer_path: &Path, action_id: &str) -> Result<String, String> {
     if !installer_path.is_file() {
         return Err(format!("安装包不存在: {action_id}"));
     }
-    if !template.contains(RUNTIMES_PATH_SENTINEL) {
+    let (head, body) = split_provenance(template);
+    if !body.contains(RUNTIMES_PATH_SENTINEL) {
         return Err("修复脚本缺少安装包路径哨兵".into());
     }
     let escaped = installer_path.to_string_lossy().replace('\'', "''");
-    let out = template.replace(RUNTIMES_PATH_SENTINEL, &escaped);
+    let out = body.replace(RUNTIMES_PATH_SENTINEL, &escaped);
     if out.contains(RUNTIMES_PATH_SENTINEL) {
         return Err("安装包路径替换失败（哨兵残留）".into());
     }
-    Ok(out)
+    Ok(format!("{head}{out}"))
 }
 
 fn build_repair_script(action_id: &str, installer_path: Option<&Path>) -> Result<String, String> {
@@ -602,5 +626,34 @@ mod tests {
         );
         assert_eq!(last_got, inst.bytes, "流式累计字节与最终文件长度不一致");
         let _ = std::fs::remove_file(&dest);
+    }
+
+    /// 审查 L3：哨兵替换只吃正文，PROVENANCE 注释行必须原样保留 token；
+    /// 且「缺哨兵」的判定只看正文 —— 注释行那个 token 不算数。
+    #[test]
+    fn 哨兵替换只作用于正文() {
+        let tmpl = "# <<<PROVENANCE\n\
+# 来源：x.js → repair(\"netfx48\", \"@@TRIM_INSTALLER_PATH@@\")\n\
+# PROVENANCE>>>\n\
+$p = '@@TRIM_INSTALLER_PATH@@'\n";
+        // 拿一个必然存在的文件当"安装包"
+        let me = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let out = replace_installer_path(tmpl, &me, "netfx48").expect("替换失败");
+        let head = out.split_once("# PROVENANCE>>>").unwrap().0;
+        assert!(
+            head.contains(RUNTIMES_PATH_SENTINEL),
+            "来源注释行里的 token 被替换掉了 ⇒ 来源记录失真"
+        );
+        let body = out.split_once("# PROVENANCE>>>").unwrap().1;
+        assert!(!body.contains(RUNTIMES_PATH_SENTINEL), "正文里哨兵未替换");
+        assert!(body.contains("Cargo.toml"), "正文未写入真实路径");
+
+        // 只有注释行带 token、正文没有 ⇒ 必须判"缺哨兵"而不是放行
+        let only_in_head = "# <<<PROVENANCE\n# 说明\n\
+# PROVENANCE>>>\nWrite-Output 'no sentinel here'\n";
+        assert!(
+            replace_installer_path(only_in_head, &me, "netfx48").is_err(),
+            "注释行里的 token 不得充当哨兵"
+        );
     }
 }

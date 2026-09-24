@@ -1,5 +1,5 @@
 // intro.js - 本地简介库 + 联网 AI 简介面板
-// 1) 本地简介：随应用分发的离线简介库（src/data/item-intro.json），覆盖
+// 1) 本地简介：随应用分发的离线简介库（src-tauri/data/item-intro.json，编译期内嵌），覆盖
 //    电脑优化中心全部优化项、启动项管理（按名称关键字/来源）、右键管理（按分类）。
 // 2) 联网 AI 简介：默认不发起任何请求；只有在详情/简介弹窗打开后，
 //    由用户再次点击「获取AI简介」才调用所选大模型生成，三个模块各自独立。
@@ -16,12 +16,9 @@
     memoryclean: '内存清理'
   };
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text == null ? '' : text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
-  // 加载本地简介库（主进程读取 src/data/item-intro.json）
+  // 加载本地简介库（主进程读取 src-tauri/data/item-intro.json）
   function load() {
     if (introData) return Promise.resolve(introData);
     if (loading) return loading;

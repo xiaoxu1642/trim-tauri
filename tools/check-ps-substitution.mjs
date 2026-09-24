@@ -113,15 +113,25 @@ if (!existsSync(join(CRATE, 'Cargo.toml'))) {
   console.log('✗ 未找到 src-tauri/Cargo.toml');
   process.exit(1);
 }
+// 审查 M13：`ps_substitution_matches_js` 现在是 `#[ignore]` 用例，必须带 `--ignored` 才会跑；
+// 更要紧的是**断言它真的跑了** —— 只认退出码的话，「0 passed / 1 ignored」也是 0，
+// 又回到「显示通过其实没跑」。所以这里把输出接回来自己核对 `1 passed`。
 const r = spawnSync(
   'cargo',
-  ['test', '--message-format', 'short', 'ps_substitution', '--', '--nocapture'],
-  { cwd: CRATE, env: { ...process.env, TRIM_PS_SUBST_DIR: work }, stdio: 'inherit', shell: false }
+  ['test', '--message-format', 'short', 'ps_substitution', '--', '--nocapture', '--ignored'],
+  { cwd: CRATE, env: { ...process.env, TRIM_PS_SUBST_DIR: work }, encoding: 'utf8', shell: false }
 );
 if (!FIXED_DIR) {
   rmSync(work, { recursive: true, force: true });
 }
-if (r.status !== 0) {
+const cargoText = `${r.stdout || ''}${r.stderr || ''}`;
+console.log(cargoText.trimEnd());
+const ran = /\b1 passed\b/.test(cargoText);
+if (!ran && r.status === 0) {
+  console.log('\n✗ 对拍用例没有实际执行（期望 1 passed；多半是被 ignore 过滤掉了）');
+  process.exit(1);
+}
+if (r.status !== 0 || !ran) {
   console.log('\n✗ PS 模板替换对拍未通过（差异见上方 cargo 输出）');
   process.exit(1);
 }

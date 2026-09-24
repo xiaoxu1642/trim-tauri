@@ -5,19 +5,20 @@
 
   const logViewer = () => document.getElementById('logViewer');
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   function formatLine(line) {
     // 格式: [2026-08-19 11:24:57] [INFO] message
     const m = line.match(/^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.*)$/);
     if (!m) return `<div class="log-line"><span class="log-message">${escapeHtml(line)}</span></div>`;
     const [, time, level, message] = m;
+    // 审查 L15：`level` 取自磁盘日志文件，是全仓唯一未转义就进 class 属性的外部文本 ——
+    // 里面一个 `"` 就能逃出属性、挂上任一 class。白名单比对后原样输出（main.css 的选择器
+    // 就是 `.log-level.INFO` 这种大写形态），表外一律退回中性的 log-level 基样式。
+    const levelCls = ['INFO', 'WARN', 'WARNING', 'ERROR', 'DEBUG'].includes(level) ? ` ${level}` : '';
     return `<div class="log-line">
       <span class="log-time">${escapeHtml(time)}</span>
-      <span class="log-level ${level}">${escapeHtml(level)}</span>
+      <span class="log-level${levelCls}">${escapeHtml(level)}</span>
       <span class="log-message">${escapeHtml(message)}</span>
     </div>`;
   }

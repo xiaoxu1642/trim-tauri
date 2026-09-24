@@ -148,6 +148,25 @@ pub fn dev_noactivate() -> bool {
     std::env::var("TRIM_DEV_NOACTIVATE").as_deref() == Ok("1")
 }
 
+/// 把 `WEBVIEW2_ADDITIONAL_BROWSER_ARGS` 环境变量透传给 builder（审查 K4 复盘）。
+///
+/// 实测陷阱：主窗在 `lib.rs` 里透传了这份参数（Phase 0 为了让 CDP 端口生效），而四个子窗
+/// **没有**透传 —— 同一个 WebView2 user-data-folder 下浏览器参数不一致时，第二个 core 创建
+/// 不出来，`build()` 却照样返回成功、`get_webview_window` 也查得到，只是 `hwnd=0x0`。
+/// 结果就是「带着调试端口启动时，所有子窗静默失效」，做真机验收的人会据此误判产品坏了。
+/// 所以每个建窗点都必须过这一手。
+pub fn with_browser_args<R: tauri::Runtime>(
+    mut builder: tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>>,
+) -> tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>> {
+    if let Ok(extra) = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            builder = builder.additional_browser_args(extra);
+        }
+    }
+    builder
+}
+
 /// 显示并聚焦窗口（生产语义）；开发期只显示不抢焦点。
 pub fn activate_window<R: Runtime>(window: &WebviewWindow<R>) {
     if dev_noactivate() {
@@ -370,7 +389,7 @@ pub fn run() {
     // `cleanup_before_exit(); process::exit(0)` —— 注册了就会把提权后的新实例自己在
     // 建窗前杀掉。改为先走文件握手（见 commands::elevate）。
     // 旧实例确认让位后 mutex 已空闲，此时仍可正常注册以恢复单实例保护。
-    let elevated_relaunch = commands::elevate::is_relaunch_from_elevation();
+    let elevated_relaunch = commands::elevate::elevation_takeover_pending();
     let takeover_released = if elevated_relaunch {
         commands::elevate::take_over_as_elevated_instance()
     } else {
@@ -429,6 +448,8 @@ pub fn run() {
                 log::write_log("info", &note);
             }
             log::prune_old_logs();
+            // 审查 M15/G4：隔离件（*.corrupt-*）此前没有任何回收路径
+            crate::security::prune_quarantined(&paths::app_data_dir());
             pwsh::cleanup_temp_scripts();
             appearance::migrate_bg_opacity_fog();
             // C 批安全地基：受保护路径清单补全（Electron 用 app.getPath 取 known folder，

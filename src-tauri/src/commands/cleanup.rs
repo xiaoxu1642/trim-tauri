@@ -64,8 +64,8 @@ use crate::security;
 
 // ==================== 常量（对照 main.js 1170-1577 / 71-72 / 1944） ====================
 
-/// 内置规则库（gen 产物，与 Electron `src/data/cleanup-rules.json` 逐字节一致）
-const BUILTIN_RULES_JSON: &str = include_str!("../../../src/data/cleanup-rules.json");
+/// 内置规则库（gen 产物，与上游 `src/data/cleanup-rules.json` 逐字节一致；本仓副本已移出 frontendDist（审查 M14），故编译期从 `src-tauri/data/` 取）
+const BUILTIN_RULES_JSON: &str = include_str!("../../data/cleanup-rules.json");
 /// 内容下限/上限（审查 1-1：先拦超大响应再解析，防 OOM）
 const RULES_MIN_SIZE: usize = 4096;
 const RULES_MAX_SIZE: usize = 2 * 1024 * 1024;
@@ -1251,8 +1251,12 @@ fn summarize_details(data: &Value) -> (i64, usize, usize, usize) {
 // ==================== cleanup:retry-failed-delete ====================
 
 /// cleanup:retry-failed-delete — 回收站失败项的永久删除重试（白名单只来自最近一次 execute）
+///
+/// 审查 L9：这条同步 `fn` 里对**任意**失败项跑 `remove_dir_all`。同步命令跑在主线程，
+/// 一个大目录能让 UI 整段冻结（且用户此刻正盯着进度），故整体挪进 `spawn_blocking`。
+/// 渲染层本来就是 `invoke` 拿 Promise，改异步对 JS 侧零影响。
 #[tauri::command]
-pub fn cleanup_retry_failed_delete<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+pub async fn cleanup_retry_failed_delete<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
@@ -1265,6 +1269,16 @@ pub fn cleanup_retry_failed_delete<R: tauri::Runtime>(window: WebviewWindow<R>) 
     if targets.is_empty() {
         return json!({ "success": false, "message": "没有待重试的失败项" });
     }
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        retry_failed_delete_blocking(targets)
+    });
+    match task.await {
+        Ok(v) => v,
+        Err(e) => json!({ "success": false, "message": format!("删除任务异常终止: {e}") }),
+    }
+}
+
+fn retry_failed_delete_blocking(targets: Vec<Value>) -> Value {
     log::write_log("warn", &format!("开始永久删除回收站失败项: {} 项", targets.len()));
     log::flush_sync(); // 审查v4-L3：危险操作执行前强制刷盘
     let mut freed = 0i64;
@@ -1950,13 +1964,12 @@ pub async fn cleanup_update_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return json!({ "success": false, "message": format!("写入规则失败: {e}") });
     }
+    // 审查 M10：改走 `security::atomic_write_file`。原来的 `fs::write` + `fs::rename`
+    // 缺 `sync_all` —— 断电/蓝屏时 rename 可能先落、内容后落，规则文件会变成 0 字节或半截；
+    // 用字节级入口（不是 atomic_write_json）是刻意的：重新序列化 JSON 会改动键序/空白，
+    // 而 `_sig` 是对**原文本**签的，一旦重排就把合法规则变成验签失败。
     let target = data_rules_file();
-    let tmp = PathBuf::from(format!("{}.downloading", target.to_string_lossy()));
-    if let Err(e) = std::fs::write(&tmp, result.text.as_bytes()) {
-        return json!({ "success": false, "message": format!("写入规则失败: {e}") });
-    }
-    if let Err(e) = std::fs::rename(&tmp, &target) {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = security::atomic_write_file(&target, result.text.as_bytes()) {
         return json!({ "success": false, "message": format!("写入规则失败: {e}") });
     }
     // 落盘成功即抬升水位线（只升不降）；写失败不阻断本次更新，读取侧仍有验签兜底
@@ -2051,18 +2064,22 @@ mod tests {
     /// PS 模板替换对拍：同一合成输入，JS 生成 vs Rust 生成**逐字节**比较。
     ///
     /// 夹具由 `node tools/check-ps-substitution.mjs` 生成到临时目录并经
-    /// `TRIM_PS_SUBST_DIR` 传入（未设置时跳过，避免误报失败）。
+    /// `TRIM_PS_SUBST_DIR` 传入。
+    ///
+    /// 审查 M13：这条曾经是普通 `#[test]`，没有夹具时打印「跳过」然后 **计入 passed**
+    /// —— 单跑 `cargo test` 时它其实什么都没做，绿灯却是真的（门禁文档还把它算进通过数）。
+    /// 改成 `#[ignore]` 让它在默认跑里显式显示为 ignored，由 node 侧带 `--ignored` + 夹具驱动，
+    /// 「没跑」与「跑过且通过」从此可区分。
     #[test]
+    #[ignore = "需 tools/check-ps-substitution.mjs 注入 TRIM_PS_SUBST_DIR 夹具，随该门禁一起跑"]
     fn ps_substitution_matches_js() {
         let Ok(dir) = std::env::var("TRIM_PS_SUBST_DIR") else {
-            eprintln!("[ps-subst] 未设置 TRIM_PS_SUBST_DIR，跳过（请跑 node tools/check-ps-substitution.mjs）");
-            return;
+            panic!("被 --ignored 点名执行却没设 TRIM_PS_SUBST_DIR：请通过 node tools/check-ps-substitution.mjs 跑");
         };
         let dir = std::path::PathBuf::from(dir);
         let inputs_path = dir.join("inputs.json");
         if !inputs_path.is_file() {
-            eprintln!("[ps-subst] 缺少夹具 {}", inputs_path.display());
-            return;
+            panic!("缺少夹具 {}", inputs_path.display());
         }
         let inputs: Value =
             serde_json::from_str(&std::fs::read_to_string(&inputs_path).unwrap()).unwrap();
@@ -2184,10 +2201,14 @@ mod tests {
             }
         }
         let Some((source, text)) = fetched else {
-            eprintln!(
-                "[rules-update] 所有发布源不可达，跳过（改以 git 回退路径为准）：{last_err}"
+            // 审查 M13：这里原本 `return` —— 断网时这条发布前门禁**绿灯通过**，
+            // 而它是唯一真跑过网络 + 真验签的链路用例，"跑过了" 与 "没网" 无法区分。
+            // 发布前门禁的语义是「必须真验成」，所以拿不到源就失败，让人去处理网络/源。
+            panic!(
+                "所有发布源均不可达，规则库更新链未被真正验证（最后错误：{last_err}）。\
+                 本用例是发布前门禁：请联网后重跑 `cargo test rules_update_chain_verify -- --ignored --nocapture`，\
+                 不许把跳过状态计入通过。"
             );
-            return;
         };
         // current_version 传 0：只验签名/结构/形状，不做降级比较（本地版本无关）
         let (version, ok_text) =

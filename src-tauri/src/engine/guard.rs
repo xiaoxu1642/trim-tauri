@@ -34,8 +34,13 @@ pub fn guard<R: Runtime>(window: &WebviewWindow<R>, allowed: &[&str]) -> Result<
     }
 }
 
-/// 只读通道便捷包装（当前与 guard 同实现；保留命名以对齐 7.3 的只读白名单语义，
-/// 后续若为只读通道放开子窗口，只改这一处）
+/// 宽松档：放行**全部已知应用窗口**（含四个子窗），用于非主窗专属的通道。
+///
+/// ⚠️ 名字里的 readonly 是 Electron 侧 `handleSafe` 只读白名单的历史叫法，
+/// **它不校验副作用、也不排除子窗口**——判据只有「label 在 `APP_WINDOWS` 内」。
+/// 因此「能不能被子窗调到」由这里选哪一档决定，与命令本身是否只读无关。
+/// 真正的读/写差异在命令体内（路径绑定、快照槽、`is_path_protected` 等）。
+/// 需要主窗专属的通道请显式用 `guard(window, MAIN)`。
 pub fn guard_readonly<R: Runtime>(window: &WebviewWindow<R>) -> Result<String, String> {
     guard(window, APP_WINDOWS)
 }

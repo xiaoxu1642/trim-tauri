@@ -20,7 +20,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::cleanup_scan::{parse_json, Json};
@@ -38,7 +38,18 @@ pub trait Sink: Send + Sync {
     fn scanned(&self, n: u64);
     /// 等价 `eprintln!("[finder-warn] {msg}")`
     fn warn(&self, msg: &str);
+    /// 结果被**条目上限截断**（审查 M7）。默认空实现：CLI 侧只靠 warn 文本即可，
+    /// Tauri 侧要把它翻成 `truncated:true` 回给渲染层 —— 「扫完了没有重复」和
+    /// 「扫到上限没扫完」在 UI 上必须是两句话（审查 M8/B2：禁止把受限结果伪装成空结果）。
+    fn truncated(&self) {}
 }
+
+/// 审查 M7：单次扫描驻留条目上限。实测每条 `(PathBuf, u64)` 约 402 B，
+/// `duplicates` 还会把其中同体积的那批再 clone 一份进 `hashed`，
+/// 不设上限时一次「查找重复」就能把机器内存吃穿（200 万条外推 ≈ 767 MB ×2）。
+/// 取值权衡：20 万条 ≈ 80 MB（含 clone 约 160 MB），对「找重复照片/文档」的
+/// 个人场景足够；超出即截断并显式告知，而不是静默 OOM。
+pub const MAX_SCAN_ENTRIES: usize = 200_000;
 
 // ---- 扫描并行参数（P0 批次）----
 /// 目录级分治展开层数。再深单目录已很小，调度开销大于收益。
@@ -105,13 +116,19 @@ fn progress(sink: &dyn Sink, n: u64) {
 fn walk(path: &Path, files: &mut Vec<(PathBuf, u64)>, min_size: u64, sink: &dyn Sink) {
     init_scan_threads();
     let counter = AtomicU64::new(0);
+    // 审查 M7：截断标记要贯穿整棵递归（多根时由调用方共用同一个），一旦置位就不再深入
+    let truncated = AtomicBool::new(false);
     // 用 Mutex 承接并发结果；对只需 Top-N 的调用方应改用 bigfiles 的任务分片（免全量驻留）。
     let out: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
-    walk_level(&path.to_path_buf(), &out, min_size, &counter, 0, sink);
+    walk_level(&path.to_path_buf(), &out, min_size, &counter, 0, sink, &truncated);
     bump_scanned(&counter, 0, sink); // 收尾再输出一次精确的最终计数（n=0 早退，见 bump_scanned）
     *files = out.into_inner().unwrap();
+    if truncated.load(Ordering::Relaxed) {
+        sink.truncated();
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_level(
     dir: &PathBuf,
     files: &Mutex<Vec<(PathBuf, u64)>>,
@@ -119,7 +136,12 @@ fn walk_level(
     counter: &AtomicU64,
     depth: usize,
     sink: &dyn Sink,
+    truncated: &AtomicBool,
 ) {
+    // 已截断就别再花 IO 了（子孙目录继续走只会白读）
+    if truncated.load(Ordering::Relaxed) {
+        return;
+    }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) => {
@@ -154,16 +176,31 @@ fn walk_level(
         }
     }
     if !batch.is_empty() {
-        bump_scanned(counter, batch.len() as u64, sink);
-        files.lock().unwrap().extend(batch);
+        // 审查 M7：条目上限在此收口。放不下的部分丢弃并置位 truncated，
+        // 让调用方知道「结果不完整」而不是「就这么些重复」。
+        let mut g = files.lock().unwrap_or_else(|e| e.into_inner());
+        let room = MAX_SCAN_ENTRIES.saturating_sub(g.len());
+        if batch.len() > room {
+            g.extend(batch.into_iter().take(room));
+            if !truncated.swap(true, Ordering::Relaxed) {
+                sink.warn(&format!("扫描条目已达上限 {MAX_SCAN_ENTRIES}，结果被截断"));
+            }
+        } else {
+            bump_scanned(counter, batch.len() as u64, sink);
+            g.extend(batch);
+        }
+    }
+    // 截断之后不再深入：剩下的 IO 只会产出注定被丢掉的结果
+    if truncated.load(Ordering::Relaxed) {
+        return;
     }
     if depth < PAR_DEPTH {
         subdirs.par_iter().for_each(|d| {
-            walk_level(d, files, min_size, counter, depth + 1, sink);
+            walk_level(d, files, min_size, counter, depth + 1, sink, truncated);
         });
     } else {
         for d in subdirs {
-            walk_level(&d, files, min_size, counter, depth + 1, sink);
+            walk_level(&d, files, min_size, counter, depth + 1, sink, truncated);
         }
     }
 }
@@ -900,23 +937,34 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
             }
         }
         if !root_files.is_empty() {
-            empty_files.lock().unwrap().extend(root_files);
+            // 锁中毒不 panic：rayon 里一个线程炸掉会把别的线程一起带崩（结果本该部分可用）。
+            // 口径与 src-tauri 侧 62 处一致 —— 一律 unwrap_or_else(into_inner)。
+            empty_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(root_files);
         }
         tops.par_iter().for_each(|d| {
             let mut f: Vec<PathBuf> = Vec::new();
             let mut dd: Vec<PathBuf> = Vec::new();
             let _ = collect_empty_fast(d, &ignore, &mut f, &mut dd);
             if !f.is_empty() {
-                empty_files.lock().unwrap().extend(f);
+                empty_files
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(f);
             }
             if !dd.is_empty() {
-                empty_dirs.lock().unwrap().extend(dd);
+                empty_dirs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(dd);
             }
         });
     }
 
-    let files = empty_files.into_inner().unwrap();
-    let dirs = empty_dirs.into_inner().unwrap();
+    let files = empty_files.into_inner().unwrap_or_else(|e| e.into_inner());
+    let dirs = empty_dirs.into_inner().unwrap_or_else(|e| e.into_inner());
 
     // 父目录折叠：若某空目录的父目录同为待删空目录，只保留父（删父连带删内层，Czkawka 思路）
     let set: HashSet<PathBuf> = dirs.iter().cloned().collect();
@@ -1252,7 +1300,7 @@ struct ProtectCache {
 static PROTECT_CACHE: Mutex<Option<ProtectCache>> = Mutex::new(None);
 
 fn with_protect_roots<T>(protect_json: Option<&str>, f: impl FnOnce(&ProtectRoots) -> T) -> T {
-    let mut g = PROTECT_CACHE.lock().unwrap();
+    let mut g = PROTECT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let need_rebuild = match g.as_ref() {
         Some(c) => c.key.as_deref() != protect_json,
         None => true,

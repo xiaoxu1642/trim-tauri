@@ -18,10 +18,7 @@
   let pickerCtrl = null;     // v3.2.0：弹窗工厂 ctrl
   let pickerChanged = false; // 本次弹窗内是否切换了模型（close 时交给 resolve）
 
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text == null ? '' : text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   async function loadSettings(force) {
     if (settingsCache && !force) return settingsCache;

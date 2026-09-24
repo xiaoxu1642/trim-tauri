@@ -64,13 +64,8 @@
   let els = {};            // 关键元素缓存
 
   function $(id) { return document.getElementById(id); }
-  function escapeAttr(s) {
-    return String(s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-  function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text == null ? '' : text).replace(/[&<>"']/g, m => map[m]);
-  }
+  function escapeAttr(s) { return window.ds.escAttr(s); }
+  function escapeHtml(text) { return window.ds.esc(text); }
 
   // 独立窗口的轻量提示（写入底部全局提示行）
   function toast(type, message) {
@@ -104,7 +99,7 @@
             <svg class="mw-group-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
             <span class="mw-group-icon">${meta.icon}</span>
             <div>
-              <div class="mw-group-title">${escapeHtml(meta.name)}${DOC_LINKS[key] ? `<a class="mw-doc-link" href="${escapeAttr(DOC_LINKS[key].url)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(DOC_LINKS[key].tip)}">${escapeHtml(DOC_LINKS[key].label)}</a>` : ''}</div>
+              <div class="mw-group-title">${escapeHtml(meta.name)}${DOC_LINKS[key] ? `<a class="mw-doc-link" href="${escapeAttr(DOC_LINKS[key].url)}" target="_blank" rel="noopener noreferrer" data-tip="${escapeAttr(DOC_LINKS[key].tip)}">${escapeHtml(DOC_LINKS[key].label)}</a>` : ''}</div>
               <div class="mw-group-sub">${escapeHtml(meta.sub)}</div>
             </div>
             <span class="mw-group-meta">${stateBadge(key)}</span>
@@ -114,7 +109,7 @@
               <span class="mw-field-label">启用AI简介</span>
               <div class="mw-field-main">
                 <div class="mw-row">
-                  <label class="toggle-switch" title="开启后，该模型可被各模块的「获取AI简介」调用">
+                  <label class="toggle-switch" data-tip="开启后，该模型可被各模块的「获取AI简介」调用">
                     <input type="checkbox" data-role="enabled" data-model="${key}" ${cfg.enabled ? 'checked' : ''} />
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
                   </label>

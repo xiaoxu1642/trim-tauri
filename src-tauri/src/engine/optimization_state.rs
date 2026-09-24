@@ -149,15 +149,6 @@ pub fn detected_all() -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// 全量替换检测结果
-pub fn replace_detected(map: Map<String, Value>) -> bool {
-    let mut state = load();
-    if let Some(o) = state.as_object_mut() {
-        o.insert("detected".into(), Value::Object(map));
-    }
-    save(&state)
-}
-
 fn normalize_verify(v: &str) -> &'static str {
     match v {
         "pass" => "pass",

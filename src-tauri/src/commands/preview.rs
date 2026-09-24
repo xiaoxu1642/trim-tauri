@@ -70,6 +70,8 @@ pub async fn preview_open_window<R: tauri::Runtime>(
                 let _ = window.emit(EVENT_DATA, data.clone());
             }
         });
+    // 审查 K4 复盘：子窗也必须透传浏览器参数，否则带调试端口启动时静默建不出窗
+    let builder = crate::with_browser_args(builder);
     match builder.parent(&window) {
         Ok(builder) => match builder.build() {
             Ok(_) => Ok(json!({ "success": true })),

@@ -1,5 +1,5 @@
 # <<<PROVENANCE
-# 来源：C:/KaiFa/Trim/src/scripts-powershell/cleanup-scripts.js → 常量 EXECUTE_SCRIPT（模板模式：占位符保留，运行前由 Rust 同口径替换）
+# 来源：vendor/upstream-js/src/scripts-powershell/cleanup-scripts.js → 常量 EXECUTE_SCRIPT（模板模式：占位符保留，运行前由 Rust 同口径替换）
 # 生成：tools/sync-ps-from-js.mjs 直接取 JS **运行时字符串值**写入，无任何字符替换；
 #       改动本文件必须在源仓库改 JS 后重跑生成器（校验见 tools/check-ps-extraction.mjs）。
 # 说明：磁盘清理执行（模板：ITEMS / FORCE / RECYCLE / AUTO_REBUILD / RULES_JSON / PROTECTED_JSON / FASTSIZE_DLL 占位符）
