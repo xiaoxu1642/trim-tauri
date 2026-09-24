@@ -39,6 +39,21 @@ use window_vibrancy::{apply_acrylic, apply_mica, apply_tabbed, clear_acrylic, cl
 /// 应用窗口材质，返回实际生效值。失败不阻塞（材质是「可损失的视觉增强」，
 /// 页面本身始终提供不透明 CSS 兜底）。
 pub fn apply_material<R: Runtime>(window: &WebviewWindow<R>, material: &str) -> String {
+    apply_material_outcome(window, material).0
+}
+
+/// 同上，但额外回报**原生层操作是否成功**：`appearance:set-material` 的 `nativeApplied`
+/// 回执要用它（上游靠 `setBackgroundMaterial` 是否抛错判断，我们据 window-vibrancy 的
+/// Result 判断，语义等价）。
+///
+/// 与上游的一处**刻意差异**：'none' 上游是早退、根本不碰原生层，因而恒报未应用；
+/// 我们仍清一次 DWM backdrop —— Electron 只在建窗参数里设材质，而我们可能在进程存活
+/// 期内从 mica 切到 none，不清复位会残留半透明背板。故 'none' 的成败按「清除是否成功」
+/// 计，比上游的恒 false 更贴合实际（该字段渲染层无消费方，仅回执）。
+pub fn apply_material_outcome<R: Runtime>(
+    window: &WebviewWindow<R>,
+    material: &str,
+) -> (String, bool) {
     let normalized = appearance::normalize_material(Some(material));
     let result: Result<(), _> = match normalized.as_str() {
         "mica" => apply_mica(window, None),
@@ -49,10 +64,10 @@ pub fn apply_material<R: Runtime>(window: &WebviewWindow<R>, material: &str) -> 
         // 渲染层 data-material="none" 的不透明底色兜底不变
         _ => clear_mica(window).and(clear_acrylic(window)),
     };
-    if let Err(e) = result {
+    if let Err(e) = &result {
         eprintln!("[trim] 材质 {normalized} 应用失败（忽略，CSS 不透明兜底）: {e}");
     }
-    normalized
+    (normalized, result.is_ok())
 }
 
 /// forceRoundCorners 等价：DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND。
@@ -325,6 +340,15 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::peripheral::peripheral_query,
         commands::peripheral::peripheral_apply,
         commands::peripheral::peripheral_restore_backup,
+        // ---- E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理，8 条）----
+        commands::appearance::appearance_get_material,
+        commands::appearance::appearance_set_material,
+        commands::appearance::appearance_set_material_enabled,
+        commands::appearance::appearance_get_env,
+        commands::appearance::appearance_bg_import,
+        commands::appearance::appearance_bg_delete,
+        commands::appearance::appearance_bg_list,
+        commands::appearance::appearance_bg_open_dir,
         // ---- Phase 0 探针（收尾删除） ----
         commands::spike::spike_ping,
         commands::spike::spike_apply_material,
@@ -403,6 +427,11 @@ pub fn run() {
                 shown: AtomicBool::new(false),
                 maximized,
             });
+
+            // ---------- 环境自适应（电池降级 / 系统透明开关）----------
+            // 必须在建窗与首次 apply_material 之后：降级逻辑要能拿到 main 窗判最大化，
+            // 且不能早于初始材质落地，否则会被随后的 apply_material 覆盖。
+            commands::appearance::init_env(app.handle());
 
             // 黑闪兜底：3s / 8s 两级（run_on_main_thread 保证窗口操作在主线程）
             for (delay_ms, cause) in [

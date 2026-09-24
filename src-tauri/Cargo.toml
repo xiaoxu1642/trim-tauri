@@ -71,6 +71,8 @@ features = [
     # C 批 HTTP：runtimes 下载安装包、aidesc/models POST JSON 一律走 Windows 原生
     # WinHTTP（仅新增特性，不新增第三方 HTTP crate；Electron 侧分别是主进程 fetch/下载）
     "Win32_Networking_WinHttp",
+    # E 批 appearance：GetSystemPowerStatus 判电池供电（亚克力系材质省电降级）
+    "Win32_System_Power",
     # windows 0.61 把 RtlGetVersion 划到 Wdk 命名空间
     "Wdk_System_SystemServices",
 ]

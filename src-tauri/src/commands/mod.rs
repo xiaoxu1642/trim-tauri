@@ -37,3 +37,5 @@ pub mod startup;
 pub mod peripheral;
 pub mod optimizer;
 pub mod maintenance;
+// ---- E 批（外观与更新：材质/环境/背景图、自动更新、UAC 提权）----
+pub mod appearance;
