@@ -10,7 +10,6 @@ pub mod misc;
 pub mod overview;
 pub mod paths;
 pub mod realtime;
-pub mod spike;
 pub mod system;
 // ---- B 批（只读扫描 + 安全与运行时）----
 pub mod finder;

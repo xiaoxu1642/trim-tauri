@@ -33,8 +33,11 @@ const WINDOW_BRIDGED = ['window:minimize', 'window:maximize', 'window:close'];
 const DIRECT = ['app:first-paint'];
 /** DIRECT 对应的 Rust 命令名（D1 断言要看命令名而非通道名） */
 const DIRECT_COMMANDS = ['app_first_paint'];
-// Phase 0/1 调试探针：非 preload 契约面，不参与 D 断言
-const PROBES = ['spike_ping', 'spike_apply_material', 'debug_data_dirs'];
+/** 不面向渲染层契约的排障探针（D1 要豁免，否则会误报「Rust 有了、前端没接」）。
+ *  Phase 0 的 spike_ping / spike_apply_material 已连命令带注册一并删除（CDP 退役后
+ *  探针无主，且其渲染层入口 raw: invokeCore 会绕过 window.api 白名单直调任意命令）。
+ *  debug_data_dirs 保留：数据目录/搬迁/写入探针仍是排障必需。 */
+const PROBES = ['debug_data_dirs'];
 
 function collect(set, re, text) {
   for (const m of text.matchAll(re)) set.add(m[1]);

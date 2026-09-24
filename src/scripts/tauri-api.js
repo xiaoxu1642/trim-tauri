@@ -823,14 +823,11 @@
     configurable: false
   });
 
-  // Phase 0 探针工具（非契约面，CDP/控制台验证用，Phase 1 前删除）
-  window.__trimSpike = {
-    channelMapKeys: function () { return Object.keys(CHANNEL_MAP); },
-    ping: function () { return invokeCore('spike_ping'); },
-    onPong: function (cb) { return onEvent('spike:pong', cb); },
-    applyMaterial: function (m) { return invokeCore('spike_apply_material', { material: m }); },
-    raw: invokeCore
-  };
+  // Phase 0 的 window.__trimSpike 探针已随 commands/spike.rs 一并删除。
+  // 除了探针本身失效，更要紧的是它导出的 `raw: invokeCore` —— 那等于把「直调任意
+  // Rust 命令」的入口挂在 window 上，绕过上面那层手工挑选的 window.api 白名单，
+  // 与本项目「preload 只做白名单转发」的安全前提直接冲突。调试需要看通道名时，
+  // 读 tools/check-channel-map.mjs 的输出即可，不要重新开这个口子。
 
   initCaption();
   notifyFirstPaint();

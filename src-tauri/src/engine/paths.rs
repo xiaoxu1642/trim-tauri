@@ -17,8 +17,15 @@ const APP_NAME: &str = "Trim";
 pub const IDENTIFIER: &str = "com.xiaoxu.trim";
 const PORTABLE_MARKER: &str = "Trim.portable";
 
-/// 从旧数据目录一次性搬迁的文件清单（D5 七个数据文件 + Local State 密钥载体，
-/// 另加 `update-mirror.json` = E 批 updater 的线路偏好）
+/// 从旧数据目录一次性搬迁的文件清单。
+/// 判据只有一条：**丢了用户就恢复不了 / 要重做** 的才进这里。
+/// - 前 7 项是 D5 原有清单（含 `Local State` = OSCrypt 主密钥载体）
+/// - `update-mirror.json` = E 批 updater 的线路偏好
+/// - `optimizer-backups.json` = 优化项的**值级注册表备份**；不搬过去，「还原」就只能
+///   退化成反向判据，原来那个具体值再也回不来了（用户改完 Defender/UAC 想还原会失败）
+/// - `bench-history.json` = 用户的历史测速/测速记录，重跑成本高且属个人数据
+/// 不进清单的：`checkup.json` 之类扫描缓存（可重扫）、`cache`（可再生）、
+/// `redist`（可重下）、`logs`/`tmp`（运行期产物）。
 const MIGRATION_FILES: &[&str] = &[
     "appearance.json",
     "settings.json",
@@ -28,16 +35,26 @@ const MIGRATION_FILES: &[&str] = &[
     "paths.json",
     "Local State",
     "update-mirror.json",
+    "optimizer-backups.json",
+    "bench-history.json",
 ];
 
-/// 需整体搬迁的**目录**清单（逐个文件、缺失才复制）。
-/// 目前只列 `backgrounds`：它是用户手工导入的背景图，本地无从再生。
+/// 需整体搬迁的**目录**清单（逐文件、缺失才复制）。同上加判据。
+/// - `backgrounds`    用户手工导入的背景图
+/// - `fonts`          用户导入字体的副本（不搬则字体设置里的"导入字体"整条失效）
+/// - `startup-backup`     禁用启动项的原文件备份，「恢复」依赖它
+/// - `peripheral-backup`  外设设置的 .reg 备份，「还原」依赖它
+/// - `fileclean-backup`   删除清单（哪些文件被移进了回收站的凭据），丢了就无从交代删了什么
 ///
-/// 已知仍有同类未列项（`startup-backup/`、`peripheral-backup/`、`fileclean-backup/`、
-/// `fonts/`、`optimizer-backups.json`）—— 全都是「还原」功能依赖的数据，丢了就
-/// 只能保持已改状态、回不去。属迁移方案 D5 的既有缺口而非本批引入，
-/// 搬哪些需产品确认（旧目录里可能有半截/失效备份），故此处不擅自扩列。
-const MIGRATION_DIRS: &[&str] = &["backgrounds"];
+/// 不在列：contextmenu 的注册表备份 —— 实测 `ps/cm_backup.ps1` 写的是
+/// `%USERPROFILE%\Desktop\右键菜单备份_<时间戳>`，本来就在桌面、不随数据目录迁移。
+const MIGRATION_DIRS: &[&str] = &[
+    "backgrounds",
+    "fonts",
+    "startup-backup",
+    "peripheral-backup",
+    "fileclean-backup",
+];
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -168,19 +185,22 @@ pub fn migrate_legacy_once() -> Option<String> {
                 "已从旧数据目录迁移 {copied} 个文件（含 Local State 密钥载体）；旧目录保留可重跑"
             ));
         }
-        // 目录类（如导入的背景图）：同样「缺失才复制」，失败不阻塞启动
-        let mut dirs = 0usize;
+        // 目录类：同样「缺失才复制」，失败不阻塞启动。
+        // 注意这是**首次启动同步执行**的一次性开销（仅当新目录无 appearance.json 时），
+        // fonts/ 可能几十 MB；日志带上目录名与文件数，便于日后排查首启动耗时。
+        let mut moved_dirs: Vec<String> = Vec::new();
         for name in MIGRATION_DIRS {
             let src = legacy.join(name);
             if !src.is_dir() {
                 continue;
             }
+            let n = std::fs::read_dir(&src).map(|r| r.count()).unwrap_or(0);
             if copy_dir_missing_only(&src, &target.join(name)).is_ok() {
-                dirs += 1;
+                moved_dirs.push(format!("{name}({n} 项)"));
             }
         }
-        if dirs > 0 {
-            notes.push(format!("已迁移 {dirs} 个数据子目录（背景图等不可再生内容）"));
+        if !moved_dirs.is_empty() {
+            notes.push(format!("已迁移数据子目录：{}", moved_dirs.join("、")));
         }
     }
 
@@ -223,15 +243,33 @@ mod tests {
     }
 
     #[test]
-    fn 迁移清单含不可再生的用户数据() {
-        // 这几项丢了用户无法恢复，任何"精简清单"的改动都必须先确认它们还在
-        for f in ["appearance.json", "settings.json", "paths.json", "Local State", "update-mirror.json"] {
+    fn 迁移清单覆盖不可再生与还原依赖的数据() {
+        // 判据：丢了用户就恢复不了 / 要重做的，必须在此列。
+        // 这几项被移出清单不会有任何编译或测试失败，只会静默丢数据，故用断言钉住。
+        for f in [
+            "appearance.json",
+            "settings.json",
+            "paths.json",
+            "Local State",
+            "update-mirror.json",
+            "optimizer-backups.json",
+            "bench-history.json",
+        ] {
             assert!(MIGRATION_FILES.contains(&f), "{f} 不在迁移文件清单");
         }
-        assert!(
-            MIGRATION_DIRS.contains(&"backgrounds"),
-            "导入的背景图是本地无从再生的内容，必须随迁"
-        );
+        for d in [
+            "backgrounds",
+            "fonts",
+            "startup-backup",
+            "peripheral-backup",
+            "fileclean-backup",
+        ] {
+            assert!(MIGRATION_DIRS.contains(&d), "{d} 不在迁移目录清单");
+        }
+        // 反向断言：可再生内容不该混进来（会让首次启动做无谓的大量复制）
+        for junk in ["cache", "redist", "logs", "tmp"] {
+            assert!(!MIGRATION_DIRS.contains(&junk), "{junk} 可再生，不该整体搬迁");
+        }
     }
 
     #[test]

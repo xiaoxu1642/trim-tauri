@@ -359,9 +359,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::updater::updater_install,
         commands::updater::updater_set_mirror,
         commands::updater::updater_get_mirror,
-        // ---- Phase 0 探针（收尾删除） ----
-        commands::spike::spike_ping,
-        commands::spike::spike_apply_material,
     ])
 }
 
