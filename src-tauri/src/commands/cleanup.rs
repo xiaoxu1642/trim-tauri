@@ -2112,13 +2112,15 @@ mod tests {
             ),
             ("detail", build_detail_script(id, path, &rules)),
         ];
+        let mut compared = 0usize;
         for (name, rust) in cases {
             let js_path = dir.join(format!("js.{name}.ps1"));
-            if !js_path.is_file() {
-                eprintln!("[ps-subst] 缺少 JS 夹具 {}", js_path.display());
-                continue;
-            }
-            let js = std::fs::read_to_string(&js_path).unwrap();
+            // 审查 v2-M16①：缺夹具绝不能 `eprintln! + continue`。那是把「跑了 1/3」报成
+            // 「3/3 通过」的静默假绿，而上游 `check-ps-substitution.mjs:129` 只匹配
+            // `\b1 passed\b` 字样 ⇒ 少两份夹具它照样打印「门禁通过」。fail-loud 才算数。
+            let js = std::fs::read_to_string(&js_path)
+                .unwrap_or_else(|_| panic!("[ps-subst] 缺少 {name} 的 JS 夹具 {}", js_path.display()));
+            compared += 1;
             if js == rust {
                 eprintln!(
                     "[ps-subst] ✓ {name} 逐字节一致（JS {} 字符 / Rust {} 字符）",
@@ -2135,6 +2137,7 @@ mod tests {
                 rust_path.display()
             );
         }
+        assert_eq!(compared, 3, "三份夹具必须逐一比对过，缺任何一份都不算通过");
     }
 
     /// 模板正文必须已剥离生成器来源块（否则与 JS 运行时字符串不等）

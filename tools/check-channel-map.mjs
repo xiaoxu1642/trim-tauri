@@ -149,8 +149,10 @@ const idsIn = (text, marker) => {
 };
 // 注意 marker 必须**吃到数组起始括号**：`const HAZARD_IDS: &[&str] = &[` 里的 `&[&str]`
 // 也含 `]`，marker 截短会让下面的 indexOf(']') 在类型标注处就收尾、解析出空集合。
-const rustHazard = idsIn(readFileSync(join(cmdDir, 'optimizer.rs'), 'utf8'), 'const HAZARD_IDS: &[&str] = &[');
-const jsHazard = idsIn(readFileSync(join(TAURI_ROOT, 'src', 'scripts', 'optimizer.js'), 'utf8'), 'const HAZARD_OPTION_IDS = new Set([');
+const rustOptSrc = readFileSync(join(cmdDir, 'optimizer.rs'), 'utf8');
+const jsOptSrc = readFileSync(join(TAURI_ROOT, 'src', 'scripts', 'optimizer.js'), 'utf8');
+const rustHazard = idsIn(rustOptSrc, 'const HAZARD_IDS: &[&str] = &[');
+const jsHazard = idsIn(jsOptSrc, 'const HAZARD_OPTION_IDS = new Set([');
 if (!rustHazard || !jsHazard) {
   check(false, 'F. 高危清单双源对拍', '没找到 HAZARD_IDS / HAZARD_OPTION_IDS，清单被改名或删掉？');
 } else {
@@ -161,6 +163,45 @@ if (!rustHazard || !jsHazard) {
     `F. 高危清单双源一致（Rust ${rustHazard.size} / JS ${jsHazard.size}）`,
     onlyRust.length || onlyJs.length ? `Rust 独有 ${JSON.stringify(onlyRust)} / JS 独有 ${JSON.stringify(onlyJs)}` : '',
   );
+
+  // ---- F2. 第三条腿：手写清单 ⇄ 数据层 risk=high（审查 v2-K3）----
+  // F 只比两份手写清单，抓不到「数据层自认 high、两份清单都没登记」的漂移——v2-K3 漏的
+  // 正是那 7 项（tf_appx 移除 25 个内置 UWP、tf_onedrive 彻底卸载 OneDrive，均
+  // restoreAvailable:false 不可逆）。现在判据是「清单 ∪ risk==high」，于是清单侧要钉三件事：
+  //   ① 清单里每个 id 都真在数据层存在（死条目会让这份清单看起来「已核对」，反向掩盖漂移）；
+  //   ② 两侧的判据函数都没被退回成「只认清单」（文本锚点钉住，改回去即红）；
+  //   ③ 数据层 high 的数量没有塌方（把 risk 批量降级成 medium 是绕开这条闸门的捷径）。
+  const HIGH_FLOOR = 5;
+  const optPath = join(TAURI_ROOT, 'src-tauri', 'data', 'optimizer-runtime.json');
+  let optIds = null;
+  let highIds = null;
+  try {
+    const arr = JSON.parse(readFileSync(optPath, 'utf8'));
+    if (Array.isArray(arr)) {
+      optIds = new Set(arr.map((o) => o && o.id));
+      highIds = new Set(arr.filter((o) => o && o.risk === 'high').map((o) => o.id));
+    }
+  } catch { /* 读不到即下面判红 */ }
+  if (!optIds || !highIds) {
+    check(false, 'F2. 高危判据 ⇄ 数据层对拍', `读不到或不是数组：${optPath}`);
+  } else {
+    const dead = [...rustHazard].filter((i) => !optIds.has(i));
+    const rustUnion = rustOptSrc.includes('fn needs_high_risk_confirm')
+      && rustOptSrc.includes('needs_high_risk_confirm(&opt, &option_id)');
+    const jsUnion = jsOptSrc.includes('function needsHazardConfirm(opt)')
+      && jsOptSrc.includes('needsHazardConfirm(opt)) runParams.confirmedHighRisk');
+    check(
+      dead.length === 0 && rustUnion && jsUnion && highIds.size >= HIGH_FLOOR,
+      `F2. 高危判据三条对拍（清单 ${rustHazard.size} ∪ 数据层 high ${highIds.size}）`,
+      !rustUnion || !jsUnion
+        ? '判据被退回「只认手写清单」：缺 union 公式锚点（Rust needs_high_risk_confirm / JS needsHazardConfirm）'
+        : dead.length
+          ? `清单里有数据层不存在的死条目 ${JSON.stringify(dead)}`
+          : highIds.size < HIGH_FLOOR
+            ? `数据层 risk=high 只剩 ${highIds.size} 项（下限 ${HIGH_FLOOR}）——是否有人批量降级绕过闸门`
+            : ''
+    );
+  }
 }
 
 // ---- 迁移进度报告 ----

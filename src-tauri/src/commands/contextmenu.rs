@@ -184,6 +184,17 @@ fn is_file_source(item: &Value) -> bool {
     )
 }
 
+/// 审查 v2-K1：恢复方向的提权闸门。抽成纯函数是为了让「提权 / 未提权」两种令牌态都能断言——
+/// 命令体里直接调 `sysinfo::is_admin()` 测到的是测试进程自己的令牌态，等于在测运行环境。
+fn restore_admin_gate(is_admin: bool) -> Option<Value> {
+    (!is_admin).then(|| {
+        json!({
+            "success": false, "needAdmin": true,
+            "message": "恢复右键菜单备份需要管理员权限（备份内可能含机器级项），请先提权再试",
+        })
+    })
+}
+
 fn run_ps(script: &str, timeout: Duration, diag: Option<&str>) -> Result<crate::pwsh::PsOutput, String> {
     let path = pwsh::write_temp_script(script, ".ps1")?;
     let r = pwsh::run_file(&path, timeout, diag);
@@ -585,6 +596,13 @@ pub async fn contextmenu_restore<R: Runtime>(window: WebviewWindow<R>) -> Value 
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    // 审查 v2-K1：恢复方向没有「本项是否需要提权」的信息可用——要导哪些 .reg 是脚本自己
+    // 在备份目录里挑的，件里可能同时含 HKLM 与 HKCU 项。旧写法在非提权态直接跑，会让
+    // HKLM 那部分静默失败并被 `success` 判成「已恢复」。这里显式要提权，让整次操作要么
+    // 在管理员态完成、要么压根不开始。
+    if let Some(deny) = restore_admin_gate(sysinfo::is_admin()) {
+        return deny;
+    }
     log::write_log("warn", "恢复右键菜单备份");
     let out = match run_ps(PS_RESTORE, Duration::from_secs(60), None) {
         Ok(o) => o,
@@ -898,6 +916,42 @@ mod tests {
         assert!(is_file_source(&json!({ "source": "filesystem" })));
         assert!(is_file_source(&json!({ "source": "winx" })));
         assert!(!is_file_source(&json!({ "source": "registry" })));
+    }
+
+    #[test]
+    fn restore_requires_elevation_both_ways() {
+        // v2-K1：未提权必须回 needAdmin（不是失败、更不是硬跑），提权态闸门放行
+        let deny = restore_admin_gate(false).expect("非提权态必须被闸门拦下");
+        assert_eq!(deny["success"], false);
+        assert_eq!(deny["needAdmin"], true);
+        assert!(restore_admin_gate(true).is_none());
+    }
+
+    /// v2-K1 的防回退断言：闸门在编译期内嵌的脚本正文里，不在 Rust 侧，
+    /// 所以只能这样钉——手改 `.ps1`、或上游 JS 被回退成「遍历目录内全部 *.reg」都会立刻红。
+    /// 只断言「闸门存在且没收窄/放宽」，不复述其逻辑（逐字节对拍归 check-ps-extraction 管）。
+    #[test]
+    fn restore_script_keeps_trust_gates() {
+        let s = PS_RESTORE;
+        assert!(
+            s.contains("manifest.registryFiles"),
+            "还原方向丢了 manifest 登记校验，退回自选目录内任意 .reg"
+        );
+        assert!(
+            s.contains("Test-RegKeyAllowedForRestore"),
+            "还原方向丢了键路径白名单闸门"
+        );
+        assert!(
+            s.contains("-Filter 'registry_*.reg'"),
+            "还原范围从本工具生成的件放宽到全部 .reg"
+        );
+        // 白名单必须是 Software\Classes 两个 hive；被改宽（如整 hive 放行）即红
+        assert!(
+            s.contains(r"@('HKLM\SOFTWARE\Classes\', 'HKCU\SOFTWARE\Classes\')"),
+            "键路径白名单前缀被改动"
+        );
+        // 恢复脚本里不该出现任何删除动作
+        assert!(!s.contains("Remove-Item"), "恢复脚本出现删除");
     }
 
     #[test]

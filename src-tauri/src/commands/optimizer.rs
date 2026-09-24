@@ -36,18 +36,28 @@ fn find_option(id: &str) -> Option<&'static Value> {
     options().iter().find(|o| o.get("id").and_then(|v| v.as_str()) == Some(id))
 }
 
-/// OPT-1 高危清单（与渲染层 HAZARD_OPTION_IDS 同一份集合）
+/// OPT-1 高危清单。
+/// 审查 v2-K3 后它的定位收窄为「比数据层 `risk:"high"` 更严的**例外集**」——真正的通用判据是
+/// [`needs_high_risk_confirm`]。这里刻意保留手写项：有的项 risk 标的是 medium，但后果不可逆。
+/// 集合差由 `tools/check-channel-map.mjs` 的门禁 F 第三条对拍钉住（Rust ⇄ JS ⇄ 数据层 risk=high）。
 const HAZARD_IDS: &[&str] = &[
     "disable_uac",
     "tf_defender",
-    "tf_microcode_del",
-    "spectre_off",
     "perf_vbs_off",
     "perf_exploit_protection_off",
     "tf_svc_bulk",
     "tf_drv_disable",
     "perf_windows_update_off",
 ];
+
+/// 高危确认闸门：手写清单 **或** 数据层自认 high。
+/// 只认手写清单会漏掉数据层 `risk:"high"` 的 7 项——`tf_appx`（移除 25 个内置 UWP）、
+/// `tf_onedrive`（彻底卸载 OneDrive）等都是 `restoreAvailable:false` 的不可逆操作，
+/// 用户在单项执行时连红色确认都不会弹（批量路径反而有闸，因为它的判据取自 `risk`）。
+/// 抽成纯函数是为了能对「数据层每一项 high」都断言，而不是只断言清单里那几项。
+fn needs_high_risk_confirm(opt: &Value, option_id: &str) -> bool {
+    HAZARD_IDS.contains(&option_id) || opt.get("risk").and_then(|v| v.as_str()) == Some("high")
+}
 
 /// svc_mem_gb 档位表（KB）
 const MEMORY_KB: &[(&str, i64)] = &[
@@ -566,7 +576,7 @@ pub async fn optimizer_run<R: Runtime>(
             "message": "优化操作需要管理员权限，请先提权"
         });
     }
-    if HAZARD_IDS.contains(&option_id.as_str()) && !p.confirmed_high_risk {
+    if needs_high_risk_confirm(&opt, &option_id) && !p.confirmed_high_risk {
         log::write_log(
             "warn",
             &format!("高危优化缺少确认回执，已拒绝: {option_id} (restore={})", p.restore),
@@ -1142,27 +1152,28 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     json!({ "success": true, "restored": restored })
 }
 
-/// 按备份条目回写（reg add/delete；失败计数必须为 0）
-fn restore_backup_values(values: &[Value]) -> bool {
-    let mut l = vec![
-        "$ErrorActionPreference = \"SilentlyContinue\"".to_string(),
-        "$failed = 0".to_string(),
-    ];
-    let quote_esc = |s: &str| s.replace('"', "\"\"");
+/// 生成「按备份回写」的命令行集合。单独抽成纯函数是为了能对恶意值直接断言 ——
+/// 它的返回值是要交给 pwsh 执行的脚本正文。
+///
+/// 审查 v2-K2：`hive/sub/key/data` 全部来自 `optimizer-backups.json` 与注册表原值，
+/// 属不可信输入。PowerShell 的 `"…"` 是**可展开字符串**，`$(…)` 与反引号会先求值再传给
+/// reg.exe ⇒ 攻击者只要在 HKCU 某个可写值里放 `A$(<管理员命令>)B`，用户点「还原」即在
+/// Trim 的提权上下文里执行任意代码（旧写法只把 `"` 双写，防不住 `$`）。
+/// 现在与读值侧同口径：一律单引号串 + `''` 转义（单引号串内不做任何展开）。
+fn backup_restore_lines(values: &[Value]) -> Vec<String> {
+    let mut out = Vec::with_capacity(values.len());
     for v in values {
         let hive = v.get("hive").and_then(|x| x.as_str()).unwrap_or("LocalMachine");
         let sub = v.get("sub").and_then(|x| x.as_str()).unwrap_or("");
         let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("");
         let prefix = reg_exe_prefix(hive);
-        let full = format!("{prefix}\\{sub}");
-        let key_esc = quote_esc(key);
+        let full = ps_esc(&format!("{prefix}\\{sub}"));
+        let key_esc = ps_esc(key);
         let exists = v.get("exists").and_then(|x| x.as_bool()).unwrap_or(false);
         if exists {
             let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("REG_SZ");
             let mut type_arg = "/t REG_SZ".to_string();
-            let mut data_arg = quote_esc(
-                v.get("data").and_then(|x| x.as_str()).unwrap_or(""),
-            );
+            let mut data_arg = ps_esc(v.get("data").and_then(|x| x.as_str()).unwrap_or(""));
             match typ {
                 "REG_DWORD" | "REG_QWORD" => type_arg = format!("/t {typ}"),
                 "REG_BINARY" => {
@@ -1174,19 +1185,33 @@ fn restore_backup_values(values: &[Value]) -> bool {
                         .map(|c| std::str::from_utf8(c).unwrap_or(""))
                         .collect::<Vec<_>>()
                         .join(",");
-                    data_arg = with_commas;
+                    // 只留 hex 数字与分隔逗号：畸形值里的换行/引号不得有机会变成下一条语句
+                    data_arg = with_commas
+                        .chars()
+                        .filter(|c| c.is_ascii_hexdigit() || *c == ',')
+                        .collect();
                 }
                 _ => {}
             }
-            l.push(format!(
-                "reg add \"{full}\" /v \"{key_esc}\" {type_arg} /d \"{data_arg}\" /f | Out-Null; if ($LASTEXITCODE -ne 0) {{ $failed++ }}"
+            out.push(format!(
+                "reg add '{full}' /v '{key_esc}' {type_arg} /d '{data_arg}' /f | Out-Null; if ($LASTEXITCODE -ne 0) {{ $failed++ }}"
             ));
         } else {
-            l.push(format!(
-                "reg delete \"{full}\" /v \"{key_esc}\" /f 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) {{ reg query \"{full}\" /v \"{key_esc}\" 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) {{ $failed++ }} }}"
+            out.push(format!(
+                "reg delete '{full}' /v '{key_esc}' /f 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) {{ reg query '{full}' /v '{key_esc}' 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) {{ $failed++ }} }}"
             ));
         }
     }
+    out
+}
+
+/// 按备份条目回写（reg add/delete；失败计数必须为 0）
+fn restore_backup_values(values: &[Value]) -> bool {
+    let mut l = vec![
+        "$ErrorActionPreference = \"SilentlyContinue\"".to_string(),
+        "$failed = 0".to_string(),
+    ];
+    l.extend(backup_restore_lines(values));
     l.push("Write-Output (\"RESTORE_DONE:\" + $failed)".into());
     let path = match pwsh::write_temp_script(&l.join("\n"), ".ps1") {
         Ok(p) => p,
@@ -1811,5 +1836,93 @@ mod tests {
         assert!(options().iter().filter(|o| {
             o.get("restore").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty())
         }).count() >= 70);
+    }
+
+    /// v2-K2：还原方向生成的是「交给 pwsh 执行的脚本正文」，不可信值必须锁在单引号串里。
+    /// 旧写法用双引号串 + 只双写 `"` ⇒ `$(…)` 与反引号会被 PowerShell 先求值，等于在
+    /// Trim 的提权上下文里执行任意代码。这条断言钉的是「求值机会为零」，不是「输出长得对」。
+    #[test]
+    fn restore_lines_lock_untrusted_values_in_single_quotes() {
+        let lines = backup_restore_lines(&[json!({
+            "hive": "CurrentUser", "sub": "Software\\X", "key": "Y",
+            "exists": true, "type": "REG_SZ", "data": "A$(whoami)`id`\"B'c"
+        })]);
+        assert_eq!(lines.len(), 1);
+        let l = &lines[0];
+        assert!(
+            l.starts_with("reg add 'HKCU\\Software\\X' /v 'Y' /t REG_SZ /d '"),
+            "{l}"
+        );
+        // 值里那个单引号必须成对（PS 单引号串的唯一转义），整条仍是单一字面量
+        assert!(l.contains("'A$(whoami)`id`\"B''c'"), "{l}");
+        // 一个双引号字面量都不许出现（出现即开了展开的口子）
+        assert!(!l.contains("reg add \"") && !l.contains("/d \"") && !l.contains("/v \""), "{l}");
+
+        // exists=false 走删除分支，同样必须全单引号
+        let d = backup_restore_lines(&[json!({
+            "hive": "LocalMachine", "sub": "S", "key": "K'$(p)", "exists": false
+        })]);
+        assert!(d[0].starts_with("reg delete 'HKLM\\S' /v 'K''$(p)' /f"), "{}", d[0]);
+        assert!(!d[0].contains('"'), "{}", d[0]);
+    }
+
+    /// REG_BINARY 的 hex 串只允许 hex 数字与分隔逗号：畸形备份里的 `$`、反引号、换行
+    /// 不得有变成语句的机会。
+    /// v2-K3：闸门必须覆盖数据层自认 high 的**每一项**，而不是只覆盖手写清单登记的那几项。
+    /// 断言写成「遍历数据层」，这样以后新增 risk=high 项而不进清单也不会漏。
+    #[test]
+    fn hazard_gate_covers_every_data_layer_high() {
+        let mut n_high = 0;
+        for o in options().iter() {
+            if o.get("risk").and_then(|v| v.as_str()) != Some("high") {
+                continue;
+            }
+            n_high += 1;
+            let id = o.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(needs_high_risk_confirm(o, id), "risk=high 的 {id} 未被高危闸门覆盖");
+        }
+        assert!(n_high >= 5, "数据层 high 项数异常（{n_high}）——是否被批量降级");
+
+        // v2-K3 实际漏掉的那 7 项：现在由 risk 覆盖，且刻意不进手写清单
+        for id in [
+            "tf_ifeo_perf",
+            "tf_ifeo_wipe",
+            "tf_dev_disable",
+            "tf_dev_audio",
+            "tf_dev_printer",
+            "tf_appx",
+            "tf_onedrive",
+        ] {
+            let o = find_option(id).unwrap_or_else(|| panic!("{id} 应存在于数据层"));
+            assert!(needs_high_risk_confirm(o, id), "{id} 单项执行仍不弹红色确认");
+            assert!(!HAZARD_IDS.contains(&id), "{id} 应由 risk 覆盖，不必回手写清单");
+        }
+
+        // 反向：low/medium 项不得被误拦，否则等于把所有优化都锁死在红确认后面
+        let low = options()
+            .iter()
+            .find(|o| o.get("risk").and_then(|v| v.as_str()) == Some("low"))
+            .expect("数据层应有 low 项");
+        let low_id = low.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(!needs_high_risk_confirm(low, low_id), "low 项 {low_id} 被误判高危");
+
+        // 死条目（数据层不存在）已从清单移除；对拍另有门禁 F2 兜着
+        assert!(!HAZARD_IDS.contains(&"tf_microcode_del"));
+        assert!(!HAZARD_IDS.contains(&"spectre_off"));
+    }
+
+    #[test]
+    fn restore_binary_hex_is_stripped_to_hexdigits() {
+        let lines = backup_restore_lines(&[json!({
+            "hive": "LocalMachine", "sub": "S", "key": "K",
+            "exists": true, "type": "REG_BINARY", "data": "41;42`$(x)43\n"
+        })]);
+        let l = &lines[0];
+        let quoted = l.split("/d '").nth(1).expect("应有 /d 参数").split('\'').next().unwrap();
+        assert!(
+            quoted.chars().all(|c| c.is_ascii_hexdigit() || c == ','),
+            "畸形 hex 未清干净: {quoted}"
+        );
+        assert!(quoted.starts_with("41"), "{quoted}");
     }
 }

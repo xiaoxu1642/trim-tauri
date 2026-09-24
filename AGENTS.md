@@ -61,9 +61,15 @@ node --check <每个改动的 .js>
 - **渲染层改动必须真机看**：本项目**不使用 CDP**。验证手段只有 `cargo test`（`tauri::test` + MockRuntime，覆盖无窗口的命令逻辑）与应用内 DevTools 人工目检（覆盖真实 WebView、材质、事件投递、子窗口生命周期）。MockRuntime 覆盖不到的一律如实标注为未验证。
 - 调试启动用 `TRIM_DEV_NOACTIVATE=1`（窗口显示但不抢前台），发布链路不带该变量。
 - **`cargo check` 的 `Finished` 不是产物新鲜的证据**：它只有增量意义，且 profile 未必是 release。发布前必须真实执行 `cargo build --release`，并核对产物 mtime 晚于所有 `.rs` 与 `Cargo.toml`。
-- 发布前另须实跑被 `#[ignore]` 的门禁用例，当前 **15 条**（真实 pwsh / 网络 / 大目录 / DPAPI 密文样本）：
-  `cargo test --lib -- --ignored`（6）、`cargo test --test ipc_smoke -- --ignored`（7）、
-  `cargo test --test safestorage_compat -- --ignored`（2，需先 `$env:TRIM_DPAPI_SAMPLE` 指向密文样本）。
+- 发布前另须实跑被 `#[ignore]` 的门禁用例，共 **15 条**（真实 pwsh / 网络 / 大目录 / DPAPI 密文样本）。
+  **照下面原样跑，别自作主张合并成一条 `--lib -- --ignored`**——`ps_substitution_matches_js` 要
+  夹具与 `TRIM_PS_SUBST_DIR`，裸跑必 panic（那是 v1 M13 刻意改成的 fail-loud，不是坏用例）：
+  ```bash
+  cargo test --lib -- --ignored --skip ps_substitution_matches_js  # 5 条：真实 pwsh / 网络
+  node tools/check-ps-substitution.mjs                            # 1 条：它负责造夹具再跑
+  cargo test --test ipc_smoke -- --ignored                        # 7 条慢集成
+  cargo test --test safestorage_compat -- --ignored                # 2 条，需 TRIM_DPAPI_SAMPLE
+  ```
   条数以 `cargo test -- --ignored --list` 现算为准，别信任何文档里的静态数字（这里写过的 14/11 都已过期）。
 
 ## 5. 本仓库特有的陷阱（动前先读）

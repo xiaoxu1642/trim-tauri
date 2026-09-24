@@ -246,6 +246,53 @@ mod tests {
         dir
     }
 
+    /// 审查 v2-M13：Tauri v2 的 `$APPDATA` **已经含 identifier**
+    /// （crate `path/desktop.rs` 的 `app_data_dir()` = `dirs::data_dir().join(identifier)`，
+    /// `path/mod.rs` 又把 `BaseDirectory::AppData` 映射到它）。当初按「`%APPDATA%` 根」的直觉
+    /// 写成 `$APPDATA/com.xiaoxu.trim/backgrounds/**`，展开成双份目录 ⇒ 背景图与导入字体
+    /// 的 URL 永不命中，也就是 P1 那个「已修好」实际没生效。这条断言钉住「别再多写一层」，
+    /// 并顺手确认两个目录仍在白名单里（去掉整条 allow 会让同一个功能以另一种方式坏掉）。
+    #[test]
+    fn asset_scope_does_not_repeat_identifier() {
+        let conf = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"))
+            .expect("读不到 tauri.conf.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&conf).expect("tauri.conf.json 不是合法 JSON");
+        assert!(
+            v["app"]["security"]["assetProtocol"]["enable"] == true,
+            "asset 协议未启用，本断言的口径需要先同步"
+        );
+        let allow = v["app"]["security"]["assetProtocol"]["scope"]["allow"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(!allow.is_empty(), "asset 协议启用但 allow 清单为空");
+        let mut seen = Vec::new();
+        for item in &allow {
+            let s = item.as_str().unwrap_or("");
+            let rest = s
+                .strip_prefix("$APPDATA/")
+                .unwrap_or_else(|| panic!("asset scope 只能用 $APPDATA 根（当前：{s}）"));
+            assert!(
+                !rest.starts_with(&format!("{IDENTIFIER}/")),
+                "asset scope 多写了一层 identifier，会展开成双份目录：{s}"
+            );
+            seen.push(rest);
+        }
+        assert!(
+            seen.iter().any(|r| r.ends_with("backgrounds/**")),
+            "背景图目录被移出 asset 白名单"
+        );
+        assert!(
+            seen.iter().any(|r| r.ends_with("fonts/**")),
+            "字体目录被移出 asset 白名单"
+        );
+        // 白名单只能是静态 glob，且必须收在应用私有目录内（不得出现 .. 或绝对盘符）
+        for r in &seen {
+            assert!(!r.contains("..") && !r.contains(':'), "asset scope 越界：{r}");
+        }
+    }
+
     #[test]
     fn 迁移清单覆盖不可再生与还原依赖的数据() {
         // 判据：丢了用户就恢复不了 / 要重做的，必须在此列。

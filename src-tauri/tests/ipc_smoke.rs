@@ -302,9 +302,19 @@ fn window_with_label(label: &str) -> WebviewWindow<MockRuntime> {
         .unwrap_or_else(|e| panic!("测试窗口 {label} 创建失败: {e}"))
 }
 
-/// 断言回执里**不是**来源校验失败（档位放对的判据）。
-fn assert_guard_passed(text: &str, ctx: &str) {
-    assert!(!text.contains("IPC 来源校验失败"), "{ctx}: 被来源校验拒杀，回执 {text}");
+/// 断言「命令确实越过了档位、跑进后面的逻辑」，而不只是「没被来源校验拒杀」。
+/// 审查 v2-M16②：旧版只断不含「IPC 来源校验失败」，而 `invoke_text` 对「命令未注册 /
+/// 参数对不上 / 建窗失败」一律返回 `e.to_string()` ⇒ 命令整条消失时这条也是绿的，
+/// 档位回归网（防的就是 M1~M3 那类回退）会被无声架空。改成由调用方点名正向特征。
+fn assert_guard_passed(text: &str, ctx: &str, reached: &[&str]) {
+    assert!(
+        !text.contains("IPC 来源校验失败"),
+        "{ctx}: 被来源校验拒杀，回执 {text}"
+    );
+    assert!(
+        reached.iter().any(|k| text.contains(k)),
+        "{ctx}: 拿不到任何「已越过档位」的正向回执（期望含其一：{reached:?}），回执 {text}"
+    );
 }
 
 /// 外设子窗必须能调 `peripheral_apply`（非管理员时回 needAdmin，而不是被拒杀）。
@@ -314,7 +324,11 @@ fn assert_guard_passed(text: &str, ctx: &str) {
 fn peripheral_subwindow_can_call_apply() {
     let w = window_with_label("peripheral");
     let text = invoke_text(&w, "peripheral_apply", json!({ "options": {} }));
-    assert_guard_passed(&text, "peripheral_apply 应允许外设窗调用");
+    assert_guard_passed(
+        &text,
+        "peripheral_apply 应允许外设窗调用",
+        &["needAdmin", "没有需要应用"],
+    );
 }
 
 /// 提权仍是主窗专属红线（AGENTS.md §3）：子窗不得触发放开。
@@ -336,7 +350,11 @@ fn subwindow_cannot_request_elevation() {
 fn preview_subwindow_reaches_fileclean_delete() {
     let w = window_with_label("preview");
     let text = invoke_text(&w, "fileclean_delete_file", json!({ "filePath": "C:\\nope\\a.jpg" }));
-    assert_guard_passed(&text, "fileclean_delete_file 应允许预览窗调用（由 in_scope 收口）");
+    assert_guard_passed(
+        &text,
+        "fileclean_delete_file 应允许预览窗调用（由 in_scope 收口）",
+        &["不在扫描范围"],
+    );
     assert!(
         text.contains("不在扫描范围"),
         "预览窗删除必须由 in_scope 拦下，而不是放行任意路径，回执 {text}"

@@ -178,12 +178,14 @@
   }
 
   // ==================== 高危项红色警告（合规强化） ====================
-  // 以下项会显著削弱系统安全防护，执行前必须弹红色警示确认
+  // 以下项会显著削弱系统安全防护，执行前必须弹红色警示确认。
+  // 审查 v2-K3：这份手写清单的定位是「比数据层 risk=high 更严的例外集」，通用判据见
+  // needsHazardConfirm()。原有的 tf_microcode_del / spectre_off 在 116 项数据里不存在
+  // （死条目，只会让这份清单看起来「已核对」），已删；集合差由 check-channel-map 门禁 F
+  // 的三条对拍（Rust ⇄ JS ⇄ 数据层 risk=high）钉住，双向差集非空即红。
   const HAZARD_OPTION_IDS = new Set([
     'disable_uac',           // 禁用 UAC
     'tf_defender',           // 关闭 Defender 与 SmartScreen
-    'tf_microcode_del',      // 删除 CPU 微码 DLL
-    'spectre_off',           // 关闭幽灵/熔断缓解
     'perf_vbs_off',          // 关闭 VBS / 内存完整性
     'perf_exploit_protection_off', // 关闭 Exploit Protection（乱序内存）
     'tf_svc_bulk',           // 禁用 70+ 非必要服务（含安全服务）
@@ -191,9 +193,16 @@
     'perf_windows_update_off' // v3.7.0 P1：彻底禁用 Windows 更新（安全补丁不再送达）
   ]);
 
+  // 判据集合必须与 Rust 侧 needs_high_risk_confirm 完全一致：手写清单 **或** 数据层自认 high。
+  // 三个调用点（confirmHazard / 回执标记 / 批量预览）都得走它——只改确认不改「是否发回执」，
+  // 等于后端开始要回执而前端不给，那 7 项会被静默锁死。
+  function needsHazardConfirm(opt) {
+    return HAZARD_OPTION_IDS.has(opt.id) || opt.risk === 'high';
+  }
+
   // 执行前高危确认：返回 true 继续 / false 取消
   async function confirmHazard(opt) {
-    if (!HAZARD_OPTION_IDS.has(opt.id)) return true;
+    if (!needsHazardConfirm(opt)) return true;
     // 红色二次确认：警示文案走 dangerHint 结构化字段，由弹窗模板渲染
     return window.app.confirmDanger(
       '⚠️ 高危安全操作确认',
@@ -790,8 +799,10 @@
       setProgressToastProgress(1);
       // OPT-1（2026-09-15 v7）：高危项红色确认已在上游通过，这里携带服务端镜像回执；
       // restore 还原方向不属高危写入，不带标记。
+      // v2-K3：判据必须与 confirmHazard 同一个函数，否则「前端弹了确认但后端不认」或
+      // 「后端要回执而前端没给」都会出现——后者会让那 7 项 data-layer high 直接锁死。
       const runParams = Object.assign({}, params || {});
-      if (!runParams.restore && HAZARD_OPTION_IDS.has(opt.id)) runParams.confirmedHighRisk = true;
+      if (!runParams.restore && needsHazardConfirm(opt)) runParams.confirmedHighRisk = true;
       const resp = await window.api.optimizer.run(opt.id, runParams);
       if (resp && resp.success) {
         finishProgressToast(true, resp.message);
@@ -977,7 +988,7 @@
       return;
     }
     // 高危项统计
-    const hazardList = batch.filter(o => HAZARD_OPTION_IDS.has(o.id));
+    const hazardList = batch.filter(o => needsHazardConfirm(o));
     const highCount = batch.filter(o => o.risk === 'high').length;
     const preview = batch.slice(0, 12).map(o => '· ' + o.title).join('\n') +
       (batch.length > 12 ? `\n…等共 ${batch.length} 项` : '');
@@ -1060,7 +1071,7 @@
     // 全选高亮，提示即将执行的项
     setCardsSelected(true);
     const highCount = batch.filter(o => o.risk === 'high').length;
-    const hazardList = batch.filter(o => HAZARD_OPTION_IDS.has(o.id));
+    const hazardList = batch.filter(o => needsHazardConfirm(o));
     const preview = batch.slice(0, 12).map(o => '· ' + o.title).join('\n') +
       (batch.length > 12 ? `\n…等共 ${batch.length} 项` : '');
     // 含高风险项时整批走红色二次确认，警示文案由 dangerHint 结构化渲染

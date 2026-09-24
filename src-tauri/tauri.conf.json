@@ -15,8 +15,8 @@
         "enable": true,
         "scope": {
           "allow": [
-            "$APPDATA/com.xiaoxu.trim/backgrounds/**",
-            "$APPDATA/com.xiaoxu.trim/fonts/**"
+            "$APPDATA/backgrounds/**",
+            "$APPDATA/fonts/**"
           ],
           "deny": []
         }
