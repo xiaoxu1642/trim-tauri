@@ -349,6 +349,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::appearance::appearance_bg_delete,
         commands::appearance::appearance_bg_list,
         commands::appearance::appearance_bg_open_dir,
+        // ---- E 批：elevate（UAC 自提权 + 新旧实例交接，2 条）----
+        commands::elevate::elevate_status,
+        commands::elevate::elevate_request,
         // ---- Phase 0 探针（收尾删除） ----
         commands::spike::spike_ping,
         commands::spike::spike_apply_material,
@@ -357,8 +360,38 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    build_app(tauri::Builder::default())
-        .plugin(tauri_plugin_dialog::init())
+    // ---------- 提权接管握手：必须早于任何建窗 ----------
+    // 带旗标的实例一律**不注册**单实例插件：实测 tauri-plugin-single-instance 2.4.5 的
+    // Windows 实现里，第二实例发现 mutex 已存在时发完 WM_COPYDATA 就无条件
+    // `cleanup_before_exit(); process::exit(0)` —— 注册了就会把提权后的新实例自己在
+    // 建窗前杀掉。改为先走文件握手（见 commands::elevate）。
+    // 旧实例确认让位后 mutex 已空闲，此时仍可正常注册以恢复单实例保护。
+    let elevated_relaunch = commands::elevate::is_relaunch_from_elevation();
+    let takeover_released = if elevated_relaunch {
+        commands::elevate::take_over_as_elevated_instance()
+    } else {
+        true
+    };
+
+    let builder = build_app(tauri::Builder::default())
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(desktop)]
+    let builder = if elevated_relaunch && !takeover_released {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 对照 main.js 57-62：再次启动应用 = 把已有主窗口唤回前台，而不是开第二个
+            if let Some(w) = app.get_webview_window("main") {
+                if w.is_minimized().unwrap_or(false) {
+                    let _ = w.unminimize();
+                }
+                focus_window(&w);
+            }
+        }))
+    };
+
+    builder
         .setup(|app| {
             // 窗口在代码中创建（而非 tauri.conf.json 声明），唯一原因：需要
             // additional_browser_args 显式透传 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS

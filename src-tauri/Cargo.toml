@@ -25,6 +25,10 @@ trim-finder = { path = "../../Trim/native-scanner" }
 # 原生文件对话框（log:export 保存 / paths:browse 选目录）——官方插件，仅用 Rust 侧 API，
 # 不向渲染层暴露 JS 命令面（少一个权限面）
 tauri-plugin-dialog = "2"
+# E 批 elevate：单实例锁 + second-instance argv 语义（方案 S8 / §176）。
+# 上游 Electron 用 app.requestSingleInstanceLock()，且提权握手依赖 second-instance 事件，
+# Tauri 侧对应件即此官方插件。
+tauri-plugin-single-instance = "2"
 # D4 液态玻璃材质映射：mica / tabbed(mica-alt) / acrylic
 # 官方 tauri-apps 维护（仓库名 tauri-plugin-vibrancy，Rust crate 名 window-vibrancy）
 window-vibrancy = "0.8"
