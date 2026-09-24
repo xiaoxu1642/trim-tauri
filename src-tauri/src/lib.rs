@@ -352,6 +352,13 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         // ---- E 批：elevate（UAC 自提权 + 新旧实例交接，2 条）----
         commands::elevate::elevate_status,
         commands::elevate::elevate_request,
+        // ---- E 批：updater（多线路容灾 + minisign 断代，6 条）----
+        commands::updater::updater_check,
+        commands::updater::updater_download,
+        commands::updater::updater_cancel_download,
+        commands::updater::updater_install,
+        commands::updater::updater_set_mirror,
+        commands::updater::updater_get_mirror,
         // ---- Phase 0 探针（收尾删除） ----
         commands::spike::spike_ping,
         commands::spike::spike_apply_material,
@@ -374,7 +381,12 @@ pub fn run() {
     };
 
     let builder = build_app(tauri::Builder::default())
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        // updater 插件必须注册：`UpdaterExt::updater_builder()` 直接取插件的
+        // `state::<UpdaterState>()`，未注册会 panic 而不是报错。
+        // 线路端点由 commands::updater 按用户偏好逐个传入（覆盖 conf 的 endpoints），
+        // 而**公钥只从 conf 读**——它必须是编译期固化的信任锚点，不能由运行时决定。
+        .plugin(tauri_plugin_updater::Builder::new().build());
 
     #[cfg(desktop)]
     let builder = if elevated_relaunch && !takeover_released {
@@ -465,6 +477,9 @@ pub fn run() {
             // 必须在建窗与首次 apply_material 之后：降级逻辑要能拿到 main 窗判最大化，
             // 且不能早于初始材质落地，否则会被随后的 apply_material 覆盖。
             commands::appearance::init_env(app.handle());
+
+            // 启动 8s 后静默检查一次更新（避开窗口动画与概览预热的资源抢占期）
+            commands::updater::schedule_silent_check(app.handle());
 
             // 黑闪兜底：3s / 8s 两级（run_on_main_thread 保证窗口操作在主线程）
             for (delay_ms, cause) in [

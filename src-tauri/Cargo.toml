@@ -29,6 +29,13 @@ tauri-plugin-dialog = "2"
 # 上游 Electron 用 app.requestSingleInstanceLock()，且提权握手依赖 second-instance 事件，
 # Tauri 侧对应件即此官方插件。
 tauri-plugin-single-instance = "2"
+# E 批 updater：自动更新（方案 Phase 4 第 5 条 + 用户 2026-09-24 拍板走断代路线）。
+# 信任模型与上游同构：sha512/签名不得由下载通道自己提供，必须由**应用内置公钥**背书；
+# 差别只在算法从 ed25519(latest.yml.sig) 换成 minisign(latest.json 内联 signature)。
+tauri-plugin-updater = "2"
+# updater 的 endpoints 参数类型是 url::Url，必须直接引；该 crate 本就在依赖树内
+# （tauri / reqwest 传递依赖，实测解析为 2.5.8），提为直接依赖不增加任何编译成本。
+url = "2"
 # D4 液态玻璃材质映射：mica / tabbed(mica-alt) / acrylic
 # 官方 tauri-apps 维护（仓库名 tauri-plugin-vibrancy，Rust crate 名 window-vibrancy）
 window-vibrancy = "0.8"
