@@ -24,8 +24,19 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 # 原生引擎（扫描/清理 + 性能指标）：Phase 1 已 lib 化（加 [lib] trim_finder，CLI 入口保留）。
 # 直调替代 spawn finder.exe：高频轮询类命令（ov-metrics ~2.5s 一拍、net-sample 每秒一帧）
-# 不再付进程创建成本。Phase 5 会把它并入本项目（届时改为本地路径/workspace 成员）。
-trim-finder = { path = "../../Trim/native-scanner" }
+# 不再付进程创建成本。
+#
+# **已 vendor 进本仓库**（../native-scanner），不再是 `../../Trim/native-scanner`。
+# 原因：仓库外的相对路径让干净 clone 根本拿不到它，cargo 直接 os error 3 断构建
+# —— 即方案登记的 R24。2026-09-24 用「克隆到别处 vs 克隆到 Trim 旁」两组实跑坐实为真缺陷。
+#
+# 为什么不并成 workspace 成员：cargo 在合并工作区里只认根节点的 [profile.*]，
+# 而 native-scanner 自带 opt-level=3 / lto=true / codegen-units=1，并进来会被静默降级
+# —— 那几个参数直接决定扫描性能。故让它独立成包、仅作 path 依赖。
+#
+# ⚠️ 双份维护：这份副本与 `C:\KaiFa\Trim\native-scanner`（Electron 轨）从此各自演化，
+# 改扫描器要说清改的是哪一份。Phase 5 清理双轨时 Electron 侧那份随 Electron 退役。
+trim-finder = { path = "../native-scanner" }
 # 原生文件对话框（log:export 保存 / paths:browse 选目录）——官方插件，仅用 Rust 侧 API，
 # 不向渲染层暴露 JS 命令面（少一个权限面）
 tauri-plugin-dialog = "2"

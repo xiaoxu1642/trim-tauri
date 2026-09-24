@@ -1,0 +1,36 @@
+[package]
+name = "trim-finder"
+version = "1.0.0"
+edition = "2021"
+description = "Trim 内建原生扫描器（重复/大文件/空文件/AppData/大小统计）"
+
+[dependencies]
+blake3 = "1.8"
+rayon = "1.11"
+miniz_oxide = "0.8"
+# v3.7.1 R1/R2/R3：Windows 原生 API（feature 最小集，方案 §4）
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Threading",
+  "Win32_System_SystemInformation",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_Security",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+] }
+
+[lib]
+name = "trim_finder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "finder"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
