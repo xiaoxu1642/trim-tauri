@@ -15,7 +15,7 @@
 //!   （D5 后数据目录为 Tauri identifier 目录；原子写 + 只留最近 50 个批次）。
 //!
 //! 需在 `lib.rs` 的 `generate_handler!` 注册：
-//! ```ignore
+//! ```text
 //! commands::finder::finder_scan,
 //! commands::finder::finder_delete,
 //! commands::finder::finder_delete_manifest,

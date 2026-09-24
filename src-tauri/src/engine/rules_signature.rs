@@ -5,7 +5,7 @@
 //! 不可信传输通道，内容必须凭内置公钥自证。
 //!
 //! 冻结 API（cleanup.rs 依赖，勿改签名）：
-//! ```ignore
+//! ```text
 //! pub fn verify_rules_text(text: &str) -> Result<(), String>;   // Err(reason) 与 JS 的 reason 文案一致
 //! pub fn canonical_body_text(parsed: &serde_json::Value) -> Option<String>;
 //! pub const RULES_PUBKEY_PEM: &str;

@@ -23,7 +23,7 @@
 //!   均已实现，接入 HTTP 后即生效。
 //!
 //! 需在 `lib.rs` 的 `generate_handler!` 注册：
-//! ```ignore
+//! ```text
 //! // ---- C 批：cleanup ----
 //! commands::cleanup::cleanup_rules,
 //! commands::cleanup::cleanup_scan,
