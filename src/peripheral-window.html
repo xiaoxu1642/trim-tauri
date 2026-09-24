@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="theme-color" content="#202020" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file:; font-src 'self' file:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
+  <title>外设优化</title>
+  <link rel="icon" href="./assets/ico/Trim.ico" />
+  <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body class="peripheral-window">
+  <div class="pv-topbar">
+    <div class="peri-topbar-left">
+      <button class="peri-back" id="btnPeriBack" data-tip="返回">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m0 0l7 7m-7-7l7-7"/></svg>
+      </button>
+      <div class="pv-title">外设优化</div>
+    </div>
+    <button class="pv-close" id="btnPeriClose" data-tip="关闭">&times;</button>
+  </div>
+
+  <div class="peri-body">
+    <!-- PE-2（2026-09-15）：本组实则调优 Win32PrioritySeparation（处理器调度优先级），
+         非鼠标注册表。原标题误导对调优用户，改名理顺：避免与下方「鼠标队列优化」混淆。 -->
+    <section class="peri-section">
+      <div class="peri-section-head">
+        <h2 class="peri-section-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M11 2h2v6h-2V2zm-1 6h4a4 4 0 0 1 4 4v1H6v-1a4 4 0 0 1 4-4zm-4 7h6v7h-2a4 4 0 0 1-4-4v-3zm8 0h6v3a4 4 0 0 1-4 4h-2v-7z"/></svg>
+          处理器调度优化
+        </h2>
+        <p class="peri-section-sub">按需设置 Win32PrioritySeparation 的十进制数值（处理器优先级，越大越偏向前台响应）</p>
+      </div>
+      <div class="peri-cards" data-group="win32"></div>
+    </section>
+
+    <!-- 键盘注册表优化 -->
+    <section class="peri-section">
+      <div class="peri-section-head">
+        <h2 class="peri-section-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm2 3v2h2V8H6zm4 0v2h2V8h-2zm4 0v2h2V8h-2zm-8 4v2h2v-2H6zm4 0v2h6v-2h-6zm8 0v2h2v-2h-2z"/></svg>
+          键盘注册表优化
+        </h2>
+        <p class="peri-section-sub">按需设置 KeyboardDataQueueSize 的十进制数值（驱动事件缓冲，默认 100，越小延迟越低，过小可能丢键）</p>
+      </div>
+      <div class="peri-cards" data-group="keyboard"></div>
+    </section>
+
+    <!-- 鼠标队列优化 -->
+    <section class="peri-section">
+      <div class="peri-section-head">
+        <h2 class="peri-section-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5z"/></svg>
+          鼠标队列优化
+        </h2>
+        <p class="peri-section-sub">按需设置 MouseDataQueueSize 的十进制数值（驱动事件缓冲，默认 100，越小延迟越低，过小可能丢事件）</p>
+      </div>
+      <div class="peri-cards" data-group="mouse"></div>
+    </section>
+
+    <p class="peri-note" id="periNote">键盘 / 鼠标队列大小修改后需重启电脑生效；当前值以注册表实时读取为准。</p>
+
+    <div class="peri-footer">
+      <button class="btn btn-primary" id="btnPeriApply">应用到注册表</button>
+      <button class="btn btn-secondary" id="btnPeriRestore" data-tip="导入最近一份备份，回到你修改前的注册表值">还原修改前的值</button>
+      <button class="btn btn-secondary" id="btnPeriReset" data-tip="写回 Windows 出厂默认值（非你修改前的值）">恢复 Windows 默认</button>
+    </div>
+  </div>
+
+  <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——窗口材质件与业务件在加载期就会读
+       window.api，必须先生效；Electron 下自动 no-op（由 preload.js 接管） -->
+  <script src="scripts/tauri-api.js"></script>
+  <!-- 子窗口材质/主题同步：electron-mica + data-material + 主题类（预览窗不加载） -->
+  <script src="scripts/window-material.js"></script>
+  <script src="scripts/theme.js"></script>
+  <!-- 液态玻璃引擎：子窗口与主窗共用四档效果（按钮折射/弹性形动），分段栏等选择器在子窗无命中自动跳过 -->
+  <script src="scripts/liquid-glass.js"></script>
+  <!-- ds.js：data-tip 委托等设计系统基础件（复核 💭4：title= 违反 AGENTS §5，改 data-tip 后需此件） -->
+  <script src="scripts/ds.js"></script>
+  <script src="scripts/peripheral-window.js"></script>
+</body>
+</html>

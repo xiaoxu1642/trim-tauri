@@ -1,0 +1,1446 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="theme-color" content="#f3f3f3" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file:; font-src 'self' file:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; frame-src https://www.speedtest.cn https://test.ustc.edu.cn;" />
+  <title>Trim</title>
+  <link rel="icon" href="./assets/ico/Trim.ico" />
+  <link rel="stylesheet" href="styles/main.css" />
+  <link rel="stylesheet" href="styles/ds.css" />
+</head>
+<body class="theme-light">
+  <!-- 启动页（v2.7.0，参考 hero-preview）：WebGL 流线背景 + Trim FLIP 平滑落位标题栏；
+       逻辑在 scripts/splash.js，首访完整体验 / 后续紧凑自动进入；v3.6.2 起开屏无视系统 reduced-motion 完整播放 -->
+  <div id="splash" class="splash-overlay">
+    <div class="splash-bg"></div>
+    <canvas id="splash-canvas" aria-hidden="true"></canvas>
+    <div class="splash-vignette"></div>
+    <div class="splash-stage">
+      <div id="splash-badge" class="splash-badge">Provided By Xiaoxu</div>
+      <div id="splash-trim" class="splash-trim">Trim</div>
+      <p id="splash-intro" class="splash-intro">轻量、纯净、高效的 Windows 11 清理优化工具</p>
+      <div id="splash-progress" class="splash-progress" role="progressbar" aria-label="加载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="splash-progress-track"><div id="splash-progress-fill" class="splash-progress-fill"></div></div>
+        <span id="splash-progress-text" class="splash-progress-text">正在加载 0%</span>
+      </div>
+      <button id="splash-enter" class="splash-enter" type="button" hidden>点击进入</button>
+    </div>
+  </div>
+  <!-- 首帧前同步主题（外部文件：内联写法被 CSP script-src 'self' 拦截，引导从未生效） -->
+  <script src="scripts/theme-boot.js"></script>
+  <!-- 标题栏（原生 titleBarOverlay 提供右上角窗口控制按钮） -->
+  <header class="titlebar" id="titlebar">
+    <div class="titlebar-left">
+      <div class="app-icon"><img src="./assets/ico/Trim.ico" alt="Trim" draggable="false"/></div>
+      <div class="titlebar-text">
+        <div class="titlebar-title">Trim</div>
+      </div>
+    </div>
+    <!-- 右上角窗口控制按钮由 Windows 原生 titleBarOverlay 渲染 -->
+  </header>
+
+  <!-- 主布局：侧边栏 + 内容区 -->
+  <div class="layout">
+    <!-- 左侧导航（批次：悬浮岛侧边栏 B 档 —— 轨道包裹层负责占位与宽度动画，
+         收起态悬停时岛浮出覆盖主内容、主内容不位移；.collapsed 类仍切在 #sidebar 上） -->
+    <div class="sidebar-rail" id="sidebarRail">
+    <nav class="sidebar" id="sidebar">
+      <!-- 侧边栏折叠/展开切换按钮 -->
+      <button class="sidebar-toggle-btn" id="sidebarToggle" data-tip="折叠/展开侧边栏" aria-label="折叠/展开侧边栏">
+        <svg class="toggle-icon-collapse" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2"/>
+          <line x1="9" y1="4" x2="9" y2="20"/>
+          <polyline points="6 10 6 14"/>
+        </svg>
+        <svg class="toggle-icon-expand" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2"/>
+          <line x1="9" y1="4" x2="9" y2="20"/>
+          <polyline points="6 10 6 14"/>
+          <path d="M14 12h5M16 9l3 3-3 3" stroke-width="1.5"/>
+        </svg>
+      </button>
+
+      <div class="nav-scroll">
+      <!-- v2.0 信息架构分组：清理 / 优化 / 工具 / 记录（底部为设置） -->
+      <div class="nav-section">
+        <div class="nav-section-title">清理</div>
+        <button class="nav-item active" data-page="overview" data-tip="系统体检">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>
+          </svg>
+          <span>系统体检</span>
+        </button>
+        <button class="nav-item" data-page="cleanup" data-tip="磁盘清理">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/>
+          </svg>
+          <span>磁盘清理</span>
+        </button>
+        <button class="nav-item" data-page="memoryclean" data-tip="内存清理">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
+          </svg>
+          <span>内存清理</span>
+        </button>
+        <button class="nav-item" data-page="maintenance" data-tip="系统维护">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/>
+          </svg>
+          <span>系统维护</span>
+        </button>
+        <button class="nav-item" data-page="runtimes" data-tip="运行库修复">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M9 3v10.55A4 4 0 1 0 11 17V7h8V3H9zm-2 16a2 2 0 1 1 .01-4.01A2 2 0 0 1 7 19zm10-8a2 2 0 1 1 .01-4.01A2 2 0 0 1 17 11z"/>
+          </svg>
+          <span>运行库修复</span>
+        </button>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">优化</div>
+        <button class="nav-item" data-page="optimizer" data-tip="电脑优化中心">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 2L4 7v10l8 5 8-5V7l-8-5zm0 3.9l5.5 3.44v6.32L12 18.1l-5.5-3.44V8.34L12 5.9zM11 9h2v4h-2V9zm0 5.5h2v2h-2v-2z"/>
+          </svg>
+          <span>电脑优化中心</span>
+        </button>
+        <button class="nav-item" data-page="startup" data-tip="启动项管理">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+          </svg>
+          <span>启动项管理</span>
+        </button>
+        <button class="nav-item" data-page="contextmenu" data-tip="右键管理">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M4 8h16v2H4V8zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/>
+            <circle cx="7" cy="9" r="1"/>
+            <circle cx="7" cy="14" r="1"/>
+            <circle cx="7" cy="19" r="1"/>
+          </svg>
+          <span>右键管理</span>
+        </button>
+        <button class="nav-item nav-parent" data-page="netspeed" data-nav-toggle="speed" data-tip="测速工具">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 3.77L11.25 4.61C11.25 4.61 9.97 6.06 8.68 7.94C7.39 9.82 6 12.07 6 14.23A6 6 0 0 0 12 20.23A6 6 0 0 0 18 14.23C18 12.07 16.61 9.82 15.32 7.94C14.03 6.06 12.75 4.61 12.75 4.61L12 3.77M12 6.9C12.44 7.42 12.84 7.85 13.68 9.07C14.89 10.83 16 13.07 16 14.23C16 16.45 14.22 18.23 12 18.23S8 16.45 8 14.23C8 13.07 9.11 10.83 10.32 9.07C11.16 7.85 11.56 7.42 12 6.9Z"/>
+          </svg>
+          <span>测速</span>
+          <span class="nav-parent-toggle" data-tip="展开/收起">
+            <svg class="nav-parent-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>
+          </span>
+        </button>
+        <div class="nav-submenu" data-nav-submenu="speed">
+          <button class="nav-subitem" data-page="diskbench"><span class="nav-subdot"></span><span>磁盘测速</span></button>
+          <button class="nav-subitem active" data-page="netspeed"><span class="nav-subdot"></span><span>网络测速</span></button>
+          <button class="nav-subitem" data-page="netcheck"><span class="nav-subdot"></span><span>网络检测</span></button>
+        </div>
+        <button class="nav-item" data-page="quickcmds" data-tip="快捷指令">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M7 2v11h3v9l7-12h-4l4-8z"/>
+          </svg>
+          <span>快捷指令</span>
+        </button>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">记录</div>
+        <button class="nav-item" data-page="logs" data-tip="操作日志">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM8 12h8v2H8v-2zm0 4h8v2H8v-2zm0-8h5v2H8V8z"/>
+          </svg>
+          <span>日志</span>
+        </button>
+      </div>
+      </div><!-- /.nav-scroll -->
+
+      <div class="sidebar-footer">
+        <button class="nav-item sidebar-settings-btn" data-page="settings" data-tip="设置">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94c0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6s3.6 1.62 3.6 3.6s-1.62 3.6-3.6 3.6z"/>
+          </svg>
+          <span>设置</span>
+        </button>
+      </div>
+    </nav>
+    </div><!-- /.sidebar-rail（批次：悬浮岛侧边栏 B 档） -->
+
+    <!-- 主内容区 -->
+    <main class="main-content" id="mainContent">
+      <!-- 系统体检页面（v2.6.0 P1-6：原「系统概览」升级，新增只读诊断） -->
+      <div class="page active" id="page-overview">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">系统体检</h1>
+            <p class="page-subtitle">只读诊断系统状态，实时掌握本机资源占用、磁盘空间与硬件配置</p>
+          </div>
+        </div>
+
+        <!-- 实时资源卡片：健康度主卡 + CPU / 内存 / 磁盘 三张资源卡 -->
+        <div class="summary-cards overview-metrics" id="overviewMetrics">
+          <!-- 系统健康度主卡：按当前产品要求仅显示状态文案 -->
+          <div class="summary-card overview-card health-card" id="ovHealthCard">
+            <div class="health-meta">
+              <div class="health-title">系统健康度</div>
+              <div class="health-status" id="ovHealthAdvice">状态良好</div>
+            </div>
+          </div>
+
+          <!-- CPU 使用率 -->
+          <div class="summary-card overview-card overview-res-card">
+            <div class="ov-res-head">
+              <span class="ov-res-label">CPU 使用率</span>
+            </div>
+            <div class="ov-res-value" id="ovCpuValue">--</div>
+            <div class="progress-bar overview-bar"><div class="progress-fill" id="ovCpuBar"></div></div>
+            <div class="ov-res-sub" id="ovCpuSub"></div>
+          </div>
+
+          <!-- 内存使用（可点击跳转内存清理） -->
+          <div class="summary-card overview-card overview-res-card overview-jump-card" data-jump="memoryclean" data-tip="点击前往「内存清理」页面" tabindex="0" role="button" aria-label="内存使用，点击前往内存清理">
+            <div class="ov-res-head">
+              <span class="ov-res-label">内存使用</span>
+              <svg class="ov-res-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+            <div class="ov-res-value" id="ovMemValue">--</div>
+            <div class="progress-bar overview-bar"><div class="progress-fill" id="ovMemBar"></div></div>
+            <div class="ov-res-sub" id="ovMemSub"></div>
+          </div>
+
+          <!-- 磁盘（可点击跳转磁盘清理） -->
+          <div class="summary-card overview-card overview-res-card overview-jump-card" data-jump="cleanup" data-tip="点击前往「磁盘清理」页面" tabindex="0" role="button" aria-label="磁盘占用，点击前往磁盘清理">
+            <div class="ov-res-head">
+              <span class="ov-res-label" id="ovDiskLabel">磁盘</span>
+              <svg class="ov-res-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+            <div class="ov-res-value" id="ovDiskValue">--</div>
+            <div class="progress-bar overview-bar"><div class="progress-fill" id="ovDiskBar"></div></div>
+            <div class="ov-res-sub" id="ovDiskSub"></div>
+          </div>
+        </div>
+
+        <!-- 系统体检（v2.6.0 P1-6）：只读诊断清单，每条带 正常/注意/异常 状态与证据等级 -->
+        <div class="overview-section">
+          <div class="overview-section-head">
+            <h2 class="overview-section-title">体检结论</h2>
+            <span class="checkup-evidence-legend" data-tip="证据等级：本机实测=直接读取本机状态；机制明确=依据系统公开机制推断；未验证=当前环境无法判定">证据等级说明</span>
+            <button class="btn btn-secondary btn-small" id="btnCheckupRerun" data-tip="重新执行一次只读体检（不改任何系统设置）" aria-label="重新体检">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+              <span id="btnCheckupRerunText">重新体检</span>
+            </button>
+          </div>
+          <div class="checkup-list" id="ovCheckupList" aria-live="polite">
+            <div class="empty-state"><p>体检中…</p></div>
+          </div>
+        </div>
+
+        <!-- 硬件信息（刷新按钮与标题同行，窗口界面升级3） -->
+        <div class="overview-section">
+          <div class="overview-section-head">
+            <h2 class="overview-section-title">硬件信息</h2>
+            <button class="btn btn-secondary btn-small" id="btnOverviewRefresh" data-tip="重新读取系统指标与硬件信息" aria-label="刷新系统概览信息">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              <span>刷新信息</span>
+            </button>
+          </div>
+          <div class="device-info-table" id="ovHardwareRows"></div>
+        </div>
+      </div>
+
+      <!-- 清理页面 -->
+      <div class="page" id="page-cleanup">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">磁盘清理</h1>
+            <p class="page-subtitle" id="cleanupSubtitle">智能扫描 C 盘各类缓存、临时文件、冗余组件</p>
+          </div>
+        </div>
+
+        <!-- 磁盘清理分段式页面切换：五合一子视图（大标题下方；各子视图操作按钮与分段栏同行右对齐，窗口界面升级3） -->
+        <div class="cleanup-toolbar">
+        <div class="filter-tabs cleanup-tabs" id="cleanupTabs" role="tablist" aria-label="磁盘清理子功能">
+          <button class="filter-tab active" data-cleanup-view="cleanup" data-subtitle="智能扫描 C 盘各类缓存、临时文件、冗余组件" role="tab" aria-selected="true">主要</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-dups" data-subtitle="基于内容指纹扫描重复文件，仅删除多余副本、保留一份" role="tab" aria-selected="false">重复文件查找</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-big" data-subtitle="按体积从大到小列出占用空间最大的文件" role="tab" aria-selected="false">大文件查找</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-empty" data-subtitle="扫描 0 字节文件与不含任何子项的空目录" role="tab" aria-selected="false">空文件与空目录</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-appdata" data-subtitle="统计 AppData 下各应用一级目录占用，识别可清理的大体积目录" role="tab" aria-selected="false">AppData 瘦身</button>
+        </div>
+
+        <!-- 各子视图操作行：随分段切换显示，与分段栏保持齐平（窗口界面升级3） -->
+        <div class="cleanup-toolbar-actions active" data-actions-for="cleanup">
+          <button class="btn btn-secondary" id="btnSelectAll">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            <span id="btnSelectAllText">全选</span>
+          </button>
+          <button class="btn btn-primary" id="btnScan">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <span>扫描大小</span>
+          </button>
+          <button class="btn btn-accent" id="btnClean" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
+            <span>开始清理</span>
+          </button>
+          <button class="btn btn-secondary" id="btnUpdateRules" data-tip="从发布源下载最新清理规则库（数据目录规则优先于内置规则，支持版本校验与防降级）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+            <span>更新规则库</span>
+          </button>
+          <div class="clean-inline-opts" id="cleanInlineOpts">
+            <span class="rules-version-info" id="rulesVersionInfo" data-tip="当前=本机规则库版本；winapp2=本机规则库同步的 WinApp2 基线版本；云端 winapp2=官方 GitHub 发布源上的 WinApp2 基线版本（进入本页自动联网检测，连不上官方库时显示 --）">（当前版本为：--，winapp2 版本为：--，云端 winapp2 版本为：--）</span>
+          </div>
+        </div>
+        <div class="cleanup-toolbar-actions" data-actions-for="cleanup-dups">
+          <button class="btn btn-secondary" id="dupBtnSelect">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            <span>勾选重复项</span>
+          </button>
+          <button class="btn btn-primary" id="dupBtnScan">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <span>开始扫描</span>
+          </button>
+          <button class="btn btn-accent" id="dupBtnDelete" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            <span>删除选中</span>
+          </button>
+          <button class="btn btn-secondary" type="button" data-finder-manifest>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+            <span>已删除清单</span>
+          </button>
+        </div>
+        <div class="cleanup-toolbar-actions" data-actions-for="cleanup-big">
+          <button class="btn btn-secondary" id="bigBtnSelect">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            <span>全选</span>
+          </button>
+          <button class="btn btn-primary" id="bigBtnScan">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <span>开始扫描</span>
+          </button>
+          <button class="btn btn-accent" id="bigBtnDelete" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            <span>删除选中</span>
+          </button>
+          <button class="btn btn-secondary" type="button" data-finder-manifest>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+            <span>已删除清单</span>
+          </button>
+        </div>
+        <div class="cleanup-toolbar-actions" data-actions-for="cleanup-empty">
+          <button class="btn btn-secondary" id="emptyBtnSelect">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            <span>全选</span>
+          </button>
+          <button class="btn btn-primary" id="emptyBtnScan">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <span>开始扫描</span>
+          </button>
+          <button class="btn btn-accent" id="emptyBtnDelete" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            <span>删除选中</span>
+          </button>
+          <button class="btn btn-secondary" type="button" data-finder-manifest>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+            <span>已删除清单</span>
+          </button>
+        </div>
+        <div class="cleanup-toolbar-actions" data-actions-for="cleanup-appdata">
+          <button class="btn btn-secondary" id="appdataBtnSelect">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            <span>全选</span>
+          </button>
+          <button class="btn btn-primary" id="appdataBtnScan">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <span>开始统计</span>
+          </button>
+          <button class="btn btn-accent" id="appdataBtnDelete" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            <span>删除选中</span>
+          </button>
+          <button class="btn btn-secondary" type="button" data-finder-manifest>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+            <span>已删除清单</span>
+          </button>
+        </div>
+        </div><!-- /.cleanup-toolbar -->
+
+        <div class="cleanup-view active" data-cleanup-panel="cleanup">
+        <!-- 总览卡片 -->
+        <div class="summary-cards">
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--accent-light); color: var(--accent)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.8 4.7 4.7 1.8-4.7 1.8L12 16.5l-1.8-4.7L5.5 10l4.7-1.8L12 3.5z"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="totalSize">0 B</div>
+              <div class="summary-label">可释放空间</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M8.3 12.2l2.5 2.5 4.9-5.4"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="selectedCount">0</div>
+              <div class="summary-label">已选项</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M3 13.5h18"/><circle cx="17" cy="16.2" r="1.1"/><path d="M6.5 16.2h5.5"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="freeSpace">--</div>
+              <div class="summary-label">C 盘剩余空间</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 进度条 -->
+        <div class="progress-section" id="progressSection" role="status" aria-live="polite" aria-busy="false" style="display:none">
+          <div class="progress-header">
+            <span class="progress-label" id="progressLabel">扫描中...</span>
+            <span class="progress-value" id="progressValue">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+        </div>
+
+        <!-- 分类列表 -->
+        <div class="category-list" id="categoryList">
+          <!-- 由 JS 动态生成 -->
+        </div>
+      </div><!-- /.cleanup-view[main] -->
+
+      <!-- ============================ 磁盘清理 · 重复文件查找（子视图） ============================ -->
+      <div class="cleanup-view" data-cleanup-panel="cleanup-dups">
+        <div class="finder-toolbar card">
+          <label class="opt-inline" data-tip="默认 = Downloads、Desktop、Documents、Pictures 与 C:\yule，不存在的目录自动跳过">扫描目录
+            <input type="text" class="finder-path input-style" id="dupPath" value="默认" placeholder="填「默认」使用内置目录，或逗号分隔自定义目录">
+          </label>
+          <label class="opt-inline" data-tip="仅影响内容指纹比对；同名与相似文档检测不受此限制">最小文件
+            <select class="input-style" id="dupMinSize">
+              <option value="0">无限制</option>
+              <option value="1048576">1 MB</option>
+              <option value="5242880">5 MB</option>
+              <option value="10485760" selected>10 MB</option>
+              <option value="104857600">100 MB</option>
+            </select>
+          </label>
+        </div>
+        <div class="progress-section" id="dupProgressSection" style="display:none">
+          <div class="progress-header"><span class="progress-label" id="dupProgressLabel">扫描中...</span><span class="progress-value" id="dupProgressValue">0%</span></div>
+          <div class="progress-bar"><div class="progress-fill" id="dupProgressFill"></div></div>
+        </div>
+        <div class="summary-cards">
+          <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><div class="summary-info"><div class="summary-value" id="dupGroupCount">0</div><div class="summary-label">重复分组</div></div></div>
+          <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--accent-light); color: var(--accent)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.8 4.7 4.7 1.8-4.7 1.8L12 16.5l-1.8-4.7L5.5 10l4.7-1.8L12 3.5z"/></svg></div><div class="summary-info"><div class="summary-value" id="dupSize">0 B</div><div class="summary-label">可释放空间</div></div></div>
+        </div>
+        <div class="table-card" id="dupTable"></div>
+      </div>
+
+      <!-- ============================ 磁盘清理 · 大文件查找（子视图） ============================ -->
+      <div class="cleanup-view" data-cleanup-panel="cleanup-big">
+        <div class="finder-toolbar card">
+          <label class="opt-inline">扫描目录
+            <input type="text" class="finder-path input-style" id="bigPath" value="C:" placeholder="逗号分隔多个目录">
+          </label>
+          <label class="opt-inline">数量上限
+            <select class="input-style" id="bigCount">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+        </div>
+        <div class="progress-section" id="bigProgressSection" style="display:none">
+          <div class="progress-header"><span class="progress-label" id="bigProgressLabel">扫描中...</span><span class="progress-value" id="bigProgressValue">0%</span></div>
+          <div class="progress-bar"><div class="progress-fill" id="bigProgressFill"></div></div>
+        </div>
+        <div class="table-card" id="bigTable"></div>
+      </div>
+
+      <!-- ============================ 磁盘清理 · 空文件与空目录（子视图） ============================ -->
+      <div class="cleanup-view" data-cleanup-panel="cleanup-empty">
+        <div class="finder-toolbar card">
+          <label class="opt-inline">扫描目录
+            <input type="text" class="finder-path input-style" id="emptyPath" value="%USERPROFILE%,C:\ProgramData" placeholder="逗号分隔多个目录">
+          </label>
+        </div>
+        <div class="progress-section" id="emptyProgressSection" style="display:none">
+          <div class="progress-header"><span class="progress-label" id="emptyProgressLabel">扫描中...</span><span class="progress-value" id="emptyProgressValue">0%</span></div>
+          <div class="progress-bar"><div class="progress-fill" id="emptyProgressFill"></div></div>
+        </div>
+        <div class="summary-cards">
+          <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3z"/><path d="M13.5 3v5.5H19"/></svg></div><div class="summary-info"><div class="summary-value" id="emptyCount">0</div><div class="summary-label">空文件</div></div></div>
+          <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--accent-light); color: var(--accent)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6.5z"/></svg></div><div class="summary-info"><div class="summary-value" id="emptyDirCount">0</div><div class="summary-label">空目录</div></div></div>
+        </div>
+        <div class="table-card" id="emptyTable"></div>
+      </div>
+
+      <!-- ============================ 磁盘清理 · AppData 瘦身（子视图） ============================ -->
+      <div class="cleanup-view" data-cleanup-panel="cleanup-appdata">
+        <div class="finder-toolbar card">
+          <label class="opt-inline">最小目录
+            <select class="input-style" id="appdataMinSize">
+              <option value="10">10 MB</option>
+              <option value="50">50 MB</option>
+              <option value="100" selected>100 MB</option>
+              <option value="512">512 MB</option>
+            </select>
+          </label>
+          <span class="opt-hint">AppData 含正在运行的应用数据，删除前请确认应用已退出。</span>
+        </div>
+        <div class="progress-section" id="appdataProgressSection" style="display:none">
+          <div class="progress-header"><span class="progress-label" id="appdataProgressLabel">统计中...</span><span class="progress-value" id="appdataProgressValue">0%</span></div>
+          <div class="progress-bar"><div class="progress-fill" id="appdataProgressFill"></div></div>
+        </div>
+        <div class="table-card" id="appdataTable"></div>
+      </div><!-- /.cleanup-view[appdata] -->
+      </div><!-- /#page-cleanup（磁盘清理五合一：五个子视图收拢于此） -->
+
+      <!-- 大文件查找 / 磁盘健康度功能已移除 -->
+      <!-- 系统维护修复组页面（P2-16） -->
+      <div class="page" id="page-maintenance">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">系统维护</h1>
+            <p class="page-subtitle">11 项常见系统问题修复 · 支持勾选批量执行，也可逐项单独执行</p>
+          </div>
+        </div>
+        <!-- 批量操作栏：全选 / 已选计数 / 执行选中 / 全部执行 / 取消 / 进度 -->
+        <div class="maint-batchbar" id="maintBatchbar">
+          <label class="maint-batch-selall" data-tip="全选/取消全选当前分类下的任务">
+            <input type="checkbox" id="maintSelAll" />
+            <span>全选</span>
+          </label>
+          <span class="maint-batch-count" id="maintSelCount">已选 0 项</span>
+          <div class="maint-batch-actions">
+            <button class="btn btn-secondary btn-small" id="btnMaintRunSelected" data-tip="按顺序执行勾选的项目">执行选中</button>
+            <button class="btn btn-accent btn-small" id="btnMaintRunAll" data-tip="按顺序执行当前分类下的全部项目">全部执行</button>
+            <button class="btn btn-danger btn-small" id="btnMaintCancelBatch" style="display:none" data-tip="停止后续项目，当前正在执行的任务会完成后停止">取消批量</button>
+          </div>
+          <div class="maint-batch-progress" id="maintBatchProgress" style="display:none">
+            <div class="maint-batch-progress-bar"><div class="maint-batch-progress-fill" id="maintBatchProgressFill"></div></div>
+            <span class="maint-batch-progress-text" id="maintBatchProgressText"></span>
+          </div>
+        </div>
+        <div class="filter-tabs maint-cat-tabs" id="maintTabs"><!-- 分类计数标签：由 JS 生成（窗口界面升级3 收编进分段体系） --></div>
+        <div class="maint-list" id="maintList"><!-- 任务卡片：由 JS 生成 --></div>
+        <div class="maint-output" id="maintOutput" style="display:none">
+          <div class="maint-output-header">
+            <span id="maintOutputTitle">执行输出</span>
+            <button class="btn btn-secondary btn-small" id="btnMaintOutputClose" data-tip="关闭输出面板">关闭</button>
+          </div>
+          <pre class="maint-output-body" id="maintOutputBody"></pre>
+        </div>
+      </div>
+
+      <!-- 网络检测页面（v3.0）：全程只读采集 + 白名单化一键修复 -->
+      <div class="page" id="page-netcheck">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">网络检测</h1>
+            <p class="page-subtitle">6 项只读网络诊断 · 异常项给出证据与修复建议，可一键修复</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-accent" id="btnNetcheckStart" data-tip="重新执行全部检测项">开始检测</button>
+          </div>
+        </div>
+        <div class="netcheck-list" id="netcheckList"><!-- 检查项行：由 JS 渲染 --></div>
+        <div class="netcheck-list" id="netcheckNicProps"><!-- v3.7.0：网卡高级属性只读枚举区，由 JS 渲染 --></div>
+      </div>
+
+      <!-- 运行库修复页面（v3.3.0 第一期）：只读检测 + 白名单化一键安装 -->
+      <div class="page" id="page-runtimes">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">运行库修复</h1>
+            <p class="page-subtitle">检测系统运行库安装状态，缺失时一键补装 · 全程只读检测</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-primary" id="btnRuntimesScan">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+              开始扫描
+            </button>
+          </div>
+        </div>
+        <div class="rt-intro-card">
+          <p>部分游戏或软件在运行时需要特定运行库支持，当缺失该类文件时，会无法正常启动。</p>
+          <p class="rt-intro-sub">覆盖范围：Microsoft Visual C++ 2015-2022 · .NET Framework 4.x / 3.5 · DirectX 9-12</p>
+        </div>
+        <div class="rt-radar-wrap">
+          <div id="rtRadar"><!-- 雷达图：由 runtimes.js 渲染内联 SVG --></div>
+          <div class="rt-summary" id="rtSummary">尚未扫描 · 点击「开始扫描」检测本机运行库</div>
+        </div>
+        <div class="rt-list" id="runtimesList"><!-- 检测结果条目：由 JS 渲染 --></div>
+      </div>
+
+      <!-- 内存清理页面 -->
+      <div class="page" id="page-memoryclean">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">内存清理</h1>
+            <p class="page-subtitle">查看内存使用情况，按区域清理工作集与系统缓存，并管理运行中的进程 · 点击各条目即可看到简介</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-secondary" id="btnMemAiIntro" data-tip="选择「内存清理」生成 AI 简介所用的模型（与其他模块相互独立）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
+              联网 AI 简介
+            </button>
+            <button class="btn btn-secondary" id="btnMemProcesses" data-tip="刷新当前运行的进程列表">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1.41 6L13 13.59 10.91 11.5 6.5 15.91 8.41 17.83l3.5-3.5 2.09 2.09L20 9.41 17.59 7z"/></svg>
+              刷新进程
+            </button>
+            <button class="btn btn-secondary" id="btnMemRefresh" data-tip="重新读取内存与系统缓存信息">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              刷新信息
+            </button>
+            <button class="btn btn-accent" id="btnMemClean" data-tip="清理勾选的内存区域（危险区域需二次确认）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
+              开始清理
+            </button>
+          </div>
+        </div>
+
+        <!-- 总览卡片（与系统概览同款 2x2 网格，最大化时一行展示） -->
+        <div class="summary-cards overview-metrics mem-metrics">
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--accent-light); color: var(--accent)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12.5h4L10 6l4 12 2.5-5.5h4"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="memUseValue">--</div>
+              <div class="summary-label">物理内存使用率</div>
+              <div class="progress-bar overview-bar"><div class="progress-fill" id="memUseBar"></div></div>
+            </div>
+            <span class="mem-ring-slot" id="memUseRingSlot" aria-hidden="false"></span>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.3l2.5 2.5 4.9-5.4"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="memFreeValue">--</div>
+              <div class="summary-label">可用内存</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--warning-soft); color: var(--warning)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.4 5.4l1.9 1.9M16.7 16.7l1.9 1.9M18.6 5.4l-1.9 1.9M7.3 16.7l-1.9 1.9"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="memPagefileValue">--</div>
+              <div class="summary-label">页面文件使用</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="12.5" rx="2"/><path d="M9.5 20.5h5M12 17v3.5"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="memCacheValue">--</div>
+              <div class="summary-label">系统缓存</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 内存清理区域（分门别类） -->
+        <div class="mem-panel">
+          <div class="mem-panel-head">
+            <h3>内存清理区域</h3>
+            <div class="mem-panel-actions">
+              <span class="opt-group-count" id="memRegionCount">5 项</span>
+              <button class="btn btn-secondary btn-small" id="btnMemSelectAll">全选</button>
+              <button class="btn btn-secondary btn-small" id="btnMemSelectNone">全不选</button>
+            </div>
+          </div>
+          <div class="mem-region-list" id="memRegionList">
+            <!-- 由 JS 动态生成 -->
+          </div>
+        </div>
+
+        <!-- 运行中的进程入口：一行式功能入口卡片（左标题 / 中内容回显区 / 右键·去管理） -->
+        <div class="mem-panel">
+          <div class="process-entry-card">
+            <div class="process-entry-left">
+              <span class="settings-entry-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M4 4h16v4H4zM4 10h16v4H4zM4 16h16v4H4z"/></svg>
+              </span>
+              <span class="process-entry-title">运行中的进程</span>
+            </div>
+            <div class="process-entry-content" id="memProcessSummary">
+              <span class="process-entry-summary">尚未管理进程 · 点击「去管理」打开管理窗口</span>
+            </div>
+            <button class="btn btn-secondary btn-small process-entry-btn"
+                    id="btnOpenProcessManager"
+                    data-tip="打开「应用进程管理」窗口，逐项查看或结束进程，操作结果实时回显于此">去管理</button>
+          </div>
+          <p class="process-entry-hint">点击「去管理」打开独立的「应用进程管理」窗口，逐项查看或结束进程；结束后的最新统计会实时回显在卡片中间。</p>
+        </div>
+      </div>
+
+      <!-- 优化电脑页面 -->
+      <div class="page" id="page-optimizer">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">优化电脑 <span class="page-summary" id="optimizerSummary"></span></h1>
+            <p class="page-subtitle">整合多项系统优化脚本，点击即后台静默执行，右上角实时显示进度 · 点击各条目即可看到简介</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-secondary" id="btnOptimizerSelected" data-tip="执行当前页面中已勾选的优化项">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              执行所选优化
+            </button>
+            <button class="btn btn-secondary" id="btnOptimizerBatch" data-tip="一键全选当前页面所有优化项，二次确认后依次执行">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              全选执行
+            </button>
+            <button class="btn btn-secondary" id="btnOptimizerAiIntro" data-tip="选择「电脑优化中心」生成 AI 简介所用的模型（与其他模块相互独立）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
+              联网 AI 简介
+            </button>
+            <button class="btn btn-secondary" id="btnSysRestore" data-tip="查看系统保护状态、创建与管理系统还原点">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
+              系统还原点
+            </button>
+            <button class="btn btn-secondary" id="btnOptimizerElevate" style="display:none" data-tip="部分选项需要管理员权限">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>
+              提升权限
+            </button>
+          </div>
+        </div>
+
+        <!-- 优化分类分段栏（原侧边栏分类子菜单收拢于此，由 optimizer.js 按 OPT_CATEGORIES 渲染） -->
+        <div class="filter-tabs optimizer-cats filter-tabs--scroll" id="optimizerCatNav" role="tablist" aria-label="优化分类"></div>
+
+        <!-- 管理员提醒（可选，交由 JS 控制） -->
+        <div class="optimizer-banner" id="optimizerBanner" style="display:none"></div>
+
+        <!-- v2.6.0（P0-1）：未完成还原提醒——启动扫描发现「有记账但未生效/执行中断」的项时显示 -->
+        <div class="optimizer-banner stale" id="optimizerStaleBanner" style="display:none">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2L1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+          <span id="optimizerStaleText"></span>
+          <button type="button" class="btn btn-secondary btn-small" id="btnStaleRestore" data-tip="按执行前记录的原值逐项还原这些改动">一键还原</button>
+        </div>
+
+        <!-- 分组选项卡片 -->
+        <div class="optimizer-net-hint" id="optimizerNetHint"></div>
+        <div class="optimizer-groups" id="optimizerGroups">
+          <!-- 由 JS 动态生成 -->
+        </div>
+      </div>
+
+      <!-- 右键管理页面 -->
+      <div class="page" id="page-contextmenu">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">右键菜单管理 <span class="page-summary" id="contextSummary"></span></h1>
+            <p class="page-subtitle">勾选=启用，取消勾选=禁用（可逆，可随时改回）；点击条目可查看详情与简介，删除入口在详情弹窗内</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-secondary" id="btnRestoreMenu">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88c3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+              从备份恢复
+            </button>
+            <button class="btn btn-primary" id="btnScanContext">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+              扫描右键菜单
+            </button>
+            <button class="btn btn-secondary" id="btnContextAiIntro" data-tip="选择「右键管理」生成 AI 简介所用的模型（与其他模块相互独立）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
+              联网 AI 简介
+            </button>
+            <button class="btn btn-secondary" id="btnCtxModePanel" data-tip="Windows 11 菜单形态开关与 Shell 扩展屏蔽表" aria-expanded="false" aria-controls="ctxModePanel">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 5h18v2H3zm0 6h12v2H3zm0 6h18v2H3z"/></svg>
+              菜单形态
+            </button>
+          </div>
+        </div>
+
+        <!-- 批次 B：延迟批量生效条。右键菜单由资源管理器在加载期解析，改完必须重启才可见；
+             这里累计改动次数，让用户一次性重启，而不是每改一项就打断一次。默认隐藏。 -->
+        <div class="ctx-apply-bar" id="ctxApplyBar" role="status" hidden>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 15h-2v-2h2zm0-4h-2V7h2z"/></svg>
+          <span class="ctx-apply-text" id="ctxApplyText"></span>
+          <button type="button" class="btn btn-primary" id="btnCtxRestartExplorer">重启资源管理器</button>
+          <button type="button" class="ctx-apply-dismiss" id="btnCtxApplyDismiss" data-tip="改动已写入注册表，只是菜单还没刷新">稍后</button>
+        </div>
+
+        <!-- 批次 B：Win11 菜单形态 + 屏蔽表（默认收起，由「菜单形态」按钮展开） -->
+        <div class="ctx-mode-panel" id="ctxModePanel" hidden>
+          <div class="ctx-mode-card">
+            <div class="ctx-mode-head">
+              <span class="ctx-mode-title">Windows 11 右键菜单形态</span>
+              <span class="ctx-mode-current" id="ctxWin11Mode">读取中…</span>
+            </div>
+            <p class="ctx-mode-desc" id="ctxWin11Desc">「新版精简」只显示少量内置命令，第三方扩展折叠进「显示更多选项」；「经典完整」把所有扩展直接平铺（等同 Win10 行为）。仅对当前用户生效，切换后需重启资源管理器。</p>
+            <div class="ctx-mode-switch" id="ctxWin11Switch"></div>
+          </div>
+          <div class="ctx-mode-card">
+            <div class="ctx-mode-head">
+              <span class="ctx-mode-title">已屏蔽的 Shell 扩展</span>
+              <span class="ctx-mode-current" id="ctxBlockedCount"></span>
+            </div>
+            <p class="ctx-mode-desc">屏蔽表（Shell Extensions\Blocked）里的扩展不会被资源管理器加载——比改键名更彻底，也常被其他工具改动。系统内置扩展不允许入表，否则整个新式菜单可能失效。</p>
+            <div class="ctx-blocked-list" id="ctxBlockedList"></div>
+          </div>
+        </div>
+
+        <!-- 右键菜单分类分段栏（原侧边栏分类树收拢于此，位于筛选标签上方） -->
+        <div class="filter-tabs ctx-cats filter-tabs--scroll" id="ctxCategoryNav" role="tablist" aria-label="右键菜单分类">
+          <button class="filter-tab" data-category="全部">全部</button>
+          <button class="filter-tab active" data-category="文件">文件</button>
+          <button class="filter-tab" data-category="文件夹">文件夹</button>
+          <button class="filter-tab" data-category="目录">目录</button>
+          <button class="filter-tab" data-category="目录背景">目录背景</button>
+          <button class="filter-tab" data-category="桌面背景">桌面背景</button>
+          <button class="filter-tab" data-category="磁盘分区">磁盘分区</button>
+          <button class="filter-tab" data-category="所有对象">所有对象</button>
+          <button class="filter-tab" data-category="此电脑">此电脑</button>
+          <button class="filter-tab" data-category="回收站">回收站</button>
+          <button class="filter-tab" data-category="库">库</button>
+          <button class="filter-tab" data-category="新建菜单">新建菜单</button>
+          <button class="filter-tab" data-category="发送到">发送到</button>
+          <button class="filter-tab" data-category="打开方式">打开方式</button>
+          <button class="filter-tab" data-category="Win+X">Win+X</button>
+        </div>
+
+        <!-- 筛选标签 -->
+        <div class="filter-tabs" id="contextFilter">
+          <button class="filter-tab active" data-filter="all">全部</button>
+          <button class="filter-tab" data-filter="high">第三方项</button>
+          <button class="filter-tab" data-filter="low">系统原生</button>
+          <button class="filter-tab" data-filter="disabled">已禁用</button>
+          <span style="margin-left:auto;font-size:12px;color:var(--fg-tertiary);align-self:center">已禁用 <strong id="contextSelectedCount">0</strong> 项</span>
+        </div>
+
+        <div class="contextmenu-list" id="contextMenuList">
+          <div class="empty-state">
+            <div class="empty-state-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></div>
+            <div class="empty-state-title">尚未扫描右键菜单</div>
+            <div class="empty-state-desc">扫描将检测系统与第三方添加的右键菜单项，支持禁用、删除与恢复</div>
+            <div class="empty-state-cta"><button class="btn btn-primary" type="button" data-empty-cta="btnScanContext">立即扫描</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 测速页面 -->
+      <div class="page" id="page-diskbench">
+        <div class="page-header">
+          <div><h1 class="page-title">磁盘测速</h1><p class="page-subtitle">评估顺序读写、4K 随机性能、IOPS 与延迟</p></div>
+          <div class="page-actions">
+            <button class="btn btn-secondary" id="btnBenchHistory" data-tip="查看历史测试记录">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L8.9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+              历史测试记录
+            </button>
+            <button class="btn btn-secondary" id="btnBenchGuide" data-tip="各测试参数的功能解释说明">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M11 7h2v2h-2zm0 4h2v6h-2zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/></svg>
+              功能解释说明
+            </button>
+            <button class="btn btn-primary" id="btnDiskBench"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 5h18v14H3V5zm2 2v10h14V7H5zm2 2h10v2H7V9zm0 4h6v2H7v-2z"/></svg>开始测试</button>
+          </div>
+        </div>
+        <div class="benchmark-layout">
+          <section class="benchmark-panel">
+            <div class="panel-kicker">测试参数</div>
+            <label class="field-label">测试路径<input id="diskBenchPath" class="field-input" value="" placeholder="将自动检测当前用户 Downloads 目录" /></label>
+            <div class="benchmark-fields">
+              <label class="field-label">块大小<select id="diskBlockSize" class="field-input"><option value="4096">4 KB</option><option value="65536">64 KB</option><option value="1048576" selected>1 MB</option></select></label>
+              <!-- v3.7.0 议题四：队列深度与线程数此前是「禁用下拉 + 单个 1 选项」，看着像可配置；
+                   实际四个测试循环均为同步单流 I/O，这两个值从未被消费。改为只读文本，不再伪装成选项。 -->
+              <!-- v3.7.1 R1：Rust 原生引擎（OVERLAPPED 并发）下 QD/线程数真实生效；语义=QD 为每线程在途上限 -->
+              <label class="field-label">队列深度<select id="diskQueueDepth" class="field-input"><option value="1" selected>1（单队列）</option><option value="8">8</option><option value="32">32</option></select></label>
+              <label class="field-label">线程数<select id="diskThreads" class="field-input"><option value="1" selected>1</option><option value="4">4</option><option value="8">8</option></select></label>
+              <label class="field-label">时长<select id="diskDuration" class="field-input"><option value="4">4 秒</option><option value="8" selected>8 秒</option><option value="16">16 秒</option></select></label>
+            </div>
+            <p class="benchmark-note">测试会在目标磁盘创建临时文件，完成后自动删除。当前采用单队列单线程模型，块大小用于模拟不同负载。</p>
+          </section>
+          <section class="benchmark-panel benchmark-status-panel"><div class="panel-kicker">状态</div><div class="benchmark-status" id="diskBenchStatus">等待测试</div><div class="benchmark-status-detail">顺序测试模拟大文件传输，随机测试模拟系统与应用的小文件 I/O。</div></section>
+        </div>
+        <div class="benchmark-results">
+          <div class="benchmark-result-group"><h3>顺序读写</h3><div class="benchmark-result-grid"><div><span>顺序读取</span><strong id="diskSeqRead">--</strong></div><div><span>顺序写入</span><strong id="diskSeqWrite">--</strong></div></div></div>
+          <div class="benchmark-result-group"><h3>随机读写 · 4K</h3><div class="benchmark-result-grid"><div><span>随机读取</span><strong id="diskRandomRead">--</strong></div><div><span>随机写入</span><strong id="diskRandomWrite">--</strong></div><div><span>IOPS</span><strong id="diskIops">--</strong></div><div><span>延迟</span><strong id="diskLatency">--</strong></div></div></div>
+        </div>
+      </div>
+
+      <div class="page" id="page-netspeed">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">网络测速</h1>
+            <p class="page-subtitle">实时监控本机网卡上行 / 下行流量与丢包率，使用外部测速网站测试真实带宽</p>
+          </div>
+          <div class="page-actions">
+            <label class="realtime-adapter-field">
+              <span class="field-label">监控网卡</span>
+              <select id="realtimeAdapter" class="field-input"></select>
+            </label>
+            <button class="btn btn-secondary" id="btnRealtimePause">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 5h4v14H6V5zm8 0h4v14h-4V5z"/></svg>
+              暂停
+            </button>
+            <button class="btn btn-secondary" id="btnRealtimeClear">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
+              清空图表
+            </button>
+            <button class="btn btn-secondary" id="btnRealtimeRecord" data-tip="记录一段时间内的网速，生成含折线图与统计的报告（存缓存目录，7 天自动清理）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 2.05v2.02c3.95.5 7 3.86 7 7.93s-3.05 7.43-7 7.93v2.02c5.05-.5 9-4.76 9-9.95s-3.95-9.45-9-9.95zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5v2c-1.66 0-3 1.34-3 3s1.34 3 3 3v2zm-1-8.95V5.05c-3.95.49-7 3.85-7 7.95s3.05 7.46 7 7.95v-2c-2.71-.48-5-2.86-5-5.95s2.29-5.47 5-5.95z"/></svg>
+              记录数据
+            </button>
+            <button class="btn btn-secondary" id="btnRealtimeReports" data-tip="查看历史网速记录报告（保留 7 天）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+              查看报告
+            </button>
+            <button class="btn btn-primary" id="btnExternalTest"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.2 2.5 3.3 5.5 3.3 9s-1.1 6.5-3.3 9c-2.2-2.5-3.3-5.5-3.3-9S9.8 5.5 12 3z"/></svg>开始测速</button>
+            <button class="btn btn-secondary" id="btnRefreshTest"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>刷新</button>
+          </div>
+        </div>
+
+        <!-- 实时网速视图（默认展示：指标卡 + 实时流量走势图） -->
+        <div id="realtimeView">
+          <div class="summary-cards realtime-metrics">
+            <div class="summary-card">
+              <div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg></div>
+              <div class="summary-info">
+                <div class="summary-value" id="realtimeDown">0 B/s</div>
+                <div class="summary-label">下载速度</div>
+              </div>
+            </div>
+            <div class="summary-card">
+              <div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9m0 0l-4 4m4-4l4 4M4 5h16"/></svg></div>
+              <div class="summary-info">
+                <div class="summary-value" id="realtimeUp">0 B/s</div>
+                <div class="summary-label">上传速度</div>
+              </div>
+            </div>
+            <div class="summary-card">
+              <div class="summary-icon" style="--icon-bg: var(--accent-light); color: var(--accent)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5M12 15.8h.01"/></svg></div>
+              <div class="summary-info">
+                <div class="summary-value">
+                  <span id="realtimeLoss">0%</span>
+                  <span class="category-risk low" id="realtimeLossRisk">正常</span>
+                </div>
+                <div class="summary-label" id="realtimeLossDetail">正在检测网关丢包…</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 走势图 -->
+          <div class="realtime-chart-panel">
+            <div class="realtime-chart-header">
+              <h3>实时流量走势</h3>
+              <div class="realtime-legend">
+                <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--accent)"></i>下载</span>
+                <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--success)"></i>上传</span>
+              </div>
+            </div>
+            <div class="realtime-chart-wrap">
+              <canvas id="realtimeChart"></canvas>
+              <div class="realtime-tooltip" id="realtimeTooltip" style="display:none"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 外部测速视图（点击「开始测速」后展示，测速结束自动切回实时图表） -->
+        <div id="externalTestView" style="display:none">
+          <div class="external-site-picker"><label class="external-site-select"><span>测试站点</span><select id="externalTestSite" class="field-input"><option value="https://www.speedtest.cn/" selected>SpeedTest.cn（推荐）</option><option value="https://test.ustc.edu.cn/">中国科大测速</option></select></label></div>
+          <div class="external-test-panel" id="externalTestPanel">
+            <div class="chart-header">
+              <h3>外部网络测速</h3>
+            </div>
+            <p class="external-test-source" id="externalTestSource">数据来源：SpeedTest.cn（推荐），仅加载所选测试站点</p>
+            <iframe id="externalTestFrame" data-tip="外部网络测试页面" src="about:blank"></iframe>
+          </div>
+        </div>
+      </div>
+
+      <!-- 启动项管理页面 -->
+      <div class="page" id="page-startup">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">启动项管理</h1>
+            <p class="page-subtitle">管理随系统启动的注册表项、启动文件夹与计划任务，禁用手动操作可逆恢复 · 点击各条目即可看到简介</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-secondary" id="btnAddStartup" data-tip="选择程序并添加为当前用户的开机启动项">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              添加启动项
+            </button>
+            <button class="btn btn-primary" id="btnScanStartup">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+              扫描启动项
+            </button>
+            <button class="btn btn-secondary" id="btnStartupAiIntro" data-tip="选择「启动项管理」生成 AI 简介所用的模型（与其他模块相互独立）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
+              联网 AI 简介
+            </button>
+          </div>
+        </div>
+
+        <!-- v3.7.0 议题二 P0：缓存年龄横幅。政策仍是「首启扫描一次后读缓存」（v3.2.1 用户裁定），
+             但缓存不再"看起来是实时"——展示数据年龄并给出一键重扫入口；进场还会静默后台重扫。 -->
+        <div class="startup-cache-banner" id="startupCacheBanner" hidden>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+          <span id="startupCacheBannerText">数据来自较早的扫描</span>
+          <button class="btn btn-secondary btn-small" id="btnStartupRescanNow">立即重新扫描</button>
+        </div>
+
+        <!-- 状态卡 -->
+        <div class="summary-cards">
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.3 6.5a8 8 0 1 0 11.4 0"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="startupTotal">-</div>
+              <div class="summary-label">启动项总数</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.3l2.5 2.5 4.9-5.4"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="startupEnabled">-</div>
+              <div class="summary-label">当前启用</div>
+            </div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-icon" style="--icon-bg: var(--warning-soft); color: var(--warning)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M6.2 6.2l11.6 11.6"/></svg></div>
+            <div class="summary-info">
+              <div class="summary-value" id="startupDisabled">-</div>
+              <div class="summary-label">已禁用</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 筛选与批量操作 -->
+        <div class="filter-tabs" id="startupFilter">
+          <button class="filter-tab active" data-filter="all">全部</button>
+          <button class="filter-tab" data-filter="registry">注册表</button>
+          <button class="filter-tab" data-filter="folder">启动文件夹</button>
+          <button class="filter-tab" data-filter="task">计划任务</button>
+          <button class="filter-tab" data-filter="disabled">已禁用</button>
+          <span class="startup-filter-ops">
+            <input type="checkbox" id="startupSelectAll" class="startup-check">
+            <label for="startupSelectAll" class="startup-check-label">全选</label>
+            <button class="btn btn-secondary btn-small" id="btnStartupDisable" disabled>禁用所选</button>
+            <button class="btn btn-secondary btn-small" id="btnStartupEnable" disabled>启用所选</button>
+            <button class="btn btn-danger btn-small" id="btnStartupDelete" disabled>删除所选</button>
+          </span>
+        </div>
+
+        <!-- SU-2（S7）：防恢复机制总开关 + UI 告知 -->
+        <div class="startup-defend-bar">
+          <label class="toggle-switch" for="startupDefendToggle" data-tip="关闭后，被拦截的启动项再次被程序创建时只做提示、不再自动删除；开启状态下每次自动删除前仍会逐条红色确认">
+            <input type="checkbox" id="startupDefendToggle" />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+          <div class="startup-defend-text">
+            <div class="startup-defend-title">防恢复自动删除</div>
+            <div class="startup-defend-desc">禁用的启动项若被外部程序反复恢复，达到次数后会自动删除并拦截其再次出现（删除前逐条红色确认）；关闭后仅提示、不再自动删除。</div>
+          </div>
+          <span class="startup-defend-state" id="startupDefendState">已开启</span>
+        </div>
+
+        <!-- 启动项列表 -->
+        <div class="card-panel">
+          <div class="card-panel-head">
+            <h3>启动项列表</h3>
+            <span class="opt-group-count" id="startupListCount">0 项</span>
+          </div>
+          <div class="startup-list" id="startupList">
+            <div class="empty-state">
+              <div class="empty-state-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></div>
+              <div class="empty-state-title">尚未扫描启动项</div>
+              <div class="empty-state-desc">扫描将检测启动文件夹、注册表 Run 键与计划任务中的开机自启项目</div>
+              <div class="empty-state-cta"><button class="btn btn-primary" type="button" data-empty-cta="btnScanStartup">立即扫描</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 快捷指令页面 -->
+      <div class="page" id="page-quickcmds">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">快捷指令</h1>
+            <p class="page-subtitle">63 条 Windows 系统快捷入口 · 一键打开常用工具与设置
+              <span class="qc-admin-note" data-tip="建议以管理员身份运行 Trim，确保全部快捷指令正常打开">默认以管理员模式启动</span>
+            </p>
+          </div>
+        </div>
+        <div class="qc-toolbar">
+          <div class="qc-search-wrap">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <input id="qcSearch" class="field-input" type="text" placeholder="搜索指令名称、说明或分类…" />
+          </div>
+          <span class="opt-group-count" id="qcCount">0 项</span>
+        </div>
+        <div class="filter-tabs qc-tabs" id="qcTabs"><!-- 分类标签：由 JS 生成（窗口界面升级3 收编进分段体系） --></div>
+        <div class="qc-grid" id="qcList"><!-- 指令卡片：由 JS 生成 --></div>
+      </div>
+
+      <!-- 日志页面 -->
+      <div class="page" id="page-logs">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">操作日志</h1>
+            <p class="page-subtitle">所有操作的详细记录，存储于 %APPDATA%\Trim\logs\</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-secondary" id="btnRefreshLog">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              刷新
+            </button>
+            <button class="btn btn-primary" id="btnExportLog">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              导出日志
+            </button>
+            <button class="btn btn-secondary" id="btnClearLog">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+              清空日志
+            </button>
+          </div>
+        </div>
+        <div class="log-viewer" id="logViewer">
+          <div class="empty-state">
+            <p>暂无日志记录</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 设置页面 -->
+      <div class="page" id="page-settings">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">设置</h1>
+            <p class="page-subtitle">应用配置与系统信息</p>
+          </div>
+        </div>
+        <div class="settings-grid" id="settingsGrid">
+          <div class="settings-section settings-entry-section">
+            <h3>功能入口</h3>
+            <div class="settings-entry-cards">
+              <!-- 安装路径绑定 / 大模型管理 / 字体选择：三卡片横向排列，仅图标 + 标题 + 操作按钮，简介移入各弹窗内 -->
+              <div class="settings-entry-card">
+                <span class="settings-entry-icon">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+                </span>
+                <span class="settings-entry-card-title">安装路径绑定</span>
+                <button class="btn btn-secondary btn-small" id="btnRescanPaths" data-tip="打开弹窗，分门别类管理各软件的安装/文件/缓存路径">去设置</button>
+              </div>
+              <div class="settings-entry-card">
+                <span class="settings-entry-icon">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
+                </span>
+                <span class="settings-entry-card-title">大模型管理</span>
+                <button class="btn btn-secondary btn-small" id="btnOpenModels" data-tip="打开「大模型管理」弹窗，逐项配置启用状态、接口地址与密钥">去管理</button>
+              </div>
+              <div class="settings-entry-card">
+                <span class="settings-entry-icon">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M9 4v3h5v12h3V7h5V4H9zm-6 8v3h3v-3H3z"/></svg>
+                </span>
+                <span class="settings-entry-card-title">字体选择</span>
+                <button class="btn btn-secondary btn-small" id="btnOpenFonts" data-tip="打开「字体选择」弹窗，切换界面字体、字重与字号">去选择</button>
+              </div>
+            </div>
+          </div>
+          <!-- 拆分批次：背景与主题独立卡 —— 根因：原 HTML 在本卡末尾少一个闭合标签，
+               致材质卡/动效卡/关于我们/系统信息全部嵌套进「显示」大容器（设置页所有模块挤在同一
+               大白容器内的来源）；按需求将本模块剥离为 settings-grid 顶层独立卡片，内容原样搬移 -->
+          <div class="settings-section settings-bgtheme-section">
+            <div class="appearance-card-head">
+              <h4>背景与主题</h4>
+              <p>预设壁纸、导入图片、自动轮换与界面强调色</p>
+            </div>
+                <div class="appearance-merge-grid">
+                  <div class="appearance-merge-col">
+                    <div class="appearance-sub">
+                      <div class="appearance-sub-head">预设背景</div>
+                      <div class="skin-row">
+                        <span class="skin-row-label">预设壁纸</span>
+                        <select id="presetBgSelect" data-tip="选择内置渐变墙纸或实拍壁纸">
+                          <option value="">无</option>
+                          <option value="graphite">石墨 Graphite</option>
+                          <option value="wp-winter">冬日 · 二次元</option>
+                          <option value="wp-gaming">电竞 · 玩趣</option>
+                          <option value="wp-anime">动漫 · 场景</option>
+                          <option value="wp-doll">Doll · 手办</option>
+                        </select>
+                      </div>
+                      <p class="appearance-hint">内置渐变墙纸与实拍壁纸铺于页面底层，可与下方导入的图片叠加使用</p>
+                    </div>
+                    <div class="appearance-sub">
+                      <div class="appearance-sub-head">导入图片</div>
+                      <div class="bg-ops-row">
+                        <button class="btn btn-secondary btn-small" id="btnBgClear">✕ 清除</button>
+                        <button class="btn btn-secondary btn-small" id="btnBgImport">⬆ 导入图片</button>
+                      </div>
+                      <div class="bg-current" id="bgCurrentRow" style="display:none">
+                        <img id="bgThumb" alt="背景预览" />
+                        <div class="bg-opacity-row">
+                          <span class="bg-opacity-label">雾化度</span>
+                          <input type="range" id="bgOpacity" min="0" max="100" value="15" />
+                          <span id="bgOpacityVal">15%</span>
+                        </div>
+                        <!-- 批次：背景视角可调 —— 裁切窗口位置滑块（0%=贴左/顶，100%=贴右/底），默认 50% 居中 -->
+                        <div class="bg-opacity-row bg-view-row">
+                          <span class="bg-opacity-label">水平位置</span>
+                          <input type="range" id="bgPosX" min="0" max="100" value="50" />
+                          <span id="bgPosXVal">50%</span>
+                        </div>
+                        <div class="bg-opacity-row bg-view-row">
+                          <span class="bg-opacity-label">垂直位置</span>
+                          <input type="range" id="bgPosY" min="0" max="100" value="50" />
+                          <span id="bgPosYVal">50%</span>
+                        </div>
+                      </div>
+                      <div class="bg-ops-row" id="bgViewRow" style="display:none">
+                        <button class="btn btn-secondary btn-small" id="btnBgViewReset" data-tip="位置恢复居中">⟲ 重置视角</button>
+                      </div>
+                      <div class="bg-list" id="bgList" style="display:none">
+                        <div class="bg-list-head" id="bgListToggle">已导入的图片（0）<span class="bg-list-chevron">⌄</span></div>
+                        <div class="bg-list-body" id="bgListBody"></div>
+                      </div>
+                      <button class="bg-dir-link btn-link" id="btnOpenBgDir" data-tip="打开背景图片存放目录">图片导入后存放地址</button>
+                    </div>
+                  </div>
+                  <div class="appearance-merge-col">
+                    <!-- 壁纸轮换（v2.8.0）：仅实拍壁纸（wp-*）预设生效，默认 10s，可调/可关 -->
+                    <div class="appearance-sub">
+                      <div class="appearance-sub-head">壁纸轮换</div>
+                      <div class="skin-row">
+                        <span class="skin-row-label">自动轮换</span>
+                        <label class="toggle-switch" for="wallpaperRotateToggle" data-tip="在内置实拍壁纸之间自动轮换（带淡入淡出过渡）；选择渐变或无背景时轮换暂停">
+                          <input type="checkbox" id="wallpaperRotateToggle" />
+                          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                      </div>
+                      <div class="skin-row">
+                        <span class="skin-row-label">轮换间隔</span>
+                        <select id="wallpaperIntervalSelect" data-tip="壁纸自动轮换的时间间隔">
+                          <option value="10">10 秒</option>
+                          <option value="30">30 秒</option>
+                          <option value="60">60 秒</option>
+                          <option value="300">5 分钟</option>
+                        </select>
+                      </div>
+                      <p class="appearance-hint">窗口隐藏时自动暂停轮换，省电不打扰</p>
+                    </div>
+                                        <!-- 主题颜色选择 + 背景模糊度（v3.0）：左右齐平排列，背景模糊度使用 Motion.Lab range-drag 自定义滑块 -->
+                    <div class="appearance-sub">
+                      <div class="accent-blur-grid">
+                        <div class="accent-blur-col">
+                          <div class="appearance-sub-head">主题颜色选择</div>
+                          <div class="accent-row">
+                            <input type="color" id="accentColor" value="#8B8EE0" data-tip="选择强调色" aria-label="选择界面强调色" />
+                            <button class="btn btn-secondary btn-small" id="btnAccentReset" data-tip="恢复默认强调色">恢复默认</button>
+                          </div>
+                          <p class="appearance-hint">强调色管按钮、高亮与选中态</p>
+                        </div>
+                        <div class="accent-blur-col">
+                          <div class="appearance-sub-head">背景模糊度</div>
+                          <div class="bg-blur-range" id="bgBlurRange">
+                            <div class="bbr-track">
+                              <div class="bbr-fill"></div>
+                              <div class="bbr-knob"></div>
+                            </div>
+                            <span class="bbr-val" id="bgBlurVal">0%</span>
+                          </div>
+                          <p class="appearance-hint">拖动滑块模糊壁纸背景，0% 清晰 / 100% 完全磨砂</p>
+                        </div>
+                      </div>
+                    </div>
+                </div>
+          </div>
+          </div>
+          <!-- 「显示」section：拆分批次后仅保留「动效设置」卡（背景与主题已剥离为上方独立卡）；
+               材质卡（v3.0 起隐藏）恢复为 appearance-grid 直接子，动效卡保持末位以命中通栏规则 -->
+          <div class="settings-section settings-appearance-section">
+            <h3>显示</h3>
+            <div class="appearance-grid">
+              <!-- 窗口材质与背景模糊度合并卡（v3.0）：横跨整行，display:none 不参与布局 -->
+              <div class="appearance-card appearance-card-wide" id="materialBlurCard">
+                <div class="appearance-card-head">
+                  <h4>窗口材质与背景模糊度</h4>
+                  <p>选择窗口背景的视觉材质效果，并调节面板磨砂强度</p>
+                  <!-- 材质总开关（Motion.Lab toggle-flip 滑动开关改）：关闭 = 暂停原生材质并回落不透明表面，记忆所选材质 -->
+                  <div class="mt-switch on" id="materialMasterToggle" role="switch" aria-checked="true" tabindex="0"
+                       aria-label="窗口材质总开关" data-tip="窗口材质总开关：关闭后窗口恢复不透明表面，重新开启回到所选材质">
+                    <span class="mt-switch-track"><span class="mt-switch-knob"></span></span>
+                  </div>
+                </div>
+                <div class="appearance-merge-grid">
+                  <div class="appearance-merge-col">
+                    <div class="material-grid">
+                      <div class="material-card" data-material="mica">
+                        <span class="material-swatch" style="background:#F3F3F3"></span>
+                        <span class="material-name">Mica</span>
+                        <span class="material-desc">柔和云母</span>
+                      </div>
+                      <div class="material-card" data-material="mica-alt">
+                        <span class="material-swatch" style="background:#E9E9E9"></span>
+                        <span class="material-name">Mica Alt</span>
+                        <span class="material-desc">层次云母</span>
+                      </div>
+                      <div class="material-card" data-material="acrylic">
+                        <span class="material-swatch" style="background:#D6D6D6"></span>
+                        <span class="material-name">亚克力</span>
+                        <span class="material-desc">磨砂玻璃</span>
+                      </div>
+                      <div class="material-card" data-material="thin-acrylic">
+                        <span class="material-swatch" style="background:#3A3A3A"></span>
+                        <span class="material-name">细亚克力</span>
+                        <span class="material-desc">更透亮的磨砂</span>
+                      </div>
+                    </div>
+                    <!-- 「无材质」卡片已移除（设置页整合4）：与上方材质总开关重复，关闭总开关即无材质观感 -->
+                    <p class="appearance-hint">材质同时作用于主窗口与大模型管理 / 外设优化 / 进程管理窗口；关闭上方总开关即无材质观感；切换后若观感未刷新，重启应用完全生效</p>
+                  </div>
+                  <div class="appearance-merge-col">
+                    <!-- 背景模糊度（设置页整合4）：合并原「皮肤：液态玻璃」与背景磨砂强度，0-100% 无级 -->
+                    <div class="appearance-sub">
+                      <div class="appearance-sub-head">背景模糊度</div>
+                      <div class="bg-opacity-row bg-blur-row">
+                        <span class="bg-opacity-label">磨砂强度</span>
+                        <input type="range" id="bgBlur" min="0" max="100" value="0" />
+                        <span id="bgBlurVal">0%</span>
+                      </div>
+                      <p class="appearance-hint">0% 无磨砂，100% 为完整磨砂（界面本身已是玻璃质感）；配合壁纸或导入图片层次感更强</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- 背景图片卡已并入上方「背景与主题」合并卡（v3.0） -->
+              <!-- 动效设置（设置页整合4）：合并原「鼠标拖尾」与「切换动效」两张卡 -->
+              <div class="appearance-card">
+                <div class="appearance-card-head">
+                  <h4>动效设置</h4>
+                  <p>指针轨迹与界面切换动效</p>
+                </div>
+                <div class="appearance-sub">
+                  <div class="appearance-sub-head">鼠标拖尾</div>
+                  <div class="mouse-trail-row">
+                    <span class="mouse-trail-label">启用鼠标拖尾</span>
+                    <label class="toggle-switch" for="mouseTrailToggle" data-tip="开启后指针移动会留下淡紫色光点轨迹">
+                      <input type="checkbox" id="mouseTrailToggle" />
+                      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    </label>
+                  </div>
+                  <p class="appearance-hint">在软件范围内显示轻量指针轨迹，仅作用于当前窗口，可随时关闭</p>
+                </div>
+                <div class="appearance-sub">
+                  <div class="appearance-sub-head">动效选择</div>
+                  <div class="skin-row">
+                    <span class="skin-row-label">效果</span>
+                    <select id="liquidMotionSelect" data-tip="切换全局液态玻璃效果强度">
+                      <option value="full">完整液态玻璃（clear+）</option>
+                      <option value="standard">标准液态玻璃（regular）</option>
+                      <option value="frost">磨砂玻璃（regular 降级）</option>
+                      <option value="off">关闭（实底）</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-section settings-about-section">
+            <h3>关于我们</h3>
+            <div class="about-row">
+              <div class="about-row-copy">
+                <strong>关于</strong>
+                <p>由小旭个人开发制作，仅供个人测试交流使用，请严格参照使用说明使用。</p>
+              </div>
+            </div>
+            <div class="about-row">
+              <div class="about-row-copy">
+                <strong>使用说明</strong>
+                <p>查看主要功能、操作流程与安全注意事项。</p>
+              </div>
+              <button class="btn btn-secondary btn-small" id="btnUsageGuide">查看说明</button>
+            </div>
+            <div class="about-row">
+              <div class="about-row-copy">
+                <strong>检查更新</strong>
+                <p id="updaterCheckHint">检查 Trim 是否有新版本</p>
+              </div>
+              <!-- v3.1.0：123 云盘备用下载渠道，点击复制提取码并打开链接 -->
+              <div class="about-row-actions">
+                <button class="btn btn-secondary btn-small" id="btn123Pan" type="button" data-tip="打开 123 云盘下载页，提取码已自动复制">123云盘</button>
+                <button class="btn btn-secondary btn-small" id="btnCheckUpdate" type="button">检查更新</button>
+              </div>
+            </div>
+            <div class="about-row">
+              <div class="about-row-copy">
+                <strong>更新镜像</strong>
+                <p id="updaterMirrorHint">GitHub 直连失败时自动回退镜像线路（下载内容经哈希校验）</p>
+              </div>
+              <select class="field-input updater-mirror-select" id="updaterMirrorSelect" data-tip="自动：优先 GitHub，失败自动回退镜像；也可固定走某条线路">
+                <option value="auto">自动（推荐）</option>
+                <option value="github">GitHub 直连</option>
+              </select>
+            </div>
+            <div class="about-row">
+              <div class="about-row-copy">
+                <strong>联系我</strong>
+                <p>欢迎在 GitHub 交流与提 Issue</p>
+              </div>
+              <button class="btn btn-secondary btn-small" id="btnGitHub" type="button" data-tip="打开 GitHub 主页">GitHub</button>
+            </div>
+          </div>
+          <div class="settings-section settings-system-section collapsed" id="systemInfoSection">
+            <div class="settings-collapse-head" id="systemInfoToggle">
+              <h3>系统信息</h3>
+              <span class="settings-collapse-chevron" id="systemInfoChevron">▾</span>
+            </div>
+            <div class="settings-system-body" id="systemInfoBody">
+              <div class="info-row"><span>应用版本</span><span id="infoVersion">--</span></div>
+              <div class="info-row"><span>数据目录</span><span id="infoPortable">--</span></div>
+              <div class="info-row" id="diagDwmRow" style="display:none"><span>兼容性提示</span><span id="diagDwmText">--</span></div>
+              <div class="info-row"><span>Electron</span><span id="infoElectron">--</span></div>
+              <div class="info-row"><span>Node.js</span><span id="infoNode">--</span></div>
+              <div class="info-row"><span>Chrome</span><span id="infoChrome">--</span></div>
+              <div class="info-row"><span>操作系统</span><span id="infoOS">--</span></div>
+              <div class="info-row"><span>系统构建号</span><span id="infoBuild">--</span></div>
+              <div class="info-row"><span>Fluent Design</span><span id="infoFluent">--</span></div>
+              <div class="info-row"><span>Mica 背景</span><span id="infoMica">--</span></div>
+              <div class="info-row"><span>用户</span><span id="infoUser">--</span></div>
+              <div class="info-row"><span>管理员权限</span><span id="infoAdmin">--</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 通知层 -->
+  <div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- 使用说明弹窗（显示 readme.md） -->
+  <div class="usage-backdrop" id="usageBackdrop" style="display:none">
+    <div class="usage-modal" role="dialog" aria-modal="true" aria-labelledby="usageTitle">
+      <div class="usage-header">
+        <h2 id="usageTitle">使用说明</h2>
+        <button class="usage-close" id="btnUsageClose" type="button" data-tip="关闭" aria-label="关闭">&times;</button>
+      </div>
+      <div class="usage-body markdown-body" id="usageBody">
+        <div class="empty-state"><p>正在加载使用说明…</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- v3.7.0 议题五：渲染脚本按需加载。
+       此前 38 个 <script> 全部同步加载并在启动时 init()，首屏解析 ~813 KB，
+       而用户默认只落在「系统体检」页。现在 index.html 只保留首屏必需的 13 个脚本，
+       其余改由 app.js 的 PAGE_SCRIPTS / IDLE_SCRIPTS 在进页或首帧空闲时动态注入。
+       两条硬约束不变：splash.js 必须是 body 末尾脚本的第一个；
+       ds.js 必须先于一切 window.ds 使用方（theme / modal / xtable 等）。 -->
+  <!-- Tauri 适配层（迁移方案 D1，Phase 0 起）：脚本链最前加载，完整复刻 window.api；
+       Electron 下自动 no-op（由 preload.js 接管），不影响双轨。不使用 window.ds，
+       不打破 ds.js 先于其使用方的约束。 -->
+  <script src="scripts/tauri-api.js"></script>
+  <!-- 启动页（v2.7.0）：独立无依赖，最先执行，盖住整窗直到 FLIP 落位完成 -->
+  <script src="scripts/splash.js"></script>
+  <!-- 硬约束（审查 2-6）：ds.js（window.ds 设计系统运行时）必须先于一切 window.ds 使用方加载（theme/modal/xtable 等） -->
+  <script src="scripts/ds.js"></script>
+  <script src="scripts/theme.js"></script>
+  <script src="scripts/modal.js"></script>
+  <script src="scripts/xtable.js"></script>
+  <script src="scripts/icon-fallback.js"></script>
+  <script src="scripts/liquid-glass.js"></script>
+  <!-- 审查 2-2：FALLBACK 原始数据（gen-fallback.js 生成，勿手改），须在 cleanup.js 之前加载 -->
+  <script src="scripts/cleanup-fallback.generated.js"></script>
+  <script src="scripts/cleanup.js"></script>
+  <script src="scripts/overview.js"></script>
+  <!-- deviceinfo.js：系统体检（默认首页）用它归一化硬件信息，留在首屏避免首屏降级为空 -->
+  <script src="scripts/deviceinfo.js"></script>
+  <!-- fontmanager.js：启动时就要恢复已保存的字体/字重/字号（app.js init 里 restore），
+       放到按需里会出现"先默认字体后跳变"，故留在首屏（14 KB） -->
+  <script src="scripts/fontmanager.js"></script>
+  <!-- logger.js：window.app.log 是全局日志出口（3 KB），留在首屏避免启动日志静默丢失 -->
+  <script src="scripts/logger.js"></script>
+  <script src="scripts/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "_comment": "退役优化项清单（v2.6.0 P0-3）。优化项从目录移除时在此登记：启动时若其备份记录仍存在，主进程会按记录的原值自动还原注册表并删除备份（幂等，失败保留待重试）。note 供日志与更新说明使用。注意：仅注册表类步骤（reg）会进 optimizer-backups 从而被自动还原；cmd（fsutil 等）与 service 类步骤只记在 optimization-state，不自动还原。",
+  "items": [
+    {
+      "id": "tf_pccleaner",
+      "title": "PCCleaner 深度清理",
+      "note": "C1（2026-09-14 重复点审查）：与「磁盘清理」大面积重复（Windows Temp / %TEMP% / Prefetch / 回收站 / Explorer *.db），且用裸 Remove-Item 绕过 trashOrUnlink、删除清单与 confirmDanger。独有项已整合进 cleanup-rules.json（cbsLogs / dismLogs / printSpoolCache），故下线。该项为纯脚本清理、不含注册表步骤，通常无备份记录需要还原。"
+    },
+    {
+      "id": "clear_recent_docs_on_exit",
+      "title": "退出时清除最近打开的文件历史",
+      "note": "C3（2026-09-14 重复点审查）：与「磁盘清理 - 隐私历史」的 explorerRecentDocs / recentFiles 目标相同，只保留磁盘清理那一套，故下线；本机若留有备份记录，启动时自动还原 ClearRecentDocsOnExit。"
+    },
+    {
+      "id": "always_unload_dll",
+      "title": "总是从内存中卸载无用的 DLL",
+      "note": "N3（2026-09-14 重复点审查）：与「内存清理 - 进程工作集」目标重叠，且 AlwaysUnloadDLL 为传统优化项、现代 Windows 部分组件已不再读取，收益存疑故下线；本机若留有备份记录，启动时自动还原该键值。"
+    },
+    {
+      "id": "ssd_opt",
+      "title": "SSD 固态硬盘优化",
+      "note": "第六大点-A/B（2026-09-14）：两步动作均被覆盖且其中一步与 tf_ntfs 取值相反（disableLastAccess 0 对 1，且在 SSD 上启用最后访问只会增加元数据写入），disable8dot3 与 storage_8dot3_off 完全同值。下线后 NTFS/fsutil 参数统一由 tf_ntfs 与 storage_8dot3_off 负责。steps 为 cmd（fsutil），不产生注册表备份。"
+    },
+    {
+      "id": "services_off",
+      "title": "禁用冗余后台服务",
+      "note": "第六大点-B（2026-09-14）：9 个服务中 4 个与 tf_svc_bulk 重复，5 个独有服务已并入 tf_svc_bulk 清单，统一由 Start=4 机制处理（原实现对服务用 Stop-Service，不改变下次开机的启动类型）。"
+    },
+    {
+      "id": "maps_off",
+      "title": "禁用下载地图管理器",
+      "note": "第六大点-B（2026-09-14）：MapsBroker 本就在 tf_svc_bulk 清单内，属纯重复项；本机若留有备份记录，启动时自动还原该服务 Start 值。"
+    },
+    {
+      "id": "mem_compress",
+      "title": "禁用内存压缩",
+      "note": "第六大点-B（2026-09-14）：是「关闭内存压缩与内存页合并」(tf_mmagent) 的子集（后者多 PageCombining），合并保留超集项，避免 Disable-MMAgent 被两个入口各执行一次。"
+    },
+    {
+      "id": "tasks_disable_ceip",
+      "title": "CEIP Consolidator 任务排查",
+      "note": "第六大点-B（2026-09-14）：目标任务 Consolidator 已被「遥测优化」(telemetry_optimize) 的任务清单覆盖，属批量项与专项项重复，合并保留批量项。"
+    },
+    {
+      "id": "tasks_disable_usb_ceip",
+      "title": "USB CEIP 任务排查",
+      "note": "第六大点-B（2026-09-14）：目标任务 UsbCeip 已被 telemetry_optimize 覆盖，合并保留批量项。"
+    },
+    {
+      "id": "tasks_disable_disk_diag",
+      "title": "磁盘诊断数据采集任务排查",
+      "note": "第六大点-B（2026-09-14）：目标任务已被 telemetry_optimize 覆盖合并。附带修正：本项原写的任务名 DiskDiagnosticDataCollector 缺 Microsoft-Windows- 前缀（本机实测真实名为 Microsoft-Windows-DiskDiagnosticDataCollector），旧实现必然静默失败。"
+    },
+    {
+      "id": "tasks_disable_office_telemetry",
+      "title": "Office Telemetry 登录任务排查",
+      "note": "第六大点-B（2026-09-14）：目标任务 OfficeTelemetryAgentLogOn 已被 telemetry_optimize 覆盖合并；同批修正了 telemetry_optimize 里该任务与 FallBack 两条多写一层 Windows 的路径错误（真实路径为 \\Microsoft\\Office\\）。"
+    },
+    {
+      "id": "edge_game_assistant_overlay_off",
+      "title": "禁用 Edge 游戏助手覆盖层",
+      "note": "第六大点-B（2026-09-14）：唯一动作是写 HubsSidebarEnabled=0，与「禁用 Edge 边栏」(edge_sidebar_off) 完全相同（Edge 未提供独立的游戏助手策略键），属纯重复项；需要该效果时用「禁用 Edge 边栏」。本机若留有备份记录，启动时自动还原该键值。"
+    },
+    {
+      "id": "tasks_stubborn_strategy",
+      "title": "顽固软件策略专杀",
+      "note": "N1（2026-09-14 重复点审查）：与「内存清理 - 顽固软件治理」针对同一批目标（MuMu / 网易 UU 远程 / 微软电脑管家 / WPS），现合并为内存清理页同一张卡片的两层（立即结束进程 / 阻止开机自启）。脚本已迁至 src/scripts-powershell/memory-scripts.js 的 STUBBORN_BLOCK_SCRIPT，IPC 为 memory:stubborn-block。该项为 pwsh 步骤、不含注册表写入，通常无备份记录需要还原。"
+    }
+  ]
+}

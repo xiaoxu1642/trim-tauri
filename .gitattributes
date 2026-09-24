@@ -1,0 +1,45 @@
+# 行尾唯一真源：仓库内一律 LF。
+# 本机 core.autocrlf=true 来自 Git-for-Windows 系统级配置
+# （C:/Program Files/Git/etc/gitconfig）。若不在此钉住，干净 clone 会把全部
+# 源码转成 CRLF —— 而 tools/check-ps-extraction.mjs 与 check-ps-substitution.mjs
+# 是拿 .ps1 与源仓库 JS 做**字节级**对拍的，行尾一变 PS 门禁必然整批红。
+# .gitattributes 优先级高于任何 autocrlf 设置，故用它在仓库内自我修正。
+* text=auto eol=lf
+
+# ==================== 必须按字节原样保留的二进制 ====================
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.bmp binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.dylib binary
+*.so binary
+
+# ==================== 明确钉为 LF 的文本类型 ====================
+*.rs text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.ps1 text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.lock text eol=lf
+*.manifest text eol=lf
+
+# 说明：.ps1 含中文且以 UTF-8 **带 BOM** 落盘（PowerShell 5.1 兼容），
+# BOM 属字节内容、不受行尾转换影响；此处只统一换行符，勿改成 CRLF「以符合 Windows 习惯」。

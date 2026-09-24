@@ -1,0 +1,209 @@
+/* ============================================================
+   Trim 2.0 Design-System 组件层（高频五件套：Dialog / Switch /
+   Progress / Slider / Badge）。行为规格参考 shadcn/ui（Radix）源码，
+   视觉全部走 main.css 的 Fluent token（碳墨×薰衣草，8px 圆角系统工具感）。
+   Dialog 的行为层（焦点陷阱/焦点归还）在 scripts/modal.js 实现（B10）。
+   本文件必须在 main.css 之后加载；归 design-system/ 文档约定约束。
+   ============================================================ */
+
+/* ---------- ① Badge（规范徽章：新代码统一用 .ds-badge） ---------- */
+.ds-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  padding: 2px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ds-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.ds-badge.dotless::before { display: none; }
+.ds-badge.ok      { background: var(--success-soft); color: var(--success); }
+.ds-badge.warn    { background: var(--warning-soft); color: var(--warning); }
+.ds-badge.bad     { background: var(--danger-soft);  color: var(--danger); }
+.ds-badge.neutral { background: var(--bg-input);     color: var(--fg-tertiary); }
+.ds-badge.accent  { background: var(--accent-soft);  color: var(--accent); }
+
+/* 旧徽章类别名：视觉收敛到同一 token 语义（只覆盖颜色，不改各处既定形状/尺寸）。
+   原规则硬编码 rgba 色值（main.css 1224/1409/4847 等），此处后置覆盖。 */
+.category-risk.low        { background: var(--success-soft); color: var(--success); }
+.category-risk.medium     { background: var(--warning-soft); color: var(--warning); }
+.category-risk.high       { background: var(--danger-soft);  color: var(--danger); }
+.badge.third-party        { background: var(--warning-soft); color: var(--warning); }
+.badge.system             { background: var(--success-soft); color: var(--success); }
+.badge.protected          { background: var(--danger-soft);  color: var(--danger); }
+.badge.off                { background: var(--bg-input);     color: var(--fg-tertiary); }
+.startup-badge.on         { background: var(--success-soft); color: var(--success); }
+.startup-badge.off        { background: var(--warning-soft); color: var(--warning); }
+
+/* ---------- ② Slider（input[type=range] Fluent 化） ---------- */
+/* 轨道随值填充：JS（ds.slider.sync）维护 --val 百分比；自动初始化只接管
+   无任何样式的裸 range（如背景透明度），带既定样式的（fm-slider）不碰。 */
+input[type="range"].ds-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  outline: none;
+  background: linear-gradient(90deg, var(--accent) var(--val, 50%), var(--bg-input) var(--val, 50%));
+  cursor: pointer;
+}
+input[type="range"].ds-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--fg-primary);
+  border: 5px solid var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+input[type="range"].ds-slider:active::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+input[type="range"].ds-slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+/* ---------- ③ Progress 环形（线形沿用 main.css .progress-bar/.progress-fill） ---------- */
+.ds-ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.ds-ring-svg { transform: rotate(-90deg); display: block; }
+.ds-ring-track { fill: none; stroke: var(--bg-input); }
+.ds-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--duration-fast) var(--ease-standard), stroke var(--duration-fast) var(--ease-standard);
+}
+.ds-ring-text {
+  position: absolute;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+/* 指标卡内的环形挂载点（内存清理页「物理内存使用率」卡） */
+.mem-ring-slot {
+  margin-left: auto;
+  align-self: center;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+
+/* ---------- ④ Switch（.toggle-switch 的 token 修正，结构沿用 main.css） ---------- */
+/* 原规则选中态滑块硬编码 #ffffff：深色主题下白块压在薰衣草紫上仅 ≈2:1；
+   改用 --accent-text（深色 #171832 / 浅色 #FFFFFF），对强调色对比 ≈7:1。 */
+.toggle-switch input:checked + .toggle-track .toggle-thumb {
+  background: var(--accent-text);
+}
+
+/* 徽章紧凑变体（看板行/密集列表用：10px、去大间距；点径 4px） */
+.ds-badge.sm { font-size: 10px; padding: 1px 7px; gap: 4px; }
+.ds-badge.sm::before { width: 4px; height: 4px; }
+
+/* ---------- ⑥ Tooltip（ds.js data-tip 委托的单例浮层） ---------- */
+.ds-tooltip {
+  position: fixed;
+  z-index: 1200;
+  max-width: 280px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--fg-primary);
+  font-size: 12px;
+  line-height: 1.55;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 120ms var(--ease-standard), transform 120ms var(--ease-standard);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+.ds-tooltip.on { opacity: 1; transform: none; }
+
+/* ---------- ⑦ DropdownMenu（ds.menu 弹出菜单） ---------- */
+.ds-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-btn);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  /* v3.5.1 动效审查 M5：菜单由 ds.js 按触发点定位（position:fixed + left/top），
+     原先无任何入场、凭空出现。这里用 @starting-style 补「从触发器方向长出」的
+     轻微缩放，点明空间来源；不依赖 JS 加类，浏览器不支持时自动退化为瞬时出现。 */
+  transform-origin: var(--ds-menu-origin, top left);
+  transition: opacity var(--duration-fast) var(--ease-emphasized), transform var(--duration-fast) var(--ease-emphasized);
+}
+@starting-style {
+  .ds-menu { opacity: 0; transform: scale(0.96); }
+}
+.ds-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-primary);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ds-menu-item:hover,
+.ds-menu-item:focus-visible { background: var(--accent-soft); color: var(--accent); outline: none; }
+.ds-menu-item.danger { color: var(--danger); }
+.ds-menu-item.danger:hover,
+.ds-menu-item.danger:focus-visible { background: var(--danger-soft); }
+.ds-menu-item[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+.ds-menu-item[aria-disabled="true"]:hover { background: none; color: var(--fg-primary); }
+
+/* ---------- ⑧ Skeleton（加载骨架，扫描/加载期占位） ---------- */
+.ds-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+}
+.ds-skeleton-block {
+  display: inline-block;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-input) 25%, var(--bg-hover) 45%, var(--bg-input) 65%);
+  background-size: 200% 100%;
+  animation: ds-shimmer 1.2s ease-in-out infinite;
+}
+.ds-skeleton-block.icon { width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0; }
+.ds-skeleton-block.short { flex-shrink: 0; }
+@keyframes ds-shimmer { to { background-position: -200% 0; } }
+
+/* ---------- ⑤ 减弱动效：组件层一律不产生过渡 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .ds-ring-fill,
+  input[type="range"].ds-slider::-webkit-slider-thumb { transition: none; }
+  .ds-tooltip { transition: none; }
+  .ds-menu { transition: none; }
+  .ds-skeleton-block { animation: none; }
+}

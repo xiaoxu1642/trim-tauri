@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "_comment": "注册表键归属表（M4/M5，2026-09-14 优化中心重复点审查）。背景：同一个注册表键被两个模块各自写入自己的值名时，任何一方的「还原」都会按整键回滚或连坐删掉对方写入的值，且用户无从判断该值当初是谁写的。本表为共享键逐值声明唯一写入方，由 scripts/check-reg-ownership.js 校验（已接入 npm test），出现越界写入即测试失败。新增共享键时在此登记，不要改校验脚本去放宽。",
+  "modules": {
+    "optimizer": "电脑优化中心（src/scripts-powershell/optimizer-scripts.js 的 OPTIONS）",
+    "maintenance": "系统维护（src/scripts-powershell/maintenance-scripts.js 的 TASKS）",
+    "cleanup": "磁盘清理（src/data/cleanup-rules.json 的 regKeys）"
+  },
+  "entries": [
+    {
+      "key": "HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION\\MULTIMEDIA\\SYSTEMPROFILE",
+      "name": "CoalescingTimerInterval",
+      "owner": "optimizer",
+      "source": "tf_timer_coal",
+      "note": "计时器合并（多媒体调度侧）归优化中心"
+    },
+    {
+      "key": "HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION\\MULTIMEDIA\\SYSTEMPROFILE",
+      "name": "NoLazyMode",
+      "owner": "optimizer",
+      "source": "mmcss_optimize",
+      "note": "MMCSS 多媒体调度参数归优化中心"
+    },
+    {
+      "key": "HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION\\MULTIMEDIA\\SYSTEMPROFILE",
+      "name": "AlwaysOn",
+      "owner": "optimizer",
+      "source": "mmcss_optimize",
+      "note": "MMCSS 多媒体调度参数归优化中心"
+    },
+    {
+      "key": "HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION\\MULTIMEDIA\\SYSTEMPROFILE",
+      "name": "NetworkThrottlingIndex",
+      "owner": "maintenance",
+      "source": "net_response / tf_net_tcp",
+      "note": "网络节流指数归系统维护"
+    },
+    {
+      "key": "HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION\\MULTIMEDIA\\SYSTEMPROFILE",
+      "name": "SystemResponsiveness",
+      "owner": "maintenance",
+      "source": "net_response / tf_net_tcp",
+      "note": "系统响应性（网络节流配套）归系统维护"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "AUTOSHAREWKS",
+      "owner": "optimizer",
+      "source": "share_off",
+      "note": "默认管理共享与空会话管道归优化中心（安全与隐私）"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "AUTOSHARESERVER",
+      "owner": "optimizer",
+      "source": "share_off"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "ENABLEAUTHENTICATEUSERSHARING",
+      "owner": "optimizer",
+      "source": "share_off"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "RESTRICTNULLSESSACCESS",
+      "owner": "optimizer",
+      "source": "share_off"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "ENABLESECURITYSIGNATURE",
+      "owner": "optimizer",
+      "source": "share_off"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "REQUIRESECURITYSIGNATURE",
+      "owner": "optimizer",
+      "source": "share_off"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "AUTODISCONNECT",
+      "owner": "maintenance",
+      "source": "tf_net_lanman",
+      "note": "SMB 会话/传输参数归系统维护（网络连接）"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "SIZE",
+      "owner": "maintenance",
+      "source": "tf_net_lanman"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "ENABLEOPLOCKS",
+      "owner": "maintenance",
+      "source": "tf_net_lanman"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "IRPSTACKSIZE",
+      "owner": "maintenance",
+      "source": "tf_net_lanman"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "SHARINGVIOLATIONDELAY",
+      "owner": "maintenance",
+      "source": "tf_net_lanman"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\LANMANSERVER\\PARAMETERS",
+      "name": "SHARINGVIOLATIONRETRIES",
+      "owner": "maintenance",
+      "source": "tf_net_lanman"
+    },
+    {
+      "key": "HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS\\CURRENTVERSION\\DELIVERYOPTIMIZATION\\CONFIG",
+      "name": "DOWNLOADMODE",
+      "owner": "optimizer",
+      "source": "telemetry_optimize",
+      "note": "传递优化下载模式归优化中心（遥测优化）；系统维护侧已于 2026-09-14 按 M1 移除同名写入"
+    }
+  ]
+}

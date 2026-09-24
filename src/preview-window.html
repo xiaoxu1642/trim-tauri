@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="theme-color" content="#000000" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file:; font-src 'self' file:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
+  <title>图片预览</title>
+  <link rel="icon" href="./assets/ico/Trim.ico" />
+  <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body class="pv-window">
+  <div class="pv-topbar">
+    <div class="pv-title" id="pvTitle">图片预览</div>
+    <div class="pv-count" id="pvCount">加载中…</div>
+    <button class="pv-close" id="pvClose" title="关闭">&times;</button>
+  </div>
+  <div class="pv-body">
+    <button class="pv-nav prev" id="pvPrev" title="上一张（←）">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.41z"/></svg>
+    </button>
+    <div class="pv-image-container" id="pvImageContainer">
+      <div class="pv-loading" id="pvLoading">正在加载图片…</div>
+      <img class="pv-image" id="pvImage" alt="" style="display:none" />
+    </div>
+    <button class="pv-nav next" id="pvNext" title="下一张（→）">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/></svg>
+    </button>
+  </div>
+  <div class="pv-footer">
+    <div class="pv-file-info" id="pvFileInfo"></div>
+    <div class="pv-controls">
+      <button class="pv-btn" id="pvZoomOut" title="缩小（-）">−</button>
+      <span class="pv-zoom-label" id="pvZoomLabel">100%</span>
+      <button class="pv-btn" id="pvZoomIn" title="放大（+）">+</button>
+      <button class="pv-btn" id="pvZoomReset" title="重置（1:1）" style="font-size:11px">1:1</button>
+      <button class="pv-btn" id="pvRotate" title="旋转" style="font-size:14px">↻</button>
+      <button class="pv-btn pv-delete" id="pvDelete" title="删除当前图片">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+        删除
+      </button>
+    </div>
+  </div>
+
+  <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——业务件在加载期就会读 window.api，
+       必须先生效；Electron 下自动 no-op（由 preload.js 接管） -->
+  <script src="scripts/tauri-api.js"></script>
+  <!-- 审查v4-M5：引入统一确认弹窗服务，删除图片走红色二次确认（ds.js 缺席时焦点陷阱按 modal 约定优雅降级） -->
+  <script src="scripts/modal.js"></script>
+  <script src="scripts/preview-window.js"></script>
+</body>
+</html>

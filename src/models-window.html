@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="theme-color" content="#f3f3f3" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file:; font-src 'self' file:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
+  <title>大模型管理</title>
+  <link rel="icon" href="./assets/ico/Trim.ico" />
+  <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body class="mw-window">
+  <div class="mw-shell">
+    <div class="pw-topbar">
+      <div class="pw-topbar-copy">
+        <h1>大模型管理</h1>
+        <div class="pw-topbar-sub">管理百度千帆 / 知乎直答 / 秘塔 AI / 自定义模型的启用状态与接口参数，为各模块的「联网 AI 简介」提供模型。点击分组标题可展开 / 折叠；密钥留空保存时不会发起联网校验。</div>
+      </div>
+      <div class="pw-topbar-actions">
+        <button class="btn btn-secondary" id="mwRefreshBtn" title="重新读取已保存的模型配置">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+          重新载入
+        </button>
+        <button class="btn btn-primary" id="mwCloseBtn">完成</button>
+      </div>
+    </div>
+
+    <div class="mw-content">
+      <div class="mw-card">
+        <div class="mw-card-head">
+          <span class="mw-card-title">模型项</span>
+          <span class="mw-card-desc">按模型逐一配置 · 保存后自动发起连通性校验</span>
+        </div>
+        <div class="mw-body" id="mwBody">
+          <div class="pw-empty">正在加载模型配置…</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mw-footer">
+      <span class="mw-foot-hint">配置保存在本机 %APPDATA%\Trim\settings.json</span>
+      <span class="mw-foot-hint" id="mwGlobalHint" style="margin:0"></span>
+    </div>
+  </div>
+
+  <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——窗口材质件与业务件在加载期就会读
+       window.api，必须先生效；Electron 下自动 no-op（由 preload.js 接管） -->
+  <script src="scripts/tauri-api.js"></script>
+  <!-- 子窗口材质/主题同步：electron-mica + data-material + 主题类（预览窗不加载） -->
+  <script src="scripts/window-material.js"></script>
+  <!-- 液态玻璃引擎：子窗口与主窗共用四档效果（按钮折射/弹性形动），分段栏等选择器在子窗无命中自动跳过 -->
+  <script src="scripts/liquid-glass.js"></script>
+  <script src="scripts/models-window.js"></script>
+</body>
+</html>

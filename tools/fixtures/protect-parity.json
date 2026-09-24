@@ -1,0 +1,188 @@
+{
+  "extras": {
+    "extraSubtree": [
+      "C:\\Users\\Administrator\\AppData\\Roaming\\Trim"
+    ],
+    "extraExact": [
+      "C:\\Users\\Administrator\\Desktop",
+      "C:\\Users\\Administrator\\Documents",
+      "C:\\Users\\Administrator\\Downloads"
+    ]
+  },
+  "rootsJson": "{\"subtree\":[\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\\\\trim\",\"c:\\\\windows\\\\system32\\\\config\"],\"exact\":[\"c:\\\\windows\",\"c:\\\\program files\",\"c:\\\\program files (x86)\",\"c:\\\\programdata\",\"c:\\\\users\\\\administrator\",\"c:\\\\users\\\\administrator\\\\desktop\",\"c:\\\\users\\\\administrator\\\\documents\",\"c:\\\\users\\\\administrator\\\\downloads\",\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\",\"c:\\\\users\\\\administrator\\\\appdata\\\\local\"],\"anyDrive\":[\"system volume information\"]}",
+  "roots": {
+    "subtree": [
+      "c:\\users\\administrator\\appdata\\roaming\\trim",
+      "c:\\windows\\system32\\config"
+    ],
+    "exact": [
+      "c:\\windows",
+      "c:\\program files",
+      "c:\\program files (x86)",
+      "c:\\programdata",
+      "c:\\users\\administrator",
+      "c:\\users\\administrator\\desktop",
+      "c:\\users\\administrator\\documents",
+      "c:\\users\\administrator\\downloads",
+      "c:\\users\\administrator\\appdata\\roaming",
+      "c:\\users\\administrator\\appdata\\local"
+    ],
+    "anyDrive": [
+      "system volume information"
+    ]
+  },
+  "vectors": [
+    {
+      "p": "",
+      "protected": true
+    },
+    {
+      "p": "   ",
+      "protected": true
+    },
+    {
+      "p": "C:",
+      "protected": true
+    },
+    {
+      "p": "C:\\",
+      "protected": true
+    },
+    {
+      "p": "D:\\",
+      "protected": true
+    },
+    {
+      "p": "C:\\Windows",
+      "protected": true
+    },
+    {
+      "p": "C:\\Windows\\",
+      "protected": true
+    },
+    {
+      "p": "C:\\Windows\\..\\Windows",
+      "protected": true
+    },
+    {
+      "p": "C:\\Windows\\System32\\config",
+      "protected": true
+    },
+    {
+      "p": "C:\\Windows\\System32\\config\\SAM",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Trim",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Trim\\cleanup\\custom\\x.json",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\Desktop",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\Documents",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\Downloads",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\AppData\\Roaming",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\AppData\\Local",
+      "protected": true
+    },
+    {
+      "p": "C:\\Program Files",
+      "protected": true
+    },
+    {
+      "p": "C:\\Program Files (x86)",
+      "protected": true
+    },
+    {
+      "p": "C:\\ProgramData",
+      "protected": true
+    },
+    {
+      "p": "C:\\System Volume Information",
+      "protected": true
+    },
+    {
+      "p": "C:\\System Volume Information\\foo",
+      "protected": true
+    },
+    {
+      "p": "D:\\System Volume Information\\foo",
+      "protected": true
+    },
+    {
+      "p": "\\\\?\\C:\\Windows\\Temp",
+      "protected": false
+    },
+    {
+      "p": "C:\\Windows\\Prefetch",
+      "protected": false
+    },
+    {
+      "p": "C:\\Windows\\SoftwareDistribution\\Download",
+      "protected": false
+    },
+    {
+      "p": "C:\\Windows\\Logs\\WindowsUpdate",
+      "protected": false
+    },
+    {
+      "p": "C:\\Windows\\System32\\winevt\\Logs",
+      "protected": false
+    },
+    {
+      "p": "C:\\Windows\\System32\\DriverStore\\Temp",
+      "protected": false
+    },
+    {
+      "p": "C:\\Windows\\WinSxS\\Temp",
+      "protected": false
+    },
+    {
+      "p": "C:\\Program Files (x86)\\Steam\\appcache",
+      "protected": false
+    },
+    {
+      "p": "C:\\$Recycle.Bin",
+      "protected": false
+    },
+    {
+      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Tencent\\QQ",
+      "protected": false
+    },
+    {
+      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Code",
+      "protected": false
+    },
+    {
+      "p": "C:\\Users\\Administrator\\Documents\\xwechat_files\\a\\temp",
+      "protected": false
+    },
+    {
+      "p": "C:\\Users\\Administrator\\AppData\\Local\\Temp",
+      "protected": false
+    },
+    {
+      "p": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp",
+      "protected": false
+    }
+  ]
+}

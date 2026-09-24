@@ -1,0 +1,190 @@
+// ps-mapping.mjs —— PS 脚本搬运映射（门禁与生成器共用，单一真源）
+//
+// 每项：JS 模块路径 + 取脚本的方式 → 目标 .ps1 文件名。三种取法：
+//   { call: 'fn' }            零参调用导出函数，取运行时字符串（最常见）
+//   { call: 'fn', args: [...] } 带**字面量**参数调用（参数含运行期变量时见下）
+//   { const: 'NAME' }         直接取模块导出的字符串常量
+//
+// 搬运为**纯搬运**：正文直接取自 JS 模块的**运行时字符串值**（不是源码字面量），
+// 因此 JS 模板字面量的转义折叠（如 `\*` → `*`、`\\` → `\`、`\uFEFF` 等）由 JS 引擎
+// 处理，Rust 侧拿到的就是 Electron 当时真正执行的那份脚本。
+//
+// 教训（Phase 1，门禁抓出）：手工搬运 device_info 时按「`\\` → `\`」的直觉还原，
+// 却把源码里本就只有一个反斜杠的 `'\*'` 保留成 `\*`——而 JS 运行时会把它折叠成 `*`，
+// 两者在 PowerShell 中语义不同，直接导致显卡匹配走错分支、显示器信息取错。
+// **结论：一律用 tools/sync-ps-from-js.mjs 生成，禁止手工誊抄。**
+//
+// ---- 参数化脚本（args + 哨兵）----
+// 某些脚本的正文里要嵌入运行期才确定的值（PID、安装包路径、规则库 JSON…）。
+// 处理方式：生成时用**不会与真实内容碰撞的哨兵字面量**调用一次，得到「模板 .ps1」；
+// Rust 侧在运行前把哨兵替换为真实值。哨兵必须满足：
+//   · 独特性：形如 __TRIM_XXX__（或 987654321 这类正常数据里不会出现的数字）；
+//   · 无变换：JS 对参数只做单引号转义/字符串化时，哨兵原样落入正文（否则见下）；
+//   · 标记 noRun：模板跑不出有意义结果（甚至可能改系统），行为层必须豁免。
+// 若 JS 对参数做了 JSON 序列化等多步变换，禁止硬凑哨兵——改用「每个变体一条映射」
+// （不同 actionId 各生成一份 .ps1），把变化收敛到生成期。
+// 
+// ---- 分域文件（并行迁移防冲突）----
+// 域专属映射放在 tools/ps-map/<域>.mjs，各导出 `MAP` 数组；本文件只做汇总。
+// 新增/修改脚本只需要动自己那个域文件，避免多人同时改本文件互相覆盖。
+
+import { MAP as memoryMap } from './ps-map/memory.mjs';
+import { MAP as netcheckMap } from './ps-map/netcheck.mjs';
+import { MAP as runtimesMap } from './ps-map/runtimes.mjs';
+import { MAP as netspeedMap } from './ps-map/netspeed.mjs';
+import { MAP as cleanupMap } from './ps-map/cleanup.mjs';
+import { MAP as pathsMap } from './ps-map/paths.mjs';
+import { MAP as modelsMap } from './ps-map/models.mjs';
+import { MAP as fontsMap } from './ps-map/fonts.mjs';
+import { MAP as aidescMap } from './ps-map/aidesc.mjs';
+// ---- D 批（删除与高危）----
+import { MAP as contextmenuMap } from './ps-map/contextmenu.mjs';
+import { MAP as startupMap } from './ps-map/startup.mjs';
+import { MAP as peripheralMap } from './ps-map/peripheral.mjs';
+import { MAP as optimizerMap } from './ps-map/optimizer.mjs';
+import { MAP as maintenanceMap } from './ps-map/maintenance.mjs';
+
+export { ORIGIN } from './ps-origin.mjs';
+import { ORIGIN } from './ps-origin.mjs';
+
+/** 核心（A 批）映射：设备/总览/实时网速等已迁移域 */
+const CORE_MAPPING = [
+  { name: 'sysdisk', js: `${ORIGIN}/src/scripts-powershell/sysdisk-scripts.js`, call: 'scan', ps1: 'sysdisk.ps1', note: '系统盘介质类型探测（只读）' },
+  { name: 'device_info', js: `${ORIGIN}/src/scripts-powershell/device-info-scripts.js`, call: 'scan', ps1: 'device_info.ps1', note: '设备信息采集（只读 CIM/WMI）' },
+  { name: 'overview_metrics', js: `${ORIGIN}/src/scripts-powershell/overview-scripts.js`, call: 'metrics', ps1: 'overview_metrics.ps1', note: '系统概览实时指标（只读）' },
+  { name: 'overview_checkup', js: `${ORIGIN}/src/scripts-powershell/overview-scripts.js`, call: 'checkup', ps1: 'overview_checkup.ps1', note: '系统体检（只读诊断）' },
+  { name: 'realtime_adapters', js: `${ORIGIN}/src/scripts-powershell/realtime-scripts.js`, call: 'adapters', ps1: 'realtime_adapters.ps1', note: '物理网卡枚举（只读）' },
+  { name: 'realtime_loss', js: `${ORIGIN}/src/scripts-powershell/realtime-scripts.js`, call: 'loss', ps1: 'realtime_loss.ps1', note: '丢包检测：ping 默认网关（只读）' },
+  // 内联脚本：不来自 scripts-powershell 模块，而是 main.js 里的模板字面量常量。
+  // 同样走「JS 引擎求值」路径，避免手工誊抄时的转义偏差。
+  { name: 'realtime_stream', inline: { file: `${ORIGIN}/main.js`, varName: 'REALTIME_STREAM_SCRIPT' }, ps1: 'realtime_stream.ps1', note: '常驻流式采样器（每秒一行 JSON，前台长驻，由 Rust 侧生命周期管理）', noRun: '长驻无限循环脚本，行为层不适用（文本层一致即等价）' },
+];
+
+export const MAPPING = [
+  ...CORE_MAPPING,
+  ...memoryMap,
+  ...netcheckMap,
+  ...runtimesMap,
+  ...netspeedMap,
+  ...cleanupMap,
+  ...pathsMap,
+  ...modelsMap,
+  ...fontsMap,
+  ...aidescMap,
+  ...contextmenuMap,
+  ...startupMap,
+  ...peripheralMap,
+  ...optimizerMap,
+  ...maintenanceMap,
+];
+
+export const PROVENANCE_BEGIN = '# <<<PROVENANCE';
+export const PROVENANCE_END = '# PROVENANCE>>>';
+
+/**
+ * 取映射项的脚本正文。
+ * - 模块项：require 后按 call/args 或 const 取运行时字符串；
+ * - 内联项：从源文件切出模板字面量，用 JS 引擎求值（转义折叠与运行期一致）。
+ */
+export function loadBody(entry, requireFn, readFileFn) {
+  if (entry.inline) {
+    const text = readFileFn(entry.inline.file, 'utf8');
+    const marker = `${entry.inline.varName} = \``;
+    const start = text.indexOf(marker);
+    if (start < 0) throw new Error(`${entry.inline.file} 未找到 ${entry.inline.varName}`);
+    const bodyStart = start + marker.length;
+    const end = text.indexOf('`', bodyStart);
+    if (end < 0) throw new Error(`${entry.inline.varName} 模板字面量未闭合`);
+    // eslint-disable-next-line no-new-func
+    return new Function('return `' + text.slice(bodyStart, end) + '`')();
+  }
+  if (entry.template) {
+    return loadTemplate(entry.template, requireFn, readFileFn);
+  }
+  const mod = requireFn(entry.js);
+  if (entry.const) {
+    const v = mod[entry.const];
+    if (typeof v !== 'string') throw new Error(`${entry.js} 导出 ${entry.const} 不是字符串`);
+    return v;
+  }
+  const fn = mod[entry.call];
+  if (typeof fn !== 'function') throw new Error(`${entry.js} 未导出函数 ${entry.call}`);
+  const out = fn(...(entry.args || []));
+  if (typeof out !== 'string') throw new Error(`${entry.js}.${entry.call}() 未返回字符串`);
+  return out;
+}
+
+/**
+ * 模板模式：取「带占位符的模板常量」而不是调用生成函数。
+ *
+ * 适用场景：一个脚本里有**多个**运行期占位符，且 JS 对每个占位符的变换各不相同
+ * （布尔→`$true/$false`、JSON→序列化+单引号转义…）。此时用哨兵调用会同时破坏
+ * 多处语义，改为把模板连同 `\${X_PLACEHOLDER}` 原样搬出，Rust 侧按 JS 的同口径
+ * 逐项替换——替换规则少且可见，且可被「同输入双生成对拍」验证（见 tools/check-ps-substitution.mjs）。
+ *
+ * 模板里的**真实插值**（`${DIAG.PS_PREAMBLE}` 这类，非占位符）必须在此求值：
+ * 由 `deps` 登记「插值根标识符 → 模块路径」，模块 exports 即为该值。
+ */
+export function loadTemplate(tpl, requireFn, readFileFn) {
+  const { file, varName, deps = {} } = tpl;
+  const text = readFileFn(file, 'utf8');
+  const marker = `${varName} = \``;
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error(`${file} 未找到 ${varName}`);
+  const bodyStart = start + marker.length;
+  const end = text.indexOf('`', bodyStart);
+  if (end < 0) throw new Error(`${varName} 模板字面量未闭合`);
+  const src = text.slice(bodyStart, end);
+  // 收集真实插值（跳过 \${X_PLACEHOLDER} 这类占位符）
+  const roots = new Set();
+  for (const m of src.matchAll(/\$\{([A-Za-z_$][\w$]*)/g)) {
+    const root = m[1];
+    if (root.endsWith('_PLACEHOLDER') || root === '__trimPlaceholder__') continue;
+    roots.add(root);
+  }
+  const names = [];
+  const values = [];
+  for (const r of roots) {
+    const dep = deps[r];
+    if (!dep) throw new Error(`${varName} 模板引用了未登记的插值 ${r}（请在 deps 中给出模块路径）`);
+    names.push(r);
+    // 两种用法都要支持：
+    //   · `${PROTECT.PROTECT_PATH_PS}` —— 值是**整个模块**（供 X.Y 取属性）
+    //   · `${RULE_PATH_EVAL_PS}`       —— 值是**模块的同名字符串导出**
+    //     （等价 JS 的 `const { RULE_PATH_EVAL_PS } = require(...)` 解构）。
+    // 同名导出优先，且仅认字符串——否则整体交模块（避免误把模块对象当插值值，
+    // 那会把 `[object Object]` 当脚本正文写进 .ps1：本条注释即该缺陷的修复记录）。
+    const m = requireFn(dep);
+    const sameName = m && typeof m === 'object' && typeof m[r] === 'string' ? m[r] : null;
+    values.push(sameName !== null ? sameName : m);
+  }
+  // eslint-disable-next-line no-new-func
+  return new Function(...names, 'return `' + src + '`')(...values);
+}
+
+/** 生成带来源标记的 .ps1 全文 */
+export function withProvenance(entry, body) {
+  const source = entry.inline
+    ? `${entry.inline.file} → 常量 ${entry.inline.varName}（内联模板字面量）`
+    : entry.template
+      ? `${entry.template.file} → 常量 ${entry.template.varName}（模板模式：占位符保留，运行前由 Rust 同口径替换）`
+      : entry.const
+      ? `${entry.js} → 常量 ${entry.const}`
+      : `${entry.js} → ${entry.call}(${(entry.args || []).map(a => JSON.stringify(a)).join(', ')})`;
+  const header = [
+    PROVENANCE_BEGIN,
+    `# 来源：${source}`,
+    `# 生成：tools/sync-ps-from-js.mjs 直接取 JS **运行时字符串值**写入，无任何字符替换；`,
+    `#       改动本文件必须在源仓库改 JS 后重跑生成器（校验见 tools/check-ps-extraction.mjs）。`,
+    ...(entry.note ? [`# 说明：${entry.note}`] : []),
+    PROVENANCE_END,
+  ].join('\n');
+  return `${header}\n${body}`;
+}
+
+/** 剥离来源标记块，返回正文（供门禁比对） */
+export function stripProvenance(text) {
+  const idx = text.indexOf(PROVENANCE_END);
+  if (idx < 0) return { body: text, provenance: null };
+  return { body: text.slice(idx + PROVENANCE_END.length), provenance: text.slice(0, idx + PROVENANCE_END.length) };
+}

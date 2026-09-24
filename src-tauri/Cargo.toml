@@ -1,0 +1,80 @@
+[package]
+name = "trim-tauri"
+version = "3.7.3"
+description = "Trim"
+authors = ["xiaoxu"]
+edition = "2021"
+rust-version = "1.98"
+
+# Phase 0 Spike：lib + bin 双目标。
+# - bin：桌面应用入口（windows_subsystem 在 main.rs 设置）
+# - lib：供 tests/ 集成测试链接（D6 验收三件套第 2 条，DPAPI 兼容性等）
+[lib]
+name = "trim_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# 原生引擎（扫描/清理 + 性能指标）：Phase 1 已 lib 化（加 [lib] trim_finder，CLI 入口保留）。
+# 直调替代 spawn finder.exe：高频轮询类命令（ov-metrics ~2.5s 一拍、net-sample 每秒一帧）
+# 不再付进程创建成本。Phase 5 会把它并入本项目（届时改为本地路径/workspace 成员）。
+trim-finder = { path = "../../Trim/native-scanner" }
+# 原生文件对话框（log:export 保存 / paths:browse 选目录）——官方插件，仅用 Rust 侧 API，
+# 不向渲染层暴露 JS 命令面（少一个权限面）
+tauri-plugin-dialog = "2"
+# D4 液态玻璃材质映射：mica / tabbed(mica-alt) / acrylic
+# 官方 tauri-apps 维护（仓库名 tauri-plugin-vibrancy，Rust crate 名 window-vibrancy）
+window-vibrancy = "0.8"
+serde = { version = "1", features = ["derive"] }
+# preserve_order：C 批规则库验签必需——JS 的 canonicalBodyText 是
+# `JSON.stringify({...parsed, _sig: undefined})`，键序 = 原文件解析插入序；
+# 默认 BTreeMap 会重排键，导致同一份规则文件在 JS 下验签通过、Rust 下失败。
+serde_json = { version = "1", features = ["preserve_order"] }
+base64 = "0.22"
+# D5：Chromium OSCrypt v10 = AES-256-GCM（Phase 0 第 6 项实测，见 safestorage.rs）
+aes-gcm = "0.10"
+# paths:app-icon / paths:file-icon：Shell 图标 → PNG dataURL
+# （Electron app.getFileIcon 返回 NativeImage.toDataURL()，即 PNG；保持格式一致）
+png = "0.17"
+# C 批 cleanup：规则库 ed25519 验签（Electron 侧 crypto.verify(null, body, PEM, sig)）。
+# 只取 dalek 的「验签」能力（verify_strict），不启用签名侧特性。
+ed25519-dalek = "2"
+# C 批 runtimes：安装包 SHA-256 + 尺寸双校验（闸门 2，见 main.js downloadRedist）
+sha2 = "0.10"
+
+# 测试专用：tauri::test（MockRuntime）无窗口 IPC 集成测试（D6 验收三件套第 2 条）。
+# 只在此处打开 `test` 特性——[dependencies] 里的 tauri 不带它，生产构建不含测试代码。
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
+# Windows 原生 API：
+# - Dwm：DWM 圆角（forceRoundCorners 等价）、SystemBackdrop 兜底
+# - SystemInformation：RtlGetVersion 取真实内部版本号（getWindowsBuild/getFluentSupportLevel 等价）
+# - UI::Shell：IsUserAnAdmin（elevate:status 等价物，Phase 0 仅信息展示）
+# - Security::Cryptography + System::Memory：DPAPI 兼容读（D5，dpapi:v1: 解密）
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_SystemInformation",
+    "Win32_System_Time",
+    "Win32_Security_Cryptography",
+    # Shell 图标提取（SHGetFileInfoW 需要 Storage_FileSystem + WindowsAndMessaging 门控）
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    # C 批 HTTP：runtimes 下载安装包、aidesc/models POST JSON 一律走 Windows 原生
+    # WinHTTP（仅新增特性，不新增第三方 HTTP crate；Electron 侧分别是主进程 fetch/下载）
+    "Win32_Networking_WinHttp",
+    # windows 0.61 把 RtlGetVersion 划到 Wdk 命名空间
+    "Wdk_System_SystemServices",
+]
+
+[profile.dev]
+# Spike 调试期增量优化，保持默认；不动 release 配置（产物新鲜度门禁见方案 Phase 4 第 6 条）
+incremental = true

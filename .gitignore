@@ -1,0 +1,31 @@
+# ==================== 绝不入库：本机密钥 ====================
+# docs/simi/ 存的是仓库 deploy key **私钥明文**（trim-tauri.*.private-key.pem）。
+# 一旦入库并推送，等于把「同一把密钥的公钥与私钥」放进同一仓库，任何克隆方都能推送。
+# 对应公钥配置在托管平台的 Deploy key（需勾选写权限），私钥只留在本机。
+docs/simi/
+*.pem
+*.key
+*.pfx
+*.p12
+
+# ==================== 构建产物 ====================
+# src-tauri/target 本机实测 19 GB，纯编译缓存
+src-tauri/target/
+# tauri-build 构建期自动重新生成（acl-manifests / capabilities / *-schema.json）
+src-tauri/gen/
+node_modules/
+dist/
+build-release/
+
+# ==================== 本机临时件与日志 ====================
+*.log
+tmp/
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# ==================== 本机智能体工作区 ====================
+# 环境强绑定信息（绝对路径、本机操作姿势），随仓库分发会误导其他机器
+.qoder/
+.workbuddy/
+.opencode/
