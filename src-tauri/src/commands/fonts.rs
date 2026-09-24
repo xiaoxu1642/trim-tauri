@@ -196,6 +196,9 @@ pub fn fonts_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, 
                 "available": available,
                 "builtin": false,
                 "imported": true,
+                // copyPath = 原始绝对路径，供渲染层经 window.api.pathToUrl 走 asset 协议
+                // 生成可加载 URL（Tauri 页源跨不到 file:，copyUrl 只是 Electron 兼容位）
+                "copyPath": if available { copy_path.clone() } else { String::new() },
                 "copyUrl": if available { path_to_file_url(&copy_path) } else { String::new() },
                 "sourcePath": truthy_string(record.get("sourcePath")).unwrap_or_default(),
             }));
@@ -307,7 +310,11 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     log::write_log("info", &format!("导入字体: {family}（副本已复制到 {copy_str}）"));
     Ok(json!({
         "success": true,
-        "data": { "family": family, "copyUrl": path_to_file_url(&copy_str) }
+        "data": {
+            "family": family,
+            "copyPath": copy_str.clone(),
+            "copyUrl": path_to_file_url(&copy_str),
+        }
     }))
 }
 

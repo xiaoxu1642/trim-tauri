@@ -194,7 +194,12 @@
         const imported = resp.data.imported;
         const importedEntry = fontList.find(f => f.imported);
         if (importedEntry && importedEntry.copyUrl) {
-          injectImportedFace(importedEntry.family, importedEntry.copyUrl);
+          // Tauri 下 copyUrl 的 file:/// 跨不到（页源是 http://tauri.localhost），
+          // 改用原始 copyPath 经桥接层生成 asset URL；无桥接（Electron 轨）时沿用 copyUrl。
+          const url = (window.api?.pathToUrl && importedEntry.copyPath)
+            ? window.api.pathToUrl(importedEntry.copyPath)
+            : importedEntry.copyUrl;
+          injectImportedFace(importedEntry.family, url);
         } else if (!imported) {
           injectImportedFace('', '');
         }

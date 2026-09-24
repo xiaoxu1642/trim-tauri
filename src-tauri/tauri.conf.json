@@ -10,7 +10,17 @@
     "withGlobalTauri": false,
     "windows": [],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": [
+            "$APPDATA/com.xiaoxu.trim/backgrounds/**",
+            "$APPDATA/com.xiaoxu.trim/fonts/**"
+          ],
+          "deny": []
+        }
+      }
     }
   },
   "bundle": {

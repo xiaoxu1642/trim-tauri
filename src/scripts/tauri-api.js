@@ -295,6 +295,29 @@
   // --------------------------------------------------------------------------
 
   var api = {
+    /**
+     * 绝对路径 → 页面可直接加载的 URL。
+     *
+     * 为什么要走这里而不是沿用调用方手拼的 `file:///`：Tauri 的页源是
+     * `http://tauri.localhost`，Chromium 会拦掉跨源的 `file:` 子资源，
+     * CSP 里留着 `file:` 也放行不了 —— 表现为「路径正确但图/字体就是不出来」。
+     * 必须走 asset 协议（conf 的 assetProtocol.scope 只放行了 backgrounds 与 fonts）。
+     *
+     * URL 形态按平台不同（Windows 是 `http://asset.localhost/<encoded>`，
+     * macOS/Linux 是 `asset://localhost/<encoded>`），所以**不在前端复刻规则**，
+     * 直接用 Tauri 注入脚本提供的 convertFileSrc。
+     * 取不到时退回 file:///，保证非 Tauri 环境（或注入脚本缺席）不白屏。
+     */
+    pathToUrl: function (filePath) {
+      if (!filePath) return '';
+      try {
+        if (internals && typeof internals.convertFileSrc === 'function') {
+          return internals.convertFileSrc(String(filePath));
+        }
+      } catch (e) { /* 落兜底 */ }
+      return 'file:///' + String(filePath).replace(/\\/g, '/').replace(/^\//, '');
+    },
+
     app: {
       getInfo: function () { return invokeChannel('app:get-info'); },
       getTheme: function () { return invokeChannel('app:get-theme'); },

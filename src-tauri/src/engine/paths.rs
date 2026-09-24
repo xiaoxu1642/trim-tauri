@@ -17,7 +17,8 @@ const APP_NAME: &str = "Trim";
 pub const IDENTIFIER: &str = "com.xiaoxu.trim";
 const PORTABLE_MARKER: &str = "Trim.portable";
 
-/// 从旧数据目录一次性搬迁的文件清单（D5 七个数据文件 + Local State 密钥载体）
+/// 从旧数据目录一次性搬迁的文件清单（D5 七个数据文件 + Local State 密钥载体，
+/// 另加 `update-mirror.json` = E 批 updater 的线路偏好）
 const MIGRATION_FILES: &[&str] = &[
     "appearance.json",
     "settings.json",
@@ -26,7 +27,17 @@ const MIGRATION_FILES: &[&str] = &[
     "system-info.json",
     "paths.json",
     "Local State",
+    "update-mirror.json",
 ];
+
+/// 需整体搬迁的**目录**清单（逐个文件、缺失才复制）。
+/// 目前只列 `backgrounds`：它是用户手工导入的背景图，本地无从再生。
+///
+/// 已知仍有同类未列项（`startup-backup/`、`peripheral-backup/`、`fileclean-backup/`、
+/// `fonts/`、`optimizer-backups.json`）—— 全都是「还原」功能依赖的数据，丢了就
+/// 只能保持已改状态、回不去。属迁移方案 D5 的既有缺口而非本批引入，
+/// 搬哪些需产品确认（旧目录里可能有半截/失效备份），故此处不擅自扩列。
+const MIGRATION_DIRS: &[&str] = &["backgrounds"];
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -157,6 +168,20 @@ pub fn migrate_legacy_once() -> Option<String> {
                 "已从旧数据目录迁移 {copied} 个文件（含 Local State 密钥载体）；旧目录保留可重跑"
             ));
         }
+        // 目录类（如导入的背景图）：同样「缺失才复制」，失败不阻塞启动
+        let mut dirs = 0usize;
+        for name in MIGRATION_DIRS {
+            let src = legacy.join(name);
+            if !src.is_dir() {
+                continue;
+            }
+            if copy_dir_missing_only(&src, &target.join(name)).is_ok() {
+                dirs += 1;
+            }
+        }
+        if dirs > 0 {
+            notes.push(format!("已迁移 {dirs} 个数据子目录（背景图等不可再生内容）"));
+        }
     }
 
     if notes.is_empty() {
@@ -180,4 +205,58 @@ fn copy_dir_missing_only(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一个唯一命名的临时根，测试结束自行删除（不依赖 tempfile crate）
+    fn sandbox(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trim-paths-test-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn 迁移清单含不可再生的用户数据() {
+        // 这几项丢了用户无法恢复，任何"精简清单"的改动都必须先确认它们还在
+        for f in ["appearance.json", "settings.json", "paths.json", "Local State", "update-mirror.json"] {
+            assert!(MIGRATION_FILES.contains(&f), "{f} 不在迁移文件清单");
+        }
+        assert!(
+            MIGRATION_DIRS.contains(&"backgrounds"),
+            "导入的背景图是本地无从再生的内容，必须随迁"
+        );
+    }
+
+    #[test]
+    fn 目录搬迁绝不覆盖目标已有文件() {
+        let root = sandbox("noclobber");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("a.txt"), b"old-from-legacy").unwrap();
+        std::fs::write(src.join("nested/b.txt"), b"deep").unwrap();
+        // 目标已存在同名文件（用户在新版里重新导入过）—— 必须保留新数据
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("a.txt"), b"new-user-data").unwrap();
+
+        copy_dir_missing_only(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"new-user-data", "旧目录覆盖了用户新数据");
+        assert_eq!(std::fs::read(dst.join("nested/b.txt")).unwrap(), b"deep", "递归子目录未搬迁");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 便携判定在开发构建下恒为标准模式() {
+        // 防回归：dev 下 exe 位于 target/debug，若真按 Trim.portable 判定会把
+        // 构建目录当数据盘。当前实现用 cfg!(debug_assertions) 短路，测试必然跑在 dev。
+        assert!(!is_portable(), "调试构建不得判为便携模式");
+    }
 }

@@ -375,12 +375,20 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
   // 应用背景图片：body::before 水印式铺底（置于内容之上、弹窗之下）。
   // 批次：雾化度语义反转 —— 入参 opacity 现为「雾化度」（0=零效果纯展示图片，100=雾化效果100%），
   // 图片不透明度 = (100 - 雾化度)/100；旧语义（值=图片不透明度）已在读取侧一次性迁移。
+  // 背景图/缩略图的 URL 构造：Tauri 下必须走 asset 协议（页源 http://tauri.localhost
+  // 跨不到 file:），Electron 下 window.api.pathToUrl 不存在、退回原来的 file:/// 手拼。
+  function toImgUrl(file) {
+    if (!file) return '';
+    if (window.api && typeof window.api.pathToUrl === 'function') return window.api.pathToUrl(file);
+    return 'file:///' + String(file).replace(/\\/g, '/').replace(/^\//, '');
+  }
+
   // 批次：背景视角可调 —— posX/posY 为 0-100 的裁切窗口位置百分比（cover 下只对图片超出
   // 窗口的那根轴生效），不传回落 50/50（居中，与旧行为一致）。
   function applyBackground(file, opacity, posX, posY) {
     const root = document.documentElement;
     if (file) {
-      const url = file.startsWith('file:') ? file : 'file:///' + String(file).replace(/\\/g, '/').replace(/^\//, '');
+      const url = toImgUrl(file);
       root.style.setProperty('--app-bg-image', `url("${url}")`);
       const fog = opacity == null ? 85 : opacity;
       root.style.setProperty('--app-bg-opacity', String((100 - fog) / 100));
@@ -486,7 +494,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
       });
     });
     if (currentRow) currentRow.style.display = ap.bgPath ? 'flex' : 'none';
-    if (thumb && ap.bgPath) thumb.src = 'file:///' + String(ap.bgPath).replace(/\\/g, '/').replace(/^\//, '');
+    if (thumb && ap.bgPath) thumb.src = toImgUrl(ap.bgPath);
   }
 
   function refreshBgCurrent(ap) {
@@ -502,7 +510,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     const posYVal = document.getElementById('bgPosYVal');
     if (currentRow) currentRow.style.display = ap.bgPath ? 'flex' : 'none';
     if (viewRow) viewRow.style.display = ap.bgPath ? 'flex' : 'none';
-    if (thumb && ap.bgPath) thumb.src = 'file:///' + String(ap.bgPath).replace(/\\/g, '/').replace(/^\//, '');
+    if (thumb && ap.bgPath) thumb.src = toImgUrl(ap.bgPath);
     if (slider) {
       slider.value = ap.bgOpacity == null ? 85 : ap.bgOpacity;
       // 编程式赋值不触发 input 事件，手动同步轨道填充（ds.slider）

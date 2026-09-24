@@ -351,6 +351,11 @@ fn image_mime(ext: &str) -> Option<&'static str> {
 }
 
 /// fileclean:read-image —— 仅扫描范围内的图片，≤10MB，返回 dataURL
+///
+/// 为什么**不**改走 asset 协议（与 backgrounds/fonts 不同处置）：本通道的图源是用户在
+/// paths.json 里自选的 QQ / 微信目录，位置任意且运行时才知道；asset 协议的 scope 只能是
+/// `tauri.conf.json` 里的静态 glob，要覆盖它们就得放开整个用户目录 —— 那是把「webview 可读
+/// 全盘」当成省一次 base64 的代价，不划算。dataURL 路径本就可用，且有 ≤10MB 上界兜着。
 #[tauri::command]
 pub async fn fileclean_read_image<R: Runtime>(
     window: WebviewWindow<R>,
