@@ -72,10 +72,16 @@ const RULES_MAX_SIZE: usize = 2 * 1024 * 1024;
 /// 单源超时（毫秒）
 const RULES_DOWNLOAD_TIMEOUT_MS: u64 = 15000;
 /// 发布源按序回退：GitHub raw → jsDelivr → gh-proxy
+///
+/// 审查 v2-C1：这三条原本全指向 `xiaoxu1642/Trim`（Electron 轨）的 `src/data/…`，实测该路径
+/// 在 `main`/`HEAD` 两个 ref 上都 **404**（同仓库的 `readme.md` 是 200，所以不是仓库或分支问题，
+/// 是这个文件根本没在那边发布）；而规则库的真源现在在本仓库 `src-tauri/data/`，同三条源的
+/// 新路径实测 `jsDelivr` 与 `gh-proxy` 均 **200**。指向不存在的源意味着**在线规则更新一直是
+/// 全源失败**、只能靠内置副本，而这条回退链看起来"配好了"——正是最容易被忽略的形态。
 const RULES_UPDATE_URLS: [&str; 3] = [
-    "https://raw.githubusercontent.com/xiaoxu1642/Trim/main/src/data/cleanup-rules.json",
-    "https://cdn.jsdelivr.net/gh/xiaoxu1642/Trim@main/src/data/cleanup-rules.json",
-    "https://gh-proxy.com/https://raw.githubusercontent.com/xiaoxu1642/Trim/main/src/data/cleanup-rules.json",
+    "https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/src-tauri/data/cleanup-rules.json",
+    "https://cdn.jsdelivr.net/gh/xiaoxu1642/trim-tauri@main/src-tauri/data/cleanup-rules.json",
+    "https://gh-proxy.com/https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/src-tauri/data/cleanup-rules.json",
 ];
 /// 可删文件清单防呆上限（D13）
 const PLAN_CAP_PER_ITEM: usize = 100_000;
