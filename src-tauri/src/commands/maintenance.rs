@@ -163,10 +163,31 @@ async fn run_one<R: Runtime>(window: &WebviewWindow<R>, task_id: &str, script: &
     };
 
     log::write_log("info", &format!("维护任务开始: {task_id}"));
-    let out = pwsh::run_file(
+    // 真流式：任务脚本（DISM / sfc / 组件清理等）常跑数分钟，输出必须边出边上屏，
+    // 不能等整条命令结束才一次性给 —— 那样界面看起来像卡死。
+    // 推送的行集合与下面收尾解析里进 `lines` 的**完全同一套**（协议行与空行不推），
+    // 否则实时看到的和最终结果对不上。渲染层只从事件追加、不读返回体的 output，
+    // 故不会重复显示。
+    let out_win = window.clone();
+    // 必须 to_string() 而不是 clone()：task_id 是 &str，&str::clone() 返回的还是 &str，
+    // 闭包就会捕获借用而跨不进 'static 的读取线程。
+    let out_task = task_id.to_string();
+    let out = pwsh::run_file_streaming(
         &script_path,
         Duration::from_secs(1800),
         Some(&format!("maintenance.{task_id}")),
+        move |line| {
+            let line = line.trim_end();
+            if line.is_empty()
+                || line.starts_with("@@RESULT@@")
+                || line.starts_with("@@DIAG@@")
+                || line.starts_with("@@WU_OLD_BAK@@")
+            {
+                return;
+            }
+            let _ = out_win
+                .emit("maintenance:output", json!({ "taskId": out_task, "line": line }));
+        },
     );
     let _ = std::fs::remove_file(&script_path);
 

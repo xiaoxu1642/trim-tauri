@@ -234,6 +234,35 @@ fn random_token() -> String {
 /// 执行临时脚本文件（`-File` 方式，避免命令行长度上限）。
 /// 超时 kill 并返回 `timed_out=true`（调用方按 code=-1 处理，与 JS 侧一致）。
 pub fn run_file(script_path: &Path, timeout: Duration, diag_op: Option<&str>) -> Result<PsOutput, String> {
+    run_file_impl(script_path, timeout, diag_op, None)
+}
+
+/// 流式执行：脚本每输出一行就立刻交给 `on_line`，同时**仍然**累积完整 stdout，
+/// 所以 `@@RESULT@@` / `@@DIAG@@` 等收尾后处理与 `run_file` 完全一致。
+///
+/// 为什么单独开函数、而不是给 `run_file` 加一个 `Option<回调>`：那样这条路径是实时的
+/// 这件事会藏进一个 `None` 里。两个必须让读代码的人一眼看到的约束：
+/// 1. **回调在 stdout 读取线程上执行** —— 回调里阻塞（等锁、等通道）会直接把管道堵住，
+///    脚本随后的输出全卡住，最后撞超时。只准做投递（`emit`）这类有界动作。
+/// 2. 超时 kill 后仍可能有已缓冲的行回调出来，调用方需自己判幂等。
+pub fn run_file_streaming<F>(
+    script_path: &Path,
+    timeout: Duration,
+    diag_op: Option<&str>,
+    on_line: F,
+) -> Result<PsOutput, String>
+where
+    F: FnMut(&str) + Send + 'static,
+{
+    run_file_impl(script_path, timeout, diag_op, Some(Box::new(on_line)))
+}
+
+fn run_file_impl(
+    script_path: &Path,
+    timeout: Duration,
+    diag_op: Option<&str>,
+    on_line: Option<Box<dyn FnMut(&str) + Send>>,
+) -> Result<PsOutput, String> {
     let exe = resolve_pwsh().map_err(|(_, msg)| msg)?;
     let trim_tmp = paths::temp_script_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut child = Command::new(&exe)
@@ -254,8 +283,8 @@ pub fn run_file(script_path: &Path, timeout: Duration, diag_op: Option<&str>) ->
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let stdout_handle = std::thread::spawn(move || read_all(stdout_pipe));
-    let stderr_handle = std::thread::spawn(move || read_all(stderr_pipe));
+    let stdout_handle = std::thread::spawn(move || read_all(stdout_pipe, on_line));
+    let stderr_handle = std::thread::spawn(move || read_all(stderr_pipe, None));
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
@@ -301,12 +330,181 @@ pub fn run_file(script_path: &Path, timeout: Duration, diag_op: Option<&str>) ->
     })
 }
 
-fn read_all(pipe: Option<impl Read>) -> String {
-    let mut buf = Vec::new();
+/// 读尽管道；带 `on_line` 时边读边回调完整行。
+///
+/// 逐行切分**不改变**最终返回的字符串：所有字节（含 `\r`、`\n` 与末尾残段）都照原样
+/// 进 `acc`，最后仍按整体 `from_utf8_lossy`。回调收到的行是去掉尾部 `\r` 的内容；
+/// 末尾没有换行的残段在流结束时也补发一次，保证「回调看到的行集合 == stdout 按行切」。
+fn read_all(pipe: Option<impl Read>, mut on_line: Option<Box<dyn FnMut(&str) + Send>>) -> String {
+    let mut acc: Vec<u8> = Vec::new();
+    let mut line_buf: Vec<u8> = Vec::new();
     if let Some(mut p) = pipe {
-        let _ = p.read_to_end(&mut buf);
+        let mut chunk = [0u8; 4096];
+        loop {
+            match p.read(&mut chunk) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    acc.extend_from_slice(&chunk[..n]);
+                    if let Some(cb) = on_line.as_mut() {
+                        for b in &chunk[..n] {
+                            if *b == b'\n' {
+                                let line = String::from_utf8_lossy(&line_buf).replace('\r', "");
+                                cb(&line);
+                                line_buf.clear();
+                            } else {
+                                line_buf.push(*b);
+                            }
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if let Some(cb) = on_line.as_mut() {
+            if !line_buf.is_empty() {
+                let line = String::from_utf8_lossy(&line_buf).replace('\r', "");
+                cb(&line);
+                line_buf.clear();
+            }
+        }
     }
-    String::from_utf8_lossy(&buf).to_string()
+    String::from_utf8_lossy(&acc).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// 跑一次带回调的读取，返回（最终 stdout 字符串, 回调收到的行序列）。
+    /// 回调要求 `Send + 'static`，所以收集容器只能放 Arc<Mutex<..>> 里由闭包持有，
+    /// 读完后 Arc 引用数已归 1，可安全 into_inner。
+    fn collect(input: &str) -> (String, Vec<String>) {
+        let shared = Arc::new(Mutex::new(Vec::<String>::new()));
+        let s = {
+            let shared = Arc::clone(&shared);
+            Box::new(move |l: &str| shared.lock().unwrap().push(l.to_string()))
+                as Box<dyn FnMut(&str) + Send>
+        };
+        let out = read_all(Some(std::io::Cursor::new(input.as_bytes())), Some(s));
+        let lines = Arc::try_unwrap(shared)
+            .expect("回调闭包应已随 read_all 结束而释放")
+            .into_inner()
+            .unwrap();
+        (out, lines)
+    }
+
+    #[test]
+    fn 加回调不得改变最终stdout字节() {
+        let input = "a\r\nb\n@@PROGRESS:50@@\n\rc";
+        let plain = read_all(Some(std::io::Cursor::new(input.as_bytes())), None);
+        let (with_cb, _) = collect(input);
+        assert_eq!(plain, with_cb, "流式路径必须与原来的一次性收集逐字节一致");
+        assert_eq!(with_cb, input);
+    }
+
+    #[test]
+    fn 回调行集合等于按行切分() {
+        let (_, lines) = collect("one\r\ntwo\nthree\n");
+        // \r 被剥掉；每个 \n 触发一行；结尾本就有换行故不产生空尾行
+        assert_eq!(lines, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn 末尾无换行的残段也必须补发() {
+        // 脚本被超时 kill 时最后一行常常没有换行。不补发就会丢一条 @@PROGRESS@@，
+        // 进度条永久停在半路 —— 正是本次改造要消灭的现象。
+        let (_, lines) = collect("a\nTAIL");
+        assert_eq!(lines, vec!["a", "TAIL"]);
+    }
+
+    #[test]
+    fn 空输入得到空串与零行() {
+        let (s, lines) = collect("");
+        assert_eq!(s, "");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn 中文行不被拆坏() {
+        // \n 字节不可能出现在 UTF-8 多字节序列内部，故逐行 lossy 与整体 lossy 等价。
+        let input = "清理完成\n开始扫描\n旧缓存备份\n";
+        let (s, lines) = collect(input);
+        assert_eq!(s, input);
+        assert_eq!(lines, vec!["清理完成", "开始扫描", "旧缓存备份"]);
+    }
+
+    #[test]
+    fn 协议行读取层不得吞行() {
+        let (_, lines) = collect("@@PROGRESS:0@@\n@@PROGRESS:37@@\n@@PROGRESS:37@@\n@@DONE@@\n");
+        let pcts: Vec<u32> = lines
+            .iter()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix("@@PROGRESS:")
+                    .and_then(|x| x.strip_suffix("@@"))
+                    .and_then(|x| x.parse().ok())
+            })
+            .collect();
+        // 同值重复行照原样交出去，去重是调用方的策略，读取层不做判断
+        assert_eq!(pcts, vec![0, 37, 37]);
+    }
+
+    #[test]
+    fn 大输出跨多个读取块仍完整() {
+        // 单块 4096 字节，构造 3 倍长度的行序列逼出多次 read 拼接
+        let input = "x".repeat(5000) + "\n" + &"y".repeat(8000) + "\n";
+        let (s, lines) = collect(&input);
+        assert_eq!(s, input);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), 5000);
+        assert_eq!(lines[1].len(), 8000);
+    }
+
+    /// 真机串流验证：上面几条只测了读取器，这条测的是**整条 pwsh 执行路径**。
+    /// 只回显文本，不碰注册表/文件/进程，故无副作用；需要本机装了 PowerShell 7，
+    /// 与其余 7 条慢测同属发布前门禁。
+    #[test]
+    #[ignore = "真实启动 PowerShell 7，发布前门禁跑"]
+    fn 真实pwsh流式按序收到每一行协议() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // 故意在协议行之间夹中文与普通行，验证不串字、不吞行、顺序不乱
+        let script = "Write-Output '@@PROGRESS:0@@'\n\
+                      Write-Output '正在扫描组件存储'\n\
+                      Write-Output '@@PROGRESS:50@@'\n\
+                      Write-Output '@@PROGRESS:50@@'\n\
+                      Write-Output '@@DONE@@'";
+        let path = write_temp_script(script, ".ps1").unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let count = Arc::new(AtomicUsize::new(0));
+        let (s, c) = (Arc::clone(&seen), Arc::clone(&count));
+        let out = run_file_streaming(
+            &path,
+            Duration::from_secs(60),
+            None,
+            move |line| {
+                c.fetch_add(1, Ordering::SeqCst);
+                s.lock().unwrap().push(line.to_string());
+            },
+        );
+        let _ = std::fs::remove_file(&path);
+        let out = out.expect("pwsh 流式执行失败");
+        let lines = seen.lock().unwrap().clone();
+
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert_eq!(
+            lines,
+            vec!["@@PROGRESS:0@@", "正在扫描组件存储", "@@PROGRESS:50@@", "@@PROGRESS:50@@", "@@DONE@@"],
+            "回调必须按序收到每一行，包括同值重复行（去重是调用方的策略）"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), lines.len());
+        // 流式与一次性收集必须给出同一个 stdout，收尾解析才不会看到不同视图
+        assert!(out.stdout.contains("@@DONE@@"), "累积 stdout 应含全部输出: {}", out.stdout);
+        for probe in ["@@PROGRESS:50@@", "正在扫描组件存储"] {
+            assert!(out.stdout.contains(probe), "stdout 丢了 {probe}");
+        }
+    }
 }
 
 /// 清理超过 1 小时的临时脚本（含历史版本遗留在全局可写 %TEMP%\Trim 下的残留）。

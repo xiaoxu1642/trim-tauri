@@ -652,10 +652,35 @@ pub async fn optimizer_run<R: Runtime>(
             return json!({ "success": false, "message": e });
         }
     };
-    let run = pwsh::run_file(
+    // 真流式进度：脚本每写一行 @@PROGRESS:<pct>@@ 就立刻推给渲染层，
+    // 而不是等整条命令跑完补发一个 100%（批量优化项可能几分钟，期间界面必须是动的）。
+    // 去重状态用闭包私有的 Cell 而不是全局 static：全局的要手动复位、并发跑两个
+    // 优化项时会互相把对方的进度判成"没变化"而漏发。Cell<u32> 是 Send，满足回调约束。
+    let progress_win = window.clone();
+    let progress_id = option_id.clone();
+    // u32::MAX 作初值：脚本第一行哪怕是 0% 也与初值不同，必定发出
+    let last_pct = std::cell::Cell::new(u32::MAX);
+    let run = pwsh::run_file_streaming(
         &path,
         std::time::Duration::from_secs(timeout),
         Some("optimizer.apply"),
+        move |line| {
+            let Some(pct) = line
+                .trim()
+                .strip_prefix("@@PROGRESS:")
+                .and_then(|x| x.strip_suffix("@@"))
+            else {
+                return;
+            };
+            let Ok(p) = pct.parse::<u32>() else { return };
+            if last_pct.get() != p {
+                last_pct.set(p);
+                let _ = progress_win.emit(
+                    "optimizer:progress",
+                    json!({ "optionId": progress_id, "percent": p }),
+                );
+            }
+        },
     );
     let _ = std::fs::remove_file(&path);
     let Ok(out) = run else {
@@ -716,7 +741,8 @@ pub async fn optimizer_run<R: Runtime>(
         "完成".to_string()
     };
 
-    // 进度收尾事件（run_file 为一次性收集，脚本结尾恒为 100）
+    // 进度收尾：脚本自己最后一行就是 @@PROGRESS:100@@，正常路径已由上面的流式回调发过；
+    // 这里再兜一次，保证脚本在 9x% 处异常中断时进度条不会永久停在半路。
     if ok {
         let _ = window.emit("optimizer:progress", json!({ "optionId": option_id, "percent": 100 }));
     }
