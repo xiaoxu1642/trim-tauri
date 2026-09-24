@@ -27,16 +27,15 @@
 //! 虚高的 `version` 与某个旧版的**合法**签名配对，把用户降到一个真实但过期的构建上。
 //! 开了它，保证强度才与上游「清单原文被内置公钥背书」等价。
 //!
-//! # 尚未闭环（Phase 4 的活，别当已完成）
+//! # 闭环状态（2026-09-25 v0.1.2）
 //!
-//! 1. `latest.json` 与 minisign 密钥对**都还不存在**：需 `tauri build` 打开
-//!    `bundle.createUpdaterArtifacts` 产出 `.sig`，签名私钥进 CI secret、公钥回填 conf。
-//!    在那之前 `updater:check` 会稳定落到 error 相位（端点 404 / 公钥未配置），渲染层按
-//!    「更新失败，点击按钮重试」呈现 —— 是预期的未就绪，不是链路 bug。
-//! 2. 端点仓库归属待定：现有 Releases 在 `xiaoxu1642/Trim`（Electron 产物）。Tauri 版产物
-//!    若发到 `xiaoxu1642/trim-tauri`，需同步改本文件 `FEED_BASES`；两种产品形态混在同一个
-//!    Releases 下会让用户被装上错的安装包。
-//! 3. 老 Electron 用户如何升过来（Q2 选「发布说明 + 应用内引导下载」）在 Phase 4 实现。
+//! 1. minisign 密钥对已生成，公钥已回填 	auri.conf.json > plugins.updater.pubkey；
+//!    私钥在本机 ~/.tauri-signer/trim-updater.key（密码见发版记录），CI 发版时须以
+//!    TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD 两个 secret 注入。
+//! 2. FEEDS 三条已改指 xiaoxu1642/trim-tauri/releases/latest/download/（本仓库），
+//!    与 Electron 版 xiaoxu1642/Trim 完全分仓，不会混装。
+//! 3. v0.1.2 是首发手动安装包（无 latest.json，updater 从下一版 v0.1.3 起生效）；
+//!    老 Electron 用户迁移引导仍待 Phase 4 实现。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -62,17 +61,17 @@ const FEEDS: &[(&str, &str, &str)] = &[
     (
         "github",
         "GitHub 直连",
-        "https://github.com/xiaoxu1642/Trim/releases/latest/download/",
+        "https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/",
     ),
     (
         "gh-proxy",
         "gh-proxy 镜像",
-        "https://gh-proxy.com/https://github.com/xiaoxu1642/Trim/releases/latest/download/",
+        "https://gh-proxy.com/https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/",
     ),
     (
         "ghfast",
         "ghfast 镜像",
-        "https://ghfast.top/https://github.com/xiaoxu1642/Trim/releases/latest/download/",
+        "https://ghfast.top/https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/",
     ),
 ];
 
