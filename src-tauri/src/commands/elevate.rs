@@ -219,9 +219,9 @@ pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
     // 审查 1-3 同款：UAC 提权是最高价值 IPC 目标，只认主窗口
     guard::guard(&window, guard::MAIN)?;
     let app = window.app_handle().clone();
-    if crate::engine::sysinfo::is_admin() {
-        return Ok(json!({ "success": true, "alreadyAdmin": true }));
-    }
+    // 不做「已是管理员就直接返回」的短路：上游没有这个分支，且渲染层拿到 success 后
+    // 承诺「应用即将以管理员身份重启」——早退会让这句话落空、用户以为卡住。
+    // 已提权进程再 runas 一次是即刻完成的，握手照常走完，行为与上游一致。
     log::write_log("info", "请求管理员权限提升 (UAC)");
 
     let nonce = new_nonce();
