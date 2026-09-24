@@ -228,38 +228,54 @@ fn prune_backups(keep: usize) {
 
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        let mut files: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().to_string_lossy().to_string().into())
-            .filter(|name| is_backup_name(name))
-            .collect();
-        files.sort();
-        files.reverse();
-        for name in files.into_iter().skip(keep) {
-            let p = dir.join(&name);
-            if let Err(e) = trim_finder::scan::recycle::send_to_trash(&p.to_string_lossy()) {
-                log::write_log("warn", &format!("旧外设备份移入回收站失败: {name} -> {e}"));
+        let mut batches: Vec<(String, Vec<String>)> = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            // v2-M12：修剪必须按**批次**算。一次 apply 产出同时间戳的 N 个分片，
+            // 若按文件数保留 10 份，三键全选时只剩 3 批半、且会把某一批切成残缺组
+            // （残缺组在还原侧就是「导入失败一部分」）。
+            let Some(batch) = backup_batch_of(&name) else { continue };
+            match batches.iter_mut().find(|(b, _)| *b == batch) {
+                Some((_, list)) => list.push(name),
+                None => batches.push((batch.to_string(), vec![name])),
+            }
+        }
+        batches.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, names) in batches.into_iter().skip(keep) {
+            for name in names {
+                let p = dir.join(&name);
+                if let Err(e) = trim_finder::scan::recycle::send_to_trash(&p.to_string_lossy()) {
+                    log::write_log("warn", &format!("旧外设备份移入回收站失败: {name} -> {e}"));
+                }
             }
         }
     }
 }
 
-fn is_backup_name(name: &str) -> bool {
-    // backup_YYYYMMDD_HHMMSS.reg
-    let b = name.as_bytes();
-    // backup_YYYYMMDD_HHMMSS.reg：7+8+1+6+4 = 26
-    b.len() == 26
-        && name.starts_with("backup_")
-        && name.ends_with(".reg")
-        && b[7..15].iter().all(|c| c.is_ascii_digit())
-        && b[15] == b'_'
-        && b[16..22].iter().all(|c| c.is_ascii_digit())
+/// 外设备份文件名里的批次标记：`backup_YYYYMMDD_HHMMSS[_<分片号>].reg`，返回中段 15 位时间戳。
+///
+/// v2-M12：旧断言是「长度必须正好 26」的定长名，只认单份备份 ⇒ 分片名既不被 prune 承认
+/// （于是永远不清理、无上限增长），也无法在还原侧归成一批。分片号只认纯数字，
+/// 目的是让「用户自己放进这个目录的文件」不被当成备份去修剪或删除。
+fn backup_batch_of(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("backup_")?.strip_suffix(".reg")?;
+    let b = rest.as_bytes();
+    // 8 位日期 + '_' + 6 位时间
+    if b.len() < 15 || b[8] != b'_' || !b[..8].iter().all(|c| c.is_ascii_digit()) || !b[9..15].iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    match rest[15..].strip_prefix('_') {
+        None if rest.len() == 15 => Some(&rest[..15]),
+        Some(shard) if !shard.is_empty() && shard.as_bytes().iter().all(|c| c.is_ascii_digit()) => Some(&rest[..15]),
+        _ => None,
+    }
 }
 
-/// peripheral:restore-backup —— 导入最新一份备份 .reg
+/// peripheral:restore-backup —— 导入**最新一批**备份 .reg（v2-M12 起同批可能含多个分片）
 ///
 /// 档位同 `peripheral_apply`（审查 M3）：唯一调用方是外设子窗，真正的闸门是 `is_admin()`
-/// 与「备份文件名 26 位字面量 + 只保留 10 份」的自产文件约束，不含任意路径入参。
+/// 与「文件名必须是 `backup_<15 位时间戳>[_<数字分片号>].reg` 且只在本应用备份目录内取件」
+/// 的自产文件约束，不含任意路径入参。
 #[tauri::command]
 pub async fn peripheral_restore_backup<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -284,15 +300,34 @@ pub async fn peripheral_restore_backup<R: tauri::Runtime>(
         return Ok(json!({ "success": false, "message": "还原备份失败" }));
     };
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        let restored = v.get("restored").and_then(|x| x.as_i64()).unwrap_or(0);
+        let total = v.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
         let reason = v.get("reason").and_then(|x| x.as_str()).unwrap_or("");
+        // v2-M12：`partial` 是本条的关键新分支——一批里有分片没导进去时，旧回执会把它
+        // 算成 ok（或干脆只导一个分片就报成功），用户拿到绿色提示却仍有键没还原。
         let msg = match reason {
-            "no-backup" => "还没有可用的备份（先应用一次优化后会自动备份）",
-            "import-failed" => "导入备份失败，备份文件可能已损坏",
-            _ => "还原备份失败",
+            "no-backup" => "还没有可用的备份（先应用一次优化后会自动备份）".to_string(),
+            "import-failed" => "导入备份失败，备份文件可能已损坏".to_string(),
+            "partial" => format!(
+                "只导入了 {restored}/{total} 个备份分片，未导入的键仍停留在优化后的值；可重试一次"
+            ),
+            _ => "还原备份失败".to_string(),
         };
-        return Ok(json!({ "success": false, "message": msg }));
+        return Ok(json!({
+            "success": false,
+            "partial": reason == "partial",
+            "message": msg,
+            "data": { "restored": restored, "total": total },
+        }));
     }
-    Ok(json!({ "success": true, "data": { "file": v.get("file") } }))
+    Ok(json!({
+        "success": true,
+        "data": {
+            "file": v.get("file"),
+            "restored": v.get("restored"),
+            "total": v.get("total"),
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -320,11 +355,30 @@ mod tests {
         assert_eq!(normalize_option(Some(json!("x"))), Some(-9999));
     }
 
+    /// v2-M12：备份名要能认出**批次**（同一次 apply 的多个分片共用时间戳），
+    /// 且分片号只认纯数字——用户自己丢进备份目录的文件既不能被 prune 当备份删掉，
+    /// 也不能在还原侧被归成一批。
     #[test]
-    fn backup_filename_shape() {
-        assert!(is_backup_name("backup_20260924_123000.reg"));
-        assert!(!is_backup_name("backup_2026924_123000.reg")); // 年份 7 位
-        assert!(!is_backup_name("backup_20260924_12300.reg")); // 秒 5 位
-        assert!(!is_backup_name("evil.reg"));
+    fn backup_batch_recognises_shards() {
+        assert_eq!(
+            backup_batch_of("backup_20260924_123000.reg"),
+            Some("20260924_123000"),
+            "旧版单份名必须仍然认得（否则历史备份永不修剪）"
+        );
+        assert_eq!(
+            backup_batch_of("backup_20260924_123000_1.reg"),
+            Some("20260924_123000")
+        );
+        assert_eq!(
+            backup_batch_of("backup_20260924_123000_12.reg"),
+            Some("20260924_123000")
+        );
+        assert_eq!(backup_batch_of("backup_2026924_123000.reg"), None); // 年份 7 位
+        assert_eq!(backup_batch_of("backup_20260924_12300.reg"), None); // 秒 5 位
+        assert_eq!(backup_batch_of("backup_20260924_123000_x.reg"), None); // 分片号非数字
+        assert_eq!(backup_batch_of("backup_20260924_123000_.reg"), None); // 空分片号
+        assert_eq!(backup_batch_of("backup_20260924_123000.reg.bak"), None);
+        assert_eq!(backup_batch_of("evil.reg"), None);
+        assert_eq!(backup_batch_of("notes.txt"), None);
     }
 }

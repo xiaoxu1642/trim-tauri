@@ -6,7 +6,8 @@
 //! main.rs 的 `StdoutSink` 原样写回 stdout，从而做到 **CLI 对外行为逐字节不变**。
 //!
 //! 输出口径（与迁移前逐字一致）：
-//!   · item     → 完整一行 `@@ITEM@@{json}`，含前缀与结尾 `'\n'`
+//!   · item     → 完整一行 `@@ITEM@@{json}`，含前缀与结尾 `'\n'`；同时交出原生 `Path`
+//!                （行内 `path` 字段是 lossy 展示串，不得回喂删除 —— 审查 v2-M5）
 //!   · progress → 取值 0..=100（本模块已 clamp，等价旧 `progress()` 的 `.min(100)`）
 //!   · scanned  → `@@SCANNED:n@@` 的取值（累计已枚举文件数心跳）
 //!   · warn     → 等价 `eprintln!("[finder-warn] {msg}")`
@@ -20,18 +21,22 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::cleanup_scan::{parse_json, Json};
-use crate::util::unix_path;
+use crate::util::{has_lossy_path, unix_path};
 use crate::{is_reparse, json_escape, to_long_path};
 
 /// 输出汇聚器：CLI 写 stdout/stderr，Tauri 侧可换成事件发射。
 /// 注意实现须是 `Send + Sync`（并行扫描路径会跨线程共享 `&dyn Sink`）。
 pub trait Sink: Send + Sync {
-    /// 完整一行，含 `"@@ITEM@@{"` 前缀与结尾 `'\n'`
-    fn item(&self, line: &str);
+    /// 完整一行，含 `"@@ITEM@@{"` 前缀与结尾 `'\n'`。
+    /// `path` 是该条目的**原生路径真身**（审查 v2-M5）：行内 `path` 字段经 `unix_path`
+    /// 的 lossy 转换，孤立代理项会被换成 U+FFFD —— 拿它再重建删除目标，得到的可能是
+    /// **另一个真实存在的路径**。所以凡要把扫描结果当成后续操作目标的汇聚器，必须用这里
+    /// 交出的 `Path`，而不是解析文本行。CLI 侧只回写文本，忽略该参数。
+    fn item(&self, path: &Path, line: &str);
     /// 取值 0..=100
     fn progress(&self, n: u64);
     /// 已枚举文件数心跳
@@ -49,6 +54,8 @@ pub trait Sink: Send + Sync {
 /// 不设上限时一次「查找重复」就能把机器内存吃穿（200 万条外推 ≈ 767 MB ×2）。
 /// 取值权衡：20 万条 ≈ 80 MB（含 clone 约 160 MB），对「找重复照片/文档」的
 /// 个人场景足够；超出即截断并显式告知，而不是静默 OOM。
+/// 口径（审查 v2-M2）：这是**一次扫描**的全局上限，不是每个根的上限 ——
+/// 多根时若各算各的，内存预算就变成「根数 × 上限」。
 pub const MAX_SCAN_ENTRIES: usize = 200_000;
 
 // ---- 扫描并行参数（P0 批次）----
@@ -102,44 +109,106 @@ fn item(sink: &dyn Sink, t: &str, path: &Path, size: u64, extra: &[(&str, String
         s.push_str("\"");
     }
     s.push_str("}\n");
-    sink.item(&s);
+    sink.item(path, &s);
 }
 
 fn progress(sink: &dyn Sink, n: u64) {
     sink.progress(n.min(100));
 }
 
+/// 一次扫描的共享上下文（审查 v2-M1/M2/M3 的同一根因收口）。
+///
+/// 为什么必须有它：`out`/`truncated`/`counter` 原本建在 `walk()` **内部**，而
+/// `duplicates()` 是逐根调 `walk()` 的，于是
+///   · 每根各起一个 Vec 并以赋值交回 ⇒ 前 N−1 根被整体覆盖，却仍走完进度条报成功（M1）；
+///   · `MAX_SCAN_ENTRIES` 退化成 per-root ⇒ 多根时驻留量是「根数 × 上限」（M2）；
+///   · 截断标记也各根一份，第二根还能再「截断」一次（M2）。
+/// 另外 `Sink` 回调（`scanned`/`warn`）原本留在 `files` 临界区里 ——
+/// Tauri 侧的实现要拿窗口锁再 `emit`，等于把 rayon 并行重新串起来，且 emit 内任何
+/// panic 会把 `files` 判中毒（M3）。这里把「入桶」收成单一函数，锁内只搬运、回调在锁外。
+pub struct ScanCtx {
+    files: Mutex<Vec<(PathBuf, u64)>>,
+    counter: AtomicU64,
+    truncated: AtomicBool,
+    cap: usize,
+}
+
+impl ScanCtx {
+    pub fn new() -> Self {
+        Self::with_cap(MAX_SCAN_ENTRIES)
+    }
+
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            files: Mutex::new(Vec::new()),
+            counter: AtomicU64::new(0),
+            truncated: AtomicBool::new(false),
+            cap,
+        }
+    }
+
+    /// 条目入桶，返回**实际收下**的条数（供心跳计数）。上限满时置 truncated 并告警一次。
+    pub fn add_batch(&self, batch: Vec<(PathBuf, u64)>, sink: &dyn Sink) -> usize {
+        let got = batch.len();
+        let mut accepted = got;
+        let mut first_hit_cap = false;
+        {
+            // 锁中毒不 panic：一个线程炸掉不该把整次扫描判死（结果本该部分可用），
+            // 口径与 src-tauri 侧一致 —— 一律 unwrap_or_else(into_inner)（审查 v2-L11）
+            let mut g = self.files.lock().unwrap_or_else(|e| e.into_inner());
+            let room = self.cap.saturating_sub(g.len());
+            if got > room {
+                g.extend(batch.into_iter().take(room));
+                accepted = room;
+                first_hit_cap = !self.truncated.swap(true, Ordering::Relaxed);
+            } else {
+                g.extend(batch);
+            }
+        }
+        if first_hit_cap {
+            sink.warn(&format!("扫描条目已达上限 {}，结果被截断", self.cap));
+        }
+        bump_scanned(&self.counter, accepted as u64, sink);
+        accepted
+    }
+
+    /// 上限已满 / 已截断 —— 各层据此停止深入（剩下的 IO 只会产出注定被丢掉的结果）
+    fn stopped(&self) -> bool {
+        self.truncated.load(Ordering::Relaxed)
+    }
+
+    /// 仅测试用：探一眼 `files` 锁此刻是否空闲（= 回调有没有落在临界区之外）
+    #[cfg(test)]
+    fn try_lock_files_free(&self) -> bool {
+        self.files.try_lock().is_ok()
+    }
+
+    /// 收尾：交出条目并上报截断。`bump_scanned(0)` 按既有口径早退、不产出心跳行，
+    /// 保留调用只为与迁移前的输出序列逐字对齐。
+    pub fn finish(&self, sink: &dyn Sink) -> Vec<(PathBuf, u64)> {
+        bump_scanned(&self.counter, 0, sink);
+        let files = std::mem::take(&mut *self.files.lock().unwrap_or_else(|e| e.into_inner()));
+        if self.stopped() {
+            sink.truncated();
+        }
+        files
+    }
+}
+
 /// 递归收集文件（跳过符号链接、重解析点与不可读目录）。
 /// 性能升级（P0）：目录级分治并行 + `ent.metadata()` 复用 DirEntry 自带大小，
 /// 每文件省掉一次 `fs::metadata(&fp)` 的额外 syscall（GetFileAttributesExW）。
 /// 审查v4-L5：移除从未使用的 dirs 参数（原收集目录后 let _ = dirs 丢弃，白耗内存）。
-fn walk(path: &Path, files: &mut Vec<(PathBuf, u64)>, min_size: u64, sink: &dyn Sink) {
-    init_scan_threads();
-    let counter = AtomicU64::new(0);
-    // 审查 M7：截断标记要贯穿整棵递归（多根时由调用方共用同一个），一旦置位就不再深入
-    let truncated = AtomicBool::new(false);
-    // 用 Mutex 承接并发结果；对只需 Top-N 的调用方应改用 bigfiles 的任务分片（免全量驻留）。
-    let out: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
-    walk_level(&path.to_path_buf(), &out, min_size, &counter, 0, sink, &truncated);
-    bump_scanned(&counter, 0, sink); // 收尾再输出一次精确的最终计数（n=0 早退，见 bump_scanned）
-    *files = out.into_inner().unwrap();
-    if truncated.load(Ordering::Relaxed) {
-        sink.truncated();
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
+/// 审查 v2-M1：本函数只负责**一个根**，累积交给跨根复用的 `ScanCtx`。
 fn walk_level(
-    dir: &PathBuf,
-    files: &Mutex<Vec<(PathBuf, u64)>>,
+    dir: &Path,
+    ctx: &ScanCtx,
     min_size: u64,
-    counter: &AtomicU64,
     depth: usize,
     sink: &dyn Sink,
-    truncated: &AtomicBool,
 ) {
     // 已截断就别再花 IO 了（子孙目录继续走只会白读）
-    if truncated.load(Ordering::Relaxed) {
+    if ctx.stopped() {
         return;
     }
     let rd = match fs::read_dir(dir) {
@@ -178,29 +247,19 @@ fn walk_level(
     if !batch.is_empty() {
         // 审查 M7：条目上限在此收口。放不下的部分丢弃并置位 truncated，
         // 让调用方知道「结果不完整」而不是「就这么些重复」。
-        let mut g = files.lock().unwrap_or_else(|e| e.into_inner());
-        let room = MAX_SCAN_ENTRIES.saturating_sub(g.len());
-        if batch.len() > room {
-            g.extend(batch.into_iter().take(room));
-            if !truncated.swap(true, Ordering::Relaxed) {
-                sink.warn(&format!("扫描条目已达上限 {MAX_SCAN_ENTRIES}，结果被截断"));
-            }
-        } else {
-            bump_scanned(counter, batch.len() as u64, sink);
-            g.extend(batch);
-        }
+        ctx.add_batch(batch, sink);
     }
     // 截断之后不再深入：剩下的 IO 只会产出注定被丢掉的结果
-    if truncated.load(Ordering::Relaxed) {
+    if ctx.stopped() {
         return;
     }
     if depth < PAR_DEPTH {
         subdirs.par_iter().for_each(|d| {
-            walk_level(d, files, min_size, counter, depth + 1, sink, truncated);
+            walk_level(d, ctx, min_size, depth + 1, sink);
         });
     } else {
         for d in subdirs {
-            walk_level(&d, files, min_size, counter, depth + 1, sink, truncated);
+            walk_level(&d, ctx, min_size, depth + 1, sink);
         }
     }
 }
@@ -274,13 +333,18 @@ fn file_fp(path: &Path) -> Option<[u8; 32]> {
 /// 重复文件三级检测：内容指纹（体积+Blake3）> 文档内容相似 > 同名文件。
 /// 每个文件最多归入一组；组 id 前缀 dupc/dups/dupn，match 字段供前端区分展示。
 pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
-    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    init_scan_threads();
+    // 审查 v2-M1：一次扫描一个上下文、跨根累积。原实现每根各建一个 Vec 并整体赋值交回，
+    // 于是只留最后一个根（默认四个根 ⇒ 下载/桌面/文档三根的重复永远查不出），
+    // 而进度条走满、`success:true`、UI 显示「未发现重复文件」——把「没扫」伪装成「没有」。
+    let ctx = ScanCtx::new();
     for r in roots {
         if let Some(p) = canonical(r) {
-            // 目录不存在时 walk 内部仅告警跳过，不影响其余目录
-            walk(&p, &mut files, 0, sink);
+            // 目录不存在时 walk_level 内部仅告警跳过，不影响其余目录
+            walk_level(&p, &ctx, 0, 0, sink);
         }
     }
+    let files = ctx.finish(sink);
     let total = files.len() as f64;
     let mut empty: Vec<PathBuf> = Vec::new();
     for (i, f) in files.iter().enumerate() {
@@ -900,6 +964,78 @@ fn empty_ignored(set: &HashSet<String>, p: &Path) -> bool {
     set.contains(&p.to_string_lossy().to_lowercase())
 }
 
+/// `empty()` 的跨根条目累积器（审查 v2-M2）。
+///
+/// 为什么单列：上限必须是**一次扫描**的全局语义。`empty()` 逐根循环，
+/// 各根各算一份上限就等于「根数 × 20 万」的驻留量；而且这条链原本**完全不接**
+/// `Sink::truncated` —— 超限后残缺集合看起来和完整结果一模一样。
+struct EmptyAccum {
+    files: Mutex<Vec<PathBuf>>,
+    dirs: Mutex<Vec<PathBuf>>,
+    kept: AtomicUsize,
+    truncated: AtomicBool,
+    cap: usize,
+}
+
+/// 本地批达到这个条数就并入累积器：既让全局计数及时生效（下钻能真的停下来），
+/// 又避免每个目录都去抢一次锁。
+const EMPTY_FLUSH: usize = 4096;
+
+impl EmptyAccum {
+    fn new() -> Self {
+        Self::with_cap(MAX_SCAN_ENTRIES)
+    }
+
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            files: Mutex::new(Vec::new()),
+            dirs: Mutex::new(Vec::new()),
+            kept: AtomicUsize::new(0),
+            truncated: AtomicBool::new(false),
+            cap,
+        }
+    }
+
+    /// 还能不能收下一条。满了置 truncated 并**只告警一次**（warn 计数会进渲染层的
+    /// 「N 处无法读取」，刷屏会把真实故障淹掉）。
+    fn room(&self, sink: &dyn Sink) -> bool {
+        if self.truncated.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self.kept.fetch_add(1, Ordering::Relaxed) + 1 > self.cap {
+            if !self.truncated.swap(true, Ordering::Relaxed) {
+                // 名额多算了一条（这条其实没收），无妨：宁可少一条也不越过内存预算
+                sink.warn(&format!("扫描条目已达上限 {}，结果被截断", self.cap));
+            }
+            return false;
+        }
+        true
+    }
+
+    fn stopped(&self) -> bool {
+        self.truncated.load(Ordering::Relaxed)
+    }
+
+    fn flush(&self, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
+        if !files.is_empty() {
+            self.files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(files.drain(..));
+        }
+        if !dirs.is_empty() {
+            self.dirs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(dirs.drain(..));
+        }
+    }
+
+    fn full(&self, files: &[PathBuf], dirs: &[PathBuf]) -> bool {
+        files.len() + dirs.len() >= EMPTY_FLUSH
+    }
+}
+
 /// 并行空目录/空文件扫描（性能升级 P1-4）：
 ///   · 根下的一级子目录交给 rayon 各自串行递归（根只作容器，避免误删根）
 ///   · `ent.metadata()` 取大小，不额外 syscall
@@ -908,81 +1044,102 @@ fn empty_ignored(set: &HashSet<String>, p: &Path) -> bool {
 pub fn empty(roots: &[String], sink: &dyn Sink) {
     init_scan_threads();
     let ignore = load_empty_ignore();
-    let empty_files: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-    let empty_dirs: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    // 审查 v2-M1/M2：跨根共用一个累积器（上限与截断都是全局口径）
+    let acc = EmptyAccum::new();
 
     for r in roots {
         let Some(p) = canonical(r) else { continue };
         // 根自身只作容器：一级子目录交并行，过滤忽略名单
         let mut tops: Vec<PathBuf> = Vec::new();
         let mut root_files: Vec<PathBuf> = Vec::new();
-        if let Ok(rd) = fs::read_dir(&p) {
-            for ent in rd.flatten() {
-                match ent.file_type() {
-                    Ok(t) if t.is_dir() => {
-                        if !is_reparse(&ent) && !empty_ignored(&ignore, &ent.path()) {
-                            tops.push(ent.path());
+        match fs::read_dir(&p) {
+            Ok(rd) => {
+                for ent in rd.flatten() {
+                    match ent.file_type() {
+                        Ok(t) if t.is_dir() => {
+                            if !is_reparse(&ent) && !empty_ignored(&ignore, &ent.path()) {
+                                tops.push(ent.path());
+                            }
                         }
-                    }
-                    Ok(t) if t.is_file() => {
-                        // FD-6（2026-09-15）：根第一层的 0 字节文件此前被忽略（tops 只收子目录），
-                        // 与 duplicates 链路「根层文件也参与」的口径不一致。补上根层空文件。
-                        let sz = ent.metadata().map(|m| m.len()).unwrap_or(1);
-                        if sz == 0 {
-                            root_files.push(ent.path());
+                        Ok(t) if t.is_file() => {
+                            // FD-6（2026-09-15）：根第一层的 0 字节文件此前被忽略（tops 只收子目录），
+                            // 与 duplicates 链路「根层文件也参与」的口径不一致。补上根层空文件。
+                            let sz = ent.metadata().map(|m| m.len()).unwrap_or(1);
+                            if sz == 0 && acc.room(sink) {
+                                root_files.push(ent.path());
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
+            // 审查 v2-M4：根读不了要说话。静默 continue 会让「没权限看」长成「这个目录真干净」
+            Err(e) => eprint_err(&e, &format!("read_dir {}", p.display()), sink),
         }
-        if !root_files.is_empty() {
-            // 锁中毒不 panic：rayon 里一个线程炸掉会把别的线程一起带崩（结果本该部分可用）。
-            // 口径与 src-tauri 侧 62 处一致 —— 一律 unwrap_or_else(into_inner)。
-            empty_files
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(root_files);
-        }
+        acc.flush(&mut root_files, &mut Vec::new());
         tops.par_iter().for_each(|d| {
             let mut f: Vec<PathBuf> = Vec::new();
             let mut dd: Vec<PathBuf> = Vec::new();
-            let _ = collect_empty_fast(d, &ignore, &mut f, &mut dd);
-            if !f.is_empty() {
-                empty_files
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend(f);
-            }
-            if !dd.is_empty() {
-                empty_dirs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend(dd);
-            }
+            collect_empty_fast(d, &ignore, &mut f, &mut dd, &acc, sink);
+            acc.flush(&mut f, &mut dd);
         });
     }
 
-    let files = empty_files.into_inner().unwrap_or_else(|e| e.into_inner());
-    let dirs = empty_dirs.into_inner().unwrap_or_else(|e| e.into_inner());
+    let files = std::mem::take(&mut *acc.files.lock().unwrap_or_else(|e| e.into_inner()));
+    let dirs = std::mem::take(&mut *acc.dirs.lock().unwrap_or_else(|e| e.into_inner()));
 
     // 父目录折叠：若某空目录的父目录同为待删空目录，只保留父（删父连带删内层，Czkawka 思路）
-    let set: HashSet<PathBuf> = dirs.iter().cloned().collect();
-    let mut out: Vec<(PathBuf, usize)> = Vec::new();
-    for d in &dirs {
-        if d.parent().map(|pp| set.contains(pp)).unwrap_or(false) {
-            continue; // 存在空父目录，跳过自己
-        }
-        let nested = dirs.iter().filter(|x| *x != d && x.starts_with(d)).count();
-        out.push((d.clone(), nested));
-    }
+    let out = fold_empty_dirs(&dirs);
     for f in &files {
         item(sink, "emptyfile", f, 0, &[]);
     }
     for (d, n) in &out {
         item(sink, "emptyfolder", d, 0, &[("nested", n.to_string())]);
     }
+    if acc.stopped() {
+        sink.truncated();
+    }
     progress(sink, 100);
+}
+
+/// 折叠：去掉「父目录也在待删集合里」的条目，nested = 该条目下被连带删掉的空目录数。
+///
+/// 审查 v2-M2：原实现对每个目录全表扫一遍 `starts_with`（n 个目录 ⇒ n² 次比较，
+/// 实测口径 n=10⁵ 就是 10¹⁰ 次，UI 分钟级假死）。这里改成「向上找代表 + 路径压缩」，
+/// 每个目录只走自己那条祖先链（集合具有向下闭合性：中间层若不空，父也不会进集合）。
+fn fold_empty_dirs(dirs: &[PathBuf]) -> Vec<(PathBuf, usize)> {
+    let set: HashSet<PathBuf> = dirs.iter().cloned().collect();
+    // rep[d] = d 所属的最外层空目录（d 自身是最外层时 rep[d] == d）
+    let mut rep: HashMap<PathBuf, PathBuf> = HashMap::with_capacity(dirs.len());
+    let mut nested: HashMap<PathBuf, usize> = HashMap::new();
+    for d in dirs {
+        if rep.contains_key(d) {
+            continue;
+        }
+        let mut chain: Vec<PathBuf> = vec![d.clone()];
+        let root = loop {
+            let cur = chain.last().cloned().unwrap_or_default();
+            match cur.parent().filter(|p| set.contains(*p)) {
+                Some(p) => {
+                    if let Some(r) = rep.get(p) {
+                        break r.clone();
+                    }
+                    chain.push(p.to_path_buf());
+                }
+                None => break cur,
+            }
+        };
+        for c in &chain {
+            rep.insert(c.clone(), root.clone());
+            if c != &root {
+                *nested.entry(root.clone()).or_insert(0usize) += 1;
+            }
+        }
+    }
+    dirs.iter()
+        .filter(|d| d.parent().map(|p| !set.contains(p)).unwrap_or(true))
+        .map(|d| (d.clone(), nested.get(d).copied().unwrap_or(0)))
+        .collect()
 }
 
 /// 返回该目录是否整体为空（可删除）。与旧 collect_empty 同语义，区别：
@@ -992,13 +1149,23 @@ fn collect_empty_fast(
     ignore: &HashSet<String>,
     files: &mut Vec<PathBuf>,
     dirs: &mut Vec<PathBuf>,
+    acc: &EmptyAccum,
+    sink: &dyn Sink,
 ) -> bool {
+    // 审查 v2-M2：上限满后停止下钻 —— 剩下的 IO 只会产出被丢掉的结果
+    if acc.stopped() {
+        return false;
+    }
     if empty_ignored(ignore, dir) {
         return false;
     }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
-        Err(_) => return false, // 不可读目录保守视为非空
+        // 不可读目录保守视为非空；审查 v2-M4：但要计数告警，不能静默吞掉
+        Err(e) => {
+            eprint_err(&e, &format!("read_dir {}", dir.display()), sink);
+            return false;
+        }
     };
     let mut empty = true;
     for ent in rd.flatten() {
@@ -1010,7 +1177,7 @@ fn collect_empty_fast(
             Ok(t) if t.is_dir() => {
                 if is_reparse(&ent) {
                     empty = false;
-                } else if !collect_empty_fast(&fp, ignore, files, dirs) {
+                } else if !collect_empty_fast(&fp, ignore, files, dirs, acc, sink) {
                     empty = false;
                 }
             }
@@ -1018,7 +1185,10 @@ fn collect_empty_fast(
                 // P0：DirEntry 自带大小，不额外 syscall
                 let sz = ent.metadata().map(|m| m.len()).unwrap_or(1);
                 if sz == 0 {
-                    files.push(fp); // 空文件单独作为删除候选
+                    // 空文件单独作为删除候选
+                    if acc.room(sink) {
+                        files.push(fp);
+                    }
                 }
                 empty = false; // 任何文件（含空文件）都使其父目录不算空文件夹
             }
@@ -1026,8 +1196,12 @@ fn collect_empty_fast(
                 empty = false;
             }
         }
+        // 审查 v2-M2：本地攒批到阈值就并入全局，好让计数及时生效、驻留量有上界
+        if acc.full(files, dirs) {
+            acc.flush(files, dirs);
+        }
     }
-    if empty {
+    if empty && acc.room(sink) {
         dirs.push(dir.to_path_buf());
     }
     empty
@@ -1116,8 +1290,19 @@ pub mod recycle {
     }
 
     /// 将单个路径移入回收站。pFrom 要求双 NUL 结尾。
+    ///
+    /// 审查 v2-M5：本函数收 `&str`，而 Windows 文件名是 UTF-16 —— 含孤立代理项
+    /// （GBK 遗留介质、字节级拷贝来的名字）的路径经 `to_string_lossy` 会被换成 U+FFFD，
+    /// 于是删不掉「真正那个文件」，甚至撞上另一个恰好用 U+FFFD 命名的文件删错对象。
+    /// 因此这里加 `send_to_trash_os`（不经 UTF-8 往返），`send_to_trash` 只作既有的
+    /// `&str` 门面保留给 src-tauri 侧的存量调用方。
     pub fn send_to_trash(path: &str) -> Result<(), String> {
-        let mut from: Vec<u16> = OsStr::new(path).encode_wide().collect();
+        send_to_trash_os(OsStr::new(path))
+    }
+
+    /// OsStr 版：直接把宽字符喂给 SHFileOperationW，全程无损。
+    pub fn send_to_trash_os(path: &OsStr) -> Result<(), String> {
+        let mut from: Vec<u16> = path.encode_wide().collect();
         from.push(0);
         from.push(0);
         let mut op = ShFileOpStructW {
@@ -1155,7 +1340,7 @@ fn del_item(sink: &dyn Sink, t: &str, path: &Path, kind: &str, status: &str, fre
     s.push_str("\",\"message\":\"");
     s.push_str(&json_escape(msg));
     s.push_str("\"}\n");
-    sink.item(&s);
+    sink.item(path, &s);
 }
 
 /// 词法规范化（火眼眼审查 2026-09-14 M-1）：剥 `\\?\` / `\\?\UNC\` 前缀、统一分隔符、
@@ -1405,7 +1590,9 @@ pub fn protect_flags(protect_json: Option<&str>, vectors: &[String]) -> Vec<bool
 /// 本函数在任何分支都不会删除文件。
 #[cfg(windows)]
 fn delete_one(p: &Path, _kind: &str) -> Result<(), String> {
-    recycle::send_to_trash(&p.to_string_lossy()).map_err(|reason| format!("回收站失败: {}", reason))
+    // 审查 v2-M5：走 OsStr 版，不做 UTF-8 往返 —— 名字含孤立代理项的目标此前被换成
+    // U+FFFD 后必然 NotFound，调用方拿到的是「删掉了 0 个」却仍报成功。
+    recycle::send_to_trash_os(p.as_os_str()).map_err(|reason| format!("回收站失败: {}", reason))
 }
 
 #[cfg(not(windows))]
@@ -1438,6 +1625,17 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
     let mut freed: u64 = 0;
     for (kind, sp) in items {
         let p = Path::new(sp);
+        // 审查 v2-M5：文件名含无法无损解码成文本的字节（GBK 遗留介质、字节级拷贝来的
+        // 孤立代理项）时，保护清单判定本身就不通 —— `is_protected_path` 与主侧
+        // `is_path_protected` 都按 lossy 后的字符串比对，而 U+FFFD 往返得到的可能是
+        // **另一个**真实存在的路径。真闸门是保护清单，不能拿「这次碰巧没删错」过闸，
+        // 所以宁可拒绝并明说：结果行 status=fail + mode=unrecoverable-name，
+        // 由上层数出「N 项因文件名无法处理而未删」。
+        if has_lossy_path(p) {
+            fail += 1;
+            del_item(sink, "delresult", p, kind, "fail", 0, "文件名含无法无损解码的字符，保护清单判定不可靠，已拒绝删除", "unrecoverable-name");
+            continue;
+        }
         if is_protected_path(&sp.to_string_lossy(), protect_json) {
             fail += 1;
             del_item(sink, "delresult", p, kind, "fail", 0, "受保护的系统路径，已拒绝", "rejected");
@@ -1468,7 +1666,7 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
         }
     }
     // 汇总行 `[finder-delete]` 是 CLI 侧诊断输出（渲染层不消费、行协议无对应通道），
-    // 冻结的 Sink 只有 item/progress/scanned/warn 四个方法，无法承载该前缀；
+    // `Sink` 只有 item/progress/scanned/warn（+ 默认空实现的 truncated）这几路，承载不了该前缀；
     // 为保持 CLI stderr 逐字节不变，这里直写 stderr（Tauri 侧仅作日志，不影响事件流）。
     eprintln!("[finder-delete] ok={} fail={} freed={}", ok, fail, freed);
     progress(sink, 100);
@@ -1481,5 +1679,244 @@ fn canonical(s: &str) -> Option<PathBuf> {
         c.or(Some(p.to_path_buf()))
     } else {
         Some(p.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// 记录型 Sink：数调用次数；`watch` 带着 `ScanCtx` 的同一份 Arc，
+    /// 用来在回调发生的那一刻探一次 `files` 锁的状态（v2-M3 的断言点）。
+    struct RecSink {
+        ctx: Arc<ScanCtx>,
+        items: AtomicUsize,
+        warns: AtomicUsize,
+        scanned: AtomicUsize,
+        truncated: AtomicBool,
+        /// 回调总次数 与 「回调进来看见 files 锁空闲」的次数：两者相等才证明 v2-M3 成立
+        probes: AtomicUsize,
+        lock_free_in_callback: AtomicUsize,
+    }
+
+    impl RecSink {
+        fn new(ctx: Arc<ScanCtx>) -> Self {
+            Self {
+                ctx,
+                items: AtomicUsize::new(0),
+                warns: AtomicUsize::new(0),
+                scanned: AtomicUsize::new(0),
+                truncated: AtomicBool::new(false),
+                probes: AtomicUsize::new(0),
+                lock_free_in_callback: AtomicUsize::new(0),
+            }
+        }
+        fn probe(&self) {
+            self.probes.fetch_add(1, Ordering::Relaxed);
+            if self.ctx.try_lock_files_free() {
+                self.lock_free_in_callback.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    impl Sink for RecSink {
+        fn item(&self, _path: &Path, _line: &str) {
+            self.probe();
+            self.items.fetch_add(1, Ordering::Relaxed);
+        }
+        fn progress(&self, _n: u64) {
+            self.probe();
+        }
+        fn scanned(&self, _n: u64) {
+            self.probe();
+            self.scanned.fetch_add(1, Ordering::Relaxed);
+        }
+        fn warn(&self, _msg: &str) {
+            self.probe();
+            self.warns.fetch_add(1, Ordering::Relaxed);
+        }
+        fn truncated(&self) {
+            self.probe();
+            self.truncated.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn f(p: &str, sz: u64) -> (PathBuf, u64) {
+        (PathBuf::from(p), sz)
+    }
+
+    /// 审查 v2-M1：多根必须**累积**。原实现在 `walk()` 里各建一个 Vec 并整体赋值交回，
+    /// 于是「下载/桌面/文档/图片」四个根只剩最后一个 —— 前三个根的重复永远查不出来，
+    /// 却仍走满进度条报 `success:true`（把「没扫」伪装成「没有」）。
+    #[test]
+    fn scan_ctx_accumulates_entries_from_every_root() {
+        let ctx = Arc::new(ScanCtx::new());
+        let sink = RecSink::new(Arc::clone(&ctx));
+        for root in ["a/1.txt", "b/2.txt", "c/3.txt", "d/4.txt"] {
+            ctx.add_batch(vec![f(root, 10)], &sink); // 一根一批
+        }
+        let all = ctx.finish(&sink);
+        assert_eq!(all.len(), 4, "四个根都要留下结果");
+        for root in ["a/1.txt", "b/2.txt", "c/3.txt", "d/4.txt"] {
+            assert!(
+                all.iter().any(|(p, _)| p == Path::new(root)),
+                "根 {root} 的结果被后续根覆盖了"
+            );
+        }
+        assert!(!sink.truncated.load(Ordering::Relaxed), "没到上限就不该报截断");
+        assert_eq!(sink.warns.load(Ordering::Relaxed), 0);
+    }
+
+    /// 审查 v2-M2：上限是「一次扫描」的全局口径。per-root 上限在修好 M1 之后
+    /// 会把内存预算变成 根数 × 上限，所以多根共用同一个计数器才是对的。
+    /// 同时钉住「只告警一次 + 置位后不再收」，避免刷屏把真实故障淹掉。
+    #[test]
+    fn scan_ctx_cap_is_global_and_warns_once() {
+        let ctx = Arc::new(ScanCtx::with_cap(5));
+        let sink = RecSink::new(Arc::clone(&ctx));
+        assert_eq!(ctx.add_batch(vec![f("r1/a", 1), f("r1/b", 2)], &sink), 2);
+        assert_eq!(ctx.add_batch(vec![f("r2/a", 1), f("r2/b", 2)], &sink), 2);
+        // 第三根：只剩 1 个名额，另两条必须被丢掉并置位 truncated
+        assert_eq!(
+            ctx.add_batch(vec![f("r3/a", 1), f("r3/b", 2)], &sink),
+            1,
+            "超出全局上限的部分不该被收下"
+        );
+        let all = ctx.finish(&sink);
+        assert_eq!(all.len(), 5, "驻留条目数必须等于全局上限");
+        assert!(sink.truncated.load(Ordering::Relaxed), "上限满后要显式报截断");
+        assert_eq!(sink.warns.load(Ordering::Relaxed), 1, "截断只告警一次");
+        // 置位后 continued 深入已无意义：stopped 是真的
+        assert!(ctx.stopped());
+    }
+
+    /// 审查 v2-M3：`Sink` 回调不得留在 `files` 临界区里。
+    /// Tauri 侧的 `scanned`/`warn` 内部要拿窗口锁并 `emit`：留在锁内 ⇒ rayon 各线程
+    /// 在 `files` 上等一次跨线程 IPC（并行被串回去），且 emit 里任何 panic 会把 `files`
+    /// 判中毒、整次扫描失败。这里让 sink 在每次回调里探测锁是否为空闲。
+    #[test]
+    fn scan_ctx_callbacks_run_outside_the_files_lock() {
+        let ctx = Arc::new(ScanCtx::with_cap(3));
+        let sink = RecSink::new(Arc::clone(&ctx));
+        // 一批正常入桶 + 一批触顶（触顶才会 warn）
+        ctx.add_batch(vec![f("a", 1), f("b", 2)], &sink);
+        ctx.add_batch(vec![f("c", 3), f("d", 4)], &sink);
+        assert!(sink.warns.load(Ordering::Relaxed) > 0, "触顶要告警（才谈得上回调位置）");
+        assert!(
+            sink.probes.load(Ordering::Relaxed) > 0,
+            "确有回调发生（HEARTBEAT_EVERY 之下的批次不产生 scanned 回调，故这里看 probes）"
+        );
+        assert_eq!(
+            sink.probes.load(Ordering::Relaxed),
+            sink.lock_free_in_callback.load(Ordering::Relaxed),
+            "有回调发生在 files 锁内（v2-M3 回归）"
+        );
+
+        // 再单独走一遍**心跳**回调路径（`bump_scanned` 只在跨过 HEARTBEAT_EVERY 时才 emit）：
+        // 报告点名的正是这条 —— 它在锁内被调用过。
+        let ctx2 = Arc::new(ScanCtx::with_cap(HEARTBEAT_EVERY as usize * 4));
+        let sink2 = RecSink::new(Arc::clone(&ctx2));
+        let batch: Vec<(PathBuf, u64)> =
+            (0..HEARTBEAT_EVERY as usize).map(|i| f(&format!("x{i}"), 1)).collect();
+        ctx2.add_batch(batch, &sink2);
+        assert_eq!(sink2.scanned.load(Ordering::Relaxed), 1, "跨过心跳阈值要 emit 一次");
+        assert_eq!(
+            sink2.probes.load(Ordering::Relaxed),
+            sink2.lock_free_in_callback.load(Ordering::Relaxed),
+            "心跳回调落在 files 锁内（v2-M3 回归）"
+        );
+    }
+
+    /// 锁中毒不许 panic（审查 v2-L11 在扫描侧的那一处）：中毒后要照取结果，
+    /// 而不是把整次扫描判死 —— 结果本该部分可用。
+    #[test]
+    fn scan_ctx_survives_poisoned_lock() {
+        let ctx = Arc::new(ScanCtx::with_cap(10));
+        let sink = RecSink::new(Arc::clone(&ctx));
+        ctx.add_batch(vec![f("a", 1)], &sink);
+        {
+            // 在别的线程里 panic 一次，把 Mutex 判中毒（正是 emit 里炸掉的等价形态）
+            let doomed = Arc::clone(&ctx);
+            let h = std::thread::spawn(move || {
+                let _g = doomed.files.lock().unwrap();
+                panic!("模拟 emit 内部 panic");
+            });
+            assert!(h.join().is_err());
+        }
+        // 中毒之后照样收条目、照样取结果，不 panic
+        assert_eq!(ctx.add_batch(vec![f("b", 2)], &sink), 1);
+        let all = ctx.finish(&sink);
+        assert_eq!(all.len(), 2, "锁中毒不该丢掉已有结果");
+    }
+
+    /// 审查 v2-M2：空目录折叠去掉「父也在集合里」的条目，nested = 被连带删掉的子空目录数。
+    /// 这里同时和**旧口径**（对每个目录全表 `starts_with`）逐条对拍，保证只是把
+    /// O(n²) 换成「向上找代表 + 路径压缩」，语义一字未动。
+    #[test]
+    fn fold_empty_dirs_matches_legacy_semantics() {
+        let dirs: Vec<PathBuf> = [
+            r"C:\a",
+            r"C:\a\b",
+            r"C:\a\b\c",
+            r"C:\a\d",
+            r"C:\ee",
+            r"C:\a2", // 名字前缀相似但不是子孙 —— 旧实现用 starts_with(路径) 而非字符串前缀
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let folded = fold_empty_dirs(&dirs);
+        let legacy: Vec<(PathBuf, usize)> = {
+            let set: HashSet<PathBuf> = dirs.iter().cloned().collect();
+            dirs.iter()
+                .filter(|d| !d.parent().map(|p| set.contains(p)).unwrap_or(false))
+                .map(|d| (d.clone(), dirs.iter().filter(|x| *x != d && x.starts_with(d)).count()))
+                .collect()
+        };
+        assert_eq!(folded.len(), 3, "只剩最外层：C:\\a、C:\\ee、C:\\a2");
+        assert_eq!(
+            folded.into_iter().collect::<HashSet<_>>(),
+            legacy.into_iter().collect::<HashSet<_>>(),
+            "折叠结果与旧口径不一致"
+        );
+        let nested_of = |t: &str| -> usize {
+            let want = PathBuf::from(t);
+            *fold_empty_dirs(&dirs)
+                .iter()
+                .find(|(p, _)| p == &want)
+                .map(|(_, n)| n)
+                .unwrap()
+        };
+        assert_eq!(nested_of(r"C:\a"), 3, "a 下连带 b、b\\c、d 三个空目录");
+        assert_eq!(nested_of(r"C:\ee"), 0);
+        assert_eq!(nested_of(r"C:\a2"), 0);
+    }
+
+    /// 折叠的另一个口径细节：孤儿子孙（父目录因不可读/被忽略而没进集合）自己成为代表。
+    /// 旧实现靠 `starts_with` 全表扫描也会这样，钉住别在改写时漂掉。
+    #[test]
+    fn fold_empty_dirs_keeps_orphans_as_their_own_representative() {
+        let dirs: Vec<PathBuf> = [r"C:\x\y\z", r"C:\x\y"].iter().map(PathBuf::from).collect();
+        let folded = fold_empty_dirs(&dirs);
+        assert_eq!(folded.len(), 1, "只有最外层 C:\\x\\y 出结果");
+        assert_eq!(folded[0].0, PathBuf::from(r"C:\x\y"));
+        assert_eq!(folded[0].1, 1);
+    }
+
+    /// 审查 v2-M2：`empty` 链的上限同样是全局口径，并且要接 `truncated`
+    /// （原实现既不设上限也不报截断，一次「空文件夹」扫描可无界驻留 PathBuf）。
+    #[test]
+    fn empty_accum_caps_globally_and_reports_truncation() {
+        let ctx = Arc::new(ScanCtx::with_cap(4));
+        let sink = RecSink::new(ctx);
+        let acc = EmptyAccum::with_cap(3);
+        assert!(acc.room(&sink));
+        assert!(acc.room(&sink));
+        assert!(acc.room(&sink));
+        assert!(!acc.room(&sink), "到上限后不再收条目");
+        assert!(acc.stopped(), "满了要置位 truncated");
+        assert!(!acc.room(&sink), "已截断后直接拒绝，不再刷告警");
+        assert_eq!(sink.warns.load(Ordering::Relaxed), 1, "截断只告警一次");
     }
 }

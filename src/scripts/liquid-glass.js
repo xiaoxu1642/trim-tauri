@@ -849,14 +849,17 @@
 
   function mountBar(bar) {
     if (states.has(bar)) return;
-    const state = { thumb: null, moved: false };
+    const state = { thumb: null, moved: false, mo: null };
     states.set(bar, state);
     bar.classList.add('lg-bar');
     createThumb(bar, state);
 
     // 维护/快捷指令页会整体重渲染栏内容：滑块被清掉后从原位置滑向新目标，
     // 保留液态跟随感；其余变化静默重定位
-    new MutationObserver(() => {
+    // 审查 v2-M22（v1 L14 未修）：观察者句柄必须存进 state —— 原来 new 完就丢，
+    // 栏被换掉后旧 observer 还盯着一个已离开的子树，且 states 条目永不减少。
+    state.mo = new MutationObserver(() => {
+      if (!bar.isConnected) return;                 // 栏已离开，静默退出（真正的回收在 detachBar）
       if (!bar.contains(state.thumb)) {
         createThumb(bar, state);
         if (typeof state.lastX === 'number') {
@@ -877,9 +880,27 @@
         }
       }
       schedulePlace(bar, false);
-    }).observe(bar, { childList: true });
+    });
+    state.mo.observe(bar, { childList: true });
 
     schedulePlace(bar, false);
+  }
+
+  // 审查 v2-M22（v1 L14 未修部分）：states 此前**全文无 delete** —— 维护页 / 快捷指令页
+  // 每次重渲染都会换掉整条 bar，旧条目（连同 bar、thumb 子树、MutationObserver、
+  // sharedDefs 里的滤镜节点）被 Map 永久持有，切页越多攒越多。
+  // 回收必须与 mountBar 严格配对：取消在途 rAF → 断观察者 → 摘滤镜节点 → 摘 thumb → 删条目。
+  // 刻意不动的护栏（AGENTS §7 / 报告 §7 点名保留）：MAX_REFRACT 28、420px/环带像素预算、
+  // MAP_CACHE_MAX 48、FILTER_BUCKETS_MAX 48、scheduleScan 的 120ms 节流——这里只补配对，不放开任何上限。
+  function detachBar(bar, state) {
+    if (state.raf) cancelAnimationFrame(state.raf);
+    state.raf = 0;
+    if (state.mo) { state.mo.disconnect(); state.mo = null; }
+    if (state.filterEl) { state.filterEl.remove(); state.filterEl = null; }
+    if (state.thumb) state.thumb.remove();
+    state.thumb = null;
+    bar.classList.remove('lg-bar');
+    states.delete(bar);
   }
 
   function mountAll() {
@@ -893,6 +914,12 @@
   function refreshBars(animate) {
     // 补挂迟渲染的栏（如优化中心分类栏由 API 回调后渲染，init 时还没有标签）
     mountAll();
+    // 审查 v2-M22：先回收已离开文档的栏（切页会整条换掉 bar 节点）。
+    // 挂在这里而不是 sweepDetached 里，是因为 sweepDetached 只在 scheduleScan 的
+    // full/standard 分支跑，而 frost/off 档下 refreshBars 照样会被调 —— 放这儿五种档位都不漏。
+    states.forEach((state, bar) => {
+      if (!bar.isConnected) detachBar(bar, state);
+    });
     states.forEach((state, bar) => {
       if (!state.thumb) return;
       state.thumb.style.display = mode === 'off' ? 'none' : '';

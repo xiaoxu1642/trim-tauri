@@ -137,6 +137,15 @@ fn ext_of(name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// 审查 v2-M5：该路径能不能作为「可预览/可删除条目」进入扫描槽。
+/// 判据是「名字能否无损地表示成 Rust `String`」——本域的 `items[].path` 与槽键都由
+/// `to_string_lossy()` 产出，而删除用的是**渲染层回传的那个字符串**：
+/// 名字含孤立代理项时往返得到的是另一个路径，轻则删不到、重则删掉一个恰好
+/// 用 U+FFFD 命名的无关文件。所以这类条目根本不收录（不可预览也不可删），并计数上报。
+fn deletable_name(p: &Path) -> bool {
+    !trim_finder::util::has_lossy_path(p)
+}
+
 fn classify(ext: &str) -> Option<&'static str> {
     if IMAGE_EXTS.contains(&ext) {
         Some("image")
@@ -151,12 +160,20 @@ fn classify(ext: &str) -> Option<&'static str> {
     }
 }
 
-/// BFS 扫描（不跟随符号链接）。返回 (items, scanned_count)。
-fn scan_root(root: &Path) -> (Vec<Value>, usize) {
+/// BFS 扫描（不跟随符号链接）。
+/// 返回 (items, 已归类的文件数, 因文件名无法无损表示而未收录的条目数)。
+///
+/// 审查 v2-M5（与 finder 域同源）：本域的删除目标是**渲染层回传的字符串**重建的，
+/// 而 `items[].path` 来自 `to_string_lossy()`。名字里有孤立代理项（GBK 遗留介质、
+/// 字节级拷贝）时，lossy 往返得到的是另一个路径 —— 轻则删不到，重则删掉一个恰好
+/// 用 U+FFFD 命名的无关文件。所以这类条目**根本不收录**（不进槽、不可删），
+/// 并把数量回给上层：不静默丢（v2-M4 同口径）。
+fn scan_root(root: &Path) -> (Vec<Value>, usize, usize) {
     let mut items: Vec<Value> = Vec::new();
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     queue.push_back((root.to_path_buf(), 0));
     let mut scanned = 0usize;
+    let mut unhandled = 0usize;
 
     while let Some((dir, depth)) = queue.pop_front() {
         if items.len() >= MAX_FILES || depth > MAX_DEPTH {
@@ -179,8 +196,12 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize) {
             if items.len() >= MAX_FILES {
                 break;
             }
-            let name = ent.file_name().to_string_lossy().to_string();
             let full = ent.path();
+            if !deletable_name(&full) {
+                unhandled += 1;
+                continue;
+            }
+            let name = ent.file_name().to_string_lossy().to_string();
             let md = match ent.metadata() {
                 // DirEntry::metadata 不跟随符号链接（Windows 上跟随；用 symlink_metadata 复核）
                 Ok(m) => m,
@@ -237,7 +258,7 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize) {
             }
         }
     }
-    (items, scanned)
+    (items, scanned, unhandled)
 }
 
 /// fileclean:scan
@@ -302,7 +323,7 @@ pub async fn fileclean_scan<R: Runtime>(
         || resolved.to_lowercase().contains("xwechat");
     let result = tauri::async_runtime::spawn_blocking(move || scan_root(Path::new(&root2)))
         .await;
-    let (items, scanned) = match result {
+    let (items, scanned, unhandled) = match result {
         Ok(v) => v,
         Err(e) => {
             log::write_log("error", &format!("文件清理扫描任务异常: {e}"));
@@ -325,11 +346,12 @@ pub async fn fileclean_scan<R: Runtime>(
     log::write_log(
         "info",
         &format!(
-            "文件清理扫描完成: {} -> {} 项，{} 字节，枚举 {} 个文件{}",
+            "文件清理扫描完成: {} -> {} 项，{} 字节，枚举 {} 个文件{}{}",
             ty2,
             items.len(),
             total_size,
             scanned,
+            if unhandled > 0 { format!("，{unhandled} 项文件名无法无损处理已跳过") } else { String::new() },
             if heavy { "（大目录）" } else { "" }
         ),
     );
@@ -343,7 +365,10 @@ pub async fn fileclean_scan<R: Runtime>(
         "data": {
             "files": items,
             "totalSize": total_size.to_string(),
-            "scanPath": resolved
+            "scanPath": resolved,
+            // 审查 v2-M5：名字无法无损表示的条目**没有**进扫描槽（不可预览也不可删），
+            // 数量回给渲染层说清楚，而不是让它们静默消失
+            "unhandled": unhandled
         }
     })
 }
@@ -631,6 +656,25 @@ mod tests {
     fn path_key_normalizes_sep_case_trailing() {
         assert_eq!(path_key("C:/A/B/"), "c:\\a\\b");
         assert_eq!(path_key("c:\\a\\b"), "c:\\a\\b");
+    }
+
+    /// 审查 v2-M5：只有能无损往返于 `String` 的名字才允许进扫描槽（进槽=可预览、可删）。
+    /// 合法的多字节 Unicode 名字（中文/emoji）必须照常放行 —— 判错方向就等于把功能关掉。
+    #[test]
+    fn only_lossless_names_are_admissible() {
+        assert!(deletable_name(Path::new(r"C:\Users\me\Documents\微信聊天记录 1.jpg")));
+        assert!(deletable_name(Path::new("")), "空串本身是合法文本，不该被误判成 lossy");
+        #[cfg(windows)]
+        {
+            use std::ffi::OsString;
+            use std::os::windows::ffi::OsStringExt;
+            // 孤立代理项：字节级拷来的 GBK 名字在 NTFS 上的真实形态
+            let broken = OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD800, 0x61, 0x2E, 0x6A, 0x70, 0x67]);
+            assert!(!deletable_name(Path::new(&broken)), "含孤立代理项的名字不得进槽");
+            // 配对代理项（合法 emoji）不是问题
+            let fine = OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD83C, 0xDFAF, 0x2E, 0x6A, 0x70, 0x67]);
+            assert!(deletable_name(Path::new(&fine)));
+        }
     }
 
     /// 审查 M1：预览窗读图/删图必须命中**主窗那次扫描**的槽。

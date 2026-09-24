@@ -129,8 +129,15 @@
 
         backdrop.querySelector('[data-role="cancelBtn"]').addEventListener('click', () => close(false));
         backdrop.querySelector('[data-role="manageBtn"]').addEventListener('click', () => {
-          if (window.api?.modelsWindow?.open) window.api.modelsWindow.open();
-          else window.app?.toast('warning', '当前环境不支持打开大模型管理窗口');
+          // 审查 v2-M22（v1 L13 未修）：浮动 Promise ⇒ 开窗失败时用户侧「点了没反应」。
+          // 关窗/开窗这类出口动作必须给可见回执。
+          if (window.api?.modelsWindow?.open) {
+            window.api.modelsWindow.open().catch((e) => {
+              window.app?.toast('error', '打开「大模型管理」窗口失败：' + ((e && e.message) || e));
+            });
+          } else {
+            window.app?.toast('warning', '当前环境不支持打开大模型管理窗口');
+          }
         });
 
         backdrop.querySelector('[data-role="saveBtn"]').addEventListener('click', async () => {

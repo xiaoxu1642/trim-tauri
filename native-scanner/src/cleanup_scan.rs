@@ -1,5 +1,5 @@
 // cleanup_scan.rs — 磁盘清理扫描引擎（P0 批次：pathPs 目录型条目 + dism 占位）
-// 方案：D:\KaiFa\文件分析\laji\磁盘清理扫描Rust化方案.md（v1.1）
+// 方案：《磁盘清理扫描 Rust 化方案》v1.1（本地资料区文档，不随仓库分发）
 //
 // 输入（方案 v1.1 输入通道定案）：
 //   argv = ["cleanup", categories_json, configured_paths_json]（均为短参数，JSON 数组/对象）

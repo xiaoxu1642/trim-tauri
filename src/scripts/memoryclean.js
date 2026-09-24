@@ -43,16 +43,18 @@
   function escapeAttr(s) { return window.ds.escAttr(s); }
   function fmtBytes(bytes) { return window.ds.fmtBytes(bytes); } // 审查 M18：真源在 ds
   function fmtPercent(p) { return (isFinite(p) ? Math.round(p) : 0) + '%'; }
-  function barColor(p) {
-    if (p >= 90) return 'linear-gradient(90deg, #DC2626, #EF4444)';
-    if (p >= 70) return 'linear-gradient(90deg, #D97706, #F59E0B)';
-    return '';
-  }
+  // 审查 v2-L5：原先这里返回两条 `linear-gradient(90deg,#DC2626,#EF4444)` 之类的**字面量**
+  // 并由 setBar 写进内联 style.background —— 4 个离表 hex + 2 条渐变，既不过 token 也不随
+  // 主题走，直撞 AGENTS §2「禁彩色渐变 / 只用 main.css 既有 token」（v1 M20 同族残留）。
+  // 改法：JS 侧只写语义档位 data-level，颜色由 main.css 的
+  // `.progress-fill[data-level="warning"|"danger"]`（既有件，色值取 --warning/--danger）决定
+  // —— 与「系统概览」页 setBar 完全同一口径，不再各写一套。
+  // 阈值口径保持不动（≥90 危险 / ≥70 警戒；概览页是 90/75，两处历史值本就不同，不并档）。
   function setBar(el, percent) {
     if (!el) return;
     const p = Math.max(0, Math.min(100, Number(percent) || 0));
     el.style.width = p + '%';
-    el.style.background = barColor(p) || '';
+    el.setAttribute('data-level', p >= 90 ? 'danger' : p >= 70 ? 'warning' : 'normal');
   }
 
   // ==================== 指标卡（与系统概览同款 2x2 / 最大化一行） ====================
@@ -162,7 +164,9 @@
   }
   function setRingValue(load) {
     const p = Math.max(0, Math.min(100, Number(load) || 0));
-    const color = p >= 90 ? '#DC2626' : p >= 70 ? '#D97706' : '';
+    // 审查 v2-L5：同上，阈值色不再写死 hex。ds.progress.circle 的 color 是直写
+    // style.stroke 的 CSS 值，给 var() 即可随主题走（浅色/深色各一档）。
+    const color = p >= 90 ? 'var(--danger)' : p >= 70 ? 'var(--warning)' : '';
     memRing.set(p, Math.round(p) + '%', color);
   }
 

@@ -7,16 +7,20 @@
   // 主进程收到后才显示主窗口，确保窗口出现即完整 UI）
   try { window.api?.window?.notifyFirstPaint?.(); } catch (e) {}
 
-  // 审查 L13：全局兜底未处理的 Promise 拒绝。此前渲染层一条 rejection 监听都没有，
-  // 任何漏了 catch 的异步调用都静默消失，用户侧就是「点了没反应、日志里也查不到」。
-  // 这里只记日志、不弹 toast：后台噪声糊到用户脸上是另一种体验事故，
-  // 而真正该给用户看错的调用点，各自补显式 catch。
-  window.addEventListener('unhandledrejection', (event) => {
-    const reason = event && event.reason;
-    const text = reason && reason.message ? reason.message : String(reason);
-    console.error('[Trim] 未处理的 Promise 拒绝:', reason);
-    try { window.logger?.write?.('error', '未处理的 Promise 拒绝: ' + text); } catch (e) {}
-  });
+  // 审查 L13 → v2-M22：全局兜底 unhandledrejection 的真源已挪进 ds.js（⑪ 节）——
+  // 原先只有主窗这一份，四个子窗一条监听都没有，子窗里的异步失败零痕迹。
+  // ds.js 在 index.html 里先于 app.js 加载并置 window.__dsErrGuard，故：
+  //   · 正常路径：ds 那份接管（主窗走 window.logger.write，与此前行为一致），这里不再注册，
+  //     免得一条 rejection 落两行日志；
+  //   · 降级路径：ds.js 缺席（浏览器裸预览 / 加载失败）时，主窗仍要有兜底，就地补装。
+  if (!window.__dsErrGuard) {
+    window.addEventListener('unhandledrejection', (event) => {
+      const reason = event && event.reason;
+      const text = reason && reason.message ? reason.message : String(reason);
+      console.error('[Trim] 未处理的 Promise 拒绝:', reason);
+      try { window.logger?.write?.('error', '未处理的 Promise 拒绝: ' + text); } catch (e) {}
+    });
+  }
 
   // 侧边栏折叠/展开
   const SIDEBAR_KEY = 'winclean-sidebar-collapsed';
@@ -594,7 +598,10 @@
     backdrop.style.display = 'flex';
     const body = document.getElementById('usageBody');
     if (!window.api?.app?.readUsage) {
-      body.innerHTML = '<div class="empty-state"><p>使用说明仅在 Electron 环境中可用</p></div>';
+      // 审查 v2-M21：这条文案原先写「仅在 Electron 环境中可用」——本仓库是 Tauri 轨，
+      // 而且 `app:read-usage` 命令真实存在，走到这个分支只可能是 **桥没就绪**（真故障），
+      // 把故障说成"这功能不在这个版本里"会让用户不再报、也让下一轮排查直接跳过。
+      body.innerHTML = '<div class="empty-state"><p>使用说明未能加载：本地接口未就绪（window.api 缺失），请重启应用后再试</p></div>';
       return;
     }
     try {

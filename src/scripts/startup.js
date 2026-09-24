@@ -190,7 +190,7 @@
   async function scan(refresh = false, silent = false) {
     if (loading) return;
     if (!window.api?.startup?.scan) {
-      renderError('启动项管理仅在 Electron 环境中可用');
+      renderError('启动项扫描不可用：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
       return;
     }
     loading = true;

@@ -1,7 +1,9 @@
 //! Phase 0 第 6 项 / D5 / R12：safeStorage 兼容读验证（默认 ignore，发布前门禁性质）。
 //!
 //! 运行方式（样本由 %TEMP%\\trim-dpapi-probe 下的探针流程产出）：
-//!   $env:TRIM_DPAPI_SAMPLE="<dpapi-final.json>"; cargo test --test dpapi_compat -- --ignored --nocapture
+//!   $env:TRIM_DPAPI_SAMPLE="<dpapi-final.json>"; cargo test --test safestorage_compat -- --ignored --nocapture
+//!   （审查 v2-L19：这里原先写的是 `--test dpapi_compat`，本仓没有那个 target，照抄会报
+//!    "no test target named"——文件名 `safestorage_compat` 才是真源。）
 //!
 //! 样本 JSON：
 //!   {

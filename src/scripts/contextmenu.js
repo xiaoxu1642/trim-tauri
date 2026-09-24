@@ -692,15 +692,29 @@
   }
 
   async function restore() {
-    const ok = await window.app?.confirm(
-      '从备份恢复',
-      '将使用桌面上的最新备份目录（右键菜单备份_*）恢复所有右键菜单项。\n是否继续？',
-      '确认恢复'
+    // 审查 v2-M11：同一条链路上「删除」已是红色确认（本文件 removeItem），「写回」却只是
+    // 普通 confirm ⇒ 确认等级方向反了——恢复会整批导入 .reg 并覆盖文件，破坏性不低于删除。
+    // 判据不来自这里：服务端已按 v2-K1 只导 manifest 登记且键路径合法的备份、并且要求提权。
+    const ok = await window.app?.confirmDanger?.(
+      '⚠️ 从备份恢复右键菜单',
+      '将用桌面上最新的那个「右键菜单备份_*」目录整体覆盖当前右键菜单设置：\n'
+      + '· 只导入该目录内、由本应用 manifest 登记过、且键路径落在注册表 Classes 范围内的备份文件；\n'
+      + '· 「发送到」/Win+X 的文件项会被备份内容覆盖，你对这些项的手动改动会丢失；\n'
+      + '· 此操作会写入注册表并可能影响机器级项，需要管理员权限。',
+      '仍然恢复',
+      '取消',
+      '恢复是整批覆盖，不是逐项选择。如需保留现状请先另存一份当前设置。'
     );
     if (!ok) return;
     try {
       if (window.api?.contextmenu) {
         const resp = await window.api.contextmenu.restore();
+        // v2-K1 给服务端补了提权闸门：未提权时回 needAdmin，走本页既有的提权握手
+        if (resp && resp.needAdmin) {
+          const elevated = await window.app?.requestElevation?.('恢复右键菜单备份需要管理员权限（可能写入 HKLM 注册表）。');
+          if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行恢复');
+          return;
+        }
         if (!resp.success) throw new Error(resp.message);
         const d = resp.data || {};
         const n = Number(d.imported || 0) + Number(d.restored || 0);

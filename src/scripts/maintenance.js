@@ -379,13 +379,32 @@
     if (!task) return;
     if (!window.api?.maintenance) { window.app?.toast?.('warning', '浏览器预览模式不支持执行维护任务'); return; }
 
-    // 独立确认：说明该任务会做什么、是否可逆、是否需重启
-    const ok = await window.app?.confirm?.(
-      `执行「${task.title}」`,
-      `${task.desc}\n\n该操作将立即开始，期间请勿关闭应用。${task.admin ? '\n（需要管理员权限）' : ''}`,
-      '确认执行',
-      '取消'
-    );
+    // 独立确认：说明该任务会做什么、是否可逆、是否需重启。
+    // 审查 v2-M11：同一条任务从「网络自检」页走是红色确认（`netcheck.js` 对 netstack/dns
+    // 走 confirmDanger），从本页走却只是普通 confirm ⇒ **确认等级按出口不一致**，用户从哪
+    // 个点进去决定了他被提醒的强度。判据统一取数据层的 `admin` 位（会改系统、需提权＝红档）。
+    // 红色确认件缺失时按"拒绝执行"收口（fail-closed）：宁可不跑，不能降级成普通确认。
+    let ok = false;
+    if (task.admin) {
+      if (!window.app?.confirmDanger) {
+        window.app?.toast?.('error', '高危确认对话框不可用，已中止');
+        return;
+      }
+      ok = await window.app.confirmDanger(
+        `⚠️ 执行「${task.title}」（需要管理员权限）`,
+        `${task.desc}\n\n该操作会立即修改系统设置，期间请勿关闭应用。`,
+        '仍然执行',
+        '取消',
+        '部分修改需重启才完全生效，请确认已了解后果。'
+      );
+    } else {
+      ok = await window.app?.confirm?.(
+        `执行「${task.title}」`,
+        `${task.desc}\n\n该操作将立即开始，期间请勿关闭应用。`,
+        '确认执行',
+        '取消'
+      );
+    }
     if (!ok) return;
 
     running = taskId;

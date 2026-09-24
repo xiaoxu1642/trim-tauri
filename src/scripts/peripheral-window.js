@@ -234,8 +234,9 @@
   }
 
   function close() {
+    // 审查 v2-M22（v1 L13 未修）：关窗是浮动 Promise，子窗此前零兜底 —— 失败即「点了没反应」。
     if (window.api?.peripheralWindow?.closeWindow) {
-      window.api.peripheralWindow.closeWindow();
+      window.api.peripheralWindow.closeWindow().catch((e) => toast('error', '关闭窗口失败：' + ((e && e.message) || e)));
     } else {
       window.close();
     }

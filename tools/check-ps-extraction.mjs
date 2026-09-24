@@ -10,7 +10,21 @@
 //   ② 行为层：同一台机器上分别用 pwsh 跑「JS 原脚本」与「.ps1」，JSON 输出深比对
 //      （只对确定性字段比对，抖动字段见 TOLERANT 说明）。
 //
-// 用法：node tools/check-ps-extraction.mjs [--no-run]
+// 审查 v2-M18（本文件默认语义的反转）：行为层要**真起 PowerShell**，66 条映射里 15 条
+// 不带 noRun（sysdisk/overview_*/memory_*/netcheck_*/runtimes_*/netspeed_*/cm_*/
+// startup_scan/peripheral_query 等采集类），每条还要跑两遍（JS 版 + .ps1 版）。
+// 本门禁在 AGENTS.md §4 里是「改完必做」的静态门禁，默认真跑等于让每次验收都扫盘+发网络探测；
+// 更要紧的是旧实现「找不到 pwsh 只打一句 ⚠ 跳过」后照样输出「全部门禁通过」= 静默判绿。
+// 现在：默认**只做文本层**，行为层必须显式 `--run`；`--run` 而 pwsh 缺席 → 判红（不许降级成跳过）；
+// 未跑行为层时结尾不再宣称「全部通过」，而是「文本层通过 / 行为层未验证」，
+// 需要把「未验证」也当失败的场景（发布前验收）加 `--strict`。
+//
+// 用法：node tools/check-ps-extraction.mjs [--run [--only a,b]] [--strict] [--no-run]
+//   --run         执行行为层（真起 pwsh，只跑不带 noRun 的 15 条）；缺 pwsh 即判红
+//   --only        配合 --run，只跑名字匹配的映射（排障用）
+//   --strict      把「行为层未验证」也算作失败（退出码 1）——发布前验收用这条
+//   --no-run      历史姿势，现为默认行为的显式写法（保留兼容，不判错）
+// 退出码：0 = 文本层全一致（--strict 时还须行为层已覆盖）；1 = 有不一致或未按要求执行
 
 import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -32,7 +46,14 @@ const VOLATILE = new Set(['cpu', 'memory', 'uptime', 'processes', 'free', 'used'
   'load']);
 // 但 overview 的 disks[].total 等结构字段必须一致
 
-const runCompare = !process.argv.includes('--no-run');
+const runCompare = process.argv.includes('--run');
+// --no-run 现在只是默认行为的显式写法；仍接受，避免让既有脚本/肌肉记忆报错。
+if (process.argv.includes('--no-run') && !runCompare) { /* 与新默认等价 */ }
+const STRICT = process.argv.includes('--strict');
+const ONLY = (() => {
+  const i = process.argv.indexOf('--only');
+  return i >= 0 && process.argv[i + 1] ? new Set(process.argv[i + 1].split(',')) : null;
+})();
 
 function resolvePwsh() {
   const candidates = [];
@@ -84,12 +105,26 @@ function deepDiff(a, b, path = '', out = []) {
 }
 
 let fail = 0;
+// 行为层三个计数：应跑 / 真跑成功 / 跑不起来 —— 没有它们就区分不了「验过且一致」与「压根没验」
+let behRun = 0;
+let behRunnable = 0;
+let behError = 0;
 const pwsh = runCompare ? resolvePwsh() : null;
-if (runCompare && !pwsh) console.log('⚠ 未找到 pwsh，跳过行为层比对（仅做文本层）');
-const work = mkdtempSync(join(tmpdir(), 'trim-ps-check-'));
+if (runCompare && !pwsh) {
+  // 判红而不是跳过：显式要求了行为层，机器上却没有 pwsh，那就是「没验」，
+  // 让它沉默地走过去正是 v2-M18 要根除的形态。
+  console.error('✗ 指定了 --run，但未找到 pwsh（设 PWSH7_PATH 或把 pwsh.exe 放进 PATH）——行为层无法执行，判失败');
+  process.exit(1);
+}
+const work = runCompare ? mkdtempSync(join(tmpdir(), 'trim-ps-check-')) : null;
 
-console.log('=== PS 脚本搬运一致性门禁 ===\n');
+console.log('=== PS 脚本搬运一致性门禁 ===');
+console.log(runCompare
+  ? `行为层：开启（--run，pwsh=${pwsh}；真起 PowerShell 执行不带 noRun 的映射，有扫盘/网络副作用）`
+  : `行为层：未验证（默认不执行真实 .ps1；需要时用 --run）`);
+console.log('');
 for (const m of MAPPING) {
+  if (ONLY && !ONLY.has(m.name)) continue;
   const jsText = loadBody(m, require, readFileSync);
   const psPath = join(PSDIR, m.ps1);
   const { body, provenance } = stripProvenance(readFileSync(psPath, 'utf8'));
@@ -111,12 +146,17 @@ for (const m of MAPPING) {
     }
   }
 
-  if (runCompare && pwsh && !m.noRun) {
+  if (!m.noRun) behRunnable++;
+  if (runCompare && !m.noRun) {
     const jsRun = runPs(pwsh, jsText, work, `${m.name}-js`);
     const psRun = runPs(pwsh, body, work, `${m.name}-ps`);
     if (jsRun.error || psRun.error) {
-      console.log(`  ⚠ 行为层跳过：JS=${jsRun.error || 'ok'} PS=${psRun.error || 'ok'}`);
+      // 跑不起来 ≠ 一致：计入 fail，避免旧的「⚠ 行为层跳过」把该条清零后照样判绿
+      fail++;
+      behError++;
+      console.log(`  ✗ 行为层无法执行：JS=${jsRun.error || 'ok'} PS=${psRun.error || 'ok'}`);
     } else {
+      behRun++;
       const diff = deepDiff(jsRun.value, psRun.value);
       if (diff.length === 0) console.log(`  ✓ 行为层：JSON 深比对一致（抖动字段已豁免：${[...VOLATILE].slice(0, 6).join('/')}…）`);
       else { fail++; console.log(`  ✗ 行为层差异 ${diff.length} 处：${diff.slice(0, 6).join(' | ')}`); }
@@ -126,6 +166,19 @@ for (const m of MAPPING) {
   }
 }
 
-rmSync(work, { recursive: true, force: true });
-console.log(`\n${fail === 0 ? '全部门禁通过' : `${fail} 项未通过`}`);
-process.exit(fail === 0 ? 0 : 1);
+if (work) rmSync(work, { recursive: true, force: true });
+// 「行为层已验证」= 该跑的每条都真跑了、且没有一条以「跑不起来」告终
+const behCovered = runCompare && behRunnable > 0 && behRun === behRunnable && behError === 0;
+console.log(`\n行为层覆盖：${runCompare ? `${behRun}/${behRunnable}` : '未执行（0/0）'}`);
+if (!runCompare) {
+  console.log(STRICT
+    ? '✗ --strict 要求行为层已验证，本次未执行（发布前验收：加 --run 真跑，或去掉 --strict 只当静态门禁）'
+    : '※ 本次只做了文本层对拍：行为层未验证，不代表 .ps1 与 JS 在真实 pwsh 下等价。');
+}
+const textFail = fail;
+const ok = textFail === 0 && (!STRICT || behCovered);
+const verdict = ok
+  ? (behCovered ? '✓ 全部门禁通过（文本层 + 行为层均已验证）' : '✓ 文本层门禁通过（行为层未验证，见上）')
+  : `✗ ${textFail} 项未通过${STRICT && !behCovered ? '（另：--strict 要求行为层已验证，本次未达成）' : ''}`;
+console.log(`\n${verdict}`);
+process.exit(ok ? 0 : 1);

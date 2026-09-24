@@ -161,8 +161,13 @@
   }
 
   function closeWindow() {
-    if (window.api?.previewWindow?.close) window.api.previewWindow.close();
-    else window.close();
+    // 审查 v2-M22（v1 L13 未修）：关窗是浮动 Promise，子窗此前零兜底 —— 失败时窗还开着但无人说话。
+    // 本窗的 toast 出口是文件信息行（preview 无独立提示层），文案照旧走 textContent。
+    if (window.api?.previewWindow?.close) {
+      window.api.previewWindow.close().catch((e) => toast('关闭窗口失败：' + ((e && e.message) || e)));
+    } else {
+      window.close();
+    }
   }
 
   function keyHandler(e) {

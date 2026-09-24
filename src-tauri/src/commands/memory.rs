@@ -181,7 +181,10 @@ pub async fn memory_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<
 /// 差异：Electron 在原生不可用时回落 PowerShell，Tauri 侧**不回落**（失败即如实返回错误）。
 #[tauri::command]
 pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Option<Vec<Value>>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    // 审查 v2-L17：这条**会改系统状态**（清工作集/系统缓存），唯一调用方是主窗的
+    // `memoryclean.js`（见 `app.js` 的页面表），四个子窗都不加载它 ⇒ 收 MAIN 档。
+    // `guard_readonly` 放行全部五窗是历史命名造成的错位，不是它该有的档位。
+    guard::guard(&window, guard::MAIN)?;
     // `Array.isArray(items) ? items.filter(i => typeof i === 'string') : []`
     let list: Vec<String> = items
         .unwrap_or_default()

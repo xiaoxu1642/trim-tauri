@@ -18,18 +18,28 @@ $targets = @(
 # 导入最新一份备份；「恢复 Windows 默认」才写出厂默认值，两个语义分开。
 $backupDir = Join-Path $env:APPDATA 'Trim\peripheral-backup'
 if (-not (Test-Path -LiteralPath $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
-$backupFile = Join-Path $backupDir ('backup_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.reg')
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $regPaths = @()
 foreach ($t in $targets) {
   if ($t.Value -lt 0) { continue }
   $stdPath = $t.Path -replace '^HKLM:', 'HKEY_LOCAL_MACHINE'
   if ($regPaths -notcontains $stdPath) { $regPaths += $stdPath }
 }
-# 导出整个父键（值可能存在/可能不存在），失败不阻断写入——有备份比没备份强
+# 审查 v2-M12：**每个**父键都要备份，旧写法导出第一个成功件后就 break —— 三组全选调优时
+# 只有 PriorityControl 有备份，KeyboardDataQueueSize / MouseDataQueueSize 的修改前值毫无记录，
+# 用户点「还原修改前的值」却拿到绿色提示，实际键鼠队列值仍是优化后的（承诺的可逆性不成立）。
+# 同一批次共用一个时间戳、按键分片成 backup_<stamp>_<n>.reg，还原时按批整组导入。
+$backupCount = 0
+$part = 0
 foreach ($rp in $regPaths) {
+  $part++
+  $backupFile = Join-Path $backupDir ('backup_' + $stamp + '_' + $part + '.reg')
   & reg.exe export "$rp" "$backupFile" /y 2>$null | Out-Null
-  if ($LASTEXITCODE -eq 0) { break }
+  if ($LASTEXITCODE -eq 0) { $backupCount++ }
+  # 导出失败的半成品分片不留：否则还原时会去导入一个内容不完整的 .reg
+  else { Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue }
 }
+Write-Output ('BACKUP ' + $backupCount + '/' + $regPaths.Count)
 foreach ($t in $targets) {
   if ($t.Value -lt 0) { continue }
   if (-not (Test-Path $t.Path)) { New-Item -Path $t.Path -Force | Out-Null }

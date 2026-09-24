@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "subwindows",
-  "description": "四个子窗（preview / models / processManager / peripheral）的最小能力集。审查 M4：它们建窗时未关原生装饰（全仓只有 lib.rs:416 的主窗 decorations(false)），标题栏/缩放由系统提供，因此既不需要 allow-close/allow-start-dragging/allow-set-position —— 尤其 allow-close，原先 `windows:[\"*\"]` 让任一被注入的子窗可直接 `invoke('plugin:window|close',{label:'main'})` 关掉主窗、打断进行中的删除。事件只给订阅，不给 emit（跨窗广播会让子窗伪造 cleanup:scan-progress / elevate:notice）。",
+  "description": "四个子窗（preview / models / processManager / peripheral）的最小能力集。审查 M4：它们建窗时未关原生装饰（全仓只有 lib.rs 主窗 builder 的 decorations(false)，现为 lib.rs:435 —— 审查 v2-L19 把原先写死的 :416 改成经核对的现值，改主窗 builder 时记得同步这句），标题栏/缩放由系统提供，因此既不需要 allow-close/allow-start-dragging/allow-set-position —— 尤其 allow-close，原先 `windows:[\"*\"]` 让任一被注入的子窗可直接 `invoke('plugin:window|close',{label:'main'})` 关掉主窗、打断进行中的删除。事件只给订阅，不给 emit（跨窗广播会让子窗伪造 cleanup:scan-progress / elevate:notice）。",
   "windows": ["preview", "models", "processManager", "peripheral"],
   "permissions": [
     "core:default",

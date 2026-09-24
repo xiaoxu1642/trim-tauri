@@ -15,6 +15,11 @@
 //! TLS 由 WinHTTP（系统 schannel）承担；代理走系统自动代理（`AUTOMATIC_PROXY`，
 //! 与 Chromium 读系统代理一致）。响应体上限 1MB（异常端点不拖垮内存）。
 //!
+//! **重定向一律不自动跟随**（审查 v2-M7）：本链带 `Authorization: Bearer <明文密钥>`，
+//! 交给 WinHTTP 自己跳的话，「公网端点 302 → 127.0.0.1」这一跳会先把凭据送到本机服务、
+//! 事后复检只能拦住读回响应。现由 `post_json` 逐跳走，每跳先过 `resolve_redirect`
+//! （非私有 + 同主机 + 不降级）才发下一跳。
+//!
 //! # 键序
 //!
 //! 请求体键序照抄 JS 对象字面量（`messages` → `stream` → `instruction` → `model`）；
@@ -153,6 +158,10 @@ impl Drop for WinHttpHandle {
 }
 
 /// POST JSON（同步阻塞；调用方负责放到 spawn_blocking 里跑）
+///
+/// 重定向由本函数**逐跳自己走**（审查 v2-M7，理由见下面 `WINHTTP_OPTION_REDIRECT_POLICY_NEVER`）：
+/// WinHTTP 默认策略是跟随，而本链带着 `Authorization: Bearer <明文密钥>` —— 交给它自动跟，
+/// 「公网端点 302 → `http://127.0.0.1:<port>/`」这一跳会在凭据**已经发出去之后**才被发现。
 fn post_json(
     url: &str,
     headers: &[(String, String)],
@@ -172,10 +181,11 @@ fn post_json(
     if settings::is_private_api_url(url) {
         return Err("接口地址指向本机或内网，已按安全策略拒绝".into());
     }
+    // 整条跳转链必须留在首发主机上：闸门按「最初那个用户填的端点」判，
+    // 不按「上一跳」判 —— 后者会让 A→B→A 这种两跳把主机限制绕过去。
+    let origin_host = target.host.clone();
     // 版本号取编译期常量：写死字面量就成了第 4 处需要手工同步的版本源
     let agent = wide(&format!("Trim/{}", env!("CARGO_PKG_VERSION")));
-    let host = wide(&target.host);
-    let object = wide(&target.path);
     let header_text: String = headers
         .iter()
         .map(|(k, v)| format!("{k}: {v}\r\n"))
@@ -197,102 +207,255 @@ fn post_json(
         let _session = WinHttpHandle(session);
         // 超时与 fetch 的 AbortController 同口径：到点即失败（解析/连接各留 10s/15s 头寸）
         let _ = WinHttpSetTimeouts(session, 10_000, 15_000, timeout, timeout);
-
-        let connect = WinHttpConnect(session, PCWSTR(host.as_ptr()), target.port, 0);
-        if connect.is_null() {
-            return Err(format!("WinHTTP 连接失败: {}", target.host));
-        }
-        let _connect = WinHttpHandle(connect);
-
-        let flags = if target.secure {
-            WINHTTP_FLAG_SECURE
-        } else {
-            WINHTTP_OPEN_REQUEST_FLAGS(0)
-        };
-        let request = WinHttpOpenRequest(
-            connect,
-            windows::core::w!("POST"),
-            PCWSTR(object.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            flags,
-        );
-        if request.is_null() {
-            return Err("WinHTTP 请求创建失败".into());
-        }
-        let _request = WinHttpHandle(request);
-
-        let headers_slice: Option<&[u16]> = if header_wide.is_empty() {
-            None
-        } else {
-            Some(&header_wide)
-        };
-        WinHttpSendRequest(
-            request,
-            headers_slice,
-            Some(body.as_ptr() as *const std::ffi::c_void),
-            body.len() as u32,
-            body.len() as u32,
-            0,
+        // 审查 v2-M7（v1 K1 的第二半）：**关掉自动跟随**。
+        // 旧实现在 `WinHttpReceiveResponse` 之后才 `query_final_url` + 复检，而那时跳转链
+        // 已经跑完、`Authorization` 已经随跨主机跳转重发 —— 事后复检只拦得住"读回响应"，
+        // 拦不住"本机服务已经收到明文密钥"。所以修法是**不让通道自己跳**，每跳先判后发。
+        // 这里刻意不再叠一层事后复检（两层判据必然漂移，且第一层已经足够）。
+        // 设不上就 fail-closed：宁可不发凭据，也不在「策略未知」的情况下把密钥交出去。
+        let policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_le_bytes();
+        WinHttpSetOption(
+            Some(session as *const std::ffi::c_void),
+            WINHTTP_OPTION_REDIRECT_POLICY,
+            Some(&policy),
         )
-        .map_err(|e| format!("HTTP 请求发送失败: {e}"))?;
-        WinHttpReceiveResponse(request, std::ptr::null_mut())
-            .map_err(|e| format!("HTTP 响应接收失败: {e}"))?;
+        .map_err(|_| "无法关闭自动重定向，已拒绝发出凭据".to_string())?;
 
-        // K1 复检终点：WinHTTP 默认跟随重定向，「初始 URL 公网 → 302 到 127.0.0.1」会让
-        // 上面那道入口校验形同虚设（跨主机跳转还会把 Authorization 头带过去）。
-        // 与 engine::winhttp 的下载链同一口径：终点必须重新过私有地址判定，且不得跨主机。
-        let final_url = crate::engine::winhttp::query_final_url(request)?;
-        if settings::is_private_api_url(&final_url) {
-            return Err("接口重定向终点指向本机或内网，已拒绝".into());
-        }
-        if let Some(f) = settings::parse_http_url(&final_url) {
-            if f.host != target.host {
-                return Err(format!("接口重定向跨主机（{} → {}），已拒绝", target.host, f.host));
+        let mut current = target;
+        // 跳数封顶：同主机 + 非私有仍可能配一个自指的 Location 形成死循环
+        for hop in 0..=MAX_REDIRECT_HOPS {
+            let host = wide(&current.host);
+            let object = wide(&current.path);
+            let connect = WinHttpConnect(session, PCWSTR(host.as_ptr()), current.port, 0);
+            if connect.is_null() {
+                return Err(format!("WinHTTP 连接失败: {}", current.host));
             }
-        }
-
-        let mut status: u32 = 0;
-        let mut status_len: u32 = std::mem::size_of::<u32>() as u32;
-        let _ = WinHttpQueryHeaders(
-            request,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some(&mut status as *mut u32 as *mut std::ffi::c_void),
-            &mut status_len,
-            std::ptr::null_mut(),
-        );
-
-        let mut bytes: Vec<u8> = Vec::new();
-        let mut buf = vec![0u8; 8192];
-        loop {
-            let mut read: u32 = 0;
-            if WinHttpReadData(
+            let _connect = WinHttpHandle(connect);
+            let flags = if current.secure {
+                WINHTTP_FLAG_SECURE
+            } else {
+                WINHTTP_OPEN_REQUEST_FLAGS(0)
+            };
+            let request = WinHttpOpenRequest(
+                connect,
+                windows::core::w!("POST"),
+                PCWSTR(object.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                std::ptr::null(),
+                flags,
+            );
+            if request.is_null() {
+                return Err("WinHTTP 请求创建失败".into());
+            }
+            // 句柄随本轮作用域释放（声明顺序保证 request 先于 connect 关）；
+            // 不这样做会在同一 session 下堆起一堆连接句柄。
+            let _request = WinHttpHandle(request);
+            let headers_slice: Option<&[u16]> = if header_wide.is_empty() {
+                None
+            } else {
+                Some(&header_wide)
+            };
+            // 每一跳都原样带上了 Authorization（同主机前提下才可接受，判据在 resolve_redirect）
+            let sent = WinHttpSendRequest(
                 request,
-                buf.as_mut_ptr() as *mut std::ffi::c_void,
-                buf.len() as u32,
-                &mut read,
+                headers_slice,
+                Some(body.as_ptr() as *const std::ffi::c_void),
+                body.len() as u32,
+                body.len() as u32,
+                0,
             )
-            .is_err()
-            {
-                break;
-            }
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&buf[..read as usize]);
-            if bytes.len() >= MAX_BODY_BYTES {
-                break;
+            .and_then(|_| WinHttpReceiveResponse(request, std::ptr::null_mut()));
+            let stepped = sent.map_err(|e| format!("HTTP 请求失败: {e}")).and_then(|_| {
+                let status = query_status(request);
+                if (300..400).contains(&status) {
+                    match query_location(request) {
+                        Some(loc) => Ok(Hop::Redirect(loc)),
+                        // 拿不到（超长 / 缺失）即不可判定 ⇒ fail-closed，不猜目的地
+                        None => Err("接口返回重定向但无法读取 Location，已拒绝".to_string()),
+                    }
+                } else {
+                    Ok(Hop::Done(HttpResult {
+                        status: status as u16,
+                        body: read_body(request),
+                    }))
+                }
+            });
+            match stepped? {
+                Hop::Done(res) => return Ok(res),
+                Hop::Redirect(location) => {
+                    if hop == MAX_REDIRECT_HOPS {
+                        return Err(format!("接口重定向超过 {MAX_REDIRECT_HOPS} 跳，已拒绝"));
+                    }
+                    current = resolve_redirect(&current, &origin_host, &location)?;
+                }
             }
         }
-
-        Ok(HttpResult {
-            status: status as u16,
-            body: String::from_utf8_lossy(&bytes).to_string(),
-        })
+        Err("接口重定向链未能收敛，已拒绝".into())
     }
 }
+
+/// 一跳的结果：拿到响应体，或者拿到一个**尚未校验**的 Location 原文。
+enum Hop {
+    Done(HttpResult),
+    Redirect(String),
+}
+
+/// 本链只跟随「同主机 + 非私有」的跳转；跳数封顶见调用方。
+const MAX_REDIRECT_HOPS: usize = 3;
+
+/// 校验并补全一跳目标（审查 v2-M7 的**唯一**闸门，纯函数以便断言）。
+///
+/// 三条判据按顺序，任一不过即 `Err`：
+/// 1. `Location` 能解析成 http(s) 绝对址（相对写法按 RFC 9110 以当前请求为基补全）；
+/// 2. 补全后的地址不是私有/环回/链路本地（`is_private_api_url`，fail-closed 同口径）；
+/// 3. 主机与**首发端点**逐字相同（跨主机的 302 是把凭据递给另一个服务的最短路径）；
+///    并且不得从 https 降级到 http —— 带着 Bearer 的降级等于把密钥改成明文过网。
+fn resolve_redirect(
+    base: &settings::ParsedUrl,
+    origin_host: &str,
+    location: &str,
+) -> Result<settings::ParsedUrl, String> {
+    let loc = location.trim();
+    if loc.is_empty() {
+        return Err("接口重定向缺少 Location，已拒绝".into());
+    }
+    let joined = absolute_url(base, loc);
+    if settings::is_private_api_url(&joined) {
+        // 这条判据同时吃掉「非 http(s) 协议」（is_private_api_url 的 fail-safe 口径）
+        return Err(format!("接口重定向终点不合规（本机/内网/协议非法），已拒绝: {joined}"));
+    }
+    let next = settings::parse_http_url(&joined)
+        .ok_or_else(|| format!("接口重定向终点无法解析: {joined}"))?;
+    if next.host.is_empty() {
+        return Err(format!("接口重定向终点缺少主机名: {joined}"));
+    }
+    if next.host != origin_host {
+        return Err(format!(
+            "接口重定向跨主机（{origin_host} → {}），已拒绝",
+            next.host
+        ));
+    }
+    if base.secure && !next.secure {
+        return Err("接口重定向把 https 降级为 http，携带的密钥会明文上网，已拒绝".into());
+    }
+    Ok(next)
+}
+
+/// `Location` → 绝对址。支持 `//host/path`（继承协议）、`/abs`、`rel`（相对当前路径的目录）
+/// 与 `scheme://...`（原样，交由 `parse_http_url` 判协议合法性）。
+fn absolute_url(base: &settings::ParsedUrl, loc: &str) -> String {
+    if loc.starts_with("//") {
+        return format!("{}:{loc}", base.scheme);
+    }
+    if loc.contains("://") {
+        return loc.to_string();
+    }
+    let rest = if loc.starts_with('/') {
+        loc.to_string()
+    } else {
+        // 相对当前「目录」：去掉基址最后一段（与浏览器同源算法一致）
+        let dir = match base.path.rfind('/') {
+            Some(i) => &base.path[..i + 1],
+            None => "/",
+        };
+        format!("{dir}{loc}")
+    };
+    // `rest` 必然以 `/` 开头（上面两个分支都保证），拼成绝对址即可
+    format!("{}{rest}", origin_of(base))
+}
+
+/// `scheme://host[:port]`（默认端口省略，避免把 `:443` 写进字面量后又被判成非默认端口）
+fn origin_of(base: &settings::ParsedUrl) -> String {
+    let host = if base.bracketed {
+        format!("[{}]", base.host)
+    } else {
+        base.host.clone()
+    };
+    let default_port: u16 = if base.secure { 443 } else { 80 };
+    if base.port == default_port {
+        format!("{}://{host}", base.scheme)
+    } else {
+        format!("{}://{host}:{}", base.scheme, base.port)
+    }
+}
+
+/// 状态码（读失败按 0 处理：调用方随后拿不到 2xx，等价于失败）
+unsafe fn query_status(request: *mut std::ffi::c_void) -> u32 {
+    use windows::core::PCWSTR;
+    use windows::Win32::Networking::WinHttp::*;
+    let mut status: u32 = 0;
+    let mut len: u32 = std::mem::size_of::<u32>() as u32;
+    let _ = WinHttpQueryHeaders(
+        request,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        PCWSTR::null(),
+        Some(&mut status as *mut u32 as *mut std::ffi::c_void),
+        &mut len,
+        std::ptr::null_mut(),
+    );
+    status
+}
+
+/// 读单个响应头。上限 4096 字节；放不下即返回 None（调用方 fail-closed，不去猜半个值）
+unsafe fn query_header(request: *mut std::ffi::c_void, name: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Networking::WinHttp::*;
+    const BUF_U16: usize = 2048;
+    let name_w = wide(name);
+    let mut buf = vec![0u16; BUF_U16];
+    let mut len = (BUF_U16 * 2) as u32;
+    WinHttpQueryHeaders(
+        request,
+        WINHTTP_QUERY_CUSTOM,
+        PCWSTR(name_w.as_ptr()),
+        Some(buf.as_mut_ptr() as *mut std::ffi::c_void),
+        &mut len,
+        std::ptr::null_mut(),
+    )
+    .ok()?;
+    let taken = ((len as usize / 2).min(BUF_U16)).min(buf.len());
+    let text = String::from_utf16_lossy(&buf[..taken]);
+    let text = text.trim_end_matches('\0').trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+unsafe fn query_location(request: *mut std::ffi::c_void) -> Option<String> {
+    query_header(request, "Location")
+}
+
+/// 读响应体，上限 `MAX_BODY_BYTES`（异常端点不拖垮内存）
+unsafe fn read_body(request: *mut std::ffi::c_void) -> String {
+    use windows::Win32::Networking::WinHttp::WinHttpReadData;
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 8192];
+    loop {
+        let mut read: u32 = 0;
+        if WinHttpReadData(
+            request,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            buf.len() as u32,
+            &mut read,
+        )
+        .is_err()
+        {
+            break;
+        }
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..read as usize]);
+        if bytes.len() >= MAX_BODY_BYTES {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
 
 /// fetch 的 `resp.ok`（2xx）
 fn is_ok_status(status: u16) -> bool {
@@ -493,10 +656,42 @@ fn load_ai_cache() -> Value {
 }
 
 /// `saveAiCache`（失败仅记日志，不阻塞返回简介）
+///
+/// 写之前先淘汰（审查 v2-L13）：TTL 原来只在**读取**分支判过一次，写入侧把整表原样落盘
+/// ⇒ 再也不被查询的条目永久留在文件里，「缓存 7 天」只对还会被读到的键成立。
 fn save_ai_cache(cache: &Value) {
-    if let Err(e) = security::atomic_write_json(&ai_cache_file(), cache) {
+    let (pruned, removed) = prune_ai_cache(cache, crate::engine::now_ms(), AI_CACHE_TTL_MS);
+    if removed > 0 {
+        log::write_log("info", &format!("简介缓存已淘汰 {removed} 条过期/畸形项"));
+    }
+    if let Err(e) = security::atomic_write_json(&ai_cache_file(), &pruned) {
         log::write_log("error", &format!("写入简介缓存失败: {e}"));
     }
+}
+
+/// 缓存淘汰（纯函数，便于断言）：交出剔掉过期与畸形条目后的表，以及剔掉了几条。
+/// 畸形（非对象条目、`timestamp` 非数）一并清掉 —— 这类件本就不该存在，
+/// 留着只会一直长，且读取分支永远把它们当 miss（等于纯垃圾）。
+fn prune_ai_cache(cache: &Value, now_ms: i64, ttl_ms: i64) -> (Value, usize) {
+    let Some(map) = cache.as_object() else {
+        return (json!({}), 0);
+    };
+    let mut out = serde_json::Map::new();
+    let mut removed = 0usize;
+    for (key, entry) in map {
+        let fresh = entry
+            .get("timestamp")
+            .map(settings::js_number)
+            .filter(|n| n.is_finite())
+            .map(|ts| now_ms - (ts as i64) < ttl_ms)
+            .unwrap_or(false);
+        if fresh {
+            out.insert(key.clone(), entry.clone());
+        } else {
+            removed += 1;
+        }
+    }
+    (Value::Object(out), removed)
 }
 
 /// `todayKey`：本地日期（与 engine::log 同一本地口径，杜绝 UTC 漂移）
@@ -691,5 +886,102 @@ mod tests {
         let k = ai_cache_key("解压到当前文件夹", "WinRAR", "global:metaso:fast_thinking");
         assert_eq!(k.len(), 32);
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ==================== 审查 v2-M7：跳转链不得在凭据发出后才发现违规 ====================
+
+    /// 用「公网 https 端点」当基址；port/path 有意非默认，顺带验证 origin_of 不丢端口。
+    fn base() -> settings::ParsedUrl {
+        settings::parse_http_url("https://api.example.com:8443/v1/chat")
+            .expect("基址必须可解析")
+    }
+
+    #[test]
+    fn 跳回本机或内网的_location_一律拒() {
+        // 这正是 v2-M7 的咬人形态：公网端点 302 → 本机服务，旧实现先把 Bearer 发出去再复检
+        for loc in [
+            "http://127.0.0.1:9999/",
+            "http://localhost:9999/v1",
+            "http://[::1]/x",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://0177.0.0.1/",          // 八进制归一化后仍是回环
+            "http://[2002:7f00:1::]/",     // 6to4 内嵌 127.0.0.1
+        ] {
+            assert!(
+                resolve_redirect(&base(), "api.example.com", loc).is_err(),
+                "{loc} 必须被拒"
+            );
+        }
+    }
+
+    #[test]
+    fn 跨主机与降级同样被拒() {
+        let b = base();
+        // 跨主机：把 Authorization 递给另一个服务（绝对址与协议相对写法都要拦）
+        assert!(resolve_redirect(&b, "api.example.com", "https://evil.example.org/steal").is_err());
+        assert!(resolve_redirect(&b, "api.example.com", "//evil.example.org/steal").is_err());
+        // https → http：密钥改成明文过网
+        assert!(resolve_redirect(&b, "api.example.com", "http://api.example.com:8443/v1").is_err());
+        // 不可判定即 fail-closed：空 Location 与非 http 协议
+        for loc in ["", "   ", "ftp://api.example.com/x"] {
+            assert!(resolve_redirect(&b, "api.example.com", loc).is_err(), "{loc} 不可跟随");
+        }
+    }
+
+    #[test]
+    fn 同主机的合规跳转必须被接受并补全() {
+        // 反向断言：闸门不得把正常的同机跳转一起拒掉（否则换域名/加尾斜杠的端点全废）
+        let b = base();
+        let next = resolve_redirect(&b, "api.example.com", "https://api.example.com:8443/v2/chat")
+            .expect("同主机同协议的绝对址必须放行");
+        assert_eq!((next.host.as_str(), next.port, next.path.as_str()), ("api.example.com", 8443, "/v2/chat"));
+        // 相对形式按 RFC 9110 以基址为参照补全，补全后同样过全套判据
+        let abs = resolve_redirect(&b, "api.example.com", "/v1/completions").unwrap();
+        assert_eq!((abs.host.as_str(), abs.port, abs.path.as_str()), ("api.example.com", 8443, "/v1/completions"));
+        let rel = resolve_redirect(&b, "api.example.com", "completions").unwrap();
+        assert_eq!(rel.path, "/v1/completions");
+        let proto = resolve_redirect(&b, "api.example.com", "//api.example.com:8443/v1").unwrap();
+        assert_eq!((proto.host.as_str(), proto.secure), ("api.example.com", true));
+    }
+
+    #[test]
+    fn 默认端口不得被写成字面量后再判成非默认() {
+        // origin_of 省略默认端口：`https://host:443` 这种写法不该让跳转目标换端口
+        let b = settings::parse_http_url("https://api.example.com/v1/chat").unwrap();
+        assert_eq!(origin_of(&b), "https://api.example.com");
+        let n = resolve_redirect(&b, "api.example.com", "/v2/chat").unwrap();
+        assert_eq!(n.port, 443);
+        // IPv6 基址必须带方括号回写，否则 `https://::1:443` 之类的串无从解析
+        let v6 = settings::parse_http_url("https://[2606:4700:4700::1111]/v1").unwrap();
+        assert_eq!(origin_of(&v6), "https://[2606:4700:4700::1111]");
+    }
+
+    // ==================== 审查 v2-L13：简介缓存只判读不淘汰 ====================
+
+    #[test]
+    fn 缓存写入前淘汰过期与畸形条目() {
+        let now: i64 = 1_760_000_000_000;
+        let ttl = 7 * 24 * 60 * 60 * 1000;
+        let cache = json!({
+            "fresh": { "desc": "d", "timestamp": now - ttl / 2 },
+            "expired": { "desc": "d", "timestamp": now - ttl * 2 },
+            "边界外一秒": { "desc": "d", "timestamp": now - ttl - 1 },
+            "没有timestamp": { "desc": "d" },
+            "时间戳不是数": { "desc": "d", "timestamp": "昨天" },
+            "条目不是对象": "随便一个字符串",
+        });
+        let (pruned, removed) = prune_ai_cache(&cache, now, ttl);
+        assert_eq!(removed, 5, "除 fresh 之外全部该被淘汰");
+        let obj = pruned.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("fresh"));
+        // 反向：不得把未过期条目一起清掉（清了就是每次都重新联网要简介）
+        let all_fresh = json!({ "a": { "timestamp": now }, "b": { "timestamp": now - ttl + 1 } });
+        let (kept, removed) = prune_ai_cache(&all_fresh, now, ttl);
+        assert_eq!((removed, kept.as_object().unwrap().len()), (0, 2));
+        // 非对象整表：当作空表处理，不 panic
+        let (v, removed) = prune_ai_cache(&json!([]), now, ttl);
+        assert_eq!((v, removed), (json!({}), 0));
     }
 }

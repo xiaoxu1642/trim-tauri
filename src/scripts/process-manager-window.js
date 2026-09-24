@@ -113,8 +113,14 @@
   }
 
   function closeWindow() {
-    if (window.api?.processManager?.closeWindow) window.api.processManager.closeWindow();
-    else window.close();
+    // 审查 v2-M22（v1 L13 未修）：关窗是浮动 Promise，子窗此前零兜底 —— 失败即「点了没反应」。
+    // 注：上面 reportProgress 走的是 send 语义（sendChannel 内部已落日志、返回 undefined），
+    // 不能在这里补 .catch，那会对 undefined 取属性。
+    if (window.api?.processManager?.closeWindow) {
+      window.api.processManager.closeWindow().catch((e) => toast('error', '关闭窗口失败：' + ((e && e.message) || e)));
+    } else {
+      window.close();
+    }
   }
 
   // 恒浅色（v2.1：应用固定浅色，不再跟随系统主题；v2.8.0 清理死代码不再 remove theme-dark）

@@ -122,17 +122,28 @@ fn read_handshake() -> Option<(String, String, u32)> {
 #[cfg(windows)]
 fn takeover_writer_gone(pid: u32) -> bool {
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     if pid == 0 || pid == std::process::id() {
         // 无 pid 字段，或写记录的就是本进程 —— 都不构成「另一个实例活着」的证据
         return true;
     }
     match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => {
+            // 审查 v2-L14：`OpenProcess` 成功**不等于这个进程还在跑**。正在退出的进程、
+            // 以及 `ShellExecuteW` 的宿主（explorer）短时握着句柄时都还打得开 —— 新实例写完
+            // `ready` 后秒退，旧实例据此让位就会把用户的应用弄没。必须问退出码：
+            // 只有 STILL_ACTIVE(259) 才算「这个实例真的活着」；问不出来也按活着处理（不让位）。
+            let mut code: u32 = 0;
+            let alive = match unsafe { GetExitCodeProcess(h, &mut code) } {
+                Ok(()) => code == 259,
+                Err(_) => true,
+            };
             unsafe {
                 let _ = CloseHandle(h);
             }
-            false
+            !alive
         }
         // 只有「参数无效」是这个 pid 不存在的确定反证；其余失败按活着处理
         Err(_) => {
@@ -243,14 +254,20 @@ fn arm_handshake<R: Runtime>(app: AppHandle<R>, nonce: String) {
     std::thread::spawn(move || {
         log::write_log("info", "等待提权后的新实例就绪");
         let started = std::time::Instant::now();
+        // 审查 v2-L14：判死为真时不改文件、也不 break，会继续 500ms 轮询到 20s 超时 ——
+        // 同一条 warn 最多刷约 40 行，把日志真正想留下的线索埋掉。只报第一次。
+        let mut gone_warned = false;
         loop {
             if let Some((n, phase, pid)) = read_handshake() {
                 if handshake_matches(&n, &phase, &nonce, PHASE_READY) {
                     if takeover_writer_gone(pid) {
-                        log::write_log(
-                            "warn",
-                            &format!("收到 ready 但写记录的进程 (pid {pid}) 已不在，不让位、继续等待"),
-                        );
+                        if !gone_warned {
+                            gone_warned = true;
+                            log::write_log(
+                                "warn",
+                                &format!("收到 ready 但写记录的进程 (pid {pid}) 已不在，不让位、继续等待"),
+                            );
+                        }
                     } else {
                         log::write_log("info", "检测到提权后的新实例已启动，退出当前实例");
                         // 先落 released 再退出：新实例在等这个标记才肯建窗

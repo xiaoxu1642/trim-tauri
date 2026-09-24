@@ -19,6 +19,10 @@ extern "system" {
 }
 
 const SYS_PROCESSOR_PERFORMANCE_INFORMATION: u32 = 8;
+/// `SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION` 单结构体字节数（按逻辑处理器数返回 N 份）
+const CPU_ITEM_LEN: usize = 48;
+/// 缓冲不够大（Nt* 的「先给我长度」回执）
+const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
 
 /// 输出一行到 stdout；管道断裂（父进程退出）返回 Err
 fn out_line(s: &str) -> std::io::Result<()> {
@@ -33,11 +37,58 @@ fn arg_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.iter().position(|a| a == &k).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
 }
 
+/// 墙钟毫秒：**只用于对外输出的时间戳**（`net-sample` 的 `t` 字段，渲染层按 epoch ms 展示）
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
-fn now_ns() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+
+// ---- 单调时钟（审查 v2-L18）----
+// 原来测速的阶段截止、收尾硬限、耗时统计全用墙钟 `SystemTime::now()`：
+// NTP 前跳会让「4 秒阶段」瞬间收尾、后跳会让 `now >= deadline` 长期不成立，
+// 而结果照样标 `measured:true` —— 计时口径必须与系统时间解耦，所以走 QPC。
+// 手写 kernel32 声明：windows-sys 的 `Win32_System_Performance` feature 本 crate 未开
+// （红线：不新开 feature），且这两个函数无类型负担。
+#[link(name = "kernel32")]
+extern "system" {
+    fn QueryPerformanceCounter(lpPerformanceCount: *mut i64) -> i32;
+    fn QueryPerformanceFrequency(lpFrequency: *mut i64) -> i32;
+}
+
+/// (起点计数, 频率)，进程内只取一次；`None` = QPC 不可用（理论不发生，留回落）
+static QPC_BASE: std::sync::OnceLock<Option<(i64, i64)>> = std::sync::OnceLock::new();
+
+fn qpc_base() -> Option<(i64, i64)> {
+    *QPC_BASE.get_or_init(|| unsafe {
+        let mut freq: i64 = 0;
+        let mut cnt: i64 = 0;
+        if QueryPerformanceFrequency(&mut freq) == 0 || freq <= 0 {
+            return None;
+        }
+        if QueryPerformanceCounter(&mut cnt) == 0 {
+            return None;
+        }
+        Some((cnt, freq))
+    })
+}
+
+/// 单调纳秒（自进程首次取值起算）
+fn mono_ns() -> u128 {
+    match qpc_base() {
+        Some((base, freq)) => unsafe {
+            let mut cnt: i64 = 0;
+            if QueryPerformanceCounter(&mut cnt) == 0 {
+                return now_ms() as u128 * 1_000_000; // 回落墙钟：宁可退化，不 panic
+            }
+            (cnt - base).max(0) as u128 * 1_000_000_000 / freq as u128
+        },
+        // QPC 不可用时退回墙钟（不影响正确性判断，只丢掉「不受调时影响」这一条）
+        None => now_ms() as u128 * 1_000_000,
+    }
+}
+
+/// 单调毫秒：所有「截止/耗时」判定用它，不用 `now_ms()`
+fn mono_ms() -> u64 {
+    (mono_ns() / 1_000_000) as u64
 }
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain([0]).collect() }
 fn utf16_str(buf: &[u16]) -> String {
@@ -116,7 +167,7 @@ unsafe fn bench_phase(
         // OVERLAPPED.Anonymous 是 union：Offset/OffsetHigh 在 OVERLAPPED_0_0 变体里（windows-sys 0.59）
         ovl[i].Anonymous.Anonymous.Offset = off as u32;
         ovl[i].Anonymous.Anonymous.OffsetHigh = (off >> 32) as u32;
-        in_flight[i] = (off, now_ns());
+        in_flight[i] = (off, mono_ns());
         let ok = if kind == 0 || kind == 3 {
             WriteFile(handle, bufs[i].as_ptr(), io_size as u32, std::ptr::null_mut(), &mut ovl[i])
         } else {
@@ -129,7 +180,7 @@ unsafe fn bench_phase(
     };
     for i in 0..qd { submit(i, &mut ovl, &mut bufs, &mut in_flight); }
     loop {
-        if now_ms() >= deadline_ms { break; }
+        if mono_ms() >= deadline_ms { break; }
         let n = events.len() as u32;
         let wait = WaitForMultipleObjects(n, events.as_ptr(), 0, 200);
         if wait < WAIT_OBJECT_0 || wait >= WAIT_OBJECT_0 + n { continue; }
@@ -137,20 +188,20 @@ unsafe fn bench_phase(
         let mut transferred: u32 = 0;
         let _ = GetOverlappedResult(handle, &ovl[i], &mut transferred, 0);
         if in_flight[i].0 != u64::MAX {
-            lat_total += now_ns().saturating_sub(in_flight[i].1);
+            lat_total += mono_ns().saturating_sub(in_flight[i].1);
             bytes_done += transferred as u64;
             ops_done += 1;
         }
-        if now_ms() < deadline_ms {
+        if mono_ms() < deadline_ms {
             submit(i, &mut ovl, &mut bufs, &mut in_flight);
         } else {
             in_flight[i].0 = u64::MAX;
         }
     }
     // 收尾：等全部在途落定（截止后仍在途的请求很小，1s 足够）
-    let hard = now_ms() + 1000;
+    let hard = mono_ms() + 1000;
     let mut remaining: Vec<usize> = (0..qd).collect();
-    while !remaining.is_empty() && now_ms() < hard {
+    while !remaining.is_empty() && mono_ms() < hard {
         let hs: Vec<*mut core::ffi::c_void> = remaining.iter().map(|&i| events[i]).collect();
         let n = hs.len() as u32;
         let wait = WaitForMultipleObjects(n, hs.as_ptr(), 1, 300);
@@ -159,7 +210,7 @@ unsafe fn bench_phase(
         let mut transferred: u32 = 0;
         let _ = GetOverlappedResult(handle, &ovl[i], &mut transferred, 0);
         if in_flight[i].0 != u64::MAX {
-            lat_total += now_ns().saturating_sub(in_flight[i].1);
+            lat_total += mono_ns().saturating_sub(in_flight[i].1);
             bytes_done += transferred as u64;
             ops_done += 1;
         }
@@ -216,7 +267,13 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
     // 非固定盘 / 探测失败回落 buf（nobuf 在内存盘、网络盘不可靠）
     let mut nobuf = mode != "buf";
     unsafe {
-        let root = format!("{}\\", &dir[..3.min(dir.len())]);
+        // 审查 v2-L18：原来写 `&dir[..3.min(dir.len())]` 按**字节**切片取盘符根，
+        // 首 3 字节落在多字节字符中间会直接 panic（CLI 直调 `--path` 可达）。
+        // 现在只在确认是 `X:` 形态时取前两个 ASCII 字节，其余一律不判、保守回落 buf。
+        let root: String = match drive_root_prefix(&dir) {
+            Some(p) => format!("{p}\\"),
+            None => dir.clone(),
+        };
         let (mut spc, mut bps, mut fc, mut tc) = (0u32, 0u32, 0u32, 0u32);
         if GetDiskFreeSpaceW(wide(&root).as_ptr(), &mut spc, &mut bps, &mut fc, &mut tc) == 0 { nobuf = false; }
     }
@@ -229,10 +286,14 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         let _ = std::fs::create_dir_all(&bench_dir);
         let seq_per = (SEQ_WINDOW_TOTAL / threads as u64 / block).max(8) * block;
         let rand_per = ((RAND_WINDOW_TOTAL / threads as u64) / 4096).max(8) * 4096;
+        // 文件名带 PID + 单调时钟戳（审查 v2-M6）：超时后原生工作线程**仍在跑完整轮**
+        // （上层只是不再等它），同名文件会让下一轮和这一轮抢同一块盘、互相把对方的
+        // 字节数算进自己的结果。不同名至少保证两轮的测量对象互不相干。
+        let stamp = format!("{}_{}", std::process::id(), mono_ms());
         let mut handles: Vec<*mut core::ffi::c_void> = Vec::new();
         let mut files: Vec<String> = Vec::new();
         for t in 0..threads {
-            let name = format!("tb_t{}.bin", t);
+            let name = format!("tb_{t}_{stamp}.bin");
             let full = format!("{}\\{}", bench_dir, name);
             let h = open_bench_file(&full, seq_per.max(rand_per), nobuf);
             if h.is_null() { break; }
@@ -243,13 +304,24 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
             for f in &files { DeleteFileW(wide(f).as_ptr()); }
             return Err("测试文件创建失败".to_string());
         }
-        let t0 = now_ms();
+        // 审查 v2-M6：句柄数不足时**不能**继续 —— 原实现 `break` 后照样往下测，
+        // 最终 JSON 里却写请求的 `threads`（请求 8 线程实开 1 线程），
+        // 于是测速历史里出现口径不自洽的曲线，且 `measured:true` 让上层护栏永不触发。
+        // 开测前先判一次：没必要为注定作废的结果再跑满一整轮（duration 最长 16s×4 段）。
+        if let Err(msg) = bench_setup_verdict(handles.len(), threads) {
+            let opened = handles.len();
+            let _ = opened;
+            for h in handles { let _ = CloseHandle(h); }
+            for f in &files { DeleteFileW(wide(f).as_ptr()); }
+            return Err(msg);
+        }
+        let t0 = mono_ms();
         let phase_ms = duration * 1000;
         let half_ms = duration * 500;
         // HANDLE 是 *mut c_void 不满足 Send；edition2021 精确捕获会连字段位置一起抓，
         // 包装体也绕不开 → 跨线程一律先转 usize（Send），闭包内再转回 HANDLE（同进程内安全）
         let run_stage = |kind: u8, io: usize, ms: u64, seq: u64, offs: &[u64]| -> (u64, u64, u128) {
-            let start = now_ms();
+            let start = mono_ms();
             let hs: Vec<usize> = handles.iter().map(|h| *h as usize).collect();
             std::thread::scope(|s| {
                 let mut js = Vec::new();
@@ -273,7 +345,7 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         bench_progress(on_progress, "randread", 90);
         let wr_r = run_stage(3, 4096, half_ms, rand_per, &offsets);
         bench_progress(on_progress, "randwrite", 100);
-        let elapsed = now_ms() - t0;
+        let elapsed = mono_ms().saturating_sub(t0);
 
         // 口径（v2 §3.1）：MB/s 按真实阶段耗时；iops=4K 随机读 IOPS（保历史可比）；
         // latency=随机读单请求端到端平均（含排队），毫秒
@@ -284,15 +356,64 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         let rand_write = mbs(wr_r.0, half_ms);
         let iops = rd_r.1 as f64 / (half_ms as f64 / 1000.0);
         let latency = if rd_r.1 > 0 { (rd_r.2 as f64 / rd_r.1 as f64) / 1e6 } else { 0.0 };
+        // 审查 v2-M6：`measured:true` 以前是**无条件**写死的。盘被配额/只读/杀软拦下时
+        // 每个阶段都是 0 次完成，输出却是 `0 MB/s 且 measured:true`，被当成一次真实测量
+        // 写进测速历史（上层唯一的护栏就是 measured）。这里先判"到底测到没有"。
+        let opened = handles.len();
+        if let Err(msg) = bench_verdict(opened, threads, [seq_w.1, seq_r.1, rd_r.1, wr_r.1]) {
+            for h in handles { let _ = CloseHandle(h); }
+            for f in &files { DeleteFileW(wide(f).as_ptr()); }
+            return Err(msg);
+        }
         let result = format!(
             "{{\"measured\":true,\"sequentialRead\":{:.1},\"sequentialWrite\":{:.1},\"randomRead\":{:.1},\"randomWrite\":{:.1},\"iops\":{:.0},\"latency\":{:.3},\"blockSize\":{},\"queueDepth\":{},\"threads\":{},\"duration\":{},\"ioMode\":\"{}\",\"qdEffective\":{},\"elapsedMs\":{}}}",
-            seq_read, seq_write, rand_read, rand_write, iops, latency, block, qd_req, threads, duration,
+            seq_read, seq_write, rand_read, rand_write, iops, latency, block, qd_req, opened, duration,
             if nobuf { "nobuf" } else { "buf" }, qd_eff, elapsed
         );
         for h in handles { let _ = CloseHandle(h); }
         for f in &files { DeleteFileW(wide(f).as_ptr()); }
         Ok(result)
     }
+}
+
+/// 取 `X:` 形态的盘符前缀（两个 ASCII 字节 + 冒号），不是这个形态返回 `None`。
+/// 审查 v2-L18：调用方要拿它拼盘符根去 `GetDiskFreeSpaceW`，原来的 `&dir[..3]`
+/// 按字节切片会在多字节首字符上 panic。
+fn drive_root_prefix(dir: &str) -> Option<&str> {
+    let b = dir.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        Some(&dir[..2])
+    } else {
+        None
+    }
+}
+
+/// 测速结果诚实性判定（纯函数，便于断言；审查 v2-M6）。
+/// 要区分的是「测到了 0」与「根本没测成」：
+///   · 建出来的句柄数少于请求数 ⇒ 线程数失真，`threads` 字段与历史曲线都不可比；
+///   · 任一阶段 0 次完成 ⇒ 那一列是凭空写出来的 0，不是测量值（写失败被静默跳过的形态）。
+/// 判 Err 之后上层（`commands/diskbench.rs`）唯一的护栏 `measured != true` 才会生效。
+fn bench_verdict(opened: usize, requested: usize, ops_per_stage: [u64; 4]) -> Result<(), String> {
+    bench_setup_verdict(opened, requested)?;
+    if ops_per_stage.iter().all(|o| *o == 0) {
+        return Err("四个阶段没有任何一次 IO 完成，测速未成功".to_string());
+    }
+    if let Some(i) = ops_per_stage.iter().position(|o| *o == 0) {
+        const NAMES: [&str; 4] = ["顺序写", "顺序读", "随机读", "随机写"];
+        return Err(format!("{}阶段没有完成任何 IO，本轮测速结果不完整", NAMES[i]));
+    }
+    Ok(())
+}
+
+/// 开测前的那一半判定（句柄建立阶段）：不值得为注定作废的结果再跑满一整轮。
+fn bench_setup_verdict(opened: usize, requested: usize) -> Result<(), String> {
+    if opened == 0 {
+        return Err("测试文件创建失败".to_string());
+    }
+    if opened != requested {
+        return Err(format!("测试文件只建成 {opened}/{requested} 个，本轮测速作废"));
+    }
+    Ok(())
 }
 
 /// 磁盘测速 **数据入口**（lib 直调）：args 与 CLI `diskbench` 参数一致；
@@ -319,18 +440,47 @@ pub fn run_diskbench(args: &[String]) -> i32 {
 // 契约（v2 §2.4）：success/cpu(数字；首拍 null，主进程差分 cpuRaw)/memory{total,free,used,percent}/
 //   disks[{name:"C:",label,total,free,used,percent}]/uptime/processes/system{caption,version,build,...}
 
+/// CPU 原始计数（busy/idle，全部逻辑处理器求和）。返回 `None` = 这次没采到。
+///
+/// 审查 v2-M6：原来是固定缓冲 `[0u8; 64*48]`，而 `SystemProcessorPerformanceInformation`
+/// 是**按逻辑处理器数**返回 N 份 48 字节结构体 ⇒ >64 核的机器必得
+/// `STATUS_INFO_LENGTH_MISMATCH`，于是 `cpuRaw` 恒 null、概览页 CPU 永久 `--`；
+/// 更要紧的是当时 `success` 无条件为 true，让本来能正常给出 CPU 的 PS 引擎**永不回落**。
+/// 现在按 ReturnLength 重试一次，并把「采没采到」如实回给调用方。
 unsafe fn cpu_raw_times() -> Option<(u64, u64)> {
-    let mut buf = [0u8; 64 * 48];
+    let mut buf: Vec<u8> = vec![0u8; CPU_ITEM_LEN * 64];
     let mut ret: u32 = 0;
-    if NtQuerySystemInformation(SYS_PROCESSOR_PERFORMANCE_INFORMATION, buf.as_mut_ptr(), buf.len() as u32, &mut ret) != 0 {
+    let mut st = NtQuerySystemInformation(
+        SYS_PROCESSOR_PERFORMANCE_INFORMATION,
+        buf.as_mut_ptr(),
+        buf.len() as u32,
+        &mut ret,
+    );
+    if st == STATUS_INFO_LENGTH_MISMATCH {
+        let want = cpu_buf_retry_len(ret, buf.len())?;
+        buf = vec![0u8; want];
+        ret = 0;
+        st = NtQuerySystemInformation(
+            SYS_PROCESSOR_PERFORMANCE_INFORMATION,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut ret,
+        );
+    }
+    if st != 0 {
         return None;
     }
-    let n = (ret as usize / 48).min(64);
+    let n = (ret as usize).min(buf.len()) / CPU_ITEM_LEN;
+    if n == 0 {
+        return None;
+    }
     let (mut busy, mut idle) = (0u64, 0u64);
     for i in 0..n {
         let rd = |o: usize| -> u64 {
             let mut v: u64 = 0;
-            for k in 0..8 { v |= (buf[i * 48 + o + k] as u64) << (8 * k); }
+            for k in 0..8 {
+                v |= (buf[i * CPU_ITEM_LEN + o + k] as u64) << (8 * k);
+            }
             v
         };
         let idle_t = rd(0);
@@ -338,6 +488,17 @@ unsafe fn cpu_raw_times() -> Option<(u64, u64)> {
         busy += rd(8).saturating_sub(idle_t) + rd(16);
     }
     Some((busy, idle))
+}
+
+/// 缓冲不足时按 `ReturnLength` 重算尺寸（纯函数，便于断言；审查 v2-M6）。
+/// 返回 `None` = 不值得一试（没给出长度，或超过 4096 逻辑核这种荒谬值）。
+/// 按整项对齐，避免尾端半条记录被当成一条读进累加（那会把随机字节算成时间）。
+fn cpu_buf_retry_len(ret: u32, cur: usize) -> Option<usize> {
+    let need = ret as usize;
+    if need <= cur || need > CPU_ITEM_LEN * 4096 {
+        return None;
+    }
+    Some(need.div_ceil(CPU_ITEM_LEN) * CPU_ITEM_LEN)
 }
 
 unsafe fn uptime_text() -> String {
@@ -391,6 +552,14 @@ unsafe fn reg_get_string(sub: &str, name: &str) -> Option<String> {
     out
 }
 
+/// `success` 字段的口径（纯函数，便于断言；审查 v2-M6）。
+/// 上层（`commands/overview.rs`）**唯一**的回落判据就是 `success != true`，而回落是一次性
+/// 换成 PS 引擎的整套字段 ⇒ 取「CPU 原始计数与物理内存全部采到」，不是「至少一个子系统」：
+/// 只要有一块缺失，PS 那份完整数据就更可信。否则 CPU 单独坏掉时护栏永不触发。
+fn metrics_success(cpu_ok: bool, mem_ok: bool) -> bool {
+    cpu_ok && mem_ok
+}
+
 /// ov-metrics **数据入口**（lib 直调）：返回单行 JSON，与 CLI 行协议同构。
 ///
 /// 为什么要这个入口：该通道被渲染层按 ~2.5s 节奏轮询，CLI 形态每拍都要付一次
@@ -399,17 +568,26 @@ unsafe fn reg_get_string(sub: &str, name: &str) -> Option<String> {
 ///
 /// 注意：cpu 首拍恒为 null（本引擎无状态，差分由调用方缓存 cpuRaw 完成）——
 /// 该语义是契约的一部分（渲染层首拍显示 `--`），lib 化不得"优化"掉。
+///
+/// `success` 口径（审查 v2-M6）：以前是字面量 `true`，任何子系统失败都照样报成功，
+/// 于是上层唯一的回落护栏（`commands/overview.rs` 判 `success != true`）永不触发。
+/// 现在取「CPU 原始计数与物理内存**全部**采到」才算成功 —— 不是「至少一个」：
+/// 上层回落是一次性换整套字段，只要有一块缺失，PS 引擎那份完整数据就更可信。
+/// 各子系统另有 `okCpu`/`okMemory`/`okDisks`/`okProcesses` 位，供上层将来按位决定回落粒度。
 pub fn ov_metrics_json() -> String {
     unsafe {
         // CPU：finder 无状态 → 输出原始计数，主进程缓存差分；首拍 cpu=null（渲染层显示 --）
-        let cpu_raw = cpu_raw_times()
+        let cpu_times = cpu_raw_times();
+        let cpu_raw = cpu_times
             .map(|(b, i)| format!("{{\"busy\":{},\"idle\":{}}}", b, i))
             .unwrap_or_else(|| "null".to_string());
+        let cpu_ok = cpu_times.is_some();
         // 内存（口径对齐 PS：TotalVisibleMemorySize/FreePhysicalMemory ≈ ullTotalPhys/ullAvailPhys）
         use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
         let mut ms: MEMORYSTATUSEX = std::mem::zeroed();
         ms.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-        GlobalMemoryStatusEx(&mut ms);
+        // 审查 v2-M6：返回值原来没判 —— 调用失败时 `ms` 全零会被当成"内存 0 字节"如实报出去
+        let mem_ok = GlobalMemoryStatusEx(&mut ms) != 0;
         let (total, free) = (ms.ullTotalPhys, ms.ullAvailPhys);
         let used = total.saturating_sub(free);
         let mem_percent = if total > 0 { used as f64 * 100.0 / total as f64 } else { 0.0 };
@@ -421,6 +599,8 @@ pub fn ov_metrics_json() -> String {
         };
         let mut disks: Vec<String> = Vec::new();
         let mask = GetLogicalDrives();
+        // mask == 0 是调用失败（不是"真没有盘"），与"枚举到但没有固定盘"要分开记
+        let disks_probed = mask != 0;
         for i in 0..26u32 {
             if mask & (1 << i) == 0 { continue; }
             let letter = (b'A' + i as u8) as char;
@@ -445,7 +625,9 @@ pub fn ov_metrics_json() -> String {
         };
         let mut processes: u32 = 0;
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if !snap.is_null() {
+        // 失败返回的是 INVALID_HANDLE_VALUE(-1) 而不是 null，只判 is_null 会把失败当成功
+        let snap_ok = !snap.is_null() && (snap as isize != -1);
+        if snap_ok {
             let mut pe: PROCESSENTRY32W = std::mem::zeroed();
             pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
             if Process32FirstW(snap, &mut pe) != 0 {
@@ -459,8 +641,10 @@ pub fn ov_metrics_json() -> String {
         let (caption, version, build) = os_version_strings();
         let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
         let user = std::env::var("USERNAME").unwrap_or_default();
+        let success = metrics_success(cpu_ok, mem_ok);
         let json = format!(
-            "{{\"success\":true,\"cpu\":null,\"cpuRaw\":{},\"memory\":{{\"total\":{},\"free\":{},\"used\":{},\"percent\":{:.1}}},\"disks\":[{}],\"uptime\":\"{}\",\"processes\":{},\"system\":{{\"caption\":\"{}\",\"version\":\"{}\",\"build\":\"{}\",\"computerName\":\"{}\",\"userName\":\"{}\"}}}}",
+            "{{\"success\":{},\"okCpu\":{},\"okMemory\":{},\"okDisks\":{},\"okProcesses\":{},\"cpu\":null,\"cpuRaw\":{},\"memory\":{{\"total\":{},\"free\":{},\"used\":{},\"percent\":{:.1}}},\"disks\":[{}],\"uptime\":\"{}\",\"processes\":{},\"system\":{{\"caption\":\"{}\",\"version\":\"{}\",\"build\":\"{}\",\"computerName\":\"{}\",\"userName\":\"{}\"}}}}",
+            success, cpu_ok, mem_ok, disks_probed && !disks.is_empty(), snap_ok,
             cpu_raw, total, free, used, mem_percent, disks.join(","),
             json_escape(&uptime_text()), processes,
             json_escape(&caption), json_escape(&version), json_escape(&build),
@@ -490,6 +674,8 @@ pub fn run_ov_metrics() -> i32 {
 /// （空闲回收、退出清理）。**首拍无基线不输出该卡**的语义原样保留。
 #[derive(Default)]
 pub struct NetSampler {
+    /// ifIndex → (上一帧 rx, 上一帧 tx, 采样时刻的**单调**毫秒)。
+    /// 每帧结束按「本帧接口表里存在的 ifIndex」剪枝（审查 v2-L18），否则常驻形态下会无界增长。
     prev: std::collections::HashMap<u32, (u64, u64, u64)>,
 }
 
@@ -516,11 +702,18 @@ fn read_if_table_frame(
             return None;
         }
         let now = now_ms();
+        // 帧间差分走单调时钟（审查 v2-L18）：`t` 字段本身是对外契约里的 epoch 毫秒
+        // （渲染层 new Date(t) 画时间轴），但拿墙钟做 dt 时，NTP 前跳会让 dt 虚大、
+        // 速率凭空腰斩，后跳会让 dt 归零而被 max(1) 放大成一帧假尖峰。
+        let mono = mono_ms();
         let mut adapters: Vec<String> = Vec::new();
+        let mut present: Vec<u32> = Vec::new();
         // Table 在绑定里是 [MIB_IF_ROW2; 1] 定长数组，真实条目数是 NumEntries → 按指针步进
         let base = (*table).Table.as_ptr();
         for i in 0..(*table).NumEntries as usize {
             let row = &*base.add(i);
+            // 本帧"接口表里存在"的 ifIndex 全部记下来（供结尾剪枝），与是否被过滤无关
+            present.push(row.InterfaceIndex);
             if row.OperStatus != 1 { continue; } // IfOperStatusUp
             let if_type = row.Type; // IF_TYPE（6=以太网，71=802.11 无线）
             if !(if_type == 6 || if_type == 71) { continue; }
@@ -532,7 +725,7 @@ fn read_if_table_frame(
             if flags & 0x01 == 0 || flags & 0x02 != 0 { continue; }
             let (in_o, out_o) = (row.InOctets, row.OutOctets);
             if let Some(&(pi, po, pt)) = prev.get(&row.InterfaceIndex) {
-                let dt = (now.saturating_sub(pt)).max(1) as f64;
+                let dt = (mono.saturating_sub(pt)).max(1) as f64;
                 let down = in_o.saturating_sub(pi) as f64 * 1000.0 / dt;
                 let up = out_o.saturating_sub(po) as f64 * 1000.0 / dt;
                 adapters.push(format!(
@@ -541,9 +734,14 @@ fn read_if_table_frame(
                     up.max(0.0), down.max(0.0), row.InterfaceIndex
                 ));
             }
-            prev.insert(row.InterfaceIndex, (in_o, out_o, now));
+            prev.insert(row.InterfaceIndex, (in_o, out_o, mono));
         }
         FreeMibTable(table as *mut core::ffi::c_void);
+        // 审查 v2-L18：基线表原来**只插不清**。CLI 形态一退进程就没了，无所谓；
+        // lib 直调形态下采样器常驻进程内（空闲回收前一直活着），拔掉/重启后换 ifIndex 的
+        // 旧条目会永久留着 —— 既涨内存，也让"同一 ifIndex 被系统复用"时拿跨越很久的旧计数
+        // 做差分，画出一个假尖峰。按本帧实际存在的接口集合剪枝。
+        prev.retain(|k, _| present.contains(k));
         if adapters.is_empty() {
             return None;
         }
@@ -664,5 +862,80 @@ pub fn run_mem_clean(args: &[String]) -> i32 {
     match mem_clean_core(&want) {
         Ok(j) => { let _ = out_line(&j); 0 }
         Err(msg) => { let _ = out_line(&msg); 2 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 审查 v2-M6：`success` 以前是字面量 `true`，任何子系统失败都照样报成功，
+    /// 上层唯一的回落护栏（判 `success != true`）因此永不触发 —— 高核数机器上
+    /// CPU 永久 `--` 就是这么来的。这里钉住「关键子系统缺一即不成功」。
+    #[test]
+    fn metrics_success_requires_the_key_subsystems() {
+        assert!(metrics_success(true, true));
+        assert!(!metrics_success(false, true), "CPU 采不到就不能报成功");
+        assert!(!metrics_success(true, false), "内存采不到就不能报成功");
+        assert!(!metrics_success(false, false));
+    }
+
+    /// 审查 v2-M6：>64 逻辑核的机器必得 STATUS_INFO_LENGTH_MISMATCH，
+    /// 原实现固定 64 项缓冲 ⇒ 恒 None。这里验按 ReturnLength 重取尺寸的那一步。
+    #[test]
+    fn cpu_buffer_retry_grows_by_return_length_and_rejects_absurd_values() {
+        // 128 核：需要 128*48 = 6144 字节，起始缓冲 3072 ⇒ 重试
+        assert_eq!(cpu_buf_retry_len((128 * CPU_ITEM_LEN) as u32, CPU_ITEM_LEN * 64), Some(128 * CPU_ITEM_LEN));
+        // 长度没变化（不是"不够大"造成的失败）⇒ 不重试，避免死循环
+        assert_eq!(cpu_buf_retry_len((64 * CPU_ITEM_LEN) as u32, CPU_ITEM_LEN * 64), None);
+        assert_eq!(cpu_buf_retry_len(0, CPU_ITEM_LEN * 64), None);
+        // 荒谬值（>4096 核）直接放弃，不照单分配巨型缓冲
+        assert_eq!(cpu_buf_retry_len(u32::MAX, CPU_ITEM_LEN), None);
+        // 非整项长度要向上对齐到整项，否则尾端半条记录会被当成一条读进累加
+        let got = cpu_buf_retry_len((64 * CPU_ITEM_LEN + 1) as u32, CPU_ITEM_LEN * 64).unwrap();
+        assert_eq!(got % CPU_ITEM_LEN, 0);
+        assert_eq!(got, 65 * CPU_ITEM_LEN);
+    }
+
+    /// 审查 v2-M6：「0 MB/s」与「没测成」必须能区分 —— 后者过去也写 `measured:true`，
+    /// 于是被当成一次真实测量落进测速历史，曲线再也不可比。
+    #[test]
+    fn bench_verdict_refuses_disguised_failures() {
+        // 请求 8 线程只开起来 1 个：线程数失真，整轮作废
+        assert!(bench_verdict(1, 8, [10, 10, 10, 10]).is_err());
+        // 一个文件都建不出来
+        assert!(bench_verdict(0, 1, [0, 0, 0, 0]).is_err());
+        // 四阶段全 0（盘被配额/只读/杀软拦住的形态）
+        assert!(bench_verdict(4, 4, [0, 0, 0, 0]).is_err());
+        // 只有某一阶段 0（写失败被静默跳过、读却在跑）同样不完整
+        let e = bench_verdict(2, 2, [900, 800, 0, 500]).unwrap_err();
+        assert!(e.contains("随机读"), "错误里要指得出是哪一段没测到：{e}");
+        // 正常一轮才放行
+        assert!(bench_verdict(2, 2, [900, 800, 700, 500]).is_ok());
+    }
+
+    /// 审查 v2-L18：取盘符根曾经是 `&dir[..3.min(dir.len())]` —— 按字节切片，
+    /// 首 3 字节落在多字节字符中间直接 panic（CLI 直调 `--path` 可达）。
+    #[test]
+    fn drive_root_prefix_never_slices_through_a_char() {
+        assert_eq!(drive_root_prefix(r"C:\Users"), Some("C:"));
+        assert_eq!(drive_root_prefix("D:"), Some("D:"));
+        // 非 ASCII 开头的路径：旧写法会 panic，新写法只能给 None
+        assert_eq!(drive_root_prefix("临时目录"), None);
+        assert_eq!(drive_root_prefix(r"\\nas\share\x"), None);
+        assert_eq!(drive_root_prefix(""), None);
+        assert_eq!(drive_root_prefix("C"), None);
+    }
+
+    /// 单调时钟：必须严格不回退，且与墙钟量级一致（口径换了不能把 4 秒阶段算成 4 毫秒）。
+    #[test]
+    fn mono_clock_is_monotonic_and_in_ms() {
+        let a = mono_ns();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let b = mono_ns();
+        assert!(b > a, "单调时钟出现回退：{a} -> {b}");
+        let dms = (b - a) / 1_000_000;
+        assert!((15..3_000).contains(&dms), "单调时钟量级不对（差了 {dms} ms）");
+        assert!(mono_ms() > 0);
     }
 }

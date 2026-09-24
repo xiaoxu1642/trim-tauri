@@ -1,6 +1,6 @@
 // tools/ps-origin.mjs —— 「上游基线」根坐标（PS 脚本搬运的唯一真源）
 //
-// 批次：审查 K2（2026-09-24）。此前这里是硬编码绝对路径 `C:/KaiFa/Trim`，
+// 批次：审查 K2（2026-09-24）。此前这里是硬编码的「本机 Electron 仓库绝对路径」，
 // 且在模块顶层就读盘——换机器、干净克隆、CI 上四套门禁与 `.ps1` 生成器**加载即抛**，
 // 与提交 `6535847` 修掉的 `trim-finder = path = "../../Trim/native-scanner"` 是同一种病。
 // 现在基线已逐字节 vendor 进 `vendor/upstream-js/`（目录形状与源仓库一致，
@@ -24,8 +24,10 @@ export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const ORIGIN = join(REPO_ROOT, 'vendor', 'upstream-js');
 
 /**
- * 源仓库（Electron 轨）在本机的位置，仅 `check-origin-drift.mjs` 用来做「快照 vs 活源」
- * 复核。默认取环境变量 TRIM_ORIGIN；缺省时按 vendor 之前的老路径猜一次。
- * **任何门禁都不得依赖它存在**——读不到就跳过，不作为失败。
+ * 源仓库（Electron 轨）在本机的位置，**只**给 `check-origin-drift.mjs` 做「快照 vs 活源」复核用。
+ * 取值只认环境变量 `TRIM_ORIGIN`（审查 v2-L9：原先缺省会猜一个本机绝对路径，
+ * 那等于把单机坐标写回随仓库分发的文件里，AGENTS.md §2/§5.12 都禁这条）。
+ * 未设即 `null` ⇒ 漂移复核按「源仓库不在位」跳过（跳过不算失败，它本就是可选工具）。
+ * **任何门禁都不得依赖它存在。**
  */
-export const UPSTREAM_REPO = process.env.TRIM_ORIGIN || 'C:/KaiFa/Trim';
+export const UPSTREAM_REPO = process.env.TRIM_ORIGIN || null;

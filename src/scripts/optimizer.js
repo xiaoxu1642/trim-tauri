@@ -91,6 +91,58 @@
     }
   };
 
+  // ==================== dynamic 项的「控件 + 参数」分派表（审查 v2-M10）====================
+  // 根因：后端 is_dynamic 分支只认两个 id，而**两者要求的参数不同** ——
+  //   svc_mem_gb 取 p.gb（缺失时按 8GB 兜底，仍是成功）、perf_wu_pause 取 p.days
+  //   （缺失直接 return「缺少暂停天数参数」，见 optimizer.rs 的 is_dynamic 段）。
+  // 前端此前对 `dynamic` 一刀切：一律画 MEMORY_OPTIONS 的 GB 下拉、一律只发 {gb}，
+  // 于是「Windows 更新：暂停到日期」在界面上可见可点、后端永远收不到 days ⇒ 该项 100% 执行失败，
+  // 弹窗文案还写着「SVCHost 拆分阈值」。这类错**不报错、不崩溃**，只表现为「这个优化项永远失败」。
+  // 约束（新增 dynamic 项时逐条对齐）：
+  //   1. 必须在本表登记，key 用数据层 id；
+  //   2. `paramKey` 与 Rust 读的结构体字段名**逐字相同**（嵌套结构体没有 camelCase 自动转换，AGENTS §5.4）；
+  //   3. 上限值要与 Rust 常量一致（WU_PAUSE_MAX_DAYS）。
+  // 三份集合（数据层 dynamic 项 ⇄ 本表 ⇄ Rust 分支）由 tools/check-optimizer-dynamic.mjs 静态对拍钉住。
+  const WU_PAUSE_MAX_DAYS = 35; // 与 optimizer.rs 的 WU_PAUSE_MAX_DAYS 对齐，改一处必须同步
+
+  const DYNAMIC_CONTROLS = {
+    svc_mem_gb: {
+      paramKey: 'gb',
+      tip: '选择内存大小或重置',
+      defaultValue: '8',
+      options: MEMORY_OPTIONS.map((m) => ({ value: String(m.gb), label: m.label })),
+      // 'default' 必须原样透传：Rust 按字符串认这一档。旧实现是 `Number(sel.value) || 8`，
+      // 把 'default' 变成 NaN→8 —— 「重置为默认」实际写入 8GB 阈值（同源缺陷，顺手随本表修掉）。
+      parse: (v) => (v === 'default' ? 'default' : (Number(v) || 8)),
+      stepLabel: (v) => 'SVCHost 拆分阈值 ' + (v === 'default' ? '重置为默认值' : v + ' GB'),
+      stepNote: () => 'reg add HKLM\\SYSTEM\\ControlSet001\\Control /v SvcHostSplitThresholdInKB /t REG_DWORD /d … /f',
+      prosCons: (v) => MEM_PROS_CONS[v] || MEM_PROS_CONS[8]
+    },
+    perf_wu_pause: {
+      paramKey: 'days',
+      tip: '选择暂停天数（1~35 天，走官方暂停键，到期自动恢复）',
+      defaultValue: '7',
+      options: Array.from({ length: WU_PAUSE_MAX_DAYS }, (_, i) => ({
+        value: String(i + 1), label: '暂停 ' + (i + 1) + ' 天'
+      })),
+      // 钳到 1~35：后端也会 clamp（wu_pause_steps），前端先钳是为了「界面显示的档位＝真正写入的档位」
+      parse: (v) => Math.min(WU_PAUSE_MAX_DAYS, Math.max(1, Math.trunc(Number(v)) || 1)),
+      stepLabel: (v) => 'Windows 更新暂停 ' + v + ' 天',
+      stepNote: () => 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate 的 Pause*Updates 起止时间（UTC FILETIME，到期系统自动恢复）',
+      prosCons: null // 该项优缺点取数据层 desc/pros/cons，不随天数变化
+    }
+  };
+
+  // 纯函数（供 tools/check-optimizer-dynamic.mjs 与人工核对使用）：
+  // 原始下拉文本 → 后端参数对象。未登记的 id 返回 null，**调用方必须显式处理**，
+  // 不许静默退回 {}（那正是 v2-M10 的失法形态：参数没给、后端报错、界面看不出来）。
+  function dynamicParams(optId, rawValue) {
+    const c = Object.prototype.hasOwnProperty.call(DYNAMIC_CONTROLS, optId) ? DYNAMIC_CONTROLS[optId] : null;
+    if (!c) return null;
+    const raw = (rawValue === undefined || rawValue === null || rawValue === '') ? c.defaultValue : rawValue;
+    return { [c.paramKey]: c.parse(raw) };
+  }
+
   // ==================== 进度型 Toast ====================
   // v3.7.0 议题一（单例语义修复）：此前的实现有两个相互叠加的缺陷——
   //   ① finishProgressToast 先把模块级 progressToast 置空，已完成的那条就此脱离
@@ -633,30 +685,41 @@
       noticeEl.style.display = 'block';
     }
 
-    // 动态 / 还原：footer 左侧内存档位提示位（图1 专属视觉，保留）
+    // 动态 / 还原：footer 左侧档位提示位（图1 专属视觉，保留）
+    // 审查 v2-M10：控件与参数一律按 opt.id 从 DYNAMIC_CONTROLS 取，不再按 `dynamic` 一刀切。
     const memWrap = $('.opt-detail-mem');
     const restoreBtn = $('.opt-btn-restore');
-    if (o.dynamic) {
+    const dyn = DYNAMIC_CONTROLS[o.id];
+    if (o.dynamic && !dyn) {
+      // 数据层说是 dynamic、本表却没登记控件 —— 这正是 v2-M10 的失法形态（后端要参数、前端不发，
+      // 表现为「该项永远执行失败」而不报错）。宁可锁死按钮并写明原因，也不放一条注定失败的请求。
+      memWrap.style.display = 'none';
+      runBtn.disabled = true;
+      runBtn.dataset.mode = 'blocked';
+      runBtn.textContent = '界面未登记参数控件';
+    } else if (dyn) {
       memWrap.style.display = '';
-      memWrap.innerHTML = '<select class="field-input optimizer-mem-select opt-mem-select" data-tip="选择内存大小或重置">' +
-        MEMORY_OPTIONS.map(m => `<option value="${m.gb}">${m.label}</option>`).join('') + '</select>';
-      const sel = memWrap.querySelector('.opt-mem-select');
+      memWrap.innerHTML = '<select class="field-input optimizer-mem-select opt-dyn-select" data-tip="' + escapeHtml(dyn.tip) + '">' +
+        dyn.options.map(m => `<option value="${escapeHtml(m.value)}">${escapeHtml(m.label)}</option>`).join('') + '</select>';
+      const sel = memWrap.querySelector('.opt-dyn-select');
       // 根据下拉档位实时刷新优缺点与步骤显示
-      function updateMemVariant() {
-        const gb = sel.value;
-        const info = MEM_PROS_CONS[gb] || MEM_PROS_CONS[8];
-        $('.opt-col-pros').textContent = info.pros;
-        $('.opt-col-cons').textContent = info.cons;
-        // 步骤区：显示当档位对应的执行说明
-        const label = (gb === 'default') ? '重置为默认值' : (gb + ' GB');
+      function updateVariant() {
+        const v = dyn.parse(sel.value);
+        const info = dyn.prosCons ? dyn.prosCons(v) : null;
+        if (info) {
+          $('.opt-col-pros').textContent = info.pros;
+          $('.opt-col-cons').textContent = info.cons;
+        }
+        // 步骤区：显示当前档位/天数对应的执行说明（label 与 note 都过转义，虽然值来自本表）
         $('.opt-detail-steps-wrap').innerHTML =
-          `<ol class="opt-detail-steps"><li><span class="opt-detail-step-label">SVCHost 拆分阈值 ${label}</span>` +
-          `<code class="opt-detail-step-note">reg add HKLM\\SYSTEM\\ControlSet001\\Control /v SvcHostSplitThresholdInKB /t REG_DWORD /d … /f</code></li></ol>`;
+          `<ol class="opt-detail-steps"><li><span class="opt-detail-step-label">${escapeHtml(dyn.stepLabel(v))}</span>` +
+          `<code class="opt-detail-step-note">${escapeHtml(dyn.stepNote(v))}</code></li></ol>`;
         $('.opt-detail-count').textContent = '1 步操作';
       }
-      // 档位联动按钮态：当前已应用的档位 → 置灰（无后续操作）；
-      // 选择其他档位 → 启用「立即执行」，可直接应用。
+      // 档位联动按钮态：当前已应用的档位 → 置灰（无后续操作）；选择其他档位 → 启用「立即执行」。
+      // 只有 svc_mem_gb 有「当前已应用档位」这个概念（读注册表反推），暂停更新天数没有，故按 id 收口。
       function syncRunBtnForGear() {
+        if (o.id !== 'svc_mem_gb') return;
         runBtn.dataset.mode = 'run';
         const selGb = String(sel.value);
         if (svcAppliedGb != null && selGb === String(svcAppliedGb)) {
@@ -669,10 +732,10 @@
           runBtn.textContent = '立即执行';
         }
       }
-      sel.addEventListener('change', () => { updateMemVariant(); syncRunBtnForGear(); });
-      // 初始档位：优先选中当前已应用的档位（未优化时默认 8，与后端默认对齐）
-      sel.value = (svcAppliedGb != null) ? String(svcAppliedGb) : '8';
-      updateMemVariant();
+      sel.addEventListener('change', () => { updateVariant(); syncRunBtnForGear(); });
+      // 初始档位：优先选中当前已应用的档位（未优化时回到本表 defaultValue，与后端默认对齐）
+      sel.value = (o.id === 'svc_mem_gb' && svcAppliedGb != null) ? String(svcAppliedGb) : dyn.defaultValue;
+      updateVariant();
       syncRunBtnForGear();
       // 兜底：弹窗打开后异步刷新一次注册表实际档位（防止启动检测尚未返回）
       if (o.id === 'svc_mem_gb' && window.api?.optimizer?.svcMemCurrent) {
@@ -685,7 +748,7 @@
             applyOptimizedStyles();
           }
           sel.value = (r.gb != null) ? String(r.gb) : sel.value;
-          updateMemVariant();
+          updateVariant();
           syncRunBtnForGear();
         }).catch(() => {});
       }
@@ -717,10 +780,12 @@
       if (!go) return;
       // R3（v3.6.6 M1）：dynamic 项的下拉值必须在 closeOptModal 之前读取，
       // 否则 optModal 被置 null 后 querySelector 恒返回 undefined → 任何档位都回落 8GB。
-      let preCloseGbVal = null;
-      if (opt.dynamic) {
-        const selEl = optModal?.modal?.querySelector('.opt-mem-select');
-        preCloseGbVal = selEl ? Number(selEl.value) || 8 : 8;
+      // v2-M10：取的是「原始下拉文本」，参数对象由 dynamicParams 按 id 造（{gb} 或 {days}）。
+      const dynCtl = DYNAMIC_CONTROLS[opt.id];
+      let preCloseRaw = null;
+      if (opt.dynamic && dynCtl) {
+        const selEl = optModal?.modal?.querySelector('.opt-dyn-select');
+        preCloseRaw = selEl ? selEl.value : dynCtl.defaultValue;
       }
       // 立即执行后自动关闭弹窗
       closeOptModal();
@@ -729,14 +794,14 @@
       // 执行前检查系统还原点（警示/风险确认；用户最终拒绝则不执行）。
       // tf_restore_point 本身就是创建动作，再走检查会「先弹建议创建、再重复创建」，直接放行。
       if (opt.id !== 'tf_restore_point' && !(await ensureRestorePoint())) return;
-      if (opt.dynamic) {
-        const gbVal = preCloseGbVal ?? 8;
-        // 本会话立即记录已应用档位：重开弹窗时该档位按钮置灰
-        svcAppliedGb = gbVal;
+      if (opt.dynamic && dynCtl) {
+        const dynP = dynamicParams(opt.id, preCloseRaw);
+        // 本会话立即记录已应用档位：重开弹窗时该档位按钮置灰（只有 mem 档有这个概念）
+        if (opt.id === 'svc_mem_gb') svcAppliedGb = dynP.gb;
         // B11：与 runBatch 对齐 —— await + try/catch，避免浮动 Promise 变成
         // unhandled rejection（用户侧表现为「点击后毫无反应」）
         try {
-          await runOptionActive({ gb: gbVal }, opt);
+          await runOptionActive(dynP, opt);
         } catch (e) {
           window.app?.toast('error', '优化执行失败: ' + (e.message || e));
         }
@@ -766,6 +831,15 @@
   function getOptionTitle(id) {
     const o = OPTIONS.find(x => x.id === id);
     return o ? o.title : id;
+  }
+
+  // 批量/单项执行统一取参数（审查 v2-M10）：dynamic 项必须带自己那一份协议参数，
+  // 原先批量一律发 {} —— svc_mem_gb 靠后端 8GB 兜底侥幸能跑，perf_wu_pause 则是必失败。
+  // 批量场景没有弹窗，取分派表的 defaultValue（等价于「用户开弹窗直接点执行」）。
+  function batchParams(opt) {
+    if (!opt.dynamic) return {};
+    const p = dynamicParams(opt.id, null);
+    return p || {};
   }
 
   async function runOptionActive(params, optOverride) {
@@ -1026,7 +1100,7 @@
       // 进度 Toast 由 runOptionActive 内部创建（此前这里先建一条、内部再建一条并销毁前者）
       progressToastSuffix = `${i + 1}/${batch.length}`;
       try {
-        const succeeded = await runOptionActive({}, opt);
+        const succeeded = await runOptionActive(batchParams(opt), opt);
         if (succeeded) {
           okCount++;
         }
@@ -1114,7 +1188,8 @@
       // 进度 Toast 由 runOptionActive 内部创建（同上，消除每项一次白建白毁）
       progressToastSuffix = `${i + 1}/${batch.length}`;
       try {
-        const succeeded = await runOptionActive(opt.id === 'tf_svc_bulk' ? { includeStore: batchIncludeStore } : {}, opt);
+        const succeeded = await runOptionActive(
+          opt.id === 'tf_svc_bulk' ? { includeStore: batchIncludeStore } : batchParams(opt), opt);
         if (succeeded) {
           okCount++;
         }
@@ -1270,14 +1345,23 @@
       });
     }
 
+    // 审查 v2-M22（v1 L13 点名的 optimizer 开窗/执行入口）：runBatch/runSelected 是 async，
+    // 循环体内部虽有 try/catch，但**循环之前**的 confirmDanger / ensureRestorePoint 一旦 reject
+    // 就是浮动 Promise —— 表现为「点批量执行毫无反应」，日志里也查不到。统一在此收口。
+    const guardBatch = (fn) => () => {
+      if (!window.api?.optimizer) { window.app?.toast('warning', '当前为预览模式，无法执行优化'); return; }
+      Promise.resolve(fn()).catch((e) => {
+        window.app?.toast('error', '批量执行异常：' + ((e && e.message) || e));
+        window.app?.log?.('error', '优化批量执行异常: ' + ((e && e.message) || e));
+      });
+    };
+
     const batchBtn = document.getElementById('btnOptimizerBatch');
-    if (batchBtn) {
-      batchBtn.addEventListener('click', () => { if (!window.api?.optimizer) window.app?.toast('warning', '当前为预览模式，无法执行优化'); else runBatch(); });
-    }
+    if (batchBtn) batchBtn.addEventListener('click', guardBatch(runBatch));
     const selectedBtn = document.getElementById('btnOptimizerSelected');
     if (selectedBtn) {
       selectedBtn.disabled = true;
-      selectedBtn.addEventListener('click', () => { if (!window.api?.optimizer) window.app?.toast('warning', '当前为预览模式，无法执行优化'); else runSelected(); });
+      selectedBtn.addEventListener('click', guardBatch(runSelected));
     }
     // 分类切换时保留勾选状态（跨分类勾选允许执行所选）
     updateSelectedButtonState();

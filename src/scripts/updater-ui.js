@@ -360,11 +360,25 @@
       const btnEl = e.target.closest('[data-upd]');
       if (!btnEl) return;
       const act = btnEl.getAttribute('data-upd');
+      // 审查 v2-U2：下面这些调用**全部是异步的**，而外层 `try` 是同步的 ⇒ IPC 一旦 reject，
+      // 既不会被这里接住、也不会走 error 回流（回流只在 Rust 主动 emit `phase:error` 时才有），
+      // 表现就是"点了没反应"（F1 明令禁止的形态），而原注释却宣称"异常走 error 状态回流"。
+      // 现在把每个 promise 显式汇到与回流**同一条** error 路径上，不自造第二套状态。
+      const run = (p, what) => {
+        Promise.resolve(p).catch((err) => {
+          state.phase = 'error';
+          state.message = `${what}失败：${(err && err.message) || err}`;
+          activeManual = true; // 手动触发的失败需要显性弹窗
+          pendingManual = false;
+          render();
+          activeManual = false;
+        });
+      };
       try {
-        if (act === 'download') window.api.updater.download();
-        else if (act === 'cancel') window.api.updater.cancelDownload();
-        else if (act === 'install') window.api.updater.install();
-        else if (act === 'retry') manualCheck();
+        if (act === 'download') run(window.api.updater.download(), '开始下载');
+        else if (act === 'cancel') run(window.api.updater.cancelDownload(), '取消下载');
+        else if (act === 'install') run(window.api.updater.install(), '安装');
+        else if (act === 'retry') run(manualCheck(), '检查更新');
         else if (act === 'releases') {
           // v3.6.5 M1-1：手动下载出口（复用既有 open-external，主进程侧已强制 https）
           try { window.api.openExternal(RELEASES_URL); } catch (_) {}

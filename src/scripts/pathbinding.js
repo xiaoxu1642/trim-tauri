@@ -949,7 +949,11 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     document.getElementById('btnRescanPaths')?.addEventListener('click', openModal);
     document.getElementById('btnOpenModels')?.addEventListener('click', () => {
       if (window.api?.modelsWindow?.open) {
-        window.api.modelsWindow.open();
+        // 审查 v2-M22（v1 L13 未修）：开窗是浮动 Promise，失败时用户侧就是「点了没反应」。
+        // 这里必须给可见回执；toast 走主窗 app，日志兜底留给 ds.js 的 rejection 网。
+        window.api.modelsWindow.open().catch((e) => {
+          window.app?.toast('error', '打开「大模型管理」窗口失败：' + ((e && e.message) || e));
+        });
       } else {
         window.app?.toast('warning', '当前环境不支持打开大模型管理窗口');
       }

@@ -7,19 +7,33 @@
 //   ② 适配层的参数整形（execute 的 force/toRecycle、scan 的 refresh 默认值等）不走样；
 //   ③ D5 数据搬迁后读到的配置与旧目录一致。
 //
-// 用法：node tools/dual-run-batchA.mjs
-// 前置：Tauri 侧以 TRIM_DEV_NOACTIVATE=1 + CDP 9334 后台运行；本工具自行拉起 Electron(9333)。
+// 用法：TRIM_ORIGIN=<Electron 仓库根> node tools/dual-run-batchA.mjs
+//   可选 TRIM_ELECTRON=<electron.exe 路径>（缺省取 $TRIM_ORIGIN/node_modules/electron/dist/electron.exe）
+// 前置：Tauri 侧以 TRIM_DEV_NOACTIVATE=1 + CDP 9334 后台运行（本工具只连它的 CDP，不 spawn 它）；
+//       Electron 侧由本工具自行拉起（9333）。
 //
 // 注意（AGENTS.md 4.3）：宿主环境会注入 ELECTRON_RUN_AS_NODE 与 NODE_OPTIONS，
 // 必须删除后 spawn，且父进程须存活，否则 Electron 会被随母进程回收。
+//
+// 审查 v2-L9：坐标一律来自环境变量，本文件不写死本机绝对路径（AGENTS.md §2 禁单机坐标入库）。
+// 本工具**按设计就要 spawn 旧 Electron 应用**（双跑对照是它的存在理由），所以缺 TRIM_ORIGIN
+// 时直接报错退出，而不是给一个「能猜中开发机」的默认值——猜错的代价是静默比错对象。
 
 import { spawn, execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-const ELECTRON = 'C:\\KaiFa\\Trim\\node_modules\\electron\\dist\\electron.exe';
-const REPO = 'C:\\KaiFa\\Trim';
+const REPO = process.env.TRIM_ORIGIN || '';
+const ELECTRON = process.env.TRIM_ELECTRON || (REPO ? join(REPO, 'node_modules', 'electron', 'dist', 'electron.exe') : '');
+if (!REPO || !existsSync(ELECTRON)) {
+  console.error(`✗ 双跑需要旧轨在位：设 TRIM_ORIGIN 指向 Electron 仓库根（现值「${REPO || '未设'}」），`
+    + `必要时用 TRIM_ELECTRON 指定 electron.exe（现值「${ELECTRON || '未推导'}」）`);
+  process.exit(1);
+}
 const ELECTRON_PORT = 9333;
 const TAURI_PORT = 9334;
+
 
 // 运行期天然抖动字段：任意深度下都跳过
 const VOLATILE = new Set([

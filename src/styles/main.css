@@ -146,6 +146,10 @@
   /* 字体管理：全局字体族 / 字号缩放（基准 16px）/ 字重缩放（基准 400）
      由「设置 → 字体选择」弹窗运行时写入，全部 font-size / font-weight 均经 calc 关联 */
   --app-font-family: 'MiSans', 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', '微软雅黑', system-ui, sans-serif;
+  /* 审查 v2-L6：等宽栈此前只有 var(--font-mono, …) 的引用、全仓无定义 ⇒ 两处恒吃各自的 fallback
+     （一处 Consolas 优先、一处 Cascadia 优先，同一诉求两套口径）。补定义并取仓库里出现最多的那一套
+     （Consolas → Cascadia → Courier New → monospace），两处引用随即去掉 fallback。 */
+  --font-mono: 'Consolas', 'Cascadia Code', 'Courier New', monospace;
   --font-size-scale: 1;
   --font-weight-scale: 1;
 
@@ -698,7 +702,10 @@ body {
   color: var(--fg-primary);
 }
 .nav-parent-toggle:active {
-  background: var(--bg-card-active);
+  /* 审查 v2-L6：原引用 --bg-card-active —— 全仓无定义且**无 fallback**，
+     于是整条 background 声明被解析器丢弃（:active 从来没有按压反馈，且无人报错）。
+     取既有 --bg-hover（比 :hover 的 --bg-card-hover 更实一档，符合"按下更深"）。 */
+  background: var(--bg-hover);
 }
 .nav-parent-chevron {
   color: var(--fg-tertiary);
@@ -2344,8 +2351,11 @@ select.field-input { cursor: pointer; appearance: auto; }
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  /* 审查 v2-L6：原引用 --bg-secondary / --border（全仓无定义、且无 fallback）⇒ 这两条声明
+     一直被解析器丢弃，提示条实际是「无底无边框」。改指既有 --bg-elevated / --border-default
+     （作者意图就是浮起一块提示卡）。**注意**：这条修复会改变观感（此前根本没有底色与边框）。 */
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-btn);
   font-size: 12px;
   color: var(--fg-tertiary);
@@ -2444,7 +2454,10 @@ select.field-input { cursor: pointer; appearance: auto; }
   align-items: center;
   gap: 8px;
 }
-.optimizer-mem-select {
+/* 审查 v2-M10：dynamic 项的档位下拉不再只有内存一档（新增了「暂停更新天数」），
+   共用 .opt-dyn-select 这一个布局类；.optimizer-mem-select 保留给历史引用。 */
+.optimizer-mem-select,
+.opt-dyn-select {
   width: auto;
   min-width: 120px;
   flex: 0 0 auto;
@@ -2482,8 +2495,11 @@ select.field-input { cursor: pointer; appearance: auto; }
   width: 28px;
   height: 28px;
   border-radius: var(--radius-btn);
-  background: var(--group-bg, var(--bg-card-hover));
-  color: var(--group-fg, var(--fg-primary));
+  /* 审查 v2-L6 + M20：--group-bg / --group-fg 是「按分类注入离表色」时代的钩子，
+     注入侧（GROUP_ACCENT/CAT_META.color）已删，全仓再无人写这两个变量 ⇒ 恒吃 fallback。
+     死间接层去掉，直接落 token 兜底（分类靠标题与图标区分，不靠彩虹）。 */
+  background: var(--bg-card-hover);
+  color: var(--fg-primary);
   flex: 0 0 auto;
 }
 .opt-group-head h3 {
@@ -2770,7 +2786,7 @@ select.field-input { cursor: pointer; appearance: auto; }
 .opt-detail-step-note {
   display: block;
   margin-top: 2px;
-  font-family: var(--font-mono, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: calc(11.5px * var(--font-size-scale, 1));
   color: var(--fg-tertiary);
   padding: 4px 8px;
@@ -4820,7 +4836,8 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 .markdown-body code {
   font-family: 'Cascadia Code', Consolas, monospace;
   font-size: var(--fs-meta);
-  background: var(--bg-code, color-mix(in srgb, var(--accent) 5%, transparent));
+  /* 审查 v2-L6：原 var(--bg-code, …) 的 --bg-code 全仓无定义 ⇒ 恒吃这条 fallback，直接落值 */
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
   color: var(--accent);
   padding: 1px 5px;
   border-radius: 4px;
@@ -4852,7 +4869,10 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   color: var(--fg-primary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
 }
-.markdown-body tr:nth-child(even) td { background: var(--bg-subtle, transparent); }
+/* 审查 v2-L6：原 var(--bg-subtle, transparent) 的 --bg-subtle 全仓无定义 ⇒ 恒吃 transparent，
+   斑马纹从未真正渲染过。这里只做「去掉死间接层」，**不**顺手补一个真底色（那是设计改动，
+   要改请先定 token 再谈观感）。 */
+.markdown-body tr:nth-child(even) td { background: transparent; }
 .markdown-body hr {
   border: none;
   border-top: 1px solid var(--border-subtle);
@@ -5165,7 +5185,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono, 'Cascadia Code', Consolas, monospace);
+  font-family: var(--font-mono);
 }
 .startup-item-meta {
   font-size: var(--fs-meta);
@@ -7803,8 +7823,11 @@ body.bg-image-on .main-content {
   color: var(--fg-tertiary);
 }
 .input-style {
-  background: var(--bg-elev, rgba(255,255,255,0.85));
-  border: 1px solid var(--border-soft, rgba(0,0,0,0.12));
+  /* 审查 v2-L6：--bg-elev / --border-soft 全仓无定义（前者疑为 --bg-elevated 写漏后缀），
+     一直恒吃 fallback 字面值。改指真源：输入框与 .field-input 同口径（--bg-input + --border-default）。
+     观感变化点：底色由 rgba(255,255,255,.85) 改为随主题的 --bg-input（浅色下更透、深色下不再是白块）。 */
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-btn);
   padding: 6px 10px;
   font-size: 13px;
@@ -7834,7 +7857,7 @@ body.bg-image-on .main-content {
   font-size: 13px;
   font-weight: 600;
   color: var(--fg-secondary, #5a6b7c);
-  border-top: 1px solid var(--border-soft, rgba(0,0,0,0.06));
+  border-top: 1px solid var(--border-subtle); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.06) → 取既有同档 token */
 }
 .finder-group-header:first-child { border-top: none; }
 .finder-group-sum {
@@ -7843,7 +7866,7 @@ body.bg-image-on .main-content {
   color: var(--fg-tertiary);
 }
 .xtable-td .finder-role-kept { color: var(--success, var(--success)); }
-.xtable-td .finder-role-candidate { color: var(--warn, var(--warning)); }
+.xtable-td .finder-role-candidate { color: var(--warning); } /* v2-L6：--warn 无定义（真源是 --warning），恒吃这层同名 fallback */
 .xtable-row[data-kind="folder"] .xtable-cell-icon, 
 .xtable-cell-path .folder-ico { opacity: 0.75; }
 .finder-size-end { text-align: right; font-variant-numeric: tabular-nums; }
@@ -7859,13 +7882,13 @@ body.bg-image-on .main-content {
   padding: 8px 12px;
   font-weight: 600;
   color: var(--fg-tertiary);
-  border-bottom: 1px solid var(--border-soft, rgba(0,0,0,0.08));
+  border-bottom: 1px solid var(--border-default); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.08) → 取 --border-default（浅色 9%） */
   white-space: nowrap;
 }
 .finder-table thead th.finder-col-size { text-align: right; }
 .finder-table tbody td {
   padding: 7px 12px;
-  border-bottom: 1px solid var(--border-soft, rgba(0,0,0,0.05));
+  border-bottom: 1px solid var(--border-subtle); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.05) → 最浅档 --border-subtle */
   vertical-align: middle;
 }
 .finder-table tbody tr:hover { background: color-mix(in srgb, var(--accent, #0EA5E9) 6%, transparent); }
@@ -8375,7 +8398,9 @@ body.lg-mode-frost .filter-tab.active .maint-tab-count {
 .netcheck-links { border-top: 1px solid var(--border-subtle); padding-top: 10px; }
 .netcheck-links-label { font-size: var(--fs-meta); color: var(--fg-tertiary); }
 /* v3.7.0 议题六 P1：网卡高级属性只读区（三级缩进区分「网卡 / 状态行 / 属性行」） */
-.nic-prop-head { color: var(--fg); font-weight: 600; margin-top: 6px; }
+/* v2-L6：--fg 全仓无定义（真源是 --fg-primary/--fg-secondary/--fg-tertiary 三级）且无 fallback
+   ⇒ 这条 color 一直被丢弃、实际继承 body 的 --fg-primary；改成显式 --fg-primary，观感不变。 */
+.nic-prop-head { color: var(--fg-primary); font-weight: 600; margin-top: 6px; }
 .nic-prop-sub { color: var(--fg-tertiary); }
 .nic-prop-item { padding-left: 14px; }
 

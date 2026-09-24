@@ -11,7 +11,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::safestorage;
 
@@ -109,7 +109,7 @@ pub fn quarantine_file(path: &Path, reason: &str) {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let bak: PathBuf = path.with_file_name(format!("{name}.corrupt-{ts}"));
+    let bak: PathBuf = path.with_file_name(quarantine_name_for(&name, ts));
     if fs::rename(path, &bak).is_ok() {
         crate::engine::log::write_log(
             "error",
@@ -118,14 +118,42 @@ pub fn quarantine_file(path: &Path, reason: &str) {
     }
 }
 
-/// 清理隔离件：`<file>.corrupt-<ts>` 超过 30 天的删掉（审查 M15/G4）。
+/// 隔离件命名（生产侧唯一出口）。
+/// 刻意与消费侧 `quarantine_stamp` 成对：两者一旦漂移，隔离件就永远回收不掉，
+/// 而这条链上没有任何报错会提醒（测试 `生产与消费命名必须成对` 钉住）。
+fn quarantine_name_for(original: &str, ts_ms: u128) -> String {
+    format!("{original}.corrupt-{ts_ms}")
+}
+
+/// 清理隔离件：`<原文件名>.json.corrupt-<毫秒>` 超过 30 天的删掉（审查 M15/G4）。
 ///
 /// 为什么需要：`quarantine_file` 每次损坏都留下一个新文件，此前**没有任何回收路径** ——
 /// 配置反复损坏（例如磁盘写满）时会在数据目录里堆一排永远没人读的 `.corrupt-*`。
-/// 只删本模块自己产出的命名格式，且按文件名里的毫秒时间戳判龄期，不碰用户文件。
+///
+/// **AGENTS §3「删除一律回收站优先」的唯一豁免就在这一句**（审查 v2-U3，2026-09-25 裁定）：
+/// 这里用 `fs::remove_file` 永久删、不过回收站、也不过 `is_path_protected`，理由是
+/// **件由本应用自己写出**（`quarantine_file` 产出、命名与本模块一一对应、内容已知是坏 JSON），
+/// 用户从未创建过它、也没有任何"还原"语义挂在它身上；进回收站只是把一堆坏件搬到另一个位置。
+/// 这条豁免**不外推**到任何用户数据 / 规则驱动的删除路径（常规清理链的永久删是另一回事，
+/// 那是 v3.3.0 的产品裁定，见 AGENTS §3）。
+///
+/// 正因豁免掉了回收站这道后悔药，匹配式必须收到最紧（审查 v2-U3 的实际咬人面）：
+/// 只认「**原文件名以 `.json` 结尾** + `.corrupt-<纯数字>`」，即本模块 `quarantine_file`
+/// 唯一可能产出的形状。旧口径只要求 `*.corrupt-<数字>`，会把用户自己的
+/// `notes.corrupt-123`（例如别的软件的坏件、或用户手工改名的备份）当垃圾永久删掉。
 pub fn prune_quarantined(dir: &Path) -> usize {
-    const KEEP_MS: u128 = 30 * 24 * 60 * 60 * 1000;
-    let now = SystemTime::now()
+    let removed = prune_quarantined_in(dir, SystemTime::now());
+    if removed > 0 {
+        crate::engine::log::write_log("info", &format!("已清理过期隔离件 {removed} 个"));
+    }
+    removed
+}
+
+const QUARANTINE_KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// 执行体（不写日志，便于在一次性沙箱里断言真实删除行为而不污染应用日志目录）
+fn prune_quarantined_in(dir: &Path, now: SystemTime) -> usize {
+    let now_ms = now
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
@@ -133,16 +161,33 @@ pub fn prune_quarantined(dir: &Path) -> usize {
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some((_, ts)) = name.rsplit_once(".corrupt-") else { continue };
-        let Ok(ts) = ts.trim_end_matches(".json").parse::<u128>() else { continue };
-        if now.saturating_sub(ts) > KEEP_MS && fs::remove_file(entry.path()).is_ok() {
-            removed += 1;
+        let Some(ts) = quarantine_stamp(&name) else { continue };
+        // 时间戳取文件名里的隔离时刻（不是 mtime）：复制/搬运过的件仍按原时刻判龄期
+        if now_ms.saturating_sub(ts) > QUARANTINE_KEEP.as_millis() {
+            // 只删普通文件、拒 reparse：链接件删掉等于删它指向的东西
+            let safe = fs::symlink_metadata(entry.path())
+                .map(|m| m.is_file() && !crate::engine::protect::is_reparse(&m))
+                .unwrap_or(false);
+            if safe && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
         }
     }
-    if removed > 0 {
-        crate::engine::log::write_log("info", &format!("已清理过期隔离件 {removed} 个"));
-    }
     removed
+}
+
+/// 隔离件命名判定：命中则返回文件名里的毫秒时间戳。
+/// 形状必须是 `<…….json>.corrupt-<纯数字>`（`quarantine_file` 的产出格式，逐字对齐）。
+fn quarantine_stamp(name: &str) -> Option<u128> {
+    let (stem, ts) = name.rsplit_once(".corrupt-")?;
+    if !stem.ends_with(".json") || ts.is_empty() || !ts.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // 分隔符兜底（NTFS 文件名本容不下，不依赖上游侥幸）
+    if name.contains(['/', '\\', ':']) {
+        return None;
+    }
+    ts.parse::<u128>().ok()
 }
 
 /// 递归把 SECRET_FIELDS 字段做变换（对齐 transformSecrets）
@@ -246,4 +291,74 @@ pub fn decrypt_settings_with_oscrypt(settings: &serde_json::Value) -> serde_json
             None => String::new(),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一次性沙箱：唯一命名 + 结束自删。测试不得具备改动真实数据目录的能力。
+    fn sandbox(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trim-security-test-{}-{tag}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // ==================== 审查 v2-U3：永久删除出口的匹配面 ====================
+
+    #[test]
+    fn 隔离件匹配必须要求原名以json结尾() {
+        // 本模块唯一产出的形状：quarantine_file 只隔离 *.json 配置
+        assert_eq!(quarantine_stamp("appearance.json.corrupt-1711"), Some(1711));
+        assert_eq!(
+            quarantine_stamp("settings.json.corrupt-1758729600000"),
+            Some(1758729600000)
+        );
+        // 用户自己的文件：旧口径（只要 `*.corrupt-<数字>`）会把它当垃圾永久删掉
+        assert_eq!(quarantine_stamp("notes.corrupt-123"), None);
+        assert_eq!(quarantine_stamp("README.corrupt-1758729600000"), None);
+        // 时间段不纯是数字 / 为空 / 带路径分隔符 ⇒ 一律不认
+        assert_eq!(quarantine_stamp("a.json.corrupt-12ab"), None);
+        assert_eq!(quarantine_stamp("a.json.corrupt-"), None);
+        assert_eq!(quarantine_stamp("sub/../x.json.corrupt-1"), None);
+        // 反向：不得把「收紧」做成「连自己也认不出」——生产侧与消费侧命名必须成对
+        assert_eq!(
+            quarantine_stamp(&quarantine_name_for("paths.json", 1758729600000)),
+            Some(1758729600000)
+        );
+    }
+
+    #[test]
+    fn 回收只动过期隔离件不碰用户文件() {
+        let dir = sandbox("prune");
+        let now = SystemTime::now();
+        let now_ms = now.duration_since(UNIX_EPOCH).unwrap().as_millis();
+        let old_ms = now_ms - (31 * 24 * 60 * 60 * 1000);
+        let fresh_ms = now_ms - (10 * 24 * 60 * 60 * 1000);
+        let expired = dir.join(quarantine_name_for("appearance.json", old_ms));
+        let kept = dir.join(quarantine_name_for("settings.json", fresh_ms));
+        let user_file = dir.join("notes.corrupt-123");
+        let plain = dir.join("notes.txt");
+        for p in [&expired, &kept, &user_file, &plain] {
+            fs::write(p, b"x").unwrap();
+        }
+        // 子目录同名也不当文件删（这里是防 remove_file 走到目录上）
+        let as_dir = dir.join(quarantine_name_for("system.json", old_ms));
+        fs::create_dir_all(&as_dir).unwrap();
+
+        assert_eq!(prune_quarantined_in(&dir, now), 1, "只该删掉那一个过期隔离件");
+        assert!(!expired.exists());
+        assert!(kept.exists(), "30 天内的隔离件要留（现场还在保留期）");
+        assert!(user_file.exists(), "用户的 notes.corrupt-123 不得被删（v2-U3 咬人面）");
+        assert!(plain.exists());
+        assert!(as_dir.is_dir(), "目录不得被 remove_file 端掉");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

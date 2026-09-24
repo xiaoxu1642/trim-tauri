@@ -43,7 +43,7 @@ for (const entry of MAPPING) {
     console.log(`✗ ${entry.ps1} 与 JS 运行时值不一致${same ? '（仅来源头待刷新）' : ''}`);
   } else {
     writeFileSync(target, desired, 'utf8');
-    console.log(`${same ? '↻ ' : '↻ '}${entry.ps1} 已按 JS 运行时值重写（${body.length} 字符${same ? '，仅来源头' : ''}）`);
+    console.log(`↻ ${entry.ps1} 已按 JS 运行时值重写（${body.length} 字符${same ? '，仅来源头' : ''}）`);
   }
 }
 

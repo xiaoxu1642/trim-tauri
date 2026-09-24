@@ -12,7 +12,7 @@ docs/
 *.p12
 
 # ==================== 构建产物 ====================
-# src-tauri/target 本机实测 19 GB，纯编译缓存
+# cargo 的编译缓存，体积随增量编译单调增长（本机量级到几十 GB 都正常），纯产物、永不入库
 src-tauri/target/
 # native-scanner 已 vendor 成独立（非 workspace）包，单独 cargo build 会生成不被上面规则覆盖的 target
 native-scanner/target/

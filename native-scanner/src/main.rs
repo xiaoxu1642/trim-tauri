@@ -10,9 +10,9 @@
 //   · 新增 @@SCANNED:n@@ 心跳行，大盘扫描时前端能实时看到已枚举文件数
 //
 // 磁盘清理扫描引擎（P0：pathPs 目录型条目 + dism 占位），方案见
-// D:\KaiFa\文件分析\laji\磁盘清理扫描Rust化方案.md（v1.1）
+// 本地资料区的《磁盘清理扫描 Rust 化方案》v1.1（不随仓库分发）
 // v3.7.1 Rust 化批次（R1/R2/R3）：diskbench / ov-metrics / net-sample / mem-clean
-// 方案见 update history/9.23/Trim-Rust化方案-R1R2R3-v2-2026-09-23.md（契约优先）
+// 方案见迁移方案文档的 R1R2R3 小节（契约优先）
 //
 // Phase 1 lib 化：模块声明与共享助手上移到 src/lib.rs（同一模块不能在 bin 与 lib 里
 // 各声明一次，否则编译两份），bin 改为引用库；CLI 行为不变。
@@ -31,7 +31,7 @@ use trim_finder::{cleanup_scan, perf, scan};
 struct StdoutSink;
 
 impl Sink for StdoutSink {
-    fn item(&self, line: &str) {
+    fn item(&self, _path: &std::path::Path, line: &str) {
         // 原实现走 write_all（stdout 为 LineWriter，遇 '\n' 即 flush），沿同路径以对齐输出节奏
         let _ = std::io::stdout().write_all(line.as_bytes());
     }

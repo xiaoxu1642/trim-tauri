@@ -155,9 +155,13 @@ pub fn dev_noactivate() -> bool {
 /// 不出来，`build()` 却照样返回成功、`get_webview_window` 也查得到，只是 `hwnd=0x0`。
 /// 结果就是「带着调试端口启动时，所有子窗静默失效」，做真机验收的人会据此误判产品坏了。
 /// 所以每个建窗点都必须过这一手。
-pub fn with_browser_args<R: tauri::Runtime>(
-    mut builder: tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>>,
-) -> tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>> {
+///
+/// 审查 v2-L4：签名对 manager 泛型化（`M: Manager<R>`），因为主窗的 builder 是在 `setup` 里
+/// 由 `&mut App` 建的、子窗的由 `&AppHandle` 建的——原先只吃 `AppHandle<R>`，主窗想复用这个
+/// helper 就得先把 builder 拆开，于是它当年被内联复制了一份，这正是"约束靠人记"的下场。
+pub fn with_browser_args<R: tauri::Runtime, M: tauri::Manager<R>>(
+    mut builder: tauri::WebviewWindowBuilder<'_, R, M>,
+) -> tauri::WebviewWindowBuilder<'_, R, M> {
     if let Ok(extra) = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
         let extra = extra.trim();
         if !extra.is_empty() {
@@ -426,7 +430,7 @@ pub fn run() {
             // ——实测 Tauri/wry 2.11 自带默认浏览器参数时，WebView2 加载器会忽略该环境变量，
             // 导致 CDP 远程调试端口起不来（Phase 0 结论，B2 已记录）。
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(APP_NAME)
                 .inner_size(MIN_WIDTH, MIN_HEIGHT)
                 .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
@@ -436,12 +440,12 @@ pub fn run() {
                 .transparent(true)
                 .visible(false)
                 .shadow(true);
-            if let Ok(extra) = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
-                if !extra.trim().is_empty() {
-                    builder = builder.additional_browser_args(&extra);
-                }
-            }
-            let window = builder.build().expect("main 窗口创建失败");
+            // 审查 v2-L4：主窗也过一次 `with_browser_args`。四个子窗早就统一走它，只有主窗内联
+            // 同款 env 读取——「建窗必须透传浏览器参数」这条 K4 换来的约束靠人记住必然漏，
+            // 收成一个函数后新增建窗点就只有一条路可走。
+            let window = with_browser_args(builder)
+                .build()
+                .expect("main 窗口创建失败");
 
             // ---------- 启动期一次性任务（D5 / 日志口径 / 临时件） ----------
             if let Some(note) = paths::migrate_legacy_once() {
@@ -533,4 +537,43 @@ pub fn on_app_exit() {
     log::flush_sync();
     commands::realtime::shutdown_sampler();
     pwsh::cleanup_temp_scripts();
+}
+
+#[cfg(test)]
+mod tests {
+    fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    rs_files(&p, out);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    /// 审查 v2-L4 的常驻断言：**每个建窗点都必须过一次 `with_browser_args`**。
+    /// 这条约束是 K4 用一次误判换来的——不透传浏览器参数时同一 WebView2 user-data-folder 下
+    /// 第二个 core 建不出来，而 `build()` 照样返回 Ok、`get_webview_window` 照样查得到，
+    /// 只有 `hwnd=0x0`；靠人在每个新窗口记得它是必漏的，所以这里直接数源码。
+    /// 只读文本、不建窗口、不依赖运行时；定义行写成 `with_browser_args<R>(` 故不计入调用数。
+    #[test]
+    fn every_window_builder_goes_through_browser_args() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        let (mut builders, mut guarded) = (0usize, 0usize);
+        for f in &files {
+            let Ok(t) = std::fs::read_to_string(f) else { continue };
+            builders += t.matches("WebviewWindowBuilder::new(").count();
+            guarded += t.matches("with_browser_args(").count();
+        }
+        assert!(builders > 0, "一个建窗点都没扫到——扫描根目录是否变了");
+        assert_eq!(
+            builders, guarded,
+            "建窗点数 {builders} ≠ with_browser_args 调用数 {guarded}：有窗口没透传浏览器参数（K4 的静默 hwnd=0x0）"
+        );
+    }
 }

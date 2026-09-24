@@ -1089,8 +1089,11 @@
     // 分离常规清理项和文件清理项
     const regularItems = allItems.filter(i => !FILECLEAN_IDS.includes(i.id));
     const fileCleanItems = allItems.filter(i => FILECLEAN_IDS.includes(i.id));
-    // v3.3.0（用户裁定）：执行选项 UI 已移除，固定语义——自动重建目录默认执行；
-    // 强制删除、删除进回收站默认不执行（回收站优先删除逻辑仍在主进程 trashOrUnlink 内）
+    // v3.3.0（用户裁定）：执行选项 UI 已移除，固定语义——常规清理**不进回收站、直接永久删**。
+    // 审查 v2-M20 订正：后半句原先写「回收站优先删除逻辑仍在主进程 trashOrUnlink 内」，那是
+    // Electron 轨的事实；本轨（Tauri/Rust）没有 trashOrUnlink，`toRecycle=false` 使
+    // `cleanup.rs` 的回收站支对该链不可达，永久删发生在 `cleanup_execute.ps1` 里，**刻意不做
+    // 永久删除兜底之外的补救**。红线口径已按这条裁定改写在 AGENTS §3（含"唯一例外"表述）。
     const force = false;
     const toRecycle = false;
     const autoRebuild = true;

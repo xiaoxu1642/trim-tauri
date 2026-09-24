@@ -150,7 +150,9 @@ fn pick(v: Option<&Value>, allowed: &[i64], default: i64) -> i64 {
 /// diskbench:run — 磁盘测速（原生引擎优先）
 #[tauri::command]
 pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options: Option<Value>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    // 审查 v2-L17：测速要独占读盘、属"会动系统资源"的写侧通道，且唯一调用方是主窗的
+    // `diskbench.js`（`app.js` 页面表）⇒ 收 MAIN，不用放行五窗的 readonly 档。
+    guard::guard(&window, guard::MAIN)?;
     let opts = options.unwrap_or_else(|| json!({}));
 
     let requested = opts
@@ -162,9 +164,11 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     if requested.is_empty() || !Path::new(&requested).exists() {
         return Ok(json!({ "success": false, "message": "测速路径不存在" }));
     }
-    // 必须是普通目录且非符号链接；通过后再规范化（消解 .. ，用于白名单包含判定）
+    // 必须是普通目录且非交换点；通过后再规范化（消解 .. ，用于白名单包含判定）。
+    // 审查 v2-L12：用 `is_reparse`（属性位 0x400）而非 `is_symlink()` —— junction / OneDrive
+    // 云占位符那类 is_symlink 判 false 的目标，一旦当成普通目录去测速会把负载压到别的存储上。
     let resolved = match std::fs::symlink_metadata(&requested) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+        Ok(meta) if meta.is_dir() && !crate::engine::protect::is_reparse(&meta) => {
             canonical(Path::new(&requested)).unwrap_or_else(|| PathBuf::from(&requested))
         }
         Ok(_) => return Ok(json!({ "success": false, "message": "测速路径必须是普通目录" })),

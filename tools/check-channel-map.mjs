@@ -4,12 +4,15 @@
 // 且新增通道必须同表登记，防止「Rust 有了、前端没接」或反向的静默断裂
 // （R18：141 条通道中任一漏迁，表现为按钮没反应而非报错，最难发现）。
 //
-// 四组断言：
+// 五组断言：
 //   A. preload 的 invoke 通道集合 == tauri-api.js 的 CHANNEL_MAP 键集合
 //   B. preload 的 send 通道集合 == SEND_MAP 键 ∪ 窗口插件桥接通道 ∪ app:first-paint 直连
 //   C. 已登记且已在 Rust 注册的命令，名字必须一一对应（snake_case 且无重复映射）
 //   D. lib.rs 中每个 #[tauri::command] 函数（探针除外）都必须被映射表引用
 //      ——这是本门禁最有价值的一条：抓 Rust 侧写完却忘了接前端的裂缝
+//   D4. 反向的第二层：映射到的命令还得**真有渲染层调用点**（审查 v2-M15）。
+//       D1~D3 只保证「三张表互相对得上」，对「表里有、没人调」是瞎的 ——
+//       settings:save 就是这么带着约 250 行密钥/内网 URL 校验逻辑零调用方存活至今。
 //
 // 未迁移通道（Rust 尚未注册）只做**统计报告**不判失败，以支持 Phase 1 增量迁移。
 //
@@ -17,14 +20,14 @@
 //   --strict：要求全部通道均已迁移（Phase 5 收尾门禁用）
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 
 const STRICT = process.argv.includes('--strict');
 const TAURI_ROOT = REPO_ROOT;
 
-// 通道契约基线：读**仓库内**的上游快照（审查 K2）。原先这里是硬编码 `C:/KaiFa/Trim`，
+// 通道契约基线：读**仓库内**的上游快照（审查 K2）。原先这里是硬编码的本机源仓库绝对路径，
 // 干净克隆上加载即抛；快照与活源仓库是否已漂，由 tools/check-origin-drift.mjs 复核。
 const preload = readFileSync(join(ORIGIN, 'preload.js'), 'utf8');
 const adapter = readFileSync(join(TAURI_ROOT, 'src', 'scripts', 'tauri-api.js'), 'utf8');
@@ -131,6 +134,135 @@ const registeredNoDecl = [...registered].filter(f => !declared.has(f));
 check(registeredNoDecl.length === 0,
   'D3. 注册的命令都有 #[tauri::command] 声明（防注册名拼错）',
   registeredNoDecl.length ? JSON.stringify(registeredNoDecl) : '');
+
+// ---- D4. 每条映射命令都要真有渲染层调用点（审查 v2-M15 的「加门禁断言」那半）----
+// 为什么要单独一条：D1~D3 核的是「Rust 声明 ⇄ generate_handler! ⇄ CHANNEL_MAP」三张表互相对得上，
+// 「表里有条目、前端没人调」在三张表里都是自洽的，于是一条孤儿写通道可以带着约 250 行
+// 密钥掩码/内网 URL 校验逻辑长期存活（settings:save），并让下一轮把「注册」读成「已覆盖」。
+// 判据取「适配层里该通道的 window.api 路径是否在渲染层出现」，而不是命令名文本 ——
+// 渲染层只写 `window.api.<域>.<方法>()`，命令名压根不出现在 src/ 里。
+//
+// 三种合法写法都要认出来，否则会把「用了」误判成「孤儿」（假红同样是债）：
+//   ① 直接点调用：`window.api?.appearance?.getMaterial()`（先把 `?.` 归一成 `.`）
+//   ② 局部别名：`const api = window.api?.pwsh;` 之后的 `api.getStatus()`
+//   ③ 动态派发：`window.api?.modal?.[method]()` —— 静态面认不出方法名，整域按「已派发」放行，
+//      但会在输出里点名，避免它变成「想绕过 D4 就加个方括号」的后门。
+const D4_ORPHANS = new Map([
+  // 现状基线：v2-M15 实测的零调用方通道。基线是**双向棘轮**——
+  // 新增孤儿判红（不许再往表里加不接线的条目），基线里的条目一旦有了调用点也判红
+  // （白名单不许留死条目，否则下一次没人记得它其实早就接上了）。摘除或接线后从这里删掉。
+  ['app:get-theme', 'v2-M15：主题只走本地 theme.js，无调用点'],
+  ['window:update-overlay', 'v2-M15：自绘标题栏改由 CSS/`body.win-maximized` 承担'],
+  ['pwsh:prepare', 'v2-M15：内置运行时准备无前端入口（状态查询 pwsh:status 有）'],
+  ['settings:save', 'v2-M15 本尊：独有字段 aiEngine/aiApiKey/aiApiUrl/baiduApiUrl/metasoApiUrl/aiDescEnabled 运行时永不可写'],
+  ['netspeed:ping', 'v2-M15：测速页现由 netspeed_throughput 之外的路径完成，ping 无调用点'],
+  ['netspeed:throughput', 'v2-M15：同上'],
+  ['elevate:status', 'v2-M15：提权状态走事件 elevate:notice，状态查询无人调'],
+  ['paths:validate', 'v2-M15：路径校验由 Rust 侧内部调用，渲染层无入口'],
+  ['shutdown:begin', 'v2-M15：`app.js:677` 注明「保留作扩展点」——刻意保留，但要显式登记'],
+  ['shutdown:complete', 'v2-M15：同上'],
+]);
+
+/** 递归取 src/ 下的渲染层源码（适配层自身除外：它定义包装器，不是调用点） */
+function rendererSources(dir, out = []) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) rendererSources(p, out);
+    else if (/\.(?:js|html)$/.test(e.name) && !p.endsWith(`tauri-api.js`)) {
+      // `?.` 归一：渲染层大量写 `window.api?.x?.y()`，不归一会把在用通道判成孤儿
+      out.push([relative(TAURI_ROOT, p), readFileSync(p, 'utf8').replace(/\?\./g, '.')]);
+    }
+  }
+  return out;
+}
+
+/** 从适配层的 `var api = {…}` 里解析「通道 → window.api 点路径」 */
+function parseApiPaths(text) {
+  const lines = text.split('\n');
+  const start = lines.findIndex(l => l.startsWith('  var api = {'));
+  if (start < 0) throw new Error('适配层里没找到 `var api = {`，D4 无从解析');
+  let end = -1;
+  for (let i = start + 1; i < lines.length; i++) if (/^  \};/.test(lines[i])) { end = i; break; }
+  if (end < 0) throw new Error('`var api = {` 块收尾没找到（缩进变了？）');
+  const stack = [];
+  const map = new Map();
+  for (let i = start + 1; i < end; i++) {
+    const l = lines[i];
+    if (/^\s*\/[/*]/.test(l)) continue;            // 注释行不参与结构判定
+    const ind = l.match(/^\s*/)[0].length;
+    const open = l.match(/^\s*([A-Za-z_$][\w$]*)\s*:\s*\{/);
+    if (open) {
+      while (stack.length && stack[stack.length - 1].ind >= ind) stack.pop();
+      stack.push({ key: open[1], ind });
+      continue;
+    }
+    const key = l.match(/^\s*([A-Za-z_$][\w$]*)\s*:/);
+    if (!key) continue;
+    while (stack.length && stack[stack.length - 1].ind >= ind) stack.pop();
+    // 函数体可能跨行（如 overview:hardware 要先整形 options），向后找通道字面量，
+    // 但绝不越过下一个方法键——否则会把邻居的通道记到本键头上。
+    for (let k = i; k < Math.min(i + 14, end); k++) {
+      const ch = lines[k].match(/(?:invokeChannel|sendChannel)\(\s*'([^']+)'/);
+      if (ch) { map.set(ch[1], [...stack.map(s => s.key), key[1]].join('.')); break; }
+      if (k !== i && /^\s*[A-Za-z_$][\w$]*\s*:\s*(?:async\s+)?function/.test(lines[k])) break;
+    }
+  }
+  return map;
+}
+
+{
+  const apiPaths = parseApiPaths(adapter);
+  const allChannels = new Map([...channelMap, ...sendMap]);
+  const sources = rendererSources(join(TAURI_ROOT, 'src'));
+  // 局部别名表：域名 → 变量名集合
+  const aliases = new Map();
+  const dynamic = new Set();
+  for (const [, text] of sources) {
+    for (const m of text.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*window\.api\.(\w+)\b/g)) {
+      if (!aliases.has(m[2])) aliases.set(m[2], new Set());
+      aliases.get(m[2]).add(m[1]);
+    }
+    // 注意 `?.` 归一后形态是 `window.api.modal.[method](...)` —— 点号还留在方括号前，
+    // 所以这里的方括号前缀是可选的（写死 `api.x[` 会漏认，把在用的 modal 域误判成孤儿）。
+    for (const m of text.matchAll(/window\.api\.(\w+)\s*\.?\s*\[/g)) dynamic.add(m[1]);
+  }
+  const used = (ch) => {
+    const path = apiPaths.get(ch);
+    if (!path) return false;
+    const [domain, ...rest] = path.split('.');
+    const method = rest.join('.');
+    const needle = `.${path}`;
+    for (const [, text] of sources) {
+      if (text.includes(needle)) return true;
+      if (dynamic.has(domain) && new RegExp(`window\\.api\\.${domain}\\s*\\.?\\s*\\[`).test(text)) return true;
+      for (const v of aliases.get(domain) ?? []) {
+        if (new RegExp(`\\b${v}\\.${method}\\b`).test(text)) return true;
+      }
+    }
+    return false;
+  };
+  const unmappedPath = [...allChannels.keys()].filter(c => !apiPaths.has(c));
+  const orphans = [...allChannels.keys()].filter(c => apiPaths.has(c) && !used(c)).sort();
+  const dead = [...orphans].filter(o => !D4_ORPHANS.has(o));
+  const stale = [...D4_ORPHANS.keys()].filter(o => !orphans.includes(o));
+  check(
+    unmappedPath.length === 0 && dead.length === 0 && stale.length === 0,
+    `D4. 每条映射命令都有渲染层调用点（通道 ${allChannels.size} / 已接线 ${allChannels.size - orphans.length} / 基线内孤儿 ${orphans.length}）`,
+    unmappedPath.length
+      ? `这些通道在 window.api 里找不到对应方法，适配层形状变了？${JSON.stringify(unmappedPath)}`
+      : dead.length
+        ? `新增孤儿通道（要么接线要么整链摘除，并同步 D4 基线）${JSON.stringify(dead)}`
+        : stale.length
+          ? `基线里的孤儿已有调用点，请从 D4_ORPHANS 删除：${JSON.stringify(stale)}`
+          : '',
+  );
+  if (dynamic.size) console.log(`  · D4 按「动态派发」放行的域：${[...dynamic].join(', ')}（静态面认不出方法名）`);
+  if (orphans.length) {
+    console.log(`  · D4 现状孤儿 ${orphans.length} 条（v2-M15 遗留，摘除或接线后要同步删基线条目）：`);
+    for (const o of orphans) console.log(`      ${o} → ${apiPaths.get(o)}（命令 ${allChannels.get(o)}）：${D4_ORPHANS.get(o) ?? '未登记原因'}`);
+  }
+}
+
 
 // ---- F. 高危优化清单双源对拍（审查 L6） ----
 // 后端 `HAZARD_IDS` 是「必须拿到 confirmedHighRisk 才放行」的闸门集合，前端

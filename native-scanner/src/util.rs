@@ -23,12 +23,24 @@ pub fn json_escape(s: &str) -> String {
 }
 
 /// 路径统一为 `/` 分隔并剥掉 `\\?\` 长路径前缀（输出口径，跨平台一致）
+///
+/// 审查 v2-M5：`to_string_lossy` 是**有损**的（孤立代理项 → U+FFFD），所以这个字符串
+/// 只能用于展示与匹配键，不能反过来当删除目标 —— 需要保真时用 `has_lossy_path` 判一眼，
+/// 并把原生 `Path`/`OsString` 交给删除侧（`Sink::item` 因此带上了原始路径）。
 pub fn unix_path(p: &std::path::Path) -> String {
     let mut s = p.to_string_lossy().to_string();
     if s.starts_with(r"\\?\") {
         s = s[4..].to_string();
     }
     s.replace('\\', "/")
+}
+
+/// 该路径的文本形态是否已经丢了信息（`to_string_lossy` 拿 U+FFFD 顶掉了非良构序列）。
+/// Windows 上 OsString 内部是 UTF-16/WTF-8，`to_str()` 返回 None 即「含孤立代理项」，
+/// 这正是 GBK 遗留介质与字节级拷贝名字的形态：此时 lossy 串既可能删不到目标、
+/// 也可能撞上另一个恰好含 U+FFFD 的真实文件。
+pub fn has_lossy_path(p: &std::path::Path) -> bool {
+    p.as_os_str().to_str().is_none()
 }
 
 /// 审查v4-M6：是否重解析点（junction/挂载点）。Windows 目录联接点不是 symlink
@@ -82,4 +94,46 @@ pub fn to_long_path(p: &str) -> String {
 #[cfg(not(windows))]
 pub fn to_long_path(p: &str) -> String {
     p.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// 审查 v2-M5：lossy 判据必须是「文本形态丢了信息」，而不是「看起来有怪字符」。
+    /// 孤立代理项（GBK 遗留介质/字节级拷贝的名字）→ `to_str()` None；
+    /// 而合法的多字节 Unicode 名字（中文、emoji）→ 无损，不能被误判成要特殊处理的目标。
+    #[test]
+    fn has_lossy_path_flags_unpaired_surrogates_only() {
+        assert!(!has_lossy_path(Path::new("C:\\Users\\me\\报告 🎯.txt")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn has_lossy_path_detects_unpaired_surrogate() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        // 0xD800 是前导代理项却没有后继 —— 真实磁盘上就长这样（字节级拷来的 GBK 名字）
+        let weird = Path::new(&OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD800, 0x61])).to_path_buf();
+        assert!(has_lossy_path(&weird), "孤立代理项必须判为 lossy");
+        // 配对代理项（emoji）是合法 UTF-16，不得误判
+        let ok = Path::new(&OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD83C, 0xDFAF])).to_path_buf();
+        assert!(!has_lossy_path(&ok), "配对代理项是无损的");
+    }
+
+    /// `unix_path` 是展示口径：剥 `\\?\`、分隔符统一，且对 lossy 输入必须仍产出可解析文本
+    #[test]
+    fn unix_path_strips_prefix_and_normalizes_sep() {
+        assert_eq!(unix_path(Path::new(r"\\?\C:\a\b")), "C:/a/b");
+        assert_eq!(unix_path(Path::new(r"C:\x\y.txt")), "C:/x/y.txt");
+    }
+
+    /// 行协议的前提：控制字符必须被转义，否则一条名字里带制表符的路径就能伪造 `@@ITEM@@` 行
+    #[test]
+    fn json_escape_covers_control_chars() {
+        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(json_escape("x\ny\rz\tw"), "x\\ny\\rz\\tw");
+        assert_eq!(json_escape("\u{1}"), "\\u0001");
+    }
 }

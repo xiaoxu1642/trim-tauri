@@ -151,8 +151,11 @@ input[type="range"].ds-slider:focus-visible {
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
   /* v3.5.1 动效审查 M5：菜单由 ds.js 按触发点定位（position:fixed + left/top），
      原先无任何入场、凭空出现。这里用 @starting-style 补「从触发器方向长出」的
-     轻微缩放，点明空间来源；不依赖 JS 加类，浏览器不支持时自动退化为瞬时出现。 */
-  transform-origin: var(--ds-menu-origin, top left);
+     轻微缩放，点明空间来源；不依赖 JS 加类，浏览器不支持时自动退化为瞬时出现。
+     v2-L6：--ds-menu-origin 是当年为「按触发点翻转原点」预留的钩子，ds.js 从未写入过它
+     （全仓零命中）⇒ 恒吃 top left。先把实际生效值写死，钩子要接线时连同 menu() 的
+     上下翻转判断一起补回来，别再留一条静默失效的间接层。 */
+  transform-origin: top left;
   transition: opacity var(--duration-fast) var(--ease-emphasized), transform var(--duration-fast) var(--ease-emphasized);
 }
 @starting-style {

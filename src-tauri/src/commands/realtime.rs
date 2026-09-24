@@ -131,16 +131,22 @@ fn stop_sampler(cause: &str) {
     }
 }
 
-/// 供应用退出时清理
+/// 供应用退出时清理（lib.rs 的 `on_app_exit` 是唯一退出钩子，覆盖窗口关闭/关机/异常三条路径）
+///
+/// 审查 v2-L13：顺带在这里回收过期报告 —— 报告 TTL 此前只有 save/list 两个触发点，
+/// 用户不再打开网速页就永不触发；挂在退出路径上保证「每次运行至少回收一次」，
+/// 且不需要动 lib.rs。启动钩子（覆盖崩溃/被杀进程那一半）见交付说明的越界需求。
 pub fn shutdown_sampler() {
     stop_sampler("应用退出");
+    prune_reports();
 }
 
 fn ps_json(script: &'static str, timeout_secs: u64, op: &str) -> Result<Value, String> {
+    // 审查 v2-L2：脚本由 `TempScript` 守卫持有，出作用域即删。
+    // 旧姿势是「run_file 后手写 remove_file」，而本函数在 remove_file 之后还有三处早退
+    // （`out?` / TIMEOUT / code!=0），任一命中都靠启动期 1h 兜底才收得回来。
     let path = pwsh::write_temp_script(script, ".ps1")?;
-    let out = pwsh::run_file(&path, Duration::from_secs(timeout_secs), Some(op));
-    let _ = std::fs::remove_file(&path);
-    let out = out?;
+    let out = pwsh::run_file(path.path(), Duration::from_secs(timeout_secs), Some(op))?;
     if out.timed_out {
         return Err("TIMEOUT".into());
     }
@@ -207,28 +213,50 @@ fn ensure_report_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
-/// 清理超过 7 天的旧报告（保存/列出时都会调用）
-fn cleanup_reports() {
+/// 清理超过 7 天的旧报告（保存/列出时都会调用）。
+///
+/// 审查 v2-L13：只有这两处触发 ⇒ 用户此后不再打开网速页，`cache/realtime-reports`
+/// 里的过期报告就永远回收不掉（TTL 承诺写在文件头与 readme 里）。判据抽成
+/// `report_expired` 纯函数，并挂到进程生命周期两端：
+/// - 退出：`shutdown_sampler`（lib.rs 的 `on_app_exit` 已接线，本文件内可改）
+/// - 启动：`prune_reports` 已 `pub`，接一行调用属 lib.rs（越界，见交付说明）
+pub fn prune_reports() {
     let Ok(dir) = ensure_report_dir() else { return };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
-    let now = crate::engine::now_ms();
+    prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS);
+}
+
+/// 执行体（不读全局目录、不写日志）：便于在一次性沙箱里断言真实删除行为。
+fn prune_reports_in(dir: &std::path::Path, now_ms: i64, ttl_ms: i64) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !name.ends_with(".json") {
             continue;
         }
-        let Some(mtime) = entry
+        let mtime = entry
             .metadata()
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-        else {
-            continue;
-        };
-        if now - mtime > REPORT_TTL_MS {
-            let _ = std::fs::remove_file(entry.path());
+            .map(|d| d.as_millis() as i64);
+        if report_expired(mtime, now_ms, ttl_ms)
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
         }
+    }
+    removed
+}
+
+/// 报告龄期判定（纯函数，便于断言）。
+/// `mtime` 取不到时按「不过期」处理：误删用户的报告比留一个文件代价高。
+fn report_expired(mtime_ms: Option<i64>, now_ms: i64, ttl_ms: i64) -> bool {
+    match mtime_ms {
+        Some(m) => now_ms - m > ttl_ms,
+        None => false,
     }
 }
 
@@ -290,7 +318,7 @@ pub fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, data: V
         }));
     }
     let dir = ensure_report_dir()?;
-    cleanup_reports();
+    prune_reports();
     let name = format!("realtime-{}.json", crate::engine::now_ms());
     match security::atomic_write_json(&dir.join(&name), &data) {
         Ok(()) => Ok(serde_json::json!({ "success": true, "name": name })),
@@ -305,7 +333,7 @@ pub fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, data: V
 #[tauri::command]
 pub fn realtime_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    cleanup_reports();
+    prune_reports();
     let dir = paths::realtime_report_dir();
     let mut out: Vec<Value> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -372,4 +400,57 @@ pub fn realtime_report_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
         }
     }
     Ok(serde_json::json!({ "success": true }))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// 一次性沙箱：唯一命名 + 结束自删（不得碰真实数据目录）
+    fn sandbox(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trim-realtime-test-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn put(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(b"{}").unwrap();
+        p
+    }
+
+    #[test]
+    fn 报告龄期判定取不到时间戳时不过期() {
+        let ttl = 7 * 24 * 60 * 60 * 1000;
+        assert!(report_expired(Some(0), ttl * 3, ttl));
+        assert!(!report_expired(Some(ttl * 3 - 1000), ttl * 3, ttl));
+        assert!(
+            !report_expired(None, ttl * 3, ttl),
+            "mtime 取不到按不过期处理：误删报告比留一个文件代价高"
+        );
+    }
+
+    /// 审查 v2-L13：TTL 回收必须真的动文件（旧实现只在 save/list 两个入口被动触发）
+    #[test]
+    fn 过期报告被回收而新鲜件与非报告件不动() {
+        let dir = sandbox("reports");
+        let old = put(&dir, "realtime-old.json");
+        let fresh = put(&dir, "realtime-fresh.json");
+        let other = put(&dir, "keep.txt");
+        // 把 old 的时间戳推到 2020-01-01（沙箱内文件）
+        let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800))
+            .unwrap();
+        drop(f);
+        let removed = prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS);
+        assert_eq!(removed, 1);
+        assert!(!old.exists(), "超过 7 天的报告必须被回收");
+        assert!(fresh.exists() && other.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

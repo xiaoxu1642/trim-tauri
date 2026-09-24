@@ -71,6 +71,25 @@ struct SnapEntry {
     /// 空目录标记（删除前需做「是否已不再为空」复检）
     empty: bool,
     ts: i64,
+    /// 审查 v2-M5：**仅当**该条目的路径名无法无损表示成文本（含孤立代理项，
+    /// `unix_path` 已把它换成 U+FFFD）时，登记原生侧交来的 `OsString` 真身。
+    /// 正常机器上这张登记恒为 `None`，不额外占内存。
+    raw: Option<OsString>,
+}
+
+impl SnapEntry {
+    /// 删除/预检真正作用的目标。
+    /// 根因：`path` 字段是 lossy 后的展示串，`OsString::from(path)` 得到的是
+    /// **另一个**可能的路径 —— 既可能指向一个恰好用 U+FFFD 命名的真实文件（删错对象），
+    /// 也可能谁都指不到（预检恒判 NotFound，却仍回 `success:true`）。
+    fn target(&self) -> OsString {
+        self.raw.clone().unwrap_or_else(|| OsString::from(self.path.as_str()))
+    }
+
+    /// 文本形态是否丢了信息（决定这一项能不能被安全删除）
+    fn is_lossy(&self) -> bool {
+        self.raw.is_some()
+    }
 }
 
 /// label -> (规范化小写路径 -> 条目)。Electron 用 Map（插入序 + 按 ts 清理）；
@@ -81,8 +100,15 @@ fn snapshots() -> &'static Mutex<HashMap<String, HashMap<String, SnapEntry>>> {
     SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 结果写入本窗口快照槽（累积合并，不整体重置——对齐 FD-7）。返回槽内条目数。
-fn store_snapshot(label: &str, items: &[Value], ts: i64) -> usize {
+/// 结果写入本窗口快照槽（累积合并，不整体重置——对齐 FD-7）。
+/// `raws` = 原生侧登记的「展示串键 → 路径真身」，只装 lossy 的那批（见 `ScanTally::raws`）。
+/// 返回槽内条目数。
+fn store_snapshot(
+    label: &str,
+    items: &[Value],
+    raws: &HashMap<String, OsString>,
+    ts: i64,
+) -> usize {
     let mut store = snapshots().lock().unwrap_or_else(|e| e.into_inner());
     let slot = store.entry(label.to_string()).or_default();
     for item in items {
@@ -91,8 +117,19 @@ fn store_snapshot(label: &str, items: &[Value], ts: i64) -> usize {
         };
         // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记
         let t = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let key = path_key(p);
+        // 审查 v2-M5：两条**不同**的原生路径 lossy 后可能塌成同一个展示串（不同的孤立
+        // 代理项都被换成同一个 U+FFFD，或一条真名里就带 U+FFFD、另一条是被替换出来的）。
+        // 展示串相同但真身不同就是无从区分 —— 保留先到的一条、不覆盖（覆盖等于把另一次
+        // 删除的目标悄悄换掉），计数已在 `ScanTally::ingest` 里做过。
+        let raw = raws.get(&key).cloned();
+        if let Some(exist) = slot.get(&key) {
+            if exist.raw != raw {
+                continue;
+            }
+        }
         slot.insert(
-            path_key(p),
+            key,
             SnapEntry {
                 path: p.to_string(),
                 kind: if t == "emptyfolder" || t == "appdata" {
@@ -102,6 +139,7 @@ fn store_snapshot(label: &str, items: &[Value], ts: i64) -> usize {
                 },
                 empty: t == "emptyfolder",
                 ts,
+                raw,
             },
         );
     }
@@ -179,46 +217,135 @@ fn path_key(p: &str) -> String {
 
 // ==================== 输出汇聚器（Sink） ====================
 
+/// 一次扫描的**接收端累加**（与窗口无关，所以能被 `cargo test` 直测；
+/// `FinderSink` 只是给它套上 emit 的外壳）。
+#[derive(Default)]
+struct ScanTally {
+    items: Mutex<Vec<Value>>,
+    /// 审查 v2-M5：`path_key(展示串) → 原生路径真身`。
+    /// 只登记「文本形态确实丢了信息」的条目（`trim_finder::util::has_lossy_path`），
+    /// 正常机器上这张表恒空，不给快照另添一份内存开销。
+    raws: Mutex<HashMap<String, OsString>>,
+    /// 审查 M8：原生侧每有一条 `warn`（打不开的目录、被跳过的项…）与每一条**畸形行**计一次。
+    /// 目的不是统计，而是让渲染层能区分「真的没有重复文件」与「没权限看所以什么都没列出来」——
+    /// 旧实现两者都回 `success:true, data:[]`，用户完全无从判断。
+    errors: std::sync::atomic::AtomicU64,
+    /// 审查 M7：结果是否因条目上限被截断（原生侧 `Sink::truncated` 通知）
+    truncated: std::sync::atomic::AtomicBool,
+    /// 畸形行数（`errors` 的一部分，单独留出来只为写日志时说得清是哪类问题）
+    malformed: std::sync::atomic::AtomicUsize,
+    /// 只留第一条畸形原因：畸形内容本身可能是任意长文本，不照抄进日志
+    first_malformed: Mutex<Option<String>>,
+    /// 因文件名无法无损表示而**不能删**的条目数（审查 v2-M5，渲染层据此说人话）
+    unhandled: std::sync::atomic::AtomicUsize,
+}
+
+impl ScanTally {
+    /// 收一行 `@@ITEM@@{json}`。
+    /// · 非 `@@ITEM@@` 前缀 → 按既有口径忽略（与 `runRustScanner` 对齐，CLI 才有别的行）
+    /// · 前缀对但解析失败/缺 `path` → **计数**（审查 v2-M4：静默丢弃等于把「行协议被畸形
+    ///   输入打破」伪装成「什么都没扫到」，两者在 UI 上必须是两句话）
+    /// · 带原生路径 → lossy 条目登记真身，供删除时按它取目标（审查 v2-M5）
+    fn ingest(&self, raw: Option<&std::path::Path>, line: &str) {
+        let Some(rest) = line.strip_prefix("@@ITEM@@") else {
+            return;
+        };
+        let v: Value = match serde_json::from_str(rest.trim()) {
+            Ok(v) => v,
+            Err(e) => return self.count_malformed(&format!("@@ITEM@@ 行解析失败: {e}")),
+        };
+        let Some(p) = v.get("path").and_then(|x| x.as_str()) else {
+            return self.count_malformed("@@ITEM@@ 行缺少 path 字段");
+        };
+        if let Some(rp) = raw {
+            if trim_finder::util::has_lossy_path(rp) {
+                self.note_lossy(path_key(p), rp.as_os_str().to_os_string());
+            }
+        }
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).push(v);
+    }
+
+    /// 审查 v2-M5：登记一条「展示串已丢信息」的条目，并给出**去重后**的 unhandled 计数。
+    /// · 同一个无法表示的路径被重复输出（duplicates 里既进 emptyfile 又进组）只算一项；
+    /// · 两条不同真身塌进同一个展示串 ⇒ 后者永远定位不到，也算一项。
+    fn note_lossy(&self, key: String, os: OsString) {
+        use std::collections::hash_map::Entry;
+        let mut g = self.raws.lock().unwrap_or_else(|e| e.into_inner());
+        match g.entry(key) {
+            Entry::Occupied(v) => {
+                if v.get() != &os {
+                    self.unhandled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(os);
+                self.unhandled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn count_malformed(&self, reason: &str) {
+        self.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.malformed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            *self.first_malformed.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(reason.chars().take(200).collect());
+        }
+    }
+
+    fn take_items(&self) -> Vec<Value> {
+        std::mem::take(&mut *self.items.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn take_raws(&self) -> HashMap<String, OsString> {
+        std::mem::take(&mut *self.raws.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn snapshot(&self) -> TallyReport {
+        TallyReport {
+            errors: self.errors.load(std::sync::atomic::Ordering::Relaxed),
+            truncated: self.truncated.load(std::sync::atomic::Ordering::Relaxed),
+            malformed: self.malformed.load(std::sync::atomic::Ordering::Relaxed),
+            first_malformed: self
+                .first_malformed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            unhandled: self.unhandled.load(std::sync::atomic::Ordering::Relaxed) as u64,
+        }
+    }
+}
+
+/// `ScanTally` 的汇总回执（一次扫描结束后交给渲染层与日志的元数据）
+struct TallyReport {
+    errors: u64,
+    truncated: bool,
+    malformed: usize,
+    first_malformed: Option<String>,
+    unhandled: u64,
+}
+
 /// `trim_finder::scan` 的输出汇聚器实现体。
-/// - `item`：只收 `@@ITEM@@` 行（剥前缀后解析），其余行忽略——与 `runRustScanner` 同口径
+/// - `item`：收 `@@ITEM@@` 行并解析（含原生路径登记），其余行忽略——与 `runRustScanner` 同口径
 /// - `progress`/`scanned`：改走 `finder:progress` 事件（删除通道不发，对齐 Electron 未传回调）
 /// - `warn`：写日志
 struct FinderSink<R: tauri::Runtime> {
     window: WebviewWindow<R>,
     /// None = 不向前端发事件（删除通道）
     scan_type: Option<String>,
-    items: Mutex<Vec<Value>>,
-    /// 审查 M8：原生侧每有一条 `warn`（打不开的目录、被跳过的项…）计一次。
-    /// 目的不是统计，而是让渲染层能区分「真的没有重复文件」与「没权限看所以什么都没列出来」——
-    /// 旧实现两者都回 `success:true, data:[]`，用户完全无从判断。
-    errors: std::sync::atomic::AtomicU64,
-    /// 审查 M7：结果是否因条目上限被截断（原生侧 `Sink::truncated` 通知）
-    truncated: std::sync::atomic::AtomicBool,
+    tally: ScanTally,
 }
 
 impl<R: tauri::Runtime> FinderSink<R> {
     fn for_scan(window: WebviewWindow<R>, scan_type: &str) -> Self {
-        Self {
-            window,
-            scan_type: Some(scan_type.to_string()),
-            items: Mutex::new(Vec::new()),
-            errors: std::sync::atomic::AtomicU64::new(0),
-            truncated: std::sync::atomic::AtomicBool::new(false),
-        }
+        Self { window, scan_type: Some(scan_type.to_string()), tally: ScanTally::default() }
     }
 
     fn for_delete(window: WebviewWindow<R>) -> Self {
-        Self {
-            window,
-            scan_type: None,
-            items: Mutex::new(Vec::new()),
-            errors: std::sync::atomic::AtomicU64::new(0),
-            truncated: std::sync::atomic::AtomicBool::new(false),
-        }
+        Self { window, scan_type: None, tally: ScanTally::default() }
     }
 
     fn take_items(&self) -> Vec<Value> {
-        std::mem::take(&mut *self.items.lock().unwrap_or_else(|e| e.into_inner()))
+        self.tally.take_items()
     }
 
     fn emit_progress(&self, payload: Value) {
@@ -228,13 +355,8 @@ impl<R: tauri::Runtime> FinderSink<R> {
 }
 
 impl<R: tauri::Runtime> Sink for FinderSink<R> {
-    fn item(&self, line: &str) {
-        let Some(rest) = line.strip_prefix("@@ITEM@@") else {
-            return;
-        };
-        if let Ok(v) = serde_json::from_str::<Value>(rest.trim()) {
-            self.items.lock().unwrap_or_else(|e| e.into_inner()).push(v);
-        }
+    fn item(&self, path: &std::path::Path, line: &str) {
+        self.tally.ingest(Some(path), line);
     }
 
     fn progress(&self, n: u64) {
@@ -250,12 +372,12 @@ impl<R: tauri::Runtime> Sink for FinderSink<R> {
     }
 
     fn warn(&self, msg: &str) {
-        self.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.tally.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         log::write_log("warn", msg);
     }
 
     fn truncated(&self) {
-        self.truncated.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.tally.truncated.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -363,13 +485,12 @@ pub async fn finder_scan<R: tauri::Runtime>(
             _ => scan::appdata(min_size_mb_arg, &sink),
         }
         // 审查 M8：把「受限结果」的元数据一并交回，别只交 items
-        let errors = sink.errors.load(std::sync::atomic::Ordering::Relaxed);
-        let truncated = sink.truncated.load(std::sync::atomic::Ordering::Relaxed);
-        (sink.take_items(), errors, truncated)
+        let report = sink.tally.snapshot();
+        (sink.tally.take_items(), sink.tally.take_raws(), report)
     })
     .await;
 
-    let (items, errors, truncated) = match scanned {
+    let (items, raws, report) = match scanned {
         Ok(v) => v,
         Err(e) => {
             log::write_log("error", &format!("finder {scan_type} 失败: {e}"));
@@ -377,19 +498,40 @@ pub async fn finder_scan<R: tauri::Runtime>(
         }
     };
 
-    let slot_size = store_snapshot(&label, &items, crate::engine::now_ms());
+    let slot_size = store_snapshot(&label, &items, &raws, crate::engine::now_ms());
+    let unhandled = report.unhandled;
+    // 畸形行要在日志里单说一句：`errors` 同时装着「读不到的目录」和「解析不了的行」，
+    // 这两类问题的处置方式完全不同（审查 v2-M4）
+    if report.malformed > 0 {
+        log::write_log(
+            "warn",
+            &format!(
+                "finder {scan_type} 有 {} 行输出无法解析（未计入结果，首条原因：{}）",
+                report.malformed,
+                report.first_malformed.unwrap_or_default()
+            ),
+        );
+    }
     log::write_log(
         "info",
         &format!(
-            "finder {scan_type} 完成: {} 项（快照槽 {} 条，告警 {errors} 条{}）",
+            "finder {scan_type} 完成: {} 项（快照槽 {} 条，告警 {} 条{}{}）",
             items.len(),
             slot_size,
-            if truncated { "，已截断" } else { "" }
+            report.errors,
+            if report.truncated { "，已截断" } else { "" },
+            if unhandled > 0 { format!("，{unhandled} 项文件名无法无损处理") } else { String::new() }
         ),
     );
-    // `errors`/`truncated` 是给渲染层的判据：空结果 + errors>0 要说「有 N 处没能读到」，
-    // 而不是「没有重复文件」（B2 禁吞异常伪装空结果）。
-    json!({ "success": true, "data": items, "errors": errors, "truncated": truncated })
+    // `errors`/`truncated`/`unhandled` 是给渲染层的判据：空结果 + errors>0 要说「有 N 处没能读到」，
+    // 而不是「没有重复文件」（B2 禁吞异常伪装空结果）；unhandled 则要说「N 项因文件名无法处理」。
+    json!({
+        "success": true,
+        "data": items,
+        "errors": report.errors,
+        "truncated": report.truncated,
+        "unhandled": unhandled
+    })
 }
 
 // ==================== finder:delete ====================
@@ -437,9 +579,20 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
     }
 
     // 删除前预检（FD-4）：目标不存在/类型不符/空目录已非空 → 跳过
+    // 审查 v2-M5：一律以 `it.target()`（原生侧交来的路径真身）为预检与删除对象，
+    // 不再 `OsString::from(it.path)` —— 展示串是 lossy 后的文本，重建出来的可能是
+    // 另一个真实存在的路径（删错对象），也可能谁都指不到（恒判 NotFound 却仍回 success:true）。
     let mut preflight: Vec<SnapEntry> = Vec::new();
+    let mut unhandled = 0usize;
     for it in &valid_safe {
-        match std::fs::metadata(&it.path) {
+        // 文件名无法无损表示 ⇒ 保护清单判定（按字符串比对）不可靠，宁可不删也要明说
+        if it.is_lossy() {
+            unhandled += 1;
+            log::write_log("warn", &format!("finder 删除预检: 文件名无法无损处理，未删除 -> {}", it.path));
+            continue;
+        }
+        let target = it.target();
+        match std::fs::metadata(&target) {
             Ok(md) => {
                 if it.kind == "dir" && !md.is_dir() {
                     continue; // 类型不符：跳过
@@ -450,7 +603,7 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
                 // TOCTOU 剩留场景：「扫描时空、删除时已非空」的目标跳过，
                 // 防止把扫描后新放入的内容整棵连进回收站
                 if it.empty && it.kind == "dir" {
-                    let child_count = std::fs::read_dir(&it.path).map(|r| r.count()).unwrap_or(0);
+                    let child_count = std::fs::read_dir(&target).map(|r| r.count()).unwrap_or(0);
                     if child_count > 0 {
                         log::write_log(
                             "warn",
@@ -478,7 +631,7 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
             "success": true,
             "data": {
                 "totalFreed": 0, "success": 0, "failed": 0,
-                "skipped": valid_safe.len(), "recycled": 0,
+                "skipped": valid_safe.len(), "recycled": 0, "unhandled": unhandled,
                 "details": [], "manifestPath": null
             }
         });
@@ -489,7 +642,7 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
 
     let pairs: Vec<(String, OsString)> = preflight
         .iter()
-        .map(|it| (if it.kind == "dir" { "dir".to_string() } else { "file".to_string() }, OsString::from(it.path.clone())))
+        .map(|it| (if it.kind == "dir" { "dir".to_string() } else { "file".to_string() }, it.target()))
         .collect();
     // 保护清单注入原生删除侧（三端同源：JS 判定 / 原生删除 / PS 执行）
     let protect_json = protect::protected_roots_json();
@@ -525,9 +678,15 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
             }
         } else {
             failed += 1;
+            // 原生删除侧也有一道同名闸门（文件名无法无损表示 ⇒ 保护清单判定不可靠）；
+            // 走到这里说明主侧漏判，仍要计进 unhandled 而不是只算「失败」
+            if d.get("mode").and_then(|m| m.as_str()) == Some("unrecoverable-name") {
+                unhandled += 1;
+            }
         }
     }
-    // skipped = 未被原生侧处理（预检剔除 + 未出结果行）的数量
+    // skipped = 未被原生侧处理（预检剔除 + 未出结果行）的数量；unhandled 是其中说得出
+    // 原因的那部分（审查 v2-M5），渲染层据此讲「N 项因文件名无法处理而未删」。
     let skipped = valid_safe.len().saturating_sub(success + failed);
 
     // 删除清单：成功项落盘（误删追溯的唯一凭据）
@@ -557,7 +716,7 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
     log::write_log(
         "info",
         &format!(
-            "finder 删除完成: 成功 {success}（回收站 {recycled}）失败 {failed} 释放 {total_freed} 字节{manifest_note}"
+            "finder 删除完成: 成功 {success}（回收站 {recycled}）失败 {failed} 跳过 {skipped}（其中 {unhandled} 项文件名无法无损处理）释放 {total_freed} 字节{manifest_note}"
         ),
     );
     // success 语义 = 「通道执行成功」，不是「全部删除成功」（任一失败即丢整批会让 UI 错报）
@@ -568,6 +727,7 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
             "success": success,
             "failed": failed,
             "skipped": skipped,
+            "unhandled": unhandled,
             "recycled": recycled,
             "details": details,
             "manifestPath": manifest_path
@@ -714,4 +874,112 @@ fn resolve_existing_dirs(list: &[String]) -> (Vec<String>, Vec<String>) {
         }
     }
     (found, missing)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 构造一条 `@@ITEM@@` 行（`path` 字段按扫描输出的正斜杠形态）
+    fn item_body(display_path: &str) -> String {
+        format!("{{\"type\":\"emptyfile\",\"path\":\"{display_path}\",\"size\":0}}")
+    }
+
+    fn item_line(display_path: &str) -> String {
+        format!("@@ITEM@@{body}\n", body = item_body(display_path))
+    }
+
+    /// 审查 v2-M4：畸形行**不得静默丢弃**。原实现 `if let Ok(v) = …` 没有 else 分支，
+    /// 于是「行协议被畸形输入打破」在渲染层长成「什么都没扫到」——与 B2 直接冲突。
+    #[test]
+    fn tally_counts_malformed_lines_instead_of_dropping_them() {
+        let t = ScanTally::default();
+        t.ingest(None, "@@PROGRESS:50@@"); // 非 item 行：按既有口径忽略、不计数
+        t.ingest(None, "@@ITEM@@{\"type\":\"bigfile\""); // 括号不完整
+        t.ingest(None, "@@ITEM@@{\"type\":\"bigfile\",\"size\":1}"); // 缺 path
+        t.ingest(None, &item_line("C:/ok/a.txt")); // 正常
+        let items = t.take_items();
+        assert_eq!(items.len(), 1, "只有合法行进结果");
+        let r = t.snapshot();
+        assert_eq!(r.malformed, 2, "两条畸形都要计数");
+        assert_eq!(r.errors, 2, "畸形计数要并入 errors（渲染层已有那条提示）");
+        assert!(r.first_malformed.is_some(), "日志里要留得下第一条原因");
+        assert!(!r.truncated);
+    }
+
+    /// 审查 v2-M4 的另一半：缺 `path` 的行不能进结果集，但也不能无声消失。
+    #[test]
+    fn tally_keeps_the_first_malformed_reason_only() {
+        let t = ScanTally::default();
+        t.ingest(None, "@@ITEM@@[1,2,3]"); // 能解析但不是带 path 的对象 ⇒ 无法定位
+        t.ingest(None, "@@ITEM@@{{{{");
+        let r = t.snapshot();
+        assert_eq!(r.malformed, 2);
+        assert!(t.take_items().is_empty(), "坏行不得混进结果");
+        assert!(r.first_malformed.unwrap().contains("path"), "第一条原因应是缺 path");
+    }
+
+    /// 审查 v2-M5：登记的是「文本形态确实丢了信息」的条目，且按展示串键去重。
+    /// 正常机器上这张表必须恒空 —— 否则等于给每次扫描多养一份全量路径表。
+    #[test]
+    fn tally_registers_nothing_for_lossless_paths() {
+        let t = ScanTally::default();
+        let good = PathBuf::from(r"C:\Users\me\照片 🎯.txt");
+        t.ingest(Some(&good), &item_line(&trim_finder::util::unix_path(&good)));
+        assert!(t.take_raws().is_empty(), "无损名字不需要另登记真身");
+        assert_eq!(t.snapshot().unhandled, 0, "也不该计入「无法处理」");
+    }
+
+    /// 审查 v2-M5：删除目标必须是原生侧交来的 `OsString`。
+    /// 拿 lossy 展示串重建会得到**另一个**路径 —— 既可能删不到，也可能删掉一个
+    /// 恰好用 U+FFFD 命名的无关文件。这里同时钉住「键位冲突不覆盖」与「去重计数」。
+    #[cfg(windows)]
+    #[test]
+    fn lossy_paths_keep_their_native_target_and_do_not_clobber_each_other() {
+        use std::os::windows::ffi::OsStringExt;
+        // 两条不同的孤立代理项名字，lossy 后塌成同一个展示串
+        let a = PathBuf::from(OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD800, 0x61]));
+        let b = PathBuf::from(OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD801, 0x61]));
+        let disp_a = trim_finder::util::unix_path(&a);
+        let disp_b = trim_finder::util::unix_path(&b);
+        assert_eq!(disp_a, disp_b, "用例前提：两条路径的展示串确实撞了");
+
+        let t = ScanTally::default();
+        t.ingest(Some(&a), &item_line(&disp_a));
+        t.ingest(Some(&b), &item_line(&disp_b));
+        let raws = t.take_raws();
+        assert_eq!(
+            raws.get(&path_key(&disp_a)),
+            Some(&a.as_os_str().to_os_string()),
+            "保留先到的一条真身（后到的无从定位，不得覆盖）"
+        );
+        assert_eq!(t.snapshot().unhandled, 2, "两条都得计入「无法处理」：一条登记、一条被冲突挤掉");
+
+        let items = vec![
+            // `item_line` 是**行协议**（带 `@@ITEM@@` 前缀与换行），JSON 解析要吃的是 `item_body`
+            serde_json::from_str::<Value>(&item_body(&disp_a)).unwrap(),
+            serde_json::from_str::<Value>(&item_body(&disp_b)).unwrap(),
+        ];
+        let label = "test-lossy-collision";
+        let slot_size = store_snapshot(label, &items, &raws, 1);
+        assert_eq!(slot_size, 1, "同一键位只留一条");
+        let stored = snapshots().lock().unwrap_or_else(|e| e.into_inner());
+        let entry = stored.get(label).and_then(|m| m.get(&path_key(&disp_a))).expect("条目应在槽内");
+        assert_eq!(entry.target(), a.as_os_str().to_os_string(), "预检/删除必须打到原生真身上");
+        assert!(entry.is_lossy());
+    }
+
+    /// 快照命中判据（`path_key`）：分隔符、大小写、`\?\` 前缀、`.`/`..` 都要折叠掉，
+    /// 但组件边界不能被吞（`C:\AB` 不是 `C:\A` 的子项）。
+    #[test]
+    fn path_key_folds_forms_but_keeps_component_bounds() {
+        assert_eq!(path_key(r"\\?\C:\A\B"), path_key("c:/a/b"), "设备命名空间前缀要折掉");
+        // 单反斜杠的 `\?\…` **不是**设备前缀：它是「当前盘根下一个名为 ? 的目录」。
+        // 把它也当 `\\?\` 剥掉会让真实目录 `?\C:` 与设备路径互相别名 —— 快照键位是删除
+        // 与预检的命中判据，别名等于给"删哪个"开了口子，所以这里断言二者**不等**。
+        assert_ne!(path_key(r"\?\C:\A\B"), path_key(r"c:\a\b"));
+        assert_eq!(path_key(r"C:\A\B\..\C"), path_key("C:/A/C"));
+        assert_eq!(path_key("C:/A/B/"), path_key(r"c:\a\b"));
+        assert_ne!(path_key(r"C:\AB"), path_key(r"C:\A\B"));
+    }
 }

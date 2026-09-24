@@ -11,10 +11,10 @@
     return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   }
 
-  function escapeHtml(s) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(s == null ? '' : s).replace(/[&<>"']/g, m => map[m]);
-  }
+  // 审查 v2-L7：这里原本有**第二张转义表**（`'` → `&#039;`），与文件下方 ⑩ 的唯一真源
+  // `esc()`（`'` → `&#39;`）并存 —— 字符集相同、解码结果相同，但 §2 要的是「一张表」。
+  // 两份表并存的下场是「改一处漏一处」：某次给 esc 加字符，badgeHtml/menu 不会跟着变。
+  // 现在 ds.js 内部也一律走 esc()（函数声明提升，调用点都在 IIFE 执行完之后，无前向引用问题）。
 
   // ---------- ① Badge ----------
   // 语义类型 → ds.css 变体类；文本经 textContent/转义，防注入。
@@ -35,7 +35,7 @@
 
   function badgeHtml(type, text, { dotless = false, title = '', small = false } = {}) {
     const cls = 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (dotless ? ' dotless' : '') + (small ? ' sm' : '');
-    return `<span class="${cls}"${title ? ` data-tip="${escapeHtml(title)}"` : ''}>${escapeHtml(text)}</span>`;
+    return `<span class="${cls}"${title ? ` data-tip="${escAttr(title)}"` : ''}>${esc(text)}</span>`;
   }
 
   // ---------- ② Progress ----------
@@ -264,7 +264,7 @@
       pop.innerHTML = current.map(it => `
         <button type="button" class="ds-menu-item${it.danger ? ' danger' : ''}"
           role="menuitem" ${it.disabled ? 'aria-disabled="true"' : ''}
-          data-menu-value="${escapeHtml(String(it.value == null ? '' : it.value))}">${escapeHtml(it.label)}</button>`).join('');
+          data-menu-value="${esc(String(it.value == null ? '' : it.value))}">${esc(it.label)}</button>`).join('');
       document.body.appendChild(pop);
       const r = trigger.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
@@ -443,6 +443,49 @@
   ds.esc = esc;
   ds.escAttr = escAttr;
   ds.fmtBytes = fmtBytes;
+
+  // ---------- ⑪ 全局未处理 rejection 兜底（审查 v2-M22）----------
+  // 为什么真源在 ds 而不是 app.js：兜底此前只在 app.js 里有一份，而 **app.js + logger.js
+  // 只有主窗 index.html 加载**——四个子窗（preview / models / processManager / peripheral）
+  // 一条 rejection 监听都没有，任何漏 catch 的异步调用在子窗里既不留痕也不报错。
+  // AGENTS §2 已把「子窗必须挂 ds.css + ds.js」钉成硬线，所以 ds.js 是唯一能同时到达
+  // 五个窗口的落点；再往各窗脚本里各写一份，等于回到「漏窗」的原点。
+  // 落盘路径按窗口分档，两档都走**已有**通道，不开新 IPC：
+  //   · 主窗：window.logger.write（logger.js 已在，行为与此前 app.js 那份完全一致）；
+  //   · 子窗：window.api.log.write —— log_write 命令体是 guard_readonly 档，五个 label 全放行，
+  //     所以子窗写得进去；写失败只能 console，**这里再挂 .catch 兜自己**，
+  //     否则兜底本身制造一条新 rejection（自我放大）。
+  // 只记日志、不弹 toast：后台噪声糊到用户脸上是另一种体验事故；
+  // 该给用户看错的调用点各自补显式 catch（v2-M22 ① 已逐个补）。
+  // 防双写：window.__dsErrGuard 是认领标记，主窗 app.js 见到就不再重复注册
+  // ——ds.js 在 index.html 里先于 app.js 加载（§2 的加载序），所以主窗走的就是这一份。
+  function describeReason(reason) {
+    if (reason && reason.message) return String(reason.message);
+    if (typeof reason === 'object' && reason !== null) {
+      try { return JSON.stringify(reason); } catch (_) { return String(reason); }
+    }
+    return String(reason);
+  }
+
+  function installErrorGuard() {
+    if (window.__dsErrGuard) return;               // 已有兜底（理论上不会发生，防重入）
+    window.__dsErrGuard = true;
+    window.addEventListener('unhandledrejection', (event) => {
+      const text = describeReason(event && event.reason);
+      console.error('[Trim] 未处理的 Promise 拒绝:', event && event.reason);
+      try {
+        if (window.logger && typeof window.logger.write === 'function') {
+          window.logger.write('error', '未处理的 Promise 拒绝: ' + text);
+        } else if (window.api && window.api.log && typeof window.api.log.write === 'function') {
+          // 子窗没有 logger.js（那是主窗日志页的渲染层件），直连 log:write 通道
+          Promise.resolve(window.api.log.write('error', '未处理的 Promise 拒绝: ' + text)).catch(() => {});
+        }
+      } catch (_) { /* 兜底路径自身不得再抛：落不了盘至少 console 已经留了 */ }
+    });
+  }
+
+  installErrorGuard();
+  ds.installErrorGuard = installErrorGuard;         // 供未来新增窗口显式调用（幂等）
 
   // 自动初始化（裸 range 接管 + 横向滚动容器滚轮映射）
   const boot = () => { initSliders(document); hWheelAll(document); };

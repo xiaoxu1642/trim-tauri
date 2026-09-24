@@ -133,7 +133,7 @@
                          value="${escapeAttr(cfg.apiKey || '')}" placeholder="请输入密钥（默认留空，保存后校验通过方可启用）" autocomplete="off" />
                   <button class="btn btn-secondary btn-small" data-role="toggleKey" data-model="${key}" type="button">显示</button>
                 </div>
-                <span class="mw-field-tip">密钥仅保存在本机 %APPDATA%\\Trim\\settings.json，不会写入日志；留空保存时不会发起校验</span>
+                <span class="mw-field-tip">密钥仅保存在本机的应用数据目录内，不会写入日志；留空保存时不会发起校验</span>
               </div>
             </div>
             ${isBaiduPro ? `
@@ -321,8 +321,13 @@
   }
 
   function closeWindow() {
-    if (window.api?.modelsWindow?.close) window.api.modelsWindow.close();
-    else window.close();
+    // 审查 v2-M22（v1 L13 未修）：关窗是浮动 Promise，子窗此前一条 rejection 监听都没有
+    // —— 失败时窗口留着、界面什么都不说。出口动作必须给可见回执。
+    if (window.api?.modelsWindow?.close) {
+      window.api.modelsWindow.close().catch((e) => toast('error', '关闭窗口失败：' + ((e && e.message) || e)));
+    } else {
+      window.close();
+    }
   }
 
   // 恒浅色（v2.1：应用固定浅色，不再跟随系统主题；v2.8.0 清理死代码不再 remove theme-dark）

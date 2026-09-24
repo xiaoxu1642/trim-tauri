@@ -274,7 +274,7 @@
           </div>`,
       footerClass: 'pw-footer',
       footerHtml: `
-          <span class="pw-last-scan">配置保存在本机 %APPDATA%\\Trim\\settings.json</span>
+          <span class="pw-last-scan">配置保存在本机的应用数据目录内（v2-M21：原先写死的 %APPDATA%\\Trim 是 Electron 轨路径）</span>
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary" data-role="resetBtn" type="button">恢复默认</button>
           <button class="btn btn-primary" data-role="applyBtn" type="button">应用</button>`,

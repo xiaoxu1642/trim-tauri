@@ -27,7 +27,8 @@
     const viewer = logViewer();
     if (!viewer) return;
     if (!window.api?.log) {
-      viewer.innerHTML = '<div class="empty-state"><p>日志功能仅在 Electron 环境中可用</p></div>';
+      // v2-M21：`log:*` 通道在本轨存在，走到这里说明桥未就绪，不是"Electron 才有"
+      viewer.innerHTML = '<div class="empty-state"><p>日志未能加载：本地接口未就绪（window.api 缺失），请重启应用后再试</p></div>';
       return;
     }
     try {
@@ -57,7 +58,7 @@
 
   async function exportLog() {
     if (!window.api?.log) {
-      window.app?.toast('error', '导出功能仅在 Electron 环境中可用');
+      window.app?.toast('error', '导出失败：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
       return;
     }
     const result = await window.api.log.export();

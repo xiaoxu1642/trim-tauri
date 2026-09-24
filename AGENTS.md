@@ -31,7 +31,9 @@ Trim = Windows 11 清理优化工具的 **Tauri v2 + Rust** 实现（前端为�
 
 Electron 时代的 `handleSafe/onSafe` 在 Rust 侧对应三层，**新增通道三层都要落**：
 
-1. **`capabilities/default.json`** —— 窗口能力与事件权限白名单。
+1. **`capabilities/*.json`** —— **窗口/事件/插件**能力面白名单（管 `plugin:window|event|webview` 这类插件能力）。
+   审查 v2-L1 实测：**0/139 条应用命令受这里约束**，所以它**不是命令级闸门**——命令级的真闸门是下面第 2 层。
+   把层 1 当"能不能调某条命令"的依据会判错。
 2. **命令内显式来源校验** —— 两档：`guard(&window, guard::MAIN)`（主窗专属）与 `guard_readonly(&window)`（**放行 `APP_WINDOWS` 全部五个窗口 label**，含四个子窗）。名字里的 readonly 是 Electron `handleSafe` 只读白名单的历史叫法，**它不代表「只读」也不代表「主窗」**——别按字面理解成安全档位；真正的读/写差异在命令体内。多窗口应用**不能裸注册命令**：子窗口一旦被注入，裸注册就让它能调主窗专属高危通道。
 3. **渲染层 `src/scripts/tauri-api.js` 的 `CHANNEL_MAP`** —— 通道名→命令名的唯一真源，兼作 preload 白名单。
 
@@ -40,8 +42,14 @@ Electron 时代的 `handleSafe/onSafe` 在 Rust 侧对应三层，**新增通道
 - 新增 `#[tauri::command]` 必须同步：`lib.rs` 的 `generate_handler!` 注册 + `CHANNEL_MAP` 条目。少一处，`tools/check-channel-map.mjs` 的 D1/D2/D3 断言会红。
 - **档位以「谁真的需要调它」为准，写错方向会锁死功能**（审查 M1~M3 的教训）：`peripheral_apply`/`peripheral_restore_backup`/`fileclean_delete_file` 是 `APP_WINDOWS` 档——唯一调用方就是子窗口，按 `MAIN` 校验等于让功能 100% 不可用；它们各自的真闸门是 `is_admin()`+取值白名单、以及**扫描槽 `in_scope`**（子窗经 `fileclean::scope_owner` 读的是主窗那次扫描的集合，不是任意路径）。**新增子窗专属通道时同样按这条判，别照抄 `MAIN`**；反之 `elevate_request` 等高危及主窗专属通道**不得**下放（回归网：`tests/ipc_smoke.rs` 末尾「子窗口来源校验档位」一组）。
 - **不要**再往 `window` 上挂任何能直调命令的原始入口（历史上 `__trimSpike.raw = invokeCore` 就是这种东西，会绕过 `window.api` 白名单调任意命令，已删，别加回来）。
-- 删除一律回收站优先：`trim_finder::scan::recycle::send_to_trash`，且先过 `engine::protect::is_path_protected`。**不做永久删除兜底**（上游 Electron 版在回收站失败时会永久删，这是刻意收紧的差异）。
-- 写 JSON 走 `security::atomic_write_json`；配置损坏先 `quarantine_file`；临时脚本只写应用私有 tmp 目录（ACL 保护，不用全局可写的 `%TEMP%`，提权场景有 TOCTOU 提权窗口）。
+- **除「常规清理项」外一律回收站优先**：走 `trim_finder::scan::recycle::send_to_trash`，且先过
+  `engine::protect::is_path_protected`；**不做永久删除兜底**（上游 Electron 版在回收站失败时会永久删，
+  这是刻意收紧的差异）。**唯一例外**是常规清理（`cleanup_execute` 那条链）：按 v3.3.0 用户裁定固定为
+  「不进回收站、直接永久删」，`toRecycle` 因此恒为 `false`、`cleanup.rs` 的回收站支对该链不可达——
+  这是产品语义而非失控回归，改它要先重新拍板（审查 v2-M20）。
+- 写 JSON 走 `security::atomic_write_json`；配置损坏先 `quarantine_file`；临时脚本只写应用私有 tmp 目录
+  （保护来自 `%APPDATA%` 的**每用户默认 DACL**，本函数自己不施加 ACL——审查 v2-L2 已把这句改准），
+  不用全局可写的 `%TEMP%`，提权场景有 TOCTOU 提权窗口。
 - 密钥不明文回渲染层（掩码常量见 `settings::SECRET_MASK`，掩码即视为未修改）；日志不落敏感信息，危险操作前 `log::flush_sync()`。
 - 提权入口 `elevate:request` 只认主窗口 label。
 
@@ -53,10 +61,17 @@ cargo check --all-targets        # 期望 0 错误 0 警告
 cargo test                       # 期望全绿（默认不跑 #[ignore]）
 cd ..
 node tools/check-channel-map.mjs --strict
-node tools/check-ps-extraction.mjs
+node tools/check-ps-extraction.mjs        # 默认只做文本层；行为层要显式 --run（v2-M18）
 node tools/check-ps-substitution.mjs
+node tools/check-data-parity.mjs          # 四组数据双源字段级对拍（v2-M17）
+node tools/check-assets-used.mjs          # 产物里的零引用资源即红（v2-L8）
+node tools/check-css-tokens.mjs           # 引用了未定义的自定义属性即红（v2-L6）
+node tools/check-optimizer-dynamic.mjs    # dynamic 项的 id⇄控件⇄参数三方对拍（v2-M10）
 node --check <每个改动的 .js>
 ```
+
+- 上面每条新门禁都要求**能判红**：新增断言后至少人为破坏一次、确认退出码非 0、再恢复。
+  只会打印 ✓ 的断言不算验收（本项目有"假绿"前科：v1 M13 / v2-M16 / check-optimizer-dynamic 自身）。
 
 - **渲染层改动必须真机看**：本项目**不使用 CDP**。验证手段只有 `cargo test`（`tauri::test` + MockRuntime，覆盖无窗口的命令逻辑）与应用内 DevTools 人工目检（覆盖真实 WebView、材质、事件投递、子窗口生命周期）。MockRuntime 覆盖不到的一律如实标注为未验证。
 - 调试启动用 `TRIM_DEV_NOACTIVATE=1`（窗口显示但不抢前台），发布链路不带该变量。

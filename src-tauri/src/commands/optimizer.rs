@@ -537,6 +537,12 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         "success": true,
         "items": items,
         "staleIds": stale_ids,
+        // 审查 v2-M14：**这是未移植的空桩**，不是"本轮没有需要还原的退役项"。
+        // Electron 轨靠 `version-migrations.js` 的 `runMigrations` 在启动时把已退役优化项
+        // （`src-tauri/data/retired-optimizations.json` 的 13 项）按 `optimizer-backups.json`
+        // 里的原值自动还原并清账；本轨 `grep retired` 实测 0 命中，所以从旧轨带来的备份记录
+        // 里属于退役项的那批**永不还原**、也无日志。字段留着是为了契约不破（渲染层按此弹 toast），
+        // 一旦移植就必须填真数据，别把空数组当"已实现"。彻底改法见审查报告 v2-M14。
         "migration": { "restored": [], "failed": [] },
         "detected": Value::Object(opt_state::detected_all())
     })
@@ -1075,6 +1081,40 @@ fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
     Some(targets)
 }
 
+/// [`insert_backup_baseline`] 的三种结果，第三态携带**已存在基线**的项数。
+#[derive(Debug)]
+enum BackupInsert {
+    Inserted,
+    KeptExisting(usize),
+    MapNotObject,
+}
+
+/// 登记值级备份：**已有记录就保留首份，绝不覆盖**。刻意保持纯函数（不打日志）——
+/// `log::write_log` 会排写入队并起后台 flush 线程，那样这条断言就得靠真实日志目录才能跑。
+///
+/// 审查 v2-M9：旧写法是 `map[id] = 当前值`，而渲染层每次执行前都会先调 `backup-reg`
+/// （`optimizer.js` 的 backupReg）⇒ 同一项**第二次**应用（改参数重跑、失败重试、批量再跑）
+/// 时，基线被「已优化后的值」覆盖，此后「还原」只能回到上一次优化的状态、**出厂原值永久丢失**；
+/// 更糟的是还原成功后还要 `remove` 掉那唯一一条记录。干净基线只有第一份，后续快照必须丢。
+fn insert_backup_baseline(map: &mut Value, option_id: &str, values: Vec<Value>) -> BackupInsert {
+    let Some(o) = map.as_object_mut() else {
+        return BackupInsert::MapNotObject;
+    };
+    if let Some(existing) = o.get(option_id) {
+        let n = existing
+            .get("values")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        return BackupInsert::KeptExisting(n);
+    }
+    o.insert(
+        option_id.to_string(),
+        json!({ "at": crate::engine::delete_manifest::iso_now(), "values": values }),
+    );
+    BackupInsert::Inserted
+}
+
 /// optimizer:backup-reg —— 执行前读取目标键值并存档
 #[tauri::command]
 pub async fn optimizer_backup_reg<R: Runtime>(
@@ -1099,18 +1139,25 @@ pub async fn optimizer_backup_reg<R: Runtime>(
         return json!({ "success": false, "message": "读取当前注册表值失败" });
     };
     let mut map = load_opt_backups();
-    if let Some(o) = map.as_object_mut() {
-        o.insert(
-            option_id.clone(),
-            json!({ "at": crate::engine::delete_manifest::iso_now(), "values": values }),
-        );
-    }
-    if !save_opt_backups(&map) {
+    let (count, kept) = match insert_backup_baseline(&mut map, &option_id, values.clone()) {
+        BackupInsert::Inserted => (values.len(), false),
+        // 已有基线：返回**首份**的项数并如实标注，且不重新落盘（内容没变）
+        BackupInsert::KeptExisting(n) => (n, true),
+        BackupInsert::MapNotObject => {
+            return json!({ "success": false, "message": "注册表备份文件结构异常" });
+        }
+    };
+    if !kept && !save_opt_backups(&map) {
         return json!({ "success": false, "message": "注册表备份文件写入失败" });
     }
-    let count = values.len();
-    log::write_log("info", &format!("优化项注册表备份完成: {option_id}（{count} 项）"));
-    json!({ "success": true, "count": count })
+    log::write_log(
+        "info",
+        &format!(
+            "优化项注册表{}: {option_id}（{count} 项）",
+            if kept { "已保留首份基线，未覆盖" } else { "备份完成" }
+        ),
+    );
+    json!({ "success": true, "count": count, "baselineKept": kept })
 }
 
 /// optimizer:restore-reg —— 按备份回写原值（不存在的键删除）
@@ -1438,13 +1485,12 @@ Write-Output ('@@SRPRE@@' + ({ globalDisabled = $gd; protectedVolumes = $vol.Cou
         match read_reg_values(&targets) {
             Some(values) => {
                 let mut map = load_opt_backups();
-                if let Some(o) = map.as_object_mut() {
-                    o.insert(
-                        "tf_restore_point".into(),
-                        json!({ "at": crate::engine::delete_manifest::iso_now(), "values": values }),
-                    );
-                }
-                if !save_opt_backups(&map) {
+                // v2-M9：这条也走「首份不覆盖」——同一项重复应用时不得把基线刷成已优化值
+                let inserted =
+                    matches!(insert_backup_baseline(&mut map, "tf_restore_point", values), BackupInsert::Inserted);
+                if !inserted {
+                    log::write_log("warn", "还原点频率覆写值级备份未写入（基线已存在或结构异常）");
+                } else if !save_opt_backups(&map) {
                     log::write_log("warn", "还原点频率覆写值级备份失败");
                 }
             }
@@ -1868,6 +1914,41 @@ mod tests {
 
     /// REG_BINARY 的 hex 串只允许 hex 数字与分隔逗号：畸形备份里的 `$`、反引号、换行
     /// 不得有变成语句的机会。
+    /// v2-M9：值级基线**只有第一份是干净的**。渲染层每次执行前都会先 backup-reg，
+    /// 所以「连拍两次（中间注册表已被改成优化值）」这条序列在真实使用中必然出现；
+    /// 旧写法无条件 insert 会让第二次快照覆盖出厂值，之后「还原」回到上一次优化状态。
+    #[test]
+    fn backup_baseline_never_overwritten() {
+        let mut map = json!({});
+        let factory = vec![json!({ "key": "X", "data": "出厂值" })];
+        assert!(matches!(
+            insert_backup_baseline(&mut map, "svc_mem_gb", factory.clone()),
+            BackupInsert::Inserted
+        ));
+
+        let optimized = vec![json!({ "key": "X", "data": "已优化值" })];
+        let again = insert_backup_baseline(&mut map, "svc_mem_gb", optimized);
+        assert!(matches!(again, BackupInsert::KeptExisting(1)), "{again:?}");
+        let stored = map["svc_mem_gb"]["values"].as_array().cloned().unwrap_or_default();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0]["data"], "出厂值",
+            "基线被第二次快照覆盖 ⇒ 出厂原值永久丢失"
+        );
+
+        // 不同项各自独立登记，互不干扰
+        assert!(matches!(
+            insert_backup_baseline(&mut map, "tf_defender", factory.clone()),
+            BackupInsert::Inserted
+        ));
+        // map 不是对象时不得静默当成「已登记」
+        let mut broken = json!([]);
+        assert!(matches!(
+            insert_backup_baseline(&mut broken, "x", factory),
+            BackupInsert::MapNotObject
+        ));
+    }
+
     /// v2-K3：闸门必须覆盖数据层自认 high 的**每一项**，而不是只覆盖手写清单登记的那几项。
     /// 断言写成「遍历数据层」，这样以后新增 risk=high 项而不进清单也不会漏。
     #[test]

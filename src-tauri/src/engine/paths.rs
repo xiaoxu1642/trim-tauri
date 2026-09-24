@@ -19,12 +19,15 @@ const PORTABLE_MARKER: &str = "Trim.portable";
 
 /// 从旧数据目录一次性搬迁的文件清单。
 /// 判据只有一条：**丢了用户就恢复不了 / 要重做** 的才进这里。
-/// - 前 7 项是 D5 原有清单（含 `Local State` = OSCrypt 主密钥载体）
+/// - 前 6 项是 D5 原有清单（含 `Local State` = OSCrypt 主密钥载体）—— 审查 v2-L10 订正计数：
+///   `checkup.json` 按判据移出后（M15），"前 7 项"这个数字就已经不对了，注释一直没跟着改
 /// - `update-mirror.json` = E 批 updater 的线路偏好
 /// - `optimizer-backups.json` = 优化项的**值级注册表备份**；不搬过去，「还原」就只能
 ///   退化成反向判据，原来那个具体值再也回不来了（用户改完 Defender/UAC 想还原会失败）
 /// - `bench-history.json` = 用户的历史测速/测速记录，重跑成本高且属个人数据
-/// 不进清单的：`checkup.json` 之类扫描缓存（可重扫，见下方 `scan_cache_file`）、`cache`（可再生）、
+/// 不进清单的：`checkup.json` 之类扫描缓存（可重扫，见下方 `scan_cache_file`）、
+/// `system-info.json`（同为缓存：`overview.rs` 首部就写明"首扫落盘、之后读缓存、
+/// `refresh=true` 强扫"，与刚移出的 `checkup.json` 同一判据）、`cache`（可再生）、
 /// `redist`（可重下）、`logs`/`tmp`（运行期产物）。
 const MIGRATION_FILES: &[&str] = &[
     "appearance.json",
@@ -33,7 +36,7 @@ const MIGRATION_FILES: &[&str] = &[
     // 审查 M15：`checkup.json` 原先在本清单里，而同一个文件块下方（`scan_cache_file`）
     // 就把体检结果定义为「可重扫的扫描缓存」—— 与上面「丢了就恢复不了」的判据自相矛盾。
     // 按判据移出：首次启动不带旧体检结果，用户重跑一次体检即可（只读、秒级）。
-    "system-info.json",
+    // 审查 v2-L10：`system-info.json` 与它同判据（可 `refresh=true` 重采），一并移出。
     "paths.json",
     "Local State",
     "update-mirror.json",
@@ -50,6 +53,15 @@ const MIGRATION_FILES: &[&str] = &[
 ///
 /// 不在列：contextmenu 的注册表备份 —— 实测 `ps/cm_backup.ps1` 写的是
 /// `%USERPROFILE%\Desktop\右键菜单备份_<时间戳>`，本来就在桌面、不随数据目录迁移。
+///
+/// ⚠️ 审查 v2-M19（一处承诺与事实的分叉，先如实记在这里，别再靠猜）：
+/// `startup-backup` / `peripheral-backup` 这几项目前是**一次性搬迁**——写侧仍在 PowerShell 里
+/// 硬编码 `%APPDATA%\Trim\*-backup`（`startup_*.ps1:37`、`peripheral_apply.ps1:19`、
+/// `cleanup_execute.ps1:706`、`memory_stubborn_block.ps1:40`），搬迁完成后新产生的备份依旧落在
+/// 老根，与这份清单**分叉**。读取侧做了「新根 + 老根」双候选（`startup.rs`、`peripheral.rs`、
+/// `pwsh/mod.rs` 的清理清单同口径），所以功能不断；但便携模式下这些备份不在 `data/` 里，
+/// readme 的承诺已按这条改写在"一处例外"里。彻底解法是把备份根由 Rust 算好后经
+/// `@@TRIM_…@@` 占位注入 `.ps1`（与 `@@TRIM_INSTALLER_PATH@@` 同一手法），改哪都只有一处真源。
 const MIGRATION_DIRS: &[&str] = &[
     "backgrounds",
     "fonts",
@@ -135,7 +147,13 @@ pub fn local_state_candidates() -> Vec<PathBuf> {
     ]
 }
 
-/// 临时脚本目录：%APPDATA%\<id>\tmp（当前用户 ACL 保护）。
+/// 临时脚本目录：%APPDATA%\<id>\tmp。
+///
+/// 审查 v2-L2 订正措辞：隔离度**不是本函数施加的** —— 全仓没有任何 ACL API 调用
+/// （`SetNamedSecurityInfo`/`CreateSecurityDescriptor` 实测 0 命中，`set_permissions`
+/// 在 Windows 上只能改只读位），实际保护来自 `%APPDATA%` 的**每用户默认 DACL**
+/// （只有当前用户与 SYSTEM 可写）。本函数只做两件事：建目录、拒把脚本写进被
+/// reparse（符号链接/联接点）替换过的目录。
 /// 不用 %TEMP%：那是全局可写目录，提权后执行脚本存在 TOCTOU 本地提权窗口（审查 A1）。
 pub fn temp_script_dir() -> Result<PathBuf, String> {
     let dir = app_data_dir().join("tmp");
@@ -160,6 +178,10 @@ pub fn migrate_legacy_once() -> Option<String> {
     let mut notes: Vec<String> = Vec::new();
 
     // 第一段：CleanTool → Trim（仅在 Trim 目录整体缺失时）
+    // 审查 v2-L10：这一段刻意**不走** MIGRATION_FILES/DIRS 白名单，与第二段口径不同，
+    // 不是漏改。判据是风险不对称：白名单漏一项 = 用户数据静默丢失且无法补救，
+    // 而整树多带几份 cache/logs 只多占空间、且都是可再生内容。
+    // 真正的搬迁闸门在第二段（往**在用的**数据目录里写），那里逐名走清单、有断言守着。
     let legacy = legacy_data_dir();
     let older = older_legacy_data_dir();
     if !legacy.exists() && older.exists() {
@@ -320,6 +342,15 @@ mod tests {
         // 反向断言：可再生内容不该混进来（会让首次启动做无谓的大量复制）
         for junk in ["cache", "redist", "logs", "tmp"] {
             assert!(!MIGRATION_DIRS.contains(&junk), "{junk} 可再生，不该整体搬迁");
+        }
+        // 审查 v2-L10：文件侧同样反向钉。`checkup.json`(M15) 与 `system-info.json`(L10)
+        // 都是「可重扫/可重采」的缓存，一旦被"顺手"加回清单，判据就又自相矛盾了——
+        // 而那正是本清单唯一的一条线。
+        for cache in ["checkup.json", "system-info.json"] {
+            assert!(
+                !MIGRATION_FILES.contains(&cache),
+                "{cache} 是可重扫缓存，按判据不得进迁移清单（移出后重扫/重采即可）"
+            );
         }
     }
 

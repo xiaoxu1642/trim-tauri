@@ -345,7 +345,12 @@ fn is_ipv4(host: &str) -> Option<[u32; 4]> {
 /// 这些字面量落到了「未知域名」分支被判公网。故按 `inet_aton` 语义补齐（不引新依赖）。
 ///
 /// 段规则：无 `0x` 前缀时**只接受十进制数字**（这排除了一切域名，`cafe.babe` 不会误判），
-/// 前导 0 按八进制；首段可占剩余全部位宽，其余每段必须 ≤255。
+/// 前导 0 按八进制；**末段**占剩余全部低位字节（`127.1` → `127.0.0.1`），其余每段必须 ≤255。
+///
+/// 审查 v2-L16：原实现按「首段吸收剩余位宽」算，而且移位方向也错（`acc<<8`），于是任何
+/// 缩写形态（n<4）都退化成 `0.x.y.z`。方向上是**过度拒绝**（`0/8` 被判私有 ⇒ 拒），
+/// 不构成放行绕过，但注释与实现相反、`http://8.8.8` 这类公网缩写被误拒，而且真正吃字节
+/// 的下游逻辑会拿到另一个 IP。现在按 `inet_aton` 的语义算，并把具体字节写进断言。
 fn parse_ipv4_aton(host: &str) -> Option<[u32; 4]> {
     let parts: Vec<&str> = host.split('.').collect();
     if parts.is_empty() || parts.len() > 4 {
@@ -371,20 +376,23 @@ fn parse_ipv4_aton(host: &str) -> Option<[u32; 4]> {
         vals.push(v);
     }
     let n = vals.len();
-    // 末 n-1 段各占一字节，首段占剩余位（n=1 时即整个 32 位）
-    for v in &vals[1..] {
+    // 非末段各占一个字节
+    for v in &vals[..n - 1] {
         if *v > 255 {
             return None;
         }
     }
-    let bits = 32 - 8 * (n as u32 - 1);
-    let limit: u64 = if bits >= 32 { u32::MAX as u64 + 1 } else { 1u64 << bits };
-    if vals[0] as u64 >= limit {
+    // 末段占剩余的 (5-n) 个字节，不得溢出那段位宽
+    let last_bits = 8 * (5 - n) as u32;
+    let last_limit: u64 = if last_bits >= 32 { u32::MAX as u64 + 1 } else { 1u64 << last_bits };
+    if vals[n - 1] as u64 >= last_limit {
         return None;
     }
-    let mut acc = vals[0];
-    for v in &vals[1..] {
-        acc = (acc << 8) | *v;
+    let mut acc: u32 = 0;
+    for (i, v) in vals.iter().enumerate() {
+        // 前 n-1 段从最高字节依次落位；末段贴着最低位（它自己已经带上了剩余位宽的值）
+        let shift = if i + 1 == n { 0 } else { 8 * (3 - i as u32) };
+        acc |= v << shift;
     }
     Some([(acc >> 24) & 255, (acc >> 16) & 255, (acc >> 8) & 255, acc & 255])
 }
@@ -1220,6 +1228,33 @@ mod tests_private_url {
     //! 审查 K1 回归断言：字面量归一化后必须落进私有判定。这些形式过去全部判「公网」放行，
     //! 被注入的渲染层可借自定义模型端点把明文 Bearer 打到本机回环服务。
     use super::is_private_api_url;
+
+    /// 审查 v2-L16：归一化本身要断言**具体字节**，不能只断言"被拒/被放"。
+    /// 旧实现把缩写塌成 `0.x.y.z`：回环类仍然被拒（但走的是 `0/8` 那个桶，理由是错的），
+    /// 公网缩写 `8.8.8` 被误拒；而任何直接使用这批字节的下游逻辑都会拿到另一个 IP。
+    /// 现在按 `inet_aton` 语义：前 n-1 段各占一字节，**末段**占剩余低位字节。
+    #[test]
+    fn aton_forms_normalize_to_exact_bytes() {
+        let aton = |h| super::parse_ipv4_aton(h);
+        let loopback = [127, 0, 0, 1];
+        for h in [
+            "127.0.0.1",      // 标准四段
+            "127.1",          // 两段：末段占低 3 字节
+            "127.0.1",        // 三段：末段占低 2 字节
+            "0177.1",         // 八进制首段
+            "0x7f000001",     // 单一十六进制
+            "2130706433",     // 单一十进制
+        ] {
+            assert_eq!(aton(h), Some(loopback), "{h} 应归一成 127.0.0.1");
+        }
+        // 公网缩写不得被误拒（旧实现在这里给出 [0,0,8,8] ⇒ 落进"0/8 私有"桶）
+        assert_eq!(aton("8.8.8"), Some([8, 8, 0, 8]));
+        assert_eq!(aton("8.8"), Some([8, 0, 0, 8]));
+        // 非末段超过一字节 / 末段超过自己的位宽：判"不是这个地址"，而不是折叠成另一个
+        assert_eq!(aton("256.1"), None);
+        assert_eq!(aton("127.0.0.256"), None);
+        assert_eq!(aton("127.16777216"), None);
+    }
 
     #[test]
     fn ipv4_alternate_forms_are_private() {

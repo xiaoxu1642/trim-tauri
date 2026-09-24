@@ -339,9 +339,12 @@ pub fn appearance_bg_delete<R: Runtime>(
     if !bg_ext_ok(&raw) {
         return Ok(json!({ "success": false, "message": "路径无效" }));
     }
-    // 名字受控但父目录可能被换成交换点，删除前再确认目标自身不是链接
+    // 名字受控但父目录可能被换成交换点，删除前再确认目标自身不是链接。
+    // 审查 v2-L12：判据用 `protect::is_reparse`（属性位 0x400）而不是 `is_symlink()` ——
+    // 后者在 Windows 上只认 SYMLINK/MOUNT_POINT 两种 tag，OneDrive 云占位符那类
+    // `is_symlink=false && is_dir=true` 的 reparse 会被放过去，等于删到另一块存储上。
     match std::fs::symlink_metadata(&target) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+        Ok(meta) if protect::is_reparse(&meta) => {
             return Ok(json!({ "success": false, "message": "拒绝删除符号链接目标" }));
         }
         Err(_) => return Ok(json!({ "success": true })), // 不存在 = 幂等成功（对齐上游 existsSync 短路）

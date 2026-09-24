@@ -37,7 +37,7 @@
   async function load() {
     if (loading || !backdrop) return;
     if (!window.api?.optimizer?.listRestore) {
-      setListError('系统还原点管理仅在 Electron 环境中可用');
+      setListError('系统还原点不可用：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
       return;
     }
     loading = true;
@@ -123,7 +123,7 @@
 
   async function create() {
     if (!window.api?.optimizer?.createRestore) {
-      window.app?.toast('error', '创建功能仅在 Electron 环境中可用');
+      window.app?.toast('error', '创建还原点不可用：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
       return;
     }
     // 复核 💭3（2026-09-16）：confirmDanger 链路判空，预览模式（无 app.js 提供方）不抛错

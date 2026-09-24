@@ -6,15 +6,15 @@
 // 本工具就是那把「防腐烂」的尺子：**只在源仓库在位时才有效，缺席即跳过（退出码 0）**，
 // 因此不属 AGENTS.md §4 的必做门禁，也不允许被任何必做门禁 import。
 //
-// 用法：node tools/check-origin-drift.mjs        # 自动按 TRIM_ORIGIN 或默认路径找源仓库
-// 退出码：0 = 无漂移 / 源仓库缺席（跳过）；1 = 有漂移（列出文件与差异字节数）
+// 用法：node tools/check-origin-drift.mjs        # 源仓库坐标只认环境变量 TRIM_ORIGIN
+// 退出码：0 = 无漂移 / 未设 TRIM_ORIGIN 或源仓库缺席（跳过）；1 = 有漂移（列出文件与差异字节数）
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { ORIGIN, UPSTREAM_REPO } from './ps-origin.mjs';
 
-if (!existsSync(UPSTREAM_REPO)) {
-  console.log(`· 源仓库不在位（${UPSTREAM_REPO}），跳过漂移复核（不算失败）`);
+if (!UPSTREAM_REPO || !existsSync(UPSTREAM_REPO)) {
+  console.log(`· 源仓库不在位（${UPSTREAM_REPO || '未设 TRIM_ORIGIN'}），跳过漂移复核（不算失败）`);
   process.exit(0);
 }
 

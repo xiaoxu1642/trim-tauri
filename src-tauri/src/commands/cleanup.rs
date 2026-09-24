@@ -1080,6 +1080,11 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                         st.recycled_bytes += js_num_or_zero(entry.get("size")) as i64;
                         st.ok += 1;
                         let is_dir = entry.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false);
+                        // 审查 v2-L15：这条重建支在当前产品语义下**不可达**——v2-M20 拍板常规清理
+                        // 固定 toRecycle=false，于是清理走 `cleanup_execute.ps1`，而那条链自己会
+                        // 重建目录（`$autoRebuild` → `Remove-PathSafely -AutoRebuild`，见 ps 的 :51/:800）。
+                        // 留着它是因为「回收站优先」一旦重新启用就要在这里做同样的事，行为两边必须一致；
+                        // 别把它当"忘了接线的功能"，也别据此删掉 PS 侧的那一份。
                         if is_dir && auto_rebuild {
                             let _ = std::fs::create_dir_all(path);
                         }
