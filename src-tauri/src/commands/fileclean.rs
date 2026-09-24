@@ -541,7 +541,12 @@ pub async fn fileclean_execute<R: Runtime>(
     let Some(ty) = ty else {
         return json!({ "success": false, "message": "至少一个文件不在扫描范围内，已拒绝整批" });
     };
-    let scope = scope_get(window.label(), ty).unwrap();
+    let Some(scope) = scope_get(window.label(), ty) else {
+        // 反查（:538-540）命中与这里取槽之间无 await，但 SCOPES 是全局槽，可能被并发
+        // 重扫清空。旧实现直接 unwrap：理论 panic 会被 Tauri command 包装兜住，但与其
+        // 让渲染层吃一个未分类错误，不如显式报「会话已过期」（审查 L1）。
+        return json!({ "success": false, "message": "扫描会话已过期，请重新扫描后再删除" });
+    };
 
     // 全部命中本槽才放行
     for f in &files {
