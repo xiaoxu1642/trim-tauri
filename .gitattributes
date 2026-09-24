@@ -25,6 +25,19 @@
 *.dylib binary
 *.so binary
 
+# ==================== .ps1 是「字节即内容」的例外，禁止任何行尾转换 ====================
+# 迁移方案 D6 的门禁 tools/check-ps-extraction.mjs 是拿 src-tauri/ps/*.ps1 与源仓库
+# Trim 的 JS 模板字面量做**逐字节**对拍的。上游这些字面量里嵌的 .reg 文本本身就带 \r\n
+# （例如 maint_net_qos_scheduler / maint_tf_net_tcp / maint_net_disable_lmhosts 等 6 个
+# 脚本里的 "Windows Registry Editor Version 5.00\r"），所以 \r 属于**内容**而不是行尾噪声。
+#
+# 曾经按「全仓 LF」把它们标成 text eol=lf，结果 6 项对拍全红、且这个回归被推到了远端
+# —— 干净克隆出来的 .ps1 是 LF，与上游字面量差一个 \r。故这里显式关掉转换。
+# 改这些文件只能通过 `node tools/sync-ps-from-js.mjs` 重出（AGENTS.md：禁止手改）。
+# 另记一条同属「字节即内容」的约束：.ps1 含中文且以 UTF-8 **带 BOM** 落盘
+# （PowerShell 5.1 兼容），BOM 与 \r 一样不能被任何转换吃掉——`-text` 一并保住了。
+*.ps1 -text
+
 # ==================== 明确钉为 LF 的文本类型 ====================
 *.rs text eol=lf
 *.js text eol=lf
@@ -34,12 +47,8 @@
 *.html text eol=lf
 *.css text eol=lf
 *.md text eol=lf
-*.ps1 text eol=lf
 *.toml text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.lock text eol=lf
 *.manifest text eol=lf
-
-# 说明：.ps1 含中文且以 UTF-8 **带 BOM** 落盘（PowerShell 5.1 兼容），
-# BOM 属字节内容、不受行尾转换影响；此处只统一换行符，勿改成 CRLF「以符合 Windows 习惯」。
