@@ -632,7 +632,7 @@ unsafe fn read_reg_dword(hkey: HKEY, subkey: &str, value: &str) -> i32 {
         hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty),
         Some(buf.as_mut_ptr()), Some(&mut size),
     );
-    RegCloseKey(hk);
+    let _ = RegCloseKey(hk);
     if r.is_err() || ty != REG_DWORD { return -1; }
     i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
 }
@@ -998,7 +998,7 @@ use windows::Win32::System::Registry::{
     REG_CREATED_NEW_KEY, REG_QWORD,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows::Win32::Foundation::{INVALID_HANDLE_VALUE, WIN32_ERROR};
+use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
 
 /// Win11 经典/现代右键菜单切换（对应 cm_win11_mode.ps1）
 ///
@@ -1107,7 +1107,7 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
     unsafe {
         // 当前会话 ID
         let mut my_session = 0u32;
-        ProcessIdToSessionId(std::process::id(), &mut my_session);
+        let _ = ProcessIdToSessionId(std::process::id(), &mut my_session);
 
         // 枚举所有 explorer.exe 进程，匹配当前会话
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -1218,7 +1218,7 @@ unsafe fn get_process_path(pid: u32) -> Option<String> {
 use windows::Win32::System::Registry::RegEnumKeyExW;
 use windows::Win32::System::LibraryLoader::LoadLibraryW;
 use windows::Win32::UI::WindowsAndMessaging::LoadStringW;
-use windows::Win32::Foundation::{HMODULE, HANDLE, FreeLibrary};
+use windows::Win32::Foundation::{HMODULE, FreeLibrary};
 
 /// 枚举注册表键的所有子键名
 unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
@@ -2165,12 +2165,9 @@ pub fn netcheck_status() -> Result<Value, String> {
     unsafe {
         use windows::Win32::NetworkManagement::IpHelper::{
             GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH as IP_ADAPTER_ADDRESSES,
-            IP_ADAPTER_UNICAST_ADDRESS_LH as IP_ADAPTER_UNICAST_ADDRESS,
-            IP_ADAPTER_GATEWAY_ADDRESS_LH as IP_ADAPTER_GATEWAY_ADDRESS,
-            IP_ADAPTER_DNS_SERVER_ADDRESS_XP as IP_ADAPTER_DNS_SERVER_ADDRESS,
             GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
         };
-        use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
+        use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
         use std::net::ToSocketAddrs;
 
         const AF_UNSPEC: u32 = 0;
@@ -3490,7 +3487,7 @@ pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
 
 unsafe fn toggle_cm_item(
     item: &Value, source: &str, target: &str, display_path: &str,
-    want_enabled: bool, id: &str, name: &str,
+    want_enabled: bool, _id: &str, _name: &str,
 ) -> Result<Value, String> {
     let blocked_by = item.get("blockedBy").and_then(|v| v.as_str()).unwrap_or("");
     let clsid = item.get("clsid").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -4971,3 +4968,4 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
         _ => Err(format!("未知的维护任务: {task_id}")),
     }
 }
+

@@ -16,7 +16,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
-use crate::engine::{guard, log, native};
+use crate::engine::{guard, native};
 use crate::pwsh;
 
 /// PS 脚本编译期嵌入（生成自源仓库，见 tools/sync-ps-from-js.mjs）
