@@ -157,12 +157,31 @@ pub async fn maintenance_run<R: Runtime>(
 }
 
 async fn run_one<R: Runtime>(window: &WebviewWindow<R>, task_id: &str, script: &str) -> Value {
+    log::write_log("info", &format!("维护任务开始: {task_id}"));
+
+    // S1：原生优先，失败自动回退 PS（PS 路径有流式输出）
+    match crate::engine::native::maint_run(task_id) {
+        Ok((success, message)) => {
+            if success {
+                log::write_log("info", &format!("维护任务原生完成: {task_id}"));
+                let _ = window.emit("maintenance:output", json!({ "taskId": task_id, "line": message }));
+                return json!({
+                    "success": true,
+                    "message": message,
+                    "data": { "taskId": task_id, "result": "ok", "output": message }
+                });
+            }
+            log::write_log("warn", &format!("维护任务原生失败，回退 PS: {task_id} -> {message}"));
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("维护任务原生异常，回退 PS: {task_id} -> {e}"));
+        }
+    }
+
     let script_path = match pwsh::write_temp_script(script, ".ps1") {
         Ok(p) => p,
         Err(e) => return json!({ "success": false, "message": e }),
     };
-
-    log::write_log("info", &format!("维护任务开始: {task_id}"));
     // 真流式：任务脚本（DISM / sfc / 组件清理等）常跑数分钟，输出必须边出边上屏，
     // 不能等整条命令结束才一次性给 —— 那样界面看起来像卡死。
     // 推送的行集合与下面收尾解析里进 `lines` 的**完全同一套**（协议行与空行不推），
