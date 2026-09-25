@@ -191,7 +191,17 @@ fn scan_install_paths() -> serde_json::Value {
             String::new()
         }
     };
-    let script_text = PATHS_SCAN_PS.replace(RULES_SENTINEL, &ps_escape_single(&rules_json));
+
+    // S1：原生优先，失败自动回退 PS
+    let native_result = crate::engine::native::paths_scan(&rules_json);
+    let mut data: serde_json::Value = match native_result {
+        Ok(d) => {
+            log::write_log("info", "安装路径原生扫描完成");
+            d
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("安装路径原生扫描失败，回退 PS: {e}"));
+            let script_text = PATHS_SCAN_PS.replace(RULES_SENTINEL, &ps_escape_single(&rules_json));
     // 哨兵必须消失：残留即模板与替换口径漂移，宁可失败也不跑半成品脚本
     if script_text.contains(RULES_SENTINEL) {
         log::write_log("error", "路径扫描脚本哨兵替换失败，已拒绝执行（模板与注入口径不一致）");
@@ -227,14 +237,16 @@ fn scan_install_paths() -> serde_json::Value {
         log::write_log("error", &format!("路径扫描失败: {message}"));
         return serde_json::json!({ "success": false, "message": message, "data": {} });
     }
-    let mut data: serde_json::Value = match serde_json::from_str(out.stdout.trim()) {
-        Ok(v) => v,
-        Err(_) => {
-            return serde_json::json!({
-                "success": false,
-                "message": "解析结果失败",
-                "raw": out.stdout
-            })
+            match serde_json::from_str(out.stdout.trim()) {
+                Ok(v) => v,
+                Err(_) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "message": "解析结果失败",
+                        "raw": out.stdout
+                    })
+                }
+            }
         }
     };
     // 标准化：去除首尾空白与包裹引号（注册表 InstallLocation 常带引号）
