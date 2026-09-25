@@ -724,64 +724,19 @@ pub async fn optimizer_run<R: Runtime>(
         }
     }
 
-    let script = build_script(&steps);
-    let timeout = if option_id == "tf_svc_bulk" { 300 } else { 120 };
     log::write_log(
         "info",
         &format!("优化电脑执行: {title}{}", if p.restore { " (还原)" } else { "" }),
     );
-    let path = match pwsh::write_temp_script(&script, ".ps1") {
-        Ok(p) => p,
-        Err(e) => {
-            if !is_restore_run {
-                let _ = opt_state::mark_applied(&option_id, "unknown");
-            }
-            return json!({ "success": false, "message": e });
+    // S3：纯 Rust 原生
+    let run: Result<pwsh::PsOutput, String> = match native_execute_steps(&window, &steps, &option_id) {
+        Ok(failed_steps) => {
+            let stdout = format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n");
+            let code = if failed_steps == 0 { 0 } else { 1 };
+            Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false })
         }
+        Err(e) => Err(format!("原生执行失败: {e}")),
     };
-    // 真流式进度：脚本每写一行 @@PROGRESS:<pct>@@ 就立刻推给渲染层，
-    // 而不是等整条命令跑完补发一个 100%（批量优化项可能几分钟，期间界面必须是动的）。
-    // 去重状态用闭包私有的 Cell 而不是全局 static：全局的要手动复位、并发跑两个
-    // 优化项时会互相把对方的进度判成"没变化"而漏发。Cell<u32> 是 Send，满足回调约束。
-    let progress_win = window.clone();
-    let progress_id = option_id.clone();
-    // u32::MAX 作初值：脚本第一行哪怕是 0% 也与初值不同，必定发出
-    let last_pct = std::cell::Cell::new(u32::MAX);
-    // B10 S2：默认原生，TRIM_LEGACY_OPTIMIZER=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_OPTIMIZER").map(|v| v == "1").unwrap_or(false);
-    let run: Result<pwsh::PsOutput, String> = if !legacy {
-        match native_execute_steps(&window, &steps, &option_id) {
-            Ok(failed_steps) => {
-                let stdout = format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n");
-                let code = if failed_steps == 0 { 0 } else { 1 };
-                Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false })
-            }
-            Err(e) => Err(format!("原生执行失败（设 TRIM_LEGACY_OPTIMIZER=1 可回退 PS）: {e}")),
-        }
-    } else {
-        pwsh::run_file_streaming(
-            &path,
-            std::time::Duration::from_secs(timeout),
-            Some("optimizer.apply"),
-            move |line| {
-            let Some(pct) = line
-                .trim()
-                .strip_prefix("@@PROGRESS:")
-                .and_then(|x| x.strip_suffix("@@"))
-            else {
-                return;
-            };
-            let Ok(p) = pct.parse::<u32>() else { return };
-            if last_pct.get() != p {
-                last_pct.set(p);
-                let _ = progress_win.emit(
-                    "optimizer:progress",
-                    json!({ "optionId": progress_id, "percent": p }),
-                );
-            }
-        })
-    };
-    let _ = std::fs::remove_file(&path);
     let Ok(out) = run else {
         let e = run.err().unwrap_or_else(|| "执行异常".into());
         log::write_log("error", &format!("优化电脑执行异常: {e}"));
