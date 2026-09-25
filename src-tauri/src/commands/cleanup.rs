@@ -1399,6 +1399,12 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
         Some(p) if !p.is_empty() && p.chars().count() <= 600 => p,
         _ => String::new(),
     };
+    // S1：原生优先，复杂规则回退 PS
+    if let Some(rule) = find_cleanup_rule_by_id(&rules, &id) {
+        if let Ok(detail) = crate::engine::native::cleanup_detail(&rule, &safe_path) {
+            return json!({ "success": true, "data": detail });
+        }
+    }
     let script = build_detail_script(&id, &safe_path, &rules);
     let files = Mutex::new(Vec::<Value>::new());
     let meta = Mutex::new(Option::<Value>::None);

@@ -5301,3 +5301,129 @@ unsafe fn reg_count_values(hk: HKEY) -> usize {
     }
     count
 }
+// ==================== B10 cleanup_detail：条目明细枚举 ====================
+
+/// 清理条目明细枚举（对应 cleanup_detail.ps1，S1）
+///
+/// 输入 rule JSON 和目标路径，返回 {kind, total, truncated, files}。
+/// 复杂 glob/排除规则回退 PS（commands 层判定）。
+pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> {
+    let cap = 600usize;
+
+    // special=dism
+    if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
+        return Ok(json!({"kind": "dism", "total": 0, "truncated": false, "files": []}));
+    }
+
+    // regKeys 型
+    if let Some(reg_keys) = rule.get("regKeys").and_then(|v| v.as_array()) {
+        if !reg_keys.is_empty() {
+            let mut count = 0usize;
+            for rk in reg_keys {
+                let path = rk.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if path.is_empty() { continue; }
+                let expanded = expand_env(path);
+                if let Some((hive, rest)) = parse_reg_path(&expanded) {
+                    count += unsafe { reg_count_key(hive, &rest, rk.get("value").is_some()) };
+                }
+            }
+            return Ok(json!({"kind": "reg", "total": count, "truncated": false, "files": []}));
+        }
+    }
+
+    // fileKeys 型
+    if let Some(file_keys) = rule.get("fileKeys").and_then(|v| v.as_array()) {
+        if !file_keys.is_empty() {
+            let mut files: Vec<Value> = Vec::new();
+            let mut total = 0usize;
+            let mut seen = std::collections::HashSet::new();
+            for fk in file_keys {
+                let path = fk.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if path.is_empty() { continue; }
+                let pattern = fk.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
+                let recurse = fk.get("recurse").and_then(|v| v.as_bool()).unwrap_or(true);
+                let expanded = expand_env(path);
+                // 简单 glob：只支持路径中不含 * 的情况
+                if expanded.contains('*') {
+                    return Err("复杂 glob 需 PS 回退".into());
+                }
+                if !std::path::Path::new(&expanded).is_dir() { continue; }
+                enumerate_files(&expanded, pattern, recurse, &mut files, &mut total, &mut seen, cap);
+            }
+            return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files}));
+        }
+    }
+
+    // 目录型
+    if !target_path.is_empty() && std::path::Path::new(target_path).exists() {
+        let mut files: Vec<Value> = Vec::new();
+        let mut total = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        enumerate_files(target_path, "*", true, &mut files, &mut total, &mut seen, cap);
+        return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files}));
+    }
+
+    Ok(json!({"kind": "files", "total": 0, "truncated": false, "files": []}))
+}
+
+fn enumerate_files(
+    dir: &str, pattern: &str, recurse: bool,
+    files: &mut Vec<Value>, total: &mut usize,
+    seen: &mut std::collections::HashSet<String>, cap: usize,
+) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        // 跳过重解析点
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_symlink() { continue; }
+        if meta.is_dir() {
+            if recurse {
+                enumerate_files(&path.to_string_lossy(), pattern, recurse, files, total, seen, cap);
+            }
+        } else if meta.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !glob_match(pattern, &name) { continue; }
+            let full = path.to_string_lossy().to_string();
+            if !seen.insert(full.clone()) { continue; }
+            *total += 1;
+            if files.len() < cap {
+                files.push(json!({"path": full, "size": meta.len()}));
+            }
+        }
+    }
+}
+
+fn glob_match(pattern: &str, name: &str) -> bool {
+    if pattern == "*" { return true; }
+    // 简单 * 匹配
+    if let Some(idx) = pattern.find('*') {
+        let prefix = &pattern[..idx];
+        let suffix = &pattern[idx+1..];
+        return name.starts_with(prefix) && name.ends_with(suffix) && name.len() >= prefix.len() + suffix.len();
+    }
+    pattern == name
+}
+
+unsafe fn reg_count_key(hive: HKEY, path: &str, has_value: bool) -> usize {
+    let sk = to_wide(path);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+        return 0;
+    }
+    let mut count = 1usize; // 键本身
+    if !has_value {
+        // 计数值 + 子键
+        count += reg_count_values(hk);
+        let mut index = 0u32;
+        loop {
+            let mut name_buf = [0u16; 256];
+            let mut name_len = 256u32;
+            if RegEnumKeyExW(hk, index, Some(windows::core::PWSTR(name_buf.as_mut_ptr())), &mut name_len, None, None, None, None).is_err() { break; }
+            count += 1;
+            index += 1;
+        }
+    }
+    let _ = RegCloseKey(hk);
+    count
+}
