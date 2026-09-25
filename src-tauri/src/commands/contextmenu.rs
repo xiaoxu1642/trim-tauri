@@ -23,15 +23,7 @@ use crate::engine::{delete_manifest, guard, log, native, paths, protect, sysinfo
 use crate::pwsh;
 
 // ==================== 外置 PS 脚本（编译期嵌入，禁止手写） ====================
-const PS_SCAN: &str = include_str!("../../ps/cm_scan.ps1");
-const PS_BACKUP: &str = include_str!("../../ps/cm_backup.ps1");
-const PS_REMOVE: &str = include_str!("../../ps/cm_remove.ps1");
-const PS_TOGGLE: &str = include_str!("../../ps/cm_toggle.ps1");
-const PS_RESTORE: &str = include_str!("../../ps/cm_restore.ps1");
 const PS_ICONS: &str = include_str!("../../ps/cm_icons.ps1");
-const PS_RESTART_EXPLORER: &str = include_str!("../../ps/cm_restart_explorer.ps1");
-const PS_WIN11_MODE: &str = include_str!("../../ps/cm_win11_mode.ps1");
-const PS_BLOCKED_LIST: &str = include_str!("../../ps/cm_blocked_list.ps1");
 
 /// 生成器以 `backup(["__TRIM_ITEMS_JSON__"])` 抽取，存活于脚本体内的字面量
 /// 是 `["__TRIM_ITEMS_JSON__"]`（含数组括号），替换值本身即完整 JSON 数组。
@@ -248,35 +240,13 @@ pub async fn contextmenu_scan<R: Runtime>(
     snap_clear(&label);
     log::write_log("info", "扫描右键菜单");
 
-    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
-    let data: Vec<Value> = if legacy {
-        let out = match run_ps(PS_SCAN, Duration::from_secs(60), None) {
-            Ok(o) => o,
-            Err(e) => return json!({ "success": false, "message": e }),
-        };
-        if out.timed_out {
-            return json!({ "success": false, "message": "扫描超时（超过 60 秒），请稍后重试或关闭其他占用注册表的程序" });
+    // S3：纯 Rust 原生
+    let data: Vec<Value> = match crate::engine::native::cm_scan() {
+        Ok(items) => {
+            log::write_log("info", &format!("右键菜单原生扫描完成: {} 项", items.len()));
+            items
         }
-        if out.code != 0 {
-            log::write_log("error", &format!("右键菜单扫描失败: {}", out.stderr));
-            return json!({ "success": false, "message": if out.stderr.is_empty() { "扫描失败".into() } else { out.stderr } });
-        }
-        match parse_last_json(&out.stdout).and_then(|v| match v {
-            Value::Array(a) => Some(a),
-            _ => None,
-        }) {
-            Some(a) => a,
-            None => return json!({ "success": false, "message": "解析失败" }),
-        }
-    } else {
-        match crate::engine::native::cm_scan() {
-            Ok(items) => {
-                log::write_log("info", &format!("右键菜单原生扫描完成: {} 项", items.len()));
-                items
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生扫描失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
-        }
+        Err(e) => return json!({ "success": false, "message": format!("原生扫描失败: {e}") }),
     };
     let normalized = normalize_ids(data);
     log::write_log("info", &format!("扫描右键菜单完成: {} 项", normalized.len()));
@@ -310,29 +280,13 @@ pub async fn contextmenu_backup<R: Runtime>(
 
     log::write_log("info", &format!("备份右键菜单: {} 项", safe.len()));
 
-    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
-    let data = if legacy {
-        let script = inject_items(PS_BACKUP, &safe);
-        let out = match run_ps(&script, Duration::from_secs(60), None) {
-            Ok(o) => o,
-            Err(e) => return json!({ "success": false, "message": e }),
-        };
-        if out.code != 0 {
-            return json!({ "success": false, "message": "备份失败" });
+    // S3：纯 Rust 原生
+    let data = match crate::engine::native::cm_backup(&safe) {
+        Ok(d) => {
+            log::write_log("info", "右键菜单备份原生完成");
+            d
         }
-        match parse_last_json(&out.stdout) {
-            Some(d) => d,
-            None => return json!({ "success": false, "message": "解析备份结果失败" }),
-        }
-    } else {
-        match crate::engine::native::cm_backup(&safe) {
-            Ok(d) => {
-                log::write_log("info", "右键菜单备份原生完成");
-                d
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生备份失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
-        }
+        Err(e) => return json!({ "success": false, "message": format!("原生备份失败: {e}") }),
     };
     let count = data.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -383,25 +337,13 @@ pub async fn contextmenu_remove<R: Runtime>(
     // 注册表类
     if !reg_items.is_empty() {
         log::write_log("warn", &format!("删除右键菜单: {} 项", reg_items.len()));
-        // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
-        let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
-        data = if legacy {
-            let script = inject_items(PS_REMOVE, &reg_items);
-            let parsed = run_ps(&script, Duration::from_secs(60), Some("contextmenu.remove"))
-                .ok()
-                .and_then(|o| if o.code == 0 { parse_last_json(&o.stdout) } else { None });
-            match parsed {
-                Some(d) => d,
-                None => return json!({ "success": false, "message": "删除失败" }),
+        // S3：纯 Rust 原生
+        data = match crate::engine::native::cm_remove(&reg_items) {
+            Ok(d) => {
+                log::write_log("info", "右键菜单删除原生完成");
+                d
             }
-        } else {
-            match crate::engine::native::cm_remove(&reg_items) {
-                Ok(d) => {
-                    log::write_log("info", "右键菜单删除原生完成");
-                    d
-                }
-                Err(e) => return json!({ "success": false, "message": format!("原生删除失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
-            }
+            Err(e) => return json!({ "success": false, "message": format!("原生删除失败: {e}") }),
         };
     }
     if !data.get("results").map(|v| v.is_array()).unwrap_or(false) {
@@ -565,32 +507,13 @@ pub async fn contextmenu_toggle<R: Runtime>(
 
     log::write_log("info", &format!("切换右键菜单启停: {} 项", toggle_items.len()));
 
-    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
-    let data = if legacy {
-        let script = inject_items(PS_TOGGLE, &toggle_items);
-        let out = match run_ps(&script, Duration::from_secs(60), None) {
-            Ok(o) => o,
-            Err(e) => return json!({ "success": false, "message": e }),
-        };
-        if out.timed_out {
-            return json!({ "success": false, "message": "切换超时，请稍后重试" });
+    // S3：纯 Rust 原生
+    let data = match crate::engine::native::cm_toggle(&toggle_items) {
+        Ok(d) => {
+            log::write_log("info", "右键菜单切换原生完成");
+            d
         }
-        if out.code != 0 {
-            return json!({ "success": false, "message": "切换失败" });
-        }
-        match parse_last_json(&out.stdout) {
-            Some(d) => d,
-            None => return json!({ "success": false, "message": "解析切换结果失败" }),
-        }
-    } else {
-        match crate::engine::native::cm_toggle(&toggle_items) {
-            Ok(d) => {
-                log::write_log("info", "右键菜单切换原生完成");
-                d
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生切换失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
-        }
+        Err(e) => return json!({ "success": false, "message": format!("原生切换失败: {e}") }),
     };
 
     // CM-12：回写新路径/屏蔽态到快照 + 缓存
@@ -658,28 +581,13 @@ pub async fn contextmenu_restore<R: Runtime>(window: WebviewWindow<R>) -> Value 
     }
     log::write_log("warn", "恢复右键菜单备份");
 
-    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
-    let data = if legacy {
-        let out = match run_ps(PS_RESTORE, Duration::from_secs(60), None) {
-            Ok(o) => o,
-            Err(e) => return json!({ "success": false, "message": e }),
-        };
-        if out.code != 0 {
-            return json!({ "success": false, "message": "恢复失败" });
+    // S3：纯 Rust 原生
+    let data = match crate::engine::native::cm_restore() {
+        Ok(d) => {
+            log::write_log("info", "右键菜单恢复原生完成");
+            d
         }
-        match parse_last_json(&out.stdout) {
-            Some(d) => d,
-            None => return json!({ "success": false, "message": "解析恢复结果失败" }),
-        }
-    } else {
-        match crate::engine::native::cm_restore() {
-            Ok(d) => {
-                log::write_log("info", "右键菜单恢复原生完成");
-                d
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生恢复失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
-        }
+        Err(e) => return json!({ "success": false, "message": format!("原生恢复失败: {e}") }),
     };
     let imported = data.get("imported").and_then(|v| v.as_i64()).unwrap_or(0)
         + data.get("restored").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -868,27 +776,12 @@ pub async fn contextmenu_restart_explorer<R: Runtime>(window: WebviewWindow<R>) 
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    // B6 S1：原生重启优先
+    // S3：纯 Rust 原生
     match tauri::async_runtime::spawn_blocking(native::cm_restart_explorer).await {
-        Ok(Ok(data)) => return json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data }),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("restart-explorer 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("restart-explorer 任务异常，回退 PS: {e}")); }
+        Ok(Ok(data)) => json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data }),
+        Ok(Err(e)) => json!({ "success": false, "message": format!("原生重启失败: {e}") }),
+        Err(e) => json!({ "success": false, "message": format!("重启任务异常: {e}") }),
     }
-    log::flush_sync();
-    log::write_log("warn", "重启资源管理器（使右键菜单改动生效）");
-    let out = match run_ps(PS_RESTART_EXPLORER, Duration::from_secs(30), Some("contextmenu.restart-explorer"))
-    {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.timed_out {
-        return json!({ "success": false, "message": "重启超时，请手动结束并重新打开资源管理器" });
-    }
-    if out.code != 0 {
-        return json!({ "success": false, "message": "重启资源管理器失败" });
-    }
-    let data = parse_last_json(&out.stdout).unwrap_or_else(|| json!({}));
-    json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data })
 }
 
 /// contextmenu:win11-classic —— action 白名单 get/set-classic/set-modern
@@ -906,29 +799,13 @@ pub async fn contextmenu_win11_classic<R: Runtime>(
     if act != "get" {
         log::write_log("warn", &format!("切换 Win11 右键菜单模式: {act}"));
     }
-    // B6 S1：原生注册表操作优先
+    // S3：纯 Rust 原生
     let act_clone = act.clone();
     match tauri::async_runtime::spawn_blocking(move || native::cm_win11_mode(&act_clone)).await {
-        Ok(Ok(data)) => return json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data }),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("win11-mode 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("win11-mode 任务异常，回退 PS: {e}")); }
+        Ok(Ok(data)) => json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data }),
+        Ok(Err(e)) => json!({ "success": false, "message": format!("原生操作失败: {e}") }),
+        Err(e) => json!({ "success": false, "message": format!("任务异常: {e}") }),
     }
-    let script = if act == "get" {
-        PS_WIN11_MODE.to_string()
-    } else {
-        // 生成器抽取时哨兵被 JS 白名单退回 'get'，此处把 provenance 锁定的固定行
-        // `$action = 'get'` 替换为白名单动作（act 已严格限定为 3 值之一）。
-        PS_WIN11_MODE.replacen("$action = 'get'", &format!("$action = '{act}'"), 1)
-    };
-    let out = match run_ps(&script, Duration::from_secs(30), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.code != 0 {
-        return json!({ "success": false, "message": "读取或切换 Win11 菜单模式失败" });
-    }
-    let data = parse_last_json(&out.stdout).unwrap_or_else(|| json!({}));
-    json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data })
 }
 
 /// contextmenu:blocked-list —— Shell Extensions\Blocked 只读枚举（≤500，GUID 校验）
@@ -937,46 +814,12 @@ pub async fn contextmenu_blocked_list<R: Runtime>(window: WebviewWindow<R>) -> V
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    // B6 S1：原生注册表只读优先
+    // S3：纯 Rust 原生
     match tauri::async_runtime::spawn_blocking(native::cm_blocked_list).await {
-        Ok(Ok(data)) => return json!({ "success": true, "data": data }),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("blocked-list 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("blocked-list 任务异常，回退 PS: {e}")); }
+        Ok(Ok(data)) => json!({ "success": true, "data": data }),
+        Ok(Err(e)) => json!({ "success": false, "message": format!("原生枚举失败: {e}") }),
+        Err(e) => json!({ "success": false, "message": format!("任务异常: {e}") }),
     }
-    let out = match run_ps(PS_BLOCKED_LIST, Duration::from_secs(30), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.code != 0 {
-        return json!({ "success": true, "data": { "entries": [] } });
-    }
-    let data = parse_last_json(&out.stdout).unwrap_or_else(|| json!({}));
-    let entries: Vec<Value> = data
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter(|e| {
-                    e.get("guid")
-                        .and_then(|g| g.as_str())
-                        .map(|g| {
-                            g.starts_with('{')
-                                && g.len() == 38
-                                && g[1..37].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
-                        })
-                        .unwrap_or(false)
-                })
-                .map(|e| {
-                    json!({
-                        "guid": e.get("guid").unwrap(),
-                        "scope": if e.get("scope").and_then(|s| s.as_str()) == Some("machine") { "machine" } else { "user" }
-                    })
-                })
-                .take(500)
-                .collect()
-        })
-        .unwrap_or_default();
-    json!({ "success": true, "data": { "entries": entries } })
 }
 
 #[cfg(test)]
@@ -1011,33 +854,6 @@ mod tests {
         assert_eq!(deny["success"], false);
         assert_eq!(deny["needAdmin"], true);
         assert!(restore_admin_gate(true).is_none());
-    }
-
-    /// v2-K1 的防回退断言：闸门在编译期内嵌的脚本正文里，不在 Rust 侧，
-    /// 所以只能这样钉——手改 `.ps1`、或上游 JS 被回退成「遍历目录内全部 *.reg」都会立刻红。
-    /// 只断言「闸门存在且没收窄/放宽」，不复述其逻辑（逐字节对拍归 check-ps-extraction 管）。
-    #[test]
-    fn restore_script_keeps_trust_gates() {
-        let s = PS_RESTORE;
-        assert!(
-            s.contains("manifest.registryFiles"),
-            "还原方向丢了 manifest 登记校验，退回自选目录内任意 .reg"
-        );
-        assert!(
-            s.contains("Test-RegKeyAllowedForRestore"),
-            "还原方向丢了键路径白名单闸门"
-        );
-        assert!(
-            s.contains("-Filter 'registry_*.reg'"),
-            "还原范围从本工具生成的件放宽到全部 .reg"
-        );
-        // 白名单必须是 Software\Classes 两个 hive；被改宽（如整 hive 放行）即红
-        assert!(
-            s.contains(r"@('HKLM\SOFTWARE\Classes\', 'HKCU\SOFTWARE\Classes\')"),
-            "键路径白名单前缀被改动"
-        );
-        // 恢复脚本里不该出现任何删除动作
-        assert!(!s.contains("Remove-Item"), "恢复脚本出现删除");
     }
 
     #[test]
