@@ -498,11 +498,7 @@ pub fn stubborn_kill() -> Result<Value, String> {
     Ok(json!({"killed": killed, "failed": failed, "leftover": leftover}))
 }
 
-pub fn stubborn_block() -> Result<Value, String> {
-    // S1：服务/注册表/计划任务的原生实现待 S2 完善。
-    // 当前直接返回错误，由调用方回退 PS 完整执行。
-    Err("stubborn_block 原生路径待实现（S2）".to_string())
-}
+
 // ==================== B4：本机测速（回环 TCP） ====================
 
 use std::io::{Read, Write};
@@ -2155,6 +2151,174 @@ unsafe fn service_status(name: &str) -> Option<(u32, u32)> {
     let _ = CloseServiceHandle(scm);
     if ok.is_err() { return None; }
     Some((status.dwCurrentState.0, 0))
+}
+
+/// 停止服务
+unsafe fn service_stop(name: &str) -> bool {
+    use windows::Win32::System::Services::{
+        OpenSCManagerW, OpenServiceW, ControlService, CloseServiceHandle,
+        SC_MANAGER_CONNECT, SERVICE_STOP, SERVICE_CONTROL_STOP, SERVICE_STATUS,
+    };
+    let scm = match OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let name_w = to_wide(name);
+    let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_STOP) {
+        Ok(s) => s,
+        Err(_) => { let _ = CloseServiceHandle(scm); return false; }
+    };
+    let mut status = SERVICE_STATUS::default();
+    let ok = ControlService(svc, SERVICE_CONTROL_STOP, &mut status).is_ok();
+    let _ = CloseServiceHandle(svc);
+    let _ = CloseServiceHandle(scm);
+    ok
+}
+
+/// 设置服务启动类型（SERVICE_DEMAND_START=Manual, SERVICE_DISABLED=Disabled, SERVICE_AUTO_START=Automatic）
+unsafe fn service_set_start_type(name: &str, start_type: u32) -> bool {
+    use windows::Win32::System::Services::{
+        OpenSCManagerW, OpenServiceW, ChangeServiceConfigW, CloseServiceHandle,
+        SC_MANAGER_CONNECT, SERVICE_CHANGE_CONFIG, SERVICE_NO_CHANGE,
+    };
+    let scm = match OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let name_w = to_wide(name);
+    let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_CHANGE_CONFIG) {
+        Ok(s) => s,
+        Err(_) => { let _ = CloseServiceHandle(scm); return false; }
+    };
+    // ChangeServiceConfigW: 不需要改的参数传 SERVICE_NO_CHANGE
+    use windows::Win32::System::Services::{SERVICE_ERROR, ENUM_SERVICE_TYPE, SERVICE_START_TYPE};
+    let ok = ChangeServiceConfigW(
+        svc,
+        ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),  // dwServiceType
+        SERVICE_START_TYPE(start_type),        // dwStartType
+        SERVICE_ERROR(SERVICE_NO_CHANGE),      // dwErrorControl
+        PCWSTR::default(),                     // lpBinaryPathName
+        PCWSTR::default(),                     // lpLoadOrderGroup
+        None,                                  // lpdwTagId
+        PCWSTR::default(),                     // lpDependencies
+        PCWSTR::default(),                     // lpServiceStartName
+        PCWSTR::default(),                     // lpPassword
+        PCWSTR::default(),                     // lpDisplayName
+    ).is_ok();
+    let _ = CloseServiceHandle(svc);
+    let _ = CloseServiceHandle(scm);
+    ok
+}
+
+/// 顽固软件自启阻断（对应 memory_stubborn_block.ps1，S1）
+///
+/// 1. 停止并禁用 4 个服务（设为 Manual）
+/// 2. 停止 wpscloudsvr 服务
+/// 3. 备份并删除 2 个计划任务（schtasks.exe）
+/// 4. 设置 WPS 更新注册表 UpdateMode=close
+pub fn stubborn_block() -> Result<Value, String> {
+    let mut changed_services: Vec<String> = Vec::new();
+    let mut fail_services: Vec<String> = Vec::new();
+    let mut changed_tasks: Vec<String> = Vec::new();
+    let mut fail_tasks: Vec<String> = Vec::new();
+    let mut failed = 0i64;
+
+    // 1. 停止并禁用服务（设为 Manual）
+    let block_services = ["Edrservice", "GameViewerService", "MuMuRemoteService", "PCManager Service Store"];
+    for svc in &block_services {
+        unsafe {
+            // 先检查服务是否存在
+            if service_status(svc).is_none() { continue; }
+            let _ = service_stop(svc);
+            // SERVICE_DEMAND_START = 3 (Manual)
+            if service_set_start_type(svc, 3) {
+                changed_services.push(svc.to_string());
+            } else {
+                fail_services.push(svc.to_string());
+                failed += 1;
+            }
+        }
+    }
+
+    // 2. 停止 wpscloudsvr（不改变启动类型）
+    unsafe {
+        if service_status("wpscloudsvr").is_some() {
+            if service_stop("wpscloudsvr") {
+                changed_services.push("wpscloudsvr".to_string());
+            } else {
+                fail_services.push("wpscloudsvr".to_string());
+                failed += 1;
+            }
+        }
+    }
+
+    // 3. 备份并删除计划任务（用 schtasks.exe）
+    let backup_dir = match std::env::var("APPDATA") {
+        Ok(d) => std::path::PathBuf::from(d).join("Trim").join("backup").join("tasks"),
+        Err(_) => std::path::PathBuf::new(),
+    };
+    if !backup_dir.as_os_str().is_empty() {
+        let _ = std::fs::create_dir_all(&backup_dir);
+    }
+    let block_tasks = ["WpsUpdateTask_CHENG", "WpsUpdateLogonTask_CHENG"];
+    for task in &block_tasks {
+        // 检查任务是否存在
+        let exists = match std::process::Command::new("schtasks")
+            .args(["/Query", "/TN", task, "/NH"])
+            .output()
+        {
+            Ok(o) => o.status.success(),
+            Err(_) => false,
+        };
+        if !exists { continue; }
+
+        // 备份
+        if !backup_dir.as_os_str().is_empty() {
+            let xml_path = backup_dir.join(format!("{task}.xml"));
+            let _ = std::process::Command::new("schtasks")
+                .args(["/Query", "/TN", task, "/XML"])
+                .stdout(std::process::Stdio::from(std::fs::File::create(&xml_path).unwrap_or_else(|_| std::fs::File::open("NUL").unwrap())))
+                .status();
+        }
+
+        // 删除
+        let deleted = match std::process::Command::new("schtasks")
+            .args(["/Delete", "/TN", task, "/F"])
+            .output()
+        {
+            Ok(o) => o.status.success(),
+            Err(_) => false,
+        };
+        if deleted {
+            changed_tasks.push(task.to_string());
+        } else {
+            fail_tasks.push(task.to_string());
+            failed += 1;
+        }
+    }
+
+    // 4. 设置 WPS 更新注册表
+    unsafe {
+        use windows::Win32::System::Registry::{
+            RegOpenKeyExW, RegSetValueExW, RegCloseKey, HKEY_CURRENT_USER, KEY_WRITE, REG_SZ,
+        };
+        let key_path = to_wide(r"Software\Kingsoft\Office\6.0\Common\updateinfo");
+        let mut hkey = HKEY_CURRENT_USER;
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()), Some(0), KEY_WRITE, &mut hkey).is_ok() {
+            let val = to_wide("close");
+            let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
+            let _ = RegSetValueExW(hkey, PCWSTR(to_wide("UpdateMode").as_ptr()), Some(0), REG_SZ, Some(&bytes));
+            let _ = RegCloseKey(hkey);
+        }
+    }
+
+    Ok(json!({
+        "services": changed_services,
+        "tasks": changed_tasks,
+        "failedServices": fail_services,
+        "failedTasks": fail_tasks,
+        "failedCount": failed,
+    }))
 }
 
 /// 网络连通性检测（对应 netcheck_status.ps1，S1 简化版）
@@ -5606,5 +5770,143 @@ fn collect_files(dir: &str, pattern: &str, recurse: bool, files: &mut Vec<(Strin
             if !glob_match(pattern, &name) { continue; }
             files.push((path.to_string_lossy().to_string(), meta.len()));
         }
+    }
+}
+
+// ==================== B3 device_info：设备信息采集 ====================
+
+/// 设备信息采集（对应 device_info.ps1，S1）
+///
+/// 从注册表和系统 API 读取：系统版本、CPU、GPU、主板、磁盘、显示器、内存。
+/// WMI 专有字段（如显存精确值、显示器 EDID）尽量从注册表读取，缺失字段留空。
+pub fn device_info() -> Result<Value, String> {
+    {
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+
+        // 辅助：从注册表读字符串值
+        fn reg_read_string(hive: windows::Win32::System::Registry::HKEY, path: &str, name: &str) -> Option<String> {
+            unsafe {
+                use windows::Win32::System::Registry::{RegOpenKeyExW, RegQueryValueExW, RegCloseKey, KEY_READ, REG_VALUE_TYPE};
+                let sk = to_wide(path);
+                let mut hk = windows::Win32::System::Registry::HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
+                let nm = to_wide(name);
+                let mut ty = REG_VALUE_TYPE::default();
+                let mut size = 0u32;
+                if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+                    let _ = RegCloseKey(hk); return None;
+                }
+                let mut buf = vec![0u8; size as usize];
+                let ok = RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_ok();
+                let _ = RegCloseKey(hk);
+                if !ok || size == 0 { return None; }
+                // REG_SZ / REG_EXPAND_SZ: UTF-16
+                if ty.0 == 1 || ty.0 == 2 {
+                    let words: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&w| w != 0).collect();
+                    Some(String::from_utf16_lossy(&words).trim().to_string())
+                } else {
+                    None
+                }
+            }
+        }
+
+        // 辅助：从注册表读 DWORD
+        fn reg_read_dword(hive: windows::Win32::System::Registry::HKEY, path: &str, name: &str) -> Option<u32> {
+            unsafe {
+                use windows::Win32::System::Registry::{RegOpenKeyExW, RegQueryValueExW, RegCloseKey, KEY_READ, REG_VALUE_TYPE};
+                let sk = to_wide(path);
+                let mut hk = windows::Win32::System::Registry::HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
+                let nm = to_wide(name);
+                let mut ty = REG_VALUE_TYPE::default();
+                let mut val = 0u32;
+                let mut size = std::mem::size_of::<u32>() as u32;
+                let ok = RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(&mut val as *mut u32 as *mut u8), Some(&mut size)).is_ok();
+                let _ = RegCloseKey(hk);
+                if ok && ty.0 == 4 { Some(val) } else { None }
+            }
+        }
+
+        // 1. 系统信息
+        let system = {
+            let caption = reg_read_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName").unwrap_or_default();
+            let version = reg_read_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "DisplayVersion").unwrap_or_default();
+            let build = reg_read_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuild").unwrap_or_default();
+            let arch = if cfg!(target_arch = "x86_64") { "64 位" } else { "32 位" };
+            json!({ "caption": caption, "architecture": arch, "version": version, "build": build })
+        };
+
+        // 2. CPU
+        let processor = {
+            let name = reg_read_string(HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString").unwrap_or_default();
+            let mut si = SYSTEM_INFO::default();
+            unsafe { GetSystemInfo(&mut si); }
+            json!({ "name": name.trim(), "cores": si.dwNumberOfProcessors, "threads": si.dwNumberOfProcessors, "process": "" })
+        };
+
+        // 3. GPU（从显示类注册表读取）
+        let mut graphics: Vec<Value> = Vec::new();
+        for i in 0..10 {
+            let path = format!(r"SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{:04}", i);
+            let name = reg_read_string(HKEY_LOCAL_MACHINE, &path, "DriverDesc");
+            if let Some(n) = name {
+                if n.is_empty() || n.contains("Basic Display") || n.contains("Remote Display") { continue; }
+                let driver = reg_read_string(HKEY_LOCAL_MACHINE, &path, "DriverVersion").unwrap_or_default();
+                // 显存：HardwareInformation.qwMemorySize（QWORD）
+                let vram = reg_read_dword(HKEY_LOCAL_MACHINE, &path, "HardwareInformation.qwMemorySize").unwrap_or(0) as u64;
+                let vram_gb = if vram > 0 { format!("{:.1} GB", vram as f64 / (1024.0 * 1024.0 * 1024.0)) } else { String::new() };
+                graphics.push(json!({ "name": n, "memory": vram_gb, "driver": driver }));
+            }
+        }
+
+        // 4. 主板
+        let motherboard = {
+            let product = reg_read_string(HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS", "BaseBoardProduct").unwrap_or_default();
+            let manufacturer = reg_read_string(HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS", "BaseBoardManufacturer").unwrap_or_default();
+            json!({ "product": product, "manufacturer": manufacturer, "chipset": "" })
+        };
+
+        // 5. 磁盘（从 SCSI 注册表读取）
+        let mut disks: Vec<Value> = Vec::new();
+        for port in 0..8 {
+            for bus in 0..4 {
+                for target in 0..8 {
+                    let path = format!(r"HARDWARE\DEVICEMAP\Scsi\Scsi Port {port}\Scsi Bus {bus}\Target Id {target}\Logical Unit Id 0");
+                    let model = reg_read_string(HKEY_LOCAL_MACHINE, &path, "Identifier");
+                    if let Some(m) = model {
+                        if m.is_empty() { continue; }
+                        let media = if m.contains("SSD") || m.contains("NVMe") || m.contains("固态") { "SSD" } else { "硬盘" };
+                        disks.push(json!({ "name": m.trim(), "capacity": "", "media": media }));
+                    }
+                }
+            }
+        }
+
+        // 6. 内存（GetPhysicallyInstalledSystemMemory）
+        let mut memory: Vec<Value> = Vec::new();
+        {
+            use windows::Win32::System::SystemInformation::GetPhysicallyInstalledSystemMemory;
+            let mut kb = 0u64;
+            unsafe {
+                if GetPhysicallyInstalledSystemMemory(&mut kb).is_ok() {
+                    let gb = kb / (1024 * 1024);
+                    memory.push(json!({ "manufacturer": "", "part": "", "capacity": format!("{gb} GB"), "speed": 0, "locator": "" }));
+                }
+            }
+        }
+
+        // 7. 显示器（从 EDID 注册表读取，简化版）
+        let monitors: Vec<Value> = Vec::new(); // EDID 解析复杂，暂留空
+
+        Ok(json!({
+            "system": system,
+            "processor": processor,
+            "graphics": graphics,
+            "motherboard": motherboard,
+            "disks": disks,
+            "monitors": monitors,
+            "memory": memory,
+        }))
     }
 }

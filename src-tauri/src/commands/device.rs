@@ -20,7 +20,13 @@ pub async fn device_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<
 }
 
 /// 跑一次设备信息采集（超时 60s，与 Electron 版同值）
+/// B3 S2：默认原生（注册表+系统 API），TRIM_LEGACY_DEVICE=1 回退 PS（WMI COM）
 pub(crate) fn collect_device_info() -> Result<serde_json::Value, String> {
+    let legacy = std::env::var("TRIM_LEGACY_DEVICE").map(|v| v == "1").unwrap_or(false);
+    if !legacy {
+        return crate::engine::native::device_info().map_err(|e| format!("原生采集失败（设 TRIM_LEGACY_DEVICE=1 可回退 PS）: {e}"));
+    }
+    // PS 回退
     let script = pwsh::write_temp_script(DEVICE_INFO_PS, ".ps1")?;
     let result = pwsh::run_file(&script, std::time::Duration::from_secs(60), Some("device:scan"));
     let _ = std::fs::remove_file(&script);

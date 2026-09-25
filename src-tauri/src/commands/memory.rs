@@ -489,14 +489,17 @@ pub async fn memory_stubborn_block<R: tauri::Runtime>(window: WebviewWindow<R>) 
             "message": "顽固软件自启阻断需要管理员权限，请先提权"
         }));
     }
-    // B2 S1：原生路径（服务+注册表部分）优先，计划任务待 S2
-    match tauri::async_runtime::spawn_blocking(native::stubborn_block).await {
-        Ok(Ok(data)) => {
-            let failed = data.get("failedCount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            return Ok(json!({ "success": failed == 0.0, "partial": failed > 0.0, "data": data }));
-        }
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("memory:stubborn-block 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("memory:stubborn-block 原生任务异常，回退 PS: {e}")); }
+    // B2 S2：默认原生，TRIM_LEGACY_MEMORY=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_MEMORY").map(|v| v == "1").unwrap_or(false);
+    if !legacy {
+        return match tauri::async_runtime::spawn_blocking(native::stubborn_block).await {
+            Ok(Ok(data)) => {
+                let failed = data.get("failedCount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                Ok(json!({ "success": failed == 0.0, "partial": failed > 0.0, "data": data }))
+            }
+            Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生执行失败（设 TRIM_LEGACY_MEMORY=1 可回退 PS）: {e}") })),
+            Err(e) => Ok(json!({ "success": false, "message": format!("原生任务异常（设 TRIM_LEGACY_MEMORY=1 可回退 PS）: {e}") })),
+        };
     }
     // PS 回退
     Ok(
@@ -509,7 +512,6 @@ pub async fn memory_stubborn_block<R: tauri::Runtime>(window: WebviewWindow<R>) 
                 } else {
                     match serde_json::from_str::<Value>(out.stdout.trim()) {
                         Ok(data) => {
-                            // M-1：单项失败（failedCount>0）不再无条件报绿，如实降级
                             let failed = data
                                 .get("failedCount")
                                 .and_then(|v| v.as_f64())
