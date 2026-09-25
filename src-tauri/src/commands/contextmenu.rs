@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 
-use crate::engine::{delete_manifest, guard, log, paths, protect, sysinfo};
+use crate::engine::{delete_manifest, guard, log, native, paths, protect, sysinfo};
 use crate::pwsh;
 
 // ==================== 外置 PS 脚本（编译期嵌入，禁止手写） ====================
@@ -801,6 +801,12 @@ pub async fn contextmenu_restart_explorer<R: Runtime>(window: WebviewWindow<R>) 
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    // B6 S1：原生重启优先
+    match tauri::async_runtime::spawn_blocking(native::cm_restart_explorer).await {
+        Ok(Ok(data)) => return json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data }),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("restart-explorer 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("restart-explorer 任务异常，回退 PS: {e}")); }
+    }
     log::flush_sync();
     log::write_log("warn", "重启资源管理器（使右键菜单改动生效）");
     let out = match run_ps(PS_RESTART_EXPLORER, Duration::from_secs(30), Some("contextmenu.restart-explorer"))
@@ -833,6 +839,13 @@ pub async fn contextmenu_win11_classic<R: Runtime>(
     if act != "get" {
         log::write_log("warn", &format!("切换 Win11 右键菜单模式: {act}"));
     }
+    // B6 S1：原生注册表操作优先
+    let act_clone = act.clone();
+    match tauri::async_runtime::spawn_blocking(move || native::cm_win11_mode(&act_clone)).await {
+        Ok(Ok(data)) => return json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data }),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("win11-mode 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("win11-mode 任务异常，回退 PS: {e}")); }
+    }
     let script = if act == "get" {
         PS_WIN11_MODE.to_string()
     } else {
@@ -856,6 +869,12 @@ pub async fn contextmenu_win11_classic<R: Runtime>(
 pub async fn contextmenu_blocked_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
+    }
+    // B6 S1：原生注册表只读优先
+    match tauri::async_runtime::spawn_blocking(native::cm_blocked_list).await {
+        Ok(Ok(data)) => return json!({ "success": true, "data": data }),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("blocked-list 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("blocked-list 任务异常，回退 PS: {e}")); }
     }
     let out = match run_ps(PS_BLOCKED_LIST, Duration::from_secs(30), None) {
         Ok(o) => o,

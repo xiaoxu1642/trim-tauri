@@ -127,6 +127,8 @@ features = [
     "Win32_System_Com",
     # System_TaskScheduler：Task Scheduler COM（导出/删除计划任务）
     "Win32_System_TaskScheduler",
+    # B6：ProcessIdToSessionId（重启 explorer 时按会话过滤）
+    "Win32_System_RemoteDesktop",
 ]
 
 [profile.dev]

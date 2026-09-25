@@ -990,3 +990,225 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
 
     Ok(results)
 }
+// ==================== B6：右键菜单 ====================
+
+use windows::Win32::System::Registry::{
+    RegCreateKeyExW, RegSetValueExW, RegDeleteTreeW,
+    REG_OPTION_NON_VOLATILE, KEY_WRITE, REG_CREATE_KEY_DISPOSITION,
+};
+use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows::Win32::Foundation::{INVALID_HANDLE_VALUE, WIN32_ERROR};
+
+/// Win11 经典/现代右键菜单切换（对应 cm_win11_mode.ps1）
+///
+/// action: "get" / "set-classic" / "set-modern"
+pub fn cm_win11_mode(action: &str) -> Result<Value, String> {
+    const CLSID_PATH: &str = r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}";
+    const INPROC_PATH: &str = r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
+
+    unsafe {
+        // 读当前模式
+        let get_mode = || -> &'static str {
+            let sk = to_wide(INPROC_PATH);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                return "modern";
+            }
+            // 读默认值（空名）
+            let empty = to_wide("");
+            let mut ty = REG_VALUE_TYPE::default();
+            let mut size = 0u32;
+            let r = RegQueryValueExW(hk, PCWSTR(empty.as_ptr()), None, Some(&mut ty), None, Some(&mut size));
+            let _ = RegCloseKey(hk);
+            if r.is_err() { return "modern"; }
+            // 默认值存在且为空字符串 → classic
+            "classic"
+        };
+
+        let before = get_mode();
+        if action == "get" {
+            return Ok(json!({ "success": true, "mode": before, "changed": false, "requireRestart": false }));
+        }
+
+        let target_mode = if action == "set-classic" { "classic" }
+            else if action == "set-modern" { "modern" }
+            else { return Ok(json!({ "success": false, "mode": before, "changed": false, "message": "未知动作" })); };
+
+        if action == "set-classic" {
+            let sk = to_wide(INPROC_PATH);
+            let mut hk = HKEY::default();
+            let mut disposition = REG_CREATE_KEY_DISPOSITION(0);
+            let r = RegCreateKeyExW(
+                HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), None,
+                REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disposition),
+            );
+            if r.is_err() { return Err(format!("创建注册表键失败: 错误码 {}", r.0)); }
+            // 写空字符串默认值（必须存在，不是不写）；一个 null u16 = 4 字节
+            let empty = to_wide("");
+            let data: [u8; 4] = [0, 0, 0, 0];
+            let r2 = RegSetValueExW(
+                hk, PCWSTR(empty.as_ptr()), Some(0), REG_SZ, Some(&data),
+            );
+            if r2.is_err() { return Err(format!("写入默认值失败: 错误码 {}", r2.0)); }
+            let _ = RegCloseKey(hk);
+        } else {
+            // set-modern：删除整个 CLSID 键树
+            let sk = to_wide(CLSID_PATH);
+            let r = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()));
+            if r.is_err() { return Err(format!("删除注册表键失败: 错误码 {}", r.0)); }
+        }
+
+        let after = get_mode();
+        let success = after == target_mode;
+        Ok(json!({
+            "success": success,
+            "mode": after,
+            "changed": after != before,
+            "requireRestart": true,
+            "message": if success { "已切换，重启资源管理器后生效" } else { "切换未生效" },
+        }))
+    }
+}
+
+/// 被拦截的右键项清单（对应 cm_blocked_list.ps1，只读）
+pub fn cm_blocked_list() -> Result<Value, String> {
+    let roots: &[(HKEY, &str, &str)] = &[
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked", "machine"),
+        (HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked", "user"),
+    ];
+    let mut entries: Vec<Value> = Vec::new();
+    unsafe {
+        for (hive, subkey, scope) in roots {
+            let sk = to_wide(subkey);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                continue;
+            }
+            let names = reg_enum_values(hk);
+            for name in names {
+                let g = name.trim();
+                // GUID 格式：{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+                if g.len() == 38
+                    && g.starts_with('{') && g.ends_with('}')
+                    && g.as_bytes().iter().skip(1).take(8).all(|b| b.is_ascii_hexdigit())
+                {
+                    entries.push(json!({ "guid": g, "scope": scope }));
+                }
+            }
+            let _ = RegCloseKey(hk);
+        }
+    }
+    Ok(json!({ "success": true, "entries": entries }))
+}
+
+/// 重启资源管理器（对应 cm_restart_explorer.ps1）
+pub fn cm_restart_explorer() -> Result<Value, String> {
+    unsafe {
+        // 当前会话 ID
+        let mut my_session = 0u32;
+        ProcessIdToSessionId(std::process::id(), &mut my_session);
+
+        // 枚举所有 explorer.exe 进程，匹配当前会话
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            .map_err(|e| format!("创建进程快照失败: {e}"))?;
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err("创建进程快照失败".into());
+        }
+        let mut pe = PROCESSENTRY32W::default();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut targets: Vec<(u32, String)> = Vec::new();
+
+        if Process32FirstW(snapshot, &mut pe).is_ok() {
+            loop {
+                let name = String::from_utf16_lossy(&pe.szExeFile);
+                if name.eq_ignore_ascii_case("explorer.exe") {
+                    let pid = pe.th32ProcessID;
+                    let mut session = 0u32;
+                    if ProcessIdToSessionId(pid, &mut session).is_ok() && session == my_session {
+                        // 取进程路径
+                        let path = get_process_path(pid).unwrap_or_default();
+                        targets.push((pid, path));
+                    }
+                }
+                if Process32NextW(snapshot, &mut pe).is_err() { break; }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+
+        if targets.is_empty() {
+            return Ok(json!({
+                "success": false, "killed": 0, "restarted": 0, "alive": 0,
+                "message": "当前会话没有运行中的资源管理器"
+            }));
+        }
+
+        let killed = targets.len();
+        // 记录唯一路径
+        let paths: Vec<String> = targets.iter().map(|(_, p)| p.clone())
+            .filter(|p| !p.is_empty()).collect::<std::collections::HashSet<_>>()
+            .into_iter().collect();
+
+        // 逐个杀
+        for (pid, _) in &targets {
+            if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
+                let _ = TerminateProcess(h, 1);
+                let _ = CloseHandle(h);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(700));
+
+        // 重新启动
+        let mut started = 0;
+        for p in &paths {
+            if std::path::Path::new(p).exists() {
+                if std::process::Command::new(p).spawn().is_ok() { started += 1; }
+            }
+        }
+        if started == 0 {
+            let fallback = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            let fp = format!("{fallback}\\explorer.exe");
+            if std::process::Command::new(&fp).spawn().is_ok() { started = 1; }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(900));
+
+        // 检查存活
+        let mut alive = 0;
+        let snap2 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if let Ok(snap2) = snap2 {
+            let mut pe2 = PROCESSENTRY32W::default();
+            pe2.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap2, &mut pe2).is_ok() {
+                loop {
+                    let name = String::from_utf16_lossy(&pe2.szExeFile);
+                    if name.eq_ignore_ascii_case("explorer.exe") {
+                        let mut session = 0u32;
+                        if ProcessIdToSessionId(pe2.th32ProcessID, &mut session).is_ok() && session == my_session {
+                            alive += 1;
+                        }
+                    }
+                    if Process32NextW(snap2, &mut pe2).is_err() { break; }
+                }
+            }
+            let _ = CloseHandle(snap2);
+        }
+
+        Ok(json!({
+            "success": alive > 0,
+            "killed": killed,
+            "restarted": started,
+            "alive": alive,
+            "message": if alive > 0 { "已重启资源管理器" } else { "资源管理器未能自动拉起，请手动启动 explorer.exe" },
+        }))
+    }
+}
+
+/// 取进程完整路径（QueryFullProcessImageNameW）
+unsafe fn get_process_path(pid: u32) -> Option<String> {
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_NAME_FORMAT};
+    let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let r = QueryFullProcessImageNameW(h, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
+    let _ = CloseHandle(h);
+    if r.is_ok() { Some(String::from_utf16_lossy(&buf[..len as usize])) } else { None }
+}
