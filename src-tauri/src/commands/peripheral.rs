@@ -197,6 +197,19 @@ pub async fn peripheral_apply<R: tauri::Runtime>(
     }
 
     let payload = Value::Object(filtered).to_string();
+
+    // S1：原生优先，失败自动回退 PS
+    let opts_val: Value = serde_json::from_str(&payload).unwrap_or(json!({}));
+    match crate::engine::native::peripheral_apply(&opts_val) {
+        Ok(()) => {
+            log::write_log("info", "外设优化应用原生完成");
+            prune_backups(10);
+            return Ok(json!({ "success": true, "message": "完成" }));
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("外设优化应用原生失败，回退 PS: {e}"));
+        }
+    }
     let script = PS_APPLY.replace(APPLY_SENTINEL, &payload);
     let Some(out) = run_ps(&script, 30) else {
         return Ok(json!({ "success": false, "message": "执行异常" }));

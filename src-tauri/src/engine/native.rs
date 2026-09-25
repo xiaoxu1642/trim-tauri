@@ -4484,3 +4484,68 @@ pub fn cm_restore() -> Result<Value, String> {
         "failed": failed,
     }))
 }
+// ==================== B9 peripheral_apply：外设优化应用 ====================
+
+/// 外设优化应用（对应 peripheral_apply.ps1，S1）
+///
+/// 写入三个 HKLM 注册表值：Win32PrioritySeparation、KeyboardDataQueueSize、MouseDataQueueSize。
+/// 写入前备份每个父键到 %APPDATA%\Trim\peripheral-backup\backup_<stamp>_<n>.reg。
+/// options 中值为 -1 表示跳过该项。
+pub fn peripheral_apply(options: &Value) -> Result<(), String> {
+    let targets: Vec<(&str, &str, &str, i64)> = vec![
+        ("win32", r"SYSTEM\CurrentControlSet\Control\PriorityControl", "Win32PrioritySeparation",
+         options.get("win32").and_then(|v| v.as_i64()).unwrap_or(-1)),
+        ("keyboard", r"SYSTEM\CurrentControlSet\Services\kbdclass\Parameters", "KeyboardDataQueueSize",
+         options.get("keyboard").and_then(|v| v.as_i64()).unwrap_or(-1)),
+        ("mouse", r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters", "MouseDataQueueSize",
+         options.get("mouse").and_then(|v| v.as_i64()).unwrap_or(-1)),
+    ];
+
+    // 备份目录
+    let backup_dir = if let Ok(appdata) = std::env::var("APPDATA") {
+        std::path::PathBuf::from(appdata).join("Trim").join("peripheral-backup")
+    } else {
+        return Err("无法获取 APPDATA".into());
+    };
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
+    let stamp = crate::engine::now_ms().to_string();
+
+    // 备份每个需要修改的父键
+    let mut part = 0;
+    for (_key, subkey, _name, value) in &targets {
+        if *value < 0 { continue; }
+        part += 1;
+        let reg_path = format!("HKLM\\{subkey}");
+        let backup_file = backup_dir.join(format!("backup_{stamp}_{part}.reg"));
+        let out = std::process::Command::new("reg.exe")
+            .args(["export", &reg_path, backup_file.to_str().unwrap(), "/y"])
+            .output();
+        if out.is_err() || !out.unwrap().status.success() {
+            let _ = std::fs::remove_file(&backup_file);
+            return Err("注册表备份失败".into());
+        }
+    }
+
+    // 写入值
+    unsafe {
+        for (_key, subkey, name, value) in &targets {
+            if *value < 0 { continue; }
+            let sk = to_wide(subkey);
+            let mut hk = HKEY::default();
+            let mut disp = REG_CREATED_NEW_KEY;
+            if RegCreateKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), None, PCWSTR::default(),
+                REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+                return Err(format!("无法打开注册表键: {subkey}"));
+            }
+            let nm = to_wide(name);
+            let val = *value as u32;
+            if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes())).is_err() {
+                let _ = RegCloseKey(hk);
+                return Err(format!("写入注册表失败: {name}"));
+            }
+            let _ = RegCloseKey(hk);
+        }
+    }
+
+    Ok(())
+}
