@@ -15,7 +15,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::window::Color;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::engine::{guard, log, paths};
+use crate::engine::{guard, log, native, paths};
 use crate::pwsh;
 
 const LABEL: &str = "peripheral";
@@ -112,6 +112,13 @@ fn find_prefixed<'a>(stdout: &'a str, prefix: &str) -> Option<&'a str> {
 #[tauri::command]
 pub async fn peripheral_query<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
+    // B3 S1：原生注册表读取优先
+    match tauri::async_runtime::spawn_blocking(native::peripheral_query).await {
+        Ok(Ok(data)) => return Ok(json!({ "success": true, "data": data })),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("peripheral:query 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("peripheral:query 任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     let Some(out) = run_ps(PS_QUERY, 20) else {
         return Ok(json!({ "success": false, "message": "读取当前外设设置失败" }));
     };

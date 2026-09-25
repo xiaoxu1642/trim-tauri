@@ -503,3 +503,153 @@ pub fn stubborn_block() -> Result<Value, String> {
     // 当前直接返回错误，由调用方回退 PS 完整执行。
     Err("stubborn_block 原生路径待实现（S2）".to_string())
 }
+// ==================== B4：本机测速（回环 TCP） ====================
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::time::Instant;
+
+/// 回环 TCP 延迟测试（对应 netspeed_ping.ps1）
+pub fn netspeed_ping() -> Result<Value, String> {
+    let listener = TcpListener::bind("127.0.0.1:19999").map_err(|_| "端口被占用".to_string())?;
+    let mut samples: Vec<f64> = Vec::new();
+    for _ in 0..10 {
+        let start = Instant::now();
+        match TcpStream::connect_timeout(
+            &"127.0.0.1:19999".parse().unwrap(),
+            std::time::Duration::from_millis(2000),
+        ) {
+            Ok(_stream) => {
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            Err(_) => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    drop(listener);
+    if samples.is_empty() {
+        return Ok(json!({"success": false, "message": "无法建立本地回环连接"}));
+    }
+    let avg = samples.iter().sum::<f64>() / samples.len() as f64;
+    let min = samples.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = samples.iter().cloned().fold(0.0f64, f64::max);
+    let mut sorted = samples.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut jitter = 0.0;
+    for i in 1..sorted.len() {
+        jitter += (sorted[i] - sorted[i-1]).abs();
+    }
+    if sorted.len() > 1 { jitter /= (sorted.len() - 1) as f64; }
+    Ok(json!({
+        "success": true,
+        "avg": (avg * 100.0).round() / 100.0,
+        "min": (min * 100.0).round() / 100.0,
+        "max": (max * 100.0).round() / 100.0,
+        "jitter": (jitter * 100.0).round() / 100.0,
+        "samples": samples,
+    }))
+}
+
+/// 回环 TCP 吞吐测试（对应 netspeed_throughput.ps1）
+pub fn netspeed_throughput(secs: f64) -> Result<Value, String> {
+    let listener = TcpListener::bind("127.0.0.1:19999").map_err(|_| "端口被占用".to_string())?;
+    // 服务端线程：接收数据
+    let server = std::thread::spawn(move || {
+        let mut received: u64 = 0;
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => received += n as u64,
+                    Err(_) => break,
+                }
+            }
+        }
+        received
+    });
+    // 客户端：连接并持续发送
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = TcpStream::connect("127.0.0.1:19999").map_err(|_| "连接失败".to_string())?;
+    let payload = vec![0u8; 64 * 1024];
+    let start = Instant::now();
+    let mut total_sent: u64 = 0;
+    let mut samples: Vec<Value> = Vec::new();
+    loop {
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed >= secs { break; }
+        client.write_all(&payload).map_err(|_| "发送失败".to_string())?;
+        total_sent += payload.len() as u64;
+        if samples.is_empty() || (elapsed * 5.0) >= samples.len() as f64 {
+            let inst_bps = total_sent as f64 / elapsed.max(0.001);
+            samples.push(json!({
+                "time": (elapsed * 100.0).round() / 100.0,
+                "speed": (inst_bps / 1048576.0 * 100.0).round() / 100.0,
+            }));
+        }
+    }
+    drop(client);
+    let received = server.join().unwrap_or(0);
+    let actual_duration = start.elapsed().as_secs_f64().max(0.001);
+    let avg_bps = received as f64 / actual_duration;
+    let download_mbps = (avg_bps * 8.0 / 1048576.0 * 100.0).round() / 100.0;
+    let speeds: Vec<f64> = samples.iter().filter_map(|s| s.get("speed").and_then(|v| v.as_f64())).collect();
+    let mut jitter = 0.0;
+    for i in 1..speeds.len() {
+        jitter += (speeds[i] - speeds[i-1]).abs();
+    }
+    if speeds.len() > 1 { jitter /= (speeds.len() - 1) as f64; }
+    Ok(json!({
+        "success": true,
+        "duration": (actual_duration * 100.0).round() / 100.0,
+        "downloadMbps": download_mbps,
+        "uploadMbps": download_mbps,
+        "totalBytes": received,
+        "jitter": (jitter * 100.0).round() / 100.0,
+        "samples": samples,
+    }))
+}
+
+// ==================== B3：外设只读查询 ====================
+
+use windows::Win32::System::Registry::{
+    RegOpenKeyExW, RegQueryValueExW, RegCloseKey, HKEY, HKEY_LOCAL_MACHINE,
+    KEY_READ, REG_VALUE_TYPE, REG_SZ, REG_DWORD,
+};
+
+/// 读注册表 DWORD，失败返回 -1
+unsafe fn read_reg_dword(hkey: HKEY, subkey: &str, value: &str) -> i32 {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hkey, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+        return -1;
+    }
+    let vn = to_wide(value);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut buf = [0u8; 4];
+    let mut size = 4u32;
+    let r = RegQueryValueExW(
+        hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty),
+        Some(buf.as_mut_ptr()), Some(&mut size),
+    );
+    RegCloseKey(hk);
+    if r.is_err() || ty != REG_DWORD { return -1; }
+    i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+}
+
+/// 外设状态查询（对应 peripheral_query.ps1）
+pub fn peripheral_query() -> Result<Value, String> {
+    unsafe {
+        let win32 = read_reg_dword(HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\PriorityControl", "Win32PrioritySeparation");
+        let keyboard = read_reg_dword(HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Services\kbdclass\Parameters", "KeyboardDataQueueSize");
+        let mouse = read_reg_dword(HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters", "MouseDataQueueSize");
+        Ok(json!({
+            "win32": win32,
+            "keyboard": keyboard,
+            "mouse": mouse,
+        }))
+    }
+}

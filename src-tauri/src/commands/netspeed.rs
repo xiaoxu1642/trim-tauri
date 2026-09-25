@@ -16,7 +16,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
-use crate::engine::guard;
+use crate::engine::{guard, log, native};
 use crate::pwsh;
 
 /// PS 脚本编译期嵌入（生成自源仓库，见 tools/sync-ps-from-js.mjs）
@@ -38,6 +38,13 @@ fn run_script(script: &str, timeout: Duration, op: &str) -> Result<pwsh::PsOutpu
 #[tauri::command]
 pub async fn netspeed_ping<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
+    // B4 S1：原生回环 TCP 优先
+    match tauri::async_runtime::spawn_blocking(native::netspeed_ping).await {
+        Ok(Ok(v)) => return Ok(json!({ "success": true, "data": v })),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("netspeed:ping 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("netspeed:ping 任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     let result =
         tauri::async_runtime::spawn_blocking(|| run_script(NETSPEED_PING_PS, Duration::from_secs(8), "netspeed:ping"))
             .await;
@@ -69,6 +76,13 @@ pub async fn netspeed_throughput<R: tauri::Runtime>(window: WebviewWindow<R>, du
     };
     let secs = requested.max(1.0).min(60.0);
 
+    // B4 S1：原生回环 TCP 吞吐优先
+    match tauri::async_runtime::spawn_blocking(move || native::netspeed_throughput(secs)).await {
+        Ok(Ok(v)) => return Ok(json!({ "success": true, "data": v })),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("netspeed:throughput 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("netspeed:throughput 任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     let script = NETSPEED_THROUGHPUT_PS.replace(DURATION_SENTINEL, &format!("{secs}"));
     if script.contains(DURATION_SENTINEL) {
         return Ok(json!({ "success": false, "message": "测速脚本时长替换失败" }));
