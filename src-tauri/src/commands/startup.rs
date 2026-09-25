@@ -293,13 +293,25 @@ pub async fn startup_delete<R: Runtime>(
     }
 
     log::write_log("info", &format!("启动项删除 {} 项", safe.len()));
-    let script = inject_items(PS_REMOVE, ITEMS_SENTINEL, &safe);
-    let out = match run_ps(&script, Duration::from_secs(60), Some("startup.delete")) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    let Some(mut data) = parse_json(&out.stdout) else {
-        return json!({ "success": false, "message": "无法解析执行结果" });
+
+    // S1：原生优先，失败自动回退 PS
+    let mut data = match crate::engine::native::startup_delete(&safe) {
+        Ok(d) => {
+            log::write_log("info", "启动项删除原生完成");
+            d
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("启动项删除原生失败，回退 PS: {e}"));
+            let script = inject_items(PS_REMOVE, ITEMS_SENTINEL, &safe);
+            let out = match run_ps(&script, Duration::from_secs(60), Some("startup.delete")) {
+                Ok(o) => o,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            match parse_json(&out.stdout) {
+                Some(d) => d,
+                None => return json!({ "success": false, "message": "无法解析执行结果" }),
+            }
+        }
     };
 
     // 文件类删除：白名单 containment 校验后回收站删除

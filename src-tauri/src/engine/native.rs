@@ -619,7 +619,7 @@ use windows::Win32::System::Registry::{
 
 /// 读注册表 DWORD，失败返回 -1
 unsafe fn read_reg_dword(hkey: HKEY, subkey: &str, value: &str) -> i32 {
-    let sk = to_wide(subkey);
+    let sk = to_wide(&subkey);
     let mut hk = HKEY::default();
     if RegOpenKeyExW(hkey, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
         return -1;
@@ -774,7 +774,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
         ];
 
         for (hive_tag, hive, subkey, label, scope) in run_paths {
-            let sk = to_wide(subkey);
+            let sk = to_wide(&subkey);
             let mut hk = HKEY::default();
             if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
                 continue;
@@ -1080,7 +1080,7 @@ pub fn cm_blocked_list() -> Result<Value, String> {
     let mut entries: Vec<Value> = Vec::new();
     unsafe {
         for (hive, subkey, scope) in roots {
-            let sk = to_wide(subkey);
+            let sk = to_wide(&subkey);
             let mut hk = HKEY::default();
             if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
                 continue;
@@ -3103,7 +3103,7 @@ unsafe fn set_approved_bit(hive: HKEY, value_name: &str, disable: bool) -> Resul
 
 /// 读注册表值（返回类型+数据）
 unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -> Option<(REG_VALUE_TYPE, Vec<u8>)> {
-    let sk = to_wide(subkey);
+    let sk = to_wide(&subkey);
     let mut hk = HKEY::default();
     if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
     let nm = to_wide(value_name);
@@ -3120,7 +3120,7 @@ unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -> Op
 
 /// 删除注册表值
 unsafe fn reg_delete_value(hive: HKEY, subkey: &str, value_name: &str) -> bool {
-    let sk = to_wide(subkey);
+    let sk = to_wide(&subkey);
     let mut hk = HKEY::default();
     if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() { return false; }
     let nm = to_wide(value_name);
@@ -3131,7 +3131,7 @@ unsafe fn reg_delete_value(hive: HKEY, subkey: &str, value_name: &str) -> bool {
 
 /// 写注册表值（恢复用）
 unsafe fn reg_write_value(hive: HKEY, subkey: &str, value_name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> bool {
-    let sk = to_wide(subkey);
+    let sk = to_wide(&subkey);
     let mut hk = HKEY::default();
     let mut disp = REG_CREATED_NEW_KEY;
     if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
@@ -3824,4 +3824,188 @@ unsafe fn toggle_cm_item(
     }
 
     Err(format!("未知 source 类型: {source}"))
+}
+// ==================== B5 startup_delete：启动项删除 ====================
+
+fn startup_deleted_dir() -> std::path::PathBuf {
+    let dir = if let Ok(appdata) = std::env::var("APPDATA") {
+        std::path::PathBuf::from(appdata).join("Trim").join("startup-backup").join("deleted")
+    } else {
+        crate::engine::paths::app_data_dir().join("startup-backup").join("deleted")
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn safe_name(name: &str) -> String {
+    name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// 启动项删除（对应 startup_remove.ps1，S1）
+///
+/// 注册表：reg.exe export 备份整个键 + RegDeleteValueW 删值
+/// 文件夹：复制到 deleted/ 备份，返回 fsDelete 由主进程回收站删除
+/// 计划任务：schtasks /Query /XML 备份 + schtasks /Delete 删除
+pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
+    let deleted_dir = startup_deleted_dir();
+    let backup_dir = deleted_dir.parent().unwrap().to_path_buf();
+    let disabled_file = backup_dir.join("disabled.json");
+    let stamp = crate::engine::now_ms().to_string();
+
+    let mut records: Vec<Value> = if disabled_file.exists() {
+        std::fs::read_to_string(&disabled_file).ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| Value::Array(vec![]))
+            .as_array().cloned().unwrap_or_default()
+    } else { vec![] };
+
+    let mut results: Vec<Value> = Vec::new();
+    let mut fs_delete: Vec<Value> = Vec::new();
+    let mut success = 0i64;
+    let mut failed = 0i64;
+
+    for item in items {
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+
+        match source {
+            "registry" => {
+                let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
+                let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
+                if reg_path.is_empty() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "缺少注册表路径"}));
+                    continue;
+                }
+                let (hive, subkey) = match parse_reg_path(reg_path) {
+                    Some(v) => v,
+                    None => { failed += 1; results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表路径格式错误"})); continue; }
+                };
+                // 备份整个键到 .reg
+                let safe = safe_name(&name);
+                let reg_file = deleted_dir.join(format!("{stamp}_reg_{safe}.reg"));
+                let hive_short = if hive == HKEY_LOCAL_MACHINE { "HKLM" } else { "HKCU" };
+                let export_path = format!("{hive_short}\\{subkey}");
+                let export_out = std::process::Command::new("reg.exe")
+                    .args(["export", &export_path, reg_file.to_str().unwrap(), "/y"])
+                    .output();
+                if export_out.is_err() || !reg_file.exists() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表备份失败，未执行删除"}));
+                    continue;
+                }
+                // 删值
+                unsafe {
+                    let sk = to_wide(&subkey);
+                    let mut hk = HKEY::default();
+                    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开注册表键"}));
+                        continue;
+                    }
+                    let nm = to_wide(value_name);
+                    let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+                    let _ = RegCloseKey(hk);
+                    // 回读
+                    let sk2 = to_wide(&subkey);
+                    let mut hk2 = HKEY::default();
+                    let still_exists = if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
+                        let nm2 = to_wide(value_name);
+                        let mut ty = REG_VALUE_TYPE::default();
+                        let mut size = 0u32;
+                        let exists = RegQueryValueExW(hk2, PCWSTR(nm2.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
+                        let _ = RegCloseKey(hk2);
+                        exists
+                    } else { false };
+                    if still_exists {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
+                    } else {
+                        // 从 disabled.json 移除记录
+                        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+                        success += 1;
+                        results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除（已备份注册表键）"}));
+                    }
+                }
+            }
+            "folder" => {
+                let file_path = item.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
+                // 检查是否为已禁用记录（在备份目录）
+                let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+                let backup_path = rec.and_then(|r| r.get("filePath").and_then(|v| v.as_str())).unwrap_or("");
+                if !backup_path.is_empty() && std::path::Path::new(backup_path).exists() && !std::path::Path::new(file_path).exists() {
+                    // 从备份目录删除
+                    fs_delete.push(json!({"id": id, "name": name, "path": backup_path, "kind": "backup-file"}));
+                    records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+                    results.push(json!({"id": id, "name": name, "status": "deferred", "message": "备份文件待主进程回收站删除"}));
+                } else if std::path::Path::new(file_path).exists() {
+                    // 备份到 deleted 目录
+                    let safe = safe_name(&name);
+                    let ext = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let dest = deleted_dir.join(format!("{stamp}_folder_{safe}.{ext}"));
+                    if std::fs::copy(file_path, &dest).is_err() {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "文件备份失败"}));
+                        continue;
+                    }
+                    fs_delete.push(json!({"id": id, "name": name, "path": file_path, "kind": "startup-file"}));
+                    results.push(json!({"id": id, "name": name, "status": "deferred", "message": "已备份，待主进程回收站删除"}));
+                } else {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "文件不存在"}));
+                }
+            }
+            "task" => {
+                let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
+                let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
+                if task_name.is_empty() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "缺少任务名"}));
+                    continue;
+                }
+                let tn = if task_path.is_empty() || task_path == "\\" { task_name.to_string() } else { format!("{}\\\\{}", task_path, task_name) };
+                // 导出 XML 备份
+                let safe = safe_name(&task_name);
+                let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
+                let query_out = std::process::Command::new("schtasks")
+                    .args(["/Query", "/TN", &tn, "/XML"])
+                    .output();
+                if let Ok(out) = query_out {
+                    if out.status.success() {
+                        let _ = std::fs::write(&xml_file, &out.stdout);
+                    }
+                }
+                if !xml_file.exists() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "计划任务备份失败，未执行删除"}));
+                    continue;
+                }
+                // 删除
+                let del_out = std::process::Command::new("schtasks")
+                    .args(["/Delete", "/TN", &tn, "/F"])
+                    .output();
+                if del_out.is_err() || !del_out.unwrap().status.success() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
+                } else {
+                    success += 1;
+                    results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除（已导出任务备份）"}));
+                }
+            }
+            _ => {
+                failed += 1;
+                results.push(json!({"id": id, "name": name, "status": "error", "message": "未知来源类型"}));
+            }
+        }
+    }
+
+    // 写回 disabled.json
+    if records.is_empty() {
+        let _ = std::fs::remove_file(&disabled_file);
+    } else {
+        let _ = std::fs::write(&disabled_file, serde_json::to_string_pretty(&Value::Array(records)).unwrap_or_else(|_| "[]".into()));
+    }
+
+    Ok(json!({"success": success, "failed": failed, "results": results, "fsDelete": fs_delete}))
 }
