@@ -4046,3 +4046,113 @@ pub fn startup_add(path: &str, name: &str) -> Result<Option<String>, String> {
         Ok(None)
     }
 }
+// ==================== B6 cm_remove：右键菜单删除 ====================
+
+/// 右键菜单删除（对应 cm_remove.ps1，S1）
+///
+/// 删除注册表键（RegDeleteTreeW 递归删除）。文件系统项由主进程回收站删除，
+/// shellnew 项通过启停管理（禁止整键删除），系统保护项拒绝。
+pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
+    unsafe {
+        let mut results: Vec<Value> = Vec::new();
+        let mut success = 0i64;
+        let mut failed = 0i64;
+
+        for item in items {
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let risk = item.get("risk").and_then(|v| v.as_str()).unwrap_or("");
+
+            if risk == "protected" {
+                results.push(json!({"id": id, "name": name, "status": "skip", "message": "系统保护项"}));
+                continue;
+            }
+            // 文件系统项由主进程回收站删除
+            if source == "filesystem" || source == "winx" {
+                results.push(json!({"id": id, "name": name, "status": "skip", "message": "文件系统项由主进程回收站删除"}));
+                continue;
+            }
+            // shellnew 禁止整键删除
+            if source == "shellnew" {
+                results.push(json!({"id": id, "name": name, "status": "skip", "message": "新建菜单项请通过启停操作管理，禁止整键删除"}));
+                continue;
+            }
+
+            let mut target = item.get("nativeRegPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if target.is_empty() { target = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("").to_string(); }
+            if target.is_empty() {
+                results.push(json!({"id": id, "name": name, "status": "skip", "message": "无效或过宽路径"}));
+                continue;
+            }
+            // 路径校验：不能是根键
+            let lower = target.to_lowercase();
+            if lower == "hkey_classes_root" || lower == "hkey_local_machine" || lower == "hkey_current_user"
+                || lower == "hkey_users" || lower == "hkey_current_config"
+                || lower.starts_with("hkey_classes_root\\") && !lower.contains("\\") {
+                results.push(json!({"id": id, "name": name, "status": "skip", "message": "无效或过宽路径"}));
+                continue;
+            }
+
+            let (hive, subkey) = match parse_reg_path(&target) {
+                Some(v) => v,
+                None => { results.push(json!({"id": id, "name": name, "status": "skip", "message": "注册表路径格式错误"})); continue; }
+            };
+
+            // 检查键是否存在
+            let sk = to_wide(&subkey);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                results.push(json!({"id": id, "name": name, "status": "skip", "message": "路径不存在"}));
+                continue;
+            }
+            let _ = RegCloseKey(hk);
+
+            // 删除键（需要父键的 DELETE 权限）
+            if let Some(pos) = subkey.rfind('\\') {
+                let parent = &subkey[..pos];
+                let leaf = &subkey[pos+1..];
+                let parent_sk = to_wide(parent);
+                let mut parent_hk = HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_err() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开父键（可能需要管理员权限）"}));
+                    continue;
+                }
+                let leaf_nm = to_wide(leaf);
+                let r = RegDeleteTreeW(parent_hk, PCWSTR(leaf_nm.as_ptr()));
+                let _ = RegCloseKey(parent_hk);
+                if r.is_err() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除失败（可能需要管理员权限）"}));
+                } else {
+                    // 回读确认
+                    let sk2 = to_wide(&subkey);
+                    let mut hk2 = HKEY::default();
+                    let still_exists = RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok();
+                    if still_exists { let _ = RegCloseKey(hk2); }
+                    if still_exists {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "删除后键仍存在（可能被占用或权限不足）"}));
+                    } else {
+                        success += 1;
+                        results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除"}));
+                    }
+                }
+            } else {
+                // 直接是根键下的一级键，用 RegDeleteTreeW(hive, leaf)
+                let leaf_nm = to_wide(&subkey);
+                let r = RegDeleteTreeW(hive, PCWSTR(leaf_nm.as_ptr()));
+                if r.is_err() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除失败（可能需要管理员权限）"}));
+                } else {
+                    success += 1;
+                    results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除"}));
+                }
+            }
+        }
+
+        Ok(json!({"success": success, "failed": failed, "results": results}))
+    }
+}
