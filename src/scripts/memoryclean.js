@@ -75,7 +75,8 @@
     if (window.api?.memory) {
       try {
         const resp = await window.api.memory.info();
-        if (resp && resp.success && resp.data) {
+        // 部分成功：后端在 ok_count>0 时即 success=true；这里兜底——只要 data 里有 results，就逐项展示
+      if (resp && resp.data && Array.isArray(resp.data.results)) {
           renderInfo(resp.data);
           return;
         }
@@ -321,7 +322,8 @@
         if (elevated) window.app?.toast('info', '已获得管理员权限，请重新点击「开始清理」');
         return;
       }
-      if (resp && resp.success && resp.data) {
+      // 部分成功：后端在 ok_count>0 时即 success=true；这里兜底——只要 data 里有 results，就逐项展示
+      if (resp && resp.data && Array.isArray(resp.data.results)) {
         const d = resp.data;
         const okCount = (d.results || []).filter(x => x.ok).length;
         const failCount = (d.results || []).length - okCount;
@@ -342,6 +344,7 @@
       throw new Error((resp && resp.message) || '清理失败');
     } catch (e) {
       window.app?.toast('error', '内存清理失败：' + e.message);
+      window.app?.log('error', '内存清理异常: ' + e.message);
     }
   }
 
@@ -360,7 +363,8 @@
         if (elevated) window.app?.toast('info', '已获得管理员权限，请重新点击「一键专杀」');
         return;
       }
-      if (resp && resp.success && resp.data) {
+      // 部分成功：后端在 ok_count>0 时即 success=true；这里兜底——只要 data 里有 results，就逐项展示
+      if (resp && resp.data && Array.isArray(resp.data.results)) {
         const d = resp.data;
         const killed = Number(d.killed) || 0;
         const failed = Number(d.failed) || 0;
@@ -402,7 +406,8 @@
         if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行本操作');
         return;
       }
-      if (resp && resp.success && resp.data) {
+      // 部分成功：后端在 ok_count>0 时即 success=true；这里兜底——只要 data 里有 results，就逐项展示
+      if (resp && resp.data && Array.isArray(resp.data.results)) {
         const d = resp.data;
         const svcs = Array.isArray(d.services) ? d.services : [];
         const tasks = Array.isArray(d.tasks) ? d.tasks : [];

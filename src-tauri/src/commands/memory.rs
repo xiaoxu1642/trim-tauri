@@ -212,11 +212,19 @@ pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Op
     Ok(match result {
         Ok(Ok(data)) => match data.get("results").and_then(|v| v.as_array()) {
             Some(results) => {
-                let failed = results
-                    .iter()
-                    .filter(|item| item.get("ok").and_then(|v| v.as_bool()) == Some(false))
+                // 部分成功语义：至少一项 ok=true 即 success=true；失败项由前端在 toast 里逐项列出
+                // NTSTATUS。此前 failed==0 才 success 会把"部分区域被系统拒绝但其他区域已释放"
+                // 整批判成失败，用户看到"清理失败"但内存确实降了——探测口径过严。
+                let ok_count = results.iter()
+                    .filter(|item| item.get("ok").and_then(|v| v.as_bool()) == Some(true))
                     .count();
-                json!({ "success": failed == 0, "data": data, "engine": "rust" })
+                let failed = results.len() - ok_count;
+                log::write_log("info", &format!(
+                    "内存清理：释放 {}，成功 {} 项，失败 {} 项",
+                    data.get("freed").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    ok_count, failed
+                ));
+                json!({ "success": ok_count > 0, "data": data, "engine": "rust" })
             }
             // 原生引擎的失败也用可解析 JSON 回执（`{"error":"…"}`，如区域 id 非法）：如实报出
             None => {
