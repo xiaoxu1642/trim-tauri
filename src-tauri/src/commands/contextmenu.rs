@@ -536,19 +536,31 @@ pub async fn contextmenu_toggle<R: Runtime>(
     }
 
     log::write_log("info", &format!("切换右键菜单启停: {} 项", toggle_items.len()));
-    let script = inject_items(PS_TOGGLE, &toggle_items);
-    let out = match run_ps(&script, Duration::from_secs(60), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.timed_out {
-        return json!({ "success": false, "message": "切换超时，请稍后重试" });
-    }
-    if out.code != 0 {
-        return json!({ "success": false, "message": "切换失败" });
-    }
-    let Some(data) = parse_last_json(&out.stdout) else {
-        return json!({ "success": false, "message": "解析切换结果失败" });
+
+    // S1：原生优先，失败自动回退 PS
+    let data = match crate::engine::native::cm_toggle(&toggle_items) {
+        Ok(d) => {
+            log::write_log("info", "右键菜单切换原生完成");
+            d
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("右键菜单切换原生失败，回退 PS: {e}"));
+            let script = inject_items(PS_TOGGLE, &toggle_items);
+            let out = match run_ps(&script, Duration::from_secs(60), None) {
+                Ok(o) => o,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            if out.timed_out {
+                return json!({ "success": false, "message": "切换超时，请稍后重试" });
+            }
+            if out.code != 0 {
+                return json!({ "success": false, "message": "切换失败" });
+            }
+            match parse_last_json(&out.stdout) {
+                Some(d) => d,
+                None => return json!({ "success": false, "message": "解析切换结果失败" }),
+            }
+        }
     };
 
     // CM-12：回写新路径/屏蔽态到快照 + 缓存

@@ -3407,3 +3407,421 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     }
     Some(result)
 }
+
+// ==================== B6 cm_toggle：右键菜单启用/禁用 ====================
+
+use windows::Win32::System::Registry::RegRenameKey;
+
+/// 检查 CLSID 是否为系统内置 COM 服务器（文件在 SystemRoot 下）
+unsafe fn is_system_com_server(guid: &str) -> bool {
+    if !is_guid(guid) { return false; }
+    let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_lowercase();
+    for view in [
+        r"SOFTWARE\Classes\CLSID",
+        r"SOFTWARE\Classes\Wow6432Node\CLSID",
+    ] {
+        for sub in ["InprocServer32", "LocalServer32"] {
+            let key = format!("{view}\\{guid}\\{sub}");
+            let sk = to_wide(&key);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
+            let mut raw = reg_read_string(hk, "").unwrap_or_default();
+            if raw.is_empty() { raw = reg_read_string(hk, "CodeBase").unwrap_or_default(); }
+            let _ = RegCloseKey(hk);
+            if raw.is_empty() { continue; }
+            let expanded = expand_env(raw.trim().trim_matches('"')).to_lowercase();
+            if expanded.starts_with(&sysroot) { return true; }
+        }
+    }
+    false
+}
+
+/// 右键菜单启用/禁用（对应 cm_toggle.ps1，S1）
+///
+/// 覆盖 7 种 source：shell（四值模型）、shellex（'-' 前缀重命名）、
+/// winx（.lnk.disabled 重命名）、filesystem（Hidden 属性）、
+/// shellnew（Classes MULTI_SZ）、openwith（NoOpenWith）、
+/// packagedcom/uwp-contract/blockedBy（Shell Extensions\Blocked 屏蔽表）。
+pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
+    unsafe {
+        let mut results: Vec<Value> = Vec::new();
+        let mut success = 0i64;
+        let mut failed = 0i64;
+
+        for item in items {
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let display_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut target = item.get("nativeRegPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if target.is_empty() { target = display_path.clone(); }
+            let want_enabled = item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let risk = item.get("risk").and_then(|v| v.as_str()).unwrap_or("");
+
+            // 系统保护项拒绝
+            if risk == "protected" {
+                results.push(json!({"id": id, "name": name, "regPath": display_path, "status": "skip", "message": "系统保护项"}));
+                continue;
+            }
+            if target.is_empty() {
+                results.push(json!({"name": name, "regPath": "", "status": "skip", "message": "缺少目标路径"}));
+                continue;
+            }
+
+            let result = toggle_cm_item(item, &source, &target, &display_path, want_enabled, &id, &name);
+            match result {
+                Ok(mut res) => {
+                    success += 1;
+                    res["id"] = json!(id);
+                    res["name"] = json!(name);
+                    res["regPath"] = json!(display_path);
+                    results.push(res);
+                }
+                Err(e) => {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "regPath": display_path, "status": "error", "message": e}));
+                }
+            }
+        }
+
+        Ok(json!({"success": success, "failed": failed, "results": results}))
+    }
+}
+
+unsafe fn toggle_cm_item(
+    item: &Value, source: &str, target: &str, display_path: &str,
+    want_enabled: bool, id: &str, name: &str,
+) -> Result<Value, String> {
+    let blocked_by = item.get("blockedBy").and_then(|v| v.as_str()).unwrap_or("");
+    let clsid = item.get("clsid").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+    // ---- 屏蔽表（packagedcom/uwp-contract/已有 blockedBy）----
+    if source == "packagedcom" || source == "uwp-contract" || !blocked_by.is_empty() {
+        if !is_guid(&clsid) {
+            return Err("缺少有效 CLSID，无法用屏蔽表启停".into());
+        }
+        if is_system_com_server(&clsid) {
+            return Err("系统内置扩展不允许加入屏蔽表（可能导致整个新式右键菜单失效）".into());
+        }
+        let scope = if blocked_by == "machine" { "machine" } else { "user" };
+        let (hive, key) = if scope == "machine" {
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked")
+        } else {
+            (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked")
+        };
+        let sk = to_wide(key);
+        let mut hk = HKEY::default();
+        let mut disp = REG_CREATED_NEW_KEY;
+        if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+            return Err("无法打开屏蔽表键".into());
+        }
+        if want_enabled {
+            let nm = to_wide(&clsid);
+            let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+        } else {
+            let nm = to_wide(&clsid);
+            let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_SZ, Some(&[0u8, 0]));
+        }
+        let _ = RegCloseKey(hk);
+        // 回读
+        let still_blocked = {
+            let sk2 = to_wide(key);
+            let mut hk2 = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_err() { false }
+            else {
+                let nm = to_wide(&clsid);
+                let mut ty = REG_VALUE_TYPE::default();
+                let mut size = 0u32;
+                let exists = RegQueryValueExW(hk2, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
+                let _ = RegCloseKey(hk2);
+                exists
+            }
+        };
+        if still_blocked == !want_enabled {
+            let new_blocked = if want_enabled { "" } else { scope };
+            let msg = if want_enabled { "已解除屏蔽" } else { "已屏蔽（不加载该扩展）" };
+            return Ok(json!({"status": "ok", "newBlockedBy": new_blocked, "message": msg}));
+        } else {
+            let msg = if scope == "machine" { "屏蔽表写入未生效（机器级需要管理员权限）" } else { "屏蔽表写入未生效" }; return Err(msg.into());
+        }
+    }
+
+    // ---- Win+X：.lnk ⇄ .lnk.disabled ----
+    if source == "winx" {
+        if !std::path::Path::new(target).exists() {
+            return Err("文件不存在".into());
+        }
+        let leaf = std::path::Path::new(target).file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let is_off = leaf.to_lowercase().ends_with(".disabled");
+        if want_enabled && !is_off {
+            return Ok(json!({"status": "ok", "message": "已处于启用状态"}));
+        }
+        if !want_enabled && is_off {
+            return Ok(json!({"status": "ok", "message": "已处于禁用状态"}));
+        }
+        let new_leaf = if want_enabled {
+            leaf.trim_end_matches(".disabled").trim_end_matches(".DISABLED").to_string()
+        } else {
+            format!("{leaf}.disabled")
+        };
+        let parent = std::path::Path::new(target).parent().unwrap();
+        let new_path = parent.join(&new_leaf);
+        std::fs::rename(target, &new_path).map_err(|e| format!("重命名失败: {e}"))?;
+        if new_path.exists() && !std::path::Path::new(target).exists() {
+            let np = new_path.to_string_lossy().to_string();
+            return Ok(json!({"status": "ok", "newRegPath": np, "newNativeRegPath": np, "message": if want_enabled { "已启用" } else { "已禁用" }}));
+        } else {
+            return Err("重命名未生效".into());
+        }
+    }
+
+    // ---- 发送到：Hidden 属性切换 ----
+    if source == "filesystem" {
+        if !std::path::Path::new(target).exists() {
+            return Err("文件不存在".into());
+        }
+        use windows::Win32::Storage::FileSystem::{GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN};
+        let target_w = to_wide(target);
+        let cur_attrs = GetFileAttributesW(PCWSTR(target_w.as_ptr()));
+        if cur_attrs == 0xFFFFFFFF { return Err("读取文件属性失败".into()); }
+        let new_attrs = if want_enabled { cur_attrs & !FILE_ATTRIBUTE_HIDDEN.0 } else { cur_attrs | FILE_ATTRIBUTE_HIDDEN.0 };
+        if SetFileAttributesW(PCWSTR(target_w.as_ptr()), windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(new_attrs)).is_err() {
+            return Err("设置文件属性失败".into());
+        }
+        // 回读
+        let now_hidden = GetFileAttributesW(PCWSTR(target_w.as_ptr())) & FILE_ATTRIBUTE_HIDDEN.0 != 0;
+        if now_hidden == !want_enabled {
+            return Ok(json!({"status": "ok", "message": if want_enabled { "已启用" } else { "已禁用" }}));
+        } else {
+            return Err("切换未生效".into());
+        }
+    }
+
+    // 解析注册表路径
+    let (hive, subkey) = parse_reg_path(target).ok_or("注册表路径格式错误")?;
+
+    // ---- 新建菜单：Classes MULTI_SZ ----
+    if source == "shellnew" {
+        let cls = item.get("target").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if cls.is_empty() { return Err("缺少类名（target）".into()); }
+        let sk = to_wide(&subkey);
+        let mut hk = HKEY::default();
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return Err("注册表路径不存在".into());
+        }
+        // 读当前 Classes
+        let mut cur: Vec<String> = Vec::new();
+        if let Some((ty, buf)) = reg_read_value_typed(hive, &subkey, "Classes") {
+            if ty == REG_MULTI_SZ {
+                let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let mut start = 0;
+                for i in 0..wide.len() {
+                    if wide[i] == 0 {
+                        if i > start {
+                            let s = String::from_utf16_lossy(&wide[start..i]);
+                            if !s.trim().is_empty() { cur.push(s); }
+                        }
+                        start = i + 1;
+                    }
+                }
+            }
+        }
+        let _ = RegCloseKey(hk);
+        let has = cur.iter().any(|c| c.eq_ignore_ascii_case(&cls));
+        if want_enabled && has {
+            return Ok(json!({"status": "ok", "message": "已处于启用状态"}));
+        }
+        if !want_enabled && !has {
+            return Ok(json!({"status": "ok", "message": "已处于禁用状态"}));
+        }
+        let new_list: Vec<String> = if want_enabled {
+            let mut v = cur.clone(); v.push(cls.clone()); v
+        } else {
+            cur.into_iter().filter(|c| !c.eq_ignore_ascii_case(&cls)).collect()
+        };
+        // 写回
+        let sk2 = to_wide(&subkey);
+        let mut hk2 = HKEY::default();
+        if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_WRITE, &mut hk2).is_err() {
+            return Err("无法写入注册表".into());
+        }
+        if new_list.is_empty() {
+            let nm = to_wide("Classes");
+            let _ = RegDeleteValueW(hk2, PCWSTR(nm.as_ptr()));
+        } else {
+            let mut bytes = Vec::new();
+            for s in &new_list {
+                let wide: Vec<u16> = s.encode_utf16().collect();
+                for w in &wide { bytes.extend_from_slice(&w.to_le_bytes()); }
+                bytes.extend_from_slice(&[0, 0]);
+            }
+            bytes.extend_from_slice(&[0, 0]);
+            let nm = to_wide("Classes");
+            if RegSetValueExW(hk2, PCWSTR(nm.as_ptr()), Some(0), REG_MULTI_SZ, Some(&bytes)).is_err() {
+                return Err("写 Classes 失败".into());
+            }
+        }
+        let _ = RegCloseKey(hk2);
+        return Ok(json!({"status": "ok", "message": if want_enabled { "已启用" } else { "已禁用" }}));
+    }
+
+    // ---- 打开方式：NoOpenWith ----
+    if source == "openwith" {
+        let sk = to_wide(&subkey);
+        let mut hk = HKEY::default();
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_err() {
+            return Err("注册表路径不存在".into());
+        }
+        if want_enabled {
+            let nm = to_wide("NoOpenWith");
+            let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+        } else {
+            let nm = to_wide("NoOpenWith");
+            let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_SZ, Some(&[0u8, 0]));
+        }
+        let _ = RegCloseKey(hk);
+        // 回读
+        let sk2 = to_wide(&subkey);
+        let mut hk2 = HKEY::default();
+        let now_off = if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
+            let nm = to_wide("NoOpenWith");
+            let mut ty = REG_VALUE_TYPE::default();
+            let mut size = 0u32;
+            let exists = RegQueryValueExW(hk2, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
+            let _ = RegCloseKey(hk2);
+            exists
+        } else { false };
+        if now_off == !want_enabled {
+            return Ok(json!({"status": "ok", "message": if want_enabled { "已启用" } else { "已禁用" }}));
+        } else {
+            return Err("切换未生效（可能需要管理员权限）".into());
+        }
+    }
+
+    // ---- shell：四值可见性模型 ----
+    if source == "shell" {
+        let leaf = subkey.rsplit('\\').next().unwrap_or(&subkey).to_string();
+        let parent = if let Some(pos) = subkey.rfind('\\') { &subkey[..pos] } else { "" };
+        let mut reg_path = subkey.to_string();
+        let mut renamed_to = String::new();
+
+        if want_enabled {
+            // AutorunsDisabled 重命名还原
+            let lower_leaf = leaf.to_lowercase();
+            if lower_leaf.starts_with("autorunsdisabled") {
+                let rest = if lower_leaf.starts_with("autorunsdisabled_") { &leaf[17..] } else { &leaf[16..] };
+                if !rest.is_empty() {
+                    renamed_to = rest.to_string();
+                    let old_sk = to_wide(&reg_path);
+                    let mut old_hk = HKEY::default();
+                    if RegOpenKeyExW(hive, PCWSTR(old_sk.as_ptr()), Some(0), KEY_READ, &mut old_hk).is_ok() {
+                        let _ = RegCloseKey(old_hk);
+                        // 重命名
+                        let new_name = to_wide(&renamed_to);
+                        let parent_sk = to_wide(parent);
+                        let mut parent_hk = HKEY::default();
+                        if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_ok() {
+                            let _ = RegRenameKey(parent_hk, PCWSTR(to_wide(&leaf).as_ptr()), PCWSTR(new_name.as_ptr()));
+                            let _ = RegCloseKey(parent_hk);
+                        }
+                        reg_path = format!("{parent}\\{renamed_to}");
+                    }
+                }
+            }
+            // 删除四值
+            let sk = to_wide(&reg_path);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_ok() {
+                for vn in ["LegacyDisable", "Blocked", "ProgrammaticAccessOnly", "HideBasedOnVelocityId"] {
+                    let nm = to_wide(vn);
+                    let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+                }
+                // CommandFlags 清 0x8 位
+                if let Some(cf) = reg_read_dword_val(hk, "CommandFlags") {
+                    let cleared = cf & !0x8;
+                    if cleared == 0 {
+                        let nm = to_wide("CommandFlags");
+                        let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+                    } else {
+                        let nm = to_wide("CommandFlags");
+                        let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&cleared.to_le_bytes()));
+                    }
+                }
+                let _ = RegCloseKey(hk);
+            }
+        } else {
+            // 禁用：写 ProgrammaticAccessOnly + HideBasedOnVelocityId，opennewwindow 不写 LegacyDisable
+            let sk = to_wide(&reg_path);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_err() {
+                return Err("注册表路径不存在".into());
+            }
+            let nm1 = to_wide("ProgrammaticAccessOnly");
+            let _ = RegSetValueExW(hk, PCWSTR(nm1.as_ptr()), Some(0), REG_SZ, Some(&[0u8, 0]));
+            let nm2 = to_wide("HideBasedOnVelocityId");
+            let velocity = 0x639bc8u32;
+            let _ = RegSetValueExW(hk, PCWSTR(nm2.as_ptr()), Some(0), REG_DWORD, Some(&velocity.to_le_bytes()));
+            // opennewwindow 硬特判
+            if !reg_path.to_lowercase().ends_with(r"\folder\shell\opennewwindow") {
+                let nm3 = to_wide("LegacyDisable");
+                let _ = RegSetValueExW(hk, PCWSTR(nm3.as_ptr()), Some(0), REG_SZ, Some(&[0u8, 0]));
+            }
+            let _ = RegCloseKey(hk);
+        }
+        // 回读：四值隐藏判据
+        let sk2 = to_wide(&reg_path);
+        let mut hk2 = HKEY::default();
+        let now_hidden = if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
+            let h = verb_hidden(hk2);
+            let _ = RegCloseKey(hk2);
+            h
+        } else { false };
+        if now_hidden == !want_enabled {
+            let mut res = json!({"status": "ok", "message": if want_enabled { "已启用" } else { "已禁用" }});
+            if !renamed_to.is_empty() {
+                let std_new = if hive == HKEY_CURRENT_USER { format!("HKEY_CURRENT_USER\\{reg_path}") } else { format!("HKEY_LOCAL_MACHINE\\{reg_path}") };
+                res["newNativeRegPath"] = json!(std_new);
+                if let Some(dpos) = display_path.rfind('\\') {
+                    res["newRegPath"] = json!(format!("{}{}", &display_path[..=dpos], renamed_to));
+                }
+            }
+            return Ok(res);
+        } else {
+            return Err("切换未生效（可能需要管理员权限）".into());
+        }
+    }
+
+    // ---- shellex：'-' 前缀重命名 ----
+    if source == "shellex" {
+        let leaf = subkey.rsplit('\\').next().unwrap_or(&subkey).to_string();
+        let parent = if let Some(pos) = subkey.rfind('\\') { &subkey[..pos] } else { "" };
+        if want_enabled && !leaf.starts_with('-') {
+            return Ok(json!({"status": "ok", "message": "已处于启用状态"}));
+        }
+        if !want_enabled && leaf.starts_with('-') {
+            return Ok(json!({"status": "ok", "message": "已处于禁用状态"}));
+        }
+        let new_name = if want_enabled { leaf[1..].to_string() } else { format!("-{leaf}") };
+        // 重命名注册表键
+        let parent_sk = to_wide(parent);
+        let mut parent_hk = HKEY::default();
+        if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_err() {
+            return Err("无法打开父键".into());
+        }
+        let old_nm = to_wide(&leaf);
+        let new_nm = to_wide(&new_name);
+        let r = RegRenameKey(parent_hk, PCWSTR(old_nm.as_ptr()), PCWSTR(new_nm.as_ptr()));
+        let _ = RegCloseKey(parent_hk);
+        if r.is_err() {
+            return Err("重命名未生效（可能需要管理员权限）".into());
+        }
+        let new_path = format!("{parent}\\{new_name}");
+        let std_new = if hive == HKEY_CURRENT_USER { format!("HKEY_CURRENT_USER\\{new_path}") } else { format!("HKEY_LOCAL_MACHINE\\{new_path}") };
+        let new_display = if let Some(dpos) = display_path.rfind('\\') {
+            format!("{}{}", &display_path[..=dpos], new_name)
+        } else { new_name.clone() };
+        return Ok(json!({"status": "ok", "newRegPath": new_display, "newNativeRegPath": std_new, "message": if want_enabled { "已启用" } else { "已禁用" }}));
+    }
+
+    Err(format!("未知 source 类型: {source}"))
+}
