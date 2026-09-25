@@ -634,7 +634,7 @@
       // 浏览器预览模式
       setInfo('infoVersion', '2.8.0');
       setInfo('infoPortable', '标准安装');
-      setInfo('infoElectron', 'N/A');
+      setInfo('infoRuntime', 'N/A');
       setInfo('infoNode', 'N/A');
       setInfo('infoChrome', navigator.userAgent.match(/Chrome\/([\d.]+)/)?.[1] || 'N/A');
       setInfo('infoOS', navigator.platform);
@@ -656,7 +656,7 @@
         ? `便携模式（${info.dataDir || '程序目录\\data'}）`
         : `标准安装（${info.dataDir || '%APPDATA%\\com.xiaoxu.trim'}）`);
       // 审查 M16：`electron` 字段恒为 N/A（本实现没有 Electron），改为显示运行时（后端 runtime）
-      setInfo('infoElectron', info.runtime || info.electron || 'N/A');
+      setInfo('infoRuntime', info.runtime || info.electron || 'N/A');
       setInfo('infoNode', info.node || 'N/A');
       setInfo('infoChrome', info.chrome || 'N/A');
       setInfo('infoOS', `${info.osVersion} (${info.arch})`);

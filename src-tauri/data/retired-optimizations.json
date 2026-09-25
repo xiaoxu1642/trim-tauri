@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "退役优化项清单（v2.6.0 P0-3）。优化项从目录移除时在此登记：启动时若其备份记录仍存在，主进程会按记录的原值自动还原注册表并删除备份（幂等，失败保留待重试）。note 供日志与更新说明使用。注意：仅注册表类步骤（reg）会进 optimizer-backups 从而被自动还原；cmd（fsutil 等）与 service 类步骤只记在 optimization-state，不自动还原。",
+  "_comment": "退役优化项清单（v2.6.0 P0-3）。优化项从目录移除时在此登记：启动时自动还原退役项的能力未移植（optimizer.rs 空桩）；本机若留有备份记录，需手动按原值还原。note 供日志与更新说明使用。。note 供日志与更新说明使用。注意：仅注册表类步骤（reg）会进 optimizer-backups 从而被自动还原；cmd（fsutil 等）与 service 类步骤只记在 optimization-state，不自动还原。",
   "items": [
     {
       "id": "tf_pccleaner",

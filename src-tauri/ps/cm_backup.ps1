@@ -73,7 +73,7 @@ foreach ($item in @($items)) {
     if (-not (Test-Path -LiteralPath $regPath)) { continue }
     $name = 'file_{0}_{1}_{2}' -f $index, ([IO.Path]::GetFileNameWithoutExtension($regPath)), ([IO.Path]::GetExtension($regPath).TrimStart('.'))
     $dest = Join-Path $filesDir $name
-    try { Copy-Item -LiteralPath $regPath -Destination $dest -Force -Recurse; $fileRecords += [pscustomobject]@{ source = $regPath; backup = $dest }; $backupFiles += $dest } catch {}
+    try { Copy-Item -LiteralPath $regPath -Destination $dest -Force -Recurse; $fileRecords += [pscustomobject]@{ source = $regPath; backup = $dest }; $backupFiles += $dest } catch { $exportFailed++ }
     continue
   }
   # 一律用扫描阶段解析出的真实 hive 路径；缺失（旧缓存/异常）时退回 regPath 但仍拒绝 HKCR 头
