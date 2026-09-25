@@ -86,8 +86,10 @@ fn collect_metrics_native() -> Result<Value, String> {
     Ok(data)
 }
 
-/// overview:metrics — 实时系统指标（原生引擎优先，失败回落 PowerShell，
-/// 与 Electron 的 `engine: 'rust' | 'powershell'` 字段语义一致）
+/// overview:metrics — 实时系统指标（S2 NativeOnly）
+///
+/// 默认只走 Rust 原生引擎；仅当环境变量 `TRIM_LEGACY_OVERVIEW=1` 时
+/// 才回退到 PowerShell（隐藏诊断开关，不暴露给用户）。
 #[tauri::command]
 pub async fn overview_metrics<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
@@ -96,23 +98,18 @@ pub async fn overview_metrics<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
             return Ok(serde_json::json!({ "success": true, "data": data, "cached": true }));
         }
     }
-    let result = tauri::async_runtime::spawn_blocking(|| {
+    let legacy = std::env::var("TRIM_LEGACY_OVERVIEW").map(|v| v == "1").unwrap_or(false);
+    let result = tauri::async_runtime::spawn_blocking(move || {
         // 串行化：重叠请求在此排队，保证任一时刻只有一次采集在跑
         let _serialize = METRICS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(match collect_metrics_native() {
-            Ok(data) => (data, "rust"),
-            Err(e) => {
-                crate::engine::log::write_log(
-                    "warn",
-                    &format!("原生系统指标不可用，回落 PowerShell: {e}"),
-                );
-                // 回落 PS（与 Electron 同策略）；PS 路径 cpu 由脚本直接给出
-                match ps_json(OVERVIEW_METRICS_PS, 60, "overview:metrics") {
-                    Ok(data) => (data, "powershell"),
-                    Err(e2) => return Err(e2),
-                }
-            }
-        })
+        if legacy {
+            let data = ps_json(OVERVIEW_METRICS_PS, 60, "overview:metrics")?;
+            return Ok((data, "powershell"));
+        }
+        match collect_metrics_native() {
+            Ok(data) => Ok((data, "rust")),
+            Err(e) => Err(format!("原生采集失败（设 TRIM_LEGACY_OVERVIEW=1 可回退 PS）: {e}")),
+        }
     })
     .await;
     match result {

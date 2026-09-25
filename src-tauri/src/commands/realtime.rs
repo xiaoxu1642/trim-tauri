@@ -24,8 +24,8 @@ use crate::security;
 /// PS 脚本编译期嵌入（生成自源仓库，见 tools/sync-ps-from-js.mjs）
 const ADAPTERS_PS: &str = include_str!("../../ps/realtime_adapters.ps1");
 const LOSS_PS: &str = include_str!("../../ps/realtime_loss.ps1");
-// 注：ps/realtime_stream.ps1 仍在（门禁仍在做文本一致性校验），但 Tauri 侧已改为
-// **进程内 NetSampler**（trim-finder lib 直调），不再起常驻 pwsh；该脚本保留作对照与回退。
+// realtime_stream.ps1 已退役（B0 S3）：Tauri 侧全程使用进程内 NetSampler，
+// 不再起常驻 pwsh；.ps1 文件与 ps-mapping 条目均已删除。
 
 /// 空闲回收阈值：连续 30s 无采样请求即停采样线程
 const IDLE_STOP_MS: i64 = 30_000;

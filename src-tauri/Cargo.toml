@@ -120,6 +120,13 @@ features = [
     "Win32_Networking_WinSock",
     # System_Registry：读取网络连接名（NetConnectionID）等注册表只读键
     "Win32_System_Registry",
+    # B2 PS→Rust 迁移：进程控制
+    # System_Services：OpenSCManager/ControlService/ChangeServiceConfig（停服务/改启动类型）
+    "Win32_System_Services",
+    # System_Com：CoInitializeEx（Task Scheduler COM 需要）
+    "Win32_System_Com",
+    # System_TaskScheduler：Task Scheduler COM（导出/删除计划任务）
+    "Win32_System_TaskScheduler",
 ]
 
 [profile.dev]

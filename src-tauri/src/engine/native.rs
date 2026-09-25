@@ -398,3 +398,108 @@ pub fn realtime_loss() -> Result<Value, String> {
         }
     }
 }
+
+// ==================== B2：进程控制 ====================
+
+use std::os::windows::ffi::OsStrExt;
+use std::ffi::OsStr;
+
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Threading::{
+    OpenProcess, TerminateProcess, QueryFullProcessImageNameW,
+    PROCESS_TERMINATE, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+    TH32CS_SNAPPROCESS,
+};
+
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
+    unsafe {
+        let h = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => h,
+            Err(_) => return Ok(json!({"success": false, "message": "进程不存在或已退出"})),
+        };
+        let mut name_buf = [0u16; 260];
+        let mut name_len = name_buf.len() as u32;
+        let exe_name = if QueryFullProcessImageNameW(h, windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0), windows::core::PWSTR(name_buf.as_mut_ptr()), &mut name_len).is_ok() {
+            let path = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase()
+        } else { String::new() };
+        let _ = CloseHandle(h);
+        let expected_lower = expected_name.to_lowercase();
+        if !expected_name.is_empty() && !exe_name.is_empty() && exe_name != expected_lower {
+            return Ok(json!({"success": false, "message": "进程 ID 已被系统复用，已拒绝结束"}));
+        }
+        let h_term = OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|_| "无法打开进程（权限不足）".to_string())?;
+        let name_display = if exe_name.is_empty() { format!("PID {pid}") } else { exe_name.clone() };
+        TerminateProcess(h_term, 1).map_err(|_| "结束进程失败".to_string())?;
+        let _ = CloseHandle(h_term);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let still_alive = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).is_ok();
+        if still_alive {
+            Ok(json!({"success": false, "message": format!("无法结束进程 {name_display} (PID {pid})，可能需要管理员权限")}))
+        } else {
+            Ok(json!({"success": true, "message": format!("已结束进程 {name_display} (PID {pid})")}))
+        }
+    }
+}
+
+pub fn stubborn_kill() -> Result<Value, String> {
+    let targets: &[&str] = &[
+        "edrservice","douyin_guard","douyin","douyin_tray",
+        "gameviewer","gameviewerservice","gameviewerserver","gameviewerhealthd",
+        "mumunxmain","mumunxservice","mumuremoteservice","mumuremotebackend",
+        "mumuremotehealthd","vedetector","jianyingpro","jianyingprotray",
+        "wps","et","wpp","wpspdf","wpscloudsvr",
+        "mscpcmanager","mscpcmanagercore","mscpcmanagerservice",
+    ];
+    let mut killed = 0u32;
+    let mut failed = 0u32;
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|_| "无法枚举进程".to_string())?;
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..std::mem::zeroed() };
+        let mut first = true;
+        while (if first { first = false; Process32FirstW(snap, &mut entry) } else { Process32NextW(snap, &mut entry) }).is_ok() {
+            let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            let stem = exe.to_lowercase();
+            let stem = stem.strip_suffix(".exe").unwrap_or(&stem);
+            if targets.contains(&stem) {
+                let pid = entry.th32ProcessID;
+                if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                    if TerminateProcess(h, 1).is_ok() { killed += 1; } else { failed += 1; }
+                    let _ = CloseHandle(h);
+                } else { failed += 1; }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    let mut leftover: Vec<String> = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|_| "无法枚举进程".to_string())?;
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..std::mem::zeroed() };
+        let mut first = true;
+        let mut seen = std::collections::HashSet::new();
+        while (if first { first = false; Process32FirstW(snap, &mut entry) } else { Process32NextW(snap, &mut entry) }).is_ok() {
+            let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            let stem = exe.to_lowercase();
+            let stem = stem.strip_suffix(".exe").unwrap_or(&stem).to_string();
+            if targets.contains(&stem.as_str()) && seen.insert(stem.clone()) { leftover.push(stem); }
+        }
+        let _ = CloseHandle(snap);
+    }
+    Ok(json!({"killed": killed, "failed": failed, "leftover": leftover}))
+}
+
+pub fn stubborn_block() -> Result<Value, String> {
+    // S1：服务/注册表/计划任务的原生实现待 S2 完善。
+    // 当前直接返回错误，由调用方回退 PS 完整执行。
+    Err("stubborn_block 原生路径待实现（S2）".to_string())
+}

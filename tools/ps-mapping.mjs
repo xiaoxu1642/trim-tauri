@@ -55,9 +55,8 @@ const CORE_MAPPING = [
   { name: 'overview_checkup', js: `${ORIGIN}/src/scripts-powershell/overview-scripts.js`, call: 'checkup', ps1: 'overview_checkup.ps1', note: '系统体检（只读诊断）' },
   { name: 'realtime_adapters', js: `${ORIGIN}/src/scripts-powershell/realtime-scripts.js`, call: 'adapters', ps1: 'realtime_adapters.ps1', note: '物理网卡枚举（只读）' },
   { name: 'realtime_loss', js: `${ORIGIN}/src/scripts-powershell/realtime-scripts.js`, call: 'loss', ps1: 'realtime_loss.ps1', note: '丢包检测：ping 默认网关（只读）' },
-  // 内联脚本：不来自 scripts-powershell 模块，而是 main.js 里的模板字面量常量。
-  // 同样走「JS 引擎求值」路径，避免手工誊抄时的转义偏差。
-  { name: 'realtime_stream', inline: { file: `${ORIGIN}/main.js`, varName: 'REALTIME_STREAM_SCRIPT' }, ps1: 'realtime_stream.ps1', note: '常驻流式采样器（每秒一行 JSON，前台长驻，由 Rust 侧生命周期管理）', noRun: '长驻无限循环脚本，行为层不适用（文本层一致即等价）' },
+  // realtime_stream.ps1 已退役（B0 S3）：Tauri 侧全程使用进程内 NetSampler，
+  // 不再起常驻 pwsh；.ps1 文件与映射条目均已删除。
 ];
 
 export const MAPPING = [

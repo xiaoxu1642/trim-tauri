@@ -424,6 +424,16 @@ pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Optio
             "message": format!("系统关键进程 {} 已受保护，不能结束", known.process_name)
         }));
     }
+    // B2 S1：原生路径优先
+    match tauri::async_runtime::spawn_blocking({
+        let name = known.process_name.clone();
+        move || native::kill_process(n as u32, &name)
+    }).await {
+        Ok(Ok(v)) => return Ok(v),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("memory:kill 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("memory:kill 原生任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     let script = match build_kill_script(n, &known.process_name) {
         Ok(s) => s,
         Err(message) => {
@@ -469,6 +479,13 @@ pub async fn memory_stubborn_kill<R: tauri::Runtime>(window: WebviewWindow<R>) -
             "message": "顽固软件专杀需要管理员权限，请先提权"
         }));
     }
+    // B2 S1：原生路径优先
+    match tauri::async_runtime::spawn_blocking(native::stubborn_kill).await {
+        Ok(Ok(data)) => return Ok(json!({ "success": true, "data": data })),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("memory:stubborn-kill 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("memory:stubborn-kill 原生任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     Ok(
         match run_script(MEMORY_STUBBORN_KILL_PS, 30, "memory:stubborn-kill").await {
             Ok(out) => {
@@ -503,6 +520,16 @@ pub async fn memory_stubborn_block<R: tauri::Runtime>(window: WebviewWindow<R>) 
             "message": "顽固软件自启阻断需要管理员权限，请先提权"
         }));
     }
+    // B2 S1：原生路径（服务+注册表部分）优先，计划任务待 S2
+    match tauri::async_runtime::spawn_blocking(native::stubborn_block).await {
+        Ok(Ok(data)) => {
+            let failed = data.get("failedCount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            return Ok(json!({ "success": failed == 0.0, "partial": failed > 0.0, "data": data }));
+        }
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("memory:stubborn-block 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("memory:stubborn-block 原生任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     Ok(
         match run_script(MEMORY_STUBBORN_BLOCK_PS, 60, "memory:stubborn-block").await {
             Ok(out) => {
