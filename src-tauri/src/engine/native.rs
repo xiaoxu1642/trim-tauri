@@ -993,8 +993,9 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
 // ==================== B6：右键菜单 ====================
 
 use windows::Win32::System::Registry::{
-    RegCreateKeyExW, RegSetValueExW, RegDeleteTreeW,
-    REG_OPTION_NON_VOLATILE, KEY_WRITE, REG_CREATE_KEY_DISPOSITION,
+    RegCreateKeyExW, RegSetValueExW, RegDeleteTreeW, RegDeleteValueW,
+    REG_OPTION_NON_VOLATILE, KEY_WRITE, KEY_SET_VALUE, REG_CREATE_KEY_DISPOSITION,
+    REG_CREATED_NEW_KEY, REG_QWORD,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::Foundation::{INVALID_HANDLE_VALUE, WIN32_ERROR};
@@ -2982,4 +2983,427 @@ pub fn paths_scan(rules_json: &str) -> Result<Value, String> {
             "scannedAt": format!("{:?}", std::time::SystemTime::now()),
         }))
     }
+}
+// ==================== B5 startup_toggle：启动项启用/禁用 ====================
+
+
+fn startup_backup_dir() -> std::path::PathBuf {
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Default\AppData\Roaming".into());
+    std::path::PathBuf::from(appdata).join("Trim").join("startup-backup")
+}
+
+fn startup_disabled_file() -> std::path::PathBuf {
+    startup_backup_dir().join("disabled.json")
+}
+
+fn startup_files_dir() -> std::path::PathBuf {
+    startup_backup_dir().join("files")
+}
+
+fn read_disabled_records() -> Vec<Value> {
+    let f = startup_disabled_file();
+    if let Ok(content) = std::fs::read_to_string(&f) {
+        if let Ok(Value::Array(arr)) = serde_json::from_str(&content) {
+            return arr.into_iter().filter(|v| !v.is_null()).collect();
+        }
+    }
+    Vec::new()
+}
+
+fn write_disabled_records(records: &[Value]) {
+    let dir = startup_backup_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let f = startup_disabled_file();
+    if records.is_empty() {
+        let _ = std::fs::remove_file(&f);
+    } else {
+        if let Ok(json) = serde_json::to_string_pretty(records) {
+            if let Ok(mut file) = std::fs::File::create(&f) {
+                let _ = file.write_all(json.as_bytes());
+            }
+        }
+    }
+}
+
+/// 解析注册表路径为 (hive, subkey)
+fn parse_reg_path(reg_path: &str) -> Option<(HKEY, String)> {
+    let rp = reg_path.trim();
+    if rp.starts_with("HKEY_CURRENT_USER") || rp.starts_with("HKCU") {
+        let rest = rp.splitn(2, '\\').nth(1).unwrap_or("");
+        Some((HKEY_CURRENT_USER, rest.to_string()))
+    } else if rp.starts_with("HKEY_LOCAL_MACHINE") || rp.starts_with("HKLM") {
+        let rest = rp.splitn(2, '\\').nth(1).unwrap_or("");
+        Some((HKEY_LOCAL_MACHINE, rest.to_string()))
+    } else {
+        None
+    }
+}
+
+/// StartupApproved 键路径
+fn startup_approved_key(hive: HKEY) -> String {
+    if hive == HKEY_CURRENT_USER {
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run".to_string()
+    } else {
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run".to_string()
+    }
+}
+
+/// 读 StartupApproved blob
+unsafe fn read_approved_blob(hive: HKEY, value_name: &str) -> Option<Vec<u8>> {
+    let key = startup_approved_key(hive);
+    let sk = to_wide(&key);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
+    let nm = to_wide(value_name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        let _ = RegCloseKey(hk); return None;
+    }
+    if ty != REG_BINARY || size == 0 { let _ = RegCloseKey(hk); return None; }
+    let mut buf = vec![0u8; size as usize];
+    let r = RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size));
+    let _ = RegCloseKey(hk);
+    if r.is_err() { None } else { Some(buf) }
+}
+
+/// 写 StartupApproved blob，设置/清除 bit0，写后回读校验
+unsafe fn set_approved_bit(hive: HKEY, value_name: &str, disable: bool) -> Result<(), String> {
+    let key = startup_approved_key(hive);
+    // 确保键存在
+    let sk = to_wide(&key);
+    let mut hk = HKEY::default();
+    let mut disp = REG_CREATED_NEW_KEY;
+    if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+        return Err("无法创建 StartupApproved 键".into());
+    }
+    // 读现有 blob
+    let mut bytes = read_approved_blob(hive, value_name).unwrap_or_else(|| {
+        let mut b = vec![0u8; 12];
+        b[0] = 2; // 无记录时按启用起手
+        b
+    });
+    if bytes.len() < 12 { bytes.resize(12, 0); }
+    if disable { bytes[0] |= 1; } else { bytes[0] &= 0xFE; }
+    let nm = to_wide(value_name);
+    if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_BINARY, Some(&bytes)).is_err() {
+        let _ = RegCloseKey(hk);
+        return Err("写 StartupApproved blob 失败".into());
+    }
+    let _ = RegCloseKey(hk);
+    // 回读校验
+    if let Some(back) = read_approved_blob(hive, value_name) {
+        let got = back.first().map(|b| b & 1 == 1).unwrap_or(false);
+        if got != disable {
+            return Err("StartupApproved 回读不符（可能被策略或安全软件覆盖）".into());
+        }
+    }
+    Ok(())
+}
+
+/// 读注册表值（返回类型+数据）
+unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -> Option<(REG_VALUE_TYPE, Vec<u8>)> {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
+    let nm = to_wide(value_name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        let _ = RegCloseKey(hk); return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let r = RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size));
+    let _ = RegCloseKey(hk);
+    if r.is_err() { None } else { Some((ty, buf)) }
+}
+
+/// 删除注册表值
+unsafe fn reg_delete_value(hive: HKEY, subkey: &str, value_name: &str) -> bool {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() { return false; }
+    let nm = to_wide(value_name);
+    let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+    let _ = RegCloseKey(hk);
+    r.is_ok()
+}
+
+/// 写注册表值（恢复用）
+unsafe fn reg_write_value(hive: HKEY, subkey: &str, value_name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> bool {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    let mut disp = REG_CREATED_NEW_KEY;
+    if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+        return false;
+    }
+    let nm = to_wide(value_name);
+    let r = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), kind, Some(data));
+    let _ = RegCloseKey(hk);
+    r.is_ok()
+}
+
+/// 启动项启用/禁用（对应 startup_enable.ps1 / startup_disable.ps1，S1）
+///
+/// 覆盖：注册表项（StartupApproved blob 为主，删值式为回退）、文件夹项（移动备份）、
+/// 计划任务（schtasks /Change）。disabled.json 记账维护。
+pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
+    unsafe {
+        let mut records = read_disabled_records();
+        let mut results: Vec<Value> = Vec::new();
+        let mut success = 0i64;
+        let mut failed = 0i64;
+
+        for item in items {
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            let result = match source.as_str() {
+                "registry" => toggle_registry_item(item, enable, &mut records),
+                "folder" => toggle_folder_item(item, enable, &mut records),
+                "task" => toggle_task_item(item, enable),
+                _ => Err("未知来源类型".into()),
+            };
+
+            match result {
+                Ok(msg) => {
+                    success += 1;
+                    results.push(json!({"id": id, "name": name, "status": "ok", "message": msg}));
+                }
+                Err(e) => {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": e}));
+                }
+            }
+        }
+
+        write_disabled_records(&records);
+        Ok(json!({"success": success, "failed": failed, "results": results}))
+    }
+}
+
+unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<String, String> {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
+    let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
+    let hive_str = item.get("hive").and_then(|v| v.as_str()).unwrap_or("HKCU");
+    let hive = if hive_str.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+
+    let (_, subkey) = parse_reg_path(reg_path).ok_or("注册表路径格式错误")?;
+
+    if enable {
+        // 启用：优先清 StartupApproved bit0
+        if reg_read_value_typed(hive, &subkey, value_name).is_some() {
+            set_approved_bit(hive, value_name, false)?;
+            records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+            return Ok("已启用".into());
+        }
+        // 值已被删除：从 disabled.json 恢复
+        let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id))
+            .cloned().ok_or("缺少启用记录，且注册表中已无该项")?;
+        let kind_str = rec.get("valueType").and_then(|v| v.as_str()).unwrap_or("String");
+        let kind = match kind_str {
+            "ExpandString" => REG_EXPAND_SZ,
+            "DWord" => REG_DWORD,
+            "QWord" => REG_QWORD,
+            "Binary" => REG_BINARY,
+            "MultiString" => REG_MULTI_SZ,
+            _ => REG_SZ,
+        };
+        let data: Vec<u8> = if kind_str == "Binary" {
+            let b64 = rec.get("valueDataB64").and_then(|v| v.as_str()).unwrap_or("");
+            base64_decode(b64).unwrap_or_default()
+        } else if kind_str == "MultiString" {
+            let arr = rec.get("valueDataArray").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let mut bytes = Vec::new();
+            for s in arr {
+                let text = s.as_str().unwrap_or("");
+                let wide: Vec<u16> = text.encode_utf16().collect();
+                for w in &wide { bytes.extend_from_slice(&w.to_le_bytes()); }
+                bytes.extend_from_slice(&[0, 0]);
+            }
+            bytes.extend_from_slice(&[0, 0]);
+            bytes
+        } else if kind_str == "DWord" || kind_str == "QWord" {
+            let val = rec.get("valueData").and_then(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            if kind_str == "DWord" { (val as u32).to_le_bytes().to_vec() } else { val.to_le_bytes().to_vec() }
+        } else {
+            let text = rec.get("valueData").and_then(|v| v.as_str()).unwrap_or("");
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let mut bytes = Vec::new();
+            for w in &wide { bytes.extend_from_slice(&w.to_le_bytes()); }
+            bytes.extend_from_slice(&[0, 0]);
+            bytes
+        };
+        if !reg_write_value(hive, &subkey, value_name, kind, &data) {
+            return Err("回写未生效（可能需要管理员权限）".into());
+        }
+        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+        Ok("已启用".into())
+    } else {
+        // 禁用：优先写 StartupApproved blob
+        if reg_read_value_typed(hive, &subkey, value_name).is_none() {
+            return Err("注册表值不存在".into());
+        }
+        match set_approved_bit(hive, value_name, true) {
+            Ok(_) => Ok("已禁用（注册表值保留，可随时还原）".into()),
+            Err(e) => {
+                // 回退：删值 + 备份
+                let (kind, data) = reg_read_value_typed(hive, &subkey, value_name)
+                    .ok_or("读取注册表值失败")?;
+                let kind_str = match kind {
+                    REG_EXPAND_SZ => "ExpandString", REG_DWORD => "DWord", REG_QWORD => "QWord",
+                    REG_BINARY => "Binary", REG_MULTI_SZ => "MultiString", _ => "String",
+                };
+                let (v_data, v_b64, v_arr) = if kind == REG_BINARY {
+                    (String::new(), base64_encode(&data), Value::Array(vec![]))
+                } else if kind == REG_MULTI_SZ {
+                    let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let parts: Vec<String> = wide.split(|&c| c == 0).filter(|s| !s.is_empty())
+                        .map(|s| String::from_utf16_lossy(s)).collect();
+                    (String::new(), String::new(), Value::Array(parts.into_iter().map(|s| json!(s)).collect()))
+                } else if kind == REG_DWORD || kind == REG_QWORD {
+                    let val = if kind == REG_DWORD { u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64 }
+                        else { i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) };
+                    (val.to_string(), String::new(), Value::Array(vec![]))
+                } else {
+                    let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+                    (String::from_utf16_lossy(&wide[..end]), String::new(), Value::Array(vec![]))
+                };
+                if !reg_delete_value(hive, &subkey, value_name) {
+                    return Err(e);
+                }
+                let rec = json!({
+                    "id": id, "name": item.get("name"), "command": v_data,
+                    "source": "registry", "hive": item.get("hive"), "regPath": reg_path,
+                    "valueName": value_name, "valueType": kind_str,
+                    "valueData": v_data, "valueDataB64": v_b64, "valueDataArray": v_arr,
+                    "filePath": "", "taskPath": "", "taskName": "",
+                    "location": item.get("location"), "scope": item.get("scope"),
+                    "publisher": item.get("publisher"), "resolvedPath": item.get("resolvedPath"),
+                });
+                records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+                records.push(rec);
+                Ok(format!("已禁用（回退为删除值方式：{e}）"))
+            }
+        }
+    }
+}
+
+unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<String, String> {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let file_path = item.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
+
+    if enable {
+        let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id))
+            .cloned().ok_or("缺少启用记录")?;
+        let backup_path = rec.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
+        let orig_path = rec.get("valueData").and_then(|v| v.as_str()).unwrap_or("");
+        if backup_path.is_empty() || !std::path::Path::new(backup_path).exists() {
+            return Err("备份文件不存在".into());
+        }
+        if let Some(parent) = std::path::Path::new(orig_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::rename(backup_path, orig_path).map_err(|e| format!("移回失败: {e}"))?;
+        if std::path::Path::new(orig_path).exists() {
+            records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+            Ok("已启用".into())
+        } else {
+            Err("移回未生效".into())
+        }
+    } else {
+        if !std::path::Path::new(file_path).exists() {
+            return Err("文件不存在".into());
+        }
+        let files_dir = startup_files_dir();
+        let _ = std::fs::create_dir_all(&files_dir);
+        let stamp = chrono_now_str();
+        let safe_name: String = item.get("name").and_then(|v| v.as_str()).unwrap_or("item")
+            .chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+        let ext = std::path::Path::new(file_path).extension()
+            .and_then(|e| e.to_str()).unwrap_or("");
+        let dest = files_dir.join(format!("{stamp}_{safe_name}.{ext}"));
+        std::fs::rename(file_path, &dest).map_err(|e| format!("移动备份失败: {e}"))?;
+        let rec = json!({
+            "id": id, "name": item.get("name"), "command": file_path,
+            "source": "folder", "hive": item.get("hive"), "regPath": "", "valueName": "",
+            "valueType": "", "valueData": file_path, "valueDataB64": "", "valueDataArray": [],
+            "filePath": dest.to_string_lossy().to_string(), "taskPath": "", "taskName": "",
+            "location": item.get("location"), "scope": item.get("scope"),
+            "publisher": item.get("publisher"), "resolvedPath": item.get("resolvedPath"),
+        });
+        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+        records.push(rec);
+        Ok("已禁用".into())
+    }
+}
+
+unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String> {
+    let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
+    let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
+    if task_name.is_empty() { return Err("缺少任务名".into()); }
+    let full_name = format!("{task_path}{task_name}");
+    let arg = if enable { "/ENABLE" } else { "/DISABLE" };
+    let output = std::process::Command::new("schtasks")
+        .args(["/Change", "/TN", &full_name, arg])
+        .output().map_err(|e| format!("schtasks 执行失败: {e}"))?;
+    if output.status.success() {
+        Ok(if enable { "已启用".into() } else { "已禁用".into() })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() { "操作未生效（可能需要管理员权限）".into() } else { stderr })
+    }
+}
+
+fn chrono_now_str() -> String {
+    let now = std::time::SystemTime::now();
+    let dur = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    // 简单格式：yyyyMMdd_HHmmss（本地时间近似）
+    let hours = (secs % 86400) / 3600 + 8; // UTC+8
+    format!("19700101_{:02}{:02}{:02}", hours % 24, (secs % 3600) / 60, secs % 60)
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((n >> 18) & 63) as usize] as char);
+        result.push(CHARS[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 { result.push(CHARS[((n >> 6) & 63) as usize] as char); } else { result.push('='); }
+        if chunk.len() > 2 { result.push(CHARS[(n & 63) as usize] as char); } else { result.push('='); }
+    }
+    result
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut result = Vec::new();
+    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 { return None; }
+        let mut n = 0u32;
+        let mut valid = 4;
+        for (i, &b) in chunk.iter().enumerate() {
+            let v = match b {
+                b'A'..=b'Z' => b - b'A',
+                b'a'..=b'z' => b - b'a' + 26,
+                b'0'..=b'9' => b - b'0' + 52,
+                b'+' => 62, b'/' => 63,
+                b'=' => { valid = i; break; }
+                _ => return None,
+            };
+            n |= (v as u32) << (18 - i * 6);
+        }
+        result.push((n >> 16) as u8);
+        if valid > 2 { result.push((n >> 8) as u8); }
+        if valid > 3 { result.push(n as u8); }
+    }
+    Some(result)
 }

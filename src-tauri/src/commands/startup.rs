@@ -240,16 +240,27 @@ pub async fn startup_toggle<R: Runtime>(
         });
     }
     let enable = enable.unwrap_or(true);
-    let template = if enable { PS_ENABLE } else { PS_DISABLE };
-    let script = inject_items(template, TOGGLE_SENTINEL, &safe);
 
-    log::write_log("info", &format!("启动项{} {} 项", if enable { "启用" } else { "禁用" }, safe.len()));
-    let out = match run_ps(&script, Duration::from_secs(60), Some("startup.toggle")) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    let Some(data) = parse_json(&out.stdout) else {
-        return json!({ "success": false, "message": "无法解析执行结果" });
+    // S1：原生优先，失败自动回退 PS
+    let data = match crate::engine::native::startup_toggle(&safe, enable) {
+        Ok(d) => {
+            log::write_log("info", &format!("启动项{}原生完成 {} 项", if enable { "启用" } else { "禁用" }, safe.len()));
+            d
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("启动项{}原生失败，回退 PS: {e}", if enable { "启用" } else { "禁用" }));
+            let template = if enable { PS_ENABLE } else { PS_DISABLE };
+            let script = inject_items(template, TOGGLE_SENTINEL, &safe);
+            log::write_log("info", &format!("启动项{} {} 项", if enable { "启用" } else { "禁用" }, safe.len()));
+            let out = match run_ps(&script, Duration::from_secs(60), Some("startup.toggle")) {
+                Ok(o) => o,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            match parse_json(&out.stdout) {
+                Some(d) => d,
+                None => return json!({ "success": false, "message": "无法解析执行结果" }),
+            }
+        }
     };
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
     json!({ "success": failed == 0, "data": data })
