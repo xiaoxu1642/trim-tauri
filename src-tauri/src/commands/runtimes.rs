@@ -29,24 +29,6 @@ use sha2::{Digest, Sha256};
 use tauri::{Emitter, WebviewWindow};
 
 use crate::engine::{guard, log, paths, sysinfo, winhttp};
-use crate::pwsh;
-
-// ==================== 外置 PS 脚本（编译期嵌入，禁止手写） ====================
-const RUNTIMES_STATUS_PS: &str = include_str!("../../ps/runtimes_status.ps1");
-const REPAIR_VC_X64_PS: &str = include_str!("../../ps/runtimes_repair_vc_x64.ps1");
-const REPAIR_VC_X86_PS: &str = include_str!("../../ps/runtimes_repair_vc_x86.ps1");
-const REPAIR_NETFX48_PS: &str = include_str!("../../ps/runtimes_repair_netfx48.ps1");
-const REPAIR_NETFX35_PS: &str = include_str!("../../ps/runtimes_repair_netfx35.ps1");
-
-/// 修复脚本里的**安装包路径哨兵**（生成期由 `tools/ps-map/runtimes.mjs` + ps-mapping 的
-/// `sentinelPath` 写入该唯一 token；运行前替换为真实缓存包路径，见 `replace_installer_path`）。
-///
-/// 审查 M22：这里**刻意不再是一个路径**。旧值是「上游 `runtimes-scripts.js` 自身在本机的
-/// 绝对路径」（上游 `repair()` 用 `fs.existsSync` 校验入参，生成期只能借真实路径过闸），
-/// 于是开发者机器布局被写进 66 个 `.ps1` 并随 `include_str!` 编进发布的二进制；
-/// 而且门禁坐标一改（vendor 进仓库）文本层对拍就整批红。token 与本机无关、全局唯一，
-/// 「缺哨兵即 Err」的 fail-closed 判定保持不变。
-const RUNTIMES_PATH_SENTINEL: &str = "@@TRIM_INSTALLER_PATH@@";
 
 // ==================== 下载白名单 / 上限 / 缓存目录（逐项照抄 main.js 7506-7511） ====================
 const REDIST_HOST_WHITELIST: &[&str] = &[
@@ -330,113 +312,20 @@ fn download_redist<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str
     Ok(cache_path)
 }
 
-// ==================== 修复脚本生成（哨兵替换） ====================
-/// `.ps1` 顶部来源说明块的结束标记（与 `cleanup.rs` 的 `PROVENANCE_END` 同一个约定）
-const PROVENANCE_END: &str = "# PROVENANCE>>>";
-
-/// 审查 L3：哨兵 token **同时出现在 PROVENANCE 注释行**（`ps/runtimes_repair_*.ps1:2` 的
-/// `repair("netfx48", "@@TRIM_INSTALLER_PATH@@")`），对它做全量 `replace` 会把真实安装包
-/// 路径注入进 `#` 注释，来源记录当场失真。故一律「只替换正文，来源块原样保留」，
-/// 哨兵有无也只看正文 —— 否则光靠注释行那个 token 就能骗过"模板带哨兵"的判定。
-fn split_provenance(template: &str) -> (&str, &str) {
-    match template.find(PROVENANCE_END) {
-        Some(i) => {
-            let cut = i + PROVENANCE_END.len();
-            template.split_at(cut)
-        }
-        None => ("", template),
-    }
-}
-
-/// 把脚本里的安装包路径哨兵替换为真实缓存包路径（单引号转义，PS 单引号字符串）
-fn replace_installer_path(template: &str, installer_path: &Path, action_id: &str) -> Result<String, String> {
-    if !installer_path.is_file() {
-        return Err(format!("安装包不存在: {action_id}"));
-    }
-    let (head, body) = split_provenance(template);
-    if !body.contains(RUNTIMES_PATH_SENTINEL) {
-        return Err("修复脚本缺少安装包路径哨兵".into());
-    }
-    let escaped = installer_path.to_string_lossy().replace('\'', "''");
-    let out = body.replace(RUNTIMES_PATH_SENTINEL, &escaped);
-    if out.contains(RUNTIMES_PATH_SENTINEL) {
-        return Err("安装包路径替换失败（哨兵残留）".into());
-    }
-    Ok(format!("{head}{out}"))
-}
-
-fn build_repair_script(action_id: &str, installer_path: Option<&Path>) -> Result<String, String> {
-    match action_id {
-        "netfx35" => Ok(REPAIR_NETFX35_PS.to_string()),
-        "vc-x64" => replace_installer_path(
-            REPAIR_VC_X64_PS,
-            installer_path.ok_or_else(|| format!("安装包不存在: {action_id}"))?,
-            action_id,
-        ),
-        "vc-x86" => replace_installer_path(
-            REPAIR_VC_X86_PS,
-            installer_path.ok_or_else(|| format!("安装包不存在: {action_id}"))?,
-            action_id,
-        ),
-        "netfx48" => replace_installer_path(
-            REPAIR_NETFX48_PS,
-            installer_path.ok_or_else(|| format!("安装包不存在: {action_id}"))?,
-            action_id,
-        ),
-        _ => Err(format!("未知的修复动作: {action_id}")),
-    }
-}
-
 // ==================== 采集 / 安装 ====================
-/// 跑一次运行库检测（超时 25s，diagOp 'runtimes.collect'），并落到本窗口快照槽。
-/// 返回脚本输出的完整 data 对象（{items, summary}）。
+/// 跑一次运行库检测，并落到本窗口快照槽。
+/// S3：纯 Rust 原生，无 PS 回退。
 fn run_runtimes_collect(label: &str) -> Result<Value, String> {
-    // B7 S2：默认原生，TRIM_LEGACY_RUNTIMES=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_RUNTIMES").map(|v| v == "1").unwrap_or(false);
-    if !legacy {
-        match crate::engine::native::runtimes_status() {
-            Ok(data) => {
-                if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
-                    snapshot_store(label, items);
-                }
-                log::write_log("info", "运行库检测原生完成");
-                return Ok(data);
+    match crate::engine::native::runtimes_status() {
+        Ok(data) => {
+            if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
+                snapshot_store(label, items);
             }
-            Err(e) => return Err(format!("原生检测失败（设 TRIM_LEGACY_RUNTIMES=1 可回退 PS）: {e}")),
+            log::write_log("info", "运行库检测原生完成");
+            Ok(data)
         }
+        Err(e) => Err(format!("原生检测失败: {e}")),
     }
-    let path = pwsh::write_temp_script(RUNTIMES_STATUS_PS, ".ps1")?;
-    let out = pwsh::run_file(&path, Duration::from_secs(25), Some("runtimes.collect"));
-    let _ = std::fs::remove_file(&path);
-    let out = out?;
-    if out.stdout.trim().is_empty() {
-        return Err(if out.stderr.trim().is_empty() {
-            "运行库检测无输出".into()
-        } else {
-            out.stderr.trim().to_string()
-        });
-    }
-    // 取最后一行以 { 开头的输出（脚本可能带前置可读行）
-    let line = out
-        .stdout
-        .trim()
-        .split('\n')
-        .filter(|l| l.trim().starts_with('{'))
-        .last()
-        .ok_or_else(|| "运行库检测结果格式异常".to_string())?
-        .trim()
-        .to_string();
-    let data: Value = serde_json::from_str(&line).map_err(|e| format!("运行库检测解析失败: {e}"))?;
-    let items = data
-        .get("items")
-        .filter(|v| v.is_array())
-        .cloned()
-        .ok_or_else(|| "运行库检测结果格式异常".to_string())?;
-    if out.code != 0 {
-        log::write_log("warn", &format!("运行库检测退出码 {}", out.code));
-    }
-    snapshot_store(label, items);
-    Ok(data)
 }
 
 /// runtimes:collect — 只读采集
@@ -491,65 +380,16 @@ fn do_install<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str, lab
     let start = crate::engine::now_ms();
     emit_progress(window, json!({ "phase": "install", "percent": 100 }));
 
-    // B7 S2：默认原生，TRIM_LEGACY_RUNTIMES=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_RUNTIMES").map(|v| v == "1").unwrap_or(false);
-    let ps_repair = || -> (bool, String) {
-        let script = match build_repair_script(action_id, local_path.as_deref()) {
-            Ok(s) => s,
-            Err(e) => return (false, e),
-        };
-        let script_path = match pwsh::write_temp_script(&script, ".ps1") {
-            Ok(p) => p,
-            Err(e) => return (false, e),
-        };
-        let diag_op = format!("runtimes.install.{action_id}");
-        let out = pwsh::run_file(&script_path, Duration::from_secs(600), Some(&diag_op));
-        let _ = std::fs::remove_file(&script_path);
-        let out = match out {
-            Ok(o) => o,
-            Err(e) => return (false, e),
-        };
-        let lines: Vec<String> = out
-            .stdout
-            .trim()
-            .split('\n')
-            .map(|l| l.trim_end_matches('\r').to_string())
-            .collect();
-        let result_line = lines.iter().filter(|l| l.starts_with("@@RESULT@@")).last();
-        let ps_ok = result_line.map(|l| l.as_str()) == Some("@@RESULT@@ok");
-        let ps_reason = if ps_ok {
-            String::new()
-        } else {
-            lines
-                .iter()
-                .filter(|l| {
-                    !l.is_empty() && !l.starts_with("@@RESULT@@") && !l.starts_with("@@DIAG@@")
-                })
-                .last()
-                .cloned()
-                .unwrap_or_else(|| {
-                    if out.stderr.trim().is_empty() {
-                        "修复未成功，请查看日志".into()
-                    } else {
-                        out.stderr.trim().to_string()
-                    }
-                })
-        };
-        (ps_ok, ps_reason)
-    };
-    let (ok, reason) = if legacy {
-        ps_repair()
-    } else {
-        match crate::engine::native::runtimes_repair(action_id, local_path.as_deref().and_then(|p| p.to_str())) {
-            Ok((success, msg)) => {
-                if success {
-                    (true, String::new())
-                } else {
-                    (false, format!("原生修复未成功（设 TRIM_LEGACY_RUNTIMES=1 可回退 PS）: {msg}"))
-                }
+    // S3：纯 Rust 原生
+    let (ok, reason) = match crate::engine::native::runtimes_repair(action_id, local_path.as_deref().and_then(|p| p.to_str())) {
+        Ok((success, msg)) => {
+            if success {
+                (true, String::new())
+            } else {
+                (false, format!("原生修复未成功: {msg}"))
             }
-            Err(e) => (false, format!("原生修复异常（设 TRIM_LEGACY_RUNTIMES=1 可回退 PS）: {e}")),
         }
+        Err(e) => (false, format!("原生修复异常: {e}")),
     };
 
     // 修复后自动重跑检测（回传最新 items/summary；N2：重跑也写回本窗口快照）
@@ -656,32 +496,4 @@ mod tests {
         let _ = std::fs::remove_file(&dest);
     }
 
-    /// 审查 L3：哨兵替换只吃正文，PROVENANCE 注释行必须原样保留 token；
-    /// 且「缺哨兵」的判定只看正文 —— 注释行那个 token 不算数。
-    #[test]
-    fn 哨兵替换只作用于正文() {
-        let tmpl = "# <<<PROVENANCE\n\
-# 来源：x.js → repair(\"netfx48\", \"@@TRIM_INSTALLER_PATH@@\")\n\
-# PROVENANCE>>>\n\
-$p = '@@TRIM_INSTALLER_PATH@@'\n";
-        // 拿一个必然存在的文件当"安装包"
-        let me = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let out = replace_installer_path(tmpl, &me, "netfx48").expect("替换失败");
-        let head = out.split_once("# PROVENANCE>>>").unwrap().0;
-        assert!(
-            head.contains(RUNTIMES_PATH_SENTINEL),
-            "来源注释行里的 token 被替换掉了 ⇒ 来源记录失真"
-        );
-        let body = out.split_once("# PROVENANCE>>>").unwrap().1;
-        assert!(!body.contains(RUNTIMES_PATH_SENTINEL), "正文里哨兵未替换");
-        assert!(body.contains("Cargo.toml"), "正文未写入真实路径");
-
-        // 只有注释行带 token、正文没有 ⇒ 必须判"缺哨兵"而不是放行
-        let only_in_head = "# <<<PROVENANCE\n# 说明\n\
-# PROVENANCE>>>\nWrite-Output 'no sentinel here'\n";
-        assert!(
-            replace_installer_path(only_in_head, &me, "netfx48").is_err(),
-            "注释行里的 token 不得充当哨兵"
-        );
-    }
 }
