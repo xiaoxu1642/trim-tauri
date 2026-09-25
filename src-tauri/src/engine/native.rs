@@ -5427,3 +5427,184 @@ unsafe fn reg_count_key(hive: HKEY, path: &str, has_value: bool) -> usize {
     let _ = RegCloseKey(hk);
     count
 }
+// ==================== B10 cleanup_execute：清理执行 ====================
+
+/// 清理执行结果
+pub struct CleanupExecuteResult {
+    pub details: Vec<Value>,
+    pub freed: i64,
+    pub file_count: i64,
+    pub recycle_entries: Vec<Value>,
+}
+
+/// 清理执行（对应 cleanup_execute.ps1，S1）
+///
+/// 只处理文件删除（fileKeys/目录型）；注册表删除和复杂模式返回 Err 触发 PS 回退。
+/// to_recycle=true 时只枚举不删除，返回 recycle_entries 由主进程移入回收站。
+pub fn cleanup_execute(
+    items: &[Value],
+    rules: &Value,
+    to_recycle: bool,
+    auto_rebuild: bool,
+) -> Result<CleanupExecuteResult, String> {
+    let mut details = Vec::new();
+    let mut total_freed = 0i64;
+    let mut total_files = 0i64;
+    let mut recycle_entries = Vec::new();
+
+    for item in items {
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let rule = find_rule_by_id(rules, id);
+        let Some(rule) = rule else {
+            details.push(json!({"id": id, "name": name, "status": "skip", "freed": 0, "message": "规则不存在", "fileCount": 0}));
+            continue;
+        };
+
+        // 注册表型回退 PS
+        if rule.get("regKeys").is_some() {
+            return Err("注册表型清理需 PS 回退".into());
+        }
+
+        // special=dism 回退 PS
+        if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
+            return Err("DISM 清理需 PS 回退".into());
+        }
+
+        // 收集要删除的文件
+        let mut files: Vec<(String, u64)> = Vec::new();
+        if let Some(file_keys) = rule.get("fileKeys").and_then(|v| v.as_array()) {
+            if !file_keys.is_empty() {
+                for fk in file_keys {
+                    let path = fk.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    if path.is_empty() { continue; }
+                    let pattern = fk.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
+                    let recurse = fk.get("recurse").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let expanded = expand_env(path);
+                    if expanded.contains('*') {
+                        return Err("复杂 glob 需 PS 回退".into());
+                    }
+                    if !std::path::Path::new(&expanded).is_dir() { continue; }
+                    collect_files(&expanded, pattern, recurse, &mut files);
+                }
+            }
+        } else {
+            // 目录型：用 item 的 path 或 rule.pathPs
+            let target = item.get("path").and_then(|v| v.as_str())
+                .or_else(|| rule.get("pathPs").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if !target.is_empty() && std::path::Path::new(target).exists() {
+                collect_files(target, "*", true, &mut files);
+            }
+        }
+
+        // 去重
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.dedup_by(|a, b| a.0 == b.0);
+
+        let mut freed = 0i64;
+        let mut deleted = 0i64;
+        let mut failed = 0i64;
+
+        for (path, size) in &files {
+            if to_recycle {
+                // 回收站模式：只枚举，由主进程移入回收站
+                recycle_entries.push(json!({"id": id, "path": path, "size": size, "isDir": false}));
+                freed += *size as i64;
+                deleted += 1;
+            } else {
+                // 永久删除
+                match std::fs::remove_file(path) {
+                    Ok(()) => {
+                        freed += *size as i64;
+                        deleted += 1;
+                    }
+                    Err(_) => {
+                        failed += 1;
+                    }
+                }
+            }
+        }
+
+        total_freed += freed;
+        total_files += deleted;
+
+        let status = if failed == 0 {
+            if to_recycle { "recycle" } else { "ok" }
+        } else if deleted > 0 {
+            "partial"
+        } else {
+            "fail"
+        };
+        let message = if to_recycle {
+            format!("待移入回收站（{} 个文件）", deleted)
+        } else if failed == 0 {
+            format!("已清理 {} 个文件", deleted)
+        } else {
+            format!("已清理 {} 个文件，{} 个被占用", deleted, failed)
+        };
+
+        details.push(json!({
+            "id": id, "name": name, "status": status,
+            "freed": freed, "message": message, "fileCount": deleted, "residual": failed,
+        }));
+
+        // auto_rebuild：重建目录
+        if auto_rebuild && !to_recycle {
+            if let Some(file_keys) = rule.get("fileKeys").and_then(|v| v.as_array()) {
+                for fk in file_keys {
+                    let path = fk.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let expanded = expand_env(path);
+                    if !expanded.contains('*') && !expanded.is_empty() {
+                        let _ = std::fs::create_dir_all(&expanded);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(CleanupExecuteResult { details, freed: total_freed, file_count: total_files, recycle_entries })
+}
+
+fn find_rule_by_id(rules: &Value, id: &str) -> Option<Value> {
+    let groups = rules.get("groups").and_then(|v| v.as_array())?;
+    for g in groups {
+        if let Some(subgroups) = g.get("subGroups").and_then(|v| v.as_array()) {
+            for sg in subgroups {
+                if let Some(items) = sg.get("items").and_then(|v| v.as_array()) {
+                    for it in items {
+                        if it.get("id").and_then(|v| v.as_str()) == Some(id) {
+                            return Some(it.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(items) = g.get("items").and_then(|v| v.as_array()) {
+            for it in items {
+                if it.get("id").and_then(|v| v.as_str()) == Some(id) {
+                    return Some(it.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn collect_files(dir: &str, pattern: &str, recurse: bool, files: &mut Vec<(String, u64)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_symlink() { continue; }
+        if meta.is_dir() {
+            if recurse {
+                collect_files(&path.to_string_lossy(), pattern, recurse, files);
+            }
+        } else if meta.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !glob_match(pattern, &name) { continue; }
+            files.push((path.to_string_lossy().to_string(), meta.len()));
+        }
+    }
+}

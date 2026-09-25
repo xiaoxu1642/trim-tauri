@@ -1018,14 +1018,37 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
     log::flush_sync(); // 审查v4-L3：危险操作执行前强制刷盘
 
     let task = tauri::async_runtime::spawn_blocking(move || {
-        let out = (|| -> Result<pwsh::PsOutput, String> {
-            let path = pwsh::write_temp_script(&script, ".ps1")?;
-            // 不在此层剥 @@DIAG@@：JS 的 cleanLines 取的是**未剥**的行，
-            // 剥掉的 stdout 只作为 join 为空时的兜底（逐字对齐 main.js 1364）
-            let r = pwsh::run_file(&path, EXECUTE_TIMEOUT, None);
-            let _ = std::fs::remove_file(&path);
-            r
-        })();
+        // S1：原生优先，注册表型/DISM/复杂 glob 回退 PS
+        let native_result = crate::engine::native::cleanup_execute(&safe_items, &rules, to_recycle, auto_rebuild);
+        let out: Result<pwsh::PsOutput, String> = match native_result {
+            Ok(result) => {
+                // 构造模拟 PsOutput：@@RECYCLE@@ 行 + JSON 结果
+                let mut stdout = String::new();
+                for entry in &result.recycle_entries {
+                    stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
+                }
+                let data = json!({
+                    "details": result.details,
+                    "freed": result.freed,
+                    "fileCount": result.file_count,
+                });
+                stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
+                stdout.push('\n');
+                Ok(pwsh::PsOutput { code: 0, stdout, stderr: String::new(), timed_out: false })
+            }
+            Err(e) => {
+                log::write_log("warn", &format!("清理执行原生回退 PS: {e}"));
+                let path = match pwsh::write_temp_script(&script, ".ps1") {
+                    Ok(p) => p,
+                    Err(e) => return json!({ "success": false, "message": e }),
+                };
+                // 不在此层剥 @@DIAG@@：JS 的 cleanLines 取的是**未剥**的行，
+                // 剥掉的 stdout 只作为 join 为空时的兜底（逐字对齐 main.js 1364）
+                let r = pwsh::run_file(&path, EXECUTE_TIMEOUT, None);
+                let _ = std::fs::remove_file(&path);
+                r
+            }
+        };
         let ps = match out {
             Ok(p) => p,
             Err(e) => return json!({ "success": false, "message": e }),
