@@ -137,6 +137,19 @@ fn build_repair_script(action_id: &str, repair: &Value) -> Result<String, String
 // ==================== 采集 / 修复 ====================
 /// 跑一次网络检测（超时 25s，diagOp 'netcheck.collect'），并落到本窗口快照槽。
 fn run_netcheck_collect(label: &str) -> Result<Value, String> {
+    // S1：原生优先，失败自动回退 PS
+    match crate::engine::native::netcheck_status() {
+        Ok(data) => {
+            if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
+                snapshot_store(label, items);
+            }
+            log::write_log("info", "网络检测原生完成");
+            return Ok(data);
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("网络原生检测失败，回退 PS: {e}"));
+        }
+    }
     let path = pwsh::write_temp_script(NETCHECK_STATUS_PS, ".ps1")?;
     let out = pwsh::run_file(&path, Duration::from_secs(25), Some("netcheck.collect"));
     let _ = std::fs::remove_file(&path);
