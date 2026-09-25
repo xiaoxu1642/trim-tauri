@@ -2,7 +2,7 @@
 
 > Trim 是一款 Windows 11 清理与优化小工具，中文界面，原生 Fluent Design 风格。
 > 由小旭个人开发，仅供个人测试交流使用，使用风险请自行承担。
-> 版本 **0.1.3**（Tauri 重构首发，由 Electron 版逐域迁移而来），适用 Windows 11 22H2 及以上，**需要系统已安装 PowerShell 7**（`winget install Microsoft.PowerShell`；未安装时清理、维护、右键管理、启动项、外设、网络检测等功能不可用）；内存清理功能需要**以管理员身份运行**。
+> 版本 **0.1.4**（B1 原生迁移：内存信息/进程列表/网卡枚举/丢包检测已改为 Rust 原生调用，不再每次冷启动 pwsh），适用 Windows 11 22H2 及以上，**需要系统已安装 PowerShell 7**（`winget install Microsoft.PowerShell`；未安装时清理、维护、右键管理、启动项、外设、网络检测等功能不可用）；内存清理功能需要**以管理员身份运行**。
 
 ---
 

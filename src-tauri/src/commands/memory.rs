@@ -29,7 +29,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
-use crate::engine::{guard, log, sysinfo};
+use crate::engine::{guard, log, native, sysinfo};
 use crate::pwsh;
 
 /// PS 脚本编译期嵌入（源：src/scripts-powershell/memory-scripts.js，逐字搬运）
@@ -153,9 +153,24 @@ fn js_string(v: Option<&Value>) -> String {
 // ==================== memory:info ====================
 
 /// memory:info — 物理内存 / 页面文件 / 系统缓存（只读，15s 超时）
+///
+/// B1 S1：原生（GetPerformanceInfo/GlobalMemoryStatusEx）优先，失败自动回退 PS。
 #[tauri::command]
 pub async fn memory_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
+    // 原生路径
+    match tauri::async_runtime::spawn_blocking(native::memory_info).await {
+        Ok(Ok(data)) => {
+            return Ok(json!({ "success": true, "data": data, "engine": "rust" }));
+        }
+        Ok(Err(e)) => {
+            let _ = log::write_log("warn", &format!("memory:info 原生失败，回退 PS: {e}"));
+        }
+        Err(e) => {
+            let _ = log::write_log("warn", &format!("memory:info 原生任务异常，回退 PS: {e}"));
+        }
+    }
+    // PS 回退
     Ok(match run_script(MEMORY_INFO_PS, 15, "memory:info").await {
         Ok(out) => {
             if out.timed_out {
@@ -303,9 +318,36 @@ fn lookup_snapshot(label: &str, pid: i64) -> Option<ProcInfo> {
 }
 
 /// memory:processes — 进程列表（只读，20s 超时），同时刷新本窗口的快照槽
+///
+/// B1 S1：原生（ToolHelp32 + OpenProcess + GetProcessMemoryInfo）优先，失败自动回退 PS。
 #[tauri::command]
 pub async fn memory_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     let label = guard::guard_readonly(&window)?;
+    // 原生路径
+    match tauri::async_runtime::spawn_blocking(native::memory_processes).await {
+        Ok(Ok(entries)) => {
+            let processes: Vec<Value> = entries
+                .into_iter()
+                .map(|p| {
+                    json!({
+                        "Id": p.pid as i64,
+                        "ProcessName": p.name,
+                        "mem": p.working_set as i64,
+                        "Path": p.path,
+                    })
+                })
+                .collect();
+            save_snapshot(&label, &processes);
+            return Ok(json!({ "success": true, "processes": processes, "engine": "rust" }));
+        }
+        Ok(Err(e)) => {
+            let _ = log::write_log("warn", &format!("memory:processes 原生失败，回退 PS: {e}"));
+        }
+        Err(e) => {
+            let _ = log::write_log("warn", &format!("memory:processes 原生任务异常，回退 PS: {e}"));
+        }
+    }
+    // PS 回退
     Ok(match run_script(MEMORY_PROCESSES_PS, 20, "memory:processes").await {
         Ok(out) => {
             if out.timed_out {

@@ -1,6 +1,6 @@
-﻿[package]
+[package]
 name = "trim-tauri"
-version = "0.1.3"
+version = "0.1.4"
 description = "Trim"
 authors = ["xiaoxu"]
 edition = "2021"
@@ -107,6 +107,19 @@ features = [
     "Win32_Security",
     # windows 0.61 把 RtlGetVersion 划到 Wdk 命名空间
     "Wdk_System_SystemServices",
+    # B1 PS→Rust 迁移：低风险只读采集
+    # ProcessStatus：GetPerformanceInfo（Cache Bytes/提交量）、GetProcessMemoryInfo（工作集）
+    "Win32_System_ProcessStatus",
+    # Diagnostics_ToolHelp：CreateToolhelp32Snapshot 枚举进程
+    "Win32_System_Diagnostics_ToolHelp",
+    # NetworkManagement_IpHelper：GetProcessMemoryInfo 等
+    # NetworkManagement_Ndis：GetAdaptersAddresses、GetIpForwardTable2（需与 WinSock 同开）
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    # Networking_WinSock：IN_ADDR / SOCKADDR_INET（IP 地址结构，ICMP/路由表需要）
+    "Win32_Networking_WinSock",
+    # System_Registry：读取网络连接名（NetConnectionID）等注册表只读键
+    "Win32_System_Registry",
 ]
 
 [profile.dev]

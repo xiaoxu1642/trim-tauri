@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tauri::WebviewWindow;
 
-use crate::engine::{guard, log, paths};
+use crate::engine::{guard, log, native, paths};
 use crate::pwsh;
 use crate::security;
 
@@ -157,9 +157,18 @@ fn ps_json(script: &'static str, timeout_secs: u64, op: &str) -> Result<Value, S
 }
 
 /// realtime:adapters — 枚举物理网卡
+///
+/// B1 S1：原生（GetAdaptersAddresses）优先，失败自动回退 PS。
 #[tauri::command]
 pub async fn realtime_adapters<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
+    // 原生路径
+    match tauri::async_runtime::spawn_blocking(native::realtime_adapters).await {
+        Ok(Ok(v)) => return Ok(v),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("realtime:adapters 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("realtime:adapters 原生任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     let r = tauri::async_runtime::spawn_blocking(|| ps_json(ADAPTERS_PS, 10, "realtime:adapters")).await;
     Ok(match r {
         Ok(Ok(v)) => v,
@@ -193,9 +202,18 @@ pub fn realtime_sample<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Va
 }
 
 /// realtime:loss — 丢包检测（ping 默认网关）
+///
+/// B1 S1：原生（GetIpForwardTable2 + IcmpSendEcho）优先，失败自动回退 PS。
 #[tauri::command]
 pub async fn realtime_loss<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
+    // 原生路径
+    match tauri::async_runtime::spawn_blocking(native::realtime_loss).await {
+        Ok(Ok(v)) => return Ok(v),
+        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("realtime:loss 原生失败，回退 PS: {e}")); }
+        Err(e) => { let _ = log::write_log("warn", &format!("realtime:loss 原生任务异常，回退 PS: {e}")); }
+    }
+    // PS 回退
     let r = tauri::async_runtime::spawn_blocking(|| ps_json(LOSS_PS, 10, "realtime:loss")).await;
     Ok(match r {
         Ok(Ok(v)) => v,

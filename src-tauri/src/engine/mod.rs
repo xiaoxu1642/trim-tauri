@@ -7,6 +7,7 @@ pub mod appearance;
 pub mod delete_manifest;
 pub mod guard;
 pub mod log;
+pub mod native;
 pub mod optimization_state;
 pub mod paths;
 pub mod protect;
