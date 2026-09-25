@@ -28,53 +28,13 @@
 // 域专属映射放在 tools/ps-map/<域>.mjs，各导出 `MAP` 数组；本文件只做汇总。
 // 新增/修改脚本只需要动自己那个域文件，避免多人同时改本文件互相覆盖。
 
-import { MAP as memoryMap } from './ps-map/memory.mjs';
-import { MAP as netcheckMap } from './ps-map/netcheck.mjs';
-import { MAP as runtimesMap } from './ps-map/runtimes.mjs';
-import { MAP as netspeedMap } from './ps-map/netspeed.mjs';
-import { MAP as cleanupMap } from './ps-map/cleanup.mjs';
-import { MAP as pathsMap } from './ps-map/paths.mjs';
-import { MAP as modelsMap } from './ps-map/models.mjs';
-import { MAP as fontsMap } from './ps-map/fonts.mjs';
-import { MAP as aidescMap } from './ps-map/aidesc.mjs';
-// ---- D 批（删除与高危）----
-import { MAP as contextmenuMap } from './ps-map/contextmenu.mjs';
-import { MAP as startupMap } from './ps-map/startup.mjs';
-import { MAP as peripheralMap } from './ps-map/peripheral.mjs';
-import { MAP as optimizerMap } from './ps-map/optimizer.mjs';
-import { MAP as maintenanceMap } from './ps-map/maintenance.mjs';
-
 export { ORIGIN } from './ps-origin.mjs';
 import { ORIGIN } from './ps-origin.mjs';
 
-/** 核心（A 批）映射：设备/总览/实时网速等已迁移域 */
-const CORE_MAPPING = [
-  { name: 'sysdisk', js: `${ORIGIN}/src/scripts-powershell/sysdisk-scripts.js`, call: 'scan', ps1: 'sysdisk.ps1', note: '系统盘介质类型探测（只读）' },
-  { name: 'device_info', js: `${ORIGIN}/src/scripts-powershell/device-info-scripts.js`, call: 'scan', ps1: 'device_info.ps1', note: '设备信息采集（只读 CIM/WMI）' },
-  { name: 'overview_metrics', js: `${ORIGIN}/src/scripts-powershell/overview-scripts.js`, call: 'metrics', ps1: 'overview_metrics.ps1', note: '系统概览实时指标（只读）' },
-  { name: 'overview_checkup', js: `${ORIGIN}/src/scripts-powershell/overview-scripts.js`, call: 'checkup', ps1: 'overview_checkup.ps1', note: '系统体检（只读诊断）' },
-  { name: 'realtime_adapters', js: `${ORIGIN}/src/scripts-powershell/realtime-scripts.js`, call: 'adapters', ps1: 'realtime_adapters.ps1', note: '物理网卡枚举（只读）' },
-  { name: 'realtime_loss', js: `${ORIGIN}/src/scripts-powershell/realtime-scripts.js`, call: 'loss', ps1: 'realtime_loss.ps1', note: '丢包检测：ping 默认网关（只读）' },
-  // realtime_stream.ps1 已退役（B0 S3）：Tauri 侧全程使用进程内 NetSampler，
-  // 不再起常驻 pwsh；.ps1 文件与映射条目均已删除。
-];
-
+// S3 后仅保留 2 个 PS 脚本：cm_icons（GDI+ 图标提取）和 optimizer_build（WMI 还原点）
 export const MAPPING = [
-  ...CORE_MAPPING,
-  ...memoryMap,
-  ...netcheckMap,
-  ...runtimesMap,
-  ...netspeedMap,
-  ...cleanupMap,
-  ...pathsMap,
-  ...modelsMap,
-  ...fontsMap,
-  ...aidescMap,
-  ...contextmenuMap,
-  ...startupMap,
-  ...peripheralMap,
-  ...optimizerMap,
-  ...maintenanceMap,
+  { name: 'cm_icons', js: `${ORIGIN}/src/scripts-powershell/contextmenu-scripts.js`, call: 'icons', args: [['__TRIM_ITEMS_JSON__']], ps1: 'cm_icons.ps1', note: '右键菜单图标修复（哨兵 items）', noRun: '带哨兵参数，行为层豁免' },
+  { name: 'optimizer_build', js: `${ORIGIN}/src/scripts-powershell/optimizer-scripts.js`, call: 'buildScript', args: [[{ __trim_sentinel__: true }]], ps1: 'optimizer_build.ps1', note: '优化项执行脚本（哨兵 steps）', noRun: '会改注册表/服务/系统设置，行为层豁免' },
 ];
 
 export const PROVENANCE_BEGIN = '# <<<PROVENANCE';

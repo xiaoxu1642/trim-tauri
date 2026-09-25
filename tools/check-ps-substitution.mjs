@@ -35,6 +35,13 @@ const require = createRequire(import.meta.url);
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\');
 const CRATE = join(ROOT, 'src-tauri');
 
+// S3：cleanup 域 PS 脚本已删除，本门禁不再适用
+const CLEANUP_PS = join(ROOT, 'src-tauri', 'ps', 'cleanup_scan.ps1');
+if (!existsSync(CLEANUP_PS)) {
+  console.log('✓ cleanup 域 PS 脚本已 S3 退役，替换口径对拍门禁跳过');
+  process.exit(0);
+}
+
 const CLEANUP = require(`${ORIGIN}/src/scripts-powershell/cleanup-scripts.js`);
 const PROTECT = require(`${ORIGIN}/src/main/ps-protect-path.js`);
 
