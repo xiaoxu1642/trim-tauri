@@ -307,17 +307,28 @@ pub async fn peripheral_restore_backup<R: tauri::Runtime>(
             "message": "外设优化需要管理员权限，请先提权"
         }));
     }
-    let Some(out) = run_ps(PS_RESTORE, 30) else {
-        return Ok(json!({ "success": false, "message": "还原备份失败" }));
-    };
-    if out.code != 0 {
-        return Ok(json!({ "success": false, "message": "还原备份失败（reg import 返回非零）" }));
-    }
-    let Some(payload) = find_prefixed(&out.stdout, "@@PERIPHERAL_RESTORE@@") else {
-        return Ok(json!({ "success": false, "message": "还原备份失败：无有效结果" }));
-    };
-    let Ok(v) = serde_json::from_str::<Value>(payload) else {
-        return Ok(json!({ "success": false, "message": "还原备份失败" }));
+    // S1：原生优先，失败自动回退 PS
+    let v = match crate::engine::native::peripheral_restore() {
+        Ok(v) => {
+            log::write_log("info", "外设恢复原生完成");
+            v
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("外设恢复原生失败，回退 PS: {e}"));
+            let Some(out) = run_ps(PS_RESTORE, 30) else {
+                return Ok(json!({ "success": false, "message": "还原备份失败" }));
+            };
+            if out.code != 0 {
+                return Ok(json!({ "success": false, "message": "还原备份失败（reg import 返回非零）" }));
+            }
+            let Some(payload) = find_prefixed(&out.stdout, "@@PERIPHERAL_RESTORE@@") else {
+                return Ok(json!({ "success": false, "message": "还原备份失败：无有效结果" }));
+            };
+            match serde_json::from_str::<Value>(payload) {
+                Ok(v) => v,
+                Err(_) => return Ok(json!({ "success": false, "message": "还原备份失败" })),
+            }
+        }
     };
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         let restored = v.get("restored").and_then(|x| x.as_i64()).unwrap_or(0);

@@ -4549,3 +4549,87 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
 
     Ok(())
 }
+// ==================== B9 peripheral_restore：外设优化恢复 ====================
+
+/// 从备份恢复外设设置（对应 peripheral_restore.ps1，S1）
+///
+/// 找 %APPDATA%\Trim\peripheral-backup 中最新一批 backup_<stamp>_*.reg，
+/// 按时间戳分组整组导入（v2-M12：一次 apply 留下多个分片，必须整组还原）。
+/// 返回 ok/reason/restored/total/file。
+pub fn peripheral_restore() -> Result<Value, String> {
+    let backup_dir = if let Ok(appdata) = std::env::var("APPDATA") {
+        std::path::PathBuf::from(appdata).join("Trim").join("peripheral-backup")
+    } else {
+        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": ""}));
+    };
+    if !backup_dir.exists() {
+        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": ""}));
+    }
+
+    // 收集所有 backup_*.reg，按修改时间倒序
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&backup_dir)
+        .map_err(|e| format!("读取备份目录失败: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file() && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("backup_") && n.ends_with(".reg")).unwrap_or(false)
+        })
+        .collect();
+    if files.is_empty() {
+        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": ""}));
+    }
+    files.sort_by(|a, b| {
+        let ta = a.metadata().and_then(|m| m.modified()).ok();
+        let tb = b.metadata().and_then(|m| m.modified()).ok();
+        tb.cmp(&ta)
+    });
+
+    // 按时间戳分组
+    let latest_name = files[0].file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let stamp = if let Some(caps) = regex_capture(latest_name, r"^backup_(\d{8}_\d{6})") {
+        caps
+    } else {
+        String::new()
+    };
+    let group: Vec<&std::path::PathBuf> = if !stamp.is_empty() {
+        files.iter().filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with(&format!("backup_{stamp}"))).unwrap_or(false)
+        }).collect()
+    } else {
+        vec![&files[0]]
+    };
+
+    let mut imported = 0i64;
+    for f in &group {
+        let out = std::process::Command::new("reg.exe")
+            .args(["import", f.to_str().unwrap()])
+            .output();
+        if out.is_ok() && out.unwrap().status.success() {
+            imported += 1;
+        }
+    }
+    let total = group.len() as i64;
+    let ok = imported > 0 && imported == total;
+    let reason = if ok { String::new() } else if imported == 0 { "import-failed".into() } else { "partial".into() };
+
+    Ok(json!({
+        "ok": ok,
+        "reason": reason,
+        "restored": imported,
+        "total": total,
+        "file": latest_name,
+    }))
+}
+
+fn regex_capture(text: &str, pattern: &str) -> Option<String> {
+    // 简单正则：backup_(\d{8}_\d{6})
+    if pattern == r"^backup_(\d{8}_\d{6})" {
+        if text.len() >= 21 && &text[..7] == "backup_" {
+            let stamp = &text[7..21];
+            if stamp.chars().all(|c| c.is_ascii_digit() || c == '_') {
+                return Some(stamp.to_string());
+            }
+        }
+    }
+    None
+}
