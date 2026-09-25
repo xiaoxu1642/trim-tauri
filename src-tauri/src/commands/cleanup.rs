@@ -89,112 +89,9 @@ const PLAN_CAP_TOTAL: usize = 1_000_000;
 /// 占用检测防呆上限
 const PLAN_LOCK_CAP: usize = 20_000;
 /// 执行/明细的 PS 超时（对照 main.js 1357 / 1531）
-const EXECUTE_TIMEOUT: Duration = Duration::from_secs(600);
-const DETAIL_TIMEOUT: Duration = Duration::from_secs(120);
-const SCAN_TIMEOUT: Duration = Duration::from_secs(300);
-
-// ==================== PS 模板替换（对照 cleanup-scripts.js 1720-1764） ====================
-
-const SCAN_TEMPLATE: &str = include_str!("../../ps/cleanup_scan.ps1");
-const EXECUTE_TEMPLATE: &str = include_str!("../../ps/cleanup_execute.ps1");
-const DETAIL_TEMPLATE: &str = include_str!("../../ps/cleanup_detail.ps1");
-/// 生成器写入的来源说明块结束标记；Rust 侧剥掉它，得到与 JS 运行时字符串**逐字节相同**的模板
-const PROVENANCE_END: &str = "# PROVENANCE>>>";
-
-/// 取模板正文（剥掉顶部 `# <<<PROVENANCE … # PROVENANCE>>>` 说明块）
-fn template_body(raw: &str) -> &str {
-    let rest = match raw.find(PROVENANCE_END) {
-        Some(i) => &raw[i + PROVENANCE_END.len()..],
-        None => raw,
-    };
-    // 生成器写的是 `<来源块>\n<正文>`，而 JS 模板字面量本身以 '\n' 开头，
-    // 故正文前会多出一个换行——剥掉它才与 JS 运行时字符串**逐字节**相同。
-    rest.strip_prefix('\n').unwrap_or(rest)
-}
-
-/// 对照 JS `psEscapeSingle`：`String(s).replace(/'/g, "''")`
-fn ps_escape_single(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
 /// 对照 JS `JSON.stringify`（紧凑、非 ASCII 原样输出；键序依赖 serde_json 的 preserve_order）
 fn json_text(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
-}
-
-/// 对照 JS `String.prototype.replace(str, val)`：**只替换首次出现**
-fn sub_once(text: &str, token: &str, value: &str) -> String {
-    text.replacen(token, value, 1)
-}
-
-/// TrimFastSize.dll 绝对路径（对照 main.js `resolveFastSizeDll`；缺失返回空串 → 脚本自动降级）
-///
-/// Electron：`process.resourcesPath/fastsize/` → 开发期 `<__dirname>/scripts/`。
-/// Tauri：exe 同级 `fastsize/`（resources 落位语义）→ 开发期仓库 `scripts/`（双轨期取兄弟仓库）。
-fn fastsize_dll() -> String {
-    let mut cands: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::env::var("TRIM_FASTSIZE_DLL") {
-        if !p.trim().is_empty() {
-            cands.push(PathBuf::from(p));
-        }
-    }
-    let exe_dir = paths::exe_dir();
-    cands.push(exe_dir.join("fastsize").join("TrimFastSize.dll"));
-    cands.push(exe_dir.join("resources").join("fastsize").join("TrimFastSize.dll"));
-    // 开发期（cargo run）：target/debug → 上溯到 nanoid 同级仓库 scripts/
-    cands.push(exe_dir.join("..").join("..").join("..").join("..").join("Trim").join("scripts").join("TrimFastSize.dll"));
-    for c in cands {
-        if c.is_file() {
-            return c.to_string_lossy().to_string();
-        }
-    }
-    String::new()
-}
-
-/// 扫描脚本（对照 `CLEANUP_SCRIPT.scan(categories, configuredPaths, rules)`）
-pub fn build_scan_script(categories: &[String], configured: &Value, rules: &Value, dll: &str) -> String {
-    let cats = ps_escape_single(&json_text(&Value::from(categories.to_vec())));
-    let paths_json = ps_escape_single(&json_text(configured));
-    let rules_json = ps_escape_single(&json_text(rules));
-    let dll_esc = ps_escape_single(dll);
-    let t = template_body(SCAN_TEMPLATE);
-    let t = sub_once(t, "${CATEGORIES_PLACEHOLDER}", &cats);
-    let t = sub_once(&t, "${CONFIGURED_PATHS_PLACEHOLDER}", &paths_json);
-    let t = sub_once(&t, "${RULES_JSON_PLACEHOLDER}", &rules_json);
-    sub_once(&t, "${FASTSIZE_DLL_PLACEHOLDER}", &dll_esc)
-}
-
-/// 执行脚本（对照 `CLEANUP_SCRIPT.execute(items, force, toRecycle, autoRebuild)`）
-pub fn build_execute_script(
-    items: &[Value],
-    force: bool,
-    to_recycle: bool,
-    auto_rebuild: bool,
-    rules: &Value,
-    protected_json: &str,
-    dll: &str,
-) -> String {
-    let items_json = ps_escape_single(&json_text(&Value::from(items.to_vec())));
-    let rules_json = ps_escape_single(&json_text(rules));
-    let protected = ps_escape_single(protected_json);
-    let dll_esc = ps_escape_single(dll);
-    let t = template_body(EXECUTE_TEMPLATE);
-    let t = sub_once(t, "${FORCE_PLACEHOLDER}", if force { "$true" } else { "$false" });
-    let t = sub_once(&t, "${RECYCLE_PLACEHOLDER}", if to_recycle { "$true" } else { "$false" });
-    let t = sub_once(&t, "${AUTO_REBUILD_PLACEHOLDER}", if auto_rebuild { "$true" } else { "$false" });
-    let t = sub_once(&t, "${ITEMS_PLACEHOLDER}", &items_json);
-    let t = sub_once(&t, "${RULES_JSON_PLACEHOLDER}", &rules_json);
-    let t = sub_once(&t, "${PROTECTED_JSON_PLACEHOLDER}", &protected);
-    sub_once(&t, "${FASTSIZE_DLL_PLACEHOLDER}", &dll_esc)
-}
-
-/// 明细脚本（对照 `CLEANUP_SCRIPT.detail(id, resolvedPath)`）
-pub fn build_detail_script(id: &str, resolved_path: &str, rules: &Value) -> String {
-    let rules_json = ps_escape_single(&json_text(rules));
-    let t = template_body(DETAIL_TEMPLATE);
-    let t = sub_once(t, "${DETAIL_ID_PLACEHOLDER}", &ps_escape_single(id));
-    let t = sub_once(&t, "${DETAIL_PATH_PLACEHOLDER}", &ps_escape_single(resolved_path));
-    sub_once(&t, "${DETAIL_RULES_JSON_PLACEHOLDER}", &rules_json)
 }
 
 // ==================== 规则库加载（对照 cleanup-scripts.js 44-195） ====================
@@ -831,38 +728,16 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
     let hook: Option<Box<dyn FnMut(&str)>> = Some(Box::new(move |line: &str| {
         ingest_and_emit(&hook_accum, &hook_window, line);
     }));
-    // B10 S2：默认原生，TRIM_LEGACY_CLEANUP=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_CLEANUP").map(|v| v == "1").unwrap_or(false);
-    let (code, _stdout, stderr) = if legacy {
-        let script = build_scan_script(&cats, &configured, &rules, &fastsize_dll());
-        let out = (|| -> Result<pwsh::PsOutput, String> {
-            let path = pwsh::write_temp_script(&script, ".ps1")?;
-            let r = pwsh::run_file(&path, SCAN_TIMEOUT, Some("cleanup.scan"));
-            let _ = std::fs::remove_file(&path);
-            r
-        })();
-        match out {
-            Ok(ps) => {
-                for line in ps.stdout.lines() {
-                    ingest_and_emit(&accum, window, line);
-                }
-                (ps.code, String::new(), ps.stderr)
-            }
-            Err(e) => {
-                log::write_log("error", &format!("扫描失败: {e}"));
-                return json!({ "success": false, "message": e, "data": [] });
-            }
-        }
-    } else {
+    // S3：纯 Rust 原生
+    let (code, _stdout, stderr) = {
         let (code, stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json], &rules_json, hook);
         if code != 0 {
             let msg = if stderr.trim().is_empty() { format!("退出码 {code}") } else { stderr.trim().to_string() };
-            log::write_log("error", &format!("Rust 清理扫描失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {msg}"));
-            return json!({ "success": false, "message": format!("原生扫描失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {msg}"), "data": [] });
+            log::write_log("error", &format!("Rust 清理扫描失败: {msg}"));
+            return json!({ "success": false, "message": format!("原生扫描失败: {msg}"), "data": [] });
         }
         (code, stdout, stderr)
     };
-    let used_ps = legacy;
     if code != 0 {
         log::write_log("error", &format!("扫描失败: {}", stderr.trim()));
         let msg = if stderr.trim().is_empty() {
@@ -890,11 +765,10 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
         }
         (data, a.plan_total)
     };
-    let engine = if used_ps { "powershell" } else { "rust" };
     log::write_log(
         "info",
         &format!(
-            "扫描完成({engine}): {} 项, 计划文件 {} 条",
+            "扫描完成(rust): {} 项, 计划文件 {} 条",
             data.len(),
             plan_total
         ),
@@ -986,15 +860,6 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
         Ok(r) => r,
         Err(e) => return json!({ "success": false, "message": e }),
     };
-    let script = build_execute_script(
-        &safe_items,
-        force,
-        to_recycle,
-        auto_rebuild,
-        &rules,
-        &protect::protected_roots_json(),
-        &fastsize_dll(),
-    );
     log::write_log(
         "info",
         &format!(
@@ -1005,34 +870,23 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
     log::flush_sync(); // 审查v4-L3：危险操作执行前强制刷盘
 
     let task = tauri::async_runtime::spawn_blocking(move || {
-        // B10 S2：默认原生，TRIM_LEGACY_CLEANUP=1 回退 PS
-        let legacy = std::env::var("TRIM_LEGACY_CLEANUP").map(|v| v == "1").unwrap_or(false);
-        let out: Result<pwsh::PsOutput, String> = if legacy {
-            let path = match pwsh::write_temp_script(&script, ".ps1") {
-                Ok(p) => p,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            let r = pwsh::run_file(&path, EXECUTE_TIMEOUT, None);
-            let _ = std::fs::remove_file(&path);
-            r
-        } else {
-            match crate::engine::native::cleanup_execute(&safe_items, &rules, to_recycle, auto_rebuild) {
-                Ok(result) => {
-                    let mut stdout = String::new();
-                    for entry in &result.recycle_entries {
-                        stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
-                    }
-                    let data = json!({
-                        "details": result.details,
-                        "freed": result.freed,
-                        "fileCount": result.file_count,
-                    });
-                    stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
-                    stdout.push('\n');
-                    Ok(pwsh::PsOutput { code: 0, stdout, stderr: String::new(), timed_out: false })
+        // S3：纯 Rust 原生
+        let out: Result<pwsh::PsOutput, String> = match crate::engine::native::cleanup_execute(&safe_items, &rules, to_recycle, auto_rebuild) {
+            Ok(result) => {
+                let mut stdout = String::new();
+                for entry in &result.recycle_entries {
+                    stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
                 }
-                Err(e) => return json!({ "success": false, "message": format!("原生执行失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {e}") }),
+                let data = json!({
+                    "details": result.details,
+                    "freed": result.freed,
+                    "fileCount": result.file_count,
+                });
+                stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
+                stdout.push('\n');
+                Ok(pwsh::PsOutput { code: 0, stdout, stderr: String::new(), timed_out: false })
             }
+            Err(e) => return json!({ "success": false, "message": format!("原生执行失败: {e}") }),
         };
         let ps = match out {
             Ok(p) => p,
@@ -1407,68 +1261,14 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
         Some(p) if !p.is_empty() && p.chars().count() <= 600 => p,
         _ => String::new(),
     };
-    // B10 S2：默认原生，TRIM_LEGACY_CLEANUP=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_CLEANUP").map(|v| v == "1").unwrap_or(false);
-    if !legacy {
-        if let Some(rule) = find_cleanup_rule_by_id(&rules, &id) {
-            match crate::engine::native::cleanup_detail(&rule, &safe_path) {
-                Ok(detail) => return json!({ "success": true, "data": detail }),
-                Err(e) => return json!({ "success": false, "message": format!("原生枚举失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {e}") }),
-            }
+    // S3：纯 Rust 原生
+    if let Some(rule) = find_cleanup_rule_by_id(&rules, &id) {
+        match crate::engine::native::cleanup_detail(&rule, &safe_path) {
+            Ok(detail) => return json!({ "success": true, "data": detail }),
+            Err(e) => return json!({ "success": false, "message": format!("原生枚举失败: {e}") }),
         }
-        return json!({ "success": false, "message": "未找到清理规则" });
     }
-    let script = build_detail_script(&id, &safe_path, &rules);
-    let files = Mutex::new(Vec::<Value>::new());
-    let meta = Mutex::new(Option::<Value>::None);
-    let body = (|| -> Result<(), String> {
-        let script_path = pwsh::write_temp_script(&script, ".ps1")?;
-        let out = pwsh::run_file(&script_path, DETAIL_TIMEOUT, Some("cleanup.detail"));
-        let _ = std::fs::remove_file(&script_path);
-        let out = out?;
-        if out.code != 0 {
-            return Err(if out.stderr.trim().is_empty() {
-                "明细枚举失败".to_string()
-            } else {
-                out.stderr.trim().to_string()
-            });
-        }
-        for line in out.stdout.lines() {
-            if let Some(rest) = line.strip_prefix("@@ITEMFILE@@") {
-                if let Ok(f) = serde_json::from_str::<Value>(rest) {
-                    if f.get("path").map(|p| p.is_string()).unwrap_or(false) {
-                        files.lock().unwrap_or_else(|e| e.into_inner()).push(f);
-                    }
-                }
-            } else if let Some(rest) = line.strip_prefix("@@DETAIL@@") {
-                if let Ok(m) = serde_json::from_str::<Value>(rest) {
-                    *meta.lock().unwrap_or_else(|e| e.into_inner()) = Some(m);
-                }
-            }
-        }
-        Ok(())
-    })();
-    if let Err(e) = body {
-        log::write_log("error", &format!("条目明细枚举失败: {e}"));
-        return json!({ "success": false, "message": e });
-    }
-    let files = files.into_inner().unwrap_or_else(|e| e.into_inner());
-    let meta = meta.into_inner().unwrap_or_else(|e| e.into_inner());
-    let kind = meta
-        .as_ref()
-        .and_then(|m| m.get("kind"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("files");
-    let total = match meta.as_ref().and_then(|m| m.get("total")) {
-        Some(v) if !v.is_null() => v.clone(),
-        _ => Value::from(files.len()),
-    };
-    let truncated = meta
-        .as_ref()
-        .and_then(|m| m.get("truncated"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    json!({ "success": true, "data": { "kind": kind, "total": total, "truncated": truncated, "files": files } })
+    json!({ "success": false, "message": "未找到清理规则" })
 }
 
 // ==================== cleanup:check-locked / kill-locked-processes ====================
@@ -2072,137 +1872,10 @@ mod tests {
     use super::*;
 
     /// 首个差异的定位信息（行号 + 两侧原文片段）
-    fn first_diff(a: &str, b: &str) -> String {
-        let la: Vec<&str> = a.split('\n').collect();
-        let lb: Vec<&str> = b.split('\n').collect();
-        for i in 0..la.len().max(lb.len()) {
-            let x = la.get(i).copied().unwrap_or("<无>");
-            let y = lb.get(i).copied().unwrap_or("<无>");
-            if x != y {
-                let clip = |s: &str| s.chars().take(200).collect::<String>();
-                return format!(
-                    "首个差异 @行 {}\n   JS  : {}\n   Rust: {}",
-                    i + 1,
-                    clip(x),
-                    clip(y)
-                );
-            }
-        }
-        "长度相同但内容不等（不可达）".to_string()
-    }
 
     /// PS 模板替换对拍：同一合成输入，JS 生成 vs Rust 生成**逐字节**比较。
     ///
-    /// 夹具由 `node tools/check-ps-substitution.mjs` 生成到临时目录并经
-    /// `TRIM_PS_SUBST_DIR` 传入。
-    ///
-    /// 审查 M13：这条曾经是普通 `#[test]`，没有夹具时打印「跳过」然后 **计入 passed**
-    /// —— 单跑 `cargo test` 时它其实什么都没做，绿灯却是真的（门禁文档还把它算进通过数）。
-    /// 改成 `#[ignore]` 让它在默认跑里显式显示为 ignored，由 node 侧带 `--ignored` + 夹具驱动，
-    /// 「没跑」与「跑过且通过」从此可区分。
-    #[test]
-    #[ignore = "需 tools/check-ps-substitution.mjs 注入 TRIM_PS_SUBST_DIR 夹具，随该门禁一起跑"]
-    fn ps_substitution_matches_js() {
-        let Ok(dir) = std::env::var("TRIM_PS_SUBST_DIR") else {
-            panic!("被 --ignored 点名执行却没设 TRIM_PS_SUBST_DIR：请通过 node tools/check-ps-substitution.mjs 跑");
-        };
-        let dir = std::path::PathBuf::from(dir);
-        let inputs_path = dir.join("inputs.json");
-        if !inputs_path.is_file() {
-            panic!("缺少夹具 {}", inputs_path.display());
-        }
-        let inputs: Value =
-            serde_json::from_str(&std::fs::read_to_string(&inputs_path).unwrap()).unwrap();
-        let dll = inputs.get("dll").and_then(|v| v.as_str()).unwrap_or("");
-        let categories: Vec<String> = inputs
-            .get("categories")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
-            .unwrap_or_default();
-        let configured = inputs.get("configured").cloned().unwrap_or_else(|| json!({}));
-        let rules = inputs.get("rules").cloned().unwrap_or_else(|| json!({}));
-        let protected = inputs.get("protectedJson").and_then(|v| v.as_str()).unwrap_or("");
-        let items = inputs
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let force = inputs.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-        let to_recycle = inputs.get("toRecycle").and_then(|v| v.as_bool()).unwrap_or(false);
-        let auto_rebuild = inputs.get("autoRebuild").and_then(|v| v.as_bool()).unwrap_or(false);
-        let detail = inputs.get("detail").cloned().unwrap_or_else(|| json!({}));
-        let id = detail.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let path = detail.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-        let cases: [(&str, String); 3] = [
-            ("scan", build_scan_script(&categories, &configured, &rules, dll)),
-            (
-                "execute",
-                build_execute_script(&items, force, to_recycle, auto_rebuild, &rules, protected, dll),
-            ),
-            ("detail", build_detail_script(id, path, &rules)),
-        ];
-        let mut compared = 0usize;
-        for (name, rust) in cases {
-            let js_path = dir.join(format!("js.{name}.ps1"));
-            // 审查 v2-M16①：缺夹具绝不能 `eprintln! + continue`。那是把「跑了 1/3」报成
-            // 「3/3 通过」的静默假绿，而上游 `check-ps-substitution.mjs:129` 只匹配
-            // `\b1 passed\b` 字样 ⇒ 少两份夹具它照样打印「门禁通过」。fail-loud 才算数。
-            let js = std::fs::read_to_string(&js_path)
-                .unwrap_or_else(|_| panic!("[ps-subst] 缺少 {name} 的 JS 夹具 {}", js_path.display()));
-            compared += 1;
-            if js == rust {
-                eprintln!(
-                    "[ps-subst] ✓ {name} 逐字节一致（JS {} 字符 / Rust {} 字符）",
-                    js.chars().count(),
-                    rust.chars().count()
-                );
-                continue;
-            }
-            let rust_path = dir.join(format!("rust.{name}.ps1"));
-            let _ = std::fs::write(&rust_path, &rust);
-            panic!(
-                "[ps-subst] ✗ {name} 替换口径与 JS 不一致\n{}\n（Rust 产物已写 {}）",
-                first_diff(&js, &rust),
-                rust_path.display()
-            );
-        }
-        assert_eq!(compared, 3, "三份夹具必须逐一比对过，缺任何一份都不算通过");
-    }
-
-    /// 模板正文必须已剥离生成器来源块（否则与 JS 运行时字符串不等）
-    #[test]
-    fn template_bodies_are_stripped() {
-        for (name, raw) in [
-            ("scan", SCAN_TEMPLATE),
-            ("execute", EXECUTE_TEMPLATE),
-            ("detail", DETAIL_TEMPLATE),
-        ] {
-            let body = template_body(raw);
-            assert!(!body.contains(PROVENANCE_END), "{name} 未剥离来源块");
-            assert!(
-                !body.contains("<<<PROVENANCE"),
-                "{name} 未剥离来源块"
-            );
-            assert!(
-                body.contains("${FASTSIZE_DLL_PLACEHOLDER}")
-                    || body.contains("${DETAIL_RULES_JSON_PLACEHOLDER}"),
-                "{name} 模板正文异常（占位符缺失）"
-            );
-        }
-    }
-
-    /// 替换只认首次出现（对照 JS `String.replace(str, val)`），且单引号转义为 `''`
-    #[test]
-    fn substitution_semantics() {
-        assert_eq!(ps_escape_single("a'b"), "a''b");
-        assert_eq!(ps_escape_single("no-quote"), "no-quote");
-        assert_eq!(
-            sub_once("${X}${X}", "${X}", "v"),
-            "v${X}",
-            "JS 的 replace(str,val) 只替换首处"
-        );
-    }
 
     /// 版本号文案（`Number(x)||0` 与 JS String(n) 同口径）
     #[test]
