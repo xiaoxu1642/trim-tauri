@@ -158,27 +158,25 @@ fn ps_json(script: &'static str, timeout_secs: u64, op: &str) -> Result<Value, S
 
 /// realtime:adapters — 枚举物理网卡
 ///
-/// B1 S1：原生（GetAdaptersAddresses）优先，失败自动回退 PS。
+/// B1 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_REALTIME=1` 可回退 PS（隐藏诊断开关）。
 #[tauri::command]
 pub async fn realtime_adapters<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    // 原生路径
-    match tauri::async_runtime::spawn_blocking(native::realtime_adapters).await {
-        Ok(Ok(v)) => return Ok(v),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("realtime:adapters 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("realtime:adapters 原生任务异常，回退 PS: {e}")); }
+    let legacy = std::env::var("TRIM_LEGACY_REALTIME").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let r = tauri::async_runtime::spawn_blocking(|| ps_json(ADAPTERS_PS, 10, "realtime:adapters")).await;
+        return Ok(match r {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) if e == "TIMEOUT" => serde_json::json!({ "success": false, "message": "网卡枚举超时，请重试" }),
+            Ok(Err(e)) => serde_json::json!({ "success": false, "message": if e.is_empty() { "网卡枚举失败" } else { &e } }),
+            Err(e) => serde_json::json!({ "success": false, "message": format!("枚举任务异常: {e}") }),
+        });
     }
-    // PS 回退
-    let r = tauri::async_runtime::spawn_blocking(|| ps_json(ADAPTERS_PS, 10, "realtime:adapters")).await;
-    Ok(match r {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) if e == "TIMEOUT" => serde_json::json!({ "success": false, "message": "网卡枚举超时，请重试" }),
-        Ok(Err(e)) => serde_json::json!({
-            "success": false,
-            "message": if e.is_empty() { "网卡枚举失败" } else { &e }
-        }),
-        Err(e) => serde_json::json!({ "success": false, "message": format!("枚举任务异常: {e}") }),
-    })
+    match tauri::async_runtime::spawn_blocking(native::realtime_adapters).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Ok(serde_json::json!({ "success": false, "message": format!("原生枚举失败（设 TRIM_LEGACY_REALTIME=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(serde_json::json!({ "success": false, "message": format!("枚举任务异常: {e}") })),
+    }
 }
 
 /// realtime:sample — 返回常驻采样器缓存（首个基线窗口返回空列表，不报错）
@@ -203,24 +201,25 @@ pub fn realtime_sample<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Va
 
 /// realtime:loss — 丢包检测（ping 默认网关）
 ///
-/// B1 S1：原生（GetIpForwardTable2 + IcmpSendEcho）优先，失败自动回退 PS。
+/// B1 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_REALTIME=1` 可回退 PS（隐藏诊断开关）。
 #[tauri::command]
 pub async fn realtime_loss<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    // 原生路径
-    match tauri::async_runtime::spawn_blocking(native::realtime_loss).await {
-        Ok(Ok(v)) => return Ok(v),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("realtime:loss 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("realtime:loss 原生任务异常，回退 PS: {e}")); }
+    let legacy = std::env::var("TRIM_LEGACY_REALTIME").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let r = tauri::async_runtime::spawn_blocking(|| ps_json(LOSS_PS, 10, "realtime:loss")).await;
+        return Ok(match r {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) if e == "TIMEOUT" => serde_json::json!({ "success": false, "message": "丢包检测超时" }),
+            Ok(Err(_)) => serde_json::json!({ "success": false, "message": "丢包检测失败" }),
+            Err(e) => serde_json::json!({ "success": false, "message": format!("检测任务异常: {e}") }),
+        });
     }
-    // PS 回退
-    let r = tauri::async_runtime::spawn_blocking(|| ps_json(LOSS_PS, 10, "realtime:loss")).await;
-    Ok(match r {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) if e == "TIMEOUT" => serde_json::json!({ "success": false, "message": "丢包检测超时" }),
-        Ok(Err(_)) => serde_json::json!({ "success": false, "message": "丢包检测失败" }),
-        Err(e) => serde_json::json!({ "success": false, "message": format!("检测任务异常: {e}") }),
-    })
+    match tauri::async_runtime::spawn_blocking(native::realtime_loss).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Ok(serde_json::json!({ "success": false, "message": format!("原生检测失败（设 TRIM_LEGACY_REALTIME=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(serde_json::json!({ "success": false, "message": format!("检测任务异常: {e}") })),
+    }
 }
 
 // ==================== 记录报告 ====================

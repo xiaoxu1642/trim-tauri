@@ -109,31 +109,31 @@ fn find_prefixed<'a>(stdout: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 /// peripheral:query —— 读三组当前值
+///
+/// B3 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_PERIPHERAL=1` 可回退 PS（隐藏诊断开关）。
 #[tauri::command]
 pub async fn peripheral_query<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    // B3 S1：原生注册表读取优先
+    let legacy = std::env::var("TRIM_LEGACY_PERIPHERAL").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let Some(out) = run_ps(PS_QUERY, 20) else {
+            return Ok(json!({ "success": false, "message": "读取当前外设设置失败" }));
+        };
+        if out.code != 0 {
+            return Ok(json!({ "success": false, "message": if out.stderr.trim().is_empty() { "读取当前外设设置失败".to_string() } else { out.stderr.trim().to_string() } }));
+        }
+        let Some(payload) = find_prefixed(&out.stdout, "@@PERIPHERAL@@") else {
+            return Ok(json!({ "success": false, "message": "读取当前外设设置失败" }));
+        };
+        return Ok(match serde_json::from_str::<Value>(payload) {
+            Ok(data) => json!({ "success": true, "data": data, "engine": "powershell" }),
+            Err(_) => json!({ "success": false, "message": "解析外设设置失败" }),
+        });
+    }
     match tauri::async_runtime::spawn_blocking(native::peripheral_query).await {
-        Ok(Ok(data)) => return Ok(json!({ "success": true, "data": data })),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("peripheral:query 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("peripheral:query 任务异常，回退 PS: {e}")); }
-    }
-    // PS 回退
-    let Some(out) = run_ps(PS_QUERY, 20) else {
-        return Ok(json!({ "success": false, "message": "读取当前外设设置失败" }));
-    };
-    if out.code != 0 {
-        return Ok(json!({
-            "success": false,
-            "message": if out.stderr.trim().is_empty() { "读取当前外设设置失败".to_string() } else { out.stderr.trim().to_string() }
-        }));
-    }
-    let Some(payload) = find_prefixed(&out.stdout, "@@PERIPHERAL@@") else {
-        return Ok(json!({ "success": false, "message": "读取当前外设设置失败" }));
-    };
-    match serde_json::from_str::<Value>(payload) {
-        Ok(data) => Ok(json!({ "success": true, "data": data })),
-        Err(_) => Ok(json!({ "success": false, "message": "解析外设设置失败" })),
+        Ok(Ok(data)) => Ok(json!({ "success": true, "data": data, "engine": "rust" })),
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生读取失败（设 TRIM_LEGACY_PERIPHERAL=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(json!({ "success": false, "message": format!("读取任务异常: {e}") })),
     }
 }
 

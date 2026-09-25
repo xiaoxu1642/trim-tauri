@@ -34,82 +34,71 @@ fn run_script(script: &str, timeout: Duration, op: &str) -> Result<pwsh::PsOutpu
     out
 }
 
-/// netspeed:ping — 网络延迟/抖动探测
+/// netspeed:ping — 回环 TCP 延迟测试
+///
+/// B4 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_NETSPEED=1` 可回退 PS（隐藏诊断开关）。
 #[tauri::command]
 pub async fn netspeed_ping<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    // B4 S1：原生回环 TCP 优先
-    match tauri::async_runtime::spawn_blocking(native::netspeed_ping).await {
-        Ok(Ok(v)) => return Ok(json!({ "success": true, "data": v })),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("netspeed:ping 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("netspeed:ping 任务异常，回退 PS: {e}")); }
-    }
-    // PS 回退
-    let result =
-        tauri::async_runtime::spawn_blocking(|| run_script(NETSPEED_PING_PS, Duration::from_secs(8), "netspeed:ping"))
-            .await;
-    Ok(match result {
-        Ok(Ok(out)) => {
-            if out.code == 0 {
-                if let Ok(v) = serde_json::from_str::<Value>(out.stdout.trim()) {
-                    return Ok(json!({ "success": true, "data": v }));
+    let legacy = std::env::var("TRIM_LEGACY_NETSPEED").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let result = tauri::async_runtime::spawn_blocking(|| run_script(NETSPEED_PING_PS, Duration::from_secs(8), "netspeed:ping")).await;
+        return Ok(match result {
+            Ok(Ok(out)) => {
+                if out.code == 0 {
+                    if let Ok(v) = serde_json::from_str::<Value>(out.stdout.trim()) {
+                        return Ok(json!({ "success": true, "data": v, "engine": "powershell" }));
+                    }
                 }
+                json!({ "success": false, "message": if out.timed_out { "Ping 测试超时，请重试" } else { "Ping 测试失败" } })
             }
-            json!({
-                "success": false,
-                "message": if out.timed_out { "Ping 测试超时，请重试" } else { "Ping 测试失败" }
-            })
-        }
-        Ok(Err(message)) => json!({ "success": false, "message": message }),
-        Err(e) => json!({ "success": false, "message": format!("Ping 任务异常: {e}") }),
-    })
+            Ok(Err(message)) => json!({ "success": false, "message": message }),
+            Err(e) => json!({ "success": false, "message": format!("Ping 任务异常: {e}") }),
+        });
+    }
+    match tauri::async_runtime::spawn_blocking(native::netspeed_ping).await {
+        Ok(Ok(v)) => Ok(json!({ "success": true, "data": v, "engine": "rust" })),
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生测速失败（设 TRIM_LEGACY_NETSPEED=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(json!({ "success": false, "message": format!("Ping 任务异常: {e}") })),
+    }
 }
 
 /// netspeed:throughput — 上下行吞吐测速（本地回环）
+///
+/// B4 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_NETSPEED=1` 可回退 PS（隐藏诊断开关）。
 #[tauri::command]
 pub async fn netspeed_throughput<R: tauri::Runtime>(window: WebviewWindow<R>, duration: Option<f64>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    // 对齐 JS：Number(duration) || 10，再 clamp(1,60)
     let requested = match duration {
         Some(n) if n.is_finite() && n != 0.0 => n,
         _ => 10.0,
     };
     let secs = requested.max(1.0).min(60.0);
-
-    // B4 S1：原生回环 TCP 吞吐优先
-    match tauri::async_runtime::spawn_blocking(move || native::netspeed_throughput(secs)).await {
-        Ok(Ok(v)) => return Ok(json!({ "success": true, "data": v })),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("netspeed:throughput 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("netspeed:throughput 任务异常，回退 PS: {e}")); }
-    }
-    // PS 回退
-    let script = NETSPEED_THROUGHPUT_PS.replace(DURATION_SENTINEL, &format!("{secs}"));
-    if script.contains(DURATION_SENTINEL) {
-        return Ok(json!({ "success": false, "message": "测速脚本时长替换失败" }));
-    }
-    let timeout = Duration::from_millis((secs * 1000.0) as u64 + 15_000);
-
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        run_script(&script, timeout, "netspeed:throughput")
-    })
-    .await;
-    Ok(match result {
-        Ok(Ok(out)) => {
-            if out.code == 0 {
-                if let Ok(v) = serde_json::from_str::<Value>(out.stdout.trim()) {
-                    return Ok(json!({ "success": true, "data": v }));
-                }
-            }
-            let message = if out.timed_out {
-                "测速超时，请重试".to_string()
-            } else if out.stderr.trim().is_empty() {
-                "测速失败".to_string()
-            } else {
-                out.stderr.trim().to_string()
-            };
-            json!({ "success": false, "message": message })
+    let legacy = std::env::var("TRIM_LEGACY_NETSPEED").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let script = NETSPEED_THROUGHPUT_PS.replace(DURATION_SENTINEL, &format!("{secs}"));
+        if script.contains(DURATION_SENTINEL) {
+            return Ok(json!({ "success": false, "message": "测速脚本时长替换失败" }));
         }
-        Ok(Err(message)) => json!({ "success": false, "message": message }),
-        Err(e) => json!({ "success": false, "message": format!("测速任务异常: {e}") }),
-    })
+        let timeout = Duration::from_millis((secs * 1000.0) as u64 + 15_000);
+        let result = tauri::async_runtime::spawn_blocking(move || run_script(&script, timeout, "netspeed:throughput")).await;
+        return Ok(match result {
+            Ok(Ok(out)) => {
+                if out.code == 0 {
+                    if let Ok(v) = serde_json::from_str::<Value>(out.stdout.trim()) {
+                        return Ok(json!({ "success": true, "data": v, "engine": "powershell" }));
+                    }
+                }
+                let msg = if out.timed_out { "测速超时，请重试".to_string() } else if out.stderr.trim().is_empty() { "测速失败".to_string() } else { out.stderr.trim().to_string() };
+                json!({ "success": false, "message": msg })
+            }
+            Ok(Err(message)) => json!({ "success": false, "message": message }),
+            Err(e) => json!({ "success": false, "message": format!("测速任务异常: {e}") }),
+        });
+    }
+    match tauri::async_runtime::spawn_blocking(move || native::netspeed_throughput(secs)).await {
+        Ok(Ok(v)) => Ok(json!({ "success": true, "data": v, "engine": "rust" })),
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生测速失败（设 TRIM_LEGACY_NETSPEED=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(json!({ "success": false, "message": format!("测速任务异常: {e}") })),
+    }
 }

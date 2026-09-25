@@ -154,38 +154,29 @@ fn js_string(v: Option<&Value>) -> String {
 
 /// memory:info — 物理内存 / 页面文件 / 系统缓存（只读，15s 超时）
 ///
-/// B1 S1：原生（GetPerformanceInfo/GlobalMemoryStatusEx）优先，失败自动回退 PS。
+/// B1 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_MEMORY=1` 可回退 PS（隐藏诊断开关）。
 #[tauri::command]
 pub async fn memory_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    // 原生路径
-    match tauri::async_runtime::spawn_blocking(native::memory_info).await {
-        Ok(Ok(data)) => {
-            return Ok(json!({ "success": true, "data": data, "engine": "rust" }));
-        }
-        Ok(Err(e)) => {
-            let _ = log::write_log("warn", &format!("memory:info 原生失败，回退 PS: {e}"));
-        }
-        Err(e) => {
-            let _ = log::write_log("warn", &format!("memory:info 原生任务异常，回退 PS: {e}"));
-        }
-    }
-    // PS 回退
-    Ok(match run_script(MEMORY_INFO_PS, 15, "memory:info").await {
-        Ok(out) => {
-            if out.timed_out {
-                json!({ "success": false, "message": "读取内存信息超时" })
-            } else if out.code != 0 {
-                json!({ "success": false, "message": "读取内存信息失败" })
-            } else {
-                match serde_json::from_str::<Value>(out.stdout.trim()) {
-                    Ok(data) => json!({ "success": true, "data": data }),
-                    Err(_) => json!({ "success": false, "message": "解析内存信息失败" }),
-                }
+    let legacy = std::env::var("TRIM_LEGACY_MEMORY").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let out = run_script(MEMORY_INFO_PS, 15, "memory:info").await?;
+        return Ok(if out.timed_out {
+            json!({ "success": false, "message": "读取内存信息超时" })
+        } else if out.code != 0 {
+            json!({ "success": false, "message": "读取内存信息失败" })
+        } else {
+            match serde_json::from_str::<Value>(out.stdout.trim()) {
+                Ok(data) => json!({ "success": true, "data": data, "engine": "powershell" }),
+                Err(_) => json!({ "success": false, "message": "解析内存信息失败" }),
             }
-        }
-        Err(message) => json!({ "success": false, "message": message }),
-    })
+        });
+    }
+    match tauri::async_runtime::spawn_blocking(native::memory_info).await {
+        Ok(Ok(data)) => Ok(json!({ "success": true, "data": data, "engine": "rust" })),
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生采集失败（设 TRIM_LEGACY_MEMORY=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(json!({ "success": false, "message": format!("采集任务异常: {e}") })),
+    }
 }
 
 // ==================== memory:clean ====================
@@ -319,11 +310,31 @@ fn lookup_snapshot(label: &str, pid: i64) -> Option<ProcInfo> {
 
 /// memory:processes — 进程列表（只读，20s 超时），同时刷新本窗口的快照槽
 ///
-/// B1 S1：原生（ToolHelp32 + OpenProcess + GetProcessMemoryInfo）优先，失败自动回退 PS。
+/// B1 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_MEMORY=1` 可回退 PS（隐藏诊断开关）。
 #[tauri::command]
 pub async fn memory_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     let label = guard::guard_readonly(&window)?;
-    // 原生路径
+    let legacy = std::env::var("TRIM_LEGACY_MEMORY").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let out = run_script(MEMORY_PROCESSES_PS, 20, "memory:processes").await?;
+        return Ok(if out.timed_out {
+            json!({ "success": false, "message": "读取进程列表超时" })
+        } else if out.code != 0 {
+            json!({ "success": false, "message": "读取进程列表失败" })
+        } else {
+            let Some(line) = find_proc_line(&out.stdout) else {
+                return Ok(json!({ "success": false, "message": "读取进程列表失败" }));
+            };
+            match serde_json::from_str::<Value>(line) {
+                Ok(data) => {
+                    let processes = normalize_processes(data);
+                    save_snapshot(&label, &processes);
+                    json!({ "success": true, "processes": processes, "engine": "powershell" })
+                }
+                Err(_) => json!({ "success": false, "message": "解析进程列表失败" }),
+            }
+        });
+    }
     match tauri::async_runtime::spawn_blocking(native::memory_processes).await {
         Ok(Ok(entries)) => {
             let processes: Vec<Value> = entries
@@ -338,38 +349,11 @@ pub async fn memory_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
                 })
                 .collect();
             save_snapshot(&label, &processes);
-            return Ok(json!({ "success": true, "processes": processes, "engine": "rust" }));
+            Ok(json!({ "success": true, "processes": processes, "engine": "rust" }))
         }
-        Ok(Err(e)) => {
-            let _ = log::write_log("warn", &format!("memory:processes 原生失败，回退 PS: {e}"));
-        }
-        Err(e) => {
-            let _ = log::write_log("warn", &format!("memory:processes 原生任务异常，回退 PS: {e}"));
-        }
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生采集失败（设 TRIM_LEGACY_MEMORY=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(json!({ "success": false, "message": format!("采集任务异常: {e}") })),
     }
-    // PS 回退
-    Ok(match run_script(MEMORY_PROCESSES_PS, 20, "memory:processes").await {
-        Ok(out) => {
-            if out.timed_out {
-                json!({ "success": false, "message": "读取进程列表超时" })
-            } else if out.code != 0 {
-                json!({ "success": false, "message": "读取进程列表失败" })
-            } else {
-                let Some(line) = find_proc_line(&out.stdout) else {
-                    return Ok(json!({ "success": false, "message": "读取进程列表失败" }));
-                };
-                match serde_json::from_str::<Value>(line) {
-                    Ok(data) => {
-                        let processes = normalize_processes(data);
-                        save_snapshot(&label, &processes);
-                        json!({ "success": true, "processes": processes })
-                    }
-                    Err(_) => json!({ "success": false, "message": "解析进程列表失败" }),
-                }
-            }
-        }
-        Err(message) => json!({ "success": false, "message": message }),
-    })
 }
 
 // ==================== memory:kill ====================
@@ -424,45 +408,37 @@ pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Optio
             "message": format!("系统关键进程 {} 已受保护，不能结束", known.process_name)
         }));
     }
-    // B2 S1：原生路径优先
+    // B2 S2：默认原生，TRIM_LEGACY_MEMORY=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_MEMORY").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        let script = match build_kill_script(n, &known.process_name) {
+            Ok(s) => s,
+            Err(message) => {
+                log::write_log("error", &format!("结束进程脚本构造失败: {message}"));
+                return Ok(json!({ "success": false, "message": message }));
+            }
+        };
+        let out = match tauri::async_runtime::spawn_blocking(move || run_ps(&script, 15, "memory:kill")).await {
+            Ok(r) => r,
+            Err(e) => return Ok(json!({ "success": false, "message": format!("结束进程任务异常: {e}") })),
+        };
+        return Ok(match out {
+            Ok(out) => {
+                if out.timed_out { json!({ "success": false, "message": "结束进程超时" }) }
+                else if out.code != 0 { json!({ "success": false, "message": "结束进程失败" }) }
+                else { match serde_json::from_str::<Value>(out.stdout.trim()) { Ok(v) => v, Err(_) => json!({ "success": false, "message": "解析结果失败" }) } }
+            }
+            Err(message) => json!({ "success": false, "message": message }),
+        });
+    }
     match tauri::async_runtime::spawn_blocking({
         let name = known.process_name.clone();
         move || native::kill_process(n as u32, &name)
     }).await {
-        Ok(Ok(v)) => return Ok(v),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("memory:kill 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("memory:kill 原生任务异常，回退 PS: {e}")); }
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生结束进程失败（设 TRIM_LEGACY_MEMORY=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(json!({ "success": false, "message": format!("结束进程任务异常: {e}") })),
     }
-    // PS 回退
-    let script = match build_kill_script(n, &known.process_name) {
-        Ok(s) => s,
-        Err(message) => {
-            log::write_log("error", &format!("结束进程脚本构造失败: {message}"));
-            return Ok(json!({ "success": false, "message": message }));
-        }
-    };
-    let out = match tauri::async_runtime::spawn_blocking(move || run_ps(&script, 15, "memory:kill"))
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return Ok(json!({ "success": false, "message": format!("结束进程任务异常: {e}") })),
-    };
-    Ok(match out {
-        Ok(out) => {
-            if out.timed_out {
-                json!({ "success": false, "message": "结束进程超时" })
-            } else if out.code != 0 {
-                json!({ "success": false, "message": "结束进程失败" })
-            } else {
-                // 脚本自行给出结果对象，原样透传（形状由 PS 决定）
-                match serde_json::from_str::<Value>(out.stdout.trim()) {
-                    Ok(v) => v,
-                    Err(_) => json!({ "success": false, "message": "解析结果失败" }),
-                }
-            }
-        }
-        Err(message) => json!({ "success": false, "message": message }),
-    })
 }
 
 // ==================== memory:stubborn-kill ====================
@@ -479,30 +455,23 @@ pub async fn memory_stubborn_kill<R: tauri::Runtime>(window: WebviewWindow<R>) -
             "message": "顽固软件专杀需要管理员权限，请先提权"
         }));
     }
-    // B2 S1：原生路径优先
-    match tauri::async_runtime::spawn_blocking(native::stubborn_kill).await {
-        Ok(Ok(data)) => return Ok(json!({ "success": true, "data": data })),
-        Ok(Err(e)) => { let _ = log::write_log("warn", &format!("memory:stubborn-kill 原生失败，回退 PS: {e}")); }
-        Err(e) => { let _ = log::write_log("warn", &format!("memory:stubborn-kill 原生任务异常，回退 PS: {e}")); }
-    }
-    // PS 回退
-    Ok(
-        match run_script(MEMORY_STUBBORN_KILL_PS, 30, "memory:stubborn-kill").await {
+    // B2 S2：默认原生，TRIM_LEGACY_MEMORY=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_MEMORY").map(|v| v == "1").unwrap_or(false);
+    if legacy {
+        return Ok(match run_script(MEMORY_STUBBORN_KILL_PS, 30, "memory:stubborn-kill").await {
             Ok(out) => {
-                if out.timed_out {
-                    json!({ "success": false, "message": "顽固软件专杀超时" })
-                } else if out.code != 0 {
-                    json!({ "success": false, "message": "顽固软件专杀执行失败" })
-                } else {
-                    match serde_json::from_str::<Value>(out.stdout.trim()) {
-                        Ok(data) => json!({ "success": true, "data": data }),
-                        Err(_) => json!({ "success": false, "message": "解析专杀结果失败" }),
-                    }
-                }
+                if out.timed_out { json!({ "success": false, "message": "顽固软件专杀超时" }) }
+                else if out.code != 0 { json!({ "success": false, "message": "顽固软件专杀执行失败" }) }
+                else { match serde_json::from_str::<Value>(out.stdout.trim()) { Ok(data) => json!({ "success": true, "data": data, "engine": "powershell" }), Err(_) => json!({ "success": false, "message": "解析专杀结果失败" }) } }
             }
             Err(message) => json!({ "success": false, "message": message }),
-        },
-    )
+        });
+    }
+    match tauri::async_runtime::spawn_blocking(native::stubborn_kill).await {
+        Ok(Ok(data)) => Ok(json!({ "success": true, "data": data, "engine": "rust" })),
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生专杀失败（设 TRIM_LEGACY_MEMORY=1 可回退 PS）: {e}") })),
+        Err(e) => Ok(json!({ "success": false, "message": format!("专杀任务异常: {e}") })),
+    }
 }
 
 // ==================== memory:stubborn-block ====================
