@@ -137,17 +137,18 @@ fn build_repair_script(action_id: &str, repair: &Value) -> Result<String, String
 // ==================== 采集 / 修复 ====================
 /// 跑一次网络检测（超时 25s，diagOp 'netcheck.collect'），并落到本窗口快照槽。
 fn run_netcheck_collect(label: &str) -> Result<Value, String> {
-    // S1：原生优先，失败自动回退 PS
-    match crate::engine::native::netcheck_status() {
-        Ok(data) => {
-            if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
-                snapshot_store(label, items);
+    // B8 S2：默认原生，TRIM_LEGACY_NETCHECK=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_NETCHECK").map(|v| v == "1").unwrap_or(false);
+    if !legacy {
+        match crate::engine::native::netcheck_status() {
+            Ok(data) => {
+                if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
+                    snapshot_store(label, items);
+                }
+                log::write_log("info", "网络检测原生完成");
+                return Ok(data);
             }
-            log::write_log("info", "网络检测原生完成");
-            return Ok(data);
-        }
-        Err(e) => {
-            log::write_log("warn", &format!("网络原生检测失败，回退 PS: {e}"));
+            Err(e) => return Err(format!("原生检测失败（设 TRIM_LEGACY_NETCHECK=1 可回退 PS）: {e}")),
         }
     }
     let path = pwsh::write_temp_script(NETCHECK_STATUS_PS, ".ps1")?;
@@ -232,19 +233,21 @@ fn do_repair(action_id: &str, repair: &Value, label: &str) -> Value {
     log::flush_sync(); // 危险操作前刷盘：修复会改服务/网卡/代理配置
     log::write_log("info", &format!("网络检测修复开始: {action_id}"));
 
-    // S1：原生优先，失败自动回退 PS
-    let fix = match crate::engine::native::netcheck_repair(action_id, repair) {
-        Ok(f) => {
-            if f.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-                f
-            } else {
-                log::write_log("warn", &format!("网络修复原生失败，回退 PS: {}", f.get("message").and_then(|v| v.as_str()).unwrap_or("")));
-                repair_via_ps(action_id, repair)
+    // B8 S2：默认原生，TRIM_LEGACY_NETCHECK=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_NETCHECK").map(|v| v == "1").unwrap_or(false);
+    let fix = if legacy {
+        repair_via_ps(action_id, repair)
+    } else {
+        match crate::engine::native::netcheck_repair(action_id, repair) {
+            Ok(f) => {
+                if f.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                    f
+                } else {
+                    let msg = f.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    json!({"ok": false, "message": format!("原生修复未成功（设 TRIM_LEGACY_NETCHECK=1 可回退 PS）: {msg}")})
+                }
             }
-        }
-        Err(e) => {
-            log::write_log("warn", &format!("网络修复原生异常，回退 PS: {e}"));
-            repair_via_ps(action_id, repair)
+            Err(e) => json!({"ok": false, "message": format!("原生修复异常（设 TRIM_LEGACY_NETCHECK=1 可回退 PS）: {e}")}),
         }
     };
     let fix_ok = fix.get("ok").and_then(|v| v.as_bool()) == Some(true);

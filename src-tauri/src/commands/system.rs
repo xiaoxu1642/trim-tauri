@@ -30,17 +30,12 @@ pub async fn system_disk_type<R: tauri::Runtime>(
         }
     }
     let result = tauri::async_runtime::spawn_blocking(|| {
-        // S1：原生优先，失败回退 PS
-        match crate::engine::native::sysdisk() {
-            Ok(data) => {
-                // 原生返回 known=false 时回退 PS（注册表读不到型号）
-                if data.get("known").and_then(|v| v.as_bool()) == Some(true) {
-                    return Ok(data);
-                }
-                crate::engine::log::write_log("info", "sysdisk 原生未判定，回退 PS");
-            }
-            Err(e) => {
-                crate::engine::log::write_log("warn", &format!("sysdisk 原生失败，回退 PS: {e}"));
+        // B10 S2：默认原生，TRIM_LEGACY_SYSDISK=1 回退 PS
+        let legacy = std::env::var("TRIM_LEGACY_SYSDISK").map(|v| v == "1").unwrap_or(false);
+        if !legacy {
+            match crate::engine::native::sysdisk() {
+                Ok(data) => return Ok(data),
+                Err(e) => return Err(format!("原生探测失败（设 TRIM_LEGACY_SYSDISK=1 可回退 PS）: {e}")),
             }
         }
         let script = pwsh::write_temp_script(SYSDISK_PS, ".ps1")?;

@@ -192,61 +192,51 @@ fn scan_install_paths() -> serde_json::Value {
         }
     };
 
-    // S1：原生优先，失败自动回退 PS
-    let native_result = crate::engine::native::paths_scan(&rules_json);
-    let mut data: serde_json::Value = match native_result {
-        Ok(d) => {
-            log::write_log("info", "安装路径原生扫描完成");
-            d
+    // B9 S2：默认原生，TRIM_LEGACY_PATHS=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_PATHS").map(|v| v == "1").unwrap_or(false);
+    let mut data: serde_json::Value = if legacy {
+        let script_text = PATHS_SCAN_PS.replace(RULES_SENTINEL, &ps_escape_single(&rules_json));
+        if script_text.contains(RULES_SENTINEL) {
+            log::write_log("error", "路径扫描脚本哨兵替换失败，已拒绝执行（模板与注入口径不一致）");
+            return serde_json::json!({ "success": false, "message": "扫描失败", "data": {} });
         }
-        Err(e) => {
-            log::write_log("warn", &format!("安装路径原生扫描失败，回退 PS: {e}"));
-            let script_text = PATHS_SCAN_PS.replace(RULES_SENTINEL, &ps_escape_single(&rules_json));
-    // 哨兵必须消失：残留即模板与替换口径漂移，宁可失败也不跑半成品脚本
-    if script_text.contains(RULES_SENTINEL) {
-        log::write_log("error", "路径扫描脚本哨兵替换失败，已拒绝执行（模板与注入口径不一致）");
-        return serde_json::json!({ "success": false, "message": "扫描失败", "data": {} });
-    }
-    let script = match pwsh::write_temp_script(&script_text, ".ps1") {
-        Ok(p) => p,
-        Err(e) => {
-            log::write_log("error", &format!("路径扫描失败: {e}"));
-            return serde_json::json!({ "success": false, "message": e, "data": {} });
-        }
-    };
-    log::write_log("info", "开始扫描安装路径");
-    let result = pwsh::run_file(
-        &script,
-        Duration::from_secs(SCAN_TIMEOUT_SECS),
-        Some("paths:scan"),
-    );
-    let _ = std::fs::remove_file(&script);
-    let out = match result {
-        Ok(o) => o,
-        Err(e) => {
-            log::write_log("error", &format!("路径扫描失败: {e}"));
-            return serde_json::json!({ "success": false, "message": e, "data": {} });
-        }
-    };
-    if out.code != 0 {
-        let message = if out.stderr.trim().is_empty() {
-            "扫描失败".to_string()
-        } else {
-            out.stderr.trim().to_string()
-        };
-        log::write_log("error", &format!("路径扫描失败: {message}"));
-        return serde_json::json!({ "success": false, "message": message, "data": {} });
-    }
-            match serde_json::from_str(out.stdout.trim()) {
-                Ok(v) => v,
-                Err(_) => {
-                    return serde_json::json!({
-                        "success": false,
-                        "message": "解析结果失败",
-                        "raw": out.stdout
-                    })
-                }
+        let script = match pwsh::write_temp_script(&script_text, ".ps1") {
+            Ok(p) => p,
+            Err(e) => {
+                log::write_log("error", &format!("路径扫描失败: {e}"));
+                return serde_json::json!({ "success": false, "message": e, "data": {} });
             }
+        };
+        log::write_log("info", "开始扫描安装路径");
+        let result = pwsh::run_file(&script, Duration::from_secs(SCAN_TIMEOUT_SECS), Some("paths:scan"));
+        let _ = std::fs::remove_file(&script);
+        let out = match result {
+            Ok(o) => o,
+            Err(e) => {
+                log::write_log("error", &format!("路径扫描失败: {e}"));
+                return serde_json::json!({ "success": false, "message": e, "data": {} });
+            }
+        };
+        if out.code != 0 {
+            let message = if out.stderr.trim().is_empty() { "扫描失败".to_string() } else { out.stderr.trim().to_string() };
+            log::write_log("error", &format!("路径扫描失败: {message}"));
+            return serde_json::json!({ "success": false, "message": message, "data": {} });
+        }
+        match serde_json::from_str(out.stdout.trim()) {
+            Ok(v) => v,
+            Err(_) => return serde_json::json!({ "success": false, "message": "解析结果失败", "raw": out.stdout }),
+        }
+    } else {
+        match crate::engine::native::paths_scan(&rules_json) {
+            Ok(d) => {
+                log::write_log("info", "安装路径原生扫描完成");
+                d
+            }
+            Err(e) => return serde_json::json!({
+                "success": false,
+                "message": format!("原生扫描失败（设 TRIM_LEGACY_PATHS=1 可回退 PS）: {e}"),
+                "data": {}
+            }),
         }
     };
     // 标准化：去除首尾空白与包裹引号（注册表 InstallLocation 常带引号）

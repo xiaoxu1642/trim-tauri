@@ -159,22 +159,31 @@ pub async fn maintenance_run<R: Runtime>(
 async fn run_one<R: Runtime>(window: &WebviewWindow<R>, task_id: &str, script: &str) -> Value {
     log::write_log("info", &format!("维护任务开始: {task_id}"));
 
-    // S1：原生优先，失败自动回退 PS（PS 路径有流式输出）
-    match crate::engine::native::maint_run(task_id) {
-        Ok((success, message)) => {
-            if success {
-                log::write_log("info", &format!("维护任务原生完成: {task_id}"));
-                let _ = window.emit("maintenance:output", json!({ "taskId": task_id, "line": message }));
+    // B8 S2：默认原生，TRIM_LEGACY_MAINTENANCE=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_MAINTENANCE").map(|v| v == "1").unwrap_or(false);
+    if !legacy {
+        match crate::engine::native::maint_run(task_id) {
+            Ok((success, message)) => {
+                if success {
+                    log::write_log("info", &format!("维护任务原生完成: {task_id}"));
+                    let _ = window.emit("maintenance:output", json!({ "taskId": task_id, "line": message }));
+                    return json!({
+                        "success": true,
+                        "message": message,
+                        "data": { "taskId": task_id, "result": "ok", "output": message }
+                    });
+                }
                 return json!({
-                    "success": true,
-                    "message": message,
-                    "data": { "taskId": task_id, "result": "ok", "output": message }
+                    "success": false,
+                    "message": format!("原生执行未成功（设 TRIM_LEGACY_MAINTENANCE=1 可回退 PS）: {message}"),
+                    "data": { "taskId": task_id, "result": "fail", "output": message }
                 });
             }
-            log::write_log("warn", &format!("维护任务原生失败，回退 PS: {task_id} -> {message}"));
-        }
-        Err(e) => {
-            log::write_log("warn", &format!("维护任务原生异常，回退 PS: {task_id} -> {e}"));
+            Err(e) => return json!({
+                "success": false,
+                "message": format!("原生执行异常（设 TRIM_LEGACY_MAINTENANCE=1 可回退 PS）: {e}"),
+                "data": { "taskId": task_id, "result": "error", "output": e }
+            }),
         }
     }
 

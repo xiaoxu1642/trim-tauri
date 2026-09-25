@@ -391,17 +391,18 @@ fn build_repair_script(action_id: &str, installer_path: Option<&Path>) -> Result
 /// 跑一次运行库检测（超时 25s，diagOp 'runtimes.collect'），并落到本窗口快照槽。
 /// 返回脚本输出的完整 data 对象（{items, summary}）。
 fn run_runtimes_collect(label: &str) -> Result<Value, String> {
-    // S1：原生优先，失败自动回退 PS
-    match crate::engine::native::runtimes_status() {
-        Ok(data) => {
-            if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
-                snapshot_store(label, items);
+    // B7 S2：默认原生，TRIM_LEGACY_RUNTIMES=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_RUNTIMES").map(|v| v == "1").unwrap_or(false);
+    if !legacy {
+        match crate::engine::native::runtimes_status() {
+            Ok(data) => {
+                if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
+                    snapshot_store(label, items);
+                }
+                log::write_log("info", "运行库检测原生完成");
+                return Ok(data);
             }
-            log::write_log("info", "运行库检测原生完成");
-            return Ok(data);
-        }
-        Err(e) => {
-            log::write_log("warn", &format!("运行库原生检测失败，回退 PS: {e}"));
+            Err(e) => return Err(format!("原生检测失败（设 TRIM_LEGACY_RUNTIMES=1 可回退 PS）: {e}")),
         }
     }
     let path = pwsh::write_temp_script(RUNTIMES_STATUS_PS, ".ps1")?;
@@ -490,103 +491,64 @@ fn do_install<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str, lab
     let start = crate::engine::now_ms();
     emit_progress(window, json!({ "phase": "install", "percent": 100 }));
 
-    // S1：原生优先，失败自动回退 PS
-    let (ok, reason) = match crate::engine::native::runtimes_repair(action_id, local_path.as_deref().and_then(|p| p.to_str())) {
-        Ok((success, msg)) => {
-            if success {
-                (true, String::new())
-            } else {
-                log::write_log("warn", &format!("运行库修复原生失败，回退 PS: {msg}"));
-                // 回退 PS
-                let script = match build_repair_script(action_id, local_path.as_deref()) {
-                    Ok(s) => s,
-                    Err(e) => return json!({ "success": false, "message": e }),
-                };
-                let script_path = match pwsh::write_temp_script(&script, ".ps1") {
-                    Ok(p) => p,
-                    Err(e) => return json!({ "success": false, "message": e }),
-                };
-                let diag_op = format!("runtimes.install.{action_id}");
-                let out = pwsh::run_file(&script_path, Duration::from_secs(600), Some(&diag_op));
-                let _ = std::fs::remove_file(&script_path);
-                let out = match out {
-                    Ok(o) => o,
-                    Err(e) => return json!({ "success": false, "message": e }),
-                };
-                let lines: Vec<String> = out
-                    .stdout
-                    .trim()
-                    .split('\n')
-                    .map(|l| l.trim_end_matches('\r').to_string())
-                    .collect();
-                let result_line = lines.iter().filter(|l| l.starts_with("@@RESULT@@")).last();
-                let ps_ok = result_line.map(|l| l.as_str()) == Some("@@RESULT@@ok");
-                let ps_reason = if ps_ok {
-                    String::new()
+    // B7 S2：默认原生，TRIM_LEGACY_RUNTIMES=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_RUNTIMES").map(|v| v == "1").unwrap_or(false);
+    let ps_repair = || -> (bool, String) {
+        let script = match build_repair_script(action_id, local_path.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return (false, e),
+        };
+        let script_path = match pwsh::write_temp_script(&script, ".ps1") {
+            Ok(p) => p,
+            Err(e) => return (false, e),
+        };
+        let diag_op = format!("runtimes.install.{action_id}");
+        let out = pwsh::run_file(&script_path, Duration::from_secs(600), Some(&diag_op));
+        let _ = std::fs::remove_file(&script_path);
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => return (false, e),
+        };
+        let lines: Vec<String> = out
+            .stdout
+            .trim()
+            .split('\n')
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect();
+        let result_line = lines.iter().filter(|l| l.starts_with("@@RESULT@@")).last();
+        let ps_ok = result_line.map(|l| l.as_str()) == Some("@@RESULT@@ok");
+        let ps_reason = if ps_ok {
+            String::new()
+        } else {
+            lines
+                .iter()
+                .filter(|l| {
+                    !l.is_empty() && !l.starts_with("@@RESULT@@") && !l.starts_with("@@DIAG@@")
+                })
+                .last()
+                .cloned()
+                .unwrap_or_else(|| {
+                    if out.stderr.trim().is_empty() {
+                        "修复未成功，请查看日志".into()
+                    } else {
+                        out.stderr.trim().to_string()
+                    }
+                })
+        };
+        (ps_ok, ps_reason)
+    };
+    let (ok, reason) = if legacy {
+        ps_repair()
+    } else {
+        match crate::engine::native::runtimes_repair(action_id, local_path.as_deref().and_then(|p| p.to_str())) {
+            Ok((success, msg)) => {
+                if success {
+                    (true, String::new())
                 } else {
-                    lines
-                        .iter()
-                        .filter(|l| {
-                            !l.is_empty() && !l.starts_with("@@RESULT@@") && !l.starts_with("@@DIAG@@")
-                        })
-                        .last()
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            if out.stderr.trim().is_empty() {
-                                "修复未成功，请查看日志".into()
-                            } else {
-                                out.stderr.trim().to_string()
-                            }
-                        })
-                };
-                (ps_ok, ps_reason)
+                    (false, format!("原生修复未成功（设 TRIM_LEGACY_RUNTIMES=1 可回退 PS）: {msg}"))
+                }
             }
-        }
-        Err(e) => {
-            log::write_log("warn", &format!("运行库修复原生异常，回退 PS: {e}"));
-            // 回退 PS
-            let script = match build_repair_script(action_id, local_path.as_deref()) {
-                Ok(s) => s,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            let script_path = match pwsh::write_temp_script(&script, ".ps1") {
-                Ok(p) => p,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            let diag_op = format!("runtimes.install.{action_id}");
-            let out = pwsh::run_file(&script_path, Duration::from_secs(600), Some(&diag_op));
-            let _ = std::fs::remove_file(&script_path);
-            let out = match out {
-                Ok(o) => o,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            let lines: Vec<String> = out
-                .stdout
-                .trim()
-                .split('\n')
-                .map(|l| l.trim_end_matches('\r').to_string())
-                .collect();
-            let result_line = lines.iter().filter(|l| l.starts_with("@@RESULT@@")).last();
-            let ps_ok = result_line.map(|l| l.as_str()) == Some("@@RESULT@@ok");
-            let ps_reason = if ps_ok {
-                String::new()
-            } else {
-                lines
-                    .iter()
-                    .filter(|l| {
-                        !l.is_empty() && !l.starts_with("@@RESULT@@") && !l.starts_with("@@DIAG@@")
-                    })
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        if out.stderr.trim().is_empty() {
-                            "修复未成功，请查看日志".into()
-                        } else {
-                            out.stderr.trim().to_string()
-                        }
-                    })
-            };
-            (ps_ok, ps_reason)
+            Err(e) => (false, format!("原生修复异常（设 TRIM_LEGACY_RUNTIMES=1 可回退 PS）: {e}")),
         }
     };
 

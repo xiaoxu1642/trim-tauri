@@ -248,32 +248,34 @@ pub async fn contextmenu_scan<R: Runtime>(
     snap_clear(&label);
     log::write_log("info", "扫描右键菜单");
 
-    // S1：原生优先，失败自动回退 PS
-    let data: Vec<Value> = match crate::engine::native::cm_scan() {
-        Ok(items) => {
-            log::write_log("info", &format!("右键菜单原生扫描完成: {} 项", items.len()));
-            items
+    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
+    let data: Vec<Value> = if legacy {
+        let out = match run_ps(PS_SCAN, Duration::from_secs(60), None) {
+            Ok(o) => o,
+            Err(e) => return json!({ "success": false, "message": e }),
+        };
+        if out.timed_out {
+            return json!({ "success": false, "message": "扫描超时（超过 60 秒），请稍后重试或关闭其他占用注册表的程序" });
         }
-        Err(e) => {
-            log::write_log("warn", &format!("右键菜单原生扫描失败，回退 PS: {e}"));
-            let out = match run_ps(PS_SCAN, Duration::from_secs(60), None) {
-                Ok(o) => o,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            if out.timed_out {
-                return json!({ "success": false, "message": "扫描超时（超过 60 秒），请稍后重试或关闭其他占用注册表的程序" });
+        if out.code != 0 {
+            log::write_log("error", &format!("右键菜单扫描失败: {}", out.stderr));
+            return json!({ "success": false, "message": if out.stderr.is_empty() { "扫描失败".into() } else { out.stderr } });
+        }
+        match parse_last_json(&out.stdout).and_then(|v| match v {
+            Value::Array(a) => Some(a),
+            _ => None,
+        }) {
+            Some(a) => a,
+            None => return json!({ "success": false, "message": "解析失败" }),
+        }
+    } else {
+        match crate::engine::native::cm_scan() {
+            Ok(items) => {
+                log::write_log("info", &format!("右键菜单原生扫描完成: {} 项", items.len()));
+                items
             }
-            if out.code != 0 {
-                log::write_log("error", &format!("右键菜单扫描失败: {}", out.stderr));
-                return json!({ "success": false, "message": if out.stderr.is_empty() { "扫描失败".into() } else { out.stderr } });
-            }
-            match parse_last_json(&out.stdout).and_then(|v| match v {
-                Value::Array(a) => Some(a),
-                _ => None,
-            }) {
-                Some(a) => a,
-                None => return json!({ "success": false, "message": "解析失败" }),
-            }
+            Err(e) => return json!({ "success": false, "message": format!("原生扫描失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
         }
     };
     let normalized = normalize_ids(data);
@@ -308,26 +310,28 @@ pub async fn contextmenu_backup<R: Runtime>(
 
     log::write_log("info", &format!("备份右键菜单: {} 项", safe.len()));
 
-    // S1：原生优先，失败自动回退 PS
-    let data = match crate::engine::native::cm_backup(&safe) {
-        Ok(d) => {
-            log::write_log("info", "右键菜单备份原生完成");
-            d
+    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
+    let data = if legacy {
+        let script = inject_items(PS_BACKUP, &safe);
+        let out = match run_ps(&script, Duration::from_secs(60), None) {
+            Ok(o) => o,
+            Err(e) => return json!({ "success": false, "message": e }),
+        };
+        if out.code != 0 {
+            return json!({ "success": false, "message": "备份失败" });
         }
-        Err(e) => {
-            log::write_log("warn", &format!("右键菜单备份原生失败，回退 PS: {e}"));
-            let script = inject_items(PS_BACKUP, &safe);
-            let out = match run_ps(&script, Duration::from_secs(60), None) {
-                Ok(o) => o,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            if out.code != 0 {
-                return json!({ "success": false, "message": "备份失败" });
+        match parse_last_json(&out.stdout) {
+            Some(d) => d,
+            None => return json!({ "success": false, "message": "解析备份结果失败" }),
+        }
+    } else {
+        match crate::engine::native::cm_backup(&safe) {
+            Ok(d) => {
+                log::write_log("info", "右键菜单备份原生完成");
+                d
             }
-            match parse_last_json(&out.stdout) {
-                Some(d) => d,
-                None => return json!({ "success": false, "message": "解析备份结果失败" }),
-            }
+            Err(e) => return json!({ "success": false, "message": format!("原生备份失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
         }
     };
     let count = data.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -379,22 +383,24 @@ pub async fn contextmenu_remove<R: Runtime>(
     // 注册表类
     if !reg_items.is_empty() {
         log::write_log("warn", &format!("删除右键菜单: {} 项", reg_items.len()));
-        // S1：原生优先，失败自动回退 PS
-        data = match crate::engine::native::cm_remove(&reg_items) {
-            Ok(d) => {
-                log::write_log("info", "右键菜单删除原生完成");
-                d
+        // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
+        let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
+        data = if legacy {
+            let script = inject_items(PS_REMOVE, &reg_items);
+            let parsed = run_ps(&script, Duration::from_secs(60), Some("contextmenu.remove"))
+                .ok()
+                .and_then(|o| if o.code == 0 { parse_last_json(&o.stdout) } else { None });
+            match parsed {
+                Some(d) => d,
+                None => return json!({ "success": false, "message": "删除失败" }),
             }
-            Err(e) => {
-                log::write_log("warn", &format!("右键菜单删除原生失败，回退 PS: {e}"));
-                let script = inject_items(PS_REMOVE, &reg_items);
-                let parsed = run_ps(&script, Duration::from_secs(60), Some("contextmenu.remove"))
-                    .ok()
-                    .and_then(|o| if o.code == 0 { parse_last_json(&o.stdout) } else { None });
-                match parsed {
-                    Some(d) => d,
-                    None => return json!({ "success": false, "message": "删除失败" }),
+        } else {
+            match crate::engine::native::cm_remove(&reg_items) {
+                Ok(d) => {
+                    log::write_log("info", "右键菜单删除原生完成");
+                    d
                 }
+                Err(e) => return json!({ "success": false, "message": format!("原生删除失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
             }
         };
     }
@@ -559,29 +565,31 @@ pub async fn contextmenu_toggle<R: Runtime>(
 
     log::write_log("info", &format!("切换右键菜单启停: {} 项", toggle_items.len()));
 
-    // S1：原生优先，失败自动回退 PS
-    let data = match crate::engine::native::cm_toggle(&toggle_items) {
-        Ok(d) => {
-            log::write_log("info", "右键菜单切换原生完成");
-            d
+    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
+    let data = if legacy {
+        let script = inject_items(PS_TOGGLE, &toggle_items);
+        let out = match run_ps(&script, Duration::from_secs(60), None) {
+            Ok(o) => o,
+            Err(e) => return json!({ "success": false, "message": e }),
+        };
+        if out.timed_out {
+            return json!({ "success": false, "message": "切换超时，请稍后重试" });
         }
-        Err(e) => {
-            log::write_log("warn", &format!("右键菜单切换原生失败，回退 PS: {e}"));
-            let script = inject_items(PS_TOGGLE, &toggle_items);
-            let out = match run_ps(&script, Duration::from_secs(60), None) {
-                Ok(o) => o,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            if out.timed_out {
-                return json!({ "success": false, "message": "切换超时，请稍后重试" });
+        if out.code != 0 {
+            return json!({ "success": false, "message": "切换失败" });
+        }
+        match parse_last_json(&out.stdout) {
+            Some(d) => d,
+            None => return json!({ "success": false, "message": "解析切换结果失败" }),
+        }
+    } else {
+        match crate::engine::native::cm_toggle(&toggle_items) {
+            Ok(d) => {
+                log::write_log("info", "右键菜单切换原生完成");
+                d
             }
-            if out.code != 0 {
-                return json!({ "success": false, "message": "切换失败" });
-            }
-            match parse_last_json(&out.stdout) {
-                Some(d) => d,
-                None => return json!({ "success": false, "message": "解析切换结果失败" }),
-            }
+            Err(e) => return json!({ "success": false, "message": format!("原生切换失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
         }
     };
 
@@ -650,25 +658,27 @@ pub async fn contextmenu_restore<R: Runtime>(window: WebviewWindow<R>) -> Value 
     }
     log::write_log("warn", "恢复右键菜单备份");
 
-    // S1：原生优先，失败自动回退 PS
-    let data = match crate::engine::native::cm_restore() {
-        Ok(d) => {
-            log::write_log("info", "右键菜单恢复原生完成");
-            d
+    // B6 S2：默认原生，TRIM_LEGACY_CONTEXTMENU=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_CONTEXTMENU").map(|v| v == "1").unwrap_or(false);
+    let data = if legacy {
+        let out = match run_ps(PS_RESTORE, Duration::from_secs(60), None) {
+            Ok(o) => o,
+            Err(e) => return json!({ "success": false, "message": e }),
+        };
+        if out.code != 0 {
+            return json!({ "success": false, "message": "恢复失败" });
         }
-        Err(e) => {
-            log::write_log("warn", &format!("右键菜单恢复原生失败，回退 PS: {e}"));
-            let out = match run_ps(PS_RESTORE, Duration::from_secs(60), None) {
-                Ok(o) => o,
-                Err(e) => return json!({ "success": false, "message": e }),
-            };
-            if out.code != 0 {
-                return json!({ "success": false, "message": "恢复失败" });
+        match parse_last_json(&out.stdout) {
+            Some(d) => d,
+            None => return json!({ "success": false, "message": "解析恢复结果失败" }),
+        }
+    } else {
+        match crate::engine::native::cm_restore() {
+            Ok(d) => {
+                log::write_log("info", "右键菜单恢复原生完成");
+                d
             }
-            match parse_last_json(&out.stdout) {
-                Some(d) => d,
-                None => return json!({ "success": false, "message": "解析恢复结果失败" }),
-            }
+            Err(e) => return json!({ "success": false, "message": format!("原生恢复失败（设 TRIM_LEGACY_CONTEXTMENU=1 可回退 PS）: {e}") }),
         }
     };
     let imported = data.get("imported").and_then(|v| v.as_i64()).unwrap_or(0)

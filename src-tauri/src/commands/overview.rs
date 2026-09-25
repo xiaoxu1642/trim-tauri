@@ -196,14 +196,13 @@ pub async fn overview_checkup<R: tauri::Runtime>(
         }
     }
     let result = tauri::async_runtime::spawn_blocking(|| {
-        // S1：原生优先，有 unknown 检查项时回退 PS
-        if let Ok(data) = crate::engine::native::overview_checkup() {
-            let checks = data.get("checks").and_then(|v| v.as_array());
-            let has_unknown = checks.map(|arr| arr.iter().any(|c| c.get("status").and_then(|s| s.as_str()) == Some("unknown"))).unwrap_or(false);
-            if !has_unknown {
-                return Ok(data);
+        // B10 S2：默认原生，TRIM_LEGACY_OVERVIEW=1 回退 PS
+        let legacy = std::env::var("TRIM_LEGACY_OVERVIEW").map(|v| v == "1").unwrap_or(false);
+        if !legacy {
+            match crate::engine::native::overview_checkup() {
+                Ok(data) => return Ok(data),
+                Err(e) => return Err(format!("原生体检失败（设 TRIM_LEGACY_OVERVIEW=1 可回退 PS）: {e}")),
             }
-            crate::engine::log::write_log("info", "overview_checkup 原生含 unknown，回退 PS");
         }
         ps_json(OVERVIEW_CHECKUP_PS, 90, "overview:checkup")
     })

@@ -747,17 +747,17 @@ pub async fn optimizer_run<R: Runtime>(
     let progress_id = option_id.clone();
     // u32::MAX 作初值：脚本第一行哪怕是 0% 也与初值不同，必定发出
     let last_pct = std::cell::Cell::new(u32::MAX);
-    // S1：原生优先，pwsh 类型或失败回退 PS
-    let native_out: Option<pwsh::PsOutput> = match native_execute_steps(&window, &steps, &option_id) {
-        Ok(failed_steps) => {
-            let stdout = format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n");
-            let code = if failed_steps == 0 { 0 } else { 1 };
-            Some(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false })
+    // B10 S2：默认原生，TRIM_LEGACY_OPTIMIZER=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_OPTIMIZER").map(|v| v == "1").unwrap_or(false);
+    let run: Result<pwsh::PsOutput, String> = if !legacy {
+        match native_execute_steps(&window, &steps, &option_id) {
+            Ok(failed_steps) => {
+                let stdout = format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n");
+                let code = if failed_steps == 0 { 0 } else { 1 };
+                Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false })
+            }
+            Err(e) => Err(format!("原生执行失败（设 TRIM_LEGACY_OPTIMIZER=1 可回退 PS）: {e}")),
         }
-        Err(_) => None,
-    };
-    let run: Result<pwsh::PsOutput, String> = if let Some(out) = native_out {
-        Ok(out)
     } else {
         pwsh::run_file_streaming(
             &path,

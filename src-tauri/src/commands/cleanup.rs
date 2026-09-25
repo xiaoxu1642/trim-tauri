@@ -831,30 +831,9 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
     let hook: Option<Box<dyn FnMut(&str)>> = Some(Box::new(move |line: &str| {
         ingest_and_emit(&hook_accum, &hook_window, line);
     }));
-    let (mut code, _stdout, mut stderr) =
-        cleanup_scan::run_json(&[cats_json, cfg_json], &rules_json, hook);
-    let mut used_ps = false;
-    if code != 0 {
-        log::write_log(
-            "warn",
-            &format!(
-                "Rust 清理扫描不可用，回退 PS 引擎: {}",
-                if stderr.trim().is_empty() {
-                    format!("退出码 {code}")
-                } else {
-                    stderr.trim().to_string()
-                }
-            ),
-        );
-        // 回退前清空 Rust 引擎的半程输出，防止条目/清单混入 PS 结果
-        {
-            let mut a = accum.lock().unwrap_or_else(|e| e.into_inner());
-            a.data.clear();
-            a.plan.clear();
-            a.plan_truncated.clear();
-            a.plan_total = 0;
-        }
-        used_ps = true;
+    // B10 S2：默认原生，TRIM_LEGACY_CLEANUP=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_CLEANUP").map(|v| v == "1").unwrap_or(false);
+    let (code, _stdout, stderr) = if legacy {
         let script = build_scan_script(&cats, &configured, &rules, &fastsize_dll());
         let out = (|| -> Result<pwsh::PsOutput, String> {
             let path = pwsh::write_temp_script(&script, ".ps1")?;
@@ -867,15 +846,23 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
                 for line in ps.stdout.lines() {
                     ingest_and_emit(&accum, window, line);
                 }
-                code = ps.code;
-                stderr = ps.stderr;
+                (ps.code, String::new(), ps.stderr)
             }
             Err(e) => {
                 log::write_log("error", &format!("扫描失败: {e}"));
                 return json!({ "success": false, "message": e, "data": [] });
             }
         }
-    }
+    } else {
+        let (code, stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json], &rules_json, hook);
+        if code != 0 {
+            let msg = if stderr.trim().is_empty() { format!("退出码 {code}") } else { stderr.trim().to_string() };
+            log::write_log("error", &format!("Rust 清理扫描失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {msg}"));
+            return json!({ "success": false, "message": format!("原生扫描失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {msg}"), "data": [] });
+        }
+        (code, stdout, stderr)
+    };
+    let used_ps = legacy;
     if code != 0 {
         log::write_log("error", &format!("扫描失败: {}", stderr.trim()));
         let msg = if stderr.trim().is_empty() {
@@ -1018,35 +1005,33 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
     log::flush_sync(); // 审查v4-L3：危险操作执行前强制刷盘
 
     let task = tauri::async_runtime::spawn_blocking(move || {
-        // S1：原生优先，注册表型/DISM/复杂 glob 回退 PS
-        let native_result = crate::engine::native::cleanup_execute(&safe_items, &rules, to_recycle, auto_rebuild);
-        let out: Result<pwsh::PsOutput, String> = match native_result {
-            Ok(result) => {
-                // 构造模拟 PsOutput：@@RECYCLE@@ 行 + JSON 结果
-                let mut stdout = String::new();
-                for entry in &result.recycle_entries {
-                    stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
+        // B10 S2：默认原生，TRIM_LEGACY_CLEANUP=1 回退 PS
+        let legacy = std::env::var("TRIM_LEGACY_CLEANUP").map(|v| v == "1").unwrap_or(false);
+        let out: Result<pwsh::PsOutput, String> = if legacy {
+            let path = match pwsh::write_temp_script(&script, ".ps1") {
+                Ok(p) => p,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            let r = pwsh::run_file(&path, EXECUTE_TIMEOUT, None);
+            let _ = std::fs::remove_file(&path);
+            r
+        } else {
+            match crate::engine::native::cleanup_execute(&safe_items, &rules, to_recycle, auto_rebuild) {
+                Ok(result) => {
+                    let mut stdout = String::new();
+                    for entry in &result.recycle_entries {
+                        stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
+                    }
+                    let data = json!({
+                        "details": result.details,
+                        "freed": result.freed,
+                        "fileCount": result.file_count,
+                    });
+                    stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
+                    stdout.push('\n');
+                    Ok(pwsh::PsOutput { code: 0, stdout, stderr: String::new(), timed_out: false })
                 }
-                let data = json!({
-                    "details": result.details,
-                    "freed": result.freed,
-                    "fileCount": result.file_count,
-                });
-                stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
-                stdout.push('\n');
-                Ok(pwsh::PsOutput { code: 0, stdout, stderr: String::new(), timed_out: false })
-            }
-            Err(e) => {
-                log::write_log("warn", &format!("清理执行原生回退 PS: {e}"));
-                let path = match pwsh::write_temp_script(&script, ".ps1") {
-                    Ok(p) => p,
-                    Err(e) => return json!({ "success": false, "message": e }),
-                };
-                // 不在此层剥 @@DIAG@@：JS 的 cleanLines 取的是**未剥**的行，
-                // 剥掉的 stdout 只作为 join 为空时的兜底（逐字对齐 main.js 1364）
-                let r = pwsh::run_file(&path, EXECUTE_TIMEOUT, None);
-                let _ = std::fs::remove_file(&path);
-                r
+                Err(e) => return json!({ "success": false, "message": format!("原生执行失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {e}") }),
             }
         };
         let ps = match out {
@@ -1422,11 +1407,16 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
         Some(p) if !p.is_empty() && p.chars().count() <= 600 => p,
         _ => String::new(),
     };
-    // S1：原生优先，复杂规则回退 PS
-    if let Some(rule) = find_cleanup_rule_by_id(&rules, &id) {
-        if let Ok(detail) = crate::engine::native::cleanup_detail(&rule, &safe_path) {
-            return json!({ "success": true, "data": detail });
+    // B10 S2：默认原生，TRIM_LEGACY_CLEANUP=1 回退 PS
+    let legacy = std::env::var("TRIM_LEGACY_CLEANUP").map(|v| v == "1").unwrap_or(false);
+    if !legacy {
+        if let Some(rule) = find_cleanup_rule_by_id(&rules, &id) {
+            match crate::engine::native::cleanup_detail(&rule, &safe_path) {
+                Ok(detail) => return json!({ "success": true, "data": detail }),
+                Err(e) => return json!({ "success": false, "message": format!("原生枚举失败（设 TRIM_LEGACY_CLEANUP=1 可回退 PS）: {e}") }),
+            }
         }
+        return json!({ "success": false, "message": "未找到清理规则" });
     }
     let script = build_detail_script(&id, &safe_path, &rules);
     let files = Mutex::new(Vec::<Value>::new());
