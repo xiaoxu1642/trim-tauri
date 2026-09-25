@@ -1940,3 +1940,194 @@ unsafe fn scan_shellex_handlers(
     }
     let _ = RegCloseKey(hk);
 }
+// ==================== B7 runtimes_status：运行库检测 ====================
+
+/// 运行库检测（对应 runtimes_status.ps1，S1）
+///
+/// 覆盖：VC++ 2015-2022 x64/x86（注册表+dll）、.NET Framework 4.x/3.5、
+/// DirectX 9.0c 附属组件、旧版 VC++ 2005-2013 信息级列举。
+pub fn runtimes_status() -> Result<Value, String> {
+    unsafe {
+        let mut items: Vec<Value> = Vec::new();
+
+        // ---- VC++ 2015-2022 x64/x86 ----
+        let vc_dlls = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll"];
+        for arch in ["x64", "x86"] {
+            let (reg_path, dll_dir) = if arch == "x64" {
+                (r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64", r"C:\Windows\System32")
+            } else {
+                (r"SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86", r"C:\Windows\SysWOW64")
+            };
+            let sk = to_wide(reg_path);
+            let mut hk = HKEY::default();
+            let installed = if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+                let inst = reg_read_dword_val(hk, "Installed").unwrap_or(0) == 1;
+                let ver = reg_read_string(hk, "Version").unwrap_or_default();
+                let _ = RegCloseKey(hk);
+                (inst, ver)
+            } else {
+                (false, String::new())
+            };
+            let missing: Vec<&str> = vc_dlls.iter()
+                .filter(|d| !std::path::Path::new(&format!("{dll_dir}\\{d}")).exists())
+                .copied().collect();
+            let (status, detail, evidence, repair) = if installed.0 && missing.is_empty() {
+                ("ok", String::new(), vec![format!("注册表：{}", installed.1), format!("关键 dll 齐全（{dll_dir}）")], Value::Null)
+            } else if !installed.0 && missing.is_empty() {
+                ("ok", String::new(), vec!["注册表项缺失，但关键 dll 齐全".to_string()], Value::Null)
+            } else if installed.0 && !missing.is_empty() {
+                let mut ev = vec![format!("注册表：{}", installed.1)];
+                for m in &missing { ev.push(format!("{dll_dir}\\{m} 缺失")); }
+                ("fail", "VC++ 运行库已安装但关键 dll 缺失（可能被清理工具误删）".to_string(), ev,
+                    json!({"id": format!("vc-{arch}"), "name": format!("VC++ 2015-2022 {}", arch.to_uppercase())}))
+            } else {
+                let mut ev = vec!["注册表：未安装".to_string()];
+                for m in &missing { ev.push(format!("{dll_dir}\\{m} 缺失")); }
+                ("fail", format!("VC++ 2015-2022 {arch} 未安装"), ev,
+                    json!({"id": format!("vc-{arch}"), "name": format!("VC++ 2015-2022 {}", arch.to_uppercase())}))
+            };
+            items.push(json!({
+                "id": format!("vc-{arch}"), "status": status, "evidence": evidence,
+                "detail": detail, "repair": repair,
+            }));
+        }
+
+        // ---- .NET Framework 4.x ----
+        let release_map: [(u32, &str); 9] = [
+            (533320, "4.8.1"), (528040, "4.8"), (461808, "4.7.2"), (461308, "4.7.1"),
+            (460798, "4.7"), (394802, "4.6.2"), (393295, "4.6"), (379893, "4.5.2"), (378389, "4.5"),
+        ];
+        let ndp_path = r"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full";
+        let sk = to_wide(ndp_path);
+        let mut hk = HKEY::default();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+            let install = reg_read_dword_val(hk, "Install").unwrap_or(0) == 1;
+            let release = reg_read_dword_val(hk, "Release").unwrap_or(0);
+            let _ = RegCloseKey(hk);
+            if install && release > 0 {
+                let mut ver_name = format!("4.x（Release {release}）");
+                for (rv, name) in &release_map {
+                    if release >= *rv { ver_name = format!("{name}（Release {release}）"); break; }
+                }
+                let (status, detail, repair) = if release >= 528040 {
+                    ("ok", String::new(), Value::Null)
+                } else {
+                    ("warn", ".NET Framework 低于 4.8，部分新软件可能无法运行".to_string(),
+                        json!({"id": "netfx48", "name": ".NET Framework 4.8"}))
+                };
+                items.push(json!({
+                    "id": "netfx4x", "status": status, "evidence": [ver_name],
+                    "detail": detail, "repair": repair,
+                }));
+            } else {
+                items.push(json!({
+                    "id": "netfx4x", "status": "fail", "evidence": ["注册表：未安装"],
+                    "detail": ".NET Framework 4.x 未安装",
+                    "repair": {"id": "netfx48", "name": ".NET Framework 4.8"},
+                }));
+            }
+        } else {
+            items.push(json!({
+                "id": "netfx4x", "status": "fail", "evidence": ["注册表：未安装"],
+                "detail": ".NET Framework 4.x 未安装",
+                "repair": {"id": "netfx48", "name": ".NET Framework 4.8"},
+            }));
+        }
+
+        // ---- .NET Framework 3.5 ----
+        let ndp35_path = r"SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5";
+        let sk = to_wide(ndp35_path);
+        let mut hk = HKEY::default();
+        let net35_installed = if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+            let inst = reg_read_dword_val(hk, "Install").unwrap_or(0) == 1;
+            let _ = RegCloseKey(hk);
+            inst
+        } else { false };
+        // 可选功能状态：用注册表判断即可（Get-WindowsOptionalFeature 需要 DISM，S1 简化）
+        if net35_installed {
+            items.push(json!({
+                "id": "netfx35", "status": "ok", "evidence": [".NET Framework 3.5 已启用"],
+                "detail": "", "repair": null,
+            }));
+        } else {
+            items.push(json!({
+                "id": "netfx35", "status": "warn", "evidence": ["注册表/可选功能：未启用"],
+                "detail": ".NET Framework 3.5 未启用（部分老游戏/老软件需要）",
+                "repair": {"id": "netfx35", "name": ".NET Framework 3.5（DISM 启用）"},
+            }));
+        }
+
+        // ---- DirectX 9.0c 附属组件 ----
+        let dx9_dlls = ["d3dx9_43.dll", "d3dx9_42.dll", "d3dx11_43.dll", "d3dx10_43.dll",
+                        "d3dcompiler_43.dll", "xinput1_3.dll", "xaudio2_7.dll"];
+        let mut dx_missing: Vec<&str> = Vec::new();
+        for dll in &dx9_dlls {
+            let in64 = std::path::Path::new(&format!(r"C:\Windows\System32\{dll}")).exists();
+            let in86 = std::path::Path::new(&format!(r"C:\Windows\SysWOW64\{dll}")).exists();
+            if !in64 && !in86 { dx_missing.push(dll); }
+        }
+        let mut dx_evidence: Vec<String> = Vec::new();
+        let mut dx_status = "ok";
+        let mut dx_detail = String::new();
+        if !dx_missing.is_empty() {
+            dx_status = "fail";
+            dx_detail = "DirectX 9.0c 附属组件缺失，部分老游戏无法启动".to_string();
+            for m in &dx_missing { dx_evidence.push(format!("{m} 缺失（System32 与 SysWOW64 均未找到）")); }
+        } else {
+            dx_evidence.push("DirectX 9.0c 关键附属组件齐全".to_string());
+        }
+        // DX12 系统组件
+        for dll in ["d3d12.dll", "d3d12core.dll"] {
+            if !std::path::Path::new(&format!(r"C:\Windows\System32\{dll}")).exists() {
+                dx_status = "fail";
+                dx_evidence.push(format!("System32\\{dll} 缺失（DX12 系统组件，建议系统文件修复）"));
+            }
+        }
+        items.push(json!({
+            "id": "dx9", "status": dx_status, "evidence": dx_evidence,
+            "detail": dx_detail, "repair": null,
+        }));
+
+        // ---- 旧版 VC++ 2005-2013（信息级） ----
+        let mut old_vc: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for uninst_path in [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ] {
+            let sk = to_wide(uninst_path);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
+            for sub in reg_enum_subkeys(hk) {
+                let sub_path = format!("{uninst_path}\\{sub}");
+                let ssk = to_wide(&sub_path);
+                let mut shk = HKEY::default();
+                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(ssk.as_ptr()), Some(0), KEY_READ, &mut shk).is_err() { continue; }
+                if let Some(dn) = reg_read_string(shk, "DisplayName") {
+                    if dn.starts_with("Microsoft Visual C++ 2005") || dn.starts_with("Microsoft Visual C++ 2008")
+                        || dn.starts_with("Microsoft Visual C++ 2010") || dn.starts_with("Microsoft Visual C++ 2012")
+                        || dn.starts_with("Microsoft Visual C++ 2013") {
+                        if dn.contains("Redistributable") { old_vc.insert(dn); }
+                    }
+                }
+                let _ = RegCloseKey(shk);
+            }
+            let _ = RegCloseKey(hk);
+        }
+        let old_evidence: Vec<String> = if old_vc.is_empty() {
+            vec!["未发现旧版 VC++（2005-2013）".to_string()]
+        } else { old_vc.into_iter().collect() };
+        items.push(json!({
+            "id": "vc-old", "status": "info", "evidence": old_evidence,
+            "detail": "信息级：仅列出已装版本，不判定异常", "repair": null,
+        }));
+
+        // ---- summary ----
+        let ok = items.iter().filter(|i| i.get("status").and_then(|s| s.as_str()) == Some("ok")).count();
+        let warn = items.iter().filter(|i| i.get("status").and_then(|s| s.as_str()) == Some("warn")).count();
+        let fail = items.iter().filter(|i| i.get("status").and_then(|s| s.as_str()) == Some("fail")).count();
+        Ok(json!({
+            "items": items,
+            "summary": {"total": items.len(), "ok": ok, "warn": warn, "fail": fail},
+        }))
+    }
+}

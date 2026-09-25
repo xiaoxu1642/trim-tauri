@@ -391,6 +391,19 @@ fn build_repair_script(action_id: &str, installer_path: Option<&Path>) -> Result
 /// 跑一次运行库检测（超时 25s，diagOp 'runtimes.collect'），并落到本窗口快照槽。
 /// 返回脚本输出的完整 data 对象（{items, summary}）。
 fn run_runtimes_collect(label: &str) -> Result<Value, String> {
+    // S1：原生优先，失败自动回退 PS
+    match crate::engine::native::runtimes_status() {
+        Ok(data) => {
+            if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
+                snapshot_store(label, items);
+            }
+            log::write_log("info", "运行库检测原生完成");
+            return Ok(data);
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("运行库原生检测失败，回退 PS: {e}"));
+        }
+    }
     let path = pwsh::write_temp_script(RUNTIMES_STATUS_PS, ".ps1")?;
     let out = pwsh::run_file(&path, Duration::from_secs(25), Some("runtimes.collect"));
     let _ = std::fs::remove_file(&path);
