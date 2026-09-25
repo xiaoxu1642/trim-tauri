@@ -1,4 +1,4 @@
-// memory-scripts.js - 内存清理 PowerShell 脚本生成器
+﻿// memory-scripts.js - 内存清理 PowerShell 脚本生成器
 // 参考 Mem Reduct 3.5.3（C:\kaifa\winclean\old\memreduct-master）：
 // 通过 NtSetSystemInformation 按内存区域掩码顺序清理工作集 / 系统文件缓存 /
 // 备用列表 / 修改列表 / 注册表缓存 / 合并物理内存页。需要管理员权限。
@@ -240,7 +240,7 @@ $changedTasks = [System.Collections.Generic.List[string]]::new()
 $failTasks = [System.Collections.Generic.List[string]]::new()
 # 审查 M-6（2026-09-14）：Unregister-ScheduledTask 不可逆，删除前先 Export-ScheduledTask
 # 到 %APPDATA%\Trim\backup\tasks\<name>.xml，与 startup/contextmenu 的「删除前备份」纪律对齐。
-$taskBackupDir = Join-Path $env:APPDATA 'Trim\backup\tasks'
+$taskBackupDir = Join-Path $env:APPDATA 'Trim\\backup\\tasks'
 foreach ($taskName in @('WpsUpdateTask_CHENG','WpsUpdateLogonTask_CHENG')) {
   if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { continue }
   try {

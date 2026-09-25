@@ -6,6 +6,10 @@
 #     `update history/` 与 AGENTS.md 口径）。
 # 注意：.gitignore 只拦未跟踪文件，历史上已提交过的必须另做剔除（见推送前门禁）。
 docs/
+# AGENTS.md：本机智能体协作约束，含绝对路径倾向与操作姿势，不随仓库分发
+AGENTS.md
+# assets-src/：图标/壁纸设计源文件（PSD/PNG 源稿），构建产物已在 src/assets/，源稿不入库
+assets-src/
 *.pem
 *.key
 *.pfx

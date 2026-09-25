@@ -66,6 +66,11 @@
       "id": "tasks_stubborn_strategy",
       "title": "顽固软件策略专杀",
       "note": "N1（2026-09-14 重复点审查）：与「内存清理 - 顽固软件治理」针对同一批目标（MuMu / 网易 UU 远程 / 微软电脑管家 / WPS），现合并为内存清理页同一张卡片的两层（立即结束进程 / 阻止开机自启）。脚本已迁至 src/scripts-powershell/memory-scripts.js 的 STUBBORN_BLOCK_SCRIPT，IPC 为 memory:stubborn-block。该项为 pwsh 步骤、不含注册表写入，通常无备份记录需要还原。"
+    },
+    {
+      "id": "mmcss_optimize",
+      "title": "MMCSS优化",
+      "note": "审计 P1-09（2026-09-25）：README 已对外承诺「MMCSS 多媒体调度相关注册表调校已不提供」，但该项仍挂在优化中心活动清单（组「游戏与多媒体」），用户可见可执行。按产品原则「说不清收益宁可不做」退役兑现承诺。原项含两步注册表写入（Games 任务高调度/GPU Priority=8/Latency Sensitive + SystemProfile NoLazyMode/AlwaysOn + Reliability 时间戳/IO优先级），restoreAvailable=true 有还原步骤。已执行过该项的用户需手动还原或使用优化中心「状态不明一键还原」。"
     }
   ]
 }

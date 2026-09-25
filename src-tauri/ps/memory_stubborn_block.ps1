@@ -37,7 +37,7 @@ $changedTasks = [System.Collections.Generic.List[string]]::new()
 $failTasks = [System.Collections.Generic.List[string]]::new()
 # 审查 M-6（2026-09-14）：Unregister-ScheduledTask 不可逆，删除前先 Export-ScheduledTask
 # 到 %APPDATA%Trimackup	asks<name>.xml，与 startup/contextmenu 的「删除前备份」纪律对齐。
-$taskBackupDir = Join-Path $env:APPDATA 'Trimackup	asks'
+$taskBackupDir = Join-Path $env:APPDATA 'Trim\backup\tasks'
 foreach ($taskName in @('WpsUpdateTask_CHENG','WpsUpdateLogonTask_CHENG')) {
   if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { continue }
   try {

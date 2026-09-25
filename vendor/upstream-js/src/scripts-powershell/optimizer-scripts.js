@@ -196,62 +196,6 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'mmcss_optimize', group: '游戏与多媒体', title: 'MMCSS优化', risk: 'medium',
-    desc: '合并原「游戏高优先级 (MMCSS Games)」与「MMCSS 系统增强」：Games 任务设为高调度/高 GPU 优先级并打上低延迟标记，SystemProfile 开启 NoLazyMode/AlwaysOn，Reliability 提升时间戳与 IO 优先级，为游戏与影音提供低延迟的多媒体调度（原「启用 Games 低延迟调度标记」同值重复，已并入本项）。',
-    steps: [
-      {
-        label: 'MMCSS Games 任务优先级 + 低延迟标记', reg: regBlock({
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games': {
-            'Affinity': 'dword:00000000',
-            'Background Only': '"False"',
-            'Clock Rate': 'dword:00002710',
-            'Scheduling Category': '"High"',
-            'SFIO Priority': '"High"',
-            'GPU Priority': 'dword:00000008',
-            'Priority': 'dword:00000006',
-            'Latency Sensitive': '"True"'
-          }
-        })
-      },
-      {
-        label: 'MMCSS 系统级增强（NoLazyMode/AlwaysOn/Reliability）', reg: regBlock({
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile': {
-            'NoLazyMode': 'dword:00000001',
-            'AlwaysOn': 'dword:00000001'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Reliability': {
-            'TimeStampInterval': 'dword:00000001',
-            'IoPriority': 'dword:00000003'
-          }
-        })
-      }
-    ],
-    restore: [
-      {
-        label: '恢复 MMCSS 默认（Games 任务回系统默认值，移除系统级增强键值）', reg: regBlock({
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games': {
-            'Affinity': 'dword:00000000',
-            'Background Only': '"True"',
-            'Clock Rate': 'dword:00002710',
-            'Scheduling Category': '"Medium"',
-            'SFIO Priority': '"Normal"',
-            'GPU Priority': 'dword:00000008',
-            'Priority': 'dword:00000002',
-            'Latency Sensitive': '-'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile': {
-            'NoLazyMode': '-',
-            'AlwaysOn': '-'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Reliability': {
-            'TimeStampInterval': '-',
-            'IoPriority': '-'
-          }
-        })
-      }
-    ]
-  },
-  {
     id: 'nara_prio', group: '游戏与多媒体', title: '永劫无间 CPU 高优先级', risk: 'low',
     desc: '为「永劫无间」(NarakaBladepoint.exe) 进程设置高 CPU 优先级类。',
     steps: [
@@ -2411,3 +2355,4 @@ module.exports = {
   // v3.7.0 议题六 P1
   windowsUpdatePauseSteps, WU_PAUSE_KEYS, WU_PAUSE_MAX_DAYS
 };
+

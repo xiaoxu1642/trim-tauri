@@ -1,4 +1,4 @@
-// PowerShell 清理脚本（嵌入为 JS 字符串）
+﻿// PowerShell 清理脚本（嵌入为 JS 字符串）
 // 参考了 上级目录中的 cmd/bat 清理脚本逻辑：
 //   - 删除 Windows 更新缓存.cmd (stop wuauserv + rd SoftwareDistribution + md)
 //   - 删除临时文件.cmd (takeown + RD /S /Q + MKDIR)
@@ -738,14 +738,12 @@ foreach ($cat in $categories) {
     $path = $configuredValue
     $pathSource = 'configured'
   }
-  # [D19 根因·已知缺陷] 下面两个分支读的键名是 candidates / globCandidates，
-  # 而规则 JSON 实际叫 candidatesPs / globCandidatesPs（全库无不带 Ps 的键），
-  # 故两分支恒不执行：内置候选回退与微信缓存的通配候选整体失效。
-  # 本轮（纯安全收口）刻意不修键名——一改就让 neteaseMusicCache/qqCache/douyinCache 换用
-  # 候选路径、wechatCache 从「整条不出现」变成可删条目，属删除面行为变更，留待 D19 批评估。
-  # 但 Invoke-Expression 必须先从这里拿掉：一旦将来补上键名，不重新引入任意代码执行面。
-  if ($rule.candidates) {
-    foreach ($cExpr in @($rule.candidates)) {
+  # [D19 修复·2026-09-25] 键名已修正为 candidatesPs / globCandidatesPs，
+  # 与规则 JSON 实际键一致。修复后 neteaseMusicCache/qqCache/douyinCache 会启用
+  # 内置候选路径回退，wechatCache 通配候选生效（属删除面行为变更，经审计 P2-08 授权修复）。
+  # Invoke-Expression 已在此前安全收口时移除，不重新引入任意代码执行面。
+  if ($rule.candidatesPs) {
+    foreach ($cExpr in @($rule.candidatesPs)) {
       if (-not $cExpr) { continue }
       $rc = Resolve-RulePath -Expr ([string]$cExpr)
       if ($rc.ok) { $pathCandidates += [string]$rc.path }
@@ -756,8 +754,8 @@ foreach ($cat in $categories) {
       }
     }
   }
-  if ($rule.globCandidates) {
-    foreach ($gExpr in @($rule.globCandidates)) {
+  if ($rule.globCandidatesPs) {
+    foreach ($gExpr in @($rule.globCandidatesPs)) {
       if (-not $gExpr) { continue }
       $rg = Resolve-RulePath -Expr ([string]$gExpr)
       if (-not $rg.ok) { continue }
