@@ -485,53 +485,109 @@ fn do_install<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str, lab
         }
     }
 
-    let script = match build_repair_script(action_id, local_path.as_deref()) {
-        Ok(s) => s,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
     log::flush_sync(); // 危险操作前刷盘：静默安装会写入系统运行库
 
     let start = crate::engine::now_ms();
-    let script_path = match pwsh::write_temp_script(&script, ".ps1") {
-        Ok(p) => p,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    log::write_log("info", &format!("运行库修复开始: {action_id}"));
     emit_progress(window, json!({ "phase": "install", "percent": 100 }));
-    let diag_op = format!("runtimes.install.{action_id}");
-    let out = pwsh::run_file(&script_path, Duration::from_secs(600), Some(&diag_op));
-    let _ = std::fs::remove_file(&script_path);
-    let out = match out {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
 
-    let lines: Vec<String> = out
-        .stdout
-        .trim()
-        .split('\n')
-        .map(|l| l.trim_end_matches('\r').to_string())
-        .collect();
-    let result_line = lines.iter().filter(|l| l.starts_with("@@RESULT@@")).last();
-    let ok = result_line.map(|l| l.as_str()) == Some("@@RESULT@@ok");
-    // RT-2：失败原因取失败分支前最后一行普通输出（stderr 多为空）
-    let reason = if ok {
-        String::new()
-    } else {
-        lines
-            .iter()
-            .filter(|l| {
-                !l.is_empty() && !l.starts_with("@@RESULT@@") && !l.starts_with("@@DIAG@@")
-            })
-            .last()
-            .cloned()
-            .unwrap_or_else(|| {
-                if out.stderr.trim().is_empty() {
-                    "修复未成功，请查看日志".into()
+    // S1：原生优先，失败自动回退 PS
+    let (ok, reason) = match crate::engine::native::runtimes_repair(action_id, local_path.as_deref().and_then(|p| p.to_str())) {
+        Ok((success, msg)) => {
+            if success {
+                (true, String::new())
+            } else {
+                log::write_log("warn", &format!("运行库修复原生失败，回退 PS: {msg}"));
+                // 回退 PS
+                let script = match build_repair_script(action_id, local_path.as_deref()) {
+                    Ok(s) => s,
+                    Err(e) => return json!({ "success": false, "message": e }),
+                };
+                let script_path = match pwsh::write_temp_script(&script, ".ps1") {
+                    Ok(p) => p,
+                    Err(e) => return json!({ "success": false, "message": e }),
+                };
+                let diag_op = format!("runtimes.install.{action_id}");
+                let out = pwsh::run_file(&script_path, Duration::from_secs(600), Some(&diag_op));
+                let _ = std::fs::remove_file(&script_path);
+                let out = match out {
+                    Ok(o) => o,
+                    Err(e) => return json!({ "success": false, "message": e }),
+                };
+                let lines: Vec<String> = out
+                    .stdout
+                    .trim()
+                    .split('\n')
+                    .map(|l| l.trim_end_matches('\r').to_string())
+                    .collect();
+                let result_line = lines.iter().filter(|l| l.starts_with("@@RESULT@@")).last();
+                let ps_ok = result_line.map(|l| l.as_str()) == Some("@@RESULT@@ok");
+                let ps_reason = if ps_ok {
+                    String::new()
                 } else {
-                    out.stderr.trim().to_string()
-                }
-            })
+                    lines
+                        .iter()
+                        .filter(|l| {
+                            !l.is_empty() && !l.starts_with("@@RESULT@@") && !l.starts_with("@@DIAG@@")
+                        })
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            if out.stderr.trim().is_empty() {
+                                "修复未成功，请查看日志".into()
+                            } else {
+                                out.stderr.trim().to_string()
+                            }
+                        })
+                };
+                (ps_ok, ps_reason)
+            }
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("运行库修复原生异常，回退 PS: {e}"));
+            // 回退 PS
+            let script = match build_repair_script(action_id, local_path.as_deref()) {
+                Ok(s) => s,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            let script_path = match pwsh::write_temp_script(&script, ".ps1") {
+                Ok(p) => p,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            let diag_op = format!("runtimes.install.{action_id}");
+            let out = pwsh::run_file(&script_path, Duration::from_secs(600), Some(&diag_op));
+            let _ = std::fs::remove_file(&script_path);
+            let out = match out {
+                Ok(o) => o,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            let lines: Vec<String> = out
+                .stdout
+                .trim()
+                .split('\n')
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .collect();
+            let result_line = lines.iter().filter(|l| l.starts_with("@@RESULT@@")).last();
+            let ps_ok = result_line.map(|l| l.as_str()) == Some("@@RESULT@@ok");
+            let ps_reason = if ps_ok {
+                String::new()
+            } else {
+                lines
+                    .iter()
+                    .filter(|l| {
+                        !l.is_empty() && !l.starts_with("@@RESULT@@") && !l.starts_with("@@DIAG@@")
+                    })
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if out.stderr.trim().is_empty() {
+                            "修复未成功，请查看日志".into()
+                        } else {
+                            out.stderr.trim().to_string()
+                        }
+                    })
+            };
+            (ps_ok, ps_reason)
+        }
     };
 
     // 修复后自动重跑检测（回传最新 items/summary；N2：重跑也写回本窗口快照）
@@ -549,10 +605,7 @@ fn do_install<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str, lab
     } else {
         log::write_log(
             "warn",
-            &format!(
-                "运行库修复未成功: {action_id} -> {}",
-                out.stderr.chars().take(120).collect::<String>()
-            ),
+            &format!("运行库修复未成功: {action_id} -> {}", reason.chars().take(120).collect::<String>()),
         );
     }
     json!({

@@ -4633,3 +4633,50 @@ fn regex_capture(text: &str, pattern: &str) -> Option<String> {
     }
     None
 }
+
+// ==================== B7 runtimes_repair：运行库修复 ====================
+
+/// 运行库修复（对应 runtimes_repair_*.ps1，S1）
+///
+/// 静默执行安装包或 dism.exe，检查退出码。
+/// 返回 (success, message)。
+/// 退出码 0/3010/1638 视为成功。
+pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<(bool, String), String> {
+    let (program, args): (&str, Vec<&str>) = match action_id {
+        "vc-x64" | "vc-x86" => {
+            let path = installer_path.ok_or("缺少安装包路径")?;
+            (path, vec!["/install", "/quiet", "/norestart"])
+        }
+        "netfx48" => {
+            let path = installer_path.ok_or("缺少安装包路径")?;
+            (path, vec!["/q", "/norestart"])
+        }
+        "netfx35" => {
+            ("dism.exe", vec!["/Online", "/Enable-Feature", "/FeatureName:NetFx3", "/All", "/NoRestart"])
+        }
+        _ => return Err(format!("未知的修复动作: {action_id}")),
+    };
+
+    crate::engine::log::write_log("info", &format!("运行库修复开始: {action_id}"));
+    let out = std::process::Command::new(program)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("执行安装程序失败: {e}"))?;
+
+    let code = out.status.code().unwrap_or(-1);
+    let (success, message) = match code {
+        0 => (true, "安装成功".into()),
+        3010 => (true, "安装成功，需重启电脑后完全生效".into()),
+        1638 => (true, "已安装相同或更新版本，无需重复安装".into()),
+        _ => (false, format!("安装失败，退出码 {code}")),
+    };
+
+    if success {
+        crate::engine::log::write_log("info", &format!("运行库修复完成: {action_id} ({message})"));
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr).chars().take(200).collect::<String>();
+        crate::engine::log::write_log("warn", &format!("运行库修复失败: {action_id} exit={code} {stderr}"));
+    }
+
+    Ok((success, message))
+}
