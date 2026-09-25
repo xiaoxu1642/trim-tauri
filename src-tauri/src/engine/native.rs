@@ -4286,3 +4286,201 @@ pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
         "failed": failed,
     }))
 }
+// ==================== B6 cm_restore：右键菜单防篡改恢复 ====================
+
+fn reg_file_all_keys(file: &std::path::Path) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(file) {
+        for line in content.lines() {
+            let t = line.trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                let key = &t[1..t.len()-1];
+                keys.push(key.trim_end_matches('\\').to_string());
+            }
+        }
+    }
+    keys
+}
+
+fn reg_key_allowed_for_restore(key: &str) -> bool {
+    let p = key.trim();
+    // 转换长 hive 为短名
+    let p = p
+        .replace("HKEY_LOCAL_MACHINE", "HKLM")
+        .replace("HKEY_CURRENT_USER", "HKCU")
+        .replace("HKEY_USERS", "HKU")
+        .replace("HKEY_CLASSES_ROOT", "HKCR")
+        .replace("HKEY_CURRENT_CONFIG", "HKCC");
+    p.starts_with("HKLM\\SOFTWARE\\Classes\\") || p.starts_with("HKCU\\SOFTWARE\\Classes\\")
+}
+
+/// 右键菜单防篡改恢复（对应 cm_restore.ps1，S1）
+///
+/// 从桌面最新「右键菜单备份_*」目录恢复，三道安全闸门：
+/// ① .reg 必须在 manifest.registryFiles 登记且在备份目录内
+/// ② .reg 正文每条键路径都过白名单（HKLM/HKCU\SOFTWARE\Classes\）
+/// ③ 文件项 source 必须在 SendTo/WinX 合法目录内
+pub fn cm_restore() -> Result<Value, String> {
+    let desktop = desktop_dir();
+    // 找最新备份目录
+    let mut backup_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&desktop)
+        .map_err(|e| format!("读取桌面失败: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("右键菜单备份_")).unwrap_or(false))
+        .collect();
+    backup_dirs.sort_by(|a, b| {
+        let ta = a.metadata().and_then(|m| m.modified()).ok();
+        let tb = b.metadata().and_then(|m| m.modified()).ok();
+        tb.cmp(&ta)
+    });
+    let Some(latest_backup) = backup_dirs.first() else {
+        return Ok(json!({"success": false, "message": "未找到备份目录"}));
+    };
+    let backup_prefix = latest_backup.to_string_lossy().to_string() + "\\";
+
+    // 读 manifest
+    let manifest_path = latest_backup.join("manifest.json");
+    let manifest: Value = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+
+    let mut listed_backups: Vec<String> = Vec::new();
+    if let Some(regs) = manifest.get("registryFiles").and_then(|v| v.as_array()) {
+        for rec in regs {
+            if let Some(b) = rec.get("backup").and_then(|v| v.as_str()) {
+                if let Ok(full) = std::fs::canonicalize(b) {
+                    listed_backups.push(full.to_string_lossy().to_string());
+                } else {
+                    listed_backups.push(b.to_string());
+                }
+            }
+        }
+    }
+
+    let mut imported = 0i64;
+    let mut failed = 0i64;
+    let mut skipped = 0i64;
+    let mut skip_reasons: Vec<String> = Vec::new();
+
+    if manifest.is_null() {
+        skip_reasons.push("manifest.json 缺失或不可解析：本次拒绝导入任何 .reg".into());
+    }
+
+    // 处理 registry_*.reg
+    if let Ok(entries) = std::fs::read_dir(latest_backup) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with("registry_") || !name.ends_with(".reg") { continue; }
+
+            let full = match std::fs::canonicalize(&path) {
+                Ok(f) => f.to_string_lossy().to_string(),
+                Err(_) => { skipped += 1; skip_reasons.push(format!("{name}（无法解析路径）")); continue; }
+            };
+            // ① 在备份目录内
+            if !full.starts_with(&backup_prefix) && !full.starts_with(&latest_backup.to_string_lossy().to_string()) {
+                skipped += 1;
+                skip_reasons.push(format!("{name}（不在本次选中的备份目录内，已拒绝导入）"));
+                continue;
+            }
+            // ① 在 manifest 登记
+            let listed = listed_backups.iter().any(|b| b.eq_ignore_ascii_case(&full) || b.eq_ignore_ascii_case(&path.to_string_lossy()));
+            if !listed {
+                skipped += 1;
+                skip_reasons.push(format!("{name}（未在 manifest.registryFiles 登记，已拒绝导入）"));
+                continue;
+            }
+            // ② 头部 hive 校验
+            let hdr = reg_file_header_hive(&path);
+            if hdr.is_none() || hdr.as_deref() == Some("HKEY_CLASSES_ROOT") || hdr.as_deref() == Some("OTHER") {
+                skipped += 1;
+                let hdr_text = hdr.unwrap_or_else(|| "无法识别".into());
+                skip_reasons.push(format!("{name}（备份头为 {hdr_text}，非真实 hive，已拒绝导入）"));
+                continue;
+            }
+            // ② 逐条键路径白名单
+            let keys = reg_file_all_keys(&path);
+            let mut bad_key = String::new();
+            if keys.is_empty() { bad_key = "正文里没有可识别的键行".into(); }
+            for k in &keys {
+                if !reg_key_allowed_for_restore(k) { bad_key = k.clone(); break; }
+            }
+            if !bad_key.is_empty() {
+                skipped += 1;
+                skip_reasons.push(format!("{name}（键路径不在右键菜单合法范围内，已拒绝导入：{bad_key}）"));
+                continue;
+            }
+            // reg.exe import
+            let out = std::process::Command::new("reg.exe")
+                .args(["import", path.to_str().unwrap()])
+                .output();
+            if out.is_err() || !out.unwrap().status.success() {
+                failed += 1;
+                continue;
+            }
+            // 导入后回读
+            let first_key = keys.first().cloned().unwrap_or_default();
+            if !first_key.is_empty() {
+                if let Some((hive, subkey)) = parse_reg_path(&first_key) {
+                    let sk = to_wide(&subkey);
+                    let mut hk = HKEY::default();
+                    let exists = unsafe { RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() };
+                    if exists { unsafe { let _ = RegCloseKey(hk); } }
+                    if !exists {
+                        failed += 1;
+                        skip_reasons.push(format!("{name}（reg import 报成功但键未出现）"));
+                        continue;
+                    }
+                }
+            }
+            imported += 1;
+        }
+    }
+
+    // 文件项恢复
+    let mut restored = 0i64;
+    if let Some(files) = manifest.get("files").and_then(|v| v.as_array()) {
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let programdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
+        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let allowed_roots = [
+            format!("{appdata}\\Microsoft\\Windows\\SendTo"),
+            format!("{programdata}\\Microsoft\\Windows\\SendTo"),
+            format!("{localappdata}\\Microsoft\\Windows\\WinX"),
+        ];
+        for record in files {
+            let b = record.get("backup").and_then(|v| v.as_str()).unwrap_or("");
+            let s = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let b_full = std::fs::canonicalize(b).unwrap_or_else(|_| std::path::PathBuf::from(b)).to_string_lossy().to_string();
+            let ok_backup = b_full.starts_with(&backup_prefix) || b_full.starts_with(&latest_backup.to_string_lossy().to_string());
+            let ok_source = allowed_roots.iter().any(|r| s.starts_with(&format!("{r}\\")));
+            if !ok_backup || !ok_source {
+                skipped += 1;
+                skip_reasons.push(format!("文件项（来源不在发送到/Win+X 合法目录内，已拒绝还原：{s}）"));
+                continue;
+            }
+            if std::path::Path::new(b).exists() && !s.is_empty() {
+                if let Some(parent) = std::path::Path::new(s).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::copy(b, s).is_ok() {
+                    restored += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+        }
+    }
+
+    Ok(json!({
+        "success": (imported + restored) > 0 && failed == 0,
+        "backupDir": latest_backup.to_string_lossy().to_string(),
+        "imported": imported,
+        "restored": restored,
+        "skipped": skipped,
+        "skipReasons": skip_reasons,
+        "failed": failed,
+    }))
+}

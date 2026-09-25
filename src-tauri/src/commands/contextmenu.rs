@@ -649,15 +649,27 @@ pub async fn contextmenu_restore<R: Runtime>(window: WebviewWindow<R>) -> Value 
         return deny;
     }
     log::write_log("warn", "恢复右键菜单备份");
-    let out = match run_ps(PS_RESTORE, Duration::from_secs(60), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.code != 0 {
-        return json!({ "success": false, "message": "恢复失败" });
-    }
-    let Some(data) = parse_last_json(&out.stdout) else {
-        return json!({ "success": false, "message": "解析恢复结果失败" });
+
+    // S1：原生优先，失败自动回退 PS
+    let data = match crate::engine::native::cm_restore() {
+        Ok(d) => {
+            log::write_log("info", "右键菜单恢复原生完成");
+            d
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("右键菜单恢复原生失败，回退 PS: {e}"));
+            let out = match run_ps(PS_RESTORE, Duration::from_secs(60), None) {
+                Ok(o) => o,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            if out.code != 0 {
+                return json!({ "success": false, "message": "恢复失败" });
+            }
+            match parse_last_json(&out.stdout) {
+                Some(d) => d,
+                None => return json!({ "success": false, "message": "解析恢复结果失败" }),
+            }
+        }
     };
     let imported = data.get("imported").and_then(|v| v.as_i64()).unwrap_or(0)
         + data.get("restored").and_then(|v| v.as_i64()).unwrap_or(0);
