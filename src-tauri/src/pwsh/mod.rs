@@ -22,6 +22,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -347,6 +349,7 @@ fn is_pwsh7_executable(exe: &Path) -> bool {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null())
+        .creation_flags(0x0800_0000)
         .spawn()
     {
         Ok(c) => c,
@@ -493,6 +496,7 @@ fn run_file_impl(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
+        .creation_flags(0x0800_0000)
         .spawn()
         .map_err(|e| format!("PowerShell 7 启动失败: {e}"))?;
 
