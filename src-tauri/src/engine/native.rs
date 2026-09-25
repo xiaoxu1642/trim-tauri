@@ -653,3 +653,340 @@ pub fn peripheral_query() -> Result<Value, String> {
         }))
     }
 }
+// ==================== B5：启动项扫描 ====================
+
+use windows::Win32::System::Registry::{
+    RegEnumValueW, HKEY_CURRENT_USER, REG_EXPAND_SZ, REG_BINARY, REG_MULTI_SZ,
+};
+
+/// 读注册表值（返回类型+数据）
+unsafe fn reg_query_value(hk: HKEY, name: &str) -> Option<(REG_VALUE_TYPE, Vec<u8>)> {
+    let nm = to_wide(name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_err() {
+        return None;
+    }
+    buf.truncate(size as usize);
+    Some((ty, buf))
+}
+
+/// 枚举注册表键的所有值名
+unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut name_buf = [0u16; 260];
+        let mut name_len = name_buf.len() as u32;
+        let r = RegEnumValueW(
+            hk, index,
+            Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
+            &mut name_len,
+            None, None, None, None,
+        );
+        if r.is_err() { break; }
+        let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+        if !name.is_empty() { names.push(name); }
+        index += 1;
+    }
+    names
+}
+
+/// 从命令行提取可执行路径（支持引号包裹）
+fn extract_cmd_path(cmd: &str) -> String {
+    let c = cmd.trim();
+    if c.starts_with('"') {
+        if let Some(idx) = c[1..].find('"') {
+            return c[1..idx+1].to_string();
+        }
+    }
+    if let Some(sp) = c.find(' ') {
+        return c[..sp].to_string();
+    }
+    c.to_string()
+}
+
+/// 展开环境变量（%VAR%）
+fn expand_env(s: &str) -> String {
+    let mut result = s.to_string();
+    // 简单展开常见变量
+    for var in ["APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "SystemRoot", "windir", "USERPROFILE", "PUBLIC"] {
+        if let Ok(val) = std::env::var(var) {
+            result = result.replace(&format!("%{var}%"), &val);
+        }
+    }
+    result
+}
+
+/// 读 StartupApproved blob，返回是否禁用（首字节 bit0=1）
+unsafe fn read_startup_approved(hive: HKEY, subkey: &str, value_name: &str) -> Option<bool> {
+    let base = match hive {
+        h if h == HKEY_CURRENT_USER => r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved",
+        _ => r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved",
+    };
+    let full = format!("{base}\\{subkey}");
+    let fw = to_wide(&full);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(fw.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+        return None;
+    }
+    let result = reg_query_value(hk, value_name).map(|(ty, buf)| {
+        if ty == REG_BINARY && !buf.is_empty() {
+            (buf[0] & 1) == 1
+        } else {
+            false
+        }
+    });
+    let _ = RegCloseKey(hk);
+    result
+}
+
+/// 取文件发布者（CompanyName）
+fn get_publisher(path: &str) -> String {
+    if path.is_empty() { return String::new(); }
+    // S1 简化：不实现 GetFileVersionInfoW，留空
+    // 后续 S2 用 VerQueryValueW 实现
+    String::new()
+}
+
+/// 启动项扫描（对应 startup_scan.ps1）
+///
+/// S1：注册表 Run/RunOnce + 启动文件夹 + StartupApproved + disabled.json 合并。
+/// 计划任务暂用 schtasks 命令获取。.lnk 目标解析和文件发布者留空（S2 完善）。
+pub fn startup_scan() -> Result<Vec<Value>, String> {
+    let mut results: Vec<Value> = Vec::new();
+
+    unsafe {
+        // ---------- 注册表 Run/RunOnce（8 路径） ----------
+        let run_paths: &[(&str, HKEY, &str, &str, &str)] = &[
+            ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户\\Run", "HKCU"),
+            ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户\\RunOnce", "HKCU"),
+            ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户(32位)\\Run", "HKCU32"),
+            ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户(32位)\\RunOnce", "HKCU32"),
+            ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户\\Run", "HKLM"),
+            ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户\\RunOnce", "HKLM"),
+            ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户(32位)\\Run", "HKLM32"),
+            ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户(32位)\\RunOnce", "HKLM32"),
+        ];
+
+        for (hive_tag, hive, subkey, label, scope) in run_paths {
+            let sk = to_wide(subkey);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                continue;
+            }
+            let values = reg_enum_values(hk);
+            for vp in values {
+                if vp.is_empty() { continue; }
+                let Some((ty, buf)) = reg_query_value(hk, &vp) else { continue; };
+                let value_type = match ty {
+                    REG_SZ => "String",
+                    REG_EXPAND_SZ => "ExpandString",
+                    REG_BINARY => "Binary",
+                    REG_MULTI_SZ => "MultiString",
+                    REG_DWORD => "DWord",
+                    _ => "Unknown",
+                };
+                let mut value_data = String::new();
+                let mut value_data_b64 = String::new();
+                let mut value_data_arr: Vec<String> = Vec::new();
+                let mut cmd_path = String::new();
+
+                if ty == REG_BINARY {
+                    value_data_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &buf);
+                } else if ty == REG_MULTI_SZ {
+                    // MULTI_SZ: 双 null 结尾的宽字符串序列
+                    let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let mut start = 0;
+                    for i in 0..wide.len() {
+                        if wide[i] == 0 {
+                            if i > start {
+                                value_data_arr.push(String::from_utf16_lossy(&wide[start..i]));
+                            }
+                            start = i + 1;
+                        }
+                    }
+                } else if ty == REG_SZ || ty == REG_EXPAND_SZ {
+                    let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+                    value_data = String::from_utf16_lossy(&wide[..end]);
+                    if ty == REG_EXPAND_SZ {
+                        value_data = expand_env(&value_data);
+                    }
+                    if !value_data.trim().is_empty() {
+                        cmd_path = extract_cmd_path(&value_data);
+                    }
+                }
+
+                if value_data.trim().is_empty() && value_data_b64.is_empty() && value_data_arr.is_empty() {
+                    continue;
+                }
+
+                // StartupApproved：32 位视图归到主 hive
+                let sa_hive = if hive_tag.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+                let sa_disabled = read_startup_approved(sa_hive, "Run", &vp);
+                let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
+                let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
+
+                let reg_path_full = match *hive {
+                    h if h == HKEY_CURRENT_USER => format!("HKEY_CURRENT_USER\\{subkey}"),
+                    _ => format!("HKEY_LOCAL_MACHINE\\{subkey}"),
+                };
+
+                results.push(json!({
+                    "id": format!("reg|{reg_path_full}|{vp}"),
+                    "name": vp,
+                    "command": value_data,
+                    "source": "registry",
+                    "hive": hive_tag,
+                    "regPath": reg_path_full,
+                    "valueName": vp,
+                    "valueType": value_type,
+                    "valueData": value_data,
+                    "valueDataB64": value_data_b64,
+                    "valueDataArray": value_data_arr,
+                    "filePath": "",
+                    "taskPath": "",
+                    "taskName": "",
+                    "enabled": enabled,
+                    "location": label,
+                    "scope": scope,
+                    "disabledBy": disabled_by,
+                    "publisher": get_publisher(&cmd_path),
+                    "resolvedPath": cmd_path,
+                }));
+            }
+            let _ = RegCloseKey(hk);
+        }
+
+        // ---------- 启动文件夹 ----------
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let programdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+        let folders: &[(&str, &str, &str)] = &[
+            (&appdata, r"Microsoft\Windows\Start Menu\Programs\Startup", "启动文件夹 · 当前用户"),
+            (&programdata, r"Microsoft\Windows\Start Menu\Programs\StartUp", "启动文件夹 · 所有用户"),
+        ];
+
+        for (base, sub, label) in folders {
+            let dir = std::path::Path::new(base).join(sub);
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
+            let scope = if base == &appdata { "HKCU" } else { "HKLM" };
+            let sa_hive = if scope == "HKLM" { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.eq_ignore_ascii_case("desktop.ini") { continue; }
+                let full_path = entry.path().to_string_lossy().to_string();
+                let name_stem = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
+                // .lnk 目标解析 S2 实现，S1 用文件路径
+                let resolved = full_path.clone();
+                // StartupApproved\StartupFolder：先按全名找，再按无扩展名找
+                let sa_disabled = read_startup_approved(sa_hive, "StartupFolder", &fname)
+                    .or_else(|| read_startup_approved(sa_hive, "StartupFolder", &name_stem));
+                let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
+                let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
+                results.push(json!({
+                    "id": format!("folder|{full_path}"),
+                    "name": name_stem,
+                    "command": full_path,
+                    "source": "folder",
+                    "hive": scope,
+                    "regPath": "",
+                    "valueName": "",
+                    "valueType": "",
+                    "valueData": "",
+                    "valueDataB64": "",
+                    "valueDataArray": Vec::<String>::new(),
+                    "filePath": full_path,
+                    "taskPath": "",
+                    "taskName": "",
+                    "enabled": enabled,
+                    "location": label,
+                    "scope": scope,
+                    "disabledBy": disabled_by,
+                    "publisher": get_publisher(&resolved),
+                    "resolvedPath": resolved,
+                }));
+            }
+        }
+    }
+
+    // ---------- 计划任务（schtasks 命令） ----------
+    if let Ok(output) = std::process::Command::new("schtasks")
+        .args(["/query", "/fo", "csv", "/nh", "/v"])
+        .output()
+    {
+        if output.status.success() {
+            let csv = String::from_utf8_lossy(&output.stdout);
+            for line in csv.lines().skip(1) {
+                // CSV 字段：HostName,TaskName,Next Run Time,Status,Logon Mode,Last Run Time,Last Result,Author,Task To Run,Start In,Comment,Scheduled Task State,Idle Time,Power Management,Run As User,Delete Task If Not Rescheduled,Stop Task If Runs X Hours And X Mins,Schedule,Schedule Type,Start Time,Start Date,End Date,Days,Months,Repeat: Every,Repeat: Until: Time,Repeat: Until: Duration,Repeat: Stop If Still Running,Multiple Instances
+                let fields: Vec<&str> = line.split("\",\"").collect();
+                if fields.len() < 10 { continue; }
+                let task_name_raw = fields[1].trim_matches('"');
+                // TaskName 格式：\Path\Name
+                let task_path = match task_name_raw.rfind('\\') {
+                    Some(idx) => &task_name_raw[..=idx],
+                    None => "\\",
+                };
+                let task_name = match task_name_raw.rfind('\\') {
+                    Some(idx) => &task_name_raw[idx+1..],
+                    None => task_name_raw,
+                };
+                if task_path.starts_with("\\Microsoft\\") { continue; }
+                // Schedule Type 字段（索引 19）含 Logon/Boot
+                let schedule_type = fields.get(19).unwrap_or(&"").trim_matches('"');
+                if !schedule_type.contains("Logon") && !schedule_type.contains("Boot") && !schedule_type.contains("At log on") && !schedule_type.contains("At startup") {
+                    continue;
+                }
+                let task_to_run = fields.get(8).unwrap_or(&"").trim_matches('"');
+                let state = fields.get(11).unwrap_or(&"").trim_matches('"');
+                let enabled = state != "Disabled";
+                results.push(json!({
+                    "id": format!("task|{task_path}{task_name}"),
+                    "name": task_name,
+                    "command": task_to_run,
+                    "source": "task",
+                    "hive": "",
+                    "regPath": "",
+                    "valueName": "",
+                    "valueType": "",
+                    "valueData": "",
+                    "valueDataB64": "",
+                    "valueDataArray": Vec::<String>::new(),
+                    "filePath": "",
+                    "taskPath": task_path,
+                    "taskName": task_name,
+                    "enabled": enabled,
+                    "location": format!("计划任务{}", task_path.trim_end_matches('\\')),
+                    "scope": "HKLM",
+                    "disabledBy": if !enabled { "system" } else { "" },
+                    "publisher": "",
+                    "resolvedPath": "",
+                }));
+            }
+        }
+    }
+
+    // ---------- 合并 disabled.json ----------
+    let disabled_file = std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
+        .join("Trim").join("startup-backup").join("disabled.json");
+    if let Ok(text) = std::fs::read_to_string(&disabled_file) {
+        if let Ok(records) = serde_json::from_str::<Vec<Value>>(&text) {
+            for r in records {
+                let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
+                if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
+                let mut item = r.clone();
+                if let Some(o) = item.as_object_mut() {
+                    o.insert("enabled".into(), json!(false));
+                    o.insert("disabledBy".into(), json!("trim"));
+                }
+                results.push(item);
+            }
+        }
+    }
+
+    Ok(results)
+}

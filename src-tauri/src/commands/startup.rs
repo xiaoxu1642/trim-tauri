@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::engine::{delete_manifest, guard, log, paths, sysinfo};
+use crate::engine::{delete_manifest, guard, log, native, paths, sysinfo};
 use crate::pwsh;
 
 const PS_SCAN: &str = include_str!("../../ps/startup_scan.ps1");
@@ -181,26 +181,38 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
     }
 
     snap_set(&label, HashMap::new());
-    let out = match run_ps(PS_SCAN, Duration::from_secs(45), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
+
+    // B5 S1：原生扫描优先，失败回退 PS
+    let ps_fallback = || -> Vec<Value> {
+        let out = match run_ps(PS_SCAN, Duration::from_secs(45), None) {
+            Ok(o) => o,
+            Err(e) => {
+                log::write_log("warn", &format!("启动项扫描 PS 回退失败: {e}"));
+                return Vec::new();
+            }
+        };
+        parse_json(&out.stdout)
+            .and_then(|v| match v { Value::Array(a) => Some(a), _ => None })
+            .unwrap_or_default()
     };
-    let data: Vec<Value> = match parse_json(&out.stdout).and_then(|v| match v {
-        Value::Array(a) => Some(a),
-        _ => None,
-    }) {
-        Some(a) => a,
-        None => {
-            log::write_log("warn", "启动项扫描解析失败");
-            return json!({ "success": false, "message": "无法解析启动项数据" });
+
+    let data: Vec<Value> = match tauri::async_runtime::spawn_blocking(native::startup_scan).await {
+        Ok(Ok(items)) => items,
+        Ok(Err(e)) => {
+            let _ = log::write_log("warn", &format!("startup:scan 原生失败，回退 PS: {e}"));
+            ps_fallback()
+        }
+        Err(e) => {
+            let _ = log::write_log("warn", &format!("startup:scan 任务异常，回退 PS: {e}"));
+            ps_fallback()
         }
     };
+
     let normalized = normalize_ids(data);
     snap_set(&label, snapshot_by_id(&normalized));
     save_cache(&normalized);
     json!({ "success": true, "data": normalized })
 }
-
 /// startup:toggle（enable=true 启用 / false 禁用）
 #[tauri::command]
 pub async fn startup_toggle<R: Runtime>(
