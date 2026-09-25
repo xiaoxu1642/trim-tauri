@@ -12,26 +12,12 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::engine::{delete_manifest, guard, log, native, paths, sysinfo};
-use crate::pwsh;
-
-const PS_SCAN: &str = include_str!("../../ps/startup_scan.ps1");
-const PS_ENABLE: &str = include_str!("../../ps/startup_enable.ps1");
-const PS_DISABLE: &str = include_str!("../../ps/startup_disable.ps1");
-const PS_REMOVE: &str = include_str!("../../ps/startup_remove.ps1");
-const PS_ADD: &str = include_str!("../../ps/startup_add.ps1");
-
-/// toggle 脚本外层多包了一层数组（生成器以 toggle([[sentinel]], bool) 抽取）
-const TOGGLE_SENTINEL: &str = "[[\"__TRIM_ITEMS_JSON__\"]]";
-const ITEMS_SENTINEL: &str = "[\"__TRIM_ITEMS_JSON__\"]";
-const PATH_SENTINEL: &str = "__TRIM_STARTUP_PATH__";
-const NAME_SENTINEL: &str = "__TRIM_STARTUP_NAME__";
 
 static SNAPSHOTS: Mutex<Option<HashMap<String, HashMap<String, Value>>>> =
     Mutex::new(None);
@@ -137,32 +123,6 @@ fn needs_hklm(item: &Value) -> bool {
     ) || item.get("scope").and_then(|v| v.as_str()) == Some("HKLM")
 }
 
-fn run_ps(script: &str, timeout: Duration, diag: Option<&str>) -> Result<crate::pwsh::PsOutput, String> {
-    let path = pwsh::write_temp_script(script, ".ps1")?;
-    let r = pwsh::run_file(&path, timeout, diag);
-    let _ = std::fs::remove_file(&path);
-    r
-}
-
-fn parse_json(stdout: &str) -> Option<Value> {
-    let t = stdout.trim();
-    if t.is_empty() {
-        return None;
-    }
-    serde_json::from_str(t).ok().or_else(|| {
-        t.lines()
-            .map(|l| l.trim())
-            .filter(|l| l.starts_with('{') || l.starts_with('['))
-            .next_back()
-            .and_then(|l| serde_json::from_str(l).ok())
-    })
-}
-
-fn inject_items(template: &str, sentinel: &str, items: &[Value]) -> String {
-    let json = serde_json::to_string(items).unwrap_or_else(|_| "[]".into());
-    template.replace(sentinel, &json.replace('\'', "''"))
-}
-
 // ==================== IPC ====================
 
 /// startup:scan
@@ -182,29 +142,16 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
 
     snap_set(&label, HashMap::new());
 
-    // B5 S1：原生扫描优先，失败回退 PS
-    let ps_fallback = || -> Vec<Value> {
-        let out = match run_ps(PS_SCAN, Duration::from_secs(45), None) {
-            Ok(o) => o,
-            Err(e) => {
-                log::write_log("warn", &format!("启动项扫描 PS 回退失败: {e}"));
-                return Vec::new();
-            }
-        };
-        parse_json(&out.stdout)
-            .and_then(|v| match v { Value::Array(a) => Some(a), _ => None })
-            .unwrap_or_default()
-    };
-
+    // S3：纯 Rust 原生
     let data: Vec<Value> = match tauri::async_runtime::spawn_blocking(native::startup_scan).await {
         Ok(Ok(items)) => items,
         Ok(Err(e)) => {
-            let _ = log::write_log("warn", &format!("startup:scan 原生失败，回退 PS: {e}"));
-            ps_fallback()
+            log::write_log("warn", &format!("startup:scan 原生失败: {e}"));
+            Vec::new()
         }
         Err(e) => {
-            let _ = log::write_log("warn", &format!("startup:scan 任务异常，回退 PS: {e}"));
-            ps_fallback()
+            log::write_log("warn", &format!("startup:scan 任务异常: {e}"));
+            Vec::new()
         }
     };
 
@@ -241,28 +188,13 @@ pub async fn startup_toggle<R: Runtime>(
     }
     let enable = enable.unwrap_or(true);
 
-    // B5 S2：默认原生，TRIM_LEGACY_STARTUP=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_STARTUP").map(|v| v == "1").unwrap_or(false);
-    let data = if legacy {
-        let template = if enable { PS_ENABLE } else { PS_DISABLE };
-        let script = inject_items(template, TOGGLE_SENTINEL, &safe);
-        log::write_log("info", &format!("启动项{} {} 项（PS 回退）", if enable { "启用" } else { "禁用" }, safe.len()));
-        let out = match run_ps(&script, Duration::from_secs(60), Some("startup.toggle")) {
-            Ok(o) => o,
-            Err(e) => return json!({ "success": false, "message": e }),
-        };
-        match parse_json(&out.stdout) {
-            Some(d) => d,
-            None => return json!({ "success": false, "message": "无法解析执行结果" }),
+    // S3：纯 Rust 原生
+    let data = match crate::engine::native::startup_toggle(&safe, enable) {
+        Ok(d) => {
+            log::write_log("info", &format!("启动项{}原生完成 {} 项", if enable { "启用" } else { "禁用" }, safe.len()));
+            d
         }
-    } else {
-        match crate::engine::native::startup_toggle(&safe, enable) {
-            Ok(d) => {
-                log::write_log("info", &format!("启动项{}原生完成 {} 项", if enable { "启用" } else { "禁用" }, safe.len()));
-                d
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生执行失败（设 TRIM_LEGACY_STARTUP=1 可回退 PS）: {e}") }),
-        }
+        Err(e) => return json!({ "success": false, "message": format!("原生执行失败: {e}") }),
     };
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
     json!({ "success": failed == 0, "data": data })
@@ -296,26 +228,13 @@ pub async fn startup_delete<R: Runtime>(
 
     log::write_log("info", &format!("启动项删除 {} 项", safe.len()));
 
-    // B5 S2：默认原生，TRIM_LEGACY_STARTUP=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_STARTUP").map(|v| v == "1").unwrap_or(false);
-    let mut data = if legacy {
-        let script = inject_items(PS_REMOVE, ITEMS_SENTINEL, &safe);
-        let out = match run_ps(&script, Duration::from_secs(60), Some("startup.delete")) {
-            Ok(o) => o,
-            Err(e) => return json!({ "success": false, "message": e }),
-        };
-        match parse_json(&out.stdout) {
-            Some(d) => d,
-            None => return json!({ "success": false, "message": "无法解析执行结果" }),
+    // S3：纯 Rust 原生
+    let mut data = match crate::engine::native::startup_delete(&safe) {
+        Ok(d) => {
+            log::write_log("info", "启动项删除原生完成");
+            d
         }
-    } else {
-        match crate::engine::native::startup_delete(&safe) {
-            Ok(d) => {
-                log::write_log("info", "启动项删除原生完成");
-                d
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生删除失败（设 TRIM_LEGACY_STARTUP=1 可回退 PS）: {e}") }),
-        }
+        Err(e) => return json!({ "success": false, "message": format!("原生删除失败: {e}") }),
     };
 
     // 文件类删除：白名单 containment 校验后回收站删除
@@ -482,45 +401,21 @@ pub async fn startup_add<R: Runtime>(window: WebviewWindow<R>) -> Value {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    // S1：原生优先，失败自动回退 PS
-    // B5 S2：默认原生，TRIM_LEGACY_STARTUP=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_STARTUP").map(|v| v == "1").unwrap_or(false);
-    if !legacy {
-        match crate::engine::native::startup_add(&file_path_str, &name) {
-            Ok(None) => {
-                log::write_log("info", &format!("添加启动项（原生）: {file_path_str}"));
-                return json!({ "success": true, "path": file_path_str, "name": name });
-            }
-            Ok(Some(existing)) => {
-                log::write_log("warn", &format!("添加启动项冲突: {name} 已存在，未重复添加（{existing}）"));
-                return json!({
-                    "success": false, "exists": true, "name": name,
-                    "message": "同名的开机启动项已存在，未重复添加"
-                });
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生添加失败（设 TRIM_LEGACY_STARTUP=1 可回退 PS）: {e}") }),
+    // S3：纯 Rust 原生
+    match crate::engine::native::startup_add(&file_path_str, &name) {
+        Ok(None) => {
+            log::write_log("info", &format!("添加启动项（原生）: {file_path_str}"));
+            json!({ "success": true, "path": file_path_str, "name": name })
         }
+        Ok(Some(existing)) => {
+            log::write_log("warn", &format!("添加启动项冲突: {name} 已存在，未重复添加（{existing}）"));
+            json!({
+                "success": false, "exists": true, "name": name,
+                "message": "同名的开机启动项已存在，未重复添加"
+            })
+        }
+        Err(e) => json!({ "success": false, "message": format!("原生添加失败: {e}") }),
     }
-    let script = PS_ADD
-        .replace(PATH_SENTINEL, &file_path_str.replace('\'', "''"))
-        .replace(NAME_SENTINEL, &name.replace('\'', "''"));
-    let out = match run_ps(&script, Duration::from_secs(20), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.code != 0 {
-        return json!({ "success": false, "message": if out.stderr.trim().is_empty() { "写入注册表失败".into() } else { out.stderr } });
-    }
-    let text = out.stdout.trim();
-    if let Some(existing) = text.strip_prefix("EXISTS:") {
-        log::write_log("warn", &format!("添加启动项冲突: {name} 已存在，未重复添加（{existing}）"));
-        return json!({
-            "success": false, "exists": true, "name": name,
-            "message": "同名的开机启动项已存在，未重复添加"
-        });
-    }
-    log::write_log("info", &format!("添加启动项: {file_path_str}"));
-    json!({ "success": true, "path": file_path_str, "name": name })
 }
 
 #[cfg(test)]

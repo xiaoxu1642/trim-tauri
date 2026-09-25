@@ -7,13 +7,11 @@
 //! app-icon/file-icon（Shell 图标提取）；C 批追补 `paths:scan`
 //! （PS 扫描 + 当前生效规则库注入，超时 120s，结果即时落盘并统一写 scannedAt）。
 
-use std::time::Duration;
 
 use tauri::WebviewWindow;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::engine::{guard, log, paths};
-use crate::pwsh;
 use crate::security;
 
 /// 可写 key 白名单（与渲染层 GROUPS 同源）
@@ -147,24 +145,9 @@ pub async fn paths_app_icon<R: tauri::Runtime>(
 
 // ==================== paths:scan（C 批追补） ====================
 
-/// 外置 PS 模板（源 `src/scripts-powershell/pathscan-scripts.js` → `scan(哨兵)`，
-/// 由 `tools/sync-ps-from-js.mjs` 生成；**禁止手写/手改 PS 文本**）。
-/// 哨兵 `__TRIM_RULES_JSON__` 出现在 `$rulesJson = '...'` 的单引号内，
-/// 运行前替换为真实规则库 JSON（按 JS `psEscapeSingle` 同口径转义）。
-const PATHS_SCAN_PS: &str = include_str!("../../ps/paths_scan.ps1");
-/// 规则库 JSON 哨兵（见 tools/ps-map/paths.mjs）
-const RULES_SENTINEL: &str = "__TRIM_RULES_JSON__";
-/// 扫描超时（与 Electron 同值 120s）
-const SCAN_TIMEOUT_SECS: u64 = 120;
-
 /// 需加入 lib.rs `generate_handler!` 的完整行（A 批 6 条见各自实现，本条为 C 批追补）：
 ///   commands::paths::paths_scan,
 ///
-/// JS `psEscapeSingle`：单引号加倍（PowerShell 单引号字符串的唯一转义规则）
-fn ps_escape_single(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
 /// paths:scan — 自动扫描安装路径（注入当前生效规则库）
 #[tauri::command]
 pub async fn paths_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
@@ -192,52 +175,17 @@ fn scan_install_paths() -> serde_json::Value {
         }
     };
 
-    // B9 S2：默认原生，TRIM_LEGACY_PATHS=1 回退 PS
-    let legacy = std::env::var("TRIM_LEGACY_PATHS").map(|v| v == "1").unwrap_or(false);
-    let mut data: serde_json::Value = if legacy {
-        let script_text = PATHS_SCAN_PS.replace(RULES_SENTINEL, &ps_escape_single(&rules_json));
-        if script_text.contains(RULES_SENTINEL) {
-            log::write_log("error", "路径扫描脚本哨兵替换失败，已拒绝执行（模板与注入口径不一致）");
-            return serde_json::json!({ "success": false, "message": "扫描失败", "data": {} });
+    // S3：纯 Rust 原生
+    let mut data: serde_json::Value = match crate::engine::native::paths_scan(&rules_json) {
+        Ok(d) => {
+            log::write_log("info", "安装路径原生扫描完成");
+            d
         }
-        let script = match pwsh::write_temp_script(&script_text, ".ps1") {
-            Ok(p) => p,
-            Err(e) => {
-                log::write_log("error", &format!("路径扫描失败: {e}"));
-                return serde_json::json!({ "success": false, "message": e, "data": {} });
-            }
-        };
-        log::write_log("info", "开始扫描安装路径");
-        let result = pwsh::run_file(&script, Duration::from_secs(SCAN_TIMEOUT_SECS), Some("paths:scan"));
-        let _ = std::fs::remove_file(&script);
-        let out = match result {
-            Ok(o) => o,
-            Err(e) => {
-                log::write_log("error", &format!("路径扫描失败: {e}"));
-                return serde_json::json!({ "success": false, "message": e, "data": {} });
-            }
-        };
-        if out.code != 0 {
-            let message = if out.stderr.trim().is_empty() { "扫描失败".to_string() } else { out.stderr.trim().to_string() };
-            log::write_log("error", &format!("路径扫描失败: {message}"));
-            return serde_json::json!({ "success": false, "message": message, "data": {} });
-        }
-        match serde_json::from_str(out.stdout.trim()) {
-            Ok(v) => v,
-            Err(_) => return serde_json::json!({ "success": false, "message": "解析结果失败", "raw": out.stdout }),
-        }
-    } else {
-        match crate::engine::native::paths_scan(&rules_json) {
-            Ok(d) => {
-                log::write_log("info", "安装路径原生扫描完成");
-                d
-            }
-            Err(e) => return serde_json::json!({
-                "success": false,
-                "message": format!("原生扫描失败（设 TRIM_LEGACY_PATHS=1 可回退 PS）: {e}"),
-                "data": {}
-            }),
-        }
+        Err(e) => return serde_json::json!({
+            "success": false,
+            "message": format!("原生扫描失败: {e}"),
+            "data": {}
+        }),
     };
     // 标准化：去除首尾空白与包裹引号（注册表 InstallLocation 常带引号）
     if let Some(map) = data.as_object_mut() {

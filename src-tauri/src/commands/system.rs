@@ -3,17 +3,13 @@
 //! 供「电脑优化中心」与「磁盘清理」按硬件显隐预读相关选项：判定失败一律返回
 //! success:false，渲染层按 unknown 处理（两边都不隐藏）——绝不让探测失败
 //! 反而藏掉用户要用的选项。系统盘介质不会变化，进程内缓存一次即可。
+//! S3：已删除 PS 回退，纯 Rust 原生实现。
 
 use std::sync::Mutex;
-use std::time::Duration;
 
 use tauri::WebviewWindow;
 
 use crate::engine::guard;
-use crate::pwsh;
-
-/// PS 脚本编译期嵌入（源：src/scripts-powershell/sysdisk-scripts.js，逐字搬运）
-const SYSDISK_PS: &str = include_str!("../../ps/sysdisk.ps1");
 
 static CACHE: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 
@@ -30,27 +26,10 @@ pub async fn system_disk_type<R: tauri::Runtime>(
         }
     }
     let result = tauri::async_runtime::spawn_blocking(|| {
-        // B10 S2：默认原生，TRIM_LEGACY_SYSDISK=1 回退 PS
-        let legacy = std::env::var("TRIM_LEGACY_SYSDISK").map(|v| v == "1").unwrap_or(false);
-        if !legacy {
-            match crate::engine::native::sysdisk() {
-                Ok(data) => return Ok(data),
-                Err(e) => return Err(format!("原生探测失败（设 TRIM_LEGACY_SYSDISK=1 可回退 PS）: {e}")),
-            }
+        match crate::engine::native::sysdisk() {
+            Ok(data) => Ok(data),
+            Err(e) => Err(format!("原生探测失败: {e}")),
         }
-        let script = pwsh::write_temp_script(SYSDISK_PS, ".ps1")?;
-        let out = pwsh::run_file(&script, Duration::from_secs(30), Some("system:disk-type"));
-        let _ = std::fs::remove_file(&script);
-        let out = out?;
-        if out.code != 0 {
-            return Err(if out.stderr.trim().is_empty() {
-                "系统盘介质探测失败".into()
-            } else {
-                out.stderr.trim().to_string()
-            });
-        }
-        serde_json::from_str::<serde_json::Value>(out.stdout.trim())
-            .map_err(|e| format!("系统盘介质解析失败: {e}"))
     })
     .await;
 

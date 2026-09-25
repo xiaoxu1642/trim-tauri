@@ -16,17 +16,10 @@ use tauri::window::Color;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::engine::{guard, log, native, paths};
-use crate::pwsh;
 
 const LABEL: &str = "peripheral";
 const PAGE: &str = "peripheral-window.html";
 const TITLE: &str = "外设优化";
-
-const PS_QUERY: &str = include_str!("../../ps/peripheral_query.ps1");
-const PS_APPLY: &str = include_str!("../../ps/peripheral_apply.ps1");
-const PS_RESTORE: &str = include_str!("../../ps/peripheral_restore.ps1");
-
-const APPLY_SENTINEL: &str = "{\"__trim_sentinel__\":true}";
 
 /// PE-3：主进程唯一权威合法值集合
 const ALLOWED_WIN32: &[i64] = &[2, 26, 36, 38, 40];
@@ -92,47 +85,15 @@ pub fn peripheral_close_window<R: tauri::Runtime>(window: WebviewWindow<R>) -> R
     Ok(json!({ "success": true }))
 }
 
-fn run_ps(script: &str, timeout_secs: u64) -> Option<crate::pwsh::PsOutput> {
-    let path = pwsh::write_temp_script(script, ".ps1").ok()?;
-    let out = pwsh::run_file(&path, std::time::Duration::from_secs(timeout_secs), None);
-    let _ = std::fs::remove_file(&path);
-    out.ok()
-}
-
-fn find_prefixed<'a>(stdout: &'a str, prefix: &str) -> Option<&'a str> {
-    stdout
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .find(|l| l.starts_with(prefix))
-        .map(|l| &l[prefix.len()..])
-}
-
 /// peripheral:query —— 读三组当前值
 ///
-/// B3 S2：默认只走 Rust 原生；设 `TRIM_LEGACY_PERIPHERAL=1` 可回退 PS（隐藏诊断开关）。
+/// S3：纯 Rust 原生，无 PS 回退。
 #[tauri::command]
 pub async fn peripheral_query<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    let legacy = std::env::var("TRIM_LEGACY_PERIPHERAL").map(|v| v == "1").unwrap_or(false);
-    if legacy {
-        let Some(out) = run_ps(PS_QUERY, 20) else {
-            return Ok(json!({ "success": false, "message": "读取当前外设设置失败" }));
-        };
-        if out.code != 0 {
-            return Ok(json!({ "success": false, "message": if out.stderr.trim().is_empty() { "读取当前外设设置失败".to_string() } else { out.stderr.trim().to_string() } }));
-        }
-        let Some(payload) = find_prefixed(&out.stdout, "@@PERIPHERAL@@") else {
-            return Ok(json!({ "success": false, "message": "读取当前外设设置失败" }));
-        };
-        return Ok(match serde_json::from_str::<Value>(payload) {
-            Ok(data) => json!({ "success": true, "data": data, "engine": "powershell" }),
-            Err(_) => json!({ "success": false, "message": "解析外设设置失败" }),
-        });
-    }
     match tauri::async_runtime::spawn_blocking(native::peripheral_query).await {
         Ok(Ok(data)) => Ok(json!({ "success": true, "data": data, "engine": "rust" })),
-        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生读取失败（设 TRIM_LEGACY_PERIPHERAL=1 可回退 PS）: {e}") })),
+        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生读取失败: {e}") })),
         Err(e) => Ok(json!({ "success": false, "message": format!("读取任务异常: {e}") })),
     }
 }
@@ -198,34 +159,19 @@ pub async fn peripheral_apply<R: tauri::Runtime>(
 
     let payload = Value::Object(filtered).to_string();
 
-    // S1：原生优先，失败自动回退 PS
+    // S3：纯 Rust 原生
     let opts_val: Value = serde_json::from_str(&payload).unwrap_or(json!({}));
     match crate::engine::native::peripheral_apply(&opts_val) {
         Ok(()) => {
             log::write_log("info", "外设优化应用原生完成");
             prune_backups(10);
-            return Ok(json!({ "success": true, "message": "完成" }));
+            Ok(json!({ "success": true, "message": "完成" }))
         }
         Err(e) => {
-            log::write_log("warn", &format!("外设优化应用原生失败，回退 PS: {e}"));
+            log::write_log("warn", &format!("外设优化应用原生失败: {e}"));
+            Ok(json!({ "success": false, "message": format!("写入注册表失败: {e}") }))
         }
     }
-    let script = PS_APPLY.replace(APPLY_SENTINEL, &payload);
-    let Some(out) = run_ps(&script, 30) else {
-        return Ok(json!({ "success": false, "message": "执行异常" }));
-    };
-    if out.code != 0 {
-        log::write_log(
-            "warn",
-            &format!("外设优化应用失败 exit={}: {}", out.code, out.stderr.trim()),
-        );
-        return Ok(json!({
-            "success": false,
-            "message": "写入注册表失败，可能需要管理员权限"
-        }));
-    }
-    prune_backups(10);
-    Ok(json!({ "success": true, "message": "完成" }))
 }
 
 /// null/空串 → None（跳过）；整数 → Some；非整数 → 视为非法（给 0 以落进白名单不命中）
@@ -307,27 +253,15 @@ pub async fn peripheral_restore_backup<R: tauri::Runtime>(
             "message": "外设优化需要管理员权限，请先提权"
         }));
     }
-    // S1：原生优先，失败自动回退 PS
+    // S3：纯 Rust 原生
     let v = match crate::engine::native::peripheral_restore() {
         Ok(v) => {
             log::write_log("info", "外设恢复原生完成");
             v
         }
         Err(e) => {
-            log::write_log("warn", &format!("外设恢复原生失败，回退 PS: {e}"));
-            let Some(out) = run_ps(PS_RESTORE, 30) else {
-                return Ok(json!({ "success": false, "message": "还原备份失败" }));
-            };
-            if out.code != 0 {
-                return Ok(json!({ "success": false, "message": "还原备份失败（reg import 返回非零）" }));
-            }
-            let Some(payload) = find_prefixed(&out.stdout, "@@PERIPHERAL_RESTORE@@") else {
-                return Ok(json!({ "success": false, "message": "还原备份失败：无有效结果" }));
-            };
-            match serde_json::from_str::<Value>(payload) {
-                Ok(v) => v,
-                Err(_) => return Ok(json!({ "success": false, "message": "还原备份失败" })),
-            }
+            log::write_log("warn", &format!("外设恢复原生失败: {e}"));
+            return Ok(json!({ "success": false, "message": format!("还原备份失败: {e}") }));
         }
     };
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {

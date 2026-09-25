@@ -9,18 +9,12 @@
 //!   会在系统恶化时误报，故加 TTL 到期自动重扫）。
 
 use std::sync::Mutex;
-use std::time::Duration;
 
 use serde_json::Value;
 use tauri::WebviewWindow;
 
 use crate::engine::{guard, paths};
-use crate::pwsh;
 use crate::security;
-
-/// PS 脚本编译期嵌入（源：src/scripts-powershell/overview-scripts.js，逐字搬运）
-const OVERVIEW_METRICS_PS: &str = include_str!("../../ps/overview_metrics.ps1");
-const OVERVIEW_CHECKUP_PS: &str = include_str!("../../ps/overview_checkup.ps1");
 
 /// metrics 结果缓存与串行锁
 static METRICS_CACHE: Mutex<Option<(i64, Value)>> = Mutex::new(None);
@@ -32,21 +26,6 @@ const METRICS_CACHE_TTL_MS: i64 = 2500;
 static CPU_PREV: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 const CHECKUP_CACHE_TTL_MS: i64 = 30 * 60 * 1000;
-
-fn ps_json(script: &'static str, timeout_secs: u64, op: &str) -> Result<Value, String> {
-    let path = pwsh::write_temp_script(script, ".ps1")?;
-    let out = pwsh::run_file(&path, Duration::from_secs(timeout_secs), Some(op));
-    let _ = std::fs::remove_file(&path);
-    let out = out?;
-    if out.code != 0 {
-        return Err(if out.stderr.trim().is_empty() {
-            format!("{op} 执行失败")
-        } else {
-            out.stderr.trim().to_string()
-        });
-    }
-    serde_json::from_str(out.stdout.trim()).map_err(|e| format!("{op} 结果解析失败: {e}"))
-}
 
 /// 由原始计数差分出 CPU 百分比（对照 main.js cpuPercentFromRaw）
 fn cpu_percent_from_raw(raw: Option<&Value>) -> Option<f64> {
@@ -86,10 +65,9 @@ fn collect_metrics_native() -> Result<Value, String> {
     Ok(data)
 }
 
-/// overview:metrics — 实时系统指标（S2 NativeOnly）
+/// overview:metrics — 实时系统指标
 ///
-/// 默认只走 Rust 原生引擎；仅当环境变量 `TRIM_LEGACY_OVERVIEW=1` 时
-/// 才回退到 PowerShell（隐藏诊断开关，不暴露给用户）。
+/// S3：纯 Rust 原生，无 PS 回退。
 #[tauri::command]
 pub async fn overview_metrics<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
@@ -98,17 +76,12 @@ pub async fn overview_metrics<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
             return Ok(serde_json::json!({ "success": true, "data": data, "cached": true }));
         }
     }
-    let legacy = std::env::var("TRIM_LEGACY_OVERVIEW").map(|v| v == "1").unwrap_or(false);
     let result = tauri::async_runtime::spawn_blocking(move || {
         // 串行化：重叠请求在此排队，保证任一时刻只有一次采集在跑
         let _serialize = METRICS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if legacy {
-            let data = ps_json(OVERVIEW_METRICS_PS, 60, "overview:metrics")?;
-            return Ok((data, "powershell"));
-        }
         match collect_metrics_native() {
             Ok(data) => Ok((data, "rust")),
-            Err(e) => Err(format!("原生采集失败（设 TRIM_LEGACY_OVERVIEW=1 可回退 PS）: {e}")),
+            Err(e) => Err(format!("原生采集失败: {e}")),
         }
     })
     .await;
@@ -196,15 +169,10 @@ pub async fn overview_checkup<R: tauri::Runtime>(
         }
     }
     let result = tauri::async_runtime::spawn_blocking(|| {
-        // B10 S2：默认原生，TRIM_LEGACY_OVERVIEW=1 回退 PS
-        let legacy = std::env::var("TRIM_LEGACY_OVERVIEW").map(|v| v == "1").unwrap_or(false);
-        if !legacy {
-            match crate::engine::native::overview_checkup() {
-                Ok(data) => return Ok(data),
-                Err(e) => return Err(format!("原生体检失败（设 TRIM_LEGACY_OVERVIEW=1 可回退 PS）: {e}")),
-            }
+        match crate::engine::native::overview_checkup() {
+            Ok(data) => Ok(data),
+            Err(e) => Err(format!("原生体检失败: {e}")),
         }
-        ps_json(OVERVIEW_CHECKUP_PS, 90, "overview:checkup")
     })
     .await;
     match result {
