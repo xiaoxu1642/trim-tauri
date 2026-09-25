@@ -151,6 +151,77 @@ fn build_script(steps: &[Value]) -> String {
     l.join("\n")
 }
 
+/// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）
+///
+/// 支持 reg/cmd/service 三种 step 类型；pwsh 类型返回 Err 触发 PS 回退。
+/// 实时推送 optimizer:progress 事件，返回 failed_steps。
+fn native_execute_steps<R: tauri::Runtime>(
+    window: &WebviewWindow<R>,
+    steps: &[Value],
+    option_id: &str,
+) -> Result<i64, String> {
+    let total = steps.len();
+    let mut failed = 0i64;
+    let tmp_dir = match crate::engine::paths::temp_script_dir() { Ok(d) => d, Err(_) => std::env::temp_dir() };
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    for (i, s) in steps.iter().enumerate() {
+        let pct = (((i + 1) as f64 / total as f64) * 100.0).round() as u32;
+        let label = s.get("label").and_then(|v| v.as_str()).unwrap_or("");
+
+        if let Some(reg) = s.get("reg").and_then(|v| v.as_str()) {
+            // reg 类型：写 .reg 临时文件 + reg.exe import
+            let reg_path = tmp_dir.join(format!("wcopt_{}.reg", crate::engine::now_ms()));
+            if std::fs::write(&reg_path, reg.as_bytes()).is_err() {
+                failed += 1;
+            } else {
+                let ok = match std::process::Command::new("reg.exe")
+                    .args(["import", reg_path.to_str().unwrap()])
+                    .output()
+                {
+                    Ok(o) => o.status.success(),
+                    Err(_) => false,
+                };
+                let _ = std::fs::remove_file(&reg_path);
+                if !ok { failed += 1; }
+            }
+        } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
+            // cmd 类型：spawn cmd /c
+            let ok = match std::process::Command::new("cmd")
+                .args(["/c", cmd])
+                .output()
+            {
+                Ok(o) => o.status.success(),
+                Err(_) => false,
+            };
+            if !ok { failed += 1; }
+        } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
+            // service 类型：sc stop + 可选 sc config disabled
+            let _ = std::process::Command::new("sc").args(["stop", service]).output();
+            if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let _ = std::process::Command::new("sc").args(["config", service, "start=", "disabled"]).output();
+            }
+            // 检查服务是否存在
+            let exists = match std::process::Command::new("sc").args(["query", service]).output() {
+                Ok(o) => o.status.success(),
+                Err(_) => false,
+            };
+            if !exists { failed += 1; }
+        } else if s.get("pwsh").is_some() {
+            // pwsh 类型：原生不支持，回退 PS
+            return Err("pwsh step 需 PS 回退".into());
+        }
+
+        // 推送进度
+        let _ = window.emit(
+            "optimizer:progress",
+            json!({ "optionId": option_id, "percent": pct }),
+        );
+        let _ = label; // label 用于日志，暂不记录
+    }
+    Ok(failed)
+}
+
 // ==================== 动态步骤 ====================
 
 fn memory_steps(gb: &Value) -> Vec<Value> {
@@ -676,11 +747,23 @@ pub async fn optimizer_run<R: Runtime>(
     let progress_id = option_id.clone();
     // u32::MAX 作初值：脚本第一行哪怕是 0% 也与初值不同，必定发出
     let last_pct = std::cell::Cell::new(u32::MAX);
-    let run = pwsh::run_file_streaming(
-        &path,
-        std::time::Duration::from_secs(timeout),
-        Some("optimizer.apply"),
-        move |line| {
+    // S1：原生优先，pwsh 类型或失败回退 PS
+    let native_out: Option<pwsh::PsOutput> = match native_execute_steps(&window, &steps, &option_id) {
+        Ok(failed_steps) => {
+            let stdout = format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n");
+            let code = if failed_steps == 0 { 0 } else { 1 };
+            Some(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false })
+        }
+        Err(_) => None,
+    };
+    let run: Result<pwsh::PsOutput, String> = if let Some(out) = native_out {
+        Ok(out)
+    } else {
+        pwsh::run_file_streaming(
+            &path,
+            std::time::Duration::from_secs(timeout),
+            Some("optimizer.apply"),
+            move |line| {
             let Some(pct) = line
                 .trim()
                 .strip_prefix("@@PROGRESS:")
@@ -696,8 +779,8 @@ pub async fn optimizer_run<R: Runtime>(
                     json!({ "optionId": progress_id, "percent": p }),
                 );
             }
-        },
-    );
+        })
+    };
     let _ = std::fs::remove_file(&path);
     let Ok(out) = run else {
         let e = run.err().unwrap_or_else(|| "执行异常".into());
