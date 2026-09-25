@@ -4680,3 +4680,105 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
 
     Ok((success, message))
 }
+// ==================== B8 netcheck_repair：网络修复 ====================
+
+/// 网络检测修复（对应 netcheck_repair_*.ps1，S1）
+///
+/// 6 个修复动作：enable-adapter / reset-dns / start-dhcp / start-dnscache /
+/// disable-user-proxy / reset-winhttp。
+/// 返回 {ok, message}。
+pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String> {
+    match action_id {
+        "enable-adapter" => {
+            let name = repair.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.trim().is_empty() {
+                return Ok(json!({"ok": false, "message": "缺少网卡名"}));
+            }
+            let out = std::process::Command::new("netsh")
+                .args(["interface", "set", "interface", &format!("name={name}"), "admin=enabled"])
+                .output()
+                .map_err(|e| format!("netsh 执行失败: {e}"))?;
+            if out.status.success() {
+                Ok(json!({"ok": true, "message": "网卡已启用"}))
+            } else {
+                Ok(json!({"ok": false, "message": "网卡启用失败"}))
+            }
+        }
+        "reset-dns" => {
+            // 优先用接口名，没有则用索引
+            let name = repair.get("name").and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    repair.get("interfaceIndex")
+                        .and_then(|v| v.as_i64())
+                        .map(|i| i.to_string())
+                        .unwrap_or_default()
+                });
+            if name.is_empty() {
+                return Ok(json!({"ok": false, "message": "缺少接口标识"}));
+            }
+            let out = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "dnsservers", &format!("name={name}"), "source=dhcp"])
+                .output()
+                .map_err(|e| format!("netsh 执行失败: {e}"))?;
+            if out.status.success() {
+                Ok(json!({"ok": true, "message": "DNS 已重置为自动获取"}))
+            } else {
+                Ok(json!({"ok": false, "message": "DNS 重置失败"}))
+            }
+        }
+        "start-dhcp" => {
+            let out = std::process::Command::new("sc")
+                .args(["start", "Dhcp"])
+                .output()
+                .map_err(|e| format!("sc 执行失败: {e}"))?;
+            if out.status.success() {
+                Ok(json!({"ok": true, "message": "DHCP 服务已启动"}))
+            } else {
+                Ok(json!({"ok": false, "message": "DHCP 服务启动失败"}))
+            }
+        }
+        "start-dnscache" => {
+            let out = std::process::Command::new("sc")
+                .args(["start", "Dnscache"])
+                .output()
+                .map_err(|e| format!("sc 执行失败: {e}"))?;
+            if out.status.success() {
+                Ok(json!({"ok": true, "message": "DNS 缓存服务已启动"}))
+            } else {
+                Ok(json!({"ok": false, "message": "DNS 缓存服务启动失败"}))
+            }
+        }
+        "disable-user-proxy" => {
+            unsafe {
+                let key = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+                let sk = to_wide(key);
+                let mut hk = HKEY::default();
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_err() {
+                    return Ok(json!({"ok": false, "message": "无法打开代理设置键"}));
+                }
+                let nm = to_wide("ProxyEnable");
+                let val = 0u32;
+                let r = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes()));
+                let _ = RegCloseKey(hk);
+                if r.is_ok() {
+                    Ok(json!({"ok": true, "message": "用户代理已禁用"}))
+                } else {
+                    Ok(json!({"ok": false, "message": "禁用用户代理失败"}))
+                }
+            }
+        }
+        "reset-winhttp" => {
+            let out = std::process::Command::new("netsh")
+                .args(["winhttp", "reset", "proxy"])
+                .output()
+                .map_err(|e| format!("netsh 执行失败: {e}"))?;
+            if out.status.success() {
+                Ok(json!({"ok": true, "message": "WinHTTP 代理已重置"}))
+            } else {
+                Ok(json!({"ok": false, "message": "WinHTTP 代理重置失败"}))
+            }
+        }
+        _ => Err(format!("未知的修复动作: {action_id}")),
+    }
+}

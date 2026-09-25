@@ -197,29 +197,24 @@ pub async fn netcheck_collect<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
 }
 
 /// 修复主体（阻塞线程内执行；netcheck 无进度事件，无需 window 句柄）
-fn do_repair(action_id: &str, repair: &Value, label: &str) -> Value {
+
+fn repair_via_ps(action_id: &str, repair: &Value) -> Value {
     let script = match build_repair_script(action_id, repair) {
         Ok(s) => s,
-        Err(e) => return json!({ "success": false, "message": e }),
+        Err(e) => return json!({ "ok": false, "message": e }),
     };
-    log::flush_sync(); // 危险操作前刷盘：修复会改服务/网卡/代理配置
-
     let path = match pwsh::write_temp_script(&script, ".ps1") {
         Ok(p) => p,
-        Err(e) => return json!({ "success": false, "message": e }),
+        Err(e) => return json!({ "ok": false, "message": e }),
     };
-    log::write_log("info", &format!("网络检测修复开始: {action_id}"));
     let diag_op = format!("netcheck.repair.{action_id}");
     let out = pwsh::run_file(&path, Duration::from_secs(60), Some(&diag_op));
     let _ = std::fs::remove_file(&path);
     let out = match out {
         Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
+        Err(e) => return json!({ "ok": false, "message": e }),
     };
-
-    // 取最后一行以 { 开头的输出作为修复结果
-    let fix = out
-        .stdout
+    out.stdout
         .trim()
         .split('\n')
         .filter(|l| l.trim().starts_with('{'))
@@ -230,7 +225,28 @@ fn do_repair(action_id: &str, repair: &Value, label: &str) -> Value {
                 "ok": false,
                 "message": if out.stderr.trim().is_empty() { "修复无输出" } else { out.stderr.trim() }
             })
-        });
+        })
+}
+
+fn do_repair(action_id: &str, repair: &Value, label: &str) -> Value {
+    log::flush_sync(); // 危险操作前刷盘：修复会改服务/网卡/代理配置
+    log::write_log("info", &format!("网络检测修复开始: {action_id}"));
+
+    // S1：原生优先，失败自动回退 PS
+    let fix = match crate::engine::native::netcheck_repair(action_id, repair) {
+        Ok(f) => {
+            if f.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                f
+            } else {
+                log::write_log("warn", &format!("网络修复原生失败，回退 PS: {}", f.get("message").and_then(|v| v.as_str()).unwrap_or("")));
+                repair_via_ps(action_id, repair)
+            }
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("网络修复原生异常，回退 PS: {e}"));
+            repair_via_ps(action_id, repair)
+        }
+    };
     let fix_ok = fix.get("ok").and_then(|v| v.as_bool()) == Some(true);
 
     // 修复后自动重跑检测（整页快照刷新，其余项也随之更新）
