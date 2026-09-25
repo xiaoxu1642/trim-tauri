@@ -4009,3 +4009,40 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
 
     Ok(json!({"success": success, "failed": failed, "results": results, "fsDelete": fs_delete}))
 }
+// ==================== B5 startup_add：新增启动项 ====================
+
+/// 新增启动项（对应 startup_add.ps1，S1）
+///
+/// 写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run，值为带引号的路径。
+/// 冲突检查：已存在同名启动项时返回原值，不覆盖。
+/// 返回 Ok(None) 表示成功，Ok(Some(existing_value)) 表示冲突。
+pub fn startup_add(path: &str, name: &str) -> Result<Option<String>, String> {
+    unsafe {
+        let key = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let sk = to_wide(key);
+        let mut hk = HKEY::default();
+        let mut disp = REG_CREATED_NEW_KEY;
+        if RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), None, PCWSTR::default(),
+            REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+            return Err("无法打开 Run 键".into());
+        }
+        // 冲突检查
+        let nm = to_wide(name);
+        if let Some(existing) = reg_read_string(hk, name) {
+            if !existing.is_empty() {
+                let _ = RegCloseKey(hk);
+                return Ok(Some(existing));
+            }
+        }
+        // 写入带引号的路径
+        let value = format!("\"{path}\"");
+        let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        let bytes: Vec<u8> = wide.iter().flat_map(|w| w.to_le_bytes()).collect();
+        if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_SZ, Some(&bytes)).is_err() {
+            let _ = RegCloseKey(hk);
+            return Err("写入注册表失败".into());
+        }
+        let _ = RegCloseKey(hk);
+        Ok(None)
+    }
+}

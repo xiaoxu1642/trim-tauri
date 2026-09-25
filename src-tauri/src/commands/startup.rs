@@ -478,6 +478,23 @@ pub async fn startup_add<R: Runtime>(window: WebviewWindow<R>) -> Value {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    // S1：原生优先，失败自动回退 PS
+    match crate::engine::native::startup_add(&file_path_str, &name) {
+        Ok(None) => {
+            log::write_log("info", &format!("添加启动项（原生）: {file_path_str}"));
+            return json!({ "success": true, "path": file_path_str, "name": name });
+        }
+        Ok(Some(existing)) => {
+            log::write_log("warn", &format!("添加启动项冲突: {name} 已存在，未重复添加（{existing}）"));
+            return json!({
+                "success": false, "exists": true, "name": name,
+                "message": "同名的开机启动项已存在，未重复添加"
+            });
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("添加启动项原生失败，回退 PS: {e}"));
+        }
+    }
     let script = PS_ADD
         .replace(PATH_SENTINEL, &file_path_str.replace('\'', "''"))
         .replace(NAME_SENTINEL, &name.replace('\'', "''"));
