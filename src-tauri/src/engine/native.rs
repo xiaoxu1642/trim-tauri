@@ -4156,3 +4156,133 @@ pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
         Ok(json!({"success": success, "failed": failed, "results": results}))
     }
 }
+// ==================== B6 cm_backup：右键菜单备份 ====================
+
+fn desktop_dir() -> std::path::PathBuf {
+    if let Ok(desktop) = std::env::var("USERPROFILE") {
+        let p = std::path::PathBuf::from(desktop).join("Desktop");
+        if p.exists() { return p; }
+    }
+    std::path::PathBuf::from(r"C:\Users\Public\Desktop")
+}
+
+fn reg_file_header_hive(file: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(file).ok()?;
+    for line in content.lines().take(8) {
+        let t = line.trim();
+        if t.starts_with('[') {
+            let h = &t[1..];
+            for root in ["HKEY_CLASSES_ROOT", "HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE", "HKEY_USERS"] {
+                if h.starts_with(root) { return Some(root.to_string()); }
+            }
+            return Some("OTHER".to_string());
+        }
+    }
+    None
+}
+
+/// 右键菜单备份（对应 cm_backup.ps1，S1）
+///
+/// 在桌面创建「右键菜单备份_时间戳」目录，注册表项用 reg.exe export 导出 .reg，
+/// 文件项复制到 files/ 子目录，生成 manifest.json。
+pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
+    let now_ms = crate::engine::now_ms();
+    let stamp = format!("{}", now_ms);
+    let backup_dir = desktop_dir().join(format!("右键菜单备份_{stamp}"));
+    let files_dir = backup_dir.join("files");
+    std::fs::create_dir_all(&files_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
+
+    let mut backup_files: Vec<String> = Vec::new();
+    let mut file_records: Vec<Value> = Vec::new();
+    let mut reg_records: Vec<Value> = Vec::new();
+    let mut exported = 0i64;
+    let mut copied = 0i64;
+    let mut failed = 0i64;
+
+    for (index, item) in items.iter().enumerate() {
+        let idx = index + 1;
+        let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
+
+        // 文件类来源：复制备份
+        if source == "filesystem" || source == "winx" {
+            if !std::path::Path::new(reg_path).exists() { continue; }
+            let file_name = std::path::Path::new(reg_path).file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            let stem = std::path::Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+            let ext = std::path::Path::new(file_name).extension().and_then(|e| e.to_str()).unwrap_or("");
+            let dest_name = format!("file_{idx}_{stem}_{ext}");
+            let dest = files_dir.join(&dest_name);
+            if std::fs::copy(reg_path, &dest).is_ok() {
+                let dest_str = dest.to_string_lossy().to_string();
+                file_records.push(json!({"source": reg_path, "backup": dest_str}));
+                backup_files.push(dest_str);
+                copied += 1;
+            } else {
+                failed += 1;
+            }
+            continue;
+        }
+
+        // 注册表类：reg.exe export
+        let mut write_path = item.get("nativeRegPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if write_path.is_empty() { write_path = reg_path.to_string(); }
+        if write_path.is_empty() { failed += 1; continue; }
+        // 拒绝 HKCR 头
+        if write_path.starts_with("HKEY_CLASSES_ROOT\\") || write_path == "HKEY_CLASSES_ROOT" {
+            failed += 1;
+            continue;
+        }
+        // 转换为 reg.exe 短路径
+        let native_path = write_path
+            .replace("HKEY_CURRENT_USER", "HKCU")
+            .replace("HKEY_LOCAL_MACHINE", "HKLM")
+            .replace("HKEY_USERS", "HKU")
+            .replace("HKEY_CLASSES_ROOT", "HKCR");
+        // 安全文件名
+        let mut safe_name = native_path.clone();
+        safe_name = safe_name.replace('\\', "_").replace('/', "_").replace(':', "_").replace('*', "_")
+            .replace('?', "_").replace('"', "_").replace('<', "_").replace('>', "_").replace('|', "_");
+        if safe_name.len() > 120 { safe_name = safe_name[safe_name.len()-120..].to_string(); }
+        let reg_file = backup_dir.join(format!("registry_{idx}_{safe_name}.reg"));
+
+        // reg.exe export
+        let out = std::process::Command::new("reg.exe")
+            .args(["export", &write_path, reg_file.to_str().unwrap(), "/y"])
+            .output();
+        let success = out.is_ok() && out.as_ref().unwrap().status.success();
+        let header_hive = reg_file_header_hive(&reg_file);
+        let hive_ok = header_hive.as_ref()
+            .map(|h| h != "HKEY_CLASSES_ROOT" && write_path.starts_with(h))
+            .unwrap_or(false);
+
+        if success && hive_ok {
+            let reg_str = reg_file.to_string_lossy().to_string();
+            backup_files.push(reg_str.clone());
+            reg_records.push(json!({"source": write_path, "backup": reg_str, "hive": header_hive.unwrap_or_default()}));
+            exported += 1;
+        } else {
+            let _ = std::fs::remove_file(&reg_file);
+            failed += 1;
+        }
+    }
+
+    // 生成 manifest.json
+    let manifest = json!({
+        "version": 2,
+        "created": now_ms,
+        "items": items,
+        "files": file_records,
+        "registryFiles": reg_records,
+    });
+    let manifest_path = backup_dir.join("manifest.json");
+    let _ = std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".into()));
+
+    Ok(json!({
+        "backupDir": backup_dir.to_string_lossy().to_string(),
+        "files": backup_files,
+        "count": exported + copied,
+        "exported": exported,
+        "copied": copied,
+        "failed": failed,
+    }))
+}

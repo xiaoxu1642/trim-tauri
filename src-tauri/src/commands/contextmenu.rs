@@ -307,16 +307,28 @@ pub async fn contextmenu_backup<R: Runtime>(
     }
 
     log::write_log("info", &format!("备份右键菜单: {} 项", safe.len()));
-    let script = inject_items(PS_BACKUP, &safe);
-    let out = match run_ps(&script, Duration::from_secs(60), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.code != 0 {
-        return json!({ "success": false, "message": "备份失败" });
-    }
-    let Some(data) = parse_last_json(&out.stdout) else {
-        return json!({ "success": false, "message": "解析备份结果失败" });
+
+    // S1：原生优先，失败自动回退 PS
+    let data = match crate::engine::native::cm_backup(&safe) {
+        Ok(d) => {
+            log::write_log("info", "右键菜单备份原生完成");
+            d
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("右键菜单备份原生失败，回退 PS: {e}"));
+            let script = inject_items(PS_BACKUP, &safe);
+            let out = match run_ps(&script, Duration::from_secs(60), None) {
+                Ok(o) => o,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            if out.code != 0 {
+                return json!({ "success": false, "message": "备份失败" });
+            }
+            match parse_last_json(&out.stdout) {
+                Some(d) => d,
+                None => return json!({ "success": false, "message": "解析备份结果失败" }),
+            }
+        }
     };
     let count = data.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
