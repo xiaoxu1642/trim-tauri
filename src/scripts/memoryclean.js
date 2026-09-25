@@ -75,8 +75,7 @@
     if (window.api?.memory) {
       try {
         const resp = await window.api.memory.info();
-        // 部分成功：后端在 ok_count>0 时即 success=true；这里兜底——只要 data 里有 results，就逐项展示
-      if (resp && resp.data && Array.isArray(resp.data.results)) {
+        if (resp && resp.success && resp.data) {
           renderInfo(resp.data);
           return;
         }

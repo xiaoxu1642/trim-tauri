@@ -294,7 +294,7 @@ pub fn resolve_pwsh() -> Result<PathBuf, (String, String)> {
         candidates.push(PathBuf::from(pf).join("PowerShell").join("7").join("pwsh.exe"));
     }
     // where.exe pwsh.exe（尊重用户自装版本）
-    if let Ok(out) = Command::new("where.exe").arg("pwsh.exe").output() {
+    if let Ok(out) = Command::new("where.exe").arg("pwsh.exe").creation_flags(0x0800_0000).output() {
         if out.status.success() {
             for line in String::from_utf8_lossy(&out.stdout).split(['\r', '\n']) {
                 let line = line.trim();
