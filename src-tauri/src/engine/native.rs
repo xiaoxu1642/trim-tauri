@@ -1212,3 +1212,731 @@ unsafe fn get_process_path(pid: u32) -> Option<String> {
     let _ = CloseHandle(h);
     if r.is_ok() { Some(String::from_utf16_lossy(&buf[..len as usize])) } else { None }
 }
+// ==================== B6 cm_scan：右键菜单深度扫描 ====================
+
+use windows::Win32::System::Registry::RegEnumKeyExW;
+use windows::Win32::System::LibraryLoader::LoadLibraryW;
+use windows::Win32::UI::WindowsAndMessaging::LoadStringW;
+use windows::Win32::Foundation::{HMODULE, HANDLE, FreeLibrary};
+
+/// 枚举注册表键的所有子键名
+unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut name_buf = [0u16; 260];
+        let mut name_len = name_buf.len() as u32;
+        let r = RegEnumKeyExW(
+            hk, index,
+            Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
+            &mut name_len,
+            None, None, None, None,
+        );
+        if r.is_err() { break; }
+        names.push(String::from_utf16_lossy(&name_buf[..name_len as usize]));
+        index += 1;
+    }
+    names
+}
+
+/// 读注册表字符串值（默认值或命名值），返回 Option<String>
+unsafe fn reg_read_string(hk: HKEY, name: &str) -> Option<String> {
+    let nm = to_wide(name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        return None;
+    }
+    if ty != REG_SZ && ty != REG_EXPAND_SZ { return None; }
+    let mut buf = vec![0u8; size as usize];
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_err() {
+        return None;
+    }
+    let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+    let s = String::from_utf16_lossy(&wide[..end]);
+    if ty == REG_EXPAND_SZ { Some(expand_env(&s)) } else { Some(s) }
+}
+
+/// 读注册表 DWORD 值
+unsafe fn reg_read_dword_val(hk: HKEY, name: &str) -> Option<u32> {
+    let nm = to_wide(name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut buf = [0u8; 4];
+    let mut size = 4u32;
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_err() {
+        return None;
+    }
+    if ty != REG_DWORD { return None; }
+    Some(u32::from_le_bytes(buf))
+}
+
+/// 检查注册表值是否存在
+unsafe fn reg_value_exists(hk: HKEY, name: &str) -> bool {
+    let nm = to_wide(name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok()
+}
+
+/// 解析 @dll,-id 形式的间接资源串
+unsafe fn resolve_resource_string(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('@') { return None; }
+    // 格式：@"C:\path\to.dll",-12345 或 @shell32.dll,-30345
+    let rest = &trimmed[1..];
+    let comma = rest.find(',')?;
+    let dll_part = rest[..comma].trim().trim_matches('"').trim().to_string();
+    let id_part = rest[comma+1..].trim().trim_start_matches('-');
+    let id: i32 = id_part.parse().ok()?;
+    let dll_path = if dll_path_needs_system(&dll_part) {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        format!("{windir}\\System32\\{dll_part}")
+    } else {
+        expand_env(&dll_part)
+    };
+    if !std::path::Path::new(&dll_path).exists() { return None; }
+    let dll_w = to_wide(&dll_path);
+    let Ok(hmod) = LoadLibraryW(PCWSTR(dll_w.as_ptr())) else { return None; };
+    if hmod == HMODULE::default() { return None; }
+    let mut buf = [0u16; 1024];
+    let len = LoadStringW(Some(windows::Win32::Foundation::HINSTANCE(hmod.0)), id as u32, windows::core::PWSTR(buf.as_mut_ptr()), buf.len() as i32);
+    let _ = FreeLibrary(hmod);
+    if len <= 0 { return None; }
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+fn dll_path_needs_system(dll: &str) -> bool {
+    !dll.contains('\\') && !dll.contains('/')
+}
+
+/// 直接字符串：@ 引用串优先走资源解析，解析失败回退空串
+unsafe fn direct_string(raw: &str) -> String {
+    if raw.is_empty() { return String::new(); }
+    let v = raw.trim();
+    if v.starts_with('@') {
+        if let Some(resolved) = resolve_resource_string(v) { return resolved; }
+        return String::new();
+    }
+    v.to_string()
+}
+
+/// GUID 格式校验
+fn is_guid(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() != 38 { return false; }
+    if !s.starts_with('{') || !s.ends_with('}') { return false; }
+    let inner = &s[1..37];
+    let parts: Vec<&str> = inner.split('-').collect();
+    if parts.len() != 5 { return false; }
+    let lens = [8usize, 4, 4, 4, 12];
+    for (i, p) in parts.iter().enumerate() {
+        if p.len() != lens[i] || !p.chars().all(|c| c.is_ascii_hexdigit()) { return false; }
+    }
+    true
+}
+
+/// 清洗字符串：移除控制字符、孤立代理、非字符
+fn clean_str(s: &str) -> String {
+    s.chars().filter(|&c| {
+        let cp = c as u32;
+        cp >= 0x20 && cp != 0x7f && !(0xD800..=0xDFFF).contains(&cp) && cp != 0xFFFE && cp != 0xFFFF
+    }).collect()
+}
+
+/// 动词隐藏判据（四值模型）
+unsafe fn verb_hidden(hk: HKEY) -> bool {
+    for vn in ["LegacyDisable", "Blocked", "ProgrammaticAccessOnly"] {
+        if reg_value_exists(hk, vn) { return true; }
+    }
+    if let Some(v) = reg_read_dword_val(hk, "HideBasedOnVelocityId") {
+        if v == 0x639bc8 { return true; }
+    }
+    if let Some(v) = reg_read_dword_val(hk, "CommandFlags") {
+        if (v % 16) >= 8 { return true; }
+    }
+    false
+}
+
+/// 受保护 CLSID 列表
+const PROTECTED_CLASSES: &[&str] = &[
+    "{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+    "{450D8FBA-AD25-11D0-98A8-0800361B1103}",
+    "{208D2C60-3AEA-1069-A2D2-08002B30309D}",
+    "{1F4DE370-D627-11D1-BA4F-00A0C91EEDBA}",
+    "{59031A47-3F72-35A7-89EC-6E8B9A8A5B5E}",
+    "{59BE1D4E-E3A4-4D8A-91A3-69D69F66A4AC}",
+    "{645FF040-5081-101B-9F08-00AA002F954E}",
+];
+
+/// 已知系统动词列表（简化版）
+const KNOWN_SYSTEM: &[&str] = &[
+    "Open", "Explore", "open", "explore", "find", "printto", "Properties",
+    "RunAs", "RunAsUser", "New", "Delete", "Cut", "Copy", "Paste", "Rename",
+    "edit", "print", "play", "Share", "Preview", "OpenWith", "Compatibility",
+    "PinToStart", "PinToTaskbar", "PreviousVersions", "ScanWithWindowsDefender",
+    "EmptyRecycleBin", "Restore", "Personalize", "Display",
+];
+
+/// 第三方判定
+fn is_third_party(name: &str, company: &str, source: &str, file_path: &str) -> bool {
+    let cl = company.to_lowercase();
+    if cl.contains("microsoft") || cl.contains("windows corporation") { return false; }
+    if company.is_empty() && file_path.to_lowercase().starts_with(r"c:\windows") { return false; }
+    if KNOWN_SYSTEM.contains(&name) { return false; }
+    if source == "shell" {
+        let nl = name.to_lowercase();
+        if nl.contains("windows") || nl.contains("system32") || nl.contains("shell32") { return false; }
+    }
+    true
+}
+
+/// CLSID 信息（名称/厂商/文件路径）
+struct ClsidInfo { name: String, company: String, file_path: String }
+
+/// 解析 CLSID 信息（简化版：只读注册表，不做文件版本信息）
+unsafe fn get_clsid_info(guid: &str, clsid_views: &[(HKEY, &str)]) -> ClsidInfo {
+    let mut info = ClsidInfo { name: String::new(), company: String::new(), file_path: String::new() };
+    if !is_guid(guid) { return info; }
+    for (hive, base) in clsid_views {
+        let sub = format!("{base}\\{guid}");
+        let sk = to_wide(&sub);
+        let mut hk = HKEY::default();
+        if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
+        // 名称：LocalizedString > InfoTip > 默认值
+        for vn in ["LocalizedString", "InfoTip", ""] {
+            if let Some(raw) = reg_read_string(hk, vn) {
+                let resolved = direct_string(&raw);
+                if !resolved.is_empty() { info.name = resolved; break; }
+            }
+        }
+        // 厂商
+        if let Some(c) = reg_read_string(hk, "Company") {
+            if !c.is_empty() { info.company = c; }
+        }
+        // 文件路径：InprocServer32 > LocalServer32
+        for sub2 in ["InprocServer32", "LocalServer32"] {
+            let s2 = format!("{sub}\\{sub2}");
+            let sk2 = to_wide(&s2);
+            let mut hk2 = HKEY::default();
+            if RegOpenKeyExW(*hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_err() { continue; }
+            let mut candidate = String::new();
+            if let Some(cb) = reg_read_string(hk2, "CodeBase") {
+                candidate = cb.replace("file:///", "").replace('/', "\\");
+            }
+            if candidate.is_empty() {
+                if let Some(def) = reg_read_string(hk2, "") {
+                    candidate = def.trim().trim_matches('"').to_string();
+                }
+            }
+            let _ = RegCloseKey(hk2);
+            if !candidate.is_empty() && std::path::Path::new(&candidate).exists() {
+                info.file_path = candidate;
+                break;
+            }
+        }
+        let _ = RegCloseKey(hk);
+        if !info.name.is_empty() || !info.company.is_empty() || !info.file_path.is_empty() { break; }
+    }
+    info
+}
+
+/// 扫描结果项
+struct CmItem {
+    name: String, clsid: String, reg_path: String, native_reg_path: String,
+    company: String, location: String, category: String, source: String,
+    file_path: String, command: String, enabled: bool,
+    confirm_required: bool, confirm_reason: String, unknown_convention: bool,
+    blocked_by: String, target: String, orphan: bool, orphan_reason: String,
+}
+
+/// HKCR -> 真实 hive 路径（HKCU 优先，否则 HKLM）
+unsafe fn resolve_native_reg_path(std_path: &str) -> String {
+    if !std_path.starts_with("HKEY_CLASSES_ROOT") { return std_path.to_string(); }
+    let rest = std_path.trim_start_matches("HKEY_CLASSES_ROOT").trim_start_matches('\\');
+    let cu = format!("HKEY_CURRENT_USER\\Software\\Classes\\{rest}");
+    // 检查 HKCU 是否存在
+    let cu_sub = format!("Software\\Classes\\{rest}");
+    let sk = to_wide(&cu_sub);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+        let _ = RegCloseKey(hk);
+        return cu;
+    }
+    format!("HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\{rest}")
+}
+
+/// 右键菜单扫描（对应 cm_scan.ps1，S1 简化版）
+///
+/// 覆盖：Shell 项 + ShellEx 项（13 场景 × 3 视图）、发送到、Win+X、
+/// 新建菜单、打开方式。UWP/PackagedCom 暂未实现（S2 完善）。
+pub fn cm_scan() -> Result<Vec<Value>, String> {
+    unsafe {
+        // ---- Blocked GUID 表 ----
+        let mut blocked: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (hive, sub, scope) in [
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked", "machine"),
+            (HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked", "user"),
+        ] {
+            let sk = to_wide(sub);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
+            for vn in reg_enum_values(hk) {
+                if is_guid(&vn) {
+                    blocked.insert(vn.to_uppercase(), scope.to_string());
+                }
+            }
+            let _ = RegCloseKey(hk);
+        }
+
+        // CLSID 视图
+        let clsid_views: Vec<(HKEY, String)> = vec![
+            (HKEY_CURRENT_USER, r"Software\Classes\CLSID".to_string()),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\CLSID".to_string()),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\Wow6432Node\CLSID".to_string()),
+        ];
+        let clsid_views_ref: Vec<(HKEY, &str)> = clsid_views.iter().map(|(h, s)| (*h, s.as_str())).collect();
+
+        // 场景注册表视图根
+        let scene_views: Vec<(HKEY, String)> = vec![
+            (HKEY_CURRENT_USER, r"Software\Classes".to_string()),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes".to_string()),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\Wow6432Node".to_string()),
+        ];
+
+        let mut items: Vec<CmItem> = Vec::new();
+        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // ---- 场景扫描 ----
+        let scenes: &[(&str, &[&str])] = &[
+            ("文件", &["*", "AllFilesystemObjects"]),
+            ("EXE文件", &["exefile", r"SystemFileAssociations\.exe"]),
+            ("LNK文件", &["lnkfile", r"SystemFileAssociations\.lnk"]),
+            ("目录", &["Directory"]),
+            ("文件夹", &["Folder"]),
+            ("驱动器", &["Drive"]),
+            ("目录背景", &[r"Directory\Background"]),
+            ("桌面背景", &["DesktopBackground"]),
+            ("回收站", &[r"CLSID\{645FF040-5081-101B-9F08-00AA002F954E}", "RecycleBinFolder"]),
+            ("此电脑", &[r"CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}"]),
+            ("库", &["LibraryFolder", r"LibraryFolder\Background", "UserLibraryFolder"]),
+        ];
+
+        for (category, suffixes) in scenes {
+            for suffix in *suffixes {
+                for (hive, base) in &scene_views {
+                    let scene_path = format!("{base}\\{suffix}");
+                    // shell 子键
+                    scan_shell_items(&scene_path, *hive, category, &clsid_views_ref, &blocked, &mut items, &mut seen_keys);
+                    // ShellEx\ContextMenuHandlers
+                    scan_shellex_handlers(&scene_path, *hive, "ContextMenuHandlers", category, &clsid_views_ref, &blocked, &mut items, &mut seen_keys);
+                    // ShellEx\-ContextMenuHandlers（整组禁用）
+                    scan_shellex_handlers(&scene_path, *hive, "-ContextMenuHandlers", category, &clsid_views_ref, &blocked, &mut items, &mut seen_keys);
+                }
+            }
+        }
+
+        // ---- 发送到 ----
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let programdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
+        for sendto_dir in [format!("{appdata}\\Microsoft\\Windows\\SendTo"), format!("{programdata}\\Microsoft\\Windows\\SendTo")] {
+            let Ok(entries) = std::fs::read_dir(&sendto_dir) else { continue; };
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.eq_ignore_ascii_case("desktop.ini") { continue; }
+                let full = entry.path().to_string_lossy().to_string();
+                let ext = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let company = if [".desklink", ".mapimail", ".zfsendtotarget", ".mydocs"].contains(&ext.as_str()) {
+                    "Microsoft Corporation".to_string()
+                } else { String::new() };
+                let name = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
+                items.push(CmItem {
+                    name, clsid: String::new(), reg_path: full.clone(), native_reg_path: full.clone(),
+                    company, location: sendto_dir.clone(), category: "发送到".to_string(),
+                    source: "filesystem".to_string(), file_path: String::new(), command: String::new(),
+                    enabled: true, confirm_required: false, confirm_reason: String::new(),
+                    unknown_convention: false, blocked_by: String::new(), target: String::new(),
+                    orphan: false, orphan_reason: String::new(),
+                });
+            }
+        }
+
+        // ---- Win+X ----
+        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        for group in ["Group1", "Group2", "Group3"] {
+            let gdir = format!("{localappdata}\\Microsoft\\Windows\\WinX\\{group}");
+            let Ok(entries) = std::fs::read_dir(&gdir) else { continue; };
+            for entry in entries.flatten() {
+                if entry.path().is_dir() { continue; }
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.eq_ignore_ascii_case("desktop.ini") { continue; }
+                let full = entry.path().to_string_lossy().to_string();
+                let ext = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let is_off = ext == "disabled";
+                let label_raw = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
+                let label = if is_off { label_raw.trim_end_matches(".lnk").to_string() } else { label_raw };
+                if label.is_empty() { continue; }
+                items.push(CmItem {
+                    name: label, clsid: String::new(), reg_path: full.clone(), native_reg_path: full.clone(),
+                    company: "Microsoft Corporation".to_string(), location: gdir.clone(),
+                    category: "Win+X".to_string(), source: "winx".to_string(),
+                    file_path: String::new(), command: String::new(),
+                    enabled: !is_off, confirm_required: false, confirm_reason: String::new(),
+                    unknown_convention: false, blocked_by: String::new(), target: String::new(),
+                    orphan: false, orphan_reason: String::new(),
+                });
+            }
+        }
+
+        // ---- 新建菜单 ----
+        let ps_sub = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Discardable\PostSetup\ShellNew";
+        let sk = to_wide(ps_sub);
+        let mut hk = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+            if let Some((_ty, buf)) = reg_query_value(hk, "Classes") {
+                // REG_MULTI_SZ
+                let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let mut start = 0;
+                for i in 0..wide.len() {
+                    if wide[i] == 0 {
+                        if i > start {
+                            let cls = String::from_utf16_lossy(&wide[start..i]);
+                            if !cls.trim().is_empty() {
+                                // 检查是否有 ShellNew 键
+                                let mut has_shellnew = false;
+                                for (hive, base) in &scene_views {
+                                    let check = format!("{base}\\{cls}\\ShellNew");
+                                    let csk = to_wide(&check);
+                                    let mut chk = HKEY::default();
+                                    if RegOpenKeyExW(*hive, PCWSTR(csk.as_ptr()), Some(0), KEY_READ, &mut chk).is_ok() {
+                                        let _ = RegCloseKey(chk);
+                                        has_shellnew = true;
+                                        break;
+                                    }
+                                }
+                                let std_path = format!("HKEY_CURRENT_USER\\{ps_sub}");
+                                let (nm, orphan) = if has_shellnew {
+                                    (format!("新建 {cls}"), false)
+                                } else {
+                                    (format!("新建 {cls}（残留：无 ShellNew 键）"), true)
+                                };
+                                items.push(CmItem {
+                                    name: nm, clsid: String::new(), reg_path: std_path.clone(),
+                                    native_reg_path: std_path.clone(),
+                                    company: "Microsoft Corporation".to_string(),
+                                    location: std_path.clone(), category: "新建菜单".to_string(),
+                                    source: "shellnew".to_string(), file_path: String::new(),
+                                    command: String::new(), enabled: true,
+                                    confirm_required: false, confirm_reason: String::new(),
+                                    unknown_convention: false, blocked_by: String::new(),
+                                    target: cls, orphan,
+                                    orphan_reason: if orphan { "列表里还挂着这个类型，但对应的 ShellNew 键已不存在".to_string() } else { String::new() },
+                                });
+                            }
+                        }
+                        start = i + 1;
+                    }
+                }
+            }
+            let _ = RegCloseKey(hk);
+        }
+
+        // ---- 打开方式（Applications） ----
+        for (hive, base) in &scene_views {
+            let app_root = format!("{base}\\Applications");
+            let ask = to_wide(&app_root);
+            let mut ahk = HKEY::default();
+            if RegOpenKeyExW(*hive, PCWSTR(ask.as_ptr()), Some(0), KEY_READ, &mut ahk).is_err() { continue; }
+            for app in reg_enum_subkeys(ahk) {
+                let app_path = format!("{app_root}\\{app}");
+                let shell_path = format!("{app_path}\\shell");
+                let ssk = to_wide(&shell_path);
+                let mut shk = HKEY::default();
+                if RegOpenKeyExW(*hive, PCWSTR(ssk.as_ptr()), Some(0), KEY_READ, &mut shk).is_err() { continue; }
+                let verbs = reg_enum_subkeys(shk);
+                let _ = RegCloseKey(shk);
+                if verbs.is_empty() { continue; }
+                let apk = to_wide(&app_path);
+                let mut aphk = HKEY::default();
+                let mut friendly = app.clone();
+                let mut no_open = false;
+                if RegOpenKeyExW(*hive, PCWSTR(apk.as_ptr()), Some(0), KEY_READ, &mut aphk).is_ok() {
+                    if let Some(f) = reg_read_string(aphk, "FriendlyAppName") {
+                        if !f.trim().is_empty() { friendly = direct_string(&f); }
+                    }
+                    if friendly.is_empty() { friendly = app.clone(); }
+                    no_open = reg_value_exists(aphk, "NoOpenWith");
+                    let _ = RegCloseKey(aphk);
+                }
+                let std_path = if *hive == HKEY_CURRENT_USER {
+                    format!("HKEY_CURRENT_USER\\{app_path}")
+                } else {
+                    format!("HKEY_LOCAL_MACHINE\\{app_path}")
+                };
+                items.push(CmItem {
+                    name: friendly, clsid: String::new(), reg_path: std_path.clone(),
+                    native_reg_path: resolve_native_reg_path(&std_path),
+                    company: String::new(), location: app_root.clone(),
+                    category: "打开方式".to_string(), source: "openwith".to_string(),
+                    file_path: String::new(), command: verbs.join(", "),
+                    enabled: !no_open, confirm_required: false, confirm_reason: String::new(),
+                    unknown_convention: false, blocked_by: String::new(), target: String::new(),
+                    orphan: false, orphan_reason: String::new(),
+                });
+            }
+            let _ = RegCloseKey(ahk);
+        }
+
+        // ---- 去重 ----
+        let mut dedup: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut result: Vec<Value> = Vec::new();
+        for item in items {
+            let enabled_text = if item.enabled { "1" } else { "0" };
+            let key = if item.clsid.is_empty() {
+                format!("{}|{}|{}|{}|{}", item.category, item.name, item.source, item.native_reg_path, enabled_text)
+            } else {
+                format!("{}|{}|{}|{}", item.category, item.name, item.clsid, enabled_text)
+            };
+            if !dedup.insert(key) { continue; }
+
+            let is_protected = PROTECTED_CLASSES.contains(&item.clsid.as_str());
+            let is_tp = is_third_party(&item.name, &item.company, &item.source, &item.file_path);
+            let risk = if is_protected { "protected" } else if is_tp { "high" } else { "low" };
+            let component_missing = is_guid(&item.clsid) && !item.file_path.is_empty()
+                && !std::path::Path::new(&item.file_path).exists();
+            let orphan = item.orphan || component_missing;
+            let orphan_reason = if component_missing {
+                format!("登记的处理程序文件已不存在（{}）", item.file_path)
+            } else { item.orphan_reason };
+
+            result.push(json!({
+                "name": clean_str(&item.name),
+                "clsid": clean_str(&item.clsid),
+                "regPath": clean_str(&item.reg_path),
+                "nativeRegPath": clean_str(&item.native_reg_path),
+                "company": clean_str(&item.company),
+                "location": clean_str(&item.location),
+                "category": clean_str(&item.category),
+                "source": clean_str(&item.source),
+                "filePath": clean_str(&item.file_path),
+                "command": clean_str(&item.command),
+                "isThirdParty": is_tp,
+                "isProtected": is_protected,
+                "risk": risk,
+                "enabled": item.enabled,
+                "confirmRequired": item.confirm_required,
+                "confirmReason": clean_str(&item.confirm_reason),
+                "unknownConvention": item.unknown_convention,
+                "orphan": orphan,
+                "orphanReason": clean_str(&orphan_reason),
+                "blockedBy": clean_str(&item.blocked_by),
+                "target": clean_str(&item.target),
+            }));
+        }
+        Ok(result)
+    }
+}
+
+/// 扫描 shell 子键项
+unsafe fn scan_shell_items(
+    scene_path: &str, hive: HKEY, category: &str,
+    clsid_views: &[(HKEY, &str)], blocked: &std::collections::HashMap<String, String>,
+    items: &mut Vec<CmItem>, seen_keys: &mut std::collections::HashSet<String>,
+) {
+    let shell_path = format!("{scene_path}\\shell");
+    let sk = to_wide(&shell_path);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return; }
+    for child in reg_enum_subkeys(hk) {
+        let seen_key = format!("{shell_path}|{child}");
+        if !seen_keys.insert(seen_key) { continue; }
+        let key_path = format!("{shell_path}\\{child}");
+        let ksk = to_wide(&key_path);
+        let mut chk = HKEY::default();
+        if RegOpenKeyExW(hive, PCWSTR(ksk.as_ptr()), Some(0), KEY_READ, &mut chk).is_err() { continue; }
+        // 名称：MUIVerb > 默认值（非多级菜单）> 键名
+        let mut name = String::new();
+        if let Some(mui) = reg_read_string(chk, "MUIVerb") {
+            name = direct_string(&mui);
+        }
+        if name.is_empty() {
+            let has_sub = reg_value_exists(chk, "SubCommands") || reg_value_exists(chk, "ExtendedSubCommandsKey");
+            if !has_sub {
+                if let Some(def) = reg_read_string(chk, "") {
+                    name = direct_string(&def);
+                }
+            }
+        }
+        if name.is_empty() { name = child.clone(); }
+        // GUID：command\DelegateExecute > DropTarget\CLSID > ExplorerCommandHandler
+        let mut clsid = String::new();
+        let cmd_path = format!("{key_path}\\command");
+        let csk = to_wide(&cmd_path);
+        let mut chk_cmd = HKEY::default();
+        let mut command = String::new();
+        if RegOpenKeyExW(hive, PCWSTR(csk.as_ptr()), Some(0), KEY_READ, &mut chk_cmd).is_ok() {
+            if let Some(de) = reg_read_string(chk_cmd, "DelegateExecute") {
+                if is_guid(&de) { clsid = de.trim().to_string(); }
+            }
+            if let Some(c) = reg_read_string(chk_cmd, "") {
+                command = direct_string(&c);
+            }
+            let _ = RegCloseKey(chk_cmd);
+        }
+        if clsid.is_empty() {
+            let dt_path = format!("{key_path}\\DropTarget");
+            let dsk = to_wide(&dt_path);
+            let mut chk_dt = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(dsk.as_ptr()), Some(0), KEY_READ, &mut chk_dt).is_ok() {
+                if let Some(c) = reg_read_string(chk_dt, "CLSID") {
+                    if is_guid(&c) { clsid = c.trim().to_string(); }
+                }
+                let _ = RegCloseKey(chk_dt);
+            }
+        }
+        if clsid.is_empty() {
+            if let Some(eh) = reg_read_string(chk, "ExplorerCommandHandler") {
+                if is_guid(&eh) { clsid = eh.trim().to_string(); }
+            }
+        }
+        // 启用状态
+        let mut enabled = !verb_hidden(chk);
+        let mut unknown_conv = false;
+        if child.to_lowercase().starts_with("autorunsdisabled") {
+            enabled = false;
+            unknown_conv = true;
+            name = format!("{name}（未识别的禁用约定）");
+        }
+        // 确认保护
+        let (confirm_req, confirm_reason) = {
+            let v = child.to_lowercase();
+            if v == "open" || v == "explore" {
+                (true, "该项是对象的基础「打开/浏览」动词，禁用或删除后双击与默认打开行为可能改变".to_string())
+            } else if clsid.eq_ignore_ascii_case("{00021401-0000-0000-C000-000000000046}") {
+                (true, "该项承载快捷方式的「打开」行为，禁用后 .lnk 双击可能失效".to_string())
+            } else {
+                (false, String::new())
+            }
+        };
+        // CLSID 信息
+        let mut company = String::new();
+        let mut file_path = String::new();
+        if is_guid(&clsid) {
+            let info = get_clsid_info(&clsid, clsid_views);
+            company = info.company;
+            file_path = info.file_path;
+        }
+        // Blocked
+        let mut blocked_by = String::new();
+        if !clsid.is_empty() {
+            if let Some(scope) = blocked.get(&clsid.to_uppercase()) {
+                blocked_by = scope.clone();
+                enabled = false;
+            }
+        }
+        let std_path = if hive == HKEY_CURRENT_USER {
+            format!("HKEY_CURRENT_USER\\{}", key_path.trim_start_matches(r"Software\\"))
+        } else {
+            format!("HKEY_LOCAL_MACHINE\\{}", key_path.trim_start_matches(r"SOFTWARE\\"))
+        };
+        // 幽灵项过滤
+        if name.trim().is_empty() { let _ = RegCloseKey(chk); continue; }
+        items.push(CmItem {
+            name, clsid, reg_path: std_path.clone(),
+            native_reg_path: resolve_native_reg_path(&std_path),
+            company, location: shell_path.clone(), category: category.to_string(),
+            source: "shell".to_string(), file_path, command,
+            enabled, confirm_required: confirm_req, confirm_reason,
+            unknown_convention: unknown_conv, blocked_by, target: String::new(),
+            orphan: false, orphan_reason: String::new(),
+        });
+        let _ = RegCloseKey(chk);
+    }
+    let _ = RegCloseKey(hk);
+}
+
+/// 扫描 ShellEx\ContextMenuHandlers 项
+unsafe fn scan_shellex_handlers(
+    scene_path: &str, hive: HKEY, handlers_dir: &str, category: &str,
+    clsid_views: &[(HKEY, &str)], blocked: &std::collections::HashMap<String, String>,
+    items: &mut Vec<CmItem>, seen_keys: &mut std::collections::HashSet<String>,
+) {
+    let cm_path = format!("{scene_path}\\ShellEx\\{handlers_dir}");
+    let sk = to_wide(&cm_path);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return; }
+    let group_disabled = handlers_dir.starts_with('-');
+    for child in reg_enum_subkeys(hk) {
+        let seen_key = format!("{cm_path}|{child}");
+        if !seen_keys.insert(seen_key) { continue; }
+        let mut enabled = !group_disabled;
+        let mut real_name = child.clone();
+        if real_name.starts_with('-') {
+            enabled = false;
+            real_name = real_name[1..].to_string();
+        }
+        if real_name.is_empty() { continue; }
+        let key_path = format!("{cm_path}\\{child}");
+        let ksk = to_wide(&key_path);
+        let mut chk = HKEY::default();
+        if RegOpenKeyExW(hive, PCWSTR(ksk.as_ptr()), Some(0), KEY_READ, &mut chk).is_err() { continue; }
+        let default_val = reg_read_string(chk, "").unwrap_or_default();
+        let _ = RegCloseKey(chk);
+        // GUID：默认值优先，回退键名
+        let mut guid = default_val.clone();
+        if !is_guid(&guid) { guid = real_name.clone(); }
+        if !is_guid(&guid) {
+            // Autoruns 约定
+            if real_name.to_lowercase().starts_with("autorunsdisabled") {
+                let std_path = if hive == HKEY_CURRENT_USER {
+                    format!("HKEY_CURRENT_USER\\{}", key_path.trim_start_matches(r"Software\\"))
+                } else {
+                    format!("HKEY_LOCAL_MACHINE\\{}", key_path.trim_start_matches(r"SOFTWARE\\"))
+                };
+                items.push(CmItem {
+                    name: format!("未识别的禁用项（{real_name}）"), clsid: String::new(),
+                    reg_path: std_path.clone(), native_reg_path: std_path,
+                    company: String::new(), location: cm_path.clone(),
+                    category: category.to_string(), source: "shellex".to_string(),
+                    file_path: String::new(), command: String::new(),
+                    enabled: false, confirm_required: false, confirm_reason: String::new(),
+                    unknown_convention: true, blocked_by: String::new(), target: String::new(),
+                    orphan: false, orphan_reason: String::new(),
+                });
+            }
+            continue;
+        }
+        guid = guid.trim().to_string();
+        let info = get_clsid_info(&guid, clsid_views);
+        // 名称：CLSID 友好名 > 键名为 GUID 时用默认值 > 键名
+        let name = if !info.name.is_empty() {
+            info.name.clone()
+        } else if is_guid(&real_name) && !default_val.is_empty() && !is_guid(&default_val) {
+            default_val
+        } else {
+            real_name
+        };
+        let mut blocked_by = String::new();
+        if let Some(scope) = blocked.get(&guid.to_uppercase()) {
+            blocked_by = scope.clone();
+            enabled = false;
+        }
+        let std_path = if hive == HKEY_CURRENT_USER {
+            format!("HKEY_CURRENT_USER\\{}", key_path.trim_start_matches(r"Software\\"))
+        } else {
+            format!("HKEY_LOCAL_MACHINE\\{}", key_path.trim_start_matches(r"SOFTWARE\\"))
+        };
+        if name.trim().is_empty() { continue; }
+        items.push(CmItem {
+            name, clsid: guid, reg_path: std_path.clone(),
+            native_reg_path: resolve_native_reg_path(&std_path),
+            company: info.company, location: cm_path.clone(),
+            category: category.to_string(), source: "shellex".to_string(),
+            file_path: info.file_path, command: String::new(),
+            enabled, confirm_required: false, confirm_reason: String::new(),
+            unknown_convention: false, blocked_by, target: String::new(),
+            orphan: false, orphan_reason: String::new(),
+        });
+    }
+    let _ = RegCloseKey(hk);
+}

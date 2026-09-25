@@ -247,23 +247,34 @@ pub async fn contextmenu_scan<R: Runtime>(
 
     snap_clear(&label);
     log::write_log("info", "扫描右键菜单");
-    let out = match run_ps(PS_SCAN, Duration::from_secs(60), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    if out.timed_out {
-        return json!({ "success": false, "message": "扫描超时（超过 60 秒），请稍后重试或关闭其他占用注册表的程序" });
-    }
-    if out.code != 0 {
-        log::write_log("error", &format!("右键菜单扫描失败: {}", out.stderr));
-        return json!({ "success": false, "message": if out.stderr.is_empty() { "扫描失败".into() } else { out.stderr } });
-    }
-    let data: Vec<Value> = match parse_last_json(&out.stdout).and_then(|v| match v {
-        Value::Array(a) => Some(a),
-        _ => None,
-    }) {
-        Some(a) => a,
-        None => return json!({ "success": false, "message": "解析失败" }),
+
+    // S1：原生优先，失败自动回退 PS
+    let data: Vec<Value> = match crate::engine::native::cm_scan() {
+        Ok(items) => {
+            log::write_log("info", &format!("右键菜单原生扫描完成: {} 项", items.len()));
+            items
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("右键菜单原生扫描失败，回退 PS: {e}"));
+            let out = match run_ps(PS_SCAN, Duration::from_secs(60), None) {
+                Ok(o) => o,
+                Err(e) => return json!({ "success": false, "message": e }),
+            };
+            if out.timed_out {
+                return json!({ "success": false, "message": "扫描超时（超过 60 秒），请稍后重试或关闭其他占用注册表的程序" });
+            }
+            if out.code != 0 {
+                log::write_log("error", &format!("右键菜单扫描失败: {}", out.stderr));
+                return json!({ "success": false, "message": if out.stderr.is_empty() { "扫描失败".into() } else { out.stderr } });
+            }
+            match parse_last_json(&out.stdout).and_then(|v| match v {
+                Value::Array(a) => Some(a),
+                _ => None,
+            }) {
+                Some(a) => a,
+                None => return json!({ "success": false, "message": "解析失败" }),
+            }
+        }
     };
     let normalized = normalize_ids(data);
     log::write_log("info", &format!("扫描右键菜单完成: {} 项", normalized.len()));
