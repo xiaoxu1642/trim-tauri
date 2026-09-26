@@ -1587,7 +1587,7 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             if !program.eq_ignore_ascii_case("powercfg.exe") {
                 return Err(format!("Spawn 算子只允许 powercfg.exe，收到 {program}"));
             }
-            let out = std::process::Command::new(crate::engine::systembin::system_tool(program))
+            let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool(program))
                 .args(args)
                 .output()
                 .map_err(|e| format!("powercfg 执行失败: {e}"))?;

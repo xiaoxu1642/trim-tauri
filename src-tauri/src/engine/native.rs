@@ -934,7 +934,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     }
 
     // ---------- 计划任务（schtasks 命令） ----------
-    if let Ok(output) = std::process::Command::new(system_tool("schtasks"))
+    if let Ok(output) = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
         .args(["/query", "/fo", "csv", "/nh", "/v"])
         .output()
     {
@@ -1181,13 +1181,13 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
         let mut started = 0;
         for p in &paths {
             if std::path::Path::new(p).exists() {
-                if std::process::Command::new(p).spawn().is_ok() { started += 1; }
+                if crate::engine::systembin::quiet_cmd(p).spawn().is_ok() { started += 1; }
             }
         }
         if started == 0 {
             let fallback = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
             let fp = format!("{fallback}\\explorer.exe");
-            if std::process::Command::new(&fp).spawn().is_ok() { started = 1; }
+            if crate::engine::systembin::quiet_cmd(&fp).spawn().is_ok() { started = 1; }
         }
         std::thread::sleep(std::time::Duration::from_millis(900));
 
@@ -2414,7 +2414,7 @@ pub fn service_set_start_pub(name: &str, start: u32) -> Result<(), String> {
 pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> Result<(), String> {
     let full = format!("{}{}", path.unwrap_or_default(), name);
     let arg = if disable { "/DISABLE" } else { "/ENABLE" };
-    let output = std::process::Command::new(system_tool("schtasks"))
+    let output = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
         .args(["/Change", "/TN", &full, arg])
         .output()
         .map_err(|e| format!("schtasks 执行失败: {e}"))?;
@@ -2653,7 +2653,7 @@ pub fn stubborn_block() -> Result<Value, String> {
     let block_tasks = ["WpsUpdateTask_CHENG", "WpsUpdateLogonTask_CHENG"];
     for task in &block_tasks {
         // 检查任务是否存在
-        let exists = match std::process::Command::new(system_tool("schtasks"))
+        let exists = match crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
             .args(["/Query", "/TN", task, "/NH"])
             .output()
         {
@@ -2665,14 +2665,14 @@ pub fn stubborn_block() -> Result<Value, String> {
         // 备份
         if !backup_dir.as_os_str().is_empty() {
             let xml_path = backup_dir.join(format!("{task}.xml"));
-            let _ = std::process::Command::new(system_tool("schtasks"))
+            let _ = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
                 .args(["/Query", "/TN", task, "/XML"])
                 .stdout(std::process::Stdio::from(std::fs::File::create(&xml_path).unwrap_or_else(|_| std::fs::File::open("NUL").unwrap())))
                 .status();
         }
 
         // 删除
-        let deleted = match std::process::Command::new(system_tool("schtasks"))
+        let deleted = match crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
             .args(["/Delete", "/TN", task, "/F"])
             .output()
         {
@@ -2953,7 +2953,7 @@ pub fn netcheck_status() -> Result<Value, String> {
             g
         } else { false };
         // WinHTTP 代理（spawn netsh）
-        let winhttp_out = std::process::Command::new(system_tool("netsh"))
+        let winhttp_out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
             .args(["winhttp", "show", "proxy"])
             .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string());
         let winhttp_has_proxy = winhttp_out.as_ref()
@@ -3898,7 +3898,7 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String>
     if task_name.is_empty() { return Err("缺少任务名".into()); }
     let full_name = format!("{task_path}{task_name}");
     let arg = if enable { "/ENABLE" } else { "/DISABLE" };
-    let output = std::process::Command::new(system_tool("schtasks"))
+    let output = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
         .args(["/Change", "/TN", &full_name, arg])
         .output().map_err(|e| format!("schtasks 执行失败: {e}"))?;
     if output.status.success() {
@@ -4444,7 +4444,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "备份路径无法编码，未执行删除"}));
                     continue;
                 };
-                let export_out = std::process::Command::new(system_tool("reg.exe"))
+                let export_out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
                     .args(["export", &export_path, reg_file_str, "/y"])
                     .output();
                 if export_out.is_err() || !reg_file.exists() {
@@ -4525,7 +4525,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 // 导出 XML 备份
                 let safe = safe_name(&task_name);
                 let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
-                let query_out = std::process::Command::new(system_tool("schtasks"))
+                let query_out = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
                     .args(["/Query", "/TN", &tn, "/XML"])
                     .output();
                 if let Ok(out) = query_out {
@@ -4539,7 +4539,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     continue;
                 }
                 // 删除
-                let del_out = std::process::Command::new(system_tool("schtasks"))
+                let del_out = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
                     .args(["/Delete", "/TN", &tn, "/F"])
                     .output();
                 if del_out.is_err() || !del_out.unwrap().status.success() {
@@ -4809,7 +4809,7 @@ pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
         // reg.exe export
         // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
         let Some(reg_file_str) = reg_file.to_str() else { failed += 1; continue; };
-        let out = std::process::Command::new(system_tool("reg.exe"))
+        let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
             .args(["export", &write_path, reg_file_str, "/y"])
             .output();
         let success = out.is_ok() && out.as_ref().unwrap().status.success();
@@ -4985,7 +4985,7 @@ pub fn cm_restore() -> Result<Value, String> {
                 skip_reasons.push(format!("{name}（备份文件路径无法编码，已跳过）"));
                 continue;
             };
-            let out = std::process::Command::new(system_tool("reg.exe"))
+            let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
                 .args(["import", path_str])
                 .output();
             if out.is_err() || !out.unwrap().status.success() {
@@ -5091,7 +5091,7 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
         let backup_file = backup_dir.join(format!("backup_{stamp}_{part}.reg"));
         // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，整批中止（备份不完整绝不能继续写入）
         let Some(backup_file_str) = backup_file.to_str() else { return Err("备份路径无法编码".into()); };
-        let out = std::process::Command::new(system_tool("reg.exe"))
+        let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
             .args(["export", &reg_path, backup_file_str, "/y"])
             .output();
         if out.is_err() || !out.unwrap().status.success() {
@@ -5178,7 +5178,7 @@ pub fn peripheral_restore() -> Result<Value, String> {
         // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，跳过该件（imported 不增，
         // 由既有 partial 记账如实呈现），而不是 panic
         let Some(f_str) = f.to_str() else { continue; };
-        let out = std::process::Command::new(system_tool("reg.exe"))
+        let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
             .args(["import", f_str])
             .output();
         if out.is_ok() && out.unwrap().status.success() {
@@ -5239,7 +5239,7 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
     // 便携版/提权实例场景下，CreateProcessW 的搜索顺序里 exe 所在目录与 CWD 都排在
     // System32 之前，裸名会以管理员权限执行植入的同名工具。安装包路径不在 PINNED，
     // system_tool 原样放行，不受影响。
-    let out = std::process::Command::new(system_tool(program))
+    let out = crate::engine::systembin::quiet_cmd(system_tool(program))
         .args(&args)
         .output()
         .map_err(|e| format!("执行安装程序失败: {e}"))?;
@@ -5275,7 +5275,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             if name.trim().is_empty() {
                 return Ok(json!({"ok": false, "message": "缺少网卡名"}));
             }
-            let out = std::process::Command::new(system_tool("netsh"))
+            let out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
                 .args(["interface", "set", "interface", &format!("name={name}"), "admin=enabled"])
                 .output()
                 .map_err(|e| format!("netsh 执行失败: {e}"))?;
@@ -5298,7 +5298,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             if name.is_empty() {
                 return Ok(json!({"ok": false, "message": "缺少接口标识"}));
             }
-            let out = std::process::Command::new(system_tool("netsh"))
+            let out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
                 .args(["interface", "ipv4", "set", "dnsservers", &format!("name={name}"), "source=dhcp"])
                 .output()
                 .map_err(|e| format!("netsh 执行失败: {e}"))?;
@@ -5309,7 +5309,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "start-dhcp" => {
-            let out = std::process::Command::new(system_tool("sc"))
+            let out = crate::engine::systembin::quiet_cmd(system_tool("sc"))
                 .args(["start", "Dhcp"])
                 .output()
                 .map_err(|e| format!("sc 执行失败: {e}"))?;
@@ -5320,7 +5320,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "start-dnscache" => {
-            let out = std::process::Command::new(system_tool("sc"))
+            let out = crate::engine::systembin::quiet_cmd(system_tool("sc"))
                 .args(["start", "Dnscache"])
                 .output()
                 .map_err(|e| format!("sc 执行失败: {e}"))?;
@@ -5350,7 +5350,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "reset-winhttp" => {
-            let out = std::process::Command::new(system_tool("netsh"))
+            let out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
                 .args(["winhttp", "reset", "proxy"])
                 .output()
                 .map_err(|e| format!("netsh 执行失败: {e}"))?;
@@ -5369,7 +5369,7 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
     // 审查 v2-F7：系统工具必须解析到 System32 再执行，不能用裸进程名 ——
     // 搜索顺序里「exe 所在目录」与「父进程 CWD」都排在 System32 之前。
     let exe = crate::engine::systembin::system_tool(program);
-    match std::process::Command::new(exe).args(args).output() {
+    match crate::engine::systembin::quiet_cmd(exe).args(args).output() {
         Ok(out) => out.status.success(),
         Err(_) => false,
     }
@@ -5377,7 +5377,7 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
 
 fn restart_service(name: &str) -> bool {
     let sc = crate::engine::systembin::system_tool("sc");
-    let _ = std::process::Command::new(&sc).args(["stop", name]).output();
+    let _ = crate::engine::systembin::quiet_cmd(&sc).args(["stop", name]).output();
     std::thread::sleep(std::time::Duration::from_millis(500));
     run_cmd("sc", &["start", name])
 }
@@ -5496,7 +5496,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             Ok((ok, if ok { "性能计数器已重建".into() } else { "性能计数器重建失败".into() }))
         }
         "store" => {
-            let _ = std::process::Command::new(system_tool("wsreset.exe")).spawn();
+            let _ = crate::engine::systembin::quiet_cmd(system_tool("wsreset.exe")).spawn();
             Ok((true, "Store 缓存清理已启动".into()))
         }
         "netstack" => {
@@ -5512,7 +5512,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
         }
         "search" => {
             // 停止 WSearch，清空索引，启动
-            let _ = std::process::Command::new(system_tool("sc")).args(["stop", "WSearch"]).output();
+            let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", "WSearch"]).output();
             std::thread::sleep(std::time::Duration::from_secs(2));
             let idx = std::path::PathBuf::from(r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows");
             let _ = std::fs::remove_dir_all(&idx);
@@ -5522,7 +5522,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
         "wu" => {
             // 停止更新服务，清理缓存，启动
             for svc in ["wuauserv", "bits", "cryptsvc"] {
-                let _ = std::process::Command::new(system_tool("sc")).args(["stop", svc]).output();
+                let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", svc]).output();
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
             let cache = std::path::PathBuf::from(r"C:\Windows\SoftwareDistribution\DataStore");
@@ -5839,7 +5839,7 @@ pub fn overview_checkup() -> Result<Value, String> {
     checks.push(check_item("memory_channels", "内存通道", "unknown", "无法读取", "SMBIOS 未返回内存条信息", "未验证"));
 
     // 3. 电源计划（powercfg /getactivescheme）
-    if let Ok(out) = std::process::Command::new(system_tool("powercfg")).args(["/getactivescheme"]).output() {
+    if let Ok(out) = crate::engine::systembin::quiet_cmd(system_tool("powercfg")).args(["/getactivescheme"]).output() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         if let Some(start) = stdout.find('(') {
             if let Some(end) = stdout[start..].find(')') {
@@ -6013,12 +6013,22 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                 let pattern = fk.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
                 let recurse = fk.get("recurse").and_then(|v| v.as_bool()).unwrap_or(true);
                 let expanded = expand_env(path);
-                // 简单 glob：只支持路径中不含 * 的情况
-                if expanded.contains('*') {
-                    return Err("复杂 glob 需 PS 回退".into());
+                // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）
+                for base in expand_glob_dirs(&expanded) {
+                    if let Ok(meta) = std::fs::metadata(&base) {
+                        if meta.is_file() {
+                            if seen.insert(base.clone()) {
+                                total += 1;
+                                if files.len() < cap {
+                                    files.push(json!({"path": base, "size": meta.len()}));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    if !std::path::Path::new(&base).is_dir() { continue; }
+                    enumerate_files(&base, pattern, recurse, &mut files, &mut total, &mut seen, cap);
                 }
-                if !std::path::Path::new(&expanded).is_dir() { continue; }
-                enumerate_files(&expanded, pattern, recurse, &mut files, &mut total, &mut seen, cap);
             }
             return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files}));
         }
@@ -6034,6 +6044,38 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
     }
 
     Ok(json!({"kind": "files", "total": 0, "truncated": false, "files": []}))
+}
+
+/// 段级 glob 展开（规则库 `%...\*\...` 形态，真机 v0.1.6 反馈）：路径中含 `*`
+/// 的段对子项名做通配匹配，返回展开后的具体路径（目录或文件）。跳过 reparse 项。
+/// 只认 `*`（与 glob_match 同口径）；静态段直接拼接，开销可忽略。
+fn expand_glob_dirs(pattern_path: &str) -> Vec<String> {
+    let mut cur: Vec<String> = Vec::new();
+    for seg in pattern_path.split('\\').filter(|s| !s.is_empty()) {
+        if cur.is_empty() {
+            cur.push(seg.to_string());
+            continue;
+        }
+        let mut next = Vec::new();
+        for base in &cur {
+            if !seg.contains('*') {
+                next.push(format!("{base}\\{seg}"));
+                continue;
+            }
+            let Ok(rd) = std::fs::read_dir(base) else { continue };
+            for entry in rd.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !glob_match(seg, &name) { continue; }
+                // 同 enumerate_files 口径：跳过重解析点
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_symlink() { continue; }
+                }
+                next.push(format!("{base}\\{name}"));
+            }
+        }
+        cur = next;
+    }
+    cur
 }
 
 fn enumerate_files(
@@ -6109,8 +6151,9 @@ pub struct CleanupExecuteResult {
 
 /// 清理执行（对应 cleanup_execute.ps1，S3）
 ///
-/// 只处理文件删除（fileKeys/目录型）；注册表删除和复杂模式返回 Err 触发 PS 回退。
-/// to_recycle=true 时只枚举不删除，返回 recycle_entries 由主进程移入回收站。
+/// 三类目标模型全部原生化（v0.1.6 真机修复）：fileKeys（含段级 glob 展开）、
+/// regKeys（先备份后删，fail-closed）、special=dism。to_recycle=true 时文件只
+/// 枚举不删除，返回 recycle_entries 由主进程移入回收站；注册表/DISM 不进回收站。
 pub fn cleanup_execute(
     items: &[Value],
     rules: &Value,
@@ -6131,14 +6174,99 @@ pub fn cleanup_execute(
             continue;
         };
 
-        // 注册表型回退 PS
-        if rule.get("regKeys").is_some() {
-            return Err("注册表型清理需 PS 回退".into());
+        // 注册表型：先逐键 reg.exe export 备份（任一失败整条不删，对齐 PS fail-closed
+        // 语义——宁可少删，不可无备份地删），再按 value 语义删除（无 value=删整树）。
+        // 注册表不进回收站，to_recycle 两种模式同径（对齐 PS）。
+        if let Some(reg_keys) = rule.get("regKeys").and_then(|v| v.as_array()) {
+            if !reg_keys.is_empty() {
+                let backup_dir = crate::engine::paths::app_data_dir().join("cleanup-reg-backup");
+                let _ = std::fs::create_dir_all(&backup_dir);
+                // 解析 + 存在性过滤（与 PS Measure-RegRule 同口径）
+                let mut parsed: Vec<(HKEY, String, Option<String>)> = Vec::new();
+                for rk in reg_keys {
+                    let path = rk.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    if path.is_empty() { continue; }
+                    let expanded = expand_env(path);
+                    let Some((hive, rest)) = parse_reg_path(&expanded) else { continue; };
+                    if !reg_key_exists(hive, &rest) { continue; }
+                    let value = rk.get("value").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    parsed.push((hive, rest, value));
+                }
+                if parsed.is_empty() {
+                    details.push(json!({"id": id, "name": name, "status": "ok", "freed": 0, "message": "注册表项不存在，无需清理", "fileCount": 0}));
+                    continue;
+                }
+                // 逐键 export 备份
+                let stamp = crate::engine::now_ms();
+                let mut backup_failed = false;
+                for (i, (hive, rest, _)) in parsed.iter().enumerate() {
+                    let file = backup_dir.join(format!("{stamp}_reg_{id}_{}.reg", i + 1));
+                    // 备份路径由 app_data_dir + ASCII 段拼成，非 UTF-8 场景按 fail-closed 处理
+                    let Some(file_str) = file.to_str() else { backup_failed = true; break; };
+                    let hive_short = if *hive == HKEY_LOCAL_MACHINE { "HKLM" }
+                        else if *hive == HKEY_CURRENT_USER { "HKCU" }
+                        else if *hive == windows::Win32::System::Registry::HKEY_CLASSES_ROOT { "HKCR" }
+                        else if *hive == windows::Win32::System::Registry::HKEY_USERS { "HKU" }
+                        else { "HKCC" };
+                    let export_path = format!("{hive_short}\\{rest}");
+                    match crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
+                        .args(["export", &export_path, file_str, "/y"])
+                        .output()
+                    {
+                        Ok(o) if o.status.success() && file.exists() => {}
+                        _ => { backup_failed = true; break; }
+                    }
+                }
+                if backup_failed {
+                    details.push(json!({"id": id, "name": name, "status": "error", "freed": 0, "message": "注册表备份失败，未执行删除", "fileCount": 0}));
+                    continue;
+                }
+                let mut removed = 0i64;
+                let mut reg_failed = 0i64;
+                for (hive, rest, value) in &parsed {
+                    let ok = match value {
+                        Some(v) => reg_restore_delete(*hive, rest, v),
+                        None => reg_key_remove(*hive, rest, true),
+                    };
+                    if ok { removed += 1; } else { reg_failed += 1; }
+                }
+                total_files += removed;
+                let status = if reg_failed == 0 { "ok" } else if removed > 0 { "partial" } else { "fail" };
+                let message = if reg_failed == 0 {
+                    format!("已清理 {} 项注册表记录", removed)
+                } else {
+                    format!("已清理 {} 项注册表记录，{} 项失败", removed, reg_failed)
+                };
+                details.push(json!({
+                    "id": id, "name": name, "status": status,
+                    "freed": 0, "message": message, "fileCount": removed, "residual": reg_failed,
+                }));
+                continue;
+            }
         }
 
-        // special=dism 回退 PS
+        // special=dism：DISM /StartComponentCleanup /ResetBase（对齐 PS 执行语义；
+        // 高危提示已在前端红色确认层，/ResetBase 后更新不可卸载）
         if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
-            return Err("DISM 清理需 PS 回退".into());
+            let dism = crate::engine::systembin::quiet_cmd(system_tool("dism.exe"))
+                .args(["/Online", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase"])
+                .output();
+            let (status, message) = match &dism {
+                Ok(o) if o.status.success() => (
+                    "ok",
+                    "DISM 组件存储清理完成（/ResetBase 已执行，更新将不可卸载）".to_string(),
+                ),
+                Ok(o) => (
+                    "fail",
+                    format!("DISM 清理失败，退出码 {}", o.status.code().unwrap_or(-1)),
+                ),
+                Err(e) => ("fail", format!("DISM 执行失败: {e}")),
+            };
+            details.push(json!({
+                "id": id, "name": name, "status": status,
+                "freed": 0, "message": message, "fileCount": 0,
+            }));
+            continue;
         }
 
         // 收集要删除的文件
@@ -6151,13 +6279,18 @@ pub fn cleanup_execute(
                     let pattern = fk.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
                     let recurse = fk.get("recurse").and_then(|v| v.as_bool()).unwrap_or(true);
                     let expanded = expand_env(path);
-                    if expanded.contains('*') {
-                        return Err("复杂 glob 需 PS 回退".into());
+                    // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）；
+                    // 展开后的每个实际目录仍过 cleanup_root_ok（reparse 判拒，双保险）
+                    for base in expand_glob_dirs(&expanded) {
+                        if !cleanup_root_ok(&base) { continue; }
+                        if let Ok(meta) = std::fs::metadata(&base) {
+                            if meta.is_file() {
+                                files.push((base, meta.len()));
+                                continue;
+                            }
+                        }
+                        collect_files(&base, pattern, recurse, &mut files);
                     }
-                    // 审查 v2-F3：根路径准入改用 symlink_metadata + reparse 属性位。
-                    // 原先只有 is_dir()，而它会跟随 junction 返回 true，导致链接目标整棵被枚举。
-                    if !cleanup_root_ok(&expanded) { continue; }
-                    collect_files(&expanded, pattern, recurse, &mut files);
                 }
             }
         } else {

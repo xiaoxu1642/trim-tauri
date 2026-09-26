@@ -763,7 +763,19 @@ pub fn run_net_sample(args: &[String]) -> i32 {
 // ============================ R3: mem-clean ============================
 // 契约（v2 §2.5）：--items 恰好 5 个合法 id（含 standbyPriority0）；
 // 输出 {"before","after","freed","results":[{"id","name","ok","status"}]}；
-// 顺序 workingSet(80,1)→modified(80,2)→standby(80,3)→standbyPriority0(80,4)→combine(87)；
+// 顺序 workingSet(80,1)→modified(80,2)→standby(80,3)→standbyPriority0(80,4)→combine(130)；
+// combine 修正（真机 v0.1.6 反馈）：旧实现误用 info class 87（= SystemSpecialPoolInformation，
+// 内核以 C0000022 拒绝）+ 8 字节全零缓冲。Mem Reduct 同功能用的是
+// SystemCombinePhysicalMemoryInformation = 130 + 零初始化的 MEMORY_COMBINE_INFORMATION_EX
+// （x64 上 24 字节：HANDLE + SIZE_T + ULONG）。参考 phnt/ntexapi.h 与 memreduct src/main.c。
+const SYS_COMBINE_PHYSICAL_MEMORY_INFORMATION: u32 = 130;
+
+#[repr(C)]
+struct MemoryCombineInformationEx {
+    handle: *mut core::ffi::c_void,
+    pages_combined: usize,
+    flags: u32,
+}
 // 双特权；82/84 黑名单继承（不提供，不是失败）。
 
 const MEM_ITEMS: [(&str, u32, u32, u8, &str); 5] = [
@@ -771,7 +783,7 @@ const MEM_ITEMS: [(&str, u32, u32, u8, &str); 5] = [
     ("modified", 80, 2, 0, "修改列表"),
     ("standby", 80, 3, 0, "备用列表"),
     ("standbyPriority0", 80, 4, 0, "低优先级备用列表"),
-    ("combine", 87, 0, 1, "合并物理内存页"), // kind=1：8 字节全零缓冲（HandleCount=0）
+    ("combine", SYS_COMBINE_PHYSICAL_MEMORY_INFORMATION, 0, 1, "合并物理内存页"),
 ];
 
 unsafe fn enable_privilege(name: &str) -> bool {
@@ -827,8 +839,13 @@ fn mem_clean_core(want: &[String]) -> Result<String, String> {
                 let buf: u64 = *val as u64;
                 NtSetSystemInformation(*cls, &buf as *const u64 as *mut u8, 8)
             } else {
-                let buf: u64 = 0; // combine：HandleCount=0 → 合并全部
-                NtSetSystemInformation(*cls, &buf as *const u64 as *mut u8, 8)
+                // combine：零初始化 MEMORY_COMBINE_INFORMATION_EX（Handle=NULL → 全部进程）
+                let mut buf: MemoryCombineInformationEx = std::mem::zeroed();
+                NtSetSystemInformation(
+                    *cls,
+                    &mut buf as *mut MemoryCombineInformationEx as *mut u8,
+                    std::mem::size_of::<MemoryCombineInformationEx>() as u32,
+                )
             };
             results.push(format!("{{\"id\":\"{}\",\"name\":\"{}\",\"ok\":{},\"status\":{}}}", id, label, status == 0, status));
         }

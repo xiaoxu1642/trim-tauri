@@ -416,7 +416,7 @@ pub fn appearance_bg_open_dir<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
 /// 用 Explorer 打开目录（不经 shell 拼接命令，避免命令注入）
 fn open_folder(dir: &Path) {
     let arg = format!("/select,{}", dir.to_string_lossy().replace('/', "\\"));
-    let _ = std::process::Command::new(system_tool("explorer.exe")).arg(&arg).spawn();
+    let _ = crate::engine::systembin::quiet_cmd(system_tool("explorer.exe")).arg(&arg).spawn();
 }
 
 // ==================== 启动期环境自适应接线 ====================
@@ -462,7 +462,7 @@ fn on_power_event<R: Runtime>(app: &AppHandle<R>) {
 /// 走 `reg.exe` 而非注册表 API：与 `commands::misc::detect_dwm_inject_tools`
 /// 同源姿势，且不为一个低频只读查询新增 windows crate feature。
 fn query_sys_transparency() -> bool {
-    let out = std::process::Command::new(system_tool("reg"))
+    let out = crate::engine::systembin::quiet_cmd(system_tool("reg"))
         .args([
             "query",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",

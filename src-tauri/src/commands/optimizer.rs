@@ -185,7 +185,7 @@ fn native_execute_steps<R: tauri::Runtime>(
             if std::fs::write(&reg_path, reg.as_bytes()).is_err() {
                 failed += 1;
             } else {
-                let ok = match std::process::Command::new(system_tool("reg.exe"))
+                let ok = match crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
                     .args(["import", reg_path_str])
                     .output()
                 {
@@ -197,7 +197,7 @@ fn native_execute_steps<R: tauri::Runtime>(
             }
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
             // cmd 类型：spawn cmd /c
-            let ok = match std::process::Command::new(system_tool("cmd"))
+            let ok = match crate::engine::systembin::quiet_cmd(system_tool("cmd"))
                 .args(["/c", cmd])
                 .output()
             {
@@ -207,12 +207,12 @@ fn native_execute_steps<R: tauri::Runtime>(
             if !ok { failed += 1; }
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
             // service 类型：sc stop + 可选 sc config disabled
-            let _ = std::process::Command::new(system_tool("sc")).args(["stop", service]).output();
+            let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", service]).output();
             if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
-                let _ = std::process::Command::new(system_tool("sc")).args(["config", service, "start=", "disabled"]).output();
+                let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["config", service, "start=", "disabled"]).output();
             }
             // 检查服务是否存在
-            let exists = match std::process::Command::new(system_tool("sc")).args(["query", service]).output() {
+            let exists = match crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["query", service]).output() {
                 Ok(o) => o.status.success(),
                 Err(_) => false,
             };

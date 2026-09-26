@@ -365,7 +365,7 @@ pub async fn startup_openlocation<R: Runtime>(
     }
     // explorer /select,<path>：参数独立传递（不走 shell），无命令注入面
     let arg = format!("/select,{}", target.replace('/', "\\"));
-    match std::process::Command::new(system_tool("explorer.exe")).arg(&arg).spawn() {
+    match crate::engine::systembin::quiet_cmd(system_tool("explorer.exe")).arg(&arg).spawn() {
         Ok(_) => json!({ "success": true }),
         Err(e) => {
             log::write_log("error", &format!("打开所在位置异常: {e}"));

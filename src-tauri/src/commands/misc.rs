@@ -54,7 +54,7 @@ pub fn detect_dwm_inject_tools_async<R: tauri::Runtime>(app: AppHandle<R>) {
 
 fn detect_dwm_inject_tools() -> Option<String> {
     // 进程痕迹：tasklist /FI "IMAGENAME eq DWMBlurGlass.exe" /FO CSV
-    if let Ok(out) = std::process::Command::new(system_tool("tasklist"))
+    if let Ok(out) = crate::engine::systembin::quiet_cmd(system_tool("tasklist"))
         .args(["/FI", "IMAGENAME eq DWMBlurGlass.exe", "/FO", "CSV"])
         .output()
     {
@@ -64,7 +64,7 @@ fn detect_dwm_inject_tools() -> Option<String> {
         }
     }
     // 计划任务痕迹：schtasks /Query /TN DWMBlurGlass_Extend
-    if let Ok(status) = std::process::Command::new(system_tool("schtasks"))
+    if let Ok(status) = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
         .args(["/Query", "/TN", "DWMBlurGlass_Extend"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

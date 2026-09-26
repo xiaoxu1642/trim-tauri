@@ -49,8 +49,7 @@ const PINNED: &[&str] = &[
 /// 进程名 → 可交给 `Command::new` 的路径。
 ///
 /// 白名单外的名字原样返回（用 `PathBuf` 包一层只是为了统一类型）。
-pub fn system_tool(program: &str) -> std::path::PathBuf {
-    if !PINNED.iter().any(|p| p.eq_ignore_ascii_case(program)) {
+pub fn system_tool(program: &str) -> std::path::PathBuf {    if !PINNED.iter().any(|p| p.eq_ignore_ascii_case(program)) {
         return std::path::PathBuf::from(program);
     }
     let root = std::env::var_os("SystemRoot")
@@ -79,6 +78,22 @@ pub fn system_tool(program: &str) -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from(program)
+}
+
+/// 后台静默 spawn 的统一入口（真机 v0.1.6 反馈：右键/启动项扫描时 schtasks 等
+/// 控制台程序弹出可见 cmd 窗口）——GUI 进程拉起控制台程序时，不带
+/// CREATE_NO_WINDOW 会让 Windows 新建控制台并前台显示。所有**后台**系统工具
+/// 调用必须经此构造；两个例外不走这里：quickcmds 的可见控制台（产品功能，
+/// CREATE_NEW_CONSOLE）与 pwsh 执行层（自带同款 flags）。
+pub fn quiet_cmd(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
 }
 
 #[cfg(test)]

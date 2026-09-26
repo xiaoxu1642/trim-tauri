@@ -1660,8 +1660,9 @@ fn git_fetch_rules_file() -> Option<String> {
 
 /// 带超时的 git 调用（对照 exec 的 timeout；超时 kill 并返回 None）
 fn run_git(cwd: &str, args: &[&str], timeout_secs: u64) -> Option<String> {
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("git")
+    use std::process::Stdio;
+    // v0.1.6 真机修复：git 也在后台静默跑（规则库更新不该闪控制台窗）
+    let mut child = crate::engine::systembin::quiet_cmd("git")
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
