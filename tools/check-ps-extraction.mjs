@@ -169,16 +169,29 @@ for (const m of MAPPING) {
 if (work) rmSync(work, { recursive: true, force: true });
 // 「行为层已验证」= 该跑的每条都真跑了、且没有一条以「跑不起来」告终
 const behCovered = runCompare && behRunnable > 0 && behRun === behRunnable && behError === 0;
-console.log(`\n行为层覆盖：${runCompare ? `${behRun}/${behRunnable}` : '未执行（0/0）'}`);
+// 审查 v3-M4：候选集为空（现存 .ps1 全部登记行为层豁免）时必须明说 SKIP——
+// 与 F1 对 check-ps-substitution 的修法同口径：✓ 只留给「真验过」，空集不许冒充通过
+const behIdle = behRunnable === 0;
+console.log(
+  `\n行为层覆盖：${runCompare
+    ? (behIdle ? 'SKIP（行为层无对象：0 条断言可跑）' : `${behRun}/${behRunnable}`)
+    : (behIdle ? '未执行（行为层无对象：现存 .ps1 全部登记豁免）' : '未执行（0/0）')}`,
+);
 if (!runCompare) {
   console.log(STRICT
     ? '✗ --strict 要求行为层已验证，本次未执行（发布前验收：加 --run 真跑，或去掉 --strict 只当静态门禁）'
-    : '※ 本次只做了文本层对拍：行为层未验证，不代表 .ps1 与 JS 在真实 pwsh 下等价。');
+    : behIdle
+      ? '※ 本次只做了文本层对拍：行为层候选集为空（全部登记豁免），已无从失效可查——豁免理由变动时须重新评估。'
+      : '※ 本次只做了文本层对拍：行为层未验证，不代表 .ps1 与 JS 在真实 pwsh 下等价。');
 }
 const textFail = fail;
 const ok = textFail === 0 && (!STRICT || behCovered);
 const verdict = ok
-  ? (behCovered ? '✓ 全部门禁通过（文本层 + 行为层均已验证）' : '✓ 文本层门禁通过（行为层未验证，见上）')
+  ? (behCovered
+      ? '✓ 全部门禁通过（文本层 + 行为层均已验证）'
+      : behIdle && runCompare
+        ? 'SKIP（文本层通过；行为层无对象：0 条断言可跑，不算验证）'
+        : '✓ 文本层门禁通过（行为层未验证，见上）')
   : `✗ ${textFail} 项未通过${STRICT && !behCovered ? '（另：--strict 要求行为层已验证，本次未达成）' : ''}`;
 console.log(`\n${verdict}`);
 process.exit(ok ? 0 : 1);

@@ -2325,9 +2325,70 @@ pub fn reg_key_remove(hive: HKEY, subkey: &str, recurse: bool) -> bool {
     }
 }
 
-/// 停止服务（`Stop-Service -Name X -Force` 的等价物）
-pub fn service_stop_pub(name: &str) -> Result<(), String> {
+/// 枚举子键名（v3-K1：`Get-ChildItem <注册表键>` 的等价物）。
+/// 键不存在 → 空集（对齐 PS `-ErrorAction SilentlyContinue`：无迭代即无操作）。
+pub fn reg_enum_subkeys_pub(hive: HKEY, subkey: &str) -> Vec<String> {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
     unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return Vec::new();
+        }
+        let names = reg_enum_subkeys(hk);
+        let _ = RegCloseKey(hk);
+        names
+    }
+}
+
+/// 枚举 `Enum\PCI` 下实例 `Class` 值等于 `class` 的设备（v3-K1）。
+///
+/// 等价性：Win32_VideoController 的成员即「Display」安装类设备、Win32_USBController
+/// 即「USB」类；数据层再以 `PNPDeviceID -like "PCI*"` 过滤到 PCI 总线 —— 与本函数
+/// 在两级子键上按 Class 过滤的成员集一致，且不依赖 WMI 服务在运行。
+/// 返回 PNPDeviceID（`PCI\VEN_x…\实例串` 形式）。
+pub fn reg_enum_dev_ids(class: &str) -> Vec<String> {
+    const BASE: &str = r"SYSTEM\CurrentControlSet\Enum\PCI";
+    let mut out = Vec::new();
+    let mut root = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(to_wide(BASE).as_ptr()), Some(0), KEY_READ, &mut root)
+            .is_err()
+        {
+            return out;
+        }
+        for dev in reg_enum_subkeys(root) {
+            let dev_path = format!("{BASE}\\{dev}");
+            let mut dev_hk = HKEY::default();
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(to_wide(&dev_path).as_ptr()), Some(0), KEY_READ, &mut dev_hk)
+                .is_err()
+            {
+                continue;
+            }
+            for inst in reg_enum_subkeys(dev_hk) {
+                let inst_path = format!("{dev_path}\\{inst}");
+                let mut inst_hk = HKEY::default();
+                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(to_wide(&inst_path).as_ptr()), Some(0), KEY_READ, &mut inst_hk)
+                    .is_err()
+                {
+                    continue;
+                }
+                let hit = reg_read_string(inst_hk, "Class")
+                    .map(|c| c.eq_ignore_ascii_case(class))
+                    .unwrap_or(false);
+                let _ = RegCloseKey(inst_hk);
+                if hit {
+                    out.push(format!("PCI\\{dev}\\{inst}"));
+                }
+            }
+            let _ = RegCloseKey(dev_hk);
+        }
+        let _ = RegCloseKey(root);
+    }
+    out
+}
+
+/// 停止服务（`Stop-Service -Name X -Force` 的等价物）
+pub fn service_stop_pub(name: &str) -> Result<(), String> {    unsafe {
         if service_stop(name) {
             Ok(())
         } else {
@@ -4377,8 +4438,14 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 let reg_file = deleted_dir.join(format!("{stamp}_reg_{safe}.reg"));
                 let hive_short = if hive == HKEY_LOCAL_MACHINE { "HKLM" } else { "HKCU" };
                 let export_path = format!("{hive_short}\\{subkey}");
+                // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
+                let Some(reg_file_str) = reg_file.to_str() else {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "备份路径无法编码，未执行删除"}));
+                    continue;
+                };
                 let export_out = std::process::Command::new(system_tool("reg.exe"))
-                    .args(["export", &export_path, reg_file.to_str().unwrap(), "/y"])
+                    .args(["export", &export_path, reg_file_str, "/y"])
                     .output();
                 if export_out.is_err() || !reg_file.exists() {
                     failed += 1;
@@ -4494,7 +4561,11 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
     if records.is_empty() {
         let _ = std::fs::remove_file(&disabled_file);
     } else {
-        let _ = std::fs::write(&disabled_file, serde_json::to_string_pretty(&Value::Array(records)).unwrap_or_else(|_| "[]".into()));
+        // 审查 v3-L1：禁用台账走原子写（直写崩溃/断电会留下半截 JSON，还原侧读不到）
+        let _ = crate::security::atomic_write_json(
+            &disabled_file,
+            &Value::Array(records),
+        );
     }
 
     Ok(json!({"success": success, "failed": failed, "results": results, "fsDelete": fs_delete}))
@@ -4736,8 +4807,10 @@ pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
         let reg_file = backup_dir.join(format!("registry_{idx}_{safe_name}.reg"));
 
         // reg.exe export
+        // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
+        let Some(reg_file_str) = reg_file.to_str() else { failed += 1; continue; };
         let out = std::process::Command::new(system_tool("reg.exe"))
-            .args(["export", &write_path, reg_file.to_str().unwrap(), "/y"])
+            .args(["export", &write_path, reg_file_str, "/y"])
             .output();
         let success = out.is_ok() && out.as_ref().unwrap().status.success();
         let header_hive = reg_file_header_hive(&reg_file);
@@ -4765,7 +4838,9 @@ pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
         "registryFiles": reg_records,
     });
     let manifest_path = backup_dir.join("manifest.json");
-    let _ = std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".into()));
+    // 审查 v3-L1：manifest 是还原侧 fail-closed 的判据（缺失/不可解析即拒绝导入），
+    // 直写崩溃会留下半截 JSON 让整份备份变废纸 —— 走原子写，失败要如实记账
+    let manifest_ok = crate::security::atomic_write_json(&manifest_path, &manifest).is_ok();
 
     Ok(json!({
         "backupDir": backup_dir.to_string_lossy().to_string(),
@@ -4774,6 +4849,7 @@ pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
         "exported": exported,
         "copied": copied,
         "failed": failed,
+        "manifestOk": manifest_ok,
     }))
 }
 // ==================== B6 cm_restore：右键菜单防篡改恢复 ====================
@@ -4903,8 +4979,14 @@ pub fn cm_restore() -> Result<Value, String> {
                 continue;
             }
             // reg.exe import
+            // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
+            let Some(path_str) = path.to_str() else {
+                failed += 1;
+                skip_reasons.push(format!("{name}（备份文件路径无法编码，已跳过）"));
+                continue;
+            };
             let out = std::process::Command::new(system_tool("reg.exe"))
-                .args(["import", path.to_str().unwrap()])
+                .args(["import", path_str])
                 .output();
             if out.is_err() || !out.unwrap().status.success() {
                 failed += 1;
@@ -5007,8 +5089,10 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
         part += 1;
         let reg_path = format!("HKLM\\{subkey}");
         let backup_file = backup_dir.join(format!("backup_{stamp}_{part}.reg"));
+        // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，整批中止（备份不完整绝不能继续写入）
+        let Some(backup_file_str) = backup_file.to_str() else { return Err("备份路径无法编码".into()); };
         let out = std::process::Command::new(system_tool("reg.exe"))
-            .args(["export", &reg_path, backup_file.to_str().unwrap(), "/y"])
+            .args(["export", &reg_path, backup_file_str, "/y"])
             .output();
         if out.is_err() || !out.unwrap().status.success() {
             let _ = std::fs::remove_file(&backup_file);
@@ -5091,8 +5175,11 @@ pub fn peripheral_restore() -> Result<Value, String> {
 
     let mut imported = 0i64;
     for f in &group {
+        // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，跳过该件（imported 不增，
+        // 由既有 partial 记账如实呈现），而不是 panic
+        let Some(f_str) = f.to_str() else { continue; };
         let out = std::process::Command::new(system_tool("reg.exe"))
-            .args(["import", f.to_str().unwrap()])
+            .args(["import", f_str])
             .output();
         if out.is_ok() && out.unwrap().status.success() {
             imported += 1;
@@ -5148,7 +5235,11 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
     };
 
     crate::engine::log::write_log("info", &format!("运行库修复开始: {action_id}"));
-    let out = std::process::Command::new(program)
+    // 审查 v3-M1：dism.exe 是 PINNED 裸名，必须经 system_tool 解析到 System32 ——
+    // 便携版/提权实例场景下，CreateProcessW 的搜索顺序里 exe 所在目录与 CWD 都排在
+    // System32 之前，裸名会以管理员权限执行植入的同名工具。安装包路径不在 PINNED，
+    // system_tool 原样放行，不受影响。
+    let out = std::process::Command::new(system_tool(program))
         .args(&args)
         .output()
         .map_err(|e| format!("执行安装程序失败: {e}"))?;

@@ -80,6 +80,16 @@
     });
   }
 
-  document.addEventListener('DOMContentLoaded', init);
+  // 审查 v3-M3：本脚本由 app.js 的 IDLE_SCRIPTS 在**首帧空闲后**动态注入，
+  // 届时 DOMContentLoaded 早已发生——顶层注册该事件等于 init 永不执行
+  //（「启用鼠标拖尾」开关静默失效）。与 updater-ui.js 同款 readyState 守卫。
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
   window.mouseTrail = { setEnabled, isEnabled: () => enabled };
 })();
+
+
+

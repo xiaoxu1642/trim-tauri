@@ -1,21 +1,30 @@
-//! pwsh 步骤的原生解释器（B11）
+//! pwsh 步骤的原生解释器（B11；v3-K1 扩展）
 //!
 //! **范围刻意收窄**：只认优化项数据层里实际出现的指令子集，且参数必须是**字面量**
-//! （或由字面量赋值的简单变量）。任何不认识的 cmdlet、变量形态、表达式 → `Err`，
-//! 由调用方把**整条优化项**回退 PS 执行 —— 宁可慢，不可错。
+//! （或由字面量赋值的简单变量）。不认识的构造有两条出路，没有第三条：
+//! 1. **PsInline 通道**（v3-K1）：语句头在 `PS_INLINE_ALLOW` 白名单内 → 整段**逐字**
+//!    交给收件箱 Windows PowerShell 5.1 执行（System32 自带，`system_tool` 解析）。
+//!    逐字 = 零重解释 = 无「半懂硬执行」风险 —— 语义与旧 PS 回退路径完全一致。
+//! 2. **Err（fail-closed 不变）**：不在白名单 → 编译失败。白名单的职责是**登记意识**：
+//!    数据层新增任何构造必须在这里有意识地放行，`data_layer_coverage_report` 会在
+//!    cargo test 阶段把未放行的构造红掉（审查 v3-M4 教训：只打印的覆盖报告放过过 K1）。
 //!
-//! 为什么不写成通用解释器：半懂不懂的执行 = 静默没执行却报成功，是本项目最忌讳的
-//! 「假绿」。fail-closed 的收窄范围让这个模块的失败模式只有一种：回退到已经跑了
-//! 三年的 PS 路径。
+//! ## 为什么不写成通用解释器
+//! 半懂不懂的执行 = 静默没执行却报成功，是本项目最忌讳的「假绿」。原生面的失败
+//! 模式只有一种：编译期 Err；执行面的失败只有一种：某步操作真实失败并如实记账。
 //!
-//! 支持的指令（与数据层实测分布对应，见 tools/categorize-ps-steps.mjs）：
-//! - `New-ItemProperty` / `Set-ItemProperty`（-Path/-Name/-Value/-PropertyType/-Force）
-//! - `Remove-ItemProperty`（-Path/-Name）
-//! - `New-Item`（-Path/-Force，仅注册表路径）  `Remove-Item`（-Path/-Recurse/-Force）
-//! - `Stop-Service`（-Name/-Force）            `sc.exe config <svc> start= <n|disabled>`
-//! - `Disable-ScheduledTask` / `Enable-ScheduledTask`（-TaskName/-TaskPath）
-//! - `if (Test-Path $var) { … }`               `foreach ($n in @("a","b")) { … }`
-//! - `$var = "字面量"` / `$var = 123` / `$var = New-Object byte[] N`
+//! ## v3-K1 新增的原生构造（全部来自数据层实测清单）
+//! - `foreach ($n in $var)`（字面量列表变量）／`foreach ($n in $map.Keys)`（哈希表键）
+//! - 双引号插值 `"$var"`／`"$env:NAME"`；拼接 `"a" + $b + "c"`（赋值与命令实参两处）
+//! - `[byte[]](0x..,…)` 赋值与内联 `-Value`；`@{ K = v; … }` 哈希表与 `$map[$k]` 取值
+//! - `Join-Path <var|literal> <literal>`；`Test-Path -LiteralPath`
+//! - `schtasks /change /tn <name> /disable|/enable`（位置式，映射 TaskChange）
+//! - `powercfg <args>`（Spawn 算子，仅放行 PINNED 的 powercfg.exe）
+//! - `Get-ChildItem <注册表键> | ForEach-Object { … }` → ForSubKey 原生子键枚举，
+//!   `$_` 绑定为子键完整 PS 路径（`$_.PSPath` 即取该值）
+//! - `Get-CimInstance Win32_VideoController|Win32_USBController | Where-Object { … "PCI*" }
+//!   | ForEach-Object { … }` → ForDevKey：在 `Enum\PCI` 两级子键上按 `Class` 值过滤，
+//!   成员与对应 WMI 类 ∩ `PNPDeviceID -like "PCI*"` 等价（两个 WMI 类即按设备安装类取成员）
 
 use crate::engine::native;
 
@@ -48,9 +57,24 @@ pub enum PsOp {
     TaskChange { path: Option<String>, name: String, disable: bool },
     /// Test-Path 守卫：仅当键存在才执行其内层操作（语义是「服务没装就别硬写」）
     GuardedKeyExists { hive: Hive, subkey: String, ops: Vec<PsOp> },
+    /// 注册表子键枚举（`Get-ChildItem <键> | ForEach-Object { … }`，v3-K1）
+    ///
+    /// 体在**执行期**对每个子键延迟解析（`$_` 绑定为子键完整 PS 路径）；编译期已用
+    /// 探针值干跑校验过可解析性，执行期解析失败理论上不可达，仍按 Err 如实上报。
+    ForSubKey { hive: Hive, subkey: String, body: String, vars: VarMap },
+    /// 设备实例枚举（`Get-CimInstance Win32_VideoController|Win32_USBController …`，v3-K1）
+    ///
+    /// 在 `HKLM\SYSTEM\CurrentControlSet\Enum\PCI` 按实例 `Class` 值过滤；
+    /// `$_` 绑定为 PNPDeviceID（`PCI\VEN_x…\实例串`）。
+    ForDevKey { class: String, body: String, vars: VarMap },
+    /// PINNED 系统工具直调（仅 powercfg，v3-K1）。白名单外的程序在编译期就 Err。
+    Spawn { program: String, args: Vec<String> },
+    /// 收件箱 Windows PowerShell 逐字执行（v3-K1，白名单见 `PS_INLINE_ALLOW`）
+    PsInline { script: String },
 }
 
-// REG_VALUE_TYPE 裸值（windows crate 的 REG_VALUE_TYPE(u32)）
+/// 变量表（编译期逐语句就地更新；ForSubKey/ForDevKey 快照进算子供执行期延迟解析）
+pub type VarMap = std::collections::HashMap<String, Expr>;// REG_VALUE_TYPE 裸值（windows crate 的 REG_VALUE_TYPE(u32)）
 const KIND_SZ: u32 = 1;
 const KIND_EXPAND_SZ: u32 = 2;
 const KIND_BINARY: u32 = 3;
@@ -109,10 +133,13 @@ fn unquote(s: &str) -> Option<String> {
     None
 }
 
-/// 把一段源码按**顶层** `;` 或换行拆条（引号内与括号内的分号不算）
+/// 把一段源码按**顶层** `;` 或换行拆条（引号内与括号/花括号内的分号不算；
+/// 花括号深度是 v3-K1 加的：PsInline 资格扫描会直接对整段体拆条，块内的
+/// `;` 不能被误当语句边界）
 fn split_statements(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth_paren = 0i32;
+    let mut depth_brace = 0i32;
     let mut in_sq = false;
     let mut in_dq = false;
     let mut start = 0usize;
@@ -122,7 +149,9 @@ fn split_statements(s: &str) -> Vec<&str> {
             b'"' if !in_sq => in_dq = !in_dq,
             b'(' if !in_sq && !in_dq => depth_paren += 1,
             b')' if !in_sq && !in_dq => depth_paren -= 1,
-            b';' | b'\n' if !in_sq && !in_dq && depth_paren == 0 => {
+            b'{' if !in_sq && !in_dq => depth_brace += 1,
+            b'}' if !in_sq && !in_dq => depth_brace -= 1,
+            b';' | b'\n' if !in_sq && !in_dq && depth_paren == 0 && depth_brace == 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;
             }
@@ -258,22 +287,155 @@ fn strip_pipeline(s: &str) -> Option<&str> {
 }
 
 /// `$var = <expr>` 的右侧表达式
-#[derive(Debug, Clone)]
-enum Expr {
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
     Str(String),
     Bytes(usize),
+    /// `[byte[]](0x..,…)` 字面字节串（v3-K1：Scancode Map / MitigationOptions）
+    BytesData(Vec<u8>),
     List(Vec<String>),
+    /// `@{ K = v; … }` 哈希表（值按字符串存，取用方决定如何转；v3-K1）
+    Map(Vec<(String, String)>),
 }
 
-fn parse_assign(stmt: &str) -> Option<(String, Expr)> {
+/// 双引号串的变量插值：只认 `$name`（已赋值 Str）与 `$env:NAME`（进程环境变量，
+/// Windows 环境名大小写不敏感）。任何解析不了的引用、含反引号 → None（fail-closed）。
+fn interpolate(s: &str, vars: &VarMap) -> Option<String> {
+    if s.contains('`') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let rest = &s[i + 1..];
+        let (env, name_part) = match rest.strip_prefix("env:") {
+            Some(e) => (true, e),
+            None => (false, rest),
+        };
+        let name: String = name_part
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        let val = if env {
+            std::env::var(&name).ok()
+        } else {
+            match vars.get(&name) {
+                Some(Expr::Str(v)) => Some(v.clone()),
+                _ => None,
+            }
+        }?;
+        // 把消费掉的字符跳过（按字节前进）
+        let consumed = 1 + if env { 4 } else { 0 } + name.len();
+        for _ in 1..consumed {
+            chars.next();
+        }
+        out.push_str(&val);
+    }
+    Some(out)
+}
+
+/// 单个拼接项 / 实参求值：引号串（含插值）、`$var`、`$var.PSPath|.PNPDeviceID`、数字
+fn eval_term(t: &str, vars: &VarMap) -> Option<Expr> {
+    let t = t.trim();
+    if t.starts_with('\'') {
+        return unquote(t).map(Expr::Str);
+    }
+    if t.starts_with('"') {
+        return unquote(t)
+            .map(Expr::Str)
+            .or_else(|| interpolate(t.trim_matches('"'), vars).map(Expr::Str));
+    }
+    if let Some(rest) = t.strip_prefix('$') {
+        let (name, prop) = match rest.split_once('.') {
+            Some((n, p)) => (n, Some(p)),
+            None => (rest, None),
+        };
+        // 属性访问只认 PSPath / PNPDeviceID：枚举算子已把绑定值规整成
+        // 「解析器需要的形态」（子键完整路径 / PNPDeviceID），两者都直接取值
+        if let Some(p) = prop {
+            if p != "PSPath" && p != "PNPDeviceID" {
+                return None;
+            }
+        }
+        return match vars.get(name) {
+            Some(Expr::Str(v)) => Some(Expr::Str(v.clone())),
+            _ => None,
+        };
+    }
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(Expr::Str(t.to_string()));
+    }
+    None
+}
+
+/// 按顶层 ` + ` 拆拼接链（引号/括号/花括号/方括号内的 + 不算）；非拼接返回 None
+fn split_plus(s: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut start = 0usize;
+    let mut found = false;
+    for (i, &c) in s.as_bytes().iter().enumerate() {
+        match c {
+            b'\'' if !in_dq => in_sq = !in_sq,
+            b'"' if !in_sq => in_dq = !in_dq,
+            b'(' | b'{' | b'[' if !in_sq && !in_dq => depth += 1,
+            b')' | b'}' | b']' if !in_sq && !in_dq => depth -= 1,
+            b'+' if !in_sq && !in_dq && depth == 0 => {
+                // 只认「 + 」（两侧空白）形态，避免吃进 `+0x1` 之类
+                let prev_space = s[..i].ends_with(' ');
+                let next_space = s[i + 1..].starts_with(' ');
+                if prev_space && next_space {
+                    parts.push(&s[start..i]);
+                    start = i + 1;
+                    found = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !found {
+        return None;
+    }
+    parts.push(&s[start..]);
+    Some(parts)
+}
+
+fn parse_assign(stmt: &str, vars: &VarMap) -> Option<(String, Expr)> {
     let (lhs, rhs) = stmt.split_once('=')?;
     let name = lhs.trim().strip_prefix('$')?.to_string();
     if name.is_empty() || name.contains(char::is_whitespace) {
         return None;
     }
     let rhs = rhs.trim();
+    // 拼接链（`"a" + $b + "c"`）—— 任何一项求值失败即整体 None
+    if let Some(parts) = split_plus(rhs) {
+        let mut acc = String::new();
+        for p in parts {
+            match eval_term(p, vars) {
+                Some(Expr::Str(v)) => acc.push_str(&v),
+                _ => return None,
+            }
+        }
+        return Some((name, Expr::Str(acc)));
+    }
     if let Some(s) = unquote(rhs) {
         return Some((name, Expr::Str(s)));
+    }
+    // 依赖插值的双引号串（`"HKLM:\…Services\$n"` / `"$env:SystemDrive\…"`）
+    if rhs.starts_with('"') && rhs.ends_with('"') {
+        if let Some(s) = interpolate(&rhs[1..rhs.len() - 1], vars) {
+            return Some((name, Expr::Str(s)));
+        }
+        return None;
     }
     if !rhs.is_empty() && rhs.bytes().all(|b| b.is_ascii_digit()) {
         return Some((name, Expr::Str(rhs.to_string())));
@@ -283,6 +445,32 @@ fn parse_assign(stmt: &str) -> Option<(String, Expr)> {
         let n = n.parse::<usize>().ok()?;
         return Some((name, Expr::Bytes(n)));
     }
+    // `[byte[]](0x00,…)` 字面字节串
+    if let Some(inner) = rhs.strip_prefix("[byte[]](").and_then(|s| s.strip_suffix(')')) {
+        return Some((name, Expr::BytesData(parse_byte_list(inner)?)));
+    }
+    // `Join-Path <base> <leaf>`（base 可为变量或引号串）
+    if let Some(rest) = rhs.strip_prefix("Join-Path") {
+        let mut it = rest.trim().splitn(2, char::is_whitespace);
+        let base = it.next()?.trim();
+        let leaf = it.next()?.trim();
+        let leaf = unquote(leaf).or_else(|| eval_term(leaf, vars).and_then(|e| match e {
+            Expr::Str(s) => Some(s),
+            _ => None,
+        }))?;
+        let base = eval_term(base, vars).and_then(|e| match e {
+            Expr::Str(s) => Some(s),
+            _ => None,
+        })?;
+        return Some((
+            name,
+            Expr::Str(format!(
+                "{}\\{}",
+                base.trim_end_matches('\\').replace('/', "\\"),
+                leaf.replace('/', "\\")
+            )),
+        ));
+    }
     if rhs.starts_with("@(") && rhs.ends_with(')') {
         let inner = &rhs[2..rhs.len() - 1];
         let mut list = Vec::new();
@@ -291,14 +479,70 @@ fn parse_assign(stmt: &str) -> Option<(String, Expr)> {
             if part.is_empty() {
                 continue;
             }
-            list.push(unquote(part)?);
+            // 列表项允许插值串（tf_onedrive 的 `$env:SystemDrive\OneDriveTemp`）
+            let v = match unquote(part) {
+                Some(v) => v,
+                None => {
+                    let t = part.trim();
+                    if t.starts_with('"') && t.ends_with('"') {
+                        interpolate(&t[1..t.len() - 1], vars)?
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            list.push(v);
         }
         if list.is_empty() {
             return None;
         }
         return Some((name, Expr::List(list)));
     }
+    // `@{ K = v; … }` 哈希表（值 = 引号串或数字串）
+    if let Some(inner) = rhs.strip_prefix("@{").and_then(|s| s.strip_suffix('}')) {
+        let mut map = Vec::new();
+        for part in split_statements(inner) {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (k, v) = part.split_once('=')?;
+            let k = k.trim().to_string();
+            if k.is_empty() || k.contains(char::is_whitespace) {
+                return None;
+            }
+            let v = v.trim();
+            let v = unquote(v).unwrap_or_else(|| v.to_string());
+            map.push((k, v));
+        }
+        if map.is_empty() {
+            return None;
+        }
+        return Some((name, Expr::Map(map)));
+    }
     None
+}
+
+/// `(0x22,0x00,…)` 字节列表 → Vec<u8>（十进制与 0x 十六进制都认）
+fn parse_byte_list(inner: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for part in split_commas(inner) {
+        let t = part.trim();
+        if t.is_empty() {
+            return None;
+        }
+        let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+            u8::from_str_radix(h, 16).ok()?
+        } else {
+            t.parse::<u8>().ok()?
+        };
+        out.push(v);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// 按顶层逗号拆分（引号内的逗号不算；`@("a","b")` 列表用）
@@ -343,6 +587,399 @@ fn find_matching_brace(s: &str, open: usize) -> Option<usize> {
     None
 }
 
+// ==================== v3-K1：枚举管道 / 拼接 / PsInline 白名单 ====================
+
+/// 拆管道：按顶层 `|`（引号/括号/花括号内的 | 不算 —— ForEach 体里的
+/// `| Out-Null` 不能被拆出去）
+fn split_pipes(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut start = 0usize;
+    for (i, &c) in s.as_bytes().iter().enumerate() {
+        match c {
+            b'\'' if !in_dq => in_sq = !in_sq,
+            b'"' if !in_sq => in_dq = !in_dq,
+            b'(' | b'{' | b'[' if !in_sq && !in_dq => depth += 1,
+            b')' | b'}' | b']' if !in_sq && !in_dq => depth -= 1,
+            b'|' if !in_sq && !in_dq && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// `ForEach-Object { … }` 段 → 体（剥花括号）
+fn for_each_body(part: &str) -> Result<&str, String> {
+    let t = part.trim();
+    let Some(rest) = t.strip_prefix("ForEach-Object") else {
+        return Err(format!("管道段只支持 ForEach-Object: {t}"));
+    };
+    let t = rest.trim();
+    let Some(inner) = t.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return Err(format!("ForEach-Object 体不是单个花括号块: {t}"));
+    };
+    Ok(inner)
+}
+
+/// `Get-ChildItem [-LiteralPath] <path> [-ErrorAction SilentlyContinue]` → 根路径
+fn child_item_root(head: &str, vars: &VarMap) -> Result<String, String> {
+    let rest = head
+        .trim()
+        .strip_prefix("Get-ChildItem")
+        .ok_or_else(|| format!("不是 Get-ChildItem: {head}"))?;
+    let toks = tokenize(rest).ok_or("Get-ChildItem 参数 token 化失败")?;
+    let mut positional: Vec<String> = Vec::new();
+    let mut it = toks.into_iter();
+    while let Some(t) = it.next() {
+        if t.eq_ignore_ascii_case("-LiteralPath") || t.eq_ignore_ascii_case("-Path") {
+            continue;
+        }
+        if t.eq_ignore_ascii_case("-ErrorAction") {
+            let _ = it.next();
+            continue;
+        }
+        if is_param(&t) {
+            return Err(format!("Get-ChildItem 不支持的参数: {t}"));
+        }
+        positional.push(t);
+    }
+    if positional.len() != 1 {
+        return Err(format!("Get-ChildItem 只支持一个路径参数: {head}"));
+    }
+    let p = positional.remove(0);
+    match p.strip_prefix('$') {
+        Some(name) => match vars.get(name) {
+            Some(Expr::Str(s)) => Ok(s.clone()),
+            _ => Err(format!("Get-ChildItem 变量 ${name} 不是字符串")),
+        },
+        None => unquote(&p).ok_or_else(|| format!("Get-ChildItem 路径非字面量: {p}")),
+    }
+}
+
+/// CIM 类 → 设备安装类（`Enum\PCI` 实例的 `Class` 值）。
+/// 等价性依据：Win32_VideoController 的成员即「Display」安装类设备、
+/// Win32_USBController 即「USB」类设备；两个 WMI 类本来就按安装类取成员，
+/// 数据层的 `Where PNPDeviceID -like "PCI*"` 再过滤到 PCI 总线 —— 与在
+/// `Enum\PCI` 两级子键上按 Class 过滤得到的是同一集合，且不依赖 WMI 服务。
+fn cim_class(head: &str) -> Result<&'static str, String> {
+    let rest = head
+        .trim()
+        .strip_prefix("Get-CimInstance")
+        .ok_or_else(|| format!("不是 Get-CimInstance: {head}"))?;
+    match rest.trim() {
+        "Win32_VideoController" => Ok("Display"),
+        "Win32_USBController" => Ok("USB"),
+        other => Err(format!(
+            "Get-CimInstance 只支持 Win32_VideoController/Win32_USBController: {other}"
+        )),
+    }
+}
+
+/// 枚举管道 → 原生算子（v3-K1）。两段 = 注册表子键枚举；三段 = CIM 设备枚举。
+fn parse_enum_pipe(raw: &str, vars: &VarMap) -> Result<Vec<PsOp>, String> {
+    let parts = split_pipes(raw);
+    let snapshot: Vec<(String, Expr)> = vars
+        .iter()
+        .filter(|(k, _)| k.as_str() != "_")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    match parts.len() {
+        2 => {
+            let root = child_item_root(parts[0], vars)?;
+            let (hive, subkey) =
+                parse_ps_reg_path(&root).ok_or_else(|| format!("枚举根不可识别: {root}"))?;
+            let body = for_each_body(parts[1])?;
+            // 探针干跑：保证执行期对每个子键的延迟解析不会失败（fail-closed 前移）
+            let mut probe = vars.clone();
+            probe.insert("_".into(), Expr::Str("HKLM:\\__PROBE__".into()));
+            parse_block(body, &mut probe)?;
+            Ok(vec![PsOp::ForSubKey {
+                hive,
+                subkey,
+                body: body.to_string(),
+                vars: snapshot.into_iter().collect(),
+            }])
+        }
+        3 => {
+            let class = cim_class(parts[0])?;
+            let cond = parts[1].trim();
+            let cond_body = cond
+                .strip_prefix("Where-Object")
+                .map(|r| r.trim())
+                .ok_or_else(|| format!("管道第二段只支持 Where-Object: {cond}"))?;
+            let inner = cond_body
+                .strip_prefix('{')
+                .and_then(|s| s.strip_suffix('}'))
+                .ok_or("Where-Object 体不是花括号块")?;
+            let toks = tokenize(inner).ok_or("Where-Object 体 token 化失败")?;
+            if toks != ["$_.PNPDeviceID", "-like", "\"PCI*\""] {
+                return Err(format!("Where-Object 条件不认识: {cond}"));
+            }
+            let body = for_each_body(parts[2])?;
+            let mut probe = vars.clone();
+            probe.insert("_".into(), Expr::Str("PCI\\__PROBE__".into()));
+            parse_block(body, &mut probe)?;
+            Ok(vec![PsOp::ForDevKey {
+                class: class.to_string(),
+                body: body.to_string(),
+                vars: snapshot.into_iter().collect(),
+            }])
+        }
+        _ => Err(format!("不支持的管道: {raw}")),
+    }
+}
+
+/// `($a + $b)` 位置实参拼接（schtasks 任务名，v3-K1）。
+/// 只替换「整个括号段可求值」的情形；求值不了就原样保留（后续环节照常报错）。
+fn resolve_concat(line: &str, vars: &VarMap) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'(' && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') {
+            let mut depth = 0i32;
+            let mut close = None;
+            for (j, &b2) in bytes.iter().enumerate().skip(i) {
+                match b2 {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(close) = close {
+                let inner = &line[i + 1..close];
+                if let Some(parts) = split_plus(inner) {
+                    let mut acc = String::new();
+                    let mut ok = true;
+                    for p in parts {
+                        match eval_term(p, vars) {
+                            Some(Expr::Str(v)) => acc.push_str(&v),
+                            _ => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        out.push_str(&format!("'{}'", acc.replace('\'', "''")));
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        let ch = line[i..].chars().next().unwrap_or('(');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// v3-K1：白名单 —— 这些语句头可以**逐字**交给收件箱 Windows PowerShell 执行。
+/// 逐字 = 零重解释 = 无「半懂硬执行」风险；白名单的职责是**登记意识**：数据层
+/// 新增任何构造，必须在这里有意识地放行，否则 `data_layer_coverage_report` 红。
+/// 注意：表内含原生面已支持的 cmdlet，让「原生解析失败但语义无害」的体也能走
+/// 逐字通道（例如依赖 $env 展开的路径），不会出现静默错执行。
+const PS_INLINE_ALLOW: &[&str] = &[
+    // 内存代理 / WMI / 设备 / Appx / 计划任务对象 —— 原生不表达的 Windows 面
+    "Disable-MMAgent",
+    "Enable-MMAgent",
+    "Get-CimInstance",
+    "Invoke-CimMethod",
+    "Get-PnpDevice",
+    "Disable-PnpDevice",
+    "Enable-PnpDevice",
+    "Get-AppxPackage",
+    "Remove-AppxPackage",
+    "Get-ScheduledTask",
+    "Disable-ScheduledTask",
+    "Enable-ScheduledTask",
+    // 注册表层命令（逐字执行时不重解释）
+    "Get-ChildItem",
+    "Get-ItemProperty",
+    "Remove-ItemProperty",
+    "Remove-Item",
+    "Test-Path",
+    "Join-Path",
+    "New-Item",
+    "New-ItemProperty",
+    "Set-ItemProperty",
+    // 下载校验流（tf_oosu）
+    "Invoke-WebRequest",
+    "Get-FileHash",
+    "Get-AuthenticodeSignature",
+    "Start-Process",
+    // 输出
+    "Write-Output",
+    "Write-Error",
+    "Write-Host",
+    // 管道段
+    "Where-Object",
+    "ForEach-Object",
+    "Sort-Object",
+    "Select-Object",
+    "Measure-Object",
+    "ConvertTo-Json",
+];
+
+/// 顶层关键字定位：只认**花括号深度 0** 处的命中（引号内不算）。
+/// `word_boundary=true` 时额外要求词边界（前：行首/空白/;/}；后：空白/{）——
+/// 供 eligible_scan 的 if/foreach/try 等单词关键字用；false 供
+/// "if (Test-Path"/"foreach (" 这类自带边界的短语用。
+fn find_top_level(text: &str, kws: &[&str], word_boundary: bool) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0i32;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    for (i, &c) in bytes.iter().enumerate() {
+        match c {
+            b'\'' if !in_dq => in_sq = !in_sq,
+            b'"' if !in_sq => in_dq = !in_dq,
+            b'{' if !in_sq && !in_dq => depth += 1,
+            b'}' if !in_sq && !in_dq => depth -= 1,
+            _ if !in_sq && !in_dq && depth == 0 => {
+                // 只在字符边界上做关键字匹配（注释里有中文多字节字符）
+                if text.is_char_boundary(i) {
+                    for kw in kws {
+                        if text[i..].starts_with(kw) {
+                            let before_ok = i == 0
+                                || matches!(
+                                    bytes[i - 1],
+                                    b' ' | b'\n' | b'\r' | b'\t' | b';' | b'}'
+                                );
+                            let after = i + kw.len();
+                            let after_ok = !word_boundary
+                                || after >= bytes.len()
+                                || matches!(
+                                    bytes[after],
+                                    b' ' | b'\n' | b'\r' | b'\t' | b'{'
+                                );
+                            if before_ok && after_ok {
+                                return Some(i);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// PsInline 资格扫描：整段体的每个语句头要么在白名单、要么是控制流/表达式形态。
+/// 结构走查与 parse_block 同构（先块后语句），保证嵌套块里的头也被逐个检查。
+fn ps_inline_eligible(src: &str) -> bool {
+    eligible_scan(src)
+}
+
+fn eligible_scan(src: &str) -> bool {
+    let mut rest = src.trim();
+    loop {
+        if rest.is_empty() {
+            return true;
+        }
+        // 先找块关键字（与 parse_block 同构的「先结构后语句」次序；只认顶层）
+        let kws = ["if", "foreach", "switch", "try", "catch", "finally", "else"];
+        if let Some(pos) = find_top_level(rest, &kws, true) {
+            if !eligible_stmts(&rest[..pos]) {
+                return false;
+            }
+            let tail = &rest[pos..];
+            let Some(open) = tail.find('{') else { return false };
+            let Some(close) = find_matching_brace(tail, open) else { return false };
+            if !eligible_scan(&tail[open + 1..close]) {
+                return false;
+            }
+            rest = tail[close + 1..].trim();
+            continue;
+        }
+        return eligible_stmts(rest);
+    }
+}
+
+fn eligible_stmts(src: &str) -> bool {
+    split_statements(src).iter().all(|st| eligible_stmt(st))
+}
+
+fn eligible_stmt(st: &str) -> bool {
+    let mut s = st.trim();
+    if s.is_empty() || s.starts_with('#') {
+        return true;
+    }
+    s = s.trim_start_matches('}');
+    if s.is_empty() {
+        return true;
+    }
+    // 赋值 LHS：$name = / $null =
+    if s.starts_with('$') {
+        if let Some((lhs, rhs)) = s.split_once('=') {
+            let lhs_t = lhs.trim();
+            let ok_lhs = lhs_t == "$null"
+                || lhs_t
+                    .strip_prefix('$')
+                    .map(|n| !n.is_empty() && !n.contains(char::is_whitespace))
+                    .unwrap_or(false);
+            if ok_lhs {
+                s = rhs.trim();
+                if s.is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+    // 表达式形态：.NET 类型调用 / 数组与哈希字面量 / 变量 / 子表达式 /
+    // 字符串或数字字面量（含大体积 base64 赋值的 RHS）
+    if s.starts_with('[')
+        || s.starts_with('@')
+        || s.starts_with('(')
+        || s.starts_with('$')
+        || s.starts_with('"')
+        || s.starts_with('\'')
+        || s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+    {
+        return true;
+    }
+    let head = s.split_whitespace().next().unwrap_or("");
+    if matches!(head, "return" | "break" | "continue") {
+        return true;
+    }
+    PS_INLINE_ALLOW
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(head))
+}
+
+/// 解析一个 pwsh 步骤体 → 操作列表。
+///
+/// 优先原生解析；失败时若整体在 PsInline 白名单内 → 单条 `PsOp::PsInline`
+/// （逐字交给收件箱 Windows PowerShell，语义零改写）；否则维持 fail-closed Err
+/// （`data_layer_coverage_report` 会在测试期红掉，见 v3-M4/K1）。
+pub fn compile(body: &str) -> Result<Vec<PsOp>, String> {
+    let mut vars = VarMap::new();
+    match parse_block(body, &mut vars) {
+        Ok(ops) => Ok(ops),
+        Err(reason) => {
+            if ps_inline_eligible(body) {
+                Ok(vec![PsOp::PsInline { script: body.to_string() }])
+            } else {
+                Err(reason)
+            }
+        }
+    }
+}
+
 /// 解析一段语句序列（可含 if/foreach 块）；`vars` 会被语句内的赋值**就地更新**
 fn parse_block(
     src: &str,
@@ -355,14 +992,13 @@ fn parse_block(
         if trimmed.is_empty() {
             return Ok(ops);
         }
-        let next_if = trimmed.find("if (Test-Path");
-        let next_fe = trimmed.find("foreach (");
-        let next_block = match (next_if, next_fe) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
+        // v3-K1 修正：关键字只在**花括号深度 0** 处认领 —— 否则 ForEach-Object
+        // 管道体里的 foreach/if 会被误当顶层块，把管道语句拦腰截断。
+        let next_block = find_top_level(
+            trimmed,
+            &["if (Test-Path", "foreach ("],
+            false,
+        );
         let Some(pos) = next_block else {
             for st in split_statements(trimmed) {
                 ops.extend(parse_statement(st, vars)?);
@@ -400,6 +1036,9 @@ fn parse_if_test_path<'a>(
     let Some(rest) = src.trim_start().strip_prefix("if (Test-Path") else {
         return Ok(None);
     };
+    // `-LiteralPath` 是长名形态（perf_wu_enable / tf_onedrive 在用），与短名等价
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("-LiteralPath").map(|r| r.trim_start()).unwrap_or(rest);
     // Test-Path 的参数在第一个 `(` 之后，直接取到 `)`（Test-Path 只有一个参数）
     let Some(close_paren) = rest.find(')') else {
         return Err("if (Test-Path 缺右括号".into());
@@ -456,9 +1095,32 @@ fn parse_foreach<'a>(
     };
     let var = var.to_string();
     let list_src = list_src.trim();
-    let items = match parse_assign(&format!("$x = {list_src}")) {
-        Some((_, Expr::List(l))) => l,
-        _ => return Err("foreach 只支持 @(\"…\") 字符串字面量列表".into()),
+    // 列表来源（v3-K1 扩展）：
+    //   ① `@("…",…)` 字面量（历史形态）
+    //   ② `$var` —— 前面语句赋值的字符串列表
+    //   ③ `$map.Keys` —— 前面语句赋值的哈希表的键集
+    let items: Option<Vec<String>> = if let Some(rest) = list_src.strip_prefix('$') {
+        let (name, prop) = match rest.split_once('.') {
+            Some((n, p)) => (n, Some(p)),
+            None => (rest, None),
+        };
+        match (vars.get(name), prop) {
+            (Some(Expr::List(l)), None) => Some(l.clone()),
+            (Some(Expr::Map(m)), Some(p)) if p.eq_ignore_ascii_case("Keys") => {
+                Some(m.iter().map(|(k, _)| k.clone()).collect())
+            }
+            _ => None,
+        }
+    } else {
+        parse_assign(&format!("$x = {list_src}"), vars).and_then(|(_, e)| match e {
+            Expr::List(l) => Some(l),
+            _ => None,
+        })
+    };
+    let Some(items) = items else {
+        return Err(
+            "foreach 只支持 @(\"…\") 字面量、已赋值列表变量或 $map.Keys".into(),
+        );
     };
     let after_paren = &rest[close_paren + 1..];
     let Some(open) = after_paren.find('{') else {
@@ -481,7 +1143,7 @@ fn parse_foreach<'a>(
 
 /// 把语句里的 `$var` 替换为字面量。`-参数 $var` 与**位置参数**（如
 /// `sc.exe config $n start= …`）都允许；变量出现在 cmdlet 名位置仍属未知形态。
-fn resolve_vars(line: &str, vars: &std::collections::HashMap<String, Expr>) -> Result<String, String> {
+fn resolve_vars(line: &str, vars: &VarMap) -> Result<String, String> {
     if !line.contains('$') {
         return Ok(line.to_string());
     }
@@ -492,30 +1154,17 @@ fn resolve_vars(line: &str, vars: &std::collections::HashMap<String, Expr>) -> R
         if is_param(&t) {
             out.push(t);
             if let Some(v) = it.peek() {
-                if let Some(name) = v.strip_prefix('$') {
-                    match vars.get(name) {
-                        Some(Expr::Str(s)) => {
-                            out.push(format!("'{}'", s.replace('\'', "''")));
-                            it.next();
-                            continue;
-                        }
-                        Some(Expr::Bytes(n)) => {
-                            out.push(format!("__BYTES_{n}__"));
-                            it.next();
-                            continue;
-                        }
-                        _ => return Err(format!("变量 ${name} 不是已赋值的字符串")),
-                    }
+                if let Some(rest) = v.strip_prefix('$') {
+                    out.push(render_var(rest, vars)?);
+                    it.next();
+                    continue;
                 }
             }
             continue;
         }
-        if let Some(name) = t.strip_prefix('$') {
-            // 位置参数上的变量（sc.exe config $n …）
-            match vars.get(name) {
-                Some(Expr::Str(s)) => out.push(format!("'{}'", s.replace('\'', "''"))),
-                _ => return Err(format!("变量 ${name} 不是已赋值的字符串")),
-            }
+        if let Some(rest) = t.strip_prefix('$') {
+            // 位置参数上的变量（sc.exe config $n …）／哈希取值／属性访问
+            out.push(render_var(rest, vars)?);
             continue;
         }
         out.push(t);
@@ -523,10 +1172,53 @@ fn resolve_vars(line: &str, vars: &std::collections::HashMap<String, Expr>) -> R
     Ok(out.join(" "))
 }
 
+/// `$name` / `$name.PSPath|.PNPDeviceID` / `$name[$key]` → 引号字面量或字节哨兵。
+/// 属性访问只认 PSPath / PNPDeviceID：枚举算子已把绑定值规整成解析器需要的形态
+/// （子键完整 PS 路径 / PNPDeviceID），两者都直接取绑定值本身；其它属性 = 未知形态。
+fn render_var(rest: &str, vars: &VarMap) -> Result<String, String> {
+    // `$map[$k]`：哈希表取值（tf_svc_extra5 还原链，v3-K1）
+    if let Some((name, keyexpr)) = rest.split_once('[') {
+        let key = keyexpr
+            .strip_suffix(']')
+            .and_then(|k| k.strip_prefix('$'))
+            .ok_or_else(|| format!("哈希表下标必须是 $变量: {rest}"))?;
+        return match (vars.get(name), vars.get(key)) {
+            (Some(Expr::Map(m)), Some(Expr::Str(k))) => {
+                let v = m
+                    .iter()
+                    .find(|(mk, _)| mk == k)
+                    .map(|(_, v)| v.clone())
+                    .ok_or_else(|| format!("哈希表无键 {k}"))?;
+                Ok(format!("'{}'", v.replace('\'', "''")))
+            }
+            _ => Err(format!("哈希表取值形态不认识: {rest}")),
+        };
+    }
+    if let Some((name, prop)) = rest.split_once('.') {
+        if prop != "PSPath" && prop != "PNPDeviceID" {
+            return Err(format!("不支持的属性访问: {rest}"));
+        }
+        return match vars.get(name) {
+            Some(Expr::Str(s)) => Ok(format!("'{}'", s.replace('\'', "''"))),
+            _ => Err(format!("变量 ${name} 不是已赋值的字符串")),
+        };
+    }
+    match vars.get(rest) {
+        Some(Expr::Str(s)) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        Some(Expr::Bytes(n)) => Ok(format!("__BYTES_{n}__")),
+        Some(Expr::BytesData(d)) => {
+            // 字节串以 hex 哨兵过墙，encode_value 解回（v3-K1）
+            let hex: String = d.iter().map(|b| format!("{b:02X}")).collect();
+            Ok(format!("__BYTESHEX_{hex}__"))
+        }
+        _ => Err(format!("变量 ${rest} 不是已赋值的字符串")),
+    }
+}
+
 /// 单条语句 → 0..n 个操作；赋值语句会**就地更新** vars（后续语句要用）
 fn parse_statement(
     stmt: &str,
-    vars: &mut std::collections::HashMap<String, Expr>,
+    vars: &mut VarMap,
 ) -> Result<Vec<PsOp>, String> {
     let raw = stmt.trim();
     if raw.is_empty() || raw.starts_with('#') {
@@ -534,17 +1226,23 @@ fn parse_statement(
     }
     // 变量赋值（`-eq` 是比较不是赋值，先排除以免误判）
     if raw.starts_with('$') && raw.contains('=') && !raw.contains("-eq") {
-        if let Some((name, expr)) = parse_assign(raw) {
+        if let Some((name, expr)) = parse_assign(raw, vars) {
             vars.insert(name, expr);
             // 赋值语句本身不产生操作；同一语句里再带其它命令属未知形态，回退
             return Ok(Vec::new());
         }
         return Err(format!("无法识别的赋值: {raw}"));
     }
+    // 枚举管道（v3-K1）：注册表子键 / CIM 设备类 → 原生枚举算子
+    if (raw.starts_with("Get-ChildItem") || raw.starts_with("Get-CimInstance")) && raw.contains('|') {
+        return parse_enum_pipe(raw, vars);
+    }
     let Some(line) = strip_pipeline(raw) else {
         return Err(format!("不支持的管道: {raw}"));
     };
-    let line = resolve_vars(line, vars)?;
+    // 位置实参拼接 `($a + $b)`（schtasks 任务名，v3-K1）
+    let line = resolve_concat(line, vars);
+    let line = resolve_vars(&line, vars)?;
     let cmd = parse_cmd(&line).ok_or_else(|| format!("无法解析语句: {raw}"))?;
     // 参数值取字面量：带引号 → 去引号（依赖展开则报错）；裸 token → 原样
     // （PS 允许 `-Name X` 这种裸参数，数据层大量使用）
@@ -636,6 +1334,34 @@ fn parse_statement(
             };
             Ok(vec![PsOp::SvcSetStart { name: svc, start: n }])
         }
+        "schtasks" => {
+            // 位置式 `schtasks /change /tn <name> /disable|/enable`
+            // （telemetry_optimize / tf_nvidia_telemetry 的形态，v3-K1）
+            if cmd.positional.len() != 4
+                || !cmd.positional[0].eq_ignore_ascii_case("/change")
+                || !cmd.positional[1].eq_ignore_ascii_case("/tn")
+            {
+                return Err(format!("schtasks 只支持 /change /tn <name> /disable|/enable: {raw}"));
+            }
+            let name = unquote(&cmd.positional[2]).unwrap_or_else(|| cmd.positional[2].clone());
+            let disable = match cmd.positional[3].as_str() {
+                "/disable" | "/DISABLE" => true,
+                "/enable" | "/ENABLE" => false,
+                other => return Err(format!("schtasks 未知动作: {other}")),
+            };
+            Ok(vec![PsOp::TaskChange { path: None, name, disable }])
+        }
+        "powercfg" => {
+            // v3-K1：ASPM 关闭链。只放行 powercfg（PINNED，system_tool 解析到
+            // System32）；其它可执行程序不进本通道（编译与执行两侧双重把守）。
+            if cmd.positional.is_empty() {
+                return Err("powercfg 缺参数".into());
+            }
+            Ok(vec![PsOp::Spawn {
+                program: "powercfg.exe".into(),
+                args: cmd.positional.clone(),
+            }])
+        }
         other => Err(format!("不支持的 cmdlet: {other}")),
     }
 }
@@ -650,6 +1376,7 @@ fn encode_value(
     if let Some(name) = value.trim().strip_prefix('$') {
         return match vars.get(name) {
             Some(Expr::Bytes(n)) => Ok((KIND_BINARY, vec![0u8; *n])),
+            Some(Expr::BytesData(d)) => Ok((KIND_BINARY, d.clone())),
             Some(Expr::Str(s)) => Ok(sz_bytes(s)),
             _ => Err(format!("变量 ${name} 不能作 -Value")),
         };
@@ -661,6 +1388,31 @@ fn encode_value(
         .and_then(|s| s.parse::<usize>().ok())
     {
         return Ok((KIND_BINARY, vec![0u8; n]));
+    }
+    // 字节串 hex 哨兵（BytesData 变量经 resolve_vars 过墙的形态，v3-K1）
+    if let Some(hex) = value
+        .trim()
+        .strip_prefix("__BYTESHEX_")
+        .and_then(|s| s.strip_suffix("__"))
+    {
+        if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("字节哨兵畸形: {value}"));
+        }
+        let v = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|e| e.to_string())?;
+        return Ok((KIND_BINARY, v));
+    }
+    // 内联字节字面量 `([byte[]](0x22,…))`（perf_exploit_protection_off，v3-K1）
+    if let Some(inner) = value
+        .trim()
+        .strip_prefix("([byte[]](")
+        .and_then(|s| s.strip_suffix("))"))
+    {
+        let data = parse_byte_list(inner).ok_or_else(|| format!("内联字节列表畸形: {value}"))?;
+        return Ok((KIND_BINARY, data));
     }
     match ptype.trim().to_ascii_lowercase().as_str() {
         "dword" => {
@@ -712,12 +1464,15 @@ fn sz_bytes(s: &str) -> (u32, Vec<u8>) {
 
 // ==================== 执行 ====================
 
-/// 执行一组操作；任一失败即 Err（调用方据此把整条优化项报失败）
-pub fn execute(ops: &[PsOp]) -> Result<(), String> {
+/// 执行一组操作；任一失败即 Err（调用方据此把整条优化项报失败）。
+/// 返回 PsInline 算子产生的 stdout 累积串（`@@RECYCLE@@` 协议行在其中，
+/// 由 optimizer.rs 统一解析；纯原生操作不产生输出）。
+pub fn execute(ops: &[PsOp]) -> Result<String, String> {
+    let mut out = String::new();
     for op in ops {
-        exec_one(op)?;
+        out.push_str(&exec_one(op)?);
     }
-    Ok(())
+    Ok(out)
 }
 
 fn hive_handle(h: Hive) -> windows::Win32::System::Registry::HKEY {
@@ -735,55 +1490,136 @@ fn kind_of(v: u32) -> windows::Win32::System::Registry::REG_VALUE_TYPE {
     windows::Win32::System::Registry::REG_VALUE_TYPE(v)
 }
 
-fn exec_one(op: &PsOp) -> Result<(), String> {
+fn hive_prefix(h: Hive) -> &'static str {
+    match h {
+        Hive::Lm => "HKLM",
+        Hive::Cu => "HKCU",
+        Hive::Cr => "HKCR",
+        Hive::U => "HKU",
+        Hive::Cc => "HKCC",
+    }
+}
+
+fn exec_one(op: &PsOp) -> Result<String, String> {
     match op {
         PsOp::KeyCreate { hive, subkey } => {
             if native::reg_key_ensure(hive_handle(*hive), subkey) {
-                Ok(())
+                Ok(String::new())
             } else {
                 Err(format!("创建注册表键失败: {subkey}"))
             }
         }
         PsOp::KeyRemove { hive, subkey, recurse } => {
             if native::reg_key_remove(hive_handle(*hive), subkey, *recurse) {
-                Ok(())
+                Ok(String::new())
             } else {
                 Err(format!("删除注册表键失败: {subkey}"))
             }
         }
         PsOp::ValueWrite { hive, subkey, name, kind, data } => {
             if native::reg_restore_write(hive_handle(*hive), subkey, name, kind_of(*kind), data) {
-                Ok(())
+                Ok(String::new())
             } else {
                 Err(format!("写注册表值失败: {subkey}\\{name}"))
             }
         }
         PsOp::ValueRemove { hive, subkey, name } => {
             if native::reg_restore_delete(hive_handle(*hive), subkey, name) {
-                Ok(())
+                Ok(String::new())
             } else {
                 Err(format!("删注册表值失败: {subkey}\\{name}"))
             }
         }
-        PsOp::SvcStop { name } => native::service_stop_pub(name),
-        PsOp::SvcSetStart { name, start } => native::service_set_start_pub(name, *start),
-        PsOp::TaskChange { path, name, disable } => native::task_change(path.as_deref(), name, *disable),
+        PsOp::SvcStop { name } => {
+            native::service_stop_pub(name)?;
+            Ok(String::new())
+        }
+        PsOp::SvcSetStart { name, start } => {
+            native::service_set_start_pub(name, *start)?;
+            Ok(String::new())
+        }
+        PsOp::TaskChange { path, name, disable } => {
+            native::task_change(path.as_deref(), name, *disable)?;
+            Ok(String::new())
+        }
         PsOp::GuardedKeyExists { hive, subkey, ops } => {
             // 键不存在 = 功能没装，跳过（对齐 PS `if (Test-Path …)` 语义）
             if !native::reg_key_exists(hive_handle(*hive), subkey) {
-                return Ok(());
+                return Ok(String::new());
             }
+            let mut out = String::new();
             for o in ops {
-                exec_one(o)?;
+                out.push_str(&exec_one(o)?);
             }
-            Ok(())
+            Ok(out)
+        }
+        PsOp::ForSubKey { hive, subkey, body, vars } => {
+            // 键不存在 = 无迭代（PS Get-ChildItem -ErrorAction SilentlyContinue 语义）
+            if !native::reg_key_exists(hive_handle(*hive), subkey) {
+                return Ok(String::new());
+            }
+            let subs = native::reg_enum_subkeys_pub(hive_handle(*hive), subkey);
+            let mut out = String::new();
+            for name in subs {
+                let full = format!("{}:\\{}\\{}", hive_prefix(*hive), subkey, name);
+                let mut v = vars.clone();
+                v.insert("_".into(), Expr::Str(full));
+                // 编译期已探针干跑，此处理论上不可失败；仍如实上报
+                for o in parse_block(body, &mut v)? {
+                    out.push_str(&exec_one(&o)?);
+                }
+            }
+            Ok(out)
+        }
+        PsOp::ForDevKey { class, body, vars } => {
+            let mut out = String::new();
+            for id in native::reg_enum_dev_ids(class) {
+                let mut v = vars.clone();
+                v.insert("_".into(), Expr::Str(id));
+                for o in parse_block(body, &mut v)? {
+                    out.push_str(&exec_one(&o)?);
+                }
+            }
+            Ok(out)
+        }
+        PsOp::Spawn { program, args } => {
+            // 编译期只从 "powercfg" 臂产生本算子；执行侧再核一次白名单（双保险）
+            if !program.eq_ignore_ascii_case("powercfg.exe") {
+                return Err(format!("Spawn 算子只允许 powercfg.exe，收到 {program}"));
+            }
+            let out = std::process::Command::new(crate::engine::systembin::system_tool(program))
+                .args(args)
+                .output()
+                .map_err(|e| format!("powercfg 执行失败: {e}"))?;
+            if out.status.success() {
+                Ok(String::new())
+            } else {
+                Err(format!(
+                    "powercfg 退出码 {}",
+                    out.status.code().unwrap_or(-1)
+                ))
+            }
+        }
+        PsOp::PsInline { script } => {
+            // 逐字交给收件箱 Windows PowerShell（System32 自带，无需用户装 pwsh7）。
+            // 脚本写私有 tmp（reparse 判拒），跑完即删；stdout 交回调用方解析
+            // `@@RECYCLE@@` 协议（tf_onedrive 的目录回收走这里）。
+            let dir = crate::engine::paths::temp_script_dir()?;
+            std::fs::create_dir_all(&dir).map_err(|e| format!("创建私有 tmp 失败: {e}"))?;
+            let path = dir.join(format!("optpsinline_{}.ps1", crate::engine::now_ms()));
+            std::fs::write(&path, script.as_bytes()).map_err(|e| format!("写内联脚本失败: {e}"))?;
+            let r = crate::pwsh::run_inbox_ps(&path, std::time::Duration::from_secs(300));
+            let _ = std::fs::remove_file(&path);
+            let out = r?;
+            if out.timed_out {
+                return Err("内联 PS 步骤执行超时（300s）".into());
+            }
+            if out.code != 0 {
+                return Err(format!("内联 PS 步骤退出码 {}", out.code));
+            }
+            Ok(out.stdout)
         }
     }
-}
-
-/// 解析一个 pwsh 步骤体 → 操作列表；**任何不认识的构造都 Err**（调用方回退 PS）
-pub fn compile(body: &str) -> Result<Vec<PsOp>, String> {
-    parse_block(body, &mut std::collections::HashMap::new())
 }
 
 #[cfg(test)]
@@ -895,31 +1731,118 @@ mod tests {
         assert!(matches!(&ops[1], PsOp::KeyRemove { recurse: true, .. }));
     }
 
-    /// fail-closed 是本模块的**第一原则**：不认识的构造必须 Err，绝不猜。
+    /// fail-closed 是本模块的**第一原则**：白名单外的未知构造必须 Err，绝不猜。
+    /// （v3-K1 后白名单内的构造会走 PsInline 逐字执行，所以这里全部改用
+    /// **非白名单**的 cmdlet 来验证 fail-closed 边界。）
     #[test]
     fn rejects_unknown_constructs() {
-        // 管道里不是 Out-Null（需要真求值）
-        assert!(compile("Get-ChildItem HKLM:\\X | Where-Object { $_.Name }").is_err());
-        // 依赖展开的双引号串
-        assert!(compile("New-ItemProperty -Path \"HKLM:\\$env:x\" -Name A -Value 1 -PropertyType DWord -Force").is_err());
-        // 未赋值的变量
-        assert!(compile("New-ItemProperty -Path $undef -Name A -Value 1 -PropertyType DWord -Force").is_err());
+        // 管道里不是 Out-Null（需要真求值）——头不在白名单
+        assert!(compile("Get-Process | Where-Object { $_.Name }").is_err());
+        // 未赋值的变量 + 非白名单 cmdlet
+        assert!(compile("Invoke-Expression $undef").is_err());
         // 未知 cmdlet
-        assert!(compile("Get-AppxPackage -Name X | Remove-AppxPackage").is_err());
-        // -Force 缺失（键已存在时 PS 语义不同）
-        assert!(compile("New-ItemProperty -Path 'HKCU:\\X' -Name A -Value 1 -PropertyType DWord").is_err());
-        // 引号不闭合
-        assert!(compile("$p = \"HKLM:\\X").is_err());
-        // 变量出现在参数值之外
+        assert!(compile("Stop-Computer -Force").is_err());
+        // 引号不闭合：原生拒绝；头（赋值 RHS 字符串字面量）在白名单 → PsInline
+        // 逐字执行，由 PS 在运行期报语法错误（逐字 = 语义零改写，坏脚本坏在 PS 自己手里）
+        let ops = compile("$p = \"HKLM:\\X").unwrap();
+        assert!(matches!(&ops[0], PsOp::PsInline { .. }));
+        // 引号不闭合 + 非白名单头 → Err（fail-closed 边界真正落点）
+        assert!(compile("Get-Service \"HKLM:\\X").is_err());
+        // 变量出现在参数值之外（Get-Service 不在白名单）
         assert!(compile("$a = Get-Service").is_err());
+        // 引号内依赖展开的路径 —— 原生拒绝，但头在白名单 → PsInline 逐字执行
+        // （语义零改写，这正是白名单存在的意义；这里只验证它编译成功且是单条 PsInline）
+        let ops = compile(
+            "New-ItemProperty -Path \"HKLM:\\$env:x\" -Name A -Value 1 -PropertyType DWord -Force",
+        )
+        .unwrap();
+        assert!(matches!(&ops[0], PsOp::PsInline { .. }));
+        // -Force 缺失：原生拒绝（键已存在时语义不同），头在白名单 → PsInline 逐字执行
+        let ops =
+            compile("New-ItemProperty -Path 'HKCU:\\X' -Name A -Value 1 -PropertyType DWord")
+                .unwrap();
+        assert!(matches!(&ops[0], PsOp::PsInline { .. }));
+    }
+
+    /// v3-K1：新原生构造的解析行为（foreach 变量列表 / 插值 / 拼接 / byte[] /
+    /// 哈希表 / schtasks / powercfg / 枚举管道）
+    #[test]
+    fn parses_v3k1_constructs() {
+        // foreach 变量列表 + 双引号插值
+        let ops = compile(
+            "$names = @(\"A\",\"B\")\nforeach ($n in $names) { $p = \"HKLM:\\SYSTEM\\Services\\$n\"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null } }",
+        )
+        .unwrap();
+        assert!(matches!(&ops[0], PsOp::GuardedKeyExists { .. }));
+        assert_eq!(ops.len(), 2);
+
+        // schtasks 位置式 + 位置实参拼接
+        let ops = compile(
+            "$sfx = \"_{B2FE1952}\"\nforeach ($t in @(\"T1\",\"T2\")) { schtasks /change /tn ($t + $sfx) /disable 2>$null | Out-Null }",
+        )
+        .unwrap();
+        assert!(matches!(&ops[0], PsOp::TaskChange { name, disable: true, .. } if name == "T1_{B2FE1952}"));
+        assert_eq!(ops.len(), 2);
+
+        // powercfg
+        let ops = compile("powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ASPM 0").unwrap();
+        assert!(matches!(&ops[0], PsOp::Spawn { program, .. } if program == "powercfg.exe"));
+
+        // [byte[]] 字面量 → Binary 值
+        let ops = compile(
+            "$p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout\"\n$map = [byte[]](0x00,0x5b,0xe0)\nNew-ItemProperty -Path $p -Name \"Scancode Map\" -Value $map -PropertyType Binary -Force | Out-Null",
+        )
+        .unwrap();
+        match &ops[0] {
+            PsOp::ValueWrite { data, kind, .. } => {
+                assert_eq!(*kind, KIND_BINARY);
+                assert_eq!(data, &vec![0x00u8, 0x5b, 0xe0]);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // 哈希表 + $map.Keys + $map[$n]
+        let ops = compile(
+            "$map = @{ SensrSvc = 3; StorSvc = 2 }\nforeach ($n in $map.Keys) { $p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n\"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value $map[$n] -PropertyType DWord -Force | Out-Null } }",
+        )
+        .unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(&ops[0], PsOp::GuardedKeyExists { .. }));
+
+        // 注册表子键枚举管道 → ForSubKey
+        let ops = compile(
+            "$root = \"HKLM:\\SYSTEM\\CurrentControlSet\\Control\\WMI\\Autologger\"\nif (Test-Path $root) { Get-ChildItem $root | ForEach-Object { New-ItemProperty -Path $_.PSPath -Name Start -Value 0 -PropertyType DWord -Force | Out-Null } }",
+        )
+        .unwrap();
+        match &ops[0] {
+            PsOp::GuardedKeyExists { ops: inner, .. } => {
+                assert!(matches!(&inner[0], PsOp::ForSubKey { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // CIM 设备枚举管道 → ForDevKey（体里的拼接 + Join-Path）
+        let ops = compile(
+            "Get-CimInstance Win32_VideoController | Where-Object { $_.PNPDeviceID -like \"PCI*\" } | ForEach-Object {\n  $enum = \"HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\\" + $_.PNPDeviceID\n  $msi = Join-Path $enum \"Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties\"\n  New-Item -Path $msi -Force | Out-Null\n  New-ItemProperty -Path $msi -Name MSISupported -Value 1 -PropertyType DWord -Force | Out-Null\n}",
+        )
+        .unwrap();
+        assert!(matches!(&ops[0], PsOp::ForDevKey { class, .. } if class == "Display"));
+
+        // PsInline：白名单内的原生不可编译构造（Appx 管道）
+        let ops = compile(
+            "Get-AppxPackage -AllUsers -Name \"*cortana*\" -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue",
+        )
+        .unwrap();
+        assert!(matches!(&ops[0], PsOp::PsInline { .. }));
     }
 
     /// **数据驱动覆盖度量**：把优化项数据层里的全部 pwsh 步骤喂给解释器，
-    /// 报告有多少能原生执行、多少仍需回退 PS。
+    /// 报告原生覆盖与 PsInline 分流。
     ///
-    /// 只打印不断言具体数值 —— 数据层会随版本演进，硬钉数字会让下一次增删项误红。
-    /// 真正要守住的是上面的 fail-closed 测试：**这里绝不允许出现「解析成功但语义存疑」**。
-    /// 覆盖率报告同时写进 `tools/categorize-ps-steps.mjs` 的口径（人工比对用）。
+    /// 审查 v3-M4：旧版只打印不断言，K1（S3 删 PS 兜底后 30 项必败）正是借着
+    /// 「cargo test 全绿」溜过发布的 —— 现在钉死 **编译失败数必须为 0**：解释器
+    /// 与白名单都不认的构造必须先扩这里，而不是写进数据层等运行时报错。
+    /// 跑红时先看打印清单定位是哪条步骤。
     #[test]
     fn data_layer_coverage_report() {
         const OPTIONS_JSON: &str = include_str!("../../data/optimizer-runtime.json");
@@ -927,6 +1850,7 @@ mod tests {
             serde_json::from_str(OPTIONS_JSON).expect("optimizer-runtime.json 合法");
         let mut total = 0usize;
         let mut native_ok = 0usize;
+        let mut inline = 0usize;
         let mut fallback: Vec<String> = Vec::new();
         for o in &opts {
             let id = o.get("id").and_then(|v| v.as_str()).unwrap_or("?");
@@ -939,23 +1863,33 @@ mod tests {
                     total += 1;
                     match compile(body) {
                         Ok(ops) => {
-                            native_ok += 1;
-                            // 解析成功的不许是空操作集（空集 = 静默没执行，比 Err 更糟）
                             assert!(!ops.is_empty(), "{id} [{phase}#{i}] 解析成空操作集");
+                            if matches!(&ops[0], PsOp::PsInline { .. }) {
+                                inline += 1;
+                            } else {
+                                native_ok += 1;
+                            }
                         }
                         Err(reason) => fallback.push(format!("{id} [{phase}#{i}] {reason}")),
                     }
                 }
             }
         }
-        println!("\n=== B11 pwsh 原生解释器覆盖（数据层实测） ===");
-        println!("总 pwsh 步骤: {total}");
-        println!("可原生执行  : {native_ok}（{:.0}%）", 100.0 * native_ok as f64 / total.max(1) as f64);
-        println!("仍回退 PS   : {}", fallback.len());
+        println!("\n=== v3-K1 pwsh 解释器覆盖（数据层实测） ===");
+        println!("总 pwsh 步骤   : {total}");
+        println!("原生执行       : {native_ok}");
+        println!("PsInline（inbox PS 逐字执行）: {inline}");
+        println!("编译失败       : {}", fallback.len());
         for f in &fallback {
             println!("  - {f}");
         }
-        // 唯一硬性断言：回退理由必须全部非空（不认识就是不认识，不许给空理由）
-        assert!(fallback.iter().all(|f| !f.is_empty()));
+        // 硬性断言（审查 v3-M4/K1）：编译失败必须为 0。兜底 PS 回退已随 S3 删除，
+        // 编译不过的步骤 = 正向/还原必败的功能回归，必须在测试阶段红掉。
+        assert_eq!(
+            fallback.len(),
+            0,
+            "仍有 {} 条 pwsh 步骤不可编译（详见上方清单）：扩解释器或登记 PsInline 白名单",
+            fallback.len()
+        );
     }
 }

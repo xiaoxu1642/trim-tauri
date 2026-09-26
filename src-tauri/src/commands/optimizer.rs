@@ -155,16 +155,22 @@ fn build_script(steps: &[Value]) -> String {
 
 /// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）
 ///
-/// 支持 reg/cmd/service 三种 step 类型；pwsh 类型返回 Err 触发 PS 回退。
-/// 实时推送 optimizer:progress 事件，返回 failed_steps。
+/// 支持 reg/cmd/service 三种 step 类型；pwsh 类型交给 pssteps 解释器
+/// （原生可编译 → 原生执行；白名单内不可编译 → 收件箱 PS 逐字执行，v3-K1）。
+/// 实时推送 optimizer:progress 事件，返回 (failed_steps, PsInline stdout 累积)。
 fn native_execute_steps<R: tauri::Runtime>(
     window: &WebviewWindow<R>,
     steps: &[Value],
     option_id: &str,
-) -> Result<i64, String> {
+) -> Result<(i64, String), String> {
     let total = steps.len();
     let mut failed = 0i64;
-    let tmp_dir = match crate::engine::paths::temp_script_dir() { Ok(d) => d, Err(_) => std::env::temp_dir() };
+    let mut inline_stdout = String::new();
+    // 审查 v3-M2：私有 tmp 被替换成 junction 时 temp_script_dir 返回 Err，这里绝不能
+    // 降级到全局可写的 %TEMP% —— 那会把「拒绝写入」翻译成「换个更危险的目录写」，
+    // 提权实例在 %TEMP% 写可预测路径的 .reg 再以管理员 reg import，是经典 TOCTOU 窗口。
+    // 与 pwsh/mod.rs 同口径：Err 直接失败。
+    let tmp_dir = crate::engine::paths::temp_script_dir()?;
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     for (i, s) in steps.iter().enumerate() {
@@ -174,11 +180,13 @@ fn native_execute_steps<R: tauri::Runtime>(
         if let Some(reg) = s.get("reg").and_then(|v| v.as_str()) {
             // reg 类型：写 .reg 临时文件 + reg.exe import
             let reg_path = tmp_dir.join(format!("wcopt_{}.reg", crate::engine::now_ms()));
+            // 审查 v3-L7：非 UTF-8 路径（孤立代理项）上 to_str() 为 None，跳过该步而不是 panic
+            let Some(reg_path_str) = reg_path.to_str() else { failed += 1; continue; };
             if std::fs::write(&reg_path, reg.as_bytes()).is_err() {
                 failed += 1;
             } else {
                 let ok = match std::process::Command::new(system_tool("reg.exe"))
-                    .args(["import", reg_path.to_str().unwrap()])
+                    .args(["import", reg_path_str])
                     .output()
                 {
                     Ok(o) => o.status.success(),
@@ -210,12 +218,13 @@ fn native_execute_steps<R: tauri::Runtime>(
             };
             if !exists { failed += 1; }
         } else if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
-            // pwsh 类型：先尝试原生解释（B11）；解释器 fail-closed —— 数据层里任何
-            // 不认识的构造都会 Err，此时才回退 PS。绝不存在「半懂还硬执行」。
+            // pwsh 类型：交给解释器（v3-K1）。原生可编译 → 原生执行；白名单内
+            // 不可编译 → PsInline（收件箱 Windows PowerShell 逐字执行，语义零改写）；
+            // 白名单外 → Err（fail-closed，由 data_layer_coverage_report 在测试期拦）。
             match crate::engine::pssteps::compile(pwsh).and_then(|ops| crate::engine::pssteps::execute(&ops)) {
-                Ok(()) => {}
+                Ok(stdout) => inline_stdout.push_str(&stdout),
                 Err(reason) => {
-                    return Err(format!("pwsh step 需 PS 回退（{}）", reason));
+                    return Err(format!("pwsh step 编译失败（{}）", reason));
                 }
             }
         }
@@ -227,7 +236,7 @@ fn native_execute_steps<R: tauri::Runtime>(
         );
         let _ = label; // label 用于日志，暂不记录
     }
-    Ok(failed)
+    Ok((failed, inline_stdout))
 }
 
 // ==================== 动态步骤 ====================
@@ -704,9 +713,17 @@ pub async fn optimizer_run<R: Runtime>(
     );
     // S3：纯 Rust 原生
     let run: Result<pwsh::PsOutput, String> = match native_execute_steps(&window, &steps, &option_id) {
-        Ok(failed_steps) => {
-            let stdout = format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n");
+        Ok((failed_steps, inline_stdout)) => {
             let code = if failed_steps == 0 { 0 } else { 1 };
+            let mut stdout = String::new();
+            // PsInline 的 stdout（@@RECYCLE@@ 协议行）必须先于收尾标记
+            if !inline_stdout.is_empty() {
+                stdout.push_str(&inline_stdout);
+                if !inline_stdout.ends_with('\n') {
+                    stdout.push('\n');
+                }
+            }
+            stdout.push_str(&format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n"));
             Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false })
         }
         Err(e) => Err(format!("原生执行失败: {e}")),
@@ -715,7 +732,10 @@ pub async fn optimizer_run<R: Runtime>(
         let e = run.err().unwrap_or_else(|| "执行异常".into());
         log::write_log("error", &format!("优化电脑执行异常: {e}"));
         if !is_restore_run {
-            let _ = opt_state::mark_applied(&option_id, "unknown");
+            // 审查 v3-K1：执行链整体失败（没跑成）≠ 执行成功但验证不了。
+            // 旧代码在这里 mark_applied("unknown") 谎报 applied，违反记账不变式②；
+            // 改落 partial，由 optimizer_state_overview 如实呈现。
+            let _ = opt_state::mark_partial(&option_id);
         }
         return json!({ "success": false, "message": e });
     };
@@ -1380,9 +1400,11 @@ fn civil_from_days_pub(days: i64) -> (i64, u32, u32) {
     (y + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
-fn run_inline_ps(ps: &str, timeout_secs: u64, diag: Option<&str>) -> Option<crate::pwsh::PsOutput> {
+fn run_inline_ps(ps: &str, timeout_secs: u64, _diag: Option<&str>) -> Option<crate::pwsh::PsOutput> {
+    // v3-K1：还原点查询属 WMI 面，交给收件箱 Windows PowerShell（System32 自带），
+    // 优化中心从此不再依赖用户安装 PowerShell 7
     let path = pwsh::write_temp_script(ps, ".ps1").ok()?;
-    let out = pwsh::run_file(&path, std::time::Duration::from_secs(timeout_secs), diag);
+    let out = crate::pwsh::run_inbox_ps(&path, std::time::Duration::from_secs(timeout_secs));
     let _ = std::fs::remove_file(&path);
     out.ok()
 }

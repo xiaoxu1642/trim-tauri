@@ -24,9 +24,9 @@
 // 若 JS 对参数做了 JSON 序列化等多步变换，禁止硬凑哨兵——改用「每个变体一条映射」
 // （不同 actionId 各生成一份 .ps1），把变化收敛到生成期。
 // 
-// ---- 分域文件（并行迁移防冲突）----
-// 域专属映射放在 tools/ps-map/<域>.mjs，各导出 `MAP` 数组；本文件只做汇总。
-// 新增/修改脚本只需要动自己那个域文件，避免多人同时改本文件互相覆盖。
+// ---- 分域文件（已废弃，审查 F5）----
+// 早期并行迁移曾把域专属映射拆在 tools/ps-map/<域>.mjs；S3 收敛后各域文件已删除，
+// MAPPING 直接内联在本文件（现存 2 项）。不要再按旧注释去找分域文件。
 
 export { ORIGIN } from './ps-origin.mjs';
 import { ORIGIN } from './ps-origin.mjs';
@@ -37,6 +37,12 @@ export const MAPPING = [
   // 审查 v2-F14：旧 note 写「40 个优化项共用一份模板」，实测含 pwsh 步骤的优化项是 44/115
   { name: 'optimizer_build', js: `${ORIGIN}/src/scripts-powershell/optimizer-scripts.js`, call: 'buildScript', args: [[{ __trim_sentinel__: true }]], ps1: 'optimizer_build.ps1', note: '优化项执行脚本（哨兵 steps；44 个含 pwsh 步骤的优化项共用一份模板）', noRun: '会改注册表/服务/系统设置，行为层豁免' },
 ];
+
+// 审查 F2：MAPPING 一旦被清空，check-ps-extraction / sync-ps-from-js 会以 0 项「真空通过」。
+// 在单一真源处 fail-loud；若将来全部退役，应连同下游门禁一起下线，而不是留空表。
+if (MAPPING.length === 0) {
+  throw new Error('ps-mapping: MAPPING 为空，下游对拍/同步门禁将真空通过（审查 F2）');
+}
 
 export const PROVENANCE_BEGIN = '# <<<PROVENANCE';
 export const PROVENANCE_END = '# PROVENANCE>>>';

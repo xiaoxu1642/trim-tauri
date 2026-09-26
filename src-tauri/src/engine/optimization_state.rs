@@ -95,6 +95,28 @@ pub fn mark_applied(id: &str, verify: &str) -> bool {
     save(&state)
 }
 
+/// 执行链整体失败（编译/启动阶段就没跑成，非「跑完但部分失败」）时落账。
+///
+/// 审查 v3-K1：旧失败路径走 `mark_applied("unknown")`，违反不变式②「执行成功
+/// 才转正 applied」——账本谎报。partial 状态如实表达「没有执行成功，pending
+/// 期间可能有已落盘的步骤」，optimizer_state_overview 原样呈现。
+pub fn mark_partial(id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    let mut state = load();
+    let Some(rec) = state
+        .get_mut("items")
+        .and_then(|i| i.as_object_mut())
+        .and_then(|m| m.get_mut(id))
+        .and_then(|r| r.as_object_mut())
+    else {
+        return false;
+    };
+    rec.insert("status".into(), json!("partial"));
+    save(&state)
+}
+
 /// 还原成功销账（本就不存在视为成功）
 pub fn remove(id: &str) -> bool {
     if id.is_empty() {

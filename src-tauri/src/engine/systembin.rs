@@ -33,6 +33,7 @@ const PINNED: &[&str] = &[
     "netsh.exe",
     "netsh",
     "powercfg.exe",
+    "powershell.exe", // 注意：在 System32\WindowsPowerShell\v1.0 子目录，见下方专属候选
     "reg.exe",
     "reg",
     "sc.exe",
@@ -61,7 +62,15 @@ pub fn system_tool(program: &str) -> std::path::PathBuf {
     if !program.to_ascii_lowercase().ends_with(".exe") {
         names.push(format!("{program}.exe"));
     }
-    for dir in [root.join("System32"), root.clone()] {
+    // powershell.exe（inbox 5.1，v3-K1 的 PsInline 执行器用）不在 System32 根，
+    // 而在 WindowsPowerShell\v1.0 子目录 —— 该工具专属候选排在最前。
+    let ps_dir = root.join(r"System32\WindowsPowerShell\v1.0");
+    let dirs: Vec<std::path::PathBuf> = if program.eq_ignore_ascii_case("powershell.exe") {
+        vec![ps_dir, root.join("System32"), root.clone()]
+    } else {
+        vec![root.join("System32"), root.clone()]
+    };
+    for dir in &dirs {
         for n in &names {
             let p = dir.join(n);
             if p.is_file() {

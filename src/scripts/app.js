@@ -322,14 +322,16 @@
     if (pageName === 'startup') window.startup?.load?.();
     // 审查 K3：这两处原本是裸 `?.init?.()`，与 ensurePageScripts 的那次 init 叠在一起，
     // 第一次进页就会绑两份监听器。quickcmds 的 renderTabs/renderList 只在首绑时需要
-    // （页面 DOM 是 display 切换、不重建），pathbinding.js 自带幂等守卫，语义不变。
+    // （页面 DOM 是 display 切换、不重建）。
     if (pageName === 'quickcmds') initModuleByName('quickcmds');
     // v3.2.1：首次进入磁盘清理页自动检测规则库云端版本（右上角 toast 提示更新）
     if (pageName === 'cleanup') window.cleanup?.onPageEnter?.();
     if (pageName === 'memoryclean') {
       window.memoryclean?.loadInfo?.();
     }
-    if (pageName === 'settings') { window.pathbinding?.init?.(); }
+    // 审查 K3-1：settings 页此前裸调 pathbinding.init()，绕过 _initedModules 台账，
+    // 重复进页会叠加 IPC 订阅。pathbinding 在 MODULES_NEEDING_INIT 里，走台账统一收口。
+    if (pageName === 'settings') initModuleByName('pathbinding');
     // v3.7.0：「默认应用接管」页面与模块已整块删除（含专家模式），进页钩子随之移除
     // 运行库修复（v3.3.0）：首次进入自动扫描一次（只读）
     if (pageName === 'runtimes') window.runtimes?.onEnter?.();

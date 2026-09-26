@@ -449,8 +449,30 @@ fn run_file_impl(
     on_line: Option<Box<dyn FnMut(&str) + Send>>,
 ) -> Result<PsOutput, String> {
     let exe = resolve_pwsh().map_err(|(_, msg)| msg)?;
+    run_with_exe(&exe, script_path, timeout, diag_op, on_line, "PowerShell 7")
+}
+
+/// 审查 v3-K1：用**收件箱 Windows PowerShell 5.1**（System32 自带，无需用户安装）
+/// 跑一个脚本文件。供 `pssteps::PsOp::PsInline` 使用 —— 解释器无法原生表达的构造
+/// （Appx/PnP 设备/WMI 方法/内存代理开关等）逐字交给 inbox PS 执行，语义零改写。
+///
+/// 脚本文件由调用方写入 `paths::temp_script_dir()`（私有 tmp，reparse 判拒），
+/// 本函数只负责执行与清理后的进程树纪律（Job Object + 超时终止，与 run_file_impl 同源）。
+pub(crate) fn run_inbox_ps(script_path: &Path, timeout: Duration) -> Result<PsOutput, String> {
+    let exe = crate::engine::systembin::system_tool("powershell.exe");
+    run_with_exe(&exe, script_path, timeout, None, None, "Windows PowerShell")
+}
+
+fn run_with_exe(
+    exe: &Path,
+    script_path: &Path,
+    timeout: Duration,
+    diag_op: Option<&str>,
+    on_line: Option<Box<dyn FnMut(&str) + Send>>,
+    label: &str,
+) -> Result<PsOutput, String> {
     let trim_tmp = paths::temp_script_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut child = Command::new(&exe)
+    let mut child = Command::new(exe)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -465,7 +487,7 @@ fn run_file_impl(
         .stdin(Stdio::null())
         .creation_flags(0x0800_0000)
         .spawn()
-        .map_err(|e| format!("PowerShell 7 启动失败: {e}"))?;
+        .map_err(|e| format!("{label} 启动失败: {e}"))?;
 
     // 审查 M6：立刻把 pwsh 塞进 Job Object（趁它还没来得及 spawn 子孙）。
     // 建不了 job 时只降级、不失败：大不了退回「超时只杀 pwsh 本体」的旧行为，并在日志里留痕。
@@ -524,7 +546,7 @@ fn run_file_impl(
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Err(e) => return Err(format!("等待 PowerShell 7 失败: {e}")),
+            Err(e) => return Err(format!("等待 {label} 失败: {e}")),
         }
     }
 
@@ -534,7 +556,7 @@ fn run_file_impl(
     let stdout = take_reader(&rx_out, &snap_out, timed_out, &job);
     let mut stderr = take_reader(&rx_err, &snap_err, timed_out, &job);
     if timed_out {
-        stderr.push_str("\nPowerShell 7 执行超时");
+        stderr.push_str(&format!("\n{label} 执行超时"));
         code = -1;
     }
     // @@DIAG@@ 诊断行转日志并从 stdout 剔除（与 extractDiagLines 同口径）

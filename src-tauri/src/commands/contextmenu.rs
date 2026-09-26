@@ -886,7 +886,12 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // 4. 拉起 regedit；普通拉起失败（返回 ≤32）转 RunAs 弹 UAC
-    let exe = to_wide16("regedit.exe");
+    // 审查 v3-L6：用 System32 绝对路径，不走 ShellExecute 的 App Paths/搜索顺序解析，
+    // 口径与 systembin::system_tool 一致（裸名解析路径里用户可写目录优先于 System32）
+    let regedit = std::env::var("SystemRoot")
+        .map(|r| format!(r"{r}\System32\regedit.exe"))
+        .unwrap_or_else(|_| r"C:\Windows\System32\regedit.exe".to_string());
+    let exe = to_wide16(&regedit);
     let open = unsafe {
         ShellExecuteW(
             None,

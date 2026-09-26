@@ -57,6 +57,11 @@
   --success: #34C77B;
   --warning: #F5A524;
   --danger: #F0524D;
+  /* 审查 E3-1：暗色 --danger 是亮红，白字仅 3.49:1 不达 AA；实底按钮前景必须走
+     --danger-text（深墨，对 --danger 4.96:1）。hover 向白混提亮（对齐 --accent-hover 暗色变亮
+     的方向），深字对提亮后的底仍 6.09:1；若沿用向黑混，深字会掉到 3.51:1，故混色方向走 token。 */
+  --danger-text: #171832;
+  --danger-hover-tint: #ffffff;
   --info: #4D9DE0;
   --success-soft: rgba(52, 199, 123, 0.14);
   --warning-soft: rgba(245, 165, 36, 0.14);
@@ -217,6 +222,10 @@
   --success: #156B42;
   --warning: #875708;
   --danger: #AC2A27;
+  /* 审查 E3-1：浅色 --danger 深红，白字 6.71:1 达标；hover 沿用向黑混（对齐 --accent-hover
+     浅色变暗的方向），8.82:1。与暗色档共用同一对 token 名。 */
+  --danger-text: #ffffff;
+  --danger-hover-tint: #000000;
   --info: #1D6493;
   --success-soft: rgba(21, 107, 66, 0.12);
   --warning-soft: rgba(135, 87, 8, 0.12);
@@ -333,6 +342,15 @@ body[data-preset-bg="graphite"] .layout::before {
   box-sizing: border-box;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* 审查 E3-2（v1 U3 闭环）：全仓此前没有任何 ::placeholder 规则，占位符吃浏览器默认
+   「文字色 × 降透明度」，两主题下都可能跌破 AA。显式取 --fg-tertiary（按各主题最暗/最亮
+   输入底最坏情形估算：暗色 ≈5.9:1、浅色 ≈5.2:1，均过 AA）并锁 opacity:1 防浏览器再压灰。
+   computed-style 终判待 DevTools 目检（本轮档位不启动应用）。 */
+::placeholder {
+  color: var(--fg-tertiary);
+  opacity: 1;
 }
 
 html {
@@ -970,14 +988,16 @@ body {
   border-color: var(--border-strong);
 }
 
+/* 审查 E3-1：实底危险按钮的前景走 --danger-text（两主题各自的对比达标档），
+   不再写死 white——暗色白字仅 3.49:1 破 AA。hover 混色方向由 --danger-hover-tint 决定。 */
 .btn-danger {
   background: var(--danger);
-  color: white;
+  color: var(--danger-text);
   border-color: var(--danger);
 }
 .btn-danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 82%, #000);
-  border-color: color-mix(in srgb, var(--danger) 82%, #000);
+  background: color-mix(in srgb, var(--danger) 82%, var(--danger-hover-tint));
+  border-color: color-mix(in srgb, var(--danger) 82%, var(--danger-hover-tint));
 }
 
 /* D10：中风险确认按钮（黄色）。亮色系 --warning 为浅黄配深色前景（--accent-text），
@@ -1110,7 +1130,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
+  /* 审查 v3-L2：删掉不可达的 `color: white` 兜底——20/20 个使用点都带内联
+     --icon-bg + color，这条白字是指下一次「去掉内联 style」时的对比度陷阱 */
   flex-shrink: 0;
 }
 
@@ -2010,7 +2031,7 @@ body.lg-mode-frost .nav-item.active:hover {
   font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
   font-size: var(--fs-meta);
   line-height: 1.6;
-  color: #D4D4D4;
+  color: var(--fg-secondary); /* 审查 C2-2：原 #D4D4D4 绕过 token，收敛到既有 fg 档 */
   flex: 1;
   min-height: 300px;
   max-height: calc(100vh - 220px);
@@ -2020,7 +2041,7 @@ body.lg-mode-frost .nav-item.active:hover {
 }
 .theme-light .log-viewer {
   background: transparent;
-  color: #1E1E1E;
+  color: var(--fg-primary); /* 审查 C2-2：原 #1E1E1E 绕过 token */
 }
 
 .log-line {
@@ -2029,7 +2050,7 @@ body.lg-mode-frost .nav-item.active:hover {
   padding: 2px 0;
 }
 .log-time {
-  color: #6B7280;
+  color: var(--fg-tertiary); /* 审查 C2-2：原 #6B7280 绕过 token，且在暗色底仅 3.9:1，收敛后两主题达标 */
   flex-shrink: 0;
 }
 .log-level {
@@ -2041,10 +2062,12 @@ body.lg-mode-frost .nav-item.active:hover {
   font-size: calc(10px * var(--font-size-scale, 1));
   padding: 1px 0;
 }
-.log-level.INFO { color: #60A5FA; }
+/* 审查 C2-2：级别色原为硬编码 Tailwind 系色值绕过 token（WARN 早已是 var(--warning)，其余与之对齐）。
+   顺带修复浅色主题下 #60A5FA/#94A3B8 在浅底上对比不足的问题——--info/--fg-tertiary 的浅色档均达 AA。 */
+.log-level.INFO { color: var(--info); }
 .log-level.WARN { color: var(--warning); }
-.log-level.ERROR { color: #F87171; }
-.log-level.DEBUG { color: #94A3B8; }
+.log-level.ERROR { color: var(--danger); }
+.log-level.DEBUG { color: var(--fg-tertiary); }
 .log-message {
   flex: 1;
   word-break: break-word;
@@ -2381,7 +2404,7 @@ select.field-input { cursor: pointer; appearance: auto; }
   width: 24px;
   height: 24px;
   border-radius: var(--radius-small);
-  color: #fff;
+  color: var(--accent-text); /* 审查 E3-1 同族：accent 实底白字在暗色仅 2.99:1；--accent-text 是设计系统规定的实底 accent 前景 */
   flex: 0 0 auto;
   background: var(--accent);
 }
@@ -2576,7 +2599,7 @@ select.field-input { cursor: pointer; appearance: auto; }
   height: 16px;
   border-radius: 50%;
   background: var(--c, var(--accent));
-  color: #fff;
+  color: var(--accent-text); /* 审查 E3-1 同族：全仓无 --c 定义，实际恒为 accent 实底，白字暗色 2.99:1 */
   font-size: calc(11px * var(--font-size-scale, 1));
   font-weight: calc(700 * var(--font-weight-scale, 1));
   line-height: 16px;
@@ -3740,64 +3763,9 @@ input[type="radio"]:focus-visible {
   max-width: 360px;
 }
 
-.shutdown-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
-}
-
-.shutdown-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--fs-meta);
-  color: var(--fg-tertiary);
-  transition: color var(--duration-base) var(--ease-standard);
-}
-
-.shutdown-step::before {
-  content: '';
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  border: 2px solid var(--border-strong);
-  transition: all var(--duration-base) var(--ease-standard);
-}
-
-.shutdown-step.active {
-  color: var(--fg-secondary);
-}
-.shutdown-step.active::before {
-  border-top-color: var(--accent);
-  border-color: var(--accent);
-  border-top-color: transparent;
-  animation: spin 0.7s linear infinite;
-}
-
-.shutdown-step.done {
-  color: var(--fg-secondary);
-}
-.shutdown-step.done::before {
-  border: none;
-  background: var(--success);
-  content: '✓';
-  color: white;
-  font-size: calc(10px * var(--font-size-scale, 1));
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-}
-
-.shutdown-step.failed {
-  color: var(--danger);
-}
-.shutdown-step.failed::before {
-  border-color: var(--danger);
-}
+/* 审查 v3-L2：`.shutdown-steps` 容器与 `.shutdown-step*` 全块删除——关机编排
+   UI 未随 Tauri 迁移，JS/HTML 零引用（全仓 grep 证实）；块内还有一条 E3-1
+   同族的 `color: white` 不可达兜底（暗色 2.19:1），一并清除 */
 
 /* ================================================================
    右键菜单详情弹窗（Fluent Design，适配浅色/深色主题）
@@ -5138,7 +5106,8 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  /* 审查 v3-L2：`color:#fff` 兜底删除——4 个变体各自覆写 color，这条白字
+     是下一个变体忘写 color 时的隐形对比度陷阱（E3-1 同族） */
 }
 .startup-item-icon.reg { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
 .startup-item-icon.folder { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
@@ -6056,7 +6025,7 @@ body.pv-window {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--accent-text); /* 审查 E3-1 同族：protected/success 实底白字在暗色仅 2.73/2.19:1；--accent-text 四种组合均 ≥6.1:1 */
   transition: transform 150ms var(--ease-standard), box-shadow 150ms var(--ease-standard);
 }
 #ovMemJump { background: var(--protected); }
@@ -6660,7 +6629,7 @@ body.pv-window {
 }
 .ctx-detail-delete:hover {
   background: var(--danger);
-  color: #fff;
+  color: var(--danger-text); /* 审查 E3-1 同族：danger 实底上的白字在暗色仅 3.49:1 不达 AA */
 }
 
 /* ================================================================
@@ -7585,27 +7554,31 @@ body.theme-light[data-preset-bg] .main-content { background: transparent; }
 body[data-preset-bg] .layout::before { display: block !important; }
 /* （玻璃皮肤磨砂层已合并至 197-228 行的 data-skin="glass" 主块，此处不再重复定义） */
 
+/* 审查 C2-1：本块原是「碳墨浅色」旧调色板的字面值覆写（#1c1e24/#f5f6f8/#505766 等），
+   绕过 token 且与雾屿 V1 浅色 token（--fg-primary #292536 / --bg-app #F6F4FB）漂移。
+   现全部改走 token，字段值向雾屿 V1 对齐（细微色差，属有意收敛），主题后续调整不再漏同步。
+   真机观感待 DevTools 目检确认。 */
 body.theme-light .titlebar {
-  background: #f7f8fb;
+  background: var(--bg-app);
 }
 body.theme-light .titlebar::after {
-  background: rgba(20, 24, 40, 0.12);
+  background: var(--border-strong);
 }
-body.theme-light .titlebar-title { color: #1c1e24; }
+body.theme-light .titlebar-title { color: var(--fg-primary); }
 
 /* Light mode readability: never inherit carbon surfaces or pale foregrounds. */
-body.theme-light { background-color: #f5f6f8; color: #1c1e24; background-image: none !important; }
+body.theme-light { background-color: var(--bg-app); color: var(--fg-primary); background-image: none !important; }
 body.theme-light .sidebar { background: var(--bg-card); border-color: var(--border-default); }
-body.theme-light .main-content { background: #f5f6f8; }
-body.theme-light .nav-item { color: #1c1e24; }
-body.theme-light .nav-item:hover { background: #eef0f4; }
-body.theme-light .nav-icon { color: #505766; }
-body.theme-light .nav-submenu.expanded { background: var(--bg-card); border-color: rgba(20, 24, 40, 0.12); }
-body.theme-light .nav-subitem { color: #4b505b; }
-body.theme-light .nav-subitem:hover { background: #eef0f4; color: #1c1e24; }
-body.theme-light .nav-subdot { background: rgba(20, 24, 40, 0.18); }
-body.theme-light .nav-subdot::after { background: #737987; }
-body.theme-light .nav-section-title { color: #626a79; }
+body.theme-light .main-content { background: var(--bg-app); }
+body.theme-light .nav-item { color: var(--fg-primary); }
+body.theme-light .nav-item:hover { background: var(--bg-hover); }
+body.theme-light .nav-icon { color: var(--fg-secondary); }
+body.theme-light .nav-submenu.expanded { background: var(--bg-card); border-color: var(--border-default); }
+body.theme-light .nav-subitem { color: var(--fg-secondary); }
+body.theme-light .nav-subitem:hover { background: var(--bg-hover); color: var(--fg-primary); }
+body.theme-light .nav-subdot { background: var(--border-strong); }
+body.theme-light .nav-subdot::after { background: var(--fg-tertiary); }
+body.theme-light .nav-section-title { color: var(--fg-tertiary); }
 
 .btn {
   position: relative;
@@ -7645,8 +7618,10 @@ body.theme-light .nav-section-title { color: #626a79; }
 .btn-accent {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
-.btn-secondary { background: #171b24; border-color: rgba(255, 255, 255, 0.11); }
-.btn-secondary:hover:not(:disabled) { background: #202631; border-color: rgba(255, 255, 255, 0.19); }
+/* 审查 v3-L3：本组字面值（#171b24/#202631/#a8afbd/#1c1e24/#f0f1f4/#4b505b）映射到
+   既有 token，向雾屿 V1 对齐（细微色差属有意收敛，主题调整不再漏同步） */
+.btn-secondary { background: var(--surface-solid); border-color: rgba(255, 255, 255, 0.11); }
+.btn-secondary:hover:not(:disabled) { background: var(--bg-hover); border-color: rgba(255, 255, 255, 0.19); }
 .btn:focus-visible,
 .nav-item:focus-visible,
 .nav-subitem:focus-visible,
@@ -7666,7 +7641,7 @@ body.theme-light .nav-section-title { color: #626a79; }
 }
 .summary-card:hover { transform: translateY(-1px); background: var(--bg-card-hover); }
 .page-title { letter-spacing: 0; }
-.page-subtitle { color: #a8afbd; }
+.page-subtitle { color: var(--fg-secondary); }
 
 @media (prefers-reduced-motion: reduce) {
   .btn > .btn-ripple { display: none; }
@@ -7678,8 +7653,8 @@ body.theme-light .nav-section-title { color: #626a79; }
 }
 
 /* Light mode controls and content keep WCAG-friendly contrast. */
-body.theme-light .btn-secondary { background: var(--bg-card); border-color: rgba(20, 24, 40, 0.14); color: #1c1e24; }
-body.theme-light .btn-secondary:hover:not(:disabled) { background: #f0f1f4; }
+body.theme-light .btn-secondary { background: var(--bg-card); border-color: rgba(20, 24, 40, 0.14); color: var(--fg-primary); }
+body.theme-light .btn-secondary:hover:not(:disabled) { background: var(--bg-hover); }
 /* 卡片底色走 token：材质激活时由「材质 2.0」段的 rgba token 接管（半透明玻璃化），
    无材质 / 不支持 DWM 时 token 本身就是不透明色，观感与原 #ffffff 一致（窗口界面升级3）。 */
 body.theme-light .summary-card,
@@ -7687,16 +7662,16 @@ body.theme-light .card,
 body.theme-light .table-card,
 body.theme-light .settings-section,
 body.theme-light .appearance-card,
-body.theme-light .empty-state { background: var(--bg-card); border-color: rgba(20, 24, 40, 0.12); color: #1c1e24; }
+body.theme-light .empty-state { background: var(--bg-card); border-color: rgba(20, 24, 40, 0.12); color: var(--fg-primary); }
 body.theme-light .summary-card:hover { background: var(--bg-card-hover); }
 body.theme-light .page-title,
 body.theme-light .health-title,
 body.theme-light .ov-res-label,
-body.theme-light .ov-res-value { color: #1c1e24; }
+body.theme-light .ov-res-value { color: var(--fg-primary); }
 body.theme-light .page-subtitle,
 body.theme-light .health-advice,
 body.theme-light .health-uptime,
-body.theme-light .ov-res-sub { color: #4b505b; }
+body.theme-light .ov-res-sub { color: var(--fg-secondary); }
 
 /* Keep the expanded navigation block compact and close to its parent. */
 .nav-submenu.expanded { margin-top: 2px; margin-bottom: 3px; padding: 3px; }
@@ -7749,7 +7724,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   font-size: var(--fs-secondary);
   color: var(--fg-primary);
 }
-body.theme-light .mouse-trail-label { color: #1c1e24; }
+body.theme-light .mouse-trail-label { color: var(--fg-primary); }
 
 @media (prefers-reduced-motion: reduce) {
   .mouse-trail-layer { display: none !important; }
@@ -8758,7 +8733,18 @@ body[data-preset-bg] .layout {
 
 /* 启动页（v2.7.0）：覆盖全窗。底色必须透明——不透明底会让「主页内容渐显」失效，
    进入过渡时靠 .splash-bg（不透明渐变）淡出露出主界面，Trim 平移与内容渐显同步进行 */
+/* 审查 v3-L3：开屏是独立覆盖层，刻意固定浅色不随主题/皮肤联动（下同，白玻璃
+   rgba 字面均为既有的「刻意设计」项）——原离表 hex 收敛为本节局部调色板，单一
+   出处；品牌色由靛蓝 #4F46E5 对齐雾屿 V1 --accent（#6A59C9，白字 5.41:1 ✓ AA，
+   属有意收敛），真机观感待 DevTools 目检确认。 */
 .splash-overlay {
+  --splash-brand: #6A59C9;
+  --splash-brand-hover: #5948BD;
+  --splash-bg-top: #F1EFFA;
+  --splash-bg-bottom: #E7E2F6;
+  --splash-border: #E0DBF3;
+  --splash-muted: #6B6787;
+  --splash-ink: #4F4C66;
   position: fixed;
   inset: 0;
   z-index: 9999;
@@ -8767,7 +8753,7 @@ body[data-preset-bg] .layout {
 .splash-overlay .splash-bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, #EFEDFB 0%, #E4E0F8 100%);
+  background: linear-gradient(180deg, var(--splash-bg-top) 0%, var(--splash-bg-bottom) 100%);
 }
 .splash-overlay #splash-canvas {
   position: absolute;
@@ -8797,10 +8783,10 @@ body[data-preset-bg] .layout {
 .splash-badge {
   font-size: 13px;
   letter-spacing: .08em;
-  color: #6E6A96;
+  color: var(--splash-muted);
   /* 刻意设计：启动页独立覆盖层（固定浅色配色），白色徽章底不随玻璃皮肤联动 */
   background: rgba(255, 255, 255, .78);
-  border: 1px solid #E3DFF7;
+  border: 1px solid var(--splash-border);
   padding: 7px 18px;
   border-radius: 999px;
   box-shadow: 0 4px 14px -6px rgba(79, 70, 229, .18);
@@ -8811,13 +8797,13 @@ body[data-preset-bg] .layout {
   font-size: clamp(4rem, 11vw, 7.5rem);
   font-weight: 800;
   line-height: 1;
-  color: #4F46E5;
+  color: var(--splash-brand);
   letter-spacing: .02em;
   animation: splashTrimIn .7s cubic-bezier(.22, 1, .36, 1) .08s both;
 }
 .splash-intro {
   font-size: clamp(1rem, 2.2vw, 1.2rem);
-  color: #55527B;
+  color: var(--splash-ink);
   max-width: 30em;
   animation: splashFadeIn .6s ease-out .18s both;
 }
@@ -8841,11 +8827,11 @@ body[data-preset-bg] .layout {
   height: 100%;
   width: 0%;
   border-radius: 999px;
-  background: #4F46E5;
+  background: var(--splash-brand);
 }
 .splash-progress-text {
   font-size: 12px;
-  color: #6E6A96;
+  color: var(--splash-muted);
   font-variant-numeric: tabular-nums;
 }
 .splash-overlay.compact .splash-badge,
@@ -8880,7 +8866,7 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
   font-size: 1.05rem;
   font-weight: 600;
   color: #fff;
-  background: #4F46E5;
+  background: var(--splash-brand);
   border: none;
   border-radius: 999px; /* 胶囊按钮例外（AGENTS §5 允许） */
   cursor: pointer;
@@ -8888,7 +8874,7 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
   box-shadow: 0 12px 26px -10px rgba(79, 70, 229, .55);
   transition: background-color .2s ease, transform .2s ease;
 }
-.splash-enter:hover { background: #4338CA; transform: translateY(-1px); }
+.splash-enter:hover { background: var(--splash-brand-hover); transform: translateY(-1px); }
 .splash-enter:focus-visible { outline: 2px solid #8B5CF6; outline-offset: 3px; }
 
 /* ==================== v2.8.0 批次样式 ==================== */

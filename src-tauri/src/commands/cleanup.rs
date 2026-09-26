@@ -43,8 +43,9 @@
 //!    属 Phase 2 的关闭编排，本批未引入（清理命令本身的返回语义一致）。
 //! 2. **无 60s 占用检测超时**：原生 `checklocked` 进程内直调不可 kill，故不返回
 //!    「占用检测超时」（与 B 批 finder 扫描同一处置，见 commands/finder.rs 差异 1）。
-//! 3. **PS 回退路径不流式**：`cleanup:scan` 原生占优路径边扫边发 `cleanup:scan-progress`；
-//!    仅当原生不可用回退 PS 时才改为一次性解析（进度事件仍在结果落定时成批发出，终态一致）。
+//! 3. **（已失效，v3-M5 订正）**：旧版曾有「原生不可用回退 PS 时进度改为一次性解析」
+//!    的差异——PS 回退引擎已随 S3 删除（见 :11），cleanup:scan 现在只有原生路径，
+//!    始终边扫边发 `cleanup:scan-progress`。保留编号只为对照历史审查记录。
 //! 4. **快照回收**：Electron 在 webContents destroy 时删桶；这里按 `window.label()` 分槽
 //!    且 `guard` 只放行 main（唯一槽），未注册 destroy 钩子。
 //! 5. **结束进程失败文案**：Node `process.kill` 抛 errno 文案（ESRCH/EPERM），
@@ -707,7 +708,7 @@ fn ingest_and_emit<R: tauri::Runtime>(accum: &Arc<Mutex<ScanAccum>>, window: &We
     }
 }
 
-/// 扫描主体（原生引擎优先，失败回退 PS）
+/// 扫描主体（纯原生引擎；PS 回退已随 S3 删除，见 :11）
 fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>) -> Value {
     let configured = load_paths_config();
     let rules = match rules_value() {
@@ -780,7 +781,7 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
     json!({ "success": true, "data": data })
 }
 
-/// cleanup:scan — 扫描可清理项（原生引擎优先，PS 回退；进度走 `cleanup:scan-progress`）
+/// cleanup:scan — 扫描可清理项（纯原生引擎；进度走 `cleanup:scan-progress`）
 #[tauri::command]
 pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categories: Option<Value>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
