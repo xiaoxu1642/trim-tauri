@@ -236,7 +236,21 @@
       conf.hint || ''
     );
     if (!ok) return;
-    const resp = await window.api.netcheck.repair(actionId);
+    // 审查 v2-F10：本函数改的是系统网络配置（关残留代理 / 重置 WinHTTP / 重置 Winsock），
+    // 失败时不能既没成功提示也没失败提示。此前这里无 try/catch，命令 reject 或通道缺席时
+    // 全局 `unhandledrejection` 兜底只记日志、不弹 toast，用户看到的是「点了没反应」，
+    // 于是反复点击。同文件的 `startCollect` 有完整 try/catch/finally，这里对齐。
+    if (typeof window.api?.netcheck?.repair !== 'function') {
+      toast('error', '修复通道不可用，未执行任何修改');
+      return;
+    }
+    let resp;
+    try {
+      resp = await window.api.netcheck.repair(actionId);
+    } catch (e) {
+      toast('error', '修复执行异常: ' + (e && e.message ? e.message : e), 5000);
+      return;
+    }
     if (resp?.needAdmin) {
       const elevated = await window.app.requestElevation?.('该修复动作需要管理员权限，应用将以管理员身份重启。');
       if (elevated) toast('info', '提权成功后请回到本页重新执行修复');
@@ -266,8 +280,20 @@
       ''
     );
     if (!ok) return;
+    // 审查 v2-F10 同族：`runMaintenanceTask` 与 `runRepair` 是同一类「改系统配置 + 无异常通道」，
+    // 而这里的「正在执行，请稍候…」是**唯一**的反馈 —— 一旦失败就永远停在这一句上。
+    if (typeof window.api?.maintenance?.run !== 'function') {
+      toast('error', '维护通道不可用，未执行任何修改');
+      return;
+    }
     toast('info', '正在执行，请稍候…');
-    const resp = await window.api.maintenance.run(taskId);
+    let resp;
+    try {
+      resp = await window.api.maintenance.run(taskId);
+    } catch (e) {
+      toast('error', '维护任务执行异常: ' + (e && e.message ? e.message : e), 5000);
+      return;
+    }
     if (resp?.success) toast('success', '维护任务执行完成');
     else toast('error', resp?.message || '维护任务执行失败', 5000);
   }

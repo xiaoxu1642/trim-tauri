@@ -181,7 +181,10 @@
   // 条目程序图标（有则展示提取的 DLL 图标，无则占位）
   function itemIconHtml(item, size) {
     if (item.clsid && iconMap[item.clsid]) {
-      return `<img class="ctx-item-icon" src="${iconMap[item.clsid]}" alt="" width="${size || 28}" height="${size || 28}" />`;
+      // 审查 v2-F14：同源的另一处（pathbinding.js groupIconHtml）写了 `escapeAttr` 而这里没写。
+      // 该值不可注入（唯一产出口是「固定前缀 + 标准 base64」，字符集不含引号），
+      // 但两处写法分裂会在下一次改动时踩雷 —— 统一走 `ds.escAttr` 这一唯一真源。
+      return `<img class="ctx-item-icon" src="${escapeAttr(iconMap[item.clsid])}" alt="" width="${size || 28}" height="${size || 28}" />`;
     }
     return placeholderIconHtml(size);
   }

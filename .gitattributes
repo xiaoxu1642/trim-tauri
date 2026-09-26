@@ -34,8 +34,10 @@
 # 曾经按「全仓 LF」把它们标成 text eol=lf，结果 6 项对拍全红、且这个回归被推到了远端
 # —— 干净克隆出来的 .ps1 是 LF，与上游字面量差一个 \r。故这里显式关掉转换。
 # 改这些文件只能通过 `node tools/sync-ps-from-js.mjs` 重出（AGENTS.md：禁止手改）。
-# 另记一条容易记错的约束（审查 v2-L3 实测订正）：盘上 66 个 .ps1 **都不带 BOM**（0/66），
+# 另记一条容易记错的约束（审查 v2-L3 实测订正，v2-F14 补记现状）：S3 退役前盘上 66 个 .ps1
+# **都不带 BOM**（0/66）；S3 退役后只剩 cm_icons / optimizer_build 两个，BOM 口径不变。
 # UTF-8 BOM 是运行期由 `src-tauri/src/pwsh/mod.rs` 的前置逻辑加的（PowerShell 5.1 兼容）。
+# 看到「66」不要以为门禁还覆盖 66 个文件 —— 现役脚本数以 `tools/ps-mapping.mjs` 的 MAPPING 为准。
 # `-text` 真正保住的是那 6 个嵌在 .reg 文本里的 `\r`——它属于内容，被归一成 LF 就整批对拍红。
 *.ps1 -text
 

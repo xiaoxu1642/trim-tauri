@@ -288,7 +288,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::preview::preview_image_deleted,
         // ---- B 批：pwsh 运行时 / runtimes / netcheck / netspeed / diskbench ----
         commands::pwshruntime::pwsh_status,
-        commands::pwshruntime::pwsh_prepare,
+        // B11（2026-09-26）：`pwsh_prepare` 已整链摘除 —— 零调用方，且 Tauri 侧根本没有
+        // 内置运行时解压链可准备（pwshruntime.rs 头部自陈「不存在 extracting 态」），
+        // 它做的事与 `pwsh_status` 内的候选链解析完全重复。
         commands::runtimes::runtimes_collect,
         commands::runtimes::runtimes_install,
         commands::netcheck::netcheck_collect,
@@ -307,8 +309,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::cleanup::cleanup_kill_locked_processes,
         commands::cleanup::cleanup_item_detail,
         // ---- C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan ----
+        // 审查 v2-F4 彻底方案：`settings_save` 已整链摘除（零调用方的死写入通道，
+        // 摘除记录见 settings.rs 头部注释）。AI 模型配置写入由 `models_save` 承载。
         commands::settings::settings_load,
-        commands::settings::settings_save,
         commands::models::models_save,
         commands::models::models_set_scope,
         commands::models::models_test,
@@ -469,6 +472,22 @@ pub fn run() {
                     if paths::is_portable() { "是" } else { "否" }
                 ),
             );
+            // 审查 v2-C-002：README 承诺「适用 Windows 11 22H2 及以上」，此前代码里没有
+            // 任何断言、日志也不记录实测版本 —— 这条承诺静态无法证伪。现在把实测 build
+            // 与判定结果落进日志；低于下限只 warn 不阻断（在 21H2 上材质会降级、其余功能
+            // 多数仍可用，替用户做「拒绝启动」的决定越权了）。
+            let build = sysinfo::windows_build();
+            if sysinfo::supported() {
+                log::write_log("info", &format!("系统版本 10.0.{build}（达到最低支持 build {}）", sysinfo::MIN_SUPPORTED_BUILD));
+            } else {
+                log::write_log(
+                    "warn",
+                    &format!(
+                        "系统版本 10.0.{build} 低于承诺的最低支持 build {}（Windows 11 22H2）：窗口材质将不可用，部分功能未在该版本验证",
+                        sysinfo::MIN_SUPPORTED_BUILD
+                    ),
+                );
+            }
 
             // ---------- 窗口状态恢复 ----------
             let ap = appearance::load_appearance();
@@ -531,8 +550,8 @@ pub fn run() {
 }
 
 /// 进程退出前的统一收尾（对齐 Electron 的 before-quit 编排中 Phase 1 已实现的部分）：
-/// 刷盘日志 → 回收长驻子进程（实时采样 pwsh）→ 清理临时脚本。
-/// 不这样做会留下常驻 pwsh 进程与半截日志（渲染层异常退出路径同样会走到这里）。
+/// 刷盘日志 → 停掉进程内实时采样线程 → 清理临时 pwsh 脚本。
+/// 不这样做会留下半截日志与残留脚本文件（渲染层异常退出路径同样会走到这里）。
 pub fn on_app_exit() {
     log::flush_sync();
     commands::realtime::shutdown_sampler();

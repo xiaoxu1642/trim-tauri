@@ -8,7 +8,8 @@
 // 用法：node tools/sync-ps-from-js.mjs [--check] [--refresh-headers]
 //   --check：只比对不写盘（差异即退出码 1，可用于门禁）
 //   --refresh-headers：正文一致时也重写文件。用于 PROVENANCE 头的口径变更
-//     （审查 M22b：来源行从绝对路径改成仓库内相对路径后，63 个正文没变的文件仍留着旧绝对路径）
+//     （审查 M22b：来源行从绝对路径改成仓库内相对路径后，当时在册的 63 个正文没变的
+//     文件仍留着旧绝对路径）。S3 退役后 MAPPING 只剩 2 项，这个数不会再是 63。
 //     —— 重写后必须逐字节核对 CR/BOM 未被吃掉（`*.ps1` 是 `-text`，AGENTS.md §5.1）。
 
 import { createRequire } from 'node:module';

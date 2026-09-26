@@ -87,7 +87,6 @@
     'runtimes:collect': 'runtimes_collect',
     'runtimes:install': 'runtimes_install',
     'pwsh:status': 'pwsh_status',
-    'pwsh:prepare': 'pwsh_prepare',
     // finder（4）
     'finder:scan': 'finder_scan',
     'finder:delete': 'finder_delete',
@@ -109,7 +108,6 @@
     'modal:close': 'modal_close',
     'diag:dwm-conflict': 'diag_dwm_conflict',
     'settings:load': 'settings_load',
-    'settings:save': 'settings_save',
     'intro:load': 'intro_load',
     // models 窗口 + models 配置（合计 5）
     'models:open-window': 'models_open_window',
@@ -243,13 +241,22 @@
     var cmd = SEND_MAP[channel];
     if (!cmd) {
       console.warn('[tauri-api] 未登记的 send 通道: ' + channel);
-      return;
+      return Promise.resolve(false);
     }
     // 审查 L13：send 语义是「不等回执」，但**不等于出错也瞒着** —— 原先 `.catch(function(){})`
     // 连一行日志都不留，通道名写错或 Rust 侧报错时完全无从发现。
-    invokeCore(cmd, args || {}).catch(function (e) {
-      console.error('[tauri-api] send 通道失败 ' + channel + ': ' + ((e && e.message) || e));
-    });
+    //
+    // 审查 v2-F17：这里**额外返回**一个 resolve 为布尔的 promise（成功 true / 失败 false）。
+    // 语义仍是 fire-and-forget —— 不返回 promise 的话，「删图后主窗没同步」这类失败在渲染层
+    // 根本无从感知（readme:56 的「实时同步」因此是假成立）。返回值不改变既有调用方：
+    // 三个忽略它的调用点行为完全不变，需要回执的调用方（预览窗删图）才去 await。
+    // 内部这条 catch 吃掉异常并落日志，故不会冒出 unhandledrejection。
+    return invokeCore(cmd, args || {})
+      .then(function () { return true; })
+      .catch(function (e) {
+        console.error('[tauri-api] send 通道失败 ' + channel + ': ' + ((e && e.message) || e));
+        return false;
+      });
   }
 
   // --------------------------------------------------------------------------
@@ -410,8 +417,8 @@
 
     pwsh: {
       getStatus: function () { return invokeChannel('pwsh:status'); },
-      prepare: function () { return invokeChannel('pwsh:prepare'); },
       onStatus: function (callback) { return onEvent('pwsh:status', callback); }
+      // B11：`prepare` 已随 pwsh:prepare 通道整链摘除（零调用方 + 无内置运行时可准备）
     },
 
     finder: {
@@ -450,9 +457,10 @@
       dwmConflict: function () { return invokeChannel('diag:dwm-conflict'); }
     },
 
+    // 审查 v2-F4：`settings:save` 整链摘除（零调用方的死写入通道，AI 配置写入归 models 域）。
+    // 只留 load；将来若真要开配置页，走 `models:save` 而不是复活这条。
     settings: {
-      load: function () { return invokeChannel('settings:load'); },
-      save: function (settings) { return invokeChannel('settings:save', { settings: settings }); }
+      load: function () { return invokeChannel('settings:load'); }
     },
 
     intro: {
@@ -572,7 +580,8 @@
       open: function (payload) { return invokeChannel('preview:open-window', { payload: payload }); },
       close: function () { return invokeChannel('preview:close-window'); },
       onData: function (callback) { return onEvent('preview:data', callback); },
-      notifyDeleted: function (filePath) { sendChannel('preview:image-deleted', { path: filePath }); },
+      // 审查 v2-F17：回传 promise 供调用方判断是否同步成功（sendChannel 内部仍落基线日志）
+      notifyDeleted: function (filePath) { return sendChannel('preview:image-deleted', { path: filePath }); },
       onImageDeleted: function (callback) { return onEvent('preview:image-deleted', callback); }
     },
 
@@ -752,16 +761,21 @@
 
     var bar = document.createElement('div');
     bar.className = 'tauri-caption';
-    bar.setAttribute('role', 'group');
+    // 审查 v2-F8：`decorations(false)`（lib.rs:439）已排除原生标题栏，这套自绘按钮是
+    // 最小化/最大化/关闭的**唯一**入口。原先三个按钮都带 `tabindex="-1"`，对纯键盘用户
+    // 完全不可达（`ds.js` 的焦点陷阱选择器也排除 `[tabindex="-1"]`），且 `index.html:32/40`
+    // 还留着「由 Windows 原生 titleBarOverlay 渲染」的过时注释。这里去掉 tabindex 限制，
+    // 并把容器升级为 `role="toolbar"`（三个按钮按 toolbar 语义可 Tab 逐个到达）。
+    bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', '窗口控制');
     bar.innerHTML =
-      '<button type="button" class="tauri-caption-btn" data-act="minimize" aria-label="最小化" tabindex="-1">' +
+      '<button type="button" class="tauri-caption-btn" data-act="minimize" aria-label="最小化">' +
         capSvg('<line x1="2" y1="6" x2="10" y2="6"/>') + '</button>' +
-      '<button type="button" class="tauri-caption-btn" data-act="maximize" aria-label="最大化/还原" tabindex="-1">' +
+      '<button type="button" class="tauri-caption-btn" data-act="maximize" aria-label="最大化/还原">' +
         '<svg class="tauri-cap-max" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7"/></svg>' +
         '<svg class="tauri-cap-restore" viewBox="0 0 12 12" aria-hidden="true"><rect x="3.5" y="1.5" width="6" height="6"/><path d="M2 4v6h6"/></svg>' +
       '</button>' +
-      '<button type="button" class="tauri-caption-btn" data-act="close" aria-label="关闭" tabindex="-1">' +
+      '<button type="button" class="tauri-caption-btn" data-act="close" aria-label="关闭">' +
         capSvg('<line x1="2.5" y1="2.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="2.5" x2="2.5" y2="9.5"/>') + '</button>';
     document.body.appendChild(bar);
 

@@ -11,6 +11,8 @@ use std::time::Duration;
 use tauri::{AppHandle, WebviewWindow};
 
 use crate::engine::{guard, log, paths};
+// 审查 v2-F7：系统工具走绝对路径，不用裸进程名
+use crate::engine::systembin::system_tool;
 use crate::security;
 
 /// DWM 注入工具检测结论（冷启动 12s 后回填）
@@ -52,7 +54,7 @@ pub fn detect_dwm_inject_tools_async<R: tauri::Runtime>(app: AppHandle<R>) {
 
 fn detect_dwm_inject_tools() -> Option<String> {
     // 进程痕迹：tasklist /FI "IMAGENAME eq DWMBlurGlass.exe" /FO CSV
-    if let Ok(out) = std::process::Command::new("tasklist")
+    if let Ok(out) = std::process::Command::new(system_tool("tasklist"))
         .args(["/FI", "IMAGENAME eq DWMBlurGlass.exe", "/FO", "CSV"])
         .output()
     {
@@ -62,7 +64,7 @@ fn detect_dwm_inject_tools() -> Option<String> {
         }
     }
     // 计划任务痕迹：schtasks /Query /TN DWMBlurGlass_Extend
-    if let Ok(status) = std::process::Command::new("schtasks")
+    if let Ok(status) = std::process::Command::new(system_tool("schtasks"))
         .args(["/Query", "/TN", "DWMBlurGlass_Extend"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -138,7 +140,12 @@ pub fn intro_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_j
     }
 }
 
-/// 数据目录只读探针（Phase 1 排障用；Phase 5 随文档收敛时评估去留）
+/// 数据目录探针（Phase 1 排障用；Phase 5 随文档收敛时评估去留）
+///
+/// 审查 v2-T1 订正措辞：旧注释写「**只读**探针」，但它最后一项会**真写**
+/// `.write-probe.json`（`secureWriteProbe`）。这不构成风险 —— 本命令不在
+/// `CHANNEL_MAP`（`tauri-api.js` 全表 `debug:` 0 命中）且被 `check-channel-map.mjs`
+/// 的 PROBES 豁免，渲染层根本调不到 —— 但注释与代码不符会误导下一个人去查「谁在写」。
 #[tauri::command]
 pub fn debug_data_dirs<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
     guard::guard_readonly(&window)?;

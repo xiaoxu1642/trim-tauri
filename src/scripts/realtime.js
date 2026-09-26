@@ -778,23 +778,60 @@
       });
     });
     // 删除单条
+    // 审查 v2-F9：原先 `if (window.api?…) await …` 后无条件改 DOM —— 通道缺席时
+    // `await undefined` 也照样往下走，命令 reject 时更是「没报错就当成功」，
+    // 于是用户看到记录消失了、刷新后它还在（状态说谎）。
     backdrop.querySelectorAll('.rt-row-del').forEach(btn => {
       btn.addEventListener('click', async () => {
         const row = btn.closest('.rt-report-row');
-        if (window.api?.realtime?.reportDelete) await window.api.realtime.reportDelete(row.dataset.name);
-        row.remove();
-        const cnt = backdrop.querySelectorAll('.rt-report-row').length;
-        const foot = backdrop.querySelector('.pw-last-scan');
-        if (foot) foot.textContent = cnt ? `共 ${cnt} 份 · 超 7 天自动清理` : '暂无记录';
+        const name = row.dataset.name;
+        if (typeof window.api?.realtime?.reportDelete !== 'function') {
+          window.app?.toast('error', '删除通道不可用，未执行删除');
+          return;
+        }
+        try {
+          const resp = await window.api.realtime.reportDelete(name);
+          if (resp && resp.success === false) {
+            window.app?.toast('error', resp.message || '删除失败，请稍后重试', 5000);
+            return;
+          }
+          row.remove();
+          const cnt = backdrop.querySelectorAll('.rt-report-row').length;
+          const foot = backdrop.querySelector('.pw-last-scan');
+          if (foot) foot.textContent = cnt ? `共 ${cnt} 份 · 超 7 天自动清理` : '暂无记录';
+        } catch (e) {
+          window.app?.toast('error', `删除失败：${e && e.message ? e.message : e}`, 5000);
+        }
       });
     });
-    // 清空全部
+    // 清空全部：不可逆，补二次确认（对照 diskbench「清空历史」有 confirm 的既有标准）
     backdrop.querySelector('.rt-clear-all').addEventListener('click', async () => {
-      if (window.api?.realtime?.reportClear) await window.api.realtime.reportClear();
-      backdrop.querySelector('.rt-report-body').innerHTML = '<div class="empty-state"><p>已清空全部记录。</p></div>';
-      const foot = backdrop.querySelector('.pw-last-scan');
-      if (foot) foot.textContent = '共 0 份 · 超 7 天自动清理';
-      window.app?.toast('success', '网速报告已全部清空');
+      if (typeof window.api?.realtime?.reportClear !== 'function') {
+        window.app?.toast('error', '清空通道不可用，未执行清空');
+        return;
+      }
+      const cnt0 = backdrop.querySelectorAll('.rt-report-row').length;
+      if (!cnt0) { window.app?.toast('info', '当前没有可清空的记录'); return; }
+      const ok = await window.app?.confirm?.(
+        '清空网速报告',
+        `将删除全部 ${cnt0} 份网速报告，删除后不可恢复（另有超 7 天自动清理的保留策略）。`,
+        '清空全部',
+        '取消'
+      );
+      if (!ok) return;
+      try {
+        const resp = await window.api.realtime.reportClear();
+        if (resp && resp.success === false) {
+          window.app?.toast('error', resp.message || '清空失败，请稍后重试', 5000);
+          return;
+        }
+        backdrop.querySelector('.rt-report-body').innerHTML = '<div class="empty-state"><p>已清空全部记录。</p></div>';
+        const foot = backdrop.querySelector('.pw-last-scan');
+        if (foot) foot.textContent = '共 0 份 · 超 7 天自动清理';
+        window.app?.toast('success', '网速报告已全部清空');
+      } catch (e) {
+        window.app?.toast('error', `清空失败：${e && e.message ? e.message : e}`, 5000);
+      }
     });
   }
 

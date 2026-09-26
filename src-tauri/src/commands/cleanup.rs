@@ -7,11 +7,13 @@
 //!   逐字节一致）；数据目录规则必须过 `engine::rules_signature` 验签 + 防回滚水位线
 //!   `<数据目录>\cleanup\rules-watermark.json`（只升不降），不通过一律回退内置。
 //!   `custom\*.json` 只允许 `{id, enabled}` 开关内置条目（白名单外字段整文件拒载）。
-//! - **扫描引擎**：原生引擎优先（`trim_finder::cleanup_scan::run_json` 进程内直调，逐行回调
-//!   驱动 `cleanup:scan-progress`），失败/非 0 退出回退 PS 引擎（`ps/cleanup_scan.ps1` 模板替换后执行）。
-//! - **PS 模板**：`src-tauri/ps/*.ps1` 是「模板模式」产物（保留 `${X_PLACEHOLDER}`，
-//!   真实插值已在生成期求值）。替换口径与 JS `CLEANUP_SCRIPT.scan/execute/detail` 逐条对齐，
-//!   由 `tools/check-ps-substitution.mjs` 对拍（同一合成输入，JS 生成 vs Rust 生成逐字节比较）。
+//! - **扫描引擎**：纯原生（`trim_finder::cleanup_scan::run_json` 进程内直调，逐行回调
+//!   驱动 `cleanup:scan-progress`）。失败/非 0 退出如实返回错误——旧「回退 PS 引擎
+//!   （`ps/cleanup_scan.ps1` 模板替换后执行）」分支已随脚本删除退役；本段注释曾长期
+//!   与代码事实不符（2026-09-25 审计修正）。
+//! - **PS 残留**：`src-tauri/ps/` 现仅余 `cm_icons.ps1` 与 `optimizer_build.ps1`，
+//!   由 `tools/check-ps-extraction.mjs` / `check-ps-substitution.mjs` 继续对拍；
+//!   cleanup 域自身的模板替换链已随脚本删除一并退役。
 //! - **快照槽**：扫描快照 / 回收站失败项 / 占用检测 PID 白名单全部按 `window.label()` 分槽
 //!   （Electron 按 `event.sender.id`），执行与结束进程只认本槽内容。
 //! - **删除安全**：受保护路径判定统一走 `engine::protect`（三端同源）；危险操作前
@@ -827,8 +829,11 @@ struct RecycleStat {
 }
 
 /// 把一个路径移入回收站（只进回收站，可还原）
-fn move_to_recycle_bin(path: &str) -> Result<(), String> {
-    trim_finder::scan::recycle::send_to_trash(path)
+///
+/// 审查 v2-F1：形参收 `&Path` 而非 `&str` —— Windows 文件名是 UTF-16，`&str` 往返会让含
+/// 孤立代理项的名字被 `to_string_lossy` 换成 U+FFFD，于是删不到真正那个文件。
+fn move_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
+    trim_finder::scan::recycle::send_to_trash_os(path.as_os_str())
 }
 
 /// cleanup:execute — 执行清理（危险通道：快照校验 + 删除前刷盘 + 回收站优先）
@@ -943,7 +948,7 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                     continue;
                 }
                 let st = per_item.entry(id).or_default();
-                match move_to_recycle_bin(path) {
+                match move_to_recycle_bin(std::path::Path::new(path)) {
                     Ok(()) => {
                         st.recycled_bytes += js_num_or_zero(entry.get("size")) as i64;
                         st.ok += 1;

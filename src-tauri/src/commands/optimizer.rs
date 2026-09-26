@@ -19,6 +19,8 @@ use serde_json::{json, Value};
 use tauri::{Emitter, Runtime, WebviewWindow};
 
 use crate::engine::{guard, log, optimization_state as opt_state, protect, sysinfo};
+// 审查 v2-F7：系统工具走绝对路径，不用裸进程名（搜索顺序前两位优先于 System32）
+use crate::engine::systembin::system_tool;
 use crate::pwsh;
 
 // ==================== 选项数据（运行时完整导出，含推理 restore） ====================
@@ -175,7 +177,7 @@ fn native_execute_steps<R: tauri::Runtime>(
             if std::fs::write(&reg_path, reg.as_bytes()).is_err() {
                 failed += 1;
             } else {
-                let ok = match std::process::Command::new("reg.exe")
+                let ok = match std::process::Command::new(system_tool("reg.exe"))
                     .args(["import", reg_path.to_str().unwrap()])
                     .output()
                 {
@@ -187,7 +189,7 @@ fn native_execute_steps<R: tauri::Runtime>(
             }
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
             // cmd 类型：spawn cmd /c
-            let ok = match std::process::Command::new("cmd")
+            let ok = match std::process::Command::new(system_tool("cmd"))
                 .args(["/c", cmd])
                 .output()
             {
@@ -197,19 +199,25 @@ fn native_execute_steps<R: tauri::Runtime>(
             if !ok { failed += 1; }
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
             // service 类型：sc stop + 可选 sc config disabled
-            let _ = std::process::Command::new("sc").args(["stop", service]).output();
+            let _ = std::process::Command::new(system_tool("sc")).args(["stop", service]).output();
             if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
-                let _ = std::process::Command::new("sc").args(["config", service, "start=", "disabled"]).output();
+                let _ = std::process::Command::new(system_tool("sc")).args(["config", service, "start=", "disabled"]).output();
             }
             // 检查服务是否存在
-            let exists = match std::process::Command::new("sc").args(["query", service]).output() {
+            let exists = match std::process::Command::new(system_tool("sc")).args(["query", service]).output() {
                 Ok(o) => o.status.success(),
                 Err(_) => false,
             };
             if !exists { failed += 1; }
-        } else if s.get("pwsh").is_some() {
-            // pwsh 类型：原生不支持，回退 PS
-            return Err("pwsh step 需 PS 回退".into());
+        } else if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
+            // pwsh 类型：先尝试原生解释（B11）；解释器 fail-closed —— 数据层里任何
+            // 不认识的构造都会 Err，此时才回退 PS。绝不存在「半懂还硬执行」。
+            match crate::engine::pssteps::compile(pwsh).and_then(|ops| crate::engine::pssteps::execute(&ops)) {
+                Ok(()) => {}
+                Err(reason) => {
+                    return Err(format!("pwsh step 需 PS 回退（{}）", reason));
+                }
+            }
         }
 
         // 推送进度
@@ -294,19 +302,25 @@ fn classify_step_kinds(steps: &[Value]) -> Vec<String> {
 
 // ==================== .reg 块解析与回读检测 ====================
 
-const REG_ROOT_MAP: &[(&str, &str)] = &[
-    ("HKEY_LOCAL_MACHINE", "HKLM:"),
-    ("HKEY_CURRENT_USER", "HKCU:"),
-    ("HKEY_CLASSES_ROOT", "HKCR:"),
-    ("HKEY_USERS", "HKU:"),
-    ("HKEY_CURRENT_CONFIG", "HKCC:"),
-];
+/// `.reg` 根键 → native hive 句柄（B11：检测不再经 PS，需要真实 hive）
+fn reg_hive(root: &str) -> Option<windows::Win32::System::Registry::HKEY> {
+    use windows::Win32::System::Registry::{HKEY_CLASSES_ROOT, HKEY_CURRENT_CONFIG, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS};
+    Some(match root {
+        "HKEY_LOCAL_MACHINE" => HKEY_LOCAL_MACHINE,
+        "HKEY_CURRENT_USER" => HKEY_CURRENT_USER,
+        "HKEY_CLASSES_ROOT" => HKEY_CLASSES_ROOT,
+        "HKEY_USERS" => HKEY_USERS,
+        "HKEY_CURRENT_CONFIG" => HKEY_CURRENT_CONFIG,
+        _ => return None,
+    })
+}
 
 #[derive(Clone)]
 struct Check {
     kind: &'static str, // "reg" | "svc"
-    // reg
-    ps_path: String,
+    // reg（B11：检测改原生，直接带 hive + 子键，不再经 PS 路径字符串）
+    hive: windows::Win32::System::Registry::HKEY,
+    subkey: String,
     key: String,
     is_dword: bool,
     data: String,
@@ -336,11 +350,9 @@ fn collect_checks(opt: &Value) -> Vec<Check> {
         if let Some(block) = s.get("reg").and_then(|v| v.as_str()) {
             for (full, body) in parse_reg_sections(block) {
                 let root = full.split('\\').next().unwrap_or("");
-                let Some((_, prefix)) = REG_ROOT_MAP.iter().find(|(r, _)| *r == root) else {
-                    continue;
-                };
-                let suffix = &full[root.len()..]; // 含前导反斜杠
-                let ps_path = format!("{prefix}{suffix}");
+                let Some(hive) = reg_hive(root) else { continue };
+                // native 子键不含根键段（`full[root.len()..]`），并去掉前导反斜杠
+                let subkey = full[root.len()..].trim_start_matches('\\').to_string();
                 for (key, raw) in parse_reg_value_lines(&body) {
                     if raw.trim() == "-" {
                         continue; // 还原占位不参与检测
@@ -348,7 +360,8 @@ fn collect_checks(opt: &Value) -> Vec<Check> {
                     if let Some((is_dword, data)) = parse_reg_expected(&raw) {
                         checks.push(Check {
                             kind: "reg",
-                            ps_path: ps_path.clone(),
+                            hive,
+                            subkey: subkey.clone(),
                             key,
                             is_dword,
                             data,
@@ -364,7 +377,8 @@ fn collect_checks(opt: &Value) -> Vec<Check> {
         ) {
             checks.push(Check {
                 kind: "svc",
-                ps_path: String::new(),
+                hive: reg_hive("HKEY_LOCAL_MACHINE").unwrap(),
+                subkey: String::new(),
                 key: String::new(),
                 is_dword: false,
                 data: String::new(),
@@ -414,8 +428,18 @@ fn parse_reg_value_lines(body: &str) -> Vec<(String, String)> {
     out
 }
 
-/// 一次性只读 PS 检测多个选项，返回 id -> 是否全部期望生效
+/// 只读检测多个选项，返回 id -> 是否全部期望生效
+///
+/// B11：原先这里生成一段 PS（`Test-One` / `Test-Svc` 两个函数 + 每个选项一行
+/// `-and` 链）、落临时 `.ps1`、spawn pwsh、120s 超时、再从 stdout 抠 JSON ——
+/// 就为了读一批注册表值和服务启动类型。现在直接走注册表 / SCM API：
+/// 语义逐条对齐原 PS（缺值 / 类型不对 / 打不开键 / 服务不存在 都算「未生效」）。
+///
+/// 与原 PS 的**一处刻意差异**：DWORD 比较按无符号 32 位读出（`read_reg_dword_opt`），
+/// 原 PS 的 `[int]$v -eq [int]$d` 是 32 位**有符号**，`dword:ffffffff` 这类值会判不上。
+/// 优化项里没有 > 2^31-1 的期望值，此差异不改变现有行为，但让实现不再有这个坑。
 fn check_optimized(ids: &[String]) -> std::collections::HashMap<String, bool> {
+    use crate::engine::native;
     let mut result = std::collections::HashMap::new();
     // id -> checks（保留请求顺序）
     let mut grouped: Vec<(String, Vec<Check>)> = Vec::new();
@@ -430,57 +454,24 @@ fn check_optimized(ids: &[String]) -> std::collections::HashMap<String, bool> {
         return result;
     }
 
-    let esc = |s: &str| s.replace('\'', "''");
-    let mut l: Vec<String> = vec![
-        "$ErrorActionPreference = \"SilentlyContinue\"".into(),
-        "function Test-One([string]$p, [string]$k, [bool]$isDword, [string]$d) {".into(),
-        "  $ip = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue".into(),
-        "  if (-not $ip) { return $false }".into(),
-        "  $v = $ip.$k".into(),
-        "  if ($null -eq $v) { return $false }".into(),
-        "  if ($isDword) { try { return ([int]$v -eq [int]$d) } catch { return $false } }".into(),
-        "  return (\"$v\" -eq $d)".into(),
-        "}".into(),
-        "function Test-Svc([string]$n) {".into(),
-        "  $s = Get-Service -Name $n -ErrorAction SilentlyContinue".into(),
-        "  return ($s -and $s.StartType -eq \"Disabled\")".into(),
-        "}".into(),
-        "$r = @{}".into(),
-    ];
-    for (gi, (id, checks)) in grouped.iter().enumerate() {
-        let gv = format!("$g_{gi}");
-        l.push(format!("{gv} = $true"));
-        for c in checks {
-            if c.kind == "svc" {
-                l.push(format!("{gv} = {gv} -and (Test-Svc '{}')", esc(&c.name)));
-            } else {
-                l.push(format!(
-                    "{gv} = {gv} -and (Test-One '{}' '{}' {} '{}')",
-                    esc(&c.ps_path),
-                    esc(&c.key),
-                    if c.is_dword { "$true" } else { "$false" },
-                    esc(&c.data)
-                ));
-            }
-        }
-        l.push(format!("$r['{}'] = ({gv} -eq $true)", esc(id)));
-    }
-    l.push("$r | ConvertTo-Json -Compress".into());
-
-    let path = match pwsh::write_temp_script(&l.join("\n"), ".ps1") {
-        Ok(p) => p,
-        Err(_) => return result,
-    };
-    if let Ok(out) = pwsh::run_file(&path, std::time::Duration::from_secs(120), None) {
-        if let Some(v) = out.stdout.trim().lines().map(str::trim).find(|x| x.starts_with('{')).and_then(|x| serde_json::from_str::<Value>(x).ok()) {
-            if let Some(obj) = v.as_object() {
-                for (id, _) in &grouped {
-                    result.insert(id.clone(), obj.get(id).and_then(|x| x.as_bool()).unwrap_or(false));
+    for (id, checks) in &grouped {
+        // 全部 check 都生效才算生效（与原 PS 的 `$gv -and (...)` 链一致）；
+        // 一条都解析不出来也按「未生效」处理，不给假阳性。
+        let all_ok = !checks.is_empty()
+            && checks.iter().all(|c| {
+                if c.kind == "svc" {
+                    native::service_start_type_is(&c.name, native::SVC_START_DISABLED)
+                } else if c.is_dword {
+                    match c.data.parse::<i64>() {
+                        Ok(want) => native::read_reg_dword_opt(c.hive, &c.subkey, &c.key) == Some(want),
+                        Err(_) => false,
+                    }
+                } else {
+                    native::read_reg_string(c.hive, &c.subkey, &c.key).as_deref() == Some(c.data.as_str())
                 }
-            }
-        }
+            });
+        result.insert(id.clone(), all_ok);
     }
-    let _ = std::fs::remove_file(&path);
     result
 }
 
@@ -496,33 +487,16 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
 }
 
 /// optimizer:svc-mem-current —— 当前 SVCHost 拆分阈值档位
+///
+/// B11：原先这里落一个 4 行的临时 `.ps1`、spawn pwsh、60s 超时、再从 stdout 里抠
+/// `KB|<n>` —— 为读一个 HKLM DWORD。现在直接 `read_hklm_dword`，同语义、零进程开销。
 #[tauri::command]
 pub async fn optimizer_svc_mem_current<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let ps = "$ErrorActionPreference = \"SilentlyContinue\"\n\
-$v = (Get-ItemProperty -Path \"HKLM:\\SYSTEM\\ControlSet001\\Control\" -Name SvcHostSplitThresholdInKB -ErrorAction SilentlyContinue).SvcHostSplitThresholdInKB\n\
-if ($null -eq $v) { Write-Output \"NONE\" } else { Write-Output (\"KB|\" + [long]$v) }";
-    let path = match pwsh::write_temp_script(ps, ".ps1") {
-        Ok(p) => p,
-        Err(e) => return json!({ "success": false, "gb": Value::Null, "kb": Value::Null, "message": e }),
-    };
-    let out = pwsh::run_file(&path, std::time::Duration::from_secs(60), None);
-    let _ = std::fs::remove_file(&path);
-    let Ok(out) = out else {
-        return json!({ "success": false, "gb": Value::Null, "kb": Value::Null });
-    };
-    let line = out
-        .stdout
-        .lines()
-        .map(str::trim)
-        .find(|s| s.starts_with("KB|") || *s == "NONE")
-        .unwrap_or("NONE");
-    let Some(kb_str) = line.strip_prefix("KB|") else {
-        return json!({ "success": true, "gb": Value::Null, "kb": Value::Null });
-    };
-    let Ok(kb) = kb_str.trim().parse::<i64>() else {
+    let Some(kb) = svc_mem_current_kb() else {
+        // 值不存在（未设置过）→ 与原 PS 的 `NONE` 分支一致：报告成功但无档位
         return json!({ "success": true, "gb": Value::Null, "kb": Value::Null });
     };
     for (k, v) in MEMORY_KB {
@@ -774,7 +748,9 @@ pub async fn optimizer_run<R: Runtime>(
                 log::write_log("warn", &format!("优化回收站协议拒绝受保护路径: {p}"));
                 continue;
             }
-            match trim_finder::scan::recycle::send_to_trash(p) {
+            // 审查 v2-F1：走 `_os` 版。路径来自 PS stdout 的 @@RECYCLE@@ 协议，
+            // 含孤立代理项的名字经 `&str` 往返会被改写，导致删错或删不到。
+            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
                 Ok(()) => rec_ok += 1,
                 Err(e) => {
                     rec_fail += 1;
@@ -917,47 +893,39 @@ fn verify_option_restored(option_id: &str, opt: &Value) -> &'static str {
 }
 
 /// 按备份条目（hive 为 .NET 静态属性名）读当前值
+///
+/// B11：与 `read_reg_values` 同一条 PS 模板的另一处调用 —— 备份条目的 `hive` 已是
+/// .NET 名（LocalMachine/CurrentUser…），这里换用 `restore_hive` 解析，其余口径一致。
 fn read_values_by_backup(want: &[Value]) -> Option<Vec<Value>> {
-    let mut l = vec![READ_ONE_HEADER.to_string(), "$out = @()".to_string()];
+    use crate::engine::native;
+    let mut out = Vec::with_capacity(want.len());
     for v in want {
         let hive = v.get("hive").and_then(|x| x.as_str()).unwrap_or("LocalMachine");
         let sub = v.get("sub").and_then(|x| x.as_str()).unwrap_or("");
         let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("");
-        l.push(format!(
-            "$out += Read-One '{}' '{}' '{}'",
-            ps_esc(hive),
-            ps_esc(sub),
-            ps_esc(key)
-        ));
+        let Some(h) = restore_hive(hive) else { return None };
+        let mut item = json!({ "hive": hive, "sub": sub, "key": key, "exists": false });
+        if let Some((ty, data)) = native::read_reg_value_text(h, sub, key) {
+            item["exists"] = json!(true);
+            item["type"] = json!(ty);
+            item["data"] = json!(data);
+        }
+        out.push(item);
     }
-    l.push("$out | ConvertTo-Json -Compress -Depth 5".into());
-    // 审查 L10：走 run_inline_ps —— 它先取结果再删脚本。原先的
-    // `run_file(..).ok()?` 在 remove_file 之前短路，超时/启动失败那次的 .ps1 会留在
-    // tmp 目录（一段期间内是可执行的真实脚本），只靠 1h 后的兜底清扫。
-    let out = run_inline_ps(&l.join("\n"), 60, None)?;
-    if out.code != 0 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_str(
-        out.stdout.trim().lines().find(|x| x.starts_with('{') || x.starts_with('['))?,
-    )
-    .ok()?;
-    Some(match parsed {
-        Value::Array(a) => a,
-        single => vec![single],
-    })
+    Some(out)
 }
 
 /// 读当前 SVCHost 阈值 KB（供动态项回读；失败 None）
+///
+/// B11：原先这里生成 4 行 PS 去读一个 HKLM DWORD，起一个 pwsh 子进程、等它退出、
+/// 再解析 stdout 里的 `KB|<n>` —— 换成直接走注册表 API，语义不变（值缺失/类型不对
+/// 都按 None 处理）。键路径**保持 `ControlSet001` 字面量**：原 PS 与写入侧（`:245` 的
+/// `reg add`）都指它，不换 `CurrentControlSet`，避免「读到活动集、写到 001」的口径分裂。
 fn svc_mem_current_kb() -> Option<i64> {
-    let ps = "$ErrorActionPreference = \"SilentlyContinue\"\n\
-$v = (Get-ItemProperty -Path \"HKLM:\\SYSTEM\\ControlSet001\\Control\" -Name SvcHostSplitThresholdInKB -ErrorAction SilentlyContinue).SvcHostSplitThresholdInKB\n\
-if ($null -eq $v) { Write-Output \"NONE\" } else { Write-Output (\"KB|\" + [long]$v) }";
-    let out = run_inline_ps(ps, 60, None)?;
-    out.stdout
-        .lines()
-        .map(str::trim)
-        .find_map(|l| l.strip_prefix("KB|")?.trim().parse::<i64>().ok())
+    crate::engine::native::read_hklm_dword(
+        r"SYSTEM\ControlSet001\Control",
+        "SvcHostSplitThresholdInKB",
+    )
 }
 
 // ==================== 值级注册表备份与还原 ====================
@@ -996,18 +964,6 @@ fn dotnet_hive(root: &str) -> &'static str {
     }
 }
 
-/// .reg 根键（或 .NET hive 名）→ reg.exe 缩写。
-/// 兼容两类备份：本应用写的 .NET 名（LocalMachine）与历史/全称（HKEY_LOCAL_MACHINE）。
-fn reg_exe_prefix(hive_or_root: &str) -> &'static str {
-    match hive_or_root {
-        "HKEY_CURRENT_USER" | "CurrentUser" => "HKCU",
-        "HKEY_CLASSES_ROOT" | "ClassesRoot" => "HKCR",
-        "HKEY_USERS" | "Users" => "HKU",
-        "HKEY_CURRENT_CONFIG" | "CurrentConfig" => "HKCC",
-        _ => "HKLM",
-    }
-}
-
 #[derive(Clone)]
 struct RegTarget {
     root: String, // HKEY_* 全称
@@ -1015,7 +971,6 @@ struct RegTarget {
     key: String,
 }
 
-/// 解析 reg 块 → 目标键值（跳过删除占位 `-`）
 fn parse_reg_targets(block: &str) -> Vec<RegTarget> {
     let mut out = Vec::new();
     for (full, body) in parse_reg_sections(block) {
@@ -1038,62 +993,34 @@ fn parse_reg_targets(block: &str) -> Vec<RegTarget> {
     out
 }
 
-/// Read-One PS 模板前置（逐行对照 main.js 3481-3502 / 3236-3257）
-const READ_ONE_HEADER: &str = "$ErrorActionPreference = \"SilentlyContinue\"\n\
-function Read-One([string]$hive, [string]$sub, [string]$name) {\n\
-  $r = @{ hive = $hive; sub = $sub; key = $name; exists = $false }\n\
-  try {\n\
-    $rk = [Microsoft.Win32.Registry]::$hive.OpenSubKey($sub, $false)\n\
-    if ($rk) {\n\
-      $v = $rk.GetValue($name)\n\
-      if ($null -ne $v) {\n\
-        $r.exists = $true\n\
-        $kind = $rk.GetValueKind($name)\n\
-        if ($kind -eq 'DWord') { $r.type = 'REG_DWORD'; $r.data = [string]([int]$v) }\n\
-        elseif ($kind -eq 'QWord') { $r.type = 'REG_QWORD'; $r.data = [string]([long]$v) }\n\
-        elseif ($kind -eq 'Binary') { $r.type = 'REG_BINARY'; $r.data = ([byte[]]$v | ForEach-Object { $_.ToString('x2') }) -join '' }\n\
-        else { $r.type = 'REG_SZ'; $r.data = [string]$v }\n\
-      }\n\
-      $rk.Close()\n\
-    }\n\
-  } catch {}\n\
-  return $r\n\
-}";
-
-fn ps_esc(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
-/// 读取一组 (hive, sub, key) 当前值；数量不符返回 None
+/// 读取一组 (hive, sub, key) 当前值；任一目标读取失败返回 None
+///
+/// B11：原先这里生成 `Read-One` PS 函数 + 逐目标调用行，spawn pwsh、60s 超时、
+/// 再解析 stdout 里的 JSON —— 就为了读几个注册表值。现在直接走注册表 API，
+/// 字符串化口径逐条对齐原 `READ_ONE_HEADER`（见 `native::read_reg_value_text`），
+/// 保证「备份 → 还原」两侧对同一值的表述完全一致。
+///
+/// 输出形状与旧 PS 逐字段一致：`exists=false` 时**不带** `type`/`data` 键
+/// （旧 `ConvertTo-Json` 也不会输出它们），下游 `build_restore_ops` 据此走删除分支。
 fn read_reg_values(targets: &[RegTarget]) -> Option<Vec<Value>> {
-    let mut l = vec![READ_ONE_HEADER.to_string(), "$out = @()".to_string()];
+    use crate::engine::native;
+    let mut out = Vec::with_capacity(targets.len());
     for t in targets {
-        l.push(format!(
-            "$out += Read-One '{}' '{}' '{}'",
-            ps_esc(dotnet_hive(&t.root)),
-            ps_esc(&t.sub),
-            ps_esc(&t.key)
-        ));
+        let Some(hive) = reg_hive(&t.root) else { return None };
+        let mut item = json!({
+            "hive": dotnet_hive(&t.root),
+            "sub": t.sub,
+            "key": t.key,
+            "exists": false,
+        });
+        if let Some((ty, data)) = native::read_reg_value_text(hive, &t.sub, &t.key) {
+            item["exists"] = json!(true);
+            item["type"] = json!(ty);
+            item["data"] = json!(data);
+        }
+        out.push(item);
     }
-    l.push("$out | ConvertTo-Json -Compress -Depth 5".into());
-    // 审查 L10：走 run_inline_ps —— 它先取结果再删脚本。原先的
-    // `run_file(..).ok()?` 在 remove_file 之前短路，超时/启动失败那次的 .ps1 会留在
-    // tmp 目录（一段期间内是可执行的真实脚本），只靠 1h 后的兜底清扫。
-    let out = run_inline_ps(&l.join("\n"), 60, None)?;
-    if out.code != 0 {
-        return None;
-    }
-    let t = out.stdout.trim();
-    let parsed: Value = serde_json::from_str(t.lines().find(|x| x.starts_with('{') || x.starts_with('['))?).ok()?;
-    let arr = match parsed {
-        Value::Array(a) => a,
-        single => vec![single],
-    };
-    if arr.len() == targets.len() {
-        Some(arr)
-    } else {
-        None
-    }
+    Some(out)
 }
 
 fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
@@ -1237,77 +1164,129 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     json!({ "success": true, "restored": restored })
 }
 
-/// 生成「按备份回写」的命令行集合。单独抽成纯函数是为了能对恶意值直接断言 ——
-/// 它的返回值是要交给 pwsh 执行的脚本正文。
-///
-/// 审查 v2-K2：`hive/sub/key/data` 全部来自 `optimizer-backups.json` 与注册表原值，
-/// 属不可信输入。PowerShell 的 `"…"` 是**可展开字符串**，`$(…)` 与反引号会先求值再传给
-/// reg.exe ⇒ 攻击者只要在 HKCU 某个可写值里放 `A$(<管理员命令>)B`，用户点「还原」即在
-/// Trim 的提权上下文里执行任意代码（旧写法只把 `"` 双写，防不住 `$`）。
-/// 现在与读值侧同口径：一律单引号串 + `''` 转义（单引号串内不做任何展开）。
-fn backup_restore_lines(values: &[Value]) -> Vec<String> {
-    let mut out = Vec::with_capacity(values.len());
-    for v in values {
-        let hive = v.get("hive").and_then(|x| x.as_str()).unwrap_or("LocalMachine");
-        let sub = v.get("sub").and_then(|x| x.as_str()).unwrap_or("");
-        let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("");
-        let prefix = reg_exe_prefix(hive);
-        let full = ps_esc(&format!("{prefix}\\{sub}"));
-        let key_esc = ps_esc(key);
-        let exists = v.get("exists").and_then(|x| x.as_bool()).unwrap_or(false);
-        if exists {
-            let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("REG_SZ");
-            let mut type_arg = "/t REG_SZ".to_string();
-            let mut data_arg = ps_esc(v.get("data").and_then(|x| x.as_str()).unwrap_or(""));
-            match typ {
-                "REG_DWORD" | "REG_QWORD" => type_arg = format!("/t {typ}"),
-                "REG_BINARY" => {
-                    type_arg = "/t REG_BINARY".to_string();
-                    let hex = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
-                    let with_commas: String = hex
-                        .as_bytes()
-                        .chunks(2)
-                        .map(|c| std::str::from_utf8(c).unwrap_or(""))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    // 只留 hex 数字与分隔逗号：畸形值里的换行/引号不得有机会变成下一条语句
-                    data_arg = with_commas
-                        .chars()
-                        .filter(|c| c.is_ascii_hexdigit() || *c == ',')
-                        .collect();
-                }
-                _ => {}
-            }
-            out.push(format!(
-                "reg add '{full}' /v '{key_esc}' {type_arg} /d '{data_arg}' /f | Out-Null; if ($LASTEXITCODE -ne 0) {{ $failed++ }}"
-            ));
-        } else {
-            out.push(format!(
-                "reg delete '{full}' /v '{key_esc}' /f 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) {{ reg query '{full}' /v '{key_esc}' 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) {{ $failed++ }} }}"
-            ));
-        }
-    }
-    out
+/// 还原操作（B11：不再生成「交给 pwsh 的脚本正文」，而是生成结构化操作，
+/// 由 Rust 直接调注册表 API —— 原先 v2-K2 防的那类注入在**没有 shell** 时不成立）
+#[derive(Debug, PartialEq)]
+enum RestoreOp {
+    /// 回写值：data 已编码为 API 就绪字节
+    Write { hive: String, sub: String, key: String, typ: String, bytes: Vec<u8> },
+    /// 删除值（不存在 = 幂等成功）
+    Delete { hive: String, sub: String, key: String },
 }
 
-/// 按备份条目回写（reg add/delete；失败计数必须为 0）
+/// dotnet hive 名 → native hive
+fn restore_hive(name: &str) -> Option<windows::Win32::System::Registry::HKEY> {
+    use crate::engine::native;
+    Some(match name {
+        "LocalMachine" | "HKEY_LOCAL_MACHINE" => native::hive_hklm(),
+        "CurrentUser" | "HKEY_CURRENT_USER" => native::hive_hkcu(),
+        "ClassesRoot" | "HKEY_CLASSES_ROOT" => native::hive_hkcr(),
+        "Users" | "HKEY_USERS" => native::hive_hku(),
+        "CurrentConfig" | "HKEY_CURRENT_CONFIG" => native::hive_hkcc(),
+        _ => return None,
+    })
+}
+
+/// 把备份条目的 `data` 字符串编码为 API 就绪字节。
+///
+/// 编码口径**逐条对齐**读值侧 `READ_ONE_HEADER`（main.js 3481-3502 的移植）：
+/// - `REG_DWORD` → `[string]([int]$v)`，是**有符号 i32** 的十进制串；
+///   还原时按 i32 解析再按 u32 写回，`0xFFFFFFFF` 才能原样往返。
+/// - `REG_QWORD` → `[string]([long]$v)`，i64 十进制。
+/// - `REG_BINARY` → 小写 hex 连写（无分隔符）。
+/// - 其余一律按 REG_SZ。
+///
+/// 返回 `Err` = 备份数据畸形（非法十进制 / 奇数位或非 hex 的 BINARY）。
+/// 刻意**fail-closed 而不是像旧 PS 那样把非 hex 字符剥掉**：这是还原路径，
+/// 静默剥字符可能把错的数据写回去还报成功；备份是我们自己生成的，畸形即文件损坏。
+fn restore_write_bytes(typ: &str, data: &str) -> Result<Vec<u8>, String> {
+    match typ {
+        "REG_DWORD" => {
+            let v: i32 = data.trim().parse().map_err(|_| format!("REG_DWORD 值畸形: {data:?}"))?;
+            Ok(v.to_le_bytes().to_vec())
+        }
+        "REG_QWORD" => {
+            let v: i64 = data.trim().parse().map_err(|_| format!("REG_QWORD 值畸形: {data:?}"))?;
+            Ok(v.to_le_bytes().to_vec())
+        }
+        "REG_BINARY" => {
+            let hex = data.trim();
+            if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!("REG_BINARY 值畸形（非 hex 或奇数位）: {data:?}"));
+            }
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
+                .collect()
+        }
+        _ => {
+            let mut v: Vec<u8> = data.encode_utf16().flat_map(|w| w.to_le_bytes()).collect();
+            v.extend_from_slice(&[0, 0]); // REG_SZ 以 UTF-16 NUL 结尾
+            Ok(v)
+        }
+    }
+}
+
+/// 把备份条目转成结构化还原操作；任一条畸形即整体 `Err`（不产生半套操作）。
+///
+/// 旧实现（`backup_restore_lines`）在这里生成 PS 命令行，靠单引号串 + `''` 转义把
+/// 不可信值锁住（v2-K2，有 3 条回归测试钉着）。改原生后那个攻击面整个消失 ——
+/// 值不再经过任何解析器，`A$(whoami)` 就是要写进注册表的字面字节。
+fn build_restore_ops(values: &[Value]) -> Result<Vec<RestoreOp>, String> {
+    let mut ops = Vec::with_capacity(values.len());
+    for v in values {
+        let hive = v.get("hive").and_then(|x| x.as_str()).unwrap_or("LocalMachine").to_string();
+        if restore_hive(&hive).is_none() {
+            return Err(format!("未知 hive: {hive}"));
+        }
+        let sub = v.get("sub").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let exists = v.get("exists").and_then(|x| x.as_bool()).unwrap_or(false);
+        if !exists {
+            ops.push(RestoreOp::Delete { hive, sub, key });
+            continue;
+        }
+        let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("REG_SZ").to_string();
+        let data = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
+        let bytes = restore_write_bytes(&typ, data)?;
+        ops.push(RestoreOp::Write { hive, sub, key, typ, bytes });
+    }
+    Ok(ops)
+}
+
+/// 按备份条目回写（任一失败即返回 false；调用方据此报「还原不完整」）
 fn restore_backup_values(values: &[Value]) -> bool {
-    let mut l = vec![
-        "$ErrorActionPreference = \"SilentlyContinue\"".to_string(),
-        "$failed = 0".to_string(),
-    ];
-    l.extend(backup_restore_lines(values));
-    l.push("Write-Output (\"RESTORE_DONE:\" + $failed)".into());
-    let path = match pwsh::write_temp_script(&l.join("\n"), ".ps1") {
-        Ok(p) => p,
-        Err(_) => return false,
+    use crate::engine::native;
+    let Ok(ops) = build_restore_ops(values) else {
+        return false;
     };
-    let ok = match pwsh::run_file(&path, std::time::Duration::from_secs(120), None) {
-        Ok(o) => o.code == 0 && o.stdout.contains("RESTORE_DONE:0"),
-        Err(_) => false,
-    };
-    let _ = std::fs::remove_file(&path);
-    ok
+    let mut failed = 0usize;
+    for op in ops {
+        let ok = match op {
+            RestoreOp::Write { hive, sub, key, typ, bytes } => {
+                use windows::Win32::System::Registry::{REG_BINARY, REG_DWORD, REG_QWORD, REG_SZ};
+                let Some(h) = restore_hive(&hive) else {
+                    failed += 1;
+                    continue;
+                };
+                let kind = match typ.as_str() {
+                    "REG_DWORD" => REG_DWORD,
+                    "REG_QWORD" => REG_QWORD,
+                    "REG_BINARY" => REG_BINARY,
+                    _ => REG_SZ,
+                };
+                native::reg_restore_write(h, &sub, &key, kind, &bytes)
+            }
+            RestoreOp::Delete { hive, sub, key } => match restore_hive(&hive) {
+                Some(h) => native::reg_restore_delete(h, &sub, &key),
+                None => false,
+            },
+        };
+        if !ok {
+            failed += 1;
+        }
+    }
+    failed == 0
 }
 
 // ==================== 系统还原点 ====================
@@ -1922,32 +1901,117 @@ mod tests {
         }).count() >= 70);
     }
 
-    /// v2-K2：还原方向生成的是「交给 pwsh 执行的脚本正文」，不可信值必须锁在单引号串里。
-    /// 旧写法用双引号串 + 只双写 `"` ⇒ `$(…)` 与反引号会被 PowerShell 先求值，等于在
-    /// Trim 的提权上下文里执行任意代码。这条断言钉的是「求值机会为零」，不是「输出长得对」。
+    /// v2-K2（B11 重写）：还原方向原先生成「交给 pwsh 执行的脚本正文」，不可信值必须锁在
+    /// 单引号串里。**现在不再有任何 shell**，攻击面从「值会被求值」变成「值被当成什么」——
+    /// 断言改为钉「不可信值逐字节原样进编码结果，不做任何解释/求值/剥除」。
     #[test]
-    fn restore_lines_lock_untrusted_values_in_single_quotes() {
-        let lines = backup_restore_lines(&[json!({
+    fn restore_ops_keep_untrusted_values_verbatim() {
+        let payload = "A$(whoami)`id`\"B'c";
+        let ops = build_restore_ops(&[json!({
             "hive": "CurrentUser", "sub": "Software\\X", "key": "Y",
-            "exists": true, "type": "REG_SZ", "data": "A$(whoami)`id`\"B'c"
-        })]);
-        assert_eq!(lines.len(), 1);
-        let l = &lines[0];
-        assert!(
-            l.starts_with("reg add 'HKCU\\Software\\X' /v 'Y' /t REG_SZ /d '"),
-            "{l}"
-        );
-        // 值里那个单引号必须成对（PS 单引号串的唯一转义），整条仍是单一字面量
-        assert!(l.contains("'A$(whoami)`id`\"B''c'"), "{l}");
-        // 一个双引号字面量都不许出现（出现即开了展开的口子）
-        assert!(!l.contains("reg add \"") && !l.contains("/d \"") && !l.contains("/v \""), "{l}");
+            "exists": true, "type": "REG_SZ", "data": payload
+        })])
+        .expect("合法条目不应报畸形");
+        let [RestoreOp::Write { ref key, ref bytes, .. }] = ops[..] else {
+            panic!("应为一条 Write: {ops:?}");
+        };
+        assert_eq!(key, "Y");
+        // 期望字节 = UTF-16LE(含 NUL)；关键字段是「没有任何字符被吃掉或改写」
+        let mut want: Vec<u8> = payload.encode_utf16().flat_map(|w| w.to_le_bytes()).collect();
+        want.extend_from_slice(&[0, 0]);
+        assert_eq!(bytes, &want, "REG_SZ 数据被改写 ⇒ 注入防护已退化为碰运气");
 
-        // exists=false 走删除分支，同样必须全单引号
-        let d = backup_restore_lines(&[json!({
+        // hive/sub/key 同样只是数据，不是代码
+        let ops = build_restore_ops(&[json!({
             "hive": "LocalMachine", "sub": "S", "key": "K'$(p)", "exists": false
-        })]);
-        assert!(d[0].starts_with("reg delete 'HKLM\\S' /v 'K''$(p)' /f"), "{}", d[0]);
-        assert!(!d[0].contains('"'), "{}", d[0]);
+        })])
+        .unwrap();
+        assert_eq!(
+            ops,
+            vec![RestoreOp::Delete { hive: "LocalMachine".into(), sub: "S".into(), key: "K'$(p)".into() }]
+        );
+    }
+
+    /// B11：畸形备份值必须 **fail-closed**（整批拒绝），而不是像旧 PS 版那样把
+    /// 非 hex 字符剥掉再写 —— 还原路径上「写错数据还报成功」比「报失败」更糟。
+    #[test]
+    fn restore_rejects_malformed_backup_data() {
+        // BINARY：旧测试喂 `41;42`$(x)43\n` 并断言剥成 `414243`；现在必须整体拒绝
+        for bad in ["41;42`$(x)43\n", "4", "zz", "4142g"] {
+            assert!(
+                build_restore_ops(&[json!({
+                    "hive": "LocalMachine", "sub": "S", "key": "K",
+                    "exists": true, "type": "REG_BINARY", "data": bad
+                })])
+                .is_err(),
+                "畸形 REG_BINARY 应拒绝: {bad:?}"
+            );
+        }
+        // DWORD / QWORD：非十进制整数同样拒绝
+        for bad in ["abc", "", "1.5"] {
+            assert!(
+                build_restore_ops(&[json!({
+                    "hive": "LocalMachine", "sub": "S", "key": "K",
+                    "exists": true, "type": "REG_DWORD", "data": bad
+                })])
+                .is_err(),
+                "畸形 REG_DWORD 应拒绝: {bad:?}"
+            );
+        }
+        // 未知 hive 也不放行
+        assert!(
+            build_restore_ops(&[json!({
+                "hive": "NoSuchHive", "sub": "S", "key": "K", "exists": false
+            })])
+            .is_err()
+        );
+    }
+
+    /// DWORD 编码口径对齐读值侧 `[string]([int]$v)`：有符号 i32 十进制，
+    /// 这样 `0xFFFFFFFF` 才能以 `-1` 的形式原样往返（reg.exe 同口径）。
+    #[test]
+    fn restore_dword_roundtrip_is_signed32() {
+        let ops = build_restore_ops(&[json!({
+            "hive": "LocalMachine", "sub": "S", "key": "K",
+            "exists": true, "type": "REG_DWORD", "data": "-1"
+        })])
+        .unwrap();
+        let Some(RestoreOp::Write { bytes, .. }) = ops.first() else { panic!("{ops:?}") };
+        assert_eq!(bytes.as_slice(), &[0xFFu8, 0xFF, 0xFF, 0xFF]);
+        // 正常值
+        let ops = build_restore_ops(&[json!({
+            "hive": "LocalMachine", "sub": "S", "key": "K",
+            "exists": true, "type": "REG_DWORD", "data": "4096"
+        })])
+        .unwrap();
+        let Some(RestoreOp::Write { bytes, .. }) = ops.first() else { panic!("{ops:?}") };
+        assert_eq!(bytes.as_slice(), 4096i32.to_le_bytes().as_slice());
+    }
+
+    /// B11：`restore_write_bytes` 与 `native::read_reg_value_text` 是**同一条链的两端** ——
+    /// 读出来的字符串必须能被编码器原样写回。这里用固定样例钉住两侧口径不漂移
+    /// （真正的注册表往返由 `restore_backup_values` 在真机执行，单测只锁纯函数）。
+    #[test]
+    fn backup_read_and_restore_encode_are_inverse() {
+        // DWORD：读侧产出有符号 i32 十进制；编码器按 i32 解析再写回 LE
+        assert_eq!(restore_write_bytes("REG_DWORD", "-1").unwrap(), vec![0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(restore_write_bytes("REG_DWORD", "0").unwrap(), vec![0, 0, 0, 0]);
+        // QWORD：i64 十进制
+        assert_eq!(
+            restore_write_bytes("REG_QWORD", "-1").unwrap(),
+            (-1i64).to_le_bytes().to_vec()
+        );
+        // BINARY：小写 hex 连写（读侧 `-join ''` 的产物）逐字节还原
+        assert_eq!(restore_write_bytes("REG_BINARY", "deadbeef").unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        // SZ：UTF-16LE + NUL；还原路径写回后读侧 `[string]$v` 得到同一串
+        let sz = restore_write_bytes("REG_SZ", "中文 & punctuation").unwrap();
+        let units: Vec<u16> = sz.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!(String::from_utf16_lossy(&units), "中文 & punctuation\0");
+        // 未知类型标签一律按 REG_SZ 编码（与旧 `reg add` 不带 /t 的兜底一致）
+        assert_eq!(
+            restore_write_bytes("REG_WHATEVER", "x").unwrap(),
+            restore_write_bytes("REG_SZ", "x").unwrap()
+        );
     }
 
     /// REG_BINARY 的 hex 串只允许 hex 数字与分隔逗号：畸形备份里的 `$`、反引号、换行
@@ -2031,17 +2095,14 @@ mod tests {
     }
 
     #[test]
-    fn restore_binary_hex_is_stripped_to_hexdigits() {
-        let lines = backup_restore_lines(&[json!({
+    fn restore_binary_hex_is_strict() {
+        // 合法 hex 连写（读值侧 `-join ''` 的产物）必须按字节对解码
+        let ops = build_restore_ops(&[json!({
             "hive": "LocalMachine", "sub": "S", "key": "K",
-            "exists": true, "type": "REG_BINARY", "data": "41;42`$(x)43\n"
-        })]);
-        let l = &lines[0];
-        let quoted = l.split("/d '").nth(1).expect("应有 /d 参数").split('\'').next().unwrap();
-        assert!(
-            quoted.chars().all(|c| c.is_ascii_hexdigit() || c == ','),
-            "畸形 hex 未清干净: {quoted}"
-        );
-        assert!(quoted.starts_with("41"), "{quoted}");
+            "exists": true, "type": "REG_BINARY", "data": "414243"
+        })])
+        .unwrap();
+        let Some(RestoreOp::Write { bytes, .. }) = ops.first() else { panic!("{ops:?}") };
+        assert_eq!(bytes.as_slice(), &[0x41u8, 0x42, 0x43]);
     }
 }

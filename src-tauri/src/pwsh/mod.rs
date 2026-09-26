@@ -3,8 +3,11 @@
 //! 候选链（顺序即优先级，与 JS 侧逐条对齐）：
 //! ① env PWSH7_PATH ② %ProgramFiles%\PowerShell\7\pwsh.exe ③ where.exe pwsh.exe
 //! ④ %LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe（仅非 0 字节的真实安装；0 字节是
-//!    Store 应用执行别名存根，执行会拉起商店）⑤ 内置运行时
-//!   %LOCALAPPDATA%\Trim\pwsh\<version>\pwsh.exe（仅 .ready 标记存在时）
+//!    Store 应用执行别名存根，执行会拉起商店）
+//!
+//! **B11（2026-09-26）**：原第 ⑤ 位「内置运行时 %LOCALAPPDATA%\Trim\pwsh\<version>\」已
+//! 整段摘除 —— Tauri 轨从未移植随包解压链，`latest_ready_exe_path()` 恒为空（死路径），
+//! 详见 `resolve_pwsh` 上方注释块。
 //!
 //! **刻意不做 Windows PowerShell 5.1 兜底**：PS 引擎脚本使用 PS7 专属语法与
 //! UTF-8 默认编码，5.1 静默降级会产生假结果，比明确失败更危险（设计文档方案 A 同口径）。
@@ -29,6 +32,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::engine::{log, paths};
+// 审查 v2-F7：系统工具走绝对路径，不用裸进程名
+use crate::engine::systembin::system_tool;
 
 pub struct PsOutput {
     pub stdout: String,
@@ -212,8 +217,16 @@ static PROBE_FAILED_AT: AtomicI64 = AtomicI64::new(0);
 static PROBE_ERROR: Mutex<Option<String>> = Mutex::new(None);
 const PROBE_FAIL_TTL_MS: i64 = 60_000;
 
-/// 内置运行时版本（与 vendor/pwsh 包一致）
-pub const PWSH_VERSION: &str = "7.6.6";
+// B11（2026-09-26）：内置运行时整条路径已摘除（原 `runtime_root_dir` /
+// `pwsh_exe_path_for` / `ready_marker_path` / `is_version_ready` /
+// `latest_ready_exe_path` / `PWSH_VERSION` 六个符号）。判据：
+//   - Tauri 轨从未移植「随包 zip 解压」链（`pwshruntime.rs` 头部自陈、审查 M9 亦确认
+//     仓库里没有任何内置 zip 资产），`%LOCALAPPDATA%\Trim\pwsh\<version>\.ready` 永远
+//     不会被本程序创建 —— 候选链第 ⑤ 位是**恒为空**的死路径；
+//   - `pwsh:prepare`（唯一会触发准备的通道）本就是 D4 孤儿，已同批摘除；
+//   - 死路径并非无害：用户若手工放好该目录，会与系统自装 PS7 混用出「版本分裂」。
+// 现在外部 PS7 探测只用 ① env PWSH7_PATH ② %ProgramFiles%\PowerShell\7 ③ where.exe
+// ④ WindowsApps 存根（非 0 字节）。
 
 fn local_appdata() -> PathBuf {
     let v = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -224,48 +237,6 @@ fn local_appdata() -> PathBuf {
     } else {
         PathBuf::from(v)
     }
-}
-
-fn runtime_root_dir() -> PathBuf {
-    local_appdata().join("Trim").join("pwsh")
-}
-
-fn pwsh_exe_path_for(version: &str) -> PathBuf {
-    runtime_root_dir().join(version).join("pwsh.exe")
-}
-
-fn ready_marker_path(version: &str) -> PathBuf {
-    runtime_root_dir().join(version).join(".ready")
-}
-
-/// 指定版本是否就绪（exe 存在非 0 字节 + .ready 标记存在）
-pub fn is_version_ready(version: &str) -> bool {
-    let exe = pwsh_exe_path_for(version);
-    let marker = ready_marker_path(version);
-    exe.is_file()
-        && std::fs::metadata(&exe).map(|m| m.len() > 0).unwrap_or(false)
-        && marker.is_file()
-}
-
-/// 最新已就绪的内置运行时 exe（按 .ready mtime 倒序取第一个）
-pub fn latest_ready_exe_path() -> Option<PathBuf> {
-    let root = runtime_root_dir();
-    let mut ready: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-    for entry in std::fs::read_dir(&root).ok()?.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !is_version_ready(&name) {
-            continue;
-        }
-        let mtime = std::fs::metadata(ready_marker_path(&name))
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        ready.push((pwsh_exe_path_for(&name), mtime));
-    }
-    ready.sort_by(|a, b| b.1.cmp(&a.1));
-    ready.into_iter().next().map(|(p, _)| p)
 }
 
 /// 候选链解析。失败返回 (code, 消息)：code ∈ {PWSH7_NOT_FOUND, PWSH7_PREPARING}
@@ -294,7 +265,7 @@ pub fn resolve_pwsh() -> Result<PathBuf, (String, String)> {
         candidates.push(PathBuf::from(pf).join("PowerShell").join("7").join("pwsh.exe"));
     }
     // where.exe pwsh.exe（尊重用户自装版本）
-    if let Ok(out) = Command::new("where.exe").arg("pwsh.exe").creation_flags(0x0800_0000).output() {
+    if let Ok(out) = Command::new(system_tool("where.exe")).arg("pwsh.exe").creation_flags(0x0800_0000).output() {
         if out.status.success() {
             for line in String::from_utf8_lossy(&out.stdout).split(['\r', '\n']) {
                 let line = line.trim();
@@ -312,11 +283,7 @@ pub fn resolve_pwsh() -> Result<PathBuf, (String, String)> {
     if std::fs::metadata(&stub).map(|m| m.len() > 0).unwrap_or(false) {
         candidates.push(stub);
     }
-    // 内置运行时：最末位（尊重用户自装版本，避免版本分裂）
-    if let Some(builtin) = latest_ready_exe_path() {
-        candidates.push(builtin);
-    }
-
+    // B11：候选 ⑤（内置运行时）已随死路径一并摘除，见上方注释块
     for candidate in candidates {
         if candidate.is_file() && is_pwsh7_executable(&candidate) {
             *CACHED_PWSH.lock().unwrap_or_else(|e| e.into_inner()) = Some(candidate.clone());
@@ -327,8 +294,8 @@ pub fn resolve_pwsh() -> Result<PathBuf, (String, String)> {
     }
 
     // 审查 M9：不得承诺「内置运行时」——随包解压链在 Phase 4 才决定，当前仓库里没有
-    // 任何内置 zip 资产，`latest_ready_exe_path()` 恒为空。指向「设置页立即准备」同样
-    // 是错的（pwsh:prepare 只是重跑本候选链）。文案只说用户能做到的事。
+    // 任何内置 zip 资产。指向「设置页立即准备」同样是错的（pwsh:prepare 已摘除）。
+    // 文案只说用户能做到的事。
     let msg = "未找到 PowerShell 7（pwsh.exe）。请先安装 PowerShell 7（winget install Microsoft.PowerShell）后重试。".to_string();
     PROBE_FAILED_AT.store(crate::engine::now_ms(), Ordering::Relaxed);
     *PROBE_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
@@ -1259,7 +1226,7 @@ fn prune_reg_backups(keep_batches: usize) {
         }
         for path in reg_backups_to_remove(backups, keep_batches) {
             // 回收站优先（AGENTS §3）：`.reg` 是删注册表前的唯一凭据，永久删等于毁掉还原线索
-            if let Err(e) = trim_finder::scan::recycle::send_to_trash(&path.to_string_lossy()) {
+            if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(path.as_os_str()) {
                 log::write_log("warn", &format!("旧注册表备份移入回收站失败: {e}"));
             }
         }

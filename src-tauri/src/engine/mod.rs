@@ -11,9 +11,11 @@ pub mod native;
 pub mod optimization_state;
 pub mod paths;
 pub mod protect;
+pub mod pssteps;
 pub mod rules_signature;
 pub mod shellicon;
 pub mod sysinfo;
+pub mod systembin;
 pub mod winhttp;
 
 use serde_json::Value;

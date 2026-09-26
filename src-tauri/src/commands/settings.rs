@@ -1,7 +1,7 @@
-//! settings 域（C 批）：settings:load / settings:save
+//! settings 域（C 批）：settings:load（v2-F4 后 `settings:save` 已摘除，见文件尾注释）
 //!
-//! 对照 main.js 4774-4840（settings:load）、4977-5070（settings:save）、
-//! 4669-4691（loadAiSettings/saveAiSettings）、4316-4560（AI 常量与调用参数）。
+//! 对照 main.js 4774-4840（settings:load）、4669-4691（loadAiSettings）、
+//! 4316-4560（AI 常量与调用参数）。原对照的 4977-5070（settings:save）已随该通道摘除。
 //!
 //! 本模块同时是 **C 批 AI 配置链的唯一真源**：models / aidesc / fonts 三个域都从这里取
 //! 配置读写、模型合并、作用域、掩码、超时钳制、SSRF 判定（避免四处复制漂移）。
@@ -567,22 +567,6 @@ pub(crate) fn save_settings(settings: &Value) -> bool {
     }
 }
 
-/// 取字符串字段（JS `str(k)`：仅当显式提供（非 undefined/null）时转字符串并 trim）
-pub(crate) fn str_field(settings: &Value, key: &str) -> Option<String> {
-    match settings.get(key) {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(js_string(v).trim().to_string()),
-    }
-}
-
-/// 掩码穿透（审查 1-5）：提交掩码视为未修改 → None 走「保留旧值」分支
-pub(crate) fn str_kept(settings: &Value, key: &str) -> Option<String> {
-    match str_field(settings, key) {
-        Some(v) if v == SECRET_MASK => None,
-        other => other,
-    }
-}
-
 /// 旧版平铺字段：秘塔地址
 pub(crate) fn metaso_url(s: &Value) -> String {
     let candidate = truthy_string(s.get("metasoApiUrl")).or_else(|| {
@@ -947,281 +931,18 @@ pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Valu
     Ok(json!({ "success": true, "data": data }))
 }
 
-/// settings:save — 保存 AI 简介设置（掩码穿透 + SSRF 校验 + 模型/作用域白名单）
-#[tauri::command]
-pub fn settings_save<R: tauri::Runtime>(window: WebviewWindow<R>, settings: Option<Value>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
-    let settings = match settings {
-        Some(Value::Object(m)) => Value::Object(m),
-        // JS 里数组也是 object：按「无任何字段」处理，与逐字段读取的结果一致
-        Some(Value::Array(_)) => json!({}),
-        _ => return Ok(json!({ "success": false, "message": "无效配置" })),
-    };
-    let current = load_settings();
-    let engine = settings
-        .get("aiEngine")
-        .and_then(|v| v.as_str())
-        .filter(|v| AI_ENGINE_ORDER.contains(v))
-        .unwrap_or(AI_ENGINE_ORDER[0])
-        .to_string();
-
-    let str_ai_url = |v: Option<&Value>| -> String {
-        truthy_string(v).unwrap_or_default().trim().to_string()
-    };
-    let cur_str = |key: &str| -> String { truthy_string(current.get(key)).unwrap_or_default() };
-    // `settings.X !== undefined ? clampTimeout(settings.X, 30) : (current.X || 30)`
-    let timeout_field = |field: &str| -> Value {
-        match settings.get(field) {
-            Some(_) => json!(clamp_timeout(settings.get(field), 30)),
-            None => match current.get(field) {
-                Some(v) if js_truthy(Some(v)) => v.clone(),
-                _ => json!(30),
-            },
-        }
-    };
-
-    // 仅当字段显式提供时才覆盖，避免清空未提交的引擎配置
-    let mut next = current.clone();
-    if !next.is_object() {
-        return Ok(json!({ "success": false, "message": "无效配置" }));
-    }
-
-    let ai_api_url = {
-        let v = str_ai_url(settings.get("aiApiUrl"));
-        if !v.is_empty() {
-            v
-        } else if engine == "baidu" {
-            baidu_url(&current)
-        } else {
-            metaso_url(&current)
-        }
-    };
-    let baidu_api_url = {
-        let v = str_ai_url(settings.get("baiduApiUrl"));
-        if !v.is_empty() {
-            v
-        } else if engine == "baidu" {
-            str_ai_url(settings.get("aiApiUrl"))
-        } else {
-            cur_str("baiduApiUrl")
-        }
-    };
-    let metaso_api_url = {
-        let v = str_ai_url(settings.get("metasoApiUrl"));
-        if !v.is_empty() {
-            v
-        } else if engine == "metaso" {
-            str_ai_url(settings.get("aiApiUrl"))
-        } else {
-            cur_str("metasoApiUrl")
-        }
-    };
-    let ai_api_key_raw = str_ai_url(settings.get("aiApiKey"));
-    let ai_api_key = if !ai_api_key_raw.is_empty() && ai_api_key_raw != SECRET_MASK {
-        ai_api_key_raw
-    } else {
-        cur_str("aiApiKey")
-    };
-
-    // 显式覆盖字段先收集到 flat，再按 JS「展开 + 逐字段赋值」的键序并入 next
-    let mut flat = serde_json::Map::new();
-    flat.insert("aiDescEnabled".into(), json!(js_truthy(settings.get("aiDescEnabled"))));
-    flat.insert("aiEngine".into(), json!(engine));
-    flat.insert("aiApiUrl".into(), json!(ai_api_url));
-    flat.insert("aiApiKey".into(), json!(ai_api_key));
-    flat.insert("baiduApiUrl".into(), json!(baidu_api_url));
-    flat.insert("metasoApiUrl".into(), json!(metaso_api_url));
-    // 百度千帆模型配置
-    flat.insert(
-        "baiduApiKey".into(),
-        json!(str_kept(&settings, "baiduApiKey").unwrap_or_else(|| cur_str("baiduApiKey"))),
-    );
-    flat.insert(
-        "baiduModel".into(),
-        json!(str_field(&settings, "baiduModel").unwrap_or_else(|| cur_str("baiduModel"))),
-    );
-    flat.insert(
-        "baiduPrompt".into(),
-        json!(str_field(&settings, "baiduPrompt").unwrap_or_else(|| cur_str("baiduPrompt"))),
-    );
-    flat.insert("baiduTimeout".into(), timeout_field("baiduTimeout"));
-    // 秘塔模型配置
-    flat.insert(
-        "metasoApiKey".into(),
-        json!(str_kept(&settings, "metasoApiKey").unwrap_or_else(|| cur_str("metasoApiKey"))),
-    );
-    flat.insert(
-        "metasoModel".into(),
-        json!(str_field(&settings, "metasoModel").unwrap_or_else(|| cur_str("metasoModel"))),
-    );
-    flat.insert(
-        "metasoPrompt".into(),
-        json!(str_field(&settings, "metasoPrompt").unwrap_or_else(|| cur_str("metasoPrompt"))),
-    );
-    flat.insert("metasoTimeout".into(), timeout_field("metasoTimeout"));
-    // 知乎直答配置
-    flat.insert(
-        "zhihuApiUrl".into(),
-        json!(str_field(&settings, "zhihuApiUrl").unwrap_or_else(|| cur_str("zhihuApiUrl"))),
-    );
-    flat.insert(
-        "zhihuApiKey".into(),
-        json!(str_kept(&settings, "zhihuApiKey").unwrap_or_else(|| {
-            truthy_string(current.get("zhihuApiKey"))
-                .or_else(|| truthy_string(current.get("zhihuAccessSecret")))
-                .unwrap_or_default()
-        })),
-    );
-    flat.insert(
-        "zhihuModel".into(),
-        json!(str_field(&settings, "zhihuModel").unwrap_or_else(|| cur_str("zhihuModel"))),
-    );
-    flat.insert(
-        "zhihuPrompt".into(),
-        json!(str_field(&settings, "zhihuPrompt").unwrap_or_else(|| cur_str("zhihuPrompt"))),
-    );
-    flat.insert("zhihuTimeout".into(), timeout_field("zhihuTimeout"));
-
-    // 平铺字段并入 next（键序与 JS「展开 + 逐字段赋值」一致：已有键保位，新键按序追加）
-    if let Some(target) = next.as_object_mut() {
-        for (k, v) in flat {
-            target.insert(k, v);
-        }
-    }
-
-    // 火眼眼审查 2026-09-14（HIGH）：与 models:save 同防 SSRF——4 个 URL 字段最终都会
-    // 携带密钥出网；空值走「保留旧值/默认」分支不校验（掩码语义不变）。
-    const URL_FIELD_LABELS: &[(&str, &str)] = &[
-        ("aiApiUrl", "AI 接口地址"),
-        ("baiduApiUrl", "百度千帆接口地址"),
-        ("metasoApiUrl", "秘塔接口地址"),
-        ("zhihuApiUrl", "知乎直答接口地址"),
-    ];
-    for (field, label) in URL_FIELD_LABELS {
-        let v = next.get(*field).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if v.is_empty() {
-            continue;
-        }
-        if !is_http_url(&v) {
-            return Ok(json!({ "success": false, "message": format!("{label}格式无效，请以 http(s):// 开头") }));
-        }
-        if is_private_api_url(&v) {
-            return Ok(json!({ "success": false, "message": format!("{label}不允许指向本机或内网网段") }));
-        }
-    }
-
-    // 大模型管理：只接受已知模型字段，并且不能通过通用设置通道绕过验证状态。
-    if let Some(submitted_all) = settings.get("models").and_then(|v| v.as_object()) {
-        let current_models = models_config();
-        let mut out = serde_json::Map::new();
-        for model_key in AI_MODEL_KEYS {
-            let current_model = current_models.get(*model_key).cloned().unwrap_or_else(|| json!({}));
-            let submitted = submitted_all.get(*model_key).and_then(|v| v.as_object());
-            let Some(submitted) = submitted else {
-                out.insert((*model_key).to_string(), current_model);
-                continue;
-            };
-            let cur_url = truthy_string(current_model.get("apiUrl")).unwrap_or_default();
-            let model_url = truthy_string(submitted.get("apiUrl"))
-                .or_else(|| {
-                    if cur_url.trim().is_empty() {
-                        None
-                    } else {
-                        Some(cur_url.clone())
-                    }
-                })
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if !model_url.is_empty() {
-                if !is_http_url(&model_url) {
-                    return Ok(json!({
-                        "success": false,
-                        "message": format!("模型 {} 接口地址格式无效，请以 http(s):// 开头", model_display_name(model_key, Some(&current_model)))
-                    }));
-                }
-                if is_private_api_url(&model_url) {
-                    return Ok(json!({
-                        "success": false,
-                        "message": format!("模型 {} 接口地址不允许指向本机或内网网段", model_display_name(model_key, Some(&current_model)))
-                    }));
-                }
-            }
-            // SET-3（2026-09-15 v7）：掩码穿透——提交掩码视为未修改，保留已存真值
-            let submitted_key = submitted.get("apiKey").map(js_string).map(|s| s.trim().to_string());
-            let api_key = match &submitted_key {
-                Some(k) if !k.is_empty() && k != SECRET_MASK => k.clone(),
-                _ => truthy_string(current_model.get("apiKey")).unwrap_or_default(),
-            };
-            let pick = |k: &str| -> String {
-                truthy_string(submitted.get(k))
-                    .or_else(|| truthy_string(current_model.get(k)))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string()
-            };
-            let patch = json!({
-                "apiUrl": model_url,
-                "apiKey": api_key,
-                "model": pick("model"),
-                "prompt": pick("prompt"),
-                "customName": pick("customName"),
-                "timeout": clamp_timeout(
-                    submitted.get("timeout"),
-                    truthy_string(current_model.get("timeout"))
-                        .and_then(|v| v.parse::<i64>().ok())
-                        .unwrap_or(30),
-                ),
-                // 验证状态只信本地已存值，通用设置通道不得改
-                "verified": js_truthy(current_model.get("verified")),
-                "enabled": js_truthy(submitted.get("enabled")) && js_truthy(current_model.get("verified")),
-            });
-            let merged = merge_model(current_model, Some(&patch));
-            out.insert((*model_key).to_string(), merged);
-        }
-        if let Some(target) = next.as_object_mut() {
-            target.insert("models".into(), Value::Object(out));
-        }
-    }
-
-    if let Some(submitted_scopes) = settings.get("aiScopes").and_then(|v| v.as_object()) {
-        let mut scopes = scope_engines();
-        if let Some(map) = scopes.as_object_mut() {
-            for scope in AI_SCOPES.iter().chain(std::iter::once(&GLOBAL_ENGINE_KEY)) {
-                if let Some(candidate) = submitted_scopes.get(*scope).and_then(|v| v.as_str()) {
-                    if AI_MODEL_KEYS.contains(&candidate) {
-                        map.insert((*scope).to_string(), json!(candidate));
-                    }
-                }
-            }
-        }
-        if let Some(target) = next.as_object_mut() {
-            target.insert("aiScopes".into(), scopes);
-        }
-    }
-
-    // 清理已下线的「本地模型」与旧版知乎遗留字段，避免配置文件残留失效引擎
-    if let Some(target) = next.as_object_mut() {
-        for key in ["localApiUrl", "localApiKey", "localModel", "localPrompt", "localTimeout"] {
-            target.remove(key);
-        }
-        target.remove("zhihuAccessSecret");
-    }
-
-    let ok = save_settings(&next);
-    log::write_log(
-        "info",
-        &format!(
-            "保存 AI 简介设置: enabled={}, engine={}",
-            js_truthy(next.get("aiDescEnabled")),
-            next.get("aiEngine").and_then(|v| v.as_str()).unwrap_or("")
-        ),
-    );
-    Ok(json!({
-        "success": ok,
-        "message": if ok { "" } else { "写入配置文件失败" }
-    }))
-}
+// 审查 v2-F4（彻底方案 · 整链摘除）：`settings:save` 已于 2026-09-26 摘除。
+//
+// 摘除判据（三条同时成立，故是「删死代码」而不是「砍功能」）：
+//   1. 零调用方 —— 全仓 `settings.save(` 0 命中（D4 孤儿），渲染层只有 `settings:load`；
+//   2. 无 UI 面 —— aiEngine / aiApiKey / aiApiUrl / baiduApiUrl / metasoApiUrl /
+//      aiDescEnabled 这 6 个字段在 src/scripts/ 下连**读取**都没有，设置页没有对应控件；
+//   3. 写入面另有其人 —— 大模型配置的真实写入与校验在 `models_save`（models.rs），
+//      本函数与它功能重叠，是迁移期留下的第二条、从未被接通的路。
+//
+// 因此「约 250 行密钥掩码与 SSRF 校验从未被执行过」不是保守估计而是事实：留着它只会
+// 让「注册 = 已覆盖」的错觉继续存在（v2-M15 的 D4 门禁正是为此而加）。
+// 若将来真要开 AI 简介配置页，正确做法是给 models 域加字段，而不是复活本通道。
 
 #[cfg(test)]
 mod tests_private_url {

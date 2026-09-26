@@ -45,6 +45,19 @@ const DIRECT_COMMANDS = ['app_first_paint'];
  *  debug_data_dirs 保留：数据目录/搬迁/写入探针仍是排障必需。 */
 const PROBES = ['debug_data_dirs'];
 
+/**
+ * 上游 preload.js 里声明、但**本仓库已刻意摘除**的通道（A 组断言要豁免）。
+ *
+ * 判据：上游基线 `vendor/upstream-js/preload.js` 是只读快照（AGENTS.md §5.12），
+ * 改它等于改契约锚点；而 Tauri 轨确实不再需要这条通道时，就在这里登记「已退役」，
+ * 与 `DIRECT` 同类 —— 都是「preload 有、映射表没有」的合法形态。
+ * 每条必须写明退役理由与日期，否则这条豁免会变成随意删通道的后门。
+ */
+const RETIRED = {
+  'settings:save': 'v2-F4（2026-09-26）：零调用方 + 无 UI 面 + 写入面在 models:save，整链摘除',
+  'pwsh:prepare': 'v2-M15/B11（2026-09-26）：D4 孤儿，且 Tauri 轨无内置运行时可准备，与 pwsh:status 完全重复',
+};
+
 function collect(set, re, text) {
   for (const m of text.matchAll(re)) set.add(m[1]);
   return set;
@@ -96,11 +109,17 @@ const check = (ok, label, detail = '') => {
 console.log('=== IPC 通道映射一致性门禁 ===\n');
 
 // ---- A. invoke 集合 ----
-const onlyPreload = [...preloadInvoke].filter(c => !channelMap.has(c));
+const retiredKeys = Object.keys(RETIRED);
+const staleRetired = retiredKeys.filter(c => channelMap.has(c)); // 退役清单里又冒出来了 → 红
+const onlyPreload = [...preloadInvoke].filter(c => !channelMap.has(c) && !RETIRED[c]);
 const onlyMap = [...channelMap.keys()].filter(c => !preloadInvoke.has(c));
-check(onlyPreload.length === 0 && onlyMap.length === 0,
-  `A. invoke 通道集合一致（preload ${preloadInvoke.size} / CHANNEL_MAP ${channelMap.size}）`,
-  onlyPreload.length || onlyMap.length ? `preload 独有 ${JSON.stringify(onlyPreload)} / map 独有 ${JSON.stringify(onlyMap)}` : '');
+check(onlyPreload.length === 0 && onlyMap.length === 0 && staleRetired.length === 0,
+  `A. invoke 通道集合一致（preload ${preloadInvoke.size} / CHANNEL_MAP ${channelMap.size} / 已退役 ${retiredKeys.length}）`,
+  staleRetired.length
+    ? `已退役通道又出现在映射表里（请删条目或撤退役登记）${JSON.stringify(staleRetired)}`
+    : onlyPreload.length || onlyMap.length
+      ? `preload 独有 ${JSON.stringify(onlyPreload)} / map 独有 ${JSON.stringify(onlyMap)}`
+      : '');
 
 // ---- B. send 集合 ----
 const expectedSend = new Set([...sendMap.keys(), ...WINDOW_BRIDGED, ...DIRECT]);
@@ -153,12 +172,17 @@ const D4_ORPHANS = new Map([
   // （白名单不许留死条目，否则下一次没人记得它其实早就接上了）。摘除或接线后从这里删掉。
   ['app:get-theme', 'v2-M15：主题只走本地 theme.js，无调用点'],
   ['window:update-overlay', 'v2-M15：自绘标题栏改由 CSS/`body.win-maximized` 承担'],
-  ['pwsh:prepare', 'v2-M15：内置运行时准备无前端入口（状态查询 pwsh:status 有）'],
-  ['settings:save', 'v2-M15 本尊：独有字段 aiEngine/aiApiKey/aiApiUrl/baiduApiUrl/metasoApiUrl/aiDescEnabled 运行时永不可写'],
+  // 'pwsh:prepare'：B11（2026-09-26）已整链摘除，登记进 RETIRED，不再占孤儿基线
+  // v2-F4 已整链摘除（命令 + lib.rs 注册 + CHANNEL_MAP + api.settings.save 一并删除）。
+  // 留作「已摘除通道」的登记：将来若有人重新注册它，D1/D2 会红，此处备忘其死因。
+  // - 'settings:save'：零调用方 + 无 UI 面 + 写入面在 models_save，2026-09-26 摘除
   ['netspeed:ping', 'v2-M15：测速页现由 netspeed_throughput 之外的路径完成，ping 无调用点'],
   ['netspeed:throughput', 'v2-M15：同上'],
   ['elevate:status', 'v2-M15：提权状态走事件 elevate:notice，状态查询无人调'],
-  ['paths:validate', 'v2-M15：路径校验由 Rust 侧内部调用，渲染层无入口'],
+  // 审查 v2-F19：原理由写成「由 Rust 侧内部调用」——实测该命令在全仓 `.ps`/`.rs` 中
+  // 除定义外 **0 命中**（Rust 侧也没有任何内部调用点），那条理由是错的。
+  // 错误理由比没有理由更糟：下一轮会把它当「已核对」抄下去，掩盖它是纯死通道。
+  ['paths:validate', 'v2-F19 订正：零调用方（Rust 侧亦无内部调用），纯死通道，待摘除'],
   ['shutdown:begin', 'v2-M15：`app.js:677` 注明「保留作扩展点」——刻意保留，但要显式登记'],
   ['shutdown:complete', 'v2-M15：同上'],
 ]);

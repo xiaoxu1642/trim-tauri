@@ -210,7 +210,7 @@ fn prune_backups(keep: usize) {
         for (_, names) in batches.into_iter().skip(keep) {
             for name in names {
                 let p = dir.join(&name);
-                if let Err(e) = trim_finder::scan::recycle::send_to_trash(&p.to_string_lossy()) {
+                if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()) {
                     log::write_log("warn", &format!("旧外设备份移入回收站失败: {name} -> {e}"));
                 }
             }

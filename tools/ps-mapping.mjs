@@ -34,7 +34,8 @@ import { ORIGIN } from './ps-origin.mjs';
 // S3 后仅保留 2 个 PS 脚本：cm_icons（GDI+ 图标提取）和 optimizer_build（WMI 还原点）
 export const MAPPING = [
   { name: 'cm_icons', js: `${ORIGIN}/src/scripts-powershell/contextmenu-scripts.js`, call: 'icons', args: [['__TRIM_ITEMS_JSON__']], ps1: 'cm_icons.ps1', note: '右键菜单图标修复（哨兵 items）', noRun: '带哨兵参数，行为层豁免' },
-  { name: 'optimizer_build', js: `${ORIGIN}/src/scripts-powershell/optimizer-scripts.js`, call: 'buildScript', args: [[{ __trim_sentinel__: true }]], ps1: 'optimizer_build.ps1', note: '优化项执行脚本（哨兵 steps）', noRun: '会改注册表/服务/系统设置，行为层豁免' },
+  // 审查 v2-F14：旧 note 写「40 个优化项共用一份模板」，实测含 pwsh 步骤的优化项是 44/115
+  { name: 'optimizer_build', js: `${ORIGIN}/src/scripts-powershell/optimizer-scripts.js`, call: 'buildScript', args: [[{ __trim_sentinel__: true }]], ps1: 'optimizer_build.ps1', note: '优化项执行脚本（哨兵 steps；44 个含 pwsh 步骤的优化项共用一份模板）', noRun: '会改注册表/服务/系统设置，行为层豁免' },
 ];
 
 export const PROVENANCE_BEGIN = '# <<<PROVENANCE';

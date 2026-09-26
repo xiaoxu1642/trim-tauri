@@ -66,8 +66,11 @@ fn decrypts_electron44_oscrypt_and_dotnet_dpapi() {
     println!("[dotnet] 裸 DPAPI 跨实现解密成功");
 }
 
+// 审查 v2-F18：这条是**纯内存、零外部依赖**的结构性断言（体内只有一次
+// `decrypt_dpapi_v1(...).expect_err(...)`），不属于 `AGENTS.md` §4 定义的
+// 「真实 pwsh / 网络 / 大目录 / DPAPI 密文样本」任何一类 —— 被 `#[ignore]` 排除在
+// 默认 `cargo test` 之外，等于把一份免费的回归覆盖关掉。取消 ignore。
 #[test]
-#[ignore = "结构性用例：非 dpapi:v1: 值必须返回 BadPrefix"]
 fn bad_prefix_is_distinct_error() {
     use trim_tauri_lib::safestorage::StorageError;
     assert!(matches!(

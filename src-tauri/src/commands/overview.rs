@@ -1,8 +1,9 @@
 //! overview 域（批次 A）：overview:metrics / overview:hardware / overview:checkup
 //!
 //! 缓存与在途去重语义（对照 main.js 5195-5379 段）：
-//! - metrics：内存缓存 2.5s；**同一时刻最多一个 pwsh 进程**（用 std 互斥锁在阻塞线程上串行化，
-//!   等价 JS 侧的 overviewMetricsInflight 去重，避免轮询打满进程）；
+//! - metrics：内存缓存 2.5s；采集为**纯原生进程内调用**（无 pwsh；用 std 互斥锁在阻塞线程上
+//!   串行化，等价 JS 侧的 overviewMetricsInflight 去重，避免轮询打满进程）——
+//!   旧注释「同一时刻最多一个 pwsh 进程」为 Electron 时代遗物（2026-09-25 审计修正）；
 //! - hardware：磁盘缓存 system-info.json（首扫落盘，之后读缓存，refresh=true 强扫）；
 //!   扫描失败时回落旧缓存并标 degraded:true（不让一次失败把页面清空）；
 //! - checkup：磁盘缓存 checkup.json + TTL 30 分钟（F1：原实现永不过期的旧"正常"结论

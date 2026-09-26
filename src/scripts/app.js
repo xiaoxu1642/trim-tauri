@@ -592,10 +592,20 @@
     return html;
   }
 
+  let usageTrap = null;
+
   async function showUsageGuide() {
     const backdrop = document.getElementById('usageBackdrop');
     if (!backdrop) return;
     backdrop.style.display = 'flex';
+    // 审查 v2-F8：这个弹窗声明了 `role="dialog" aria-modal="true"`，却全程没有焦点管理 ——
+    // 打开时不移焦点、Tab 不圈闭、关闭时不归还，屏幕阅读器与纯键盘用户被留在弹窗背后。
+    // 仓库自己有正确做法（`ds.focusTrap`，modal.js:145 工厂在用），这里直接复用同一件。
+    const modalEl = backdrop.querySelector('.usage-modal');
+    if (window.ds && typeof window.ds.focusTrap === 'function' && modalEl) {
+      usageTrap?.release();
+      usageTrap = window.ds.focusTrap(modalEl, { initialFocus: '#btnUsageClose' });
+    }
     const body = document.getElementById('usageBody');
     if (!window.api?.app?.readUsage) {
       // 审查 v2-M21：这条文案原先写「仅在 Electron 环境中可用」——本仓库是 Tauri 轨，
@@ -619,6 +629,8 @@
   function closeUsageGuide() {
     const backdrop = document.getElementById('usageBackdrop');
     if (backdrop) backdrop.style.display = 'none';
+    // 审查 v2-F8：关闭时归还焦点给触发元素（`focusTrap` 内部已记录 prevFocus）
+    if (usageTrap) { usageTrap.release(); usageTrap = null; }
   }
 
   function escapeHtml(text) { return window.ds.esc(text); }
@@ -891,30 +903,19 @@
     // 暴露给其它模块（须在页面模块启动逻辑之前，保证其可调用 app 能力）
     window.app = { toast, confirm, confirmDanger, confirmWarning, showPreviewModeBanner, log, switchPage, loadAppInfo, requestElevation, registerToast, unregisterToast, getState: () => appState };
 
-    // 监听内置 pwsh 运行时状态：准备中→就绪/失败的一次性反馈（已就绪不弹）。
-    // 解压期间主进程每 ~800ms 广播一次进度，晚订阅的渲染层仍能接到在途广播。
+    // 监听 pwsh 运行时状态：失败时一次性提示（就绪不弹，避免每次启动噪音）。
+    // B11 订正：原先这里处理 'extracting'（解压中）态，但 Tauri 轨没有随包解压链
+    // （pwshruntime.rs 头部自陈「不存在 extracting 态」），该分支从未到达过。
     function initPwshFeedback() {
       try {
         const api = window.api?.pwsh;
         if (!api || typeof api.onStatus !== 'function') return;
-        let stage = null; // null | 'extracting' | 'ready' | 'error'
-        let preparingEntry = null;
-        const dismissPreparing = () => { try { preparingEntry?.remove(); } catch (_) {} preparingEntry = null; };
+        let reported = false; // 同一次失败只报一次，避免重复弹窗
         const apply = (s) => {
           if (!s || typeof s.status !== 'string') return;
-          if (s.status === 'extracting' && stage !== 'extracting') {
-            stage = 'extracting';
-            // duration=0 会立即移除，故用长时长模拟常驻 + 可手动关闭
-            preparingEntry = toast('info', s.message || '正在准备 PowerShell 7 运行环境（首次约 10-30 秒）…', 120000, { closable: true });
-          } else if (s.status === 'ready') {
-            const wasPreparing = stage === 'extracting';
-            dismissPreparing();
-            if (wasPreparing) toast('success', 'PowerShell 7 运行环境已就绪');
-            stage = 'ready';
-          } else if (s.status === 'error' && stage !== 'error') {
-            dismissPreparing();
-            stage = 'error';
-            toast('error', s.message || 'PowerShell 7 运行环境准备失败，请安装 PowerShell 7 后重试');
+          if (s.status === 'error' && !reported) {
+            reported = true;
+            toast('error', s.message || '未找到 PowerShell 7，含 pwsh 步骤的优化项不可用', 5000);
           }
         };
         const unsubscribe = api.onStatus(apply);

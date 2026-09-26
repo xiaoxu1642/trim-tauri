@@ -1,6 +1,6 @@
 [package]
 name = "trim-tauri"
-version = "0.1.4"
+version = "0.1.5"
 description = "Trim"
 authors = ["xiaoxu"]
 edition = "2021"
@@ -120,6 +120,9 @@ features = [
     "Win32_Networking_WinSock",
     # System_Registry：读取网络连接名（NetConnectionID）等注册表只读键
     "Win32_System_Registry",
+    # System_Environment：ExpandEnvironmentStringsW —— B11 值级备份读 REG_EXPAND_SZ 时
+    # 展开，对齐 .NET GetValue 的口径（依赖准入见 docs/PS转Rust迁移方案.md §4.1）
+    "Win32_System_Environment",
     # B2 PS→Rust 迁移：进程控制
     # System_Services：OpenSCManager/ControlService/ChangeServiceConfig（停服务/改启动类型）
     "Win32_System_Services",

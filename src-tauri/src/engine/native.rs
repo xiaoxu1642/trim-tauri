@@ -6,10 +6,15 @@
 //! - `realtime_adapters` ← realtime_adapters.ps1
 //! - `realtime_loss`    ← realtime_loss.ps1
 //!
-//! 状态：S1（NativeFirst）。调用方先试本模块，失败自动回退 PS。
+//! 状态：纯原生（方案 S3）。各域 `.ps1` 已删除，本模块是唯一实现，**不存在 PS 回退**；
+//! 调用失败一律如实返回错误（2026-09-25 审计修正：旧注释「S1 NativeFirst、自动回退 PS」与代码事实不符）。
 //! 权限拒绝、参数非法等不应回退——由调用方按错误类型判断。
 
 use serde_json::{json, Value};
+
+// 审查 v2-F7：系统工具统一经 `system_tool` 解析到 System32 后再 `Command::new`，
+// 不允许直接写裸进程名（搜索顺序里 exe 所在目录与 CWD 都排在 System32 之前）。
+use crate::engine::systembin::system_tool;
 
 /// 从 `*const u16` 以 null 结尾宽字符串构造 String（null 指针返回空串）
 unsafe fn wide_str(ptr: *const u16) -> String {
@@ -613,24 +618,42 @@ use windows::Win32::System::Registry::{
     KEY_READ, REG_VALUE_TYPE, REG_SZ, REG_DWORD,
 };
 
-/// 读注册表 DWORD，失败返回 -1
+/// 读注册表 DWORD，失败返回 -1（保持 unsafe 签名，调用方维持既有 unsafe 块）
 unsafe fn read_reg_dword(hkey: HKEY, subkey: &str, value: &str) -> i32 {
-    let sk = to_wide(&subkey);
+    read_reg_dword_opt(hkey, subkey, value).map(|v| v as i32).unwrap_or(-1)
+}
+
+/// 读注册表 DWORD 的可判空版本（B11：原 PS 实现靠 `Get-ItemProperty` + `$null` 判缺，
+/// 这里用 `Option` 表达同一语义 —— 值不存在 / 类型不对 / 打不开键都算 `None`）。
+///
+/// 返回值按**无符号**读出再转 i64：DWORD 本就是 32 位无符号，按 i32 读会把
+/// `0xFFFFFFFF` 这类阈值变成 -1，而调用方（如 SVCHost 拆分阈值）拿它做数值比较。
+pub fn read_reg_dword_opt(hive: HKEY, subkey: &str, value: &str) -> Option<i64> {
+    let sk = to_wide(subkey);
     let mut hk = HKEY::default();
-    if RegOpenKeyExW(hkey, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-        return -1;
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return None;
+        }
+        let vn = to_wide(value);
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut buf = [0u8; 4];
+        let mut size = 4u32;
+        let r = RegQueryValueExW(
+            hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty),
+            Some(buf.as_mut_ptr()), Some(&mut size),
+        );
+        let _ = RegCloseKey(hk);
+        if r.is_err() || ty != REG_DWORD || size != 4 {
+            return None;
+        }
+        Some(u32::from_le_bytes(buf) as i64)
     }
-    let vn = to_wide(value);
-    let mut ty = REG_VALUE_TYPE::default();
-    let mut buf = [0u8; 4];
-    let mut size = 4u32;
-    let r = RegQueryValueExW(
-        hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty),
-        Some(buf.as_mut_ptr()), Some(&mut size),
-    );
-    let _ = RegCloseKey(hk);
-    if r.is_err() || ty != REG_DWORD { return -1; }
-    i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+}
+
+/// 读 `HKLM\<subkey>\<value>` 的 DWORD 快捷入口（B11：optimizer 三处 PS 读值改原生用）
+pub fn read_hklm_dword(subkey: &str, value: &str) -> Option<i64> {
+    read_reg_dword_opt(HKEY_LOCAL_MACHINE, subkey, value)
 }
 
 /// 外设状态查询（对应 peripheral_query.ps1）
@@ -744,14 +767,14 @@ unsafe fn read_startup_approved(hive: HKEY, subkey: &str, value_name: &str) -> O
 /// 取文件发布者（CompanyName）
 fn get_publisher(path: &str) -> String {
     if path.is_empty() { return String::new(); }
-    // S1 简化：不实现 GetFileVersionInfoW，留空
+    // 简化实现：不实现 GetFileVersionInfoW，留空
     // 后续 S2 用 VerQueryValueW 实现
     String::new()
 }
 
 /// 启动项扫描（对应 startup_scan.ps1）
 ///
-/// S1：注册表 Run/RunOnce + 启动文件夹 + StartupApproved + disabled.json 合并。
+/// 注册表 Run/RunOnce + 启动文件夹 + StartupApproved + disabled.json 合并。
 /// 计划任务暂用 schtasks 命令获取。.lnk 目标解析和文件发布者留空（S2 完善）。
 pub fn startup_scan() -> Result<Vec<Value>, String> {
     let mut results: Vec<Value> = Vec::new();
@@ -877,7 +900,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                 if fname.eq_ignore_ascii_case("desktop.ini") { continue; }
                 let full_path = entry.path().to_string_lossy().to_string();
                 let name_stem = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
-                // .lnk 目标解析 S2 实现，S1 用文件路径
+                // 简化实现：.lnk 目标解析暂用文件路径（未做 IShellLink 深解析）
                 let resolved = full_path.clone();
                 // StartupApproved\StartupFolder：先按全名找，再按无扩展名找
                 let sa_disabled = read_startup_approved(sa_hive, "StartupFolder", &fname)
@@ -911,7 +934,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     }
 
     // ---------- 计划任务（schtasks 命令） ----------
-    if let Ok(output) = std::process::Command::new("schtasks")
+    if let Ok(output) = std::process::Command::new(system_tool("schtasks"))
         .args(["/query", "/fo", "csv", "/nh", "/v"])
         .output()
     {
@@ -1463,7 +1486,7 @@ unsafe fn resolve_native_reg_path(std_path: &str) -> String {
     format!("HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\{rest}")
 }
 
-/// 右键菜单扫描（对应 cm_scan.ps1，S1 简化版）
+/// 右键菜单扫描（对应 cm_scan.ps1，S3 简化版）
 ///
 /// 覆盖：Shell 项 + ShellEx 项（13 场景 × 3 视图）、发送到、Win+X、
 /// 新建菜单、打开方式。UWP/PackagedCom 暂未实现（S2 完善）。
@@ -1939,7 +1962,7 @@ unsafe fn scan_shellex_handlers(
 }
 // ==================== B7 runtimes_status：运行库检测 ====================
 
-/// 运行库检测（对应 runtimes_status.ps1，S1）
+/// 运行库检测（对应 runtimes_status.ps1，S3）
 ///
 /// 覆盖：VC++ 2015-2022 x64/x86（注册表+dll）、.NET Framework 4.x/3.5、
 /// DirectX 9.0c 附属组件、旧版 VC++ 2005-2013 信息级列举。
@@ -2040,7 +2063,7 @@ pub fn runtimes_status() -> Result<Value, String> {
             let _ = RegCloseKey(hk);
             inst
         } else { false };
-        // 可选功能状态：用注册表判断即可（Get-WindowsOptionalFeature 需要 DISM，S1 简化）
+        // 可选功能状态：用注册表判断即可（Get-WindowsOptionalFeature 需要 DISM，从简）
         if net35_installed {
             items.push(json!({
                 "id": "netfx35", "status": "ok", "evidence": [".NET Framework 3.5 已启用"],
@@ -2210,7 +2233,313 @@ unsafe fn service_set_start_type(name: &str, start_type: u32) -> bool {
     ok
 }
 
-/// 顽固软件自启阻断（对应 memory_stubborn_block.ps1，S1）
+/// 服务启动类型是否等于期望值（B11：原 PS `Get-Service ... StartType -eq 'Disabled'` 的原生等价）
+///
+/// 走 `QueryServiceConfigW`（需要 `SERVICE_QUERY_CONFIG`，不是 `service_status` 用的
+/// `SERVICE_QUERY_STATUS`）。服务不存在 = `false`：检测语义是「这项优化是否已生效」，
+/// 服务没了当然不算生效。
+pub fn service_start_type_is(name: &str, expected: u32) -> bool {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
+        QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+    };
+    unsafe {
+        let Ok(scm) = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) else {
+            return false;
+        };
+        let name_w = to_wide(name);
+        let Ok(svc) = OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_CONFIG) else {
+            let _ = CloseServiceHandle(scm);
+            return false;
+        };
+        // 两段式：先取需要的字节数，再分配重查（QueryServiceConfigW 的标准用法）
+        let mut needed = 0u32;
+        let _ = QueryServiceConfigW(svc, None, 0, &mut needed);
+        if needed == 0 {
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
+            return false;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        let cfg = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+        let ok = QueryServiceConfigW(svc, Some(cfg), needed, &mut needed).is_ok();
+        let start = if ok { (*cfg).dwStartType.0 } else { u32::MAX };
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+        ok && start == expected
+    }
+}
+
+/// `SERVICE_DISABLED`（供跨 crate 比较，避免调用方 import windows crate）
+pub const SVC_START_DISABLED: u32 = windows::Win32::System::Services::SERVICE_DISABLED.0;
+
+// ==================== B11：pwsh 步骤原生解释器的执行出口 ====================
+
+/// 键存在性（对应 PS `Test-Path HKxx:\…`）
+pub fn reg_key_exists(hive: HKEY, subkey: &str) -> bool {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        let ok = RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok();
+        if ok {
+            let _ = RegCloseKey(hk);
+        }
+        ok
+    }
+}
+
+/// 确保键存在（对应 PS `New-Item -Path … -Force`；RegCreateKeyExW 幂等）
+pub fn reg_key_ensure(hive: HKEY, subkey: &str) -> bool {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        let ok = RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_READ, None, &mut hk, None).is_ok();
+        if ok {
+            let _ = RegCloseKey(hk);
+        }
+        ok
+    }
+}
+
+/// 删除键（对应 PS `Remove-Item`；`recurse` 走 `RegDeleteTreeW`，含全部子键与值）
+pub fn reg_key_remove(hive: HKEY, subkey: &str, recurse: bool) -> bool {
+    use windows::Win32::System::Registry::{RegDeleteTreeW, RegDeleteKeyW};
+    let sk = to_wide(subkey);
+    unsafe {
+        if recurse {
+            // RegDeleteTreeW 可直接作用于父 hive + 子键路径
+            RegDeleteTreeW(hive, PCWSTR(sk.as_ptr())).is_ok()
+        } else {
+            // 非递归删除只对**最末段**有效：拆出父键与末段
+            let Some((parent, last)) = subkey.rsplit_once('\\') else {
+                return RegDeleteKeyW(hive, PCWSTR(sk.as_ptr())).is_ok();
+            };
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(to_wide(parent).as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
+                return false;
+            }
+            let r = RegDeleteKeyW(hk, PCWSTR(to_wide(last).as_ptr()));
+            let _ = RegCloseKey(hk);
+            r.is_ok()
+        }
+    }
+}
+
+/// 停止服务（`Stop-Service -Name X -Force` 的等价物）
+pub fn service_stop_pub(name: &str) -> Result<(), String> {
+    unsafe {
+        if service_stop(name) {
+            Ok(())
+        } else {
+            Err(format!("停止服务失败: {name}"))
+        }
+    }
+}
+
+/// 设置服务启动类型（`sc.exe config X start= N` 的等价物）
+pub fn service_set_start_pub(name: &str, start: u32) -> Result<(), String> {
+    unsafe {
+        if service_set_start_type(name, start) {
+            Ok(())
+        } else {
+            Err(format!("设置服务启动类型失败: {name} → {start}"))
+        }
+    }
+}
+
+/// 启用/禁用计划任务（对应 `Disable/Enable-ScheduledTask`，与启动项链同一工具）
+///
+/// `path` 为含尾反斜杠的任务路径（如 `\Microsoft\Windows\Defrag\`），与数据层 `taskPath` 同形。
+pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> Result<(), String> {
+    let full = format!("{}{}", path.unwrap_or_default(), name);
+    let arg = if disable { "/DISABLE" } else { "/ENABLE" };
+    let output = std::process::Command::new(system_tool("schtasks"))
+        .args(["/Change", "/TN", &full, arg])
+        .output()
+        .map_err(|e| format!("schtasks 执行失败: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() {
+            format!("计划任务{}未生效（可能需要管理员权限）: {full}", if disable { "禁用" } else { "启用" })
+        } else {
+            stderr
+        })
+    }
+}
+
+
+/// 读注册表字符串值（REG_SZ；B11：optimizer 回读检测的非 DWORD 分支用）
+///
+/// 刻意**不展开** `REG_EXPAND_SZ`：PS 的 `Get-ItemProperty` 会展开它，但 optimizer 的
+/// 期望值来自 `.reg` 文本解析（`parse_reg_expected`），那里只会产生 `dword:` 与
+/// 引号串（REG_SZ）两种 —— 遇到 `hex(2):` 等其它类型直接 `None`（fail-closed），
+/// 与「检测失败」的语义一致，而不是拿一个展开后的串去对一个错误的期望值。
+pub fn read_reg_string(hive: HKEY, subkey: &str, value: &str) -> Option<String> {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return None;
+        }
+        let vn = to_wide(value);
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut size = 0u32;
+        if RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+            let _ = RegCloseKey(hk);
+            return None;
+        }
+        if ty != REG_SZ || size == 0 {
+            let _ = RegCloseKey(hk);
+            return None;
+        }
+        // size 含结尾 NUL 的字节数
+        let mut buf = vec![0u8; size as usize];
+        let r = RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size));
+        let _ = RegCloseKey(hk);
+        if r.is_err() {
+            return None;
+        }
+        // 去掉结尾 NUL，按 UTF-16 解码
+        let bytes = &buf[..buf.len().saturating_sub(2)];
+        let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        Some(String::from_utf16_lossy(&units))
+    }
+}
+
+/// 读注册表值，返回 (类型标签, 字符串化数据)。
+///
+/// **口径逐条对齐** optimizer 值级备份的 `READ_ONE_HEADER`（main.js 3481-3502 的移植）——
+/// 这条链的产物会被写进 `optimizer-backups.json`，再由 `restore_backup_values` 读回，
+/// 读写两侧必须用同一套字符串化规则，否则 `0xFFFFFFFF` 这类值会在「备份→还原」之间变形：
+/// - `REG_DWORD` → `("REG_DWORD", [int] 的 i32 十进制)`（有符号！）
+/// - `REG_QWORD` → `("REG_QWORD", [long] 的 i64 十进制)`
+/// - `REG_BINARY` → `("REG_BINARY", 小写 hex 连写，无分隔符)`
+/// - `REG_SZ` → `("REG_SZ", 原文)`
+/// - `REG_EXPAND_SZ` → `("REG_SZ", **展开后**的串)` —— .NET `GetValue` 会展开，保持同口径
+/// - `REG_MULTI_SZ` → `("REG_SZ", 空格连接)` —— PS `[string]$v` 对字符串数组的强制转换
+/// - 其它类型 → `None`（与 `GetValue` 返回 null 一致，调用方按「不存在」处理）
+pub fn read_reg_value_text(hive: HKEY, subkey: &str, name: &str) -> Option<(&'static str, String)> {
+    use windows::Win32::System::Registry::{REG_EXPAND_SZ, REG_MULTI_SZ};
+    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+
+
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return None;
+        }
+        let vn = to_wide(name);
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut size = 0u32;
+        if RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+            let _ = RegCloseKey(hk);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let r = RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size));
+        let _ = RegCloseKey(hk);
+        if r.is_err() {
+            return None;
+        }
+
+        let units = |b: &[u8]| -> Vec<u16> {
+            b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        };
+        match ty {
+            REG_DWORD if size >= 4 => {
+                let raw = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                // .NET 把 DWORD 读成 int（有符号），`[int]$v` 再转字符串 —— 保留该口径
+                Some(("REG_DWORD", (raw as i32).to_string()))
+            }
+            REG_QWORD if size >= 8 => {
+                let raw = u64::from_le_bytes(buf[..8].try_into().ok()?);
+                Some(("REG_QWORD", (raw as i64).to_string()))
+            }
+            REG_BINARY => {
+                Some(("REG_BINARY", buf.iter().map(|b| format!("{b:02x}")).collect()))
+            }
+            REG_SZ => {
+                let u = units(&buf);
+                Some(("REG_SZ", String::from_utf16_lossy(&u).trim_end_matches('\0').to_string()))
+            }
+            REG_EXPAND_SZ => {
+                // 展开环境变量（对齐 .NET GetValue）；展开结果以 NUL 结尾
+                let u = units(&buf);
+                let raw = String::from_utf16_lossy(&u);
+                let raw = raw.trim_end_matches('\0');
+                let mut out = [0u16; 1024];
+                let src = to_wide(raw);
+                let n = ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut out[..]));
+                let s = if n == 0 || n as usize > out.len() {
+                    raw.to_string() // 展开失败/过长 → 原样保留，不造一个错值
+                } else {
+                    let u16s = &out[..(n as usize - 1).max(0)];
+                    String::from_utf16_lossy(u16s)
+                };
+                Some(("REG_SZ", s))
+            }
+            REG_MULTI_SZ => {
+                // 双 NUL 结尾的 UTF-16 串序列；PS `[string]$v` 对数组是空格连接
+                let u = units(&buf);
+                let joined: String = String::from_utf16_lossy(&u)
+                    .split('\0')
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Some(("REG_SZ", joined))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// hive 句柄的跨 crate 出口（命令层不 import windows crate）
+pub fn hive_hklm() -> HKEY { HKEY_LOCAL_MACHINE }
+pub fn hive_hkcu() -> HKEY { HKEY_CURRENT_USER }
+pub fn hive_hkcr() -> HKEY {
+    windows::Win32::System::Registry::HKEY_CLASSES_ROOT
+}
+pub fn hive_hku() -> HKEY {
+    windows::Win32::System::Registry::HKEY_USERS
+}
+pub fn hive_hkcc() -> HKEY {
+    windows::Win32::System::Registry::HKEY_CURRENT_CONFIG
+}
+
+/// 写注册表值（B11：optimizer「按备份回写」的原生出口，替代 `reg.exe add` 子进程）
+///
+/// `kind` 与 `data` 由调用方编码（见 optimizer 的 `restore_write_bytes`），
+/// 这里只负责打开键、写入、关闭 —— 与内部既有的 `reg_write_value` 同一套姿势。
+pub fn reg_restore_write(hive: HKEY, subkey: &str, value_name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> bool {
+    unsafe { reg_write_value(hive, subkey, value_name, kind, data) }
+}
+
+/// 删注册表值；**值本来就不存在 = 成功**（B11：optimizer「按备份删除」的原生出口）
+///
+/// 语义对齐原 PS `reg delete … ; if ($LASTEXITCODE -ne 0) { reg query …; if (0) { failed++ } }`
+/// —— reg.exe 删不存在的值会报错，但随后 query 不到，于是不计失败。原生等价是
+/// `RegDeleteValueW` 返回 `ERROR_FILE_NOT_FOUND`(2) 视为幂等成功。
+pub fn reg_restore_delete(hive: HKEY, subkey: &str, value_name: &str) -> bool {
+    use windows::Win32::Foundation::WIN32_ERROR;
+    const ERROR_FILE_NOT_FOUND: WIN32_ERROR = WIN32_ERROR(2);
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
+            // 键都不存在 → 值必然不存在 → 幂等成功
+            return true;
+        }
+        let nm = to_wide(value_name);
+        let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+        let _ = RegCloseKey(hk);
+        r.is_ok() || r == ERROR_FILE_NOT_FOUND
+    }
+}
+
+/// 顽固软件自启阻断（对应 memory_stubborn_block.ps1，S3）
 ///
 /// 1. 停止并禁用 4 个服务（设为 Manual）
 /// 2. 停止 wpscloudsvr 服务
@@ -2263,7 +2592,7 @@ pub fn stubborn_block() -> Result<Value, String> {
     let block_tasks = ["WpsUpdateTask_CHENG", "WpsUpdateLogonTask_CHENG"];
     for task in &block_tasks {
         // 检查任务是否存在
-        let exists = match std::process::Command::new("schtasks")
+        let exists = match std::process::Command::new(system_tool("schtasks"))
             .args(["/Query", "/TN", task, "/NH"])
             .output()
         {
@@ -2275,14 +2604,14 @@ pub fn stubborn_block() -> Result<Value, String> {
         // 备份
         if !backup_dir.as_os_str().is_empty() {
             let xml_path = backup_dir.join(format!("{task}.xml"));
-            let _ = std::process::Command::new("schtasks")
+            let _ = std::process::Command::new(system_tool("schtasks"))
                 .args(["/Query", "/TN", task, "/XML"])
                 .stdout(std::process::Stdio::from(std::fs::File::create(&xml_path).unwrap_or_else(|_| std::fs::File::open("NUL").unwrap())))
                 .status();
         }
 
         // 删除
-        let deleted = match std::process::Command::new("schtasks")
+        let deleted = match std::process::Command::new(system_tool("schtasks"))
             .args(["/Delete", "/TN", task, "/F"])
             .output()
         {
@@ -2321,7 +2650,7 @@ pub fn stubborn_block() -> Result<Value, String> {
     }))
 }
 
-/// 网络连通性检测（对应 netcheck_status.ps1，S1 简化版）
+/// 网络连通性检测（对应 netcheck_status.ps1，S3 简化版）
 ///
 /// 覆盖：网卡枚举、IP 配置、DHCP 服务、DNS 配置、代理设置、连通性探测。
 /// 网卡高级属性（Get-NetAdapterAdvancedProperty）暂未实现（S2 完善）。
@@ -2563,7 +2892,7 @@ pub fn netcheck_status() -> Result<Value, String> {
             g
         } else { false };
         // WinHTTP 代理（spawn netsh）
-        let winhttp_out = std::process::Command::new("netsh")
+        let winhttp_out = std::process::Command::new(system_tool("netsh"))
             .args(["winhttp", "show", "proxy"])
             .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string());
         let winhttp_has_proxy = winhttp_out.as_ref()
@@ -2679,7 +3008,7 @@ pub fn netcheck_status() -> Result<Value, String> {
         };
         items.push(json!({"id": "connectivity", "status": net_status, "evidence": net_evidence, "detail": net_detail}));
 
-        // nicProps：S1 简化，physical 为空数组，virtual 列出虚拟网卡
+        // nicProps：从简实现，physical 为空数组，virtual 列出虚拟网卡
         let virtual_nics: Vec<Value> = nics.iter().filter(|n| n.is_virtual).map(|n| json!({
             "name": n.name, "status": n.status, "writable": false,
         })).collect();
@@ -2958,7 +3287,7 @@ fn glob_first_dir(pattern: &str) -> String {
     if std::path::Path::new(&current).is_dir() { current } else { String::new() }
 }
 
-/// 安装路径扫描（对应 paths_scan.ps1，S1 简化版）
+/// 安装路径扫描（对应 paths_scan.ps1，S3 简化版）
 ///
 /// 覆盖：规则表达式解析、卸载注册表枚举、App Paths、应用安装路径多级兜底、
 /// 用户数据目录、缓存目录、glob 匹配。开始菜单 .lnk 目标解析暂未实现（S2 用 IShellLink COM）。
@@ -3304,7 +3633,7 @@ unsafe fn reg_write_value(hive: HKEY, subkey: &str, value_name: &str, kind: REG_
     r.is_ok()
 }
 
-/// 启动项启用/禁用（对应 startup_enable.ps1 / startup_disable.ps1，S1）
+/// 启动项启用/禁用（对应 startup_enable.ps1 / startup_disable.ps1，S3）
 ///
 /// 覆盖：注册表项（StartupApproved blob 为主，删值式为回退）、文件夹项（移动备份）、
 /// 计划任务（schtasks /Change）。disabled.json 记账维护。
@@ -3508,7 +3837,7 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String>
     if task_name.is_empty() { return Err("缺少任务名".into()); }
     let full_name = format!("{task_path}{task_name}");
     let arg = if enable { "/ENABLE" } else { "/DISABLE" };
-    let output = std::process::Command::new("schtasks")
+    let output = std::process::Command::new(system_tool("schtasks"))
         .args(["/Change", "/TN", &full_name, arg])
         .output().map_err(|e| format!("schtasks 执行失败: {e}"))?;
     if output.status.success() {
@@ -3597,7 +3926,7 @@ unsafe fn is_system_com_server(guid: &str) -> bool {
     false
 }
 
-/// 右键菜单启用/禁用（对应 cm_toggle.ps1，S1）
+/// 右键菜单启用/禁用（对应 cm_toggle.ps1，S3）
 ///
 /// 覆盖 7 种 source：shell（四值模型）、shellex（'-' 前缀重命名）、
 /// winx（.lnk.disabled 重命名）、filesystem（Hidden 属性）、
@@ -4002,7 +4331,7 @@ fn safe_name(name: &str) -> String {
     name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
-/// 启动项删除（对应 startup_remove.ps1，S1）
+/// 启动项删除（对应 startup_remove.ps1，S3）
 ///
 /// 注册表：reg.exe export 备份整个键 + RegDeleteValueW 删值
 /// 文件夹：复制到 deleted/ 备份，返回 fsDelete 由主进程回收站删除
@@ -4048,7 +4377,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 let reg_file = deleted_dir.join(format!("{stamp}_reg_{safe}.reg"));
                 let hive_short = if hive == HKEY_LOCAL_MACHINE { "HKLM" } else { "HKCU" };
                 let export_path = format!("{hive_short}\\{subkey}");
-                let export_out = std::process::Command::new("reg.exe")
+                let export_out = std::process::Command::new(system_tool("reg.exe"))
                     .args(["export", &export_path, reg_file.to_str().unwrap(), "/y"])
                     .output();
                 if export_out.is_err() || !reg_file.exists() {
@@ -4129,7 +4458,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 // 导出 XML 备份
                 let safe = safe_name(&task_name);
                 let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
-                let query_out = std::process::Command::new("schtasks")
+                let query_out = std::process::Command::new(system_tool("schtasks"))
                     .args(["/Query", "/TN", &tn, "/XML"])
                     .output();
                 if let Ok(out) = query_out {
@@ -4143,7 +4472,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     continue;
                 }
                 // 删除
-                let del_out = std::process::Command::new("schtasks")
+                let del_out = std::process::Command::new(system_tool("schtasks"))
                     .args(["/Delete", "/TN", &tn, "/F"])
                     .output();
                 if del_out.is_err() || !del_out.unwrap().status.success() {
@@ -4172,7 +4501,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
 }
 // ==================== B5 startup_add：新增启动项 ====================
 
-/// 新增启动项（对应 startup_add.ps1，S1）
+/// 新增启动项（对应 startup_add.ps1，S3）
 ///
 /// 写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run，值为带引号的路径。
 /// 冲突检查：已存在同名启动项时返回原值，不覆盖。
@@ -4209,7 +4538,7 @@ pub fn startup_add(path: &str, name: &str) -> Result<Option<String>, String> {
 }
 // ==================== B6 cm_remove：右键菜单删除 ====================
 
-/// 右键菜单删除（对应 cm_remove.ps1，S1）
+/// 右键菜单删除（对应 cm_remove.ps1，S3）
 ///
 /// 删除注册表键（RegDeleteTreeW 递归删除）。文件系统项由主进程回收站删除，
 /// shellnew 项通过启停管理（禁止整键删除），系统保护项拒绝。
@@ -4342,7 +4671,7 @@ fn reg_file_header_hive(file: &std::path::Path) -> Option<String> {
     None
 }
 
-/// 右键菜单备份（对应 cm_backup.ps1，S1）
+/// 右键菜单备份（对应 cm_backup.ps1，S3）
 ///
 /// 在桌面创建「右键菜单备份_时间戳」目录，注册表项用 reg.exe export 导出 .reg，
 /// 文件项复制到 files/ 子目录，生成 manifest.json。
@@ -4407,7 +4736,7 @@ pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
         let reg_file = backup_dir.join(format!("registry_{idx}_{safe_name}.reg"));
 
         // reg.exe export
-        let out = std::process::Command::new("reg.exe")
+        let out = std::process::Command::new(system_tool("reg.exe"))
             .args(["export", &write_path, reg_file.to_str().unwrap(), "/y"])
             .output();
         let success = out.is_ok() && out.as_ref().unwrap().status.success();
@@ -4475,7 +4804,7 @@ fn reg_key_allowed_for_restore(key: &str) -> bool {
     p.starts_with("HKLM\\SOFTWARE\\Classes\\") || p.starts_with("HKCU\\SOFTWARE\\Classes\\")
 }
 
-/// 右键菜单防篡改恢复（对应 cm_restore.ps1，S1）
+/// 右键菜单防篡改恢复（对应 cm_restore.ps1，S3）
 ///
 /// 从桌面最新「右键菜单备份_*」目录恢复，三道安全闸门：
 /// ① .reg 必须在 manifest.registryFiles 登记且在备份目录内
@@ -4574,7 +4903,7 @@ pub fn cm_restore() -> Result<Value, String> {
                 continue;
             }
             // reg.exe import
-            let out = std::process::Command::new("reg.exe")
+            let out = std::process::Command::new(system_tool("reg.exe"))
                 .args(["import", path.to_str().unwrap()])
                 .output();
             if out.is_err() || !out.unwrap().status.success() {
@@ -4647,7 +4976,7 @@ pub fn cm_restore() -> Result<Value, String> {
 }
 // ==================== B9 peripheral_apply：外设优化应用 ====================
 
-/// 外设优化应用（对应 peripheral_apply.ps1，S1）
+/// 外设优化应用（对应 peripheral_apply.ps1，S3）
 ///
 /// 写入三个 HKLM 注册表值：Win32PrioritySeparation、KeyboardDataQueueSize、MouseDataQueueSize。
 /// 写入前备份每个父键到 %APPDATA%\Trim\peripheral-backup\backup_<stamp>_<n>.reg。
@@ -4678,7 +5007,7 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
         part += 1;
         let reg_path = format!("HKLM\\{subkey}");
         let backup_file = backup_dir.join(format!("backup_{stamp}_{part}.reg"));
-        let out = std::process::Command::new("reg.exe")
+        let out = std::process::Command::new(system_tool("reg.exe"))
             .args(["export", &reg_path, backup_file.to_str().unwrap(), "/y"])
             .output();
         if out.is_err() || !out.unwrap().status.success() {
@@ -4712,7 +5041,7 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
 }
 // ==================== B9 peripheral_restore：外设优化恢复 ====================
 
-/// 从备份恢复外设设置（对应 peripheral_restore.ps1，S1）
+/// 从备份恢复外设设置（对应 peripheral_restore.ps1，S3）
 ///
 /// 找 %APPDATA%\Trim\peripheral-backup 中最新一批 backup_<stamp>_*.reg，
 /// 按时间戳分组整组导入（v2-M12：一次 apply 留下多个分片，必须整组还原）。
@@ -4762,7 +5091,7 @@ pub fn peripheral_restore() -> Result<Value, String> {
 
     let mut imported = 0i64;
     for f in &group {
-        let out = std::process::Command::new("reg.exe")
+        let out = std::process::Command::new(system_tool("reg.exe"))
             .args(["import", f.to_str().unwrap()])
             .output();
         if out.is_ok() && out.unwrap().status.success() {
@@ -4797,7 +5126,7 @@ fn regex_capture(text: &str, pattern: &str) -> Option<String> {
 
 // ==================== B7 runtimes_repair：运行库修复 ====================
 
-/// 运行库修复（对应 runtimes_repair_*.ps1，S1）
+/// 运行库修复（对应 runtimes_repair_*.ps1，S3）
 ///
 /// 静默执行安装包或 dism.exe，检查退出码。
 /// 返回 (success, message)。
@@ -4843,7 +5172,7 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
 }
 // ==================== B8 netcheck_repair：网络修复 ====================
 
-/// 网络检测修复（对应 netcheck_repair_*.ps1，S1）
+/// 网络检测修复（对应 netcheck_repair_*.ps1，S3）
 ///
 /// 6 个修复动作：enable-adapter / reset-dns / start-dhcp / start-dnscache /
 /// disable-user-proxy / reset-winhttp。
@@ -4855,7 +5184,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             if name.trim().is_empty() {
                 return Ok(json!({"ok": false, "message": "缺少网卡名"}));
             }
-            let out = std::process::Command::new("netsh")
+            let out = std::process::Command::new(system_tool("netsh"))
                 .args(["interface", "set", "interface", &format!("name={name}"), "admin=enabled"])
                 .output()
                 .map_err(|e| format!("netsh 执行失败: {e}"))?;
@@ -4878,7 +5207,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             if name.is_empty() {
                 return Ok(json!({"ok": false, "message": "缺少接口标识"}));
             }
-            let out = std::process::Command::new("netsh")
+            let out = std::process::Command::new(system_tool("netsh"))
                 .args(["interface", "ipv4", "set", "dnsservers", &format!("name={name}"), "source=dhcp"])
                 .output()
                 .map_err(|e| format!("netsh 执行失败: {e}"))?;
@@ -4889,7 +5218,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "start-dhcp" => {
-            let out = std::process::Command::new("sc")
+            let out = std::process::Command::new(system_tool("sc"))
                 .args(["start", "Dhcp"])
                 .output()
                 .map_err(|e| format!("sc 执行失败: {e}"))?;
@@ -4900,7 +5229,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "start-dnscache" => {
-            let out = std::process::Command::new("sc")
+            let out = std::process::Command::new(system_tool("sc"))
                 .args(["start", "Dnscache"])
                 .output()
                 .map_err(|e| format!("sc 执行失败: {e}"))?;
@@ -4930,7 +5259,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "reset-winhttp" => {
-            let out = std::process::Command::new("netsh")
+            let out = std::process::Command::new(system_tool("netsh"))
                 .args(["winhttp", "reset", "proxy"])
                 .output()
                 .map_err(|e| format!("netsh 执行失败: {e}"))?;
@@ -4946,27 +5275,113 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
 // ==================== B8 maint：维护命令 ====================
 
 fn run_cmd(program: &str, args: &[&str]) -> bool {
-    match std::process::Command::new(program).args(args).output() {
+    // 审查 v2-F7：系统工具必须解析到 System32 再执行，不能用裸进程名 ——
+    // 搜索顺序里「exe 所在目录」与「父进程 CWD」都排在 System32 之前。
+    let exe = crate::engine::systembin::system_tool(program);
+    match std::process::Command::new(exe).args(args).output() {
         Ok(out) => out.status.success(),
         Err(_) => false,
     }
 }
 
 fn restart_service(name: &str) -> bool {
-    let _ = std::process::Command::new("sc").args(["stop", name]).output();
+    let sc = crate::engine::systembin::system_tool("sc");
+    let _ = std::process::Command::new(&sc).args(["stop", name]).output();
     std::thread::sleep(std::time::Duration::from_millis(500));
     run_cmd("sc", &["start", name])
 }
 
+fn split_reg_hive(path: &str) -> Option<(HKEY, &str)> {
+    let (hive, sub) = match path.split_once('\\') {
+        Some((h, s)) => (h, s),
+        None => (path, ""),
+    };
+    let h = match hive {
+        "HKEY_LOCAL_MACHINE" | "HKLM" => HKEY_LOCAL_MACHINE,
+        "HKEY_CURRENT_USER" | "HKCU" => HKEY_CURRENT_USER,
+        _ => return None,
+    };
+    Some((h, sub))
+}
+
+/// `"名称"=dword:八位十六进制` → (名称, 值)；不支持的写法返回 None
+fn parse_reg_dword(line: &str) -> Option<(String, u32)> {
+    let (name, rest) = line.split_once('=')?;
+    let name = name.trim();
+    if !(name.starts_with('"') && name.ends_with('"') && name.len() >= 2) { return None; }
+    let name = &name[1..name.len() - 1];
+    if name.is_empty() { return None; }
+    let hex = rest.trim().strip_prefix("dword:")?;
+    if hex.len() != 8 { return None; }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some((name.to_string(), v))
+}
+
+/// .reg 文本 → 逐键写入注册表（不落盘、不起外部进程）
+///
+/// 审查 v2-F2：原实现把内容写进 `std::env::temp_dir()`（全局可写 `%TEMP%`），文件名
+/// 可预测（`tfmaint_<毫秒>`），再由 `reg.exe import` 读回 —— 在管理员令牌下同时打开
+/// TOCTOU 回写与 junction 预占两条本地提权窗口，且违反 `AGENTS.md` §3「临时脚本只写
+/// 应用私有 tmp 目录」。改为直接 `RegCreateKeyExW` + `RegSetValueExW`，两条窗口一并消失。
+///
+/// 语法支持面刻意收窄到本模块维护任务实际用到的：`[HIVE\子键]` 段 + 若干
+/// `"名"=dword:XXXXXXXX`。**先整体解析再统一写入**：任何一行解析不了就返回 false，
+/// 不留下半写状态。
 fn reg_import(reg_content: &str) -> bool {
-    let tmp = std::env::temp_dir().join(format!("tfmaint_{}.reg", crate::engine::now_ms()));
-    if std::fs::write(&tmp, reg_content).is_err() { return false; }
-    let ok = run_cmd("reg.exe", &["import", tmp.to_str().unwrap()]);
-    let _ = std::fs::remove_file(&tmp);
+    #[allow(clippy::type_complexity)]
+    let mut sections: Vec<(HKEY, String, Vec<(String, u32)>)> = Vec::new();
+    let mut cur: Option<(HKEY, String, Vec<(String, u32)>)> = None;
+
+    for raw in reg_content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with("Windows Registry Editor Version") {
+            continue;
+        }
+        if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            if let Some(prev) = cur.take() { sections.push(prev); }
+            match split_reg_hive(inner) {
+                Some((hive, sub)) => cur = Some((hive, sub.to_string(), Vec::new())),
+                None => return false,
+            }
+            continue;
+        }
+        match parse_reg_dword(line) {
+            Some((name, val)) => match cur.as_mut() {
+                Some(s) => s.2.push((name, val)),
+                None => return false, // 值出现在任何 [键] 之前，属畸形输入
+            },
+            None => return false,
+        }
+    }
+    if let Some(prev) = cur.take() { sections.push(prev); }
+    if sections.is_empty() { return false; }
+
+    let mut ok = true;
+    unsafe {
+        for (hive, sub, vals) in &sections {
+            let sk = to_wide(sub);
+            let mut hk = HKEY::default();
+            let mut disp = REG_CREATED_NEW_KEY;
+            if RegCreateKeyExW(
+                *hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(),
+                REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp),
+            ).is_err() {
+                ok = false;
+                continue;
+            }
+            for (name, val) in vals {
+                let nm = to_wide(name);
+                if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes())).is_err() {
+                    ok = false;
+                }
+            }
+            let _ = RegCloseKey(hk);
+        }
+    }
     ok
 }
 
-/// 维护命令执行（对应 maint_*.ps1，S1）
+/// 维护命令执行（对应 maint_*.ps1，S3）
 ///
 /// 覆盖 18 个维护任务。返回 (success, output_message)。
 pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
@@ -4990,7 +5405,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             Ok((ok, if ok { "性能计数器已重建".into() } else { "性能计数器重建失败".into() }))
         }
         "store" => {
-            let _ = std::process::Command::new("wsreset.exe").spawn();
+            let _ = std::process::Command::new(system_tool("wsreset.exe")).spawn();
             Ok((true, "Store 缓存清理已启动".into()))
         }
         "netstack" => {
@@ -5006,7 +5421,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
         }
         "search" => {
             // 停止 WSearch，清空索引，启动
-            let _ = std::process::Command::new("sc").args(["stop", "WSearch"]).output();
+            let _ = std::process::Command::new(system_tool("sc")).args(["stop", "WSearch"]).output();
             std::thread::sleep(std::time::Duration::from_secs(2));
             let idx = std::path::PathBuf::from(r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows");
             let _ = std::fs::remove_dir_all(&idx);
@@ -5016,7 +5431,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
         "wu" => {
             // 停止更新服务，清理缓存，启动
             for svc in ["wuauserv", "bits", "cryptsvc"] {
-                let _ = std::process::Command::new("sc").args(["stop", svc]).output();
+                let _ = std::process::Command::new(system_tool("sc")).args(["stop", svc]).output();
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
             let cache = std::path::PathBuf::from(r"C:\Windows\SoftwareDistribution\DataStore");
@@ -5136,7 +5551,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
 
 // ==================== B10 sysdisk：系统盘介质探测 ====================
 
-/// 系统盘介质类型探测（对应 sysdisk.ps1，S1）
+/// 系统盘介质类型探测（对应 sysdisk.ps1，S3）
 ///
 /// 通过注册表 SCSI 设备信息 + 型号关键字判断 SSD/HDD。
 /// 返回 {letter, media, busType, model, isSsd, known, detector}。
@@ -5254,7 +5669,7 @@ fn check_item(id: &str, title: &str, status: &str, value: &str, detail: &str, ev
     })
 }
 
-/// 系统体检（对应 overview_checkup.ps1，S1）
+/// 系统体检（对应 overview_checkup.ps1，S3）
 ///
 /// 9 个检查项。WMI 相关（内存通道/磁盘健康/刷新率）返回 unknown，
 /// commands 层检测到 unknown 时回退 PS 获取完整结果。
@@ -5333,7 +5748,7 @@ pub fn overview_checkup() -> Result<Value, String> {
     checks.push(check_item("memory_channels", "内存通道", "unknown", "无法读取", "SMBIOS 未返回内存条信息", "未验证"));
 
     // 3. 电源计划（powercfg /getactivescheme）
-    if let Ok(out) = std::process::Command::new("powercfg").args(["/getactivescheme"]).output() {
+    if let Ok(out) = std::process::Command::new(system_tool("powercfg")).args(["/getactivescheme"]).output() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         if let Some(start) = stdout.find('(') {
             if let Some(end) = stdout[start..].find(')') {
@@ -5467,7 +5882,7 @@ unsafe fn reg_count_values(hk: HKEY) -> usize {
 }
 // ==================== B10 cleanup_detail：条目明细枚举 ====================
 
-/// 清理条目明细枚举（对应 cleanup_detail.ps1，S1）
+/// 清理条目明细枚举（对应 cleanup_detail.ps1，S3）
 ///
 /// 输入 rule JSON 和目标路径，返回 {kind, total, truncated, files}。
 /// 复杂 glob/排除规则回退 PS（commands 层判定）。
@@ -5601,7 +6016,7 @@ pub struct CleanupExecuteResult {
     pub recycle_entries: Vec<Value>,
 }
 
-/// 清理执行（对应 cleanup_execute.ps1，S1）
+/// 清理执行（对应 cleanup_execute.ps1，S3）
 ///
 /// 只处理文件删除（fileKeys/目录型）；注册表删除和复杂模式返回 Err 触发 PS 回退。
 /// to_recycle=true 时只枚举不删除，返回 recycle_entries 由主进程移入回收站。
@@ -5648,7 +6063,9 @@ pub fn cleanup_execute(
                     if expanded.contains('*') {
                         return Err("复杂 glob 需 PS 回退".into());
                     }
-                    if !std::path::Path::new(&expanded).is_dir() { continue; }
+                    // 审查 v2-F3：根路径准入改用 symlink_metadata + reparse 属性位。
+                    // 原先只有 is_dir()，而它会跟随 junction 返回 true，导致链接目标整棵被枚举。
+                    if !cleanup_root_ok(&expanded) { continue; }
                     collect_files(&expanded, pattern, recurse, &mut files);
                 }
             }
@@ -5657,7 +6074,7 @@ pub fn cleanup_execute(
             let target = item.get("path").and_then(|v| v.as_str())
                 .or_else(|| rule.get("pathPs").and_then(|v| v.as_str()))
                 .unwrap_or("");
-            if !target.is_empty() && std::path::Path::new(target).exists() {
+            if !target.is_empty() && cleanup_root_ok(target) {
                 collect_files(target, "*", true, &mut files);
             }
         }
@@ -5676,6 +6093,11 @@ pub fn cleanup_execute(
                 recycle_entries.push(json!({"id": id, "path": path, "size": size, "isDir": false}));
                 freed += *size as i64;
                 deleted += 1;
+            } else if crate::engine::protect::is_path_protected(path) {
+                // 审查 v2-F3：常规清理豁免的是「回收站优先」，**没有**豁免保护路径判定。
+                // 这是全仓唯一执行永久删除的链，保护清单在这里不能缺席 —— 同模块
+                // `retry_failed_delete`（cleanup.rs:1170）与回收站支（:942）都有这道闸门。
+                failed += 1;
             } else {
                 // 永久删除
                 match std::fs::remove_file(path) {
@@ -5755,6 +6177,19 @@ fn find_rule_by_id(rules: &Value, id: &str) -> Option<Value> {
     None
 }
 
+/// 清理根路径准入：必须是真实目录，且**不是** reparse（审查 v2-F3）
+///
+/// 判定必须在进 `collect_files` 之前做：后者只对**子项**过滤 `is_symlink()`，根路径本身
+/// 若被替换成指向他处的 junction，`Path::is_dir()` 会跟随链接返回 true，于是链接目标整棵
+/// 被枚举，并在永久删除分支下不可恢复地删掉。用 `protect::is_reparse` 的 0x400 属性位
+/// 而非 `is_symlink()`：前者覆盖全部 reparse tag（云占位符 / NFS / WIM），严格更强。
+fn cleanup_root_ok(dir: &str) -> bool {
+    match std::fs::symlink_metadata(dir) {
+        Ok(md) => md.is_dir() && !crate::engine::protect::is_reparse(&md),
+        Err(_) => false,
+    }
+}
+
 fn collect_files(dir: &str, pattern: &str, recurse: bool, files: &mut Vec<(String, u64)>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.filter_map(|e| e.ok()) {
@@ -5775,7 +6210,7 @@ fn collect_files(dir: &str, pattern: &str, recurse: bool, files: &mut Vec<(Strin
 
 // ==================== B3 device_info：设备信息采集 ====================
 
-/// 设备信息采集（对应 device_info.ps1，S1）
+/// 设备信息采集（对应 device_info.ps1，S3）
 ///
 /// 从注册表和系统 API 读取：系统版本、CPU、GPU、主板、磁盘、显示器、内存。
 /// WMI 专有字段（如显存精确值、显示器 EDID）尽量从注册表读取，缺失字段留空。

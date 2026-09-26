@@ -29,7 +29,8 @@
   </div>
   <!-- 首帧前同步主题（外部文件：内联写法被 CSP script-src 'self' 拦截，引导从未生效） -->
   <script src="scripts/theme-boot.js"></script>
-  <!-- 标题栏（原生 titleBarOverlay 提供右上角窗口控制按钮） -->
+  <!-- 标题栏（审查 v2-F8：原生装饰已由 lib.rs 的 decorations(false) 关闭，
+       右上角窗口控制按钮由 tauri-api.js 注入的自绘 caption 提供，不是 titleBarOverlay） -->
   <header class="titlebar" id="titlebar">
     <div class="titlebar-left">
       <div class="app-icon"><img src="./assets/ico/Trim.ico" alt="Trim" draggable="false"/></div>
@@ -37,7 +38,7 @@
         <div class="titlebar-title">Trim</div>
       </div>
     </div>
-    <!-- 右上角窗口控制按钮由 Windows 原生 titleBarOverlay 渲染 -->
+    <!-- 右上角窗口控制按钮由 tauri-api.js 注入的自绘 caption 渲染（见上条注释） -->
   </header>
 
   <!-- 主布局：侧边栏 + 内容区 -->

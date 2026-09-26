@@ -437,7 +437,8 @@ pub async fn fileclean_read_image<R: Runtime>(
 
 /// 回收站删除单个文件（供 delete-file / execute 共用），返回 (ok, recycled, message)
 fn recycle_one(file_path: &str) -> (bool, bool, String) {
-    match trim_finder::scan::recycle::send_to_trash(file_path) {
+    // 审查 v2-F1：走 `_os` 版。`has_lossy_path` 是第二道闸，这里不重复做名称转换。
+    match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(file_path).as_os_str()) {
         Ok(()) => (true, true, String::new()),
         Err(e1) => {
             // 回收站失败仅在明确失败时才永久删除（与 Electron trashOrUnlink 不同：

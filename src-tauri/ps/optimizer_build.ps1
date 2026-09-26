@@ -2,7 +2,7 @@
 # 来源：vendor/upstream-js/src/scripts-powershell/optimizer-scripts.js → buildScript([{"__trim_sentinel__":true}])
 # 生成：tools/sync-ps-from-js.mjs 直接取 JS **运行时字符串值**写入，无任何字符替换；
 #       改动本文件必须在源仓库改 JS 后重跑生成器（校验见 tools/check-ps-extraction.mjs）。
-# 说明：优化项执行脚本（哨兵 steps；40 个优化项共用一份模板）
+# 说明：优化项执行脚本（哨兵 steps；44 个含 pwsh 步骤的优化项共用一份模板）
 # PROVENANCE>>>
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'

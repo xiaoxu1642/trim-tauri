@@ -1289,18 +1289,13 @@ pub mod recycle {
         fn SHFileOperationW(lpfileop: *mut ShFileOpStructW) -> i32;
     }
 
-    /// 将单个路径移入回收站。pFrom 要求双 NUL 结尾。
-    ///
-    /// 审查 v2-M5：本函数收 `&str`，而 Windows 文件名是 UTF-16 —— 含孤立代理项
-    /// （GBK 遗留介质、字节级拷贝来的名字）的路径经 `to_string_lossy` 会被换成 U+FFFD，
-    /// 于是删不掉「真正那个文件」，甚至撞上另一个恰好用 U+FFFD 命名的文件删错对象。
-    /// 因此这里加 `send_to_trash_os`（不经 UTF-8 往返），`send_to_trash` 只作既有的
-    /// `&str` 门面保留给 src-tauri 侧的存量调用方。
-    pub fn send_to_trash(path: &str) -> Result<(), String> {
-        send_to_trash_os(OsStr::new(path))
-    }
-
     /// OsStr 版：直接把宽字符喂给 SHFileOperationW，全程无损。
+    ///
+    /// 审查 v2-F1（收口）：原先这里还有一个 `send_to_trash(&str)` 门面，已被删除 ——
+    /// 门面自身在 Windows 上是保真的（`&str → OsStr` 为 WTF-8），丢失发生在**上游调用方**
+    /// 的 `to_string_lossy()`，而门面的存在让「先 lossy 再传 &str」这类误用编译得过。
+    /// 只留 `_os` 版后，任何 `to_string_lossy()` 的产物要传给本函数必须显式写出转换，
+    /// 误用在编译期即暴露。src-tauri 侧 8 个调用点已全部改为 `_os`。
     pub fn send_to_trash_os(path: &OsStr) -> Result<(), String> {
         let mut from: Vec<u16> = path.encode_wide().collect();
         from.push(0);

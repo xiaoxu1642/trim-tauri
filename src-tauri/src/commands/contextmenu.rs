@@ -22,6 +22,13 @@ use tauri::{Runtime, WebviewWindow};
 use crate::engine::{delete_manifest, guard, log, native, paths, protect, sysinfo};
 use crate::pwsh;
 
+// open-in-regedit 纯原生实现所需（审计 F-05：原内联 PS 改 Win32 等价，见 open_regedit_native）
+use windows::core::{BOOL, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_SHOWNORMAL, WM_CLOSE,
+};
+
 // ==================== 外置 PS 脚本（编译期嵌入，禁止手写） ====================
 const PS_ICONS: &str = include_str!("../../ps/cm_icons.ps1");
 
@@ -377,7 +384,10 @@ pub async fn contextmenu_remove<R: Runtime>(
                 }));
                 continue;
             }
-            match trim_finder::scan::recycle::send_to_trash(p) {
+            // 审查 v2-F1：走 `_os` 版。`p` 来自快照、可能含非 UTF-8 / 孤立代理项，
+            // `&str` 门面在 Windows 上虽是 WTF-8 保真，但上游任何 lossy 转换都会让
+            // 回收站去删一个名字被改写过的对象（删不到，或撞上同名的另一个文件）。
+            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
                 Ok(()) => {
                     data["success"] = json!(data.get("success").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
                     manifest.push(json!({
@@ -690,7 +700,10 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
     window: WebviewWindow<R>,
     reg_path: Option<String>,
 ) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
+    // 审查 v2-F6：本命令体内会写 HKCU（`Regedit\LastKey`）并在普通拉起失败时以 `runas`
+    // 弹 UAC，具备提权能力；唯一调用方在主窗（`contextmenu.js:408`）。挂 `guard_readonly`
+    // 等于让 4 个子窗都能触发它 —— 按「谁真的需要调它」判档，这里必须收回主窗。
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
     let mut p = reg_path.unwrap_or_default().trim().trim_end_matches('\\').to_string();
@@ -723,51 +736,188 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
     } else if let Some(full) = aliases.get(p.to_uppercase().as_str()) {
         p = full.to_string();
     }
-    let escaped = p.replace('\'', "''");
-
-    // 与 Electron 同一段内联脚本（无独立 .ps1 来源，直接固化——仅 LastKey + Start-Process）
-    let script = format!(
-        r#"$ErrorActionPreference = 'SilentlyContinue'
-$key = '{escaped}'
-$running = Get-Process regedit -ErrorAction SilentlyContinue
-if ($running) {{
-  foreach ($p in $running) {{ try {{ $null = $p.CloseMainWindow() }} catch {{}} }}
-  Start-Sleep -Milliseconds 500
-}}
-try {{
-  if (-not (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit')) {{
-    New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit' -Force | Out-Null
-  }}
-  Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit' -Name 'LastKey' -Value $key -ErrorAction Stop
-}} catch {{}}
-Start-Sleep -Milliseconds 200
-$elevated = $false
-try {{
-  Start-Process regedit -ErrorAction Stop
-}} catch {{
-  try {{
-    Start-Process regedit -Verb RunAs -ErrorAction Stop
-    $elevated = $true
-  }} catch {{
-    Write-Output 'FAIL'
-    exit 1
-  }}
-}}
-if ($elevated) {{ Write-Output 'OK-ELEVATED' }} else {{ Write-Output 'OK' }}
-"#
-    );
-
     log::write_log("info", &format!("在注册表编辑器中定位: {p}"));
-    let out = match run_ps(&script, Duration::from_secs(30), None) {
-        Ok(o) => o,
-        Err(e) => return json!({ "success": false, "message": e }),
-    };
-    let text = out.stdout.trim();
-    if out.code == 0 && text.contains("OK") {
-        json!({ "success": true, "elevated": text.contains("ELEVATED") })
-    } else {
-        json!({ "success": false, "message": "打开注册表编辑器失败" })
+    // 审计 F-05 修复（2026-09-25）：原实现是 B6 九脚本清单**之外**的内联 PowerShell
+    // （CloseMainWindow + 写 LastKey + Start-Process regedit），无 pwsh 机器上该功能必挂。
+    // 改为纯 Win32 等价实现，语义逐条对齐（见 open_regedit_native 注释）。
+    let spawned = tauri::async_runtime::spawn_blocking(move || open_regedit_native(&p))
+        .await
+        .unwrap_or_else(|e| Err(format!("后台任务异常: {e}")));
+    match spawned {
+        Ok(elevated) => json!({ "success": true, "elevated": elevated }),
+        Err(e) => {
+            log::write_log("warn", &format!("打开注册表编辑器失败: {e}"));
+            json!({ "success": false, "message": "打开注册表编辑器失败" })
+        }
     }
+}
+
+// ==================== open-in-regedit 纯原生实现（审计 F-05） ====================
+//
+// 语义对齐原内联 PS 脚本：
+//   1) CloseMainWindow ≈ 对 regedit.exe 的**可见**顶层窗口投递 WM_CLOSE（隐藏/消息窗不动）；
+//   2) 必须先关窗再写 LastKey —— regedit 退出时会覆写 LastKey，顺序反了定位即失效；
+//   3) 写 LastKey 失败不阻断拉起（对齐原脚本 catch{}），只留日志；
+//   4) Start-Process 失败（ShellExecuteW 返回 ≤32）转 "runas" 弹 UAC，并如实上报 elevated。
+
+/// 枚举回调：把属于 regedit.exe 的可见顶层窗口关掉
+struct RegEditCloseCtx {
+    pids: Vec<u32>,
+    hits: usize,
+}
+
+unsafe extern "system" fn close_regedit_wndproc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let ctx = &mut *(lparam.0 as *mut RegEditCloseCtx);
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid != 0 && ctx.pids.contains(&pid) && IsWindowVisible(hwnd).as_bool() {
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        ctx.hits += 1;
+    }
+    BOOL(1) // 继续枚举
+}
+
+fn to_wide16(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 关旧 regedit → 写 LastKey → 拉起 regedit（失败转 RunAs）。
+/// 返回 Ok(elevated)；Err 表示两次拉起均失败。
+fn open_regedit_native(last_key: &str) -> Result<bool, String> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
+        REG_CREATE_KEY_DISPOSITION, REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+    use windows::Win32::UI::Shell::ShellExecuteW;
+
+    // 1. 找 regedit.exe 的 PID（对齐原脚本 Get-Process regedit）
+    let mut pids: Vec<u32> = Vec::new();
+    unsafe {
+        // 审查 v2-F12：快照句柄必须在离开本块前释放。同 bundle 另 6 处
+        // `CreateToolhelp32Snapshot` 均成对 `CloseHandle`（`native.rs:109/159` 等），此处是漏网。
+        let snap_res = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        let snap = match snap_res {
+            Ok(s) => s,
+            Err(_) => return Err("无法枚举系统进程".to_string()),
+        };
+        // 之后只有一条退出路径（枚举结束即 break），故在块尾统一释放。
+        let mut entry: PROCESSENTRY32W = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..std::mem::zeroed()
+        };
+        let mut first = true;
+        loop {
+            let ok = if first {
+                first = false;
+                Process32FirstW(snap, &mut entry)
+            } else {
+                Process32NextW(snap, &mut entry)
+            };
+            if ok.is_err() {
+                break;
+            }
+            let name = String::from_utf16_lossy(&entry.szExeFile);
+            if name.trim_end_matches('\0').eq_ignore_ascii_case("regedit.exe") {
+                pids.push(entry.th32ProcessID);
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+
+    // 2. 关旧 regedit 主窗（有进程才需要；对齐原脚本只在 $running 非空时关+睡）
+    if !pids.is_empty() {
+        let mut ctx = RegEditCloseCtx { pids, hits: 0 };
+        unsafe {
+            let _ = EnumWindows(
+                Some(close_regedit_wndproc),
+                LPARAM(&mut ctx as *mut RegEditCloseCtx as isize),
+            );
+        }
+        if ctx.hits > 0 {
+            // 给 regedit 一点退出时间，避免它退出时把 LastKey 覆写回去
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
+    // 3. 写 LastKey（键不存在则创建；写失败不阻断——对齐原脚本 catch{}）
+    unsafe {
+        let path = to_wide16(r"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit");
+        let mut hk = HKEY::default();
+        let mut disp = REG_CREATE_KEY_DISPOSITION::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(path.as_ptr()),
+            None,
+            PCWSTR::default(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut hk,
+            Some(&mut disp),
+        )
+        .is_ok()
+        {
+            let val = to_wide16(last_key);
+            let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
+            // 审查 v2-F16：值名先落到局部变量再取裸指针。原先写
+            // `PCWSTR(to_wide16("LastKey").as_ptr())` —— 临时值当前能活到语句结束因而不算 UB，
+            // 但只要有人把这条语句拆开、或在中间插入 `.await`/提前返回，指针立刻悬垂，
+            // 而 FFI 路径上不会有任何编译错误。同函数 `:840`/`:876` 都已用局部变量写法。
+            let name = to_wide16("LastKey");
+            let r = RegSetValueExW(
+                hk,
+                PCWSTR(name.as_ptr()),
+                Some(0),
+                REG_SZ,
+                Some(&bytes),
+            );
+            let _ = RegCloseKey(hk);
+            if r.is_err() {
+                log::write_log("warn", "写 Regedit LastKey 失败，仍尝试打开注册表编辑器");
+            }
+        } else {
+            log::write_log("warn", "打开 Regedit Applets 注册表键失败，仍尝试打开注册表编辑器");
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 4. 拉起 regedit；普通拉起失败（返回 ≤32）转 RunAs 弹 UAC
+    let exe = to_wide16("regedit.exe");
+    let open = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            PCWSTR(exe.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if open.0 as usize > 32 {
+        return Ok(false);
+    }
+    let runas = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("runas"),
+            PCWSTR(exe.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if runas.0 as usize > 32 {
+        return Ok(true);
+    }
+    Err(format!(
+        "ShellExecuteW 两次拉起均失败（open={}, runas={}）",
+        open.0 as usize,
+        runas.0 as usize
+    ))
 }
 
 /// contextmenu:restart-explorer

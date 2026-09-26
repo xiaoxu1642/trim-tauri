@@ -2973,9 +2973,20 @@ select.field-input { cursor: pointer; appearance: auto; }
    减弱动效（可访问性）
    ================================================================ */
 @media (prefers-reduced-motion: reduce) {
-  /* v3.6.2 产品决策：开屏进行中（body.splash-live）豁免全局归零——WebGL 背景、
-     splash 入场、FLIP 落位与主界面渐显在系统关闭动画时仍完整播放 */
-  body:not(.splash-live) *, body:not(.splash-live) *::before, body:not(.splash-live) *::after {
+  /* v3.6.2 产品决策：开屏（#splash）忽略系统「减少动效」，完整播放一次性走场
+     —— WebGL 背景、splash 入场、FLIP 落位都不受归零影响。 */
+  /* 审查 v2-F11：豁免范围收窄过。原先写成 `body:not(.splash-live) *`，
+     等于开屏期间**整棵 DOM**（含主界面尚未上屏的 shimmer / pulse / spin）都恢复全速，
+     超出 AGENTS.md §2「唯一豁免：开屏 splash 的**一次性走场**」的字面范围。
+     改成只豁免 `#splash` 子树：主界面动效始终受保护，开屏自身仍是豁免的。
+     选择器只用简单选择器进 `:not()`（不依赖 Selectors L4 的复杂选择器），
+     故这里用「body 直接子代中排除 #splash」+「其后代」两式覆盖整棵非开屏子树。 */
+  body > *:not(#splash),
+  body > *:not(#splash) *,
+  body > *:not(#splash)::before,
+  body > *:not(#splash)::after,
+  body > *:not(#splash) *::before,
+  body > *:not(#splash) *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
     /* v3.5.1 动效审查 H1：原先只归零 duration，未归零 iteration-count，

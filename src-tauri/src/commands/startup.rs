@@ -18,6 +18,8 @@ use tauri::{Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::engine::{delete_manifest, guard, log, native, paths, sysinfo};
+// 审查 v2-F7：系统工具走绝对路径，不用裸进程名
+use crate::engine::systembin::system_tool;
 
 static SNAPSHOTS: Mutex<Option<HashMap<String, HashMap<String, Value>>>> =
     Mutex::new(None);
@@ -287,7 +289,8 @@ pub async fn startup_delete<R: Runtime>(
             let (ok, msg) = if !allowed {
                 (false, "删除路径与快照不符，已拒绝".to_string())
             } else {
-                match trim_finder::scan::recycle::send_to_trash(p) {
+                // 审查 v2-F1：走 `_os` 版，避免非 UTF-8 文件名在 `&str` 往返中被改写。
+                match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
                     Ok(()) => (true, "已移入回收站（已备份）".to_string()),
                     Err(e) => (false, e),
                 }
@@ -362,7 +365,7 @@ pub async fn startup_openlocation<R: Runtime>(
     }
     // explorer /select,<path>：参数独立传递（不走 shell），无命令注入面
     let arg = format!("/select,{}", target.replace('/', "\\"));
-    match std::process::Command::new("explorer.exe").arg(&arg).spawn() {
+    match std::process::Command::new(system_tool("explorer.exe")).arg(&arg).spawn() {
         Ok(_) => json!({ "success": true }),
         Err(e) => {
             log::write_log("error", &format!("打开所在位置异常: {e}"));

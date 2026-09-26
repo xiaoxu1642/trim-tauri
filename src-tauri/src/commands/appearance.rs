@@ -26,6 +26,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::engine::{guard, log, paths, protect};
+// 审查 v2-F7：系统工具走绝对路径，不用裸进程名
+use crate::engine::systembin::system_tool;
 
 /// 材质合法值全集（对照上游 `MATERIAL_NATIVE_MAP` 的键；与
 /// `engine::appearance::MATERIALS` 同源，两处必须一起改）
@@ -357,7 +359,9 @@ pub fn appearance_bg_delete<R: Runtime>(
     // 审查 M11：删除前把缓冲日志刷盘（AGENTS §3）。此处是「用户文件进回收站」的出口，
     // 若紧随其后的操作让进程异常退出，未落盘的日志会让这次删除无从追溯。
     log::flush_sync();
-    match trim_finder::scan::recycle::send_to_trash(&p) {
+    // 审查 v2-F1：走 `_os` 版，直接把 OsStr 交给回收站 —— `p` 是 `to_string_lossy()`
+    // 的产物，含孤立代理项的文件名（GBK 遗留介质）会被换成 U+FFFD，删不到真正那个文件。
+    match trim_finder::scan::recycle::send_to_trash_os(target.as_os_str()) {
         Ok(()) => Ok(json!({ "success": true })),
         Err(e) => {
             log::write_log("error", &format!("背景图片移入回收站失败: {e}"));
@@ -412,7 +416,7 @@ pub fn appearance_bg_open_dir<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
 /// 用 Explorer 打开目录（不经 shell 拼接命令，避免命令注入）
 fn open_folder(dir: &Path) {
     let arg = format!("/select,{}", dir.to_string_lossy().replace('/', "\\"));
-    let _ = std::process::Command::new("explorer.exe").arg(&arg).spawn();
+    let _ = std::process::Command::new(system_tool("explorer.exe")).arg(&arg).spawn();
 }
 
 // ==================== 启动期环境自适应接线 ====================
@@ -458,7 +462,7 @@ fn on_power_event<R: Runtime>(app: &AppHandle<R>) {
 /// 走 `reg.exe` 而非注册表 API：与 `commands::misc::detect_dwm_inject_tools`
 /// 同源姿势，且不为一个低频只读查询新增 windows crate feature。
 fn query_sys_transparency() -> bool {
-    let out = std::process::Command::new("reg")
+    let out = std::process::Command::new(system_tool("reg"))
         .args([
             "query",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",

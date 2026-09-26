@@ -108,7 +108,8 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     if (!ico) return;
     if (icons[groupId]) {
       if (img) img.src = icons[groupId];
-      else ico.innerHTML = `<img src="${icons[groupId]}" alt="${escapeAttr(group.name)}" />`;
+      // 审查 v2-F14：与 `groupIconHtml` 取齐，dataUrl 也过 `escapeAttr`
+      else ico.innerHTML = `<img src="${escapeAttr(icons[groupId])}" alt="${escapeAttr(group.name)}" />`;
     }
   }
 

@@ -216,12 +216,29 @@
         </div>
       </div>
     `;
+    // 审查 v2-F8：这个自建弹窗原先既没有 `role`/`aria-modal`，也没有 Esc 关闭和焦点管理，
+    // 只有遮罩点击和一个关闭按钮 —— 键盘用户进得去出不来。与「使用说明」弹窗同族，
+    // 一并补上语义声明 + Esc + `ds.focusTrap`。
+    const modalEl = backdrop.querySelector('.preview-modal');
+    if (modalEl) {
+      modalEl.setAttribute('role', 'dialog');
+      modalEl.setAttribute('aria-modal', 'true');
+      modalEl.setAttribute('aria-label', '历史测试记录');
+    }
     document.body.appendChild(backdrop);
 
     $('benchHistoryClose')?.addEventListener('click', closeHistory);
     backdrop.addEventListener('click', e => {
       if (e.target === backdrop) closeHistory();
     });
+    // Esc 关闭：与同一弹窗的遮罩点击、关闭按钮三条退出路径齐平
+    const onEsc = e => { if (e.key === 'Escape') closeHistory(); };
+    document.addEventListener('keydown', onEsc);
+    backdrop._onEsc = onEsc;
+    // 焦点圈闭 + 关闭时归还（release 内部会还原 prevFocus）
+    if (window.ds && typeof window.ds.focusTrap === 'function' && modalEl) {
+      backdrop._trap = window.ds.focusTrap(modalEl, { initialFocus: '#benchHistoryClose' });
+    }
 
     // 删除单条记录
     backdrop.querySelectorAll('[data-delete-id]').forEach(btn => {
@@ -257,7 +274,12 @@
   }
 
   function closeHistory() {
-    document.getElementById('benchHistoryBackdrop')?.remove();
+    const el = document.getElementById('benchHistoryBackdrop');
+    if (el) {
+      if (el._onEsc) document.removeEventListener('keydown', el._onEsc);
+      el._trap?.release();
+    }
+    el?.remove();
   }
 
   function escapeHtml(text) { return window.ds.esc(text); }

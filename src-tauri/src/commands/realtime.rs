@@ -1,10 +1,11 @@
 //! realtime 域（批次 A）：实时网速监控 7 条通道
 //!
 //! 关键设计（对照 main.js 5796-6087，逐条复刻）：
-//! - **常驻流式采样器**：旧实现每 1.5s 拉起一个 pwsh（冷启动 ~1.2s + 采样窗 900ms）
-//!   导致进程重叠、图表断续。改为单个常驻 pwsh 每秒输出一行 JSON，命令直接返回缓存
-//!   （毫秒级），渲染层曲线平滑连续。
-//! - **空闲自动回收**：连续 30s 无采样请求即结束常驻进程（离开测速页不占资源）。
+//! - **进程内常驻采样线程**：Electron 时代每 1.5s 拉起一个 pwsh（冷启动 ~1.2s + 采样窗
+//!   900ms）导致进程重叠、图表断续，曾以「单个常驻 pwsh」过渡；Tauri 侧为**进程内采样
+//!   线程**（无任何 pwsh 子进程），命令直接返回缓存（毫秒级），渲染层曲线平滑连续。
+//!   旧注释「常驻 pwsh」为过渡期遗物（2026-09-25 审计修正）。
+//! - **空闲自动回收**：连续 30s 无采样请求即停采样线程（离开测速页不占资源）。
 //! - `realtime:sample` 首个基线窗口内暂无差值数据 → 返回**空列表而非失败**，
 //!   让渲染层继续等待而不是弹错。
 //! - 报告落盘前做 schema 校验（SP-2）：拒绝非网速报告结构污染缓存；样本数上限 1e6 防爆盘。
@@ -280,7 +281,7 @@ fn validate_report(data: &Value) -> Result<(), String> {
 
 /// realtime:report-save
 #[tauri::command]
-pub fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, data: Value) -> Result<Value, String> {
+pub async fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, data: Value) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
     if let Err(why) = validate_report(&data) {
         log::write_log(
@@ -293,13 +294,25 @@ pub fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, data: V
         }));
     }
     let dir = ensure_report_dir()?;
-    prune_reports();
     let name = format!("realtime-{}.json", crate::engine::now_ms());
-    match security::atomic_write_json(&dir.join(&name), &data) {
-        Ok(()) => Ok(serde_json::json!({ "success": true, "name": name })),
-        Err(e) => {
+    let path = dir.join(&name);
+    // 审查 v2-F13：目录清理 + `to_string_pretty` 序列化 + `sync_all` 全是磁盘 I/O，
+    // 同步命令会把这段停顿留在主线程上。与同文件另两条写法对齐，丢进阻塞池。
+    let payload = data.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS);
+        security::atomic_write_json(&path, &payload)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Ok(serde_json::json!({ "success": true, "name": name })),
+        Ok(Err(e)) => {
             log::write_log("error", &format!("保存网速报告失败: {e}"));
             Ok(serde_json::json!({ "success": false, "message": e }))
+        }
+        Err(e) => {
+            log::write_log("error", &format!("保存网速报告任务异常: {e}"));
+            Ok(serde_json::json!({ "success": false, "message": format!("保存任务异常: {e}") }))
         }
     }
 }
@@ -346,19 +359,44 @@ pub fn realtime_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Resu
     Ok(serde_json::json!({ "success": true, "reports": out }))
 }
 
-/// realtime:report-delete（basename 化，防路径穿越）
+/// 报告文件的唯一解析出口：basename 化 + `.json` 后缀 + 限定报告目录。
+///
+/// 审查 v2-F9：删除口原先只 `file_name()` 而不要求 `.json`，比列举口宽 ——
+/// 同一目录下若有非报告文件，删得掉却列不出。三个出口（`delete`/`clear`/`list`）
+/// 共用同一个后缀判定后，口径不会再分叉。
+fn report_path(name: &str) -> Option<std::path::PathBuf> {
+    let base = std::path::Path::new(name).file_name()?.to_str()?;
+    if !base.ends_with(".json") || base.trim().is_empty() {
+        return None;
+    }
+    Some(paths::realtime_report_dir().join(base))
+}
+
+/// realtime:report-delete（basename 化 + `.json` 后缀，防路径穿越）
 #[tauri::command]
 pub fn realtime_report_delete<R: tauri::Runtime>(window: WebviewWindow<R>, name: String) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    let base = std::path::Path::new(&name)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let fp = paths::realtime_report_dir().join(base);
-    if fp.is_file() {
-        let _ = std::fs::remove_file(&fp);
+    // 审查 v2-F9：原先恒返回 `success:true` —— `remove_file` 的错误被 `let _ =` 丢掉，
+    // 文件被占用时前端照样弹「已删除」，刷新后记录又回来了（状态说谎）。
+    // 同时补上 `.json` 后缀判定，与 `report_list`/`prune_reports_in`/`report_clear` 三处同口径。
+    let Some(fp) = report_path(&name) else {
+        log::write_log("warn", &format!("拒绝删除网速报告（名称非法）: {name}"));
+        return Ok(serde_json::json!({ "success": false, "removed": 0, "message": "报告名称非法，未删除" }));
+    };
+    if !fp.is_file() {
+        // 已不存在按幂等成功处理（与列表里「已消失」的观感一致），不报失败。
+        return Ok(serde_json::json!({ "success": true, "removed": 0 }));
     }
-    Ok(serde_json::json!({ "success": true }))
+    match std::fs::remove_file(&fp) {
+        Ok(()) => Ok(serde_json::json!({ "success": true, "removed": 1 })),
+        Err(e) => {
+            log::write_log("warn", &format!("删除网速报告失败: {name} -> {e}"));
+            Ok(serde_json::json!({
+                "success": false, "removed": 0,
+                "message": format!("删除失败：{e}"),
+            }))
+        }
+    }
 }
 
 /// realtime:report-clear
@@ -366,15 +404,31 @@ pub fn realtime_report_delete<R: tauri::Runtime>(window: WebviewWindow<R>, name:
 pub fn realtime_report_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
     let dir = ensure_report_dir()?;
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    // 审查 v2-F9：同上 —— 清空是「全部删完」的强断言，有一条失败就不能报成功。
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".json") {
-                let _ = std::fs::remove_file(entry.path());
+            if !name.ends_with(".json") {
+                continue;
+            }
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    failed += 1;
+                    log::write_log("warn", &format!("清空网速报告失败: {name} -> {e}"));
+                }
             }
         }
     }
-    Ok(serde_json::json!({ "success": true }))
+    if failed > 0 {
+        return Ok(serde_json::json!({
+            "success": false, "removed": removed, "failed": failed,
+            "message": format!("已删除 {removed} 条，{failed} 条失败（可能被占用）"),
+        }));
+    }
+    Ok(serde_json::json!({ "success": true, "removed": removed, "failed": 0 }))
 }
 #[cfg(test)]
 mod tests {

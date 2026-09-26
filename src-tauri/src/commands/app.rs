@@ -123,7 +123,19 @@ const fn node_arch() -> &'static str {
 /// `on_page_load(Finished)` 路径处理，不经过这里。
 #[tauri::command]
 pub fn app_first_paint<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWindow<R>) {
-    if window.label() != "main" {
+    // 审查 v2-F15：139 条命令里唯一不走统一 `guard*` 的一条（另外 138 条都走）。
+    // 这里刻意按 label 判定而非 `guard(window, MAIN)`，是因为非 main 是**正常路径**
+    // （四个子窗都会发这条通知，见上面注释），用 guard 会把每一次子窗首帧都记成
+    // error 级「来源校验失败」，把真正的注入尝试淹掉。
+    // 但**留痕不能省**：`guard.rs:29-32` 写明「静默拒绝会掩盖注入尝试」，
+    // 所以非 main 时至少留一条 debug，未知 label 才升级为 warn。
+    let label = window.label().to_string();
+    if label != "main" {
+        let known = crate::engine::guard::APP_WINDOWS.contains(&label.as_str());
+        crate::engine::log::write_log(
+            if known { "debug" } else { "warn" },
+            &format!("app:first-paint 已忽略非主窗来源：'{label}'（子窗首帧走 on_page_load 路径）"),
+        );
         return;
     }
     crate::show_main_window_when_ready(&app, "渲染层首帧握手");

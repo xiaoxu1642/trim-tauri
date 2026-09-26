@@ -1,8 +1,7 @@
-//! pwsh 运行时域（B 批）：pwsh:status / pwsh:prepare（+ `pwsh:status` 事件）
+//! pwsh 运行时域（B 批）：pwsh:status（v3 批原有 pwsh:prepare，已于 B11 摘除，见文件尾）
 //!
 //! 需在 lib.rs 的 invoke_handler 中注册（本任务不改 lib.rs，请统一登记）：
 //!   commands::pwshruntime::pwsh_status,
-//!   commands::pwshruntime::pwsh_prepare,
 //!
 //! 实现体来源：main.js 4653-4667（IPC 壳）+ src/main/pwsh-runtime.js（状态机/解压）。
 //! 候选链**直接复用** pwsh/mod.rs 的 `resolve_pwsh` / `is_version_ready` /
@@ -20,12 +19,13 @@
 
 use std::sync::Mutex;
 
-use tauri::{Emitter, WebviewWindow};
+use tauri::WebviewWindow;
 
 use crate::engine::guard;
 use crate::pwsh;
 
-/// 运行时状态机（对齐 Electron 的 'idle' | 'extracting' | 'ready' | 'error'）
+/// 运行时状态机（对齐 Electron 的 'idle' | 'extracting' | 'ready' | 'error'；
+/// Tauri 轨无解压链，实际只会出现 'idle' | 'ready' | 'error'，见头部差异说明）
 struct PwshState {
     status: &'static str,
     message: String,
@@ -40,7 +40,9 @@ fn with_state<T>(f: impl FnOnce(&mut Option<PwshState>) -> T) -> T {
     f(&mut g)
 }
 
-/// 状态快照（形状逐字段对齐 Electron getPwshStatusSnapshot：status/message/progress/version/path）
+/// 状态快照（形状对齐 Electron getPwshStatusSnapshot 的 status/message/progress/path；
+/// `version` 字段已随 B11 摘除 —— 它原样回传「内置运行时版本号」，而 Tauri 轨根本没有
+/// 内置运行时，读它得到的是一个与实际执行的 pwsh 毫无关系的常量，比没有字段更误导）
 fn snapshot() -> serde_json::Value {
     let (status, message, progress, path) = with_state(|s| match s {
         Some(v) => (v.status, v.message.clone(), v.progress, v.path.clone()),
@@ -50,7 +52,6 @@ fn snapshot() -> serde_json::Value {
         "status": status,
         "message": message,
         "progress": progress,
-        "version": pwsh::PWSH_VERSION,
         "path": path,
     })
 }
@@ -94,24 +95,17 @@ pub async fn pwsh_status<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<
     Ok(serde_json::json!({ "success": true, "data": snapshot() }))
 }
 
-/// pwsh:prepare — 手动触发准备（设置页「立即准备」/ 启动期后台准备）
-#[tauri::command]
-pub async fn pwsh_prepare<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard(&window, guard::MAIN)?;
-    let result = tauri::async_runtime::spawn_blocking(resolve_and_record).await;
-    let snap = snapshot();
-    // 状态事件（渲染层 pwsh.onStatus 监听）
-    let _ = window.emit("pwsh:status", snap.clone());
-    match result {
-        Ok(Ok(path)) => Ok(serde_json::json!({
-            "success": true,
-            "data": { "status": "ready", "path": path }
-        })),
-        Ok(Err(message)) => Ok(serde_json::json!({
-            "success": false, "message": message, "data": snap
-        })),
-        Err(e) => Ok(serde_json::json!({
-            "success": false, "message": format!("准备任务异常: {e}"), "data": snap
-        })),
-    }
-}
+// pwsh:prepare — 手动触发准备（设置页「立即准备」/ 启动期后台准备）
+//
+// **B11（2026-09-26）已整链摘除**（命令 + lib.rs 注册 + CHANNEL_MAP + `api.pwsh.prepare`）。
+// 摘除判据三条：
+//   1. 零调用方 —— 全仓 `pwsh.prepare(` 0 命中（v2 审查 D4 孤儿）；渲染层只订阅
+//      `pwsh:status` 事件并调 `getStatus()`（`app.js` 的 `initPwshFeedback`）。
+//   2. 无实际可准备的东西 —— Electron 侧它触发的是「内置 zip 运行时解压」，而本仓库
+//      **没有任何内置 zip 资产**，也没有移植解压链（见本文件头部差异说明），
+//      所以 Tauri 侧它只会把 `resolve_pwsh()` 这条候选链重跑一遍。
+//   3. 与 `pwsh:status` 完全重复 —— `pwsh_status` 内部同样调 `resolve_and_record()`。
+//
+// 留着它的代价是「注册 = 已覆盖」的错觉（v2-M15 D4 门禁正是抓这类），
+// 且给「设置页有个按钮能装上 PS7」的虚假预期。将来若真要移植解压链，
+// 正确做法是新增一条语义明确的 `pwsh:install` 通道，而不是复活本条。
