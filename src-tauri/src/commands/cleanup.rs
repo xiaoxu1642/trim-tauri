@@ -89,6 +89,16 @@ const RULES_UPDATE_URLS: [&str; 3] = [
 /// 可删文件清单防呆上限（D13）
 const PLAN_CAP_PER_ITEM: usize = 100_000;
 const PLAN_CAP_TOTAL: usize = 1_000_000;
+/// 执行侧清理项条数硬上限（审查 v2-L3）
+///
+/// 结论先说：执行链**不是无界**的 —— `cleanup_execute` 只认最近一次扫描快照里的项，
+/// 而扫描侧已有 `PLAN_CAP_PER_ITEM` / `PLAN_CAP_TOTAL` 防呆；这里再卡一道条数上限，
+/// 于是「一次能删多少」的边界是**显式常量**而不是埋在判断里的 500。
+/// 未做的事：总字节数上限**没有加**——那会拒绝合法的大清理（几十 GB 缓存一次清完是
+/// 正常用法），属产品取舍，需拍板后再动；当前靠 `RULES_MAX_SIZE` 拦的是**规则文件**体积，
+/// 与被清理内容的体积不是一回事，别混为一谈。
+const EXECUTE_MAX_ITEMS: usize = 500;
+
 /// 占用检测防呆上限
 const PLAN_LOCK_CAP: usize = 20_000;
 /// 执行/明细的 PS 超时（对照 main.js 1357 / 1531）
@@ -527,7 +537,7 @@ fn path_resolve(p: &str) -> String {
 /// 对照 `validateSnapshotItems`：全部命中本窗口快照且 path 未被改写才放行
 fn validate_snapshot_items(items: Option<&Value>, snapshot: &HashMap<String, Value>) -> Option<Vec<Value>> {
     let arr = items?.as_array()?;
-    if arr.is_empty() || arr.len() > 500 {
+    if arr.is_empty() || arr.len() > EXECUTE_MAX_ITEMS {
         return None;
     }
     let mut out = Vec::with_capacity(arr.len());
@@ -1509,6 +1519,31 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
 
 // ==================== 规则在线更新（HTTP 传输层为唯一 TODO 点） ====================
 
+/// 从覆盖配置的 `urls` 里挑出 https 源，返回 `(接受, 被拒)`（审查 v2-L4）
+///
+/// 自定义源此前 `http://` 与 `https://` 一并接受。内容虽有 ed25519 验签兜底（篡改过不了签），
+/// 但明文 HTTP 还会把自定义请求头（可能含 Authorization / 私有镜像 token）暴露在链路上，
+/// 且中间人可以整段替换响应做成「全部源失败」的拒绝服务。纵深原则：传输层只认 https。
+/// 被拒的源由调用方逐条写日志——不让用户以为「配了但没生效」却无从发现。
+/// 拆成纯函数是为了可测：判定面（哪些留下、哪些被拒）不依赖数据目录与磁盘。
+fn pick_https_urls(cfg: &Value) -> (Vec<String>, Vec<String>) {
+    let mut accepted: Vec<String> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+    let Some(arr) = cfg.get("urls").and_then(|v| v.as_array()) else {
+        return (accepted, rejected);
+    };
+    for u in arr.iter().filter_map(|v| v.as_str()) {
+        if u.to_ascii_lowercase().starts_with("https://") {
+            if accepted.len() < 10 {
+                accepted.push(u.to_string());
+            }
+        } else {
+            rejected.push(u.to_string());
+        }
+    }
+    (accepted, rejected)
+}
+
 /// 更新源覆盖配置（对照 loadRulesUpdateOverride）：数据目录 `update-source.json`
 fn load_rules_update_override() -> Option<(Vec<String>, Vec<(String, String)>)> {
     let file = data_rules_dir().join("update-source.json");
@@ -1517,18 +1552,13 @@ fn load_rules_update_override() -> Option<(Vec<String>, Vec<(String, String)>)> 
     if !cfg.is_object() {
         return None;
     }
-    let urls: Vec<String> = cfg
-        .get("urls")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|u| u.as_str())
-                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
-                .take(10)
-                .map(|u| u.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+    let (urls, rejected) = pick_https_urls(&cfg);
+    for u in rejected {
+        log::write_log(
+            "warn",
+            &format!("规则库自定义源不是 https，已拒绝使用: {u}"),
+        );
+    }
     let mut headers: Vec<(String, String)> = Vec::new();
     if let Some(obj) = cfg.get("headers").and_then(|v| v.as_object()) {
         for (k, v) in obj {
@@ -1877,6 +1907,46 @@ pub async fn cleanup_check_rules_version<R: tauri::Runtime>(window: WebviewWindo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 审查 v2-L4：自定义规则源只认 https —— 明文 http 与非法协议一律进「被拒」，
+    /// 且大小写不敏感（`HTTPS://` 也要认）。
+    #[test]
+    fn custom_rules_source_is_https_only() {
+        let cfg = json!({
+            "urls": [
+                "https://example.com/rules.json",
+                "HTTPS://mirror.example.org/r.json",
+                "http://plain.example.net/r.json",
+                "ftp://nope/r.json",
+                "rules.json"
+            ]
+        });
+        let (accepted, rejected) = pick_https_urls(&cfg);
+        assert_eq!(
+            accepted,
+            vec![
+                "https://example.com/rules.json".to_string(),
+                "HTTPS://mirror.example.org/r.json".to_string()
+            ],
+            "https 源必须全部保留（大小写不敏感）: {accepted:?}"
+        );
+        assert_eq!(
+            rejected,
+            vec![
+                "http://plain.example.net/r.json".to_string(),
+                "ftp://nope/r.json".to_string(),
+                "rules.json".to_string()
+            ],
+            "非 https 源必须全部被拒: {rejected:?}"
+        );
+    }
+
+    /// 缺 `urls`（或不是数组）→ 两个列表都空，不许回退到内置源之外的隐式行为。
+    #[test]
+    fn custom_rules_source_missing_urls_is_empty() {
+        let (accepted, rejected) = pick_https_urls(&json!({ "headers": {} }));
+        assert!(accepted.is_empty() && rejected.is_empty());
+    }
 
     /// 首个差异的定位信息（行号 + 两侧原文片段）
 

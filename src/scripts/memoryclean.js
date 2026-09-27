@@ -31,7 +31,9 @@
     // N1（2026-09-14 重复点审查）：原「顽固软件专杀」与「电脑优化中心 - 顽固软件策略专杀」
     // 合并为同一张「顽固软件治理」卡片，分两层：勾选 /「立即结束进程」= 一次性杀进程；
     // 「阻止开机自启」= 常驻服务改手动 + 删 WPS 更新任务（持久，不提供自动还原）。
-    { id: 'stubbornKill', name: '顽固软件治理', risk: 'medium', checked: false, kind: 'stubborn',
+    // 审查 v2-M1：风险档位由 medium 升为 high —— 这条会按进程名批量结束系统里的
+    // 目标进程（含前台），未保存的文档/渲染工程会直接丢失，标中风险会误导用户。
+    { id: 'stubbornKill', name: '顽固软件治理', risk: 'high', checked: false, kind: 'stubborn',
       desc: '两层处理：①「立即结束进程」一次性结束 MuMu 模拟器 / 网易 UU 远程 / 抖音 / 剪映 / WPS 金山办公 / 微软电脑管家 的后台常驻与守护进程（含前台进程，请先保存工作）；②「阻止开机自启」把这些软件的后台服务改为手动启动，并删除 WPS 更新计划任务、关闭其自动升级（持久生效，不提供自动还原）' }
   ];
 
@@ -353,6 +355,19 @@
       window.app?.toast('warning', '预览模式不支持清理顽固软件');
       return;
     }
+    // 审查 v2-M1：这条链路会结束前台进程（未保存的文档、渲染工程、游戏进度会丢），
+    // 此前点「立即结束进程」是直接执行、无任何二次确认，与项目危险确认纪律不符。
+    // 确认放在本函数内而非 runClean 里：卡片按钮与「开始清理」两条入口共用同一道闸。
+    const ok = await window.app?.confirmDanger?.(
+      '结束顽固软件进程',
+      '将结束 MuMu 模拟器 / 网易 UU 远程 / 抖音 / 剪映 / WPS 金山办公 / 微软电脑管家 的后台常驻与守护进程。\n\n' +
+      '注意：同名进程会被一并结束，可能包含你正在使用的前台窗口，未保存的文档、剪辑工程与游戏进度将丢失。\n' +
+      '已保存好工作内容后再继续。',
+      '仍然结束',
+      '取消',
+      '此操作不可撤销，请先保存所有工作内容。'
+    );
+    if (!ok) return;
     window.app?.toast('info', '正在专杀顽固软件后台进程…');
     try {
       const resp = await window.api.memory.stubbornKill();
@@ -362,14 +377,28 @@
         if (elevated) window.app?.toast('info', '已获得管理员权限，请重新点击「一键专杀」');
         return;
       }
-      // 部分成功：后端在 ok_count>0 时即 success=true；这里兜底——只要 data 里有 results，就逐项展示
-      if (resp && resp.data && Array.isArray(resp.data.results)) {
+      // 回执对账（本轮附带修正）：后端 `stubborn_kill` 返回的是
+      // { killed / failed / skipped / skippedDetail / leftover }，**没有 results 字段**，
+      // 而这里原本判 `Array.isArray(resp.data.results)` —— 分支永远进不去，杀完了也弹
+      // 「专杀失败」。改成按 data 对象判存在，逐字段读。
+      if (resp && resp.data) {
         const d = resp.data;
         const killed = Number(d.killed) || 0;
         const failed = Number(d.failed) || 0;
+        const skipped = Number(d.skipped) || 0;
         const leftover = Array.isArray(d.leftover) ? d.leftover : [];
-        window.app?.toast('success', `顽固软件专杀完成：已结束 ${killed} 个进程` + (failed ? `，${failed} 个失败` : '') + (leftover.length ? `，仍有残留 ${leftover.join('、')}` : ''));
-        window.app?.log('info', `顽固软件专杀：已结束 ${killed} 个进程，失败 ${failed} 个，剩余 ${leftover.join('、') || '无'}`);
+        const skippedDetail = Array.isArray(d.skippedDetail) ? d.skippedDetail : [];
+        const summary = `顽固软件专杀完成：已结束 ${killed} 个进程`
+          + (failed ? `，${failed} 个失败` : '')
+          + (leftover.length ? `，仍有残留 ${leftover.join('、')}` : '');
+        // 审查 v2-M1：被路径判定跳过的进程必须被看见，不能表现为「静默成功 0 个」
+        if (skipped > 0) {
+          window.app?.toast('warning', `${summary}；${skipped} 个同名进程不在预期安装目录已跳过`);
+          window.app?.log('warn', `顽固软件专杀跳过 ${skipped} 个同名进程：${skippedDetail.join('；')}`);
+        } else {
+          window.app?.toast('success', summary);
+        }
+        window.app?.log('info', `顽固软件专杀：已结束 ${killed} 个进程，失败 ${failed} 个，跳过 ${skipped} 个，剩余 ${leftover.join('、') || '无'}`);
         return;
       }
       throw new Error((resp && resp.message) || '专杀失败');
@@ -405,8 +434,8 @@
         if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行本操作');
         return;
       }
-      // 部分成功：后端在 ok_count>0 时即 success=true；这里兜底——只要 data 里有 results，就逐项展示
-      if (resp && resp.data && Array.isArray(resp.data.results)) {
+      // 同 stubbornKill 的回执对账修正：后端 stubborn_block 也没有 results 字段
+      if (resp && resp.data) {
         const d = resp.data;
         const svcs = Array.isArray(d.services) ? d.services : [];
         const tasks = Array.isArray(d.tasks) ? d.tasks : [];

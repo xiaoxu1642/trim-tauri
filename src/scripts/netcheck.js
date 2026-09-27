@@ -1,11 +1,14 @@
 // netcheck.js - 网络检测（v3.0）
-// 6 项只读检测：单脚本一次采集（主进程），前端逐项揭示还原「逐项扫描」观感；
+// 6 项只读检测：单次 IPC 一次采集（主进程原生实现 `native::netcheck_status`，S3 已无 PS 回退），
+// 前端逐项揭示还原「逐项扫描」观感；
 // 异常项展示原因 + 证据 + 修复建议；带修复动作的项提供「一键修复」
 // （白名单动作 id → 主进程固定命令，红色二次确认，需管理员时走 UAC 提权握手）。
 (function () {
   'use strict';
 
-  // 检测项元数据（名称/一句话说明），id 与 netcheck-scripts.js 的输出一一对应
+  // 审查 v2-L9：这里原写「id 与 netcheck-scripts.js 的输出一一对应」，而该脚本已随
+  // S3（PS → Rust 原生）迁移删除，指向不存在的文件会让人去错地方对字段。
+  // 真源是后端 `native::netcheck_status` 回传的 items（键名与本表一致）。
   const ITEM_META = {
     adapter: { name: '网络硬件配置', desc: '网卡是否存在、是否被禁用' },
     ipconfig: { name: '网络连接配置', desc: '活动网卡的有效 IPv4 与默认网关' },

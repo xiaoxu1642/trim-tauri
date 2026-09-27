@@ -320,9 +320,14 @@ pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Optio
 // ==================== memory:stubborn-kill ====================
 
 /// memory:stubborn-kill — 顽固软件专杀（需管理员，30s 超时）
+///
+/// 审查 v2-H2：档位由 `guard_readonly`（放行全部五个应用窗口）升为 `MAIN`。
+/// 它会批量 `TerminateProcess` 系统里所有匹配进程，后端不校验任何前端确认值
+/// （确认只存在于渲染层），因此档位必须表达「只允许主窗」，不能依赖
+/// 「子窗恰好没加载 memoryclean.js」这种巧合。
 #[tauri::command]
 pub async fn memory_stubborn_kill<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     // M-3：批量结束进程属特权操作，无权限直接返回 needAdmin，由渲染层触发提权
     if !sysinfo::is_admin() {
         return Ok(json!({
@@ -333,7 +338,22 @@ pub async fn memory_stubborn_kill<R: tauri::Runtime>(window: WebviewWindow<R>) -
     }
     // S3：纯 Rust 原生
     match tauri::async_runtime::spawn_blocking(native::stubborn_kill).await {
-        Ok(Ok(data)) => Ok(json!({ "success": true, "data": data, "engine": "rust" })),
+        Ok(Ok(data)) => {
+            // 审查 v2-M1：被路径判定跳过的进程必须留痕，不能静默表现为「成功 0 个」。
+            let skipped = data.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0);
+            if skipped > 0 {
+                let detail = data
+                    .get("skippedDetail")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("；"))
+                    .unwrap_or_default();
+                log::write_log(
+                    "warn",
+                    &format!("顽固软件专杀跳过 {skipped} 个同名进程（镜像路径不在预期安装目录）：{detail}"),
+                );
+            }
+            Ok(json!({ "success": true, "data": data, "engine": "rust" }))
+        }
         Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生专杀失败: {e}") })),
         Err(e) => Ok(json!({ "success": false, "message": format!("专杀任务异常: {e}") })),
     }
@@ -344,9 +364,11 @@ pub async fn memory_stubborn_kill<R: tauri::Runtime>(window: WebviewWindow<R>) -
 /// memory:stubborn-block — 顽固软件阻止开机自启（需管理员，60s 超时）
 ///
 /// 持久化策略（改服务启动类型 / 删更新任务），不提供自动还原。
+///
+/// 审查 v2-H2：与 `memory_stubborn_kill` 同为高危且仅主窗使用，档位升为 `MAIN`。
 #[tauri::command]
 pub async fn memory_stubborn_block<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     if !sysinfo::is_admin() {
         return Ok(json!({
             "success": false,

@@ -344,6 +344,47 @@ fn subwindow_cannot_request_elevation() {
     }
 }
 
+/// 审查 v2-H2：顽固软件治理的两条命令此前挂 `guard_readonly`（放行全部五个应用窗口），
+/// 而 `tauri-api.js` 在所有窗口加载 —— 子窗一旦被注入就能直接结束系统进程 / 改服务启动类型，
+/// 且后端不校验任何前端确认值（stubborn_kill 前端原本连确认都没有）。档位必须是主窗专属。
+#[test]
+fn subwindow_cannot_call_stubborn_commands() {
+    for label in ["peripheral", "preview", "processManager", "models"] {
+        for cmd in ["memory_stubborn_kill", "memory_stubborn_block"] {
+            let w = window_with_label(label);
+            let text = invoke_text(&w, cmd, json!({}));
+            assert!(
+                text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 必须被拒（v2-H2：主窗专属高危通道），回执 {text}"
+            );
+        }
+    }
+}
+
+/// 主窗调用不得被档位拒杀（防「升档升过头」把功能锁死）：
+/// 非管理员时应在档位之后落到 needAdmin，而不是来源校验失败。
+#[test]
+fn main_window_reaches_stubborn_commands() {
+    // 管理员身份下这两条命令会**真的**结束进程 / 改服务启动类型并删计划任务，
+    // 测试机不做真实执行 —— 该分支如实标注为未覆盖（真机验收项）。
+    if trim_tauri_lib::engine::sysinfo::is_admin() {
+        eprintln!("⚠ main_window_reaches_stubborn_commands 跳过：当前为管理员权限，正向调用会造成真实系统变更");
+        return;
+    }
+    for cmd in ["memory_stubborn_kill", "memory_stubborn_block"] {
+        let w = main_window();
+        let text = invoke_text(&w, cmd, json!({}));
+        assert!(
+            !text.contains("IPC 来源校验失败"),
+            "主窗调 {cmd} 不得被档位拒杀，回执 {text}"
+        );
+        assert!(
+            text.contains("needAdmin") || text.contains("killed") || text.contains("failedCount"),
+            "主窗调 {cmd} 应越过档位进入命令体（needAdmin 或结果回执），回执 {text}"
+        );
+    }
+}
+
 /// 预览窗调 `fileclean_delete_file` 不得被档位拒杀（M2）：
 /// 没有扫描槽时在 `in_scope` 处返回「不在扫描范围内」，这一层才是真闸门。
 #[test]

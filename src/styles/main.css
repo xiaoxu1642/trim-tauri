@@ -6745,7 +6745,11 @@ body.pv-window {
 .rt-badge.warn { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
 .rt-badge.fail { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .rt-badge.info { color: var(--fg-secondary); }
-.rt-badge.scanning { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+/* v2-U1：染底浓度 6% 而非 8% —— 8% 时「--accent 前景 / accent 染底」仅 4.47:1 未达 AA，
+   降到 6% 后 4.59:1。同族还有 .maint-tab.active .maint-tab-count / .maint-status-running /
+   .checkup-btn:hover（accent 6%）与 .checkup-btn-ignore:hover（--fg-tertiary 8%），
+   改回更高浓度会被 tools/check-contrast.mjs 判红。 */
+.rt-badge.scanning { color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 .rt-item-evidence {
   margin-top: 10px;
   padding-top: 10px;
@@ -7165,7 +7169,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   color: var(--fg-tertiary);
 }
 .maint-tab.active .maint-tab-count {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
   color: var(--accent);
 }
 
@@ -7285,7 +7289,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   padding: 0 7px;
   border-radius: var(--radius-btn);
 }
-.maint-status-running { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.maint-status-running { color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .maint-status-ok { color: var(--success); background: rgba(var(--success-rgb), 0.14); }
 .maint-status-warn { color: color-mix(in srgb, var(--warning) 80%, #000); background: rgba(var(--warning-rgb), 0.14); }
 .maint-status-error { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
@@ -8777,14 +8781,14 @@ body[data-preset-bg] .layout {
   cursor: pointer;
   transition: background-color var(--duration-fast) var(--ease-standard);
 }
-.checkup-btn:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.checkup-btn:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .checkup-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .checkup-btn-ignore {
   border-color: var(--border-default);
   background: transparent;
   color: var(--fg-tertiary);
 }
-.checkup-btn-ignore:hover { background: color-mix(in srgb, var(--fg-tertiary) 10%, transparent); }
+.checkup-btn-ignore:hover { background: color-mix(in srgb, var(--fg-tertiary) 8%, transparent); }
 .checkup-restore-link {
   font-size: var(--fs-meta);
   flex: none;

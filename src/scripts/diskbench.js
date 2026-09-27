@@ -260,7 +260,15 @@
 
     // 清空全部
     $('benchHistoryClear')?.addEventListener('click', async () => {
-      const ok = await window.app?.confirm('清空历史记录', '确定要删除全部测试记录吗？此操作不可恢复。', '清空');
+      // 审查 v2-L6：清空全部记录是不可恢复的删除操作，原先用普通 confirm（无红色危险
+      // 样式）。改走 confirmDanger（签名是位置参数，不是对象 + onOk）。
+      const ok = await window.app?.confirmDanger?.(
+        '清空测速历史',
+        '确定要删除全部测试记录吗？此操作不可恢复。',
+        '清空',
+        '取消',
+        '删除后无法从应用内恢复，历史图表将一并清空。'
+      );
       if (!ok) return;
       try {
         await window.api.benchHistory.clear();

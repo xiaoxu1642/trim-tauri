@@ -342,7 +342,11 @@
       onRequestClose: () => {
         // 下载中点关闭/X/Esc 等同显式取消，避免弹窗关了下载仍偷跑
         if (modalKind === 'downloading') {
-          try { window.api.updater.cancelDownload(); } catch (_) {}
+          // 审查 v2-L8：`cancelDownload` 是异步的，原同步 try/catch 抓不到 reject；
+          // 取消失败意味着下载仍在后台跑，必须让用户知道，不能静默。
+          Promise.resolve(window.api.updater.cancelDownload()).catch((err) => {
+            window.app?.toast?.('warning', `取消下载失败：${(err && err.message) || err}`);
+          });
         }
       },
       onClose: () => { ctrl = null; modalKind = ''; }
@@ -381,7 +385,8 @@
         else if (act === 'retry') run(manualCheck(), '检查更新');
         else if (act === 'releases') {
           // v3.6.5 M1-1：手动下载出口（复用既有 open-external，主进程侧已强制 https）
-          try { window.api.openExternal(RELEASES_URL); } catch (_) {}
+          // 审查 v2-L8：同样走 `run` 汇到 error 回流，不另开静默分支
+          run(window.api.openExternal(RELEASES_URL), '打开下载页');
         }
         else if (act === 'later' || act === 'close') closeModal();
       } catch (err) { /* IPC 异常走 error 状态回流，不在按钮回调里抛 */ }

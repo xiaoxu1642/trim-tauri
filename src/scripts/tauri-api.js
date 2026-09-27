@@ -726,8 +726,12 @@
       '  display:flex;align-items:center;justify-content:center;padding:0;color:currentColor;',
       '  font-size:10px;line-height:1;opacity:.72;transition:background .12s ease,opacity .12s ease;}',
       '.tauri-caption-btn svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:1.4;}',
-      '.tauri-caption-btn:hover{background:rgba(0,0,0,.07);opacity:1;}',
-      '.tauri-caption-btn[data-act=close]:hover{background:#c42b1c;color:#fff;opacity:1;}',
+      // 审查 v2-L5：原先写的是 `rgba(0,0,0,.07)` 与 `#c42b1c` / `#fff` 三个字面色值 ——
+      // 既不随主题走（暗色下 7% 黑的 hover 几乎看不见），白字也违反「实底语义色前景必须
+      // 走 token」的约定。改成设计系统既有 token：hover 底用卡片悬停底，关闭键用 danger 实底
+      // + 规定的实底前景（暗/亮两主题对比度均已验）。
+      '.tauri-caption-btn:hover{background:var(--bg-card-hover);opacity:1;}',
+      '.tauri-caption-btn[data-act=close]:hover{background:var(--danger);color:var(--danger-text);opacity:1;}',
       '.tauri-caption-btn[data-act=maximize] .tauri-cap-restore{display:none;}',
       'body.tauri-maximized .tauri-caption-btn[data-act=maximize] .tauri-cap-max{display:none;}',
       'body.tauri-maximized .tauri-caption-btn[data-act=maximize] .tauri-cap-restore{display:block;}',

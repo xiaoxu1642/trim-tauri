@@ -838,8 +838,19 @@
     document.getElementById('btnUsageGuide')?.addEventListener('click', showUsageGuide);
     document.getElementById('btnUsageClose')?.addEventListener('click', closeUsageGuide);
     // 批次：外部链接（GitHub 主页）—— 走受控 IPC，主进程校验 https
-    document.getElementById('btnGitHub')?.addEventListener('click', () => {
-      try { window.api?.app?.openExternal('https://github.com/xiaoxu1642/Trim'); } catch (_) {}
+    // 审查 v2-L8：`openExternal` 返回 Promise，原 `try { ... } catch (_) {}` 只抓同步异常，
+    // reject 会静默落到全局 unhandledrejection（只记日志不弹 toast），用户点了没反应。
+    // 改成 await + 显式失败反馈，通道缺席也要说清。
+    document.getElementById('btnGitHub')?.addEventListener('click', async () => {
+      if (typeof window.api?.app?.openExternal !== 'function') {
+        window.app?.toast?.('warning', '当前环境不支持打开外部链接');
+        return;
+      }
+      try {
+        await window.api.app.openExternal('https://github.com/xiaoxu1642/Trim');
+      } catch (e) {
+        window.app?.toast?.('error', '打开链接失败：' + (e && e.message ? e.message : e));
+      }
     });
     // v3.1.0：123 云盘备用下载渠道——先复制提取码（剪贴板写入需窗口在前台，须先于 openExternal）再打开链接
     document.getElementById('btn123Pan')?.addEventListener('click', async () => {
@@ -849,7 +860,16 @@
       } catch (e) {
         window.app?.toast?.('warning', '提取码复制失败，请在网盘页手动输入 1642');
       }
-      try { window.api?.app?.openExternal('https://1813260438.share.123pan.cn/123pan/AzxUVv-APFIh?pwd=1642#'); } catch (_) {}
+      // 同上（审查 v2-L8）：openExternal 的失败必须显式反馈，不静默吞掉
+      if (typeof window.api?.app?.openExternal === 'function') {
+        try {
+          await window.api.app.openExternal('https://1813260438.share.123pan.cn/123pan/AzxUVv-APFIh?pwd=1642#');
+        } catch (e) {
+          window.app?.toast?.('error', '打开网盘链接失败：' + (e && e.message ? e.message : e));
+        }
+      } else {
+        window.app?.toast?.('warning', '当前环境不支持打开外部链接');
+      }
     });
     const usageBackdrop = document.getElementById('usageBackdrop');
     usageBackdrop?.addEventListener('click', (e) => {

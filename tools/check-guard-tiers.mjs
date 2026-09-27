@@ -65,6 +65,10 @@ const MUST_MAIN = [
   'finder_delete',
   'maintenance_run',
   'memory_clean',
+  // v2-H2：两条顽固软件治理命令会批量结束进程 / 改服务启动类型 + 删计划任务，
+  // 后端不校验任何前端确认值，且只有主窗加载 memoryclean.js —— 必须锁为主窗档。
+  'memory_stubborn_block',
+  'memory_stubborn_kill',
   'netcheck_repair',
   'optimizer_backup_reg',
   'optimizer_create_restore',

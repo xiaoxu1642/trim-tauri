@@ -149,7 +149,17 @@
     modal.delBtn.addEventListener('click', async () => {
       if (!window.api?.fonts?.removeImported) { window.app?.toast('warning', '当前环境不支持删除字体'); return; }
       if (!fontList.some(f => f.imported)) return;
-      if (!window.confirm(`确定删除已导入字体「${importedFamily}」吗？\n本地副本将一并删除（不影响原始文件），界面将回退到 MiSans。`)) return;
+      // 审查 v2-M2：原先用原生 window.confirm，绕过统一危险确认（红色样式 + 默认焦点在取消）。
+      // 注意 confirmDanger 的签名是 (title, message, confirmText, cancelText, dangerHint)，
+      // **不是**对象 + onOk —— 按对象写法会把对象当成 title 且回调永不执行。
+      const ok = await window.app?.confirmDanger?.(
+        '删除已导入字体',
+        `确定删除已导入字体「${importedFamily}」吗？本地副本将一并删除（不影响原始文件），界面将回退到 MiSans。`,
+        '删除',
+        '取消',
+        '删除后无法从应用内恢复该字体副本。'
+      );
+      if (!ok) return;
       try {
         const resp = await window.api.fonts.removeImported();
         if (resp && resp.success) {

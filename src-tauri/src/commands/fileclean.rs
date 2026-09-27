@@ -22,7 +22,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use tauri::{Emitter, Runtime, WebviewWindow};
 
-use crate::engine::{delete_manifest, guard, log, paths};
+use crate::engine::{delete_manifest, guard, log, paths, protect};
 use crate::security;
 
 const MAX_FILES: usize = 2000;
@@ -478,6 +478,15 @@ pub async fn fileclean_delete_file<R: Runtime>(
         return json!({ "success": false, "message": "路径不在扫描范围内，已拒绝删除" });
     };
 
+    // 审查 v2-L2：此前只有 `in_scope`（扫描槽）一道闸，缺 AGENTS §3 要求的
+    // `is_path_protected` 纵深。扫描槽是「主窗那次扫到了什么」，受保护目录是「系统/用户
+    // 关键目录」——两者判定面不同（用户把扫描根指到受保护目录时，槽里也会装满这些路径），
+    // 因此不能互相替代。放在 in_scope 之后、删除之前。
+    if protect::is_path_protected(&file_path) {
+        log::write_log("warn", &format!("受保护路径，拒绝删除: {file_path}"));
+        return json!({ "success": false, "message": "受保护路径，已拒绝删除" });
+    }
+
     let is_file = std::fs::metadata(&file_path)
         .map(|m| m.is_file())
         .unwrap_or(false);
@@ -554,6 +563,11 @@ pub async fn fileclean_execute<R: Runtime>(
         let p = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
         if !in_scope(&scope, p) {
             return json!({ "success": false, "message": "包含不在扫描范围内的路径，已拒绝整批" });
+        }
+        // 审查 v2-L2：与 delete-file 同一口径，批量删除同样要过 is_path_protected 纵深
+        if protect::is_path_protected(p) {
+            log::write_log("warn", &format!("批量删除含受保护路径，拒绝整批: {p}"));
+            return json!({ "success": false, "message": "包含受保护路径，已拒绝整批" });
         }
         if std::fs::metadata(p).map(|m| !m.is_file()).unwrap_or(true) {
             return json!({ "success": false, "message": "包含非普通文件，已拒绝整批" });

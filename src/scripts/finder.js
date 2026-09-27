@@ -495,7 +495,13 @@
     });
     if (!ctrl) return;
     ctrl.footer.querySelector('[data-manifest-dir]').addEventListener('click', async () => {
-      try { await window.api.finder.openBackupDir(); } catch (e) {}
+      // 审查 v2-L8：原先 `catch (e) {}` 整条吞掉 —— 通道缺席或后端失败时用户点了
+      // 「打开清单目录」毫无反应，也不知该去哪找。失败必须显式反馈。
+      try {
+        await window.api.finder.openBackupDir();
+      } catch (e) {
+        window.app?.toast?.('error', '打开清单目录失败：' + (e && e.message ? e.message : e));
+      }
     });
     ctrl.footer.querySelector('[data-manifest-close]').addEventListener('click', () => ctrl.close());
   }

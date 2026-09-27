@@ -458,17 +458,139 @@ pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
     }
 }
 
-pub fn stubborn_kill() -> Result<Value, String> {
-    let targets: &[&str] = &[
-        "edrservice","douyin_guard","douyin","douyin_tray",
-        "gameviewer","gameviewerservice","gameviewerserver","gameviewerhealthd",
-        "mumunxmain","mumunxservice","mumuremoteservice","mumuremotebackend",
-        "mumuremotehealthd","vedetector","jianyingpro","jianyingprotray",
-        "wps","et","wpp","wpspdf","wpscloudsvr",
-        "mscpcmanager","mscpcmanagercore","mscpcmanagerservice",
+/// 顽固软件专杀的目标进程名（小写，不含 .exe）
+///
+/// ⚠️ 这张表**只做初筛**：命中名字之后还必须过 `stubborn_path_allowed` 的镜像路径判定，
+/// 名字本身不构成「可以杀」的充分条件（审查 v2-M1）。
+pub(crate) const STUBBORN_TARGETS: &[&str] = &[
+    "edrservice","douyin_guard","douyin","douyin_tray",
+    "gameviewer","gameviewerservice","gameviewerserver","gameviewerhealthd",
+    "mumunxmain","mumunxservice","mumuremoteservice","mumuremotebackend",
+    "mumuremotehealthd","vedetector","jianyingpro","jianyingprotray",
+    "wps","et","wpp","wpspdf","wpscloudsvr",
+    "mscpcmanager","mscpcmanagercore","mscpcmanagerservice",
+];
+
+/// 目录前缀归一：小写 + 以 `\` 结尾（否则 `C:\Program Files` 会误配 `C:\Program FilesX`）
+fn stubborn_norm_dir(p: &str) -> String {
+    let lower = p.trim().to_lowercase().replace('/', "\\");
+    if lower.is_empty() {
+        return String::new();
+    }
+    if lower.ends_with('\\') { lower } else { format!("{lower}\\") }
+}
+
+/// 专杀认可的「正规安装目录」根集合（小写、带尾部分隔符）
+///
+/// 为什么需要它：审查 v2-M1 —— 原实现只比对 `szExeFile` 的 exe stem，任何同名进程
+/// （用户自己在下载/桌面跑的绿色版、便携版、同名木马，甚至另一个正版前台实例）都会被
+/// `TerminateProcess` 干掉，未保存的文档、渲染工程与游戏进度直接丢失。
+/// 这里是 fail-closed：镜像路径读不到或不在集合内 → 跳过并记原因，**不退回按名杀**。
+pub(crate) fn stubborn_install_roots() -> Vec<String> {
+    let mut roots: Vec<String> = Vec::new();
+    for key in [
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "ProgramData",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            let r = stubborn_norm_dir(&v);
+            if !r.is_empty() {
+                roots.push(r);
+            }
+        }
+    }
+    // 装在非系统盘「Program Files」的软件（MuMu/剪映装在 D 盘很常见）：逐个盘符补齐，
+    // 只认 `X:\Program Files` 与 `X:\Program Files (x86)` 两档，不放开整个盘符。
+    for d in 'A'..='Z' {
+        let drive = format!("{d}:\\");
+        if std::path::Path::new(&drive).exists() {
+            roots.push(format!("{drive}Program Files\\").to_lowercase());
+            roots.push(format!("{drive}Program Files (x86)\\").to_lowercase());
+        }
+    }
+    roots
+}
+
+/// 明确拒绝的目录：即便名字命中，落在用户内容 / 临时 / 系统目录下的进程一律不杀
+pub(crate) fn stubborn_denied_roots() -> Vec<String> {
+    let mut denied: Vec<String> = Vec::new();
+    for key in ["TEMP", "TMP", "WINDIR", "SystemRoot"] {
+        if let Ok(v) = std::env::var(key) {
+            let r = stubborn_norm_dir(&v);
+            if !r.is_empty() {
+                denied.push(r);
+            }
+        }
+    }
+    let content_dirs = [
+        "desktop", "downloads", "documents", "pictures", "videos", "music", "onedrive",
     ];
+    for profile_key in ["USERPROFILE", "PUBLIC"] {
+        if let Ok(profile) = std::env::var(profile_key) {
+            let base = stubborn_norm_dir(&profile);
+            if base.is_empty() { continue; }
+            for seg in content_dirs {
+                denied.push(format!("{base}{seg}\\"));
+            }
+        }
+    }
+    denied
+}
+
+/// 镜像路径判定：允许安装目录内 且 不在拒绝目录内。
+///
+/// 纯函数（不碰 Win32），便于单测直接钉死「同名但路径不对的前台进程不被选中」。
+pub(crate) fn stubborn_path_allowed(
+    image_path: &str,
+    install_roots: &[String],
+    denied_roots: &[String],
+) -> bool {
+    let p = image_path.trim().to_lowercase().replace('/', "\\");
+    if p.is_empty() {
+        return false;
+    }
+    if denied_roots.iter().any(|r| !r.is_empty() && p.starts_with(r.as_str())) {
+        return false;
+    }
+    install_roots
+        .iter()
+        .any(|r| !r.is_empty() && p.starts_with(r.as_str()))
+}
+
+/// 取进程镜像全路径；取不到返回 `None`（受保护进程/权限不足/已退出）。
+///
+/// 调用方必须按 `None` → 跳过处理：拿不到路径就不得凭进程名下判断（审查 v2-M1）。
+fn query_process_image_path(pid: u32) -> Option<String> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            h,
+            windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(h);
+        if !ok {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+pub fn stubborn_kill() -> Result<Value, String> {
+    let install_roots = stubborn_install_roots();
+    let denied_roots = stubborn_denied_roots();
+    let self_pid = std::process::id();
     let mut killed = 0u32;
     let mut failed = 0u32;
+    let mut skipped: Vec<String> = Vec::new();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|_| "无法枚举进程".to_string())?;
         let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..std::mem::zeroed() };
@@ -477,14 +599,34 @@ pub fn stubborn_kill() -> Result<Value, String> {
             let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
             let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
             let stem = exe.to_lowercase();
-            let stem = stem.strip_suffix(".exe").unwrap_or(&stem);
-            if targets.contains(&stem) {
-                let pid = entry.th32ProcessID;
-                if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-                    if TerminateProcess(h, 1).is_ok() { killed += 1; } else { failed += 1; }
-                    let _ = CloseHandle(h);
-                } else { failed += 1; }
+            let stem = stem.strip_suffix(".exe").unwrap_or(&stem).to_string();
+            if !STUBBORN_TARGETS.contains(&stem.as_str()) { continue; }
+            let pid = entry.th32ProcessID;
+            if pid == 0 || pid == self_pid { continue; }
+            // 审查 v2-M1：只比进程名会把任何同名进程一并杀掉。先取镜像全路径——
+            // 取不到（受保护/权限不足）就跳过，绝不允许凭名字兜底。
+            let Some(image) = query_process_image_path(pid) else {
+                skipped.push(format!("{stem}.exe（PID {pid}）无法读取镜像路径，已跳过"));
+                continue;
+            };
+            // 镜像文件名必须与快照一致：防 PID 复用 / 进程已退出后名字被顶替
+            let img_stem = std::path::Path::new(&image)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if img_stem != stem {
+                skipped.push(format!("{stem}.exe（PID {pid}）镜像名与快照不一致（{image}），已跳过"));
+                continue;
             }
+            if !stubborn_path_allowed(&image, &install_roots, &denied_roots) {
+                skipped.push(format!("{stem}.exe（PID {pid}）不在预期安装目录（{image}），已跳过"));
+                continue;
+            }
+            if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                if TerminateProcess(h, 1).is_ok() { killed += 1; } else { failed += 1; }
+                let _ = CloseHandle(h);
+            } else { failed += 1; }
         }
         let _ = CloseHandle(snap);
     }
@@ -499,11 +641,142 @@ pub fn stubborn_kill() -> Result<Value, String> {
             let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
             let stem = exe.to_lowercase();
             let stem = stem.strip_suffix(".exe").unwrap_or(&stem).to_string();
-            if targets.contains(&stem.as_str()) && seen.insert(stem.clone()) { leftover.push(stem); }
+            if !STUBBORN_TARGETS.contains(&stem.as_str()) { continue; }
+            let pid = entry.th32ProcessID;
+            if pid == 0 || pid == self_pid { continue; }
+            // 与执行侧同一口径：只统计「确认在预期安装目录内」的残留，
+            // 避免把用户自己放在下载目录的同名进程报成「顽固软件清不掉」。
+            let Some(image) = query_process_image_path(pid) else { continue; };
+            if !stubborn_path_allowed(&image, &install_roots, &denied_roots) { continue; }
+            if seen.insert(stem.clone()) { leftover.push(stem); }
         }
         let _ = CloseHandle(snap);
     }
-    Ok(json!({"killed": killed, "failed": failed, "leftover": leftover}))
+    Ok(json!({
+        "killed": killed,
+        "failed": failed,
+        "skipped": skipped.len(),
+        "skippedDetail": skipped,
+        "leftover": leftover
+    }))
+}
+
+// ==================== 维护任务删目录前校验测试（审查 v2-L1 回归网） ====================
+
+#[cfg(test)]
+mod maint_reparse_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// 真实系统目录（及其到盘符根的整条链）必须放行 —— 防「为了防误删把功能废掉」。
+    /// search / wu 清理的目标目录正是这类固定系统路径。
+    #[test]
+    fn real_system_dirs_pass() {
+        for p in [
+            r"C:\Windows\System32",
+            r"C:\Windows\SoftwareDistribution",
+        ] {
+            assert!(
+                dir_delete_blocked(Path::new(p)).is_none(),
+                "真实系统目录不得被阻断: {p} — {:?}",
+                dir_delete_blocked(Path::new(p))
+            );
+        }
+    }
+
+    /// 属性读不到的路径（不存在 / 无权限）必须按拒绝处理：
+    /// 「查不到」不许等价于「安全」（fail-closed）。
+    #[test]
+    fn unreadable_path_is_refused() {
+        let r = dir_delete_blocked(Path::new(r"C:\TrimNoSuchDir-9f3a\DataStore"));
+        assert!(r.is_some(), "不存在的路径必须拒绝删除，实测: {r:?}");
+    }
+}
+
+// ==================== 顽固软件专杀选择器测试（审查 v2-M1 回归网） ====================
+
+#[cfg(test)]
+mod stubborn_kill_selector_tests {
+    use super::*;
+
+    fn roots() -> Vec<String> {
+        vec![
+            "c:\\program files\\".to_string(),
+            "c:\\program files (x86)\\".to_string(),
+            "d:\\program files\\".to_string(),
+            "c:\\users\\x\\appdata\\local\\".to_string(),
+        ]
+    }
+
+    fn denied() -> Vec<String> {
+        vec![
+            "c:\\windows\\".to_string(),
+            "c:\\users\\x\\downloads\\".to_string(),
+            "c:\\users\\x\\desktop\\".to_string(),
+            "c:\\users\\x\\appdata\\local\\temp\\".to_string(),
+        ]
+    }
+
+    /// 同名但躺在下载目录 / 桌面的绿色版、便携版（前台进程）必须被排除。
+    /// 这是 v2-M1 的核心危害：旧实现只看进程名，这种进程会被无条件 TerminateProcess。
+    #[test]
+    fn rejects_same_name_outside_install_root() {
+        for p in [
+            r"C:\Users\x\Downloads\wps.exe",
+            r"C:\Users\x\Desktop\portable\jianyingpro.exe",
+            r"D:\绿色版\douyin.exe",
+            r"C:\Windows\Temp\mumunxmain.exe",
+        ] {
+            assert!(
+                !stubborn_path_allowed(p, &roots(), &denied()),
+                "同名但路径不在安装目录，必须跳过: {p}"
+            );
+        }
+    }
+
+    /// 装在正规安装目录的目标进程必须仍然被选中（不能为了防误杀把功能整体废掉）。
+    #[test]
+    fn accepts_real_install_paths() {
+        for p in [
+            r"C:\Program Files\Kingsoft\WPS Office\ksomisc\wps.exe",
+            r"C:\Program Files (x86)\Microsoft PC Manager\MSPCManager.exe",
+            r"D:\Program Files\Netease\MuMuPlayer-12.0\MuMuNxMain.exe",
+            r"C:\Users\x\AppData\Local\JianyingPro\JianyingPro.exe",
+        ] {
+            assert!(
+                stubborn_path_allowed(p, &roots(), &denied()),
+                "正规安装目录内的目标必须命中: {p}"
+            );
+        }
+    }
+
+    /// 空路径 / 取不到镜像路径 → false（fail-closed，不许按名兜底）。
+    #[test]
+    fn empty_path_is_rejected() {
+        assert!(!stubborn_path_allowed("", &roots(), &denied()));
+        assert!(!stubborn_path_allowed("   ", &roots(), &denied()));
+    }
+
+    /// 拒绝目录优先级高于允许目录：`%LOCALAPPDATA%\Temp` 也在允许根内，仍须拒绝。
+    #[test]
+    fn denied_root_wins_over_install_root() {
+        assert!(!stubborn_path_allowed(
+            r"C:\Users\x\AppData\Local\Temp\wps.exe",
+            &roots(),
+            &denied()
+        ));
+    }
+
+    /// 目标清单只认声明过的名字，防止后人随手加名把 `explorer` 之类拖进来。
+    #[test]
+    fn target_list_is_declared_only() {
+        for n in ["wps", "jianyingpro", "mumunxmain", "mscpcmanager", "douyin"] {
+            assert!(STUBBORN_TARGETS.contains(&n), "目标清单应含 {n}");
+        }
+        for n in ["explorer", "cmd", "notepad", "trim"] {
+            assert!(!STUBBORN_TARGETS.contains(&n), "目标清单不得含 {n}");
+        }
+    }
 }
 
 
@@ -5481,6 +5754,31 @@ fn reg_import(reg_content: &str) -> bool {
     ok
 }
 
+/// 删除固定目录前的重解析点（junction / 符号链接）校验
+///
+/// 审查 v2-L1：`maint_run` 的 search / wu 两条会对**固定系统目录**做 `remove_dir_all`，
+/// 此前不查属性位。若目标或其任一上级被换成指向别处的 junction（误操作、软件搬家、
+/// 恶意替换都可能），`remove_dir_all` 会顺着链接把目标位置的内容删掉——「清缓存」
+/// 变成删数据。因此删前从自身到盘符根逐层查 `FILE_ATTRIBUTE_REPARSE_POINT`。
+///
+/// 返回 `Some(原因)` = 拒绝删除（含属性读不到：fail-closed，不许「查不到就当安全」）。
+pub(crate) fn dir_delete_blocked(path: &std::path::Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{GetFileAttributesW, FILE_ATTRIBUTE_REPARSE_POINT};
+    const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
+    // Path::ancestors() 自带「自身 → 逐级父目录 → 根」，正是要逐层查的链
+    for level in path.ancestors() {
+        let wide = wide_str_from_str(&level.to_string_lossy());
+        let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+        if attrs == INVALID_FILE_ATTRIBUTES {
+            return Some(format!("无法读取目录属性（{}），按拒绝处理", level.display()));
+        }
+        if attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Some(format!("{} 是重解析点（junction/符号链接），删除会波及链接目标", level.display()));
+        }
+    }
+    None
+}
+
 /// 维护命令执行（对应 maint_*.ps1，S3）
 ///
 /// 覆盖 18 个维护任务。返回 (success, output_message)。
@@ -5520,21 +5818,31 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             Ok((ok, if ok { "音频服务已重启".into() } else { "音频服务重启失败".into() }))
         }
         "search" => {
+            // 审查 v2-L1：删前校验放在**停服务之前** —— 校验不通过就整条不执行，
+            // 免得服务停了却什么也没清（用户只看到「搜索服务重启失败」）。
+            let idx = std::path::PathBuf::from(r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows");
+            if let Some(reason) = dir_delete_blocked(&idx) {
+                crate::engine::log::write_log("warn", &format!("维护：search 索引目录删除被拒 — {reason}"));
+                return Ok((false, format!("搜索索引目录未通过删除前校验，已取消：{reason}")));
+            }
             // 停止 WSearch，清空索引，启动
             let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", "WSearch"]).output();
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let idx = std::path::PathBuf::from(r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows");
             let _ = std::fs::remove_dir_all(&idx);
             let ok = run_cmd("sc", &["start", "WSearch"]);
             Ok((ok, if ok { "搜索服务已重启，索引将在后台重建".into() } else { "搜索服务重启失败".into() }))
         }
         "wu" => {
+            let cache = std::path::PathBuf::from(r"C:\Windows\SoftwareDistribution\DataStore");
+            if let Some(reason) = dir_delete_blocked(&cache) {
+                crate::engine::log::write_log("warn", &format!("维护：wu 缓存目录删除被拒 — {reason}"));
+                return Ok((false, format!("更新缓存目录未通过删除前校验，已取消：{reason}")));
+            }
             // 停止更新服务，清理缓存，启动
             for svc in ["wuauserv", "bits", "cryptsvc"] {
                 let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", svc]).output();
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let cache = std::path::PathBuf::from(r"C:\Windows\SoftwareDistribution\DataStore");
             let _ = std::fs::remove_dir_all(&cache);
             let mut ok = true;
             for svc in ["wuauserv", "bits", "cryptsvc"] {

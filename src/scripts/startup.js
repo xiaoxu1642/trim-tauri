@@ -14,10 +14,14 @@
   // 静默后台重扫在途标记，避免重复触发
   let silentScanning = false;
 
+  // 审查 v2-L5：这里原先给每项挂了 `color: '#16A34A' / '#D97706'` 两个离表 hex，而
+  // **全仓没有任何一处读取这个字段** —— 图标配色实际由 main.css 的
+  // `.startup-item-icon.reg/.folder/.task`（token + color-mix）决定。删掉死字段，
+  // 避免留下「改这里能换颜色」的假象（真正的单一真源是 main.css）。
   const SOURCE_META = {
-    registry: { label: '注册表', cls: 'reg', color: 'var(--accent)' },
-    folder: { label: '启动文件夹', cls: 'folder', color: '#16A34A' },
-    task: { label: '计划任务', cls: 'task', color: '#D97706' }
+    registry: { label: '注册表', cls: 'reg' },
+    folder: { label: '启动文件夹', cls: 'folder' },
+    task: { label: '计划任务', cls: 'task' }
   };
 
   function el(id) { return document.getElementById(id); }
