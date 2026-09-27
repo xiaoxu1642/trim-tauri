@@ -1,6 +1,6 @@
 [package]
 name = "trim-tauri"
-version = "0.2.2"
+version = "0.2.3"
 description = "Trim"
 authors = ["xiaoxu"]
 edition = "2021"
