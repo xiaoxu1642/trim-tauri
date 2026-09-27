@@ -8172,6 +8172,80 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
   gap: 8px;
 }
 
+/* ---------- P2 规模化浏览：清理页搜索与筛选栏（规则库最终优化方案 2026-09-27） ----------
+   只用既有 token；圆角走 btn 档（8px）；无过渡动画（prefers-reduced-motion 兼容，
+   也避免筛选交互出现动效延迟感）。 */
+.clean-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.clean-filter-bar .input-style {
+  height: 30px;
+  font-size: 12px;
+}
+.clean-filter-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 240px;
+  min-width: 200px;
+  max-width: 420px;
+  color: var(--fg-tertiary);
+}
+.clean-filter-search .input-style {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.clean-filter-search svg { flex: none; }
+.clean-filter-bar select.input-style {
+  flex: none;
+  min-width: 0;
+  width: auto;
+  padding: 5px 8px;
+}
+.clean-filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.clean-filter-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+}
+.clean-filter-clear {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.clean-filter-clear:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+.clean-filter-hint {
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+.clean-filter-empty {
+  padding: 32px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--fg-tertiary);
+}
+
 /* 系统概览：硬件信息标题行（标题 + 刷新按钮同行） */
 .overview-section-head {
   display: flex;

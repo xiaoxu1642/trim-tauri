@@ -702,7 +702,9 @@ pub fn resolve_rule_path(expr: &str) -> Option<String> {
 }
 
 // ==================== %ENV% 展开（对齐 Expand-EnvPath） ====================
-// %NAME% → 环境变量值；未定义或定义为空串时保持原文（便于在路径列直接看出配置问题）
+// %NAME% → 环境变量值；未定义或定义为空串时保持原文（便于在路径列直接看出配置问题）。
+// 本函数是全仓唯一的 %VAR% 展开实现（P0 统一，规则库最终优化方案 2026-09-27）：
+// src-tauri 执行侧的展开必须委托到这里，禁止再写第二份白名单展开器。
 pub fn expand_env_path(p: &str) -> String {
     let ch: Vec<char> = p.chars().collect();
     let mut out = String::with_capacity(p.len());
@@ -726,6 +728,27 @@ pub fn expand_env_path(p: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// 检测展开后残留的 %TOKEN%（fail-closed 判据，P0 规则库最终优化方案 2026-09-27）。
+///
+/// `expand_env_path` 对未定义/空值变量保持原文，所以「展开成功」不能默认成立——
+/// 扫描/执行两侧拿到展开结果后必须显式调用本函数：有残留即视为路径无效，
+/// 扫描侧跳过（不进可清理结果），执行侧必须上报跳过/失败原因，禁止伪装成「成功 0 删」。
+pub fn first_unexpanded_token(s: &str) -> Option<String> {
+    let ch: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    while i < ch.len() {
+        if ch[i] == '%' {
+            if let Some(j) = (i + 1..ch.len()).find(|&k| ch[k] == '%') {
+                if j > i + 1 {
+                    return Some(ch[i + 1..j].iter().collect());
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 // ==================== 文件系统基础判定 ====================
@@ -1500,6 +1523,16 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
                 continue;
             };
             if fp.is_empty() {
+                continue;
+            }
+            // P0 fail-closed（规则库最终优化方案 2026-09-27）：无法展开的路径不得进入
+            // 可清理结果。不再依赖「字面量 %TOKEN% 路径不存在」的隐式兜底——显式跳过并留痕，
+            // 日志带规则 id 与原始模板，供「扫描命中、执行 0 删」类问题对账。
+            if let Some(tok) = first_unexpanded_token(&expand_env_path(fp)) {
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {} fileKey 路径变量 %{tok}% 未解析，已跳过（模板 {fp}）",
+                    rule.get("id").and_then(|v| v.as_str()).unwrap_or("?")
+                ));
                 continue;
             }
             let pattern = fk.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");

@@ -732,16 +732,22 @@ fn extract_cmd_path(cmd: &str) -> String {
     c.to_string()
 }
 
-/// 展开环境变量（%VAR%）
+/// 展开环境变量（%VAR%）——委托给原生扫描器的唯一实现
+/// `trim_finder::cleanup_scan::expand_env_path`（P0 统一，规则库最终优化方案 2026-09-27）。
+///
+/// 为什么不再自己展开：旧白名单版按**字面大小写**做字符串替换，规则库里的
+/// `%WINDIR%`（大写）匹配不上白名单的 `"windir"` → 执行侧永远展不开，
+/// `expand_glob_dirs` 拿字面量路径去 read_dir → 0 文件、状态 ok，正是
+/// 「扫描命中、执行 0 删」的根因（printSpoolCache 实锤）。扫描侧用
+/// `env::var_os`，Windows 语义下大小写不敏感，从未出过这个问题。
 fn expand_env(s: &str) -> String {
-    let mut result = s.to_string();
-    // 简单展开常见变量
-    for var in ["APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "SystemRoot", "windir", "USERPROFILE", "PUBLIC"] {
-        if let Ok(val) = std::env::var(var) {
-            result = result.replace(&format!("%{var}%"), &val);
-        }
-    }
-    result
+    trim_finder::cleanup_scan::expand_env_path(s)
+}
+
+/// P0 fail-closed 判据：展开结果里残留 %TOKEN% 即路径无效。
+/// 统一走扫描器实现，避免执行侧再造一份残留检测（与 expand_env 同理）。
+fn first_unexpanded_token(s: &str) -> Option<String> {
+    trim_finder::cleanup_scan::first_unexpanded_token(s)
 }
 
 /// 读 StartupApproved blob，返回是否禁用（首字节 bit0=1）
@@ -6184,17 +6190,35 @@ pub fn cleanup_execute(
                 let _ = std::fs::create_dir_all(&backup_dir);
                 // 解析 + 存在性过滤（与 PS Measure-RegRule 同口径）
                 let mut parsed: Vec<(HKEY, String, Option<String>)> = Vec::new();
+                // P0 fail-closed：变量未解析的键不能混进「注册表项不存在」的 benign 结论
+                let mut reg_unresolved: Vec<String> = Vec::new();
                 for rk in reg_keys {
                     let path = rk.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     if path.is_empty() { continue; }
                     let expanded = expand_env(path);
+                    if let Some(tok) = first_unexpanded_token(&expanded) {
+                        reg_unresolved.push(format!("%{tok}%"));
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!(
+                                "cleanup_execute 规则 {id}：注册表路径变量 %{tok}% 未解析，该键已跳过（原始模板 {path}）"
+                            ),
+                        );
+                        continue;
+                    }
                     let Some((hive, rest)) = parse_reg_path(&expanded) else { continue; };
                     if !reg_key_exists(hive, &rest) { continue; }
                     let value = rk.get("value").and_then(|v| v.as_str()).map(|s| s.to_string());
                     parsed.push((hive, rest, value));
                 }
                 if parsed.is_empty() {
-                    details.push(json!({"id": id, "name": name, "status": "ok", "freed": 0, "message": "注册表项不存在，无需清理", "fileCount": 0}));
+                    let message = if reg_unresolved.is_empty() {
+                        "注册表项不存在，无需清理".to_string()
+                    } else {
+                        format!("路径变量 {} 未解析，未执行注册表清理", reg_unresolved.join("、"))
+                    };
+                    let status = if reg_unresolved.is_empty() { "ok" } else { "skip" };
+                    details.push(json!({"id": id, "name": name, "status": status, "freed": 0, "message": message, "fileCount": 0}));
                     continue;
                 }
                 // 逐键 export 备份
@@ -6272,6 +6296,8 @@ pub fn cleanup_execute(
 
         // 收集要删除的文件
         let mut files: Vec<(String, u64)> = Vec::new();
+        // P0 fail-closed：本条规则里展开失败的 %TOKEN%（变量名）清单
+        let mut unresolved: Vec<String> = Vec::new();
         if let Some(file_keys) = rule.get("fileKeys").and_then(|v| v.as_array()) {
             if !file_keys.is_empty() {
                 for fk in file_keys {
@@ -6280,6 +6306,18 @@ pub fn cleanup_execute(
                     let pattern = fk.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
                     let recurse = fk.get("recurse").and_then(|v| v.as_bool()).unwrap_or(true);
                     let expanded = expand_env(path);
+                    // P0 fail-closed（规则库最终优化方案 2026-09-27）：变量未解析的路径
+                    // 不参与枚举，也不能伪装成「成功 0 删」——记账后在结果里显式报 skip。
+                    if let Some(tok) = first_unexpanded_token(&expanded) {
+                        unresolved.push(format!("%{tok}%"));
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!(
+                                "cleanup_execute 规则 {id}：路径变量 %{tok}% 未解析，fileKey 已跳过（原始模板 {path}）"
+                            ),
+                        );
+                        continue;
+                    }
                     // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）；
                     // 展开后的每个实际目录仍过 cleanup_root_ok（reparse 判拒，双保险）
                     for base in expand_glob_dirs(&expanded) {
@@ -6340,19 +6378,26 @@ pub fn cleanup_execute(
         total_freed += freed;
         total_files += deleted;
 
-        let status = if failed == 0 {
-            if to_recycle { "recycle" } else { "ok" }
-        } else if deleted > 0 {
-            "partial"
+        // P0 fail-closed（规则库最终优化方案 2026-09-27）：存在未解析变量且一无所删时，
+        // 不得报「已清理 0 个文件、状态成功」——这正是「扫描命中、执行 0 删」静默失效的
+        // 结果形态，必须显式降为 skip 并把原因带给前端。部分成功时也要在 message 里留痕。
+        let (status, message) = if !unresolved.is_empty() && deleted == 0 && failed == 0 {
+            ("skip", format!("路径变量 {} 未解析，未执行清理", unresolved.join("、")))
         } else {
-            "fail"
-        };
-        let message = if to_recycle {
-            format!("待移入回收站（{} 个文件）", deleted)
-        } else if failed == 0 {
-            format!("已清理 {} 个文件", deleted)
-        } else {
-            format!("已清理 {} 个文件，{} 个被占用", deleted, failed)
+            let suffix = if unresolved.is_empty() {
+                String::new()
+            } else {
+                format!("；{} 未解析已跳过", unresolved.join("、"))
+            };
+            if to_recycle {
+                ("recycle", format!("待移入回收站（{} 个文件）{suffix}", deleted))
+            } else if failed == 0 {
+                ("ok", format!("已清理 {} 个文件{suffix}", deleted))
+            } else if deleted > 0 {
+                ("partial", format!("已清理 {} 个文件，{} 个被占用{suffix}", deleted, failed))
+            } else {
+                ("fail", format!("已清理 0 个文件，{} 个被占用{suffix}", failed))
+            }
         };
 
         details.push(json!({
@@ -6366,6 +6411,9 @@ pub fn cleanup_execute(
                 for fk in file_keys {
                     let path = fk.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     let expanded = expand_env(path);
+                    // P0 fail-closed：变量未解析时绝不 create_dir_all——否则会在进程
+                    // 工作目录下造出形如 `%WINDIR%\...` 的字面量垃圾目录树
+                    if first_unexpanded_token(&expanded).is_some() { continue; }
                     if !expanded.contains('*') && !expanded.is_empty() {
                         let _ = std::fs::create_dir_all(&expanded);
                     }
@@ -6568,5 +6616,54 @@ pub fn device_info() -> Result<Value, String> {
             "monitors": monitors,
             "memory": memory,
         }))
+    }
+}
+
+// ==================== P0 规则库引擎契约测试（规则库最终优化方案 2026-09-27） ====================
+
+#[cfg(test)]
+mod cleanup_engine_contract_tests {
+    use super::*;
+
+    /// 执行侧展开必须与扫描侧同源且大小写不敏感：`%WINDIR%`（大写）在旧白名单
+    /// 展开器下永远展不开（printSpoolCache 静默失效根因），统一实现后必须解析。
+    #[test]
+    fn expand_env_resolves_windir_case_insensitive() {
+        let out = expand_env(r"%WINDIR%\System32\spool\PRINTERS");
+        assert!(!out.contains('%'), "%WINDIR% 未展开: {out}");
+        assert!(
+            out.to_lowercase().ends_with(r"system32\spool\printers"),
+            "展开结果异常: {out}"
+        );
+    }
+
+    /// 方案 P0-2：内置规则可用的基础变量在展开器下必须可解析（有值时无残留）。
+    /// TEMP/TMP/PROGRAMDATA/SystemDrive 是后续扩库的最小变量集。
+    #[test]
+    fn expand_env_covers_baseline_tokens() {
+        for tok in ["TEMP", "TMP", "PROGRAMDATA", "SystemDrive", "LOCALAPPDATA", "APPDATA", "USERPROFILE", "WINDIR"] {
+            let out = expand_env(&format!(r"%{tok}%\probe"));
+            // 变量在测试机上必然有值（Windows 基础环境）；即便被清空，残留也必须能被
+            // first_unexpanded_token 显式识别，而不是静默当有效路径
+            if out.contains('%') {
+                assert!(
+                    first_unexpanded_token(&out).is_some(),
+                    "变量 {tok} 展开异常且未被发现: {out}"
+                );
+            }
+        }
+    }
+
+    /// 残留检测：未解析 token 必须被识别，普通路径不得误报。
+    #[test]
+    fn first_unexpanded_token_detects_residual() {
+        assert_eq!(
+            first_unexpanded_token(r"C:\x\%FAKE_TOKEN%\y").as_deref(),
+            Some("FAKE_TOKEN")
+        );
+        assert_eq!(first_unexpanded_token(r"C:\Windows\Temp"), None);
+        assert_eq!(first_unexpanded_token(""), None);
+        // 单个 % 不构成 token，不算残留
+        assert_eq!(first_unexpanded_token(r"C:\100%done"), None);
     }
 }

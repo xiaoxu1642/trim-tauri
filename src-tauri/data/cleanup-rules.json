@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "rulesVersion": 20260914,
+  "rulesVersion": 20260927,
   "groups": [
     {
       "key": "system",
@@ -19,15 +19,16 @@
               "pathPs": "$env:WINDIR + '\\Logs\\WindowsUpdate'",
               "evidence": "Windows Update 安装日志",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "updates",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -41,15 +42,16 @@
               ],
               "evidence": "Windows Update 下载缓存",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "updates",
               "nature": "updateResidual",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -59,15 +61,16 @@
               "pathPs": "$env:WINDIR + '\\SoftwareDistribution\\DeliveryOptimization'",
               "evidence": "更新分发缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "updates",
               "nature": "updateResidual",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -77,15 +80,16 @@
               "pathPs": "$env:WINDIR + '\\Performance\\WinSAT'",
               "evidence": "WinSAT 磁盘/图形评估缓存（HiBit 逆向新增）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "updates",
               "nature": "updateResidual",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -95,15 +99,16 @@
               "pathPs": "$env:PROGRAMDATA + '\\USOShared\\Logs'",
               "evidence": "Windows Update 会话日志（HiBit 逆向新增）",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "updates",
               "nature": "updateResidual",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -120,15 +125,16 @@
               "pathPs": "$env:PROGRAMDATA + '\\Microsoft\\Windows\\WER\\ReportArchive'",
               "evidence": "Windows 错误报告存档",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -138,15 +144,16 @@
               "pathPs": "$env:PROGRAMDATA + '\\Microsoft\\Diagnosis'",
               "evidence": "系统诊断预取数据",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -156,15 +163,16 @@
               "pathPs": "$env:WINDIR + '\\System32\\LogFiles'",
               "evidence": "系统/HTTPERR 等日志文件（HiBit 逆向新增，主要清理 HTTPERR 与 W3SVC 站点日志）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -174,15 +182,16 @@
               "pathPs": "$env:WINDIR + '\\Logs\\CBS'",
               "evidence": "Windows 组件安装与修复日志（CBS.log；原「电脑优化中心 - PCCleaner 深度清理」携带项，C1 整合，2026-09-14）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "trim/pccleaner",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -192,15 +201,16 @@
               "pathPs": "$env:WINDIR + '\\Logs\\DISM'",
               "evidence": "DISM 组件维护日志（dism.log；原「电脑优化中心 - PCCleaner 深度清理」携带项，C1 整合，2026-09-14）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "trim/pccleaner",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -210,15 +220,16 @@
               "pathPs": "$env:WINDIR + '\\debug'",
               "evidence": "Windows 调试输出目录（HiBit 逆向新增）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -228,15 +239,16 @@
               "pathPs": "$env:WINDIR + '\\Panther'",
               "evidence": "setupact/setuperr 安装日志与镜像部署残留（HiBit 逆向新增）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -246,15 +258,16 @@
               "pathPs": "$env:PROGRAMDATA + '\\Microsoft\\Windows\\WER\\ReportQueue'",
               "evidence": "待上报的 WER 错误报告队列（与 ReportArchive 配套，HiBit 逆向新增）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -264,15 +277,16 @@
               "pathPs": "$env:PROGRAMDATA + '\\Microsoft\\Windows Defender\\Scans\\History\\Results'",
               "evidence": "Defender 扫描历史",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/app",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -282,15 +296,16 @@
               "pathPs": "$env:WINDIR + '\\System32\\winevt\\Logs'",
               "evidence": "事件日志目录",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "logs",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -307,15 +322,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\Microsoft\\Terminal Server Client\\Cache'",
               "evidence": "远程桌面位图缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "caches",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -325,15 +341,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\Microsoft\\CLR_v4.0\\UsageLogs'",
               "evidence": "CLR 使用日志",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "caches",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -343,15 +360,16 @@
               "pathPs": "$env:WINDIR + '\\Prefetch'",
               "evidence": "Prefetch 预读",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "caches",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -362,7 +380,8 @@
               "fileKeys": [
                 {
                   "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer",
-                  "pattern": "thumbcache_*.db"
+                  "pattern": "thumbcache_*.db",
+                  "recurse": true
                 }
               ],
               "restartProcesses": [
@@ -373,15 +392,16 @@
               ],
               "evidence": "资源管理器缩略图缓存数据库。清理时会临时重启资源管理器",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "caches",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -391,7 +411,8 @@
               "fileKeys": [
                 {
                   "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer",
-                  "pattern": "iconcache_*.db"
+                  "pattern": "iconcache_*.db",
+                  "recurse": true
                 }
               ],
               "restartProcesses": [
@@ -408,8 +429,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -419,15 +442,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\Microsoft\\Windows\\INetCache'",
               "evidence": "系统级网页缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "caches",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -437,15 +461,16 @@
               "pathPs": "$env:WINDIR + '\\LiveKernelReports'",
               "evidence": "内核实时崩溃报告（HiBit 逆向新增）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "caches",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -462,15 +487,16 @@
               "pathPs": "$env:WINDIR + '\\WinSxS\\Temp'",
               "evidence": "组件服务临时",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "temps",
               "nature": "temp",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -480,15 +506,16 @@
               "pathPs": "$env:WINDIR + '\\WinSxS\\Temp\\PendingRename'",
               "evidence": "挂起重命名临时",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "temps",
               "nature": "temp",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -498,15 +525,16 @@
               "pathPs": "$env:TEMP",
               "evidence": "用户 TEMP",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "temps",
               "nature": "temp",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -516,15 +544,16 @@
               "pathPs": "$env:WINDIR + '\\System32\\DriverStore\\Temp'",
               "evidence": "驱动安装解压残留",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "temps",
               "nature": "temp",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -534,15 +563,16 @@
               "pathPs": "$env:WINDIR + '\\Temp'",
               "evidence": "系统级 TEMP（区别于用户 TEMP，HiBit 逆向新增）",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "temps",
               "nature": "temp",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -559,15 +589,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\CrashDumps'",
               "evidence": "应用崩溃 .dmp",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "dumps",
               "nature": "dump",
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -577,15 +608,16 @@
               "pathPs": "$env:WINDIR + '\\Minidump'",
               "evidence": "蓝屏 minidump",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "dumps",
               "nature": "dump",
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -612,8 +644,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -633,8 +667,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -655,8 +691,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/system",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -666,15 +704,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\Microsoft\\Windows\\INetCookies'",
               "evidence": "系统级 Cookie",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "history",
               "nature": "history",
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/cache",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -684,15 +723,16 @@
               "pathPs": "$env:APPDATA + '\\Microsoft\\Windows\\Recent'",
               "evidence": "最近使用文件的 .lnk 快捷方式（隐私清理，执行后自动重建目录）",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "system",
               "group": "history",
               "nature": "history",
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -715,8 +755,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/outdated",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -740,15 +782,16 @@
               "pathPs": "$env:APPDATA + '\\Tencent\\QQ\\Temp'",
               "evidence": "QQ 临时",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "app",
               "group": "im",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -765,15 +808,16 @@
               ],
               "evidence": "微信文件缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "app",
               "group": "im",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -793,15 +837,16 @@
               ],
               "evidence": "QQ 缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "app",
               "group": "im",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -817,8 +862,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "fileclean",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -834,8 +881,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "fileclean",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -860,15 +909,16 @@
               ],
               "evidence": "网易云音乐缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "app",
               "group": "media",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -886,15 +936,16 @@
               ],
               "evidence": "抖音缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "app",
               "group": "media",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -911,15 +962,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\Baidu\\BaiduNetdisk\\log'",
               "evidence": "百度网盘日志",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "app",
               "group": "netdisk",
               "nature": "log",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -942,8 +994,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "windows/outdated",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -958,7 +1012,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Office\\*\\OfficeFileCache"
+                  "path": "%LOCALAPPDATA%\\Microsoft\\Office\\*\\OfficeFileCache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -975,8 +1030,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -996,15 +1053,16 @@
               ],
               "evidence": "Steam 下载缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "app",
               "group": "game",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1019,7 +1077,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Steam\\htmlcache"
+                  "path": "%LOCALAPPDATA%\\Steam\\htmlcache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1033,8 +1092,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1049,7 +1110,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Epic Games Launcher\\Saved\\webcache"
+                  "path": "%LOCALAPPDATA%\\Epic Games Launcher\\Saved\\webcache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1063,8 +1125,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1086,16 +1150,20 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%APPDATA%\\Code\\Cache"
+                  "path": "%APPDATA%\\Code\\Cache",
+                  "recurse": true
                 },
                 {
-                  "path": "%APPDATA%\\Code\\CachedData"
+                  "path": "%APPDATA%\\Code\\CachedData",
+                  "recurse": true
                 },
                 {
-                  "path": "%APPDATA%\\Code\\Code Cache"
+                  "path": "%APPDATA%\\Code\\Code Cache",
+                  "recurse": true
                 },
                 {
-                  "path": "%APPDATA%\\Code\\GPUCache"
+                  "path": "%APPDATA%\\Code\\GPUCache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1109,8 +1177,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1125,10 +1195,12 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\JetBrains\\*\\caches"
+                  "path": "%LOCALAPPDATA%\\JetBrains\\*\\caches",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\JetBrains\\*\\log"
+                  "path": "%LOCALAPPDATA%\\JetBrains\\*\\log",
+                  "recurse": true
                 }
               ],
               "evidence": "JetBrains 系列 IDE 的索引缓存与日志（通配各产品版本目录）",
@@ -1139,8 +1211,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1155,7 +1229,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\npm-cache"
+                  "path": "%LOCALAPPDATA%\\npm-cache",
+                  "recurse": true
                 }
               ],
               "evidence": "npm 下载缓存（内容寻址校验，可安全清除）",
@@ -1166,8 +1241,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1182,7 +1259,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\pip\\cache"
+                  "path": "%LOCALAPPDATA%\\pip\\cache",
+                  "recurse": true
                 }
               ],
               "evidence": "pip 下载/构建缓存",
@@ -1193,8 +1271,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1209,7 +1289,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%USERPROFILE%\\.nuget\\packages"
+                  "path": "%USERPROFILE%\\.nuget\\packages",
+                  "recurse": true
                 }
               ],
               "evidence": "NuGet 全局包目录（删除后首次构建将自动重新还原）",
@@ -1220,8 +1301,164 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "apps",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
+              }
+            },
+            {
+              "id": "pnpmCache",
+              "name": "pnpm 包缓存（v6 遗留）",
+              "risk": "low",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\pnpm-cache"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\pnpm-cache",
+                  "recurse": true
+                }
+              ],
+              "evidence": "pnpm v6 及更早版本的下载缓存目录（v7 起迁移到 %LOCALAPPDATA%\\pnpm\\store）。内容可安全清除，下次安装依赖时重新下载。本机实测 87 MB。",
+              "recommended": false,
+              "domain": "app",
+              "group": "dev",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "pnpm/store-path",
+                "importedAt": "2026-09-27",
+                "reviewedAt": "2026-09-27"
+              }
+            },
+            {
+              "id": "nugetHttpCache",
+              "name": "NuGet HTTP 缓存",
+              "risk": "low",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\NuGet\\v3-cache"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\NuGet\\v3-cache",
+                  "recurse": true
+                }
+              ],
+              "evidence": "NuGet 的 HTTP 响应缓存（v3-cache），与全局包目录（.nuget\\packages，另条规则）相互独立。清除后还原包时重新下载，不影响已安装包。本机实测 300 MB。",
+              "recommended": false,
+              "domain": "app",
+              "group": "dev",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "microsoft/nuget/cache-layout",
+                "importedAt": "2026-09-27",
+                "reviewedAt": "2026-09-27"
+              }
+            },
+            {
+              "id": "cargoRegistryCache",
+              "name": "Cargo registry 缓存",
+              "risk": "medium",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%USERPROFILE%\\.cargo"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%USERPROFILE%\\.cargo\\registry\\cache",
+                  "recurse": true
+                },
+                {
+                  "path": "%USERPROFILE%\\.cargo\\registry\\src",
+                  "recurse": true
+                }
+              ],
+              "evidence": "cargo 的 registry 下载缓存（.crate 压缩包）与解压源码缓存。src 可由本机 cache 离线重建，cache 清除后重编译需重新下载。CARGO_HOME 自定义迁移的机器（如本机）不命中，detect 未命中时自动隐藏。删除代价与重建耗时相关，故定 medium。",
+              "recommended": false,
+              "domain": "app",
+              "group": "dev",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "cargo-book/cargo-home",
+                "importedAt": "2026-09-27",
+                "reviewedAt": "2026-09-27"
+              }
+            },
+            {
+              "id": "uvCache",
+              "name": "uv 包缓存",
+              "risk": "low",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\uv\\cache"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\uv\\cache",
+                  "recurse": true
+                }
+              ],
+              "evidence": "uv（Astral 的 Python 包管理器）默认缓存目录，官方提供 uv cache clean 同语义清理。清除后安装依赖时重新下载。本机实测存在（体积小，随使用增长）。",
+              "recommended": false,
+              "domain": "app",
+              "group": "dev",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "astral-sh/uv/cache",
+                "importedAt": "2026-09-27",
+                "reviewedAt": "2026-09-27"
+              }
+            },
+            {
+              "id": "codexRuntimesCache",
+              "name": "Codex CLI 运行时缓存",
+              "risk": "medium",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%USERPROFILE%\\.cache\\codex-runtimes"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%USERPROFILE%\\.cache\\codex-runtimes",
+                  "recurse": true
+                }
+              ],
+              "evidence": "OpenAI Codex CLI 存放在用户 .cache 下的运行时文件缓存。清除后下次启动 CLI 重新下载（可能达 GB 级），本机实测 1.3 GB。代价为重新下载流量与时间，故定 medium。",
+              "recommended": false,
+              "domain": "app",
+              "group": "dev",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "openai/codex-cli-runtimes",
+                "importedAt": "2026-09-27",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1250,19 +1487,24 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Network\\Cache"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Network\\Cache",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Cache"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Cache",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\GPUCache"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\GPUCache",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\DawnGraphiteCache"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\DawnGraphiteCache",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\DawnWebGPUCache"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\DawnWebGPUCache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1276,8 +1518,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1292,13 +1536,16 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Network\\Cache"
+                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Network\\Cache",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Cache"
+                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Cache",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\GPUCache"
+                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\GPUCache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1312,8 +1559,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1328,7 +1577,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%APPDATA%\\Tencent\\QQBrowser\\User Data\\*\\Cache"
+                  "path": "%APPDATA%\\Tencent\\QQBrowser\\User Data\\*\\Cache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1342,8 +1592,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1365,7 +1617,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Code Cache"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Code Cache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1379,8 +1632,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1395,7 +1650,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Media Cache"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Media Cache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1409,8 +1665,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1425,7 +1683,8 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Media Cache"
+                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Media Cache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1439,8 +1698,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1455,13 +1716,16 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles\\*\\cache2"
+                  "path": "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles\\*\\cache2",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles\\*\\startupCache"
+                  "path": "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles\\*\\startupCache",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles\\*\\shader-cache"
+                  "path": "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles\\*\\shader-cache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
@@ -1475,8 +1739,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1502,10 +1768,12 @@
               ],
               "fileKeys": [
                 {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Sync Data"
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Sync Data",
+                  "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Sync Data"
+                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Sync Data",
+                  "recurse": true
                 }
               ],
               "evidence": "由 Winapp2 云端浏览器同步缓存规则转换（Chrome/Edge Sync Data），仅清空目录内容，浏览器自动重建",
@@ -1516,8 +1784,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "browser",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1540,8 +1810,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "vendor-doc",
                 "ref": "windows/outdated",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1565,15 +1837,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\NVIDIA'",
               "evidence": "NVIDIA 编译着色器缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "gpu",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1583,15 +1856,16 @@
               "pathPs": "$env:PROGRAMDATA + '\\NVIDIA Corporation\\NV_Cache'",
               "evidence": "NVIDIA 全局安装缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "gpu",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1601,15 +1875,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\AMD'",
               "evidence": "AMD 着色器缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "gpu",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1619,15 +1894,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\Intel\\ShaderCache'",
               "evidence": "Intel 核显着色器缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "gpu",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1644,15 +1920,16 @@
               "pathPs": "$env:LOCALAPPDATA + '\\D3DSCache'",
               "evidence": "DX 着色器缓存",
               "recommended": true,
-              "deleteMode": "contents",
               "domain": "gfx",
               "group": "sysgfx",
               "nature": "cache",
               "regenerable": true,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "independent",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1676,15 +1953,16 @@
               "pathPs": "$env:WINDIR + '\\Installer\\$PatchCache$'",
               "evidence": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "special",
               "group": "actions",
               "nature": "action",
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/app",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1694,15 +1972,16 @@
               "pathPs": "'C:\\$Recycle.Bin'",
               "evidence": "回收站内容",
               "recommended": false,
-              "deleteMode": "contents",
               "domain": "special",
               "group": "actions",
               "nature": "action",
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1712,7 +1991,8 @@
               "fileKeys": [
                 {
                   "path": "%WINDIR%\\System32\\spool\\PRINTERS",
-                  "pattern": "*"
+                  "pattern": "*",
+                  "recurse": true
                 }
               ],
               "restartProcesses": [
@@ -1730,8 +2010,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             },
             {
@@ -1747,8 +2029,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
+                "sourceClass": "windows-doc",
                 "ref": "windows/temp",
-                "importedAt": "2026-09-14"
+                "importedAt": "2026-09-14",
+                "reviewedAt": "2026-09-27"
               }
             }
           ]
@@ -1756,9 +2040,9 @@
       ]
     }
   ],
+  "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "QZfvWY+pJ7zoYaoPyMHGhzJntSRec3zYoLIpEAOWygBnYRHxjNYYrsuaJs2PLqFKPUheSCbffcb/+7wBrfX6BQ=="
-  },
-  "winapp2Version": 260730
+    "sig": "ZPgEKr3rIGBPRwiQcPI9fBm3YF9tDggkPFR3k3eoPxf0+d20zRnq4rPpGzC8OjjbSZE2dwY6oDgCsYLLpFsBDQ=="
+  }
 }

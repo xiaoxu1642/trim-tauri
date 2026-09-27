@@ -285,7 +285,7 @@
             <span>更新规则库</span>
           </button>
           <div class="clean-inline-opts" id="cleanInlineOpts">
-            <span class="rules-version-info" id="rulesVersionInfo" data-tip="当前=本机规则库版本；winapp2=本机规则库同步的 WinApp2 基线版本；云端 winapp2=官方 GitHub 发布源上的 WinApp2 基线版本（进入本页自动联网检测，连不上官方库时显示 --）">（当前版本为：--，winapp2 版本为：--，云端 winapp2 版本为：--）</span>
+            <span class="rules-version-info" id="rulesVersionInfo" data-tip="当前=本机规则库版本；云端=官方发布源上的最新版本（进入本页自动联网检测，连不上发布源时不显徽标）。winapp2 基线版本已从主文案下线，字段保留兼容">（当前规则库版本：--）</span>
           </div>
         </div>
         <div class="cleanup-toolbar-actions" data-actions-for="cleanup-dups">
@@ -397,6 +397,37 @@
           <div class="progress-bar">
             <div class="progress-fill" id="progressFill"></div>
           </div>
+        </div>
+
+        <!-- P2 规模化浏览：搜索与筛选（规则库最终优化方案 2026-09-27）。
+             只过滤当前可见规则的显示，不改规则库数据、不影响勾选集合与风险确认链 -->
+        <div class="clean-filter-bar" id="cleanFilterBar">
+          <div class="clean-filter-search">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <input type="text" class="input-style" id="cleanSearchInput" placeholder="搜索规则名 / 应用 / 路径 / 性质 / 文件模式" data-tip="支持多关键词（空格分隔须同时命中）：规则名、应用与分类名、路径模板、性质标签、文件名模式。只影响列表显示，不影响勾选与清理范围">
+          </div>
+          <select class="input-style" id="cleanFilterDomain" data-tip="按顶级域筛选（选项随规则库动态生成）">
+            <option value="">全部域</option>
+          </select>
+          <select class="input-style" id="cleanFilterRisk" data-tip="按风险等级筛选">
+            <option value="">全部风险</option>
+            <option value="low">安全</option>
+            <option value="medium">注意</option>
+            <option value="high">高风险</option>
+          </select>
+          <select class="input-style" id="cleanFilterRec" data-tip="按默认推荐状态筛选">
+            <option value="">推荐 + 非推荐</option>
+            <option value="rec">仅推荐</option>
+            <option value="unrec">仅非推荐</option>
+          </select>
+          <label class="clean-filter-toggle" data-tip="仅显示扫描后存在可清理内容（占用 &gt; 0）的规则；未扫描时不生效">
+            <input type="checkbox" id="cleanFilterHasContent">有内容
+          </label>
+          <label class="clean-filter-toggle" data-tip="仅显示需要退出应用 / 停止服务 / 重启 Explorer 才能清理的规则">
+            <input type="checkbox" id="cleanFilterNeedsExit">需退出应用
+          </label>
+          <button class="clean-filter-clear" id="cleanFilterReset" type="button" data-tip="清空搜索与全部筛选">重置</button>
+          <span class="clean-filter-hint" id="cleanFilterHint"></span>
         </div>
 
         <!-- 分类列表 -->

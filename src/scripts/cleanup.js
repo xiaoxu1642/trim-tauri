@@ -25,12 +25,23 @@
 
   // 从 cleanup-rules.json 的分组项提取渲染层所需字段（id/name/risk/fileCleanType/domain/nature）
   // v3.2.1 类目重构：domain/group 为唯一分类主轴元数据，nature 为性质标签（文档 §3.1）
+  // P2 规模化浏览：补充搜索/筛选所需字段（路径模板、文件名模式、进程约束）。
+  // 只挑展示与检索需要的字段，不把整个规则对象带进渲染层。
   function pickRuleItem(it) {
     const o = { id: it.id, name: it.name, risk: it.risk };
     if (it.fileCleanType) o.fileCleanType = it.fileCleanType;
     if (it.domain) o.domain = it.domain;
     if (it.nature) o.nature = it.nature;
     if (it.recommended !== undefined) o.recommended = it.recommended;
+    // P2 搜索/筛选字段
+    const paths = [];
+    if (it.pathPs) paths.push(it.pathPs);
+    for (const fk of it.fileKeys || []) if (fk.path) paths.push(fk.path);
+    for (const rk of it.regKeys || []) if (rk.path) paths.push(rk.path);
+    if (paths.length) o.paths = paths;
+    const patterns = (it.fileKeys || []).map(fk => fk.pattern).filter(Boolean);
+    if (patterns.length) o.patterns = patterns;
+    if (((it.restartProcesses || []).length + (it.requiredStoppedProcesses || []).length) > 0) o.needsExit = true;
     return o;
   }
 
@@ -180,6 +191,39 @@
       if (sg) return sg.items.map(i => i.id);
     }
     return [];
+  }
+
+  // ==================== P2 规模化浏览：搜索与筛选（规则库最终优化方案 2026-09-27） ====================
+  // 只过滤「当前可见规则」的显示与计数，不改规则库数据、不动勾选集合与风险确认链：
+  // selectedIds / ALL_IDS 与全选语义保持「全部条目」口径，不随筛选收窄。
+  const filterState = { query: '', domain: '', risk: '', rec: '', hasContent: false, needsExit: false };
+
+  function filterActive() {
+    return !!(filterState.query || filterState.domain || filterState.risk
+      || filterState.rec || filterState.hasContent || filterState.needsExit);
+  }
+
+  // 单条规则是否命中当前筛选。子分组名为空表示扁平分组（无二级分类）。
+  // 关键词为 AND 语义：空格分隔的多个词必须全部命中（规则名 / 分类名 / 性质 / 路径 / 文件模式）。
+  function itemMatchesFilter(it, groupKey, groupTitle, subName) {
+    if (filterState.domain && groupKey !== filterState.domain) return false;
+    if (filterState.risk && it.risk !== filterState.risk) return false;
+    if (filterState.rec === 'rec' && it.recommended !== true) return false;
+    if (filterState.rec === 'unrec' && it.recommended === true) return false;
+    // 「仅看有内容」只在已有扫描结果时生效——未扫描前所有项都无内容，生效等于全隐藏
+    if (filterState.hasContent && scanResults.size > 0 && !((scanResults.get(it.id)?.size || 0) > 0)) return false;
+    if (filterState.needsExit && !it.needsExit) return false;
+    const q = filterState.query;
+    if (!q) return true;
+    const hay = [
+      it.name,
+      groupTitle || '',
+      subName || '',
+      NATURE_LABELS[it.nature] || it.nature || '',
+      ...(it.paths || []),
+      ...(it.patterns || []),
+    ].join('\n').toLowerCase();
+    return q.split(/\s+/).every(tok => hay.includes(tok));
   }
 
   // ==================== 详细信息表格（资源管理器风格） ====================
@@ -403,11 +447,39 @@
       });
     }
 
+    // P2：域筛选选项随当前规则库动态生成（IPC 覆盖 CATEGORIES 后标题可能变化；
+    // 保留用户已选值，选项消失时回落到「全部域」）
+    const domainSel = document.getElementById('cleanFilterDomain');
+    if (domainSel) {
+      const cur = domainSel.value;
+      const escAttr = s => window.ds.escAttr(s);
+      const opts = Object.entries(CATEGORIES)
+        .map(([k, g]) => `<option value="${escAttr(k)}">${escapeHtml(g.title)}</option>`)
+        .join('');
+      domainSel.innerHTML = '<option value="">全部域</option>' + opts;
+      if ([...domainSel.options].some(o => o.value === cur)) domainSel.value = cur;
+    }
+
+    const filtering = filterActive();
+    let matchedTotal = 0;
+    let renderedAny = false;
+
     for (const [groupKey, rawGroup] of Object.entries(CATEGORIES)) {
       // P1：detect 未命中的隐藏条目不渲染（分组计数/大小汇总同步排除）
+      // P2：搜索/筛选在 hiddenIds 之后再过滤一层，无命中的子分类/域整体不渲染
+      const match = (it, subName) => itemMatchesFilter(it, groupKey, rawGroup.title, subName);
       const group = rawGroup.subGroups
-        ? { ...rawGroup, subGroups: rawGroup.subGroups.map(sg => ({ ...sg, items: visibleItems(sg.items) })).filter(sg => sg.items.length > 0) }
-        : { ...rawGroup, items: visibleItems(rawGroup.items || []) };
+        ? { ...rawGroup, subGroups: rawGroup.subGroups.map(sg => ({ ...sg, items: visibleItems(sg.items).filter(i => match(i, sg.name)) })).filter(sg => sg.items.length > 0) }
+        : { ...rawGroup, items: visibleItems(rawGroup.items || []).filter(i => match(i, null)) };
+      // 筛选态下无命中的域不渲染（扁平组原有空组 continue 语义顺带覆盖）
+      if (group.subGroups) {
+        if (filtering && group.subGroups.length === 0) continue;
+      } else if (!group.items.length) {
+        continue;
+      }
+      matchedTotal += group.subGroups
+        ? group.subGroups.reduce((s, sg) => s + sg.items.length, 0)
+        : group.items.length;
       // v3.2.1 类目重构：维护与特殊操作域加视觉隔离类（警示条 + 语义边界）
       const groupEl = document.createElement('div');
       groupEl.className = 'category-group'
@@ -430,7 +502,8 @@
           </div>
         `;
       } else {
-        // 扁平布局（显卡 / 浏览器 / 应用 / 文件清理）
+        // 扁平布局：防御分支——当前规则库五个域均带子组（P2 核对 2026-09-27），
+        // 此分支仅在规则库未来出现无子组域 / 旧版兜底数据时生效
         const items = group.items;
         if (!items.length) continue;
         groupEl.innerHTML = `
@@ -446,15 +519,29 @@
       }
 
       container.appendChild(groupEl);
+      renderedAny = true;
+    }
+
+    // P2：筛选态空结果提示（不改 #categoryList 的委托绑定——节点仍持久）
+    if (filtering && !renderedAny) {
+      container.innerHTML = '<div class="clean-filter-empty">没有匹配当前搜索 / 筛选的规则。调整关键词，或点击「重置」清除筛选。</div>';
+    }
+    // P2：筛选命中计数（渲染时点最新；updateUI 不重复计算）
+    const hintEl = document.getElementById('cleanFilterHint');
+    if (hintEl) {
+      const totalCount = getAllIds().length;
+      hintEl.textContent = filtering ? `${matchedTotal} / ${totalCount} 项匹配` : '';
     }
 
     // 恢复折叠状态 + 设置展开内容高度（展开态不锁死 maxHeight，避免 grid 布局未完成时 scrollHeight 偏小导致内容被裁剪）
+    // P2：筛选激活时强制展开全部分组——折叠态下命中结果不可见，搜索就没有意义。
+    // 不改写 collapsedKeys：清空筛选后恢复用户原有的折叠状态。
     container.querySelectorAll('.category-group').forEach(g => {
       const toggle = g.querySelector(':scope > .category-group-header');
       const content = g.querySelector(':scope > .category-group-content');
       if (!toggle || !content) return;
       const key = 'group:' + toggle.dataset.groupToggle;
-      if (collapsedKeys.has(key)) {
+      if (!filtering && collapsedKeys.has(key)) {
         g.classList.add('collapsed');
         content.style.maxHeight = '0px';
       } else {
@@ -465,7 +552,7 @@
       const content = sg.querySelector(':scope > .sub-group-content');
       if (!content) return;
       const key = 'sub:' + sg.dataset.subGroup;
-      if (collapsedKeys.has(key)) {
+      if (!filtering && collapsedKeys.has(key)) {
         sg.classList.add('collapsed');
         content.style.maxHeight = '0px';
       } else {
@@ -652,8 +739,25 @@
     if (cleanBtn) cleanBtn.disabled = selectedIds.size === 0 || isScanning || isCleaning;
 
     // 顶层分组汇总（条目数量 + 总占用大小，兼容扁平分组）
+    // P2：计数与已选数量按当前筛选口径展示（无筛选时与原口径一致）；
+    // 已选大小汇总仍以 selectedIds 为准，不随筛选改变。
+    const filteringNow = filterActive();
     for (const [groupKey, group] of Object.entries(CATEGORIES)) {
-      const items = getGroupItems(group);
+      let items;
+      let catCount = 0;
+      if (group.subGroups) {
+        items = [];
+        for (const sg of group.subGroups) {
+          const matched = visibleItems(sg.items).filter(i => itemMatchesFilter(i, groupKey, group.title, sg.name));
+          if (matched.length > 0) catCount++;
+          items.push(...matched);
+        }
+        // 筛选态下整域无命中的组已在渲染层隐藏，这里同步跳过计数
+        if (filteringNow && items.length === 0) continue;
+      } else {
+        items = visibleItems(group.items || []).filter(i => itemMatchesFilter(i, groupKey, group.title, null));
+        if (filteringNow && items.length === 0) continue;
+      }
       const groupSize = groupTotalSize(items);
       const countEl = document.querySelector(`[data-group-count="${groupKey}"]`);
       if (!countEl) continue;
@@ -661,7 +765,7 @@
       const selectedCount = items.filter(i => selectedIds.has(i.id)).length;
       const sizePart = groupSize > 0 ? ` · ${formatSize(groupSize)}` : '';
       if (group.subGroups) {
-        countEl.textContent = `${totalItems} 项 · ${group.subGroups.length} 分类${selectedCount > 0 ? ` · ${selectedCount}/${totalItems} 已选` : ''}${sizePart}`;
+        countEl.textContent = `${totalItems} 项 · ${catCount} 分类${selectedCount > 0 ? ` · ${selectedCount}/${totalItems} 已选` : ''}${sizePart}`;
       } else {
         countEl.textContent = `${totalItems} 项${selectedCount > 0 ? ` · ${selectedCount}/${totalItems} 已选` : ''}${sizePart}`;
       }
@@ -1320,26 +1424,19 @@
   }
 
   // ==================== 规则库版本显示与检测（v3.2.1 / v3.3.0 三段版本） ====================
-  // 「更新规则库」右侧（当前版本为：x，winapp2 版本为：y，云端 winapp2 版本为：z）；
-  // 首次进入磁盘清理页自动检测远端（远端验签后只读版本号，不落盘）；
-  // 有更新 toast 提示；每次会话只自动检测一次。
-  // v3.3.4 文案澄清：远端取的是发布源（官方 GitHub 仓库）里的规则库，其携带的正是 winapp2 基线
-  // 版本号，故第三段明确写作「云端 winapp2 版本」；连不上官方库（网络/源不可达）时该段显示 --。
-  // v3.3.4 语义修正：三段分别是「本机规则库版本」「本机 winapp2 基线版本」「云端 winapp2 基线版本」。
-  // 第三段必须取远端规则库里的 winapp2Version（而不是远端 rulesVersion）——否则会显示成本机规则库
-  // 版本号，与「winapp2」语义不符（实测错显为 20260914 而非 260730）。
+  // 「更新规则库」右侧显示当前规则库版本；首次进入磁盘清理页自动检测远端
+  // （远端验签后只读版本号，不落盘）；有更新 toast 提示；每次会话只自动检测一次。
+  // P1 版本语义收口（规则库最终优化方案 2026-09-27）：winapp2 两段从主要状态文案
+  // 下线——winapp2 只是历史素材基线，不再是扩库成果指标，主文案只保留当前规则库
+  // 版本。winapp2Version 字段本身保留兼容（JSON / IPC resp / 远端检测逻辑均不动）。
   let versionChecked = false;
 
-  function setVersionInfo(curRules, localWinapp2, remoteWinapp2, hasUpdate) {
+  function setVersionInfo(curRules, hasUpdate) {
     const el = document.getElementById('rulesVersionInfo');
     if (!el) return;
-    // v3.5.3（2026-09-15）：云端 winapp2 版本与本地一致时，追加「无需更新」字样
-    // 复核 N1（磁盘清理，2026-09-16）：「无需更新」必须同时满足 ①主规则库无更新（hasUpdate === false）
-    // ②本地与云端 winapp2 版本相等；此前只看 winapp2 相等，主规则库有更新时会与
-    // 「规则库有新版本」toast 自相矛盾。hasUpdate 非 false（含未传）一律不显徽标，保守不误导。
-    const base = `（当前版本为：${curRules ?? '--'}，winapp2 版本为：${localWinapp2 ?? '--'}，云端 winapp2 版本为：${remoteWinapp2 ?? '--'}）`;
-    const upToDate = hasUpdate === false && remoteWinapp2 != null && localWinapp2 != null && String(remoteWinapp2) === String(localWinapp2);
-    el.textContent = upToDate ? `${base} · 无需更新` : base;
+    // 「无需更新」只看主规则库远端检测结论（hasUpdate === false）；检测未跑/失败不显徽标
+    const base = `（当前规则库版本：${curRules ?? '--'}）`;
+    el.textContent = hasUpdate === false ? `${base} · 无需更新` : base;
   }
 
   function onPageEnter() {
@@ -1348,13 +1445,13 @@
     if (!window.api?.cleanup?.checkRulesVersion) return;
     window.api.cleanup.checkRulesVersion().then((resp) => {
       if (resp && resp.success) {
-        setVersionInfo(resp.currentVersion, resp.currentWinapp2Version, resp.remoteWinapp2Version, resp.hasUpdate);
+        setVersionInfo(resp.currentVersion, resp.hasUpdate);
         if (resp.hasUpdate) {
           window.app?.toast('info', `规则库有新版本：v${resp.remoteVersion}（当前 v${resp.currentVersion}），可点击「更新规则库」升级`, 6000);
         }
       } else {
-        // 检测失败（网络/源不可达）：云端 winapp2 显示 --，本地版本照常展示，不打扰
-        setVersionInfo(resp?.currentVersion ?? null, resp?.currentWinapp2Version ?? null, null);
+        // 检测失败（网络/源不可达）：本地版本照常展示，不打扰
+        setVersionInfo(resp?.currentVersion ?? null);
       }
     }).catch(() => {});
   }
@@ -1403,7 +1500,7 @@
         window.app?.toast('success', `规则库更新完成（当前版本为：${resp.rulesVersion}）`);
         hiddenIds.clear();
         await loadRulesFromMain();
-        setVersionInfo(resp.rulesVersion, resp.winapp2Version ?? null, resp.winapp2Version ?? null, false); // 本地已是最新，本地/云端 winapp2 同源同值
+        setVersionInfo(resp.rulesVersion, false); // 本地已是最新（更新成功即无更新）
       } else {
         dismissRulesProgressToast();
         window.app?.toast('error', (resp && resp.message) || '规则库更新失败');
@@ -1489,6 +1586,70 @@
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnUpdateRules')?.addEventListener('click', updateRules);
+
+    // P2 规模化浏览：搜索与筛选绑定（只影响渲染与计数，不影响勾选 / 清理范围）
+    // 搜索框 140ms 防抖——每次输入触发整表重渲染（含虚拟列表重建），连击输入时避免抖动
+    const searchInput = document.getElementById('cleanSearchInput');
+    let searchTimer = null;
+    searchInput?.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        filterState.query = searchInput.value.trim().toLowerCase();
+        syncFilterChrome();
+        renderCategoryList();
+        updateUI();
+      }, 140);
+    });
+    const bindFilterSelect = (id, key) => {
+      const el = document.getElementById(id);
+      el?.addEventListener('change', () => {
+        filterState[key] = el.value;
+        syncFilterChrome();
+        renderCategoryList();
+        updateUI();
+      });
+    };
+    const bindFilterCheck = (id, key) => {
+      const el = document.getElementById(id);
+      el?.addEventListener('change', () => {
+        filterState[key] = el.checked;
+        syncFilterChrome();
+        renderCategoryList();
+        updateUI();
+      });
+    };
+    bindFilterSelect('cleanFilterDomain', 'domain');
+    bindFilterSelect('cleanFilterRisk', 'risk');
+    bindFilterSelect('cleanFilterRec', 'rec');
+    bindFilterCheck('cleanFilterHasContent', 'hasContent');
+    bindFilterCheck('cleanFilterNeedsExit', 'needsExit');
+    document.getElementById('cleanFilterReset')?.addEventListener('click', () => {
+      filterState.query = '';
+      filterState.domain = '';
+      filterState.risk = '';
+      filterState.rec = '';
+      filterState.hasContent = false;
+      filterState.needsExit = false;
+      const si = document.getElementById('cleanSearchInput');
+      if (si) si.value = '';
+      for (const id of ['cleanFilterDomain', 'cleanFilterRisk', 'cleanFilterRec']) {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      }
+      for (const id of ['cleanFilterHasContent', 'cleanFilterNeedsExit']) {
+        const el = document.getElementById(id);
+        if (el) el.checked = false;
+      }
+      syncFilterChrome();
+      renderCategoryList();
+      updateUI();
+    });
+
+    // 重置按钮与命中提示的可见性（filterActive 时显示；命中计数由 renderCategoryList 写入）
+    function syncFilterChrome() {
+      const resetBtn = document.getElementById('cleanFilterReset');
+      if (resetBtn) resetBtn.style.display = filterActive() ? '' : 'none';
+    }
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
     if (window.api?.cleanup?.onScanProgress) {
