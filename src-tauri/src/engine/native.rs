@@ -370,7 +370,10 @@ pub fn realtime_loss() -> Result<Value, String> {
             }
             let _ = IcmpCloseHandle(handle);
 
-            let b = gw_net.to_be_bytes();
+            // 审查 2026-09-27 M1：S_un.S_addr 本身已是网络字节序（WinSock 语义），
+            // 直接 to_be_bytes() 会二次反转成反序地址（192.168.31.1 → 1.31.168.192）。
+            // 先按网络序语义还原成主机序数值，再序列化回网络序，跨平台口径自洽。
+            let b = u32::from_be(gw_net).to_be_bytes();
             let gateway_str = format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]);
 
             let lost = sent - received;

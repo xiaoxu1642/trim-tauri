@@ -17,7 +17,7 @@
     { id: 'standbyPriority0', name: '低优先级待机', risk: 'low', checked: true,
       desc: '仅清理 0 优先级待机页，不影响常用缓存，安全' },
     { id: 'combine', name: '即时合并物理内存页', risk: 'medium', checked: true,
-      desc: '此刻调用 NtSetSystemInformation(87) 合并物理内存页去重，降低页表开销，Win10+ 可用；与「电脑优化中心 - 关闭 Windows 内存页合并（PageCombining）」不是同一机制，互不影响' },
+      desc: '此刻调用 NtSetSystemInformation(130 SystemCombinePhysicalMemoryInformation) 合并物理内存页去重，降低页表开销，Win10+ 可用；与「电脑优化中心 - 关闭 Windows 内存页合并（PageCombining）」不是同一机制，互不影响' },
     { id: 'modified', name: '修改页面列表', risk: 'high', checked: true,
       desc: '脏页写盘后回收，触发磁盘 I/O，可能短暂卡顿' },
     { id: 'standby', name: '待机列表', risk: 'high', checked: true,

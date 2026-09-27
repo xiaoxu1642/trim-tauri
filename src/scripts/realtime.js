@@ -259,12 +259,9 @@
       } catch (e) {
         // 丢包检测失败不阻断流量监控，静默
       }
-    } else {
-      // 预览模式模拟丢包
-      const r = Math.random();
-      const rate = r < 0.18 ? (Math.random() * 3) : (Math.random() * 0.4);
-      state.loss = { lossRate: rate, sent: 3, received: rate === 0 ? 3 : 2, latencyMs: Math.round(8 + Math.random() * 30), gateway: '192.168.1.1' };
     }
+    // 审查 2026-09-27 L3：预览模式模拟丢包的 else 分支已删——Tauri 轨 window.api
+    // 恒在，该分支不可达；Math.random() 假丢包/假网关渲染违反「无模拟假数据」纪律。
     renderMetrics();
   }
 

@@ -60,8 +60,8 @@ const RAW_EXEMPT = {
  */
 const SITE_EXEMPT = {
   'src-tauri/src/engine/systembin.rs:88': 'quiet_cmd 函数定义本身（token 命中函数名，非调用点）',
-  'src-tauri/src/engine/native.rs:1184': 'p 来自注册表 Run 键回读的绝对路径列表（:1167 构造），非 PINNED 裸名',
-  'src-tauri/src/engine/native.rs:1190': 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
+  'src-tauri/src/engine/native.rs:1187': 'p 来自注册表 Run 键回读的绝对路径列表（:1170 构造），非 PINNED 裸名',
+  'src-tauri/src/engine/native.rs:1193': 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
 };
 
 function walk(dir, out = []) {
