@@ -107,6 +107,11 @@ pub async fn models_save<R: tauri::Runtime>(
     if is_private_api_url(&api_url) {
         return Ok(json!({ "success": false, "message": "API 接口地址不允许指向本机或内网网段" }));
     }
+    // 审查 v2-U2（v3 拍板收紧）：域名一律放行，明文 http 下中间人可替换响应且自定义头
+    // （含 Authorization）明文过链路 ⇒ 自定义源只认 https。与 cleanup 规则源同一口径。
+    if let Some(reason) = settings::is_insecure_api_scheme(&api_url) {
+        return Ok(json!({ "success": false, "message": reason }));
+    }
 
     let cur = models.get(&key).cloned().unwrap_or_else(|| json!({}));
     // 掩码穿透（审查 1-5）：渲染层回传掩码 = 用户未修改密钥，保留已存真值；空串仍表示清除
@@ -315,6 +320,10 @@ pub async fn models_test<R: tauri::Runtime>(
     }
     if is_private_api_url(&api_url) {
         return Ok(json!({ "success": false, "message": "API 接口地址不允许指向本机或内网网段" }));
+    }
+    // 审查 v2-U2（v3 拍板收紧）：与 save 同一口径，测试连接同样只认 https。
+    if let Some(reason) = settings::is_insecure_api_scheme(&api_url) {
+        return Ok(json!({ "success": false, "message": reason }));
     }
 
     let test_cfg = json!({

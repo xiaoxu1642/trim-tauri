@@ -195,7 +195,8 @@ fn ensure_report_dir() -> Result<std::path::PathBuf, String> {
 /// 里的过期报告就永远回收不掉（TTL 承诺写在文件头与 readme 里）。判据抽成
 /// `report_expired` 纯函数，并挂到进程生命周期两端：
 /// - 退出：`shutdown_sampler`（lib.rs 的 `on_app_exit` 已接线，本文件内可改）
-/// - 启动：`prune_reports` 已 `pub`，接一行调用属 lib.rs（越界，见交付说明）
+/// - 启动：审查 v3-L3 已在 lib.rs 的 `setup` 接线（此前注释写「越界未接」，
+///   导致只有打开网速页的用户才享受得到 TTL 回收）
 pub fn prune_reports() {
     let Ok(dir) = ensure_report_dir() else { return };
     prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS);

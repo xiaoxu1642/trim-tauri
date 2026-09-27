@@ -181,6 +181,11 @@ fn post_json(
     if settings::is_private_api_url(url) {
         return Err("接口地址指向本机或内网，已按安全策略拒绝".into());
     }
+    // 审查 v2-U2（v3 拍板收紧）：凭据正是从这条链路以 `Authorization: Bearer` 发出的，
+    // 明文 http 等于把密钥交出去 ⇒ 只认 https。拦截发生在**凭据发出之前**（见下方 header 拼装）。
+    if let Some(reason) = settings::is_insecure_api_scheme(url) {
+        return Err(reason.into());
+    }
     // 整条跳转链必须留在首发主机上：闸门按「最初那个用户填的端点」判，
     // 不按「上一跳」判 —— 后者会让 A→B→A 这种两跳把主机限制绕过去。
     let origin_host = target.host.clone();

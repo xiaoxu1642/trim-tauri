@@ -98,8 +98,20 @@ fn free_bytes(path: &Path) -> Option<u64> {
 }
 
 /// 残留测试目录递归清理（应用自产临时数据；失败只记日志，不影响结果）
+///
+/// 审查 v3-L1：删前先过 `dir_delete_blocked` —— 与维护任务（搜索索引 / 更新缓存）同一口径。
+/// `residue_dir` 位于**用户在 UI 里自选的测速路径**下，若该目录被换成指向别处的 junction，
+/// 直接 `remove_dir_all` 会把链接目标一起处理掉；且这是本仓唯一一处「用户可设路径下的
+/// 递归删除」，此前恰好漏了这道闸。属性读不到同样按拒绝处理（fail-closed）。
 fn cleanup_residue(dir: &Path) {
     if !dir.exists() {
+        return;
+    }
+    if let Some(reason) = crate::engine::native::dir_delete_blocked(dir) {
+        log::write_log(
+            "warn",
+            &format!("测速残留目录未通过删除前校验，已跳过清理: {} — {}", dir.display(), reason),
+        );
         return;
     }
     let mut last_err = None;

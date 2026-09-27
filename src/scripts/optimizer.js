@@ -426,7 +426,66 @@
   // ==================== 安全托底：已优化检测与还原 ====================
   // 启动时异步批量检测含注册表操作的项是否已生效（不阻塞首屏），命中项灰态展示；
   // 点击灰态行弹「是否还原此项优化？」确认，「是」执行 restore 后恢复正常态。
-  const optimizedIds = new Set();
+  //
+  // 审查 v3（2026-09-28 用户拍板）：灰态改为**三重来源取并集**——
+  //   appliedLocal   = 本机执行成功后落盘的本地数据（localStorage，跨会话保留）
+  //   appliedDetected= 主进程首启扫描的持久化记账（stateOverview.detected）
+  //   appliedChecked = 本轮实时检测（checkOptimized / svcMemCurrent）
+  // **命中任一即灰态**。旧实现把实时检测当权威源，检测为 false 时会把另外两个来源的记录
+  // 一并 delete —— 于是「明明刚优化过，但因检测漏判（组策略覆盖/读取失败/项已变形）就变回
+  // 未优化态」，用户可再次勾选执行，**重复优化造成损失**。灰态是防重复执行的唯一护栏，
+  // 判据只能是「宁可多灰，不可漏灰」：误灰的代价是多点一次还原，漏灰的代价是不可逆的系统改动。
+  // 只有**显式还原成功**才从三个来源同时清除。
+  const optimizedIds = new Set();     // 渲染用的合并视图，禁止直接 add/delete，走 syncOptimized()
+  const appliedLocal = new Set();     // 来源①：本机执行落盘
+  const appliedDetected = new Set();  // 来源②：主进程持久化记账
+  const appliedChecked = new Set();   // 来源③：实时检测
+
+  const OPT_APPLIED_KEY = 'winclean-opt-applied-ids';
+
+  function loadAppliedLocal() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(OPT_APPLIED_KEY) || '[]');
+      if (!Array.isArray(raw)) return;
+      // 只认当前还存在的项：退役/改名项顺带清出，避免集合无限增长
+      const known = new Set(OPTIONS.map(o => o.id));
+      for (const id of raw) if (typeof id === 'string' && known.has(id)) appliedLocal.add(id);
+    } catch (e) { /* 损坏即从空集合开始：漏灰有还原兜底，误灰会挡住合法操作 */ }
+  }
+
+  function saveAppliedLocal() {
+    try {
+      localStorage.setItem(OPT_APPLIED_KEY, JSON.stringify([...appliedLocal]));
+    } catch (e) {
+      window.app?.log?.('warn', '已优化记录落盘失败（本次会话有效，重启后需重新检测）');
+    }
+  }
+
+  /** 合并三源 → optimizedIds，并刷新行样式 */
+  function syncOptimized() {
+    optimizedIds.clear();
+    for (const s of [appliedLocal, appliedDetected, appliedChecked]) for (const id of s) optimizedIds.add(id);
+    applyOptimizedStyles();
+  }
+
+  /** 执行成功落地：写本地数据并置灰（双保险的第一层） */
+  function markAppliedLocal(id) {
+    if (!id) return false;
+    appliedLocal.add(id);
+    saveAppliedLocal();
+    syncOptimized();
+    return true;
+  }
+
+  /** 显式还原成功：三个来源同时清除（唯一允许摘灰态的路径） */
+  function clearAllApplied(id) {
+    if (!id) return;
+    appliedLocal.delete(id);
+    appliedDetected.delete(id);
+    appliedChecked.delete(id);
+    saveAppliedLocal();
+    syncOptimized();
+  }
 
   function applyOptimizedStyles() {
     document.querySelectorAll('#optimizerGroups .opt-row').forEach(row => {
@@ -448,18 +507,14 @@
     });
   }
 
-  // 已优化项标记：执行成功后立即置灰（用于用户刚操作完的即时反馈）。
-  // 判断规则：
-  //   · dynamic 项（如 SVCHost 内存阈值）一定生效 → 直接标记
-  //   · 含 reg 步骤 / 含 service.disable 步骤 → 标记
-  //   · 含 pwsh / cmd 步骤（绝大多数是注册表、服务或系统级改动）→ 标记
-  // 兜底：只要执行成功就认为"已优化"，避免漏判导致用户看不到灰态反馈。
+  // 已优化项标记：执行成功后立即置灰并**落本地数据**（用于用户刚操作完的即时反馈，
+  // 且重启后仍在）。判断规则不变（dynamic / 含 reg·service.disable / 含 pwsh·cmd 步骤 → 标记）。
   function markOptimizedIfApplicable(opt) {
     if (!opt || !opt.id) return false;
-    if (opt.dynamic) { optimizedIds.add(opt.id); return true; }
+    if (opt.dynamic) { markAppliedLocal(opt.id); return true; }
     const steps = Array.isArray(opt.steps) ? opt.steps : [];
     if (steps.length === 0) return false;
-    optimizedIds.add(opt.id);
+    markAppliedLocal(opt.id);
     return true;
   }
 
@@ -480,22 +535,27 @@
       window.api.optimizer.svcMemCurrent().then(r => {
         if (r && r.success && r.gb != null) {
           svcAppliedGb = r.gb;
-          optimizedIds.add('svc_mem_gb');
-          applyOptimizedStyles();
+          appliedChecked.add('svc_mem_gb');
+          syncOptimized();
         }
-      }).catch(() => {});
+      }).catch((e) => {
+        window.app?.log?.('warn', `SVCHost 档位检测失败（保留本地与记账灰态）: ${e && e.message ? e.message : e}`);
+      });
     }
     if (!checkIds.length) return;
     window.api.optimizer.checkOptimized(checkIds).then(resp => {
-      if (resp && resp.success && resp.results) {
-        // v2.7.0：实时检测结果为权威源——与持久化缓存不一致时以本轮为准（增删灰态都生效）
-        for (const id of checkIds) {
-          if (resp.results[id] === true) optimizedIds.add(id);
-          else optimizedIds.delete(id);
-        }
-        applyOptimizedStyles();
+      if (!resp || !resp.success || !resp.results) return;
+      // 审查 v3：实时检测只维护自己那一源 —— 命中加、未命中撤，
+      // **不再动 appliedLocal / appliedDetected**（旧实现 delete 掉了它们 → 漏灰 → 可重复优化）。
+      for (const id of checkIds) {
+        if (resp.results[id] === true) appliedChecked.add(id);
+        else appliedChecked.delete(id);
       }
-    }).catch(() => { /* 检测失败不影响正常使用 */ });
+      syncOptimized();
+    }).catch((e) => {
+      // 审查 v3-L6：检测失败必须留痕。此时另外两源仍在，灰态不会因一次失败而消失。
+      window.app?.log?.('warn', `优化状态检测失败（以本地与记账灰态为准）: ${e && e.message ? e.message : e}`);
+    });
   }
 
   // 还原入口统一走这里：优先按执行前记录的注册表值恢复；
@@ -506,7 +566,7 @@
       let r = null;
       try { r = await window.api.optimizer.restoreReg(opt.id); } catch (e) { /* 走回退 */ }
       if (r && r.success) {
-        optimizedIds.delete(opt.id);
+        clearAllApplied(opt.id);
         renderGroups(OPTIONS);
         window.app?.toast('success', '已恢复：' + (opt.title || opt.id));
         return true;
@@ -517,7 +577,7 @@
     }
     const okRun = await runOptionActive({ restore: true }, opt);
     if (okRun) {
-      optimizedIds.delete(opt.id);
+      clearAllApplied(opt.id);
       renderGroups(OPTIONS);
       window.app?.toast('success', '已恢复：' + (opt.title || opt.id));
     }
@@ -533,16 +593,16 @@
     try {
       const resp = await window.api.optimizer.stateOverview();
       if (!resp || !resp.success) return;
-      // v2.7.0：主进程首启扫描的持久化结果先灰化（页面未到、扫描未跑完时也有即时反馈）；
-      // startOptimizedCheck 的实时检测稍后权威校正。动态项（svc_mem_gb）走注册表实时档位，不在此列。
+      // v2.7.0：主进程首启扫描的持久化结果先灰化（页面未到、扫描未跑完时也有即时反馈）。
+      // 审查 v3：这是第二来源，与本机执行落盘（appliedLocal）取并集，不再被实时检测清掉。
       const detected = resp.detected || {};
       let prefill = 0;
       for (const [id, d] of Object.entries(detected)) {
         const opt = OPTIONS.find(o => o.id === id);
         if (!opt || opt.dynamic) continue;
-        if (d && d.optimized === true && !optimizedIds.has(id)) { optimizedIds.add(id); prefill++; }
+        if (d && d.optimized === true && !appliedDetected.has(id)) { appliedDetected.add(id); prefill++; }
       }
-      if (prefill) applyOptimizedStyles();
+      if (prefill || appliedLocal.size) syncOptimized();
       // 退役迁移（P0-3）结果一次性回报
       const mig = resp.migration;
       if (mig && Array.isArray(mig.restored) && mig.restored.length) {
@@ -752,8 +812,8 @@
           if (activeOption !== o) return; // 弹窗已切走，丢弃
           svcAppliedGb = r.gb;
           if (r.gb != null) {
-            optimizedIds.add(o.id);
-            applyOptimizedStyles();
+            appliedChecked.add(o.id);
+            syncOptimized();
           }
           sel.value = (r.gb != null) ? String(r.gb) : sel.value;
           updateVariant();
@@ -894,9 +954,9 @@
           window.app?.log('warn', `回读校验不符（可能被组策略/安全软件覆盖）: ${optName}`);
           window.app?.toast('warning', `「${optName}」已执行但读回校验不符，可能被组策略或安全软件覆盖`, 6000);
         }
-        // 安全托底：执行成功后立即标记为已优化（灰态）
+        // 安全托底：执行成功后立即标记为已优化（灰态）+ 落本地数据
         if (params && params.restore) {
-          optimizedIds.delete(opt.id);
+          clearAllApplied(opt.id);
         } else {
           markOptimizedIfApplicable(opt);
         }
@@ -1279,6 +1339,9 @@
         if (res && res.success && Array.isArray(res.data)) {
           OPTIONS = filterByDiskType(res.data);
           activeCategory = getSavedCategory();
+          // 审查 v3：本地执行记录必须在渲染之前载入，否则首屏会短暂显示「未优化」，
+          // 用户在这一瞬勾选并重复执行——正是本次要防的形态。
+          loadAppliedLocal();
           renderCatNav();
           setCategory(activeCategory);
           bindEvents();

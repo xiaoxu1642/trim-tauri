@@ -5899,6 +5899,17 @@ body.pv-window {
    ================================================================ */
 .rt-report-modal { max-width: 680px; }
 .rt-report-body { padding: 16px 20px 18px; overflow-y: auto; max-height: calc(100vh - 220px); }
+/* 审查 v3-M1：报告列表读取失败态（不得与「暂无记录」空态同形 —— 失败必须看得出来） */
+.rt-report-loadfail {
+  padding: 12px 14px;
+  border-radius: var(--radius-medium);
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  color: var(--danger);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+}
+.rt-report-loadfail-hint { color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); }
 .rt-report-head { margin-bottom: 12px; }
 .rt-report-title { font-size: var(--fs-body); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
 .rt-report-meta { margin-top: 3px; font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }

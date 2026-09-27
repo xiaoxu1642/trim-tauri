@@ -513,6 +513,30 @@ fn ipv6_private(b: &[u8; 16]) -> bool {
     false
 }
 
+/// 自定义 API 源是否**非 https**（审查 v2-U2 / v3 拍板收紧）
+///
+/// 为什么收紧：`is_private_api_url` 只判 IP/域名的字面形态，**域名一律放行**；明文 http 下
+/// 中间人可以整段替换响应，且自定义请求头（可能含 `Authorization: Bearer <明文密钥>`）
+/// 会明文过链路。强制 https 后，攻击者要先为该域名持有**合法证书**才能拿到凭据，
+/// 成本与留痕都大幅提高。
+///
+/// **不破坏现有能力**：`localhost` 与私网 IP 本来就由 `is_private_api_url` 判私网拒绝，
+/// 用户现在能填的**只有公网服务**——公网服务走 https 是常态，故收紧不减功能。
+///
+/// 返回 `Some(原因)` 表示应拒绝；`None` 表示协议合规。
+pub(crate) fn is_insecure_api_scheme(raw: &str) -> Option<&'static str> {
+    // 解析不出来也要拒（fail-closed），与 `is_private_api_url` 同口径：
+    // 「认不出」不许等价于「合规」。
+    let Some(u) = parse_http_url(raw) else {
+        return Some("接口地址无法解析，已按不合规拒绝");
+    };
+    if u.scheme == "https" {
+        None
+    } else {
+        Some("接口地址必须使用 https（http 为明文传输，密钥与响应都可能被中间人替换）")
+    }
+}
+
 /// `isPrivateApiUrl`（火眼眼审查 2026-09-14）：拒绝环回/私有/链路本地网段。
 /// 协议非法或解析失败一律判私有；**字面量形式一律归一化后再判**（审查 K1：整数型/缩写型/
 /// IPv4-mapped 曾落到「未知域名」分支被放行）。域名解析到内网 IP 的 rebinding 不在本防线内。
@@ -953,6 +977,7 @@ pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Valu
 mod tests_private_url {
     //! 审查 K1 回归断言：字面量归一化后必须落进私有判定。这些形式过去全部判「公网」放行，
     //! 被注入的渲染层可借自定义模型端点把明文 Bearer 打到本机回环服务。
+    use super::is_insecure_api_scheme;
     use super::is_private_api_url;
 
     /// 审查 v2-L16：归一化本身要断言**具体字节**，不能只断言"被拒/被放"。
@@ -1017,6 +1042,31 @@ mod tests_private_url {
         ] {
             assert!(is_private_api_url(u), "{u} 应判私有");
         }
+    }
+
+    /// 反向断言：强制 https 不得把正常公网 https 端点一起拒掉
+    #[test]
+    fn https_public_endpoints_pass_scheme_check() {
+        for u in [
+            "https://api.openai.com/v1/chat/completions",
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        ] {
+            assert!(is_insecure_api_scheme(u).is_none(), "{u} 应放行");
+        }
+    }
+
+    /// 审查 v2-U2（v3 收紧）：明文 http 一律拒；协议非法/无法解析也按拒（fail-closed）
+    #[test]
+    fn insecure_scheme_is_rejected() {
+        for u in [
+            "http://api.example.com/v1/chat/completions",
+            "HTTP://API.EXAMPLE.COM/V1",
+        ] {
+            assert!(is_insecure_api_scheme(u).is_some(), "{u} 应拒绝");
+        }
+        // 协议非法 → 解析不出来 → fail-closed 拒
+        assert!(is_insecure_api_scheme("ftp://example.com/x").is_some());
+        assert!(is_insecure_api_scheme("not-a-url").is_some());
     }
 
     #[test]

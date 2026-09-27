@@ -805,7 +805,11 @@
           n: 'North', s: 'South', w: 'West', e: 'East',
           ne: 'NorthEast', nw: 'NorthWest', se: 'SouthEast', sw: 'SouthWest'
         })[dir];
-        invokeCore('plugin:window|start_resize_dragging', { label: currentLabel(), value: value }).catch(function () {});
+        invokeCore('plugin:window|start_resize_dragging', { label: currentLabel(), value: value }).catch(function (e) {
+          // 审查 v3-L2：拖拽失败的表现是「拖不动边框」，此前完全静默（连日志都没有）。
+          // 至少留痕，便于定位是窗口已销毁还是插件能力缺失。
+          if (window.app && window.app.log) window.app.log('warn', '窗口缩放拖拽失败: ' + (e && e.message ? e.message : e));
+        });
       });
     });
 
@@ -816,7 +820,10 @@
       var titlebar = e.target.closest && e.target.closest('#titlebar');
       if (!titlebar) return;
       e.preventDefault();
-      pluginInvoke('start_dragging').catch(function () {});
+      pluginInvoke('start_dragging').catch(function (e) {
+        // 审查 v3-L2：同上，标题栏拖动失败需留痕
+        if (window.app && window.app.log) window.app.log('warn', '标题栏拖动失败: ' + (e && e.message ? e.message : e));
+      });
     }, true);
     document.addEventListener('dblclick', function (e) {
       var titlebar = e.target.closest && e.target.closest('#titlebar');

@@ -735,12 +735,25 @@
 
   async function openReportsModal() {
     let reports = [];
-    if (window.api?.realtime?.reportList) {
+    // 审查 v3-M1：三态分离 —— 成功有数据 / 成功但为空 / 读取失败。
+    // 旧实现 catch 里写「忽略」，失败时 reports 保持 []，弹窗于是渲染「暂无记录」，
+    // 把「读取失败」伪装成「确无结果」（规范 B2 明令禁止的形态）；用户会以为自己没存过报告。
+    let loadError = '';
+    if (typeof window.api?.realtime?.reportList !== 'function') {
+      loadError = '报告列表通道不可用（预览模式）';
+    } else {
       try {
         const resp = await window.api.realtime.reportList();
         if (resp && resp.success) reports = resp.reports || [];
-      } catch (e) { /* 忽略 */ }
+        else loadError = (resp && resp.message) || '报告列表读取失败';
+      } catch (e) {
+        loadError = (e && e.message) ? e.message : String(e);
+        window.app?.log?.('warn', `网速报告列表读取失败: ${loadError}`);
+      }
     }
+    const emptyHtml = loadError
+      ? `<div class="rt-report-loadfail" role="alert">读取报告失败：${escapeHtml(loadError)}<br><span class="rt-report-loadfail-hint">报告文件仍在本地，可稍后重试；若持续失败请查看日志。</span></div>`
+      : '<div class="empty-state"><p>暂无记录。点击实时网速页右上角「记录数据」，停止后自动生成报告。</p></div>';
     closeReportBackdrops();
     const ctrl = window.modal.create({
       id: 'rtReportsBackdrop',
@@ -757,9 +770,9 @@
               </div>
               <button class="btn btn-secondary btn-small rt-row-open" type="button">查看</button>
               <button class="btn btn-secondary btn-small rt-row-del" type="button">删除</button>
-            </div>`).join('') : '<div class="empty-state"><p>暂无记录。点击实时网速页右上角「记录数据」，停止后自动生成报告。</p></div>'}`,
+            </div>`).join('') : emptyHtml}`,
       footerHtml: `
-          <span class="pw-last-scan">共 ${reports.length} 份 · 超 7 天自动清理</span>
+          <span class="pw-last-scan">${loadError ? '读取失败' : `共 ${reports.length} 份 · 超 7 天自动清理`}</span>
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary rt-clear-all" type="button">清空全部</button>
           <button class="btn btn-primary rt-close-btn" type="button">关闭</button>`

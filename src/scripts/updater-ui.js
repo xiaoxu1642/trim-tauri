@@ -619,7 +619,11 @@
           state.currentVersion = info.version;
           if (state.phase === 'idle') syncRow();
         }
-      }).catch(() => {});
+      }).catch((err) => {
+        // 审查 v3-L5：版本号属用户可感知信息，取不到时静默会让「当前版本」空白，
+        // 用户会以为更新功能坏了。至少留日志说明是获取失败而非没有版本。
+        window.app?.log?.('warn', `读取当前版本失败: ${(err && err.message) || err}`);
+      });
     }
 
     window.addEventListener('beforeunload', () => {

@@ -457,6 +457,10 @@ pub fn run() {
             log::prune_old_logs();
             // 审查 M15/G4：隔离件（*.corrupt-*）此前没有任何回收路径
             crate::security::prune_quarantined(&paths::app_data_dir());
+            // 审查 v3-L3：网速报告的 7 天 TTL 此前只在 save/list 两个入口被动触发，
+            // 用户不再打开网速页就永远回收不掉。启动补这一行，与退出端
+            // （`on_app_exit` → `realtime::shutdown_sampler`）合成完整生命周期。
+            commands::realtime::prune_reports();
             pwsh::cleanup_temp_scripts();
             appearance::migrate_bg_opacity_fog();
             // C 批安全地基：受保护路径清单补全（Electron 用 app.getPath 取 known folder，

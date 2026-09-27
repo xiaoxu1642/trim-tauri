@@ -667,7 +667,13 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
       const ap2 = loadAppearance();
       delete ap2.accent;
       saveAppearance(ap2);
-      if (accentInput) accentInput.value = '#6A59C9';
+      // 审查 v3-L4：原先硬编码 `#6A59C9`，与 main.css 的 `--accent` 默认值构成双源
+      // （改 CSS 默认值不跟着变，且无门禁能抓）。改为**从 CSS 变量现读**，
+      // 让 main.css 成为默认强调色的唯一真源。取不到时退回空串（不臆造色值）。
+      if (accentInput) {
+        accentInput.value = (getComputedStyle(document.documentElement)
+          .getPropertyValue('--accent') || '').trim();
+      }
       window.app?.toast('success', '已恢复默认强调色');
     });
 
