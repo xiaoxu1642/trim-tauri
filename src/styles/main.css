@@ -2369,21 +2369,6 @@ select.field-input { cursor: pointer; appearance: auto; }
   gap: 22px;
 }
 
-.optimizer-net-hint {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  /* 审查 v2-L6：原引用 --bg-secondary / --border（全仓无定义、且无 fallback）⇒ 这两条声明
-     一直被解析器丢弃，提示条实际是「无底无边框」。改指既有 --bg-elevated / --border-default
-     （作者意图就是浮起一块提示卡）。**注意**：这条修复会改变观感（此前根本没有底色与边框）。 */
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-btn);
-  font-size: 12px;
-  color: var(--fg-tertiary);
-}
-
 .optimizer-group-head {
   display: flex;
   align-items: center;

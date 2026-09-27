@@ -157,15 +157,19 @@ fn build_script(steps: &[Value]) -> String {
 ///
 /// 支持 reg/cmd/service 三种 step 类型；pwsh 类型交给 pssteps 解释器
 /// （原生可编译 → 原生执行；白名单内不可编译 → 收件箱 PS 逐字执行，v3-K1）。
-/// 实时推送 optimizer:progress 事件，返回 (failed_steps, PsInline stdout 累积)。
+/// 实时推送 optimizer:progress 事件，返回 (failed_steps, PsInline stdout 累积, 失败原因明细)。
+/// 审查 2026-09-27 M2/M4：pwsh 编译/执行失败不再中止整批（与 reg/cmd/service 的
+/// 「失败计数继续」语义一致，避免前置已落盘、后置永不执行的批量断裂）；每步失败的
+/// label 与原因收集进返回值，由调用方随回执下发前端，不再只回「部分步骤可能失败」。
 fn native_execute_steps<R: tauri::Runtime>(
     window: &WebviewWindow<R>,
     steps: &[Value],
     option_id: &str,
-) -> Result<(i64, String), String> {
+) -> Result<(i64, String, Vec<String>), String> {
     let total = steps.len();
     let mut failed = 0i64;
     let mut inline_stdout = String::new();
+    let mut failed_reasons: Vec<String> = Vec::new();
     // 审查 v3-M2：私有 tmp 被替换成 junction 时 temp_script_dir 返回 Err，这里绝不能
     // 降级到全局可写的 %TEMP% —— 那会把「拒绝写入」翻译成「换个更危险的目录写」，
     // 提权实例在 %TEMP% 写可预测路径的 .reg 再以管理员 reg import，是经典 TOCTOU 窗口。
@@ -181,9 +185,19 @@ fn native_execute_steps<R: tauri::Runtime>(
             // reg 类型：写 .reg 临时文件 + reg.exe import
             let reg_path = tmp_dir.join(format!("wcopt_{}.reg", crate::engine::now_ms()));
             // 审查 v3-L7：非 UTF-8 路径（孤立代理项）上 to_str() 为 None，跳过该步而不是 panic
-            let Some(reg_path_str) = reg_path.to_str() else { failed += 1; continue; };
-            if std::fs::write(&reg_path, reg.as_bytes()).is_err() {
+            let Some(reg_path_str) = reg_path.to_str() else {
                 failed += 1;
+                failed_reasons.push(format!("步骤「{label}」: 临时文件路径不可表达（非 UTF-8），已跳过"));
+                continue;
+            };
+            // 审查 2026-09-27 L1：.reg 临时文件改为 UTF-16LE + BOM（reg.exe 的 Unicode
+            // 格式），与 PS 侧 reg 导入路径的 -Encoding Unicode 口径一致——此前 UTF-8
+            // 无 BOM 在数据层出现中文值数据时会被 reg.exe 按 ANSI 误读
+            let mut reg_bytes = vec![0xFFu8, 0xFEu8];
+            reg_bytes.extend(reg.encode_utf16().flat_map(|u| u.to_le_bytes()));
+            if std::fs::write(&reg_path, &reg_bytes).is_err() {
+                failed += 1;
+                failed_reasons.push(format!("步骤「{label}」: .reg 临时文件写入失败"));
             } else {
                 let ok = match crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
                     .args(["import", reg_path_str])
@@ -193,7 +207,10 @@ fn native_execute_steps<R: tauri::Runtime>(
                     Err(_) => false,
                 };
                 let _ = std::fs::remove_file(&reg_path);
-                if !ok { failed += 1; }
+                if !ok {
+                    failed += 1;
+                    failed_reasons.push(format!("步骤「{label}」: reg import 返回非零（键被占用或策略拒绝）"));
+                }
             }
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
             // cmd 类型：spawn cmd /c
@@ -204,19 +221,36 @@ fn native_execute_steps<R: tauri::Runtime>(
                 Ok(o) => o.status.success(),
                 Err(_) => false,
             };
-            if !ok { failed += 1; }
+            if !ok {
+                failed += 1;
+                failed_reasons.push(format!("步骤「{label}」: 命令返回非零"));
+            }
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
             // service 类型：sc stop + 可选 sc config disabled
             let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", service]).output();
             if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
-                let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["config", service, "start=", "disabled"]).output();
+                // 审查 2026-09-27 L5：sc config 被策略拒绝不再静默——计入失败原因
+                let cfg_ok = match crate::engine::systembin::quiet_cmd(system_tool("sc"))
+                    .args(["config", service, "start=", "disabled"])
+                    .output()
+                {
+                    Ok(o) => o.status.success(),
+                    Err(_) => false,
+                };
+                if !cfg_ok {
+                    failed += 1;
+                    failed_reasons.push(format!("服务「{service}」: sc config disabled 被拒绝（可能被组策略锁定）"));
+                }
             }
             // 检查服务是否存在
             let exists = match crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["query", service]).output() {
                 Ok(o) => o.status.success(),
                 Err(_) => false,
             };
-            if !exists { failed += 1; }
+            if !exists {
+                failed += 1;
+                failed_reasons.push(format!("服务「{service}」不存在（可能已被卸载或精简）"));
+            }
         } else if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
             // pwsh 类型：交给解释器（v3-K1）。原生可编译 → 原生执行；白名单内
             // 不可编译 → PsInline（收件箱 Windows PowerShell 逐字执行，语义零改写）；
@@ -224,7 +258,10 @@ fn native_execute_steps<R: tauri::Runtime>(
             match crate::engine::pssteps::compile(pwsh).and_then(|ops| crate::engine::pssteps::execute(&ops)) {
                 Ok(stdout) => inline_stdout.push_str(&stdout),
                 Err(reason) => {
-                    return Err(format!("pwsh step 编译失败（{}）", reason));
+                    // 审查 2026-09-27 M2：与 reg/cmd/service 同口径——失败计数继续，
+                    // 不再 return Err 中止整批（此前前置步骤已落盘、后置永不执行）
+                    failed += 1;
+                    failed_reasons.push(format!("pwsh 步骤「{label}」: {reason}"));
                 }
             }
         }
@@ -234,9 +271,8 @@ fn native_execute_steps<R: tauri::Runtime>(
             "optimizer:progress",
             json!({ "optionId": option_id, "percent": pct }),
         );
-        let _ = label; // label 用于日志，暂不记录
     }
-    Ok((failed, inline_stdout))
+    Ok((failed, inline_stdout, failed_reasons))
 }
 
 // ==================== 动态步骤 ====================
@@ -546,8 +582,10 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
 
     for (id, rec) in &raw {
         let opt = find_option(id);
-        let is_dynamic = opt.and_then(|o| o.get("dynamic")).and_then(|v| v.as_bool()).unwrap_or(false);
-        if is_dynamic {
+        // 变量名刻意区别于 optimizer_run 里的同名变量：check-optimizer-dynamic A2
+        // 靠字面前缀定位 4000 字符窗口，本处同名声明会抢走第一个命中
+        let is_dyn_record = opt.and_then(|o| o.get("dynamic")).and_then(|v| v.as_bool()).unwrap_or(false);
+        if is_dyn_record {
             // 动态项遗留 pending 无法可靠核对，直接清理
             if rec.get("status").and_then(|v| v.as_str()) == Some("pending") {
                 opt_state::remove(id);
@@ -615,6 +653,25 @@ pub struct RunParams {
 }
 
 /// optimizer:run —— 执行单个优化项（正向/还原）
+///
+/// 审查 2026-09-27 L4：执行链含状态文件的 read-modify-write 且非幂等，并发触发同一
+/// 项会互相覆盖记账。整条执行链持全局互斥（Drop 复位，覆盖全部早退路径）——前端
+/// 批量本就是串行 await，此锁只拦「重复点击/双入口并发」，不影响正常吞吐。
+static OPT_RUN_INFLIGHT: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+struct OptRunGuard;
+impl OptRunGuard {
+    fn acquire() -> Option<Self> {
+        let mut slot = OPT_RUN_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        if *slot { None } else { *slot = true; Some(Self) }
+    }
+}
+impl Drop for OptRunGuard {
+    fn drop(&mut self) {
+        *OPT_RUN_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+}
+
 #[tauri::command]
 pub async fn optimizer_run<R: Runtime>(
     window: WebviewWindow<R>,
@@ -624,6 +681,9 @@ pub async fn optimizer_run<R: Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let Some(_inflight) = OptRunGuard::acquire() else {
+        return json!({ "success": false, "message": "已有优化项正在执行，请稍候" });
+    };
     let option_id = option_id.unwrap_or_default();
     let Some(opt) = find_option(&option_id) else {
         return json!({ "success": false, "message": "未知的优化选项" });
@@ -636,7 +696,11 @@ pub async fn optimizer_run<R: Runtime>(
             "message": "优化操作需要管理员权限，请先提权"
         });
     }
-    if needs_high_risk_confirm(&opt, &option_id) && !p.confirmed_high_risk {
+    // 审查 2026-09-27 H1：还原方向（restore=true）只执行预置 restore 步骤——把改动
+    // 回退到原值，不做正向写入，不属于高危写入；此前闸门不分方向地拒绝，而前端约定
+    // restore 不带 confirmedHighRisk 且不处理 needConfirm，导致无值级备份的高危项
+    // 走预置脚本还原时整体死锁（4 条还原入口全部命中）。故 restore 方向豁免回执。
+    if !p.restore && needs_high_risk_confirm(&opt, &option_id) && !p.confirmed_high_risk {
         log::write_log(
             "warn",
             &format!("高危优化缺少确认回执，已拒绝: {option_id} (restore={})", p.restore),
@@ -712,22 +776,23 @@ pub async fn optimizer_run<R: Runtime>(
         &format!("优化电脑执行: {title}{}", if p.restore { " (还原)" } else { "" }),
     );
     // S3：纯 Rust 原生
-    let run: Result<pwsh::PsOutput, String> = match native_execute_steps(&window, &steps, &option_id) {
-        Ok((failed_steps, inline_stdout)) => {
-            let code = if failed_steps == 0 { 0 } else { 1 };
-            let mut stdout = String::new();
-            // PsInline 的 stdout（@@RECYCLE@@ 协议行）必须先于收尾标记
-            if !inline_stdout.is_empty() {
-                stdout.push_str(&inline_stdout);
-                if !inline_stdout.ends_with('\n') {
-                    stdout.push('\n');
+    let (run, failed_reasons): (Result<pwsh::PsOutput, String>, Vec<String>) =
+        match native_execute_steps(&window, &steps, &option_id) {
+            Ok((failed_steps, inline_stdout, reasons)) => {
+                let code = if failed_steps == 0 { 0 } else { 1 };
+                let mut stdout = String::new();
+                // PsInline 的 stdout（@@RECYCLE@@ 协议行）必须先于收尾标记
+                if !inline_stdout.is_empty() {
+                    stdout.push_str(&inline_stdout);
+                    if !inline_stdout.ends_with('\n') {
+                        stdout.push('\n');
+                    }
                 }
+                stdout.push_str(&format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n"));
+                (Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false }), reasons)
             }
-            stdout.push_str(&format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n"));
-            Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false })
-        }
-        Err(e) => Err(format!("原生执行失败: {e}")),
-    };
+            Err(e) => (Err(format!("原生执行失败: {e}")), Vec::new()),
+        };
     let Ok(out) = run else {
         let e = run.err().unwrap_or_else(|| "执行异常".into());
         log::write_log("error", &format!("优化电脑执行异常: {e}"));
@@ -779,8 +844,14 @@ pub async fn optimizer_run<R: Runtime>(
             }
         }
     }
+    // 审查 2026-09-27 M4：失败不再只报「部分步骤可能失败」——携带逐步原因（label +
+    // 失败方式），前端 toast 与日志按此呈现，排障不再两眼一抹黑
     let ok_message = if !ok {
-        "部分步骤可能失败".to_string()
+        if failed_reasons.is_empty() {
+            "部分步骤可能失败".to_string()
+        } else {
+            format!("{} 项步骤失败：{}", failed_reasons.len(), failed_reasons.join("；"))
+        }
     } else if rec_ok > 0 || rec_fail > 0 {
         if rec_fail > 0 {
             format!("完成（{rec_ok} 个目录已移入回收站，{rec_fail} 个失败）")
@@ -816,7 +887,13 @@ pub async fn optimizer_run<R: Runtime>(
             return json!({ "success": true, "message": ok_message, "verify": verify });
         }
     } else if ok {
-        let verify = verify_applied(&option_id, opt, &p);
+        let mut verify = verify_applied(&option_id, opt, &p);
+        // 审查 2026-09-27 L7：@@RECYCLE@@ 目录删除失败不计入步骤失败（主要写入已成功），
+        // 但「回读全部命中」时不应记 pass——降档 partial 并如实提示，避免假绿
+        if rec_fail > 0 && verify == "pass" {
+            verify = "partial";
+            log::write_log("warn", &format!("优化项有 {rec_fail} 个目标目录移入回收站失败，回读降档为 partial: {title}"));
+        }
         if verify == "partial" {
             log::write_log("warn", &format!("执行后回读校验不符（可能被组策略/安全软件覆盖）: {title}"));
         }
@@ -826,9 +903,20 @@ pub async fn optimizer_run<R: Runtime>(
         }
         return json!({ "success": true, "message": ok_message, "verify": verify });
     } else {
-        let _ = opt_state::mark_applied(&option_id, "unknown");
+        // 审查 2026-09-27 M1：部分步骤失败（failed>0 但链路跑完）不再 mark_applied("unknown")
+        // 转正为「已应用」——违反记账不变式②「执行成功才转正」，且纯 cmd/pwsh 项不可回读、
+        // 错误状态永无纠正机会。改落 partial，由 optimizer_state_overview 如实呈现（可重试）。
+        let _ = opt_state::mark_partial(&option_id);
+        log::write_log(
+            "warn",
+            &format!("优化项部分步骤失败（{} 项），已记账为 partial: {title}", failed_reasons.len()),
+        );
+        return json!({
+            "success": false,
+            "message": ok_message,
+            "failedSteps": failed_reasons
+        });
     }
-
     json!({ "success": ok, "message": ok_message })
 }
 
@@ -1157,6 +1245,11 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     let option_id = option_id.unwrap_or_default();
     if find_option(&option_id).is_none() {
         return json!({ "success": false, "message": "未知的优化选项" });
+    }
+    // 审查 2026-09-27 M3：值级还原要写回 HKLM/HKCU 备份值，非管理员必然写失败且
+    // 此前无任何提示（与 optimizer_run 的提权门槛对齐，needAdmin 走前端提权链）
+    if !sysinfo::is_admin() {
+        return json!({ "success": false, "needAdmin": true, "message": "还原优化需要管理员权限，请先提权" });
     }
     let mut map = load_opt_backups();
     let entry = map.get(&option_id).cloned();

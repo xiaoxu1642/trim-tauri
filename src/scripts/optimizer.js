@@ -307,7 +307,9 @@
   // 优化中心分类过滤（'全部' 显示全部分组）
   let activeCategory = '全部';
   const OPT_CATEGORY_KEY = 'winclean-optcat-active';
-  const OPT_CATEGORIES = ['全部', '内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '隐私防护', '系统调校', '系统精简', '显卡优化', '浏览器优化', '游戏安全诊断'];
+  // 审查 2026-09-27 L11：「游戏安全诊断」无任何数据项映射（12 个最终展示组外），常驻
+  // 空分类已删除；如日后新增该分组任务，在此补回即可
+  const OPT_CATEGORIES = ['全部', '内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '隐私防护', '系统调校', '系统精简', '显卡优化', '浏览器优化'];
 
   function getSavedCategory() {
     try {
@@ -394,17 +396,8 @@
         ? window.emptyState({ icon: 'box', title: '该分类下暂无优化项', desc: '尝试切换左侧其它分类，或返回「全部」查看所有优化项目' })
         : '<div class="empty-state"><p>该分类暂无优化项目。</p></div>';
     }
-    // ancel 对比审查 P1（2026-09-14）：网络栈优化（TCP/拥塞控制/RSS 等）已从优化中心
-    // 迁至维护中心（maintenance-scripts.js），此处加轻量指引避免用户在优化中心找不到。
-    const tip = document.getElementById('optimizerNetHint');
-    if (tip) {
-      tip.innerHTML = `<span class="pw-last-scan" data-tip="网络栈优化已迁至维护中心">网络栈优化（TCP/拥塞控制/RSS/RSC/ECN 等）已移至「系统维护」页</span><button type="button" class="btn btn-ghost btn-xs" id="btnGoMaintenanceNet" data-tip="前往维护中心">前往维护中心</button>`;
-      const btn = tip.querySelector('#btnGoMaintenanceNet');
-      if (btn) btn.addEventListener('click', () => {
-        const nav = document.querySelector('.nav-item[data-page="maintenance"]');
-        if (nav) nav.click();
-      });
-    }
+    // ancel 对比审查 P1（2026-09-14）的「网络栈优化已移至系统维护」指引横幅已按用户要求移除
+    // （2026-09-27）：网络栈优化迁移已跨多个版本，新用户无从知晓旧位置，横幅失去指引价值。
     // 瀑布流布局：重新渲染后立即放置；窗口 resize 由 attach 内部防抖 + FLIP 动画重排
     // 注意：布局容器是每次重渲染重建的 .opt-kanban，须用 getter 动态获取
     if (!kanbanMasonry && window.kanbanMasonry) {
@@ -561,6 +554,21 @@
       const staleIds = (Array.isArray(resp.staleIds) ? resp.staleIds : []).filter(id => OPTIONS.some(o => o.id === id));
       if (staleIds.length) showStaleBanner(staleIds);
     } catch (e) { /* 状态总览失败不影响正常使用 */ }
+  }
+
+  // 审查 2026-09-27 M8：重启后恢复上次因提权中断的批量——读回预勾选并提示续跑。
+  // 键只在「同意提权且有批量上下文」时写入，恢复后立即清除，不产生循环提示。
+  function restorePendingBatch() {
+    let pending = null;
+    try { pending = JSON.parse(localStorage.getItem(OPT_PENDING_BATCH_KEY) || 'null'); } catch (e) { /* 损坏即放弃 */ }
+    if (!Array.isArray(pending) || !pending.length) return;
+    try { localStorage.removeItem(OPT_PENDING_BATCH_KEY); } catch (e) { /* 同上 */ }
+    const valid = pending.filter(id => OPTIONS.some(o => o.id === id));
+    if (!valid.length) return;
+    valid.forEach(id => selectedIds.add(id));
+    renderGroups(OPTIONS);
+    updateSelectedButtonState();
+    window.app?.toast('info', `检测到上次因提权重启中断的优化批次（${valid.length} 项），已恢复勾选，可点「执行所选优化」继续`, 6000);
   }
 
   function showStaleBanner(ids) {
@@ -853,7 +861,7 @@
     // 还原时直接按记录恢复。这里统一拦截（单项/批量执行都经过本函数）。
     if (!(params && params.restore) && window.api.optimizer.backupReg) {
       try {
-        const bk = await window.api.optimizer.backupReg(opt.id, opt.steps || []);
+        const bk = await window.api.optimizer.backupReg(opt.id);
         if (!bk || !bk.success) {
           window.app?.toast('error', `无法备份「${opt.title || opt.id}」，已停止执行`);
           return false;
@@ -906,12 +914,33 @@
       // 此前只报「优化失败」死路；现在弹提权确认，管理员重启后重试即可
       if (resp && resp.needAdmin) {
         finishProgressToast(false, '需要管理员权限');
+        // 审查 2026-09-27 M8：同意提权 → 应用即将重启，先把批量剩余写进 localStorage，
+        // 重启进页时恢复预勾选（见 restorePendingBatch）；单项执行 batchRemainingIds
+        // 为 null，不写键、行为不变
         const elevated = await window.app?.requestElevation?.('优化电脑部分选项需要管理员权限才能修改系统注册表与服务。');
-        if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行本优化项');
+        if (elevated) {
+          if (batchRemainingIds && batchRemainingIds.length) {
+            try { localStorage.setItem(OPT_PENDING_BATCH_KEY, JSON.stringify(batchRemainingIds)); } catch (e) { /* 存储不可用时降级为提示重试 */ }
+          }
+          window.app?.toast('info', '已获得管理员权限，请重新执行本优化项');
+        }
         return false;
       }
-      finishProgressToast(false, resp && resp.message);
-      window.app?.log('warn', `优化电脑失败: ${optName}: ${resp && resp.message || ''}`);
+      // 审查 2026-09-27 H1 兜底：Rust 侧还原方向已豁免回执闸门，正向链也总带标记；
+      // 若仍收到 needConfirm（契约被破坏的信号），如实呈现而不是并进泛化的「优化失败」
+      if (resp && resp.needConfirm) {
+        finishProgressToast(false, resp.message || '缺少高危确认回执');
+        window.app?.log('warn', `优化电脑被拒: ${optName}: 缺少高危确认回执`);
+        return false;
+      }
+      // 审查 2026-09-27 M4：后端随回执下发逐步失败原因（failedSteps），toast 展示前
+      // 3 条、完整清单进日志，不再只有一句「部分步骤可能失败」
+      const failedSteps = (resp && Array.isArray(resp.failedSteps)) ? resp.failedSteps : [];
+      const detail = failedSteps.length
+        ? `${resp.message || '部分步骤失败'}（${failedSteps.slice(0, 3).join('；')}${failedSteps.length > 3 ? ' 等' : ''}）`
+        : (resp && resp.message);
+      finishProgressToast(false, detail);
+      window.app?.log('warn', `优化电脑失败: ${optName}: ${detail || ''}${failedSteps.length ? ' | 全部: ' + failedSteps.join('；') : ''}`);
       return false;
     } catch (e) {
       finishProgressToast(false, e.message);
@@ -1024,6 +1053,11 @@
 
   // ==================== 部分选择执行 ====================
   let selectedIds = new Set(); // 已勾选的优化项 id（跨分组/分类保留）
+  // 审查 2026-09-27 M8：批量执行中触发提权时，应用会以管理员身份重启、内存勾选集
+  // 全部丢失。剩余批次在提权确认瞬间写入 localStorage，重启进页时恢复为预勾选并提示，
+  // 用户点「执行所选优化」即可续跑；单项执行（无批量上下文）不写键、行为不变。
+  const OPT_PENDING_BATCH_KEY = 'winclean-opt-pending-batch';
+  let batchRemainingIds = null;
 
   function toggleSelect(id) {
     if (optimizedIds.has(id)) return; // 已优化项不可勾选（点击行走还原确认流程）
@@ -1097,6 +1131,8 @@
     const failedNames = [];
     for (let i = 0; i < batch.length; i++) {
       const opt = batch[i];
+      // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
+      batchRemainingIds = batch.slice(i).map(o => o.id);
       // 进度 Toast 由 runOptionActive 内部创建（此前这里先建一条、内部再建一条并销毁前者）
       progressToastSuffix = `${i + 1}/${batch.length}`;
       try {
@@ -1109,6 +1145,7 @@
         failCount++; failedNames.push(opt.title);
       }
     }
+    batchRemainingIds = null;
     progressToastSuffix = '';
     batchRunning = false;
     if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
@@ -1185,6 +1222,8 @@
     const failedNames = [];
     for (let i = 0; i < batch.length; i++) {
       const opt = batch[i];
+      // 审查 2026-09-27 M8：同 runSelected——提权中断时据此恢复剩余批次
+      batchRemainingIds = batch.slice(i).map(o => o.id);
       // 进度 Toast 由 runOptionActive 内部创建（同上，消除每项一次白建白毁）
       progressToastSuffix = `${i + 1}/${batch.length}`;
       try {
@@ -1198,6 +1237,7 @@
         failCount++; failedNames.push(opt.title);
       }
     }
+    batchRemainingIds = null;
     progressToastSuffix = '';
     batchRunning = false;
     if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
@@ -1246,6 +1286,8 @@
           startOptimizedCheck();
           // v2.6.0（P0-1）：启动扫描已应用记账 + 未完成还原横幅 + 退役迁移结果回报
           loadStateOverview();
+          // 审查 2026-09-27 M8：恢复上次因提权重启中断的批量勾选
+          restorePendingBatch();
         }
       }).catch(() => renderFallback());
       window.api.optimizer.onProgress(({ percent }) => {

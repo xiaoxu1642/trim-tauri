@@ -78,6 +78,13 @@ fn new_nonce() -> String {
     format!("{:016x}", b.finish())
 }
 
+/// 审查 2026-09-27 M9：提权请求防重入。此前连点两次会生成两个 nonce 原子覆写同一条
+/// 握手记录——第一个监视线程认不出自己的 nonce，20s 超时后误报「未检测到新实例启动」，
+/// 且可能弹出两个 UAC。用 AtomicBool 让并发第二个请求直接被拒；释放点覆盖全部退出
+/// 路径（runas 失败 / 写状态失败），成功路径不显式复位——握手完成后本进程即将退出，
+/// 新实例是全新的内存空间，复位反而可能放行「同进程内第三次点击」与让位流程竞争。
+static ELEVATE_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn write_phase(nonce: &str, phase: &str) -> bool {
     let payload = json!({
         "nonce": nonce,
@@ -310,6 +317,12 @@ pub fn elevate_status<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, Str
 pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     // 审查 1-3 同款：UAC 提权是最高价值 IPC 目标，只认主窗口
     guard::guard(&window, guard::MAIN)?;
+    // 审查 2026-09-27 M9：防重入——已有提权握手在进行时直接拒绝第二次请求
+    use std::sync::atomic::Ordering;
+    if ELEVATE_INFLIGHT.swap(true, Ordering::SeqCst) {
+        log::write_log("warn", "提权请求重复触发，已拒绝（上一次握手仍在进行）");
+        return Ok(json!({ "success": false, "message": "提权请求正在处理中，请勿重复点击" }));
+    }
     let app = window.app_handle().clone();
     // 不做「已是管理员就直接返回」的短路：上游没有这个分支，且渲染层拿到 success 后
     // 承诺「应用即将以管理员身份重启」——早退会让这句话落空、用户以为卡住。
@@ -318,12 +331,14 @@ pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
 
     let nonce = new_nonce();
     if !write_phase(&nonce, PHASE_REQUESTED) {
+        ELEVATE_INFLIGHT.store(false, Ordering::SeqCst);
         return Ok(json!({ "success": false, "message": "无法写入提权握手状态，已拒绝提权" }));
     }
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
             clear_handshake();
+            ELEVATE_INFLIGHT.store(false, Ordering::SeqCst);
             return Ok(json!({ "success": false, "message": e.to_string() }));
         }
     };
@@ -333,10 +348,12 @@ pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
         Ok(()) => {
             log::write_log("info", "UAC 提权成功，等待新实例就绪后退出当前实例");
             arm_handshake(app, nonce);
+            // 成功路径不复位：本进程即将让位退出，见 ELEVATE_INFLIGHT 处注释
             Ok(json!({ "success": true, "relaunching": true }))
         }
         Err(e) => {
             clear_handshake();
+            ELEVATE_INFLIGHT.store(false, Ordering::SeqCst);
             log::write_log("warn", &format!("UAC 提权被用户取消或失败: {e}"));
             Ok(json!({ "success": false, "message": "提权请求被取消或失败" }))
         }

@@ -924,39 +924,6 @@ const OPTIONS = [
       }
     ]
   },
-  {
-    // 审查 B-1（2026-09-14）加固：① cfg 不再从第三方仓库的可变分支（ancel1x/... raw/main）拉取，
-    //   改为本文件内置 base64（来源 O&O ShutUp10++ 1.9.1436 导出模板）；
-    //   ② OOSU10.exe 固定 O&O 官方直链并做 SHA-256 校验（附 Authenticode 签名校验）；
-    //   ③ 所有落点改在用户临时目录，执行完自动清理，不再污染 C:\ANCELOOSUIMPORT.cfg；
-    //   ④ desc 明确「配置由 Trim 内置」「将下载并校验 OOSU10.exe」。
-    id: 'tf_oosu', group: '系统精简', title: 'OOSU 隐私工具静默导入', risk: 'medium',
-    desc: 'Trim RunOOSU：联网从 O&O 官方下载 OOSU10.exe 并校验 SHA-256/Authenticode 签名（校验失败即中止，不执行），使用 Trim 内置的隐私配置模板静默导入（不再从第三方仓库拉取配置），导入完成后自动清理临时文件。需要联网；配置会批量关闭大量隐私与遥测项，可能改变部分系统默认行为。',
-    steps: [
-      { label: '下载校验 OOSU10.exe 并静默导入内置配置', pwsh: [
-        '$oosuUrl = "https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe"',
-        '$expect = "1AD8CDC324A79AC37A50858FDDCD28EB7491459114F0DA514C4750B08B115103"',
-        '$oosu = Join-Path $env:TEMP ("OOSU10_" + [guid]::NewGuid().ToString("N") + ".exe")',
-        '$cfg  = Join-Path $env:TEMP ("OOSU_cfg_" + [guid]::NewGuid().ToString("N") + ".cfg")',
-        'try {',
-        '  Invoke-WebRequest $oosuUrl -OutFile $oosu -UseBasicParsing',
-        '  $got = (Get-FileHash -LiteralPath $oosu -Algorithm SHA256).Hash',
-        '  if ($got -ne $expect) { Write-Error ("SHA256 校验失败：实际 " + $got + "，期望 " + $expect); return }',
-        '  $sig = Get-AuthenticodeSignature -LiteralPath $oosu',
-        '  if ($sig.Status -ne "Valid") { Write-Error ("Authenticode 签名无效：" + $sig.Status); return }',
-        '  $b64 = "' + OOSU_CFG_B64 + '"',
-        '  [IO.File]::WriteAllBytes($cfg, [Convert]::FromBase64String($b64))',
-        '  Start-Process -FilePath $oosu -ArgumentList $cfg -Wait -NoNewWindow',
-        '} catch {',
-        '  Write-Error ("OOSU 执行失败: " + $_.Exception.Message)',
-        '  return',
-        '} finally {',
-        '  Remove-Item -LiteralPath $oosu -Force -ErrorAction SilentlyContinue',
-        '  Remove-Item -LiteralPath $cfg  -Force -ErrorAction SilentlyContinue',
-        '}'
-      ].join('\n') }
-    ]
-  },
   // ---------- 音频优化（对齐 Trim BuildAudioModule） ----------
   {
     id: 'audio_disable_enhancements', group: '音频优化', title: '关闭音频增强', risk: 'medium',
@@ -2154,7 +2121,6 @@ const PROS_CONS = {
   'tf_appx': { pros: '移除 25 个预装 UWP 应用，释放磁盘并减少后台活动。', cons: '部分应用移除后需从商店重装，个别系统集成可能异常。' },
   'tf_cortana': { pros: '禁用 Cortana 与网页搜索，减少后台联网与隐私追踪。', cons: '失去 Cortana 语音助手与任务栏网页搜索能力。' },
   'tf_onedrive': { pros: '彻底卸载 OneDrive 并清理数据目录，释放空间、减少同步。', cons: '云端文件不再自动同步，恢复需重新安装并登录。' },
-  'tf_oosu': { pros: '静默导入 OOSU 隐私配置，批量关闭大量隐私与遥测开关。', cons: '需联网下载，配置覆盖范围广，可能改变部分系统默认行为。' },
   'explorer_foreground_speed': { pros: '前台程序立即获得焦点与刷新优先级，点击窗口后界面响应更跟手。', cons: '极少数依赖焦点抢占提示的后台弹窗可能更频繁地抢到前台。' },
   'explorer_autorestart': { pros: 'explorer.exe 崩溃后自动拉起，桌面与任务栏无需手动重启。', cons: '崩溃发生时重启过程会有短暂桌面黑屏闪烁。' },
   'explorer_refresh_policy': { pros: '按完整信息刷新文件列表，新建/重命名后图标即时显示。', cons: '禁用简化标识列表在个别网络环境下可能略微增加刷新开销。' },
@@ -2271,7 +2237,6 @@ const EFFECT_MAP = {
   tf_appx: '明显',
   tf_cortana: '一般',
   tf_onedrive: '一般',
-  tf_oosu: '一般',
   audio_disable_enhancements: '一般',
   audio_disable_spatial_sound: '一般',
   audio_mmcss_priority: '微小',

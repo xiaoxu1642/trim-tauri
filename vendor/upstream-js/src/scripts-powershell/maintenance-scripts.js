@@ -98,7 +98,7 @@ if ($LASTEXITCODE -eq 0) { Write-Output '@@RESULT@@ok' } else { Write-TFDiag -St
   },
   wu: {
     title: '重置 Windows Update 组件',
-    desc: '停止更新服务并重置 SoftwareDistribution / catroot2 缓存目录后重启服务，修复更新卡住/下载失败。不会删除已安装更新。',
+    desc: '停止更新服务（wuauserv / BITS / CryptSvc）并清理 SoftwareDistribution\\DataStore 更新缓存后重启服务，修复更新卡住/下载失败。不涉及 catroot2，不会删除已安装更新。',
     category: '系统修复',
     admin: true,
     ps: () => `
@@ -241,7 +241,7 @@ const CATEGORY_ORDER = ['系统修复', '搜索与界面', '网络连接'];
 const NET_MIGRATED = [
   {
     id: 'net_response', title: '加快网络响应', risk: 'medium',
-    desc: '关闭网络节流、系统响应降级，加快网络吞吐与系统反馈。',
+    desc: '关闭多媒体播放场景的网络节流（NetworkThrottlingIndex 拉满），并将连接响应重传收紧（TcpMaxConnectResponseRetransmissions=2）。',
     steps: [
       {
         label: '网络节流阈值 / 系统响应性', reg: regBlock({
@@ -255,7 +255,7 @@ const NET_MIGRATED = [
   },
   {
     id: 'tf_net_tcp', title: 'TCP/IP 全局参数调优', risk: 'medium',
-    desc: 'netsh 全局调优：关闭自动调优/ECN/RSC/时间戳/启发式/安全配置文件/任务卸载，启用 DCA/NetDMA/RSS，CTCP 拥塞提供程序，ARP 缓存 4096，初始 RTO 2000，MTU 1500，最大 SYN 重传 2，关闭 MPP（不涉及任何 IPv6 相关设置）。',
+    desc: 'netsh 全局调优：关闭自动调优/ECN/RSC/时间戳/启发式，启用 DCA/RSS/CTCP 拥塞提供程序，RSS 基准 CPU=1，邻居缓存 4096；注册表写入网络节流关闭与 SystemResponsiveness=10。',
     steps: [
       { label: '网络节流指数最大化', reg: regBlock({
         'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile': {
@@ -276,7 +276,7 @@ const NET_MIGRATED = [
   },
   {
     id: 'tf_net_tcpip', title: 'Tcpip 注册表参数', risk: 'medium',
-    desc: '注册表网络参数：TTL=64、窗口缩放、TcpMaxDupAcks=2、关闭 SACK、MaxUserPort=65534、TIME_WAIT=30s、Dns/Hosts 优先级、Winsock 地址长度、关闭 Nagle 算法、关闭传递优化。',
+    desc: '注册表 TCP 参数：窗口缩放与时间戳（Tcp1323Opts=1）、快速重传灵敏度（TcpMaxDupAcks=2）、启用 SACK（SackOpts=1）。',
     steps: [
       {
         label: 'Tcpip / ServiceProvider / Winsock / Nagle / DeliveryOptimization', reg: regBlock({
@@ -318,7 +318,7 @@ const NET_MIGRATED = [
   },
   {
     id: 'tf_net_lanman', title: 'LanmanServer 会话参数', risk: 'medium',
-    desc: 'SMB 服务器参数：空闲不断开(4294967295)、Size=3、关闭 Oplocks、IRPStackSize=20、共享冲突延迟/重试为 0。',
+    desc: 'SMB 服务器参数：服务器平衡档（Size=3）、关闭 Lanman 广播公告（LmAnnounce=0）。',
     steps: [
       {
         label: 'LanmanServer Parameters', reg: regBlock({
@@ -335,35 +335,6 @@ const NET_MIGRATED = [
     ]
   },
   {
-    id: 'tf_net_nic', title: '网卡高级属性（低延迟）', risk: 'medium',
-    desc: '遍历网卡 Class 注册表：关闭全部节能/绿色以太网/WoL/中断调节，关闭校验和与 LSO 卸载，关闭流控，RSS 开启(2队列/Profile3)，收发缓冲 4096/512，JumboPacket=1514。',
-    steps: [
-      { label: '遍历网卡 Class 写入低延迟 SZ 参数', pwsh: [
-        '$root = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}"',
-        '$sz = @{',
-        '  "AutoPowerSaveModeEnabled"="0"; "AutoDisableGigabit"="0"; "AdvancedEEE"="0"; "DisableDelayedPowerUp"="2";',
-        '  "*EEE"="0"; "EEE"="0"; "EnablePME"="0"; "EEELinkAdvertisement"="0"; "EnableGreenEthernet"="0";',
-        '  "EnableSavePowerNow"="0"; "EnablePowerManagement"="0"; "EnableDynamicPowerGating"="0";',
-        '  "EnableConnectedPowerGating"="0"; "EnableWakeOnLan"="0"; "GigaLite"="0"; "NicAutoPowerSaver"="2";',
-        '  "PowerDownPll"="0"; "PowerSavingMode"="0"; "ReduceSpeedOnPowerDown"="0"; "SmartPowerDownEnable"="0";',
-        '  "S5NicKeepOverrideMacAddrV2"="0"; "S5WakeOnLan"="0"; "ULPMode"="0"; "WakeOnDisconnect"="0";',
-        '  "*WakeOnMagicPacket"="0"; "*WakeOnPattern"="0"; "WakeOnLink"="0"; "WolShutdownLinkSpeed"="2";',
-        '  "JumboPacket"="1514"; "TransmitBuffers"="4096"; "ReceiveBuffers"="512";',
-        '  "IPChecksumOffloadIPv4"="0"; "LsoV1IPv4"="0"; "LsoV2IPv4"="0"; "PMARPOffload"="0";',
-        '  "PMNSOffload"="0"; "TCPChecksumOffloadIPv4"="0";',
-        '  "UDPChecksumOffloadIPv4"="0";',
-        '  "RSS"="1"; "*NumRssQueues"="2"; "RSSProfile"="3"; "*FlowControl"="0"; "FlowControlCap"="0";',
-        '  "TxIntDelay"="0"; "TxAbsIntDelay"="0"; "RxIntDelay"="0"; "RxAbsIntDelay"="0";',
-        '  "FatChannelIntolerant"="0"; "*InterruptModeration"="0"',
-        '}',
-        'Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match "^\\d{4}$" } | ForEach-Object {',
-        '  $k = $_.PSPath',
-        '  foreach ($n in $sz.Keys) { New-ItemProperty -Path $k -Name $n -Value $sz[$n] -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null }',
-        '}'
-      ].join('\n') }
-    ]
-  },
-  {
     id: 'tf_net_weakhost', title: '启用 WeakHost 收发', risk: 'low',
     desc: '对所有网卡（含隐藏）启用 WeakHostSend / WeakHostReceive，改善多网卡下的路由收发；轻微降低网络隔离安全性。',
     steps: [
@@ -372,7 +343,7 @@ const NET_MIGRATED = [
   },
   {
     id: 'net_qos_scheduler', title: 'QoS 保留带宽策略排查', risk: 'medium',
-    desc: 'NonBestEffortLimit=0，关闭 QoS 默认保留带宽的 PSched 策略；不承诺固定带宽收益，企业、校园、VPN 或域策略可能覆盖。',
+    desc: '取消 QoS 默认保留带宽（Psched 策略 NonBestEffortLimit=0），并关闭 TCP 任务卸载（DisableTaskOffload=1，规避部分网卡卸载缺陷，略增 CPU 占用）。',
     steps: [
       { label: 'NonBestEffortLimit=0', reg: regBlock({
         'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\Psched': {

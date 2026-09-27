@@ -1,5 +1,5 @@
 // maintenance.js - 系统维护修复组（P2-16）
-// 11 项修复任务：分类计数标签 + 任务卡片 + 每项独立确认 + 实时输出面板。
+// 17 项修复任务：分类计数标签 + 任务卡片 + 每项独立确认 + 实时输出面板。
 // 批量操作：复选框勾选 + 「执行选中」/「全部执行」+ 进度与成功/失败反馈 + 取消。
 // 数据源为主进程 maintenance:tasks（PowerShell 脚本模块），渲染层不硬编码任务逻辑。
 (function () {
@@ -12,6 +12,10 @@
   const status = new Map();     // taskId -> 'idle'|'running'|'ok'|'warn'|'error'
   const selected = new Set();   // 批量勾选的 taskId（跨分类保留）
   let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested } | null
+  // 审查 2026-09-27 M8：批量执行中触发提权时，应用将重启、内存勾选集丢失。
+  // 剩余批次在提权确认瞬间写入 localStorage，重启进页时恢复预勾选并提示续跑。
+  const MAINT_PENDING_BATCH_KEY = 'winclean-maint-pending-batch';
+  let batchRemainingIds = null;
   let outputBound = false;
 
   function escapeHtml(s) { return window.ds.esc(s); }
@@ -36,14 +40,9 @@
       effect: '组件存储恢复一致，SFC 的修复能力随之恢复。耗时更长（可能 10 分钟以上），期间可能联网下载健康修复源。'
     },
     wu: {
-      what: '停止更新相关服务，重命名 SoftwareDistribution 与 catroot2 缓存目录后重启服务，相当于给 Windows 更新「恢复出厂设置」。',
+      what: '停止更新相关服务（wuauserv / BITS / CryptSvc），清理 SoftwareDistribution\\DataStore 更新缓存后重启服务，相当于给 Windows 更新「恢复出厂设置」（不涉及 catroot2）。',
       when: '更新长期卡在某个百分比、报错 0x8007xxxx、补丁反复下载失败。',
       effect: '更新缓存与任务队列清空，下次检查更新将重新拉取；已安装的更新不会被卸载，数据不受影响。'
-    },
-    print: {
-      what: '停止 Print Spooler 打印后台服务，清空卡死的打印任务队列文件，再重启服务。',
-      when: '打印任务卡在队列里删不掉、打印机显示「正在打印」却毫无动静。',
-      effect: '打印队列归零，打印机恢复可响应状态；需要重新下发刚才没打出来的任务。'
     },
     store: {
       what: '运行系统自带的 wsreset.exe，清空 Microsoft Store 应用缓存并自动重启商店。',
@@ -59,11 +58,6 @@
       what: '运行 lodctr /r，从系统备份清单重新注册性能计数器库。',
       when: '任务管理器性能页数值空白、性能监视器报「无法收集计数器数据」。',
       effect: '性能计数器恢复可用，任务管理器/性能监视器重新正常显示 CPU、磁盘、网络等实时数据。'
-    },
-    iconthumb: {
-      what: '删除图标缓存与缩略图缓存数据库，并自动重启资源管理器，让系统重新生成缓存。',
-      when: '桌面/任务栏图标变成白块、文件夹缩略图显示错乱或长期不刷新。',
-      effect: '缓存重建后图标与缩略图恢复正常显示；重建期间桌面会短暂闪烁，文件本身不受任何影响。'
     },
     search: {
       what: '停止 Windows Search 服务，清空旧索引数据库后重启服务，索引将在后台自动重建。',
@@ -81,29 +75,24 @@
       effect: '被软件篡改的 LSP 与协议参数归零，网络栈恢复干净状态；需重启电脑完全生效，并重新输入 Wi-Fi 密码连接。'
     },
     net_response: {
-      what: '关闭 Windows 多媒体播放时的网络节流（NetworkThrottlingIndex 拉满），并把系统响应性设为 0。',
+      what: '关闭 Windows 多媒体播放场景的网络节流（NetworkThrottlingIndex 拉满），并把连接响应重传收紧（TcpMaxConnectResponseRetransmissions=2）。',
       when: '后台看视频/听音乐时网速被系统压低、游戏延迟因节流策略升高。',
       effect: '系统不再在播放场景主动限制网络吞吐，网络反馈更快；普通浏览感知有限，游戏、直播、下载场景更明显。'
     },
     tf_net_tcp: {
-      what: '通过 netsh 与注册表批量调整 TCP 全局参数：关闭自动调优/ECN/时间戳，启用 RSS、CTCP 拥塞算法等。',
+      what: '通过 netsh 与注册表批量调整 TCP 全局参数：关闭自动调优/ECN/RSC/时间戳/启发式，启用 RSS、DCA、CTCP 拥塞算法，邻居缓存 4096，关闭网络节流。',
       when: '追求极限低延迟的游戏、竞技或下载场景，愿意用少量兼容性换取网络性能。',
       effect: 'TCP 连接的延迟与吞吐参数得到优化；个别老旧网络设备或 VPN 可能不兼容，出现异常可通过还原点回退。'
     },
     tf_net_tcpip: {
-      what: '写入 Tcpip 服务注册表参数：TTL=64、关闭 SACK 与 Nagle 算法、MaxUserPort 拉满、TIME_WAIT 缩短到 30 秒等。',
-      when: '高并发连接场景（大量下载任务、本地服务）出现端口耗尽、连接建立偏慢。',
-      effect: '连接复用更激进、握手更干脆；家用日常感知不大，所有改动均为可逆的注册表参数。'
+      what: '写入 Tcpip 服务注册表参数：窗口缩放与时间戳（Tcp1323Opts=1）、快速重传灵敏度（TcpMaxDupAcks=2）、启用 SACK（SackOpts=1）。',
+      when: '高并发连接场景（大量下载任务、本地服务）出现连接建立偏慢、丢包恢复慢。',
+      effect: '丢包恢复与连接建立更灵敏；家用日常感知不大，所有改动均为可逆的注册表参数。'
     },
     tf_net_lanman: {
-      what: '调整 SMB 服务器（LanmanServer 文件共享服务）的会话参数：空闲会话永不断开、关闭 Oplocks 等。',
-      when: '局域网共享或 NAS 传输频繁断连、小文件传输速度明显偏慢。',
-      effect: '共享会话更稳定，减少频繁断开重连；关闭 Oplocks 后个别场景的共享文件一致性保障会降低。'
-    },
-    tf_net_nic: {
-      what: '遍历所有网卡，把高级属性统一切到「低延迟」档：关闭节能、绿色以太网、WoL、中断调节与流控，RSS 双队列、缓冲区拉大。',
-      when: '网游、竞技等对网络延迟抖动极度敏感的场景，可以接受功耗略微增加。',
-      effect: '网卡对数据包「即来即走」，延迟与抖动明显变小；笔记本的功耗与发热会略有增加。'
+      what: '调整 SMB 服务器（LanmanServer 文件共享服务）参数：服务器平衡档（Size=3）、关闭 Lanman 广播公告（LmAnnounce=0）。',
+      when: '局域网共享或 NAS 传输场景想减少老式广播流量、统一服务器资源档位。',
+      effect: '共享服务以平衡档运行、不再向网络广播主机存在；依赖 Lanman 广播的老式网络发现会受影响。'
     },
     tf_net_weakhost: {
       what: '对所有网卡（含隐藏网卡）启用 WeakHost 发送/接收模型，替代默认的强主机模型。',
@@ -111,9 +100,9 @@
       effect: '多网卡间的路由收发更灵活，跨网段访问更顺；网络隔离安全性轻微降低，单网卡环境收益有限。'
     },
     net_qos_scheduler: {
-      what: '将组策略 NonBestEffortLimit 设为 0，取消 Windows 默认预留的 QoS 保留带宽（PSched 策略）。',
-      when: '大流量下载、直播推流时感觉带宽总被系统「吃掉」一截。',
-      effect: '应用可用的带宽上限不再被系统预留削减；企业、校园、VPN 或域策略环境可能被上层配置覆盖。'
+      what: '将组策略 NonBestEffortLimit 设为 0，取消 Windows 默认预留的 QoS 保留带宽（PSched 策略）；同时关闭 TCP 任务卸载（DisableTaskOffload=1）。',
+      when: '大流量下载、直播推流时感觉带宽总被系统「吃掉」一截，或网卡卸载功能存在缺陷导致连接异常。',
+      effect: '应用可用的带宽上限不再被系统预留削减，卸载相关异常可规避；CPU 占用略增，企业、校园、VPN 或域策略环境可能被上层配置覆盖。'
     },
     net_disable_netbios: {
       what: '把所有网卡接口的 NetBIOS over TCP/IP 关闭（NetbiosOptions=2）。',
@@ -355,10 +344,15 @@
       if (resp && resp.needAdmin) {
         status.set(task.id, 'error');
         const elevated = await window.app?.requestElevation?.('该维护任务需要管理员权限才能执行系统级操作。');
+        if (elevated && batchRemainingIds && batchRemainingIds.length) {
+          // 审查 2026-09-27 M8：同意提权 → 应用即将重启，先把剩余批次（含本项，
+          // 本项未执行成功）写入 localStorage，重启进页时恢复预勾选
+          try { localStorage.setItem(MAINT_PENDING_BATCH_KEY, JSON.stringify(batchRemainingIds)); } catch (e) { /* 存储不可用则降级为手动重选 */ }
+        }
         appendOutput(elevated
-          ? '已获得管理员权限，应用将以管理员身份重启，重启后请重新执行本任务'
+          ? '已获得管理员权限，应用将以管理员身份重启，剩余任务已保存，重启后将自动恢复勾选'
           : '未提权，任务已取消（需要管理员权限）');
-        return 'error';
+        return elevated ? 'elevating' : 'error';
       }
       const result = resp?.data?.result || (resp?.success ? 'ok' : 'error');
       status.set(task.id, resp?.success ? (result === 'ok' ? 'ok' : result === 'warn' ? 'warn' : 'error') : 'error');
@@ -448,21 +442,33 @@
     updateBatchbar();
     renderList();
 
-    for (const task of list) {
+    for (const [idx, task] of list.entries()) {
       if (batch.cancelRequested) {
         appendOutput(`—— 已取消：跳过「${task.title}」及后续项目 ——`);
         break;
       }
+      // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
+      batchRemainingIds = list.slice(idx).map(t => t.id);
       running = task.id;
       appendOutput(`—— [${batch.done + 1}/${batch.total}] ${task.title} ——`);
       updateBatchbar();
 
       const st = await runOne(task);
+      if (st === 'elevating') {
+        // 提权已获同意，应用即将以管理员身份重启——剩余批次已持久化，中止循环
+        appendOutput('—— 应用即将以管理员身份重启，批量已暂停，重启后将自动恢复勾选 ——');
+        batch.fail++;
+        batch.done++;
+        running = null;
+        updateBatchbar();
+        return;
+      }
       if (st === 'ok' || st === 'warn') batch.ok++; else batch.fail++;
       batch.done++;
       running = null;
       updateBatchbar();
     }
+    batchRemainingIds = null;
 
     const cancelled = batch.cancelRequested;
     const summary = `成功 ${batch.ok} 项 · 失败 ${batch.fail} 项${cancelled ? ' · 已取消剩余' : ''}`;
@@ -509,10 +515,25 @@
         renderTabs();
         renderList();
         updateBatchbar();
+        restorePendingBatch();
       }
     } catch (e) {
       // 静默：保留空态
     }
+  }
+
+  // 审查 2026-09-27 M8：重启后恢复上次因提权中断的批量勾选，恢复后立即清键
+  function restorePendingBatch() {
+    let pending = null;
+    try { pending = JSON.parse(localStorage.getItem(MAINT_PENDING_BATCH_KEY) || 'null'); } catch (e) { /* 损坏即放弃 */ }
+    if (!Array.isArray(pending) || !pending.length) return;
+    try { localStorage.removeItem(MAINT_PENDING_BATCH_KEY); } catch (e) { /* 同上 */ }
+    const valid = pending.filter(id => tasks.some(t => t.id === id));
+    if (!valid.length) return;
+    valid.forEach(id => selected.add(id));
+    renderList();
+    updateBatchbar();
+    window.app?.toast?.('info', `检测到上次因提权重启中断的维护批量（${valid.length} 项），已恢复勾选，可点「执行所选」继续`, 6000);
   }
 
   function init() {

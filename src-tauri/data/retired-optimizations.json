@@ -71,6 +71,11 @@
       "id": "mmcss_optimize",
       "title": "MMCSS优化",
       "note": "审计 P1-09（2026-09-25）：README 已对外承诺「MMCSS 多媒体调度相关注册表调校已不提供」，但该项仍挂在优化中心活动清单（组「游戏与多媒体」），用户可见可执行。按产品原则「说不清收益宁可不做」退役兑现承诺。原项含两步注册表写入（Games 任务高调度/GPU Priority=8/Latency Sensitive + SystemProfile NoLazyMode/AlwaysOn + Reliability 时间戳/IO优先级），restoreAvailable=true 有还原步骤。已执行过该项的用户需手动还原或使用优化中心「状态不明一键还原」。"
+    },
+    {
+      "id": "tf_oosu",
+      "title": "OOSU 隐私工具静默导入",
+      "note": "用户 2026-09-27 点名下线。该项为「联网下载外部 exe 并静默执行」模式（O&O ShutUp10++），是全部优化项中唯一引入第三方可执行文件的步骤，与其余纯注册表/系统工具步骤风险模型不同；隐私批量关闭能力已由 tf_privacy_extra / tf_ai_off 等内置策略项覆盖。该项含 pwsh 下载校验步骤、无注册表步骤，通常无 optimizer-backups 备份记录需要还原。"
     }
   ]
 }

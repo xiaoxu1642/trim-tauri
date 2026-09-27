@@ -816,10 +816,8 @@ const PS_INLINE_ALLOW: &[&str] = &[
     "New-Item",
     "New-ItemProperty",
     "Set-ItemProperty",
-    // 下载校验流（tf_oosu）
-    "Invoke-WebRequest",
-    "Get-FileHash",
-    "Get-AuthenticodeSignature",
+    // 启动外部进程（tf_onedrive 的服务操作）；tf_oosu 退役后
+    // Invoke-WebRequest / Get-FileHash / Get-AuthenticodeSignature 已无使用者，同步收紧
     "Start-Process",
     // 输出
     "Write-Output",

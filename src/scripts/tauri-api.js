@@ -623,7 +623,7 @@
       listRestore: function () { return invokeChannel('optimizer:list-restore'); },
       checkOptimized: function (ids) { return invokeChannel('optimizer:check-optimized', { ids: ids }); },
       svcMemCurrent: function () { return invokeChannel('optimizer:svc-mem-current'); },
-      backupReg: function (optionId, steps) { return invokeChannel('optimizer:backup-reg', { optionId: optionId, steps: steps }); },
+      backupReg: function (optionId) { return invokeChannel('optimizer:backup-reg', { optionId: optionId }); },
       restoreReg: function (optionId) { return invokeChannel('optimizer:restore-reg', { optionId: optionId }); },
       stateOverview: function () { return invokeChannel('optimizer:state-overview'); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }

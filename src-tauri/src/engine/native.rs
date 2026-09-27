@@ -5561,15 +5561,14 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             let ok = reg_import(reg);
             Ok((ok, "弱主机模型已启用".into()))
         }
-        "tf_net_nic" => {
-            // 网卡类注册表调优（简化版：写通用值）
-            let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}]\r\n";
-            let ok = reg_import(reg);
-            Ok((ok, "网卡参数已优化".into()))
-        }
+        // 审查 2026-09-27 M5：本分支此前是「空操作假成功」——.reg 只有节头零值行，
+        // reg_import 只会建空类键却报「网卡参数已优化」。真正的网卡级调优需要遍历
+        // 每个网卡实例子键（PnP 路径），误写通用键有断网风险，故整任务下线而非补实现。
         "net_disable_netbios" => {
-            // 遍历接口写 NetbiosOptions=2
+            // 遍历接口写 NetbiosOptions=2；审查 2026-09-27 M7：写失败不再静默吞掉，
+            // 按成功写入数如实回传，0 个接口写入成功即为失败
             let base = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces";
+            let mut written = 0u32;
             unsafe {
                 let sk = to_wide(base);
                 let mut hk = HKEY::default();
@@ -5586,7 +5585,9 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
                         if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(isk.as_ptr()), Some(0), KEY_WRITE, &mut ihk).is_ok() {
                             let nm = to_wide("NetbiosOptions");
                             let val = 2u32;
-                            let _ = RegSetValueExW(ihk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes()));
+                            if RegSetValueExW(ihk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes())).is_ok() {
+                                written += 1;
+                            }
                             let _ = RegCloseKey(ihk);
                         }
                         index += 1;
@@ -5594,49 +5595,46 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
                     let _ = RegCloseKey(hk);
                 }
             }
-            Ok((true, "NetBIOS 已在所有接口禁用".into()))
+            if written > 0 {
+                Ok((true, format!("NetBIOS 已在 {written} 个接口禁用")))
+            } else {
+                Ok((false, "未能禁用任何接口的 NetBIOS（注册表写入失败）".into()))
+            }
         }
         "net_disable_lmhosts" => {
-            unsafe {
+            // 审查 2026-09-27 M7：RegSetValueExW 失败不再被 let _ 吞掉后谎报成功
+            let ok = unsafe {
                 let key = r"SYSTEM\CurrentControlSet\Services\NetBT\Parameters";
                 let sk = to_wide(key);
                 let mut hk = HKEY::default();
-                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_ok() {
+                let opened = RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk);
+                if opened.is_ok() {
                     let nm = to_wide("EnableLMHOSTS");
                     let val = 0u32;
-                    let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes()));
+                    let set = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes()));
                     let _ = RegCloseKey(hk);
+                    set.is_ok()
+                } else {
+                    false
                 }
-            }
-            Ok((true, "LMHOSTS 查找已禁用".into()))
+            };
+            Ok((ok, if ok { "LMHOSTS 查找已禁用".into() } else { "LMHOSTS 注册表写入失败（键不存在或被策略保护）".into() }))
         }
         "net_qos_scheduler" => {
-            unsafe {
-                let key = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters";
-                let sk = to_wide(key);
-                let mut hk = HKEY::default();
-                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_ok() {
-                    let nm = to_wide("DisableTaskOffload");
-                    let val = 1u32;
-                    let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes()));
-                    let _ = RegCloseKey(hk);
-                }
-            }
-            Ok((true, "QoS 调度器已优化".into()))
+            // 审查 2026-09-27 M6：补文案承诺的 NonBestEffortLimit=0（PSched 策略键）；
+            // DisableTaskOffload=1 是本任务实际写入的另一参数（关闭 TCP 任务卸载），
+            // 统一走 reg_import 并检查结果，不再「打开键失败也报成功」
+            let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\Psched]\r\n\"NonBestEffortLimit\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters]\r\n\"DisableTaskOffload\"=dword:00000001\r\n";
+            let ok = reg_import(reg);
+            Ok((ok, if ok { "QoS 保留带宽已取消，TCP 任务卸载已关闭".into() } else { "QoS 参数写入失败".into() }))
         }
         "net_response" => {
-            unsafe {
-                let key = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters";
-                let sk = to_wide(key);
-                let mut hk = HKEY::default();
-                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_ok() {
-                    let nm = to_wide("TcpMaxConnectResponseRetransmissions");
-                    let val = 2u32;
-                    let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes()));
-                    let _ = RegCloseKey(hk);
-                }
-            }
-            Ok((true, "网络响应参数已优化".into()))
+            // 审查 2026-09-27 M6：补文案承诺的网络节流键（NetworkThrottlingIndex 拉满
+            // = 禁用多媒体播放时的网络节流）；SystemResponsiveness 不在此处写——
+            // tf_net_tcp 已按其文案写 10，两任务对该键取值不同，避免隐式互相覆盖
+            let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile]\r\n\"NetworkThrottlingIndex\"=dword:ffffffff\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters]\r\n\"TcpMaxConnectResponseRetransmissions\"=dword:00000002\r\n";
+            let ok = reg_import(reg);
+            Ok((ok, if ok { "网络节流已关闭，连接响应重传已收紧".into() } else { "网络响应参数写入失败".into() }))
         }
         _ => Err(format!("未知的维护任务: {task_id}")),
     }
