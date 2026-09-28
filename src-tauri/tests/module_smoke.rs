@@ -601,3 +601,184 @@ fn uninstall_list_rows_carry_resolvable_shortcuts() {
     println!("带 shortcutPath 的行数: {hit} / {}", apps.len());
     assert!(hit > 0, "全机没有任何一行匹配到快捷方式 = 索引或匹配链断了");
 }
+
+/// 探针清场守卫：断言失败（panic 走 unwind）也必须把注册表键与临时文件收掉，
+/// 否则一次失败的发布前门禁会在用户机器上留下假备份与假档案。
+struct RestoreProbeGuard {
+    sub: &'static str,
+    file: std::path::PathBuf,
+    seal: std::path::PathBuf,
+}
+
+impl Drop for RestoreProbeGuard {
+    fn drop(&mut self) {
+        use trim_tauri_lib::engine::native;
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        let _ = native::reg_key_remove(HKEY_CURRENT_USER, self.sub, true);
+        let _ = std::fs::remove_file(&self.file);
+        let _ = std::fs::remove_file(&self.seal);
+    }
+}
+
+/// M5 D1 的真机闭环：`reg import` 到底有没有把值写回注册表。
+///
+/// 这条一直是缺口——之前只证到「命令边界与四道闸的判定」，从没让 reg.exe 真跑过一次。
+/// 用一次性探针键 `HKCU\Software\TrimRestoreProbe`（不碰任何真实软件键）。
+/// 顺带在同一条真链上钉封条闸门：写一条错摘要后再还原必须被硬拒——
+/// 否则「封条」只是注释里的承诺。
+#[test]
+#[ignore = "真跑 reg import 写注册表（一次性 HKCU 探针键），发布前门禁跑"]
+fn reg_backup_restore_writes_registry_end_to_end() {
+    use trim_tauri_lib::engine::{native, paths};
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    let sub = r"Software\TrimRestoreProbe";
+    let probe_val = || native::read_reg_value_text(HKEY_CURRENT_USER, sub, "probe").map(|(_, s)| s);
+    let dir = paths::app_data_dir().join("uninstall-reg-backup");
+    std::fs::create_dir_all(&dir).expect("备份目录应可建");
+    let name = "1790000000001_TrimRestoreProbe.reg";
+    let file = dir.join(name);
+    let seal = dir.join(format!("{name}.meta.json"));
+    let _guard = RestoreProbeGuard { sub, file: file.clone(), seal: seal.clone() };
+    assert_eq!(probe_val(), None, "前置条件：探针键必须不存在（守卫没清干净？）");
+
+    std::fs::write(
+        &file,
+        "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\TrimRestoreProbe]\r\n\"probe\"=\"restored\"\r\n",
+    )
+    .expect("备份应可写");
+
+    let w = main_window();
+    let res = invoke(&w, "uninstall_reg_backup_restore", json!({ "file": name }));
+    assert_eq!(res["success"], json!(true), "无封条（missing）的合法备份应可还原: {res}");
+    assert_eq!(
+        probe_val().as_deref(),
+        Some("restored"),
+        "reg import 必须真的把值写进注册表，不能只回一个 success"
+    );
+
+    // 封条闸门：同一份文件，补一条错摘要后再还原必须被拒
+    std::fs::write(
+        &seal,
+        br#"{"sha256":"0000000000000000000000000000000000000000000000000000000000000000","target":"HKCU\Software\TrimRestoreProbe"}"#,
+    )
+    .expect("封条应可写");
+    let again = invoke(&w, "uninstall_reg_backup_restore", json!({ "file": name }));
+    assert_eq!(again["success"], json!(false), "封条不符必须硬拒，实测 {again}");
+    assert!(
+        common::message_of(&again).contains("封条"),
+        "回执必须说明是封条拦下的，实测 {again}"
+    );
+    assert_eq!(probe_val().as_deref(), Some("restored"), "被拒的还原不得改动已有键值");
+}
+
+/// 所有权链探针守卫：档案恢复原样 + 探针目录整体删除，panic 也要执行。
+struct OrphanProbeGuard {
+    doc_path: std::path::PathBuf,
+    backup: Option<Vec<u8>>,
+    root: std::path::PathBuf,
+}
+
+impl Drop for OrphanProbeGuard {
+    fn drop(&mut self) {
+        match &self.backup {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.doc_path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.doc_path);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// M4 所有权链的「有产出」分支真机验证：候选真出现 → 真送回收站 → 「不再提示」真生效。
+///
+/// 之前这条链只在单测里用注入的 `exists` 闭包跑过判定，真机上从没产出过候选
+/// （本机唯一档案项网易大神没有精确同名目录），所以候选渲染、快照闸、回收站、
+/// 忽略写档这一段全是未验证状态。
+///
+/// 探针只在 `%LOCALAPPDATA%\TrimOrphanProbe\cache` 里造，删除走回收站（可还原）；
+/// 真实所有权档案先读后恢复，测试不留痕。
+#[test]
+#[ignore = "写所有权档案与 %LOCALAPPDATA% 探针目录并真送回收站，发布前门禁跑"]
+fn orphan_chain_produces_real_candidate_and_ignore_works() {
+    use trim_tauri_lib::engine::paths;
+    let doc_path = paths::app_data_dir().join("uninstall-ownership.json");
+    let probe = "TrimOrphanProbe";
+    let app_id = format!(r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{probe}");
+    let root = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA"))
+        .join(probe);
+    let cache = root.join("cache");
+    std::fs::create_dir_all(&cache).expect("探针目录应可建");
+    std::fs::write(cache.join("probe.txt"), b"probe").expect("探针文件应可写");
+    let backup = std::fs::read(&doc_path).ok();
+    let _guard = OrphanProbeGuard { doc_path: doc_path.clone(), backup, root: root.clone() };
+    let gone = std::env::temp_dir().join(format!("TrimOrphanProbe-Gone-{}", std::process::id()));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let doc = json!({
+        "schemaVersion": 1,
+        "owners": [{
+            "appId": app_id,
+            "displayName": probe,
+            "publisher": "",
+            "installLocation": gone.to_string_lossy(),
+            "ownedPaths": [],
+            "recordedAt": now - 2000,
+            "state": "historical",
+            "confirmedAt": now - 2000,
+        }],
+        "ignored": [],
+    });
+    std::fs::write(&doc_path, serde_json::to_vec_pretty(&doc).unwrap()).expect("档案应可写");
+
+    let w = main_window();
+    let scan = invoke(&w, "uninstall_orphan_scan", json!({}));
+    assert_eq!(scan["success"], json!(true), "有 historical 档案时扫描应成功: {scan}");
+    let findings = scan["data"]["findings"].as_array().cloned().unwrap_or_default();
+    let cand = findings
+        .iter()
+        .find(|f| {
+            f["kind"] == json!("folder")
+                && f["target"]
+                    .as_str()
+                    .map(|t| t.replace('/', "\\").ends_with(&format!("\\{probe}\\cache")))
+                    .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("探针目录的 cache 子目录必须成为候选，实测 {findings:?}"));
+    assert_eq!(cand["defaultChecked"], json!(false), "该组候选一律不自动勾选");
+    assert_eq!(cand["ownerName"], json!(probe), "候选要写清归属: {cand}");
+    let target = cand["target"].as_str().unwrap_or("").to_string();
+
+    let exec = invoke(
+        &w,
+        "uninstall_residue_execute",
+        json!({ "appId": app_id, "targets": [{ "kind": "folder", "target": target }] }),
+    );
+    assert_eq!(exec["success"], json!(true), "快照内的探针目录应可送回收站: {exec}");
+    assert!(exec["data"]["okCount"].as_i64().unwrap_or(0) >= 1, "回执要报成功数: {exec}");
+    assert!(
+        !std::path::Path::new(&target).exists(),
+        "送删后探针 cache 目录必须真的不在了（回收站可还原）: {target}"
+    );
+
+    // 「不再提示该程序」必须写档并在下一次扫描里生效
+    let ign = invoke(
+        &w,
+        "uninstall_orphan_ignore",
+        json!({ "appId": app_id, "displayName": probe }),
+    );
+    assert_eq!(ign["success"], json!(true), "忽略入口应成功: {ign}");
+    let after = invoke(&w, "uninstall_orphan_scan", json!({}));
+    let left = after["data"]["findings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f["ownerName"] == json!(probe))
+        .count();
+    assert_eq!(left, 0, "忽略后该 owner 不得再产候选，实测 {after}");
+}

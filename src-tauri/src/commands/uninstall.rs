@@ -2339,7 +2339,7 @@ mod ownership {
 /// 2. **owner 唯一**——同一目录名被两个 historical owner 命中时无法判定归属，直接丢；
 /// 3. **原安装目录必须 ENOENT**——还在就说明程序没卸完，不是应用数据遗留。
 /// 另外再过三道环境闸：受保护路径、上级链重解析点（`dir_delete_blocked`）、
-/// 运行中进程的祖先链（正被使用的目录绝不提示删除）。
+/// 运行中进程所在目录（与候选互为祖先或子孙即视为在用，正被使用的目录绝不提示删除）。
 /// 产出默认只列**可弃子目录**（cache / logs 这类），且一律不勾选、置信度封顶 medium。
 const ORPHAN_DISPOSABLE_SUBDIRS: &[&str] = &[
     "cache", "caches", "code cache", "gpucache", "gpu cache", "logs", "log", "tmp", "temp",
@@ -2395,10 +2395,16 @@ fn running_process_dirs() -> Option<HashSet<String>> {
 /// **两个方向都要查**：候选是进程目录的祖先（端掉父目录会带走正在跑的程序）
 /// 或候选就在进程目录里面（正被使用的子目录）——只查一边会漏掉另一半（Y5 实测）。
 fn under_running_process(dir: &Path, procs: &HashSet<String>) -> bool {
-    dir.ancestors().any(|a| {
-        let s = a.to_string_lossy().to_ascii_lowercase();
-        procs.iter().any(|p| p.starts_with(&s) || s.starts_with(p))
-    })
+    let cand = dir.to_string_lossy().to_ascii_lowercase();
+    procs.iter().any(|p| path_within(p, &cand) || path_within(&cand, p))
+}
+
+/// `inner` 是否等于 `outer` 或位于其目录树内。**按路径段**比，不按裸前缀比：
+/// `C:\Foo\bar` 与 `C:\Foobar` 都不算在 `C:\Foo` 里面，否则同级兄弟目录会被误判成在用。
+fn path_within(inner: &str, outer: &str) -> bool {
+    let i = inner.trim_end_matches(['\\', '/']);
+    let o = outer.trim_end_matches(['\\', '/']);
+    i == o || (i.starts_with(o) && matches!(i.as_bytes().get(o.len()), Some(b'\\') | Some(b'/')))
 }
 
 /// uninstall:orphan-scan — 应用数据遗留应用数据扫描（主窗档；只产候选，删除仍走 residue-execute）
@@ -4196,7 +4202,7 @@ mod residue_trace_tests {
         ]));
     }
 
-    /// 运行进程祖先链判定：命中自身或任一祖先都算在用；大小写与尾随分隔符不许绕过。
+    /// 运行进程目录判定：候选与进程目录互为祖先/子孙都算在用；大小写与尾随分隔符不许绕过。
     #[test]
     fn running_process_ancestry_blocks_candidates() {
         let mut procs = HashSet::new();
@@ -4209,6 +4215,20 @@ mod residue_trace_tests {
             "候选位于正在运行的进程目录之内，必须视为在用"
         );
         assert!(!under_running_process(Path::new(r"D:\Data\Other"), &procs));
+        // 同盘但毫不相干的目录 —— M4 真机缺陷的回归钉：旧实现走 `dir.ancestors()`，
+        // 走到 `C:\` 时任何进程路径都 starts_with 它，于是**全盘恒为在用**，
+        // 应用数据遗留链在任何机器上都产不出一个候选（2026-09-29 探针实测暴露）。
+        assert!(
+            !under_running_process(Path::new(r"C:\Users\x\AppData\Local\SomeLeftover"), &procs),
+            "同盘无关目录不得被判成在用"
+        );
+        // 同级兄弟前缀不许互相污染（裸字符串前缀比就会）
+        let mut sib = HashSet::new();
+        sib.insert(r"c:\program files\acmebackup".to_string());
+        assert!(
+            !under_running_process(Path::new(r"C:\Program Files\Acme"), &sib),
+            r"按裸前缀比会把兄弟目录 acmebackup 误判进 Acme 的树里"
+        );
         // 快照为空（取不到）时不该放行任何候选 —— 由调用方按 None 拒绝扫描
         assert!(!under_running_process(Path::new(r"C:\Program Files\Acme"), &HashSet::new()));
     }
