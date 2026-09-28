@@ -4674,7 +4674,7 @@ dependencies = [
 
 [[package]]
 name = "trim-tauri"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
