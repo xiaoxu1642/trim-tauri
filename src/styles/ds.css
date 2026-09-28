@@ -131,6 +131,8 @@ input[type="range"].ds-slider:focus-visible {
   color: var(--fg-primary);
   font-size: 12px;
   line-height: 1.55;
+  /* 提示里的 \n 是内容（多条件判定依据、多路径目标清单），不是排版噪音 */
+  white-space: pre-line;
   pointer-events: none;
   opacity: 0;
   transform: translateY(2px);

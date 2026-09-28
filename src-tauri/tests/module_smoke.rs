@@ -529,6 +529,18 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
                 assert!(f[k].is_string(), "{app_id} 候选缺字符串字段 {k}: {f}");
             }
             assert!(f["defaultChecked"].is_boolean(), "{app_id} 候选缺 defaultChecked: {f}");
+            // C4：contribs 可缺（有的链只有一句结论），但一旦出现必须是「对象 + 非空 code/text」
+            // 数组——渲染层直接 .map，混进字符串或 null 会让整张残留表崩。
+            if let Some(cs) = f["contribs"].as_array() {
+                assert!(
+                    !cs.is_empty()
+                        && cs.iter().all(|c| {
+                            !c["code"].as_str().unwrap_or("").is_empty()
+                                && !c["text"].as_str().unwrap_or("").is_empty()
+                        }),
+                    "{app_id} 贡献项形状不合规: {f}"
+                );
+            }
             if f["kind"].as_str() == Some("reg_key") {
                 let t = f["target"].as_str().unwrap_or("");
                 assert!(

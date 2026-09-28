@@ -447,11 +447,19 @@
         ? `<button class="btn btn-secondary" style="margin-left:8px;padding:2px 8px;font-size:12px" data-orphan-ignore="${i}" data-tip="此后不再按这条卸载记录提示遗留数据（只影响应用数据遗留这一组，不动残留规则库）">不再提示该程序</button>`
         : '';
       const tested = (f.testedPaths && f.testedPaths.length) ? f.testedPaths.join('\n') : f.target;
+      // C4：判定依据按离散贡献项逐条给（后端只产事实、不产分数），一行一条。
+      const contribs = f.contribs || [];
+      const whyTip = contribs.length
+        ? ` data-tip="${esc(contribs.map((c) => '· ' + (c.text || '')).join('\n'))}"`
+        : '';
+      const whyHint = contribs.length
+        ? `<span class="finder-name-text" style="opacity:.5;font-size:11px">· 依据 ${contribs.length} 条</span>`
+        : '';
       h += `<tr class="${f._checked ? 'finder-row-selected' : ''}">
           <td>${cell}</td>
           <td><div class="finder-cell"><span class="finder-path-text" data-tip="${esc(tested)}">${esc(f.target)}</span></div></td>
           <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75">${CONF_LABEL[f.confidence] || f.confidence || '—'}</span></td>
-          <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75">${esc(f.reason || '')}</span>${ignoreBtn}</td>
+          <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75"${whyTip}>${esc(f.reason || '')}</span>${whyHint}${ignoreBtn}</td>
         </tr>`;
     }
     return h + '</tbody></table>';

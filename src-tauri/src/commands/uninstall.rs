@@ -1976,6 +1976,21 @@ fn load_residue_rules() -> Option<Value> {
     Some(builtin)
 }
 
+/// C4 贡献项：把「这一条为什么进候选」拆成离散因子，供渲染层逐条指认。
+///
+/// 借 BCU 的是**可解释性**，不是它的加权计分内核：浮点总分会让启发式看起来比实际更精确，
+/// 而删除依据必须一条条数得出来。`code` 是稳定标识（单测与过滤按它寻址，不按文案寻址），
+/// `text` 是给人看的那一句。纯展示字段——执行侧一律不消费它（方案 §6.3：展示/诊断字段
+/// 不等于执行语义）。
+fn contribs(items: &[(&str, String)]) -> Value {
+    Value::Array(
+        items
+            .iter()
+            .map(|(code, text)| json!({ "code": code, "text": text }))
+            .collect(),
+    )
+}
+
 /// 条件组命中判定（U-1「双条件」拍板）：displayName / publisher / uninstallKey 三组里
 /// **至少两组命中**才视为同一程序，单一维度弱相似不触发（防「QQ」类短名误伤全家桶）。
 /// 返回 (候选集, 被 A1 硬否决的目标) —— 否决原因只在这里收集，由命令边界落日志：
@@ -2035,6 +2050,19 @@ fn residue_rules_hits(
         if hits < 2 {
             continue;
         }
+        // C4：把「哪几组条件命中」摊开成离散因子。双条件闸本身只说"够两组"，用户看不到
+        // 是哪两组，就无法判断这条规则是不是靠「厂商名 + 一个短词」弱命中了自己别的产品。
+        let mut why: Vec<(&str, String)> = Vec::new();
+        if name_hit {
+            why.push(("name", format!("程序名条件组命中：本机 DisplayName「{display_name}」")));
+        }
+        if pub_hit {
+            why.push(("publisher", format!("发行商条件组命中：本机 Publisher「{publisher}」")));
+        }
+        if key_hit {
+            why.push(("uninstallKey", format!("卸载键条件组命中：本机键路径「{key_path}」")));
+        }
+        why.push(("ruleId", format!("来自签名残留规则库规则 {id}")));
         // 命中 → 展开 %VAR% 目标并做存在性判定：不存在的目标不出现在面板里
         for entry in rule.get("residue").and_then(|x| x.as_array()).unwrap_or(&empty) {
             let kind = entry.get("kind").and_then(|x| x.as_str()).unwrap_or("");
@@ -2065,6 +2093,7 @@ fn residue_rules_hits(
                         "reason": format!("残留规则库命中（{id}）：{note}"),
                         "confidence": "high", "risk": "medium", "defaultChecked": true,
                         "ruleId": id,
+                        "contribs": contribs(&why),
                     }));
                 }
                 "reg_key" => {
@@ -2086,6 +2115,7 @@ fn residue_rules_hits(
                         "reason": format!("残留规则库命中（{id}）：{note}"),
                         "confidence": "high", "risk": "medium", "defaultChecked": true,
                         "ruleId": id,
+                        "contribs": contribs(&why),
                     }));
                 }
                 _ => continue,
@@ -2701,6 +2731,15 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
                     {
                         continue;
                     }
+                    let why = contribs(&[
+                        ("ownerUninstalled", format!(
+                            "卸载记录「{owner_name}」已复扫确认：程序不在当前清单，且原安装目录已不存在",
+                        )),
+                        ("disposableSubdir", format!(
+                            "子目录「{sub_norm}」属于可弃类别（cache / logs 一类），不是用户资料",
+                        )),
+                        ("envGates", "已通过保护路径、目录重解析点、运行进程同链三道环境闸".to_string()),
+                    ]);
                     findings.push(json!({
                         "kind": "folder",
                         "target": sub_path,
@@ -2712,6 +2751,8 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
                         "ownerName": owner_name,
                         // 忽略操作要按 owner 的卸载键寻址，前端从这字段取
                         "ownerAppId": owner.get("appId").and_then(Value::as_str).unwrap_or(""),
+                        // C4：所有权链的证据是「一条闭合推理」，不写出来用户只能选择信或不信。
+                        "contribs": why,
                     }));
                     if findings.len() >= ORPHAN_MAX_CANDIDATES {
                         break;
@@ -2936,6 +2977,30 @@ fn dead_uninstall_findings(
         if lands.len() < needed || !landings_all_missing(&lands, exists) {
             continue;
         }
+        let dormant = dormant_delta(r.last_write_ms, now);
+        // C4：证据一条条列出来。落点是这条判定的全部依据，只给一句「落点已全部不存在」
+        // 用户既不知道查了哪几个路径，也无从发现「InstallLocation 本来就写错了」。
+        let mut why: Vec<(&str, String)> =
+            vec![("entry", format!("卸载登记仍在 {}\\{}", r.hive, r.path))];
+        for p in &lands {
+            why.push(("landingMissing", format!("落点已不存在：{p}")));
+        }
+        if needed > 1 {
+            why.push((
+                "msiRule",
+                "MSI 产品码键：要求两条及以上落点全部缺失才入候选".to_string(),
+            ));
+        }
+        match dormant.as_i64() {
+            Some(ms) => why.push((
+                "dormant",
+                format!("键最后写入距今 {} 天（沉睡只展示，不参与判定）", ms / 86_400_000),
+            )),
+            None => why.push((
+                "dormantUnknown",
+                "读不到键最后写入时间，因此不显示沉睡时长".to_string(),
+            )),
+        }
         out.push(json!({
             "kind": "reg_key",
             "target": format!("{}\\{}", r.hive, r.path),
@@ -2947,7 +3012,8 @@ fn dead_uninstall_findings(
             "deadClass": "uninstall",
             "deleteCapable": true,
             "testedPaths": lands,
-            "dormantMs": dormant_delta(r.last_write_ms, now),
+            "contribs": contribs(&why),
+            "dormantMs": dormant,
         }));
     }
     out
@@ -2965,6 +3031,21 @@ fn dead_app_paths_findings(
         if exists(&p) {
             continue;
         }
+        let dormant = dormant_delta(r.last_write_ms, now);
+        let mut why: Vec<(&str, String)> = vec![
+            ("entry", format!("App Paths 登记仍在 {}\\{}", r.hive, r.path)),
+            ("targetMissing", format!("默认值指向的文件已不存在：{p}")),
+        ];
+        match dormant.as_i64() {
+            Some(ms) => why.push((
+                "dormant",
+                format!("键最后写入距今 {} 天（沉睡只展示，不参与判定）", ms / 86_400_000),
+            )),
+            None => why.push((
+                "dormantUnknown",
+                "读不到键最后写入时间，因此不显示沉睡时长".to_string(),
+            )),
+        }
         out.push(json!({
             "kind": "reg_key",
             "target": format!("{}\\{}", r.hive, r.path),
@@ -2976,7 +3057,8 @@ fn dead_app_paths_findings(
             "deadClass": "appPaths",
             "deleteCapable": true,
             "testedPaths": [p],
-            "dormantMs": dormant_delta(r.last_write_ms, now),
+            "contribs": contribs(&why),
+            "dormantMs": dormant,
         }));
     }
     out
@@ -3186,6 +3268,10 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                     "kind": "folder", "target": dir.to_string_lossy(),
                     "reason": "Windows 应用已移除，其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据成为应用数据遗留（进回收站，可还原）",
                     "confidence": "high", "risk": "low", "defaultChecked": true,
+                    "contribs": contribs(&[
+                        ("appxRemoved", format!("包 {pfn} 已从当前用户移除（清单里查不到）")),
+                        ("pkgDataDir", format!("遗留位置由包名唯一确定：{}", dir.to_string_lossy())),
+                    ]),
                 }));
             }
             return (findings, pfn);
@@ -3212,10 +3298,14 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         let mut findings: Vec<Value> = Vec::new();
         // 高置信：卸载键仍在（原厂卸载未完成/已取消的直接证据）
         if crate::engine::native::reg_key_exists(hive, &key_path) {
+            let why = contribs(&[
+                ("uninstallKeyAlive", format!("本次卸载后复查：{full_target} 仍能打开")),
+            ]);
             findings.push(json!({
                 "kind": "reg_key", "target": full_target,
                 "reason": "卸载注册表项仍存在（原厂卸载可能未完成或已取消）",
                 "confidence": "high", "risk": "medium", "defaultChecked": true,
+                "contribs": why,
             }));
         }
         // 高置信：安装目录仍在
@@ -3224,10 +3314,12 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
             && Path::new(&loc).is_dir()
             && !protect::is_path_protected(&loc)
         {
+            let why = contribs(&[("installLocationAlive", format!("厂商写的安装目录仍在磁盘上：{loc}"))]);
             findings.push(json!({
                 "kind": "folder", "target": loc,
                 "reason": "InstallLocation 指向的安装目录仍存在",
                 "confidence": "high", "risk": "medium", "defaultChecked": true,
+                "contribs": why,
             }));
         }
         // 低置信：名称启发式（默认不勾，交用户判断）
@@ -3235,14 +3327,19 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
             if protect::is_path_protected(&p) {
                 continue;
             }
+            let why = contribs(&[(
+                "nameHeuristic",
+                format!("目录名与「{display_name}」互含且长度达阈值（阈值 {NAME_MIN_SIMILAR} 字）"),
+            )]);
             findings.push(json!({
                 "kind": "folder", "target": p,
                 "reason": format!("目录名与「{display_name}」高度相似（启发式，请人工确认后再删）"),
                 "confidence": "low", "risk": "high", "defaultChecked": false,
+                "contribs": why,
             }));
         }
         // 高置信补充：卸载器/图标指向的目录仍存在（InstallLocation 缺失时的主线索）
-        for src in [&uninstall_string, &display_icon_src] {
+        for (from_value, src) in [("UninstallString", &uninstall_string), ("DisplayIcon", &display_icon_src)] {
             if src.trim().is_empty() {
                 continue;
             }
@@ -3259,10 +3356,15 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                     {
                         continue;
                     }
+                    let why = contribs(&[(
+                        "exeParent",
+                        format!("{from_value} 指向的 exe 落在这家目录里：{}", pd.to_string_lossy()),
+                    )]);
                     findings.push(json!({
                         "kind": "folder", "target": pd.to_string_lossy(),
                         "reason": "卸载器/图标指向的程序目录仍存在",
                         "confidence": "high", "risk": "medium", "defaultChecked": true,
+                        "contribs": why,
                     }));
                 }
             }
@@ -3272,7 +3374,28 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 整组降 low 且不默认勾选（目录类启发式本来就是 low，不受这条影响）
         let shortcuts = start_menu_shortcut_hits(&display_name);
         let shortcut_ambiguous = name_is_ambiguous(&shortcuts);
+        // C4：歧义降级要能把「到底是哪几个父目录各有同名快捷方式」指出来，否则用户只看到
+        // 一句"出现在多个目录"，仍然不知道该信哪条。
+        let shortcut_parents = {
+            let mut v: Vec<String> = shortcuts
+                .iter()
+                .filter_map(|s| Path::new(s).parent().map(|p| p.to_string_lossy().to_string()))
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
         for lnk in shortcuts {
+            let mut items: Vec<(&str, String)> = vec![(
+                "shortcutNameMatch",
+                format!("快捷方式文件名与「{display_name}」同名（阈值 {NAME_MIN_SHORTCUT} 字）"),
+            )];
+            if shortcut_ambiguous {
+                items.push((
+                    "ambiguousParents",
+                    format!("同名快捷方式分布在多个父目录，无法指认哪条属于本程序：{}", shortcut_parents.join("；")),
+                ));
+            }
             findings.push(json!({
                 "kind": "shortcut", "target": lnk,
                 "reason": format!("开始菜单快捷方式与「{display_name}」同名{}",
@@ -3280,6 +3403,7 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                 "confidence": if shortcut_ambiguous { "low" } else { "medium" },
                 "risk": "low",
                 "defaultChecked": !shortcut_ambiguous,
+                "contribs": contribs(&items),
             }));
         }
         // 中置信（默认不勾）：固定系统侧痕反查（U-2）。按系统对象里记录的程序路径反查，
@@ -3294,40 +3418,67 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
             .map(|e| e.trim_end_matches('\\').to_ascii_lowercase())
             .collect();
         if !exes_lc.is_empty() || !dir_lc.is_empty() {
+            // C4：侧痕反查的线索来源（安装目录 / exe 路径）比"命中了某个系统登记"更有用——
+            // 用户要判断的是这条线索是不是这个程序留下的。
+            let mut trace_src: Vec<(&str, String)> = Vec::new();
+            if !dir_lc.is_empty() {
+                trace_src.push(("traceByInstallDir", format!("按安装目录反查系统登记：{dir_lc}")));
+            }
+            if !exes_lc.is_empty() {
+                trace_src.push((
+                    "traceByExe",
+                    format!("按 {} 条已知 exe 路径反查（取自卸载器/图标）", exes_lc.len()),
+                ));
+            }
             // 外层闭包整体处于 unsafe 块内，直接调用即可（内层再包 unsafe 会告警冗余）
             for target in muicache_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
+                let mut items = trace_src.clone();
+                items.push(("muicacheHit", "MuiCache 里缓存了这个程序路径的友好名称".to_string()));
                 findings.push(json!({
                     "kind": "reg_value", "target": target,
                     "reason": "MuiCache 残留值（系统缓存了此程序路径的友好名称）",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
+                    "contribs": contribs(&items),
                 }));
             }
             for target in firewall_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
+                let mut items = trace_src.clone();
+                items.push(("firewallHit", "防火墙规则里记着这个程序路径，规则已随程序失效".to_string()));
                 findings.push(json!({
                     "kind": "reg_value", "target": target,
                     "reason": "防火墙规则引用此程序路径（程序已卸载，规则已失效）",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
+                    "contribs": contribs(&items),
                 }));
             }
             for target in bam_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
+                let mut items = trace_src.clone();
+                items.push(("bamHit", "BAM 后台执行管理里留着这个程序路径的执行记录".to_string()));
                 findings.push(json!({
                     "kind": "reg_value", "target": target,
                     "reason": "BAM 后台执行记录引用此程序路径",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
+                    "contribs": contribs(&items),
                 }));
             }
             for target in tracing_hits(&exes_lc, SIDE_TRACE_CAP) {
+                let mut items = trace_src.clone();
+                items.push(("tracingHit", "诊断跟踪子键以此程序的 exe 文件名命名".to_string()));
                 findings.push(json!({
                     "kind": "reg_key", "target": target,
                     "reason": "Tracing 诊断跟踪项以此程序的 exe 命名",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
+                    "contribs": contribs(&items),
                 }));
             }
             for target in jumplist_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
+                let mut items = trace_src.clone();
+                items.push(("jumplistHit", "JumpList 自动目标缓存里留着这个程序的 exe 条目".to_string()));
                 findings.push(json!({
                     "kind": "file", "target": target,
                     "reason": "JumpList 自动目标缓存引用此程序路径",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
+                    "contribs": contribs(&items),
                 }));
             }
         }
@@ -4877,6 +5028,7 @@ mod residue_trace_tests {
     }
 
     /// M6 卸载项判据：全部落点缺失才算失效；MSI 产品码键要求两条落点。
+    /// C4 的贡献项断言也挂在这里——这两个函数的判据是同一条证据链。
     #[test]
     fn dead_uninstall_needs_every_landing_missing() {
         let present: std::collections::HashSet<String> = [
@@ -4928,6 +5080,26 @@ mod residue_trace_tests {
         let out3 = dead_uninstall_findings(&[one], &exists, 1_700_000_900_000);
         assert_eq!(out3.len(), 1, "普通键单条落点缺失就该产出: {out3:?}");
         assert_eq!(out3[0]["confidence"], json!("low"), "一条落点不给 medium: {out3:?}");
+        // C4：贡献项按 code 断言（不按中文文案断言，改文案不该碎掉测试），每条都得有 text。
+        let c = &out[0]["contribs"];
+        let codes: Vec<&str> = c.as_array().unwrap().iter().map(|x| x["code"].as_str().unwrap_or("")).collect();
+        assert_eq!(codes.iter().filter(|k| *k == &"landingMissing").count(), 2, "两条落点各一条: {c}");
+        assert!(codes.contains(&"entry") && codes.contains(&"dormant"), "键位置与沉睡证据都要在: {c}");
+        assert!(
+            c.as_array().unwrap().iter().all(|x| !x["text"].as_str().unwrap_or("").is_empty()),
+            "有 code 没 text 等于给用户一个看不懂的代号: {c}"
+        );
+        assert!(
+            !codes.contains(&"msiRule"),
+            "普通键不该出现 MSI 口径: {c}"
+        );
+        assert!(out2[0]["contribs"]
+            .as_array().unwrap()
+            .iter().any(|x| x["code"] == json!("msiRule")),
+            "MSI 键要说明为什么要求两条落点: {}", out2[0]);
+        let one_codes: Vec<&str> = out3[0]["contribs"].as_array().unwrap()
+            .iter().map(|x| x["code"].as_str().unwrap_or("")).collect();
+        assert_eq!(one_codes.iter().filter(|k| *k == &"landingMissing").count(), 1, "一条落点只该有一条证据: {one_codes:?}");
     }
 
     #[test]
@@ -4964,6 +5136,12 @@ mod residue_trace_tests {
             protect::reg_target_block_reason(target).is_none(),
             "M1 给 App Paths 留的例外放行没生效，本类候选会被执行侧全量拒杀: {target}"
         );
+        // C4：读不到写入时间时明确给 dormantUnknown，不许出现"沉默即很久"那种暗示
+        let codes: Vec<&str> = out[0]["contribs"].as_array().unwrap()
+            .iter().map(|x| x["code"].as_str().unwrap_or("")).collect();
+        assert!(codes.contains(&"entry") && codes.contains(&"targetMissing"), "键与缺失目标都要点名: {codes:?}");
+        assert!(codes.contains(&"dormantUnknown"), "无写入时间不该编沉睡证据: {codes:?}");
+        assert!(!codes.contains(&"dormant"), "{codes:?}");
     }
 
     /// 快照分桶：面板现在同时展示多组候选，整槽覆盖会让先扫那组在执行时被快照闸判过期。
