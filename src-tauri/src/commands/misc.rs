@@ -102,23 +102,6 @@ fn modal_id(info: Option<&serde_json::Value>) -> String {
     raw.chars().take(40).collect()
 }
 
-/// shutdown:begin — 预留扩展点（Electron 版同为未接线的空实现，勿当冗余删除）
-#[tauri::command]
-pub fn shutdown_begin<R: tauri::Runtime>(window: WebviewWindow<R>) {
-    let _ = guard::guard_readonly(&window);
-}
-
-/// shutdown:complete — 渲染层宣告收尾完成，执行最终退出。
-/// Phase 1 语义：走统一退出钩子（RunEvent::Exit → on_app_exit：刷盘日志 + 回收长驻
-/// 子进程 + 清理临时脚本）；Phase 2 会在此之前插入「等删除类任务、断子进程」的静默收尾编排。
-#[tauri::command]
-pub fn shutdown_complete<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWindow<R>) {
-    let _ = guard::guard_readonly(&window);
-    log::write_log("info", "渲染层宣告关闭收尾完成，执行退出");
-    crate::on_app_exit();
-    app.exit(0);
-}
-
 /// intro:load — 本地内置简介库
 #[tauri::command]
 pub fn intro_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {

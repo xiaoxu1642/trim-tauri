@@ -697,7 +697,9 @@
   // ==================== 关闭流程（v2.7.0） ====================
   // 关闭编排已全部移交主进程：点击 X → 窗口立即隐藏，断开连接/清理临时文件/保存日志
   // 等收尾在后台静默进行后自动退出。渲染层不再展示「感谢使用」Toast，也不发送
-  // shutdown:complete（通道保留作扩展点，preload 白名单未动）。
+  // shutdown:complete —— 该通道与 shutdown:begin 已于 2026-09-29（J3）整链摘除：
+  // begin 是空函数，complete 会让任意应用窗强制 app.exit(0)，而退出早已由
+  // RunEvent::Exit → on_app_exit 承担，留着只是多一个退出面。
 
   // 初始化
   async function init() {

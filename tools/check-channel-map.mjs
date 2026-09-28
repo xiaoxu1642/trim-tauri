@@ -65,6 +65,10 @@ const RETIRED = {
   'netspeed:throughput': 'D4 清零（2026-09-28）：同上（回环吞吐测速无 UI 面）',
   'elevate:status': 'D4 清零（2026-09-28）：提权状态走事件 elevate:notice，状态查询零调用方',
   'paths:validate': 'D4 清零（2026-09-28）：纯死通道（Rust 侧亦无内部调用，v2-F19 订正过错误理由）',
+  // J3（2026-09-29）D4 基线清零：两条 shutdown 通道整链摘除（命令体 + lib.rs 注册 +
+  // SEND_MAP + api 包装器一并删除），理由见 D4_ORPHANS 注释。
+  'shutdown:begin': 'J3 清零（2026-09-29）：空函数 no-op，零调用方；关闭编排在主进程 RunEvent::Exit',
+  'shutdown:complete': 'J3 清零（2026-09-29）：渲染层零调用，且 readonly 档可 app.exit(0) 是多余退出面',
 };
 
 /**
@@ -166,7 +170,9 @@ check(onlyPreload.length === 0 && onlyMap.length === 0 && staleRetired.length ==
 
 // ---- B. send 集合 ----
 const expectedSend = new Set([...sendMap.keys(), ...WINDOW_BRIDGED, ...DIRECT]);
-const sendMissing = [...preloadSend].filter(c => !expectedSend.has(c));
+// 退役豁免对 send 同样适用：RETIRED 的语义是「Tauri 轨不再需要这条通道」，
+// 与它挂在 invoke 还是 send 方向无关（A 组早就这么处理了，B 组此前漏掉）。
+const sendMissing = [...preloadSend].filter(c => !expectedSend.has(c) && !RETIRED[c]);
 const sendExtra = [...expectedSend].filter(c => !preloadSend.has(c));
 check(sendMissing.length === 0 && sendExtra.length === 0,
   `B. send 通道集合一致（preload ${preloadSend.size} / 映射+桥接 ${expectedSend.size}）`,
@@ -213,11 +219,10 @@ const D4_ORPHANS = new Map([
   // 现状基线：v2-M15 实测的零调用方通道。基线是**双向棘轮**——
   // 新增孤儿判红（不许再往表里加不接线的条目），基线里的条目一旦有了调用点也判红
   // （白名单不许留死条目，否则下一次没人记得它其实早就接上了）。摘除或接线后从这里删掉。
-  // 2026-09-28 D4 基线清零：原 6 条孤儿（app:get-theme / window:update-overlay /
-  // netspeed:ping / netspeed:throughput / elevate:status / paths:validate）整链摘除并
-  // 登记 RETIRED；仅余 shutdown 两通道为刻意保留的扩展点。
-  ['shutdown:begin', 'v2-M15：`app.js:677` 注明「保留作扩展点」——刻意保留，但要显式登记'],
-  ['shutdown:complete', 'v2-M15：同上'],
+  // 2026-09-28 清到 2 条，2026-09-29（J3）**清零**：shutdown:begin / shutdown:complete
+  // 整链摘除并登记 RETIRED。它们不是「扩展点」而是两个真实风险面：begin 是空函数，
+  // complete 会 app.exit(0) 且档位是 guard_readonly（五个窗都能强制退出应用），
+  // 而关闭编排早已全在主进程（RunEvent::Exit → on_app_exit），这条 IPC 入口纯属重复。
 ]);
 
 /** 递归取 src/ 下的渲染层源码（适配层自身除外：它定义包装器，不是调用点） */

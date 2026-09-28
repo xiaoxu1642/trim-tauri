@@ -782,3 +782,45 @@ fn orphan_chain_produces_real_candidate_and_ignore_works() {
         .count();
     assert_eq!(left, 0, "忽略后该 owner 不得再产候选，实测 {after}");
 }
+
+/// log:write 的边界行为（N3）：五个应用窗都可调（子窗没有 logger.js，直连本通道），
+/// 未知 label 必须拒杀；越过后还要证明**清洗真的发生了**——非法 level 降级为 INFO、
+/// 带换行的消息不能撑出第二行日志、消息前会带上窗口 label。
+///
+/// 正向特征刻意取"降级为 INFO"而不是"没报来源校验失败"：后者在命令整条消失时也会成立
+/// （v2-M16② 的老坑）。
+#[test]
+fn log_write_is_readonly_tier_and_sanitizes_renderer_input() {
+    let evil = "第一行\n[2099-01-01 00:00:00] [ERROR] 伪造行";
+    let labels = ["main"].into_iter().chain(sub_windows().into_iter());
+    for label in labels {
+        let w = window_with_label(label);
+        let res = invoke(&w, "log_write", json!({ "level": "CRITICAL] [x", "message": evil }));
+        let line = res.as_str().unwrap_or_else(|| panic!("{label} 窗应返回日志行字符串，实测 {res}"));
+        assert!(
+            line.contains("[INFO]"),
+            "{label} 窗应越过档位并被 level 白名单降级为 INFO，实测 {line}"
+        );
+        assert!(
+            line.contains(&format!("[{label}]")),
+            "日志行要带窗口 label 才知道是谁报的: {line}"
+        );
+        // 行边界：write_log 只在末尾加一个换行，消息里的换行必须已被吃掉
+        assert_eq!(
+            line.matches('\n').count(),
+            1,
+            "一条消息只能占一行（末尾那一个换行是 write_log 加的），实测 {line:?}"
+        );
+        assert!(
+            !line.contains("\n[2099"),
+            "换行没被清洗就会留下伪造的行首: {line:?}"
+        );
+        assert!(line.contains("2099"), "内容本身不该被吞掉，只吞行边界: {line}");
+    }
+    let w = window_with_label("not-a-trim-window");
+    let text = invoke_text(&w, "log_write", json!({ "level": "error", "message": "x" }));
+    assert!(
+        text.contains("IPC 来源校验失败"),
+        "未知 label 必须被来源校验拒杀，回执 {text}"
+    );
+}

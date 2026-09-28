@@ -241,8 +241,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::misc::diag_dwm_conflict,
         commands::misc::modal_open,
         commands::misc::modal_close,
-        commands::misc::shutdown_begin,
-        commands::misc::shutdown_complete,
         commands::misc::intro_load,
         commands::misc::debug_data_dirs,
         // ---- A 批：device / system / overview ----

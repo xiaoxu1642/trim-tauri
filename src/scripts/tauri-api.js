@@ -251,8 +251,6 @@
    *   驼峰域（processManager）隐式转换会拼错 Rust snake_case 命令（Phase 0 发现）。
    */
   var SEND_MAP = {
-    'shutdown:begin': 'shutdown_begin',
-    'shutdown:complete': 'shutdown_complete',
     'preview:image-deleted': 'preview_image_deleted',
     'processManager:report': 'process_manager_report'
   };
@@ -576,10 +574,6 @@
       onNotice: function (callback) { return onEvent('elevate:notice', callback); }
     },
 
-    shutdown: {
-      begin: function () { sendChannel('shutdown:begin'); },
-      complete: function () { sendChannel('shutdown:complete'); }
-    },
 
     paths: {
       scan: function () { return invokeChannel('paths:scan'); },
@@ -905,6 +899,40 @@
   // Rust 命令」的入口挂在 window 上，绕过上面那层手工挑选的 window.api 白名单，
   // 与本项目「preload 只做白名单转发」的安全前提直接冲突。调试需要看通道名时，
   // 读 tools/check-channel-map.mjs 的输出即可，不要重新开这个口子。
+
+  // 渲染层诊断上报（N3，2026-09-29 借鉴杰瑞调机助手的 boot.log 做法）：
+  // JS 异常与未处理的 Promise 拒绝此前只存在于 DevTools 里，用户侧完全不可见 ——
+  // 白屏、材质不渲染（v2-U4）这类问题因此无从诊断，而 AGENTS §4 现在也不允许
+  // 随手起前台窗口去目检。走**既有** log:write 通道（该通道本轮补了清洗：
+  // 换行、长度、level 白名单），不新开 IPC 面。
+  (function installRendererDiagnostics() {
+    if (window.__trimDiagInstalled) return;
+    window.__trimDiagInstalled = true;
+    var MAX_REPORTS = 20; // 一处循环里持续抛错不能把日志刷爆
+    var sent = 0;
+    function report(kind, detail) {
+      if (sent >= MAX_REPORTS) return;
+      sent += 1;
+      try {
+        window.api.log.write('error', '渲染层' + kind + '：' + String(detail == null ? '' : detail).slice(0, 500));
+      } catch (e) {
+        // 上报本身失败绝不再抛：那会变成「记错误导致新错误」的递归
+      }
+    }
+    // capture 阶段才能收到 img/link/script 的加载失败（它们不冒泡）
+    window.addEventListener('error', function (ev) {
+      var t = ev.target;
+      if (t && t !== window && (t.src || t.href)) {
+        report('资源加载失败', (t.tagName || 'ELEMENT') + ' ' + (t.src || t.href));
+        return;
+      }
+      report('异常', (ev.message || '') + ' @' + (ev.filename || '') + ':' + (ev.lineno || 0));
+    }, true);
+    window.addEventListener('unhandledrejection', function (ev) {
+      var r = ev.reason;
+      report('未处理的 Promise 拒绝', (r && (r.message || r.stack)) || String(r));
+    });
+  })();
 
   initCaption();
   notifyFirstPaint();
