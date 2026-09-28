@@ -1039,9 +1039,10 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         }
         {
             let mut own_doc = ownership::load();
+            let app_id = format!("{hive_name}|{key_path}");
             let recorded = ownership::record_pending(
                 &mut own_doc,
-                &format!("{hive_name}|{key_path}"),
+                &app_id,
                 &display_name,
                 &publisher,
                 install_location.trim(),
@@ -1049,7 +1050,25 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 crate::engine::now_ms(),
                 norm_name,
             );
-            if recorded {
+            // HiBit §9.1 那条基线：卸载**之前**取一次厂商顶层键集合。之后扫描时
+            // 「卸载前没有、现在有了」的键才可能是这程序自己写的配置键（卸载器不认的那批）。
+            // 一个根都没枚举到就**不写基线**：空集合不是"这台机器没有厂商键"，写成基线会让
+            // 下一轮差分把全部现存键算成新键。没有基线时那一类候选整段不出，目录候选不受影响。
+            let footprinted = if recorded {
+                let vendor = collect_vendor_keys();
+                if vendor.is_empty() {
+                    log::write_log(
+                        "warn",
+                        "卸载前厂商键基线未记录：三个 Software 根都枚举不到（不写空基线，否则下轮差分全是假候选）",
+                    );
+                    false
+                } else {
+                    ownership::set_footprint(&mut own_doc, &app_id, &vendor, crate::engine::now_ms())
+                }
+            } else {
+                false
+            };
+            if recorded || footprinted {
                 if let Err(e) = ownership::save(&own_doc) {
                     log::write_log("warn", &format!("所有权事件落盘失败（不影响卸载）: {e}"));
                 }
@@ -2321,6 +2340,7 @@ pub async fn uninstall_update_residue_rules<R: tauri::Runtime>(window: WebviewWi
 /// 把一次点击当成"这台机器上的这个目录属于它"会让后面所有判定建立在猜测上。
 /// `leftover-owners` 类实现（Kudu）也是跨轮保存、合并后再确认的，不是一条即用即弃的记录。
 mod ownership {
+    use crate::commands::uninstall::footprint;
     use serde_json::{json, Value};
     use std::collections::HashSet;
     use std::path::Path;
@@ -2427,6 +2447,34 @@ mod ownership {
             "recordedAt": now_ms,
             "state": STATE_PENDING,
         }));
+        true
+    }
+
+    /// 记/刷新某 owner 的**卸载前足迹基线**（HiBit §9.1 那条思路的落地位置）。
+    ///
+    /// 存的是卸载动作发生时 `HKCU\Software` / `HKLM\SOFTWARE` 下的厂商顶层键名集合。
+    /// 卸载后复扫时，"清单里没了、但顶层多出一个厂商键且基线里没有"才是厂商自己写的配置键——
+    /// 名称相似度那条路实测会把 `netease`（网易云音乐仍在装）这类共享厂商段误判成残留。
+    ///
+    /// `SCHEMA_VERSION` 刻意**不升**：这是纯增字段，老档案里没有 footprint 就当"没有基线"，
+    /// 而升版本会触发 `load()` 的隔离重建，把用户本机已有的卸载记录一起丢掉。
+    pub fn set_footprint(doc: &mut Value, app_id: &str, keys: &[String], now_ms: i64) -> bool {
+        // 空基线一律不写：空集合不是"这台机器没有厂商键"，写成基线下一轮差分就会把
+        // 全部现存键算成"卸载后才出现的新键"。调用方（uninstall_run）拿 false 去记日志。
+        if keys.is_empty() {
+            return false;
+        }
+        let Some(list) = doc.get_mut("owners").and_then(Value::as_array_mut) else {
+            return false;
+        };
+        let Some(hit) = list.iter_mut().find(|o| {
+            o.get("appId").and_then(Value::as_str) == Some(app_id)
+        }) else {
+            return false;
+        };
+        let capped = keys.len() > footprint::MAX_KEYS_PER_OWNER;
+        let keep: Vec<String> = keys.iter().take(footprint::MAX_KEYS_PER_OWNER).cloned().collect();
+        hit["footprint"] = json!({ "at": now_ms, "keys": keep, "capped": capped });
         true
     }
 
@@ -2580,6 +2628,131 @@ fn running_process_dirs() -> Option<HashSet<String>> {
     }
 }
 
+/// 卸载前足迹基线的判据（HiBit §9.1「轻量安装监视」落到本应用能承受的形态）。
+///
+/// HiBit 在安装前记基线、安装后差分；本应用没有安装钩子，能拿到的同价证据是
+/// **卸载动作那一刻**的顶层厂商键集合：卸载后程序不在了、清单里没有它、安装目录也没了，
+/// 而某个厂商键是卸载前不存在、卸载后才出现的——那就是它自己写、卸载器不认的登记。
+/// 名称相似度那条路实测不可用（本机 `NeteaseGodLike` 与仍在装的网易云音乐共享 `Netease` 段）。
+mod footprint {
+    use serde_json::Value;
+    use std::collections::HashSet;
+
+    /// 一条基线保留的顶层键上限（本机实测三根共 135 个名字，留一倍余量）。
+    pub const MAX_KEYS_PER_OWNER: usize = 300;
+    /// 单次扫描最多产出的厂商键候选，防止某台机器上出现异常膨胀。
+    pub const MAX_CANDIDATES: usize = 40;
+
+    /// 结构性容器：这些顶层键不是任何第三方程序的落点，出现在差集里也只可能是系统或
+    /// 别的软件在这两次读之间动过手。判"残留"不值得为它们打扰用户。
+    const DENY_ROOTS: &[&str] = &[
+        "microsoft",
+        "classes",
+        "clients",
+        "policies",
+        "registeredapplications",
+        "wow6432node",
+        "khronos",
+        "odbc",
+        "oem",
+        "setup",
+        "volatile",
+        "defaultuserenvironment",
+        "appdatalow",
+        "deviceinfo",
+        "changetracker",
+        "contextmenumgr",
+        "roamingdevice",
+        "capabilities",
+    ];
+
+    /// 顶层键名是否可能是某个程序的厂商键。
+    ///
+    /// GUID 形态（`14d8c5cd-3d3a-…`）在本机是 WebView2/Chromium 组件键，且系统随时可能新增，
+    /// 一并挡掉：宁可漏一条厂商残留，不要把系统键列成"可删的残留"。
+    pub fn is_vendor_key(name: &str) -> bool {
+        let n = name.trim().to_ascii_lowercase();
+        if n.chars().count() < 2 {
+            return false;
+        }
+        if DENY_ROOTS.iter().any(|d| n.starts_with(d)) {
+            return false;
+        }
+        let guid_shape = n.len() == 36
+            && n.matches('-').count() == 4
+            && n.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        !guid_shape
+    }
+
+    /// 卸载后才新出现的厂商键（大小写不敏感差集，顺序跟"当前"读到的顺序）。
+    pub fn new_keys_since(baseline: &[String], current: &[String]) -> Vec<String> {
+        let seen: HashSet<String> = baseline.iter().map(|k| k.to_ascii_lowercase()).collect();
+        current
+            .iter()
+            .filter(|k| !seen.contains(&k.to_ascii_lowercase()))
+            .cloned()
+            .collect()
+    }
+
+    /// 归属判定用的 token：显示名、发布商、安装目录末段里能取到的短词。
+    ///
+    /// 只做**互含**、不做相似度：足迹差分已经证明"这键是卸完才出现的"，token 只回答
+    /// "它是不是这个程序写的"；再加上模糊匹配就等于把猜测请回删除依据里（C3 同一口径）。
+    pub fn tokens_of(owner: &Value) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut add = |raw: &str| {
+            let s = raw.trim().to_ascii_lowercase();
+            if s.chars().count() >= 2 && !out.contains(&s) {
+                out.push(s);
+            }
+        };
+        for field in ["displayName", "publisher"] {
+            if let Some(v) = owner.get(field).and_then(Value::as_str) {
+                add(v);
+            }
+        }
+        if let Some(loc) = owner.get("installLocation").and_then(Value::as_str) {
+            if let Some(base) = loc.trim().trim_end_matches(['\\', '/']).rsplit('\\').next() {
+                add(base);
+            }
+        }
+        if let Some(paths) = owner.get("ownedPaths").and_then(Value::as_array) {
+            for p in paths.iter().filter_map(Value::as_str) {
+                if let Some(base) = p.trim().trim_end_matches(['\\', '/']).rsplit('\\').next() {
+                    add(base);
+                }
+            }
+        }
+        out
+    }
+
+    /// 键的末段是否与某程序的 token 互含（两侧都小写）。
+    pub fn key_belongs_to(key: &str, tokens: &[String]) -> bool {
+        let leaf = key.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
+        if leaf.chars().count() < 2 {
+            return false;
+        }
+        tokens.iter().any(|t| {
+            t.chars().count() >= 2 && (leaf.contains(t.as_str()) || t.contains(leaf.as_str()))
+        })
+    }
+
+    /// 从 owner 记录里取基线。**缺字段或被截断（capped）都当"没有可信基线"**：
+    /// 基线不全时差集会把本来早就存在的键算成新键，那是把老键当残留删，代价不可接受。
+    pub fn baseline_of(owner: &Value) -> Option<Vec<String>> {
+        let fp = owner.get("footprint")?;
+        if fp.get("capped").and_then(Value::as_bool).unwrap_or(true) {
+            return None;
+        }
+        let keys = fp.get("keys").and_then(Value::as_array)?;
+        Some(
+            keys.iter()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect(),
+        )
+    }
+}
+
 /// 候选目录是否与某个运行中进程的可执行路径在同一条链上。
 /// **两个方向都要查**：候选是进程目录的祖先（端掉父目录会带走正在跑的程序）
 /// 或候选就在进程目录里面（正被使用的子目录）——只查一边会漏掉另一半（Y5 实测）。
@@ -2596,7 +2769,8 @@ fn path_within(inner: &str, outer: &str) -> bool {
     i == o || (i.starts_with(o) && matches!(i.as_bytes().get(o.len()), Some(b'\\') | Some(b'/')))
 }
 
-/// uninstall:orphan-scan — 应用数据遗留应用数据扫描（主窗档；只产候选，删除仍走 residue-execute）
+/// uninstall:orphan-scan — 卸载遗留扫描（应用数据目录 + 卸载后新增的厂商配置键；
+/// 主窗档，只产候选，删除仍走 residue-execute）
 #[tauri::command]
 pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
@@ -2760,6 +2934,75 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
                 }
             }
         }
+        // ⑥ 厂商配置键足迹差分（HiBit §9.1 的落地形态）：卸载前基线里没有、现在出现、
+        //    且键名对得上这个程序 token 的顶层键。三条同时成立才入候选——差集给**时序**证据，
+        //    token 给**归属**证据；只靠名字猜会把仍在装的别家程序键端出来（本机 `Netease` 段实测）。
+        //    这一类不成立时只跳过、不报错：目录候选已经产出，而收口前建的档案本来就没有基线字段。
+        let vendor_now = collect_vendor_keys();
+        let mut vendor_added = 0usize;
+        if vendor_now.is_empty() {
+            crate::engine::log::write_log(
+                "warn",
+                "厂商键足迹差分跳过：三个 Software 根都枚举不到（拿空清单差分等于凭空造候选）",
+            );
+        } else {
+            for o in ownership::historical_owners(&doc) {
+                let Some(base) = footprint::baseline_of(&o) else { continue };
+                let tokens = footprint::tokens_of(&o);
+                if tokens.is_empty() {
+                    continue;
+                }
+                let owner_name = o.get("displayName").and_then(Value::as_str).unwrap_or("").to_string();
+                let owner_app_id = o.get("appId").and_then(Value::as_str).unwrap_or("").to_string();
+                for target in footprint::new_keys_since(&base, &vendor_now) {
+                    if !footprint::key_belongs_to(&target, &tokens) {
+                        continue;
+                    }
+                    if findings.len() >= ORPHAN_MAX_CANDIDATES || vendor_added >= footprint::MAX_CANDIDATES {
+                        break;
+                    }
+                    // 与规则库链同一道硬闸：落在注册表禁删面的目标连原因都不给过（A1）
+                    if let Some(reason) = protect::reg_target_block_reason(&target) {
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!("厂商键足迹候选被硬否决（不入候选）: {target} — {reason}"),
+                        );
+                        continue;
+                    }
+                    let Some((hive, rest)) = parse_reg_target(&target) else { continue };
+                    if !crate::engine::native::reg_key_exists(hive, &rest) {
+                        continue; // 差分到候选之间键消失了：不列一条已经不存在的东西
+                    }
+                    vendor_added += 1;
+                    let why = contribs(&[
+                        (
+                            "footprintBaseline",
+                            format!("卸载动作发生前记下的 {} 个厂商顶层键里没有它", base.len()),
+                        ),
+                        (
+                            "appearedAfterUninstall",
+                            "本次复扫它仍存在，而该程序的卸载登记与原安装目录都已消失".to_string(),
+                        ),
+                        (
+                            "ownerToken",
+                            format!("键名与这程序的显示名/发行商/安装目录名互含：{}", tokens.join("、")),
+                        ),
+                    ]);
+                    findings.push(json!({
+                        "kind": "reg_key",
+                        "target": target,
+                        "reason": format!("「{owner_name}」卸载后新出现的厂商配置键（卸载前基线里没有，不自动勾选）"),
+                        "confidence": "medium",
+                        "risk": "medium",
+                        "defaultChecked": false,
+                        "origin": "orphan",
+                        "ownerName": owner_name,
+                        "ownerAppId": owner_app_id,
+                        "contribs": why,
+                    }));
+                }
+            }
+        }
         (findings, String::new())
     })
     .await;
@@ -2771,7 +3014,7 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
             // 落进与本会话残留扫描同一个快照槽：执行侧的快照闸、A1 硬否决、
             // 目录重解析校验、回收站优先一律复用，不给应用数据遗留候选开第二条删除通道
             residue_snapshot_put(&label, "orphan", findings.clone());
-            json!({ "success": true, "data": { "appName": "应用数据遗留应用数据", "findings": findings } })
+            json!({ "success": true, "data": { "appName": "卸载遗留（应用数据与厂商配置键）", "findings": findings } })
         }
         Err(e) => json!({ "success": false, "message": format!("应用数据遗留扫描异常: {e}") }),
     }
@@ -3103,6 +3346,28 @@ fn hive_of(label: &str) -> windows::Win32::System::Registry::HKEY {
 }
 
 /// 采集三根下的卸载键原始字段（只读，不判定）
+/// 三个根下的厂商顶层键（完整目标串，与执行侧 `HKCU\<子路径>` 的口径一致）。
+///
+/// 返回空 = 连根都枚举不到，调用方必须当成"读不到"而不是"这台机器没有厂商键"：
+/// 拿空清单去做差分，会把所有现存键算成"卸载后才出现的新键"，那是凭空造出一批删除候选。
+unsafe fn collect_vendor_keys() -> Vec<String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let mut out = Vec::new();
+    for (label, hive, sub) in [
+        ("HKCU", HKEY_CURRENT_USER, r"Software"),
+        ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE"),
+        ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node"),
+    ] {
+        for name in reg_enum_subkeys(hive, sub, footprint::MAX_KEYS_PER_OWNER) {
+            if !footprint::is_vendor_key(&name) {
+                continue;
+            }
+            out.push(format!("{label}\\{sub}\\{name}"));
+        }
+    }
+    out
+}
+
 unsafe fn collect_dead_uninstall_raws() -> Vec<DeadUninstallRaw> {
     const ROOTS: &[(&str, &str)] = &[
         ("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
@@ -4430,6 +4695,133 @@ mod residue_trace_tests {
 
     /// 上限裁剪只动最旧的 historical，pending 有生命周期意义不被裁；
     /// 全是 pending 且超限时才动 pending（宁可丢历史也不无界增长）。
+    /// HiBit §9.1 足迹差分的判据：时序（差集）+ 归属（token）+ 基线可信，三者缺一不可。
+    #[test]
+    fn footprint_diff_needs_timing_ownership_and_a_trustworthy_baseline() {
+        let baseline = vec![
+            r"HKCU\Software\Netease".to_string(),
+            r"HKCU\Software\7-Zip".to_string(),
+        ];
+        let current = vec![
+            r"HKCU\Software\Netease".to_string(),
+            r"HKCU\Software\NETEASEGODLIKE".to_string(),
+            r"HKCU\Software\Clash Verge Rev".to_string(),
+        ];
+        let fresh = footprint::new_keys_since(&baseline, &current);
+        assert_eq!(fresh.len(), 2, "基线里没有的两条才算新增: {fresh:?}");
+        let owner = json!({
+            "displayName": "网易大神",
+            "publisher": "Netease",
+            "installLocation": r"C:\Games\GodLike",
+            "ownedPaths": [r"C:\Games\GodLike\unins000.exe"]
+        });
+        let toks = footprint::tokens_of(&owner);
+        assert!(
+            footprint::key_belongs_to(r"HKCU\Software\NeteaseGodLike", &toks),
+            "厂商段 + 产品段都在 token 里，这条必须有归属证据: {toks:?}"
+        );
+        assert!(
+            !footprint::key_belongs_to(r"HKCU\Software\Clash Verge Rev", &toks),
+            "别家程序的键不能算到这个 owner 头上"
+        );
+        // 基线缺失或被截断 = 不可信，差分侧必须整条跳过（不能拿半份基线去判"新键"）
+        assert!(footprint::baseline_of(&json!({ "state": "historical" })).is_none());
+        assert!(footprint::baseline_of(&json!({ "footprint": { "keys": [], "capped": true } })).is_none());
+        assert_eq!(
+            footprint::baseline_of(&json!({ "footprint": { "keys": ["a"], "capped": false } })),
+            Some(vec!["a".to_string()])
+        );
+        // 结构性容器与 GUID 形态键都不是厂商落点
+        for deny in [
+            "Microsoft",
+            "Classes",
+            "WOW6432Node",
+            "Policies",
+            "RegisteredApplications",
+            "appdatalow",
+            "14d8c5cd-3d3a-5fb8-8746-849118a754ce",
+            "x",
+            "",
+        ] {
+            assert!(!footprint::is_vendor_key(deny), "{deny} 不该被当成厂商键");
+        }
+        assert!(footprint::is_vendor_key("NeteaseGodLike"));
+        assert!(footprint::is_vendor_key("7-Zip"));
+    }
+
+    /// 基线写入的两个边界：owner 不在档里不写；超上限必须标 capped（差分侧据此拒产候选）。
+    #[test]
+    fn footprint_baseline_records_only_known_owner_and_flags_capped() {
+        let mut doc = ownership::empty_doc();
+        assert!(
+            !ownership::set_footprint(&mut doc, "HKCU|X", &[r"HKCU\Software\X".to_string()], 1),
+            "档里没有这个 owner 就不该凭空写基线"
+        );
+        let norm = |s: &str| s.to_lowercase();
+        assert!(ownership::record_pending(
+            &mut doc, "HKCU|X", "Acme", "", r"C:\Acme", &[], 1000, norm
+        ));
+        let many: Vec<String> = (0..=footprint::MAX_KEYS_PER_OWNER)
+            .map(|i| format!(r"HKCU\Software\K{i}"))
+            .collect();
+        assert!(ownership::set_footprint(&mut doc, "HKCU|X", &many, 1500));
+        let o = &doc["owners"][0];
+        assert_eq!(o["footprint"]["capped"], json!(true), "超上限必须如实标截断");
+        assert_eq!(
+            o["footprint"]["keys"].as_array().unwrap().len(),
+            footprint::MAX_KEYS_PER_OWNER
+        );
+        assert!(
+            footprint::baseline_of(o).is_none(),
+            "截断的基线不可信，差分必须跳过这一条"
+        );
+        assert!(ownership::set_footprint(&mut doc, "HKCU|X", &[r"HKCU\Software\Keep".to_string()], 2000));
+        assert_eq!(
+            footprint::baseline_of(&doc["owners"][0]),
+            Some(vec![r"HKCU\Software\Keep".to_string()]),
+            "刷新后要能读回，且 capped 标记跟着清掉"
+        );
+        // 空清单一律拒写：那会把"一个根都没枚举到"伪装成"这台机器没有厂商键"
+        assert!(
+            !ownership::set_footprint(&mut doc, "HKCU|X", &[], 2500),
+            "空基线不能写进去，否则下一轮差分把全部现存键算成新键"
+        );
+        assert!(
+            footprint::baseline_of(&doc["owners"][0]).unwrap().len() == 1,
+            "被拒的写入不许留下半份基线"
+        );
+    }
+
+    /// 真机足迹采集（`#[ignore]`）：三个 Software 根能枚举出厂商键集合，且**同一台机器上
+    /// 连读两次的差集为空** —— 差分不稳定就说明采集在漂（排除表没生效或枚举被 cap 截断），
+    /// 那这条链产出的"新键"全是假候选。
+    #[test]
+    #[ignore = "读注册表三个 Software 根，发布前门禁跑"]
+    fn vendor_footprint_captures_real_keys_and_is_stable() {
+        let a = unsafe { collect_vendor_keys() };
+        assert!(
+            a.len() >= 20,
+            "本机实测三根有上百个顶层键，只取到 {} 条说明枚举或排除表坏了",
+            a.len()
+        );
+        assert!(
+            a.iter()
+                .all(|k| k.starts_with(r"HKCU\Software\") || k.starts_with(r"HKLM\SOFTWARE\")),
+            "目标串必须与执行侧同口径: {a:?}"
+        );
+        assert!(
+            !a.iter().any(|k| k.to_lowercase().contains("\\microsoft")
+                || k.to_lowercase().contains("\\classes")),
+            "结构性容器漏排除: {a:?}"
+        );
+        let b = unsafe { collect_vendor_keys() };
+        assert_eq!(
+            footprint::new_keys_since(&a, &b),
+            Vec::<String>::new(),
+            "同一台机器连读两次不该差出新键"
+        );
+    }
+
     #[test]
     fn ownership_cap_prefers_dropping_oldest_historical() {
         let norm = |s: &str| s.to_lowercase();

@@ -359,7 +359,9 @@
   //   失效残留     —— 全机扫描，判据只有一条：卸载项/App Paths 里记着的落点文件已不存在，
   //                   不要求本机有卸载记录（用户拍板 2026-09-28）。服务与设备刻意不扫：
   //                   判据虽成立，但删除要提权走 SCM/SetupAPI，我们缺这块实操经验；
-  //   应用数据遗留 —— 仍要「本机确实卸载过它」这条所有权事实，精确同名目录本身不是证据。
+  //   卸载遗留     —— 仍要「本机确实卸载过它」这条所有权事实，精确同名目录本身不是证据；
+  //                   厂商配置键走「卸载前基线 → 卸载后差分」，还要键名与这程序的 name/发行商/
+  //                   安装目录名互含才算到它头上（HiBit §9.1，两条证据缺一不可）。
   // 三组共用同一份快照（后端按 origin 分桶存）与同一条执行链，所以先扫哪组都不会让
   // 另一组的勾选项在执行时被快照闸判成"已过期"。
   async function scanAllResidue() {
@@ -391,11 +393,11 @@
       groups.push({ title: '失效残留 · 全机', rows: [], hint: ((rDead && rDead.message) || '本组扫描失败') });
     }
     if (rOrphan && rOrphan.success) {
-      groups.push({ title: '应用数据遗留（按本机卸载记录）', rows: (rOrphan.data && rOrphan.data.findings) || [] });
+      groups.push({ title: '卸载遗留 · 按本机卸载记录（应用数据目录与卸后新增的厂商配置键）', rows: (rOrphan.data && rOrphan.data.findings) || [] });
     } else {
       // 这一组拒绝扫描是**正确行为**（档案为空时拿空集会被读成"这台机器没有遗留"），
       // 所以按组的说明行呈现，不再让整页扫描失败
-      groups.push({ title: '应用数据遗留（按本机卸载记录）', rows: [], hint: ((rOrphan && rOrphan.message) || '本组未执行') });
+      groups.push({ title: '卸载遗留 · 按本机卸载记录', rows: [], hint: ((rOrphan && rOrphan.message) || '本组未执行') });
     }
     scanGroups = groups;
     findings = groups.reduce((acc, g) => acc.concat(g.rows), []);
