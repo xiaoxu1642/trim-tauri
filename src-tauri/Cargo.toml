@@ -132,6 +132,9 @@ features = [
     "Win32_System_TaskScheduler",
     # B6：ProcessIdToSessionId（重启 explorer 时按会话过滤）
     "Win32_System_RemoteDesktop",
+    # M6 失效残留扫描：SetupDiGetClassDevsW 枚举两次（ALLCLASSES / +PRESENT）求 phantom 差集。
+    # 新开 feature 登记（AGENTS §2）：只读枚举，不装不卸驱动；不新增第三方 crate。
+    "Win32_Devices_DeviceAndDriverInstallation",
 ]
 
 [profile.dev]

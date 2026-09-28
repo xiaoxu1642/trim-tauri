@@ -279,6 +279,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_check_residue_version,
         commands::uninstall::uninstall_update_residue_rules,
         commands::uninstall::uninstall_orphan_scan,
+        commands::uninstall::uninstall_dead_scan,
         commands::uninstall::uninstall_orphan_ignore,
         commands::uninstall::uninstall_reg_backup_list,
         commands::uninstall::uninstall_reg_backup_restore,

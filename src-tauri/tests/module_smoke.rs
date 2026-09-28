@@ -275,7 +275,7 @@ fn residue_rule_update_channels_are_main_only() {
     }
 }
 
-/// C2 两条孤儿命令都是 MAIN 档（唯一调用方是主窗卸载页）。
+/// C2 两条应用数据遗留命令都是 MAIN 档（唯一调用方是主窗卸载页）。
 ///
 /// 快速组里主窗正向特征只走 `orphan_ignore` 的参数校验早退路（格式错即返回，
 /// 不 load/save 所有权档案，零副作用）；`orphan_scan` 会读档案并可能写回（升级/过期），
@@ -287,7 +287,7 @@ fn orphan_channels_are_main_only() {
         let scan = invoke_text(&w, "uninstall_orphan_scan", json!({}));
         assert!(
             scan.contains("IPC 来源校验失败"),
-            "{label} 窗调孤儿扫描必须被来源校验拒杀，回执 {scan}"
+            "{label} 窗调应用数据遗留扫描必须被来源校验拒杀，回执 {scan}"
         );
         let ign = invoke_text(
             &w,
@@ -296,7 +296,7 @@ fn orphan_channels_are_main_only() {
         );
         assert!(
             ign.contains("IPC 来源校验失败"),
-            "{label} 窗调孤儿忽略必须被拒杀，回执 {ign}"
+            "{label} 窗调遗留忽略必须被拒杀，回执 {ign}"
         );
     }
     let w = main_window();
@@ -358,9 +358,25 @@ fn reg_backup_channels_are_main_only() {
     );
 }
 
-/// 真机孤儿扫描（`#[ignore]`）：先按**档案实际状态**决定断言哪条，两条路都要能钉红。
+/// M6 失效残留扫描是 MAIN 档：它产出的注册表候选会进同一条删除链，
+/// 子窗一律拒杀。正向特征放在下面的 `#[ignore]` 真机用例里（那条会断言 success 与
+/// 四类候选的硬约束）；这里只断"拒杀"，因为命令本体要读注册表三根并枚举设备，
+/// 不属于快速组的零副作用范围。
+#[test]
+fn dead_scan_channel_is_main_only() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "uninstall_dead_scan", json!({}));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调失效残留扫描必须被拒杀，回执 {text}"
+        );
+    }
+}
+
+/// 真机应用数据遗留扫描（`#[ignore]`）：先按**档案实际状态**决定断言哪条，两条路都要能钉红。
 /// - 档案空 / 没有任何 historical → 必须**拒绝扫描并给出可读原因**，不许回空集
-///   （空集会被读成「这台机器没有孤儿」，那是把"不知道"伪装成"知道"）；
+///   （空集会被读成「这台机器没有遗留数据」，那是把"不知道"伪装成"知道"）；
 /// - 有 historical 且产出候选 → 断言候选形状与「一律不自动勾选、置信度封顶 medium、
 ///   不是受保护路径、带 ownerAppId」这四条硬约束。
 #[test]
@@ -385,7 +401,7 @@ fn orphan_scan_refuses_or_returns_unchecked_candidates() {
         assert_eq!(
             res["success"],
             json!(false),
-            "没有已确认卸载完成的记录时不得回空集伪装「没有孤儿」，实测 {res}"
+            "没有已确认卸载完成的记录时不得回空集伪装「没有遗留数据」，实测 {res}"
         );
         let msg = common::message_of(&res);
         assert!(
@@ -400,21 +416,21 @@ fn orphan_scan_refuses_or_returns_unchecked_candidates() {
         .as_array()
         .unwrap_or_else(|| panic!("data.findings 必须是数组: {res}"));
     for f in findings {
-        assert_eq!(f["kind"], json!("folder"), "孤儿候选只给目录: {f}");
+        assert_eq!(f["kind"], json!("folder"), "该组候选只给目录: {f}");
         assert_eq!(f["origin"], json!("orphan"), "候选要标明来源: {f}");
         assert_eq!(
             f["defaultChecked"],
             json!(false),
-            "孤儿候选一律不得默认勾选: {f}"
+            "该组候选一律不得默认勾选: {f}"
         );
         assert!(
             f["confidence"] == json!("low") || f["confidence"] == json!("medium"),
-            "孤儿候选置信度封顶 medium: {f}"
+            "该组候选置信度封顶 medium: {f}"
         );
         let t = f["target"].as_str().unwrap_or("");
         assert!(
             !trim_tauri_lib::engine::protect::is_path_protected(t),
-            "孤儿候选不得是受保护路径: {t}"
+            "该组候选不得是受保护路径: {t}"
         );
         assert!(
             !f["ownerAppId"].as_str().unwrap_or("").is_empty(),
@@ -498,3 +514,101 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
 // }
 //
 // 跑法：cargo test --test module_smoke -- --ignored
+
+/// M6 失效残留扫描（真机 `#[ignore]`）：四类候选都要能产出，且硬约束一条不许破。
+///
+/// 这条用例的存在理由是「结构收口把功能误杀」和「判定放宽到敢删东西」两个方向都会
+/// 静默出问题：前者表现为注册表类候选为空（禁删面把 Uninstall 例外吃掉了），后者表现为
+/// 出现 `confidence:"high"` 或 `deleteCapable` 与 kind 不匹配的条目。
+/// 计数用 println 打出来，发布前门禁那一步人工过一眼量级是否合理。
+///
+/// 如实标注一处空转：本机没有失效卸载项/App Paths（实测 uninstall=0、appPaths=0、
+/// service=2、device=61），所以「不自动勾选」「置信度不 high」这两条在本机只对服务与
+/// 设备行生效；注册表类的同两条断言由 lib 单测非空转地钉住（破坏 defaultChecked 即判红）。
+#[test]
+#[ignore = "读注册表三根 + SetupAPI 枚举设备（秒级），发布前门禁跑"]
+fn dead_scan_reports_four_classes_under_hard_constraints() {
+    use trim_tauri_lib::engine::protect;
+    let w = main_window();
+    let res = invoke(&w, "uninstall_dead_scan", json!({}));
+    assert_eq!(res["success"], json!(true), "扫描应成功: {res}");
+    let findings = res["data"]["findings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut by_class: std::collections::HashMap<String, usize> = Default::default();
+    for f in &findings {
+        *by_class
+            .entry(f["deadClass"].as_str().unwrap_or("?").to_string())
+            .or_default() += 1;
+        assert_eq!(f["origin"], json!("dead"), "候选必须标 origin=dead: {f}");
+        assert_eq!(
+            f["defaultChecked"],
+            json!(false),
+            "失效残留一律不自动勾选（落点缺失也可能是移动盘没插）: {f}"
+        );
+        let conf = f["confidence"].as_str().unwrap_or("");
+        assert!(
+            conf == "low" || conf == "medium",
+            "本链置信度封顶 medium，high 会把'没插盘'说成'一定是残留': {f}"
+        );
+        let kind = f["kind"].as_str().unwrap_or("");
+        if kind == "reg_key" {
+            let t = f["target"].as_str().unwrap_or("");
+            assert!(
+                protect::reg_target_block_reason(t).is_none(),
+                "可删候选被禁删面挡住 = 收口把功能误杀，目标 {t}"
+            );
+            assert_eq!(f["deleteCapable"], json!(true), "注册表类应给删除出口: {f}");
+        } else {
+            assert_eq!(
+                f["deleteCapable"],
+                json!(false),
+                "服务/设备/说明行只展示，不开删除通道: {f}"
+            );
+        }
+    }
+    let counts: Vec<(&str, usize)> = vec![
+        ("uninstall", *by_class.get("uninstall").unwrap_or(&0)),
+        ("appPaths", *by_class.get("appPaths").unwrap_or(&0)),
+        ("service", *by_class.get("service").unwrap_or(&0)),
+        ("device", *by_class.get("device").unwrap_or(&0)),
+    ];
+    println!("失效残留四类计数: {counts:?} 总计 {}", findings.len());
+    println!("说明行: {:?}", res["data"]["notes"]);
+    assert!(
+        counts.iter().any(|(_, n)| *n > 0),
+        "本机四类候选全空，说明判定或采集链断了（真机上一台用过的 Windows 不可能四类皆空）"
+    );
+}
+
+/// M6 图标第四源（真机 `#[ignore]`）：`shortcutPath` 是后端算好的，前端只按优先级尝试，
+/// 所以这里钉三条 —— 字段形状（要么没有、要么是个真实存在的 .lnk）、至少有一行命中
+/// （一台装过软件、桌面有快捷方式的机器全空 = 匹配或根目录断了）、以及它不越界
+/// （只落在四个快捷方式根里，不指向任意路径）。
+#[test]
+#[ignore = "读桌面与开始菜单，发布前门禁跑"]
+fn uninstall_list_rows_carry_resolvable_shortcuts() {
+    let w = main_window();
+    let res = invoke(&w, "uninstall_list", json!({ "scope": "user" }));
+    assert_eq!(res["success"], json!(true), "列表应成功: {res}");
+    let apps = res["data"]["apps"].as_array().cloned().unwrap_or_default();
+    assert!(!apps.is_empty(), "本机应有已安装程序，否则这条用例证明不了什么");
+    let mut hit = 0usize;
+    for a in &apps {
+        let p = match a.get("shortcutPath").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => p,
+            _ => continue,
+        };
+        hit += 1;
+        assert!(p.len() > 4 && p.to_lowercase().ends_with(".lnk"), "第四源必须是 .lnk: {p}");
+        assert!(std::path::Path::new(p).exists(), "给出的快捷方式路径必须真实存在: {p}");
+        let low = p.to_lowercase();
+        assert!(
+            low.contains("desktop") || low.contains("start menu"),
+            "shortcutPath 只应落在桌面/开始菜单根里: {p}"
+        );
+    }
+    println!("带 shortcutPath 的行数: {hit} / {}", apps.len());
+    assert!(hit > 0, "全机没有任何一行匹配到快捷方式 = 索引或匹配链断了");
+}

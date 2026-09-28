@@ -84,6 +84,7 @@ const TAURI_ADDED = {
   'cleanup:custom-execute': 'C-3（2026-09-28）：自定义清理目录执行（只回收站，主窗档）',
   'uninstall:report-list': 'U-6（2026-09-28）：批次报告列表（上游只写报告无查看面）',
   'uninstall:report-get': 'U-6（2026-09-28）：批次报告明细读取（同上）',
+  'uninstall:dead-scan': 'M6（2026-09-28）：失效残留扫描（不依赖卸载事实的无主残留，上游无此能力）',
   'uninstall:appx-logo': 'U-3（2026-09-28）：Appx Logo 懒加载（上游无此能力）',
   'cleanup:reg-backup-list': 'C-4（2026-09-28）：注册表备份列表（上游只写备份无还原面）',
   'cleanup:reg-backup-restore': 'C-4（2026-09-28）：注册表备份还原（reg import，主窗档）',

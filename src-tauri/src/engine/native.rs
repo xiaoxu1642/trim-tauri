@@ -2562,6 +2562,103 @@ pub fn reg_enum_dev_ids(class: &str) -> Vec<String> {
     out
 }
 
+/// 键的最后写入时间（Unix 毫秒）—— 失效残留扫描的「沉睡多久」展示用。
+///
+/// 取不到一律返回 `None`：调用方按「不知道」渲染。返回 0 等于在 UI 上写
+/// 「1970 年起没动过」，那是把"读不到"伪装成"很古老"，会让判定看起来比实际有把握。
+pub fn reg_key_last_write_ms(hive: HKEY, subkey: &str) -> Option<i64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW, KEY_READ};
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return None;
+        }
+        let mut ft = FILETIME::default();
+        let err = RegQueryInfoKeyW(
+            hk, None, None, None, None, None, None, None, None, None, None, Some(&mut ft),
+        );
+        let _ = RegCloseKey(hk);
+        if err.0 != 0 {
+            return None;
+        }
+        let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+        // FILETIME 自 1601-01-01 起的 100ns 计数，与 Unix 纪元差 11644473600 秒
+        const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
+        if ticks < EPOCH_DIFF_100NS {
+            return None;
+        }
+        Some(((ticks - EPOCH_DIFF_100NS) / 10_000) as i64)
+    }
+}
+
+/// SetupAPI 枚举一次设备集合，返回大写实例 ID 集
+fn setupdi_instance_ids(
+    flags: windows::Win32::Devices::DeviceAndDriverInstallation::SETUP_DI_GET_CLASS_DEVS_FLAGS,
+) -> Result<std::collections::HashSet<String>, String> {
+    use std::collections::HashSet;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        SetupDiGetDeviceInstanceIdW, SP_DEVINFO_DATA,
+    };
+    let mut out = HashSet::new();
+    unsafe {
+        let set = match SetupDiGetClassDevsW(None, PCWSTR::null(), None, flags) {
+            Ok(s) => s,
+            Err(e) => return Err(format!("SetupDiGetClassDevsW 失败: {e}")),
+        };
+        let mut idx = 0u32;
+        loop {
+            let mut data = SP_DEVINFO_DATA {
+                cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+                ..Default::default()
+            };
+            // ERROR_NO_MORE_ITEMS 与真错误都就地停止：设备类枚举宁可少报不猜
+            if SetupDiEnumDeviceInfo(set, idx, &mut data).is_err() {
+                break;
+            }
+            idx += 1;
+            let mut buf = [0u16; 512];
+            if SetupDiGetDeviceInstanceIdW(set, &data, Some(&mut buf), None).is_ok() {
+                let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                if n > 0 {
+                    out.insert(String::from_utf16_lossy(&buf[..n]).to_uppercase());
+                }
+            }
+        }
+        let _ = SetupDiDestroyDeviceInfoList(set);
+    }
+    Ok(out)
+}
+
+/// 当前不在场的设备实例 ID（phantom / 幽灵设备）：SetupAPI 枚举两次求差集。
+///
+/// 两条更省事的路都实测过更差，写在这里免得下一个人再走：
+/// - 读 `Enum\...\ConfigFlags` 判幽灵 —— 那个位是「禁用」不是「不在」，会把用户
+///   手动停用的在用设备当成残留；
+/// - 解析 `pnputil /enum-devices /disconnected` —— 字段名随系统显示语言变（本机就是
+///   中文），等于把判定交给本地化文案，换台英文机就静默产不出候选。
+pub fn phantom_device_ids() -> Result<Vec<String>, String> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        DIGCF_ALLCLASSES, DIGCF_PRESENT,
+    };
+    let all = setupdi_instance_ids(DIGCF_ALLCLASSES)?;
+    let present = setupdi_instance_ids(DIGCF_ALLCLASSES | DIGCF_PRESENT)?;
+    // 任一集合为空 = 那次枚举没跑成（驱动服务异常等）。此时差集会等于全量，
+    // 把在用设备整批报成幽灵，所以必须报错而不是产出。
+    if all.is_empty() || present.is_empty() {
+        return Err(format!(
+            "设备枚举不可信（登记 {} 台 / 在场 {} 台），不产出幽灵设备候选",
+            all.len(),
+            present.len()
+        ));
+    }
+    let mut v: Vec<String> = all.difference(&present).cloned().collect();
+    v.sort();
+    Ok(v)
+}
+
 /// 停止服务（`Stop-Service -Name X -Force` 的等价物）
 pub fn service_stop_pub(name: &str) -> Result<(), String> {    unsafe {
         if service_stop(name) {

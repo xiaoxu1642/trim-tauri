@@ -355,6 +355,63 @@ unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root
     out
 }
 
+/// 桌面与开始菜单的 `.lnk` 索引：文件名主干（小写）→ 首个命中的完整路径。
+///
+/// 为什么要有第四图标源：不少程序在注册表 `DisplayIcon` 里留的是安装时那台机器上的路径
+/// （或被搬过、或干脆指向一个通用 dll 的索引），前端拿它取不到图；真正带着正确图标的
+/// 东西是桌面/开始菜单那个快捷方式 —— `SHGetFileInfoW` 会顺着 .lnk 解析到目标图标。
+/// 只按**精确同名**匹配，不做相似度：图标是锦上添花，把别家程序的图标配到这一行上，
+/// 比留一个占位方块更糟。
+fn shortcut_icon_index() -> std::collections::HashMap<String, String> {
+    fn walk(dir: &std::path::Path, depth: usize, out: &mut std::collections::HashMap<String, String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(mt) = e.metadata() else { continue };
+            if mt.is_dir() {
+                if depth > 0 {
+                    walk(&p, depth - 1, out);
+                }
+                continue;
+            }
+            let is_lnk = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("lnk"))
+                .unwrap_or(false);
+            if !is_lnk {
+                continue;
+            }
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+            let key = stem.trim().to_lowercase();
+            if !key.is_empty() {
+                out.entry(key).or_insert_with(|| p.to_string_lossy().to_string());
+            }
+        }
+    }
+    let joined = |var: &str, tail: &str| -> Option<(std::path::PathBuf, usize)> {
+        std::env::var(var)
+            .ok()
+            .map(|v| (std::path::PathBuf::from(v).join(tail), if tail.contains("Start Menu") { 4 } else { 0 }))
+    };
+    let mut roots: Vec<(std::path::PathBuf, usize)> = Vec::new();
+    for spec in [
+        joined("USERPROFILE", "Desktop"),
+        joined("PUBLIC", "Desktop"),
+        joined("APPDATA", r"Microsoft\Windows\Start Menu\Programs"),
+        joined("PROGRAMDATA", r"Microsoft\Windows\Start Menu\Programs"),
+    ] {
+        if let Some(r) = spec {
+            roots.push(r);
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for (root, depth) in roots {
+        walk(&root, depth, &mut out);
+    }
+    out
+}
+
 /// 卸载域·列表（方案 M1 + 用户拍板 2026-09-28）。
 /// scope：user=传统 Win32 程序（HKLM 64+32 与 HKCU 三根合并去重，HiBit「程序名」83 项的口径）；
 /// windows=Appx 商店应用（Get-AppxPackage，当前用户，分第三方/Windows 应用两组）。
@@ -394,6 +451,14 @@ pub async fn uninstall_list<R: tauri::Runtime>(
             );
             seen.insert(key)
         });
+        // 图标第四源挂到行上（前端按优先级尝试，取不到仍回退占位，不新增 IPC 通道）
+        let links = shortcut_icon_index();
+        for a in apps.iter_mut() {
+            let name = a["displayName"].as_str().unwrap_or("").trim().to_lowercase();
+            if let Some(p) = links.get(&name) {
+                a["shortcutPath"] = json!(p);
+            }
+        }
         apps.sort_by(|a, b| {
             let an = a["displayName"].as_str().unwrap_or("").to_lowercase();
             let bn = b["displayName"].as_str().unwrap_or("").to_lowercase();
@@ -813,7 +878,7 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             })
         };
         // C2 所有权事件：在启动卸载器**之前**记 pending —— 此刻还不知道卸载会不会成功，
-        // 所以只登记「用户打算卸它」这一事实。孤儿判定要等复扫确认程序已消失、且原安装目录
+        // 所以只登记「用户打算卸它」这一事实。应用数据遗留判定要等复扫确认程序已消失、且原安装目录
         // ENOENT，才升级为 historical（Q9 拍板：取消/失败不回滚成"已卸载"，交给稳定期回收）。
         let mut owned_paths: Vec<String> = Vec::new();
         if !install_location.trim().is_empty() {
@@ -2046,12 +2111,12 @@ pub async fn uninstall_update_residue_rules<R: tauri::Runtime>(window: WebviewWi
 
 // ==================== C2 卸载所有权历史（方案 §6.3） ====================
 ///
-/// 目标不是"发现所有孤儿目录"，而是**只在证据链闭合时**把一个精确同名目录（或其中
+/// 目标不是"把所有没人认领的目录都列出来"，而是**只在证据链闭合时**把一个精确同名目录（或其中
 /// 明确可弃的子目录）升级为候选。所以这里是一条单向状态机，不是一个缓存：
 ///
 /// ```text
 /// 用户确认卸载、执行卸载器之前  →  写 pending（此刻还不知道卸载会不会成功）
-/// 孤儿扫描时复扫当前程序清单     →  程序已消失且原 InstallLocation ENOENT  → historical
+/// 应用数据遗留扫描时复扫当前程序清单     →  程序已消失且原 InstallLocation ENOENT  → historical
 ///                                  程序仍在清单                          → 继续 pending
 ///                                  pending 超稳定期（30 天）             → 移除
 ///                                  historical 的程序又回到清单（重装）   → 移除该记录
@@ -2067,7 +2132,7 @@ mod ownership {
 
     /// 数据文件 schema 版本（结构变化时递增；旧版本文件按损坏处理走隔离，不做兼容层）
     pub const SCHEMA_VERSION: u64 = 1;
-    /// 记录上限：所有权历史只服务孤儿判定，不该无限增长（每条记录都要参与复扫与匹配）
+    /// 记录上限：所有权历史只服务应用数据遗留判定，不该无限增长（每条记录都要参与复扫与匹配）
     pub const MAX_RECORDS: usize = 400;
     /// pending 稳定期：超过就按"卸载没继续/用户放弃了"回收。刻意**不做**成永久保留——
     /// 一条永远悬着的 pending 会让后面每次复扫都重跑判定，却没有产出候选的资格。
@@ -2187,7 +2252,7 @@ mod ownership {
             let listed = current_app_ids.contains(&app_id);
             if state == STATE_HISTORICAL {
                 if listed {
-                    // 程序又回到清单 = 用户重装了它，这条"孤儿"事实不再成立
+                    // 程序又回到清单 = 用户重装了它，这条"已卸载"事实不再成立
                     removed += 1;
                     return false;
                 }
@@ -2260,26 +2325,26 @@ mod ownership {
     }
 }
 
-/// 孤儿候选的判定与产出（C2-3）。
+/// 应用数据遗留候选的判定与产出（C2-3）。
 ///
 /// 三条硬约束，缺一条都不许出候选：
 /// 1. **精确同名**（不是相似度）——目录末段归一后等于某 historical owner 的显示名或
 ///    其 installLocation 的 basename；
 /// 2. **owner 唯一**——同一目录名被两个 historical owner 命中时无法判定归属，直接丢；
-/// 3. **原安装目录必须 ENOENT**——还在就说明程序没卸完，不是孤儿。
+/// 3. **原安装目录必须 ENOENT**——还在就说明程序没卸完，不是应用数据遗留。
 /// 另外再过三道环境闸：受保护路径、上级链重解析点（`dir_delete_blocked`）、
 /// 运行中进程的祖先链（正被使用的目录绝不提示删除）。
 /// 产出默认只列**可弃子目录**（cache / logs 这类），且一律不勾选、置信度封顶 medium。
 const ORPHAN_DISPOSABLE_SUBDIRS: &[&str] = &[
     "cache", "caches", "code cache", "gpucache", "gpu cache", "logs", "log", "tmp", "temp",
 ];
-/// 孤儿扫描的根：与启发式目录命中同三个根，只扫一层（不递归，成本可控）
+/// 应用数据遗留扫描的目录根：与启发式目录命中同三个根，只扫一层（不递归，成本可控）
 const ORPHAN_SCAN_ROOTS: &[&str] = &["APPDATA", "LOCALAPPDATA", "PROGRAMDATA"];
 const ORPHAN_MAX_CANDIDATES: usize = 40;
 
 /// 当前全系统进程的可执行路径（小写全路径），用于「候选目录是否在运行进程祖先链上」。
 /// 拿不到就返回空集 —— 但这条判定是**保护用户**的，取不到时按「全部拒绝出候选」处理更稳妥，
-/// 所以调用方用 Option：None = 取不到快照，直接不产出孤儿候选。
+/// 所以调用方用 Option：None = 取不到快照，直接不产出该组候选。
 fn running_process_dirs() -> Option<HashSet<String>> {
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -2330,7 +2395,7 @@ fn under_running_process(dir: &Path, procs: &HashSet<String>) -> bool {
     })
 }
 
-/// uninstall:orphan-scan — 孤儿应用数据扫描（主窗档；只产候选，删除仍走 residue-execute）
+/// uninstall:orphan-scan — 应用数据遗留应用数据扫描（主窗档；只产候选，删除仍走 residue-execute）
 #[tauri::command]
 pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
@@ -2341,7 +2406,7 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
         let now = crate::engine::now_ms();
         let mut doc = ownership::load();
-        // ① 所有权档案为空 → 能力没被喂过事实，直接拒绝而不是伪装「没有孤儿」
+        // ① 所有权档案为空 → 能力没被喂过事实，直接拒绝而不是伪装「没有应用数据遗留」
         if doc
             .get("owners")
             .and_then(Value::as_array)
@@ -2350,7 +2415,7 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
         {
             return (
                 Vec::new(),
-                "还没有卸载记录：孤儿判定要靠「本机确实卸载过某程序」这条事实链，先卸载一次再来扫描".to_string(),
+                "还没有卸载记录：应用数据遗留判定要靠「本机确实卸载过某程序」这条事实链，先卸载一次再来扫描".to_string(),
             );
         }
         // ② 复扫当前程序清单（获取失败必须拒扫，不能拿空清单把所有 pending 都升级成 historical）
@@ -2371,7 +2436,7 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
             current.extend(rows);
         }
         if current.is_empty() {
-            return (Vec::new(), "当前程序清单获取失败，本次不做孤儿判定（拿空清单去比对会把所有记录误判成已卸载）".to_string());
+            return (Vec::new(), "当前程序清单获取失败，本次不做应用数据遗留判定（拿空清单去比对会把所有记录误判成已卸载）".to_string());
         }
         let ids: HashSet<String> = current
             .iter()
@@ -2386,7 +2451,7 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
         }
         // ④ 运行进程祖先链：取不到快照就不产出候选（这条是保护用户的判定，宁可不出）
         let Some(procs) = running_process_dirs() else {
-            return (Vec::new(), "进程快照获取失败，本次不做孤儿判定（无法确认候选目录是否正在被使用）".to_string());
+            return (Vec::new(), "进程快照获取失败，本次不做应用数据遗留判定（无法确认候选目录是否正在被使用）".to_string());
         };
         // historical owner 的精确名 → owner 列表（同名多 owner 时用于「唯一归属」判定）
         let mut by_name: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
@@ -2445,7 +2510,7 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
                     continue;
                 }
                 if let Some(reason) = crate::engine::native::dir_delete_blocked(&dir) {
-                    crate::engine::log::write_log("info", &format!("孤儿候选跳过 {shown}: {reason}"));
+                    crate::engine::log::write_log("info", &format!("应用数据遗留候选跳过 {shown}: {reason}"));
                     continue;
                 }
                 // ⑦ 默认只列可弃子目录，不端整个 profile
@@ -2492,14 +2557,11 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
                 return json!({ "success": false, "message": note });
             }
             // 落进与本会话残留扫描同一个快照槽：执行侧的快照闸、A1 硬否决、
-            // 目录重解析校验、回收站优先一律复用，不给孤儿候选开第二条删除通道
-            {
-                let mut store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
-                store.insert(label, (crate::engine::now_ms(), findings.clone()));
-            }
-            json!({ "success": true, "data": { "appName": "孤儿应用数据", "findings": findings } })
+            // 目录重解析校验、回收站优先一律复用，不给应用数据遗留候选开第二条删除通道
+            residue_snapshot_put(&label, "orphan", findings.clone());
+            json!({ "success": true, "data": { "appName": "应用数据遗留应用数据", "findings": findings } })
         }
-        Err(e) => json!({ "success": false, "message": format!("孤儿扫描异常: {e}") }),
+        Err(e) => json!({ "success": false, "message": format!("应用数据遗留扫描异常: {e}") }),
     }
 }
 
@@ -2526,10 +2588,557 @@ pub async fn uninstall_orphan_ignore<R: tauri::Runtime>(
     ownership::ignore(&mut doc, &app_id, &display_name, crate::engine::now_ms(), |s| norm_name(s));
     match ownership::save(&doc) {
         Ok(()) => {
-            log::write_log("info", &format!("孤儿判定已忽略历史 owner: {display_name}（{app_id}）"));
+            log::write_log("info", &format!("应用数据遗留判定已忽略历史 owner: {display_name}（{app_id}）"));
             json!({ "success": true, "data": { "message": format!("已不再提示「{display_name}」的遗留数据") } })
         }
         Err(e) => json!({ "success": false, "message": format!("忽略记录写入失败: {e}") }),
+    }
+}
+
+// ==================== 失效残留扫描（M6，用户拍板 2026-09-28） ====================
+//
+// 与 M4 的所有权链分工不同，两条链共用一个「残留扫描」面板但证据来源不同：
+// - 程序残留（规则库）：知道是哪个程序，按签名规则找它的痕；
+// - 失效残留（本模块）：不要求本机有卸载记录，判据只有一条 ——
+//   **注册表/服务/设备里记着的落点文件已经不存在**（无法启动、零调用）。
+// - 应用数据遗留（所有权链）：仍然要「本机确实卸载过它」这条事实，
+//   因为同名目录匹配本身不是证据；档案取不到时这一组自己说明取不到，
+//   不再让整次扫描失败（那是把一条链的缺证据当成三条链的结论）。
+//
+// 三条硬约束（不随需求变）：
+// 1. 一律 `defaultChecked: false`、置信度封顶 medium —— 落点缺失也可能是
+//    移动盘/网络盘没插、程序被手工搬过位置，这些只有用户知道；
+// 2. 只有注册表类候选给删除出口，且必须过既有 `classify_residue_op`
+//    （快照闸 + A1 禁删面 + 先 export 备份 + 封条）；服务与设备的 kind 故意写成
+//    `service`/`device`，执行链的「未知残留类型」分支天然拒绝它们 ——
+//    展示与变更之间不留第二条通道；
+// 3. 「沉睡多久」只展示不参与判定：键的 LastWriteTime 读不到就留空，
+//    拿 0 当"很久没动过"会把读不到伪装成有把握。
+
+/// 快照槽按 origin 分桶替换。
+///
+/// 为什么不能整槽覆盖：面板现在同时展示多组候选，先扫的那组会在后一次扫描后被
+/// 快照闸判成「不在本次扫描快照中」，用户看到的勾选项点下去就报错。
+/// M4 的应用数据遗留链其实已经有这个坑（它覆盖掉单程序残留的快照），一并收口。
+fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Value>) {
+    const SNAPSHOT_CAP: usize = 400;
+    let mut store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
+    let mut merged: Vec<Value> = store
+        .get(label)
+        .map(|(_, f)| {
+            f.iter()
+                .filter(|x| x.get("origin").and_then(Value::as_str) != Some(origin))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    merged.extend(findings);
+    if merged.len() > SNAPSHOT_CAP {
+        merged.truncate(SNAPSHOT_CAP);
+    }
+    store.insert(label.to_string(), (crate::engine::now_ms(), merged));
+}
+
+/// `%VAR%` 展开。**任一变量取不到就返回 None**：把没展开的串继续往下判，等于
+/// 拿一个本机根本不存在的路径去判"落点已消失"，那是自己造出来的假阳性。
+fn expand_pct(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        match tail.find('%') {
+            Some(j) => {
+                let name = &tail[..j];
+                if name.is_empty() {
+                    out.push('%');
+                } else {
+                    out.push_str(&std::env::var(name).ok()?);
+                }
+                rest = &tail[j + 1..];
+            }
+            None => {
+                out.push('%');
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// 从 `UninstallString` / 服务 `ImagePath` / App Paths 默认值里取出「它记着哪个文件」。
+///
+/// `None` = 判不出来（相对名、无扩展名、`Device\` 形态、变量展开不了），
+/// 调用方必须把 None 当**无证据**而不是"不存在"。
+/// 截参数的口径：带引号取引号内；不带引号就在第一个 `.exe/.dll/.sys` 之后切断
+/// （注册表里没引号的路径只能靠扩展名边界分参数），且结果必须以这三种扩展名结尾。
+fn dead_landing(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let s = s.strip_prefix(r"\??\").unwrap_or(s);
+    // `\SystemRoot\system32\...` 是服务表里的常见写法（不是 %SystemRoot%）
+    let rewritten;
+    let s = if s
+        .get(..11)
+        .map(|p| p.eq_ignore_ascii_case(r"\SystemRoot"))
+        .unwrap_or(false)
+    {
+        rewritten = format!("{}{}", std::env::var("SystemRoot").ok()?, &s[11..]);
+        rewritten.as_str()
+    } else {
+        s
+    };
+    let expanded = expand_pct(s)?;
+    let head = match expanded.strip_prefix('"') {
+        Some(q) => q.split('"').next().unwrap_or("").to_string(),
+        None => {
+            let low = expanded.to_lowercase();
+            let cut = [".exe", ".dll", ".sys"]
+                .iter()
+                .filter_map(|e| low.find(e).map(|i| i + e.len()))
+                .min();
+            match cut {
+                Some(end) => expanded.chars().take(end).collect(),
+                None => expanded.clone(),
+            }
+        }
+    };
+    let head = head.trim().to_string();
+    if head.is_empty() {
+        return None;
+    }
+    let b = head.as_bytes();
+    let is_abs = (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\')
+        || head.starts_with(r"\\");
+    if !is_abs {
+        return None;
+    }
+    let low = head.to_lowercase();
+    if !(low.ends_with(".exe") || low.ends_with(".dll") || low.ends_with(".sys")) {
+        return None;
+    }
+    Some(head)
+}
+
+/// 落点集合是否「全部缺失」。空集合返回 false —— 没有落点就没有证据，不产候选。
+fn landings_all_missing(lands: &[String], exists: &dyn Fn(&str) -> bool) -> bool {
+    !lands.is_empty() && lands.iter().all(|p| !exists(p))
+}
+
+/// MSI 产品码形态的键名（`{GUID}`）：它的 `InstallLocation` 经常是空或错的，
+/// 单靠一条落点判"程序已不在"不够，要求至少两条落点全部缺失。
+fn is_msi_product_code(key_tail: &str) -> bool {
+    let t = key_tail.trim_matches('{').trim_matches('}');
+    t.len() == 36
+        && t.matches('-').count() == 4
+        && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// 卸载键候选（纯函数，单测注入存在性判定）
+fn dead_uninstall_findings(
+    raws: &[DeadUninstallRaw],
+    exists: &dyn Fn(&str) -> bool,
+    now: i64,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for r in raws {
+        if r.name.trim().is_empty() {
+            continue; // 没有显示名的条目用户无法判断是什么，不产候选
+        }
+        let mut lands: Vec<String> = Vec::new();
+        let loc = r.install.trim().trim_end_matches(['\\', '/']);
+        if !loc.is_empty() {
+            lands.push(loc.to_string());
+        }
+        for raw in [&r.uninstall, &r.quiet] {
+            if let Some(p) = dead_landing(raw) {
+                if !lands.iter().any(|x| x.eq_ignore_ascii_case(&p)) {
+                    lands.push(p);
+                }
+            }
+        }
+        let needed = if is_msi_product_code(&r.key) { 2 } else { 1 };
+        if lands.len() < needed || !landings_all_missing(&lands, exists) {
+            continue;
+        }
+        out.push(json!({
+            "kind": "reg_key",
+            "target": format!("{}\\{}", r.hive, r.path),
+            "reason": format!("卸载项「{}」记着的落点已全部不存在（{}）", r.name, lands.join("；")),
+            "confidence": if lands.len() >= 2 { "medium" } else { "low" },
+            "risk": "medium",
+            "defaultChecked": false,
+            "origin": "dead",
+            "deadClass": "uninstall",
+            "deleteCapable": true,
+            "testedPaths": lands,
+            "dormantMs": dormant_delta(r.last_write_ms, now),
+        }));
+    }
+    out
+}
+
+/// App Paths 候选：默认值指向的文件已不存在 → 该 `App Paths\<x.exe>` 子键是失效登记
+fn dead_app_paths_findings(
+    raws: &[DeadAppPathRaw],
+    exists: &dyn Fn(&str) -> bool,
+    now: i64,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for r in raws {
+        let Some(p) = dead_landing(&r.value) else { continue };
+        if exists(&p) {
+            continue;
+        }
+        out.push(json!({
+            "kind": "reg_key",
+            "target": format!("{}\\{}", r.hive, r.path),
+            "reason": format!("App Paths「{}」指向 {}，该文件已不存在", r.key, p),
+            "confidence": "low",
+            "risk": "low",
+            "defaultChecked": false,
+            "origin": "dead",
+            "deadClass": "appPaths",
+            "deleteCapable": true,
+            "testedPaths": [p],
+            "dormantMs": dormant_delta(r.last_write_ms, now),
+        }));
+    }
+    out
+}
+
+/// 服务候选：`ImagePath` 记着的二进制已不存在 → 无法启动即零调用。
+/// 只展示（`deleteCapable:false`，kind 用 `service`），删服务要提权走 SCM，不在本轮。
+fn dead_service_findings(
+    raws: &[DeadServiceRaw],
+    exists: &dyn Fn(&str) -> bool,
+    windir: &str,
+    now: i64,
+) -> Vec<Value> {
+    let win = windir.trim_end_matches('\\').to_lowercase();
+    let mut out = Vec::new();
+    for r in raws {
+        let Some(p) = dead_landing(&r.image_path) else { continue };
+        // Windows 自己的服务不在「应用卸载相关残留」范围内；它的二进制缺失是系统坏了，
+        // 不是卸载残留，报出来只会把真信号埋进噪音里
+        if !win.is_empty() && p.to_lowercase().starts_with(&win) {
+            continue;
+        }
+        if exists(&p) {
+            continue;
+        }
+        out.push(json!({
+            "kind": "service",
+            "target": r.name.clone(),
+            "reason": format!("服务「{}」的 ImagePath 指向 {}，文件已不存在（无法启动）", r.display, p),
+            "confidence": "medium",
+            "risk": "high",
+            "defaultChecked": false,
+            "origin": "dead",
+            "deadClass": "service",
+            "deleteCapable": false,
+            "testedPaths": [p],
+            "dormantMs": dormant_delta(r.last_write_ms, now),
+        }));
+    }
+    out
+}
+
+/// 设备候选：SetupAPI 判定当前不在场的实例（幽灵设备）。只展示。
+fn dead_device_findings(raws: &[DeadDeviceRaw], total: usize, now: i64) -> Vec<Value> {
+    let mut rows: Vec<Value> = raws
+        .iter()
+        .take(DEAD_DEVICE_CAP)
+        .map(|r| {
+            let label = if r.friendly.trim().is_empty() {
+                r.desc.clone()
+            } else {
+                r.friendly.clone()
+            };
+            json!({
+                "kind": "device",
+                "target": r.id.clone(),
+                "reason": format!("设备「{}」当前不在场（{}）", if label.is_empty() { "未命名设备".to_string() } else { label }, r.class),
+                "confidence": "low",
+                "risk": "high",
+                "defaultChecked": false,
+                "origin": "dead",
+                "deadClass": "device",
+                "deleteCapable": false,
+                "testedPaths": [],
+                "dormantMs": dormant_delta(r.last_write_ms, now),
+            })
+        })
+        .collect();
+    let listed = rows.len();
+    // 说明行按「实际列出多少」说话：采集侧还会因无名字跳过若干台，
+    // 拿上限值当列出数会把「另有 N 台未列出」算错
+    if total > listed {
+        rows.push(json!({
+            "kind": "note",
+            "target": "device-total",
+            "reason": format!("共 {total} 台设备当前不在场，此处列出 {listed} 台（幽灵设备多为历史插拔过的 USB/虚拟网卡，属正常积累，不建议批量处置）"),
+            "confidence": "low",
+            "risk": "low",
+            "defaultChecked": false,
+            "origin": "dead",
+            "deadClass": "device",
+            "deleteCapable": false,
+            "testedPaths": [],
+            "dormantMs": null,
+        }));
+    }
+    rows
+}
+
+/// 沉睡时长（毫秒差）。读不到写入时间就返回 `None`，前端显示「未知」而不是"很久"。
+fn dormant_delta(last_write_ms: Option<i64>, now: i64) -> Value {
+    match last_write_ms {
+        Some(t) if t > 0 && now > t => json!(now - t),
+        _ => Value::Null,
+    }
+}
+
+/// 一次扫描里各组的产出上限：服务与设备是"看一眼"的信息，注册表类才进删除清单
+const DEAD_SERVICE_CAP: usize = 60;
+const DEAD_DEVICE_CAP: usize = 60;
+const DEAD_REG_CAP: usize = 120;
+
+/// 卸载键原始行（枚举与判定分开，判定是纯函数）
+struct DeadUninstallRaw {
+    hive: String,
+    key: String,
+    path: String,
+    name: String,
+    install: String,
+    uninstall: String,
+    quiet: String,
+    last_write_ms: Option<i64>,
+}
+
+struct DeadAppPathRaw {
+    hive: String,
+    key: String,
+    path: String,
+    value: String,
+    last_write_ms: Option<i64>,
+}
+
+struct DeadServiceRaw {
+    name: String,
+    display: String,
+    image_path: String,
+    last_write_ms: Option<i64>,
+}
+
+struct DeadDeviceRaw {
+    id: String,
+    friendly: String,
+    desc: String,
+    class: String,
+    last_write_ms: Option<i64>,
+}
+
+fn hive_of(label: &str) -> windows::Win32::System::Registry::HKEY {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    if label == "HKCU" {
+        HKEY_CURRENT_USER
+    } else {
+        HKEY_LOCAL_MACHINE
+    }
+}
+
+/// 采集三根下的卸载键原始字段（只读，不判定）
+unsafe fn collect_dead_uninstall_raws() -> Vec<DeadUninstallRaw> {
+    const ROOTS: &[(&str, &str)] = &[
+        ("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ("HKLM", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ];
+    let mut out = Vec::new();
+    for (hive_label, root) in ROOTS {
+        let hive = hive_of(hive_label);
+        for sub in crate::engine::native::reg_enum_subkeys_pub(hive, root) {
+            let path = format!("{root}\\{sub}");
+            let rd = |v: &str| {
+                crate::engine::native::read_reg_value_text(hive, &path, v)
+                    .map(|(_, s)| s)
+                    .unwrap_or_default()
+            };
+            let name = rd("DisplayName");
+            let install = rd("InstallLocation");
+            let uninstall = rd("UninstallString");
+            let quiet = rd("QuietUninstallString");
+            if name.is_empty() && install.is_empty() && uninstall.is_empty() {
+                continue;
+            }
+            let last_write_ms = crate::engine::native::reg_key_last_write_ms(hive, &path);
+            out.push(DeadUninstallRaw {
+                hive: hive_label.to_string(),
+                key: sub,
+                path,
+                name,
+                install,
+                uninstall,
+                quiet,
+                last_write_ms,
+            });
+        }
+    }
+    out
+}
+
+/// 采集 App Paths 默认值
+unsafe fn collect_dead_app_path_raws() -> Vec<DeadAppPathRaw> {
+    const ROOTS: &[(&str, &str)] = &[
+        ("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"),
+        ("HKLM", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths"),
+        ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\App Paths"),
+    ];
+    let mut out = Vec::new();
+    for (hive_label, root) in ROOTS {
+        let hive = hive_of(hive_label);
+        for sub in crate::engine::native::reg_enum_subkeys_pub(hive, root) {
+            let path = format!("{root}\\{sub}");
+            let value = crate::engine::native::read_reg_value_text(hive, &path, "")
+                .map(|(_, s)| s)
+                .unwrap_or_default();
+            if value.trim().is_empty() {
+                continue;
+            }
+            let last_write_ms = crate::engine::native::reg_key_last_write_ms(hive, &path);
+            out.push(DeadAppPathRaw {
+                hive: hive_label.to_string(),
+                key: sub,
+                path,
+                value,
+                last_write_ms,
+            });
+        }
+    }
+    out
+}
+
+/// 采集服务登记（注册表侧，不走 SCM：枚举服务不需要提权，读 ImagePath 也不需要）
+unsafe fn collect_dead_service_raws() -> Vec<DeadServiceRaw> {
+    const ROOT: &str = r"SYSTEM\CurrentControlSet\Services";
+    let hive = hive_of("HKLM");
+    let mut out = Vec::new();
+    for name in crate::engine::native::reg_enum_subkeys_pub(hive, ROOT) {
+        let path = format!("{ROOT}\\{name}");
+        let image = crate::engine::native::read_reg_value_text(hive, &path, "ImagePath")
+            .map(|(_, s)| s)
+            .unwrap_or_default();
+        if image.trim().is_empty() {
+            continue; // 文件驱动外的过滤驱动/内置项，没有落点就不判
+        }
+        let display = crate::engine::native::read_reg_value_text(hive, &path, "DisplayName")
+            .map(|(_, s)| s)
+            .unwrap_or_else(|| name.clone());
+        let last_write_ms = crate::engine::native::reg_key_last_write_ms(hive, &path);
+        out.push(DeadServiceRaw {
+            name,
+            display,
+            image_path: image,
+            last_write_ms,
+        });
+    }
+    out
+}
+
+/// 幽灵设备的注册表侧描述（实例 ID 来自 SetupAPI，描述回查 Enum 键，省一次 FFI）
+unsafe fn collect_dead_device_raws(ids: &[String]) -> Vec<DeadDeviceRaw> {
+    const ROOT: &str = r"SYSTEM\CurrentControlSet\Enum";
+    let hive = hive_of("HKLM");
+    let mut out = Vec::new();
+    for id in ids.iter().take(DEAD_DEVICE_CAP * 2) {
+        let path = format!("{ROOT}\\{id}");
+        let rd = |v: &str| {
+            crate::engine::native::read_reg_value_text(hive, &path, v)
+                .map(|(_, s)| s)
+                .unwrap_or_default()
+        };
+        let class = rd("Class");
+        let friendly = rd("FriendlyName");
+        let desc = rd("DeviceDesc");
+        if class.eq_ignore_ascii_case("System") && friendly.is_empty() && desc.is_empty() {
+            continue;
+        }
+        let last_write_ms = crate::engine::native::reg_key_last_write_ms(hive, &path);
+        out.push(DeadDeviceRaw {
+            id: id.clone(),
+            friendly,
+            desc,
+            class: if class.is_empty() { "未知类别".to_string() } else { class },
+            last_write_ms,
+        });
+    }
+    out
+}
+
+/// uninstall:dead-scan — 失效残留扫描（主窗档；不依赖卸载事实，只产候选）
+#[tauri::command]
+pub async fn uninstall_dead_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let label = window.label().to_string();
+    let res = tauri::async_runtime::spawn_blocking(move || unsafe {
+        let now = crate::engine::now_ms();
+        let exists = |p: &str| std::path::Path::new(p).exists();
+        let mut notes: Vec<String> = Vec::new();
+
+        let u_raws = collect_dead_uninstall_raws();
+        let mut u = dead_uninstall_findings(&u_raws, &exists, now);
+        if u_raws.is_empty() {
+            notes.push("卸载项清单读取失败（注册表三根都打不开），本组结果不完整".to_string());
+        }
+        u.sort_by(|a, b| b["dormantMs"].as_i64().cmp(&a["dormantMs"].as_i64()));
+        u.truncate(DEAD_REG_CAP);
+
+        let a_raws = collect_dead_app_path_raws();
+        let mut ap = dead_app_paths_findings(&a_raws, &exists, now);
+        ap.sort_by(|a, b| b["dormantMs"].as_i64().cmp(&a["dormantMs"].as_i64()));
+        ap.truncate(DEAD_REG_CAP);
+
+        let s_raws = collect_dead_service_raws();
+        let mut svc = dead_service_findings(&s_raws, &exists, &std::env::var("SystemRoot").unwrap_or_default(), now);
+        let svc_total = svc.len();
+        svc.truncate(DEAD_SERVICE_CAP);
+
+        let devices: Vec<Value> = match crate::engine::native::phantom_device_ids() {
+            Ok(ids) => {
+                let raws = collect_dead_device_raws(&ids);
+                dead_device_findings(&raws, ids.len(), now)
+            }
+            Err(e) => {
+                notes.push(format!("设备面本次未判定：{e}"));
+                Vec::new()
+            }
+        };
+
+        let mut findings = Vec::new();
+        findings.extend(u);
+        findings.extend(ap);
+        findings.extend(svc);
+        findings.extend(devices);
+        (findings, notes, svc_total)
+    })
+    .await;
+    match res {
+        Ok((findings, notes, svc_total)) => {
+            residue_snapshot_put(&label, "dead", findings.clone());
+            json!({ "success": true, "data": {
+                "appName": "失效残留",
+                "findings": findings,
+                "notes": notes,
+                "serviceTotal": svc_total,
+            }})
+        }
+        Err(e) => json!({ "success": false, "message": format!("失效残留扫描异常: {e}") }),
     }
 }
 
@@ -2549,7 +3158,7 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     let Some((hive_str, key_path)) = app_id.split_once('|') else {
         return json!({ "success": false, "message": "app_id 格式错误" });
     };
-    // U-4（拍板 2026-09-28）：Appx 也参与残留扫描（Packages 孤儿数据），先用包全名闸
+    // U-4（拍板 2026-09-28）：Appx 也参与残留扫描（Packages 应用数据遗留数据），先用包全名闸
     if hive_str.eq_ignore_ascii_case("APPX") {
         if !valid_appx_fullname(key_path) {
             return json!({ "success": false, "message": "app_id 不是合法的包全名" });
@@ -2562,7 +3171,7 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     let findings = tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
         // U-4（拍板 2026-09-28）：Appx 残留口径=Remove-AppxPackage 后
-        // %LOCALAPPDATA%\Packages\<PFN> 的孤儿应用数据。此前「不参与残留扫描」，
+        // %LOCALAPPDATA%\Packages\<PFN> 的应用数据遗留应用数据。此前「不参与残留扫描」，
         // 小旭拍板并入：目录存在才入候选，进回收站（可还原），先过 is_path_protected。
         if hive_str.eq_ignore_ascii_case("APPX") {
             let Some(pfn) = package_family_name(&key_path) else {
@@ -2577,7 +3186,7 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
             if dir.is_dir() && !protect::is_path_protected(&dir.to_string_lossy()) {
                 findings.push(json!({
                     "kind": "folder", "target": dir.to_string_lossy(),
-                    "reason": "Windows 应用已移除，其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据成为孤儿（进回收站，可还原）",
+                    "reason": "Windows 应用已移除，其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据成为应用数据遗留（进回收站，可还原）",
                     "confidence": "high", "risk": "low", "defaultChecked": true,
                 }));
             }
@@ -2743,10 +3352,7 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     // 快照落槽：执行只认这份集合
     let (finding_list, app_name) = findings;
     let label = window.label().to_string();
-    {
-        let mut store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
-        store.insert(label, (crate::engine::now_ms(), finding_list.clone()));
-    }
+    residue_snapshot_put(&label, "app", finding_list.clone());
     json!({ "success": true, "data": { "appName": app_name, "findings": finding_list } })
 }
 
@@ -3642,7 +4248,7 @@ mod residue_trace_tests {
         assert_eq!(doc["owners"][0]["state"], json!("historical"));
         assert_eq!(doc["owners"][0]["confirmedAt"], json!(3000));
 
-        // ④ 重装：historical 记录撤销（否则会被当成孤儿来源）
+        // ④ 重装：historical 记录撤销（否则会被当成应用数据遗留来源）
         let (p, r) = ownership::rescan(&mut doc, &ids_of(&[A_ID]), 4000, &gone);
         assert_eq!((p, r), (0, 1));
         assert!(doc["owners"].as_array().unwrap().is_empty());
@@ -3774,7 +4380,7 @@ mod residue_trace_tests {
         for name in ORPHAN_DISPOSABLE_SUBDIRS {
             assert_eq!(&norm_name(name), name, "清单里的 {name} 不是归一化形态，永远不会命中");
         }
-        assert!(ORPHAN_SCAN_ROOTS.contains(&"LOCALAPPDATA"), "孤儿扫描必须覆盖用户级数据根");
+        assert!(ORPHAN_SCAN_ROOTS.contains(&"LOCALAPPDATA"), "应用数据遗留扫描必须覆盖用户级数据根");
     }
 
     /// A1 扫描侧硬闸：受保护的注册表目标**不得进候选列表**。
@@ -4142,5 +4748,199 @@ mod residue_trace_tests {
             second_evidence_kind(r"C:\Program Files\Foo\", &by_name("unins000.exe")),
             Some("inno")
         );
+    }
+    /// M6：注册表里记着的落点写法五花八门，解析必须"认不出就无证据"，
+    /// 而不是"猜一个路径出来判它不存在"。下面每条都是真机见过的形态。
+    #[test]
+    fn dead_landing_parses_registry_forms() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let cases: &[(&str, Option<&str>)] = &[
+            (r#""C:\Program Files\Foo\unins000.exe" /SILENT"#, Some(r"C:\Program Files\Foo\unins000.exe")),
+            (r"C:\Program Files\AntiCheatExpert\ACE-CORE102706.sys", Some(r"C:\Program Files\AntiCheatExpert\ACE-CORE102706.sys")),
+            (r"C:\Windows\System32\svchost.exe -k netsvcs", Some(r"C:\Windows\System32\svchost.exe")),
+            (r"\??\C:\Windows\System32\drivers\ACEX.sys", Some(r"C:\Windows\System32\drivers\ACEX.sys")),
+            (r"\\server\share\unins000.exe /S", Some(r"\\server\share\unins000.exe")),
+            // 认不出的一律 None —— 把"判不出来"当成"不存在"就是假阳性的来源
+            ("notepad.exe", None),
+            (r"C:\Program Files\Foo\launcher", None),
+            (r"cmd /c del C:\x", None),
+            (r"%NO_SUCH_TRIM_VAR%\a.exe", None),
+            ("", None),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(dead_landing(raw).as_deref(), *want, "落点解析不符: {raw:?}");
+        }
+        // %SystemRoot% 展开依赖本机环境，只断前缀不断全串
+        let exp = dead_landing(r"%SystemRoot%\system32\foo.exe").unwrap_or_default();
+        assert!(
+            exp.to_lowercase().starts_with(&windir.to_lowercase()),
+            "变量没展开: {exp}"
+        );
+        // 未闭合引号不许把整串（含参数）当路径
+        assert_eq!(dead_landing(r#""C:\Program Files\Foo\unins000.exe /S"#), None);
+    }
+
+    /// M6 卸载项判据：全部落点缺失才算失效；MSI 产品码键要求两条落点。
+    #[test]
+    fn dead_uninstall_needs_every_landing_missing() {
+        let present: std::collections::HashSet<String> = [
+            r"C:\Program Files\Alive",
+            r"C:\Program Files\Alive\unins000.exe",
+            r"C:\Program Files\Half\unins000.exe",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let exists = |p: &str| present.iter().any(|x| x.eq_ignore_ascii_case(p));
+        let mk = |name: &str, key: &str, install: &str, un: &str| DeadUninstallRaw {
+            hive: "HKLM".to_string(),
+            key: key.to_string(),
+            path: format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{key}"),
+            name: name.to_string(),
+            install: install.to_string(),
+            uninstall: un.to_string(),
+            quiet: String::new(),
+            last_write_ms: Some(1_700_000_000_000),
+        };
+        let guid = "{1D4E2B7A-2F3C-4D5E-8A9B-0C1D2E3F4A5B}";
+        let rows = vec![
+            mk("Alive", "Alive", r"C:\Program Files\Alive", r"C:\Program Files\Alive\unins000.exe"),
+            mk("Half", "Half", r"C:\Program Files\Half", r"C:\Program Files\Half\unins000.exe"),
+            mk("Gone", "Gone", r"C:\Program Files\Gone", r"C:\Program Files\Gone\unins000.exe"),
+            mk("NoLanding", "NoLanding", "", ""),
+            mk("RelativeOnly", "RelativeOnly", "", "unins000.exe"),
+            mk("", "Nameless", r"C:\Program Files\Nameless", r"C:\Program Files\Nameless\u.exe"),
+            mk("MsiOne", guid, r"C:\Program Files\MsiOne", ""),
+        ];
+        let out = dead_uninstall_findings(&rows, &exists, 1_700_000_900_000);
+        let targets: Vec<&str> = out.iter().map(|f| f["target"].as_str().unwrap_or("")).collect();
+        assert_eq!(
+            targets,
+            vec![r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Gone"],
+            "候选集合不符（半存活/无落点/相对名/无名/MSI 单证据都不该出）: {out:?}"
+        );
+        assert_eq!(out[0]["confidence"], json!("medium"), "两条落点全部缺失才给 medium");
+        assert_eq!(out[0]["defaultChecked"], json!(false));
+        assert_eq!(out[0]["deleteCapable"], json!(true));
+        // MSI 键两条落点全部缺失才放行，且置信度按证据条数走
+        let msi_two = mk("MsiTwo", guid, r"C:\Program Files\MsiTwo", r"C:\Program Files\MsiTwo\setup.exe /x");
+        let out2 = dead_uninstall_findings(&[msi_two], &exists, 1_700_000_900_000);
+        assert_eq!(out2.len(), 1, "MSI 键两条落点全缺应产出: {out2:?}");
+        assert_eq!(out2[0]["confidence"], json!("medium"), "两条落点全缺给 medium: {out2:?}");
+        // 普通键单条落点缺失即产出，但置信度只到 low
+        let one = mk("OneLanding", "OneLanding", "", r"C:\Program Files\OneLanding\unins000.exe");
+        let out3 = dead_uninstall_findings(&[one], &exists, 1_700_000_900_000);
+        assert_eq!(out3.len(), 1, "普通键单条落点缺失就该产出: {out3:?}");
+        assert_eq!(out3[0]["confidence"], json!("low"), "一条落点不给 medium: {out3:?}");
+    }
+
+    /// 服务与设备只展示：`deleteCapable` 是 UI 承诺，执行链的「未知残留类型」才是真闸门。
+    #[test]
+    fn dead_service_and_device_rows_cannot_reach_the_mutator() {
+        let raws = vec![
+            DeadServiceRaw {
+                name: "AcSvc".to_string(),
+                display: "Acme Service".to_string(),
+                image_path: r"C:\Program Files\Acme\svc.exe".to_string(),
+                last_write_ms: Some(1_700_000_000_000),
+            },
+            DeadServiceRaw {
+                name: "WinSvc".to_string(),
+                display: "Windows Thing".to_string(),
+                image_path: r"C:\Windows\System32\gone.exe".to_string(),
+                last_write_ms: None,
+            },
+        ];
+        let out = dead_service_findings(&raws, &|_| false, r"C:\Windows", 1_700_000_900_000);
+        let names: Vec<&str> = out.iter().map(|f| f["target"].as_str().unwrap_or("")).collect();
+        assert!(names.contains(&"AcSvc"), "第三方服务二进制缺失必须报出: {out:?}");
+        assert!(
+            !names.contains(&"WinSvc"),
+            "Windows 自己的服务不属「应用卸载相关残留」，报出来只会淹掉真信号: {out:?}"
+        );
+        for f in &out {
+            assert_eq!(f["deleteCapable"], json!(false));
+            assert_eq!(f["defaultChecked"], json!(false));
+            // 双保险：即便渲染层硬把这条送去执行，D3 的单一变更入口也判它未知类型
+            match classify_residue_op(f["kind"].as_str().unwrap_or(""), "x") {
+                OpVerdict::Skip(m) => assert!(m.contains("未知残留类型"), "实测: {m}"),
+                OpVerdict::Ready(_) => panic!("服务/设备候选不得进入变更清单"),
+                OpVerdict::Abort(m) => panic!("不该整批拒绝，实测 {m}"),
+            }
+        }
+    }
+
+    #[test]
+    fn dead_app_paths_rows_target_only_their_own_key() {
+        let raws = vec![
+            DeadAppPathRaw {
+                hive: "HKLM".to_string(),
+                key: "foo.exe".to_string(),
+                path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\foo.exe".to_string(),
+                value: r"C:\Program Files\Foo\foo.exe".to_string(),
+                last_write_ms: None,
+            },
+            DeadAppPathRaw {
+                hive: "HKLM".to_string(),
+                key: "bar.exe".to_string(),
+                path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\bar.exe".to_string(),
+                value: "bar.exe".to_string(),
+                last_write_ms: None,
+            },
+            DeadAppPathRaw {
+                hive: "HKLM".to_string(),
+                key: "live.exe".to_string(),
+                path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\live.exe".to_string(),
+                value: r"C:\Windows\explorer.exe".to_string(),
+                last_write_ms: None,
+            },
+        ];
+        let out = dead_app_paths_findings(&raws, &|p| p.eq_ignore_ascii_case(r"C:\Windows\explorer.exe"), 1_700_000_900_000);
+        assert_eq!(out.len(), 1, "只有落点确实缺失的那条该出候选: {out:?}");
+        let target = out[0]["target"].as_str().unwrap_or("");
+        assert_eq!(target, r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\foo.exe");
+        assert_eq!(out[0]["deleteCapable"], json!(true));
+        assert!(
+            protect::reg_target_block_reason(target).is_none(),
+            "M1 给 App Paths 留的例外放行没生效，本类候选会被执行侧全量拒杀: {target}"
+        );
+    }
+
+    /// 快照分桶：面板现在同时展示多组候选，整槽覆盖会让先扫那组在执行时被快照闸判过期。
+    #[test]
+    fn residue_snapshot_buckets_replace_only_their_own_origin() {
+        let label = "test-snapshot-merge";
+        residue_snapshot_put(label, "app", vec![json!({ "kind": "folder", "target": "C:\\a", "origin": "app" })]);
+        residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\X", "origin": "dead" })]);
+        let both: Vec<String> = residue_snapshots()
+            .lock()
+            .map(|g| g.get(label).cloned().unwrap_or_default().1)
+            .unwrap_or_default()
+            .iter()
+            .map(|f| f["target"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(both.len(), 2, "两组扫描的候选必须共存: {both:?}");
+        residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\Y", "origin": "dead" })]);
+        let after: Vec<String> = residue_snapshots()
+            .lock()
+            .map(|g| g.get(label).cloned().unwrap_or_default().1)
+            .unwrap_or_default()
+            .iter()
+            .map(|f| f["target"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(after.len(), 2, "重扫只换自己那一桶: {after:?}");
+        assert!(after.iter().any(|t| t == "C:\\a"), "app 桶被误替换: {after:?}");
+        assert!(after.iter().any(|t| t.ends_with("Software\\Y")), "dead 桶没换: {after:?}");
+        assert!(!after.iter().any(|t| t.ends_with("Software\\X")), "dead 桶旧值残留: {after:?}");
+        let _ = residue_snapshots().lock().map(|mut g| g.remove(label));
+    }
+
+    /// 沉睡时长：读不到就留未知。把 0 显示成"很久没动过"是把没把握说成有把握。
+    #[test]
+    fn dormant_stays_unknown_instead_of_looking_ancient() {
+        assert_eq!(dormant_delta(None, 1_700_000_900_000), Value::Null);
+        assert_eq!(dormant_delta(Some(0), 1_700_000_900_000), Value::Null);
+        assert_eq!(dormant_delta(Some(1_700_000_900_001), 1_700_000_900_000), Value::Null, "时钟回拨不给负数");
+        assert_eq!(dormant_delta(Some(1_700_000_000_000), 1_700_000_900_000), json!(900_000));
     }
 }
