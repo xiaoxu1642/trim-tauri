@@ -96,11 +96,15 @@ const MUST_MAIN = [
   'updater_install',
   'updater_set_mirror',
   // 卸载域 MVP（竞品借鉴落地方案 P0 §11）：卸载/残留执行是高危写操作，
-  // 且只有主窗加载 uninstall.js —— 四条命令全档 MAIN。
+  // 且只有主窗加载 uninstall.js —— 六条命令全档 MAIN。
+  // 其中 check/update-residue 两条按「谁真的需要调它」定档（AGENTS §3 的 M1~M3 教训）：
+  // 更新入口在卸载页（主窗），**不得**因为"检查版本看着像只读"就下放成放行四个子窗的档位。
   'uninstall_list',
   'uninstall_run',
   'uninstall_residue_scan',
   'uninstall_residue_execute',
+  'uninstall_check_residue_version',
+  'uninstall_update_residue_rules',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----

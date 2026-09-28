@@ -276,6 +276,8 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_run,
         commands::uninstall::uninstall_residue_scan,
         commands::uninstall::uninstall_residue_execute,
+        commands::uninstall::uninstall_check_residue_version,
+        commands::uninstall::uninstall_update_residue_rules,
         commands::uninstall::uninstall_report_list,
         commands::uninstall::uninstall_report_get,
         commands::uninstall::uninstall_appx_logo,

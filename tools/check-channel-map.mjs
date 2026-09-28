@@ -89,6 +89,8 @@ const TAURI_ADDED = {
   'cleanup:reg-backup-restore': 'C-4（2026-09-28）：注册表备份还原（reg import，主窗档）',
   'cleanup:file-backup-list': 'C-4（2026-09-28）：永久删批次文件备份清单（2026-09-28 拍板补删前备份）',
   'cleanup:file-backup-restore': 'C-4（2026-09-28）：文件备份拷回原路径（主窗档）',
+  'uninstall:check-residue-version': 'A3/M3（2026-09-28）：残留规则库版本检查（上游无残留库热更新能力）',
+  'uninstall:update-residue-rules': 'A3/M3（2026-09-28）：残留规则库在线更新（主窗档，显式动作不做定时）',
 };
 
 function collect(set, re, text) {

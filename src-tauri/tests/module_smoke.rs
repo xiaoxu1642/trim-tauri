@@ -255,6 +255,26 @@ fn uninstall_run_is_main_only_and_passes_guard_from_main() {
     );
 }
 
+/// A3 两条残留库更新命令都是 MAIN 档（唯一调用方是主窗卸载页）。
+///
+/// 快速组这里**只断子窗被拒杀**，不测主窗正向特征：这两条命令过了档位就要出网
+/// （更新还会写数据目录），属 §4.1 纪律② 的「外呼/触盘」，正例落在
+/// `cargo test --lib -- --ignored` 的 `residue_update_chain_verify`（只读不落盘）。
+/// 子窗这条断言本身也能证明命令已注册：未注册时回执是「命令不存在」而不是来源校验失败。
+#[test]
+fn residue_rule_update_channels_are_main_only() {
+    for cmd in ["uninstall_check_residue_version", "uninstall_update_residue_rules"] {
+        for label in sub_windows() {
+            let w = window_with_label(label);
+            let text = invoke_text(&w, cmd, json!({}));
+            assert!(
+                text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
+            );
+        }
+    }
+}
+
 // ==================== 重/外呼组（默认 ignore，发布前跑） ====================
 
 /// A1 收紧的**放行回测**（真机、只读）：装机清单里每个桌面程序的卸载键必然存在，

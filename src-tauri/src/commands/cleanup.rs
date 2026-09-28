@@ -89,6 +89,20 @@ const RULES_UPDATE_URLS: [&str; 3] = [
     "https://cdn.jsdelivr.net/gh/xiaoxu1642/trim-tauri@main/src-tauri/data/cleanup-rules.json",
     "https://gh-proxy.com/https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/src-tauri/data/cleanup-rules.json",
 ];
+
+/// 三条发布源对**仓库内路径**的 URL 形态。清理库与残留库共用这一个函数而不是各写一份清单：
+/// 镜像的路径结构各不相同（raw 走 `/main/<路径>`、jsDelivr 走 `/gh/<仓库>@main/<路径>`、
+/// gh-proxy 是前缀套娃），两份常量抄下来必然漂移（决策清单 D6）。
+/// 漂移由测试 `三条源与仓库内路径的拼装必须同源` 钉住。
+pub(crate) fn release_source_urls_for(rel_path: &str) -> Vec<String> {
+    vec![
+        format!("https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/{rel_path}"),
+        format!("https://cdn.jsdelivr.net/gh/xiaoxu1642/trim-tauri@main/{rel_path}"),
+        format!(
+            "https://gh-proxy.com/https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/{rel_path}"
+        ),
+    ]
+}
 /// 可删文件清单防呆上限（D13）
 const PLAN_CAP_PER_ITEM: usize = 100_000;
 const PLAN_CAP_TOTAL: usize = 1_000_000;
@@ -112,30 +126,41 @@ fn json_text(v: &Value) -> String {
 
 // ==================== 规则库加载（对照 cleanup-scripts.js 44-195） ====================
 
-/// 数据目录规则目录。**与 Electron 逐字一致**：`%APPDATA%\Trim\cleanup`
-/// （cleanup-scripts.js 硬编码 'Trim'，便携模式同样落 Roaming——保持文件路径全一致）
+/// 规则库根目录（**读**）。收口后新根 = `app_data_dir()\cleanup`
+/// （标准模式 `%APPDATA%\com.xiaoxu.trim\cleanup`，便携模式 exe 同级 `data\cleanup`），
+/// 老根 `%APPDATA%\Trim\cleanup` 只作只读兜底——2026-09-28 决策清单 D1=A。
+///
+/// 本函数原注释写的是「与 Electron 逐字一致，便携模式同样落 Roaming」，那是收口前的口径：
+/// 它造成便携实例下载的规则带不走、标准与便携两实例互相覆盖 `rules.json` 与水位线、
+/// AGENTS §7.3 的清缓存步骤够不着规则文件。老根仍在 `MIGRATION_DIRS` 里做一次性搬迁，
+/// 兜底读只服务于「搬迁没跑成」的场景。
 pub fn data_rules_dir() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    let base = if appdata.trim().is_empty() {
-        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
-            .join("AppData")
-            .join("Roaming")
-    } else {
-        PathBuf::from(appdata)
-    };
-    base.join("Trim").join("cleanup")
+    paths::data_subdir_for_read("cleanup")
+}
+
+/// **写入**专用规则根：恒新根。双写会让两个根长期分叉（v2-M19 记的同一类病）。
+fn data_rules_write_dir() -> PathBuf {
+    paths::data_subdir_for_write("cleanup")
 }
 
 fn data_rules_file() -> PathBuf {
-    data_rules_dir().join("rules.json")
+    paths::data_file_for_read("cleanup/rules.json")
+}
+
+fn data_rules_write_file() -> PathBuf {
+    data_rules_write_dir().join("rules.json")
 }
 
 fn custom_rules_dir() -> PathBuf {
-    data_rules_dir().join("custom")
+    paths::data_subdir_for_read("cleanup/custom")
 }
 
 fn watermark_file() -> PathBuf {
-    data_rules_dir().join("rules-watermark.json")
+    paths::data_file_for_read("cleanup/rules-watermark.json")
+}
+
+fn watermark_write_file() -> PathBuf {
+    data_rules_write_dir().join("rules-watermark.json")
 }
 
 /// 规则缓存（键 = 数据 mtime|size|custom 数量|各 custom mtime；对照 RULES_CACHE_SIG）
@@ -190,7 +215,8 @@ pub fn set_rules_watermark(version: f64) -> bool {
     if !version.is_finite() || version <= 0.0 || version <= rules_watermark() {
         return false;
     }
-    let file = watermark_file();
+    // 水位线只写新根：写老根会让两个根各自记住一个版本，读取侧的 max() 口径就失效了
+    let file = watermark_write_file();
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -2318,7 +2344,7 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
 /// 且中间人可以整段替换响应做成「全部源失败」的拒绝服务。纵深原则：传输层只认 https。
 /// 被拒的源由调用方逐条写日志——不让用户以为「配了但没生效」却无从发现。
 /// 拆成纯函数是为了可测：判定面（哪些留下、哪些被拒）不依赖数据目录与磁盘。
-fn pick_https_urls(cfg: &Value) -> (Vec<String>, Vec<String>) {
+pub(crate) fn pick_https_urls(cfg: &Value) -> (Vec<String>, Vec<String>) {
     let mut accepted: Vec<String> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
     let Some(arr) = cfg.get("urls").and_then(|v| v.as_array()) else {
@@ -2336,10 +2362,11 @@ fn pick_https_urls(cfg: &Value) -> (Vec<String>, Vec<String>) {
     (accepted, rejected)
 }
 
-/// 更新源覆盖配置（对照 loadRulesUpdateOverride）：数据目录 `update-source.json`
-fn load_rules_update_override() -> Option<(Vec<String>, Vec<(String, String)>)> {
-    let file = data_rules_dir().join("update-source.json");
-    let text = std::fs::read_to_string(&file).ok()?;
+/// 更新源覆盖配置（对照 loadRulesUpdateOverride）：读指定文件，只认 https 源，
+/// 附带可选的 `headers`（私有源鉴权由用户自配）。清理库与残留库共用这套 schema，
+/// 差别只在**读哪个文件**（决策清单 D6 定为各一份，避免动清理域的读侧语义）。
+pub(crate) fn load_update_override(file: &Path) -> Option<(Vec<String>, Vec<(String, String)>)> {
+    let text = std::fs::read_to_string(file).ok()?;
     let cfg: Value = serde_json::from_str(&text).ok()?;
     if !cfg.is_object() {
         return None;
@@ -2366,9 +2393,18 @@ fn load_rules_update_override() -> Option<(Vec<String>, Vec<(String, String)>)> 
     Some((urls, headers))
 }
 
-/// 更新源清单（update / check-version 共用；对照 buildRulesSources）
-fn build_rules_sources() -> Vec<(String, Vec<(String, String)>)> {
-    let override_cfg = load_rules_update_override();
+/// 清理库的用户覆盖源（各库一份文件，决策清单 D6：不动清理域读侧语义、也不给残留库
+/// 复用同一个文件——两个同名文件不同 schema 比两个文件名更糟）
+pub(crate) fn load_rules_update_override() -> Option<(Vec<String>, Vec<(String, String)>)> {
+    load_update_override(&paths::data_file_for_read("cleanup/update-source.json"))
+}
+
+/// 源清单装配：用户覆盖源在前（共用同一份 headers），内置发布源在后，总数截到 16。
+/// 清理与残留两库共用本函数，差别只在传入的内置 URL 列表——清单本身不复制第二份。
+pub(crate) fn assemble_sources(
+    override_cfg: Option<(Vec<String>, Vec<(String, String)>)>,
+    base_urls: &[String],
+) -> Vec<(String, Vec<(String, String)>)> {
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
     if let Some((urls, headers)) = override_cfg.as_ref() {
         for u in urls {
@@ -2376,11 +2412,19 @@ fn build_rules_sources() -> Vec<(String, Vec<(String, String)>)> {
         }
     }
     let headers = override_cfg.map(|(_, h)| h).unwrap_or_default();
-    for url in RULES_UPDATE_URLS {
-        out.push((url.to_string(), headers.clone()));
+    for url in base_urls {
+        out.push((url.clone(), headers.clone()));
     }
     out.truncate(16);
     out
+}
+
+/// 更新源清单（update / check-version 共用；对照 buildRulesSources）
+fn build_rules_sources() -> Vec<(String, Vec<(String, String)>)> {
+    assemble_sources(
+        load_rules_update_override(),
+        &RULES_UPDATE_URLS.map(String::from),
+    )
 }
 
 /// HTTP 传输层（复用 `engine::winhttp`，与 runtimes 安装包下载共用同一实现）。
@@ -2395,6 +2439,19 @@ fn http_get(
     url: &str,
     headers: &[(String, String)],
     timeout: Duration,
+    on_progress: Option<&dyn Fn(f64)>,
+) -> Result<String, String> {
+    http_get_limited(url, headers, timeout, RULES_MAX_SIZE, on_progress)
+}
+
+/// 同上，但**尺寸上限由调用方给**：清理库（2 MiB）与残留规则库（几百 KB）量级不同，
+/// 共用一个上限会让残留库要么被清理库的宽松值放过、要么被它的严格值误拒。
+/// 传输层实现仍然只有这一处（`engine::winhttp`），不重写第二份。
+pub(crate) fn http_get_limited(
+    url: &str,
+    headers: &[(String, String)],
+    timeout: Duration,
+    max_bytes: usize,
     on_progress: Option<&dyn Fn(f64)>,
 ) -> Result<String, String> {
     // 进度：按「已收字节 / 声明总长」折算为 0..99（100 由更新/落盘成功时另行表达）；
@@ -2413,7 +2470,7 @@ fn http_get(
             report(pct);
         }
     };
-    winhttp::get_text(url, headers, timeout, RULES_MAX_SIZE as u64, None, &mut cb)
+    winhttp::get_text(url, headers, timeout, max_bytes as u64, None, &mut cb)
 }
 
 /// 内容校验器（对照 makeRulesValidator：尺寸 → 验签 → JSON 结构 → 条目形状 → 版本防降级）
@@ -2625,7 +2682,7 @@ pub async fn cleanup_update_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -
             "message": format!("所有发布源均不可用或校验未通过：{}{hint}", result.error)
         });
     }
-    let dir = data_rules_dir();
+    let dir = data_rules_write_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return json!({ "success": false, "message": format!("写入规则失败: {e}") });
     }
@@ -2633,7 +2690,7 @@ pub async fn cleanup_update_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -
     // 缺 `sync_all` —— 断电/蓝屏时 rename 可能先落、内容后落，规则文件会变成 0 字节或半截；
     // 用字节级入口（不是 atomic_write_json）是刻意的：重新序列化 JSON 会改动键序/空白，
     // 而 `_sig` 是对**原文本**签的，一旦重排就把合法规则变成验签失败。
-    let target = data_rules_file();
+    let target = data_rules_write_file();
     if let Err(e) = security::atomic_write_file(&target, result.text.as_bytes()) {
         return json!({ "success": false, "message": format!("写入规则失败: {e}") });
     }
@@ -2705,6 +2762,24 @@ pub async fn cleanup_check_rules_version<R: tauri::Runtime>(window: WebviewWindo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 发布源清单的唯一拼装口是 `release_source_urls_for`（残留库共用）。
+    /// 清理库这份 const 若与它漂移（改了一个镜像、漏了另一个），在线更新会**只坏一个域**，
+    /// 而那种半坏形态最容易长期无人发现 —— 故按整条 URL 逐字钉住。
+    #[test]
+    fn 三条源与仓库内路径的拼装必须同源() {
+        let built = release_source_urls_for("src-tauri/data/cleanup-rules.json");
+        assert_eq!(built.len(), RULES_UPDATE_URLS.len(), "源条数漂移");
+        for (i, url) in RULES_UPDATE_URLS.iter().enumerate() {
+            assert_eq!(built[i], *url, "第 {i} 条源与拼装口不一致");
+        }
+        // 残留库用同一函数换路径，禁止再抄第二份清单
+        let residue = release_source_urls_for("src-tauri/data/uninstall-residue-rules.json");
+        for u in &residue {
+            assert!(u.ends_with("uninstall-residue-rules.json"), "残留源路径错: {u}");
+            assert!(u.starts_with("https://"), "源必须 https: {u}");
+        }
+    }
 
     /// 审查 v2-L4：自定义规则源只认 https —— 明文 http 与非法协议一律进「被拒」，
     /// 且大小写不敏感（`HTTPS://` 也要认）。

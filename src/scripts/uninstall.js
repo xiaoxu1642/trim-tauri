@@ -511,6 +511,41 @@
   }
 
   // ==================== 初始化 ====================
+  // A3（M3）残留规则库在线更新：刻意做成显式动作、不做定时自动更新——规则库决定
+  // 「什么会被当成残留」，替换它必须是用户点出来的一次操作（删除本身仍要逐项勾选 +
+  // 快照复核 + 注册表先备份，硬闸在后端）。失败必须可见：清理域 v0.2.2 修过
+  // 「异步失败被同步 try/catch 静默吞掉」那一类缺陷，这里不重犯。
+  let rulesUpdating = false;
+
+  async function updateResidueRules() {
+    if (rulesUpdating) return;
+    const btn = document.getElementById('btnResidueRulesUpdate');
+    rulesUpdating = true;
+    if (btn) btn.disabled = true;
+    try {
+      const chk = await window.api.uninstall.checkResidueVersion();
+      if (!chk || !chk.success) throw new Error((chk && chk.message) || '检查版本失败');
+      const cur = chk.data.currentVersion;
+      if (!chk.data.newerAvailable) {
+        window.app?.toast?.('info', `残留规则库已是最新（版本 ${esc(String(cur))}）`);
+        return;
+      }
+      const up = await window.api.uninstall.updateResidueRules();
+      if (!up || !up.success) throw new Error((up && up.message) || '更新失败');
+      window.app?.toast?.(
+        'success',
+        `残留规则库已更新：${esc(String(cur))} → ${esc(String(up.data.rulesVersion))}，重新扫描后生效`
+      );
+      // 面板已展开时立刻按新规则重扫，免得用户以为「更新了但还是那几条」
+      if (currentAppId) await scanResidue();
+    } catch (e) {
+      window.app?.toast?.('error', '残留规则库更新失败: ' + (e && e.message ? e.message : String(e)));
+    } finally {
+      rulesUpdating = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
   function init() {
     if (inited) return;
     inited = true;
@@ -530,6 +565,7 @@
     });
     document.getElementById('uninstallBtnRefresh')?.addEventListener('click', loadApps);
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
+    document.getElementById('btnResidueRulesUpdate')?.addEventListener('click', updateResidueRules);
     document.getElementById('uninstallList')?.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-un-app]');
       if (btn && !btn.disabled) runUninstall(btn.dataset.unApp);

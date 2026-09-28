@@ -68,6 +68,11 @@ const MIGRATION_DIRS: &[&str] = &[
     "startup-backup",
     "peripheral-backup",
     "fileclean-backup",
+    // 规则库目录（决策清单 D1=A）：里面是用户下载的签名规则包、更新源覆盖与
+    // 防回滚水位线——重做要重新联网取包并重新验签，按「丢了要重做」判据必须搬。
+    // `uninstall` 同批进来是因为两个规则库必须同一口径，留一半会让便携模式只对半成立。
+    "cleanup",
+    "uninstall",
 ];
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -111,6 +116,40 @@ pub fn older_legacy_data_dir() -> PathBuf {
 
 pub fn join_data(name: &str) -> PathBuf {
     app_data_dir().join(name)
+}
+
+/// 规则库目录收口（2026-09-28 决策清单 D1=A）用的三个入口。
+///
+/// 为什么要这三个而不是各处自己拼路径：清理/残留规则库长期写死 `%APPDATA%\Trim\{cleanup,uninstall}`
+/// （Electron 时代的口径），于是便携模式下用户下载的更新落在宿主机漫游目录、带不走；
+/// 标准实例与便携实例还共写同一个文件、互相覆盖水位线。收口到 `app_data_dir()` 后
+/// 便携模式自动获得「规则随盘走」语义，AGENTS §7.3 的清缓存步骤也能真正覆盖规则。
+///
+/// 收口必须带**只读兜底**：启动搬迁是一次性「只补不覆盖」，磁盘满/权限异常时新根可能仍空，
+/// 此时功能不能断。反过来**写入恒走新根**——双写会让两个根长期分叉，那正是 v2-M19 记下的旧病。
+
+/// 写入用子目录（永远是新根；不存在时由调用方 create_dir_all）
+pub fn data_subdir_for_write(rel: &str) -> PathBuf {
+    app_data_dir().join(rel)
+}
+
+/// 读取用子目录：新根存在 → 新根，否则老根兜底
+pub fn data_subdir_for_read(rel: &str) -> PathBuf {
+    let fresh = app_data_dir().join(rel);
+    if fresh.is_dir() {
+        return fresh;
+    }
+    legacy_data_dir().join(rel)
+}
+
+/// 读取用文件：新根有这份 → 新根，否则老根兜底
+/// （新根目录已存在但没有这份文件时，也必须回老根——那是搬迁没跑成的典型形态）
+pub fn data_file_for_read(rel: &str) -> PathBuf {
+    let fresh = app_data_dir().join(rel);
+    if fresh.is_file() {
+        return fresh;
+    }
+    legacy_data_dir().join(rel)
 }
 
 pub fn log_dir() -> PathBuf {
@@ -336,6 +375,10 @@ mod tests {
             "startup-backup",
             "peripheral-backup",
             "fileclean-backup",
+            // 规则库目录进了写入路径：漏掉这两项 = 收口后老根的规则文件不再被读到
+            // （用户已下载的更新静默失效，且没有任何报错），与备份目录同一条判据。
+            "cleanup",
+            "uninstall",
         ] {
             assert!(MIGRATION_DIRS.contains(&d), "{d} 不在迁移目录清单");
         }
@@ -352,6 +395,26 @@ mod tests {
                 "{cache} 是可重扫缓存，按判据不得进迁移清单（移出后重扫/重采即可）"
             );
         }
+    }
+
+    /// 规则库目录收口（D1=A）的两个入口不许互换语义：
+    /// 写入恒新根 —— 若写成「看哪边存在就写哪边」，两个根会各自持有一份规则与水位线，
+    /// 读取侧 `max(内置版本, 水位线)` 的口径当场失效（v2-M19 记的同一类病不能重犯）；
+    /// 读取在两边都没有时回落老根 —— 一次性搬迁没跑成（磁盘满/权限）时功能不能断。
+    #[test]
+    fn 规则目录写入口不随存在性漂移() {
+        let ghost = "trim-nonexistent-9f3a";
+        assert_eq!(data_subdir_for_write(ghost), app_data_dir().join(ghost));
+        assert_eq!(data_subdir_for_write("cleanup"), app_data_dir().join("cleanup"));
+        assert_ne!(
+            data_subdir_for_write("cleanup"),
+            legacy_data_dir().join("cleanup"),
+            "写入入口落到老根 = 双根分叉"
+        );
+        assert_eq!(data_subdir_for_read(ghost), legacy_data_dir().join(ghost));
+        assert_eq!(data_file_for_read(ghost), legacy_data_dir().join(ghost));
+        // 便携模式下新根随 exe 走（规则随盘携带是本次收口的目的）
+        assert!(data_subdir_for_write("cleanup").starts_with(app_data_dir().as_path()));
     }
 
     #[test]

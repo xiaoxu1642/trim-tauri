@@ -1299,24 +1299,28 @@ fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
 /// 内置残留规则库（编译期嵌入，与 data/uninstall-residue-rules.json 逐字节一致）
 const BUILTIN_RESIDUE_RULES_JSON: &str = include_str!("../../data/uninstall-residue-rules.json");
 
+/// 残留规则根目录（**读**）：新根 `app_data_dir()\uninstall`（便携模式跟着 exe 走），
+/// 老根 `%APPDATA%\Trim\uninstall` 只作只读兜底 —— 2026-09-28 决策清单 D1=A，
+/// 与清理库同一口径（两库必须一起收口，否则便携模式只对一半成立）。
 pub fn residue_rules_dir() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    let base = if appdata.trim().is_empty() {
-        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
-            .join("AppData")
-            .join("Roaming")
-    } else {
-        PathBuf::from(appdata)
-    };
-    base.join("Trim").join("uninstall")
+    crate::engine::paths::data_subdir_for_read("uninstall")
+}
+
+/// **写入**专用根：恒新根，避免两个根各自持有一份规则与水位线。
+fn residue_rules_write_dir() -> PathBuf {
+    crate::engine::paths::data_subdir_for_write("uninstall")
 }
 
 fn residue_rules_file() -> PathBuf {
-    residue_rules_dir().join("residue-rules.json")
+    crate::engine::paths::data_file_for_read("uninstall/residue-rules.json")
 }
 
 fn residue_watermark_file() -> PathBuf {
-    residue_rules_dir().join("residue-rules-watermark.json")
+    crate::engine::paths::data_file_for_read("uninstall/residue-rules-watermark.json")
+}
+
+fn residue_watermark_write_file() -> PathBuf {
+    residue_rules_write_dir().join("residue-rules-watermark.json")
 }
 
 /// 防回滚水位线读取（损坏/不可读按 0；口径同 cleanup::rules_watermark）
@@ -1335,7 +1339,7 @@ pub fn set_residue_watermark(version: f64) -> bool {
     if !version.is_finite() || version <= 0.0 || version <= residue_watermark() {
         return false;
     }
-    let file = residue_watermark_file();
+    let file = residue_watermark_write_file();
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -1792,6 +1796,185 @@ fn residue_rules_hits(
         }
     }
     (out, vetoed)
+}
+
+// ==================== A3 残留规则库在线更新（M3，决策清单 D3-D7） ====================
+//
+// 前置条件已由 M1 满足：A1 注册表硬否决 + A2 整包语义校验先落地，才允许把远程包接进分发。
+// 顺序反过来（先上链再收口）等于让一条误签或私钥泄露后的坏规则自动扩散到所有装机。
+//
+// 与清理域的分工：**传输、验签、字节级原子落盘、水位线四段一律复用清理域已跑通的实现**
+// （`cleanup::http_get_limited` / `rules_signature` / `security::atomic_write_file`），
+// 只有「字段规则」和「尺寸量级」各留一份——两库内容量级不同，共用尺寸闸必然一边误拒、
+// 一边放过。
+
+/// 仓库内残留规则库路径（三条发布源共用清理域的同一拼装口，不抄第二份清单）
+const RESIDUE_REPO_PATH: &str = "src-tauri/data/uninstall-residue-rules.json";
+const RESIDUE_BUILTIN_LEN: usize = BUILTIN_RESIDUE_RULES_JSON.len();
+/// 下限取「内置库一半」与 2048B 的较大者。刻意**不共用** `cleanup::RULES_MIN_SIZE = 4096`：
+/// 残留库现在只有 6 条规则，删规则就可能掉到 4096B 以下，用清理域的下限会把合法包
+/// 当成「异常响应」拒掉。下限的意义始终是探测截断/异常响应，不是质量线。
+const RESIDUE_RULES_MIN_SIZE: usize = if RESIDUE_BUILTIN_LEN / 2 > 2048 {
+    RESIDUE_BUILTIN_LEN / 2
+} else {
+    2048
+};
+/// 上限给合法增长留一个数量级以上的余量（内置约 5 KB → 512 KB 封顶）：
+/// 收太紧会在规则库长到几十上百条后自我拒更，放到清理域的 2 MiB 又失去先拦超大响应的意义。
+const RESIDUE_RULES_MAX_SIZE: usize = 512 * 1024;
+const RESIDUE_DOWNLOAD_TIMEOUT_MS: u64 = 15000;
+
+fn residue_source_urls() -> Vec<String> {
+    crate::commands::cleanup::release_source_urls_for(RESIDUE_REPO_PATH)
+}
+
+/// 残留库更新源：用户覆盖源是**自己一份** `uninstall/update-source.json`（D6 拍板，
+/// 不与清理库共用同名文件——两个同名文件长不同 schema 比多一个文件名更糟），
+/// schema 与 headers 语义则完全共用清理域的解析器。
+fn residue_sources() -> Vec<(String, Vec<(String, String)>)> {
+    let user_file = crate::engine::paths::data_file_for_read("uninstall/update-source.json");
+    crate::commands::cleanup::assemble_sources(
+        crate::commands::cleanup::load_update_override(&user_file),
+        &residue_source_urls(),
+    )
+}
+
+/// 本地生效版本（数据目录那份被接受则用它，否则内置）——检查版本与防降级下限都以此为准
+fn residue_local_version() -> f64 {
+    let builtin = serde_json::from_str::<Value>(BUILTIN_RESIDUE_RULES_JSON)
+        .ok()
+        .and_then(|b| b.get("rulesVersion").and_then(|x| x.as_f64()))
+        .unwrap_or(0.0);
+    load_residue_rules()
+        .and_then(|v| v.get("rulesVersion").and_then(|x| x.as_f64()))
+        .unwrap_or(builtin)
+}
+
+/// 远程包校验（更新与「只查版本」共用同一条链）：尺寸 → 验签 → JSON → **语义** → 版本。
+/// 语义校验调的就是装载侧那个 `validate_residue_package`——更新侧不写第二套字段规则，
+/// 否则会出现「更新放行了、装载拒绝了」这种两头都自认正确的分叉。
+/// 失败一律不落盘，因此这里不产生「半新半旧」的规则库状态。
+fn verify_residue_remote_text(text: &str, floor: f64) -> Result<f64, String> {
+    let len = text.chars().count();
+    if len < RESIDUE_RULES_MIN_SIZE {
+        return Err("内容过小，疑似异常响应".to_string());
+    }
+    if len > RESIDUE_RULES_MAX_SIZE {
+        return Err("内容过大，疑似异常响应".to_string());
+    }
+    rules_signature::verify_rules_text(text)?;
+    let parsed: Value = serde_json::from_str(text).map_err(|_| "JSON 解析失败".to_string())?;
+    validate_residue_package(&parsed)?;
+    let version = parsed
+        .get("rulesVersion")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "缺少 rulesVersion".to_string())?;
+    if floor > 0.0 && version < floor {
+        return Err(format!(
+            "下载版本({version})低于防回滚下限({floor})，疑似旧签名文件重放，已拒绝"
+        ));
+    }
+    Ok(version)
+}
+
+/// 逐源取包并校验。返回 (版本, 原文, 命中的源)；全部失败时报最后一个原因。
+/// 刻意不在这里落盘——更新与查版本共用它，查版本只读。
+fn fetch_verified_residue_package() -> Result<(f64, String, String), String> {
+    let floor = residue_local_version().max(residue_watermark());
+    let sources = residue_sources();
+    if sources.is_empty() {
+        return Err("没有可用的更新源".to_string());
+    }
+    let mut last_err = String::new();
+    let mut unreachable = 0;
+    for (url, headers) in &sources {
+        match crate::commands::cleanup::http_get_limited(
+            url,
+            headers,
+            std::time::Duration::from_millis(RESIDUE_DOWNLOAD_TIMEOUT_MS),
+            RESIDUE_RULES_MAX_SIZE,
+            None,
+        ) {
+            Ok(text) => match verify_residue_remote_text(&text, floor) {
+                Ok(version) => return Ok((version, text, url.clone())),
+                Err(e) => last_err = e,
+            },
+            Err(e) => {
+                unreachable += 1;
+                last_err = e;
+            }
+        }
+    }
+    if unreachable == sources.len() {
+        return Err(format!("所有发布源均不可达，最后一条: {last_err}"));
+    }
+    Err(format!("源可达但校验未通过，最后一条: {last_err}"))
+}
+
+/// uninstall:check-residue-version — 只查版本，不写任何东西（主窗档）
+#[tauri::command]
+pub async fn uninstall_check_residue_version<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let res = tauri::async_runtime::spawn_blocking(|| match fetch_verified_residue_package() {
+        Ok((version, _text, source)) => Ok((version, source)),
+        Err(e) => Err(e),
+    })
+    .await;
+    match res {
+        Ok(Ok((version, source))) => {
+            let current = residue_local_version();
+            json!({ "success": true, "data": {
+                "currentVersion": current, "remoteVersion": version,
+                "newerAvailable": version > current, "source": source,
+            }})
+        }
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("检查残留规则版本异常: {e}") }),
+    }
+}
+
+/// uninstall:update-residue-rules — 更新残留规则库（主窗档；显式动作，不做定时）。
+/// 落盘必须是**字节级**原子写：重新序列化 JSON 会改键序/空白，而 `_sig` 是对原文本签的，
+/// 重排就把合法包变成验签失败（清理域审查 M10 的同一条教训）。
+#[tauri::command]
+pub async fn uninstall_update_residue_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let res = tauri::async_runtime::spawn_blocking(|| {
+        let (version, text, source) = fetch_verified_residue_package()?;
+        let dir = residue_rules_write_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建规则目录失败: {e}"))?;
+        let target = residue_rules_write_dir().join("residue-rules.json");
+        crate::security::atomic_write_file(&target, text.as_bytes())
+            .map_err(|e| format!("写入残留规则失败: {e}"))?;
+        // 水位线只在真的抬得动时记一笔；写失败不撤销本次更新（读取侧仍有验签与语义闸）
+        let raised = set_residue_watermark(version);
+        Ok::<(f64, String, bool), String>((version, source, raised))
+    })
+    .await;
+    match res {
+        Ok(Ok((version, source, raised))) => {
+            log::write_log(
+                "info",
+                &format!(
+                    "残留规则库已更新: rulesVersion={version} 源={source} 水位线={}",
+                    if raised { "已抬升" } else { "未变(写入失败或不高于当前)" }
+                ),
+            );
+            json!({ "success": true, "data": {
+                "rulesVersion": version, "source": source,
+                "message": format!("残留规则库已更新到 {version}"),
+            }})
+        }
+        Ok(Err(e)) => {
+            log::write_log("warn", &format!("残留规则库更新失败: {e}"));
+            json!({ "success": false, "message": e })
+        }
+        Err(e) => json!({ "success": false, "message": format!("残留规则更新异常: {e}") }),
+    }
 }
 
 /// 卸载域·残留扫描（方案 M3 MVP + U-2 固定系统侧痕）。
@@ -2550,6 +2733,30 @@ mod residue_trace_tests {
         assert!(diff.is_empty(), "语义校验与夹具不一致：\n{}", diff.join("\n"));
     }
 
+    /// A3 真网门禁（照 `cleanup::tests::rules_update_chain_verify` 的形状）：
+    /// 逐源取包 → 验签 → 语义校验 → 版本比对，**只读不落盘**（不写用户数据目录）。
+    /// 取不到源必须失败，不许 SKIP 当通过——`check-ps-substitution` 恒 SKIP 变死门禁是前车之鉴。
+    /// 跑法：`cargo test --lib -- --ignored`
+    #[test]
+    #[ignore = "需要网络；发布前手动执行（只取包并校验，不落盘）"]
+    fn residue_update_chain_verify() {
+        let sources = residue_sources();
+        assert!(!sources.is_empty(), "残留库没有可用更新源，本用例失去意义");
+        let (version, text, source) =
+            fetch_verified_residue_package().expect("至少一条源应能取到合签的残留规则包");
+        assert!(version > 0.0, "rulesVersion 必须解析出来: {version}");
+        assert!(text.contains("\"rules\""), "取回的不是规则包: {}B", text.len());
+        let builtin_ver = serde_json::from_str::<Value>(BUILTIN_RESIDUE_RULES_JSON)
+            .ok()
+            .and_then(|b| b.get("rulesVersion").and_then(|x| x.as_f64()))
+            .unwrap_or(0.0);
+        assert!(
+            version >= builtin_ver,
+            "线上包版本({version})低于内置副本({builtin_ver})，发布链没跟上"
+        );
+        println!("[residue-update] 命中源={source} rulesVersion={version} 字节={}", text.len());
+    }
+
     /// A1 扫描侧硬闸：受保护的注册表目标**不得进候选列表**。
     /// 快照闸只证明「来自上次扫描」，证明不了「不该删」—— 危险候选本来就是扫描器按
     /// 规则产出的，所以收口点必须在产候选这一层（方案 §4.1）。
@@ -2604,6 +2811,47 @@ mod residue_trace_tests {
             ("shortcut".to_string(), ghost_os),
         ]);
         assert!(blocked.is_empty() && sendable.len() == 2, "目录闸误伤了 file/shortcut");
+    }
+
+    /// A3 更新链的校验序（尺寸 → 验签 → JSON → **语义** → 版本）。
+    /// 正例直接用内置库原文：它是签过名的合法包，于是「happy path」不必联网、
+    /// 也不需要在测试里造第二把私钥（私钥只在发布机 `~/.trim-signing/`）。
+    #[test]
+    fn residue_remote_package_gate_accepts_the_signed_builtin() {
+        let builtin = include_str!("../../data/uninstall-residue-rules.json");
+        let ver = verify_residue_remote_text(builtin, 0.0).expect("内置签名库必须能过更新链校验");
+        assert!(ver > 0.0, "版本必须解析出来: {ver}");
+        // 防降级：下限高于它就必须拒（重放旧签名包的路径）
+        let err = verify_residue_remote_text(builtin, ver + 1.0).expect_err("低于下限必须拒绝");
+        assert!(err.contains("防回滚下限"), "文案要指向防降级，实测: {err}");
+    }
+
+    /// 尺寸闸的两侧都要能判红；且**不共用清理域的 4096B 下限**——
+    /// 残留库只有 6 条规则，共用会把合法的小包当异常响应拒了。
+    #[test]
+    fn residue_size_gates_reject_both_ends() {
+        assert!(
+            RESIDUE_RULES_MIN_SIZE < 4096 || RESIDUE_BUILTIN_LEN / 2 >= 4096,
+            "下限与内置库量级脱节：内置 {RESIDUE_BUILTIN_LEN}B，下限 {RESIDUE_RULES_MIN_SIZE}B"
+        );
+        let small = "x".repeat(RESIDUE_RULES_MIN_SIZE - 1);
+        let e1 = verify_residue_remote_text(&small, 0.0).expect_err("过小必须拒");
+        assert!(e1.contains("过小"), "实测: {e1}");
+        let big = "x".repeat(RESIDUE_RULES_MAX_SIZE + 1);
+        let e2 = verify_residue_remote_text(&big, 0.0).expect_err("过大必须拒");
+        assert!(e2.contains("过大"), "实测: {e2}");
+    }
+
+    /// 更新链必须先过语义校验（与装载侧同一个函数）：验签通过但字段不合规的包
+    /// 不能因为「是更新流进来的」就放行——否则会出现更新放行、装载拒绝的分叉。
+    #[test]
+    fn residue_update_gate_calls_the_same_semantic_validator() {
+        // 顶层塞一个未知字段：JSON 合法、尺寸够、但语义必拒（验签会先失败，
+        // 所以这里直接断言校验器本身在这类包上判红，序位由上一条测试覆盖）
+        let mut pkg: Value = serde_json::from_str(BUILTIN_RESIDUE_RULES_JSON).unwrap();
+        pkg.as_object_mut().unwrap().insert("__smoke_extra".to_string(), json!(1));
+        let err = validate_residue_package(&pkg).expect_err("未知字段必须整包拒");
+        assert!(err.contains("未知字段"), "实测: {err}");
     }
 
     // ==================== M2 静默知识（B1 构造闸 / B2 分档 / B4 第二证据） ====================
