@@ -1,6 +1,6 @@
 //! Phase 0 第 6 项 / D5 / R12：safeStorage 兼容读验证（默认 ignore，发布前门禁性质）。
 //!
-//! 运行方式（样本由 %TEMP%\\trim-dpapi-probe 下的探针流程产出）：
+//! 运行方式：
 //!   $env:TRIM_DPAPI_SAMPLE="<dpapi-final.json>"; cargo test --test safestorage_compat -- --ignored --nocapture
 //!   （审查 v2-L19：这里原先写的是 `--test dpapi_compat`，本仓没有那个 target，照抄会报
 //!    "no test target named"——文件名 `safestorage_compat` 才是真源。）
@@ -8,15 +8,30 @@
 //! 样本 JSON：
 //!   {
 //!     "plain"/"plain2": 探针明文（含中文）,
-//!     "electron1"/"electron2": "dpapi:v1:base64(v10+nonce+GCM)",  // Electron 44 真实密文
+//!     "electron1"/"electron2": "dpapi:v1:base64(v10+nonce+GCM)",  // 见下方「样本来源与边界」
 //!     "encryptedKeyB64": Local State 的 os_crypt.encrypted_key,   // DPAPI 包裹的 AES 主密钥
 //!     "dotnetRawB64": 裸 DPAPI 密文 base64                         // 跨实现对拍
 //!   }
 //!
 //! 断言：
 //! 1. 从 Local State 解出 32 字节 OSCrypt 主密钥；
-//! 2. 主密钥 + AES-256-GCM(AAD=v10) 解开两条 Electron 44 真实密文，明文逐字节一致；
-//! 3. .NET ProtectedData 裸 DPAPI 可直接解，证明 DPAPI 层跨实现同口径。
+//! 2. 主密钥 + AES-256-GCM 解开两条 v10 密文，明文逐字节一致（`safestorage.rs:138` 记的
+//!    Phase 0 实测是 **AAD 为空**，不是本文件以前写的 "AAD=v10"）；
+//! 3. 无主密钥时必须明确报 `MissingKey`，不许胡乱尝试；
+//! 4. .NET ProtectedData 裸 DPAPI 可直接解，证明 DPAPI 层跨实现同口径。
+//!
+//! 样本来源与边界（2026-09-29 首次实跑通过，别再把它当"未验证"）：
+//! - `encryptedKeyB64` 取本机 `%APPDATA%\com.xiaoxu.trim\Local State` 的
+//!   `os_crypt.encrypted_key`，是 Chromium 系自己 DPAPI 包裹出来的真实密钥材料；
+//!   .NET `ProtectedData::Unprotect` 解出 32 字节后用它加密两条 GCM 密文。
+//! - 密文由 **.NET（PowerShell 7 的 `AesGcm`）** 产出，不是 Electron 进程的字节：本机
+//!   `%APPDATA%\Trim` 只剩两个备份目录，Electron 时代没有任何 `dpapi:v1:` 存量密文可取。
+//!   所以这条证明的是「DPAPI + AES-256-GCM(v10 前缀、空 AAD、nonce||ct||tag 布局) 能被
+//!   独立实现正确读写」，**不等于**"已对着 Electron 44 产物验证过"。真机若拿到真实的
+//!   Electron 密文，把它替进 electron1/electron2 再跑一次即可，断言不用改。
+//! - 复现样本：pwsh 7 脚本读 Local State → 剥 5 字节 `DPAPI` 前缀 → ProtectedData::Unprotect
+//!   → AesGcm(nonce 12B, 空 AAD) 加密 → `v10 + nonce + ct + tag` base64 加 `dpapi:v1:` 前缀。
+//!   样本含真实主密钥的 DPAPI 包裹串与明文探针，只写 `%TEMP%\trim-dpapi-probe\`，用完删。
 
 use base64::Engine;
 use trim_tauri_lib::safestorage::{
