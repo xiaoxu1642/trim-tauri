@@ -419,6 +419,60 @@ fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
     );
 }
 
+/// v2-M14 接线：还原通道认得**退役项**的 id。
+///
+/// 退役项已从优化目录移除，原先 `find_option` 判不到就被拒「未知的优化选项」，于是它们
+/// 留在备份文件里的原值**连手动还原的出口都没有**。这里钉两件事：未知 id 仍然拒、退役 id
+/// 不再被当成未知。
+///
+/// 刻意只挑一个**本机没有备份记录**的退役 id：有备份的话命令会真去写注册表，快速组不许碰。
+#[test]
+fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "optimizer_restore_reg", json!({ "optionId": "any" }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调优化项还原必须被拒杀，回执 {text}"
+        );
+    }
+
+    let w = main_window();
+    let unknown = invoke(&w, "optimizer_restore_reg", json!({ "optionId": "trim-不存在的选项" }));
+    assert_eq!(unknown["success"], json!(false), "未知 id 必须拒: {unknown}");
+    assert!(
+        common::message_of(&unknown).contains("未知的优化选项"),
+        "主窗应越过档位进入参数校验，回执 {unknown}"
+    );
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+    let retired: Vec<String> = {
+        let text = std::fs::read_to_string(dir.join("retired-optimizations.json")).expect("退役清单可读");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("退役清单是合法 JSON");
+        parsed["items"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|i| i["id"].as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    assert!(retired.len() >= 10, "退役清单解析不出条目: {retired:?}");
+    let backups: serde_json::Value = std::fs::read_to_string(
+        trim_tauri_lib::engine::paths::app_data_dir().join("optimizer-backups.json"),
+    )
+    .ok()
+    .and_then(|t| serde_json::from_str(&t).ok())
+    .unwrap_or(json!({}));
+    let id = retired
+        .iter()
+        .find(|id| backups.get(id.to_string()).is_none())
+        .expect("挑得出一个本机无备份的退役 id");
+    let res = invoke(&w, "optimizer_restore_reg", json!({ "optionId": id }));
+    assert_eq!(res["success"], json!(false), "无备份记录不该报成功: {res}");
+    assert!(
+        !common::message_of(&res).contains("未知的优化选项"),
+        "退役 id {id} 必须被还原通道认得（这条就是 v2-M14 的接线点），回执 {res}"
+    );
+}
+
 /// 真机应用数据遗留扫描（`#[ignore]`）：先按**档案实际状态**决定断言哪条，两条路都要能钉红。
 /// - 档案空 / 没有任何 historical → 必须**拒绝扫描并给出可读原因**，不许回空集
 ///   （空集会被读成「这台机器没有遗留数据」，那是把"不知道"伪装成"知道"）；

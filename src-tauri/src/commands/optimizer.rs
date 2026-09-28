@@ -38,6 +38,56 @@ fn find_option(id: &str) -> Option<&'static Value> {
     options().iter().find(|o| o.get("id").and_then(|v| v.as_str()) == Some(id))
 }
 
+/// v2-M14 接线：退役优化项清单（项从目录移除后在此登记）。
+///
+/// 上游 Electron 轨靠 `version-migrations.js` 在启动时把这些项的注册表备份**静默写回**；
+/// 本轨刻意不抄那一段——无人确认的 HKLM 写入与「危险操作先确认」的安全模型冲突。
+/// 真正的缺陷在另一半：还原通道只认目录里的 id，于是退役项留下的备份**连手动出口都没有**。
+/// 现在两半都补上：还原认得退役 id，概览把本机确有备份的那些列成待还原清单交用户点。
+const RETIRED_JSON: &str = include_str!("../../data/retired-optimizations.json");
+
+fn retired_items() -> &'static [Value] {
+    static CACHE: OnceLock<Vec<Value>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let parsed: Value =
+                serde_json::from_str(RETIRED_JSON).expect("retired-optimizations.json 合法");
+            parsed
+                .get("items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|i| !i["id"].as_str().unwrap_or("").is_empty())
+                .collect()
+        })
+        .as_slice()
+}
+
+fn is_retired_id(id: &str) -> bool {
+    retired_items()
+        .iter()
+        .any(|i| i["id"].as_str() == Some(id))
+}
+
+/// 本机确有备份的退役项。备份结构异常或 `values` 为空的条目按「没有备份」处理——
+/// 列出来只会给用户一个点了不会成功的按钮。
+fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
+    retired_items()
+        .iter()
+        .filter_map(|i| {
+            let id = i["id"].as_str()?;
+            let n = backup_map
+                .get(id)?
+                .get("values")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .filter(|n| *n > 0)?;
+            Some(json!({ "id": id, "title": i["title"].as_str().unwrap_or(id), "values": n }))
+        })
+        .collect()
+}
+
 /// OPT-1 高危清单。
 /// 审查 v2-K3 后它的定位收窄为「比数据层 `risk:"high"` 更严的**例外集**」——真正的通用判据是
 /// [`needs_high_risk_confirm`]。这里刻意保留手写项：有的项 risk 标的是 medium，但后果不可逆。
@@ -629,13 +679,10 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         "success": true,
         "items": items,
         "staleIds": stale_ids,
-        // 审查 v2-M14：**这是未移植的空桩**，不是"本轮没有需要还原的退役项"。
-        // Electron 轨靠 `version-migrations.js` 的 `runMigrations` 在启动时把已退役优化项
-        // （`src-tauri/data/retired-optimizations.json` 的 13 项）按 `optimizer-backups.json`
-        // 里的原值自动还原并清账；本轨 `grep retired` 实测 0 命中，所以从旧轨带来的备份记录
-        // 里属于退役项的那批**永不还原**、也无日志。字段留着是为了契约不破（渲染层按此弹 toast），
-        // 一旦移植就必须填真数据，别把空数组当"已实现"。彻底改法见审查报告 v2-M14。
-        "migration": { "restored": [], "failed": [] },
+        // v2-M14：这里原先是 `{ "restored": [], "failed": [] }` 的字面空桩，渲染层据此弹
+        // 「已自动还原 N 项」——那件事从没发生过。空桩删除后字段改成**待还原清单**：
+        // 退役项在本机留有注册表备份的才出现，由用户点「按原值还原」走已提权的还原通道。
+        "migration": { "pending": retired_pending_backups(&load_opt_backups()) },
         "detected": Value::Object(opt_state::detected_all())
     })
 }
@@ -1243,7 +1290,8 @@ pub async fn optimizer_restore_reg<R: Runtime>(
         return json!({ "success": false, "message": msg });
     }
     let option_id = option_id.unwrap_or_default();
-    if find_option(&option_id).is_none() {
+    // 退役项已不在目录里，但它们的备份必须还能还原（v2-M14）；两份清单都不认的 id 仍然拒。
+    if find_option(&option_id).is_none() && !is_retired_id(&option_id) {
         return json!({ "success": false, "message": "未知的优化选项" });
     }
     // 审查 2026-09-27 M3：值级还原要写回 HKLM/HKCU 备份值，非管理员必然写失败且
@@ -1917,6 +1965,44 @@ fn parse_pros_cons(text: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v2-M14：退役清单必须有真消费者，且不与在目录里的 id 重叠。
+    /// 重叠意味着同一个 id 既走正常还原又被列进「待还原的退役项」，两本账会互相清账。
+    #[test]
+    fn retired_catalog_is_real_and_disjoint_from_live_options() {
+        let retired: Vec<&str> = retired_items().iter().filter_map(|i| i["id"].as_str()).collect();
+        assert!(retired.len() >= 10, "退役清单解析不出条目，接线等于空转: {retired:?}");
+        assert!(retired.iter().all(|id| !id.is_empty()), "条目缺 id");
+        let mut sorted = retired.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), retired.len(), "退役 id 不得重复");
+        for id in &retired {
+            assert!(find_option(id).is_none(), "{id} 同时在优化目录与退役清单里");
+        }
+        assert!(is_retired_id(retired[0]), "清单里的 id 必须被还原通道认得");
+        assert!(!is_retired_id("trim-definitely-not-a-real-option-id"));
+    }
+
+    /// 待还原清单只列「本机确实留有非空备份」的退役项：备份空或结构塌了都还原不了，
+    /// 列出来等于给用户一个点了不会成功的按钮。
+    #[test]
+    fn retired_pending_lists_only_backups_that_can_actually_restore() {
+        let id0 = retired_items()[0]["id"].as_str().unwrap();
+        let id1 = retired_items()[1]["id"].as_str().unwrap();
+        let map = json!({
+            id0: { "values": [ { "hive": "CurrentUser", "sub": "Software\\X", "key": "a" } ] },
+            id1: { "values": [] },
+            "not-a-retired-id": { "values": [ { "hive": "CurrentUser" } ] },
+        });
+        let out = retired_pending_backups(&map);
+        assert_eq!(out.len(), 1, "空备份与非退役 id 都不该列: {out:?}");
+        assert_eq!(out[0]["id"], json!(id0));
+        assert_eq!(out[0]["values"], json!(1), "渲染层要按条数说明改写了几个值");
+        assert!(out[0]["title"].is_string(), "给用户看的必须是标题不是 id");
+        assert!(retired_pending_backups(&json!([])).is_empty(), "备份文件不是对象不得 panic");
+        assert!(retired_pending_backups(&json!({ id0: "oops" })).is_empty(), "条目结构异常按无备份处理");
+    }
 
     #[test]
     fn reg_expected_dword_and_string() {

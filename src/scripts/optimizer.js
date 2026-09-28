@@ -603,14 +603,11 @@
         if (d && d.optimized === true && !appliedDetected.has(id)) { appliedDetected.add(id); prefill++; }
       }
       if (prefill || appliedLocal.size) syncOptimized();
-      // 退役迁移（P0-3）结果一次性回报
+      // v2-M14：`migration.restored / failed` 是空桩产物（启动从不自动还原，那两个数组
+      // 永远是空的），据此弹的「已自动还原 N 项」是从未发生过的承诺，已删。
+      // 现在字段给的是「本机仍留有注册表备份的退役项」，还原由用户点，走同一条已确认通道。
       const mig = resp.migration;
-      if (mig && Array.isArray(mig.restored) && mig.restored.length) {
-        window.app?.toast('success', `已自动还原 ${mig.restored.length} 项已退役优化的历史改动`);
-      }
-      if (mig && Array.isArray(mig.failed) && mig.failed.length) {
-        window.app?.log('warn', `${mig.failed.length} 项退役优化的历史改动还原失败（多为缺管理员权限），下次启动自动重试`);
-      }
+      if (mig && Array.isArray(mig.pending) && mig.pending.length) showRetiredBanner(mig.pending);
       const staleIds = (Array.isArray(resp.staleIds) ? resp.staleIds : []).filter(id => OPTIONS.some(o => o.id === id));
       if (staleIds.length) showStaleBanner(staleIds);
     } catch (e) { /* 状态总览失败不影响正常使用 */ }
@@ -655,6 +652,57 @@
           `一键还原完成：成功 ${okCount} 项，共 ${ids.length} 项`);
       };
     }
+  }
+
+  // v2-M14：退役优化项的还原出口。这些 id 已不在优化目录里（所以详情弹窗、勾选项、
+  // 常规还原横幅都找不到它们），但执行前记录的注册表原值还在备份文件里。
+  // 刻意**不在启动时自动写回**：上游 Electron 轨那么做，而本应用的模型要求危险操作先确认。
+  function showRetiredBanner(items) {
+    const banner = document.getElementById('optimizerRetiredBanner');
+    const text = document.getElementById('optimizerRetiredText');
+    if (!banner || !text) return;
+    const names = items.slice(0, 3).map(i => i.title || i.id).join('、')
+      + (items.length > 3 ? ` 等 ${items.length} 项` : '');
+    text.textContent = `${items.length} 项已退役优化在本机仍留有注册表备份（${names}）。`
+      + 'Trim 不会在启动时静默写回系统设置，需要你确认后按备份的原值逐项还原。';
+    banner.style.display = 'flex';
+    const btn = document.getElementById('btnRetiredRestore');
+    if (!btn) return;
+    btn.onclick = async () => {
+      const ok = await window.app?.confirmDanger?.(
+        '按原值还原退役优化项',
+        `将把 ${items.length} 项已退役优化在执行前记录的注册表原值写回系统（共 ${items.reduce((n, i) => n + (i.values || 0), 0)} 个值）。`,
+        '确认还原',
+        '取消',
+        '这些项已从优化目录移除，除了这里没有别的还原入口；需要管理员权限。'
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      btn.textContent = '还原中…';
+      let done = 0;
+      const fails = [];
+      for (const it of items) {
+        try {
+          const r = await window.api.optimizer.restoreReg(it.id);
+          if (r && r.success) done++;
+          else fails.push(`${it.title || it.id}：${(r && r.message) || '未知错误'}`);
+        } catch (e) {
+          fails.push(`${it.title || it.id}：${e && e.message ? e.message : String(e)}`);
+        }
+      }
+      if (done) {
+        window.app?.toast('success', `已按原值还原 ${done} 项退役优化的改动`);
+        window.app?.log('info', `退役优化项按备份还原成功 ${done} 项`);
+      }
+      if (fails.length) {
+        // 失败不清账：备份还在，下次进页继续提示，用户提权后可再点一次
+        window.app?.log('warn', `退役优化项还原失败 ${fails.length} 项：${fails.slice(0, 3).join('；')}`);
+        window.app?.toast('warning', `${fails.length} 项还原失败（多为缺管理员权限），备份记录已保留`);
+      }
+      if (done && !fails.length) banner.style.display = 'none';
+      btn.disabled = false;
+      btn.textContent = '按原值还原';
+    };
   }
 
   // ==================== 详情弹窗（v3.2.0 弹窗统一批次：迁移到 modal.js 工厂） ====================

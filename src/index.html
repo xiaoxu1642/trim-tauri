@@ -814,6 +814,14 @@
           <button type="button" class="btn btn-secondary btn-small" id="btnStaleRestore" data-tip="按执行前记录的原值逐项还原这些改动">一键还原</button>
         </div>
 
+        <!-- v2-M14：退役优化项在本机仍留有注册表备份时的出口。刻意不学上游那样启动即静默写回，
+             还原必须由用户点，且走 optimizer:restore-reg 已提权的那条通道 -->
+        <div class="optimizer-banner stale" id="optimizerRetiredBanner" style="display:none">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2L1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+          <span id="optimizerRetiredText"></span>
+          <button type="button" class="btn btn-secondary btn-small" id="btnRetiredRestore" data-tip="按备份记录的原值逐项写回；不在优化目录里的退役项也认得，需管理员权限">按原值还原</button>
+        </div>
+
         <!-- 分组选项卡片 -->
         <div class="optimizer-groups" id="optimizerGroups">
           <!-- 由 JS 动态生成 -->

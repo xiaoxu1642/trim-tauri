@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "退役优化项清单（v2.6.0 P0-3）。优化项从目录移除时在此登记：启动时自动还原退役项的能力未移植（optimizer.rs 空桩）；本机若留有备份记录，需手动按原值还原。note 供日志与更新说明使用。。note 供日志与更新说明使用。注意：仅注册表类步骤（reg）会进 optimizer-backups 从而被自动还原；cmd（fsutil 等）与 service 类步骤只记在 optimization-state，不自动还原。",
+  "_comment": "退役优化项清单（v2.6.0 P0-3）。优化项从目录移除时在此登记。v2-M14 接线（2026-09-29）：本清单由 optimizer.rs 读取——还原通道认得这里的 id，启动概览把本机仍留有注册表备份的项列成「待还原」交用户点；不做启动静默写回（无人确认的 HKLM 写入与本应用安全模型冲突）。note 供日志与更新说明使用。注意：仅注册表类步骤（reg）会进 optimizer-backups 因而有还原出口；cmd（fsutil 等）与 service 类步骤只记在 optimization-state，不在还原范围内。",
   "items": [
     {
       "id": "tf_pccleaner",
