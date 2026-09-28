@@ -13,8 +13,12 @@
 //!   但里面缓存照删」的容器（系统根、用户内容根）。
 //! - `anyDrive`：任意盘符下同名目录整棵受保护（System Volume Information）。
 //!
-//! 已知局限（与原实现一致）：符号链接/junction 不解析；相对路径各自按 CWD 解析；
-//! 注册表条目走独立的 excludeKeys 保护，不在文件系统清单内。
+//! 已知局限（与原实现一致）：符号链接/junction 不解析；相对路径各自按 CWD 解析。
+//!
+//! **注册表面另起一套**（见文件末尾「注册表禁删面」小节）：清理域历史上的 `excludeKeys`
+//! 字段在执行侧没有过滤逻辑，已被 `check-cleanup-rule-contract.mjs` 禁用，注册表保护
+//! 此前实际为空 —— 卸载残留规则库的 `reg_key` 走 `RegDeleteTreeW` 递归删树，一条
+//! `HKLM\SOFTWARE` 就能端掉系统配置，故必须在结构上封死（方案 §4.1 实锤）。
 
 use std::sync::Mutex;
 
@@ -406,12 +410,315 @@ pub fn json_of(r: &ProtectRoots) -> String {
     )
 }
 
+// ==================== 注册表禁删面（A1） ====================
+//
+// 为什么单独一套清单：`uninstall_residue_execute` 对 `reg_key` 走的是
+// `native::reg_key_remove(hive, subkey, true)` → `RegDeleteTreeW`，**递归删整棵树**，
+// 而目标字符串来自「可被外部替换 + 需过验签」的残留规则库 JSON。文件系统面有
+// `is_path_protected` 挡着，注册表面此前一个判定都没有（方案 §4.1 的证据链），
+// 于是 `{"kind":"reg_key","target":"HKLM\\SOFTWARE"}` 这类规则能通过全部现有门禁、
+// 进候选列表、默认勾选并被执行。靠「规则库目前只有几条 sane 规则」「私钥只在发布机」
+// 是人工纪律不是代码约束，且残留库一旦接上热更新就会被放大成全网扩散 —— 所以先硬否决。
+//
+// 三道判定（与文件系统清单的 subtree/exact 对称但更严，勿合并）：
+// 1. `REG_SUBTREE_DENY`：目标等于该键**或位于其下** → 拒。用于「下面没有任何一层属于
+//    单个产品的残留」的系统命名空间（COM 注册、策略、驱动与安全单元…）。
+// 2. `REG_MICROSOFT_ROOTS` 默认拒绝：`…\SOFTWARE\Microsoft` 树下**整棵**属系统命名空间。
+//    逐条枚举系统键永远会漏（`…\CurrentVersion\Explorer\Advanced` 这种用户态设置键就不在
+//    任何竞品清单里），所以这里按「前缀命中即拒 + 白名单例外」反向表达；例外见
+//    `REG_MICROSOFT_LEAF_ALLOW`（其下**再往下一层**是每程序自己的键才放行）。
+// 3. `REG_CONTAINER_DENY`：目标等于该键**或其祖先是该键** → 拒。用于「容器本身不许端掉，
+//    但容器里的产品叶键是合法残留」，例如 `…\CurrentVersion\Uninstall\<产品键>`。
+// 另有 `REG_GENERIC_LEAF` 作横向兜底：末段是 Windows 命名空间名的目标一律拒。
+// 刻意**不用**「hive 下至少 N 段」这类深度规则：那会误拒 `HKLM\SOFTWARE\ESET` 这种
+// 两段就是产品键的合法目标（方案 §4.3 明确否掉的写法）。
+//
+// 只覆盖 `reg_key`（递归删树）。`reg_value` 是删单个值且执行前先整父键 export 备份，
+// 候选只来自代码内固定反查（MuiCache / 防火墙规则 / BAM，U-2 拍板默认不勾），不经规则库。
+// **约束**：`reg_value`/`shortcut` 一旦获准进入签名规则库（方案 Q8 当前为否），本判定
+// 必须同时检查父键与值名，不能只比值名。
+//
+// 清单来源：按本工具实际支持的 HKLM/HKCU 两个 hive 逐项映射竞品保护面（Kudu
+// `PROTECTED_DELETE_KEYS`），不是整份搬档；新增条目须同步
+// `tools/fixtures/residue-contract.json` 的 `regVectors` 反例（Node 门禁与 Rust 各自
+// 独立实现同一套断言，靠夹具钉住，见方案 §4.3 第三步）。
+
+/// 整棵禁删的系统命名空间（已归一：大写、单 `\` 分隔、无首尾空白）
+const REG_SUBTREE_DENY: &[&str] = &[
+    // HKLM 根下的系统配置单元。`HKLM\SYSTEM` 一条即覆盖 CurrentControlSet\Services、
+    // EventLog、FirewallPolicy\FirewallRules、bam\State 等（夹具里有逐条反例证明覆盖到）
+    r"HKLM\SYSTEM",
+    r"HKLM\SAM",
+    r"HKLM\SECURITY",
+    r"HKLM\BCD00000000",
+    r"HKLM\COMPONENTS",
+    r"HKLM\DRIVERS",
+    r"HKLM\HARDWARE",
+    // COM / 类型库 / MIME / 文件关联：删任意一层都是全局性破坏，不是某个产品的残留
+    r"HKLM\SOFTWARE\CLASSES",
+    r"HKCU\SOFTWARE\CLASSES",
+    // 组策略（HKLM / HKCU / 32 位重定向三份）
+    r"HKLM\SOFTWARE\POLICIES",
+    r"HKCU\SOFTWARE\POLICIES",
+    r"HKLM\SOFTWARE\WOW6432NODE\POLICIES",
+    // 已注册应用与客户端命名空间（键与值由系统和浏览器写入）
+    r"HKLM\SOFTWARE\CLIENTS",
+    r"HKCU\SOFTWARE\CLIENTS",
+    r"HKLM\SOFTWARE\REGISTEREDAPPLICATIONS",
+    // 图形接口与 ODBC 驱动登记：机器级共享，不归属任何单一产品
+    r"HKLM\SOFTWARE\ODBC",
+    r"HKLM\SOFTWARE\KHRONOS",
+    r"HKLM\SOFTWARE\OPENGL",
+    // 用户环境与特殊文件夹指向（D4：环境层只报告不修改）
+    r"HKCU\ENVIRONMENT",
+    r"HKCU\NETWORK",
+    r"HKCU\VOLATILE ENVIRONMENT",
+];
+
+/// `…\SOFTWARE\Microsoft` 树下**默认整棵禁删**（自启动 Run/RunOnce、Installer 台账、
+/// Shell 扩展与 BHO、FileExts、MountPoints2、字体与 AppCompat 数据库、IFEO、Winlogon、
+/// Windows Defender、策略与 WMI 仓库全在这一棵下面 —— 逐条枚举会漏，故反向表达）。
+const REG_MICROSOFT_ROOTS: &[&str] = &[
+    r"HKLM\SOFTWARE\MICROSOFT",
+    r"HKLM\SOFTWARE\WOW6432NODE\MICROSOFT",
+    r"HKCU\SOFTWARE\MICROSOFT",
+];
+
+/// Microsoft 树下唯一放行的例外：**其下再往下一层**是「每个程序自己的键」的那些容器。
+/// 命中条件是「严格位于其下」，所以容器本身（`…\Uninstall`）仍被拒；再往下的
+/// `…\Uninstall\<产品键>`、`…\Tracing\<exe>` 才可能放行（末段仍过 GENERIC_LEAF 判定）。
+const REG_MICROSOFT_LEAF_ALLOW: &[&str] = &[
+    r"HKLM\SOFTWARE\MICROSOFT\WINDOWS\CURRENTVERSION\UNINSTALL",
+    r"HKLM\SOFTWARE\WOW6432NODE\MICROSOFT\WINDOWS\CURRENTVERSION\UNINSTALL",
+    r"HKCU\SOFTWARE\MICROSOFT\WINDOWS\CURRENTVERSION\UNINSTALL",
+    r"HKLM\SOFTWARE\MICROSOFT\WINDOWS\CURRENTVERSION\APP PATHS",
+    r"HKLM\SOFTWARE\WOW6432NODE\MICROSOFT\WINDOWS\CURRENTVERSION\APP PATHS",
+    r"HKCU\SOFTWARE\MICROSOFT\WINDOWS\CURRENTVERSION\APP PATHS",
+    r"HKLM\SOFTWARE\MICROSOFT\TRACING",
+    r"HKLM\SOFTWARE\WOW6432NODE\MICROSOFT\TRACING",
+];
+
+/// 容器本身及其祖先禁删、**其下产品专属叶键允许**（Microsoft 树外的三大软件根）
+const REG_CONTAINER_DENY: &[&str] = &[
+    r"HKLM\SOFTWARE",
+    r"HKLM\SOFTWARE\WOW6432NODE",
+    r"HKCU\SOFTWARE",
+];
+
+/// 末段是这些 Windows 命名空间名 → 该目标「只是把大类容器当目标」，不是产品专属叶键。
+/// 这是对上面几张清单的横向兜底：清单没枚举到的命名空间容器（第三方厂商键里名叫
+/// `Software`、`Classes`、`Tracing` 的）也进不来。比较时去空格 + 大写（`App Paths` → `APPPATHS`）。
+const REG_GENERIC_LEAF: &[&str] = &[
+    "SOFTWARE",
+    "CLASSES",
+    "MICROSOFT",
+    "WINDOWS",
+    "WINDOWSNT",
+    "CURRENTVERSION",
+    "UNINSTALL",
+    "WOW6432NODE",
+    "POLICIES",
+    "RUN",
+    "RUNONCE",
+    "RUNONCEEX",
+    "RUNSERVICES",
+    "INSTALLER",
+    "SHELL",
+    "EXPLORER",
+    "SHELLEXTENSIONS",
+    "CONTEXTMENUHANDLERS",
+    "BROWSERHELPEROBJECTS",
+    "FILEEXTS",
+    "AUTOPLAYHANDLERS",
+    "MOUNTPOINTS2",
+    "USERASSOCIATIONS",
+    "WINLOGON",
+    "TRACING",
+    "FONTS",
+    "FONTLINKS",
+    "FONTSUBSTITUTES",
+    "PROFILELIST",
+    "SHAREDLLS",
+    "IMAGEFILEEXECUTIONOPTIONS",
+    "APPCOMPATFLAGS",
+    "CLIENTS",
+    "REGISTEREDAPPLICATIONS",
+    "ENVIRONMENT",
+    "NETWORK",
+    "SHELLFOLDERS",
+    "USERSHELLFOLDERS",
+    "MUICACHE",
+    "LOCALSETTINGS",
+    "APPPATHS",
+];
+
+/// 归一化注册表目标为 `(hive, 子键段)`；hive 只认本工具支持的 HKLM / HKCU 两种写法。
+/// 返回 None = 判不出来（未知或裸 hive 之外的写法、空段、`.`/`..`、含 NUL 或换行），
+/// 调用方必须按拒绝处理 —— 与 `dir_delete_blocked` 的「读不到属性即拒」同口径。
+fn normalize_reg_target(target: &str) -> Option<(String, Vec<String>)> {
+    let t = target.trim();
+    if t.is_empty() || t.contains('\0') || t.contains('\n') || t.contains('\r') {
+        return None;
+    }
+    // 键名字符集里 '/' 合法，但 RegOpenKeyExW/RegDeleteTreeW 不把它当分隔符，
+    // 所以「用 / 改写」只能骗过字符串判定、骗不过真实删除。按分隔符归一后判定只会更严。
+    let segs: Vec<String> = t
+        .replace('/', "\\")
+        .split('\\')
+        .map(|s| s.trim().to_uppercase())
+        .collect();
+    if segs.iter().any(|s| s.is_empty() || s == "." || s == "..") {
+        return None;
+    }
+    let hive = match segs[0].as_str() {
+        "HKLM" | "HKEY_LOCAL_MACHINE" => "HKLM",
+        "HKCU" | "HKEY_CURRENT_USER" => "HKCU",
+        // HKCR / HKU / HKCC / HKPT 等本工具不支持，也一律判不出来（执行侧本就打不开）
+        _ => return None,
+    };
+    Some((hive.to_string(), segs[1..].to_vec()))
+}
+
+/// 注册表删除目标判定：返回 `Some(原因)` = 拒绝递归删除（原因进日志与明细行）。
+pub fn reg_target_block_reason(target: &str) -> Option<String> {
+    let (hive, rest) = match normalize_reg_target(target) {
+        Some(v) => v,
+        None => {
+            return Some(
+                "注册表目标无法判定（hive 只支持 HKLM/HKCU，且不允许空段或 . / ..）".to_string(),
+            )
+        }
+    };
+    if rest.is_empty() {
+        return Some("注册表根单元（hive）整体禁止删除".to_string());
+    }
+    let canon = format!("{}\\{}", hive, rest.join("\\"));
+    // ① 整棵禁删：等于清单键，或位于清单键之下
+    for root in REG_SUBTREE_DENY {
+        if canon == *root || canon.starts_with(&format!("{root}\\")) {
+            return Some(format!("{canon} 位于系统级注册表单元 {root} 之下（整棵禁删）"));
+        }
+    }
+    // ② Microsoft 树默认拒绝，只放行例外容器**再往下一层**的目标
+    if let Some(mroot) = REG_MICROSOFT_ROOTS
+        .iter()
+        .find(|m| canon == **m || canon.starts_with(&format!("{m}\\")))
+    {
+        if !REG_MICROSOFT_LEAF_ALLOW
+            .iter()
+            .any(|a| canon.starts_with(&format!("{a}\\")))
+        {
+            return Some(format!(
+                "{canon} 落在 {mroot} 系统命名空间内（该树默认整棵禁删，只有 Uninstall / App Paths / Tracing 下的产品键放行）"
+            ));
+        }
+    }
+    // ③ 容器本身及其祖先禁删（两张表都查祖先，避免依赖「上层容器已枚举全」这一假设）
+    for deny in REG_SUBTREE_DENY.iter().chain(REG_CONTAINER_DENY.iter()) {
+        if canon == **deny {
+            return Some(format!("{canon} 本身是系统级容器键，不得整棵删除"));
+        }
+        if deny.starts_with(&format!("{canon}\\")) {
+            return Some(format!("{canon} 是受保护容器 {deny} 的祖先，删除会端掉整个容器"));
+        }
+    }
+    // ④ 末段是 Windows 命名空间 → 没有产品专属叶段（`HKLM\SOFTWARE\Microsoft` 之类
+    //    不因「深度够了」而放行）
+    let leaf: String = rest
+        .last()
+        .map(|s| s.replace(' ', ""))
+        .unwrap_or_default();
+    if REG_GENERIC_LEAF.contains(&leaf.as_str()) {
+        let raw_leaf = rest.last().map(|s| s.as_str()).unwrap_or("");
+        return Some(format!("{canon} 的末段「{raw_leaf}」是 Windows 命名空间，不是某个产品的专属键"));
+    }
+    None
+}
+
+/// 对照 `is_path_protected`：true = 受保护（必须拒绝递归删除）
+pub fn is_reg_target_protected(target: &str) -> bool {
+    reg_target_block_reason(target).is_some()
+}
+
 // ==================== 与 JS 权威实现的三端同源对拍（cargo test 门禁） ====================
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    /// 夹具由 `node tools/gen-residue-fixture.mjs` 生成（A1 注册表保护 + A2 语义校验共用）。
+    const REG_FIXTURE: &str = include_str!("../../../tools/fixtures/residue-contract.json");
+
+    /// A1 与 Node 门禁的对拍：`check-residue-rule-contract.mjs` 用**同一份夹具**跑它自己的
+    /// 独立实现（不跨语言调用 Rust）。任一侧口径漂移即红 —— 这是「JS 判拒、Rust 放行」
+    /// 这类静默漏防的唯一机器拦截点（AGENTS.md §4：只会打印 ✓ 的断言不算验收）。
+    #[test]
+    fn reg_vectors_match_shared_fixture() {
+        let f: Value = serde_json::from_str(REG_FIXTURE).expect("注册表保护夹具解析失败");
+        let vectors = f["regVectors"].as_array().expect("夹具缺 regVectors");
+        let mut diff: Vec<String> = Vec::new();
+        let mut blocked = 0;
+        for v in vectors {
+            let target = v["target"].as_str().unwrap();
+            let expect = v["blocked"].as_bool().unwrap();
+            let got = reg_target_block_reason(target).is_some();
+            if got {
+                blocked += 1;
+            }
+            if got != expect {
+                diff.push(format!(
+                    "{target:?} ({}): 夹具要求{}，Rust 判为{}",
+                    v["cls"].as_str().unwrap_or("?"),
+                    if expect { "拒绝" } else { "放行" },
+                    if got { "拒绝" } else { "放行" }
+                ));
+            }
+        }
+        assert!(
+            vectors.len() >= 40 && blocked >= 30,
+            "夹具向量数 {}（其中拒绝 {blocked}）过少，保护类别覆盖不足",
+            vectors.len()
+        );
+        assert!(diff.is_empty(), "注册表保护判定与夹具不一致：\n{}", diff.join("\n"));
+    }
+
+    /// 放行回测单独立一条：这三条是**线上真实规则**用的键，收紧把它们误杀等于把
+    /// 卸载残留功能打死（方案 §4.3 要求为当前合法规则建放行回测）。
+    #[test]
+    fn legit_product_keys_are_not_over_blocked() {
+        for t in [
+            r"HKLM\SOFTWARE\ESET",
+            r"HKLM\SOFTWARE\360Safe",
+            r"HKLM\SOFTWARE\Piriform",
+            r"HKCU\Software\Tencent\WeChat",
+            // 扫描器自身产出的最高置信候选：产品卸载键（Uninstall 容器只禁容器本身）
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\VLC media player_is1",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Acme",
+            r"HKLM\SOFTWARE\Microsoft\Tracing\acme_RASAPI32",
+        ] {
+            assert!(reg_target_block_reason(t).is_none(), "合法目标被误拒: {t}");
+        }
+    }
+
+    /// 判定必须认得别名与改写：长写法 / 小写 / 斜杠 / 尾随分隔符不得绕过清单。
+    #[test]
+    fn reg_evasion_shapes_still_blocked() {
+        for t in [
+            "HKEY_LOCAL_MACHINE\\SOFTWARE",
+            "hkey_local_machine\\software\\microsoft",
+            "  HKLM\\SOFTWARE  ",
+            "HKLM/SOFTWARE/Microsoft",
+            r"HKLM\SOFTWARE\",
+            r"HKLM\SOFTWARE\.\Microsoft",
+            "HKCR\\Acme",
+            "HKU\\S-1-5-21-0\\Software",
+            "",
+            "SOFTWARE\\Acme",
+        ] {
+            assert!(reg_target_block_reason(t).is_some(), "改写形态未被拒绝: {t:?}");
+        }
+    }
 
     /// 夹具由 `node tools/gen-protect-parity.mjs` 用 JS 权威实现（ps-protect-path.js）生成：
     /// 含清单 JSON 与 38 条向量的判定结果。任何一处口径漂移都会在这里失败——

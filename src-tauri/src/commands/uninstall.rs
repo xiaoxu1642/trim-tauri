@@ -1137,8 +1137,10 @@ fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
 // 已知程序知识库：规则文件与 cleanup-rules.json 同款签名链（Ed25519 + 去掉 _sig 的
 // 紧凑 JSON 规范化，rules_signature::verify_rules_text 验签）。数据目录规则优先于内置，
 // 验签失败 / 版本低于防回滚下限一律 fail-closed 回退内置。
-// 在线更新：与 cleanup 规则共用同一 HTTP 传输层（cleanup.rs 的单一 TODO 点），
-// 传输层落地后按 `residue-rules.json` 走 set_residue_watermark 同款防回滚即可，本文件不再改动加载语义。
+// 在线更新（A3，M3 批次）：cleanup 域的 HTTP 传输层已落地（`engine::winhttp` + 验签 +
+// 原子落盘 + 水位线），残留库尚未接入。接入的**前置条件**是本文件 A1/A2 两道闸已生效
+// （方案 §6.2：先硬否决与语义校验，再上远程分发），另有数据目录归属、是否建前端兜底
+// 副本、版本语义等 7 项待拍板，未拍板前不得新增 `residue:update` 通道。
 
 /// 内置残留规则库（编译期嵌入，与 data/uninstall-residue-rules.json 逐字节一致）
 const BUILTIN_RESIDUE_RULES_JSON: &str = include_str!("../../data/uninstall-residue-rules.json");
@@ -1187,7 +1189,292 @@ pub fn set_residue_watermark(version: f64) -> bool {
     crate::security::atomic_write_json(&file, &payload).is_ok()
 }
 
-/// 残留规则库加载：数据目录（验签 + 防回滚）→ 内置。fail-closed。
+// ==================== A2 残留规则库语义校验（方案 §6.1） ====================
+//
+// 为什么必须存在：`load_residue_rules` 此前只做「验签 → JSON → rules 是数组 → 版本水位线」，
+// 也就是**只证明这份文件出自发布机私钥**，不证明内容安全。而规则里的 `reg_key` 目标会被
+// `RegDeleteTreeW` 递归删、`folder` 目标会进回收站，所以一条 `HKLM\SOFTWARE` 就够出事故。
+// 人审与私钥纪律不是代码约束，热更新一上就是放大面 —— 故整包语义校验先于上链。
+//
+// 口径约束（勿单侧改）：
+// - 失败一律**整包拒绝**并回退上一份可用规则（Q2 拍板）。不做「坏条目剔除、其余生效」，
+//   那会让审核记录与线上行为不一致。
+// - 本函数是**唯一运行期真源**；`tools/check-residue-rule-contract.mjs` 用同一组夹具
+//   (`tools/fixtures/residue-contract.json`) 独立实现同一套断言，不跨语言调用 Rust。
+// - 清理域与残留域字段规则不同，只共享「外层流程」（尺寸/验签/版本），不共享白名单。
+
+/// 签名残留规则库允许的 kind（Q8 拍板：`reg_value` / `shortcut` 不放行。一旦放行，
+/// 校验器、执行侧保护判定、夹具与备份策略必须同时改，不得出现「校验器放行、执行器不支持」）
+const RESIDUE_RULE_KINDS: &[&str] = &["folder", "file", "reg_key"];
+/// 本库显式允许的 `%TOKEN%`。`expand_env_path` 不做白名单（任意环境变量都展开），
+/// 所以这里不收口等于放开「规则引用任何机器上的环境变量」。与 Node 门禁同名清单必须同集。
+const RESIDUE_RULE_TOKENS: &[&str] = &[
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "USERPROFILE",
+    "WINDIR",
+    "SYSTEMROOT",
+];
+const RESIDUE_TOP_FIELDS: &[&str] = &["rulesVersion", "prov", "rules", "_sig"];
+const RESIDUE_PROV_FIELDS: &[&str] = &["sourceClass", "reviewedAt"];
+const RESIDUE_RULE_FIELDS: &[&str] = &["id", "displayName", "publisher", "uninstallKey", "residue"];
+const RESIDUE_ENTRY_FIELDS: &[&str] = &["kind", "target", "note"];
+/// 匹配组「至少两组非空」是 U-1 拍板口径，Node 门禁同断言
+const RESIDUE_MATCH_GROUPS: &[&str] = &["displayName", "publisher", "uninstallKey"];
+const RESIDUE_MAX_RULES: usize = 400;
+const RESIDUE_MAX_RESIDUE: usize = 64;
+const RESIDUE_MAX_GROUP_ITEMS: usize = 32;
+const RESIDUE_MAX_TARGET_LEN: usize = 260; // MAX_PATH：超过说明规则写坏了或被撑爆
+const RESIDUE_MAX_TEXT_LEN: usize = 200; // id / note / 匹配词
+const RESIDUE_MAX_SEGMENTS: usize = 32; // 路径段数与注册表键深度
+
+/// 未知字段白名单检查（A5）： serde 手取字段时未知字段会被静默忽略，
+/// 那等于「规则库里有一执行侧根本不认的字段」，审核记录与线上行为不一致。
+fn unknown_fields<'a>(obj: &serde_json::Map<String, Value>, allow: &[&'a str]) -> Option<String> {
+    obj.keys()
+        .find(|k| !allow.contains(&k.as_str()))
+        .map(|k| format!("未知字段 {k}"))
+}
+
+/// 字符串数组字段：字段可缺失（视为空组，「至少两组非空」另有断言），但类型不符必须 Err
+/// —— 不许把 `null` / 对象 / 数字静默当空数组，那会静默改变命中口径。
+fn str_array_field<'a>(obj: &'a Value, field: &str) -> Result<Vec<&'a str>, String> {
+    let Some(v) = obj.get(field) else {
+        return Ok(Vec::new());
+    };
+    let Some(arr) = v.as_array() else {
+        return Err(format!("{field} 不是数组"));
+    };
+    if arr.len() > RESIDUE_MAX_GROUP_ITEMS {
+        return Err(format!("{field} 条目数 {} 超上限 {RESIDUE_MAX_GROUP_ITEMS}", arr.len()));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        let Some(s) = v.as_str() else {
+            return Err(format!("{field} 含非字符串元素"));
+        };
+        if s.trim().is_empty() || s.chars().count() > RESIDUE_MAX_TEXT_LEN {
+            return Err(format!("{field} 含空白或超长条目"));
+        }
+        out.push(s.trim());
+    }
+    Ok(out)
+}
+
+fn path_shape_problem(target: &str) -> Option<String> {
+    if target.chars().count() > RESIDUE_MAX_TARGET_LEN {
+        return Some("目标长度超过 260（MAX_PATH）".to_string());
+    }
+    if target.contains('*') || target.contains('?') {
+        return Some("目标含通配符（残留规则只允许精确路径）".to_string());
+    }
+    if target.chars().any(|c| c == '\0' || c == '\n' || c == '\r' || c == '\t') {
+        return Some("目标含控制字符".to_string());
+    }
+    None
+}
+
+/// 文件类目标形状：`%登记TOKEN%\非空子段` 或 盘符/UNC 绝对路径。
+/// 禁 token 根（`%APPDATA%`）、尾随分隔符、`.`/`..` 段、路径中部二次变量替换。
+fn file_target_problem(target: &str) -> Option<String> {
+    if let Some(reason) = path_shape_problem(target) {
+        return Some(reason);
+    }
+    let body = if let Some(rest) = target.strip_prefix('%') {
+        let Some(end) = rest.find('%') else {
+            return Some("变量名未闭合".to_string());
+        };
+        let token = &rest[..end];
+        if token.is_empty() || !RESIDUE_RULE_TOKENS.iter().any(|t| t.eq_ignore_ascii_case(token)) {
+            return Some(format!("变量 %{token}% 未登记（先确认展开器可解析再入白名单）"));
+        }
+        let tail = &rest[end + 1..];
+        if tail.contains('%') {
+            return Some("路径中不允许出现第二个变量替换".to_string());
+        }
+        if !tail.starts_with('\\') && !tail.starts_with('/') {
+            return Some("变量后必须有分隔符与非空子段（禁止 token 根）".to_string());
+        }
+        tail[1..].to_string()
+    } else {
+        // 绝对路径两写法：`X:\...` 与 `\\server\share\...`
+        let b = target.as_bytes();
+        let drive_abs = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+        let unc_abs = target.starts_with("\\\\") && target.trim_start_matches('\\').contains('\\');
+        if !drive_abs && !unc_abs {
+            return Some("既不是登记变量的子路径，也不是绝对路径".to_string());
+        }
+        target.to_string()
+    };
+    let segs: Vec<&str> = body.split(|c| c == '\\' || c == '/').collect();
+    if segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
+        return Some("含空段、`.` 或 `..`（尾随分隔符同样命中）".to_string());
+    }
+    if segs.len() > RESIDUE_MAX_SEGMENTS {
+        return Some(format!("路径段数 {} 超上限 {RESIDUE_MAX_SEGMENTS}", segs.len()));
+    }
+    None
+}
+
+/// 注册表目标：hive 合法 + 过 A1 保护判定 + 不放 reg_value 形态（`::值名`）
+fn reg_target_problem(target: &str) -> Option<String> {
+    if let Some(reason) = path_shape_problem(target) {
+        return Some(reason);
+    }
+    if target.contains("::") || target.contains('%') {
+        return Some("注册表目标不允许 `::值名` 或变量形态".to_string());
+    }
+    let Some((_, rest)) = parse_reg_target(target) else {
+        return Some("hive 只支持 HKCU / HKLM".to_string());
+    };
+    let segs: Vec<&str> = rest.split('\\').collect();
+    if segs.iter().any(|s| s.trim().is_empty()) {
+        return Some("注册表路径含空段或尾随分隔符".to_string());
+    }
+    if segs.len() > RESIDUE_MAX_SEGMENTS {
+        return Some(format!("注册表深度 {} 超上限 {RESIDUE_MAX_SEGMENTS}", segs.len()));
+    }
+    protect::reg_target_block_reason(target)
+}
+
+/// 整包语义校验。`Err(原因)` = 调用方必须拒绝这份规则库。
+fn validate_residue_package(pkg: &Value) -> Result<(), String> {
+    let Some(top) = pkg.as_object() else {
+        return Err("规则包不是 JSON 对象".to_string());
+    };
+    if let Some(reason) = unknown_fields(top, RESIDUE_TOP_FIELDS) {
+        return Err(format!("顶层 {reason}"));
+    }
+    pkg.get("rulesVersion")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .ok_or_else(|| "rulesVersion 缺失、非数字或非正数".to_string())?;
+    let prov = pkg
+        .get("prov")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| "prov 缺失或为空（来源登记是审核链的一环）".to_string())?;
+    for p in prov {
+        let Some(obj) = p.as_object() else {
+            return Err("prov 条目不是对象".to_string());
+        };
+        if let Some(reason) = unknown_fields(obj, RESIDUE_PROV_FIELDS) {
+            return Err(format!("prov {reason}"));
+        }
+        for f in RESIDUE_PROV_FIELDS {
+            let ok = obj
+                .get(*f)
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty() && s.chars().count() <= RESIDUE_MAX_TEXT_LEN)
+                .unwrap_or(false);
+            if !ok {
+                return Err(format!("prov.{f} 缺失、非字符串或为空白"));
+            }
+        }
+    }
+    let rule_list = pkg
+        .get("rules")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| "rules 缺失或为空数组".to_string())?;
+    if rule_list.len() > RESIDUE_MAX_RULES {
+        return Err(format!("规则条数 {} 超上限 {RESIDUE_MAX_RULES}", rule_list.len()));
+    }
+    let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for rule in rule_list {
+        let Some(obj) = rule.as_object() else {
+            return Err("规则条目不是对象".to_string());
+        };
+        let id = rule
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| {
+                !s.is_empty()
+                    && s.chars().count() <= RESIDUE_MAX_TEXT_LEN
+                    && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            })
+            .ok_or_else(|| "规则 id 缺失、为空或含非 [A-Za-z0-9._-] 字符".to_string())?;
+        if !seen_ids.insert(id) {
+            return Err(format!("规则 id 重复: {id}"));
+        }
+        if let Some(reason) = unknown_fields(obj, RESIDUE_RULE_FIELDS) {
+            return Err(format!("规则 {id}: {reason}"));
+        }
+        let mut hit_groups = 0;
+        for g in RESIDUE_MATCH_GROUPS {
+            let items = str_array_field(rule, g).map_err(|e| format!("规则 {id}: {e}"))?;
+            if !items.is_empty() {
+                hit_groups += 1;
+            }
+        }
+        if hit_groups < 2 {
+            return Err(format!(
+                "规则 {id}: 三条件组只有 {hit_groups} 组非空，双条件命中是 U-1 拍板口径"
+            ));
+        }
+        let Some(residue) = rule.get("residue").and_then(Value::as_array) else {
+            return Err(format!("规则 {id}: residue 缺失或不是数组"));
+        };
+        if residue.is_empty() {
+            return Err(format!("规则 {id}: residue 为空"));
+        }
+        if residue.len() > RESIDUE_MAX_RESIDUE {
+            return Err(format!(
+                "规则 {id}: residue 条数 {} 超上限 {RESIDUE_MAX_RESIDUE}",
+                residue.len()
+            ));
+        }
+        for entry in residue {
+            let Some(obj) = entry.as_object() else {
+                return Err(format!("规则 {id}: residue 条目不是对象"));
+            };
+            if let Some(reason) = unknown_fields(obj, RESIDUE_ENTRY_FIELDS) {
+                return Err(format!("规则 {id}: residue {reason}"));
+            }
+            let kind = entry
+                .get("kind")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("规则 {id}: residue.kind 缺失或非字符串"))?;
+            if !RESIDUE_RULE_KINDS.contains(&kind) {
+                // 未知 kind 必须报错而不是静默跳过：静默跳过会让「执行侧不支持的字段」
+                // 长期留在库里（方案 §6.1 三集合区分）
+                return Err(format!("规则 {id}: 未知 kind {kind}（允许集 {RESIDUE_RULE_KINDS:?}）"));
+            }
+            let raw_target = entry
+                .get("target")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("规则 {id}: residue.target 缺失或非字符串"))?;
+            let target = raw_target.trim();
+            if target.is_empty() || target != raw_target {
+                return Err(format!("规则 {id}: residue.target 为空白或首尾含空白"));
+            }
+            let problem = match kind {
+                "folder" | "file" => file_target_problem(target),
+                "reg_key" => reg_target_problem(target),
+                _ => Some("kind 不在允许集".to_string()),
+            };
+            if let Some(reason) = problem {
+                return Err(format!("规则 {id}: {kind} 目标 {target} 不合规 — {reason}"));
+            }
+            let note_ok = entry
+                .get("note")
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty() && s.chars().count() <= RESIDUE_MAX_TEXT_LEN)
+                .unwrap_or(false);
+            if !note_ok {
+                return Err(format!("规则 {id}: residue.note 缺失或为空白（面板 reason 要展示）"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 残留规则库加载：数据目录（验签 + 防回滚 + A2 语义校验）→ 内置。fail-closed。
 fn load_residue_rules() -> Option<Value> {
     let file = residue_rules_file();
     if file.is_file() {
@@ -1196,20 +1483,24 @@ fn load_residue_rules() -> Option<Value> {
                 Ok(()) => {
                     let parsed: Option<Value> = serde_json::from_str(&text).ok();
                     if let Some(v) = parsed {
-                        let valid = v.get("rules").map(|r| r.is_array()).unwrap_or(false);
                         let ver = v.get("rulesVersion").and_then(|x| x.as_f64()).unwrap_or(0.0);
                         let builtin_ver = serde_json::from_str::<Value>(BUILTIN_RESIDUE_RULES_JSON)
                             .ok()
                             .and_then(|b| b.get("rulesVersion").and_then(|x| x.as_f64()))
                             .unwrap_or(0.0);
                         let floor = builtin_ver.max(residue_watermark());
-                        if !valid {
-                            log::write_log("warn", "数据目录残留规则结构非法（rules 非数组），已回退内置规则库");
-                        } else if floor > 0.0 && ver < floor {
+                        if floor > 0.0 && ver < floor {
                             log::write_log(
                                 "warn",
                                 &format!("数据目录残留规则版本({ver})低于防回滚下限({floor})，疑似旧签名文件重放，已回退内置规则库"),
                             );
+                        } else if let Err(reason) = validate_residue_package(&v) {
+                            // 验签通过但语义不合规：整包拒绝并隔离，避免每次扫描重复判同一份坏文件
+                            log::write_log(
+                                "error",
+                                &format!("数据目录残留规则语义校验未通过，已整包拒绝并回退内置规则库: {reason}"),
+                            );
+                            crate::security::quarantine_file(&file, "residue-rules 语义校验未通过");
                         } else {
                             return Some(v);
                         }
@@ -1226,7 +1517,20 @@ fn load_residue_rules() -> Option<Value> {
             }
         }
     }
-    serde_json::from_str::<Value>(BUILTIN_RESIDUE_RULES_JSON).ok()
+    let builtin: Value = match serde_json::from_str(BUILTIN_RESIDUE_RULES_JSON) {
+        Ok(v) => v,
+        Err(e) => {
+            log::write_log("error", &format!("内置残留规则 JSON 解析失败: {e}"));
+            return None;
+        }
+    };
+    // 内置库同样过校验：数据文件由工具生成且发布前 `cargo test` 有对拍用例，
+    // 这里失败说明仓库自身坏了，运行期只能停用规则（不给豁免通道）。
+    if let Err(reason) = validate_residue_package(&builtin) {
+        log::write_log("error", &format!("内置残留规则语义校验未通过，残留规则已停用: {reason}"));
+        return None;
+    }
+    Some(builtin)
 }
 
 /// 条件组命中判定（U-1「双条件」拍板）：displayName / publisher / uninstallKey 三组里
@@ -1310,6 +1614,16 @@ fn residue_rules_hits(
                     let Some((hive, rest)) = parse_reg_target(target_raw) else {
                         continue;
                     };
+                    // A1（方案 §4.1 实锤）：规则库里的 reg_key 目标此前只查「能不能解析 +
+                    // 存不存在」，一条 `HKLM\SOFTWARE` 就能进候选列表并被默认勾选，执行侧
+                    // 是 RegDeleteTreeW 递归删树。保护判定必须在产候选时就生效。
+                    if let Some(reason) = protect::reg_target_block_reason(target_raw) {
+                        log::write_log(
+                            "warn",
+                            &format!("残留规则 {id} 的注册表目标被硬否决（不入候选）: {reason}"),
+                        );
+                        continue;
+                    }
                     if !crate::engine::native::reg_key_exists(hive, &rest) {
                         continue;
                     }
@@ -1539,10 +1853,34 @@ fn detail(kind: &str, target: &str, status: &str, message: &str) -> Value {
     json!({ "kind": kind, "target": target, "status": status, "message": message })
 }
 
+/// 把待送删目标按「目录级重解析点校验」拆成（可送删, 被拒项→拒因）。
+///
+/// 只对 `kind == "folder"` 生效：单个 file / shortcut 即使自身是重解析点，删除也只删掉
+/// 链接本身，不会顺链接递归搬走目标内容；目录才会（OneDrive 占位文件因此不受这条闸影响）。
+///
+/// 为什么单独成函数而不是内联在命令里：它落在 `uninstall_residue_execute` 的窗口化命令内，
+/// 不抽出来就没有任何单测能覆盖这条删除链（方案 §7 要求「不依赖真机」的回归网）。
+fn partition_reparse_blocked(items: Vec<(String, OsString)>) -> (Vec<(String, OsString)>, Vec<(OsString, String)>) {
+    let mut sendable = Vec::with_capacity(items.len());
+    let mut blocked: Vec<(OsString, String)> = Vec::new();
+    for (kind, target) in items {
+        if kind == "folder" {
+            if let Some(reason) = crate::engine::native::dir_delete_blocked(Path::new(&target)) {
+                blocked.push((target, reason));
+                continue;
+            }
+        }
+        sendable.push((kind, target));
+    }
+    (sendable, blocked)
+}
+
 /// 卸载域·残留执行（方案 M4）。
 /// 硬约束：目标必须命中本会话快照（防伪造请求）；文件/目录回收站优先且
 /// `is_path_protected` 前置、失败不永久删除兜底；注册表先 export 备份再删，
-/// 备份失败该项拒绝。批次报告落 uninstall-reports/<batch>.json。
+/// 备份失败该项拒绝；`reg_key` 删树前必须过 `protect::reg_target_block_reason`（A1，
+/// 与扫描侧同判定）；`folder` 送删前必须过上级链重解析校验（C1）。
+/// 批次报告落 uninstall-reports/<batch>.json。
 #[tauri::command]
 pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -1597,6 +1935,15 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 details.push(detail(kind, target, "skip", "注册表目标无法解析（只支持 HKCU/HKLM）"));
                 continue;
             };
+            // A1 执行侧硬闸（与扫描侧同一判定）：快照闸只证明「来自上次扫描」，
+            // 证明不了「这个目标不该删」—— 危险候选本来就是扫描器按规则产出的。
+            if let Some(reason) = protect::reg_target_block_reason(target) {
+                log::write_log("warn", &format!("uninstall_residue_execute 拒绝注册表目标: {reason}"));
+                // 状态只用既有的 skip：报告明细按 ok/fail/skip 三态渲染中文标签，
+                // 新增 status 会在前端漏出英文字面量（uninstall.js:487）
+                details.push(detail(kind, target, "skip", &format!("已拒绝删除：{reason}")));
+                continue;
+            }
             if !crate::engine::native::reg_key_exists(hive, &rest) {
                 details.push(detail(kind, target, "skip", "注册表项已不存在"));
                 continue;
@@ -1687,7 +2034,16 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 .into_iter()
                 .filter(|(_, t)| std::fs::symlink_metadata(t).is_ok())
                 .collect();
-            if !existing.is_empty() {
+            // C1（方案 §5·C1）：目录送删前过「自身→盘符根」逐层重解析点校验，与维护任务
+            // (`native::maint_run`)、diskbench 同口径。上级被换成 junction 时回收站会顺着链接
+            // 把链接目标整棵搬走，「清残留」变成删数据。逐项判定、拒因写明细行，不整批失败。
+            let (sendable, blocked) = partition_reparse_blocked(existing);
+            for (target, reason) in blocked {
+                let shown = target.to_string_lossy().to_string();
+                log::write_log("warn", &format!("uninstall_residue_execute 跳过目录 {shown}: {reason}"));
+                details.push(detail("folder", &shown, "skip", &format!("已拒绝删除：{reason}")));
+            }
+            if !sendable.is_empty() {
                 let protect_json = protect::protected_roots_json();
                 // 删除结果行解析 Sink：只收 @@ITEM@@ 行里的 delresult（对齐 finder 的 FinderSink 口径）
                 struct RowSink(Mutex<Vec<Value>>);
@@ -1720,7 +2076,7 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                     fn truncated(&self) {}
                 }
                 let sink = RowSink(Mutex::new(Vec::new()));
-                let _ = trim_finder::scan::delete(&existing, Some(protect_json.as_str()), &sink);
+                let _ = trim_finder::scan::delete(&sendable, Some(protect_json.as_str()), &sink);
                 for row in sink.0.into_inner().unwrap_or_default() {
                     let ok = row["status"] == "ok";
                     details.push(detail(
@@ -1991,47 +2347,99 @@ mod residue_trace_tests {
         assert!(exes.is_empty(), "msiexec 不该作为程序对象：{exes:?}");
     }
 
-    /// U-1：内置残留规则库验签 + 契约自检（与 check-residue-rule-contract.mjs 同口径的
-    /// Rust 侧兜底——数据文件被改而门禁没跑时，cargo test 仍会抓住）
+    /// U-1 + A2：内置残留规则库验签 + 整包语义校验自检（数据文件被改而 Node 门禁没跑时，
+    /// `cargo test` 这一侧仍会抓住）。校验器就是运行期真身，不是测试专用的第二套口径。
     #[test]
     fn builtin_residue_rules_verify_and_contract() {
         let text = include_str!("../../data/uninstall-residue-rules.json");
         rules_signature::verify_rules_text(text).expect("内置残留规则库验签失败");
         let v: Value = serde_json::from_str(text).expect("内置残留规则库 JSON 解析失败");
+        validate_residue_package(&v).expect("内置残留规则库语义校验未通过");
         let rules = v.get("rules").and_then(|r| r.as_array()).expect("rules 非数组");
         assert!(!rules.is_empty(), "rules 为空");
-        let mut ids: Vec<&str> = Vec::new();
-        for r in rules {
-            let id = r.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            assert!(!id.is_empty(), "规则缺 id");
-            ids.push(id);
-            let conds = ["displayName", "publisher", "uninstallKey"]
-                .iter()
-                .filter(|k| {
-                    r.get(**k)
-                        .and_then(|x| x.as_array())
-                        .map(|a| !a.is_empty())
-                        .unwrap_or(false)
-                })
-                .count();
-            assert!(conds >= 2, "规则 {id} 条件组不足 2（双条件拍板口径）");
-            let empty_residue: Vec<Value> = Vec::new();
-            let residue = r.get("residue").and_then(|x| x.as_array()).unwrap_or(&empty_residue);
-            assert!(!residue.is_empty(), "规则 {id} residue 为空");
-            for e in residue {
-                let kind = e.get("kind").and_then(|x| x.as_str()).unwrap_or("");
-                assert!(
-                    matches!(kind, "folder" | "file" | "reg_key"),
-                    "规则 {id} 残留 kind 非法: {kind}"
-                );
-                assert!(
-                    e.get("target").and_then(|x| x.as_str()).map(|t| !t.trim().is_empty()).unwrap_or(false),
-                    "规则 {id} 残留 target 缺失"
-                );
+    }
+
+    /// 夹具由 `node tools/gen-residue-fixture.mjs` 生成，与 `check-residue-rule-contract.mjs`
+    /// 的独立实现共用（方案 §4.3 第三步 / §6.1：不跨语言调用，只靠同一组正反例钉口径）。
+    /// 任何一侧放宽判定，另一侧就会在这里判红。
+    #[test]
+    fn residue_validator_matches_shared_fixture() {
+        let raw = include_str!("../../../tools/fixtures/residue-contract.json");
+        let f: Value = serde_json::from_str(raw).expect("残留契约夹具解析失败");
+        let cases = f["packages"].as_array().expect("夹具缺 packages");
+        let mut diff: Vec<String> = Vec::new();
+        let mut rejected = 0;
+        for c in cases {
+            let label = c["label"].as_str().unwrap_or("?");
+            let expect_ok = c["ok"].as_bool().unwrap_or(false);
+            let got_ok = validate_residue_package(&c["pkg"]).is_ok();
+            if !got_ok {
+                rejected += 1;
+            }
+            if got_ok != expect_ok {
+                diff.push(format!(
+                    "{label}: 夹具要求{}，Rust 判为{}",
+                    if expect_ok { "放行" } else { "整包拒绝" },
+                    if got_ok { "放行" } else { "拒绝" }
+                ));
             }
         }
-        ids.sort();
-        let dup = ids.windows(2).any(|w| w[0] == w[1]);
-        assert!(!dup, "规则 id 重复: {ids:?}");
+        assert!(
+            cases.len() >= 30 && rejected >= 25,
+            "夹具用例数 {}（其中判红 {rejected}）过少，无法覆盖各保护类别",
+            cases.len()
+        );
+        assert!(diff.is_empty(), "语义校验与夹具不一致：\n{}", diff.join("\n"));
+    }
+
+    /// A1 扫描侧硬闸：受保护的注册表目标**不得进候选列表**。
+    /// 快照闸只证明「来自上次扫描」，证明不了「不该删」—— 危险候选本来就是扫描器按
+    /// 规则产出的，所以收口点必须在产候选这一层（方案 §4.1）。
+    #[test]
+    fn protected_reg_target_never_becomes_candidate() {
+        let pkg = json!({
+            "rulesVersion": 20260928,
+            "prov": [{ "sourceClass": "test", "reviewedAt": "2026-09-28" }],
+            "rules": [{
+                "id": "fixture-evil",
+                "displayName": ["EvilApp"],
+                "publisher": ["EvilCorp"],
+                "uninstallKey": ["EvilApp"],
+                "residue": [
+                    { "kind": "reg_key", "target": "HKLM\\SOFTWARE", "note": "整棵软件配置" },
+                    { "kind": "reg_key", "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", "note": "自启动" },
+                    { "kind": "reg_key", "target": "HKLM\\SYSTEM", "note": "系统配置" }
+                ]
+            }]
+        });
+        let hits = residue_rules_hits(&pkg, "EvilApp 1.0", "EvilCorp", "EvilApp");
+        assert!(hits.is_empty(), "受保护注册表目标进入了候选列表: {hits:?}");
+    }
+
+    /// C1（不依赖真机）：残留目录送删前的重解析闸。
+    /// 用「不存在」触发 fail-closed 分支，用「真实系统目录整条链」证明没有把功能废掉。
+    #[test]
+    fn residue_folder_reparse_gate_is_fail_closed() {
+        let ghost = std::env::temp_dir().join("trim-no-such-dir-9f3a\\DataStore");
+        let ghost_os = ghost.as_os_str().to_os_string();
+        let (sendable, blocked) =
+            partition_reparse_blocked(vec![("folder".to_string(), ghost_os.clone())]);
+        assert!(sendable.is_empty(), "读不到属性的目录被放行: {sendable:?}");
+        assert_eq!(blocked.len(), 1, "不存在目录必须按拒绝处理（查不到≠安全）");
+
+        // 真实系统目录（自身到盘符根整条链都非 reparse）必须放行
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        let sys32 = PathBuf::from(format!("{}\\Windows\\System32", drive.trim_end_matches('\\')));
+        let (sendable, blocked) =
+            partition_reparse_blocked(vec![("folder".to_string(), sys32.as_os_str().to_os_string())]);
+        assert_eq!(blocked.len(), 0, "真实系统目录被误拦: {sys32:?}");
+        assert_eq!(sendable.len(), 1, "真实系统目录应可送删");
+
+        // file / shortcut 不受这条目录闸影响（单文件删除不会顺链接递归）
+        let (sendable, blocked) = partition_reparse_blocked(vec![
+            ("file".to_string(), ghost_os.clone()),
+            ("shortcut".to_string(), ghost_os),
+        ]);
+        assert!(blocked.is_empty() && sendable.len() == 2, "目录闸误伤了 file/shortcut");
     }
 }

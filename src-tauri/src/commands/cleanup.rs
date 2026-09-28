@@ -19,10 +19,9 @@
 //! - **删除安全**：受保护路径判定统一走 `engine::protect`（三端同源）；危险操作前
 //!   `log::flush_sync()`；回收站优先（`trim_finder::scan::recycle::send_to_trash`），
 //!   回收站失败项留槽等渲染层红色确认后再永久删除。
-//! - **HTTP 未接入**：`cleanup:update-rules` / `cleanup:check-rules-version` 的传输层
-//!   留作单一 TODO 点（本批不新增 Cargo 依赖，与 `commands/runtimes.rs::download_to` 同处置），
-//!   其余全链（来源清单 / 尺寸闸 / 验签 / 结构校验 / 版本防降级 / 原子落盘 / 水位线 / git 回退）
-//!   均已实现，接入 HTTP 后即生效。
+//! - **HTTP 已接入**：`cleanup:update-rules` / `cleanup:check-rules-version` 走
+//!   `engine::winhttp::get_text`（不新增 Cargo 依赖），全链为来源清单 → 尺寸闸 →
+//!   ed25519 验签 → 结构校验 → 版本防降级 → 字节级原子落盘 → 抬水位线，git 回退仅开发机。
 //!
 //! 需在 `lib.rs` 的 `generate_handler!` 注册：
 //! ```text
@@ -53,7 +52,8 @@
 //!    且 `guard` 只放行 main（唯一槽），未注册 destroy 钩子。
 //! 5. **结束进程失败文案**：Node `process.kill` 抛 errno 文案（ESRCH/EPERM），
 //!    Rust 侧用 TerminateProcess 的可读文案（`{...p, message}` 字段形状一致）。
-//! 6. **HTTP 传输层未接入**（见下），`update-rules` / `check-rules-version` 当前恒失败。
+//! 6. **HTTP 传输层**：已接 `engine::winhttp`（见上），真网用例是 `#[ignore]` 的发布前
+//!    门禁用例（`cargo test --lib -- --ignored`），日常 `cargo test` 不触网。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2309,7 +2309,7 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
     json!({ "success": true, "killed": killed, "failed": failed })
 }
 
-// ==================== 规则在线更新（HTTP 传输层为唯一 TODO 点） ====================
+// ==================== 规则在线更新（HTTP 传输层已接入 engine::winhttp） ====================
 
 /// 从覆盖配置的 `urls` 里挑出 https 源，返回 `(接受, 被拒)`（审查 v2-L4）
 ///
@@ -2477,7 +2477,13 @@ fn git_fetch_rules_file() -> Option<String> {
     if run_git(&cwd, &["fetch", "--depth=1", "origin", "main"], 60).is_none() {
         return None;
     }
-    run_git(&cwd, &["show", "FETCH_HEAD:src/data/cleanup-rules.json"], 15)
+    // 仓库内实际路径是 `src-tauri/data/cleanup-rules.json`（Electron 时代才是 src/data）；
+    // 写错路径时 git show 直接失败，回退链静默不生效（方案 D6）。
+    run_git(
+        &cwd,
+        &["show", "FETCH_HEAD:src-tauri/data/cleanup-rules.json"],
+        15,
+    )
 }
 
 /// 带超时的 git 调用（对照 exec 的 timeout；超时 kill 并返回 None）
