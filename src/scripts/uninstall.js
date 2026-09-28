@@ -246,10 +246,16 @@
       const resp = await window.api.uninstall.run(appId);
       if (!resp.success) throw new Error(resp.message || '卸载失败');
       const d = resp.data || {};
+      // 退出码语义后端早就算好了（classify_exit），但前端一直没用：1602 取消与 1618
+      // 并发都只被笼统播报成「仍在列表里」，用户不知道该等一会儿还是再点一次。
+      // 有界重试仍按裁定不做（要真机 MSI/NSIS 样本才定策略），这里只把已知语义说清楚。
+      const meaning = d.exitMeaning ? `（退出码 ${d.exitCode}：${d.exitMeaning}）` : '';
       if (isAppx) {
         window.app?.toast?.('success', `「${app.displayName}」已移除`);
       } else if (d.stillListed) {
-        window.app?.toast?.('warning', '卸载器已退出，但该程序仍在卸载列表中（可能未完成或已取消）');
+        window.app?.toast?.('warning', `卸载器已退出，但该程序仍在卸载列表中${meaning}。可稍后再试一次卸载`);
+      } else if (Number(d.exitCode) === 3010) {
+        window.app?.toast?.('success', '卸载完成，需重启系统以完成清理（重启前部分残留可能仍在）');
       } else if (d.fellBack) {
         window.app?.toast?.('success', '静默卸载未完成，已回退原厂卸载界面并执行完毕，可以继续扫描残留');
       } else if (d.usedSilent) {

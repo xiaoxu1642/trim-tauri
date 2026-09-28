@@ -1898,6 +1898,16 @@ fn residue_rules_hits(
             match kind {
                 "folder" | "file" => {
                     let target = cleanup_scan::expand_env_path(target_raw);
+                    // A4：变量没解析出来时，展开结果里还留着 `%X%`，这个路径必然不存在。
+                    // 让它落到下面的「不存在」分支，等于把「本机没这个变量」说成
+                    // 「程序没留这个目录」——清理链早就为这件事加了 first_unexpanded_token，
+                    // 残留链此前一个调用点都没有，未展开目标就这么静默消失了。
+                    if let Some(tok) = cleanup_scan::first_unexpanded_token(&target) {
+                        vetoed.push(format!(
+                            "规则 {id}: 目标 {target_raw} 含未解析变量 %{tok}%（本机取不到该变量），已跳过"
+                        ));
+                        continue;
+                    }
                     let p = Path::new(&target);
                     let exists = if kind == "folder" { p.is_dir() } else { p.is_file() };
                     if !exists || protect::is_path_protected(&target) {
@@ -1907,6 +1917,7 @@ fn residue_rules_hits(
                         "kind": kind, "target": target,
                         "reason": format!("残留规则库命中（{id}）：{note}"),
                         "confidence": "high", "risk": "medium", "defaultChecked": true,
+                        "ruleId": id,
                     }));
                 }
                 "reg_key" => {
@@ -1927,6 +1938,7 @@ fn residue_rules_hits(
                         "kind": "reg_key", "target": target_raw,
                         "reason": format!("残留规则库命中（{id}）：{note}"),
                         "confidence": "high", "risk": "medium", "defaultChecked": true,
+                        "ruleId": id,
                     }));
                 }
                 _ => continue,
@@ -4200,6 +4212,47 @@ mod residue_trace_tests {
             r"C:\Users\x\AppData\Roaming\Acme".to_string(),
             r"C:\Users\x\AppData\Local\Acme".to_string()
         ]));
+    }
+
+    /// A4 + A6：规则库目标里的 `%TOKEN%` 没解析出来时，必须报成「变量未解析」，
+    /// 不能落到「目标不存在」那条分支上——后者是在告诉用户"这程序没留东西"，
+    /// 而真相是"这台机器取不到这个变量"。同时钉住候选带 ruleId（面板要能回答谁产的）。
+    #[test]
+    fn residue_rule_unexpanded_token_is_reported_not_hidden() {
+        let rules = json!({ "rules": [{
+            "id": "residue-unexpanded-probe",
+            "displayName": ["探针程序"],
+            "publisher": ["ProbeSoft"],
+            "uninstallKey": [],
+            "residue": [
+                { "kind": "folder", "target": r"%TRIM_NO_SUCH_VAR%\Data", "note": "未解析变量目标" },
+                { "kind": "folder", "target": r"%APPDATA%\ProbeMissing-9f3a", "note": "解析成功但不存在" },
+            ],
+        }]});
+        let (out, vetoed) = residue_rules_hits(&rules, "探针程序", "ProbeSoft", r"Software\X\Uninstall\Probe");
+        assert!(out.is_empty(), "两条都不该出候选: {out:?}");
+        let joined = vetoed.join("\n");
+        assert!(
+            joined.contains("未解析变量 %TRIM_NO_SUCH_VAR%"),
+            "未展开目标必须显式报出变量名，实测 {vetoed:?}"
+        );
+        // 反面对照：变量解析成功、只是路径不存在 —— 不能被说成变量问题
+        assert!(
+            !joined.contains("ProbeMissing") && !joined.contains("%APPDATA%"),
+            "已解析的目标不该进未解析清单: {vetoed:?}"
+        );
+        // 命中且存在 → 候选必须带 ruleId（A6）
+        let dir = std::env::temp_dir();
+        let rules2 = json!({ "rules": [{
+            "id": "residue-ruleid-probe",
+            "displayName": ["探针程序"],
+            "publisher": ["ProbeSoft"],
+            "uninstallKey": [],
+            "residue": [{ "kind": "folder", "target": dir.to_string_lossy().to_string(), "note": "存在的目录" }],
+        }]});
+        let (out2, _) = residue_rules_hits(&rules2, "探针程序", "ProbeSoft", r"Software\X\Uninstall\Probe");
+        assert_eq!(out2.len(), 1, "存在的目标应出候选: {out2:?}");
+        assert_eq!(out2[0]["ruleId"], json!("residue-ruleid-probe"), "候选必须带 ruleId: {out2:?}");
     }
 
     /// 运行进程目录判定：候选与进程目录互为祖先/子孙都算在用；大小写与尾随分隔符不许绕过。
