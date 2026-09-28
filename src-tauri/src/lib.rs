@@ -88,8 +88,10 @@ fn force_round_corners<R: Runtime>(window: &WebviewWindow<R>) {
 
 // ==================== 窗口状态恢复（sanitize 逻辑对照 main.js 866 段） ====================
 
-struct ShowState {
-    shown: AtomicBool,
+pub(crate) struct ShowState {
+    /// `pub(crate)` 是为了让首帧看门狗（commands::app）能读到它——
+    /// 看门狗不另建一份状态，避免「两个真相判断界面是否画出来了」。
+    pub(crate) shown: AtomicBool,
     maximized: bool,
 }
 
@@ -278,6 +280,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_update_residue_rules,
         commands::uninstall::uninstall_orphan_scan,
         commands::uninstall::uninstall_dead_scan,
+        commands::uninstall::uninstall_dir_size,
         commands::uninstall::uninstall_orphan_ignore,
         commands::uninstall::uninstall_reg_backup_list,
         commands::uninstall::uninstall_reg_backup_restore,
@@ -537,6 +540,9 @@ pub fn run() {
                 shown: AtomicBool::new(false),
                 maximized,
             });
+
+            // 首帧看门狗：必须排在 manage(ShowState) 之后 —— 它读的就是这个状态。
+            commands::app::start_boot_watchdog(app.handle().clone());
 
             // ---------- 环境自适应（电池降级 / 系统透明开关）----------
             // 必须在建窗与首次 apply_material 之后：降级逻辑要能拿到 main 窗判最大化，

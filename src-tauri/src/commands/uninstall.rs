@@ -355,6 +355,141 @@ unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root
     out
 }
 
+// ==================== B6 / B7：体积兜底与最近运行（2026-09-29，借鉴方案 P2） ====================
+
+/// 有界目录体积扫描的上限。刻意有界：卸载清单里缺 `EstimatedSize` 的程序可能正装着
+/// 整个游戏库，无界递归会把"打开页面"变成一次磁盘扫描。
+const DIR_SIZE_FILE_CAP: usize = 20_000;
+const DIR_SIZE_DEPTH_CAP: usize = 8;
+
+/// 有界目录体积：返回 (字节数, 已访问文件数, 是否被上限截断)。
+///
+/// 三条不变量：
+/// - 用 `symlink_metadata` 且跳过任何重解析点 —— 跟链接走会把别的目录算进来，
+///   甚至在环上永不收敛（同一原因见 `dir_delete_blocked`）；
+/// - 只统计文件字节，不折算目录项与簇对齐 —— 这是"估算"，UI 上也这么写；
+/// - 触顶就返回 `partial=true`，绝不把截断值当成完整值。
+fn bounded_dir_size(root: &Path) -> (u64, usize, bool) {
+    bounded_dir_size_in(root, DIR_SIZE_FILE_CAP, DIR_SIZE_DEPTH_CAP)
+}
+
+/// 上限抽成入参：真机阈值（2 万文件 / 8 层）在单测里跑不起，但截断语义必须能判红。
+fn bounded_dir_size_in(root: &Path, file_cap: usize, depth_cap: usize) -> (u64, usize, bool) {
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    let mut total = 0u64;
+    let mut files = 0usize;
+    let mut partial = false;
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for ent in rd.flatten() {
+            let Ok(md) = ent.file_type() else { continue };
+            if md.is_symlink() {
+                continue;
+            }
+            let path = ent.path();
+            if md.is_dir() {
+                if depth + 1 >= depth_cap {
+                    partial = true;
+                    continue;
+                }
+                stack.push((path, depth + 1));
+                continue;
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.is_file() => {
+                    // 触顶即整体收工：只跳出当前目录会留下一栈子目录继续 read_dir，
+                    // 在 target/ 这种目录数巨大的树上等于没设上限。
+                    if files >= file_cap {
+                        return (total, files, true);
+                    }
+                    total = total.saturating_add(m.len());
+                    files += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    (total, files, partial)
+}
+
+/// uninstall:dir-size — 体积二级兜底（B6）。清单里 `EstimatedSize` 缺失时按安装目录估。
+///
+/// 档位取 MAIN：唯一调用方是主窗卸载页（与 `uninstall_list` 同档）。
+/// 只读、不跟随重解析点、有界，因此不写日志也不建快照。
+#[tauri::command]
+pub fn uninstall_dir_size<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    path: String,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let root = Path::new(path.trim());
+    // 只接受绝对路径且真实存在的目录：其余一律不扫（也不报错给攻击面探测者额外信息）
+    if path.trim().is_empty() || !root.is_absolute() || !root.is_dir() {
+        return json!({ "success": false, "message": "路径不可用" });
+    }
+    let (bytes, files, partial) = bounded_dir_size(root);
+    json!({
+        "success": true,
+        "data": {
+            "sizeKb": bytes / 1024,
+            "files": files,
+            "partial": partial,
+        }
+    })
+}
+
+/// 从 Prefetch 文件名解出主程序名（`OBS64.EXE-2F3A1B4C.pf` → `OBS64.EXE`）。
+/// 认不出（无 8 位十六进制后缀、非 .pf）返回 None —— 宁可不显示也不猜。
+fn prefetch_entry_exe(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(".pf")?;
+    let (exe, hash) = stem.rsplit_once('-')?;
+    if exe.is_empty() || hash.len() != 8 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(exe.to_ascii_uppercase())
+}
+
+/// 建 Prefetch 索引：主程序名（大写）→ 最后运行时间（Unix 毫秒，取文件 mtime）。
+///
+/// 回空表有两种**都不代表"程序从未运行"**：非提权时 `C:\Windows\Prefetch` 读不到（ACL
+/// 限制），以及本机干脆关掉了 Prefetch（`EnablePrefetcher=0` / SysMain 禁用 —— 开发机实测
+/// 就是这种，目录只剩一个 ReadyBoot）。所以调用方只在拿得到时渲染，拿不到就什么都不显示。
+fn prefetch_last_run_index() -> std::collections::HashMap<String, i64> {
+    let mut out = std::collections::HashMap::new();
+    let Some(windir) = std::env::var("SystemRoot").ok() else { return out };
+    let dir = Path::new(&windir).join("Prefetch");
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    for ent in rd.flatten() {
+        let Some(exe) = prefetch_entry_exe(&ent.file_name().to_string_lossy()) else { continue };
+        let Ok(md) = ent.metadata() else { continue };
+        let Ok(modified) = md.modified() else { continue };
+        let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) else { continue };
+        let ms = d.as_millis() as i64;
+        let e = out.entry(exe).or_insert(0i64);
+        if ms > *e {
+            *e = ms;
+        }
+    }
+    out
+}
+
+/// 从 DisplayIcon 里取主程序 exe 名（`C:\Apps\Foo\foo.exe,0` → `FOO.EXE`）。
+/// 取不到（无扩展名、指向 dll/ico）返回 None。
+fn exe_name_from_display_icon(icon: &str) -> Option<String> {
+    let head = icon.split(',').next().unwrap_or("").trim();
+    if head.is_empty() {
+        return None;
+    }
+    let base = Path::new(head).file_name()?.to_string_lossy().to_string();
+    if !base.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    Some(base.to_ascii_uppercase())
+}
+
+
 /// 桌面与开始菜单的 `.lnk` 索引：文件名主干（小写）→ 首个命中的完整路径。
 ///
 /// 为什么要有第四图标源：不少程序在注册表 `DisplayIcon` 里留的是安装时那台机器上的路径
@@ -451,6 +586,18 @@ pub async fn uninstall_list<R: tauri::Runtime>(
             );
             seen.insert(key)
         });
+        // B7：主程序最近运行时间（Prefetch 文件 mtime）。非提权时那个目录读不到，
+        // 回空表即可 —— 前端按「没有这个信息」渲染，**不能**把空当成「从未运行」。
+        let runs = prefetch_last_run_index();
+        if !runs.is_empty() {
+            for a in apps.iter_mut() {
+                if let Some(exe) = a["displayIcon"].as_str().and_then(exe_name_from_display_icon) {
+                    if let Some(ms) = runs.get(&exe) {
+                        a["lastRunMs"] = json!(ms);
+                    }
+                }
+            }
+        }
         // 图标第四源挂到行上（前端按优先级尝试，取不到仍回退占位，不新增 IPC 通道）
         let links = shortcut_icon_index();
         for a in apps.iter_mut() {
@@ -4169,6 +4316,42 @@ mod residue_trace_tests {
             owners.iter().any(|o| o["displayName"] == json!("Fresh") && o["state"] == json!("pending")),
             "新写入的 pending 被裁掉了"
         );
+    }
+
+    /// B6：体积兜底必须有界且诚实标注截断；不存在的目录与相对路径不接受。
+    #[test]
+    fn bounded_dir_size_counts_files_and_flags_partial() {
+        let dir = std::env::temp_dir().join(format!("trim-dirsize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub\\deep")).expect("临时目录");
+        std::fs::write(dir.join("a.bin"), vec![b'1'; 1024]).expect("写文件");
+        std::fs::write(dir.join("sub\\deep\\b.bin"), vec![b'2'; 2048]).expect("写文件");
+        let (bytes, files, partial) = bounded_dir_size(&dir);
+        assert_eq!(bytes, 3072, "两文件共 3072 字节: {bytes}");
+        assert_eq!(files, 2, "递归两层应数到两个文件");
+        assert!(!partial, "小规模不该报截断");
+        // 文件数触顶：只数到上限个、必须标截断（哪个文件先被读到随枚举序变，所以只断上界）
+        let (bytes, files, partial) = bounded_dir_size_in(&dir, 1, 8);
+        assert_eq!(files, 1, "文件闸应把计数卡在上限");
+        assert!(bytes < 3072, "截断后不该是完整金额: {bytes}");
+        assert!(partial, "有界截断却回 partial=false，UI 就会把半截值当完整值");
+        // 层级触顶：sub/deep 在 depth=2，depth_cap=2 时进不去
+        let (_bytes, _files, partial) = bounded_dir_size_in(&dir, 100, 2);
+        assert!(partial, "深度闸命中必须上报截断");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B7：Prefetch 文件名解析认不出就 None；DisplayIcon 只认 .exe。
+    #[test]
+    fn prefetch_and_icon_parsers_refuse_guessing() {
+        assert_eq!(prefetch_entry_exe("OBS64.EXE-2F3A1B4C.pf").as_deref(), Some("OBS64.EXE"));
+        assert_eq!(prefetch_entry_exe("obs64.exe-2f3a1b4c.PF"), None, "扩展名大小写形态不认（Prefetch 全大写）");
+        assert_eq!(prefetch_entry_exe("OBS64.EXE-2F3A1B4.pf"), None, "哈希位数不对不认");
+        assert_eq!(prefetch_entry_exe("OBS64.EXE.pf"), None, "没有哈希段不认");
+        assert_eq!(prefetch_entry_exe("readme.txt"), None);
+        assert_eq!(exe_name_from_display_icon(r"C:\Apps\Foo\foo.exe,0").as_deref(), Some("FOO.EXE"));
+        assert_eq!(exe_name_from_display_icon(r"C:\Apps\Foo\icon.dll,1"), None, "dll 不是主程序");
+        assert_eq!(exe_name_from_display_icon(""), None);
     }
 
     /// C3：阈值表的排序本身就是判据（目录比快捷方式严），三条不许被"顺手统一"成一个数。

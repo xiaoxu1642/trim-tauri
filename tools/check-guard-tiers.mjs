@@ -109,6 +109,7 @@ const MUST_MAIN = [
   // 所以这两条不给子窗放行（AGENTS §3「档位以谁真的需要调它为准」）。
   'uninstall_orphan_scan',
   'uninstall_dead_scan',
+  'uninstall_dir_size',
   'uninstall_orphan_ignore',
   // D1 还原入口：列表也走 MAIN（与 restore 同一弹窗，没必要放行子窗），
   // restore 会 reg import 写注册表，必须主窗专属 + 危险确认。

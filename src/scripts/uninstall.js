@@ -83,6 +83,39 @@
     } catch (_) { /* 配额不足不影响功能 */ }
   }
 
+  // B7：安装日期格子的悬停说明。最近运行只在真拿得到时出现——
+  // Prefetch 目录非提权读不到，此时不显示也不猜「从未运行」。
+  function installDateTip(a) {
+    let tip = '注册表键最后写入时间，近似安装日期';
+    if (a.lastRunMs) {
+      const d = new Date(a.lastRunMs);
+      const pad = (n) => String(n).padStart(2, '0');
+      tip += '；主程序最近运行 ' + d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+        + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + '（Prefetch）';
+    }
+    return tip;
+  }
+
+  // B6：EstimatedSize 是厂商自愿写的字段，缺失就不是 0。缺的地方按安装目录估一次，
+  // 标「估算」并在截断时说明不精确；后台懒取，不拖慢首屏（与图标同一套路）。
+  async function fillMissingSizes() {
+    const need = apps.filter((a) => !a.estimatedSizeKb && a.installLocation);
+    for (const a of need) {
+      const cell = document.querySelector(`[data-un-size="${CSS.escape(a.id)}"]`);
+      if (!cell) continue;
+      try {
+        const r = await window.api.uninstall.dirSize(a.installLocation);
+        if (!r || !r.success || !r.data) continue;
+        if (!r.data.sizeKb) continue;
+        const stillThere = document.querySelector(`[data-un-size="${CSS.escape(a.id)}"]`);
+        if (!stillThere) return; // 列表已重绘，旧结果不再回写
+        stillThere.textContent = '≈' + fmtSizeKb(r.data.sizeKb);
+        stillThere.setAttribute('data-tip', '厂商未写 EstimatedSize，按安装目录大小估算'
+          + (r.data.partial ? '（文件数或层级触顶，实际可能更大）' : ''));
+      } catch (e) { /* 估不出来就留空位，不编一个数 */ }
+    }
+  }
+
   const iconCacheKey = (a) => `${a.id}|${a.displayVersion || ''}`;
 
   // 图标源优先级：Appx Logo（.png 直接读图，U-3）→ displayIcon（剥 ,索引 后缀）→
@@ -168,6 +201,8 @@
       }
       listEl.innerHTML = currentScope === 'windows' ? renderWindowsApps() : renderWin32Apps();
       hydrateIcons();
+      // 体积补全要逐目录读盘，放首屏之后跑，不阻塞列表出现。
+      if (currentScope !== 'windows') fillMissingSizes();
     } catch (e) {
       listEl.innerHTML = `<div class="finder-empty">枚举失败：${esc(String(e.message || e))}</div>`;
       window.app?.toast?.('error', '枚举失败: ' + (e.message || e));
@@ -184,8 +219,8 @@
         <td><div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div></td>
         <td class="finder-col-size" style="width:180px"><span class="finder-name-text" style="opacity:.7">${esc(a.publisher || '—')}</span></td>
         <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
-        <td class="finder-col-size" style="width:90px">${fmtSizeKb(a.estimatedSizeKb)}</td>
-        <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7" data-tip="注册表键最后写入时间，近似安装日期">${esc(a.installDate || '—')}</span></td>
+        <td class="finder-col-size" style="width:90px"><span data-un-size="${esc(a.id)}">${fmtSizeKb(a.estimatedSizeKb)}</span></td>
+        <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7" data-tip="${esc(installDateTip(a))}">${esc(a.installDate || '—')}</span></td>
         <td class="finder-col-size" style="width:150px">
           <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${a.uninstallString ? '' : ' disabled data-tip="没有 UninstallString，无法调用原厂卸载器"'}>卸载</button>
         </td>

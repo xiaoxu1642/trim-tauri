@@ -373,6 +373,52 @@ fn dead_scan_channel_is_main_only() {
     }
 }
 
+/// B6 体积兜底：MAIN 档 + 入参形状闸。
+///
+/// `path` 的真源是注册表 `InstallLocation`，也就是**软件自己能写**的字段，所以路径形状
+/// 必须在读盘前定死：非绝对 / 不存在 / 空串一律早退。正向特征点名取仓库自带的
+/// `src-tauri/data`（小、只读、每次构建都在），只断「命令整条消失」打不穿的 success 与
+/// 渲染层直接消费的 `sizeKb`/`partial` 两个字段类型。
+#[test]
+fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "uninstall_dir_size", json!({ "path": "C:\\Windows\\Temp" }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调体积兜底必须被拒杀，回执 {text}"
+        );
+    }
+
+    let w = main_window();
+    // `"."` 而不是随便一个相对串：它**一定**存在，所以去掉绝对路径闸后这条必然变绿，
+    // 判红才有意义（`"../../Windows"` 在本机恰好解析不到，曾经假判绿过一次）。
+    for bad in ["", "   ", ".", "./data", "C:\\Trim-不存在的目录-xyz"] {
+        let res = invoke(&w, "uninstall_dir_size", json!({ "path": bad }));
+        assert_eq!(res["success"], json!(false), "{bad} 必须被形状闸早退: {res}");
+        assert!(
+            common::message_of(&res).contains("路径不可用"),
+            "主窗应越过档位进入参数校验，回执 {res}"
+        );
+    }
+
+    let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+    let res = invoke(
+        &w,
+        "uninstall_dir_size",
+        json!({ "path": data_dir.to_string_lossy() }),
+    );
+    assert_eq!(res["success"], json!(true), "{data_dir:?} 应可估算: {res}");
+    assert!(
+        res["data"]["sizeKb"].is_number(),
+        "sizeKb 必须是数字（渲染层直接 '≈' + fmtSizeKb）: {res}"
+    );
+    assert!(
+        res["data"]["partial"].is_boolean(),
+        "partial 必须是布尔（截断时前端要在提示里带上'实际可能更大'）: {res}"
+    );
+}
+
 /// 真机应用数据遗留扫描（`#[ignore]`）：先按**档案实际状态**决定断言哪条，两条路都要能钉红。
 /// - 档案空 / 没有任何 historical → 必须**拒绝扫描并给出可读原因**，不许回空集
 ///   （空集会被读成「这台机器没有遗留数据」，那是把"不知道"伪装成"知道"）；

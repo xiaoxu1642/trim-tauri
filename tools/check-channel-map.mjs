@@ -89,6 +89,7 @@ const TAURI_ADDED = {
   'uninstall:report-list': 'U-6（2026-09-28）：批次报告列表（上游只写报告无查看面）',
   'uninstall:report-get': 'U-6（2026-09-28）：批次报告明细读取（同上）',
   'uninstall:dead-scan': 'M6（2026-09-28）：失效残留扫描（不依赖卸载事实的无主残留，上游无此能力）',
+  'uninstall:dir-size': 'B6（2026-09-29）：EstimatedSize 缺失时的安装目录体积兜底估算（上游无此能力）',
   'uninstall:appx-logo': 'U-3（2026-09-28）：Appx Logo 懒加载（上游无此能力）',
   'cleanup:reg-backup-list': 'C-4（2026-09-28）：注册表备份列表（上游只写备份无还原面）',
   'cleanup:reg-backup-restore': 'C-4（2026-09-28）：注册表备份还原（reg import，主窗档）',

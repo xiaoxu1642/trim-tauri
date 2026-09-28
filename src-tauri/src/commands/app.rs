@@ -108,6 +108,44 @@ const fn node_arch() -> &'static str {
     }
 }
 
+/// 启动看门狗超时阈值。取 12s：本地资源、无网络依赖，正常首帧在 2s 内；
+/// 留足慢盘与杀软扫描的余量——宁可漏报，也不要在正常启动后凭空写一条 WARN。
+const BOOT_WATCHDOG_MS: u64 = 12_000;
+
+/// 看门狗到点的判据：只有「没收到首帧握手」才需要记一条日志。
+///
+/// 单独抽成纯函数，是因为线程 + 定时器的组合在没有窗口的测试里跑不了，
+/// 而"什么情况下该报警"恰恰是这条机制唯一有判断含量的部分。
+fn boot_watchdog_note(shown: bool) -> Option<&'static str> {
+    if shown {
+        return None;
+    }
+    Some("启动看门狗：主窗首帧握手超时未到，界面可能白屏或渲染脚本未执行；可导出日志反馈（日志已含渲染层异常行）")
+}
+
+/// 挂启动看门狗：到点检查主窗是否已因首帧握手而 show 出来。
+///
+/// 为什么需要：白屏、材质不渲染、脚本抛错这类问题此前**只在 DevTools 里可见**，
+/// 用户侧一句"打开是空的"没有任何可诊断信息（v2-U4 长期挂着的未验证项就是这个）。
+/// 信号复用现成的 `ShowState.shown`：它由 `app:first-paint` 这条真实渲染完成通知置位，
+/// 不新增状态、也不为此再开一条 IPC 通道。
+///
+/// 刻意**不自动 reload**（竞品那种做法在这里不安全）：本应用的窗口显示与提权重启握手
+/// 耦合（§5.7 文件握手状态机），重载可能把用户正在确认的危险操作打断。只记录，不干预。
+pub fn start_boot_watchdog<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(BOOT_WATCHDOG_MS));
+        use tauri::Manager;
+        let Some(state) = app.try_state::<crate::ShowState>() else {
+            return; // 状态都没建起来 = 启动更早就断了，不在这里重复报
+        };
+        let shown = state.shown.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(note) = boot_watchdog_note(shown) {
+            crate::engine::log::write_log("warn", &format!("{note}（阈值 {BOOT_WATCHDOG_MS}ms）"));
+        }
+    });
+}
+
 /// app:first-paint — 渲染层 DOMContentLoaded + 双 rAF 黑闪握手（只认首个通知）
 ///
 /// 只认 `main` 的帧：`tauri-api.js` 在**每个**窗口里都会发这条，而闩锁是全局一次性的。
@@ -132,4 +170,16 @@ pub fn app_first_paint<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWind
         return;
     }
     crate::show_main_window_when_ready(&app, "渲染层首帧握手");
+}
+#[cfg(test)]
+mod boot_watchdog_tests {
+    use super::boot_watchdog_note;
+
+    /// 看门狗只在没收到首帧时说话：正常启动不得凭空留一条 WARN。
+    #[test]
+    fn watchdog_stays_silent_once_first_paint_arrived() {
+        assert!(boot_watchdog_note(true).is_none(), "已 show 还报警就是噪音");
+        let note = boot_watchdog_note(false).expect("未收到首帧必须给出可诊断的一条");
+        assert!(note.contains("白屏") && note.contains("导出日志"), "文案要指向下一步动作: {note}");
+    }
 }
