@@ -108,6 +108,8 @@
     'uninstall:residue-execute': 'uninstall_residue_execute',
     'uninstall:check-residue-version': 'uninstall_check_residue_version',
     'uninstall:update-residue-rules': 'uninstall_update_residue_rules',
+    'uninstall:orphan-scan': 'uninstall_orphan_scan',
+    'uninstall:orphan-ignore': 'uninstall_orphan_ignore',
     'uninstall:report-list': 'uninstall_report_list',
     'uninstall:report-get': 'uninstall_report_get',
     'uninstall:appx-logo': 'uninstall_appx_logo',
@@ -462,6 +464,8 @@
       residueExecute: function (appId, targets) { return invokeChannel('uninstall:residue-execute', { appId: appId, targets: targets }); },
       checkResidueVersion: function () { return invokeChannel('uninstall:check-residue-version'); },
       updateResidueRules: function () { return invokeChannel('uninstall:update-residue-rules'); },
+      orphanScan: function () { return invokeChannel('uninstall:orphan-scan'); },
+      orphanIgnore: function (appId, displayName) { return invokeChannel('uninstall:orphan-ignore', { appId: appId, displayName: displayName }); },
       reportList: function () { return invokeChannel('uninstall:report-list'); },
       reportGet: function (batchId) { return invokeChannel('uninstall:report-get', { batchId: batchId }); },
       appxLogo: function (logoPath) { return invokeChannel('uninstall:appx-logo', { logoPath: logoPath }); }

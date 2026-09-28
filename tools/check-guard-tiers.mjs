@@ -105,6 +105,10 @@ const MUST_MAIN = [
   'uninstall_residue_execute',
   'uninstall_check_residue_version',
   'uninstall_update_residue_rules',
+  // C2 孤儿判定同样只有主窗卸载页需要；执行仍复用 residue_execute 的快照闸与硬否决，
+  // 所以这两条不给子窗放行（AGENTS §3「档位以谁真的需要调它为准」）。
+  'uninstall_orphan_scan',
+  'uninstall_orphan_ignore',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----

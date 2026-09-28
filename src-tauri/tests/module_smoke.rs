@@ -275,6 +275,109 @@ fn residue_rule_update_channels_are_main_only() {
     }
 }
 
+/// C2 两条孤儿命令都是 MAIN 档（唯一调用方是主窗卸载页）。
+///
+/// 快速组里主窗正向特征只走 `orphan_ignore` 的参数校验早退路（格式错即返回，
+/// 不 load/save 所有权档案，零副作用）；`orphan_scan` 会读档案并可能写回（升级/过期），
+/// 且要逐目录读盘，正例只在下面的 `#[ignore]` 组里跑。
+#[test]
+fn orphan_channels_are_main_only() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let scan = invoke_text(&w, "uninstall_orphan_scan", json!({}));
+        assert!(
+            scan.contains("IPC 来源校验失败"),
+            "{label} 窗调孤儿扫描必须被来源校验拒杀，回执 {scan}"
+        );
+        let ign = invoke_text(
+            &w,
+            "uninstall_orphan_ignore",
+            json!({ "appId": "no-separator", "displayName": "x" }),
+        );
+        assert!(
+            ign.contains("IPC 来源校验失败"),
+            "{label} 窗调孤儿忽略必须被拒杀，回执 {ign}"
+        );
+    }
+    let w = main_window();
+    let res = invoke(
+        &w,
+        "uninstall_orphan_ignore",
+        json!({ "appId": "no-separator", "displayName": "Acme" }),
+    );
+    assert_eq!(res["success"], json!(false), "非法 appId 必须早退: {res}");
+    assert!(
+        common::message_of(&res).contains("app_id 格式错误"),
+        "主窗应越过档位进入参数校验，回执 {res}"
+    );
+}
+
+/// 真机孤儿扫描（`#[ignore]`）：先按**档案实际状态**决定断言哪条，两条路都要能钉红。
+/// - 档案空 / 没有任何 historical → 必须**拒绝扫描并给出可读原因**，不许回空集
+///   （空集会被读成「这台机器没有孤儿」，那是把"不知道"伪装成"知道"）；
+/// - 有 historical 且产出候选 → 断言候选形状与「一律不自动勾选、置信度封顶 medium、
+///   不是受保护路径、带 ownerAppId」这四条硬约束。
+#[test]
+#[ignore = "逐目录读盘且依赖本机卸载记录，发布前门禁跑"]
+fn orphan_scan_refuses_or_returns_unchecked_candidates() {
+    use serde_json::Value;
+    let w = main_window();
+    let res = invoke(&w, "uninstall_orphan_scan", json!({}));
+    // 自己读一遍档案判断"该不该有产出"，而不是靠回执猜
+    let own = trim_tauri_lib::engine::paths::app_data_dir().join("uninstall-ownership.json");
+    let has_historical = std::fs::read_to_string(&own)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|d| {
+            d["owners"].as_array().map(|a| {
+                a.iter()
+                    .any(|o| o["state"].as_str() == Some("historical"))
+            })
+        })
+        .unwrap_or(false);
+    if !has_historical {
+        assert_eq!(
+            res["success"],
+            json!(false),
+            "没有已确认卸载完成的记录时不得回空集伪装「没有孤儿」，实测 {res}"
+        );
+        let msg = common::message_of(&res);
+        assert!(
+            msg.contains("还没有卸载记录") || msg.contains("还没有已确认卸载完成") || msg.contains("获取失败"),
+            "拒绝扫描必须给出可读原因，实测: {msg}"
+        );
+        println!("[orphan] 档案无 historical，按预期拒绝扫描：{msg}");
+        return;
+    }
+    assert_eq!(res["success"], json!(true), "有 historical 时扫描应成功: {res}");
+    let findings = res["data"]["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data.findings 必须是数组: {res}"));
+    for f in findings {
+        assert_eq!(f["kind"], json!("folder"), "孤儿候选只给目录: {f}");
+        assert_eq!(f["origin"], json!("orphan"), "候选要标明来源: {f}");
+        assert_eq!(
+            f["defaultChecked"],
+            json!(false),
+            "孤儿候选一律不得默认勾选: {f}"
+        );
+        assert!(
+            f["confidence"] == json!("low") || f["confidence"] == json!("medium"),
+            "孤儿候选置信度封顶 medium: {f}"
+        );
+        let t = f["target"].as_str().unwrap_or("");
+        assert!(
+            !trim_tauri_lib::engine::protect::is_path_protected(t),
+            "孤儿候选不得是受保护路径: {t}"
+        );
+        assert!(
+            !f["ownerAppId"].as_str().unwrap_or("").is_empty(),
+            "忽略操作要靠 ownerAppId 寻址: {f}"
+        );
+    }
+    println!("[orphan] 本机产出 {} 条候选（均未自动勾选）", findings.len());
+}
+
 // ==================== 重/外呼组（默认 ignore，发布前跑） ====================
 
 /// A1 收紧的**放行回测**（真机、只读）：装机清单里每个桌面程序的卸载键必然存在，

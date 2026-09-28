@@ -565,6 +565,10 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .88-.29 1.7-.77 2.37l1.46 1.46C18.9 15.84 19.5 14.5 19.5 13c0-3.87-3.13-7-7.5-7zm0 14c-2.76 0-5-2.24-5-5 0-.88.29-1.7.77-2.37L6.31 11.17C5.1 12.16 4.5 13.5 4.5 15c0 3.87 3.13 7 7.5 7v3l4-4-4-4v3z"/></svg>
               <span>更新残留规则</span>
             </button>
+            <button class="btn btn-secondary" id="btnUninstallOrphans" data-tip="按「本机确实卸载过某程序」的所有权历史，找它遗留的可弃目录（cache / logs 这类）。候选一律不自动勾选；判定要靠卸载记录，还没卸载过任何程序时会拒绝扫描。">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+              <span>孤儿应用数据</span>
+            </button>
             <!-- B1（2026-09-28 拍板）：静默勾选框已删——默认静默优先、失败自动回退原厂 UI -->
             <span class="clean-filter-hint" id="uninstallCountWrap">已安装 <span id="uninstallCount">0</span> 个程序</span>
           </div>

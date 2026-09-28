@@ -21,6 +21,10 @@
   // 最近一次残留扫描结果（渲染与勾选用）
   let findings = [];
   let currentAppId = '';
+  // C2 孤儿扫描复用同一个面板：mode 决定「重新扫描」按钮回到哪条链，
+  // 以及删除时传给后端的 appId（孤儿结果不属于任何单个程序，用合成 id 落批次报告）
+  let residueMode = 'app';
+  const ORPHAN_APP_ID = 'ORPHAN|machine';
 
   function esc(s) { return window.ds.esc(s); }
   function fmtSizeKb(kb) {
@@ -308,6 +312,7 @@
   // ==================== 残留扫描 ====================
   async function scanResidue() {
     if (!currentAppId) return;
+    residueMode = 'app';
     const panel = document.getElementById('residuePanel');
     const box = document.getElementById('residueList');
     panel.style.display = 'block';
@@ -330,6 +335,42 @@
     }
   }
 
+  // C2 孤儿应用数据扫描：只按「本机确实卸载过它」这条所有权链出候选。
+  // 后端在档案为空、程序清单取不到、进程快照取不到时都会**拒绝扫描**而不是回空集——
+  // 空集会被读成「这台机器没有孤儿」，那是把"不知道"伪装成"知道"。
+  async function scanOrphans() {
+    const panel = document.getElementById('residuePanel');
+    const box = document.getElementById('residueList');
+    residueMode = 'orphan';
+    currentAppId = ORPHAN_APP_ID;
+    panel.style.display = 'block';
+    box.innerHTML = '<div class="finder-empty">正在按卸载记录比对…</div>';
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    try {
+      const resp = await window.api.uninstall.orphanScan();
+      if (!resp.success) throw new Error(resp.message || '孤儿扫描失败');
+      findings = resp.data.findings || [];
+      document.getElementById('residueTitle').textContent = '孤儿应用数据';
+      renderResidue();
+      window.app?.toast?.(findings.length ? 'info' : 'success',
+        findings.length ? `发现 ${findings.length} 项遗留可弃目录，均未自动勾选，请逐项确认` : '没有符合所有权判定的遗留目录');
+    } catch (e) {
+      box.innerHTML = `<div class="finder-empty">孤儿扫描未执行：${esc(String(e.message || e))}</div>`;
+      window.app?.toast?.('warning', '孤儿扫描未执行: ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  async function ignoreOrphanOwner(f) {
+    try {
+      const resp = await window.api.uninstall.orphanIgnore(f.ownerAppId, f.ownerName || '');
+      if (!resp || !resp.success) throw new Error((resp && resp.message) || '写入忽略记录失败');
+      window.app?.toast?.('success', `已不再提示「${esc(f.ownerName || '')}」的遗留数据`);
+      await scanOrphans();
+    } catch (e) {
+      window.app?.toast?.('error', '忽略失败: ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+
   function renderResidue() {
     const box = document.getElementById('residueList');
     if (!findings.length) {
@@ -348,11 +389,16 @@
       h += '<table class="finder-table"><thead><tr><th style="width:34px"></th><th>目标</th><th style="width:110px">置信度</th><th style="width:200px">判定原因</th></tr></thead><tbody>';
       for (const f of rows) {
         const checked = !!f.defaultChecked;
+        // C2 孤儿行的处置出口：所有权判定可能有误（同名的另一款软件、或用户自己放的数据），
+        // 必须能让用户把某个历史 owner 永久排除，而不是每次扫描都重复看到同一条
+        const ignoreBtn = f.origin === 'orphan'
+          ? `<button class="btn btn-secondary" style="margin-left:8px;padding:2px 8px;font-size:12px" data-orphan-ignore="${findings.indexOf(f)}" data-tip="此后不再按这条卸载记录提示遗留数据（只影响孤儿扫描，不动残留规则库）">不再提示该程序</button>`
+          : '';
         h += `<tr class="${checked ? 'finder-row-selected' : ''}">
           <td><span class="checkbox ${checked ? 'checked' : ''}" data-rcheck="${prefix}"></span></td>
           <td><div class="finder-cell"><span class="finder-path-text" data-tip="${esc(f.target)}">${esc(f.target)}</span></div></td>
           <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75">${CONF_LABEL[f.confidence] || f.confidence || '—'}</span></td>
-          <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75">${esc(f.reason || '')}</span></td>
+          <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75">${esc(f.reason || '')}</span>${ignoreBtn}</td>
         </tr>`;
       }
       h += '</tbody></table>';
@@ -367,6 +413,12 @@
   }
 
   function onResidueClick(e) {
+    const ign = e.target.closest('[data-orphan-ignore]');
+    if (ign) {
+      const target = findings[Number(ign.dataset.orphanIgnore)];
+      if (target) ignoreOrphanOwner(target);
+      return;
+    }
     const t = e.target.closest('[data-rcheck]');
     if (!t) return;
     const isReg = t.dataset.rcheck === 'reg';
@@ -570,7 +622,11 @@
       const btn = e.target.closest('[data-un-app]');
       if (btn && !btn.disabled) runUninstall(btn.dataset.unApp);
     });
-    document.getElementById('residueBtnRescan')?.addEventListener('click', scanResidue);
+    // 「重新扫描」按面板当前来源回到对应的扫描链：孤儿扫描不能把面板又变回单程序残留
+    document.getElementById('residueBtnRescan')?.addEventListener('click', () => {
+      if (residueMode === 'orphan') { scanOrphans(); } else { scanResidue(); }
+    });
+    document.getElementById('btnUninstallOrphans')?.addEventListener('click', scanOrphans);
     document.getElementById('residueBtnClean')?.addEventListener('click', cleanResidue);
     document.getElementById('residueList')?.addEventListener('click', onResidueClick);
     loadApps();

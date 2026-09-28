@@ -19,7 +19,7 @@
 //! commands::uninstall::uninstall_residue_execute,
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -771,6 +771,7 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
         let quiet_string = reg_sz(hk, "QuietUninstallString").unwrap_or_default();
         let install_location = reg_sz(hk, "InstallLocation").unwrap_or_default();
+        let publisher = reg_sz(hk, "Publisher").unwrap_or_default();
         let key_name = key_path.rsplit('\\').next().unwrap_or("").to_string();
         let (mut kind, product_code) = detect_installer(&key_name, &uninstall_string);
         let _ = RegCloseKey(hk);
@@ -811,6 +812,37 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 e
             })
         };
+        // C2 所有权事件：在启动卸载器**之前**记 pending —— 此刻还不知道卸载会不会成功，
+        // 所以只登记「用户打算卸它」这一事实。孤儿判定要等复扫确认程序已消失、且原安装目录
+        // ENOENT，才升级为 historical（Q9 拍板：取消/失败不回滚成"已卸载"，交给稳定期回收）。
+        let mut owned_paths: Vec<String> = Vec::new();
+        if !install_location.trim().is_empty() {
+            owned_paths.push(install_location.trim().trim_end_matches('\\').to_string());
+        }
+        if let Some(parent) = Path::new(&original.0).parent() {
+            let p = parent.to_string_lossy().to_string();
+            if !p.is_empty() && !owned_paths.iter().any(|x| x.eq_ignore_ascii_case(&p)) {
+                owned_paths.push(p);
+            }
+        }
+        {
+            let mut own_doc = ownership::load();
+            let recorded = ownership::record_pending(
+                &mut own_doc,
+                &format!("{hive_name}|{key_path}"),
+                &display_name,
+                &publisher,
+                install_location.trim(),
+                &owned_paths,
+                crate::engine::now_ms(),
+                norm_name,
+            );
+            if recorded {
+                if let Err(e) = ownership::save(&own_doc) {
+                    log::write_log("warn", &format!("所有权事件落盘失败（不影响卸载）: {e}"));
+                }
+            }
+        }
         log::flush_sync(); // 危险操作前刷盘
         let mut fell_back = false;
         let mut exit_code = match shell_run_wait(&exe, &args) {
@@ -900,11 +932,46 @@ fn norm_name(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
+// ==================== C3 名称阈值与产出上限（2026-09-28 收口） ====================
+//
+// 这些数字此前散在八九处（5 / 4 / 2 / 20 / 16），同一个"名字够不够长、能出多少条"的问题
+// 在不同代码路径上答案不同，改一处忘一处就会让候选集自相矛盾。收在这张表里，每条写清判据。
+//
+// **刻意不做成"一个全局阈值"**：门槛高低应该跟"猜错的代价"绑定，所以按风险分三档。
+// - `NAME_MIN_SIMILAR`：目录名互含。5 是实测经验值——短于此（如「QQ」「微信」）会命中
+//   大量无关目录，而目录是整棵删（回收站可还原但仍是数据），误报不可接受。
+// - `NAME_MIN_SHORTCUT`：快捷方式 stem 互含。比目录宽一档，因为删一个 .lnk 只影响开始菜单
+//   入口，程序本体不动。
+// - `NAME_MIN_RULE_WORD`：签名规则库条件组里的短词门槛。这是**人工维护的精确词表**，
+//   与自由文本猜测不同风险面；配套的「三条件组至少两组」是 U-1 拍板口径（见 `RESIDUE_MATCH_GROUPS`），
+//   那是条件组数不是字符数，不许并进这两档。
+const NAME_MIN_SIMILAR: usize = 5;
+const NAME_MIN_SHORTCUT: usize = 4;
+const NAME_MIN_RULE_WORD: usize = 2;
+/// 名称类命中上限（目录与快捷方式共用）：启发式只是提示，膨胀会把用户判断力淹掉
+const NAME_HIT_CAP: usize = 20;
+/// 系统侧痕反查上限（MuiCache / BAM / 防火墙 / Tracing / JumpList 各自一条）
+const SIDE_TRACE_CAP: usize = 20;
+/// 参与反查的程序 exe 数量上限（collect_program_objects 的产出面）
+const PROGRAM_EXE_CAP: usize = 16;
+
+/// 同名多候选降级（C3 的后半）：同一归一化名字在**不同父目录**下命中多个结果时，
+/// 无法判定哪一条才是这个程序自己的东西，整组降 low 并默认不勾。
+fn name_is_ambiguous(hits: &[String]) -> bool {
+    let mut parents: HashSet<String> = HashSet::new();
+    for h in hits {
+        if let Some(p) = Path::new(h).parent() {
+            parents.insert(p.to_string_lossy().to_ascii_lowercase());
+        }
+    }
+    parents.len() > 1
+}
+
 /// 启发式残留：应用名与 AppData/LocalAppData/ProgramData 一级目录名互含（双侧 ≥5 字符）。
 /// 方案 §4.4：名称启发式置信度 low，默认不勾选，只作候选提示。
 unsafe fn heuristic_dir_hits(app_name: &str) -> Vec<String> {
     let norm = norm_name(app_name);
-    if norm.chars().count() < 5 {
+    if norm.chars().count() < NAME_MIN_SIMILAR {
         return Vec::new(); // 名字太短误报率爆炸（如「QQ」会命中一堆目录）
     }
     let mut hits = Vec::new();
@@ -916,13 +983,13 @@ unsafe fn heuristic_dir_hits(app_name: &str) -> Vec<String> {
                 continue;
             }
             let dnorm = norm_name(&ent.file_name().to_string_lossy());
-            if dnorm.chars().count() < 5 {
+            if dnorm.chars().count() < NAME_MIN_SIMILAR {
                 continue;
             }
             if dnorm == norm || (dnorm.contains(&norm) || norm.contains(&dnorm)) {
                 hits.push(ent.path().to_string_lossy().to_string());
             }
-            if hits.len() >= 20 {
+            if hits.len() >= NAME_HIT_CAP {
                 return hits; // 上限：启发式只是提示，不该膨胀
             }
         }
@@ -946,7 +1013,7 @@ fn start_menu_shortcut_hits(app_name: &str) -> Vec<String> {
     .flatten()
     .collect();
     for root in roots {
-        if hits.len() >= 20 {
+        if hits.len() >= NAME_HIT_CAP {
             break;
         }
         // 迭代下钻，深度 ≤ 5（开始菜单层级浅，防符号链接打穿用 is_symlink 挡）
@@ -968,9 +1035,9 @@ fn start_menu_shortcut_hits(app_name: &str) -> Vec<String> {
                     continue;
                 }
                 let stem = norm_name(&p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
-                if stem.contains(&norm) || (norm.contains(&stem) && stem.chars().count() >= 4) {
+                if stem.contains(&norm) || (norm.contains(&stem) && stem.chars().count() >= NAME_MIN_SHORTCUT) {
                     hits.push(p.to_string_lossy().to_string());
-                    if hits.len() >= 20 {
+                    if hits.len() >= NAME_HIT_CAP {
                         return hits;
                     }
                 }
@@ -1013,7 +1080,7 @@ fn collect_program_objects(loc: &str, uninstall_string: &str, display_icon_src: 
                     && p.extension().map(|e| e.eq_ignore_ascii_case("exe")).unwrap_or(false)
                 {
                     exes.push(p.to_string_lossy().to_string());
-                    if exes.len() >= 16 {
+                    if exes.len() >= PROGRAM_EXE_CAP {
                         break;
                     }
                 }
@@ -1723,7 +1790,7 @@ fn residue_rules_hits(
             .map(|a| {
                 a.iter().filter_map(|p| p.as_str()).any(|p| {
                     let pn = norm_name(p);
-                    pn.chars().count() >= 2 && contains2(&name_norm, &pn)
+                    pn.chars().count() >= NAME_MIN_RULE_WORD && contains2(&name_norm, &pn)
                 })
             })
             .unwrap_or(false);
@@ -1742,7 +1809,7 @@ fn residue_rules_hits(
             .map(|a| {
                 a.iter().filter_map(|p| p.as_str()).any(|p| {
                     let pl = p.trim().to_lowercase();
-                    pl.chars().count() >= 2 && contains2(&key_lc, &pl)
+                    pl.chars().count() >= NAME_MIN_RULE_WORD && contains2(&key_lc, &pl)
                 })
             })
             .unwrap_or(false);
@@ -1977,6 +2044,495 @@ pub async fn uninstall_update_residue_rules<R: tauri::Runtime>(window: WebviewWi
     }
 }
 
+// ==================== C2 卸载所有权历史（方案 §6.3） ====================
+///
+/// 目标不是"发现所有孤儿目录"，而是**只在证据链闭合时**把一个精确同名目录（或其中
+/// 明确可弃的子目录）升级为候选。所以这里是一条单向状态机，不是一个缓存：
+///
+/// ```text
+/// 用户确认卸载、执行卸载器之前  →  写 pending（此刻还不知道卸载会不会成功）
+/// 孤儿扫描时复扫当前程序清单     →  程序已消失且原 InstallLocation ENOENT  → historical
+///                                  程序仍在清单                          → 继续 pending
+///                                  pending 超稳定期（30 天）             → 移除
+///                                  historical 的程序又回到清单（重装）   → 移除该记录
+/// ```
+///
+/// 为什么不把"点击卸载"直接当成所有权事实：卸载会取消、会失败、会只删一半；
+/// 把一次点击当成"这台机器上的这个目录属于它"会让后面所有判定建立在猜测上。
+/// `leftover-owners` 类实现（Kudu）也是跨轮保存、合并后再确认的，不是一条即用即弃的记录。
+mod ownership {
+    use serde_json::{json, Value};
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    /// 数据文件 schema 版本（结构变化时递增；旧版本文件按损坏处理走隔离，不做兼容层）
+    pub const SCHEMA_VERSION: u64 = 1;
+    /// 记录上限：所有权历史只服务孤儿判定，不该无限增长（每条记录都要参与复扫与匹配）
+    pub const MAX_RECORDS: usize = 400;
+    /// pending 稳定期：超过就按"卸载没继续/用户放弃了"回收。刻意**不做**成永久保留——
+    /// 一条永远悬着的 pending 会让后面每次复扫都重跑判定，却没有产出候选的资格。
+    pub const PENDING_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+    pub const STATE_PENDING: &str = "pending";
+    pub const STATE_HISTORICAL: &str = "historical";
+
+    pub fn empty_doc() -> Value {
+        json!({ "schemaVersion": SCHEMA_VERSION, "owners": [], "ignored": [] })
+    }
+
+    pub fn file() -> std::path::PathBuf {
+        crate::engine::paths::app_data_dir().join("uninstall-ownership.json")
+    }
+
+    /// 载入：文件缺失 = 空档（正常首次使用）；解析失败或结构不对 = 按损坏隔离后回空档。
+    /// 隔离而不是"尽力解析"是因为这份数据会**驱动删除候选**，半损坏状态下的猜测不可接受。
+    pub fn load() -> Value {
+        let path = file();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return empty_doc();
+        };
+        let parsed: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::engine::log::write_log("warn", &format!("所有权历史解析失败，已隔离: {e}"));
+                crate::security::quarantine_file(&path, "ownership JSON 解析失败");
+                return empty_doc();
+            }
+        };
+        if parsed.get("owners").and_then(Value::as_array).is_none()
+            || parsed.get("schemaVersion").and_then(Value::as_u64) != Some(SCHEMA_VERSION)
+        {
+            crate::engine::log::write_log("warn", "所有权历史结构或 schema 版本不符，已隔离并重建空档");
+            crate::security::quarantine_file(&path, "ownership 结构/版本不符");
+            return empty_doc();
+        }
+        parsed
+    }
+
+    pub fn save(doc: &Value) -> Result<(), String> {
+        crate::security::atomic_write_json(&file(), doc).map_err(|e| e.to_string())
+    }
+
+    fn owners_of_mut<'a>(doc: &'a mut Value) -> &'a mut Vec<Value> {
+        doc["owners"].as_array_mut().expect("owners 必须是数组（load 已校验）")
+    }
+
+    pub fn is_ignored(doc: &Value, app_id: &str, display_name_norm: &str) -> bool {
+        let Some(list) = doc.get("ignored").and_then(Value::as_array) else {
+            return false;
+        };
+        list.iter().any(|i| {
+            let id = i.get("appId").and_then(Value::as_str).unwrap_or("");
+            let name = i.get("displayName").and_then(Value::as_str).unwrap_or("");
+            (!id.is_empty() && id.eq_ignore_ascii_case(app_id))
+                || (!name.is_empty() && !display_name_norm.is_empty() && name == display_name_norm)
+        })
+    }
+
+    /// 卸载执行前写 pending 事件。已存在同 appId 时**刷新**而不是新增（重装/多次尝试是同一事实）；
+    /// 命中忽略清单则完全不记（否则用户忽略了又被重新采纳）。
+    pub fn record_pending(
+        doc: &mut Value,
+        app_id: &str,
+        display_name: &str,
+        publisher: &str,
+        install_location: &str,
+        owned_paths: &[String],
+        now_ms: i64,
+        name_norm: impl Fn(&str) -> String,
+    ) -> bool {
+        if app_id.is_empty() || is_ignored(doc, app_id, &name_norm(display_name)) {
+            return false;
+        }
+        let owners = owners_of_mut(doc);
+        if let Some(hit) = owners.iter_mut().find(|o| {
+            o.get("appId").and_then(Value::as_str) == Some(app_id)
+        }) {
+            hit["displayName"] = json!(display_name);
+            hit["publisher"] = json!(publisher);
+            hit["installLocation"] = json!(install_location);
+            hit["ownedPaths"] = json!(owned_paths);
+            hit["state"] = json!(STATE_PENDING);
+            hit["recordedAt"] = json!(now_ms);
+            // 刷新即重新开始稳定期计时；上一轮的确认时间不再有意义
+            hit.as_object_mut().map(|o| o.remove("confirmedAt"));
+            return true;
+        }
+        owners.push(json!({
+            "appId": app_id,
+            "displayName": display_name,
+            "publisher": publisher,
+            "installLocation": install_location,
+            "ownedPaths": owned_paths,
+            "recordedAt": now_ms,
+            "state": STATE_PENDING,
+        }));
+        true
+    }
+
+    /// 复扫：pending → historical、过期回收、重装的 historical 撤销。
+    /// `install_exists` 注入探测（测试不碰盘）；返回 (升级为 historical 数, 移除数)。
+    pub fn rescan(
+        doc: &mut Value,
+        current_app_ids: &HashSet<String>,
+        now_ms: i64,
+        install_exists: &dyn Fn(&Path) -> bool,
+    ) -> (usize, usize) {
+        let mut promoted = 0;
+        let mut removed = 0;
+        let owners = owners_of_mut(doc);
+        owners.retain_mut(|o| {
+            let app_id = o.get("appId").and_then(Value::as_str).unwrap_or("").to_string();
+            let state = o.get("state").and_then(Value::as_str).unwrap_or("").to_string();
+            let listed = current_app_ids.contains(&app_id);
+            if state == STATE_HISTORICAL {
+                if listed {
+                    // 程序又回到清单 = 用户重装了它，这条"孤儿"事实不再成立
+                    removed += 1;
+                    return false;
+                }
+                return true;
+            }
+            if listed {
+                return true; // 还在清单里：卸载没完成，继续 pending
+            }
+            let loc = o.get("installLocation").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let gone = loc.is_empty() || !install_exists(Path::new(&loc));
+            if !gone {
+                // 程序不在清单但安装目录还在：可能是卸载器半途退出，也可能是别的软件复用同目录。
+                // 不升级、也不删事实，交给稳定期回收。
+                return true;
+            }
+            let recorded = o.get("recordedAt").and_then(Value::as_i64).unwrap_or(now_ms);
+            if now_ms - recorded > PENDING_TTL_MS {
+                removed += 1;
+                return false;
+            }
+            o["state"] = json!(STATE_HISTORICAL);
+            o["confirmedAt"] = json!(now_ms);
+            promoted += 1;
+            true
+        });
+        // 上限裁剪：pending 有生命周期意义，优先裁最旧的 historical；
+        // 全是 pending 仍超限时才动 pending（宁可丢历史也不无界增长）。
+        let owners = owners_of_mut(doc);
+        if owners.len() > MAX_RECORDS {
+            let mut oldest_h: Option<(usize, i64)> = None;
+            for (idx, o) in owners.iter().enumerate() {
+                if o.get("state").and_then(Value::as_str) == Some(STATE_HISTORICAL) {
+                    let at = o.get("confirmedAt").and_then(Value::as_i64).unwrap_or(0);
+                    if oldest_h.map(|(_, c)| at < c).unwrap_or(true) {
+                        oldest_h = Some((idx, at));
+                    }
+                }
+            }
+            if let Some((idx, _)) = oldest_h {
+                owners.remove(idx);
+            } else {
+                owners.sort_by_key(|o| o.get("recordedAt").and_then(Value::as_i64).unwrap_or(0));
+                while owners.len() > MAX_RECORDS {
+                    owners.remove(0);
+                }
+            }
+        }
+        (promoted, removed)
+    }
+
+    /// 用户忽略某个 owner：移出 owners 并写进 ignored（按 appId 与归一化显示名双记，
+    /// 因为同一款程序可能以不同 hive/子键再次出现在卸载清单里）。
+    pub fn ignore(doc: &mut Value, app_id: &str, display_name: &str, now_ms: i64, name_norm: impl Fn(&str) -> String) {
+        let name = name_norm(display_name);
+        {
+            let owners = owners_of_mut(doc);
+            owners.retain(|o| o.get("appId").and_then(Value::as_str) != Some(app_id));
+        }
+        let list = doc["ignored"].as_array_mut().expect("ignored 必须是数组");
+        if !list.iter().any(|i| i.get("appId").and_then(Value::as_str) == Some(app_id)) {
+            list.push(json!({ "appId": app_id, "displayName": name, "addedAt": now_ms }));
+        }
+    }
+
+    pub fn historical_owners(doc: &Value) -> Vec<Value> {
+        doc.get("owners")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter(|o| o.get("state").and_then(Value::as_str) == Some(STATE_HISTORICAL)).cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// 孤儿候选的判定与产出（C2-3）。
+///
+/// 三条硬约束，缺一条都不许出候选：
+/// 1. **精确同名**（不是相似度）——目录末段归一后等于某 historical owner 的显示名或
+///    其 installLocation 的 basename；
+/// 2. **owner 唯一**——同一目录名被两个 historical owner 命中时无法判定归属，直接丢；
+/// 3. **原安装目录必须 ENOENT**——还在就说明程序没卸完，不是孤儿。
+/// 另外再过三道环境闸：受保护路径、上级链重解析点（`dir_delete_blocked`）、
+/// 运行中进程的祖先链（正被使用的目录绝不提示删除）。
+/// 产出默认只列**可弃子目录**（cache / logs 这类），且一律不勾选、置信度封顶 medium。
+const ORPHAN_DISPOSABLE_SUBDIRS: &[&str] = &[
+    "cache", "caches", "code cache", "gpucache", "gpu cache", "logs", "log", "tmp", "temp",
+];
+/// 孤儿扫描的根：与启发式目录命中同三个根，只扫一层（不递归，成本可控）
+const ORPHAN_SCAN_ROOTS: &[&str] = &["APPDATA", "LOCALAPPDATA", "PROGRAMDATA"];
+const ORPHAN_MAX_CANDIDATES: usize = 40;
+
+/// 当前全系统进程的可执行路径（小写全路径），用于「候选目录是否在运行进程祖先链上」。
+/// 拿不到就返回空集 —— 但这条判定是**保护用户**的，取不到时按「全部拒绝出候选」处理更稳妥，
+/// 所以调用方用 Option：None = 取不到快照，直接不产出孤儿候选。
+fn running_process_dirs() -> Option<HashSet<String>> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut out = HashSet::new();
+        if Process32FirstW(snap, &mut pe).is_ok() {
+            loop {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pe.th32ProcessID).ok();
+                if let Some(h) = h {
+                    let mut buf: Vec<u16> = vec![0; 1024];
+                    let mut len: u32 = buf.len() as u32;
+                    let name = QueryFullProcessImageNameW(
+                        h,
+                        PROCESS_NAME_FORMAT(0),
+                        windows::core::PWSTR(buf.as_mut_ptr()),
+                        &mut len,
+                    )
+                    .map(|_| String::from_utf16_lossy(&buf[..len as usize]));
+                    let _ = windows::Win32::Foundation::CloseHandle(h);
+                    if let Ok(p) = name {
+                        if let Some(parent) = Path::new(&p).parent() {
+                            out.insert(parent.to_string_lossy().to_ascii_lowercase());
+                        }
+                    }
+                }
+                if Process32NextW(snap, &mut pe).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = snap;
+        Some(out)
+    }
+}
+
+/// 候选目录是否与某个运行中进程的可执行路径在同一条链上。
+/// **两个方向都要查**：候选是进程目录的祖先（端掉父目录会带走正在跑的程序）
+/// 或候选就在进程目录里面（正被使用的子目录）——只查一边会漏掉另一半（Y5 实测）。
+fn under_running_process(dir: &Path, procs: &HashSet<String>) -> bool {
+    dir.ancestors().any(|a| {
+        let s = a.to_string_lossy().to_ascii_lowercase();
+        procs.iter().any(|p| p.starts_with(&s) || s.starts_with(p))
+    })
+}
+
+/// uninstall:orphan-scan — 孤儿应用数据扫描（主窗档；只产候选，删除仍走 residue-execute）
+#[tauri::command]
+pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let label = window.label().to_string();
+    let res = tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        let now = crate::engine::now_ms();
+        let mut doc = ownership::load();
+        // ① 所有权档案为空 → 能力没被喂过事实，直接拒绝而不是伪装「没有孤儿」
+        if doc
+            .get("owners")
+            .and_then(Value::as_array)
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
+        {
+            return (
+                Vec::new(),
+                "还没有卸载记录：孤儿判定要靠「本机确实卸载过某程序」这条事实链，先卸载一次再来扫描".to_string(),
+            );
+        }
+        // ② 复扫当前程序清单（获取失败必须拒扫，不能拿空清单把所有 pending 都升级成 historical）
+        let mut current: Vec<Value> = Vec::new();
+        for (hive, sub) in [
+            (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ] {
+            let rows = enum_uninstall_root(hive, sub);
+            if rows.is_empty() && sub.contains("WOW6432Node") {
+                continue; // 32 位视图在本机可能不存在，不算失败
+            }
+            if rows.is_empty() && sub.contains("Software\\Microsoft") && !sub.starts_with("SOFTWARE") {
+                // HKCU 下没有用户级安装项是常见形态，同样不算取数失败
+                continue;
+            }
+            current.extend(rows);
+        }
+        if current.is_empty() {
+            return (Vec::new(), "当前程序清单获取失败，本次不做孤儿判定（拿空清单去比对会把所有记录误判成已卸载）".to_string());
+        }
+        let ids: HashSet<String> = current
+            .iter()
+            .filter_map(|a| a.get("id").and_then(Value::as_str).map(String::from))
+            .collect();
+        // ③ pending → historical、过期回收、重装撤销（就地改档并落盘）
+        let (promoted, removed) = ownership::rescan(&mut doc, &ids, now, &|p: &Path| p.exists());
+        if promoted > 0 || removed > 0 {
+            if let Err(e) = ownership::save(&doc) {
+                crate::engine::log::write_log("warn", &format!("所有权历史写回失败: {e}"));
+            }
+        }
+        // ④ 运行进程祖先链：取不到快照就不产出候选（这条是保护用户的判定，宁可不出）
+        let Some(procs) = running_process_dirs() else {
+            return (Vec::new(), "进程快照获取失败，本次不做孤儿判定（无法确认候选目录是否正在被使用）".to_string());
+        };
+        // historical owner 的精确名 → owner 列表（同名多 owner 时用于「唯一归属」判定）
+        let mut by_name: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
+        for o in ownership::historical_owners(&doc) {
+            let mut keys: Vec<String> = Vec::new();
+            if let Some(n) = o.get("displayName").and_then(Value::as_str) {
+                let nn = norm_name(n);
+                if nn.chars().count() >= NAME_MIN_SIMILAR {
+                    keys.push(nn);
+                }
+            }
+            if let Some(loc) = o.get("installLocation").and_then(Value::as_str) {
+                if let Some(base) = loc.trim().trim_end_matches(['\\', '/']).rsplit('\\').next() {
+                    let bn = norm_name(base);
+                    if bn.chars().count() >= NAME_MIN_SIMILAR {
+                        keys.push(bn);
+                    }
+                }
+            }
+            for k in keys {
+                by_name.entry(k).or_default().push(o.clone());
+            }
+        }
+        if by_name.is_empty() {
+            return (Vec::new(), "还没有已确认卸载完成的程序（pending 尚未满足升级条件）".to_string());
+        }
+
+        let mut findings: Vec<Value> = Vec::new();
+        for root in ORPHAN_SCAN_ROOTS {
+            let Ok(base_raw) = std::env::var(root) else { continue };
+            let Ok(rd) = std::fs::read_dir(&base_raw) else { continue };
+            for ent in rd.flatten() {
+                let dir = ent.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                let dname = norm_name(&ent.file_name().to_string_lossy());
+                if dname.chars().count() < NAME_MIN_SIMILAR {
+                    continue;
+                }
+                let Some(owners) = by_name.get(&dname) else { continue };
+                // ⑤ 归属唯一：两个 historical owner 精确同名时无法判定这个目录归谁
+                if owners.len() != 1 {
+                    continue;
+                }
+                let owner = &owners[0];
+                let owner_name = owner.get("displayName").and_then(Value::as_str).unwrap_or("").to_string();
+                // ⑥ 原安装目录必须已不存在
+                if let Some(loc) = owner.get("installLocation").and_then(Value::as_str) {
+                    if !loc.trim().is_empty() && Path::new(loc.trim()).exists() {
+                        continue;
+                    }
+                }
+                let shown = dir.to_string_lossy().to_string();
+                if protect::is_path_protected(&shown) || under_running_process(&dir, &procs) {
+                    continue;
+                }
+                if let Some(reason) = crate::engine::native::dir_delete_blocked(&dir) {
+                    crate::engine::log::write_log("info", &format!("孤儿候选跳过 {shown}: {reason}"));
+                    continue;
+                }
+                // ⑦ 默认只列可弃子目录，不端整个 profile
+                let Ok(sub_rd) = std::fs::read_dir(&dir) else { continue };
+                for sub in sub_rd.flatten() {
+                    if !sub.path().is_dir() {
+                        continue;
+                    }
+                    let sub_norm = norm_name(&sub.file_name().to_string_lossy());
+                    if !ORPHAN_DISPOSABLE_SUBDIRS.contains(&sub_norm.as_str()) {
+                        continue;
+                    }
+                    let sub_path = sub.path().to_string_lossy().to_string();
+                    if protect::is_path_protected(&sub_path)
+                        || under_running_process(&sub.path(), &procs)
+                        || crate::engine::native::dir_delete_blocked(&sub.path()).is_some()
+                    {
+                        continue;
+                    }
+                    findings.push(json!({
+                        "kind": "folder",
+                        "target": sub_path,
+                        "reason": format!("「{owner_name}」已确认卸载完成，其遗留可弃目录（所有权判定，不自动勾选）"),
+                        "confidence": "medium",
+                        "risk": "medium",
+                        "defaultChecked": false,
+                        "origin": "orphan",
+                        "ownerName": owner_name,
+                        // 忽略操作要按 owner 的卸载键寻址，前端从这字段取
+                        "ownerAppId": owner.get("appId").and_then(Value::as_str).unwrap_or(""),
+                    }));
+                    if findings.len() >= ORPHAN_MAX_CANDIDATES {
+                        break;
+                    }
+                }
+            }
+        }
+        (findings, String::new())
+    })
+    .await;
+    match res {
+        Ok((findings, note)) => {
+            if !note.is_empty() {
+                return json!({ "success": false, "message": note });
+            }
+            // 落进与本会话残留扫描同一个快照槽：执行侧的快照闸、A1 硬否决、
+            // 目录重解析校验、回收站优先一律复用，不给孤儿候选开第二条删除通道
+            {
+                let mut store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
+                store.insert(label, (crate::engine::now_ms(), findings.clone()));
+            }
+            json!({ "success": true, "data": { "appName": "孤儿应用数据", "findings": findings } })
+        }
+        Err(e) => json!({ "success": false, "message": format!("孤儿扫描异常: {e}") }),
+    }
+}
+
+/// uninstall:orphan-ignore — 用户判定某个历史 owner 不再提示（主窗档）
+#[tauri::command]
+pub async fn uninstall_orphan_ignore<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    app_id: String,
+    display_name: String,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Some((hive_str, key_path)) = app_id.split_once('|') else {
+        return json!({ "success": false, "message": "app_id 格式错误" });
+    };
+    if !(hive_str.eq_ignore_ascii_case("HKCU") || hive_str.eq_ignore_ascii_case("HKLM")) {
+        return json!({ "success": false, "message": "app_id hive 只支持 HKCU/HKLM" });
+    }
+    if !valid_uninstall_key_path(key_path) {
+        return json!({ "success": false, "message": "app_id 不是合法的卸载键路径" });
+    }
+    let mut doc = ownership::load();
+    ownership::ignore(&mut doc, &app_id, &display_name, crate::engine::now_ms(), |s| norm_name(s));
+    match ownership::save(&doc) {
+        Ok(()) => {
+            log::write_log("info", &format!("孤儿判定已忽略历史 owner: {display_name}（{app_id}）"));
+            json!({ "success": true, "data": { "message": format!("已不再提示「{display_name}」的遗留数据") } })
+        }
+        Err(e) => json!({ "success": false, "message": format!("忽略记录写入失败: {e}") }),
+    }
+}
+
 /// 卸载域·残留扫描（方案 M3 MVP + U-2 固定系统侧痕）。
 /// 来源与置信度：卸载键仍在=high（reg_key）；InstallLocation 仍在=high（folder）；
 /// 名称启发式=low（folder，默认不勾）；开始菜单快捷方式=medium（默认勾）；
@@ -2105,11 +2661,18 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
             }
         }
         // 中置信：开始菜单快捷方式（文件名含程序名；删 .lnk 无害，默认勾选）
-        for lnk in start_menu_shortcut_hits(&display_name) {
+        // C3 同名多候选降级：同名快捷方式出现在多个父目录时无法判定哪条属于本程序，
+        // 整组降 low 且不默认勾选（目录类启发式本来就是 low，不受这条影响）
+        let shortcuts = start_menu_shortcut_hits(&display_name);
+        let shortcut_ambiguous = name_is_ambiguous(&shortcuts);
+        for lnk in shortcuts {
             findings.push(json!({
                 "kind": "shortcut", "target": lnk,
-                "reason": format!("开始菜单快捷方式与「{display_name}」同名"),
-                "confidence": "medium", "risk": "low", "defaultChecked": true,
+                "reason": format!("开始菜单快捷方式与「{display_name}」同名{}",
+                    if shortcut_ambiguous { "（同名快捷方式出现在多个目录，请人工确认后再删）" } else { "" }),
+                "confidence": if shortcut_ambiguous { "low" } else { "medium" },
+                "risk": "low",
+                "defaultChecked": !shortcut_ambiguous,
             }));
         }
         // 中置信（默认不勾）：固定系统侧痕反查（U-2）。按系统对象里记录的程序路径反查，
@@ -2125,35 +2688,35 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
             .collect();
         if !exes_lc.is_empty() || !dir_lc.is_empty() {
             // 外层闭包整体处于 unsafe 块内，直接调用即可（内层再包 unsafe 会告警冗余）
-            for target in muicache_hits(&exes_lc, &dir_lc, 20) {
+            for target in muicache_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
                 findings.push(json!({
                     "kind": "reg_value", "target": target,
                     "reason": "MuiCache 残留值（系统缓存了此程序路径的友好名称）",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
                 }));
             }
-            for target in firewall_hits(&exes_lc, &dir_lc, 20) {
+            for target in firewall_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
                 findings.push(json!({
                     "kind": "reg_value", "target": target,
                     "reason": "防火墙规则引用此程序路径（程序已卸载，规则已失效）",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
                 }));
             }
-            for target in bam_hits(&exes_lc, &dir_lc, 20) {
+            for target in bam_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
                 findings.push(json!({
                     "kind": "reg_value", "target": target,
                     "reason": "BAM 后台执行记录引用此程序路径",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
                 }));
             }
-            for target in tracing_hits(&exes_lc, 20) {
+            for target in tracing_hits(&exes_lc, SIDE_TRACE_CAP) {
                 findings.push(json!({
                     "kind": "reg_key", "target": target,
                     "reason": "Tracing 诊断跟踪项以此程序的 exe 命名",
                     "confidence": "medium", "risk": "low", "defaultChecked": false,
                 }));
             }
-            for target in jumplist_hits(&exes_lc, &dir_lc, 20) {
+            for target in jumplist_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
                 findings.push(json!({
                     "kind": "file", "target": target,
                     "reason": "JumpList 自动目标缓存引用此程序路径",
@@ -2755,6 +3318,184 @@ mod residue_trace_tests {
             "线上包版本({version})低于内置副本({builtin_ver})，发布链没跟上"
         );
         println!("[residue-update] 命中源={source} rulesVersion={version} 字节={}", text.len());
+    }
+
+    // ==================== C2 所有权状态机 / C3 阈值表 ====================
+
+    fn ids_of(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+    const A_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Acme";
+
+    /// 状态机全路径：pending 不被"点击卸载"直接升级成事实；程序消失且安装目录 ENOENT 才
+    /// historical；目录还在就不升级；超稳定期回收；重装的 historical 撤销。
+    #[test]
+    fn ownership_state_machine_only_promotes_on_closed_evidence() {
+        let norm = |s: &str| s.to_lowercase();
+        let mut doc = ownership::empty_doc();
+        assert!(ownership::record_pending(
+            &mut doc, A_ID, "Acme", "Acme Corp", r"C:\Program Files\Acme", &[], 1000, norm
+        ));
+        assert_eq!(doc["owners"].as_array().unwrap().len(), 1);
+        assert_eq!(doc["owners"][0]["state"], json!("pending"));
+        // 再卸一次同一程序：刷新而不是叠记录
+        assert!(ownership::record_pending(
+            &mut doc, A_ID, "Acme", "Acme Corp", r"C:\Program Files\Acme", &[], 2000, norm
+        ));
+        assert_eq!(doc["owners"].as_array().unwrap().len(), 1, "同一 appId 必须刷新");
+        assert_eq!(doc["owners"][0]["recordedAt"], json!(2000));
+
+        // ① 程序仍在清单 → 继续 pending
+        let exists_all = |_: &Path| true;
+        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[A_ID]), 3000, &exists_all);
+        assert_eq!((p, r), (0, 0));
+        assert_eq!(doc["owners"][0]["state"], json!("pending"));
+
+        // ② 程序消失但安装目录还在 → 不升级（可能是半途退出/别人复用同目录）
+        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[]), 3000, &exists_all);
+        assert_eq!((p, r), (0, 0), "安装目录仍在时不得升级");
+        assert_eq!(doc["owners"][0]["state"], json!("pending"));
+
+        // ③ 程序消失且目录 ENOENT → historical
+        let gone = |_: &Path| false;
+        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[]), 3000, &gone);
+        assert_eq!((p, r), (1, 0));
+        assert_eq!(doc["owners"][0]["state"], json!("historical"));
+        assert_eq!(doc["owners"][0]["confirmedAt"], json!(3000));
+
+        // ④ 重装：historical 记录撤销（否则会被当成孤儿来源）
+        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[A_ID]), 4000, &gone);
+        assert_eq!((p, r), (0, 1));
+        assert!(doc["owners"].as_array().unwrap().is_empty());
+
+        // ⑤ pending 超稳定期 → 回收（卸载没继续的事实不该永久挂着）
+        let mut doc2 = ownership::empty_doc();
+        ownership::record_pending(&mut doc2, A_ID, "Acme", "", "", &[], 1000, norm);
+        let later = 1000 + ownership::PENDING_TTL_MS + 1;
+        let (_, removed) = ownership::rescan(&mut doc2, &ids_of(&[]), later, &exists_all);
+        assert_eq!(removed, 1, "超稳定期的 pending 必须回收");
+        assert!(doc2["owners"].as_array().unwrap().is_empty());
+    }
+
+    /// 忽略清单：既挡住后续再被记录，也让历史里的同一条消失（否则用户忽略了还反复出现）。
+    #[test]
+    fn ownership_ignore_stops_re_adopting_the_owner() {
+        let norm = |s: &str| s.to_lowercase();
+        let mut doc = ownership::empty_doc();
+        ownership::record_pending(&mut doc, A_ID, "Acme", "", r"C:\Program Files\Acme", &[], 1000, norm);
+        ownership::ignore(&mut doc, A_ID, "Acme", 2000, norm);
+        assert!(doc["owners"].as_array().unwrap().is_empty(), "忽略后 owners 必须清空该条");
+        assert!(ownership::is_ignored(&doc, A_ID, "acme"));
+        assert!(
+            !ownership::record_pending(&mut doc, A_ID, "Acme", "", "", &[], 3000, norm),
+            "被忽略的 owner 不得重新记录"
+        );
+        // 同显示名、不同 hive 的条目也按名字挡住（同一款程序可能两处都有键）
+        assert!(ownership::is_ignored(&doc, "HKCU|SOFTWARE\\x", "acme"));
+    }
+
+    /// 上限裁剪只动最旧的 historical，pending 有生命周期意义不被裁；
+    /// 全是 pending 且超限时才动 pending（宁可丢历史也不无界增长）。
+    #[test]
+    fn ownership_cap_prefers_dropping_oldest_historical() {
+        let norm = |s: &str| s.to_lowercase();
+        let pid = |i: usize| format!(r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\P{i}");
+        let mut doc = ownership::empty_doc();
+        for i in 0..ownership::MAX_RECORDS {
+            ownership::record_pending(
+                &mut doc, &pid(i), "P", "", &format!(r"C:\Program Files\P{i}"), &[], 1000, norm,
+            );
+        }
+        // ① 安装目录都还在 → 一条都不升级，也不裁（400 条刚好在上限内）
+        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[]), 1500, &|_: &Path| true);
+        assert_eq!((p, r), (0, 0), "目录还在时不该有升级");
+        assert_eq!(doc["owners"].as_array().unwrap().len(), ownership::MAX_RECORDS);
+
+        // ② 越过上限：全部目录消失 → 升级为 historical，同时裁回上限
+        ownership::record_pending(&mut doc, &pid(999), "P999", "", r"C:\Program Files\P999", &[], 1500, norm);
+        let (p, _) = ownership::rescan(&mut doc, &ids_of(&[]), 1600, &|_: &Path| false);
+        assert!(p >= 1, "目录消失后必须升级，实测 {p}");
+        assert_eq!(
+            doc["owners"].as_array().unwrap().len(),
+            ownership::MAX_RECORDS,
+            "超限必须裁回上限"
+        );
+
+        // ③ 混合形态：新进来的 pending 不许被裁，该裁的是最旧的 historical
+        ownership::record_pending(&mut doc, &pid(1000), "Fresh", "", r"C:\Program Files\P1000", &[], 9000, norm);
+        let (_, _) = ownership::rescan(&mut doc, &ids_of(&[]), 9500, &|p: &Path| {
+            // 只有新记录的目录还在 → 它保持 pending，其余已在清单外且目录消失
+            p.to_string_lossy().ends_with("P1000")
+        });
+        let owners = doc["owners"].as_array().unwrap();
+        assert_eq!(owners.len(), ownership::MAX_RECORDS, "仍然超限即裁失败");
+        assert!(
+            owners.iter().any(|o| o["displayName"] == json!("Fresh") && o["state"] == json!("pending")),
+            "新写入的 pending 被裁掉了"
+        );
+    }
+
+    /// C3：阈值表的排序本身就是判据（目录比快捷方式严），三条不许被"顺手统一"成一个数。
+    #[test]
+    fn name_threshold_table_keeps_risk_ordering() {
+        assert!(
+            NAME_MIN_SIMILAR > NAME_MIN_SHORTCUT,
+            "整棵目录删除的门槛必须高于只删一个 .lnk 的门槛"
+        );
+        assert!(NAME_MIN_SHORTCUT >= NAME_MIN_RULE_WORD);
+        assert_eq!(NAME_MIN_SIMILAR, 5);
+        assert_eq!(NAME_MIN_SHORTCUT, 4);
+        assert_eq!(NAME_MIN_RULE_WORD, 2, "2 是规则库短词门槛，与「至少两组条件」的 U-1 口径同源");
+        // 上限收口后各归一类：名称类 20、侧痕反查 20、exe 收集 16（三处不许再写死字面量）
+        assert_eq!(NAME_HIT_CAP, 20);
+        assert_eq!(SIDE_TRACE_CAP, 20);
+        assert_eq!(PROGRAM_EXE_CAP, 16);
+    }
+
+    /// 同名多候选降级：判定依据是「父目录不同」，不是「条数多」——
+    /// 同一目录下的多个子项不构成歧义。
+    #[test]
+    fn ambiguity_is_about_parents_not_counts() {
+        assert!(!name_is_ambiguous(&[]));
+        assert!(!name_is_ambiguous(&[r"C:\Program Files\Acme\a".to_string()]));
+        assert!(
+            !name_is_ambiguous(&[
+                r"C:\Program Files\Acme\a".to_string(),
+                r"C:\Program Files\Acme\b".to_string()
+            ]),
+            "同一父目录下的多条不构成归属歧义"
+        );
+        assert!(name_is_ambiguous(&[
+            r"C:\Users\x\AppData\Roaming\Acme".to_string(),
+            r"C:\Users\x\AppData\Local\Acme".to_string()
+        ]));
+    }
+
+    /// 运行进程祖先链判定：命中自身或任一祖先都算在用；大小写与尾随分隔符不许绕过。
+    #[test]
+    fn running_process_ancestry_blocks_candidates() {
+        let mut procs = HashSet::new();
+        procs.insert(r"c:\program files\acme\bin".to_lowercase());
+        assert!(under_running_process(Path::new(r"C:\Program Files\Acme"), &procs));
+        assert!(under_running_process(Path::new(r"C:\Program Files\Acme\bin"), &procs));
+        // 候选在运行进程目录**里面**：只查祖先就会漏掉这一半
+        assert!(
+            under_running_process(Path::new(r"C:\Program Files\Acme\bin\plugins"), &procs),
+            "候选位于正在运行的进程目录之内，必须视为在用"
+        );
+        assert!(!under_running_process(Path::new(r"D:\Data\Other"), &procs));
+        // 快照为空（取不到）时不该放行任何候选 —— 由调用方按 None 拒绝扫描
+        assert!(!under_running_process(Path::new(r"C:\Program Files\Acme"), &HashSet::new()));
+    }
+
+    /// 可弃子目录清单必须与 norm_name 的输出同形（小写、无首尾空白）——
+    /// 否则条目永远匹配不上，成了一条静默失效的白名单。
+    #[test]
+    fn disposable_subdir_names_are_normalized() {
+        for name in ORPHAN_DISPOSABLE_SUBDIRS {
+            assert_eq!(&norm_name(name), name, "清单里的 {name} 不是归一化形态，永远不会命中");
+        }
+        assert!(ORPHAN_SCAN_ROOTS.contains(&"LOCALAPPDATA"), "孤儿扫描必须覆盖用户级数据根");
     }
 
     /// A1 扫描侧硬闸：受保护的注册表目标**不得进候选列表**。
