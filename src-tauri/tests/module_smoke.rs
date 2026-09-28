@@ -312,6 +312,52 @@ fn orphan_channels_are_main_only() {
     );
 }
 
+/// M5 D1：卸载域注册表备份的列表/还原两条通道都是 MAIN 档。
+///
+/// 还原会经 `reg import` 写注册表，所以档位是它的第一道闸，子窗一律拒杀。
+/// 主窗正向特征刻意选两条**零副作用**路径：list 只读目录，restore 用越界文件名在
+/// 参数校验处就早退（进不到封条判定、更进不到 reg.exe）。list 的形状也钉住：
+/// 渲染层对 `data.backups` 直接 `.map`，塌成 null 会让备份弹窗整片崩。
+#[test]
+fn reg_backup_channels_are_main_only() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let list = invoke_text(&w, "uninstall_reg_backup_list", json!({}));
+        assert!(
+            list.contains("IPC 来源校验失败"),
+            "{label} 窗调卸载域备份列表必须被来源校验拒杀，回执 {list}"
+        );
+        let restore = invoke_text(
+            &w,
+            "uninstall_reg_backup_restore",
+            json!({ "file": "..\\..\\evil.reg" }),
+        );
+        assert!(
+            restore.contains("IPC 来源校验失败"),
+            "{label} 窗调卸载域备份还原必须被拒杀，回执 {restore}"
+        );
+    }
+
+    let w = main_window();
+    let list = invoke(&w, "uninstall_reg_backup_list", json!({}));
+    assert_eq!(list["success"], json!(true), "主窗列表应越过档位进入实现: {list}");
+    assert!(
+        list["data"]["backups"].is_array(),
+        "backups 必须是数组（渲染层直接 .map，null 会让弹窗整片崩）: {list}"
+    );
+
+    let restore = invoke(
+        &w,
+        "uninstall_reg_backup_restore",
+        json!({ "file": "..\\..\\evil.reg" }),
+    );
+    assert_eq!(restore["success"], json!(false), "越界文件名必须早退: {restore}");
+    assert!(
+        common::message_of(&restore).contains("备份文件名非法"),
+        "主窗应越过档位进入参数校验，回执 {restore}"
+    );
+}
+
 /// 真机孤儿扫描（`#[ignore]`）：先按**档案实际状态**决定断言哪条，两条路都要能钉红。
 /// - 档案空 / 没有任何 historical → 必须**拒绝扫描并给出可读原因**，不许回空集
 ///   （空集会被读成「这台机器没有孤儿」，那是把"不知道"伪装成"知道"）；

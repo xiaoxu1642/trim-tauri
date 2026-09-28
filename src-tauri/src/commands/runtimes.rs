@@ -134,7 +134,7 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// 流式 SHA-256（4MB 缓冲，与 JS sha256File 同口径）
-fn sha256_file(path: &Path) -> Result<String, String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 4 * 1024 * 1024];

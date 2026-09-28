@@ -13,7 +13,8 @@
 //      两侧各自独立实现同一套判定 —— 本文件**不调用** Rust，靠夹具钉口径（方案 §4.3 第三步）。
 //      任一侧口径漂移，夹具立刻判红；新增保护类别必须同时补夹具反例。
 //
-// 用法：node tools/check-residue-rule-contract.mjs
+// 用法：node tools/check-residue-rule-contract.mjs            （全套门禁）
+//       node tools/check-residue-rule-contract.mjs --preview x.json （A8 候选包干跑）
 'use strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -240,11 +241,44 @@ function validateResiduePackage(pkg) {
 
 // ==================== 断言执行 ====================
 
+const argv = process.argv.slice(2);
+const pvIdx = argv.indexOf('--preview');
+
 let fail = 0;
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
   if (!ok) fail++;
 };
+
+// ---- A8 干跑预览：只回答「这条规则装上后会不会被装载侧拒」 ----
+// 用法：node tools/check-residue-rule-contract.mjs --preview <候选json>
+// 只做 validateResiduePackage 一件事（注册表禁删面在它内部）：不读真实规则库、不验签、不落盘。
+// 不验签是有意的——私钥只在发布机，干跑阶段拿不到；而装载侧的真闸门就是同一个
+// validateResiduePackage（与 Rust 侧同名同口径），过了它就等于过了运行期装载。
+if (pvIdx >= 0) {
+  const target = argv[pvIdx + 1];
+  if (!target) {
+    console.log('✗ --preview 需要候选 JSON 路径');
+    process.exit(2);
+  }
+  let cand = null;
+  try {
+    cand = JSON.parse(fs.readFileSync(target, 'utf8'));
+  } catch (e) {
+    console.log(`✗ 候选文件读取或 JSON 解析失败: ${e.message}`);
+    process.exit(1);
+  }
+  const pkgErr = validateResiduePackage(cand);
+  if (pkgErr) {
+    console.log(`✗ 语义校验未通过: ${pkgErr}`);
+    process.exit(1);
+  }
+  const n = (Array.isArray(cand.rules) ? cand.rules : []).length;
+  console.log(`✓ 候选包通过装载侧同口径校验（${n} 条规则，含注册表禁删面）`);
+  console.log('干跑不验签、不落盘。合并进规则库后必须重签，否则验签断言与 Rust 装载都会判红:');
+  console.log('  node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/uninstall-residue-rules.json');
+  process.exit(0);
+}
 
 console.log('=== 卸载残留规则库契约门禁 ===\n');
 

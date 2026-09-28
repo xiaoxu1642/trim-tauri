@@ -93,6 +93,8 @@ const TAURI_ADDED = {
   'uninstall:update-residue-rules': 'A3/M3（2026-09-28）：残留规则库在线更新（主窗档，显式动作不做定时）',
   'uninstall:orphan-scan': 'C2/M4（2026-09-28）：孤儿应用数据扫描（上游无所有权历史这一层）',
   'uninstall:orphan-ignore': 'C2/M4（2026-09-28）：把某历史 owner 记入忽略清单（同上）',
+  'uninstall:reg-backup-list': 'D1/M5（2026-09-28）：卸载域注册表备份列表（此前备份只写不读）',
+  'uninstall:reg-backup-restore': 'D1/M5（2026-09-28）：单个备份 reg import 还原（主窗档 + 危险确认）',
 };
 
 function collect(set, re, text) {

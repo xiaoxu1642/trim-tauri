@@ -1762,11 +1762,13 @@
 
   async function renderRegBackupList(ctrl) {
     const body = ctrl.body;
-    let resp, respF;
+    let resp, respF, respU;
     try {
-      [resp, respF] = await Promise.all([
+      [resp, respF, respU] = await Promise.all([
         window.api.cleanup.regBackupList(),
-        window.api.cleanup.fileBackupList().catch(() => null)
+        window.api.cleanup.fileBackupList().catch(() => null),
+        // D1（M5）：卸载域注册表备份此前只写不读，删错了没有任何还原入口
+        window.api.uninstall.regBackupList().catch(() => null)
       ]);
     } catch (e) {
       if (document.body.contains(body)) body.innerHTML = `<div class="empty-state"><p>备份列表读取失败: ${escapeHtml(e.message)}</p></div>`;
@@ -1775,7 +1777,8 @@
     if (!document.body.contains(body)) return;
     const backups = (resp && resp.success && resp.data && resp.data.backups) || [];
     const manifests = (respF && respF.success && respF.data && respF.data.manifests) || [];
-    if (!backups.length && !manifests.length) {
+    const uninst = (respU && respU.success && respU.data && respU.data.backups) || [];
+    if (!backups.length && !manifests.length && !uninst.length) {
       body.innerHTML = '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。</p></div>';
       return;
     }
@@ -1789,7 +1792,45 @@
        <div class="detail-file-list">${manifests.map((m, i) =>
         `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(m.file)}">${fmtBackupTime(m.mtimeMs)} · ${m.count} 个文件 · ${formatSize(m.totalSize)}</span><button class="fileclean-preview-btn" data-file-backup-view="${i}" type="button" data-tip="查看本批次条目并逐个还原">查看</button></div>`
       ).join('')}</div>`;
-    body.innerHTML = regSection + fileSection;
+    // 卸载域备份：每行标出封条核对结果。seal 不是 ok 的行**不给还原按钮**——
+    // 内容与封条不符的备份 import 回注册表，等于把可能被改写过的内容当可信还原
+    const SEAL_TEXT = { ok: '封条相符', missing: '无封条（旧备份）', mismatch: '封条不符', corrupt: '封条损坏', unreadable: '备份不可读' };
+    const uninstSection = !uninst.length ? '' :
+      `<div class="finder-group-header"><span>卸载残留注册表备份 · ${uninst.length} 份</span></div>
+       <div class="detail-file-list">${uninst.map((b, i) => {
+         const canRestore = b.seal === 'ok' || b.seal === 'missing';
+         // 封条状态已经在行内文本里出现过，这里不重复它，只说明「为什么没有还原入口」
+         const restoreBtn = canRestore
+           ? `<button class="fileclean-preview-btn" data-uninst-restore="${i}" type="button">还原</button>`
+           : `<span class="finder-name-text" style="opacity:.6" data-tip="封条核对未通过（${escapeHtml(b.seal)}），不提供还原入口">不可还原</span>`;
+         return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)}</span>${restoreBtn}</div>`;
+       }).join('')}</div>`;
+    body.innerHTML = regSection + uninstSection + fileSection;
+
+    body.querySelectorAll('[data-uninst-restore]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const b = uninst[+btn.getAttribute('data-uninst-restore')];
+        if (!b) return;
+        const ok = await window.app?.confirmDanger?.(
+          '还原卸载残留的注册表备份',
+          `将把备份「${b.keyLeaf || b.file}」（${fmtBackupTime(b.mtimeMs)}，目标 ${b.target || '未知'}）通过 reg import 合并回注册表。只加回备份时存在的键/值，不会删除之后产生的新数据。`,
+          '确认还原',
+          '取消',
+          '还原会重新写入注册表内容。备份与封条同在本用户可写的目录里，封条只防半截写入与误改，不是防伪凭证；请确认这确实是要恢复的键。'
+        );
+        if (!ok) return;
+        try {
+          const r = await window.api.uninstall.regBackupRestore(b.file);
+          if (r && r.success) {
+            window.app?.toast('success', (r.data && r.data.message) || '备份已还原');
+          } else {
+            window.app?.toast('error', (r && r.message) || '还原失败');
+          }
+        } catch (e) {
+          window.app?.toast('error', '还原失败: ' + e.message);
+        }
+      });
+    });
 
     body.querySelectorAll('[data-reg-restore]').forEach((btn) => {
       btn.addEventListener('click', async () => {

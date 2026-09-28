@@ -2757,26 +2757,104 @@ fn detail(kind: &str, target: &str, status: &str, message: &str) -> Value {
     json!({ "kind": kind, "target": target, "status": status, "message": message })
 }
 
-/// 把待送删目标按「目录级重解析点校验」拆成（可送删, 被拒项→拒因）。
+/// 残留执行的**单一变更入口**（D3）：变更阶段拿到的就是已判定完的目标。
+enum ResidueOp {
+    RegKey {
+        target: String,
+        hive: windows::Win32::System::Registry::HKEY,
+        rest: String,
+    },
+    RegValue {
+        target: String,
+        key_part: String,
+        hive: windows::Win32::System::Registry::HKEY,
+        rest: String,
+        value_name: String,
+    },
+    Path { kind: String, target: OsString },
+}
+
+/// 单个目标的只读判定结果。`Abort` = 整批拒绝（受保护路径的既有语义，不降级成单项跳过）。
+enum OpVerdict {
+    Ready(ResidueOp),
+    Skip(String),
+    Abort(String),
+}
+
+/// 残留执行链上**所有只读闸门的唯一落点**（D3）。
 ///
-/// 只对 `kind == "folder"` 生效：单个 file / shortcut 即使自身是重解析点，删除也只删掉
-/// 链接本身，不会顺链接递归搬走目标内容；目录才会（OneDrive 占位文件因此不受这条闸影响）。
+/// 为什么要收：`uninstall_residue_execute` 原本三段各写各的判定（reg_key 查 hive 解析 +
+/// A1 硬否决 + 存在性；reg_value 查 `::` 形状；文件目录查保护路径 + 存在性 + C1 重解析），
+/// 「谁查了哪几道闸」只能靠通读三段来确认 —— 这正是漏闸的形态。收进一个函数后，
+/// 判定顺序 = 这一个函数的行序，变更代码里不再有 if 保护判断。
 ///
-/// 为什么单独成函数而不是内联在命令里：它落在 `uninstall_residue_execute` 的窗口化命令内，
-/// 不抽出来就没有任何单测能覆盖这条删除链（方案 §7 要求「不依赖真机」的回归网）。
-fn partition_reparse_blocked(items: Vec<(String, OsString)>) -> (Vec<(String, OsString)>, Vec<(OsString, String)>) {
-    let mut sendable = Vec::with_capacity(items.len());
-    let mut blocked: Vec<(OsString, String)> = Vec::new();
-    for (kind, target) in items {
-        if kind == "folder" {
-            if let Some(reason) = crate::engine::native::dir_delete_blocked(Path::new(&target)) {
-                blocked.push((target, reason));
-                continue;
+/// 方案 §5·D3 原文还有个 `mode="plan"`（干跑不落变更）。这里刻意**不做**成参数：
+/// 现在没有任何调用方会传 plan，加了就是死分支；"判定与变更分离"这个目的已经由本函数达成，
+/// UI 真需要预览时再显式加 mode，届时这条函数就是它的实现。
+fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
+    let skip = |m: &str| OpVerdict::Skip(m.to_string());
+    match kind {
+        "reg_key" => {
+            let Some((hive, rest)) = parse_reg_target(target) else {
+                return skip("注册表目标无法解析（只支持 HKCU/HKLM）");
+            };
+            // A1 执行侧硬闸（与扫描侧同一判定）：快照闸只证明「来自上次扫描」，
+            // 证明不了「这个目标不该删」—— 危险候选本来就是扫描器按规则产出的。
+            if let Some(reason) = protect::reg_target_block_reason(target) {
+                log::write_log("warn", &format!("uninstall_residue_execute 拒绝注册表目标: {reason}"));
+                // 状态只用既有的 skip：报告明细按 ok/fail/skip 三态渲染中文标签，
+                // 新增 status 会在前端漏出英文字面量（uninstall.js:487）
+                return OpVerdict::Skip(format!("已拒绝删除：{reason}"));
             }
+            if !crate::engine::native::reg_key_exists(hive, &rest) {
+                return skip("注册表项已不存在");
+            }
+            OpVerdict::Ready(ResidueOp::RegKey { target: target.to_string(), hive, rest })
         }
-        sendable.push((kind, target));
+        // 注册表值：删单值前先整父键备份（U-2 侧痕面 MuiCache/防火墙/BAM）。
+        // 值已不存在的幂等语义留给 `reg_restore_delete`（对齐 B11），这里不重复判存在性。
+        "reg_value" => {
+            let Some((key_part, value_name)) = target.rsplit_once("::") else {
+                return skip("注册表值目标格式错误（缺 :: 值名分隔）");
+            };
+            if value_name.trim().is_empty() {
+                return skip("注册表值名为空");
+            }
+            let Some((hive, rest)) = parse_reg_target(key_part) else {
+                return skip("注册表目标无法解析（只支持 HKCU/HKLM）");
+            };
+            OpVerdict::Ready(ResidueOp::RegValue {
+                target: target.to_string(),
+                key_part: key_part.to_string(),
+                hive,
+                rest,
+                value_name: value_name.to_string(),
+            })
+        }
+        "folder" | "file" | "shortcut" => {
+            let shown = target.to_string();
+            if protect::is_path_protected(&shown) {
+                log::write_log("warn", &format!("uninstall_residue_execute 拒绝: 受保护路径 {shown}"));
+                return OpVerdict::Abort(format!("包含受保护的系统路径，已拒绝：{shown}"));
+            }
+            if std::fs::symlink_metadata(target).is_err() {
+                // 原本这里是被静默滤掉（报告里连一行都没有），现按 skip 记因：
+                // 「没删」与「不需要删」必须在批次报告里可区分
+                return OpVerdict::Skip("目标已不存在（未执行删除）".to_string());
+            }
+            // C1（方案 §5·C1）：目录送删前过「自身→盘符根」逐层重解析点校验，与维护任务
+            // (`native::maint_run`)、diskbench 同口径。上级被换成 junction 时回收站会顺着链接
+            // 把链接目标整棵搬走。file / shortcut 不查：单文件删除只删链接本身，不递归。
+            if kind == "folder" {
+                if let Some(reason) = crate::engine::native::dir_delete_blocked(Path::new(target)) {
+                    log::write_log("warn", &format!("uninstall_residue_execute 跳过目录 {shown}: {reason}"));
+                    return OpVerdict::Skip(format!("已拒绝删除：{reason}"));
+                }
+            }
+            OpVerdict::Ready(ResidueOp::Path { kind: kind.to_string(), target: OsString::from(target) })
+        }
+        other => OpVerdict::Skip(format!("未知残留类型 {other}，未执行")),
     }
-    (sendable, blocked)
 }
 
 /// 卸载域·残留执行（方案 M4）。
@@ -2830,29 +2908,21 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     let app_id = app_id.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
         let mut details: Vec<Value> = Vec::new();
-        // 注册表项：先备份后删（与 cleanup 同一 export 通道，fail-closed）
+        // D3：只读闸门先一次跑完（判定顺序集中在 classify_residue_op），下面的变更代码里
+        // 不再出现任何保护判断 —— 「谁查了哪几道闸」从"通读三段"变成"看一个函数的行序"。
+        let mut ops: Vec<ResidueOp> = Vec::new();
         for (kind, target) in &wanted {
-            if kind != "reg_key" {
-                continue;
+            match classify_residue_op(kind, target) {
+                OpVerdict::Ready(op) => ops.push(op),
+                OpVerdict::Skip(msg) => details.push(detail(kind, target, "skip", &msg)),
+                OpVerdict::Abort(msg) => return Err(msg),
             }
-            let Some((hive, rest)) = parse_reg_target(target) else {
-                details.push(detail(kind, target, "skip", "注册表目标无法解析（只支持 HKCU/HKLM）"));
-                continue;
-            };
-            // A1 执行侧硬闸（与扫描侧同一判定）：快照闸只证明「来自上次扫描」，
-            // 证明不了「这个目标不该删」—— 危险候选本来就是扫描器按规则产出的。
-            if let Some(reason) = protect::reg_target_block_reason(target) {
-                log::write_log("warn", &format!("uninstall_residue_execute 拒绝注册表目标: {reason}"));
-                // 状态只用既有的 skip：报告明细按 ok/fail/skip 三态渲染中文标签，
-                // 新增 status 会在前端漏出英文字面量（uninstall.js:487）
-                details.push(detail(kind, target, "skip", &format!("已拒绝删除：{reason}")));
-                continue;
-            }
-            if !crate::engine::native::reg_key_exists(hive, &rest) {
-                details.push(detail(kind, target, "skip", "注册表项已不存在"));
-                continue;
-            }
-            let backup_dir = crate::engine::paths::app_data_dir().join("uninstall-reg-backup");
+        }
+        // 注册表项：先备份后删（与 cleanup 同一 export 通道，fail-closed）
+        for op in &ops {
+            let ResidueOp::RegKey { target, hive, rest } = op else { continue };
+            let (kind, target, hive, rest) = ("reg_key", target.as_str(), *hive, rest.as_str());
+            let backup_dir = uninstall_reg_backup_dir();
             let _ = std::fs::create_dir_all(&backup_dir);
             let file = backup_dir.join(format!("{}_{}.reg", crate::engine::now_ms(), rest.rsplit('\\').next().unwrap_or("key")));
             let Some(file_str) = file.to_str() else {
@@ -2869,7 +2939,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
                 continue;
             }
-            if crate::engine::native::reg_key_remove(hive, &rest, true) {
+            // D2：备份写成后落封条（此后列表/还原才对得上这份文件）
+            write_reg_backup_seal(&file, target);
+            if crate::engine::native::reg_key_remove(hive, rest, true) {
                 details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
             } else {
                 details.push(detail(kind, target, "fail", "注册表删除失败"));
@@ -2879,23 +2951,11 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
         // 注册表值：先备份整个父键再删单值（U-2 侧痕面：MuiCache/防火墙规则/BAM）。
         // 目标格式 `HKCU\<键路径>::<值名>`；删值复用 reg_restore_delete
         // （值已不存在 = 幂等成功，对齐 B11 语义）。
-        for (kind, target) in &wanted {
-            if kind != "reg_value" {
-                continue;
-            }
-            let Some((key_part, value_name)) = target.rsplit_once("::") else {
-                details.push(detail(kind, target, "skip", "注册表值目标格式错误（缺 :: 值名分隔）"));
-                continue;
-            };
-            if value_name.trim().is_empty() {
-                details.push(detail(kind, target, "skip", "注册表值名为空"));
-                continue;
-            }
-            let Some((hive, rest)) = parse_reg_target(key_part) else {
-                details.push(detail(kind, target, "skip", "注册表目标无法解析（只支持 HKCU/HKLM）"));
-                continue;
-            };
-            let backup_dir = crate::engine::paths::app_data_dir().join("uninstall-reg-backup");
+        for op in &ops {
+            let ResidueOp::RegValue { target, key_part, hive, rest, value_name } = op else { continue };
+            let (kind, target, hive, rest, value_name) =
+                ("reg_value", target.as_str(), *hive, rest.as_str(), value_name.as_str());
+            let backup_dir = uninstall_reg_backup_dir();
             let _ = std::fs::create_dir_all(&backup_dir);
             let leaf = rest.rsplit('\\').next().unwrap_or("key");
             let file = backup_dir.join(format!("{}_{}.reg", crate::engine::now_ms(), leaf));
@@ -2912,84 +2972,74 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
                 continue;
             }
-            if crate::engine::native::reg_restore_delete(hive, &rest, value_name) {
+            // D2：封条记的是**被备份的父键**（删单值前整父键导出，还原粒度也是父键）
+            write_reg_backup_seal(&file, key_part);
+            if crate::engine::native::reg_restore_delete(hive, rest, value_name) {
                 details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
             } else {
                 details.push(detail(kind, target, "fail", "注册表值删除失败"));
             }
         }
 
-        // 文件/目录/快捷方式：保护判定 + 回收站（trim_finder 三端同源删除，含 protect 注入）
-        let paths: Vec<(String, OsString)> = wanted
+        // 文件/目录/快捷方式：回收站批量（trim_finder 三端同源删除，含 protect 注入）
+        let paths: Vec<(String, OsString)> = ops
             .iter()
-            .filter(|(k, _)| matches!(k.as_str(), "folder" | "file" | "shortcut"))
-            .map(|(k, t)| (k.clone(), OsString::from(t)))
+            .filter_map(|o| match o {
+                ResidueOp::Path { kind, target } => Some((kind.clone(), target.clone())),
+                _ => None,
+            })
             .collect();
         if !paths.is_empty() {
             if let Some((_, target)) = paths
                 .iter()
                 .find(|(_, t)| protect::is_path_protected(&t.to_string_lossy()))
             {
+                // 兜底重复检查：分类阶段已 Abort 过，这里再挡一次是为了让"整批拒绝"
+                // 不依赖 classify 的实现细节（受保护路径出现即整批不动，语义不变）
                 log::write_log("warn", &format!("uninstall_residue_execute 拒绝: 受保护路径 {}", target.to_string_lossy()));
                 return Err(format!("包含受保护的系统路径，已拒绝：{}", target.to_string_lossy()));
             }
-            // 预检：目标存在才送删
-            let existing: Vec<(String, OsString)> = paths
-                .into_iter()
-                .filter(|(_, t)| std::fs::symlink_metadata(t).is_ok())
-                .collect();
-            // C1（方案 §5·C1）：目录送删前过「自身→盘符根」逐层重解析点校验，与维护任务
-            // (`native::maint_run`)、diskbench 同口径。上级被换成 junction 时回收站会顺着链接
-            // 把链接目标整棵搬走，「清残留」变成删数据。逐项判定、拒因写明细行，不整批失败。
-            let (sendable, blocked) = partition_reparse_blocked(existing);
-            for (target, reason) in blocked {
-                let shown = target.to_string_lossy().to_string();
-                log::write_log("warn", &format!("uninstall_residue_execute 跳过目录 {shown}: {reason}"));
-                details.push(detail("folder", &shown, "skip", &format!("已拒绝删除：{reason}")));
-            }
-            if !sendable.is_empty() {
-                let protect_json = protect::protected_roots_json();
-                // 删除结果行解析 Sink：只收 @@ITEM@@ 行里的 delresult（对齐 finder 的 FinderSink 口径）
-                struct RowSink(Mutex<Vec<Value>>);
-                impl trim_finder::scan::Sink for RowSink {
-                    fn item(&self, _p: &Path, line: &str) {
-                        let Some(body) = line.strip_prefix("@@ITEM@@") else { return };
-                        let Ok(v) = trim_finder::cleanup_scan::parse_json(body) else { return };
-                        if v.get("type").and_then(|t| t.as_str()) != Some("delresult") {
-                            return;
-                        }
-                        let jnum = |j: Option<&trim_finder::cleanup_scan::Json>| -> u64 {
-                            match j {
-                                Some(trim_finder::cleanup_scan::Json::Num(n)) => *n as u64,
-                                _ => 0,
-                            }
-                        };
-                        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(json!({
-                            "kind": match v.get("kind").and_then(|k| k.as_str()) {
-                                Some("dir") => "dir",
-                                _ => "file",
-                            },
-                            "path": v.get("path").and_then(|p| p.as_str()).unwrap_or(""),
-                            "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
-                            "freed": jnum(v.get("freed")),
-                        }));
+            let protect_json = protect::protected_roots_json();
+            // 删除结果行解析 Sink：只收 @@ITEM@@ 行里的 delresult（对齐 finder 的 FinderSink 口径）
+            struct RowSink(Mutex<Vec<Value>>);
+            impl trim_finder::scan::Sink for RowSink {
+                fn item(&self, _p: &Path, line: &str) {
+                    let Some(body) = line.strip_prefix("@@ITEM@@") else { return };
+                    let Ok(v) = trim_finder::cleanup_scan::parse_json(body) else { return };
+                    if v.get("type").and_then(|t| t.as_str()) != Some("delresult") {
+                        return;
                     }
-                    fn progress(&self, _n: u64) {}
-                    fn scanned(&self, _n: u64) {}
-                    fn warn(&self, _m: &str) {}
-                    fn truncated(&self) {}
+                    let jnum = |j: Option<&trim_finder::cleanup_scan::Json>| -> u64 {
+                        match j {
+                            Some(trim_finder::cleanup_scan::Json::Num(n)) => *n as u64,
+                            _ => 0,
+                        }
+                    };
+                    self.0.lock().unwrap_or_else(|e| e.into_inner()).push(json!({
+                        "kind": match v.get("kind").and_then(|k| k.as_str()) {
+                            Some("dir") => "dir",
+                            _ => "file",
+                        },
+                        "path": v.get("path").and_then(|p| p.as_str()).unwrap_or(""),
+                        "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
+                        "freed": jnum(v.get("freed")),
+                    }));
                 }
-                let sink = RowSink(Mutex::new(Vec::new()));
-                let _ = trim_finder::scan::delete(&sendable, Some(protect_json.as_str()), &sink);
-                for row in sink.0.into_inner().unwrap_or_default() {
-                    let ok = row["status"] == "ok";
-                    details.push(detail(
-                        row["kind"].as_str().unwrap_or("file"),
-                        row["path"].as_str().unwrap_or(""),
-                        if ok { "ok" } else { "fail" },
-                        if ok { "已移入回收站" } else { row["path"].as_str().map(|_| "删除失败（可能被占用）").unwrap_or("删除失败") },
-                    ));
-                }
+                fn progress(&self, _n: u64) {}
+                fn scanned(&self, _n: u64) {}
+                fn warn(&self, _m: &str) {}
+                fn truncated(&self) {}
+            }
+            let sink = RowSink(Mutex::new(Vec::new()));
+            let _ = trim_finder::scan::delete(&paths, Some(protect_json.as_str()), &sink);
+            for row in sink.0.into_inner().unwrap_or_default() {
+                let ok = row["status"] == "ok";
+                details.push(detail(
+                    row["kind"].as_str().unwrap_or("file"),
+                    row["path"].as_str().unwrap_or(""),
+                    if ok { "ok" } else { "fail" },
+                    if ok { "已移入回收站" } else { row["path"].as_str().map(|_| "删除失败（可能被占用）").unwrap_or("删除失败") },
+                ));
             }
         }
         Ok(details)
@@ -3019,6 +3069,235 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
         }
         Ok(Err(e)) => json!({ "success": false, "message": e }),
         Err(e) => json!({ "success": false, "message": format!("残留清理异常: {e}") }),
+    }
+}
+
+// ==================== uninstall:reg-backup-*（D1 还原入口 + D2 封条） ====================
+//
+// 卸载残留的注册表删除一直是「先 export 再删」，但备份**只写不读**：删错了没有任何还原
+// 入口，兜底承诺停在半路（方案 §5·D1）。这一节补列表与单项还原，并给每份备份加封条。
+//
+// 封条能做什么、不能做什么必须写清（Q3 拍板 + 方案 D2 的边界）：备份与封条同在
+// **用户可写**的数据目录里，同一个用户（或以该用户身份跑的任意进程）可以同时改写两者，
+// 所以封条只提升两类防护——半截写入/手工误改的**误污染检测**，和低权限单点篡改的**可发现性**。
+// 真正的防伪需要 HKLM 侧常驻提权面，那是另一次拍板，不许在这里当成已经具备的能力。
+
+/// 卸载域注册表备份目录：两处 export 与列表/还原共用同一入口，不再各拼一遍路径
+fn uninstall_reg_backup_dir() -> PathBuf {
+    crate::engine::paths::app_data_dir().join("uninstall-reg-backup")
+}
+
+/// 备份文件名准入：只认生成器产出的形状（`<毫秒>_<键末段>.reg`），
+/// 路径穿越（`..` / `\` / `/`）与非 .reg 一律拒绝——还原是**写注册表**的通道
+fn valid_uninstall_backup_name(name: &str) -> bool {
+    let n = name.trim();
+    n.len() > 4
+        && n.len() <= 120
+        && n.ends_with(".reg")
+        && n.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// `a_1.reg` → `a_1.reg.meta.json`（同目录放封条，便于人工核对；列表按 .reg 收尾过滤，不会自纳）
+fn reg_seal_path_for(file: &Path) -> PathBuf {
+    let mut s = file.as_os_str().to_os_string();
+    s.push(".meta.json");
+    PathBuf::from(s)
+}
+
+/// 写封条：目标键 + SHA-256 + 时间。失败只在日志留痕，**不阻断删除**——
+/// 封条是备份的增强，不是删除的前提（备份本身已写成，这时回滚删除反而更糟）。
+fn write_reg_backup_seal(file: &Path, target: &str) {
+    let sum = match crate::commands::runtimes::sha256_file(file) {
+        Ok(s) => s,
+        Err(e) => {
+            log::write_log("warn", &format!("注册表备份封条计算失败（不阻断删除）: {e}"));
+            return;
+        }
+    };
+    let payload = json!({
+        "file": file.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+        "target": target,
+        "sha256": sum,
+        "createdAt": crate::engine::now_ms(),
+    });
+    if let Err(e) = crate::security::atomic_write_json(&reg_seal_path_for(file), &payload) {
+        log::write_log("warn", &format!("注册表备份封条写入失败（不阻断删除）: {e}"));
+    }
+}
+
+/// 封条核对：ok / missing（旧备份没封条）/ mismatch（内容与封条不符）/ corrupt / unreadable
+fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
+    let meta_path = reg_seal_path_for(file);
+    let Ok(text) = std::fs::read_to_string(&meta_path) else {
+        return ("missing", Value::Null);
+    };
+    let Ok(meta) = serde_json::from_str::<Value>(&text) else {
+        return ("corrupt", Value::Null);
+    };
+    let want = meta.get("sha256").and_then(Value::as_str).unwrap_or("");
+    if want.is_empty() {
+        return ("corrupt", meta);
+    }
+    match crate::commands::runtimes::sha256_file(file) {
+        Ok(got) if got.eq_ignore_ascii_case(want) => ("ok", meta),
+        Ok(_) => ("mismatch", meta),
+        Err(_) => ("unreadable", meta),
+    }
+}
+
+/// 严格 `.reg` 解析：要求版本头 + 至少一个顶层键段，返回去重后的键列表。
+/// `None` = 形状不对（半截写入、被截断、或根本不是 .reg），这类文件**不许** import。
+/// 刻意不做宽松兼容：还原前必须知道"这份文件会往哪些键里写"，否则等于把未知来源的内容
+/// 灌进注册表（v2 时代还原链的教训就是"校验自己解析出来的东西"）。
+fn parse_reg_backup(file: &Path) -> Option<Vec<String>> {
+    parse_reg_backup_text(&std::fs::read_to_string(file).ok()?)
+}
+
+/// 同上，输入是文本 —— 拆成纯函数是为了单测能覆盖"半截 .reg / 缺版本头 / 无键段"这三类
+/// 形状，不必往数据目录造文件。
+fn parse_reg_backup_text(text: &str) -> Option<Vec<String>> {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())?
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string();
+    if !first.eq_ignore_ascii_case("Windows Registry Editor Version 5.00") {
+        return None;
+    }
+    let mut keys: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix('[') else { continue };
+        let Some(inner) = rest.strip_suffix(']') else { continue };
+        let k = inner.trim().trim_matches('"').to_string();
+        if k.is_empty() {
+            continue;
+        }
+        if !keys.iter().any(|x| x.eq_ignore_ascii_case(&k)) {
+            keys.push(k);
+        }
+    }
+    (!keys.is_empty()).then_some(keys)
+}
+
+/// uninstall:reg-backup-list — 卸载域注册表备份列表（只读；≤50 条按 mtime 倒序）
+#[tauri::command]
+pub fn uninstall_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Ok(rd) = std::fs::read_dir(uninstall_reg_backup_dir()) else {
+        return json!({ "success": true, "data": { "backups": [] } });
+    };
+    let mut items: Vec<Value> = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        if !valid_uninstall_backup_name(&name) || !p.is_file() {
+            continue;
+        }
+        let Ok(meta) = ent.metadata() else { continue };
+        let (seal, seal_meta) = reg_backup_seal_state(&p);
+        // 文件名形如 `{毫秒}_{键末段}.reg`：时间戳直接取首段，取不到就以 mtime 为准
+        let stamp = name.split('_').next().unwrap_or("").parse::<i64>().unwrap_or(0);
+        items.push(json!({
+            "file": name,
+            "stampMs": stamp,
+            "keyLeaf": name.trim_end_matches(".reg").split_once('_').map(|(_, r)| r.to_string()).unwrap_or_default(),
+            "mtimeMs": meta.modified().ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            "sizeBytes": meta.len(),
+            "seal": seal,
+            "target": seal_meta.get("target").and_then(Value::as_str).unwrap_or(""),
+        }));
+        if items.len() >= 50 {
+            break;
+        }
+    }
+    items.sort_by(|a, b| b["mtimeMs"].as_i64().cmp(&a["mtimeMs"].as_i64()));
+    json!({ "success": true, "data": { "backups": items } })
+}
+
+/// uninstall:reg-backup-restore — 把单个备份 import 回注册表（主窗专属）。
+/// import 是「合并加回」不是「回滚快照」：只还原备份里存在的键/值，不删除此后产生的新数据。
+/// 四道前置闸：文件名白名单 → 严格解析目标键 → 封条核对 → 目标含 HKLM 时必须已提权。
+#[tauri::command]
+pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    file: String,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let name = file.trim().to_string();
+    if !valid_uninstall_backup_name(&name) {
+        return json!({ "success": false, "message": "备份文件名非法" });
+    }
+    let path = uninstall_reg_backup_dir().join(&name);
+    if !path.is_file() {
+        return json!({ "success": false, "message": "备份文件不存在" });
+    }
+    let Some(keys) = parse_reg_backup(&path) else {
+        return json!({
+            "success": false,
+            "message": "备份文件不是合法的 .reg（缺版本头或没有任何键段），已拒绝还原"
+        });
+    };
+    // 解析出来的目标键必须仍在允许删除的面上：一份被手工改成
+    // `[HKEY_LOCAL_MACHINE\SOFTWARE]` 的 .reg 不该因为"是备份文件"就被 import
+    for k in &keys {
+        if let Some(reason) = protect::reg_target_block_reason(k) {
+            log::write_log("warn", &format!("备份 {name} 含受保护目标，已拒绝还原: {reason}"));
+            return json!({ "success": false, "message": format!("备份内含受保护的注册表容器，已拒绝还原：{reason}") });
+        }
+    }
+    let (seal, _) = reg_backup_seal_state(&path);
+    if matches!(seal, "mismatch" | "corrupt" | "unreadable") {
+        log::write_log("warn", &format!("备份 {name} 封条核对未通过（{seal}），已拒绝还原"));
+        return json!({
+            "success": false,
+            "message": format!("备份内容与封条不符或不可读（{seal}），已拒绝还原——请改用导出时间的更早一份，或重新安装该程序")
+        });
+    }
+    let needs_admin = keys
+        .iter()
+        .any(|k| k.to_uppercase().starts_with("HKEY_LOCAL_MACHINE") || k.to_uppercase().starts_with("HKLM"));
+    if needs_admin && !crate::engine::sysinfo::is_admin() {
+        return json!({
+            "success": false,
+            "message": "该备份指向 HKLM 下的键，需要以管理员身份运行后再还原（HKCU 下的备份不需要）"
+        });
+    }
+    log::flush_sync(); // 写注册表前刷盘
+    let Some(path_str) = path.to_str() else {
+        return json!({ "success": false, "message": "备份路径无法表示为文本" });
+    };
+    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
+        .args(["import", path_str])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            log::write_log("info", &format!("卸载域注册表备份已还原: {name}（{} 个键）", keys.len()));
+            json!({ "success": true, "data": {
+                "restored": true, "keys": keys, "sealWasRecorded": seal == "ok",
+                "message": "已按备份合并回注册表（只加回备份里存在的键/值）"
+            }})
+        }
+        Ok(o) => {
+            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            log::write_log("error", &format!("卸载域备份还原失败: {name} {detail}"));
+            json!({ "success": false, "message": if detail.is_empty() { "reg import 失败".to_string() } else { format!("reg import 失败: {detail}") } })
+        }
+        Err(e) => {
+            log::write_log("error", &format!("卸载域备份还原调用失败: {name} {e}"));
+            json!({ "success": false, "message": format!("reg import 调用失败: {e}") })
+        }
     }
 }
 
@@ -3527,31 +3806,133 @@ mod residue_trace_tests {
         );
     }
 
-    /// C1（不依赖真机）：残留目录送删前的重解析闸。
-    /// 用「不存在」触发 fail-closed 分支，用「真实系统目录整条链」证明没有把功能废掉。
+    /// D3 + C1：残留执行的单一判定入口（不依赖真机）。判定收进 classify_residue_op 之后，
+    /// 一个函数就能把六道只读闸全测到 —— 取代原先只覆盖目录重解析那一段的测试。
+    /// D1/D2：备份文件名白名单与封条命名。还原是**写注册表**的通道，
+    /// 文件名是唯一决定"读哪个文件去 import"的输入，必须挡住穿越与非 .reg。
     #[test]
-    fn residue_folder_reparse_gate_is_fail_closed() {
+    fn reg_backup_name_and_seal_paths_are_narrowed() {
+        assert!(valid_uninstall_backup_name("1790561031234_ESET.reg"));
+        assert!(valid_uninstall_backup_name("1790561031234_acme_RASAPI32.reg"));
+        for bad in [
+            "",
+            "x.txt",
+            "../1_x.reg",
+            r"..\..\windows.reg",
+            "a/b.reg",
+            "a reg.reg",
+            "1_x.reg.meta.json", // 封条自身不得被当成备份列出/还原
+            &format!("{}.reg", "s".repeat(200)),
+        ] {
+            assert!(!valid_uninstall_backup_name(bad), "非法文件名被放行: {bad}");
+        }
+        // 封条同目录、后缀固定：人工核对时一眼能找到，列表按 .reg 收尾天然排除它
+        let p = std::path::PathBuf::from(r"C:\x\1_a.reg");
+        assert_eq!(reg_seal_path_for(&p), std::path::PathBuf::from(r"C:\x\1_a.reg.meta.json"));
+    }
+
+    /// D2：严格 `.reg` 解析。还原前必须知道"这份文件会往哪些键里写"，
+    /// 所以宁可拒也不能宽松 —— 半截写入的备份尤其要拦。
+    #[test]
+    fn reg_backup_parser_requires_header_and_keys() {
+        let ok = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET]\r\n\"a\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET\\b]\r\n";
+        let keys = parse_reg_backup_text(ok).expect("合法 .reg 必须解析通过");
+        assert_eq!(keys.len(), 2, "键段去重后应有两条: {keys:?}");
+        // BOM 与前后空白是 reg.exe export 的实际形态，不能被当成非法
+        assert!(parse_reg_backup_text(&format!("\u{feff} {ok}")).is_some());
+        for bad in [
+            "",
+            "Windows Registry Editor Version 5.00\r\n",              // 有头无键
+            "[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET]\r\n\"a\"=dword:1", // 缺版本头
+            "Windows Registry Editor Version 5.00\r\n[HKEY_",        // 半截写入
+            "Windows Registry Editor Version 5.00\r\n[]\r\n",         // 空键名
+        ] {
+            assert!(parse_reg_backup_text(bad).is_none(), "这类 .reg 不该通过解析: {bad:?}");
+        }
+    }
+
+    /// D2 封条状态机：列表按状态决定给不给还原入口、还原按状态硬拒，所以这四态必须可区分。
+    /// `unreadable` 要的是「文本读得动但摘要算不出」的窗口，单测造不出来，如实留作未验证。
+    #[test]
+    fn reg_backup_seal_states_are_distinguishable() {
+        let dir = std::env::temp_dir().join(format!("trim-seal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("临时目录应可建");
+        let bak = dir.join("1790561031234_Acme.reg");
+        std::fs::write(
+            &bak,
+            b"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Acme]\r\n",
+        )
+        .expect("备份应可写");
+        // 旧备份没有封条：仍可还原，但界面不许显示成"相符"
+        assert_eq!(reg_backup_seal_state(&bak).0, "missing");
+        write_reg_backup_seal(&bak, "HKCU\\Software\\Acme");
+        let (state, meta) = reg_backup_seal_state(&bak);
+        assert_eq!(state, "ok");
+        assert_eq!(
+            meta.get("target").and_then(Value::as_str),
+            Some("HKCU\\Software\\Acme"),
+            "列表行的目标列取封条里的 target，丢了就没法核对是哪一键"
+        );
+        // 内容被改（半截写入 / 手工编辑）→ mismatch，还原链要据此硬拒
+        std::fs::write(
+            &bak,
+            b"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE]\r\n",
+        )
+        .expect("备份应可重写");
+        assert_eq!(reg_backup_seal_state(&bak).0, "mismatch");
+        // 封条不是 JSON → corrupt
+        std::fs::write(reg_seal_path_for(&bak), b"not json").expect("封条应可写");
+        assert_eq!(reg_backup_seal_state(&bak).0, "corrupt");
+        // 封条是 JSON 却缺 sha256：等同于没核对过，不许降级成 missing 放行
+        std::fs::write(reg_seal_path_for(&bak), br#"{"target":"x"}"#).expect("封条应可写");
+        assert_eq!(reg_backup_seal_state(&bak).0, "corrupt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn classify_residue_op_gates_run_before_any_mutation() {
+        let skip_msg = |kind: &str, target: &str| -> Option<String> {
+            match classify_residue_op(kind, target) {
+                OpVerdict::Skip(m) => Some(m),
+                OpVerdict::Ready(_) => panic!("{kind} 不该通过判定: {target}"),
+                OpVerdict::Abort(m) => panic!("{kind} 不该整批拒绝: {m}"),
+            }
+        };
         let ghost = std::env::temp_dir().join("trim-no-such-dir-9f3a\\DataStore");
-        let ghost_os = ghost.as_os_str().to_os_string();
-        let (sendable, blocked) =
-            partition_reparse_blocked(vec![("folder".to_string(), ghost_os.clone())]);
-        assert!(sendable.is_empty(), "读不到属性的目录被放行: {sendable:?}");
-        assert_eq!(blocked.len(), 1, "不存在目录必须按拒绝处理（查不到≠安全）");
+        let ghost_s = ghost.to_string_lossy().to_string();
 
-        // 真实系统目录（自身到盘符根整条链都非 reparse）必须放行
+        // ① 不存在的目录/文件：Skip 且给原因（原先被静默滤掉，批次报告里连一行都没有）
+        assert!(skip_msg("folder", &ghost_s).unwrap_or_default().contains("不存在"));
+        assert!(skip_msg("file", &ghost_s).unwrap_or_default().contains("不存在"));
+        // ② 受保护路径：整批拒绝，不降级成单项跳过。用 %WINDIR% 而不是应用数据目录——
+        // 后者只在 `configure_from_app()` 跑过之后才进 subtree 清单，单测环境里没有那一步
+        let win = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
+        match classify_residue_op("folder", &win) {
+            OpVerdict::Abort(m) => assert!(m.contains("受保护"), "实测: {m}"),
+            _ => panic!("系统根目录必须触发整批拒绝"),
+        }
+        // ③ A1 硬否决：受保护注册表容器 Skip 且带原因
+        let m = skip_msg("reg_key", "HKLM\\SOFTWARE").unwrap_or_default();
+        assert!(m.contains("已拒绝删除"), "实测: {m}");
+        // ④ 合法形状但不存在的注册表键
+        assert!(skip_msg(
+            "reg_key",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TrimNoSuch-9f3a"
+        )
+        .unwrap_or_default()
+        .contains("已不存在"));
+        // ⑤ reg_value 形状闸：缺 :: 与值名为空都要出局
+        assert!(skip_msg("reg_value", r"HKCU\Software\Acme").unwrap_or_default().contains("::"));
+        assert!(skip_msg("reg_value", r"HKCU\Software\Acme::").unwrap_or_default().contains("为空"));
+        // ⑥ 未知 kind 不静默放行
+        assert!(skip_msg("whatever", r"C:\x").unwrap_or_default().contains("未知残留类型"));
+        // ⑦ 真实系统目录（整条链非 reparse、不属保护面）应进入变更清单
         let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
-        let sys32 = PathBuf::from(format!("{}\\Windows\\System32", drive.trim_end_matches('\\')));
-        let (sendable, blocked) =
-            partition_reparse_blocked(vec![("folder".to_string(), sys32.as_os_str().to_os_string())]);
-        assert_eq!(blocked.len(), 0, "真实系统目录被误拦: {sys32:?}");
-        assert_eq!(sendable.len(), 1, "真实系统目录应可送删");
-
-        // file / shortcut 不受这条目录闸影响（单文件删除不会顺链接递归）
-        let (sendable, blocked) = partition_reparse_blocked(vec![
-            ("file".to_string(), ghost_os.clone()),
-            ("shortcut".to_string(), ghost_os),
-        ]);
-        assert!(blocked.is_empty() && sendable.len() == 2, "目录闸误伤了 file/shortcut");
+        let sys32 = format!("{}\\Windows\\System32", drive.trim_end_matches('\\'));
+        assert!(
+            matches!(classify_residue_op("folder", &sys32), OpVerdict::Ready(_)),
+            "真实系统目录被误拦: {sys32}"
+        );
     }
 
     /// A3 更新链的校验序（尺寸 → 验签 → JSON → **语义** → 版本）。
