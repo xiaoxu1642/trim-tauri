@@ -19,72 +19,13 @@
 //! （审查 M1~M3 后补：子窗 label 的**来源校验档位**已可 mock 覆盖，见文件末尾
 //!  「子窗口来源校验档位」一组；仍不覆盖的是真实建窗与页面加载。）
 
-use serde_json::{json, Value};
-use tauri::ipc::{CallbackFn, InvokeBody};
-use tauri::test::{
-    get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY,
+mod common;
+
+use common::{
+    assert_guard_passed, invoke, invoke_text, main_window, message_of, sub_windows,
+    window_with_label,
 };
-use tauri::webview::InvokeRequest;
-use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-
-/// 建一个独立的测试 App + 主窗口（label = `main`）。
-///
-/// 每条用例各自建 app/窗口：快照类命令（finder/memory）按**窗口 label 分槽**，
-/// 独立 app 可避免用例间状态串台；label 用 `main` 与生产一致（`guard` 只放行已知窗口）。
-fn main_window() -> WebviewWindow<MockRuntime> {
-    let app = trim_tauri_lib::build_app(mock_builder())
-        .build(mock_context(noop_assets()))
-        .expect("测试 App 构建失败");
-    WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
-        .build()
-        .expect("测试主窗口创建失败")
-}
-
-/// 经真实 IPC 调用链发一条命令并取回返回体。
-///
-/// - `url` 固定 `http://tauri.localhost`：Windows 下 mock runtime 的本地来源
-///   （`is_local_url` 据此判 Origin::Local，ACL 不拦自定义命令）；
-/// - `invoke_key` 用 `tauri::test::INVOKE_KEY`：与 `mock_builder` 注入的钥匙一致；
-/// - 参数名按既有约定用 camelCase（tauri 宏默认 `rename_all = "camelCase"`）。
-fn ipc_request(cmd: &str, args: Value) -> InvokeRequest {
-    InvokeRequest {
-        cmd: cmd.to_string(),
-        callback: CallbackFn(0),
-        error: CallbackFn(1),
-        url: "http://tauri.localhost".parse().expect("测试 URL 解析失败"),
-        body: InvokeBody::Json(args),
-        headers: Default::default(),
-        invoke_key: INVOKE_KEY.to_string(),
-    }
-}
-
-fn invoke(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Value {
-    match get_ipc_response(window, ipc_request(cmd, args)) {
-        Ok(body) => body.deserialize::<Value>().expect("命令返回体不是合法 JSON"),
-        Err(e) => panic!("{cmd} 被 IPC 层拒绝（命令未注册或 invoke_key 不符）: {e}"),
-    }
-}
-
-/// 同 `invoke`，但把回执压成文本返回。
-/// 命令签名是 `Result<_, String>` 时（来源校验失败即此类）回执不是 JSON 对象，
-/// `invoke` 会直接 panic —— 审查 M1~M3 的档位断言只看「有没有被拒杀」，用这个。
-fn invoke_text(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> String {
-    match get_ipc_response(window, ipc_request(cmd, args)) {
-        Ok(body) => match body.deserialize::<Value>() {
-            Ok(v) => v.to_string(),
-            Err(e) => format!("<非 JSON 回执 {e}>"),
-        },
-        Err(e) => e.to_string(),
-    }
-}
-
-/// 取返回体 message 字段（负例文案断言用）
-fn message_of(res: &Value) -> String {
-    res.get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
+use serde_json::json;
 
 // ==================== 快速组（默认跑） ====================
 
@@ -291,31 +232,7 @@ fn netcheck_collect_shape() {
 // `guard::MAIN` 拒杀」这类缺陷在几十条绿灯里完全隐形——外设窗的 apply/restore、
 // 预览窗的 delete-file 全部 100% 不可用却测不出来（文件头的「已知不覆盖：子窗口」即此）。
 // 这些用例只打快速组，不建真实窗口、不跑 PowerShell。
-
-/// 建一个指定 label 的测试窗口（与生产同 label 集，见 `engine::guard::APP_WINDOWS`）。
-fn window_with_label(label: &str) -> WebviewWindow<MockRuntime> {
-    let app = trim_tauri_lib::build_app(mock_builder())
-        .build(mock_context(noop_assets()))
-        .expect("测试 App 构建失败");
-    WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
-        .build()
-        .unwrap_or_else(|e| panic!("测试窗口 {label} 创建失败: {e}"))
-}
-
-/// 断言「命令确实越过了档位、跑进后面的逻辑」，而不只是「没被来源校验拒杀」。
-/// 审查 v2-M16②：旧版只断不含「IPC 来源校验失败」，而 `invoke_text` 对「命令未注册 /
-/// 参数对不上 / 建窗失败」一律返回 `e.to_string()` ⇒ 命令整条消失时这条也是绿的，
-/// 档位回归网（防的就是 M1~M3 那类回退）会被无声架空。改成由调用方点名正向特征。
-fn assert_guard_passed(text: &str, ctx: &str, reached: &[&str]) {
-    assert!(
-        !text.contains("IPC 来源校验失败"),
-        "{ctx}: 被来源校验拒杀，回执 {text}"
-    );
-    assert!(
-        reached.iter().any(|k| text.contains(k)),
-        "{ctx}: 拿不到任何「已越过档位」的正向回执（期望含其一：{reached:?}），回执 {text}"
-    );
-}
+// helper（window_with_label / invoke_text / assert_guard_passed）见 tests/common/mod.rs。
 
 /// 外设子窗必须能调 `peripheral_apply`（非管理员时回 needAdmin，而不是被拒杀）。
 /// 传空 options → 三组都归一为 -1 → 命令在写注册表之前就返回「没有需要应用的设置」，
@@ -334,7 +251,7 @@ fn peripheral_subwindow_can_call_apply() {
 /// 提权仍是主窗专属红线（AGENTS.md §3）：子窗不得触发放开。
 #[test]
 fn subwindow_cannot_request_elevation() {
-    for label in ["peripheral", "preview", "processManager", "models"] {
+    for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "elevate_request", json!({}));
         assert!(
@@ -349,7 +266,7 @@ fn subwindow_cannot_request_elevation() {
 /// 且后端不校验任何前端确认值（stubborn_kill 前端原本连确认都没有）。档位必须是主窗专属。
 #[test]
 fn subwindow_cannot_call_stubborn_commands() {
-    for label in ["peripheral", "preview", "processManager", "models"] {
+    for label in sub_windows() {
         for cmd in ["memory_stubborn_kill", "memory_stubborn_block"] {
             let w = window_with_label(label);
             let text = invoke_text(&w, cmd, json!({}));

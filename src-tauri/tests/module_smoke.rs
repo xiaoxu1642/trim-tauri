@@ -1,0 +1,307 @@
+//! 模块轻量验证模板（MockRuntime 底座消费示例）。
+//!
+//! 定位：`ipc_smoke.rs` 是既有回归网（改动需评审）；本文件是**给 agent/新模块用的
+//! 轻量验证落点**——验证某个模块的命令链路时，复制一个用例改命令名与断言即可，
+//! 不必动回归网文件。底座 helper 单一真源在 `tests/common/mod.rs`。
+//!
+//! 用例编写的三条纪律（沿用 ipc_smoke 与 AGENTS §3 的教训）：
+//! 1. 档位断言必须点名正向特征（`assert_guard_passed` 的 `reached`），
+//!    只断「不含来源校验失败」会被「命令整条消失」假绿穿透（v2-M16②）。
+//! 2. 快速组只用**零副作用**命令（纯读、负例拦截）；会触盘/外呼/改系统的一律
+//!    `#[ignore]` 进发布前门禁组。
+//! 3. 形状断言对着渲染层消费口径写（前端直接 `.map` 的字段必须断类型），
+//!    防的是后端形状漂移让页面静默崩。
+
+mod common;
+
+use common::{invoke, invoke_text, main_window, sub_windows, window_with_label};
+use serde_json::json;
+use trim_tauri_lib::engine::guard::APP_WINDOWS;
+
+// ==================== 底座自身的元断言 ====================
+
+/// `sub_windows()` 必须由 `guard::APP_WINDOWS` 派生且剔除主窗——
+/// 防的是：派生逻辑被改成硬编码清单后，新增子窗时档位回归网漏测新 label。
+#[test]
+fn sub_windows_derives_from_guard_list() {
+    let subs = sub_windows();
+    assert_eq!(
+        subs.len(),
+        APP_WINDOWS.len() - 1,
+        "子窗数应为 APP_WINDOWS 减主窗: {subs:?} vs {APP_WINDOWS:?}"
+    );
+    assert!(!subs.contains(&"main"), "sub_windows 不得含主窗: {subs:?}");
+    for l in &subs {
+        assert!(APP_WINDOWS.contains(l), "{l} 不在 APP_WINDOWS: {subs:?}");
+    }
+}
+
+/// 未知 label 的窗口不得调过 guard_readonly 档（防「白名单靠猜」）：
+/// 子窗清单外注入的窗口（模拟被注入页）调只读档命令必须被拒杀。
+#[test]
+fn unknown_label_window_is_rejected() {
+    let w = window_with_label("__trim_injected__");
+    let text = invoke_text(&w, "settings_load", json!({}));
+    assert!(
+        text.contains("IPC 来源校验失败"),
+        "未知 label 调 settings_load 必须被拒，回执 {text}"
+    );
+}
+
+// ==================== 各模块零副作用读命令形状 ====================
+
+/// app:get-info 形状：version 非空字符串、runtime 恒 "tauri"、
+/// electron/node/chrome 显式 null（渲染层按 null 显示 N/A，缺字段会渲染成 undefined）。
+#[test]
+fn app_get_info_shape() {
+    let w = main_window();
+    let res = invoke(&w, "app_get_info", json!({}));
+    assert!(res["version"].is_string(), "version 必须是字符串: {res}");
+    assert_eq!(res["runtime"], json!("tauri"), "runtime 应为 tauri: {res}");
+    for k in ["electron", "node", "chrome"] {
+        assert!(res[k].is_null(), "{k} 应显式为 null: {res}");
+    }
+}
+
+/// intro:load 形状：`data` 必须是对象（简介库整体透传，前端按键索引；
+/// 塌成 null 会让悬浮简介全部静默消失——与 cleanup_rules 塌空同型的坑）。
+#[test]
+fn intro_load_shape() {
+    let w = main_window();
+    let res = invoke(&w, "intro_load", json!({}));
+    assert_eq!(res["success"], json!(true), "intro:load 应成功: {res}");
+    assert!(res["data"].is_object(), "data 必须是对象: {res}");
+}
+
+/// paths:load 形状：`data` 必须是对象。
+/// 防的是：配置文件损坏时返回 null，路径绑定页的 Object.entries 直接抛。
+#[test]
+fn paths_load_shape() {
+    let w = main_window();
+    let res = invoke(&w, "paths_load", json!({}));
+    assert_eq!(res["success"], json!(true), "paths:load 应成功: {res}");
+    assert!(res["data"].is_object(), "data 必须是对象: {res}");
+}
+
+/// cleanup:exclude-list 形状（C-1 排除名单）：`data.entries` 必须是数组。
+/// 防的是：名单文件缺失时弹窗渲染崩（应为空列表降级）。
+#[test]
+fn cleanup_exclude_list_shape() {
+    let w = main_window();
+    let res = invoke(&w, "cleanup_exclude_list", json!({}));
+    assert_eq!(res["success"], json!(true), "exclude-list 应成功: {res}");
+    assert!(
+        res["data"]["entries"].is_array(),
+        "data.entries 必须是数组: {res}"
+    );
+}
+
+/// cleanup:custom-list 形状：`data.entries` 必须是数组（返回体为 {file, entries}）。
+/// 防的是：自定义目录文件缺失时弹窗渲染崩（应为空列表降级）。
+#[test]
+fn cleanup_custom_list_shape() {
+    let w = main_window();
+    let res = invoke(&w, "cleanup_custom_list", json!({}));
+    assert_eq!(res["success"], json!(true), "custom-list 应成功: {res}");
+    assert!(
+        res["data"]["entries"].is_array(),
+        "data.entries 必须是数组: {res}"
+    );
+}
+
+/// paths:save 负例：key 白名单外的写入必须在落盘前被拒。
+/// 防的是：渲染层被注入后借路径通道往配置里塞任意键（配置面越权）。
+#[test]
+fn paths_save_rejects_unknown_key() {
+    let w = main_window();
+    let res = invoke(
+        &w,
+        "paths_save",
+        json!({ "key": "__trim_smoke_key__", "value": "C:\\x" }),
+    );
+    assert_eq!(res["success"], json!(false), "白名单外 key 必须被拒: {res}");
+}
+
+/// 子窗档位通用式：guard_readonly 档命令从**每个**子窗 label 都应能越过档位
+/// （以 settings_load 为载体；真数据断言在各模块自己的用例里）。
+/// 防的是：M1~M3 那类「子窗专属通道被按 MAIN 校验锁死」的镜像缺陷——
+/// 只读档降成主窗专属会让子窗功能 100% 不可用。
+#[test]
+fn readonly_channel_passes_guard_from_every_subwindow() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "settings_load", json!({}));
+        assert!(
+            !text.contains("IPC 来源校验失败"),
+            "{label} 窗调 guard_readonly 档命令不得被拒杀，回执 {text}"
+        );
+        // 正向特征：settings:load 返回体是 JSON 且含 success 字段
+        assert!(
+            text.contains("success"),
+            "{label} 窗应越过档位进入命令体（回执含 success），回执 {text}"
+        );
+    }
+}
+
+// ==================== 卸载残留链三道闸（M1 安全收口 2026-09-28） ====================
+//
+// 覆盖对象是**命令边界**而不是判定函数本身（判定函数的正反例在 lib 单测里由
+// `tools/fixtures/residue-contract.json` 驱动）。这三条用例各自钉住一条顺序/形状，
+// 都是零副作用（纯读或在任何删除动作之前整批拒绝）：
+// - 残留扫描与残留执行是 `guard::MAIN` 档（唯一调用方是主窗卸载页），子窗必须被拒杀；
+// - 执行侧的快照闸必须**先于**删除：受保护注册表容器在无快照时也要被整批拒绝，
+//   这条防的是「把快照闸挪到删除之后」那类改动；
+// - 扫描返回形状是渲染层直接 `.map` 的 `data.findings`，塌成 null 会让残留面板整片崩。
+
+const GHOST_APP_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TrimNoSuch-9f3a";
+
+#[test]
+fn residue_scan_is_main_only_and_passes_guard_from_main() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "uninstall_residue_scan", json!({ "appId": GHOST_APP_ID }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调残留扫描必须被来源校验拒杀，回执 {text}"
+        );
+    }
+    let w = main_window();
+    // 正向特征用「缺 | 分隔」的早退文案：它在档位之后、任何注册表读取之前，
+    // 拿得到它就证明档位已越过（只断「不含拒杀」会被命令消失假绿穿透，v2-M16②）
+    let res = invoke(&w, "uninstall_residue_scan", json!({ "appId": "no-separator" }));
+    assert_eq!(res["success"], json!(false), "非法 app_id 必须失败: {res}");
+    assert!(
+        common::message_of(&res).contains("app_id 格式错误"),
+        "主窗应越过档位进入命令体（期望读到格式错误早退），回执 {res}"
+    );
+}
+
+/// 合法形状但不存在的卸载键 → 空集（不是报错），且 `findings` 必须是数组。
+/// 这条同时是 A1 的反向保险：硬否决把候选丢掉之后，命令仍必须回一个合法空集，
+/// 不许变成 `null` 或整条失败。
+#[test]
+fn residue_scan_unknown_key_returns_empty_findings_array() {
+    let w = main_window();
+    let res = invoke(&w, "uninstall_residue_scan", json!({ "appId": GHOST_APP_ID }));
+    assert_eq!(res["success"], json!(true), "不存在的卸载键应回空集而非报错: {res}");
+    let findings = res["data"]["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data.findings 必须是数组: {res}"));
+    assert!(findings.is_empty(), "不存在的键不该产出候选: {findings:?}");
+}
+
+/// 执行侧两道闸的顺序：目标先过快照闸。空快照时哪怕给的是受保护注册表容器，
+/// 也必须在任何删除动作之前被整批拒绝。
+///
+/// 刻意只选**任何扫描都产不出**的注册表容器，不选目录：快照槽是进程级 static
+/// （按 label 分槽、跨用例共享），万一将来有用例先往 main 槽写过快照，这些目标也不
+/// 可能在里面；即便快照闸被改坏，A1 硬否决是第二道 —— 本用例永远不会真的删掉东西。
+#[test]
+fn residue_execute_requires_snapshot_before_any_delete() {
+    const HOSTILE: &str = "HKLM\\SOFTWARE";
+    const HOSTILE2: &str = "HKLM\\SYSTEM";
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(
+            &w,
+            "uninstall_residue_execute",
+            json!({ "appId": GHOST_APP_ID, "targets": [{ "kind": "reg_key", "target": HOSTILE }] }),
+        );
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调残留执行必须被来源校验拒杀，回执 {text}"
+        );
+    }
+    let w = main_window();
+    let res = invoke(
+        &w,
+        "uninstall_residue_execute",
+        json!({
+            "appId": GHOST_APP_ID,
+            "targets": [
+                { "kind": "reg_key", "target": HOSTILE },
+                { "kind": "reg_key", "target": HOSTILE2 }
+            ]
+        }),
+    );
+    assert_eq!(res["success"], json!(false), "无快照时不得执行任何删除: {res}");
+    assert!(
+        common::message_of(&res).contains("不在本次扫描快照"),
+        "整批拒绝的文案应指向快照闸，回执 {res}"
+    );
+}
+
+// ==================== 重/外呼组（默认 ignore，发布前跑） ====================
+
+/// A1 收紧的**放行回测**（真机、只读）：装机清单里每个桌面程序的卸载键必然存在，
+/// 所以残留扫描必须照样产出「卸载注册表项仍存在」这条最高置信候选 —— 这是
+/// 「结构收口把主功能误杀」最直接的探测器（`HKLM\SOFTWARE\…\Uninstall\<产品键>`
+/// 属于容器下的产品叶键，按设计必须放行）。
+///
+/// 同时断言扫描产出的每个 `reg_key` 目标都不落在保护面内（扫描侧硬闸无漏放），
+/// 以及候选形状是渲染层直接消费的字段集。
+///
+/// 成本：按程序逐个扫（含开始菜单/跳转列表目录读），耗时随装机清单变化，
+/// 故不进快速组。跑法：`cargo test --test module_smoke -- --ignored`
+#[test]
+#[ignore = "逐个程序残留扫描会读多目录且依赖装机清单，发布前门禁跑"]
+fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
+    use serde_json::Value;
+    use trim_tauri_lib::engine::protect;
+    let w = main_window();
+    let list = invoke(&w, "uninstall_list", json!({ "scope": "user" }));
+    assert_eq!(list["success"], json!(true), "uninstall_list 应成功: {list}");
+    let apps = list["data"]["apps"].as_array().cloned().unwrap_or_default();
+    // 条目里的寻址键是 `id`（`HKLM|<卸载子路径>` / `APPX|<包全名>`），不是 appId
+    let sample: Vec<&Value> = apps.iter().take(8).collect();
+    assert!(!sample.is_empty(), "本机没有桌面程序可采样，本用例失去意义");
+
+    let mut checked = 0;
+    for a in sample {
+        let Some(app_id) = a["id"].as_str() else { continue };
+        // 只测注册表寻址的桌面程序（APPX| 前缀走另一条口径）
+        if !app_id.contains('|') || app_id.starts_with("APPX|") {
+            continue;
+        }
+        let res = invoke(&w, "uninstall_residue_scan", json!({ "appId": app_id }));
+        assert_eq!(res["success"], json!(true), "{app_id} 扫描应成功: {res}");
+        let findings = res["data"]["findings"].as_array().unwrap_or_else(|| {
+            panic!("{app_id} 的 data.findings 必须是数组: {res}");
+        });
+        checked += 1;
+        let mut has_uninstall_key = false;
+        for f in findings {
+            for k in ["kind", "target", "reason", "confidence", "risk"] {
+                assert!(f[k].is_string(), "{app_id} 候选缺字符串字段 {k}: {f}");
+            }
+            assert!(f["defaultChecked"].is_boolean(), "{app_id} 候选缺 defaultChecked: {f}");
+            if f["kind"].as_str() == Some("reg_key") {
+                let t = f["target"].as_str().unwrap_or("");
+                assert!(
+                    protect::reg_target_block_reason(t).is_none(),
+                    "扫描侧硬闸漏放受保护目标 {t}（{app_id}）"
+                );
+                if f["reason"].as_str().unwrap_or("").contains("卸载注册表项仍存在") {
+                    has_uninstall_key = true;
+                }
+            }
+        }
+        assert!(
+            has_uninstall_key,
+            "{app_id} 在清单里就说明它的卸载键存在，扫描必须产出该候选（A1 误杀信号）"
+        );
+    }
+    assert!(checked > 0, "样本里没有可用的注册表寻址程序");
+}
+
+// 需要真实环境的验证（pwsh / 扫盘 / 网络 / 改系统），复制下面这个骨架进来：
+//
+// #[test]
+// #[ignore = "<说明成本>，发布前门禁跑"]
+// fn <module>_<command>_shape() {
+//     let w = main_window();
+//     let res = invoke(&w, "<command>", json!({}));
+//     assert_eq!(res["success"], json!(true), "...: {res}");
+// }
+//
+// 跑法：cargo test --test module_smoke -- --ignored
