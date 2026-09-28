@@ -1535,18 +1535,21 @@ fn load_residue_rules() -> Option<Value> {
 
 /// 条件组命中判定（U-1「双条件」拍板）：displayName / publisher / uninstallKey 三组里
 /// **至少两组命中**才视为同一程序，单一维度弱相似不触发（防「QQ」类短名误伤全家桶）。
+/// 返回 (候选集, 被 A1 硬否决的目标) —— 否决原因只在这里收集，由命令边界落日志：
+/// 纯函数不留写盘副作用，`cargo test` 才不会把测试规则 id 写进用户的应用日志。
 fn residue_rules_hits(
     rules: &Value,
     display_name: &str,
     publisher: &str,
     key_path: &str,
-) -> Vec<Value> {
+) -> (Vec<Value>, Vec<String>) {
     let empty: Vec<Value> = Vec::new();
     let rule_list = rules.get("rules").and_then(|r| r.as_array()).unwrap_or(&empty);
     let name_norm = norm_name(display_name);
     let pub_lc = publisher.trim().to_lowercase();
     let key_lc = key_path.trim().to_lowercase();
     let mut out = Vec::new();
+    let mut vetoed: Vec<String> = Vec::new();
     for rule in rule_list {
         let Some(id) = rule.get("id").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) else {
             continue;
@@ -1618,10 +1621,7 @@ fn residue_rules_hits(
                     // 存不存在」，一条 `HKLM\SOFTWARE` 就能进候选列表并被默认勾选，执行侧
                     // 是 RegDeleteTreeW 递归删树。保护判定必须在产候选时就生效。
                     if let Some(reason) = protect::reg_target_block_reason(target_raw) {
-                        log::write_log(
-                            "warn",
-                            &format!("残留规则 {id} 的注册表目标被硬否决（不入候选）: {reason}"),
-                        );
+                        vetoed.push(format!("残留规则 {id} 的注册表目标被硬否决（不入候选）: {reason}"));
                         continue;
                     }
                     if !crate::engine::native::reg_key_exists(hive, &rest) {
@@ -1637,7 +1637,7 @@ fn residue_rules_hits(
             }
         }
     }
-    out
+    (out, vetoed)
 }
 
 /// 卸载域·残留扫描（方案 M3 MVP + U-2 固定系统侧痕）。
@@ -1827,8 +1827,12 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 高置信：签名残留规则库命中（U-1）——已知程序知识库，双条件命中 +
         // 目标存在性判定后才出现；reg_key 删除走执行侧同款「先备份后删」
         if let Some(rules) = load_residue_rules() {
-            for f in residue_rules_hits(&rules, &display_name, &publisher, &key_path) {
-                findings.push(f);
+            let (rule_hits, vetoed) = residue_rules_hits(&rules, &display_name, &publisher, &key_path);
+            findings.extend(rule_hits);
+            // 硬否决在命令边界留痕：真机跑到这一行就说明签名规则库里躺着一处系统容器
+            // （误签、私钥泄露或规则生成漏检），属异常而非常态，必须能在日志里查到。
+            for line in vetoed {
+                log::write_log("warn", &line);
             }
         }
         (findings, display_name)
@@ -2412,8 +2416,13 @@ mod residue_trace_tests {
                 ]
             }]
         });
-        let hits = residue_rules_hits(&pkg, "EvilApp 1.0", "EvilCorp", "EvilApp");
+        let (hits, vetoed) = residue_rules_hits(&pkg, "EvilApp 1.0", "EvilCorp", "EvilApp");
         assert!(hits.is_empty(), "受保护注册表目标进入了候选列表: {hits:?}");
+        assert_eq!(
+            vetoed.len(),
+            3,
+            "三条危险目标都应各自给出否决原因（祖先/命名空间树/整棵禁删各一类）: {vetoed:?}"
+        );
     }
 
     /// C1（不依赖真机）：残留目录送删前的重解析闸。
