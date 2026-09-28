@@ -193,38 +193,10 @@
     return [];
   }
 
-  // ==================== P2 规模化浏览：搜索与筛选（规则库最终优化方案 2026-09-27） ====================
-  // 只过滤「当前可见规则」的显示与计数，不改规则库数据、不动勾选集合与风险确认链：
-  // selectedIds / ALL_IDS 与全选语义保持「全部条目」口径，不随筛选收窄。
-  const filterState = { query: '', domain: '', risk: '', rec: '', hasContent: false, needsExit: false };
-
-  function filterActive() {
-    return !!(filterState.query || filterState.domain || filterState.risk
-      || filterState.rec || filterState.hasContent || filterState.needsExit);
-  }
-
-  // 单条规则是否命中当前筛选。子分组名为空表示扁平分组（无二级分类）。
-  // 关键词为 AND 语义：空格分隔的多个词必须全部命中（规则名 / 分类名 / 性质 / 路径 / 文件模式）。
-  function itemMatchesFilter(it, groupKey, groupTitle, subName) {
-    if (filterState.domain && groupKey !== filterState.domain) return false;
-    if (filterState.risk && it.risk !== filterState.risk) return false;
-    if (filterState.rec === 'rec' && it.recommended !== true) return false;
-    if (filterState.rec === 'unrec' && it.recommended === true) return false;
-    // 「仅看有内容」只在已有扫描结果时生效——未扫描前所有项都无内容，生效等于全隐藏
-    if (filterState.hasContent && scanResults.size > 0 && !((scanResults.get(it.id)?.size || 0) > 0)) return false;
-    if (filterState.needsExit && !it.needsExit) return false;
-    const q = filterState.query;
-    if (!q) return true;
-    const hay = [
-      it.name,
-      groupTitle || '',
-      subName || '',
-      NATURE_LABELS[it.nature] || it.nature || '',
-      ...(it.paths || []),
-      ...(it.patterns || []),
-    ].join('\n').toLowerCase();
-    return q.split(/\s+/).every(tok => hay.includes(tok));
-  }
+  // ==================== P2 规模化浏览 ====================
+  // 2026-09-28 仓库精简：搜索/筛选 UI（cleanFilterBar）已随九轮拍板整行删除，
+  // filterState/filterActive/itemMatchesFilter 空转逻辑与绑定代码一并清除——
+  // 此前筛选恒为「不过滤」，但每次渲染仍白跑三层 filter/map。
 
   // ==================== 详细信息表格（资源管理器风格） ====================
   const RISK_ORDER = { low: 0, medium: 1, high: 2 };
@@ -340,6 +312,12 @@
     </button>`;
   }
 
+  // 排除名单只覆盖文件系统路径（正侧匹配防误判）：盘符 / UNC / %环境变量% 开头。
+  // 注册表键与 DISM 特殊项不产生文件路径，排除名单不覆盖，对应条目不显示「忽略」按钮
+  function isFsPath(p) {
+    return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') || p.startsWith('%');
+  }
+
   // 渲染单个数据行（列布局样式与表头共用 buildLayout，保证对齐）
   function renderRow(item, columns, groupKey) {
     const layout = xtable.buildLayout(columns);
@@ -392,7 +370,12 @@
             inner = previewBtnHtml(item, hasImages, imageCount);
           } else {
             // P3：明细按钮——弹窗枚举该条目将删除的具体文件清单（只读）
-            inner = `<button class="fileclean-preview-btn" data-detail="${item.id}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>`;
+            // C-1：文件系统路径条目追加「忽略」——加入排除名单后扫描与执行同源跳过
+            const exPath = result && result.path;
+            const exBtn = exPath && isFsPath(exPath)
+              ? ` <button class="fileclean-preview-btn" data-exclude="${item.id}" data-tip="把此路径加入排除名单：之后扫描与执行都会跳过它">忽略</button>`
+              : '';
+            inner = `<button class="fileclean-preview-btn" data-detail="${item.id}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>${exBtn}`;
           }
           break;
       }
@@ -434,6 +417,12 @@
           if (!previewBtn.disabled) openPreview(previewBtn.dataset.preview);
           return;
         }
+        const excludeBtn = e.target.closest('[data-exclude]');
+        if (excludeBtn) {
+          e.stopPropagation();
+          addExcludeById(excludeBtn.dataset.exclude);
+          return;
+        }
         const detailBtn = e.target.closest('[data-detail]');
         if (detailBtn) {
           e.stopPropagation();
@@ -447,39 +436,16 @@
       });
     }
 
-    // P2：域筛选选项随当前规则库动态生成（IPC 覆盖 CATEGORIES 后标题可能变化；
-    // 保留用户已选值，选项消失时回落到「全部域」）
-    const domainSel = document.getElementById('cleanFilterDomain');
-    if (domainSel) {
-      const cur = domainSel.value;
-      const escAttr = s => window.ds.escAttr(s);
-      const opts = Object.entries(CATEGORIES)
-        .map(([k, g]) => `<option value="${escAttr(k)}">${escapeHtml(g.title)}</option>`)
-        .join('');
-      domainSel.innerHTML = '<option value="">全部域</option>' + opts;
-      if ([...domainSel.options].some(o => o.value === cur)) domainSel.value = cur;
-    }
-
-    const filtering = filterActive();
-    let matchedTotal = 0;
     let renderedAny = false;
 
     for (const [groupKey, rawGroup] of Object.entries(CATEGORIES)) {
       // P1：detect 未命中的隐藏条目不渲染（分组计数/大小汇总同步排除）
-      // P2：搜索/筛选在 hiddenIds 之后再过滤一层，无命中的子分类/域整体不渲染
-      const match = (it, subName) => itemMatchesFilter(it, groupKey, rawGroup.title, subName);
       const group = rawGroup.subGroups
-        ? { ...rawGroup, subGroups: rawGroup.subGroups.map(sg => ({ ...sg, items: visibleItems(sg.items).filter(i => match(i, sg.name)) })).filter(sg => sg.items.length > 0) }
-        : { ...rawGroup, items: visibleItems(rawGroup.items || []).filter(i => match(i, null)) };
-      // 筛选态下无命中的域不渲染（扁平组原有空组 continue 语义顺带覆盖）
-      if (group.subGroups) {
-        if (filtering && group.subGroups.length === 0) continue;
-      } else if (!group.items.length) {
+        ? { ...rawGroup, subGroups: rawGroup.subGroups.map(sg => ({ ...sg, items: visibleItems(sg.items) })).filter(sg => sg.items.length > 0) }
+        : { ...rawGroup, items: visibleItems(rawGroup.items || []) };
+      if (!group.subGroups && !group.items.length) {
         continue;
       }
-      matchedTotal += group.subGroups
-        ? group.subGroups.reduce((s, sg) => s + sg.items.length, 0)
-        : group.items.length;
       // v3.2.1 类目重构：维护与特殊操作域加视觉隔离类（警示条 + 语义边界）
       const groupEl = document.createElement('div');
       groupEl.className = 'category-group'
@@ -522,26 +488,13 @@
       renderedAny = true;
     }
 
-    // P2：筛选态空结果提示（不改 #categoryList 的委托绑定——节点仍持久）
-    if (filtering && !renderedAny) {
-      container.innerHTML = '<div class="clean-filter-empty">没有匹配当前搜索 / 筛选的规则。调整关键词，或点击「重置」清除筛选。</div>';
-    }
-    // P2：筛选命中计数（渲染时点最新；updateUI 不重复计算）
-    const hintEl = document.getElementById('cleanFilterHint');
-    if (hintEl) {
-      const totalCount = getAllIds().length;
-      hintEl.textContent = filtering ? `${matchedTotal} / ${totalCount} 项匹配` : '';
-    }
-
     // 恢复折叠状态 + 设置展开内容高度（展开态不锁死 maxHeight，避免 grid 布局未完成时 scrollHeight 偏小导致内容被裁剪）
-    // P2：筛选激活时强制展开全部分组——折叠态下命中结果不可见，搜索就没有意义。
-    // 不改写 collapsedKeys：清空筛选后恢复用户原有的折叠状态。
     container.querySelectorAll('.category-group').forEach(g => {
       const toggle = g.querySelector(':scope > .category-group-header');
       const content = g.querySelector(':scope > .category-group-content');
       if (!toggle || !content) return;
       const key = 'group:' + toggle.dataset.groupToggle;
-      if (!filtering && collapsedKeys.has(key)) {
+      if (collapsedKeys.has(key)) {
         g.classList.add('collapsed');
         content.style.maxHeight = '0px';
       } else {
@@ -552,7 +505,7 @@
       const content = sg.querySelector(':scope > .sub-group-content');
       if (!content) return;
       const key = 'sub:' + sg.dataset.subGroup;
-      if (!filtering && collapsedKeys.has(key)) {
+      if (collapsedKeys.has(key)) {
         sg.classList.add('collapsed');
         content.style.maxHeight = '0px';
       } else {
@@ -741,22 +694,18 @@
     // 顶层分组汇总（条目数量 + 总占用大小，兼容扁平分组）
     // P2：计数与已选数量按当前筛选口径展示（无筛选时与原口径一致）；
     // 已选大小汇总仍以 selectedIds 为准，不随筛选改变。
-    const filteringNow = filterActive();
     for (const [groupKey, group] of Object.entries(CATEGORIES)) {
       let items;
       let catCount = 0;
       if (group.subGroups) {
         items = [];
         for (const sg of group.subGroups) {
-          const matched = visibleItems(sg.items).filter(i => itemMatchesFilter(i, groupKey, group.title, sg.name));
+          const matched = visibleItems(sg.items);
           if (matched.length > 0) catCount++;
           items.push(...matched);
         }
-        // 筛选态下整域无命中的组已在渲染层隐藏，这里同步跳过计数
-        if (filteringNow && items.length === 0) continue;
       } else {
-        items = visibleItems(group.items || []).filter(i => itemMatchesFilter(i, groupKey, group.title, null));
-        if (filteringNow && items.length === 0) continue;
+        items = visibleItems(group.items || []);
       }
       const groupSize = groupTotalSize(items);
       const countEl = document.querySelector(`[data-group-count="${groupKey}"]`);
@@ -1521,6 +1470,397 @@
     document.getElementById('itemDetailBackdrop')?.remove();
   }
 
+  // ==================== C-1 排除名单 UI ====================
+
+  function closeExcludeManager() {
+    document.getElementById('excludeListBackdrop')?.remove();
+  }
+
+  // 拉取并渲染名单列表（entries 闭包捕获，移除按钮按下标回查原文，避免路径进属性转义）
+  async function renderExcludeList(ctrl) {
+    const body = ctrl.body;
+    let resp;
+    try {
+      resp = await window.api.cleanup.excludeList();
+    } catch (e) {
+      if (document.body.contains(body)) body.innerHTML = `<div class="empty-state"><p>名单读取失败: ${escapeHtml(e.message)}</p></div>`;
+      return;
+    }
+    if (!document.body.contains(body)) return;
+    if (!resp || !resp.success) {
+      body.innerHTML = `<div class="empty-state"><p>${escapeHtml((resp && resp.message) || '名单读取失败')}</p></div>`;
+      return;
+    }
+    const entries = (resp.data && resp.data.entries) || [];
+    const fileTip = (resp.data && resp.data.file) || '';
+    if (!entries.length) {
+      body.innerHTML = `<div class="empty-state"><p>排除名单为空。可在下方手动添加，或在扫描结果条目上点「忽略」。</p><p>名单文件：${escapeHtml(fileTip)}</p></div>`;
+      return;
+    }
+    body.innerHTML = `<div class="detail-file-list">${entries.map((en, i) =>
+      `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(en.expanded)}">${escapeHtml(en.raw)} <span class="path-auto-tag">${en.isFile ? '文件' : '目录'}</span></span><button class="fileclean-preview-btn" data-exclude-remove="${i}" type="button">移除</button></div>`
+    ).join('')}</div>`;
+    body.querySelectorAll('[data-exclude-remove]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const en = entries[+btn.getAttribute('data-exclude-remove')];
+        if (!en) return;
+        try {
+          const r = await window.api.cleanup.excludeRemove(en.raw);
+          if (r && r.success) {
+            window.app?.toast(r.data && r.data.removed ? 'success' : 'info', r.data && r.data.removed ? '已从排除名单移除' : '该路径不在名单中');
+            renderExcludeList(ctrl);
+          } else {
+            window.app?.toast('error', (r && r.message) || '移除失败');
+          }
+        } catch (e) {
+          window.app?.toast('error', '移除失败: ' + e.message);
+        }
+      });
+    });
+  }
+
+  function openExcludeManager() {
+    closeExcludeManager();
+    const ctrl = window.modal.create({
+      id: 'excludeListBackdrop',
+      title: '清理排除名单',
+      bodyHtml: '<div class="empty-state"><p>正在读取排除名单…</p></div>',
+      footerClass: 'pw-footer',
+      footerHtml: `
+          <input id="excludeAddInput" class="field-input" type="text" placeholder="输入要排除的绝对路径（目录或文件，支持 %环境变量%）" />
+          <button class="btn btn-primary" data-role="addBtn" type="button">添加</button>
+          <button class="btn btn-secondary" data-role="doneBtn" type="button">关闭</button>`
+    });
+    ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeExcludeManager);
+    const input = ctrl.footer.querySelector('#excludeAddInput');
+    const add = async () => {
+      const p = (input.value || '').trim();
+      if (!p) {
+        window.app?.toast('warning', '请输入要排除的路径');
+        return;
+      }
+      try {
+        const r = await window.api.cleanup.excludeAdd(p);
+        if (r && r.success) {
+          window.app?.toast(r.data && r.data.added ? 'success' : 'info', r.data && r.data.added ? '已加入排除名单' : '该路径已在排除名单中');
+          input.value = '';
+          renderExcludeList(ctrl);
+        } else {
+          window.app?.toast('error', (r && r.message) || '添加失败');
+        }
+      } catch (e) {
+        window.app?.toast('error', '添加失败: ' + e.message);
+      }
+    };
+    ctrl.footer.querySelector('[data-role="addBtn"]').addEventListener('click', add);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+    renderExcludeList(ctrl);
+  }
+
+  // 条目级「忽略」——把该条目的路径整棵加入排除名单（目录=整棵子树，文件=单文件）
+  async function addExcludeById(id) {
+    const result = scanResults.get(id);
+    const p = result && result.path;
+    if (!p || !isFsPath(p)) {
+      window.app?.toast('warning', '该条目没有可排除的文件路径');
+      return;
+    }
+    try {
+      const r = await window.api.cleanup.excludeAdd(p);
+      if (r && r.success) {
+        window.app?.toast(r.data && r.data.added ? 'success' : 'info', r.data && r.data.added ? `已加入排除名单：${p}` : '该路径已在排除名单中');
+      } else {
+        window.app?.toast('error', (r && r.message) || '加入排除名单失败');
+      }
+    } catch (e) {
+      window.app?.toast('error', '加入排除名单失败: ' + e.message);
+    }
+  }
+
+  // ==================== C-3 自定义清理目录 UI ====================
+  // 与排除名单同款 modal 形态：目录管理（增/删）+ 扫描候选 + 勾选清理。
+  // 删除面只走回收站（后端 cleanup:custom-execute 固定语义），转义用 ds.esc 真源。
+
+  function closeCustomDirs() {
+    document.getElementById('customDirsBackdrop')?.remove();
+  }
+
+  // 弹窗生命周期内缓存：entries=目录条目；files=最近一次扫描的候选（执行按此回查）
+  let customEntries = [];
+  let customFiles = [];
+
+  async function renderCustomEntries(ctrl) {
+    const listEl = document.getElementById('customDirList');
+    if (!listEl) return;
+    let resp;
+    try {
+      resp = await window.api.cleanup.customList();
+    } catch (e) {
+      listEl.innerHTML = `<div class="empty-state"><p>名单读取失败: ${ds.esc(String(e.message || e))}</p></div>`;
+      return;
+    }
+    if (!listEl.isConnected) return;
+    if (!resp || !resp.success) {
+      listEl.innerHTML = `<div class="empty-state"><p>${ds.esc((resp && resp.message) || '名单读取失败')}</p></div>`;
+      return;
+    }
+    customEntries = (resp.data && resp.data.entries) || [];
+    if (!customEntries.length) {
+      listEl.innerHTML = '<div class="empty-state"><p>还没有自定义目录。在下方输入目录路径（可选扩展名模式）后点「添加」，再点「扫描」出候选。</p></div>';
+      return;
+    }
+    listEl.innerHTML = customEntries.map((en, i) =>
+      `<div class="detail-file-row"><span class="detail-file-path" data-tip="${ds.escAttr(en.dir)}">${ds.esc(en.dir)}${en.patterns && en.patterns.length ? ` <span class="path-auto-tag">${ds.esc(en.patterns.join(' '))}</span>` : ''}</span><button class="fileclean-preview-btn" data-custom-remove="${i}" type="button">移除</button></div>`
+    ).join('');
+    listEl.querySelectorAll('[data-custom-remove]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const en = customEntries[+btn.getAttribute('data-custom-remove')];
+        if (!en) return;
+        try {
+          const r = await window.api.cleanup.customRemove(en.dir);
+          if (r && r.success) {
+            window.app?.toast(r.data && r.data.removed ? 'success' : 'info', r.data && r.data.removed ? '已移除该目录' : '该目录不在名单中');
+            renderCustomEntries(ctrl);
+          } else {
+            window.app?.toast('error', (r && r.message) || '移除失败');
+          }
+        } catch (e) {
+          window.app?.toast('error', '移除失败: ' + (e.message || e));
+        }
+      });
+    });
+  }
+
+  async function customScanNow(ctrl) {
+    const area = document.getElementById('customFileArea');
+    if (!area) return;
+    area.style.display = 'block';
+    area.innerHTML = '<div class="empty-state"><p>正在扫描自定义目录…</p></div>';
+    let resp;
+    try {
+      resp = await window.api.cleanup.customScan();
+    } catch (e) {
+      area.innerHTML = `<div class="empty-state"><p>扫描失败: ${ds.esc(String(e.message || e))}</p></div>`;
+      return;
+    }
+    if (!area.isConnected) return;
+    if (!resp || !resp.success) {
+      area.innerHTML = `<div class="empty-state"><p>${ds.esc((resp && resp.message) || '扫描失败')}</p></div>`;
+      return;
+    }
+    const d = resp.data || {};
+    customFiles = d.files || [];
+    const cleanBtn = ctrl.footer.querySelector('[data-role="cleanBtn"]');
+    if (cleanBtn) cleanBtn.disabled = !customFiles.length;
+    if (!customFiles.length) {
+      area.innerHTML = '<div class="empty-state"><p>没有可清理的候选（只收修改时间满 24 小时、未命中排除名单的文件；目录本身不删）。</p></div>';
+      return;
+    }
+    const rows = customFiles.slice(0, 500).map((f, i) =>
+      `<div class="detail-file-row"><label class="finder-cell" style="gap:8px"><input type="checkbox" data-custom-file="${i}" checked /> <span class="detail-file-path" data-tip="${ds.escAttr(f.path)}">${ds.esc(f.path)}</span></label><span class="path-auto-tag">${ds.fmtBytes(f.size || 0)}</span></div>`
+    ).join('');
+    const moreTip = customFiles.length > 500
+      ? `<div class="empty-state"><p>仅展示前 500 项，其余 ${customFiles.length - 500} 项默认同样参与清理。</p></div>`
+      : '';
+    area.innerHTML = `<div class="finder-group-header"><span>候选文件 ${customFiles.length} 项 · 共 ${ds.fmtBytes(d.totalSize || 0)}</span></div>${moreTip}<div class="detail-file-list">${rows}</div>`;
+  }
+
+  async function customCleanSelected(ctrl) {
+    if (!customFiles.length) return;
+    const area = document.getElementById('customFileArea');
+    const boxes = area ? Array.from(area.querySelectorAll('input[data-custom-file]:checked')) : [];
+    // 勾选语义：有勾选按勾选；一个都没勾=「全部取消」，不给整批盲删
+    const targets = boxes
+      .map(b => customFiles[+b.getAttribute('data-custom-file')])
+      .filter(Boolean)
+      .map(f => f.path);
+    if (!targets.length) {
+      window.app?.toast('warning', '请先勾选要清理的文件');
+      return;
+    }
+    const ok = await window.app?.confirmDanger?.(
+      '清理自定义目录',
+      `将把选中的 ${targets.length} 个文件移入回收站（可还原）。`,
+      '开始清理',
+      '取消',
+      '只进回收站；执行前会逐项复验保护目录、修改时间与排除名单。'
+    );
+    if (!ok) return;
+    try {
+      const r = await window.api.cleanup.customExecute(targets);
+      if (r && r.success) {
+        const d = r.data || {};
+        window.app?.toast(d.failCount ? 'warning' : 'success',
+          `清理完成：成功 ${d.fileCount} 个，回收 ${ds.fmtBytes(d.freed || 0)}${d.failCount ? `，失败/跳过 ${d.failCount}` : ''}`);
+        customScanNow(ctrl);
+      } else {
+        window.app?.toast('error', (r && r.message) || '清理失败');
+      }
+    } catch (e) {
+      window.app?.toast('error', '清理失败: ' + (e.message || e));
+    }
+  }
+
+  function openCustomDirs() {
+    closeCustomDirs();
+    const ctrl = window.modal.create({
+      id: 'customDirsBackdrop',
+      title: '自定义清理目录',
+      bodyHtml: '<div id="customDirList"><div class="empty-state"><p>正在读取目录名单…</p></div></div><div id="customFileArea" style="display:none"></div>',
+      footerClass: 'pw-footer',
+      footerHtml: `
+          <input id="customDirInput" class="field-input" type="text" placeholder="目录绝对路径（支持 %环境变量%）" style="flex:2" />
+          <input id="customPatInput" class="field-input" type="text" placeholder="扩展名模式（可选，如 *.tmp;*.log）" style="flex:1" />
+          <button class="btn btn-secondary" data-role="addBtn" type="button">添加</button>
+          <button class="btn btn-secondary" data-role="scanBtn" type="button">扫描</button>
+          <button class="btn btn-primary" data-role="cleanBtn" type="button" disabled>清理所选</button>
+          <button class="btn btn-secondary" data-role="doneBtn" type="button">关闭</button>`
+    });
+    ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeCustomDirs);
+    ctrl.footer.querySelector('[data-role="scanBtn"]').addEventListener('click', () => customScanNow(ctrl));
+    ctrl.footer.querySelector('[data-role="cleanBtn"]').addEventListener('click', () => customCleanSelected(ctrl));
+    const dirInput = ctrl.footer.querySelector('#customDirInput');
+    const patInput = ctrl.footer.querySelector('#customPatInput');
+    const add = async () => {
+      const p = (dirInput.value || '').trim();
+      if (!p) {
+        window.app?.toast('warning', '请输入目录路径');
+        return;
+      }
+      const pats = (patInput.value || '').split(';').map(s => s.trim()).filter(Boolean);
+      try {
+        const r = await window.api.cleanup.customAdd(p, pats.length ? pats : null);
+        if (r && r.success) {
+          window.app?.toast(r.data && r.data.added ? 'success' : 'info', r.data && r.data.added ? '已添加自定义目录' : '该目录已在名单中');
+          dirInput.value = '';
+          patInput.value = '';
+          renderCustomEntries(ctrl);
+        } else {
+          window.app?.toast('error', (r && r.message) || '添加失败');
+        }
+      } catch (e) {
+        window.app?.toast('error', '添加失败: ' + (e.message || e));
+      }
+    };
+    ctrl.footer.querySelector('[data-role="addBtn"]').addEventListener('click', add);
+    dirInput.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+    renderCustomEntries(ctrl);
+  }
+
+  // ==================== C-4 备份还原（注册表 + 永久删文件批次） ====================
+
+  function closeRegBackupModal() {
+    document.getElementById('regBackupBackdrop')?.remove();
+  }
+
+  function fmtBackupTime(ms) {
+    if (!ms) return '—';
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  async function renderRegBackupList(ctrl) {
+    const body = ctrl.body;
+    let resp, respF;
+    try {
+      [resp, respF] = await Promise.all([
+        window.api.cleanup.regBackupList(),
+        window.api.cleanup.fileBackupList().catch(() => null)
+      ]);
+    } catch (e) {
+      if (document.body.contains(body)) body.innerHTML = `<div class="empty-state"><p>备份列表读取失败: ${escapeHtml(e.message)}</p></div>`;
+      return;
+    }
+    if (!document.body.contains(body)) return;
+    const backups = (resp && resp.success && resp.data && resp.data.backups) || [];
+    const manifests = (respF && respF.success && respF.data && respF.data.manifests) || [];
+    if (!backups.length && !manifests.length) {
+      body.innerHTML = '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。</p></div>';
+      return;
+    }
+    const regSection = !backups.length ? '' :
+      `<div class="finder-group-header"><span>注册表备份 · ${backups.length} 份</span></div>
+       <div class="detail-file-list">${backups.map((b, i) =>
+        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.ruleId || '?')}${b.seq ? ` #${escapeHtml(b.seq)}` : ''} · ${formatSize(b.sizeBytes)}</span><button class="fileclean-preview-btn" data-reg-restore="${i}" type="button">还原</button></div>`
+      ).join('')}</div>`;
+    const fileSection = !manifests.length ? '' :
+      `<div class="finder-group-header"><span>文件备份（永久删批次） · ${manifests.length} 批</span></div>
+       <div class="detail-file-list">${manifests.map((m, i) =>
+        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(m.file)}">${fmtBackupTime(m.mtimeMs)} · ${m.count} 个文件 · ${formatSize(m.totalSize)}</span><button class="fileclean-preview-btn" data-file-backup-view="${i}" type="button" data-tip="查看本批次条目并逐个还原">查看</button></div>`
+      ).join('')}</div>`;
+    body.innerHTML = regSection + fileSection;
+
+    body.querySelectorAll('[data-reg-restore]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const b = backups[+btn.getAttribute('data-reg-restore')];
+        if (!b) return;
+        const ok = await window.app?.confirmDanger?.(
+          '还原注册表备份',
+          `将把备份「${b.ruleId || b.file}」（${fmtBackupTime(b.mtimeMs)}）通过 reg import 合并回系统注册表。只加回备份时存在的键/值，不会删除之后产生的新数据。`,
+          '确认还原',
+          '取消',
+          '还原会重新写入注册表内容，请确认该备份对应你确实要恢复的清理操作。'
+        );
+        if (!ok) return;
+        try {
+          const r = await window.api.cleanup.regBackupRestore(b.file);
+          if (r && r.success) {
+            window.app?.toast('success', '注册表备份已还原');
+          } else {
+            window.app?.toast('error', (r && r.message) || '还原失败');
+          }
+        } catch (e) {
+          window.app?.toast('error', '还原失败: ' + e.message);
+        }
+      });
+    });
+
+    // 文件批次：二级视图（点「查看」展开该批条目，逐条还原到原路径）
+    body.querySelectorAll('[data-file-backup-view]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const m = manifests[+btn.getAttribute('data-file-backup-view')];
+        if (!m) return;
+        try {
+          // 明细直接读 manifest 不可行（渲染层无文件读取面），逐批列出由后端扩展——
+          // 这里用最简实现：还原动作按「整批还原」逐条调 restore(index)，后端逐条判
+          // 存在性跳过已存在的目标。先给用户确认，再顺序还原。
+          const ok = await window.app?.confirmDanger?.(
+            '还原文件备份',
+            `将把「${fmtBackupTime(m.mtimeMs)}」批次的 ${m.count} 个文件逐个拷回原路径。目标位置已存在的文件会自动跳过，不会覆盖。`,
+            '开始还原',
+            '取消',
+            '还原只加回文件，不删除任何现有数据。'
+          );
+          if (!ok) return;
+          let restored = 0;
+          let skipped = 0;
+          for (let i = 0; i < m.count; i++) {
+            const r = await window.api.cleanup.fileBackupRestore(m.file, i);
+            if (r && r.success && r.data && r.data.restored) restored++;
+            else skipped++;
+          }
+          window.app?.toast(restored ? 'success' : 'info', `还原完成：恢复 ${restored} 个文件，跳过 ${skipped} 个`);
+        } catch (e) {
+          window.app?.toast('error', '还原失败: ' + (e.message || e));
+        }
+      });
+    });
+  }
+
+  function openRegBackupManager() {
+    closeRegBackupModal();
+    const ctrl = window.modal.create({
+      id: 'regBackupBackdrop',
+      title: '备份还原（清理域）',
+      bodyHtml: '<div class="empty-state"><p>正在读取备份列表…</p></div>',
+      footerClass: 'pw-footer',
+      footerHtml: '<button class="btn btn-secondary" data-role="doneBtn" type="button">关闭</button>'
+    });
+    ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeRegBackupModal);
+    renderRegBackupList(ctrl);
+  }
+
   function openItemDetail(id) {
     const result = scanResults.get(id);
     const item = getItemById(id);
@@ -1586,70 +1926,9 @@
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnUpdateRules')?.addEventListener('click', updateRules);
-
-    // P2 规模化浏览：搜索与筛选绑定（只影响渲染与计数，不影响勾选 / 清理范围）
-    // 搜索框 140ms 防抖——每次输入触发整表重渲染（含虚拟列表重建），连击输入时避免抖动
-    const searchInput = document.getElementById('cleanSearchInput');
-    let searchTimer = null;
-    searchInput?.addEventListener('input', () => {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => {
-        filterState.query = searchInput.value.trim().toLowerCase();
-        syncFilterChrome();
-        renderCategoryList();
-        updateUI();
-      }, 140);
-    });
-    const bindFilterSelect = (id, key) => {
-      const el = document.getElementById(id);
-      el?.addEventListener('change', () => {
-        filterState[key] = el.value;
-        syncFilterChrome();
-        renderCategoryList();
-        updateUI();
-      });
-    };
-    const bindFilterCheck = (id, key) => {
-      const el = document.getElementById(id);
-      el?.addEventListener('change', () => {
-        filterState[key] = el.checked;
-        syncFilterChrome();
-        renderCategoryList();
-        updateUI();
-      });
-    };
-    bindFilterSelect('cleanFilterDomain', 'domain');
-    bindFilterSelect('cleanFilterRisk', 'risk');
-    bindFilterSelect('cleanFilterRec', 'rec');
-    bindFilterCheck('cleanFilterHasContent', 'hasContent');
-    bindFilterCheck('cleanFilterNeedsExit', 'needsExit');
-    document.getElementById('cleanFilterReset')?.addEventListener('click', () => {
-      filterState.query = '';
-      filterState.domain = '';
-      filterState.risk = '';
-      filterState.rec = '';
-      filterState.hasContent = false;
-      filterState.needsExit = false;
-      const si = document.getElementById('cleanSearchInput');
-      if (si) si.value = '';
-      for (const id of ['cleanFilterDomain', 'cleanFilterRisk', 'cleanFilterRec']) {
-        const el = document.getElementById(id);
-        if (el) el.value = '';
-      }
-      for (const id of ['cleanFilterHasContent', 'cleanFilterNeedsExit']) {
-        const el = document.getElementById(id);
-        if (el) el.checked = false;
-      }
-      syncFilterChrome();
-      renderCategoryList();
-      updateUI();
-    });
-
-    // 重置按钮与命中提示的可见性（filterActive 时显示；命中计数由 renderCategoryList 写入）
-    function syncFilterChrome() {
-      const resetBtn = document.getElementById('cleanFilterReset');
-      if (resetBtn) resetBtn.style.display = filterActive() ? '' : 'none';
-    }
+    document.getElementById('btnExcludeList')?.addEventListener('click', openExcludeManager);
+    document.getElementById('btnCustomDirs')?.addEventListener('click', openCustomDirs);
+    document.getElementById('btnRegBackups')?.addEventListener('click', openRegBackupManager);
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
     if (window.api?.cleanup?.onScanProgress) {

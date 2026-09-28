@@ -317,7 +317,8 @@ mod ffi {
 
 // ==================== 最小 JSON 解析器 ====================
 // 规则 JSON 是主进程 JSON.stringify 的机器产物（合法、无注释、数字不越界），
-// P0 手写解析避免为此引入 serde 依赖（native-scanner 现仅 blake3/rayon/miniz_oxide）。
+// P0 手写解析避免为此引入 serde 依赖（native-scanner 现仅 blake3/rayon；
+// miniz_oxide 原为文档相似检测的 zip 解压依赖，该检测已于 2026-09-28 移除）。
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
@@ -832,7 +833,17 @@ pub struct DeletableResult {
 
 /// 单遍递归枚举 + 探测。口径：跳 ReparsePoint（不深入）、目录不计数、
 /// IgnoreInaccessible（不可读子目录静默跳过）、**无深度上限**（PS DLL 路径即此口径）。
-fn walk_deletable(dir: &Path, all: bool, pattern: &str, res: &mut DeletableResult) {
+/// minAge 时效护栏：cutoff 命中时太新的文件不计入 total（对齐 pattern 未命中的口径）。
+/// 全局排除名单：命中前缀/全路径的文件不计入 total。
+fn walk_deletable(
+    dir: &Path,
+    all: bool,
+    pattern: &str,
+    cutoff: Option<std::time::SystemTime>,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    res: &mut DeletableResult,
+) {
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return, // IgnoreInaccessible
@@ -846,7 +857,7 @@ fn walk_deletable(dir: &Path, all: bool, pattern: &str, res: &mut DeletableResul
             Err(_) => continue,
         };
         if ft.is_dir() {
-            walk_deletable(&ent.path(), all, pattern, res);
+            walk_deletable(&ent.path(), all, pattern, cutoff, excl_dirs, excl_files, res);
             continue;
         }
         if !ft.is_file() {
@@ -856,31 +867,49 @@ fn walk_deletable(dir: &Path, all: bool, pattern: &str, res: &mut DeletableResul
         if !all && !wildcard_match(&name, pattern) {
             continue; // 未命中 pattern：不计入 total（对齐 Skip() 在 total++ 之前）
         }
+        let full_s = ent.path().to_string_lossy().to_string();
+        if path_excluded(excl_dirs, excl_files, &full_s.to_lowercase()) {
+            continue;
+        }
+        if cutoff.map(|c| !ent.metadata().map(|m| modified_before(&m, c)).unwrap_or(false)).unwrap_or(false) {
+            continue; // 太新：不计入 total（fail-closed，metadata 读不到按太新处理）
+        }
         res.total += 1;
         let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
-        let full = ent.path().to_string_lossy().to_string();
-        if file_deletable(Path::new(&full)) {
-            res.files.push((full, size));
+        if file_deletable(Path::new(&full_s)) {
+            res.files.push((full_s, size));
         }
     }
 }
 
-pub fn list_deletable(root_str: &str, pattern: &str) -> DeletableResult {
+pub fn list_deletable(
+    root_str: &str,
+    pattern: &str,
+    cutoff: Option<std::time::SystemTime>,
+    excl_dirs: &[String],
+    excl_files: &[String],
+) -> DeletableResult {
     let all = pattern.is_empty() || pattern == "*";
     let root = Path::new(root_str);
     // 根本身是文件（pattern='*'）：单文件口径（对齐 TryFileLength 分支）
     if all {
         if let Some(fl) = try_file_length(root) {
+            // minAge：单文件同样要过时效护栏（mtime 读不到按太新处理）
+            let old_enough = cutoff
+                .map(|c| fs::metadata(root).map(|m| modified_before(&m, c)).unwrap_or(false))
+                .unwrap_or(true);
+            let root_low = root.to_string_lossy().to_lowercase();
+            let excluded = path_excluded(excl_dirs, excl_files, &root_low);
             let mut files = Vec::new();
-            if file_deletable(root) {
+            if old_enough && !excluded && file_deletable(root) {
                 files.push((root_str.to_string(), fl));
             }
-            return DeletableResult { files, total: 1 };
+            return DeletableResult { files, total: if old_enough && !excluded { 1 } else { 0 } };
         }
     }
     let mut res = DeletableResult { files: Vec::new(), total: 0 };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
-    walk_deletable(root, all, pattern, &mut res);
+    walk_deletable(root, all, pattern, cutoff, excl_dirs, excl_files, &mut res);
     res
 }
 
@@ -897,7 +926,7 @@ pub struct PathStats {
     pub locked: u64,
 }
 
-fn get_path_deletable_stats(path: &str) -> PathStats {
+fn get_path_deletable_stats(path: &str, cutoff: Option<std::time::SystemTime>) -> PathStats {
     if path.is_empty() {
         return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0 };
     }
@@ -922,7 +951,8 @@ fn get_path_deletable_stats(path: &str) -> PathStats {
     if !probe_ok {
         return PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0 };
     }
-    let res = list_deletable(path, "*");
+    let (excl_dirs, excl_files) = load_global_excludes();
+    let res = list_deletable(path, "*", cutoff, &excl_dirs, &excl_files);
     let nfiles = res.files.len() as u64;
     let size: u64 = res.files.iter().map(|f| f.1).sum();
     PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles }
@@ -1326,6 +1356,81 @@ fn get_blocked(rule: &Json, running: &HashSet<String>) -> Vec<String> {
 //     声明条目不做占用探测（执行侧会临时停占用进程，探测会把文件全部误判 locked）。
 // PLAN_CAP（D13，方案 v1.1）：单条目 10 万 / 全扫描 100 万行，超限止推并标 filesTruncated。
 
+// ==================== 时效护栏 minAge（P0-M5，竞品借鉴落地方案 §5） ====================
+// 规则可声明 minAgeHours 或 minAgeDays（互斥，契约门禁 A9 钉死）。年龄口径 =
+// 当前时间 − 文件**修改时间**；mtime 早于 cutoff 才算够老。mtime 读不到按「太新」
+// 处理（fail-closed：误删正在写入的文件不可逆，宁可少删）。扫描（本文件）与执行
+// （engine::native::cleanup_execute）两侧共用同一谓词，防「扫描排除、执行照删」。
+
+/// 由秒数推 cutoff（现在 − secs）。Duration 溢出只在天文数字下发生，panic 可接受。
+pub fn min_age_cutoff(secs: u64) -> std::time::SystemTime {
+    std::time::SystemTime::now() - std::time::Duration::from_secs(secs)
+}
+
+/// 文件修改时间是否早于 cutoff（= 年龄达标）。mtime 读不到 ⇒ false（按太新处理）。
+pub fn modified_before(m: &fs::Metadata, cutoff: std::time::SystemTime) -> bool {
+    match m.modified() {
+        Ok(t) => t <= cutoff,
+        Err(_) => false,
+    }
+}
+
+/// 解析规则的 minAge 字段为秒数。minAgeDays = 24h 的整数倍；非正数/非数字按缺失处理。
+fn rule_min_age_secs(rule: &Json) -> Option<u64> {
+    let pos = |v: &Json| match v {
+        Json::Num(n) if *n > 0.0 => Some(*n),
+        _ => None,
+    };
+    let h = rule.get("minAgeHours").and_then(pos);
+    let d = rule.get("minAgeDays").and_then(pos);
+    match (h, d) {
+        (Some(h), None) => Some((h * 3600.0) as u64),
+        (None, Some(d)) => Some((d * 86400.0) as u64),
+        _ => None, // 双声明或全缺：门禁 A9 判双声明；全缺 = 无时效护栏
+    }
+}
+
+// ==================== 全局排除名单（P0-M5 §5.2） ====================
+// %APPDATA%\Trim\cleanup-exclude.txt，每行一个绝对路径：目录行=排除该目录整棵子树，
+// 文件行=排除该文件。大小写不敏感。扫描（本文件）与执行（engine::native::cleanup_execute）
+// 共用同一加载与判定，防「扫描排除、执行照删」。
+// 损坏/不可读按空名单处理（排除名单只影响删什么，不影响 fail-closed 的删除面）。
+
+pub fn global_exclude_file() -> Option<std::path::PathBuf> {
+    std::env::var("APPDATA")
+        .ok()
+        .map(|a| std::path::PathBuf::from(a).join("Trim").join("cleanup-exclude.txt"))
+}
+
+/// 返回 (目录前缀, 文件全路径) 两组小写排除项。行尾 `\` 归一。
+pub fn load_global_excludes() -> (Vec<String>, Vec<String>) {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    if let Some(f) = global_exclude_file() {
+        if let Ok(txt) = fs::read_to_string(&f) {
+            for line in txt.lines() {
+                let l = expand_env_path(line.trim()).trim_end_matches('\\').to_lowercase();
+                if l.is_empty() || l.starts_with('#') {
+                    continue;
+                }
+                // 有扩展名的行大概率是文件，按全路径排除；否则按目录前缀排除。
+                // 判定只影响分组方式：文件路径也能进 dirs（前缀匹配照样排除整棵树）。
+                if Path::new(&l).extension().is_some() {
+                    files.push(l);
+                } else {
+                    dirs.push(l);
+                }
+            }
+        }
+    }
+    (dirs, files)
+}
+
+/// 全路径（小写）是否被排除名单命中。
+pub fn path_excluded(excl_dirs: &[String], excl_files: &[String], low: &str) -> bool {
+    excl_dirs.iter().any(|d| low.starts_with(&format!("{}\\", d))) || excl_files.iter().any(|f| *f == low)
+}
+
 const PLAN_CAP_PER_ITEM: usize = 100_000;
 const PLAN_CAP_TOTAL: usize = 1_000_000;
 
@@ -1368,6 +1473,7 @@ fn walk_fk_dll(
     all: bool,
     pattern: &str,
     recurse: bool,
+    cutoff: Option<std::time::SystemTime>,
     excl_dirs: &[String],
     excl_files: &[String],
     acc: &mut FkAcc,
@@ -1386,11 +1492,19 @@ fn walk_fk_dll(
         };
         if ft.is_dir() {
             if recurse {
-                walk_fk_dll(&ent.path(), all, pattern, recurse, excl_dirs, excl_files, acc);
+                walk_fk_dll(&ent.path(), all, pattern, recurse, cutoff, excl_dirs, excl_files, acc);
             }
             continue;
         }
         if !ft.is_file() {
+            continue;
+        }
+        // minAge 时效护栏：太新的文件不计入 total（对齐 pattern 未命中的口径）
+        let md = match ent.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if cutoff.map(|c| !modified_before(&md, c)).unwrap_or(false) {
             continue;
         }
         let full_s = ent.path().to_string_lossy().to_string();
@@ -1405,7 +1519,7 @@ fn walk_fk_dll(
             continue;
         }
         acc.total_count += 1;
-        let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+        let size = md.len();
         if file_deletable(Path::new(&full_s)) {
             acc.deletable_count += 1; // 去重前累加（对齐 PS DLL 分支）
             if acc.seen.insert(low) {
@@ -1422,6 +1536,7 @@ fn walk_fk_snapshot(
     pattern: &str,
     recurse: bool,
     depth: usize,
+    cutoff: Option<std::time::SystemTime>,
     excl_dirs: &[String],
     excl_files: &[String],
     skip_lock: bool,
@@ -1441,7 +1556,7 @@ fn walk_fk_snapshot(
         };
         if ft.is_dir() {
             if recurse && depth < 24 {
-                walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, excl_dirs, excl_files, skip_lock, acc);
+                walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, cutoff, excl_dirs, excl_files, skip_lock, acc);
             }
             continue;
         }
@@ -1450,6 +1565,14 @@ fn walk_fk_snapshot(
         }
         let name = ent.file_name().to_string_lossy().to_string();
         if !all && !wildcard_match(&name, pattern) {
+            continue;
+        }
+        // minAge 时效护栏：太新的文件不计入 total（对齐 pattern 未命中的口径）
+        let md = match ent.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if cutoff.map(|c| !modified_before(&md, c)).unwrap_or(false) {
             continue;
         }
         let full_s = ent.path().to_string_lossy().to_string();
@@ -1465,7 +1588,7 @@ fn walk_fk_snapshot(
             continue;
         }
         acc.total_count += 1;
-        let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+        let size = md.len();
         if skip_lock || file_deletable(Path::new(&full_s)) {
             acc.deletable_count += 1;
             acc.push_budget(full_s, size);
@@ -1476,15 +1599,34 @@ fn walk_fk_snapshot(
 fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
     let skip_lock = rule.get("restartProcesses").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let has_excl = rule.get("excludeKeys").map(|v| v.ps_count()).unwrap_or(0) > 0;
+    // 规则级 excludePaths（C-2，2026-09-28 开门）：字符串数组，与全局排除名单同口径
+    // （%VAR% 展开 / 有扩展名=文件全路径 / 否则=目录前缀）。excludeKeys（对象型、reg 面）
+    // 仍被门禁 A2 禁用，回潮即红。走 excludePaths 同样要求快照模式（逐文件过滤必须在
+    // 受控枚举里做，DLL 快照模式没有排除通道）。
+    let has_expaths = rule.get("excludePaths").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let any_recurse_false = rule
         .get("fileKeys")
         .and_then(|v| v.as_arr())
         .map(|arr| arr.iter().any(|fk| fk.get("recurse") == Some(&Json::Bool(false))))
         .unwrap_or(false);
-    let snapshot_mode = skip_lock || has_excl || any_recurse_false;
-
-    let mut excl_dirs: Vec<String> = Vec::new();
-    let mut excl_files: Vec<String> = Vec::new();
+    let snapshot_mode = skip_lock || has_excl || has_expaths || any_recurse_false;
+    let cutoff = rule_min_age_secs(rule).map(min_age_cutoff);
+    // 全局排除名单并入规则级 excludeKeys/excludePaths 的同一过滤面（excludeKeys 本身
+    // 仍被门禁 A2 禁用，这里只为全局名单复用同一通道；执行侧 cleanup_execute 用同一谓词复核）
+    let (mut excl_dirs, mut excl_files) = load_global_excludes();
+    if let Some(arr) = rule.get("excludePaths").and_then(|v| v.as_arr()) {
+        for ep0 in arr.iter().filter_map(|v| v.as_str()) {
+            let ep = expand_env_path(ep0).trim_end_matches('\\').to_lowercase();
+            if ep.is_empty() || ep.starts_with('#') {
+                continue;
+            }
+            if Path::new(&ep).extension().is_some() {
+                excl_files.push(ep);
+            } else {
+                excl_dirs.push(ep);
+            }
+        }
+    }
     if let Some(arr) = rule.get("excludeKeys").and_then(|v| v.as_arr()) {
         for ex in arr {
             // reg 型排除键不属于文件过滤面（PS: -or -not $ex.path -or $ex.type -eq 'reg' → skip）
@@ -1541,11 +1683,11 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
             for dir in expand_glob_dirs(fp, true) {
                 if snapshot_mode {
                     walk_fk_snapshot(
-                        Path::new(&dir), all, pattern, recurse, 0,
+                        Path::new(&dir), all, pattern, recurse, 0, cutoff,
                         &excl_dirs, &excl_files, skip_lock, &mut acc,
                     );
                 } else {
-                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, &excl_dirs, &excl_files, &mut acc);
+                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, cutoff, &excl_dirs, &excl_files, &mut acc);
                 }
             }
         }
@@ -1575,22 +1717,65 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
 // 只做存在性 + 规模计数（删除留到执行阶段）：键存在计数 1，无 value 语义时
 // 另加 values 数 + 子键数；value='*' 或具名时只数键本身。
 
+/// F-2（2026-09-28 拍板）：规则级 excludePaths 对注册表目标的排除判定（扫描/执行两侧共用）。
+/// 排除条目形态与 regKeys path 同源：`HIVE\KEY`（排除整键）或 `HIVE\KEY::VALUE`
+/// （只排除该具名值）。归一口径：trim → %VAR% 展开 → 小写 → 去尾 `\`；注册表
+/// 键/值名不区分大小写。键下子树保护**不支持**（RegDeleteTree 原子删树无法保留
+/// 子键），带 :: 的排除只对具名值目标有意义——对树/通配形态目标是不可兑现语义，
+/// 由契约门禁 A2 禁止该组合（回潮即红）。
+pub fn reg_target_excluded(excludes: &[String], target: &str, value: Option<&str>) -> bool {
+    let norm = |s: &str| expand_env_path(s.trim()).trim_end_matches('\\').to_lowercase();
+    let t = norm(target);
+    if t.is_empty() {
+        return false;
+    }
+    let tv = value.map(|v| v.to_lowercase());
+    for e in excludes {
+        let en = norm(e);
+        if en.is_empty() {
+            continue;
+        }
+        match en.rsplit_once("::") {
+            Some((ek, ev)) if !ek.is_empty() => {
+                if t == ek && tv.as_deref() == Some(ev) {
+                    return true;
+                }
+            }
+            _ => {
+                if t == en {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn measure_reg_rule(rule: &Json) -> (bool, i64) {
     let mut exists = false;
     let mut count: i64 = 0;
     if let Some(arr) = rule.get("regKeys").and_then(|v| v.as_arr()) {
+        let excludes: Vec<String> = rule
+            .get("excludePaths")
+            .and_then(|v| v.as_arr())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
         for rk in arr {
             let Some(path) = rk.get("path").and_then(|v| v.as_str()) else {
                 continue;
             };
             let p = expand_env_path(path);
+            let value = rk.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            let value_opt = if value.is_empty() { None } else { Some(value) };
+            if reg_target_excluded(&excludes, &p, value_opt) {
+                continue;
+            }
             if !ffi::reg_key_exists(&p) {
                 continue;
             }
             exists = true;
             count += 1;
-            let value = rk.get("value").and_then(|v| v.as_str()).unwrap_or("");
-            if !value.is_empty() {
+            if value.is_empty() {
                 continue;
             }
             if let Some((values, subkeys)) = ffi::reg_key_counts(&p) {
@@ -1927,8 +2112,9 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             }
         }
 
-        // 目录型统计走可删口径：被占用文件不计入 size，locked 只进协议不进 UI
-        let stats = get_path_deletable_stats(&path);
+        // 目录型统计走可删口径：被占用文件不计入 size，locked 只进协议不进 UI。
+        // minAge 时效护栏（P0-M5）：目录型规则的统计与执行侧同口径过滤太新文件。
+        let stats = get_path_deletable_stats(&path, rule_min_age_secs(rule).map(min_age_cutoff));
         // 统计失败上报 size=null——渲染层对 null 走「—」分支，不用 0 B 冒充可清理
         let size_json = if stats.ok { stats.size.to_string() } else { "null".to_string() };
         // autoPath 命中时 size 即 autoPath 的大小，不再二次枚举

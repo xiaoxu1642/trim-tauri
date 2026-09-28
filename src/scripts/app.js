@@ -144,8 +144,10 @@
   // 数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
   const PAGE_SCRIPTS = {
     // 磁盘清理的首屏脚本（cleanup.js / fallback）已在 index.html 内；
-    // 查找器子视图（重复/大文件/空文件/AppData）才需要 finder.js
+    // 查找器子视图（重复/大文件/空文件）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
+    // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
+    uninstall: ['scripts/uninstall.js'],
     // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载
     optimizer: ['scripts/optimizer.js', 'scripts/sysrestore.js'],
     contextmenu: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/contextmenu.js'],
@@ -240,7 +242,7 @@
   const ACTIVE_PAGE_KEY = 'winclean-active-page';
 
   // 磁盘清理五合一：原五个独立页面收拢为 page-cleanup 内的分段视图
-  const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-big', 'cleanup-empty', 'cleanup-appdata'];
+  const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-big', 'cleanup-empty', 'cleanup-analyze'];
   const CLEANUP_VIEW_KEY = 'winclean-cleanup-view';
 
   function getCleanupView() {

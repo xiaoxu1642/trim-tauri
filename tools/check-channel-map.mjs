@@ -56,6 +56,39 @@ const PROBES = ['debug_data_dirs'];
 const RETIRED = {
   'settings:save': 'v2-F4（2026-09-26）：零调用方 + 无 UI 面 + 写入面在 models:save，整链摘除',
   'pwsh:prepare': 'v2-M15/B11（2026-09-26）：D4 孤儿，且 Tauri 轨无内置运行时可准备，与 pwsh:status 完全重复',
+  // D4 基线清零（2026-09-28，用户拍板「零引用功能全部清除」）：六条孤儿整链摘除
+  // （命令 fn + lib.rs 注册 + CHANNEL_MAP + api 包装器一并删除；shutdown:begin/complete
+  // 保留为刻意登记的扩展点，见 D4_ORPHANS）
+  'app:get-theme': 'D4 清零（2026-09-28）：主题只走本地 theme.js，零调用方整链摘除',
+  'window:update-overlay': 'D4 清零（2026-09-28）：自绘标题栏改由 CSS/body.win-maximized 承担，no-op 命令已无意义',
+  'netspeed:ping': 'D4 清零（2026-09-28）：零调用方，netcheck 域已覆盖连通性探测，整链摘除',
+  'netspeed:throughput': 'D4 清零（2026-09-28）：同上（回环吞吐测速无 UI 面）',
+  'elevate:status': 'D4 清零（2026-09-28）：提权状态走事件 elevate:notice，状态查询零调用方',
+  'paths:validate': 'D4 清零（2026-09-28）：纯死通道（Rust 侧亦无内部调用，v2-F19 订正过错误理由）',
+};
+
+/**
+ * Tauri 轨**正向新增**通道（上游 Electron preload.js 快照里没有的）。
+ * 上游快照是只读契约锚点（AGENTS §5.12），不回填；Tauri 时代新增能力在这里登记，
+ * 每条写明来源批次与理由。与 RETIRED 对称的反向豁免：不登记会被 A 组断言当
+ * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
+ */
+const TAURI_ADDED = {
+  'cleanup:exclude-list': 'C-1（2026-09-28）：排除名单 UI 读面（上游无此能力）',
+  'cleanup:exclude-add': 'C-1（2026-09-28）：排除名单 UI 写面（主窗档）',
+  'cleanup:exclude-remove': 'C-1（2026-09-28）：排除名单 UI 写面（主窗档）',
+  'cleanup:custom-list': 'C-3（2026-09-28）：自定义清理目录读面（上游无此能力）',
+  'cleanup:custom-add': 'C-3（2026-09-28）：自定义清理目录写面（主窗档）',
+  'cleanup:custom-remove': 'C-3（2026-09-28）：自定义清理目录写面（主窗档）',
+  'cleanup:custom-scan': 'C-3（2026-09-28）：自定义清理目录扫描（结果落快照）',
+  'cleanup:custom-execute': 'C-3（2026-09-28）：自定义清理目录执行（只回收站，主窗档）',
+  'uninstall:report-list': 'U-6（2026-09-28）：批次报告列表（上游只写报告无查看面）',
+  'uninstall:report-get': 'U-6（2026-09-28）：批次报告明细读取（同上）',
+  'uninstall:appx-logo': 'U-3（2026-09-28）：Appx Logo 懒加载（上游无此能力）',
+  'cleanup:reg-backup-list': 'C-4（2026-09-28）：注册表备份列表（上游只写备份无还原面）',
+  'cleanup:reg-backup-restore': 'C-4（2026-09-28）：注册表备份还原（reg import，主窗档）',
+  'cleanup:file-backup-list': 'C-4（2026-09-28）：永久删批次文件备份清单（2026-09-28 拍板补删前备份）',
+  'cleanup:file-backup-restore': 'C-4（2026-09-28）：文件备份拷回原路径（主窗档）',
 };
 
 function collect(set, re, text) {
@@ -112,14 +145,17 @@ console.log('=== IPC 通道映射一致性门禁 ===\n');
 const retiredKeys = Object.keys(RETIRED);
 const staleRetired = retiredKeys.filter(c => channelMap.has(c)); // 退役清单里又冒出来了 → 红
 const onlyPreload = [...preloadInvoke].filter(c => !channelMap.has(c) && !RETIRED[c]);
-const onlyMap = [...channelMap.keys()].filter(c => !preloadInvoke.has(c));
-check(onlyPreload.length === 0 && onlyMap.length === 0 && staleRetired.length === 0,
-  `A. invoke 通道集合一致（preload ${preloadInvoke.size} / CHANNEL_MAP ${channelMap.size} / 已退役 ${retiredKeys.length}）`,
+const onlyMap = [...channelMap.keys()].filter(c => !preloadInvoke.has(c) && !TAURI_ADDED[c]);
+const staleAdded = Object.keys(TAURI_ADDED).filter(c => !channelMap.has(c)); // 登记了但映射表没有 → 豁免失效
+check(onlyPreload.length === 0 && onlyMap.length === 0 && staleRetired.length === 0 && staleAdded.length === 0,
+  `A. invoke 通道集合一致（preload ${preloadInvoke.size} / CHANNEL_MAP ${channelMap.size} / 已退役 ${retiredKeys.length} / 正向新增 ${Object.keys(TAURI_ADDED).length}）`,
   staleRetired.length
     ? `已退役通道又出现在映射表里（请删条目或撤退役登记）${JSON.stringify(staleRetired)}`
-    : onlyPreload.length || onlyMap.length
-      ? `preload 独有 ${JSON.stringify(onlyPreload)} / map 独有 ${JSON.stringify(onlyMap)}`
-      : '');
+    : staleAdded.length
+      ? `正向新增登记已失效（映射表里没有这些通道）${JSON.stringify(staleAdded)}`
+      : onlyPreload.length || onlyMap.length
+        ? `preload 独有 ${JSON.stringify(onlyPreload)} / map 独有 ${JSON.stringify(onlyMap)}`
+        : '');
 
 // ---- B. send 集合 ----
 const expectedSend = new Set([...sendMap.keys(), ...WINDOW_BRIDGED, ...DIRECT]);
@@ -170,19 +206,9 @@ const D4_ORPHANS = new Map([
   // 现状基线：v2-M15 实测的零调用方通道。基线是**双向棘轮**——
   // 新增孤儿判红（不许再往表里加不接线的条目），基线里的条目一旦有了调用点也判红
   // （白名单不许留死条目，否则下一次没人记得它其实早就接上了）。摘除或接线后从这里删掉。
-  ['app:get-theme', 'v2-M15：主题只走本地 theme.js，无调用点'],
-  ['window:update-overlay', 'v2-M15：自绘标题栏改由 CSS/`body.win-maximized` 承担'],
-  // 'pwsh:prepare'：B11（2026-09-26）已整链摘除，登记进 RETIRED，不再占孤儿基线
-  // v2-F4 已整链摘除（命令 + lib.rs 注册 + CHANNEL_MAP + api.settings.save 一并删除）。
-  // 留作「已摘除通道」的登记：将来若有人重新注册它，D1/D2 会红，此处备忘其死因。
-  // - 'settings:save'：零调用方 + 无 UI 面 + 写入面在 models_save，2026-09-26 摘除
-  ['netspeed:ping', 'v2-M15：测速页现由 netspeed_throughput 之外的路径完成，ping 无调用点'],
-  ['netspeed:throughput', 'v2-M15：同上'],
-  ['elevate:status', 'v2-M15：提权状态走事件 elevate:notice，状态查询无人调'],
-  // 审查 v2-F19：原理由写成「由 Rust 侧内部调用」——实测该命令在全仓 `.ps`/`.rs` 中
-  // 除定义外 **0 命中**（Rust 侧也没有任何内部调用点），那条理由是错的。
-  // 错误理由比没有理由更糟：下一轮会把它当「已核对」抄下去，掩盖它是纯死通道。
-  ['paths:validate', 'v2-F19 订正：零调用方（Rust 侧亦无内部调用），纯死通道，待摘除'],
+  // 2026-09-28 D4 基线清零：原 6 条孤儿（app:get-theme / window:update-overlay /
+  // netspeed:ping / netspeed:throughput / elevate:status / paths:validate）整链摘除并
+  // 登记 RETIRED；仅余 shutdown 两通道为刻意保留的扩展点。
   ['shutdown:begin', 'v2-M15：`app.js:677` 注明「保留作扩展点」——刻意保留，但要显式登记'],
   ['shutdown:complete', 'v2-M15：同上'],
 ]);

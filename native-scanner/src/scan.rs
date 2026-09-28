@@ -314,6 +314,143 @@ fn dir_size(dir: &Path) -> u64 {
     total
 }
 
+// ==================== 磁盘分析器（C-5，2026-09-28 拍板：逐层按需下钻） ====================
+// 一次调用 = 一个目录层的完整画像：父目录 du 汇总（目录/文件计数 + 扩展名聚合）
+// + 一级子目录大小排行（并行 du）。下钻由前端逐层发起，不做一次性全树——
+// 大盘全树的内存与耗时都不可控，且「最大目录排行」本来就是每层 child du 的副产品。
+
+/// 文件名 → 扩展名聚合键（.ext 小写、≤12 字符；无扩展名/超长归「(其他)」）
+fn analyze_ext_key(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((_, e)) if !e.is_empty() && e.len() <= 12 => format!(".{}", e.to_lowercase()),
+        _ => "(其他)".to_string(),
+    }
+}
+
+/// du 原语带计数与扩展名聚合。与 dir_size 同口径：跳过 symlink、联接点不深入；
+/// 大小用 DirEntry.metadata 复用（不额外 syscall）。exts 键数上限 64——巨型目录
+/// 的扩展名种类可能上万，聚合表只保留先到的前 64 键（Top-N 语义近似，够「看大头」）。
+fn analyze_dir_deep(dir: &Path, exts: &mut std::collections::HashMap<String, u64>) -> (u64, u64, u64) {
+    let (mut total, mut dirs, mut files) = (0u64, 0u64, 0u64);
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = match fs::read_dir(&d) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            match ent.file_type() {
+                Ok(t) if t.is_symlink() => continue,
+                Ok(t) if t.is_dir() && !is_reparse(&ent) => {
+                    dirs += 1;
+                    stack.push(ent.path());
+                }
+                Ok(t) if t.is_file() => {
+                    let sz = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                    total += sz;
+                    files += 1;
+                    if let Some(name) = ent.file_name().to_str() {
+                        let key = analyze_ext_key(name);
+                        if exts.len() < 64 || exts.contains_key(&key) {
+                            *exts.entry(key).or_insert(0) += sz;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (total, dirs, files)
+}
+
+/// 磁盘分析一层。输出（type=analyzer，extra 字段均为字符串，前端 Number() 转换）：
+///   kind=summary：path/size(=子树总字节)/dirCount/fileCount/elapsedMs
+///   kind=dir    ：一级子目录，size=子树字节，降序（快照槽按此登记 kind=dir 供删除复用）
+///   kind=ext    ：扩展名聚合，ext=键名，降序 ≤16 条
+pub fn analyze(paths: &[String], sink: &dyn Sink) {
+    for p in paths {
+        let root = Path::new(p);
+        if !root.is_dir() {
+            continue;
+        }
+        let t0 = std::time::Instant::now();
+        let rd = match fs::read_dir(root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let mut subdirs: Vec<PathBuf> = Vec::new();
+        let (mut top_total, mut top_files) = (0u64, 0u64);
+        let mut exts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for ent in rd.flatten() {
+            match ent.file_type() {
+                Ok(t) if t.is_symlink() => continue,
+                Ok(t) if t.is_dir() && !is_reparse(&ent) => subdirs.push(ent.path()),
+                Ok(t) if t.is_file() => {
+                    let sz = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                    top_total += sz;
+                    top_files += 1;
+                    if let Some(name) = ent.file_name().to_str() {
+                        let key = analyze_ext_key(name);
+                        if exts.len() < 64 || exts.contains_key(&key) {
+                            *exts.entry(key).or_insert(0) += sz;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 每个子目录整树 du + 子树 ext 聚合（rayon 并行，child_dir_sizes 同款通道）
+        let results: Vec<(PathBuf, u64, u64, u64, Vec<(String, u64)>)> = subdirs
+            .par_iter()
+            .map(|d| {
+                let mut m: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                let (sz, dc, fc) = analyze_dir_deep(d, &mut m);
+                (d.clone(), sz, dc, fc, m.into_iter().collect())
+            })
+            .collect();
+        let (mut total, mut dir_count, mut file_count) = (top_total, subdirs.len() as u64, top_files);
+        for (_d, sz, dc, fc, m) in &results {
+            total += sz;
+            dir_count += dc;
+            file_count += fc;
+            for (k, v) in m {
+                if exts.len() < 64 || exts.contains_key(k) {
+                    *exts.entry(k.clone()).or_insert(0) += v;
+                }
+            }
+        }
+        let mut children: Vec<(PathBuf, u64)> = results
+            .iter()
+            .map(|(d, sz, _, _, _)| (d.clone(), *sz))
+            .filter(|(_, sz)| *sz >= 1)
+            .collect();
+        children.sort_by(|a, b| b.1.cmp(&a.1));
+        // 防呆：单层子目录可能数以万计（异常目录），排行只发 Top 200，截断在 summary 里声明
+        let mut children_truncated = false;
+        if children.len() > 200 {
+            children.truncate(200);
+            children_truncated = true;
+        }
+        item(sink, "analyzer", root, total, &[
+            ("kind", "summary".to_string()),
+            ("dirCount", dir_count.to_string()),
+            ("fileCount", file_count.to_string()),
+            ("elapsedMs", t0.elapsed().as_millis().to_string()),
+            ("childrenTruncated", if children_truncated { "true" } else { "false" }.to_string()),
+        ]);
+        for (cp, sz) in &children {
+            item(sink, "analyzer", cp, *sz, &[("kind", "dir".to_string())]);
+        }
+        let mut ext_list: Vec<(String, u64)> = exts.into_iter().collect();
+        ext_list.sort_by(|a, b| b.1.cmp(&a.1));
+        ext_list.truncate(16);
+        for (name, sz) in ext_list {
+            item(sink, "analyzer", root, sz, &[("kind", "ext".to_string()), ("ext", name)]);
+        }
+        progress(sink, 100);
+    }
+}
+
 /// 计算完整文件的 Blake3 内容指纹；先按体积分组，只有可能重复的文件才会进入这里。
 fn file_fp(path: &Path) -> Option<[u8; 32]> {
     let mut f = fs::File::open(path).ok()?;
@@ -330,8 +467,13 @@ fn file_fp(path: &Path) -> Option<[u8; 32]> {
     Some(*hasher.finalize().as_bytes())
 }
 
-/// 重复文件三级检测：内容指纹（体积+Blake3）> 文档内容相似 > 同名文件。
-/// 每个文件最多归入一组；组 id 前缀 dupc/dups/dupn，match 字段供前端区分展示。
+/// 重复文件检测（2026-09-28 七轮拍板重排）：
+///   ① 同名同大小组（文件名优先命中——同名组内再按大小二次校验，同名不同大小的
+///      成员剔除出组：同名不同内容太常见，不误报）；
+///   ② 内容指纹组（同体积 + Blake3；仅收未被同名组占用的文件）；
+///   ③ ~~文档内容相似组~~ 已整块移除——它把**不同名**的文件塞进一组（相似度 100%
+///      却是不同小说），正是用户"明细不一样"的来源。
+/// 每个文件最多归入一组；组 id 前缀 dupn/dupc，match 字段供前端区分展示。
 pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     init_scan_threads();
     // 审查 v2-M1：一次扫描一个上下文、跨根累积。原实现每根各建一个 Vec 并整体赋值交回，
@@ -356,41 +498,10 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
         }
     }
     progress(sink, 15);
-    // ---------- 1) 内容指纹组：仅同体积文件计算 Blake3 ----------
-    let hashed: Vec<(u64, PathBuf, [u8; 32])> = files
-        .par_iter()
-        .filter(|(_, sz)| *sz > 0 && *sz >= min_size)
-        .filter_map(|(p, sz)| file_fp(p).map(|fp| (*sz, p.clone(), fp)))
-        .collect();
-    progress(sink, 60);
-    let mut cmap: HashMap<(u64, [u8; 32]), Vec<PathBuf>> = HashMap::new();
-    for (size, path, fp) in hashed {
-        cmap.entry((size, fp)).or_default().push(path);
-    }
-    let mut content_groups: Vec<(u64, Vec<PathBuf>)> = cmap
-        .into_iter()
-        .filter(|(_, v)| v.len() >= 2)
-        .map(|(k, v)| (k.0, v))
-        .collect();
-    content_groups.sort_by_key(|(sz, _)| std::cmp::Reverse(*sz));
-    let mut taken: HashSet<PathBuf> = HashSet::new();
-    for (_, v) in &content_groups {
-        for p in v {
-            taken.insert(p.clone());
-        }
-    }
-    // ---------- 2) 文档内容相似组 ----------
-    let similar_groups = find_similar_doc_groups(&files, &taken, sink);
-    for (_, v) in &similar_groups {
-        for (p, _) in v {
-            taken.insert(p.clone());
-        }
-    }
-    progress(sink, 85);
-    // ---------- 3) 同名文件组（含扩展名一致，忽略大小写） ----------
+    // ---------- 1) 同名同大小组（文件名优先；不受 min_size 约束——同名小文件也是重复） ----------
     let mut nmap: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
     for (p, sz) in &files {
-        if *sz == 0 || taken.contains(p) {
+        if *sz == 0 {
             continue; // 0 字节文件已作为 emptyfile 输出，不再参与同名分组
         }
         let name = p
@@ -402,18 +513,50 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
         }
         nmap.entry(name).or_default().push((p.clone(), *sz));
     }
-    let mut name_groups: Vec<(u64, Vec<(PathBuf, u64)>)> = nmap
-        .into_values()
-        .filter(|v| v.len() >= 2)
-        .map(|v| {
-            let sum: u64 = v.iter().map(|(_, s)| s).sum();
-            (sum, v)
-        })
-        .collect();
+    // 组内按大小二次聚合：同名同大小才是重复候选
+    let mut name_groups: Vec<(u64, Vec<(PathBuf, u64)>)> = Vec::new();
+    for v in nmap.into_values() {
+        let mut by_size: HashMap<u64, Vec<(PathBuf, u64)>> = HashMap::new();
+        for (p, sz) in v {
+            by_size.entry(sz).or_default().push((p, sz));
+        }
+        for (_, group) in by_size.into_iter().filter(|(_, g)| g.len() >= 2) {
+            let sum: u64 = group.iter().map(|(_, s)| s).sum();
+            name_groups.push((sum, group));
+        }
+    }
     name_groups.sort_by_key(|(sum, _)| std::cmp::Reverse(*sum));
+    let mut taken: HashSet<PathBuf> = HashSet::new();
+    for (_, v) in &name_groups {
+        for (p, _) in v {
+            taken.insert(p.clone());
+        }
+    }
+    progress(sink, 55);
+    // ---------- 2) 内容指纹组：仅同体积文件计算 Blake3（未被同名组占用的） ----------
+    let hashed: Vec<(u64, PathBuf, [u8; 32])> = files
+        .par_iter()
+        .filter(|(p, sz)| *sz > 0 && *sz >= min_size && !taken.contains(p))
+        .filter_map(|(p, sz)| file_fp(p).map(|fp| (*sz, p.clone(), fp)))
+        .collect();
+    progress(sink, 80);
+    let mut cmap: HashMap<(u64, [u8; 32]), Vec<PathBuf>> = HashMap::new();
+    for (size, path, fp) in hashed {
+        cmap.entry((size, fp)).or_default().push(path);
+    }
+    let mut content_groups: Vec<(u64, Vec<PathBuf>)> = cmap
+        .into_iter()
+        .filter(|(_, v)| v.len() >= 2)
+        .map(|(k, v)| (k.0, v))
+        .collect();
+    content_groups.sort_by_key(|(sz, _)| std::cmp::Reverse(*sz));
     progress(sink, 95);
-    // ---------- 输出 ----------
+    // ---------- 输出：同名组在前（文件名优先命中），内容组在后 ----------
     let mut gid = 0usize;
+    for (_, v) in &name_groups {
+        gid += 1;
+        emit_dup_group(sink, v, &format!("dupn{:04}", gid), "name", None);
+    }
     for (sz, v) in &content_groups {
         gid += 1;
         emit_dup_group(
@@ -423,14 +566,6 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
             "content",
             None,
         );
-    }
-    for (sim, v) in &similar_groups {
-        gid += 1;
-        emit_dup_group(sink, v, &format!("dups{:04}", gid), "similar", Some(*sim));
-    }
-    for (_, v) in &name_groups {
-        gid += 1;
-        emit_dup_group(sink, v, &format!("dupn{:04}", gid), "name", None);
     }
     for e in empty {
         item(sink, "emptyfile", &e, 0, &[]);
@@ -450,358 +585,6 @@ fn emit_dup_group(sink: &dyn Sink, v: &[(PathBuf, u64)], gid: &str, match_kind: 
         }
         item(sink, "duplicate", p, *sz, &extra);
     }
-}
-
-// ==================== 文档内容相似检测 ====================
-const SIM_EXTS: [&str; 5] = ["txt", "md", "log", "csv", "docx"];
-const SIM_MIN_BYTES: u64 = 256; // 过短文本 shingle 太少，不参与相似判定
-const SIM_MAX_BYTES: u64 = 4 * 1024 * 1024;
-const SIM_MIN_SHINGLES: usize = 24;
-const SIM_THRESHOLD: f64 = 0.8;
-const SIM_MAX_DOCS: usize = 2000; // 单扩展名参与上限，防极端目录拖垮扫描
-const SIM_MAX_PAIRS: usize = 400_000; // 单扩展名两两比较上限
-
-fn dsu_find(parent: &mut [usize], mut x: usize) -> usize {
-    while parent[x] != x {
-        parent[x] = parent[parent[x]];
-        x = parent[x];
-    }
-    x
-}
-
-/// 归一化：小写、丢弃非字母数字、空白折叠为单空格。
-fn normalize_text(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut pending_space = false;
-    for ch in s.chars() {
-        if ch.is_whitespace() {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if ch.is_alphanumeric() {
-            if pending_space {
-                out.push(' ');
-                pending_space = false;
-            }
-            for lc in ch.to_lowercase() {
-                out.push(lc);
-            }
-        } else {
-            pending_space = false;
-        }
-    }
-    out
-}
-
-/// 16 字符窗口 shingle + FNV-1a 哈希，1/3 采样降内存；返回排序去重的指纹集。
-fn shingle_set(norm: &str) -> Option<Vec<u64>> {
-    const W: usize = 16;
-    const STRIDE: usize = 3;
-    let chars: Vec<char> = norm.chars().collect();
-    if chars.len() < W * 6 {
-        return None;
-    }
-    let mut raw: Vec<u64> = Vec::with_capacity(chars.len() / STRIDE + 1);
-    let mut i = 0usize;
-    while i + W <= chars.len() {
-        let mut h: u64 = 0xcbf29ce484222325;
-        for ch in &chars[i..i + W] {
-            let c = *ch as u32;
-            h = (h ^ (c as u64)).wrapping_mul(0x100000001b3);
-            h = (h ^ ((c >> 16) as u64)).wrapping_mul(0x100000001b3);
-        }
-        raw.push(h);
-        i += STRIDE;
-    }
-    raw.sort_unstable();
-    raw.dedup();
-    if raw.len() < SIM_MIN_SHINGLES {
-        return None;
-    }
-    Some(raw)
-}
-
-fn jaccard(a: &[u64], b: &[u64]) -> f64 {
-    let (mut i, mut j) = (0usize, 0usize);
-    let mut inter = 0usize;
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                inter += 1;
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    let uni = a.len() + b.len() - inter;
-    if uni == 0 {
-        0.0
-    } else {
-        inter as f64 / uni as f64
-    }
-}
-
-fn doc_sketch(path: &Path) -> Option<Vec<u64>> {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let text = if ext == "docx" {
-        extract_docx_text(path)?
-    } else {
-        let raw = fs::read(path).ok()?;
-        String::from_utf8_lossy(&raw).into_owned()
-    };
-    shingle_set(&normalize_text(&text))
-}
-
-/// 文档相似检测：Jaccard ≥ 阈值的文档经并查集聚类；返回 (簇内最低相似度%, 成员)。
-fn find_similar_doc_groups(
-    files: &[(PathBuf, u64)],
-    taken: &HashSet<PathBuf>,
-    sink: &dyn Sink,
-) -> Vec<(u64, Vec<(PathBuf, u64)>)> {
-    let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, (p, sz)) in files.iter().enumerate() {
-        if *sz < SIM_MIN_BYTES || *sz > SIM_MAX_BYTES || taken.contains(p) {
-            continue;
-        }
-        let ext = p
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        if SIM_EXTS.contains(&ext.as_str()) {
-            buckets.entry(ext).or_default().push(i);
-        }
-    }
-    let mut out: Vec<(u64, Vec<(PathBuf, u64)>)> = Vec::new();
-    for (ext, mut idxs) in buckets {
-        if idxs.len() > SIM_MAX_DOCS {
-            sink.warn(&format!(
-                ".{} 文档 {} 个超出相似检测上限，仅分析前 {} 个",
-                ext,
-                idxs.len(),
-                SIM_MAX_DOCS
-            ));
-            idxs.truncate(SIM_MAX_DOCS);
-        }
-        let sketches: Vec<Option<Vec<u64>>> =
-            idxs.par_iter().map(|i| doc_sketch(&files[*i].0)).collect();
-        // (sketches 下标, 指纹长度)，按长度升序便于窗口剪枝：Jaccard ≤ 短集/长集
-        let mut docs: Vec<(usize, usize)> = sketches
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.as_ref().map(|v| v.len()).unwrap_or(0) >= SIM_MIN_SHINGLES)
-            .map(|(k, s)| (k, s.as_ref().map(|v| v.len()).unwrap_or(0)))
-            .collect();
-        docs.sort_by_key(|(_, l)| *l);
-        let n = docs.len();
-        if n < 2 {
-            continue;
-        }
-        let mut parent: Vec<usize> = (0..n).collect();
-        let mut min_edge: Vec<u64> = vec![100u64; n];
-        let mut pairs = 0usize;
-        let mut capped = false;
-        for i in 0..n {
-            let (ki, li) = docs[i];
-            let si = sketches[ki].as_ref().unwrap();
-            for j in i + 1..n {
-                let (kj, lj) = docs[j];
-                if (lj as f64) * SIM_THRESHOLD > li as f64 {
-                    break; // 长度差过大，不可能达到阈值
-                }
-                pairs += 1;
-                if pairs > SIM_MAX_PAIRS {
-                    capped = true;
-                    break;
-                }
-                let jac = jaccard(si, sketches[kj].as_ref().unwrap());
-                if jac >= SIM_THRESHOLD {
-                    let pct = (jac * 100.0).round().min(100.0) as u64;
-                    let ri = dsu_find(&mut parent, i);
-                    let rj = dsu_find(&mut parent, j);
-                    if ri != rj {
-                        parent[rj] = ri;
-                        min_edge[ri] = min_edge[ri].min(min_edge[rj]).min(pct);
-                    }
-                }
-            }
-            if capped {
-                sink.warn(&format!(".{} 相似比较次数达上限，部分文档未参与聚类", ext));
-                break;
-            }
-        }
-        let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
-        for i in 0..n {
-            let r = dsu_find(&mut parent, i);
-            clusters.entry(r).or_default().push(i);
-        }
-        let mut groups: Vec<(u64, Vec<(PathBuf, u64)>)> = clusters
-            .into_values()
-            .filter(|m| m.len() >= 2)
-            .map(|m| {
-                let root = dsu_find(&mut parent, m[0]);
-                let sim = min_edge[root];
-                let members: Vec<(PathBuf, u64)> = m
-                    .iter()
-                    .map(|k| {
-                        let fi = idxs[docs[*k].0];
-                        (files[fi].0.clone(), files[fi].1)
-                    })
-                    .collect();
-                (sim, members)
-            })
-            .collect();
-        groups.sort_by_key(|(_, v)| {
-            let max: u64 = v.iter().map(|(_, s)| *s).max().unwrap_or(0);
-            std::cmp::Reverse(max)
-        });
-        out.extend(groups);
-    }
-    out
-}
-
-// ==================== docx 正文抽取 ====================
-/// 解压 docx（zip 容器）中的 word/document.xml 并转纯文本。
-fn extract_docx_text(path: &Path) -> Option<String> {
-    let data = fs::read(path).ok()?;
-    if data.len() > (SIM_MAX_BYTES as usize) * 2 {
-        return None;
-    }
-    let xml = zip_read_entry(&data, b"word/document.xml")?;
-    Some(xml_to_text(&xml))
-}
-
-/// 在 zip 字节流中按中央目录查找并解压单个条目（支持 stored 与 raw deflate）。
-fn zip_read_entry(data: &[u8], want: &[u8]) -> Option<Vec<u8>> {
-    const EOCD_SIG: [u8; 4] = [0x50, 0x4b, 0x05, 0x06];
-    const CDH_SIG: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
-    const LFH_SIG: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
-    if data.len() < 22 {
-        return None;
-    }
-    // 从尾部找 EOCD（zip 注释最长 65535 字节）
-    let scan_start = data.len().saturating_sub(22 + 65535);
-    let mut eocd = None;
-    let mut i = data.len() - 22;
-    loop {
-        if data[i..i + 4] == EOCD_SIG {
-            eocd = Some(i);
-            break;
-        }
-        if i == scan_start {
-            break;
-        }
-        i -= 1;
-    }
-    let eocd = eocd?;
-    let entries = u16::from_le_bytes([data[eocd + 10], data[eocd + 11]]) as usize;
-    let cd_off = u32::from_le_bytes([
-        data[eocd + 16],
-        data[eocd + 17],
-        data[eocd + 18],
-        data[eocd + 19],
-    ]) as usize;
-    let mut p = cd_off;
-    for _ in 0..entries {
-        if p + 46 > data.len() || data[p..p + 4] != CDH_SIG {
-            return None;
-        }
-        let method = u16::from_le_bytes([data[p + 10], data[p + 11]]);
-        let csize =
-            u32::from_le_bytes([data[p + 20], data[p + 21], data[p + 22], data[p + 23]]) as usize;
-        let name_len = u16::from_le_bytes([data[p + 28], data[p + 29]]) as usize;
-        let extra_len = u16::from_le_bytes([data[p + 30], data[p + 31]]) as usize;
-        let comment_len = u16::from_le_bytes([data[p + 32], data[p + 33]]) as usize;
-        let lfh_off = u32::from_le_bytes([
-            data[p + 42],
-            data[p + 43],
-            data[p + 44],
-            data[p + 45],
-        ]) as usize;
-        let name = &data[p + 46..p + 46 + name_len];
-        p += 46 + name_len + extra_len + comment_len;
-        if name.eq_ignore_ascii_case(want) {
-            if lfh_off + 30 > data.len() || data[lfh_off..lfh_off + 4] != LFH_SIG {
-                return None;
-            }
-            let l_name = u16::from_le_bytes([data[lfh_off + 26], data[lfh_off + 27]]) as usize;
-            let l_extra = u16::from_le_bytes([data[lfh_off + 28], data[lfh_off + 29]]) as usize;
-            let start = lfh_off + 30 + l_name + l_extra;
-            let comp = data.get(start..start + csize)?;
-            return match method {
-                0 => Some(comp.to_vec()),
-                8 => miniz_oxide::inflate::decompress_to_vec(comp).ok(),
-                _ => None,
-            };
-        }
-    }
-    None
-}
-
-/// document.xml 转纯文本：段落尾换行、去标签、解常见实体。
-fn xml_to_text(xml: &[u8]) -> String {
-    let s = String::from_utf8_lossy(xml);
-    let mut out = String::with_capacity(s.len() / 2);
-    let mut in_tag = false;
-    let mut tag = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '<' => {
-                in_tag = true;
-                tag.clear();
-            }
-            '>' => {
-                if tag.starts_with("/w:p") || tag.starts_with("/w:br") || tag == "w:br" {
-                    out.push('\n');
-                } else if tag.starts_with("w:tab") {
-                    out.push(' ');
-                }
-                in_tag = false;
-            }
-            _ => {
-                if in_tag {
-                    tag.push(c);
-                } else if c == '&' {
-                    let mut ent = String::new();
-                    for e in chars.by_ref() {
-                        if e == ';' {
-                            break;
-                        }
-                        ent.push(e);
-                        if ent.len() > 10 {
-                            break;
-                        }
-                    }
-                    match ent.as_str() {
-                        "amp" => out.push('&'),
-                        "lt" => out.push('<'),
-                        "gt" => out.push('>'),
-                        "quot" => out.push('"'),
-                        "apos" => out.push('\''),
-                        _ => {
-                            let cp = ent.strip_prefix('#').and_then(|num| {
-                                num.strip_prefix('x')
-                                    .or_else(|| num.strip_prefix('X'))
-                                    .and_then(|h| u32::from_str_radix(h, 16).ok())
-                                    .or_else(|| num.parse::<u32>().ok())
-                            });
-                            if let Some(ch) = cp.and_then(char::from_u32) {
-                                out.push(ch);
-                            }
-                        }
-                    }
-                } else {
-                    out.push(c);
-                }
-            }
-        }
-    }
-    out
 }
 
 /// bigfiles 的分片 Top-K 堆类型（Reverse 使 BinaryHeap 变成「最小堆」）。
@@ -867,7 +650,7 @@ fn merge_topk_into(a: &mut TopHeap, b: TopHeap, cap: usize) {
 }
 
 /// 单个任务内串行递归，只用容量 cap 的堆保留最大项；顺带累计计数并输出心跳。
-fn topk_in(dir: &Path, recursive: bool, cap: usize, counter: &AtomicU64, sink: &dyn Sink) -> TopHeap {
+fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, counter: &AtomicU64, sink: &dyn Sink) -> TopHeap {
     let mut heap: TopHeap = BinaryHeap::new();
     let mut stack: Vec<(PathBuf, bool)> = vec![(dir.to_path_buf(), recursive)];
     let mut local: u64 = 0;
@@ -889,10 +672,17 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, counter: &AtomicU64, sink: &
                     stack.push((ent.path(), true));
                 }
             } else if ft.is_file() {
-                // P0：DirEntry 自带大小，不额外 syscall
+                // 八轮拍板：内存系统文件（pagefile*.sys/swapfile/hiberfil）与 2025 年前
+                // 创建的文件不进候选（列出来纯噪音）；心跳计数照常
+                if is_memory_system_file(&ent.file_name().to_string_lossy()) {
+                    continue;
+                }
+                // P0：DirEntry 自带大小，不额外 syscall；min_size 前置过滤（六轮拍板：大文件 ≥300MB）
                 if let Ok(md) = ent.metadata() {
                     let sz = md.len();
-                    push_topk(&mut heap, sz, ent.path(), cap);
+                    if sz >= min_size && created_in_current_year(&md) {
+                        push_topk(&mut heap, sz, ent.path(), cap);
+                    }
                     local += 1;
                 }
             }
@@ -905,7 +695,9 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, counter: &AtomicU64, sink: &
 
 /// 大文件扫描（性能升级 P0-3/P1-1）：任务分片 + 每片局部 Top-K 堆 + reduce 归并。
 /// 内存从 O(文件总数) 降到 O(线程数 × N)；天然无锁；心跳线 @@SCANNED:n@@ 实时反馈。
-pub fn bigfiles(roots: &[String], count: usize, sink: &dyn Sink) {
+/// 2026-09-28 六轮拍板：前端删「数量上限」下拉（固定 200）、「大文件」阈值固定 300MB——
+/// 小于阈值的文件不进堆（Top-K 语义不变，只是候选面收窄）。
+pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) {
     init_scan_threads();
     let cap = count.max(1);
     let counter = AtomicU64::new(0);
@@ -920,7 +712,7 @@ pub fn bigfiles(roots: &[String], count: usize, sink: &dyn Sink) {
     }
     let heap: TopHeap = tasks
         .par_iter()
-        .map(|(d, rec)| topk_in(d, *rec, cap, &counter, sink))
+        .map(|(d, rec)| topk_in(d, *rec, cap, min_size, &counter, sink))
         .reduce(|| BinaryHeap::new(), |mut a, b| {
             merge_topk_into(&mut a, b, cap);
             a
@@ -935,6 +727,60 @@ pub fn bigfiles(roots: &[String], count: usize, sink: &dyn Sink) {
     }
     bump_scanned(&counter, 0, sink); // 收尾精确计数（n=0 早退，见 bump_scanned）
     progress(sink, 100);
+}
+
+/// 空文件/空目录的最低创建年龄（竞品实测 + 用户五轮拍板，最新 2026-09-28：14 天）：
+/// 同场景 HiBit 只报 4454 项，Trim 却扫出 10 万+ 空文件 —— 根因是 .lock / .sentinel /
+/// 活跃日志这类 0 字节在用标记文件被整单算成可删候选。应用常用「新建空标记文件」
+/// 表达在用状态，创建太新的空条目大概率仍在服役。口径：按**创建时间**（不是修改
+/// 时间）判断，只收创建满 14 天的条目；创建时间读不到时按「太新」处理（宁可不删）。
+/// now−14d 与自然日边界存在半天级误差（刻意不引入时区换算换这点精度）。
+const EMPTY_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
+
+/// 该条目创建时间是否「太新」（不足 EMPTY_MIN_AGE）。太新 ⇒ 不作为可删候选。
+/// `elapsed()` 为 Err（创建时间在未来，时钟回拨/元数据异常）同样按太新处理。
+fn created_too_new(m: &fs::Metadata) -> bool {
+    match m.created() {
+        Ok(t) => match t.elapsed() {
+            Ok(age) => age < EMPTY_MIN_AGE,
+            Err(_) => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// Unix 天数 → 公历年（Howard Hinnant civil_from_days 算法，含闰年修正）。
+fn civil_year(days_since_epoch: i64) -> i64 {
+    let z = days_since_epoch + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    yoe + era * 400
+}
+
+/// 用户拍板 2026-09-28 八轮：**2025 年及更早**创建的条目不进候选（实测扫出 2017 年的
+/// empty.cpp、2024 年的 .npmrc——系统自带老文件不是清理目标）。口径 = 创建年份等于
+/// 当前年份（UTC，与自然年边界存在时区级半天误差，刻意不换算）；创建时间读不到
+/// 按太老处理（宁可不删）。
+fn created_in_current_year(m: &fs::Metadata) -> bool {
+    let now_days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|n| (n.as_secs() / 86_400) as i64)
+        .unwrap_or(0);
+    match m.created() {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => civil_year((d.as_secs() / 86_400) as i64) == civil_year(now_days),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// 内存系统文件（大文件扫描排除，八轮拍板 pagefile）：pagefile*.sys / swapfile.sys /
+/// hiberfil.sys 都在盘根、恒被系统占用、体积极大——列进「可删大文件」纯属噪音。
+fn is_memory_system_file(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n == "swapfile.sys" || n == "hiberfil.sys" || (n.starts_with("pagefile") && n.ends_with(".sys"))
 }
 
 /// 空目录用户级忽略名单：%APPDATA%\Trim\empty-ignore.txt，每行一个绝对路径，大小写不敏感。
@@ -964,6 +810,52 @@ fn empty_ignored(set: &HashSet<String>, p: &Path) -> bool {
     set.contains(&p.to_string_lossy().to_lowercase())
 }
 
+/// 用户拍板 2026-09-28：跳过 `.` 开头的目录（.claude/.dotnet/.workbuddy 等应用
+/// 配置与运行数据目录——里面的 0 字节 db-wal / 锁文件全是活跃状态，不是清理目标，
+/// 真机目检第一批全是 `C:\Users\<u>\.claude\...\*.db-wal`）。
+/// 语义：不下钻、自身不算空候选；父目录把 dot 子目录视作「有内容」（保守，不折叠）。
+fn is_dot_dir(p: &Path) -> bool {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with('.'))
+        .unwrap_or(false)
+}
+
+/// 条目创建时间的 Unix 秒（真机目检 2026-09-28：列表要显示创建日期）。
+/// 读不到（元数据失败/时钟早于 epoch）返回 None，序列化成空串由前端显示「—」。
+fn created_epoch(p: &Path) -> Option<u64> {
+    fs::metadata(p)
+        .ok()?
+        .created()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// created 字段的序列化形态（空串 = 未知）。
+fn created_tag(p: &Path) -> (&'static str, String) {
+    ("created", created_epoch(p).map(|s| s.to_string()).unwrap_or_default())
+}
+
+/// 用户拍板 2026-09-28 六轮：空扫描默认全盘（盘符点选），但**排除用户目录子树**
+/// （%USERPROFILE%——应用数据/文档密密麻麻的 0 字节标记不是清理目标，且已实测
+/// .claude 等目录全是活跃 db-wal）。整树前缀排除，优先级高于 dot 目录过滤。
+fn userprofile_root() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// 路径是否落在用户目录子树内（前缀匹配；canonical 化后比较，防 `C:\Users\XY` 误伤同前缀名）。
+fn under_userprofile(p: &Path, up: Option<&Path>) -> bool {
+    let Some(up) = up else { return false };
+    match (p.canonicalize(), up.canonicalize()) {
+        (Ok(a), Ok(b)) => a.starts_with(&b),
+        _ => false, // canonical 失败保守放行（后续 dot/age 过滤仍兜底）
+    }
+}
+
 /// `empty()` 的跨根条目累积器（审查 v2-M2）。
 ///
 /// 为什么单列：上限必须是**一次扫描**的全局语义。`empty()` 逐根循环，
@@ -975,6 +867,10 @@ struct EmptyAccum {
     kept: AtomicUsize,
     truncated: AtomicBool,
     cap: usize,
+    /// 已枚举条目数（心跳源）。空扫描全程无 progress 百分比可报，前端此前一直
+    /// 停在「正在准备... 2%」直到完成 —— 用户实测反馈「准备时间过长」。按
+    /// HEARTBEAT_EVERY 间隔发 scanned 心跳，让前端显示「已枚举 N 个文件」。
+    visits: AtomicU64,
 }
 
 /// 本地批达到这个条数就并入累积器：既让全局计数及时生效（下钻能真的停下来），
@@ -993,6 +889,16 @@ impl EmptyAccum {
             kept: AtomicUsize::new(0),
             truncated: AtomicBool::new(false),
             cap,
+            visits: AtomicU64::new(0),
+        }
+    }
+
+    /// 枚举心跳：每个被遍历的条目调一次，跨过 HEARTBEAT_EVERY 就发一次 scanned。
+    /// 原子加在热路径上，代价远小于一次 metadata syscall。
+    fn heartbeat(&self, sink: &dyn Sink) {
+        let n = self.visits.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % HEARTBEAT_EVERY == 0 {
+            sink.scanned(n);
         }
     }
 
@@ -1041,9 +947,11 @@ impl EmptyAccum {
 ///   · `ent.metadata()` 取大小，不额外 syscall
 ///   · 用户忽略名单 empty-ignore.txt 生效，视为非空且不下钻
 ///   · 输出 emptyfolder 附带 nested=「删它可连带删掉的子空目录数」，供前端提示
+///   · 按条目发 scanned 心跳（用户实测 2026-09-28：全程无反馈被当成「准备慢」）
 pub fn empty(roots: &[String], sink: &dyn Sink) {
     init_scan_threads();
     let ignore = load_empty_ignore();
+    let up = userprofile_root();
     // 审查 v2-M1/M2：跨根共用一个累积器（上限与截断都是全局口径）
     let acc = EmptyAccum::new();
 
@@ -1055,17 +963,28 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
         match fs::read_dir(&p) {
             Ok(rd) => {
                 for ent in rd.flatten() {
+                    acc.heartbeat(sink);
                     match ent.file_type() {
                         Ok(t) if t.is_dir() => {
-                            if !is_reparse(&ent) && !empty_ignored(&ignore, &ent.path()) {
-                                tops.push(ent.path());
+                            // dot 目录（.claude/.dotnet/…）与用户目录子树不下钻、不作候选
+                            if is_dot_dir(&ent.path())
+                                || under_userprofile(&ent.path(), up.as_deref())
+                                || is_reparse(&ent)
+                                || empty_ignored(&ignore, &ent.path())
+                            {
+                                continue;
                             }
+                            tops.push(ent.path());
                         }
                         Ok(t) if t.is_file() => {
                             // FD-6（2026-09-15）：根第一层的 0 字节文件此前被忽略（tops 只收子目录），
                             // 与 duplicates 链路「根层文件也参与」的口径不一致。补上根层空文件。
-                            let sz = ent.metadata().map(|m| m.len()).unwrap_or(1);
-                            if sz == 0 && acc.room(sink) {
+                            // 2026-09-28：创建满 3 天的空文件才收（见 EMPTY_MIN_AGE）。
+                            let keep = ent
+                                .metadata()
+                                .map(|m| m.len() == 0 && !created_too_new(&m))
+                                .unwrap_or(false);
+                            if keep && acc.room(sink) {
                                 root_files.push(ent.path());
                             }
                         }
@@ -1091,10 +1010,10 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
     // 父目录折叠：若某空目录的父目录同为待删空目录，只保留父（删父连带删内层，Czkawka 思路）
     let out = fold_empty_dirs(&dirs);
     for f in &files {
-        item(sink, "emptyfile", f, 0, &[]);
+        item(sink, "emptyfile", f, 0, &[created_tag(f)]);
     }
     for (d, n) in &out {
-        item(sink, "emptyfolder", d, 0, &[("nested", n.to_string())]);
+        item(sink, "emptyfolder", d, 0, &[("nested", n.to_string()), created_tag(d)]);
     }
     if acc.stopped() {
         sink.truncated();
@@ -1156,6 +1075,10 @@ fn collect_empty_fast(
     if acc.stopped() {
         return false;
     }
+    // dot 目录不下钻、自身不算空候选、并让父目录视其为「有内容」（is_dot_dir 文档）
+    if is_dot_dir(dir) {
+        return false;
+    }
     if empty_ignored(ignore, dir) {
         return false;
     }
@@ -1169,6 +1092,7 @@ fn collect_empty_fast(
     };
     let mut empty = true;
     for ent in rd.flatten() {
+        acc.heartbeat(sink);
         let fp = ent.path();
         match ent.file_type() {
             Ok(t) if t.is_symlink() => {
@@ -1182,15 +1106,28 @@ fn collect_empty_fast(
                 }
             }
             Ok(t) if t.is_file() => {
-                // P0：DirEntry 自带大小，不额外 syscall
-                let sz = ent.metadata().map(|m| m.len()).unwrap_or(1);
-                if sz == 0 {
-                    // 空文件单独作为删除候选
-                    if acc.room(sink) {
-                        files.push(fp);
+                // P0：DirEntry 自带大小，不额外 syscall。
+                // 2026-09-28 五轮/八轮口径（用户拍板「空文件夹=包含 0 字节的文件以及空文件夹」
+                // 且「2025 年前的不扫」）：
+                //   · 0 字节文件创建满 14 天**且**在本年内 → 独立删除候选，且**不阻止**父目录
+                //     判空树（父目录作为空目录删除时经回收站整树连带，可还原）；
+                //   · 0 字节文件太新（在用标记）或太老（2025 前系统文件）→ 阻止父目录判空；
+                //   · 非 0 字节文件 → 阻止父目录判空。
+                if let Ok(m) = ent.metadata() {
+                    if m.len() == 0 {
+                        if !created_too_new(&m) && created_in_current_year(&m) {
+                            if acc.room(sink) {
+                                files.push(fp);
+                            }
+                        } else {
+                            empty = false;
+                        }
+                    } else {
+                        empty = false;
                     }
+                } else {
+                    empty = false; // 元数据读不到按非空处理（fail-closed）
                 }
-                empty = false; // 任何文件（含空文件）都使其父目录不算空文件夹
             }
             _ => {
                 empty = false;
@@ -1201,8 +1138,17 @@ fn collect_empty_fast(
             acc.flush(files, dirs);
         }
     }
-    if empty && acc.room(sink) {
-        dirs.push(dir.to_path_buf());
+    if empty {
+        // 2026-09-28：空目录只收「创建满 14 天**且**在本年内」的（五轮 14 天 + 八轮
+        // 2025 前不扫）。不满足按「非空」上报（返回 false），同时阻断父目录折叠。
+        let deletable = fs::metadata(dir)
+            .map(|m| !created_too_new(&m) && created_in_current_year(&m))
+            .unwrap_or(false);
+        if deletable && acc.room(sink) {
+            dirs.push(dir.to_path_buf());
+        } else {
+            empty = false;
+        }
     }
     empty
 }
@@ -1682,6 +1628,16 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    /// C-5 分析器：扩展名聚合键口径。大写归小写、无扩展名/超长归「(其他)」。
+    #[test]
+    fn analyze_ext_key_normalizes() {
+        assert_eq!(analyze_ext_key("Photo.PNG"), ".png");
+        assert_eq!(analyze_ext_key("archive.tar.gz"), ".gz");
+        assert_eq!(analyze_ext_key("Makefile"), "(其他)");
+        assert_eq!(analyze_ext_key("a.verylongextensionname"), "(其他)");
+        assert_eq!(analyze_ext_key(".gitignore"), ".gitignore");
+    }
+
     /// 记录型 Sink：数调用次数；`watch` 带着 `ScanCtx` 的同一份 Arc，
     /// 用来在回调发生的那一刻探一次 `files` 锁的状态（v2-M3 的断言点）。
     struct RecSink {
@@ -1913,5 +1869,135 @@ mod tests {
         assert!(acc.stopped(), "满了要置位 truncated");
         assert!(!acc.room(&sink), "已截断后直接拒绝，不再刷告警");
         assert_eq!(sink.warns.load(Ordering::Relaxed), 1, "截断只告警一次");
+    }
+
+    #[cfg(windows)]
+    /// 用 SetFileTime 把条目的创建时间拨回 days 天前（真实文件系统，读方向没法用假路径替代）。
+    fn set_creation_time_days_ago(p: &Path, days: u64) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_WRITE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, SetFileTime, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        let wide: Vec<u16> = p
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let h = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(h as isize, -1, "CreateFileW 失败: {p:?}");
+        // FILETIME = 1601-01-01 起 100ns 计数；Unix 纪元偏移 11644473600s
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let old = ((now - (days as i64) * 86400 + 11644473600) * 10_000_000) as u64;
+        let ft = FILETIME {
+            dwLowDateTime: (old & 0xFFFF_FFFF) as u32,
+            dwHighDateTime: (old >> 32) as u32,
+        };
+        let ok = unsafe { SetFileTime(h, &ft, std::ptr::null(), std::ptr::null()) };
+        assert_ne!(ok, 0, "SetFileTime 失败: {p:?}");
+        unsafe { CloseHandle(h) };
+    }
+
+    /// 2026-09-28 五轮拍板：空文件/空目录只收创建满 14 天的条目（EMPTY_MIN_AGE，
+    /// 3 天 → 7 天 → 30 天 → 14 天）。
+    /// 在用应用常用 0 字节标记文件（.lock/.sentinel）表达「活着」，全是刚建的；
+    /// 全量算成可删候选就是「Trim 扫出 10 万项、HiBit 同场景只报 4454 项」的根因。
+    /// 「空文件夹」= 树内只含（满 14 天的）0 字节文件与空子目录；太新的空目录/
+    /// 0 字节文件都要阻断父目录折叠（老父不能连带删掉刚建的新条目）。
+    #[cfg(windows)]
+    #[test]
+    fn empty_scan_only_reports_items_created_before_min_age() {
+        struct CollectSink(std::sync::Mutex<Vec<String>>);
+        impl Sink for CollectSink {
+            fn item(&self, p: &Path, _line: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(p.to_string_lossy().to_string());
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+
+        // 根不能放 %TEMP%（在 %USERPROFILE% 子树内，会被六轮拍板的用户目录排除滤掉）；
+        // 用 CARGO_MANIFEST_DIR/target 下（仓库工作区，userprofile 之外，测试后清理）
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("test-empty-age-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("has_old_file")).unwrap();
+        fs::create_dir_all(base.join("has_fresh_file")).unwrap();
+        fs::create_dir_all(base.join("old_empty_dir")).unwrap();
+        fs::create_dir_all(base.join("old_nest").join("fresh_sub")).unwrap();
+        fs::write(base.join("has_old_file").join("stale.txt"), b"").unwrap();
+        fs::write(base.join("has_fresh_file").join("marker.lock"), b"").unwrap();
+        // 锚点：15 天前（> 14 天下限）。八轮口径要求「本年内创建」，1 月 1-14 日运行时
+        // 15 天前落在去年——此时所有条目都该被过滤（规则本身正确），断言自适应。
+        set_creation_time_days_ago(&base.join("has_old_file").join("stale.txt"), 15);
+        set_creation_time_days_ago(&base.join("has_old_file"), 15);
+        set_creation_time_days_ago(&base.join("old_empty_dir"), 15);
+        set_creation_time_days_ago(&base.join("old_nest"), 15);
+        let now_days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            / 86_400;
+        let expect_results = civil_year(now_days) == civil_year(now_days - 15);
+
+        let sink = CollectSink(std::sync::Mutex::new(Vec::new()));
+        empty(&[base.to_string_lossy().to_string()], &sink);
+        let got = sink.0.into_inner().unwrap();
+
+        if !expect_results {
+            // 一月上旬运行：15 天前落去年，「今年内」过滤应清空全部候选
+            assert!(got.is_empty(), "跨年窗口内不应有任何候选: {got:?}");
+            let _ = fs::remove_dir_all(&base);
+            return;
+        }
+
+        let files: Vec<&String> = got.iter().filter(|s| s.ends_with(".txt")).collect();
+        assert_eq!(files.len(), 1, "只应报 1 个空文件（创建满 14 天的）：{got:?}");
+        assert!(files[0].contains("stale.txt"));
+        assert!(
+            !got.iter().any(|s| s.contains("marker.lock")),
+            "创建不满 14 天的 0 字节标记文件不得进候选"
+        );
+        // 五轮口径：has_old_file 树内只有（满 14 天的）stale.txt → 也算空目录
+        assert!(
+            got.iter().any(|s| s.ends_with("old_empty_dir")),
+            "创建满 14 天的空目录应报出：{got:?}"
+        );
+        assert!(
+            got.iter().any(|s| s.ends_with("has_old_file")),
+            "树内只含满龄 0 字节文件的目录应判为空目录：{got:?}"
+        );
+        assert!(
+            !got.iter().any(|s| s.contains("fresh_sub")),
+            "太新空目录自身不得报出"
+        );
+        assert!(
+            !got.iter().any(|s| s.ends_with("old_nest")),
+            "太新空目录应阻断父目录折叠（old_nest 不算可删空目录）"
+        );
+        assert!(
+            !got.iter().any(|s| s.ends_with("has_fresh_file")),
+            "树内含太新 0 字节标记的目录不得判空（活跃标记保护）"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 }

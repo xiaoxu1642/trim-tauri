@@ -1,0 +1,206 @@
+{
+  "rulesVersion": 20260928,
+  "prov": [
+    {
+      "sourceClass": "builtin-knowledge",
+      "reviewedAt": "2026-09-28"
+    }
+  ],
+  "rules": [
+    {
+      "id": "residue-360safe",
+      "displayName": [
+        "360安全卫士",
+        "360Safe"
+      ],
+      "publisher": [
+        "奇虎",
+        "Qihoo 360"
+      ],
+      "uninstallKey": [
+        "360safe"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\360\\360safe",
+          "note": "安装目录（默认装此处）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\360safe",
+          "note": "用户配置目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\360Safe",
+          "note": "主程序配置键"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\360Safe",
+          "note": "当前用户配置键"
+        }
+      ]
+    },
+    {
+      "id": "residue-eset",
+      "displayName": [
+        "ESET"
+      ],
+      "publisher": [
+        "ESET"
+      ],
+      "uninstallKey": [
+        "ESET"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\ESET",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMDATA%\\ESET",
+          "note": "全局数据目录（日志/隔离区索引）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\ESET",
+          "note": "配置键"
+        }
+      ]
+    },
+    {
+      "id": "residue-roboform",
+      "displayName": [
+        "RoboForm"
+      ],
+      "publisher": [
+        "Siber Systems"
+      ],
+      "uninstallKey": [
+        "RoboForm"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Siber Systems",
+          "note": "安装目录（以发行商命名）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\RoboForm",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\RoboForm",
+          "note": "当前用户配置键"
+        }
+      ]
+    },
+    {
+      "id": "residue-ccleaner",
+      "displayName": [
+        "CCleaner"
+      ],
+      "publisher": [
+        "Piriform"
+      ],
+      "uninstallKey": [
+        "CCleaner"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\CCleaner",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Piriform",
+          "note": "用户配置目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\Piriform",
+          "note": "配置键（以发行商命名）"
+        }
+      ]
+    },
+    {
+      "id": "residue-wechat",
+      "displayName": [
+        "微信",
+        "WeChat"
+      ],
+      "publisher": [
+        "Tencent",
+        "腾讯"
+      ],
+      "uninstallKey": [
+        "WeChat"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Tencent\\WeChat",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Tencent\\WeChat",
+          "note": "用户数据目录（聊天记录另存路径不在本规则面）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Tencent\\WeChat",
+          "note": "当前用户配置键"
+        }
+      ]
+    },
+    {
+      "id": "residue-qq",
+      "displayName": [
+        "腾讯QQ",
+        "TIM"
+      ],
+      "publisher": [
+        "Tencent",
+        "腾讯"
+      ],
+      "uninstallKey": [
+        "Tencent QQ",
+        "TIM"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Tencent\\QQNT",
+          "note": "QQNT 安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Tencent\\QQ",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Tencent\\TIM",
+          "note": "TIM 用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Tencent\\QQ",
+          "note": "当前用户配置键"
+        }
+      ]
+    }
+  ],
+  "_sig": {
+    "alg": "ed25519",
+    "sig": "kDMynzaopc3kAXZv5qlk5A4nJJVkL42/zArvK4pU0qq1WL599BnysyHHH40qRmxJAf0ONoPWlT7hikYFTIpxCA=="
+  }
+}

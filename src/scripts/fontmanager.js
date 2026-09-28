@@ -1,6 +1,7 @@
 // fontmanager.js - 设置 → 字体选择 应用内弹窗
 // 复用「安装路径绑定」的 usage-backdrop > usage-modal 弹窗样式。
-// 能力：5 款系统字体识别（缺失置灰）+ 内嵌 MiSans 可变字体（默认）+ 导入 1 款外部字体；
+// 能力：5 款系统字体识别（缺失置灰）+ 内嵌 MiSans 可变字体（选项，出厂默认已改系统字体
+// 微软雅黑——2026-09-28 八轮拍板：MiSans 20MB 异步加载导致卡片高度漂移/看板重叠）+ 导入 1 款外部字体；
 // 字重滑块（100-1000，MiSans 无级连续调节）与字号滑块（12-24px）全局生效，
 // 经 --app-font-family / --font-weight-scale / --font-size-scale 三个 CSS 变量驱动全部界面文本。
 // 配置持久化到 settings.json 的 font 字段，应用重启后自动恢复。
@@ -14,7 +15,7 @@
   let modal = null;      // { backdrop, select, weightInput, sizeInput, preview, weightVal, sizeVal, tip }
   let escHandler = null;
   let fontList = [];
-  let settings = { family: 'MiSans', weight: 400, size: 16 };
+  let settings = { family: '微软雅黑', weight: 400, size: 16 };
   let importedFamily = '';
   let importedUrl = '';
 
@@ -37,7 +38,7 @@
   // ---------- 全局应用（三个 CSS 变量驱动 main.css 内全部 calc 字号 / 字重） ----------
   function stackFor(family) {
     const found = fontList.find(f => f.family === family && f.available);
-    return found ? found.cssStack : "'MiSans', '微软雅黑', 'Microsoft YaHei', sans-serif";
+    return found ? found.cssStack : "'微软雅黑', 'Microsoft YaHei', 'Segoe UI', sans-serif";
   }
 
   function applyToRoot() {
@@ -115,12 +116,12 @@
     });
     // 「恢复默认」：把预览区和设置都改回默认（尚未全局应用，需再点「应用」）
     modal.resetBtn.addEventListener('click', () => {
-      settings = { family: 'MiSans', weight: WEIGHT_BASE, size: SIZE_BASE };
+      settings = { family: '微软雅黑', weight: WEIGHT_BASE, size: SIZE_BASE };
       modal.weightInput.value = String(WEIGHT_BASE);
       modal.sizeInput.value = String(SIZE_BASE);
       renderSelect();
       renderPreview();
-      window.app?.toast('info', '已重置为默认：MiSans · 400 字重 · 16px，点击「应用」生效');
+      window.app?.toast('info', '已重置为默认：微软雅黑 · 400 字重 · 16px，点击「应用」生效');
     });
     modal.importBtn.addEventListener('click', async () => {
       if (!window.api?.fonts?.importFont) { window.app?.toast('warning', '当前环境不支持导入字体'); return; }
@@ -166,7 +167,7 @@
           injectImportedFace('', '');
           await load(true);
           if (settings.family === importedFamily || !fontList.some(f => f.family === settings.family)) {
-            settings.family = 'MiSans';
+            settings.family = '微软雅黑';
           }
           applyToRoot();
           renderSelect();

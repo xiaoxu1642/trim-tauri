@@ -97,7 +97,8 @@ fn main() {
                 println!("bigfiles 需要至少一个扫描目录");
                 return;
             }
-            scan::bigfiles(&roots, count.max(1), &sink);
+            // CLI 侧默认也钉 300MB 阈值（与 Tauri 通道六轮拍板口径一致）
+            scan::bigfiles(&roots, count.max(1), 300 * 1024 * 1024, &sink);
         }
         "empty" => {
             let mut roots: Vec<String> = Vec::new();

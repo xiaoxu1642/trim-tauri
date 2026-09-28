@@ -304,14 +304,6 @@ fn arm_handshake<R: Runtime>(app: AppHandle<R>, nonce: String) {
 
 // ==================== IPC 命令 ====================
 
-/// elevate:status — 当前进程是否以管理员身份运行。
-/// 用 Rust 令牌 elevation（`IsUserAnAdmin`），等价上游的 `net session` 探测但无外部进程。
-#[tauri::command]
-pub fn elevate_status<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
-    Ok(json!({ "isAdmin": crate::engine::sysinfo::is_admin() }))
-}
-
 /// elevate:request — 以 runas 直拉自身带提权旗标，随后挂 20s 交接握手
 #[tauri::command]
 pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {

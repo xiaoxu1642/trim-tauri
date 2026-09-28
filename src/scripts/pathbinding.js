@@ -898,7 +898,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
   }
 
 
-  // 背景模糊度滑块（Motion.Lab range-drag 适配）：拖动实时模糊壁纸 .layout::before
+  // 背景模糊度滑块（Motion.Lab range-drag 适配）：拖动实时模糊壁纸 .app-wallpaper::before
   function initBgBlur() {
     var range = document.getElementById('bgBlurRange');
     if (!range) return;

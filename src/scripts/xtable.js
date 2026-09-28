@@ -373,7 +373,11 @@
         const container = getContainer();
         if (!container || !container.isConnected) return;
         if (roTarget === container) return;
-        if (!ro) ro = new ResizeObserver(() => check(false));
+        // 真 masonry 堆叠根因（真机目检 2026-09-28）：RO 回调原来走 check()，而 check
+        // 在宽度未变时跳过——字体（MiSansVF 异步加载）就绪后卡片变高触发 RO 却被跳过，
+        // 列内卡片堆叠，直到拖动窗口改变宽度才恢复。改为 RO 回调无条件 force：
+        // 高度变化（内容/字体/折叠）同样需要重排；重排是幂等的，收敛后 RO 不再触发。
+        if (!ro) ro = new ResizeObserver(() => force(false));
         if (roTarget) ro.unobserve(roTarget);
         roTarget = container;
         ro.observe(container);

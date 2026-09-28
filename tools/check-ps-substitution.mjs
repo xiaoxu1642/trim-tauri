@@ -40,7 +40,10 @@ const CLEANUP_PS = join(ROOT, 'src-tauri', 'ps', 'cleanup_scan.ps1');
 if (!existsSync(CLEANUP_PS)) {
   // 审查 F1：打印「✓」会被当成「跑过且通过」（假绿）。这里没有执行任何断言，
   // 必须显式标 SKIP，让验收日志能区分「真跑过」与「无对象可查」。
-  console.log('SKIP（未执行任何断言）：cleanup 域 PS 脚本已 S3 退役，替换口径对拍无对象可查；若模板重新引入需恢复本门禁');
+  // D-2（2026-09-28）：Rust 侧 ps_substitution_matches_js 用例也已随 S3 退役删除——
+  // 对拍双端（PS 模板 + Rust 同口径替换）都不存在了，本门禁从必跑清单摘除（AGENTS §4），
+  // 保留工具文件作为历史口径的人工复核入口（--fixtures-only）。
+  console.log('RETIRED（未执行任何断言）：cleanup 域 PS 脚本与 Rust 对拍用例均已随 S3 退役删除，替换口径对拍无对象可查；模板若重新引入须恢复本门禁并重新判红');
   process.exit(0);
 }
 

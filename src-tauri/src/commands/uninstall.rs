@@ -1,0 +1,2037 @@
+//! commands/uninstall.rs — 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28）
+//!
+//! 方案边界（方案 §4.1，违反即回退）：
+//! - 只做「看见已安装程序 → 调原厂卸载器 → 残留扫描/解释/受控清理」三步；
+//! - 不做全量注册表清理器、不默认强删程序目录、不盲目静默卸载；
+//! - 静默参数只允许白名单模板（msi/inno/nsis 三类），命令串一律**后端现读注册表**，
+//!   绝不信任渲染层回传的任何命令文本（防注入面）；
+//! - 残留文件/目录回收站优先（`is_path_protected` 前置 + `trim_finder` 回收站），
+//!   回收站失败不做永久删除兜底；注册表先 export 备份再删，备份失败整项拒绝；
+//! - 残留执行只认**本次会话扫描快照**里的目标（任意单项不得绕过快照，方案 M4）。
+//!
+//! 注册（lib.rs generate_handler + CHANNEL_MAP + check-guard-tiers MUST_MAIN 同步落）：
+//! ```text
+//! commands::uninstall::uninstall_list,
+//! commands::uninstall::uninstall_run,
+//! commands::uninstall::uninstall_residue_scan,
+//! commands::uninstall::uninstall_residue_execute,
+//! ```
+
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use serde_json::{json, Value};
+use tauri::WebviewWindow;
+use trim_finder::cleanup_scan;
+
+use crate::engine::{delete_manifest, guard, log, protect, rules_signature};
+
+/// 残留扫描快照：label -> (时间戳, findings)。执行只认快照内的 kind+target 组合。
+static RESIDUE_SNAPSHOTS: OnceLock<Mutex<HashMap<String, (i64, Vec<Value>)>>> = OnceLock::new();
+
+fn residue_snapshots() -> &'static Mutex<HashMap<String, (i64, Vec<Value>)>> {
+    RESIDUE_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+// ==================== 注册表读取助手（本文件自含，不动 native.rs 私有层） ====================
+
+unsafe fn reg_sz(hk: windows::Win32::System::Registry::HKEY, name: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
+    let nm = to_wide(name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, windows::core::PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        return None;
+    }
+    if ty.0 != 1 && ty.0 != 2 {
+        return None; // 只读 REG_SZ / REG_EXPAND_SZ
+    }
+    let mut buf = vec![0u8; size as usize];
+    let ok = RegQueryValueExW(hk, windows::core::PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_ok();
+    if !ok || size == 0 {
+        return None;
+    }
+    let words: Vec<u16> = buf[..size as usize]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&w| w != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&words).trim().to_string())
+}
+
+unsafe fn reg_dword(hk: windows::Win32::System::Registry::HKEY, name: &str) -> Option<u32> {
+    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
+    let nm = to_wide(name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, windows::core::PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        return None;
+    }
+    if ty.0 != 4 || size < 4 {
+        return None; // 只认 REG_DWORD
+    }
+    let mut buf = [0u8; 4];
+    let ok = RegQueryValueExW(hk, windows::core::PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_ok();
+    if !ok {
+        return None;
+    }
+    Some(u32::from_le_bytes(buf))
+}
+
+/// 解析 "HKCU\..." / "HKLM\..." 前缀（与 engine::native::parse_reg_path 同口径，
+/// 但只放行 HKCU/HKLM 两个 hive —— 残留清理面不覆盖 HKCR/HKU/HKCC）。
+fn parse_reg_target(target: &str) -> Option<(windows::Win32::System::Registry::HKEY, String)> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let t = target.trim();
+    for (prefix, hive) in [
+        ("HKEY_CURRENT_USER\\", HKEY_CURRENT_USER),
+        ("HKCU\\", HKEY_CURRENT_USER),
+        ("HKEY_LOCAL_MACHINE\\", HKEY_LOCAL_MACHINE),
+        ("HKLM\\", HKEY_LOCAL_MACHINE),
+    ] {
+        if t.len() > prefix.len()
+            && t[..prefix.len()].eq_ignore_ascii_case(prefix)
+        {
+            return Some((hive, t[prefix.len()..].trim_start_matches('\\').to_string()));
+        }
+    }
+    None
+}
+
+/// Appx 包全名准入：只允许 `[A-Za-z0-9._-]`（PackageFullName 的合法字符集），
+/// 喂给 PowerShell 前必须过这道闸（防引号/换行注入命令串）。
+fn valid_appx_fullname(fullname: &str) -> bool {
+    !fullname.is_empty()
+        && fullname.len() <= 200
+        && fullname
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// 包全名 → 包系列名（PFN，U-4）：`Name_Version_Arch__PublisherId` → `Name_PublisherId`。
+/// Name 可含下划线，Version（点分段）与 Arch（x64/x86/arm/neutral）不含下划线、
+/// PublisherId（如 8wekyb3d8bbwe）也不含——所以去掉最后两段拼回即 Name。
+/// 解析不出（结构不符）返回 None，调用方按空集处理。
+fn package_family_name(fullname: &str) -> Option<String> {
+    let (left, publisher) = fullname.rsplit_once("__")?;
+    if publisher.is_empty() || publisher.contains('_') {
+        return None;
+    }
+    let segs: Vec<&str> = left.split('_').collect();
+    // 最少三段：Name（可含下划线，也可以是单段）+ Version + Arch
+    if segs.len() < 3 {
+        return None;
+    }
+    let name = segs[..segs.len() - 2].join("_");
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!("{name}_{publisher}"))
+}
+
+/// 发行商串 → 友好显示（HiBit 口径）：`CN=OpenAI, O=...` 取 CN= 后首个逗号前的段。
+fn friendly_publisher(publisher: &str) -> String {
+    let p = publisher.trim();
+    if let Some(rest) = p.strip_prefix("CN=").or_else(|| p.strip_prefix("cn=")) {
+        let name = rest.split(',').next().unwrap_or(rest).trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    p.to_string()
+}
+
+/// Appx（Windows 应用商店应用）枚举（用户拍板 2026-09-28：「Windows应用」滑块）。
+/// 走 inbox Windows PowerShell 5.1 的 Appx 模块（system_tool 白名单 + quiet_cmd，
+/// 与 PsInline 执行器同通道），不新增裸 spawn。当前用户 scope（Get-AppxPackage 语义）。
+/// 输出 UTF-8（命令内显式设 OutputEncoding，防止中文发行商按 OEM 码页乱码）。
+fn enum_appx_packages() -> Result<Vec<Value>, String> {
+    // Logo 取法（U-3 复检修真，2026-09-28）：Get-AppxPackage 对象**没有 Logo 属性**
+    // （初版 Select Logo 恒空，前端从不请求）——真身在 manifest 的 Application/
+    // VisualElements 元素的 **XML 属性** 上，PS 点号只取子元素不取属性，必须
+    // GetAttribute。依次试 Square44x44/Square150x150/Logo/StoreLogo，跳过
+    // ms-resource: 资源引用；manifest 写的是基准名（Logo.png），磁盘常只有
+    // scale 变体（Logo.scale-200.png），不存在时同目录 stem*.png 兜底取最大。
+    let script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+try { $out=@(); Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.NonRemovable } | ForEach-Object { $logo=''; \
+try { $m = Get-AppxPackageManifest -Package $_ -ErrorAction Stop; $loc = $_.InstallLocation; \
+foreach ($x in @($m.Package.Applications.Application)) { $ve = $x.VisualElements; if (-not $ve) { continue }; \
+foreach ($k in @('Square44x44Logo','Square150x150Logo','Logo','StoreLogo')) { $v = $ve.GetAttribute($k); \
+if ($v -and -not $v.StartsWith('ms-resource:') -and $loc) { $cand = Join-Path $loc ($v.Replace('/','\\')); \
+if (-not (Test-Path -LiteralPath $cand)) { $dir = Split-Path $cand -Parent; $stem = [IO.Path]::GetFileNameWithoutExtension($cand); \
+if (Test-Path -LiteralPath $dir) { $hit = Get-ChildItem -LiteralPath $dir -Filter ($stem + '*.png') -ErrorAction SilentlyContinue | Sort-Object Length -Descending | Select-Object -First 1; if ($hit) { $cand = $hit.FullName } } }; \
+if (Test-Path -LiteralPath $cand) { $logo = $cand; break } } }; if ($logo) { break } } } catch { }; \
+$out += [pscustomobject]@{ Name=$_.Name; Publisher=$_.Publisher; Version=$_.Version; PackageFullName=$_.PackageFullName; InstallLocation=$_.InstallLocation; Logo=$logo } }; \
+if ($out.Count -gt 0) { $out | ConvertTo-Json -Compress -Depth 2 }; exit 0 } \
+catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
+    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("powershell.exe"))
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .output()
+        .map_err(|e| format!("powershell 启动失败: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() {
+        return Err(if text.starts_with("ERR:") {
+            text[4..].trim().to_string()
+        } else {
+            format!("Get-AppxPackage 失败（退出码 {}）", out.status.code().unwrap_or(-1))
+        });
+    }
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let parsed: Value = serde_json::from_str(&text).map_err(|e| format!("Appx 输出解析失败: {e}"))?;
+    let items: Vec<Value> = match parsed {
+        Value::Array(a) => a,
+        obj @ Value::Object(_) => vec![obj], // 单包时 ConvertTo-Json 出对象而非数组
+        _ => return Err("Appx 输出结构异常".to_string()),
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|p| {
+            let fullname = p.get("PackageFullName")?.as_str()?.to_string();
+            if !valid_appx_fullname(&fullname) {
+                return None;
+            }
+            let publisher_raw = p.get("Publisher").and_then(|v| v.as_str()).unwrap_or("");
+            let publisher = friendly_publisher(publisher_raw);
+            let group = if publisher_raw.to_lowercase().contains("microsoft") { "system" } else { "third" };
+            Some(json!({
+                "id": format!("APPX|{fullname}"),
+                "displayName": p.get("Name").and_then(|v| v.as_str()).unwrap_or(&fullname),
+                "publisher": publisher,
+                "displayVersion": p.get("Version").and_then(|v| v.as_str()).unwrap_or(""),
+                "installLocation": p.get("InstallLocation").and_then(|v| v.as_str()).unwrap_or(""),
+                "displayIcon": "",
+                // U-3：Logo 资产路径（包安装目录下的 .png），前端经 uninstall:appx-logo
+                // 懒加载转 dataURL；路径不存在/越界由命令侧校验兜底
+                "logoPath": p.get("Logo").and_then(|v| v.as_str()).unwrap_or(""),
+                "uninstallString": "",
+                "quietUninstallString": "",
+                "estimatedSizeKb": 0,
+                "productCode": null,
+                "installerKind": "appx",
+                "group": group,
+                // 枚举口径已过滤 NonRemovable（实机探针 2026-09-28：对齐 HiBit「可卸载商店应用」17 项量级）
+                "removable": true,
+            }))
+        })
+        .collect())
+}
+
+/// Appx 移除（当前用户，对齐 HiBit 的 `powershell Remove-AppxPackage` 实测口径）。
+/// 返回 Ok(()) 或带原因的 Err。NonRemovable 的包系统会拒绝，由这里如实转述。
+fn remove_appx(fullname: &str) -> Result<(), String> {
+    let script = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+try {{ Remove-AppxPackage -Package '{}' -ErrorAction Stop; exit 0 }} \
+catch {{ Write-Output ('ERR:' + $_.Exception.Message); exit 1 }}",
+        fullname
+    );
+    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("powershell.exe"))
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .output()
+        .map_err(|e| format!("powershell 启动失败: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Err(if text.starts_with("ERR:") {
+            text[4..].trim().to_string()
+        } else {
+            format!("Remove-AppxPackage 失败（退出码 {}）", out.status.code().unwrap_or(-1))
+        })
+    }
+}
+
+/// 卸载键路径准入：必须是 Uninstall 根下的直接子键路径，禁 %VAR%/..（防把任意键当卸载键删）
+fn valid_uninstall_key_path(path: &str) -> bool {
+    let p = path.to_lowercase();
+    p.starts_with("software\\")
+        && p.contains("microsoft\\windows\\currentversion\\uninstall\\")
+        && !p.contains("..")
+        && !p.contains('%')
+}
+
+// ==================== uninstall:list ====================
+
+/// 安装器类型判定（方案 §4.2 installerKind）：
+/// msi（UninstallString 走 msiexec）> inno（键名 _is1 / unins000.exe）>
+/// nsis（卸载器名含 uninst/uninstall）> unknown。同时抽出 MSI 产品码 {GUID}。
+fn detect_installer(key_name: &str, uninstall_string: &str) -> (&'static str, Option<String>) {
+    let us = uninstall_string.to_lowercase();
+    if us.contains("msiexec") {
+        let guid = uninstall_string
+            .find('{')
+            .and_then(|s| uninstall_string[s..].find('}').map(|e| uninstall_string[s..=s + e].to_string()));
+        return ("msi", guid);
+    }
+    if key_name.to_lowercase().ends_with("_is1") || us.contains("unins000.exe") {
+        return ("inno", None);
+    }
+    let base = us.rsplit(['\\', '/']).next().unwrap_or("");
+    if base.contains("uninst") || base.contains("uninstall") {
+        return ("nsis", None);
+    }
+    ("unknown", None)
+}
+
+/// 注册表键最后写入时间（LastWriteTime）→ "YYYY-MM-DD"，失败/异常年份返回空串。
+/// U-5 安装日期列的兜底口径：卸载键的 LastWriteTime 常发生在安装/更新写入时
+/// （卸载键值自带 InstallDate 的程序极少），与 HiBit 同为近似值，UI 文案注明「约」。
+unsafe fn reg_key_last_write_date(hk: windows::Win32::System::Registry::HKEY) -> String {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Registry::RegQueryInfoKeyW;
+    use windows::Win32::System::Time::FileTimeToSystemTime;
+    let mut ft = FILETIME::default();
+    if RegQueryInfoKeyW(hk, None, None, None, None, None, None, None, None, None, None, Some(&mut ft)).is_err() {
+        return String::new();
+    }
+    let mut st = windows::Win32::Foundation::SYSTEMTIME::default();
+    if FileTimeToSystemTime(&ft, &mut st).is_err() || st.wYear < 1990 || st.wYear > 2100 {
+        return String::new();
+    }
+    format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay)
+}
+
+/// 枚举一个 hive 根下的卸载条目。root 不存在 → 空集。
+/// 过滤口径（与 build_inventory 同源）：空 DisplayName / SystemComponent=1 /
+/// ReleaseType 含 update|hotfix|security 的跳过（系统组件与更新不是「已安装程序」）。
+unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root: &str) -> Vec<Value> {
+    use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, KEY_READ};
+    let mut out = Vec::new();
+    for sub in crate::engine::native::reg_enum_subkeys_pub(hive, root) {
+        let sub_path = format!("{root}\\{sub}");
+        let sk = to_wide(&sub_path);
+        let mut hk = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            continue;
+        }
+        let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
+        let system_component = reg_dword(hk, "SystemComponent").unwrap_or(0);
+        let release_type = reg_sz(hk, "ReleaseType").unwrap_or_default().to_lowercase();
+        let display_version = reg_sz(hk, "DisplayVersion").unwrap_or_default();
+        let publisher = reg_sz(hk, "Publisher").unwrap_or_default();
+        let install_location = reg_sz(hk, "InstallLocation").unwrap_or_default();
+        let display_icon = reg_sz(hk, "DisplayIcon").unwrap_or_default();
+        let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
+        let quiet_uninstall_string = reg_sz(hk, "QuietUninstallString").unwrap_or_default();
+        let estimated_size_kb = reg_dword(hk, "EstimatedSize").unwrap_or(0);
+        let install_date = unsafe { reg_key_last_write_date(hk) };
+        let _ = RegCloseKey(hk);
+
+        if display_name.trim().is_empty() {
+            continue;
+        }
+        if system_component == 1 {
+            continue;
+        }
+        if release_type.contains("update") || release_type.contains("hotfix") || release_type.contains("security") {
+            continue;
+        }
+        let (installer_kind, product_code) = detect_installer(&sub, &uninstall_string);
+        out.push(json!({
+            "id": format!("{}|{}", if hive == windows::Win32::System::Registry::HKEY_CURRENT_USER { "HKCU" } else { "HKLM" }, sub_path),
+            "displayName": display_name,
+            "publisher": publisher,
+            "displayVersion": display_version,
+            "installLocation": install_location,
+            "displayIcon": display_icon,
+            "uninstallString": uninstall_string,
+            "quietUninstallString": quiet_uninstall_string,
+            "estimatedSizeKb": estimated_size_kb,
+            "installDate": install_date,
+            "productCode": product_code,
+            "installerKind": installer_kind,
+        }));
+    }
+    out
+}
+
+/// 卸载域·列表（方案 M1 + 用户拍板 2026-09-28）。
+/// scope：user=传统 Win32 程序（HKLM 64+32 与 HKCU 三根合并去重，HiBit「程序名」83 项的口径）；
+/// windows=Appx 商店应用（Get-AppxPackage，当前用户，分第三方/Windows 应用两组）。
+#[tauri::command]
+pub async fn uninstall_list<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    scope: String,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let scope = scope.to_lowercase();
+    if !matches!(scope.as_str(), "user" | "windows") {
+        return json!({ "success": false, "message": "未知范围：只支持 user / windows" });
+    }
+    // 注册表枚举 / Appx 枚举都是纯阻塞 IO，丢 blocking 池，避免占住 async worker。
+    // 枚举失败显式上抛（空数组会被当成「没有程序」伪装成功）。
+    let apps = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Value>, String> {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        if scope == "windows" {
+            return enum_appx_packages();
+        }
+        let mut apps: Vec<Value> = Vec::new();
+        unsafe {
+            apps.extend(enum_uninstall_root(HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"));
+            apps.extend(enum_uninstall_root(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"));
+            apps.extend(enum_uninstall_root(HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"));
+        }
+        // 跨根去重（HiBit 同口径）：同一程序常同时出现在 HKLM 64 位与 WOW6432Node 键下。
+        // 键 = 显示名+版本（小写）；保留先出现者（HKCU 优先，用户级条目更贴近当前用户）。
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        apps.retain(|a| {
+            let key = format!(
+                "{}|{}",
+                a["displayName"].as_str().unwrap_or("").to_lowercase(),
+                a["displayVersion"].as_str().unwrap_or("")
+            );
+            seen.insert(key)
+        });
+        apps.sort_by(|a, b| {
+            let an = a["displayName"].as_str().unwrap_or("").to_lowercase();
+            let bn = b["displayName"].as_str().unwrap_or("").to_lowercase();
+            an.cmp(&bn)
+        });
+        Ok(apps)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("枚举异常: {e}")));
+    match apps {
+        Ok(list) => json!({ "success": true, "data": { "apps": list } }),
+        Err(e) => json!({ "success": false, "message": e }),
+    }
+}
+
+// ==================== uninstall:run ====================
+
+/// 把原厂卸载命令行拆成 (exe, args)。
+/// 带引号取首段引号；msiexec 直接归一；其余在「首个 .exe」处切开（卸载串的 exe
+/// 路径几乎总以 .exe 结尾，比按首个空格切更稳），都失败再退回首空格。
+fn split_uninstall_cmd(s: &str) -> Option<(String, String)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix('"') {
+        let end = rest.find('"')?;
+        return Some((rest[..end].to_string(), rest[end + 1..].trim().to_string()));
+    }
+    let low = s.to_lowercase();
+    if low.starts_with("msiexec") {
+        let rest = s.get(7..).unwrap_or_default().trim().to_string();
+        return Some(("msiexec.exe".to_string(), rest));
+    }
+    if let Some(idx) = low.find(".exe") {
+        let exe = s[..idx + 4].to_string();
+        let args = s[idx + 4..].trim().to_string();
+        return Some((exe, args));
+    }
+    let sp = s.find(' ')?;
+    Some((s[..sp].to_string(), s[sp + 1..].trim().to_string()))
+}
+
+/// 静默卸载只认白名单模板（方案 §4.3）：msi → msiexec /X{GUID} /qn /norestart；
+/// inno → /VERYSILENT /SUPPRESSMSGBOXES /NORESTART；nsis → /S。其余一律拒绝。
+fn build_silent_cmd(kind: &str, product_code: Option<&str>, exe: &str, raw_args: &str) -> Result<(String, String), String> {
+    match kind {
+        "msi" => {
+            let Some(guid) = product_code else {
+                return Err("MSI 产品码缺失，无法构造静默卸载".to_string());
+            };
+            if !guid.starts_with('{') || !guid.ends_with('}') || guid.contains('"') {
+                return Err("MSI 产品码格式异常，拒绝执行".to_string());
+            }
+            Ok(("msiexec.exe".to_string(), format!("/X{guid} /qn /norestart")))
+        }
+        "inno" => Ok((exe.to_string(), "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART".to_string())),
+        "nsis" => Ok((exe.to_string(), "/S".to_string())),
+        _ => {
+            let _ = raw_args;
+            Err("该安装器类型不受静默白名单支持，请使用原厂卸载界面".to_string())
+        }
+    }
+}
+
+/// ShellExecuteEx 启动卸载器并等待退出。返回 (exitCode, 是否拿到进程句柄)。
+/// 不加 RUNAS verb：卸载器自带 manifest 会按需弹 UAC（对齐 Trim 按需提权模型）。
+unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<u32, String> {
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows::core::PCWSTR;
+
+    let file = to_wide(exe);
+    let params = if args.is_empty() { None } else { Some(to_wide(args)) };
+    let mut sei: SHELLEXECUTEINFOW = core::mem::zeroed();
+    sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpFile = PCWSTR(file.as_ptr());
+    if let Some(p) = &params {
+        sei.lpParameters = PCWSTR(p.as_ptr());
+    }
+    sei.nShow = 1; // SW_SHOWNORMAL
+    ShellExecuteExW(&mut sei).map_err(|e| format!("启动卸载器失败: {e}"))?;
+    let h = sei.hProcess;
+    if h.is_invalid() {
+        // 拿不到句柄（目标拒绝 NOCLOSEPROCESS 等）：无法等待，如实上报
+        return Err("卸载器已启动但无法等待其完成（未返回进程句柄）".to_string());
+    }
+    WaitForSingleObject(h, INFINITE);
+    let mut code: u32 = 0;
+    let _ = GetExitCodeProcess(h, &mut code);
+    let _ = windows::Win32::Foundation::CloseHandle(h);
+    Ok(code)
+}
+
+// ==================== 卸载进程监视（2026-09-28 用户拍板） ====================
+// Inno/NSIS 卸载器会把自身复制到临时目录后由副本继续（unins000.exe → au_.exe /
+// un_a.exe），或经 UAC 提权拉起新进程——「启动句柄退出」≠「卸载结束」。原实现
+// wait 提前返回，残留扫描在卸载器还在跑时就执行，只扫出一条“卸载键还在”。
+// 口径：先等句柄退出，再 1s 间隔轮询（上限 15 分钟）：
+//   · 卸载键消失 → 卸载完成；
+//   · 卸载器家族进程全部退出且连续 3 轮稳定 → 结束（用户取消 / 静默完成）；
+//   · 超时 → 如实返回键的现状。
+
+/// 当前全系统进程名快照（小写；Toolhelp32，与 native-scanner ffi 同口径）
+fn process_names_snapshot() -> std::collections::HashSet<String> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut out = std::collections::HashSet::new();
+    unsafe {
+        // windows 0.61 返回 Result<HANDLE>；失败按空快照处理（调用方走 3 轮稳定判定）
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return out;
+        };
+        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut pe).is_ok() {
+            loop {
+                let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+                out.insert(String::from_utf16_lossy(&pe.szExeFile[..len]).to_lowercase());
+                if Process32NextW(snap, &mut pe).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(snap);
+    }
+    out
+}
+
+/// 卸载器家族进程判定：启动的 exe 本名 + Inno/NSIS 临时副本/提权副本/MSI 引擎
+fn is_uninstaller_process(name: &str, launched: &str) -> bool {
+    if name == launched {
+        return true;
+    }
+    name == "msiexec.exe"
+        || name == "au_.exe"
+        || name == "un_a.exe"
+        || name.starts_with("unins")
+        || name.starts_with("un_a")
+}
+
+/// 句柄退出后继续监视：返回 (stillListed, 是否超时放弃)。
+fn watch_uninstaller(
+    hive: windows::Win32::System::Registry::HKEY,
+    key_path: &str,
+    launched_exe: &str,
+) -> (bool, bool) {
+    let launched = launched_exe
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    let mut stable = 0u32;
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // 键消失 = 卸载完成（最早、最可靠的完成信号）
+        if !crate::engine::native::reg_key_exists(hive, key_path) {
+            return (false, false);
+        }
+        let any = process_names_snapshot()
+            .iter()
+            .any(|n| is_uninstaller_process(n, &launched));
+        if any {
+            stable = 0;
+        } else {
+            stable += 1;
+            if stable >= 3 {
+                // 卸载器家族进程已连续 3 秒绝迹：卸载结束（含用户取消）
+                break;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            return (crate::engine::native::reg_key_exists(hive, key_path), true);
+        }
+    }
+    (crate::engine::native::reg_key_exists(hive, key_path), false)
+}
+
+/// 卸载域·执行原厂卸载（方案 M2 + 用户拍板 2026-09-28）。
+/// app_id 只当**寻址键**用：Win32 命令串一律现读注册表，不信任渲染层回传；
+/// APPX 前缀走 Remove-AppxPackage（包全名过字符集白名单后内插，防注入）。
+#[tauri::command]
+pub async fn uninstall_run<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    app_id: String,
+    // 已废弃（2026-09-28 二轮拍板）：静默勾选框删除，静默优先成为默认行为；参数保留兼容旧调用
+    silent: Option<bool>,
+) -> Value {
+    let _ = silent;
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    // ---- Windows 应用（Appx）：Remove-AppxPackage，无静默/原厂 UI 之分 ----
+    if let Some(fullname) = app_id.strip_prefix("APPX|") {
+        if !valid_appx_fullname(fullname) {
+            return json!({ "success": false, "message": "包全名格式非法" });
+        }
+        let fullname = fullname.to_string();
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            log::flush_sync();
+            remove_appx(&fullname)
+        })
+        .await;
+        return match res {
+            Ok(Ok(())) => json!({ "success": true, "data": {
+                "exitCode": 0, "stillListed": false, "installerKind": "appx",
+                "message": "已从当前用户移除该 Windows 应用",
+            }}),
+            Ok(Err(e)) => json!({ "success": false, "message": e }),
+            Err(e) => json!({ "success": false, "message": format!("卸载执行异常: {e}") }),
+        };
+    }
+    let Some((hive_str, key_path)) = app_id.split_once('|') else {
+        return json!({ "success": false, "message": "app_id 格式错误" });
+    };
+    if !valid_uninstall_key_path(key_path) {
+        return json!({ "success": false, "message": "app_id 不是合法的卸载键路径" });
+    }
+    let hive_str = hive_str.to_string();
+    let key_path = key_path.to_string();
+    let res = tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+        let (hive, hive_name) = if hive_str.eq_ignore_ascii_case("HKCU") {
+            (HKEY_CURRENT_USER, "HKCU")
+        } else if hive_str.eq_ignore_ascii_case("HKLM") {
+            (HKEY_LOCAL_MACHINE, "HKLM")
+        } else {
+            return Err("app_id hive 只支持 HKCU/HKLM".to_string());
+        };
+        let sk = to_wide(&key_path);
+        let mut hk = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return Err("卸载注册表键不存在（程序可能已被卸载）".to_string());
+        }
+        let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
+        let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
+        let (kind, product_code) = detect_installer(key_path.rsplit('\\').next().unwrap_or(""), &uninstall_string);
+        let _ = RegCloseKey(hk);
+
+        if uninstall_string.trim().is_empty() {
+            return Err("该程序没有 UninstallString，无法调用原厂卸载器".to_string());
+        }
+        // 静默优先（2026-09-28 二轮拍板，勾选框已删）：白名单（msi/inno/nsis）内先静默；
+        // 非成功退出码或启动失败 → 自动回退原厂卸载界面（既定降级路径，不视为错误）。
+        // 退出码口径：0=成功；3010=msi 成功需重启；1605=产品未安装（按成功对待）。
+        let original = split_uninstall_cmd(&uninstall_string);
+        let silent_try = build_silent_cmd(
+            kind,
+            product_code.as_deref(),
+            &original.as_ref().map(|(e, _)| e.clone()).unwrap_or_default(),
+            "",
+        );
+        let (exe, exit_code, used_silent, fell_back) = match silent_try {
+            Ok((sexe, sargs)) => {
+                log::flush_sync(); // 危险操作前刷盘
+                match shell_run_wait(&sexe, &sargs) {
+                    // 0=成功；3010=msi 成功需重启；1605=产品未安装（按成功对待）
+                    Ok(code) if code == 0 || code == 3010 || code == 1605 => (sexe, code, true, false),
+                    Ok(code) => {
+                        log::write_log(
+                            "info",
+                            &format!("uninstall_run {display_name}: 静默卸载退出码 {code}，自动回退原厂卸载界面"),
+                        );
+                        let (ue, ua) =
+                            original.clone().ok_or_else(|| "UninstallString 无法解析出可执行文件".to_string())?;
+                        log::flush_sync();
+                        let code2 = shell_run_wait(&ue, &ua).map_err(|e| {
+                            log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂 UI 启动失败: {e}"));
+                            e
+                        })?;
+                        (ue, code2, true, true)
+                    }
+                    Err(e) => {
+                        log::write_log(
+                            "info",
+                            &format!("uninstall_run {display_name}: 静默卸载启动失败（{e}），自动回退原厂卸载界面"),
+                        );
+                        let (ue, ua) =
+                            original.clone().ok_or_else(|| "UninstallString 无法解析出可执行文件".to_string())?;
+                        log::flush_sync();
+                        let code2 = shell_run_wait(&ue, &ua).map_err(|e| {
+                            log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂 UI 启动失败: {e}"));
+                            e
+                        })?;
+                        (ue, code2, true, true)
+                    }
+                }
+            }
+            Err(_) => {
+                // 非白名单安装器：直接原厂 UI（原行为）
+                let (e2, a2) =
+                    original.ok_or_else(|| "UninstallString 无法解析出可执行文件".to_string())?;
+                log::flush_sync();
+                let code = shell_run_wait(&e2, &a2).map_err(|e| {
+                    log::write_log("error", &format!("uninstall_run {display_name}: {e}"));
+                    e
+                })?;
+                (e2, code, false, false)
+            }
+        };
+
+        // 进程监视（2026-09-28 用户拍板）：句柄退出 ≠ 卸载结束——继续轮询卸载键与
+        // 卸载器家族进程，直到键消失或进程绝迹（上限 15 分钟）
+        let (still_listed, timed_out) = watch_uninstaller(hive, &key_path, &exe);
+        if still_listed {
+            log::write_log(
+                "warn",
+                &format!(
+                    "uninstall_run {display_name}: 卸载器退出（码 {exit_code}，监视{}）但卸载键仍在，原厂卸载可能未完成",
+                    if timed_out { "超时" } else { "结束" }
+                ),
+            );
+        } else {
+            log::write_log("info", &format!("uninstall_run {display_name}: 卸载完成（码 {exit_code}）"));
+        }
+        Ok(json!({
+            "exitCode": exit_code,
+            "stillListed": still_listed,
+            "installerKind": kind,
+            "usedSilent": used_silent,
+            "fellBack": fell_back,
+            "message": if still_listed {
+                if fell_back {
+                    "静默卸载未完成，已回退原厂卸载界面；卸载器已退出但该程序仍在卸载列表中（可能未完成或已取消）".to_string()
+                } else {
+                    "卸载进程已结束，但该程序仍出现在卸载列表中（可能未完成或已取消）".to_string()
+                }
+            } else if fell_back {
+                "静默卸载未完成，已自动回退原厂卸载界面并执行完毕".to_string()
+            } else {
+                format!("「{display_name}」的卸载器已执行完毕")
+            },
+            "_hive": hive_name,
+        }))
+    })
+    .await;
+    match res {
+        Ok(Ok(data)) => json!({ "success": true, "data": data }),
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("卸载执行异常: {e}") }),
+    }
+}
+
+// ==================== uninstall:residue-scan ====================
+
+/// 应用名 → 归一化串（小写 + 折叠空白）。用于启发式目录匹配。
+fn norm_name(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// 启发式残留：应用名与 AppData/LocalAppData/ProgramData 一级目录名互含（双侧 ≥5 字符）。
+/// 方案 §4.4：名称启发式置信度 low，默认不勾选，只作候选提示。
+unsafe fn heuristic_dir_hits(app_name: &str) -> Vec<String> {
+    let norm = norm_name(app_name);
+    if norm.chars().count() < 5 {
+        return Vec::new(); // 名字太短误报率爆炸（如「QQ」会命中一堆目录）
+    }
+    let mut hits = Vec::new();
+    for root in ["APPDATA", "LOCALAPPDATA", "PROGRAMDATA"] {
+        let Ok(base) = std::env::var(root) else { continue };
+        let Ok(rd) = std::fs::read_dir(&base) else { continue };
+        for ent in rd.flatten() {
+            if !ent.path().is_dir() {
+                continue;
+            }
+            let dnorm = norm_name(&ent.file_name().to_string_lossy());
+            if dnorm.chars().count() < 5 {
+                continue;
+            }
+            if dnorm == norm || (dnorm.contains(&norm) || norm.contains(&dnorm)) {
+                hits.push(ent.path().to_string_lossy().to_string());
+            }
+            if hits.len() >= 20 {
+                return hits; // 上限：启发式只是提示，不该膨胀
+            }
+        }
+    }
+    hits
+}
+
+/// 开始菜单快捷方式命中（用户拍板 2026-09-28：残留面板要有可清理项）：
+/// 递归扫全体/当前用户两级开始菜单，.lnk 文件名含程序名即命中。上限 20 条。
+fn start_menu_shortcut_hits(app_name: &str) -> Vec<String> {
+    let norm = norm_name(app_name);
+    if norm.chars().count() < 3 {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    let roots: Vec<PathBuf> = [
+        std::env::var_os("PROGRAMDATA").map(|p| PathBuf::from(p).join(r"Microsoft\Windows\Start Menu")),
+        std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join(r"Microsoft\Windows\Start Menu")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for root in roots {
+        if hits.len() >= 20 {
+            break;
+        }
+        // 迭代下钻，深度 ≤ 5（开始菜单层级浅，防符号链接打穿用 is_symlink 挡）
+        let mut stack = vec![(root, 0usize)];
+        while let Some((dir, depth)) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if p.is_symlink() {
+                    continue;
+                }
+                if p.is_dir() {
+                    if depth < 5 {
+                        stack.push((p, depth + 1));
+                    }
+                    continue;
+                }
+                if p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("lnk")) != Some(true) {
+                    continue;
+                }
+                let stem = norm_name(&p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+                if stem.contains(&norm) || (norm.contains(&stem) && stem.chars().count() >= 4) {
+                    hits.push(p.to_string_lossy().to_string());
+                    if hits.len() >= 20 {
+                        return hits;
+                    }
+                }
+            }
+        }
+    }
+    hits
+}
+
+// ==================== 固定系统侧痕反查（U-2） ====================
+// 原则：按「系统对象里记录的程序路径」反查，不按程序名猜。已知线索 = 卸载键的
+// InstallLocation / UninstallString / DisplayIcon 推出的 exe 路径与安装目录。
+// 全部来源置信度 medium、默认不勾（拍板口径见 uninstall_residue_scan 的文档注释）。
+
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+/// 从卸载键线索收集「程序对象」：(exe 全路径集合, 安装目录)。
+/// exe 来源 = UninstallString / DisplayIcon 解析 + 安装目录一级 *.exe 直查（上限 16）。
+fn collect_program_objects(loc: &str, uninstall_string: &str, display_icon_src: &str) -> (Vec<String>, Option<String>) {
+    let mut exes: Vec<String> = Vec::new();
+    for src in [uninstall_string, display_icon_src] {
+        if let Some((exe, _)) = split_uninstall_cmd(src) {
+            let exe = exe.trim().to_string();
+            // msiexec.exe 是系统组件：MSI 卸载走它不代表程序装在 System32，反查它只会误伤
+            if !exe.is_empty()
+                && exe.to_ascii_lowercase().ends_with(".exe")
+                && !exe.to_ascii_lowercase().ends_with("\\msiexec.exe")
+            {
+                exes.push(exe);
+            }
+        }
+    }
+    let mut dir: Option<String> = None;
+    if !loc.is_empty() && Path::new(loc).is_dir() {
+        dir = Some(loc.to_string());
+        if let Ok(rd) = std::fs::read_dir(loc) {
+            for ent in rd.flatten().take(64) {
+                let p = ent.path();
+                if p.is_file()
+                    && p.extension().map(|e| e.eq_ignore_ascii_case("exe")).unwrap_or(false)
+                {
+                    exes.push(p.to_string_lossy().to_string());
+                    if exes.len() >= 16 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    (exes, dir)
+}
+
+/// 路径前缀命中：值名以已知 exe 开头（MuiCache 值名形如 `<exe>.FriendlyAppName`、
+/// BAM 值名即完整 exe 路径），或落在安装目录整棵前缀下
+fn trace_prefix_hit(name_lc: &str, exes_lc: &[String], dir_lc: &str) -> bool {
+    exes_lc.iter().any(|e| name_lc.starts_with(e.as_str()))
+        || (!dir_lc.is_empty() && name_lc.starts_with(&format!("{dir_lc}\\")))
+}
+
+/// 枚举注册表键的全部值（只收 REG_SZ / REG_EXPAND_SZ，返回 (值名, 数据)）。
+/// 上限 cap 防爆（MuiCache/BAM 可上千条；枚举到 cap 即截断返回）。
+unsafe fn reg_enum_sz_values(
+    hive: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+    cap: usize,
+) -> Vec<(String, String)> {
+    use windows::Win32::System::Registry::{RegCloseKey, RegEnumValueW, RegOpenKeyExW, KEY_READ};
+    if cap == 0 {
+        return Vec::new();
+    }
+    let sk = to_wide(subkey);
+    let mut hk = windows::Win32::System::Registry::HKEY::default();
+    if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut name_buf = [0u16; 1024];
+        let mut name_len = name_buf.len() as u32;
+        let mut ty = 0u32; // windows 0.61 的 lptype 是 *mut u32：1=REG_SZ 2=REG_EXPAND_SZ
+        let mut data_len = 0u32;
+        // 先探类型与尺寸（lpData=None），只收字符串类；二进制/DWORD 值直接跳过
+        let r = RegEnumValueW(
+            hk, index,
+            Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
+            &mut name_len,
+            None,
+            Some(&mut ty),
+            None,
+            Some(&mut data_len),
+        );
+        if r.is_err() {
+            break; // ERROR_NO_MORE_ITEMS 或访问异常都按枚举结束处理
+        }
+        let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+        index += 1;
+        if name.is_empty() {
+            continue;
+        }
+        if ty != 1 && ty != 2 {
+            continue;
+        }
+        // 再取数据（data_len 为字节数，含终止 NUL）
+        let mut buf = vec![0u8; data_len.max(2) as usize];
+        let mut got = buf.len() as u32;
+        let ok = RegEnumValueW(
+            hk, index - 1,
+            Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
+            &mut name_len,
+            None,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr()),
+            Some(&mut got),
+        )
+        .is_ok();
+        if !ok {
+            continue;
+        }
+        let words: Vec<u16> = buf[..got as usize]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&w| w != 0)
+            .collect();
+        out.push((name, String::from_utf16_lossy(&words)));
+        if out.len() >= cap {
+            break;
+        }
+    }
+    let _ = RegCloseKey(hk);
+    out
+}
+
+/// 枚举注册表键的全部子键名（上限 cap）
+unsafe fn reg_enum_subkeys(
+    hive: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+    cap: usize,
+) -> Vec<String> {
+    use windows::Win32::System::Registry::{RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, KEY_READ};
+    if cap == 0 {
+        return Vec::new();
+    }
+    let sk = to_wide(subkey);
+    let mut hk = windows::Win32::System::Registry::HKEY::default();
+    if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut name_buf = [0u16; 260];
+        let mut name_len = name_buf.len() as u32;
+        let r = RegEnumKeyExW(
+            hk, index,
+            Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
+            &mut name_len,
+            None, None, None, None,
+        );
+        if r.is_err() {
+            break;
+        }
+        index += 1;
+        let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+        if !name.is_empty() {
+            out.push(name);
+        }
+        if out.len() >= cap {
+            break;
+        }
+    }
+    let _ = RegCloseKey(hk);
+    out
+}
+
+/// MuiCache 残留值反查。目标格式 `HKCU\<键路径>::<值名>`（执行侧按 rsplit_once("::") 拆）。
+unsafe fn muicache_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
+    const SUBKEY: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache";
+    let mut out = Vec::new();
+    for (name, _) in reg_enum_sz_values(HKEY_CURRENT_USER, SUBKEY, 4096) {
+        if trace_prefix_hit(&name.to_ascii_lowercase(), exes_lc, dir_lc) {
+            out.push(format!("HKCU\\{SUBKEY}::{name}"));
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 防火墙规则反查：规则值数据形如 `...|App=C:\path\app.exe|...`，数据里含已知 exe/安装目录即命中。
+unsafe fn firewall_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
+    const SUBKEY: &str = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules";
+    let mut out = Vec::new();
+    for (name, data) in reg_enum_sz_values(HKEY_LOCAL_MACHINE, SUBKEY, 4096) {
+        let dl = data.to_ascii_lowercase();
+        let hit = exes_lc.iter().any(|e| dl.contains(e.as_str()))
+            || (!dir_lc.is_empty() && dl.contains(&format!("{dir_lc}\\")));
+        if hit {
+            out.push(format!("HKLM\\{SUBKEY}::{name}"));
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// BAM（后台活动记录）反查：`bam\State\UserSettings\<SID>` 下值名 = 完整 exe 路径
+/// （数据是执行序号 DWORD，不参与匹配）。
+unsafe fn bam_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
+    const ROOT: &str = r"SYSTEM\CurrentControlSet\Services\bam\State\UserSettings";
+    let mut out = Vec::new();
+    'outer: for sid in reg_enum_subkeys(HKEY_LOCAL_MACHINE, ROOT, 64) {
+        for (name, _) in reg_enum_sz_values(HKEY_LOCAL_MACHINE, &format!("{ROOT}\\{sid}"), 256) {
+            if trace_prefix_hit(&name.to_ascii_lowercase(), exes_lc, dir_lc) {
+                out.push(format!("HKLM\\{ROOT}\\{sid}::{name}"));
+                if out.len() >= cap {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Tracing 诊断跟踪项反查：`HKLM\SOFTWARE\Microsoft\Tracing\<exe 文件名>` 子键
+/// （常见形如 `App.EXE`），按已知 exe 的文件名 stem 反查。
+unsafe fn tracing_hits(exes_lc: &[String], cap: usize) -> Vec<String> {
+    const ROOT: &str = r"SOFTWARE\Microsoft\Tracing";
+    let mut stems: Vec<String> = exes_lc
+        .iter()
+        .filter_map(|e| {
+            Path::new(e)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        })
+        .collect();
+    stems.sort();
+    stems.dedup();
+    if stems.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for name in reg_enum_subkeys(HKEY_LOCAL_MACHINE, ROOT, 512) {
+        let nl = name.to_ascii_lowercase();
+        let stem = Path::new(&nl)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| nl.clone());
+        if stems.contains(&nl) || stems.contains(&stem) {
+            out.push(format!("HKLM\\{ROOT}\\{name}"));
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// JumpList 自动目标反查（对象级）：`.destinations-ms` 文件是 OLE 复合文档，
+/// AppID 为不可逆哈希，无法按应用名映射——改为字节级包含判定：文件原始字节里
+/// 出现安装目录 / exe 路径的 UTF-16LE 编码即命中（同前缀目录树的程序会共享命中，
+/// 因此保持 medium + 默认不勾）。
+fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
+    let Some(base) = std::env::var_os("APPDATA") else {
+        return Vec::new();
+    };
+    let root = PathBuf::from(base).join(r"Microsoft\Windows\Recent\AutomaticDestinations");
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut needles: Vec<Vec<u8>> = Vec::new();
+    let push_needle = |s: &str, needles: &mut Vec<Vec<u8>>| {
+        if s.is_empty() {
+            return;
+        }
+        needles.push(s.encode_utf16().flat_map(u16::to_le_bytes).collect());
+    };
+    push_needle(dir_lc, &mut needles);
+    for e in exes_lc {
+        push_needle(e, &mut needles);
+    }
+    if needles.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let is_dest = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase().ends_with("destinations-ms"))
+            .unwrap_or(false);
+        if !is_dest {
+            continue;
+        }
+        // 正常目标文件 <1MB；超 4MB 视为异常直接跳过（防把巨型文件读进内存）
+        let Ok(bytes) = std::fs::read(&p) else { continue };
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+            continue;
+        }
+        if needles.iter().any(|n| {
+            bytes
+                .windows(n.len())
+                .any(|w| w == n.as_slice())
+        }) {
+            out.push(p.to_string_lossy().to_string());
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
+}
+
+// ==================== 签名残留规则库（U-1） ====================
+// 已知程序知识库：规则文件与 cleanup-rules.json 同款签名链（Ed25519 + 去掉 _sig 的
+// 紧凑 JSON 规范化，rules_signature::verify_rules_text 验签）。数据目录规则优先于内置，
+// 验签失败 / 版本低于防回滚下限一律 fail-closed 回退内置。
+// 在线更新：与 cleanup 规则共用同一 HTTP 传输层（cleanup.rs 的单一 TODO 点），
+// 传输层落地后按 `residue-rules.json` 走 set_residue_watermark 同款防回滚即可，本文件不再改动加载语义。
+
+/// 内置残留规则库（编译期嵌入，与 data/uninstall-residue-rules.json 逐字节一致）
+const BUILTIN_RESIDUE_RULES_JSON: &str = include_str!("../../data/uninstall-residue-rules.json");
+
+pub fn residue_rules_dir() -> PathBuf {
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    let base = if appdata.trim().is_empty() {
+        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+            .join("AppData")
+            .join("Roaming")
+    } else {
+        PathBuf::from(appdata)
+    };
+    base.join("Trim").join("uninstall")
+}
+
+fn residue_rules_file() -> PathBuf {
+    residue_rules_dir().join("residue-rules.json")
+}
+
+fn residue_watermark_file() -> PathBuf {
+    residue_rules_dir().join("residue-rules-watermark.json")
+}
+
+/// 防回滚水位线读取（损坏/不可读按 0；口径同 cleanup::rules_watermark）
+pub fn residue_watermark() -> f64 {
+    let Ok(text) = std::fs::read_to_string(residue_watermark_file()) else {
+        return 0.0;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return 0.0;
+    };
+    v.get("rulesVersion").and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+
+/// 防回滚水位线写入（只升不降；在线更新链路接入时调用）
+pub fn set_residue_watermark(version: f64) -> bool {
+    if !version.is_finite() || version <= 0.0 || version <= residue_watermark() {
+        return false;
+    }
+    let file = residue_watermark_file();
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let payload = json!({ "rulesVersion": version, "at": crate::engine::now_ms() });
+    crate::security::atomic_write_json(&file, &payload).is_ok()
+}
+
+/// 残留规则库加载：数据目录（验签 + 防回滚）→ 内置。fail-closed。
+fn load_residue_rules() -> Option<Value> {
+    let file = residue_rules_file();
+    if file.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            match rules_signature::verify_rules_text(&text) {
+                Ok(()) => {
+                    let parsed: Option<Value> = serde_json::from_str(&text).ok();
+                    if let Some(v) = parsed {
+                        let valid = v.get("rules").map(|r| r.is_array()).unwrap_or(false);
+                        let ver = v.get("rulesVersion").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        let builtin_ver = serde_json::from_str::<Value>(BUILTIN_RESIDUE_RULES_JSON)
+                            .ok()
+                            .and_then(|b| b.get("rulesVersion").and_then(|x| x.as_f64()))
+                            .unwrap_or(0.0);
+                        let floor = builtin_ver.max(residue_watermark());
+                        if !valid {
+                            log::write_log("warn", "数据目录残留规则结构非法（rules 非数组），已回退内置规则库");
+                        } else if floor > 0.0 && ver < floor {
+                            log::write_log(
+                                "warn",
+                                &format!("数据目录残留规则版本({ver})低于防回滚下限({floor})，疑似旧签名文件重放，已回退内置规则库"),
+                            );
+                        } else {
+                            return Some(v);
+                        }
+                    } else {
+                        log::write_log("warn", "数据目录残留规则 JSON 解析失败，已回退内置规则库");
+                    }
+                }
+                Err(reason) => {
+                    log::write_log(
+                        "warn",
+                        &format!("数据目录残留规则验签未通过，已回退内置规则库: {reason}"),
+                    );
+                }
+            }
+        }
+    }
+    serde_json::from_str::<Value>(BUILTIN_RESIDUE_RULES_JSON).ok()
+}
+
+/// 条件组命中判定（U-1「双条件」拍板）：displayName / publisher / uninstallKey 三组里
+/// **至少两组命中**才视为同一程序，单一维度弱相似不触发（防「QQ」类短名误伤全家桶）。
+fn residue_rules_hits(
+    rules: &Value,
+    display_name: &str,
+    publisher: &str,
+    key_path: &str,
+) -> Vec<Value> {
+    let empty: Vec<Value> = Vec::new();
+    let rule_list = rules.get("rules").and_then(|r| r.as_array()).unwrap_or(&empty);
+    let name_norm = norm_name(display_name);
+    let pub_lc = publisher.trim().to_lowercase();
+    let key_lc = key_path.trim().to_lowercase();
+    let mut out = Vec::new();
+    for rule in rule_list {
+        let Some(id) = rule.get("id").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        // 双侧互含（沿用名称启发式的口径，但阈值放宽到 2：规则模式是人工维护的精确短词）
+        let contains2 = |a: &str, b: &str| {
+            let (a, b) = (a.trim(), b.trim());
+            !a.is_empty() && !b.is_empty() && (a.contains(b) || b.contains(a))
+        };
+        let name_hit = rule
+            .get("displayName")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter().filter_map(|p| p.as_str()).any(|p| {
+                    let pn = norm_name(p);
+                    pn.chars().count() >= 2 && contains2(&name_norm, &pn)
+                })
+            })
+            .unwrap_or(false);
+        let pub_hit = rule
+            .get("publisher")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p.as_str())
+                    .any(|p| contains2(&pub_lc, &p.trim().to_lowercase()))
+            })
+            .unwrap_or(false);
+        let key_hit = rule
+            .get("uninstallKey")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter().filter_map(|p| p.as_str()).any(|p| {
+                    let pl = p.trim().to_lowercase();
+                    pl.chars().count() >= 2 && contains2(&key_lc, &pl)
+                })
+            })
+            .unwrap_or(false);
+        let hits = [name_hit, pub_hit, key_hit].iter().filter(|h| **h).count();
+        if hits < 2 {
+            continue;
+        }
+        // 命中 → 展开 %VAR% 目标并做存在性判定：不存在的目标不出现在面板里
+        for entry in rule.get("residue").and_then(|x| x.as_array()).unwrap_or(&empty) {
+            let kind = entry.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+            let Some(target_raw) = entry.get("target").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let note = entry.get("note").and_then(|x| x.as_str()).unwrap_or("");
+            match kind {
+                "folder" | "file" => {
+                    let target = cleanup_scan::expand_env_path(target_raw);
+                    let p = Path::new(&target);
+                    let exists = if kind == "folder" { p.is_dir() } else { p.is_file() };
+                    if !exists || protect::is_path_protected(&target) {
+                        continue;
+                    }
+                    out.push(json!({
+                        "kind": kind, "target": target,
+                        "reason": format!("残留规则库命中（{id}）：{note}"),
+                        "confidence": "high", "risk": "medium", "defaultChecked": true,
+                    }));
+                }
+                "reg_key" => {
+                    let Some((hive, rest)) = parse_reg_target(target_raw) else {
+                        continue;
+                    };
+                    if !crate::engine::native::reg_key_exists(hive, &rest) {
+                        continue;
+                    }
+                    out.push(json!({
+                        "kind": "reg_key", "target": target_raw,
+                        "reason": format!("残留规则库命中（{id}）：{note}"),
+                        "confidence": "high", "risk": "medium", "defaultChecked": true,
+                    }));
+                }
+                _ => continue,
+            }
+        }
+    }
+    out
+}
+
+/// 卸载域·残留扫描（方案 M3 MVP + U-2 固定系统侧痕）。
+/// 来源与置信度：卸载键仍在=high（reg_key）；InstallLocation 仍在=high（folder）；
+/// 名称启发式=low（folder，默认不勾）；开始菜单快捷方式=medium（默认勾）；
+/// 固定系统侧痕（U-2）=medium 全默认不勾（拍板口径 2026-09-28：侧痕删除无原厂依据，
+/// 只作候选交用户逐项决定）。签名残留规则库按方案后置接入（U-1）。
+#[tauri::command]
+pub async fn uninstall_residue_scan<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    app_id: String,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Some((hive_str, key_path)) = app_id.split_once('|') else {
+        return json!({ "success": false, "message": "app_id 格式错误" });
+    };
+    // U-4（拍板 2026-09-28）：Appx 也参与残留扫描（Packages 孤儿数据），先用包全名闸
+    if hive_str.eq_ignore_ascii_case("APPX") {
+        if !valid_appx_fullname(key_path) {
+            return json!({ "success": false, "message": "app_id 不是合法的包全名" });
+        }
+    } else if !valid_uninstall_key_path(key_path) {
+        return json!({ "success": false, "message": "app_id 不是合法的卸载键路径" });
+    }
+    let hive_str = hive_str.to_string();
+    let key_path = key_path.to_string();
+    let findings = tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+        // U-4（拍板 2026-09-28）：Appx 残留口径=Remove-AppxPackage 后
+        // %LOCALAPPDATA%\Packages\<PFN> 的孤儿应用数据。此前「不参与残留扫描」，
+        // 小旭拍板并入：目录存在才入候选，进回收站（可还原），先过 is_path_protected。
+        if hive_str.eq_ignore_ascii_case("APPX") {
+            let Some(pfn) = package_family_name(&key_path) else {
+                return (Vec::new(), "Windows 应用".to_string());
+            };
+            let base = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            if base.is_empty() {
+                return (Vec::new(), "Windows 应用".to_string());
+            }
+            let dir = PathBuf::from(&base).join("Packages").join(&pfn);
+            let mut findings: Vec<Value> = Vec::new();
+            if dir.is_dir() && !protect::is_path_protected(&dir.to_string_lossy()) {
+                findings.push(json!({
+                    "kind": "folder", "target": dir.to_string_lossy(),
+                    "reason": "Windows 应用已移除，其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据成为孤儿（进回收站，可还原）",
+                    "confidence": "high", "risk": "low", "defaultChecked": true,
+                }));
+            }
+            return (findings, pfn);
+        }
+        let (hive, full_target) = if hive_str.eq_ignore_ascii_case("HKCU") {
+            (HKEY_CURRENT_USER, format!("HKCU\\{key_path}"))
+        } else if hive_str.eq_ignore_ascii_case("HKLM") {
+            (HKEY_LOCAL_MACHINE, format!("HKLM\\{key_path}"))
+        } else {
+            return (Vec::new(), String::new());
+        };
+        let sk = to_wide(&key_path);
+        let mut hk = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return (Vec::new(), String::new());
+        }
+        let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
+        let publisher = reg_sz(hk, "Publisher").unwrap_or_default();
+        let install_location = reg_sz(hk, "InstallLocation").unwrap_or_default();
+        let display_icon_src = reg_sz(hk, "DisplayIcon").unwrap_or_default();
+        let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
+        let _ = RegCloseKey(hk);
+
+        let mut findings: Vec<Value> = Vec::new();
+        // 高置信：卸载键仍在（原厂卸载未完成/已取消的直接证据）
+        if crate::engine::native::reg_key_exists(hive, &key_path) {
+            findings.push(json!({
+                "kind": "reg_key", "target": full_target,
+                "reason": "卸载注册表项仍存在（原厂卸载可能未完成或已取消）",
+                "confidence": "high", "risk": "medium", "defaultChecked": true,
+            }));
+        }
+        // 高置信：安装目录仍在
+        let loc = install_location.trim().trim_end_matches('\\').to_string();
+        if !loc.is_empty()
+            && Path::new(&loc).is_dir()
+            && !protect::is_path_protected(&loc)
+        {
+            findings.push(json!({
+                "kind": "folder", "target": loc,
+                "reason": "InstallLocation 指向的安装目录仍存在",
+                "confidence": "high", "risk": "medium", "defaultChecked": true,
+            }));
+        }
+        // 低置信：名称启发式（默认不勾，交用户判断）
+        for p in heuristic_dir_hits(&display_name) {
+            if protect::is_path_protected(&p) {
+                continue;
+            }
+            findings.push(json!({
+                "kind": "folder", "target": p,
+                "reason": format!("目录名与「{display_name}」高度相似（启发式，请人工确认后再删）"),
+                "confidence": "low", "risk": "high", "defaultChecked": false,
+            }));
+        }
+        // 高置信补充：卸载器/图标指向的目录仍存在（InstallLocation 缺失时的主线索）
+        for src in [&uninstall_string, &display_icon_src] {
+            if src.trim().is_empty() {
+                continue;
+            }
+            if let Some((exe, _)) = split_uninstall_cmd(src) {
+                if let Some(parent) = Path::new(&exe).parent() {
+                    let pd = parent.to_path_buf();
+                    if pd.as_os_str().is_empty()
+                        || !pd.is_dir()
+                        || protect::is_path_protected(&pd.to_string_lossy())
+                        || findings.iter().any(|f| {
+                            f["kind"] == "folder"
+                                && f["target"].as_str().map(|s| s.eq_ignore_ascii_case(&pd.to_string_lossy())).unwrap_or(false)
+                        })
+                    {
+                        continue;
+                    }
+                    findings.push(json!({
+                        "kind": "folder", "target": pd.to_string_lossy(),
+                        "reason": "卸载器/图标指向的程序目录仍存在",
+                        "confidence": "high", "risk": "medium", "defaultChecked": true,
+                    }));
+                }
+            }
+        }
+        // 中置信：开始菜单快捷方式（文件名含程序名；删 .lnk 无害，默认勾选）
+        for lnk in start_menu_shortcut_hits(&display_name) {
+            findings.push(json!({
+                "kind": "shortcut", "target": lnk,
+                "reason": format!("开始菜单快捷方式与「{display_name}」同名"),
+                "confidence": "medium", "risk": "low", "defaultChecked": true,
+            }));
+        }
+        // 中置信（默认不勾）：固定系统侧痕反查（U-2）。按系统对象里记录的程序路径反查，
+        // 不按程序名猜——已知线索只有卸载键推出的 exe 路径与安装目录。
+        let (prog_exes, prog_dir) = collect_program_objects(&loc, &uninstall_string, &display_icon_src);
+        let dir_lc = prog_dir
+            .as_ref()
+            .map(|d| d.trim_end_matches('\\').to_ascii_lowercase())
+            .unwrap_or_default();
+        let exes_lc: Vec<String> = prog_exes
+            .iter()
+            .map(|e| e.trim_end_matches('\\').to_ascii_lowercase())
+            .collect();
+        if !exes_lc.is_empty() || !dir_lc.is_empty() {
+            // 外层闭包整体处于 unsafe 块内，直接调用即可（内层再包 unsafe 会告警冗余）
+            for target in muicache_hits(&exes_lc, &dir_lc, 20) {
+                findings.push(json!({
+                    "kind": "reg_value", "target": target,
+                    "reason": "MuiCache 残留值（系统缓存了此程序路径的友好名称）",
+                    "confidence": "medium", "risk": "low", "defaultChecked": false,
+                }));
+            }
+            for target in firewall_hits(&exes_lc, &dir_lc, 20) {
+                findings.push(json!({
+                    "kind": "reg_value", "target": target,
+                    "reason": "防火墙规则引用此程序路径（程序已卸载，规则已失效）",
+                    "confidence": "medium", "risk": "low", "defaultChecked": false,
+                }));
+            }
+            for target in bam_hits(&exes_lc, &dir_lc, 20) {
+                findings.push(json!({
+                    "kind": "reg_value", "target": target,
+                    "reason": "BAM 后台执行记录引用此程序路径",
+                    "confidence": "medium", "risk": "low", "defaultChecked": false,
+                }));
+            }
+            for target in tracing_hits(&exes_lc, 20) {
+                findings.push(json!({
+                    "kind": "reg_key", "target": target,
+                    "reason": "Tracing 诊断跟踪项以此程序的 exe 命名",
+                    "confidence": "medium", "risk": "low", "defaultChecked": false,
+                }));
+            }
+            for target in jumplist_hits(&exes_lc, &dir_lc, 20) {
+                findings.push(json!({
+                    "kind": "file", "target": target,
+                    "reason": "JumpList 自动目标缓存引用此程序路径",
+                    "confidence": "medium", "risk": "low", "defaultChecked": false,
+                }));
+            }
+        }
+        // 高置信：签名残留规则库命中（U-1）——已知程序知识库，双条件命中 +
+        // 目标存在性判定后才出现；reg_key 删除走执行侧同款「先备份后删」
+        if let Some(rules) = load_residue_rules() {
+            for f in residue_rules_hits(&rules, &display_name, &publisher, &key_path) {
+                findings.push(f);
+            }
+        }
+        (findings, display_name)
+    })
+    .await
+    .unwrap_or((Vec::new(), String::new()));
+
+    // 快照落槽：执行只认这份集合
+    let (finding_list, app_name) = findings;
+    let label = window.label().to_string();
+    {
+        let mut store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
+        store.insert(label, (crate::engine::now_ms(), finding_list.clone()));
+    }
+    json!({ "success": true, "data": { "appName": app_name, "findings": finding_list } })
+}
+
+// ==================== uninstall:residue-execute ====================
+
+/// 残留执行结果明细行
+fn detail(kind: &str, target: &str, status: &str, message: &str) -> Value {
+    json!({ "kind": kind, "target": target, "status": status, "message": message })
+}
+
+/// 卸载域·残留执行（方案 M4）。
+/// 硬约束：目标必须命中本会话快照（防伪造请求）；文件/目录回收站优先且
+/// `is_path_protected` 前置、失败不永久删除兜底；注册表先 export 备份再删，
+/// 备份失败该项拒绝。批次报告落 uninstall-reports/<batch>.json。
+#[tauri::command]
+pub async fn uninstall_residue_execute<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    app_id: String,
+    targets: Vec<Value>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    if targets.is_empty() || targets.len() > 200 {
+        return json!({ "success": false, "message": "targets 为空或超过 200 项上限" });
+    }
+    let label = window.label().to_string();
+    // 快照校验：kind+target 逐一命中（方案 M4 验收「任意单项不得绕过快照」）
+    let snap: Vec<Value> = {
+        let store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
+        store.get(&label).map(|(_, f)| f.clone()).unwrap_or_default()
+    };
+    let wanted: Vec<(String, String)> = targets
+        .iter()
+        .map(|t| {
+            (
+                t.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                t.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    if wanted.iter().any(|(k, t)| k.is_empty() || t.is_empty()) {
+        return json!({ "success": false, "message": "targets 存在缺失 kind/target 的项" });
+    }
+    let known = |k: &str, t: &str| {
+        snap.iter().any(|f| {
+            f["kind"].as_str() == Some(k)
+                && f["target"].as_str().map(|s| s.eq_ignore_ascii_case(t)).unwrap_or(false)
+        })
+    };
+    let stale: Vec<&(String, String)> = wanted.iter().filter(|(k, t)| !known(k, t)).collect();
+    if !stale.is_empty() {
+        return json!({ "success": false, "message": format!("{} 项不在本次扫描快照中（目标已过期或请求被篡改），请重新扫描后再试", stale.len()) });
+    }
+
+    log::flush_sync(); // 危险操作前刷盘
+    let app_id = app_id.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let mut details: Vec<Value> = Vec::new();
+        // 注册表项：先备份后删（与 cleanup 同一 export 通道，fail-closed）
+        for (kind, target) in &wanted {
+            if kind != "reg_key" {
+                continue;
+            }
+            let Some((hive, rest)) = parse_reg_target(target) else {
+                details.push(detail(kind, target, "skip", "注册表目标无法解析（只支持 HKCU/HKLM）"));
+                continue;
+            };
+            if !crate::engine::native::reg_key_exists(hive, &rest) {
+                details.push(detail(kind, target, "skip", "注册表项已不存在"));
+                continue;
+            }
+            let backup_dir = crate::engine::paths::app_data_dir().join("uninstall-reg-backup");
+            let _ = std::fs::create_dir_all(&backup_dir);
+            let file = backup_dir.join(format!("{}_{}.reg", crate::engine::now_ms(), rest.rsplit('\\').next().unwrap_or("key")));
+            let Some(file_str) = file.to_str() else {
+                details.push(detail(kind, target, "fail", "备份路径无法表示为文本，拒绝删除"));
+                continue;
+            };
+            let export_path = format!("{}\\{rest}", target.split('\\').next().unwrap_or(""));
+            let backup_ok = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
+                .args(["export", &export_path, file_str, "/y"])
+                .output()
+                .map(|o| o.status.success() && file.exists())
+                .unwrap_or(false);
+            if !backup_ok {
+                details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
+                continue;
+            }
+            if crate::engine::native::reg_key_remove(hive, &rest, true) {
+                details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
+            } else {
+                details.push(detail(kind, target, "fail", "注册表删除失败"));
+            }
+        }
+
+        // 注册表值：先备份整个父键再删单值（U-2 侧痕面：MuiCache/防火墙规则/BAM）。
+        // 目标格式 `HKCU\<键路径>::<值名>`；删值复用 reg_restore_delete
+        // （值已不存在 = 幂等成功，对齐 B11 语义）。
+        for (kind, target) in &wanted {
+            if kind != "reg_value" {
+                continue;
+            }
+            let Some((key_part, value_name)) = target.rsplit_once("::") else {
+                details.push(detail(kind, target, "skip", "注册表值目标格式错误（缺 :: 值名分隔）"));
+                continue;
+            };
+            if value_name.trim().is_empty() {
+                details.push(detail(kind, target, "skip", "注册表值名为空"));
+                continue;
+            }
+            let Some((hive, rest)) = parse_reg_target(key_part) else {
+                details.push(detail(kind, target, "skip", "注册表目标无法解析（只支持 HKCU/HKLM）"));
+                continue;
+            };
+            let backup_dir = crate::engine::paths::app_data_dir().join("uninstall-reg-backup");
+            let _ = std::fs::create_dir_all(&backup_dir);
+            let leaf = rest.rsplit('\\').next().unwrap_or("key");
+            let file = backup_dir.join(format!("{}_{}.reg", crate::engine::now_ms(), leaf));
+            let Some(file_str) = file.to_str() else {
+                details.push(detail(kind, target, "fail", "备份路径无法表示为文本，拒绝删除"));
+                continue;
+            };
+            let backup_ok = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
+                .args(["export", key_part, file_str, "/y"])
+                .output()
+                .map(|o| o.status.success() && file.exists())
+                .unwrap_or(false);
+            if !backup_ok {
+                details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
+                continue;
+            }
+            if crate::engine::native::reg_restore_delete(hive, &rest, value_name) {
+                details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
+            } else {
+                details.push(detail(kind, target, "fail", "注册表值删除失败"));
+            }
+        }
+
+        // 文件/目录/快捷方式：保护判定 + 回收站（trim_finder 三端同源删除，含 protect 注入）
+        let paths: Vec<(String, OsString)> = wanted
+            .iter()
+            .filter(|(k, _)| matches!(k.as_str(), "folder" | "file" | "shortcut"))
+            .map(|(k, t)| (k.clone(), OsString::from(t)))
+            .collect();
+        if !paths.is_empty() {
+            if let Some((_, target)) = paths
+                .iter()
+                .find(|(_, t)| protect::is_path_protected(&t.to_string_lossy()))
+            {
+                log::write_log("warn", &format!("uninstall_residue_execute 拒绝: 受保护路径 {}", target.to_string_lossy()));
+                return Err(format!("包含受保护的系统路径，已拒绝：{}", target.to_string_lossy()));
+            }
+            // 预检：目标存在才送删
+            let existing: Vec<(String, OsString)> = paths
+                .into_iter()
+                .filter(|(_, t)| std::fs::symlink_metadata(t).is_ok())
+                .collect();
+            if !existing.is_empty() {
+                let protect_json = protect::protected_roots_json();
+                // 删除结果行解析 Sink：只收 @@ITEM@@ 行里的 delresult（对齐 finder 的 FinderSink 口径）
+                struct RowSink(Mutex<Vec<Value>>);
+                impl trim_finder::scan::Sink for RowSink {
+                    fn item(&self, _p: &Path, line: &str) {
+                        let Some(body) = line.strip_prefix("@@ITEM@@") else { return };
+                        let Ok(v) = trim_finder::cleanup_scan::parse_json(body) else { return };
+                        if v.get("type").and_then(|t| t.as_str()) != Some("delresult") {
+                            return;
+                        }
+                        let jnum = |j: Option<&trim_finder::cleanup_scan::Json>| -> u64 {
+                            match j {
+                                Some(trim_finder::cleanup_scan::Json::Num(n)) => *n as u64,
+                                _ => 0,
+                            }
+                        };
+                        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(json!({
+                            "kind": match v.get("kind").and_then(|k| k.as_str()) {
+                                Some("dir") => "dir",
+                                _ => "file",
+                            },
+                            "path": v.get("path").and_then(|p| p.as_str()).unwrap_or(""),
+                            "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
+                            "freed": jnum(v.get("freed")),
+                        }));
+                    }
+                    fn progress(&self, _n: u64) {}
+                    fn scanned(&self, _n: u64) {}
+                    fn warn(&self, _m: &str) {}
+                    fn truncated(&self) {}
+                }
+                let sink = RowSink(Mutex::new(Vec::new()));
+                let _ = trim_finder::scan::delete(&existing, Some(protect_json.as_str()), &sink);
+                for row in sink.0.into_inner().unwrap_or_default() {
+                    let ok = row["status"] == "ok";
+                    details.push(detail(
+                        row["kind"].as_str().unwrap_or("file"),
+                        row["path"].as_str().unwrap_or(""),
+                        if ok { "ok" } else { "fail" },
+                        if ok { "已移入回收站" } else { row["path"].as_str().map(|_| "删除失败（可能被占用）").unwrap_or("删除失败") },
+                    ));
+                }
+            }
+        }
+        Ok(details)
+    })
+    .await;
+
+    match report {
+        Ok(Ok(details)) => {
+            let ok_count = details.iter().filter(|d| d["status"] == "ok").count();
+            let fail_count = details.iter().filter(|d| d["status"] == "fail").count();
+            // 批次报告（方案 M4）：动作级明细落盘，失败如实呈现
+            let batch_id = delete_manifest::new_batch_id();
+            let report_path = crate::engine::paths::app_data_dir()
+                .join("uninstall-reports")
+                .join(format!("{batch_id}.json"));
+            let _ = std::fs::create_dir_all(report_path.parent().unwrap_or(Path::new(".")));
+            let _ = crate::security::atomic_write_json(
+                &report_path,
+                &json!({
+                    "batchId": batch_id, "appId": app_id,
+                    "time": delete_manifest::iso_now(),
+                    "details": details,
+                }),
+            );
+            log::write_log("info", &format!("uninstall_residue_execute {app_id}: 成功 {ok_count} 失败 {fail_count}（报告 {batch_id}）"));
+            json!({ "success": true, "data": { "details": details, "okCount": ok_count, "failCount": fail_count, "reportPath": report_path.to_string_lossy() } })
+        }
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("残留清理异常: {e}") }),
+    }
+}
+
+// ==================== uninstall:report-*（U-6 批次报告查看入口） ====================
+
+fn uninstall_reports_dir() -> PathBuf {
+    crate::engine::paths::app_data_dir().join("uninstall-reports")
+}
+
+/// batch_id 准入：new_batch_id 形如 `2026-09-28T12-30-45-123Z`（ISO 去 :/.），
+/// 字符集限定 [A-Za-z0-9-]（含 T/Z）——路径穿越（..、\、/）与非报告文件名一律拒绝。
+fn valid_batch_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// uninstall:report-list — 列出残留清理批次报告（主窗档；只读；上限 50 条按时间倒序）
+#[tauri::command]
+pub fn uninstall_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Ok(rd) = std::fs::read_dir(uninstall_reports_dir()) else {
+        return json!({ "success": true, "data": { "reports": [] } });
+    };
+    let mut items: Vec<Value> = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !valid_batch_id(stem) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        // 损坏的个别报告跳过不阻断整表；details 计数在列表页就给全，点开再看明细
+        let (mut ok, mut fail, mut skip) = (0i64, 0i64, 0i64);
+        for d in v.get("details").and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+            match d.get("status").and_then(|s| s.as_str()) {
+                Some("ok") => ok += 1,
+                Some("fail") => fail += 1,
+                _ => skip += 1,
+            }
+        }
+        items.push(json!({
+            "batchId": stem,
+            "time": v.get("time").cloned().unwrap_or(Value::Null),
+            "appId": v.get("appId").cloned().unwrap_or(Value::Null),
+            "okCount": ok, "failCount": fail, "skipCount": skip,
+        }));
+        if items.len() >= 50 {
+            break;
+        }
+    }
+    // 文件名即 ISO 时间戳，倒序 = 最新在前
+    items.sort_by(|a, b| {
+        let ka = a["batchId"].as_str().unwrap_or("");
+        let kb = b["batchId"].as_str().unwrap_or("");
+        kb.cmp(ka)
+    });
+    json!({ "success": true, "data": { "reports": items } })
+}
+
+/// uninstall:report-get — 读取单个批次报告（主窗档；只读；batch_id 过字符集闸防穿越）
+#[tauri::command]
+pub fn uninstall_report_get<R: tauri::Runtime>(window: WebviewWindow<R>, batch_id: String) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    if !valid_batch_id(&batch_id) {
+        return json!({ "success": false, "message": "batchId 非法" });
+    }
+    let p = uninstall_reports_dir().join(format!("{batch_id}.json"));
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return json!({ "success": false, "message": "报告不存在或不可读" });
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) => json!({ "success": true, "data": v }),
+        Err(_) => json!({ "success": false, "message": "报告 JSON 解析失败" }),
+    }
+}
+
+/// uninstall:appx-logo — 读取 Appx Logo PNG → dataURL（U-3）。
+/// SHGetFileInfoW 对 .png 只出「文件类型图标」，不是图像内容，故走直接读文件；
+/// 准入收紧到 `\WindowsApps\` 下的 .png（Appx 安装资产），防变成任意文件读。
+#[tauri::command]
+pub fn uninstall_appx_logo<R: tauri::Runtime>(window: WebviewWindow<R>, logo_path: String) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let p = logo_path.trim();
+    let pl = p.to_lowercase();
+    let looks_ok = p.len() <= 1024
+        && pl.ends_with(".png")
+        && (pl.as_bytes().get(1) == Some(&b':') || pl.starts_with("\\\\"))
+        && pl.contains("\\windowsapps\\");
+    if !looks_ok {
+        return json!({ "success": false, "message": "logo 路径不在 Appx 安装资产范围内" });
+    }
+    let path = PathBuf::from(p);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return json!({ "success": false, "message": "logo 文件不存在" });
+    };
+    if !meta.is_file() || meta.len() > 512 * 1024 {
+        return json!({ "success": false, "message": "logo 文件缺失或超过 512KB 上限" });
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            use base64::Engine as _;
+            // 形状对齐 paths:file-icon / paths:app-icon（顶层 dataUrl）——前端
+            // fetchIcon 三分支统一判 resp.dataUrl，嵌套 data.dataUrl 永远判不中
+            // （U-3 复检二轮实锤：枚举修好后图标仍不显示的真因）
+            json!({
+                "success": true,
+                "dataUrl": format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes))
+            })
+        }
+        Err(e) => json!({ "success": false, "message": format!("logo 读取失败: {e}") }),
+    }
+}
+
+#[cfg(test)]
+mod uninstall_appx_tests {
+    use super::*;
+
+    /// 包全名是直接内插进 PowerShell 命令串的，字符集白名单是唯一注入防线。
+    #[test]
+    fn appx_fullname_charset_gate() {
+        assert!(valid_appx_fullname("OpenAI.ChatGPT-Desktop_1.2025.123.0_x64__0000000000000"));
+        assert!(valid_appx_fullname("Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe"));
+        // 注入面：引号 / 分号 / 换行 / 非 ASCII 一律拒绝
+        assert!(!valid_appx_fullname("a'; Remove-Item C:\\ -Recurse; '"));
+        assert!(!valid_appx_fullname("a\"b"));
+        assert!(!valid_appx_fullname("a\nb"));
+        assert!(!valid_appx_fullname(""));
+        assert!(!valid_appx_fullname("名字非法"));
+    }
+
+    /// U-4：包全名 → PFN。Name 含下划线（多段拼回）、Version/Arch 去尾两段；
+    /// 结构不符返回 None。
+    #[test]
+    fn package_family_name_derivation() {
+        assert_eq!(
+            package_family_name("Microsoft.MicrosoftEdge.Stable_153.0.4234.32_neutral__8wekyb3d8bbwe"),
+            Some("Microsoft.MicrosoftEdge.Stable_8wekyb3d8bbwe".to_string())
+        );
+        assert_eq!(
+            package_family_name("OpenAI.ChatGPT-Desktop_1.2025.123.0_x64__0000000000000"),
+            Some("OpenAI.ChatGPT-Desktop_0000000000000".to_string())
+        );
+        // Name 自带下划线
+        assert_eq!(
+            package_family_name("Some_App.Name_1.0.0.0_x64__cafebabedeadbeef"),
+            Some("Some_App.Name_cafebabedeadbeef".to_string())
+        );
+        // 结构不符：缺 __ / 缺 Version+Arch 段 / PublisherId 带下划线
+        assert_eq!(package_family_name("NoDoubleUnderscore_1.0.0.0_x64"), None);
+        assert_eq!(package_family_name("A_B__pub"), None);
+        assert_eq!(package_family_name("A_1.0_x64__has_underscore"), None);
+        assert_eq!(package_family_name(""), None);
+    }
+
+    /// 发行商友好化：CN= 取逗号前段；非 CN 形态原样保留。
+    #[test]
+    fn friendly_publisher_extracts_cn() {
+        assert_eq!(friendly_publisher("CN=OpenAI, O=OpenAI, L=San Francisco"), "OpenAI");
+        assert_eq!(friendly_publisher("CN=Microsoft Windows Store"), "Microsoft Windows Store");
+        assert_eq!(friendly_publisher("Tencent"), "Tencent");
+        assert_eq!(friendly_publisher(""), "");
+    }
+}
+
+#[cfg(test)]
+mod residue_trace_tests {
+    use super::*;
+
+    /// U-2 反查的前缀语义：值名以已知 exe 开头（MuiCache `<exe>.xxx` / BAM 完整路径），
+    /// 或落在安装目录前缀下；前缀命中不得跨「路径段」误放行。
+    #[test]
+    fn trace_prefix_hit_matches_exe_and_dir() {
+        let exes = vec!["c:\\apps\\foo\\foo.exe".to_string()];
+        assert!(trace_prefix_hit("c:\\apps\\foo\\foo.exe.FriendlyAppName", &exes, ""));
+        assert!(trace_prefix_hit("c:\\apps\\foo\\foo.exe", &exes, ""));
+        assert!(!trace_prefix_hit("c:\\apps\\foobar\\foo.exe", &exes, ""));
+        assert!(trace_prefix_hit("c:\\apps\\foo\\helper.exe", &exes, "c:\\apps\\foo"));
+        assert!(!trace_prefix_hit("c:\\apps\\foobar\\x.exe", &exes, "c:\\apps\\foo"));
+        // 无目录线索时不能放行任意路径
+        assert!(!trace_prefix_hit("d:\\elsewhere\\foo.exe", &exes, ""));
+    }
+
+    /// reg_value 目标格式往返：`HKCU\<键>::<值名>` 按 rsplit_once("::") 拆，
+    /// 值名（完整路径）含 `:` 但不含 `::`，rsplit 保证只切最后一刀。
+    #[test]
+    fn reg_value_target_roundtrip() {
+        let target = r"HKCU\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache::C:\Apps\Foo\Foo.exe.FriendlyAppName";
+        let (key, val) = target.rsplit_once("::").unwrap();
+        assert!(key.starts_with("HKCU\\") && key.contains("MuiCache"));
+        assert_eq!(val, r"C:\Apps\Foo\Foo.exe.FriendlyAppName");
+        // 无分隔 → None（执行侧按 skip 处理，不 panic）
+        assert!(r"HKCU\Software\Foo".rsplit_once("::").is_none());
+    }
+
+    /// collect_program_objects：UninstallString / DisplayIcon 双来源提取 exe；
+    /// DisplayIcon 的 `,图标索引` 后缀被剥掉；不存在的安装目录不进 dir。
+    #[test]
+    fn collect_program_objects_from_cmds() {
+        let (exes, dir) = collect_program_objects(
+            "",
+            r#""C:\Apps\Foo\unins000.exe" /SILENT"#,
+            r"C:\Apps\Foo\Foo.exe,0",
+        );
+        assert!(exes.iter().any(|e| e == r"C:\Apps\Foo\unins000.exe"));
+        assert!(exes.iter().any(|e| e == r"C:\Apps\Foo\Foo.exe"));
+        assert!(dir.is_none());
+    }
+
+    /// msiexec 形态不入 exe 集（msiexec.exe 是系统组件，反查它只会误伤）
+    #[test]
+    fn collect_program_objects_skips_msiexec() {
+        let (exes, _) = collect_program_objects("", r"C:\Windows\System32\msiexec.exe /X{GUID}", "");
+        assert!(exes.is_empty(), "msiexec 不该作为程序对象：{exes:?}");
+    }
+
+    /// U-1：内置残留规则库验签 + 契约自检（与 check-residue-rule-contract.mjs 同口径的
+    /// Rust 侧兜底——数据文件被改而门禁没跑时，cargo test 仍会抓住）
+    #[test]
+    fn builtin_residue_rules_verify_and_contract() {
+        let text = include_str!("../../data/uninstall-residue-rules.json");
+        rules_signature::verify_rules_text(text).expect("内置残留规则库验签失败");
+        let v: Value = serde_json::from_str(text).expect("内置残留规则库 JSON 解析失败");
+        let rules = v.get("rules").and_then(|r| r.as_array()).expect("rules 非数组");
+        assert!(!rules.is_empty(), "rules 为空");
+        let mut ids: Vec<&str> = Vec::new();
+        for r in rules {
+            let id = r.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            assert!(!id.is_empty(), "规则缺 id");
+            ids.push(id);
+            let conds = ["displayName", "publisher", "uninstallKey"]
+                .iter()
+                .filter(|k| {
+                    r.get(**k)
+                        .and_then(|x| x.as_array())
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false)
+                })
+                .count();
+            assert!(conds >= 2, "规则 {id} 条件组不足 2（双条件拍板口径）");
+            let empty_residue: Vec<Value> = Vec::new();
+            let residue = r.get("residue").and_then(|x| x.as_array()).unwrap_or(&empty_residue);
+            assert!(!residue.is_empty(), "规则 {id} residue 为空");
+            for e in residue {
+                let kind = e.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+                assert!(
+                    matches!(kind, "folder" | "file" | "reg_key"),
+                    "规则 {id} 残留 kind 非法: {kind}"
+                );
+                assert!(
+                    e.get("target").and_then(|x| x.as_str()).map(|t| !t.trim().is_empty()).unwrap_or(false),
+                    "规则 {id} 残留 target 缺失"
+                );
+            }
+        }
+        ids.sort();
+        let dup = ids.windows(2).any(|w| w[0] == w[1]);
+        assert!(!dup, "规则 id 重复: {ids:?}");
+    }
+}

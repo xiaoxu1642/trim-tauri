@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "rulesVersion": 20260927,
+  "rulesVersion": 20260928,
   "groups": [
     {
       "key": "system",
@@ -370,7 +370,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeDays": 7
             },
             {
               "id": "thumbnailCacheFiles",
@@ -497,7 +498,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeHours": 24
             },
             {
               "id": "winSxsTempFile2",
@@ -516,7 +518,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeHours": 24
             },
             {
               "id": "tempFiles",
@@ -535,7 +538,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeHours": 24
             },
             {
               "id": "driverTempExtract",
@@ -573,7 +577,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeHours": 24
             }
           ]
         },
@@ -599,7 +604,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeDays": 2
             },
             {
               "id": "memoryDumpFiles",
@@ -618,7 +624,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeDays": 2
             }
           ]
         },
@@ -1982,7 +1989,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "minAgeHours": 24
             },
             {
               "id": "printSpoolCache",
@@ -2043,6 +2051,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "ZPgEKr3rIGBPRwiQcPI9fBm3YF9tDggkPFR3k3eoPxf0+d20zRnq4rPpGzC8OjjbSZE2dwY6oDgCsYLLpFsBDQ=="
+    "sig": "JybKV/xsVOANccTvXwtJR2wyQkNPPKxOnWBapvuS7oDErPK2jNZZ0erQ8EZjIZNsijX1ZldJnjCZc2HMG4/pDw=="
   }
 }

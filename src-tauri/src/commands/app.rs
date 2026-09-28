@@ -42,13 +42,6 @@ pub fn app_get_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde
     }))
 }
 
-/// app:get-theme — v2.1 起应用固定浅色
-#[tauri::command]
-pub fn app_get_theme<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<String, String> {
-    guard::guard_readonly(&window)?;
-    Ok("light".into())
-}
-
 /// app:read-usage — 返回使用说明 Markdown 全文
 #[tauri::command]
 pub fn app_read_usage<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {

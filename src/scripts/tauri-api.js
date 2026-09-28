@@ -52,7 +52,6 @@
   var CHANNEL_MAP = {
     // app 域（onMemoryTrim 是事件，不在此表）
     'app:get-info': 'app_get_info',
-    'app:get-theme': 'app_get_theme',
     'app:read-usage': 'app_read_usage',
     'app:open-external': 'app_open_external',
     // updater 域（onState 是事件）
@@ -67,14 +66,24 @@
     'overview:metrics': 'overview_metrics',
     'overview:hardware': 'overview_hardware',
     'overview:checkup': 'overview_checkup',
-    // window（update-overlay：Tauri 无原生 overlay，Phase A 落 noop 命令）
-    'window:update-overlay': 'window_update_overlay',
     // log
     'log:write': 'log_write',
     'log:read': 'log_read',
     'log:export': 'log_export',
-    // cleanup（9）
+    // cleanup（21）
     'cleanup:rules': 'cleanup_rules',
+    'cleanup:exclude-list': 'cleanup_exclude_list',
+    'cleanup:exclude-add': 'cleanup_exclude_add',
+    'cleanup:exclude-remove': 'cleanup_exclude_remove',
+    'cleanup:custom-list': 'cleanup_custom_list',
+    'cleanup:custom-add': 'cleanup_custom_add',
+    'cleanup:custom-remove': 'cleanup_custom_remove',
+    'cleanup:custom-scan': 'cleanup_custom_scan',
+    'cleanup:custom-execute': 'cleanup_custom_execute',
+    'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
+    'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
+    'cleanup:file-backup-list': 'cleanup_file_backup_list',
+    'cleanup:file-backup-restore': 'cleanup_file_backup_restore',
     'cleanup:scan': 'cleanup_scan',
     'cleanup:execute': 'cleanup_execute',
     'cleanup:update-rules': 'cleanup_update_rules',
@@ -92,6 +101,14 @@
     'finder:delete': 'finder_delete',
     'finder:delete-manifest': 'finder_delete_manifest',
     'finder:open-backup-dir': 'finder_open_backup_dir',
+    // uninstall（7）：卸载域（report/appx-logo 为只读档，其余 MAIN）
+    'uninstall:list': 'uninstall_list',
+    'uninstall:run': 'uninstall_run',
+    'uninstall:residue-scan': 'uninstall_residue_scan',
+    'uninstall:residue-execute': 'uninstall_residue_execute',
+    'uninstall:report-list': 'uninstall_report_list',
+    'uninstall:report-get': 'uninstall_report_get',
+    'uninstall:appx-logo': 'uninstall_appx_logo',
     // contextmenu（10）
     'contextmenu:scan': 'contextmenu_scan',
     'contextmenu:backup': 'contextmenu_backup',
@@ -129,10 +146,8 @@
     'appearance:bg-delete': 'appearance_bg_delete',
     'appearance:bg-list': 'appearance_bg_list',
     'appearance:bg-open-dir': 'appearance_bg_open_dir',
-    // aidesc / netspeed / diskbench
+    // aidesc / diskbench
     'aidesc:get': 'aidesc_get',
-    'netspeed:ping': 'netspeed_ping',
-    'netspeed:throughput': 'netspeed_throughput',
     'diskbench:run': 'diskbench_run',
     // realtime（7）
     'realtime:adapters': 'realtime_adapters',
@@ -142,19 +157,17 @@
     'realtime:report-list': 'realtime_report_list',
     'realtime:report-delete': 'realtime_report_delete',
     'realtime:report-clear': 'realtime_report_clear',
-    // bench-history（4）/ elevate（2）
+    // bench-history（4）/ elevate（1）
     'bench-history:add': 'bench_history_add',
     'bench-history:list': 'bench_history_list',
     'bench-history:delete': 'bench_history_delete',
     'bench-history:clear': 'bench_history_clear',
-    'elevate:status': 'elevate_status',
     'elevate:request': 'elevate_request',
-    // paths（7）
+    // paths（6）
     'paths:scan': 'paths_scan',
     'paths:load': 'paths_load',
     'paths:save': 'paths_save',
     'paths:browse': 'paths_browse',
-    'paths:validate': 'paths_validate',
     'paths:app-icon': 'paths_app_icon',
     'paths:file-icon': 'paths_file_icon',
     // fileclean（4）
@@ -199,6 +212,7 @@
     'optimizer:state-overview': 'optimizer_state_overview',
     // system / startup（5）
     'system:disk-type': 'system_disk_type',
+    'system:disk-list': 'system_disk_list',
     'startup:scan': 'startup_scan',
     'startup:toggle': 'startup_toggle',
     'startup:delete': 'startup_delete',
@@ -331,7 +345,6 @@
 
     app: {
       getInfo: function () { return invokeChannel('app:get-info'); },
-      getTheme: function () { return invokeChannel('app:get-theme'); },
       readUsage: function () { return invokeChannel('app:read-usage'); },
       // 裸标量载荷（preload 直传 url 而非对象）：Tauri 命令必须收到具名参数，此处整形为 { url }
       openExternal: function (url) { return invokeChannel('app:open-external', { url: url }); },
@@ -369,10 +382,6 @@
       minimize: function () { return pluginInvoke('minimize'); },
       maximize: function () { return pluginInvoke('toggle_maximize'); },
       close: function () { return pluginInvoke('close'); },
-      // Tauri 无原生 titleBarOverlay；按钮配色由自绘 caption 的 CSS 主题负责。
-      // 但仍要真实过一遍通道（Electron 返回 true，渲染层可能依赖回执），
-      // Rust 侧为 no-op 命令。
-      updateOverlay: function (isDark) { return invokeChannel('window:update-overlay', { isDark: isDark }); },
       onFocusState: function (callback) { return bridgeFocusState(callback); },
       onResized: function (callback) { return bridgeResized(callback); },
       // 黑闪握手：与 preload 同逻辑（双 rAF + 200ms 竞速），适配层加载即自动执行一次
@@ -387,6 +396,18 @@
 
     cleanup: {
       rules: function () { return invokeChannel('cleanup:rules'); },
+      excludeList: function () { return invokeChannel('cleanup:exclude-list'); },
+      excludeAdd: function (path) { return invokeChannel('cleanup:exclude-add', { path: path }); },
+      excludeRemove: function (path) { return invokeChannel('cleanup:exclude-remove', { path: path }); },
+      customList: function () { return invokeChannel('cleanup:custom-list'); },
+      customAdd: function (dir, patterns) { return invokeChannel('cleanup:custom-add', { dir: dir, patterns: patterns }); },
+      customRemove: function (dir) { return invokeChannel('cleanup:custom-remove', { dir: dir }); },
+      customScan: function () { return invokeChannel('cleanup:custom-scan'); },
+      customExecute: function (targets) { return invokeChannel('cleanup:custom-execute', { targets: targets }); },
+      regBackupList: function () { return invokeChannel('cleanup:reg-backup-list'); },
+      regBackupRestore: function (file) { return invokeChannel('cleanup:reg-backup-restore', { file: file }); },
+      fileBackupList: function () { return invokeChannel('cleanup:file-backup-list'); },
+      fileBackupRestore: function (file, index) { return invokeChannel('cleanup:file-backup-restore', { file: file, index: index }); },
       scan: function (categories) { return invokeChannel('cleanup:scan', { categories: categories }); },
       execute: function (items, force, toRecycle, autoRebuild) {
         return invokeChannel('cleanup:execute', {
@@ -430,6 +451,16 @@
       onProgress: function (callback) { return onEvent('finder:progress', callback); },
       deleteManifest: function () { return invokeChannel('finder:delete-manifest'); },
       openBackupDir: function () { return invokeChannel('finder:open-backup-dir'); }
+    },
+
+    uninstall: {
+      list: function (scope) { return invokeChannel('uninstall:list', { scope: scope }); },
+      run: function (appId) { return invokeChannel('uninstall:run', { appId: appId }); },
+      residueScan: function (appId) { return invokeChannel('uninstall:residue-scan', { appId: appId }); },
+      residueExecute: function (appId, targets) { return invokeChannel('uninstall:residue-execute', { appId: appId, targets: targets }); },
+      reportList: function () { return invokeChannel('uninstall:report-list'); },
+      reportGet: function (batchId) { return invokeChannel('uninstall:report-get', { batchId: batchId }); },
+      appxLogo: function (logoPath) { return invokeChannel('uninstall:appx-logo', { logoPath: logoPath }); }
     },
 
     contextmenu: {
@@ -504,11 +535,6 @@
       }
     },
 
-    netspeed: {
-      ping: function () { return invokeChannel('netspeed:ping'); },
-      throughput: function (duration) { return invokeChannel('netspeed:throughput', { duration: duration }); }
-    },
-
     diskbench: {
       run: function (options) { return invokeChannel('diskbench:run', { options: options }); },
       onProgress: function (cb) { return onEvent('diskbench:progress', cb); }
@@ -532,7 +558,6 @@
     },
 
     elevate: {
-      status: function () { return invokeChannel('elevate:status'); },
       request: function () { return invokeChannel('elevate:request'); },
       onNotice: function (callback) { return onEvent('elevate:notice', callback); }
     },
@@ -547,7 +572,6 @@
       load: function () { return invokeChannel('paths:load'); },
       save: function (key, value) { return invokeChannel('paths:save', { key: key, value: value }); },
       browse: function (title, defaultPath) { return invokeChannel('paths:browse', { title: title, defaultPath: defaultPath }); },
-      validate: function (dirPath) { return invokeChannel('paths:validate', { path: dirPath }); },
       appIcon: function (installPath, exeCandidates) {
         return invokeChannel('paths:app-icon', { installPath: installPath, exeCandidates: exeCandidates });
       },
@@ -633,7 +657,9 @@
       diskType: function (opts) {
         if (opts === void 0) opts = {};
         return invokeChannel('system:disk-type', opts);
-      }
+      },
+      // 固定磁盘盘符列表（finder 大文件/空文件页盘符点选器，2026-09-28 六轮拍板）
+      diskList: function () { return invokeChannel('system:disk-list'); }
     },
 
     startup: {
@@ -720,7 +746,9 @@
     var style = document.createElement('style');
     style.id = 'tauri-caption-style';
     style.textContent = [
-      '.tauri-caption{position:fixed;top:0;right:0;height:46px;display:flex;z-index:100000;',
+      // 高度必须与 main.css .titlebar（36px）一致：按钮字形在条内居中，
+      // 46px 时代字形中心比品牌行低 5px（真机目检实锤），齐平即同高。
+      '.tauri-caption{position:fixed;top:0;right:0;height:36px;display:flex;z-index:100000;',
       '  -webkit-user-select:none;user-select:none;}',
       '.tauri-caption-btn{width:46px;height:100%;border:0;background:transparent;cursor:default;',
       '  display:flex;align-items:center;justify-content:center;padding:0;color:currentColor;',

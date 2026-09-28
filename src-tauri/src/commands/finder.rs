@@ -42,8 +42,8 @@ use trim_finder::scan::{self, Sink};
 use crate::engine::delete_manifest;
 use crate::engine::{guard, log, protect};
 
-/// 合法扫描类型（对照 FINDER_SCAN_TYPES）
-const FINDER_SCAN_TYPES: [&str; 4] = ["duplicates", "bigfiles", "empty", "appdata"];
+/// 合法扫描类型（对照 FINDER_SCAN_TYPES）。analyze = C-5 磁盘分析器（逐层下钻）
+const FINDER_SCAN_TYPES: [&str; 5] = ["duplicates", "bigfiles", "empty", "appdata", "analyze"];
 /// 重复文件内置扫描目录：缺哪个跳哪个，全缺则报错（对照 FINDER_DEFAULT_DUP_DIRS）
 const FINDER_DEFAULT_DUP_DIRS: [&str; 4] = [
     "%USERPROFILE%\\Downloads",
@@ -115,8 +115,12 @@ fn store_snapshot(
         let Some(p) = item.get("path").and_then(|v| v.as_str()) else {
             continue;
         };
-        // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记
+        // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记。
+        // analyzer（C-5）：只有 kind=dir 的条目有删除语义，summary/ext 不入快照槽
         let t = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if t == "analyzer" && item.get("kind").and_then(|v| v.as_str()) != Some("dir") {
+            continue;
+        }
         let key = path_key(p);
         // 审查 v2-M5：两条**不同**的原生路径 lossy 后可能塌成同一个展示串（不同的孤立
         // 代理项都被换成同一个 U+FFFD，或一条真名里就带 U+FFFD、另一条是被替换出来的）。
@@ -132,7 +136,7 @@ fn store_snapshot(
             key,
             SnapEntry {
                 path: p.to_string(),
-                kind: if t == "emptyfolder" || t == "appdata" {
+                kind: if t == "emptyfolder" || t == "appdata" || t == "analyzer" {
                     "dir".to_string()
                 } else {
                     "file".to_string()
@@ -391,7 +395,6 @@ pub async fn finder_scan<R: tauri::Runtime>(
     scan_type: String,
     paths: Option<Vec<Value>>,
     min_size: Option<Value>,
-    count: Option<Value>,
     min_size_mb: Option<Value>,
 ) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
@@ -450,10 +453,18 @@ pub async fn finder_scan<R: tauri::Runtime>(
             if plist.is_empty() {
                 return json!({ "success": false, "message": "至少需要一个扫描目录" });
             }
-            count_arg = num_or(count.as_ref(), 50.0).max(1.0) as usize;
+            // 六轮拍板 2026-09-28：数量上限删除（固定 200）、大文件阈值固定 300MB——
+            // 前端两处下拉已移除，这里作为唯一口径（CLI 侧 main.rs 同值）
+            count_arg = 200;
         }
         "appdata" => {
             min_size_mb_arg = num_or(min_size_mb.as_ref(), 10.0).max(1.0) as u64;
+        }
+        "analyze" => {
+            // C-5：paths 即待分析目录（盘符或下钻层），无额外参数
+            if plist.is_empty() {
+                return json!({ "success": false, "message": "至少需要一个分析目录" });
+            }
         }
         _ => {
             // empty：无额外参数
@@ -480,8 +491,10 @@ pub async fn finder_scan<R: tauri::Runtime>(
     let scanned = tauri::async_runtime::spawn_blocking(move || {
         match kind.as_str() {
             "duplicates" => scan::duplicates(&roots, min_size_arg, &sink),
-            "bigfiles" => scan::bigfiles(&roots, count_arg, &sink),
+            // 大文件阈值固定 300MB（六轮拍板 2026-09-28，前端下拉已删）
+            "bigfiles" => scan::bigfiles(&roots, count_arg, 300 * 1024 * 1024, &sink),
             "empty" => scan::empty(&roots, &sink),
+            "analyze" => scan::analyze(&roots, &sink),
             _ => scan::appdata(min_size_mb_arg, &sink),
         }
         // 审查 M8：把「受限结果」的元数据一并交回，别只交 items

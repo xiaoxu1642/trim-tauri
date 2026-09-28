@@ -4668,14 +4668,13 @@ name = "trim-finder"
 version = "1.0.0"
 dependencies = [
  "blake3",
- "miniz_oxide 0.8.9",
  "rayon",
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "trim-tauri"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

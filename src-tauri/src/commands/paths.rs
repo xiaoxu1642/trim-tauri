@@ -106,17 +106,6 @@ pub async fn paths_browse<R: tauri::Runtime>(
     }
 }
 
-/// paths:validate — 校验路径是否存在
-#[tauri::command]
-pub fn paths_validate<R: tauri::Runtime>(window: WebviewWindow<R>, path: Option<String>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
-    let exists = path
-        .filter(|p| !p.is_empty())
-        .map(|p| std::path::Path::new(&p).exists())
-        .unwrap_or(false);
-    Ok(serde_json::json!({ "success": true, "exists": exists }))
-}
-
 /// paths:app-icon — 提取安装目录下主程序 exe 的图标（供路径绑定弹窗分组标题头）
 /// 按 exeCandidates 顺序取第一个存在的；都不存在时退回安装目录本身的图标。
 #[tauri::command]

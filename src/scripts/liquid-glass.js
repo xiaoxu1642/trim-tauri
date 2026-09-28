@@ -799,6 +799,9 @@
       thumb.style.setProperty('--lg-y', y + 'px');
       state.lastY = y;
     } else {
+      // 防御性清零：重建恢复路径（上方 MutationObserver）曾给横向栏残留 --lg-y，
+      // transform 与 top 双重叠加会把滑块压低一个 padding；这里显式归零自愈
+      thumb.style.setProperty('--lg-y', '0px');
       thumb.style.top = y + 'px';
     }
     thumb.style.width = w + 'px';
@@ -865,8 +868,12 @@
         if (typeof state.lastX === 'number') {
           state.thumb.classList.add('lg-no-anim');
           state.thumb.style.setProperty('--lg-x', state.lastX + 'px');
-          // v3.2.0：侧边栏纵向坐标一并恢复（top=0 + --lg-y），否则重建后瞬跳回顶部
-          if (typeof state.lastY === 'number') {
+          // v3.2.0：侧边栏纵向坐标一并恢复（top=0 + --lg-y），否则重建后瞬跳回顶部。
+          // 修复（目检实锤）：此恢复只属于纵向栏——横向栏的 Y 走 top（placeThumb 会重写），
+          // 这里若也无条件写 --lg-y=lastY，随后的 placeThumb 只写 top 不清 --lg-y，
+          // top(4px)+transform(4px) 双重叠加，横向滑块整体下移一个 padding（维护/快捷
+          // 指令页每次数据刷新重渲染栏内容，必现；文字因此不在滑块垂直中央）。
+          if (isSidebarBar(bar) && typeof state.lastY === 'number') {
             state.thumb.style.top = '0px';
             state.thumb.style.setProperty('--lg-y', state.lastY + 'px');
           }

@@ -150,7 +150,9 @@
 
   /* 字体管理：全局字体族 / 字号缩放（基准 16px）/ 字重缩放（基准 400）
      由「设置 → 字体选择」弹窗运行时写入，全部 font-size / font-weight 均经 calc 关联 */
-  --app-font-family: 'MiSans', 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', '微软雅黑', system-ui, sans-serif;
+  /* 2026-09-28 八轮拍板：默认系统字体（MiSans 异步加载导致卡片高度漂移/看板重叠）；
+     MiSans 保留 @font-face 内嵌，仅作为设置页字体选项，由 fontmanager 按需切回 */
+  --app-font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', '微软雅黑', system-ui, sans-serif;
   /* 审查 v2-L6：等宽栈此前只有 var(--font-mono, …) 的引用、全仓无定义 ⇒ 两处恒吃各自的 fallback
      （一处 Consolas 优先、一处 Cascadia 优先，同一诉求两套口径）。补定义并取仓库里出现最多的那一套
      （Consolas → Cascadia → Courier New → monospace），两处引用随即去掉 fallback。 */
@@ -315,8 +317,19 @@ body[data-skin="glass"] .topbar {
     0 1px 0 var(--glass-border);
 }
 
-/* 预设背景只绘制在应用布局中，明确避开系统标题栏。 */
-body[data-preset-bg] .layout::before {
+/* 全窗壁纸层基座（背景贯通标题栏批次）：fixed 铺满整窗（含标题栏区域），
+   z-index:-1 画在 body 88% 黑闪安全网之上、全部内容之下——既贯通到顶又不碰安全网。
+   原两层挂在 .layout::before/::after（当时刻意避开标题栏，.layout overflow:hidden 裁切）；
+   贯通后整体上移到本容器，内层伪元素的定位/变量/透明度语义逐字保留。 */
+.app-wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* 预设壁纸：铺满整窗（贯通标题栏），明确不再避开窗口顶部。 */
+body[data-preset-bg] .app-wallpaper::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -329,7 +342,7 @@ body[data-preset-bg] .layout::before {
   opacity: calc(0.85 * var(--preset-bg-fade, 1));
   transition: opacity var(--duration-slow) var(--ease-emphasized);
 }
-body[data-preset-bg="graphite"] .layout::before {
+body[data-preset-bg="graphite"] .app-wallpaper::before {
   background-image:
     radial-gradient(130% 130% at 12% 0%, #374151 0%, transparent 58%),
     radial-gradient(140% 140% at 90% 100%, #0b1220 0%, transparent 62%);
@@ -421,19 +434,9 @@ body {
   /* 右侧预留原生 overlay 按钮区域（Win11 三按钮约 138px） */
   padding-right: 140px;
 }
-/* 标题栏底部分隔线：不能画在 .titlebar 自身的 border-bottom 上——右侧 140px 被
-   原生 titleBarOverlay 不透明矩形覆盖，线会在按钮区左缘断掉。改由 ::after 定位
-   在标题栏下边缘外侧（top:100%，即 overlay 矩形下沿），横跨整宽，原生层盖不到。 */
-.titlebar::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  height: 1px;
-  background: rgba(0, 0, 0, 0.08);
-  pointer-events: none;
-}
+/* 标题栏底部分割线已删除（背景贯通标题栏批次，用户拍板）：壁纸贯通后顶部
+   不再有「标题栏 vs 内容区」的材质断层，分割线反而多余；无壁纸态两区同为
+   body 基色系，同样不需要线。 */
 
 .titlebar-left {
   display: flex;
@@ -6949,10 +6952,10 @@ body.pv-window {
 }
 .settings-system-section.collapsed .settings-system-body { display: none; }
 
-/* 导入图片叠在预设背景之上，但仍只铺在布局区，不侵入标题栏。
-   批次：背景视角可调 —— 裁切窗口位置走 CSS 变量（pathbinding.js 按设置写入），
-   未设置时回落 center，与旧版行为一致 */
-body.bg-image-on .layout::after {
+/* 导入图片叠在预设背景之上（背景贯通标题栏批次：随预设层一起上移到全窗
+   壁纸容器，原「不侵入标题栏」约束废止）。批次：背景视角可调 —— 裁切窗口位置
+   走 CSS 变量（pathbinding.js 按设置写入），未设置时回落 center，与旧版行为一致 */
+body.bg-image-on .app-wallpaper::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -7551,7 +7554,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
    画布再压灰底等于遮盖背景（0.86/0.70 两个历史档位均已删除）；
    文字可读性由各白容器自身的 46% 白玻璃 + 磨砂承担（与导入图片模式同规则） */
 body.theme-light[data-preset-bg] .main-content { background: transparent; }
-body[data-preset-bg] .layout::before { display: block !important; }
+body[data-preset-bg] .app-wallpaper::before { display: block !important; }
 /* （玻璃皮肤磨砂层已合并至 197-228 行的 data-skin="glass" 主块，此处不再重复定义） */
 
 /* 审查 C2-1：本块原是「碳墨浅色」旧调色板的字面值覆写（#1c1e24/#f5f6f8/#505766 等），
@@ -7561,9 +7564,7 @@ body[data-preset-bg] .layout::before { display: block !important; }
 body.theme-light .titlebar {
   background: var(--bg-app);
 }
-body.theme-light .titlebar::after {
-  background: var(--border-strong);
-}
+/* 分割线规则（body.theme-light .titlebar::after）已随贯通批次删除 */
 body.theme-light .titlebar-title { color: var(--fg-primary); }
 
 /* Light mode readability: never inherit carbon surfaces or pale foregrounds. */
@@ -7762,20 +7763,20 @@ body.theme-light[data-preset-bg] .maint-output {
 }
 
 /* 4) 看板/卡片依赖 var(--bg-card) 令牌（v3.0 已透明化）。v3.0 修复批次：原「预设
-   壁纸下按容器补磨砂」的规则退役——壁纸模糊由 .layout::before（--bg-blur 滑块）
+   壁纸下按容器补磨砂」的规则退役——壁纸模糊由 .app-wallpaper::before（--bg-blur 滑块）
    统一供给，容器自身保持透明，避免「壁纸模糊 + 容器再模糊」双重叠影；
    原残缺选择器（无声明块）还会吞并下方 body.bg-image-on 规则，一并清除。 */
 
 /* ================================================================
    自定义背景图（bg-image-on）下主内容区保底底色
-   背景图画在 .layout::before（z-index:0），.main-content 默认透明；
+   背景图画在全窗壁纸层 .app-wallpaper::before（z-index:-1 容器内层），.main-content 默认透明；
    当导入图片与文字/卡片对比度不足时内容会"融入"背景呈空白，而标题栏
    在 .layout 之外不受影响。这里给主内容区一个基于 --bg-base 的保底底色，
    深/浅模式自动适配，且保留背景图隐约透出。
    ================================================================ */
 /* ================================================================
    自定义背景图（bg-image-on）与主内容区
-   背景图画在 .layout::after（z-index:1），内容层 z-index:2。原先给
+   背景图画在 .app-wallpaper::after（容器 z-index:-1），内容层 z-index:2。原先给
    .main-content 铺 86% 保底底色，加上图层自身 opacity（默认 15%）后
    图案透出度仅 ≈2%，导入的图片在主内容区完全不可见。现改为完全透明：
    图按用户设置的透明度直接可见；卡片/表格等白底组件自身不透明，可读性
@@ -7829,6 +7830,34 @@ body.bg-image-on .main-content {
   width: 300px;
   min-width: 220px;
 }
+/* 盘符点选器（finder 大文件/空文件页，2026-09-28 六轮拍板）：胶囊式复选标签 */
+.drive-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.drive-picker .drive-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.drive-picker .drive-chip:hover { border-color: var(--accent); color: var(--fg-primary); }
+.drive-picker .drive-chip.active {
+  color: var(--accent-text, var(--fg-primary));
+  background: var(--accent-light);
+  border-color: var(--accent);
+  font-weight: 600;
+}
 .finder-empty {
   padding: 40px 16px;
   text-align: center;
@@ -7880,6 +7909,13 @@ body.bg-image-on .main-content {
 .finder-table tbody tr:hover { background: color-mix(in srgb, var(--accent, #0EA5E9) 6%, transparent); }
 .finder-table tbody tr.finder-row-selected { background: color-mix(in srgb, var(--accent, #0EA5E9) 5%, transparent); }
 .finder-col-size { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* fixed 布局（大文件/空页表格，2026-09-28 八轮）：路径列 ellipsis 不再覆盖大小列；
+   大小列左侧留透明隔离带，路径再长也顶不到数字 */
+.finder-table-fixed { table-layout: fixed; }
+.finder-table-fixed .finder-col-size { padding-left: 18px; }
+/* 大文件路径点击定位（explorer /select） */
+.finder-reveal { cursor: pointer; min-width: 0; }
+.finder-reveal:hover .finder-path-text { color: var(--accent); }
 .finder-cell {
   display: inline-flex;
   align-items: center;
@@ -7897,6 +7933,101 @@ body.bg-image-on .main-content {
 .finder-role { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
 .finder-role-kept { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
 .finder-role-candidate { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+
+/* 空文件/空目录结果分页（2026-09-28）：数万条结果一次性渲染会卡死渲染层，每页只挂 1000 条 */
+.finder-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 0 6px;
+  border-top: 1px solid var(--border-default);
+}
+.finder-pager-info { color: var(--fg-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* 空文件/空目录可折叠栏目（2026-09-28 五轮拍板：放弃双栏改横向单列手风琴）。
+   视觉对齐优化中心 .opt-col 卡片（顶边 3px accent / radius-medium / shadow-card）；
+   栏目头是按钮，点击切换 .collapsed；纵向堆叠撑满窗口宽。 */
+.empty-accordion {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.empty-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-top: 3px solid var(--accent);
+  border-radius: var(--radius-medium);
+  box-shadow: var(--shadow-card);
+}
+.empty-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 14px 10px;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+.empty-pane-head:hover .empty-pane-title { color: var(--accent); }
+.empty-pane-chevron {
+  flex: 0 0 auto;
+  color: var(--fg-tertiary);
+  font-size: 12px;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.empty-pane.collapsed .empty-pane-chevron { transform: rotate(-90deg); }
+.empty-pane-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+.empty-pane-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-subtle);
+  padding: 2px 9px;
+  border-radius: var(--radius-btn);
+  white-space: nowrap;
+}
+.empty-pane-sub {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+.empty-pane-body { padding: 4px 10px 10px; min-width: 0; }
+.empty-pane-body .finder-table { width: 100%; }
+.empty-pane-body .finder-empty { padding: 26px 10px; }
+.empty-pane.collapsed .empty-pane-body { display: none; }
+.empty-pane.collapsed .empty-pane-head { border-bottom: none; }
+@media (prefers-reduced-motion: reduce) {
+  .empty-pane-chevron { transition: none; }
+}
+
+/* 软件卸载列表的应用图标（2026-09-28）：shellicon 提取的 dataUrl，懒加载逐个补 */
+.un-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+.un-icon img { width: 100%; height: 100%; object-fit: contain; }
+.un-icon-fallback { color: var(--fg-tertiary); font-size: 12px; line-height: 1; }
 
 /* ================================================================
    窗口材质 2.0 + 液态玻璃 2.0（文件末位覆盖层 · 窗口界面升级2）
@@ -8380,7 +8511,7 @@ body.lg-mode-frost .filter-tab.active .maint-tab-count {
    v3.0 全局玻璃化后容器自身不再持有 backdrop-filter，滑块改经两条
    链路生效——① :root --glass-blur 派生四档（faint/soft/mid/strong），
    供 frost 档兜底与菜单/tooltip 磨砂等余留消费方；② 壁纸层 --bg-blur
-   （.layout::before）。系统关透明度时 --glass-blur 归零自动全停。
+   （.app-wallpaper::before）。系统关透明度时 --glass-blur 归零自动全停。
    ================================================================ */
 
 /* ==================== 审查 3-1/6-1：系统「透明度效果」降级 ==================== */
@@ -8955,22 +9086,22 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
 
 /* 内嵌实拍壁纸预设（v2.8.0）：与渐变预设同管道（data-preset-bg），底图铺满 + 顶部雾化渐变保可读性；
    图片随包分发（src/assets/bg/，经 asar 读取），轮换只切 data-preset-bg 属性值 */
-body[data-preset-bg^="wp-"] .layout::before {
+body[data-preset-bg^="wp-"] .app-wallpaper::before {
   display: block !important;
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
 }
-body[data-preset-bg="wp-winter"] .layout::before {
+body[data-preset-bg="wp-winter"] .app-wallpaper::before {
   background-image: linear-gradient(180deg, rgba(247, 248, 251, 0.30), rgba(247, 248, 251, 0.55)), url('../assets/bg/wp-winter.jpg');
 }
-body[data-preset-bg="wp-gaming"] .layout::before {
+body[data-preset-bg="wp-gaming"] .app-wallpaper::before {
   background-image: linear-gradient(180deg, rgba(247, 248, 251, 0.32), rgba(247, 248, 251, 0.58)), url('../assets/bg/wp-gaming.jpg');
 }
-body[data-preset-bg="wp-anime"] .layout::before {
+body[data-preset-bg="wp-anime"] .app-wallpaper::before {
   background-image: linear-gradient(180deg, rgba(247, 248, 251, 0.30), rgba(247, 248, 251, 0.55)), url('../assets/bg/wp-anime.jpg');
 }
-body[data-preset-bg="wp-doll"] .layout::before {
+body[data-preset-bg="wp-doll"] .app-wallpaper::before {
   background-image: linear-gradient(180deg, rgba(247, 248, 251, 0.32), rgba(247, 248, 251, 0.58)), url('../assets/bg/wp-doll.jpg');
 }
 
@@ -8992,8 +9123,8 @@ body.win-inactive::after {
 }
 
 /* v3.0 批次：背景模糊度滑块（Motion.Lab range-drag 适配）—— 自定义圆形滑块，
-   拖动实时写入 --bg-blur，壁纸层 .layout::before 按此值模糊 */
-body[data-preset-bg] .layout::before {
+   拖动实时写入 --bg-blur，壁纸层（.app-wallpaper::before，贯通标题栏批次迁移）按此值模糊 */
+body[data-preset-bg] .app-wallpaper::before {
   filter: blur(var(--bg-blur, 0px));
 }
 .bg-blur-range {
@@ -9070,3 +9201,15 @@ body[data-preset-bg] .layout::before {
 
 /* v3.5.3（2026-09-15）：运行库修复成功后的行内闭环标记 */
 .rt-fixed-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:550;padding:3px 10px;border-radius:999px;background:var(--success-soft);color:var(--success);white-space:nowrap}
+
+/* ==================== 背景贯通标题栏批次（2026-09-28，B 方案） ====================
+   有壁纸（预设 data-preset-bg 或导入图 bg-image-on）时标题栏放行壁纸：全窗壁纸层
+   .app-wallpaper（z-index:-1）已铺到窗口顶部，标题栏透明即视觉贯通、无分割线。
+   无壁纸时保持上方既有实色规则——无壁纸还透明会让 body 88% 黑闪安全网单独承压，
+   也守不住 win-maximized / data-material="none" 完全不透明护栏（AGENTS §2）。
+   本块必须排在全部 .titlebar 底色规则之后：electron-mica / theme-light 分支与
+   本块特异性同为 (0,2,1)，靠源序取胜，挪动位置即失效。 */
+body[data-preset-bg] .titlebar,
+body.bg-image-on .titlebar {
+  background: transparent;
+}

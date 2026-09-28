@@ -165,6 +165,13 @@
   // 高于此值展示年龄横幅并静默后台重扫。
   const CACHE_STALE_MS = 60 * 1000;
 
+  // 2026-09-28 六轮拍板：进页不再自动扫描——
+  //   · 首次（localStorage 无扫描时间戳）：不扫，等用户点「扫描启动项」；
+  //   · 之后：距上次扫描 < 12h 进页只读缓存（瞬时），≥ 12h 静默后台重扫；
+  //   · 手动点扫描/刷新不受间隔限制，成功后刷新时间戳。
+  const SCAN_INTERVAL_MS = 12 * 60 * 60 * 1000;
+  const SCAN_TS_KEY = 'startup-lastScanAt';
+
   function formatAge(ms) {
     if (!ms || ms < 0) return '未知时间';
     const min = Math.floor(ms / 60000);
@@ -232,6 +239,8 @@
       }
       items = next;
       cacheInfo = { cached: !!resp.cached, cachedAt: resp.cachedAt || (resp.cached ? Date.now() : 0) };
+      // 扫描时间戳落 localStorage（12h 自动刷新间隔的判定依据；静默重扫同样刷新）
+      try { localStorage.setItem(SCAN_TS_KEY, String(Date.now())); } catch (e) { /* 隐私模式等场景静默 */ }
       // 防恢复机制：黑名单拦截 + 顽固恢复计数（可能自动删除并刷新列表）
       await enforceStartupDefend();
       render();
@@ -247,11 +256,21 @@
     }
   }
 
-  // v3.7.0 议题二 P0：进场先拿到缓存（瞬时），若缓存已陈旧则静默后台重扫覆盖。
-  // 政策本身未变（仍是"首启扫描一次后读缓存"），只是不再让缓存冒充实时数据。
+  // 2026-09-28 六轮拍板：进页自动扫描政策改版——
+  //   · 首次使用（无时间戳）：不扫，展示 empty-state 引导用户点「扫描启动项」；
+  //   · 有时间戳且 < 12h：进页读后端缓存（瞬时返回，非真实扫描）；
+  //   · 有时间戳且 ≥ 12h：读缓存后静默后台重扫（不打断用户）。
+  //   · 手动「扫描/刷新」不受间隔限制（scan(true) 走真实扫描并刷新时间戳）。
   async function load() {
+    let last = 0;
+    try { last = Number(localStorage.getItem(SCAN_TS_KEY)) || 0; } catch (e) { /* 同上 */ }
+    if (!last) {
+      // 首次：render() 在 items 为空时本就显示「尚未扫描」引导（cta 指向扫描按钮）
+      render();
+      return;
+    }
     await scan(false);
-    if (cacheInfo.cached && (Date.now() - (cacheInfo.cachedAt || 0)) >= CACHE_STALE_MS && !loading) {
+    if (Date.now() - last >= SCAN_INTERVAL_MS && !loading) {
       void scan(true, true);
     }
   }

@@ -76,7 +76,9 @@ const FONT_SYSTEM_FAMILIES: &[(&str, &str, &[&str])] = &[
 /// 内嵌 MiSans 可变字体（随应用分发，恒可用）
 const FONT_MISANS_FAMILY: &str = "MiSans";
 const FONT_MISANS_CSS: &str = "'MiSans', '微软雅黑', 'Microsoft YaHei', sans-serif";
-const FONT_DEFAULT_FAMILY: &str = "MiSans";
+/// 出厂默认改系统字体（2026-09-28 八轮拍板：MiSans 20MB 异步加载是看板卡片高度
+/// 漂移/重叠的根因源，改为仅作选项；已保存过 MiSans 的用户不受影响——stored 优先）
+const FONT_DEFAULT_FAMILY: &str = "微软雅黑";
 const FONT_DEFAULT_WEIGHT: i64 = 400;
 const FONT_DEFAULT_SIZE: i64 = 16;
 

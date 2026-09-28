@@ -62,8 +62,8 @@ const SITE_EXEMPT = {
   'src-tauri/src/engine/systembin.rs:88': 'quiet_cmd 函数定义本身（token 命中函数名，非调用点）',
   // 行号随 v2-M1（stubborn_kill 镜像路径判定）与 v2-L1（dir_delete_blocked）两次插入
   // 整体下移，此处同步登记 —— 改 native.rs 行号必查本表
-  'src-tauri/src/engine/native.rs:1466': 'p 来自注册表 Run 键回读的绝对路径列表（:1449 构造），非 PINNED 裸名',
-  'src-tauri/src/engine/native.rs:1472': 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
+  'src-tauri/src/engine/native.rs:1359': 'p 来自注册表 Run 键回读的绝对路径列表，非 PINNED 裸名',
+  'src-tauri/src/engine/native.rs:1365': 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
 };
 
 function walk(dir, out = []) {

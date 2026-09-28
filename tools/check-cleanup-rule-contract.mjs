@@ -110,10 +110,38 @@ function main() {
         }
       },
     });
-    // 执行侧 cleanup_execute 没有 excludeKeys 过滤逻辑：出现即「扫描排除、执行照删」，
-    // 属于数据面放行越界删除的高危形态。要支持必须先改执行侧，再放开门禁。
+    // excludeKeys（对象型、含 reg 面）执行侧无过滤逻辑：出现即「扫描排除、执行照删」，
+    // 属于数据面放行越界删除的高危形态，回潮即红。
     if ((it.excludeKeys ?? []).length > 0) {
       fail(`[A2] 规则 ${it.id}：使用了 excludeKeys，但执行侧（native.rs cleanup_execute）未实现排除过滤——先实现执行侧再放行本断言`);
+    }
+    // excludePaths（C-2，2026-09-28 开门）：字符串数组，两侧已实现同口径过滤
+    // （扫描 cleanup_scan.rs get_file_key_deletable / 执行 native.rs cleanup_execute，
+    // 均按「%VAR% 展开 + 有扩展名=文件 + 否则=目录前缀」并入排除面）。形态约束与
+    // fileKeys.path 同源：禁 / 分隔符与 ? 通配；%TOKEN% 由 A1 的全量字符串收集覆盖。
+    const expaths = it.excludePaths ?? [];
+    if (!Array.isArray(expaths)) {
+      fail(`[A2] 规则 ${it.id}：excludePaths 必须是字符串数组`);
+    } else {
+      for (const t of expaths) {
+        if (typeof t !== 'string' || !t.trim()) {
+          fail(`[A2] 规则 ${it.id}：excludePaths 含非字符串或空项`);
+        } else {
+          if (t.includes('/')) fail(`[A2] 规则 ${it.id}：excludePaths 含 / 分隔符（执行侧只按 \\ 归一）: ${t}`);
+          if (t.includes('?')) fail(`[A2] 规则 ${it.id}：excludePaths 含 ? 通配（执行侧不支持）: ${t}`);
+        }
+      }
+      // F-2（2026-09-28）：excludePaths 的注册表形态（`HIVE\KEY::VALUE` 具名值排除）
+      // 只对具名值 regKeys 目标可兑现——树删除（无 value）与 value:"*"（清全部值）都是
+      // 原子操作，无法在删的过程中保留个别值。混用 = 扫描排除了执行删不掉的语义缺口。
+      const hasRegValueExclude = expaths.some((t) => typeof t === 'string' && t.includes('::'));
+      if (hasRegValueExclude) {
+        const regKeys = it.regKeys ?? [];
+        const offenders = regKeys.filter((rk) => !rk.value || rk.value === '*');
+        if (offenders.length > 0) {
+          fail(`[A2] 规则 ${it.id}：excludePaths 含具名值排除（::），但 regKeys 存在删树/通配形态（无法保留个别值）——把排除写成整键形态或改目标为具名值`);
+        }
+      }
     }
   }
 
@@ -202,6 +230,24 @@ function main() {
     console.log(`\n〔人工复核清单〕父子路径重叠 ${overlaps.length} 组（不判红，但每批发布前须有明确合并/排除/共存结论，记录见 docs/规则库审核记录-*.md）：`);
     for (const [parent, child] of overlaps) {
       console.log(`  · ${parent.id}（${parent.path}）⊃ ${child.id}（${child.path}）`);
+    }
+  }
+
+  // ---- A9: 时效护栏字段形态（P0-M5，竞品借鉴落地方案 §5）----
+  // minAgeHours / minAgeDays 互斥（两侧解析器对双声明取更严格值，但数据面禁止含糊）；
+  // 必须是正整数；年龄语义 = 文件修改时间，扫描与执行两侧同谓词（cleanup_scan.rs）。
+  for (const it of items) {
+    const hasH = 'minAgeHours' in it;
+    const hasD = 'minAgeDays' in it;
+    if (hasH && hasD) {
+      fail(`[A9] 规则 ${it.id}：minAgeHours 与 minAgeDays 互斥，不得同时声明`);
+    }
+    for (const f of ['minAgeHours', 'minAgeDays']) {
+      if (!(f in it)) continue;
+      const v = it[f];
+      if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
+        fail(`[A9] 规则 ${it.id}：${f} 必须是正整数（当前 ${JSON.stringify(v)}）`);
+      }
     }
   }
 

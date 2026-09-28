@@ -102,14 +102,6 @@ fn modal_id(info: Option<&serde_json::Value>) -> String {
     raw.chars().take(40).collect()
 }
 
-/// window:update-overlay — Tauri 无原生 titleBarOverlay；
-/// 按钮配色改由自绘 caption 的 CSS 主题负责，此通道保留为 no-op 以满足契约。
-#[tauri::command]
-pub fn window_update_overlay<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<bool, String> {
-    guard::guard_readonly(&window)?;
-    Ok(true)
-}
-
 /// shutdown:begin — 预留扩展点（Electron 版同为未接线的空实现，勿当冗余删除）
 #[tauri::command]
 pub fn shutdown_begin<R: tauri::Runtime>(window: WebviewWindow<R>) {

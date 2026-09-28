@@ -10,6 +10,11 @@
   <link rel="stylesheet" href="styles/ds.css" />
 </head>
 <body class="theme-light">
+  <!-- 全窗壁纸层（背景贯通标题栏批次）：fixed 铺满整窗含标题栏，z-index:-1
+       压在 body 黑闪安全网之上、全部内容之下；两层伪元素分别承载预设壁纸
+       （.app-wallpaper::before）与导入图片（.app-wallpaper::after），
+       变量语义与旧 .layout::before/::after 完全一致，pathbinding.js 无需改动 -->
+  <div class="app-wallpaper" aria-hidden="true"></div>
   <!-- 启动页（v2.7.0，参考 hero-preview）：WebGL 流线背景 + Trim FLIP 平滑落位标题栏；
        逻辑在 scripts/splash.js，首访完整体验 / 后续紧凑自动进入；v3.6.2 起开屏无视系统 reduced-motion 完整播放 -->
   <div id="splash" class="splash-overlay">
@@ -77,6 +82,13 @@
             <path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/>
           </svg>
           <span>磁盘清理</span>
+        </button>
+        <!-- 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28）：磁盘清理下新增「软件卸载」入口 -->
+        <button class="nav-item" data-page="uninstall" data-tip="软件卸载与残留清理">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z"/>
+          </svg>
+          <span>软件卸载</span>
         </button>
         <button class="nav-item" data-page="memoryclean" data-tip="内存清理">
           <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
@@ -262,8 +274,8 @@
           <button class="filter-tab active" data-cleanup-view="cleanup" data-subtitle="智能扫描 C 盘各类缓存、临时文件、冗余组件" role="tab" aria-selected="true">主要</button>
           <button class="filter-tab" data-cleanup-view="cleanup-dups" data-subtitle="基于内容指纹扫描重复文件，仅删除多余副本、保留一份" role="tab" aria-selected="false">重复文件查找</button>
           <button class="filter-tab" data-cleanup-view="cleanup-big" data-subtitle="按体积从大到小列出占用空间最大的文件" role="tab" aria-selected="false">大文件查找</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-empty" data-subtitle="扫描 0 字节文件与不含任何子项的空目录" role="tab" aria-selected="false">空文件与空目录</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-appdata" data-subtitle="统计 AppData 下各应用一级目录占用，识别可清理的大体积目录" role="tab" aria-selected="false">AppData 瘦身</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-empty" data-subtitle="扫描创建满 14 天的 0 字节文件与空目录（空目录=树内只含 0 字节文件与空子目录）" role="tab" aria-selected="false">空文件与空目录</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-analyze" data-subtitle="逐层下钻的磁盘空间分析" role="tab" aria-selected="false">磁盘分析</button>
         </div>
 
         <!-- 各子视图操作行：随分段切换显示，与分段栏保持齐平（窗口界面升级3） -->
@@ -283,6 +295,18 @@
           <button class="btn btn-secondary" id="btnUpdateRules" data-tip="从发布源下载最新清理规则库（数据目录规则优先于内置规则，支持版本校验与防降级）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
             <span>更新规则库</span>
+          </button>
+          <button class="btn btn-secondary" id="btnExcludeList" data-tip="管理清理排除名单：名单内的路径在「主要清理」的扫描与执行时都会被跳过（大文件/空文件/重复文件查找不受名单影响）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2L4 5v6c0 5.25 3.4 10.15 8 11 4.6-.85 8-5.75 8-11V5l-8-3zm-1 14l-4-4 1.41-1.41L11 13.17l4.59-4.58L17 10l-6 6z"/></svg>
+            <span>排除名单</span>
+          </button>
+          <button class="btn btn-secondary" id="btnCustomDirs" data-tip="自定义清理目录：添加自己指定的目录（可限定扩展名），扫描后清理候选文件——只进回收站，可还原">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+            <span>自定义目录</span>
+          </button>
+          <button class="btn btn-secondary" id="btnRegBackups" data-tip="查看与还原清理域的注册表备份（regKeys 条目删除前的整键导出）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-5 10H9v-2h6v2z"/></svg>
+            <span>注册表备份</span>
           </button>
           <div class="clean-inline-opts" id="cleanInlineOpts">
             <span class="rules-version-info" id="rulesVersionInfo" data-tip="当前=本机规则库版本；云端=官方发布源上的最新版本（进入本页自动联网检测，连不上发布源时不显徽标）。winapp2 基线版本已从主文案下线，字段保留兼容">（当前规则库版本：--）</span>
@@ -342,18 +366,14 @@
             <span>已删除清单</span>
           </button>
         </div>
-        <div class="cleanup-toolbar-actions" data-actions-for="cleanup-appdata">
-          <button class="btn btn-secondary" id="appdataBtnSelect">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-            <span>全选</span>
-          </button>
-          <button class="btn btn-primary" id="appdataBtnScan">
+        <div class="cleanup-toolbar-actions" data-actions-for="cleanup-analyze">
+          <button class="btn btn-primary" id="anBtnScan">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-            <span>开始统计</span>
+            <span>开始分析</span>
           </button>
-          <button class="btn btn-accent" id="appdataBtnDelete" disabled>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-            <span>删除选中</span>
+          <button class="btn btn-secondary" id="anBtnAppData" data-tip="一键直达当前用户的 AppData\Local（通常是占空间大头）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+            <span>AppData 直达</span>
           </button>
           <button class="btn btn-secondary" type="button" data-finder-manifest>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
@@ -399,36 +419,8 @@
           </div>
         </div>
 
-        <!-- P2 规模化浏览：搜索与筛选（规则库最终优化方案 2026-09-27）。
-             只过滤当前可见规则的显示，不改规则库数据、不影响勾选集合与风险确认链 -->
-        <div class="clean-filter-bar" id="cleanFilterBar">
-          <div class="clean-filter-search">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-            <input type="text" class="input-style" id="cleanSearchInput" placeholder="搜索规则名 / 应用 / 路径 / 性质 / 文件模式" data-tip="支持多关键词（空格分隔须同时命中）：规则名、应用与分类名、路径模板、性质标签、文件名模式。只影响列表显示，不影响勾选与清理范围">
-          </div>
-          <select class="input-style" id="cleanFilterDomain" data-tip="按顶级域筛选（选项随规则库动态生成）">
-            <option value="">全部域</option>
-          </select>
-          <select class="input-style" id="cleanFilterRisk" data-tip="按风险等级筛选">
-            <option value="">全部风险</option>
-            <option value="low">安全</option>
-            <option value="medium">注意</option>
-            <option value="high">高风险</option>
-          </select>
-          <select class="input-style" id="cleanFilterRec" data-tip="按默认推荐状态筛选">
-            <option value="">推荐 + 非推荐</option>
-            <option value="rec">仅推荐</option>
-            <option value="unrec">仅非推荐</option>
-          </select>
-          <label class="clean-filter-toggle" data-tip="仅显示扫描后存在可清理内容（占用 &gt; 0）的规则；未扫描时不生效">
-            <input type="checkbox" id="cleanFilterHasContent">有内容
-          </label>
-          <label class="clean-filter-toggle" data-tip="仅显示需要退出应用 / 停止服务 / 重启 Explorer 才能清理的规则">
-            <input type="checkbox" id="cleanFilterNeedsExit">需退出应用
-          </label>
-          <button class="clean-filter-clear" id="cleanFilterReset" type="button" data-tip="清空搜索与全部筛选">重置</button>
-          <span class="clean-filter-hint" id="cleanFilterHint"></span>
-        </div>
+        <!-- P2 规模化浏览的搜索/筛选栏已按用户要求移除（2026-09-28 七轮）：规则规模
+             （76 条）下无检索价值；cleanup.js 的 filterState 逻辑保留空转（全空 = 不过滤） -->
 
         <!-- 分类列表 -->
         <div class="category-list" id="categoryList">
@@ -439,9 +431,8 @@
       <!-- ============================ 磁盘清理 · 重复文件查找（子视图） ============================ -->
       <div class="cleanup-view" data-cleanup-panel="cleanup-dups">
         <div class="finder-toolbar card">
-          <label class="opt-inline" data-tip="默认 = Downloads、Desktop、Documents、Pictures 与 C:\yule，不存在的目录自动跳过">扫描目录
-            <input type="text" class="finder-path input-style" id="dupPath" value="默认" placeholder="填「默认」使用内置目录，或逗号分隔自定义目录">
-          </label>
+          <!-- 2026-09-28 六轮拍板：重复文件页隐藏扫描目录输入，固定内置默认目录
+               （Downloads/Desktop/Documents/Pictures），仅保留最小文件选择 -->
           <label class="opt-inline" data-tip="仅影响内容指纹比对；同名与相似文档检测不受此限制">最小文件
             <select class="input-style" id="dupMinSize">
               <option value="0">无限制</option>
@@ -466,17 +457,11 @@
       <!-- ============================ 磁盘清理 · 大文件查找（子视图） ============================ -->
       <div class="cleanup-view" data-cleanup-panel="cleanup-big">
         <div class="finder-toolbar card">
-          <label class="opt-inline">扫描目录
-            <input type="text" class="finder-path input-style" id="bigPath" value="C:" placeholder="逗号分隔多个目录">
-          </label>
-          <label class="opt-inline">数量上限
-            <select class="input-style" id="bigCount">
-              <option value="20">20</option>
-              <option value="50" selected>50</option>
-              <option value="100">100</option>
-              <option value="200">200</option>
-            </select>
-          </label>
+          <!-- 2026-09-28 六轮拍板：扫描目录改盘符点选（默认全选固定盘）；数量上限删除（固定 200）；阈值固定 300MB -->
+          <span class="opt-inline">扫描磁盘
+            <span class="drive-picker" id="bigDrives"></span>
+          </span>
+          <span class="opt-hint">仅列出 ≥ 300 MB 的文件（按体积从大到小，最多 200 个）</span>
         </div>
         <div class="progress-section" id="bigProgressSection" style="display:none">
           <div class="progress-header"><span class="progress-label" id="bigProgressLabel">扫描中...</span><span class="progress-value" id="bigProgressValue">0%</span></div>
@@ -488,9 +473,10 @@
       <!-- ============================ 磁盘清理 · 空文件与空目录（子视图） ============================ -->
       <div class="cleanup-view" data-cleanup-panel="cleanup-empty">
         <div class="finder-toolbar card">
-          <label class="opt-inline">扫描目录
-            <input type="text" class="finder-path input-style" id="emptyPath" value="%USERPROFILE%,C:\ProgramData" placeholder="逗号分隔多个目录">
-          </label>
+          <!-- 2026-09-28 六轮拍板：空扫描默认全盘（盘符点选），排除规则在扫描器内部生效 -->
+          <span class="opt-inline">扫描磁盘
+            <span class="drive-picker" id="emptyDrives"></span>
+          </span>
         </div>
         <div class="progress-section" id="emptyProgressSection" style="display:none">
           <div class="progress-header"><span class="progress-label" id="emptyProgressLabel">扫描中...</span><span class="progress-value" id="emptyProgressValue">0%</span></div>
@@ -500,29 +486,108 @@
           <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3z"/><path d="M13.5 3v5.5H19"/></svg></div><div class="summary-info"><div class="summary-value" id="emptyCount">0</div><div class="summary-label">空文件</div></div></div>
           <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--accent-light); color: var(--accent)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6.5z"/></svg></div><div class="summary-info"><div class="summary-value" id="emptyDirCount">0</div><div class="summary-label">空目录</div></div></div>
         </div>
-        <div class="table-card" id="emptyTable"></div>
+        <!-- 空文件/空目录可折叠栏目（2026-09-28 五轮拍板：放弃左右双栏，改横向单列
+             可折叠——点击栏目头展开/折叠；默认空文件展开、空目录折叠） -->
+        <div class="empty-accordion" id="emptyTable">
+          <section class="empty-pane" data-empty-pane="files">
+            <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="true">
+              <span class="empty-pane-chevron" aria-hidden="true">▾</span>
+              <span class="empty-pane-title">空文件</span>
+              <span class="empty-pane-count" id="emptyPaneCountFiles">0</span>
+              <span class="empty-pane-sub">0 字节 · 创建满 14 天</span>
+            </button>
+            <div class="empty-pane-body" id="emptyFilesBox"></div>
+          </section>
+          <section class="empty-pane collapsed" data-empty-pane="dirs">
+            <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="false">
+              <span class="empty-pane-chevron" aria-hidden="true">▾</span>
+              <span class="empty-pane-title">空目录</span>
+              <span class="empty-pane-count" id="emptyPaneCountDirs">0</span>
+              <span class="empty-pane-sub">树内只含空文件与空子目录 · 创建满 14 天</span>
+            </button>
+            <div class="empty-pane-body" id="emptyDirsBox"></div>
+          </section>
+        </div>
       </div>
 
-      <!-- ============================ 磁盘清理 · AppData 瘦身（子视图） ============================ -->
-      <div class="cleanup-view" data-cleanup-panel="cleanup-appdata">
+      <!-- ============================ 磁盘清理 · 磁盘分析器（子视图，C-5） ============================ -->
+      <div class="cleanup-view" data-cleanup-panel="cleanup-analyze">
         <div class="finder-toolbar card">
-          <label class="opt-inline">最小目录
-            <select class="input-style" id="appdataMinSize">
-              <option value="10">10 MB</option>
-              <option value="50">50 MB</option>
-              <option value="100" selected>100 MB</option>
-              <option value="512">512 MB</option>
-            </select>
-          </label>
-          <span class="opt-hint">AppData 含正在运行的应用数据，删除前请确认应用已退出。</span>
+          <!-- C-5 拍板：逐层按需下钻（每层一次扫描），删除复用 finder:delete 回收站链 -->
+          <span class="opt-inline">分析磁盘
+            <span class="drive-picker" id="anDrives"></span>
+          </span>
+          <span class="opt-hint">点击目录名逐层下钻；「删除」整树移入回收站并记入已删除清单</span>
         </div>
-        <div class="progress-section" id="appdataProgressSection" style="display:none">
-          <div class="progress-header"><span class="progress-label" id="appdataProgressLabel">统计中...</span><span class="progress-value" id="appdataProgressValue">0%</span></div>
-          <div class="progress-bar"><div class="progress-fill" id="appdataProgressFill"></div></div>
+        <div class="progress-section" id="anProgressSection" style="display:none">
+          <div class="progress-header"><span class="progress-label" id="anProgressLabel">分析中...</span><span class="progress-value" id="anProgressValue">0%</span></div>
+          <div class="progress-bar"><div class="progress-fill" id="anProgressFill"></div></div>
         </div>
-        <div class="table-card" id="appdataTable"></div>
-      </div><!-- /.cleanup-view[appdata] -->
+        <div class="finder-toolbar card" id="anBreadcrumb" style="display:none">
+          <!-- 面包屑由 finder.js 渲染：根节点（盘符/多盘/AppData）+ 逐层路径 + 返回上级 -->
+        </div>
+        <div class="summary-cards">
+          <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--accent-light); color: var(--accent)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7.5l-9-4-9 4 9 4 9-4zM3 7.5V16c0 1.5 4 3.5 9 3.5s9-2 9-3.5V7.5"/><path d="M12 11.5V19.5"/></svg></div><div class="summary-info"><div class="summary-value" id="anTotalSize">—</div><div class="summary-label">当前层总大小</div></div></div>
+          <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6.5z"/></svg></div><div class="summary-info"><div class="summary-value" id="anCounts">—</div><div class="summary-label">子目录 / 文件数</div></div></div>
+          <div class="summary-card"><div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></div><div class="summary-info"><div class="summary-value" id="anElapsed">—</div><div class="summary-label">分析耗时</div></div></div>
+        </div>
+        <div class="finder-toolbar card" id="anExtSection" style="display:none">
+          <!-- 类型构成（子树扩展名聚合 Top5）：堆叠条 + 图例由 finder.js 渲染 -->
+        </div>
+        <div class="table-card" id="anTable"></div>
+      </div>
       </div><!-- /#page-cleanup（磁盘清理五合一：五个子视图收拢于此） -->
+
+      <!-- 软件卸载页（卸载域 MVP：列表 → 原厂卸载 → 残留扫描/受控清理） -->
+      <div class="page" id="page-uninstall">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">软件卸载</h1>
+            <p class="page-subtitle">用户应用 = 传统 Win32 程序（原厂卸载器）；Windows应用 = 商店应用（Remove-AppxPackage）</p>
+          </div>
+        </div>
+
+        <div class="cleanup-toolbar">
+          <div class="filter-tabs" id="uninstallScopeTabs" role="tablist" aria-label="应用范围">
+            <button class="filter-tab active" data-un-scope="user" role="tab" aria-selected="true">用户应用</button>
+            <button class="filter-tab" data-un-scope="windows" role="tab" aria-selected="false">Windows应用</button>
+          </div>
+          <div class="cleanup-toolbar-actions active">
+            <button class="btn btn-secondary" id="uninstallBtnRefresh">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              <span>刷新列表</span>
+            </button>
+            <button class="btn btn-secondary" id="btnUninstallReports" data-tip="查看历次残留清理的批次报告（每项的删除结果与失败原因）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+              <span>清理报告</span>
+            </button>
+            <!-- B1（2026-09-28 拍板）：静默勾选框已删——默认静默优先、失败自动回退原厂 UI -->
+            <span class="clean-filter-hint" id="uninstallCountWrap">已安装 <span id="uninstallCount">0</span> 个程序</span>
+          </div>
+        </div>
+
+        <div class="progress-section" id="uninstallBusy" style="display:none" role="status" aria-live="polite">
+          <div class="progress-header">
+            <span class="progress-label">卸载器运行中…</span>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>
+        </div>
+
+        <div class="table-card" id="uninstallList"></div>
+
+        <!-- 残留扫描面板（卸载完成后自动展开，也可手动重扫） -->
+        <div id="residuePanel" style="display:none">
+          <div class="finder-group-header" style="margin-top:14px">
+            <span id="residueTitle">残留扫描</span>
+          </div>
+          <div class="cleanup-toolbar-actions active" style="margin:8px 0">
+            <button class="btn btn-accent" id="residueBtnClean" disabled>删除选中残留</button>
+            <button class="btn btn-secondary" id="residueBtnRescan">重新扫描</button>
+            <span class="clean-filter-hint">高置信项默认勾选；注册表删除前自动备份，文件移入回收站。</span>
+          </div>
+          <div class="table-card" id="residueList"></div>
+        </div>
+      </div><!-- /#page-uninstall -->
 
       <!-- 大文件查找 / 磁盘健康度功能已移除 -->
       <!-- 系统维护修复组页面（P2-16） -->

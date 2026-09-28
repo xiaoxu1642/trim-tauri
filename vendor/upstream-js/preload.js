@@ -154,6 +154,14 @@ contextBridge.exposeInMainWorld('api', {
     openBackupDir: () => ipcRenderer.invoke('finder:open-backup-dir')
   },
 
+  // 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28）：列表 / 原厂卸载 / 残留扫描 / 残留清理（全档 MAIN）
+  uninstall: {
+    list: (scope) => ipcRenderer.invoke('uninstall:list', { scope }),
+    run: (appId, silent) => ipcRenderer.invoke('uninstall:run', { appId, silent }),
+    residueScan: (appId) => ipcRenderer.invoke('uninstall:residue-scan', { appId }),
+    residueExecute: (appId, targets) => ipcRenderer.invoke('uninstall:residue-execute', { appId, targets })
+  },
+
   // 右键菜单
   contextmenu: {
     // v3.2.1：refresh=false 优先读持久缓存（首启扫描一次落盘）；true 强制重新扫描
@@ -439,7 +447,9 @@ contextBridge.exposeInMainWorld('api', {
   // 系统信息（C2，2026-09-14 重复点审查）：系统盘介质类型（SSD/HDD），
   // 供优化中心与磁盘清理按硬件显隐预读相关选项（unknown 时两边都不隐藏）
   system: {
-    diskType: (opts = {}) => ipcRenderer.invoke('system:disk-type', opts)
+    diskType: (opts = {}) => ipcRenderer.invoke('system:disk-type', opts),
+    // 固定磁盘盘符列表（finder 大文件/空文件页盘符点选器，2026-09-28 六轮拍板）
+    diskList: () => ipcRenderer.invoke('system:disk-list')
   },
 
   // 启动项管理：扫描 / 启停 / 删除 / 打开所在位置 / 添加

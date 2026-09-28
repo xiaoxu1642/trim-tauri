@@ -50,7 +50,14 @@ const MUST_MAIN = [
   'appearance_bg_list',
   'appearance_bg_open_dir',
   'cleanup_execute',
+  'cleanup_exclude_add', // C-1：写 %APPDATA%\Trim\cleanup-exclude.txt，只放主窗
+  'cleanup_exclude_remove', // C-1：同上（写面）
+  'cleanup_custom_add', // C-3：写 %APPDATA%\Trim\cleanup-custom.txt，只放主窗
+  'cleanup_custom_remove', // C-3：同上（写面）
+  'cleanup_custom_execute', // C-3：只回收站的删除面，只放主窗
   'cleanup_kill_locked_processes',
+  'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
+  'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
   'cleanup_retry_failed_delete',
   'cleanup_update_rules',
   'contextmenu_open_in_regedit', // v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC
@@ -59,6 +66,8 @@ const MUST_MAIN = [
   'contextmenu_restore',
   'contextmenu_toggle',
   'contextmenu_win11_classic',
+  'uninstall_report_get', // U-6：读批次报告，卸载域全档 MAIN 约定
+  'uninstall_report_list', // U-6：同上
   'diskbench_run',
   'elevate_request', // AGENTS §3：提权入口只认主窗口 label
   'fileclean_execute',
@@ -86,6 +95,12 @@ const MUST_MAIN = [
   'updater_get_mirror',
   'updater_install',
   'updater_set_mirror',
+  // 卸载域 MVP（竞品借鉴落地方案 P0 §11）：卸载/残留执行是高危写操作，
+  // 且只有主窗加载 uninstall.js —— 四条命令全档 MAIN。
+  'uninstall_list',
+  'uninstall_run',
+  'uninstall_residue_scan',
+  'uninstall_residue_execute',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----

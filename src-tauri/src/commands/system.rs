@@ -42,3 +42,44 @@ pub async fn system_disk_type<R: tauri::Runtime>(
         Err(e) => Ok(serde_json::json!({ "success": false, "message": format!("探测任务异常: {e}") })),
     }
 }
+
+/// system:disk-list — 枚举本机**固定磁盘**盘符（finder 大文件/空文件页的盘符点选器用，
+/// 2026-09-28 六轮拍板：扫描目录从文本输入改为 C/D 盘点选）。
+/// GetLogicalDriveStringsW + GetDriveTypeW，只放行 DRIVE_FIXED（可移动/网络盘
+/// 拔插会让扫描中途失效，不进候选）。
+#[tauri::command]
+pub fn system_disk_list<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+) -> Result<serde_json::Value, String> {
+    guard::guard_readonly(&window)?;
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDriveStringsW};
+    // DRIVE_FIXED = 3（winnt.h 宏；windows 0.61 未导出该常量，按 SDK 原值硬编码）
+    const DRIVE_FIXED: u32 = 3;
+    let mut buf = [0u16; 512];
+    let len = unsafe { GetLogicalDriveStringsW(Some(&mut buf)) } as usize;
+    if len == 0 || len > buf.len() {
+        return Ok(serde_json::json!({ "success": false, "message": "枚举盘符失败", "data": [] }));
+    }
+    let mut drives: Vec<String> = Vec::new();
+    // 缓冲区形态：`C:\<0>D:\<0>...<0>`（双 NUL 结尾的逐段串）
+    let mut seg = &buf[..len];
+    while let Some(pos) = seg.iter().position(|&c| c == 0) {
+        let s = String::from_utf16_lossy(&seg[..pos]);
+        seg = &seg[pos + 1..];
+        if s.is_empty() {
+            break;
+        }
+        let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+        let fixed = unsafe { GetDriveTypeW(windows::core::PCWSTR(wide.as_ptr())) } == DRIVE_FIXED;
+        if !fixed {
+            continue;
+        }
+        // "C:\" → "C:"（UI 点选标签）
+        let letter = s.trim_end_matches('\\').to_uppercase();
+        if !letter.is_empty() {
+            drives.push(letter);
+        }
+    }
+    drives.sort();
+    Ok(serde_json::json!({ "success": true, "data": drives }))
+}

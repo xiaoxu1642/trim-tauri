@@ -13,9 +13,9 @@ pub mod realtime;
 pub mod system;
 // ---- B 批（只读扫描 + 安全与运行时）----
 pub mod finder;
+pub mod uninstall;
 pub mod memory;
 pub mod netcheck;
-pub mod netspeed;
 pub mod diskbench;
 pub mod preview;
 pub mod processmanager;

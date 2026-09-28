@@ -12,7 +12,7 @@
 //!   （`ps/cleanup_scan.ps1` 模板替换后执行）」分支已随脚本删除退役；本段注释曾长期
 //!   与代码事实不符（2026-09-25 审计修正）。
 //! - **PS 残留**：`src-tauri/ps/` 现仅余 `cm_icons.ps1` 与 `optimizer_build.ps1`，
-//!   由 `tools/check-ps-extraction.mjs` / `check-ps-substitution.mjs` 继续对拍；
+//!   由 `tools/check-ps-extraction.mjs` 继续对拍（check-ps-substitution 已随 S3 退役，D-2）。
 //!   cleanup 域自身的模板替换链已随脚本删除一并退役。
 //! - **快照槽**：扫描快照 / 回收站失败项 / 占用检测 PID 白名单全部按 `window.label()` 分槽
 //!   （Electron 按 `event.sender.id`），执行与结束进程只认本槽内容。
@@ -28,6 +28,9 @@
 //! ```text
 //! // ---- C 批：cleanup ----
 //! commands::cleanup::cleanup_rules,
+//! commands::cleanup::cleanup_exclude_list,
+//! commands::cleanup::cleanup_exclude_add,
+//! commands::cleanup::cleanup_exclude_remove,
 //! commands::cleanup::cleanup_scan,
 //! commands::cleanup::cleanup_execute,
 //! commands::cleanup::cleanup_retry_failed_delete,
@@ -647,6 +650,795 @@ pub fn cleanup_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
         Err(e) => {
             log::write_log("warn", &format!("读取清理规则失败: {e}"));
             json!({ "success": false, "message": "清理规则读取失败" })
+        }
+    }
+}
+
+// ==================== cleanup:exclude-*（C-1 排除名单 UI） ====================
+// %APPDATA%\Trim\cleanup-exclude.txt 的读写面。解析口径与
+// trim_finder::cleanup_scan::{load_global_excludes, path_excluded} 同源
+// （每行一个绝对路径、# 注释、%VAR% 展开、大小写不敏感、行尾 \ 归一），
+// 这里只做「列 / 增 / 删」，不重复实现匹配语义。扫描侧与执行侧每次都重新读盘，
+// 命令写完即生效，无缓存失效问题。
+
+/// 列表条目：raw=文件原文行（展示用），expanded=%VAR% 展开后的小写归一形态（比对用）
+#[derive(serde::Serialize)]
+struct ExcludeEntry {
+    raw: String,
+    expanded: String,
+    is_file: bool,
+}
+
+/// 读排除名单原文行（文件缺失/不可读 = 空名单，与扫描侧口径一致）
+fn exclude_lines() -> Vec<String> {
+    match cleanup_scan::global_exclude_file() {
+        Some(f) => std::fs::read_to_string(&f)
+            .map(|t| t.lines().map(|l| l.to_string()).collect())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// 单行展开归一（与 load_global_excludes 逐字对齐：trim → 展开 → 去尾 \ → 小写）
+fn exclude_normalize(line: &str) -> String {
+    cleanup_scan::expand_env_path(line.trim())
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+/// 原子写回排除名单（LF/CRLF 均可被读取侧 lines() 消化，统一 CRLF 对齐 Windows 记事本习惯）
+fn write_exclude_lines(lines: &[String]) -> Result<(), String> {
+    let f = cleanup_scan::global_exclude_file()
+        .ok_or_else(|| "无法定位排除名单路径（APPDATA 缺失）".to_string())?;
+    let mut text = lines.join("\r\n");
+    if !text.is_empty() {
+        text.push_str("\r\n");
+    }
+    security::atomic_write_file(&f, text.as_bytes())
+}
+
+/// cleanup:exclude-list — 列出当前排除名单（只读）
+#[tauri::command]
+pub fn cleanup_exclude_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let entries: Vec<ExcludeEntry> = exclude_lines()
+        .into_iter()
+        .filter_map(|raw| {
+            let expanded = exclude_normalize(&raw);
+            if expanded.is_empty() || expanded.starts_with('#') {
+                return None;
+            }
+            // 分组口径与 load_global_excludes 一致：有扩展名按文件，否则按目录前缀
+            let is_file = Path::new(&expanded).extension().is_some();
+            Some(ExcludeEntry {
+                raw: raw.trim().to_string(),
+                expanded,
+                is_file,
+            })
+        })
+        .collect();
+    let file = cleanup_scan::global_exclude_file()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    json!({ "success": true, "data": { "file": file, "entries": entries } })
+}
+
+/// cleanup:exclude-add — 追加一条排除路径（主窗专属；只加保护性排除，不产生删除面）
+#[tauri::command]
+pub fn cleanup_exclude_add<R: tauri::Runtime>(window: WebviewWindow<R>, path: String) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let raw = path.trim().to_string();
+    if raw.is_empty() {
+        return json!({ "success": false, "message": "路径不能为空" });
+    }
+    let expanded = exclude_normalize(&raw);
+    // 必须是绝对路径：盘符 / UNC（%VAR% 行在展开后再校验，防「%MYTOOL%\x」展开成相对路径混入）
+    let b = expanded.as_bytes();
+    let looks_abs = (b.len() >= 2
+        && b[1] == b':'
+        && b[0].is_ascii_alphabetic())
+        || expanded.starts_with("\\\\");
+    if !looks_abs {
+        return json!({ "success": false, "message": "仅支持绝对路径（盘符、UNC 或展开后为盘符/UNC 的 %环境变量% 路径）" });
+    }
+    let existing = exclude_lines();
+    let dup = existing
+        .iter()
+        .any(|l| exclude_normalize(l) == expanded);
+    if dup {
+        return json!({ "success": true, "data": { "added": false } });
+    }
+    let mut lines = existing;
+    lines.push(raw);
+    match write_exclude_lines(&lines) {
+        Ok(()) => {
+            log::write_log("info", &format!("排除名单已新增: {expanded}"));
+            json!({ "success": true, "data": { "added": true } })
+        }
+        Err(e) => {
+            log::write_log("error", &format!("排除名单写入失败: {e}"));
+            json!({ "success": false, "message": "排除名单写入失败" })
+        }
+    }
+}
+
+/// cleanup:exclude-remove — 移除一条排除路径（主窗专属；按展开归一匹配，其余行原样保留）
+#[tauri::command]
+pub fn cleanup_exclude_remove<R: tauri::Runtime>(window: WebviewWindow<R>, path: String) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let target = exclude_normalize(&path);
+    if target.is_empty() {
+        return json!({ "success": false, "message": "路径不能为空" });
+    }
+    let lines = exclude_lines();
+    let kept: Vec<String> = lines
+        .iter()
+        .filter(|l| exclude_normalize(l) != target)
+        .cloned()
+        .collect();
+    if kept.len() == lines.len() {
+        return json!({ "success": true, "data": { "removed": false } });
+    }
+    match write_exclude_lines(&kept) {
+        Ok(()) => {
+            log::write_log("info", &format!("排除名单已移除: {target}"));
+            json!({ "success": true, "data": { "removed": true } })
+        }
+        Err(e) => {
+            log::write_log("error", &format!("排除名单写入失败: {e}"));
+            json!({ "success": false, "message": "排除名单写入失败" })
+        }
+    }
+}
+
+// ==================== cleanup:custom-*（C-3 自定义清理目录） ====================
+// 用户显式添加的清理目录：%APPDATA%\Trim\cleanup-custom.txt，每行
+// `<dir>` 或 `<dir>|<分号分隔的扩展名模式>`（模式只认 `*.ext` 形态）。
+// 与主清理链刻意隔离：主链是「永久删」产品语义（v3.3.0 拍板），本域**只回收站**
+// （可还原），且执行前过 is_path_protected + minAge(24h) + 全局排除名单三道闸；
+// 执行只认本会话扫描快照（与卸载残留同款防伪造口径）。目录归一/匹配语义复用
+// C-1 的 exclude_normalize 与 trim_finder::cleanup_scan，不另起炉灶。
+
+/// 在用文件保护：修改时间不足 24h 的文件不进候选（用户显式加目录也守这道闸）
+const CUSTOM_MIN_AGE_HOURS: u64 = 24;
+/// 扫描上限：防把巨型目录树整棵塞进快照（触顶即截断并如实回报）
+const CUSTOM_MAX_FILES: usize = 20_000;
+const CUSTOM_MAX_DEPTH: u32 = 32;
+
+static CUSTOM_SNAPSHOTS: OnceLock<Mutex<HashMap<String, (i64, Vec<Value>)>>> = OnceLock::new();
+
+fn custom_snapshots() -> &'static Mutex<HashMap<String, (i64, Vec<Value>)>> {
+    CUSTOM_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn custom_file() -> PathBuf {
+    paths::app_data_dir().join("cleanup-custom.txt")
+}
+
+/// 读自定义目录原文行（文件缺失/不可读 = 空名单）
+fn custom_lines() -> Vec<String> {
+    std::fs::read_to_string(custom_file())
+        .map(|t| t.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// 原子写回自定义目录名单
+fn write_custom_lines(lines: &[String]) -> Result<(), String> {
+    let mut text = lines.join("\r\n");
+    if !text.is_empty() {
+        text.push_str("\r\n");
+    }
+    security::atomic_write_file(&custom_file(), text.as_bytes())
+}
+
+/// 扩展名模式准入：只认 `*.ext`（ext 为字母数字，≤24 字符）——不开放任意通配，
+/// 防把模式写成路径穿越或把匹配面扩到不可预期
+fn valid_custom_pattern(p: &str) -> bool {
+    let Some(ext) = p.strip_prefix("*.") else { return false };
+    !ext.is_empty() && ext.len() <= 24 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// 解析一行：`dir` 或 `dir|p1;p2`。dir 按排除名单同款归一；模式小写存放（匹配不区分大小写）
+fn parse_custom_line(line: &str) -> Option<(String, Vec<String>)> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') {
+        return None;
+    }
+    let (dir_raw, pat_raw) = match t.split_once('|') {
+        Some((d, p)) => (d, Some(p)),
+        None => (t, None),
+    };
+    let dir = exclude_normalize(dir_raw);
+    if dir.is_empty() {
+        return None;
+    }
+    let patterns = pat_raw
+        .map(|p| {
+            p.split(';')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| valid_custom_pattern(s))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some((dir, patterns))
+}
+
+#[derive(serde::Serialize)]
+struct CustomEntry {
+    raw: String,
+    dir: String,
+    patterns: Vec<String>,
+}
+
+/// cleanup:custom-list — 列出自定义清理目录（只读）
+#[tauri::command]
+pub fn cleanup_custom_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let entries: Vec<CustomEntry> = custom_lines()
+        .iter()
+        .filter_map(|l| {
+            parse_custom_line(l).map(|(dir, patterns)| CustomEntry {
+                raw: l.trim().to_string(),
+                dir,
+                patterns,
+            })
+        })
+        .collect();
+    json!({ "success": true, "data": { "file": custom_file().to_string_lossy(), "entries": entries } })
+}
+
+/// cleanup:custom-add — 添加一条自定义清理目录（主窗专属）。
+/// 目录必须存在且非受保护；受保护目录在添加时就拒（不给「加了扫不出」的假体验）。
+#[tauri::command]
+pub fn cleanup_custom_add<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    dir: String,
+    patterns: Option<Value>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let raw = dir.trim().to_string();
+    if raw.is_empty() {
+        return json!({ "success": false, "message": "目录不能为空" });
+    }
+    if raw.contains('|') {
+        // 行格式是 `dir|p1;p2`，目录段本身不允许出现分隔符（Windows 路径名也不含 |）
+        return json!({ "success": false, "message": "目录路径不能包含 | 字符" });
+    }
+    // 模式先校验（有非法模式整条拒绝，防静默丢弃造成「我以为生效了」）
+    let mut pats: Vec<String> = Vec::new();
+    if let Some(v) = patterns.as_ref() {
+        let Some(arr) = v.as_array() else {
+            return json!({ "success": false, "message": "扩展名模式参数无效" });
+        };
+        if arr.len() > 16 {
+            return json!({ "success": false, "message": "扩展名模式最多 16 个" });
+        }
+        for p in arr {
+            let Some(s) = p.as_str() else {
+                return json!({ "success": false, "message": "扩展名模式参数无效" });
+            };
+            let pl = s.trim().to_lowercase();
+            if !valid_custom_pattern(&pl) {
+                return json!({ "success": false, "message": format!("扩展名模式只支持形如 *.tmp 的写法：{s}") });
+            }
+            if !pats.contains(&pl) {
+                pats.push(pl);
+            }
+        }
+    }
+    // 目录归一后必须是绝对路径且真实存在
+    let expanded = exclude_normalize(&raw);
+    let b = expanded.as_bytes();
+    let looks_abs = (b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic()) || expanded.starts_with("\\\\");
+    if !looks_abs {
+        return json!({ "success": false, "message": "仅支持绝对路径（盘符、UNC 或展开后为盘符/UNC 的 %环境变量% 路径）" });
+    }
+    if !Path::new(&expanded).is_dir() {
+        return json!({ "success": false, "message": "目录不存在（添加前须真实存在）" });
+    }
+    if protect::is_path_protected(&expanded) {
+        return json!({ "success": false, "message": "受保护目录不允许添加为清理目标" });
+    }
+    let existing = custom_lines();
+    let dup = existing.iter().any(|l| {
+        parse_custom_line(l)
+            .map(|(d, _)| d == expanded)
+            .unwrap_or(false)
+    });
+    if dup {
+        return json!({ "success": true, "data": { "added": false } });
+    }
+    let mut lines = existing;
+    let line = if pats.is_empty() {
+        raw.clone()
+    } else {
+        format!("{raw}|{}", pats.join(";"))
+    };
+    lines.push(line);
+    match write_custom_lines(&lines) {
+        Ok(()) => {
+            log::write_log("info", &format!("自定义清理目录已新增: {expanded}（模式 {} 个）", pats.len()));
+            json!({ "success": true, "data": { "added": true } })
+        }
+        Err(e) => {
+            log::write_log("error", &format!("自定义清理目录写入失败: {e}"));
+            json!({ "success": false, "message": "自定义清理目录写入失败" })
+        }
+    }
+}
+
+/// cleanup:custom-remove — 移除一条自定义清理目录（主窗专属；按归一目录匹配）
+#[tauri::command]
+pub fn cleanup_custom_remove<R: tauri::Runtime>(window: WebviewWindow<R>, dir: String) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let target = exclude_normalize(&dir);
+    if target.is_empty() {
+        return json!({ "success": false, "message": "目录不能为空" });
+    }
+    let lines = custom_lines();
+    let kept: Vec<String> = lines
+        .iter()
+        .filter(|l| {
+            parse_custom_line(l)
+                .map(|(d, _)| d != target)
+                .unwrap_or(true) // 解析不出的残行不误删
+        })
+        .cloned()
+        .collect();
+    if kept.len() == lines.len() {
+        return json!({ "success": true, "data": { "removed": false } });
+    }
+    match write_custom_lines(&kept) {
+        Ok(()) => {
+            log::write_log("info", &format!("自定义清理目录已移除: {target}"));
+            json!({ "success": true, "data": { "removed": true } })
+        }
+        Err(e) => {
+            log::write_log("error", &format!("自定义清理目录写入失败: {e}"));
+            json!({ "success": false, "message": "自定义清理目录写入失败" })
+        }
+    }
+}
+
+/// 递归收集自定义目录下的候选文件（跳过符号链接/重解析点防环；错误静默跳过并计数）
+fn custom_collect_dir(
+    dir: &Path,
+    patterns: &[String],
+    cutoff: std::time::SystemTime,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    out: &mut Vec<Value>,
+    skipped: &mut usize,
+    depth: u32,
+) {
+    if out.len() >= CUSTOM_MAX_FILES || depth > CUSTOM_MAX_DEPTH {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        *skipped += 1;
+        return;
+    };
+    for e in rd.flatten() {
+        if out.len() >= CUSTOM_MAX_FILES {
+            return;
+        }
+        let Ok(ft) = e.file_type() else {
+            *skipped += 1;
+            continue;
+        };
+        let p = e.path();
+        if ft.is_symlink() {
+            continue; // 链接不深入、不作候选（防环 + 防把链接目标误当目录内文件）
+        }
+        if ft.is_dir() {
+            custom_collect_dir(&p, patterns, cutoff, excl_dirs, excl_files, out, skipped, depth + 1);
+            continue;
+        }
+        // 文件候选：模式（空=全部）→ minAge → 排除名单，逐道过滤
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        if !patterns.is_empty() && !patterns.iter().any(|pat| name.ends_with(&pat[1..])) {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { *skipped += 1; continue };
+        if !cleanup_scan::modified_before(&meta, cutoff) {
+            continue; // 太新（在用标记）不入候选
+        }
+        let low = p.to_string_lossy().to_lowercase();
+        if cleanup_scan::path_excluded(excl_dirs, excl_files, &low) {
+            continue;
+        }
+        out.push(json!({
+            "path": p.to_string_lossy(),
+            "name": e.file_name().to_string_lossy(),
+            "size": meta.len(),
+            "modifiedMs": meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0),
+        }));
+    }
+}
+
+/// cleanup:custom-scan — 扫描自定义清理目录（只读通道；结果落快照供 execute 校验）
+#[tauri::command]
+pub fn cleanup_custom_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let entries: Vec<(String, Vec<String>)> = custom_lines()
+        .iter()
+        .filter_map(|l| parse_custom_line(l))
+        .collect();
+    if entries.is_empty() {
+        return json!({ "success": true, "data": { "files": [], "totalSize": 0, "skipped": 0, "truncated": false, "dirs": 0 } });
+    }
+    let label = window.label().to_string();
+    let (excl_dirs, excl_files) = cleanup_scan::load_global_excludes();
+    let cutoff = std::time::SystemTime::now() - Duration::from_secs(CUSTOM_MIN_AGE_HOURS * 3600);
+    let mut files: Vec<Value> = Vec::new();
+    let mut skipped = 0usize;
+    for (dir, patterns) in &entries {
+        custom_collect_dir(Path::new(dir), patterns, cutoff, &excl_dirs, &excl_files, &mut files, &mut skipped, 0);
+    }
+    let truncated = files.len() >= CUSTOM_MAX_FILES;
+    let total_size: i64 = files.iter().filter_map(|f| f["size"].as_u64()).map(|s| s as i64).sum();
+    let n_dirs = entries.len();
+    custom_snapshots()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(label, (crate::engine::now_ms(), files.clone()));
+    log::write_log(
+        "info",
+        &format!("自定义目录扫描: {n_dirs} 个目录, {} 个候选文件, 共 {total_size} B, 跳过 {skipped}", files.len()),
+    );
+    json!({ "success": true, "data": { "files": files, "totalSize": total_size, "skipped": skipped, "truncated": truncated, "dirs": n_dirs } })
+}
+
+/// cleanup:custom-execute — 清理自定义目录候选（主窗专属；**只回收站**，可还原）。
+/// 目标必须命中本会话扫描快照（防伪造）；执行前逐项复验存在性/minAge/排除名单/
+/// is_path_protected——扫描到执行之间状态可能变化，不复用扫描结论。
+#[tauri::command]
+pub async fn cleanup_custom_execute<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    targets: Option<Value>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Some(list) = targets.as_ref().and_then(|v| v.as_array()) else {
+        return json!({ "success": false, "message": "目标参数无效" });
+    };
+    if list.is_empty() || list.len() > CUSTOM_MAX_FILES {
+        return json!({ "success": false, "message": "目标数量无效" });
+    }
+    let mut wanted: Vec<String> = Vec::with_capacity(list.len());
+    for v in list {
+        let Some(s) = v.as_str() else {
+            return json!({ "success": false, "message": "目标参数无效" });
+        };
+        wanted.push(s.trim_end_matches('\\').to_lowercase());
+    }
+    let label = window.label().to_string();
+    let snap: Vec<Value> = custom_snapshots()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&label)
+        .map(|(_, f)| f.clone())
+        .unwrap_or_default();
+    if snap.is_empty() {
+        return json!({ "success": false, "message": "没有可用的扫描快照，请先扫描" });
+    }
+    let known: HashMap<String, u64> = snap
+        .iter()
+        .filter_map(|f| {
+            let p = f["path"].as_str()?.trim_end_matches('\\').to_lowercase();
+            let s = f["size"].as_u64().unwrap_or(0);
+            Some((p, s))
+        })
+        .collect();
+    log::flush_sync(); // 危险操作前刷盘
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let (excl_dirs, excl_files) = cleanup_scan::load_global_excludes();
+        let cutoff = std::time::SystemTime::now() - Duration::from_secs(CUSTOM_MIN_AGE_HOURS * 3600);
+        let mut details = Vec::new();
+        let mut freed = 0i64;
+        let mut ok_count = 0usize;
+        let mut fail_count = 0usize;
+        for w in &wanted {
+            let mut push = |status: &str, message: String| {
+                details.push(json!({ "path": w, "status": status, "message": message }));
+            };
+            // 快照命中（防伪造/防过期目标）
+            let Some(&size) = known.get(w) else {
+                push("skip", "目标不在本次扫描快照中（已过期或请求被篡改），请重新扫描".to_string());
+                fail_count += 1;
+                continue;
+            };
+            let p = PathBuf::from(w);
+            let Ok(meta) = std::fs::metadata(&p) else {
+                push("skip", "文件已不存在".to_string());
+                continue;
+            };
+            if !meta.is_file() {
+                push("skip", "目标不是文件".to_string());
+                fail_count += 1;
+                continue;
+            }
+            if !cleanup_scan::modified_before(&meta, cutoff) {
+                push("skip", "文件修改时间不足 24 小时（执行前复验未过）".to_string());
+                fail_count += 1;
+                continue;
+            }
+            if cleanup_scan::path_excluded(&excl_dirs, &excl_files, w) {
+                push("skip", "命中排除名单（执行前复验）".to_string());
+                fail_count += 1;
+                continue;
+            }
+            if protect::is_path_protected(w) {
+                push("skip", "受保护路径，已拒绝".to_string());
+                fail_count += 1;
+                continue;
+            }
+            match move_to_recycle_bin(&p) {
+                Ok(()) => {
+                    freed += size as i64;
+                    ok_count += 1;
+                    push("ok", "已移入回收站".to_string());
+                }
+                Err(e) => {
+                    push("error", format!("移入回收站失败: {e}"));
+                    fail_count += 1;
+                }
+            }
+        }
+        log::write_log(
+            "info",
+            &format!("自定义目录清理: 成功 {ok_count}, 失败/跳过 {fail_count}, 回收 {freed} B"),
+        );
+        json!({ "success": true, "data": { "details": details, "freed": freed, "fileCount": ok_count, "failCount": fail_count } })
+    });
+    match task.await {
+        Ok(v) => v,
+        Err(e) => json!({ "success": false, "message": e.to_string() }),
+    }
+}
+
+// ==================== cleanup:reg-backup-*（C-4 注册表备份还原入口） ====================
+// cleanup_execute 的 regKeys 分支在删除前 export 整键到 %APPDATA%\Trim\cleanup-reg-backup
+// （文件名 {ms时间戳}_reg_{规则id}_{序号}.reg）。此前只有写没有读——「能清不能还」；
+// 本节补列表与还原面。还原 = reg import 合并回系统（把备份时的键/值原样加回）。
+
+fn reg_backup_dir() -> PathBuf {
+    crate::engine::paths::app_data_dir().join("cleanup-reg-backup")
+}
+
+/// 备份文件名准入：单段文件名、字符集 [A-Za-z0-9_- .]、.reg 结尾——防路径穿越与任意导入
+fn valid_backup_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && name.to_lowercase().ends_with(".reg")
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+}
+
+/// cleanup:reg-backup-list — 列出清理域注册表备份（只读；≤50 条按 mtime 倒序）
+#[tauri::command]
+pub fn cleanup_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Ok(rd) = std::fs::read_dir(reg_backup_dir()) else {
+        return json!({ "success": true, "data": { "backups": [] } });
+    };
+    let mut items: Vec<Value> = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !valid_backup_file_name(name) {
+            continue;
+        }
+        let Ok(meta) = ent.metadata() else { continue };
+        // stem 形如 {ms}_reg_{规则id}_{序号}；规则 id 取中段（宽容解析，解析失败也列出）
+        let stem = name.trim_end_matches(".reg");
+        let parts: Vec<&str> = stem.split('_').collect();
+        let (stamp, rule_id, seq) = if parts.len() >= 4 && parts[1] == "reg" {
+            (
+                parts[0].to_string(),
+                parts[2..parts.len() - 1].join("_"),
+                parts[parts.len() - 1].to_string(),
+            )
+        } else {
+            (String::new(), stem.to_string(), String::new())
+        };
+        items.push(json!({
+            "file": name,
+            "stampMs": stamp.parse::<i64>().unwrap_or(0),
+            "ruleId": rule_id,
+            "seq": seq,
+            "mtimeMs": meta.modified().ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            "sizeBytes": meta.len(),
+        }));
+        if items.len() >= 50 {
+            break;
+        }
+    }
+    items.sort_by(|a, b| b["mtimeMs"].as_i64().cmp(&a["mtimeMs"].as_i64()));
+    json!({ "success": true, "data": { "backups": items } })
+}
+
+/// cleanup:reg-backup-restore — reg import 把单个备份合并回注册表（主窗专属）。
+/// import 是「合并加回」不是「回滚快照」：只还原备份里存在的键/值，不删除此后产生的新数据。
+#[tauri::command]
+pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, file: String) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    if !valid_backup_file_name(file.trim()) {
+        return json!({ "success": false, "message": "备份文件名非法" });
+    }
+    let path = reg_backup_dir().join(file.trim());
+    if !path.is_file() {
+        return json!({ "success": false, "message": "备份文件不存在" });
+    }
+    log::flush_sync(); // 写注册表前刷盘
+    let Some(path_str) = path.to_str() else {
+        return json!({ "success": false, "message": "备份路径无法表示为文本" });
+    };
+    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
+        .args(["import", path_str])
+        .output();
+    let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    if ok {
+        log::write_log("info", &format!("cleanup 注册表备份已还原: {file}"));
+        json!({ "success": true, "data": { "restored": true } })
+    } else {
+        let detail = out
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+            .unwrap_or_default();
+        log::write_log("error", &format!("cleanup 注册表备份还原失败: {file} {detail}"));
+        json!({ "success": false, "message": "reg import 失败（见日志）" })
+    }
+}
+
+// ==================== cleanup:file-backup-*（C-4 永久删批次备份还原） ====================
+// 常规清理链是「永久删」产品语义（v3.3.0 拍板），2026-09-28 小旭拍板补删前备份：
+// native::cleanup_execute 在永久删除前把文件复制到 cleanup-files-backup/<批次>\，
+// 并落 manifest-<ts>.json（条目=备份相对名 ↔ 原始路径）。备份是语义增强不是删除
+// 前提：复制失败/超上限照常删除并记账（native.rs 内有 64MB/文件、256MB/批次上限）。
+
+fn files_backup_dir() -> PathBuf {
+    crate::engine::paths::app_data_dir().join("cleanup-files-backup")
+}
+
+/// manifest 文件名准入：`manifest-<纯数字>.json`——防路径穿越
+fn valid_files_manifest_name(name: &str) -> bool {
+    let Some(stem) = name.strip_prefix("manifest-").and_then(|s| s.strip_suffix(".json")) else {
+        return false;
+    };
+    !stem.is_empty() && stem.len() <= 20 && stem.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// cleanup:file-backup-list — 列出永久删批次的文件备份清单（只读；≤50 份按时间倒序）
+#[tauri::command]
+pub fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Ok(rd) = std::fs::read_dir(files_backup_dir()) else {
+        return json!({ "success": true, "data": { "manifests": [] } });
+    };
+    let mut items: Vec<Value> = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue };
+        if !valid_files_manifest_name(name) {
+            continue;
+        }
+        let Ok(meta) = ent.metadata() else { continue };
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let entries = v.get("entries").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+        let total: i64 = entries
+            .iter()
+            .filter_map(|e| e.get("size").and_then(|s| s.as_i64()))
+            .sum();
+        items.push(json!({
+            "file": name,
+            "ts": v.get("ts").and_then(|t| t.as_i64()).unwrap_or(0),
+            "count": entries.len(),
+            "totalSize": total,
+            "mtimeMs": meta.modified().ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        }));
+        if items.len() >= 50 {
+            break;
+        }
+    }
+    items.sort_by(|a, b| b["mtimeMs"].as_i64().cmp(&a["mtimeMs"].as_i64()));
+    json!({ "success": true, "data": { "manifests": items } })
+}
+
+/// cleanup:file-backup-restore — 把单个备份条目拷回原路径（主窗专属）。
+/// 目标已存在时跳过（合并语义：只还原缺失文件，不覆盖现有数据）。
+#[tauri::command]
+pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    file: String,
+    index: usize,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let fname = file.trim();
+    if !valid_files_manifest_name(fname) {
+        return json!({ "success": false, "message": "备份清单名非法" });
+    }
+    let mpath = files_backup_dir().join(fname);
+    let Ok(text) = std::fs::read_to_string(&mpath) else {
+        return json!({ "success": false, "message": "备份清单不存在" });
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return json!({ "success": false, "message": "备份清单解析失败" });
+    };
+    let Some(entries) = v.get("entries").and_then(|e| e.as_array()) else {
+        return json!({ "success": false, "message": "备份清单结构异常" });
+    };
+    let Some(entry) = entries.get(index) else {
+        return json!({ "success": false, "message": "条目序号越界" });
+    };
+    // 备份相对名准入：不含 .. / 绝对路径形态 / 盘符——防穿越到备份根之外
+    let Some(rel) = entry.get("file").and_then(|s| s.as_str()) else {
+        return json!({ "success": false, "message": "条目缺少备份文件名" });
+    };
+    if rel.contains("..") || rel.starts_with('\\') || rel.starts_with('/') || rel.contains(':') {
+        return json!({ "success": false, "message": "备份文件名非法" });
+    }
+    let Some(original) = entry.get("path").and_then(|s| s.as_str()) else {
+        return json!({ "success": false, "message": "条目缺少原始路径" });
+    };
+    if crate::engine::protect::is_path_protected(original) {
+        return json!({ "success": false, "message": "原始路径现为受保护路径，已拒绝还原" });
+    }
+    let src = files_backup_dir().join(rel);
+    if !src.is_file() {
+        return json!({ "success": false, "message": "备份文件已不存在" });
+    }
+    let dst = PathBuf::from(original);
+    if dst.exists() {
+        return json!({ "success": true, "data": { "restored": false, "reason": "目标已存在，未覆盖" } });
+    }
+    if let Some(parent) = dst.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return json!({ "success": false, "message": format!("原目录创建失败: {e}") });
+        }
+    }
+    match std::fs::copy(&src, &dst) {
+        Ok(_) => {
+            log::write_log("info", &format!("cleanup 文件备份已还原: {original}"));
+            json!({ "success": true, "data": { "restored": true } })
+        }
+        Err(e) => {
+            log::write_log("error", &format!("cleanup 文件备份还原失败: {original} {e}"));
+            json!({ "success": false, "message": format!("拷回失败: {e}") })
         }
     }
 }

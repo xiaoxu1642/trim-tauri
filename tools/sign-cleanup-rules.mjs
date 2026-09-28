@@ -6,8 +6,10 @@
 // real_rules_file_verdict 测试盯着），check-data-parity 还要求它与
 // src/scripts/cleanup-fallback.generated.js 逐字节一致。本工具把两个动作收进本仓库：
 //
-//   node tools/sign-cleanup-rules.mjs sign          签名 src-tauri/data/cleanup-rules.json
-//   node tools/sign-cleanup-rules.mjs gen-fallback  从规则 JSON 重新生成前端兜底副本
+//   node tools/sign-cleanup-rules.mjs sign                     签名 src-tauri/data/cleanup-rules.json
+//   node tools/sign-cleanup-rules.mjs gen-fallback             从规则 JSON 重新生成前端兜底副本
+//   node tools/sign-cleanup-rules.mjs sign --file <相对路径>    签名其他规则文件（同款密钥/规范化），
+//                                                              如 --file src-tauri/data/uninstall-residue-rules.json
 //
 // 签名私钥固定在 ~/.trim-signing/rules-ed25519-private.pem（发布机私有，绝不入仓库）。
 // 签名对象 = 根对象去掉 _sig 后的紧凑 JSON（键序 = 原解析插入序），与
@@ -21,7 +23,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const RULES = path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
+// --file <相对路径>：U-1 起签名工具泛化为「规则文件签名器」（同一密钥、同一规范化），
+// 默认仍是 cleanup-rules.json，存量用法零改动
+const argv = process.argv.slice(2);
+const fileArg = argv.includes('--file') ? argv[argv.indexOf('--file') + 1] : null;
+const RULES = fileArg ? path.join(ROOT, fileArg) : path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
 const FALLBACK = path.join(ROOT, 'src', 'scripts', 'cleanup-fallback.generated.js');
 const PRIV_KEY = path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
 
@@ -69,10 +75,10 @@ function genFallback() {
   console.log(`已生成: ${FALLBACK}`);
 }
 
-const cmd = process.argv[2];
+const cmd = argv[0];
 if (cmd === 'sign') sign();
 else if (cmd === 'gen-fallback') genFallback();
 else {
-  console.error('用法: node tools/sign-cleanup-rules.mjs <sign|gen-fallback>');
+  console.error('用法: node tools/sign-cleanup-rules.mjs <sign|gen-fallback> [--file <相对路径>]');
   process.exit(1);
 }

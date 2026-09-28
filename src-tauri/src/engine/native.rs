@@ -780,113 +780,6 @@ mod stubborn_kill_selector_tests {
 }
 
 
-// ==================== B4：本机测速（回环 TCP） ====================
-
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::time::Instant;
-
-/// 回环 TCP 延迟测试（对应 netspeed_ping.ps1）
-pub fn netspeed_ping() -> Result<Value, String> {
-    let listener = TcpListener::bind("127.0.0.1:19999").map_err(|_| "端口被占用".to_string())?;
-    let mut samples: Vec<f64> = Vec::new();
-    for _ in 0..10 {
-        let start = Instant::now();
-        match TcpStream::connect_timeout(
-            &"127.0.0.1:19999".parse().unwrap(),
-            std::time::Duration::from_millis(2000),
-        ) {
-            Ok(_stream) => {
-                samples.push(start.elapsed().as_secs_f64() * 1000.0);
-            }
-            Err(_) => {}
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    drop(listener);
-    if samples.is_empty() {
-        return Ok(json!({"success": false, "message": "无法建立本地回环连接"}));
-    }
-    let avg = samples.iter().sum::<f64>() / samples.len() as f64;
-    let min = samples.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max = samples.iter().cloned().fold(0.0f64, f64::max);
-    let mut sorted = samples.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mut jitter = 0.0;
-    for i in 1..sorted.len() {
-        jitter += (sorted[i] - sorted[i-1]).abs();
-    }
-    if sorted.len() > 1 { jitter /= (sorted.len() - 1) as f64; }
-    Ok(json!({
-        "success": true,
-        "avg": (avg * 100.0).round() / 100.0,
-        "min": (min * 100.0).round() / 100.0,
-        "max": (max * 100.0).round() / 100.0,
-        "jitter": (jitter * 100.0).round() / 100.0,
-        "samples": samples,
-    }))
-}
-
-/// 回环 TCP 吞吐测试（对应 netspeed_throughput.ps1）
-pub fn netspeed_throughput(secs: f64) -> Result<Value, String> {
-    let listener = TcpListener::bind("127.0.0.1:19999").map_err(|_| "端口被占用".to_string())?;
-    // 服务端线程：接收数据
-    let server = std::thread::spawn(move || {
-        let mut received: u64 = 0;
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 64 * 1024];
-            loop {
-                match stream.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => received += n as u64,
-                    Err(_) => break,
-                }
-            }
-        }
-        received
-    });
-    // 客户端：连接并持续发送
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let mut client = TcpStream::connect("127.0.0.1:19999").map_err(|_| "连接失败".to_string())?;
-    let payload = vec![0u8; 64 * 1024];
-    let start = Instant::now();
-    let mut total_sent: u64 = 0;
-    let mut samples: Vec<Value> = Vec::new();
-    loop {
-        let elapsed = start.elapsed().as_secs_f64();
-        if elapsed >= secs { break; }
-        client.write_all(&payload).map_err(|_| "发送失败".to_string())?;
-        total_sent += payload.len() as u64;
-        if samples.is_empty() || (elapsed * 5.0) >= samples.len() as f64 {
-            let inst_bps = total_sent as f64 / elapsed.max(0.001);
-            samples.push(json!({
-                "time": (elapsed * 100.0).round() / 100.0,
-                "speed": (inst_bps / 1048576.0 * 100.0).round() / 100.0,
-            }));
-        }
-    }
-    drop(client);
-    let received = server.join().unwrap_or(0);
-    let actual_duration = start.elapsed().as_secs_f64().max(0.001);
-    let avg_bps = received as f64 / actual_duration;
-    let download_mbps = (avg_bps * 8.0 / 1048576.0 * 100.0).round() / 100.0;
-    let speeds: Vec<f64> = samples.iter().filter_map(|s| s.get("speed").and_then(|v| v.as_f64())).collect();
-    let mut jitter = 0.0;
-    for i in 1..speeds.len() {
-        jitter += (speeds[i] - speeds[i-1]).abs();
-    }
-    if speeds.len() > 1 { jitter /= (speeds.len() - 1) as f64; }
-    Ok(json!({
-        "success": true,
-        "duration": (actual_duration * 100.0).round() / 100.0,
-        "downloadMbps": download_mbps,
-        "uploadMbps": download_mbps,
-        "totalBytes": received,
-        "jitter": (jitter * 100.0).round() / 100.0,
-        "samples": samples,
-    }))
-}
-
 // ==================== B3：外设只读查询 ====================
 
 use windows::Win32::System::Registry::{
@@ -2860,6 +2753,20 @@ pub fn reg_restore_write(hive: HKEY, subkey: &str, value_name: &str, kind: REG_V
     unsafe { reg_write_value(hive, subkey, value_name, kind, data) }
 }
 
+/// 枚举指定键的全部值名（F-1：regKeys `value:"*"` 展开用）。键打不开 → 空集。
+pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> Vec<String> {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return Vec::new();
+        }
+        let names = reg_enum_values(hk);
+        let _ = RegCloseKey(hk);
+        names
+    }
+}
+
 /// 删注册表值；**值本来就不存在 = 成功**（B11：optimizer「按备份删除」的原生出口）
 ///
 /// 语义对齐原 PS `reg delete … ; if ($LASTEXITCODE -ne 0) { reg query …; if (0) { failed++ } }`
@@ -3850,11 +3757,12 @@ fn write_disabled_records(records: &[Value]) {
     if records.is_empty() {
         let _ = std::fs::remove_file(&f);
     } else {
-        if let Ok(json) = serde_json::to_string_pretty(records) {
-            if let Ok(mut file) = std::fs::File::create(&f) {
-                let _ = file.write_all(json.as_bytes());
+            if let Ok(json) = serde_json::to_string_pretty(records) {
+                if let Ok(mut file) = std::fs::File::create(&f) {
+                    use std::io::Write;
+                    let _ = file.write_all(json.as_bytes());
+                }
             }
-        }
     }
 }
 
@@ -6480,6 +6388,17 @@ pub fn cleanup_execute(
     let mut total_files = 0i64;
     let mut recycle_entries = Vec::new();
 
+    // C-4（2026-09-28 拍板）：永久删除链删前备份。批次目录懒创建，仅 to_recycle=false
+    // 时生效（回收站模式可还原，无需副本）。上限护栏：单文件 64MB / 批次 256MB，
+    // 超限的文件照常删除但**不留副本**（记账进 message——备份是语义增强不是删除前提，
+    // 复制失败/超限都不阻塞删除，否则清理主链被备份故障绑架）。
+    const FILE_BACKUP_MAX_FILE: u64 = 64 * 1024 * 1024;
+    const FILE_BACKUP_MAX_BATCH: u64 = 256 * 1024 * 1024;
+    let files_backup_root = crate::engine::paths::app_data_dir().join("cleanup-files-backup");
+    let backup_batch_ts = crate::engine::now_ms();
+    let mut backup_entries: Vec<Value> = Vec::new();
+    let mut backup_total: u64 = 0;
+
     for item in items {
         let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -6500,6 +6419,14 @@ pub fn cleanup_execute(
                 let mut parsed: Vec<(HKEY, String, Option<String>)> = Vec::new();
                 // P0 fail-closed：变量未解析的键不能混进「注册表项不存在」的 benign 结论
                 let mut reg_unresolved: Vec<String> = Vec::new();
+                // F-2（2026-09-28 拍板）：规则级 excludePaths 对注册表目标的排除
+                // （整键 `HIVE\KEY` / 具名值 `HIVE\KEY::VALUE`，与扫描侧 measure_reg_rule 同一判定）
+                let reg_excludes: Vec<String> = rule
+                    .get("excludePaths")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let mut reg_excluded = 0i64;
                 for rk in reg_keys {
                     let path = rk.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     if path.is_empty() { continue; }
@@ -6514,14 +6441,22 @@ pub fn cleanup_execute(
                         );
                         continue;
                     }
+                    let value = rk.get("value").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    if trim_finder::cleanup_scan::reg_target_excluded(&reg_excludes, &expanded, value.as_deref()) {
+                        reg_excluded += 1;
+                        continue;
+                    }
                     let Some((hive, rest)) = parse_reg_path(&expanded) else { continue; };
                     if !reg_key_exists(hive, &rest) { continue; }
-                    let value = rk.get("value").and_then(|v| v.as_str()).map(|s| s.to_string());
                     parsed.push((hive, rest, value));
                 }
                 if parsed.is_empty() {
                     let message = if reg_unresolved.is_empty() {
-                        "注册表项不存在，无需清理".to_string()
+                        if reg_excluded > 0 {
+                            format!("注册表目标全部命中规则级排除（{reg_excluded} 项），无需清理")
+                        } else {
+                            "注册表项不存在，无需清理".to_string()
+                        }
                     } else {
                         format!("路径变量 {} 未解析，未执行注册表清理", reg_unresolved.join("、"))
                     };
@@ -6557,18 +6492,50 @@ pub fn cleanup_execute(
                 let mut removed = 0i64;
                 let mut reg_failed = 0i64;
                 for (hive, rest, value) in &parsed {
-                    let ok = match value {
-                        Some(v) => reg_restore_delete(*hive, rest, v),
-                        None => reg_key_remove(*hive, rest, true),
-                    };
-                    if ok { removed += 1; } else { reg_failed += 1; }
+                    match value.as_deref() {
+                        // F-1（2026-09-28 用户拍板）：value="*" = 清空该键全部值
+                        // （shellMuiCache 等「清值不删键」规则的既定语义）。此前把 "*"
+                        // 字面量喂给 RegDeleteValueW（删名为 * 的值、不存在按幂等报成功），
+                        // 规则实际静默空转；现展开为逐值删除。整键 export 备份已在前一步
+                        // 覆盖，删除顺序无保护语义差异。空键（无值）视为成功：目标状态已达成。
+                        // 口径注：扫描侧对 value="*" 只计 1 项，执行侧按实际值数记账，
+                        // 「清理数 ≥ 扫描数」属本规则的既定形态。
+                        Some("*") => {
+                            for name in reg_enum_value_names_pub(*hive, rest) {
+                                if reg_restore_delete(*hive, rest, &name) {
+                                    removed += 1;
+                                } else {
+                                    reg_failed += 1;
+                                }
+                            }
+                        }
+                        Some(v) => {
+                            if reg_restore_delete(*hive, rest, v) {
+                                removed += 1;
+                            } else {
+                                reg_failed += 1;
+                            }
+                        }
+                        None => {
+                            if reg_key_remove(*hive, rest, true) {
+                                removed += 1;
+                            } else {
+                                reg_failed += 1;
+                            }
+                        }
+                    }
                 }
                 total_files += removed;
                 let status = if reg_failed == 0 { "ok" } else if removed > 0 { "partial" } else { "fail" };
-                let message = if reg_failed == 0 {
-                    format!("已清理 {} 项注册表记录", removed)
+                let excl_note = if reg_excluded > 0 {
+                    format!("；{} 个注册表目标命中规则级排除已跳过", reg_excluded)
                 } else {
-                    format!("已清理 {} 项注册表记录，{} 项失败", removed, reg_failed)
+                    String::new()
+                };
+                let message = if reg_failed == 0 {
+                    format!("已清理 {} 项注册表记录{excl_note}", removed)
+                } else {
+                    format!("已清理 {} 项注册表记录，{} 项失败{excl_note}", removed, reg_failed)
                 };
                 details.push(json!({
                     "id": id, "name": name, "status": status,
@@ -6606,6 +6573,31 @@ pub fn cleanup_execute(
         let mut files: Vec<(String, u64)> = Vec::new();
         // P0 fail-closed：本条规则里展开失败的 %TOKEN%（变量名）清单
         let mut unresolved: Vec<String> = Vec::new();
+        // P0-M5 时效护栏：minAge 规则在执行侧**重新逐文件判定**修改时间，与扫描侧
+        // 同口径（同一谓词）。扫描与执行之间有时间差，太新文件可能在两次枚举之间
+        // 刚被应用写入——执行侧必须自己拒绝，不能只信扫描结果。
+        let cutoff = rule_min_age_secs_json(&rule).map(trim_finder::cleanup_scan::min_age_cutoff);
+        let mut too_new = 0i64;
+        // 全局排除名单（P0-M5 §5.2）+ 规则级 excludePaths（C-2，2026-09-28 开门）：
+        // 与扫描侧同一加载/判定/归一口径（trim_finder 同源），执行侧再拦一次——
+        // 排除名单可能在扫描之后被用户改过，规则也可能换版本，执行时必须以当下为准。
+        let (mut excl_dirs, mut excl_files) = trim_finder::cleanup_scan::load_global_excludes();
+        if let Some(arr) = rule.get("excludePaths").and_then(|v| v.as_array()) {
+            for ep0 in arr.iter().filter_map(|v| v.as_str()) {
+                let ep = trim_finder::cleanup_scan::expand_env_path(ep0)
+                    .trim_end_matches('\\')
+                    .to_lowercase();
+                if ep.is_empty() || ep.starts_with('#') {
+                    continue;
+                }
+                if std::path::Path::new(&ep).extension().is_some() {
+                    excl_files.push(ep);
+                } else {
+                    excl_dirs.push(ep);
+                }
+            }
+        }
+        let excluded;
         if let Some(file_keys) = rule.get("fileKeys").and_then(|v| v.as_array()) {
             if !file_keys.is_empty() {
                 for fk in file_keys {
@@ -6632,11 +6624,16 @@ pub fn cleanup_execute(
                         if !cleanup_root_ok(&base) { continue; }
                         if let Ok(meta) = std::fs::metadata(&base) {
                             if meta.is_file() {
+                                // fileKey 直指单文件：同样过时效护栏
+                                if cutoff.map(|c| !trim_finder::cleanup_scan::modified_before(&meta, c)).unwrap_or(false) {
+                                    too_new += 1;
+                                    continue;
+                                }
                                 files.push((base, meta.len()));
                                 continue;
                             }
                         }
-                        collect_files(&base, pattern, recurse, &mut files);
+                        collect_files(&base, pattern, recurse, cutoff, &mut files, &mut too_new);
                     }
                 }
             }
@@ -6646,7 +6643,7 @@ pub fn cleanup_execute(
                 .or_else(|| rule.get("pathPs").and_then(|v| v.as_str()))
                 .unwrap_or("");
             if !target.is_empty() && cleanup_root_ok(target) {
-                collect_files(target, "*", true, &mut files);
+                collect_files(target, "*", true, cutoff, &mut files, &mut too_new);
             }
         }
 
@@ -6654,9 +6651,17 @@ pub fn cleanup_execute(
         files.sort_by(|a, b| a.0.cmp(&b.0));
         files.dedup_by(|a, b| a.0 == b.0);
 
+        // 全局排除名单 + 规则级 excludePaths 过滤：显式记账，不混进「被占用」或「成功 0 删」
+        let before_excl = files.len();
+        files.retain(|(p, _)| {
+            !trim_finder::cleanup_scan::path_excluded(&excl_dirs, &excl_files, &p.to_lowercase())
+        });
+        excluded = (before_excl - files.len()) as i64;
+
         let mut freed = 0i64;
         let mut deleted = 0i64;
         let mut failed = 0i64;
+        let mut backup_skipped = 0usize;
 
         for (path, size) in &files {
             if to_recycle {
@@ -6670,6 +6675,31 @@ pub fn cleanup_execute(
                 // `retry_failed_delete`（cleanup.rs:1170）与回收站支（:942）都有这道闸门。
                 failed += 1;
             } else {
+                // C-4：删前备份（只对将真正删除的文件；复制失败不阻塞删除）
+                if *size <= FILE_BACKUP_MAX_FILE
+                    && backup_total + *size <= FILE_BACKUP_MAX_BATCH
+                {
+                    let seq = deleted as u32 + backup_skipped as u32 + failed as u32;
+                    let fname = std::path::Path::new(path)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| seq.to_string());
+                    let rel = format!("{}\\{}_{}", id, seq, fname);
+                    let dst = files_backup_root.join(&rel);
+                    if std::fs::create_dir_all(dst.parent().unwrap_or(&files_backup_root)).is_ok()
+                        && std::fs::copy(path, &dst).map(|n| n == *size).unwrap_or(false)
+                    {
+                        backup_total += size;
+                        backup_entries.push(json!({
+                            "file": rel, "path": path.clone(), "size": size, "rule": id,
+                        }));
+                    } else {
+                        let _ = std::fs::remove_file(&dst);
+                        backup_skipped += 1;
+                    }
+                } else {
+                    backup_skipped += 1;
+                }
                 // 永久删除
                 match std::fs::remove_file(path) {
                     Ok(()) => {
@@ -6689,14 +6719,39 @@ pub fn cleanup_execute(
         // P0 fail-closed（规则库最终优化方案 2026-09-27）：存在未解析变量且一无所删时，
         // 不得报「已清理 0 个文件、状态成功」——这正是「扫描命中、执行 0 删」静默失效的
         // 结果形态，必须显式降为 skip 并把原因带给前端。部分成功时也要在 message 里留痕。
+        // P0-M5：too_new 同理——「全都是太新文件」必须显式说成 skip，不许伪装成成功 0 删。
+        let too_new_suffix = if too_new > 0 {
+            format!("；{} 个文件修改时间不足 minAge 已跳过", too_new)
+        } else {
+            String::new()
+        };
+        let excl_suffix = if excluded > 0 {
+            format!("；{} 个文件在排除名单中已跳过", excluded)
+        } else {
+            String::new()
+        };
+        let backup_suffix = if backup_skipped > 0 && !to_recycle {
+            format!("；{} 个文件超备份上限未留副本", backup_skipped)
+        } else {
+            String::new()
+        };
         let (status, message) = if !unresolved.is_empty() && deleted == 0 && failed == 0 {
             ("skip", format!("路径变量 {} 未解析，未执行清理", unresolved.join("、")))
+        } else if deleted == 0 && failed == 0 && too_new > 0 {
+            ("skip", format!("{} 个文件修改时间不足 minAge（时效护栏），未执行清理", too_new))
+        } else if deleted == 0 && failed == 0 && excluded > 0 {
+            ("skip", format!("{} 个文件在排除名单中，未执行清理", excluded))
         } else {
-            let suffix = if unresolved.is_empty() {
-                String::new()
-            } else {
-                format!("；{} 未解析已跳过", unresolved.join("、"))
-            };
+            let mut suffix = too_new_suffix;
+            if !excl_suffix.is_empty() {
+                suffix.push_str(&excl_suffix);
+            }
+            if !backup_suffix.is_empty() {
+                suffix.push_str(&backup_suffix);
+            }
+            if !unresolved.is_empty() {
+                suffix = format!("；{} 未解析已跳过{}", unresolved.join("、"), suffix);
+            }
             if to_recycle {
                 ("recycle", format!("待移入回收站（{} 个文件）{suffix}", deleted))
             } else if failed == 0 {
@@ -6711,6 +6766,7 @@ pub fn cleanup_execute(
         details.push(json!({
             "id": id, "name": name, "status": status,
             "freed": freed, "message": message, "fileCount": deleted, "residual": failed,
+            "tooNew": too_new,
         }));
 
         // auto_rebuild：重建目录
@@ -6730,7 +6786,42 @@ pub fn cleanup_execute(
         }
     }
 
+    // C-4：批次备份清单落盘（有副本才写；还原通道按清单逐条拷回）
+    if !backup_entries.is_empty() {
+        let manifest = json!({ "ts": backup_batch_ts, "entries": backup_entries });
+        let mpath = files_backup_root.join(format!("manifest-{}.json", backup_batch_ts));
+        if std::fs::create_dir_all(&files_backup_root).is_ok() {
+            match serde_json::to_string_pretty(&manifest) {
+                Ok(text) => {
+                    if let Err(e) = std::fs::write(&mpath, text) {
+                        crate::engine::log::write_log("warn", &format!("files 备份清单写入失败: {e}"));
+                    }
+                }
+                Err(_) => {
+                    crate::engine::log::write_log("warn", "files 备份清单序列化失败");
+                }
+            }
+        }
+    }
+
     Ok(CleanupExecuteResult { details, freed: total_freed, file_count: total_files, recycle_entries })
+}
+
+/// 时效护栏 minAge（P0-M5，竞品借鉴落地方案 §5）：解析规则的 minAgeHours/minAgeDays
+/// 为秒数。与扫描侧（trim_finder::cleanup_scan::rule_min_age_secs）同口径：互斥由契约
+/// 门禁 A9 钉死，双声明/非法值在这里按「无护栏」处理会静默放宽删除面——所以双声明时
+/// 取**更严格**（更大）的那个，宁可少删。
+fn rule_min_age_secs_json(rule: &Value) -> Option<u64> {
+    let pos = |v: &Value| v.as_f64().filter(|n| *n > 0.0 && n.is_finite());
+    let h = rule.get("minAgeHours").and_then(pos);
+    let d = rule.get("minAgeDays").and_then(pos);
+    let secs = match (h, d) {
+        (Some(h), None) => h * 3600.0,
+        (None, Some(d)) => d * 86400.0,
+        (Some(h), Some(d)) => (h * 3600.0).max(d * 86400.0),
+        (None, None) => return None,
+    };
+    Some(secs as u64)
 }
 
 fn find_rule_by_id(rules: &Value, id: &str) -> Option<Value> {
@@ -6771,7 +6862,14 @@ fn cleanup_root_ok(dir: &str) -> bool {
     }
 }
 
-fn collect_files(dir: &str, pattern: &str, recurse: bool, files: &mut Vec<(String, u64)>) {
+fn collect_files(
+    dir: &str,
+    pattern: &str,
+    recurse: bool,
+    cutoff: Option<std::time::SystemTime>,
+    files: &mut Vec<(String, u64)>,
+    too_new: &mut i64,
+) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -6779,11 +6877,16 @@ fn collect_files(dir: &str, pattern: &str, recurse: bool, files: &mut Vec<(Strin
         if meta.is_symlink() { continue; }
         if meta.is_dir() {
             if recurse {
-                collect_files(&path.to_string_lossy(), pattern, recurse, files);
+                collect_files(&path.to_string_lossy(), pattern, recurse, cutoff, files, too_new);
             }
         } else if meta.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
             if !glob_match(pattern, &name) { continue; }
+            // P0-M5 时效护栏：太新（mtime 不足 minAge 或读不到 mtime）不进删除清单
+            if cutoff.map(|c| !trim_finder::cleanup_scan::modified_before(&meta, c)).unwrap_or(false) {
+                *too_new += 1;
+                continue;
+            }
             files.push((path.to_string_lossy().to_string(), meta.len()));
         }
     }
@@ -6973,5 +7076,75 @@ mod cleanup_engine_contract_tests {
         assert_eq!(first_unexpanded_token(""), None);
         // 单个 % 不构成 token，不算残留
         assert_eq!(first_unexpanded_token(r"C:\100%done"), None);
+    }
+
+    /// P0-M5 时效护栏：测试辅助——把文件 mtime 拨回 days 天前（SetFileTime，真实文件系统）。
+    #[cfg(windows)]
+    fn set_file_mtime_days_ago(p: &std::path::Path, days: i64) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, SetFileTime, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_SHARE_MODE, OPEN_EXISTING,
+        };
+        use windows::core::PCWSTR;
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let h = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                GENERIC_WRITE.0,
+                FILE_SHARE_MODE(1 | 2), // READ | WRITE
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+        }
+        .expect("CreateFileW 失败");
+        // FILETIME = 1601-01-01 起 100ns 计数；Unix 纪元偏移 11644473600s
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let old = ((now - days * 86400 + 11644473600) * 10_000_000) as u64;
+        let ft = FILETIME {
+            dwLowDateTime: (old & 0xFFFF_FFFF) as u32,
+            dwHighDateTime: (old >> 32) as u32,
+        };
+        // minAge 谓词按**修改时间**判定，创建/写入两个时间都要拨回
+        unsafe { SetFileTime(h, Some(&ft), None, Some(&ft)) }.expect("SetFileTime 失败");
+        unsafe { let _ = CloseHandle(h); }
+    }
+
+    /// P0-M5 时效护栏：执行侧必须**自己**按修改时间拒绝太新文件，不能只信扫描结果
+    /// （扫描与执行之间有时间差，太新文件可能刚被应用写入）。用回收站模式
+    /// （to_recycle=true，只枚举不删除）断言清单内容，测试零删除副作用。
+    #[test]
+    #[cfg(windows)]
+    fn cleanup_execute_enforces_min_age() {
+        let base = std::env::temp_dir().join(format!("trim-minage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("stale.txt"), b"old").unwrap();
+        std::fs::write(base.join("fresh.lock"), b"new").unwrap();
+        set_file_mtime_days_ago(&base.join("stale.txt"), 10);
+
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"m5test","name":"M5测试",
+            "fileKeys":[{"path": base.to_string_lossy(), "pattern":"*", "recurse":true}],
+            "minAgeDays": 3
+        }]}]});
+        let items = vec![serde_json::json!({"id":"m5test","name":"M5测试","path": base.to_string_lossy()})];
+        let res = cleanup_execute(&items, &rules, true, false).unwrap();
+        let d = &res.details[0];
+        assert_eq!(d["tooNew"], 1, "太新文件必须显式记账: {d}");
+        let paths: Vec<&str> = res
+            .recycle_entries
+            .iter()
+            .map(|e| e["path"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(paths.len(), 1, "只有 mtime 满 3 天的文件进清单: {paths:?}");
+        assert!(paths[0].ends_with("stale.txt"), "清单内容异常: {paths:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

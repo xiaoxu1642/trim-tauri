@@ -7,8 +7,8 @@ description = "Trim 内建原生扫描器（重复/大文件/空文件/AppData/�
 [dependencies]
 blake3 = "1.8"
 rayon = "1.11"
-miniz_oxide = "0.8"
 # v3.7.1 R1/R2/R3：Windows 原生 API（feature 最小集，方案 §4）
+# 注：miniz_oxide 原为文档相似检测的 zip 解压依赖，该检测 2026-09-28 移除后一并删除
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

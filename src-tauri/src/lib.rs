@@ -231,7 +231,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
     builder.invoke_handler(tauri::generate_handler![
         // ---- A 批：app ----
         commands::app::app_get_info,
-        commands::app::app_get_theme,
         commands::app::app_read_usage,
         commands::app::app_open_external,
         commands::app::app_first_paint,
@@ -242,7 +241,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::misc::diag_dwm_conflict,
         commands::misc::modal_open,
         commands::misc::modal_close,
-        commands::misc::window_update_overlay,
         commands::misc::shutdown_begin,
         commands::misc::shutdown_complete,
         commands::misc::intro_load,
@@ -250,6 +248,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         // ---- A 批：device / system / overview ----
         commands::device::device_scan,
         commands::system::system_disk_type,
+        commands::system::system_disk_list,
         commands::overview::overview_metrics,
         commands::overview::overview_hardware,
         commands::overview::overview_checkup,
@@ -257,7 +256,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::paths::paths_load,
         commands::paths::paths_save,
         commands::paths::paths_browse,
-        commands::paths::paths_validate,
         commands::paths::paths_app_icon,
         commands::paths::paths_file_icon,
         // ---- A 批：realtime ----
@@ -273,6 +271,14 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::finder::finder_delete,
         commands::finder::finder_delete_manifest,
         commands::finder::finder_open_backup_dir,
+        // ---- 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）----
+        commands::uninstall::uninstall_list,
+        commands::uninstall::uninstall_run,
+        commands::uninstall::uninstall_residue_scan,
+        commands::uninstall::uninstall_residue_execute,
+        commands::uninstall::uninstall_report_list,
+        commands::uninstall::uninstall_report_get,
+        commands::uninstall::uninstall_appx_logo,
         // ---- B 批：memory（6）+ processManager 窗口（2+send）+ preview 窗口（2+send）----
         commands::memory::memory_info,
         commands::memory::memory_clean,
@@ -286,7 +292,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::preview::preview_open_window,
         commands::preview::preview_close_window,
         commands::preview::preview_image_deleted,
-        // ---- B 批：pwsh 运行时 / runtimes / netcheck / netspeed / diskbench ----
+        // ---- B 批：pwsh 运行时 / runtimes / netcheck / diskbench ----
         commands::pwshruntime::pwsh_status,
         // B11（2026-09-26）：`pwsh_prepare` 已整链摘除 —— 零调用方，且 Tauri 侧根本没有
         // 内置运行时解压链可准备（pwshruntime.rs 头部自陈「不存在 extracting 态」），
@@ -295,11 +301,21 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::runtimes::runtimes_install,
         commands::netcheck::netcheck_collect,
         commands::netcheck::netcheck_repair,
-        commands::netspeed::netspeed_ping,
-        commands::netspeed::netspeed_throughput,
         commands::diskbench::diskbench_run,
         // ---- C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细，9 条）----
         commands::cleanup::cleanup_rules,
+        commands::cleanup::cleanup_exclude_list,
+        commands::cleanup::cleanup_exclude_add,
+        commands::cleanup::cleanup_exclude_remove,
+        commands::cleanup::cleanup_custom_list,
+        commands::cleanup::cleanup_custom_add,
+        commands::cleanup::cleanup_custom_remove,
+        commands::cleanup::cleanup_custom_scan,
+        commands::cleanup::cleanup_custom_execute,
+        commands::cleanup::cleanup_reg_backup_list,
+        commands::cleanup::cleanup_reg_backup_restore,
+        commands::cleanup::cleanup_file_backup_list,
+        commands::cleanup::cleanup_file_backup_restore,
         commands::cleanup::cleanup_scan,
         commands::cleanup::cleanup_execute,
         commands::cleanup::cleanup_update_rules,
@@ -375,8 +391,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::appearance::appearance_bg_delete,
         commands::appearance::appearance_bg_list,
         commands::appearance::appearance_bg_open_dir,
-        // ---- E 批：elevate（UAC 自提权 + 新旧实例交接，2 条）----
-        commands::elevate::elevate_status,
+        // ---- E 批：elevate（UAC 自提权 + 新旧实例交接）----
         commands::elevate::elevate_request,
         // ---- E 批：updater（多线路容灾 + minisign 断代，6 条）----
         commands::updater::updater_check,
