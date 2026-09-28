@@ -231,6 +231,30 @@ fn residue_execute_requires_snapshot_before_any_delete() {
     );
 }
 
+// ==================== 卸载执行链（M2 静默知识：档位与现读） ====================
+
+/// `uninstall:run` 是 MAIN 档，且命令串一律后端现读注册表。
+/// 主窗用「卸载键不存在」的早退作正向特征：它发生在任何卸载器被启动之前，
+/// 所以本用例零副作用（不会有进程被拉起来），同时证明档位已越过。
+#[test]
+fn uninstall_run_is_main_only_and_passes_guard_from_main() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "uninstall_run", json!({ "appId": GHOST_APP_ID }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调卸载命令必须被来源校验拒杀，回执 {text}"
+        );
+    }
+    let w = main_window();
+    let res = invoke(&w, "uninstall_run", json!({ "appId": GHOST_APP_ID }));
+    assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
+    assert!(
+        common::message_of(&res).contains("卸载注册表键不存在"),
+        "主窗应越过档位进入「现读注册表」这一步，回执 {res}"
+    );
+}
+
 // ==================== 重/外呼组（默认 ignore，发布前跑） ====================
 
 /// A1 收紧的**放行回测**（真机、只读）：装机清单里每个桌面程序的卸载键必然存在，

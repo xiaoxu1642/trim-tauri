@@ -3,7 +3,9 @@
 //! 方案边界（方案 §4.1，违反即回退）：
 //! - 只做「看见已安装程序 → 调原厂卸载器 → 残留扫描/解释/受控清理」三步；
 //! - 不做全量注册表清理器、不默认强删程序目录、不盲目静默卸载；
-//! - 静默参数只允许白名单模板（msi/inno/nsis 三类），命令串一律**后端现读注册表**，
+//! - 静默命令由构造器裁决（B1）：厂商 `QuietUninstallString` 优先，但必须先过严格闸
+//!   （绝对路径 .exe、非 shell/脚本宿主、无重定向/管道/复合/变量替换、文件存在），
+//!   不过闸则回退 msi/inno/nsis 白名单模板派生；命令串一律**后端现读注册表**，
 //!   绝不信任渲染层回传的任何命令文本（防注入面）；
 //! - 残留文件/目录回收站优先（`is_path_protected` 前置 + `trim_finder` 回收站），
 //!   回收站失败不做永久删除兜底；注册表先 export 备份再删，备份失败整项拒绝；
@@ -457,6 +459,141 @@ fn build_silent_cmd(kind: &str, product_code: Option<&str>, exe: &str, raw_args:
     }
 }
 
+/// 直接当卸载目标就危险的宿主：这些进程会把自己收到的参数再解释一遍，参数里的
+/// `|` `&` `$` 就不再是字面量。而静默串来自注册表，是**软件自己能写**的字段。
+const QUIET_DENY_HOSTS: &[&str] = &[
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "wscript.exe",
+    "cscript.exe",
+    "mshta.exe",
+    "rundll32.exe",
+    "reg.exe",
+    "regsvr32.exe",
+    "sc.exe",
+    "conhost.exe",
+];
+
+/// 静默命令候选（方案 §6.4）：执行层只接受这个结构，**不接受未解析的注册表原文**。
+struct SilentCandidate {
+    exe: String,
+    args: String,
+    /// `vendor` = 厂商 QuietUninstallString；`whitelist` = 本地白名单模板派生
+    source: &'static str,
+    /// 厂商串被拒的原因（进日志，说明为什么退回白名单派生；None = 没试过或试通）
+    vendor_reject: Option<String>,
+}
+
+/// 厂商静默串准入闸（B1 强约束）：只放行「单一绝对路径 exe + 字面参数」。
+/// 返回 `Some(原因)` = 拒绝该串（调用方回退白名单派生，不是放弃静默）。
+/// 存在性判定注入化：闸本身保持纯函数，单测不必造真文件。
+fn quiet_string_reject_reason(
+    exe: &str,
+    args: &str,
+    file_exists: &dyn Fn(&Path) -> bool,
+) -> Option<String> {
+    let exe_low = exe.to_lowercase();
+    let name = exe_low.rsplit(['\\', '/']).next().unwrap_or("");
+    if QUIET_DENY_HOSTS.contains(&name) {
+        return Some(format!("{name} 是 shell/脚本宿主，参数会被二次解释"));
+    }
+    if !name.ends_with(".exe") {
+        return Some("目标不是 .exe（.msi/.msp 一律走 msiexec 白名单派生）".to_string());
+    }
+    let b = exe.as_bytes();
+    let abs = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    if !abs {
+        return Some("可执行文件不是绝对路径".to_string());
+    }
+    if exe.contains('"') || exe.contains('\'') {
+        return Some("可执行文件路径含引号".to_string());
+    }
+    for c in ['<', '>', '|', '&', ';', '$', '`', '\n', '\r', '\0'] {
+        if args.contains(c) {
+            return Some(format!("参数含 {:?} 形态（重定向/管道/复合命令/变量替换）", c));
+        }
+    }
+    // `%` 成对出现按变量替换处理：ShellExecuteEx 不会展开它，留着只会把「没展开的字面量」
+    // 交给卸载器，行为不可证明；单个 % 属于合法文件名（如 100% 目录名）则放行。
+    if args.matches('%').count() >= 2 {
+        return Some("参数含 %VAR% 变量替换形态".to_string());
+    }
+    if args.matches('"').count() % 2 != 0 {
+        return Some("参数引号未闭合".to_string());
+    }
+    if !file_exists(Path::new(exe)) {
+        return Some("可执行文件不存在".to_string());
+    }
+    None
+}
+
+/// 静默命令裁决（B1）：厂商静默串优先于本地拼参数，但必须先过构造闸；
+/// 构造失败或语义不明 → 记录原因并回退现有白名单派生（不永久放弃该程序的静默能力）。
+fn pick_silent_candidate(
+    kind: &str,
+    product_code: Option<&str>,
+    original: &(String, String),
+    quiet: Option<&str>,
+    file_exists: &dyn Fn(&Path) -> bool,
+) -> Option<SilentCandidate> {
+    let mut vendor_reject: Option<String> = None;
+    if let Some(q) = quiet.map(str::trim).filter(|s| !s.is_empty()) {
+        match split_uninstall_cmd(q) {
+            None => vendor_reject = Some("厂商静默串解析不出可执行文件".to_string()),
+            Some((qe, qa)) => match quiet_string_reject_reason(&qe, &qa, file_exists) {
+                Some(reason) => vendor_reject = Some(reason),
+                None => {
+                    return Some(SilentCandidate { exe: qe, args: qa, source: "vendor", vendor_reject: None })
+                }
+            },
+        }
+    }
+    build_silent_cmd(kind, product_code, &original.0, &original.1)
+        .ok()
+        .map(|(exe, args)| SilentCandidate { exe, args, source: "whitelist", vendor_reject })
+}
+
+/// 卸载器退出码语义分档（B2）：返回 (中文语义, 是否回退原厂卸载界面)。
+///
+/// 口径来源要分清：`0 / 3010 / 1605` 是 Trim 此前已特判的三档；`1602 / 1618 / 1603`
+/// 的语义取自 MSI 官方错误码（`1602` 用户取消、`1618` 另一安装进行中、`1603` 内部错误），
+/// **本机未用真实 MSI/NSIS 样本复现过**。因此：取消与并发**不再**自动重弹原厂界面
+/// （用户既然取消就不再替他决定，自动重弹等于无视取消）；`1618` 只做提示、
+/// 不做有界重试（重试策略要真机证据才定，方案 §5·B2 证据边界）。
+/// NSIS 的 `1/2` 不特判：与通用码空间重叠，未确认前按「其它」走原回退路径。
+fn classify_exit(code: u32) -> (&'static str, bool) {
+    match code {
+        0 => ("卸载成功", false),
+        3010 => ("卸载成功，需重启完成", false),
+        1605 => ("产品未安装（该卸载键已无对应产品）", false),
+        1602 => ("用户取消", false),
+        1618 => ("另一个安装或卸载正在进行，请稍后再试", false),
+        1603 => ("安装器内部错误", true),
+        _ => ("其它退出码", true),
+    }
+}
+
+/// 安装器识别的第二条证据（B4）：仅在纯字符串判定为 `unknown` 时调用，且只探
+/// Inno / NSIS 的**独有文件名**（固定候选、顶层不递归、不枚举目录，所以没有
+/// 「目录太大」「枚举超时」这类成本面）。
+///
+/// 刻意**不把 `uninstall.exe` 认成 NSIS**：那名字太通用，认了就是把 `/S` 发给一个
+/// 未知卸载器——识别可以弱，执行不能猜。存在性判定由调用方注入，便于单测不触盘。
+fn second_evidence_kind(install_location: &str, file_exists: &dyn Fn(&Path) -> bool) -> Option<&'static str> {
+    let loc = install_location.trim().trim_end_matches(['\\', '/']).to_string();
+    if loc.is_empty() || loc.chars().count() > 260 || !loc.contains(':') {
+        return None;
+    }
+    let base = Path::new(&loc);
+    for (name, kind) in [("unins000.exe", "inno"), ("nsisunins.exe", "nsis")] {
+        if file_exists(&base.join(name)) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
 /// ShellExecuteEx 启动卸载器并等待退出。返回 (exitCode, 是否拿到进程句柄)。
 /// 不加 RUNAS verb：卸载器自带 manifest 会按需弹 UAC（对齐 Trim 按需提权模型）。
 unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<u32, String> {
@@ -632,70 +769,85 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         }
         let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
         let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
-        let (kind, product_code) = detect_installer(key_path.rsplit('\\').next().unwrap_or(""), &uninstall_string);
+        let quiet_string = reg_sz(hk, "QuietUninstallString").unwrap_or_default();
+        let install_location = reg_sz(hk, "InstallLocation").unwrap_or_default();
+        let key_name = key_path.rsplit('\\').next().unwrap_or("").to_string();
+        let (mut kind, product_code) = detect_installer(&key_name, &uninstall_string);
         let _ = RegCloseKey(hk);
+        // B4 第二证据：只在字符串判定不出类型时探测，且只认独有文件名（不猜通用名）
+        if kind == "unknown" {
+            if let Some(ev) = second_evidence_kind(&install_location, &|p| p.is_file()) {
+                log::write_log(
+                    "info",
+                    &format!("uninstall_run {display_name}: 字符串判定 unknown，InstallLocation 第二证据判为 {ev}"),
+                );
+                kind = ev;
+            }
+        }
 
         if uninstall_string.trim().is_empty() {
             return Err("该程序没有 UninstallString，无法调用原厂卸载器".to_string());
         }
-        // 静默优先（2026-09-28 二轮拍板，勾选框已删）：白名单（msi/inno/nsis）内先静默；
-        // 非成功退出码或启动失败 → 自动回退原厂卸载界面（既定降级路径，不视为错误）。
-        // 退出码口径：0=成功；3010=msi 成功需重启；1605=产品未安装（按成功对待）。
-        let original = split_uninstall_cmd(&uninstall_string);
-        let silent_try = build_silent_cmd(
-            kind,
-            product_code.as_deref(),
-            &original.as_ref().map(|(e, _)| e.clone()).unwrap_or_default(),
-            "",
-        );
-        let (exe, exit_code, used_silent, fell_back) = match silent_try {
-            Ok((sexe, sargs)) => {
-                log::flush_sync(); // 危险操作前刷盘
-                match shell_run_wait(&sexe, &sargs) {
-                    // 0=成功；3010=msi 成功需重启；1605=产品未安装（按成功对待）
-                    Ok(code) if code == 0 || code == 3010 || code == 1605 => (sexe, code, true, false),
-                    Ok(code) => {
-                        log::write_log(
-                            "info",
-                            &format!("uninstall_run {display_name}: 静默卸载退出码 {code}，自动回退原厂卸载界面"),
-                        );
-                        let (ue, ua) =
-                            original.clone().ok_or_else(|| "UninstallString 无法解析出可执行文件".to_string())?;
-                        log::flush_sync();
-                        let code2 = shell_run_wait(&ue, &ua).map_err(|e| {
-                            log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂 UI 启动失败: {e}"));
-                            e
-                        })?;
-                        (ue, code2, true, true)
-                    }
-                    Err(e) => {
-                        log::write_log(
-                            "info",
-                            &format!("uninstall_run {display_name}: 静默卸载启动失败（{e}），自动回退原厂卸载界面"),
-                        );
-                        let (ue, ua) =
-                            original.clone().ok_or_else(|| "UninstallString 无法解析出可执行文件".to_string())?;
-                        log::flush_sync();
-                        let code2 = shell_run_wait(&ue, &ua).map_err(|e| {
-                            log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂 UI 启动失败: {e}"));
-                            e
-                        })?;
-                        (ue, code2, true, true)
-                    }
-                }
+        // 静默优先（2026-09-28 二轮拍板，勾选框已删）：先厂商 QuietUninstallString
+        // （必须过 B1 构造闸），再本地白名单派生；退出码按 B2 分档决定是否回退原厂界面。
+        let original = split_uninstall_cmd(&uninstall_string)
+            .ok_or_else(|| "UninstallString 无法解析出可执行文件".to_string())?;
+        let candidate =
+            pick_silent_candidate(kind, product_code.as_deref(), &original, Some(&quiet_string), &|p| p.is_file());
+        let (mut exe, args, used_silent, silent_source) = match &candidate {
+            Some(c) => (c.exe.clone(), c.args.clone(), true, c.source),
+            None => (original.0.clone(), original.1.clone(), false, "none"),
+        };
+        if let Some(reason) = candidate.as_ref().and_then(|c| c.vendor_reject.as_ref()) {
+            log::write_log(
+                "info",
+                &format!("uninstall_run {display_name}: 厂商 QuietUninstallString 被构造闸拒绝（{reason}），改用白名单派生"),
+            );
+        }
+        let run_original_ui = || -> Result<u32, String> {
+            log::flush_sync();
+            shell_run_wait(&original.0, &original.1).map_err(|e| {
+                log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂卸载界面启动失败: {e}"));
+                e
+            })
+        };
+        log::flush_sync(); // 危险操作前刷盘
+        let mut fell_back = false;
+        let mut exit_code = match shell_run_wait(&exe, &args) {
+            Ok(code) => code,
+            Err(e) if used_silent => {
+                log::write_log(
+                    "info",
+                    &format!("uninstall_run {display_name}: 静默卸载启动失败（{e}），自动回退原厂卸载界面"),
+                );
+                fell_back = true;
+                exe = original.0.clone();
+                run_original_ui()?
             }
-            Err(_) => {
-                // 非白名单安装器：直接原厂 UI（原行为）
-                let (e2, a2) =
-                    original.ok_or_else(|| "UninstallString 无法解析出可执行文件".to_string())?;
-                log::flush_sync();
-                let code = shell_run_wait(&e2, &a2).map_err(|e| {
-                    log::write_log("error", &format!("uninstall_run {display_name}: {e}"));
-                    e
-                })?;
-                (e2, code, false, false)
+            Err(e) => {
+                // 非白名单且厂商串不可用时本来就走原厂界面，启动失败即如实报错（原行为）
+                log::write_log("error", &format!("uninstall_run {display_name}: {e}"));
+                return Err(e);
             }
         };
+        if used_silent && !fell_back {
+            let (meaning, fall_back) = classify_exit(exit_code);
+            if fall_back {
+                log::write_log(
+                    "info",
+                    &format!("uninstall_run {display_name}: 静默卸载退出码 {exit_code}（{meaning}），自动回退原厂卸载界面"),
+                );
+                fell_back = true;
+                exe = original.0.clone();
+                exit_code = run_original_ui()?;
+            } else {
+                log::write_log(
+                    "info",
+                    &format!("uninstall_run {display_name}: 静默卸载退出码 {exit_code}（{meaning}），按分档不回退原厂界面"),
+                );
+            }
+        }
+        let (exit_meaning, _) = classify_exit(exit_code);
 
         // 进程监视（2026-09-28 用户拍板）：句柄退出 ≠ 卸载结束——继续轮询卸载键与
         // 卸载器家族进程，直到键消失或进程绝迹（上限 15 分钟）
@@ -713,6 +865,8 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         }
         Ok(json!({
             "exitCode": exit_code,
+            "exitMeaning": exit_meaning,
+            "silentSource": silent_source,
             "stillListed": still_listed,
             "installerKind": kind,
             "usedSilent": used_silent,
@@ -2450,5 +2604,173 @@ mod residue_trace_tests {
             ("shortcut".to_string(), ghost_os),
         ]);
         assert!(blocked.is_empty() && sendable.len() == 2, "目录闸误伤了 file/shortcut");
+    }
+
+    // ==================== M2 静默知识（B1 构造闸 / B2 分档 / B4 第二证据） ====================
+
+    fn exists_all(_: &Path) -> bool {
+        true
+    }
+    fn exists_none(_: &Path) -> bool {
+        false
+    }
+
+    /// B1 构造闸：每一类「无法静态证明安全」的形态都要拒。逐类一条，缺一条就是漏一种绕过面
+    /// —— 静默串来自注册表，是软件自己能写的字段，不能当成可信输入。
+    #[test]
+    fn quiet_string_gate_rejects_each_unsafe_shape() {
+        let cases = [
+            (r"C:\Windows\System32\cmd.exe".to_string(), "/c del C:\\x".to_string(), "宿主"),
+            (
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_string(),
+                "-Command Remove-Item".to_string(),
+                "宿主",
+            ),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S | more".to_string(), "管道"),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S & calc".to_string(), "复合命令"),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S && taskkill".to_string(), "复合命令"),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S > C:\\x\\log.txt".to_string(), "重定向"),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S < NUL".to_string(), "重定向"),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S ; reboot".to_string(), "分号"),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S $env:FOO".to_string(), "变量"),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S `whoami`".to_string(), "反引号"),
+            (
+                r"C:\Program Files\Foo\u.exe".to_string(),
+                "/D=\"%ProgramFiles%\\Foo\"".to_string(),
+                "变量替换",
+            ),
+            (r"C:\Program Files\Foo\u.exe".to_string(), "/S \"unclosed".to_string(), "引号"),
+            ("unins000.exe".to_string(), "/S".to_string(), "绝对路径"),
+            (r"\\server\share\u.exe".to_string(), "/S".to_string(), "绝对路径"),
+            (r"C:\Program Files\Foo\setup.msi".to_string(), "/quiet".to_string(), ".exe"),
+        ];
+        for (exe, args, label) in cases {
+            let reason = quiet_string_reject_reason(&exe, &args, &exists_all);
+            assert!(
+                reason.is_some(),
+                "[{label}] 该形态必须被拒：exe={exe:?} args={args:?}"
+            );
+        }
+        // 存在性也是闸的一部分：路径写法都对但文件不存在同样不放行
+        assert!(
+            quiet_string_reject_reason(r"C:\Program Files\Foo\u.exe", "/S", &exists_none).is_some(),
+            "文件不存在的厂商串必须被拒"
+        );
+    }
+
+    /// 正例：字面的「绝对路径 exe + 参数」必须放行，含 NSIS 常见的 `/D="路径"` 形态。
+    #[test]
+    fn quiet_string_gate_admits_literal_absolute_command() {
+        for (exe, args) in [
+            (r"C:\Program Files\Foo\unins000.exe", "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"),
+            (r"C:\Program Files (x86)\Foo\uninstall.exe", "/S /D=C:\\Program Files\\Foo"),
+            (r"D:\Foo\u.exe", "/S /D=\"C:\\Program Files\\Foo Data\""),
+        ] {
+            assert_eq!(
+                quiet_string_reject_reason(exe, args, &exists_all),
+                None,
+                "合法厂商串被误拒: {exe} {args}"
+            );
+        }
+    }
+
+    /// B1 优先级：厂商静默串存在且过闸 → 用它，不再本地拼参数（BCU silentIfAvailable 的口径）。
+    #[test]
+    fn vendor_quiet_string_wins_over_whitelist() {
+        let original = (
+            r"C:\Program Files\Foo\uninstall.exe".to_string(),
+            "/S".to_string(),
+        );
+        let quiet = r#""C:\Program Files\Foo\unins000.exe" /VERYSILENT /NORESTART"#;
+        let c = pick_silent_candidate("nsis", None, &original, Some(quiet), &exists_all).expect("应有静默候选");
+        assert_eq!(c.source, "vendor", "厂商串过闸后必须优先于白名单派生");
+        assert_eq!(c.exe, r"C:\Program Files\Foo\unins000.exe");
+        assert_eq!(c.args, "/VERYSILENT /NORESTART");
+        assert!(c.vendor_reject.is_none());
+    }
+
+    /// B1 回退：厂商串被拒 → 退回白名单派生并**留下拒绝原因**；两类都不可用 → None（原厂 UI）。
+    #[test]
+    fn rejected_vendor_falls_back_to_whitelist_then_to_original_ui() {
+        let original = (r"C:\Program Files\Foo\unins000.exe".to_string(), String::new());
+        let bad = r"C:\Windows\System32\cmd.exe /c C:\Program Files\Foo\unins000.exe /S";
+        let c = pick_silent_candidate("inno", None, &original, Some(bad), &exists_all).expect("白名单派生要接住");
+        assert_eq!(c.source, "whitelist");
+        assert_eq!(c.args, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART");
+        let reason = c.vendor_reject.expect("必须记录厂商串被拒的原因");
+        assert!(reason.contains("宿主"), "原因要点明是哪一类风险，实测: {reason}");
+
+        // 非白名单类型 + 无可用厂商串 → 不猜静默，交回原厂界面
+        assert!(
+            pick_silent_candidate("unknown", None, &original, None, &exists_all).is_none(),
+            "unknown 类型不得凭空造静默命令"
+        );
+        // MSI 仍按产品码派生（原行为不受 B1 影响）
+        let msi = pick_silent_candidate(
+            "msi",
+            Some("{1D180B6A-C6AE-4D6E-A2A8-000000001001}"),
+            &original,
+            None,
+            &exists_all,
+        )
+        .expect("msi 应产出静默候选");
+        assert_eq!(msi.exe, "msiexec.exe");
+        assert!(msi.args.starts_with("/X{1D180B6A") && msi.args.contains("/qn /norestart"));
+    }
+
+    /// B2 分档：语义与「是否回退原厂界面」成对钉住。
+    /// 用户取消(1602) 与并发安装(1618) **不回退**（2026-09-28 裁定：取消是用户决定，
+    /// 自动重弹界面等于无视取消；1618 的有界重试要真机证据才定）。
+    #[test]
+    fn exit_codes_classified_with_fallback_decision() {
+        let cases = [
+            (0u32, "卸载成功", false),
+            (3010, "卸载成功，需重启完成", false),
+            (1605, "产品未安装（该卸载键已无对应产品）", false),
+            (1602, "用户取消", false),
+            (1618, "另一个安装或卸载正在进行，请稍后再试", false),
+            (1603, "安装器内部错误", true),
+            // 未确认语义的码（含 NSIS 的 1/2）保持原行为：回退原厂界面
+            (1, "其它退出码", true),
+            (2, "其它退出码", true),
+            (1619, "其它退出码", true),
+        ];
+        for (code, meaning, fall_back) in cases {
+            let got = classify_exit(code);
+            assert_eq!(got.0, meaning, "退出码 {code} 的语义文案漂移");
+            assert_eq!(got.1, fall_back, "退出码 {code} 的回退决策应为 {fall_back}");
+        }
+    }
+
+    /// B4 第二证据：只认独有文件名。`uninstall.exe` 太通用，认了就等于把 `/S` 发给
+    /// 未知卸载器 —— 识别可以弱，执行不能猜。
+    #[test]
+    fn second_evidence_only_recognizes_own_names() {
+        let by_name = |want: &'static str| move |p: &Path| {
+            p.file_name().and_then(|n| n.to_str()) == Some(want)
+        };
+        assert_eq!(
+            second_evidence_kind(r"C:\Program Files\Foo", &by_name("unins000.exe")),
+            Some("inno")
+        );
+        assert_eq!(
+            second_evidence_kind(r"C:\Program Files\Foo", &by_name("nsisunins.exe")),
+            Some("nsis")
+        );
+        assert_eq!(
+            second_evidence_kind(r"C:\Program Files\Foo", &by_name("uninstall.exe")),
+            None,
+            "通用名不得被当成 NSIS"
+        );
+        // 输入不可信：空串、无盘符、超长一律不探
+        let exists_all2 = |_: &Path| true;
+        assert!(second_evidence_kind("", &exists_all2).is_none());
+        assert!(second_evidence_kind("Foo\\Bar", &exists_all2).is_none());
+        assert!(second_evidence_kind(&format!("C:\\{}", "a".repeat(300)), &exists_all2).is_none());
+        // 尾随分隔符不能把探测变成目录本身
+        assert_eq!(
+            second_evidence_kind(r"C:\Program Files\Foo\", &by_name("unins000.exe")),
+            Some("inno")
+        );
     }
 }
