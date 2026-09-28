@@ -1893,7 +1893,7 @@
     closeRegBackupModal();
     const ctrl = window.modal.create({
       id: 'regBackupBackdrop',
-      title: '备份还原（清理域）',
+      title: '备份还原（清理域 + 卸载残留）',
       bodyHtml: '<div class="empty-state"><p>正在读取备份列表…</p></div>',
       footerClass: 'pw-footer',
       footerHtml: '<button class="btn btn-secondary" data-role="doneBtn" type="button">关闭</button>'
