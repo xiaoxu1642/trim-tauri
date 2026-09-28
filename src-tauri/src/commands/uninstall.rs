@@ -1013,6 +1013,12 @@ fn norm_name(s: &str) -> String {
 const NAME_MIN_SIMILAR: usize = 5;
 const NAME_MIN_SHORTCUT: usize = 4;
 const NAME_MIN_RULE_WORD: usize = 2;
+/// 所有权链的**精确同名**门槛。2 而不是 5：那条链是 HashMap 精确查表（目录名归一后
+/// 必须等于 owner 名），不是互含猜测，猜错代价与 `NAME_MIN_SIMILAR` 完全不同量级。
+/// 沿用 5 的实际后果是中文产品名全军覆没 —— 「网易大神」4 字、「豆包」2 字、
+/// 「永劫无间」4 字，全部被当成"名字太短"丢掉，档案里有 historical 记录却报
+/// "没有已确认卸载完成的程序"（2026-09-28 真机实测暴露）。
+const NAME_MIN_EXACT: usize = 2;
 /// 名称类命中上限（目录与快捷方式共用）：启发式只是提示，膨胀会把用户判断力淹掉
 const NAME_HIT_CAP: usize = 20;
 /// 系统侧痕反查上限（MuiCache / BAM / 防火墙 / Tracing / JumpList 各自一条）
@@ -2459,14 +2465,14 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
             let mut keys: Vec<String> = Vec::new();
             if let Some(n) = o.get("displayName").and_then(Value::as_str) {
                 let nn = norm_name(n);
-                if nn.chars().count() >= NAME_MIN_SIMILAR {
+                if nn.chars().count() >= NAME_MIN_EXACT {
                     keys.push(nn);
                 }
             }
             if let Some(loc) = o.get("installLocation").and_then(Value::as_str) {
                 if let Some(base) = loc.trim().trim_end_matches(['\\', '/']).rsplit('\\').next() {
                     let bn = norm_name(base);
-                    if bn.chars().count() >= NAME_MIN_SIMILAR {
+                    if bn.chars().count() >= NAME_MIN_EXACT {
                         keys.push(bn);
                     }
                 }
@@ -2489,7 +2495,7 @@ pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) 
                     continue;
                 }
                 let dname = norm_name(&ent.file_name().to_string_lossy());
-                if dname.chars().count() < NAME_MIN_SIMILAR {
+                if dname.chars().count() < NAME_MIN_EXACT {
                     continue;
                 }
                 let Some(owners) = by_name.get(&dname) else { continue };
@@ -2600,7 +2606,7 @@ pub async fn uninstall_orphan_ignore<R: tauri::Runtime>(
 // 与 M4 的所有权链分工不同，两条链共用一个「残留扫描」面板但证据来源不同：
 // - 程序残留（规则库）：知道是哪个程序，按签名规则找它的痕；
 // - 失效残留（本模块）：不要求本机有卸载记录，判据只有一条 ——
-//   **注册表/服务/设备里记着的落点文件已经不存在**（无法启动、零调用）。
+//   注册表里记着的落点文件已经不存在**（程序不在了、键还留着指着一个不存在的东西）。
 // - 应用数据遗留（所有权链）：仍然要「本机确实卸载过它」这条事实，
 //   因为同名目录匹配本身不是证据；档案取不到时这一组自己说明取不到，
 //   不再让整次扫描失败（那是把一条链的缺证据当成三条链的结论）。
@@ -2608,10 +2614,11 @@ pub async fn uninstall_orphan_ignore<R: tauri::Runtime>(
 // 三条硬约束（不随需求变）：
 // 1. 一律 `defaultChecked: false`、置信度封顶 medium —— 落点缺失也可能是
 //    移动盘/网络盘没插、程序被手工搬过位置，这些只有用户知道；
-// 2. 只有注册表类候选给删除出口，且必须过既有 `classify_residue_op`
-//    （快照闸 + A1 禁删面 + 先 export 备份 + 封条）；服务与设备的 kind 故意写成
-//    `service`/`device`，执行链的「未知残留类型」分支天然拒绝它们 ——
-//    展示与变更之间不留第二条通道；
+// 2. 候选必须过既有 `classify_residue_op`（快照闸 + A1 禁删面 + 先 export 备份 + 封条）。
+//    **服务与设备两类已按用户裁定 2026-09-28 摘掉**：判据虽然也成立（二进制文件已丢失 /
+//    设备当前不在场），但删除要提权走 SCM 与 SetupAPI，我们没有这块的实操经验，
+//    误删一个服务或设备实例的代价远高于"多列出两类候选"的收益。要做也得先有
+//    真机样本与回滚路径，不要在这里留半条通道。
 // 3. 「沉睡多久」只展示不参与判定：键的 LastWriteTime 读不到就留空，
 //    拿 0 当"很久没动过"会把读不到伪装成有把握。
 
@@ -2809,91 +2816,6 @@ fn dead_app_paths_findings(
     }
     out
 }
-
-/// 服务候选：`ImagePath` 记着的二进制已不存在 → 无法启动即零调用。
-/// 只展示（`deleteCapable:false`，kind 用 `service`），删服务要提权走 SCM，不在本轮。
-fn dead_service_findings(
-    raws: &[DeadServiceRaw],
-    exists: &dyn Fn(&str) -> bool,
-    windir: &str,
-    now: i64,
-) -> Vec<Value> {
-    let win = windir.trim_end_matches('\\').to_lowercase();
-    let mut out = Vec::new();
-    for r in raws {
-        let Some(p) = dead_landing(&r.image_path) else { continue };
-        // Windows 自己的服务不在「应用卸载相关残留」范围内；它的二进制缺失是系统坏了，
-        // 不是卸载残留，报出来只会把真信号埋进噪音里
-        if !win.is_empty() && p.to_lowercase().starts_with(&win) {
-            continue;
-        }
-        if exists(&p) {
-            continue;
-        }
-        out.push(json!({
-            "kind": "service",
-            "target": r.name.clone(),
-            "reason": format!("服务「{}」的 ImagePath 指向 {}，文件已不存在（无法启动）", r.display, p),
-            "confidence": "medium",
-            "risk": "high",
-            "defaultChecked": false,
-            "origin": "dead",
-            "deadClass": "service",
-            "deleteCapable": false,
-            "testedPaths": [p],
-            "dormantMs": dormant_delta(r.last_write_ms, now),
-        }));
-    }
-    out
-}
-
-/// 设备候选：SetupAPI 判定当前不在场的实例（幽灵设备）。只展示。
-fn dead_device_findings(raws: &[DeadDeviceRaw], total: usize, now: i64) -> Vec<Value> {
-    let mut rows: Vec<Value> = raws
-        .iter()
-        .take(DEAD_DEVICE_CAP)
-        .map(|r| {
-            let label = if r.friendly.trim().is_empty() {
-                r.desc.clone()
-            } else {
-                r.friendly.clone()
-            };
-            json!({
-                "kind": "device",
-                "target": r.id.clone(),
-                "reason": format!("设备「{}」当前不在场（{}）", if label.is_empty() { "未命名设备".to_string() } else { label }, r.class),
-                "confidence": "low",
-                "risk": "high",
-                "defaultChecked": false,
-                "origin": "dead",
-                "deadClass": "device",
-                "deleteCapable": false,
-                "testedPaths": [],
-                "dormantMs": dormant_delta(r.last_write_ms, now),
-            })
-        })
-        .collect();
-    let listed = rows.len();
-    // 说明行按「实际列出多少」说话：采集侧还会因无名字跳过若干台，
-    // 拿上限值当列出数会把「另有 N 台未列出」算错
-    if total > listed {
-        rows.push(json!({
-            "kind": "note",
-            "target": "device-total",
-            "reason": format!("共 {total} 台设备当前不在场，此处列出 {listed} 台（幽灵设备多为历史插拔过的 USB/虚拟网卡，属正常积累，不建议批量处置）"),
-            "confidence": "low",
-            "risk": "low",
-            "defaultChecked": false,
-            "origin": "dead",
-            "deadClass": "device",
-            "deleteCapable": false,
-            "testedPaths": [],
-            "dormantMs": null,
-        }));
-    }
-    rows
-}
-
 /// 沉睡时长（毫秒差）。读不到写入时间就返回 `None`，前端显示「未知」而不是"很久"。
 fn dormant_delta(last_write_ms: Option<i64>, now: i64) -> Value {
     match last_write_ms {
@@ -2902,9 +2824,6 @@ fn dormant_delta(last_write_ms: Option<i64>, now: i64) -> Value {
     }
 }
 
-/// 一次扫描里各组的产出上限：服务与设备是"看一眼"的信息，注册表类才进删除清单
-const DEAD_SERVICE_CAP: usize = 60;
-const DEAD_DEVICE_CAP: usize = 60;
 const DEAD_REG_CAP: usize = 120;
 
 /// 卸载键原始行（枚举与判定分开，判定是纯函数）
@@ -2924,21 +2843,6 @@ struct DeadAppPathRaw {
     key: String,
     path: String,
     value: String,
-    last_write_ms: Option<i64>,
-}
-
-struct DeadServiceRaw {
-    name: String,
-    display: String,
-    image_path: String,
-    last_write_ms: Option<i64>,
-}
-
-struct DeadDeviceRaw {
-    id: String,
-    friendly: String,
-    desc: String,
-    class: String,
     last_write_ms: Option<i64>,
 }
 
@@ -3022,63 +2926,6 @@ unsafe fn collect_dead_app_path_raws() -> Vec<DeadAppPathRaw> {
     out
 }
 
-/// 采集服务登记（注册表侧，不走 SCM：枚举服务不需要提权，读 ImagePath 也不需要）
-unsafe fn collect_dead_service_raws() -> Vec<DeadServiceRaw> {
-    const ROOT: &str = r"SYSTEM\CurrentControlSet\Services";
-    let hive = hive_of("HKLM");
-    let mut out = Vec::new();
-    for name in crate::engine::native::reg_enum_subkeys_pub(hive, ROOT) {
-        let path = format!("{ROOT}\\{name}");
-        let image = crate::engine::native::read_reg_value_text(hive, &path, "ImagePath")
-            .map(|(_, s)| s)
-            .unwrap_or_default();
-        if image.trim().is_empty() {
-            continue; // 文件驱动外的过滤驱动/内置项，没有落点就不判
-        }
-        let display = crate::engine::native::read_reg_value_text(hive, &path, "DisplayName")
-            .map(|(_, s)| s)
-            .unwrap_or_else(|| name.clone());
-        let last_write_ms = crate::engine::native::reg_key_last_write_ms(hive, &path);
-        out.push(DeadServiceRaw {
-            name,
-            display,
-            image_path: image,
-            last_write_ms,
-        });
-    }
-    out
-}
-
-/// 幽灵设备的注册表侧描述（实例 ID 来自 SetupAPI，描述回查 Enum 键，省一次 FFI）
-unsafe fn collect_dead_device_raws(ids: &[String]) -> Vec<DeadDeviceRaw> {
-    const ROOT: &str = r"SYSTEM\CurrentControlSet\Enum";
-    let hive = hive_of("HKLM");
-    let mut out = Vec::new();
-    for id in ids.iter().take(DEAD_DEVICE_CAP * 2) {
-        let path = format!("{ROOT}\\{id}");
-        let rd = |v: &str| {
-            crate::engine::native::read_reg_value_text(hive, &path, v)
-                .map(|(_, s)| s)
-                .unwrap_or_default()
-        };
-        let class = rd("Class");
-        let friendly = rd("FriendlyName");
-        let desc = rd("DeviceDesc");
-        if class.eq_ignore_ascii_case("System") && friendly.is_empty() && desc.is_empty() {
-            continue;
-        }
-        let last_write_ms = crate::engine::native::reg_key_last_write_ms(hive, &path);
-        out.push(DeadDeviceRaw {
-            id: id.clone(),
-            friendly,
-            desc,
-            class: if class.is_empty() { "未知类别".to_string() } else { class },
-            last_write_ms,
-        });
-    }
-    out
-}
-
 /// uninstall:dead-scan — 失效残留扫描（主窗档；不依赖卸载事实，只产候选）
 #[tauri::command]
 pub async fn uninstall_dead_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
@@ -3104,38 +2951,24 @@ pub async fn uninstall_dead_scan<R: tauri::Runtime>(window: WebviewWindow<R>) ->
         ap.sort_by(|a, b| b["dormantMs"].as_i64().cmp(&a["dormantMs"].as_i64()));
         ap.truncate(DEAD_REG_CAP);
 
-        let s_raws = collect_dead_service_raws();
-        let mut svc = dead_service_findings(&s_raws, &exists, &std::env::var("SystemRoot").unwrap_or_default(), now);
-        let svc_total = svc.len();
-        svc.truncate(DEAD_SERVICE_CAP);
-
-        let devices: Vec<Value> = match crate::engine::native::phantom_device_ids() {
-            Ok(ids) => {
-                let raws = collect_dead_device_raws(&ids);
-                dead_device_findings(&raws, ids.len(), now)
-            }
-            Err(e) => {
-                notes.push(format!("设备面本次未判定：{e}"));
-                Vec::new()
-            }
-        };
-
-        let mut findings = Vec::new();
-        findings.extend(u);
-        findings.extend(ap);
-        findings.extend(svc);
-        findings.extend(devices);
-        (findings, notes, svc_total)
+        if a_raws.is_empty() {
+            notes.push("App Paths 清单读取失败（三根都打不开或一条都没有），本组结果不完整".to_string());
+        }
+        // 采集计数单独回传：候选为 0 在干净机器上是合法结果，但「扫过多少条」为 0 一定是
+        // 枚举链断了。真机用例靠这两个数判"扫过但确实没有"还是"根本没扫"。
+        let scanned = json!({ "uninstallKeys": u_raws.len(), "appPathsKeys": a_raws.len() });
+        let findings = u.into_iter().chain(ap).collect::<Vec<_>>();
+        (findings, notes, scanned)
     })
     .await;
     match res {
-        Ok((findings, notes, svc_total)) => {
+        Ok((findings, notes, scanned)) => {
             residue_snapshot_put(&label, "dead", findings.clone());
             json!({ "success": true, "data": {
                 "appName": "失效残留",
                 "findings": findings,
                 "notes": notes,
-                "serviceTotal": svc_total,
+                "scanned": scanned,
             }})
         }
         Err(e) => json!({ "success": false, "message": format!("失效残留扫描异常: {e}") }),
@@ -4331,6 +4164,13 @@ mod residue_trace_tests {
         assert_eq!(NAME_MIN_SIMILAR, 5);
         assert_eq!(NAME_MIN_SHORTCUT, 4);
         assert_eq!(NAME_MIN_RULE_WORD, 2, "2 是规则库短词门槛，与「至少两组条件」的 U-1 口径同源");
+        // 精确同名那一档必须**低于**互含那一档：它是 HashMap 查表，不是猜测，
+        // 沿用 5 会让所有 2-4 字中文产品名从所有权链上消失（2026-09-28 网易大神实测）。
+        assert_eq!(NAME_MIN_EXACT, 2);
+        assert!(
+            NAME_MIN_EXACT < NAME_MIN_SIMILAR,
+            "精确同名的容错应比互含猜测宽，不许被\"顺手统一\"回 5"
+        );
         // 上限收口后各归一类：名称类 20、侧痕反查 20、exe 收集 16（三处不许再写死字面量）
         assert_eq!(NAME_HIT_CAP, 20);
         assert_eq!(SIDE_TRACE_CAP, 20);
@@ -4832,42 +4672,6 @@ mod residue_trace_tests {
         let out3 = dead_uninstall_findings(&[one], &exists, 1_700_000_900_000);
         assert_eq!(out3.len(), 1, "普通键单条落点缺失就该产出: {out3:?}");
         assert_eq!(out3[0]["confidence"], json!("low"), "一条落点不给 medium: {out3:?}");
-    }
-
-    /// 服务与设备只展示：`deleteCapable` 是 UI 承诺，执行链的「未知残留类型」才是真闸门。
-    #[test]
-    fn dead_service_and_device_rows_cannot_reach_the_mutator() {
-        let raws = vec![
-            DeadServiceRaw {
-                name: "AcSvc".to_string(),
-                display: "Acme Service".to_string(),
-                image_path: r"C:\Program Files\Acme\svc.exe".to_string(),
-                last_write_ms: Some(1_700_000_000_000),
-            },
-            DeadServiceRaw {
-                name: "WinSvc".to_string(),
-                display: "Windows Thing".to_string(),
-                image_path: r"C:\Windows\System32\gone.exe".to_string(),
-                last_write_ms: None,
-            },
-        ];
-        let out = dead_service_findings(&raws, &|_| false, r"C:\Windows", 1_700_000_900_000);
-        let names: Vec<&str> = out.iter().map(|f| f["target"].as_str().unwrap_or("")).collect();
-        assert!(names.contains(&"AcSvc"), "第三方服务二进制缺失必须报出: {out:?}");
-        assert!(
-            !names.contains(&"WinSvc"),
-            "Windows 自己的服务不属「应用卸载相关残留」，报出来只会淹掉真信号: {out:?}"
-        );
-        for f in &out {
-            assert_eq!(f["deleteCapable"], json!(false));
-            assert_eq!(f["defaultChecked"], json!(false));
-            // 双保险：即便渲染层硬把这条送去执行，D3 的单一变更入口也判它未知类型
-            match classify_residue_op(f["kind"].as_str().unwrap_or(""), "x") {
-                OpVerdict::Skip(m) => assert!(m.contains("未知残留类型"), "实测: {m}"),
-                OpVerdict::Ready(_) => panic!("服务/设备候选不得进入变更清单"),
-                OpVerdict::Abort(m) => panic!("不该整批拒绝，实测 {m}"),
-            }
-        }
     }
 
     #[test]

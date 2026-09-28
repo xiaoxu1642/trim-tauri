@@ -358,10 +358,9 @@ fn reg_backup_channels_are_main_only() {
     );
 }
 
-/// M6 失效残留扫描是 MAIN 档：它产出的注册表候选会进同一条删除链，
-/// 子窗一律拒杀。正向特征放在下面的 `#[ignore]` 真机用例里（那条会断言 success 与
-/// 四类候选的硬约束）；这里只断"拒杀"，因为命令本体要读注册表三根并枚举设备，
-/// 不属于快速组的零副作用范围。
+/// M6 失效残留扫描是 MAIN 档：它产出的注册表候选会进同一条删除链，子窗一律拒杀。
+/// 正向特征放在下面的 `#[ignore]` 真机用例里（那条断言 success、采集计数与候选硬约束）；
+/// 这里只断"拒杀"，因为命令本体要读注册表三根，不属于快速组的零副作用范围。
 #[test]
 fn dead_scan_channel_is_main_only() {
     for label in sub_windows() {
@@ -515,70 +514,60 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
 //
 // 跑法：cargo test --test module_smoke -- --ignored
 
-/// M6 失效残留扫描（真机 `#[ignore]`）：四类候选都要能产出，且硬约束一条不许破。
+/// M6 失效残留扫描（真机 `#[ignore]`）：注册表两类的采集链要跑通，候选硬约束一条不许破。
 ///
-/// 这条用例的存在理由是「结构收口把功能误杀」和「判定放宽到敢删东西」两个方向都会
-/// 静默出问题：前者表现为注册表类候选为空（禁删面把 Uninstall 例外吃掉了），后者表现为
-/// 出现 `confidence:"high"` 或 `deleteCapable` 与 kind 不匹配的条目。
-/// 计数用 println 打出来，发布前门禁那一步人工过一眼量级是否合理。
+/// 服务与设备两类已按用户裁定 2026-09-28 摘掉（判据成立但删除要提权，我们没有这块实操经验）。
 ///
-/// 如实标注一处空转：本机没有失效卸载项/App Paths（实测 uninstall=0、appPaths=0、
-/// service=2、device=61），所以「不自动勾选」「置信度不 high」这两条在本机只对服务与
-/// 设备行生效；注册表类的同两条断言由 lib 单测非空转地钉住（破坏 defaultChecked 即判红）。
+/// 这条用例**不要求本机产出候选**：原厂卸载器自己把卸载键删干净时，0 条就是正确答案
+/// （网易大神实测就是这样）。它靠 `scanned` 两个计数判"扫过但确实没有"和"根本没扫"——
+/// 只断 findings 为空/非空都会空转：前者把断链读成成功，后者把干净机器读成故障。
+/// 判定本体的正反例在 lib 单测里非空转地钉着。
 #[test]
-#[ignore = "读注册表三根 + SetupAPI 枚举设备（秒级），发布前门禁跑"]
-fn dead_scan_reports_four_classes_under_hard_constraints() {
+#[ignore = "读注册表三根（含 App Paths），发布前门禁跑"]
+fn dead_scan_collects_registry_roots_under_hard_constraints() {
     use trim_tauri_lib::engine::protect;
     let w = main_window();
     let res = invoke(&w, "uninstall_dead_scan", json!({}));
     assert_eq!(res["success"], json!(true), "扫描应成功: {res}");
+    let scanned_uninstall = res["data"]["scanned"]["uninstallKeys"].as_u64().unwrap_or(0);
+    let scanned_paths = res["data"]["scanned"]["appPathsKeys"].as_u64().unwrap_or(0);
+    assert!(
+        scanned_uninstall > 0 && scanned_paths > 0,
+        "采集链断了：卸载键扫到 {scanned_uninstall} 条、App Paths 扫到 {scanned_paths} 条（真机不可能都是 0）"
+    );
     let findings = res["data"]["findings"]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let mut by_class: std::collections::HashMap<String, usize> = Default::default();
     for f in &findings {
-        *by_class
-            .entry(f["deadClass"].as_str().unwrap_or("?").to_string())
-            .or_default() += 1;
         assert_eq!(f["origin"], json!("dead"), "候选必须标 origin=dead: {f}");
+        assert!(
+            matches!(f["deadClass"].as_str(), Some("uninstall") | Some("appPaths")),
+            "本链只剩注册表两类: {f}"
+        );
         assert_eq!(
             f["defaultChecked"],
             json!(false),
-            "失效残留一律不自动勾选（落点缺失也可能是移动盘没插）: {f}"
+            "失效残留一律不自动勾选（落点缺失也可能是移动盘/网络盘没插）: {f}"
         );
         let conf = f["confidence"].as_str().unwrap_or("");
+        assert!(conf == "low" || conf == "medium", "置信度封顶 medium: {f}");
+        assert_eq!(f["kind"], json!("reg_key"), "本链只产注册表候选: {f}");
+        assert_eq!(f["deleteCapable"], json!(true));
+        let t = f["target"].as_str().unwrap_or("");
         assert!(
-            conf == "low" || conf == "medium",
-            "本链置信度封顶 medium，high 会把'没插盘'说成'一定是残留': {f}"
+            protect::reg_target_block_reason(t).is_none(),
+            "可删候选被禁删面挡住 = 结构收口把功能误杀，目标 {t}"
         );
-        let kind = f["kind"].as_str().unwrap_or("");
-        if kind == "reg_key" {
-            let t = f["target"].as_str().unwrap_or("");
-            assert!(
-                protect::reg_target_block_reason(t).is_none(),
-                "可删候选被禁删面挡住 = 收口把功能误杀，目标 {t}"
-            );
-            assert_eq!(f["deleteCapable"], json!(true), "注册表类应给删除出口: {f}");
-        } else {
-            assert_eq!(
-                f["deleteCapable"],
-                json!(false),
-                "服务/设备/说明行只展示，不开删除通道: {f}"
-            );
-        }
+        assert!(
+            f["testedPaths"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+            "每条候选必须写清测过哪些落点，用户才有判断依据: {f}"
+        );
     }
-    let counts: Vec<(&str, usize)> = vec![
-        ("uninstall", *by_class.get("uninstall").unwrap_or(&0)),
-        ("appPaths", *by_class.get("appPaths").unwrap_or(&0)),
-        ("service", *by_class.get("service").unwrap_or(&0)),
-        ("device", *by_class.get("device").unwrap_or(&0)),
-    ];
-    println!("失效残留四类计数: {counts:?} 总计 {}", findings.len());
-    println!("说明行: {:?}", res["data"]["notes"]);
-    assert!(
-        counts.iter().any(|(_, n)| *n > 0),
-        "本机四类候选全空，说明判定或采集链断了（真机上一台用过的 Windows 不可能四类皆空）"
+    println!(
+        "失效残留：扫过 卸载键 {scanned_uninstall} / App Paths {scanned_paths}，产出候选 {} 条，说明 {:?}",
+        findings.len(),
+        res["data"]["notes"]
     );
 }
 

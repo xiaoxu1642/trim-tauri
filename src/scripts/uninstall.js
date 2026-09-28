@@ -315,8 +315,9 @@
   // ==================== 残留扫描（一个入口，三条链） ====================
   // 面板标题统一叫「残留扫描」，内部按证据来源分三组：
   //   程序残留     —— 规则库命中，要有选中或刚卸载的那个程序；
-  //   失效残留     —— 全机扫描，判据只有一条：注册表/服务/设备里记着的落点已不存在，
-  //                   不要求本机有卸载记录（用户拍板 2026-09-28）；
+  //   失效残留     —— 全机扫描，判据只有一条：卸载项/App Paths 里记着的落点文件已不存在，
+  //                   不要求本机有卸载记录（用户拍板 2026-09-28）。服务与设备刻意不扫：
+  //                   判据虽成立，但删除要提权走 SCM/SetupAPI，我们缺这块实操经验；
   //   应用数据遗留 —— 仍要「本机确实卸载过它」这条所有权事实，精确同名目录本身不是证据。
   // 三组共用同一份快照（后端按 origin 分桶存）与同一条执行链，所以先扫哪组都不会让
   // 另一组的勾选项在执行时被快照闸判成"已过期"。
@@ -344,7 +345,7 @@
       groups.push({ title: '程序残留（规则库）', rows: [], hint: ((rApp && rApp.message) || '本组扫描失败') });
     }
     if (rDead && rDead.success) {
-      groups.push({ title: '失效残留 · 全机（记着的落点已不存在）', rows: (rDead.data && rDead.data.findings) || [], byClass: true });
+      groups.push({ title: '失效残留 · 全机（卸载项与 App Paths 记着的落点已不存在）', rows: (rDead.data && rDead.data.findings) || [], byClass: true });
     } else {
       groups.push({ title: '失效残留 · 全机', rows: [], hint: ((rDead && rDead.message) || '本组扫描失败') });
     }
@@ -359,7 +360,7 @@
     findings = groups.reduce((acc, g) => acc.concat(g.rows), []);
     // 勾选初值在渲染前定好：只展示不给删的行永远不该被勾上
     findings.forEach((f) => {
-      f._checked = f.deleteCapable !== false && f.kind !== 'note' && !!f.defaultChecked;
+      f._checked = f.deleteCapable !== false && !!f.defaultChecked;
     });
     document.getElementById('residueTitle').textContent = '残留扫描';
     renderResidue();
@@ -372,20 +373,16 @@
   const DEAD_CLASS_TITLE = {
     uninstall: '失效卸载项（可删该注册表键）',
     appPaths: '失效 App Paths（可删该注册表键）',
-    service: '服务二进制已丢失（仅展示：删服务要提权走 SCM）',
-    device: '当前不在场的设备（仅展示：多为历史插拔过的 USB/虚拟网卡）',
   };
 
   function groupHtml(g) {
     let h = `<div class="finder-group-header" style="margin-top:14px"><span>${esc(g.title)} · ${g.rows.length} 项</span></div>`;
     if (!g.rows.length) return h + `<div class="finder-empty">${esc(g.hint || '本组没有候选。')}</div>`;
     if (g.byClass) {
-      for (const cls of ['uninstall', 'appPaths', 'service', 'device']) {
+      for (const cls of ['uninstall', 'appPaths']) {
         const rows = g.rows.filter((f) => f.deadClass === cls);
         if (rows.length) h += residueTableHtml(DEAD_CLASS_TITLE[cls] || cls, rows);
       }
-      const notes = g.rows.filter((f) => f.kind === 'note');
-      if (notes.length) h += residueTableHtml('说明', notes);
       return h;
     }
     const regs = g.rows.filter((f) => f.kind === 'reg_key' || f.kind === 'reg_value');
@@ -400,10 +397,9 @@
     h += '<table class="finder-table"><thead><tr><th style="width:34px"></th><th>目标</th><th style="width:110px">置信度</th><th style="width:220px">判定原因</th></tr></thead><tbody>';
     for (const f of rows) {
       const i = findings.indexOf(f);
-      const deletable = f.deleteCapable !== false && f.kind !== 'note';
-      const cell = deletable
-        ? `<span class="checkbox ${f._checked ? 'checked' : ''}" data-rcheck="${i}"></span>`
-        : '<span class="finder-name-text" style="opacity:.5" data-tip="本链只登记、不删除">—</span>';
+      const cell = f.deleteCapable === false
+        ? '<span class="finder-name-text" style="opacity:.5" data-tip="本链只登记、不删除">—</span>'
+        : `<span class="checkbox ${f._checked ? 'checked' : ''}" data-rcheck="${i}"></span>`;
       // 应用数据遗留的处置出口：所有权判定可能有误（同名另一款软件、用户自己放的目录），
       // 必须能把某个历史 owner 永久排除，而不是每次扫描都重复看到同一条
       const ignoreBtn = f.origin === 'orphan'
@@ -452,7 +448,7 @@
     if (!t) return;
     // 勾选按 findings 全局下标寻址：面板现在有多组多表，段内序号会跨表串位
     const f = findings[Number(t.dataset.rcheck)];
-    if (!f || f.deleteCapable === false || f.kind === 'note') return;
+    if (!f || f.deleteCapable === false) return;
     f._checked = !f._checked;
     t.classList.toggle('checked', f._checked);
     t.closest('tr').classList.toggle('finder-row-selected', f._checked);
