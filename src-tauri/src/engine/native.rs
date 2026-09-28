@@ -1165,19 +1165,21 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     }
 
     // ---------- 合并 disabled.json ----------
-    let disabled_file = std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
-        .join("Trim").join("startup-backup").join("disabled.json");
-    if let Ok(text) = std::fs::read_to_string(&disabled_file) {
-        if let Ok(records) = serde_json::from_str::<Vec<Value>>(&text) {
-            for r in records {
-                let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
-                if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
-                let mut item = r.clone();
-                if let Some(o) = item.as_object_mut() {
-                    o.insert("enabled".into(), json!(false));
-                    o.insert("disabledBy".into(), json!("trim"));
+    // 与 read_disabled_records 同一取本口径（`startup_ledger_file`）：两处读同一本账，
+    // 一处认新根一处认老根就会出现「列表里有、恢复按钮说没有」
+    if let Some(disabled_file) = startup_ledger_file() {
+        if let Ok(text) = std::fs::read_to_string(&disabled_file) {
+            if let Ok(records) = serde_json::from_str::<Vec<Value>>(&text) {
+                for r in records {
+                    let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
+                    if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
+                    let mut item = r.clone();
+                    if let Some(o) = item.as_object_mut() {
+                        o.insert("enabled".into(), json!(false));
+                        o.insert("disabledBy".into(), json!("trim"));
+                    }
+                    results.push(item);
                 }
-                results.push(item);
             }
         }
     }
@@ -2861,10 +2863,9 @@ pub fn stubborn_block() -> Result<Value, String> {
     }
 
     // 3. 备份并删除计划任务（用 schtasks.exe）
-    let backup_dir = match std::env::var("APPDATA") {
-        Ok(d) => std::path::PathBuf::from(d).join("Trim").join("backup").join("tasks"),
-        Err(_) => std::path::PathBuf::new(),
-    };
+    // v2-M19：导出件是「当时任务长什么样」的凭据，写新根才随便携盘走；老根那份
+    // 只是历史留痕（本函数不再读它，也没有还原入口），因此不进 MIGRATION_DIRS 的必需清单。
+    let backup_dir = crate::engine::paths::backup_write_dir("backup").join("tasks");
     if !backup_dir.as_os_str().is_empty() {
         let _ = std::fs::create_dir_all(&backup_dir);
     }
@@ -3756,8 +3757,39 @@ pub fn paths_scan(rules_json: &str) -> Result<Value, String> {
 // ==================== B5 startup_toggle：启动项启用/禁用 ====================
 
 fn startup_backup_dir() -> std::path::PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Default\AppData\Roaming".into());
-    std::path::PathBuf::from(appdata).join("Trim").join("startup-backup")
+    crate::engine::paths::backup_write_dir("startup-backup")
+}
+
+/// `disabled.json` 的候选（写入那份在前，历史老根那份兜底）。
+fn startup_disabled_file_candidates() -> Vec<std::path::PathBuf> {
+    crate::engine::paths::backup_read_dirs("startup-backup")
+        .into_iter()
+        .map(|d| d.join("disabled.json"))
+        .collect()
+}
+
+/// 在同名台账的多份候选里取**最近修改**的那本（同刻并列时偏向列表第一位=写入根）。
+fn pick_newest_file(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for p in paths {
+        let Ok(md) = p.metadata() else { continue };
+        let Ok(t) = md.modified() else { continue };
+        match &best {
+            // 严格大于才替换：第一位（写入根）在并列时保住优先权
+            Some((bt, _)) if *bt >= t => {}
+            _ => best = Some((t, p.clone())),
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// 当前生效的那本禁用台账。
+///
+/// 为什么按修改时间而不是"新根优先"：收口前所有写入都落老根，而启动迁移只是**按名复制一次**，
+/// 于是老根那份很可能比新根的副本新。新根优先会把用户后来禁用的项从列表里抹掉
+/// （账在老根那本上），而「恢复」按钮读的是同一本账——界面会说没有禁用项，系统里却还禁用着。
+fn startup_ledger_file() -> Option<std::path::PathBuf> {
+    pick_newest_file(&startup_disabled_file_candidates())
 }
 
 fn startup_disabled_file() -> std::path::PathBuf {
@@ -3768,8 +3800,108 @@ fn startup_files_dir() -> std::path::PathBuf {
     startup_backup_dir().join("files")
 }
 
+/// v2-M19 备份根收口的回归位：写入恒新根、读取带老根兜底。
+#[cfg(test)]
+mod backup_root_tests {
+    use super::*;
+
+    #[test]
+    fn startup_ledger_writes_data_root_and_reads_both() {
+        let write = startup_disabled_file();
+        assert!(
+            write.starts_with(crate::engine::paths::app_data_dir()),
+            "禁用台账写回了老根，便携实例的台账带不走: {write:?}"
+        );
+        let cands = startup_disabled_file_candidates();
+        assert_eq!(cands[0], write, "读取候选的第一位必须就是写入那份，否则写完立刻读不到");
+        assert!(cands.len() >= 2, "老根那份历史台账必须还在候选里: {cands:?}");
+        assert!(
+            !startup_deleted_dir().to_string_lossy().contains(r"\Trim\"),
+            "删除备份又拼回 Electron 老根: {:?}",
+            startup_deleted_dir()
+        );
+    }
+
+    /// 台账取本口径：收口前写入全落老根，迁移只是**按名复制一次**，所以老根那份常常更新。
+    /// 按"新根优先"会把用户后来禁用的项从界面里抹掉，而系统里它们仍然禁用着。
+    #[test]
+    fn ledger_takes_the_newest_copy_not_the_new_root() {
+        use std::fs::File;
+        use std::io::Write;
+        use std::time::{Duration, SystemTime};
+        let t = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let root = std::env::temp_dir().join(format!("trim-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("new")).expect("临时目录");
+        std::fs::create_dir_all(root.join("old")).expect("临时目录");
+        let put = |dir: &str, secs: u64| -> std::path::PathBuf {
+            let p = root.join(dir).join("disabled.json");
+            let mut f = File::create(&p).expect("写台账");
+            f.write_all(b"[]").expect("写台账");
+            f.set_modified(t(secs)).expect("设时间");
+            p
+        };
+        let new_copy = put("new", 1_700_000_000);
+        let legacy_copy = put("old", 1_730_000_000);
+        assert_eq!(
+            pick_newest_file(&[new_copy.clone(), legacy_copy.clone()]).as_deref(),
+            Some(legacy_copy.as_path()),
+            "老根那份更新时必须认它，否则界面上看不到用户后来禁用的项"
+        );
+        // 同一时刻并列 → 偏向第一位（写入根），保证"刚写完立刻读"读到自己的写
+        let a = put("new", 1_740_000_000);
+        let b = put("old", 1_740_000_000);
+        assert_eq!(pick_newest_file(&[a.clone(), b]).as_deref(), Some(a.as_path()));
+        // 只剩一份 / 都不存在
+        assert_eq!(pick_newest_file(&[a.clone()]).as_deref(), Some(a.as_path()));
+        assert_eq!(
+            pick_newest_file(&[root.join("nope").join("disabled.json")]),
+            None,
+            "一本都没有就是没有台账，不该回退到某个写死路径"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 两根都要收，且**跨根一起排时间**：只认一根就是 v2-M19 收口后的新病——
+    /// 老根那批更早，新根这批才是"最近一次外设改动"，反过来也一样会挑错。
+    #[test]
+    fn peripheral_backup_scan_spans_both_roots_and_sorts_by_time() {
+        use std::fs::File;
+        use std::io::Write;
+        use std::time::{Duration, SystemTime};
+        let root = std::env::temp_dir().join(format!("trim-periph-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let current = root.join("current");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&current).expect("临时目录");
+        std::fs::create_dir_all(&legacy).expect("临时目录");
+        let put = |dir: &std::path::Path, name: &str, secs: u64| -> std::path::PathBuf {
+            let p = dir.join(name);
+            let mut f = File::create(&p).expect("写分片");
+            f.write_all(b"Windows Registry Editor Version 5.00\r\n").expect("写分片");
+            f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .expect("设时间");
+            p
+        };
+        let older = put(&current, "backup_20260101_000000_1.reg", 1_700_000_000);
+        let newer = put(&legacy, "backup_20260901_000000_1.reg", 1_730_000_000);
+        put(&current, "notes.txt", 1_800_000_000);
+        let got = collect_peripheral_backup_files(&[current.clone(), legacy.clone()]);
+        assert_eq!(got.len(), 2, "两个根都要收且只认 backup_*.reg: {got:?}");
+        assert_eq!(got[0], newer, "跨根必须一起排时间，否则还原挑到旧批次: {got:?}");
+        assert_eq!(got[1], older);
+        assert_eq!(
+            collect_peripheral_backup_files(&[current]).len(),
+            1,
+            "少给一个根就少一批可还原的备份"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// 读「本机被 Trim 禁用的启动项」台账（见 `startup_ledger_file` 的取本口径）。
 fn read_disabled_records() -> Vec<Value> {
-    let f = startup_disabled_file();
+    let Some(f) = startup_ledger_file() else { return Vec::new() };
     if let Ok(content) = std::fs::read_to_string(&f) {
         if let Ok(Value::Array(arr)) = serde_json::from_str(&content) {
             return arr.into_iter().filter(|v| !v.is_null()).collect();
@@ -3782,15 +3914,13 @@ fn write_disabled_records(records: &[Value]) {
     let dir = startup_backup_dir();
     let _ = std::fs::create_dir_all(&dir);
     let f = startup_disabled_file();
-    if records.is_empty() {
-        let _ = std::fs::remove_file(&f);
-    } else {
-            if let Ok(json) = serde_json::to_string_pretty(records) {
-                if let Ok(mut file) = std::fs::File::create(&f) {
-                    use std::io::Write;
-                    let _ = file.write_all(json.as_bytes());
-                }
-            }
+    // 空台账写 `[]` 而不是删文件：删掉后「最近修改的那本」会回到老根那份历史账，
+    // 用户已经启用回来的项会被再次报成「Trim 禁用的」（见 startup_ledger_file）。
+    let payload = if records.is_empty() { Value::Array(Vec::new()) } else { Value::Array(records.to_vec()) };
+    let json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".into());
+    if let Ok(mut file) = std::fs::File::create(&f) {
+        use std::io::Write;
+        let _ = file.write_all(json.as_bytes());
     }
 }
 
@@ -4597,11 +4727,7 @@ unsafe fn toggle_cm_item(
 // ==================== B5 startup_delete：启动项删除 ====================
 
 fn startup_deleted_dir() -> std::path::PathBuf {
-    let dir = if let Ok(appdata) = std::env::var("APPDATA") {
-        std::path::PathBuf::from(appdata).join("Trim").join("startup-backup").join("deleted")
-    } else {
-        crate::engine::paths::app_data_dir().join("startup-backup").join("deleted")
-    };
+    let dir = crate::engine::paths::backup_write_dir("startup-backup").join("deleted");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -5291,12 +5417,8 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
          options.get("mouse").and_then(|v| v.as_i64()).unwrap_or(-1)),
     ];
 
-    // 备份目录
-    let backup_dir = if let Ok(appdata) = std::env::var("APPDATA") {
-        std::path::PathBuf::from(appdata).join("Trim").join("peripheral-backup")
-    } else {
-        return Err("无法获取 APPDATA".into());
-    };
+    // 备份目录（v2-M19：写入恒新根，还原侧按新老两根找最新一批）
+    let backup_dir = crate::engine::paths::backup_write_dir("peripheral-backup");
     std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
     let stamp = crate::engine::now_ms().to_string();
 
@@ -5343,38 +5465,44 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
 }
 // ==================== B9 peripheral_restore：外设优化恢复 ====================
 
-/// 从备份恢复外设设置（对应 peripheral_restore.ps1，S3）
+/// 跨候选根收集外设备份分片（`backup_<stamp>_*.reg`），按修改时间倒序。
 ///
-/// 找 %APPDATA%\Trim\peripheral-backup 中最新一批 backup_<stamp>_*.reg，
-/// 按时间戳分组整组导入（v2-M12：一次 apply 留下多个分片，必须整组还原）。
-/// 返回 ok/reason/restored/total/file。
-pub fn peripheral_restore() -> Result<Value, String> {
-    let backup_dir = if let Ok(appdata) = std::env::var("APPDATA") {
-        std::path::PathBuf::from(appdata).join("Trim").join("peripheral-backup")
-    } else {
-        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": ""}));
-    };
-    if !backup_dir.exists() {
-        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": ""}));
-    }
-
-    // 收集所有 backup_*.reg，按修改时间倒序
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&backup_dir)
-        .map_err(|e| format!("读取备份目录失败: {e}"))?
+/// 单独成函数只为让「新老两根都要收、且一起排时间」这条能被单测钉住：真正的还原要跑
+/// `reg.exe import`，快速组碰不得。只认一根会出现「老根有三月那批、新根有今天那批，
+/// 还原挑错一批」的错账（v2-M19 收口后两根都可能有条目）。
+fn collect_peripheral_backup_files(dirs: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.is_file() && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("backup_") && n.ends_with(".reg")).unwrap_or(false)
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("backup_") && n.ends_with(".reg"))
+                    .unwrap_or(false)
         })
         .collect();
-    if files.is_empty() {
-        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": ""}));
-    }
     files.sort_by(|a, b| {
         let ta = a.metadata().and_then(|m| m.modified()).ok();
         let tb = b.metadata().and_then(|m| m.modified()).ok();
         tb.cmp(&ta)
     });
+    files
+}
+
+/// 从备份恢复外设设置（对应 peripheral_restore.ps1，S3）
+///
+/// 找数据目录（含收口前的老根 `%APPDATA%\Trim\peripheral-backup`）里最新一批
+/// `backup_<stamp>_*.reg`，按时间戳分组整组导入（v2-M12：一次 apply 留下多个分片，必须整组还原）。
+/// 返回 ok/reason/restored/total/file。
+pub fn peripheral_restore() -> Result<Value, String> {
+    let files = collect_peripheral_backup_files(&crate::engine::paths::backup_read_dirs("peripheral-backup"));
+    if files.is_empty() {
+        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": ""}));
+    }
 
     // 按时间戳分组
     let latest_name = files[0].file_name().and_then(|n| n.to_str()).unwrap_or("");

@@ -1221,12 +1221,9 @@ const REG_BACKUP_KEEP_BATCHES: usize = 10;
 /// 四要素固定：目录常量 + 严格文件名白名单（`is_reg_backup_name`）+ 拒 reparse 的普通文件
 /// + 只进回收站（可恢复、且不删目录本身）。同族的 `peripheral.rs::prune_backups` 也是这个姿势。
 fn prune_reg_backups(keep_batches: usize) {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    if !appdata.is_empty() {
-        dirs.push(PathBuf::from(appdata).join("Trim").join(REG_BACKUP_DIR));
-    }
-    dirs.push(paths::app_data_dir().join(REG_BACKUP_DIR));
+    // 两根候选走唯一寻址口（v2-M19）：写侧恒新根（`commands/cleanup.rs`），老根只是
+    // 收口前那批备份的兜底，修剪要覆盖它们否则超额文件永远留在盘上。
+    let dirs = paths::backup_read_dirs(REG_BACKUP_DIR);
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;

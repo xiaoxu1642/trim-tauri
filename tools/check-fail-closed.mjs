@@ -8,6 +8,8 @@
 //      `Err(_) => std::env::temp_dir()`（v3-M2，已修）。
 //   B. `Path::to_str().unwrap()` 在含孤立代理项的非 UTF-8 路径上直接 panic；本项目
 //      口径（AGENTS §5 / I3）是批量操作单项失败要跳过并回传，不是崩溃。
+//   C. 备份/数据根唯一真源（v2-M19）：老根 `%APPDATA%\Trim` 只许在 engine/paths.rs 里
+//      拼出来，别处手拼就意味着便携实例的备份又回到宿主机、两根分叉。
 //
 // 判定粒度是「语句」（向前扩到最近的 ;{}，向后扩到括号深度 0 的分号），而不是
 // 函数级 —— 函数级会误伤 cleanup_temp_scripts 这类「私有 tmp + 遗留 %TEMP% 残留
@@ -149,6 +151,36 @@ check(
   bHits.length === 0,
   'B. 路径转字符串禁用 unwrap()（非 UTF-8 路径会 panic，应跳过并回传失败）',
   bHits.length ? `违规 ${JSON.stringify(bHits)}` : '',
+);
+
+// C. 备份/数据根唯一真源（审查 v2-M19）
+//
+// `%APPDATA%\Trim` 是 Electron 轨的数据根，Tauri 轨的新根由 `engine::paths::app_data_dir()`
+// 决定（便携模式随盘走）。历史上各处自己拼 `.join("Trim")`，于是便携实例的新备份落在宿主
+// 机漫游目录、带不走，标准与便携实例还共写同一批目录。现在写入恒走
+// `paths::backup_write_dir`、读取恒走 `paths::backup_read_dirs`，老根只允许在
+// `engine/paths.rs` 里被拼出来（`legacy_data_dir` / 更早的 CleanTool 兜底）。
+// 这条是源码级棘轮：谁再手拼一次老根，就会在门禁里留下文件名与行号。
+const ROOT_OWNER = 'src-tauri/src/engine/paths.rs';
+const cHits = [];
+for (const f of files) {
+  const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
+  if (rel === ROOT_OWNER) continue;
+  const lines = readFileSync(f, 'utf8').split(/\r?\n/);
+  lines.forEach((line, i) => {
+    if (line.trimStart().startsWith('//')) return;
+    if (!/\.join\(\s*"Trim"\s*\)/.test(line)) return;
+    // 往上再看 3 行：`PathBuf::from(appdata)\n    .join("Trim")` 这种换行拼法也要抓到
+    const window = lines.slice(Math.max(0, i - 3), i + 1).join('\n');
+    // `%TEMP%\Trim` 是 pwsh 遗留清扫槽，与数据根无关（见 pwsh/mod.rs 的清理槽候选）
+    if (/temp_dir\(\)/.test(window)) return;
+    if (/appdata/i.test(window)) cHits.push(`${rel}:${i + 1}`);
+  });
+}
+check(
+  cHits.length === 0,
+  `C. 老根 %APPDATA%\\Trim 只许在 ${ROOT_OWNER} 里拼（备份根唯一真源，v2-M19）`,
+  cHits.length ? `违规 ${JSON.stringify(cHits)}` : '',
 );
 
 console.log('');

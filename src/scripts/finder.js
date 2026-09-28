@@ -849,7 +849,7 @@
            <div style="max-height:340px;overflow:auto;margin-top:10px">
              <table class="finder-table"><thead><tr><th>路径</th><th class="finder-col-size" style="width:90px">大小</th><th style="width:80px">方式</th><th style="width:150px">时间</th></tr></thead><tbody>${rows}</tbody></table>
            </div>`
-        : `<div class="empty-state"><p>暂无删除记录。执行文件删除后会自动记录到 %APPDATA%\\Trim\\fileclean-backup\\。</p></div>`,
+        : `<div class="empty-state"><p>暂无删除记录。执行文件删除后会自动记录到本应用数据目录的 fileclean-backup\\（标准版在 %APPDATA%\\com.xiaoxu.trim，便携版在程序目录的 data 下）。</p></div>`,
       footerHtml: `
         <span class="model-picker-spacer"></span>
         <button class="btn btn-secondary" data-manifest-dir type="button">打开清单目录</button>

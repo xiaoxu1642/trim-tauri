@@ -54,14 +54,20 @@ const MIGRATION_FILES: &[&str] = &[
 /// 不在列：contextmenu 的注册表备份 —— 实测 `ps/cm_backup.ps1` 写的是
 /// `%USERPROFILE%\Desktop\右键菜单备份_<时间戳>`，本来就在桌面、不随数据目录迁移。
 ///
-/// ⚠️ 审查 v2-M19（一处承诺与事实的分叉，先如实记在这里，别再靠猜）：
-/// `startup-backup` / `peripheral-backup` 这几项目前是**一次性搬迁**——写侧仍在 PowerShell 里
-/// 硬编码 `%APPDATA%\Trim\*-backup`（`startup_*.ps1:37`、`peripheral_apply.ps1:19`、
-/// `cleanup_execute.ps1:706`、`memory_stubborn_block.ps1:40`），搬迁完成后新产生的备份依旧落在
-/// 老根，与这份清单**分叉**。读取侧做了「新根 + 老根」双候选（`startup.rs`、`peripheral.rs`、
-/// `pwsh/mod.rs` 的清理清单同口径），所以功能不断；但便携模式下这些备份不在 `data/` 里，
-/// readme 的承诺已按这条改写在"一处例外"里。彻底解法是把备份根由 Rust 算好后经
-/// `@@TRIM_…@@` 占位注入 `.ps1`（与 `@@TRIM_INSTALLER_PATH@@` 同一手法），改哪都只有一处真源。
+/// ⚠️ 审查 v2-M19（备份根分叉，2026-09-29 已收口）：这几处写侧原先硬编码
+/// `%APPDATA%\Trim\*-backup`，于是便携模式下新产生的备份仍落在宿主机漫游目录、带不走，
+/// 标准与便携实例还共写同一批目录。现在写入恒走 `app_data_dir()`，读取保留「新根 + 老根」
+/// 双候选，唯一寻址口是 [`backup_write_dir`] / [`backup_read_dirs`]。
+///
+/// 但**同一本账有两份副本时不能按"新根优先"取**：迁移只是按名复制一次，而收口前所有写入都
+/// 落老根，于是老根那份往往更新。新根优先会把用户后来禁用的启动项从界面里抹掉，而系统里它们
+/// 还禁用着——台账取本口径见 `engine::native::startup_ledger_file`（取最近修改的那本）。
+///
+/// 这条注释原先还把写侧算到 PowerShell 头上（`startup_*.ps1`、`peripheral_apply.ps1`、
+/// `cleanup_execute.ps1:706`、`memory_stubborn_block.ps1:40`）——那是 S3 退役前的旧轨坐标，
+/// 现在 `src-tauri/ps/` 只剩 2 个脚本、`grep -i appdata` 零命中，写侧全在 Rust
+/// （`engine/native.rs` 的启动项与外设备份、`commands/cleanup.rs` 的注册表备份）。
+/// 留着错坐标比不留更坏：下一个人会去改一个不存在的文件。
 const MIGRATION_DIRS: &[&str] = &[
     "backgrounds",
     "fonts",
@@ -116,6 +122,27 @@ pub fn older_legacy_data_dir() -> PathBuf {
 
 pub fn join_data(name: &str) -> PathBuf {
     app_data_dir().join(name)
+}
+
+/// 备份类目录的**写入**根（v2-M19 收口）。
+///
+/// 只允许新根：双写会让两个根长期分叉，出现「还原时看到 A 根、写入落在 B 根」这种
+/// 两边都自认正确的状态。规则库收口（决策清单 D1）用的就是同一条纪律。
+pub fn backup_write_dir(sub: &str) -> PathBuf {
+    app_data_dir().join(sub)
+}
+
+/// 备份类目录的**读取**候选，新根在前、取到即用。
+///
+/// 老根兜底不能删：启动搬迁是一次性「只补不覆盖」，磁盘满、权限异常、或便携盘插过别的
+/// 机器，都可能让新根没有那份备份——而备份是「恢复 / 还原」按钮唯一的依据。
+pub fn backup_read_dirs(sub: &str) -> Vec<PathBuf> {
+    let mut dirs = vec![app_data_dir().join(sub)];
+    let legacy = legacy_data_dir().join(sub);
+    if legacy != dirs[0] {
+        dirs.push(legacy);
+    }
+    dirs
 }
 
 /// 规则库目录收口（2026-09-28 决策清单 D1=A）用的三个入口。
@@ -352,6 +379,32 @@ mod tests {
         for r in &seen {
             assert!(!r.contains("..") && !r.contains(':'), "asset scope 越界：{r}");
         }
+    }
+
+    /// v2-M19 备份根收口的口径：写入恒新根，读取第一位=写入根、后面挂老根兜底。
+    /// 两根在开发/标准形态下必然不同（`com.xiaoxu.trim` vs `Trim`），所以候选是 2 条；
+    /// 断言写成"包含老根"而不是"第二条就是老根"，是为了让以后加第三本历史根（CleanTool）
+    /// 时不必改这条测试。
+    #[test]
+    fn backup_root_writes_new_and_reads_with_legacy_fallback() {
+        let sub = "startup-backup";
+        let write = backup_write_dir(sub);
+        assert_eq!(write, app_data_dir().join(sub), "备份写入必须落当前数据目录");
+        assert!(
+            !write.starts_with(legacy_data_dir()),
+            "写入又回到老根，v2-M19 的分叉就没被收掉：{write:?}"
+        );
+        let dirs = backup_read_dirs(sub);
+        assert_eq!(dirs[0], write, "读取候选的第一位就是写入根");
+        assert!(
+            dirs.iter().any(|d| d.starts_with(legacy_data_dir())),
+            "老根兜底被删：收口前留下的备份将读不到，而它是「恢复」按钮唯一的依据：{dirs:?}"
+        );
+        assert_eq!(
+            dirs.len(),
+            dirs.iter().collect::<std::collections::HashSet<_>>().len(),
+            "候选里有重复根"
+        );
     }
 
     #[test]

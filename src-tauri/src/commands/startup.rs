@@ -251,17 +251,13 @@ pub async fn startup_delete<R: Runtime>(
 
     if !fs_delete.is_empty() {
         log::flush_sync();
-        // 备份目录候选：%APPDATA%\Trim\startup-backup\deleted 与应用数据目录同名路径
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            candidates.push(
-                std::path::PathBuf::from(appdata)
-                    .join("Trim")
-                    .join("startup-backup")
-                    .join("deleted"),
-            );
-        }
-        candidates.push(paths::app_data_dir().join("startup-backup").join("deleted"));
+        // 备份目录候选：新根 `app_data_dir()/startup-backup/deleted` 与收口前的老根同名路径
+        // （v2-M19 起两根都只从 `paths::backup_read_dirs` 出，不再各处自己拼 `%APPDATA%\Trim`）。
+        // 这里是「删除范围白名单」而非写入目标，两根都要在册，否则历史备份删不掉。
+        let candidates: Vec<std::path::PathBuf> = paths::backup_read_dirs("startup-backup")
+            .into_iter()
+            .map(|d| d.join("deleted"))
+            .collect();
 
         let mut manifest: Vec<Value> = Vec::new();
         for fd in &fs_delete {

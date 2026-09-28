@@ -186,11 +186,9 @@ fn normalize_option(raw: Option<Value>) -> Option<i64> {
 
 /// 修剪外设备份目录：backup_YYYYMMDD_HHMMSS.reg 按名倒序保留 keep 份，更旧的进回收站
 fn prune_backups(keep: usize) {
-    let mut dirs = Vec::new();
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        dirs.push(std::path::PathBuf::from(appdata).join("Trim").join("peripheral-backup"));
-    }
-    dirs.push(paths::app_data_dir().join("peripheral-backup"));
+    // 候选根走唯一寻址口（v2-M19）：新根 + 收口前落在老根的那批都要修剪，
+    // 但**写侧**已经只在新根，这里出现两根只是兜底读取的同一份口径。
+    let dirs = paths::backup_read_dirs("peripheral-backup");
 
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
