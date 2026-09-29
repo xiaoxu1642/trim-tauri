@@ -151,5 +151,70 @@ check(
           : '批量入口仍在发空参数对象'
 );
 
+// ---------------------------------------------------------------------------
+// A6 生效粒度侧表（BoosterX §B2）—— 三件事必须同时成立：
+//   ① 表里的 id 都还在数据层目录里（项退役没清表 = 建议挂在空气上）
+//   ② 表的集合与「按步骤触碰位置机械重算」的结果**逐条相等**。档位不是人肉判断
+//      （本机不可能为了标注去真跑 114 项优化），所以它必须是可重算的派生量；
+//      规则只有这一份实现，改规则=改这里，然后重出表。
+//   ③ Rust 与 JS 的档位序表同键同序：前端「整批取最大值只提示一次」靠的就是这张表，
+//      两侧键不一致会让某一档在前端被当成 0（= 静默不提示）。
+// ---------------------------------------------------------------------------
+{
+  const SCOPE_REBOOT_CMD = /\b(fsutil|powercfg|DISM|schtasks|sc config|sc stop|net stop)\b/i;
+  const SCOPE_REBOOT_KEY = /(HKLM|HKEY_LOCAL_MACHINE)\\SYSTEM\\CurrentControlSet\\(Services|Control|FileSystem)/i;
+  const SCOPE_EXPLORER_KEY = /CurrentVersion\\Explorer|Policies\\Explorer|CurrentVersion\\Winlogon|ContextMenuHandlers|Control Panel\\Mouse|(HKCR|HKEY_CLASSES_ROOT)\\/i;
+  const SCOPE_LABELS = ['none', 'explorer', 'reboot'];
+
+  let scopeTbl = null;
+  try {
+    scopeTbl = JSON.parse(R('src-tauri/data/optimizer-scope.json')).scope;
+  } catch (e) {
+    check(false, 'A6 生效粒度侧表 optimizer-scope.json', `读不到或不是合法 JSON：${e.message.slice(0, 60)}`);
+  }
+  if (scopeTbl) {
+    const opts = JSON.parse(dataJson);
+    const known = new Set(opts.map((o) => o.id));
+    const recomputed = new Map();
+    for (const o of opts) {
+      const hay = [...(o.steps || []), ...(o.restore || [])]
+        .map((s) => `${s.cmd || ''} ${s.reg || ''} ${s.service || ''}`)
+        .join(' ; ');
+      let sc = 'none';
+      if (SCOPE_REBOOT_CMD.test(hay) || SCOPE_REBOOT_KEY.test(hay)) sc = 'reboot';
+      else if (SCOPE_EXPLORER_KEY.test(hay)) sc = 'explorer';
+      if (sc !== 'none') recomputed.set(o.id, sc);
+    }
+    const stale = Object.keys(scopeTbl).filter((id) => !known.has(id));
+    const badLabel = Object.entries(scopeTbl).filter(([, v]) => !SCOPE_LABELS.includes(v));
+    const missing = [...recomputed.keys()].filter((id) => scopeTbl[id] !== recomputed.get(id));
+    const extra = Object.keys(scopeTbl).filter((id) => recomputed.get(id) !== scopeTbl[id]);
+    check(
+      stale.length === 0 && badLabel.length === 0 && missing.length === 0 && extra.length === 0,
+      `A6 生效粒度侧表 ⇄ 机械重算（表 ${Object.keys(scopeTbl).length} 条 / 重算 ${recomputed.size} 条）`,
+      stale.length ? `表里有目录中不存在的 id：${stale.slice(0, 6).join(',')}`
+        : badLabel.length ? `非法档位：${badLabel.slice(0, 4).map(([k, v]) => `${k}=${v}`).join(',')}`
+          : missing.length ? `规则判定需要提示但表里没标：${missing.slice(0, 8).join(',')}`
+            : extra.length ? `表里标了规则判不出该档位的项（新增提示面须同时改规则）：${extra.slice(0, 8).join(',')}`
+              : ''
+    );
+
+    // ③ 两侧档位序表同键同序
+    const rustBlock = (rustOpt.match(/const SCOPE_RANK: &\[\(&str, u8\)\] = &\[[^\]]+\]/) || [''])[0];
+    const jsBlock = (jsOpt.match(/const SCOPE_RANK = \{[^}]+\}/) || [''])[0];
+    const rustKeys = [...rustBlock.matchAll(/\("([a-z_]+)",\s*(\d+)\)/g)].map((m) => `${m[1]}:${m[2]}`);
+    const jsKeys = [...jsBlock.matchAll(/\b([a-z_]+)\s*:\s*(\d+)/g)].map((m) => `${m[1]}:${m[2]}`);
+    check(
+      rustKeys.length > 0 && jsKeys.length > 0 && JSON.stringify(rustKeys) === JSON.stringify(jsKeys),
+      `A6b 档位序表 Rust ⇄ JS（${rustKeys.join(' ') || '取不到'}）`,
+      rustKeys.length === 0 ? 'Rust 侧 SCOPE_RANK 表取不到（结构变了要同步改这里的正则）'
+        : jsKeys.length === 0 ? '前端没有 SCOPE_RANK 常量（取最大粒度无处可依）'
+          : JSON.stringify(rustKeys) !== JSON.stringify(jsKeys)
+            ? `两侧档位键或序不一致：Rust [${rustKeys.join(',')}] vs JS [${jsKeys.join(',')}] —— 对不上的那档在前端按 0 处理，等于不提示`
+            : ''
+    );
+  }
+}
+
 console.log(`\n${fail === 0 ? '门禁通过' : `${fail} 项未通过`}`);
 process.exit(fail === 0 ? 0 : 1);

@@ -70,6 +70,65 @@ fn is_retired_id(id: &str) -> bool {
         .any(|i| i["id"].as_str() == Some(id))
 }
 
+// ==================== 生效粒度（applyScope）====================
+//
+// 借鉴 BoosterX §B2：它的顶层不是优化项列表而是「方案」，方案级决定生效时要哪种重启粒度。
+// 本仓 114 项此前**完全没有**这一层 —— `optimizer.rs` 里 grep `重启|reboot|logoff|explorer`
+// 零命中，用户勾完一批只能在各项 desc 的自然语言里自己找「需要重启」。
+//
+// 粒度刻意只留三档：`explorer` 有现成出口（`contextmenu_restart_explorer` 走同一套
+// `cm_restart_explorer` 机制），`reboot` 是用户自己重启。BoosterX 的「重启显卡驱动」档
+// 不抄 —— 它靠 `restart64.exe` 做 PnP 枚举级重启，而那份对标报告 §1 已把具体实现标为【C】
+// 未取到，本仓也没有这个能力；没有执行原语的档位只是把猜测写进用户可见的建议里。
+// 同理不做 `logoff`：没有登出原语，能登出解决的项归到 reboot 提示。
+const SCOPE_JSON: &str = include_str!("../../data/optimizer-scope.json");
+
+/// 档位序：取集合内最大值即整批的粒度（none 被 explorer 盖过，explorer 被 reboot 盖过）
+const SCOPE_RANK: &[(&str, u8)] = &[("none", 0), ("explorer", 1), ("reboot", 2)];
+
+fn scope_rank_of(label: &str) -> u8 {
+    SCOPE_RANK
+        .iter()
+        .find(|(l, _)| *l == label)
+        .map(|(_, r)| *r)
+        .unwrap_or(0)
+}
+
+fn scope_label_of(rank: u8) -> &'static str {
+    SCOPE_RANK
+        .iter()
+        .find(|(_, r)| *r == rank)
+        .map(|(l, _)| *l)
+        .unwrap_or("none")
+}
+
+fn scope_table() -> &'static std::collections::HashMap<String, u8> {
+    static CACHE: OnceLock<std::collections::HashMap<String, u8>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let parsed: Value =
+            serde_json::from_str(SCOPE_JSON).expect("optimizer-scope.json 合法");
+        parsed
+            .get("scope")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), scope_rank_of(v.as_str().unwrap_or("none"))))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// 单项粒度；表里没有的按 none（= 不提示，与本轮之前的行为一致，漏标不会误报）
+///
+/// 「整批取最大粒度」刻意不在 Rust 侧：`optimizer_run` 一次只接一个 `option_id`，批次是
+/// 前端逐条循环执行的，聚合与文案都落在 `optimizer.js`；Rust 只把每行的 `applyScope` 透出去。
+/// 档位序与前端一致（`none` < `explorer` < `reboot`），这条一致性由
+/// `tools/check-optimizer-dynamic.mjs` 对拍两侧表钉住。
+fn apply_scope(option_id: &str) -> &'static str {
+    scope_label_of(scope_table().get(option_id).copied().unwrap_or(0))
+}
+
 /// 本机确有备份的退役项。备份结构异常或 `values` 为空的条目按「没有备份」处理——
 /// 列出来只会给用户一个点了不会成功的按钮。
 fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
@@ -573,12 +632,29 @@ fn check_optimized(ids: &[String]) -> std::collections::HashMap<String, bool> {
 // ==================== IPC ====================
 
 /// optimizer:list —— 完整选项目录（含 steps/restore）
+///
+/// 每行补一个 `applyScope`（生效粒度），值来自 [`SCOPE_JSON`] 侧表而非数据层本身 ——
+/// `optimizer-runtime.json` 与上游基线是逐字段对拍的双源文件，加字段必判红。
+/// 前端在「执行所选优化」的批次结束时按各行取最大粒度，**只提示一次**重启建议。
 #[tauri::command]
 pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    json!({ "success": true, "data": options().as_slice() })
+    let rows: Vec<Value> = options()
+        .iter()
+        .map(|o| {
+            let mut row = o.clone();
+            if let Some(map) = row.as_object_mut() {
+                map.insert(
+                    "applyScope".into(),
+                    json!(apply_scope(o.get("id").and_then(Value::as_str).unwrap_or(""))),
+                );
+            }
+            row
+        })
+        .collect();
+    json!({ "success": true, "data": rows })
 }
 
 /// optimizer:svc-mem-current —— 当前 SVCHost 拆分阈值档位
@@ -2459,6 +2535,33 @@ mod tests {
             insert_backup_baseline(&mut broken, "x", factory),
             BackupInsert::MapNotObject
         ));
+    }
+
+    /// 生效粒度表的三条底线：表里的 id 必须都还在目录里（退役项要清表，否则提示挂在空气上）、
+    /// 表里的标签必须是合法档位、目录里的项缺键按 none。
+    /// `tools/check-optimizer-dynamic.mjs` 还会用同一条机械规则重算并要求标签与之一致 ——
+    /// 档位是**派生判定**而不是逐条实测（本机不能为了标注真跑 114 项优化），所以必须可复核。
+    #[test]
+    fn apply_scope_table_is_consistent_with_catalog() {
+        let parsed: Value = serde_json::from_str(SCOPE_JSON).expect("optimizer-scope.json 合法");
+        let map = parsed.get("scope").and_then(Value::as_object).expect("scope 段必须是对象");
+        assert!(!map.is_empty(), "侧表为空 ⇒ 整批重启建议永远不出现，等于没接");
+
+        let known: std::collections::HashSet<String> =
+            options().iter().filter_map(|o| o.get("id").and_then(Value::as_str).map(String::from)).collect();
+        let valid: std::collections::HashSet<&str> = ["none", "explorer", "reboot"].into_iter().collect();
+        for (id, label) in map {
+            assert!(known.contains(id), "表里的 {id} 已不在优化目录（退役没清表）");
+            let l = label.as_str().unwrap_or("");
+            assert!(valid.contains(l), "{id} 的档位 {l:?} 不是合法标签");
+            // 表里既然不含 none，每条都该产生真提示；标签映射丢了会静默变成「不提示」
+            assert!(scope_rank_of(l) > 0, "{l:?} 被映射成 none ⇒ 这条标注在界面上不存在");
+            assert_eq!(apply_scope(id), l, "表里的 {l:?} 没能原样透传到 apply_scope");
+        }
+        // 刻意不认的档位（display-driver / logoff 没有执行原语）必须降为 none，
+        // 不能因为表里误写就冒出一条界面做不到的建议
+        assert_eq!(scope_rank_of("display-driver"), 0);
+        assert_eq!(apply_scope("id_不在表里"), "none");
     }
 
     /// v2-K3：闸门必须覆盖数据层自认 high 的**每一项**，而不是只覆盖手写清单登记的那几项。

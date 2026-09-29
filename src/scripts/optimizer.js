@@ -944,6 +944,23 @@
 
   // ==================== 执行 & AI ====================
   let OPTIONS = [];
+
+  // ==================== 生效粒度（applyScope，BoosterX §B2）====================
+  // 档位序与 Rust 侧 SCOPE_RANK 同表（commands/optimizer.rs），两侧一致性由
+  // tools/check-optimizer-dynamic.mjs 对拍；display-driver / logoff 刻意不存在 ——
+  // 本应用没有重启显卡驱动与登出的执行原语，给一个做不到的档位等于把猜测写进建议。
+  const SCOPE_RANK = { none: 0, explorer: 1, reboot: 2 };
+
+  function scopeAdviceText(rank, count) {
+    if (rank >= SCOPE_RANK.reboot) {
+      return `本批有 ${count} 项需要重启电脑才完全生效，重启前部分改动可能看不出来`;
+    }
+    if (rank >= SCOPE_RANK.explorer) {
+      return `本批有 ${count} 项建议重启资源管理器后生效（右键菜单页可一键重启），未重启前界面可能不变`;
+    }
+    return '';
+  }
+
   function getOptionTitle(id) {
     const o = OPTIONS.find(x => x.id === id);
     return o ? o.title : id;
@@ -1237,6 +1254,10 @@
     if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '执行中…'; }
     let okCount = 0, failCount = 0;
     const failedNames = [];
+    // BoosterX §B2：整批只给**一次**生效建议，取成功项里最粗的档位。
+    // 逐项提示会把用户推向「每改一项重启一次」；档位由后端侧表算好透在每行的 applyScope 上
+    // （data/optimizer-scope.json，判定规则与档位序两侧同表，由 check-optimizer-dynamic 对拍）。
+    let batchScope = 0, batchScopeCount = 0;
     for (let i = 0; i < batch.length; i++) {
       const opt = batch[i];
       // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
@@ -1247,6 +1268,9 @@
         const succeeded = await runOptionActive(batchParams(opt), opt);
         if (succeeded) {
           okCount++;
+          const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
+          if (rank > batchScope) { batchScope = rank; batchScopeCount = 1; }
+          else if (rank === batchScope && rank > 0) batchScopeCount++;
         }
         else { failCount++; failedNames.push(opt.title); }
       } catch (e) {
@@ -1264,6 +1288,11 @@
       `执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
       (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
     );
+    // 整批只提示一次生效粒度，且排在「执行完成」之后 —— 用户先要知道做没做成，再要知道要不要重启
+    if (batchScope > 0 && batchScopeCount > 0) {
+      window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
+      window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
+    }
   }
 
   // ==================== 一键全选当前页并依次执行 ====================
@@ -1328,6 +1357,7 @@
     if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '批量执行中…'; }
     let okCount = 0, failCount = 0;
     const failedNames = [];
+    let batchScope = 0, batchScopeCount = 0;
     for (let i = 0; i < batch.length; i++) {
       const opt = batch[i];
       // 审查 2026-09-27 M8：同 runSelected——提权中断时据此恢复剩余批次
@@ -1339,6 +1369,9 @@
           opt.id === 'tf_svc_bulk' ? { includeStore: batchIncludeStore } : batchParams(opt), opt);
         if (succeeded) {
           okCount++;
+          const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
+          if (rank > batchScope) { batchScope = rank; batchScopeCount = 1; }
+          else if (rank === batchScope && rank > 0) batchScopeCount++;
         }
         else { failCount++; failedNames.push(opt.title); }
       } catch (e) {
@@ -1357,6 +1390,11 @@
       `批量执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
       (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
     );
+    // 与 runSelected 同一口径：两条批量入口都只提示一次，漏一条会让「一键全选」比手勾更没有提示
+    if (batchScope > 0 && batchScopeCount > 0) {
+      window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
+      window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
+    }
   }
 
   // ==================== 初始化 ====================
