@@ -422,7 +422,8 @@
       an.cache.set(key, {
         summary: items.find(r => r.kind === 'summary') || null,
         dirs: items.filter(r => r.kind === 'dir'),
-        exts: items.filter(r => r.kind === 'ext')
+        exts: items.filter(r => r.kind === 'ext'),
+        times: items.filter(r => r.kind === 'time')
       });
       stopFakeProgress(cfg);
       setProgress(cfg, 100, '分析完成');
@@ -533,6 +534,136 @@
     </div>`;
   }
 
+  // ── M6 时间维度 ────────────────────────────────────────────────────
+  // 6 桶由后端固定顺序发全（含 0 桶），前端按下标取标签即可，缺行会当场露出来。
+  const AN_TIME_ORDER = ['七天内', '三十天内', '九十天以内', '一年内', '更早', '时间未知'];
+
+  function renderAnTime(layer) {
+    const box = document.getElementById('anTimeSection');
+    if (!box) return;
+    const rows = (layer && layer.times) || [];
+    const total = rows.reduce((a, r) => a + Number(r.size || 0), 0);
+    if (!rows.length || total <= 0) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    // 守恒自查：后端承诺「各桶相加 = 本层总量」，对不上就是聚合口径破了，
+    // 这里不静默吞掉——直接把差值说出来，否则 UI 会拿着错数画出一条看着很合理的条
+    const sm = layer.summary;
+    if (sm && Number(sm.size) > 0 && Math.abs(total - Number(sm.size)) > Math.max(1, Number(sm.size) * 0.001)) {
+      box.style.display = 'flex';
+      box.innerHTML = `<div style="font-size:12px;opacity:.8">时间构成数据不一致（各桶合计 ${esc(formatSize(total))}，本层总量 ${esc(formatSize(Number(sm.size)))}），已隐藏该视图。</div>`;
+      return;
+    }
+    const segs = rows.map((r, i) => {
+      const pct = Math.round(Number(r.size) * 100 / total);
+      return pct > 0 ? `<div style="width:${pct}%;background:${AN_EXT_COLORS[i] || 'var(--fg-tertiary)'}"></div>` : '';
+    }).join('');
+    const legend = rows.map((r, i) => {
+      const sz = Number(r.size || 0);
+      if (sz <= 0) return '';
+      const pct = Math.round(sz * 100 / total);
+      const label = r.label || AN_TIME_ORDER[i] || '未知';
+      return `<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${AN_EXT_COLORS[i] || 'var(--fg-tertiary)'};margin-right:4px"></span>${esc(label)} ${pct}% · ${esc(formatSize(sz))}</span>`;
+    }).join('');
+    box.style.display = 'flex';
+    box.innerHTML = `<div style="flex:1;min-width:0">
+      <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层时间构成（按文件最后修改时间；回答"这些空间是什么时候留下的"）</div>
+      <div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${segs}</div>
+      <div style="display:flex;gap:14px;margin-top:6px;font-size:12px;flex-wrap:wrap;opacity:.85">${legend}</div>
+    </div>`;
+  }
+
+  // ── M6 Treemap ─────────────────────────────────────────────────────
+  // squarified 布局（Bruls/Hijma/van Wijk）：沿**短边**开一条，贪心地往里塞下一项，
+  // 一旦最坏长宽比变差就换条。写成纯函数是为了能拿脚本核算面积、边界与重叠 ——
+  // 本项目不用 CDP，窗口渲染验不了，但这些数学性质可以静默验。
+  function anTreemapLayout(items, width, height) {
+    const out = [];
+    const vals = (items || []).filter((r) => Number(r.size) > 0);
+    if (!vals.length || !(width > 0) || !(height > 0)) return out;
+    const totalArea = width * height;
+    const sum = vals.reduce((a, r) => a + Number(r.size), 0) || 1;
+    let nodes = vals.map((r) => ({ item: r, area: (Number(r.size) / sum) * totalArea }));
+    let x = 0, y = 0, w = width, h = height;
+    let row = [];
+    const worstRatio = (list, side) => {
+      if (!list.length || side <= 0) return Infinity;
+      const s = list.reduce((a, n) => a + n.area, 0);
+      let min = Infinity, max = 0;
+      for (const n of list) { if (n.area < min) min = n.area; if (n.area > max) max = n.area; }
+      return Math.max((side * side * max) / (s * s), (s * s) / (side * side * min));
+    };
+    // 开一条：w >= h 时条是**竖的**（宽 = 厚度，格子沿 y 叠），否则横的（高 = 厚度，沿 x 排）。
+    // 写反这两个轴向，面积仍然对但格子会越界并互相压住 —— 所以它们和被单列进校验脚本。
+    const flushRow = () => {
+      const s = row.reduce((a, n) => a + n.area, 0);
+      const side = Math.min(w, h);
+      if (s <= 0 || side <= 0) { row = []; return; }
+      const thick = s / side;
+      let cursor = 0;
+      if (w >= h) {
+        for (const n of row) {
+          const len = n.area / thick;
+          out.push({ item: n.item, x, y: y + cursor, w: thick, h: len });
+          cursor += len;
+        }
+        x += thick; w -= thick;
+      } else {
+        for (const n of row) {
+          const len = n.area / thick;
+          out.push({ item: n.item, x: x + cursor, y, w: len, h: thick });
+          cursor += len;
+        }
+        y += thick; h -= thick;
+      }
+      row = [];
+    };
+    while (nodes.length) {
+      const side = Math.min(w, h);
+      if (side <= 0) break;
+      const next = nodes[0];
+      const candidate = row.concat([next]);
+      // 条为空时必须收下一个（否则超大项会让循环永不推进）
+      if (!row.length || worstRatio(candidate, side) <= worstRatio(row, side)) {
+        row = candidate; nodes = nodes.slice(1);
+      } else {
+        flushRow();
+      }
+    }
+    if (row.length) flushRow();
+    return out;
+  }
+
+  function renderAnTreemap(layer) {
+    const box = document.getElementById('anTreemapSection');
+    if (!box) return;
+    const dirs = (layer && layer.dirs) || [];
+    if (dirs.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; } // 单项画了没信息量
+    const shown = dirs.slice(0, 24); // 上限：再多格子小到无法点，也只是噪声
+    const cells = anTreemapLayout(shown, 100, 46); // 逻辑坐标系（百分比 × 高度 px 由 CSS 换算）
+    let html = `<div style="flex:1;min-width:0">
+      <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层 Treemap（最大 ${shown.length} 个子目录，格子面积 = 占比，点击下钻）</div>
+      <div style="position:relative;height:230px;border-radius:var(--radius-medium);overflow:hidden">`;
+    cells.forEach((c) => {
+      const name = nameOf(c.item.path);
+      const pct = (c.w * c.h) / (100 * 46) * 100;
+      // 只有放得下才写字：小格子标名会溢出成一片糊，不如留白 + data-tip
+      const label = (c.w > 11 && c.h > 8) ? esc(name) : '';
+      const sub = (c.w > 11 && c.h > 15) ? `<div style="font-size:11px;opacity:.75">${esc(formatSize(Number(c.item.size)))}</div>` : '';
+      html += `<div data-an-drill="${esc(c.item.path)}" data-tip="${esc(c.item.path)} · ${esc(formatSize(Number(c.item.size)))} · ${pct.toFixed(1)}%"
+        style="position:absolute;left:${c.x}%;top:${(c.y / 46 * 100)}%;width:${c.w}%;height:${(c.h / 46 * 100)}%;
+        background:var(--accent-soft);border:1px solid var(--border-subtle);border-radius:var(--radius-small);
+        padding:4px 6px;box-sizing:border-box;overflow:hidden;cursor:pointer;
+        font-size:12px;line-height:1.25;color:var(--fg-primary)">
+        <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</div>${sub}</div>`;
+    });
+    html += '</div>';
+    if (dirs.length > shown.length) {
+      html += `<div style="font-size:12px;opacity:.6;margin-top:6px">Treemap 只铺最大的 ${shown.length} 个（本层共 ${dirs.length} 个非空子目录），其余见下方列表</div>`;
+    }
+    html += '</div>';
+    box.style.display = 'flex';
+    box.innerHTML = html;
+  }
+
   function renderAnBreadcrumb() {
     const box = document.getElementById('anBreadcrumb');
     if (!box) return;
@@ -555,12 +686,16 @@
     const cntEl = document.getElementById('anCounts');
     const elapEl = document.getElementById('anElapsed');
     const extBox = document.getElementById('anExtSection');
+    const timeBox = document.getElementById('anTimeSection');
+    const tmBox = document.getElementById('anTreemapSection');
     if (!layer) {
       el.innerHTML = '<div class="finder-empty">尚未分析。请选择磁盘后点击「开始分析」，或点击「AppData 直达」</div>';
       if (sumEl) sumEl.textContent = '—';
       if (cntEl) cntEl.textContent = '—';
       if (elapEl) elapEl.textContent = '—';
       if (extBox) extBox.style.display = 'none';
+      if (timeBox) timeBox.style.display = 'none';
+      if (tmBox) tmBox.style.display = 'none';
       return;
     }
     const sm = layer.summary;
@@ -568,6 +703,8 @@
     if (cntEl) cntEl.textContent = sm ? `${Number(sm.dirCount).toLocaleString()} / ${Number(sm.fileCount).toLocaleString()}` : '—';
     if (elapEl) elapEl.textContent = sm ? `${(Number(sm.elapsedMs) / 1000).toFixed(1)} s` : '—';
     renderAnExt(layer);
+    renderAnTime(layer);
+    renderAnTreemap(layer);
     if (!layer.dirs.length) {
       el.innerHTML = '<div class="finder-empty">该层没有非空子目录</div>';
       return;

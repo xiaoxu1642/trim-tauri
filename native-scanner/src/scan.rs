@@ -330,8 +330,9 @@ fn analyze_ext_key(name: &str) -> String {
 /// du 原语带计数与扩展名聚合。与 dir_size 同口径：跳过 symlink、联接点不深入；
 /// 大小用 DirEntry.metadata 复用（不额外 syscall）。exts 键数上限 64——巨型目录
 /// 的扩展名种类可能上万，聚合表只保留先到的前 64 键（Top-N 语义近似，够「看大头」）。
-fn analyze_dir_deep(dir: &Path, exts: &mut std::collections::HashMap<String, u64>) -> (u64, u64, u64) {
+fn analyze_dir_deep(dir: &Path, exts: &mut std::collections::HashMap<String, u64>, times: &mut [u64; TIME_BUCKETS]) -> (u64, u64, u64) {
     let (mut total, mut dirs, mut files) = (0u64, 0u64, 0u64);
+    let now = now_millis();
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let rd = match fs::read_dir(&d) {
@@ -346,9 +347,17 @@ fn analyze_dir_deep(dir: &Path, exts: &mut std::collections::HashMap<String, u64
                     stack.push(ent.path());
                 }
                 Ok(t) if t.is_file() => {
-                    let sz = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                    let meta = ent.metadata();
+                    let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                     total += sz;
                     files += 1;
+                    // M6 时间维度：取不到 mtime 也要落桶，否则「各桶相加 = 总量」不成立
+                    // meta.as_ref() 是 Result<&Metadata,&Error>：先 .ok() 再 and_then，
+                    // 否则拿到的是 Result<Option<SystemTime>,&Error>，没有 flatten 可用
+                    let mtime = meta.as_ref().ok().and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64);
+                    times[analyze_time_bucket(mtime, now)] += sz;
                     if let Some(name) = ent.file_name().to_str() {
                         let key = analyze_ext_key(name);
                         if exts.len() < 64 || exts.contains_key(&key) {
@@ -363,10 +372,46 @@ fn analyze_dir_deep(dir: &Path, exts: &mut std::collections::HashMap<String, u64
     (total, dirs, files)
 }
 
+/// 时间聚合的桶数（0..=4 按年龄，5 = 取不到 mtime）。
+pub const TIME_BUCKETS: usize = 6;
+
+/// 桶名（渲染层直接用，避免中英两边各维护一份表）。
+pub const TIME_BUCKET_LABELS: [&str; TIME_BUCKETS] = [
+    "七天内", "三十天内", "九十天以内", "一年内", "更早", "时间未知",
+];
+
+/// 把一份文件的字节按**最后修改时间**归进某一桶。
+///
+/// 为什么按「桶序号 → 字节」聚合而不是直接输出日期：分析器的时间维度回答的是
+/// "这些空间是什么时候留下的"，5 条横条就够；而 `now` 由调用方传入，边界
+/// （正好 7 天算哪一桶、时钟回拨、mtime 在将来）才能用单测钉住 —— 这类口径真机测不出来。
+/// 取不到 mtime 单独成桶，是为了让「各桶相加 = 总量」这条不变量在任何输入下都成立。
+pub fn analyze_time_bucket(mtime_ms: Option<u64>, now_ms: u64) -> usize {
+    let Some(m) = mtime_ms else { return TIME_BUCKETS - 1 };
+    // 时钟回拨 / mtime 在未来：按"刚改过"处理，不给负数
+    let age = now_ms.saturating_sub(m);
+    const DAY: u64 = 86_400_000;
+    match age {
+        a if a <= 7 * DAY => 0,
+        a if a <= 30 * DAY => 1,
+        a if a <= 90 * DAY => 2,
+        a if a <= 365 * DAY => 3,
+        _ => 4,
+    }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 磁盘分析一层。输出（type=analyzer，extra 字段均为字符串，前端 Number() 转换）：
-///   kind=summary：path/size(=子树总字节)/dirCount/fileCount/elapsedMs
+///   kind=summary：path/size(=子树总字节)/dirCount/fileCount/elapsedMs/childrenTruncated
 ///   kind=dir    ：一级子目录，size=子树字节，降序（快照槽按此登记 kind=dir 供删除复用）
 ///   kind=ext    ：扩展名聚合，ext=键名，降序 ≤16 条
+///   kind=time   ：按最后修改时间的 6 桶聚合，bucket/label 见 `TIME_BUCKET_LABELS`（M6）
 pub fn analyze(paths: &[String], sink: &dyn Sink) {
     for p in paths {
         let root = Path::new(p);
@@ -381,14 +426,23 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
         let mut subdirs: Vec<PathBuf> = Vec::new();
         let (mut top_total, mut top_files) = (0u64, 0u64);
         let mut exts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut times = [0u64; TIME_BUCKETS];
+        let now = now_millis();
         for ent in rd.flatten() {
             match ent.file_type() {
                 Ok(t) if t.is_symlink() => continue,
                 Ok(t) if t.is_dir() && !is_reparse(&ent) => subdirs.push(ent.path()),
                 Ok(t) if t.is_file() => {
-                    let sz = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                    let meta = ent.metadata();
+                    let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                     top_total += sz;
                     top_files += 1;
+                    // meta.as_ref() 是 Result<&Metadata,&Error>：先 .ok() 再 and_then，
+                    // 否则拿到的是 Result<Option<SystemTime>,&Error>，没有 flatten 可用
+                    let mtime = meta.as_ref().ok().and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64);
+                    times[analyze_time_bucket(mtime, now)] += sz;
                     if let Some(name) = ent.file_name().to_str() {
                         let key = analyze_ext_key(name);
                         if exts.len() < 64 || exts.contains_key(&key) {
@@ -399,20 +453,24 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
                 _ => {}
             }
         }
-        // 每个子目录整树 du + 子树 ext 聚合（rayon 并行，child_dir_sizes 同款通道）
-        let results: Vec<(PathBuf, u64, u64, u64, Vec<(String, u64)>)> = subdirs
+        // 每个子目录整树 du + 子树 ext / 时间聚合（rayon 并行，child_dir_sizes 同款通道）
+        let results: Vec<(PathBuf, u64, u64, u64, Vec<(String, u64)>, [u64; TIME_BUCKETS])> = subdirs
             .par_iter()
             .map(|d| {
                 let mut m: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-                let (sz, dc, fc) = analyze_dir_deep(d, &mut m);
-                (d.clone(), sz, dc, fc, m.into_iter().collect())
+                let mut t = [0u64; TIME_BUCKETS];
+                let (sz, dc, fc) = analyze_dir_deep(d, &mut m, &mut t);
+                (d.clone(), sz, dc, fc, m.into_iter().collect(), t)
             })
             .collect();
         let (mut total, mut dir_count, mut file_count) = (top_total, subdirs.len() as u64, top_files);
-        for (_d, sz, dc, fc, m) in &results {
+        for (_d, sz, dc, fc, m, t) in &results {
             total += sz;
             dir_count += dc;
             file_count += fc;
+            for (i, v) in t.iter().enumerate() {
+                times[i] += v;
+            }
             for (k, v) in m {
                 if exts.len() < 64 || exts.contains_key(k) {
                     *exts.entry(k.clone()).or_insert(0) += v;
@@ -421,7 +479,7 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
         }
         let mut children: Vec<(PathBuf, u64)> = results
             .iter()
-            .map(|(d, sz, _, _, _)| (d.clone(), *sz))
+            .map(|(d, sz, _, _, _, _)| (d.clone(), *sz))
             .filter(|(_, sz)| *sz >= 1)
             .collect();
         children.sort_by(|a, b| b.1.cmp(&a.1));
@@ -446,6 +504,15 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
         ext_list.truncate(16);
         for (name, sz) in ext_list {
             item(sink, "analyzer", root, sz, &[("kind", "ext".to_string()), ("ext", name)]);
+        }
+        // M6 时间维度：6 桶全发（含 0 字节桶），渲染层因此可以无条件按下标取标签，
+        // 也才能当场校验「各桶相加 = 总量」。
+        for (i, label) in TIME_BUCKET_LABELS.iter().enumerate() {
+            item(sink, "analyzer", root, times[i], &[
+                ("kind", "time".to_string()),
+                ("bucket", i.to_string()),
+                ("label", (*label).to_string()),
+            ]);
         }
         progress(sink, 100);
     }
@@ -1627,6 +1694,95 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    /// M6 验收①：一层分析的**总量守恒**。四个口径必须对得上同一个数：
+    /// summary 的总量 = 各时间桶之和 = 各扩展名之和 = 顶层文件 + 各一级子目录递归之和。
+    /// 对不上就意味着"分析器告诉用户的空间分布"是编的 —— 这条用临时目录造已知尺寸的文件钉住。
+    #[test]
+    fn 分析器时间聚合与总量守恒() {
+        use std::io::Write;
+        let day: u64 = 86_400_000;
+        let root = std::env::temp_dir().join(format!(
+            "trim-analyze-keep-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let now = now_millis();
+        // (相对名, 字节数, 距今多少天)
+        let plan = [("a.txt", 100u64, 0u64), ("b.bin", 200, 40), ("sub/c.txt", 300, 200)];
+        for (name, size, age_days) in plan {
+            let p = root.join(name);
+            let mut f = fs::File::create(&p).unwrap();
+            f.write_all(&vec![b'x'; size as usize]).unwrap();
+            drop(f);
+            let mtime = std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(now.saturating_sub(age_days * day));
+            fs::File::options().append(true).open(&p).unwrap().set_modified(mtime).unwrap();
+        }
+
+        #[derive(Default)]
+        struct Cap(Mutex<Vec<String>>);
+        impl Sink for Cap {
+            fn item(&self, _p: &Path, line: &str) {
+                self.0.lock().unwrap().push(line.to_string());
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        let sink = Cap::default();
+        analyze(&[root.to_string_lossy().to_string()], &sink);
+        let lines = sink.0.lock().unwrap().clone();
+
+        let field = |line: &str, key: &str| -> Option<String> {
+            let pat = format!("\"{key}\":\"");
+            let i = line.find(&pat)? + pat.len();
+            let j = i + line[i..].find('"')?;
+            Some(line[i..j].to_string())
+        };
+        let num = |line: &str, key: &str| -> Option<u64> {
+            let pat = format!("\"{key}\":");
+            let i = line.find(&pat)? + pat.len();
+            let digits: String = line[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        };
+
+        let summary = lines.iter().find(|l| field(l, "kind").as_deref() == Some("summary"))
+            .expect("必须有 summary 行");
+        let total = num(summary, "size").expect("summary 带 size");
+        assert_eq!(total, 600, "三个文件合计 600 字节");
+
+        let sum_by = |kind: &str| -> u64 {
+            lines.iter()
+                .filter(|l| field(l, "kind").as_deref() == Some(kind))
+                .filter_map(|l| num(l, "size"))
+                .sum()
+        };
+        assert_eq!(sum_by("time"), total, "各时间桶相加必须等于总量");
+        assert_eq!(sum_by("ext"), total, "各扩展名相加必须等于总量");
+        // 顶层自有文件（100+200）+ 一级子目录递归（300）= 总量
+        assert_eq!(sum_by("dir"), 300, "kind=dir 只发一级子目录的递归体积");
+
+        // 分桶归位：40 天 → 九十天以内，200 天 → 一年内，刚改 → 七天内
+        let bucket = |label: &str| -> u64 {
+            lines.iter()
+                .find(|l| field(l, "kind").as_deref() == Some("time") && field(l, "label").as_deref() == Some(label))
+                .and_then(|l| num(l, "size"))
+                .unwrap_or(u64::MAX)
+        };
+        assert_eq!(bucket("七天内"), 100);
+        assert_eq!(bucket("九十天以内"), 200);
+        assert_eq!(bucket("一年内"), 300);
+        assert_eq!(bucket("更早"), 0);
+        assert_eq!(bucket("时间未知"), 0);
+        // 6 桶必须全发（渲染层按下标取标签，缺行就会错位）
+        assert_eq!(
+            lines.iter().filter(|l| field(l, "kind").as_deref() == Some("time")).count(),
+            TIME_BUCKETS
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// C-5 分析器：扩展名聚合键口径。大写归小写、无扩展名/超长归「(其他)」。
     #[test]
     fn analyze_ext_key_normalizes() {
@@ -1635,6 +1791,25 @@ mod tests {
         assert_eq!(analyze_ext_key("Makefile"), "(其他)");
         assert_eq!(analyze_ext_key("a.verylongextensionname"), "(其他)");
         assert_eq!(analyze_ext_key(".gitignore"), ".gitignore");
+    }
+
+    /// M6 时间维度：边界必须说清「正好 7 天」落在哪一桶，且取不到 mtime 要单独成桶
+    /// ——否则「各桶相加 = 总量」这条不变量会在时间读取失败的文件上漏字节。
+    #[test]
+    fn 时间桶边界与未知时间单独成桶() {
+        const DAY: u64 = 86_400_000;
+        let now = 1_700_000_000_000u64;
+        assert_eq!(analyze_time_bucket(Some(now), now), 0, "刚改过 = 七天内");
+        assert_eq!(analyze_time_bucket(Some(now - 7 * DAY), now), 0, "正好 7 天算七天内");
+        assert_eq!(analyze_time_bucket(Some(now - 7 * DAY - 1), now), 1, "超出 7 天一天进下一桶");
+        assert_eq!(analyze_time_bucket(Some(now - 30 * DAY), now), 1);
+        assert_eq!(analyze_time_bucket(Some(now - 90 * DAY), now), 2);
+        assert_eq!(analyze_time_bucket(Some(now - 365 * DAY), now), 3);
+        assert_eq!(analyze_time_bucket(Some(now - 366 * DAY), now), 4, "更早");
+        // mtime 在未来 / 时钟回拨 ⇒ 按"刚改过"，绝不给负数（saturating_sub）
+        assert_eq!(analyze_time_bucket(Some(now + 9 * DAY), now), 0);
+        assert_eq!(analyze_time_bucket(None, now), TIME_BUCKETS - 1, "取不到 mtime 单独成桶");
+        assert_eq!(TIME_BUCKET_LABELS.len(), TIME_BUCKETS, "标签表与桶数必须一一对应");
     }
 
     /// 记录型 Sink：数调用次数；`watch` 带着 `ScanCtx` 的同一份 Arc，
