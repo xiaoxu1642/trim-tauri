@@ -2014,12 +2014,21 @@ fn contribs(items: &[(&str, String)]) -> Value {
 /// **至少两组命中**才视为同一程序，单一维度弱相似不触发（防「QQ」类短名误伤全家桶）。
 /// 返回 (候选集, 被 A1 硬否决的目标) —— 否决原因只在这里收集，由命令边界落日志：
 /// 纯函数不留写盘副作用，`cargo test` 才不会把测试规则 id 写进用户的应用日志。
+///
+/// `learned` 决定证据等级：同一套命中逻辑跑在两份库上（签名库 / 本机学习库），
+/// 学习库不签名、没人审，所以候选一律 `medium` + **不自动勾选**，且 reason 要交代来源。
+/// 做成参数而不是「产出后再改字段」，是因为后写进来的字段一旦与产出侧分叉就没人会发现
+/// （签名库那条 `defaultChecked: true` 就是靠这条链默认勾上的）。
 fn residue_rules_hits(
     rules: &Value,
     display_name: &str,
     publisher: &str,
     key_path: &str,
+    learned: bool,
 ) -> (Vec<Value>, Vec<String>) {
+    let lib_label = if learned { "本机学习库" } else { "残留规则库" };
+    let confidence = if learned { "medium" } else { "high" };
+    let default_checked = !learned;
     let empty: Vec<Value> = Vec::new();
     let rule_list = rules.get("rules").and_then(|r| r.as_array()).unwrap_or(&empty);
     let name_norm = norm_name(display_name);
@@ -2081,7 +2090,7 @@ fn residue_rules_hits(
         if key_hit {
             why.push(("uninstallKey", format!("卸载键条件组命中：本机键路径「{key_path}」")));
         }
-        why.push(("ruleId", format!("来自签名残留规则库规则 {id}")));
+        why.push(("ruleId", format!("来自{lib_label}规则 {id}")));
         // 命中 → 展开 %VAR% 目标并做存在性判定：不存在的目标不出现在面板里
         for entry in rule.get("residue").and_then(|x| x.as_array()).unwrap_or(&empty) {
             let kind = entry.get("kind").and_then(|x| x.as_str()).unwrap_or("");
@@ -2109,8 +2118,9 @@ fn residue_rules_hits(
                     }
                     out.push(json!({
                         "kind": kind, "target": target,
-                        "reason": format!("残留规则库命中（{id}）：{note}"),
-                        "confidence": "high", "risk": "medium", "defaultChecked": true,
+                        "reason": format!("{lib_label}命中（{id}）：{note}"),
+                        "confidence": confidence, "risk": "medium",
+                        "defaultChecked": default_checked,
                         "ruleId": id,
                         "contribs": contribs(&why),
                     }));
@@ -2131,8 +2141,9 @@ fn residue_rules_hits(
                     }
                     out.push(json!({
                         "kind": "reg_key", "target": target_raw,
-                        "reason": format!("残留规则库命中（{id}）：{note}"),
-                        "confidence": "high", "risk": "medium", "defaultChecked": true,
+                        "reason": format!("{lib_label}命中（{id}）：{note}"),
+                        "confidence": confidence, "risk": "medium",
+                        "defaultChecked": default_checked,
                         "ruleId": id,
                         "contribs": contribs(&why),
                     }));
@@ -2750,6 +2761,279 @@ mod footprint {
                 .filter_map(|k| k.as_str().map(String::from))
                 .collect(),
         )
+    }
+}
+
+/// 本机学习型残留库（HiBit §H3 借鉴项，2026-09-29）。
+///
+/// HiBit 的 `LocalDB.ini` 是「出厂内置 + 用户增量」两层：exe 里嵌一份出厂默认，
+/// AppData 那份随使用增长。Trim 只有前者（`uninstall-residue-rules.json`：人工评审 +
+/// 签名 + `prov.reviewedAt` 溯源），缺的就是第二层——同一台机器上卸载过一次的程序，
+/// 下次再装再卸仍然要从头启发。本模块补那半层。
+///
+/// **schema 与签名库逐字段相同，因此运行期复用同一个 `validate_residue_package`**。
+/// 这不是偷懒，是这批唯一的安全支点：学习库不签名、由本机自采，若给它一套自己的校验器，
+/// 就等于开了「绕过人审与私钥也能进候选」的旁路——M1 批次封的正是同类洞
+/// （一条签名规则 `reg_key: HKLM\SOFTWARE` 当时能过所有闸门并被默认勾选）。
+/// 复用同一校验器 ⇒ 字段白名单、kind 允许集、目标形状、深度上限、双条件组、注册表禁删面
+/// 一个都不少。代价是学不到 `learnedAt`/命中次数这类元数据（白名单不放）——
+/// 淘汰改用「数组顺序即新旧」，不值得为一条统计字段把校验器分叉。
+///
+/// 与签名库不同的三处刻意收紧（因为证据等级更低）：
+/// 1. `defaultChecked = false`、`confidence` 上限 `medium`（与 M4/M6 对本机自推候选的裁定一致）；
+/// 2. 目标必须**可按归属核对**——路径里至少有一段与该程序的显示名/发行商/卸载键末段互含，
+///    沿用 `footprint` 那条口径（只做互含、不做相似度）。没有归属判据时，
+///    `%APPDATA%\Microsoft\Windows\Recent` 这类共享容器会被当成"这程序的残留"学进去；
+/// 3. 注册表目标额外要求 hive 之下 ≥3 段（`HKCU\Software\Foo` 这种厂商顶层键不学）——
+///    本机实测过共享厂商段误判（`Netease` 同时被网易云音乐命中）。
+mod learned {
+    use serde_json::{json, Value};
+    use std::path::Path;
+
+    use super::{
+        footprint, norm_name, parse_reg_target, protect, validate_residue_package,
+        RESIDUE_MAX_TEXT_LEN,
+    };
+
+    /// 学习库条数上限：一台机器不会装几百个待卸载程序，超了按新旧淘汰
+    pub const MAX_RULES: usize = 120;
+    /// 单程序记录的落点数上限（有些程序散落十几个目录，记满只会淹没面板）
+    pub const MAX_RESIDUE_PER_RULE: usize = 16;
+    /// 注册表学习深度下限：hive 之下至少三段。`HKCU\Software\Foo` 是厂商顶层键，
+    /// 一个键名下可能住着全家桶，不给进学习库
+    pub const REG_MIN_DEPTH: usize = 3;
+
+    pub const LEARNED_SOURCE_CLASS: &str = "本机自采（未签名、未经人工评审）";
+
+    fn file_write() -> std::path::PathBuf {
+        super::residue_rules_write_dir().join("residue-learned.json")
+    }
+
+    /// 读取根：与规则库同一口径（新根优先，老根只读兜底）
+    fn file_read() -> std::path::PathBuf {
+        crate::engine::paths::data_file_for_read("uninstall/residue-learned.json")
+    }
+
+    pub fn empty_doc() -> Value {
+        json!({
+            "rulesVersion": 1.0,
+            "prov": [{ "sourceClass": LEARNED_SOURCE_CLASS, "reviewedAt": "" }],
+            "rules": []
+        })
+    }
+
+    /// 纯函数：解析 + 复用签名库校验器。**任何一步失败都返回 Err**，由调用方决定隔离。
+    /// 刻意不碰文件——这份数据驱动删除候选，测试里留写盘副作用会把用户本机档案判坏。
+    pub fn from_text(text: &str) -> Result<Value, String> {
+        let v: Value = serde_json::from_str(text).map_err(|e| format!("JSON 解析失败: {e}"))?;
+        validate_residue_package(&v).map_err(|e| format!("学习库语义校验未通过: {e}"))?;
+        Ok(v)
+    }
+
+    /// 载入。文件缺失 = 空（首次使用）；解析或语义不过 = 隔离后回空档。
+    ///
+    /// 与 `ownership::load` 同一立场：驱动删除候选的数据在半损坏状态下必须**停用**，
+    /// 而不是尽力解析——「猜出来的残留」比「这一轮没提示」危险得多。
+    pub fn load() -> Option<Value> {
+        let path = file_read();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return None;
+        };
+        match from_text(&text) {
+            Ok(v) => Some(v),
+            Err(reason) => {
+                crate::engine::log::write_log("warn", &format!("{reason}，学习库已隔离停用: {:?}", path.file_name()));
+                crate::security::quarantine_file(&path, "residue-learned 语义校验未通过");
+                None
+            }
+        }
+    }
+
+    /// 落盘前先自校验：写入侧不把一份「装载时会被隔离」的文件留给下一轮扫描。
+    /// 两头都判才是闭环——只判读侧的话，本函数的一个 bug 会直接毁掉用户本机全部学习记录。
+    pub fn save(doc: &Value) -> Result<(), String> {
+        validate_residue_package(doc).map_err(|e| format!("学习库落盘前校验未通过（已放弃写入）: {e}"))?;
+        let path = file_write();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("创建学习库目录失败: {e}"))?;
+        }
+        crate::security::atomic_write_json(&path, doc).map_err(|e| e.to_string())
+    }
+
+    /// 学习库规则的稳定 id：`learned-` + (归一化程序名 + 卸载键末段) 的 sha256 前 12 位。
+    /// 必须是纯 [a-z0-9-] —— 签名库校验器对 id 字符集有白名单，中文程序名不能直接当 id。
+    pub fn rule_id(display_name: &str, key_path: &str) -> String {
+        use sha2::{Digest as _, Sha256};
+        let leaf = key_path.rsplit('\\').next().unwrap_or("").to_lowercase();
+        let base = format!("{}|{}", norm_name(display_name), leaf);
+        let hex: String = Sha256::digest(base.as_bytes())
+            .iter()
+            .take(6)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("learned-{hex}")
+    }
+
+    /// 目标是否值得学。返回 `Some(原因)` = 拒学（不写进库，下一轮也不会再出这条候选）。
+    ///
+    /// 判据顺序有讲究：先看保护面（最硬），再看归属（学习库特有），最后看深度。
+    /// 归属这一步是学习库与签名库的实质差别：签名库是人写「这个程序确实有这目录」，
+    /// 学习库没人审，只能靠路径里有没有这程序的名字来自己交代。
+    pub fn target_reject_reason(kind: &str, target: &str, tokens: &[String]) -> Option<String> {
+        if target.trim().is_empty() || target.len() > 260 {
+            return Some("目标为空或超过 MAX_PATH".to_string());
+        }
+        match kind {
+            "reg_key" => {
+                if let Some(r) = protect::reg_target_block_reason(target) {
+                    return Some(format!("注册表禁删面: {r}"));
+                }
+                let Some((_, rest)) = parse_reg_target(target) else {
+                    return Some("注册表目标无法解析".to_string());
+                };
+                let depth = rest.split('\\').filter(|s| !s.trim().is_empty()).count();
+                if depth < REG_MIN_DEPTH {
+                    return Some(format!("注册表深度 {depth} 低于下限 {REG_MIN_DEPTH}（厂商顶层键不学）"));
+                }
+            }
+            "folder" | "file" => {
+                if protect::is_path_protected(target) {
+                    return Some("受保护路径".to_string());
+                }
+                let p = Path::new(target);
+                // 盘根/父根一律不学：一旦学错，下一轮是整棵目录树进候选
+                if p.parent().map(|x| x.parent().is_none()).unwrap_or(true) {
+                    return Some("路径层级过浅".to_string());
+                }
+            }
+            other => return Some(format!("不支持学习的 kind: {other}")),
+        }
+        // 归属核对：任一段与该程序 token 互含（与 footprint 同口径，不做相似度）
+        let segs: Vec<String> = target
+            .split(['\\', '/'])
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| s.chars().count() >= 2)
+            .collect();
+        if segs.is_empty() {
+            return Some("路径没有可比对的段".to_string());
+        }
+        let owned = tokens.iter().any(|t| {
+            let tl = t.trim().to_ascii_lowercase();
+            tl.chars().count() >= 2 && segs.iter().any(|s| s.contains(&tl) || tl.contains(s.as_str()))
+        });
+        if !owned {
+            return Some("路径里没有任何一段属于这程序（共享容器不学）".to_string());
+        }
+        None
+    }
+
+    /// 把「用户实际删掉的落点」并入库。返回新增条数。
+    ///
+    /// 三组条件必须同时给得出（`displayName` + `uninstallKey` 至少两组非空是签名库的
+    /// U-1 口径，校验器会整包拒），拿不到归属身份就不学——宁可这条不沉淀。
+    pub fn learn(
+        doc: &mut Value,
+        display_name: &str,
+        publisher: &str,
+        key_path: &str,
+        entries: &[(&str, String)],
+        now_ms: i64,
+    ) -> usize {
+        if entries.is_empty() || display_name.trim().is_empty() || key_path.trim().is_empty() {
+            return 0;
+        }
+        // 归属 token 只能来自**程序身份**（显示名 / 发行商 / 卸载键末段）。刻意不喂 ownedPaths：
+        // 那等于把候选路径自己的末段当成「属于这程序」的证据，任何目标都会命中自己，
+        // 归属判定当场失效（写第一版时就踩在这里，被单测抓出来）。
+        let key_leaf = key_path.rsplit('\\').next().unwrap_or(key_path).to_string();
+        // 归属 token 只能来自**程序身份**（显示名 / 发行商 / 卸载键末段）。刻意不喂 ownedPaths：
+        // 那等于把候选路径自己的末段当成「属于这程序」的证据，任何目标都会命中自己，
+        // 归属判定当场失效（写第一版时踩在这里，判红自测已把这条缺陷装回去验证过会被抓到）。
+        let tokens = footprint::tokens_of(&json!({
+            "displayName": display_name,
+            "publisher": publisher,
+            "installLocation": format!("C:\\x\\{key_leaf}"),
+        }));
+        let id = rule_id(display_name, key_path);
+        // 只留 kind 与目标形状都合规的落点
+        let keep: Vec<(&str, String)> = entries
+            .iter()
+            .filter(|(k, t)| target_reject_reason(k, t, &tokens).is_none())
+            .cloned()
+            .collect();
+        if keep.is_empty() {
+            return 0;
+        }
+        let Some(rules) = doc.get_mut("rules").and_then(Value::as_array_mut) else {
+            return 0;
+        };
+        let stamp = super::delete_manifest::iso_now();
+        let mut added = 0usize;
+        let hit = rules.iter_mut().find(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str()));
+        match hit {
+            Some(r) => {
+                let Some(list) = r.get_mut("residue").and_then(Value::as_array_mut) else {
+                    return 0;
+                };
+                for (k, t) in keep {
+                    let dup = list.iter().any(|e| {
+                        e.get("kind").and_then(Value::as_str) == Some(k)
+                            && e.get("target").and_then(Value::as_str)
+                                .map(|x| x.eq_ignore_ascii_case(&t))
+                                .unwrap_or(false)
+                    });
+                    if dup {
+                        continue;
+                    }
+                    list.push(json!({ "kind": k, "target": t, "note": learn_note(display_name, &stamp) }));
+                    added += 1;
+                }
+                // 单程序上限按「先记的先出」裁，与整库淘汰同一策略，不引入时间戳字段
+                while list.len() > MAX_RESIDUE_PER_RULE {
+                    list.remove(0);
+                }
+            }
+            None => {
+                let residue: Vec<Value> = keep
+                    .iter()
+                    .map(|(k, t)| json!({ "kind": *k, "target": t.clone(), "note": learn_note(display_name, &stamp) }))
+                    .collect();
+                let mut pubarr: Vec<Value> = Vec::new();
+                if !publisher.trim().is_empty() {
+                    pubarr.push(json!(publisher.trim()));
+                }
+                rules.push(json!({
+                    "id": id,
+                    "displayName": [display_name.trim()],
+                    "publisher": pubarr,
+                    "uninstallKey": [key_leaf],
+                    "residue": residue,
+                }));
+                added = residue.len();
+                while rules.len() > MAX_RULES {
+                    rules.remove(0);
+                }
+            }
+        }
+        // prov.reviewedAt 用「最近一次学习」当时间戳：校验器要求它非空且是字符串，
+        // 而学习库没有人工评审事件可登记，如实写成本机自采时间比留个假评审日期诚实
+        if let Some(prov) = doc.get_mut("prov").and_then(Value::as_array_mut) {
+            prov.insert(
+                0,
+                json!({ "sourceClass": LEARNED_SOURCE_CLASS, "reviewedAt": format!("本机自采 {stamp}") }),
+            );
+            prov.truncate(1);
+        }
+        let _ = now_ms;
+        added
+    }
+
+    fn learn_note(name: &str, stamp: &str) -> String {
+        let mut s = format!("本机于 {stamp} 清理「{name}」时删掉的落点");
+        if s.chars().count() > RESIDUE_MAX_TEXT_LEN {
+            s = s.chars().take(RESIDUE_MAX_TEXT_LEN).collect();
+        }
+        s
     }
 }
 
@@ -3750,12 +4034,33 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 高置信：签名残留规则库命中（U-1）——已知程序知识库，双条件命中 +
         // 目标存在性判定后才出现；reg_key 删除走执行侧同款「先备份后删」
         if let Some(rules) = load_residue_rules() {
-            let (rule_hits, vetoed) = residue_rules_hits(&rules, &display_name, &publisher, &key_path);
+            let (rule_hits, vetoed) = residue_rules_hits(&rules, &display_name, &publisher, &key_path, false);
             findings.extend(rule_hits);
             // 硬否决在命令边界留痕：真机跑到这一行就说明签名规则库里躺着一处系统容器
             // （误签、私钥泄露或规则生成漏检），属异常而非常态，必须能在日志里查到。
             for line in vetoed {
                 log::write_log("warn", &line);
+            }
+        }
+        // 第二层：本机学习库（HiBit §H3）。同一套命中判定 + 同一个语义校验器，差别只在
+        // 证据等级（不签名 ⇒ medium + 不自动勾选）。**签名库命中的同一目标不再出第二次**——
+        // 重复行会把用户推向「勾两次才删得掉」的错觉，而面板里没有去重就等于两条独立证据。
+        if let Some(learned_doc) = learned::load() {
+            let (hits, vetoed) =
+                residue_rules_hits(&learned_doc, &display_name, &publisher, &key_path, true);
+            for line in vetoed {
+                log::write_log("warn", &line);
+            }
+            for h in hits {
+                let k = h["kind"].as_str().unwrap_or("").to_lowercase();
+                let t = h["target"].as_str().unwrap_or("").to_lowercase();
+                let dup = findings.iter().any(|f| {
+                    f["kind"].as_str().unwrap_or("").to_lowercase() == k
+                        && f["target"].as_str().unwrap_or("").to_lowercase() == t
+                });
+                if !dup {
+                    findings.push(h);
+                }
             }
         }
         (findings, display_name)
@@ -3775,6 +4080,65 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
 /// 残留执行结果明细行
 fn detail(kind: &str, target: &str, status: &str, message: &str) -> Value {
     json!({ "kind": kind, "target": target, "status": status, "message": message })
+}
+
+/// HiBit §H3 的回写侧：把这一轮用户**实际删掉**的落点沉淀进本机学习库。
+///
+/// 只学 status=="ok" 的行 —— 失败行学进去会让下一轮把「这台机器上删不掉的路径」
+/// 当成已知残留反复推荐。归属身份（displayName / publisher / 卸载键末段）一律
+/// **现读注册表**，不从渲染层回传：与 `uninstall_run` 同一条纪律（app_id 只当寻址键）。
+/// 学不到（合成 MACHINE id、APPX 包、键已不存在、没有一条落点过得了归属判定）就整条不写，
+/// 而不是写一份"大概是这样"的记录 —— 学习库是下一轮的删除建议来源。
+fn learn_from_deletions(app_id: &str, details: &[Value]) -> usize {
+    let Some((hive_str, key_path)) = app_id.split_once('|') else {
+        return 0; // APPX|… 与 MACHINE|all 都没有卸载键身份，学不了
+    };
+    let reg_full = format!("{hive_str}\\{key_path}");
+    let Some((hive, rest)) = parse_reg_target(&reg_full) else {
+        return 0;
+    };
+    let read_sz = |name: &str| -> String {
+        crate::engine::native::read_reg_value_text(hive, rest.as_str(), name)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    };
+    let display_name = read_sz("DisplayName");
+    let publisher = read_sz("Publisher");
+    if display_name.trim().is_empty() {
+        return 0; // 没有程序名就当双条件组的另一半也凑不齐，校验器会整包拒
+    }
+    // kind 口径对齐：执行明细里的目录行写作 `dir`（原生删除侧的回执），学习库 schema 要 `folder`
+    let mut entries: Vec<(&str, String)> = Vec::new();
+    for d in details {
+        if d["status"].as_str() != Some("ok") {
+            continue;
+        }
+        let raw_kind = d["kind"].as_str().unwrap_or("");
+        let mapped = match raw_kind {
+            "dir" | "folder" => "folder",
+            "file" => "file",
+            "reg_key" => "reg_key",
+            _ => continue, // shortcut / reg_value 不在签名库允许集里，也不该出现在学习库里
+        };
+        let Some(t) = d["target"].as_str() else { continue };
+        entries.push((mapped, t.to_string()));
+    }
+    if entries.is_empty() {
+        return 0;
+    }
+    let mut doc = learned::load().unwrap_or_else(learned::empty_doc);
+    let added = learned::learn(&mut doc, &display_name, &publisher, key_path, &entries, crate::engine::now_ms());
+    if added == 0 {
+        return 0;
+    }
+    match learned::save(&doc) {
+        Ok(_) => added,
+        Err(e) => {
+            // 学习是附加价值：写失败只降级成「这次没学到」，绝不能把已经成功的清理判成失败
+            log::write_log("warn", &format!("学习库回写失败（本轮清理结果不受影响）: {e}"));
+            0
+        }
+    }
 }
 
 /// 残留执行的**单一变更入口**（D3）：变更阶段拿到的就是已判定完的目标。
@@ -4140,10 +4504,17 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 }),
             );
             log::write_log("info", &format!("uninstall_residue_execute {app_id}: 成功 {ok_count} 失败 {fail_count}（报告 {batch_id}）"));
+            // HiBit §H3 回写：学到几条就记几条，0 条不写文件也不报错（学习是附加价值）。
+            // 放在报告落盘之后：报告是「删了什么」的凭据，不能被学习链的不确定性挡住。
+            let learned_added = learn_from_deletions(&app_id, &details);
+            if learned_added > 0 {
+                log::write_log("info", &format!("本机学习库新增 {learned_added} 条落点（下轮同程序残留直接命中）"));
+            }
             json!({ "success": true, "data": {
                 "details": details, "okCount": ok_count, "failCount": fail_count,
                 "reportPath": report_path.to_string_lossy(),
                 "restorePack": pack_out,
+                "learnedAdded": learned_added,
             } })
         }
         Ok(Err(e)) => json!({ "success": false, "message": e }),
@@ -5065,7 +5436,7 @@ mod residue_trace_tests {
                 { "kind": "folder", "target": r"%APPDATA%\ProbeMissing-9f3a", "note": "解析成功但不存在" },
             ],
         }]});
-        let (out, vetoed) = residue_rules_hits(&rules, "探针程序", "ProbeSoft", r"Software\X\Uninstall\Probe");
+        let (out, vetoed) = residue_rules_hits(&rules, "探针程序", "ProbeSoft", r"Software\X\Uninstall\Probe", false);
         assert!(out.is_empty(), "两条都不该出候选: {out:?}");
         let joined = vetoed.join("\n");
         assert!(
@@ -5086,7 +5457,7 @@ mod residue_trace_tests {
             "uninstallKey": [],
             "residue": [{ "kind": "folder", "target": dir.to_string_lossy().to_string(), "note": "存在的目录" }],
         }]});
-        let (out2, _) = residue_rules_hits(&rules2, "探针程序", "ProbeSoft", r"Software\X\Uninstall\Probe");
+        let (out2, _) = residue_rules_hits(&rules2, "探针程序", "ProbeSoft", r"Software\X\Uninstall\Probe", false);
         assert_eq!(out2.len(), 1, "存在的目标应出候选: {out2:?}");
         assert_eq!(out2[0]["ruleId"], json!("residue-ruleid-probe"), "候选必须带 ruleId: {out2:?}");
     }
@@ -5152,13 +5523,181 @@ mod residue_trace_tests {
                 ]
             }]
         });
-        let (hits, vetoed) = residue_rules_hits(&pkg, "EvilApp 1.0", "EvilCorp", "EvilApp");
+        let (hits, vetoed) = residue_rules_hits(&pkg, "EvilApp 1.0", "EvilCorp", "EvilApp", false);
         assert!(hits.is_empty(), "受保护注册表目标进入了候选列表: {hits:?}");
         assert_eq!(
             vetoed.len(),
             3,
             "三条危险目标都应各自给出否决原因（祖先/命名空间树/整棵禁删各一类）: {vetoed:?}"
         );
+    }
+
+    /// HiBit §H3 的全部安全支点：**学习库复用签名库那一个校验器**，不另开一套。
+    /// 这条测试就是钉住它——哪天学习库加了自有字段（字段白名单不放）、或改了 kind，
+    /// 这里当场红，而不是等装载时在用户机器上把整库隔离掉才发现。
+    #[test]
+    fn learned_doc_is_valid_under_the_signed_library_validator() {
+        let mut doc = learned::empty_doc();
+        let entries = vec![
+            ("folder", r"C:\Users\me\AppData\Roaming\ProbeSoft\cache".to_string()),
+            ("reg_key", r"HKCU\Software\ProbeSoft\Settings".to_string()),
+        ];
+        let n = learned::learn(
+            &mut doc,
+            "ProbeSoft 测试程序",
+            "ProbeCorp",
+            r"Software\X\Uninstall\ProbeSoft",
+            &entries,
+            1,
+        );
+        assert_eq!(n, 2, "两条落点都该学到: {doc}");
+        validate_residue_package(&doc).expect("学习库文档必须过签名库同一个校验器");
+        let rules = doc["rules"].as_array().cloned().unwrap_or_default();
+        assert_eq!(rules.len(), 1);
+        // 双条件组是 U-1 口径：displayName + uninstallKey 必须都在，缺一组校验器整包拒
+        assert!(!rules[0]["displayName"].as_array().unwrap().is_empty());
+        assert!(!rules[0]["uninstallKey"].as_array().unwrap().is_empty());
+        let id = rules[0]["id"].as_str().unwrap_or("");
+        assert!(
+            id.starts_with("learned-") && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+            "学习库 id 不合签名库字符集白名单（中文名不能直接当 id）: {id}"
+        );
+        // 纯函数侧：坏 JSON 与语义不合都必须是 Err（装载侧据此隔离停用，不尽力解析）
+        assert!(learned::from_text("not json").is_err());
+        assert!(learned::from_text(r#"{"rulesVersion":1,"prov":[],"rules":[]}"#).is_err());
+        assert!(learned::from_text(&doc.to_string()).is_ok(), "learn() 的产物必须能被 load 侧原样接受");
+    }
+
+    /// 学习库特有的三道收紧。缺任何一道，本机自采数据都会把「共享容器」或「厂商顶层键」
+    /// 学成下次可直接勾选的残留——签名库有人审，学习库没有。
+    #[test]
+    fn learned_floor_rejects_shared_and_shallow_targets() {
+        // token 必须是显示名的**真实小写形态**（`ProbeSoft` → `probesoft`）。第一版手写成
+        // `probsoft`（少一个 e），实现被假断言判成错，我围着它调试了两轮 —— 归属类断言的
+        // 期望值应由被测的同一条派生链给出，不要手抄字面量。
+        let tokens = vec!["probesoft 测试程序".to_string(), "probcorp".to_string()];
+        // 归属：路径里没有任何一段属于这程序 ⇒ 不学（Recent 是全家共享容器）
+        assert!(learned::target_reject_reason(
+            "folder",
+            r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Recent",
+            &tokens
+        )
+        .is_some());
+        assert!(
+            learned::target_reject_reason("folder", r"C:\Users\me\SomeRandomDir", &tokens).is_some(),
+            "候选自己的末段不能当归属证据（第一版把 ownedPaths 喂进 token 集就在这里假过）"
+        );
+        assert!(
+            learned::target_reject_reason("folder", r"C:\Users\me\AppData\Roaming\ProbeSoft\cache", &tokens)
+                .is_none(),
+            "有归属段就该放行，实得拒绝原因: {:?}",
+            learned::target_reject_reason("folder", r"C:\Users\me\AppData\Roaming\ProbeSoft\cache", &tokens)
+        );
+        // 注册表深度：厂商顶层键（hive 之下 2 段）不学，三段才学
+        assert!(learned::target_reject_reason("reg_key", r"HKCU\Software\ProbeSoft", &tokens).is_some());
+        assert!(learned::target_reject_reason("reg_key", r"HKCU\Software\ProbeSoft\Settings", &tokens).is_none());
+        // 禁删面：A1 那条清单**刻意没有深度规则**（有就会误拒 `HKLM\SOFTWARE\ESET` 这类
+        // 合法二级产品键），所以 `HKLM\SOFTWARE\ProbeSoft\X` 该放行——它归属成立、深度够。
+        // 真正必须拒的是整棵容器与命名空间树这两类。
+        assert!(
+            learned::target_reject_reason("reg_key", r"HKLM\SOFTWARE", &tokens).is_some(),
+            "整棵 SOFTWARE 必须被禁删面拒"
+        );
+        assert!(learned::target_reject_reason(
+            "reg_key",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+            &tokens
+        )
+        .is_some());
+        assert!(learned::target_reject_reason("reg_key", r"HKLM\SOFTWARE\ProbeSoft\X", &tokens).is_none());
+        assert!(learned::target_reject_reason("shortcut", r"C:\x\ProbeSoft.lnk", &tokens).is_some());
+    }
+
+    /// 证据等级分岔必须**由参数产生**，不能靠产出后再改字段：签名库那条
+    /// `defaultChecked: true` 正是靠这条链把候选默认勾上的，学习库若走同一条路，
+    /// 「本机猜的」就会被界面当成「官方规则」推荐。
+    #[test]
+    fn learned_hits_are_never_auto_checked_while_signed_hits_are() {
+        // 命中链要求目标**真实存在**（不存在的落点不该出现在面板里，这是生产语义），
+        // 所以这里在临时目录下建一个真目录并挂 Drop 清掉；固定假路径会让两条链都空手而归，
+        // 断言就退化成「什么都没发生也算过」。
+        let dir = std::env::temp_dir().join(format!("trim-learn-{}", std::process::id()));
+        let sub = dir.join("ProbeSoftCache");
+        std::fs::create_dir_all(&sub).expect("建临时命中目标");
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+        let target = sub.to_string_lossy().to_string();
+
+        let doc = json!({
+            "rulesVersion": 1.0,
+            "prov": [{ "sourceClass": learned::LEARNED_SOURCE_CLASS, "reviewedAt": "本机自采 x" }],
+            "rules": [{
+                "id": "learned-abc123",
+                "displayName": ["ProbeSoft"],
+                "publisher": ["ProbeCorp"],
+                "uninstallKey": ["ProbeSoft"],
+                "residue": [{ "kind": "folder", "target": target, "note": "本机自采" }]
+            }]
+        });
+        let (learned_hits, _) = residue_rules_hits(
+            &doc,
+            "ProbeSoft",
+            "ProbeCorp",
+            r"Software\X\Uninstall\ProbeSoft",
+            true,
+        );
+        assert_eq!(learned_hits.len(), 1, "学习库命中链断了: {learned_hits:?}");
+        assert_eq!(learned_hits[0]["defaultChecked"], json!(false), "学习库候选不得默认勾选");
+        assert_eq!(learned_hits[0]["confidence"], json!("medium"), "学习库证据上限是 medium");
+        assert!(
+            learned_hits[0]["reason"].as_str().unwrap_or("").contains("本机学习库"),
+            "候选必须交代自己是本机学习库而不是官方规则: {}",
+            learned_hits[0]["reason"]
+        );
+        // 同一份文档按签名库口径跑必须还是 high + 默认勾选——参数没分岔就是假绿
+        let (signed_hits, _) = residue_rules_hits(
+            &doc,
+            "ProbeSoft",
+            "ProbeCorp",
+            r"Software\X\Uninstall\ProbeSoft",
+            false,
+        );
+        assert_eq!(signed_hits.len(), 1);
+        assert_eq!(signed_hits[0]["defaultChecked"], json!(true));
+        assert_eq!(signed_hits[0]["confidence"], json!("high"));
+    }
+
+    /// 学不到东西的情形必须**整条不写**，而不是写一份下一轮会被校验器拒掉的文档。
+    #[test]
+    fn learn_skips_when_identity_or_targets_are_unusable() {
+        let base = |name: &str, publisher: &str, entries: Vec<(&str, String)>| {
+            let mut doc = learned::empty_doc();
+            learned::learn(&mut doc, name, publisher, r"Software\X\Uninstall\ProbeSoft", &entries, 1)
+        };
+        assert_eq!(base("ProbeSoft", "ProbeCorp", vec![]), 0, "没有落点不写");
+        assert_eq!(base("", "ProbeCorp", vec![("folder", r"C:\x\ProbeSoft".to_string())]), 0, "没有程序名不写");
+        // 显示名 + 卸载键末段已经是两组，publisher 空不该把它判死
+        assert!(
+            base("ProbeSoft", "", vec![("folder", r"C:\x\ProbeSoft".to_string())]) > 0,
+            "双条件组应成立"
+        );
+        // 全部落点过不了归属 ⇒ 一条都不学，且不留空规则（空 residue 会被校验器整包拒）
+        let mut doc = learned::empty_doc();
+        let n = learned::learn(
+            &mut doc,
+            "ProbeSoft",
+            "ProbeCorp",
+            r"Software\X\Uninstall\ProbeSoft",
+            &[("folder", r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Recent".to_string())],
+            1,
+        );
+        assert_eq!(n, 0, "无归属落点不该学: {doc}");
+        assert!(doc["rules"].as_array().map(|a| a.is_empty()).unwrap_or(false), "不该留下空规则");
     }
 
     /// D3 + C1：残留执行的单一判定入口（不依赖真机）。判定收进 classify_residue_op 之后，
@@ -5684,3 +6223,5 @@ mod residue_trace_tests {
         assert_eq!(dormant_delta(Some(1_700_000_000_000), 1_700_000_900_000), json!(900_000));
     }
 }
+
+
