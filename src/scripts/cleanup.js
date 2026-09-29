@@ -1786,28 +1786,39 @@
       body.innerHTML = '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。卸载残留可在清理前勾选「先备份内容再删」生成本机还原包。</p></div>';
       return;
     }
+    // 「旧版」徽章：这份躺在升级前的老数据目录里（N1 跨根兜底才看得见）。
+    // 不标来源的话用户会以为当前版本偷偷写了它，或以为它已经被清理掉了。
+    const legacyBadge = (x) => (x && x.fromLegacy
+      ? '<span class="badge off" data-tip="来自升级前的旧数据目录，仍可还原">旧版</span>' : '');
+    const backupHead = (list, data, unit) => {
+      const total = Number(data && data.totalCount) || list.length;
+      const bytes = Number(data && data.totalBytes) || 0;
+      const more = total > list.length ? `，显示最近 ${list.length} 份` : '';
+      const size = bytes > 0 ? ` · 合计 ${formatSize(bytes)}` : '';
+      return `${unit} · ${total} 份${more}${size}`;
+    };
     const regSection = !backups.length ? '' :
-      `<div class="finder-group-header"><span>注册表备份 · ${backups.length} 份</span></div>
+      `<div class="finder-group-header"><span>${backupHead(backups, resp && resp.data, '注册表备份')}</span></div>
        <div class="detail-file-list">${backups.map((b, i) =>
-        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.ruleId || '?')}${b.seq ? ` #${escapeHtml(b.seq)}` : ''} · ${formatSize(b.sizeBytes)}</span><button class="fileclean-preview-btn" data-reg-restore="${i}" type="button">还原</button></div>`
+        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.ruleId || '?')}${b.seq ? ` #${escapeHtml(b.seq)}` : ''} · ${formatSize(b.sizeBytes)} ${legacyBadge(b)}</span><button class="fileclean-preview-btn" data-reg-restore="${i}" type="button">还原</button></div>`
       ).join('')}</div>`;
     const fileSection = !manifests.length ? '' :
-      `<div class="finder-group-header"><span>文件备份（永久删批次） · ${manifests.length} 批</span></div>
+      `<div class="finder-group-header"><span>文件备份（永久删批次） · ${Number((respF && respF.data && respF.data.totalCount)) || manifests.length} 批${manifests.length < Number((respF && respF.data && respF.data.totalCount)) ? `，显示最近 ${manifests.length} 批` : ''}</span></div>
        <div class="detail-file-list">${manifests.map((m, i) =>
-        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(m.file)}">${fmtBackupTime(m.mtimeMs)} · ${m.count} 个文件 · ${formatSize(m.totalSize)}</span><button class="fileclean-preview-btn" data-file-backup-view="${i}" type="button" data-tip="查看本批次条目并逐个还原">查看</button></div>`
+        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(m.file)}">${fmtBackupTime(m.mtimeMs)} · ${m.count} 个文件 · ${formatSize(m.totalSize)} ${legacyBadge(m)}</span><button class="fileclean-preview-btn" data-file-backup-view="${i}" type="button" data-tip="查看本批次条目并逐个还原">查看</button></div>`
       ).join('')}</div>`;
     // 卸载域备份：每行标出封条核对结果。seal 不是 ok 的行**不给还原按钮**——
     // 内容与封条不符的备份 import 回注册表，等于把可能被改写过的内容当可信还原
     const SEAL_TEXT = { ok: '封条相符', missing: '无封条（旧备份）', mismatch: '封条不符', corrupt: '封条损坏', unreadable: '备份不可读' };
     const uninstSection = !uninst.length ? '' :
-      `<div class="finder-group-header"><span>卸载残留注册表备份 · ${uninst.length} 份</span></div>
+      `<div class="finder-group-header"><span>${backupHead(uninst, respU && respU.data, '卸载残留注册表备份')}</span></div>
        <div class="detail-file-list">${uninst.map((b, i) => {
          const canRestore = b.seal === 'ok' || b.seal === 'missing';
          // 封条状态已经在行内文本里出现过，这里不重复它，只说明「为什么没有还原入口」
          const restoreBtn = canRestore
            ? `<button class="fileclean-preview-btn" data-uninst-restore="${i}" type="button">还原</button>`
            : `<span class="finder-name-text" style="opacity:.6" data-tip="封条核对未通过（${escapeHtml(b.seal)}），不提供还原入口">不可还原</span>`;
-         return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)}</span>${restoreBtn}</div>`;
+         return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)} ${legacyBadge(b)}</span>${restoreBtn}</div>`;
        }).join('')}</div>`;
     // 还原包：zip 不在了就**不给还原按钮**（内容缺失时点下去只会逐条失败，不如这里说清）
     const packSection = !packs.length ? '' :

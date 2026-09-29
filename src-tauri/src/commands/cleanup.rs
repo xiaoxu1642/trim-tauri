@@ -1239,13 +1239,17 @@ pub async fn cleanup_custom_execute<R: tauri::Runtime>(
 }
 
 // ==================== cleanup:reg-backup-*（C-4 注册表备份还原入口） ====================
-// cleanup_execute 的 regKeys 分支在删除前 export 整键到 %APPDATA%\Trim\cleanup-reg-backup
+// cleanup_execute 的 regKeys 分支在删除前 export 整键到 <数据根>\cleanup-reg-backup
 // （文件名 {ms时间戳}_reg_{规则id}_{序号}.reg）。此前只有写没有读——「能清不能还」；
 // 本节补列表与还原面。还原 = reg import 合并回系统（把备份时的键/值原样加回）。
+//
+// 落点口径（N1，2026-09-29）：**写恒新根**（`backup_write_dir`），**读跨两根**
+// （`backup_read_entries` / `resolve_backup_file`）。上游 Electron 轨的 PS 写的是
+// `%APPDATA%\Trim\cleanup-reg-backup`（`vendor/upstream-js` cleanup-scripts.js:1411），
+// 只读新根会让升级用户的老批备份在列表里凭空消失，与「这台机器没做过可还原操作」无法区分。
 
-fn reg_backup_dir() -> PathBuf {
-    crate::engine::paths::app_data_dir().join("cleanup-reg-backup")
-}
+/// 备份根标识：列表项要告诉用户这份来自当前数据目录还是升级前的老根
+const REG_BACKUP_SUB: &str = "cleanup-reg-backup";
 
 /// 备份文件名准入：单段文件名、字符集 [A-Za-z0-9_- .]、.reg 结尾——防路径穿越与任意导入
 fn valid_backup_file_name(name: &str) -> bool {
@@ -1264,19 +1268,18 @@ pub fn cleanup_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> V
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let Ok(rd) = std::fs::read_dir(reg_backup_dir()) else {
-        return json!({ "success": true, "data": { "backups": [] } });
-    };
+    // N1：跨根列举（新根在前、同名只留新根那份）。老根那份必须标来源，否则用户会以为
+    // 当前版本偷偷写了它；总数与总体积按**全量**算，列表只截最近 50 份。
     let mut items: Vec<Value> = Vec::new();
-    for ent in rd.flatten() {
-        let p = ent.path();
-        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+    let mut total_bytes: u64 = 0;
+    for (p, from_legacy) in crate::engine::paths::backup_read_entries(REG_BACKUP_SUB) {
+        let Some(name) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
             continue;
         };
-        if !valid_backup_file_name(name) {
+        if !valid_backup_file_name(&name) || !p.is_file() {
             continue;
         }
-        let Ok(meta) = ent.metadata() else { continue };
+        let Ok(meta) = p.metadata() else { continue };
         // stem 形如 {ms}_reg_{规则id}_{序号}；规则 id 取中段（宽容解析，解析失败也列出）
         let stem = name.trim_end_matches(".reg");
         let parts: Vec<&str> = stem.split('_').collect();
@@ -1289,23 +1292,29 @@ pub fn cleanup_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> V
         } else {
             (String::new(), stem.to_string(), String::new())
         };
+        total_bytes = total_bytes.saturating_add(meta.len());
         items.push(json!({
             "file": name,
             "stampMs": stamp.parse::<i64>().unwrap_or(0),
             "ruleId": rule_id,
             "seq": seq,
+            "fromLegacy": from_legacy,
             "mtimeMs": meta.modified().ok()
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
             "sizeBytes": meta.len(),
         }));
-        if items.len() >= 50 {
-            break;
-        }
     }
     items.sort_by(|a, b| b["mtimeMs"].as_i64().cmp(&a["mtimeMs"].as_i64()));
-    json!({ "success": true, "data": { "backups": items } })
+    let total_count = items.len();
+    items.truncate(crate::engine::paths::BACKUP_KEEP);
+    json!({ "success": true, "data": {
+        "backups": items,
+        "totalCount": total_count,
+        "totalBytes": total_bytes,
+        "keep": crate::engine::paths::BACKUP_KEEP,
+    } })
 }
 
 /// cleanup:reg-backup-restore — reg import 把单个备份合并回注册表（主窗专属）。
@@ -1318,10 +1327,11 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
     if !valid_backup_file_name(file.trim()) {
         return json!({ "success": false, "message": "备份文件名非法" });
     }
-    let path = reg_backup_dir().join(file.trim());
-    if !path.is_file() {
+    // 还原侧必须与列表侧同一套跨根解析：列表能列出老根那份，还原就只能从同一根取，
+    // 否则"看得见、点不动"（N1）
+    let Some(path) = crate::engine::paths::resolve_backup_file(REG_BACKUP_SUB, file.trim()) else {
         return json!({ "success": false, "message": "备份文件不存在" });
-    }
+    };
     log::flush_sync(); // 写注册表前刷盘
     let Some(path_str) = path.to_str() else {
         return json!({ "success": false, "message": "备份路径无法表示为文本" });
@@ -1349,9 +1359,7 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
 // 并落 manifest-<ts>.json（条目=备份相对名 ↔ 原始路径）。备份是语义增强不是删除
 // 前提：复制失败/超上限照常删除并记账（native.rs 内有 64MB/文件、256MB/批次上限）。
 
-fn files_backup_dir() -> PathBuf {
-    crate::engine::paths::app_data_dir().join("cleanup-files-backup")
-}
+const FILES_BACKUP_SUB: &str = "cleanup-files-backup";
 
 /// manifest 文件名准入：`manifest-<纯数字>.json`——防路径穿越
 fn valid_files_manifest_name(name: &str) -> bool {
@@ -1367,17 +1375,16 @@ pub fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> 
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let Ok(rd) = std::fs::read_dir(files_backup_dir()) else {
-        return json!({ "success": true, "data": { "manifests": [] } });
-    };
     let mut items: Vec<Value> = Vec::new();
-    for ent in rd.flatten() {
-        let p = ent.path();
-        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue };
-        if !valid_files_manifest_name(name) {
+    let mut total_bytes: i64 = 0;
+    for (p, from_legacy) in crate::engine::paths::backup_read_entries(FILES_BACKUP_SUB) {
+        let Some(name) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        if !valid_files_manifest_name(&name) || !p.is_file() {
             continue;
         }
-        let Ok(meta) = ent.metadata() else { continue };
+        let Ok(meta) = p.metadata() else { continue };
         let Ok(text) = std::fs::read_to_string(&p) else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         let entries = v.get("entries").and_then(|e| e.as_array()).cloned().unwrap_or_default();
@@ -1385,22 +1392,28 @@ pub fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> 
             .iter()
             .filter_map(|e| e.get("size").and_then(|s| s.as_i64()))
             .sum();
+        total_bytes = total_bytes.saturating_add(total);
         items.push(json!({
             "file": name,
             "ts": v.get("ts").and_then(|t| t.as_i64()).unwrap_or(0),
             "count": entries.len(),
             "totalSize": total,
+            "fromLegacy": from_legacy,
             "mtimeMs": meta.modified().ok()
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
         }));
-        if items.len() >= 50 {
-            break;
-        }
     }
     items.sort_by(|a, b| b["mtimeMs"].as_i64().cmp(&a["mtimeMs"].as_i64()));
-    json!({ "success": true, "data": { "manifests": items } })
+    let total_count = items.len();
+    items.truncate(crate::engine::paths::BACKUP_KEEP);
+    json!({ "success": true, "data": {
+        "manifests": items,
+        "totalCount": total_count,
+        "totalBytes": total_bytes,
+        "keep": crate::engine::paths::BACKUP_KEEP,
+    } })
 }
 
 /// cleanup:file-backup-restore — 把单个备份条目拷回原路径（主窗专属）。
@@ -1418,7 +1431,10 @@ pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
     if !valid_files_manifest_name(fname) {
         return json!({ "success": false, "message": "备份清单名非法" });
     }
-    let mpath = files_backup_dir().join(fname);
+    // 清单按跨根解析（N1）；后续取副本时必须用**同一根**，否则老根清单会去新根找文件
+    let Some(mpath) = crate::engine::paths::resolve_backup_file(FILES_BACKUP_SUB, fname) else {
+        return json!({ "success": false, "message": "备份清单不存在" });
+    };
     let Ok(text) = std::fs::read_to_string(&mpath) else {
         return json!({ "success": false, "message": "备份清单不存在" });
     };
@@ -1444,7 +1460,11 @@ pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
     if crate::engine::protect::is_path_protected(original) {
         return json!({ "success": false, "message": "原始路径现为受保护路径，已拒绝还原" });
     }
-    let src = files_backup_dir().join(rel);
+    // 副本必须与清单同根（老根清单的副本躺在老根），不能固定用新根拼（N1）
+    let Some(root) = mpath.parent() else {
+        return json!({ "success": false, "message": "备份清单路径异常" });
+    };
+    let src = root.join(rel);
     if !src.is_file() {
         return json!({ "success": false, "message": "备份文件已不存在" });
     }

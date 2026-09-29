@@ -4,6 +4,57 @@
 //! 且保持 CLI 输出与判定语义完全不变（回归基线见 tools/ 与本方案附录 D）。
 
 use std::fs;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// 宿主注入的数据根：`(当前数据根, 升级前的老数据根)`。
+///
+/// 为什么不在这里自己拼 `%APPDATA%\<产品名>`（N2，2026-09-29）：
+/// - 便携模式下那是**宿主机**的漫游目录，标准实例与便携实例会共写同一份排除/忽略名单，
+///   便携版"状态全留在 exe 同级 `data/`"的承诺当场不成立；
+/// - 主 crate 有 `paths::app_data_dir()` 这个唯一真源，扫描器再拼一遍就是第二个口径，
+///   而两边一旦分叉，用户看到的现象是"我明明排除了它，下次还是被列出来"。
+///
+/// 没注入时名单按**空**处理（而不是猜一个路径）：猜出来的路径会把删除面缩小或放大，
+/// 两种都错。注入点在 `src-tauri/src/engine/paths.rs` 的 `app_data_dir()` 初始化里，
+/// 由 `tools/check-fail-closed.mjs` 的 D 段钉住（把注入调用摘掉就判红）。
+static DATA_ROOTS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+
+pub fn set_data_roots(current: PathBuf, legacy: PathBuf) {
+    let _ = DATA_ROOTS.set((current, legacy));
+}
+
+pub fn data_roots() -> Option<(PathBuf, PathBuf)> {
+    DATA_ROOTS.get().cloned()
+}
+
+/// 名单类文件（每行一条路径的 txt）的落点：
+/// 当前根已有 ⇒ 当前根；只有老根有 ⇒ 老根（兜底读，保证升级后旧名单继续生效）；
+/// 两处都没有 ⇒ 当前根（写入落点）。
+///
+/// 刻意**只选一个文件**而不是把两份并起来读：并集会让"删除一条排除项"永远删不干净
+/// （老根那行还在，下次扫描又生效）。真正的合并由主 crate 在启动时一次性搬文件完成。
+pub fn list_file_path(name: &str) -> Option<PathBuf> {
+    let (current, legacy) = DATA_ROOTS.get()?;
+    let cur = current.join(name);
+    if cur.is_file() {
+        return Some(cur);
+    }
+    let old = legacy.join(name);
+    if old.is_file() {
+        return Some(old);
+    }
+    Some(cur)
+}
+
+/// CLI 独立调试入口专用的数据根（Electron 轨 `%APPDATA%\<产品名>`）。
+///
+/// 全仓**唯一**允许在扫描器里拼这个老根的地方就是本函数 —— `tools/check-fail-closed.mjs`
+/// C 段把 `native-scanner/src/util.rs` 钉成 ROOT_OWNER 之一，别处再拼就判红。
+/// 之所以要留着：CLI 没有宿主注入，而它的名单行为必须与迁移前逐字一致（crate 的搬迁原则）。
+pub fn legacy_cli_root() -> Option<PathBuf> {
+    std::env::var("APPDATA").ok().map(|a| PathBuf::from(a).join("Trim"))
+}
 
 /// JSON 字符串转义（手写，避免为单点需求引入 serde——与既有"零额外依赖"取向一致）
 pub fn json_escape(s: &str) -> String {
@@ -135,5 +186,47 @@ mod tests {
         assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
         assert_eq!(json_escape("x\ny\rz\tw"), "x\\ny\\rz\\tw");
         assert_eq!(json_escape("\u{1}"), "\\u0001");
+    }
+}
+
+#[cfg(test)]
+mod data_roots_tests {
+    use super::*;
+
+    /// 名单落点的三种情形必须在**同一个用例**里跑完：根对是进程级 `OnceLock`，
+    /// 只能设置一次，拆成多个 test 会让第二个用例读到第一个的根。
+    #[test]
+    fn 名单落点当前根优先老根兜底两处都无则指当前根() {
+        let root = std::env::temp_dir().join(format!(
+            "trim-roots-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let cur = root.join("cur");
+        let old = root.join("old");
+        std::fs::create_dir_all(&cur).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        set_data_roots(cur.clone(), old.clone());
+
+        // ① 两处都没有 ⇒ 返回当前根（写入落点，绝不返回老根，否则便携实例写宿主机）
+        assert_eq!(
+            list_file_path("cleanup-exclude.txt").as_deref(),
+            Some(cur.join("cleanup-exclude.txt").as_path()),
+            "无名单时写入落点必须是当前根"
+        );
+        // ② 只有老根有 ⇒ 兜底读老根（升级用户的既有排除项不能突然失效）
+        std::fs::write(old.join("empty-ignore.txt"), b"x\r\n").unwrap();
+        assert_eq!(
+            list_file_path("empty-ignore.txt").as_deref(),
+            Some(old.join("empty-ignore.txt").as_path())
+        );
+        // ③ 当前根也有了 ⇒ 立刻改口当前根（主 crate 启动搬完就是这个状态；
+        //    继续读老根会造成"删掉一条排除项、下轮又生效"的两份真相）
+        std::fs::write(cur.join("empty-ignore.txt"), b"x\r\ny\r\n").unwrap();
+        assert_eq!(
+            list_file_path("empty-ignore.txt").as_deref(),
+            Some(cur.join("empty-ignore.txt").as_path())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

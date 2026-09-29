@@ -23,6 +23,11 @@ import { join, relative } from 'node:path';
 import { REPO_ROOT } from './ps-origin.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
+// N2（2026-09-29）：老根棘轮必须把原生扫描器一起扫。它在仓库里是 path 依赖、不是
+// workspace 成员，历史上一直在 `src-tauri/src` 之外自己拼 `%APPDATA%\Trim`
+// （排除名单与空目录忽略名单），标准实例与便携实例共写同一份文件。
+// A/B 两段与扫描器无关（它没有 temp_script_dir），只有 C 段扩范围。
+const SCANNER = join(REPO_ROOT, 'native-scanner', 'src');
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -161,11 +166,20 @@ check(
 // `paths::backup_write_dir`、读取恒走 `paths::backup_read_dirs`，老根只允许在
 // `engine/paths.rs` 里被拼出来（`legacy_data_dir` / 更早的 CleanTool 兜底）。
 // 这条是源码级棘轮：谁再手拼一次老根，就会在门禁里留下文件名与行号。
-const ROOT_OWNER = 'src-tauri/src/engine/paths.rs';
+//
+// N2（2026-09-29）把扫描范围扩到 `native-scanner/src`：那里历史上也自己拼老根
+// （排除名单 / 空目录忽略名单），而扫描器不在 workspace 内，只扫 `src-tauri/src`
+// 的话这类拼法永远不会被判红 —— 便携模式的标准实例与便携实例共写同一份名单就是这么漏的。
+// 允许拼老根的两个文件：主 crate 的数据根唯一真源，和扫描器里 CLI 专用的那一个助手。
+const ROOT_OWNERS = [
+  'src-tauri/src/engine/paths.rs',
+  'native-scanner/src/util.rs',
+];
+const cFiles = [...files, ...walk(SCANNER)];
 const cHits = [];
-for (const f of files) {
+for (const f of cFiles) {
   const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
-  if (rel === ROOT_OWNER) continue;
+  if (ROOT_OWNERS.includes(rel)) continue;
   const lines = readFileSync(f, 'utf8').split(/\r?\n/);
   lines.forEach((line, i) => {
     if (line.trimStart().startsWith('//')) return;
@@ -179,8 +193,23 @@ for (const f of files) {
 }
 check(
   cHits.length === 0,
-  `C. 老根 %APPDATA%\\Trim 只许在 ${ROOT_OWNER} 里拼（备份根唯一真源，v2-M19）`,
+  `C. 老根 %APPDATA%\\Trim 只许在 ${ROOT_OWNERS.join(' / ')} 里拼（备份与名单根唯一真源，v2-M19 / N2）`,
   cHits.length ? `违规 ${JSON.stringify(cHits)}` : '',
+);
+
+// D. 扫描器名单根必须由主 crate 注入（N2）
+//
+// `util::list_file_path` 在没有注入时把名单按**空**处理，而排除/忽略名单是"少删"的保护面：
+// 名单为空 = 删除面变大。所以注入点必须存在且只有一处真源 —— 摘掉下面这行调用，
+// 运行时不会立刻报错（OnceLock 静默为空），只能靠这条源码断言拦住。
+const pathsSrc = readFileSync(join(SRC, 'engine', 'paths.rs'), 'utf8');
+const injected = /trim_finder::util::set_data_roots\s*\(/.test(pathsSrc);
+const scannerUsesRoots = walk(SCANNER).some((f) =>
+  /crate::util::list_file_path\s*\(/.test(readFileSync(f, 'utf8')));
+check(
+  injected && scannerUsesRoots,
+  'D. 扫描器名单根注入只许发生在 paths::app_data_dir()，且扫描器只经 util::list_file_path 取名单',
+  `${injected ? '' : ' 缺注入'}${scannerUsesRoots ? '' : ' 扫描器未走统一入口'}`.trim(),
 );
 
 console.log('');

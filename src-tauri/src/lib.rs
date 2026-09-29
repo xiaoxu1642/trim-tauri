@@ -479,6 +479,12 @@ pub fn run() {
             if let Some(note) = paths::migrate_legacy_once() {
                 log::write_log("info", &note);
             }
+            // N2（2026-09-29）：名单文件（清理排除 / 空目录忽略）另走一条搬迁，不受
+            // appearance.json 闸门限制 —— 它们是扫描器每轮都要读的活性文件，滞留老根
+            // 会造成「读老根、写新根」两份真相：用户删掉一条排除项，下轮扫描又生效。
+            if let Some(note) = paths::migrate_list_files_once() {
+                log::write_log("info", &note);
+            }
             log::prune_old_logs();
             // 审查 M15/G4：隔离件（*.corrupt-*）此前没有任何回收路径
             crate::security::prune_quarantined(&paths::app_data_dir());

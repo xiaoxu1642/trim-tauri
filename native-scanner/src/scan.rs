@@ -783,12 +783,11 @@ fn is_memory_system_file(name: &str) -> bool {
     n == "swapfile.sys" || n == "hiberfil.sys" || (n.starts_with("pagefile") && n.ends_with(".sys"))
 }
 
-/// 空目录用户级忽略名单：%APPDATA%\Trim\empty-ignore.txt，每行一个绝对路径，大小写不敏感。
+/// 空目录用户级忽略名单：`<数据根>\empty-ignore.txt`，每行一个绝对路径，大小写不敏感。
 /// 对标 HiBit Empty Folder Cleaner 的「Ignore this Folder」持久化忽略（P1-4）。
+/// 落点由宿主注入（`util::list_file_path`），本 crate 不再自己拼 `%APPDATA%`（N2）。
 fn empty_ignore_file() -> Option<PathBuf> {
-    std::env::var("APPDATA")
-        .ok()
-        .map(|a| PathBuf::from(a).join("Trim").join("empty-ignore.txt"))
+    crate::util::list_file_path("empty-ignore.txt")
 }
 
 fn load_empty_ignore() -> HashSet<String> {

@@ -6612,6 +6612,60 @@ pub struct CleanupExecuteResult {
     pub recycle_entries: Vec<Value>,
 }
 
+/// 永久删副本的保留上限（N3，2026-09-29）。裁「最老批次」，但副本落在
+/// `<规则id>\<序号>_<文件名>`（见本文件 C-4 写入处），**批次时间戳找不到对应目录**，
+/// 所以只能照清单条目删——清单就是那批副本的唯一索引。删完顺手收掉空掉的规则目录，
+/// 否则 `cleanup-files-backup` 里会留下一堆空壳，看起来"还有备份"其实一份都还原不了。
+///
+/// 只裁新根（调用方传 `backup_write_dir`）：老根那份是升级前的唯一还原依据。
+fn prune_file_backups(root: &std::path::Path, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    let mut manifests: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .filter(|n| {
+            n.strip_prefix("manifest-")
+                .and_then(|s| s.strip_suffix(".json"))
+                .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .collect();
+    manifests.sort();
+    while manifests.len() > keep {
+        let oldest = manifests.remove(0);
+        let mpath = root.join(&oldest);
+        if let Ok(text) = std::fs::read_to_string(&mpath) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
+                    for ent in entries {
+                        let Some(rel) = ent.get("file").and_then(|s| s.as_str()) else { continue };
+                        // 与还原通道同一道准入：不含 .. / 不是绝对路径 / 不带盘符
+                        if rel.is_empty()
+                            || rel.contains("..")
+                            || rel.starts_with('\\')
+                            || rel.starts_with('/')
+                            || rel.contains(':')
+                        {
+                            continue;
+                        }
+                        let _ = std::fs::remove_file(root.join(rel));
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&mpath);
+    }
+    // 空规则目录回收（只在上面真删过东西之后才有意义，扫描代价是一次 read_dir）
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            let Ok(mut sub) = std::fs::read_dir(&p) else { continue }; // 非目录 → 直接跳过
+            if sub.next().is_none() {
+                let _ = std::fs::remove_dir(&p);
+            }
+        }
+    }
+}
+
 /// 清理执行（对应 cleanup_execute.ps1，S3）
 ///
 /// 三类目标模型全部原生化（v0.1.6 真机修复）：fileKeys（含段级 glob 展开）、
@@ -6634,7 +6688,7 @@ pub fn cleanup_execute(
     // 复制失败/超限都不阻塞删除，否则清理主链被备份故障绑架）。
     const FILE_BACKUP_MAX_FILE: u64 = 64 * 1024 * 1024;
     const FILE_BACKUP_MAX_BATCH: u64 = 256 * 1024 * 1024;
-    let files_backup_root = crate::engine::paths::app_data_dir().join("cleanup-files-backup");
+    let files_backup_root = crate::engine::paths::backup_write_dir("cleanup-files-backup");
     let backup_batch_ts = crate::engine::now_ms();
     let mut backup_entries: Vec<Value> = Vec::new();
     let mut backup_total: u64 = 0;
@@ -6653,7 +6707,7 @@ pub fn cleanup_execute(
         // 注册表不进回收站，to_recycle 两种模式同径（对齐 PS）。
         if let Some(reg_keys) = rule.get("regKeys").and_then(|v| v.as_array()) {
             if !reg_keys.is_empty() {
-                let backup_dir = crate::engine::paths::app_data_dir().join("cleanup-reg-backup");
+                let backup_dir = crate::engine::paths::backup_write_dir("cleanup-reg-backup");
                 let _ = std::fs::create_dir_all(&backup_dir);
                 // 解析 + 存在性过滤（与 PS Measure-RegRule 同口径）
                 let mut parsed: Vec<(HKEY, String, Option<String>)> = Vec::new();
@@ -6729,6 +6783,11 @@ pub fn cleanup_execute(
                     details.push(json!({"id": id, "name": name, "status": "error", "freed": 0, "message": "注册表备份失败，未执行删除", "fileCount": 0}));
                     continue;
                 }
+                // N3：备份写完后裁一次保留上限（只裁新根，见 paths::prune_backups）
+                crate::engine::paths::prune_backups(
+                    &backup_dir,
+                    crate::engine::paths::BACKUP_KEEP,
+                );
                 let mut removed = 0i64;
                 let mut reg_failed = 0i64;
                 for (hive, rest, value) in &parsed {
@@ -7041,6 +7100,8 @@ pub fn cleanup_execute(
                     crate::engine::log::write_log("warn", "files 备份清单序列化失败");
                 }
             }
+            // N3：副本按清单裁最老批次（副本目录是 `规则id\`，不能按批次时间戳找）
+            prune_file_backups(&files_backup_root, crate::engine::paths::BACKUP_KEEP);
         }
     }
 
@@ -7386,5 +7447,110 @@ mod cleanup_engine_contract_tests {
         assert_eq!(paths.len(), 1, "只有 mtime 满 3 天的文件进清单: {paths:?}");
         assert!(paths[0].ends_with("stale.txt"), "清单内容异常: {paths:?}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod file_backup_retention_tests {
+    use super::*;
+
+    fn sandbox(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("trim-filekeep-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 造一批：清单 + `<规则id>\<序号>_<文件名>` 副本（与 C-4 写入处同形状）
+    fn make_batch(root: &std::path::Path, ts: u64, rule: &str, files: &[&str]) {
+        let entries: Vec<serde_json::Value> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let rel = format!("{rule}\\{i}_{f}");
+                std::fs::create_dir_all(root.join(rule)).unwrap();
+                std::fs::write(root.join(&rel), b"payload").unwrap();
+                json!({ "file": rel, "path": format!("C:\\orig\\{f}"), "size": 7, "rule": rule })
+            })
+            .collect();
+        std::fs::write(
+            root.join(format!("manifest-{ts}.json")),
+            serde_json::to_vec(&json!({ "ts": ts, "entries": entries })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// N3：文件副本的保留上限必须**照清单条目删**。副本落点是 `<规则id>\`、跨批次共享，
+    /// 按批次时间戳找不到对应目录 —— 只删清单会留下无人认领的副本，反过来按目录删
+    /// 会把别的批次一起带走。
+    #[test]
+    fn 裁最老批次时清单与副本同删并回收空规则目录() {
+        let root = sandbox("prune");
+        make_batch(&root, 1_700_000_000_001, "share_cache", &["a.txt", "b.txt"]);
+        make_batch(&root, 1_700_000_000_002, "thumb", &["c.txt"]);
+        make_batch(&root, 1_700_000_000_003, "thumb", &["d.txt"]);
+
+        prune_file_backups(&root, 2);
+
+        let mut left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "manifest-1700000000002.json".to_string(),
+                "manifest-1700000000003.json".to_string(),
+                "thumb".to_string()
+            ],
+            "只该裁最老那批，且它独占的规则目录要一起回收: {left:?}"
+        );
+        assert!(!root.join("share_cache").exists(), "该批副本目录已空并被回收");
+        assert_eq!(
+            std::fs::read_dir(root.join("thumb")).unwrap().flatten().count(),
+            2,
+            "后续批次的副本不得被牵连"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 清单条目里的 `rel` 走与还原通道同一道准入：`..` / 绝对路径 / 盘符一律不删。
+    /// 少这道闸，一份被改写过的清单就能让"保留上限"变成任意路径删除。
+    #[test]
+    fn 保留上限不得跟着被改写的清单删到备份根之外() {
+        let root = sandbox("evil");
+        let outside = root.parent().unwrap().join(format!(
+            "trim-filekeep-outside-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&outside);
+        std::fs::write(&outside, b"must survive").unwrap();
+        // 三批 keep=2 ⇒ 最老那份要被裁；它的条目却指向备份根之外
+        for ts in [1_700_000_000_001u64, 1_700_000_000_002, 1_700_000_000_003] {
+            std::fs::write(
+                root.join(format!("manifest-{ts}.json")),
+                serde_json::to_vec(&json!({
+                    "ts": ts,
+                    "entries": [{
+                        "file": format!("..\\{}", outside.file_name().unwrap().to_string_lossy()),
+                        "path": "C:\\orig\\x", "size": 1, "rule": "r"
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        prune_file_backups(&root, 2);
+
+        assert!(outside.is_file(), "越界 rel 必须被拒，保留上限裁不到备份根之外");
+        assert!(
+            !root.join("manifest-1700000000001.json").exists(),
+            "清单自身仍按上限裁掉（拒删条目不等于放弃限额）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
     }
 }

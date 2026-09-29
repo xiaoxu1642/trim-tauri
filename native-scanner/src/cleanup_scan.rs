@@ -1396,10 +1396,11 @@ fn rule_min_age_secs(rule: &Json) -> Option<u64> {
 // 共用同一加载与判定，防「扫描排除、执行照删」。
 // 损坏/不可读按空名单处理（排除名单只影响删什么，不影响 fail-closed 的删除面）。
 
+/// 排除名单落点由宿主注入（`util::list_file_path`），本 crate 不再自己拼 `%APPDATA%`（N2）。
+/// 主 crate 的读写两侧都走这一个函数，所以"扫描排除了、执行照删"和"删了条 yet 又生效"
+/// 两类分叉都被同一入口挡住。
 pub fn global_exclude_file() -> Option<std::path::PathBuf> {
-    std::env::var("APPDATA")
-        .ok()
-        .map(|a| std::path::PathBuf::from(a).join("Trim").join("cleanup-exclude.txt"))
+    crate::util::list_file_path("cleanup-exclude.txt")
 }
 
 /// 返回 (目录前缀, 文件全路径) 两组小写排除项。行尾 `\` 归一。

@@ -51,6 +51,13 @@ fn parse_u64(s: &str) -> u64 {
 }
 
 fn main() {
+    // N2：CLI 是独立调试入口，没有宿主注入数据根。这里把两个根都设成 Electron 时代的
+    // 老根，使 CLI 的排除/忽略名单行为与迁移前**逐字一致**（crate 的搬迁原则）；
+    // Tauri 侧不走这条路，它由 `paths::app_data_dir()` 注入当前根 + 老根兜底。
+    // 老根的拼接只允许发生在 `util::legacy_cli_root`（门禁 C 段把它列为 ROOT_OWNER）。
+    if let Some(root) = trim_finder::util::legacy_cli_root() {
+        trim_finder::util::set_data_roots(root.clone(), root);
+    }
     // 审查v4-L4：命令名/数值参数经 lossy 转换足够，但原始 OsString 必须保留——
     // 文件路径含孤立代理对等非良构 UTF-16 时 to_string_lossy 会产生 U+FFFD，删除目标静默失配
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();

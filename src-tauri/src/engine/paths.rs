@@ -81,6 +81,14 @@ const MIGRATION_DIRS: &[&str] = &[
     "uninstall",
 ];
 
+// N1（2026-09-29）**刻意不把 `cleanup-reg-backup` / `cleanup-files-backup` /
+// `uninstall-reg-backup` 加进 MIGRATION_DIRS**，改走 `backup_read_entries` 兜底读，理由两条：
+// ① 第二段迁移的闸门是「新根没有 appearance.json 才跑」，存量用户的新根早就有了 ⇒ 补清单
+//   对他们一次都不会执行，等于修了个不生效的开关；兜底读对他们立刻生效。
+// ② 便携模式的迁移目标在 U 盘上（`exe/data/`），把宿主机 `%APPDATA%\Trim` 里的历史备份
+//   整批复制过去既拖慢首启动（这批可能有几百 MB），又把用户的本机路径带上共享介质。
+// 结论：备份的"看得见 + 还能还原"由读取兜底负责，搬迁不是必要环节。
+
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn exe_dir() -> PathBuf {
@@ -103,10 +111,17 @@ fn appdata_dir() -> PathBuf {
 /// 本应用数据目录（便携模式为 exe 目录 data 子目录）
 pub fn app_data_dir() -> &'static PathBuf {
     DATA_DIR.get_or_init(|| {
-        if is_portable() {
-            return exe_dir().join("data");
-        }
-        appdata_dir().join(IDENTIFIER)
+        let dir = if is_portable() {
+            exe_dir().join("data")
+        } else {
+            appdata_dir().join(IDENTIFIER)
+        };
+        // N2（2026-09-29）：数据根一旦确定就把根注入原生扫描器。放在这里而不是各处记得调，
+        // 理由是「谁能拿到数据根，谁就顺手把scanner 的名单根定下来」——漏注入的后果是
+        // 排除/忽略名单按空处理，删除面**变大**（用户明确排除过的东西重新进候选），
+        // 那比多排除更危险。`tools/check-fail-closed.mjs` D 段钉住这条注入。
+        trim_finder::util::set_data_roots(dir.clone(), legacy_data_dir());
+        dir
     })
 }
 
@@ -143,6 +158,84 @@ pub fn backup_read_dirs(sub: &str) -> Vec<PathBuf> {
         dirs.push(legacy);
     }
     dirs
+}
+
+/// 备份类的保留上限（N3，2026-09-29）：与 `delete_manifest::MANIFEST_KEEP`、还原包
+/// `KEEP_BATCHES` 同一口径，不新造数字。
+pub const BACKUP_KEEP: usize = 50;
+
+/// 跨根列出备份条目：`(路径, 是否来自老根)`，新根在前、**按小写文件名去重**。
+///
+/// 为什么同名只留新根那份：还原入口是按文件名找实体的（`file` 参数来自渲染层），
+/// 同一个名字挂两根会让"还原哪一个"变成掷硬币，而两根同名几乎只可能是搬迁残留的副本。
+/// 老根兜底的意义是**让升级前的备份看得见、还能还原**，不是把它们再抄一份进来。
+pub fn backup_read_entries(sub: &str) -> Vec<(PathBuf, bool)> {
+    read_entries_across_roots(backup_read_dirs(sub))
+}
+
+/// `backup_read_entries` 的可注入内核：入参就是"根清单"（第一个算新根，其余算老根），
+/// 单测才能拿临时目录测跨根去重与来源标记 —— 直接测上面那个只能对着真实数据根跑，
+/// 本机有没有备份会让用例变成"碰巧绿"。
+///
+/// **只上报文件**：`cleanup-files-backup` 的根里混着 `<规则id>\` 目录，把它们当条目会让
+/// "同名以新根为准"变成"新根一个目录屏蔽老根一份真备份"。目录过滤留在这一层，
+/// 调用方就不必各写一遍 `is_file()`。
+pub fn read_entries_across_roots(dirs: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
+    let mut out: Vec<(PathBuf, bool)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (i, dir) in dirs.into_iter().enumerate() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for ent in rd.flatten() {
+            let path = ent.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
+            let key = name.to_lowercase();
+            if seen.iter().any(|s| *s == key) {
+                continue;
+            }
+            seen.push(key);
+            out.push((path, i > 0));
+        }
+    }
+    out
+}
+
+/// 按文件名定位备份实体（新根优先）。还原侧**唯一**的路径解析入口——渲染层只给文件名，
+/// 拼路径的权力留在这里，别让调用方各写一遍 `join` 而漏掉老根兜底。
+pub fn resolve_backup_file(sub: &str, name: &str) -> Option<PathBuf> {
+    backup_read_dirs(sub)
+        .into_iter()
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
+/// 只保留最近 `keep` 份备份（名字里的毫秒时间戳是定宽 13 位 ⇒ 字典序即时序，与
+/// delete_manifest / restore_pack 同姿势）。
+///
+/// **只管新根**：老根那份是用户升级前的唯一还原依据，删它等于替用户丢掉最后的退路；
+/// 读取兜底负责"看得见"，这里负责"我们自己写的地方不无限涨"（N3）。
+///
+/// 形状 `RegSealed` = 主文件 `<ms>_..._.reg` + 同目录封条 `<该文件名>.meta.json`。
+/// 两者必须同生同死：只删主文件会留下孤儿封条，而封条本身也以 `.reg` 结尾……不，封条名是
+/// `x.reg.meta.json`，不以 `.reg` 结尾，所以不会被当主文件计数；反过来若只删封条，主文件
+/// 就变成"无据可查"，还原侧会按 `missing` 拒 —— 那比留下孤儿更糟。
+pub fn prune_backups(dir: &Path, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .filter(|n| n.ends_with(".reg") && !n.starts_with('.'))
+        .collect();
+    names.sort();
+    while names.len() > keep {
+        let oldest = names.remove(0);
+        let _ = std::fs::remove_file(dir.join(&oldest));
+        let mut seal = oldest;
+        seal.push_str(".meta.json");
+        let _ = std::fs::remove_file(dir.join(seal));
+    }
 }
 
 /// 规则库目录收口（2026-09-28 决策清单 D1=A）用的三个入口。
@@ -235,6 +328,43 @@ pub fn temp_script_dir() -> Result<PathBuf, String> {
         }
     }
     Ok(dir)
+}
+
+/// 名单类文件（每行一条路径）的一次性搬迁（N2）。
+///
+/// 为什么单独一条、且**不走** `MIGRATION_FILES` 那条闸门：那份迁移只在「新根没有
+/// appearance.json」时执行，存量用户永远碰不到；而名单是扫描器每轮都要读的活性文件，
+/// 不搬就会出现"读取走老根、写入落新根"的两份真相 —— 用户删掉一条排除项，下轮又生效。
+/// 搬完只留新根一份可写实体；老根那份原样保留（可重跑、也可人工回退）。
+pub fn migrate_list_files_once() -> Option<String> {
+    migrate_list_files_into(app_data_dir().as_ref(), &legacy_data_dir())
+}
+
+/// 同上，但两个根由入参给 —— 名单搬迁的判定（只补不覆盖、老根保留）必须能拿临时目录测，
+/// 对着真实数据根跑会变成"这台机器恰好没有老名单"式的假绿。
+fn migrate_list_files_into(target: &Path, legacy: &Path) -> Option<String> {
+    const LIST_FILES: &[&str] = &["empty-ignore.txt", "cleanup-exclude.txt"];
+    let mut moved: Vec<&str> = Vec::new();
+    for name in LIST_FILES {
+        let dst = target.join(name);
+        if dst.exists() {
+            continue;
+        }
+        let src = legacy.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        if std::fs::create_dir_all(target).is_err() {
+            break;
+        }
+        if std::fs::copy(&src, &dst).is_ok() {
+            moved.push(name);
+        }
+    }
+    if moved.is_empty() {
+        return None;
+    }
+    Some(format!("已把名单文件迁入当前数据目录：{}", moved.join("、")))
 }
 
 /// 启动迁移：CleanTool → Trim → com.xiaoxu.trim 两段式，均为「仅在目标不存在时复制」。
@@ -470,6 +600,121 @@ mod tests {
         assert!(data_subdir_for_write("cleanup").starts_with(app_data_dir().as_path()));
     }
 
+    /// N1：跨根列举必须是「新根同名优先 + 老根标来源」。
+    /// 同名挂两根时还原按文件名找实体，两条同名等于让用户掷硬币。
+    #[test]
+    fn 跨根列举_新根优先且老根标来源() {
+        let root = sandbox("cross-root");
+        let new = root.join("new");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(legacy.join("sub")).unwrap();
+        std::fs::write(new.join("a.reg"), b"new-a").unwrap();
+        std::fs::write(legacy.join("a.reg"), b"legacy-a").unwrap(); // 与新根同名
+        std::fs::write(legacy.join("b.reg"), b"legacy-b").unwrap();
+        std::fs::write(legacy.join("sub/c.txt"), b"x").unwrap(); // 子目录不得被当条目上报
+
+        let got = read_entries_across_roots(vec![new.clone(), legacy.clone()]);
+        let mut by_name: Vec<(String, bool)> = got
+            .iter()
+            .map(|(p, legacy_flag)| {
+                (p.file_name().unwrap().to_string_lossy().to_string(), *legacy_flag)
+            })
+            .collect();
+        by_name.sort();
+        assert_eq!(
+            by_name,
+            vec![("a.reg".to_string(), false), ("b.reg".to_string(), true)],
+            "同名必须以新根为准且只留一条，老根独有项要标 fromLegacy"
+        );
+
+        // 判红自测口径：去掉去重 ⇒ 两条 a.reg；去掉 i>0 ⇒ b.reg 不再标老根
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 新根的**同名目录**不得屏蔽老根的真备份（本轮实测到旧写法就会这样：目录被当条目
+    /// 上报并占掉去重名，结果列表里没有那份能还原的 .reg）
+    #[test]
+    fn 新根同名目录不屏蔽老根实体() {
+        let root = sandbox("shadow");
+        let new = root.join("new");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(new.join("1700000000007_Alpha.reg")).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("1700000000007_Alpha.reg"), b"Windows Registry Editor").unwrap();
+        let got = read_entries_across_roots(vec![new, legacy]);
+        assert_eq!(got.len(), 1, "目录不是备份条目: {got:?}");
+        assert!(got[0].1, "唯一那份来自老根，要标 fromLegacy");
+        assert!(got[0].0.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// N3：保留上限裁最老批次，并让封条与主文件同生同死。
+    /// 只管新根由调用方保证（`backup_write_dir`），老根那份是升级前唯一还原依据。
+    #[test]
+    fn 备份保留上限裁最老份且连封条一起删() {
+        let root = sandbox("prune");
+        let dir = root.join("cleanup-reg-backup");
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..5u64 {
+            let name = format!("170000000{i}_key_{i}.reg");
+            std::fs::write(dir.join(&name), b"Windows Registry Editor").unwrap();
+            let mut seal = name;
+            seal.push_str(".meta.json");
+            std::fs::write(dir.join(seal), b"{}").unwrap();
+        }
+        prune_backups(&dir, 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "1700000002_key_2.reg".to_string(),
+                "1700000002_key_2.reg.meta.json".to_string(),
+                "1700000003_key_3.reg".to_string(),
+                "1700000003_key_3.reg.meta.json".to_string(),
+                "1700000004_key_4.reg".to_string(),
+                "1700000004_key_4.reg.meta.json".to_string(),
+            ],
+            "必须裁掉最老两份，且它们的封条一起消失"
+        );
+
+        // 孤儿封条（主文件已被用户删掉）不得占保留额度：只数 .reg
+        std::fs::write(dir.join("1700000009_orphan.reg.meta.json"), b"{}").unwrap();
+        prune_backups(&dir, 3);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().flatten().count(),
+            7,
+            "三份主文件 + 三份封条 + 一份孤儿封条，孤儿不参与计数"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 还原侧的跨根定位：新根优先，新根缺失才回老根；两处都没有 ⇒ None（不得凭空缺路径 import）
+    #[test]
+    fn 备份实体定位新根优先且缺文件返回空() {
+        let root = sandbox("resolve");
+        let new = root.join("new");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("only_legacy.reg"), b"l").unwrap();
+        std::fs::write(new.join("both.reg"), b"n").unwrap();
+        std::fs::write(legacy.join("both.reg"), b"l").unwrap();
+        let dirs = vec![new.clone(), legacy.clone()];
+        let pick = |name: &str| -> Option<PathBuf> {
+            dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
+        };
+        assert_eq!(pick("only_legacy.reg"), Some(legacy.join("only_legacy.reg")));
+        assert_eq!(pick("both.reg"), Some(new.join("both.reg")));
+        assert_eq!(pick("missing.reg"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn 目录搬迁绝不覆盖目标已有文件() {
         let root = sandbox("noclobber");
@@ -494,5 +739,32 @@ mod tests {
         // 防回归：dev 下 exe 位于 target/debug，若真按 Trim.portable 判定会把
         // 构建目录当数据盘。当前实现用 cfg!(debug_assertions) 短路，测试必然跑在 dev。
         assert!(!is_portable(), "调试构建不得判为便携模式");
+    }
+
+    /// N2：名单文件搬迁必须「只补不覆盖 + 老根保留」。覆盖新根会抹掉用户在新版里
+    /// 增删过的排除项；删老根则让回退无路可走（与 `copy_dir_missing_only` 同纪律）。
+    #[test]
+    fn 名单搬迁只补不覆盖且保留老根() {
+        let root = sandbox("lists");
+        let cur = root.join("cur");
+        let old = root.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("cleanup-exclude.txt"), b"legacy-line\r\n").unwrap();
+        std::fs::write(old.join("empty-ignore.txt"), b"old-ignore\r\n").unwrap();
+        // 新根已有排除名单（用户在新版里改过）——只有 empty-ignore 需要搬
+        std::fs::create_dir_all(&cur).unwrap();
+        std::fs::write(cur.join("cleanup-exclude.txt"), b"new-line\r\n").unwrap();
+
+        let note = migrate_list_files_into(&cur, &old).expect("应至少搬成一份");
+        assert!(note.contains("empty-ignore.txt") && !note.contains("cleanup-exclude.txt"),
+                "只搬缺失的那份: {note}");
+        assert_eq!(std::fs::read(cur.join("cleanup-exclude.txt")).unwrap(), b"new-line\r\n",
+                   "新根名单不得被老根覆盖");
+        assert_eq!(std::fs::read(cur.join("empty-ignore.txt")).unwrap(), b"old-ignore\r\n");
+        assert!(old.join("empty-ignore.txt").is_file(), "老根原件保留（可重跑、可回退）");
+
+        // 再跑一次：新根两份都在 ⇒ 无事可做返回 None（启动每次都调，必须幂等）
+        assert!(migrate_list_files_into(&cur, &old).is_none(), "已迁完不得再产生搬迁日志");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

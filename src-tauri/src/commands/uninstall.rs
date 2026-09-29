@@ -4475,6 +4475,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             }
             // D2：备份写成后落封条（此后列表/还原才对得上这份文件）
             write_reg_backup_seal(&file, target);
+            // N3：写完裁一次保留上限。只裁新根，封条随主文件同删（paths::prune_backups）；
+            // 刚写的这份是最新项，不会被自己裁掉。
+            crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);
             if let Some(p) = pack.as_mut() {
                 let _ = p.include_reg_backup(&file);
             }
@@ -4511,6 +4514,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             }
             // D2：封条记的是**被备份的父键**（删单值前整父键导出，还原粒度也是父键）
             write_reg_backup_seal(&file, key_part);
+            // N3：与 reg_key 分支同一口径裁保留上限（同一目录，两处都要裁，漏一处
+            // 就等于"删值的备份不参与限额"，盘上照样无限涨）
+            crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);
             if let Some(p) = pack.as_mut() {
                 // 副本只为「一批一个去处」；写注册表的还原入口仍然只有 uninstall_reg_backup_restore
                 if let Err(e) = p.include_reg_backup(&file) {
@@ -4667,9 +4673,17 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
 // 所以封条只提升两类防护——半截写入/手工误改的**误污染检测**，和低权限单点篡改的**可发现性**。
 // 真正的防伪需要 HKLM 侧常驻提权面，那是另一次拍板，不许在这里当成已经具备的能力。
 
-/// 卸载域注册表备份目录：两处 export 与列表/还原共用同一入口，不再各拼一遍路径
+/// 卸载域注册表备份目录：两处 export 与列表/还原共用同一入口，不再各拼一遍路径。
+///
+/// 写恒新根（`backup_write_dir`），**读跨两根**（`backup_read_entries` / `resolve_backup_file`）：
+/// 卸载域的 `.reg` 是本仓新写的，老根理论上不该有；但 v0.2.6 之前该目录曾用
+/// `app_data_dir().join(...)` 直拼，与 `backup_write_dir` 等价，故不影响实体。兜底读留着
+/// 是为了与 cleanup 域同口径（那条域的旧批确实躺在 `%APPDATA%\Trim`，N1），
+/// 别让"同一个还原界面"在两个域里对同一件事给出不同答案。
+const UNINSTALL_REG_BACKUP_SUB: &str = "uninstall-reg-backup";
+
 fn uninstall_reg_backup_dir() -> PathBuf {
-    crate::engine::paths::app_data_dir().join("uninstall-reg-backup")
+    crate::engine::paths::backup_write_dir(UNINSTALL_REG_BACKUP_SUB)
 }
 
 /// 备份文件名准入：只认生成器产出的形状（`<毫秒>_<键末段>.reg`），
@@ -4767,25 +4781,21 @@ fn parse_reg_backup_text(text: &str) -> Option<Vec<String>> {
     (!keys.is_empty()).then_some(keys)
 }
 
-/// uninstall:reg-backup-list — 卸载域注册表备份列表（只读；≤50 条按 mtime 倒序）
-#[tauri::command]
-pub fn uninstall_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    let Ok(rd) = std::fs::read_dir(uninstall_reg_backup_dir()) else {
-        return json!({ "success": true, "data": { "backups": [] } });
-    };
+/// 把「跨根备份条目」渲染成列表项：文件名解析 + 封条核对 + 老根标记 + mtime 倒序。
+///
+/// 为什么单独成函数：这段逻辑决定"还原按钮有没有依据"，但它对着真实数据根测不准 ——
+/// 本机有没有 `.reg` 备份会让用例变成"碰巧绿"（AGENTS §4.1 假绿教训）。拆出来才能拿
+/// 临时目录当输入。
+fn render_reg_backups(entries: Vec<(PathBuf, bool)>) -> Vec<Value> {
     let mut items: Vec<Value> = Vec::new();
-    for ent in rd.flatten() {
-        let p = ent.path();
+    for (p, from_legacy) in entries {
         let Some(name) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
             continue;
         };
         if !valid_uninstall_backup_name(&name) || !p.is_file() {
             continue;
         }
-        let Ok(meta) = ent.metadata() else { continue };
+        let Ok(meta) = p.metadata() else { continue };
         let (seal, seal_meta) = reg_backup_seal_state(&p);
         // 文件名形如 `{毫秒}_{键末段}.reg`：时间戳直接取首段，取不到就以 mtime 为准
         let stamp = name.split('_').next().unwrap_or("").parse::<i64>().unwrap_or(0);
@@ -4799,14 +4809,27 @@ pub fn uninstall_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) ->
                 .unwrap_or(0),
             "sizeBytes": meta.len(),
             "seal": seal,
+            // 老根那份必须标来源：它是升级前的唯一还原依据，不是当前版本偷偷写的
+            "fromLegacy": from_legacy,
             "target": seal_meta.get("target").and_then(Value::as_str).unwrap_or(""),
         }));
-        if items.len() >= 50 {
-            break;
-        }
     }
     items.sort_by(|a, b| b["mtimeMs"].as_i64().cmp(&a["mtimeMs"].as_i64()));
-    json!({ "success": true, "data": { "backups": items } })
+    items
+}
+
+/// uninstall:reg-backup-list — 卸载域注册表备份列表（只读；跨新根+老根，≤50 条按 mtime 倒序）
+#[tauri::command]
+pub fn uninstall_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let mut items = render_reg_backups(crate::engine::paths::backup_read_entries(
+        UNINSTALL_REG_BACKUP_SUB,
+    ));
+    let total_count = items.len();
+    items.truncate(50);
+    json!({ "success": true, "data": { "backups": items, "totalCount": total_count } })
 }
 
 /// uninstall:reg-backup-restore — 把单个备份 import 回注册表（主窗专属）。
@@ -4824,10 +4847,13 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
     if !valid_uninstall_backup_name(&name) {
         return json!({ "success": false, "message": "备份文件名非法" });
     }
-    let path = uninstall_reg_backup_dir().join(&name);
-    if !path.is_file() {
+    // 还原侧与列表侧必须共用同一套跨根解析：列表能列出老根那份，还原就只能从同一根取，
+    // 否则"看得见、点不动"（N1）
+    let Some(path) =
+        crate::engine::paths::resolve_backup_file(UNINSTALL_REG_BACKUP_SUB, &name)
+    else {
         return json!({ "success": false, "message": "备份文件不存在" });
-    }
+    };
     let Some(keys) = parse_reg_backup(&path) else {
         return json!({
             "success": false,
@@ -6425,6 +6451,71 @@ mod residue_trace_tests {
         assert_eq!(dormant_delta(Some(0), 1_700_000_900_000), Value::Null);
         assert_eq!(dormant_delta(Some(1_700_000_900_001), 1_700_000_900_000), Value::Null, "时钟回拨不给负数");
         assert_eq!(dormant_delta(Some(1_700_000_000_000), 1_700_000_900_000), json!(900_000));
+    }
+}
+
+#[cfg(test)]
+mod backup_visibility_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn sandbox(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trim-backup-vis-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// mtime 必须显式设定：两个文件在同一毫秒内写完时，倒序断言会变成掷硬币，
+    /// 于是"看起来稳定"的用例会在换机器时第一次红。
+    fn touch(path: &Path, ms: u64) {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_millis(ms)).unwrap();
+    }
+
+    /// N1：跨根列表必须把「来自老根」标出来，且**封条缺失也要列出**。
+    /// 封条是 v0.2.6 才加的，升级前那批永远 missing —— 拒列就等于把用户唯一的
+    /// 还原依据藏起来（这正是 v2-M14「已自动还原」空桩那一类：界面看不到 = 用户以为没有）。
+    #[test]
+    fn 跨根备份渲染标来源且缺封条仍列出() {
+        let root = sandbox("render");
+        let new = root.join("new");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        let a = new.join("1700000000001_Alpha.reg");
+        std::fs::write(&a, "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Alpha]\r\n\"X\"=dword:1\r\n").unwrap();
+        write_reg_backup_seal(&a, "HKCU\\Software\\Alpha");
+        touch(&a, 1_700_000_001_000);
+        let b = legacy.join("1700000000002_Beta.reg");
+        std::fs::write(&b, "Windows Registry Editor Version 5.00\r\n").unwrap();
+        touch(&b, 1_700_000_002_000);
+        // 杂项与非法名不得进列表（还原是按文件名找实体的通道）
+        std::fs::write(legacy.join("readme.txt"), b"x").unwrap();
+
+        let items = render_reg_backups(vec![(a.clone(), false), (b.clone(), true)]);
+        assert_eq!(items.len(), 2, "两份都要列出，非法名那份被过滤: {items:?}");
+        assert_eq!(items[0]["file"], "1700000000002_Beta.reg", "mtime 倒序");
+        assert_eq!(items[0]["fromLegacy"], json!(true), "老根那份必须标来源");
+        assert_eq!(items[0]["seal"], "missing", "无封条的老备份仍要可见");
+        assert_eq!(items[1]["fromLegacy"], json!(false));
+        assert_eq!(items[1]["seal"], "ok");
+        assert_eq!(items[1]["target"], "HKCU\\Software\\Alpha");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 判红自测口径（AGENTS §4：只会打 ✓ 的不算验收）：
+    /// 把 `from_legacy` 写死 false、或把 `!p.is_file()` 那道闸摘掉，本用例必须红。
+    #[test]
+    fn 渲染拒绝目录项与非文件条目() {
+        let root = sandbox("reject");
+        std::fs::create_dir_all(root.join("1700000000009_Dir.reg")).unwrap();
+        let entries = vec![(root.join("1700000000009_Dir.reg"), false)];
+        assert!(render_reg_backups(entries).is_empty(), "同名目录不得当备份列出——还原侧会按文件读它并失败");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
