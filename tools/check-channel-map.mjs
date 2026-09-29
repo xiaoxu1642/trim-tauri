@@ -93,6 +93,8 @@ const TAURI_ADDED = {
   'uninstall:appx-logo': 'U-3（2026-09-28）：Appx Logo 懒加载（上游无此能力）',
   'cleanup:reg-backup-list': 'C-4（2026-09-28）：注册表备份列表（上游只写备份无还原面）',
   'cleanup:reg-backup-restore': 'C-4（2026-09-28）：注册表备份还原（reg import，主窗档）',
+  'uninstall:batch-list': 'H1（2026-09-29）：卸载还原包列表（上游只有 .reg 备份，无内容级还原包）',
+  'uninstall:batch-restore': 'H1（2026-09-29）：整批还原文件内容（往磁盘写，主窗档）',
   'cleanup:file-backup-list': 'C-4（2026-09-28）：永久删批次文件备份清单（2026-09-28 拍板补删前备份）',
   'cleanup:file-backup-restore': 'C-4（2026-09-28）：文件备份拷回原路径（主窗档）',
   'uninstall:check-residue-version': 'A3/M3（2026-09-28）：残留规则库版本检查（上游无残留库热更新能力）',

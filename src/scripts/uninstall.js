@@ -26,6 +26,13 @@
   // 无选中程序时的合成 id：残留不属于任何单个程序，批次报告按它归档（执行侧只用于落报告）
   const MACHINE_APP_ID = 'MACHINE|all';
 
+  // 删前备份偏好（HiBit §H1 还原包）。取「显式关过才算关」以外的最保守解：
+  // 读不到 / 读失败一律按关，因为开备份会带来几百 MB 落盘，猜错方向的代价不对称。
+  const BACKUP_PREF_KEY = 'trim.residue.backupPack';
+  function readBackupPref() {
+    try { return localStorage.getItem(BACKUP_PREF_KEY) === '1'; } catch (e) { return false; }
+  }
+
   function esc(s) { return window.ds.esc(s); }
   function fmtSizeKb(kb) {
     kb = Number(kb) || 0;
@@ -517,7 +524,7 @@
     if (!picked.length || running) return;
     const ok = await window.app?.confirmDanger?.(
       '确认清理残留',
-      `将删除选中的 ${picked.length} 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。`,
+      `将删除选中的 ${picked.length} 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。${readBackupPref() ? '已开启删前备份：选中内容会先打进本机还原包，之后可整批写回原位置。' : ''}`,
       '开始清理',
       '取消',
       '低置信项为名称启发式结果，请确认路径确实属于已卸载的程序再勾选。'
@@ -529,10 +536,18 @@
     try {
       const resp = await window.api.uninstall.residueExecute(
         currentAppId,
-        picked.map((f) => ({ kind: f.kind, target: f.target }))
+        picked.map((f) => ({ kind: f.kind, target: f.target })),
+        readBackupPref()
       );
       if (!resp.success) throw new Error(resp.message || '残留清理失败');
       const d = resp.data || {};
+      // 还原包结果要说清：勾了备份却没成（收尾失败）时必须当场讲，不能等用户去还原才发现
+      const pack = d.restorePack;
+      if (pack && pack.error) {
+        window.app?.toast?.('error', `还原包写入失败：${pack.error}（文件已删除，内容无法还原，回收站仍可查看）`);
+      } else if (pack) {
+        window.app?.log?.('info', `还原包已生成：${pack.files} 个文件 / ${pack.dirs} 个目录 / ${(pack.bytes / 1048576).toFixed(1)} MB（${pack.id}）`);
+      }
       const okCount = Number(d.okCount) || 0;
       const failCount = Number(d.failCount) || 0;
       if (failCount > 0) {
@@ -698,6 +713,18 @@
     document.getElementById('residueBtnRescan')?.addEventListener('click', scanAllResidue);
     document.getElementById('btnResidueScanAll')?.addEventListener('click', scanAllResidue);
     document.getElementById('residueBtnClean')?.addEventListener('click', cleanResidue);
+    // HiBit §H1：删前是否先打还原包。**默认关**（2026-09-29 裁定不做默认备份）——
+    // 整目录动辄几百 MB，静默打包既慢又占盘；勾了才备，且勾了建包失败就整批不删（后端钉）
+    const bk = document.getElementById('residueBackupToggle');
+    if (bk) {
+      bk.checked = readBackupPref();
+      bk.addEventListener('change', () => {
+        try { localStorage.setItem(BACKUP_PREF_KEY, bk.checked ? '1' : '0'); } catch (e) { /* 偏好写不进不影响本次判断 */ }
+        window.app?.toast?.('info', bk.checked
+          ? '已开启：删除前会把选中项的内容打进本机还原包，之后可在「备份」列表整批还原'
+          : '已关闭：文件只进回收站，不再生成内容还原包');
+      });
+    }
     document.getElementById('residueList')?.addEventListener('click', onResidueClick);
     loadApps();
   }

@@ -11,6 +11,7 @@ pub mod native;
 pub mod optimization_state;
 pub mod paths;
 pub mod protect;
+pub mod restore_pack;
 pub mod pssteps;
 pub mod rules_signature;
 pub mod shellicon;

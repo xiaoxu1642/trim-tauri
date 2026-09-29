@@ -591,6 +591,10 @@
           <div class="cleanup-toolbar-actions active" style="margin:8px 0">
             <button class="btn btn-accent" id="residueBtnClean" disabled>删除选中残留</button>
             <button class="btn btn-secondary" id="residueBtnRescan">重新扫描</button>
+            <label class="toggle-switch" for="residueBackupToggle" data-tip="开启后，删除前先把选中的文件与目录内容打进本机还原包（zip），之后可在「备份」列表里整批写回原位置。关闭时文件只进回收站、不留内容副本。注册表项无论开关都会先导出 .reg 备份。">
+              <input type="checkbox" id="residueBackupToggle" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
             <span class="clean-filter-hint">规则库高置信项默认勾选；失效登记与应用数据遗留一律不自动勾选。注册表删除前自动备份，文件移入回收站。</span>
           </div>
           <div class="table-card" id="residueList"></div>

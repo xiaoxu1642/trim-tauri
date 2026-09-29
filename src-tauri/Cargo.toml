@@ -70,6 +70,16 @@ png = "0.17"
 ed25519-dalek = "2"
 # C 批 runtimes：安装包 SHA-256 + 尺寸双校验（闸门 2，见 main.js downloadRedist）
 sha2 = "0.10"
+# H1（2026-09-29 借鉴 HiBit Uninstaller 4.0.10.100 的自包含还原包）：卸载残留删前把内容
+# 打进 payload.zip，之后可整批写回原位置。仓内此前没有任何归档能力（grep `zip|archive` 在
+# delete_manifest.rs / cleanup.rs 零命中），而「清单 ≠ 还原包」正是那份对标报告标的唯一
+# 结构性缺口。
+#
+# 刻意关默认 feature 只留 deflate：zip 8.x 的默认面带 zstd/xz/ppmd/bzip2/aes-crypto 等
+# 一串压缩与加密后端，每一串都是一份传递依赖与 AV 误报面；本用途只需要 deflate + stored。
+# 离线实测：`cargo add zip --offline --no-default-features --features deflate` 只连带
+# typed-path 与 zopfli 两个新包，`cargo check --offline` 通过（本机 CARGO_HOME 缓存已有）。
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # 测试专用：tauri::test（MockRuntime）无窗口 IPC 集成测试（D6 验收三件套第 2 条）。
 # 只在此处打开 `test` 特性——[dependencies] 里的 tauri 不带它，生产构建不含测试代码。

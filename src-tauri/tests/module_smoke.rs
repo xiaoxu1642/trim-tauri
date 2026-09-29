@@ -936,3 +936,69 @@ fn log_write_is_readonly_tier_and_sanitizes_renderer_input() {
         "未知 label 必须被来源校验拒杀，回执 {text}"
     );
 }
+
+// ==================== HiBit §H1 卸载还原包（batch-list / batch-restore）====================
+
+/// 两个新通道的档位：子窗一律被来源校验拒杀，主窗进入实现。
+/// 正向断言点名 `reached`（AGENTS §4.1 纪律①）——只断「不含校验失败」会被
+/// 「命令整条没注册/直接消失」假绿穿透（v2-M16② 的前科就在这条上）。
+#[test]
+fn batch_pack_channels_are_main_only() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let list = invoke_text(&w, "uninstall_batch_list", json!({}));
+        assert!(
+            list.contains("IPC 来源校验失败"),
+            "{label} 窗调还原包列表必须被拒杀，回执 {list}"
+        );
+        let restore = invoke_text(&w, "uninstall_batch_restore", json!({ "batchId": "x" }));
+        assert!(
+            restore.contains("IPC 来源校验失败"),
+            "{label} 窗调整批还原必须被拒杀（它往磁盘写文件），回执 {restore}"
+        );
+    }
+
+    let w = main_window();
+    let list = invoke(&w, "uninstall_batch_list", json!({}));
+    assert_eq!(list["success"], json!(true), "主窗应越过档位进入实现: {list}");
+    // 形状按渲染层的消费口径断：弹窗对 packs 直接 .map，totalBytes 进 formatSize
+    assert!(list["data"]["packs"].is_array(), "packs 必须是数组: {list}");
+    assert!(
+        list["data"]["totalBytes"].is_number(),
+        "totalBytes 必须是数字（缺失会让界面显示 NaN 而不是 0）: {list}"
+    );
+}
+
+/// 还原是「按 manifest 里的路径往磁盘写」，`batchId` 来自渲染层，先当不可信文件名：
+/// 任何分隔符/`..` 都必须被格式闸门拒掉，且不能因此碰到盘。
+#[test]
+fn batch_restore_refuses_hostile_batch_id() {
+    let w = main_window();
+    for bad in ["", r"..\..\x", "a/b", r"a\b"] {
+        let r = invoke(&w, "uninstall_batch_restore", json!({ "batchId": bad }));
+        assert_eq!(r["success"], json!(false), "恶意 batchId {bad:?} 必须失败: {r}");
+        assert!(
+            r["message"].as_str().unwrap_or("").contains("格式不合法"),
+            "理由必须是格式拒杀，实得 {r}"
+        );
+    }
+    // 形状合法但不存在：报「找不到」，不崩也不静默成功
+    let miss = invoke(&w, "uninstall_batch_restore", json!({ "batchId": "2020-01-01T00-00-00-000Z" }));
+    assert_eq!(miss["success"], json!(false));
+    assert!(
+        miss["message"].as_str().unwrap_or("").contains("找不到"),
+        "理由应为找不到，实得 {miss}"
+    );
+}
+
+/// 新增的 `backup` 参数是 Option——旧调用形状（只送 appId+targets）必须仍然进实现，
+/// 否则前端一处没改就是整条残留清理不可用。这里用空 targets 触发**零副作用**的入参闸门。
+#[test]
+fn residue_execute_still_accepts_call_without_backup_arg() {
+    let w = main_window();
+    let r = invoke(&w, "uninstall_residue_execute", json!({ "appId": "MACHINE|all", "targets": [] }));
+    assert!(
+        r["message"].as_str().unwrap_or("").contains("targets 为空"),
+        "缺 backup 参数的旧调用应进实现并停在入参闸门，实得 {r}"
+    );
+}

@@ -115,6 +115,11 @@ const MUST_MAIN = [
   // restore 会 reg import 写注册表，必须主窗专属 + 危险确认。
   'uninstall_reg_backup_list',
   'uninstall_reg_backup_restore',
+  // H1（2026-09-29）：还原包两个入口都只在主窗备份弹窗。list 与同门
+  // uninstall_reg_backup_list 同档（子窗无消费方，按 readonly 放行等于白给目录列举面）；
+  // restore 往磁盘写文件，档位方向写错会锁死功能（M1~M3 教训的反面）
+  'uninstall_batch_list',
+  'uninstall_batch_restore',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----

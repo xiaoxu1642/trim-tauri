@@ -3888,6 +3888,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     app_id: String,
     targets: Vec<Value>,
+    // HiBit §H1：删前是否先把内容打进还原包。**默认关**（2026-09-29 用户裁定不做默认备份），
+    // 由残留面板上的开关逐项决定；勾了却建包失败则整批不删（见下面 closure 开头）。
+    backup: Option<bool>,
 ) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
@@ -3925,8 +3928,20 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     }
 
     log::flush_sync(); // 危险操作前刷盘
+    // 批次号在这里就定：还原包目录、批次报告、回执必须共用同一个 id，事后补生成会对不上
+    let batch_id = delete_manifest::new_batch_id();
+    let batch_for_pack = batch_id.clone();
+    let want_backup = backup.unwrap_or(false);
     let app_id = app_id.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
+        // 勾了备份却建包失败 ⇒ 整批不删。静默降级成「只删不备」是把用户的决定改成她没选的那件事
+        let mut pack = match want_backup {
+            true => match crate::engine::restore_pack::Pack::begin(&batch_for_pack) {
+                Ok(p) => Some(p),
+                Err(e) => return Err(format!("创建还原包失败，未执行任何删除: {e}")),
+            },
+            false => None,
+        };
         let mut details: Vec<Value> = Vec::new();
         // D3：只读闸门先一次跑完（判定顺序集中在 classify_residue_op），下面的变更代码里
         // 不再出现任何保护判断 —— 「谁查了哪几道闸」从"通读三段"变成"看一个函数的行序"。
@@ -3961,6 +3976,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             }
             // D2：备份写成后落封条（此后列表/还原才对得上这份文件）
             write_reg_backup_seal(&file, target);
+            if let Some(p) = pack.as_mut() {
+                let _ = p.include_reg_backup(&file);
+            }
             if crate::engine::native::reg_key_remove(hive, rest, true) {
                 details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
             } else {
@@ -3994,6 +4012,12 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             }
             // D2：封条记的是**被备份的父键**（删单值前整父键导出，还原粒度也是父键）
             write_reg_backup_seal(&file, key_part);
+            if let Some(p) = pack.as_mut() {
+                // 副本只为「一批一个去处」；写注册表的还原入口仍然只有 uninstall_reg_backup_restore
+                if let Err(e) = p.include_reg_backup(&file) {
+                    details.push(detail(kind, target, "skip", &format!("{e}（.reg 原件仍在，可用原还原入口）")));
+                }
+            }
             if crate::engine::native::reg_restore_delete(hive, rest, value_name) {
                 details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
             } else {
@@ -4009,6 +4033,24 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 _ => None,
             })
             .collect();
+        // 勾了备份：先逐个入包，**入包失败的那一项不删**（与注册表「备份失败不删」同口径）。
+        // 顺序很关键——先打包后删除，反过来就可能出现「文件已进回收站、包里没这条」
+        let paths: Vec<(String, OsString)> = match pack.as_mut() {
+            None => paths,
+            Some(p) => {
+                let mut keep: Vec<(String, OsString)> = Vec::new();
+                for (k, t) in paths {
+                    match p.add_target(Path::new(&t)) {
+                        Ok(_) => keep.push((k, t)),
+                        Err(e) => {
+                            let s = t.to_string_lossy().to_string();
+                            details.push(detail(&k, &s, "skip", &format!("还原包写入失败，未删除: {e}")));
+                        }
+                    }
+                }
+                keep
+            }
+        };
         if !paths.is_empty() {
             if let Some((_, target)) = paths
                 .iter()
@@ -4062,16 +4104,27 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 ));
             }
         }
-        Ok(details)
+        // 收尾：包要落 manifest 才算成。内容已删而包没写成 ⇒ 回执必须带 error，
+        // 不能让用户以为「备份好了」
+        let pack_out = match pack {
+            Some(p) => match p.finish() {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::write_log("error", &format!("还原包收尾失败（文件已删，内容不可还原）: {e}"));
+                    Some(json!({ "error": e }))
+                }
+            },
+            None => None,
+        };
+        Ok((details, pack_out))
     })
     .await;
 
     match report {
-        Ok(Ok(details)) => {
+        Ok(Ok((details, pack_out))) => {
             let ok_count = details.iter().filter(|d| d["status"] == "ok").count();
             let fail_count = details.iter().filter(|d| d["status"] == "fail").count();
             // 批次报告（方案 M4）：动作级明细落盘，失败如实呈现
-            let batch_id = delete_manifest::new_batch_id();
             let report_path = crate::engine::paths::app_data_dir()
                 .join("uninstall-reports")
                 .join(format!("{batch_id}.json"));
@@ -4082,10 +4135,16 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                     "batchId": batch_id, "appId": app_id,
                     "time": delete_manifest::iso_now(),
                     "details": details,
+                    // 报告里留一笔：还原包被保留策略裁掉后，报告仍能说明「当时备过什么」
+                    "restorePack": pack_out,
                 }),
             );
             log::write_log("info", &format!("uninstall_residue_execute {app_id}: 成功 {ok_count} 失败 {fail_count}（报告 {batch_id}）"));
-            json!({ "success": true, "data": { "details": details, "okCount": ok_count, "failCount": fail_count, "reportPath": report_path.to_string_lossy() } })
+            json!({ "success": true, "data": {
+                "details": details, "okCount": ok_count, "failCount": fail_count,
+                "reportPath": report_path.to_string_lossy(),
+                "restorePack": pack_out,
+            } })
         }
         Ok(Err(e)) => json!({ "success": false, "message": e }),
         Err(e) => json!({ "success": false, "message": format!("残留清理异常: {e}") }),
@@ -4318,6 +4377,57 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
             log::write_log("error", &format!("卸载域备份还原调用失败: {name} {e}"));
             json!({ "success": false, "message": format!("reg import 调用失败: {e}") })
         }
+    }
+}
+
+// ==================== uninstall:batch-*（HiBit §H1 还原包列表与整批还原） ====================
+//
+// 与 `uninstall_reg-backup-*` 的分工必须写清，否则后来者会以为这里也能还原注册表：
+// 本节的 restore **只往磁盘写文件**，注册表还原仍然只有 `uninstall_reg_backup_restore`
+// 那一条通道（文件名准入 → 严格 .reg 解析 → 从正文重取键路径复算禁删面 → 封条校验）。
+// 给同一个危险动作开第二个入口，等于让四道闸变成「挑一条走」。
+
+/// uninstall:batch-list —— 本机还原包（**MAIN 档**，与同门 `uninstall_reg_backup_list` 一致：
+/// 只有主窗的备份弹窗调它，四子窗没有消费方，按 readonly 放行等于白给一个目录列举面）。
+/// 带体积与「zip 是否还在」的自检，界面据此能说清「这个包点还原到底会不会成功」，
+/// 而不是等用户点下去才报错。
+#[tauri::command]
+pub fn uninstall_batch_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    json!({
+        "success": true,
+        "data": {
+            "packs": crate::engine::restore_pack::list(50),
+            "totalBytes": crate::engine::restore_pack::total_bytes(),
+        }
+    })
+}
+
+/// uninstall:batch-restore —— 按 manifest 把整批内容写回原位置。
+///
+/// 档位 MAIN：它写磁盘，且入口只在主窗的备份弹窗（与 `uninstall_batch_list` 同档）。
+/// 逐条判定都在 restore_pack::restore 里：
+/// 路径准入（绝对 + 不含 .. + 非受保护 + 不落 %WINDIR%）→ zip 缺条目即失败 →
+/// 哈希/字节数不符即失败 → 目标已存在且内容不同则**不覆盖**（那是「卸完又装了」，
+/// 覆盖等于抢掉用户现在的文件）。
+#[tauri::command]
+pub async fn uninstall_batch_restore<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    batch_id: String,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        crate::engine::restore_pack::restore(&batch_id)
+    })
+    .await;
+    match res {
+        Ok(Ok(v)) => json!({ "success": true, "data": v }),
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("还原包还原异常: {e}") }),
     }
 }
 

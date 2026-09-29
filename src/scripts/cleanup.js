@@ -1762,13 +1762,15 @@
 
   async function renderRegBackupList(ctrl) {
     const body = ctrl.body;
-    let resp, respF, respU;
+    let resp, respF, respU, respP;
     try {
-      [resp, respF, respU] = await Promise.all([
+      [resp, respF, respU, respP] = await Promise.all([
         window.api.cleanup.regBackupList(),
         window.api.cleanup.fileBackupList().catch(() => null),
         // D1（M5）：卸载域注册表备份此前只写不读，删错了没有任何还原入口
-        window.api.uninstall.regBackupList().catch(() => null)
+        window.api.uninstall.regBackupList().catch(() => null),
+        // HiBit §H1：卸载残留的自包含还原包（内容本体在 zip 里，能整批写回原位置）
+        window.api.uninstall.batchList().catch(() => null)
       ]);
     } catch (e) {
       if (document.body.contains(body)) body.innerHTML = `<div class="empty-state"><p>备份列表读取失败: ${escapeHtml(e.message)}</p></div>`;
@@ -1778,8 +1780,10 @@
     const backups = (resp && resp.success && resp.data && resp.data.backups) || [];
     const manifests = (respF && respF.success && respF.data && respF.data.manifests) || [];
     const uninst = (respU && respU.success && respU.data && respU.data.backups) || [];
-    if (!backups.length && !manifests.length && !uninst.length) {
-      body.innerHTML = '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。</p></div>';
+    const packData = (respP && respP.success && respP.data) || {};
+    const packs = packData.packs || [];
+    if (!backups.length && !manifests.length && !uninst.length && !packs.length) {
+      body.innerHTML = '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。卸载残留可在清理前勾选「先备份内容再删」生成本机还原包。</p></div>';
       return;
     }
     const regSection = !backups.length ? '' :
@@ -1805,7 +1809,50 @@
            : `<span class="finder-name-text" style="opacity:.6" data-tip="封条核对未通过（${escapeHtml(b.seal)}），不提供还原入口">不可还原</span>`;
          return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)}</span>${restoreBtn}</div>`;
        }).join('')}</div>`;
-    body.innerHTML = regSection + uninstSection + fileSection;
+    // 还原包：zip 不在了就**不给还原按钮**（内容缺失时点下去只会逐条失败，不如这里说清）
+    const packSection = !packs.length ? '' :
+      `<div class="finder-group-header"><span>卸载还原包 · ${packs.length} 批（合计 ${formatSize(Number(packData.totalBytes) || 0)}）</span></div>
+       <div class="detail-file-list">${packs.map((p, i) => {
+         const canRestore = p.hasZip && !p.broken;
+         const label = `${escapeHtml(p.id)} · ${p.files || 0} 个文件 · ${p.dirs || 0} 个目录 · ${formatSize(Number(p.bytes) || 0)}`;
+         const btn = canRestore
+           ? `<button class="fileclean-preview-btn" data-pack-restore="${i}" type="button">整批还原</button>`
+           : `<span class="finder-name-text" style="opacity:.6" data-tip="${escapeHtml(p.broken || 'payload.zip 缺失')}">不可还原</span>`;
+         return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(p.dir || '')}">${label}</span>${btn}</div>`;
+       }).join('')}</div>`;
+    body.innerHTML = regSection + uninstSection + packSection + fileSection;
+
+    body.querySelectorAll('[data-pack-restore]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const p = packs[+btn.getAttribute('data-pack-restore')];
+        if (!p) return;
+        const ok = await window.app?.confirmDanger?.(
+          '整批还原卸载内容',
+          `将把还原包「${p.id}」里的 ${p.files || 0} 个文件与 ${p.dirs || 0} 个目录按原路径写回磁盘（合计 ${formatSize(Number(p.bytes) || 0)}）。`,
+          '确认还原',
+          '取消',
+          '只写文件，不写注册表（注册表还原在上方「卸载残留注册表备份」那一栏）。目标已存在且内容与备份不同的项会被跳过而不覆盖；受保护路径一律拒绝。'
+        );
+        if (!ok) return;
+        try {
+          const r = await window.api.uninstall.batchRestore(p.id);
+          if (r && r.success) {
+            const d = r.data || {};
+            const bad = (d.failed || []).length;
+            window.app?.toast(bad ? 'warning' : 'success',
+              bad ? `已还原 ${d.restored || 0} 项，${bad} 项未还原（详见提示）` : `已还原 ${d.restored || 0} 项`);
+            if (bad) {
+              window.app?.log?.('warn', `还原包 ${p.id} 未还原项：${(d.failed || []).slice(0, 3).map((f) => `${f.path}（${f.reason}）`).join('；')}`);
+            }
+          } else {
+            window.app?.toast('error', (r && r.message) || '还原失败');
+          }
+        } catch (e) {
+          window.app?.toast('error', '还原失败: ' + e.message);
+        }
+        renderRegBackupList(ctrl);
+      });
+    });
 
     body.querySelectorAll('[data-uninst-restore]').forEach((btn) => {
       btn.addEventListener('click', async () => {
