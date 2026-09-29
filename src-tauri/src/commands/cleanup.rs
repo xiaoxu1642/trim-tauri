@@ -1327,11 +1327,26 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
     if !valid_backup_file_name(file.trim()) {
         return json!({ "success": false, "message": "备份文件名非法" });
     }
-    // 还原侧必须与列表侧同一套跨根解析：列表能列出老根那份，还原就只能从同一根取，
+    // 还原侧必须与列表侧共用同一套跨根解析：列表能列出老根那份，还原就只能从同一根取，
     // 否则"看得见、点不动"（N1）
     let Some(path) = crate::engine::paths::resolve_backup_file(REG_BACKUP_SUB, file.trim()) else {
         return json!({ "success": false, "message": "备份文件不存在" });
     };
+    // N9：清理域此前"文件名白名单过了就直接 reg import"，而卸载域同一威胁模型下有四道闸。
+    // 调同一个公共件 —— 一份被手工改成 `[HKEY_LOCAL_MACHINE\SOFTWARE]` 的 .reg，
+    // 不该因为"它是备份文件"就被写进注册表；老根兜底纳进来的 Electron 轨文件形状更不可信。
+    let crate::engine::reg_backup::RegBackupCheck { keys, seal: _ } =
+        match crate::engine::reg_backup::reg_backup_restore_guards(
+            &path,
+            file.trim(),
+            crate::engine::sysinfo::is_admin(),
+        ) {
+            Ok(c) => c,
+            Err(msg) => {
+                log::write_log("warn", &format!("cleanup 注册表备份还原被拒: {msg}"));
+                return json!({ "success": false, "message": msg });
+            }
+        };
     log::flush_sync(); // 写注册表前刷盘
     let Some(path_str) = path.to_str() else {
         return json!({ "success": false, "message": "备份路径无法表示为文本" });
@@ -1341,8 +1356,8 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
         .output();
     let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
     if ok {
-        log::write_log("info", &format!("cleanup 注册表备份已还原: {file}"));
-        json!({ "success": true, "data": { "restored": true } })
+        log::write_log("info", &format!("cleanup 注册表备份已还原: {file}（{} 个键）", keys.len()));
+        json!({ "success": true, "data": { "restored": true, "keys": keys } })
     } else {
         let detail = out
             .ok()
@@ -1355,7 +1370,8 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
 
 // ==================== cleanup:file-backup-*（C-4 永久删批次备份还原） ====================
 // 常规清理链是「永久删」产品语义（v3.3.0 拍板），2026-09-28 小旭拍板补删前备份：
-// native::cleanup_execute 在永久删除前把文件复制到 cleanup-files-backup/<批次>\，
+// native::cleanup_execute 在永久删除前把文件复制到 cleanup-files-backup\<规则id>\ 下
+// （文件名 `<批次ms>_<序号>_<原名>`，N10 补的批次段），
 // 并落 manifest-<ts>.json（条目=备份相对名 ↔ 原始路径）。备份是语义增强不是删除
 // 前提：复制失败/超上限照常删除并记账（native.rs 内有 64MB/文件、256MB/批次上限）。
 

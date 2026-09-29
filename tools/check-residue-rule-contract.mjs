@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
 const UNINSTALL_RS = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall.rs');
+import { leadingToken, makeTokenChecker } from './rule-tokens.mjs';
 const FIXTURE = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
 const PRIV_KEY = path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
 // token 登记表：新 token 必须先在这里登记、Rust 侧 RESIDUE_RULE_TOKENS 同步、
@@ -34,6 +35,9 @@ const RESOLVABLE_TOKENS = [
   'PROGRAMFILES(X86)', 'PROGRAMW6432', 'COMMONPROGRAMFILES', 'USERPROFILE',
   'WINDIR', 'SYSTEMROOT',
 ];
+// token 判定器（大小写不敏感，保持既有行为）
+const checkToken = makeTokenChecker(RESOLVABLE_TOKENS, { caseInsensitive: true });
+
 const MIN_VERSION = 20260928;
 const ALLOWED_KINDS = ['folder', 'file', 'reg_key'];
 const TOP_FIELDS = ['rulesVersion', 'prov', 'rules', '_sig'];
@@ -132,20 +136,15 @@ function regTargetBlockReason(target) {
 function fileTargetProblem(target) {
   if ([...target].length > MAX_TARGET_LEN) return '目标长度超过 260（MAX_PATH）';
   if (target.includes('*') || target.includes('?')) return '目标含通配符（残留规则只允许精确路径）';
-  if (/[\0\r\n\t]/.test(target)) return '目标含控制字符';
+  // 形态与 token 查法走 rule-tokens.mjs；允许集合仍是本文件那份（与清理库刻意不同集、
+  // 且这一侧大小写不敏感 —— 同源化不等于把两份清单合并）
+  const lead = leadingToken(target);
+  if (lead.error) return lead.error;
   let body;
-  if (target.startsWith('%')) {
-    const rest = target.slice(1);
-    const end = rest.indexOf('%');
-    if (end < 0) return '变量名未闭合';
-    const token = rest.slice(0, end);
-    if (!token || !RESOLVABLE_TOKENS.some((t) => t.toLowerCase() === token.toLowerCase())) {
-      return `变量 %${token}% 未登记（先确认展开器可解析再入白名单）`;
-    }
-    const tail = rest.slice(end + 1);
-    if (tail.includes('%')) return '路径中不允许出现第二个变量替换';
-    if (!tail.startsWith('\\') && !tail.startsWith('/')) return '变量后必须有分隔符与非空子段（禁止 token 根）';
-    body = tail.slice(1);
+  if (lead.token) {
+    const why = checkToken(lead.token);
+    if (why) return why;
+    body = lead.body;
   } else {
     const driveAbs = /^[A-Za-z]:[\\/]./.test(target);
     const uncAbs = target.startsWith('\\\\') && target.replace(/^\\+/, '').includes('\\');

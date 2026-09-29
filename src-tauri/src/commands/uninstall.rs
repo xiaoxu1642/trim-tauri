@@ -4696,90 +4696,10 @@ fn valid_uninstall_backup_name(name: &str) -> bool {
         && n.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-/// `a_1.reg` → `a_1.reg.meta.json`（同目录放封条，便于人工核对；列表按 .reg 收尾过滤，不会自纳）
-fn reg_seal_path_for(file: &Path) -> PathBuf {
-    let mut s = file.as_os_str().to_os_string();
-    s.push(".meta.json");
-    PathBuf::from(s)
-}
-
-/// 写封条：目标键 + SHA-256 + 时间。失败只在日志留痕，**不阻断删除**——
-/// 封条是备份的增强，不是删除的前提（备份本身已写成，这时回滚删除反而更糟）。
-fn write_reg_backup_seal(file: &Path, target: &str) {
-    let sum = match crate::commands::runtimes::sha256_file(file) {
-        Ok(s) => s,
-        Err(e) => {
-            log::write_log("warn", &format!("注册表备份封条计算失败（不阻断删除）: {e}"));
-            return;
-        }
-    };
-    let payload = json!({
-        "file": file.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
-        "target": target,
-        "sha256": sum,
-        "createdAt": crate::engine::now_ms(),
-    });
-    if let Err(e) = crate::security::atomic_write_json(&reg_seal_path_for(file), &payload) {
-        log::write_log("warn", &format!("注册表备份封条写入失败（不阻断删除）: {e}"));
-    }
-}
-
-/// 封条核对：ok / missing（旧备份没封条）/ mismatch（内容与封条不符）/ corrupt / unreadable
-fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
-    let meta_path = reg_seal_path_for(file);
-    let Ok(text) = std::fs::read_to_string(&meta_path) else {
-        return ("missing", Value::Null);
-    };
-    let Ok(meta) = serde_json::from_str::<Value>(&text) else {
-        return ("corrupt", Value::Null);
-    };
-    let want = meta.get("sha256").and_then(Value::as_str).unwrap_or("");
-    if want.is_empty() {
-        return ("corrupt", meta);
-    }
-    match crate::commands::runtimes::sha256_file(file) {
-        Ok(got) if got.eq_ignore_ascii_case(want) => ("ok", meta),
-        Ok(_) => ("mismatch", meta),
-        Err(_) => ("unreadable", meta),
-    }
-}
-
-/// 严格 `.reg` 解析：要求版本头 + 至少一个顶层键段，返回去重后的键列表。
-/// `None` = 形状不对（半截写入、被截断、或根本不是 .reg），这类文件**不许** import。
-/// 刻意不做宽松兼容：还原前必须知道"这份文件会往哪些键里写"，否则等于把未知来源的内容
-/// 灌进注册表（v2 时代还原链的教训就是"校验自己解析出来的东西"）。
-fn parse_reg_backup(file: &Path) -> Option<Vec<String>> {
-    parse_reg_backup_text(&std::fs::read_to_string(file).ok()?)
-}
-
-/// 同上，输入是文本 —— 拆成纯函数是为了单测能覆盖"半截 .reg / 缺版本头 / 无键段"这三类
-/// 形状，不必往数据目录造文件。
-fn parse_reg_backup_text(text: &str) -> Option<Vec<String>> {
-    let first = text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())?
-        .trim_start_matches('\u{feff}')
-        .trim()
-        .to_string();
-    if !first.eq_ignore_ascii_case("Windows Registry Editor Version 5.00") {
-        return None;
-    }
-    let mut keys: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let l = line.trim();
-        let Some(rest) = l.strip_prefix('[') else { continue };
-        let Some(inner) = rest.strip_suffix(']') else { continue };
-        let k = inner.trim().trim_matches('"').to_string();
-        if k.is_empty() {
-            continue;
-        }
-        if !keys.iter().any(|x| x.eq_ignore_ascii_case(&k)) {
-            keys.push(k);
-        }
-    }
-    (!keys.is_empty()).then_some(keys)
-}
+// 封条与 `.reg` 严格解析的**实现已移到 `engine::reg_backup`**（N9）：清理域那条还原链
+// 面对的是同一个威胁模型（用户可写目录里的一份 .reg 被拿去写注册表），复制一份正则或
+// 一份切分只会让两域口径再次分叉。本文件按名字直接用，调用点与用例都不用改。
+use crate::engine::reg_backup::{reg_backup_seal_state, write_reg_backup_seal};
 
 /// 把「跨根备份条目」渲染成列表项：文件名解析 + 封条核对 + 老根标记 + mtime 倒序。
 ///
@@ -4854,37 +4774,16 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
     else {
         return json!({ "success": false, "message": "备份文件不存在" });
     };
-    let Some(keys) = parse_reg_backup(&path) else {
-        return json!({
-            "success": false,
-            "message": "备份文件不是合法的 .reg（缺版本头或没有任何键段），已拒绝还原"
-        });
-    };
-    // 解析出来的目标键必须仍在允许删除的面上：一份被手工改成
-    // `[HKEY_LOCAL_MACHINE\SOFTWARE]` 的 .reg 不该因为"是备份文件"就被 import
-    for k in &keys {
-        if let Some(reason) = protect::reg_target_block_reason(k) {
-            log::write_log("warn", &format!("备份 {name} 含受保护目标，已拒绝还原: {reason}"));
-            return json!({ "success": false, "message": format!("备份内含受保护的注册表容器，已拒绝还原：{reason}") });
-        }
-    }
-    let (seal, _) = reg_backup_seal_state(&path);
-    if matches!(seal, "mismatch" | "corrupt" | "unreadable") {
-        log::write_log("warn", &format!("备份 {name} 封条核对未通过（{seal}），已拒绝还原"));
-        return json!({
-            "success": false,
-            "message": format!("备份内容与封条不符或不可读（{seal}），已拒绝还原——请改用导出时间的更早一份，或重新安装该程序")
-        });
-    }
-    let needs_admin = keys
-        .iter()
-        .any(|k| k.to_uppercase().starts_with("HKEY_LOCAL_MACHINE") || k.to_uppercase().starts_with("HKLM"));
-    if needs_admin && !crate::engine::sysinfo::is_admin() {
-        return json!({
-            "success": false,
-            "message": "该备份指向 HKLM 下的键，需要以管理员身份运行后再还原（HKCU 下的备份不需要）"
-        });
-    }
+    // 四道闸走公共件（N9）：清理域那条链现在调的是同一个函数，两域不可能再各写一套口径
+    let crate::engine::reg_backup::RegBackupCheck { keys, seal } =
+        match crate::engine::reg_backup::reg_backup_restore_guards(
+            &path,
+            &name,
+            crate::engine::sysinfo::is_admin(),
+        ) {
+            Ok(c) => c,
+            Err(msg) => return json!({ "success": false, "message": msg }),
+        };
     log::flush_sync(); // 写注册表前刷盘
     let Some(path_str) = path.to_str() else {
         return json!({ "success": false, "message": "备份路径无法表示为文本" });
@@ -5954,67 +5853,12 @@ mod residue_trace_tests {
         }
         // 封条同目录、后缀固定：人工核对时一眼能找到，列表按 .reg 收尾天然排除它
         let p = std::path::PathBuf::from(r"C:\x\1_a.reg");
-        assert_eq!(reg_seal_path_for(&p), std::path::PathBuf::from(r"C:\x\1_a.reg.meta.json"));
-    }
-
-    /// D2：严格 `.reg` 解析。还原前必须知道"这份文件会往哪些键里写"，
-    /// 所以宁可拒也不能宽松 —— 半截写入的备份尤其要拦。
-    #[test]
-    fn reg_backup_parser_requires_header_and_keys() {
-        let ok = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET]\r\n\"a\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET\\b]\r\n";
-        let keys = parse_reg_backup_text(ok).expect("合法 .reg 必须解析通过");
-        assert_eq!(keys.len(), 2, "键段去重后应有两条: {keys:?}");
-        // BOM 与前后空白是 reg.exe export 的实际形态，不能被当成非法
-        assert!(parse_reg_backup_text(&format!("\u{feff} {ok}")).is_some());
-        for bad in [
-            "",
-            "Windows Registry Editor Version 5.00\r\n",              // 有头无键
-            "[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET]\r\n\"a\"=dword:1", // 缺版本头
-            "Windows Registry Editor Version 5.00\r\n[HKEY_",        // 半截写入
-            "Windows Registry Editor Version 5.00\r\n[]\r\n",         // 空键名
-        ] {
-            assert!(parse_reg_backup_text(bad).is_none(), "这类 .reg 不该通过解析: {bad:?}");
-        }
-    }
-
-    /// D2 封条状态机：列表按状态决定给不给还原入口、还原按状态硬拒，所以这四态必须可区分。
-    /// `unreadable` 要的是「文本读得动但摘要算不出」的窗口，单测造不出来，如实留作未验证。
-    #[test]
-    fn reg_backup_seal_states_are_distinguishable() {
-        let dir = std::env::temp_dir().join(format!("trim-seal-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("临时目录应可建");
-        let bak = dir.join("1790561031234_Acme.reg");
-        std::fs::write(
-            &bak,
-            b"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Acme]\r\n",
-        )
-        .expect("备份应可写");
-        // 旧备份没有封条：仍可还原，但界面不许显示成"相符"
-        assert_eq!(reg_backup_seal_state(&bak).0, "missing");
-        write_reg_backup_seal(&bak, "HKCU\\Software\\Acme");
-        let (state, meta) = reg_backup_seal_state(&bak);
-        assert_eq!(state, "ok");
         assert_eq!(
-            meta.get("target").and_then(Value::as_str),
-            Some("HKCU\\Software\\Acme"),
-            "列表行的目标列取封条里的 target，丢了就没法核对是哪一键"
+            crate::engine::reg_backup::reg_seal_path_for(&p),
+            std::path::PathBuf::from(r"C:\x\1_a.reg.meta.json"),
         );
-        // 内容被改（半截写入 / 手工编辑）→ mismatch，还原链要据此硬拒
-        std::fs::write(
-            &bak,
-            b"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE]\r\n",
-        )
-        .expect("备份应可重写");
-        assert_eq!(reg_backup_seal_state(&bak).0, "mismatch");
-        // 封条不是 JSON → corrupt
-        std::fs::write(reg_seal_path_for(&bak), b"not json").expect("封条应可写");
-        assert_eq!(reg_backup_seal_state(&bak).0, "corrupt");
-        // 封条是 JSON 却缺 sha256：等同于没核对过，不许降级成 missing 放行
-        std::fs::write(reg_seal_path_for(&bak), br#"{"target":"x"}"#).expect("封条应可写");
-        assert_eq!(reg_backup_seal_state(&bak).0, "corrupt");
-        let _ = std::fs::remove_dir_all(&dir);
     }
+
     #[test]
     fn classify_residue_op_gates_run_before_any_mutation() {
         let skip_msg = |kind: &str, target: &str| -> Option<String> {

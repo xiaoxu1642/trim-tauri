@@ -6813,7 +6813,12 @@ pub fn cleanup_execute(
                         .args(["export", &export_path, file_str, "/y"])
                         .output()
                     {
-                        Ok(o) if o.status.success() && file.exists() => {}
+                        Ok(o) if o.status.success() && file.exists() => {
+                            // N9：清理域此前**根本不产封条**，于是还原链那道"封条核对"对本域
+                            // 永远只能走 missing 分支（等于没闸）。与卸载域同口径落一份，
+                            // 半截写入与手工误改才有可发现性。写封条失败不阻断删除（增强而非前提）。
+                            crate::engine::reg_backup::write_reg_backup_seal(&file, &export_path);
+                        }
                         _ => { backup_failed = true; break; }
                     }
                 }

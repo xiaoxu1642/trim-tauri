@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+import { collectTokens, makeTokenChecker } from './rule-tokens.mjs';
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
 
 // 展开器唯一实现 trim_finder::cleanup_scan::expand_env_path 用 env::var_os 逐变量解析，
@@ -31,6 +32,9 @@ const RESOLVABLE_TOKENS = new Set([
 // P1-1 来源级别枚举（规则库最终优化方案 2026-09-27）。winapp2-clue 仅允许用于
 // 「把 winapp2 当目录线索、文本独立重写」的规则；整库导入不存在，出现 imported 类即红。
 const SOURCE_CLASSES = new Set(['windows-doc', 'vendor-doc', 'independent', 'winapp2-clue']);
+
+// token 判定器：允许集合是本文件那份，大小写口径保持既有行为（敏感）
+const checkToken = makeTokenChecker(RESOLVABLE_TOKENS);
 
 // P1-3 准入必填字段（缺失即红；文件规则另须显式 recurse，见 A7）
 const REQUIRED_FIELDS = ['id', 'name', 'risk', 'evidence', 'recommended', 'domain', 'group', 'nature', 'regenerable', 'prov'];
@@ -70,24 +74,23 @@ function main() {
   }
   if (items.length === 0) fail('规则库没有任何条目（groups 结构异常？）');
 
-  // ---- A1: 每个 %TOKEN% 都在登记表内（大小写不敏感，对齐 Windows 展开语义） ----
+  // 判定器自检（A1 的反假绿）：真实规则库里没有未登记 token，所以**光跑数据永远测不出
+  // "判定器坏成永远放行"** —— 本轮同源化时实测过：把 makeTokenChecker 改成恒返回 null，
+  // 残留门禁因有夹具反例当场红，本门禁却照旧绿。补一条最小判别断言，坏判定器必红。
+  if (checkToken('ZZ_NotARealToken') === null || checkToken('APPDATA') !== null) {
+    fail('[A1] token 判定器自检失败：无法区分"已登记"与"未登记"，整段 A1 不可信');
+  }
+
+  // ---- A1: 每个 %TOKEN% 都在登记表内 ----
+  // 口径注意：旧注释写的是「大小写不敏感」，但既有判定 `RESOLVABLE_TOKENS.has(tok)` 实际
+  // **大小写敏感**（集合里就是 SystemRoot / ProgramFiles(x86) 这种原样写法）。A7/N6 同源化
+  // 只共享查法与报错，**不改这条口径** —— 改成不敏感会放宽准入，属行为变更要单独拍板。
   let tokenCount = 0;
   for (const it of items) {
-    const strings = [];
-    const collect = (o) => {
-      if (typeof o === 'string') strings.push(o);
-      else if (Array.isArray(o)) o.forEach(collect);
-      else if (o && typeof o === 'object') Object.values(o).forEach(collect);
-    };
-    collect(it);
-    for (const s of strings) {
-      for (const m of s.matchAll(/%([^%\s]+)%/g)) {
-        tokenCount++;
-        const tok = m[1];
-        if (!RESOLVABLE_TOKENS.has(tok)) {
-          fail(`[A1] 规则 ${it.id}：变量 %{tok}% 未登记（登记表见本文件头部 RESOLVABLE_TOKENS；先确认展开器可解析，再登记）`.replace('%{tok}%', `%${tok}%`));
-        }
-      }
+    for (const tok of collectTokens(it)) {
+      tokenCount++;
+      const why = checkToken(tok);
+      if (why) fail(`[A1] 规则 ${it.id}：${why}；登记表见本文件头部 RESOLVABLE_TOKENS`);
     }
   }
 

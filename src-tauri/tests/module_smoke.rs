@@ -1002,3 +1002,72 @@ fn residue_execute_still_accepts_call_without_backup_arg() {
         "缺 backup 参数的旧调用应进实现并停在入参闸门，实得 {r}"
     );
 }
+
+/// N9：清理域的 `.reg` 还原链必须与卸载域同一套闸。
+/// 此前它只有"文件名白名单 + 直接 reg import"，而同一威胁模型（用户可写目录里的一份 .reg
+/// 被拿去写注册表）在卸载域收了四道；N1 之后列表还会跨根列出 Electron 轨写的老文件，
+/// 弱链的输入面同步扩大。
+///
+/// 三条断言都停在**写注册表之前**，所以是零副作用的快速用例：
+/// 越界文件名（档位之后参数闸门）、缺版本头的形状、内容指向受保护容器。
+#[test]
+fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
+    use trim_tauri_lib::engine::paths;
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let r = invoke_text(&w, "cleanup_reg_backup_restore", json!({ "file": "1_x.reg" }));
+        assert!(
+            r.contains("IPC 来源校验失败"),
+            "{label} 窗调清理域备份还原必须被拒杀，回执 {r}"
+        );
+    }
+
+    let dir = paths::backup_write_dir("cleanup-reg-backup");
+    std::fs::create_dir_all(&dir).expect("备份目录应可建");
+    let stamp = 1_700_000_000_000i64;
+    let no_header = dir.join(format!("{stamp}_reg_zzgate_1.reg"));
+    let deny_target = dir.join(format!("{}_reg_zzgate_2.reg", stamp + 1));
+    // 用例中途 panic 也必须清掉探针文件，否则用户备份目录里会长出两条永远还原不了的假备份
+    struct Cleanup(Vec<std::path::PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = std::fs::remove_file(p);
+                let _ = std::fs::remove_file({
+                    let mut s = p.as_os_str().to_os_string();
+                    s.push(".meta.json");
+                    std::path::PathBuf::from(s)
+                });
+            }
+        }
+    }
+    let _guard = Cleanup(vec![no_header.clone(), deny_target.clone()]);
+
+    std::fs::write(&no_header, "[HKEY_CURRENT_USER\\Software\\zzgate]\r\n\"a\"=dword:1\r\n").unwrap();
+    std::fs::write(
+        &deny_target,
+        "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE]\r\n\"a\"=dword:1\r\n",
+    )
+    .unwrap();
+
+    let w = main_window();
+    let r = invoke(&w, "cleanup_reg_backup_restore", json!({ "file": file_name(&no_header) }));
+    assert_eq!(r["success"], json!(false), "缺版本头的 .reg 必须拒: {r}");
+    assert!(
+        common::message_of(&r).contains("合法的 .reg"),
+        "回执要说清是哪道闸拦的，实得 {r}"
+    );
+
+    let r2 = invoke(&w, "cleanup_reg_backup_restore", json!({ "file": file_name(&deny_target) }));
+    assert_eq!(r2["success"], json!(false), "指向 HKLM\\SOFTWARE 的 .reg 必须拒: {r2}");
+    assert!(
+        common::message_of(&r2).contains("受保护"),
+        "回执应写明是禁删面拦下的，实得 {r2}"
+    );
+
+    // 判红自测口径：把 cleanup 侧那次 guards 调用摘掉 ⇒ 上面两条断言都会变成
+    // "success:true 或直接走 reg.exe 失败"，本用例必红。
+    fn file_name(p: &std::path::Path) -> String {
+        p.file_name().unwrap().to_string_lossy().to_string()
+    }
+}
