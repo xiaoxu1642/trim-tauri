@@ -17,11 +17,11 @@
     "privacy_permissions_tune": "reboot",
     "storage_8dot3_off": "reboot",
     "perf_vbs_off": "reboot",
-    "perf_service_shutdown_fast": "reboot",
     "perf_remote_assist_off": "reboot",
     "perf_prefetcher_fast": "reboot",
     "perf_crash_autoreboot": "reboot",
     "tf_disk_extra3": "reboot",
+    "tf_perf_misc": "reboot",
     "mouse_optimize": "explorer",
     "tf_onedrive": "explorer",
     "desktop_show_ext": "explorer",
@@ -37,7 +37,6 @@
     "peripheral_mouse_trails": "explorer",
     "peripheral_snap_to": "explorer",
     "tf_ai_off": "explorer",
-    "tf_perf_misc": "explorer",
     "tf_ctx_copymove": "explorer"
   }
 }

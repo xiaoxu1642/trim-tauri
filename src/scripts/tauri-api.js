@@ -932,6 +932,14 @@
         report('资源加载失败', (t.tagName || 'ELEMENT') + ' ' + (t.src || t.href));
         return;
       }
+      // ResizeObserver 的「loop completed with undelivered notifications」不是未捕获异常：
+      // 它是浏览器在同帧内尺寸反复变化时自投的投递轮次上限提示，filename 恒为页面根、
+      // lineno 0、没有栈，任何一次正常布局抖动都可能触发。记成 ERROR 级「渲染层异常」
+      // 会把真异常淹掉（2026-09-30 日志里唯一那条就是它）。DevTools 仍留一条 debug。
+      if (/^ResizeObserver loop/i.test(ev.message || '')) {
+        try { console.debug('[Trim] ResizeObserver 投递轮次提示（已忽略）:', ev.message); } catch (e) {}
+        return;
+      }
       report('异常', (ev.message || '') + ' @' + (ev.filename || '') + ':' + (ev.lineno || 0));
     }, true);
     window.addEventListener('unhandledrejection', function (ev) {

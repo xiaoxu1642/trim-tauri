@@ -76,6 +76,21 @@
       "id": "tf_oosu",
       "title": "OOSU 隐私工具静默导入",
       "note": "用户 2026-09-27 点名下线。该项为「联网下载外部 exe 并静默执行」模式（O&O ShutUp10++），是全部优化项中唯一引入第三方可执行文件的步骤，与其余纯注册表/系统工具步骤风险模型不同；隐私批量关闭能力已由 tf_privacy_extra / tf_ai_off 等内置策略项覆盖。该项含 pwsh 下载校验步骤、无注册表步骤，通常无 optimizer-backups 备份记录需要还原。"
+    },
+    {
+      "id": "explorer_foreground_speed",
+      "title": "提高前台程序显示速度",
+      "note": "N4（2026-09-30 用户点名下线）：与「系统响应微调合集」（tf_perf_misc）同属桌面/前台响应微调，单项摆出来与合集重复，已整并进 tf_perf_misc 的 steps 与 restore（ForegroundLockTimeout 一步不丢）。本机若留有该项的注册表备份，启动概览会列成「待还原」。"
+    },
+    {
+      "id": "perf_shutdown_fast",
+      "title": "加快关机速度",
+      "note": "N4（2026-09-30 用户点名下线）：与「系统响应微调合集」目标同类（关机/注销等待微调），已整并进 tf_perf_misc（WaitToKillAppTimeout=2000 一步不丢）。本机若留有该项的注册表备份，启动概览会列成「待还原」。"
+    },
+    {
+      "id": "perf_service_shutdown_fast",
+      "title": "缩短服务关闭等待时间",
+      "note": "N4（2026-09-30 用户点名下线）：与「系统响应微调合集」目标同类，已整并进 tf_perf_misc（WaitToKillServiceTimeout=2000 一步不丢）。注意合并后 tf_perf_misc 的生效粒度升为「需重启」（HKLMSYSTEMCurrentControlSetControl），optimizer-scope.json 已同步。本机若留有该项的注册表备份，启动概览会列成「待还原」。"
     }
   ]
 }

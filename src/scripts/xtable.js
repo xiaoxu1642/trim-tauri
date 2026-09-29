@@ -356,6 +356,7 @@
       let lastW = -1;
       let ro = null;
       let roTarget = null;
+      let roFrame = 0;
       let resizeTimer = null;
       let disposed = false;
       function force(animate) {
@@ -377,7 +378,15 @@
         // 在宽度未变时跳过——字体（MiSansVF 异步加载）就绪后卡片变高触发 RO 却被跳过，
         // 列内卡片堆叠，直到拖动窗口改变宽度才恢复。改为 RO 回调无条件 force：
         // 高度变化（内容/字体/折叠）同样需要重排；重排是幂等的，收敛后 RO 不再触发。
-        if (!ro) ro = new ResizeObserver(() => force(false));
+        // 但重排必须推到下一帧：layout() 会写「被观察容器自身」的 style.height，在回调里
+        // 同步写等于在本帧的投递循环内又产生一条通知 → WebView2 抛
+        // 「ResizeObserver loop completed with undelivered notifications」，2026-09-30
+        // 日志里那条 ERROR 级「渲染层异常」就是它。rAF 只多一帧，force 幂等，不影响
+        // 字体就绪后的那次重排。
+        if (!ro) ro = new ResizeObserver(() => {
+          if (disposed || roFrame) return;
+          roFrame = requestAnimationFrame(() => { roFrame = 0; force(false); });
+        });
         if (roTarget) ro.unobserve(roTarget);
         roTarget = container;
         ro.observe(container);
@@ -402,6 +411,7 @@
         relayout(animate) { force(!!animate); syncObserver(); },
         dispose() {
           disposed = true;
+          if (roFrame) { cancelAnimationFrame(roFrame); roFrame = 0; }
           if (ro) { ro.disconnect(); ro = null; roTarget = null; }
           clearTimeout(resizeTimer);
           window.removeEventListener('resize', onWindowResize);

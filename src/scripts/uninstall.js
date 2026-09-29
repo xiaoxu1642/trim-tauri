@@ -196,7 +196,6 @@
   // ==================== 程序列表 ====================
   async function loadApps() {
     const listEl = document.getElementById('uninstallList');
-    const countEl = document.getElementById('uninstallCount');
     if (enumerating) return;
     enumerating = true;
     // 自我安慰式进度：枚举期间进度条爬升封顶 99%，完成即 100% 收尾
@@ -206,7 +205,6 @@
       const resp = await window.api.uninstall.list(currentScope);
       if (!resp.success) throw new Error(resp.message || '枚举失败');
       apps = resp.data.apps || [];
-      countEl.textContent = apps.length;
       if (!apps.length) {
         listEl.innerHTML = '<div class="finder-empty">没有枚举到已安装程序</div>';
         return;
@@ -239,7 +237,7 @@
       </tr>`).join('');
     return `
       <table class="finder-table">
-        <thead><tr><th>程序</th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:150px">操作</th></tr></thead>
+        <thead><tr><th>程序<span class="page-summary">共 ${apps.length} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:150px">操作</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   }
@@ -248,7 +246,7 @@
   function renderWindowsApps() {
     const third = apps.filter((a) => a.group === 'third');
     const sys = apps.filter((a) => a.group !== 'third');
-    const section = (title, list) => {
+    const section = (title, list, withTotal) => {
       if (!list.length) return '';
       // 卸载按钮的禁用属性。三类"不可卸载"要说清差别：NonRemovable 是系统声明不许移除，
   // staged / 全用户预配是**当前用户删不掉**（Remove-AppxPackage 是用户语义），
@@ -272,11 +270,12 @@
         </tr>`).join('');
       return `<div class="finder-group-header"><span>${title} · ${list.length} 项</span></div>
         <table class="finder-table">
-          <thead><tr><th>应用名</th><th class="finder-col-size" style="width:190px">发布者</th><th class="finder-col-size" style="width:130px">版本</th><th class="finder-col-size" style="width:150px">操作</th></tr></thead>
+          <thead><tr><th>应用名${withTotal ? `<span class="page-summary">共 ${apps.length} 个应用</span>` : ''}</th><th class="finder-col-size" style="width:190px">发布者</th><th class="finder-col-size" style="width:130px">版本</th><th class="finder-col-size" style="width:150px">操作</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
     };
-    return section('第三方应用', third) + section('Windows 应用', sys);
+    // 总数只落在第一张表的表头：两组都在时归「第三方应用」，第三方为空时归「Windows 应用」
+    return section('第三方应用', third, true) + section('Windows 应用', sys, !third.length);
   }
 
   // ==================== 卸载 ====================

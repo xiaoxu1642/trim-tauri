@@ -184,7 +184,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">系统体检</h1>
-            <p class="page-subtitle">只读诊断系统状态，实时掌握本机资源占用、磁盘空间与硬件配置</p>
           </div>
         </div>
 
@@ -264,18 +263,16 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">磁盘清理</h1>
-            <p class="page-subtitle" id="cleanupSubtitle">智能扫描 C 盘各类缓存、临时文件、冗余组件</p>
           </div>
         </div>
 
-        <!-- 磁盘清理分段式页面切换：五合一子视图（大标题下方；各子视图操作按钮与分段栏同行右对齐，窗口界面升级3） -->
+        <!-- 磁盘清理分段式页面切换：四合一子视图（大标题下方；各子视图操作按钮与分段栏同行右对齐，窗口界面升级3） -->
         <div class="cleanup-toolbar">
         <div class="filter-tabs cleanup-tabs" id="cleanupTabs" role="tablist" aria-label="磁盘清理子功能">
-          <button class="filter-tab active" data-cleanup-view="cleanup" data-subtitle="智能扫描 C 盘各类缓存、临时文件、冗余组件" role="tab" aria-selected="true">主要</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-dups" data-subtitle="基于内容指纹扫描重复文件，仅删除多余副本、保留一份" role="tab" aria-selected="false">重复文件查找</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-big" data-subtitle="按体积从大到小列出占用空间最大的文件" role="tab" aria-selected="false">大文件查找</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-empty" data-subtitle="扫描创建满 14 天的 0 字节文件与空目录（空目录=树内只含 0 字节文件与空子目录）" role="tab" aria-selected="false">空文件与空目录</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-analyze" data-subtitle="逐层下钻的磁盘空间分析" role="tab" aria-selected="false">磁盘分析</button>
+          <button class="filter-tab active" data-cleanup-view="cleanup" role="tab" aria-selected="true">主要</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-dups" role="tab" aria-selected="false">重复文件查找</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-empty" role="tab" aria-selected="false">空文件与空目录</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-analyze" role="tab" aria-selected="false">磁盘分析</button>
         </div>
 
         <!-- 各子视图操作行：随分段切换显示，与分段栏保持齐平（窗口界面升级3） -->
@@ -296,7 +293,7 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
             <span>更新规则库</span>
           </button>
-          <button class="btn btn-secondary" id="btnExcludeList" data-tip="管理清理排除名单：名单内的路径在「主要清理」的扫描与执行时都会被跳过（大文件/空文件/重复文件查找不受名单影响）">
+          <button class="btn btn-secondary" id="btnExcludeList" data-tip="管理清理排除名单：名单内的路径在「主要清理」的扫描与执行时都会被跳过（空文件/重复文件查找不受名单影响）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2L4 5v6c0 5.25 3.4 10.15 8 11 4.6-.85 8-5.75 8-11V5l-8-3zm-1 14l-4-4 1.41-1.41L11 13.17l4.59-4.58L17 10l-6 6z"/></svg>
             <span>排除名单</span>
           </button>
@@ -322,24 +319,6 @@
             <span>开始扫描</span>
           </button>
           <button class="btn btn-accent" id="dupBtnDelete" disabled>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-            <span>删除选中</span>
-          </button>
-          <button class="btn btn-secondary" type="button" data-finder-manifest>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
-            <span>已删除清单</span>
-          </button>
-        </div>
-        <div class="cleanup-toolbar-actions" data-actions-for="cleanup-big">
-          <button class="btn btn-secondary" id="bigBtnSelect">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-            <span>全选</span>
-          </button>
-          <button class="btn btn-primary" id="bigBtnScan">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-            <span>开始扫描</span>
-          </button>
-          <button class="btn btn-accent" id="bigBtnDelete" disabled>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
             <span>删除选中</span>
           </button>
@@ -454,22 +433,6 @@
         <div class="table-card" id="dupTable"></div>
       </div>
 
-      <!-- ============================ 磁盘清理 · 大文件查找（子视图） ============================ -->
-      <div class="cleanup-view" data-cleanup-panel="cleanup-big">
-        <div class="finder-toolbar card">
-          <!-- 2026-09-28 六轮拍板：扫描目录改盘符点选（默认全选固定盘）；数量上限删除（固定 200）；阈值固定 300MB -->
-          <span class="opt-inline">扫描磁盘
-            <span class="drive-picker" id="bigDrives"></span>
-          </span>
-          <span class="opt-hint">仅列出 ≥ 300 MB 的文件（按体积从大到小，最多 200 个）</span>
-        </div>
-        <div class="progress-section" id="bigProgressSection" style="display:none">
-          <div class="progress-header"><span class="progress-label" id="bigProgressLabel">扫描中...</span><span class="progress-value" id="bigProgressValue">0%</span></div>
-          <div class="progress-bar"><div class="progress-fill" id="bigProgressFill"></div></div>
-        </div>
-        <div class="table-card" id="bigTable"></div>
-      </div>
-
       <!-- ============================ 磁盘清理 · 空文件与空目录（子视图） ============================ -->
       <div class="cleanup-view" data-cleanup-panel="cleanup-empty">
         <div class="finder-toolbar card">
@@ -542,14 +505,13 @@
         </div>
         <div class="table-card" id="anTable"></div>
       </div>
-      </div><!-- /#page-cleanup（磁盘清理五合一：五个子视图收拢于此） -->
+      </div><!-- /#page-cleanup（磁盘清理四合一：四个子视图收拢于此） -->
 
       <!-- 软件卸载页（卸载域 MVP：列表 → 原厂卸载 → 残留扫描/受控清理） -->
       <div class="page" id="page-uninstall">
         <div class="page-header">
           <div>
             <h1 class="page-title">软件卸载</h1>
-            <p class="page-subtitle">用户应用 = 传统 Win32 程序（原厂卸载器）；Windows应用 = 商店应用（Remove-AppxPackage）</p>
           </div>
         </div>
 
@@ -576,7 +538,7 @@
               <span>残留扫描</span>
             </button>
             <!-- B1（2026-09-28 拍板）：静默勾选框已删——默认静默优先、失败自动回退原厂 UI -->
-            <span class="clean-filter-hint" id="uninstallCountWrap">已安装 <span id="uninstallCount">0</span> 个程序</span>
+            <!-- 应用计数改由列表表头「程序」列承载（2026-09-30 用户要求），此处不再重复一处 -->
           </div>
         </div>
 
@@ -607,13 +569,12 @@
         </div>
       </div><!-- /#page-uninstall -->
 
-      <!-- 大文件查找 / 磁盘健康度功能已移除 -->
+      <!-- 大文件查找已下线（2026-09-30 用户裁定：与「磁盘分析」逐层按体积排序重复）；磁盘健康度功能已移除 -->
       <!-- 系统维护修复组页面（P2-16） -->
       <div class="page" id="page-maintenance">
         <div class="page-header">
           <div>
             <h1 class="page-title">系统维护</h1>
-            <p class="page-subtitle">17 项常见系统问题修复 · 支持勾选批量执行，也可逐项单独执行</p>
           </div>
         </div>
         <!-- 批量操作栏：全选 / 已选计数 / 执行选中 / 全部执行 / 取消 / 进度 -->
@@ -649,7 +610,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">网络检测</h1>
-            <p class="page-subtitle">6 项只读网络诊断 · 异常项给出证据与修复建议，可一键修复</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-accent" id="btnNetcheckStart" data-tip="重新执行全部检测项">开始检测</button>
@@ -664,7 +624,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">运行库修复</h1>
-            <p class="page-subtitle">检测系统运行库安装状态，缺失时一键补装 · 全程只读检测</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-primary" id="btnRuntimesScan">
@@ -689,7 +648,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">内存清理</h1>
-            <p class="page-subtitle">查看内存使用情况，按区域清理工作集与系统缓存，并管理运行中的进程 · 点击各条目即可看到简介</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnMemAiIntro" data-tip="选择「内存清理」生成 AI 简介所用的模型（与其他模块相互独立）">
@@ -785,7 +743,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">优化电脑 <span class="page-summary" id="optimizerSummary"></span></h1>
-            <p class="page-subtitle">整合多项系统优化脚本，点击即后台静默执行，右上角实时显示进度 · 点击各条目即可看到简介</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnOptimizerSelected" data-tip="执行当前页面中已勾选的优化项">
@@ -846,7 +803,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">右键菜单管理 <span class="page-summary" id="contextSummary"></span></h1>
-            <p class="page-subtitle">勾选=启用，取消勾选=禁用（可逆，可随时改回）；点击条目可查看详情与简介，删除入口在详情弹窗内</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnRestoreMenu">
@@ -938,7 +894,7 @@
       <!-- 测速页面 -->
       <div class="page" id="page-diskbench">
         <div class="page-header">
-          <div><h1 class="page-title">磁盘测速</h1><p class="page-subtitle">评估顺序读写、4K 随机性能、IOPS 与延迟</p></div>
+          <div><h1 class="page-title">磁盘测速</h1></div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnBenchHistory" data-tip="查看历史测试记录">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L8.9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
@@ -978,7 +934,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">网络测速</h1>
-            <p class="page-subtitle">实时监控本机网卡上行 / 下行流量与丢包率，使用外部测速网站测试真实带宽</p>
           </div>
           <div class="page-actions">
             <label class="realtime-adapter-field">
@@ -1069,7 +1024,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">启动项管理</h1>
-            <p class="page-subtitle">管理随系统启动的注册表项、启动文件夹与计划任务，禁用手动操作可逆恢复 · 点击各条目即可看到简介</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnAddStartup" data-tip="选择程序并添加为当前用户的开机启动项">
@@ -1171,9 +1125,7 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">快捷指令</h1>
-            <p class="page-subtitle">63 条 Windows 系统快捷入口 · 一键打开常用工具与设置
-              <span class="qc-admin-note" data-tip="建议以管理员身份运行 Trim，确保全部快捷指令正常打开">默认以管理员模式启动</span>
-            </p>
+            <span class="qc-admin-note" data-tip="建议以管理员身份运行 Trim，确保全部快捷指令正常打开">默认以管理员模式启动</span>
           </div>
         </div>
         <div class="qc-toolbar">
@@ -1192,7 +1144,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">操作日志</h1>
-            <p class="page-subtitle">所有操作的详细记录，存储于应用数据目录的 logs 子文件夹（标准模式在 %APPDATA% 下，便携模式在程序目录 data 下）</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnRefreshLog">
@@ -1221,7 +1172,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">设置</h1>
-            <p class="page-subtitle">应用配置与系统信息</p>
           </div>
         </div>
         <div class="settings-grid" id="settingsGrid">

@@ -1162,17 +1162,6 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'explorer_foreground_speed', group: '桌面体验', title: '提高前台程序显示速度', risk: 'low',
-    desc: 'ForegroundLockTimeout=0，允许前台程序立即获得焦点并优先刷新显示，减少点击窗口后界面延迟响应的等待。',
-    steps: [
-      {
-        label: 'ForegroundLockTimeout=0', reg: regBlock({
-          'HKEY_CURRENT_USER\\Control Panel\\Desktop': { 'ForegroundLockTimeout': 'dword:00000000' }
-        })
-      }
-    ]
-  },
-  {
     id: 'explorer_autorestart', group: '桌面体验', title: '资源管理器崩溃时自动重启', risk: 'low',
     desc: 'AutoRestartShell=1，explorer.exe 意外退出后由系统自动拉起，桌面与任务栏无需手动重启（HKCU 为参考项目原路径，同时写入实际生效的 HKLM Winlogon）。',
     steps: [
@@ -1624,28 +1613,6 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'perf_shutdown_fast', group: '性能调优', title: '加快关机速度', risk: 'low',
-    desc: 'WaitToKillAppTimeout=2000（毫秒），缩短系统等待应用自行退出的超时时间，让关机/注销更快；个别未保存工作的应用可能被更快结束。',
-    steps: [
-      {
-        label: 'WaitToKillAppTimeout=2000', reg: regBlock({
-          'HKEY_CURRENT_USER\\Control Panel\\Desktop': { 'WaitToKillAppTimeout': '"2000"' }
-        })
-      }
-    ]
-  },
-  {
-    id: 'perf_service_shutdown_fast', group: '性能调优', title: '缩短服务关闭等待时间', risk: 'low',
-    desc: 'WaitToKillServiceTimeout=2000（毫秒），缩短关机时等待服务停止的超时；个别服务可能来不及保存状态，多数场景可安全应用。',
-    steps: [
-      {
-        label: 'WaitToKillServiceTimeout=2000', reg: regBlock({
-          'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control': { 'WaitToKillServiceTimeout': '"2000"' }
-        })
-      }
-    ]
-  },
-  {
     id: 'perf_remote_assist_off', group: '性能调优', title: '关闭远程协助', risk: 'low',
     desc: 'fAllowToGetHelp=0，禁用 Windows 远程协助的受邀协助入口，减少攻击面与后台监听；使用"请求远程协助"功能时需还原。',
     steps: [
@@ -1789,8 +1756,11 @@ const OPTIONS = [
 
   // 系统响应杂项（总表 34/38/41/42，4 项）
   {
+    // N4（2026-09-30）：原「提高前台程序显示速度」「加快关机速度」「缩短服务关闭等待时间」三项
+    // 与合集目标同类（都是 HKCU/HKLM 的响应与关机等待微调），单项摆出来既占版面又与合集重复，
+    // 故整并进本项；退役登记见 data/retired-optimizations.json。
     id: 'tf_perf_misc', group: '性能调优', title: '系统响应微调合集', risk: 'low',
-    desc: '开机启动延迟归零（StartupDelayInMSec=0）、禁用窗口摇晃（拖动标题栏摇晃不再最小化其它窗口）、禁用失效快捷方式链接解析（不再全盘/联网查找目标）、关闭运行对话框与资源管理器自动建议。',
+    desc: '开机启动延迟归零（StartupDelayInMSec=0）、禁用窗口摇晃（拖动标题栏摇晃不再最小化其它窗口）、禁用失效快捷方式链接解析（不再全盘/联网查找目标）、关闭运行对话框与资源管理器自动建议、前台程序立即获得焦点（ForegroundLockTimeout=0）、关机等待应用与服务退出的超时各缩到 2000 毫秒（WaitToKillAppTimeout / WaitToKillServiceTimeout）。',
     steps: [
       { label: '启动延迟归零 + 禁用窗口摇晃 + 禁用链接解析', reg: regBlock({
         'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Serialize': { 'StartupDelayInMSec': 'dword:00000000' },
@@ -1799,6 +1769,15 @@ const OPTIONS = [
       }) },
       { label: '关闭自动建议（AutoSuggest）', reg: regBlock({
         'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AutoComplete': { 'AutoSuggest': '"NO"' }
+      }) },
+      { label: 'ForegroundLockTimeout=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Desktop': { 'ForegroundLockTimeout': 'dword:00000000' }
+      }) },
+      { label: 'WaitToKillAppTimeout=2000', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Desktop': { 'WaitToKillAppTimeout': '"2000"' }
+      }) },
+      { label: 'WaitToKillServiceTimeout=2000', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control': { 'WaitToKillServiceTimeout': '"2000"' }
       }) }
     ],
     restore: [
@@ -1807,6 +1786,10 @@ const OPTIONS = [
         'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': { 'DisallowShaking': '-' },
         'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer': { 'DisableSearchLinkTracking': '-' },
         'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AutoComplete': { 'AutoSuggest': '"YES"' }
+      }) },
+      { label: '还原：删除前台焦点与关机等待键值（恢复系统默认）', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Desktop': { 'ForegroundLockTimeout': '-', 'WaitToKillAppTimeout': '-' },
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control': { 'WaitToKillServiceTimeout': '-' }
       }) }
     ]
   },
@@ -2121,11 +2104,8 @@ const PROS_CONS = {
   'tf_appx': { pros: '移除 25 个预装 UWP 应用，释放磁盘并减少后台活动。', cons: '部分应用移除后需从商店重装，个别系统集成可能异常。' },
   'tf_cortana': { pros: '禁用 Cortana 与网页搜索，减少后台联网与隐私追踪。', cons: '失去 Cortana 语音助手与任务栏网页搜索能力。' },
   'tf_onedrive': { pros: '彻底卸载 OneDrive 并清理数据目录，释放空间、减少同步。', cons: '云端文件不再自动同步，恢复需重新安装并登录。' },
-  'explorer_foreground_speed': { pros: '前台程序立即获得焦点与刷新优先级，点击窗口后界面响应更跟手。', cons: '极少数依赖焦点抢占提示的后台弹窗可能更频繁地抢到前台。' },
   'explorer_autorestart': { pros: 'explorer.exe 崩溃后自动拉起，桌面与任务栏无需手动重启。', cons: '崩溃发生时重启过程会有短暂桌面黑屏闪烁。' },
   'explorer_refresh_policy': { pros: '按完整信息刷新文件列表，新建/重命名后图标即时显示。', cons: '禁用简化标识列表在个别网络环境下可能略微增加刷新开销。' },
-  'perf_shutdown_fast': { pros: '缩短等待应用退出的超时，关机/注销明显更快。', cons: '个别未保存工作的应用可能被更快结束，建议先保存再关机。' },
-  'perf_service_shutdown_fast': { pros: '缩短服务停止超时，关机不再卡在"正在关闭"。', cons: '个别服务可能来不及保存状态，数据库类服务需注意。' },
   'perf_remote_assist_off': { pros: '禁用远程协助入口，减少攻击面与后台监听。', cons: '无法再使用"请求远程协助"功能。' },
   'perf_prefetcher_fast': { pros: '启用应用与启动预读，程序启动与文件访问更快。', cons: 'SSD 上收益有限，Prefetch 被清理后需重新积累。' },
   'perf_crash_autoreboot': { pros: '蓝屏后自动重启，无人值守场景恢复更快。', cons: '排查蓝屏时看不到完整停机码，建议排查期临时关闭。' },
@@ -2147,7 +2127,7 @@ const PROS_CONS = {
   'edge_update_task_disable': { pros: '停止 Edge 自动更新检查，消除后台更新占用。', cons: '浏览器安全补丁不再自动安装，必须定期手动更新。' },
   'privacy_permissions_tune': { pros: '一次精调 20+ 项应用权限与数据收集开关，输入习惯、活动历史、通讯录等不再被收集。', cons: '应用可能失去文档/日历/联系人访问权限，剪贴板历史被启用，个别权限需手动在设置中恢复。' },
   'tf_ai_off': { pros: '策略级关闭 Copilot/Recall/Click to Do/AI Agent 全家桶并禁用 AgentRuntime 服务，释放后台内存与 CPU，隐私零上传。', cons: '无法使用 Windows 内置 AI 功能（Copilot、Recall 等），系统更新后部分策略可能被重置需重新执行。' },
-  'tf_perf_misc': { pros: '启动延迟归零、禁用窗口摇晃与失效快捷方式全盘解析，桌面响应更跟手。', cons: '个别依赖 Aero Shake 的使用习惯失效；禁用链接解析后指向网络位置的失效快捷方式打开更慢。' },
+  'tf_perf_misc': { pros: '启动延迟归零、禁用窗口摇晃与失效快捷方式全盘解析，桌面响应更跟手；前台窗口即时抢到焦点，关机不再卡在"正在关闭"。', cons: '个别依赖 Aero Shake 的使用习惯失效；禁用链接解析后指向网络位置的失效快捷方式打开更慢；未保存工作的应用与个别服务可能被更快结束，关机前请先保存。' },
   'tf_privacy_extra': { pros: '补漏关闭 Chrome/Firefox/VS 遥测、许可验证上报、新闻兴趣流与步骤记录器，第三方数据外发通道进一步收窄。', cons: '浏览器与 VS 的官方反馈/体验改进计划退出，个别企业环境可能检测策略与预期不符。' },
   'tf_svc_extra5': { pros: '停用传感器、存储感知、PCA 等非必要服务，减少后台进程与定时唤醒。', cons: '亮度自动调节等传感器功能失效，打印机兼容性助手不再提示，外设依赖相关服务时需还原。' },
   'tf_ctx_copymove': { pros: '右键菜单直达「复制/移动到文件夹」对话框，搬运文件免剪贴粘贴。', cons: '右键菜单新增两项条目，菜单略长；个别精简系统该 CLSID 处理器可能缺失而无效果。' },
@@ -2254,7 +2234,6 @@ const EFFECT_MAP = {
   desktop_taskbar_show_desktop: '一般',
   desktop_taskbar_multi: '一般',
   desktop_low_disk_off: '微小',
-  explorer_foreground_speed: '一般',
   explorer_autorestart: '一般',
   explorer_refresh_policy: '一般',
   tasks_disable_defrag: '未验证',
@@ -2283,8 +2262,6 @@ const EFFECT_MAP = {
   perf_windows_update_off: '微小',
   perf_notifications_off: '一般',
   perf_vbs_off: '一般',
-  perf_shutdown_fast: '一般',
-  perf_service_shutdown_fast: '一般',
   perf_remote_assist_off: '微小',
   perf_prefetcher_fast: '微小',
   perf_crash_autoreboot: '一般',

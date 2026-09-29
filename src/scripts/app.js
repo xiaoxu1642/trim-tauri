@@ -144,7 +144,7 @@
   // 数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
   const PAGE_SCRIPTS = {
     // 磁盘清理的首屏脚本（cleanup.js / fallback）已在 index.html 内；
-    // 查找器子视图（重复/大文件/空文件）才需要 finder.js
+    // 查找器子视图（重复文件/空文件/磁盘分析）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
     uninstall: ['scripts/uninstall.js'],
@@ -241,8 +241,8 @@
   // 路由
   const ACTIVE_PAGE_KEY = 'winclean-active-page';
 
-  // 磁盘清理五合一：原五个独立页面收拢为 page-cleanup 内的分段视图
-  const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-big', 'cleanup-empty', 'cleanup-analyze'];
+  // 磁盘清理四合一：原五个独立页面收拢为 page-cleanup 内的分段视图
+  const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-empty', 'cleanup-analyze'];
   const CLEANUP_VIEW_KEY = 'winclean-cleanup-view';
 
   function getCleanupView() {
@@ -263,14 +263,13 @@
     document.querySelectorAll('.cleanup-view').forEach(v => {
       v.classList.toggle('active', v.dataset.cleanupPanel === view);
     });
-    // 操作行与分段栏同行（窗口界面升级3）：仅显示当前子视图的操作按钮
-    document.querySelectorAll('.cleanup-toolbar-actions').forEach(el => {
+    // 操作行与分段栏同行（窗口界面升级3）：仅显示当前子视图的操作按钮。
+    // 选择器必须锁在 #page-cleanup 内 —— `.cleanup-toolbar-actions` 这个类名软件卸载页
+    // 也在用（残留扫描面板同样借用它），全局选会把卸载页工具栏的 active 一并摘掉，
+    // 表现为「刷新列表 / 清理报告 / 残留扫描」整排凭空消失（2026-09-30 用户截图反馈）。
+    document.querySelectorAll('#page-cleanup .cleanup-toolbar-actions').forEach(el => {
       el.classList.toggle('active', el.dataset.actionsFor === view);
     });
-    // 大标题简介跟随子视图切换
-    const subtitle = document.getElementById('cleanupSubtitle');
-    const tab = tabs?.querySelector(`.filter-tab[data-cleanup-view="${view}"]`);
-    if (subtitle && tab?.dataset.subtitle) subtitle.textContent = tab.dataset.subtitle;
     if (persist) {
       try { localStorage.setItem(CLEANUP_VIEW_KEY, view); } catch (e) {}
     }
@@ -288,7 +287,7 @@
   }
 
   async function switchPageInner(pageName) {
-    // 磁盘清理五合一：旧子页地址（cleanup-dups 等）统一映射到主页并恢复对应分段
+    // 磁盘清理四合一：旧子页地址（cleanup-dups 等）统一映射到主页并恢复对应分段
     let cleanupView = 'cleanup';
     if (CLEANUP_VIEWS.indexOf(pageName) > -1) {
       cleanupView = pageName === 'cleanup' ? getCleanupView() : pageName;
@@ -952,10 +951,10 @@
 
     // 初始加载：恢复上次活跃页（窗口状态记忆），无记录则默认系统概览
     const lastPage = (() => { try { return localStorage.getItem(ACTIVE_PAGE_KEY); } catch (e) { return null; } })();
-    // 磁盘清理五合一：旧子页地址（cleanup-dups 等）对应 page 已不存在，先归一化到主页
+    // 磁盘清理四合一：旧子页地址（cleanup-dups 等）对应 page 已不存在，先归一化到主页
     const targetPage = lastPage && CLEANUP_VIEWS.indexOf(lastPage) > -1 ? 'cleanup' : lastPage;
     if (targetPage && targetPage !== 'overview' && document.getElementById('page-' + targetPage)) {
-      // 审查 7-4：统一用归一化后的变量；switchPage 内部自会处理五合一旧地址。
+      // 审查 7-4：统一用归一化后的变量；switchPage 内部自会处理四合一旧地址。
       // v3.7.0：switchPage 已改 async（要先补齐本页脚本），此处必须 await——
       // 否则恢复的页面是 optimizer 时，下面的 overview.start() 会先跑起来。
       await switchPage(targetPage);

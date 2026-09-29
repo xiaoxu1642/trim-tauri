@@ -143,6 +143,263 @@
     return { [c.paramKey]: c.parse(raw) };
   }
 
+  // ==================== 虚拟合集卡（前端聚合，数据层不动）====================
+  // 为什么不在数据层合成一项：三态各有独立的 steps / restore / 备份记账与后端执行分支
+  // （perf_windows_update_off 写 NoAutoUpdate、perf_wu_pause 走 is_dynamic 的 days 分支、
+  // perf_wu_enable 清键）。塞进同一个 id 等于把三套协议并到一条通道上，而数据层与 vendor
+  // 基线是逐字段对拍的双源（check-data-parity P2），分叉的代价远大于列表里少一张卡。
+  // 这里只做「一张卡 → 用户先选哪一态 → 派发到原 id」，原 id 的备份、还原与账本全部照旧。
+  const VIRTUAL_GROUPS = {
+    wu_adjust: {
+      id: 'wu_adjust',
+      title: 'Windows更新调整',
+      group: '性能调优',
+      risk: 'high', // 三态里含「彻底禁用」，卡片按最高档标注；红色确认按**选中的那一态**判
+      desc: '把「彻底禁用 / 恢复自动更新 / 推迟一段时间」三种互斥做法收在一张卡里。三者不能同时成立，所以点开必须先选一种，不替你决定更新策略。',
+      choices: [
+        { runId: 'perf_windows_update_off', name: '彻底禁用自动更新', desc: '写 NoAutoUpdate=1，安全补丁不再自动送达；仅在明确知晓风险时使用。', state: '高危' },
+        { runId: 'perf_wu_enable', name: '恢复自动更新', desc: '只清 Trim 写过的暂停键与 NoAutoUpdate 策略，没让 Trim 动过的设置一概不碰。' },
+        { runId: 'perf_wu_pause', name: '暂停更新到指定日期', desc: '走 Windows 官方暂停键，到期系统自动恢复，不停用任何组件。', needsDate: true }
+      ]
+    }
+  };
+  const VIRTUAL_RUN_IDS = new Set(
+    Object.keys(VIRTUAL_GROUPS).reduce((acc, k) => acc.concat(VIRTUAL_GROUPS[k].choices.map(c => c.runId)), [])
+  );
+
+  function virtualOf(id) { return Object.prototype.hasOwnProperty.call(VIRTUAL_GROUPS, id) ? VIRTUAL_GROUPS[id] : null; }
+
+  /** 列表视图：被聚合的真实项从清单里摘掉，虚拟卡插到它首个成员原来所在的位置 */
+  function displayList(options) {
+    const out = [];
+    for (const o of options) {
+      if (VIRTUAL_RUN_IDS.has(o.id)) {
+        const g = virtualOfByRunId(o.id);
+        if (g && out.indexOf(g) < 0) out.push(g);
+        continue;
+      }
+      out.push(o);
+    }
+    return out;
+  }
+  function virtualOfByRunId(runId) {
+    const keys = Object.keys(VIRTUAL_GROUPS);
+    for (const k of keys) if (VIRTUAL_GROUPS[k].choices.some(c => c.runId === runId)) return VIRTUAL_GROUPS[k];
+    return null;
+  }
+  /** 行 id → 条目（虚拟卡不在 OPTIONS 里，点击/批量都要认得它） */
+  function findEntry(id) { return virtualOf(id) || OPTIONS.find(o => o.id === id) || null; }
+  /** 需要用户先做选择的条目：dynamic（后端要参数）与虚拟多态卡（三态互斥） */
+  function needsUserChoice(entry) { return !!virtualOf(entry.id) || !!entry.dynamic; }
+
+  // 「暂停到 xx 年 xx 月 xx 日」→ 后端协议要的 days。上限只在 WU_PAUSE_MAX_DAYS 一处持有
+  // （与 Rust 同值，由 check-optimizer-dynamic A4 对拍钉住），这里不另写第二份数字。
+  function pauseDaysFrom(dateStr) {
+    if (!dateStr) return null;
+    const t = new Date(dateStr + 'T00:00:00').getTime();
+    if (!isFinite(t)) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const days = Math.round((t - today.getTime()) / 86400000);
+    return days >= 1 ? Math.min(WU_PAUSE_MAX_DAYS, days) : null;
+  }
+  function dateInputValue(offsetDays) {
+    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + offsetDays);
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  // 单个条目当前选中的执行参数；返回 null = 还没选完（确认按钮据此保持禁用）
+  function draftParamsFor(entryId, state) {
+    const s = state.get(entryId);
+    if (!s || !s.runId) return null;
+    const g = virtualOf(entryId);
+    if (g) {
+      const c = g.choices.find(x => x.runId === s.runId);
+      if (!c) return null;
+      if (c.needsDate) {
+        const days = pauseDaysFrom(s.date);
+        if (days == null) return null;
+        return { runId: c.runId, params: dynamicParams('perf_wu_pause', String(days)), label: '暂停 ' + days + ' 天' };
+      }
+      return { runId: c.runId, params: {}, label: c.name };
+    }
+    const ctl = DYNAMIC_CONTROLS[entryId];
+    if (ctl) {
+      if (s.value === undefined || s.value === null || s.value === '') return null;
+      return { runId: entryId, params: dynamicParams(entryId, s.value), label: String(s.value) };
+    }
+    return { runId: entryId, params: {}, label: '' };
+  }
+
+  function choiceGroupHtml(entry) {
+    const g = virtualOf(entry.id);
+    if (g) {
+      const rows = g.choices.map(c => `
+        <label class="model-picker-item" data-choice-row>
+          <input type="radio" name="optChoice_${window.ds.escAttr(g.id)}" value="${window.ds.escAttr(c.runId)}" />
+          <span class="model-picker-radio"></span>
+          <span class="model-picker-copy">
+            <span class="model-picker-name">${escapeHtml(c.name)}</span>
+            <span class="model-picker-desc">${escapeHtml(c.desc)}</span>
+          </span>
+          ${c.state ? `<span class="model-picker-state warn">${escapeHtml(c.state)}</span>` : ''}
+        </label>`).join('');
+      return `
+        <div class="opt-choice-group" data-choice-for="${window.ds.escAttr(g.id)}">
+          <div class="opt-choice-title">${escapeHtml(g.title)}</div>
+          <div class="opt-choice-desc">${escapeHtml(g.desc)}</div>
+          <div class="model-picker-list">${rows}
+            <div class="opt-choice-extra" data-choice-date-for="${window.ds.escAttr(g.id)}" hidden>
+              <label class="opt-inline">暂停到
+                <input type="date" class="field-input opt-choice-date" data-choice-date="${window.ds.escAttr(g.id)}"
+                  min="${window.ds.escAttr(dateInputValue(1))}" max="${window.ds.escAttr(dateInputValue(WU_PAUSE_MAX_DAYS))}" />
+              </label>
+              <span class="opt-choice-days" data-choice-days="${window.ds.escAttr(g.id)}">可选区间：明天起，最多 ${WU_PAUSE_MAX_DAYS} 天</span>
+            </div>
+          </div>
+        </div>`;
+    }
+    // dynamic 真实项：档位一律取自 DYNAMIC_CONTROLS，不在此另写一份选项
+    const ctl = DYNAMIC_CONTROLS[entry.id];
+    const rows2 = (ctl ? ctl.options : []).map(o => `
+        <label class="model-picker-item" data-choice-row>
+          <input type="radio" name="optChoice_${window.ds.escAttr(entry.id)}" value="${window.ds.escAttr(o.value)}" />
+          <span class="model-picker-radio"></span>
+          <span class="model-picker-copy"><span class="model-picker-name">${escapeHtml(o.label)}</span></span>
+        </label>`).join('');
+    return `
+      <div class="opt-choice-group" data-choice-for="${window.ds.escAttr(entry.id)}">
+        <div class="opt-choice-title">${escapeHtml(entry.title)}</div>
+        <div class="opt-choice-desc">${escapeHtml(ctl ? ctl.tip : '该项需要指定参数后才能执行。')}</div>
+        <div class="model-picker-list">${rows2}</div>
+      </div>`;
+  }
+
+  // 自绘选择窗：单项执行（点开虚拟卡）与批量执行（勾到多态 / dynamic 项）共用一份实现。
+  // 返回 Promise<Map<runId, params>>；用户取消 / Esc / 点遮罩一律 resolve null，
+  // 调用方必须中止整批 —— 退回到 defaultValue 就是「替用户做选择」（2026-09-30 用户裁定）。
+  function promptUserChoices(entries) {
+    return new Promise((resolve) => {
+      const state = new Map();      // entryId -> { runId, date, value }
+      let settled = false;
+      const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+      const g0 = virtualOf(entries[0].id);
+      const ctrl = window.modal.create({
+        id: 'optChoiceModal-' + Date.now(),
+        title: entries.length > 1 ? '请先选择做法' : (g0 ? g0.title : entries[0].title),
+        iconSvg: `<span class="opt-detail-icon"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">${GEAR_ICON}</svg></span>`,
+        bodyHtml: `<div class="opt-choice-body">${entries.map(choiceGroupHtml).join('')}</div>`,
+        footerHtml: `
+          <span class="opt-choice-hint" data-role="hint">每一项都要选定一个做法才能继续。</span>
+          <span class="model-picker-spacer"></span>
+          <button class="btn btn-secondary" data-role="cancelBtn" type="button">取消</button>
+          <button class="btn btn-primary" data-role="okBtn" type="button" disabled>确认选择</button>`,
+        bodyClass: 'opt-choice-modal-body',
+        onClose: () => finish(null)
+      });
+      const okBtn = ctrl.footer.querySelector('[data-role="okBtn"]');
+      const hintEl = ctrl.footer.querySelector('[data-role="hint"]');
+
+      function sync() {
+        const resolved = new Map();
+        let missing = null;
+        for (const e of entries) {
+          const p = draftParamsFor(e.id, state);
+          if (!p) { missing = e; break; }
+          resolved.set(p.runId, p.params);
+        }
+        okBtn.disabled = !!missing;
+        hintEl.textContent = missing
+          ? `还差「${missing.title || (virtualOf(missing.id) || {}).title || missing.id}」的做法没选。`
+          : `将执行：${entries.map(e => { const p = draftParamsFor(e.id, state); const real = OPTIONS.find(o => o.id === p.runId); return real ? real.title : p.runId; }).join('、')}`;
+        return resolved;
+      }
+
+      ctrl.body.addEventListener('change', (e) => {
+        const group = e.target.closest('[data-choice-for]');
+        if (!group) return;
+        const entryId = group.dataset.choiceFor;
+        const radio = e.target.closest('input[type="radio"]');
+        if (radio) {
+          const cur = state.get(entryId) || {};
+          // 两类条目的 radio.value 语义不同：虚拟卡是「选哪一态」（runId），
+          // dynamic 项是「取哪个档位」（runId 就是它自己）。混存会让档位被当成 id，
+          // draftParamsFor 永远判未选完 → 批量选择窗的确认按钮点不动。
+          state.set(entryId, virtualOf(entryId)
+            ? Object.assign({}, cur, { runId: radio.value })
+            : Object.assign({}, cur, { runId: entryId, value: radio.value }));
+          group.querySelectorAll('[data-choice-row]').forEach(l =>
+            l.classList.toggle('active', l.querySelector('input').checked));
+          const extra = group.querySelector('[data-choice-date-for]');
+          if (extra) {
+            const c = (virtualOf(entryId) || { choices: [] }).choices.find(x => x.runId === radio.value);
+            extra.hidden = !(c && c.needsDate);
+          }
+        }
+        const dateEl = e.target.closest('input[type="date"]');
+        if (dateEl) {
+          const cur = state.get(entryId) || {};
+          state.set(entryId, Object.assign({}, cur, { date: dateEl.value }));
+          const daysEl = group.querySelector('[data-choice-days]');
+          const days = pauseDaysFrom(dateEl.value);
+          if (daysEl) daysEl.textContent = days == null ? '请选择一个明天以后的日期' : `共暂停 ${days} 天，到期系统自动恢复更新`;
+        }
+        sync();
+      });
+      okBtn.addEventListener('click', () => {
+        const resolved = sync();
+        if (!resolved || okBtn.disabled) return;
+        settled = true;              // 选定：让 onClose 不再把结果覆盖成 null
+        ctrl.close();
+        finish(resolved);
+      });
+      ctrl.footer.querySelector('[data-role="cancelBtn"]').addEventListener('click', () => ctrl.close());
+    });
+  }
+
+  /** 条目清单 → 真实执行清单（虚拟卡换成用户选中的那个真实项） */
+  function expandEntries(entries, paramsByRun) {
+    const out = [];
+    for (const e of entries) {
+      const g = virtualOf(e.id);
+      if (!g) { out.push(e); continue; }
+      const runId = chosenRunOf(g, paramsByRun);
+      const real = runId ? OPTIONS.find(o => o.id === runId) : null;
+      if (real) out.push(real);
+    }
+    return out;
+  }
+  // paramsByRun 的键就是 runId，反查该虚拟卡被选中的那一态（同一卡只会命中一个）
+  function chosenRunOf(g, paramsByRun) {
+    const hit = g.choices.map(c => c.runId).filter(id => paramsByRun.has(id));
+    return hit.length ? hit[0] : null;
+  }
+
+  /** 用户选定某一态后按真实项执行：确认链与单项「立即执行」完全同一条（不另起一套） */
+  async function runChosenEntry(runId, params) {
+    const real = OPTIONS.find(o => o.id === runId);
+    if (!real) {
+      window.app?.toast('error', `所选做法（${runId}）不在优化目录里，已中止`);
+      window.app?.log?.('error', `优化虚拟项派发失败：目录里找不到 ${runId}`);
+      return;
+    }
+    // 三态里只有「彻底禁用」是高危，红色确认按**选中的那一态**判，不按整卡标注的档位判
+    if (!(await confirmHazard(real))) return;
+    if (!(await ensureRestorePoint())) return;
+    try {
+      await runOptionActive(params, real);
+    } catch (e) {
+      window.app?.toast('error', '优化执行失败: ' + (e.message || e));
+    }
+  }
+
+  async function openVirtualChoice(g) {
+    const paramsByRun = await promptUserChoices([g]);
+    if (!paramsByRun) return;            // 取消 / Esc / 点遮罩：什么都不做，不退回默认那一态
+    const runId = chosenRunOf(g, paramsByRun);
+    if (runId) await runChosenEntry(runId, paramsByRun.get(runId));
+  }
+
   // ==================== 进度型 Toast ====================
   // v3.7.0 议题一（单例语义修复）：此前的实现有两个相互叠加的缺陷——
   //   ① finishProgressToast 先把模块级 progressToast 置空，已完成的那条就此脱离
@@ -353,6 +610,7 @@
   function renderGroups(options) {
     const root = document.getElementById('optimizerGroups');
     if (!root) return;
+    options = displayList(options);   // 虚拟卡顶掉被聚合的真实项（三态收在一张卡里）
     const byGroup = {};
     options.forEach(o => {
       const g = displayGroup(o);
@@ -620,7 +878,11 @@
     try { pending = JSON.parse(localStorage.getItem(OPT_PENDING_BATCH_KEY) || 'null'); } catch (e) { /* 损坏即放弃 */ }
     if (!Array.isArray(pending) || !pending.length) return;
     try { localStorage.removeItem(OPT_PENDING_BATCH_KEY); } catch (e) { /* 同上 */ }
-    const valid = pending.filter(id => OPTIONS.some(o => o.id === id));
+    // 提权前落盘的是**展开后的真实 id**；回到界面后被聚合项只以卡片形态存在，
+    // 所以按 runId 反查回卡片 id —— 否则「已恢复勾选」恢复的是界面上根本没有的一行。
+    const valid = pending
+      .filter(id => OPTIONS.some(o => o.id === id))
+      .map(id => { const g = virtualOfByRunId(id); return g ? g.id : id; });
     if (!valid.length) return;
     valid.forEach(id => selectedIds.add(id));
     renderGroups(OPTIONS);
@@ -736,6 +998,14 @@
   let activeOption = null;
 
   function openModal(o, notice) {
+    // 虚拟合集卡没有自己的 steps/restore，详情窗对它没有意义 —— 点开即弹「先选哪一态」。
+    // openVirtualChoice 是 async：外层吞掉异常，否则点卡片就成了浮动 Promise（v2-M22 同族）。
+    if (virtualOf(o.id)) {
+      Promise.resolve(openVirtualChoice(o)).catch((e) => {
+        window.app?.toast('error', 'Windows 更新调整异常：' + ((e && e.message) || e));
+      });
+      return;
+    }
     // 重复打开（如执行后刷新按钮态）先关旧实例，保证唯一 id 与事件不叠加
     if (optModal) { optModal.close(); optModal = null; }
     activeOption = o;
@@ -989,13 +1259,22 @@
     return o ? o.title : id;
   }
 
-  // 批量/单项执行统一取参数（审查 v2-M10）：dynamic 项必须带自己那一份协议参数，
-  // 原先批量一律发 {} —— svc_mem_gb 靠后端 8GB 兜底侥幸能跑，perf_wu_pause 则是必失败。
-  // 批量场景没有弹窗，取分派表的 defaultValue（等价于「用户开弹窗直接点执行」）。
-  function batchParams(opt) {
-    if (!opt.dynamic) return {};
-    const p = dynamicParams(opt.id, null);
-    return p || {};
+  // 批量执行的参数来源（v2-M10 → 2026-09-30 改口径）：dynamic 项与虚拟多态卡一律取自
+  // promptUserChoices 弹出的选择窗。**不再退回分派表 defaultValue** —— 那等于「用户没表态，
+  // 我们替他挑了暂停 7 天」，而更新策略猜错方向的代价不对称。
+  // 返回 null = 这条压根没选定：调用方必须跳过并如实计入失败，不能发一条注定失败的请求。
+  function batchParams(opt, paramsByRun) {
+    if (paramsByRun && paramsByRun.has(opt.id)) return paramsByRun.get(opt.id);
+    if (opt.dynamic) return null;
+    return {};
+  }
+
+  // 批量前置闸：把勾到的「虚拟多态卡 / dynamic 项」一次性收进同一张选择窗。
+  // 返回 Map<runId, params>；用户取消即 null（整批中止）。无需选择的批次直接返回空表。
+  async function collectBatchChoices(entries) {
+    const pending = entries.filter(needsUserChoice);
+    if (!pending.length) return new Map();
+    return await promptUserChoices(pending);
   }
 
   async function runOptionActive(params, optOverride) {
@@ -1238,11 +1517,16 @@
   // 执行已勾选的优化项（支持跨分类；跳过当前页面分类之外的项需重新渲染时保持一致）
   async function runSelected() {
     if (batchRunning) return;
-    const batch = OPTIONS.filter(o => selectedIds.has(o.id));
-    if (!batch.length) {
+    const entries = displayList(OPTIONS).filter(o => selectedIds.has(o.id));
+    if (!entries.length) {
       window.app?.toast('warning', '请先勾选要执行的优化项');
       return;
     }
+    // 先收选择再报清单：虚拟卡要展开成用户实际选中的那一态，
+    // 否则预览里写「Windows更新调整」、真正写的却是 NoAutoUpdate —— 承诺与动作分叉。
+    const paramsByRun = await collectBatchChoices(entries);
+    if (!paramsByRun) return;
+    const batch = expandEntries(entries, paramsByRun);
     // 高危项统计
     const hazardList = batch.filter(o => needsHazardConfirm(o));
     const highCount = batch.filter(o => o.risk === 'high').length;
@@ -1288,7 +1572,9 @@
       // 进度 Toast 由 runOptionActive 内部创建（此前这里先建一条、内部再建一条并销毁前者）
       progressToastSuffix = `${i + 1}/${batch.length}`;
       try {
-        const succeeded = await runOptionActive(batchParams(opt), opt);
+        const p = batchParams(opt, paramsByRun);
+        if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
+        const succeeded = await runOptionActive(p, opt);
         if (succeeded) {
           okCount++;
           const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
@@ -1320,8 +1606,9 @@
 
   // ==================== 一键全选当前页并依次执行 ====================
   function getCurrentPageOptions() {
-    if (activeCategory === '全部') return OPTIONS.slice();
-    return OPTIONS.filter(o => displayGroup(o) === activeCategory);
+    const list = displayList(OPTIONS);   // 虚拟卡顶掉被聚合的真实项，与界面所见同一份清单
+    if (activeCategory === '全部') return list;
+    return list.filter(o => displayGroup(o) === activeCategory);
   }
 
   function setCardsSelected(sel) {
@@ -1334,11 +1621,15 @@
   let batchRunning = false;
   async function runBatch() {
     if (batchRunning) return;
-    const batch = getCurrentPageOptions();
-    if (!batch.length) {
+    const entries = getCurrentPageOptions();
+    if (!entries.length) {
       window.app?.toast('warning', '当前页面没有可执行的优化项');
       return;
     }
+    // 与 runSelected 同一条前置闸：多态卡与 dynamic 项先让用户表态，取消即整批中止
+    const paramsByRun = await collectBatchChoices(entries);
+    if (!paramsByRun) return;
+    const batch = expandEntries(entries, paramsByRun);
     // 全选高亮，提示即将执行的项
     setCardsSelected(true);
     const highCount = batch.filter(o => o.risk === 'high').length;
@@ -1388,8 +1679,11 @@
       // 进度 Toast 由 runOptionActive 内部创建（同上，消除每项一次白建白毁）
       progressToastSuffix = `${i + 1}/${batch.length}`;
       try {
-        const succeeded = await runOptionActive(
-          opt.id === 'tf_svc_bulk' ? { includeStore: batchIncludeStore } : batchParams(opt), opt);
+        const p = opt.id === 'tf_svc_bulk'
+          ? { includeStore: !!batchIncludeStore }
+          : batchParams(opt, paramsByRun);
+        if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
+        const succeeded = await runOptionActive(p, opt);
         if (succeeded) {
           okCount++;
           const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
@@ -1519,7 +1813,8 @@
       const selAll = e.target.closest('.opt-col-selectall');
       if (selAll) {
         const group = selAll.dataset.selectallGroup;
-        const ids = OPTIONS.filter(o => displayGroup(o) === group && !optimizedIds.has(o.id)).map(o => o.id);
+        // 用 displayList：虚拟卡要能被「全选本类」选中，被聚合的真实项则不能（它们已不在界面上）
+        const ids = displayList(OPTIONS).filter(o => displayGroup(o) === group && !optimizedIds.has(o.id)).map(o => o.id);
         ids.forEach(id => selectedIds.add(id));
         renderGroups(OPTIONS);
         window.app?.toast('info', `已全选「${group}」${ids.length} 项，可点击「执行所选优化」批量执行`);
@@ -1538,7 +1833,7 @@
       const row = e.target.closest('.opt-row');
       if (!row) return;
       const id = row.dataset.id;
-      const o = OPTIONS.find(x => x.id === id);
+      const o = findEntry(id);   // 虚拟卡不在 OPTIONS 里
       if (!o) return;
       if (optimizedIds.has(o.id)) {
         // 安全兜底：已生效项点击 → 打开详情弹窗（按钮为「立即恢复」，见 openModal）

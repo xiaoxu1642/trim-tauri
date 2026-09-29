@@ -1638,7 +1638,7 @@ body.lg-mode-frost .nav-item.active:hover {
 }
 
 /* ================================================================
-   磁盘清理五合一（分段式子视图，原五个独立页面收拢）
+   磁盘清理四合一（分段式子视图，原五个独立页面收拢）
    ================================================================ */
 .cleanup-view {
   display: none;
@@ -2811,6 +2811,19 @@ select.field-input { cursor: pointer; appearance: auto; }
   font-size: var(--fs-meta);
   color: var(--fg-tertiary);
 }
+/* ---------- 执行前「先做选择」窗（虚拟合集卡 / dynamic 项共用）----------
+   单选行复用 .model-picker-* 现成件（AGENTS §2：新交互先查 ds 有没有现成件），
+   这里只补分组标题、说明与日期副行。 */
+.opt-choice-body { display: flex; flex-direction: column; gap: 16px; }
+.opt-choice-group { display: flex; flex-direction: column; gap: 8px; }
+.opt-choice-title { font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
+.opt-choice-desc { font-size: var(--fs-meta); color: var(--fg-tertiary); line-height: 1.5; }
+.opt-choice-extra { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 2px 12px 0 26px; }
+.opt-choice-extra[hidden] { display: none; }
+.opt-choice-extra label { display: flex; align-items: center; gap: 8px; font-size: var(--fs-meta); color: var(--fg-secondary); }
+.opt-choice-date { width: auto; }
+.opt-choice-days { font-size: var(--fs-meta); color: var(--fg-tertiary); }
+.opt-choice-hint { font-size: var(--fs-meta); color: var(--fg-tertiary); }
 /* footer 左侧内存档位提示位（dynamic 项）：usage-footer 内 flex 布局，spacer 推按钮组右对齐 */
 .opt-detail-mem {
   flex: 1 1 auto;

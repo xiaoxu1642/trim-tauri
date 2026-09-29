@@ -6,16 +6,19 @@
 // 三方各改一处都不会有编译错误、不会有测试红，只有用户看见「这个优化项永远失败」。
 // 唯一能长期钉住它的是静态对拍：**三份集合必须一致**。
 //
-// 五条断言：
+// 七条断言：
 //   A1 数据层 `dynamic:true` 的 id 集合 == optimizer.js 的 DYNAMIC_CONTROLS 键集合（双向差集）
 //   A2 每个 dynamic id 在 Rust 的 is_dynamic 分支里有 `option_id == "<id>"` 分支
 //   A3 前端 paramKey == 该分支读的 `p.<字段>`，且字段存在于 RunParams
 //   A4 暂停天数上限两侧一致（JS WU_PAUSE_MAX_DAYS == Rust 同名常量）
 //   A5 前端不得再按 `dynamic` 一刀切：`.opt-mem-select` 必须归零、执行参数走 dynamicParams、
 //      批量入口不得再发裸 `{}`（那正是 v2-M10 的第二条失法路径）
+//   A6 生效粒度侧表 optimizer-scope.json ⇄ 按步骤机械重算（详见块内注释）
+//   A7 虚拟合集卡（optimizer.js 的 VIRTUAL_GROUPS）⇄ 数据层：runId 必须真存在、
+//      一卡至少两态、同一真实项不得被两卡抢、整卡档位不得低于成员最高档
 //
 // 用法：node tools/check-optimizer-dynamic.mjs
-//   退出码 0 = 五条全绿；1 = 任一不符（无「只警告」档）。
+//   退出码 0 = 七条全绿；1 = 任一不符（无「只警告」档）。
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -213,6 +216,49 @@ check(
             ? `两侧档位键或序不一致：Rust [${rustKeys.join(',')}] vs JS [${jsKeys.join(',')}] —— 对不上的那档在前端按 0 处理，等于不提示`
             : ''
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A7 虚拟合集卡（2026-09-30 聚合层）—— 卡上的每个 runId 都是**真实执行目标**，
+//   数据层一退役/改名，卡片就会「点开看得见、执行必失败」，与 v2-M10 同一失法形态。
+//   四件事必须成立：① runId 真在目录里；② 一张卡至少两态（否则不叫聚合）；
+//   ③ 同一真实项不被两张卡抢（展开会重复执行）；④ 整卡标注的档位不得低于任何成员的
+//   最高档 —— 否则「整卡标 low、选中态是高危禁用」会绕过红色确认（AGENTS §3）。
+// ---------------------------------------------------------------------------
+{
+  const lit = objectLiteral(jsOpt, /const VIRTUAL_GROUPS\s*=/);
+  if (!lit) {
+    check(false, 'A7. 虚拟合集卡 ⇄ 数据层', 'optimizer.js 里找不到 const VIRTUAL_GROUPS（聚合层被删了？那列表过滤与批量前置闸也该一并清）');
+  } else if (!Array.isArray(options)) {
+    check(false, 'A7. 虚拟合集卡 ⇄ 数据层', '数据层读不到，无法对拍');
+  } else {
+    const RISK_ORDER = { low: 0, medium: 1, high: 2 };
+    const byId = new Map(options.map((o) => [o.id, o]));
+    const cards = [...lit.matchAll(/^ {4}([A-Za-z0-9_]+): \{([\s\S]*?)^ {4}\}/gm)];
+    const seenRun = new Map();
+    const bad = [];
+    for (const [, cardId, body] of cards) {
+      const rm = /risk: '([a-z]+)'/.exec(body);
+      const cardRank = rm ? RISK_ORDER[rm[1]] : undefined;
+      if (cardRank === undefined) bad.push(`${cardId}: 缺 risk 或档位非法`);
+      const runs = [...body.matchAll(/runId: '([^']+)'/g)].map((x) => x[1]);
+      if (runs.length < 2) bad.push(`${cardId}: 只有 ${runs.length} 个选项，聚合至少两态`);
+      let maxRank = -1;
+      for (const r of runs) {
+        const real = byId.get(r);
+        if (!real) { bad.push(`${cardId}: runId=${r} 不在数据层目录里（点开必失败）`); continue; }
+        if (seenRun.has(r)) bad.push(`${r}: 被 ${seenRun.get(r)} 与 ${cardId} 两张卡同时聚合`);
+        seenRun.set(r, cardId);
+        maxRank = Math.max(maxRank, RISK_ORDER[real.risk] ?? 0);
+      }
+      if (cardRank !== undefined && cardRank < maxRank) {
+        bad.push(`${cardId}: 整卡标 ${rm[1]}，低于选中态最高档（会降档绕过红色确认）`);
+      }
+    }
+    check(cards.length > 0 && bad.length === 0,
+      `A7. 虚拟合集卡 ⇄ 数据层（${cards.length} 张卡 / 聚合 ${seenRun.size} 个真实项）`,
+      bad.join(' / '));
   }
 }
 

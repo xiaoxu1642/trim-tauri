@@ -1,4 +1,4 @@
-// finder.js - 磁盘清理 · Rust 原生查找器（重复/大文件/空）
+// finder.js - 磁盘清理 · Rust 原生查找器（重复/空/磁盘分析）
 // 三个子页共用一套「布尔进度 + @@PROGRESS:n@@ 上报管线」：
 // 扫描走进程内原生引擎（trim-finder lib 直调，不再 spawn finder.exe），
 // 进度以 finder:progress 事件推送，完成时一次性返回结果数组。
@@ -17,7 +17,6 @@
   // 每个页签独立状态
   const st = {
     dups:    { results: [], selected: new Set(), scanning: false, deleting: false },
-    big:     { results: [], selected: new Set(), scanning: false, deleting: false },
     // pageF/pageD：空文件/空目录各自独立的当前页码（两段列表分开翻页）
     empty:   { results: [], selected: new Set(), scanning: false, deleting: false, pageF: 1, pageD: 1 },
     // C-5 磁盘分析器：selected/results 仅复用通用按钮态；真实数据在 an.cache/trail
@@ -25,7 +24,7 @@
   };
 
   // 页签 -> 元素 id / 参数来源 / scanType 映射
-  // 2026-09-28 六轮拍板：重复文件隐藏目录输入（内置默认）；大文件/空文件改盘符点选
+  // 2026-09-28 六轮拍板：重复文件隐藏目录输入（内置默认）；空文件/磁盘分析改盘符点选
   const CFG = {
     dups: {
       scanType: 'duplicates', kind: 'file',
@@ -33,13 +32,6 @@
       minSizeSel: 'dupMinSize',
       progress: { section: 'dupProgressSection', label: 'dupProgressLabel', value: 'dupProgressValue', fill: 'dupProgressFill' },
       table: 'dupTable', groupCount: 'dupGroupCount', size: 'dupSize'
-    },
-    big: {
-      scanType: 'bigfiles', kind: 'file',
-      scanBtn: 'bigBtnScan', selectBtn: 'bigBtnSelect', deleteBtn: 'bigBtnDelete',
-      drivesEl: 'bigDrives',
-      progress: { section: 'bigProgressSection', label: 'bigProgressLabel', value: 'bigProgressValue', fill: 'bigProgressFill' },
-      table: 'bigTable'
     },
     empty: {
       scanType: 'empty', kind: 'both',
@@ -58,7 +50,7 @@
   };
 
   // 盘符点选状态：scanType -> Set(选中盘符，如 "C:")。默认全选固定盘（diskList 返回值）。
-  const driveSel = { big: new Set(), empty: new Set(), an: new Set() };
+  const driveSel = { empty: new Set(), an: new Set() };
 
   // 拉取固定盘并渲染胶囊点选器（默认全选；失败时保留「预置 C:」保底并显式报错，
   // 不让「点开始扫描没反应」——七轮真机反馈排查防御）。
@@ -130,13 +122,10 @@
     return s.slice(0, keep) + '…' + s.slice(s.length - keep);
   }
 
-  // 扫描根：big/empty/analyze 用盘符点选（选中盘 → "X:\"），dups 交后端内置默认目录
-  function readPaths(cfg) {
-    if (cfg.drivesEl) {
-      const key = cfg.scanType === 'bigfiles' ? 'big' : (cfg.scanType === 'analyze' ? 'an' : 'empty');
-      return [...driveSel[key]].map((d) => d + '\\');
-    }
-    return [];
+  // 扫描根：empty/analyze 用盘符点选（选中盘 → "X:\"），dups 交后端内置默认目录
+  function readPaths(key) {
+    if (!CFG[key].drivesEl) return [];
+    return [...driveSel[key]].map((d) => d + '\\');
   }
 
   function setProgress(cfg, percent, label) {
@@ -158,7 +147,7 @@
   // ==================== 自我安慰式进度（用户拍板 2026-09-28） ====================
   // 真百分比未知的扫描（空文件全树遍历）此前全程停在 2% 直到完成，观感是「卡死」。
   // 口径：启动后从 4% 缓慢爬升、渐近封顶 99%（越接近 99 步长越小），扫描完成才跳
-  // 100% 收尾；真 progress 事件（dups/bigfiles 有）与心跳粗估值（E-1）只在**大于**
+  // 100% 收尾；真 progress 事件（dups 有）与心跳粗估值（E-1）只在**大于**
   // 当前伪值时抬升（bumpProgress 同时改 ticker 内部值，防下一拍伪值把进度拉回去）。
   const fakeTickers = {}; // scanType -> { id, v }
 
@@ -194,7 +183,7 @@
         if (typeof p.scanned === 'number') {
           // E-1（2026-09-28 拍板）：心跳换算粗估百分比——总数未知，按全盘 ~60 万
           // 文件的饱和指数曲线折算（n=60万→约60%，封顶 95%），只升不降；真 progress
-          // 事件仍优先（dups/big 的心跳与真进度同源时真值更准）。
+          // 事件仍优先（dups 的心跳与真进度同源时真值更准）。
           const rough = Math.min(95, 95 * (1 - Math.exp(-p.scanned / 600000)));
           const lab = document.getElementById(CFG[key].progress.label);
           const sec = document.getElementById(CFG[key].progress.section);
@@ -283,31 +272,6 @@
     document.getElementById(cfg.size).textContent = formatSize(total);
   }
 
-  // ==================== 大文件 ====================
-  // 2026-09-28 八轮：路径列可点击——explorer /select 定位到文件（复用 startup:openlocation）；
-  // 表格 fixed 布局 + 大小列左侧隔离，长路径不再覆盖大小显示。
-  function renderBig() {
-    const el = document.getElementById(CFG.big.table);
-    const cfg = CFG.big;
-    const s = st.big;
-    if (!s.results.length) {
-      el.innerHTML = '<div class="finder-empty">尚未扫描。请选择磁盘后点击「开始扫描」</div>';
-      return;
-    }
-    let html = '<table class="finder-table finder-table-fixed"><thead><tr><th style="width:34px"></th><th>名称 / 路径</th><th class="finder-col-size" style="width:130px">大小</th></tr></thead><tbody>';
-    for (const r of s.results) {
-      const checked = s.selected.has(r.path);
-      html += `<tr class="${checked ? 'finder-row-selected' : ''}">
-        <td>${checkboxHtml('big_' + esc(r.path), checked)}</td>
-        <td><div class="finder-cell finder-reveal" data-reveal="${esc(r.path)}" data-tip="点击在资源管理器中定位该文件"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-name-text" style="opacity:.55">·</span><span class="finder-path-text" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 76))}</span></div></td>
-        <td class="finder-col-size">${formatSize(r.size)}</td>
-      </tr>`;
-    }
-    html += '</tbody></table>';
-    el.innerHTML = html;
-    updateAllButtons();
-  }
-
   // ==================== 空文件 / 空目录 ====================
   // 2026-09-28：分页渲染。扫描可返回数万条（10 万级也曾出现），一次挂全部 DOM 会
   // 把渲染层卡死；每页只渲染 EMPTY_PAGE_SIZE 条，勾选集合仍作用于全部结果。
@@ -375,7 +339,7 @@
     updateAllButtons();
   }
 
-  const RENDER_FN = { dups: renderDups, big: renderBig, empty: renderEmpty, an: renderAn };
+  const RENDER_FN = { dups: renderDups, empty: renderEmpty, an: renderAn };
 
   // ==================== 磁盘分析器（C-5，2026-09-28 拍板） ====================
   // 逐层按需下钻：trail 为导航栈（节点 = {key,label,paths}），每层结果缓存在 cache
@@ -444,7 +408,7 @@
   }
 
   function startAnalyzeRoots() {
-    const paths = readPaths(CFG.an);
+    const paths = readPaths('an');
     if (!paths.length) {
       window.app?.toast?.('warning', '请至少选择一个要分析的磁盘');
       return;
@@ -741,8 +705,6 @@
       s.results.forEach(r => {
         if (r.type === 'duplicate' && r.role !== 'kept' && r.match === 'content') s.selected.add(r.path);
       });
-    } else if (key === 'big') {
-      s.results.forEach(r => s.selected.add(r.path));
     } else if (key === 'empty') {
       // 空文件全勾；空目录仅默认勾选「连带空子目录」的父目录（nested>0），普通空目录交用户勾选
       s.results.forEach(r => {
@@ -784,7 +746,7 @@
     if (scanBtn) { scanBtn.disabled = true; scanBtn.querySelector('span').textContent = '扫描中...'; }
     updateAllButtons();
     // 盘符点选页：一个盘都没选就直接拦下（空结果会被当成「盘很干净」误导）
-    if (cfg.drivesEl && readPaths(cfg).length === 0) {
+    if (cfg.drivesEl && readPaths(key).length === 0) {
       window.app?.toast?.('warning', '请至少选择一个要扫描的磁盘');
       scanBtn.disabled = false;
       scanBtn.querySelector('span').textContent = '开始扫描';
@@ -794,7 +756,7 @@
     // 自我安慰式进度：爬升封顶 99%，扫描完成才跳 100%（startFakeProgress 口径）
     setProgress(cfg, 4, '扫描中...');
     startFakeProgress(cfg);
-    const opts = { paths: readPaths(cfg) };
+    const opts = { paths: readPaths(key) };
     if (cfg.minSizeSel) opts.minSize = Number(document.getElementById(cfg.minSizeSel).value) || 0;
     try {
       const resp = await window.api.finder.scan(cfg.scanType, opts);
@@ -829,14 +791,14 @@
 
   function render(key) { RENDER_FN[key](); }
 
-  // 表格行内复选框点击（事件委托）+ 空页分页翻页 + 折叠栏目头 + 大文件定位 + 分析器下钻/删除
+  // 表格行内复选框点击（事件委托）+ 空页分页翻页 + 折叠栏目头 + 路径定位 + 分析器下钻/删除
   function onTableClick(e, tableId, key) {
     // C-5 分析器：目录下钻 / 行内删除（先于 reveal 判定，属性集互不相交但顺序更稳）
     const drill = e.target.closest('[data-an-drill]');
     if (drill) { anDrill(drill.dataset.anDrill); return; }
     const anDel = e.target.closest('[data-an-del]');
     if (anDel) { anDelete(anDel.dataset.anDel); return; }
-    // 大文件路径点击：资源管理器定位（explorer /select，复用 startup:openlocation 通道）
+    // 路径点击：资源管理器定位（explorer /select，复用 startup:openlocation 通道）
     const reveal = e.target.closest('[data-reveal]');
     if (reveal) {
       if (e.target.closest('[data-fcheck]')) return; // 点在复选框上不触发定位
@@ -1028,9 +990,9 @@
       document.getElementById(cfg.scanBtn)?.addEventListener('click', () => runScan(key));
       document.getElementById(cfg.selectBtn)?.addEventListener('click', () => onSelect(key));
       document.getElementById(cfg.deleteBtn)?.addEventListener('click', () => onDelete(key));
-      // 表格复选框委托 + 分页翻页 + 折叠栏目头（dups/big 名为 dup/big；empty 用自己表 id）
+      // 表格复选框委托 + 分页翻页 + 折叠栏目头（dups 的表名为 dupTable；empty 用自己表 id）
       document.getElementById(cfg.table)?.addEventListener('click', e => onTableClick(e, cfg.table, key));
-      // 盘符点选器（big/empty/an）：委托点击 + 拉取盘符渲染（默认全选）
+      // 盘符点选器（empty/an）：委托点击 + 拉取盘符渲染（默认全选）
       if (cfg.drivesEl) {
         document.getElementById(cfg.drivesEl)?.addEventListener('click', onDriveClick);
         initDrivePicker(key);
