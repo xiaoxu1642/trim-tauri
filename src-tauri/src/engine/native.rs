@@ -2823,6 +2823,52 @@ pub fn reg_restore_write(hive: HKEY, subkey: &str, value_name: &str, kind: REG_V
     unsafe { reg_write_value(hive, subkey, value_name, kind, data) }
 }
 
+/// 枚举文件的命名数据流（NTFS ADS）字节数与条数（HiBit §H5，2026-09-29）。
+///
+/// **用的是 `FindFirstStreamW` / `FindNextStreamW`**。对标报告按 HiBit 的导入表
+/// （`FindFirstFileNameW`/`FindNextFileNameW`）推断它在做 ADS，那个推断错了一半：
+/// `FindFirstFileNameW` 枚举的是同一文件记录上的**硬链接名**，不是数据流。
+/// 这里要的是数据流，所以按 API 的真实语义取，而不是照抄被推断的那对。
+///
+/// 默认流 `::$DATA` 不计入（它就是文件本体，已由 `metadata().len()` 算过）。
+/// 失败一律返回 (0,0)：ADS 属于"解释体积为什么比表面大"的附加信息，
+/// 不该让一次体积估算整体失败。
+pub fn file_ads_bytes(path: &std::path::Path) -> (u64, usize) {
+    use windows::Win32::Storage::FileSystem::{
+        FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, WIN32_FIND_STREAM_DATA,
+    };
+    use windows::Win32::Foundation::CloseHandle;
+
+    let mut buf = WIN32_FIND_STREAM_DATA::default();
+    let wide = to_wide(&path.to_string_lossy());
+    let mut bytes = 0u64;
+    let mut count = 0usize;
+    unsafe {
+        let Ok(handle) = FindFirstStreamW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            FindStreamInfoStandard,
+            &mut buf as *mut _ as *mut core::ffi::c_void,
+            None,
+        ) else {
+            return (0, 0);
+        };
+        loop {
+            let units: Vec<u16> = buf.cStreamName.iter().copied().take_while(|u| *u != 0).collect();
+            let name = String::from_utf16_lossy(&units);
+            // 形如 `::<名字>:$DATA`；默认流是 `::$DATA`
+            if !name.eq_ignore_ascii_case("::$DATA") {
+                bytes = bytes.saturating_add(buf.StreamSize.max(0) as u64);
+                count += 1;
+            }
+            if FindNextStreamW(handle, &mut buf as *mut _ as *mut core::ffi::c_void).is_err() {
+                break;
+            }
+        }
+        let _ = CloseHandle(handle);
+    }
+    (bytes, count)
+}
+
 /// 枚举指定键的全部值名（F-1：regKeys `value:"*"` 展开用）。键打不开 → 空集。
 pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> Vec<String> {
     let sk = to_wide(subkey);

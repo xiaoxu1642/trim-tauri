@@ -117,8 +117,13 @@
         const stillThere = document.querySelector(`[data-un-size="${CSS.escape(a.id)}"]`);
         if (!stillThere) return; // 列表已重绘，旧结果不再回写
         stillThere.textContent = '≈' + fmtSizeKb(r.data.sizeKb);
+        // HiBit §H5：命名数据流（ADS）不计入本体体积，单独在提示里交代。
+        // 它解释的是「为什么删完释放的比显示的多」——下载来源标记 Zone.Identifier 就住在这里
         stillThere.setAttribute('data-tip', '厂商未写 EstimatedSize，按安装目录大小估算'
-          + (r.data.partial ? '（文件数或层级触顶，实际可能更大）' : ''));
+          + (r.data.partial ? '（文件数或层级触顶，实际可能更大）' : '')
+          + (Number(r.data.adsStreams) > 0
+            ? `；另含 ${r.data.adsStreams} 条备用数据流约 ${fmtSizeKb(Math.ceil(Number(r.data.adsBytes) / 1024))}（不计入上面的数）`
+            : ''));
       } catch (e) { /* 估不出来就留空位，不编一个数 */ }
     }
   }
@@ -245,13 +250,24 @@
     const sys = apps.filter((a) => a.group !== 'third');
     const section = (title, list) => {
       if (!list.length) return '';
-      const rows = list.map((a) => `
+      // 卸载按钮的禁用属性。三类"不可卸载"要说清差别：NonRemovable 是系统声明不许移除，
+  // staged / 全用户预配是**当前用户删不掉**（Remove-AppxPackage 是用户语义），
+  // 混成一句会让用户以为我们只是没做这个功能。
+  function uninstallBlockAttr(a) {
+    if (!a || a.removable === false) {
+      const reason = a && a.reason ? a.reason : '系统声明的不可移除包';
+      return ` disabled data-tip="${esc(reason)}"`;
+    }
+    return '';
+  }
+
+  const rows = list.map((a) => `
         <tr>
           <td><div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div></td>
           <td class="finder-col-size" style="width:190px"><span class="finder-name-text" style="opacity:.7">${esc(a.publisher || '—')}</span></td>
           <td class="finder-col-size" style="width:130px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
           <td class="finder-col-size" style="width:150px">
-            <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${a.removable === false ? ' disabled data-tip="系统声明的不可移除包"' : ''}>卸载</button>
+            <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${uninstallBlockAttr(a)}>卸载</button>
           </td>
         </tr>`).join('');
       return `<div class="finder-group-header"><span>${title} · ${list.length} 项</span></div>

@@ -226,6 +226,112 @@ catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
         .collect())
 }
 
+/// Appx「未注册到当前用户」补充枚举（HiBit §H6 借鉴项，2026-09-29）。
+///
+/// 为什么要这一路：`Get-AppxPackage` 是**当前用户**语义，看不到两类实际占盘的东西——
+/// ① `AppxAllUserStore\Staged\` 下"已下载未注册"的包（占空间但不在使用中，恰恰最该清），
+/// ② `AppxAllUserStore\Applications\` 下为**全用户预配**、当前用户没注册的包。
+/// 本机实测结构（只读查得，非推断）：
+/// `…\AppxAllUserStore\Staged\<家族名>\<包全名>` 带 `Path` 值指向包内 AppxManifest.xml；
+/// `…\AppxAllUserStore\Applications\<包全名>` 直接以全名为键。
+///
+/// 三条纪律：
+/// 1. **只读注册表，不提权、不执行**。这两类包当前用户的 `Remove-AppxPackage` 删不掉，
+///    所以 `removable=false` 且不带卸载入口 —— 覆盖面不能顺手把执行面也放大
+///    （刻意不改成 `-AllUsers` 裸命令，那正是本应用拒绝"透传参数面"的地方）。
+/// 2. 包全名照过 `valid_appx_fullname`：注册表里的串也是外部输入，将来任何一条链把它
+///    拼进命令时，这道闸必须已经生效过。
+/// 3. 体积不给数：`WindowsApps` 的 ACL 标准用户读不了，读不出就返回 0 并在界面显示"——"，
+///    不猜一个数冒充实测。
+fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -> Vec<Value> {
+    use crate::engine::native;
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+    const STORE: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore";
+    let mut out: Vec<Value> = Vec::new();
+    // (子树, 状态标签, 家族名层是否存在)：Staged 多一层家族名，Applications 直接是包全名
+    for (sub, state, two_level) in [("Staged", "staged", true), ("Applications", "provisioned", false)] {
+        for a in native::reg_enum_subkeys_pub(HKEY_LOCAL_MACHINE, &format!("{STORE}\\{sub}")) {
+            let leaves: Vec<String> = if two_level {
+                native::reg_enum_subkeys_pub(HKEY_LOCAL_MACHINE, &format!("{STORE}\\{sub}\\{a}"))
+            } else {
+                vec![a.clone()]
+            };
+            for full in leaves {
+                if full.is_empty() || !valid_appx_fullname(&full) || seen.contains(&full) {
+                    continue;
+                }
+                // 包全名 `<名>_<版本>_<架构>_<发行商>`：取下划线路径里的名字与版本做展示
+                let segs: Vec<&str> = full.split('_').collect();
+                let (name, version) = (
+                    segs.first().copied().unwrap_or(full.as_str()),
+                    segs.get(1).copied().unwrap_or(""),
+                );
+                // 注册表这一路的"发布商"段是 **发布者哈希**（`8wekyb3d8bbwe` 这种），
+                // 不是 Get-AppxPackage 给的 `CN=Microsoft Corporation`。真机跑出来发现两件事：
+                // 哈希直接上屏在厂商列显示成乱码样，且 `Microsoft.*` 包因哈希里不含 "microsoft"
+                // 被归进「第三方」。哈希只有这一个已知映射，其余一律留空让界面出"——"，
+                // 不拿哈希冒充厂商名，也不靠包名前缀去猜归属。
+                const MS_PUBLISHER_HASH: &str = "8wekyb3d8bbwe";
+                let publisher_raw = segs.last().copied().unwrap_or("");
+                let publisher = if publisher_raw.eq_ignore_ascii_case(MS_PUBLISHER_HASH) {
+                    "Microsoft Corporation".to_string()
+                } else {
+                    String::new()
+                };
+                let group = if publisher_raw.eq_ignore_ascii_case(MS_PUBLISHER_HASH) { "system" } else { "third" };
+                let install = if two_level {
+                    native::read_reg_value_text(
+                        HKEY_LOCAL_MACHINE,
+                        &format!("{STORE}\\{sub}\\{a}\\{full}"),
+                        "Path",
+                    )
+                    .map(|(_, v)| v)
+                    .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let install_dir = match install.rsplit_once('\\') {
+                    Some((dir, _)) if dir.ends_with("Packages") => dir.to_string(),
+                    Some((dir, _)) => dir.to_string(),
+                    None => String::new(),
+                };
+                if !install_dir.is_empty() {
+                    // 再判一次：当前用户已注册的同名包会在上面 seen 里被跳过，这里挡的是
+                    // 「同一个包全名在两个子树里都出现」的重叠，避免一行出两次
+                    if out.iter().any(|r| r["id"].as_str() == Some(format!("APPX|{full}").as_str())) {
+                        continue;
+                    }
+                }
+                out.push(json!({
+                    "id": format!("APPX|{full}"),
+                    "displayName": name,
+                    "publisher": publisher,
+                    "displayVersion": version,
+                    "installLocation": install_dir,
+                    "displayIcon": "",
+                    "logoPath": "",
+                    "uninstallString": "",
+                    "quietUninstallString": "",
+                    "estimatedSizeKb": 0,
+                    "productCode": null,
+                    "installerKind": "appx",
+                    "group": group,
+                    // 关键差别：这一类当前用户删不掉，界面据此不给卸载按钮
+                    "removable": false,
+                    "appxState": state,
+                    "reason": if state == "staged" {
+                        "已下载但未注册到当前用户，Remove-AppxPackage 对它无效（需管理员按全用户面处理）"
+                    } else {
+                        "为全用户预配的包，当前用户未注册，不在可卸载列表内"
+                    },
+                }));
+            }
+        }
+    }
+    out
+}
+
 /// Appx 移除（当前用户，对齐 HiBit 的 `powershell Remove-AppxPackage` 实测口径）。
 /// 返回 Ok(()) 或带原因的 Err。NonRemovable 的包系统会拒绝，由这里如实转述。
 fn remove_appx(fullname: &str) -> Result<(), String> {
@@ -369,16 +475,25 @@ const DIR_SIZE_DEPTH_CAP: usize = 8;
 ///   甚至在环上永不收敛（同一原因见 `dir_delete_blocked`）；
 /// - 只统计文件字节，不折算目录项与簇对齐 —— 这是"估算"，UI 上也这么写；
 /// - 触顶就返回 `partial=true`，绝不把截断值当成完整值。
-fn bounded_dir_size(root: &Path) -> (u64, usize, bool) {
+fn bounded_dir_size(root: &Path) -> DirSize {
     bounded_dir_size_in(root, DIR_SIZE_FILE_CAP, DIR_SIZE_DEPTH_CAP)
 }
 
+/// 一次有界目录遍历的产出。`ads_*` 单列而不并进 `bytes`：ADS 是否真的额外占盘取决于
+/// 簇对齐与压缩，混进本体就说不清"估"的是哪一个数。
+#[derive(Debug, Default, PartialEq)]
+struct DirSize {
+    bytes: u64,
+    files: usize,
+    partial: bool,
+    ads_bytes: u64,
+    ads_streams: usize,
+}
+
 /// 上限抽成入参：真机阈值（2 万文件 / 8 层）在单测里跑不起，但截断语义必须能判红。
-fn bounded_dir_size_in(root: &Path, file_cap: usize, depth_cap: usize) -> (u64, usize, bool) {
+fn bounded_dir_size_in(root: &Path, file_cap: usize, depth_cap: usize) -> DirSize {
+    let mut out = DirSize::default();
     let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
-    let mut total = 0u64;
-    let mut files = 0usize;
-    let mut partial = false;
     while let Some((dir, depth)) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for ent in rd.flatten() {
@@ -389,7 +504,7 @@ fn bounded_dir_size_in(root: &Path, file_cap: usize, depth_cap: usize) -> (u64, 
             let path = ent.path();
             if md.is_dir() {
                 if depth + 1 >= depth_cap {
-                    partial = true;
+                    out.partial = true;
                     continue;
                 }
                 stack.push((path, depth + 1));
@@ -399,17 +514,23 @@ fn bounded_dir_size_in(root: &Path, file_cap: usize, depth_cap: usize) -> (u64, 
                 Ok(m) if m.is_file() => {
                     // 触顶即整体收工：只跳出当前目录会留下一栈子目录继续 read_dir，
                     // 在 target/ 这种目录数巨大的树上等于没设上限。
-                    if files >= file_cap {
-                        return (total, files, true);
+                    if out.files >= file_cap {
+                        out.partial = true;
+                        return out;
                     }
-                    total = total.saturating_add(m.len());
-                    files += 1;
+                    out.bytes = out.bytes.saturating_add(m.len());
+                    out.files += 1;
+                    // HiBit §H5：一并累计命名数据流（下载来源标记 Zone.Identifier 之类）。
+                    // 每个文件一次 FindFirstStreamW，量级被 file_cap 天然限制住。
+                    let (ab, ac) = crate::engine::native::file_ads_bytes(&path);
+                    out.ads_bytes = out.ads_bytes.saturating_add(ab);
+                    out.ads_streams += ac;
                 }
                 _ => {}
             }
         }
     }
-    (total, files, partial)
+    out
 }
 
 /// uninstall:dir-size — 体积二级兜底（B6）。清单里 `EstimatedSize` 缺失时按安装目录估。
@@ -429,13 +550,17 @@ pub fn uninstall_dir_size<R: tauri::Runtime>(
     if path.trim().is_empty() || !root.is_absolute() || !root.is_dir() {
         return json!({ "success": false, "message": "路径不可用" });
     }
-    let (bytes, files, partial) = bounded_dir_size(root);
+    let ds = bounded_dir_size(root);
     json!({
         "success": true,
         "data": {
-            "sizeKb": bytes / 1024,
-            "files": files,
-            "partial": partial,
+            "sizeKb": ds.bytes / 1024,
+            "files": ds.files,
+            "partial": ds.partial,
+            // HiBit §H5：命名数据流单独回传。前端只在有条目时多讲一句，
+            // 它解释的是「为什么删完释放的比显示的多/少」，不是本体体积
+            "adsBytes": ds.ads_bytes,
+            "adsStreams": ds.ads_streams,
         }
     })
 }
@@ -567,7 +692,17 @@ pub async fn uninstall_list<R: tauri::Runtime>(
     let apps = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Value>, String> {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
         if scope == "windows" {
-            return enum_appx_packages();
+            let mut rows = enum_appx_packages()?;
+            // 未注册到当前用户的两类（staged / 全用户预配）补在同一列表里，
+            // 但 removable=false ⇒ 前端不给卸载按钮（HiBit §H6：覆盖面不顺手放大执行面）
+            let seen: std::collections::HashSet<String> = rows
+                .iter()
+                .filter_map(|r| {
+                    r["id"].as_str().and_then(|s| s.strip_prefix("APPX|")).map(String::from)
+                })
+                .collect();
+            rows.extend(enum_appx_store_extras(&seen));
+            return Ok(rows);
         }
         let mut apps: Vec<Value> = Vec::new();
         unsafe {
@@ -5343,6 +5478,8 @@ mod residue_trace_tests {
     }
 
     /// B6：体积兜底必须有界且诚实标注截断；不存在的目录与相对路径不接受。
+    /// H5：顺带把命名数据流（ADS）算出来——这条是真跑 `FindFirstStreamW`，
+    /// 不是打桩：ADS 的全部意义就是"本体之外还占着多少"，不落到真实文件系统上就验不到。
     #[test]
     fn bounded_dir_size_counts_files_and_flags_partial() {
         let dir = std::env::temp_dir().join(format!("trim-dirsize-{}", std::process::id()));
@@ -5350,22 +5487,89 @@ mod residue_trace_tests {
         std::fs::create_dir_all(dir.join("sub\\deep")).expect("临时目录");
         std::fs::write(dir.join("a.bin"), vec![b'1'; 1024]).expect("写文件");
         std::fs::write(dir.join("sub\\deep\\b.bin"), vec![b'2'; 2048]).expect("写文件");
-        let (bytes, files, partial) = bounded_dir_size(&dir);
-        assert_eq!(bytes, 3072, "两文件共 3072 字节: {bytes}");
-        assert_eq!(files, 2, "递归两层应数到两个文件");
-        assert!(!partial, "小规模不该报截断");
+        // 给 a.bin 挂一条 ADS（下载来源标记就是这个形状）。`文件:流名` 直接 open 即建流。
+        let ads_body = b"ZoneId=0\r\nHostUrl=https://example.com/x";
+        std::fs::write(dir.join("a.bin:Zone.Identifier"), ads_body.to_vec())
+            .expect("写 ADS（非 NTFS 或策略禁用时本用例不适用）");
+        let ds = bounded_dir_size(&dir);
+        assert_eq!(ds.bytes, 3072, "两文件共 3072 字节: {}", ds.bytes);
+        assert_eq!(ds.files, 2, "递归两层应数到两个文件");
+        assert!(!ds.partial, "小规模不该报截断");
+        assert_eq!(ds.ads_streams, 1, "应当只数到那一条命名流（默认流不计）: {ds:?}");
+        assert_eq!(ds.ads_bytes as usize, ads_body.len(), "ADS 字节数必须与写入量一致: {ds:?}");
         // 文件数触顶：只数到上限个、必须标截断（哪个文件先被读到随枚举序变，所以只断上界）
-        let (bytes, files, partial) = bounded_dir_size_in(&dir, 1, 8);
-        assert_eq!(files, 1, "文件闸应把计数卡在上限");
-        assert!(bytes < 3072, "截断后不该是完整金额: {bytes}");
-        assert!(partial, "有界截断却回 partial=false，UI 就会把半截值当完整值");
+        let ds1 = bounded_dir_size_in(&dir, 1, 8);
+        assert_eq!(ds1.files, 1, "文件闸应把计数卡在上限");
+        assert!(ds1.bytes < 3072, "截断后不该是完整金额: {}", ds1.bytes);
+        assert!(ds1.partial, "有界截断却回 partial=false，UI 就会把半截值当完整值");
         // 层级触顶：sub/deep 在 depth=2，depth_cap=2 时进不去
-        let (_bytes, _files, partial) = bounded_dir_size_in(&dir, 100, 2);
-        assert!(partial, "深度闸命中必须上报截断");
+        let ds2 = bounded_dir_size_in(&dir, 100, 2);
+        assert!(ds2.partial, "深度闸命中必须上报截断");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// B7：Prefetch 文件名解析认不出就 None；DisplayIcon 只认 .exe。
+    /// H6：`Staged` 子树**一个不漏**地进列表，且每一行都不可卸载。
+    ///
+    /// 期望值不写死、从注册表现算（`reg_enum_subkeys_pub` 与实现走的是同一份枚举）——
+    /// 这样"漏读某一层"会当场红，而在没有商店包的机器上也不会靠 `count>0` 假装验过。
+    #[test]
+    fn appx_store_extras_covers_every_staged_package_and_is_never_removable() {
+        use crate::engine::native;
+        use std::collections::HashSet;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        const STORE: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore";
+
+        let mut expected_staged = 0usize;
+        let mut sample_family = String::new();
+        for fam in native::reg_enum_subkeys_pub(HKEY_LOCAL_MACHINE, &format!(r"{STORE}\Staged")) {
+            let kids = native::reg_enum_subkeys_pub(HKEY_LOCAL_MACHINE, &format!(r"{STORE}\Staged\{fam}"));
+            if sample_family.is_empty() {
+                sample_family = fam.clone();
+            }
+            expected_staged += kids.len();
+        }
+
+        let rows = enum_appx_store_extras(&HashSet::new());
+        let staged = rows.iter().filter(|r| r["appxState"] == json!("staged")).count();
+        assert_eq!(staged, expected_staged, "Staged 子树漏读（实现数 {staged} / 注册表数 {expected_staged}）");
+
+        // 形状按渲染层消费口径断：`removable===false` 才是前端禁用按钮的判据，
+        // 缺这个字段会被当成可卸载，等于把"当前用户删不掉"的包推去执行
+        for r in &rows {
+            assert_eq!(r["removable"], json!(false), "这一类必须显式不可卸载: {r}");
+            let id = r["id"].as_str().unwrap_or("");
+            let Some(full) = id.strip_prefix("APPX|") else {
+                panic!("id 必须带 APPX| 前缀: {id}");
+            };
+            assert!(valid_appx_fullname(full), "包全名没过字符集闸: {full}");
+            assert!(!r["reason"].as_str().unwrap_or("").is_empty(), "必须交代为什么不可卸载");
+            // 发布商这一路是**哈希**不是 CN= 串：裸哈希上屏在厂商列看着像乱码，
+            // 而且真机第一版因此把 `Microsoft.Services.Store.Engagement` 归进了「第三方」。
+            let publ = r["publisher"].as_str().unwrap_or("—");
+            assert!(!publ.contains("wekyb"), "发布商列出现裸哈希: {r}");
+            if r["displayName"].as_str().unwrap_or("").to_lowercase().starts_with("microsoft") {
+                assert_eq!(r["group"], json!("system"), "微软包被归成第三方: {r}");
+            }
+        }
+
+        // 去重：已经在当前用户列表里的全名不得再出第二次（同一行出两次会被勾两次）
+        if !sample_family.is_empty() {
+            let kids = native::reg_enum_subkeys_pub(
+                HKEY_LOCAL_MACHINE,
+                &format!(r"{STORE}\Staged\{sample_family}"),
+            );
+            if let Some(first) = kids.first() {
+                let mut seen = HashSet::new();
+                seen.insert(first.clone());
+                let again = enum_appx_store_extras(&seen);
+                assert!(
+                    again.iter().all(|r| r["id"] != json!(format!("APPX|{first}"))),
+                    "seen 里的 {first} 又出了一次"
+                );
+            }
+        }
+    }
+
     #[test]
     fn prefetch_and_icon_parsers_refuse_guessing() {
         assert_eq!(prefetch_entry_exe("OBS64.EXE-2F3A1B4C.pf").as_deref(), Some("OBS64.EXE"));
