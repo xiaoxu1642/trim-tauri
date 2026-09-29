@@ -2676,22 +2676,38 @@ pub fn read_reg_string(hive: HKEY, subkey: &str, value: &str) -> Option<String> 
     }
 }
 
-/// 读注册表值，返回 (类型标签, 字符串化数据)。
+/// 读注册表值，返回 (类型标签, 字符串化数据) —— **显示/回读链**用的展平口径。
 ///
-/// **口径逐条对齐** optimizer 值级备份的 `READ_ONE_HEADER`（main.js 3481-3502 的移植）——
-/// 这条链的产物会被写进 `optimizer-backups.json`，再由 `restore_backup_values` 读回，
-/// 读写两侧必须用同一套字符串化规则，否则 `0xFFFFFFFF` 这类值会在「备份→还原」之间变形：
-/// - `REG_DWORD` → `("REG_DWORD", [int] 的 i32 十进制)`（有符号！）
-/// - `REG_QWORD` → `("REG_QWORD", [long] 的 i64 十进制)`
-/// - `REG_BINARY` → `("REG_BINARY", 小写 hex 连写，无分隔符)`
-/// - `REG_SZ` → `("REG_SZ", 原文)`
-/// - `REG_EXPAND_SZ` → `("REG_SZ", **展开后**的串)` —— .NET `GetValue` 会展开，保持同口径
-/// - `REG_MULTI_SZ` → `("REG_SZ", 空格连接)` —— PS `[string]$v` 对字符串数组的强制转换
-/// - 其它类型 → `None`（与 `GetValue` 返回 null 一致，调用方按「不存在」处理）
+/// 口径逐条对齐 .NET `GetValue` 与 PS `[string]$v`（`READ_ONE_HEADER`，main.js 3481-3502 的移植）：
+/// `REG_EXPAND_SZ` **展开后**按 `REG_SZ` 回报、`REG_MULTI_SZ` 空格连接按 `REG_SZ` 回报。
+/// 这两个展平是有意的：卸载项的 `UninstallString` 给人看就该是展开后的真实路径。
+/// DWORD 按**有符号 i32**、QWORD 按 i64、BINARY 按小写 hex 连写 —— 读写两侧必须同一套规则，
+/// 否则 `0xFFFFFFFF` 这类值会在「备份→还原」之间变形。
+///
+/// **备份/还原链不要用这里**，用 [`read_reg_value_faithful`] —— 展开过的 EXPAND_SZ 写回去
+/// 会把 `%VAR%` 永久变成字面量，那正是「还原后反而变了」那一类疑难的根因。
 pub fn read_reg_value_text(hive: HKEY, subkey: &str, name: &str) -> Option<(&'static str, String)> {
-    use windows::Win32::System::Registry::{REG_EXPAND_SZ, REG_MULTI_SZ};
-    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+    read_reg_value_mode(hive, subkey, name, true)
+}
 
+/// 读注册表值，返回 (**真实**类型标签, 未加工内容) —— **备份/还原链**专用。
+///
+/// 与 [`read_reg_value_text`] 的唯一差别是不展平：
+/// - `REG_EXPAND_SZ` → 原样（不展开环境变量）
+/// - `REG_MULTI_SZ` → 各元素以 `\u{0}` 连接。选 NUL 作分隔是因为它**不可能**出现在元素里
+///   （NUL 本身就是注册表里的元素分隔符），所以连接是可逆的；备份文件的 `data` 只有一个
+///   真源，不必再加数组字段。渲染层只读备份的**条数**、不读 `data`，串里的 NUL 不会上屏。
+///   元素中间的空串会被丢弃（注册表保留用法，实际写入方极少），其余字节原样往返。
+pub fn read_reg_value_faithful(hive: HKEY, subkey: &str, name: &str) -> Option<(&'static str, String)> {
+    read_reg_value_mode(hive, subkey, name, false)
+}
+
+fn read_reg_value_mode(
+    hive: HKEY,
+    subkey: &str,
+    name: &str,
+    flatten: bool,
+) -> Option<(&'static str, String)> {
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
     unsafe {
@@ -2711,55 +2727,78 @@ pub fn read_reg_value_text(hive: HKEY, subkey: &str, name: &str) -> Option<(&'st
         if r.is_err() {
             return None;
         }
+        // 两次查询之间值被改小时 size < buf.len()：按第二次报的实际长度截断，
+        // 否则多出来的补零会参与解码（DWORD 长度闸门就是这么被打穿的）
+        let actual = (size as usize).min(buf.len());
+        decode_reg_value_bytes(ty, &buf[..actual], flatten)
+    }
+}
 
-        let units = |b: &[u8]| -> Vec<u16> {
-            b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
-        };
-        match ty {
-            REG_DWORD if size >= 4 => {
-                let raw = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                // .NET 把 DWORD 读成 int（有符号），`[int]$v` 再转字符串 —— 保留该口径
-                Some(("REG_DWORD", (raw as i32).to_string()))
-            }
-            REG_QWORD if size >= 8 => {
-                let raw = u64::from_le_bytes(buf[..8].try_into().ok()?);
-                Some(("REG_QWORD", (raw as i64).to_string()))
-            }
-            REG_BINARY => {
-                Some(("REG_BINARY", buf.iter().map(|b| format!("{b:02x}")).collect()))
-            }
-            REG_SZ => {
-                let u = units(&buf);
-                Some(("REG_SZ", String::from_utf16_lossy(&u).trim_end_matches('\0').to_string()))
-            }
-            REG_EXPAND_SZ => {
-                // 展开环境变量（对齐 .NET GetValue）；展开结果以 NUL 结尾
-                let u = units(&buf);
-                let raw = String::from_utf16_lossy(&u);
-                let raw = raw.trim_end_matches('\0');
-                let mut out = [0u16; 1024];
-                let src = to_wide(raw);
-                let n = ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut out[..]));
-                let s = if n == 0 || n as usize > out.len() {
-                    raw.to_string() // 展开失败/过长 → 原样保留，不造一个错值
-                } else {
-                    let u16s = &out[..(n as usize - 1).max(0)];
-                    String::from_utf16_lossy(u16s)
-                };
-                Some(("REG_SZ", s))
-            }
-            REG_MULTI_SZ => {
-                // 双 NUL 结尾的 UTF-16 串序列；PS `[string]$v` 对数组是空格连接
-                let u = units(&buf);
-                let joined: String = String::from_utf16_lossy(&u)
-                    .split('\0')
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                Some(("REG_SZ", joined))
-            }
-            _ => None,
+/// 值字节 → (类型标签, 字符串)。两条口径的唯一解码处，不碰注册表句柄，
+/// 因此能与 `optimizer::restore_write_bytes` 成对钉在单测里（读写两端同一条链）。
+pub fn decode_reg_value_bytes(
+    ty: REG_VALUE_TYPE,
+    buf: &[u8],
+    flatten: bool,
+) -> Option<(&'static str, String)> {
+    use windows::Win32::System::Registry::{REG_EXPAND_SZ, REG_MULTI_SZ};
+    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+
+    let units = |b: &[u8]| -> Vec<u16> {
+        b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+    };
+    match ty {
+        REG_DWORD if buf.len() >= 4 => {
+            let raw = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            // .NET 把 DWORD 读成 int（有符号），`[int]$v` 再转字符串 —— 保留该口径
+            Some(("REG_DWORD", (raw as i32).to_string()))
         }
+        REG_QWORD if buf.len() >= 8 => {
+            let raw = u64::from_le_bytes(buf[..8].try_into().ok()?);
+            Some(("REG_QWORD", (raw as i64).to_string()))
+        }
+        REG_BINARY => {
+            Some(("REG_BINARY", buf.iter().map(|b| format!("{b:02x}")).collect()))
+        }
+        REG_SZ => {
+            let u = units(buf);
+            Some(("REG_SZ", String::from_utf16_lossy(&u).trim_end_matches('\0').to_string()))
+        }
+        REG_EXPAND_SZ => {
+            let u = units(buf);
+            let raw = String::from_utf16_lossy(&u);
+            let raw = raw.trim_end_matches('\0');
+            if !flatten {
+                return Some(("REG_EXPAND_SZ", raw.to_string()));
+            }
+            // 展开环境变量（对齐 .NET GetValue）；展开结果以 NUL 结尾
+            let mut out = [0u16; 1024];
+            let src = to_wide(raw);
+            let n = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut out[..])) };
+            let s = if n == 0 || n as usize > out.len() {
+                raw.to_string() // 展开失败/过长 → 原样保留，不造一个错值
+            } else {
+                let u16s = &out[..(n as usize - 1).max(0)];
+                String::from_utf16_lossy(u16s)
+            };
+            Some(("REG_SZ", s))
+        }
+        REG_MULTI_SZ => {
+            let u = units(buf);
+            let text = String::from_utf16_lossy(&u);
+            let parts: Vec<&str> = text
+                .trim_end_matches('\0')
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .collect();
+            if flatten {
+                // PS `[string]$v` 对字符串数组是空格连接
+                Some(("REG_SZ", parts.join(" ")))
+            } else {
+                Some(("REG_MULTI_SZ", parts.join("\u{0}")))
+            }
+        }
+        _ => None,
     }
 }
 

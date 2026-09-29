@@ -1051,6 +1051,10 @@ fn verify_option_restored(option_id: &str, opt: &Value) -> &'static str {
 ///
 /// B11：与 `read_reg_values` 同一条 PS 模板的另一处调用 —— 备份条目的 `hive` 已是
 /// .NET 名（LocalMachine/CurrentUser…），这里换用 `restore_hive` 解析，其余口径一致。
+///
+/// **必须与 `read_reg_values` 同一口径（faithful）**：产物是给 `verify_option_restored`
+/// 逐项比对 `type`/`data` 用的。一侧展平、一侧不展平，会让每个 EXPAND_SZ/MULTI_SZ
+/// 备份项永远比出不一致，还原明明成功却报「部分还原」。
 fn read_values_by_backup(want: &[Value]) -> Option<Vec<Value>> {
     use crate::engine::native;
     let mut out = Vec::with_capacity(want.len());
@@ -1060,7 +1064,7 @@ fn read_values_by_backup(want: &[Value]) -> Option<Vec<Value>> {
         let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("");
         let Some(h) = restore_hive(hive) else { return None };
         let mut item = json!({ "hive": hive, "sub": sub, "key": key, "exists": false });
-        if let Some((ty, data)) = native::read_reg_value_text(h, sub, key) {
+        if let Some((ty, data)) = native::read_reg_value_faithful(h, sub, key) {
             item["exists"] = json!(true);
             item["type"] = json!(ty);
             item["data"] = json!(data);
@@ -1151,9 +1155,12 @@ fn parse_reg_targets(block: &str) -> Vec<RegTarget> {
 /// 读取一组 (hive, sub, key) 当前值；任一目标读取失败返回 None
 ///
 /// B11：原先这里生成 `Read-One` PS 函数 + 逐目标调用行，spawn pwsh、60s 超时、
-/// 再解析 stdout 里的 JSON —— 就为了读几个注册表值。现在直接走注册表 API，
-/// 字符串化口径逐条对齐原 `READ_ONE_HEADER`（见 `native::read_reg_value_text`），
-/// 保证「备份 → 还原」两侧对同一值的表述完全一致。
+/// 再解析 stdout 里的 JSON —— 就为了读几个注册表值。现在直接走注册表 API。
+///
+/// 口径用 `native::read_reg_value_faithful`（**不展平**）：备份的目的是还原，
+/// 展平口径会把 `REG_EXPAND_SZ` 展开成字面量、把 `REG_MULTI_SZ` 压成空格串并谎报为
+/// `REG_SZ`，于是「还原」把类型和内容一起改错 —— 用户看到的正是「还原后反而变了」。
+/// DWORD/QWORD/BINARY 的字符串化规则与展平口径相同，所以既有备份文件不受影响。
 ///
 /// 输出形状与旧 PS 逐字段一致：`exists=false` 时**不带** `type`/`data` 键
 /// （旧 `ConvertTo-Json` 也不会输出它们），下游 `build_restore_ops` 据此走删除分支。
@@ -1168,7 +1175,7 @@ fn read_reg_values(targets: &[RegTarget]) -> Option<Vec<Value>> {
             "key": t.key,
             "exists": false,
         });
-        if let Some((ty, data)) = native::read_reg_value_text(hive, &t.sub, &t.key) {
+        if let Some((ty, data)) = native::read_reg_value_faithful(hive, &t.sub, &t.key) {
             item["exists"] = json!(true);
             item["type"] = json!(ty);
             item["data"] = json!(data);
@@ -1350,12 +1357,17 @@ fn restore_hive(name: &str) -> Option<windows::Win32::System::Registry::HKEY> {
 
 /// 把备份条目的 `data` 字符串编码为 API 就绪字节。
 ///
-/// 编码口径**逐条对齐**读值侧 `READ_ONE_HEADER`（main.js 3481-3502 的移植）：
+/// 编码口径**逐条对齐**读值侧 `native::decode_reg_value_bytes(.., flatten=false)`：
 /// - `REG_DWORD` → `[string]([int]$v)`，是**有符号 i32** 的十进制串；
 ///   还原时按 i32 解析再按 u32 写回，`0xFFFFFFFF` 才能原样往返。
 /// - `REG_QWORD` → `[string]([long]$v)`，i64 十进制。
 /// - `REG_BINARY` → 小写 hex 连写（无分隔符）。
-/// - 其余一律按 REG_SZ。
+/// - `REG_SZ` / `REG_EXPAND_SZ` → UTF-16LE + 单个终止 NUL（两者字节布局相同，
+///   区别只在类型标签，标签在 `restore_backup_values` 的 kind 映射里保住）。
+/// - `REG_MULTI_SZ` → 元素以 `\u{0}` 连接（读侧的可逆分隔），写回时每个元素补一个
+///   NUL、整个串再补一个 NUL（注册表的双 NUL 终止约定）。
+/// - 其余标签按 REG_SZ 兜底 —— 只服务**升级前生成**的老备份（那批数据里 EXPAND_SZ/
+///   MULTI_SZ 当年就是按 REG_SZ 记的，照老语义还原比猜一个新语义诚实）。
 ///
 /// 返回 `Err` = 备份数据畸形（非法十进制 / 奇数位或非 hex 的 BINARY）。
 /// 刻意**fail-closed 而不是像旧 PS 那样把非 hex 字符剥掉**：这是还原路径，
@@ -1379,6 +1391,15 @@ fn restore_write_bytes(typ: &str, data: &str) -> Result<Vec<u8>, String> {
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
                 .collect()
+        }
+        "REG_MULTI_SZ" => {
+            let mut v: Vec<u8> = Vec::new();
+            for part in data.split('\0').filter(|s| !s.is_empty()) {
+                v.extend(part.encode_utf16().flat_map(|w| w.to_le_bytes()));
+                v.extend_from_slice(&[0, 0]);
+            }
+            v.extend_from_slice(&[0, 0]); // 双 NUL 收尾；零个元素时这就是「空 MULTI_SZ」
+            Ok(v)
         }
         _ => {
             let mut v: Vec<u8> = data.encode_utf16().flat_map(|w| w.to_le_bytes()).collect();
@@ -1415,6 +1436,27 @@ fn build_restore_ops(values: &[Value]) -> Result<Vec<RestoreOp>, String> {
     Ok(ops)
 }
 
+/// 备份里的类型标签 → 写注册表用的 `REG_VALUE_TYPE`。
+///
+/// 单独成函数是因为这条映射**看不见失败**：字节编码正确但标签塌成 `REG_SZ`，
+/// `RegSetValueExW` 照样返回成功、还原回读也确实读得出一个串，只有下一个用这个值的
+/// 程序会发现 `%VAR%` 变成了字面路径、多值串变成了单串。抽出来才能被单测判红。
+/// 未知标签按 `REG_SZ` 兜底，只服务升级前生成的老备份（那批里 EXPAND_SZ/MULTI_SZ
+/// 当年就是按 `REG_SZ` 记的，照老语义还原比猜一个新语义诚实）。
+fn restore_reg_kind(typ: &str) -> windows::Win32::System::Registry::REG_VALUE_TYPE {
+    use windows::Win32::System::Registry::{
+        REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_QWORD, REG_SZ,
+    };
+    match typ {
+        "REG_DWORD" => REG_DWORD,
+        "REG_QWORD" => REG_QWORD,
+        "REG_BINARY" => REG_BINARY,
+        "REG_EXPAND_SZ" => REG_EXPAND_SZ,
+        "REG_MULTI_SZ" => REG_MULTI_SZ,
+        _ => REG_SZ,
+    }
+}
+
 /// 按备份条目回写（任一失败即返回 false；调用方据此报「还原不完整」）
 fn restore_backup_values(values: &[Value]) -> bool {
     use crate::engine::native;
@@ -1425,18 +1467,11 @@ fn restore_backup_values(values: &[Value]) -> bool {
     for op in ops {
         let ok = match op {
             RestoreOp::Write { hive, sub, key, typ, bytes } => {
-                use windows::Win32::System::Registry::{REG_BINARY, REG_DWORD, REG_QWORD, REG_SZ};
                 let Some(h) = restore_hive(&hive) else {
                     failed += 1;
                     continue;
                 };
-                let kind = match typ.as_str() {
-                    "REG_DWORD" => REG_DWORD,
-                    "REG_QWORD" => REG_QWORD,
-                    "REG_BINARY" => REG_BINARY,
-                    _ => REG_SZ,
-                };
-                native::reg_restore_write(h, &sub, &key, kind, &bytes)
+                native::reg_restore_write(h, &sub, &key, restore_reg_kind(&typ), &bytes)
             }
             RestoreOp::Delete { hive, sub, key } => match restore_hive(&hive) {
                 Some(h) => native::reg_restore_delete(h, &sub, &key),
@@ -2189,7 +2224,7 @@ mod tests {
         assert_eq!(bytes.as_slice(), 4096i32.to_le_bytes().as_slice());
     }
 
-    /// B11：`restore_write_bytes` 与 `native::read_reg_value_text` 是**同一条链的两端** ——
+    /// B11：`restore_write_bytes` 与 `native::decode_reg_value_bytes` 是**同一条链的两端** ——
     /// 读出来的字符串必须能被编码器原样写回。这里用固定样例钉住两侧口径不漂移
     /// （真正的注册表往返由 `restore_backup_values` 在真机执行，单测只锁纯函数）。
     #[test]
@@ -2213,6 +2248,180 @@ mod tests {
             restore_write_bytes("REG_WHATEVER", "x").unwrap(),
             restore_write_bytes("REG_SZ", "x").unwrap()
         );
+    }
+
+    /// 备份链（`flatten=false`）两端互逆，且**类型不变形**。
+    ///
+    /// 修的是这一类：读侧曾把 `REG_EXPAND_SZ` 展开后报成 `REG_SZ`、把 `REG_MULTI_SZ`
+    /// 空格连接后报成 `REG_SZ`，写侧又没有这两条 arm —— 于是「还原」必然把值的
+    /// 类型和内容一起改错（`%VAR%` 变成字面路径、多值串变成单串），而还原回读
+    /// `verify_option_restored` 因为两侧同口径地错，报的是"还原成功"。
+    /// 展平口径本身保留（显示路径要看展开后的真实路径），所以这里同时断言两条口径分岔。
+    #[test]
+    fn faithful_backup_round_trip_keeps_type_and_bytes() {
+        use crate::engine::native::decode_reg_value_bytes;
+        use windows::Win32::System::Registry::{REG_EXPAND_SZ, REG_MULTI_SZ};
+
+        // --- REG_EXPAND_SZ：内容不展开、标签保真，编码回去等于原字节 ---
+        let raw = r"%USERPROFILE%\App\run.exe";
+        let mut eb: Vec<u8> = raw.encode_utf16().flat_map(|w| w.to_le_bytes()).collect();
+        eb.extend_from_slice(&[0, 0]);
+        let (ty, data) = decode_reg_value_bytes(REG_EXPAND_SZ, &eb, false).unwrap();
+        assert_eq!(ty, "REG_EXPAND_SZ", "备份链把 EXPAND_SZ 抹平成 REG_SZ ⇒ 还原写死 %VAR%");
+        assert_eq!(data, raw, "备份链展开了环境变量 ⇒ 原值永久丢失");
+        assert_eq!(restore_write_bytes(ty, &data).unwrap(), eb);
+        // 同一份字节走显示口径：仍按老语义报成 REG_SZ（本轮刻意不动它）
+        let (flat_ty, flat_data) = decode_reg_value_bytes(REG_EXPAND_SZ, &eb, true).unwrap();
+        assert_eq!(flat_ty, "REG_SZ");
+        assert_ne!(flat_data, raw, "显示口径应当是展开后的路径");
+
+        // --- REG_MULTI_SZ：NUL 连接可逆，含空格的元素不会被分隔符误伤 ---
+        let parts = ["a b", "中文", r"C:\x"];
+        let mut mb: Vec<u8> = Vec::new();
+        for p in parts.iter() {
+            mb.extend(p.encode_utf16().flat_map(|w| w.to_le_bytes()));
+            mb.extend_from_slice(&[0, 0]);
+        }
+        mb.extend_from_slice(&[0, 0]);
+        let (ty, data) = decode_reg_value_bytes(REG_MULTI_SZ, &mb, false).unwrap();
+        assert_eq!(ty, "REG_MULTI_SZ");
+        assert_eq!(data, "a b\u{0}中文\u{0}C:\\x");
+        assert_eq!(restore_write_bytes(ty, &data).unwrap(), mb, "MULTI_SZ 字节往返必须逐字节相等");
+        // 展平口径用空格连接 —— 正是它无法逆的原因（元素自带空格）
+        assert_eq!(
+            decode_reg_value_bytes(REG_MULTI_SZ, &mb, true).unwrap(),
+            ("REG_SZ", "a b 中文 C:\\x".to_string())
+        );
+
+        // --- 空 MULTI_SZ 往返仍是空 MULTI_SZ，不是「一个空元素」 ---
+        let (ty, data) = decode_reg_value_bytes(REG_MULTI_SZ, &[0, 0], false).unwrap();
+        assert_eq!((ty, data.as_str()), ("REG_MULTI_SZ", ""));
+        assert_eq!(restore_write_bytes(ty, &data).unwrap(), vec![0, 0]);
+
+        // --- DWORD 边界值仍按有符号口径往返（0xFFFFFFFF 变形过一次，别再来） ---
+        let (ty, data) = decode_reg_value_bytes(
+            windows::Win32::System::Registry::REG_DWORD,
+            &[0xFF, 0xFF, 0xFF, 0xFF],
+            false,
+        )
+        .unwrap();
+        assert_eq!((ty, data.as_str()), ("REG_DWORD", "-1"));
+        assert_eq!(restore_write_bytes(ty, &data).unwrap(), vec![0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    /// 还原路径的类型标签不能塌成 REG_SZ：字节编码对了但类型写错，注册表里同样是坏值。
+    /// 两条都要断 —— `build_restore_ops` 保住标签只到「操作结构体」为止，真正进
+    /// `RegSetValueExW` 的是 `restore_reg_kind` 的映射，那才是用户机器上落盘的东西。
+    #[test]
+    fn build_restore_ops_preserves_string_variant_types() {
+        use windows::Win32::System::Registry::{
+            REG_EXPAND_SZ, REG_MULTI_SZ, REG_VALUE_TYPE, REG_SZ,
+        };
+        // EXPAND_SZ 与 SZ 字节布局相同，所以只能从类型标签这条 arm 判出有没有塌
+        for (label, want) in [
+            ("REG_EXPAND_SZ", REG_EXPAND_SZ),
+            ("REG_MULTI_SZ", REG_MULTI_SZ),
+            ("REG_SZ", REG_SZ),
+        ] {
+            let ops = build_restore_ops(&[json!({
+                "hive": "CurrentUser", "sub": "S", "key": "K",
+                "exists": true, "type": label, "data": "x"
+            })])
+            .unwrap();
+            let Some(RestoreOp::Write { typ, .. }) = ops.first() else {
+                panic!("{label} 应当产生写操作，实际 {ops:?}")
+            };
+            assert_eq!(typ, label, "备份里的 {label} 在还原操作里被降级");
+            let got: REG_VALUE_TYPE = restore_reg_kind(typ);
+            assert_eq!(got, want, "{label} 写注册表时被当成 REG_SZ ⇒ 类型永久变形");
+        }
+        // 老备份（升级前只有 REG_SZ）与未知标签仍按 REG_SZ 兜底
+        assert_eq!(restore_reg_kind("REG_WAS_UNKNOWN_BEFORE"), REG_SZ);
+    }
+
+    /// 真机闭环（发布前门禁跑）：值级备份 → 污染 → 还原 → 逐字段回读一致。
+    ///
+    /// 纯单测锁的是编解码函数与类型映射，这条锁的是「`RegSetValueExW` 真的按备份里的
+    /// 类型落盘」。断言写成**绝对期望**而不是「还原后 == 备份」：读侧和写侧同口径地错
+    /// 也能自洽通过，而 EXPAND_SZ 被抹平成 REG_SZ 恰好就是这种自洽的错。
+    /// 探针键 `HKCU\Software\TrimValueFidelityProbe`，不碰任何真实软件键；Drop 守卫删键，
+    /// 断言 panic 也不在用户机器上留残迹。
+    #[test]
+    #[ignore = "真写 HKCU 探针键（值级备份→还原的类型保真），发布前门禁跑"]
+    fn value_level_backup_restore_keeps_types_on_real_registry() {
+        use crate::engine::native;
+        use windows::Win32::System::Registry::{
+            HKEY_CURRENT_USER, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ,
+        };
+
+        const SUB: &str = r"Software\TrimValueFidelityProbe";
+        struct ProbeKey;
+        impl Drop for ProbeKey {
+            fn drop(&mut self) {
+                let _ = crate::engine::native::reg_key_remove(
+                    windows::Win32::System::Registry::HKEY_CURRENT_USER,
+                    SUB,
+                    true,
+                );
+            }
+        }
+        let _probe = ProbeKey;
+
+        let utf16z = |s: &str| -> Vec<u8> {
+            s.encode_utf16().flat_map(|w| w.to_le_bytes()).chain([0u8, 0u8]).collect()
+        };
+        let multi_factory: Vec<u8> = {
+            let mut v = Vec::new();
+            for p in ["cache", "logs"] {
+                v.extend(utf16z(p));
+            }
+            v.extend_from_slice(&[0, 0]);
+            v
+        };
+        // 前置条件：键不存在。残留探针键会让「备份」拍到脏值，整条测试就失去意义
+        assert_eq!(
+            native::read_reg_value_faithful(HKEY_CURRENT_USER, SUB, "multi"),
+            None,
+            "前置条件：探针键必须不存在（守卫没清干净？）"
+        );
+
+        assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "multi", REG_MULTI_SZ, &multi_factory));
+        assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "expand", REG_EXPAND_SZ, &utf16z(r"%USERPROFILE%\App")));
+        assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "dw", REG_DWORD, &0xFFFF_FFFFu32.to_le_bytes()));
+
+        let targets = vec![
+            RegTarget { root: "HKEY_CURRENT_USER".into(), sub: SUB.into(), key: "multi".into() },
+            RegTarget { root: "HKEY_CURRENT_USER".into(), sub: SUB.into(), key: "expand".into() },
+            RegTarget { root: "HKEY_CURRENT_USER".into(), sub: SUB.into(), key: "dw".into() },
+        ];
+
+        // ① 备份拍到的必须是真实类型与未展开内容（读侧抹平 ⇒ 这三条先红）
+        let backup = read_reg_values(&targets).expect("出厂态读取应成功");
+        assert_eq!(backup[0]["type"], json!("REG_MULTI_SZ"), "读侧把 MULTI_SZ 抹平成 REG_SZ");
+        assert_eq!(backup[0]["data"], json!("cache\u{0}logs"));
+        assert_eq!(backup[1]["type"], json!("REG_EXPAND_SZ"), "读侧把 EXPAND_SZ 抹平成 REG_SZ");
+        assert_eq!(backup[1]["data"], json!(r"%USERPROFILE%\App"), "读侧展开了 %VAR% ⇒ 原值进不了备份");
+        assert_eq!(backup[2]["data"], json!("-1"), "DWORD 的有符号口径变了");
+
+        // ② 污染成「优化后」状态，连类型一起改坏（模拟最真实的使用现场）
+        assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "multi", REG_SZ, &utf16z("cache logs")));
+        assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "expand", REG_SZ, &utf16z(r"C:\Users\me\AppData\Roaming")));
+        assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "dw", REG_DWORD, &0u32.to_le_bytes()));
+
+        // ③ 还原
+        assert!(restore_backup_values(&backup), "值级还原必须整体成功");
+
+        // ④ 绝对期望：还原后注册表里就是这个类型与这串内容
+        let now = read_reg_values(&targets).expect("还原后应能读回");
+        assert_eq!(now, backup, "还原后的值与备份逐项不一致 ⇒ 类型或内容变形了");
+        assert_eq!(now[0]["type"], json!("REG_MULTI_SZ"), "写侧把 MULTI_SZ 降级成 REG_SZ 时这里红");
+        assert_eq!(now[1]["type"], json!("REG_EXPAND_SZ"), "写侧把 EXPAND_SZ 降级成 REG_SZ 时这里红");
+        assert_eq!(now[1]["data"], json!(r"%USERPROFILE%\App"), "展开后的字面量被写回去时这里红");
+
+        // ⑤ 同一条链的显示口径仍然照旧展平（本轮刻意不改 uninstall 那边的可见行为）
+        let (flat_ty, flat_data) = native::read_reg_value_text(HKEY_CURRENT_USER, SUB, "multi")
+            .expect("探针值应可读");
+        assert_eq!((flat_ty, flat_data.as_str()), ("REG_SZ", "cache logs"));
     }
 
     /// REG_BINARY 的 hex 串只允许 hex 数字与分隔逗号：畸形备份里的 `$`、反引号、换行
