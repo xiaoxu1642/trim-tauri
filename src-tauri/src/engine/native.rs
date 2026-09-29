@@ -6618,6 +6618,20 @@ pub struct CleanupExecuteResult {
 /// 否则 `cleanup-files-backup` 里会留下一堆空壳，看起来"还有备份"其实一份都还原不了。
 ///
 /// 只裁新根（调用方传 `backup_write_dir`）：老根那份是升级前的唯一还原依据。
+/// 永久删副本的相对名：`<规则id>\<批次ms>_<序号>_<文件名>`。两段易变成分各有不可替代的理由：
+///
+/// - **批次段**：少了它 ⇒ 同一条规则第二次清理命中同名文件时 `rel` 逐字节相同，第二次
+///   `copy` 原地覆盖第一次的副本，而两份 manifest 都还写着同一个 `file` ——「还原第 1 批」
+///   静默拿回第 2 批的字节，且不报错（N10）。
+/// - **序号段**：少了它 ⇒ 同一批次里两个不同目录下的同名 `.log` 互相覆盖。
+///
+/// 批次段是纯数字 ms，字符集不比原形状宽 ⇒ 还原侧那道穿越准入（拒 `..` / 绝对 / 盘符）不用动。
+/// 读侧天然兼容：还原走的是 manifest 里存的 `rel`，老清单里的老形状照样能还原，
+/// 所以这里不需要版本号、不需要搬迁、不需要双分支解析。
+fn backup_rel_name(rule_id: &str, batch_ts: i64, seq: u32, fname: &str) -> String {
+    format!("{rule_id}\\{batch_ts}_{seq}_{fname}")
+}
+
 fn prune_file_backups(root: &std::path::Path, keep: usize) {
     let Ok(rd) = std::fs::read_dir(root) else { return };
     let mut manifests: Vec<String> = rd
@@ -6629,41 +6643,65 @@ fn prune_file_backups(root: &std::path::Path, keep: usize) {
                 .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
         })
         .collect();
-    manifests.sort();
-    while manifests.len() > keep {
-        let oldest = manifests.remove(0);
-        let mpath = root.join(&oldest);
-        if let Ok(text) = std::fs::read_to_string(&mpath) {
-            if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
-                    for ent in entries {
-                        let Some(rel) = ent.get("file").and_then(|s| s.as_str()) else { continue };
-                        // 与还原通道同一道准入：不含 .. / 不是绝对路径 / 不带盘符
-                        if rel.is_empty()
-                            || rel.contains("..")
-                            || rel.starts_with('\\')
-                            || rel.starts_with('/')
-                            || rel.contains(':')
-                        {
-                            continue;
-                        }
-                        let _ = std::fs::remove_file(root.join(rel));
-                    }
-                }
+    if manifests.len() <= keep {
+        return;
+    }
+    manifests.sort(); // 时间戳升序：前面是最老的批次
+    // 幸存者 = **最新的 keep 份** ⇒ 切点必须按长度算。写成 `split_off(keep)` 会留下
+    // `len - keep` 份（3 份 keep=2 时只活 1 份），实测把我自己的用例当场判红才暴露。
+    let survivors = manifests.split_off(manifests.len() - keep);
+    // **幸存清单仍引用的 rel 一律不删**。批次段是 N10 才加进 `rel` 的，改名之前写的
+    // 存量批次里 `rel` 可以跨批次相同 —— 那份物理文件同时属于两份清单，跟着老批次删掉
+    // 就等于把幸存批次的还原凭据一起毁掉（症状与 N10 同源：还原静默拿回别的时间点的内容
+    // 或干脆"备份文件已不存在"）。
+    let mut kept_rels: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &survivors {
+        for rel in manifest_rels(&root.join(m)) {
+            kept_rels.insert(rel.to_lowercase());
+        }
+    }
+    for oldest in &manifests {
+        let mpath = root.join(oldest);
+        for rel in manifest_rels(&mpath) {
+            // 与还原通道同一道准入：不含 .. / 不是绝对路径 / 不带盘符
+            if rel.is_empty()
+                || rel.contains("..")
+                || rel.starts_with('\\')
+                || rel.starts_with('/')
+                || rel.contains(':')
+            {
+                continue;
             }
+            if kept_rels.contains(&rel.to_lowercase()) {
+                continue; // 还有幸存批次指着它，只删清单不删字节
+            }
+            let _ = std::fs::remove_file(root.join(&rel));
         }
         let _ = std::fs::remove_file(&mpath);
     }
-    // 空规则目录回收（只在上面真删过东西之后才有意义，扫描代价是一次 read_dir）
+    // 空规则目录回收（副本按 `<规则id>\` 分目录，删空了才收，非目录自然跳过）
     if let Ok(rd) = std::fs::read_dir(root) {
         for ent in rd.flatten() {
             let p = ent.path();
-            let Ok(mut sub) = std::fs::read_dir(&p) else { continue }; // 非目录 → 直接跳过
+            let Ok(mut sub) = std::fs::read_dir(&p) else { continue };
             if sub.next().is_none() {
                 let _ = std::fs::remove_dir(&p);
             }
         }
     }
+}
+
+/// 读一份文件备份清单里所有 `entries[].file`（相对名）。读不动就当没有条目。
+fn manifest_rels(manifest: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(manifest) else { return Vec::new() };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("entries")
+                .and_then(|e| e.as_array())
+                .map(|a| a.iter().filter_map(|x| x.get("file").and_then(|s| s.as_str()).map(String::from)).collect())
+        })
+        .unwrap_or_default()
 }
 
 /// 清理执行（对应 cleanup_execute.ps1，S3）
@@ -6983,7 +7021,8 @@ pub fn cleanup_execute(
                         .file_name()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| seq.to_string());
-                    let rel = format!("{}\\{}_{}", id, seq, fname);
+                    // rel 必须同时带**批次段**和**序号段**（N10），见 `backup_rel_name`
+                    let rel = backup_rel_name(id, backup_batch_ts, seq, &fname);
                     let dst = files_backup_root.join(&rel);
                     if std::fs::create_dir_all(dst.parent().unwrap_or(&files_backup_root)).is_ok()
                         && std::fs::copy(path, &dst).map(|n| n == *size).unwrap_or(false)
@@ -7461,16 +7500,18 @@ mod file_backup_retention_tests {
         dir
     }
 
-    /// 造一批：清单 + `<规则id>\<序号>_<文件名>` 副本（与 C-4 写入处同形状）
-    fn make_batch(root: &std::path::Path, ts: u64, rule: &str, files: &[&str]) {
-        let entries: Vec<serde_json::Value> = files
+    /// 造一批：清单 + 指定 `rel` 的副本。rel 由入参给，是为了能刻意造出
+    /// **N10 修复前的碰撞形状**（两份清单写着同一个 rel）来测幸存保护。
+    fn make_batch(root: &std::path::Path, ts: u64, rels: &[&str]) {
+        let entries: Vec<serde_json::Value> = rels
             .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let rel = format!("{rule}\\{i}_{f}");
-                std::fs::create_dir_all(root.join(rule)).unwrap();
-                std::fs::write(root.join(&rel), b"payload").unwrap();
-                json!({ "file": rel, "path": format!("C:\\orig\\{f}"), "size": 7, "rule": rule })
+            .map(|rel| {
+                // 父目录必须挂在 root 下：`Path::new(rel).parent()` 拿到的是相对段，
+                // 直接对它 create_dir_all 会建到进程 CWD，随后 root.join(rel) 的写入就找不到路径
+                let dst = root.join(rel);
+                std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+                std::fs::write(&dst, b"payload").unwrap();
+                json!({ "file": rel, "path": "C:\\orig\\x", "size": 7, "rule": "r" })
             })
             .collect();
         std::fs::write(
@@ -7480,15 +7521,63 @@ mod file_backup_retention_tests {
         .unwrap();
     }
 
+    /// N10：副本名必须同时带批次段与序号段。少任一段都会让两份清单指向同一个物理文件，
+    /// 于是「还原第 1 批」静默拿回第 2 批的字节，而且**不报错**。
+    #[test]
+    fn 副本名同时带批次段与序号段() {
+        // 同规则、同文件名、不同批次 ⇒ 必须不同名
+        assert_ne!(
+            backup_rel_name("share_cache", 1_700_000_000_001, 0, "a.log"),
+            backup_rel_name("share_cache", 1_700_000_000_002, 0, "a.log"),
+            "第二次清理不得覆盖第一次的副本"
+        );
+        // 同批次、同文件名、不同序号 ⇒ 必须不同名（两个目录下的同一个 `a.log`）
+        assert_ne!(
+            backup_rel_name("thumb", 1_700_000_000_001, 0, "a.log"),
+            backup_rel_name("thumb", 1_700_000_000_001, 1, "a.log")
+        );
+        // 不同规则仍然分目录存放（空目录回收与穿越准入都依赖这个形状）
+        let rel = backup_rel_name("thumb", 1_700_000_000_001, 2, "a.log");
+        assert_eq!(rel, "thumb\\1700000000001_2_a.log");
+        assert!(!rel.contains(".."), "生成器不得产出穿越形态");
+    }
+
+    /// N3 + N10 交界：裁最老批次时，**幸存批次还在引用的副本不得删**。
+    /// 存量数据（批次段加进 rel 之前写的）里两份清单可以写着同一个物理文件；
+    /// 无脑照被裁清单的条目删，就把幸存批次的还原凭据一起毁了。
+    #[test]
+    fn 裁批次时保留幸存批次仍在引用的副本() {
+        let root = sandbox("shared");
+        // 老形状：两份清单写着完全相同的 rel
+        make_batch(&root, 1_700_000_000_001, &["legacy_rule\\0_a.log"]);
+        make_batch(&root, 1_700_000_000_002, &["legacy_rule\\0_a.log"]);
+        make_batch(&root, 1_700_000_000_003, &["other_rule\\0_b.log"]);
+
+        prune_file_backups(&root, 2);
+
+        assert!(!root.join("manifest-1700000000001.json").exists(), "最老那份清单要裁掉");
+        assert!(
+            root.join("legacy_rule\\0_a.log").is_file(),
+            "但它与幸存批次共用同一份副本，字节必须留下"
+        );
+        assert!(root.join("other_rule\\0_b.log").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// N3：文件副本的保留上限必须**照清单条目删**。副本落点是 `<规则id>\`、跨批次共享，
     /// 按批次时间戳找不到对应目录 —— 只删清单会留下无人认领的副本，反过来按目录删
     /// 会把别的批次一起带走。
     #[test]
     fn 裁最老批次时清单与副本同删并回收空规则目录() {
         let root = sandbox("prune");
-        make_batch(&root, 1_700_000_000_001, "share_cache", &["a.txt", "b.txt"]);
-        make_batch(&root, 1_700_000_000_002, "thumb", &["c.txt"]);
-        make_batch(&root, 1_700_000_000_003, "thumb", &["d.txt"]);
+        // 用生产形状（含批次段）造三批：第 1 批独占 share_cache，第 2/3 批共用 thumb
+        let a0 = backup_rel_name("share_cache", 1_700_000_000_001, 0, "a.txt");
+        let a1 = backup_rel_name("share_cache", 1_700_000_000_001, 1, "b.txt");
+        let b0 = backup_rel_name("thumb", 1_700_000_000_002, 0, "c.txt");
+        let c0 = backup_rel_name("thumb", 1_700_000_000_003, 0, "d.txt");
+        make_batch(&root, 1_700_000_000_001, &[a0.as_str(), a1.as_str()]);
+        make_batch(&root, 1_700_000_000_002, &[b0.as_str()]);
+        make_batch(&root, 1_700_000_000_003, &[c0.as_str()]);
 
         prune_file_backups(&root, 2);
 

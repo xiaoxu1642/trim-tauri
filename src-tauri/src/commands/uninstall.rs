@@ -5019,17 +5019,19 @@ pub fn uninstall_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Val
             "appId": v.get("appId").cloned().unwrap_or(Value::Null),
             "okCount": ok, "failCount": fail, "skipCount": skip,
         }));
-        if items.len() >= 50 {
-            break;
-        }
     }
-    // 文件名即 ISO 时间戳，倒序 = 最新在前
+    // 文件名即 ISO 时间戳，倒序 = 最新在前。
+    // N8：必须**先全量收集再排序再截断**。NTFS 枚举序≈文件名升序，在循环里 `break` 到 50
+    // 截走的是**最旧** 50 份，随后那次排序只是在旧账里排座次 ⇒ 批次一过 50，用户刚做完
+    // 的那次清理报告就不在列表里（与 N1 同症状、不同成因）。
     items.sort_by(|a, b| {
         let ka = a["batchId"].as_str().unwrap_or("");
         let kb = b["batchId"].as_str().unwrap_or("");
         kb.cmp(ka)
     });
-    json!({ "success": true, "data": { "reports": items } })
+    let total_count = items.len();
+    items.truncate(50);
+    json!({ "success": true, "data": { "reports": items, "totalCount": total_count } })
 }
 
 /// uninstall:report-get — 读取单个批次报告（主窗档；只读；batch_id 过字符集闸防穿越）

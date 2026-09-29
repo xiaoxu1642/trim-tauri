@@ -335,30 +335,73 @@ pub fn temp_script_dir() -> Result<PathBuf, String> {
 /// 为什么单独一条、且**不走** `MIGRATION_FILES` 那条闸门：那份迁移只在「新根没有
 /// appearance.json」时执行，存量用户永远碰不到；而名单是扫描器每轮都要读的活性文件，
 /// 不搬就会出现"读取走老根、写入落新根"的两份真相 —— 用户删掉一条排除项，下轮又生效。
-/// 搬完只留新根一份可写实体；老根那份原样保留（可重跑、也可人工回退）。
+/// 搬完只留新根一份可写实体；老根那份原样保留（可重跑、也可人工回退）。合并细则见
+/// `migrate_list_files_into`（逐行并集，不是二选一）。
 pub fn migrate_list_files_once() -> Option<String> {
     migrate_list_files_into(app_data_dir().as_ref(), &legacy_data_dir())
 }
 
-/// 同上，但两个根由入参给 —— 名单搬迁的判定（只补不覆盖、老根保留）必须能拿临时目录测，
-/// 对着真实数据根跑会变成"这台机器恰好没有老名单"式的假绿。
+/// 同上，但两个根由入参给 —— 名单合并的判定必须能拿临时目录测，对着真实数据根跑会变成
+/// "这台机器恰好没有老名单"式的假绿。
+///
+/// 合并口径是**逐行并集**，不是"存在即用某一侧"（v2 报告 N2 第 3 条，纠正本仓初版）：
+/// 名单是行集合，二选一会让用户在新根加了第一条排除项之后、老根那几十条**整批静默失效**，
+/// 而"排除失效"的方向是**多删**，比"看不见备份"更坏。
+/// 归一行 = trim → 去尾 `\` → 小写（与 `cleanup_scan::load_global_excludes` /
+/// `load_empty_ignore` 同口径），所以只差大小写或尾斜杠的同一行不会被重复追加 ⇒ 幂等。
+///
+/// 刻意**不含** `cleanup-custom.txt`：它是**删除来源**（用户显式加的要清的目录），不是保护面。
+/// 老根那份从来没被读过，合过来等于凭空多出用户没见过的待删目录 —— 方向与排除名单相反，
+/// 保持不读才是无行为变更。
 fn migrate_list_files_into(target: &Path, legacy: &Path) -> Option<String> {
     const LIST_FILES: &[&str] = &["empty-ignore.txt", "cleanup-exclude.txt"];
-    let mut moved: Vec<&str> = Vec::new();
+    let normalize = |raw: &str| -> String { raw.trim().trim_end_matches('\\').to_lowercase() };
+    let mut moved: Vec<String> = Vec::new();
     for name in LIST_FILES {
-        let dst = target.join(name);
-        if dst.exists() {
-            continue;
-        }
         let src = legacy.join(name);
         if !src.is_file() {
             continue;
         }
-        if std::fs::create_dir_all(target).is_err() {
-            break;
+        let Ok(text) = std::fs::read_to_string(&src) else { continue };
+        let dst = target.join(name);
+        if !dst.is_file() {
+            // 新根还没有：整份搬过去（老根原件保留，可重跑、也可人工回退）
+            if std::fs::create_dir_all(target).is_err() {
+                break;
+            }
+            if std::fs::copy(&src, &dst).is_ok() {
+                moved.push(format!("{name}(整份)"));
+            }
+            continue;
         }
-        if std::fs::copy(&src, &dst).is_ok() {
-            moved.push(name);
+        // 两边都有：只把新根缺的行并进去
+        let Ok(cur_text) = std::fs::read_to_string(&dst) else { continue };
+        let have: std::collections::HashSet<String> = cur_text
+            .lines()
+            .map(&normalize)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        let mut missing: Vec<String> = Vec::new();
+        let mut queued: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for line in text.lines() {
+            let key = normalize(line);
+            if key.is_empty() || key.starts_with('#') || have.contains(&key) || !queued.insert(key) {
+                continue;
+            }
+            missing.push(line.trim().to_string());
+        }
+        if missing.is_empty() {
+            continue;
+        }
+        let mut merged = cur_text;
+        if !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        merged.push_str(&missing.join("\n"));
+        merged.push('\n');
+        // 写走原子写：名单是保护面，半截写入会让后面的行整批读不到（= 多删）
+        if crate::security::atomic_write_file(&dst, merged.as_bytes()).is_ok() {
+            moved.push(format!("{name}(并 {n} 行)", n = missing.len()));
         }
     }
     if moved.is_empty() {
@@ -741,30 +784,60 @@ mod tests {
         assert!(!is_portable(), "调试构建不得判为便携模式");
     }
 
-    /// N2：名单文件搬迁必须「只补不覆盖 + 老根保留」。覆盖新根会抹掉用户在新版里
-    /// 增删过的排除项；删老根则让回退无路可走（与 `copy_dir_missing_only` 同纪律）。
+    /// N2：名单搬迁必须是**逐行并集**。老根那本有 2 条排除项、用户在新版里又加了 1 条
+    /// ⇒ 新根文件已存在；"二选一"会让老根那 2 条整批静默失效，而排除失效的方向是**多删**。
+    /// 同时守住：新根原有行不动、只差大小写或尾斜杠的同一行不重复追加、重跑幂等。
     #[test]
-    fn 名单搬迁只补不覆盖且保留老根() {
+    fn 名单搬迁逐行合并而非二选一() {
         let root = sandbox("lists");
         let cur = root.join("cur");
         let old = root.join("old");
         std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(old.join("cleanup-exclude.txt"), b"legacy-line\r\n").unwrap();
-        std::fs::write(old.join("empty-ignore.txt"), b"old-ignore\r\n").unwrap();
-        // 新根已有排除名单（用户在新版里改过）——只有 empty-ignore 需要搬
         std::fs::create_dir_all(&cur).unwrap();
-        std::fs::write(cur.join("cleanup-exclude.txt"), b"new-line\r\n").unwrap();
+        std::fs::write(
+            old.join("cleanup-exclude.txt"),
+            "# 旧版注释\r\nC:\\Users\\me\\Keep\\\r\nC:\\Users\\me\\AlsoKeep\r\n".as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(cur.join("cleanup-exclude.txt"), b"C:\\Users\\me\\NewOne\r\n").unwrap();
 
-        let note = migrate_list_files_into(&cur, &old).expect("应至少搬成一份");
-        assert!(note.contains("empty-ignore.txt") && !note.contains("cleanup-exclude.txt"),
-                "只搬缺失的那份: {note}");
-        assert_eq!(std::fs::read(cur.join("cleanup-exclude.txt")).unwrap(), b"new-line\r\n",
-                   "新根名单不得被老根覆盖");
-        assert_eq!(std::fs::read(cur.join("empty-ignore.txt")).unwrap(), b"old-ignore\r\n");
-        assert!(old.join("empty-ignore.txt").is_file(), "老根原件保留（可重跑、可回退）");
+        let note = migrate_list_files_into(&cur, &old).expect("应合并出缺失行");
+        assert!(note.contains("2 行"), "老根两条都该并进来: {note}");
+        let text = std::fs::read_to_string(cur.join("cleanup-exclude.txt")).unwrap();
+        assert!(text.contains("NewOne"), "新根原有行不得丢: {text}");
+        assert!(text.contains("me\\Keep"), "尾斜杠行要并入（写入保持原样）: {text}");
+        assert!(text.contains("AlsoKeep"), "另一条老行同样要并入: {text}");
+        assert!(!text.contains('#'), "注释不是路径，不并入: {text}");
+        assert!(old.join("cleanup-exclude.txt").is_file(), "老根原件保留（可人工回退）");
 
-        // 再跑一次：新根两份都在 ⇒ 无事可做返回 None（启动每次都调，必须幂等）
-        assert!(migrate_list_files_into(&cur, &old).is_none(), "已迁完不得再产生搬迁日志");
+        // 幂等：再跑一次既不得重复追加，也不得产生搬迁日志（启动每次都调这条）
+        let again_note = migrate_list_files_into(&cur, &old);
+        assert!(again_note.is_none(), "已合并完不得再改写名单: {again_note:?}");
+        assert_eq!(
+            std::fs::read_to_string(cur.join("cleanup-exclude.txt")).unwrap(),
+            text,
+            "第二次运行必须逐字节不变"
+        );
+
+        // 只差大小写 = 同一行，不得当成缺失行追加（否则名单越跑越长）
+        std::fs::write(old.join("empty-ignore.txt"), b"C:\\Users\\me\\X\r\n").unwrap();
+        std::fs::write(cur.join("empty-ignore.txt"), b"c:\\users\\me\\x\r\n").unwrap();
+        assert!(migrate_list_files_into(&cur, &old).is_none(), "大小写差异不得被当成新行");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 新根完全没有名单时才走"整份搬"，且必须两份文件都搬（启动只调一次的机会不会重来）
+    #[test]
+    fn 新根无名单时整份搬迁() {
+        let root = sandbox("lists-copy");
+        let cur = root.join("cur");
+        let old = root.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("cleanup-exclude.txt"), b"C:\\a\r\n").unwrap();
+        std::fs::write(old.join("empty-ignore.txt"), b"C:\\b\r\n").unwrap();
+        let note = migrate_list_files_into(&cur, &old).expect("两份都该搬");
+        assert!(note.contains("cleanup-exclude.txt(整份)") && note.contains("empty-ignore.txt(整份)"), "{note}");
+        assert_eq!(std::fs::read(cur.join("empty-ignore.txt")).unwrap(), b"C:\\b\r\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

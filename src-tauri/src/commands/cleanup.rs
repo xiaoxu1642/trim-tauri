@@ -681,7 +681,7 @@ pub fn cleanup_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
 }
 
 // ==================== cleanup:exclude-*（C-1 排除名单 UI） ====================
-// %APPDATA%\Trim\cleanup-exclude.txt 的读写面。解析口径与
+// <当前数据根>\cleanup-exclude.txt 的读写面（名单根由主 crate 注入，N2）。解析口径与
 // trim_finder::cleanup_scan::{load_global_excludes, path_excluded} 同源
 // （每行一个绝对路径、# 注释、%VAR% 展开、大小写不敏感、行尾 \ 归一），
 // 这里只做「列 / 增 / 删」，不重复实现匹配语义。扫描侧与执行侧每次都重新读盘，
@@ -824,7 +824,7 @@ pub fn cleanup_exclude_remove<R: tauri::Runtime>(window: WebviewWindow<R>, path:
 }
 
 // ==================== cleanup:custom-*（C-3 自定义清理目录） ====================
-// 用户显式添加的清理目录：%APPDATA%\Trim\cleanup-custom.txt，每行
+// 用户显式添加的清理目录：<当前数据根>\cleanup-custom.txt（新根；刻意不做老根合并，见 paths::migrate_list_files_into），每行
 // `<dir>` 或 `<dir>|<分号分隔的扩展名模式>`（模式只认 `*.ext` 形态）。
 // 与主清理链刻意隔离：主链是「永久删」产品语义（v3.3.0 拍板），本域**只回收站**
 // （可还原），且执行前过 is_path_protected + minAge(24h) + 全局排除名单三道闸；
