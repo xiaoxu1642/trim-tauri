@@ -633,7 +633,7 @@
     const text = document.getElementById('optimizerStaleText');
     if (!banner || !text) return;
     const names = ids.slice(0, 3).map(id => getOptionTitle(id)).join('、') + (ids.length > 3 ? ` 等 ${ids.length} 项` : '');
-    text.textContent = `检测到 ${ids.length} 项优化改动未完成还原（${names}）：可能因执行中断或被系统回写导致状态不明。`;
+    text.textContent = `检测到 ${ids.length} 项优化改动未完成还原（${names}）：可能因执行中断或被系统回写导致状态不明。可退回原值，或把优化值重新写到位。`;
     banner.style.display = 'flex';
     const btn = document.getElementById('btnStaleRestore');
     if (btn) {
@@ -650,6 +650,29 @@
         renderGroups(OPTIONS);
         window.app?.toast(okCount === ids.length ? 'success' : 'warning',
           `一键还原完成：成功 ${okCount} 项，共 ${ids.length} 项`);
+      };
+    }
+    // 「一键应用」= 把状态不明的项重新写成优化目标值。刻意**不另起一条 apply 链**：
+    // 直接把这批 id 装进选择集再走 runSelected，这样高危红色二次确认、还原点检查、
+    // 提权中断续跑（batchRemainingIds）、批次生效粒度提示一条都不会绕过去。
+    const applyBtn = document.getElementById('btnStaleApply');
+    if (applyBtn) {
+      const applicable = ids.filter((id) => OPTIONS.some((o) => o.id === id));
+      applyBtn.disabled = applicable.length === 0;
+      if (applicable.length === 0) {
+        applyBtn.setAttribute('data-tip', '这些项已不在优化目录里，只能按原值还原');
+      }
+      applyBtn.onclick = async () => {
+        // 保住用户此前的手勾：本入口只是"临时借用选择集"，不该把人家的勾选清掉
+        const keep = new Set(selectedIds);
+        selectedIds.clear();
+        applicable.forEach((id) => selectedIds.add(id));
+        await runSelected();
+        if (keep.size) {
+          selectedIds.clear();
+          keep.forEach((id) => selectedIds.add(id));
+          renderGroups(OPTIONS);
+        }
       };
     }
   }

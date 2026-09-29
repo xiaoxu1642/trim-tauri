@@ -641,19 +641,21 @@
     const cells = anTreemapLayout(shown, 100, 46); // 逻辑坐标系（百分比 × 高度 px 由 CSS 换算）
     let html = `<div style="flex:1;min-width:0">
       <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层 Treemap（最大 ${shown.length} 个子目录，格子面积 = 占比，点击下钻）</div>
-      <div style="position:relative;height:230px;border-radius:var(--radius-medium);overflow:hidden">`;
+      <div class="an-tm-box">`;
     cells.forEach((c) => {
       const name = nameOf(c.item.path);
       const pct = (c.w * c.h) / (100 * 46) * 100;
+      const sizeText = formatSize(Number(c.item.size));
       // 只有放得下才写字：小格子标名会溢出成一片糊，不如留白 + data-tip
-      const label = (c.w > 11 && c.h > 8) ? esc(name) : '';
-      const sub = (c.w > 11 && c.h > 15) ? `<div style="font-size:11px;opacity:.75">${esc(formatSize(Number(c.item.size)))}</div>` : '';
-      html += `<div data-an-drill="${esc(c.item.path)}" data-tip="${esc(c.item.path)} · ${esc(formatSize(Number(c.item.size)))} · ${pct.toFixed(1)}%"
-        style="position:absolute;left:${c.x}%;top:${(c.y / 46 * 100)}%;width:${c.w}%;height:${(c.h / 46 * 100)}%;
-        background:var(--accent-soft);border:1px solid var(--border-subtle);border-radius:var(--radius-small);
-        padding:4px 6px;box-sizing:border-box;overflow:hidden;cursor:pointer;
-        font-size:12px;line-height:1.25;color:var(--fg-primary)">
-        <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</div>${sub}</div>`;
+      const label = (c.w > 11 && c.h > 8) ? `<div class="an-tm-cell-name">${esc(name)}</div>` : '';
+      const sub = (c.w > 11 && c.h > 15) ? `<div class="an-tm-cell-size">${esc(sizeText)}</div>` : '';
+      // 格子用 role=button + tabindex：div 挂 click 等于键盘用户到不了这一层，
+      // 而下钻是这页的主交互（2026-09-29 目检反馈：只有下方列表能点）
+      html += `<div class="an-tm-cell" role="button" tabindex="0" data-an-drill="${esc(c.item.path)}"
+        aria-label="下钻到 ${esc(name)}，${esc(sizeText)}，占本层 ${pct.toFixed(1)}%"
+        data-tip="${esc(c.item.path)} · ${esc(sizeText)} · ${pct.toFixed(1)}%"
+        style="left:${c.x}%;top:${(c.y / 46 * 100)}%;width:${c.w}%;height:${(c.h / 46 * 100)}%">
+        ${label}${sub}</div>`;
     });
     html += '</div>';
     if (dirs.length > shown.length) {
@@ -1041,6 +1043,21 @@
       const goto_ = e.target.closest('[data-an-goto]');
       if (goto_) { anGoto(Number(goto_.dataset.anGoto)); return; }
       if (e.target.closest('[data-an-up]')) anUp();
+    });
+    // M6 Treemap：格子挂在 #anTreemapSection，而 `data-an-drill` 的委托只绑在表格 `#anTable` 上
+    // ⇒ 只加容器不加监听的话，格子看着能点（cursor:pointer）事件却没人接（2026-09-29 目检就是这个）。
+    // 键盘同理：Enter/Space 要等价于点击，否则这一层交互键盘到不了。
+    const anTmEl = document.getElementById('anTreemapSection');
+    anTmEl?.addEventListener('click', (e) => {
+      const cell = e.target.closest('[data-an-drill]');
+      if (cell) anDrill(cell.dataset.anDrill);
+    });
+    anTmEl?.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const cell = e.target.closest('[data-an-drill]');
+      if (!cell) return;
+      e.preventDefault(); // 空格默认会滚页
+      anDrill(cell.dataset.anDrill);
     });
     // 已删除清单入口（三个子页工具栏共用 data 属性委托）
     document.querySelectorAll('[data-finder-manifest]').forEach(btn => {

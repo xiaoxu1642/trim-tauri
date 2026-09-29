@@ -7916,6 +7916,34 @@ body.bg-image-on .main-content {
 /* 大文件路径点击定位（explorer /select） */
 .finder-reveal { cursor: pointer; min-width: 0; }
 .finder-reveal:hover .finder-path-text { color: var(--accent); }
+
+/* M6 Treemap 格子（磁盘分析器）：面积 = 体积占比，点格子或回车即下钻。
+   刻意不写 transition/animation —— prefers-reduced-motion 是硬约束（AGENTS §2），
+   hover 与 focus 只换底色和描边，不加动效。 */
+.an-tm-box {
+  position: relative;
+  height: 230px;
+  border-radius: var(--radius-medium);
+  overflow: hidden;
+}
+.an-tm-cell {
+  position: absolute;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-small);
+  background: var(--accent-soft);
+  color: var(--fg-primary);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  line-height: 1.25;
+  text-align: left;
+}
+.an-tm-cell:hover { background: var(--accent-light); border-color: var(--border-accent); }
+.an-tm-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.an-tm-cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.an-tm-cell-size { font-size: calc(11px * var(--font-size-scale, 1)); opacity: .75; }
 .finder-cell {
   display: inline-flex;
   align-items: center;
