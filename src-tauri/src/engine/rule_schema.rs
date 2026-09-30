@@ -1,0 +1,164 @@
+//! 规则库契约表的运行期消费者（V2 P0-A2 / P2-C8，2026-09-30）
+//!
+//! 真源是仓库根的 `tools/rule-schema.json`，编译期嵌入 ⇒ **发布物里不额外落一份数据文件**，
+//! 也就不会出现"运行期读到的表与门禁读的表不同"这种分叉（本仓同类事故：更新侧与装载侧各写
+//! 一套字段规则，见 uninstall.rs A2 段注释）。
+//!
+//! 这张表**只管词汇与数值**：字段白名单、必填集、枚举、上限、token 登记集。
+//! 判定逻辑一律留在各自代码里（注册表禁删面 `protect.rs`、target 形态与单星 glob、
+//! residue 三条件组≥2、excludePaths 的 `::` 具名值约束）。把逻辑塞进数据文件等于
+//! 造通用规则引擎，82 条库的规模不需要，且 AGENTS §2 是零新增依赖。
+//!
+//! 两个域的同名条目**刻意不同值**（token 集清理侧 14 个大小写敏感、残留侧 10 个不敏感），
+//! 这里不做任何"取交集/并集"的便捷函数 —— 那种 API 早晚会被用来合并两张清单，
+//! 制造假一致（AGENTS §5.16 / N6 既有裁定）。
+//!
+//! 失败口径：表解析不了 = **fail closed**。所有校验器拿到 `None` 都必须整包拒绝，
+//! 不许回退到"跳过语义校验只验签"，那等于把这条链整体关掉。
+
+use std::sync::OnceLock;
+
+use serde_json::Value;
+
+/// 编译期嵌入的契约表原文（与 Node 门禁读的是同一个字节）
+const CONTRACT_JSON: &str = include_str!("../../../tools/rule-schema.json");
+
+static CONTRACT: OnceLock<Option<Value>> = OnceLock::new();
+
+fn contract() -> Option<&'static Value> {
+    CONTRACT.get_or_init(|| match serde_json::from_str::<Value>(CONTRACT_JSON) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            // 只在真的坏了时打一次（OnceLock 保证不刷屏）；正常构建永远走不到这里
+            crate::engine::log::write_log("error", &format!("规则契约表解析失败，规则库装载将整体拒绝: {e}"));
+            None
+        }
+    })
+    .as_ref()
+}
+
+/// 域内字符串数组（字段白名单 / 枚举 / 匹配组名 / 禁止字段名等）
+pub fn list(domain: &str, key: &str) -> Option<Vec<String>> {
+    let arr = contract()?.get(domain).and_then(|d| d.get(key))?.as_array()?;
+    let out: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    // 元素个数与解析结果不一致 = 表里混进了非字符串，宁可当作表坏了
+    if out.len() != arr.len() {
+        return None;
+    }
+    Some(out)
+}
+
+/// 数值上限：先找 `limits.<key>`，再找域顶层 `<key>`（如 matchGroupsMinNonEmpty）
+pub fn number(domain: &str, key: &str) -> Option<usize> {
+    let c = contract()?;
+    let d = c.get(domain)?;
+    let hit = d
+        .get("limits")
+        .and_then(|l| l.get(key))
+        .or_else(|| d.get(key))?
+        .as_f64()?;
+    if hit.is_finite() && hit >= 0.0 {
+        Some(hit as usize)
+    } else {
+        None
+    }
+}
+
+/// token 登记集 + 大小写口径（两域不同值，调用方必须各自取自己那份）
+pub fn tokens(domain: &str) -> Option<(Vec<String>, bool)> {
+    let c = contract()?;
+    let t = c.get(domain)?.get("tokens")?.as_object()?;
+    let allowed: Vec<String> = t
+        .get("allowed")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    let ci = t.get("caseInsensitive")?.as_bool()?;
+    Some((allowed, ci))
+}
+
+/// crossTrack 登记表里的一个键（V2 P2-D7：活来源键 / 死键 / 专用分流登记）
+pub fn cross(key: &str) -> Option<Value> {
+    Some(contract()?.get("crossTrack")?.get(key)?.clone())
+}
+
+/// 表是否可用（供测试与诊断；校验器内部一律按 None 即拒绝处理）
+pub fn available() -> bool {
+    contract().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 表坏了会让两域整体停用，所以可用性本身必须是被断言的（本仓有假绿前科）
+    #[test]
+    fn 契约表可解析且两域关键条目齐备() {
+        assert!(available(), "嵌入的 tools/rule-schema.json 解析失败");
+        for (dom, keys) in [
+            (
+                "cleanup",
+                &[
+                    "topFields",
+                    "itemFields",
+                    "itemRequired",
+                    "fileKeyFields",
+                    "regKeyFields",
+                    "provFields",
+                    "provRequired",
+                    "riskLevels",
+                    "sourceClasses",
+                    "itemBannedKeys",
+                    "tokens",
+                ][..],
+            ),
+            (
+                "residue",
+                &[
+                    "topFields",
+                    "provFields",
+                    "ruleFields",
+                    "entryFields",
+                    "matchGroups",
+                    "ruleKinds",
+                    "tokens",
+                ][..],
+            ),
+        ] {
+            for k in keys {
+                if *k == "tokens" {
+                    assert!(tokens(dom).is_some(), "{dom}.tokens 缺失");
+                } else if *k == "itemBannedKeys" {
+                    assert!(list(dom, "itemBannedKeys").is_some(), "{dom}.itemBannedKeys 缺失");
+                } else {
+                    assert!(!list(dom, k).unwrap_or_default().is_empty(), "{dom}.{k} 缺失或为空");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn 两域token集保持刻意不同() {
+        // 这条断言防的是"哪天有人把两张清单合并成一份等价集"（AGENTS §5.16 / N6）
+        let (cl, ci) = tokens("cleanup").expect("cleanup tokens");
+        let (rl, ri) = tokens("residue").expect("residue tokens");
+        assert!(!ci, "清理侧 token 历史上是大小写敏感，改口径要单独拍板");
+        assert!(ri, "残留侧 token 历史上是大小写不敏感，改口径要单独拍板");
+        assert_ne!(
+            cl.len(),
+            rl.len(),
+            "两域 token 登记集数量相等了——很可能被合并成同一份清单，制造假一致"
+        );
+        assert!(cl.contains(&"TEMP".to_string()) && !rl.contains(&"TEMP".to_string()));
+        assert!(rl.contains(&"PROGRAMW6432".to_string()) && !cl.contains(&"PROGRAMW6432".to_string()));
+    }
+
+    #[test]
+    fn 上限取值走limits再走域顶层() {
+        assert_eq!(number("residue", "maxRules"), Some(400));
+        assert_eq!(number("residue", "matchGroupsMinNonEmpty"), Some(2));
+        assert_eq!(number("cleanup", "maxItems"), Some(400));
+        assert_eq!(number("cleanup", "maxTargetLen"), Some(260));
+    }
+}

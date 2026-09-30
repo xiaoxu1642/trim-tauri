@@ -64,7 +64,7 @@ use serde_json::{json, Map, Value};
 use tauri::{Emitter, WebviewWindow};
 use trim_finder::cleanup_scan;
 
-use crate::engine::{guard, log, paths, protect, rules_signature, winhttp};
+use crate::engine::{guard, log, paths, protect, rule_schema, rules_signature, winhttp};
 use crate::pwsh;
 use crate::security;
 
@@ -230,7 +230,530 @@ pub fn set_rules_watermark(version: f64) -> bool {
     }
 }
 
-/// 数据目录规则读取（验签 + 防回滚，fail-closed 回退内置）
+// ==================== A2 清理规则库语义校验（V2 P1-B0，2026-09-30） ====================
+//
+// 为什么必须存在：本文件此前的装载链只做「验签 → JSON → `groups` 是数组 → 版本下限」，
+// 也就是只证明**这份文件出自发布机私钥**，不证明内容合法。而清理条目直接驱动删除面
+// （`fileKeys.path` / `regKeys.path` / `pathPs` / `excludePaths`）：一条 `risk:"deluxe"`、
+// 一个含 `/` 的路径、或一个执行侧根本不认的字段，都会变成「扫描命中、执行 0 删、状态成功」
+// 那类事故（本域真实前科：printSpoolCache 的 `%WINDIR%` 大写形态）。残留库早在 U-1 就补了
+// 这一层（uninstall.rs A2 段），清理库一直是缺的 —— 两库共用一条更新链，强度却不对称。
+//
+// 口径约束（勿单侧改）：
+// - 词汇表与上限来自 `engine::rule_schema`（真源 `tools/rule-schema.json`，Node 门禁读同一份字节）；
+//   **判定逻辑仍是两份独立实现**（本函数与 `tools/check-cleanup-rule-contract.mjs`），
+//   靠 `tools/fixtures/cleanup-contract.json` 钉住 —— 不跨语言调用，也不让 JS 反过来生成 Rust。
+// - 失败一律**整包拒绝** + 隔离现场 + 回退内置，不做「坏条目剔除、其余生效」：那会让
+//   审核记录与线上行为不一致（残留域 Q2 同口径）。
+// - **不套用残留域的注册表禁删面**：清理的 `regKeys` 目标由执行侧过 `engine::protect`
+//   （三端同源）。在这里另接一套判定会让同一目标在装载侧与执行侧口径不同（AGENTS §5.16/N6）。
+
+/// 递归收集一个值里所有 `%TOKEN%`（按出现顺序，不去重 ⇒ 报错能指到具体位置）
+fn collect_rule_tokens(value: &Value) -> Vec<String> {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => {
+                let bytes = s.as_bytes();
+                let mut i = 0usize;
+                while i < bytes.len() {
+                    if bytes[i] == b'%' {
+                        if let Some(end) = s[i + 1..].find('%') {
+                            let tok = &s[i + 1..i + 1 + end];
+                            if !tok.is_empty() && !tok.chars().any(|c| c.is_whitespace()) {
+                                out.push(tok.to_string());
+                            }
+                            i = i + 1 + end + 1;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    walk(v, out);
+                }
+            }
+            Value::Object(o) => {
+                for v in o.values() {
+                    walk(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, &mut out);
+    out
+}
+
+/// 未知字段检查：手取字段时未知字段会被静默忽略，那等于「规则库里有一执行侧根本不认的
+/// 字段」，审核记录与线上行为不一致。返回 `Some(字段名)` = 拒载原因。
+fn unknown_rule_field(obj: &Map<String, Value>, allow: &[String]) -> Option<String> {
+    obj.keys()
+        .find(|k| !allow.iter().any(|a| a == k.as_str()))
+        .cloned()
+}
+
+/// 必填非空字符串字段
+fn require_rule_str(obj: &Map<String, Value>, field: &str, max_len: usize) -> Option<String> {
+    match obj.get(field).and_then(Value::as_str) {
+        None => Some(format!("缺必填字段 {field}")),
+        Some(s) => {
+            if s.trim().is_empty() {
+                Some(format!("{field} 为空白"))
+            } else if s.chars().count() > max_len {
+                Some(format!("{field} 超长（{} > {max_len}）", s.chars().count()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// 路径形态：执行侧 `expand_glob_dirs` 只认 `*`、`glob_match` 只支持单星、分隔符只认 `\`；
+/// 扫描侧支持 `?` 与 `/` —— 规则里出现这些形态就是「扫描命中、执行漏删」。
+fn file_path_form_problem(path: &str, max_len: usize) -> Option<String> {
+    if path.trim().is_empty() {
+        return Some("path 为空白".to_string());
+    }
+    if path.chars().count() > max_len {
+        return Some(format!("path 超长（{} > {max_len}）", path.chars().count()));
+    }
+    if path.contains('/') {
+        return Some(format!("path 含 / 分隔符（执行侧只按 \\ 切分）: {path}"));
+    }
+    if path.contains('?') {
+        return Some(format!("path 含 ? 通配（执行侧 expand_glob_dirs 不支持）: {path}"));
+    }
+    None
+}
+
+/// 整包语义校验。`Err(原因)` = 调用方必须拒绝这份规则库（与 Node 门禁同口径）。
+fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
+    let top = pkg
+        .as_object()
+        .ok_or_else(|| "规则包不是 JSON 对象".to_string())?;
+    let empty: Vec<String> = Vec::new();
+    let top_fields = rule_schema::list("cleanup", "topFields").ok_or_else(|| SCHEMA_UNAVAILABLE.to_string())?;
+    let top_required = rule_schema::list("cleanup", "topRequired").unwrap_or(empty.clone());
+    let group_fields = rule_schema::list("cleanup", "groupFields").unwrap_or(empty.clone());
+    let group_required = rule_schema::list("cleanup", "groupRequired").unwrap_or(empty.clone());
+    let sub_fields = rule_schema::list("cleanup", "subGroupFields").unwrap_or(empty.clone());
+    let sub_required = rule_schema::list("cleanup", "subGroupRequired").unwrap_or(empty.clone());
+    let item_fields = rule_schema::list("cleanup", "itemFields").unwrap_or(empty.clone());
+    let item_required = rule_schema::list("cleanup", "itemRequired").unwrap_or(empty.clone());
+    let banned = rule_schema::list("cleanup", "itemBannedKeys").unwrap_or(empty.clone());
+    let fk_fields = rule_schema::list("cleanup", "fileKeyFields").unwrap_or(empty.clone());
+    let fk_required = rule_schema::list("cleanup", "fileKeyRequired").unwrap_or(empty.clone());
+    let rk_fields = rule_schema::list("cleanup", "regKeyFields").unwrap_or(empty.clone());
+    let rk_required = rule_schema::list("cleanup", "regKeyRequired").unwrap_or(empty.clone());
+    let prov_fields = rule_schema::list("cleanup", "provFields").unwrap_or(empty.clone());
+    let prov_required = rule_schema::list("cleanup", "provRequired").unwrap_or(empty.clone());
+    let risk_levels = rule_schema::list("cleanup", "riskLevels").unwrap_or(empty.clone());
+    let source_classes = rule_schema::list("cleanup", "sourceClasses").unwrap_or(empty.clone());
+    let non_empty_arrays = rule_schema::list("cleanup", "nonEmptyArrayFields").unwrap_or(empty.clone());
+    let positive_ints = rule_schema::list("cleanup", "positiveIntFields").unwrap_or(empty.clone());
+    let exclusive = rule_schema::list("cleanup", "exclusiveNumericFields").unwrap_or(empty);
+    let (token_allowed, token_ci) =
+        rule_schema::tokens("cleanup").ok_or_else(|| SCHEMA_UNAVAILABLE.to_string())?;
+    let max_text = rule_schema::number("cleanup", "maxTextLen").unwrap_or(0);
+    let max_target = rule_schema::number("cleanup", "maxTargetLen").unwrap_or(0);
+
+    if let Some(k) = unknown_rule_field(top, &top_fields) {
+        return Err(format!("顶层未知字段 {k}"));
+    }
+    for k in &top_required {
+        if !top.contains_key(k) {
+            return Err(format!("顶层缺必填字段 {k}"));
+        }
+    }
+    // 严格数字：不套用本域 `js_number` 的 JS 宽松 coercion（字符串 "20260928" 会被它吞掉）。
+    // 契约口径必须与 Node 门禁的 `typeof === 'number'` 一致，否则两侧对同一个包给不同结论
+    // （残留域同口径：uninstall.rs 用 `as_f64` 而非宽松解析）。
+    let ver = top.get("rulesVersion").and_then(Value::as_f64).unwrap_or(0.0);
+    if !(ver.is_finite() && ver > 0.0) {
+        return Err("rulesVersion 缺失、非数字或非正数".to_string());
+    }
+    let groups = top
+        .get("groups")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| "groups 缺失或为空数组".to_string())?;
+    if groups.len() > rule_schema::number("cleanup", "maxGroups").unwrap_or(0) {
+        return Err(format!("组数 {} 超上限", groups.len()));
+    }
+
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut seen_targets: HashMap<String, String> = HashMap::new();
+    let mut item_count = 0usize;
+
+    for g in groups {
+        let Some(go) = g.as_object() else {
+            return Err("groups 条目不是对象".to_string());
+        };
+        if let Some(k) = unknown_rule_field(go, &group_fields) {
+            return Err(format!("组未知字段 {k}"));
+        }
+        for f in &group_required {
+            if let Some(why) = require_rule_str(go, f, max_text) {
+                return Err(format!("groups.{why}"));
+            }
+        }
+        let owned_items = go.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+        let owned_subs = go.get("subGroups").and_then(Value::as_array).cloned().unwrap_or_default();
+        if owned_subs.len() > rule_schema::number("cleanup", "maxSubGroupsPerGroup").unwrap_or(0) {
+            return Err("subGroups 数量超上限".to_string());
+        }
+        for io in owned_items.iter().filter_map(Value::as_object) {
+            check_cleanup_item(io, &mut item_count, &mut seen_ids, &mut seen_targets, Ctx {
+                item_fields: &item_fields,
+                item_required: &item_required,
+                banned: &banned,
+                fk_fields: &fk_fields,
+                fk_required: &fk_required,
+                rk_fields: &rk_fields,
+                rk_required: &rk_required,
+                prov_fields: &prov_fields,
+                prov_required: &prov_required,
+                risk_levels: &risk_levels,
+                source_classes: &source_classes,
+                non_empty_arrays: &non_empty_arrays,
+                positive_ints: &positive_ints,
+                exclusive: &exclusive,
+                max_text,
+                max_target,
+                pkg_ver: ver,
+            })?;
+        }
+        for sg in owned_subs.iter().filter_map(Value::as_object) {
+            if let Some(k) = unknown_rule_field(sg, &sub_fields) {
+                return Err(format!("子组未知字段 {k}"));
+            }
+            for f in &sub_required {
+                if let Some(why) = require_rule_str(sg, f, max_text) {
+                    return Err(format!("subGroups.{why}"));
+                }
+            }
+            let sg_items = sg.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+            for io in sg_items.iter().filter_map(Value::as_object) {
+                check_cleanup_item(io, &mut item_count, &mut seen_ids, &mut seen_targets, Ctx {
+                    item_fields: &item_fields,
+                    item_required: &item_required,
+                    banned: &banned,
+                    fk_fields: &fk_fields,
+                    fk_required: &fk_required,
+                    rk_fields: &rk_fields,
+                    rk_required: &rk_required,
+                    prov_fields: &prov_fields,
+                    prov_required: &prov_required,
+                    risk_levels: &risk_levels,
+                    source_classes: &source_classes,
+                    non_empty_arrays: &non_empty_arrays,
+                    positive_ints: &positive_ints,
+                    exclusive: &exclusive,
+                    max_text,
+                    max_target,
+                    pkg_ver: ver,
+                })?;
+            }
+        }
+    }
+    if item_count > rule_schema::number("cleanup", "maxItems").unwrap_or(0) {
+        return Err(format!("条目数 {item_count} 超上限"));
+    }
+    // token 登记集：规则库是签名发布物，未登记变量混进来会造成跨机器行为漂移
+    for tok in collect_rule_tokens(pkg) {
+        let hit = if token_ci {
+            token_allowed.iter().any(|a| a.eq_ignore_ascii_case(&tok))
+        } else {
+            token_allowed.iter().any(|a| *a == tok)
+        };
+        if !hit {
+            return Err(format!(
+                "变量 %{tok}% 未登记（先确认展开器可解析，再登记进契约表 cleanup.tokens）"
+            ));
+        }
+    }
+    Ok(())
+}
+
+const SCHEMA_UNAVAILABLE: &str = "规则契约表不可用（tools/rule-schema.json 解析失败），已按 fail-closed 拒绝";
+
+/// 一条规则的检查参数（避免 20 个位置参数）
+struct Ctx<'a> {
+    item_fields: &'a Vec<String>,
+    item_required: &'a Vec<String>,
+    banned: &'a Vec<String>,
+    fk_fields: &'a Vec<String>,
+    fk_required: &'a Vec<String>,
+    rk_fields: &'a Vec<String>,
+    rk_required: &'a Vec<String>,
+    prov_fields: &'a Vec<String>,
+    prov_required: &'a Vec<String>,
+    risk_levels: &'a Vec<String>,
+    source_classes: &'a Vec<String>,
+    non_empty_arrays: &'a Vec<String>,
+    positive_ints: &'a Vec<String>,
+    exclusive: &'a Vec<String>,
+    max_text: usize,
+    max_target: usize,
+    /// 顶层 rulesVersion：条目级 `ver` 必须与它相等（V2 P2-A1）
+    pkg_ver: f64,
+}
+
+fn check_cleanup_item(
+    it: &Map<String, Value>,
+    item_count: &mut usize,
+    seen_ids: &mut HashSet<String>,
+    seen_targets: &mut HashMap<String, String>,
+    c: Ctx<'_>,
+) -> Result<(), String> {
+    *item_count += 1;
+    let id = it
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "条目缺 id".to_string())?
+        .to_string();
+    if let Some(k) = unknown_rule_field(it, c.item_fields) {
+        // 先查"已裁决移除"再报"未知字段"：前者才是可执行的结论（回潮字段要点名裁决，
+        // 而不是诱导人去契约表里把它加回来）。与 Node 门禁 A4/A2 的报错口径对齐。
+        for b in c.banned {
+            if it.contains_key(b) {
+                return Err(format!("规则 {id}: 出现已裁决移除的字段 {b}"));
+            }
+        }
+        return Err(format!("规则 {id}: 未知字段 {k}（新增字段要先接执行侧，再进契约表）"));
+    }
+    for f in c.item_required {
+        if !it.contains_key(f) {
+            return Err(format!("规则 {id}: 缺必填字段 {f}"));
+        }
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(format!("规则 {id}: id 含非 [A-Za-z0-9._-] 字符"));
+    }
+    if !seen_ids.insert(id.clone()) {
+        return Err(format!("规则 id 重复: {id}"));
+    }
+    // 活路径来源（V2 P2-D7 实测不等价点）：清理域扫描器读的是库里不存在的 `candidates`，
+    // 所以"只写 candidatesPs"的规则会静默 0 命中 —— 不报错比报错坏，装载侧直接拒
+    {
+        let live = rule_schema::cross("liveSourceKeys").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let dead = rule_schema::cross("deadSourceKeys").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let handlers = rule_schema::cross("specialHandlers").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let has_live = live.iter().any(|k| {
+            let k = match k.as_str() {
+                Some(s) => s,
+                None => return false,
+            };
+            match it.get(k) {
+                None => false,
+                Some(Value::Array(a)) => !a.is_empty(),
+                Some(v) => !v.is_null(),
+            }
+        });
+        let handled = handlers.iter().find_map(|h| {
+            let key = h.get("key").and_then(Value::as_str)?;
+            let v = it.get(key).and_then(Value::as_str)?;
+            let vals: Vec<&str> = h.get("values").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            // 键存在但取值没登记 → 同样拒（"我以为是专用通道，其实没人认这个值"）
+            if vals.is_empty() || vals.contains(&v) {
+                Some(vals.contains(&v))
+            } else {
+                Some(false)
+            }
+        });
+        if let Some(false) = handled {
+            return Err(format!("规则 {id}: 专用分流取值未在契约表 crossTrack.specialHandlers 登记"));
+        }
+        if !has_live && handled.is_none() {
+            let dead_used: Vec<String> = dead
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|k| it.get(*k).and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false))
+                .map(String::from)
+                .collect();
+            return Err(if dead_used.is_empty() {
+                format!("规则 {id}: 没有任何活路径来源（{:?} 全缺）", live.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            } else {
+                format!(
+                    "规则 {id}: 只有 {} 作为路径来源，清理域引擎不消费它（登记表见契约表 crossTrack），等于静默失效",
+                    dead_used.join("/")
+                )
+            });
+        }
+    }
+    // 条目级版本戳必须与顶层一致：混着一版旧条目 = 「上次报这次没报」无从对齐（V2 P2-A1）
+    match it.get("ver").and_then(Value::as_f64) {
+        None => return Err(format!("规则 {id}: 缺条目级版本戳 ver（跑 tools/stamp-rule-ver.mjs --write 后重签）")),
+        Some(vv) if (vv - c.pkg_ver).abs() > f64::EPSILON => {
+            return Err(format!("规则 {id}: ver={vv} 与顶层 rulesVersion={} 不一致", c.pkg_ver));
+        }
+        Some(_) => {}
+    }
+    let risk = it.get("risk").and_then(Value::as_str).unwrap_or_default();
+    if !c.risk_levels.iter().any(|r| r == risk) {
+        return Err(format!("规则 {id}: risk「{risk}」不在 {:?} 之内", c.risk_levels));
+    }
+    for f in ["evidence", "domain", "group", "nature", "name"] {
+        if let Some(why) = require_rule_str(it, f, c.max_text) {
+            return Err(format!("规则 {id}: {why}"));
+        }
+    }
+    for f in ["recommended", "regenerable"] {
+        if !it.get(f).map(|v| v.is_boolean()).unwrap_or(false) {
+            return Err(format!("规则 {id}: {f} 必须是布尔（缺省即静默改变默认口径）"));
+        }
+    }
+    for f in c.non_empty_arrays {
+        if let Some(v) = it.get(f) {
+            if !v.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+                return Err(format!("规则 {id}: {f} 存在但不是非空数组（有约束却写空 = 静默失效）"));
+            }
+        }
+    }
+    let declared = c.exclusive.iter().filter(|f| it.contains_key(f.as_str())).count();
+    if declared > 1 {
+        return Err(format!("规则 {id}: minAgeHours 与 minAgeDays 互斥，不得同时声明"));
+    }
+    for f in c.positive_ints {
+        if let Some(v) = it.get(f) {
+            let ok = v.as_f64().map(|n| n.is_finite() && n.fract() == 0.0 && n > 0.0).unwrap_or(false);
+            if !ok {
+                return Err(format!("规则 {id}: {f} 必须是正整数"));
+            }
+        }
+    }
+    let prov = it
+        .get("prov")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("规则 {id}: prov 缺失或不是对象"))?;
+    if let Some(k) = unknown_rule_field(prov, c.prov_fields) {
+        return Err(format!("规则 {id}: prov 未知字段 {k}"));
+    }
+    for f in c.prov_required {
+        if let Some(why) = require_rule_str(prov, f, c.max_text) {
+            return Err(format!("规则 {id}: prov.{why}"));
+        }
+    }
+    let sc = prov.get("sourceClass").and_then(Value::as_str).unwrap_or_default();
+    if !c.source_classes.iter().any(|s| s == sc) {
+        return Err(format!("规则 {id}: prov.sourceClass「{sc}」不在 {:?} 之内", c.source_classes));
+    }
+    let fk_list = it.get("fileKeys").and_then(Value::as_array).cloned().unwrap_or_default();
+    if fk_list.len() > rule_schema::number("cleanup", "maxFileKeysPerItem").unwrap_or(0) {
+        return Err(format!("规则 {id}: fileKeys 条数超上限"));
+    }
+    for fk in fk_list.iter().filter_map(Value::as_object) {
+        if let Some(k) = unknown_rule_field(fk, c.fk_fields) {
+            return Err(format!("规则 {id}: fileKeys 未知字段 {k}"));
+        }
+        for f in c.fk_required {
+            if !fk.contains_key(f) {
+                return Err(format!("规则 {id}: fileKeys 缺必填字段 {f}（recurse 不得依赖缺省值）"));
+            }
+        }
+        let path = fk.get("path").and_then(Value::as_str).unwrap_or_default();
+        if let Some(why) = file_path_form_problem(path, c.max_target) {
+            return Err(format!("规则 {id}: fileKeys.{why}"));
+        }
+        if !fk.get("recurse").map(|v| v.is_boolean()).unwrap_or(false) {
+            return Err(format!("规则 {id}: fileKeys.path「{path}」缺显式布尔 recurse"));
+        }
+        let pat = fk.get("pattern").and_then(Value::as_str).unwrap_or("*");
+        let stars = pat.matches('*').count();
+        if pat != "*" && (stars != 1 || pat.contains('?')) {
+            return Err(format!(
+                "规则 {id}: pattern「{pat}」超出执行侧 glob_match 的单星能力（只支持 * / 前缀* / *后缀 / 前缀*后缀）"
+            ));
+        }
+        let fp = format!(
+            "file|{}|{}|{}",
+            path.to_lowercase(),
+            pat,
+            if fk.get("recurse").and_then(Value::as_bool) == Some(false) { "false" } else { "true" }
+        );
+        if let Some(prev) = seen_targets.get(&fp) {
+            return Err(format!("规则 {id}: 与 {prev} 精确重复（{fp}）"));
+        }
+        seen_targets.insert(fp, id.clone());
+    }
+    let rk_list = it.get("regKeys").and_then(Value::as_array).cloned().unwrap_or_default();
+    if rk_list.len() > rule_schema::number("cleanup", "maxRegKeysPerItem").unwrap_or(0) {
+        return Err(format!("规则 {id}: regKeys 条数超上限"));
+    }
+    for rk in rk_list.iter().filter_map(Value::as_object) {
+        if let Some(k) = unknown_rule_field(rk, c.rk_fields) {
+            return Err(format!("规则 {id}: regKeys 未知字段 {k}"));
+        }
+        for f in c.rk_required {
+            if let Some(why) = require_rule_str(rk, f, c.max_target) {
+                return Err(format!("规则 {id}: regKeys.{why}"));
+            }
+        }
+        let path = rk.get("path").and_then(Value::as_str).unwrap_or_default();
+        let value = rk.get("value").and_then(Value::as_str).unwrap_or("");
+        let fp = format!("reg|{}|{}", path.to_lowercase(), value);
+        if let Some(prev) = seen_targets.get(&fp) {
+            return Err(format!("规则 {id}: 与 {prev} 精确重复（{fp}）"));
+        }
+        seen_targets.insert(fp, id.clone());
+    }
+    if let Some(ep) = it.get("excludePaths") {
+        let arr = ep
+            .as_array()
+            .ok_or_else(|| format!("规则 {id}: excludePaths 必须是数组"))?;
+        if arr.len() > rule_schema::number("cleanup", "maxExcludePathsPerItem").unwrap_or(0) {
+            return Err(format!("规则 {id}: excludePaths 条数超上限"));
+        }
+        let mut has_named_value_exclude = false;
+        for v in arr {
+            let Some(s) = v.as_str() else {
+                return Err(format!("规则 {id}: excludePaths 含非字符串项"));
+            };
+            if s.trim().is_empty() {
+                return Err(format!("规则 {id}: excludePaths 含空白项"));
+            }
+            if s.contains('/') || s.contains('?') {
+                return Err(format!("规则 {id}: excludePaths 形态非法（禁 / 与 ?）: {s}"));
+            }
+            if s.contains("::") {
+                has_named_value_exclude = true;
+            }
+        }
+        if has_named_value_exclude {
+            // 删树（无 value）与 value:"*"（清全部值）是原子操作，删的过程中保不住个别值
+            let bad = rk_list.iter().filter_map(Value::as_object).any(|rk| {
+                let v = rk.get("value").and_then(Value::as_str);
+                v.is_none() || v == Some("*")
+            });
+            if bad {
+                return Err(format!(
+                    "规则 {id}: excludePaths 含具名值排除（::），但 regKeys 存在删树/通配形态（无法保留个别值）"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 内置副本读取：与数据目录同一套校验。这里失败说明**仓库自身坏了**（生成器产物没跑门禁），
+/// 运行期只能停用规则 —— 给内置副本开豁免通道等于整条链白做。
+fn read_builtin_rules() -> Option<Value> {
+    let v = safe_read_json_from_str(BUILTIN_RULES_JSON)?;
+    if let Err(reason) = validate_cleanup_package(&v) {
+        log::write_log("error", &format!("内置清理规则语义校验未通过，清理规则已停用: {reason}"));
+        return None;
+    }
+    Some(v)
+}
+
+/// 数据目录规则读取（验签 + 防回滚 + 语义校验，fail-closed 回退内置）
 fn read_verified_data_rules() -> Option<Value> {
     let file = data_rules_file();
     if !file.is_file() {
@@ -262,6 +785,16 @@ fn read_verified_data_rules() -> Option<Value> {
             "warn",
             &format!("数据目录规则版本({v})低于防回滚下限({floor})，疑似旧签名文件重放，已回退内置规则"),
         );
+        return None;
+    }
+    // 验签通过但语义不合规：整包拒绝并隔离，避免每次扫描都重复判同一份坏文件
+    // （与残留域 load_residue_rules 同一处置，Q2 拍板口径）
+    if let Err(reason) = validate_cleanup_package(&parsed) {
+        log::write_log(
+            "error",
+            &format!("数据目录规则语义校验未通过，已整包拒绝并回退内置规则: {reason}"),
+        );
+        security::quarantine_file(&file, "cleanup-rules 语义校验未通过");
         return None;
     }
     Some(parsed)
@@ -431,9 +964,17 @@ pub fn rules_value() -> Result<Value, String> {
         }
     }
 
-    let mut rules = read_verified_data_rules()
-        .or_else(|| safe_read_json_from_str(BUILTIN_RULES_JSON))
-        .unwrap_or_else(|| json!({ "version": 0, "rulesVersion": 0, "groups": [] }));
+    // 来源要记进日志（V2 P2-A1）：用户反馈"上次报了这次没报"时，第一句要能回答
+    // 「当时吃的是哪一版、是数据目录那份还是内置那份」—— 整库 rulesVersion 相同但来源不同，
+    // 结论完全不同
+    let (mut rules, rules_source) = match read_verified_data_rules() {
+        Some(v) => (v, "数据目录"),
+        None => match read_builtin_rules() {
+            Some(v) => (v, "内置副本"),
+            // 两条路都不通就是空规则集，装载侧不猜、不静默沿用上一版缓存
+            None => (json!({ "version": 0, "rulesVersion": 0, "groups": [] }), "无可用规则"),
+        },
+    };
     for (path, _) in &custom {
         let Some(parsed) = safe_read_json(path) else {
             continue;
@@ -446,6 +987,21 @@ pub fn rules_value() -> Result<Value, String> {
             log::write_log("warn", &format!("[cleanup] 自定义规则文件已拒载: {}", path.display()));
         }
     }
+    let rules_version = rules.get("rulesVersion").map(js_number).unwrap_or(0.0);
+    let mut rule_items = 0usize;
+    for g in rules.get("groups").and_then(Value::as_array).cloned().unwrap_or_default() {
+        rule_items += g.get("items").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+        for sg in g.get("subGroups").and_then(Value::as_array).cloned().unwrap_or_default() {
+            rule_items += sg.get("items").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+        }
+    }
+    // 只在缓存刷新时打一条，扫描/执行/明细都复用这条记录
+    log::write_log(
+        "info",
+        &format!(
+            "清理规则库已装载: 来源={rules_source} rulesVersion={rules_version} 条目={rule_items}"
+        ),
+    );
     *RULES_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((sig, rules.clone()));
     Ok(rules)
 }
@@ -2526,25 +3082,9 @@ fn validate_remote_rules(text: &str, current_version: f64) -> Result<(f64, Strin
     }
     rules_signature::verify_rules_text(text)?;
     let parsed: Value = serde_json::from_str(text).map_err(|_| "JSON 解析失败".to_string())?;
-    let groups = parsed
-        .get("groups")
-        .and_then(|g| g.as_array())
-        .filter(|a| !a.is_empty());
-    let Some(groups) = groups else {
-        return Err("缺少 groups 结构".to_string());
-    };
-    let mut sample: Vec<Value> = Vec::new();
-    for g in groups {
-        sample.extend(collect_group_items(g));
-    }
-    let shape_ok = !sample.is_empty()
-        && sample.iter().all(|it| {
-            it.get("id").map(|v| v.is_string()).unwrap_or(false)
-                && it.get("name").map(|v| v.is_string()).unwrap_or(false)
-        });
-    if !shape_ok {
-        return Err("条目缺少 id/name 字段".to_string());
-    }
+    // 更新链必须调用**装载侧同一个**语义校验器：另写一套字段规则就会「更新放行、装载拒绝」，
+    // 两边都觉得自己对（残留域 E4b 同一断言，本域此前只查 id/name 是否存在）
+    validate_cleanup_package(&parsed)?;
     let version = js_num_or_zero(parsed.get("rulesVersion"));
     if version < current_version {
         return Err(format!(
@@ -2922,6 +3462,254 @@ mod tests {
             "[rules-update] ✓ 源 {} 验签通过，rulesVersion={}",
             source,
             js_num_str(version)
+        );
+    }
+
+    // ==================== V2 P1-B0 清理库语义校验（2026-09-30） ====================
+
+    fn ok_item() -> Value {
+        json!({
+            "id": "t-ok",
+            "ver": 20260928,
+            "name": "测试项",
+            "risk": "low",
+            "evidence": "只作用于测试目录",
+            "recommended": true,
+            "domain": "system",
+            "group": "g1",
+            "nature": "log",
+            "regenerable": true,
+            "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "tests/cleanup",
+                "reviewedAt": "2026-09-30"
+            },
+            "fileKeys": [{ "path": "%LOCALAPPDATA%\\TrimTest", "pattern": "*", "recurse": true }]
+        })
+    }
+
+    fn ok_pkg(item: Value) -> Value {
+        json!({
+            "version": 2,
+            "rulesVersion": 20260928,
+            "groups": [{ "key": "g1", "title": "测试组", "items": [item] }]
+        })
+    }
+
+    /// 坏包必须整包拒绝，且原因要指到具体字段（"没报错"不等于"已验证"）
+    fn expect_reject(item: Value, needle: &str) {
+        match validate_cleanup_package(&ok_pkg(item)) {
+            Ok(()) => panic!("应拒绝且含「{needle}」，但被放行了"),
+            Err(err) => assert!(err.contains(needle), "拒绝原因未指到「{needle}」，实际：{err}"),
+        }
+    }
+
+    #[test]
+    fn 内置清理规则必须通过语义校验() {
+        let v: Value = serde_json::from_str(BUILTIN_RULES_JSON).expect("内置规则 JSON 坏了");
+        if let Err(reason) = validate_cleanup_package(&v) {
+            panic!("内置清理规则未通过装载侧语义校验（发布物自身坏了）: {reason}");
+        }
+    }
+
+    #[test]
+    fn 清理语义校验_合法最小包通过() {
+        validate_cleanup_package(&ok_pkg(ok_item())).expect("合法包被拒");
+    }
+
+    #[test]
+    fn 清理语义校验_判定器不会恒放行() {
+        // 反向钉桩：包彻底坏掉时若还放行，说明校验器坏成"永远绿"（本仓有假绿前科 v1 M13）
+        let junk = json!({ "rulesVersion": 1, "groups": [] });
+        assert!(validate_cleanup_package(&junk).is_err(), "空 groups 的包被放行 = 校验器失效");
+        let junk2 = json!({ "groups": [{ "key": "k", "items": [{}] }] });
+        assert!(validate_cleanup_package(&junk2).is_err(), "缺 rulesVersion / 空条目被放行 = 校验器失效");
+    }
+
+    #[test]
+    fn 清理语义校验_逐条拒掉坏包形态() {
+        // 必填与枚举
+        let mut it = ok_item();
+        it.as_object_mut().unwrap().remove("name");
+        expect_reject(it, "缺必填字段 name");
+        let mut it = ok_item();
+        it["risk"] = json!("deluxe");
+        expect_reject(it, "risk「deluxe」");
+        let mut it = ok_item();
+        it["prov"]["sourceClass"] = json!("imported");
+        expect_reject(it, "prov.sourceClass「imported」");
+
+        // 未知字段与已裁决移除的字段
+        let mut it = ok_item();
+        it.as_object_mut().unwrap().insert("sizeHint".to_string(), json!(1));
+        expect_reject(it, "未知字段 sizeHint");
+        let mut it = ok_item();
+        it.as_object_mut().unwrap().insert("deleteMode".to_string(), json!("recycle"));
+        expect_reject(it, "已裁决移除的字段 deleteMode");
+        let mut it = ok_item();
+        it.as_object_mut().unwrap().insert("excludeKeys".to_string(), json!([]));
+        expect_reject(it, "已裁决移除的字段 excludeKeys");
+
+        // 形态：/ 分隔符、? 通配、多星 pattern、缺显式 recurse、子对象未知字段
+        let mut it = ok_item();
+        it["fileKeys"][0]["path"] = json!("%LOCALAPPDATA%/TrimTest");
+        expect_reject(it, "含 / 分隔符");
+        let mut it = ok_item();
+        it["fileKeys"][0]["path"] = json!("%LOCALAPPDATA%\\Trim?Test");
+        expect_reject(it, "含 ? 通配");
+        let mut it = ok_item();
+        it["fileKeys"][0]["pattern"] = json!("**");
+        expect_reject(it, "单星能力");
+        let mut it = ok_item();
+        it["fileKeys"][0].as_object_mut().unwrap().remove("recurse");
+        expect_reject(it, "缺必填字段 recurse");
+        let mut it = ok_item();
+        it["fileKeys"][0].as_object_mut().unwrap().insert("depth".to_string(), json!(2));
+        expect_reject(it, "fileKeys 未知字段 depth");
+
+        // 布尔字段不许写成字符串
+        let mut it = ok_item();
+        it["recommended"] = json!("true");
+        expect_reject(it, "recommended 必须是布尔");
+
+        // 条目级版本戳：缺失与不等都必须红（V2 P2-A1）
+        let mut it = ok_item();
+        it.as_object_mut().unwrap().remove("ver");
+        expect_reject(it, "缺条目级版本戳 ver");
+        let mut it = ok_item();
+        it["ver"] = json!(20260101);
+        expect_reject(it, "与顶层 rulesVersion");
+        let mut it = ok_item();
+        it["ver"] = json!("20260928");
+        expect_reject(it, "缺条目级版本戳 ver");
+
+        // 时效护栏：互斥 + 正整数
+        let mut it = ok_item();
+        it["minAgeHours"] = json!(24);
+        it["minAgeDays"] = json!(1);
+        expect_reject(it, "互斥");
+        let mut it = ok_item();
+        it["minAgeDays"] = json!(0);
+        expect_reject(it, "必须是正整数");
+
+        // 进程约束字段写了就必须非空
+        let mut it = ok_item();
+        it["restartProcesses"] = json!([]);
+        expect_reject(it, "restartProcesses 存在但不是非空数组");
+
+        // token 未登记（清理侧允许集与残留侧刻意不同，见 tools/rule-schema.json）
+        let mut it = ok_item();
+        it["fileKeys"][0]["path"] = json!("%ZZ_NOT_A_REAL_TOKEN%\\x");
+        expect_reject(it, "未登记");
+
+        // excludePaths 的 :: 具名值排除只能配具名值 regKeys（F-2）
+        let mut it = ok_item();
+        it["regKeys"] = json!([{ "path": "HKCU\\Software\\TrimTest" }]);
+        it["excludePaths"] = json!(["HKCU\\Software\\TrimTest::ValueName"]);
+        expect_reject(it, "excludePaths 含具名值排除");
+
+        // id 字符集 / 重复 / 目标精确重复
+        let mut it = ok_item();
+        it["id"] = json!("bad id!");
+        expect_reject(it, "id 含非");
+        let pair = json!({
+            "version": 2,
+            "rulesVersion": 20260928,
+            "groups": [{ "key": "g1", "title": "T", "items": [ok_item(), ok_item()] }]
+        });
+        let err = validate_cleanup_package(&pair).unwrap_err();
+        assert!(err.contains("规则 id 重复"), "重复 id 未被拒: {err}");
+        let mut other = ok_item();
+        other["id"] = json!("t-other");
+        let overlap = json!({
+            "version": 2,
+            "rulesVersion": 20260928,
+            "groups": [{ "key": "g1", "title": "T", "items": [ok_item(), other] }]
+        });
+        let err = validate_cleanup_package(&overlap).unwrap_err();
+        assert!(err.contains("精确重复"), "目标精确重复未被拒: {err}");
+
+        // 组结构：title 必填
+        let bad_group = json!({
+            "version": 2,
+            "rulesVersion": 20260928,
+            "groups": [{ "key": "g1", "items": [ok_item()] }]
+        });
+        let err = validate_cleanup_package(&bad_group).unwrap_err();
+        assert!(err.contains("groups.缺必填字段 title"), "组缺 title 未被拒: {err}");
+
+        // 顶层未知字段（残留库早有此道，清理库此前没有）
+        let mut pkg = ok_pkg(ok_item());
+        pkg.as_object_mut().unwrap().insert("extraTop".to_string(), json!(1));
+        let err = validate_cleanup_package(&pkg).unwrap_err();
+        assert!(err.contains("顶层未知字段 extraTop"), "顶层未知字段未被拒: {err}");
+    }
+
+    #[test]
+    fn 清理语义校验与夹具一致() {
+        // 夹具由 Node 侧维护（tools/fixtures/cleanup-contract.json），两个消费者各自独立实现判定：
+        // 任何一侧放宽，另一侧就在这里判红（口径同 uninstall.rs::residue_validator_matches_shared_fixture）
+        let raw = include_str!("../../../tools/fixtures/cleanup-contract.json");
+        let f: Value = serde_json::from_str(raw).expect("清理契约夹具解析失败");
+        let cases = f["packages"].as_array().expect("夹具缺 packages");
+        let mut diff: Vec<String> = Vec::new();
+        let mut rejected = 0usize;
+        for c in cases {
+            let label = c["label"].as_str().unwrap_or("?");
+            let expect_ok = c["ok"].as_bool().unwrap_or(false);
+            let got_ok = validate_cleanup_package(&c["pkg"]).is_ok();
+            if !got_ok {
+                rejected += 1;
+            }
+            if got_ok != expect_ok {
+                diff.push(format!(
+                    "{label}: 夹具要求{}，Rust 判为{}",
+                    if expect_ok { "放行" } else { "整包拒绝" },
+                    if got_ok { "放行" } else { "拒绝" }
+                ));
+            }
+        }
+        assert!(
+            cases.len() >= 12 && rejected >= 10,
+            "夹具用例数 {}（其中判红 {rejected}）过少，无法覆盖各保护类别",
+            cases.len()
+        );
+        assert!(diff.is_empty(), "语义校验与夹具不一致：\n{}", diff.join("\n"));
+    }
+
+    #[test]
+    fn 清理装载与更新两处都接同一个语义校验器() {
+        // 接线断言（口径同 tools/check-residue-rule-contract.mjs 的 E2/E4b）：数据目录与
+        // 更新链各写一套字段规则，就是"更新放行、装载拒绝"那种分叉的起点
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/commands/cleanup.rs"
+        ))
+        .expect("读自身源码做接线断言");
+        let fn_body = |head: &str| -> String {
+            let i = src.find(head).unwrap_or_else(|| panic!("找不到 {head}"));
+            let rest = &src[i..];
+            rest[..rest.find("\n}\n").unwrap_or(rest.len())].to_string()
+        };
+        let load = fn_body("fn read_verified_data_rules");
+        assert!(
+            load.contains("validate_cleanup_package(&parsed)") && load.contains("quarantine_file(&file"),
+            "数据目录装载缺语义校验或缺隔离动作：只回退内置不隔离 = 每次扫描重复判同一份坏文件"
+        );
+        let builtin = fn_body("fn read_builtin_rules");
+        assert!(
+            builtin.contains("validate_cleanup_package(&v)"),
+            "内置副本没过同一道语义校验 = 给内置开了豁免通道"
+        );
+        let remote = fn_body("fn validate_remote_rules");
+        assert!(
+            remote.contains("validate_cleanup_package(&parsed)") && remote.contains("verify_rules_text"),
+            "更新链必须复用装载侧校验器（不许另写一套字段规则）"
+        );
+        assert!(
+            !remote.contains("\"条目缺少 id/name 字段\""),
+            "更新链退回了旧的弱形状检查（只查 id/name 是否存在）"
         );
     }
 }

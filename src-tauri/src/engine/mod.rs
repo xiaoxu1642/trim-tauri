@@ -14,6 +14,7 @@ pub mod protect;
 pub mod reg_backup;
 pub mod restore_pack;
 pub mod pssteps;
+pub mod rule_schema;
 pub mod rules_signature;
 pub mod shellicon;
 pub mod sysinfo;

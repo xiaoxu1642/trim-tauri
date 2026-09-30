@@ -29,7 +29,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "windowsDownloadCache",
@@ -52,7 +53,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "deliveryOptimization",
@@ -71,7 +73,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "winsatCache",
@@ -90,7 +93,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "usoLogs",
@@ -109,7 +113,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -135,7 +140,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "diagnosisData",
@@ -154,7 +160,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "systemLogFiles",
@@ -173,7 +180,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "cbsLogs",
@@ -192,7 +200,8 @@
                 "ref": "trim/pccleaner",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "dismLogs",
@@ -211,7 +220,8 @@
                 "ref": "trim/pccleaner",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "windowsDebug",
@@ -230,7 +240,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "pantherLogs",
@@ -249,7 +260,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "werReportQueue",
@@ -268,7 +280,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "defenderHistoryRecords",
@@ -287,7 +300,8 @@
                 "ref": "windows/app",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "windowsLogs",
@@ -306,7 +320,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -332,7 +347,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "dotNetCache",
@@ -351,7 +367,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "prefetchFiles",
@@ -371,7 +388,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeDays": 7
+              "minAgeDays": 7,
+              "ver": 20260928
             },
             {
               "id": "thumbnailCacheFiles",
@@ -403,7 +421,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "iconCacheFiles",
@@ -434,7 +453,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "winINetCache",
@@ -453,7 +473,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "liveKernelReports",
@@ -472,7 +493,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -499,7 +521,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeHours": 24
+              "minAgeHours": 24,
+              "ver": 20260928
             },
             {
               "id": "winSxsTempFile2",
@@ -519,7 +542,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeHours": 24
+              "minAgeHours": 24,
+              "ver": 20260928
             },
             {
               "id": "tempFiles",
@@ -539,7 +563,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeHours": 24
+              "minAgeHours": 24,
+              "ver": 20260928
             },
             {
               "id": "driverTempExtract",
@@ -558,7 +583,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "systemTemp",
@@ -578,7 +604,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeHours": 24
+              "minAgeHours": 24,
+              "ver": 20260928
             }
           ]
         },
@@ -605,7 +632,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeDays": 2
+              "minAgeDays": 2,
+              "ver": 20260928
             },
             {
               "id": "memoryDumpFiles",
@@ -625,7 +653,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeDays": 2
+              "minAgeDays": 2,
+              "ver": 20260928
             }
           ]
         },
@@ -655,7 +684,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "explorerRunMRU",
@@ -678,7 +708,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "shellMuiCache",
@@ -702,7 +733,8 @@
                 "ref": "windows/system",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "winINetCookies",
@@ -721,7 +753,8 @@
                 "ref": "windows/cache",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "recentFiles",
@@ -740,7 +773,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -766,7 +800,8 @@
                 "ref": "windows/outdated",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         }
@@ -799,7 +834,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "wechatCache",
@@ -825,7 +861,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "qqCache",
@@ -854,7 +891,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "qqFileClean",
@@ -873,7 +911,8 @@
                 "ref": "fileclean",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "wechatFileClean",
@@ -892,7 +931,8 @@
                 "ref": "fileclean",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -926,7 +966,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "douyinCache",
@@ -953,7 +994,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -979,7 +1021,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -1005,7 +1048,8 @@
                 "ref": "windows/outdated",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "officeFileCache",
@@ -1041,7 +1085,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -1070,7 +1115,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "steamHtmlCache",
@@ -1103,7 +1149,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "epicWebCache",
@@ -1136,7 +1183,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -1188,7 +1236,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "jetbrainsCache",
@@ -1222,7 +1271,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "npmCache",
@@ -1252,7 +1302,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "pipCache",
@@ -1282,7 +1333,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "nugetCache",
@@ -1312,7 +1364,8 @@
                 "ref": "apps",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "pnpmCache",
@@ -1342,7 +1395,8 @@
                 "ref": "pnpm/store-path",
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "nugetHttpCache",
@@ -1372,7 +1426,8 @@
                 "ref": "microsoft/nuget/cache-layout",
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "cargoRegistryCache",
@@ -1406,7 +1461,8 @@
                 "ref": "cargo-book/cargo-home",
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "uvCache",
@@ -1436,7 +1492,8 @@
                 "ref": "astral-sh/uv/cache",
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "codexRuntimesCache",
@@ -1466,7 +1523,8 @@
                 "ref": "openai/codex-cli-runtimes",
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         }
@@ -1529,7 +1587,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "edgeCache",
@@ -1570,7 +1629,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "qqBrowserCache",
@@ -1603,7 +1663,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -1643,7 +1704,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "chromeMediaCache",
@@ -1676,7 +1738,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "edgeMediaCache",
@@ -1709,7 +1772,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "firefoxCache",
@@ -1750,7 +1814,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -1795,7 +1860,8 @@
                 "ref": "browser",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -1821,7 +1887,8 @@
                 "ref": "windows/outdated",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         }
@@ -1854,7 +1921,8 @@
                 "ref": "gpu",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "nvidiaNvCache",
@@ -1873,7 +1941,8 @@
                 "ref": "gpu",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "amdCache",
@@ -1892,7 +1961,8 @@
                 "ref": "gpu",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "intelShaderCache",
@@ -1911,7 +1981,8 @@
                 "ref": "gpu",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         },
@@ -1937,7 +2008,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         }
@@ -1970,7 +2042,8 @@
                 "ref": "windows/app",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "recycleBin",
@@ -1990,7 +2063,8 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "minAgeHours": 24
+              "minAgeHours": 24,
+              "ver": 20260928
             },
             {
               "id": "printSpoolCache",
@@ -2022,7 +2096,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             },
             {
               "id": "dismComponentCleanup",
@@ -2041,7 +2116,8 @@
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
-              }
+              },
+              "ver": 20260928
             }
           ]
         }
@@ -2051,6 +2127,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "JybKV/xsVOANccTvXwtJR2wyQkNPPKxOnWBapvuS7oDErPK2jNZZ0erQ8EZjIZNsijX1ZldJnjCZc2HMG4/pDw=="
+    "sig": "E1XqP87JPT3kemMxhd2JFVNt9B9SL0HhCetkj9jURokKXzgSUIFTCgFMhaT/g3KmRVlEmBHrKzMroGjeUUEmCQ=="
   }
 }

@@ -41,7 +41,8 @@
           "target": "HKCU\\Software\\360Safe",
           "note": "当前用户配置键"
         }
-      ]
+      ],
+      "ver": 20260928
     },
     {
       "id": "residue-eset",
@@ -70,7 +71,8 @@
           "target": "HKLM\\SOFTWARE\\ESET",
           "note": "配置键"
         }
-      ]
+      ],
+      "ver": 20260928
     },
     {
       "id": "residue-roboform",
@@ -99,7 +101,8 @@
           "target": "HKCU\\Software\\RoboForm",
           "note": "当前用户配置键"
         }
-      ]
+      ],
+      "ver": 20260928
     },
     {
       "id": "residue-ccleaner",
@@ -128,7 +131,8 @@
           "target": "HKLM\\SOFTWARE\\Piriform",
           "note": "配置键（以发行商命名）"
         }
-      ]
+      ],
+      "ver": 20260928
     },
     {
       "id": "residue-wechat",
@@ -159,7 +163,8 @@
           "target": "HKCU\\Software\\Tencent\\WeChat",
           "note": "当前用户配置键"
         }
-      ]
+      ],
+      "ver": 20260928
     },
     {
       "id": "residue-qq",
@@ -196,11 +201,12 @@
           "target": "HKCU\\Software\\Tencent\\QQ",
           "note": "当前用户配置键"
         }
-      ]
+      ],
+      "ver": 20260928
     }
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "kDMynzaopc3kAXZv5qlk5A4nJJVkL42/zArvK4pU0qq1WL599BnysyHHH40qRmxJAf0ONoPWlT7hikYFTIpxCA=="
+    "sig": "wyefhm5QjLBMQqWwN7aLCLTAGWWbaOfQhzsb57eXQag2ew+HXy+U9yIPw7Ka5IWeny3KTj2Jlqqq65K3ySu9DA=="
   }
 }

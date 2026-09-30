@@ -407,6 +407,36 @@ unsafe fn reg_key_last_write_date(hk: windows::Win32::System::Registry::HKEY) ->
     format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay)
 }
 
+/// Unix 秒（卸载键 `InstallDate` 的存储口径）→ "YYYY-MM-DD"，不可信返回 None。
+///
+/// 装成纯函数是为了可测：`InstallDate` 由安装器自填，**0 与越界值是常态**（MSI 的
+/// 某些壳、以及"字段存在但从没写过"的情况都会留 0），一旦直接信它，列表会显示
+/// 1970-01-01 这种一眼假的日子；越界值（>2100）同样按不可信处理，让调用方退回
+/// 键 LastWriteTime 那一档并照旧标「约」。
+fn install_date_from_epoch(secs: u32) -> Option<String> {
+    if secs == 0 {
+        return None;
+    }
+    // Howard Hinnant 的 civil_from_days：不引时区库、不加依赖（AGENTS §2 零新增依赖）
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let mut y = yoe as i64 + era * 400;
+    if m <= 2 {
+        y += 1;
+    }
+    if !(1990..=2100).contains(&y) {
+        return None;
+    }
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
 /// 枚举一个 hive 根下的卸载条目。root 不存在 → 空集。
 /// 过滤口径（与 build_inventory 同源）：空 DisplayName / SystemComponent=1 /
 /// ReleaseType 含 update|hotfix|security 的跳过（系统组件与更新不是「已安装程序」）。
@@ -430,7 +460,13 @@ unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root
         let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
         let quiet_uninstall_string = reg_sz(hk, "QuietUninstallString").unwrap_or_default();
         let estimated_size_kb = reg_dword(hk, "EstimatedSize").unwrap_or(0);
-        let install_date = unsafe { reg_key_last_write_date(hk) };
+        // 安装日期两档（V2 P1-D3）：装过 `InstallDate` 就按它报（安装器写下的值，不是猜的），
+        // 缺失/为 0/越界才退回卸载键 LastWriteTime 那一档 —— 兜底口径与 U-5 一致，
+        // 「约」标注沿用前端现状（前端不加精确/近似区分不影响正确性，只是少一分信息）
+        let install_date_exact = reg_dword(hk, "InstallDate").and_then(install_date_from_epoch);
+        let install_date = install_date_exact
+            .clone()
+            .unwrap_or_else(|| unsafe { reg_key_last_write_date(hk) });
         let _ = RegCloseKey(hk);
 
         if display_name.trim().is_empty() {
@@ -454,6 +490,7 @@ unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root
             "quietUninstallString": quiet_uninstall_string,
             "estimatedSizeKb": estimated_size_kb,
             "installDate": install_date,
+            "installDateExact": install_date_exact.is_some(),
             "productCode": product_code,
             "installerKind": installer_kind,
         }));
@@ -1819,7 +1856,8 @@ const RESIDUE_RULE_TOKENS: &[&str] = &[
 ];
 const RESIDUE_TOP_FIELDS: &[&str] = &["rulesVersion", "prov", "rules", "_sig"];
 const RESIDUE_PROV_FIELDS: &[&str] = &["sourceClass", "reviewedAt"];
-const RESIDUE_RULE_FIELDS: &[&str] = &["id", "displayName", "publisher", "uninstallKey", "residue"];
+const RESIDUE_RULE_FIELDS: &[&str] =
+    &["id", "ver", "displayName", "publisher", "uninstallKey", "residue"];
 const RESIDUE_ENTRY_FIELDS: &[&str] = &["kind", "target", "note"];
 /// 匹配组「至少两组非空」是 U-1 拍板口径，Node 门禁同断言
 const RESIDUE_MATCH_GROUPS: &[&str] = &["displayName", "publisher", "uninstallKey"];
@@ -1947,7 +1985,8 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
     if let Some(reason) = unknown_fields(top, RESIDUE_TOP_FIELDS) {
         return Err(format!("顶层 {reason}"));
     }
-    pkg.get("rulesVersion")
+    let ver = pkg
+        .get("rulesVersion")
         .and_then(Value::as_f64)
         .filter(|v| v.is_finite() && *v > 0.0)
         .ok_or_else(|| "rulesVersion 缺失、非数字或非正数".to_string())?;
@@ -2001,6 +2040,19 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
         }
         if let Some(reason) = unknown_fields(obj, RESIDUE_RULE_FIELDS) {
             return Err(format!("规则 {id}: {reason}"));
+        }
+        // 条目级版本戳必须与顶层一致（V2 P2-A1，与清理库同口径）：
+        // 残留规则只有 6 条，但一旦开始按批补充，"这条是哪一版加的"必须能答
+        match rule.get("ver").and_then(Value::as_f64) {
+            None => {
+                return Err(format!(
+                    "规则 {id}: 缺条目级版本戳 ver（跑 tools/stamp-rule-ver.mjs --write 后重签）"
+                ))
+            }
+            Some(vv) if (vv - ver).abs() > f64::EPSILON => {
+                return Err(format!("规则 {id}: ver={vv} 与顶层 rulesVersion={ver} 不一致"))
+            }
+            Some(_) => {}
         }
         let mut hit_groups = 0;
         for g in RESIDUE_MATCH_GROUPS {
@@ -2225,7 +2277,13 @@ fn residue_rules_hits(
         if key_hit {
             why.push(("uninstallKey", format!("卸载键条件组命中：本机键路径「{key_path}」")));
         }
-        why.push(("ruleId", format!("来自{lib_label}规则 {id}")));
+        // 条目级版本戳跟着候选走（V2 P2-A1）：反馈里能指认"这条候选是哪一版规则给的"，
+        // 不必让用户去比对整库 rulesVersion。文案级改动，界面沿用既有 data-tip 位置。
+        let rule_ver = rule.get("ver").and_then(Value::as_f64).unwrap_or(0.0);
+        why.push((
+            "ruleId",
+            format!("来自{lib_label}规则 {id}（规则版本 {:.0}）", rule_ver),
+        ));
         // 命中 → 展开 %VAR% 目标并做存在性判定：不存在的目标不出现在面板里
         for entry in rule.get("residue").and_then(|x| x.as_array()).unwrap_or(&empty) {
             let kind = entry.get("kind").and_then(|x| x.as_str()).unwrap_or("");
@@ -2256,7 +2314,7 @@ fn residue_rules_hits(
                         "reason": format!("{lib_label}命中（{id}）：{note}"),
                         "confidence": confidence, "risk": "medium",
                         "defaultChecked": default_checked,
-                        "ruleId": id,
+                        "ruleId": id, "ruleVer": rule_ver,
                         "contribs": contribs(&why),
                     }));
                 }
@@ -2279,7 +2337,7 @@ fn residue_rules_hits(
                         "reason": format!("{lib_label}命中（{id}）：{note}"),
                         "confidence": confidence, "risk": "medium",
                         "defaultChecked": default_checked,
-                        "ruleId": id,
+                        "ruleId": id, "ruleVer": rule_ver,
                         "contribs": contribs(&why),
                     }));
                 }
@@ -3099,6 +3157,11 @@ mod learned {
         if keep.is_empty() {
             return 0;
         }
+        // 先取库版本再可变借用 rules：条目级 ver 必须等于顶层 rulesVersion（V2 P2-A1）
+        let doc_ver = doc
+            .get("rulesVersion")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
         let Some(rules) = doc.get_mut("rules").and_then(Value::as_array_mut) else {
             return 0;
         };
@@ -3137,8 +3200,12 @@ mod learned {
                 if !publisher.trim().is_empty() {
                     pubarr.push(json!(publisher.trim()));
                 }
+                // 条目级版本戳跟随本库这一版（V2 P2-A1 同口径）：学习库的 rulesVersion 固定 1.0，
+                // 但签名库校验器要求每条都带着它，缺一条就整包拒 —— 这里不补就等于
+                // 「学出来的规则永远装不回去」
                 rules.push(json!({
                     "id": id,
+                    "ver": doc_ver,
                     "displayName": [display_name.trim()],
                     "publisher": pubarr,
                     "uninstallKey": [key_leaf],
@@ -4988,6 +5055,45 @@ pub fn uninstall_appx_logo<R: tauri::Runtime>(window: WebviewWindow<R>, logo_pat
             })
         }
         Err(e) => json!({ "success": false, "message": format!("logo 读取失败: {e}") }),
+    }
+}
+
+#[cfg(test)]
+mod install_date_tier_tests {
+    use super::install_date_from_epoch;
+
+    /// 期望值全部用 `new Date(secs*1000).toISOString()` 独立算过一遍（不拿实现反推实现）
+    #[test]
+    fn epoch_换算与标准库一致() {
+        let cases = [
+            (1_609_459_200u32, "2021-01-01"),
+            (1_000_000_000, "2001-09-09"),
+            (1_582_934_400, "2020-02-29"), // 闰日
+            (946_684_800, "2000-01-01"), // 千禧年
+            (788_918_400, "1995-01-01"),
+            (631_152_000, "1990-01-01"), // 下界含
+        ];
+        for (secs, want) in cases {
+            assert_eq!(install_date_from_epoch(secs).as_deref(), Some(want), "secs={secs}");
+        }
+    }
+
+    /// 「不可信」必须是 None，不能退成 1970-01-01 —— 那会被列表当成真实安装日期显示，
+    /// 比空值更糟（用户会拿它判断"这程序多久没动了"）
+    #[test]
+    fn 不可信取值一律返回_none() {
+        for secs in [0u32, 1, 86_399, 631_065_600 /* 1989-12-31 */, 4_133_980_800 /* 2101-01-01 */] {
+            assert_eq!(install_date_from_epoch(secs), None, "secs={secs} 应判不可信");
+        }
+    }
+
+    #[test]
+    fn 两档顺序_装了安装日期值就不该退到键时间() {
+        // 纯函数层能钉的只有这一半：调用方（enum_uninstall_root）先取本函数、
+        // 拿不到才退 reg_key_last_write_date，且 installDateExact 反映来源。
+        // 真机两档差异要看的证据是列表里同一程序「安装日期」与注册表键时间不一致时取前者。
+        assert_eq!(install_date_from_epoch(1_609_459_200).as_deref(), Some("2021-01-01"));
+        assert_eq!(install_date_from_epoch(0), None, "0 必须退回兜底档，否则 exact 标志会撒谎");
     }
 }
 

@@ -6739,6 +6739,9 @@ pub fn cleanup_execute(
             details.push(json!({"id": id, "name": name, "status": "skip", "freed": 0, "message": "规则不存在", "fileCount": 0}));
             continue;
         };
+        // 条目级版本戳随结果一起回传（V2 P2-A1）：用户报"上次清了这次没清"时，
+        // 批次报告里能直接指认这一条当时是哪一版规则判的，不用去比对整库 rulesVersion
+        let rule_ver = rule.get("ver").and_then(Value::as_f64).unwrap_or(0.0);
 
         // 注册表型：先逐键 reg.exe export 备份（任一失败整条不删，对齐 PS fail-closed
         // 语义——宁可少删，不可无备份地删），再按 value 语义删除（无 value=删整树）。
@@ -6793,7 +6796,7 @@ pub fn cleanup_execute(
                         format!("路径变量 {} 未解析，未执行注册表清理", reg_unresolved.join("、"))
                     };
                     let status = if reg_unresolved.is_empty() { "ok" } else { "skip" };
-                    details.push(json!({"id": id, "name": name, "status": status, "freed": 0, "message": message, "fileCount": 0}));
+                    details.push(json!({"id": id, "name": name, "status": status, "freed": 0, "message": message, "fileCount": 0, "ruleVer": rule_ver}));
                     continue;
                 }
                 // 逐键 export 备份
@@ -6823,7 +6826,7 @@ pub fn cleanup_execute(
                     }
                 }
                 if backup_failed {
-                    details.push(json!({"id": id, "name": name, "status": "error", "freed": 0, "message": "注册表备份失败，未执行删除", "fileCount": 0}));
+                    details.push(json!({"id": id, "name": name, "status": "error", "freed": 0, "message": "注册表备份失败，未执行删除", "fileCount": 0, "ruleVer": rule_ver}));
                     continue;
                 }
                 // N3：备份写完后裁一次保留上限（只裁新根，见 paths::prune_backups）
@@ -6882,6 +6885,7 @@ pub fn cleanup_execute(
                 details.push(json!({
                     "id": id, "name": name, "status": status,
                     "freed": 0, "message": message, "fileCount": removed, "residual": reg_failed,
+                    "ruleVer": rule_ver,
                 }));
                 continue;
             }
@@ -6906,7 +6910,7 @@ pub fn cleanup_execute(
             };
             details.push(json!({
                 "id": id, "name": name, "status": status,
-                "freed": 0, "message": message, "fileCount": 0,
+                "freed": 0, "message": message, "fileCount": 0, "ruleVer": rule_ver,
             }));
             continue;
         }
@@ -7109,7 +7113,7 @@ pub fn cleanup_execute(
         details.push(json!({
             "id": id, "name": name, "status": status,
             "freed": freed, "message": message, "fileCount": deleted, "residual": failed,
-            "tooNew": too_new,
+            "tooNew": too_new, "ruleVer": rule_ver,
         }));
 
         // auto_rebuild：重建目录
