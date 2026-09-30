@@ -222,6 +222,27 @@
     }
   }
 
+  // P1-D6（2026-10-01）：修改/修复按钮灰化口径——
+  //   修改：要有 ModifyPath 且未声明 NoModify；修复：要有 ModifyPath 且未声明 NoRepair。
+  //   两类"灰"必须分清：没命令行是"我们没得跑"，声明位是"程序自己说不行"。
+  function modifyBtnAttr(a) {
+    if (!a.modifyPath) return ' disabled data-tip="没有 ModifyPath，无法执行修改/修复"';
+    return '';
+  }
+  function noModifyAttr(a) {
+    return a.noModify ? ' disabled data-tip="该程序声明不支持更改（NoModify）"' : '';
+  }
+  function noRepairAttr(a) {
+    return a.noRepair ? ' disabled data-tip="该程序声明不支持修复（NoRepair）"' : '';
+  }
+  // P1-D6：NoRemove=1 是 ARP 声明「不许卸载」，与"没有 UninstallString"是两回事，
+  // 文案分开写，别让用户以为是我们没做。
+  function noRemoveAttr(a) {
+    if (!a.uninstallString) return ' disabled data-tip="没有 UninstallString，无法调用原厂卸载器"';
+    if (a.noRemove) return ' disabled data-tip="该程序声明不可卸载（NoRemove），系统安装策略禁止移除"';
+    return '';
+  }
+
   // 用户应用（传统 Win32）：三个卸载注册表根合并，HiBit「程序名」83 项的口径
   function renderWin32Apps() {
     const rows = apps.map((a) => `
@@ -231,13 +252,15 @@
         <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
         <td class="finder-col-size" style="width:90px"><span data-un-size="${esc(a.id)}">${fmtSizeKb(a.estimatedSizeKb)}</span></td>
         <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7" data-tip="${esc(installDateTip(a))}">${esc(a.installDate || '—')}</span></td>
-        <td class="finder-col-size" style="width:150px">
-          <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${a.uninstallString ? '' : ' disabled data-tip="没有 UninstallString，无法调用原厂卸载器"'}>卸载</button>
+        <td class="finder-col-size" style="width:210px">
+          <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${noRemoveAttr(a)}>卸载</button>
+          <button class="btn btn-secondary btn-small" data-un-modify="${esc(a.id)}"${modifyBtnAttr(a)}${noModifyAttr(a)}>修改</button>
+          <button class="btn btn-secondary btn-small" data-un-repair="${esc(a.id)}"${modifyBtnAttr(a)}${noRepairAttr(a)}>修复</button>
         </td>
       </tr>`).join('');
     return `
       <table class="finder-table">
-        <thead><tr><th>程序<span class="page-summary">共 ${apps.length} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:150px">操作</th></tr></thead>
+        <thead><tr><th>程序<span class="page-summary">共 ${apps.length} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:210px">操作</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   }
@@ -325,10 +348,112 @@
       currentAppId = appId;
       await scanAllResidue();
     } catch (e) {
+      // P1-D1（2026-10-01）：对齐 Geek msgUninstallFailed 的语义——失败后一句话把两件事
+      // 说清：卸载没成 + 已存在的残留仍可清。只改呈现：不自动扫、不预勾选任何删除项，
+      // 用户仍要点「重新扫描」并逐项确认（与成功路径同一套候选/勾选/确认链）。
       window.app?.toast?.('error', '卸载失败: ' + (e.message || e));
+      window.app?.toast?.('info', '卸载程序没有执行完成；它已存在的文件与注册表项不会被自动改动——可点「重新扫描」清点残留后逐项确认删除');
     } finally {
       finishFakeProgress();
       running = false;
+    }
+  }
+
+  // P1-D6（2026-10-01）：修改 / 修复。二者执行的是同一条 ModifyPath（ARP 口径，
+  // MSI 产品会弹维护对话框再分项），NoModify/NoRepair 由后端执行时复判——
+  // 前端灰化只是入口提示，清单可能是旧快照。这里只做确认与结果播报。
+  async function runModify(appId, mode) {
+    if (running) return;
+    const app = apps.find((a) => a.id === appId);
+    if (!app) return;
+    const label = mode === 'repair' ? '修复' : '修改';
+    const ok = await window.app?.confirmDanger?.(
+      `确认${label}`,
+      `将打开「${app.displayName}」自带的${label}程序（来自注册表 ModifyPath），按其界面提示操作。`,
+      `开始${label}`,
+      '取消'
+    );
+    if (!ok) return;
+    running = true;
+    startFakeProgress(`正在启动${label}程序…`);
+    try {
+      const resp = await window.api.uninstall.modify(appId, mode);
+      if (!resp.success) throw new Error(resp.message || `${label}失败`);
+      const code = resp.data && resp.data.exitCode;
+      window.app?.toast?.(code === 0 ? 'success' : 'info', `${label}程序已退出（退出码 ${code ?? '未知'}）`);
+    } catch (e) {
+      window.app?.toast?.('error', `${label}失败: ` + (e.message || e));
+    } finally {
+      finishFakeProgress();
+      running = false;
+    }
+  }
+
+  // ==================== P1-B3 重启后删（2026-10-01 拍板） ====================
+  // 四条硬约束见 uninstall.rs 同名段：明示+单独确认 / 只限回收站失败文件项 /
+  // 可撤回 / 待删清单可见。这里没有任何静默登记路径——按钮必须由一次真实的
+  // 清理失败结果驱动，登记前还有单独的确认框。
+  let pendingFailedTargets = [];
+
+  function updatePendingButtons(failedFiles) {
+    const addBtn = document.getElementById('residueBtnPending');
+    const revBtn = document.getElementById('residueBtnPendingRevoke');
+    if (addBtn) {
+      if (Array.isArray(failedFiles)) pendingFailedTargets = failedFiles;
+      addBtn.style.display = pendingFailedTargets.length ? '' : 'none';
+      addBtn.textContent = `重启后删除失败的 ${pendingFailedTargets.length} 项…`;
+      addBtn.disabled = !pendingFailedTargets.length;
+    }
+    if (revBtn) {
+      window.api.uninstall.pendingList().then((r) => {
+        const entries = (r && r.success && r.data && r.data.entries) || [];
+        const n = entries.filter((e) => e.status === 'pending').length;
+        revBtn.style.display = n ? '' : 'none';
+        revBtn.textContent = `撤回重启后删（${n} 项）`;
+      }).catch(() => {});
+    }
+  }
+
+  async function addPendingDeletes() {
+    if (!pendingFailedTargets.length) return;
+    const ok = await window.app?.confirmDanger?.(
+      '登记重启后删除',
+      `把 ${pendingFailedTargets.length} 个回收站删不掉的文件登记为「下次重启时删除」。这是永久删除：不进回收站、无法还原；重启前可撤回。目录不支持该机制，登记时会被跳过。`,
+      '登记',
+      '取消',
+      '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
+    );
+    if (!ok) return;
+    try {
+      const resp = await window.api.uninstall.pendingAdd(pendingFailedTargets);
+      if (!resp.success) throw new Error(resp.message || '登记失败');
+      const d = resp.data || {};
+      window.app?.toast?.(d.added ? 'success' : 'info',
+        d.added
+          ? `已登记 ${d.added} 项，将在下次重启时永久删除（重启前可撤回）`
+          : '没有新登记项（可能都已登记过或目标已不在）');
+      pendingFailedTargets = [];
+      updatePendingButtons([]);
+    } catch (e) {
+      window.app?.toast?.('error', '登记失败: ' + (e.message || e));
+    }
+  }
+
+  async function revokePendingDeletes() {
+    const ok = await window.app?.confirmDanger?.(
+      '撤回重启后删除',
+      '将把已登记的「重启后删除」条目从系统中摘除：相关文件不会被删除，保持原样。',
+      '撤回全部',
+      '取消'
+    );
+    if (!ok) return;
+    try {
+      const resp = await window.api.uninstall.pendingRevoke();
+      if (!resp.success) throw new Error(resp.message || '撤回失败');
+      window.app?.toast?.('success', `已撤回 ${resp.data.revoked} 项登记，相关文件不会被删除`);
+      updatePendingButtons([]);
+    } catch (e) {
+      window.app?.toast?.('error', '撤回失败: ' + (e.message || e));
     }
   }
 
@@ -544,7 +669,13 @@
       '取消',
       '低置信项为名称启发式结果，请确认路径确实属于已卸载的程序再勾选。'
     );
-    if (!ok) return;
+    if (!ok) {
+      // P1-D2（2026-10-01）：对齐 Geek msgCancelWizard——取消时把「已发现的候选不会被删」
+      // 说明白，N 取当前面板的真实候选数（含未勾选的展示行，而不是只数勾选项：
+      // 用户取消时关心的是"整批都不会动"）。取消路径到此为止，之后没有任何删除调用。
+      window.app?.toast?.('info', `已取消：本次已发现的 ${findings.length} 项候选不会被删除，内容保持原样`);
+      return;
+    }
     running = true;
     setBusy(true, '正在清理残留…');
     startFakeProgress('正在清理残留…');
@@ -575,6 +706,12 @@
       findings = findings.filter((f) => !done.has(f.kind + '|' + f.target));
       renderResidue();
       await loadApps();
+      // P1-B3（2026-10-01）：失败的文件项（被占用/无权限）可显式降级为重启后删。
+      // 按钮只是入口，登记前还有单独确认框；只送文件，目录项后端会拒（PFRO 对非空目录不可靠）。
+      const failedFiles = (d.details || [])
+        .filter((x) => x.status !== 'ok' && x.kind === 'file')
+        .map((x) => x.target);
+      updatePendingButtons(failedFiles);
     } catch (e) {
       window.app?.toast?.('error', '残留清理失败: ' + (e.message || e));
     } finally {
@@ -723,11 +860,17 @@
     document.getElementById('uninstallList')?.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-un-app]');
       if (btn && !btn.disabled) runUninstall(btn.dataset.unApp);
+      const mod = e.target.closest('[data-un-modify]');
+      if (mod && !mod.disabled) runModify(mod.dataset.unModify, 'modify');
+      const rep = e.target.closest('[data-un-repair]');
+      if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair');
     });
     // 一个入口跑三条链：面板里的「重新扫描」与页头按钮走同一条路
     document.getElementById('residueBtnRescan')?.addEventListener('click', scanAllResidue);
     document.getElementById('btnResidueScanAll')?.addEventListener('click', scanAllResidue);
     document.getElementById('residueBtnClean')?.addEventListener('click', cleanResidue);
+    document.getElementById('residueBtnPending')?.addEventListener('click', addPendingDeletes);
+    document.getElementById('residueBtnPendingRevoke')?.addEventListener('click', revokePendingDeletes);
     // HiBit §H1：删前是否先打还原包。**默认关**（2026-09-29 裁定不做默认备份）——
     // 整目录动辄几百 MB，静默打包既慢又占盘；勾了才备，且勾了建包失败就整批不删（后端钉）
     const bk = document.getElementById('residueBackupToggle');

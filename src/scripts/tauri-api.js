@@ -80,6 +80,8 @@
     'cleanup:custom-remove': 'cleanup_custom_remove',
     'cleanup:custom-scan': 'cleanup_custom_scan',
     'cleanup:custom-execute': 'cleanup_custom_execute',
+    'cleanup:mode-get': 'cleanup_mode_get',
+    'cleanup:mode-set': 'cleanup_mode_set',
     'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
     'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
     'cleanup:file-backup-list': 'cleanup_file_backup_list',
@@ -104,6 +106,10 @@
     // uninstall（7）：卸载域（report/appx-logo 为只读档，其余 MAIN）
     'uninstall:list': 'uninstall_list',
     'uninstall:run': 'uninstall_run',
+    'uninstall:modify': 'uninstall_modify',
+    'uninstall:pending-add': 'uninstall_pending_add',
+    'uninstall:pending-list': 'uninstall_pending_list',
+    'uninstall:pending-revoke': 'uninstall_pending_revoke',
     'uninstall:residue-scan': 'uninstall_residue_scan',
     'uninstall:residue-execute': 'uninstall_residue_execute',
     'uninstall:check-residue-version': 'uninstall_check_residue_version',
@@ -425,6 +431,8 @@
           autoRebuild: autoRebuild === true
         });
       },
+      modeGet: function () { return invokeChannel('cleanup:mode-get'); },
+      modeSet: function (mode) { return invokeChannel('cleanup:mode-set', { mode: mode }); },
       updateRules: function () { return invokeChannel('cleanup:update-rules'); },
       checkRulesVersion: function () { return invokeChannel('cleanup:check-rules-version'); },
       onRulesDownloadProgress: function (callback) { return onEvent('cleanup:rules-download-progress', callback); },
@@ -464,6 +472,10 @@
     uninstall: {
       list: function (scope) { return invokeChannel('uninstall:list', { scope: scope }); },
       run: function (appId) { return invokeChannel('uninstall:run', { appId: appId }); },
+      modify: function (appId, mode) { return invokeChannel('uninstall:modify', { appId: appId, mode: mode }); },
+      pendingAdd: function (targets) { return invokeChannel('uninstall:pending-add', { targets: targets }); },
+      pendingList: function () { return invokeChannel('uninstall:pending-list'); },
+      pendingRevoke: function (batchId) { return invokeChannel('uninstall:pending-revoke', { batchId: batchId }); },
       residueScan: function (appId) { return invokeChannel('uninstall:residue-scan', { appId: appId }); },
       residueExecute: function (appId, targets, backup) { return invokeChannel('uninstall:residue-execute', { appId: appId, targets: targets, backup: !!backup }); },
       checkResidueVersion: function () { return invokeChannel('uninstall:check-residue-version'); },

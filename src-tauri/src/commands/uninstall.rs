@@ -460,6 +460,12 @@ unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root
         let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
         let quiet_uninstall_string = reg_sz(hk, "QuietUninstallString").unwrap_or_default();
         let estimated_size_kb = reg_dword(hk, "EstimatedSize").unwrap_or(0);
+        // P1-D6（2026-10-01）：修改/修复入口判据与不可卸载声明。布尔一律按
+        // 「值存在且 ==1」算 true（ARP 口径：声明缺失 = 不限制），缺失不丢条目。
+        let modify_path = reg_sz(hk, "ModifyPath").unwrap_or_default();
+        let no_modify = reg_dword(hk, "NoModify").unwrap_or(0) == 1;
+        let no_repair = reg_dword(hk, "NoRepair").unwrap_or(0) == 1;
+        let no_remove = reg_dword(hk, "NoRemove").unwrap_or(0) == 1;
         // 安装日期两档（V2 P1-D3）：装过 `InstallDate` 就按它报（安装器写下的值，不是猜的），
         // 缺失/为 0/越界才退回卸载键 LastWriteTime 那一档 —— 兜底口径与 U-5 一致，
         // 「约」标注沿用前端现状（前端不加精确/近似区分不影响正确性，只是少一分信息）
@@ -488,6 +494,10 @@ unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root
             "displayIcon": display_icon,
             "uninstallString": uninstall_string,
             "quietUninstallString": quiet_uninstall_string,
+            "modifyPath": modify_path,
+            "noModify": no_modify,
+            "noRepair": no_repair,
+            "noRemove": no_remove,
             "estimatedSizeKb": estimated_size_kb,
             "installDate": install_date,
             "installDateExact": install_date_exact.is_some(),
@@ -1055,6 +1065,153 @@ fn is_uninstaller_process(name: &str, launched: &str) -> bool {
         || name == "un_a.exe"
         || name.starts_with("unins")
         || name.starts_with("un_a")
+}
+
+// ==================== P2-D4 占用进程与第三方模块只读自检（2026-10-01） ====================
+// Geek 的对应行为：撞上被安全软件注入的进程时明说「XX 与 avcuf64.dll 不兼容，请退出该
+// 应用或禁用插件」。Trim 口径刻意收窄成只报事实：谁把目标文件当模块加载着、它还加载了
+// 哪些非 Windows 目录的第三方模块。不判恶意、不自动结束任何进程——「注入」这个词本身
+// 带指控味，文案统一说「第三方模块」，解释方向只点名安全软件这一种常见可能。
+// 纯句柄占用（数据文件被打开读）模块枚举看不见，找不到时回退原有「可能被占用」文案。
+
+/// 模块路径是否「第三方」：不在 Windows 目录、不在本应用自身目录。
+/// 排除自身目录的理由：应用自己的 DLL 占着自己的卸载目标是常态，报出来是噪声。
+fn is_third_party_module(module_path: &str) -> bool {
+    fn under(dir_lower: &str, root: &str) -> bool {
+        let r = root.trim_end_matches(['\\', '/']).to_lowercase();
+        if r.is_empty() {
+            return false;
+        }
+        // 完全相等也算在内：self_dir 场景里目录本身就可能直接等于根（模块文件
+        // 就躺在这层目录），只认「下一个字符是分隔符」会把这层漏掉；
+        // C:\Windows.old 这类跨段前缀仍由「下一个字符必须是分隔符」挡住。
+        dir_lower.starts_with(&r)
+            && matches!(
+                dir_lower.as_bytes().get(r.len()),
+                Some(b'\\') | Some(b'/') | None
+            )
+    }
+    let lower = module_path.to_lowercase();
+    let Some(dir) = lower.rsplit_once('\\').map(|(d, _)| d) else {
+        return false;
+    };
+    if under(
+        dir,
+        &std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string()),
+    ) {
+        return false;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(self_dir) = exe.parent().and_then(|p| p.to_str()) {
+            if under(dir, self_dir) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 找出把 `target` 当模块加载着的进程（只读：ToolHelp 进程快照 + EnumProcessModulesEx）。
+/// 返回 (pid, 进程名, 该进程加载的第三方模块名样例)。打不开的进程直接跳过——系统进程
+/// 读不到模块是常态，不能因此把检查变成报错。单进程模块数截 512、样例截 8 个：这条
+/// 检查只为拼一条提示文案，量再大也用不上。
+fn module_lockers(target: &Path) -> Vec<(u32, String, Vec<String>)> {
+    use windows::Win32::Foundation::{CloseHandle, HMODULE};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::ProcessStatus::{
+        EnumProcessModulesEx, GetModuleFileNameExW, LIST_MODULES_ALL,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+    const MODULE_CAP: usize = 512;
+    const SAMPLE_CAP: usize = 8;
+
+    let want = target.to_string_lossy().to_lowercase();
+    let mut out: Vec<(u32, String, Vec<String>)> = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return out;
+        };
+        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = Process32FirstW(snap, &mut pe).is_ok();
+        while more {
+            let pid = pe.th32ProcessID;
+            let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            let exe = String::from_utf16_lossy(&pe.szExeFile[..len]);
+            more = Process32NextW(snap, &mut pe).is_ok();
+            if pid == 0 {
+                continue;
+            }
+            let Ok(h) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) else {
+                continue;
+            };
+            let mut locker = false;
+            let mut third: Vec<String> = Vec::new();
+            let mut needed = 0u32;
+            // 两段式：先传空指针只取 cbNeeded（文档允许），再按实际模块数取一遍
+            if EnumProcessModulesEx(h, std::ptr::null_mut(), 0, &mut needed, LIST_MODULES_ALL)
+                .is_ok()
+                && needed > 0
+            {
+                let size_of_hmodule = std::mem::size_of::<HMODULE>();
+                let count = ((needed as usize) / size_of_hmodule).min(MODULE_CAP);
+                let mut mods = vec![HMODULE::default(); count];
+                let mut got = 0u32;
+                if EnumProcessModulesEx(
+                    h,
+                    mods.as_mut_ptr(),
+                    (count * size_of_hmodule) as u32,
+                    &mut got,
+                    LIST_MODULES_ALL,
+                )
+                .is_ok()
+                {
+                    let n = ((got as usize) / size_of_hmodule).min(mods.len());
+                    let mut buf = [0u16; 1024];
+                    for m in &mods[..n] {
+                        let l = GetModuleFileNameExW(Some(h), Some(*m), &mut buf) as usize;
+                        if l == 0 {
+                            continue;
+                        }
+                        let path = String::from_utf16_lossy(&buf[..l]).to_lowercase();
+                        if path == want {
+                            locker = true;
+                        }
+                        if third.len() < SAMPLE_CAP && is_third_party_module(&path) {
+                            let name = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+                            third.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            let _ = CloseHandle(h);
+            if locker {
+                out.push((pid, exe, third));
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+/// 删除失败行的占用说明：查得到模块级占用就点名进程与第三方模块样例，查不到回退原句。
+fn occupancy_note(target: &Path) -> String {
+    let Some((pid, exe, third)) = module_lockers(target).into_iter().next() else {
+        return "删除失败（可能被占用）".to_string();
+    };
+    if third.is_empty() {
+        return format!("删除失败：文件被 {exe}（PID {pid}）加载占用，可尝试退出该程序后重试");
+    }
+    format!(
+        "删除失败：文件被 {exe}（PID {pid}）加载占用，该进程还加载了 {} 个非系统目录的第三方模块（{} 等，常见于安全软件）——可尝试退出该程序或暂时关闭其防护后重试",
+        third.len(),
+        third.join("、")
+    )
 }
 
 /// 句柄退出后继续监视：返回 (stillListed, 是否超时放弃)。
@@ -2459,6 +2616,90 @@ fn fetch_verified_residue_package() -> Result<(f64, String, String), String> {
         return Err(format!("所有发布源均不可达，最后一条: {last_err}"));
     }
     Err(format!("源可达但校验未通过，最后一条: {last_err}"))
+}
+
+/// uninstall:modify — 修改 / 修复入口（V2 P1-D6，2026-10-01；主窗档）
+///
+/// 与 uninstall_run 同一条纪律：app_id 只当寻址键，命令行**现读注册表**而不是信任
+/// 渲染层早前传来的清单（那可能是旧快照）；NoModify/NoRepair 在执行时复判——
+/// 清单说能改、键里已声明不能的场景以注册表为准。二者执行的都是 ModifyPath
+/// （Windows「更改 / 修复」共用这一条命令行，MSI 产品会弹出维护对话框再分项），
+/// mode 只影响拒绝文案与日志标签，不构造任何新命令行——「识别可以弱，执行不能猜」。
+#[tauri::command]
+pub async fn uninstall_modify<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    app_id: String,
+    mode: Option<String>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let Some((hive_str, key_path)) = app_id.split_once('|') else {
+        return json!({ "success": false, "message": "app_id 格式错误" });
+    };
+    if !valid_uninstall_key_path(key_path) {
+        return json!({ "success": false, "message": "app_id 不是合法的卸载键路径" });
+    }
+    let mode = match mode.as_deref() {
+        Some("repair") => "repair",
+        _ => "modify",
+    };
+    let hive_str = hive_str.to_string();
+    let key_path = key_path.to_string();
+    let res = tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegOpenKeyExW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
+        };
+        let (hive, _hive_name) = if hive_str.eq_ignore_ascii_case("HKCU") {
+            (HKEY_CURRENT_USER, "HKCU")
+        } else if hive_str.eq_ignore_ascii_case("HKLM") {
+            (HKEY_LOCAL_MACHINE, "HKLM")
+        } else {
+            return Err("app_id hive 只支持 HKCU/HKLM".to_string());
+        };
+        let sk = to_wide(&key_path);
+        let mut hk = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err()
+        {
+            return Err("卸载注册表键不存在（程序可能已被卸载）".to_string());
+        }
+        let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
+        let modify_path = reg_sz(hk, "ModifyPath").unwrap_or_default();
+        let no_modify = reg_dword(hk, "NoModify").unwrap_or(0);
+        let no_repair = reg_dword(hk, "NoRepair").unwrap_or(0);
+        let _ = RegCloseKey(hk);
+        let label = if mode == "repair" { "修复" } else { "修改" };
+        if modify_path.trim().is_empty() {
+            return Err("该程序没有 ModifyPath，无法执行修改/修复".to_string());
+        }
+        if mode != "repair" && no_modify == 1 {
+            return Err("该程序声明不支持更改（NoModify=1）".to_string());
+        }
+        if mode == "repair" && no_repair == 1 {
+            return Err("该程序声明不支持修复（NoRepair=1）".to_string());
+        }
+        let (exe, args) = split_uninstall_cmd(&modify_path)
+            .ok_or_else(|| "ModifyPath 无法解析出可执行文件".to_string())?;
+        log::flush_sync();
+        let code = shell_run_wait(&exe, &args).map_err(|e| {
+            log::write_log(
+                "error",
+                &format!("uninstall_modify {display_name}: {label}启动失败: {e}"),
+            );
+            e
+        })?;
+        log::write_log(
+            "info",
+            &format!("uninstall_modify {display_name}: {label}完成，退出码 {code}"),
+        );
+        Ok(code)
+    })
+    .await;
+    match res {
+        Ok(Ok(code)) => json!({ "success": true, "data": { "exitCode": code, "mode": mode } }),
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("修改/修复执行异常: {e}") }),
+    }
 }
 
 /// uninstall:check-residue-version — 只查版本，不写任何东西（主窗档）
@@ -4666,13 +4907,34 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             }
             let sink = RowSink(Mutex::new(Vec::new()));
             let _ = trim_finder::scan::delete(&paths, Some(protect_json.as_str()), &sink);
+            // P2-D4：只读占用自检只花在真正失败的文件行上，且最多查 3 个——模块枚举是
+            // 全进程开销，为拼提示文案不值得在整批全败时查几十次；目录行不查（目录不是
+            // 可加载模块，占用的也是里面的文件，逐个查反而把消息拉长）。
+            let mut probe_budget = 3usize;
             for row in sink.0.into_inner().unwrap_or_default() {
                 let ok = row["status"] == "ok";
+                let message = if ok {
+                    "已移入回收站".to_string()
+                } else {
+                    match row["kind"].as_str() {
+                        Some("file") if probe_budget > 0 => {
+                            probe_budget -= 1;
+                            row["path"]
+                                .as_str()
+                                .map(|p| occupancy_note(Path::new(p)))
+                                .unwrap_or_else(|| "删除失败".to_string())
+                        }
+                        _ => row["path"]
+                            .as_str()
+                            .map(|_| "删除失败（可能被占用）".to_string())
+                            .unwrap_or_else(|| "删除失败".to_string()),
+                    }
+                };
                 details.push(detail(
                     row["kind"].as_str().unwrap_or("file"),
                     row["path"].as_str().unwrap_or(""),
                     if ok { "ok" } else { "fail" },
-                    if ok { "已移入回收站" } else { row["path"].as_str().map(|_| "删除失败（可能被占用）").unwrap_or("删除失败") },
+                    &message,
                 ));
             }
         }
@@ -5148,9 +5410,408 @@ mod uninstall_appx_tests {
     }
 }
 
+// ==================== P1-B3 重启后删（2026-10-01 拍板） ====================
+// 回收站失败的「文件」项可以降级为「重启后删除」：MoveFileEx(DELAY_UNTIL_REBOOT)
+// 写进系统 PendingFileRenameOperations（PFRO），下次重启由会话管理器删除。
+//
+// 四条硬约束（2026-10-01 拍板口径，缺一不可）：
+//   · 明示 + 单独确认：只处理用户在确认框里点过头的批次，绝不静默登记；
+//   · 只限回收站失败项：本模块不提供任何"直接登记"入口，调用方（渲染层）只能把
+//     residueExecute 回执里 status != ok 的文件行送进来；
+//   · 可撤回：登记项记进本机 state 文件，撤回 = 把 PFRO 里的对应条目摘掉（重启前有效）；
+//   · 待删清单可见：pending_list 把「还挂着 / 已被重启消费 / 文件已不在」三种状态分清。
+// 这是**永久删除**（不进回收站），与 AGENTS §3 回收站优先的红线冲突，属 2026-10-01
+// 显式拍板的受控例外（类比 v3.3.0 常规清理永久删那次裁定）。
+
+const PENDING_DELETE_FILE: &str = "pending-delete.json";
+const PFRO_SUBKEY: &str = "SYSTEM\\CurrentControlSet\\Control\\Session Manager";
+const PFRO_VALUE: &str = "PendingFileRenameOperations";
+
+/// 登记 state 文件路径（数据目录下，含 legacy 迁移口径由 paths 统一管）
+fn pending_delete_path() -> std::path::PathBuf {
+    crate::engine::paths::app_data_dir().join(PENDING_DELETE_FILE)
+}
+
+fn pending_load() -> Value {
+    let p = pending_delete_path();
+    std::fs::read(&p)
+        .ok()
+        .and_then(|b| serde_json::from_str::<Value>(&String::from_utf8_lossy(&b)).ok())
+        .filter(|v| v.get("version").and_then(Value::as_u64) == Some(1))
+        .unwrap_or_else(|| json!({ "version": 1, "entries": [] }))
+}
+
+fn pending_save(doc: &Value) -> Result<(), String> {
+    crate::security::atomic_write_json(&pending_delete_path(), doc)
+}
+
+/// MOVEFILE 失败错误码 → 中文分档（纯函数，可测）。ACCESS_DENIED 与 SHARING_VIOLATION
+/// 必须分开说：前者是权限问题（提权重试有意义），后者是占用问题（提权没用）。
+fn classify_pending_delete_error(win32_code: u32) -> &'static str {
+    match win32_code {
+        5 => "拒绝访问（权限不足，需管理员）",
+        32 => "文件正被占用（共享冲突）",
+        2 => "目标文件不存在",
+        3 => "目标路径不存在",
+        _ => "系统拒绝该操作",
+    }
+}
+
+/// 读 PFRO（REG_MULTI_SZ）。缺失/为空按空表处理——首次登记时它经常还不存在。
+fn read_pfro() -> Result<Vec<String>, String> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
+        REG_VALUE_TYPE,
+    };
+    unsafe {
+        let sk = to_wide(PFRO_SUBKEY);
+        let mut hk = windows::Win32::System::Registry::HKEY::default();
+        let opened = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(sk.as_ptr()),
+            Some(0),
+            KEY_READ,
+            &mut hk,
+        );
+        if opened.is_err() {
+            return Err(format!("打开 PFRO 键失败: {opened:?}"));
+        }
+        let nm = to_wide(PFRO_VALUE);
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut size = 0u32;
+        let q = RegQueryValueExW(
+            hk,
+            windows::core::PCWSTR(nm.as_ptr()),
+            None,
+            Some(&mut ty),
+            None,
+            Some(&mut size),
+        );
+        if q.is_err() {
+            let _ = RegCloseKey(hk);
+            return Ok(Vec::new()); // 值不存在 = 没有待重启操作
+        }
+        if ty.0 != 7 || size == 0 {
+            let _ = RegCloseKey(hk);
+            if ty.0 != 7 {
+                return Err("PFRO 值类型异常（不是 REG_MULTI_SZ），拒绝改写".to_string());
+            }
+            return Ok(Vec::new());
+        }
+        let mut buf = vec![0u8; size as usize];
+        let ok = RegQueryValueExW(
+            hk,
+            windows::core::PCWSTR(nm.as_ptr()),
+            None,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hk);
+        if ok.is_err() {
+            return Err("读取 PFRO 失败".to_string());
+        }
+        // MULTI_SZ 形态：str\0str\0…\0\0。空串项是"删除"对的第二个元素，必须保留语义。
+        let mut out: Vec<String> = Vec::new();
+        let mut cur: Vec<u16> = Vec::new();
+        let words: Vec<u16> = buf[..size as usize]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        for w in words {
+            if w == 0 {
+                if cur.is_empty() && out.last().map(|s: &String| s.is_empty()).unwrap_or(false) {
+                    break; // 连续两个 \0 = 表结束
+                }
+                out.push(String::from_utf16_lossy(&cur));
+                cur.clear();
+            } else {
+                cur.push(w);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// 写回 PFRO（REG_MULTI_SZ）。需要管理员（Session Manager 键的 DACL 只给管理员写）。
+fn write_pfro(entries: &[String]) -> Result<(), String> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_SET_VALUE,
+        REG_MULTI_SZ,
+    };
+    let mut words: Vec<u16> = Vec::new();
+    for e in entries {
+        words.extend(to_wide(e)); // to_wide 自带结尾 NUL
+    }
+    if words.last() != Some(&0) {
+        words.push(0);
+    }
+    words.push(0); // MULTI_SZ 以双 NUL 结束
+    unsafe {
+        let sk = to_wide(PFRO_SUBKEY);
+        let mut hk = windows::Win32::System::Registry::HKEY::default();
+        let opened = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(sk.as_ptr()),
+            Some(0),
+            KEY_SET_VALUE,
+            &mut hk,
+        );
+        if opened.is_err() {
+            // 5 = ERROR_ACCESS_DENIED：Session Manager 键的 DACL 只给管理员写
+            let hint = if opened.0 == 5 {
+                "（权限不足：登记/撤回重启后删除需要管理员权限，请以管理员身份运行 Trim）"
+            } else {
+                ""
+            };
+            return Err(format!("打开 PFRO 键失败: {opened:?}{hint}"));
+        }
+        let nm = to_wide(PFRO_VALUE);
+            let r = RegSetValueExW(
+            hk,
+            windows::core::PCWSTR(nm.as_ptr()),
+            None,
+            REG_MULTI_SZ,
+            Some(words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>().as_slice()),
+        );
+        let _ = RegCloseKey(hk);
+        if r.is_err() {
+            return Err(format!("写 PFRO 失败: {r:?}"));
+        }
+        Ok(())
+    }
+}
+
+/// PFRO 里"删除 target"的登记形态：src=target、紧随其后的 dst 为空串。
+fn pfro_has_delete(entries: &[String], target: &str) -> bool {
+    let t = target.trim_end_matches(['\\', '/']).to_lowercase();
+    entries
+        .windows(2)
+        .any(|w| w[1].is_empty() && w[0].trim_end_matches(['\\', '/']).to_lowercase() == t)
+}
+
+/// 从 PFRO 里摘掉"删除 targets 中任一路径"的整对（src+dst 一起删）。
+fn pfro_strip_deletes(entries: Vec<String>, targets: &HashSet<String>) -> Vec<String> {
+    let norm = |s: &str| s.trim_end_matches(['\\', '/']).to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < entries.len() {
+        let is_ours = i + 1 < entries.len()
+            && entries[i + 1].is_empty()
+            && targets.contains(&norm(&entries[i]));
+        if is_ours {
+            i += 2; // 整对摘除
+        } else {
+            out.push(entries[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// uninstall:pending-add — 把回收站失败的文件项登记为重启后删除（主窗档）。
+/// 只接受**文件**路径（PFRO 对非空目录的延迟删除并不可靠，登记了也删不掉，
+/// 与其制造"已登记=会删掉"的错觉，不如入口就拒）。
+#[tauri::command]
+pub async fn uninstall_pending_add<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    targets: Vec<String>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    if targets.is_empty() {
+        return json!({ "success": false, "message": "没有要登记的目标" });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        // 先读 PFRO：登记前必须确认能写（权限不足在这里就暴露，不要等到"登记完才发现撤不回"）
+        let mut pfro = read_pfro()?;
+        let mut doc = pending_load();
+        let entries = doc["entries"].as_array_mut().ok_or("登记文件损坏")?;
+        let batch = format!(
+            "p{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+        let mut rows: Vec<Value> = Vec::new();
+        let mut added = 0usize;
+        for t in &targets {
+            let path = Path::new(t);
+            if t.trim().is_empty() || !path.is_file() {
+                rows.push(json!({ "target": t, "status": "skip", "message": "目标不是存在的文件（目录不支持重启后删）" }));
+                continue;
+            }
+            let already = pfro_has_delete(&pfro, t)
+                || entries.iter().any(|e| {
+                    e["target"].as_str().map(|s| s.eq_ignore_ascii_case(t)).unwrap_or(false)
+                });
+            if already {
+                rows.push(json!({ "target": t, "status": "skip", "message": "已登记过，不重复登记" }));
+                continue;
+            }
+            use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+            // DELAY_UNTIL_REBOOT 只登记、立即返回；删除动作发生在下次重启的会话管理器阶段
+            let moved = unsafe {
+                MoveFileExW(
+                    windows::core::PCWSTR(to_wide(t).as_ptr()),
+                    None,
+                    MOVEFILE_DELAY_UNTIL_REBOOT,
+                )
+            };
+            match moved {
+                Ok(()) => {
+                    pfro.push(t.clone());
+                    pfro.push(String::new());
+                    entries.push(json!({ "target": t, "batchId": batch, "addedAt": batch.trim_start_matches('p') }));
+                    rows.push(json!({ "target": t, "status": "ok", "message": "已登记，下次重启时删除" }));
+                    added += 1;
+                }
+                Err(e) => {
+                    let code = e.code().0 as u32 & 0xFFFF;
+                    rows.push(json!({ "target": t, "status": "fail", "message": format!("{}（错误码 {code}）", classify_pending_delete_error(code)) }));
+                }
+            }
+        }
+        if added > 0 {
+            write_pfro(&pfro)?;
+            pending_save(&doc)?;
+            log::flush_sync();
+            log::write_log("warn", &format!("重启后删除：本批登记 {added} 项（永久删除，不进回收站）"));
+        }
+        Ok::<Vec<Value>, String>(rows)
+    })
+    .await;
+    match res {
+        Ok(Ok(rows)) => {
+            let ok = rows.iter().filter(|r| r["status"] == "ok").count();
+            json!({ "success": true, "data": { "added": ok, "details": rows } })
+        }
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("登记执行异常: {e}") }),
+    }
+}
+
+/// uninstall:pending-list — 待删清单（主窗档，只读）。
+/// 三个状态分开：pending（PFRO 还挂着）/ consumed（重启已消费）/ missing（文件已不在）。
+#[tauri::command]
+pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let doc = pending_load();
+        let pfro = read_pfro()?;
+        let rows: Vec<Value> = doc["entries"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .map(|e| {
+                let t = e["target"].as_str().unwrap_or_default().to_string();
+                let pending = pfro_has_delete(&pfro, &t);
+                let exists = Path::new(&t).is_file();
+                let status = if pending {
+                    "pending"
+                } else if !exists {
+                    "missing"
+                } else {
+                    "consumed"
+                };
+                json!({
+                    "target": t,
+                    "batchId": e["batchId"],
+                    "addedAt": e["addedAt"],
+                    "status": status,
+                })
+            })
+            .collect();
+        Ok(json!({ "entries": rows, "pfroReadable": true }))
+    })
+    .await;
+    match res {
+        Ok(Ok(v)) => json!({ "success": true, "data": v }),
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("读取失败: {e}") }),
+    }
+}
+
+/// uninstall:pending-revoke — 撤回（主窗档）。不传 batchId = 撤回本机全部登记项。
+/// 撤回动作本身要写 PFRO（管理员权限），失败时明确报错且不动 state —— 两边必须一致。
+#[tauri::command]
+pub async fn uninstall_pending_revoke<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    batch_id: Option<String>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let mut doc = pending_load();
+        let scoped: HashSet<String> = doc["entries"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter(|e| batch_id.as_deref().map(|b| e["batchId"].as_str() == Some(b)).unwrap_or(true))
+            .filter_map(|e| e["target"].as_str().map(|s| s.trim_end_matches(['\\', '/']).to_lowercase()))
+            .collect();
+        if scoped.is_empty() {
+            return Ok(0usize);
+        }
+        let pfro = read_pfro()?;
+        let stripped = pfro_strip_deletes(pfro, &scoped);
+        write_pfro(&stripped)?;
+        let remaining: Vec<Value> = doc["entries"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter(|e| {
+                let t = e["target"]
+                    .as_str()
+                    .map(|s| s.trim_end_matches(['\\', '/']).to_lowercase())
+                    .unwrap_or_default();
+                !scoped.contains(&t)
+            })
+            .cloned()
+            .collect();
+        doc["entries"] = Value::Array(remaining);
+        pending_save(&doc)?;
+        log::flush_sync();
+        log::write_log("info", &format!("重启后删除：撤回 {} 项登记", scoped.len()));
+        Ok(scoped.len())
+    })
+    .await;
+    match res {
+        Ok(Ok(n)) => json!({ "success": true, "data": { "revoked": n } }),
+        Ok(Err(e)) => json!({ "success": false, "message": e }),
+        Err(e) => json!({ "success": false, "message": format!("撤回执行异常: {e}") }),
+    }
+}
+
 #[cfg(test)]
 mod residue_trace_tests {
     use super::*;
+
+    /// P2-D4 的「第三方模块」口径：排除 Windows 目录与本应用自身目录，且前缀命中
+    /// 不得跨路径段（C:\Windows.old 不能被 C:\Windows 前缀吃掉）。
+    #[test]
+    fn third_party_module_scope_excludes_system_and_self() {
+        assert!(!is_third_party_module(r"C:\Windows\System32\kernel32.dll"));
+        // 边界：Windows.old 不属于 C:\Windows 前缀段，必须算第三方
+        assert!(is_third_party_module(r"C:\Windows.old\System32\app.dll"));
+        assert!(is_third_party_module(
+            r"C:\Program Files\AVAST Software\AV\avcuf64.dll"
+        ));
+        // 自身目录里的模块不算第三方（拿真机 current_exe 现算，不写死路径）
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let sample = dir.join("self_module.dll");
+                assert!(!is_third_party_module(&sample.to_string_lossy()));
+            }
+        }
+        // 非法/无目录形态一律不判第三方（模块枚举不会产这种值，防御性回 false）
+        assert!(!is_third_party_module("kernel32.dll"));
+    }
 
     /// U-2 反查的前缀语义：值名以已知 exe 开头（MuiCache `<exe>.xxx` / BAM 完整路径），
     /// 或落在安装目录前缀下；前缀命中不得跨「路径段」误放行。

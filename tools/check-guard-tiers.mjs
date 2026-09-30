@@ -101,6 +101,12 @@ const MUST_MAIN = [
   // 更新入口在卸载页（主窗），**不得**因为"检查版本看着像只读"就下放成放行四个子窗的档位。
   'uninstall_list',
   'uninstall_run',
+  'uninstall_modify',
+  'uninstall_pending_add',
+  'uninstall_pending_list',
+  'uninstall_pending_revoke',
+  'cleanup_mode_get',
+  'cleanup_mode_set',
   'uninstall_residue_scan',
   'uninstall_residue_execute',
   'uninstall_check_residue_version',

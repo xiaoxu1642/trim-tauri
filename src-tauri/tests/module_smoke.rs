@@ -255,6 +255,79 @@ fn uninstall_run_is_main_only_and_passes_guard_from_main() {
     );
 }
 
+/// `uninstall:modify`（P1-D6）与 `uninstall:run` 同为 MAIN 档。
+/// 主窗正向特征同口径：用「卸载键不存在」的早退证明档位已越过 —— 它发生在任何
+/// ModifyPath 进程被启动之前，所以零副作用（不会有修改/修复程序被拉起来）。
+#[test]
+fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "uninstall_modify", json!({ "appId": GHOST_APP_ID }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调修改/修复命令必须被来源校验拒杀，回执 {text}"
+        );
+    }
+    let w = main_window();
+    let res = invoke(&w, "uninstall_modify", json!({ "appId": GHOST_APP_ID }));
+    assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
+    assert!(
+        common::message_of(&res).contains("卸载注册表键不存在"),
+        "主窗应越过档位进入「现读注册表」这一步，回执 {res}"
+    );
+}
+
+/// P1-B3 三条重启后删命令都是 MAIN 档（唯一调用方是主窗卸载页残留面板）。
+/// 快速组只断子窗被拒杀；add/list/revoke 的正例都要触真实注册表（PFRO），属
+/// 发布前人工/真机组，静默快速组不做。
+#[test]
+fn pending_delete_channels_are_main_only() {
+    for (cmd, args) in [
+        ("uninstall_pending_add", json!({ "targets": [] })),
+        ("uninstall_pending_list", json!({})),
+        ("uninstall_pending_revoke", json!({})),
+    ] {
+        for label in sub_windows() {
+            let w = window_with_label(label);
+            let text = invoke_text(&w, cmd, args.clone());
+            assert!(
+                text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
+            );
+        }
+    }
+}
+
+/// P1-B4：观察档在命令层挡下 cleanup:execute。往返验证：设 observe → execute 必须带
+/// blocked="observe"（引擎与删除调用都不被触达）→ 设回 act → execute 继续走到快照
+/// 校验那一档（证明挡它的是观察闸，不是命令本身坏了）。
+/// 副作用说明：写数据目录的 cleanup-mode.json，结束时已恢复为 "act"（默认档）。
+#[test]
+fn cleanup_execute_is_blocked_by_observe_mode() {
+    let w = main_window();
+    let res = invoke(&w, "cleanup_mode_set", json!({ "mode": "observe" }));
+    assert_eq!(res["success"], json!(true), "设观察档失败: {res}");
+    let res = invoke(&w, "cleanup_execute", json!({ "items": [] }));
+    assert_eq!(res["success"], json!(false), "{res}");
+    assert_eq!(
+        res["blocked"],
+        json!("observe"),
+        "观察档下执行必须带 blocked=observe 回执: {res}"
+    );
+    let res = invoke(&w, "cleanup_mode_set", json!({ "mode": "act" }));
+    assert_eq!(res["success"], json!(true), "设回执行档失败: {res}");
+    let res = invoke(&w, "cleanup_execute", json!({ "items": [] }));
+    assert_eq!(
+        res["blocked"],
+        json!(null),
+        "设回执行档后不得再被观察闸挡下: {res}"
+    );
+    assert!(
+        common::message_of(&res).contains("不是最近一次扫描结果"),
+        "应继续走到快照校验这一档: {res}"
+    );
+}
+
 /// A3 两条残留库更新命令都是 MAIN 档（唯一调用方是主窗卸载页）。
 ///
 /// 快速组这里**只断子窗被拒杀**，不测主窗正向特征：这两条命令过了档位就要出网

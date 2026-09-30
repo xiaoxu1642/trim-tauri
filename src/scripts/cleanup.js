@@ -153,6 +153,29 @@
   let selectedIds = new Set();
   let isScanning = false;
   let isCleaning = false;
+  // P1-B4：观察模式开关的本地缓存。仅用于 UI 呈现与入口拦截，真正的档位闸在后端
+  //（cleanup:execute / cleanup:custom-execute 命令层现读），缓存过期只会造成体验差异、
+  // 不会造成"观察模式下仍然执行"。
+  let observeMode = false;
+
+  function updateObserveHint(on) {
+    const hint = document.getElementById('cleanupObserveHint');
+    if (hint) hint.style.display = on ? '' : 'none';
+  }
+
+  async function refreshObserveToggle() {
+    try {
+      const resp = await window.api.cleanup.modeGet();
+      if (resp && resp.success) {
+        observeMode = resp.data.mode === 'observe';
+        const t = document.getElementById('cleanupObserveToggle');
+        if (t) t.checked = observeMode;
+        updateObserveHint(observeMode);
+      }
+    } catch (e) {
+      // 档位读不到按执行档处理（后端归一口径一致），不打断页面
+    }
+  }
   // 文件清理扫描结果：id -> { files: [...], totalSize, scanPath }
   let fileCleanData = new Map();
 
@@ -337,10 +360,24 @@
         case 'check':
           inner = `<div class="checkbox ${isSelected ? 'checked' : ''}" data-checkbox="${item.id}"></div>`;
           break;
-        case 'name':
+        case 'name': {
           // 中缝省略：超长文件名保留首尾（title 仍展示完整原文）
-          inner = `<span class="xtable-cell-text" data-tip="${escapeHtml(item.name)}">${escapeHtml(xtable.middleEllipsis(item.name, 40))}</span>`;
+          // P1-A3（2026-10-01）：悬停依据升级为贡献项逐条展示——正分事实标「＋」，
+          // 0 分解释项标「·」（只解释执行方式，不改变建议分量）。内容全部来自
+          // 规则条目已登记的字段事实；没有 evidenceItems 的条目回退为只显示全名。
+          const evs = Array.isArray(item.evidenceItems) && item.evidenceItems.length
+            ? item.evidenceItems
+            : null;
+          const tipLines = [item.name];
+          if (evs) {
+            tipLines.push('依据：');
+            for (const ev of evs) {
+              tipLines.push((ev.weight > 0 ? '＋ ' : '· ') + (ev.text || ''));
+            }
+          }
+          inner = `<span class="xtable-cell-text" data-tip="${escapeHtml(tipLines.join('\n'))}">${escapeHtml(xtable.middleEllipsis(item.name, 40))}</span>`;
           break;
+        }
         case 'path':
           if (result && result.path) {
             const autoTag = result.pathSource === 'auto' ? ' <span class="path-auto-tag">自动定位</span>' : '';
@@ -1078,6 +1115,17 @@
   // 清理
   async function clean() {
     if (isCleaning || selectedIds.size === 0) return;
+    // P1-B4：观察模式下"开始清理"整体降级为回放说明——不发起任何执行通道调用
+    //（常规清理 / 自定义目录 / 文件清理都被挡在入口），扫描结果就是回放。
+    // 档位以后端为准现读，不信任本页缓存的开关状态。
+    if (observeMode === true) {
+      const picked = Array.from(selectedIds).map(id => scanResults.get(id)).filter(Boolean);
+      const files = picked.reduce((a, r) => a + (r.fileCount || 0), 0);
+      const bytes = picked.reduce((a, r) => a + (r.size || 0), 0);
+      window.app?.toast?.('info',
+        `观察模式：未执行任何删除。回放——本次若执行将清理 ${picked.length} 个项目 / 约 ${files} 个文件 / ${window.ds.fmtBytes(bytes)}；关闭观察模式后才会真正执行`);
+      return;
+    }
     isCleaning = true;
     setCleaningBtn(true);
     updateUI();
@@ -2018,6 +2066,22 @@
 
   function init() {
     renderCategoryList();
+    // P1-B4 观察模式：读取档位 + 绑定开关
+    refreshObserveToggle();
+    document.getElementById('cleanupObserveToggle')?.addEventListener('change', async (e) => {
+      const mode = e.target.checked ? 'observe' : 'act';
+      const resp = await window.api.cleanup.modeSet(mode);
+      if (!resp || !resp.success) {
+        window.app?.toast?.('error', '档位切换失败: ' + ((resp && resp.message) || '未知错误'));
+        e.target.checked = !e.target.checked; // 回弹，UI 与真实档位保持一致
+        return;
+      }
+      observeMode = mode === 'observe';
+      updateObserveHint(observeMode);
+      window.app?.toast?.('info', observeMode
+        ? '观察模式已开启：只扫描、不执行任何删除（含常规清理的永久删）'
+        : '已切回执行模式');
+    });
     updateUI();
     initPreviewSync();
 

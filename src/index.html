@@ -289,6 +289,11 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
             <span>开始清理</span>
           </button>
+          <label class="toggle-switch" for="cleanupObserveToggle" data-tip="观察模式（P1-B4）：只扫描、不执行。开启后「开始清理」不会触发任何删除调用（包括常规清理的永久删），扫描结果即「若执行会删什么」的整批回放。">
+            <input type="checkbox" id="cleanupObserveToggle" />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+          <span class="clean-filter-hint" id="cleanupObserveHint" style="display:none">观察模式：只报告不删除</span>
           <button class="btn btn-secondary" id="btnUpdateRules" data-tip="从发布源下载最新清理规则库（数据目录规则优先于内置规则，支持版本校验与防降级）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
             <span>更新规则库</span>
@@ -559,6 +564,8 @@
           <div class="cleanup-toolbar-actions active" style="margin:8px 0">
             <button class="btn btn-accent" id="residueBtnClean" disabled>删除选中残留</button>
             <button class="btn btn-secondary" id="residueBtnRescan">重新扫描</button>
+            <button class="btn btn-secondary" id="residueBtnPending" style="display:none" data-tip="回收站删不掉的文件可登记为下次重启时删除（永久删除，重启前可撤回）">重启后删除</button>
+            <button class="btn btn-secondary" id="residueBtnPendingRevoke" style="display:none" data-tip="把已登记的「重启后删除」条目从系统摘除，文件保持原样">撤回重启后删</button>
             <label class="toggle-switch" for="residueBackupToggle" data-tip="开启后，删除前先把选中的文件与目录内容打进本机还原包（zip），之后可在「备份」列表里整批写回原位置。关闭时文件只进回收站、不留内容副本。注册表项无论开关都会先导出 .reg 备份。">
               <input type="checkbox" id="residueBackupToggle" />
               <span class="toggle-track"><span class="toggle-thumb"></span></span>

@@ -274,6 +274,12 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         // ---- 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）----
         commands::uninstall::uninstall_list,
         commands::uninstall::uninstall_run,
+        commands::uninstall::uninstall_modify,
+        commands::uninstall::uninstall_pending_add,
+        commands::uninstall::uninstall_pending_list,
+        commands::uninstall::uninstall_pending_revoke,
+        commands::cleanup::cleanup_mode_get,
+        commands::cleanup::cleanup_mode_set,
         commands::uninstall::uninstall_residue_scan,
         commands::uninstall::uninstall_residue_execute,
         commands::uninstall::uninstall_check_residue_version,
