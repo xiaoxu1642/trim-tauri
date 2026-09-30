@@ -70,23 +70,29 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     ((y + if m <= 2 { 1 } else { 0 }) as i32, m, d)
 }
 
-/// 本机相对于 UTC 的偏移秒数（Win32 本地时钟与 UTC 时钟同刻差值，分钟精度足够日志分档）
+/// 本机相对于 UTC 的偏移秒数（本地 SYSTEMTIME 与 UTC SYSTEMTIME 各自转 FILETIME 后相减）。
+///
+/// 【根因记录】上一版用「wDay 之差 × 86400」近似跨日偏移，只在同月内成立——
+/// 月初/月末本地与 UTC 落在不同月时（如 UTC 9-30 晚 vs 本地 10-1 凌晨），day 差会算出
+/// -29/30 天级别的垃圾偏移，日志日期整体跑偏（实测本地 10-01 被写成 09-02）。改为
+/// FILETIME 相减，跨月/跨年都精确；换算失败按 UTC 处理（宁可时区差 8 小时，不写坏日期）。
 fn local_utc_offset_secs() -> i64 {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+    use windows::Win32::System::Time::SystemTimeToFileTime;
     unsafe {
-        let local = GetLocalTime();
-        let sys = GetSystemTime();
-        let l = local.wHour as i64 * 3600 + local.wMinute as i64 * 60;
-        let s = sys.wHour as i64 * 3600 + sys.wMinute as i64 * 60;
-        let day_diff = local.wDay as i64 - sys.wDay as i64;
-        let mut diff = l - s + day_diff * 86_400;
-        // 归一到 ±12 小时内（跨日时差值会跑出一天）
-        if diff > 43_200 {
-            diff -= 86_400;
-        } else if diff < -43_200 {
-            diff += 86_400;
+        let local: SYSTEMTIME = GetLocalTime();
+        let sys: SYSTEMTIME = GetSystemTime();
+        let to_filetime = |st: SYSTEMTIME| -> Option<i64> {
+            let mut ft = FILETIME::default();
+            SystemTimeToFileTime(&st, &mut ft).ok()?;
+            let v = ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64;
+            Some(v / 10_000_000) // 100ns 粒度 -> 秒
+        };
+        match (to_filetime(local), to_filetime(sys)) {
+            (Some(l), Some(s)) => l - s,
+            _ => 0,
         }
-        diff
     }
 }
 
@@ -238,4 +244,44 @@ fn is_log_file_name(name: &str) -> bool {
             .bytes()
             .enumerate()
             .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// civil_from_days 的锚点：不校验它，local_date_str 的所有日期都是"看着对"而已。
+    /// 这里钉住 1970-01-01、闰年 2 月末、以及跨月 anchor（正是上一版 wDay 差值法的
+    /// 翻车点：UTC 9-30 晚 vs 本地 10-1 凌晨会把日志日期写成 09-02，实测发生过）。
+    #[test]
+    fn civil_from_days_anchors() {
+        let (y, m, d) = civil_from_days(0);
+        assert_eq!((y, m, d), (1970, 1, 1));
+        // 2026-09-30 = 20726 天（UTC），2026-10-01 = 20727 天
+        let (y, m, d) = civil_from_days(20_726);
+        assert_eq!((y, m, d), (2026, 9, 30));
+        let (y, m, d) = civil_from_days(20_727);
+        assert_eq!((y, m, d), (2026, 10, 1));
+        // 闰日：2024-02-29 = 19723（2024-01-01）+ 31 + 29 - 1 = 19782 天
+        let (y, m, d) = civil_from_days(19_782);
+        assert_eq!((y, m, d), (2024, 2, 29));
+    }
+
+    /// 本机偏移必须是分钟级粒度、±14 小时内（时区 + 整分 DST），否则算出的
+    /// 本地日期不可信。机器相关，但这两条不变量在任何正常系统上都成立。
+    #[test]
+    fn local_offset_is_minute_granular_and_bounded() {
+        let off = local_utc_offset_secs();
+        assert!(off % 60 == 0, "偏移应有分钟粒度: {off}");
+        assert!((-50_400..=50_400).contains(&off), "偏移超出 ±14h: {off}");
+    }
+
+    /// 日期串格式不变量（文件名分档依赖它）：YYYY-MM-DD、数字位、横杠位固定。
+    #[test]
+    fn local_date_str_shape() {
+        let s = local_date_str(std::time::SystemTime::now());
+        assert_eq!(s.len(), 10);
+        let bytes = s.as_bytes();
+        assert_eq!(bytes[4], b'-');
+        assert_eq!(bytes[7], b'-');
+    }
 }
