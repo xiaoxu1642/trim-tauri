@@ -498,5 +498,15 @@
   // 审查 5-5：背景模糊度百分比 → 玻璃模糊半径（px）换算上限，pathbinding 与 theme 共用
   ds.GLASS_MAX_BLUR_PX = 26;
 
+  // 壁纸层模糊（设置页那条「背景模糊度」滑块 → --bg-blur）与上面那条玻璃磨砂是两套半径，
+  // 上限不同（20px）。真源收在这里：theme.js 启动期要按存好的百分比算 px，
+  // pathbinding.js 设置页拖动时也算同一个值，两处各写一个数字必然漂移。
+  ds.WALLPAPER_MAX_BLUR_PX = 20;
+
+  // 首次启动（localStorage 里根本没这个键）的外观默认值。判据一律是「键不存在」而不是
+  // 「值为空」——用户显式选了「无背景」会存 ''、拖到 0% 会存 0，那些都是选择而不是缺省。
+  ds.DEFAULT_PRESET_BG = 'wp-doll';
+  ds.DEFAULT_WALLPAPER_BLUR = 20;
+
   window.ds = ds;
 })();

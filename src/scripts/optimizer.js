@@ -1316,9 +1316,10 @@
       if (resp && resp.success) {
         finishProgressToast(true, resp.message);
         window.app?.log('info', `优化电脑完成: ${optName}`);
-        // v2.6.0（P0-2）：执行后回读校验不符（主进程已逐键比对）——明确告知而非静默成功
+        // v2.6.0（P0-2）：执行后回读校验不符（主进程已逐键比对）——明确告知而非静默成功。
+        // 2026-09-30：日志只留后端那一条（optimizer.rs 的执行后/还原后各一），这里不再重复记，
+        // 同一次失败在日志页出现两行会把真实的一条挤下去；toast 是用户侧唯一回执，保留。
         if (resp.verify === 'partial') {
-          window.app?.log('warn', `回读校验不符（可能被组策略/安全软件覆盖）: ${optName}`);
           window.app?.toast('warning', `「${optName}」已执行但读回校验不符，可能被组策略或安全软件覆盖`, 6000);
         }
         // 安全托底：执行成功后立即标记为已优化（灰态）+ 落本地数据
@@ -1391,7 +1392,9 @@
       return true;
     }
     if (!resp || !resp.success) {
-      window.app?.log?.('warn', '还原点查询失败（已放行，不视为无还原点）: ' + ((resp && resp.message) || '未知原因'));
+      // 2026-09-30：这一条不再记日志——后端 optimizer_check_restore 对每个失败出口都已写
+      // warn（RPERROR / 脚本未跑成 / 无有效输出），前端再记一遍就是同事件双行。
+      // 放行策略仍在这里：查询失败 ≠ 无还原点，不能据此弹「建议创建」骚扰用户。
       return true;
     }
 

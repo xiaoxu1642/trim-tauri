@@ -2236,8 +2236,14 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
                 if pid == self_pid {
                     continue;
                 }
-                // v3.7.3 修复②：explorer 命中即 critical（只展示、无结束入口）
-                let critical = app.to_lowercase().contains("explorer") || app.contains("资源管理器");
+                // v3.7.3 修复②：explorer 命中即 critical（只展示、无结束入口）。
+                // 2026-09-30 补：再并上扫描器按 RM ApplicationType 判出的 critical
+                // （RmCritical=1000）——此前这个字段整条被丢掉，「系统关键进程」实际只认
+                // explorer 一个名字，lsass/csrss 这类真关键进程会被列进可结束名单。
+                // 名字规则仍要保留：实测 RM 对 explorer 报的是 Application 不是 RmCritical。
+                let critical = p.get("critical").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || app.to_lowercase().contains("explorer")
+                    || app.contains("资源管理器");
                 let n = by_app.get(app).map(js_number).unwrap_or(0.0) + 1.0;
                 by_app.insert(app.to_string(), Value::from(n as i64));
                 if seen_pids.insert(pid) {

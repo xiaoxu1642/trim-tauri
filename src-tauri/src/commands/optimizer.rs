@@ -13,6 +13,7 @@
 //! - @@RECYCLE@@ 协议：删除目标回主进程，受保护路径拒绝、其余进回收站（B-2）。
 //! - WU 暂停天数服务端钳制 1~35，FILETIME 在 PS 内算（渲染层不参与）。
 
+use std::os::windows::process::CommandExt;
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
@@ -262,6 +263,23 @@ fn build_script(steps: &[Value]) -> String {
     l.join("\n")
 }
 
+/// cmd.exe 的命令行参数：`/s /c "<整条命令行>"`。
+///
+/// `/s` 是关键：cmd 见到首字符是引号时按「剥掉首尾那对引号、其余逐字保留」处理，内层引号
+/// 才能原样抵达 reg.exe；不带 `/s` 时 cmd 的引号规则会吃掉转义。
+fn cmd_line_of(cmd: &str) -> String {
+    format!("/s /c \"{cmd}\"")
+}
+
+/// 用 cmd.exe 跑一条优化步骤命令。**生产与回归测试都必须走这里**：测试若自己拼一遍
+/// 命令行形状，生产改回 `args(["/c", cmd])` 就测不出来了（而那条形状是错的，见下）。
+/// 完整根因与实测证据见 `native_execute_steps` 的 cmd 分支注释。
+fn run_cmd_step(cmd: &str) -> std::io::Result<std::process::Output> {
+    crate::engine::systembin::quiet_cmd(system_tool("cmd"))
+        .raw_arg(cmd_line_of(cmd))
+        .output()
+}
+
 /// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）
 ///
 /// 支持 reg/cmd/service 三种 step 类型；pwsh 类型交给 pssteps 解释器
@@ -322,11 +340,13 @@ fn native_execute_steps<R: tauri::Runtime>(
                 }
             }
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
-            // cmd 类型：spawn cmd /c
-            let ok = match crate::engine::systembin::quiet_cmd(system_tool("cmd"))
-                .args(["/c", cmd])
-                .output()
-            {
+            // cmd 类型：spawn cmd /c。形状必须是 raw_arg("/s /c \"…\"")，不能用 args(["/c", cmd])。
+            // 根因（2026-09-30 用户机实测）：std 的 args() 把内嵌 " 转义成 \"，而 cmd.exe 不认 \"，
+            // 它只按「剥掉首尾那对引号」的规则处理 ⇒ \" 原样进子进程命令行，reg.exe 于是把
+            // "HKLM\SYSTEM\ControlSet001\Control" 解析成键名 Control"（尾随一个引号），
+            // 值写进这个当场新建的垃圾键、真键一个字没改，而 reg 返回 0 ⇒ 步骤记成功、
+            // 回读必然报「校验不符」。/s 让 cmd 只剥首尾引号、内层逐字透传。
+            let ok = match run_cmd_step(cmd) {
                 Ok(o) => o.status.success(),
                 Err(_) => false,
             };
@@ -1675,6 +1695,9 @@ try {\n\
   Write-Output (\"RPERROR|\" + $_.Exception.Message)\n\
 }";
     let Some(out) = run_inline_ps(ps, 30, None) else {
+        // 2026-09-30：前端不再替这条记日志（同事件双行会把真实的一条挤下去），所以每个
+        // 失败出口都必须在这里落一行，否则「查询失败」会变成无声失败。
+        log::write_log("warn", "还原点查询失败: 查询脚本未跑成（临时脚本写入或 pwsh 启动失败）");
         return json!({ "success": false, "exists": false, "message": "查询失败" });
     };
     let line = out
@@ -1699,7 +1722,10 @@ try {\n\
             json!({ "success": false, "exists": false, "message": msg })
         }
         Some(_) => json!({ "success": true, "exists": false }), // RPNONE
-        None => json!({ "success": false, "exists": false, "message": "查询无有效输出" }),
+        None => {
+            log::write_log("warn", "还原点查询失败: 查询无有效输出");
+            json!({ "success": false, "exists": false, "message": "查询无有效输出" })
+        }
     }
 }
 
@@ -2153,6 +2179,28 @@ mod tests {
         let steps = memory_steps(&json!(99));
         assert!(steps[0].get("cmd").unwrap().as_str().unwrap().contains("8388608"));
         assert!(steps[0].get("label").unwrap().as_str().unwrap().contains("回退"));
+    }
+
+    /// 回归 2026-09-30（用户机实测）：cmd 步骤的引号形状。旧写法 `args(["/c", cmd])` 让子进程
+    /// 收到 `\"…\"`，reg.exe 于是把值写进键名尾随一个引号的垃圾键
+    /// （`HKLM\SYSTEM\ControlSet001\Control"` 当场被创建），真键一个字没改、退出码还是 0 ⇒
+    /// 步骤记「成功」、回读报「校验不符」，用户只看见一项永远失败的优化。
+    /// 这里用 echo 看子进程实际收到的文本：不碰注册表（零副作用），但引号一丢必红。
+    /// 探针取生产同一条 `memory_steps` 命令行，且走生产同一个 `run_cmd_step` —— 测试自己抄一份
+    /// 格式的话，生产改回去它是测不出来的。
+    #[test]
+    fn cmd_step_line_survives_cmd_quote_stripping() {
+        let steps = memory_steps(&json!("16"));
+        let probe = steps[0]
+            .get("cmd")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(probe.contains('"'), "探针必须带内层引号，否则这条测试测不到引号形状");
+        let out = run_cmd_step(&format!("echo {probe}")).expect("cmd /c echo 起不来");
+        let got = String::from_utf8_lossy(&out.stdout).replace("\r\n", "");
+        assert!(got.contains(&probe), "子进程收到的命令行与原文不符: {got}");
+        assert!(!got.contains("\\\""), "出现反斜杠+引号说明又退回 args() 转义: {got}");
     }
 
     #[test]

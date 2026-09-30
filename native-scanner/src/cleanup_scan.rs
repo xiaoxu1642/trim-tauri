@@ -1097,6 +1097,15 @@ mod rstrtmgr {
         ApplicationType: u32,
         TSSessionId: u32,
         bRestartable: i32,
+        // 2026-09-30 实测：Windows 按 **668 字节**步长写这条记录，SDK 头文件那六个成员只推出 664。
+        // 少这 4 字节的后果不是「显示难看」而是三件实事：① 第 i 条记录整体前移 4×i 字节，
+        // 应用名前多出 2i 个乱码字符（用户看到的「偁aWindows 资源管理器」）；② `pid` 与
+        // `ApplicationType` 跟着错位 ⇒ 结束进程拿的是错 PID、critical 判错；③ 按 664 申请的
+        // 缓冲区被按 668 写满 ⇒ 越界写（72 条时越界 288 字节）。
+        // 字段位置同样实测钉住：strAppName@12、strServiceShortName@524（服务短名干净）、
+        // ApplicationType@652（lsass 读出 1000=RmCritical）、bRestartable@660。
+        // 这个尾巴 DWORD 是什么微软没写进头文件，本模块不消费它，只负责让步长对齐。
+        _reserved: u32,
     }
 
     impl Clone for RM_PROCESS_INFO {
@@ -1104,6 +1113,20 @@ mod rstrtmgr {
             unsafe { std::ptr::read(self) } // POD 结构体逐位复制（含数组字段，无堆所有权）
         }
     }
+
+    // 布局不变式放编译期而不是 #[test]：native-scanner 是 path 依赖、非 workspace 成员，
+    // 它的单测只有显式 --manifest-path 才跑，靠测试兜不住「有人改回六个成员」这种回归。
+    const _: () = {
+        if std::mem::size_of::<RM_PROCESS_INFO>() != 668 {
+            panic!("RM_PROCESS_INFO 步长必须 668 字节：Windows 就按这个宽度写，错了会错位读名/pid 并越界写");
+        }
+        if std::mem::offset_of!(RM_PROCESS_INFO, strAppName) != 12 {
+            panic!("strAppName 偏移必须是 12：RM_UNIQUE_PROCESS 是 DWORD+FILETIME 共 12 字节而非 16");
+        }
+        if std::mem::offset_of!(RM_PROCESS_INFO, ApplicationType) != 652 {
+            panic!("ApplicationType 偏移必须是 652：critical 判定（==1000 RmCritical）按它读");
+        }
+    };
 
     #[link(name = "rstrtmgr")]
     #[allow(non_snake_case)]

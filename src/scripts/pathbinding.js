@@ -906,7 +906,8 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     var fill = range.querySelector('.bbr-fill');
     var knob = range.querySelector('.bbr-knob');
     var valEl = document.getElementById('bgBlurVal');
-    var MAX_BLUR = 20;
+    // 上限与启动期 theme.js 同源（ds.WALLPAPER_MAX_BLUR_PX），两处各写一个数字必然漂移
+    var MAX_BLUR = window.ds?.WALLPAPER_MAX_BLUR_PX || 20;
     var dragging = false;
     var blurSaveTimer = null;
     function setBlur(pct) {
@@ -947,8 +948,11 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     });
     try {
       var ap2 = JSON.parse(localStorage.getItem('winclean-appearance') || '{}');
-      setBlur(typeof ap2.wallpaperBlur === 'number' ? ap2.wallpaperBlur : 0);
-    } catch (e) { setBlur(0); }
+      // 兜底用同一个默认值：theme.js 正常已在启动期把 wallpaperBlur 落进存储，
+      // 走到这里说明它是空的（老配置/写入失败），滑块位置要和实际生效值一致，不能显示 0%
+      var defBlur = window.ds?.DEFAULT_WALLPAPER_BLUR ?? 0;
+      setBlur(typeof ap2.wallpaperBlur === 'number' ? ap2.wallpaperBlur : defBlur);
+    } catch (e) { setBlur(window.ds?.DEFAULT_WALLPAPER_BLUR ?? 0); }
   }
   function init() {
     if (isInitialized) return;

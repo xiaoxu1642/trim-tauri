@@ -56,10 +56,24 @@
     // 改动需两处同步）。v3.0 全局玻璃化：0% 仅表示「无磨砂」，容器仍为玻璃 alpha
     // （表面 token 真源即玻璃值），不再有「经典不透明面板」态。旧 skin 键按 glass=100% / classic=0% 折算迁移。
     let blur = ap.bgBlur;
-    if (blur == null) {
+    let dirty = blur == null;
+    if (dirty) {
       blur = 100;
       ap.bgBlur = blur;
       delete ap.skin;
+    }
+    // 首次启动（键不存在）的外观默认：预设壁纸 Doll·手办 + 壁纸模糊 20%。判据一律是
+    // 「键不存在」而不是「值为空」——用户显式选过「无背景」存的是 ''、拖到 0% 存的是 0，
+    // 那是选择不是缺省，覆盖它等于替用户改设置。落默认值同时写回，让设置页读到同一个值。
+    if (ap.presetBg == null) {
+      ap.presetBg = window.ds?.DEFAULT_PRESET_BG || '';
+      dirty = true;
+    }
+    if (typeof ap.wallpaperBlur !== 'number') {
+      ap.wallpaperBlur = window.ds?.DEFAULT_WALLPAPER_BLUR ?? 0;
+      dirty = true;
+    }
+    if (dirty) {
       try { localStorage.setItem('winclean-appearance', JSON.stringify(ap)); } catch (e) {}
     }
     if (blur > 0) {
@@ -69,6 +83,13 @@
     } else {
       delete document.body.dataset.skin;
       document.documentElement.style.removeProperty('--glass-blur');
+    }
+    // 壁纸层模糊（--bg-blur）此前只有设置页脚本 pathbinding.js 会写，而它是进「设置」页
+    // 才延迟加载 ⇒ 重启后没打开过设置页，壁纸一直是清晰的（存过的值和默认值都不生效）。
+    // 启动期按同一套换算补上，设置页拖动时覆盖的是同一个属性。
+    if (typeof ap.wallpaperBlur === 'number') {
+      const wpMax = window.ds?.WALLPAPER_MAX_BLUR_PX || 20;
+      document.documentElement.style.setProperty('--bg-blur', (ap.wallpaperBlur / 100 * wpMax).toFixed(1) + 'px');
     }
     if (ap.presetBg) document.body.dataset.presetBg = ap.presetBg;
     else delete document.body.dataset.presetBg;
