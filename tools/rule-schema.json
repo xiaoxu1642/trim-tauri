@@ -1,0 +1,342 @@
+{
+  "schemaVersion": 1,
+  "_说明": [
+    "规则库契约表：**只承载词汇表与数值上限**（字段白名单 / 必填 / 枚举 / 上限 / token 登记集）。",
+    "判定逻辑不进这张表：注册表禁删面（engine/protect.rs 与 Node 侧独立实现）、target 形态与单星 glob、",
+    "excludePaths 的 :: 具名值约束、residue 三条件组≥2、token 的「禁 token 根 / 一段路径只允许一个变量」等都是**代码**，",
+    "把它们塞进数据文件就是在造通用规则引擎 —— 82 条库的规模不需要，且 AGENTS §2 是零新增依赖。",
+    "两个域的同名条目**刻意不同值**（tokens 的清理侧 14 个大小写敏感、残留侧 10 个不敏感且额外禁 token 根）：",
+    "合并成一份等价清单会制造假一致，这是 tools/rule-tokens.mjs 头注释与 AGENTS §5.16/N6 的既有裁定。",
+    "消费者有两个且必须同源：tools/check-cleanup-rule-contract.mjs + tools/check-residue-rule-contract.mjs（发布前门禁）",
+    "与 src-tauri/src/engine/rule_schema.rs（运行期装载侧，含内置副本）。两侧对同一坏包必须给同一结论。",
+    "条目级 ver（cleanup 每条 / residue 每条规则）= 「该包这一版」，必须等于顶层 rulesVersion；不是该条目的引入版本。抬 rulesVersion 后跑 node tools/stamp-rule-ver.mjs 重刷再重签。要的是「上次报这次没报是哪一版判的」可回答，不是变更记录。",
+    "ver 不挂 itemRequired：它有自己的断言（缺失/不等/非数字三个方向，Node A12 与 Rust 同文案），挂进通用必填会让同一问题报两个原因。"
+  ],
+  "cleanup": {
+    "file": "src-tauri/data/cleanup-rules.json",
+    "topFields": [
+      "version",
+      "rulesVersion",
+      "groups",
+      "winapp2Version",
+      "_sig"
+    ],
+    "topRequired": [
+      "rulesVersion",
+      "groups"
+    ],
+    "groupFields": [
+      "key",
+      "title",
+      "icon",
+      "subGroups",
+      "items"
+    ],
+    "groupRequired": [
+      "key",
+      "title"
+    ],
+    "subGroupFields": [
+      "id",
+      "name",
+      "icon",
+      "items"
+    ],
+    "subGroupRequired": [
+      "id",
+      "name"
+    ],
+    "itemFields": [
+      "id",
+      "ver",
+      "name",
+      "risk",
+      "evidence",
+      "recommended",
+      "domain",
+      "group",
+      "nature",
+      "regenerable",
+      "prov",
+      "pathPs",
+      "fileKeys",
+      "regKeys",
+      "excludePaths",
+      "globCandidatesPs",
+      "candidatesPs",
+      "fileCleanType",
+      "detect",
+      "special",
+      "minAgeDays",
+      "minAgeHours",
+      "requiredStoppedProcesses",
+      "restartProcesses"
+    ],
+    "itemRequired": [
+      "id",
+      "name",
+      "risk",
+      "evidence",
+      "recommended",
+      "domain",
+      "group",
+      "nature",
+      "regenerable",
+      "prov"
+    ],
+    "fileKeyFields": [
+      "path",
+      "pattern",
+      "recurse"
+    ],
+    "fileKeyRequired": [
+      "path",
+      "recurse"
+    ],
+    "regKeyFields": [
+      "path",
+      "value"
+    ],
+    "regKeyRequired": [
+      "path"
+    ],
+    "provFields": [
+      "source",
+      "sourceClass",
+      "ref",
+      "importedAt",
+      "reviewedAt"
+    ],
+    "provRequired": [
+      "source",
+      "sourceClass",
+      "ref",
+      "reviewedAt"
+    ],
+    "riskLevels": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "sourceClasses": [
+      "windows-doc",
+      "vendor-doc",
+      "independent",
+      "winapp2-clue"
+    ],
+    "nonEmptyArrayFields": [
+      "restartProcesses",
+      "requiredStoppedProcesses"
+    ],
+    "exclusiveNumericFields": [
+      "minAgeHours",
+      "minAgeDays"
+    ],
+    "positiveIntFields": [
+      "minAgeHours",
+      "minAgeDays"
+    ],
+    "tokens": {
+      "caseInsensitive": false,
+      "allowed": [
+        "LOCALAPPDATA",
+        "APPDATA",
+        "USERPROFILE",
+        "WINDIR",
+        "SystemRoot",
+        "SystemDrive",
+        "PROGRAMDATA",
+        "TEMP",
+        "TMP",
+        "PUBLIC",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "HOMEDRIVE",
+        "HOMEPATH"
+      ]
+    },
+    "limits": {
+      "maxGroups": 40,
+      "maxSubGroupsPerGroup": 40,
+      "maxItems": 400,
+      "maxFileKeysPerItem": 32,
+      "maxRegKeysPerItem": 32,
+      "maxExcludePathsPerItem": 32,
+      "maxTargetLen": 260,
+      "maxTextLen": 200,
+      "maxNameLen": 120,
+      "maxSegments": 32
+    },
+    "itemBannedKeys": [
+      "deleteMode",
+      "excludeKeys"
+    ],
+    "versionRatchetMin": 20260928,
+    "frozenWinapp2Version": "260730",
+    "itemBannedReasons": {
+      "deleteMode": "P0-5 已裁决移除（Rust/前端零消费方），回潮即红",
+      "excludeKeys": "执行侧未实现排除过滤，放行等于「扫描排除、执行照删」"
+    },
+    "entryVersionField": "ver"
+  },
+  "residue": {
+    "file": "src-tauri/data/uninstall-residue-rules.json",
+    "topFields": [
+      "rulesVersion",
+      "prov",
+      "rules",
+      "_sig"
+    ],
+    "provFields": [
+      "sourceClass",
+      "reviewedAt"
+    ],
+    "ruleFields": [
+      "id",
+      "ver",
+      "displayName",
+      "publisher",
+      "uninstallKey",
+      "residue"
+    ],
+    "entryFields": [
+      "kind",
+      "target",
+      "note"
+    ],
+    "matchGroups": [
+      "displayName",
+      "publisher",
+      "uninstallKey"
+    ],
+    "matchGroupsMinNonEmpty": 2,
+    "ruleKinds": [
+      "folder",
+      "file",
+      "reg_key"
+    ],
+    "idCharset": "A-Za-z0-9._-",
+    "tokens": {
+      "caseInsensitive": true,
+      "allowed": [
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "USERPROFILE",
+        "WINDIR",
+        "SYSTEMROOT"
+      ]
+    },
+    "limits": {
+      "maxRules": 400,
+      "maxResiduePerRule": 64,
+      "maxGroupItems": 32,
+      "maxTargetLen": 260,
+      "maxTextLen": 200,
+      "maxSegments": 32
+    },
+    "versionRatchetMin": 20260928,
+    "entryVersionField": "ver"
+  },
+  "crossTrack": {
+    "_说明": [
+      "已**实测**的跨轨/跨域键名不等价点登记表（V2 P2-D7）。只登记跑过命令确认的事实，不登记推断。",
+      "门禁 tools/check-cleanup-rule-contract.mjs 的 A13 负责三件事：",
+      "  ① 每条登记的「消费点」文件:行号 必须仍能匹配到声明的代码（腐烂即红，防止表变成神话）；",
+      "  ② 规则库里不得出现「只有死键来源」的条目（装载侧与门禁同口径 fail-closed）；",
+      "  ③ 带这些键的条目必须逐个登记在案（新增即要求写明它在哪条轨生效、哪条轨不生效）。",
+      "specialHandlers 登记的是「没有文件系统路径来源、但确实有消费者」的两类条目：取值域必须与消费方代码里的字面量一致，改动任一侧都要同步这张表（A13 会拿 anchor 去代码里核对）。"
+    ],
+    "points": [
+      {
+        "id": "D19-cleanup-scan-candidates",
+        "key": "candidates / globCandidates",
+        "consumer": "native-scanner/src/cleanup_scan.rs",
+        "anchor": "if let Some(cands) = rule.get(\"candidates\")",
+        "fact": "磁盘清理原生扫描器读 `candidates`/`globCandidates`，而规则库里的键名是 `candidatesPs`/`globCandidatesPs` ⇒ 该分支在清理域恒不命中",
+        "impact": "清理域里任何一条「只靠 candidates 生效」的规则都会静默 0 命中（不是报错，是看起来配好了）",
+        "status": "known-dead-kept",
+        "note": "源码注释自述按缺陷原样保留（引擎替换不夹带删除面变更，方案红线 1）。修它=给 4 条规则新开删除面，属**待拍板**，不在门禁里顺手改",
+        "affectedItems": []
+      },
+      {
+        "id": "paths-scan-candidatesPs",
+        "key": "candidatesPs / globCandidatesPs",
+        "consumer": "src-tauri/src/engine/native.rs",
+        "anchor": "for id in [\"neteaseMusicCache\", \"qqCache\", \"douyinCache\"]",
+        "fact": "安装路径扫描（paths_scan）消费 `candidatesPs`/`globCandidatesPs`，但**按 3 个条目 id 硬编码**取用；清理扫描器同名键读的是 `candidates`/`globCandidates`（库里不存在）",
+        "impact": "同名键在两个域语义不同：清理域不消费、安装路径域只对已登记 id 生效 ⇒ 新增条目带该键不会自动生效",
+        "status": "live-for-listed-ids",
+        "note": "受影响 4 条里只有 3 条被 paths_scan 硬编码清单覆盖；`wechatCache` 的 globCandidatesPs 两条轨都不消费 = 纯死重量。要清掉或删除该键属**待拍板**（会改删除面），本表只登记事实",
+        "affectedItems": [
+          "qqCache",
+          "neteaseMusicCache",
+          "douyinCache",
+          "wechatCache"
+        ]
+      }
+    ],
+    "deadSourceKeys": [
+      "candidatesPs",
+      "globCandidatesPs"
+    ],
+    "liveSourceKeys": [
+      "pathPs",
+      "fileKeys",
+      "regKeys",
+      "detect"
+    ],
+    "specialHandlers": [
+      {
+        "key": "special",
+        "values": [
+          "dism"
+        ],
+        "consumer": "native-scanner/src/cleanup_scan.rs",
+        "anchor": "rule.get(\"special\").and_then(|v| v.as_str()) == Some(\"dism\")",
+        "via": "引擎分流：DISM 组件清理，不走文件系统路径来源"
+      },
+      {
+        "key": "fileCleanType",
+        "values": [
+          "qq",
+          "wechat"
+        ],
+        "consumer": "src/scripts/cleanup.js",
+        "anchor": "window.api.fileclean.scan(item.fileCleanType",
+        "via": "渲染层分流：转 fileclean:scan 通道；取值域由 commands/fileclean.rs 的 Some(\"qq\") | Some(\"wechat\") 把住"
+      }
+    ],
+    "notCovered": [
+      {
+        "area": "残留候选：Windows 服务与设备实例",
+        "reason": "判据同样成立，但删除要提权走 SCM 与 SetupAPI，缺这块实操经验；误删一个服务或设备实例的代价远高于多列两类候选的收益",
+        "status": "做过并按风险裁定撤除（readme v0.2.7 已入库表述）"
+      },
+      {
+        "area": "AMD 驱动注册表深度调优",
+        "reason": "A 卡用户实机反馈存在副作用，只保留清理类规则",
+        "status": "按反馈撤除（readme 已入库表述）"
+      },
+      {
+        "area": "winapp2.ini 整库导入",
+        "reason": "FluentCleaner 只是 winapp2 的 CC-BY-SA 包装，可直译率 16.3%，且许可要求派生署名；批量导入会制造不可溯源的规则",
+        "status": "评估后不做（docs/规则库对比-FluentCleaner-winapp2-2026-09-27.md）"
+      },
+      {
+        "area": "SpaceMint 云端规则库抓取导入",
+        "reason": "语法可直译率≈100%，但协议明文禁止批量抓取服务数据且下载需登录",
+        "status": "只借字段模型（docs/规则库对比-SpaceMint-2026-09-27.md）"
+      },
+      {
+        "area": "永久删除兜底（回收站失败后强删）",
+        "reason": "除常规清理项外一律回收站优先，不做永久删除兜底；上游 Electron 版会兜底，本仓刻意收紧",
+        "status": "红线（AGENTS §3）"
+      }
+    ]
+  }
+}

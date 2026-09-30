@@ -26,31 +26,34 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
 const UNINSTALL_RS = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall.rs');
 import { leadingToken, makeTokenChecker } from './rule-tokens.mjs';
+import { list as schemaList, number as schemaNumber, tokens as schemaTokens } from './rule-schema.mjs';
 const FIXTURE = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
 const PRIV_KEY = path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
-// token 登记表：新 token 必须先在这里登记、Rust 侧 RESIDUE_RULE_TOKENS 同步、
-// 且 expand_env_path 能展开才放行（两侧清单必须同集，夹具 packages 钉住）
-const RESOLVABLE_TOKENS = [
-  'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES',
-  'PROGRAMFILES(X86)', 'PROGRAMW6432', 'COMMONPROGRAMFILES', 'USERPROFILE',
-  'WINDIR', 'SYSTEMROOT',
-];
+// 词汇与上限取自 `tools/rule-schema.json`（V2 P0-A2，2026-09-30）：同一份字节也被 Rust 装载侧
+// 编译期嵌入（engine/rule_schema.rs），本文件不再抄第二份清单 —— 抄了就会出现"改了表没改门禁"
+// 或反过来的分叉（本仓 A7/N6 记过同源化的边界：只共享查法与报错，**不共享允许集**）。
+const { allowed: RESIDUE_RULE_TOKENS, caseInsensitive: TOKEN_CI } = schemaTokens('residue');
+if (!TOKEN_CI) {
+  console.error('✗ 契约表 residue.tokens.caseInsensitive 必须是 true（大小写口径要改得单独拍板）');
+  process.exit(1);
+}
 // token 判定器（大小写不敏感，保持既有行为）
-const checkToken = makeTokenChecker(RESOLVABLE_TOKENS, { caseInsensitive: true });
+const checkToken = makeTokenChecker(RESIDUE_RULE_TOKENS, { caseInsensitive: true });
 
-const MIN_VERSION = 20260928;
-const ALLOWED_KINDS = ['folder', 'file', 'reg_key'];
-const TOP_FIELDS = ['rulesVersion', 'prov', 'rules', '_sig'];
-const PROV_FIELDS = ['sourceClass', 'reviewedAt'];
-const RULE_FIELDS = ['id', 'displayName', 'publisher', 'uninstallKey', 'residue'];
-const ENTRY_FIELDS = ['kind', 'target', 'note'];
-const MATCH_GROUPS = ['displayName', 'publisher', 'uninstallKey'];
-const MAX_RULES = 400;
-const MAX_RESIDUE = 64;
-const MAX_GROUP_ITEMS = 32;
-const MAX_TARGET_LEN = 260; // MAX_PATH
-const MAX_TEXT_LEN = 200;
-const MAX_SEGMENTS = 32;
+const MIN_VERSION = schemaNumber('residue', 'versionRatchetMin');
+const ALLOWED_KINDS = schemaList('residue', 'ruleKinds');
+const TOP_FIELDS = schemaList('residue', 'topFields');
+const PROV_FIELDS = schemaList('residue', 'provFields');
+const RULE_FIELDS = schemaList('residue', 'ruleFields');
+const ENTRY_FIELDS = schemaList('residue', 'entryFields');
+const MATCH_GROUPS = schemaList('residue', 'matchGroups');
+const MIN_MATCH_GROUPS = schemaNumber('residue', 'matchGroupsMinNonEmpty');
+const MAX_RULES = schemaNumber('residue', 'maxRules');
+const MAX_RESIDUE = schemaNumber('residue', 'maxResiduePerRule');
+const MAX_GROUP_ITEMS = schemaNumber('residue', 'maxGroupItems');
+const MAX_TARGET_LEN = schemaNumber('residue', 'maxTargetLen'); // MAX_PATH
+const MAX_TEXT_LEN = schemaNumber('residue', 'maxTextLen');
+const MAX_SEGMENTS = schemaNumber('residue', 'maxSegments');
 
 // ==================== 注册表禁删面（与 engine/protect.rs 同口径的独立实现） ====================
 
@@ -213,7 +216,11 @@ function validateResiduePackage(pkg) {
       }
       if (arr.length) groups += 1;
     }
-    if (groups < 2) return `规则 ${id}: 三条件组只有 ${groups} 组非空，双条件命中是 U-1 拍板口径`;
+    if (!('ver' in rule)) return `规则 ${id}: 缺条目级版本戳 ver（跑 node tools/stamp-rule-ver.mjs --write 后重签）`;
+    if (typeof rule.ver !== 'number' || rule.ver !== pkg.rulesVersion) {
+      return `规则 ${id}: ver=${JSON.stringify(rule.ver)} 与顶层 rulesVersion=${JSON.stringify(pkg.rulesVersion)} 不一致`;
+    }
+    if (groups < MIN_MATCH_GROUPS) return `规则 ${id}: 三条件组只有 ${groups} 组非空，双条件命中是 U-1 拍板口径（阈值取自契约表 matchGroupsMinNonEmpty）`;
     if (!Array.isArray(rule.residue) || !rule.residue.length) return `规则 ${id}: residue 缺失、不是数组或为空`;
     if (rule.residue.length > MAX_RESIDUE) {
       return `规则 ${id}: residue 条数 ${rule.residue.length} 超上限 ${MAX_RESIDUE}`;
@@ -425,6 +432,33 @@ if (fixture) {
     pkgBad.length ? `${pkgBad.length} 处不一致：${pkgBad.map((c) => `${c.label} 期望 ${c.ok ? '放行' : '拒绝'}`).join('；')}` : '');
   const negCount = (fixture.packages || []).filter((c) => !c.ok).length;
   check(negCount >= 20, `F3. 夹具判红用例数量充足（当前 ${negCount} 条，方案 §7 要求每类保护都有反例）`);
+
+  // F4 双向覆盖（V2 P0-C1）：拒绝侧与放行侧都必须有足量样本，且数量是棘轮。
+  // 只测拒绝方向时，判定器会一路收紧到把合法产品键打死而门禁照绿 —— 放行方向
+  // 才是"收紧不许误伤功能"的证据（本仓 C1/C2 的放行回测就是这个用途的结构化版本）。
+  // 数量下限写在下面常量里：删反例必须同时改下限，等于逼人来写明理由。
+  const REG_DENY_MIN = 25;
+  const REG_ALLOW_MIN = 8;
+  let regDeny = 0;
+  let regAllow = 0;
+  for (const v of fixture.regVectors || []) {
+    if (v.blocked) regDeny += 1; else regAllow += 1;
+  }
+  check(
+    regDeny >= REG_DENY_MIN && regAllow >= REG_ALLOW_MIN,
+    `F4a. 注册表向量双向足量（拒 ${regDeny}/${REG_DENY_MIN}，放 ${regAllow}/${REG_ALLOW_MIN}）`,
+    regDeny < REG_DENY_MIN || regAllow < REG_ALLOW_MIN
+      ? `放行侧只有 ${regAllow} 条时，判定器可以随意收紧而无人报警；要删反例必须同时改上面的下限并写明理由`
+      : '',
+  );
+  const noCls = (fixture.regVectors || []).filter((v) => !v.cls).length;
+  check(noCls === 0, `F4b. 注册表向量都归了类（未分类 ${noCls} 条）`);
+  const okPkg = (fixture.packages || []).filter((c) => c.ok).length;
+  check(okPkg >= 5, `F4c. 语义校验至少有 5 条"合法包"用例（当前 ${okPkg}）—— 只有反例就等于没测过放行方向`, '');
+  const dupLabel = (fixture.packages || []).map((c) => c.label).filter((l, i, a) => a.indexOf(l) !== i);
+  check(dupLabel.length === 0, 'F4d. 夹具用例 label 唯一（重名会让"缺样本"看不出来）', dupLabel.join('；'));
+  const badLabelled = (fixture.packages || []).filter((c) => typeof c.label !== 'string' || !c.label.trim());
+  check(badLabelled.length === 0, `F4e. 夹具用例都有名字（无名 ${badLabelled.length} 条）`);
 }
 
 console.log(fail === 0 ? '\n门禁通过' : `\n${fail} 项未通过`);

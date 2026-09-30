@@ -243,6 +243,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -291,6 +292,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -327,6 +329,152 @@
       }
     },
     {
+      "label": "条目缺 ver（版本戳对齐）",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_key",
+                "target": "HKCU\\Software\\Acme\\Editor",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "条目 ver 与顶层不等",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260101,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_key",
+                "target": "HKCU\\Software\\Acme\\Editor",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "条目 ver 非数字",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": "20260928",
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_key",
+                "target": "HKCU\\Software\\Acme\\Editor",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
       "label": "规则条目未知字段 recurse",
       "ok": false,
       "pkg": {
@@ -340,6 +488,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -389,6 +538,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -438,6 +588,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -486,6 +637,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -534,6 +686,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -577,6 +730,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [],
             "publisher": [],
             "uninstallKey": [],
@@ -619,6 +773,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -665,6 +820,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": "Acme Editor",
             "publisher": [
               "Acme Corp"
@@ -711,6 +867,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "  "
             ],
@@ -759,6 +916,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -807,6 +965,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -855,6 +1014,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -903,6 +1063,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -951,6 +1112,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -999,6 +1161,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1047,6 +1210,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1095,6 +1259,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1143,6 +1308,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1190,6 +1356,7 @@
         "rules": [
           {
             "id": "acme editor/1",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1238,6 +1405,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1267,6 +1435,7 @@
           },
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1315,6 +1484,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1359,6 +1529,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1408,6 +1579,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1456,6 +1628,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1504,6 +1677,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1552,6 +1726,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1600,6 +1775,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1648,6 +1824,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1696,6 +1873,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1744,6 +1922,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1792,6 +1971,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1840,6 +2020,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1888,6 +2069,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],
@@ -1936,6 +2118,7 @@
         "rules": [
           {
             "id": "fixture-acme",
+            "ver": 20260928,
             "displayName": [
               "Acme Editor"
             ],

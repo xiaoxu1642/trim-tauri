@@ -144,6 +144,11 @@ for (const m of MAPPING) {
         break;
       }
     }
+    // V2 P2-C7：改源 JS 后忘了同步产物是这类红唯一的原因（`.ps1` 禁止手改，AGENTS §5.1）。
+    // 这里只把一键命令递到手边，**不装任何 hook**、不自动写文件 —— 能阻断用户输入的
+    // PreToolUse/提交钩子是红线，且"自动改产物"会让一次门禁跑动变成看不见的写操作。
+    console.log(`   ↳ 若你刚改了源 JS：跑 \`node tools/sync-ps-from-js.mjs\` 重新生成 ${m.ps1} 后重跑本门禁`);
+    console.log('     （源 → 产物是单向的：改反方向会让下次同步覆盖你的修改，`.ps1` 一律禁止手改）');
   }
 
   if (!m.noRun) behRunnable++;

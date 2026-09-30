@@ -43,28 +43,86 @@ const PINNED = [
 
 /**
  * 允许裸 `Command::new(` 的场景（v0.1.6 静默收敛）：只放行**自带非默认 creation
- * flags** 的合法产品功能。file:line → 理由；行号以本门禁自己的计算为准，
- * 漂移即红（失效棘轮）。
+ * flags** 的合法产品功能。
+ *
+ * V2 P1-C2（2026-09-30）：登记键从 `file:行号` 改成 `file + anchor`（调用点那一行的
+ * 判别性子串）。原因：AGENTS §5.19 记了两次「在被豁免调用点上方增删一行 ⇒ 行号错位、
+ * 豁免指到别处或失效」，而本门禁此前是"看行号"而不是"看内容"。锚点式登记让豁免跟着
+ * 代码走；同时**不做模糊匹配**：锚点在文件里匹配到 0 处判红（失效）、匹配到 2 处以上
+ * 也判红（歧义，必须加长锚文本），所以既不会被增删行蒙掉，也不会被改名悄悄绕过。
  */
-const RAW_EXEMPT = {
-  'src-tauri/src/pwsh/mod.rs:268': 'pwsh7 探测 where.exe（自带 CREATE_NO_WINDOW flags，历史调用点）',
-  'src-tauri/src/pwsh/mod.rs:307': 'is_pwsh7_executable 探测：pwsh7 子进程树纪律需要 Job Object 前的裸构造（自带 CREATE_NO_WINDOW flags）',
-  'src-tauri/src/pwsh/mod.rs:475': 'run_with_exe：pwsh/inbox PS 执行层（自带 CREATE_NO_WINDOW flags + Job Object）',
-  'src-tauri/src/commands/quickcmds.rs:267': '用户自定义快捷指令的可见控制台（CREATE_NEW_CONSOLE 是产品功能，禁静默）',
-  'src-tauri/src/engine/systembin.rs:89': 'quiet_cmd 自身的实现体',
-};
+const RAW_EXEMPT = [
+  {
+    file: 'src-tauri/src/pwsh/mod.rs',
+    anchor: 'system_tool("where.exe")',
+    reason: 'pwsh7 探测 where.exe（自带 CREATE_NO_WINDOW flags，历史调用点）',
+  },
+  {
+    file: 'src-tauri/src/pwsh/mod.rs',
+    anchor: 'let mut child = match Command::new(exe)',
+    reason: 'is_pwsh7_executable 探测：pwsh7 子进程树纪律需要 Job Object 前的裸构造（自带 CREATE_NO_WINDOW flags）',
+  },
+  {
+    file: 'src-tauri/src/pwsh/mod.rs',
+    anchor: 'let mut child = Command::new(exe)',
+    reason: 'run_with_exe：pwsh/inbox PS 执行层（自带 CREATE_NO_WINDOW flags + Job Object）',
+  },
+  {
+    file: 'src-tauri/src/commands/quickcmds.rs',
+    anchor: 'Command::new(exe)',
+    reason: '用户自定义快捷指令的可见控制台（CREATE_NEW_CONSOLE 是产品功能，禁静默）',
+  },
+  {
+    file: 'src-tauri/src/engine/systembin.rs',
+    anchor: 'std::process::Command::new(program)',
+    reason: 'quiet_cmd 自身的实现体',
+  },
+];
 
 /**
- * 变量形态豁免（file:line → 理由）：绑定无法静态收敛的 quiet_cmd 调用。
+ * 变量形态豁免（anchor 式登记，理由同上）：绑定无法静态收敛的 quiet_cmd 调用。
  * 目标是保持最小集；新增豁免必须写明为什么不违反 systembin 口径。
  */
-const SITE_EXEMPT = {
-  'src-tauri/src/engine/systembin.rs:88': 'quiet_cmd 函数定义本身（token 命中函数名，非调用点）',
-  // 行号随 v2-M1（stubborn_kill 镜像路径判定）与 v2-L1（dir_delete_blocked）两次插入
-  // 整体下移，此处同步登记 —— 改 native.rs 行号必查本表
-  'src-tauri/src/engine/native.rs:1361': 'p 来自注册表 Run 键回读的绝对路径列表，非 PINNED 裸名',
-  'src-tauri/src/engine/native.rs:1367': 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
-};
+const SITE_EXEMPT = [
+  {
+    file: 'src-tauri/src/engine/systembin.rs',
+    anchor: 'pub fn quiet_cmd(program: impl AsRef',
+    reason: 'quiet_cmd 函数定义本身（token 命中函数名，非调用点）',
+  },
+  {
+    file: 'src-tauri/src/engine/native.rs',
+    anchor: 'quiet_cmd(p).spawn()',
+    reason: 'p 来自注册表 Run 键回读的绝对路径列表，非 PINNED 裸名',
+  },
+  {
+    file: 'src-tauri/src/engine/native.rs',
+    anchor: 'quiet_cmd(&fp).spawn()',
+    reason: 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
+  },
+];
+
+/**
+ * 按锚点解析一条登记项 → 它覆盖的调用点。
+ * 返回 `{ ok, hits, why }`：0 命中 = 登记已失效；>1 命中 = 锚文本不够判别。
+ */
+function resolveExemption(entry, pool) {
+  const matched = pool.filter((h) => h.file === entry.file && h.raw.includes(entry.anchor));
+  if (matched.length === 0) {
+    return {
+      ok: false,
+      hits: [],
+      why: `${entry.file}#${entry.anchor.slice(0, 40)} 找不到对应调用点（登记失效：代码改名/删调用点后必须同步本表）`,
+    };
+  }
+  if (matched.length > 1) {
+    return {
+      ok: false,
+      hits: matched,
+      why: `${entry.file}#${entry.anchor.slice(0, 40)} 匹配到 ${matched.length} 处调用点（锚文本不判别，请加长到唯一）`,
+    };
+  }
+  return { ok: true, hits: matched, why: '' };
+}
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -203,42 +261,47 @@ function resolveBinding(file, ident) {
 }
 
 const identSites = quiet.filter((h) => !h.wrapped && h.ident);
+// 先把锚点解析成"覆盖了哪个调用点"，再做双向核对：
+//   登记侧失效/歧义 → 红；调用点侧没被任何登记覆盖 → 红
+const siteResolutions = SITE_EXEMPT.map((e) => ({ entry: e, ...resolveExemption(e, identSites) }));
+const siteCovered = new Set(
+  siteResolutions.filter((r) => r.ok).flatMap((r) => r.hits.map((h) => `${h.file}:${h.line}`)),
+);
 const cFailures = [];
 for (const h of identSites) {
   const key = `${h.file}:${h.line}`;
   const verdict = resolveBinding(h.file, h.ident);
   if (verdict === 'literal-unwrapped') {
     cFailures.push(`${key} 绑定到 PINNED 字面量且未经 system_tool 解析（ident=${h.ident}）`);
-  } else if (verdict === 'unknown' && !SITE_EXEMPT[key]) {
-    cFailures.push(`${key} 变量形态无法静态收敛（ident=${h.ident}），必须在 SITE_EXEMPT 登记理由`);
+  } else if (verdict === 'unknown' && !siteCovered.has(key)) {
+    cFailures.push(`${key} 变量形态无法静态收敛（ident=${h.ident}），必须在 SITE_EXEMPT 用唯一锚文本登记理由`);
   }
 }
-const staleSites = Object.keys(SITE_EXEMPT).filter(
-  (k) => !identSites.some((h) => `${h.file}:${h.line}` === k),
-);
+const siteBroken = siteResolutions.filter((r) => !r.ok);
 check(
-  cFailures.length === 0 && staleSites.length === 0,
-  `C. ${identSites.length} 个变量形态调用点均解析或已登记（两跳别名闭合）`,
-  cFailures.length
-    ? cFailures.join('；')
-    : staleSites.length
-      ? `SITE_EXEMPT 已失效（无对应调用点）${JSON.stringify(staleSites)}`
-      : '',
+  cFailures.length === 0 && siteBroken.length === 0,
+  `C. ${identSites.length} 个变量形态调用点均解析或已按锚点登记（两跳别名闭合）`,
+  // 先看登记侧是否坏掉（失效/歧义），再看调用侧未覆盖 —— 后者往往是前者的症状，
+  // 报"你没登记"会让人去补一条本来就在表里的登记
+  siteBroken.length
+    ? siteBroken.map((r) => r.why).join('；')
+    : cFailures.join('；'),
 );
 
-// ---- D. 裸 Command::new 必须登记 RAW_EXEMPT（v0.1.6 静默收敛） ----
-const rawViolations = raw.filter((h) => !RAW_EXEMPT[`${h.file}:${h.line}`]);
-const staleRaw = Object.keys(RAW_EXEMPT).filter(
-  (k) => !raw.some((h) => `${h.file}:${h.line}` === k),
+// ---- D. 裸 Command::new 必须按锚点登记（v0.1.6 静默收敛） ----
+const rawResolutions = RAW_EXEMPT.map((e) => ({ entry: e, ...resolveExemption(e, raw) }));
+const rawCovered = new Set(
+  rawResolutions.filter((r) => r.ok).flatMap((r) => r.hits.map((h) => `${h.file}:${h.line}`)),
 );
+const rawViolations = raw.filter((h) => !rawCovered.has(`${h.file}:${h.line}`));
+const rawBroken = rawResolutions.filter((r) => !r.ok);
 check(
-  rawViolations.length === 0 && staleRaw.length === 0,
-  `D. ${raw.length} 处裸 Command::new 均已登记（后台 spawn 必须走 quiet_cmd）`,
-  rawViolations.length
-    ? `未登记 ${JSON.stringify(rawViolations.map((h) => `${h.file}:${h.line} ${h.raw.slice(0, 60)}`))}`
-    : staleRaw.length
-      ? `RAW_EXEMPT 已失效（无对应调用点）${JSON.stringify(staleRaw)}`
-      : '',
+  rawViolations.length === 0 && rawBroken.length === 0,
+  `D. ${raw.length} 处裸 Command::new 均已按锚点登记（后台 spawn 必须走 quiet_cmd）`,
+  // 登记侧坏掉（失效/歧义）优先报：它通常是"某处调用点没被覆盖"的根因
+  rawBroken.length
+    ? rawBroken.map((r) => r.why).join('；')
+    : `未登记 ${JSON.stringify(rawViolations.map((h) => `${h.file}:${h.line} ${h.raw.slice(0, 60)}`))}`,
 );
 
 console.log('\n调用点分布：' + hits.map((h) => `${h.name ?? h.ident ?? '变量'}${h.wrapped ? '(已解析)' : ''}`).length + ' 处');

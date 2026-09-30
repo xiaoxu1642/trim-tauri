@@ -39,6 +39,9 @@ function basePackage() {
     rules: [
       {
         id: 'fixture-acme',
+        // 条目级版本戳：必须等于顶层 rulesVersion（V2 P2-A1）。基线包故意写对，
+        // 下面两条用例专门测"缺失"与"不等"，让 Rust 与 Node 谁放宽都会被夹具抓。
+        ver: 20260928,
         displayName: ['Acme Editor'],
         publisher: ['Acme Corp'],
         uninstallKey: ['AcmeEditor'],
@@ -57,6 +60,9 @@ function basePackage() {
 const cases = [
   { label: '基线合法包', ok: true, mutate: () => {} },
   { label: '顶层未知字段', ok: false, mutate: (p) => set(p, 'extra', 1) },
+  { label: '条目缺 ver（版本戳对齐）', ok: false, mutate: (p) => del(p, 'rules.0.ver') },
+  { label: '条目 ver 与顶层不等', ok: false, mutate: (p) => set(p, 'rules.0.ver', 20260101) },
+  { label: '条目 ver 非数字', ok: false, mutate: (p) => set(p, 'rules.0.ver', '20260928') },
   { label: '规则条目未知字段 recurse', ok: false, mutate: (p) => set(p, 'rules.0.recurse', true) },
   { label: 'residue 条目未知字段 flags', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.flags', 'x') },
   { label: '未知 kind reg_value', ok: false, mutate: (p) => set(p, 'rules.0.residue.2.kind', 'reg_value') },

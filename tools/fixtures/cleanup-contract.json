@@ -1,0 +1,1728 @@
+{
+  "_说明": [
+    "清理规则库契约夹具（V2 P0-C1，2026-09-30）。两个消费者读同一份文件、各自独立实现判定：",
+    "  · Node 侧 tools/check-cleanup-rule-contract.mjs 调 tools/cleanup-contract.mjs::validateCleanupPackage，",
+    "    并按 mustTrigger 断言「到底是哪条判的红」；",
+    "  · Rust 侧 commands/cleanup.rs::清理语义校验与夹具一致 断言 ok/拒绝方向一致。",
+    "任何一侧放宽判定，另一侧立刻判红；不跨语言调用（方案 §4.3 第三步 / 残留库同姿势）。",
+    "A8（父子路径重叠）是人工复核清单、非致命，故不出现在本文件的 assertionIds 里。"
+  ],
+  "assertionIds": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "A9",
+    "A10",
+    "A11",
+    "A12",
+    "A13"
+  ],
+  "packages": [
+    {
+      "label": "合法最小包（含子组形态）",
+      "ok": true,
+      "mustTrigger": [],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": 20260928
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A1 未登记 token",
+      "ok": false,
+      "mustTrigger": [
+        "A1"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a1",
+                "name": "未登记变量",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%ZZ_NOT_A_REAL_TOKEN%\\x",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 path 含 / 分隔符",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-slash",
+                "name": "斜杠",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%/TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 path 含 ? 通配",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-question",
+                "name": "问号通配",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\Trim?Test",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 pattern 多星超出执行侧单星能力",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-pattern",
+                "name": "多星",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "**",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 excludePaths 的 :: 具名值排除混用删树 regKeys（F-2）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-exclude",
+                "name": "具名值排除",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "regKeys": [
+                  {
+                    "path": "HKCU\\Software\\TrimTest"
+                  }
+                ],
+                "excludePaths": [
+                  "HKCU\\Software\\TrimTest::ValueName"
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A3 两条规则目标精确重复",
+      "ok": false,
+      "mustTrigger": [
+        "A3"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a3-a",
+                "name": "重复甲",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest\\dup",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              },
+              {
+                "id": "c-a3-b",
+                "name": "重复乙",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest\\dup",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A4 deleteMode 回潮",
+      "ok": false,
+      "mustTrigger": [
+        "A4"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a4",
+                "name": "删除方式回潮",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "deleteMode": "recycle",
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A4 excludeKeys 回潮（执行侧未实现过滤）",
+      "ok": false,
+      "mustTrigger": [
+        "A4"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a4-exclude-keys",
+                "name": "排除键回潮",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "excludeKeys": [],
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A5 groups 为空数组",
+      "ok": false,
+      "mustTrigger": [
+        "A5"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": []
+      }
+    },
+    {
+      "label": "A5 rulesVersion 非数字",
+      "ok": false,
+      "mustTrigger": [
+        "A5"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": "20260928",
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a5-ver",
+                "name": "字符串版本",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": "20260928"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A6 缺必填字段 evidence",
+      "ok": false,
+      "mustTrigger": [
+        "A6"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a6-evidence",
+                "name": "缺依据",
+                "risk": "low",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A6 risk 不在枚举内",
+      "ok": false,
+      "mustTrigger": [
+        "A6"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a6-risk",
+                "name": "非法风险级",
+                "risk": "deluxe",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A6 prov.sourceClass 不在来源级别枚举内",
+      "ok": false,
+      "mustTrigger": [
+        "A6"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a6-sourceclass",
+                "name": "非法来源级",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "imported",
+                  "sourceClass": "imported",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A6 prov 缺 ref",
+      "ok": false,
+      "mustTrigger": [
+        "A6"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a6-provref",
+                "name": "缺出处",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A6 recommended 写成字符串",
+      "ok": false,
+      "mustTrigger": [
+        "A6"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a6-bool",
+                "name": "布尔写错",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": "true",
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A7 fileKeys 缺显式 recurse",
+      "ok": false,
+      "mustTrigger": [
+        "A7"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a7-recurse",
+                "name": "依赖缺省值",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*"
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A7 restartProcesses 存在却是空数组（静默失效）",
+      "ok": false,
+      "mustTrigger": [
+        "A7"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a7-empty-array",
+                "name": "空约束",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "restartProcesses": [],
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A9 minAgeHours 与 minAgeDays 同时声明",
+      "ok": false,
+      "mustTrigger": [
+        "A9"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a9-both",
+                "name": "时效互斥",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "minAgeHours": 24,
+                "minAgeDays": 1,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A9 minAgeDays 非正整数",
+      "ok": false,
+      "mustTrigger": [
+        "A9"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a9-zero",
+                "name": "零时效",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "minAgeDays": 0,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A10 条目未知字段 sizeHint",
+      "ok": false,
+      "mustTrigger": [
+        "A10"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a10-item",
+                "name": "执行侧不认的字段",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "sizeHint": 123,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A10 顶层未知字段",
+      "ok": false,
+      "mustTrigger": [
+        "A10"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "extraTop": 1,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a10-top",
+                "name": "顶层多出字段",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A10 fileKeys 未知字段 depth",
+      "ok": false,
+      "mustTrigger": [
+        "A10"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a10-fk",
+                "name": "子对象多出字段",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true,
+                    "depth": 2
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A10 regKeys 未知字段 hive",
+      "ok": false,
+      "mustTrigger": [
+        "A10"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a10-rk",
+                "name": "注册表子对象多出字段",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "regKeys": [
+                  {
+                    "path": "HKCU\\Software\\TrimTest",
+                    "hive": "HKCU"
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A10 prov 未知字段 url",
+      "ok": false,
+      "mustTrigger": [
+        "A10"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a10-prov",
+                "name": "溯源多出字段",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30",
+                  "url": "https://example.invalid"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A11 id 含空格与感叹号",
+      "ok": false,
+      "mustTrigger": [
+        "A11"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "bad id!",
+                "name": "非法 id",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A11 id 重复",
+      "ok": false,
+      "mustTrigger": [
+        "A11"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-dup-id",
+                "name": "甲",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest\\a",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              },
+              {
+                "id": "c-dup-id",
+                "name": "乙",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest\\b",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A11 id 缺失",
+      "ok": false,
+      "mustTrigger": [
+        "A6",
+        "A11"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "name": "没有 id",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A12 条目缺 ver（版本戳对齐）",
+      "ok": false,
+      "mustTrigger": [
+        "A12"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ]
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A12 条目 ver 与顶层不等",
+      "ok": false,
+      "mustTrigger": [
+        "A12"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260101
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": 20260101
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A12 条目 ver 非数字",
+      "ok": false,
+      "mustTrigger": [
+        "A12"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": "20260928"
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": "20260928"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A13 条目只有 candidatesPs（引擎不消费）",
+      "ok": false,
+      "mustTrigger": [
+        "A13"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "ver": 20260928,
+                "candidatesPs": [
+                  "$env:APPDATA + '\\X\\Cache'"
+                ]
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "ver": 20260928
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A13 专用分流取值未登记",
+      "ok": false,
+      "mustTrigger": [
+        "A13"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "ver": 20260928,
+                "fileCleanType": "telegram"
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": 20260928
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -8,6 +8,14 @@
 //      扫描侧支持而执行侧不支持的 `?` 通配 / `/` 分隔符 / 多星 pattern）；
 //   3. 精确重复规则与已裁决移除的 deleteMode 字段回潮。
 //
+// V2（2026-09-30）改造两点：
+//   · 词汇与上限不再抄在本文件里，统一取自 `tools/rule-schema.json`（Rust 装载侧读同一份字节）；
+//     断言实现抽到 `tools/cleanup-contract.mjs`，与 Rust 的 `validate_cleanup_package` 各自独立、
+//     靠 `tools/fixtures/cleanup-contract.json` 钉口径 —— 本文件不调 Rust。
+//   · 判定器自检升级为**双向核对**：夹具必须能打到每条登记过的断言（漏样本红），
+//     样本引用的断言必须在登记表里（引用不存在红），合法样本必须零错（判定器过严红）。
+//     背景：真实规则库里没有反例，光跑数据永远测不出"判定器坏成永远放行"（AGENTS §4 假绿前科）。
+//
 // 可判红要求（AGENTS §4）：新增断言后至少人为破坏一次、确认退出码非 0、再恢复。
 'use strict';
 import fs from 'node:fs';
@@ -15,49 +23,97 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-import { collectTokens, makeTokenChecker } from './rule-tokens.mjs';
+import { loadSchema, number as schemaNumber } from './rule-schema.mjs';
+import { ASSERTIONS, validateCleanupPackage, selfTest } from './cleanup-contract.mjs';
+
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
-
-// 展开器唯一实现 trim_finder::cleanup_scan::expand_env_path 用 env::var_os 逐变量解析，
-// Windows 语义下大小写不敏感，理论上有值的环境变量都能展开。这里仍维护一张登记表：
-// 规则库是签名发布物，token 必须显式登记才允许进入，防止「本机有值、别机没有」的
-// 用户态变量（如 PATH 扩展、自定义变量）混进规则造成跨机器行为漂移。
-// P0-2 基线：TEMP/TMP/PROGRAMDATA/SystemDrive 为后续扩库预留的最小变量集。
-const RESOLVABLE_TOKENS = new Set([
-  'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'WINDIR', 'SystemRoot', 'SystemDrive',
-  'PROGRAMDATA', 'TEMP', 'TMP', 'PUBLIC', 'ProgramFiles', 'ProgramFiles(x86)',
-  'HOMEDRIVE', 'HOMEPATH',
-]);
-
-// P1-1 来源级别枚举（规则库最终优化方案 2026-09-27）。winapp2-clue 仅允许用于
-// 「把 winapp2 当目录线索、文本独立重写」的规则；整库导入不存在，出现 imported 类即红。
-const SOURCE_CLASSES = new Set(['windows-doc', 'vendor-doc', 'independent', 'winapp2-clue']);
-
-// token 判定器：允许集合是本文件那份，大小写口径保持既有行为（敏感）
-const checkToken = makeTokenChecker(RESOLVABLE_TOKENS);
-
-// P1-3 准入必填字段（缺失即红；文件规则另须显式 recurse，见 A7）
-const REQUIRED_FIELDS = ['id', 'name', 'risk', 'evidence', 'recommended', 'domain', 'group', 'nature', 'regenerable', 'prov'];
-const RISK_LEVELS = new Set(['low', 'medium', 'high']);
+const FIXTURE_REL = path.join('tools', 'fixtures', 'cleanup-contract.json');
 
 // P1-4 winapp2Version 冻结棘轮：它只是历史素材基线，不再是扩库成果指标，
-// 禁止随「计划同步」「看到新版库」抬值。确需抬值必须改这里并写明依据（版本、日期、决策）。
-const WINAPP2_FROZEN = '260730';
+// 禁止随「计划同步」「看到新版库」抬值。确需抬值必须改契约表并写明依据（版本、日期、决策）。
+const FROZEN_KEY = 'frozenWinapp2Version';
 
 const errors = [];
-const warn = (msg) => errors.push(msg);
-
 function fail(msg) {
   console.error(`✗ ${msg}`);
   errors.push(msg);
 }
 
-function walkRules(rule, cb) {
-  for (const fk of rule.fileKeys ?? []) cb.fileKey?.(fk);
-  for (const rk of rule.regKeys ?? []) cb.regKey?.(rk);
+function collectItems(rules) {
+  const items = [];
+  for (const g of rules.groups ?? []) {
+    for (const it of g.items ?? []) items.push(it);
+    for (const sg of g.subGroups ?? []) for (const it of sg.items ?? []) items.push(it);
+  }
+  return items;
 }
 
 function main() {
+  // ---- 0. 契约表本身可用（表坏了 ⇒ 两侧判定都会变形，先钉住） ----
+  let schema;
+  try {
+    schema = loadSchema();
+  } catch (e) {
+    fail(`[A0] 契约表不可用：${e.message}`);
+    return;
+  }
+
+  // ---- 1. 判定器自检（坏判定器必红，且不放过"过严"这一侧） ----
+  for (const why of selfTest(validateCleanupPackage)) {
+    fail(`[A0] 判定器自检失败：${why}`);
+  }
+
+  // ---- 2. 夹具双向核对：每条断言都要有反例，每个反例都要打中登记的断言 ----
+  const fixturePath = path.join(ROOT, FIXTURE_REL);
+  let fixture;
+  try {
+    fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+  } catch (e) {
+    fail(`[A0] 夹具不可读：${e.message}`);
+    return;
+  }
+  const declaredIds = Array.isArray(fixture.assertionIds) ? fixture.assertionIds : [];
+  const cases = Array.isArray(fixture.packages) ? fixture.packages : [];
+  if (cases.length < 12) fail(`[A0] 夹具用例只有 ${cases.length} 条，覆盖不住各保护类别`);
+
+  // 2a 断言登记表 ↔ 夹具声明 一致（两边必须列同一批 ID，缺一边即红）
+  const implIds = Object.keys(ASSERTIONS);
+  for (const id of implIds) {
+    if (!declaredIds.includes(id)) fail(`[A0] 断言 ${id} 已实现但没进夹具 assertionIds（等于永远不会被测坏）`);
+  }
+  for (const id of declaredIds) {
+    if (!implIds.includes(id)) fail(`[A0] 夹具声明的断言 ${id} 在 cleanup-contract.mjs 里不存在（空登记）`);
+  }
+  // 2b 每条断言至少一个反例
+  for (const id of implIds) {
+    if (!cases.some((c) => (c.mustTrigger ?? []).includes(id))) {
+      fail(`[A0] 断言 ${id}（${ASSERTIONS[id]}）没有任何夹具反例 ⇒ 这条断言永远不会被测坏`);
+    }
+  }
+  // 2c 逐用例判定
+  const firedByCase = [];
+  for (const c of cases) {
+    const label = c.label ?? '?';
+    const errs = validateCleanupPackage(c.pkg ?? {});
+    const ids = [...new Set(errs.map((e) => (e.match(/^\[(A\d+)\]/) ?? [, '?'])[1]))];
+    firedByCase.push({ label, ok: Boolean(c.ok), ids, count: errs.length });
+    if (c.ok) {
+      if (errs.length !== 0) fail(`[A0] 夹具合法用例「${label}」被判红：${errs.join('；')}`);
+      continue;
+    }
+    if (errs.length === 0) {
+      fail(`[A0] 夹具反例「${label}」被放行 ⇒ 判定器坏成永远放行（应命中 ${(c.mustTrigger ?? []).join('/')}`);
+      continue;
+    }
+    for (const id of c.mustTrigger ?? []) {
+      if (!ids.includes(id)) fail(`[A0] 夹具反例「${label}」应命中 ${id}（${ASSERTIONS[id] ?? '?'}），实际只命中 ${ids.join('/') || '无'}`);
+    }
+    for (const id of ids) {
+      if (!implIds.includes(id)) fail(`[A0] 夹具反例「${label}」命中了未登记的断言 ${id}`);
+    }
+  }
+
+  // ---- 3. 真实规则库过同一个校验器 ----
   const file = path.join(ROOT, RULES_REL);
   let rules;
   try {
@@ -66,157 +122,81 @@ function main() {
     fail(`规则 JSON 不可读: ${e.message}`);
     return;
   }
-
-  const items = [];
-  for (const g of rules.groups ?? []) {
-    for (const it of g.items ?? []) items.push(it);
-    for (const sg of g.subGroups ?? []) for (const it of sg.items ?? []) items.push(it);
-  }
+  const items = collectItems(rules);
   if (items.length === 0) fail('规则库没有任何条目（groups 结构异常？）');
 
-  // 判定器自检（A1 的反假绿）：真实规则库里没有未登记 token，所以**光跑数据永远测不出
-  // "判定器坏成永远放行"** —— 本轮同源化时实测过：把 makeTokenChecker 改成恒返回 null，
-  // 残留门禁因有夹具反例当场红，本门禁却照旧绿。补一条最小判别断言，坏判定器必红。
-  if (checkToken('ZZ_NotARealToken') === null || checkToken('APPDATA') !== null) {
-    fail('[A1] token 判定器自检失败：无法区分"已登记"与"未登记"，整段 A1 不可信');
-  }
+  const pkgErrs = validateCleanupPackage(rules);
+  for (const e of pkgErrs) fail(`真实规则库：${e}`);
 
-  // ---- A1: 每个 %TOKEN% 都在登记表内 ----
-  // 口径注意：旧注释写的是「大小写不敏感」，但既有判定 `RESOLVABLE_TOKENS.has(tok)` 实际
-  // **大小写敏感**（集合里就是 SystemRoot / ProgramFiles(x86) 这种原样写法）。A7/N6 同源化
-  // 只共享查法与报错，**不改这条口径** —— 改成不敏感会放宽准入，属行为变更要单独拍板。
-  let tokenCount = 0;
-  for (const it of items) {
-    for (const tok of collectTokens(it)) {
-      tokenCount++;
-      const why = checkToken(tok);
-      if (why) fail(`[A1] 规则 ${it.id}：${why}；登记表见本文件头部 RESOLVABLE_TOKENS`);
+  // ---- 4. 门禁专属断言（不属于"包语义"，不放进夹具） ----
+  // ---- 4z 跨轨登记表不许腐烂（V2 P2-D7）----
+  // 登记的是"实测不等价点"。一旦有人动了消费方代码（修 D19、扩那份硬编码 id 清单、
+  // 换专用通道），这张表就从证据变成神话 —— 所以每条都拿 anchor 回代码里对一遍。
+  const xt = schema.crossTrack ?? {};
+  const points = Array.isArray(xt.points) ? xt.points : [];
+  if (points.length === 0) {
+    fail('[A13] 契约表 crossTrack.points 为空：已实测的不等价点必须登记（没有也要写明"本轮未发现"）');
+  }
+  for (const p2 of [...points, ...(Array.isArray(xt.specialHandlers) ? xt.specialHandlers : [])]) {
+    const file = p2.consumer;
+    const anchor = p2.anchor;
+    const label = p2.id ?? p2.key ?? '?';
+    if (!file || !anchor) {
+      fail(`[A13] 登记项 ${label} 缺 consumer/anchor（没有坐标的登记表无法核对）`);
+      continue;
+    }
+    let text;
+    try {
+      text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    } catch (e) {
+      fail(`[A13] 登记项 ${label} 的消费方读不到：${file}（${e.message}）`);
+      continue;
+    }
+    if (!text.includes(anchor)) {
+      fail(`[A13] 登记项 ${label} 的 anchor 在 ${file} 里已找不到 ⇒ 代码已改动，本条登记过期，复核后更新或删除`);
     }
   }
-
-  // ---- A2: 扫描/执行口径一致的字段形态 ----
-  // 执行侧 expand_glob_dirs 只认 `*`、glob_match 只支持单星、分隔符只认 `\`；
-  // 扫描侧（cleanup_scan.rs）支持 `?` 与 `/`。规则里出现这些形态 = 扫描命中、执行漏删。
-  for (const it of items) {
-    walkRules(it, {
-      fileKey: (fk) => {
-        const p = fk.path ?? '';
-        if (p.includes('/')) fail(`[A2] 规则 ${it.id}：fileKeys.path 含 / 分隔符（执行侧只按 \\ 切分）: ${p}`);
-        if (p.includes('?')) fail(`[A2] 规则 ${it.id}：fileKeys.path 含 ? 通配（执行侧 expand_glob_dirs 不支持）: ${p}`);
-        if (typeof fk.recurse !== 'undefined' && typeof fk.recurse !== 'boolean') {
-          fail(`[A2] 规则 ${it.id}：fileKeys.recurse 必须是布尔（两侧缺省口径都是 true，但非布尔值两侧判定路径不同）`);
-        }
-        const pat = fk.pattern ?? '*';
-        const starCount = (pat.match(/\*/g) ?? []).length;
-        if (pat !== '*' && (starCount !== 1 || pat.includes('?'))) {
-          fail(`[A2] 规则 ${it.id}：pattern「${pat}」超出执行侧 glob_match 的单星能力（只支持 * / 前缀* / *后缀 / 前缀*后缀）`);
-        }
-      },
-    });
-    // excludeKeys（对象型、含 reg 面）执行侧无过滤逻辑：出现即「扫描排除、执行照删」，
-    // 属于数据面放行越界删除的高危形态，回潮即红。
-    if ((it.excludeKeys ?? []).length > 0) {
-      fail(`[A2] 规则 ${it.id}：使用了 excludeKeys，但执行侧（native.rs cleanup_execute）未实现排除过滤——先实现执行侧再放行本断言`);
-    }
-    // excludePaths（C-2，2026-09-28 开门）：字符串数组，两侧已实现同口径过滤
-    // （扫描 cleanup_scan.rs get_file_key_deletable / 执行 native.rs cleanup_execute，
-    // 均按「%VAR% 展开 + 有扩展名=文件 + 否则=目录前缀」并入排除面）。形态约束与
-    // fileKeys.path 同源：禁 / 分隔符与 ? 通配；%TOKEN% 由 A1 的全量字符串收集覆盖。
-    const expaths = it.excludePaths ?? [];
-    if (!Array.isArray(expaths)) {
-      fail(`[A2] 规则 ${it.id}：excludePaths 必须是字符串数组`);
-    } else {
-      for (const t of expaths) {
-        if (typeof t !== 'string' || !t.trim()) {
-          fail(`[A2] 规则 ${it.id}：excludePaths 含非字符串或空项`);
-        } else {
-          if (t.includes('/')) fail(`[A2] 规则 ${it.id}：excludePaths 含 / 分隔符（执行侧只按 \\ 归一）: ${t}`);
-          if (t.includes('?')) fail(`[A2] 规则 ${it.id}：excludePaths 含 ? 通配（执行侧不支持）: ${t}`);
-        }
-      }
-      // F-2（2026-09-28）：excludePaths 的注册表形态（`HIVE\KEY::VALUE` 具名值排除）
-      // 只对具名值 regKeys 目标可兑现——树删除（无 value）与 value:"*"（清全部值）都是
-      // 原子操作，无法在删的过程中保留个别值。混用 = 扫描排除了执行删不掉的语义缺口。
-      const hasRegValueExclude = expaths.some((t) => typeof t === 'string' && t.includes('::'));
-      if (hasRegValueExclude) {
-        const regKeys = it.regKeys ?? [];
-        const offenders = regKeys.filter((rk) => !rk.value || rk.value === '*');
-        if (offenders.length > 0) {
-          fail(`[A2] 规则 ${it.id}：excludePaths 含具名值排除（::），但 regKeys 存在删树/通配形态（无法保留个别值）——把排除写成整键形态或改目标为具名值`);
-        }
-      }
+  // 取值域与库对齐：未登记取值 = A13 红（装载侧同口径）；登记了但库里没人用 = 表没跟着收缩
+  for (const h of Array.isArray(xt.specialHandlers) ? xt.specialHandlers : []) {
+    const used = new Set(items.map((it) => it[h.key]).filter((v) => v !== undefined));
+    const unknown = [...used].filter((v) => !(h.values || []).includes(v));
+    if (unknown.length) fail(`[A13] 条目里出现未登记的 ${h.key} 取值：${unknown.join('/')}（先实测消费方再进表）`);
+    const stale = (h.values || []).filter((v) => !used.has(v));
+    if (stale.length) fail(`[A13] ${h.key} 登记了库内已不存在的取值：${stale.join('/')}（登记表必须跟着真库收缩）`);
+  }
+  // 死键使用者必须全数登记：将来有人修那份硬编码 id 清单时，这份清单就是改动面
+  for (const k of Array.isArray(xt.deadSourceKeys) ? xt.deadSourceKeys : []) {
+    const users = items.filter((it) => Array.isArray(it[k]) && it[k].length > 0).map((it) => it.id);
+    const pt = points.find((x) => String(x.key ?? '').includes(k));
+    if (pt && users.length) {
+      const listed = new Set(pt.affectedItems ?? []);
+      const missing = users.filter((id) => !listed.has(id));
+      if (missing.length) fail(`[A13] 使用死键 ${k} 的条目未全数登记：缺 ${missing.join('/')}（affectedItems 要跟库对齐）`);
     }
   }
 
-  // ---- A3: 精确重复规则（指纹 = 目标类型 + 可移植路径模板 + pattern + recurse + reg value） ----
-  const seen = new Map();
-  for (const it of items) {
-    const fps = [];
-    for (const fk of it.fileKeys ?? []) {
-      fps.push(`file|${(fk.path ?? '').toLowerCase()}|${fk.pattern ?? '*'}|${fk.recurse === false ? 'false' : 'true'}`);
-    }
-    for (const rk of it.regKeys ?? []) {
-      fps.push(`reg|${(rk.path ?? '').toLowerCase()}|${rk.value ?? ''}`);
-    }
-    for (const fp of fps) {
-      if (seen.has(fp)) {
-        fail(`[A3] 精确重复：规则 ${it.id} 与 ${seen.get(fp)} 重复定义 ${fp}`);
-      } else {
-        seen.set(fp, it.id);
-      }
-    }
+  // 4a winapp2Version 冻结棘轮（值取自契约表，改值必须同时改表 ⇒ 留痕）
+  const frozen = schema.cleanup[FROZEN_KEY];
+  if (!frozen) {
+    fail(`[A5] 契约表缺 cleanup.${FROZEN_KEY}.winapp2Version（冻结值没了等于放开抬值）`);
+  } else if ('winapp2Version' in rules && String(rules.winapp2Version) !== String(frozen)) {
+    fail(
+      `[A5] winapp2Version=${rules.winapp2Version} 与冻结值 ${frozen} 不符——P1-4 已裁决它只是历史素材基线，` +
+        `禁止随「计划同步」抬值；确需变动请同时改 tools/rule-schema.json 与本门禁的注释并写明依据`,
+    );
   }
-
-  // ---- A4: deleteMode 已裁决移除（P0-5），回潮即红 ----
-  const raw = fs.readFileSync(file, 'utf8');
-  const dm = (raw.match(/"deleteMode"/g) ?? []).length;
-  if (dm > 0) fail(`[A4] deleteMode 出现 ${dm} 次——该字段在 Rust/前端零消费方，P0-5 已裁决移除，禁止回潮`);
-
-  // ---- A5: 结构底线（验签与对拍另有专门门禁，这里只做形状自检） ----
-  if (typeof rules.rulesVersion !== 'number') fail('[A5] rulesVersion 必须是数字');
-  if ('winapp2Version' in rules && String(rules.winapp2Version) !== WINAPP2_FROZEN) {
-    fail(`[A5] winapp2Version=${rules.winapp2Version} 与冻结值 ${WINAPP2_FROZEN} 不符——P1-4 已裁决它只是历史素材基线，禁止随「计划同步」抬值；确需变动请修改本门禁 WINAPP2_FROZEN 并写明依据`);
+  // 4b rulesVersion 下限棘轮（只升不降；上限交给装载侧防回滚链）
+  const minVer = Number(schema.cleanup.versionRatchetMin ?? 0);
+  if (!minVer) {
+    fail('[A5] 契约表缺 cleanup.versionRatchetMin');
+  } else if (typeof rules.rulesVersion !== 'number' || rules.rulesVersion < minVer) {
+    fail(`[A5] rulesVersion 必须是不低于 ${minVer} 的数字`);
   }
-
-  // ---- A6: 准入必填字段与溯源形态（P1-3） ----
-  for (const it of items) {
-    for (const f of REQUIRED_FIELDS) {
-      if (it[f] === undefined) fail(`[A6] 规则 ${it.id}：缺必填字段 ${f}`);
-    }
-    if (it.risk !== undefined && !RISK_LEVELS.has(it.risk)) {
-      fail(`[A6] 规则 ${it.id}：risk「${it.risk}」不在 ${[...RISK_LEVELS].join('/')} 之内`);
-    }
-    const prov = it.prov ?? {};
-    if (typeof prov.source !== 'string' || !prov.source) fail(`[A6] 规则 ${it.id}：prov.source 缺失或为空`);
-    if (!SOURCE_CLASSES.has(prov.sourceClass)) {
-      fail(`[A6] 规则 ${it.id}：prov.sourceClass「${prov.sourceClass ?? '缺失'}」不在来源级别枚举内（${[...SOURCE_CLASSES].join('/')}）`);
-    }
-    if (typeof prov.ref !== 'string' || !prov.ref) fail(`[A6] 规则 ${it.id}：prov.ref 缺失或为空`);
-    if (!prov.reviewedAt) fail(`[A6] 规则 ${it.id}：prov.reviewedAt 缺失（治理批次日期，格式 YYYY-MM-DD）`);
-  }
-
-  // ---- A7: 文件规则必须显式写 recurse（P1-3：不得依赖缺省值，两侧口径由数据钉死） ----
-  for (const it of items) {
-    for (const fk of it.fileKeys ?? []) {
-      if (typeof fk.recurse !== 'boolean') {
-        fail(`[A7] 规则 ${it.id}：fileKeys.path「${fk.path ?? ''}」缺显式布尔 recurse`);
-      }
-    }
-    // 进程约束字段出现时必须是非空数组（有约束却写空 = 静默失效）
-    for (const f of ['restartProcesses', 'requiredStoppedProcesses']) {
-      if (f in it && (!Array.isArray(it[f]) || it[f].length === 0)) {
-        fail(`[A7] 规则 ${it.id}：${f} 存在但不是非空数组`);
-      }
-    }
-  }
-
-  // ---- A8: 父子路径重叠 → 人工复核清单（非致命，P1-2）----
-  // 精确重复在 A3 判红；父子重叠（一条规则的目标目录是另一条的前缀）不禁止，
-  // 但必须显式列进人工复核清单，由开发者确认「合并 / 排除 / 保持共存」三选一。
+  // 4c 父子路径重叠 → 人工复核清单（非致命，P1-2）
   const filePaths = [];
   for (const it of items) {
     for (const fk of it.fileKeys ?? []) {
-      filePaths.push({ id: it.id, path: (fk.path ?? '').toLowerCase().replace(/\/+$/, '') });
+      filePaths.push({ id: it.id, path: (fk.path ?? '').toLowerCase().replace(/\\+$/, '') });
     }
   }
   const overlaps = [];
@@ -230,35 +210,28 @@ function main() {
     }
   }
   if (overlaps.length > 0) {
-    console.log(`\n〔人工复核清单〕父子路径重叠 ${overlaps.length} 组（不判红，但每批发布前须有明确合并/排除/共存结论，记录见 docs/规则库审核记录-*.md）：`);
+    console.log(
+      `\n〔人工复核清单〕父子路径重叠 ${overlaps.length} 组（不判红，但每批发布前须有明确合并/排除/共存结论，记录见 docs/规则库审核记录-*.md）：`,
+    );
     for (const [parent, child] of overlaps) {
       console.log(`  · ${parent.id}（${parent.path}）⊃ ${child.id}（${child.path}）`);
     }
   }
-
-  // ---- A9: 时效护栏字段形态（P0-M5，竞品借鉴落地方案 §5）----
-  // minAgeHours / minAgeDays 互斥（两侧解析器对双声明取更严格值，但数据面禁止含糊）；
-  // 必须是正整数；年龄语义 = 文件修改时间，扫描与执行两侧同谓词（cleanup_scan.rs）。
-  for (const it of items) {
-    const hasH = 'minAgeHours' in it;
-    const hasD = 'minAgeDays' in it;
-    if (hasH && hasD) {
-      fail(`[A9] 规则 ${it.id}：minAgeHours 与 minAgeDays 互斥，不得同时声明`);
-    }
-    for (const f of ['minAgeHours', 'minAgeDays']) {
-      if (!(f in it)) continue;
-      const v = it[f];
-      if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
-        fail(`[A9] 规则 ${it.id}：${f} 必须是正整数（当前 ${JSON.stringify(v)}）`);
-      }
-    }
+  // 4d 上限口径提示（阈值本身由校验器把关，这里只报当前水位，防"贴着上限"无人察觉）
+  const maxItems = schemaNumber('cleanup', 'maxItems');
+  if (items.length > maxItems * 0.9) {
+    console.log(`\n〔水位提示〕条目数 ${items.length} 已接近上限 ${maxItems}（90%），扩库前先确认上限是不是被随手抬过`);
   }
 
   if (errors.length > 0) {
-    console.error(`\n清理规则契约门禁：${errors.length} 处违约（共检查 ${items.length} 条规则 / ${tokenCount} 个 token 引用）`);
+    console.error(`\n清理规则契约门禁：${errors.length} 处违约（共检查 ${items.length} 条规则 / 夹具 ${cases.length} 用例）`);
     process.exit(1);
   }
-  console.log(`✓ 清理规则契约门禁通过：${items.length} 条规则 / ${tokenCount} 个 token 引用全部可解析、口径一致、无重复`);
+  console.log(
+    `✓ 清理规则契约门禁通过：${items.length} 条规则；判定器自检与夹具 ${cases.length} 用例双向核对 ` +
+      `（${implIds.length} 条断言全部有反例）；契约表 schemaVersion=${schema.schemaVersion}`,
+  );
+  console.log(`  覆盖明细：${implIds.map((id) => `${id}=${firedByCase.filter((c) => !c.ok && c.ids.includes(id)).length} 反例`).join(' ')}`);
 }
 
 main();
