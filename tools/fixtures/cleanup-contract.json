@@ -19,7 +19,8 @@
     "A10",
     "A11",
     "A12",
-    "A13"
+    "A13",
+    "A14"
   ],
   "packages": [
     {
@@ -1576,7 +1577,7 @@
       }
     },
     {
-      "label": "A13 条目只有 candidatesPs（引擎不消费）",
+      "label": "A13 条目没有任何活路径来源（candidatesPs 自 D19 修复 2026-10-01 起已是活键：主条目只带它不再触发 A13；子组条目一条来源都没有，仍必须拒）",
       "ok": false,
       "mustTrigger": [
         "A13"
@@ -1678,6 +1679,387 @@
                 },
                 "ver": 20260928,
                 "fileCleanType": "telegram"
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": 20260928
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A14 贡献项 weight 越界（上限 3）",
+      "ok": false,
+      "mustTrigger": [
+        "A14"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "evidenceItems": [
+                  {
+                    "text": "a",
+                    "weight": 4
+                  },
+                  {
+                    "text": "b",
+                    "weight": 1
+                  }
+                ]
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": 20260928
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A14 贡献项缺 text",
+      "ok": false,
+      "mustTrigger": [
+        "A14"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "evidenceItems": [
+                  {
+                    "weight": 1
+                  },
+                  {
+                    "text": "b",
+                    "weight": 1
+                  }
+                ]
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": 20260928
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A14 贡献项全是 0 分解释项",
+      "ok": false,
+      "mustTrigger": [
+        "A14"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "evidenceItems": [
+                  {
+                    "text": "a",
+                    "weight": 0
+                  },
+                  {
+                    "text": "b",
+                    "weight": 0
+                  }
+                ]
+              }
+            ],
+            "subGroups": [
+              {
+                "id": "g1-sub",
+                "name": "子组",
+                "items": [
+                  {
+                    "id": "selftest-sub",
+                    "name": "子组项",
+                    "risk": "medium",
+                    "evidence": "只作用于测试目录",
+                    "recommended": false,
+                    "domain": "app",
+                    "group": "g1-sub",
+                    "nature": "cache",
+                    "regenerable": true,
+                    "minAgeDays": 7,
+                    "prov": {
+                      "source": "builtin",
+                      "sourceClass": "windows-doc",
+                      "ref": "tests/selftest",
+                      "reviewedAt": "2026-09-30"
+                    },
+                    "fileKeys": [
+                      {
+                        "path": "%APPDATA%\\TrimTest\\cache",
+                        "pattern": "*.tmp",
+                        "recurse": false
+                      }
+                    ],
+                    "regKeys": [
+                      {
+                        "path": "HKCU\\Software\\TrimTest",
+                        "value": "LastRun"
+                      }
+                    ],
+                    "ver": 20260928
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A14 合法包：含 0 分解释项但有一个正分事实",
+      "ok": true,
+      "mustTrigger": [],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "selftest-ok",
+                "name": "自检项",
+                "risk": "low",
+                "evidence": "只作用于测试目录",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "evidenceItems": [
+                  {
+                    "text": "Windows 更新安装日志，目录内容可再生",
+                    "weight": 2
+                  },
+                  {
+                    "text": "部分第三方维护工具也会在此写日志，仅作背景说明",
+                    "weight": 0
+                  }
+                ]
               }
             ],
             "subGroups": [

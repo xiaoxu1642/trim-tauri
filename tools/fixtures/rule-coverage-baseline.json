@@ -1,5 +1,5 @@
 {
-  "rulesVersion": 20260928,
+  "rulesVersion": 20261001,
   "covered": [
     "cleanup:amdCache",
     "cleanup:baiduNetdiskLog",

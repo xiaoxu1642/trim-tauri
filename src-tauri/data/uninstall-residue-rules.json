@@ -1,5 +1,5 @@
 {
-  "rulesVersion": 20260928,
+  "rulesVersion": 20261001,
   "prov": [
     {
       "sourceClass": "builtin-knowledge",
@@ -42,7 +42,7 @@
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20260928
+      "ver": 20261001
     },
     {
       "id": "residue-eset",
@@ -72,7 +72,7 @@
           "note": "配置键"
         }
       ],
-      "ver": 20260928
+      "ver": 20261001
     },
     {
       "id": "residue-roboform",
@@ -102,7 +102,7 @@
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20260928
+      "ver": 20261001
     },
     {
       "id": "residue-ccleaner",
@@ -132,7 +132,7 @@
           "note": "配置键（以发行商命名）"
         }
       ],
-      "ver": 20260928
+      "ver": 20261001
     },
     {
       "id": "residue-wechat",
@@ -164,7 +164,7 @@
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20260928
+      "ver": 20261001
     },
     {
       "id": "residue-qq",
@@ -202,11 +202,11 @@
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20260928
+      "ver": 20261001
     }
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "wyefhm5QjLBMQqWwN7aLCLTAGWWbaOfQhzsb57eXQag2ew+HXy+U9yIPw7Ka5IWeny3KTj2Jlqqq65K3ySu9DA=="
+    "sig": "U015FGi21QBEVC262l+KKAeLb0J6djlVIpJkD1vuJbPj4jJJt5THik6wdWB0GtZ1Vc4qQQWERYqPGxQChi1IAw=="
   }
 }

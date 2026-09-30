@@ -52,6 +52,7 @@
       "name",
       "risk",
       "evidence",
+      "evidenceItems",
       "recommended",
       "domain",
       "group",
@@ -89,6 +90,11 @@
       "pattern",
       "recurse"
     ],
+    "evidenceItemFields": [
+      "text",
+      "weight"
+    ],
+    "evidenceWeightMax": 3,
     "fileKeyRequired": [
       "path",
       "recurse"
@@ -254,24 +260,29 @@
     "points": [
       {
         "id": "D19-cleanup-scan-candidates",
-        "key": "candidates / globCandidates",
+        "key": "candidatesPs / globCandidatesPs",
         "consumer": "native-scanner/src/cleanup_scan.rs",
-        "anchor": "if let Some(cands) = rule.get(\"candidates\")",
-        "fact": "磁盘清理原生扫描器读 `candidates`/`globCandidates`，而规则库里的键名是 `candidatesPs`/`globCandidatesPs` ⇒ 该分支在清理域恒不命中",
-        "impact": "清理域里任何一条「只靠 candidates 生效」的规则都会静默 0 命中（不是报错，是看起来配好了）",
-        "status": "known-dead-kept",
-        "note": "源码注释自述按缺陷原样保留（引擎替换不夹带删除面变更，方案红线 1）。修它=给 4 条规则新开删除面，属**待拍板**，不在门禁里顺手改",
-        "affectedItems": []
+        "anchor": "if let Some(cands) = rule.get(\"candidatesPs\")",
+        "fact": "磁盘清理原生扫描器自 2026-10-01 起读库里的真键名 `candidatesPs`/`globCandidatesPs`（D19 键名缺陷已修：此前读 `candidates`/`globCandidates`，库里不存在 ⇒ 该分支恒不命中）",
+        "impact": "带候选的条目（qqCache/neteaseMusicCache/douyinCache/wechatCache）在配置路径缺失时可用候选自动换路径；修复前这 4 条只走 pathPs 一条来源",
+        "status": "fixed-2026-10-01",
+        "note": "修复前提是库里过宽候选先收敛到叶子 Cache 目录（qqCache 原候选含整个 %APPDATA%\\Tencent\\QQ 数据目录、douyinCache 原候选含整个应用目录——原样翻键会净扩删除面，2026-10-01 拍板先收敛再翻）。schema 的 itemFields 从未登记过 candidates/globCandidates 旧键名，装载侧天然拒绝",
+        "affectedItems": [
+          "qqCache",
+          "neteaseMusicCache",
+          "douyinCache",
+          "wechatCache"
+        ]
       },
       {
         "id": "paths-scan-candidatesPs",
         "key": "candidatesPs / globCandidatesPs",
         "consumer": "src-tauri/src/engine/native.rs",
         "anchor": "for id in [\"neteaseMusicCache\", \"qqCache\", \"douyinCache\"]",
-        "fact": "安装路径扫描（paths_scan）消费 `candidatesPs`/`globCandidatesPs`，但**按 3 个条目 id 硬编码**取用；清理扫描器同名键读的是 `candidates`/`globCandidates`（库里不存在）",
-        "impact": "同名键在两个域语义不同：清理域不消费、安装路径域只对已登记 id 生效 ⇒ 新增条目带该键不会自动生效",
+        "fact": "安装路径扫描（paths_scan）消费 `candidatesPs`/`globCandidatesPs`，但**按 3 个条目 id 硬编码**取用（wechatCache 的 globCandidatesPs 单独走微信缓存目录解析）；清理扫描器 2026-10-01 起也消费同名键（D19 已修）",
+        "impact": "同名键在两个域都活了，但 paths_scan 侧仍按已登记 id 生效 ⇒ 新增条目带该键在 paths_scan 域不会自动生效（清理域会）",
         "status": "live-for-listed-ids",
-        "note": "受影响 4 条里只有 3 条被 paths_scan 硬编码清单覆盖；`wechatCache` 的 globCandidatesPs 两条轨都不消费 = 纯死重量。要清掉或删除该键属**待拍板**（会改删除面），本表只登记事实",
+        "note": "受影响 4 条的键在两条轨都有消费者：paths_scan 按 id 硬编码消费 3 条 candidatesPs，wechatCache 的 globCandidatesPs 用于微信缓存目录解析（2026-10-01 订正：此前写「两条轨都不消费=纯死重量」与 engine/native.rs 实际读取不符）。要清掉或删除该键属**待拍板**（会改删除面），本表只登记事实",
         "affectedItems": [
           "qqCache",
           "neteaseMusicCache",
@@ -280,15 +291,14 @@
         ]
       }
     ],
-    "deadSourceKeys": [
-      "candidatesPs",
-      "globCandidatesPs"
-    ],
+    "deadSourceKeys": [],
     "liveSourceKeys": [
       "pathPs",
       "fileKeys",
       "regKeys",
-      "detect"
+      "detect",
+      "candidatesPs",
+      "globCandidatesPs"
     ],
     "specialHandlers": [
       {

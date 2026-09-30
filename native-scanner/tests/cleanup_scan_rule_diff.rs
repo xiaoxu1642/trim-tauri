@@ -140,9 +140,9 @@ fn rules_json(target: &Path, pattern: &str, recurse: bool, extra: &str) -> Strin
     wrap_item(&item)
 }
 
-/// pathPs 形态（目录型条目）：`candidates` 分支只在**没有 fileKeys** 时才可达
+/// pathPs 形态（目录型条目）：`candidatesPs` 分支只在**没有 fileKeys** 时才可达
 /// —— fileKeys 分支处理完会 `continue`，带 fileKeys 的条目根本走不到那段。
-/// 注意 pathPs 与 candidates 都要 PS 受限表达式（单引号字面量 / `$env:` 拼接），
+/// 注意 pathPs 与 candidatesPs 都要 PS 受限表达式（单引号字面量 / `$env:` 拼接），
 /// 裸路径会被求值器判非法并 fail-closed 跳过。
 fn rules_json_pathps(target: &Path, extra: &str) -> String {
     let mut item = String::from(ITEM_HEAD);
@@ -215,37 +215,37 @@ fn 时效护栏能把命中清零() {
     fs::remove_dir_all(&root).ok();
 }
 
-/// D19 钉桩（**双向**）：引擎按缺陷原样只读 `candidates`/`globCandidates`，而真实规则库用的是
+/// D19 钉桩（**双向**，2026-10-01 键名已对齐后翻向）：引擎现在读库里的真键名
 /// `candidatesPs`/`globCandidatesPs`（`cleanup_scan.rs` 该分支的注释即登记处）。两个方向都断：
-///   ① 写 `candidates` 时这个分支必须是活的（pathCandidates 真的收到它）——否则钉桩是空的，
-///      下一个人删掉分支也照样绿；
-///   ② 写 `candidatesPs`（库里的真键名）时 pathCandidates 必须为空 —— 这是**已登记缺陷**，
-///      不是通过。哪天有人把键名对齐，② 立刻判红：那时必须同步改契约表 crossTrack 登记表
-///      与覆盖基线，不能悄悄把枚举面/删除面放大。
+///   ① 写 `candidatesPs`（库里的真键名）时分支必须是活的（pathCandidates 真的收到它）——
+///      否则钉桩是空的，下一个人删掉分支也照样绿；
+///   ② 写旧缺陷键名 `candidates` 时必须被忽略——库里根本没有这个键，schema 也禁止它
+///      （不在 itemFields），引擎这里同样不能给翻回去留活路。哪天这里红说明键名又被
+///      改回去了：同步契约表 crossTrack 登记表与覆盖基线，别悄悄改枚举面。
 #[test]
-fn 死键双向钉桩_引擎只认_candidates_不认库里的键名() {
+fn 活键双向钉桩_引擎认库里的键名_不认旧缺陷键名() {
     let root = temp_root("deadkey");
     plant(&root, &[("a.log", 5)]);
     let probe = jstr(&ps_lit(&root));
 
-    // ① 引擎真读的键名：分支应当是活的
-    let live = format!(",\"candidates\":[{probe}]");
+    // ① 库里的真键名：分支应当是活的
+    let live = format!(",\"candidatesPs\":[{probe}]");
     let (code, out, err) = scan_raw(&rules_json_pathps(&root, &live));
     assert_eq!(code, 0, "引擎不认的键不该让整次扫描失败：{err}");
     assert_eq!(
         path_candidates_empty(&out),
         Some(false),
-        "candidates 分支没收到候选路径 —— 钉桩失去意义，先查引擎是否改了这段：{out}"
+        "candidatesPs 分支没收到候选路径 —— D19 修复被回退了，先查引擎这段：{out}"
     );
 
-    // ② 库里的真键名：当前必须仍被静默忽略（D19 已登记缺陷，不是通过）
-    let dead = format!(",\"candidatesPs\":[{probe}]");
+    // ② 旧缺陷键名：库里不存在（schema 也不登记），引擎必须仍忽略
+    let dead = format!(",\"candidates\":[{probe}]");
     let (code2, out2, err2) = scan_raw(&rules_json_pathps(&root, &dead));
     assert_eq!(code2, 0, "引擎不认的键不该让整次扫描失败：{err2}");
     assert_eq!(
         path_candidates_empty(&out2),
         Some(true),
-        "candidatesPs 竟被消费了 —— 键名已被对齐。同步改契约表 crossTrack 登记表与覆盖基线后再改本用例：{out2}"
+        "candidates 竟被消费了 —— 旧缺陷键名被翻回来了。同步契约表 crossTrack 与覆盖基线后再改本用例：{out2}"
     );
 
     fs::remove_dir_all(&root).ok();

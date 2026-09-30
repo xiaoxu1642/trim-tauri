@@ -13,8 +13,9 @@
 //     IgnoreInaccessible（不可读子目录静默跳过）、目录不计数、独占打开探测（FileShare.None）
 //   - Get-PathDeletableStats：三态出口（ok/missing），size/nfiles 只计探测通过的可删文件
 //   - RULE_PATH_EVAL_PS：受限求值器逐字符对齐（含 depth 不回退的累计计数语义）
-//   - D19 键名缺陷 bug 兼容：candidates/globCandidates 分支照原样移植（规则库无此键名，恒死代码），
-//     修复键名属删除面变更，留待 D19 批评估——引擎替换不得夹带行为变更。
+//   - D19 键名缺陷已修（2026-10-01 拍板）：candidatesPs/globCandidatesPs 分支自本日起按
+//     库里的真键名生效；修复前读 candidates/globCandidates 恒死。修复前提是库里过宽候选
+//     先收敛到叶子 Cache 目录（删除面不得借机扩大），登记处 tools/rule-schema.json crossTrack。
 //
 // P1/P2 待接入：fileKeys（枚举+pattern+去重+PLANFILE）、regKeys（winreg）、
 //               blockedBy（Toolhelp32 进程枚举）、detect 的 reg 型检测。
@@ -2089,9 +2090,11 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             path_source = "configured".to_string();
         }
 
-        // [D19 根因·已知缺陷] 规则键名实为 candidatesPs/globCandidatesPs，这里按缺陷原样
-        // 读 candidates/globCandidates（恒死代码）——引擎替换不夹带删除面变更（方案红线 1）
-        if let Some(cands) = rule.get("candidates") {
+        // [D19 键名已对齐（2026-10-01 拍板修复）] 此前按缺陷原样读 `candidates`/`globCandidates`，
+        // 而规则库真键名是 `candidatesPs`/`globCandidatesPs` ⇒ 恒死代码。修复前提是把库里
+        // 过宽的候选先收敛到叶子 Cache 目录（qqCache/douyinCache 原候选含整个应用数据目录，
+        // 原样翻键会净扩删除面）。同步登记处：tools/rule-schema.json crossTrack。
+        if let Some(cands) = rule.get("candidatesPs") {
             if cands.ps_count() > 0 {
                 if let Some(arr) = cands.as_arr() {
                     for cexpr in arr {
@@ -2114,7 +2117,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
                 }
             }
         }
-        if let Some(globs) = rule.get("globCandidates") {
+        if let Some(globs) = rule.get("globCandidatesPs") {
             if globs.ps_count() > 0 {
                 if let Some(arr) = globs.as_arr() {
                     for gexpr in arr {

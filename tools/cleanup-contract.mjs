@@ -30,7 +30,8 @@ export const ASSERTIONS = {
   A10: '未知字段白名单（顶层 / 组 / 子组 / 条目 / fileKeys / regKeys / prov）',
   A11: '条目 id 字符集与非空唯一',
   A12: '条目级版本戳 ver 必须存在且等于顶层 rulesVersion（V2 P2-A1：报告要能回答"这条是哪一版规则判的"）',
-  A13: '条目必须有**当前引擎真会读**的路径来源：只有 candidatesPs/globCandidatesPs 的条目在清理域恒 0 命中（V2 P2-D7 实测不等价点）',
+  A13: '条目必须有**当前引擎真会读**的路径来源（活键清单见契约表 crossTrack.liveSourceKeys；D19 修复后 candidatesPs/globCandidatesPs 已是活键，一条来源都没有的条目仍必须拒）',
+  A14: '可选贡献项 evidenceItems 必须是非空对象数组：text 非空、weight 为 0..契约上限的数字，且至少一项 weight>0（V2 P1-A3：0 分解释项只解释、不进求和）',
 };
 
 const itemLabel = (it, fallback) => {
@@ -202,8 +203,47 @@ export function validateCleanupPackage(pkg) {
     } else if (typeof it.ver !== 'number' || it.ver !== pkg.rulesVersion) {
       say('A12', `规则 ${id}: ver=${JSON.stringify(it.ver)} 与顶层 rulesVersion=${JSON.stringify(pkg.rulesVersion)} 不一致`);
     }
-    // A13 路径来源必须"活着"（V2 P2-D7）：清理域扫描器读的是库里不存在的 `candidates`，
-    // 于是"只写 candidatesPs"的规则等于配了却永远 0 命中 —— 不报错比报错坏。
+    // A14 贡献项（V2 P1-A3）：0 分解释项允许存在（BCU 口径：不进求和、只解释），
+    // 但至少要有一个正分事实项——否则这条规则的"建议"没有任何事实支撑。
+    // 与 Rust 装载侧同文案同口径，任一侧放宽另一侧红。
+    if (it.evidenceItems !== undefined) {
+      const evs = it.evidenceItems;
+      if (!Array.isArray(evs)) {
+        say('A14', `规则 ${id}: evidenceItems 必须是数组`);
+      } else if (evs.length === 0) {
+        say('A14', `规则 ${id}: evidenceItems 不能是空数组（没有贡献项就删掉该字段，用 evidence 单句）`);
+      } else {
+        const evFields = list('cleanup', 'evidenceItemFields') ?? [];
+        const weightMax = number('cleanup', 'evidenceWeightMax') ?? 3;
+        let positive = 0;
+        evs.forEach((ev, i) => {
+          if (!ev || typeof ev !== 'object' || Array.isArray(ev)) {
+            say('A14', `规则 ${id}: evidenceItems[${i}] 必须是对象`);
+            return;
+          }
+          for (const k of Object.keys(ev)) {
+            if (!evFields.includes(k)) say('A14', `规则 ${id}: evidenceItems[${i}] 未知字段 ${k}`);
+          }
+          const text = typeof ev.text === 'string' ? ev.text : '';
+          if (!text.trim()) say('A14', `规则 ${id}: evidenceItems[${i}] 缺 text 或为空白`);
+          if (text.length > maxText) say('A14', `规则 ${id}: evidenceItems[${i}] text 超长（上限 ${maxText}）`);
+          const w = ev.weight;
+          if (typeof w !== 'number' || !Number.isFinite(w)) {
+            say('A14', `规则 ${id}: evidenceItems[${i}] 缺 weight 或不是数字`);
+          } else if (w < 0 || w > weightMax) {
+            say('A14', `规则 ${id}: evidenceItems[${i}] weight=${w} 超出 0..=${weightMax}`);
+          } else if (w > 0) {
+            positive += 1;
+          }
+        });
+        if (positive === 0) {
+          say('A14', `规则 ${id}: evidenceItems 全是 0 分解释项——0 分项只解释不进求和，至少要有一个正分事实支撑这条建议`);
+        }
+      }
+    }
+    // A13 路径来源必须"活着"：活键清单取自契约表 crossTrack.liveSourceKeys（与扫描器、
+    // 覆盖矩阵同一份定义，改键名先改契约表）。D19 键名缺陷修复（2026-10-01）后
+    // candidatesPs/globCandidatesPs 已进活键清单，但"一条来源都没有"仍然必须拒。
     {
       const live = crossTrack('liveSourceKeys');
       const deadOnly = crossTrack('deadSourceKeys');
