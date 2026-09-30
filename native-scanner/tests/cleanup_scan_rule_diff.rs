@@ -1,0 +1,264 @@
+//! 规则改动 → 命中集差分（V2 P1-C5，2026-09-30）
+//!
+//! 为什么放在扫描器自己的集成测试里：真正的执行侧扫描器是 Rust（`cleanup_scan::run_json`），
+//! Node 门禁只能对拍文本与结构，测不出"改完这条规则到底多命中/少命中哪些文件"。
+//! CRS 那套语料差分的价值也在这里 —— 静态契约全绿不代表行为没变。
+//!
+//! 三条纪律：
+//! 1. **零副作用**：只在临时目录造文件、只跑扫描，绝不进删除链（AGENTS §4「快速组只用
+//!    零副作用命令」）；本文件最后一条用例专门钉住"扫描是只读的"，前提不成立则全部断言作废；
+//! 2. 断言的是**差分集合**（新增/丢失了哪些目标），不是总数 —— 差分才是"这次改动干了什么"；
+//! 3. 本 crate 不依赖 serde_json（自带 JSON 解析器），**不为测试新增依赖**（AGENTS §2），
+//!    因此这里用最小手写解析，只认 `@@PLANFILE@@` 这一种行。
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn temp_root(tag: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = std::env::temp_dir().join(format!("trim-rule-diff-{tag}-{}-{n}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).expect("建临时树失败");
+    // temp_dir() 在 8.3 短名环境下给的是 `ADMINI~1`，而扫描器枚举出的是长名 —— 不拉齐
+    // 就 strip_prefix 全失败、命中集变成绝对路径，"差分"断言会以假阳性过掉。
+    // canonicalize 后手工剥 `\\?\` 前缀（不为测试引 dunce，且只服务本机临时目录）。
+    let mut real = fs::canonicalize(&base)
+        .expect("canonicalize 临时目录失败")
+        .to_string_lossy()
+        .into_owned();
+    if let Some(s) = real.strip_prefix(r"\\?\") {
+        real = s.to_string();
+    }
+    PathBuf::from(real)
+}
+
+fn plant(root: &Path, files: &[(&str, usize)]) {
+    for (name, size) in files {
+        let full = root.join(name);
+        if let Some(dir) = full.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        fs::write(&full, vec![b'x'; *size]).expect("写样本文件失败");
+    }
+}
+
+/// JSON 字符串字面量转义（只覆盖夹具里会出现的字符：反斜杠与双引号）
+fn jstr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// 从 `@@PLANFILE@@{"id":"…","path":"…","size":N}` 里取 path 值（最小解析，不引依赖）
+fn planfile_path(line: &str) -> Option<String> {
+    let body = line.strip_prefix("@@PLANFILE@@")?;
+    let key = "\"path\":";
+    let at = body.find(key)? + key.len();
+    let rest = &body[at..];
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let mut out = String::new();
+    let chars: Vec<char> = rest[1..].chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => return Some(out),
+            '\\' if i + 1 < chars.len() => {
+                out.push(chars[i + 1]);
+                i += 2;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// 跑一次扫描的原始输出（不做路径裁剪）
+fn scan_raw(rules_json: &str) -> (i32, String, String) {
+    let argv = vec!["[\"diffProbe\"]".to_string(), "{}".to_string()];
+    trim_finder::cleanup_scan::run_json(&argv, rules_json, None)
+}
+
+/// 取 `"pathCandidates":[` 后紧跟的是否就是 `]`（最小解析，不引依赖）
+fn path_candidates_empty(out: &str) -> Option<bool> {
+    let key = "\"pathCandidates\":[";
+    let at = out.find(key)? + key.len();
+    Some(out[at..].starts_with(']'))
+}
+
+/// 跑一次扫描，返回 (退出码, 命中相对路径集合, stderr)
+fn scan_hits(root: &Path, rules_json: &str) -> (i32, BTreeSet<String>, String) {
+    let (code, out, err) = scan_raw(rules_json);
+    let mut hits = BTreeSet::new();
+    for line in out.lines() {
+        if let Some(p) = planfile_path(line) {
+            let rel = Path::new(&p)
+                .strip_prefix(root)
+                .map(|x| x.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| p.clone());
+            hits.insert(rel);
+        }
+    }
+    (code, hits, err)
+}
+
+/// 条目骨架（到 prov 为止），两种目标形态各接各的尾巴
+const ITEM_HEAD: &str = r#"{"id":"diffProbe","name":"规则行为差分探针","ver":20260928,"risk":"low","evidence":"仅临时目录","recommended":true,"domain":"system","group":"probe","nature":"log","regenerable":true,"prov":{"source":"builtin","sourceClass":"independent","ref":"tests","reviewedAt":"2026-09-30"}"#;
+
+fn wrap_item(item: &str) -> String {
+    format!(
+        r#"{{"version":2,"rulesVersion":20260928,"groups":[{{"key":"probe","title":"差分夹具","items":[{item}]}}]}}"#
+    )
+}
+
+/// fileKeys 形态（文件型条目）：逐段拼，别把 JSON 塞进带转义的 format! —— 那样大括号极易数错
+fn rules_json(target: &Path, pattern: &str, recurse: bool, extra: &str) -> String {
+    let mut item = String::from(ITEM_HEAD);
+    item.push_str(r#","fileKeys":[{"path":"#);
+    item.push_str(&jstr(&target.to_string_lossy()));
+    item.push_str(r#","pattern":"#);
+    item.push_str(&jstr(pattern));
+    item.push_str(r#","recurse":"#);
+    item.push_str(if recurse { "true" } else { "false" });
+    item.push_str("}]");
+    item.push_str(extra);
+    item.push('}');
+    wrap_item(&item)
+}
+
+/// pathPs 形态（目录型条目）：`candidates` 分支只在**没有 fileKeys** 时才可达
+/// —— fileKeys 分支处理完会 `continue`，带 fileKeys 的条目根本走不到那段。
+/// 注意 pathPs 与 candidates 都要 PS 受限表达式（单引号字面量 / `$env:` 拼接），
+/// 裸路径会被求值器判非法并 fail-closed 跳过。
+fn rules_json_pathps(target: &Path, extra: &str) -> String {
+    let mut item = String::from(ITEM_HEAD);
+    item.push_str(r#","pathPs":"#);
+    item.push_str(&jstr(&ps_lit(target)));
+    item.push_str(extra);
+    item.push('}');
+    wrap_item(&item)
+}
+
+/// PS 单引号字面量形态（'' 转义撇号；临时目录不含撇号，与求值器语法对齐即可）
+fn ps_lit(p: &Path) -> String {
+    format!("'{}'", p.to_string_lossy())
+}
+
+fn diff_sets(before: &BTreeSet<String>, after: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
+    (
+        after.difference(before).cloned().collect(),
+        before.difference(after).cloned().collect(),
+    )
+}
+
+/// 改 pattern 一处，命中集多两个文件 —— 这就是"行为差分"最小可断言的形态
+#[test]
+fn 放宽_pattern_的命中差分可断言() {
+    let root = temp_root("pattern");
+    plant(&root, &[("a.log", 10), ("b.tmp", 20), ("keep.txt", 30), ("sub/c.log", 40)]);
+
+    let (code1, narrow, err1) = scan_hits(&root, &rules_json(&root, "*.log", true, ""));
+    assert_eq!(code1, 0, "扫描应正常退出：{err1}");
+    let (code2, wide, err2) = scan_hits(&root, &rules_json(&root, "*", true, ""));
+    assert_eq!(code2, 0, "扫描应正常退出：{err2}");
+
+    assert_eq!(
+        narrow,
+        BTreeSet::from(["a.log".to_string(), "sub/c.log".to_string()]),
+        "窄 pattern 应只命中两个 .log"
+    );
+    let (added, removed) = diff_sets(&narrow, &wide);
+    assert_eq!(added, vec!["b.tmp".to_string(), "keep.txt".to_string()], "放宽后新增的命中");
+    assert!(removed.is_empty(), "放宽 pattern 不该反而少命中：{removed:?}");
+
+    fs::remove_dir_all(&root).ok();
+}
+
+/// recurse 翻转的差分只该出现在子目录里
+#[test]
+fn 关递归只该砍掉子目录命中() {
+    let root = temp_root("recurse");
+    plant(&root, &[("a.log", 5), ("sub/c.log", 5), ("sub/deep/d.log", 5)]);
+
+    let (_, deep, _) = scan_hits(&root, &rules_json(&root, "*.log", true, ""));
+    let (_, flat, _) = scan_hits(&root, &rules_json(&root, "*.log", false, ""));
+    assert!(deep.contains("sub/deep/d.log"), "递归应命中两层：{deep:?}");
+    assert!(!flat.contains("sub/deep/d.log"), "关递归却命中了两层：{flat:?}");
+    assert!(!flat.contains("sub/c.log"), "关递归却命中了一层子目录：{flat:?}");
+    assert!(flat.contains("a.log"), "关递归把本层也砍了，口径变了：{flat:?}");
+    fs::remove_dir_all(&root).ok();
+}
+
+/// 时效护栏必须真能挡住命中（否则 minAgeDays 只是装饰）
+#[test]
+fn 时效护栏能把命中清零() {
+    let root = temp_root("minage");
+    plant(&root, &[("a.log", 5)]);
+    let (_, plain, _) = scan_hits(&root, &rules_json(&root, "*.log", true, ""));
+    assert!(plain.contains("a.log"), "基线就该命中：{plain:?}");
+    let (_, aged, _) = scan_hits(&root, &rules_json(&root, "*.log", true, ",\"minAgeDays\":3650"));
+    assert!(aged.is_empty(), "刚写的文件应被 minAgeDays=3650 挡掉，实际：{aged:?}");
+    fs::remove_dir_all(&root).ok();
+}
+
+/// D19 钉桩（**双向**）：引擎按缺陷原样只读 `candidates`/`globCandidates`，而真实规则库用的是
+/// `candidatesPs`/`globCandidatesPs`（`cleanup_scan.rs` 该分支的注释即登记处）。两个方向都断：
+///   ① 写 `candidates` 时这个分支必须是活的（pathCandidates 真的收到它）——否则钉桩是空的，
+///      下一个人删掉分支也照样绿；
+///   ② 写 `candidatesPs`（库里的真键名）时 pathCandidates 必须为空 —— 这是**已登记缺陷**，
+///      不是通过。哪天有人把键名对齐，② 立刻判红：那时必须同步改契约表 crossTrack 登记表
+///      与覆盖基线，不能悄悄把枚举面/删除面放大。
+#[test]
+fn 死键双向钉桩_引擎只认_candidates_不认库里的键名() {
+    let root = temp_root("deadkey");
+    plant(&root, &[("a.log", 5)]);
+    let probe = jstr(&ps_lit(&root));
+
+    // ① 引擎真读的键名：分支应当是活的
+    let live = format!(",\"candidates\":[{probe}]");
+    let (code, out, err) = scan_raw(&rules_json_pathps(&root, &live));
+    assert_eq!(code, 0, "引擎不认的键不该让整次扫描失败：{err}");
+    assert_eq!(
+        path_candidates_empty(&out),
+        Some(false),
+        "candidates 分支没收到候选路径 —— 钉桩失去意义，先查引擎是否改了这段：{out}"
+    );
+
+    // ② 库里的真键名：当前必须仍被静默忽略（D19 已登记缺陷，不是通过）
+    let dead = format!(",\"candidatesPs\":[{probe}]");
+    let (code2, out2, err2) = scan_raw(&rules_json_pathps(&root, &dead));
+    assert_eq!(code2, 0, "引擎不认的键不该让整次扫描失败：{err2}");
+    assert_eq!(
+        path_candidates_empty(&out2),
+        Some(true),
+        "candidatesPs 竟被消费了 —— 键名已被对齐。同步改契约表 crossTrack 登记表与覆盖基线后再改本用例：{out2}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+}
+
+/// 前提检查：整个文件都建立在"扫描不动样本文件"上
+#[test]
+fn 扫描是只读的() {
+    let root = temp_root("readonly");
+    plant(&root, &[("a.log", 11), ("sub/c.log", 22)]);
+    let (_, hits, _) = scan_hits(&root, &rules_json(&root, "*", true, ""));
+    assert_eq!(hits.len(), 2, "用例本身失效：没扫到两个文件 {hits:?}");
+    assert!(root.join("a.log").is_file(), "扫描把文件删了");
+    assert!(root.join("sub/c.log").is_file(), "扫描把子目录文件删了");
+    fs::remove_dir_all(&root).ok();
+}
