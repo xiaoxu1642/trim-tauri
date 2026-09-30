@@ -234,6 +234,10 @@ fn build_script(steps: &[Value]) -> String {
             l.push(format!("if ($LASTEXITCODE -ne 0) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.reg' -Mutation 'rolled_back' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] reg import exit=' + $LASTEXITCODE) }}"));
             l.push("Remove-Item $___rf -Force -ErrorAction SilentlyContinue".into());
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
+            // 注意：PS 轨这条 `& $env:ComSpec /c $___cmd` 与已修的 `run_cmd_step` 是同一类
+            // 引号陷阱（PS 也会把内嵌引号重写成子进程不认的形状）。今天不可达——唯一调用
+            // build_script 的 tf_restore_point 只有 reg + pwsh 两种步骤。若哪天有 cmd 步骤
+            // 走到这里，先照 run_cmd_step 的实测结论改这条，别等回读校验报不符再查。
             let safe = cmd.replace('\'', "''");
             l.push(format!("$___cmd='{safe}'"));
             l.push("& $env:ComSpec /c $___cmd *> $null".into());
