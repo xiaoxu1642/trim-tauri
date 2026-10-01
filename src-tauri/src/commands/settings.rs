@@ -556,6 +556,19 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
     if let Some(o) = is_ipv4(&u.host).or_else(|| parse_ipv4_aton(&u.host)) {
         return ipv4_private(o);
     }
+    // v2-L4P-24（A-6）：尾点畸形 IPv4（`127.0.0.1.`、`127.1.`）。Windows socket 解析
+    // 会剥掉**一个**尾点后按数字 IP 连接，而上面的解析器认不出 ⇒ 落到「未知域名」
+    // 分支被放行。判前剥一个尾点重试；剥完仍在 IPv4 字符集（数字/点/hex 段）却仍解析
+    // 失败 ⇒ fail-closed 按私网拒——「认不出」不许等价于「公网域名」。
+    let de_dot = u.host.strip_suffix('.').unwrap_or(&u.host);
+    if de_dot != u.host {
+        if let Some(o) = is_ipv4(de_dot).or_else(|| parse_ipv4_aton(de_dot)) {
+            return ipv4_private(o);
+        }
+        if de_dot.bytes().all(|c| c.is_ascii_digit() || c == b'.') && de_dot.contains('.') {
+            return true;
+        }
+    }
     if u.host.contains(':') || u.bracketed {
         // 方括号里的东西只可能是 IPv6 字面量：解析不出来即畸形 → fail-closed，
         // 不允许它退回去当域名放行。
@@ -1018,6 +1031,10 @@ mod tests_private_url {
             "http://127.0.0.1:8080/",
             "http://169.254.169.254/latest/meta-data/", // 链路本地（云元数据）
             "http://0.0.0.0/",
+            // v2-L4P-24（A-6）：尾点畸形——socket 层会剥一个尾点后按数字 IP 连接
+            "http://127.0.0.1./",
+            "http://127.1./",
+            "http://10.0.0.1./",
         ] {
             assert!(is_private_api_url(u), "{u} 应判私有");
         }

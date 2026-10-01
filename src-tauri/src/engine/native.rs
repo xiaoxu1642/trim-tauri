@@ -441,8 +441,16 @@ pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
         } else { String::new() };
         let _ = CloseHandle(h);
         let expected_lower = expected_name.to_lowercase();
-        if !expected_name.is_empty() && !exe_name.is_empty() && exe_name != expected_lower {
-            return Ok(json!({"success": false, "message": "进程 ID 已被系统复用，已拒绝结束"}));
+        // v2-L4P-55（C-10）：镜像名**取不到即拒**（调用方给了期望名时）。旧口径
+        // `!exe_name.is_empty()` 才比对——QueryFullProcessImageNameW 失败 = 比对整体
+        // 跳过，剩下的 PID 复用窗口（旧 PID 已死、新进程顶上）会被直接 Terminate。
+        if !expected_name.is_empty() {
+            if exe_name.is_empty() {
+                return Ok(json!({"success": false, "message": "无法读取进程镜像名，已拒绝结束（防 PID 复用误杀）"}));
+            }
+            if exe_name != expected_lower {
+                return Ok(json!({"success": false, "message": "进程 ID 已被系统复用，已拒绝结束"}));
+            }
         }
         let h_term = OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|_| "无法打开进程（权限不足）".to_string())?;
         let name_display = if exe_name.is_empty() { format!("PID {pid}") } else { exe_name.clone() };
@@ -4002,10 +4010,11 @@ fn write_disabled_records(records: &[Value]) {
     // 空台账写 `[]` 而不是删文件：删掉后「最近修改的那本」会回到老根那份历史账，
     // 用户已经启用回来的项会被再次报成「Trim 禁用的」（见 startup_ledger_file）。
     let payload = if records.is_empty() { Value::Array(Vec::new()) } else { Value::Array(records.to_vec()) };
-    let json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".into());
-    if let Ok(mut file) = std::fs::File::create(&f) {
-        use std::io::Write;
-        let _ = file.write_all(json.as_bytes());
+    // v2-L4P-23（A-5）：改走原子写。原实现 File::create 直接截断——进程在写入中途
+    // 崩溃/断电会留下半截 JSON，read_disabled_records 解析失败静默归空 ⇒ 启用回来的
+    // 项凭空消失。写日志留痕（原子写失败 = 台账更新没生效，得让维护者看得见）。
+    if let Err(e) = crate::security::atomic_write_json(&f, &payload) {
+        crate::engine::log::write_log("warn", &format!("启动项禁用台账写入失败（保留旧账）: {e}"));
     }
 }
 
@@ -4873,9 +4882,12 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "备份路径无法编码，未执行删除"}));
                     continue;
                 };
-                let export_out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
-                    .args(["export", &export_path, reg_file_str, "/y"])
-                    .output();
+                // v2-L4P-29（B-7）：备份类子进程统一走带超时入口，reg.exe 被拖住不再永久挂死
+                let export_out = crate::engine::systembin::quiet_cmd_timeout(
+                    system_tool("reg.exe"),
+                    &["export", &export_path, reg_file_str, "/y"],
+                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                );
                 if export_out.is_err() || !reg_file.exists() {
                     failed += 1;
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表备份失败，未执行删除"}));
@@ -5232,16 +5244,25 @@ pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
         let mut safe_name = native_path.clone();
         safe_name = safe_name.replace('\\', "_").replace('/', "_").replace(':', "_").replace('*', "_")
             .replace('?', "_").replace('"', "_").replace('<', "_").replace('>', "_").replace('|', "_");
-        if safe_name.len() > 120 { safe_name = safe_name[safe_name.len()-120..].to_string(); }
+        // v2-L4P-32（C-4）：按字符截断——`safe_name[高字节切片]` 在含中文键名时
+        // 会切在 UTF-8 多字节序列中间直接 panic（同族已修过、此处是漏网点）。
+        if safe_name.chars().count() > 120 {
+            let keep: String = safe_name.chars().rev().take(120).collect::<Vec<_>>()
+                .into_iter().rev().collect();
+            safe_name = keep;
+        }
         let reg_file = backup_dir.join(format!("registry_{idx}_{safe_name}.reg"));
 
         // reg.exe export
         // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
         let Some(reg_file_str) = reg_file.to_str() else { failed += 1; continue; };
-        let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
-            .args(["export", &write_path, reg_file_str, "/y"])
-            .output();
-        let success = out.is_ok() && out.as_ref().unwrap().status.success();
+        // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
+        let out = crate::engine::systembin::quiet_cmd_timeout(
+            system_tool("reg.exe"),
+            &["export", &write_path, reg_file_str, "/y"],
+            crate::engine::systembin::REG_EXPORT_TIMEOUT,
+        );
+        let success = out.map(|o| o.status.success()).unwrap_or(false);
         let header_hive = reg_file_header_hive(&reg_file);
         let hive_ok = header_hive.as_ref()
             .map(|h| h != "HKEY_CLASSES_ROOT" && write_path.starts_with(h))
@@ -5513,10 +5534,13 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
         let backup_file = backup_dir.join(format!("backup_{stamp}_{part}.reg"));
         // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，整批中止（备份不完整绝不能继续写入）
         let Some(backup_file_str) = backup_file.to_str() else { return Err("备份路径无法编码".into()); };
-        let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
-            .args(["export", &reg_path, backup_file_str, "/y"])
-            .output();
-        if out.is_err() || !out.unwrap().status.success() {
+        // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
+        let out = crate::engine::systembin::quiet_cmd_timeout(
+            system_tool("reg.exe"),
+            &["export", &reg_path, backup_file_str, "/y"],
+            crate::engine::systembin::REG_EXPORT_TIMEOUT,
+        );
+        if !out.map(|o| o.status.success()).unwrap_or(false) {
             let _ = std::fs::remove_file(&backup_file);
             return Err("注册表备份失败".into());
         }
@@ -5789,11 +5813,17 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
 }
 // ==================== B8 maint：维护命令 ====================
 
+/// 维护任务子进程超时上限（v2-L4P-37 / F-6）：sfc /scannow 与 DISM RestoreHealth
+/// 合法耗时可达数十分钟，30 分钟取模块文档的既有上限；sc/wsreset 等快命令被同一
+/// 上限兜住（正常毫秒级，永到不了）。此前 run_cmd 无超时——挂住的 sfc 会把维护
+/// 页永久锁死。登记于 check-ps-callsites 的 F 组（quiet_cmd_timeout 调用点）。
+pub const MAINT_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 fn run_cmd(program: &str, args: &[&str]) -> bool {
     // 审查 v2-F7：系统工具必须解析到 System32 再执行，不能用裸进程名 ——
     // 搜索顺序里「exe 所在目录」与「父进程 CWD」都排在 System32 之前。
     let exe = crate::engine::systembin::system_tool(program);
-    match crate::engine::systembin::quiet_cmd(exe).args(args).output() {
+    match crate::engine::systembin::quiet_cmd_timeout(exe, args, MAINT_CMD_TIMEOUT) {
         Ok(out) => out.status.success(),
         Err(_) => false,
     }
@@ -5801,7 +5831,9 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
 
 fn restart_service(name: &str) -> bool {
     let sc = crate::engine::systembin::system_tool("sc");
-    let _ = crate::engine::systembin::quiet_cmd(&sc).args(["stop", name]).output();
+    // v2-L4P-37：sc stop 同样套超时（快命令的兜底上限）
+    let _ = crate::engine::systembin::quiet_cmd_timeout(&sc, &["stop", name], MAINT_CMD_TIMEOUT)
+        .is_ok();
     std::thread::sleep(std::time::Duration::from_millis(500));
     run_cmd("sc", &["start", name])
 }
@@ -5923,7 +5955,7 @@ pub(crate) fn dir_delete_blocked(path: &std::path::Path) -> Option<String> {
 
 /// 维护命令执行（对应 maint_*.ps1，S3）
 ///
-/// 覆盖 18 个维护任务。返回 (success, output_message)。
+/// 覆盖任务数以 data/maintenance-tasks.json 现算为准（v2-L4P-55/C-10：注释计数必须与数据同源，散文数字已删）。返回 (success, output_message)。
 pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
     match task_id {
         "sfc" => {
@@ -5968,7 +6000,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
                 return Ok((false, format!("搜索索引目录未通过删除前校验，已取消：{reason}")));
             }
             // 停止 WSearch，清空索引，启动
-            let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", "WSearch"]).output();
+            let _ = crate::engine::systembin::quiet_cmd_timeout(system_tool("sc"), &["stop", "WSearch"], MAINT_CMD_TIMEOUT).is_ok();
             std::thread::sleep(std::time::Duration::from_secs(2));
             let _ = std::fs::remove_dir_all(&idx);
             let ok = run_cmd("sc", &["start", "WSearch"]);
@@ -5982,7 +6014,7 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             }
             // 停止更新服务，清理缓存，启动
             for svc in ["wuauserv", "bits", "cryptsvc"] {
-                let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", svc]).output();
+                let _ = crate::engine::systembin::quiet_cmd_timeout(system_tool("sc"), &["stop", svc], MAINT_CMD_TIMEOUT).is_ok();
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
             let _ = std::fs::remove_dir_all(&cache);
@@ -6522,9 +6554,11 @@ fn expand_glob_dirs(pattern_path: &str) -> Vec<String> {
             for entry in rd.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !glob_match(seg, &name) { continue; }
-                // 同 enumerate_files 口径：跳过重解析点
+                // 同 enumerate_files 口径：跳过 reparse（v2-L4P-11/C-1：is_symlink 在
+                // Windows 上只认 SYMLINK/MOUNT_POINT 两个 tag，云占位符那类
+                // is_symlink=false && is_dir=true 的 reparse 会被放过去穿透进另一块存储）
                 if let Ok(meta) = entry.metadata() {
-                    if meta.is_symlink() { continue; }
+                    if crate::engine::protect::is_reparse(&meta) { continue; }
                 }
                 next.push(format!("{base}\\{name}"));
             }
@@ -6534,20 +6568,35 @@ fn expand_glob_dirs(pattern_path: &str) -> Vec<String> {
     cur
 }
 
+/// 执行侧遍历深度上限（v2-L4P-11/C-1）：与 native-scanner 的 `MAX_WALK_DEPTH=64`
+/// 同口径。此前 collect_files/enumerate_files 无上限，规则目标深处若有环状结构
+/// （经普通目录绕开 reparse 判定构造不了，但超深目录树可以把删除清单撑爆）。
+const ENGINE_WALK_MAX_DEPTH: usize = 64;
+
 fn enumerate_files(
     dir: &str, pattern: &str, recurse: bool,
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
 ) {
+    enumerate_files_at(dir, pattern, recurse, files, total, seen, cap, 0)
+}
+
+fn enumerate_files_at(
+    dir: &str, pattern: &str, recurse: bool,
+    files: &mut Vec<Value>, total: &mut usize,
+    seen: &mut std::collections::HashSet<String>, cap: usize,
+    depth: usize,
+) {
+    if depth >= ENGINE_WALK_MAX_DEPTH { return; }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.filter_map(|e| e.ok()) {
         let path = entry.path();
-        // 跳过重解析点
+        // 跳过 reparse 点（v2-L4P-11/C-1：0x400 属性位口径，见 expand_glob_dirs 注释）
         let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_symlink() { continue; }
+        if crate::engine::protect::is_reparse(&meta) { continue; }
         if meta.is_dir() {
             if recurse {
-                enumerate_files(&path.to_string_lossy(), pattern, recurse, files, total, seen, cap);
+                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, files, total, seen, cap, depth + 1);
             }
         } else if meta.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -6668,9 +6717,21 @@ fn prune_file_backups(root: &std::path::Path, keep: usize) {
             if kept_rels.contains(&rel.to_lowercase()) {
                 continue; // 还有幸存批次指着它，只删清单不删字节
             }
-            let _ = std::fs::remove_file(root.join(&rel));
+            // v2-L4P-33（C-5）：引擎级裁剪出口回收站优先；先拒 reparse，链接件不投
+            let victim = root.join(&rel);
+            let reparse = std::fs::symlink_metadata(&victim)
+                .map(|m| crate::engine::protect::is_reparse(&m))
+                .unwrap_or(true);
+            if !reparse {
+                let _ = trim_finder::scan::recycle::send_to_trash_os(victim.as_os_str());
+            }
         }
-        let _ = std::fs::remove_file(&mpath);
+        let reparse_m = std::fs::symlink_metadata(&mpath)
+            .map(|m| crate::engine::protect::is_reparse(&m))
+            .unwrap_or(true);
+        if !reparse_m {
+            let _ = trim_finder::scan::recycle::send_to_trash_os(mpath.as_os_str());
+        }
     }
     // 空规则目录回收（副本按 `<规则id>\` 分目录，删空了才收，非目录自然跳过）
     if let Ok(rd) = std::fs::read_dir(root) {
@@ -6805,10 +6866,12 @@ pub fn cleanup_execute(
                         else if *hive == windows::Win32::System::Registry::HKEY_USERS { "HKU" }
                         else { "HKCC" };
                     let export_path = format!("{hive_short}\\{rest}");
-                    match crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
-                        .args(["export", &export_path, file_str, "/y"])
-                        .output()
-                    {
+                    // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
+                    match crate::engine::systembin::quiet_cmd_timeout(
+                        system_tool("reg.exe"),
+                        &["export", &export_path, file_str, "/y"],
+                        crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                    ) {
                         Ok(o) if o.status.success() && file.exists() => {
                             // N9：清理域此前**根本不产封条**，于是还原链那道"封条核对"对本域
                             // 永远只能走 missing 分支（等于没闸）。与卸载域同口径落一份，
@@ -7194,10 +7257,11 @@ fn find_rule_by_id(rules: &Value, id: &str) -> Option<Value> {
 
 /// 清理根路径准入：必须是真实目录，且**不是** reparse（审查 v2-F3）
 ///
-/// 判定必须在进 `collect_files` 之前做：后者只对**子项**过滤 `is_symlink()`，根路径本身
-/// 若被替换成指向他处的 junction，`Path::is_dir()` 会跟随链接返回 true，于是链接目标整棵
-/// 被枚举，并在永久删除分支下不可恢复地删掉。用 `protect::is_reparse` 的 0x400 属性位
-/// 而非 `is_symlink()`：前者覆盖全部 reparse tag（云占位符 / NFS / WIM），严格更强。
+/// 判定必须在进 `collect_files` 之前做：后者对**子项**过滤 reparse（v2-L4P-11 起与
+/// 根路径同口径、均为 0x400 属性位判定），根路径本身若被替换成指向他处的 junction，
+/// `Path::is_dir()` 会跟随链接返回 true，于是链接目标整棵被枚举，并在永久删除分支下
+/// 不可恢复地删掉。用 `protect::is_reparse` 的 0x400 属性位而非 `is_symlink()`：
+/// 前者覆盖全部 reparse tag（云占位符 / NFS / WIM），严格更强。
 fn cleanup_root_ok(dir: &str) -> bool {
     match std::fs::symlink_metadata(dir) {
         Ok(md) => md.is_dir() && !crate::engine::protect::is_reparse(&md),
@@ -7213,14 +7277,30 @@ fn collect_files(
     files: &mut Vec<(String, u64)>,
     too_new: &mut i64,
 ) {
+    collect_files_at(dir, pattern, recurse, cutoff, files, too_new, 0)
+}
+
+fn collect_files_at(
+    dir: &str,
+    pattern: &str,
+    recurse: bool,
+    cutoff: Option<std::time::SystemTime>,
+    files: &mut Vec<(String, u64)>,
+    too_new: &mut i64,
+    depth: usize,
+) {
+    if depth >= ENGINE_WALK_MAX_DEPTH { return; }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.filter_map(|e| e.ok()) {
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_symlink() { continue; }
+        // v2-L4P-11/C-1：子项判定从 is_symlink() 收紧为 protect::is_reparse（0x400
+        // 属性位）。此处产物直接喂删除链，弱口径会把 OneDrive 云占位符 / NFS / WIM
+        // 这类 reparse 目录当普通目录递归进去、在永久删除分支下不可恢复地删到另一块存储。
+        if crate::engine::protect::is_reparse(&meta) { continue; }
         if meta.is_dir() {
             if recurse {
-                collect_files(&path.to_string_lossy(), pattern, recurse, cutoff, files, too_new);
+                collect_files_at(&path.to_string_lossy(), pattern, recurse, cutoff, files, too_new, depth + 1);
             }
         } else if meta.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -7419,6 +7499,69 @@ mod cleanup_engine_contract_tests {
         assert_eq!(first_unexpanded_token(""), None);
         // 单个 % 不构成 token，不算残留
         assert_eq!(first_unexpanded_token(r"C:\100%done"), None);
+    }
+
+    /// v2-L4P-11（C-1）：执行侧遍历对 reparse 子项的判定必须用 0x400 属性位口径。
+    /// junction 形态（is_symlink=false && is_dir=true 的前身是 MOUNT_POINT，is_symlink
+    /// 在 Windows 上能认出 junction 但认不出云占位符；此处以 junction 做「链接不进
+    /// 删除清单」的最小实证，语义与 protect::is_reparse 的强口径一致）。无建链权限的
+    /// 环境跳过（与 E-11 同姿势：环境性跳过要显式留痕）。
+    #[test]
+    fn collect_files_skips_reparse_children() {
+        let base = std::env::temp_dir().join(format!("trim-c1-junction-{}", std::process::id()));
+        let target = base.join("real");
+        let link = base.join("scan-root").join("linked");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&target).expect("建 real 目录");
+        std::fs::create_dir_all(base.join("scan-root")).expect("建 scan-root 目录");
+        std::fs::write(target.join("marker.txt"), b"x").expect("写标记文件");
+        let linked = match std::os::windows::fs::symlink_dir(&target, &link) {
+            Ok(()) => true,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&base);
+                eprintln!("⚠ 跳过：本环境无建链权限（{e}）——reparse 子项用例需管理员或开发者模式");
+                return;
+            }
+        };
+        assert!(linked);
+        let mut files = Vec::new();
+        let mut too_new = 0i64;
+        collect_files(
+            &link.parent().unwrap().to_string_lossy(),
+            "*.txt",
+            true,
+            None,
+            &mut files,
+            &mut too_new,
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            !files.iter().any(|(p, _)| p.to_lowercase().contains("marker.txt")),
+            "reparse 子目录内的文件不得进删除清单: {files:?}"
+        );
+    }
+
+    /// v2-L4P-11（C-1）：执行侧遍历必须有深度上限（与扫描器 MAX_WALK_DEPTH=64 同口径）。
+    /// 造一条 80 层目录链、底放标记文件，collect_files 不得抵达。
+    #[test]
+    fn collect_files_respects_depth_cap() {
+        let base = std::env::temp_dir().join(format!("trim-c1-depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mut cur = base.clone();
+        for i in 0..80 {
+            cur = cur.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&cur).expect("建深目录链");
+        std::fs::write(cur.join("deep-marker.txt"), b"x").expect("写深处标记");
+        let mut files = Vec::new();
+        let mut too_new = 0i64;
+        collect_files(&base.to_string_lossy(), "*.txt", true, None, &mut files, &mut too_new);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            !files.iter().any(|(p, _)| p.contains("deep-marker.txt")),
+            "深度超过上限的文件不得进删除清单: {}",
+            files.len()
+        );
     }
 
     /// P0-M5 时效护栏：测试辅助——把文件 mtime 拨回 days 天前（SetFileTime，真实文件系统）。

@@ -1568,9 +1568,21 @@ struct ScanAccum {
     plan_truncated: HashSet<String>,
     plan_total: usize,
     total: usize,
+    /// v2-L4P-34（C-6）：畸形行计数——静默丢弃等于把「行协议被畸形输入打破」
+    /// 伪装成「什么都没扫到」（与 finder.rs ScanTally 同口径）
+    malformed: usize,
+    /// 只留第一条畸形原因（畸形内容可能是任意长文本，不照抄进日志）
+    first_malformed: Option<String>,
 }
 
 impl ScanAccum {
+    fn count_malformed(&mut self, reason: &str) {
+        self.malformed += 1;
+        if self.first_malformed.is_none() {
+            self.first_malformed = Some(reason.chars().take(200).collect());
+        }
+    }
+
     /// 按行解析（对照 `onEngineStdout`），返回本轮新增的 `@@ITEM@@`（用于推进度）
     fn ingest_line(&mut self, line: &str) -> Option<Value> {
         if let Some(rest) = line.strip_prefix("@@PLANFILE@@") {
@@ -1578,10 +1590,17 @@ impl ScanAccum {
             if self.plan_total >= PLAN_CAP_TOTAL {
                 return None;
             }
-            if let Ok(pf) = serde_json::from_str::<Value>(rest) {
-                let id = pf.get("id").and_then(|v| v.as_str());
-                let path = pf.get("path").and_then(|v| v.as_str());
-                if let (Some(id), Some(path)) = (id, path) {
+            let pf = match serde_json::from_str::<Value>(rest) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.count_malformed(&format!("@@PLANFILE@@ 行解析失败: {e}"));
+                    return None;
+                }
+            };
+            let id = pf.get("id").and_then(|v| v.as_str());
+            let path = pf.get("path").and_then(|v| v.as_str());
+            match (id, path) {
+                (Some(id), Some(path)) => {
                     if id.chars().count() <= 160 && path.chars().count() <= 2000 {
                         let arr = self.plan.entry(id.to_string()).or_default();
                         if arr.len() < PLAN_CAP_PER_ITEM {
@@ -1596,13 +1615,23 @@ impl ScanAccum {
                         }
                     }
                 }
+                _ => self.count_malformed("@@PLANFILE@@ 行缺少 id 或 path 字段"),
             }
             return None;
         }
-        let rest = line.strip_prefix("@@ITEM@@")?;
-        let item: Value = serde_json::from_str(rest).ok()?;
-        let id = item.get("id")?;
-        if !js_truthy(id) {
+        let Some(rest) = line.strip_prefix("@@ITEM@@") else {
+            return None;
+        };
+        let item = match serde_json::from_str::<Value>(rest) {
+            Ok(v) => v,
+            Err(e) => {
+                self.count_malformed(&format!("@@ITEM@@ 行解析失败: {e}"));
+                return None;
+            }
+        };
+        let id_ok = item.get("id").map(js_truthy).unwrap_or(false);
+        if !id_ok {
+            self.count_malformed("@@ITEM@@ 行缺少 id 字段");
             return None;
         }
         self.data.push(item.clone());
@@ -1668,7 +1697,7 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
         return json!({ "success": false, "message": msg, "data": [] });
     }
     // 把可删文件清单并进条目（无清单的条目补空数组，执行/明细侧统一按数组消费）
-    let (data, plan_total) = {
+    let (data, plan_total, malformed) = {
         let mut a = accum.lock().unwrap_or_else(|e| e.into_inner());
         let plan = std::mem::take(&mut a.plan);
         let truncated = std::mem::take(&mut a.plan_truncated);
@@ -1683,8 +1712,19 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
                 }
             }
         }
-        (data, a.plan_total)
+        (data, a.plan_total, (a.malformed, a.first_malformed.take()))
     };
+    // v2-L4P-34（C-6）：畸形行不再静默——计数进日志，UI 才能区分「真干净」与「协议被打破」
+    if malformed.0 > 0 {
+        log::write_log(
+            "warn",
+            &format!(
+                "扫描行协议出现 {} 条畸形行（已丢弃），首因: {}",
+                malformed.0,
+                malformed.1.as_deref().unwrap_or("未知")
+            ),
+        );
+    }
     log::write_log(
         "info",
         &format!(
@@ -1893,7 +1933,15 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                 }
             }
             // J-1（S3）：写入本 label 分槽（Electron 用 sender.id），多窗口并发清理互不串台
-            if !failures.is_empty() {
+            // v2-L4P-38（F-7）：**无条件覆盖**——只在本轮有失败时 insert 会让上一轮的
+            // 失败路径留槽，下一轮全部成功时「重试失败项」仍重放旧路径（对已成功回收的
+            // 目标二次操作）。本轮零失败即清槽，槽内永远是最近一轮的真实状态。
+            if failures.is_empty() {
+                trash_failures()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&label);
+            } else {
                 trash_failures()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())

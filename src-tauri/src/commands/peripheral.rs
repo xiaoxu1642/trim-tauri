@@ -186,9 +186,11 @@ fn normalize_option(raw: Option<Value>) -> Option<i64> {
 
 /// 修剪外设备份目录：backup_YYYYMMDD_HHMMSS.reg 按名倒序保留 keep 份，更旧的进回收站
 fn prune_backups(keep: usize) {
-    // 候选根走唯一寻址口（v2-M19）：新根 + 收口前落在老根的那批都要修剪，
-    // 但**写侧**已经只在新根，这里出现两根只是兜底读取的同一份口径。
-    let dirs = paths::backup_read_dirs("peripheral-backup");
+    // 裁根 = 写侧单根（v2-L4P-14，B-2/C-3 用户拍板 D-1）：老根是升级前备份的唯一还原
+    // 依据，AGENTS §9.2① 冻结「老根只读不裁」。此前把 backup_read_dirs 的读兜底清单
+    // 直接当裁根清单用，超额老根会被投回收站——文档与代码互相说谎（L4 B-2/C-3）。
+    // 老根超额文件宁可留存，读取兜底仍可见、可还原。
+    let dirs = vec![paths::backup_write_dir("peripheral-backup")];
 
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };

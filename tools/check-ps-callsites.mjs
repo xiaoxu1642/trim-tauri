@@ -306,6 +306,34 @@ check(
   [...rD.problems, ...rD.uncovered.map((h) => `未登记：${h.file}:${h.line} ${h.desc}`), ...inlineProblems].join('；'),
 );
 
+// ---- F. 带超时静默子进程（quiet_cmd_timeout）调用点（v2-L4P-29 / B-7） ----
+// 6 处 reg.exe export 备份点统一走带超时入口；秒数真源 = systembin::REG_EXPORT_TIMEOUT。
+// 这张表抓两件事：① 新增 quiet_cmd_timeout 调用点不登记即红（登记制）；
+// ② 谁把 REG_EXPORT_TIMEOUT 常量改掉（换字面量/换时长）即红（超时一致性）。
+const TIMEOUT_SPAWN_SITES = [
+  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &export_path, reg_file_str, "/y"]', reason: '启动项禁用台账：删值前整键备份' },
+  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &write_path, reg_file_str, "/y"]', reason: '右键菜单删除前整键备份' },
+  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &reg_path, backup_file_str, "/y"]', reason: '外设优化写值前逐键备份' },
+  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
+  { file: 'src-tauri/src/commands/uninstall.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },
+  { file: 'src-tauri/src/commands/uninstall.rs', anchor: '&["export", key_part, file_str, "/y"]', reason: '残留 reg_value 删值前父键备份' },
+  // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
+  { file: 'src-tauri/src/engine/native.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'restart_service 的 sc stop', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native.rs', anchor: 'system_tool("sc"), &["stop", "WSearch"], MAINT_CMD_TIMEOUT', reason: '维护：停 Windows Search 服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native.rs', anchor: 'system_tool("sc"), &["stop", svc], MAINT_CMD_TIMEOUT', reason: '维护：停多个服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+];
+const TIMEOUT_SECS = 15;
+
+// ---- G. QUICKCMDS 两条 PS 启动项登记（v2-L4P-26 / B-4） ----
+// quickcmds 的 powershell 启动是**产品功能**（可见控制台，CREATE_NEW_CONSOLE），
+// 不走 quiet_cmd、不受 A 组正则约束——正因为 A 组看不见它，必须在这里显式留名：
+// 新增第三条 PS 启动项不登记即红；摘掉这两条任何一条，锚失效同样红。
+const QUICKCMD_PS_SITES = [
+  { anchor: '("sys-cmd-admin", "管理员CMD", "powershell -Command \\"Start-Process cmd -Verb RunAs\\"")', reason: '产品功能：管理员 CMD 快捷启动（经可见控制台）' },
+  { anchor: '("sys-powershell", "PowerShell", "powershell")', reason: '产品功能：PowerShell 快捷启动' },
+];
+
 // ---- E. PS_INLINE_ALLOW 条数现算 + 台账打印 ----
 const allowText = texts.get(PS_INLINE_ALLOW_FILE) ?? '';
 const allowBlock = allowText.match(/const PS_INLINE_ALLOW: &\[&str\] = &\[([\s\S]*?)\n\];/);
@@ -319,6 +347,65 @@ check(
     : allowDup > 0
       ? `有 ${allowDup} 条重入条目，白名单必须逐项唯一（否则条数不再等于实际放行面）`
       : '',
+);
+
+// ---- F/G 组执行（登记制 + 超时常量核对）----
+const timeoutPool = [];
+for (const [file, text] of texts) {
+  // 定义行本身不是调用点（collect 的 defRe 归一化对此函数名失效，这里显式剔除）
+  timeoutPool.push(...collect(text, file, 'quiet_cmd_timeout(').filter((h) => !h.raw.includes('fn quiet_cmd_timeout')));
+}
+const tUsed = new Set();
+const tProblems = [];
+for (const e of TIMEOUT_SPAWN_SITES) {
+  const matched = timeoutPool.filter((h) => (!e.file || h.file === e.file) && h.args.includes(e.anchor));
+  if (matched.length === 0) tProblems.push(`登记失效：${e.file} # ${cut(e.anchor)}`);
+  else if (matched.length > 1) tProblems.push(`锚不判别：${e.file} # ${cut(e.anchor)} 命中 ${matched.length} 处`);
+  else {
+    tUsed.add(matched[0]);
+    e._site = matched[0];
+    if (!e.reason) tProblems.push(`${e.file} 登记缺理由`);
+    // 超时常量核对：调用点实参必须引用登记的常量名，且常量定义值 = 登记秒数
+    const tc = e.timeoutConst ?? 'REG_EXPORT_TIMEOUT';
+    const secs = e.secs ?? TIMEOUT_SECS;
+    {
+      if (!e._site.args.includes(tc)) {
+        tProblems.push(`${e.file}:${e._site.line} 实参未引用登记的 ${tc}`);
+      }
+      const sysbin = texts.get('src-tauri/src/engine/systembin.rs') ?? '';
+      const native = texts.get('src-tauri/src/engine/native.rs') ?? '';
+      const allSrc = sysbin + native;
+      const defRe = new RegExp(`const\\s+${tc}\\s*:[^=;]*?=\\s*std::time::Duration::from_secs\\(([^)]*)\\)`);
+      const def = allSrc.match(defRe);
+      if (!def) tProblems.push(`${tc} 常量定义找不到（native.rs / systembin.rs）`);
+      else {
+        const expr = def[1].replace(/\s/g, '');
+        const val = /^\d+$/.test(expr) ? Number(expr) : expr.split('*').reduce((a, b) => a * Number(b), 1);
+        if (val !== secs) tProblems.push(`${tc} 漂移：登记 ${secs}s，代码 ${val}s`);
+      }
+    }
+  }
+}
+const tUncovered = timeoutPool.filter((h) => !tUsed.has(h));
+const sysbinText = texts.get('src-tauri/src/engine/systembin.rs') ?? '';
+const tConstOk = new RegExp(`pub const REG_EXPORT_TIMEOUT[^=]*=\\s*std::time::Duration::from_secs\\(\\s*${TIMEOUT_SECS}\\s*\\)`).test(sysbinText);
+check(
+  tProblems.length === 0 && tUncovered.length === 0 && tConstOk,
+  `F. quiet_cmd_timeout 调用点 ${timeoutPool.length} 处全部登记，REG_EXPORT_TIMEOUT=${TIMEOUT_SECS}s 与源码一致`,
+  [...tProblems, ...tUncovered.map((h) => `未登记：${h.file}:${h.line} ${h.desc}`), tConstOk ? '' : 'systembin.rs 的 REG_EXPORT_TIMEOUT 定义漂移'].filter(Boolean).join('；'),
+);
+
+let gProblems = [];
+for (const e of QUICKCMD_PS_SITES) {
+  const text = [...texts.entries()].filter(([f]) => f.endsWith('quickcmds.rs')).map(([, t]) => t).join('\n');
+  const n = text.split(e.anchor).length - 1;
+  if (n !== 1) gProblems.push(`锚期望恰好 1 处、实际 ${n} 处：${cut(e.anchor)}`);
+  else if (!e.reason) gProblems.push('登记缺理由');
+}
+check(
+  gProblems.length === 0,
+  `G. QUICKCMDS 的 ${QUICKCMD_PS_SITES.length} 条 PS 启动项均已登记（产品功能，可见控制台，不进 A 组正则）`,
+  gProblems.join('；'),
 );
 
 console.log('');

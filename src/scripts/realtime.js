@@ -14,6 +14,10 @@
   // Math.max(...samples.map(...)) 展开，点数过多会直接抛「Maximum call stack size exceeded」。
   // 7200 点 ≈ 3 小时 @1.5s，覆盖任何真实测速/观测场景，同时把展开量压在调用栈安全区内。
   const MAX_RECORD_POINTS = 7200;
+  // v2-L4P-36（F-5）：记录时长强制收口。MAX_RECORD_POINTS 只保证内存与栈安全，
+  // 记录动作本身还该有时间上界（7200 点 × 1.5s ≈ 3 小时），到点自动生成报告，
+  // 不允许用户忘关记录让会话无限拉长。
+  const MAX_RECORDING_MS = MAX_RECORD_POINTS * 1500;
 
   const $ = id => document.getElementById(id);
 
@@ -273,6 +277,11 @@
       state.recordSamples.push({ t: Date.now(), up, down });
       if (state.recordSamples.length > MAX_RECORD_POINTS) {
         state.recordSamples.splice(0, state.recordSamples.length - MAX_RECORD_POINTS);
+      }
+      // v2-L4P-36（F-5）：时长到点强制收口（自动停止并生成报告）
+      if (Date.now() - state.recordStart > MAX_RECORDING_MS) {
+        window.app?.toast('info', '已达最长记录时长（约 3 小时），已自动停止并生成报告');
+        toggleRecord();
       }
     }
   }
@@ -555,11 +564,13 @@
       window.app?.toast('warning', '记录时间过短，未生成报告');
       return;
     }
+    // v2-L4P-36（F-5）：统计改 reduce——展开运算符对超大数组会抛 RangeError，
+    // 截断上限不是「永远不会超」的保证，统计口径自身要安全。
     const durationSec = Math.round((samples[samples.length - 1].t - samples[0].t) / 1000);
-    const maxDown = Math.max(...samples.map(s => s.down));
-    const maxUp = Math.max(...samples.map(s => s.up));
-    const minDown = Math.min(...samples.map(s => s.down));
-    const minUp = Math.min(...samples.map(s => s.up));
+    const maxDown = samples.reduce((a, s) => s.down > a ? s.down : a, -Infinity);
+    const maxUp = samples.reduce((a, s) => s.up > a ? s.up : a, -Infinity);
+    const minDown = samples.reduce((a, s) => s.down < a ? s.down : a, Infinity);
+    const minUp = samples.reduce((a, s) => s.up < a ? s.up : a, Infinity);
     const avgDown = samples.reduce((a, s) => a + s.down, 0) / samples.length;
     const avgUp = samples.reduce((a, s) => a + s.up, 0) / samples.length;
     const report = {
@@ -766,7 +777,7 @@
             <div class="rt-report-row" data-name="${escapeAttr(r.name)}">
               <div class="rt-report-row-main">
                 <div class="rt-report-row-title">${escapeHtml(fmtTime(r.createdAt))} · ${escapeHtml(fmtDuration(r.durationSec))}</div>
-                <div class="rt-report-row-meta">下载峰值 ${formatSpeed(r.maxDown)} · 上传峰值 ${formatSpeed(r.maxUp)} · ${r.samples ? r.samples.length : 0} 个采样点</div>
+                <div class="rt-report-row-meta">下载峰值 ${formatSpeed(r.maxDown)} · 上传峰值 ${formatSpeed(r.maxUp)} · ${r.sampleCount ?? (r.samples ? r.samples.length : 0)} 个采样点</div>
               </div>
               <button class="btn btn-secondary btn-small rt-row-open" type="button">查看</button>
               <button class="btn btn-secondary btn-small rt-row-del" type="button">删除</button>
@@ -780,11 +791,29 @@
     const backdrop = ctrl.backdrop;
     ctrl.footer.querySelector('.rt-close-btn').addEventListener('click', () => ctrl.close());
     // 查看详情
+    // v2-L4P-35（F-4）：列表已瘦身（sampleCount），明细按需经 report-get 取全文；
+    // 通道缺席（预览态/旧后端）时回退用列表内联数据（旧后端仍回 samples）。
     backdrop.querySelectorAll('.rt-row-open').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const row = btn.closest('.rt-report-row');
-        const r = reports.find(x => x.name === row.dataset.name);
-        if (r) openReportModal(r, r.name);
+        const name = row.dataset.name;
+        const r = reports.find(x => x.name === name);
+        if (!r) return;
+        if (typeof window.api?.realtime?.reportGet === 'function' && !r.samples) {
+          try {
+            const resp = await window.api.realtime.reportGet(name);
+            if (resp && resp.success && resp.report) {
+              openReportModal(resp.report, name);
+              return;
+            }
+            window.app?.toast('error', (resp && resp.message) || '报告明细读取失败');
+            return;
+          } catch (e) {
+            window.app?.toast('error', (e && e.message) ? e.message : String(e));
+            return;
+          }
+        }
+        openReportModal(r, name);
       });
     });
     // 删除单条

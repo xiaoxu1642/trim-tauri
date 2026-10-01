@@ -41,6 +41,16 @@ fn set_running(id: Option<String>) {
     *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = id;
 }
 
+/// v2-L4P-37（F-6）：运行锁改 RAII——此前 set_running(Some) 与 set_running(None)
+/// 夹着整条执行链，链上任何 panic 都会让 Some(taskId) 永久留锁，维护页从此
+/// 「已有任务在执行中」直到重启。Drop 复位覆盖 panic/早退全部路径。
+struct RunningGuard;
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        set_running(None);
+    }
+}
+
 // ==================== IPC ====================
 
 /// maintenance:tasks —— 返回任务清单与分类顺序（纯数据，不跑脚本）
@@ -97,13 +107,27 @@ pub async fn maintenance_run<R: Runtime>(
         });
     }
 
+    // v2-L4P-37（F-6）：RAII 锁 + 阻塞链进 spawn_blocking。maint_run 内部是
+    // sfc/DISM/sc 等长耗时子进程（run_cmd 有 30 分钟超时上限，见 native.rs
+    // MAINT_CMD_TIMEOUT），必须离开 async runtime 线程。
     set_running(Some(task_id.clone()));
-    let result = run_one(&window, &task_id).await;
-    set_running(None);
+    let _guard = RunningGuard;
+    let wid = window.clone();
+    let tid = task_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || run_one(&wid, &tid))
+        .await
+        .unwrap_or_else(|e| {
+            log::write_log("error", &format!("维护任务线程异常: {e}"));
+            json!({
+                "success": false,
+                "message": format!("维护任务异常退出: {e}"),
+                "data": { "taskId": task_id, "result": "error", "output": format!("{e}") }
+            })
+        });
     result
 }
 
-async fn run_one<R: Runtime>(window: &WebviewWindow<R>, task_id: &str) -> Value {
+fn run_one<R: Runtime>(window: &WebviewWindow<R>, task_id: &str) -> Value {
     log::write_log("info", &format!("维护任务开始: {task_id}"));
 
     // S3：纯 Rust 原生，无 PS 回退

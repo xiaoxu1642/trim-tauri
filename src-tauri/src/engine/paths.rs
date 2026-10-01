@@ -231,10 +231,24 @@ pub fn prune_backups(dir: &Path, keep: usize) {
     names.sort();
     while names.len() > keep {
         let oldest = names.remove(0);
-        let _ = std::fs::remove_file(dir.join(&oldest));
+        // v2-L4P-33（C-5）：引擎级裁剪出口一律回收站优先（AGENTS §3）。目录受 v2-M19
+        // 寻址口约束（backup_write_dir 单根、非外部输入），再加一层 reparse 拒——
+        // 链接件进回收站等于把它指向的实体卷进来。
+        let main = dir.join(&oldest);
         let mut seal = oldest;
         seal.push_str(".meta.json");
-        let _ = std::fs::remove_file(dir.join(seal));
+        let seal_path = dir.join(&seal);
+        let reparse = |p: &Path| {
+            std::fs::symlink_metadata(p)
+                .map(|m| crate::engine::protect::is_reparse(&m))
+                .unwrap_or(true) // 读不到元数据按 reparse 处理（宁可不清，不误投）
+        };
+        if !reparse(&main) {
+            let _ = trim_finder::scan::recycle::send_to_trash_os(main.as_os_str());
+        }
+        if !reparse(&seal_path) {
+            let _ = trim_finder::scan::recycle::send_to_trash_os(seal_path.as_os_str());
+        }
     }
 }
 

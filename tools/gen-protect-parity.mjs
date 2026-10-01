@@ -88,6 +88,14 @@ export function buildParityFixture() {
     'C:\\System Volume Information\\foo',
     'D:\\System Volume Information\\foo',
     '\\\\?\\C:\\Windows\\Temp',
+    // v2-L4P-17（B-3）：UNC 三形态向量。本机默认清单无 UNC 根 ⇒ 全部放行（与 Rust 一致）；
+    // 向量锁的是「三端对同一形态判同一结果」：plain UNC（保留体）、\\?\UNC\（还原后再判）、
+    // 正斜杠 UNC。翻转场景（受保护根本身是 UNC）在 Rust 单测 unc_prefix_forms_converge_and_do_not_flip_protection 里用注入根证明。
+    '\\\\srv\\pub\\Windows\\System32',
+    '\\\\srv\\pub\\cache',
+    '\\\\?\\UNC\\srv\\pub\\Windows\\System32',
+    '\\\\?\\UNC\\srv\\pub\\cache',
+    '//srv/pub/Windows/System32',
     // 必须放行（清理工具的主力目标：系统根**之下**的缓存/日志）
     `${WINDIR}\\Prefetch`,
     `${WINDIR}\\SoftwareDistribution\\Download`,

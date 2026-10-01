@@ -226,12 +226,20 @@ pub fn fonts_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, 
 #[tauri::command]
 pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    let picked = window
-        .dialog()
-        .file()
-        .set_title("导入字体文件（将替换当前已导入字体）")
-        .add_filter("字体文件", &["ttf", "otf", "woff", "woff2"])
-        .blocking_pick_file();
+    // v2-L4P-40（RPT-09 补审）：blocking_pick_file 会一直阻塞到用户选完/取消——
+    // 直接在 async 命令体里调 = 占住一个 runtime worker 数分钟。挪进 spawn_blocking
+    //（对话框本身就要「等用户」，阻塞语义不变，只是不占 runtime 线程）。
+    let dlg_window = window.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        dlg_window
+            .dialog()
+            .file()
+            .set_title("导入字体文件（将替换当前已导入字体）")
+            .add_filter("字体文件", &["ttf", "otf", "woff", "woff2"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|e| format!("文件选择任务异常: {e}"))?;
     let Some(picked) = picked else {
         return Ok(json!({ "success": false, "canceled": true }));
     };
@@ -292,9 +300,8 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     if let Some(prev) = &prev {
         if let Some(prev_copy) = truthy_string(prev.get("copyPath")) {
             if !prev_copy.is_empty() && !same_path(&prev_copy, &copy_str) {
-                if let Err(e) = std::fs::remove_file(&prev_copy) {
-                    log::write_log("warn", &format!("旧导入字体副本删除失败: {e}"));
-                }
+                // v2-L4P-27（B-5）：出口收紧为 remove_owned_font_copy（归属 + reparse + 回收站）
+                remove_owned_font_copy(&prev_copy);
             }
         }
     }
@@ -320,9 +327,36 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     }))
 }
 
+/// v2-L4P-27（B-5）：自有字体副本删除的**唯一出口**。check-delete-exits 豁免理由是
+/// 「只删 Trim 导入时生成的副本」——豁免必须由代码兑现：目标必须位于 fonts_dir()
+/// 直下、且自身不是 reparse（云占位符/junction 形态删到的是另一块存储）。settings 里
+/// 的 copyPath 若被篡改成任意路径（或指向链接），这里一律拒绝并留痕；删除走回收站
+///（与背景图删除同口径，可恢复），不因「自己是副本」就永久删。
+fn remove_owned_font_copy(raw: &str) -> bool {
+    let p = PathBuf::from(raw);
+    if p.parent().map(|d| d == fonts_dir()) != Some(true) {
+        log::write_log("warn", &format!("拒绝删除 fonts 目录外的字体副本: {raw}"));
+        return false;
+    }
+    match std::fs::symlink_metadata(&p) {
+        Ok(meta) if crate::engine::protect::is_reparse(&meta) => {
+            log::write_log("warn", &format!("拒绝删除 reparse 形态的字体副本: {raw}"));
+            return false;
+        }
+        Err(_) => return true, // 不存在 = 幂等成功
+        Ok(_) => {}
+    }
+    match trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()) {
+        Ok(()) => true,
+        Err(e) => {
+            log::write_log("warn", &format!("旧导入字体副本移入回收站失败: {e}"));
+            false
+        }
+    }
+}
+
 /// `path.resolve(a) !== path.resolve(b)` 等价（大小写不敏感比较 + 规范化）
-fn same_path(a: &str, b: &str) -> bool {
-    let norm = |p: &str| -> String {
+fn same_path(a: &str, b: &str) -> bool {    let norm = |p: &str| -> String {
         let pb = PathBuf::from(p);
         let full = std::fs::canonicalize(&pb).unwrap_or(pb);
         full.to_string_lossy()
@@ -373,9 +407,9 @@ pub fn fonts_remove_imported<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
     let mut file_deleted = true;
     if let Some(copy_path) = truthy_string(prev.get("copyPath")) {
         if !copy_path.is_empty() {
-            if let Err(e) = std::fs::remove_file(&copy_path) {
+            // v2-L4P-27（B-5）：出口收紧为 remove_owned_font_copy（归属 + reparse + 回收站）
+            if !remove_owned_font_copy(&copy_path) {
                 file_deleted = false;
-                log::write_log("warn", &format!("导入字体副本删除失败: {e}"));
             }
         }
     }

@@ -160,6 +160,7 @@
     'realtime:loss': 'realtime_loss',
     'realtime:report-save': 'realtime_report_save',
     'realtime:report-list': 'realtime_report_list',
+    'realtime:report-get': 'realtime_report_get',
     'realtime:report-delete': 'realtime_report_delete',
     'realtime:report-clear': 'realtime_report_clear',
     // bench-history（4）/ elevate（1）
@@ -552,6 +553,7 @@
       loss: function () { return invokeChannel('realtime:loss'); },
       reportSave: function (data) { return invokeChannel('realtime:report-save', { data: data }); },
       reportList: function () { return invokeChannel('realtime:report-list'); },
+      reportGet: function (name) { return invokeChannel('realtime:report-get', { name: name }); },
       reportDelete: function (name) { return invokeChannel('realtime:report-delete', { name: name }); },
       reportClear: function () { return invokeChannel('realtime:report-clear'); }
     },

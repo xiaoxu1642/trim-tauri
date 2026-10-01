@@ -39,9 +39,12 @@ const DELETE_MARKERS = [
   'remove_file',          // 单文件删
   'DeleteFileW',
   'SHFileOperation',
-  'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW',
+  'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW', 'RegDeleteKeyExW',
+  'remove_dir',          // 单目录删（B-9：此前漏登，只盯了递归删）
   // 引擎删除函数（二跳委托的发现网）
   'send_to_trash',        // trim_finder 回收站
+  'send_to_trash_os',     // trim_finder 回收站（OsStr 直传形态）
+  'remove_owned_font_copy', // fonts 自有副本删除 helper（v2-L4P-27：三道闸内聚于此）
   'reg_key_remove',       // native::RegDeleteTree 封装
   'reg_restore_delete',   // native::reg_value 恢复语义的删值
   'startup_delete',       // native::启动项删除
@@ -63,6 +66,12 @@ const EXEMPTS = new Map([
   // 自有字体副本：只动 Trim 导入时生成的副本，绝不触用户原始字体文件
   ['fonts_import', 'remove_file 只删自有字体副本目录内「上一份导入副本」（替换语义）'],
   ['fonts_remove_imported', '移除记录 + 删 settings.fontImported 登记的自有副本，不触用户原始文件'],
+  // v2-L4P-12（B-1）：backgrounds 住在 app_data_dir() 里，而 configure_from_app 把
+  // app_data_dir() 整棵登记为 subtree ⇒ is_path_protected 恒拒，功能 100% 不可用。
+  // 闸门收口为四件套（见命令体注释），故从 MUST_PROTECT 挪入豁免并写明依据：
+  ['appearance_bg_delete', '仅删 backgrounds 直接子项：父目录归属校验 + 扩展名白名单 + is_reparse 拒 + 回收站 _os；文件面 protect 对自有数据目录恒拒无判定意义'],
+  // v2-L4P-27（B-5）：fonts_import 旧副本删除补齐归属校验后的口径说明由代码兑现；
+  // 豁免理由不变（只删自有副本目录内目标）。
 ]);
 
 // ---- 正向清单：审查矩阵逐列核过的文件型删除出口，protect 判定不许掉 ----
@@ -71,7 +80,6 @@ const MUST_PROTECT = [
   'fileclean_delete_file',
   'fileclean_execute',
   'finder_delete',
-  'appearance_bg_delete',
   'uninstall_residue_execute',
   'uninstall_pending_add',
   'contextmenu_remove',
@@ -98,21 +106,73 @@ const walk = (dir) => {
 };
 walk(path.join(ROOT, 'src'));
 
+// v2-L4P-31（E-6 同族）：剥离 Rust 注释与字符串字面量后再做标记匹配。实测教训：
+// appearance_bg_delete 的说明注释里写了 API 名，`body.includes()` 被注释文本洗白——
+// 状态机剥除（处理块注释/行注释/字符串/字符/生存期撇号）后，断言只看真实代码。
+function stripRustComments(src) {
+  let out = '', i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i], d = i + 1 < n ? src[i + 1] : '';
+    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') {
+      let depth = 1; i += 2;
+      while (i < n && depth > 0) {
+        if (src[i] === '/' && src[i + 1] === '*') { depth++; i += 2; }
+        else if (src[i] === '*' && src[i + 1] === '/') { depth--; i += 2; }
+        else i++;
+      }
+      out += ' ';
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < n && src[i] !== '"') { if (src[i] === '\\') i++; i++; }
+      i++; out += '""';
+      continue;
+    }
+    if (c === 'r' && (d === '"' || d === '#')) {
+      // raw string r"..." / r#"..."#
+      let hashes = 0, j = i + 1;
+      while (src[j] === '#') { hashes++; j++; }
+      if (src[j] === '"') {
+        const close = '"' + '#'.repeat(hashes);
+        const end = src.indexOf(close, j + 1);
+        i = end < 0 ? n : end + close.length;
+        out += '""';
+        continue;
+      }
+    }
+    if (c === "'") {
+      // 字符字面量或生存期（'a）：看第二个引号前的形态
+      const m = /^'(\\.|[^'\\])'/.exec(src.slice(i, i + 5));
+      if (m) { i += m[0].length; out += "''"; continue; }
+      out += c; i++;
+      continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}
+
 function extractBody(name) {
   for (const file of srcFiles) {
     const src = fs.readFileSync(file, 'utf8');
     const re = new RegExp(`\\bfn\\s+${name}\\s*[<(]`);
     const m = src.match(re);
     if (!m) continue;
-    // 从 fn 起始做花括号配平
-    let i = src.indexOf('{', m.index);
+    // 从 fn 起始做花括号配平（在剥离注释/字符串后的文本上做，防止字符串里的
+    // 花括号截断函数体——E-6 的判绿方向风险）
+    const clean = stripRustComments(src);
+    const mc = clean.match(re);
+    let i = mc ? clean.indexOf('{', mc.index) : -1;
     if (i < 0) continue;
     let depth = 0, end = -1;
-    for (; i < src.length; i++) {
-      if (src[i] === '{') depth++;
-      else if (src[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    for (; i < clean.length; i++) {
+      if (clean[i] === '{') depth++;
+      else if (clean[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
     }
-    return { file: path.relative(ROOT, file).replace(/\\/g, '/'), body: end > 0 ? src.slice(m.index, end) : '' };
+    return { file: path.relative(ROOT, file).replace(/\\/g, '/'), body: end > 0 ? clean.slice(mc.index, end) : '' };
   }
   return null;
 }
@@ -161,9 +221,14 @@ check(unknownExits.length === 0, '3. 无未注册的删除出口（新出口默�
   unknownExits.length ? unknownExits.join('；') : `${[...bodies.values()].filter((b) => DELETE_MARKERS.some((mk) => b.body.includes(mk))).length} 条命中删除标记的命令全部受控`);
 check(exemptMissing.length === 0, '4. 豁免条目与函数体现状一致', exemptMissing.join('；') || '无漂移');
 
+// v2-L4P-16（E-5）：定位失败从「ℹ 放行」改为判红。函数改名/搬出 src-tauri/src 会让
+// 删除出口网整条脱网——「新永久删出口默认红」的防线可以在无声中被绕掉，方向必须
+// fail-closed。豁免/正向清单里的命令仍允许仅提示（它们的受控性由登记理由兜住）。
 const missingCmds = missing.filter((n) => !EXEMPTS.has(n) && !MUST_PROTECT.includes(n));
-if (missing.length) {
-  console.log(`ℹ 未定位到函数体的命令（定义可能在宏/其他 crate 内，按现状放行但列出）：${missing.join(', ')}`);
+check(missingCmds.length === 0, '5. 命令体定位失败即红（fail-closed，防出口网无声脱网）',
+  missingCmds.length ? `未定位：${missingCmds.join(', ')}` : `${commands.length} 条命令全部定位到函数体`);
+if (missing.length > missingCmds.length) {
+  console.log(`ℹ 豁免/正向清单内未定位的命令（受控性由登记理由兜住）：${missing.filter((n) => EXEMPTS.has(n) || MUST_PROTECT.includes(n)).join(', ')}`);
 }
 
 console.log('');
@@ -171,4 +236,21 @@ if (fail > 0) {
   console.error('门禁失败：删除出口枚举存在未受控项');
   process.exit(1);
 }
+
+// ---- E-8/E-15 正向对照自检（v2-L4P-16/44）：判定器必须能抓真实违规，否则恒绿 ----
+const POSITIVE_CONTROLS = (() => {
+  const checks = [];
+  // ① 剥注释后，注释里的 API 名不得再命中标记
+  const sample = stripRustComments('fn x() {\n    // remove_file 不算\n    let s = "remove_dir_all 也不算";\n}');
+  checks.push(['注释/字符串被剥离', !sample.includes('remove_file') && !sample.includes('remove_dir_all')]);
+  // ② 真实调用仍然命中
+  const sample2 = stripRustComments('fn y() { let _ = remove_file(p); }');
+  checks.push(['真实调用仍命中', sample2.includes('remove_file')]);
+  for (const [label, ok] of checks) {
+    if (!ok) { console.error(`✗ 正向对照失败：${label}——判定器已失效，本门禁的 ✓ 不可信`); process.exit(1); }
+  }
+  console.log('✓ 正向对照自检通过（剥离 + 命中两向）');
+  return true;
+})();
+
 console.log('删除出口枚举门禁全部通过');

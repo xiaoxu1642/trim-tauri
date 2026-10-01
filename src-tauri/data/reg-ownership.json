@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "注册表键归属表（M4/M5，2026-09-14 优化中心重复点审查）。背景：同一个注册表键被两个模块各自写入自己的值名时，任何一方的「还原」都会按整键回滚或连坐删掉对方写入的值，且用户无从判断该值当初是谁写的。本表为共享键逐值声明唯一写入方，由 scripts/check-reg-ownership.js 校验（已接入 npm test），出现越界写入即测试失败。新增共享键时在此登记，不要改校验脚本去放宽。",
+  "_comment": "注册表键归属表（M4/M5，2026-09-14 优化中心重复点审查）。背景：同一个注册表键被两个模块各自写入自己的值名时，任何一方的「还原」都会按整键回滚或连坐删掉对方写入的值，且用户无从判断该值当初是谁写的。本表为共享键逐值声明唯一写入方。v2-L4P-42（C-7）勘误：原注释声称由 scripts/check-reg-ownership.js 校验（已接入 npm test）——该脚本与 npm test 均不存在（Electron 时代遗留叙述），本表当前**无自动校验**，仅有 check-data-parity.mjs 的「无对拍对象」显式提示；改动只能靠人工核对，勿再引用虚无脚本。新增共享键时在此登记并人工核对写入方唯一性。",
   "modules": {
     "optimizer": "电脑优化中心（src/scripts-powershell/optimizer-scripts.js 的 OPTIONS）",
     "maintenance": "系统维护（src/scripts-powershell/maintenance-scripts.js 的 TASKS）",

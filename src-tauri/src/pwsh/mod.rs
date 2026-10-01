@@ -309,7 +309,11 @@ fn run_with_exe(
     diag_op: Option<&str>,
     label: &str,
 ) -> Result<PsOutput, String> {
-    let trim_tmp = paths::temp_script_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // v2-L4P-28（B-6）：取值失败必须 Err 早退。原实现回落 `PathBuf::from(".")`——
+    // 提权实例的 CWD 可能是 System32，等于把临时脚本写到系统目录（TOCTOU 提权窗口），
+    // 与模块头「拒把脚本写到 reparse 替换过的目录」的承诺自相矛盾。
+    let trim_tmp = paths::temp_script_dir()
+        .map_err(|e| format!("私有临时目录不可用，拒绝执行 {label}: {e}"))?;
     let mut child = Command::new(exe)
         .args([
             "-NoProfile",
@@ -384,7 +388,16 @@ fn run_with_exe(
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Err(e) => return Err(format!("等待 {label} 失败: {e}")),
+            Err(e) => {
+                // v2-L4P-28（B-6）：try_wait 出错不能裸返回——子进程还活着、job 也无人收，
+                // 直接 return 会把孤儿进程（及其管道写端）留给调用方。先收树再报错。
+                if let Some(j) = &job {
+                    j.terminate();
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("等待 {label} 失败: {e}"));
+            }
         }
     }
 
@@ -728,16 +741,33 @@ mod tests {
 
     #[test]
     fn 备份名白名单只认脚本产出的形状() {
-        // cleanup_execute.ps1:715 → yyyyMMdd_HHmmss_reg_<id>_<n>.reg
+        // ① 旧（cleanup_execute.ps1 时代）：yyyyMMdd_HHmmss_reg_<id>_<n>.reg
         assert!(is_reg_backup_name("20260925_131400_reg_packageCache_1.reg"));
         assert!(is_reg_backup_name("20260925_131400_reg_a_12.reg"));
-        // 时间戳形状不对 / 缺 _reg_ 前缀 / 非 .reg 结尾，一律不当备份
+        // ② 新（原生执行链 v2-L4P-30）：now_ms 13 位 —— 旧实现对此恒 false（假绿根因）
+        assert!(is_reg_backup_name("1789999999999_reg_packageCache_1.reg"));
+        assert!(is_reg_backup_name("1789999999999_reg_a_12.reg"));
+        assert_eq!(
+            reg_backup_stamp("1789999999999_reg_a_1.reg").as_deref(),
+            Some("1789999999999")
+        );
+        assert_eq!(
+            reg_backup_stamp("20260925_131400_reg_a_1.reg").as_deref(),
+            Some("20260925_131400")
+        );
+        // 时间戳形状不对 / 缺 _reg_ 前缀 / 非 .reg 结尾 / 尾段缺失，一律不当备份
         for junk in [
             "2026-09-25_131400_reg_a_1.reg",
             "20260925_13140_reg_a_1.reg",
             "20260925_131400_key_a_1.reg",
             "20260925_131400_reg_a_1.txt",
             "notes.reg",
+            // 12 位 / 14 位纯数字都不在两种合法形态里
+            "178999999999_reg_a_1.reg",
+            "17899999999999_reg_a_1.reg",
+            // 缺序号段
+            "1789999999999_reg_a.reg",
+            "1789999999999_reg__1.reg",
             // id 里带目录分隔符也必须被白名单挡下（名称取自数据，不可信）
             "20260925_131400_reg_..\\win_1.reg",
         ] {
@@ -965,8 +995,10 @@ fn expired_since(mtime: Option<std::time::SystemTime>, now: std::time::SystemTim
 const REG_BACKUP_KEEP_BATCHES: usize = 10;
 
 /// 修剪 `cleanup-reg-backup`：超额批次的文件逐个进回收站。
-/// 目录清单与 `peripheral.rs::prune_backups` 同口径 —— 老目录（`%APPDATA%\Trim`，
-/// `.ps1` 里写死的正是它）与新目录（便携/identifier）都扫，漏一个就是无上限增长。
+/// **裁根 = 写侧单根**（v2-L4P-14，B-2/C-3 用户拍板 D-1）：老根（`%APPDATA%\Trim`，
+/// `.ps1` 里写死的正是它）是用户升级前的唯一还原依据，AGENTS §9.2① 冻结「老根只读不裁」
+/// ——把 `backup_read_dirs` 的读兜底清单当裁根清单用，等于替用户丢掉最后的退路。
+/// 老根的超额文件宁可留在盘上（读取兜底仍可见、可还原），也不许被我们清掉。
 ///
 /// **为什么这里没有逐文件过 `is_path_protected`（与整改单的点名校法不同，实测依据）**：
 /// `protect.rs:282` 把 `%APPDATA%\Trim` 整棵列为 subtree 受保护根（注释原文
@@ -977,9 +1009,9 @@ const REG_BACKUP_KEEP_BATCHES: usize = 10;
 /// 四要素固定：目录常量 + 严格文件名白名单（`is_reg_backup_name`）+ 拒 reparse 的普通文件
 /// + 只进回收站（可恢复、且不删目录本身）。同族的 `peripheral.rs::prune_backups` 也是这个姿势。
 fn prune_reg_backups(keep_batches: usize) {
-    // 两根候选走唯一寻址口（v2-M19）：写侧恒新根（`commands/cleanup.rs`），老根只是
-    // 收口前那批备份的兜底，修剪要覆盖它们否则超额文件永远留在盘上。
-    let dirs = paths::backup_read_dirs(REG_BACKUP_DIR);
+    // 裁根恒为写侧单根（v2-L4P-14）：读兜底（backup_read_dirs）与裁根（backup_write_dir）
+    // 从此是两个口径，check-fail-closed 钉住「老根不得出现在裁根名单」。
+    let dirs = vec![paths::backup_write_dir(REG_BACKUP_DIR)];
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -996,7 +1028,10 @@ fn prune_reg_backups(keep_batches: usize) {
                 .map(|m| m.is_file() && !crate::engine::protect::is_reparse(&m))
                 .unwrap_or(false);
             if ok_regular {
-                backups.push((name[..REG_STAMP_LEN].to_string(), entry.path()));
+                // v2-L4P-30：批次键由 reg_backup_stamp 给出（双形态各自定宽、字典序即时序）
+                if let Some(stamp) = reg_backup_stamp(&name) {
+                    backups.push((stamp, entry.path()));
+                }
             }
         }
         for path in reg_backups_to_remove(backups, keep_batches) {
@@ -1009,24 +1044,47 @@ fn prune_reg_backups(keep_batches: usize) {
 }
 
 const REG_BACKUP_DIR: &str = "cleanup-reg-backup";
-/// 文件名前缀 `yyyyMMdd_HHmmss` 的固定长度，即批次时间戳
-const REG_STAMP_LEN: usize = 15;
 
-/// `cleanup_execute.ps1:715` 的命名：`yyyyMMdd_HHmmss_reg_<规则id>_<序号>.reg`。
-/// 必须逐位卡死前缀：id 是数据里的字符串、长度与字符集都不受本模块控制，
+/// 登记两种合法自产备份命名并给出批次键（v2-L4P-30 / B-8）。
+///
+/// ① 旧（cleanup_execute.ps1 时代，盘上存量）：`yyyyMMdd_HHmmss_reg_<id>_<序号>.reg`
+/// ② 新（原生执行链，native.rs regKeys 分支）：`<now_ms 13 位>_reg_<id>_<序号>.reg`
+/// ——旧实现只认①，②恒 false ⇒ 原生备份既不被修剪也不被当备份（无上限增长 + 假绿测试）。
+/// 逐位卡死前缀的理由不变：id 是规则数据里的字符串、长度与字符集都不受本模块控制，
 /// 宽松匹配会把用户丢进这个目录的任意文件当成备份删掉。
-fn is_reg_backup_name(name: &str) -> bool {
-    let b = name.as_bytes();
-    // 时间戳 15 + "_reg_" 5 + 至少 1 字节 id + "_" + 至少 1 字节序号 + ".reg" 4
-    b.len() >= REG_STAMP_LEN + 5 + 1 + 1 + 1 + 4
-        && name.ends_with(".reg")
-        && b[8] == b'_'
+/// 返回 None = 不是自产备份（一律不碰）；Some = 批次键（字典序即时序，两种形态各自定宽）。
+fn reg_backup_stamp(name: &str) -> Option<String> {
+    const LEGACY_LEN: usize = 15; // yyyyMMdd_HHmmss
+    const MS_LEN: usize = 13; // now_ms
+    let stem = name.strip_suffix(".reg")?;
+    // 分隔符一律拒：id 取自规则数据，理论上可能被写成 `..\windows`；
+    // NTFS 文件名本身容不下这些字符，故这是「不依赖上游侥幸」的第二层
+    if stem.contains(['/', '\\', ':']) {
+        return None;
+    }
+    let us = stem.find("_reg_")?;
+    let stamp = &stem[..us];
+    let b = stamp.as_bytes();
+    let legacy = stamp.len() == LEGACY_LEN
         && b[..8].iter().all(|c| c.is_ascii_digit())
-        && b[9..15].iter().all(|c| c.is_ascii_digit())
-        && &name[REG_STAMP_LEN..REG_STAMP_LEN + 5] == "_reg_"
-        // 分隔符一律拒：id 取自规则数据，理论上可能被写成 `..\windows`；
-        // NTFS 文件名本身容不下这些字符，故这是「不依赖上游侥幸」的第二层
-        && !name.contains(['/', '\\', ':'])
+        && b[8] == b'_'
+        && b[9..15].iter().all(|c| c.is_ascii_digit());
+    let ms = stamp.len() == MS_LEN && stamp.bytes().all(|c| c.is_ascii_digit());
+    if !legacy && !ms {
+        return None;
+    }
+    // "_reg_" 之后必须恰好是 id 与序号两段且都非空
+    let tail = &stem[us + 5..];
+    let segs: Vec<&str> = tail.split('_').collect();
+    if segs.len() != 2 || segs.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    Some(stamp.to_string())
+}
+
+/// 自产备份白名单（两种命名形态，见 `reg_backup_stamp`）
+fn is_reg_backup_name(name: &str) -> bool {
+    reg_backup_stamp(name).is_some()
 }
 
 /// 纯函数：给定 (批次, 路径) 列表，交出应删除的那些（保留最近 keep 个批次）。

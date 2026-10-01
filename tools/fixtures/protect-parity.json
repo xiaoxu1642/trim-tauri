@@ -133,6 +133,26 @@
       "protected": false
     },
     {
+      "p": "\\\\srv\\pub\\Windows\\System32",
+      "protected": false
+    },
+    {
+      "p": "\\\\srv\\pub\\cache",
+      "protected": false
+    },
+    {
+      "p": "\\\\?\\UNC\\srv\\pub\\Windows\\System32",
+      "protected": false
+    },
+    {
+      "p": "\\\\?\\UNC\\srv\\pub\\cache",
+      "protected": false
+    },
+    {
+      "p": "//srv/pub/Windows/System32",
+      "protected": false
+    },
+    {
       "p": "C:\\Windows\\Prefetch",
       "protected": false
     },

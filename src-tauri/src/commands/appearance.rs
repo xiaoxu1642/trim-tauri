@@ -352,10 +352,11 @@ pub fn appearance_bg_delete<R: Runtime>(
         Err(_) => return Ok(json!({ "success": true })), // 不存在 = 幂等成功（对齐上游 existsSync 短路）
         Ok(_) => {}
     }
-    let p = target.to_string_lossy().to_string();
-    if protect::is_path_protected(&p) {
-        return Ok(json!({ "success": false, "message": "该路径受保护，已拒绝删除" }));
-    }
+    // v2-L4P-12（B-1）：此处不得再调 protect::is_path_protected——configure_from_app
+    // 把 app_data_dir() 整棵登记为 subtree，而 backgrounds 就住在里面，判定恒拒 ⇒
+    // 删除背景图按钮 100% 不可用（且测试环境不跑 configure_from_app，永远看不到冲突）。
+    // 闸门收口改为四件套：backgrounds 直接子项（防穿越/逃逸）+ 扩展名白名单 +
+    // is_reparse 拒 + 回收站 _os，已在 check-delete-exits 的 EXEMPTS 带理由登记。
     // 审查 M11：删除前把缓冲日志刷盘（AGENTS §3）。此处是「用户文件进回收站」的出口，
     // 若紧随其后的操作让进程异常退出，未落盘的日志会让这次删除无从追溯。
     log::flush_sync();

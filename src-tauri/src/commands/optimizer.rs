@@ -1748,6 +1748,24 @@ try {\n\
 
 static RESTORE_INFLIGHT: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
+/// v2-L4P-10（F-1，P0）：泛型 inflight RAII guard。原实现在函数体里取 `MutexGuard`
+/// 并活到函数尾，又在同线程对同一个 `std` futex mutex 二次 `lock()` 复位——std 互斥量
+/// 不可重入，等价于自死锁：还原点已建成、回执永挂、async worker 永久泄漏。
+/// 刻意不复用 `OptRunGuard`（RPT-07）：那管的是 `OPT_RUN_INFLIGHT`，字面复用会让
+/// 「创建还原点」与「跑优化项」互相排斥。Drop 复位覆盖全部早退路径。
+struct InflightGuard<'a>(&'a std::sync::Mutex<bool>);
+impl InflightGuard<'_> {
+    fn acquire(flag: &std::sync::Mutex<bool>) -> Option<InflightGuard<'_>> {
+        let mut slot = flag.lock().unwrap_or_else(|e| e.into_inner());
+        if *slot { None } else { *slot = true; Some(InflightGuard(flag)) }
+    }
+}
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+}
+
 /// optimizer:create-restore —— 创建系统还原点（预检 + 记账 + 创建后回读数量增长）
 #[tauri::command]
 pub async fn optimizer_create_restore<R: Runtime>(window: WebviewWindow<R>) -> Value {
@@ -1760,13 +1778,14 @@ pub async fn optimizer_create_restore<R: Runtime>(window: WebviewWindow<R>) -> V
             "message": "创建系统还原点需要管理员权限，请先提权"
         });
     }
-    let mut guard_inflight = RESTORE_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    if *guard_inflight {
+    let Some(_inflight) = InflightGuard::acquire(&RESTORE_INFLIGHT) else {
         return json!({ "success": false, "message": "正在创建还原点，请勿重复提交" });
-    }
-    *guard_inflight = true;
-    let result = create_restore_inner();
-    *RESTORE_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    };
+    // create_restore_inner 全程是阻塞面（收件箱 PS 预检/创建 + WMI 回读 + 注册表记账），
+    // 命令体是 async fn，必须搬进 spawn_blocking，不能占 runtime worker（v2-L4P-10）。
+    let result = tauri::async_runtime::spawn_blocking(create_restore_inner)
+        .await
+        .unwrap_or_else(|_| json!({ "success": false, "message": "创建还原点任务异常退出，请重试" }));
     result
 }
 

@@ -264,6 +264,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::realtime::realtime_loss,
         commands::realtime::realtime_report_save,
         commands::realtime::realtime_report_list,
+        commands::realtime::realtime_report_get,
         commands::realtime::realtime_report_delete,
         commands::realtime::realtime_report_clear,
         // ---- B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）----

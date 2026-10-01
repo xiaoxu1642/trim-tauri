@@ -212,6 +212,45 @@ check(
   `${injected ? '' : ' 缺注入'}${scannerUsesRoots ? '' : ' 扫描器未走统一入口'}`.trim(),
 );
 
+// ---- E. 裁根不得含老根（v2-L4P-14，B-2/C-3 用户拍板 D-1） ----
+// 老根 `%APPDATA%\Trim` 是升级前备份的唯一还原依据，AGENTS §9.2① 冻结「老根只读不裁」。
+// pwsh::prune_reg_backups 与 peripheral::prune_backups 曾把 backup_read_dirs（读兜底清单）
+// 直接当裁根清单用 ⇒ 超额老根被投回收站。本断言钉死：两个裁剪函数的函数体必须以
+// backup_write_dir 单根为裁根、不得出现 backup_read_dirs。正向对照：backup_read_dirs
+// 必须仍在仓内被读取侧使用（API 改名/消失时断言失效要立刻暴露，而不是恒绿）。
+const PRUNE_FNS = [
+  { file: 'pwsh/mod.rs', fn: 'prune_reg_backups' },
+  { file: 'commands/peripheral.rs', fn: 'prune_backups' },
+];
+function fnBody(src, fnName) {
+  const re = new RegExp(`\\bfn\\s+${fnName}\\s*[<(]`);
+  const m = src.match(re);
+  if (!m) return null;
+  let i = src.indexOf('{', m.index);
+  if (i < 0) return null;
+  let depth = 0;
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) break; }
+  }
+  return src.slice(m.index, i);
+}
+const readDirsStillUsed = files.some((f) => /backup_read_dirs\s*\(/.test(readFileSync(f, 'utf8')));
+check(readDirsStillUsed, 'E0. 正向对照：backup_read_dirs 读取侧仍在仓内使用（断言 E1-E2 防恒绿）', readDirsStillUsed ? '' : '读兜底 API 已消失——请复核 E 组断言是否还有意义');
+let eHits = [];
+for (const { file, fn } of PRUNE_FNS) {
+  const p = join(SRC, file);
+  const body = fnBody(readFileSync(p, 'utf8'), fn);
+  if (!body) { eHits.push(`${file}:${fn} 函数体定位失败`); continue; }
+  if (!/backup_write_dir\s*\(/.test(body)) eHits.push(`${file}:${fn} 裁根未走 backup_write_dir 单根`);
+  if (/backup_read_dirs\s*\(/.test(body)) eHits.push(`${file}:${fn} 裁根含读兜底清单（老根会被裁）`);
+}
+check(
+  eHits.length === 0,
+  'E. 裁剪函数裁根 = backup_write_dir 单根，老根只读不裁（v2-L4P-14）',
+  eHits.length ? `违规 ${JSON.stringify(eHits)}` : `${PRUNE_FNS.length} 个裁剪函数全部写侧单根`,
+);
+
 console.log('');
 if (fail > 0) {
   console.error(`门禁失败：${fail} 组断言未通过`);

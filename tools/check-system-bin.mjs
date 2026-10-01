@@ -80,6 +80,11 @@ const SITE_EXEMPT = [
     reason: 'quiet_cmd 函数定义本身（token 命中函数名，非调用点）',
   },
   {
+    file: 'src-tauri/src/engine/systembin.rs',
+    anchor: 'let mut child = quiet_cmd(program)',
+    reason: 'quiet_cmd_timeout（v2-L4P-29）函数体内的透传：program 由调用方经 system_tool 或已登记豁免解析，本函数只补超时收口',
+  },
+  {
     file: 'src-tauri/src/engine/native.rs',
     anchor: 'quiet_cmd(p).spawn()',
     reason: 'p 来自注册表 Run 键回读的绝对路径列表，非 PINNED 裸名',

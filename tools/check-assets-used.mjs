@@ -67,6 +67,12 @@ let unused = 0;
 let unusedBytes = 0;
 console.log('=== frontendDist 资源引用门禁（v2-L8）===');
 console.log(`产物目录 src/ = ${assets.length} 个文件；引用语料 ${texts.length} 个文本件（不含 vendor/、docs/）\n`);
+// v2-L4P-16（E-1）：0 对象即红——目录名改错/扫描器失效时「0 个资源全通过」是假绿。
+// 正向对照：src/ 下 JS 文件数必须 > 0（前端目录存在的前提）。
+if (assets.length === 0 || !texts.length) {
+  console.error(`✗ 扫描对象为空（assets=${assets.length}, corpus=${texts.length}）——门禁失效方向判红，请检查 DIST/语料配置`);
+  process.exit(1);
+}
 for (const f of assets) {
   const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
   const size = statSync(f).size;
@@ -89,6 +95,32 @@ if (unused) {
   console.log(`\n※ 零引用资源 ${unused} 个、共 ${(unusedBytes / 1024 / 1024).toFixed(2)} MB。`
     + `确认运行期不需要就搬出 src/（母版/未打包资产放仓库根的 assets-src/，它不在 frontendDist 里），`
     + `确实要在包里但靠动态拼名加载的，进本文件 WHITELIST 并写明理由。`);
+}
+
+// ---- v2-L4P-45（F-11）：src-tauri/icons 只读枚举台账 ----
+// 此前门禁只扫 frontendDist（src/），看不见 src-tauri/icons：那里 13 个
+// Square*/StoreLogo 等 Windows 打包位图不在 bundle.icon 清单里、语料也零引用，
+// 但它们由 Tauri bundler 按 targets 隐式消费，**不可删**。这里只做台账打印
+// （数字供报告现抄），不判红——删图标的行为由 check-asset-size 的基线棘轮兜底。
+const ICONS_DIR = join(REPO_ROOT, 'src-tauri', 'icons');
+if (existsSync(ICONS_DIR)) {
+  const conf = JSON.parse(readFileSync(join(REPO_ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const bundled = new Set((conf.bundle?.icon ?? []).map((s) => s.replace(/^icons\//, '')));
+  const icons = walk(ICONS_DIR);
+  const orphan = [];
+  for (const f of icons) {
+    const name = basename(f);
+    if (bundled.has(name)) continue;
+    const referenced = texts.some(([cf, text]) => cf !== f && text.includes(name));
+    if (!referenced) orphan.push(name);
+  }
+  console.log(`\nsrc-tauri/icons 台账：共 ${icons.length} 个，bundle.icon 点名 ${bundled.size} 个，` +
+    `语料引用后零引用 ${orphan.length} 个（bundler 按 targets 隐式消费，刻意保留）：`);
+  if (orphan.length) console.log('  ' + orphan.join(', '));
+  if (icons.length === 0) {
+    console.error('✗ icons 目录为空——图标枚举失效方向判红');
+    process.exit(1);
+  }
 }
 console.log(`\n${unused === 0 ? '✓ 产物里没有零引用资源' : `✗ ${unused} 个零引用资源待处理`}`);
 process.exit(unused === 0 ? 0 : 1);

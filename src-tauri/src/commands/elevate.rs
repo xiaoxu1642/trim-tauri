@@ -288,6 +288,11 @@ fn arm_handshake<R: Runtime>(app: AppHandle<R>, nonce: String) {
             if started.elapsed().as_millis() as u64 > HANDSHAKE_TIMEOUT_MS {
                 log::write_log("warn", "未检测到提权后的新实例启动，保持当前实例运行");
                 clear_handshake();
+                // v2-L4P-13（A-1）：超时分支刻意让旧实例活着，但监视线程在此 return——
+                // 若不复位 ELEVATE_INFLIGHT，本进程再点「提权」永远回「正在处理中」
+                //（文案还谎称有请求在途），只能重启应用。成功让位路径不复位是有意的
+                //（进程即将退出），超时保持存活路径必须复位。
+                ELEVATE_INFLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
                 let main = app.get_webview_window("main");
                 if let Some(w) = main {
                     let _ = w.emit(

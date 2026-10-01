@@ -35,7 +35,7 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpSetTimeouts, URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
     WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE, WINHTTP_FLAG_SECURE,
     WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_OPTION_REDIRECT_POLICY,
-    WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS, WINHTTP_OPTION_URL, WINHTTP_QUERY_CONTENT_LENGTH,
+    WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS, WINHTTP_OPTION_REDIRECT_POLICY_NEVER, WINHTTP_OPTION_URL, WINHTTP_QUERY_CONTENT_LENGTH,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
@@ -229,16 +229,25 @@ fn open_response(
     // （runtimes 传 30s → 与迁移前 15/15/30/30 逐字一致）
     let phase_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
     let _ = unsafe { WinHttpSetTimeouts(session.raw(), 15_000, 15_000, phase_ms, phase_ms) };
-    // 跟随重定向：ALWAYS 允许跳转（含跨主机），终点由调用方的 allow_host 闸门收口
-    let policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS.to_le_bytes();
+    // 跟随重定向：v2-L4P-22（A-4/RPT-06）——两个维度收口：
+    // ① 自定义请求头非空 ⇒ 一律 NEVER。WinHTTP 跨主机 30x 会原样重发全部请求头
+    //    （含用户自配的鉴权头），而此时 allow_host 是「用户自选源」分支（None），
+    //    没有任何逐跳复判；最小改法是收紧方向——带自定义头就不跟跳，30x 落到
+    //    下方非 2xx 失败返回，把跳转决定权还给调用方。
+    // ② headers 为空 ⇒ 维持 ALWAYS + allow_host 闸门（有 Some(host) 时每跳复判主机）。
+    let policy_bytes = if headers.is_empty() {
+        WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS.to_le_bytes()
+    } else {
+        WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_le_bytes()
+    };
     unsafe {
         WinHttpSetOption(
             Some(session.raw() as *const c_void),
             WINHTTP_OPTION_REDIRECT_POLICY,
-            Some(&policy),
+            Some(&policy_bytes),
         )
     }
-    .map_err(|_| "无法启用重定向跟随".to_string())?;
+    .map_err(|_| "无法设置重定向策略".to_string())?;
 
     let host_w: Vec<u16> = host.encode_utf16().chain(std::iter::once(0)).collect();
     let connect = WinHandle::new(

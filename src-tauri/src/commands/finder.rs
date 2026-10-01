@@ -403,16 +403,36 @@ pub async fn finder_scan<R: tauri::Runtime>(
     if !FINDER_SCAN_TYPES.contains(&scan_type.as_str()) {
         return json!({ "success": false, "message": "未知扫描类型" });
     }
-    // 路径归一：trim → 丢空串与超长 → 展开 %VAR% → 最多 50 个
-    let mut plist: Vec<String> = paths
+    // 路径归一（v2-L4P-39 / F-8）：trim → 展开变量 → **展开后**再量长度 → 上限截断。
+    // 三类丢弃都显式计数并回执，不再静默：静默丢弃 = 用户给的目录被偷偷缩小扫描面。
+    let raw_inputs: Vec<String> = paths
         .unwrap_or_default()
         .iter()
         .map(js_string)
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s.chars().count() <= FINDER_PATH_MAX_LEN)
-        .map(|s| expand_env_path(&s))
-        .take(FINDER_PATHS_MAX)
         .collect();
+    let provided = raw_inputs.iter().filter(|s| !s.is_empty()).count();
+    let mut plist: Vec<String> = Vec::new();
+    let mut dropped_roots: usize = 0;
+    let mut roots_truncated = false;
+    for s in &raw_inputs {
+        if s.is_empty() {
+            continue;
+        }
+        let expanded = expand_env_path(s);
+        if expanded.chars().count() > FINDER_PATH_MAX_LEN {
+            // 长度在展开后量：`%LOCALAPPDATA%\…` 展开前看着短、展开后可能超限
+            dropped_roots += 1;
+            log::write_log("warn", &format!("finder 扫描根超长丢弃（展开后 > {FINDER_PATH_MAX_LEN} 字符）：{s}"));
+            continue;
+        }
+        if plist.len() >= FINDER_PATHS_MAX {
+            roots_truncated = true;
+            log::write_log("warn", &format!("finder 扫描根超过 {FINDER_PATHS_MAX} 个上限，其余已丢弃"));
+            break;
+        }
+        plist.push(expanded);
+    }
 
     // 默认值：--min-size 0 / --count 50 / --min-size-mb 10（对照 Math.max 语义）
     let mut min_size_arg = 0u64;
@@ -422,6 +442,16 @@ pub async fn finder_scan<R: tauri::Runtime>(
     match scan_type.as_str() {
         "duplicates" => {
             if plist.is_empty() {
+                // v2-L4P-39（F-8）：只有「用户什么都没填」才回落默认根；填了但全部
+                // 被丢弃/超限时不得回落——那等于把无效输入伪装成一次成功的默认扫描。
+                if provided > 0 {
+                    return json!({
+                        "success": false,
+                        "message": "提供的扫描目录全部无效（不存在/超长），未执行扫描；请修正后重试",
+                        "droppedRoots": dropped_roots,
+                        "rootsTruncated": roots_truncated
+                    });
+                }
                 // 输入为「默认」占位：解析内置目录，缺哪个跳哪个，全缺则报错
                 let defaults: Vec<String> = FINDER_DEFAULT_DUP_DIRS.iter().map(|d| expand_env_path(d)).collect();
                 let (found, missing) = resolve_existing_dirs(&defaults);
@@ -538,12 +568,15 @@ pub async fn finder_scan<R: tauri::Runtime>(
     );
     // `errors`/`truncated`/`unhandled` 是给渲染层的判据：空结果 + errors>0 要说「有 N 处没能读到」，
     // 而不是「没有重复文件」（B2 禁吞异常伪装空结果）；unhandled 则要说「N 项因文件名无法处理」。
+    // v2-L4P-39（F-8）：扫描根丢弃/截断随回执透出。
     json!({
         "success": true,
         "data": items,
         "errors": report.errors,
         "truncated": report.truncated,
-        "unhandled": unhandled
+        "unhandled": unhandled,
+        "droppedRoots": dropped_roots,
+        "rootsTruncated": roots_truncated
     })
 }
 

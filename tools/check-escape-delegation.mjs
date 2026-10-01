@@ -24,8 +24,10 @@ import { join } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
 
-// 基线 = 2026-10-01 L3 审查时现盘定义数（24 文件 29 个，全为纯委托）。只许下调。
-const BASELINE = 29;
+// 基线 = 2026-10-02 v2-L4P-16（E-2）重算：`function` 定义 29 + 箭头定义 1
+// （runtimes.js:9 `const escapeHtml = (s) => window.ds.esc(s)`，旧正则看不见）
+// = 30。只许下调。
+const BASELINE = 30;
 
 const dir = join(REPO_ROOT, 'src', 'scripts');
 const files = readdirSync(dir).filter((f) => f.endsWith('.js')).sort();
@@ -36,10 +38,17 @@ function stripBlockComments(text) {
 
 // 定义体允许跨行；体内容不含 `}` 的前提下整段截取（包装函数极薄，足够）
 const RE_DEF = /function\s+(escapeHtml|escapeAttr)\s*\([^)]*\)\s*\{([^}]*)\}/g;
+// v2-L4P-16（E-2）：箭头函数定义形（`const escapeHtml = (s) => window.ds.esc(s)`）
+// 与 `const x = function (...) {…}` 形——旧正则只认 function 声明，存量因此少算 1。
+const RE_DEF_ARROW = /(?:const|let|var)\s+(escapeHtml|escapeAttr)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*([^;\n]+)/g;
+const RE_DEF_FNEXPR = /(?:const|let|var)\s+(escapeHtml|escapeAttr)\s*=\s*function\s*\([^)]*\)\s*\{([^}]*)\}/g;
 
 let fail = 0;
 let count = 0;
 const badForm = [];
+
+const delegated = (kind, body) =>
+  new RegExp(`window\\.ds\\.${kind === 'escapeHtml' ? 'esc' : 'escAttr'}\\s*\\(`).test(body);
 
 for (const f of files) {
   const text = stripBlockComments(readFileSync(join(dir, f), 'utf8'));
@@ -47,13 +56,25 @@ for (const f of files) {
   RE_DEF.lastIndex = 0;
   while ((m = RE_DEF.exec(text)) !== null) {
     count++;
-    const kind = m[1];
-    const body = m[2].trim();
-    const fn = kind === 'escapeHtml' ? 'esc' : 'escAttr';
-    // 纯委托判定：返回值必须来自 window.ds.esc / window.ds.escAttr
-    if (!new RegExp(`return\\s+window\\.ds\\.${fn}\\s*\\(`).test(body)) {
+    if (!delegated(m[1], m[2].trim())) {
       const line = text.slice(0, m.index).split('\n').length;
-      badForm.push(`${f}:${line} ${kind}`);
+      badForm.push(`${f}:${line} ${m[1]}`);
+    }
+  }
+  RE_DEF_ARROW.lastIndex = 0;
+  while ((m = RE_DEF_ARROW.exec(text)) !== null) {
+    count++;
+    if (!delegated(m[1], m[2])) {
+      const line = text.slice(0, m.index).split('\n').length;
+      badForm.push(`${f}:${line} ${m[1]}(箭头形)`);
+    }
+  }
+  RE_DEF_FNEXPR.lastIndex = 0;
+  while ((m = RE_DEF_FNEXPR.exec(text)) !== null) {
+    count++;
+    if (!delegated(m[1], m[2].trim())) {
+      const line = text.slice(0, m.index).split('\n').length;
+      badForm.push(`${f}:${line} ${m[1]}(函数表达式)`);
     }
   }
 }
@@ -72,4 +93,20 @@ if (fail > 0) {
   console.error('门禁失败：本地 escape* 包装违反委托/棘轮约束（见上）');
   process.exit(1);
 }
+
+// ---- E-8/E-15 正向对照自检（v2-L4P-16/44）：判定正则必须抓得到违规与新增 ----
+const POSITIVE_CONTROLS = (() => {
+  const synth = 'const escapeHtml = (s) => s;'; // 箭头形 + 非委托：应同时被「计数」与「形态」抓到
+  let n = 0, bad = false;
+  let m;
+  const re = new RegExp(RE_DEF_ARROW.source, 'g');
+  while ((m = re.exec(synth)) !== null) { n++; if (!delegated(m[1], m[2])) bad = true; }
+  if (n !== 1 || !bad) {
+    console.error('✗ 正向对照失败：非委托箭头定义未被识别——判定器已失效');
+    process.exit(1);
+  }
+  console.log('✓ 正向对照自检通过（非委托箭头定义可被抓到）');
+  return true;
+})();
+
 console.log(`本地 escape* 包装门禁通过（${count}/${BASELINE}）`);

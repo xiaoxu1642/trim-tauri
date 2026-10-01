@@ -87,6 +87,12 @@ fn is_bare_drive(s: &str) -> bool {
 }
 
 /// 拆出不可折叠的前缀：盘符（`C:`）或 UNC（`\\server\share`），其余为可折叠体。
+///
+/// v2-L4P-17（B-3）：UNC 的 **share 之后的体必须保留**并参与折叠——旧实现返回空体，
+/// `\\srv\pub\Windows\System32` 会被塌成 `\\srv\pub`：受保护根若登记在 share 深处
+/// （如企业文件夹重定向的 `\\srv\home$\user\Desktop`），塌短后的目标不再命中任何根
+/// ⇒ protected→unprotected 翻转。JS 权威实现（ps-protect-path.js normalizeForCompare）
+/// 历来保留完整 UNC 体，本函数对齐后三端口径一致（PS 模板由同一权威生成）。
 fn split_prefix(s: &str) -> (String, String) {
     let b = s.as_bytes();
     if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
@@ -98,7 +104,8 @@ fn split_prefix(s: &str) -> (String, String) {
             .filter(|c| !c.is_empty())
             .collect();
         if parts.len() >= 2 {
-            return (format!("\\\\{}\\{}", parts[0], parts[1]), String::new());
+            let body = parts[2..].join("\\");
+            return (format!("\\\\{}\\{}", parts[0], parts[1]), body);
         }
     }
     (String::new(), s.to_string())
@@ -195,9 +202,22 @@ pub fn normalize_for_compare(p: &str) -> Norm {
         return fail();
     }
     // `\\?\` 前缀让 Win32 跳过路径解析，必须剥掉再比较，否则可绕过全部判定。
-    // UNC（`\\server\share`）不剥。
-    if s.starts_with("\\\\?\\") {
+    // v2-L4P-17（B-3）：`\\?\UNC\` 是设备名形态的 UNC，先还原成 `\\server\share\…`
+    // 再走 UNC 分支——无条件剥 4 字符会把 `\\?\UNC\srv\pub\x` 变成相对路径 `UNC\srv\pub\x`
+    // 拼上 CWD，受保护根本身是 UNC 时（企业文件夹重定向）即 protected→unprotected。
+    // 该形态是三端共有的口径缺口（JS 权威同样如此，vendor 只读不回改）；Tauri 侧
+    // 判定统一走本函数，先在执行端收紧，向量进 parity 夹具钉住结论。
+    if s.starts_with("\\\\?\\UNC\\") {
+        s = format!("\\\\{}", &s[8..]);
+    } else if s.starts_with("\\\\?\\") {
         s = s[4..].to_string();
+    }
+    // v2-L4P-17（B-3）续：前导 `//`（正斜杠 UNC）。Node `path.win32.resolve` 把两个
+    // 前导分隔符（不分方向）都认作 UNC 起点（实测 `//srv/pub/x` → `\\srv\pub\x`），
+    // 而 Rust `Path::is_absolute` 只认反斜杠 ⇒ `//srv/...` 会被当相对路径拼 CWD，
+    // 与 JS 权威发散。前置还原对齐三端。
+    if s.starts_with("//") {
+        s = format!("\\\\{}", &s[2..]);
     }
     // 裸盘符必须在 resolve 之前拦下：Node 会把 "C:" 当驱动器相对路径拼上 CWD。
     if is_bare_drive(&s) {
@@ -764,5 +784,40 @@ mod tests {
             }
         }
         assert!(diff.is_empty(), "判定口径与 JS 不一致：\n{}", diff.join("\n"));
+    }
+
+    /// v2-L4P-17（B-3）：UNC 三形态收敛 + 翻转向量回归。
+    /// ① `\\?\UNC\` 设备名形态必须还原成 `\\server\share\…`（无条件剥 4 字符会变成
+    /// 相对路径拼 CWD）；② split_prefix 必须保留 share 之后的体（塌成 share 根会让
+    /// 登记在 share 深处的受保护根被绕过——企业文件夹重定向是真实场景）。
+    /// 无 UNC 根时这些目标都应放行（与 parity 夹具同结论），翻转判定用注入根证明。
+    #[test]
+    fn unc_prefix_forms_converge_and_do_not_flip_protection() {
+        // 三种写法归一后必须是同一条路径（与 JS 权威「保留完整 UNC 体」口径一致）
+        let a = normalize_for_compare(r"\\srv\pub\Windows\System32");
+        let b = normalize_for_compare(r"\\?\UNC\srv\pub\Windows\System32");
+        let c = normalize_for_compare("//srv/pub/Windows/System32");
+        for n in [&a, &b, &c] {
+            assert!(n.ok, "UNC 形态归一失败");
+        }
+        assert_eq!(a.low, r"\\srv\pub\windows\system32", "plain UNC 体被丢弃: {}", a.low);
+        assert_eq!(b.low, a.low, "\\?\\UNC\\ 形态未还原: {}", b.low);
+        assert_eq!(c.low, a.low, "正斜杠 UNC 形态不一致: {}", c.low);
+
+        // 翻转向量回归：受保护根本身是 UNC（企业重定向场景）时，share 深处根之下的
+        // 目标无论以 plain 还是 \\?\UNC\ 形态提交都必须受保护；share 内根之外的目标放行。
+        let r = build_roots(
+            &[r"\\srv\home$\user\Desktop".to_string()],
+            &[],
+            &[],
+        );
+        assert!(is_path_protected_with(r"\\srv\home$\user\Desktop", &r));
+        assert!(is_path_protected_with(r"\\srv\home$\user\Desktop\file.txt", &r));
+        assert!(is_path_protected_with(r"\\?\UNC\srv\home$\user\Desktop\file.txt", &r),
+            "\\?\\UNC\\ 形态绕过了 UNC 受保护根（protected→unprotected 翻转）");
+        assert!(!is_path_protected_with(r"\\srv\pub\other\cache", &r),
+            "同 share 根之外的目标被过度保护");
+        // 无 UNC 根（默认清单）时：UNC 目标不命中任何本地根，放行（夹具同结论）
+        assert!(!is_path_protected_with(r"\\srv\pub\Windows\System32", &roots()));
     }
 }

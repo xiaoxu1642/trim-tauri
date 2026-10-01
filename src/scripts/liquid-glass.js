@@ -754,11 +754,18 @@
 
   // 每个滑块一个独立滤镜（尺寸随标签变化时重建，位移贴图走缓存）
   function ensureFilter(state, w, h, radius) {
-    const needRebuild = !state.filterEl || Math.abs(state.mapW - w) > 1 || Math.abs(state.mapH - h) > 1;
+    // v2-L4P-51（F-9②）：玻璃档位切换也必须重建。此前 needRebuild 只看尺寸——
+    // full ↔ standard 切档时尺寸不变，旧滤镜（standard 时代建的三色散或不带
+    // mode 位移贴图）原样留着，滑块继续按旧档位渲染。
+    const needRebuild = !state.filterEl
+      || state.filterMode !== mode
+      || Math.abs(state.mapW - w) > 1
+      || Math.abs(state.mapH - h) > 1;
     if (!needRebuild) return;
     if (!state.filterId) state.filterId = 'lg-thumb-' + Math.random().toString(36).slice(2, 9);
     state.mapW = w;
     state.mapH = h;
+    state.filterMode = mode;
     const maps = buildMaps(w, h, radius);
     const filterEl = buildFilterEl(state.filterId, w, h, maps, Math.min(Math.max(radius * 0.85, 3), 12), mode === 'full');
     if (state.filterEl) state.filterEl.remove();

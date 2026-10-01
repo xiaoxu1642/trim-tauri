@@ -24,7 +24,7 @@ pub fn reg_seal_path_for(file: &Path) -> PathBuf {
 /// 写封条：目标键 + SHA-256 + 时间。失败只在日志留痕，**不阻断删除**——
 /// 封条是备份的增强，不是删除的前提（备份本身已写成，这时回滚删除反而更糟）。
 pub fn write_reg_backup_seal(file: &Path, target: &str) {
-    let sum = match crate::commands::runtimes::sha256_file(file) {
+    let sum = match crate::engine::hash::sha256_file(file) {
         Ok(s) => s,
         Err(e) => {
             crate::engine::log::write_log("warn", &format!("注册表备份封条计算失败（不阻断删除）: {e}"));
@@ -55,7 +55,7 @@ pub fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
     if want.is_empty() {
         return ("corrupt", meta);
     }
-    match crate::commands::runtimes::sha256_file(file) {
+    match crate::engine::hash::sha256_file(file) {
         Ok(got) if got.eq_ignore_ascii_case(want) => ("ok", meta),
         Ok(_) => ("mismatch", meta),
         Err(_) => ("unreadable", meta),

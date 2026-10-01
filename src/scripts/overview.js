@@ -251,11 +251,13 @@
     const root = $('ovCheckupList');
     if (!root) return;
     if (!window.api?.overview?.checkup) {
-      // 浏览器预览模式：静态示例，保持布局一致
+      // 浏览器预览模式：静态示例，保持布局一致。
+      // v2-L4P-45（F-10）：evidence 必须如实——示例数据不是「本机实测」，
+      // 假标注会顺着 UI 一路撒谎到用户眼前。
       lastCheckupChecks = [
-        { id: 'cpu_topology', title: 'CPU 拓扑', status: 'ok', value: '8 核 16 线程', detail: '浏览器预览示例数据', evidence: '本机实测' },
-        { id: 'memory_channels', title: '内存通道', status: 'warn', value: '1 条 / 16 GB', detail: '单通道运行，建议组双通道（预览示例）', evidence: '本机实测' },
-        { id: 'sys_drive_free', title: '系统盘空间', status: 'bad', value: '剩余 8 GB（4%）', detail: '系统盘空间严重不足（预览示例）', evidence: '本机实测' },
+        { id: 'cpu_topology', title: 'CPU 拓扑', status: 'ok', value: '8 核 16 线程', detail: '浏览器预览示例数据', evidence: '未验证' },
+        { id: 'memory_channels', title: '内存通道', status: 'warn', value: '1 条 / 16 GB', detail: '单通道运行，建议组双通道（预览示例）', evidence: '未验证' },
+        { id: 'sys_drive_free', title: '系统盘空间', status: 'bad', value: '剩余 8 GB（4%）', detail: '系统盘空间严重不足（预览示例）', evidence: '未验证' },
         { id: 'disk_health', title: '磁盘健康', status: 'unknown', value: '无法读取', detail: '预览模式下不执行体检', evidence: '未验证' }
       ];
       renderCheckup(lastCheckupChecks);

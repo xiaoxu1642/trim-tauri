@@ -16,7 +16,8 @@
 
   // 每个页签独立状态
   const st = {
-    dups:    { results: [], selected: new Set(), scanning: false, deleting: false },
+    // v2-L4P-18（F-3）：pageDup 重复文件页当前页码（按组累加行预算分页，见 renderDups）
+    dups:    { results: [], selected: new Set(), scanning: false, deleting: false, pageDup: 1 },
     // pageF/pageD：空文件/空目录各自独立的当前页码（两段列表分开翻页）
     empty:   { results: [], selected: new Set(), scanning: false, deleting: false, pageF: 1, pageD: 1 },
     // C-5 磁盘分析器：selected/results 仅复用通用按钮态；真实数据在 an.cache/trail
@@ -215,6 +216,13 @@
   // 2026-09-28 七轮拍板：similar（文档内容相似）组已移除——不同名文件塞一组的明细不成立。
   const DUP_MATCH_LABEL = { content: '内容相同组', name: '同名文件组' };
 
+  // v2-L4P-18（F-3）：重复文件与空侧同病同治——全组全行一次性拼 HTML 在十万级结果下
+  // 会把渲染层卡死（空目录侧早已因同一病根做了分页，属修复未跟齐）。分页口径：
+  // 按组累加行数、攒满一页行预算即切页（组边界不拆，页大小 = 预算 + 当前组溢出量）；
+  // 另设单组渲染上限，超大组只渲染前 N 行并显式注明——勾选/删除仍作用于全部结果。
+  const DUP_ROW_BUDGET = EMPTY_PAGE_SIZE;
+  const DUP_GROUP_RENDER_CAP = 500;
+
   function renderDups() {
     const el = document.getElementById(CFG.dups.table);
     const cfg = CFG.dups;
@@ -234,8 +242,22 @@
       }
       gmap.get(it.group).rows.push(it);
     }
-    let html = '';
+    // 以行预算切页：walk groups，攒满预算即开新页（组边界不拆）
+    const pages = [];
+    let curPage = [], curRows = 0;
     for (const g of groups) {
+      curPage.push(g);
+      curRows += g.rows.length;
+      if (curRows >= DUP_ROW_BUDGET) { pages.push(curPage); curPage = []; curRows = 0; }
+    }
+    if (curPage.length) pages.push(curPage);
+    const pagesCount = Math.max(1, pages.length);
+    s.pageDup = Math.min(Math.max(1, s.pageDup), pagesCount);
+    const showGroups = pages[s.pageDup - 1] || [];
+
+    let html = '';
+    let renderedRows = 0;
+    for (const g of showGroups) {
       const cands = g.rows.filter(r => r.role !== 'kept');
       const kept = g.rows.find(r => r.role === 'kept');
       const candSum = cands.reduce((a, r) => a + (r.size || 0), 0);
@@ -245,8 +267,10 @@
         <span>${head}</span>
         <span class="finder-group-sum">保留 1 · 可释放 ${formatSize(candSum)}</span>
       </div>`;
+      const rows = g.rows.length > DUP_GROUP_RENDER_CAP ? g.rows.slice(0, DUP_GROUP_RENDER_CAP) : g.rows;
       html += '<table class="finder-table"><thead><tr><th style="width:34px"></th><th>名称 / 路径</th><th class="finder-col-size" style="width:110px">大小</th><th class="finder-col-size" style="width:90px">角色</th></tr></thead><tbody>';
-      for (const r of g.rows) {
+      for (const r of rows) {
+        renderedRows++;
         const keepRole = r.role === 'kept';
         const checked = s.selected.has(r.path);
         html += `<tr class="${checked ? 'finder-row-selected' : ''}">
@@ -256,8 +280,12 @@
           <td class="finder-col-size"><span class="finder-role ${keepRole ? 'finder-role-kept' : 'finder-role-candidate'}">${keepRole ? '保留' : '可删'}</span></td>
         </tr>`;
       }
+      if (rows.length < g.rows.length) {
+        html += `<tr><td colspan="4" class="finder-empty">该组共 ${g.rows.length} 份，本页仅渲染前 ${rows.length} 份（勾选整组删除仍作用于全部）</td></tr>`;
+      }
       html += '</tbody></table>';
     }
+    if (pagesCount > 1) html += pagerHtml('dups', s.pageDup, pagesCount);
     el.innerHTML = html;
     refreshDupSummary();
     updateAllButtons();
@@ -742,6 +770,7 @@
     s.results = [];
     s.selected.clear();
     if (key === 'empty') { s.pageF = 1; s.pageD = 1; }
+    if (key === 'dups') { s.pageDup = 1; }
     const scanBtn = document.getElementById(cfg.scanBtn);
     if (scanBtn) { scanBtn.disabled = true; scanBtn.querySelector('span').textContent = '扫描中...'; }
     updateAllButtons();
@@ -831,6 +860,9 @@
         const one = dir === 'prev' ? -1 : 1;
         if (target === 'files') s.pageF += one;
         else if (target === 'dirs') s.pageD += one;
+        render(key);
+      } else if (key === 'dups') {
+        s.pageDup += dir === 'prev' ? -1 : 1;
         render(key);
       }
       return;

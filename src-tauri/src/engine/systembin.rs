@@ -96,6 +96,65 @@ pub fn quiet_cmd(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command 
     c
 }
 
+/// reg.exe export 备份类调用的统一超时（v2-L4P-29）：正常毫秒级，15s 已是宽限上界。
+/// 登记在 `tools/check-ps-callsites.mjs` 的 REG_EXPORT 表，与源码实参一致性由门禁对拍。
+pub const REG_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 带超时的静默子进程执行（v2-L4P-29 / B-7）。
+///
+/// 为什么必须有它：6 处 `reg.exe export` 备份点此前都是裸 `.output()`——平时毫秒级，
+/// 但被杀软钩住/句柄异常时 reg.exe 会永远不退出，删除链就在「备份这一步」整条挂死
+/// 且没有任何超时收口。轮询 `try_wait` 到点 `kill()+wait()`；刻意不上 Job Object：
+/// reg.exe 是单进程工具、不再 spawn 子孙（需要收整棵树的执行链走 pwsh 层的
+/// ProcessJob），裸 kill 已覆盖其威胁模型。超时按失败返回（status 非 0 + stderr 注记），
+/// 调用方的 fail-closed 逻辑原样生效。
+pub fn quiet_cmd_timeout(
+    program: impl AsRef<std::ffi::OsStr>,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::process::{Output, Stdio};
+    use std::time::Instant;
+
+    let mut child = quiet_cmd(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait()? {
+            Some(_status) => {
+                // 进程已退出，管道缓冲（reg.exe stdout 仅数行）不会死锁，正常收尾
+                return child.wait_with_output();
+            }
+            None => {
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Ok(Output {
+                        status: {
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::process::ExitStatusExt;
+                                std::process::ExitStatus::from_raw(1)
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                std::process::ExitStatus::default()
+                            }
+                        },
+                        stdout: Vec::new(),
+                        stderr: format!("执行超时（>{}ms），已终止", timeout.as_millis()).into_bytes(),
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -594,20 +594,24 @@ fn bounded_dir_size_in(root: &Path, file_cap: usize, depth_cap: usize) -> DirSiz
 ///
 /// 档位取 MAIN：唯一调用方是主窗卸载页（与 `uninstall_list` 同档）。
 /// 只读、不跟随重解析点、有界，因此不写日志也不建快照。
+/// v2-L4P-18（F-2）：上限 2 万文件 + 每文件 ADS 枚举是纯阻塞面，同步命令会在主线程
+/// 响应点原地执行 ⇒ 大目录整段冻结 UI。改 async + spawn_blocking（与 `report_save` 同形）。
 #[tauri::command]
-pub fn uninstall_dir_size<R: tauri::Runtime>(
+pub async fn uninstall_dir_size<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     path: String,
 ) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    let root = Path::new(path.trim());
+    let root = PathBuf::from(path.trim());
     // 只接受绝对路径且真实存在的目录：其余一律不扫（也不报错给攻击面探测者额外信息）
     if path.trim().is_empty() || !root.is_absolute() || !root.is_dir() {
         return json!({ "success": false, "message": "路径不可用" });
     }
-    let ds = bounded_dir_size(root);
+    let ds = tauri::async_runtime::spawn_blocking(move || bounded_dir_size(&root))
+        .await
+        .unwrap_or(DirSize::default());
     json!({
         "success": true,
         "data": {
@@ -2006,40 +2010,70 @@ pub fn set_residue_watermark(version: f64) -> bool {
 
 /// 签名残留规则库允许的 kind（Q8 拍板：`reg_value` / `shortcut` 不放行。一旦放行，
 /// 校验器、执行侧保护判定、夹具与备份策略必须同时改，不得出现「校验器放行、执行器不支持」）
-const RESIDUE_RULE_KINDS: &[&str] = &["folder", "file", "reg_key"];
-/// 本库显式允许的 `%TOKEN%`。`expand_env_path` 不做白名单（任意环境变量都展开），
-/// 所以这里不收口等于放开「规则引用任何机器上的环境变量」。与 Node 门禁同名清单必须同集。
-const RESIDUE_RULE_TOKENS: &[&str] = &[
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "COMMONPROGRAMFILES",
-    "USERPROFILE",
-    "WINDIR",
-    "SYSTEMROOT",
-];
-const RESIDUE_TOP_FIELDS: &[&str] = &["rulesVersion", "prov", "rules", "_sig"];
-const RESIDUE_PROV_FIELDS: &[&str] = &["sourceClass", "reviewedAt"];
-const RESIDUE_RULE_FIELDS: &[&str] =
-    &["id", "ver", "displayName", "publisher", "uninstallKey", "residue"];
-const RESIDUE_ENTRY_FIELDS: &[&str] = &["kind", "target", "note"];
-/// 匹配组「至少两组非空」是 U-1 拍板口径，Node 门禁同断言
-const RESIDUE_MATCH_GROUPS: &[&str] = &["displayName", "publisher", "uninstallKey"];
-const RESIDUE_MAX_RULES: usize = 400;
-const RESIDUE_MAX_RESIDUE: usize = 64;
-const RESIDUE_MAX_GROUP_ITEMS: usize = 32;
-const RESIDUE_MAX_TARGET_LEN: usize = 260; // MAX_PATH：超过说明规则写坏了或被撑爆
-const RESIDUE_MAX_TEXT_LEN: usize = 200; // id / note / 匹配词
-const RESIDUE_MAX_SEGMENTS: usize = 32; // 路径段数与注册表键深度
+
+// v2-L4P-15（C-2）：残留域词汇与数值的**唯一真源** = tools/rule-schema.json（经
+// engine::rule_schema 编译期嵌入，与 Node 门禁读同一份字节）。此前这里是硬编码第二真源
+// ——改 schema 只动 Node 门禁、装载侧纹丝不动，AGENTS §5.16「同字节双读」在残留域只成立一半。
+// 一次性解析成静态快照；表解析失败时全部取空/取 0，下方校验逻辑对空白名单/0 上限
+// 天然整包拒绝，与 rule_schema 的 fail-closed 口径一致。
+struct ResidueContract {
+    rule_kinds: Vec<String>,
+    tokens: Vec<String>,
+    top_fields: Vec<String>,
+    prov_fields: Vec<String>,
+    rule_fields: Vec<String>,
+    entry_fields: Vec<String>,
+    match_groups: Vec<String>,
+    max_rules: usize,
+    max_residue: usize,
+    max_group_items: usize,
+    max_target_len: usize,
+    max_text_len: usize,
+    max_segments: usize,
+}
+
+fn residue_contract() -> &'static ResidueContract {
+    use crate::engine::rule_schema as rs;
+    static CELL: OnceLock<ResidueContract> = OnceLock::new();
+    CELL.get_or_init(|| {
+        // 表不可用 → 空契约（空白名单 + 0 上限）⇒ 任何包都会被整包拒绝
+        let mut c = ResidueContract {
+            rule_kinds: Vec::new(),
+            tokens: Vec::new(),
+            top_fields: Vec::new(),
+            prov_fields: Vec::new(),
+            rule_fields: Vec::new(),
+            entry_fields: Vec::new(),
+            match_groups: Vec::new(),
+            max_rules: 0,
+            max_residue: 0,
+            max_group_items: 0,
+            max_target_len: 0,
+            max_text_len: 0,
+            max_segments: 0,
+        };
+        if let Some(v) = rs::list("residue", "ruleKinds") { c.rule_kinds = v; }
+        if let Some((allowed, _ci)) = rs::tokens("residue") { c.tokens = allowed; }
+        if let Some(v) = rs::list("residue", "topFields") { c.top_fields = v; }
+        if let Some(v) = rs::list("residue", "provFields") { c.prov_fields = v; }
+        if let Some(v) = rs::list("residue", "ruleFields") { c.rule_fields = v; }
+        if let Some(v) = rs::list("residue", "entryFields") { c.entry_fields = v; }
+        if let Some(v) = rs::list("residue", "matchGroups") { c.match_groups = v; }
+        if let Some(v) = rs::number("residue", "maxRules") { c.max_rules = v; }
+        if let Some(v) = rs::number("residue", "maxResiduePerRule") { c.max_residue = v; }
+        if let Some(v) = rs::number("residue", "maxGroupItems") { c.max_group_items = v; }
+        if let Some(v) = rs::number("residue", "maxTargetLen") { c.max_target_len = v; }
+        if let Some(v) = rs::number("residue", "maxTextLen") { c.max_text_len = v; }
+        if let Some(v) = rs::number("residue", "maxSegments") { c.max_segments = v; }
+        c
+    })
+}
 
 /// 未知字段白名单检查（A5）： serde 手取字段时未知字段会被静默忽略，
 /// 那等于「规则库里有一执行侧根本不认的字段」，审核记录与线上行为不一致。
-fn unknown_fields<'a>(obj: &serde_json::Map<String, Value>, allow: &[&'a str]) -> Option<String> {
+fn unknown_fields<'a>(obj: &serde_json::Map<String, Value>, allow: &'a [String]) -> Option<String> {
     obj.keys()
-        .find(|k| !allow.contains(&k.as_str()))
+        .find(|k| !allow.iter().any(|a| a == *k))
         .map(|k| format!("未知字段 {k}"))
 }
 
@@ -2052,15 +2086,15 @@ fn str_array_field<'a>(obj: &'a Value, field: &str) -> Result<Vec<&'a str>, Stri
     let Some(arr) = v.as_array() else {
         return Err(format!("{field} 不是数组"));
     };
-    if arr.len() > RESIDUE_MAX_GROUP_ITEMS {
-        return Err(format!("{field} 条目数 {} 超上限 {RESIDUE_MAX_GROUP_ITEMS}", arr.len()));
+    if arr.len() > residue_contract().max_group_items {
+        return Err(format!("{field} 条目数 {} 超上限 {}", arr.len(), residue_contract().max_group_items));
     }
     let mut out = Vec::with_capacity(arr.len());
     for v in arr {
         let Some(s) = v.as_str() else {
             return Err(format!("{field} 含非字符串元素"));
         };
-        if s.trim().is_empty() || s.chars().count() > RESIDUE_MAX_TEXT_LEN {
+        if s.trim().is_empty() || s.chars().count() > residue_contract().max_text_len {
             return Err(format!("{field} 含空白或超长条目"));
         }
         out.push(s.trim());
@@ -2069,7 +2103,7 @@ fn str_array_field<'a>(obj: &'a Value, field: &str) -> Result<Vec<&'a str>, Stri
 }
 
 fn path_shape_problem(target: &str) -> Option<String> {
-    if target.chars().count() > RESIDUE_MAX_TARGET_LEN {
+    if target.chars().count() > residue_contract().max_target_len {
         return Some("目标长度超过 260（MAX_PATH）".to_string());
     }
     if target.contains('*') || target.contains('?') {
@@ -2092,7 +2126,7 @@ fn file_target_problem(target: &str) -> Option<String> {
             return Some("变量名未闭合".to_string());
         };
         let token = &rest[..end];
-        if token.is_empty() || !RESIDUE_RULE_TOKENS.iter().any(|t| t.eq_ignore_ascii_case(token)) {
+        if token.is_empty() || !residue_contract().tokens.iter().any(|t| t.eq_ignore_ascii_case(token)) {
             return Some(format!("变量 %{token}% 未登记（先确认展开器可解析再入白名单）"));
         }
         let tail = &rest[end + 1..];
@@ -2117,8 +2151,8 @@ fn file_target_problem(target: &str) -> Option<String> {
     if segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
         return Some("含空段、`.` 或 `..`（尾随分隔符同样命中）".to_string());
     }
-    if segs.len() > RESIDUE_MAX_SEGMENTS {
-        return Some(format!("路径段数 {} 超上限 {RESIDUE_MAX_SEGMENTS}", segs.len()));
+    if segs.len() > residue_contract().max_segments {
+        return Some(format!("路径段数 {} 超上限 {}", segs.len(), residue_contract().max_segments));
     }
     None
 }
@@ -2138,18 +2172,19 @@ fn reg_target_problem(target: &str) -> Option<String> {
     if segs.iter().any(|s| s.trim().is_empty()) {
         return Some("注册表路径含空段或尾随分隔符".to_string());
     }
-    if segs.len() > RESIDUE_MAX_SEGMENTS {
-        return Some(format!("注册表深度 {} 超上限 {RESIDUE_MAX_SEGMENTS}", segs.len()));
+    if segs.len() > residue_contract().max_segments {
+        return Some(format!("注册表深度 {} 超上限 {}", segs.len(), residue_contract().max_segments));
     }
     protect::reg_target_block_reason(target)
 }
 
 /// 整包语义校验。`Err(原因)` = 调用方必须拒绝这份规则库。
 fn validate_residue_package(pkg: &Value) -> Result<(), String> {
+    let c = residue_contract();
     let Some(top) = pkg.as_object() else {
         return Err("规则包不是 JSON 对象".to_string());
     };
-    if let Some(reason) = unknown_fields(top, RESIDUE_TOP_FIELDS) {
+    if let Some(reason) = unknown_fields(top, &c.top_fields) {
         return Err(format!("顶层 {reason}"));
     }
     let ver = pkg
@@ -2166,14 +2201,14 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
         let Some(obj) = p.as_object() else {
             return Err("prov 条目不是对象".to_string());
         };
-        if let Some(reason) = unknown_fields(obj, RESIDUE_PROV_FIELDS) {
+        if let Some(reason) = unknown_fields(obj, &c.prov_fields) {
             return Err(format!("prov {reason}"));
         }
-        for f in RESIDUE_PROV_FIELDS {
+        for f in &c.prov_fields {
             let ok = obj
-                .get(*f)
+                .get(f)
                 .and_then(Value::as_str)
-                .map(|s| !s.trim().is_empty() && s.chars().count() <= RESIDUE_MAX_TEXT_LEN)
+                .map(|s| !s.trim().is_empty() && s.chars().count() <= c.max_text_len)
                 .unwrap_or(false);
             if !ok {
                 return Err(format!("prov.{f} 缺失、非字符串或为空白"));
@@ -2185,8 +2220,8 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
         .and_then(Value::as_array)
         .filter(|a| !a.is_empty())
         .ok_or_else(|| "rules 缺失或为空数组".to_string())?;
-    if rule_list.len() > RESIDUE_MAX_RULES {
-        return Err(format!("规则条数 {} 超上限 {RESIDUE_MAX_RULES}", rule_list.len()));
+    if rule_list.len() > c.max_rules {
+        return Err(format!("规则条数 {} 超上限 {}", rule_list.len(), c.max_rules));
     }
     let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for rule in rule_list {
@@ -2198,14 +2233,14 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
             .and_then(Value::as_str)
             .filter(|s| {
                 !s.is_empty()
-                    && s.chars().count() <= RESIDUE_MAX_TEXT_LEN
+                    && s.chars().count() <= c.max_text_len
                     && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
             })
             .ok_or_else(|| "规则 id 缺失、为空或含非 [A-Za-z0-9._-] 字符".to_string())?;
         if !seen_ids.insert(id) {
             return Err(format!("规则 id 重复: {id}"));
         }
-        if let Some(reason) = unknown_fields(obj, RESIDUE_RULE_FIELDS) {
+        if let Some(reason) = unknown_fields(obj, &c.rule_fields) {
             return Err(format!("规则 {id}: {reason}"));
         }
         // 条目级版本戳必须与顶层一致（V2 P2-A1，与清理库同口径）：
@@ -2222,7 +2257,7 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
             Some(_) => {}
         }
         let mut hit_groups = 0;
-        for g in RESIDUE_MATCH_GROUPS {
+        for g in &c.match_groups {
             let items = str_array_field(rule, g).map_err(|e| format!("规则 {id}: {e}"))?;
             if !items.is_empty() {
                 hit_groups += 1;
@@ -2239,27 +2274,28 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
         if residue.is_empty() {
             return Err(format!("规则 {id}: residue 为空"));
         }
-        if residue.len() > RESIDUE_MAX_RESIDUE {
+        if residue.len() > c.max_residue {
             return Err(format!(
-                "规则 {id}: residue 条数 {} 超上限 {RESIDUE_MAX_RESIDUE}",
-                residue.len()
+                "规则 {id}: residue 条数 {} 超上限 {}",
+                residue.len(),
+                c.max_residue
             ));
         }
         for entry in residue {
             let Some(obj) = entry.as_object() else {
                 return Err(format!("规则 {id}: residue 条目不是对象"));
             };
-            if let Some(reason) = unknown_fields(obj, RESIDUE_ENTRY_FIELDS) {
+            if let Some(reason) = unknown_fields(obj, &c.entry_fields) {
                 return Err(format!("规则 {id}: residue {reason}"));
             }
             let kind = entry
                 .get("kind")
                 .and_then(Value::as_str)
                 .ok_or_else(|| format!("规则 {id}: residue.kind 缺失或非字符串"))?;
-            if !RESIDUE_RULE_KINDS.contains(&kind) {
+            if !c.rule_kinds.iter().any(|k| k == kind) {
                 // 未知 kind 必须报错而不是静默跳过：静默跳过会让「执行侧不支持的字段」
                 // 长期留在库里（方案 §6.1 三集合区分）
-                return Err(format!("规则 {id}: 未知 kind {kind}（允许集 {RESIDUE_RULE_KINDS:?}）"));
+                return Err(format!("规则 {id}: 未知 kind {kind}（允许集 {:?}）", c.rule_kinds));
             }
             let raw_target = entry
                 .get("target")
@@ -2280,7 +2316,7 @@ fn validate_residue_package(pkg: &Value) -> Result<(), String> {
             let note_ok = entry
                 .get("note")
                 .and_then(Value::as_str)
-                .map(|s| !s.trim().is_empty() && s.chars().count() <= RESIDUE_MAX_TEXT_LEN)
+                .map(|s| !s.trim().is_empty() && s.chars().count() <= c.max_text_len)
                 .unwrap_or(false);
             if !note_ok {
                 return Err(format!("规则 {id}: residue.note 缺失或为空白（面板 reason 要展示）"));
@@ -3234,10 +3270,7 @@ mod learned {
     use serde_json::{json, Value};
     use std::path::Path;
 
-    use super::{
-        footprint, norm_name, parse_reg_target, protect, validate_residue_package,
-        RESIDUE_MAX_TEXT_LEN,
-    };
+    use super::{footprint, norm_name, parse_reg_target, protect, validate_residue_package};
 
     /// 学习库条数上限：一台机器不会装几百个待卸载程序，超了按新旧淘汰
     pub const MAX_RULES: usize = 120;
@@ -3482,9 +3515,11 @@ mod learned {
     }
 
     fn learn_note(name: &str, stamp: &str) -> String {
+        // v2-L4P-15：上限走 residue_contract()（真源 rule-schema.json），不再引用本文件常量
+        let max_text = super::residue_contract().max_text_len;
         let mut s = format!("本机于 {stamp} 清理「{name}」时删掉的落点");
-        if s.chars().count() > RESIDUE_MAX_TEXT_LEN {
-            s = s.chars().take(RESIDUE_MAX_TEXT_LEN).collect();
+        if s.chars().count() > max_text {
+            s = s.chars().take(max_text).collect();
         }
         s
     }
@@ -4782,11 +4817,14 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 continue;
             };
             let export_path = format!("{}\\{rest}", target.split('\\').next().unwrap_or(""));
-            let backup_ok = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
-                .args(["export", &export_path, file_str, "/y"])
-                .output()
-                .map(|o| o.status.success() && file.exists())
-                .unwrap_or(false);
+            // v2-L4P-29（B-7）：备份类子进程统一走带超时入口，reg.exe 被拖住不再永久挂死
+            let backup_ok = crate::engine::systembin::quiet_cmd_timeout(
+                crate::engine::systembin::system_tool("reg.exe"),
+                &["export", &export_path, file_str, "/y"],
+                crate::engine::systembin::REG_EXPORT_TIMEOUT,
+            )
+            .map(|o| o.status.success() && file.exists())
+            .unwrap_or(false);
             if !backup_ok {
                 details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
                 continue;
@@ -4821,11 +4859,14 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 details.push(detail(kind, target, "fail", "备份路径无法表示为文本，拒绝删除"));
                 continue;
             };
-            let backup_ok = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
-                .args(["export", key_part, file_str, "/y"])
-                .output()
-                .map(|o| o.status.success() && file.exists())
-                .unwrap_or(false);
+            // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
+            let backup_ok = crate::engine::systembin::quiet_cmd_timeout(
+                crate::engine::systembin::system_tool("reg.exe"),
+                &["export", key_part, file_str, "/y"],
+                crate::engine::systembin::REG_EXPORT_TIMEOUT,
+            )
+            .map(|o| o.status.success() && file.exists())
+            .unwrap_or(false);
             if !backup_ok {
                 details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
                 continue;
@@ -6739,6 +6780,32 @@ mod residue_trace_tests {
         // 防降级：下限高于它就必须拒（重放旧签名包的路径）
         let err = verify_residue_remote_text(builtin, ver + 1.0).expect_err("低于下限必须拒绝");
         assert!(err.contains("防回滚下限"), "文案要指向防降级，实测: {err}");
+    }
+
+    /// v2-L4P-15（C-2）：运行期契约必须等于 rule-schema.json 的值（单一真源自证）。
+    /// 本测试用具体数值锚定 schema 关键项——谁改了 tools/rule-schema.json 的数值而
+    /// 没有同步重签与登记，这里立即判红；反过来装载侧与 Node 门禁读的是同一份字节，
+    /// 不可能再出现「改 schema 只动门禁、运行期纹丝不动」的双源分叉。
+    #[test]
+    fn residue_contract_matches_rule_schema_values() {
+        assert!(crate::engine::rule_schema::available(), "嵌入契约表必须可解析");
+        let c = residue_contract();
+        // 数值锚点（与 tools/rule-schema.json residue.limits 逐项对拍）
+        assert_eq!(c.max_rules, 400, "maxRules 漂移：改 schema 须同步 review 门禁与 readme");
+        assert_eq!(c.max_residue, 64, "maxResiduePerRule 漂移");
+        assert_eq!(c.max_group_items, 32, "maxGroupItems 漂移");
+        assert_eq!(c.max_target_len, 260, "maxTargetLen 漂移");
+        assert_eq!(c.max_text_len, 200, "maxTextLen 漂移");
+        assert_eq!(c.max_segments, 32, "maxSegments 漂移");
+        // 词汇锚点：token 集与 kind 集非空且含代表项（防止 schema 键改名后静默取空集
+        // ——空集会让校验器整包拒绝，属 fail-closed 安全方向，但会瞬间停用残留域）
+        assert!(c.tokens.iter().any(|t| t == "APPDATA"), "residue tokens 必须含 APPDATA");
+        assert!(c.tokens.iter().any(|t| t == "SYSTEMROOT"), "residue tokens 必须含 SYSTEMROOT");
+        assert_eq!(c.rule_kinds, vec!["folder", "file", "reg_key"], "ruleKinds 漂移");
+        assert_eq!(c.match_groups, vec!["displayName", "publisher", "uninstallKey"], "matchGroups 漂移");
+        // 内置库必须能通过语义校验（空契约/漂移都会在此暴露）
+        let builtin: Value = serde_json::from_str(BUILTIN_RESIDUE_RULES_JSON).expect("内置库 JSON");
+        validate_residue_package(&builtin).expect("内置库必须通过语义校验（契约快照与 schema 同源）");
     }
 
     /// 尺寸闸的两侧都要能判红；且**不共用清理域的 4096B 下限**——

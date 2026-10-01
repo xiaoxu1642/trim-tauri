@@ -41,9 +41,10 @@ check(missing.length === 0, `${htmls.length} 份 HTML 均带 CSP meta`, missing.
 
 const values = [...csps.values()].filter((v) => v !== null);
 const allSame = values.length > 0 && values.every((v) => v === values[0]);
+// v2-L4P-44（E-14）：份数不再硬编码在断言文案里，随 htmls 现算（新增子窗自动纳入）
 check(
   allSame,
-  '去掉 frame-src 收窄差异后 5 份 CSP 逐字相等',
+  `去掉 frame-src 收窄差异后 ${values.length} 份 CSP 逐字相等`,
   allSame ? '' : `不一致：${JSON.stringify([...csps.entries()].filter(([, v]) => v !== null))}`,
 );
 

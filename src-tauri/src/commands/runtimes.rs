@@ -19,13 +19,11 @@
 //! 全部下载相关判定（白名单/尺寸上限/双校验/原子改名/装前复核）均已实现，无遗留 TODO。
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tauri::{Emitter, WebviewWindow};
 
 use crate::engine::{guard, log, paths, sysinfo, winhttp};
@@ -125,31 +123,15 @@ fn snapshot_has_repair(label: &str, action_id: &str) -> bool {
 }
 
 // ==================== 通用工具 ====================
-fn to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-/// 流式 SHA-256（4MB 缓冲，与 JS sha256File 同口径）
-pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 4 * 1024 * 1024];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(to_hex(&hasher.finalize()))
-}
+// v2-L4P-41（D-1）：sha256_file/to_hex 下沉 engine/hash.rs（reg_backup 反向依赖清零）；
+// 此处保留同形转发，命令域调用方不动。
 
 fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
+    crate::engine::hash::sha256_file(path)
 }
 
 /// 闸门 1：主机白名单（URL 解析比较，禁字符串 includes）；

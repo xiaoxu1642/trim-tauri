@@ -115,8 +115,21 @@ for (const file of cssFiles) {
 }
 
 // ---- 定义面：JS / HTML 里的运行时写入（setProperty、内联 --x: value、把名字当字符串传出去） ----
+// v2-L4P-44（E-13）：JS/HTML 的定义面同样要先剥注释——注释里的 `--x: v` 举例
+// 会把「真身未定义」的变量洗白成已定义（CSS 侧 v2-M16 已修，此处是同族漏网）。
+// 剥除用等长空白替换，行号偏移保持不变。
+function blankJsComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, (m, keep) => keep + m.slice(keep.length).replace(/[^\n]/g, ' '));
+}
+function blankHtmlComments(text) {
+  return text.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
+}
 for (const file of [...jsFiles, ...htmlFiles]) {
-  const text = readFileSync(file, 'utf8');
+  const raw = readFileSync(file, 'utf8');
+  const kind = file.slice(-4).toLowerCase();
+  const text = kind === '.js' ? blankJsComments(raw) : kind === 'html' ? blankHtmlComments(raw) : raw;
   const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
   collect(text, RE_SET, (m) => addDefinition(m[1], `${rel}:${lineOf(text, m.index)}`));
   // 内联声明：字符串/模板里的 `--x: v`（style 属性、insertAdjacentHTML、setProperty 的拼接形态）
@@ -170,14 +183,17 @@ const radiusBad = [];
 for (const file of cssFiles) {
   const text = blankComments(readFileSync(file, 'utf8'));
   const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
-  for (const m of text.matchAll(/border-radius:\s*(\d+)px/g)) {
+  // v2-L4P-44（E-14）：扩到四角写法 border-top-right-radius 等——只盯简写会漏掉
+  // 单角字面值（同一档位纪律，四角写法是同一约束的逃逸口）。
+  for (const m of text.matchAll(/border(?:-(?:top|bottom)-(?:left|right))?-radius:\s*(\d+)px/g)) {
     const px = Number(m[1]);
+    const label = m[0].split(':')[0].trim();
     // AGENTS：胶囊与徽章不在档位约束内——>=90px 是全仓既定的胶囊写法（999/99px），放行
     if (px >= 90) continue;
     if (px < 4) {
-      radiusBad.push(`${rel}:${lineOf(text, m.index)} border-radius: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
+      radiusBad.push(`${rel}:${lineOf(text, m.index)} ${label}: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
     } else if (![4, 6, 8, 10, 14].includes(px)) {
-      radiusBad.push(`${rel}:${lineOf(text, m.index)} border-radius: ${px}px（不在档位 4/6/8/10/14）`);
+      radiusBad.push(`${rel}:${lineOf(text, m.index)} ${label}: ${px}px（不在档位 4/6/8/10/14）`);
     }
   }
 }

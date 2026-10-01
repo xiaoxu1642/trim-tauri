@@ -319,45 +319,81 @@ pub async fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, d
 }
 
 /// realtime:report-list（按 createdAt 倒序）
+///
+/// v2-L4P-35（F-4）：与 report_save 对齐——async + spawn_blocking（读目录 + 每份
+/// 报告整文件 read_to_string + JSON 解析全是磁盘 I/O）；列表只回 `sampleCount`
+/// 不回 samples 全量（7200 点 × N 份报告整包过 IPC 毫无必要），明细走
+/// `realtime:report-get` 按需取。
 #[tauri::command]
-pub fn realtime_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
+pub async fn realtime_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
     prune_reports();
     let dir = paths::realtime_report_dir();
-    let mut out: Vec<Value> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".json") {
-                continue;
+    let out = tauri::async_runtime::spawn_blocking(move || -> Vec<Value> {
+        let mut out: Vec<Value> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".json") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                    continue;
+                };
+                let Ok(d) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let sample_count = d
+                    .get("samples")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                out.push(serde_json::json!({
+                    "name": name,
+                    "createdAt": d.get("createdAt").cloned().unwrap_or(Value::Null),
+                    "durationSec": d.get("durationSec").cloned().unwrap_or(Value::Null),
+                    "maxDown": d.get("maxDown").cloned().unwrap_or(Value::Null),
+                    "maxUp": d.get("maxUp").cloned().unwrap_or(Value::Null),
+                    "minDown": d.get("minDown").cloned().unwrap_or(Value::Null),
+                    "minUp": d.get("minUp").cloned().unwrap_or(Value::Null),
+                    "avgDown": d.get("avgDown").cloned().unwrap_or(Value::Null),
+                    "avgUp": d.get("avgUp").cloned().unwrap_or(Value::Null),
+                    "sampleCount": sample_count,
+                    "adapter": d.get("adapter").cloned().unwrap_or_else(|| serde_json::json!("")),
+                }));
             }
-            let Ok(text) = std::fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let Ok(d) = serde_json::from_str::<Value>(&text) else {
-                continue;
-            };
-            out.push(serde_json::json!({
-                "name": name,
-                "createdAt": d.get("createdAt").cloned().unwrap_or(Value::Null),
-                "durationSec": d.get("durationSec").cloned().unwrap_or(Value::Null),
-                "maxDown": d.get("maxDown").cloned().unwrap_or(Value::Null),
-                "maxUp": d.get("maxUp").cloned().unwrap_or(Value::Null),
-                "minDown": d.get("minDown").cloned().unwrap_or(Value::Null),
-                "minUp": d.get("minUp").cloned().unwrap_or(Value::Null),
-                "avgDown": d.get("avgDown").cloned().unwrap_or(Value::Null),
-                "avgUp": d.get("avgUp").cloned().unwrap_or(Value::Null),
-                "samples": d.get("samples").cloned().unwrap_or(Value::Array(vec![])),
-                "adapter": d.get("adapter").cloned().unwrap_or_else(|| serde_json::json!("")),
-            }));
         }
-    }
-    out.sort_by(|a, b| {
-        let sa = a.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
-        let sb = b.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
-        sb.cmp(sa)
-    });
+        out.sort_by(|a, b| {
+            let sa = a.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
+            let sb = b.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
+            sb.cmp(sa)
+        });
+        out
+    })
+    .await
+    .map_err(|e| format!("报告列表任务异常: {e}"))?;
     Ok(serde_json::json!({ "success": true, "reports": out }))
+}
+
+/// realtime:report-get —— 按名取单份报告全文（v2-L4P-35：列表瘦身后的明细入口）
+#[tauri::command]
+pub async fn realtime_report_get<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    name: String,
+) -> Result<Value, String> {
+    guard::guard_readonly(&window)?;
+    // 复用 report_path 的唯一解析出口（basename 化 + .json 后缀 + 限定目录）
+    let Some(path) = report_path(&name) else {
+        return Ok(serde_json::json!({ "success": false, "message": "报告名非法" }));
+    };
+    let text = tauri::async_runtime::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .map_err(|e| format!("报告读取任务异常: {e}"))?
+        .map_err(|e| format!("报告读取失败: {e}"))?;
+    match serde_json::from_str::<Value>(&text) {
+        Ok(d) => Ok(serde_json::json!({ "success": true, "report": d })),
+        Err(e) => Ok(serde_json::json!({ "success": false, "message": format!("报告解析失败: {e}") })),
+    }
 }
 
 /// 报告文件的唯一解析出口：basename 化 + `.json` 后缀 + 限定报告目录。
