@@ -15,6 +15,11 @@
 //                  数据层原始分组经重映射归并到这 12 组，两者不等是设计不是漂移）
 //   前端可见项   = 优化项总数 − 聚合进虚拟卡的 runId 数 + 虚拟卡数 − HIDE_ON_SSD 长度
 //                  （SSD 视角；HIDE_ON_HDD 当前为空数组，若日后非空需在此同步口径）
+//   pwsh 项/步   = tools/count-ps-steps.mjs 的 countPsSteps()（v2-R6：readme 那句
+//                  「优化中心含 pwsh 步骤的 N 项 / M 步」是本门禁里唯一带两个数的声明，
+//                  也是「还剩几个 PS 点」对用户公开的那一处。v2 R6 明令这个数字必须从
+//                  门禁现算、不许手写，所以这里 import 计数函数而不是再抄一遍口径 ——
+//                  自己数一遍等于制造第二份真源，两份各自漂移时门禁反而恒绿）
 //
 // 判定原则：readme 中**每一处**同类声明都必须与真源相等——只查第一处会让
 // 「§二改了、§十三漏改」这种 M-B5 原始形态从指缝漏过去。
@@ -24,6 +29,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { countPsSteps } from './count-ps-steps.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -100,6 +106,26 @@ assertAllEqual('5b. 高风险项数（注意事项措辞）', /(\d+)\s*项高风
 assertAllEqual('6a. 高风险无还原数（重要提示措辞）', /其中\s*\*{0,2}(\d+)\s*项执行后无自动还原/g, optHighNoRestore);
 assertAllEqual('6b. 高风险无还原数（注意事项措辞）', /\d+\s*项高风险里\s*(\d+)\s*项无自动还原/g, optHighNoRestore);
 assertAllEqual('7. SSD 通常可见项数 = 前端口径实算', /通常可见\s*(\d+)\s*项/g, visibleSsd);
+
+// 8（v2-R6）：「还剩几个 PS 步」这句对用户公开的数字。readme 里它是唯一一处**双数**声明
+// （N 项 / M 步），所以不复用 assertAllEqual，单独对拍两个捕获组。
+// 措辞变了导致 0 处命中同样判红：这句是「本应用不要求你安装任何组件」的支撑数据。
+const psTruth = countPsSteps(optItems);
+const psClaims = [...readme.matchAll(/含 pwsh 步骤的\s*(\d+)\s*项\s*\/\s*(\d+)\s*步/g)];
+if (psClaims.length === 0) {
+  check(false, '8. pwsh 项/步数（readme「含 pwsh 步骤的 N 项 / M 步」）', 'readme 中未找到该声明（措辞变了或被删？）');
+} else {
+  const bad = psClaims.filter((m) => Number(m[1]) !== psTruth.applyItems || Number(m[2]) !== psTruth.applySteps);
+  check(
+    bad.length === 0,
+    `8. pwsh 项/步数 = countPsSteps() 实算（${psClaims.length} 处）`,
+    bad.length === 0
+      ? `全部为 ${psTruth.applyItems} 项 / ${psTruth.applySteps} 步`
+      : `漂移：${bad.map((m) => `${m[1]} 项 / ${m[2]} 步`).join('、')} ≠ 真源 ${psTruth.applyItems} 项 / ${psTruth.applySteps} 步`,
+  );
+  // 恢复方向单独声明（若将来写进 readme 也要钉；当前没有该措辞，只打印不判红）
+  console.log(`   ↳ 真源分账：正向 ${psTruth.applyItems} 项/${psTruth.applySteps} 步，恢复 ${psTruth.restoreItems} 项/${psTruth.restoreSteps} 步，合计 ${psTruth.applySteps + psTruth.restoreSteps} 步`);
+}
 
 console.log('');
 if (fail > 0) {
