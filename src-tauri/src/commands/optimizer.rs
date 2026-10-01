@@ -1676,13 +1676,15 @@ fn civil_from_days_pub(days: i64) -> (i64, u32, u32) {
     (y + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
-fn run_inline_ps(ps: &str, timeout_secs: u64, _diag: Option<&str>) -> Option<crate::pwsh::PsOutput> {
-    // v3-K1：还原点查询属 WMI 面，交给收件箱 Windows PowerShell（System32 自带），
-    // 优化中心从此不再依赖用户安装 PowerShell 7
-    let path = pwsh::write_temp_script(ps, ".ps1").ok()?;
-    let out = crate::pwsh::run_inbox_ps(&path, std::time::Duration::from_secs(timeout_secs));
-    let _ = std::fs::remove_file(&path);
-    out.ok()
+/// 命令层直调收件箱 PS 的薄封装（v3-K1：还原点查询属 WMI 面，交给 System32 自带的
+/// Windows PowerShell，优化中心不再依赖用户安装 PowerShell 7）。
+///
+/// R0（2026-10-01）：临时脚本与进程树纪律全部下沉到 `pwsh::run_inbox_script`，这里只做
+/// `Option` 收敛。原实现自己 `write_temp_script` + `run_inbox_ps`，是「第三种裸调」的形态
+/// —— 台账与判红见 `tools/check-ps-callsites.mjs`。`diag` 此前被静默丢弃，现在真的传给
+/// 执行层：`optimizer.create-restore` 的 `@@DIAG@@` 行会落日志并从 stdout 剔除。
+fn run_inline_ps(ps: &str, timeout_secs: u64, diag: Option<&str>) -> Option<crate::pwsh::PsOutput> {
+    crate::pwsh::run_inbox_script(ps, std::time::Duration::from_secs(timeout_secs), diag).ok()
 }
 
 /// optimizer:check-restore —— 最近一次还原点（三态错误码）

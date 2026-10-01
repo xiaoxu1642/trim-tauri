@@ -1600,15 +1600,11 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
         }
         PsOp::PsInline { script } => {
             // 逐字交给收件箱 Windows PowerShell（System32 自带，无需用户装 pwsh7）。
-            // 脚本写私有 tmp（reparse 判拒），跑完即删；stdout 交回调用方解析
-            // `@@RECYCLE@@` 协议（tf_onedrive 的目录回收走这里）。
-            let dir = crate::engine::paths::temp_script_dir()?;
-            std::fs::create_dir_all(&dir).map_err(|e| format!("创建私有 tmp 失败: {e}"))?;
-            let path = dir.join(format!("optpsinline_{}.ps1", crate::engine::now_ms()));
-            std::fs::write(&path, script.as_bytes()).map_err(|e| format!("写内联脚本失败: {e}"))?;
-            let r = crate::pwsh::run_inbox_ps(&path, std::time::Duration::from_secs(300));
-            let _ = std::fs::remove_file(&path);
-            let out = r?;
+            // stdout 交回调用方解析 `@@RECYCLE@@` 协议（tf_onedrive 的目录回收走这里）。
+            // R0（2026-10-01）：这里原来是「temp_script_dir + fs::write + remove_file」手拼，
+            // 少了两样东西 —— UTF-8 BOM（PS 5.1 按 ANSI 读无 BOM 脚本，中文注释会乱码到解析
+            // 失败）和早退路径的脚本清理。改走统一入口后两者由 pwsh 层保证。
+            let out = crate::pwsh::run_inbox_script(script, std::time::Duration::from_secs(300), None)?;
             if out.timed_out {
                 return Err("内联 PS 步骤执行超时（300s）".into());
             }

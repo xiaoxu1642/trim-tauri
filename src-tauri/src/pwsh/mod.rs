@@ -453,14 +453,28 @@ fn run_file_impl(
 }
 
 /// 审查 v3-K1：用**收件箱 Windows PowerShell 5.1**（System32 自带，无需用户安装）
-/// 跑一个脚本文件。供 `pssteps::PsOp::PsInline` 使用 —— 解释器无法原生表达的构造
-/// （Appx/PnP 设备/WMI 方法/内存代理开关等）逐字交给 inbox PS 执行，语义零改写。
-///
-/// 脚本文件由调用方写入 `paths::temp_script_dir()`（私有 tmp，reparse 判拒），
-/// 本函数只负责执行与清理后的进程树纪律（Job Object + 超时终止，与 run_file_impl 同源）。
-pub(crate) fn run_inbox_ps(script_path: &Path, timeout: Duration) -> Result<PsOutput, String> {
+/// 跑一个**已经写好**的脚本文件。刻意做成模块私有 —— 生产代码不得再持有
+/// 「自己拼路径写 .ps1 + 直接执行」这条旁路（R0，2026-10-01），统一走
+/// [`run_inbox_script`]，否则 BOM、私有 tmp、脚本清理三件纪律又会各自长出一份。
+fn run_inbox_ps(script_path: &Path, timeout: Duration, diag_op: Option<&str>) -> Result<PsOutput, String> {
     let exe = crate::engine::systembin::system_tool("powershell.exe");
-    run_with_exe(&exe, script_path, timeout, None, None, "Windows PowerShell")
+    run_with_exe(&exe, script_path, timeout, diag_op, None, "Windows PowerShell")
+}
+
+/// **收件箱 Windows PowerShell 5.1 的唯一执行入口**（R0，2026-10-01）。
+///
+/// 一次调用即拿到全部纪律：脚本写私有 tmp（`temp_script_dir` 拒 reparse）、UTF-8 BOM、
+/// `-NoProfile -NonInteractive -ExecutionPolicy Bypass -File`、超时 + Job Object 收树、
+/// 脚本随 `TempScript` 守卫离开作用域删除（含 `?` 早退路径）。
+///
+/// 为什么收在 pwsh 层而不是各命令自己拼：`commands/uninstall.rs` 的两处 Appx 调用此前用
+/// `quiet_cmd(...).output()` **没有任何超时**，子孙占住管道时命令会永久挂住；而
+/// `engine/pssteps.rs` 的 PsInline 执行器自己 `fs::write` 出一份**无 BOM** 的脚本
+/// （PS 5.1 按 ANSI 读无 BOM 文件，中文注释会乱码到解析失败）。登记台账见
+/// `tools/check-ps-callsites.mjs`。
+pub fn run_inbox_script(script: &str, timeout: Duration, diag_op: Option<&str>) -> Result<PsOutput, String> {
+    let path = write_temp_script(script, ".ps1")?;
+    run_inbox_ps(path.path(), timeout, diag_op)
 }
 
 fn run_with_exe(

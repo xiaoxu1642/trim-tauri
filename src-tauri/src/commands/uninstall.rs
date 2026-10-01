@@ -150,9 +150,16 @@ fn friendly_publisher(publisher: &str) -> String {
 }
 
 /// Appx（Windows 应用商店应用）枚举（用户拍板 2026-09-28：「Windows应用」滑块）。
-/// 走 inbox Windows PowerShell 5.1 的 Appx 模块（system_tool 白名单 + quiet_cmd，
-/// 与 PsInline 执行器同通道），不新增裸 spawn。当前用户 scope（Get-AppxPackage 语义）。
+/// 走 inbox Windows PowerShell 5.1 的 Appx 模块（R0 起经统一入口 `pwsh::run_inbox_script`，
+/// 与数据层 PsInline 同一咽喉：私有 tmp + BOM + Job Object + 超时收树），不新增裸 spawn。
+/// 当前用户 scope（Get-AppxPackage 语义）。
 /// 输出 UTF-8（命令内显式设 OutputEncoding，防止中文发行商按 OEM 码页乱码）。
+///
+/// 超时口径（R0，2026-10-01）：这两条原来是 `quiet_cmd(...).output()`，**没有任何超时** ——
+/// Appx 模块首次加载本身就慢，子孙进程再占住管道即整条 IPC 永久挂住。
+const APPX_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const APPX_REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 fn enum_appx_packages() -> Result<Vec<Value>, String> {
     // Logo 取法（U-3 复检修真，2026-09-28）：Get-AppxPackage 对象**没有 Logo 属性**
     // （初版 Select Logo 恒空，前端从不请求）——真身在 manifest 的 Application/
@@ -172,16 +179,16 @@ if (Test-Path -LiteralPath $cand) { $logo = $cand; break } } }; if ($logo) { bre
 $out += [pscustomobject]@{ Name=$_.Name; Publisher=$_.Publisher; Version=$_.Version; PackageFullName=$_.PackageFullName; InstallLocation=$_.InstallLocation; Logo=$logo } }; \
 if ($out.Count -gt 0) { $out | ConvertTo-Json -Compress -Depth 2 }; exit 0 } \
 catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
-    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("powershell.exe"))
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
-        .output()
+    let out = crate::pwsh::run_inbox_script(script, APPX_ENUM_TIMEOUT, None)
         .map_err(|e| format!("powershell 启动失败: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() {
-        return Err(if text.starts_with("ERR:") {
+    let text = out.stdout.trim().to_string();
+    if out.code != 0 {
+        return Err(if out.timed_out {
+            format!("Get-AppxPackage 超时（{}s）", APPX_ENUM_TIMEOUT.as_secs())
+        } else if text.starts_with("ERR:") {
             text[4..].trim().to_string()
         } else {
-            format!("Get-AppxPackage 失败（退出码 {}）", out.status.code().unwrap_or(-1))
+            format!("Get-AppxPackage 失败（退出码 {}）", out.code)
         });
     }
     if text.is_empty() {
@@ -341,18 +348,21 @@ try {{ Remove-AppxPackage -Package '{}' -ErrorAction Stop; exit 0 }} \
 catch {{ Write-Output ('ERR:' + $_.Exception.Message); exit 1 }}",
         fullname
     );
-    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("powershell.exe"))
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
-        .output()
+    let out = crate::pwsh::run_inbox_script(&script, APPX_REMOVE_TIMEOUT, None)
         .map_err(|e| format!("powershell 启动失败: {e}"))?;
-    if out.status.success() {
+    if out.code == 0 {
         Ok(())
     } else {
-        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Err(if text.starts_with("ERR:") {
+        let text = out.stdout.trim().to_string();
+        Err(if out.timed_out {
+            format!(
+                "Remove-AppxPackage 超时（{}s），子进程树已终止，可在卸载界面重试",
+                APPX_REMOVE_TIMEOUT.as_secs()
+            )
+        } else if text.starts_with("ERR:") {
             text[4..].trim().to_string()
         } else {
-            format!("Remove-AppxPackage 失败（退出码 {}）", out.status.code().unwrap_or(-1))
+            format!("Remove-AppxPackage 失败（退出码 {}）", out.code)
         })
     }
 }
@@ -5407,6 +5417,29 @@ mod uninstall_appx_tests {
         assert_eq!(friendly_publisher("CN=Microsoft Windows Store"), "Microsoft Windows Store");
         assert_eq!(friendly_publisher("Tencent"), "Tencent");
         assert_eq!(friendly_publisher(""), "");
+    }
+
+    /// R0（2026-10-01）：Appx 枚举从 `quiet_cmd(...).output()` + `-Command` 改走统一入口
+    /// `pwsh::run_inbox_script`（`-File` + UTF-8 BOM + 120s 超时 + Job Object 收树）。
+    /// MockRuntime 测不到真起进程的这一面，而 `-Command → -File` 恰恰是**语义可能变**的地方
+    /// （脚本形态、`exit` 码传递、BOM），所以留一条只读实跑当发布前门禁。
+    #[test]
+    #[ignore = "真实起收件箱 PowerShell 枚举 Appx（只读、秒级），发布前门禁跑"]
+    fn appx_枚举经统一入口交出可渲染列表() {
+        let items = enum_appx_packages().expect("Get-AppxPackage 枚举失败：统一入口或脚本形态有问题");
+        for it in &items {
+            let id = it.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let fullname = id.strip_prefix("APPX|").unwrap_or_else(|| panic!("id 不是 APPX|PFN 形状: {id}"));
+            assert!(valid_appx_fullname(fullname), "包全名没过字符集闸: {fullname}");
+            // 渲染层直接读的字段必须是字符串（前端 .displayName 不做判空）
+            for k in ["displayName", "publisher", "displayVersion", "installLocation", "logoPath"] {
+                assert!(it.get(k).and_then(|v| v.as_str()).is_some(), "{k} 必须是字符串: {it}");
+            }
+            assert_eq!(it.get("installerKind").and_then(|v| v.as_str()), Some("appx"));
+            assert_eq!(it.get("removable").and_then(|v| v.as_bool()), Some(true));
+        }
+        // 空列表在这台机器上是合法结果（没有可卸载的商店应用），不据此判失败；
+        // 这条用例真正钉的是「调用成功 + 每一项都过形状」，脚本跑歪会直接 Err。
     }
 }
 
