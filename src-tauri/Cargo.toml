@@ -142,6 +142,14 @@ features = [
     "Win32_System_TaskScheduler",
     # B6：ProcessIdToSessionId（重启 explorer 时按会话过滤）
     "Win32_System_RemoteDesktop",
+    # v2-R4 / A11 还原点原生侧（engine::sysrestore 只读 spike）：
+    # System_Wmi 提供 IWbemLocator/IWbemServices/IEnumWbemClassObject；
+    # 注意该 crate 的 IWbemLocator **只有 ConnectServer、没有 CreateService**，
+    # 且**不导出 CLSID_WbemLocator**（GUID 常量在 sysrestore.rs 里手写并有断言钉住）。
+    "Win32_System_Wmi",
+    # 属性级读取（IWbemClassObject::Get）要 VARIANT；spike 阶段先用 GetObjectText，
+    # 但类型签名引用该模块，feature 不开则 Wmi 侧本身编不过。
+    "Win32_System_Variant",
 ]
 
 [profile.dev]

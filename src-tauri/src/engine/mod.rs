@@ -17,6 +17,8 @@ pub mod pssteps;
 pub mod rule_schema;
 pub mod rules_signature;
 pub mod shellicon;
+/// A11 还原点原生侧（只读 spike，未接任何 IPC 命令）
+pub mod sysrestore;
 pub mod sysinfo;
 pub mod systembin;
 pub mod winhttp;
