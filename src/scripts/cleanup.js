@@ -313,11 +313,6 @@
   }
 
   // 排除名单只覆盖文件系统路径（正侧匹配防误判）：盘符 / UNC / %环境变量% 开头。
-  // 注册表键与 DISM 特殊项不产生文件路径，排除名单不覆盖，对应条目不显示「忽略」按钮
-  function isFsPath(p) {
-    return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') || p.startsWith('%');
-  }
-
   // 渲染单个数据行（列布局样式与表头共用 buildLayout，保证对齐）
   function renderRow(item, columns, groupKey) {
     const layout = xtable.buildLayout(columns);
@@ -384,12 +379,7 @@
             inner = previewBtnHtml(item, hasImages, imageCount);
           } else {
             // P3：明细按钮——弹窗枚举该条目将删除的具体文件清单（只读）
-            // C-1：文件系统路径条目追加「忽略」——加入排除名单后扫描与执行同源跳过
-            const exPath = result && result.path;
-            const exBtn = exPath && isFsPath(exPath)
-              ? ` <button class="fileclean-preview-btn" data-exclude="${item.id}" data-tip="把此路径加入排除名单：之后扫描与执行都会跳过它">忽略</button>`
-              : '';
-            inner = `<button class="fileclean-preview-btn" data-detail="${item.id}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>${exBtn}`;
+            inner = `<button class="fileclean-preview-btn" data-detail="${item.id}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>`;
           }
           break;
       }
@@ -429,12 +419,6 @@
         if (previewBtn) {
           e.stopPropagation();
           if (!previewBtn.disabled) openPreview(previewBtn.dataset.preview);
-          return;
-        }
-        const excludeBtn = e.target.closest('[data-exclude]');
-        if (excludeBtn) {
-          e.stopPropagation();
-          addExcludeById(excludeBtn.dataset.exclude);
           return;
         }
         const detailBtn = e.target.closest('[data-detail]');
@@ -1484,283 +1468,6 @@
     document.getElementById('itemDetailBackdrop')?.remove();
   }
 
-  // ==================== C-1 排除名单 UI ====================
-
-  function closeExcludeManager() {
-    document.getElementById('excludeListBackdrop')?.remove();
-  }
-
-  // 拉取并渲染名单列表（entries 闭包捕获，移除按钮按下标回查原文，避免路径进属性转义）
-  async function renderExcludeList(ctrl) {
-    const body = ctrl.body;
-    let resp;
-    try {
-      resp = await window.api.cleanup.excludeList();
-    } catch (e) {
-      if (document.body.contains(body)) body.innerHTML = `<div class="empty-state"><p>名单读取失败: ${escapeHtml(e.message)}</p></div>`;
-      return;
-    }
-    if (!document.body.contains(body)) return;
-    if (!resp || !resp.success) {
-      body.innerHTML = `<div class="empty-state"><p>${escapeHtml((resp && resp.message) || '名单读取失败')}</p></div>`;
-      return;
-    }
-    const entries = (resp.data && resp.data.entries) || [];
-    const fileTip = (resp.data && resp.data.file) || '';
-    if (!entries.length) {
-      body.innerHTML = `<div class="empty-state"><p>排除名单为空。可在下方手动添加，或在扫描结果条目上点「忽略」。</p><p>名单文件：${escapeHtml(fileTip)}</p></div>`;
-      return;
-    }
-    body.innerHTML = `<div class="detail-file-list">${entries.map((en, i) =>
-      `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(en.expanded)}">${escapeHtml(en.raw)} <span class="path-auto-tag">${en.isFile ? '文件' : '目录'}</span></span><button class="fileclean-preview-btn" data-exclude-remove="${i}" type="button">移除</button></div>`
-    ).join('')}</div>`;
-    body.querySelectorAll('[data-exclude-remove]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const en = entries[+btn.getAttribute('data-exclude-remove')];
-        if (!en) return;
-        try {
-          const r = await window.api.cleanup.excludeRemove(en.raw);
-          if (r && r.success) {
-            window.app?.toast(r.data && r.data.removed ? 'success' : 'info', r.data && r.data.removed ? '已从排除名单移除' : '该路径不在名单中');
-            renderExcludeList(ctrl);
-          } else {
-            window.app?.toast('error', (r && r.message) || '移除失败');
-          }
-        } catch (e) {
-          window.app?.toast('error', '移除失败: ' + e.message);
-        }
-      });
-    });
-  }
-
-  function openExcludeManager() {
-    closeExcludeManager();
-    const ctrl = window.modal.create({
-      id: 'excludeListBackdrop',
-      title: '清理排除名单',
-      bodyHtml: '<div class="empty-state"><p>正在读取排除名单…</p></div>',
-      footerClass: 'pw-footer',
-      footerHtml: `
-          <input id="excludeAddInput" class="field-input" type="text" placeholder="输入要排除的绝对路径（目录或文件，支持 %环境变量%）" />
-          <button class="btn btn-primary" data-role="addBtn" type="button">添加</button>
-          <button class="btn btn-secondary" data-role="doneBtn" type="button">关闭</button>`
-    });
-    ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeExcludeManager);
-    const input = ctrl.footer.querySelector('#excludeAddInput');
-    const add = async () => {
-      const p = (input.value || '').trim();
-      if (!p) {
-        window.app?.toast('warning', '请输入要排除的路径');
-        return;
-      }
-      try {
-        const r = await window.api.cleanup.excludeAdd(p);
-        if (r && r.success) {
-          window.app?.toast(r.data && r.data.added ? 'success' : 'info', r.data && r.data.added ? '已加入排除名单' : '该路径已在排除名单中');
-          input.value = '';
-          renderExcludeList(ctrl);
-        } else {
-          window.app?.toast('error', (r && r.message) || '添加失败');
-        }
-      } catch (e) {
-        window.app?.toast('error', '添加失败: ' + e.message);
-      }
-    };
-    ctrl.footer.querySelector('[data-role="addBtn"]').addEventListener('click', add);
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
-    renderExcludeList(ctrl);
-  }
-
-  // 条目级「忽略」——把该条目的路径整棵加入排除名单（目录=整棵子树，文件=单文件）
-  async function addExcludeById(id) {
-    const result = scanResults.get(id);
-    const p = result && result.path;
-    if (!p || !isFsPath(p)) {
-      window.app?.toast('warning', '该条目没有可排除的文件路径');
-      return;
-    }
-    try {
-      const r = await window.api.cleanup.excludeAdd(p);
-      if (r && r.success) {
-        window.app?.toast(r.data && r.data.added ? 'success' : 'info', r.data && r.data.added ? `已加入排除名单：${p}` : '该路径已在排除名单中');
-      } else {
-        window.app?.toast('error', (r && r.message) || '加入排除名单失败');
-      }
-    } catch (e) {
-      window.app?.toast('error', '加入排除名单失败: ' + e.message);
-    }
-  }
-
-  // ==================== C-3 自定义清理目录 UI ====================
-  // 与排除名单同款 modal 形态：目录管理（增/删）+ 扫描候选 + 勾选清理。
-  // 删除面只走回收站（后端 cleanup:custom-execute 固定语义），转义用 ds.esc 真源。
-
-  function closeCustomDirs() {
-    document.getElementById('customDirsBackdrop')?.remove();
-  }
-
-  // 弹窗生命周期内缓存：entries=目录条目；files=最近一次扫描的候选（执行按此回查）
-  let customEntries = [];
-  let customFiles = [];
-
-  async function renderCustomEntries(ctrl) {
-    const listEl = document.getElementById('customDirList');
-    if (!listEl) return;
-    let resp;
-    try {
-      resp = await window.api.cleanup.customList();
-    } catch (e) {
-      listEl.innerHTML = `<div class="empty-state"><p>名单读取失败: ${ds.esc(String(e.message || e))}</p></div>`;
-      return;
-    }
-    if (!listEl.isConnected) return;
-    if (!resp || !resp.success) {
-      listEl.innerHTML = `<div class="empty-state"><p>${ds.esc((resp && resp.message) || '名单读取失败')}</p></div>`;
-      return;
-    }
-    customEntries = (resp.data && resp.data.entries) || [];
-    if (!customEntries.length) {
-      listEl.innerHTML = '<div class="empty-state"><p>还没有自定义目录。在下方输入目录路径（可选扩展名模式）后点「添加」，再点「扫描」出候选。</p></div>';
-      return;
-    }
-    listEl.innerHTML = customEntries.map((en, i) =>
-      `<div class="detail-file-row"><span class="detail-file-path" data-tip="${ds.escAttr(en.dir)}">${ds.esc(en.dir)}${en.patterns && en.patterns.length ? ` <span class="path-auto-tag">${ds.esc(en.patterns.join(' '))}</span>` : ''}</span><button class="fileclean-preview-btn" data-custom-remove="${i}" type="button">移除</button></div>`
-    ).join('');
-    listEl.querySelectorAll('[data-custom-remove]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const en = customEntries[+btn.getAttribute('data-custom-remove')];
-        if (!en) return;
-        try {
-          const r = await window.api.cleanup.customRemove(en.dir);
-          if (r && r.success) {
-            window.app?.toast(r.data && r.data.removed ? 'success' : 'info', r.data && r.data.removed ? '已移除该目录' : '该目录不在名单中');
-            renderCustomEntries(ctrl);
-          } else {
-            window.app?.toast('error', (r && r.message) || '移除失败');
-          }
-        } catch (e) {
-          window.app?.toast('error', '移除失败: ' + (e.message || e));
-        }
-      });
-    });
-  }
-
-  async function customScanNow(ctrl) {
-    const area = document.getElementById('customFileArea');
-    if (!area) return;
-    area.style.display = 'block';
-    area.innerHTML = '<div class="empty-state"><p>正在扫描自定义目录…</p></div>';
-    let resp;
-    try {
-      resp = await window.api.cleanup.customScan();
-    } catch (e) {
-      area.innerHTML = `<div class="empty-state"><p>扫描失败: ${ds.esc(String(e.message || e))}</p></div>`;
-      return;
-    }
-    if (!area.isConnected) return;
-    if (!resp || !resp.success) {
-      area.innerHTML = `<div class="empty-state"><p>${ds.esc((resp && resp.message) || '扫描失败')}</p></div>`;
-      return;
-    }
-    const d = resp.data || {};
-    customFiles = d.files || [];
-    const cleanBtn = ctrl.footer.querySelector('[data-role="cleanBtn"]');
-    if (cleanBtn) cleanBtn.disabled = !customFiles.length;
-    if (!customFiles.length) {
-      area.innerHTML = '<div class="empty-state"><p>没有可清理的候选（只收修改时间满 24 小时、未命中排除名单的文件；目录本身不删）。</p></div>';
-      return;
-    }
-    const rows = customFiles.slice(0, 500).map((f, i) =>
-      `<div class="detail-file-row"><label class="finder-cell" style="gap:8px"><input type="checkbox" data-custom-file="${i}" checked /> <span class="detail-file-path" data-tip="${ds.escAttr(f.path)}">${ds.esc(f.path)}</span></label><span class="path-auto-tag">${ds.fmtBytes(f.size || 0)}</span></div>`
-    ).join('');
-    const moreTip = customFiles.length > 500
-      ? `<div class="empty-state"><p>仅展示前 500 项，其余 ${customFiles.length - 500} 项默认同样参与清理。</p></div>`
-      : '';
-    area.innerHTML = `<div class="finder-group-header"><span>候选文件 ${customFiles.length} 项 · 共 ${ds.fmtBytes(d.totalSize || 0)}</span></div>${moreTip}<div class="detail-file-list">${rows}</div>`;
-  }
-
-  async function customCleanSelected(ctrl) {
-    if (!customFiles.length) return;
-    const area = document.getElementById('customFileArea');
-    const boxes = area ? Array.from(area.querySelectorAll('input[data-custom-file]:checked')) : [];
-    // 勾选语义：有勾选按勾选；一个都没勾=「全部取消」，不给整批盲删
-    const targets = boxes
-      .map(b => customFiles[+b.getAttribute('data-custom-file')])
-      .filter(Boolean)
-      .map(f => f.path);
-    if (!targets.length) {
-      window.app?.toast('warning', '请先勾选要清理的文件');
-      return;
-    }
-    const ok = await window.app?.confirmDanger?.(
-      '清理自定义目录',
-      `将把选中的 ${targets.length} 个文件移入回收站（可还原）。`,
-      '开始清理',
-      '取消',
-      '只进回收站；执行前会逐项复验保护目录、修改时间与排除名单。'
-    );
-    if (!ok) return;
-    try {
-      const r = await window.api.cleanup.customExecute(targets);
-      if (r && r.success) {
-        const d = r.data || {};
-        window.app?.toast(d.failCount ? 'warning' : 'success',
-          `清理完成：成功 ${d.fileCount} 个，回收 ${ds.fmtBytes(d.freed || 0)}${d.failCount ? `，失败/跳过 ${d.failCount}` : ''}`);
-        customScanNow(ctrl);
-      } else {
-        window.app?.toast('error', (r && r.message) || '清理失败');
-      }
-    } catch (e) {
-      window.app?.toast('error', '清理失败: ' + (e.message || e));
-    }
-  }
-
-  function openCustomDirs() {
-    closeCustomDirs();
-    const ctrl = window.modal.create({
-      id: 'customDirsBackdrop',
-      title: '自定义清理目录',
-      bodyHtml: '<div id="customDirList"><div class="empty-state"><p>正在读取目录名单…</p></div></div><div id="customFileArea" style="display:none"></div>',
-      footerClass: 'pw-footer',
-      footerHtml: `
-          <input id="customDirInput" class="field-input" type="text" placeholder="目录绝对路径（支持 %环境变量%）" style="flex:2" />
-          <input id="customPatInput" class="field-input" type="text" placeholder="扩展名模式（可选，如 *.tmp;*.log）" style="flex:1" />
-          <button class="btn btn-secondary" data-role="addBtn" type="button">添加</button>
-          <button class="btn btn-secondary" data-role="scanBtn" type="button">扫描</button>
-          <button class="btn btn-primary" data-role="cleanBtn" type="button" disabled>清理所选</button>
-          <button class="btn btn-secondary" data-role="doneBtn" type="button">关闭</button>`
-    });
-    ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeCustomDirs);
-    ctrl.footer.querySelector('[data-role="scanBtn"]').addEventListener('click', () => customScanNow(ctrl));
-    ctrl.footer.querySelector('[data-role="cleanBtn"]').addEventListener('click', () => customCleanSelected(ctrl));
-    const dirInput = ctrl.footer.querySelector('#customDirInput');
-    const patInput = ctrl.footer.querySelector('#customPatInput');
-    const add = async () => {
-      const p = (dirInput.value || '').trim();
-      if (!p) {
-        window.app?.toast('warning', '请输入目录路径');
-        return;
-      }
-      const pats = (patInput.value || '').split(';').map(s => s.trim()).filter(Boolean);
-      try {
-        const r = await window.api.cleanup.customAdd(p, pats.length ? pats : null);
-        if (r && r.success) {
-          window.app?.toast(r.data && r.data.added ? 'success' : 'info', r.data && r.data.added ? '已添加自定义目录' : '该目录已在名单中');
-          dirInput.value = '';
-          patInput.value = '';
-          renderCustomEntries(ctrl);
-        } else {
-          window.app?.toast('error', (r && r.message) || '添加失败');
-        }
-      } catch (e) {
-        window.app?.toast('error', '添加失败: ' + (e.message || e));
-      }
-    };
-    ctrl.footer.querySelector('[data-role="addBtn"]').addEventListener('click', add);
-    dirInput.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
-    renderCustomEntries(ctrl);
-  }
-
   // ==================== C-4 备份还原（注册表 + 永久删文件批次） ====================
 
   function closeRegBackupModal() {
@@ -2039,8 +1746,6 @@
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnUpdateRules')?.addEventListener('click', updateRules);
-    document.getElementById('btnExcludeList')?.addEventListener('click', openExcludeManager);
-    document.getElementById('btnCustomDirs')?.addEventListener('click', openCustomDirs);
     document.getElementById('btnRegBackups')?.addEventListener('click', openRegBackupManager);
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）

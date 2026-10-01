@@ -952,8 +952,9 @@ fn get_path_deletable_stats(path: &str, cutoff: Option<std::time::SystemTime>) -
     if !probe_ok {
         return PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0 };
     }
-    let (excl_dirs, excl_files) = load_global_excludes();
-    let res = list_deletable(path, "*", cutoff, &excl_dirs, &excl_files);
+    // U1-b（2026-10-01）：全局排除名单整链下线。本探针历史上也只吃全局名单（规则级
+    // excludePaths 到这层已经丢了规则上下文），传空集即等价于「名单为空」。
+    let res = list_deletable(path, "*", cutoff, &[], &[]);
     let nfiles = res.files.len() as u64;
     let size: u64 = res.files.iter().map(|f| f.1).sum();
     PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles }
@@ -1414,43 +1415,6 @@ fn rule_min_age_secs(rule: &Json) -> Option<u64> {
     }
 }
 
-// ==================== 全局排除名单（P0-M5 §5.2） ====================
-// %APPDATA%\Trim\cleanup-exclude.txt，每行一个绝对路径：目录行=排除该目录整棵子树，
-// 文件行=排除该文件。大小写不敏感。扫描（本文件）与执行（engine::native::cleanup_execute）
-// 共用同一加载与判定，防「扫描排除、执行照删」。
-// 损坏/不可读按空名单处理（排除名单只影响删什么，不影响 fail-closed 的删除面）。
-
-/// 排除名单落点由宿主注入（`util::list_file_path`），本 crate 不再自己拼 `%APPDATA%`（N2）。
-/// 主 crate 的读写两侧都走这一个函数，所以"扫描排除了、执行照删"和"删了条 yet 又生效"
-/// 两类分叉都被同一入口挡住。
-pub fn global_exclude_file() -> Option<std::path::PathBuf> {
-    crate::util::list_file_path("cleanup-exclude.txt")
-}
-
-/// 返回 (目录前缀, 文件全路径) 两组小写排除项。行尾 `\` 归一。
-pub fn load_global_excludes() -> (Vec<String>, Vec<String>) {
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
-    if let Some(f) = global_exclude_file() {
-        if let Ok(txt) = fs::read_to_string(&f) {
-            for line in txt.lines() {
-                let l = expand_env_path(line.trim()).trim_end_matches('\\').to_lowercase();
-                if l.is_empty() || l.starts_with('#') {
-                    continue;
-                }
-                // 有扩展名的行大概率是文件，按全路径排除；否则按目录前缀排除。
-                // 判定只影响分组方式：文件路径也能进 dirs（前缀匹配照样排除整棵树）。
-                if Path::new(&l).extension().is_some() {
-                    files.push(l);
-                } else {
-                    dirs.push(l);
-                }
-            }
-        }
-    }
-    (dirs, files)
-}
-
 /// 全路径（小写）是否被排除名单命中。
 pub fn path_excluded(excl_dirs: &[String], excl_files: &[String], low: &str) -> bool {
     excl_dirs.iter().any(|d| low.starts_with(&format!("{}\\", d))) || excl_files.iter().any(|f| *f == low)
@@ -1636,9 +1600,11 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
         .unwrap_or(false);
     let snapshot_mode = skip_lock || has_excl || has_expaths || any_recurse_false;
     let cutoff = rule_min_age_secs(rule).map(min_age_cutoff);
-    // 全局排除名单并入规则级 excludeKeys/excludePaths 的同一过滤面（excludeKeys 本身
-    // 仍被门禁 A2 禁用，这里只为全局名单复用同一通道；执行侧 cleanup_execute 用同一谓词复核）
-    let (mut excl_dirs, mut excl_files) = load_global_excludes();
+    // 规则级 excludePaths 的过滤面（excludeKeys 本身仍被门禁 A2 禁用）。
+    // U1-b（2026-10-01）：全局排除名单整链下线，这里不再有全局种子；
+    // 执行侧 cleanup_execute 用同一谓词复核，两侧口径仍然一致。
+    let mut excl_dirs: Vec<String> = Vec::new();
+    let mut excl_files: Vec<String> = Vec::new();
     if let Some(arr) = rule.get("excludePaths").and_then(|v| v.as_arr()) {
         for ep0 in arr.iter().filter_map(|v| v.as_str()) {
             let ep = expand_env_path(ep0).trim_end_matches('\\').to_lowercase();

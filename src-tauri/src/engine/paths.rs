@@ -347,14 +347,13 @@ pub fn migrate_list_files_once() -> Option<String> {
 /// 合并口径是**逐行并集**，不是"存在即用某一侧"（v2 报告 N2 第 3 条，纠正本仓初版）：
 /// 名单是行集合，二选一会让用户在新根加了第一条排除项之后、老根那几十条**整批静默失效**，
 /// 而"排除失效"的方向是**多删**，比"看不见备份"更坏。
-/// 归一行 = trim → 去尾 `\` → 小写（与 `cleanup_scan::load_global_excludes` /
-/// `load_empty_ignore` 同口径），所以只差大小写或尾斜杠的同一行不会被重复追加 ⇒ 幂等。
+/// 归一行 = trim → 去尾 `\` → 小写（与 `load_empty_ignore` 同口径），所以只差大小写
+/// 或尾斜杠的同一行不会被重复追加 ⇒ 幂等。
 ///
-/// 刻意**不含** `cleanup-custom.txt`：它是**删除来源**（用户显式加的要清的目录），不是保护面。
-/// 老根那份从来没被读过，合过来等于凭空多出用户没见过的待删目录 —— 方向与排除名单相反，
-/// 保持不读才是无行为变更。
+/// U1-b（2026-10-01）：`cleanup-exclude.txt` 随「排除名单」、`cleanup-custom.txt` 随
+/// 「自定义目录」整链下线，均已从本清单摘除。
 fn migrate_list_files_into(target: &Path, legacy: &Path) -> Option<String> {
-    const LIST_FILES: &[&str] = &["empty-ignore.txt", "cleanup-exclude.txt"];
+    const LIST_FILES: &[&str] = &["empty-ignore.txt"];
     let normalize = |raw: &str| -> String { raw.trim().trim_end_matches('\\').to_lowercase() };
     let mut moved: Vec<String> = Vec::new();
     for name in LIST_FILES {
@@ -784,8 +783,9 @@ mod tests {
         assert!(!is_portable(), "调试构建不得判为便携模式");
     }
 
-    /// N2：名单搬迁必须是**逐行并集**。老根那本有 2 条排除项、用户在新版里又加了 1 条
-    /// ⇒ 新根文件已存在；"二选一"会让老根那 2 条整批静默失效，而排除失效的方向是**多删**。
+    /// N2：名单搬迁必须是**逐行并集**。老根那本有 2 条、用户在新版里又加了 1 条 ⇒ 新根
+    /// 文件已存在；"二选一"会让老根那 2 条整批静默失效，而忽略名单失效的方向是**多删**。
+    /// 夹具用 empty-ignore.txt —— U1-b 之后本清单里唯一还活着的名单，性质必须仍然被钉住。
     /// 同时守住：新根原有行不动、只差大小写或尾斜杠的同一行不重复追加、重跑幂等。
     #[test]
     fn 名单搬迁逐行合并而非二选一() {
@@ -795,26 +795,26 @@ mod tests {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::create_dir_all(&cur).unwrap();
         std::fs::write(
-            old.join("cleanup-exclude.txt"),
+            old.join("empty-ignore.txt"),
             "# 旧版注释\r\nC:\\Users\\me\\Keep\\\r\nC:\\Users\\me\\AlsoKeep\r\n".as_bytes(),
         )
         .unwrap();
-        std::fs::write(cur.join("cleanup-exclude.txt"), b"C:\\Users\\me\\NewOne\r\n").unwrap();
+        std::fs::write(cur.join("empty-ignore.txt"), b"C:\\Users\\me\\NewOne\r\n").unwrap();
 
         let note = migrate_list_files_into(&cur, &old).expect("应合并出缺失行");
         assert!(note.contains("2 行"), "老根两条都该并进来: {note}");
-        let text = std::fs::read_to_string(cur.join("cleanup-exclude.txt")).unwrap();
+        let text = std::fs::read_to_string(cur.join("empty-ignore.txt")).unwrap();
         assert!(text.contains("NewOne"), "新根原有行不得丢: {text}");
         assert!(text.contains("me\\Keep"), "尾斜杠行要并入（写入保持原样）: {text}");
         assert!(text.contains("AlsoKeep"), "另一条老行同样要并入: {text}");
         assert!(!text.contains('#'), "注释不是路径，不并入: {text}");
-        assert!(old.join("cleanup-exclude.txt").is_file(), "老根原件保留（可人工回退）");
+        assert!(old.join("empty-ignore.txt").is_file(), "老根原件保留（可人工回退）");
 
         // 幂等：再跑一次既不得重复追加，也不得产生搬迁日志（启动每次都调这条）
         let again_note = migrate_list_files_into(&cur, &old);
         assert!(again_note.is_none(), "已合并完不得再改写名单: {again_note:?}");
         assert_eq!(
-            std::fs::read_to_string(cur.join("cleanup-exclude.txt")).unwrap(),
+            std::fs::read_to_string(cur.join("empty-ignore.txt")).unwrap(),
             text,
             "第二次运行必须逐字节不变"
         );
@@ -826,17 +826,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 新根完全没有名单时才走"整份搬"，且必须两份文件都搬（启动只调一次的机会不会重来）
+    /// 新根完全没有名单时才走"整份搬"（启动只调一次的机会不会重来）
     #[test]
     fn 新根无名单时整份搬迁() {
         let root = sandbox("lists-copy");
         let cur = root.join("cur");
         let old = root.join("old");
         std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(old.join("cleanup-exclude.txt"), b"C:\\a\r\n").unwrap();
         std::fs::write(old.join("empty-ignore.txt"), b"C:\\b\r\n").unwrap();
-        let note = migrate_list_files_into(&cur, &old).expect("两份都该搬");
-        assert!(note.contains("cleanup-exclude.txt(整份)") && note.contains("empty-ignore.txt(整份)"), "{note}");
+        let note = migrate_list_files_into(&cur, &old).expect("名单该整份搬过来");
+        assert!(note.contains("empty-ignore.txt(整份)"), "{note}");
         assert_eq!(std::fs::read(cur.join("empty-ignore.txt")).unwrap(), b"C:\\b\r\n");
         let _ = std::fs::remove_dir_all(&root);
     }

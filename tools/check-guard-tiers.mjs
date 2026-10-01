@@ -50,11 +50,6 @@ const MUST_MAIN = [
   'appearance_bg_list',
   'appearance_bg_open_dir',
   'cleanup_execute',
-  'cleanup_exclude_add', // C-1：写当前数据根的 cleanup-exclude.txt（删除保护面），只放主窗
-  'cleanup_exclude_remove', // C-1：同上（写面）
-  'cleanup_custom_add', // C-3：写当前数据根的 cleanup-custom.txt（删除来源），只放主窗
-  'cleanup_custom_remove', // C-3：同上（写面）
-  'cleanup_custom_execute', // C-3：只回收站的删除面，只放主窗
   'cleanup_kill_locked_processes',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗

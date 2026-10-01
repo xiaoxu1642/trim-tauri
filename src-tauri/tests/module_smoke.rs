@@ -83,32 +83,6 @@ fn paths_load_shape() {
     assert!(res["data"].is_object(), "data 必须是对象: {res}");
 }
 
-/// cleanup:exclude-list 形状（C-1 排除名单）：`data.entries` 必须是数组。
-/// 防的是：名单文件缺失时弹窗渲染崩（应为空列表降级）。
-#[test]
-fn cleanup_exclude_list_shape() {
-    let w = main_window();
-    let res = invoke(&w, "cleanup_exclude_list", json!({}));
-    assert_eq!(res["success"], json!(true), "exclude-list 应成功: {res}");
-    assert!(
-        res["data"]["entries"].is_array(),
-        "data.entries 必须是数组: {res}"
-    );
-}
-
-/// cleanup:custom-list 形状：`data.entries` 必须是数组（返回体为 {file, entries}）。
-/// 防的是：自定义目录文件缺失时弹窗渲染崩（应为空列表降级）。
-#[test]
-fn cleanup_custom_list_shape() {
-    let w = main_window();
-    let res = invoke(&w, "cleanup_custom_list", json!({}));
-    assert_eq!(res["success"], json!(true), "custom-list 应成功: {res}");
-    assert!(
-        res["data"]["entries"].is_array(),
-        "data.entries 必须是数组: {res}"
-    );
-}
-
 /// paths:save 负例：key 白名单外的写入必须在落盘前被拒。
 /// 防的是：渲染层被注入后借路径通道往配置里塞任意键（配置面越权）。
 #[test]

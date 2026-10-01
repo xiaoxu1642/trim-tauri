@@ -79,14 +79,6 @@ const RETIRED = {
  * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
  */
 const TAURI_ADDED = {
-  'cleanup:exclude-list': 'C-1（2026-09-28）：排除名单 UI 读面（上游无此能力）',
-  'cleanup:exclude-add': 'C-1（2026-09-28）：排除名单 UI 写面（主窗档）',
-  'cleanup:exclude-remove': 'C-1（2026-09-28）：排除名单 UI 写面（主窗档）',
-  'cleanup:custom-list': 'C-3（2026-09-28）：自定义清理目录读面（上游无此能力）',
-  'cleanup:custom-add': 'C-3（2026-09-28）：自定义清理目录写面（主窗档）',
-  'cleanup:custom-remove': 'C-3（2026-09-28）：自定义清理目录写面（主窗档）',
-  'cleanup:custom-scan': 'C-3（2026-09-28）：自定义清理目录扫描（结果落快照）',
-  'cleanup:custom-execute': 'C-3（2026-09-28）：自定义清理目录执行（只回收站，主窗档）',
   'uninstall:modify': 'P1-D6（2026-10-01）：修改/修复入口，执行 ModifyPath（主窗档）',
   'uninstall:pending-add': 'P1-B3（2026-10-01）：回收站失败项登记重启后删（主窗档）',
   'uninstall:pending-list': 'P1-B3（2026-10-01）：重启后删待删清单（主窗档，只读）',

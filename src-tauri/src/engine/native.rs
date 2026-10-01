@@ -6924,10 +6924,11 @@ pub fn cleanup_execute(
         // 刚被应用写入——执行侧必须自己拒绝，不能只信扫描结果。
         let cutoff = rule_min_age_secs_json(&rule).map(trim_finder::cleanup_scan::min_age_cutoff);
         let mut too_new = 0i64;
-        // 全局排除名单（P0-M5 §5.2）+ 规则级 excludePaths（C-2，2026-09-28 开门）：
-        // 与扫描侧同一加载/判定/归一口径（trim_finder 同源），执行侧再拦一次——
-        // 排除名单可能在扫描之后被用户改过，规则也可能换版本，执行时必须以当下为准。
-        let (mut excl_dirs, mut excl_files) = trim_finder::cleanup_scan::load_global_excludes();
+        // 规则级 excludePaths（C-2，2026-09-28 开门）：与扫描侧同一判定/归一口径
+        //（trim_finder 同源），执行侧再拦一次——规则可能换版本，执行时必须以当下为准。
+        // U1-b（2026-10-01）：全局排除名单已整链下线，这里不再有任何全局种子。
+        let mut excl_dirs: Vec<String> = Vec::new();
+        let mut excl_files: Vec<String> = Vec::new();
         if let Some(arr) = rule.get("excludePaths").and_then(|v| v.as_array()) {
             for ep0 in arr.iter().filter_map(|v| v.as_str()) {
                 let ep = trim_finder::cleanup_scan::expand_env_path(ep0)
