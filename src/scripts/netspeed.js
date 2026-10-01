@@ -243,6 +243,11 @@
       saved = ok;
       const note = document.getElementById('nsReportSaveNote');
       if (note) note.textContent = ok ? '本次测速结果已保存至历史记录（可在「查看报告」中查看，保留 7 天）。' : '本次测速结果未能保存到历史记录。';
+    }).catch(() => {
+      // NEW-4（L3 2026-10-01）：保存链拒绝必须显性——saved 保持 false，回执注释落失败文案
+      saved = false;
+      const note = document.getElementById('nsReportSaveNote');
+      if (note) note.textContent = '本次测速结果未能保存到历史记录。';
     });
     const latStat = `
       <div class="rt-stat"><span class="rt-stat-label">平均延迟</span><span class="rt-stat-value" style="color:var(--warning,#E6A23C)">${avgLat != null ? avgLat + ' ms' : '—'}</span><span class="rt-stat-meta">${minLat != null ? '最低 ' + minLat + ' ms · 采样 ' + lats.length + ' 次' : '未获取到延迟采样'}</span></div>`;

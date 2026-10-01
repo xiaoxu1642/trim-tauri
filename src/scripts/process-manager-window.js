@@ -1,22 +1,17 @@
 // process-manager-window.js - 内存清理 → 「应用进程管理」独立窗口
 // 承载运行进程列表（按路径分组 + 实例缩进的进程树），支持搜索、刷新、逐项/整体结束进程。
 // 列表渲染与结束逻辑复用 processes.js（与「内存清理」页共享）。
-// 注意：独立窗口未加载 app.js，故 confirm/toast 自行实现（统一使用 .usage-modal 样式）。
+// 注意：独立窗口未加载 app.js —— confirm 自行实现（统一使用 .usage-modal 样式）；
+//       toast 已收敛委托 scripts/sub-toast.js（NEW-6 收敛，window.app 在子窗不存在）。
 (function () {
   'use strict';
 
   function el(id) { return document.getElementById(id); }
   function escapeHtml(s) { return window.ds.esc(s); }
 
-  function toast(type, message) {
-    const host = el('pmGlobalHint');
-    if (!host) return;
-    host.textContent = message || '';
-    host.style.color = type === 'error' ? 'var(--danger)'
-      : type === 'success' ? 'var(--success)'
-        : type === 'warning' ? 'var(--warning)' : 'var(--fg-tertiary)';
-    if (message) setTimeout(() => { if (host.textContent === message) host.textContent = ''; }, 5000);
-  }
+  // NEW-6（L3 2026-10-01）收敛：实现统一在 scripts/sub-toast.js，此处仅薄委托
+  // （独立窗口未加载 app.js 的约束见文件头注 —— 收敛件落 sub-toast 而非 app.js）
+  function toast(type, message) { window.subToast?.hintLine('pmGlobalHint', type, message); }
 
   // 内置确认框（.usage-backdrop > .usage-modal 三段式）
   // 复核 PM-6/N3（2026-09-16）：结束进程不可逆，确认按钮改危险色 btn-danger（main.css 既有件），

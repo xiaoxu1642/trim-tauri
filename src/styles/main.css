@@ -30,7 +30,9 @@
   --fg-primary: #F4F6FA;
   --fg-secondary: #C3C9D4;
   --fg-tertiary: #8B93A5;
-  --fg-disabled: rgba(244, 246, 250, 0.34);
+  /* NEW-5（L3 2026-10-01）：0.34 仅 2.95:1，WCAG 虽豁免非活动组件但低视力不可辨；
+     提到 0.5 → 4.9:1，仍明显弱于 --fg-tertiary 的灰态层次。 */
+  --fg-disabled: rgba(244, 246, 250, 0.5);
 
   --border-default: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.13);
@@ -192,7 +194,9 @@
   /* L4（2026-09-19）：原 #767191 于 --bg-app #F6F4FB 上仅 4.24:1，低于 WCAG AA 正文 4.5:1；
      同色相加深至 #6B657F 达 5.08:1，仍与 --fg-secondary 保持三级层次，不改任何引用点。 */
   --fg-tertiary: #6B657F;
-  --fg-disabled: rgba(41, 37, 54, 0.34);
+  /* NEW-5（L3 2026-10-01）：0.34 仅 2.01:1，提至 0.62 → ≈4.2:1（双主题独立值；
+     亮底上 alpha 需比暗侧更高才能过 3:1，且仍弱于 --fg-tertiary 保住灰态层次）。 */
+  --fg-disabled: rgba(41, 37, 54, 0.62);
 
   --border-default: rgba(41, 37, 54, 0.09);
   --border-strong: rgba(41, 37, 54, 0.16);

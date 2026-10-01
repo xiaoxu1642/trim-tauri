@@ -26,18 +26,20 @@
 // 
 // ---- 分域文件（已废弃，审查 F5）----
 // 早期并行迁移曾把域专属映射拆在 tools/ps-map/<域>.mjs；S3 收敛后各域文件已删除，
-// MAPPING 直接内联在本文件（现存 2 项）。不要再按旧注释去找分域文件。
+// MAPPING 直接内联在本文件（项数以 MAPPING 实际内容为准，注释不写数量——v2-R2 口径纪律）。
+// 不要再按旧注释去找分域文件。
 
 export { ORIGIN } from './ps-origin.mjs';
 import { ORIGIN } from './ps-origin.mjs';
 
 // R1（2026-10-01）去 PowerShell 化：cm_icons 已退役 —— 右键菜单 CLSID 图标改走原生
 // `ExtractIconExW`（engine/shellicon.rs），实机对拍与 .NET ExtractAssociatedIcon 像素和相等。
-// 现存 1 项：optimizer_build（WMI 还原点哨兵模板，仅作 provenance 哨兵保留）。
+// 现存仅 optimizer_build（WMI 还原点哨兵模板，仅作 provenance 哨兵保留）。
 //
 // v2-R2 口径纪律：note 会随 PROVENANCE 头写进 .ps1 产物，因此**禁止在 note 里写数量**。
-// 审查 v2-F14 当年把「40 个优化项」订正成「44 个」，而 44 随后又漂了（现算正向是 43 项）——
-// 把一次订正写成第二个硬编码，等于把同一个错误再埋一遍。数量一律看
+// 审查 v2-F14 当年把「40 个优化项」订正成「44 个」，而 44 随后又漂了——
+// 把一次订正写成第二个硬编码，等于把同一个错误再埋一遍（L3 2026-10-01 NF-B1：本注释
+// 曾又写死「43 项」并再次漂移，已删）。数量一律看
 // `node tools/count-ps-steps.mjs`（正向/恢复分账）或 `data_layer_coverage_report`。
 export const MAPPING = [
   { name: 'optimizer_build', js: `${ORIGIN}/src/scripts-powershell/optimizer-scripts.js`, call: 'buildScript', args: [[{ __trim_sentinel__: true }]], ps1: 'optimizer_build.ps1', note: '优化项执行脚本（哨兵 steps；含 pwsh 步骤的优化项数量一律由 tools/count-ps-steps.mjs 现算，本行不写数字）', noRun: '会改注册表/服务/系统设置，行为层豁免' },

@@ -125,10 +125,10 @@
     }
 
     // 通知主窗口刷新文件列表
-    // 审查 v2-F17：`preview:image-deleted` 是 fire-and-forget 通道，主窗没刷新时渲染层
-    // 原本完全无感 —— readme:56 承诺的「删掉后主窗口文件列表实时同步」就这样假成立。
+    // 审查 v2-F17 → F17 闭环（L3 2026-10-01）：回执链已补全——Rust 侧
+    // preview_image_deleted 改 fail-loud（主窗缺席/emit 失败返回 Err），
+    // 本窗拿到 false（而非旧的恒 true）即如实提示；主窗刷新环节自身失败由主窗 toast 显性。
     // 本窗的 toast 出口是文件信息条，同步失败时如实说一句，不再装作已经同步。
-    // 真回执（改走 invoke）要动 CHANNEL_MAP/SEND_MAP + Rust 注册三层，单独立项。
     if (window.api?.previewWindow?.notifyDeleted) {
       const sent = window.api.previewWindow.notifyDeleted(fileData.path);
       if (sent && typeof sent.then === 'function') {

@@ -115,8 +115,15 @@ pub fn preview_image_deleted<R: tauri::Runtime>(
 ) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
     let file_path = path.unwrap_or(Value::Null);
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        let _ = main.emit(EVENT_DELETED, file_path);
+    // F17 闭环（L3 2026-10-01）：交付必须真回执 —— 旧实现主窗缺席时不发事件、emit 失败
+    // 被 `let _ =` 吞掉，却仍返回 success:true，预览窗的「同步失败」提示永远不触发，
+    // readme「不会静默假装已同步」的承诺是假成立。改 fail-loud：Err 使 sendChannel
+    // 的布尔回执落 false，预览窗如实提示用户手动刷新。
+    match app.get_webview_window(MAIN_LABEL) {
+        Some(main) => main
+            .emit(EVENT_DELETED, file_path)
+            .map_err(|e| format!("向主窗口发送删除同步事件失败: {e}"))?,
+        None => return Err("主窗口不存在（可能已关闭），无法同步文件列表".into()),
     }
     Ok(json!({ "success": true }))
 }

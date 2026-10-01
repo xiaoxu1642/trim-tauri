@@ -67,16 +67,9 @@
   function escapeAttr(s) { return window.ds.escAttr(s); }
   function escapeHtml(text) { return window.ds.esc(text); }
 
-  // 独立窗口的轻量提示（写入底部全局提示行）
-  function toast(type, message) {
-    const host = $('mwGlobalHint');
-    if (!host) return;
-    host.textContent = message || '';
-    host.style.color = type === 'error' ? 'var(--danger)'
-      : type === 'success' ? 'var(--success)'
-        : type === 'warning' ? 'var(--warning)' : 'var(--fg-tertiary)';
-    if (message) setTimeout(() => { if (host.textContent === message) host.textContent = ''; }, 5000);
-  }
+  // 独立窗口的轻量提示 —— NEW-6（L3 2026-10-01）收敛：实现统一在 scripts/sub-toast.js
+  // （子窗不加载 app.js，window.app 不存在），此处仅薄委托。
+  function toast(type, message) { window.subToast?.hintLine('mwGlobalHint', type, message); }
 
   function stateBadge(key) {
     const cfg = models[key] || {};

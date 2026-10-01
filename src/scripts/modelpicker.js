@@ -161,6 +161,13 @@
             window.app?.toast('error', '保存失败: ' + e.message);
           }
         });
+      }).catch((e) => {
+        // NEW-4（L3 2026-10-01）：设置加载/弹窗渲染链失败必须结算 open() 的 Promise，
+        // 否则调用方 await 永久挂起（「点了没反应」）；此时弹窗可能尚未创建，
+        // 按「未切换」结算并显性留痕。
+        window.app?.log?.('warn', '模型选择弹窗打开失败: ' + ((e && e.message) || e));
+        pickerCtrl = null;
+        if (openResolve) { openResolve(false); openResolve = null; }
       });
     });
   }

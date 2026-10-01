@@ -1305,12 +1305,12 @@
   async function offerTrashRetry(failures) {
     try {
       const total = failures.reduce((s, f) => s + (Number(f.size) || 0), 0);
-      const ok = await window.app?.confirmDanger({
-        title: '部分项目无法移入回收站',
-        message: `有 ${failures.length} 项（共 ${formatSize(total)}）无法移入回收站（回收站可能已满或已禁用）。\n是否改为永久删除？`,
-        confirmText: '永久删除',
-        dangerHint: '永久删除不可恢复，文件不会进入回收站。'
-      });
+      const ok = await window.app?.confirmDanger(
+        '部分项目无法移入回收站',
+        `有 ${failures.length} 项（共 ${formatSize(total)}）无法移入回收站（回收站可能已满或已禁用）。\n是否改为永久删除？`,
+        '永久删除', '取消',
+        '永久删除不可恢复，文件不会进入回收站。'
+      );
       if (!ok) return;
       const resp = await window.api?.cleanup?.retryFailedDelete();
       if (resp && resp.success) {
@@ -1352,21 +1352,30 @@
   // 图片预览窗口删除图片后，同步清理本页数据与扫描结果并刷新
   function initPreviewSync() {
     window.api?.previewWindow?.onImageDeleted?.((filePath) => {
-      if (!filePath) return;
-      for (const [id, data] of fileCleanData.entries()) {
-        if (!data || !Array.isArray(data.files)) continue;
-        const idx = data.files.findIndex(f => f.path === filePath);
-        if (idx !== -1) {
-          const removed = data.files[idx];
-          data.files.splice(idx, 1);
-          data.totalSize = Math.max(0, (data.totalSize || 0) - (removed.size || 0));
-          const sr = scanResults.get(id);
-          if (sr) sr.size = Math.max(0, (sr.size || 0) - (removed.size || 0));
-          break;
+      // F17 闭环（L3 2026-10-01）：同步链最后一环显性化 —— 事件送达但本页刷新自身
+      // 失败（渲染异常）时必须可见，否则「实时同步」承诺在这一环静默失效。
+      // 交付侧回执由 preview_image_deleted fail-loud 承担（主窗缺席/emit 失败 → Err
+      // → 预览窗 toast），这里兜住渲染侧；失败可见，用户可手动重扫兜底。
+      try {
+        if (!filePath) return;
+        for (const [id, data] of fileCleanData.entries()) {
+          if (!data || !Array.isArray(data.files)) continue;
+          const idx = data.files.findIndex(f => f.path === filePath);
+          if (idx !== -1) {
+            const removed = data.files[idx];
+            data.files.splice(idx, 1);
+            data.totalSize = Math.max(0, (data.totalSize || 0) - (removed.size || 0));
+            const sr = scanResults.get(id);
+            if (sr) sr.size = Math.max(0, (sr.size || 0) - (removed.size || 0));
+            break;
+          }
         }
+        renderCategoryList();
+        updateUI();
+      } catch (e) {
+        window.app?.log?.('error', '预览窗删除同步刷新失败: ' + ((e && e.message) || e));
+        window.app?.toast('error', '主窗口列表同步失败，请手动重新扫描');
       }
-      renderCategoryList();
-      updateUI();
     });
   }
 

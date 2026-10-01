@@ -235,7 +235,10 @@
   // pathbinding 放这里是因为 cleanup.js 的 QQ/微信文件清理要读它的路径配置。
   function scheduleIdleLoads() {
     const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1000));
-    idle(() => { IDLE_SCRIPTS.forEach((src) => loadScript(src).then(() => initModuleOf(src))); });
+    idle(() => { IDLE_SCRIPTS.forEach((src) => loadScript(src).then(() => initModuleOf(src)).catch((e) => {
+      // NEW-4（L3 2026-10-01）：空闲预取脚本加载失败必须留痕——模块不 init 且无声 = 「功能消失」无从排查
+      window.app?.log?.('warn', '空闲脚本加载失败 ' + src + ': ' + ((e && e.message) || e));
+    })); });
   }
 
   // 路由
@@ -380,13 +383,30 @@
 
   // 高风险操作语义化入口（规范：高风险清理项、内存深度清理、高危优化项、
   // 删除类操作必须红色二次确认）。新增高危确认一律走这里，避免遗漏 danger 标记。
+  // NEW-1 归一兜底：首参误传单对象（L3 审查 2026-10-01 回归形态）时按字段还原为位置参数，
+  // 防止对象被当 title 渲染成 "[object Object]"、message 与「不可恢复」警示整段丢失；
+  // 调用形态回归由 tools/check-confirm-danger.mjs 静态拦截，这里是运行时最后防线。
   function confirmDanger(title, message, confirmText = '确认', cancelText = '取消', dangerHint = '') {
+    if (title && typeof title === 'object' && !Array.isArray(title)) {
+      const o = title;
+      return confirmDanger(o.title, o.message,
+        o.confirmText != null ? o.confirmText : confirmText,
+        o.cancelText != null ? o.cancelText : cancelText,
+        o.dangerHint != null ? o.dangerHint : dangerHint);
+    }
     return confirm(title, message, confirmText, cancelText, { danger: true, dangerHint });
   }
 
   // D10：中风险操作语义化入口（黄色确认）。中风险清理项勾选清理前的二次确认，
-  // 与高风险红色确认分级，视觉与文案均低一档。
+  // 与高风险红色确认分级，视觉与文案均低一档。归一兜底同 confirmDanger（NEW-1）。
   function confirmWarning(title, message, confirmText = '确认', cancelText = '取消', warningHint = '') {
+    if (title && typeof title === 'object' && !Array.isArray(title)) {
+      const o = title;
+      return confirmWarning(o.title, o.message,
+        o.confirmText != null ? o.confirmText : confirmText,
+        o.cancelText != null ? o.cancelText : cancelText,
+        o.warningHint != null ? o.warningHint : warningHint);
+    }
     return confirm(title, message, confirmText, cancelText, { danger: false, warning: true, warningHint });
   }
 

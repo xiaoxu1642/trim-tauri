@@ -386,6 +386,11 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
                 );
             }
         }
+        // 技术债 T2（v2 审查，2026-10-01 登记维持）：本行与 spawn 后的 `= Some(task)` 存在
+        // 理论乱序 —— 若下载在本行执行前就瞬时完成（微秒级，实测不可达），此处置 None 会被
+        // Some(已完成句柄) 覆盖 → `is_some()` 守卫误判「下载中」。干净修法需 JoinHandle 终态
+        // 判活（tauri 2.11 的 JoinHandle 无 is_finished，已查证）或显式 DownloadState 枚举，
+        // 随统一出口重构一并带走；现实兜底是 updater:cancel-download 的 take() 会清掉死句柄，可自愈。
         *lock(&DOWNLOAD_TASK) = None;
     });
     *lock(&DOWNLOAD_TASK) = Some(task);

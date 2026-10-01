@@ -47,28 +47,9 @@
   // 审查 PE-1（2026-09-15）：独立窗口未加载 app.js/modal.js（见 peripheral-window.html 脚本清单），
   // 原实现 window.app?.toast 与 window.modal?.toast 两条分支都不可能命中，且 window.modal 本无 toast 方法
   // → 8 处调用全部静默，失败路径（未提权写 HKLM）与输入校验守卫完全没有反馈。
-  // 照 models-window.js 范式自建窗口内 DOM 提示，复用 main.css 既有的 .toast-container / .toast 件。
-  function toast(type, msg) {
-    if (!msg) return;
-    let host = document.getElementById('periToastHost');
-    if (!host) {
-      host = document.createElement('div');
-      host.id = 'periToastHost';
-      host.className = 'toast-container';
-      document.body.appendChild(host);
-    }
-    const el = document.createElement('div');
-    el.className = 'toast ' + (['success', 'error', 'warning', 'info'].includes(type) ? type : 'info');
-    const text = document.createElement('div');
-    text.className = 'toast-message';
-    text.textContent = String(msg);
-    el.appendChild(text);
-    host.appendChild(el);
-    setTimeout(() => {
-      el.classList.add('removing');
-      setTimeout(() => el.remove(), 300);
-    }, 4000);
-  }
+  // NEW-6（L3 2026-10-01）收敛：堆叠形态实现移入 scripts/sub-toast.js（stack 形态，
+  // 宿主容器 id 统一 subToastHost），此处仅薄委托；行为与原实现一致。
+  function toast(type, msg) { window.subToast?.stack(type, msg); }
 
   /**
    * 需要管理员权限时的统一出口（审查 M3）。

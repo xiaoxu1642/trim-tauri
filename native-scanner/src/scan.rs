@@ -1282,6 +1282,10 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
 
 // 回收站删除：SHFileOperationW + FOF_ALLOWUNDO（shell32）。
 // 手工声明 extern 绑定与结构体，避免为单一 API 引入 windows/winapi 依赖。
+// 技术债 T6 后半（v2 审查，2026-10-01 登记维持）：SHFileOperationW 受 MAX_PATH 限制，
+// >260 长路径删除会失败（失败以 Err 返回给调用方，非静默吞）；彻底修法是 IFileOperation
+// COM 重写，随统一出口重构一并带走。前半「递归深度无上限」已由 walk_level 的
+// MAX_WALK_DEPTH 收口（v2-D5）。
 #[cfg(windows)]
 /// 手写 SHFileOperationW（只进回收站）。`pub` 供 Tauri 侧清理执行链复用
 /// （cleanup:execute 的 toRecycle 分支 / D 批删除链）——三端同源的回收站语义，避免各写一份。

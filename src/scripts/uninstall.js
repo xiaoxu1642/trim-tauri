@@ -185,7 +185,7 @@
         const url = await fetchIcon(app);
         cell.dataset.loaded = '1';
         cell.innerHTML = url
-          ? `<img src="${url}" alt="" draggable="false">`
+          ? `<img src="${window.ds.escAttr(url)}" alt="" draggable="false">`
           : '<span class="un-icon-fallback">▣</span>';
       }
     };

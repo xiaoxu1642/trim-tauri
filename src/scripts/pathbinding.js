@@ -505,7 +505,11 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
           renderBgList(ap2);
         });
       });
-    });
+      }).catch((e) => {
+        // NEW-4（L3 2026-10-01）：背景图列表 IPC 失败必须显性留痕，不能静默空白
+        window.app?.log?.('warn', '背景图列表加载失败: ' + ((e && e.message) || e));
+        window.app?.toast?.('error', '背景图列表加载失败');
+      });
     if (currentRow) currentRow.style.display = ap.bgPath ? 'flex' : 'none';
     if (thumb && ap.bgPath) thumb.src = toImgUrl(ap.bgPath);
   }

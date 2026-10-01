@@ -42,6 +42,9 @@ fn random_suffix() -> String {
 }
 
 /// 原子写文件：temp（同目录）→ fsync → rename 覆盖；失败清理临时件
+/// 技术债 T5（v2 审查，2026-10-01 登记维持）：未对父目录 fsync——断电极端场景下 rename
+/// 可能不落目录项。Windows 上 std 打不开目录句柄（需 FILE_FLAG_BACKUP_SEMANTICS 旗标，
+/// std::fs 不提供），补丁做不成且收益有限，刻意不加；切原生句柄 / IFileOperation 时可一并补。
 pub fn atomic_write_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or_else(|| "无效路径".to_string())?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
