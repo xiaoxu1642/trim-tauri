@@ -150,6 +150,14 @@ features = [
     # 属性级读取（IWbemClassObject::Get）要 VARIANT；spike 阶段先用 GetObjectText，
     # 但类型签名引用该模块，feature 不开则 Wmi 侧本身编不过。
     "Win32_System_Variant",
+    # v2-R5 / A3 PnP 设备原生侧（engine::pnp 只读 spike）：
+    # Devices_DeviceAndDriverInstallation = CM_Get_Device_ID_List* / CM_Locate_DevNodeW /
+    # CM_Get_DevNode_Status / CM_Get_DevNode_PropertyW；
+    # Devices_Properties = DEVPKEY_Device_FriendlyName 与 DEVPROPTYPE
+    # （0.61 里 DEVPROPKEY 在 Foundation、DEVPROPTYPE 在 Properties，不是一个命名空间）。
+    # 依赖准入见 docs/Trim-111项目全量对比与去PowerShell原生落地-2026-10-01-v2.md §7
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
 ]
 
 [profile.dev]

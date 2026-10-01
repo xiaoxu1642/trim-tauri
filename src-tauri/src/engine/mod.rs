@@ -10,6 +10,8 @@ pub mod log;
 pub mod native;
 pub mod optimization_state;
 pub mod paths;
+/// A3 PnP 设备原生侧（只读 spike，未接任何 IPC 命令）
+pub mod pnp;
 pub mod protect;
 pub mod reg_backup;
 pub mod restore_pack;
