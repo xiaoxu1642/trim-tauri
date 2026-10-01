@@ -308,11 +308,10 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::preview::preview_open_window,
         commands::preview::preview_close_window,
         commands::preview::preview_image_deleted,
-        // ---- B 批：pwsh 运行时 / runtimes / netcheck / diskbench ----
-        commands::pwshruntime::pwsh_status,
-        // B11（2026-09-26）：`pwsh_prepare` 已整链摘除 —— 零调用方，且 Tauri 侧根本没有
-        // 内置运行时解压链可准备（pwshruntime.rs 头部自陈「不存在 extracting 态」），
-        // 它做的事与 `pwsh_status` 内的候选链解析完全重复。
+        // ---- B 批：runtimes / netcheck / diskbench ----
+        // R1（2026-10-01）：`pwsh_status` 随整条 PowerShell 7 链退役 —— 右键图标改原生取图后
+        // 本应用不再需要用户自装 PS7，「探测候选链并回报状态」这件事失去了对象。
+        // （更早的 B11 已摘除 `pwsh_prepare`：零调用方 + 无内置解压链可准备。）
         commands::runtimes::runtimes_collect,
         commands::runtimes::runtimes_install,
         commands::netcheck::netcheck_collect,

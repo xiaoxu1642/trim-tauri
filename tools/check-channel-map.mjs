@@ -56,6 +56,7 @@ const PROBES = ['debug_data_dirs'];
 const RETIRED = {
   'settings:save': 'v2-F4（2026-09-26）：零调用方 + 无 UI 面 + 写入面在 models:save，整链摘除',
   'pwsh:prepare': 'v2-M15/B11（2026-09-26）：D4 孤儿，且 Tauri 轨无内置运行时可准备，与 pwsh:status 完全重复',
+  'pwsh:status': 'v2-R1（2026-10-01）：右键图标改原生 ExtractIconExW 后，PS7 候选链与 pwshruntime.rs 整条退役，本应用不再启动 pwsh.exe',
   // D4 基线清零（2026-09-28，用户拍板「零引用功能全部清除」）：六条孤儿整链摘除
   // （命令 fn + lib.rs 注册 + CHANNEL_MAP + api 包装器一并删除；shutdown:begin/complete
   // 保留为刻意登记的扩展点，见 D4_ORPHANS）

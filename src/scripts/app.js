@@ -887,10 +887,6 @@
     // 加载应用信息
     loadAppInfo();
 
-    // 内置 PowerShell 7 运行时状态反馈（v3.3.x）：后台解压期间给「正在准备运行环境」提示，
-    // 完成后一次性收尾；用户已自装/已就绪时进来即 ready，不弹成功提示避免每次启动噪音。
-    initPwshFeedback();
-
     // 初始化各模块
     // v3.7.0 议题五：只初始化首屏已加载的模块；其余改到 ensurePageScripts 加载后按需 init。
     // 审查 K3：这四个也走 initModuleByName —— 它们同样在 MODULES_NEEDING_INIT 里，
@@ -927,27 +923,6 @@
 
     // 暴露给其它模块（须在页面模块启动逻辑之前，保证其可调用 app 能力）
     window.app = { toast, confirm, confirmDanger, confirmWarning, showPreviewModeBanner, log, switchPage, loadAppInfo, requestElevation, registerToast, unregisterToast, getState: () => appState };
-
-    // 监听 pwsh 运行时状态：失败时一次性提示（就绪不弹，避免每次启动噪音）。
-    // B11 订正：原先这里处理 'extracting'（解压中）态，但 Tauri 轨没有随包解压链
-    // （pwshruntime.rs 头部自陈「不存在 extracting 态」），该分支从未到达过。
-    function initPwshFeedback() {
-      try {
-        const api = window.api?.pwsh;
-        if (!api || typeof api.onStatus !== 'function') return;
-        let reported = false; // 同一次失败只报一次，避免重复弹窗
-        const apply = (s) => {
-          if (!s || typeof s.status !== 'string') return;
-          if (s.status === 'error' && !reported) {
-            reported = true;
-            toast('error', s.message || '未找到 PowerShell 7，含 pwsh 步骤的优化项不可用', 5000);
-          }
-        };
-        const unsubscribe = api.onStatus(apply);
-        api.getStatus().then((r) => { try { if (r && r.success && r.data) apply(r.data); } catch (_) {} }).catch(() => {});
-        window.addEventListener('beforeunload', () => { try { unsubscribe(); } catch (_) {} });
-      } catch (_) { /* 反馈属增强，失败不阻断页面 */ }
-    }
 
     // 初始加载：恢复上次活跃页（窗口状态记忆），无记录则默认系统概览
     const lastPage = (() => { try { return localStorage.getItem(ACTIVE_PAGE_KEY); } catch (e) { return null; } })();

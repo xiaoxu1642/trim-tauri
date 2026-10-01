@@ -94,10 +94,9 @@
     'cleanup:check-locked': 'cleanup_check_locked',
     'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
     'cleanup:item-detail': 'cleanup_item_detail',
-    // runtimes / pwsh
+    // runtimes
     'runtimes:collect': 'runtimes_collect',
     'runtimes:install': 'runtimes_install',
-    'pwsh:status': 'pwsh_status',
     // finder（4）
     'finder:scan': 'finder_scan',
     'finder:delete': 'finder_delete',
@@ -452,11 +451,8 @@
       onProgress: function (callback) { return onEvent('runtimes:install-progress', callback); }
     },
 
-    pwsh: {
-      getStatus: function () { return invokeChannel('pwsh:status'); },
-      onStatus: function (callback) { return onEvent('pwsh:status', callback); }
-      // B11：`prepare` 已随 pwsh:prepare 通道整链摘除（零调用方 + 无内置运行时可准备）
-    },
+    // R1（2026-10-01）：`pwsh` 命名空间随 pwsh:status 通道整链摘除 —— 右键图标改原生取图后
+    // 本应用不再有 PowerShell 7 使用者，「探测 PS7 并回报状态」失去了对象。
 
     finder: {
       scan: function (scanType, opts) {

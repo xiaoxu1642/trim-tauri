@@ -19,7 +19,6 @@ pub mod netcheck;
 pub mod diskbench;
 pub mod preview;
 pub mod processmanager;
-pub mod pwshruntime;
 pub mod runtimes;
 // ---- C 批（安全与规则）----
 pub mod cleanup;

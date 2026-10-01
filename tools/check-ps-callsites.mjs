@@ -37,14 +37,10 @@ const THROAT = 'src-tauri/src/pwsh/mod.rs';
  * `run_inbox_ps` 自 R0 起是 pwsh 模块私有、编译器已经挡住外部调用；列在这里是为了它哪天
  * 被重新 `pub` 出来时门禁先响，而不是留给下一个人靠肉眼发现。
  */
-const PS_EXEC_SITES = [
-  {
-    file: 'src-tauri/src/commands/contextmenu.rs',
-    anchor: 'fn run_ps | let r = pwsh::run_file(&path, timeout, diag);',
-    reason: '右键图标链走外部 PowerShell 7（run_file 内含 Job Object 与超时）',
-    owner: 'R1 归零目标：改用 engine/shellicon.rs 原生取图标后整条删除',
-  },
-];
+const PS_EXEC_SITES = [];
+// 表空不等于断言空：R1 之后全仓**不允许**有任何咽喉外的低层执行器调用点，
+// 上面 contextmenu.rs 那条（右键图标走 PowerShell 7）已随原生 ExtractIconExW 落地删除。
+// 谁重新 `pub` 出 run_file* 并调用，pool 就会非空而登记表为空 → B 红。
 
 /**
  * C. 统一入口 `pwsh::run_inbox_script` 的生产调用点。

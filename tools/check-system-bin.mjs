@@ -54,18 +54,8 @@ const PINNED = [
 const RAW_EXEMPT = [
   {
     file: 'src-tauri/src/pwsh/mod.rs',
-    anchor: 'system_tool("where.exe")',
-    reason: 'pwsh7 探测 where.exe（自带 CREATE_NO_WINDOW flags，历史调用点）',
-  },
-  {
-    file: 'src-tauri/src/pwsh/mod.rs',
-    anchor: 'let mut child = match Command::new(exe)',
-    reason: 'is_pwsh7_executable 探测：pwsh7 子进程树纪律需要 Job Object 前的裸构造（自带 CREATE_NO_WINDOW flags）',
-  },
-  {
-    file: 'src-tauri/src/pwsh/mod.rs',
     anchor: 'let mut child = Command::new(exe)',
-    reason: 'run_with_exe：pwsh/inbox PS 执行层（自带 CREATE_NO_WINDOW flags + Job Object）',
+    reason: 'run_with_exe：收件箱 PowerShell 5.1 执行层（自带 CREATE_NO_WINDOW flags + Job Object）',
   },
   {
     file: 'src-tauri/src/commands/quickcmds.rs',

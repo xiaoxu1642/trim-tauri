@@ -14,13 +14,11 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 
-use crate::engine::{delete_manifest, guard, log, native, paths, protect, sysinfo};
-use crate::pwsh;
+use crate::engine::{delete_manifest, guard, log, native, paths, protect, shellicon, sysinfo};
 
 // open-in-regedit 纯原生实现所需（审计 F-05：原内联 PS 改 Win32 等价，见 open_regedit_native）
 use windows::core::{BOOL, PCWSTR};
@@ -28,13 +26,6 @@ use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_SHOWNORMAL, WM_CLOSE,
 };
-
-// ==================== 外置 PS 脚本（编译期嵌入，禁止手写） ====================
-const PS_ICONS: &str = include_str!("../../ps/cm_icons.ps1");
-
-/// 生成器以 `backup(["__TRIM_ITEMS_JSON__"])` 抽取，存活于脚本体内的字面量
-/// 是 `["__TRIM_ITEMS_JSON__"]`（含数组括号），替换值本身即完整 JSON 数组。
-const ITEMS_SENTINEL: &str = "[\"__TRIM_ITEMS_JSON__\"]";
 
 /// 窗口快照：item.id -> 扫描项（完整字段）
 static SNAPSHOTS: Mutex<Option<HashMap<String, HashMap<String, Value>>>> =
@@ -194,28 +185,39 @@ fn restore_admin_gate(is_admin: bool) -> Option<Value> {
     })
 }
 
-fn run_ps(script: &str, timeout: Duration, diag: Option<&str>) -> Result<crate::pwsh::PsOutput, String> {
-    let path = pwsh::write_temp_script(script, ".ps1")?;
-    let r = pwsh::run_file(&path, timeout, diag);
-    let _ = std::fs::remove_file(&path);
-    r
-}
-
-/// 把 items 序列化进 PS 模板（与 JS serializeItems 同口径：JSON + 单引号翻倍）
-fn inject_items(template: &str, items: &[Value]) -> String {
-    let json = serde_json::to_string(items).unwrap_or_else(|_| "[]".into());
-    let escaped = json.replace('\'', "''");
-    template.replace(ITEMS_SENTINEL, &escaped)
-}
-
-fn parse_last_json(stdout: &str) -> Option<Value> {
-    let line = stdout
-        .trim()
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| l.starts_with('{') || l.starts_with('['))
-        .next_back()?;
-    serde_json::from_str(line).ok()
+/// CLSID → `InprocServer32` 默认值指向的 dll/exe（R1 去 PS 化，2026-10-01）。
+///
+/// 三个视图与旧 `cm_icons.ps1` 同一批次、同一次序，差别只有一处且是放宽：旧脚本一旦读到
+/// 非空值就 `break`，路径不存在则该 CLSID 直接无图标；这里继续试下一个视图。
+/// 环境变量展开走 `cleanup_scan::expand_env_path`（扫描/执行侧共用的那一份，不再各自实现）。
+fn clsid_inproc_server(clsid: &str) -> Option<std::path::PathBuf> {
+    let hkcr = native::hive_hkcr();
+    let hklm = native::hive_hklm();
+    let views = [
+        (hkcr, format!(r"CLSID\{clsid}\InprocServer32")),
+        (hkcr, format!(r"WOW6432Node\CLSID\{clsid}\InprocServer32")),
+        (
+            hklm,
+            format!(r"SOFTWARE\Classes\Wow6432Node\CLSID\{clsid}\InprocServer32"),
+        ),
+    ];
+    for (hive, subkey) in views {
+        // 默认值名是空串；EXPAND_SZ 由 read_reg_value_text 的展平口径给出
+        let Some((_, raw)) = native::read_reg_value_text(hive, &subkey, "") else {
+            continue;
+        };
+        // 旧脚本口径：Trim 再去掉首尾成对引号（`%ProgramFiles%\x.dll` 常被带引号写入）
+        let dll = raw.trim().trim_matches('"');
+        if dll.is_empty() {
+            continue;
+        }
+        let expanded = trim_finder::cleanup_scan::expand_env_path(dll);
+        let path = std::path::PathBuf::from(expanded.trim());
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 // ==================== IPC ====================
@@ -660,18 +662,23 @@ pub async fn contextmenu_icons<R: Runtime>(
     if icon_items.is_empty() {
         return json!({ "success": true, "data": {} });
     }
-    let script = inject_items(PS_ICONS, &icon_items);
-    // 图标提取失败不影响主流程，恒返回 success
-    if let Ok(out) = run_ps(&script, Duration::from_secs(30), None) {
-        if out.code == 0 {
-            if let Some(data) = parse_last_json(&out.stdout) {
-                if data.is_object() {
-                    return json!({ "success": true, "data": data });
-                }
-            }
+    // R1（2026-10-01）：原走 cm_icons.ps1 + `[System.Drawing.Icon]::ExtractAssociatedIcon`，
+    // 那是本域最后一个外部 PowerShell 入口。换成原生 `ExtractIconExW` 索引 0 ——
+    // 三件系统 PE 实机对拍像素和与 .NET 完全相等（见 shellicon 的 live_probe 注释）。
+    // 图标提取失败不影响主流程，恒返回 success（与旧行为一致：缺图只是没图）。
+    let mut data = serde_json::Map::new();
+    for it in &icon_items {
+        let Some(clsid) = it.get("clsid").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(server) = clsid_inproc_server(clsid) else {
+            continue;
+        };
+        if let Ok(url) = shellicon::first_icon_data_url(&server) {
+            data.insert(clsid.to_string(), json!(url));
         }
     }
-    json!({ "success": true, "data": {} })
+    json!({ "success": true, "data": Value::Object(data) })
 }
 
 fn canon_reg_key(s: &str) -> String {

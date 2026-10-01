@@ -11,8 +11,9 @@
 //!   驱动 `cleanup:scan-progress`）。失败/非 0 退出如实返回错误——旧「回退 PS 引擎
 //!   （`ps/cleanup_scan.ps1` 模板替换后执行）」分支已随脚本删除退役；本段注释曾长期
 //!   与代码事实不符（2026-09-25 审计修正）。
-//! - **PS 残留**：`src-tauri/ps/` 现仅余 `cm_icons.ps1` 与 `optimizer_build.ps1`，
-//!   由 `tools/check-ps-extraction.mjs` 继续对拍（check-ps-substitution 已随 S3 退役，D-2）。
+//! - **PS 残留**：`src-tauri/ps/` 现仅余哨兵模板 `optimizer_build.ps1`（R1，2026-10-01：
+//!   `cm_icons.ps1` 随右键图标改原生 `ExtractIconExW` 退役），由
+//!   `tools/check-ps-extraction.mjs` 继续对拍（check-ps-substitution 已随 S3 退役，D-2）。
 //!   cleanup 域自身的模板替换链已随脚本删除一并退役。
 //! - **快照槽**：扫描快照 / 回收站失败项 / 占用检测 PID 白名单全部按 `window.label()` 分槽
 //!   （Electron 按 `event.sender.id`），执行与结束进程只认本槽内容。
