@@ -1752,16 +1752,6 @@ pub async fn cleanup_custom_execute<R: tauri::Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    // P1-B4：观察档同样挡住自定义目录执行（自定义目录虽走回收站，但"只报告不执行"
-    // 是档位语义本身，不能按删除方式挑豁免）
-    if cleanup_mode() == "observe" {
-        log::write_log("info", "cleanup_custom_execute 被观察模式挡下：未执行任何删除");
-        return json!({
-            "success": false,
-            "blocked": "observe",
-            "message": "观察模式开启中：本次未执行任何删除。"
-        });
-    }
     let Some(list) = targets.as_ref().and_then(|v| v.as_array()) else {
         return json!({ "success": false, "message": "目标参数无效" });
     };
@@ -2267,67 +2257,6 @@ fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, ca
     json!({ "success": true, "data": data })
 }
 
-// ==================== P1-B4 档位级观察模式（2026-10-01 拍板） ====================
-// 检测与动作分离：observe 档下 cleanup:execute / cleanup:custom-execute 在**命令层**
-// 即被挡下——引擎函数、快照校验、任何删除调用都不被触达。扫描（cleanup:scan）不受
-// 影响：它本身就是「若执行会删什么」的整批回放。
-// 与 v3.3.0「常规清理永久删」裁定的关系：观察模式是**收紧**——连那一步永久删也不会
-// 发生——不是对永久删的放宽或绕过；档位只影响"执不执行"，永远不改变"怎么删"。
-
-const CLEANUP_MODE_FILE: &str = "cleanup-mode.json";
-
-fn cleanup_mode_path() -> std::path::PathBuf {
-    crate::engine::paths::app_data_dir().join(CLEANUP_MODE_FILE)
-}
-
-/// 档位归一（纯函数，可测）：只有 "observe" 是观察档，其余一切输入（缺省 / 损坏 /
-/// 未知值）都落在 "act"。缺省必须可用——不能因为一个坏配置文件把清理功能锁死。
-/// 与 set 侧的"非法值拒收"分工：set 拒收防止"想设 observe 拼错了却静默落回 act"，
-/// 这里兜底防的是配置文件被人手改坏。
-fn normalize_cleanup_mode(v: Option<&str>) -> &'static str {
-    match v {
-        Some("observe") => "observe",
-        _ => "act",
-    }
-}
-
-fn cleanup_mode() -> &'static str {
-    let doc = std::fs::read(cleanup_mode_path())
-        .ok()
-        .and_then(|b| serde_json::from_str::<Value>(&String::from_utf8_lossy(&b)).ok());
-    normalize_cleanup_mode(doc.as_ref().and_then(|v| v.get("mode")).and_then(Value::as_str))
-}
-
-/// cleanup:mode-get — 读当前档位（主窗档，只读）
-#[tauri::command]
-pub async fn cleanup_mode_get<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    json!({ "success": true, "data": { "mode": cleanup_mode() } })
-}
-
-/// cleanup:mode-set — 写档位（主窗档）。非法值**拒收**而不是归一：想设观察档却拼错
-/// 成别的值、然后被静默落回执行档，是这条链上唯一不可接受的失败方向。
-#[tauri::command]
-pub async fn cleanup_mode_set<R: tauri::Runtime>(
-    window: WebviewWindow<R>,
-    mode: String,
-) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    if mode != "observe" && mode != "act" {
-        return json!({ "success": false, "message": format!("未知档位 {mode}（只接受 observe / act）") });
-    }
-    let doc = json!({ "version": 1, "mode": mode });
-    if let Err(e) = crate::security::atomic_write_json(&cleanup_mode_path(), &doc) {
-        return json!({ "success": false, "message": format!("档位写入失败: {e}") });
-    }
-    log::write_log("info", &format!("清理档位已切换: {mode}"));
-    json!({ "success": true, "data": { "mode": mode } })
-}
-
 /// cleanup:scan — 扫描可清理项（纯原生引擎；进度走 `cleanup:scan-progress`）
 #[tauri::command]
 pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categories: Option<Value>) -> Value {
@@ -2395,16 +2324,6 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
 ) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
-    }
-    // P1-B4：观察档在命令层挡下——引擎函数与任何删除调用都不被触达。
-    // 回执 blocked:"observe" 供渲染层与其它失败区分（不许把"没执行"谎报成"执行了没效果"）。
-    if cleanup_mode() == "observe" {
-        log::write_log("info", "cleanup_execute 被观察模式挡下：未执行任何删除");
-        return json!({
-            "success": false,
-            "blocked": "observe",
-            "message": "观察模式开启中：本次未执行任何删除。扫描结果即「若执行会删什么」的整批回放。"
-        });
     }
     let label = window.label().to_string();
     let force = force.unwrap_or(false);
@@ -3481,18 +3400,6 @@ pub async fn cleanup_check_rules_version<R: tauri::Runtime>(window: WebviewWindo
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// P1-B4：档位归一——只有 "observe" 是观察档，缺省/损坏/未知一律落回执行档
-    /// （缺省必须可用）。而 set 侧对非法值是拒收不是归一，两侧分工不同。
-    #[test]
-    fn 观察档归一只认_observe_其余落回执行档() {
-        assert_eq!(normalize_cleanup_mode(Some("observe")), "observe");
-        assert_eq!(normalize_cleanup_mode(Some("act")), "act");
-        assert_eq!(normalize_cleanup_mode(None), "act");
-        assert_eq!(normalize_cleanup_mode(Some("")), "act");
-        assert_eq!(normalize_cleanup_mode(Some("obserb")), "act"); // 手滑打错
-        assert_eq!(normalize_cleanup_mode(Some("OBSERVE")), "act"); // 大小写敏感：档位不是宽松词表
-    }
 
     /// 发布源清单的唯一拼装口是 `release_source_urls_for`（残留库共用）。
     /// 清理库这份 const 若与它漂移（改了一个镜像、漏了另一个），在线更新会**只坏一个域**，

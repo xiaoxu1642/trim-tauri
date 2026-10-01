@@ -278,8 +278,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_pending_add,
         commands::uninstall::uninstall_pending_list,
         commands::uninstall::uninstall_pending_revoke,
-        commands::cleanup::cleanup_mode_get,
-        commands::cleanup::cleanup_mode_set,
         commands::uninstall::uninstall_residue_scan,
         commands::uninstall::uninstall_residue_execute,
         commands::uninstall::uninstall_check_residue_version,

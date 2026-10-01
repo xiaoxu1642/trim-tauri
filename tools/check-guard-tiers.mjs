@@ -105,8 +105,6 @@ const MUST_MAIN = [
   'uninstall_pending_add',
   'uninstall_pending_list',
   'uninstall_pending_revoke',
-  'cleanup_mode_get',
-  'cleanup_mode_set',
   'uninstall_residue_scan',
   'uninstall_residue_execute',
   'uninstall_check_residue_version',

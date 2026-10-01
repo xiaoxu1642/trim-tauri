@@ -91,8 +91,6 @@ const TAURI_ADDED = {
   'uninstall:pending-add': 'P1-B3（2026-10-01）：回收站失败项登记重启后删（主窗档）',
   'uninstall:pending-list': 'P1-B3（2026-10-01）：重启后删待删清单（主窗档，只读）',
   'uninstall:pending-revoke': 'P1-B3（2026-10-01）：撤回重启后删登记（主窗档）',
-  'cleanup:mode-get': 'P1-B4（2026-10-01）：观察模式档位读取（主窗档）',
-  'cleanup:mode-set': 'P1-B4（2026-10-01）：观察模式档位写入（主窗档）',
   'uninstall:report-list': 'U-6（2026-09-28）：批次报告列表（上游只写报告无查看面）',
   'uninstall:report-get': 'U-6（2026-09-28）：批次报告明细读取（同上）',
   'uninstall:dead-scan': 'M6（2026-09-28）：失效残留扫描（不依赖卸载事实的无主残留，上游无此能力）',

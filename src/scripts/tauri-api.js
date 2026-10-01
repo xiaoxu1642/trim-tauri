@@ -80,8 +80,6 @@
     'cleanup:custom-remove': 'cleanup_custom_remove',
     'cleanup:custom-scan': 'cleanup_custom_scan',
     'cleanup:custom-execute': 'cleanup_custom_execute',
-    'cleanup:mode-get': 'cleanup_mode_get',
-    'cleanup:mode-set': 'cleanup_mode_set',
     'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
     'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
     'cleanup:file-backup-list': 'cleanup_file_backup_list',
@@ -430,8 +428,6 @@
           autoRebuild: autoRebuild === true
         });
       },
-      modeGet: function () { return invokeChannel('cleanup:mode-get'); },
-      modeSet: function (mode) { return invokeChannel('cleanup:mode-set', { mode: mode }); },
       updateRules: function () { return invokeChannel('cleanup:update-rules'); },
       checkRulesVersion: function () { return invokeChannel('cleanup:check-rules-version'); },
       onRulesDownloadProgress: function (callback) { return onEvent('cleanup:rules-download-progress', callback); },

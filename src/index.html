@@ -289,11 +289,6 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
             <span>开始清理</span>
           </button>
-          <label class="toggle-switch" for="cleanupObserveToggle" data-tip="观察模式（P1-B4）：只扫描、不执行。开启后「开始清理」不会触发任何删除调用（包括常规清理的永久删），扫描结果即「若执行会删什么」的整批回放。">
-            <input type="checkbox" id="cleanupObserveToggle" />
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          </label>
-          <span class="clean-filter-hint" id="cleanupObserveHint" style="display:none">观察模式：只报告不删除</span>
           <button class="btn btn-secondary" id="btnUpdateRules" data-tip="从发布源下载最新清理规则库（数据目录规则优先于内置规则，支持版本校验与防降级）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
             <span>更新规则库</span>
