@@ -160,9 +160,33 @@ const bad = [...refs.keys()]
   .filter((n) => !defined.has(n) && !ALLOW_UNDECLARED.has(n))
   .sort();
 
-console.log(`引用面 ${refs.size} 个自定义属性；定义面 ${defined.size} 个（CSS 声明 + JS/HTML 运行时写入）`);
+// ---- 圆角 token 纪律（v2 批次 D4，2026-10-01）----
+// 为什么跟 token 门禁放一起：都是「CSS 字面值绕过设计系统」的同类纪律。
+// AGENTS 圆角档位 badge 4 / small 6 / btn 8 / medium 10 / large 14（胶囊 999 与圆 50% 除外），
+// <6px 的字面值此前散落 27 处绕开 token，收敛后禁回潮：sub-6px 一律 var(--radius-badge)，
+// 档位之间（5/7/9px 等）不得自造。CSS 圆角会被钳制到盒尺寸一半，微元素上 2/3px→badge(4px)
+// 渲染等价——这正是当年敢统一收敛的依据，回潮即红。
+const radiusBad = [];
+for (const file of cssFiles) {
+  const text = blankComments(readFileSync(file, 'utf8'));
+  const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
+  for (const m of text.matchAll(/border-radius:\s*(\d+)px/g)) {
+    const px = Number(m[1]);
+    // AGENTS：胶囊与徽章不在档位约束内——>=90px 是全仓既定的胶囊写法（999/99px），放行
+    if (px >= 90) continue;
+    if (px < 4) {
+      radiusBad.push(`${rel}:${lineOf(text, m.index)} border-radius: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
+    } else if (![4, 6, 8, 10, 14].includes(px)) {
+      radiusBad.push(`${rel}:${lineOf(text, m.index)} border-radius: ${px}px（不在档位 4/6/8/10/14）`);
+    }
+  }
+}
 
-if (!bad.length) {
+console.log(`引用面 ${refs.size} 个自定义属性；定义面 ${defined.size} 个（CSS 声明 + JS/HTML 运行时写入）`);
+console.log(`圆角纪律：${radiusBad.length ? `${radiusBad.length} 处违档` : '✓ 全部字面值落在档位或 token 上'}`);
+for (const r of radiusBad) console.log(`✗ ${r}`);
+
+if (!bad.length && !radiusBad.length) {
   console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）');
   process.exit(0);
 }
@@ -173,5 +197,5 @@ for (const name of bad) {
   console.log(`✗ ${name} 无定义 —— ${sites.length} 处引用：${sites.map((s) => s.at).join(', ')}`);
   console.log(`  ${noFallback ? `其中 ${noFallback} 处连 fallback 都没有 ⇒ 整条声明被解析器丢弃（功能静默消失）` : '全部恒吃 fallback ⇒ token 被架空'}`);
 }
-console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）`);
+console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）${radiusBad.length ? `；${radiusBad.length} 处圆角违档（v2 批次 D4）` : ''}`);
 process.exit(1);

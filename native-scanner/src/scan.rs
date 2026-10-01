@@ -61,6 +61,11 @@ pub const MAX_SCAN_ENTRIES: usize = 200_000;
 // ---- 扫描并行参数（P0 批次）----
 /// 目录级分治展开层数。再深单目录已很小，调度开销大于收益。
 const PAR_DEPTH: usize = 3;
+/// 全局递归深度天花板（v2-D5，2026-10-01 复核）。reparse 跳过只断了「绕回已访问
+/// 目录」的环，防不了病态深嵌套树把递归栈撑爆。正常磁盘目录树（含 node_modules
+/// 这类 nesting 重灾区）远达不到此深度；超过即不再下钻，stderr 留痕——stderr 不进
+/// 协议输出，不影响退出码，只给排障留证据。
+const MAX_WALK_DEPTH: usize = 64;
 /// I/O 密集场景线程上限：核数再多也不盲目拉满，避免随机寻道互相拖累。
 const MAX_IO_THREADS: usize = 8;
 /// bigfiles 心跳输出间隔：每累积多少文件输出一行 @@SCANNED:n@@。
@@ -209,6 +214,12 @@ fn walk_level(
 ) {
     // 已截断就别再花 IO 了（子孙目录继续走只会白读）
     if ctx.stopped() {
+        return;
+    }
+    // v2-D5：深度天花板在此收口——不是错误，是「这一支不再往下」的扫描边界，
+    // 与 reparse 跳过同属防环/防失控语义，只留痕不报错。
+    if depth >= MAX_WALK_DEPTH {
+        eprintln!("[trim-scanner] depth cap {MAX_WALK_DEPTH} reached at {}", dir.display());
         return;
     }
     let rd = match fs::read_dir(dir) {
@@ -1724,7 +1735,7 @@ mod tests {
         struct Cap(Mutex<Vec<String>>);
         impl Sink for Cap {
             fn item(&self, _p: &Path, line: &str) {
-                self.0.lock().unwrap().push(line.to_string());
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
             }
             fn progress(&self, _n: u64) {}
             fn scanned(&self, _n: u64) {}
@@ -1732,7 +1743,7 @@ mod tests {
         }
         let sink = Cap::default();
         analyze(&[root.to_string_lossy().to_string()], &sink);
-        let lines = sink.0.lock().unwrap().clone();
+        let lines = sink.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         let field = |line: &str, key: &str| -> Option<String> {
             let pat = format!("\"{key}\":\"");
@@ -1964,7 +1975,7 @@ mod tests {
             // 在别的线程里 panic 一次，把 Mutex 判中毒（正是 emit 里炸掉的等价形态）
             let doomed = Arc::clone(&ctx);
             let h = std::thread::spawn(move || {
-                let _g = doomed.files.lock().unwrap();
+                let _g = doomed.files.lock().unwrap_or_else(|e| e.into_inner());
                 panic!("模拟 emit 内部 panic");
             });
             assert!(h.join().is_err());

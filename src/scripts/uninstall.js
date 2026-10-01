@@ -517,7 +517,11 @@
     panel.style.display = 'block';
     box.innerHTML = '<div class="finder-empty">正在扫描三类残留（规则库 / 失效登记 / 卸载记录）…</div>';
     // U-8 感知修复：面板在长列表下方，不滚动就等于"没弹出"
-    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // 审查 L16 / v2 批次A2：CSS 的 prefers-reduced-motion 通配归零管不到 JS 传进去的
+    // scroll 选项，必须在这里自己求值——否则系统关掉动画的用户仍会被这段 smooth 滚动
+    // 推着走（与 app.js toggleNavSub 同口径）。
+    const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    panel.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
     const app = currentAppId && currentAppId !== MACHINE_APP_ID ? currentAppId : '';
     const fail = (e) => ({ success: false, message: String((e && e.message) || e) });
     const [rApp, rDead, rOrphan] = await Promise.all([

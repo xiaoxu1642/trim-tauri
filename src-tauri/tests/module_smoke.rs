@@ -298,6 +298,46 @@ fn pending_delete_channels_are_main_only() {
     }
 }
 
+/// v2-B1/B2（2026-10-01 复核批次）：pending-add 的纵深防御正例。
+/// 两条路径都在**写入任何东西之前**短路：受保护/不可归一化目标在循环内第一道闸被
+/// skip（`added=0` → 不写 PFRO、不写待删文档），超限在 spawn_blocking 之前整批拒绝；
+/// 除只读 PFRO/文档读取外零副作用，可进快速组。
+/// 向量口径（对照 protect::build_default_roots）：空串=归一化失败、裸盘符与盘符根=
+/// drive_root、`System32\config` 子树与 `C:\Windows` exact=受保护清单本体。
+#[test]
+fn pending_add_rejects_protected_paths_and_over_limit() {
+    let w = main_window();
+    let res = invoke(
+        &w,
+        "uninstall_pending_add",
+        json!({ "targets": ["", "C:", "C:\\", "C:\\Windows", "C:\\Windows\\System32\\config\\SAM"] }),
+    );
+    assert_eq!(
+        res["success"], json!(true),
+        "受保护路径应逐项 skip 而非整批失败: {res}"
+    );
+    assert_eq!(res["data"]["added"], json!(0), "受保护路径一项都不许登记: {res}");
+    let rows = res["data"]["details"].as_array().expect("details 应为数组");
+    assert_eq!(rows.len(), 5, "五个目标都应有逐项回执: {res}");
+    for r in rows {
+        assert_eq!(r["status"], json!("skip"), "受保护目标必须 skip: {r}");
+        assert!(
+            r["message"].as_str().unwrap_or("").contains("受保护路径"),
+            "skip 原因必须写明受保护路径: {r}"
+        );
+    }
+    // 单批上限：33 项 > PENDING_ADD_MAX_ITEMS(32)，整批失败且信息写明口径
+    let over: Vec<String> = (0..33)
+        .map(|i| format!("C:\\nonexistent-trim-pending-{i}.bin"))
+        .collect();
+    let res = invoke(&w, "uninstall_pending_add", json!({ "targets": over }));
+    assert_eq!(res["success"], json!(false), "超上限必须整批失败: {res}");
+    assert!(
+        common::message_of(&res).contains("32"),
+        "失败信息应写明上限口径 32: {res}"
+    );
+}
+
 /// P1-B4：观察档在命令层挡下 cleanup:execute。往返验证：设 observe → execute 必须带
 /// blocked="observe"（引擎与删除调用都不被触达）→ 设回 act → execute 继续走到快照
 /// 校验那一档（证明挡它的是观察闸，不是命令本身坏了）。

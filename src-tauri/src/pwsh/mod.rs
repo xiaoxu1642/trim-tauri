@@ -640,7 +640,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(Vec::<String>::new()));
         let s = {
             let shared = Arc::clone(&shared);
-            Box::new(move |l: &str| shared.lock().unwrap().push(l.to_string()))
+            Box::new(move |l: &str| shared.lock().unwrap_or_else(|e| e.into_inner()).push(l.to_string()))
                 as Box<dyn FnMut(&str) + Send>
         };
         let out = read_all(Some(std::io::Cursor::new(input.as_bytes())), Some(s), None);
@@ -1043,12 +1043,12 @@ mod tests {
             None,
             move |line| {
                 c.fetch_add(1, Ordering::SeqCst);
-                s.lock().unwrap().push(line.to_string());
+                s.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
             },
         );
         let _ = std::fs::remove_file(&path);
         let out = out.expect("pwsh 流式执行失败");
-        let lines = seen.lock().unwrap().clone();
+        let lines = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         assert_eq!(out.code, 0, "stderr: {}", out.stderr);
         assert_eq!(

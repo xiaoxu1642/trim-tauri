@@ -5609,6 +5609,11 @@ fn pfro_strip_deletes(entries: Vec<String>, targets: &HashSet<String>) -> Vec<St
     out
 }
 
+/// 单批登记上限：口径对齐残留执行 `RESIDUE_MAX_GROUP_ITEMS=32`。PFRO 是系统级全局队列，
+/// 登记逐条走 MoveFileExW，超大批次没有业务场景（可登记项天然来自「回收站删不掉」的少数派），
+/// 只会拉长重启阶段会话管理器的消费时间（v2-B2，2026-10-01 复核）。
+const PENDING_ADD_MAX_ITEMS: usize = 32;
+
 /// uninstall:pending-add — 把回收站失败的文件项登记为重启后删除（主窗档）。
 /// 只接受**文件**路径（PFRO 对非空目录的延迟删除并不可靠，登记了也删不掉，
 /// 与其制造"已登记=会删掉"的错觉，不如入口就拒）。
@@ -5622,6 +5627,14 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
     }
     if targets.is_empty() {
         return json!({ "success": false, "message": "没有要登记的目标" });
+    }
+    // v2-B2：单批上限在入口拦，进 spawn_blocking 之前就整批拒绝——
+    // 不给「先读 PFRO 才发现超批」的无效往返，也不留半批登记的中间态。
+    if targets.len() > PENDING_ADD_MAX_ITEMS {
+        return json!({
+            "success": false,
+            "message": format!("单批登记 {} 项超上限 {PENDING_ADD_MAX_ITEMS}，请分批登记", targets.len())
+        });
     }
     let res = tauri::async_runtime::spawn_blocking(move || {
         // 先读 PFRO：登记前必须确认能写（权限不足在这里就暴露，不要等到"登记完才发现撤不回"）
@@ -5638,6 +5651,15 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
         let mut rows: Vec<Value> = Vec::new();
         let mut added = 0usize;
         for t in &targets {
+            // v2-B1（2026-10-01 复核）：PFRO 登记是**永久删**出口（不进回收站，重启后由
+            // 会话管理器执行），受保护路径判定必须在命令体内前置——渲染层 confirmDanger
+            // 只是第一层，命令体内再判一次才与其余删除链同口径。刻意放在 is_file 之前：
+            // 空串 / 盘符根 / 受保护根下的路径无论当前存在与否都拒，不给「登记窗口期
+            // 路径状态变化」留缝，也与 protect 判定的 fail-closed 语义一致。
+            if protect::is_path_protected(t) {
+                rows.push(json!({ "target": t, "status": "skip", "message": "目标位于受保护路径（或无法归一化），拒绝登记重启后删除" }));
+                continue;
+            }
             let path = Path::new(t);
             if t.trim().is_empty() || !path.is_file() {
                 rows.push(json!({ "target": t, "status": "skip", "message": "目标不是存在的文件（目录不支持重启后删）" }));
