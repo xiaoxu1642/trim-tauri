@@ -129,22 +129,17 @@ fn finder_delete_manifest_shape() {
 }
 
 // ==================== 重 / 外呼组（默认 ignore，发布前门禁跑） ====================
-
-/// pwsh:status 形状：`success` true 且 `data.status` 是字符串。
-/// 成本：候选链探测会同步 spawn PowerShell 探测候选版本（秒级）。
-#[test]
-#[ignore = "需本机 PowerShell 7 候选链探测（同步 spawn，秒级），发布前门禁跑"]
-fn pwsh_status_shape() {
-    let w = main_window();
-    let res = invoke(&w, "pwsh_status", json!({}));
-    assert_eq!(res["success"], json!(true), "pwsh:status 应成功: {res}");
-    assert!(res["data"]["status"].is_string(), "data.status 必须是字符串: {res}");
-}
+//
+// `pwsh_status_shape` 随 v2-R1 一起删掉：PS7 通道整条摘除后 `pwsh_status` 命令不复存在，
+// 用例在 `--ignored` 里报 "Command pwsh_status not found"。默认 `cargo test` 跑不到它，
+// 所以这条只能靠发布前实跑 `#[ignore]` 抓到（AGENTS §4「照原样跑」的意义就在这）。
 
 /// memory:info 形状 + 物理内存总量 > 0。
-/// 成本：真实跑一段 PowerShell 脚本（进程外呼 + 秒级）。
+/// 成本：**已经是纯原生只读采集**（`native::memory_info`，`engine:"rust"`，无 PowerShell），
+/// 留在这里是历史归类——原先这条走 PS 脚本。不挪进快速组是为了不动这一组的分组结构；
+/// 真要挪，先确认 `spawn_blocking` 在 MockRuntime 下不引入调度依赖。
 #[test]
-#[ignore = "走真实 PowerShell 脚本读取内存信息（外呼 + 秒级），发布前门禁跑"]
+#[ignore = "读真实性能计数器（进程外 API，毫秒级），发布前门禁跑"]
 fn memory_info_reports_total() {
     let w = main_window();
     let res = invoke(&w, "memory_info", json!({}));
