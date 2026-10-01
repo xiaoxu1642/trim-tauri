@@ -1399,23 +1399,25 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
             }
         };
     log::flush_sync(); // 写注册表前刷盘
-    let Some(path_str) = path.to_str() else {
-        return json!({ "success": false, "message": "备份路径无法表示为文本" });
-    };
-    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
-        .args(["import", path_str])
-        .output();
-    let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
-    if ok {
-        log::write_log("info", &format!("cleanup 注册表备份已还原: {file}（{} 个键）", keys.len()));
+    // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。四道闸（严格解析 / 受保护面 /
+    // 封条核对 / HKLM 提权）原样在上游跑完，这里只换执行器；.reg 文本格式与封条链未动。
+    let imported = crate::engine::reg_backup::reg_import_apply(&path);
+    if let Ok(stat) = &imported {
+        log::write_log(
+            "info",
+            &format!(
+                "cleanup 注册表备份已还原: {file}（{} 个键，写入 {} 值、删除 {} 值、删键 {}）",
+                keys.len(),
+                stat.values_written,
+                stat.values_deleted,
+                stat.keys_deleted
+            ),
+        );
         json!({ "success": true, "data": { "restored": true, "keys": keys } })
     } else {
-        let detail = out
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
-            .unwrap_or_default();
+        let detail = imported.err().unwrap_or_default();
         log::write_log("error", &format!("cleanup 注册表备份还原失败: {file} {detail}"));
-        json!({ "success": false, "message": "reg import 失败（见日志）" })
+        json!({ "success": false, "message": format!("还原写入失败: {detail}") })
     }
 }
 

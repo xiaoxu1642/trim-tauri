@@ -5124,28 +5124,29 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
             Err(msg) => return json!({ "success": false, "message": msg }),
         };
     log::flush_sync(); // 写注册表前刷盘
-    let Some(path_str) = path.to_str() else {
-        return json!({ "success": false, "message": "备份路径无法表示为文本" });
-    };
-    let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool("reg.exe"))
-        .args(["import", path_str])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            log::write_log("info", &format!("卸载域注册表备份已还原: {name}（{} 个键）", keys.len()));
+    // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。上面四道闸原样跑，
+    // .reg 文本格式与封条链未动；原先「成功 / 非零退出 / 调用失败」三分支
+    // 在原生侧塌成 Ok/Err 两分支（外部进程的退出码这一层信息本身已不存在）。
+    match crate::engine::reg_backup::reg_import_apply(&path) {
+        Ok(stat) => {
+            log::write_log(
+                "info",
+                &format!(
+                    "卸载域注册表备份已还原: {name}（{} 个键，写入 {} 值、删除 {} 值、删键 {}）",
+                    keys.len(),
+                    stat.values_written,
+                    stat.values_deleted,
+                    stat.keys_deleted
+                ),
+            );
             json!({ "success": true, "data": {
                 "restored": true, "keys": keys, "sealWasRecorded": seal == "ok",
                 "message": "已按备份合并回注册表（只加回备份里存在的键/值）"
             }})
         }
-        Ok(o) => {
-            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            log::write_log("error", &format!("卸载域备份还原失败: {name} {detail}"));
-            json!({ "success": false, "message": if detail.is_empty() { "reg import 失败".to_string() } else { format!("reg import 失败: {detail}") } })
-        }
         Err(e) => {
-            log::write_log("error", &format!("卸载域备份还原调用失败: {name} {e}"));
-            json!({ "success": false, "message": format!("reg import 调用失败: {e}") })
+            log::write_log("error", &format!("卸载域备份还原失败: {name} {e}"));
+            json!({ "success": false, "message": format!("还原写入失败: {e}") })
         }
     }
 }

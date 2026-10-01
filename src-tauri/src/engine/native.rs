@@ -5407,18 +5407,15 @@ pub fn cm_restore() -> Result<Value, String> {
                 skip_reasons.push(format!("{name}（键路径不在右键菜单合法范围内，已拒绝导入：{bad_key}）"));
                 continue;
             }
-            // reg.exe import
-            // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
-            let Some(path_str) = path.to_str() else {
+            // A6（v2-R4）：原生 `.reg` 写入，替换 `reg.exe import`。
+            // 备份是 reg.exe export 产的 UTF-16LE，编码感知收在
+            // `reg_backup::read_reg_text_file` 一处，不在这里各解一遍。
+            // 原来那档「路径 to_str() 为 None 就跳过」（审查 v3-L7）随 reg.exe 一起消失 ——
+            // 那是外部进程需要字符串参数才有的限制，原生拿 &Path 不受影响。
+            // 失败原因现在进 skip_reasons（旧实现只 failed += 1，用户看不到为什么没还原上）。
+            if let Err(e) = crate::engine::reg_backup::reg_import_apply(&path) {
                 failed += 1;
-                skip_reasons.push(format!("{name}（备份文件路径无法编码，已跳过）"));
-                continue;
-            };
-            let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
-                .args(["import", path_str])
-                .output();
-            if out.is_err() || !out.unwrap().status.success() {
-                failed += 1;
+                skip_reasons.push(format!("{name}（还原写入失败：{e}）"));
                 continue;
             }
             // 导入后回读
@@ -5606,13 +5603,9 @@ pub fn peripheral_restore() -> Result<Value, String> {
 
     let mut imported = 0i64;
     for f in &group {
-        // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，跳过该件（imported 不增，
-        // 由既有 partial 记账如实呈现），而不是 panic
-        let Some(f_str) = f.to_str() else { continue; };
-        let out = crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
-            .args(["import", f_str])
-            .output();
-        if out.is_ok() && out.unwrap().status.success() {
+        // A6（v2-R4）：原生 import。原先「路径非 UTF-8 就跳过」（审查 v3-L7）随 reg.exe
+        // 一起消失 —— 那档跳过会让 imported 少计、回执变成 partial，而原因用户看不见。
+        if crate::engine::reg_backup::reg_import_apply(f).is_ok() {
             imported += 1;
         }
     }

@@ -313,35 +313,31 @@ fn native_execute_steps<R: tauri::Runtime>(
         let label = s.get("label").and_then(|v| v.as_str()).unwrap_or("");
 
         if let Some(reg) = s.get("reg").and_then(|v| v.as_str()) {
-            // reg 类型：写 .reg 临时文件 + reg.exe import
+            // reg 类型：写 .reg 临时文件 + 原生 import（A6，v2-R4）
             let reg_path = tmp_dir.join(format!("wcopt_{}.reg", crate::engine::now_ms()));
-            // 审查 v3-L7：非 UTF-8 路径（孤立代理项）上 to_str() 为 None，跳过该步而不是 panic
-            let Some(reg_path_str) = reg_path.to_str() else {
-                failed += 1;
-                failed_reasons.push(format!("步骤「{label}」: 临时文件路径不可表达（非 UTF-8），已跳过"));
-                continue;
-            };
-            // 审查 2026-09-27 L1：.reg 临时文件改为 UTF-16LE + BOM（reg.exe 的 Unicode
-            // 格式），与 PS 侧 reg 导入路径的 -Encoding Unicode 口径一致——此前 UTF-8
-            // 无 BOM 在数据层出现中文值数据时会被 reg.exe 按 ANSI 误读
+            // 审查 2026-09-27 L1：.reg 临时文件为 UTF-16LE + BOM（.reg 的 Unicode 格式），
+            // 与 `reg.exe export` 的产物同编码。原先「路径非 UTF-8 就跳过该步」（v3-L7）
+            // 是 reg.exe 需要字符串参数才有的限制，原生拿 &Path 后随 reg.exe 一起删除。
+            // 中文值数据在旧 UTF-8 无 BOM 形态下会被按 ANSI 误读，那一条现在由读侧的
+            // 编码感知（reg_backup::read_reg_text_file）兜住。
             let mut reg_bytes = vec![0xFFu8, 0xFEu8];
             reg_bytes.extend(reg.encode_utf16().flat_map(|u| u.to_le_bytes()));
             if std::fs::write(&reg_path, &reg_bytes).is_err() {
                 failed += 1;
                 failed_reasons.push(format!("步骤「{label}」: .reg 临时文件写入失败"));
             } else {
-                let ok = match crate::engine::systembin::quiet_cmd(system_tool("reg.exe"))
-                    .args(["import", reg_path_str])
-                    .output()
-                {
-                    Ok(o) => o.status.success(),
-                    Err(_) => false,
-                };
-                let _ = std::fs::remove_file(&reg_path);
-                if !ok {
-                    failed += 1;
-                    failed_reasons.push(format!("步骤「{label}」: reg import 返回非零（键被占用或策略拒绝）"));
+                // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。
+                // 文件仍按 UTF-16LE+BOM 写（那是这份 .reg 文本格式既有的约定，v2 明令不动），
+                // 读侧的编码感知在 reg_backup::read_reg_text_file。
+                // 失败原因现在进 failed_reasons —— 旧实现只说"返回非零"，用户看不到为什么。
+                match crate::engine::reg_backup::reg_import_apply(std::path::Path::new(&reg_path)) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        failed += 1;
+                        failed_reasons.push(format!("步骤「{label}」: {e}"));
+                    }
                 }
+                let _ = std::fs::remove_file(&reg_path);
             }
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
             // cmd 类型：spawn cmd /c。形状必须是 raw_arg("/s /c \"…\"")，不能用 args(["/c", cmd])。
