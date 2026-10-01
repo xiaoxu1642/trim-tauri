@@ -259,6 +259,49 @@ fn has_flag(cmd: &Cmd, k: &str) -> bool {
     cmd.named.iter().any(|(n, v)| n.eq_ignore_ascii_case(k) && v.is_none())
 }
 
+/// A5（v2-R4，2026-10-01）：`Get-ScheduledTask -TaskName "X" | Disable-ScheduledTask`
+/// 这类管道形态 → 复用既有 `TaskChange` 算子（与 `schtasks /change` 同一条执行路径，
+/// 不新写执行器）。
+///
+/// 语义依据：`Get-ScheduledTask -TaskName X` 只选出 X 这一个实例，管道把它原样交给
+/// `Disable/Enable-ScheduledTask`，被改的对象就是 X —— 与直接写
+/// `Disable-ScheduledTask -TaskName X` 是同一件事，所以映射到同一算子不是近似。
+///
+/// 返回 `Option`：只在**完全匹配**时接管，任何不确定的形态都交 `None` 走原路径
+/// （→ PsInline 逐字执行）。原因很具体：这里返回 `Err` 会让
+/// `data_layer_coverage_report` 的「编译失败必须为 0」硬断言红掉，而一个
+/// 「我看不懂的形态」不该被报成「数据层坏了」。
+fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
+    let parts = split_pipes(raw);
+    if parts.len() != 2 {
+        return None;
+    }
+    let getter = parse_cmd(parts[0].trim())?;
+    if !getter.name.eq_ignore_ascii_case("Get-ScheduledTask") {
+        return None;
+    }
+    let task_name = unquote(param(&getter, "TaskName")?)?;
+    let task_path = match param(&getter, "TaskPath") {
+        Some(p) => Some(unquote(p)?),
+        None => None,
+    };
+    let setter = parse_cmd(parts[1].trim())?;
+    let disable = match setter.name.as_str() {
+        "Disable-ScheduledTask" => true,
+        "Enable-ScheduledTask" => false,
+        _ => return None,
+    };
+    // 管道尾端若自带另一个 -TaskName/-TaskPath，身份就有两种说法，不猜
+    if param(&setter, "TaskName").is_some() || param(&setter, "TaskPath").is_some() {
+        return None;
+    }
+    Some(Ok(vec![PsOp::TaskChange {
+        path: task_path,
+        name: task_name,
+        disable,
+    }]))
+}
+
 /// 去掉管道尾巴与重定向；除 `| Out-Null` 外一律不支持
 fn strip_pipeline(s: &str) -> Option<&str> {
     let mut t = s.trim();
@@ -1235,6 +1278,13 @@ fn parse_statement(
     if (raw.starts_with("Get-ChildItem") || raw.starts_with("Get-CimInstance")) && raw.contains('|') {
         return parse_enum_pipe(raw, vars);
     }
+    // A5（v2-R4）：`Get-ScheduledTask … | Disable/Enable-ScheduledTask` → 原生 TaskChange。
+    // 不匹配时返回 None，继续走下面既有的管道/语句路径（不改变任何既有行为）。
+    if raw.trim_start().starts_with("Get-ScheduledTask") && raw.contains('|') {
+        if let Some(r) = parse_task_pipe(raw) {
+            return r;
+        }
+    }
     let Some(line) = strip_pipeline(raw) else {
         return Err(format!("不支持的管道: {raw}"));
     };
@@ -1710,6 +1760,65 @@ mod tests {
         );
     }
 
+    /// A5（v2-R4）：`Get-ScheduledTask … | Disable/Enable-ScheduledTask` 管道形态。
+    /// 两条断言用的是 `edge_update_task_disable` 的**真实步骤体**（数据层原文），
+    /// 不是构造出来的样例 —— 构造样例只能证明解析器自洽，证明不了它接住了数据层。
+    #[test]
+    fn parses_scheduled_task_pipe_from_real_data() {
+        let ops = compile(
+            "Get-ScheduledTask -TaskName \"MicrosoftEdgeUpdateTaskMachineCore\" -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue",
+        )
+        .unwrap();
+        assert_eq!(
+            ops,
+            vec![PsOp::TaskChange {
+                path: None,
+                name: "MicrosoftEdgeUpdateTaskMachineCore".into(),
+                disable: true,
+            }]
+        );
+        let ops = compile(
+            "Get-ScheduledTask -TaskName \"MicrosoftEdgeUpdateTaskMachineCore\" -ErrorAction SilentlyContinue | Enable-ScheduledTask -ErrorAction SilentlyContinue",
+        )
+        .unwrap();
+        assert_eq!(
+            ops,
+            vec![PsOp::TaskChange {
+                path: None,
+                name: "MicrosoftEdgeUpdateTaskMachineCore".into(),
+                disable: false,
+            }]
+        );
+    }
+
+    /// A5 的**不接管**边界：形态一变（带 TaskPath / 尾端另给 TaskName / 三段管道）
+    /// 就整条交回 PsInline，而不是猜一个最像的解释。
+    /// 这条断言防的是"解析器变得自信"——把不认识的管道硬映射成 TaskChange，
+    /// 就会静默改错任务，而那正是本项目最忌讳的假绿形态。
+    #[test]
+    fn task_pipe_only_takes_exact_two_stage_shape() {
+        // 带 -TaskPath：应当被接住，且 path 落进算子
+        let ops = compile(
+            "Get-ScheduledTask -TaskPath \"\\Microsoft\\Windows\\DiskDiagnostic\" -TaskName \"X\" | Disable-ScheduledTask",
+        )
+        .unwrap();
+        assert!(
+            matches!(&ops[0], PsOp::TaskChange { path: Some(p), name, disable: true }
+                if p == "\\Microsoft\\Windows\\DiskDiagnostic" && name == "X"),
+            "带 TaskPath 的管道要把它带进算子: {ops:?}"
+        );
+        // 尾端又给一个 TaskName：身份有两种说法，不接管
+        let ops = compile(
+            "Get-ScheduledTask -TaskName \"A\" | Disable-ScheduledTask -TaskName \"B\"",
+        )
+        .unwrap();
+        assert!(matches!(&ops[0], PsOp::PsInline { .. }), "冲突形态必须交回 PsInline: {ops:?}");
+        // 三段管道：不接管
+        let ops = compile("Get-ScheduledTask -TaskName \"A\" | Where-Object { $_ } | Disable-ScheduledTask")
+            .unwrap();
+        assert!(matches!(&ops[0], PsOp::PsInline { .. }), "三段管道必须交回 PsInline: {ops:?}");
+    }
+
     #[test]
     fn parses_key_create_and_remove() {
         let ops = compile(
@@ -1846,6 +1955,10 @@ mod tests {
         let mut native_ok = 0usize;
         let mut inline = 0usize;
         let mut fallback: Vec<String> = Vec::new();
+        // v2-R4：PsInline 的**清单**也要能打印出来。此前报告只给一个数字，于是
+        // 「还剩哪几步走 PS」这件事只能靠人翻数据层重算 —— 而 A5/A2 这些退役批次
+        // 每批都要以这份清单为靶子，数字回答不了"下一步该动谁"。
+        let mut inline_list: Vec<String> = Vec::new();
         for o in &opts {
             let id = o.get("id").and_then(|v| v.as_str()).unwrap_or("?");
             for (phase, arr) in [
@@ -1860,6 +1973,15 @@ mod tests {
                             assert!(!ops.is_empty(), "{id} [{phase}#{i}] 解析成空操作集");
                             if matches!(&ops[0], PsOp::PsInline { .. }) {
                                 inline += 1;
+                                let head = body
+                                    .lines()
+                                    .map(str::trim)
+                                    .find(|l| !l.is_empty() && !l.starts_with('#'))
+                                    .unwrap_or("");
+                                inline_list.push(format!(
+                                    "{id} [{phase}#{i}] {}",
+                                    head.chars().take(96).collect::<String>()
+                                ));
                             } else {
                                 native_ok += 1;
                             }
@@ -1876,6 +1998,10 @@ mod tests {
         println!("编译失败       : {}", fallback.len());
         for f in &fallback {
             println!("  - {f}");
+        }
+        println!("--- 走 inbox PS 的步骤清单（退役批次以此为靶子）---");
+        for f in &inline_list {
+            println!("  * {f}");
         }
         // 硬性断言（审查 v3-M4/K1）：编译失败必须为 0。兜底 PS 回退已随 S3 删除，
         // 编译不过的步骤 = 正向/还原必败的功能回归，必须在测试阶段红掉。
