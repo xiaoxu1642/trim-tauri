@@ -249,23 +249,7 @@ const OPTIONS = [
       }
     ]
   },
-  {
-    id: 'tf_fso', group: '游戏与多媒体', title: '全屏优化(FSO)行为', risk: 'low',
-    desc: '全屏优化(FSO)相关键的唯一写入方：GameDVR_DSEBehavior=0、FSEBehaviorMode=0、EFSEFeatureFlags=0、DXGIHonorFSEWindowsCompatible=0、HonorUserFSEBehaviorMode=1。原与「关闭游戏 DVR 录制」同时写这 4 个键且 FSEBehaviorMode / HonorUserFSEBehaviorMode 取值相反，第六大点-A（2026-09-14）起 FSO 键只由本项负责。',
-    steps: [
-      {
-        label: 'FSO GameConfigStore', reg: regBlock({
-          'HKEY_CURRENT_USER\\System\\GameConfigStore': {
-            'GameDVR_DSEBehavior': 'dword:00000000',
-            'GameDVR_FSEBehaviorMode': 'dword:00000000',
-            'GameDVR_EFSEFeatureFlags': 'dword:00000000',
-            'GameDVR_DXGIHonorFSEWindowsCompatible': 'dword:00000000',
-            'GameDVR_HonorUserFSEBehaviorMode': 'dword:00000001'
-          }
-        })
-      }
-    ]
-  },
+  
   {
     id: 'tf_gpu_latency', group: '游戏与多媒体', title: 'GPU 延迟容忍度调优', risk: 'medium',
     desc: 'Trim Latency Tolerance：DXGKrnl MonitorLatencyTolerance/MonitorRefreshLatencyTolerance=1，Control\\Power 9 键=1，GraphicsDrivers\\Power 24 键=1（含 DefaultD3TransitionLatency*、DefaultLatencyTolerance*、Miracast 等）。',
@@ -689,21 +673,7 @@ const OPTIONS = [
   // ---------- 系统精简（原「系统清理」已并入） ----------
   // 注：「清理临时文件」已移除，功能由「磁盘清理」覆盖。
   // ---------- 显卡优化 ----------
-  {
-    id: 'tf_gpu_msi', group: '显卡优化', title: '显卡启用 MSI 中断模式', risk: 'medium',
-    desc: 'Trim：遍历所有 PCI 显卡（wmic Win32_VideoController 已改写为 Get-CimInstance），在其 Enum 设备参数下开启 MSISupported=1 并将 Affinity Policy 的 DevicePriority=0，降低显卡中断延迟（极少数老驱动可能不兼容）。',
-    steps: [
-      { label: 'GPU MSI + DevicePriority', pwsh: [
-        'Get-CimInstance Win32_VideoController | Where-Object { $_.PNPDeviceID -like "PCI*" } | ForEach-Object {',
-        '  $enum = "HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\" + $_.PNPDeviceID',
-        '  $msi = Join-Path $enum "Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties"',
-        '  $aff = Join-Path $enum "Device Parameters\\Interrupt Management\\Affinity Policy"',
-        '  New-Item -Path $msi -Force | Out-Null; New-ItemProperty -Path $msi -Name MSISupported -Value 1 -PropertyType DWord -Force | Out-Null',
-        '  New-Item -Path $aff -Force | Out-Null; New-ItemProperty -Path $aff -Name DevicePriority -Value 0 -PropertyType DWord -Force | Out-Null',
-        '}'
-      ].join('\n') }
-    ]
-  },
+  
   {
     id: 'tf_nvidia_telemetry', group: '显卡优化', title: 'NVIDIA：关闭遥测与自动更新', risk: 'low',
     desc: 'Trim：删除开机启动 NvBackend，OptInOrOutPreference=0，FTS EnableRID66610/64640/44231=0，并禁用 7 个 NvTm/NvDriverUpdateCheck/GeForce Experience SelfUpdate 计划任务（仅 NVIDIA 系统有对应项，缺失自动跳过）。',
@@ -732,21 +702,7 @@ const OPTIONS = [
       }) }
     ]
   },
-  {
-    id: 'tf_usb_msi', group: '键鼠与外设', title: 'USB 控制器启用 MSI 中断', risk: 'medium',
-    desc: 'Trim：遍历所有 PCI USB 控制器（wmic Win32_USBController 已改写为 Get-CimInstance），开启 MSISupported=1、DevicePriority=0，降低 USB 轮询中断延迟（电竞鼠标/键盘推荐）。',
-    steps: [
-      { label: 'USB MSI + DevicePriority', pwsh: [
-        'Get-CimInstance Win32_USBController | Where-Object { $_.PNPDeviceID -like "PCI*" } | ForEach-Object {',
-        '  $enum = "HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\" + $_.PNPDeviceID',
-        '  $msi = Join-Path $enum "Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties"',
-        '  $aff = Join-Path $enum "Device Parameters\\Interrupt Management\\Affinity Policy"',
-        '  New-Item -Path $msi -Force | Out-Null; New-ItemProperty -Path $msi -Name MSISupported -Value 1 -PropertyType DWord -Force | Out-Null',
-        '  New-Item -Path $aff -Force | Out-Null; New-ItemProperty -Path $aff -Name DevicePriority -Value 0 -PropertyType DWord -Force | Out-Null',
-        '}'
-      ].join('\n') }
-    ]
-  },
+  
   {
     id: 'tf_usb_power', group: '键鼠与外设', title: '关闭 USB 选择性暂停', risk: 'low',
     desc: 'Trim：所有 USB 控制器 Device Parameters 下 AllowIdleIrpInD3/D3ColdSupported/DeviceSelectiveSuspended/EnableSelectiveSuspend/EnhancedPowerManagementEnabled/SelectiveSuspendEnabled/SelectiveSuspendOn 全部=0，Services\\USB DisableSelectiveSuspend=1，杜绝鼠标键盘间歇掉线。',

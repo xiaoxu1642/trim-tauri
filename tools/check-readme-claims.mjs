@@ -86,6 +86,13 @@ const assertAllEqual = (label, re, truth) => {
 assertAllEqual('1. 清理项总数 = cleanup-rules.json 实数', /共\s*(\d+)\s*个清理项/g, cleanupTotal);
 assertAllEqual('2. 清理库条数 = cleanup-rules.json 实数', /清理库\s*(\d+)\s*条/g, cleanupTotal);
 assertAllEqual('3. 优化项总数 = optimizer-runtime.json 实数', /共\s*(\d+)\s*个优化项/g, optTotal);
+// 3b/3c（v2-R3 补）：本节初版只有「共 N 个优化项」这一种措辞进了对拍，于是
+// 「110 个优化项按 12 个分组」（使用步骤）与「110 项里有 14 项高风险」（重要提示）
+// 两处同义声明**不在覆盖内**——tf_fso 退役后它们仍写着 111，是人眼看出的，不是门禁拦的。
+// 一条承诺被写在几种措辞里，就必须有几种措辞的正则；否则「§二改了、§六漏改」这个
+// M-B5 原始形态只挡住了一半。
+assertAllEqual('3b. 优化项总数（使用步骤措辞，无「共」字）', /(\d+)\s*个优化项按\s*\d+\s*个分组/g, optTotal);
+assertAllEqual('3c. 优化项总数（重要提示措辞）', /(\d+)\s*项里有\s*\d+\s*项高风险/g, optTotal);
 assertAllEqual('4. 优化项按 N 个分组 = GROUP_ORDER 长度', /个优化项按\s*(\d+)\s*个分组/g, groupCount);
 // 5/6 的两种措辞各配一条单捕获组正则（「§重要提示」与「§注意事项」两处口径都要钉）
 assertAllEqual('5a. 高风险项数（重要提示措辞）', /项里有\s*(\d+)\s*项高风险/g, optHigh);
