@@ -32,7 +32,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { MAPPING, stripProvenance, loadBody } from './ps-mapping.mjs';
+import { MAPPING, stripProvenance, loadBody, withProvenance } from './ps-mapping.mjs';
 
 const require = createRequire(import.meta.url);
 const PSDIR = join(new URL('..', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\'), 'src-tauri', 'ps');
@@ -149,6 +149,37 @@ for (const m of MAPPING) {
     // PreToolUse/提交钩子是红线，且"自动改产物"会让一次门禁跑动变成看不见的写操作。
     console.log(`   ↳ 若你刚改了源 JS：跑 \`node tools/sync-ps-from-js.mjs\` 重新生成 ${m.ps1} 后重跑本门禁`);
     console.log('     （源 → 产物是单向的：改反方向会让下次同步覆盖你的修改，`.ps1` 一律禁止手改）');
+  }
+
+  // v2-R2：PROVENANCE 头也要对拍，不只是「有没有这块」。
+  //
+  // 为什么正文对拍抓不到头部漂移：正文比对前先把 PROVENANCE 块剥掉了（`stripProvenance`），
+  // 而头里的「说明」行来自 `ps-mapping.mjs` 的 `note` —— 二者是**两个真源**。实机演示过这个
+  // 形态：note 里的「44 个含 pwsh 步骤的优化项」早已随数据层变动而失真（现算正向是 43 项），
+  // 而正文一致，于是旧实现输出「✓ 文本层门禁通过」、`sync-ps-from-js --check` 输出「已同步」，
+  // 一个印在发布产物里的错数字谁也抓不到（V2-07）。
+  // 现在：头必须逐字等于「按当前 MAPPING 重新生成的头」。改 note 而不重生成产物 → 红。
+  const desiredProvenance = stripProvenance(withProvenance(m, jsText)).provenance;
+  const headerOk = provenance !== null && provenance === desiredProvenance;
+  console.log(`${headerOk ? '✓' : '✗'} ${m.ps1} 来源头（PROVENANCE 与 MAPPING 元数据一致）`);
+  if (!headerOk) {
+    fail++;
+    if (provenance === null) {
+      console.log(`   ✗ 缺 PROVENANCE 块：产物必须由 tools/sync-ps-from-js.mjs 生成`);
+    } else {
+      const a = desiredProvenance.split('\n');
+      const b = provenance.split('\n');
+      for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        if (a[i] !== b[i]) {
+          console.log(`   首个差异 @头行 ${i + 1}`);
+          console.log(`   期望（按当前 MAPPING）: ${JSON.stringify((a[i] ?? '').slice(0, 200))}`);
+          console.log(`   实际（产物里的头）  : ${JSON.stringify((b[i] ?? '').slice(0, 200))}`);
+          break;
+        }
+      }
+      console.log(`   ↳ 跑 \`node tools/sync-ps-from-js.mjs --refresh-headers\` 重写 ${m.ps1} 的来源头`);
+      console.log('     （正文没变时 --check 会说「已同步」，头部漂移正是靠这条断言兜住的）');
+    }
   }
 
   if (!m.noRun) behRunnable++;
