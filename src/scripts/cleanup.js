@@ -1470,10 +1470,6 @@
 
   // ==================== C-4 备份还原（注册表 + 永久删文件批次） ====================
 
-  function closeRegBackupModal() {
-    document.getElementById('regBackupBackdrop')?.remove();
-  }
-
   function fmtBackupTime(ms) {
     if (!ms) return '—';
     const d = new Date(ms);
@@ -1668,17 +1664,14 @@
     });
   }
 
-  function openRegBackupManager() {
-    closeRegBackupModal();
-    const ctrl = window.modal.create({
-      id: 'regBackupBackdrop',
-      title: '备份还原（清理域 + 卸载残留）',
-      bodyHtml: '<div class="empty-state"><p>正在读取备份列表…</p></div>',
-      footerClass: 'pw-footer',
-      footerHtml: '<button class="btn btn-secondary" data-role="doneBtn" type="button">关闭</button>'
-    });
-    ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeRegBackupModal);
-    renderRegBackupList(ctrl);
+  // U1-d（2026-10-01）：备份还原从磁盘清理工具栏的二级按钮提到一级页面。
+  // 原来藏在清理页最右侧，等于把「还原」这条退路摆在用户最不容易看见的位置；
+  // 渲染逻辑（renderRegBackupList）只依赖 ctrl.body，所以搬页面不用改它。
+  function renderBackupsPage() {
+    const body = document.getElementById('backupsPageBody');
+    if (!body) return;
+    body.innerHTML = '<div class="empty-state"><p>正在读取备份列表…</p></div>';
+    renderRegBackupList({ body });
   }
 
   function openItemDetail(id) {
@@ -1746,7 +1739,7 @@
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnUpdateRules')?.addEventListener('click', updateRules);
-    document.getElementById('btnRegBackups')?.addEventListener('click', openRegBackupManager);
+    document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
     if (window.api?.cleanup?.onScanProgress) {
@@ -1802,8 +1795,10 @@
     clean,
     formatSize,
     MOCK_SIZES,
-    // v3.2.1：首次进入磁盘清理页时自动检测规则库云端版本（会话内仅一次）
+    // v3.2.1：首次进入磁盘清理页自动检测规则库云端版本（会话内仅一次）
     onPageEnter,
+    // U1-d：一级「备份还原」页的进页钩子（app.js switchPage 调）
+    onBackupsEnter: renderBackupsPage,
     // 审查 4-2：供 app.js 优雅关闭前判断清理任务是否在执行（执行中最长等待 10 分钟）
     isCleaning: () => isCleaning
   };

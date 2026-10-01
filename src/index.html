@@ -157,6 +157,12 @@
 
       <div class="nav-section">
         <div class="nav-section-title">记录</div>
+        <button class="nav-item" data-page="backups" data-tip="备份还原：清理域整键导出、卸载残留还原包、永久删文件批次副本">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
+          </svg>
+          <span>备份还原</span>
+        </button>
         <button class="nav-item" data-page="logs" data-tip="操作日志">
           <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
             <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM8 12h8v2H8v-2zm0 4h8v2H8v-2zm0-8h5v2H8V8z"/>
@@ -292,10 +298,6 @@
           <button class="btn btn-secondary" id="btnUpdateRules" data-tip="从发布源下载最新清理规则库（数据目录规则优先于内置规则，支持版本校验与防降级）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
             <span>更新规则库</span>
-          </button>
-          <button class="btn btn-secondary" id="btnRegBackups" data-tip="查看与还原三类备份：清理域整键导出、卸载残留删除前的整键导出（带封条核对）、永久删文件批次副本">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-5 10H9v-2h6v2z"/></svg>
-            <span>注册表备份</span>
           </button>
           <div class="clean-inline-opts" id="cleanInlineOpts">
             <span class="rules-version-info" id="rulesVersionInfo" data-tip="当前=本机规则库版本；云端=官方发布源上的最新版本（进入本页自动联网检测，连不上发布源时不显徽标）。winapp2 基线版本已从主文案下线，字段保留兼容">（当前规则库版本：--）</span>
@@ -1131,6 +1133,27 @@
         </div>
         <div class="filter-tabs qc-tabs" id="qcTabs"><!-- 分类标签：由 JS 生成（窗口界面升级3 收编进分段体系） --></div>
         <div class="qc-grid" id="qcList"><!-- 指令卡片：由 JS 生成 --></div>
+      </div>
+
+      <!-- 备份还原页面（U1-d：从磁盘清理工具栏的二级按钮提到一级入口——它是找回东西的地方，
+           不是清理动作，藏在清理页最右侧等于不想让用户还原） -->
+      <div class="page" id="page-backups">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">备份还原</h1>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-secondary" id="btnRefreshBackups">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 4.01-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              刷新
+            </button>
+          </div>
+        </div>
+        <div id="backupsPageBody">
+          <div class="empty-state">
+            <p>正在读取备份列表…</p>
+          </div>
+        </div>
       </div>
 
       <!-- 日志页面 -->
