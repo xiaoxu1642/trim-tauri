@@ -512,10 +512,15 @@
   // 执行前高危确认：返回 true 继续 / false 取消
   async function confirmHazard(opt) {
     if (!needsHazardConfirm(opt)) return true;
+    // R2（RAINZ 对标）：侧表给出了「具体降哪一面」就逐条点名。泛泛的「会降低安全防护」
+    // 很容易被点过去；「关闭 UAC」或者「关闭 VBS 与内存完整性」这种具名后果，用户才能真的判断。
+    // 文案来源是后端侧表（optimizer-security.json 的 why），不在前端另写一份。
+    const sd = opt.securityDegrade;
+    const detail = sd && sd.why ? `\n\n本项具体降低的是：\n· ${sd.why}` : '';
     // 红色二次确认：警示文案走 dangerHint 结构化字段，由弹窗模板渲染
     return window.app.confirmDanger(
       '⚠️ 高危安全操作确认',
-      `「${opt.title}」会显著降低系统安全防护：\n\n· ${opt.desc || ''}`,
+      `「${opt.title}」会显著降低系统安全防护：\n\n· ${opt.desc || ''}${detail}`,
       '仍然执行',
       '取消',
       '此操作可能使系统更容易受到恶意软件或攻击的侵害，请确认已了解风险。'

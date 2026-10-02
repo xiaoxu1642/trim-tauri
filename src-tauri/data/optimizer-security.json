@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "_comment": "优化目录的「安全降级」侧表（RAINZ 对标报告 §4 R2）。这一维度**不能放进 optimizer-runtime.json** —— 那份文件与上游基线 optimizer-scripts.js 的 OPTIONS 逐字段对拍（加字段必判红），而「哪些项降安全基线」是本仓的判定，不是上游数据。侧表的形态照 optimizer-scope.json 的先例。",
+  "_rule": "判定规则的唯一实现在 tools/check-optimizer-security.mjs：按 (段路径, 键名, 写入值) 三元组与命令面正则机械分类，**看值不看名**（`NoAutoUpdate=0` 是开更新、`EnableLUA=1` 是开 UAC，都不算降级；删除键也不算）。本表必须与重算结果逐条相等，多一条少一条、或某条的 rules 与重算不符都判红 —— 手工改表不能改变判定，只能改变「是否被登记」。新增条目要写清为什么这条算降安全面。",
+  "items": {
+    "disable_uac": {
+      "level": "high",
+      "why": "关闭 UAC：提权不再弹窗，恶意程序与脚本更容易静默获得管理员权限，是最常被滥用的单键开关。",
+      "writes": [
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System :: EnableLUA=0"
+      ],
+      "rules": [
+        "uac-off"
+      ]
+    },
+    "tf_defender": {
+      "level": "high",
+      "why": "关闭 Defender 的实时/行为/云上报等防护面并停用 Sense/WinDefend/WdNisSvc/SecurityHealthService/wscsvc，系统将没有杀毒防护；同时关掉 SmartScreen。",
+      "writes": [
+        "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\* :: Disable*=1",
+        "EnableSmartScreen=0"
+      ],
+      "rules": [
+        "defender-off",
+        "smartscreen-off"
+      ]
+    },
+    "perf_windows_update_off": {
+      "level": "high",
+      "why": "永久关闭 Windows Update 自动更新（NoAutoUpdate=1）：安全补丁不再自动送达，长期不更新的机器是勒索与横向移动的首选目标。注意本项只写策略层、不停 wuauserv —— 但效果仍是「不再自动打补丁」。",
+      "writes": [
+        "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU :: NoAutoUpdate=1"
+      ],
+      "rules": [
+        "wu-off"
+      ]
+    },
+    "perf_vbs_off": {
+      "level": "high",
+      "why": "关闭基于虚拟化的安全（VBS）与内存完整性（HVCI）：两者是抵御内核级提权与恶意驱动的核心机制，关掉后 0day 与易受攻击驱动的利用门槛显著下降。",
+      "writes": [
+        "HKLM\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard :: EnableVirtualizationBasedSecurity=0",
+        "…\\Scenarios\\HypervisorEnforcedCodeIntegrity :: Enabled=0"
+      ],
+      "rules": [
+        "hvci-off",
+        "vbs-off"
+      ]
+    }
+  }
+}

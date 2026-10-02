@@ -114,6 +114,31 @@ pub(super) fn apply_scope(option_id: &str) -> &'static str {
     scope_label_of(scope_table().get(option_id).copied().unwrap_or(0))
 }
 
+// ==================== 安全降级侧表（RAINZ 对标 §4 R2）====================
+//
+// 与 applyScope 同一条路子：`optimizer-runtime.json` 与上游基线逐字段对拍，加字段必判红，
+// 所以「哪些项降低安全基线」这个**本仓判定**只能落在侧表里、由响应侧注入。
+//
+// 判定的唯一实现在 `tools/check-optimizer-security.mjs`（看值不看名：`NoAutoUpdate=0`
+// 是开更新、`EnableLUA=1` 是开 UAC，都不算降级）。这里**只读表、不重算** ——
+// 同一判据两份实现必然漂移，那是本仓反复踩过的坑。
+pub(super) const SECURITY_JSON: &str = include_str!("../../../data/optimizer-security.json");
+
+/// 安全降级项的元信息（`level` / `why` / `writes` / `rules`）；不在表里 = 不是降级项
+pub(super) fn security_degrade_of(option_id: &str) -> Option<Value> {
+    static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        let parsed: Value =
+            serde_json::from_str(SECURITY_JSON).expect("optimizer-security.json 合法");
+        parsed
+            .get("items")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    });
+    map.get(option_id).cloned()
+}
+
 /// 本机确有备份的退役项。备份结构异常或 `values` 为空的条目按「没有备份」处理——
 /// 列出来只会给用户一个点了不会成功的按钮。
 pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {

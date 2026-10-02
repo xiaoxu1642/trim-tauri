@@ -244,6 +244,12 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                     "applyScope".into(),
                     json!(apply_scope(o.get("id").and_then(Value::as_str).unwrap_or(""))),
                 );
+                // 安全降级标签（RAINZ 对标 §4 R2）：同一条侧表注入路径。前端据此在
+                // 高危确认与详情里点名「这一项会降低安全基线」，而不是只靠 risk:high 暗示。
+                let sid = o.get("id").and_then(Value::as_str).unwrap_or("");
+                if let Some(sd) = security_degrade_of(sid) {
+                    map.insert("securityDegrade".into(), sd);
+                }
             }
             tag_exec_modes(&mut row);
             row

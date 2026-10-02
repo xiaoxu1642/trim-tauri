@@ -91,6 +91,34 @@ use super::restore_point::*;
         assert_eq!(opt.get("effect").and_then(|v| v.as_str()), Some("未验证"));
     }
 
+    /// RAINZ 对标 §4 R2：安全降级侧表与目录的一致性。
+    ///
+    /// 分类的**唯一实现**在 `tools/check-optimizer-security.mjs`（(段,名,值) 三元组 + 命令面
+    /// 正则的机械判据，带正向/反向对照）。这里只钉两侧不会各说各话：表里的 id 必须都还在
+    /// 目录里（项退役没清表 = 标签挂在空气上）、每条要带档位与理由，且这四条已知的降安全项
+    /// 一个都不能少 —— 少了就是门禁覆盖出现空洞，而这四条的危害都是"系统没有防护"级别。
+    #[test]
+    fn 安全降级侧表与目录一致() {
+        for id in ["disable_uac", "tf_defender", "perf_windows_update_off", "perf_vbs_off"] {
+            let sd = security_degrade_of(id).unwrap_or_else(|| panic!("{id} 不在安全降级侧表里"));
+            assert!(find_option(id).is_some(), "{id} 已不在目录里（侧表该一起清）");
+            assert_eq!(
+                sd.get("level").and_then(|v| v.as_str()),
+                Some("high"),
+                "{id} 档位应仍为 high（这些都在降安全基线）"
+            );
+            let why = sd.get("why").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(why.chars().count() >= 10, "{id} 的 why 太短，等于没写为什么算降级: {why:?}");
+            assert!(
+                !sd.get("rules").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(true),
+                "{id} 缺 rules（判据标识，用来与 Node 侧重算对拍）"
+            );
+        }
+        // 反向：普通策略项不许被误标（否则「安全降级」这个标签会自己贬值）
+        assert!(security_degrade_of("edge_hide_firstrun").is_none(), "普通策略项被误标成安全降级");
+        assert!(security_degrade_of("__nope__").is_none());
+    }
+
     /// v2-M14：退役清单必须有真消费者，且不与在目录里的 id 重叠。
     /// 重叠意味着同一个 id 既走正常还原又被列进「待还原的退役项」，两本账会互相清账。
     #[test]
