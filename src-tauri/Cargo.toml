@@ -1,6 +1,6 @@
 [package]
 name = "trim-tauri"
-version = "0.4.8"
+version = "0.5.0"
 description = "Trim"
 authors = ["xiaoxu"]
 edition = "2021"
@@ -150,6 +150,11 @@ features = [
     # 属性级读取（IWbemClassObject::Get）要 VARIANT；spike 阶段先用 GetObjectText，
     # 但类型签名引用该模块，feature 不开则 Wmi 侧本身编不过。
     "Win32_System_Variant",
+    # v0.4.9 RAINZ 对标 §3.3：崩溃时间线。`engine::native::bsod::event_timeline` 用
+    # EvtQuery/EvtNext/EvtRender 读 System 日志里 Kernel-Power 41 / EventLog 6008 /
+    # WER-BugCheck 1001 三类事件（近 30 天），把「最近一次崩是什么时候」从"转储文件
+    # mtime 近似"升级成"权威时间线"。依赖准入登记见 docs/PS转Rust迁移方案.md §4.1。
+    "Win32_System_EventLog",
     # v2-R5 / A3 PnP 设备原生侧（engine::pnp 只读 spike）：
     # Devices_DeviceAndDriverInstallation = CM_Get_Device_ID_List* / CM_Locate_DevNodeW /
     # CM_Get_DevNode_Status / CM_Get_DevNode_PropertyW；

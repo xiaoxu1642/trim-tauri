@@ -9,9 +9,10 @@
 //   · 优化项只改了前端 OPTIONS ⇒ JSON 停在旧字段，Rust 侧按旧值下发步骤；
 //   · 受保护路径基线重拷了 vendor 却没重跑夹具 ⇒ Rust 测的是过期期望值，看着绿其实在测旧口径。
 // 本门禁把附录 G 的四条对拍固化下来，四条都是**纯内存重算**（不写盘、不起 pwsh、不开窗口）。
+// v0.4.9 RAINZ 对标 §3.1 加了 P5：蓝屏码库 `tools/bugcheck-codes.source.mjs` ⇄ `data/*.json`。
 //
 // 用法：node tools/check-data-parity.mjs [--strict] [--verbose]
-//   --strict   与默认行为等价（本门禁没有「可选层」，四项源全在仓库内，读不到即判红）；
+//   --strict   与默认行为等价（本门禁没有「可选层」，五项源全在仓库内，读不到即判红）；
 //              接受该 flag 只为和 §4 其它门禁统一写法
 //   --verbose  额外打印每条漂移的字段名（默认只打印前若干条）
 // 退出码：0 = 四组逐条一致；1 = 任一组漂移或源不可读
@@ -202,6 +203,54 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
   }
 }
 
+// ---------------------------------------------------------------------------
+// P5 `tools/bugcheck-codes.source.mjs` ⇄ `data/bugcheck-codes.json`（RAINZ 对标 §3.1）
+// 蓝屏码库没有 JS 轨，它的真源就是那份 mjs（能带注释解释归类为什么这样）。
+// JSON 只是 Rust include_str! 要读的字节 —— 改了源不重出，运行时会拿到旧表；
+// 手改 JSON，下一次 --write 又会覆盖掉。这里是这条断链的**唯一机器拦截点**。
+// 语义合法性由 tools/check-bugcheck-codes.mjs 单独管（正向对照 trim 旧硬编码那 28 条），
+// 这里只做字节级对拍 —— 与 P1 的清理规则库 ⇄ 兜底副本同形。
+// ---------------------------------------------------------------------------
+{
+  const BUG_SRC_MJS = join('tools', 'gen-bugcheck-codes.mjs');
+  const BUG_JSON = join('src-tauri', 'data', 'bugcheck-codes.json');
+  const artPath = join(REPO_ROOT, BUG_JSON);
+  if (!existsSync(artPath)) {
+    check(false, 'P5 bugcheck-codes source.mjs ⇄ data/bugcheck-codes.json', `产物不存在：跑 node ${BUG_SRC_MJS.replace(/\\/g, '/')} --write`);
+  } else {
+    // 与生成器**同一份源**：直接 import source.mjs，用同样的 map+sort 规则在内存里重算 want
+    // —— 生成器改了 map 规则、这里会跟着变；生成器漏跑，这里必红。
+    // 不用 `child_process.execFileSync('node', [gen])` 是因为：门禁之间互相起子进程，
+    // 一旦生成器抛错就会把整个 parity 报告截掉一半；纯内存重算失败只让本组红、其它组照跑。
+    const src = await import(new URL('./bugcheck-codes.source.mjs', import.meta.url).href);
+    const sorted = [...src.BUGCHECK_CODES].sort((a, b) => a.code - b.code);
+    const want = JSON.stringify({
+      _meta: {
+        schema: 'trim.bugcheck-codes.v1',
+        total: sorted.length,
+        cats: [...src.CATS],
+        source: 'tools/bugcheck-codes.source.mjs',
+        note: '派生物：改动请回到 source.mjs，跑 node tools/gen-bugcheck-codes.mjs --write 重出',
+      },
+      entries: sorted.map((e) => ({
+        code: e.code,
+        hex: '0x' + e.code.toString(16).padStart(8, '0').toUpperCase(),
+        name: e.name,
+        cat: e.cat,
+        meaning: e.meaning,
+        causes: e.causes,
+        solution: e.solution,
+      })),
+      fallbackRules: src.FALLBACK_RULES.map((r) => ({ id: r.id, cat: r.cat, why: r.why })),
+      fallbackDefault: { ...src.FALLBACK_DEFAULT },
+    }, null, 2) + '\n';
+    const got = readFileSync(artPath, 'utf8');
+    check(got === want,
+      `P5 蓝屏码库 source.mjs ⇄ 运行时 JSON（${sorted.length} 条）`,
+      got === want ? '' : 'JSON 与源不同步 ⇒ 改了 source.mjs 忘跑 --write，或手改了 data/*.json');
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // 报告项（不参与判定）：附录 G 里「本仓无再生成路径 / 无消费者」的两个数据文件。
@@ -218,5 +267,5 @@ for (const rel of [join('src-tauri', 'data', 'reg-ownership.json'), join('src-ta
   console.log(`  · ${rel.replace(/\\/g, '/')} ${existsSync(abs) ? extra : '缺失'}`);
 }
 
-console.log(`\n${fail === 0 ? '✓ 四组数据对拍全部一致' : `${fail} 项未通过`}`);
+console.log(`\n${fail === 0 ? '✓ 五组数据对拍全部一致' : `${fail} 项未通过`}`);
 process.exit(fail === 0 ? 0 : 1);

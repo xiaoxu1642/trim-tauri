@@ -2120,8 +2120,141 @@ body.lg-mode-frost .nav-item.active:hover {
 .settings-bgtheme-section,
 .settings-appearance-section,
 .settings-system-section,
+.settings-syspanel,
 .settings-about-section {
   grid-column: 1 / -1;
+}
+
+/* 系统面板（P2 §3.6 RAINZ 对标）：电源计划三档 + 虚拟内存只读。
+   颜色一律走既有 token（AGENTS §2「分组不得用离表色」），圆角按 medium/btn 档位。 */
+.settings-syspanel-hint {
+  margin: 0 0 12px;
+  color: var(--fg-tertiary);
+  font-size: var(--fs-meta);
+  line-height: 1.6;
+}
+.syspanel-card {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-medium);
+  padding: 14px 16px;
+  margin-top: 12px;
+  background: var(--bg-card-hover);
+}
+.syspanel-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.syspanel-card-head h4 {
+  margin: 0;
+  font-size: calc(14px * var(--font-size-scale, 1));
+  font-weight: calc(600 * var(--font-weight-scale, 1));
+  color: var(--fg-primary);
+}
+.syspanel-card-head .btn { margin-left: auto; }
+.syspanel-card-head .syspanel-tag {
+  margin-left: auto;
+  padding: 2px 10px;
+  font-size: calc(11px * var(--font-size-scale, 1));
+  color: var(--fg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: 999px; /* 胶囊徽章例外（AGENTS §5 允许） */
+}
+.syspanel-card-head .syspanel-tag + .btn { margin-left: 8px; }
+.syspanel-card-body { font-size: var(--fs-meta); color: var(--fg-secondary); }
+.syspanel-power-current { margin-bottom: 8px; color: var(--fg-primary); }
+.syspanel-radios { display: flex; flex-direction: column; gap: 8px; }
+.syspanel-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+}
+.syspanel-radio[data-active="1"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  cursor: default;
+}
+.syspanel-radio input[type="radio"] { margin-top: 3px; accent-color: var(--accent); }
+.syspanel-radio-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.syspanel-radio-label { color: var(--fg-primary); font-weight: calc(500 * var(--font-weight-scale, 1)); }
+.syspanel-radio-tip { color: var(--fg-tertiary); font-size: calc(12px * var(--font-size-scale, 1)); }
+.syspanel-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  font-size: calc(11px * var(--font-size-scale, 1));
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-weight: 400;
+}
+.syspanel-actions { margin-top: 12px; }
+.syspanel-note {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-btn);
+  color: var(--fg-tertiary);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  line-height: 1.6;
+}
+.syspanel-pf-mode { margin: 0 0 8px; color: var(--fg-primary); }
+.syspanel-pf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-meta);
+}
+.syspanel-pf-table th,
+.syspanel-pf-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-default);
+}
+.syspanel-pf-table th { color: var(--fg-tertiary); font-weight: 500; background: var(--bg-hover); }
+.syspanel-pf-table .empty-cell { color: var(--fg-tertiary); text-align: center; padding: 12px; }
+.syspanel-pf-hint {
+  margin: 10px 0 0;
+  color: var(--fg-tertiary);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  line-height: 1.6;
+}
+/* v0.4.9 §3.6 写侧：编辑态样式（managed 复选框 + 三列表格 + 增删按钮） */
+.syspanel-pf-actions { margin-top: 10px; display: flex; gap: 8px; }
+.syspanel-pf-managed {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px;
+  color: var(--fg-primary);
+  font-size: var(--fs-meta);
+}
+.syspanel-pf-managed input[type="checkbox"] { accent-color: var(--accent); }
+.syspanel-pf-manual-area { margin-top: 6px; }
+.syspanel-pf-input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: var(--fs-meta);
+  color: var(--fg-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-btn);
+}
+.syspanel-pf-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.syspanel-pf-drive { width: 60px; text-transform: uppercase; }
+.syspanel-pf-tools { margin-top: 6px; }
+.syspanel-pf-backup {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: var(--bg-hover);
+  border-radius: var(--radius-btn);
+  color: var(--fg-tertiary);
+  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-size: calc(11px * var(--font-size-scale, 1));
+  word-break: break-all;
 }
 
 /* Fluent 开关（设置页 AI 简介开关） */
@@ -5502,6 +5635,27 @@ input[type="range"].fm-slider:disabled,
 .intro-block-tag { margin-left: auto; font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
 .intro-tag-warn { color: var(--warning); }
 .intro-local-text { font-size: var(--fs-meta); line-height: 1.75; color: var(--fg-secondary); }
+/* v0.4.9 RAINZ 对标 §3.4：三档场景建议（日常 / 游戏 / 办公）。
+   只吃既有 token、不引入离表色（AGENTS §2「分组不得用离表色」）；
+   grid 让三行的 key 都对齐，`display: contents` 让 .intro-tips-row 不做布局盒、
+   直接按 key/val 顺序落进两列。 */
+.intro-tips-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 12px;
+  row-gap: 6px;
+  font-size: var(--fs-meta);
+  line-height: 1.65;
+}
+.intro-tips-row { display: contents; }
+.intro-tips-key {
+  color: var(--fg-tertiary);
+  font-weight: calc(500 * var(--font-weight-scale, 1));
+  text-align: right;
+  align-self: start;
+  padding-top: 1px;
+}
+.intro-tips-val { color: var(--fg-secondary); min-width: 0; word-break: break-word; }
 .intro-ai-content { min-height: 42px; font-size: var(--fs-meta); line-height: 1.75; color: var(--fg-secondary); }
 .intro-ai-idle { color: var(--fg-tertiary); }
 .intro-ai-meta { margin-top: 6px; font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
@@ -8930,6 +9084,10 @@ body[data-preset-bg] .layout {
   line-height: 1.6;
   color: var(--fg-tertiary);
   overflow-wrap: anywhere;
+  /* v0.4.9 RAINZ 对标 §3.1：蓝屏记录条目要展示「含义 / 常见成因 / 建议」三段，
+     check_item 结构不动（保持零新增 IPC），换行靠 detail 字符串里的 \n 呈现。
+     pre-line 只把 \n 变换行、多余空白仍折叠，不影响其它 checkup 条目的单段展示。 */
+  white-space: pre-line;
 }
 /* 异常/注意行左侧语义色条（v3.2.0：行已成卡片，inset 阴影在圆角边上穿帮，改 border-left） */
 .checkup-row[data-status="bad"] { border-left: 3px solid var(--danger); }

@@ -1622,6 +1622,260 @@ const OPTIONS = [
         ].join('\n') }
     ]
   },
+  // ---------- D 批 1（v0.4.9 RAINZ 对标 §3.5）：网络与更新策略 4 项 ----------
+  // 4 项**全是纯 reg 步骤**，`restoreAvailable` 由 2116 那条 forEach 的推理机制自动置 true
+  // （删除写入的键 = 恢复系统默认），不重复手写 restore 数组。
+  // 全部避开 check-optimizer-security 的 (段路径, 键名, 写入值) 三元组：
+  //   · DoDownloadMode=0 / EnableActiveProbing=0 / ShowCopilotButton=0 / SubscribedContent-*
+  //     都不在 VALUE_RULES 的 nameRe 清单里，红判据不会误伤、也不给它们开后门。
+  // group 分配按语义走（性能调优 / 桌面体验 / 隐私防护），不再要求文件位置与 group 一致。
+  {
+    id: 'wu_do_download_mode_off', group: '性能调优', title: '关闭 Windows 更新 P2P 分发', risk: 'low',
+    desc: 'DeliveryOptimization 的 DoDownloadMode=0（HTTP only），Windows 更新与商店应用不再从局域网/互联网其他机器拉取分块。同网段多台机器一起更新时整体下载可能变慢；单机用户无损。',
+    steps: [
+      { label: 'DeliveryOptimization DoDownloadMode=0', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization': {
+          'DoDownloadMode': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'net_no_active_probe', group: '性能调优', title: '关闭 NCSI 主动探测', risk: 'medium',
+    desc: 'EnableActiveProbing=0，Windows 不再周期性访问 msftconnecttest.com 判断"是否有互联网"。副作用：任务栏网络图标失去"是否联网"的准确指示；酒店/机场 captive portal 不会自动弹出登录页。',
+    steps: [
+      { label: 'NlaSvc EnableActiveProbing=0', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\NlaSvc\\Parameters\\Internet': {
+          'EnableActiveProbing': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_copilot_hide_button', group: '桌面体验', title: '隐藏任务栏 Copilot 按钮', risk: 'low',
+    desc: 'HKCU Explorer\\Advanced 的 ShowCopilotButton=0，任务栏不再显示 Copilot 图标。仅影响视觉入口；Copilot 运行时与后台服务不由本项控制（对应项见 tf_ai_off）。',
+    steps: [
+      { label: 'ShowCopilotButton=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': {
+          'ShowCopilotButton': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_startmenu_ads_off', group: '隐私防护', title: '关闭开始菜单"建议"应用推广', risk: 'low',
+    desc: 'ContentDeliveryManager 的 SubscribedContent-338388Enabled=0，开始菜单不再展示微软推荐的应用（俗称"开始菜单广告"）。',
+    steps: [
+      { label: 'SubscribedContent-338388Enabled=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager': {
+          'SubscribedContent-338388Enabled': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  // ---------- D 批 2（v0.4.9 RAINZ 对标 §3.5）：隐私与遥测补齐 3 项 ----------
+  // 三条 SubscribedContent-* 变体与上面的 338388 同段（HKCU ContentDeliveryManager），
+  // 语义各不重叠：338389 = 开始菜单提示；310093 = 设置首页"为你推荐"；353694 = OneDrive 存储同步建议。
+  // 全部纯 reg、low risk、由推理机制自动可还原。
+  {
+    id: 'sys_startmenu_tip_off', group: '隐私防护', title: '关闭开始菜单"提示"', risk: 'low',
+    desc: 'ContentDeliveryManager 的 SubscribedContent-338389Enabled=0，开始菜单不再展示功能提示与新手引导卡片。',
+    steps: [
+      { label: 'SubscribedContent-338389Enabled=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager': {
+          'SubscribedContent-338389Enabled': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_settings_ads_off', group: '隐私防护', title: '关闭设置页"为你推荐"', risk: 'low',
+    desc: 'ContentDeliveryManager 的 SubscribedContent-310093Enabled=0，Windows 设置首页不再展示"为你推荐"卡片（多为微软自家功能与服务推广）。',
+    steps: [
+      { label: 'SubscribedContent-310093Enabled=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager': {
+          'SubscribedContent-310093Enabled': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_filesync_ads_off', group: '隐私防护', title: '关闭 OneDrive 存储同步建议', risk: 'low',
+    desc: 'ContentDeliveryManager 的 SubscribedContent-353694Enabled=0，Windows 不再弹「自动把新文档保存到 OneDrive」的建议。不改变 OneDrive 客户端自身行为，只关掉这个提示通道。',
+    steps: [
+      { label: 'SubscribedContent-353694Enabled=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager': {
+          'SubscribedContent-353694Enabled': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  // ---------- D 批 4（v0.4.9 RAINZ 对标 §3.5）：桌面体验与视觉 4 项 ----------
+  // 全部走 HKCU、纯 reg、可推理还原；scope 判据（check-optimizer-dynamic A6）：
+  //   · MinAnimate / FontSmoothingType 落在 HKCU\Control Panel\Desktop → 不 match explorer regex → none
+  //   · TaskbarAnimations / DisableThumbnailCache 落在 HKCU\...\Explorer\Advanced → explorer
+  // 「none 档不进 optimizer-scope.json」是 A6 判据（表 ⇄ 重算必须完全相等）；
+  // 只有 explorer / reboot 档才登记。
+  {
+    id: 'sys_minanimate_off', group: '桌面体验', title: '关闭窗口开合动画', risk: 'low',
+    desc: 'HKCU Control Panel\\Desktop 的 MinAnimate=0，最小化/最大化窗口时不再播放缩放动画，视觉响应更"直接"。低配机与远程桌面上感知更明显。',
+    steps: [
+      { label: 'MinAnimate=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Desktop': {
+          'MinAnimate': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_taskbar_anim_off', group: '桌面体验', title: '关闭任务栏按钮动画', risk: 'low',
+    desc: 'HKCU Explorer\\Advanced 的 TaskbarAnimations=0，任务栏按钮在窗口切换/最小化时不再播放滑动动画。属偏好设置。',
+    steps: [
+      { label: 'TaskbarAnimations=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': {
+          'TaskbarAnimations': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_thumb_cache_off', group: '桌面体验', title: '禁用缩略图缓存（thumbcache）', risk: 'low',
+    desc: 'HKCU Explorer\\Advanced 的 DisableThumbnailCache=1，资源管理器不再把缩略图写入 thumbcache_*.db。隐私向：U 盘/多人共用机器上避免缩略图残留；代价是每次进同一目录要重算缩略图，SSD 上开销可忽略。',
+    steps: [
+      { label: 'DisableThumbnailCache=1', reg: regBlock({
+        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': {
+          'DisableThumbnailCache': 'dword:00000001'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_font_smoothing_cleartype', group: '桌面体验', title: '字体平滑强制 ClearType', risk: 'low',
+    desc: 'HKCU Control Panel\\Desktop 的 FontSmoothingType=2（ClearType）。默认已是 2；本项用于「被精简脚本或老系统改回 1（标准）后拉回来」。LCD 屏上文字更清晰，CRT/部分高 DPI 缩放场景可能反而劣化。',
+    steps: [
+      { label: 'FontSmoothingType=2 (ClearType)', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Desktop': {
+          'FontSmoothingType': 'dword:00000002'
+        }
+      }) }
+    ]
+  },
+  // ---------- D 批 收尾（v0.4.9 RAINZ 对标 §2/§3.5）：4 项补齐 ----------
+  // 方案 §2 差集清单里"值得单独成项"且**不与既有语义重叠 + 键路径有把握**的剩余项：
+  //   · AUOptions=2（Windows Update 通知下载和安装）—— 只在 NoAutoUpdate=0 时生效，
+  //     与 perf_windows_update_off / perf_wu_pause 语义正交
+  //   · NoAutoRebootWithLoggedOnUsers=1（更新装完后不强制重启）—— 与 NoAutoUpdate 无关，
+  //     防的是"补丁装好 → 半夜自动重启"这类经典坑；不触发 check-optimizer-security
+  //     的 wu-off 三元组（键名不是 NoAutoUpdate）
+  //   · EnableTransparency=0（HKCU Themes Personalize 关系统级透明效果）—— 与 Trim 窗材质
+  //     属性（`data-material="none"`，AGENTS §2 刻意设计）不同层，本项管 Windows 开始菜单/
+  //     任务栏/窗口边框的透明；低配机与远程桌面上关闭能减少 DWM 合成开销
+  //   · ShowHiddenDevices=1（设备管理器默认显示隐藏设备）—— 落 HKLM\SYSTEM\CurrentControlSet\
+  //     Control\DeviceManager，触发 SCOPE_REBOOT_KEY 的 `HKLM\SYSTEM\CurrentControlSet\Control`
+  //     → optimizer-scope.json 登记为 reboot
+  // **明确不做**（AGENTS §9.3 纪律 ① + §3.5 落法 6，写清理由避免下次会话误补回来）：
+  //   · TcpAckFrequency / TcpNoDelay / TcpSlowStartRestart：键路径在 Tcpip\Parameters\
+  //     Interfaces\{网卡 GUID}，接口子键要枚举；方案 §3.5 表格里自己也标注"trim
+  //     tf_net_nic 已下线的写侧邻域"，且 tf_net_tcp / tf_net_tcpip 已覆盖同类语义
+  //   · DisableAIFeatures：与既有 tf_ai_off 高度重叠（后者策略级关 Copilot/Recall/
+  //     Click to Do/AI Agent 全家桶，本项是其子集）
+  //   · 蓝牙 EnhancedDiscovery / EnableAutoPairing：键路径本机现查证据不足（§9.3
+  //     "不拿推断当实测"），需要真机 `reg query` 复核后再决定
+  //   · UserPreferencesMask：REG_BINARY 位掩码，"关某个动画"要读写回整个 8 字节，
+  //     会连累用户其他偏好；与 §3.5 落法 1「不走数量」的最小改动原则冲突
+  {
+    id: 'wu_au_options_notify', group: '性能调优', title: 'Windows 更新：改为通知下载和安装', risk: 'medium',
+    desc: 'AUOptions=2，Windows Update 检测到新补丁后弹提示由用户决定何时下载与安装，不再自动跑完流程。仅在 NoAutoUpdate=0（自动更新开着）时生效；已开 perf_windows_update_off 的机器本项无实际作用。',
+    steps: [
+      { label: 'AU AUOptions=2 (通知下载和安装)', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU': {
+          'AUOptions': 'dword:00000002'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'wu_no_auto_reboot', group: '性能调优', title: 'Windows 更新：登录时不强制重启', risk: 'low',
+    desc: 'NoAutoRebootWithLoggedOnUsers=1，补丁安装完成后即使到了计划的重启时间，只要有用户登录就不会自动重启，避免"半夜补丁装完把机器重启、工作丢失"。不影响补丁本身下载安装。',
+    steps: [
+      { label: 'AU NoAutoRebootWithLoggedOnUsers=1', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU': {
+          'NoAutoRebootWithLoggedOnUsers': 'dword:00000001'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'sys_transparency_off', group: '桌面体验', title: '关闭系统透明效果', risk: 'low',
+    desc: 'HKCU Themes\\Personalize 的 EnableTransparency=0，开始菜单/任务栏/窗口边框不再叠加透明材质。低配机与远程桌面上能减少 DWM 合成开销；Win11 主题视觉会变"实"一些。与 Trim 窗材质设置（`data-material`）不同层，本项管的是 Windows 系统级透明。',
+    steps: [
+      { label: 'EnableTransparency=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize': {
+          'EnableTransparency': 'dword:00000000'
+        }
+      }) }
+    ]
+  },
+  {
+    id: 'devmgr_show_hidden_default', group: '系统调校', title: '设备管理器默认显示隐藏设备', risk: 'low',
+    desc: 'HKLM DeviceManager 的 ShowHiddenDevices=1，打开设备管理器时默认展开"显示隐藏设备"（灰色显示未插着的旧驱动、断开的历史设备）。便于排查残留驱动，不改变任何硬件行为。',
+    steps: [
+      { label: 'DeviceManager ShowHiddenDevices=1', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\DeviceManager': {
+          'ShowHiddenDevices': 'dword:00000001'
+        }
+      }) }
+    ]
+  },
+  // ---------- D 批 3（v0.4.9 RAINZ 对标 §3.5）：服务改「手动」而非「禁用」4 项 ----------
+  // 方案 §3.5 D 批 3 主题就是「可恢复停发」。AGENTS §5.12 二次扩宽允许本文件的 service
+  // 模板新增 startType 枚举分支；对应 Rust 侧解释器在 `engine/pssteps.rs` 里加 Set-Service
+  // match 分支，走 PsOp::SvcSetStart → service_set_start_pub（原生 Windows API）。
+  // 语义硬约束：改 Manual **不立即 Stop-Service**，当前运行不受影响、下次开机不再自动启动；
+  // 还原走 Set-StartupType Automatic，也不 Start-Service（下次开机自动起）。
+  // 4 项默认启动类型均为 Automatic（本机 `sc qc` 可读），改动可回退；不选 WebClient/msiserver
+  // 是因为它们默认已是 Manual，「改 Manual」对它们是 no-op、不登记（AGENTS §3.5 落法 6：
+  // 人工确认不与既有语义重叠 —— 与"当前启动类型已是目标"的 no-op 项同理，不收）。
+  {
+    id: 'svc_w32time_manual', group: '系统服务', title: 'Windows Time 改手动启动', risk: 'low',
+    desc: 'W32Time 启动类型从 Automatic 改为 Manual，下次开机不再常驻。当前运行不受影响；AD 域环境 / 双系统时间冲突场景请谨慎，或改用「时间同步故障排查」类专项。',
+    steps: [
+      { label: 'W32Time → Manual（不立即停止）', service: 'W32Time', startType: 'manual' }
+    ],
+    restore: [
+      { label: '还原：W32Time 改回 Automatic', service: 'W32Time', startType: 'automatic' }
+    ]
+  },
+  {
+    id: 'svc_fdrespum_manual', group: '系统服务', title: 'Function Discovery Resource Publication 改手动启动', risk: 'low',
+    desc: 'FDResPub 启动类型改 Manual，下次开机不再常驻；这台机器在局域网中的"可发现性"会下降（其他设备不再自动看到本机的共享资源）。当前运行不受影响。',
+    steps: [
+      { label: 'FDResPub → Manual（不立即停止）', service: 'FDResPub', startType: 'manual' }
+    ],
+    restore: [
+      { label: '还原：FDResPub 改回 Automatic', service: 'FDResPub', startType: 'automatic' }
+    ]
+  },
+  {
+    id: 'svc_storsvc_manual', group: '系统服务', title: 'Storage Service 改手动启动', risk: 'low',
+    desc: 'StorSvc 启动类型改 Manual，下次开机不再常驻。不用 Windows 存储空间（Storage Spaces）与便携设备镜像的机器无影响；用了的请先手动启动再操作。当前运行不受影响。',
+    steps: [
+      { label: 'StorSvc → Manual（不立即停止）', service: 'StorSvc', startType: 'manual' }
+    ],
+    restore: [
+      { label: '还原：StorSvc 改回 Automatic', service: 'StorSvc', startType: 'automatic' }
+    ]
+  },
+  {
+    id: 'svc_xblauthmgr_manual', group: '系统服务', title: 'Xbox Live Auth Manager 改手动启动', risk: 'low',
+    desc: 'XblAuthManager 启动类型改 Manual，下次开机不再常驻。不用 Xbox App / Xbox Game Pass / Microsoft Store 游戏登录的机器无损；用到时首次启动会多一次登录。当前运行不受影响。',
+    steps: [
+      { label: 'XblAuthManager → Manual（不立即停止）', service: 'XblAuthManager', startType: 'manual' }
+    ],
+    restore: [
+      { label: '还原：XblAuthManager 改回 Automatic', service: 'XblAuthManager', startType: 'automatic' }
+    ]
+  },
   // ---------- 浏览器优化（EDGE 专优拆分为 16 个独立项） ----------
   edgePolicyItem('edge_hide_firstrun', '禁用首次运行体验', 'low', 'HideFirstRunExperience', 'dword:00000001',
     '不显示 Edge 首次运行欢迎页与数据导入向导，新装或新配置文件直接可用。'),
@@ -1665,6 +1919,10 @@ const OPTIONS = [
     steps: [{ label: '停用 Edge Update Machine Core', pwsh: 'Get-ScheduledTask -TaskName "MicrosoftEdgeUpdateTaskMachineCore" -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue' }],
     restore: [{ label: '重新启用 Edge Update Machine Core', pwsh: 'Get-ScheduledTask -TaskName "MicrosoftEdgeUpdateTaskMachineCore" -ErrorAction SilentlyContinue | Enable-ScheduledTask -ErrorAction SilentlyContinue' }]
   },
+  // D 批 2（v0.4.9 RAINZ 对标 §3.5）：禁用 Edge 地址栏 Copilot 搜索集成
+  // Edge 官方策略键 DisableCopilotSearchIntegration；已装 Edge 若未支持该策略则无效果（不谎报）。
+  edgePolicyItem('edge_copilot_search_off', '禁用 Edge 搜索页 Copilot 集成', 'low', 'DisableCopilotSearchIntegration', 'dword:00000001',
+    'Edge 地址栏搜索结果页不再自动接入 Copilot 侧栏回答。仅影响 Edge；不改变 Copilot 应用与系统级 Copilot（那由 tf_ai_off / sys_copilot_hide_button 覆盖）。'),
   // 第六大点-B（2026-09-14 重复点审查）：原「禁用 Edge 游戏助手覆盖层」
   // (edge_game_assistant_overlay_off) 已下线 —— 它的唯一动作就是写 HubsSidebarEnabled=0，
   // 与「禁用 Edge 边栏」(edge_sidebar_off) 完全相同（Edge 并未提供独立的游戏助手策略键），
@@ -1983,8 +2241,24 @@ function buildScript(steps) {
       // OPT-2（2026-09-15）：s.service 统一走 psQuoteForScript 生成单引号字面量，
       // 杜绝服务名含单引号时脱出引号拼接（当前内置常量无该字符，属前置加固）。
       const svcPs = psQuoteForScript(s.service);
-      L.push(`Stop-Service -Name ${svcPs} -Force -ErrorAction SilentlyContinue`);
-      if (s.disable) L.push(`Set-Service -Name ${svcPs} -StartupType Disabled -ErrorAction SilentlyContinue`);
+      // v0.4.9 D 批 3（RAINZ 对标 §3.5，AGENTS §5.12 二次扩宽允许本模板加枚举分支）：
+      // 新增 `startType: 'manual' | 'automatic' | 'disabled'`，走 Set-Service -StartupType。
+      // 语义分工：manual / automatic **不 Stop-Service**（只改下次开机行为，当前运行不受影响），
+      // disabled 与既有 `{ disable: true }` 等价（Stop + Set Disabled）。
+      // **向后兼容硬约束**：未带 startType 字段的既有项走 else 分支，生成字节与旧版逐字节一致
+      // （sync-ps-from-js --check 哨兵 steps 全部落在这条 else 上）。
+      const st = s.startType;
+      const wantsStartType = st === 'manual' || st === 'automatic' || st === 'disabled';
+      if (wantsStartType) {
+        if (st === 'disabled') {
+          L.push(`Stop-Service -Name ${svcPs} -Force -ErrorAction SilentlyContinue`);
+        }
+        const stCap = st === 'manual' ? 'Manual' : st === 'automatic' ? 'Automatic' : 'Disabled';
+        L.push(`Set-Service -Name ${svcPs} -StartupType ${stCap} -ErrorAction SilentlyContinue`);
+      } else {
+        L.push(`Stop-Service -Name ${svcPs} -Force -ErrorAction SilentlyContinue`);
+        if (s.disable) L.push(`Set-Service -Name ${svcPs} -StartupType Disabled -ErrorAction SilentlyContinue`);
+      }
       L.push(`if (-not (Get-Service -Name ${svcPs} -ErrorAction SilentlyContinue)) { $failedSteps++; Write-TFDiag -Stage 'optimizer.service' -Mutation 'rolled_back' -Detail ('step ' + (${i} + 1) + ' [' + ${labelPs} + '] 服务不存在: ' + ${svcPs}) }`);
     } else if (s.pwsh) {
       // SR-1（2026-09-15）：此前 pwsh 步骤原样裸拼、成败无人记账；又因 PS_PREAMBLE 的
@@ -2092,7 +2366,32 @@ const PROS_CONS = {
   'tf_svc_extra5': { pros: '停用传感器、存储感知、PCA 等非必要服务，减少后台进程与定时唤醒。', cons: '亮度自动调节等传感器功能失效，打印机兼容性助手不再提示，外设依赖相关服务时需还原。' },
   'tf_ctx_copymove': { pros: '右键菜单直达「复制/移动到文件夹」对话框，搬运文件免剪贴粘贴。', cons: '右键菜单新增两项条目，菜单略长；个别精简系统该 CLSID 处理器可能缺失而无效果。' },
   'tf_disk_extra3': { pros: '禁用 NTFS 目录加密、搜索仅限索引位置并释放约 7GB 更新保留存储，磁盘空间与扫描开销双降。', cons: 'EFS 文件加密不可用（BitLocker 不受影响），索引范围外的文件搜索变慢，保留存储还原需 DISM 联网。' },
-  'tf_store_autoupdate': { pros: '商店应用不再自动下载更新，消除后台偷跑流量与磁盘 IO，推广弹窗一并关闭。', cons: '应用须手动到商店检查更新，长期不更新可能错过安全补丁与新功能。' }
+  'tf_store_autoupdate': { pros: '商店应用不再自动下载更新，消除后台偷跑流量与磁盘 IO，推广弹窗一并关闭。', cons: '应用须手动到商店检查更新，长期不更新可能错过安全补丁与新功能。' },
+  // ===== v0.4.9 D 批 1（RAINZ 对标 §3.5）新增 4 项 =====
+  'wu_do_download_mode_off': { pros: 'Windows 更新只从微软官方源下载，本机不再向 LAN/互联网其他机器上传分块，后台带宽与磁盘 IO 更稳。', cons: '同网段多台 Windows 一起更新时整体下载速度可能变慢（失去 P2P 加速）；企业用 Delivery Optimization 做缓存分发的场景不适用。' },
+  'net_no_active_probe': { pros: '不再周期性向 msftconnecttest.com 发探测请求，隐私外发面收窄；断网时也不会反复重试。', cons: '任务栏网络图标失去"是否联网"的准确指示，可能一直显示正常；酒店/机场 captive portal 不会自动弹出登录页。' },
+  'sys_copilot_hide_button': { pros: '任务栏视觉更清爽，减少误点 Copilot 图标。', cons: '需要 Copilot 时要走其它入口触发（搜索或快捷键）；不影响 Copilot 后台服务（那由 tf_ai_off 覆盖）。' },
+  'sys_startmenu_ads_off': { pros: '开始菜单不再展示微软推广的应用图标，视觉更干净、少一层数据上报。', cons: '失去"这个应用可能对你有用"的推荐入口，需要自己搜装。' },
+  // ===== v0.4.9 D 批 2（RAINZ 对标 §3.5）新增 4 项 =====
+  'sys_startmenu_tip_off': { pros: '开始菜单不再弹功能提示与新手引导卡片，视觉稳定；也不弹"这个新技能你可以试试"的推广。', cons: '首次接触 Windows 新功能时缺少官方引导，需要自己查文档。' },
+  'sys_settings_ads_off': { pros: 'Windows 设置首页不再展示"为你推荐"卡片，进入设置就是设置本身。', cons: '偶尔有用的系统功能提示（例如BitLocker 提醒）可能一并被压制。' },
+  'sys_filesync_ads_off': { pros: '不再弹「把新文档自动保存到 OneDrive」的建议卡片，减少把本地文件误上云的引导压力。', cons: '真正需要云同步的用户要自己去 OneDrive 设置里手动开启 Known Folder Move。' },
+  'edge_copilot_search_off': { pros: 'Edge 地址栏搜索结果页不再自动接入 Copilot 侧栏回答，搜索体验回到普通结果列表；也少一层向微软服务端发送查询内容的通道。', cons: '需要 Copilot 回答时要手动点开或在应用里访问；已装 Edge 若未支持该策略则无效果。' },
+  // ===== v0.4.9 D 批 4（RAINZ 对标 §3.5）新增 4 项 =====
+  'sys_minanimate_off': { pros: '窗口最小化/最大化不再播缩放动画，视觉响应更直接；低配机与远程桌面上感知明显。', cons: '失去开合过渡的"柔和感"，习惯动画的用户短期会不适应。' },
+  'sys_taskbar_anim_off': { pros: '任务栏按钮切换与最小化不再播滑动动画，减少视觉噪声。', cons: '属偏好设置，喜欢 Windows 原生动画观感的用户会不习惯。' },
+  'sys_thumb_cache_off': { pros: '资源管理器不再把缩略图写入 thumbcache_*.db，多人共用/U 盘场景避免缩略图残留；隐私收益更明确。', cons: '每次进同一目录要重新计算缩略图，SSD 上开销可忽略、机械盘大目录略慢。' },
+  'sys_font_smoothing_cleartype': { pros: '把 FontSmoothingType 拉回 2（ClearType），LCD 屏上中文与英文都更清晰。', cons: '默认已是 2；本项只在被改回标准/无平滑时才有意义。CRT 或部分非整数 DPI 缩放下 ClearType 反而劣化。' },
+  // ===== v0.4.9 D 批 3（RAINZ 对标 §3.5）新增 4 项：服务改手动启动 =====
+  'svc_w32time_manual': { pros: 'W32Time 下次开机不再自动常驻，少一个后台服务；当前运行不受影响。', cons: 'AD 域环境与依赖精确系统时间的场景（证书校验、Kerberos）需要该服务在线；改成手动后要么依赖登录时组策略触发、要么手动启动。' },
+  'svc_fdrespum_manual': { pros: 'FDResPub 下次开机不再常驻，本机不再主动通过 WS-Discovery 广播可发现性。', cons: '局域网内其他 Windows 设备不再自动看到本机的共享资源；需要网络发现时要手动启动。' },
+  'svc_storsvc_manual': { pros: 'StorSvc 下次开机不再常驻，普通家用/办公机不用存储空间就没损失。', cons: '用到 Windows 存储空间、便携设备镜像或某些存储池管理操作时需要该服务在线，可能要手动启动。' },
+  'svc_xblauthmgr_manual': { pros: 'XblAuthManager 下次开机不再常驻，不用 Xbox App/Game Pass 的机器无损失。', cons: '首次登录 Xbox 相关应用时会多一次服务冷启动，个别 Store 游戏登录体验略慢。' },
+  // ===== v0.4.9 D 批 收尾 新增 4 项 =====
+  'wu_au_options_notify': { pros: 'Windows 更新不再自动跑完"检测→下载→安装"全流程，改为每次弹提示由你决定何时动手；能避开"正在演示/开会时突然开始下载"的场面。', cons: '只在 NoAutoUpdate=0 时生效；关掉自动更新（perf_windows_update_off）的机器本项无实际作用，且需要主动留意提示。' },
+  'wu_no_auto_reboot': { pros: '补丁装完后只要有用户登录就不会自动重启，避免"下班忘了关工作簿、半夜被 Windows 重启"。不影响补丁本身下载安装。', cons: '需要重启才能生效的补丁会被推迟，长期不主动重启会让部分修复未落地；建议偶尔手动重启。' },
+  'sys_transparency_off': { pros: '系统级透明效果关掉，低配机与远程桌面上 DWM 合成开销更少；开始菜单/任务栏/窗口边框视觉更"实"。', cons: '失去 Win11 标志性的透明/云母质感，视觉上更像传统实色窗口。与 Trim 窗材质设置不同层。' },
+  'devmgr_show_hidden_default': { pros: '打开设备管理器默认就能看见灰色"未插着"的历史设备，方便清理残留驱动（比如换过 WiFi 卡后老卡的驱动）。', cons: '列表会更长、混杂更多无关条目；不改变任何硬件行为，纯展示层。' }
 };
 
 // 将优点/缺点注入到选项目录（不改动上方 OPTIONS 结构）
@@ -2247,7 +2546,35 @@ const EFFECT_MAP = {
   tf_svc_extra5: '一般',
   tf_ctx_copymove: '一般',
   tf_disk_extra3: '一般',
-  tf_store_autoupdate: '一般'
+  tf_store_autoupdate: '一般',
+  // ===== v0.4.9 D 批 1（RAINZ 对标 §3.5）=====
+  // 4 项都在**微软文档公开的策略键**上；效果分级按"多数用户可感 vs 少数用户可感 vs 未验证"给。
+  // 「未验证」留给"要跑机器 + 场景 + 长期观察才能定"的效果 —— D 批 1 里没有一条属于此类，
+  // 但保留注释位以便下一批沿用同一路子。
+  wu_do_download_mode_off: '一般',
+  net_no_active_probe: '一般',
+  sys_copilot_hide_button: '微小',
+  sys_startmenu_ads_off: '一般',
+  // ===== v0.4.9 D 批 2 =====
+  sys_startmenu_tip_off: '一般',
+  sys_settings_ads_off: '一般',
+  sys_filesync_ads_off: '一般',
+  edge_copilot_search_off: '微小',
+  // ===== v0.4.9 D 批 4 =====
+  sys_minanimate_off: '微小',
+  sys_taskbar_anim_off: '微小',
+  sys_thumb_cache_off: '一般',
+  sys_font_smoothing_cleartype: '一般',
+  // ===== v0.4.9 D 批 3 =====
+  svc_w32time_manual: '微小',
+  svc_fdrespum_manual: '微小',
+  svc_storsvc_manual: '微小',
+  svc_xblauthmgr_manual: '微小',
+  // ===== v0.4.9 D 批 收尾 =====
+  wu_au_options_notify: '一般',
+  wu_no_auto_reboot: '一般',
+  sys_transparency_off: '微小',
+  devmgr_show_hidden_default: '微小'
 };
 // 注入预期效果；未登记的项（未来新增）默认「未验证」——诚实兜底，宁可不标好话
 OPTIONS.forEach(o => { o.effect = EFFECT_MAP[o.id] || '未验证'; });

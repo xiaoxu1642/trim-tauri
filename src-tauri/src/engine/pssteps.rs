@@ -1356,6 +1356,24 @@ fn parse_statement(
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             Ok(vec![PsOp::SvcStop { name }])
         }
+        "Set-Service" => {
+            // v0.4.9 D 批 3（RAINZ 对标 §3.5）：优化项「服务改 Manual 而非 Disabled」走这条。
+            // JS 模板 optimizer-scripts.js:2124 起会生成
+            //   `Set-Service -Name '<svc>' -StartupType <Manual|Automatic|Disabled> ...`
+            // 只识别 -StartupType 的三种拼法（首字母大写在 JS 侧固定），其他值直接 Err，
+            // 不"猜相近值"（AGENTS §9.3 纪律 ①）。与 `sc.exe config` 走同一个 PsOp::SvcSetStart，
+            // 落地都在下面 execute 分支的 service_set_start_pub。
+            let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
+            let raw = param(&cmd, "StartupType").ok_or("Set-Service 只支持 -StartupType 分支")?;
+            let val = lit(raw, "-StartupType")?;
+            let start = match val.as_str() {
+                "Automatic" | "auto" | "automatic" => 2,
+                "Manual" | "manual" => 3,
+                "Disabled" | "disabled" => 4,
+                other => return Err(format!("Set-Service -StartupType 不支持 {other}")),
+            };
+            Ok(vec![PsOp::SvcSetStart { name, start }])
+        }
         "Disable-ScheduledTask" | "Enable-ScheduledTask" => {
             let name = lit(param(&cmd, "TaskName").ok_or("缺 -TaskName")?, "-TaskName")?;
             let path = match param(&cmd, "TaskPath") {
@@ -1788,6 +1806,40 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// v0.4.9 D 批 3（RAINZ 对标 §3.5）：Set-Service -StartupType 三档都能翻成 SvcSetStart。
+    /// 走的是"服务改启动类型但不立即停"这条新语义入口，对应 JS 模板 2124 分支。
+    #[test]
+    fn parses_set_service_startup_type_three_values() {
+        for (verb, expect) in [
+            ("Manual", 3u32),
+            ("Automatic", 2),
+            ("Disabled", 4),
+        ] {
+            let src = format!("Set-Service -Name W32Time -StartupType {verb} -ErrorAction SilentlyContinue");
+            let ops = compile(&src).unwrap_or_else(|e| panic!("{src} 解析失败：{e}"));
+            assert_eq!(ops.len(), 1, "{verb} 应产出 1 条 op");
+            match &ops[0] {
+                PsOp::SvcSetStart { name, start } => {
+                    assert_eq!(name, "W32Time");
+                    assert_eq!(*start, expect, "StartupType={verb} 应翻成 {expect}");
+                }
+                other => panic!("StartupType={verb} 期望 SvcSetStart，实际 {other:?}"),
+            }
+        }
+    }
+
+    /// 反向：Set-Service 只支持 -StartupType，其他参数或缺参数一律 Err —— 不猜。
+    #[test]
+    fn set_service_rejects_missing_or_unknown_starttype() {
+        // 缺 -StartupType
+        assert!(compile("Set-Service -Name W32Time -ErrorAction SilentlyContinue").is_err());
+        // 未知值（大小写严格，防"猜相近值"）
+        let err = compile("Set-Service -Name W32Time -StartupType FooBar").unwrap_err();
+        assert!(err.contains("不支持"), "错因文案漂了：{err}");
+        // 只识别 Set-Service 的 -StartupType；-DisplayName 之类的分支不走这里，本项也不承诺支持
+        assert!(compile("Set-Service -Name W32Time -DisplayName X -StartupType Manual").is_ok());
     }
 
     #[test]

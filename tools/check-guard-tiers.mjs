@@ -119,6 +119,13 @@ const MUST_MAIN = [
   // restore 往磁盘写文件，档位方向写错会锁死功能（M1~M3 教训的反面）
   'uninstall_batch_list',
   'uninstall_batch_restore',
+  // P2 §3.6（2026-10-03 RAINZ 对标）：系统面板三条 —— 电源方案写侧、系统级、
+  // 只在主窗 settings 页有入口；pagefile_state 虽只读但同域同档，
+  // 免得下一批加写侧时又要改档位（AGENTS §3 M1~M3 教训的"反向"：判档要看**下一批**会不会翻）。
+  'syspanel_power_plan_get',
+  'syspanel_power_plan_apply',
+  'syspanel_pagefile_state',
+  'syspanel_pagefile_apply',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----

@@ -36,5 +36,7 @@ mod services;
 pub use services::{service_start_type_is, SVC_START_DISABLED, service_stop_pub, service_set_start_pub};
 mod startup;
 pub use startup::{startup_scan, startup_toggle, startup_delete, startup_add};
+mod syspanel;
+pub use syspanel::{PagefileEntry, pagefile_apply, pagefile_state, power_plan_apply, power_plan_state};
 
 

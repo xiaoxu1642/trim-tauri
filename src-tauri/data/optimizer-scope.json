@@ -37,6 +37,11 @@
     "peripheral_mouse_trails": "explorer",
     "peripheral_snap_to": "explorer",
     "tf_ai_off": "explorer",
-    "tf_ctx_copymove": "explorer"
+    "tf_ctx_copymove": "explorer",
+    "sys_copilot_hide_button": "explorer",
+    "sys_taskbar_anim_off": "explorer",
+    "sys_thumb_cache_off": "explorer",
+    "net_no_active_probe": "reboot",
+    "devmgr_show_hidden_default": "reboot"
   }
 }

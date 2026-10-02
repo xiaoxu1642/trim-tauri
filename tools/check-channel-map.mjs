@@ -101,6 +101,10 @@ const TAURI_ADDED = {
   'uninstall:orphan-ignore': 'C2/M4（2026-09-28）：把某历史 owner 记入忽略清单（同上）',
   'uninstall:reg-backup-list': 'D1/M5（2026-09-28）：卸载域注册表备份列表（此前备份只写不读）',
   'uninstall:reg-backup-restore': 'D1/M5（2026-09-28）：单个备份 reg import 还原（主窗档 + 危险确认）',
+  'syspanel:power-plan-get': 'P2 §3.6（2026-10-03）：电源方案读侧（RAINZ 对标系统面板）',
+  'syspanel:power-plan-apply': 'P2 §3.6（2026-10-03）：电源方案三档切换 + 400ms 回读校验（主窗档，白名单 GUID）',
+  'syspanel:pagefile-state': 'P2 §3.6（2026-10-03）：虚拟内存只读展示（写侧同批落地）',
+  'syspanel:pagefile-apply': 'P2 §3.6（2026-10-03）：虚拟内存写侧（AutomaticManagedPagefile + PagingFiles；主窗档 + 高危确认 + 需重启）',
 };
 
 function collect(set, re, text) {

@@ -223,7 +223,12 @@
     'startup:toggle': 'startup_toggle',
     'startup:delete': 'startup_delete',
     'startup:openlocation': 'startup_openlocation',
-    'startup:add': 'startup_add'
+    'startup:add': 'startup_add',
+    // syspanel（P2 §3.6：电源计划 + 虚拟内存面板，只在主窗 settings 页调用）
+    'syspanel:power-plan-get': 'syspanel_power_plan_get',
+    'syspanel:power-plan-apply': 'syspanel_power_plan_apply',
+    'syspanel:pagefile-state': 'syspanel_pagefile_state',
+    'syspanel:pagefile-apply': 'syspanel_pagefile_apply'
   };
 
   /** Electron invoke 通道 → Promise（成功 resolve / 失败 reject，与 ipcRenderer.invoke 同契约）。 */
@@ -664,6 +669,21 @@
       },
       // 固定磁盘盘符列表（finder 大文件/空文件页盘符点选器，2026-09-28 六轮拍板）
       diskList: function () { return invokeChannel('system:disk-list'); }
+    },
+
+    // syspanel（P2 §3.6）：电源计划读写 + 虚拟内存读写；主窗 settings 页专用
+    syspanel: {
+      powerPlanGet: function () { return invokeChannel('syspanel:power-plan-get'); },
+      powerPlanApply: function (guid) { return invokeChannel('syspanel:power-plan-apply', { guid: guid }); },
+      pagefileState: function () { return invokeChannel('syspanel:pagefile-state'); },
+      // 高危：前端必须显式带 confirmedHighRisk:true，后端未确认直接 Err
+      pagefileApply: function (managed, entries) {
+        return invokeChannel('syspanel:pagefile-apply', {
+          managed: managed,
+          entries: entries || [],
+          confirmedHighRisk: true
+        });
+      }
     },
 
     startup: {

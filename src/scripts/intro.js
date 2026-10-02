@@ -54,16 +54,42 @@
   }
 
   // 电脑优化中心：按优化项 id 精确匹配，其次按所属分组，最后兜底
+  // v0.4.9 RAINZ 对标 §3.4：byId 值兼容两种形状 ——
+  //   · 旧：`"一段简介文本"`（string）
+  //   · 新：`{desc, tips?}`（对象；tips 是 {normal, game, office} 三档场景建议）
+  // 迁移窗口内两种都吃，之后新增项一律走 {desc} 对象；`check-item-intro.mjs` ① 会盯形状。
+  function normalizeIntro(entry) {
+    if (typeof entry === 'string') return { desc: entry, tips: null };
+    if (entry && typeof entry === 'object' && typeof entry.desc === 'string') {
+      return { desc: entry.desc, tips: entry.tips || null };
+    }
+    return { desc: '', tips: null };
+  }
+
   function getOptimizer(item) {
     const cfg = scopeConfig('optimizer');
     const byId = cfg.byId || {};
     const byGroup = cfg.byGroup || {};
     const id = String((item && (item.id || item.optionId)) || '').trim();
-    if (id && byId[id]) return { text: byId[id], level: 'item', label: '本项简介' };
+    if (id && byId[id]) {
+      const n = normalizeIntro(byId[id]);
+      return { text: n.desc, level: 'item', label: '本项简介' };
+    }
     if (item && item.desc) return { text: String(item.desc), level: 'item', label: '本项简介' };
     const group = String((item && (item.group || item.category)) || '').trim();
     if (group && byGroup[group]) return { text: byGroup[group], level: 'group', label: group + '（分组简介）' };
     return { text: cfg.default || '', level: 'default', label: '通用说明' };
+  }
+
+  // 三档场景建议：只在 byId 里显式填了 tips 的项返回对象；其他一律 null（面板不渲染空壳）。
+  // 与 check-item-intro ② 契约绑定：三档要么全在、要么整段没有。
+  function getOptimizerTips(item) {
+    const cfg = scopeConfig('optimizer');
+    const byId = cfg.byId || {};
+    const id = String((item && (item.id || item.optionId)) || '').trim();
+    if (!id || !byId[id]) return null;
+    const n = normalizeIntro(byId[id]);
+    return n.tips;
   }
 
   // 启动项管理：按名称关键字匹配，其次按来源（注册表/启动文件夹/计划任务），最后兜底
@@ -174,6 +200,22 @@
 
     await load();
     const local = getLocal(scope, item);
+    // 三档场景建议：只对 optimizer 生效；未填 tips 的项返回 null，本段整块不渲染（不留空壳）。
+    const tips = scope === 'optimizer' ? getOptimizerTips(item) : null;
+    const tipsHtml = tips
+      ? `
+        <div class="intro-block intro-tips" role="group" aria-label="按场景看建议">
+          <div class="intro-block-head">
+            <span class="intro-block-title">按场景看建议</span>
+            <span class="intro-block-tag">离线内置 · 三档取舍</span>
+          </div>
+          <div class="intro-tips-list">
+            <div class="intro-tips-row"><span class="intro-tips-key">日常</span><span class="intro-tips-val">${escapeHtml(tips.normal || '')}</span></div>
+            <div class="intro-tips-row"><span class="intro-tips-key">游戏</span><span class="intro-tips-val">${escapeHtml(tips.game || '')}</span></div>
+            <div class="intro-tips-row"><span class="intro-tips-key">办公</span><span class="intro-tips-val">${escapeHtml(tips.office || '')}</span></div>
+          </div>
+        </div>`
+      : '';
 
     mount.innerHTML = `
       <div class="intro-panel" data-scope="${escapeHtml(scope)}">
@@ -184,6 +226,7 @@
           </div>
           <div class="intro-local-text">${escapeHtml(local.text || '暂无本地简介')}</div>
         </div>
+        ${tipsHtml}
         <div class="intro-block intro-ai">
           <div class="intro-block-head">
             <span class="intro-block-title">联网 AI 简介</span>
@@ -280,5 +323,5 @@
     manageBtn.addEventListener('click', () => openModelsWindow());
   }
 
-  window.intro = { load, getLocal, getOptimizer, getStartup, getContextmenu, getMemoryclean, mountIntroPanel, currentModelName, SCOPE_LABEL };
+  window.intro = { load, getLocal, getOptimizer, getOptimizerTips, getStartup, getContextmenu, getMemoryclean, mountIntroPanel, currentModelName, SCOPE_LABEL };
 })();

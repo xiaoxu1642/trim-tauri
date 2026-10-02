@@ -11,6 +11,7 @@ pub mod overview;
 pub mod paths;
 pub mod realtime;
 pub mod system;
+pub mod syspanel;
 // ---- B 批（只读扫描 + 安全与运行时）----
 pub mod finder;
 pub mod uninstall;

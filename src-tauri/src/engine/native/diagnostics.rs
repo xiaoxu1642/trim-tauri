@@ -335,11 +335,12 @@ pub fn overview_checkup() -> Result<Value, String> {
         if let Some(e) = hist.read_error.as_deref() {
             checks.push(check_item("crash_history", "蓝屏记录", "unknown", "无法读取", e, "未验证"));
         } else if let Some(newest) = hist.records.first() {
-            let code_text = newest
+            // 短码串：优先带官方名，未收录时只给十六进制（不编造名字）
+            let code_short = newest
                 .bugcheck
-                .map(|c| match super::bsod::bugcheck_name(c) {
-                    Some(n) => format!("0x{c:08X} {n}"),
-                    None => format!("0x{c:08X}（未收录的 bugcheck 码）"),
+                .map(|c| match super::bsod::bugcheck_detail(c) {
+                    Some(d) => format!("0x{c:08X} {}", d.name),
+                    None => format!("0x{c:08X}"),
                 })
                 .unwrap_or_else(|| "码未读出（转储头部形态异常）".to_string());
             let when = super::bsod::age_text(newest.mtime_ms, crate::engine::now_ms());
@@ -354,16 +355,72 @@ pub fn overview_checkup() -> Result<Value, String> {
                 Some(_) => "，崩溃后不自动重启",
                 None => "",
             };
+            let head = format!(
+                "最近一次 {code_short}{p0}；转储 {}（{} KB）{reboot}。文件保持原样未动。",
+                newest.path,
+                newest.size / 1024
+            );
+            // v0.4.9 起（RAINZ 对标 §3.1）：detail 追加三段「含义 / 常见成因 / 建议」，
+            // 未收录的码走 classify_fallback 给分类方向（不编造 causes）。
+            // 换行分隔靠前端 CSS 的 white-space: pre-line 生效，与 §3.1 落法 4
+            // 「复用 checks 通道、零新增 IPC」的定位一致。
+            let body = match newest.bugcheck {
+                Some(c) => match super::bsod::bugcheck_detail(c) {
+                    Some(d) => super::bsod::render_detail(d),
+                    None => {
+                        let hit = super::bsod::classify_fallback(c);
+                        super::bsod::render_fallback(c, &hit)
+                    }
+                },
+                None => String::new(),
+            };
+            // v0.4.9 起（RAINZ 对标 §3.2）：崩溃模块定位。四个参数里第一个能落到
+            // 某个模块 [base, base+size) 区间内的地址就是"疑似出错模块"；不命中就不写这段
+            // （不猜"最近的模块"）。全内存转储本轮不解模块（要内核符号），也走这条无路径。
+            let module_line = match (&newest.crash_module, newest.crash_addr) {
+                (Some(name), Some(addr)) => format!("\n出错模块：{name}（0x{addr:016X}）"),
+                _ => String::new(),
+            };
+            let mut detail = head;
+            if !body.is_empty() {
+                detail.push_str("\n\n");
+                detail.push_str(&body);
+            }
+            detail.push_str(&module_line);
+            // v0.4.9 起（RAINZ 对标 §3.3）：崩溃事件时间线（近 30 天 Kernel-Power 41 /
+            // EventLog 6008 / WER-BugCheck 1001）。放最后一段，让用户能核对
+            // 「文件 mtime 的近似时间」与「事件里的权威时间」是否对得上。
+            // 事件为空（本机没崩过 / 权限不足 / 日志被裁）时不写这段。
+            {
+                let events = super::bsod::event_timeline(30);
+                if !events.is_empty() {
+                    let now = crate::engine::now_ms();
+                    let lines: Vec<String> = events
+                        .iter()
+                        .take(3)
+                        .map(|e| {
+                            let code = e
+                                .bugcheck
+                                .map(|c| format!(" · 0x{c:08X}"))
+                                .unwrap_or_default();
+                            format!(
+                                "· {}（EventID={}）{}",
+                                super::bsod::age_text(e.time_ms, now),
+                                e.event_id,
+                                code
+                            )
+                        })
+                        .collect();
+                    detail.push_str("\n\n事件时间线（近 30 天，最多 3 条）：\n");
+                    detail.push_str(&lines.join("\n"));
+                }
+            }
             checks.push(check_item(
                 "crash_history",
                 "蓝屏记录",
                 "warn",
                 &format!("{} 个转储，最近 {when}", hist.records.len()),
-                &format!(
-                    "最近一次蓝屏码 {code_text}{p0}；转储 {}（{} KB）{reboot}。文件保持原样未动，可用 BlueScreenView 之类工具查驱动归属",
-                    newest.path,
-                    newest.size / 1024
-                ),
+                &detail,
                 "本机实测",
             ));
         } else if cc.dump_enabled() {

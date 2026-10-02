@@ -166,14 +166,14 @@
     netcheck: ['scripts/netcheck.js'],
     runtimes: ['scripts/runtimes.js'],
     quickcmds: ['scripts/quickcmds-data.js', 'scripts/quickcmds.js'],
-    settings: ['scripts/pathbinding.js']
+    settings: ['scripts/pathbinding.js', 'scripts/syspanel.js']
   };
   // 需要显式调用 init() 的模块：这些文件加载时不会自执行 init。
   // 未列入的是自初始化件（DOMContentLoaded 自执行或纯数据/工具）——再调一次会重复绑定监听器。
   const MODULES_NEEDING_INIT = new Set([
     'cleanup', 'contextmenu', 'deviceinfo', 'diskbench', 'fontmanager', 'intro',
     'maintenance', 'memoryclean', 'netcheck', 'netspeed', 'optimizer', 'overview',
-    'pathbinding', 'quickcmds', 'realtime', 'runtimes', 'startup', 'sysrestore'
+    'pathbinding', 'quickcmds', 'realtime', 'runtimes', 'startup', 'syspanel', 'sysrestore'
   ]);
   // 首帧后空闲加载：视觉增强 + 自动更新 UI（不阻塞首帧）。
   // pathbinding 也放这里——cleanup.js 的 QQ/微信文件清理会读它的路径配置，

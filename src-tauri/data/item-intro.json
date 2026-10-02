@@ -1,8 +1,8 @@
 {
-  "version": 2,
-  "updatedAt": "2026-09-04",
+  "version": 3,
+  "updatedAt": "2026-10-03",
   "source": "Trim 内置本地简介库（离线内置，不联网、不上传任何本机信息）",
-  "note": "本地简介为离线兜底内容；联网 AI 简介需在用户点击「获取AI简介」后由所选大模型生成，两者在界面上明确区分展示。",
+  "note": "本地简介为离线兜底内容；联网 AI 简介需在用户点击「获取AI简介」后由所选大模型生成，两者在界面上明确区分展示。 v3 起 byId 值形态为 {desc, tips?}；tips 是「日常 / 游戏 / 办公」三档场景建议，未填的项前端不显示该区。",
   "scopes": {
     "optimizer": {
       "label": "电脑优化中心",
@@ -27,115 +27,691 @@
         "性能调优": "性能调优类：限制后台运行与自动更新以减少资源抢占，长期关闭更新会带来安全风险，建议仅在需要专注工作时临时使用。"
       },
       "byId": {
-        "tf_ntfs": "关闭 8.3 短名、最后访问时间戳等 NTFS 元数据写入，减少无谓磁盘写入，机械硬盘上的收益更明显。",
-        "tf_hibern_off": "关闭休眠与快速启动并删除 hiberfil.sys，可释放数 GB 系统盘空间；代价是失去休眠功能与快速开机。",
-        "tf_core_misc": "调整菜单延迟、关机等待、窗口动画等系统响应参数，让界面交互更跟手，属于低风险的体验优化。",
-        "tf_timer_coal": "关闭计时器合并以提升计时精度与前台响应速度，代价是待机功耗上升，笔记本用户需权衡续航。",
-        "game_dvr": "关闭 Xbox 游戏栏的后台录制与广播，释放 GPU 与磁盘占用，避免帧率被后台录制拖低。",
-        "mmcss_optimize": "合并原「游戏高优先级」与「MMCSS 系统增强」：Games 任务高调度/高 GPU 优先级 + 低延迟标记 + 系统级 NoLazyMode/AlwaysOn，为游戏与影音提供低延迟的多媒体调度（原「启用 Games 低延迟调度标记」同值重复已并入）。",
-        "nara_prio": "为《永劫无间》进程设置 CPU 与 IO 优先级，减少后台抢占造成的帧率波动，对其他游戏无效。",
-        "disable_uac": "完全关闭用户账户控制，不再弹出提权提示，代价是系统安全性显著下降，不建议日常使用。",
-        "tf_gamemode": "开启 Windows 游戏模式，让系统在游戏运行时优先分配资源并抑制后台更新与通知。",
-        "tf_gamebar": "关闭游戏栏的后台录制与截图捕获组件，减少资源占用，同时保留 Win+G 快捷键的可用入口。",
-        "tf_gpu_latency": "调整 GPU 延迟容忍度与抢占策略，降低 DPC 延迟与帧生成抖动，对竞技类游戏收益较明显。",
-        "tf_ifeo_perf": "通过 IFEO 为指定进程固定 CPU/IO 与页面优先级；配置不当可能影响稳定性，属高风险项。",
-        "tf_ifeo_wipe": "清理注册表中残留的 IFEO 调试器与优先级配置，恢复程序默认启动行为，用于修复被篡改的启动配置。",
-        "svc_mem_gb": "提高 SVCHost 进程拆分的内存阈值，减少进程数量与内存碎片，适合大内存机器。",
-        "tf_mmagent": "关闭内存压缩与页面合并，降低后台 CPU 开销，代价是多任务场景下更容易吃满物理内存。",
-        "tf_svc_bulk": "批量禁用 70 多个被认为非必要的服务以释放资源，范围较大，可能影响打印、蓝牙、远程桌面等功能，属高风险项；执行时会单独弹窗询问是否连商店相关服务（ClipSVC/InstallService/PushToInstall/wuauserv/DoSvc）一并禁用，禁用后 Windows 应用商店的使用、更新与下载会受影响。",
-        "tf_drv_disable": "禁用部分易出问题或极少使用的驱动服务，降低攻击面与蓝屏概率；误禁用可能导致对应硬件不可用。",
-        "share_off": "关闭 ADMIN$、C$ 等默认隐藏共享，减少局域网被横向访问的风险，仅影响远程管理类场景。",
-        "telemetry_optimize": "合并原「关闭系统遥测」与「停用遥测计划任务/日志」：策略层 + 计划任务层 + AutoLogger + 遥测服务四层一体掐断遥测采集与上传，减少隐私外发与后台网络活动。",
-        "power_off": "关闭处理器节能与链接状态电源管理，换取持续高性能输出，代价是功耗、温度上升与笔记本续航缩短。",
-        "tf_defender": "关闭 Microsoft Defender 实时防护与 SmartScreen，会显著降低系统安全防护，仅在有替代杀软并明确接受风险时执行。",
-        "tf_privacy": "统一关闭广告 ID、位置、活动历史等隐私选项，减少个性化数据收集，不影响系统功能的正常可用。",
-        "privacy_permissions_tune": "按缺失项清单合并精调 20+ 项权限与数据收集开关：应用访问拒绝、活动收集、写作习惯、键入文本、输入个性化、OOBE 隐私体验、通讯录、热点自动连接、.NET/PowerShell 遥测环境变量、启用剪贴板历史、停用 SMS 路由器服务；已被现有项覆盖的键值不再重复写入。",
-        "tf_nvidia_telemetry": "关闭 NVIDIA 驱动的遥测服务与自动更新检查，减少后台进程与网络活动，显卡驱动本身功能不受影响。",
-        "tf_keys_sticky": "从注册表彻底关闭粘滞键、筛选键与切换键，杜绝游戏中连按 Shift 弹出提示的干扰。",
-        "tf_usb_power": "禁止系统为省电暂停 USB 设备，避免鼠标、耳机、外置硬盘在空闲后被断开或唤醒延迟。",
-        "mouse_optimize": "合并原「鼠标去加速 + 6/11 灵敏度」与「清空平滑鼠标曲线」：关闭指针加速、灵敏度固定 6/11 档并清零平滑曲线，指针移动完全线性，得到与多数 FPS 游戏一致的原始输入手感。",
-        "tf_keyboard": "调整键盘重复延迟与输入队列深度，缩短按键响应与连击间隔，提升打字与游戏跟手度。",
-        "tf_dev_disable": "批量禁用串口、并口等 24 个极少使用的板载设备，减少驱动占用与设备枚举开销，需要时请还原。",
-        "tf_dev_audio": "禁用主板高清音频控制器，仅在改用独立声卡或 USB 音频设备时使用，否则会导致无声。",
-        "tf_dev_printer": "禁用打印队列与相关设备，减少后台服务开销；仍需要打印的机器请勿执行。",
-        "tf_restore_point": "为所有已开启系统保护的磁盘创建一个还原点，作为执行高风险优化前的回退保障；本身不改变系统行为，仅占用少量磁盘空间，需至少一个卷已启用系统保护。",
-        "tf_appx": "卸载 25 个内置 UWP 应用以释放空间，部分依赖组件可能被一并移除且难以完整恢复，属高风险项。",
-        "tf_cortana": "关闭 Cortana 与开始菜单的网页搜索，减少联网搜索与后台进程，不影响本地文件搜索。",
-        "tf_onedrive": "完整卸载 OneDrive，将 OneDrive 数据目录移入系统回收站（可还原）并清理资源管理器侧栏入口，释放磁盘与后台同步开销；正在使用云盘的用户请先完成同步备份。",
-        "audio_disable_enhancements": "关闭音频设备的音效增强处理，缩短音频处理链路、降低延迟，音色更接近原始录音。",
-        "audio_disable_spatial_sound": "关闭空间音效（如 Windows Sonic），避免虚拟环绕带来的延迟与音色改变，游戏定位听感更真实。",
-        "audio_mmcss_priority": "为音频线程提升 MMCSS 调度优先级，减少爆音与卡顿，CPU 高负载时效果尤其明显。",
-        "audio_mmcss_schedule": "调整音频线程的调度类别与周期，降低缓冲下溢概率，可能与部分专业声卡驱动存在兼容性差异。",
-        "audio_disable_comm_ducking": "禁止系统在检测到通话时自动压低其他应用音量，避免游戏或音乐被突然拉低。",
-        "audio_disable_service_restart": "将 Windows Audio 服务改为自动（非延迟启动），减少开机后短暂无声与设备识别慢的问题。",
-        "audio_disable_voice_activation": "禁止应用自行激活语音识别麦克风，减少后台监听与隐私风险，语音助手需手动唤起。",
-        "audio_disable_voice_activation_last_used": "清除并禁止记录语音激活的最近使用信息，减少使用痕迹在本机留存。",
-        "audio_disable_narrator_ducking": "禁用讲述人朗读时压低其他音量的行为，适合不使用讲述人却常被压低音量的场景。",
-        "desktop_show_ext": "在资源管理器中显示文件扩展名，便于识别伪装成文档的可执行文件，提升安全性与使用效率。",
-        "desktop_show_hidden": "显示被隐藏的文件与系统文件夹，方便排查问题；不熟悉系统文件时请谨慎修改其中内容。",
-        "desktop_thumb_delay": "去掉资源管理器缩略图的悬停延迟，快速预览图片与视频内容，磁盘较慢时可能略有卡顿。",
-        "desktop_sep_process": "让每个资源管理器窗口使用独立进程，单窗口崩溃不再影响其他窗口，代价是内存占用略增。",
-        "desktop_taskbar_left": "将任务栏图标恢复为左对齐（Windows 10 风格），纯偏好设置，无性能影响。",
-        "desktop_taskbar_show_desktop": "在任务栏最右侧启用「显示桌面」按钮，一键最小化所有窗口。",
-        "desktop_taskbar_multi": "让多显示器环境下每个屏幕都显示任务栏，方便跨屏切换窗口，会占用少量屏幕空间。",
-        "desktop_low_disk_off": "排查并关闭低磁盘空间提醒的触发条件，避免频繁弹窗打扰；磁盘紧张时请留意剩余容量。",
-        "explorer_autorestart": "explorer.exe 意外退出后由系统自动拉起，桌面与任务栏无需手动重启。",
-        "explorer_refresh_policy": "禁用简化的网络标识列表，让资源管理器按完整信息刷新文件列表，减少新建/重命名后不即时显示的问题。",
-        "edge_hide_firstrun": "不显示 Edge 首次运行欢迎页与数据导入向导，新装或新配置文件直接可用。",
-        "edge_bg_mode_off": "Edge 关闭所有窗口后不再驻留后台运行，释放内存与后台占用；网页推送通知将不再及时送达。",
-        "edge_startup_boost_off": "关闭系统启动时的 Edge 预加载（启动增强），开机进程更少。",
-        "edge_intrusive_ads_off": "在所有网站上阻止侵入式广告，减少误导弹窗与虚假下载按钮。",
-        "edge_ntp_quicklinks_off": "从新标签页隐藏默认的热门站点快速链接。",
-        "edge_sidebar_off": "隐藏浏览器右侧边栏（Copilot、发现等入口）。",
-        "edge_unsupported_os_warn_off": "关闭此版本 Windows 即将停止支持的 Edge 通知。",
-        "edge_metrics_off": "不向微软发送任何浏览器诊断数据，关闭浏览器侧隐私外发。",
-        "edge_tab_perf_detector_off": "关闭标签页性能检测器，不再弹出性能提示。",
-        "edge_ntp_content_off": "新标签页不展示微软资讯信息流。",
-        "edge_personalization_off": "不发送浏览历史用于个性化广告与体验推荐。",
-        "edge_insecure_download_warn_off": "关闭不安全（HTTP）下载警告，仅建议熟练用户使用。",
-        "edge_rewards_hide": "隐藏 Microsoft Rewards 积分入口与提醒。",
-        "edge_sxs_service_off": "关闭 EdgeUpdate 客户端的 SxsService 组件，减少后台活动。",
-        "edge_update_task_disable": "停用 Edge 自动更新计划任务；停用后请定期手动更新浏览器。",
-        "tasks_disable_defrag": "关闭计划碎片整理任务的自动触发；固态硬盘本就不需要碎片整理，机械硬盘建议保留。",
-        "tasks_disable_silent_cleanup": "禁用自动静默清理任务，避免系统在空闲时突然占用磁盘，改为由你手动清理。",
-        "tasks_disable_winbackup": "关闭 Windows 备份的监视任务，不使用系统备份时可减少后台唤醒。",
-        "tasks_disable_settingsync": "禁用设置同步的后台任务，减少网络与后台活动，多设备间的设置同步功能会失效。",
-        "peripheral_inactive_scroll": "关闭「悬停即滚动」的非活动窗口滚动，避免鼠标划过时误滚动其他窗口。",
-        "peripheral_winkey_off": "禁用 Windows 键，避免游戏中误触弹出开始菜单；需要使用 Win 组合键时请还原。",
-        "peripheral_mouse_trails": "关闭鼠标指针轨迹，去掉拖影，指针移动更干净利落。",
-        "peripheral_snap_to": "关闭鼠标自动跳到对话框默认按钮的行为，避免误点「确定」。",
-        "privacy_advertising_id": "排查并关闭广告 ID 的个性化推荐，减少跨应用的广告画像追踪。",
-        "privacy_wer_off": "排查并关闭 Windows 错误报告的自动上报，减少崩溃信息外发，故障排查时可参考的信息会变少。",
-        "privacy_compat_telemetry": "关闭兼容性遥测（程序兼容性助手的数据收集），减少应用运行行为被上传。",
-        "privacy_settingsync_off": "关闭设置与应用数据的云同步，减少数据外传，多设备之间不再自动同步偏好设置。",
-        "privacy_cloud_content": "关闭开始菜单与锁屏的云端推荐内容（建议、提示、推广），界面更干净。",
-        "svc_connected_devices_manual": "将跨设备连接平台服务改为手动启动，减少常驻后台；需要手机联动或无线投影时再启动。",
-        "svc_fax_disable": "排查并禁用传真服务，绝大多数家用与办公环境不使用传真，可释放一个后台服务。",
-        "svc_remote_registry_disable": "禁用远程注册表服务，阻断远程读取本机注册表的通道，提升安全性。",
-        "svc_remote_connectivity_manual": "将远程连接相关服务设为手动，减少常驻后台并降低远程攻击面。",
-        "svc_bluetooth_disable": "排查并禁用蓝牙支持服务，不使用蓝牙键鼠或耳机时可释放资源，需要蓝牙时请还原。",
-        "power_aspm_off": "关闭 PCI-E 链路的 ASPM 节能状态，避免设备进入低功耗导致延迟抖动，代价是整机功耗上升。",
-        "storage_8dot3_off": "关闭 8.3 短文件名生成，减少文件创建时的额外元数据写入，老旧 16 位程序可能受影响。",
-        "perf_uwp_background_off": "排查并限制 UWP 应用的后台运行，减少后台唤醒与耗电，消息类应用可能延迟收到通知。",
-        "perf_store_auto_update_off": "关闭 Microsoft Store 应用的自动更新，避免更新时机不可控；请记得定期手动更新以修复安全漏洞。",
-        "perf_windows_update_off": "彻底关闭 Windows 自动更新（NoAutoUpdate=1），安全补丁将不再自动送达；仅在明确知晓风险并有其它补丁维护方式时执行，只想推迟一段时间请改用「Windows 更新：暂停到日期」。",
-        "perf_wu_pause": "把 Windows 更新推迟到指定天数之后（1~35 天），走官方暂停键，服务照常运行、到期自动恢复，是推迟更新的推荐方式。",
-        "perf_wu_enable": "清除 Trim 写入的暂停键与 NoAutoUpdate 策略，让 Windows 恢复默认的自动检查与安装；只删 Trim 自己写过的键。",
-        "privacy_defender_cloud": "把 Defender 云保护（MAPS）报告级别设为 0，不再把可疑文件送微软云端比对；本地查杀仍然工作，新威胁的云端判定速度会下降。",
-        "privacy_defender_sample": "把自动样本提交设为永不发送；不影响本地查杀能力，微软对新样本的响应速度会变慢。",
-        "perf_notifications_off": "关闭系统全局通知横幅与提示音，减少打扰，重要的系统告警也可能一并被隐藏。",
-        "perf_vbs_off": "关闭基于虚拟化的安全（VBS）与内存完整性保护，可提升部分游戏性能，但会明显削弱系统对内核级攻击的防护。",
-        "perf_remote_assist_off": "禁用 Windows 远程协助的受邀协助入口，减少攻击面与后台监听。",
-        "perf_prefetcher_fast": "EnablePrefetcher=3 同时启用应用与启动预读，改善程序启动与文件访问速度；SSD 上收益有限。",
-        "perf_crash_autoreboot": "蓝屏后自动重启而非停留在选择界面，适合无人值守场景；排查蓝屏时建议临时关闭。",
-        "perf_exploit_protection_off": "写入内核 MitigationOptions 二进制值关闭漏洞利用缓解（乱序内存等），可小幅提升内存分配性能，但显著降低防护，属高风险项。",
-        "tf_ai_off": "通过系统策略关闭 Copilot、Recall、Click to Do、AI Agent 连接器及相关运行时服务，减少后台活动和 AI 数据处理。执行后这些 Windows AI 功能将不可用，但可用内置还原操作恢复。",
-        "tf_perf_misc": "取消开机启动延迟，并关闭窗口摇晃、失效快捷方式自动查找及运行/资源管理器自动建议；并同步收紧前台焦点等待（ForegroundLockTimeout=0）与关机时等待应用、服务退出的超时（各 2000 毫秒）。该项主要改变交互偏好与关机等待，不会提升硬件性能。",
-        "tf_privacy_extra": "关闭 Chrome、Firefox、Visual Studio 与 Windows 许可/兼容性相关遥测，同时停用新闻兴趣流和步骤记录器。可减少数据上报，但会降低诊断、反馈和部分内容推荐能力。",
-        "tf_svc_extra5": "精简传感器、存储感知、应用兼容性助手与诊断建议相关服务。可能影响自动磁盘清理、兼容性提示以及依赖传感器的打印/扫描设备，执行前请确认使用场景。",
-        "tf_ctx_copymove": "为文件和文件夹的经典右键菜单添加“复制到文件夹…”与“移动到文件夹…”入口，便于直接选择目标位置。还原操作只移除新增菜单项，不会移动或删除已有文件。",
-        "tf_disk_extra3": "关闭 NTFS 文件系统级加密、限制开始菜单搜索范围，并禁用 Windows 更新保留存储。可减少扫描和预留空间占用，但会影响 EFS 加密与更新空间保障；不影响 BitLocker。",
-        "tf_store_autoupdate": "关闭 Microsoft Store 应用自动更新和 Windows 消费者推广内容，避免后台下载与静默安装。执行后需要手动打开 Microsoft Store 检查应用更新，以免遗漏安全修复。"
+        "tf_ntfs": {
+          "desc": "关闭 8.3 短名、最后访问时间戳等 NTFS 元数据写入，减少无谓磁盘写入，机械硬盘上的收益更明显。",
+          "tips": {
+            "normal": "普通用户可开；跨老程序（16 位或依赖短名的旧工具）时先测。",
+            "game": "推荐开：游戏目录读多写少，减少元数据写入对帧率影响小但省 SSD 寿命。",
+            "office": "谨慎：某些企业文档管理系统/老旧 ERP 依赖 8.3 短名。开前在测试机验证。"
+          }
+        },
+        "tf_hibern_off": {
+          "desc": "关闭休眠与快速启动并删除 hiberfil.sys，可释放数 GB 系统盘空间；代价是失去休眠功能与快速开机。",
+          "tips": {
+            "normal": "台式机与常开不关的机器建议开；日常偶尔合上笔记本的用户保留休眠更省心。",
+            "game": "推荐开：省下 hiberfil.sys 数 GB 空间，SSD 也少一次擦写；对帧率没影响。",
+            "office": "建议**别开**：合盖带休眠/快速启动的办公本靠它做冷启动加速，开了会更慢。"
+          }
+        },
+        "tf_core_misc": {
+          "desc": "调整菜单延迟、关机等待、窗口动画等系统响应参数，让界面交互更跟手，属于低风险的体验优化。",
+          "tips": {
+            "normal": "推荐开：低风险，交互跟手度明显。",
+            "game": "可开，收益与关闭游戏栏类似；不影响帧率。",
+            "office": "推荐开，菜单延迟降低后切换窗口更利落。"
+          }
+        },
+        "tf_timer_coal": {
+          "desc": "关闭计时器合并以提升计时精度与前台响应速度，代价是待机功耗上升，笔记本用户需权衡续航。",
+          "tips": {
+            "normal": "台式机可开；笔记本先想清楚续航再决定。",
+            "game": "推荐开：降低计时器合并后输入延迟与帧抖动更稳。",
+            "office": "**不推荐**：办公本开这个会明显掉续航（CPU 无法进入长时间 idle）。"
+          }
+        },
+        "game_dvr": {
+          "desc": "关闭 Xbox 游戏栏的后台录制与广播，释放 GPU 与磁盘占用，避免帧率被后台录制拖低。",
+          "tips": {
+            "normal": "不用 Xbox 录屏的用户推荐开，省 GPU 与磁盘。",
+            "game": "强烈推荐开：后台录制常把帧率拖 10-20%，且引发卡顿。",
+            "office": "可开：办公场景不需要游戏栏录制。若用 Xbox Game Bar 截屏请留。"
+          }
+        },
+        "mmcss_optimize": {
+          "desc": "合并原「游戏高优先级」与「MMCSS 系统增强」：Games 任务高调度/高 GPU 优先级 + 低延迟标记 + 系统级 NoLazyMode/AlwaysOn，为游戏与影音提供低延迟的多媒体调度（原「启用 Games 低延迟调度标记」同值重复已并入）。"
+        },
+        "nara_prio": {
+          "desc": "为《永劫无间》进程设置 CPU 与 IO 优先级，减少后台抢占造成的帧率波动，对其他游戏无效。",
+          "tips": {
+            "normal": "不玩《永劫无间》就关；对别的游戏无效。",
+            "game": "只在该游戏运行时收益；不玩此游戏就不必开。",
+            "office": "关：办公与 IFEO 无关，留着只是给注册表添噪。"
+          }
+        },
+        "disable_uac": {
+          "desc": "完全关闭用户账户控制，不再弹出提权提示，代价是系统安全性显著下降，不建议日常使用。",
+          "tips": {
+            "normal": "**不推荐**：日常环境不建议关 UAC。",
+            "game": "**不推荐**：游戏不需要关 UAC；一些作弊反制组件反而依赖它。",
+            "office": "**不要开**。"
+          }
+        },
+        "tf_gamemode": {
+          "desc": "开启 Windows 游戏模式，让系统在游戏运行时优先分配资源并抑制后台更新与通知。",
+          "tips": {
+            "normal": "可开：Windows 游戏模式只在检测到全屏游戏时生效，平时不改变行为。",
+            "game": "推荐开：抑制后台更新与通知，独占部分资源。",
+            "office": "可开可不开：非游戏时它自动不生效。"
+          }
+        },
+        "tf_gamebar": {
+          "desc": "关闭游戏栏的后台录制与截图捕获组件，减少资源占用，同时保留 Win+G 快捷键的可用入口。",
+          "tips": {
+            "normal": "不用 Win+G 的用户开；需要屏幕录制/截图则留。",
+            "game": "推荐开，与 game_dvr 配套：彻底关掉后台广播组件。",
+            "office": "一般可开；偶尔用录屏的话请留。"
+          }
+        },
+        "tf_gpu_latency": {
+          "desc": "调整 GPU 延迟容忍度与抢占策略，降低 DPC 延迟与帧生成抖动，对竞技类游戏收益较明显。",
+          "tips": {
+            "normal": "可开，日常几乎无感。",
+            "game": "推荐开：竞技/格斗游戏帧延迟敏感，收益明显。",
+            "office": "可开可不开，不改变办公软件行为。"
+          }
+        },
+        "tf_ifeo_perf": {
+          "desc": "通过 IFEO 为指定进程固定 CPU/IO 与页面优先级；配置不当可能影响稳定性，属高风险项。",
+          "tips": {
+            "normal": "**谨慎**：IFEO 写坏会让程序启动失败；小白用户建议不开。",
+            "game": "可开，针对具体游戏进程设优先级；用后不玩时记得还原。",
+            "office": "关：办公环境优先稳定性。"
+          }
+        },
+        "tf_ifeo_wipe": {
+          "desc": "清理注册表中残留的 IFEO 调试器与优先级配置，恢复程序默认启动行为，用于修复被篡改的启动配置。"
+        },
+        "svc_mem_gb": {
+          "desc": "提高 SVCHost 进程拆分的内存阈值，减少进程数量与内存碎片，适合大内存机器。",
+          "tips": {
+            "normal": "内存 ≥ 16 GB 可开；8 GB 及以下反而可能引发 SVCHost 拆分异常。",
+            "game": "可开：游戏时后台 SVCHost 少一些，进程切换略快。",
+            "office": "推荐开：办公机常驻 8-16 GB，进程数量减一半。"
+          }
+        },
+        "tf_mmagent": {
+          "desc": "关闭内存压缩与页面合并，降低后台 CPU 开销，代价是多任务场景下更容易吃满物理内存。",
+          "tips": {
+            "normal": "内存 ≥ 16 GB 且不做重度多任务的开。",
+            "game": "可开：省 CPU 后台开销；如果同时挂 Chrome + Discord 请留内存压缩。",
+            "office": "**不推荐**：办公典型场景就是重多任务（浏览器 + Office + 通讯），关了更容易卡。"
+          }
+        },
+        "tf_svc_bulk": {
+          "desc": "批量禁用 70 多个被认为非必要的服务以释放资源，范围较大，可能影响打印、蓝牙、远程桌面等功能，属高风险项；执行时会单独弹窗询问是否连商店相关服务（ClipSVC/InstallService/PushToInstall/wuauserv/DoSvc）一并禁用，禁用后 Windows 应用商店的使用、更新与下载会受影响。",
+          "tips": {
+            "normal": "不建议：影响面广，容易连带把日常依赖的服务一起禁掉。",
+            "game": "谨慎：某些网络/音频服务对上分与语音聊天必要。",
+            "office": "**别开**：打印/远程/蓝牙/Windows 更新可能一起瘫，IT 部门会来找你。"
+          }
+        },
+        "tf_drv_disable": {
+          "desc": "禁用部分易出问题或极少使用的驱动服务，降低攻击面与蓝屏概率；误禁用可能导致对应硬件不可用。"
+        },
+        "share_off": {
+          "desc": "关闭 ADMIN$、C$ 等默认隐藏共享，减少局域网被横向访问的风险，仅影响远程管理类场景。"
+        },
+        "telemetry_optimize": {
+          "desc": "合并原「关闭系统遥测」与「停用遥测计划任务/日志」：策略层 + 计划任务层 + AutoLogger + 遥测服务四层一体掐断遥测采集与上传，减少隐私外发与后台网络活动。",
+          "tips": {
+            "normal": "关心隐私的开；企业环境有合规要求先问 IT。",
+            "game": "可开：不影响游戏，只是关掉后台上报。",
+            "office": "**谨慎**：某些公司审计要这台机器仍在上报。"
+          }
+        },
+        "power_off": {
+          "desc": "关闭处理器节能与链接状态电源管理，换取持续高性能输出，代价是功耗、温度上升与笔记本续航缩短。",
+          "tips": {
+            "normal": "台式机可开；笔记本要看续航需求。",
+            "game": "推荐开：CPU 保持高频，帧率下限更稳。",
+            "office": "**不推荐**：办公本开了会明显掉续航、发热上升。"
+          }
+        },
+        "tf_defender": {
+          "desc": "关闭 Microsoft Defender 实时防护与 SmartScreen，会显著降低系统安全防护，仅在有替代杀软并明确接受风险时执行。",
+          "tips": {
+            "normal": "**不推荐**：除非装了替代杀软并明确接受风险。",
+            "game": "**不推荐**：实时防护对帧率影响通常 < 2%，代价不值。",
+            "office": "**不要开**：企业合规红线。"
+          }
+        },
+        "tf_privacy": {
+          "desc": "统一关闭广告 ID、位置、活动历史等隐私选项，减少个性化数据收集，不影响系统功能的正常可用。",
+          "tips": {
+            "normal": "推荐开：广告 ID / 位置 / 活动历史这些个性化通道，日常几乎不会主动用到。",
+            "game": "推荐开，无副作用。",
+            "office": "可开；某些\"跨设备体验\"依赖位置/活动历史的会失效。"
+          }
+        },
+        "privacy_permissions_tune": {
+          "desc": "按缺失项清单合并精调 20+ 项权限与数据收集开关：应用访问拒绝、活动收集、写作习惯、键入文本、输入个性化、OOBE 隐私体验、通讯录、热点自动连接、.NET/PowerShell 遥测环境变量、启用剪贴板历史、停用 SMS 路由器服务；已被现有项覆盖的键值不再重复写入。"
+        },
+        "tf_nvidia_telemetry": {
+          "desc": "关闭 NVIDIA 驱动的遥测服务与自动更新检查，减少后台进程与网络活动，显卡驱动本身功能不受影响。",
+          "tips": {
+            "normal": "推荐开：驱动本身不受影响。",
+            "game": "推荐开：少一个后台进程。",
+            "office": "推荐开：办公与驱动遥测无关，关掉少一个后台上报进程。"
+          }
+        },
+        "tf_keys_sticky": {
+          "desc": "从注册表彻底关闭粘滞键、筛选键与切换键，杜绝游戏中连按 Shift 弹出提示的干扰。",
+          "tips": {
+            "normal": "不用粘滞键的开；家中有需要辅助功能的用户**别开**。",
+            "game": "强烈推荐开：连按 Shift 弹提示是竞技游戏老bug 之一。",
+            "office": "可开；若有同事依赖粘滞键做辅助输入请先问明。"
+          }
+        },
+        "tf_usb_power": {
+          "desc": "禁止系统为省电暂停 USB 设备，避免鼠标、耳机、外置硬盘在空闲后被断开或唤醒延迟。",
+          "tips": {
+            "normal": "推荐开：避免鼠标/耳机空闲掉线。",
+            "game": "强烈推荐开：无线鼠标 2.4G 接收器一旦被省电暂停就是几秒钟不动。",
+            "office": "推荐开：USB 键鼠与外置硬盘不再被省电暂停，切换更跟手。"
+          }
+        },
+        "mouse_optimize": {
+          "desc": "合并原「鼠标去加速 + 6/11 灵敏度」与「清空平滑鼠标曲线」：关闭指针加速、灵敏度固定 6/11 档并清零平滑曲线，指针移动完全线性，得到与多数 FPS 游戏一致的原始输入手感。",
+          "tips": {
+            "normal": "普通用户可开：指针线性后短期会不适应。",
+            "game": "强烈推荐开：FPS 玩家几乎都在关指针加速。",
+            "office": "一般可开，若你依赖 Windows 默认加速做长距离指针移动请留。"
+          }
+        },
+        "tf_keyboard": {
+          "desc": "调整键盘重复延迟与输入队列深度，缩短按键响应与连击间隔，提升打字与游戏跟手度。",
+          "tips": {
+            "normal": "推荐开：打字跟手度提升。",
+            "game": "推荐开：连击间隔更短。",
+            "office": "推荐开，但**RepeatDelay 别调到最短**，误按退格会丢一大段。"
+          }
+        },
+        "tf_dev_disable": {
+          "desc": "批量禁用串口、并口等 24 个极少使用的板载设备，减少驱动占用与设备枚举开销，需要时请还原。"
+        },
+        "tf_dev_audio": {
+          "desc": "禁用主板高清音频控制器，仅在改用独立声卡或 USB 音频设备时使用，否则会导致无声。"
+        },
+        "tf_dev_printer": {
+          "desc": "禁用打印队列与相关设备，减少后台服务开销；仍需要打印的机器请勿执行。"
+        },
+        "tf_restore_point": {
+          "desc": "为所有已开启系统保护的磁盘创建一个还原点，作为执行高风险优化前的回退保障；本身不改变系统行为，仅占用少量磁盘空间，需至少一个卷已启用系统保护。"
+        },
+        "tf_appx": {
+          "desc": "卸载 25 个内置 UWP 应用以释放空间，部分依赖组件可能被一并移除且难以完整恢复，属高风险项。",
+          "tips": {
+            "normal": "谨慎：UWP 组件之间互相关联，某些功能会连带失去。",
+            "game": "可开，但**别把 Xbox Identity / Game Bar 一并删掉**，部分游戏要登录。",
+            "office": "谨慎：如果公司依赖\"你的手机\"或 Teams UWP 版就别删。"
+          }
+        },
+        "tf_cortana": {
+          "desc": "关闭 Cortana 与开始菜单的网页搜索，减少联网搜索与后台进程，不影响本地文件搜索。"
+        },
+        "tf_onedrive": {
+          "desc": "完整卸载 OneDrive，将 OneDrive 数据目录移入系统回收站（可还原）并清理资源管理器侧栏入口，释放磁盘与后台同步开销；正在使用云盘的用户请先完成同步备份。",
+          "tips": {
+            "normal": "不用云盘的可开。",
+            "game": "可开：游戏与云盘无关，卸载只影响 OneDrive 同步。",
+            "office": "**谨慎**：企业桌面常见依赖 OneDrive 做 Known Folder Move，删了会掉同步。"
+          }
+        },
+        "audio_disable_enhancements": {
+          "desc": "关闭音频设备的音效增强处理，缩短音频处理链路、降低延迟，音色更接近原始录音。",
+          "tips": {
+            "normal": "喜欢原声 / 用监听耳机的开；用音响 + 环绕声的不建议开。",
+            "game": "推荐开：音效增强会引入几毫秒到几十毫秒的额外延迟。",
+            "office": "可开可不开：语音会议时如果对方听到回声，反而要**保留**增强。"
+          }
+        },
+        "audio_disable_spatial_sound": {
+          "desc": "关闭空间音效（如 Windows Sonic），避免虚拟环绕带来的延迟与音色改变，游戏定位听感更真实。",
+          "tips": {
+            "normal": "不用 Windows Sonic 的空间音效的用户开。",
+            "game": "推荐开：游戏耳机不需要虚拟环绕，砍了更跟手。",
+            "office": "可开，不影响会议音频。"
+          }
+        },
+        "audio_mmcss_priority": {
+          "desc": "为音频线程提升 MMCSS 调度优先级，减少爆音与卡顿，CPU 高负载时效果尤其明显。",
+          "tips": {
+            "normal": "推荐开：几乎无副作用，改善系统音频稳定性。",
+            "game": "推荐开：高 CPU 负载下减少爆音。",
+            "office": "推荐开：会议软件音频更稳。"
+          }
+        },
+        "audio_mmcss_schedule": {
+          "desc": "调整音频线程的调度类别与周期，降低缓冲下溢概率，可能与部分专业声卡驱动存在兼容性差异。"
+        },
+        "audio_disable_comm_ducking": {
+          "desc": "禁止系统在检测到通话时自动压低其他应用音量，避免游戏或音乐被突然拉低。",
+          "tips": {
+            "normal": "不喜欢\"接电话就压低音乐\"的开。",
+            "game": "推荐开：队友语音不应把游戏音效压低。",
+            "office": "推荐开：Teams/Zoom 通话时不想被系统压低其他应用音量。"
+          }
+        },
+        "audio_disable_service_restart": {
+          "desc": "将 Windows Audio 服务改为自动（非延迟启动），减少开机后短暂无声与设备识别慢的问题。"
+        },
+        "audio_disable_voice_activation": {
+          "desc": "禁止应用自行激活语音识别麦克风，减少后台监听与隐私风险，语音助手需手动唤起。"
+        },
+        "audio_disable_voice_activation_last_used": {
+          "desc": "清除并禁止记录语音激活的最近使用信息，减少使用痕迹在本机留存。"
+        },
+        "audio_disable_narrator_ducking": {
+          "desc": "禁用讲述人朗读时压低其他音量的行为，适合不使用讲述人却常被压低音量的场景。"
+        },
+        "desktop_show_ext": {
+          "desc": "在资源管理器中显示文件扩展名，便于识别伪装成文档的可执行文件，提升安全性与使用效率。",
+          "tips": {
+            "normal": "强烈推荐开：安全收益远大于视觉噪音。",
+            "game": "可开，与游戏无关。",
+            "office": "强烈推荐开。"
+          }
+        },
+        "desktop_show_hidden": {
+          "desc": "显示被隐藏的文件与系统文件夹，方便排查问题；不熟悉系统文件时请谨慎修改其中内容。"
+        },
+        "desktop_thumb_delay": {
+          "desc": "去掉资源管理器缩略图的悬停延迟，快速预览图片与视频内容，磁盘较慢时可能略有卡顿。",
+          "tips": {
+            "normal": "推荐开：预览更快。",
+            "game": "一般不用管。",
+            "office": "推荐开：批量看截图/设计稿时体验提升明显。"
+          }
+        },
+        "desktop_sep_process": {
+          "desc": "让每个资源管理器窗口使用独立进程，单窗口崩溃不再影响其他窗口，代价是内存占用略增。",
+          "tips": {
+            "normal": "谨慎：单窗口崩不影响其他窗口，代价是内存略增。",
+            "game": "关：游戏切回桌面时多一个 explorer 进程被切换反而更容易抖动。",
+            "office": "推荐开：办公多窗口场景，一个卡死不牵连其他。"
+          }
+        },
+        "desktop_taskbar_left": {
+          "desc": "将任务栏图标恢复为左对齐（Windows 10 风格），纯偏好设置，无性能影响。"
+        },
+        "desktop_taskbar_show_desktop": {
+          "desc": "在任务栏最右侧启用「显示桌面」按钮，一键最小化所有窗口。"
+        },
+        "desktop_taskbar_multi": {
+          "desc": "让多显示器环境下每个屏幕都显示任务栏，方便跨屏切换窗口，会占用少量屏幕空间。"
+        },
+        "desktop_low_disk_off": {
+          "desc": "排查并关闭低磁盘空间提醒的触发条件，避免频繁弹窗打扰；磁盘紧张时请留意剩余容量。"
+        },
+        "explorer_autorestart": {
+          "desc": "explorer.exe 意外退出后由系统自动拉起，桌面与任务栏无需手动重启。"
+        },
+        "explorer_refresh_policy": {
+          "desc": "禁用简化的网络标识列表，让资源管理器按完整信息刷新文件列表，减少新建/重命名后不即时显示的问题。"
+        },
+        "edge_hide_firstrun": {
+          "desc": "不显示 Edge 首次运行欢迎页与数据导入向导，新装或新配置文件直接可用。"
+        },
+        "edge_bg_mode_off": {
+          "desc": "Edge 关闭所有窗口后不再驻留后台运行，释放内存与后台占用；网页推送通知将不再及时送达。"
+        },
+        "edge_startup_boost_off": {
+          "desc": "关闭系统启动时的 Edge 预加载（启动增强），开机进程更少。"
+        },
+        "edge_intrusive_ads_off": {
+          "desc": "在所有网站上阻止侵入式广告，减少误导弹窗与虚假下载按钮。"
+        },
+        "edge_ntp_quicklinks_off": {
+          "desc": "从新标签页隐藏默认的热门站点快速链接。"
+        },
+        "edge_sidebar_off": {
+          "desc": "隐藏浏览器右侧边栏（Copilot、发现等入口）。"
+        },
+        "edge_unsupported_os_warn_off": {
+          "desc": "关闭此版本 Windows 即将停止支持的 Edge 通知。"
+        },
+        "edge_metrics_off": {
+          "desc": "不向微软发送任何浏览器诊断数据，关闭浏览器侧隐私外发。"
+        },
+        "edge_tab_perf_detector_off": {
+          "desc": "关闭标签页性能检测器，不再弹出性能提示。"
+        },
+        "edge_ntp_content_off": {
+          "desc": "新标签页不展示微软资讯信息流。"
+        },
+        "edge_personalization_off": {
+          "desc": "不发送浏览历史用于个性化广告与体验推荐。"
+        },
+        "edge_insecure_download_warn_off": {
+          "desc": "关闭不安全（HTTP）下载警告，仅建议熟练用户使用。"
+        },
+        "edge_rewards_hide": {
+          "desc": "隐藏 Microsoft Rewards 积分入口与提醒。"
+        },
+        "edge_sxs_service_off": {
+          "desc": "关闭 EdgeUpdate 客户端的 SxsService 组件，减少后台活动。"
+        },
+        "edge_update_task_disable": {
+          "desc": "停用 Edge 自动更新计划任务；停用后请定期手动更新浏览器。"
+        },
+        "tasks_disable_defrag": {
+          "desc": "关闭计划碎片整理任务的自动触发；固态硬盘本就不需要碎片整理，机械硬盘建议保留。",
+          "tips": {
+            "normal": "SSD 用户可开；机械盘**别开**。",
+            "game": "SSD 用户可开，避免游戏时突然被后台整理打断。",
+            "office": "SSD 用户开；有机械盘存储阵列的别动。"
+          }
+        },
+        "tasks_disable_silent_cleanup": {
+          "desc": "禁用自动静默清理任务，避免系统在空闲时突然占用磁盘，改为由你手动清理。"
+        },
+        "tasks_disable_winbackup": {
+          "desc": "关闭 Windows 备份的监视任务，不使用系统备份时可减少后台唤醒。"
+        },
+        "tasks_disable_settingsync": {
+          "desc": "禁用设置同步的后台任务，减少网络与后台活动，多设备间的设置同步功能会失效。"
+        },
+        "peripheral_inactive_scroll": {
+          "desc": "关闭「悬停即滚动」的非活动窗口滚动，避免鼠标划过时误滚动其他窗口。"
+        },
+        "peripheral_winkey_off": {
+          "desc": "禁用 Windows 键，避免游戏中误触弹出开始菜单；需要使用 Win 组合键时请还原。"
+        },
+        "peripheral_mouse_trails": {
+          "desc": "关闭鼠标指针轨迹，去掉拖影，指针移动更干净利落。"
+        },
+        "peripheral_snap_to": {
+          "desc": "关闭鼠标自动跳到对话框默认按钮的行为，避免误点「确定」。"
+        },
+        "privacy_advertising_id": {
+          "desc": "排查并关闭广告 ID 的个性化推荐，减少跨应用的广告画像追踪。"
+        },
+        "privacy_wer_off": {
+          "desc": "排查并关闭 Windows 错误报告的自动上报，减少崩溃信息外发，故障排查时可参考的信息会变少。"
+        },
+        "privacy_compat_telemetry": {
+          "desc": "关闭兼容性遥测（程序兼容性助手的数据收集），减少应用运行行为被上传。"
+        },
+        "privacy_settingsync_off": {
+          "desc": "关闭设置与应用数据的云同步，减少数据外传，多设备之间不再自动同步偏好设置。"
+        },
+        "privacy_cloud_content": {
+          "desc": "关闭开始菜单与锁屏的云端推荐内容（建议、提示、推广），界面更干净。"
+        },
+        "svc_connected_devices_manual": {
+          "desc": "将跨设备连接平台服务改为手动启动，减少常驻后台；需要手机联动或无线投影时再启动。"
+        },
+        "svc_fax_disable": {
+          "desc": "排查并禁用传真服务，绝大多数家用与办公环境不使用传真，可释放一个后台服务。"
+        },
+        "svc_remote_registry_disable": {
+          "desc": "禁用远程注册表服务，阻断远程读取本机注册表的通道，提升安全性。"
+        },
+        "svc_remote_connectivity_manual": {
+          "desc": "将远程连接相关服务设为手动，减少常驻后台并降低远程攻击面。"
+        },
+        "svc_bluetooth_disable": {
+          "desc": "排查并禁用蓝牙支持服务，不使用蓝牙键鼠或耳机时可释放资源，需要蓝牙时请还原。"
+        },
+        "power_aspm_off": {
+          "desc": "关闭 PCI-E 链路的 ASPM 节能状态，避免设备进入低功耗导致延迟抖动，代价是整机功耗上升。",
+          "tips": {
+            "normal": "台式机开；笔记本看续航需求。",
+            "game": "推荐开：避免 PCIe 链路唤醒抖动（尤其 NVMe 与声卡）。",
+            "office": "**不推荐**：办公本开这个掉续航。"
+          }
+        },
+        "storage_8dot3_off": {
+          "desc": "关闭 8.3 短文件名生成，减少文件创建时的额外元数据写入，老旧 16 位程序可能受影响。"
+        },
+        "perf_uwp_background_off": {
+          "desc": "排查并限制 UWP 应用的后台运行，减少后台唤醒与耗电，消息类应用可能延迟收到通知。"
+        },
+        "perf_store_auto_update_off": {
+          "desc": "关闭 Microsoft Store 应用的自动更新，避免更新时机不可控；请记得定期手动更新以修复安全漏洞。"
+        },
+        "perf_windows_update_off": {
+          "desc": "彻底关闭 Windows 自动更新（NoAutoUpdate=1），安全补丁将不再自动送达；仅在明确知晓风险并有其它补丁维护方式时执行，只想推迟一段时间请改用「Windows 更新：暂停到日期」。",
+          "tips": {
+            "normal": "不推荐：真要推迟请改用 perf_wu_pause。",
+            "game": "不推荐：驱动更新很多从 Windows Update 分发，长期关会掉兼容性。",
+            "office": "**不要开**：安全补丁断供是最高风险项。"
+          }
+        },
+        "perf_wu_pause": {
+          "desc": "把 Windows 更新推迟到指定天数之后（1~35 天），走官方暂停键，服务照常运行、到期自动恢复，是推迟更新的推荐方式。"
+        },
+        "perf_wu_enable": {
+          "desc": "清除 Trim 写入的暂停键与 NoAutoUpdate 策略，让 Windows 恢复默认的自动检查与安装；只删 Trim 自己写过的键。"
+        },
+        "privacy_defender_cloud": {
+          "desc": "把 Defender 云保护（MAPS）报告级别设为 0，不再把可疑文件送微软云端比对；本地查杀仍然工作，新威胁的云端判定速度会下降。"
+        },
+        "privacy_defender_sample": {
+          "desc": "把自动样本提交设为永不发送；不影响本地查杀能力，微软对新样本的响应速度会变慢。"
+        },
+        "perf_notifications_off": {
+          "desc": "关闭系统全局通知横幅与提示音，减少打扰，重要的系统告警也可能一并被隐藏。"
+        },
+        "perf_vbs_off": {
+          "desc": "关闭基于虚拟化的安全（VBS）与内存完整性保护，可提升部分游戏性能，但会明显削弱系统对内核级攻击的防护。",
+          "tips": {
+            "normal": "不推荐：这是 Windows 内核防护的核心一层，关掉等于让恶意驱动更容易植入。",
+            "game": "只有当\"确定某游戏性能被 VBS 拖累 ≥ 10%\"再开；且要有替代杀软。",
+            "office": "**不要开**：企业安全基线通常要求 VBS 常开。"
+          }
+        },
+        "perf_remote_assist_off": {
+          "desc": "禁用 Windows 远程协助的受邀协助入口，减少攻击面与后台监听。"
+        },
+        "perf_prefetcher_fast": {
+          "desc": "EnablePrefetcher=3 同时启用应用与启动预读，改善程序启动与文件访问速度；SSD 上收益有限。",
+          "tips": {
+            "normal": "SSD 用户收益有限；机械硬盘开。",
+            "game": "SSD 上无所谓；机械盘开能略减加载。",
+            "office": "可开：开机预热文档/浏览器。"
+          }
+        },
+        "perf_crash_autoreboot": {
+          "desc": "蓝屏后自动重启而非停留在选择界面，适合无人值守场景；排查蓝屏时建议临时关闭。",
+          "tips": {
+            "normal": "可开：日常不需要盯着蓝屏信息。",
+            "game": "推荐开：蓝屏后自动重启继续排位。",
+            "office": "推荐开；排查蓝屏期间请**临时关**。"
+          }
+        },
+        "perf_exploit_protection_off": {
+          "desc": "写入内核 MitigationOptions 二进制值关闭漏洞利用缓解（乱序内存等），可小幅提升内存分配性能，但显著降低防护，属高风险项。"
+        },
+        "tf_ai_off": {
+          "desc": "通过系统策略关闭 Copilot、Recall、Click to Do、AI Agent 连接器及相关运行时服务，减少后台活动和 AI 数据处理。执行后这些 Windows AI 功能将不可用，但可用内置还原操作恢复。"
+        },
+        "tf_perf_misc": {
+          "desc": "取消开机启动延迟，并关闭窗口摇晃、失效快捷方式自动查找及运行/资源管理器自动建议；并同步收紧前台焦点等待（ForegroundLockTimeout=0）与关机时等待应用、服务退出的超时（各 2000 毫秒）。该项主要改变交互偏好与关机等待，不会提升硬件性能。"
+        },
+        "tf_privacy_extra": {
+          "desc": "关闭 Chrome、Firefox、Visual Studio 与 Windows 许可/兼容性相关遥测，同时停用新闻兴趣流和步骤记录器。可减少数据上报，但会降低诊断、反馈和部分内容推荐能力。"
+        },
+        "tf_svc_extra5": {
+          "desc": "精简传感器、存储感知、应用兼容性助手与诊断建议相关服务。可能影响自动磁盘清理、兼容性提示以及依赖传感器的打印/扫描设备，执行前请确认使用场景。"
+        },
+        "tf_ctx_copymove": {
+          "desc": "为文件和文件夹的经典右键菜单添加“复制到文件夹…”与“移动到文件夹…”入口，便于直接选择目标位置。还原操作只移除新增菜单项，不会移动或删除已有文件。"
+        },
+        "tf_disk_extra3": {
+          "desc": "关闭 NTFS 文件系统级加密、限制开始菜单搜索范围，并禁用 Windows 更新保留存储。可减少扫描和预留空间占用，但会影响 EFS 加密与更新空间保障；不影响 BitLocker。"
+        },
+        "tf_store_autoupdate": {
+          "desc": "关闭 Microsoft Store 应用自动更新和 Windows 消费者推广内容，避免后台下载与静默安装。执行后需要手动打开 Microsoft Store 检查应用更新，以免遗漏安全修复。"
+        },
+        "net_qos_dscp": {
+          "desc": "为游戏/低延迟流量按 DSCP 46（EF）标记出站包，让支持 QoS 的路由器/交换机识别并优先转发，减少网游与视频会议的抖动。不改变本地策略，只在网络设备配合时生效。",
+          "tips": {
+            "normal": "推荐开：不改变本地策略，只在设备/网络支持 QoS 时才有收益。",
+            "game": "推荐开：网游与语音包按 EF 标记，路由器配合时抖动下降。",
+            "office": "推荐开：Teams/Zoom 会议流量同样受益。"
+          }
+        },
+        "wu_do_download_mode_off": {
+          "desc": "DeliveryOptimization 的 DoDownloadMode=0（HTTP only），Windows 更新与商店应用不再从局域网/互联网其他机器拉取分块，本机也不再对外上传。同网段多台机器一起更新时整体下载可能变慢；单机用户无损。",
+          "tips": {
+            "normal": "推荐开：单机用户几乎无损，只少了后台带宽与磁盘 IO 抢占。",
+            "game": "推荐开：游戏时段不再被后台 DO 上传悄悄占带宽。",
+            "office": "谨慎：企业若靠 Delivery Optimization 做分支缓存分发，关掉会拖累同网段批量更新。"
+          }
+        },
+        "net_no_active_probe": {
+          "desc": "EnableActiveProbing=0，Windows 不再周期性访问 msftconnecttest.com 判断「是否有互联网」。副作用：任务栏网络图标失去「是否联网」的准确指示；酒店/机场 captive portal 不会自动弹出登录页。",
+          "tips": {
+            "normal": "谨慎：日常办公建议留（连 captive portal 时需要它）。",
+            "game": "可开：能少一层外发探测，网络异常时需要自己确认连通性。",
+            "office": "建议**别开**：企业网/公共 WiFi 常见 captive portal，关了会导致「看着连着但打不开网页」的排查困难。"
+          }
+        },
+        "sys_copilot_hide_button": {
+          "desc": "HKCU Explorer\\Advanced 的 ShowCopilotButton=0，任务栏不再显示 Copilot 图标。仅影响视觉入口；Copilot 运行时与后台服务不由本项控制（对应项见 tf_ai_off）。",
+          "tips": {
+            "normal": "推荐开：不用 Copilot 时少一个视觉噪音。",
+            "game": "可开：与游戏无关，只是让任务栏更清爽。",
+            "office": "可开；公司若把 Copilot 当生产力入口，请先与 IT 沟通再决定。"
+          }
+        },
+        "sys_startmenu_ads_off": {
+          "desc": "ContentDeliveryManager 的 SubscribedContent-338388Enabled=0，开始菜单不再展示微软推荐的应用（俗称「开始菜单广告」）。",
+          "tips": {
+            "normal": "强烈推荐开：广告位关掉，同时少一层数据上报，几乎无副作用。",
+            "game": "推荐开：与游戏无关，只是让开始菜单不再推第三方应用与工作负载。",
+            "office": "推荐开：办公机也少一层「这个应用你可能需要」的干扰入口。"
+          }
+        },
+        "sys_startmenu_tip_off": {
+          "desc": "ContentDeliveryManager 的 SubscribedContent-338389Enabled=0，开始菜单不再展示功能提示与新手引导卡片。",
+          "tips": {
+            "normal": "推荐开：熟悉了 Windows 之后引导卡是视觉噪音。",
+            "game": "推荐开：与游戏无关，只是让开始菜单更清爽。",
+            "office": "谨慎：公司新员工首机可能会希望保留引导。"
+          }
+        },
+        "sys_settings_ads_off": {
+          "desc": "ContentDeliveryManager 的 SubscribedContent-310093Enabled=0，Windows 设置首页不再展示「为你推荐」卡片（多为微软自家功能与服务推广）。",
+          "tips": {
+            "normal": "强烈推荐开：进设置就是设置本身，减少推广干扰。",
+            "game": "推荐开：与游戏无关，主要是把设置首页的推广位关掉。",
+            "office": "推荐开：办公场景下也不需要「微软建议你可能想试这个」。"
+          }
+        },
+        "sys_filesync_ads_off": {
+          "desc": "ContentDeliveryManager 的 SubscribedContent-353694Enabled=0，Windows 不再弹「自动把新文档保存到 OneDrive」的建议。不改变 OneDrive 客户端自身行为，只关掉这个提示通道。",
+          "tips": {
+            "normal": "推荐开：不想上云的机器少一个「差点误开同步」的机会。",
+            "game": "推荐开：游戏截图与本地素材不该被引导上云。",
+            "office": "谨慎：企业靠 OneDrive Known Folder Move 做漫游桌面的话，此提示本身是引导入口。"
+          }
+        },
+        "edge_copilot_search_off": {
+          "desc": "Edge 官方策略 DisableCopilotSearchIntegration=1，地址栏搜索结果页不再自动接入 Copilot 侧栏回答。仅影响 Edge，不改变 Copilot 应用与系统级 Copilot。",
+          "tips": {
+            "normal": "推荐开：搜索就是搜索，不必默认弹 Copilot。",
+            "game": "推荐开：与游戏无关，主要是隐私与视觉。",
+            "office": "推荐开；若公司把 Copilot 当生产力入口，请先与 IT 沟通。"
+          }
+        },
+        "sys_minanimate_off": {
+          "desc": "HKCU Control Panel\\Desktop 的 MinAnimate=0，最小化/最大化窗口时不再播放缩放动画，视觉响应更「直接」。低配机与远程桌面上感知更明显。",
+          "tips": {
+            "normal": "可开：喜欢流畅动画就留；偏好干脆响应或机器较老就关。",
+            "game": "可开：切回桌面时不播动画，视觉更清爽。",
+            "office": "推荐开：远程桌面与低配办公机上窗口切换跟手度提升明显。"
+          }
+        },
+        "sys_taskbar_anim_off": {
+          "desc": "HKCU Explorer\\Advanced 的 TaskbarAnimations=0，任务栏按钮在窗口切换/最小化时不再播放滑动动画。属偏好设置。",
+          "tips": {
+            "normal": "可开：与 MinAnimate 配套，视觉上更「干脆」。",
+            "game": "可开：与 sys_minanimate_off 搭配。",
+            "office": "推荐开：办公机常切窗口，动画关掉更清爽。"
+          }
+        },
+        "sys_thumb_cache_off": {
+          "desc": "HKCU Explorer\\Advanced 的 DisableThumbnailCache=1，资源管理器不再把缩略图写入 thumbcache_*.db。隐私向：U 盘/多人共用机器上避免缩略图残留；代价是每次进同一目录要重算缩略图。",
+          "tips": {
+            "normal": "可开：介意缩略图残留的开；SSD 单机不介意可留。",
+            "game": "可开：与游戏无关。",
+            "office": "谨慎：批量看设计稿/截图的工作流会重算缩略图变慢。"
+          }
+        },
+        "sys_font_smoothing_cleartype": {
+          "desc": "HKCU Control Panel\\Desktop 的 FontSmoothingType=2（ClearType）。默认已是 2；本项用于「被精简脚本或老系统改回 1（标准）后拉回来」。LCD 屏上文字更清晰，CRT/部分高 DPI 缩放场景可能反而劣化。",
+          "tips": {
+            "normal": "推荐开：LCD 屏上中英文都更锐利，几乎无损。",
+            "game": "可开：与游戏无关，只是字体清晰度。",
+            "office": "推荐开：办公大量文本阅读更省力。"
+          }
+        },
+        "svc_w32time_manual": {
+          "desc": "W32Time 启动类型从 Automatic 改为 Manual，下次开机不再常驻。当前运行不受影响；AD 域环境 / 双系统时间冲突场景请谨慎。",
+          "tips": {
+            "normal": "可开：家用机不敏感；改完仍会在需要时自动启动。",
+            "game": "可开：与游戏时间无关。",
+            "office": "谨慎：AD 域、Kerberos 认证与证书校验依赖精确时间，改 Manual 可能引发认证异常。"
+          }
+        },
+        "svc_fdrespum_manual": {
+          "desc": "FDResPub 启动类型改 Manual，下次开机不再常驻；这台机器在局域网中的「可发现性」会下降。当前运行不受影响。",
+          "tips": {
+            "normal": "可开：不在局域网共享文件的机器无损失。",
+            "game": "可开：与游戏联机无关（联机走的是游戏客户端本身）。",
+            "office": "谨慎：公司靠 SMB 共享/网络发现访问公共文件夹时，本机可能被隐藏。"
+          }
+        },
+        "svc_storsvc_manual": {
+          "desc": "StorSvc 启动类型改 Manual，下次开机不再常驻。不用 Windows 存储空间（Storage Spaces）与便携设备镜像的机器无损；用了的请先手动启动再操作。",
+          "tips": {
+            "normal": "可开：家用机大概率不用 Storage Spaces。",
+            "game": "可开：游戏磁盘与 StorSvc 无关。",
+            "office": "谨慎：企业用 Storage Spaces 或便携设备镜像功能时要保留 Automatic。"
+          }
+        },
+        "svc_xblauthmgr_manual": {
+          "desc": "XblAuthManager 启动类型改 Manual，下次开机不再常驻。不用 Xbox App / Xbox Game Pass / Microsoft Store 游戏登录的机器无损；用到时首次启动会多一次登录。",
+          "tips": {
+            "normal": "可开：不玩 Xbox 的机器无损失。",
+            "game": "谨慎：如果你走 Xbox Game Pass 或 Store 版游戏登录，改 Manual 会让首次登录略慢。",
+            "office": "推荐开：办公机一般不装 Xbox 相关。"
+          }
+        },
+        "wu_au_options_notify": {
+          "desc": "AUOptions=2，Windows Update 检测到新补丁后弹提示由用户决定何时下载与安装，不再自动跑完流程。仅在 NoAutoUpdate=0（自动更新开着）时生效；已开 perf_windows_update_off 的机器本项无实际作用。",
+          "tips": {
+            "normal": "可开：怕被打断的机器改「暂停到日期」更合适。",
+            "game": "可开：能避开游戏时段突然开始下载更新的场面。",
+            "office": "可开；企业环境通常由 IT 用组策略统一设定，个人机按需。"
+          }
+        },
+        "wu_no_auto_reboot": {
+          "desc": "NoAutoRebootWithLoggedOnUsers=1，补丁安装完成后即使到了计划的重启时间，只要有用户登录就不会自动重启，避免「半夜补丁装完把机器重启、工作丢失」。不影响补丁本身下载安装。",
+          "tips": {
+            "normal": "强烈推荐开：防「忘保存被重启」的经典坑。",
+            "game": "推荐开：游戏挂机时段不被强制重启打断。",
+            "office": "强烈推荐开：办公机长期开着、忘保存风险高。"
+          }
+        },
+        "sys_transparency_off": {
+          "desc": "HKCU Themes\\Personalize 的 EnableTransparency=0，开始菜单/任务栏/窗口边框不再叠加透明材质。低配机与远程桌面上能减少 DWM 合成开销；Win11 主题视觉会变「实」一些。与 Trim 窗材质设置（data-material）不同层，本项管的是 Windows 系统级透明。",
+          "tips": {
+            "normal": "可开：喜欢 Win11 透明质感就留，追求「实在」就关。",
+            "game": "可开：游戏时全屏不感知透明度；只在切回桌面时视觉略变。",
+            "office": "推荐开：远程桌面与低配办公机上减少 DWM 合成开销。"
+          }
+        },
+        "devmgr_show_hidden_default": {
+          "desc": "HKLM DeviceManager 的 ShowHiddenDevices=1，打开设备管理器时默认展开「显示隐藏设备」（灰色显示未插着的旧驱动、断开的历史设备）。便于排查残留驱动，不改变任何硬件行为。",
+          "tips": {
+            "normal": "可开：普通用户不常用设备管理器，开了列表略长。",
+            "game": "可开：与游戏无关。",
+            "office": "推荐开：IT/运维排查残留驱动时不用再手动点「显示隐藏设备」。"
+          }
+        }
       }
     },
     "startup": {
