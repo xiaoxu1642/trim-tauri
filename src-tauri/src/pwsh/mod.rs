@@ -865,10 +865,17 @@ mod tests {
     /// 判为失控），本用例只是刻意复现那个形态来量墙上时间。
     /// R1（2026-10-01）：随 PS7 退役改挂到统一入口 `run_inbox_script` 上 —— 要测的进程树纪律
     /// 与引擎无关，两条路径共用同一个 `run_with_exe`。
+    ///
+    /// 阈值为什么是 25s 而不是贴着「宽限期 + 一点点」：这条断言要抓的是**等子孙自己跑完**
+    /// （旧实现实测 19.7s），而收件箱 PowerShell 的冷启动本身在 2~9s 之间飘——发布前门禁是
+    /// 整套 `--ignored` 并发跑的，本机量到过单条 13~16s。拿 12s 这种「贴着噪声」的墙上时间
+    /// 当阈值，结果是同一段代码单独跑绿、批量跑红，红两次就有人开始「重跑到绿为止」。
+    /// 所以把**危害窗口放大**：子孙 ping 拉长到 40s，退化成旧行为会 >40s 才返回，
+    /// 与正确行为（≤16s 量级）之间拉开 24s 的分离度，阈值取中间的 25s。
     #[test]
     #[ignore = "真实启动收件箱 PowerShell 与子孙进程，发布前门禁跑"]
     fn 子孙进程占住管道时函数必须自己收回来() {
-        let script = "$g = Start-Process -FilePath 'ping' -ArgumentList '-n','20','127.0.0.1' -NoNewWindow -PassThru\n\
+        let script = "$g = Start-Process -FilePath 'ping' -ArgumentList '-n','40','127.0.0.1' -NoNewWindow -PassThru\n\
                       Write-Output '@@DONE@@'";
         let started = Instant::now();
         let out = run_inbox_script(script, Duration::from_secs(60), None);
@@ -878,8 +885,8 @@ mod tests {
         assert_eq!(out.code, 0, "本体是正常退出的，不该被记成失败: {}", out.stderr);
         assert!(!out.timed_out, "本体没超时，不应判 timed_out");
         assert!(
-            elapsed < Duration::from_secs(12),
-            "应在宽限期后交回快照并返回（旧实现会等 ping 自己跑完 ≈20s），实耗 {elapsed:?}"
+            elapsed < Duration::from_secs(25),
+            "应在宽限期后交回快照并返回（旧实现会等 ping 自己跑完 ≈40s），实耗 {elapsed:?}"
         );
         assert!(out.stdout.contains("@@DONE@@"), "正常输出不得被截断: {}", out.stdout);
     }
