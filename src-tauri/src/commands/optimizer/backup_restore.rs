@@ -150,9 +150,24 @@ fn svc_start_target(name: &str) -> RegTarget {
 /// 用户改前的实际值永久丢失。
 fn collect_service_start_targets(steps: &[Value], out: &mut Vec<RegTarget>) {
     for s in steps {
-        // ① service 步骤型：{ "service": "X", "disable": true } → sc config start= disabled
+        // ① service 步骤型：改启动类型就要进基线，两种形态都收（R0-a）
+        //
+        //   { "service": "X", "disable": true }        → sc config start= disabled
+        //   { "service": "X", "startType": "manual" }  → sc config start= demand
+        //
+        // v0.5.0 只收前者，于是 `svc_*_manual` 四项**没有值级备份基线** —— 用户改前的
+        // 实际 Start 值永久丢失，还原只能靠数据层硬编码的猜值。这与 AGENTS 的
+        // 「值级备份 → 执行 → 回读 → fail-closed」三不变式直接冲突：基线缺失时
+        // 还原链的「还原后回读校验」校验的是一个从未被记录的值。
         if let Some(name) = s.get("service").and_then(|v| v.as_str()) {
-            if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let has_disable = s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false);
+            // startType 走 native 解析（fail-closed）：未知取值不猜，也不收基线，
+            // 免得把一个解析不了的步骤记成「已备份」而实际没记。
+            let has_start = match s.get("startType").and_then(|v| v.as_str()) {
+                Some(l) => crate::engine::native::start_type_from_label(l).is_ok(),
+                None => false,
+            };
+            if has_disable || has_start {
                 out.push(svc_start_target(name));
             }
         }

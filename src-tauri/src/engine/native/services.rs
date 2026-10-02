@@ -82,7 +82,9 @@ const SVC_STOPPED: u32 = 1;
 const SVC_NOT_RUNNING: u32 = 1062;
 const SVC_NOT_INSTALLED: u32 = 1060;
 
-/// 设置服务启动类型（SERVICE_DEMAND_START=Manual, SERVICE_DISABLED=Disabled, SERVICE_AUTO_START=Automatic）
+/// 设置服务启动类型。**数值以 windows crate 常量为真源**（0.61.3 实测）：
+/// `SERVICE_AUTO_START = 2`（自动）/ `SERVICE_DEMAND_START = 3`（手动）/ `SERVICE_DISABLED = 4`（禁用）。
+/// 另两档 `SERVICE_BOOT_START = 1` / `SERVICE_SYSTEM_START = 1` 数据层暂不使用。
 ///
 /// 返回 win32 码而非 bool，理由同 [`service_stop`]：调用方要能区分「服务没装」与「改不动」。
 pub(super) unsafe fn service_set_start_type(name: &str, start_type: u32) -> Result<(), u32> {
@@ -154,8 +156,49 @@ pub fn service_start_type_is(name: &str, expected: u32) -> bool {
     }
 }
 
+/// 服务是否在本机存在（`sc query X` 的原生等价）
+///
+/// 存在性判据必须与「运行态」分开：R0-a 起 `{service, startType}` 形态**刻意不停服**，
+/// 拿运行态当「这一步做成了吗」的判据会把它误判成失败。
+pub fn service_exists(name: &str) -> bool {
+    use windows::Win32::System::Services::{OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT};
+    unsafe {
+        let Ok(scm) = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) else {
+            return false;
+        };
+        let name_w = to_wide(name);
+        let ok = OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS).is_ok();
+        let _ = CloseServiceHandle(scm);
+        ok
+    }
+}
+
 /// `SERVICE_DISABLED`（供跨 crate 比较，避免调用方 import windows crate）
 pub const SVC_START_DISABLED: u32 = windows::Win32::System::Services::SERVICE_DISABLED.0;
+
+/// `SERVICE_DEMAND_START`（手动启动）。与 [`SVC_START_DISABLED`] 同理由导出。
+pub const SVC_START_MANUAL: u32 = windows::Win32::System::Services::SERVICE_DEMAND_START.0;
+
+/// `SERVICE_AUTO_START`（自动启动）。同上。
+pub const SVC_START_AUTO: u32 = windows::Win32::System::Services::SERVICE_AUTO_START.0;
+
+/// 数据层 `startType` 字符串 → `dwStartType` 期望值。
+///
+/// **fail-closed 是这里的设计要点**（R0-b 起 `startType` 是被执行链与检测侧共同消费
+/// 的字段）：未知取值必须 `Err`，绝不能静默跳到某个默认值。旧实现里
+/// `{service, startType}` 这种步骤走 service 分支时 `startType` **根本不被读取**，
+/// 于是「改手动启动」被当成「停一下」执行并报成功 —— 而数据层 `label`/`desc` 都写着
+/// 「不立即停止」。新增枚举值时若这里猜一个值，等于凭空造一个静默盲区。
+pub fn start_type_from_label(label: &str) -> Result<u32, String> {
+    match label {
+        "manual" => Ok(SVC_START_MANUAL),
+        "automatic" => Ok(SVC_START_AUTO),
+        "disabled" => Ok(SVC_START_DISABLED),
+        other => Err(format!(
+            "未知 startType: {other}（合法值 manual / automatic / disabled）"
+        )),
+    }
+}
 
 /// win32 服务类错误码 → 人话（口径对齐 `pssteps::reg_err`：把码翻译成「为什么」）
 fn svc_err(code: u32) -> String {

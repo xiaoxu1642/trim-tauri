@@ -89,10 +89,40 @@ pub(super) fn build_script(steps: &[Value]) -> String {
             l.push("& $env:ComSpec /c $___cmd *> $null".into());
             l.push(format!("if ($LASTEXITCODE -ne 0) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.cmd' -Mutation 'partial' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] exit=' + $LASTEXITCODE) }}"));
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
+            // 与 `native_execute_steps` 的 service 分支**同口径**（R0-a）。这里原来只认
+            // `disable`，startType 形态在 PS 轨上同样会退化成「只停服」。两条轨的分歧不是
+            // 美观问题：tf_restore_point 这类项走 build_script，而备份/回读按 native 轨的
+            // 语义记账，两轨对同一份 steps 给出不同解释 = 备份与实际写入不匹配。
             let svc_ps = ps_quote(service);
-            l.push(format!("Stop-Service -Name {svc_ps} -Force -ErrorAction SilentlyContinue"));
-            if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
-                l.push(format!("Set-Service -Name {svc_ps} -StartupType Disabled -ErrorAction SilentlyContinue"));
+            let start_label = s.get("startType").and_then(|v| v.as_str());
+            let want_disable = s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false);
+            // 未知 startType 同样 fail-closed：生成不出合法脚本就别生成。
+            // 注意 `raw` 是数据层原值、`verb` 是已解析的合法档位，二者都要 ps_quote —
+            // 错误文案里带数据层原串，不转义会把引号带进脚本。
+            let mut start_ps = match start_label {
+                Some(raw) => match crate::engine::native::start_type_from_label(raw) {
+                    Ok(_) => Some(ps_quote(match raw {
+                        "manual" => "Manual",
+                        "automatic" => "Automatic",
+                        _ => "Disabled",
+                    })),
+                    Err(reason) => {
+                        l.push(format!("Write-TFDiag -Stage 'optimizer.service' -Mutation 'failed' -Detail {}", ps_quote(&reason)));
+                        l.push("$failedSteps++".into());
+                        None
+                    }
+                },
+                None => None,
+            };
+            if want_disable && start_ps.is_none() {
+                start_ps = Some(ps_quote("Disabled"));
+            }
+            // 显式 startType 且非 Disabled ⇒ 不停服（对齐「不立即停止」文案）
+            if want_disable || start_ps.is_none() {
+                l.push(format!("Stop-Service -Name {svc_ps} -Force -ErrorAction SilentlyContinue"));
+            }
+            if let Some(st) = start_ps {
+                l.push(format!("Set-Service -Name {svc_ps} -StartupType {st} -ErrorAction SilentlyContinue"));
             }
             l.push(format!("if (-not (Get-Service -Name {svc_ps} -ErrorAction SilentlyContinue)) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.service' -Mutation 'rolled_back' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] 服务不存在: ' + {svc_ps}) }}"));
         } else if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
@@ -201,28 +231,60 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                 failed_reasons.push(format!("步骤「{label}」: 命令返回非零"));
             }
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
-            // service 类型：sc stop + 可选 sc config disabled
-            let _ = crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["stop", service]).output();
-            if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
-                // 审查 2026-09-27 L5：sc config 被策略拒绝不再静默——计入失败原因
-                let cfg_ok = match crate::engine::systembin::quiet_cmd(system_tool("sc"))
-                    .args(["config", service, "start=", "disabled"])
-                    .output()
-                {
-                    Ok(o) => o.status.success(),
-                    Err(_) => false,
-                };
-                if !cfg_ok {
+            // service 类型。三种形态，语义各不相同（R0-a 起）：
+            //
+            //   {service, disable:true}      → 停服 + 改启动类型为 disabled（隐私权限停用类）
+            //   {service, startType:"..."}   → **只**改启动类型，不停服
+            //   {service} 单独出现            → 只停服
+            //
+            // v0.5.0 的缺陷就在第二形态：startType 既不被这里读取、也不被 build_script
+            // 读取，于是 `{service, startType:"manual"}` 落进「只停服」分支 —— 服务被停、
+            // 启动类型原封不动，而回执报成功。数据层 label/desc 写的却是「不立即停止」，
+            // 三条文案与实际行为全部相反。
+            let start_label = s.get("startType").and_then(|v| v.as_str());
+            let want_disable = s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            // 启动类型期望值。未知取值 fail-closed（native 侧解析，绝不猜默认值）。
+            let mut expected_start = match start_label {
+                Some(l) => match crate::engine::native::start_type_from_label(l) {
+                    Ok(v) => Some(v),
+                    Err(reason) => {
+                        failed += 1;
+                        failed_reasons.push(format!("步骤「{label}」: {reason}"));
+                        None
+                    }
+                },
+                None => None,
+            };
+            if want_disable && expected_start.is_none() {
+                expected_start = Some(crate::engine::native::SVC_START_DISABLED);
+            }
+
+            // 是否需要停服：只有「要 disabled」或「没指定启动类型」才停。
+            // 显式 startType 且非 disabled ⇒ 用户要的是「下次开机别自动起」，
+            // 停服是副作用，不做（对齐 label「不立即停止」与 desc「当前运行不受影响」）。
+            let need_stop = want_disable || expected_start.is_none();
+
+            if need_stop {
+                // 终态语义走 native 原语（v5 O-1）：1062 本就未启动 / 1060 本机没装
+                // 都等于目标达成，判 Ok。旧的 `sc stop` 直调把退出码非零一律当失败。
+                if let Err(reason) = crate::engine::native::service_stop_pub(service) {
                     failed += 1;
-                    failed_reasons.push(format!("服务「{service}」: sc config disabled 被拒绝（可能被组策略锁定）"));
+                    failed_reasons.push(format!("服务「{service}」: {reason}"));
                 }
             }
-            // 检查服务是否存在
-            let exists = match crate::engine::systembin::quiet_cmd(system_tool("sc")).args(["query", service]).output() {
-                Ok(o) => o.status.success(),
-                Err(_) => false,
-            };
-            if !exists {
+            if let Some(want) = expected_start {
+                // 审查 2026-09-27 L5 的等价物：被策略拒绝不再静默，计入失败原因。
+                if let Err(reason) = crate::engine::native::service_set_start_pub(service, want) {
+                    failed += 1;
+                    failed_reasons.push(format!(
+                        "服务「{service}」: {reason}（可能被组策略锁定）"
+                    ));
+                }
+            }
+            // 存在性回读。判据用「服务在不在」而不是「停没停」：startType 形态刻意
+            // 不停服，拿运行态当判据会把它误判成失败。
+            if !crate::engine::native::service_exists(service) {
                 failed += 1;
                 failed_reasons.push(format!("服务「{service}」不存在（可能已被卸载或精简）"));
             }

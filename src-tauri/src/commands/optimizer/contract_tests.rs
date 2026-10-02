@@ -14,6 +14,150 @@ use super::backup_restore::*;
 use super::catalog::*;
 use super::overview::*;
 use super::restore_point::*;
+
+    /// R0-a 判据 1：`startType` 步骤的 Start 必须进值级备份基线。
+    ///
+    /// v0.5.0 的缺陷：`collect_service_start_targets` ①分支只收 `disable === true`，
+    /// 于是 `svc_w32time_manual` 等 4 项**没有基线** —— 用户改前的实际 Start 值永久丢失。
+    /// 本测试在 v0.5.0 上会红（targets 里找不到这 4 个服务）。
+    #[test]
+    fn starttype步骤进值级备份基线() {
+        for opt_id in [
+            "svc_w32time_manual",
+            "svc_fdrespum_manual",
+            "svc_storsvc_manual",
+            "svc_xblauthmgr_manual",
+        ] {
+            let targets: Vec<String> = option_targets(opt_id)
+                .unwrap_or_default()
+                .iter()
+                .map(|t| format!("{}::{}\\{}", t.root, t.sub, t.key))
+                .collect();
+            let opt = find_option(opt_id).expect("选项应存在");
+            let svc = opt
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.iter().find_map(|s| s.get("service")).and_then(|v| v.as_str()))
+                .expect("步骤应带 service 名");
+            let want = format!(
+                "HKEY_LOCAL_MACHINE::SYSTEM\\CurrentControlSet\\Services\\{svc}\\Start"
+            );
+            assert!(
+                targets.contains(&want),
+                "{opt_id}（服务 {svc}）的 Start 没进基线，值级备份形同虚设；实收: {targets:?}"
+            );
+        }
+    }
+
+    /// R0-a 判据 2：`startType` 步骤**不得**生成停服命令。
+    ///
+    /// 数据层这 4 项的 `label` 写「不立即停止」、`desc` 写「当前运行不受影响」。
+    /// v0.5.0 的 `build_script` 无条件 `Stop-Service`，两条文案与行为直接矛盾。
+    /// 判据落在 PS 轨脚本文本上：生成物里出现 `Stop-Service` 即红。
+    #[test]
+    fn starttype步骤不生成停服命令() {
+        for opt_id in [
+            "svc_w32time_manual",
+            "svc_fdrespum_manual",
+            "svc_storsvc_manual",
+            "svc_xblauthmgr_manual",
+        ] {
+            let opt = find_option(opt_id).expect("选项应存在");
+            let steps = opt
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let script = build_script(&steps);
+            assert!(
+                !script.contains("Stop-Service"),
+                "{opt_id} 的 PS 轨脚本里出现了 Stop-Service —— 与「不立即停止」文案矛盾"
+            );
+            assert!(
+                script.contains("Set-Service"),
+                "{opt_id} 的 PS 轨脚本没生成 Set-Service —— 启动类型根本没被改；实得:\n{script}"
+            );
+            // 这 4 项的 restore 语义是「改回 Automatic」，执行语义是「改 Manual」，
+            // 两档都得能生成出来（v0.5.0 只有 disable 一档能生成）。
+            let rsteps: Vec<Value> = opt
+                .get("restore")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let rscript = build_script(&rsteps);
+            assert!(
+                rscript.contains("-StartupType 'Automatic'"),
+                "{opt_id} 的还原脚本没生成 StartupType Automatic —— 还原会退化成空操作；实得:\n{rscript}"
+            );
+            assert!(
+                !rscript.contains("Stop-Service"),
+                "{opt_id} 的还原脚本出现了 Stop-Service —— 还原不该停服"
+            );
+        }
+    }
+
+    /// R0-a 判据 3：`disable: true` 的旧语义**不许被这次改动破坏**。
+    ///
+    /// 这是本次收紧的反向护栏 —— `privacy_permissions_tune`（停用 SMS 路由器）依赖
+    /// 「停服 + 改 disabled」两件事都做。若为了 startType 把 stop 一起去掉，它会红。
+    #[test]
+    fn disable形态仍同时停服并改启动类型() {
+        let opt = find_option("privacy_permissions_tune").expect("选项应存在");
+        let steps = opt
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let script = build_script(&steps);
+        assert!(
+            script.contains("Stop-Service"),
+            "disable 形态丢了停服：privacy_permissions_tune 会变成只改启动类型不停服"
+        );
+        assert!(
+            script.contains("-StartupType 'Disabled'"),
+            "disable 形态丢了 StartupType Disabled；实得脚本:\n{script}"
+        );
+    }
+
+    /// R0-a 判据 4：未知 `startType` 值必须 fail-closed。
+    ///
+    /// 猜一个默认值 = 凭空造一个静默盲区（这正是 v0.5.0 的病根）。解析函数是
+    /// 执行链、检测侧、备份侧三处共用的唯一入口，必须在入口就拒绝。
+    #[test]
+    fn 未知starttype值fail_closed() {
+        use crate::engine::native::start_type_from_label;
+        assert_eq!(start_type_from_label("manual"), Ok(crate::engine::native::SVC_START_MANUAL));
+        assert_eq!(
+            start_type_from_label("automatic"),
+            Ok(crate::engine::native::SVC_START_AUTO)
+        );
+        assert_eq!(
+            start_type_from_label("disabled"),
+            Ok(crate::engine::native::SVC_START_DISABLED)
+        );
+        let err = start_type_from_label("Manual").expect_err("大小写不同就该拒绝，不许猜");
+        assert!(err.contains("未知 startType"), "错误文案须点名问题字段，实得: {err}");
+        assert!(start_type_from_label("auto").is_err(), "auto 不是合法取值");
+        assert!(start_type_from_label("").is_err(), "空串不是合法取值");
+    }
+
+    /// R0-a 判据 5：`startType` 三档期望值必须与 windows crate 常量逐一对齐。
+    ///
+    /// 这条看着像废话，但它是「数据层写 manual，代码却按错的数值去查」的唯一护栏。
+    /// **数值以 windows 0.61.3 crate 为真源，不凭记忆写**（本条首次编写时把
+    /// SERVICE_DEMAND_START 记成 2，被本条判红当场抓出；真值是 3）：
+    ///   SERVICE_AUTO_START   = 2   （自动）
+    ///   SERVICE_DEMAND_START = 3   （手动）
+    ///   SERVICE_DISABLED     = 4   （禁用）
+    /// 记错的后果是检测侧恒判「未生效」，且只在真机上炸 —— 编译期与静态检查全绿。
+    #[test]
+    fn starttype三档期望值对齐win32契约() {
+        use crate::engine::native::{SVC_START_AUTO, SVC_START_DISABLED, SVC_START_MANUAL};
+        assert_eq!(SVC_START_AUTO, 2, "SERVICE_AUTO_START 约定为 2");
+        assert_eq!(SVC_START_MANUAL, 3, "SERVICE_DEMAND_START 约定为 3");
+        assert_eq!(SVC_START_DISABLED, 4, "SERVICE_DISABLED 约定为 4");
+    }
+
     /// v5 O-4：pwsh / cmd / service 步骤改的「服务启动类型」必须进值级备份基线。
     /// 此前 `option_targets` 只解析 `s.reg`，于是 `tf_svc_extra5` 那 4 个服务的 Start 没有基线
     /// —— 还原只能写数据层硬编码的"猜的原值"（restore 步里明写着 `SensrSvc=3; StorSvc=2`），
