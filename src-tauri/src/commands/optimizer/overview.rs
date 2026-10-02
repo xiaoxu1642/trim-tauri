@@ -618,6 +618,11 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                 if let Some(pv) = provenance_of(sid) {
                     map.insert("provenance".into(), pv);
                 }
+                // C1：出厂默认值 / 产品建议（正交）。defaultKnown=false 时前端
+                // 必须显示「出厂默认值未知」而不是留空 —— 留空会被读成「不需要偏离」。
+                if let Some(dv) = defaults_of(sid) {
+                    map.insert("defaults".into(), dv);
+                }
             }
             tag_exec_modes(&mut row);
             row

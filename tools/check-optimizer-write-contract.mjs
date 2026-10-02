@@ -684,6 +684,99 @@ check(
   a6Problems.join('; '),
 );
 
+// ======================================================================
+// A7（C1）：出厂默认值侧表的契约
+// ----------------------------------------------------------------------
+// 核心断言不是「填了多少」，而是**「没填的那些有没有诚实地标 unknown」**。
+// C1 的价值在「依据可判定」—— 一个编出来的 Windows 出厂默认值恰好废掉这个价值，
+// 而门禁只能校验「与数据一致」、校验不了「与 Windows 真实出厂一致」。
+// 所以门禁的火力集中在两处：
+//   ① `defaultKnown=true` 的项，其 `defaultValue` 必须**可从数据层机械复核**
+//      （唯一允许的 true 形态是 `null` =键本应不存在，判据：steps 有 / restore 无）
+//   ② `defaultKnown=false` 的项，`defaultValue` **必须**是字符串 `"unknown"`
+//      ——出现任何具体值即红（那说明有人开始猜了）
+// ======================================================================
+const DEF_KEYS = new Set(['defaultKnown', 'defaultValue', 'why', 'reviewedAt']);
+const defs = JSON.parse(read('src-tauri', 'data', 'optimizer-defaults.json'));
+const defItems = defs.items || {};
+const a7Problems = [];
+for (const [id, d] of Object.entries(defItems)) {
+  if (!opts.some((o) => o.id === id)) a7Problems.push(`defaults 有 ${id} 但数据层没有此项`);
+  for (const k of Object.keys(d)) {
+    if (!DEF_KEYS.has(k)) a7Problems.push(`${id}: 未知 defaults 键「${k}」`);
+  }
+  if (d.defaultKnown === true) {
+    // 唯一允许的 known 形态是 `null`（键本应不存在）。任何具体值都需要
+    // 「可机械复核的来源」，而本仓目前**没有**这样的来源（出厂默认值无权威出处、
+    // 实测原值因机而异）—— 出现即红。
+    if (d.defaultValue !== null) {
+      a7Problems.push(
+        `${id}: defaultKnown=true 但 defaultValue=${JSON.stringify(d.defaultValue)} —— `
+        + `本仓目前唯一可机械复核的 known 形态是 null（键本应不存在）。`
+        + `填具体值需要「可复核的来源」，而 Windows 出厂默认值无权威出处、`
+        + `实测原值因机而异 —— 写了就是编造依据（C1 的价值恰在「依据可判定」）`,
+      );
+    } else {
+      // 反向复核：真的是「steps 有 / restore 无」吗
+      const o = opts.find((x) => x.id === id);
+      const sk = new Set();
+      for (const s of (o.steps || [])) {
+        if (typeof s.reg !== 'string') continue;
+        for (const m of s.reg.matchAll(/^"([^"]+)"=/gm)) sk.add(m[1]);
+      }
+      const rk = new Set();
+      for (const s of (o.restore || [])) {
+        if (typeof s.reg !== 'string') continue;
+        for (const m of s.reg.matchAll(/^"([^"]+)"=/gm)) rk.add(m[1]);
+      }
+      const created = [...sk].filter((k) => !rk.has(k));
+      if (!created.length) {
+        a7Problems.push(
+          `${id}: 标成 defaultKnown=true（键本应不存在）但机械复核不成立 —— `
+          + `steps 的键全部出现在 restore 里，没有「执行时新建」的键`,
+        );
+      }
+    }
+  } else if (d.defaultKnown === false) {
+    if (d.defaultValue !== 'unknown') {
+      a7Problems.push(
+        `${id}: defaultKnown=false 但 defaultValue=${JSON.stringify(d.defaultValue)} —— `
+        + `未知的必须写字符串 "unknown"。写具体值等于把猜测冒充成依据，`
+        + `而 C1 的门禁只能验「与数据一致」、验不了「与 Windows 真实出厂一致」`,
+      );
+    }
+  } else {
+    a7Problems.push(`${id}: defaultKnown 必须是 true/false，实际 ${JSON.stringify(d.defaultKnown)}`);
+  }
+  if (!d.why || String(d.why).length < 8) a7Problems.push(`${id}: why 太短（依据不可复核）`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.reviewedAt || '')) a7Problems.push(`${id}: reviewedAt 不是 YYYY-MM-DD`);
+}
+// 覆盖率棘轮：登记项数只增不减
+const DEF_BASELINE = 126; // 2026-10-03 首版：全部项都登记（known 或 unknown）
+if (Object.keys(defItems).length < DEF_BASELINE) {
+  a7Problems.push(
+    `defaults 覆盖缩水：${Object.keys(defItems).length} < 基线 ${DEF_BASELINE} —— `
+    + `新项必须登记（哪怕标 unknown），否则「哪些项的默认值未知」就不可查`,
+  );
+}
+// known 项数棘轮：**只增不减**。判红实验 2 抓到的缺口：把一个 `defaultKnown=true`
+// 改成 `false` + `"unknown"` 完全合规（每条规则都过），于是「机械可复核的项」可以
+// 被静默降级成 unknown —— 覆盖率只登记不升级，几个月后这张表就全是 unknown 而没人察觉。
+const DEF_KNOWN_BASELINE = 10; // 2026-10-03 首版
+const knownCount = Object.values(defItems).filter((x) => x.defaultKnown).length;
+if (knownCount < DEF_KNOWN_BASELINE) {
+  a7Problems.push(
+    `defaultKnown=true 的项从 ${DEF_KNOWN_BASELINE} 降到 ${knownCount} —— `
+    + `「可机械复核的项」可以静默降级成 unknown（每条规则都过），`
+    + `所以必须单独棘轮。确有项不再可复核时请下调本基线并在提交信息里说明`,
+  );
+}
+check(
+  a7Problems.length === 0,
+  `A7. 出厂默认值侧表：${Object.keys(defItems).length} 项全登记 / defaultKnown=true ${knownCount} 项（机械可复核，棘轮 >= ${DEF_KNOWN_BASELINE}）/ 其余显式 "unknown"（不猜值）`,
+  a7Problems.join('; '),
+);
+
 console.log('');
 if (fail > 0) {
   console.error(`写入坐标侧表门禁失败 ${fail} 项。`);
@@ -828,7 +921,33 @@ console.log('✓ 写入坐标侧表：键集 / 双向对拍 / 启动类型 / 商
   for (const [name, got, want] of m4Cases) {
     if (got !== want) findings.push(`M4 自检「${name}」判据行为不符预期`);
   }
-  const total = cases.length + m4Cases.length;
+  // 第三批（C1 / A7）：「诚实标 unknown」这条判据的正向对照。
+  // 关键样本是第4 条 —— defaultKnown=true 但机械复核不成立（steps 的键全在 restore 里）。
+  // 那条是本组最容易写成「只看 defaultValue 是不是 null」的形态，而那样它就恒绿。
+  const a7Judge = (d, createdKeysInSteps, createdKeysInRestore) => {
+    const bad = [];
+    if (d.defaultKnown === true) {
+      if (d.defaultValue !== null) bad.push('known 但填了具体值');
+      const created = createdKeysInSteps.filter((k) => !createdKeysInRestore.includes(k));
+      if (!created.length) bad.push('标 known 但机械复核不成立');
+    } else if (d.defaultKnown === false) {
+      if (d.defaultValue !== 'unknown') bad.push('unknown 但填了具体值');
+    } else {
+      bad.push('defaultKnown 非法');
+    }
+    return bad;
+  };
+  const a7Cases = [
+    ['known + null + 机械复核成立', a7Judge({ defaultKnown: true, defaultValue: null }, ['A', 'B'], ['A']).length === 0, true],
+    ['known + 填了具体值', a7Judge({ defaultKnown: true, defaultValue: 'dword:00000000' }, ['A'], []).length > 0, true],
+    ['unknown 但填了具体值（开始猜了）', a7Judge({ defaultKnown: false, defaultValue: '0' }, [], []).length > 0, true],
+    ['unknown + "unknown" 应放行', a7Judge({ defaultKnown: false, defaultValue: 'unknown' }, [], []).length === 0, true],
+    ['known + null 但机械复核不成立', a7Judge({ defaultKnown: true, defaultValue: null }, ['A'], ['A']).length > 0, true],
+  ];
+  for (const [name, got, want] of a7Cases) {
+    if (got !== want) findings.push(`A7 自检「${name}」判据行为不符预期`);
+  }
+  const total = cases.length + m4Cases.length + a7Cases.length;
   const ok = findings.length === 0;
   console.log(`${ok ? '✓' : '✗'} 自检：${total} 条已知样本（含 1 条**应当放行**的干净样本），判据行为全对 ${total - findings.length} 条`);
   if (!ok) {

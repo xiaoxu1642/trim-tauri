@@ -148,12 +148,32 @@ pub(super) const SECURITY_JSON: &str = include_str!("../../../data/optimizer-sec
 // **不是**「没有依据」—— 覆盖率棘轮在 `check-optimizer-write-contract.mjs` 的 A5 组）。
 pub(super) const PROVENANCE_JSON: &str = include_str!("../../../data/optimizer-provenance.json");
 
+/// C1：出厂默认值 / 产品建议侧表。`defaultKnown=false` 的项 `defaultValue` 是字符串
+/// `"unknown"` —— **不是猜的值**。见 `tools/check-optimizer-write-contract.mjs` 的 A7 组。
+pub(super) const DEFAULTS_JSON: &str = include_str!("../../../data/optimizer-defaults.json");
+
 /// 某项的 provenance；不在表里 = None
 pub(super) fn provenance_of(option_id: &str) -> Option<Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
     let map = CACHE.get_or_init(|| {
         let parsed: Value =
             serde_json::from_str(PROVENANCE_JSON).expect("optimizer-provenance.json 合法");
+        parsed
+            .get("items")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    });
+    map.get(option_id).cloned()
+}
+
+/// C1：某项的「出厂默认值 / 产品建议」信息；不在表里 = None
+/// （**不是**「没有默认值」，而是「没登记」—— 覆盖率棘轮在门禁 A7 组）。
+pub(super) fn defaults_of(option_id: &str) -> Option<Value> {
+    static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        let parsed: Value =
+            serde_json::from_str(DEFAULTS_JSON).expect("optimizer-defaults.json 合法");
         parsed
             .get("items")
             .and_then(Value::as_object)

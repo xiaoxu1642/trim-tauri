@@ -1,0 +1,762 @@
+{
+  "_comment": "优化项「出厂默认值 / 产品建议」正交分离（C1 · 借 Winhance RegistrySetting 的两个正交字段）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。姿势同 optimizer-scope.json / optimizer-provenance.json。  defaultKnown 语义：true=defaultValue 有可机械复核的依据；false=unknown，**不用猜的值填坑**。  **本表刻意不含「Windows 出厂默认值」**：那个值没有权威来源、本机也验不了（键已被改过），而门禁只能校验「与数据一致」、校验不了「与 Windows 真实出厂一致」—— 编一个默认值恰好废掉 C1 的全部价值（价值就在「依据可判定」）。  真正的「原值」来源是值级备份 optimizer-backups.json 里执行前的实测值，但那**因机而异**。",
+  "schemaVer": 1,
+  "items": {
+    "tf_ntfs": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_hibern_off": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 4 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_core_misc": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_timer_coal": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "game_dvr": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "nara_prio": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "net_qos_dscp": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "disable_uac": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_gamemode": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_gamebar": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_gpu_latency": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 11 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_ifeo_perf": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_ifeo_wipe": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_mem_gb": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_mmagent": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_svc_bulk": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_drv_disable": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "share_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "telemetry_optimize": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 8 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "power_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_defender": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 23 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_defender_cloud": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_defender_sample": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_privacy": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 22 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_nvidia_telemetry": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 4 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_keys_sticky": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_usb_power": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "mouse_optimize": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 4 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_keyboard": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_dev_disable": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_dev_audio": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_dev_printer": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_restore_point": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_appx": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_cortana": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 7 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_onedrive": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 6 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_disable_enhancements": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_disable_spatial_sound": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_mmcss_priority": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_mmcss_schedule": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_disable_comm_ducking": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_disable_service_restart": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_disable_narrator_ducking": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_show_ext": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_show_hidden": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_thumb_delay": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_sep_process": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_taskbar_left": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_taskbar_show_desktop": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_taskbar_multi": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_low_disk_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "explorer_autorestart": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "explorer_refresh_policy": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tasks_disable_defrag": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tasks_disable_silent_cleanup": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tasks_disable_winbackup": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tasks_disable_settingsync": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "peripheral_inactive_scroll": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "peripheral_winkey_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "peripheral_mouse_trails": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "peripheral_snap_to": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_advertising_id": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_wer_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_compat_telemetry": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_settingsync_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_cloud_content": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_permissions_tune": {
+      "defaultKnown": true,
+      "defaultValue": null,
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 18 个），原状态必然是「键不存在」",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_connected_devices_manual": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_remote_registry_disable": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_remote_connectivity_manual": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_bluetooth_disable": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "power_aspm_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "storage_8dot3_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_uwp_background_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_store_auto_update_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_windows_update_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_wu_pause": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_wu_enable": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_notifications_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_vbs_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_remote_assist_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_prefetcher_fast": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_crash_autoreboot": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_exploit_protection_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "wu_do_download_mode_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "net_no_active_probe": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_copilot_hide_button": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_startmenu_ads_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_startmenu_tip_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_settings_ads_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_filesync_ads_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_minanimate_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_taskbar_anim_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_thumb_cache_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_font_smoothing_cleartype": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "wu_au_options_notify": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "wu_no_auto_reboot": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "sys_transparency_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "devmgr_show_hidden_default": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_w32time_manual": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_fdrespum_manual": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_storsvc_manual": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "svc_xblauthmgr_manual": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_hide_firstrun": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_bg_mode_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_startup_boost_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_intrusive_ads_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_ntp_quicklinks_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_sidebar_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_unsupported_os_warn_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_metrics_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_tab_perf_detector_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_ntp_content_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_personalization_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_insecure_download_warn_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_rewards_hide": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_sxs_service_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_update_task_disable": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_copilot_search_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_ai_off": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_perf_misc": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_privacy_extra": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_svc_extra5": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_ctx_copymove": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_disk_extra3": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_store_autoupdate": {
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
+      "reviewedAt": "2026-10-03"
+    }
+  }
+}
