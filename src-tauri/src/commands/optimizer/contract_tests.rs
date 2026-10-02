@@ -1166,3 +1166,231 @@ use super::restore_point::*;
             "svc_bluetooth_disable 不该有 store_services（只有 tf_svc_bulk 有条件追加）"
         );
     }
+
+    /// M2-B：`read_reg_binary_opt` 的行为契约（Binary 读回原语）。
+    ///
+    /// 四条都要断，因为它们各自对应一种「检不出」形态：
+    /// · 正常二进制 → 小写 hex 连写（与 `read_reg_value_text` 的 BINARY 展平同格式，
+    ///   否则两侧比较时格式不同会恒不相等）
+    /// · 空二进制 → `Some("")`，**不是** `None`（`MitigationOptions` 全零字节属这类；
+    ///   判成「读不到」会把「已清零」说成「未知」）
+    /// · 非 REG_BINARY（DWORD）→ `None`（fail-closed，不拿别的类型凑）
+    /// · 键/值不存在 → `None`
+    ///
+    /// 反向护栏同批：同一键上的 DWORD 读侧**不受影响**（防止新原语抢了旧原语的活）。
+    #[test]
+    fn m2_二进制读回原语的四条契约() {
+        use windows::Win32::System::Registry::{
+            HKEY_CURRENT_USER, REG_BINARY, REG_DWORD,
+        };
+        use crate::engine::native::{read_reg_binary_opt, read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+
+        let sub = "Software\\Trim\\m2-binary-probe";
+        assert!(reg_key_ensure(HKEY_CURRENT_USER, sub), "建夹具键失败");
+        // 写侧用引擎自己的原语（不引新依赖）
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, sub, "Bin", REG_BINARY, &[0x0a, 0x0b, 0x0c]),
+            "写二进制夹具失败"
+        );
+
+        // ① 正常二进制 → 小写 hex 连写
+        assert_eq!(
+            read_reg_binary_opt(HKEY_CURRENT_USER, sub, "Bin").as_deref(),
+            Some("0a0b0c"),
+            "二进制读回格式必须是连写小写 hex（与 read_reg_value_text 同口径）"
+        );
+
+        // ② 非 REG_BINARY（DWORD）→ None（fail-closed）
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, sub, "Dword", REG_DWORD, &42u32.to_le_bytes()),
+            "写 dword 夹具失败"
+        );
+        assert_eq!(
+            read_reg_binary_opt(HKEY_CURRENT_USER, sub, "Dword"),
+            None,
+            "DWORD 值不许被二进制原语读出来（那会拿错类型凑判定）"
+        );
+        // 反向护栏：DWORD 读侧不受影响
+        assert_eq!(
+            read_reg_dword_opt(HKEY_CURRENT_USER, sub, "Dword"),
+            Some(42),
+            "新增二进制原语后 DWORD 读侧被影响 ⇒ 原语抢活"
+        );
+
+        // ③ 不存在的值 / 键 → None
+        assert_eq!(read_reg_binary_opt(HKEY_CURRENT_USER, sub, "不存在的值"), None);
+        assert_eq!(read_reg_binary_opt(HKEY_CURRENT_USER, "Software\\Trim\\不存在的键xyz", "x"), None);
+
+        // 清理夹具（不留残留）
+        let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, "Bin");
+        let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, "Dword");
+    }
+
+    /// M2-B：A 类 6 项「写注册表但检测不出」的项必须真能产出断言。
+    ///
+    /// v0.5.0 的形态同 B 类：`steps` 全是 `pwsh` 文本，`collect_checks` 不解析 pwsh
+    /// 所以返回空 vec，体检恒显示「未生效」，用户点详情看到「立即执行」而不是
+    /// 「立即恢复」，会重复施加。
+    ///
+    /// 本批覆盖三种判据形态（混起来会判错，所以逐个断）：
+    /// · dword 等值（`CommDucking=0`）
+    /// · binary 逐字节（`MitigationOptions` / `Scancode Map`）
+    /// · **键必须不存在**（`perf_wu_enable` 的删除语义）
+    #[test]
+    fn m2_a类盲区项现在能产出断言() {
+        for (id, min_checks, want_kinds) in [
+            ("perf_exploit_protection_off", 1, &["regBinary"][..]),
+            ("peripheral_winkey_off", 1, &["regBinary"][..]),
+            ("audio_disable_comm_ducking", 3, &["reg"][..]),
+            ("audio_disable_narrator_ducking", 2, &["reg"][..]),
+            ("audio_disable_service_restart", 1, &["reg"][..]),
+            ("perf_wu_enable", 4, &["regAbsent"][..]),
+        ] {
+            let opt = find_option(id).unwrap_or_else(|| panic!("{id} 应存在于数据层"));
+            let checks = collect_checks(opt);
+            assert!(
+                checks.len() >= min_checks,
+                "{id} 只产出 {} 条断言（期望 >= {min_checks}）—— 检测侧仍读不到 pwsh 步骤的写入落点",
+                checks.len()
+            );
+            for c in &checks {
+                let (kind, data, _) = c.probe();
+                assert!(
+                    want_kinds.contains(&kind),
+                    "{id} 产出了预期外的 kind={kind}（期望 {:?}）",
+                    want_kinds
+                );
+                // binary 绝不能标 is_dword（判定链靠它二分 dword/string）
+                if kind == "regBinary" {
+                    assert!(
+                        !c.probe_reg().2,
+                        "{id} 的 binary 断言被标成 is_dword ⇒ 判定链会把多字节二进制当 4 字节整数比"
+                    );
+                    // 字节数逐项不同（MitigationOptions 16 字节 / Scancode Map 24 字节），
+                    // 所以只断**格式**（偶数长度 + 全小写 hex），不断具体长度 ——
+                    // 写死 32 会在换项时误报（第一版就踩了）。
+                    // **长度与 pwsh 原文的逐字节一致性由门禁的 A2 组对拍**——
+                    // 那条真的抓到了「手抄错一个字节」（本批真发生过）。
+                    assert_eq!(
+                        data.len() % 2,
+                        0,
+                        "{id} 的 binary 期望值长度必须是偶数（每字节两个 hex），实际 {}",
+                        data.len()
+                    );
+                    assert!(
+                        !data.is_empty() && data.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+                        "{id} 的 binary 期望值必须是非空小写 hex 连写，实际 {data:?}"
+                    );
+                }
+                // regAbsent 的 data 为空（没有「期望值」这回事）
+                if kind == "regAbsent" {
+                    assert!(data.is_empty(), "{id} 的 regAbsent 断言不该带期望值，实际 {data:?}");
+                }
+            }
+        }
+        // 反向护栏：binary 断言的 hive/subkey 必须真的指向侧表声明的键，
+        // 否则「键名写错」会表现为「恒判未生效」而不是报错。
+        let opt = find_option("perf_exploit_protection_off").unwrap();
+        let checks = collect_checks(opt);
+        let c = checks.iter().find(|c| c.probe().0 == "regBinary").unwrap();
+        assert_eq!(c.probe_reg().0, "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel");
+        assert_eq!(c.probe_reg().1, "MitigationOptions");
+    }
+
+    /// M2-B：`regAbsent` 判据的**方向**必须对（这是本批最容易被写反的一处）。
+    ///
+    /// 真机验证：造一个键 → 断言判「未生效」（键还在）→ 删掉 → 断言判「已生效」。
+    /// 方向写反的话这条会红，而只断言「能产出 regAbsent」的测试**照样绿**。
+    /// M2-B：`regAbsent` 判据的**方向**必须对（这是本批最容易被写反的一处）。
+    ///
+    /// 只断「能产出 regAbsent」的测试**照样绿** —— 方向写反时它仍是 regAbsent，
+    /// 只有真机往返能抓住。而真机往返必须**按侧表声明的真实键**做（用别的键
+    /// 造同形态夹具测不到方向：`check_optimized` 走的是侧表那条路，会去读
+    /// HKLM 下另外 3 个键，它们不存在 ⇒ `all()` 恒 true，与本键无关）。
+    ///
+    /// ⚠️ 所以这条是 `#[ignore]`：它要在 HKLM
+    /// `SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate` 下真的建/删一个
+    /// `Pause*` 键 —— 那是**改系统更新策略**，快速组零副作用纪律不许。
+    /// 发布前门禁组（`cargo test -- --ignored`）跑。
+    #[test]
+    #[ignore = "要真改 HKLM 下的 WindowsUpdate 策略键，发布前门禁组跑"]
+    fn m2_删除语义判据方向正确() {
+        use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_DWORD};
+        use crate::engine::native::{read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+
+        // 键路径与 hive 从**侧表**现取，不硬编码 —— 硬编码会在侧表改键名后
+        // 静默测到另一个键上（症状：这条绿了，但真实判据方向是反的）。
+        let spec = write_spec_of("perf_wu_enable").expect("perf_wu_enable 应在侧表里");
+        let r = spec.reg_writes.first().expect("perf_wu_enable 应有 regWrites");
+        assert!(r.absent, "前提失效：perf_wu_enable 的第一条不是删除语义");
+        let sub = r.subkey;
+        let value = r.value;
+
+        // 建出那个键（模拟「用户暂停过更新」的真实状态）
+        reg_key_ensure(HKEY_LOCAL_MACHINE, sub);
+        reg_restore_write(HKEY_LOCAL_MACHINE, sub, value, REG_DWORD, &1u32.to_le_bytes());
+        assert_eq!(
+            read_reg_dword_opt(HKEY_LOCAL_MACHINE, sub, value),
+            Some(1),
+            "前提失效：夹具值写不进 HKLM（需要管理员）"
+        );
+        // 键在 ⇒ 该判「未生效」
+        let res = check_optimized(&["perf_wu_enable".to_string()]);
+        assert_eq!(
+            res.get("perf_wu_enable"),
+            Some(&false),
+            "键还在时必须判未生效（判成 true 就是方向写反了）"
+        );
+
+        // 删掉键 ⇒ 判「已生效」
+        let _ = crate::engine::native::reg_restore_delete(HKEY_LOCAL_MACHINE, sub, value);
+        assert_eq!(
+            read_reg_dword_opt(HKEY_LOCAL_MACHINE, sub, value),
+            None,
+            "前提失效：夹具值删不掉"
+        );
+        let res = check_optimized(&["perf_wu_enable".to_string()]);
+        assert_eq!(
+            res.get("perf_wu_enable"),
+            Some(&true),
+            "键删掉后必须判已生效 —— 这就是「恢复自动更新」该被认出来的状态"
+        );
+    }
+
+    /// M2-B：`regBinary` 判据的真机往返（造字节 → 判生效 → 改字节 → 判未生效）。
+    ///
+    /// 为什么要真机往返而不是只断形状：binary 比较是**字符串相等**，
+    /// 两侧格式只要有一处不同（大小写 / 分隔符 / 长度口径）就恒不相等，
+    /// 而这种错编译全绿、静态检查全绿，只在这条真机断言里才暴露。
+    #[test]
+    fn m2_binary判据真机往返() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_BINARY};
+        use crate::engine::native::{read_reg_binary_opt, reg_key_ensure, reg_restore_write};
+
+        let sub = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel";
+        let value = "MitigationOptions";
+        // 只在测试键下做往返（真机那个键是系统级的，写它属于改系统状态）
+        let probe_sub = "Software\\Trim\\m2-binary-probe2";
+        assert!(reg_key_ensure(HKEY_CURRENT_USER, probe_sub), "建夹具键失败");
+        let bytes = [0x22u8, 0x22, 0x22, 0x00, 0x00, 0x02];
+        assert!(reg_restore_write(HKEY_CURRENT_USER, probe_sub, value, REG_BINARY, &bytes), "写夹具失败");
+
+        let expect = "222222000002";
+        assert_eq!(
+            read_reg_binary_opt(HKEY_CURRENT_USER, probe_sub, value).as_deref(),
+            Some(expect),
+            "写入的 6 字节应读回成 12 个 hex 字符"
+        );
+        // 侧表里 perf_exploit_protection_off 用的正是同一套格式（16 字节 = 32 hex）
+        let spec = write_spec_of("perf_exploit_protection_off").unwrap();
+        let ra = spec
+            .reg_writes
+            .iter()
+            .find(|r| r.value == "MitigationOptions")
+            .expect("侧表里应有 MitigationOptions");
+        assert_eq!(ra.expect.len(), 32, "侧表期望值应是 32 个 hex 字符");
+        assert!(ra.expect.chars().all(|c| c.is_ascii_hexdigit()), "侧表期望值必须全是 hex 字符");
+        // 键路径对照（防止侧表写错键名，那会表现为恒判未生效而不是报错）
+        assert_eq!(ra.subkey, sub);
+        let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe_sub, value);
+    }

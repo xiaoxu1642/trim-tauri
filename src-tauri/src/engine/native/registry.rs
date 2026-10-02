@@ -338,6 +338,69 @@ pub fn read_reg_string(hive: HKEY, subkey: &str, value: &str) -> Option<String> 
     }
 }
 
+/// 读注册表二进制值（REG_BINARY）—— M2 检测断言用。
+///
+/// 为什么需要（与既有原语的关系）：
+/// - [`read_reg_dword_opt`] 只认 `REG_DWORD`（4 字节）；
+/// - [`read_reg_string`] 只认 `REG_SZ`（UTF-16，且**不**展开 `REG_EXPAND_SZ`）；
+/// - 而优化项里有两类真实写入是二进制：`MitigationOptions`（内核缓解位图，
+///   `perf_exploit_protection_off`）与 `Scancode Map`（键盘扫描码重映射，
+///   `peripheral_winkey_off`）。这两项原先因此完全检不出。
+///
+/// **口径**：
+/// - 类型不是 `REG_BINARY` 一律 `None`（fail-closed，不拿别的类型凑 —— `read_reg_string`
+///   拒绝 `REG_EXPAND_SZ` 是同一个理由）；
+/// - 返回小写 hex 连写（无分隔符），与 [`read_reg_value_text`] 的 BINARY 展平口径一致，
+///   所以 `check_optimized` 那侧比较时两侧格式相同；
+/// - 空值返回 `Some("")`（长度 0 是合法状态，与「键不存在」`None` 区分开）。
+///   `MitigationOptions` 全零字节就属于这一类 —— 判成「读不到」会把「已清零」说成「未知」。
+pub fn read_reg_binary_opt(hive: HKEY, subkey: &str, value: &str) -> Option<String> {
+    const REG_BINARY: u32 = 3;
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return None;
+        }
+        let vn = to_wide(value);
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut size: u32 = 0;
+        if RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+            let _ = RegCloseKey(hk);
+            return None;
+        }
+        if ty.0 != REG_BINARY {
+            let _ = RegCloseKey(hk);
+            return None; // 类型不符 ⇒ 检不出（不猜）
+        }
+        if size == 0 {
+            let _ = RegCloseKey(hk);
+            return Some(String::new()); // 存在但为空 ≠ 不存在
+        }
+        // 上限防御：优化项里的二进制值最大 24 字节（MEMORY_COMBINE_INFORMATION_EX）。
+        // 1 MiB 是「读不出来就是异常」与「内存被无界分配」之间的折中，且远大于任何真实值。
+        const MAX_BINARY: u32 = 1024 * 1024;
+        if size > MAX_BINARY {
+            let _ = RegCloseKey(hk);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let r = RegQueryValueExW(
+            hk,
+            PCWSTR(vn.as_ptr()),
+            None,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hk);
+        if r.is_err() {
+            return None;
+        }
+        Some(buf[..size as usize].iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
 /// 读注册表值，返回 (类型标签, 字符串化数据) —— **显示/回读链**用的展平口径。
 ///
 /// 口径逐条对齐 .NET `GetValue` 与 PS `[string]$v`（`READ_ONE_HEADER`，main.js 3481-3502 的移植）：

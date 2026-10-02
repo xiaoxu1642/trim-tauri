@@ -177,6 +177,29 @@ pub(super) struct WriteSpec {
     /// (期望Start, 服务清单)
     pub groups: &'static [(u32, &'static [String])],
     pub store_services: &'static [String],
+    /// A 类（注册表可回读）断言。M2-B。
+    ///
+    /// 三种判据形态，**混起来会判错**：
+    /// - `kind=dword` + `expect`：键存在且值等于期望（走 `read_reg_dword_opt`）
+    /// - `kind=binary` + `expect`：键存在且字节序列等于期望（走 `read_reg_binary_opt`）
+    /// - `absent=true`：**键必须不存在**才算已生效。`perf_wu_enable` 是删除语义
+    ///   （`Remove-ItemProperty` 删掉 4 个 `Pause*` 键），判「值等于某个数」永远不可能
+    ///   满足 —— 那是把「已生效」判成「未生效」，用户会点「立即执行」而执行侧只是在
+    ///   重复删不存在的键。
+    pub reg_writes: &'static [RegAssert],
+}
+
+/// 一条注册表断言。
+#[derive(Clone)]
+pub(super) struct RegAssert {
+    pub hive: &'static str,
+    pub subkey: &'static str,
+    pub value: &'static str,
+    /// "dword" | "string" | "binary"
+    pub kind: &'static str,
+    /// 期望值；`absent` 为真时忽略
+    pub expect: &'static str,
+    pub absent: bool,
 }
 
 fn writes_table() -> &'static std::collections::HashMap<String, Value> {
@@ -194,8 +217,8 @@ fn writes_table() -> &'static std::collections::HashMap<String, Value> {
 /// 取某项的写入坐标；不在表里 = None（**不是**「没有写入」—— 是「检不出」，
 /// 调用方据此跳过而不是判未生效，见 `overview.rs::collect_checks`）。
 ///
-/// 生命周期说明：服务名池与本函数的结果都活在各自的 `OnceLock` 里（进程级），
-/// 所以 `&'static [String]` 借用成立，**不需要 `Box::leak`**（那会让每次热路径调用
+/// 生命周期说明：服务名池、断言池与本函数的结果都活在各自的 `OnceLock` 里（进程级），
+/// 所以 `&'static [..]` 借用成立，**不需要 `Box::leak`**（那会让每次热路径调用
 /// 都真正泄漏一份，虽然被 OnceLock 挡住只泄漏一次，但读代码的人会误以为有泄漏风险）。
 pub(super) fn write_spec_of(option_id: &str) -> Option<WriteSpec> {
     static CACHE: OnceLock<std::collections::HashMap<String, WriteSpec>> = OnceLock::new();
@@ -253,16 +276,51 @@ pub(super) fn write_spec_of(option_id: &str) -> Option<WriteSpec> {
                 }
                 m
             });
-        groups_map
-            .iter()
-            .map(|(id, groups)| {
+        // A 类断言池（M2-B）。`&'static str` 直接借用自 `WRITES_JSON`（`include_str!`
+        // 的字面量是 `'static`），所以这里连字符串池都不用建。
+        static REGS: OnceLock<std::collections::HashMap<String, Vec<RegAssert>>> = OnceLock::new();
+        let regs_map: &'static std::collections::HashMap<String, Vec<RegAssert>> =
+            REGS.get_or_init(|| {
+                let mut m = std::collections::HashMap::new();
+                for (id, v) in table.iter() {
+                    let Some(arr) = v.get("regWrites").and_then(Value::as_array) else { continue };
+                    let list: Vec<RegAssert> = arr
+                        .iter()
+                        .filter_map(|r| {
+                            Some(RegAssert {
+                                hive: r.get("hive")?.as_str()?,
+                                subkey: r.get("subkey")?.as_str()?,
+                                value: r.get("value")?.as_str()?,
+                                kind: r.get("kind").and_then(Value::as_str).unwrap_or("dword"),
+                                expect: r.get("expect").and_then(Value::as_str).unwrap_or(""),
+                                absent: r.get("absent").and_then(Value::as_bool).unwrap_or(false),
+                            })
+                        })
+                        .collect();
+                    if !list.is_empty() {
+                        m.insert(id.clone(), list);
+                    }
+                }
+                m
+            });
+        // 合并两域。**任一域非空才登记** —— 两域都空的项返回 None（=检不出），
+        // 不能因为「groups 空」就把有 regWrites 的项丢掉（M2-B 踩过）。
+        let mut ids: std::collections::HashSet<&String> = std::collections::HashSet::new();
+        ids.extend(groups_map.keys());
+        ids.extend(regs_map.keys());
+        ids.into_iter()
+            .map(|id| {
                 let store: &'static [String] = pool
                     .get(&format!("{id}\u{1}store"))
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
                 (
                     id.clone(),
-                    WriteSpec { groups: groups.as_slice(), store_services: store },
+                    WriteSpec {
+                        groups: groups_map.get(id).map(|v| v.as_slice()).unwrap_or(&[]),
+                        store_services: store,
+                        reg_writes: regs_map.get(id).map(|v| v.as_slice()).unwrap_or(&[]),
+                    },
                 )
             })
             .collect()
@@ -272,7 +330,8 @@ pub(super) fn write_spec_of(option_id: &str) -> Option<WriteSpec> {
 
 /// 本机确有备份的退役项。备份结构异常或 `values` 为空的条目按「没有备份」处理——
 /// 列出来只会给用户一个点了不会成功的按钮。
-pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {    retired_items()
+pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
+    retired_items()
         .iter()
         .filter_map(|i| {
             let id = i["id"].as_str()?;

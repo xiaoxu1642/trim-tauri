@@ -63,11 +63,18 @@ pub(super) fn reg_hive(root: &str) -> Option<windows::Win32::System::Registry::H
 
 #[derive(Clone)]
 pub(super) struct Check {
-    /// "reg" | "svc" | "svcStart"
+    /// "reg" | "svc" | "svcStart" | "regBinary" | "regAbsent"
     ///
     /// `svcStart` 与 `svc` 必须分开：`svc` 判「是不是 disabled」，`svcStart` 判
     /// 「启动类型是不是某个具体值」。合成一个 kind 就得把期望值塞进 `data` 再在
     /// 判定处反解，判据会散到两处。
+    ///
+    /// M2-B 新增两个（都来自 `optimizer-writes.json` 的 `regWrites[]`）：
+    /// - `regBinary`：REG_BINARY 值逐字节相等（`MitigationOptions` / `Scancode Map`）。
+    ///   不并进 `reg` 是因为 `reg` 分支按 `is_dword` 二分（dword / string），
+    ///   加第三种类型要么多一个标志位、要么在判定处按值猜类型 —— 两种都更容易判错。
+    /// - `regAbsent`：**键必须不存在**才算已生效。`perf_wu_enable` 是删除语义
+    ///   （`Remove-ItemProperty`），判「值等于某个数」永远不可能满足。
     kind: &'static str,
     // reg（B11：检测改原生，直接带 hive + 子键，不再经 PS 路径字符串）
     hive: windows::Win32::System::Registry::HKEY,
@@ -91,6 +98,19 @@ impl Check {
     #[allow(dead_code)]
     pub(super) fn probe(&self) -> (&'static str, &str, &str) {
         (self.kind, self.data.as_str(), self.name.as_str())
+    }
+
+    /// 形状对拍的第二组：注册表坐标 + 类型标志（M2-B）。
+    ///
+    /// 为什么单独一个而不是把 `probe` 扩成四元组：`probe` 的三个返回值已被
+    /// 十几处断言在用（改它要动全部调用点），而「键路径对不对」「binary 会不会被
+    /// 误标 is_dword」这两件事**只在新分支上有意义**。两个访问器各管一域，
+    /// 加新判据形态时不会把旧调用点全拖下水。
+    ///
+    /// ⚠️ 只给测试/门禁用，不开 `pub` 字段 —— 理由同 [`Check::probe`]。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn probe_reg(&self) -> (&str, &str, bool) {
+        (self.subkey.as_str(), self.key.as_str(), self.is_dword)
     }
 }
 
@@ -228,6 +248,64 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
                 // 人以为这里漏了。
             }
         }
+        // 第五条分支：注册表写入坐标（M2-B · A 类「注册表可回读」）。
+        //
+        // 与第四条（服务）**并列而不合并**：两类断言的读取原语、失败语义都不同
+        // （服务走 SCM，失败 = 服务不存在；注册表走 RegQuery，失败 = 类型不符 / 无权限），
+        // 合成一条会让「判不出来」这个结果无法区分成因。
+        //
+        // 这 6 项原先同样是 `pwsh` 文本 ⇒ `collect_checks` 返回空 vec ⇒ 体检恒「未生效」
+        // ⇒ 用户点「立即执行」重复施加。形态与 B 类完全同构，只是原语不同。
+        let opt_id2 = opt.get("id").and_then(Value::as_str).unwrap_or("");
+        if !opt_id2.is_empty() && checks.is_empty() {
+            if let Some(spec) = write_spec_of(opt_id2) {
+                for r in spec.reg_writes {
+                    // ⚠️ 侧表里写的是**短名**（HKLM/HKCU/…）而 [`reg_hive`] 认的是
+                    // **长名**（HKEY_LOCAL_MACHINE/…）—— 两者不匹配会让每个断言都走
+                    // 「未知 hive」分支被 skip，`collect_checks` 仍返回空 vec，
+                    // 症状与 v0.5.0 的缺陷**完全一样**（体检恒「未生效」）。
+                    // 这个 bug 是单测抓出来的：报「只产出 0 条断言」，而侧表自洽测试
+                    // 是绿的（它只查「项在表里」，不查「hive 认不认」）。
+                    let hive_name = match r.hive {
+                        "HKLM" => "HKEY_LOCAL_MACHINE",
+                        "HKCU" => "HKEY_CURRENT_USER",
+                        "HKCR" => "HKEY_CLASSES_ROOT",
+                        "HKU" => "HKEY_USERS",
+                        "HKCC" => "HKEY_CURRENT_CONFIG",
+                        other => other,
+                    };
+                    let Some(hive) = reg_hive(hive_name) else {
+                        // 未知 hive：产不出断言。**不记一条恒 false** —— 那样会让整个项
+                        // 恒判「未生效」，用户点详情看到「立即执行」而实际什么也没做。
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!(
+                                "写入坐标侧表里 {} 的 hive {:?} 无法识别，该断言已跳过",
+                                opt_id2, r.hive
+                            ),
+                        );
+                        continue;
+                    };
+                    checks.push(Check {
+                        kind: if r.absent {
+                            "regAbsent"
+                        } else if r.kind == "binary" {
+                            "regBinary"
+                        } else {
+                            "reg"
+                        },
+                        hive,
+                        subkey: r.subkey.to_string(),
+                        key: r.value.to_string(),
+                        // binary 绝不能标 is_dword：判定链靠这个标志二分 dword/string，
+                        // 标错会把 24 字节的 Scancode Map 当 4 字节整数比。
+                        is_dword: r.kind == "dword" && !r.absent,
+                        data: r.expect.to_string(),
+                        name: String::new(),
+                    });
+                }
+            }
+        }
     }
     checks
 }
@@ -304,6 +382,34 @@ pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<Strin
             && checks.iter().all(|c| {
                 if c.kind == "svc" {
                     native::service_start_type_is(&c.name, native::SVC_START_DISABLED)
+                } else if c.kind == "regBinary" {
+                    // M2-B：REG_BINARY 逐字节相等。`read_reg_binary_opt` 返回小写
+                    // hex 连写（与侧表的 expect 同格式），所以直接字符串比。
+                    //
+                    // 读不到（None）判 false —— 与整条链的既有口径一致（fail-closed）。
+                    // `Some("")`（存在但空）与 `None`（读不到）**必须**分清：前者是
+                    // 「值被清空了」，后者是「读不出来」。把前者当后者会让「已清零」
+                    // 显示成「未生效」。
+                    native::read_reg_binary_opt(c.hive, &c.subkey, &c.key).as_deref() == Some(c.data.as_str())
+                } else if c.kind == "regAbsent" {
+                    // M2-B：删除语义判据 —— **键必须不存在**才算已生效。
+                    //
+                    // 为什么方向是「不存在 = 已生效」：perf_wu_enable 的执行侧是
+                    // `Remove-ItemProperty`（删掉 4 个 `Pause*` 键与 `NoAutoUpdate` 策略），
+                    // 已执行的效果就是那些键**消失**。若判「键存在且等于某值」，它永远
+                    // 不成立 ⇒ 体检恒显示「未生效」⇒ 用户点「立即执行」，而执行侧只是在
+                    // 重复删不存在的键 —— 「谎报未生效 + 重复施加」的组合比检不出更糟。
+                    //
+                    // 读侧用 `read_reg_value_text`（任意类型都读得到）而不是
+                    // `read_reg_dword_opt`：判据是「这个键还在不在」，与值类型无关。
+                    //
+                    // ⚠️ **已知简化**：`None` 同时覆盖「值不存在」与「键打不开
+                    // （无权限 / 父键缺失）」。本判据不区分 —— 对 `WindowsUpdate`
+                    // 那个父键而言，非管理员读它本来就该失败，而「读不到」判未生效是
+                    // 安全的默认方向（灰态宁可多灰不可漏灰）。要区分需要一个
+                    // 「键存在但值不存在」的专用原语（按 `RegQueryValueEx` 的
+                    // ERROR_FILE_NOT_FOUND 与其它错误码分流），本批不做。
+                    native::read_reg_value_text(c.hive, &c.subkey, &c.key).is_none()
                 } else if c.kind == "svcStart" {
                     // `data` 是 collect_checks 存进去的十进制期望值。解析失败即判 false：
                     // 宁可说「未生效」也不给假阳性（与整条链的既有口径一致）。
