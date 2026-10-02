@@ -355,7 +355,15 @@ const idsIn = (text, marker) => {
 };
 // 注意 marker 必须**吃到数组起始括号**：`const HAZARD_IDS: &[&str] = &[` 里的 `&[&str]`
 // 也含 `]`，marker 截短会让下面的 indexOf(']') 在类型标注处就收尾、解析出空集合。
-const rustOptSrc = readFileSync(join(cmdDir, 'optimizer.rs'), 'utf8');
+// v3 D4：optimizer.rs 拆成 commands/optimizer/ 目录，高危清单落在 catalog.rs。
+// 读整个目录而不是点名某个文件——坐标再搬家也不用回来改这里，同时保留
+// 「一个都找不到就判红」的 fail-closed 方向（idsIn 返回 null 即红）。
+const readDirRs = (dir) =>
+  readdirSync(dir)
+    .filter((f) => f.endsWith('.rs'))
+    .map((f) => readFileSync(join(dir, f), 'utf8'))
+    .join('\n');
+const rustOptSrc = readDirRs(join(cmdDir, 'optimizer'));
 const jsOptSrc = readFileSync(join(TAURI_ROOT, 'src', 'scripts', 'optimizer.js'), 'utf8');
 const rustHazard = idsIn(rustOptSrc, 'const HAZARD_IDS: &[&str] = &[');
 const jsHazard = idsIn(jsOptSrc, 'const HAZARD_OPTION_IDS = new Set([');

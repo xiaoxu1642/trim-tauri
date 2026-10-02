@@ -3,7 +3,7 @@
 // 为什么要有这条：`PS_INLINE_ALLOW`（engine/pssteps.rs）管的是**数据层语法白名单**——
 // 「哪串 PowerShell 允许逐字交给收件箱 PS 跑」。它从来不是「命令层调用点已登记」的证据，
 // 而 v1 方案正是把它当成了证据，于是 `tf_restore_point` 的创建链
-// （commands/optimizer.rs 的 run_inline_ps）绕开 `pssteps::compile` 也一直被算成"受棘轮管"。
+// （commands/optimizer/restore_point.rs 的 run_inline_ps）绕开 `pssteps::compile` 也一直被算成"受棘轮管"。
 // 同类漏网的还有 commands/uninstall.rs 的两处 Appx 调用：`quiet_cmd(...).output()`
 // 连超时都没有，子孙进程占住管道即整条 IPC 永久挂住（R0 已改走统一入口）。
 //
@@ -55,10 +55,10 @@ const PS_CALL_SITES = [
     timeout: 300,
   },
   {
-    file: 'src-tauri/src/commands/optimizer.rs',
+    file: 'src-tauri/src/commands/optimizer/restore_point.rs',
     anchor: 'fn run_inline_ps | crate::pwsh::run_inbox_script(ps, std::time::Duration::from_secs(timeout_secs), diag)',
     reason: '命令层薄封装：不自己定超时，秒数见 D 表逐调用点',
-    owner: 'commands/optimizer.rs',
+    owner: 'commands/optimizer/restore_point.rs',
     timeout: 'caller',
   },
   {
@@ -164,7 +164,10 @@ function splitArgs(args) {
 /** 扫一个调用 token → 命中清单（注释行、函数定义行不算调用点） */
 function collect(text, file, token) {
   const hits = [];
-  const defRe = new RegExp(`(pub(\\(crate\\))?\\s+)?(async\\s+)?fn\\s+${token.slice(0, -1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+  // 定义行不算调用点：这里的 defRe 历史上就够不到函数名（before 截到 token 前为止），
+  // 真正生效的是 D/F 组各自的 isDefLine 过滤；保留本正则只为兼容旧形态，
+  // 但可见性分支已放宽到 pub(...)，避免以后有人把它当唯一出口来改。
+  const defRe = new RegExp(`(pub(\\(\\w+\\))?\\s+)?(async\\s+)?(unsafe\\s+)?fn\\s+${token.slice(0, -1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
   let idx = text.indexOf(token);
   while (idx >= 0) {
     const lineStart = text.lastIndexOf('\n', idx - 1) + 1;
@@ -260,13 +263,16 @@ for (const [file, text] of texts) {
   if (file === THROAT) continue; // 执行层内部自调不是「调用点」
   for (const t of ['run_inbox_ps(', 'run_file(', 'run_file_streaming(']) execPool.push(...collect(text, file, t));
   callPool.push(...collect(text, file, 'run_inbox_script('));
-  if (file.endsWith('commands/optimizer.rs')) inlinePool.push(...collect(text, file, 'run_inline_ps('));
+  if (file.endsWith('commands/optimizer/restore_point.rs')) inlinePool.push(...collect(text, file, 'run_inline_ps('));
 }
-const inlineCalls = inlinePool.filter((h) => !h.raw.trimStart().startsWith('fn '));
+// 定义行不是调用点。可见性前缀要一并剥掉再看 `fn`：D 批拆模块后跨文件 helper 降成
+// `pub(super) fn`，只判 `startsWith('fn ')` 会把定义数成第 N 个调用点（登记表随之假红）。
+const isDefLine = (raw) => /^(?:(?:pub|crate|use)(?:\(\w+\))?\s+)*(?:async\s+)?(?:unsafe\s+)?fn\s/.test(raw.trim());
+const inlineCalls = inlinePool.filter((h) => !isDefLine(h.raw));
 
 const rB = resolve(PS_EXEC_SITES, execPool);
 const rC = resolve(PS_CALL_SITES, callPool);
-const rD = resolve(RUN_INLINE_PS_SITES.map((e) => ({ ...e, file: 'src-tauri/src/commands/optimizer.rs' })), inlineCalls);
+const rD = resolve(RUN_INLINE_PS_SITES.map((e) => ({ ...e, file: 'src-tauri/src/commands/optimizer/restore_point.rs' })), inlineCalls);
 
 check(
   rB.problems.length === 0 && rB.uncovered.length === 0,
@@ -414,7 +420,7 @@ console.log('');
 console.log('PS 调用点台账（现算，引用这些数字的地方必须重跑本门禁）：');
 console.log(`  数据层 PsInline 执行器 : ${callPool.filter((h) => h.file.endsWith('pssteps.rs')).length} 处`);
 console.log(`  命令层直调 inbox PS    : ${inlineCalls.length} 处 → 收敛到薄封装 ${callPool.filter((h) => h.file.endsWith('optimizer.rs')).length} 处`);
-console.log(`  Appx 命令层直调        : ${callPool.filter((h) => h.file.endsWith('uninstall.rs')).length} 处`);
+console.log(`  Appx 命令层直调        : ${callPool.filter((h) => h.file.includes('commands/uninstall/')).length} 处`);
 console.log(`  外部 PowerShell 7 通道 : ${execPool.filter((h) => h.raw.includes('run_file')).length} 处（R1 归零目标）`);
 console.log(`  合计 inbox PS 生产入口 : ${callPool.length} 处（登记表 ${PS_CALL_SITES.length} 条）`);
 

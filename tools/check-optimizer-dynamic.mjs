@@ -29,7 +29,11 @@ const R = (rel) => readFileSync(join(REPO_ROOT, ...rel.split('/')), 'utf8');
 
 const dataJson = R('src-tauri/data/optimizer-runtime.json');
 const jsOpt = R('src/scripts/optimizer.js');
-const rustOpt = R('src-tauri/src/commands/optimizer.rs');
+// v3 D4：optimizer.rs 拆目录后按**契约面点名文件**，不拼整个目录——A 组靠
+// `let is_dynamic` 字面前缀定位 4000 字符窗口、再按 `option_id == "<id>"` 取体，
+// 拼接会让 overview.rs 里那个刻意改名的同名声明抢先命中，窗口就切错位置了。
+const rustOpt = R('src-tauri/src/commands/optimizer/apply.rs');
+const rustCatalog = R('src-tauri/src/commands/optimizer/catalog.rs');
 
 let fail = 0;
 function check(ok, name, detail) {
@@ -203,7 +207,7 @@ check(
     );
 
     // ③ 两侧档位序表同键同序
-    const rustBlock = (rustOpt.match(/const SCOPE_RANK: &\[\(&str, u8\)\] = &\[[^\]]+\]/) || [''])[0];
+    const rustBlock = (rustCatalog.match(/const SCOPE_RANK: &\[\(&str, u8\)\] = &\[[^\]]+\]/) || [''])[0];
     const jsBlock = (jsOpt.match(/const SCOPE_RANK = \{[^}]+\}/) || [''])[0];
     const rustKeys = [...rustBlock.matchAll(/\("([a-z_]+)",\s*(\d+)\)/g)].map((m) => `${m[1]}:${m[2]}`);
     const jsKeys = [...jsBlock.matchAll(/\b([a-z_]+)\s*:\s*(\d+)/g)].map((m) => `${m[1]}:${m[2]}`);
