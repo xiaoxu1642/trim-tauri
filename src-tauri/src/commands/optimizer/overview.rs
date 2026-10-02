@@ -112,6 +112,40 @@ impl Check {
     pub(super) fn probe_reg(&self) -> (&str, &str, bool) {
         (self.subkey.as_str(), self.key.as_str(), self.is_dword)
     }
+
+    /// 区间判据（`regTimeWindow`）的**结束**坐标 —— M2-C。
+    ///
+    /// 单独一个访问器而不是把它塞进 `probe_reg`：那个返回 `(subkey, key, is_dword)`，
+    /// 是给「等值类」断言做形状对拍的。区间类多一个坐标，混进去会让那个访问器的
+    /// 返回值语义变成「有时第三个是 flag 有时是键名」—— 那是判据自己都认不出来的形态。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn probe_reg_name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    /// 造一条**坐标被改写过**的断言副本（仅测试用）。
+    ///
+    /// 为什么需要它：`regEnum` / `regTimeWindow` 的真机往返必须在**测试自己的键**上做
+    /// —— `svc_mem_gb` / `perf_wu_pause` 的真键都在 HKLM 下（改系统状态，快速组不许）。
+    /// 而 `collect_checks` 产出的 `Check` 字段是私有的，测试改不了坐标就会
+    /// 真的去动系统键。
+    ///
+    /// ⚠️ 只在 `cfg(test)` 下存在。非测试构建里「构造一条坐标与数据面无关的断言」
+    /// 这件事没有合法用途 —— 它能让 `judge_check` 被喂任意坐标，是判据被绕过的口子。
+    #[cfg(test)]
+    pub(super) fn with_coords(
+        mut self,
+        hive: windows::Win32::System::Registry::HKEY,
+        subkey: &str,
+        key: &str,
+        name: &str,
+    ) -> Self {
+        self.hive = hive;
+        self.subkey = subkey.to_string();
+        self.key = key.to_string();
+        self.name = name.to_string();
+        self
+    }
 }
 
 /// 解析一个 .reg 值的期望数据（dword:hex→十进制 / 引号串 / 原串）
@@ -130,9 +164,19 @@ pub(super) fn parse_reg_expected(raw: &str) -> Option<(bool, String)> {
 /// 解析 option.steps 中全部 reg 期望值 + service.disable
 pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
     let mut checks = Vec::new();
-    let steps = opt.get("steps").and_then(|v| v.as_array());
-    let Some(steps) = steps else { return checks };
-    for s in steps {
+    // ⚠️ **`steps` 缺失/为空时要走侧表分支，不能直接 return**（M2-C踩过）：
+    // `svc_mem_gb` 在数据层里**连 `steps` 键都没有**（`dynamic: true`，真实步骤由
+    // `apply.rs::memory_steps(gb)` 按用户选的 GB 在运行时生成）。
+    // 早退会让后面的「写入坐标侧表」两条分支**永远到不了** ——
+    // 症状与 v0.5.0 的缺陷一模一样（体检恒「未生效」），但看起来像侧表没登记。
+    // 所以改成`unwrap_or_default()`：缺失与空数组都走「零轮次」的 for 循环，
+    // 循环结束后自然落到侧表分支。
+    let steps: Vec<Value> = opt
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for s in &steps {
         if let Some(block) = s.get("reg").and_then(|v| v.as_str()) {
             for (full, body) in parse_reg_sections(block) {
                 let root = full.split('\\').next().unwrap_or("");
@@ -204,106 +248,117 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
                 name: name.to_string(),
             });
         }
-        // 第四条分支：写入坐标侧表（M2 · B类「服务可回读」）。
-        //
-        // 为什么需要：v0.5.0 时`tf_svc_bulk`（65 个服务）/ `tf_drv_disable`（19 个）
-        // / `svc_bluetooth_disable` 等6 项的 steps 全是 `pwsh` 文本，`collect_checks`
-        // 不解析 pwsh ⇒ 返回空 vec ⇒ 上游 `if !checks.is_empty()` 跳过 ⇒ 体检恒显示
-        // 「未生效」⇒ 用户看到「立即执行」而不是「立即恢复」，会**重复施加同一批改动**。
-        // 这与 v2-M1 那个重复项 bug 是同一种形态：把「没检到」显示成「没有」。
-        //
-        // 原语零新增：R0-b 已建`service_start_type_is(name, expected)`，这里只是
-        // 把「服务名清单」从 pwsh 文本搬到侧表（`optimizer-writes.json`）让检测侧能读。
-        // 数据真源仍是 pwsh 文本 —— `tools/check-optimizer-write-contract.mjs` 逐项对拍两侧。
-        let opt_id = opt.get("id").and_then(Value::as_str).unwrap_or("");
-        if !opt_id.is_empty() && checks.is_empty() {
-            if let Some(spec) = write_spec_of(opt_id) {
-                for (expect, services) in spec.groups {
-                    for svc in *services {
-                        checks.push(Check {
-                            kind: "svcStart",
-                            hive: reg_hive("HKEY_LOCAL_MACHINE").unwrap(),
-                            subkey: String::new(),
-                            key: String::new(),
-                            is_dword: false,
-                            data: expect.to_string(),
-                            name: svc.clone(),
-                        });
-                    }
-                }
-                // 商店那 5 项由 `svc_bulk_append_store` 条件追加（RunParams.includeStore，
-                // 用户弹窗确认过才执行）。这里**刻意不生成断言** ——
-                // `check_optimized` 只知道「当前启动类型」，不知道「用户当时勾没勾商店」。
-                // 判成未生效会让没勾商店的用户永远看到「立即执行」，
-                // 判成已生效会让勾了商店的用户看不到还原入口。**两者都是谎报**。
-                //
-                // 正确形态是让它们显示为「部分生效」，那需要把 `check_optimized`
-                // 的返回从 `bool` 扩成三态（影响 4 个调用方 + 前端三处消费），
-                // 属 M2 的独立一批。清单本身在这里取出来**只为了不漂移**：
-                // 见 `check-optimizer-write-contract.mjs` 的「storeServices 必须与
-                // apply.rs 的 STORE_SERVICES 逐项一致」—— 清单烂掉时门禁会红。
-                let _ = spec.store_services;
-                //
-                // 为什么不静默：这里刻意留注释说明「为什么不判」，避免下一个读代码的
-                // 人以为这里漏了。
-            }
-        }
-        // 第五条分支：注册表写入坐标（M2-B · A 类「注册表可回读」）。
-        //
-        // 与第四条（服务）**并列而不合并**：两类断言的读取原语、失败语义都不同
-        // （服务走 SCM，失败 = 服务不存在；注册表走 RegQuery，失败 = 类型不符 / 无权限），
-        // 合成一条会让「判不出来」这个结果无法区分成因。
-        //
-        // 这 6 项原先同样是 `pwsh` 文本 ⇒ `collect_checks` 返回空 vec ⇒ 体检恒「未生效」
-        // ⇒ 用户点「立即执行」重复施加。形态与 B 类完全同构，只是原语不同。
-        let opt_id2 = opt.get("id").and_then(Value::as_str).unwrap_or("");
-        if !opt_id2.is_empty() && checks.is_empty() {
-            if let Some(spec) = write_spec_of(opt_id2) {
-                for r in spec.reg_writes {
-                    // ⚠️ 侧表里写的是**短名**（HKLM/HKCU/…）而 [`reg_hive`] 认的是
-                    // **长名**（HKEY_LOCAL_MACHINE/…）—— 两者不匹配会让每个断言都走
-                    // 「未知 hive」分支被 skip，`collect_checks` 仍返回空 vec，
-                    // 症状与 v0.5.0 的缺陷**完全一样**（体检恒「未生效」）。
-                    // 这个 bug 是单测抓出来的：报「只产出 0 条断言」，而侧表自洽测试
-                    // 是绿的（它只查「项在表里」，不查「hive 认不认」）。
-                    let hive_name = match r.hive {
-                        "HKLM" => "HKEY_LOCAL_MACHINE",
-                        "HKCU" => "HKEY_CURRENT_USER",
-                        "HKCR" => "HKEY_CLASSES_ROOT",
-                        "HKU" => "HKEY_USERS",
-                        "HKCC" => "HKEY_CURRENT_CONFIG",
-                        other => other,
-                    };
-                    let Some(hive) = reg_hive(hive_name) else {
-                        // 未知 hive：产不出断言。**不记一条恒 false** —— 那样会让整个项
-                        // 恒判「未生效」，用户点详情看到「立即执行」而实际什么也没做。
-                        crate::engine::log::write_log(
-                            "warn",
-                            &format!(
-                                "写入坐标侧表里 {} 的 hive {:?} 无法识别，该断言已跳过",
-                                opt_id2, r.hive
-                            ),
-                        );
-                        continue;
-                    };
+    }
+
+    // 第四条分支：写入坐标侧表（M2 · B类「服务可回读」）。
+    //
+    // 为什么需要：v0.5.0 时`tf_svc_bulk`（65 个服务）/ `tf_drv_disable`（19 个）
+    // / `svc_bluetooth_disable` 等6 项的 steps 全是 `pwsh` 文本，`collect_checks`
+    // 不解析 pwsh ⇒ 返回空 vec ⇒ 上游 `if !checks.is_empty()` 跳过 ⇒ 体检恒显示
+    // 「未生效」⇒ 用户看到「立即执行」而不是「立即恢复」，会**重复施加同一批改动**。
+    // 这与 v2-M1 那个重复项 bug 是同一种形态：把「没检到」显示成「没有」。
+    //
+    // 原语零新增：R0-b 已建`service_start_type_is(name, expected)`，这里只是
+    // 把「服务名清单」从 pwsh 文本搬到侧表（`optimizer-writes.json`）让检测侧能读。
+    // 数据真源仍是 pwsh 文本 —— `tools/check-optimizer-write-contract.mjs` 逐项对拍两侧。
+    let opt_id = opt.get("id").and_then(Value::as_str).unwrap_or("");
+    if !opt_id.is_empty() && checks.is_empty() {
+        if let Some(spec) = write_spec_of(opt_id) {
+            for (expect, services) in spec.groups {
+                for svc in *services {
                     checks.push(Check {
-                        kind: if r.absent {
-                            "regAbsent"
-                        } else if r.kind == "binary" {
-                            "regBinary"
-                        } else {
-                            "reg"
-                        },
-                        hive,
-                        subkey: r.subkey.to_string(),
-                        key: r.value.to_string(),
-                        // binary 绝不能标 is_dword：判定链靠这个标志二分 dword/string，
-                        // 标错会把 24 字节的 Scancode Map 当 4 字节整数比。
-                        is_dword: r.kind == "dword" && !r.absent,
-                        data: r.expect.to_string(),
-                        name: String::new(),
+                        kind: "svcStart",
+                        hive: reg_hive("HKEY_LOCAL_MACHINE").unwrap(),
+                        subkey: String::new(),
+                        key: String::new(),
+                        is_dword: false,
+                        data: expect.to_string(),
+                        name: svc.clone(),
                     });
                 }
+            }
+            // 商店那 5 项由 `svc_bulk_append_store` 条件追加（RunParams.includeStore，
+            // 用户弹窗确认过才执行）。这里**刻意不生成断言** ——
+            // `check_optimized` 只知道「当前启动类型」，不知道「用户当时勾没勾商店」。
+            // 判成未生效会让没勾商店的用户永远看到「立即执行」，
+            // 判成已生效会让勾了商店的用户看不到还原入口。**两者都是谎报**。
+            //
+            // 正确形态是让它们显示为「部分生效」，那需要把 `check_optimized`
+            // 的返回从 `bool` 扩成三态（影响 4 个调用方 + 前端三处消费），
+            // 属 M2 的独立一批。清单本身在这里取出来**只为了不漂移**：
+            // 见 `check-optimizer-write-contract.mjs` 的「storeServices 必须与
+            // apply.rs 的 STORE_SERVICES 逐项一致」—— 清单烂掉时门禁会红。
+            let _ = spec.store_services;
+            //
+            // 为什么不静默：这里刻意留注释说明「为什么不判」，避免下一个读代码的
+            // 人以为这里漏了。
+        }
+    }
+    // 第五条分支：注册表写入坐标（M2-B · A 类「注册表可回读」）。
+    //
+    // 与第四条（服务）**并列而不合并**：两类断言的读取原语、失败语义都不同
+    // （服务走 SCM，失败 = 服务不存在；注册表走 RegQuery，失败 = 类型不符 / 无权限），
+    // 合成一条会让「判不出来」这个结果无法区分成因。
+    //
+    // 这 6 项原先同样是 `pwsh` 文本 ⇒ `collect_checks` 返回空 vec ⇒ 体检恒「未生效」
+    // ⇒ 用户点「立即执行」重复施加。形态与 B 类完全同构，只是原语不同。
+    let opt_id2 = opt.get("id").and_then(Value::as_str).unwrap_or("");
+    if !opt_id2.is_empty() && checks.is_empty() {
+        if let Some(spec) = write_spec_of(opt_id2) {
+            for r in spec.reg_writes {
+                // ⚠️ 侧表里写的是**短名**（HKLM/HKCU/…）而 [`reg_hive`] 认的是
+                // **长名**（HKEY_LOCAL_MACHINE/…）—— 两者不匹配会让每个断言都走
+                // 「未知 hive」分支被 skip，`collect_checks` 仍返回空 vec，
+                // 症状与 v0.5.0 的缺陷**完全一样**（体检恒「未生效」）。
+                // 这个 bug 是单测抓出来的：报「只产出 0 条断言」，而侧表自洽测试
+                // 是绿的（它只查「项在表里」，不查「hive 认不认」）。
+                let hive_name = match r.hive {
+                    "HKLM" => "HKEY_LOCAL_MACHINE",
+                    "HKCU" => "HKEY_CURRENT_USER",
+                    "HKCR" => "HKEY_CLASSES_ROOT",
+                    "HKU" => "HKEY_USERS",
+                    "HKCC" => "HKEY_CURRENT_CONFIG",
+                    other => other,
+                };
+                let Some(hive) = reg_hive(hive_name) else {
+                    // 未知 hive：产不出断言。**不记一条恒 false** —— 那样会让整个项
+                    // 恒判「未生效」，用户点详情看到「立即执行」而实际什么也没做。
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!(
+                            "写入坐标侧表里 {} 的 hive {:?} 无法识别，该断言已跳过",
+                            opt_id2, r.hive
+                        ),
+                    );
+                    continue;
+                };
+                checks.push(Check {
+                    kind: if r.absent {
+                        "regAbsent"
+                    } else if r.kind == "binary" {
+                        "regBinary"
+                    } else if r.kind == "enum" {
+                        // M2-C：dynamic 项的「值 ∈ 合法档位集合」判据。
+                        // 不用等值：检测时不知道用户当初选的哪个 GB（那信息只在
+                        // 记账里，记账可被清）。落在集合内 ⇒ 有人配过合法档位。
+                        "regEnum"
+                    } else if r.kind == "timeWindow" {
+                        // M2-C：dynamic 项的「现在 ∈ [start, end)」区间判据。
+                        "regTimeWindow"
+                    } else {
+                        "reg"
+                    },
+                    hive,
+                    subkey: r.subkey.to_string(),
+                    key: r.value.to_string(),
+                    // 区间判据的结束键名复用 `name`字段：它是这条断言的
+                    // 第二个坐标，不是服务名。判定链按 kind 分派，不会串味。
+                    name: r.value2.to_string(),
+                    // binary 绝不能标 is_dword：判定链靠这个标志二分 dword/string，
+                    // 标错会把 24 字节的 Scancode Map 当 4 字节整数比。
+                    is_dword: r.kind == "dword" && !r.absent,
+                    data: r.expect.to_string(),
+                });
             }
         }
     }
@@ -359,8 +414,117 @@ pub(super) fn parse_reg_value_lines(body: &str) -> Vec<(String, String)> {
 /// 与原 PS 的**一处刻意差异**：DWORD 比较按无符号 32 位读出（`read_reg_dword_opt`），
 /// 原 PS 的 `[int]$v -eq [int]$d` 是 32 位**有符号**，`dword:ffffffff` 这类值会判不上。
 /// 优化项里没有 > 2^31-1 的期望值，此差异不改变现有行为，但让实现不再有这个坑。
-pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<String, bool> {
+/// 判定单条断言（M2-C 抽出）。
+///
+/// 抽出前它是 `check_optimized` 里的一个闭包。抽出来的原因不是「好看」：
+/// - `regEnum` / `regTimeWindow` 两种新形态需要**真机往返**验证三态
+///   （在集合内/不在集合内/键不存在），而 `check_optimized` 只能按 id走侧表，
+///   测试改不了坐标就会测到别的键上。
+/// - 六个分支的顺序是契约：`svc` / `svcStart` / `regBinary` / `regAbsent` /
+///   `regEnum` / `regTimeWindow` 都必须在 `c.is_dword` 那个二分**之前**判掉，
+///   落下去会被当成 dword 或 string 比，症状是「恒判未生效」。
+pub(super) fn judge_check(c: &Check) -> bool {
     use crate::engine::native;
+            if c.kind == "svc" {
+                native::service_start_type_is(&c.name, native::SVC_START_DISABLED)
+            } else if c.kind == "regBinary" {
+                // M2-B：REG_BINARY 逐字节相等。`read_reg_binary_opt` 返回小写
+                // hex 连写（与侧表的 expect 同格式），所以直接字符串比。
+                //
+                // 读不到（None）判 false —— 与整条链的既有口径一致（fail-closed）。
+                // `Some("")`（存在但空）与 `None`（读不到）**必须**分清：前者是
+                // 「值被清空了」，后者是「读不出来」。把前者当后者会让「已清零」
+                // 显示成「未生效」。
+                native::read_reg_binary_opt(c.hive, &c.subkey, &c.key).as_deref() == Some(c.data.as_str())
+            } else if c.kind == "regEnum" {
+                // M2-C：dynamic 项 svc_mem_gb 的判据 —— **值 ∈ 合法档位集合**。
+                //
+                // 为什么不是等值判据：这项是 `dynamic: true`，`steps` 在数据层是空的，
+                // 真实步骤由 `apply.rs::memory_steps(gb)` 按用户选的 GB 生成。
+                // 检测时**不知道用户当初选的是 8 还是 16** —— 那信息只在
+                // `optimization_state` 的记账里，而记账可以被 `clearAllApplied` 清掉。
+                // 所以判据只能是「当前值是某个合法档位」：在集合内 ⇒ 有人配过；
+                // 不在 ⇒ 一定是没配过的（或者是被组策略改了）。
+                //
+                // 语义方向与灰态一致（宁可多灰不可漏灰）：宁可把「用户配了 8GB
+                // 但组策略又改了」判成未生效，也不要判成已生效让用户以为生效了。
+                match native::read_reg_dword_opt(c.hive, &c.subkey, &c.key) {
+                    None => false, // 读不到 ⇒ 未生效（fail-closed）
+                    Some(v) => c
+                        .data
+                        .split(',')
+                        .filter_map(|x| x.trim().parse::<i64>().ok())
+                        .any(|allowed| allowed == v),
+                }
+            } else if c.kind == "regTimeWindow" {
+                // M2-C：dynamic 项 perf_wu_pause 的判据 —— **现在 ∈ [start, end)**。
+                //
+                // 这项的步骤由 `apply.rs::wu_pause_steps(days)` 生成：3 个 StartTime
+                // 写成执行时刻的 FILETIME，3 个 EndTime 写成 now + days 的 FILETIME。
+                // 暂停期是用户当时选的，检测时不知道选了多少天 ⇒ 只能判区间。
+                //
+                // 三个 `&&` 的语义：开始时刻已过 且 尚未到结束时刻。任一不满足就
+                // 说明「没暂停过」或「暂停期已过」⇒ 两种都该显示「立即执行」而不是
+                // 「立即恢复」—— 已过期的暂停项恢复它没有意义。
+                //
+                // 两侧任一读不到都判 false：FILETIME 缺失意味着这条链没跑过。
+                // 刻意用 if-else 而不是 `return false` —— `return` 在 `all()` 的
+                // 闭包里虽语义正确（从闭包返回），但读代码的人会误以为它返回的是
+                // 整个 `check_optimized`，从而以为「一个区间读不到就跳过其余断言」。
+                let verdict = match (
+                    native::read_reg_qword_opt(c.hive, &c.subkey, &c.key),
+                    native::read_reg_qword_opt(c.hive, &c.subkey, &c.name),
+                ) {
+                    (Some(start), Some(end)) => {
+                        // FILETIME → Unix 毫秒。与 `registry.rs::reg_key_last_write_ms`
+                        // 用同一个 `EPOCH_DIFF_100NS` 口径（100ns 计数、自 1601-01-01 起）。
+                        const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
+                        // `now_ms` 取系统时钟：FILETIME 是 UTC，Unix 纪元也是 UTC，无时区差。
+                        let now_ms = crate::engine::now_ms();
+                        // 化到同一量纲再比（FILETIME 是 100ns，now_ms 是毫秒，差 10000 倍）。
+                        let to_ms = |ft: i64| (ft - EPOCH_DIFF_100NS) / 10_000;
+                        to_ms(start) <= now_ms && now_ms < to_ms(end)
+                    }
+                    _ => false,
+                };
+                verdict
+            } else if c.kind == "regAbsent" {
+                // M2-B：删除语义判据 —— **键必须不存在**才算已生效。
+                //
+                // 为什么方向是「不存在 = 已生效」：perf_wu_enable 的执行侧是
+                // `Remove-ItemProperty`（删掉 4 个 `Pause*` 键与 `NoAutoUpdate` 策略），
+                // 已执行的效果就是那些键**消失**。若判「键存在且等于某值」，它永远
+                // 不成立 ⇒ 体检恒显示「未生效」⇒ 用户点「立即执行」，而执行侧只是在
+                // 重复删不存在的键 —— 「谎报未生效 + 重复施加」的组合比检不出更糟。
+                //
+                // 读侧用 `read_reg_value_text`（任意类型都读得到）而不是
+                // `read_reg_dword_opt`：判据是「这个键还在不在」，与值类型无关。
+                //
+                // ⚠️ **已知简化**：`None` 同时覆盖「值不存在」与「键打不开
+                // （无权限 / 父键缺失）」。本判据不区分 —— 对 `WindowsUpdate`
+                // 那个父键而言，非管理员读它本来就该失败，而「读不到」判未生效是
+                // 安全的默认方向（灰态宁可多灰不可漏灰）。要区分需要一个
+                // 「键存在但值不存在」的专用原语（按 `RegQueryValueEx` 的
+                // ERROR_FILE_NOT_FOUND 与其它错误码分流），本批不做。
+                native::read_reg_value_text(c.hive, &c.subkey, &c.key).is_none()
+            } else if c.kind == "svcStart" {
+                // `data` 是 collect_checks 存进去的十进制期望值。解析失败即判 false：
+                // 宁可说「未生效」也不给假阳性（与整条链的既有口径一致）。
+                match c.data.parse::<u32>() {
+                    Ok(want) => native::service_start_type_is(&c.name, want),
+                    Err(_) => false,
+                }
+            } else if c.is_dword {
+                match c.data.parse::<i64>() {
+                    Ok(want) => native::read_reg_dword_opt(c.hive, &c.subkey, &c.key) == Some(want),
+                    Err(_) => false,
+                }
+            } else {
+                native::read_reg_string(c.hive, &c.subkey, &c.key).as_deref() == Some(c.data.as_str())
+            }
+}
+
+pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<String, bool> {
     let mut result = std::collections::HashMap::new();
     // id -> checks（保留请求顺序）
     let mut grouped: Vec<(String, Vec<Check>)> = Vec::new();
@@ -378,54 +542,7 @@ pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<Strin
     for (id, checks) in &grouped {
         // 全部 check 都生效才算生效（与原 PS 的 `$gv -and (...)` 链一致）；
         // 一条都解析不出来也按「未生效」处理，不给假阳性。
-        let all_ok = !checks.is_empty()
-            && checks.iter().all(|c| {
-                if c.kind == "svc" {
-                    native::service_start_type_is(&c.name, native::SVC_START_DISABLED)
-                } else if c.kind == "regBinary" {
-                    // M2-B：REG_BINARY 逐字节相等。`read_reg_binary_opt` 返回小写
-                    // hex 连写（与侧表的 expect 同格式），所以直接字符串比。
-                    //
-                    // 读不到（None）判 false —— 与整条链的既有口径一致（fail-closed）。
-                    // `Some("")`（存在但空）与 `None`（读不到）**必须**分清：前者是
-                    // 「值被清空了」，后者是「读不出来」。把前者当后者会让「已清零」
-                    // 显示成「未生效」。
-                    native::read_reg_binary_opt(c.hive, &c.subkey, &c.key).as_deref() == Some(c.data.as_str())
-                } else if c.kind == "regAbsent" {
-                    // M2-B：删除语义判据 —— **键必须不存在**才算已生效。
-                    //
-                    // 为什么方向是「不存在 = 已生效」：perf_wu_enable 的执行侧是
-                    // `Remove-ItemProperty`（删掉 4 个 `Pause*` 键与 `NoAutoUpdate` 策略），
-                    // 已执行的效果就是那些键**消失**。若判「键存在且等于某值」，它永远
-                    // 不成立 ⇒ 体检恒显示「未生效」⇒ 用户点「立即执行」，而执行侧只是在
-                    // 重复删不存在的键 —— 「谎报未生效 + 重复施加」的组合比检不出更糟。
-                    //
-                    // 读侧用 `read_reg_value_text`（任意类型都读得到）而不是
-                    // `read_reg_dword_opt`：判据是「这个键还在不在」，与值类型无关。
-                    //
-                    // ⚠️ **已知简化**：`None` 同时覆盖「值不存在」与「键打不开
-                    // （无权限 / 父键缺失）」。本判据不区分 —— 对 `WindowsUpdate`
-                    // 那个父键而言，非管理员读它本来就该失败，而「读不到」判未生效是
-                    // 安全的默认方向（灰态宁可多灰不可漏灰）。要区分需要一个
-                    // 「键存在但值不存在」的专用原语（按 `RegQueryValueEx` 的
-                    // ERROR_FILE_NOT_FOUND 与其它错误码分流），本批不做。
-                    native::read_reg_value_text(c.hive, &c.subkey, &c.key).is_none()
-                } else if c.kind == "svcStart" {
-                    // `data` 是 collect_checks 存进去的十进制期望值。解析失败即判 false：
-                    // 宁可说「未生效」也不给假阳性（与整条链的既有口径一致）。
-                    match c.data.parse::<u32>() {
-                        Ok(want) => native::service_start_type_is(&c.name, want),
-                        Err(_) => false,
-                    }
-                } else if c.is_dword {
-                    match c.data.parse::<i64>() {
-                        Ok(want) => native::read_reg_dword_opt(c.hive, &c.subkey, &c.key) == Some(want),
-                        Err(_) => false,
-                    }
-                } else {
-                    native::read_reg_string(c.hive, &c.subkey, &c.key).as_deref() == Some(c.data.as_str())
-                }
-            });
+        let all_ok = !checks.is_empty() && checks.iter().all(judge_check);
         result.insert(id.clone(), all_ok);
     }
     result

@@ -1,6 +1,6 @@
 {
-  "_comment": "优化项写入坐标（M2 · 检测断言侧表）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js/optimizer-scripts.js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。本表是 Trim 自有侧表，姿势同 optimizer-scope.json / optimizer-security.json：按 id 挂、include_str! 编译进二进制、缺键按「检不出」处理。**本文件是单源数据，不进 check-data-parity 双源体系** —— 它是「执行侧写什么」的镜像，真源始终是 optimizer-runtime.json 的 pwsh 文本；tools/check-optimizer-write-contract.mjs 负责逐项对拍两侧。  **wuauserv 在两组里各出现一次（groups Start=3 手动 / groups Start=4 商店段），这不是重复而是数据层的既有语义**：基础段先跑让更新仍能用，商店段（用户勾了才追加）后跑把它改成禁用，最终值按执行顺序取。  regWrites[] 是 A 类（注册表可回读）条目：kind ∈ {dword, string, binary}，expect 是期望值（dword 十进制、binary 小写 hex 连写），**absent:true 表示判据是「键必须不存在」** —— `perf_wu_enable` 是删除语义（Remove-ItemProperty 删掉 4 个 Pause 键与 NoAutoUpdate 策略），判「值等于某个数」永远不可能满足，那会把「已生效」判成「未生效」、用户点「立即执行」而执行侧只是在重复删不存在的键。",
-  "_rule": "groups[] 按「期望 Start 值」分组，**不按 steps 切分** —— tf_svc_bulk 只有一步 pwsh，里面却有三段不同期望值的写入（基础 65 个 Start=4 禁用 + wuauserv Start=3 手动 + lfsvc 在基础数组里）。按「一项一个 expectStart」建模会把后两段判成错值，这是门禁 check-optimizer-write-contract.mjs 第一次跑就抓到的。每组的 services 是该期望值下的服务名全集，机械提取自 pwsh 文本的 `$xxx = @(...)` 数组与 `Services\\<名>` 键路径。storeServices 单独列出是因为它们由 apply.rs 的 svc_bulk_append_store **条件追加**（RunParams.includeStore，用户弹窗确认过才执行）—— 混进 groups 会让没勾商店的用户永远判「未生效」。  wuauserv 出现在两个 groups 里：基础段 Start=3（手动，保持 Windows Update 可用）+ 商店段 Start=4（禁用，仅 includeStore 时追加）。**检测侧按「未追加商店段」判3** —— 追加与否不在检测能力内（见 overview.rs 的注释）。  regWrites[] 每条都对着 pwsh 原文人工核实过（不是按记忆写的），门禁 check-optimizer-write-contract.mjs 的 A2 组会逐条对拍键/值/类型。",
+  "_comment": "优化项写入坐标（M2 · 检测断言侧表）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js/optimizer-scripts.js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。本表是 Trim 自有侧表，姿势同 optimizer-scope.json / optimizer-security.json：按 id 挂、include_str! 编译进二进制、缺键按「检不出」处理。**本文件是单源数据，不进 check-data-parity 双源体系** —— 它是「执行侧写什么」的镜像，真源始终是 optimizer-runtime.json 的 pwsh 文本；tools/check-optimizer-write-contract.mjs 负责逐项对拍两侧。  **wuauserv 在两组里各出现一次（groups Start=3 手动 / groups Start=4 商店段），这不是重复而是数据层的既有语义**：基础段先跑让更新仍能用，商店段（用户勾了才追加）后跑把它改成禁用，最终值按执行顺序取。  regWrites[] 是 A 类（注册表可回读）条目：kind ∈ {dword, string, binary}，expect 是期望值（dword 十进制、binary 小写 hex 连写），**absent:true 表示判据是「键必须不存在」** —— `perf_wu_enable` 是删除语义（Remove-ItemProperty 删掉 4 个 Pause 键与 NoAutoUpdate 策略），判「值等于某个数」永远不可能满足，那会把「已生效」判成「未生效」、用户点「立即执行」而执行侧只是在重复删不存在的键。  kind=\"enum\"：判据是「当前值 ∈ expect 里的逗号分隔集合」。用于 dynamic 项 —— 检测时不知道用户当初选的哪个参数（那信息只在记账里，记账可被清），落在合法集合内就意味着「有人配过一个合法档位」⇒ 判已生效。  kind=\"timeWindow\"：判据是「现在落在 [value, value2) 区间内」，两端都是 FILETIME（REG_QWORD，100ns 计数）。用于 perf_wu_pause —— 暂停起止随用户选的天数变，形态是区间而非单值。全部区间都满足才算已生效。",
+  "_rule": "groups[] 按「期望 Start 值」分组，**不按 steps 切分** —— tf_svc_bulk 只有一步 pwsh，里面却有三段不同期望值的写入（基础 65 个 Start=4 禁用 + wuauserv Start=3 手动 + lfsvc 在基础数组里）。按「一项一个 expectStart」建模会把后两段判成错值，这是门禁 check-optimizer-write-contract.mjs 第一次跑就抓到的。每组的 services 是该期望值下的服务名全集，机械提取自 pwsh 文本的 `$xxx = @(...)` 数组与 `Services\\<名>` 键路径。storeServices 单独列出是因为它们由 apply.rs 的 svc_bulk_append_store **条件追加**（RunParams.includeStore，用户弹窗确认过才执行）—— 混进 groups 会让没勾商店的用户永远判「未生效」。  wuauserv 出现在两个 groups 里：基础段 Start=3（手动，保持 Windows Update 可用）+ 商店段 Start=4（禁用，仅 includeStore 时追加）。**检测侧按「未追加商店段」判3** —— 追加与否不在检测能力内（见 overview.rs 的注释）。  regWrites[] 每条都对着 pwsh 原文人工核实过（不是按记忆写的），门禁 check-optimizer-write-contract.mjs 的 A2 组会逐条对拍键/值/类型。  enum 的集合必须机械来自 apply.rs 的 MEMORY_KB + MEMORY_KB_DEFAULT，timeWindow 的两端键名必须与 wu_pause_steps 里 pwsh 写的键名逐字一致；两条都由 tools/check-optimizer-write-contract.mjs 的 A3 组对拍。",
   "schemaVer": 1,
   "items": {
     "tf_svc_bulk": {
@@ -300,6 +300,42 @@
           "value": "PauseUpdatesStartTime",
           "kind": "dword",
           "absent": true
+        }
+      ]
+    },
+    "svc_mem_gb": {
+      "regWrites": [
+        {
+          "hive": "HKLM",
+          "subkey": "SYSTEM\\ControlSet001\\Control",
+          "value": "SvcHostSplitThresholdInKB",
+          "kind": "enum",
+          "expect": "380000,4194304,6291456,8388608,12582912,16777216,20971520,25165824,33554432"
+        }
+      ]
+    },
+    "perf_wu_pause": {
+      "regWrites": [
+        {
+          "hive": "HKLM",
+          "subkey": "SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate",
+          "value": "PauseFeatureUpdatesStartTime",
+          "value2": "PauseFeatureUpdatesEndTime",
+          "kind": "timeWindow"
+        },
+        {
+          "hive": "HKLM",
+          "subkey": "SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate",
+          "value": "PauseQualityUpdatesStartTime",
+          "value2": "PauseQualityUpdatesEndTime",
+          "kind": "timeWindow"
+        },
+        {
+          "hive": "HKLM",
+          "subkey": "SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate",
+          "value": "PauseUpdatesStartTime",
+          "value2": "PauseUpdatesExpiryTime",
+          "kind": "timeWindow"
         }
       ]
     }

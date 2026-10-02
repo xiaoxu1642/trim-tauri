@@ -1394,3 +1394,203 @@ use super::restore_point::*;
         assert_eq!(ra.subkey, sub);
         let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe_sub, value);
     }
+
+    /// M2-C：两个 dynamic 项现在能产出断言（它们的数据层 `steps` 是空的）。
+    ///
+    /// 这两项与 M2-A/B 那些**根本不同**：`dynamic: true`，真实步骤由后端按用户
+    /// 选的参数生成（`memory_steps(gb)` / `wu_pause_steps(days)`），所以检测侧
+    /// **不能**从数据层 pwsh 文本抽判据。两种新形态：
+    /// · `regEnum`（svc_mem_gb）：值 ∈ 合法档位集合
+    /// · `regTimeWindow`（perf_wu_pause）：现在 ∈ [start, end) 区间
+    #[test]
+    fn m2c_dynamic项现在能产出断言() {
+        // svc_mem_gb → 1 条 regEnum
+        let opt = find_option("svc_mem_gb").unwrap();
+        let checks = collect_checks(opt);
+        assert_eq!(checks.len(), 1, "svc_mem_gb 应产出 1 条断言，实际 {}", checks.len());
+        assert_eq!(checks[0].probe().0, "regEnum", "形态不对：{:?}", checks[0].probe());
+        assert_eq!(checks[0].probe_reg().1, "SvcHostSplitThresholdInKB");
+        // 集合来自 apply.rs 的 MEMORY_KB + MEMORY_KB_DEFAULT（9 个值）
+        let set: Vec<i64> = checks[0].probe().1.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        assert_eq!(set.len(), 9, "档位集合应含 8 个 MEMORY_KB 档位 + default，实际 {}", set.len());
+        for kb in [380_000i64, 4_194_304, 6_291_456, 8_388_608, 12_582_912, 16_777_216, 20_971_520, 25_165_824, 33_554_432] {
+            assert!(set.contains(&kb), "档位集合缺 {kb}（侧表与 apply.rs 的 MEMORY_KB 漂移了）");
+        }
+
+        // perf_wu_pause → 3 条 regTimeWindow（每组一 start 一 end）
+        let opt = find_option("perf_wu_pause").unwrap();
+        let checks = collect_checks(opt);
+        assert_eq!(checks.len(), 3, "perf_wu_pause 应产出 3 组区间断言，实际 {}", checks.len());
+        let mut pairs: Vec<(String, String)> = checks
+            .iter()
+            .map(|c| (c.probe_reg().1.to_string(), c.probe_reg_name().to_string()))
+            .collect();
+        pairs.sort();
+        let want = [
+            ("PauseFeatureUpdatesStartTime", "PauseFeatureUpdatesEndTime"),
+            ("PauseQualityUpdatesStartTime", "PauseQualityUpdatesEndTime"),
+            ("PauseUpdatesStartTime", "PauseUpdatesExpiryTime"),
+        ];
+        for (i, (ws, we)) in want.iter().enumerate() {
+            assert_eq!(pairs[i], (ws.to_string(), we.to_string()), "第 {i} 组键名与 wu_pause_steps 的 pwsh 原文不一致");
+        }
+    }
+
+    /// M2-C：`regEnum` 判据的真机往返（在测试键上，不动系统那个键）。
+    ///
+    /// 要断的三态：值在集合内 ⇒ 已生效；值不在集合内 ⇒ 未生效；键不存在 ⇒ 未生效。
+    /// 只断第一态的话，「实现把判据写成永远 true」也能过。
+    #[test]
+    fn m2c_enum判据三态真机往返() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD};
+        use crate::engine::native::{read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+
+        let opt = find_option("svc_mem_gb").unwrap();
+        let template = collect_checks(opt);
+        let probe = "Software\\Trim\\m2c-enum-probe";
+        // ⚠️ **先删残留再开始**：上一次运行（无论成功还是 panic）会留下这个键，
+        // 而「键不存在 ⇒ 未生效」那一态就永远测不到（实测踩过：残留值恰好是
+        // 8388608，在档位集合内，于是① 判成 true）。
+        // 夹具不跨运行保持干净 ⇒ 每次都从「键不存在」这个真起点开始。
+        let _ = crate::engine::native::reg_restore_delete(
+            HKEY_CURRENT_USER,
+            probe,
+            "SvcHostSplitThresholdInKB",
+        );
+        assert!(
+            read_reg_dword_opt(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB").is_none(),
+            "前提失效：上一次运行的夹具残留没清干净"
+        );
+        assert!(reg_key_ensure(HKEY_CURRENT_USER, probe), "建夹具键失败");
+        let c = template[0]
+            .clone()
+            .with_coords(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB", "");
+
+        // ① 键不存在 ⇒ 未生效
+        assert!(!judge_check(&c), "键不存在时必须判未生效");
+
+        // ② 值在集合内（8GB = 8388608）⇒ 已生效
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB", REG_DWORD, &8_388_608u32.to_le_bytes()),
+            "写夹具值失败"
+        );
+        assert_eq!(read_reg_dword_opt(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB"), Some(8_388_608));
+        assert!(judge_check(&c), "8GB 是合法档位，必须判已生效");
+
+        // ③ 值不在集合内（1234567）⇒ 未生效
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB", REG_DWORD, &1_234_567u32.to_le_bytes()),
+            "改夹具值失败"
+        );
+        assert!(
+            !judge_check(&c),
+            "1234567 不在档位集合里，必须判未生效（组策略乱改后的形态）"
+        );
+
+        let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB");
+    }
+
+    /// M2-C：`regTimeWindow` 判据的 FILETIME 换算口径（**不真机**）。
+    ///
+    /// 为什么可以不算真机：换算是纯算术（`EPOCH_DIFF_100NS` 与 `registry.rs::reg_key_last_write_ms`
+    /// 同一口径），而真机要往 HKLM 的更新策略键写 FILETIME（改系统状态）。这里改为
+    /// 断言「算出来的两个边界值符合已知常量」——用 2026-01-01 / 2026-01-08 两个
+    /// 真实 FILETIME 值手算的毫秒值，判据算错就会偏离。
+    ///
+    /// 顺带断一个**本批最容易写错的点**：FILETIME 是 100ns 计数而 `now_ms` 是毫秒，
+    /// 差 10000 倍。忘了这个换算，`to_ms` 会算出 1970 年附近 ⇒ 区间永远判 false。
+    #[test]
+    fn m2c_filetime换算口径() {
+        const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
+        let to_ms = |ft: i64| (ft - EPOCH_DIFF_100NS) / 10_000;
+
+        // Unix 纪元 = FILETIME 0
+        assert_eq!(to_ms(EPOCH_DIFF_100NS), 0, "FILETIME 纪元点应换算成 Unix 0");
+        // 2026-01-01T00:00:00Z 的 Unix 毫秒（1767225600000）
+        let ft_2026 = EPOCH_DIFF_100NS + 1_767_225_600_000i64 * 10_000;
+        assert_eq!(to_ms(ft_2026), 1_767_225_600_000, "2026-01-01 的 FILETIME 换算应等于该时刻的 Unix 毫秒");
+        // 100ns 精度：+10000 个 100ns 单位 = +1 毫秒
+        assert_eq!(to_ms(ft_2026 + 10_000), 1_767_225_600_001, "加 1 毫秒的 FILETIME 差值应换算成 +1");
+
+        // 区间语义：一个落在 [2026-01-01, 2026-01-08) 内的时刻应判 true
+        let now_ms = 1_767_225_600_000i64 + 3 * 86_400_000; // +3 天
+        let (start, end) = (ft_2026, ft_2026 + 7 * 86_400_000 * 10_000);
+        assert!(
+            to_ms(start) <= now_ms && now_ms < to_ms(end),
+            "区间内（+3 天）必须判 true"
+        );
+        // 边界：正好等于 start ⇒ true（闭区间左端）；正好等于 end ⇒ false（开区间右端）
+        assert!(to_ms(start) <= to_ms(start) && to_ms(start) < to_ms(end), "左端点应包含");
+        assert!(!(to_ms(end) <= to_ms(end) && to_ms(end) < to_ms(end)), "右端点应不包含（暂停已到期）");
+    }
+
+    /// M2-C 的反向护栏：`regEnum` / `regTimeWindow` 两种形态的**判定分支必须真实存在**。
+    ///
+    /// 判红实验 14 抓到的缺口：把 `judge_check` 里的 `else if c.kind == "regEnum"`
+    /// 改成 `else if false` 之后，`m2c_dynamic项现在能产出断言` **照样绿** ——
+    /// 那条只断「产出了 regEnum 断言」，而判定被删后它会落进末尾的
+    /// `c.is_dword` 二分，被当成 dword 与「逗号分隔的集合字符串」比 ⇒ 恒 false。
+    ///
+    /// 这类「产出对了但判定被摘掉」的缺口只有**行为**断言能抓，所以下面两条
+    /// 直接跑 `judge_check` 并断行为，而不是断源码文本。
+    #[test]
+    fn m2c_两种新形态的判定分支真实生效() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD};
+        use crate::engine::native::{read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+
+        // 造一个集合外的值（1234567）：enum 判据对它必须判 false。
+        // 若 `regEnum` 分支被摘掉，它会落进 dword 分支与整个集合字符串比，
+        // 结果**也是 false** —— 所以这一态抓不到「分支被摘」。真正的抓手是
+        // 下面那条「集合内的值必须判 true」：落进 dword 分支时必为 false。
+        let opt = find_option("svc_mem_gb").unwrap();
+        let tpl = collect_checks(opt);
+        assert_eq!(tpl.len(), 1, "前提失效：svc_mem_gb 没产出断言");
+        let probe = r"Software\Trim\m2c-branch-probe";
+        let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB");
+        assert!(reg_key_ensure(HKEY_CURRENT_USER, probe), "建夹具键失败");
+        let c = tpl[0]
+            .clone()
+            .with_coords(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB", "");
+
+        // 集合内的值（8GB）⇒ 必须 true。`regEnum` 分支被摘时这条必红。
+        assert!(reg_restore_write(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB", REG_DWORD, &8_388_608u32.to_le_bytes()));
+        assert_eq!(read_reg_dword_opt(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB"), Some(8_388_608));
+        assert!(
+            judge_check(&c),
+            "8GB 在 enum 集合里却判未生效 —— regEnum 判定分支被摘掉了？（落进 dword 分支会恒 false）"
+        );
+
+        // 同理要守 `regTimeWindow` 的分支存在性（判红实验 15 证实的缺口）。
+        //
+        // 为什么不能像 regEnum 那样「造一个集合内的值让它判true」：timeWindow 要真机
+        // 写两个 FILETIME 键才能构造出「区间内」状态，而它的真键在 HKLM 的更新策略下
+        // （改系统状态，快速组不许）。
+        //
+        // 改用**源码结构断言**：判定链里必须存在 `c.kind == "regTimeWindow"` 这个
+        // 分派，且它必须在 `c.is_dword` 那个二分**之前**（落下去会被当成 dword 与
+        // FILETIME 字符串比，恒 false）。这是**文本**断言而非行为断言 ——
+        // 形态上不够强，但它守的是「分支被摘」与「分支被挪到二分之后」两种改法，
+        // 而这两种改法都会让本项恒判未生效（症状一致）。
+        // 同目录下（contract_tests.rs 与 overview.rs 同属 commands/optimizer/）
+let ov = include_str!("overview.rs");
+        let tw_at = ov
+            .find("c.kind == \"regTimeWindow\"")
+            .expect("judge_check 里没有 regTimeWindow 分支 —— 该形态会落进末尾的 is_dword 二分，恒判未生效");
+        let enum_at = ov
+            .find("c.kind == \"regEnum\"")
+            .expect("judge_check 里没有 regEnum 分支 —— 该形态会落进末尾的 is_dword 二分，恒判未生效");
+        let dword_split_at = ov
+            .find("} else if c.is_dword {")
+            .expect("判定链末尾的 is_dword 二分不见了");
+        assert!(
+            tw_at < dword_split_at,
+            "regTimeWindow 分支被挪到了 is_dword 二分之后（{tw_at} vs {dword_split_at}）—— \
+             那样它会被当成 dword 与 FILETIME 字符串比，恒 false"
+        );
+        assert!(
+            enum_at < dword_split_at,
+            "regEnum 分支被挪到了 is_dword 二分之后（{enum_at} vs {dword_split_at}）—— 那样它恒 false"
+        );
+
+        let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB");
+    }

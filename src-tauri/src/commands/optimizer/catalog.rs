@@ -195,9 +195,16 @@ pub(super) struct RegAssert {
     pub hive: &'static str,
     pub subkey: &'static str,
     pub value: &'static str,
-    /// "dword" | "string" | "binary"
+    /// 区间判据的**结束**键名（`kind == "timeWindow"` 时用，其余形态为空串）。
+    ///
+    /// 为什么单开一个字段而不是把两端塞进 `value`（如 `"A..B"`）：那会让
+    /// `value` 同时承载两种语义，`probe_reg()` 的对拍断言（「值名要在 pwsh 里出现」）
+    /// 就得跟着分叉。分开之后键名对拍逻辑完全不变。
+    pub value2: &'static str,
+    /// "dword" | "string" | "binary" | "enum" | "timeWindow"
     pub kind: &'static str,
-    /// 期望值；`absent` 为真时忽略
+    /// 期望值；`absent` 为 true 时忽略。
+    /// `enum` 形态下是**逗号分隔的整数集合**（如 `"380000,4194304,…"`）。
     pub expect: &'static str,
     pub absent: bool,
 }
@@ -291,6 +298,7 @@ pub(super) fn write_spec_of(option_id: &str) -> Option<WriteSpec> {
                                 hive: r.get("hive")?.as_str()?,
                                 subkey: r.get("subkey")?.as_str()?,
                                 value: r.get("value")?.as_str()?,
+                                value2: r.get("value2").and_then(Value::as_str).unwrap_or(""),
                                 kind: r.get("kind").and_then(Value::as_str).unwrap_or("dword"),
                                 expect: r.get("expect").and_then(Value::as_str).unwrap_or(""),
                                 absent: r.get("absent").and_then(Value::as_bool).unwrap_or(false),

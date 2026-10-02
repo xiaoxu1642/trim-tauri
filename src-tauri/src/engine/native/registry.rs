@@ -50,6 +50,48 @@ pub fn read_hklm_dword(subkey: &str, value: &str) -> Option<i64> {
     read_reg_dword_opt(HKEY_LOCAL_MACHINE, subkey, value)
 }
 
+/// 读注册表 QWORD 值（REG_QWORD → i64）—— M2-C 检测断言用。
+///
+/// **为什么需要**（`read_reg_dword_opt` / `read_reg_string` / `read_reg_binary_opt`
+/// 都覆盖不到它）：`perf_wu_pause` 把暂停起止时间写成 **FILETIME**（100ns 计数
+/// 的 QWORD，`[DateTime]::UtcNow.ToFileTimeUtc()`），那是 64 位值 ——
+/// 用 dword 原语读会拿到低 32 位（截断到 1950~2042 年之间的随机日期），
+/// 用 string 原语读会因为类型不是 REG_SZ 而返回 `None`。
+///
+/// **返回 `i64` 而不是 `u64`**：FILETIME 的实际取值在 1.3e17 上下（远小于
+/// `i64::MAX` ≈ 9.2e18），符号位一直是 0。但用 `i64` 是为了和
+/// [`read_reg_dword_opt`] 的返回类型一致（上层算区间时不必到处转换），
+/// 真出现 ≥2^63 的写入（不可能，来自 `FILETIME` 或别处的 QWORD）时它会是负数，
+/// 由调用方的区间判定自然排除。
+///
+/// 类型不是 `REG_QWORD` 一律 `None`（fail-closed，不拿别的类型凑）。
+pub fn read_reg_qword_opt(hive: HKEY, subkey: &str, value: &str) -> Option<i64> {
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            return None;
+        }
+        let vn = to_wide(value);
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut buf = [0u8; 8];
+        let mut size = 8u32;
+        let r = RegQueryValueExW(
+            hk,
+            PCWSTR(vn.as_ptr()),
+            None,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hk);
+        if r.is_err() || ty != REG_QWORD || size != 8 {
+            return None;
+        }
+        Some(i64::from_le_bytes(buf))
+    }
+}
+
 
 /// 读注册表值（返回类型+数据）
 pub(super) unsafe fn reg_query_value(hk: HKEY, name: &str) -> Option<(REG_VALUE_TYPE, Vec<u8>)> {

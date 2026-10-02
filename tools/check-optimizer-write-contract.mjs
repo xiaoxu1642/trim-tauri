@@ -102,8 +102,13 @@ function writesServiceStart(o) {
 const ALLOWED = new Set(['groups', 'storeServices', 'regWrites']);
 // 必填键**按域**：`groups` 与 `regWrites` 至少有一个非空（B 类项只有 groups，
 // A 类项只有 regWrites）。要求两者都必填会把 A 类项全判红。
-const REG_KEYS = new Set(['hive', 'subkey', 'value', 'kind', 'expect', 'absent']);
-const REG_KINDS = new Set(['dword', 'string', 'binary']);
+const REG_KEYS = new Set(['hive', 'subkey', 'value', 'value2', 'kind', 'expect', 'absent']);
+// kind 的全集（M2-C 加了两种新形态，都是 **dynamic 项专用**）：
+//   enum      —— 「值 ∈ 合法集合」（svc_mem_gb）
+//   timeWindow —— 「现在 ∈ [value, value2) 区间」（perf_wu_pause）
+// dynamic 项的 `steps` 由后端按用户选的参数在运行时生成，**数据层没有 pwsh 文本**
+// 可对拍 —— 所以这两种形态的真源是 `apply.rs`，由 A3 组负责。
+const REG_KINDS = new Set(['dword', 'string', 'binary', 'enum', 'timeWindow']);
 const HIVES = new Set(['HKLM', 'HKCU', 'HKCR', 'HKU', 'HKCC']);
 const items = writes.items || {};
 const comment = writes._comment || '';
@@ -142,6 +147,28 @@ for (const [id, spec] of Object.entries(items)) {
     }
     if (r.absent && r.expect) {
       keyProblems.push(`${at}: absent 语义不该带 expect（判据是「键不存在」）`);
+    }
+    // value2 只有 timeWindow 用；其余形态带它会被Rust 侧静默忽略（写错了看不出来）
+    if (r.kind === 'timeWindow') {
+      if (!r.value2) keyProblems.push(`${at}: timeWindow 必须给 value2（区间结束键名）`);
+    } else if (r.value2) {
+      keyProblems.push(`${at}: 只有 timeWindow 能用 value2（当前 kind=${r.kind}）`);
+    }
+    if (r.kind === 'enum') {
+      const nums = String(r.expect).split(',').map((x) => Number(x.trim()));
+      if (nums.some((n) => !Number.isInteger(n))) {
+        keyProblems.push(`${at}: enum 期望值必须全是整数（逗号分隔），实际 ${JSON.stringify(r.expect)}`);
+      }
+    }
+    // enum / timeWindow 是 dynamic 项专用形态：静态项的 steps 在数据层里，
+    // 判据应当能走 A2 组的「pwsh 原文逐条对拍」。给 dynamic 项用等值判据
+    // 反而是错的（期望值随用户选的参数变，等值永远不成立）。
+    const itemDynamic = (opts.find((x) => x.id === id) || {}).dynamic === true;
+    if ((r.kind === 'enum' || r.kind === 'timeWindow') && !itemDynamic) {
+      keyProblems.push(`${at}: ${r.kind} 只用于 dynamic 项，而 ${id} 不是 dynamic（静态项应当用等值判据）`);
+    }
+    if (r.kind !== 'enum' && r.kind !== 'timeWindow' && itemDynamic && r.kind !== 'dword') {
+      keyProblems.push(`${at}: dynamic 项 ${id} 用了 ${r.kind} 形态，需确认是否该用 enum/timeWindow`);
     }
   }
 }
@@ -208,6 +235,11 @@ for (const [id, spec] of Object.entries(items)) {
   const blob = (o.steps || []).map((s) => s.pwsh || '').join('\n');
   const roots = rootsIn(blob);
   const binLiterals = binaryLiterals(blob);
+  // **dynamic 项跳过本组**：它的 steps 由后端按用户选的参数在运行时生成
+  // （数据层里 `svc_mem_gb` 连 steps 键都没有、`perf_wu_pause` 是空数组），
+  // 没有 pwsh 文本可对拍 —— 拿空串去查「hive/子键/值名」只会得到一堆假红。
+  // 它们的真源是 `apply.rs`（`memory_steps` / `wu_pause_steps`），由 A3 组负责。
+  if (o.dynamic === true) continue;
 
   for (const r of regWrites) {
     regChecked++;
@@ -308,6 +340,86 @@ check(
   regDrift.length === 0,
   `A2. regWrites[] ⇄ pwsh 原文逐条对拍（${regChecked} 条断言：hive/子键/值名/字节/删除语义）`,
   regDrift.join('; '),
+);
+
+// ======================================================================
+// A3. 两种新形态（enum / timeWindow）的专项对拍（M2-C）
+// ----------------------------------------------------------------------
+// 这两种形态**不能**走 A2 那套「从 pwsh 文本抽值」的路径：
+//   · enum 的判据是「值 ∈ 集合」，集合的真源是 `apply.rs` 的 `MEMORY_KB` +
+//     `MEMORY_KB_DEFAULT`（**不在 pwsh 文本里**—— dynamic 项的 steps 是运行时生成的）；
+//   · timeWindow 的两端键名真源是 `apply.rs::wu_pause_steps` 生成的 pwsh 文本。
+// 所以 A3 换了个真源：`apply.rs`。
+// ======================================================================
+
+// 真源 ①：MEMORY_KB + MEMORY_KB_DEFAULT（从 apply.rs 现读）
+const kbBlockM = applyRs.match(/pub\(super\) const MEMORY_KB: &\[\(&str, i64\)\] = &\[([\s\S]*?)\n\];/);
+const defM = applyRs.match(/pub\(super\) const MEMORY_KB_DEFAULT: i64 = ([0-9_]+);/);
+const a3Problems = [];
+if (!kbBlockM || !defM) {
+  a3Problems.push('从 apply.rs 读不出 MEMORY_KB / MEMORY_KB_DEFAULT（被改名或搬走？）');
+} else {
+  const want = [
+    ...kbBlockM[1].matchAll(/\(\s*"[^"]*"\s*,\s*([0-9_]+)\s*\)/g),
+  ].map((m) => Number(m[1].replace(/_/g, '')));
+  want.push(Number(defM[1].replace(/_/g, '')));
+  const wantSorted = [...new Set(want)].sort((a, b) => a - b);
+
+  const memSpec = items.svc_mem_gb?.regWrites?.find((r) => r.kind === 'enum');
+  if (!memSpec) {
+    a3Problems.push('svc_mem_gb 没有 kind="enum" 的 regWrites（dynamic 项的判据缺失）');
+  } else {
+    const got = String(memSpec.expect).split(',').map((x) => Number(x.trim())).filter((n) => !Number.isNaN(n));
+    const gotSorted = [...new Set(got)].sort((a, b) => a - b);
+    if (JSON.stringify(gotSorted) !== JSON.stringify(wantSorted)) {
+      a3Problems.push(
+        `svc_mem_gb 的 enum 集合与 apply.rs 的 MEMORY_KB+DEFAULT 不一致：`
+        + `侧表 [${gotSorted.join(',')}] / 真源 [${wantSorted.join(',')}]`,
+      );
+    }
+  }
+}
+
+// 真源 ②：`wu_pause_steps` 生成的 pwsh 里的键名。
+//
+// ⚠️ **必须从 apply.rs 取，不能从数据层取**（这正是本组第一版判红的原因）：
+// `perf_wu_pause` 是 dynamic 项，它的 pwsh 由 `apply.rs::wu_pause_steps(days)`
+// 在运行时拼出来 —— 数据层里 `steps` 是**空数组**。从数据层读会得到「一个键都读不出」，
+// 那正是「真源找错地方」的形态。
+const wuFn = applyRs.match(/pub\(super\) fn wu_pause_steps\(days: i64\)[\s\S]*?\n\}/);
+if (!wuFn) {
+  a3Problems.push('从 apply.rs 读不出 wu_pause_steps（被改名或搬走？）');
+} else {
+  // 键名在 Rust 源码里是 `\"PauseFeature…\"`（**转义**引号，因为它们在
+  // `format!` 的字符串字面量里）。正则必须匹配「反斜杠 + 引号」，
+  // 否则抓到 0 个 —— 而「读到 0 个」与「生成逻辑变了」在这一组里长得一样，
+  // 所以下面两处要分开报错。
+  const wuKeys = [...wuFn[0].matchAll(/\\"(Pause[A-Za-z]+)\\"/g)].map((m) => m[1]);
+  const wuStarts = new Set(wuKeys.filter((k) => k.endsWith('StartTime')));
+  const wuEnds = new Set(wuKeys.filter((k) => k.endsWith('EndTime') || k.endsWith('ExpiryTime')));
+  if (!wuStarts.size || !wuEnds.size) {
+    a3Problems.push('从 wu_pause_steps 读不出 Pause* 键名（生成逻辑变了？）');
+  } else {
+    const twSpec = (items.perf_wu_pause?.regWrites || []).filter((r) => r.kind === 'timeWindow');
+    if (twSpec.length !== wuStarts.size) {
+      a3Problems.push(
+        `perf_wu_pause 的 timeWindow 组数 ${twSpec.length} ≠ wu_pause_steps 里的 Start 键数 ${wuStarts.size}`,
+      );
+    }
+    for (const r of twSpec) {
+      if (!wuStarts.has(r.value)) {
+        a3Problems.push(`${r.value} 不在 wu_pause_steps 的 Start 键集合（${[...wuStarts].join('/')}）里`);
+      }
+      if (!wuEnds.has(r.value2)) {
+        a3Problems.push(`${r.value2} 不在 wu_pause_steps 的 End 键集合（${[...wuEnds].join('/')}）里`);
+      }
+    }
+  }
+}
+check(
+  a3Problems.length === 0,
+  'A3. enum 集合 ⇄ apply.rs 的 MEMORY_KB、timeWindow 键名 ⇄ wu_pause_steps 生成的 pwsh',
+  a3Problems.join('; '),
 );
 
 // ---- B. groups[] ⇄ pwsh 文本双向对拍 ----
