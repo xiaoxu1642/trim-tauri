@@ -62,17 +62,17 @@ const PS_CALL_SITES = [
     timeout: 'caller',
   },
   {
-    file: 'src-tauri/src/commands/uninstall.rs',
+    file: 'src-tauri/src/commands/uninstall/appx.rs',
     anchor: 'fn enum_appx_packages | let out = crate::pwsh::run_inbox_script(script, APPX_ENUM_TIMEOUT, None)',
     reason: 'Appx 枚举（Get-AppxPackage）。R0 前是无超时的 quiet_cmd(...).output()',
-    owner: 'commands/uninstall.rs',
+    owner: 'commands/uninstall/appx.rs',
     timeout: 120,
   },
   {
-    file: 'src-tauri/src/commands/uninstall.rs',
+    file: 'src-tauri/src/commands/uninstall/appx.rs',
     anchor: 'fn remove_appx | let out = crate::pwsh::run_inbox_script(&script, APPX_REMOVE_TIMEOUT, None)',
     reason: 'Appx 移除（Remove-AppxPackage），卸载动作本身可长。R0 前同样无超时',
-    owner: 'commands/uninstall.rs',
+    owner: 'commands/uninstall/appx.rs',
     timeout: 300,
   },
 ];
@@ -315,8 +315,8 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/contextmenu.rs', anchor: '&["export", &write_path, reg_file_str, "/y"]', reason: '右键菜单删除前整键备份' },
   { file: 'src-tauri/src/engine/native/peripheral.rs', anchor: '&["export", &reg_path, backup_file_str, "/y"]', reason: '外设优化写值前逐键备份' },
   { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
-  { file: 'src-tauri/src/commands/uninstall.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },
-  { file: 'src-tauri/src/commands/uninstall.rs', anchor: '&["export", key_part, file_str, "/y"]', reason: '残留 reg_value 删值前父键备份' },
+  { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },
+  { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", key_part, file_str, "/y"]', reason: '残留 reg_value 删值前父键备份' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'restart_service 的 sc stop', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },

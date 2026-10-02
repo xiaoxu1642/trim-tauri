@@ -129,18 +129,29 @@ const handlerBlock = libRs.slice(libRs.indexOf('generate_handler!['), libRs.inde
 const registered = new Set();
 for (const m of handlerBlock.matchAll(/commands::\w+::(\w+)/g)) registered.add(m[1]);
 
-// 解析 commands/*.rs 中声明的 #[tauri::command] 函数
-const declared = new Map(); // fn -> file
+// 解析 commands/**.rs 中声明的 #[tauri::command] 函数
+// v3 D2：递归扫——命令下沉到子目录（commands/uninstall/*.rs）时，只扫一层会让 D3
+// 「注册了但找不到声明」集体判红，反过来若改成静默跳过就是把注入面台账掏空。
 const cmdDir = join(TAURI_ROOT, 'src-tauri', 'src', 'commands');
-for (const f of readdirSync(cmdDir)) {
-  if (!f.endsWith('.rs')) continue;
-  const text = readFileSync(join(cmdDir, f), 'utf8');
+const cmdFiles = [];
+(() => {
+  const walk = (dir, prefix = '') => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(join(dir, e.name), `${prefix}${e.name}/`);
+      else if (e.name.endsWith('.rs')) cmdFiles.push({ rel: prefix + e.name, abs: join(dir, e.name) });
+    }
+  };
+  walk(cmdDir);
+})();
+const declared = new Map(); // fn -> file
+for (const { rel, abs } of cmdFiles) {
+  const text = readFileSync(abs, 'utf8');
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].includes('#[tauri::command]')) continue;
     for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
       const m = lines[j].match(/pub\s+(?:async\s+)?fn\s+(\w+)/);
-      if (m) { declared.set(m[1], f); break; }
+      if (m) { declared.set(m[1], rel); break; }
     }
   }
 }

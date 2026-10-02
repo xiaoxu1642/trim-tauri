@@ -122,7 +122,20 @@ const MUST_MAIN = [
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----
-const files = readdirSync(CMD_DIR).filter((f) => f.endsWith('.rs'));
+// v3 D2：命令文件会再往下沉目录（commands/uninstall/*.rs），这里必须递归扫——
+// 只扫一层等于「搬进子目录的命令自动退出档位台账」，那是假绿不是收敛。
+const relFiles = [];
+(() => {
+  const walk = (dir, prefix = '') => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p, `${prefix}${e.name}/`);
+      else if (e.name.endsWith('.rs')) relFiles.push(prefix + e.name);
+    }
+  };
+  walk(CMD_DIR);
+})();
+const files = relFiles;
 /** @type {Map<string, {file:string, tier:string|null, line:number}>} */
 const tiers = new Map();
 

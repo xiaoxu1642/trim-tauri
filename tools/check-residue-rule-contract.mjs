@@ -24,7 +24,10 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
-const UNINSTALL_RS = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall.rs');
+// v3 D2：卸载域按命令契约拆成 commands/uninstall/ 目录，装载/校验/更新链集中在
+// residue_update.rs。这里读整目录而不是单文件——坐标再搬家时断言仍然有效，
+// 不会退化成「文件不在了就跳过」的假绿。
+const UNINSTALL_DIR = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall');
 import { leadingToken, makeTokenChecker } from './rule-tokens.mjs';
 import { list as schemaList, number as schemaNumber, tokens as schemaTokens } from './rule-schema.mjs';
 const FIXTURE = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
@@ -354,10 +357,14 @@ try {
 check(sigOk, 'D. Ed25519 验签通过', sigDetail);
 
 // ---- E. Rust 侧接线 ----
-const rsText = fs.readFileSync(UNINSTALL_RS, 'utf8');
+const rsText = fs
+  .readdirSync(UNINSTALL_DIR)
+  .filter((f) => f.endsWith('.rs') && !f.includes('_tests'))
+  .map((f) => fs.readFileSync(path.join(UNINSTALL_DIR, f), 'utf8'))
+  .join('\n');
 check(
-  rsText.includes('include_str!("../../data/uninstall-residue-rules.json")'),
-  'E1. uninstall.rs 内置副本已接线（include_str!）',
+  /include_str!\("[^"]*uninstall-residue-rules\.json"\)/.test(rsText),
+  'E1. 卸载域内置副本已接线（include_str!，路径相对 commands/uninstall/ 子目录）',
 );
 // 装载链两处都必须过校验：数据目录那份 + 内置那份（只校验其一等于留豁免通道）
 const loadFn = rsText.slice(rsText.indexOf('fn load_residue_rules()'));
