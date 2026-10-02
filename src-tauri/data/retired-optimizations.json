@@ -106,6 +106,21 @@
       "id": "tf_usb_msi",
       "title": "USB 控制器启用 MSI 中断",
       "note": "v2-R3 / Q2 裁定（2026-10-01 用户点名退役）：readme §十一 明写「MSI 中断模式 / 中断亲和性调优：无法可靠验证设备是否支持消息信号中断，误开会导致设备失联，不提供」，而本项一直是可勾选优化项，文档承诺与可执行面对立。还原缺口如实记录：本项步骤是 pwsh 型，按本账门口径只有 reg 型步骤进 optimizer-backups，所以本机不会留值级备份，已应用过的用户没有自动还原出口——只能在设备管理器里把该设备的中断类型手工改回。不做启动静默写回（无人确认的注册表写入与本应用安全模型冲突）。"
+    },
+    {
+      "id": "audio_disable_voice_activation",
+      "title": "关闭应用语音激活",
+      "note": "v5 / Q1 裁定（2026-10-02 用户裁决「摘除优化列表，直接删除该优化项」）：写的是 HKLMSOFTWAREMicrosoftSpeech_OneCoreSettingsAgentActivationEnabled，该键所有权属 TrustedInstaller，实测写入必回「拒绝访问：该键的所有权不在 Administrators，需先取得所有权」，而 Trim 的既有口径是**不代取所有权**——于是这一项结构上不可能成功，永远只会在日志里刷 WARN。还原缺口：本项是纯 pwsh 步骤、不进值级备份（本账门口径只有 reg 型步骤进 optimizer-backups），但因写入从未成功，本机不存在需要回退的已应用状态；若在别的机器上曾写入成功，手工回退方式是删掉该值或改回 1。"
+    },
+    {
+      "id": "audio_disable_voice_activation_last_used",
+      "title": "关闭语音激活最近使用记录",
+      "note": "v5 / Q1 裁定（2026-10-02 用户裁决「摘除优化列表，直接删除该优化项」）：同上一条，写 AgentActivationLastUsed 撞 TrustedInstaller 独占键，结构上不可能成功（实测恒报拒绝访问）。Trim 不代取所有权是既定红线，所以选择删项而不是把红线松开。还原缺口同上一项：纯 pwsh 步骤不进值级备份，但从未写入成功，故本机无待回退状态。"
+    },
+    {
+      "id": "svc_fax_disable",
+      "title": "Fax 服务使用排查",
+      "note": "v5 / Q3 裁定（2026-10-02 用户裁决「退役」）：该项对 Fax 服务写 Start=4 并 Stop-Service，而 Windows 11 24H2（本机 26200）已不再随系统分发 Fax 服务——实测 SCM 判 1060「指定的服务未安装」，只剩 HKLMSYSTEMCurrentControlSetServicesFax 注册表键残留（Start 已是 4），该项在受支持的系统上没有可作用的对象。还原缺口：本项步骤为纯 pwsh（无 reg 步），按本账门口径不进值级备份，已应用过的用户没有自动还原出口——需要时把 ServicesFax 的 Start 改回 3 并删掉该服务键即可（本机实测该值一直为 4，未被本项改动过）。"
     }
   ]
 }

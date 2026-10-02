@@ -961,36 +961,7 @@ const OPTIONS = [
       }
     ]
   },
-  {
-    id: 'audio_disable_voice_activation', group: '音频优化', title: '关闭应用语音激活', risk: 'medium',
-    desc: 'AgentActivationEnabled=0，阻止支持的应用使用语音激活服务，减少后台麦克风监听。',
-    steps: [
       {
-        label: '关闭应用语音激活', pwsh: [
-          '$p = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture\\{{0}}"',
-          '$base = "HKLM:\\SOFTWARE\\Microsoft\\Speech_OneCore\\Settings"',
-          'New-Item -Path $base -Force | Out-Null; New-ItemProperty -Path $base -Name "AgentActivationEnabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null',
-          '$p2 = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Speech"',
-          'New-Item -Path $p2 -Force | Out-Null; New-ItemProperty -Path $p2 -Name "AgentActivationEnabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null'
-        ].join('\n')
-      }
-    ]
-  },
-  {
-    id: 'audio_disable_voice_activation_last_used', group: '音频优化', title: '关闭语音激活最近使用记录', risk: 'medium',
-    desc: 'AgentActivationLastUsed=0，阻止 SpeechOneCore 记住语音激活最近使用状态；依赖语音唤醒或语音助手的应用可能需要重新确认偏好。',
-    steps: [
-      {
-        label: '关闭语音激活最近使用记录', pwsh: [
-          '$base = "HKLM:\\SOFTWARE\\Microsoft\\Speech_OneCore\\Settings"',
-          'New-Item -Path $base -Force | Out-Null; New-ItemProperty -Path $base -Name "AgentActivationLastUsed" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null',
-          '$p2 = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Speech"',
-          'New-Item -Path $p2 -Force | Out-Null; New-ItemProperty -Path $p2 -Name "AgentActivationLastUsed" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null'
-        ].join('\n')
-      }
-    ]
-  },
-  {
     id: 'audio_disable_narrator_ducking', group: '音频优化', title: '关闭讲述人压低其他应用音量', risk: 'medium',
     desc: 'DuckAudio=0，关闭讲述人说话时自动降低其他应用音量；依赖讲述人的用户需要手动平衡音量。',
     steps: [
@@ -1400,14 +1371,7 @@ const OPTIONS = [
       }
     ]
   },
-  {
-    id: 'svc_fax_disable', group: '系统服务', title: 'Fax 服务使用排查', risk: 'medium',
-    desc: 'Fax 服务 Start=4 并停止；仅在确认不用传真、扫描传真或旧设备工作流时启用，实际占用变化需按本机服务状态复查。',
-    steps: [
-      { label: 'Fax Start=4', pwsh: '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Fax"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name Fax -Force -ErrorAction SilentlyContinue }' }
-    ]
-  },
-  {
+    {
     id: 'svc_remote_registry_disable', group: '系统服务', title: 'RemoteRegistry 远程管理排查', risk: 'medium',
     desc: 'RemoteRegistry 服务 Start=4 并停止；仅在确认不依赖远程注册表管理、资产盘点、运维工具或企业策略时请求关闭，并保留恢复路径。',
     steps: [
