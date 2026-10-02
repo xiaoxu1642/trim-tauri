@@ -241,6 +241,8 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // 读取，于是 `{service, startType:"manual"}` 落进「只停服」分支 —— 服务被停、
             // 启动类型原封不动，而回执报成功。数据层 label/desc 写的却是「不立即停止」，
             // 三条文案与实际行为全部相反。
+            //
+            // D0-EXEC-SIDE: startType 执行分支（D0-COVERAGE-ANCHOR 契约表的一行）。
             let start_label = s.get("startType").and_then(|v| v.as_str());
             let want_disable = s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false);
 

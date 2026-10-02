@@ -168,6 +168,7 @@ fn collect_service_start_targets(steps: &[Value], out: &mut Vec<RegTarget>) {
                 None => false,
             };
             if has_disable || has_start {
+                // D0-BACKUP-SIDE: startType 基线收集（D0-COVERAGE-ANCHOR 契约表的一行）
                 out.push(svc_start_target(name));
             }
         }

@@ -3,6 +3,30 @@
 //!
 //! check_optimized 的判据来自规则库 .reg 文本的期望值，解析口径必须与还原侧
 //! （backup_restore.rs 的写回）一致，否则会出现「显示已优化、还原写不回」的分叉。
+//!
+//! ==================== D0 三侧覆盖契约（D0-COVERAGE-ANCHOR） ====================
+//! 数据层每个 `steps[]` 字段必须被**三个侧**同时消费，缺一侧即门禁红
+//! （`tools/check-optimizer-dynamic.mjs` 的 A8 断言按本段锚点静态对拍）：
+//!
+//! ```text
+//! 字段        执行(apply.rs)      检测(overview.rs)   备份(backup_restore.rs)
+//! reg         ✅ 写 .reg+import     ✅ kind="reg"        ✅ parse_reg_targets
+//! service     ✅ 三分态分支        ✅ kind="svc"        ✅ svc_start_target
+//! startType   ✅ 三分态分支        ✅ kind="svcStart"   ✅ svc_start_target
+//! disable     ✅ 三分态分支        ✅ 与 service 同判     ✅ svc_start_target
+//! cmd         ✅ run_cmd_step      ⬜ 白名单(见下)      ✅ svc_names_writing_start
+//! pwsh        ✅ pssteps 解释器    ⬜ 白名单(见下)      ✅ walk_ps_ops_for_start
+//! label       ⬜ 白名单(纯展示)     ⬜ 白名单            ⬜ 白名单
+//! ```
+//!
+//! **为什么是三侧而不是只查检测侧**：v0.5.0 的 `startType` 三侧全缺，而报告
+//! （§5.2）判定它是「检测盲区」并写明「执行链已走 Set-Service 解释器分支、
+//! 是好的」—— 只查检测侧的门禁会把这个真缺陷放过去。实测 `grep startType
+//! src-tauri/src/` 全仓 3 处命中**全是注释**，执行链根本没读这个字段。
+//!
+//! `cmd` / `pwsh` 仍列白名单：它们的「已生效判定」要按脚本语义推（例如一条
+//! pwsh 步骤可能改 3 个键也可能只改 1 个），强行按字段名对拍会误红。白名单
+//! 本身要写明理由，新增字段时**不许顺手加进来** —— 要加必须同时给出检测原语。
 
 use crate::engine::{guard, optimization_state as opt_state};
 use serde_json::{Value, json};
@@ -10,6 +34,13 @@ use tauri::{Runtime, WebviewWindow};
 use super::apply::*;
 use super::backup_restore::*;
 use super::catalog::*;
+
+/// D0 三侧覆盖契约锚点：门禁按本常量与本文件下述各侧 anchor 做静态对拍。
+///
+/// 门禁能判红的前提是「锚点存在且唯一」：改这里的字符串而不同步门禁，门禁会红
+/// （说明两侧脱节）；删掉整段，门禁也会红（说明契约被整体删除）。
+pub(super) const D0_COVERAGE_ANCHOR: &str = "D0-COVERAGE-ANCHOR";
+
 // ==================== .reg 块解析与回读检测 ====================
 
 /// `.reg` 根键 → native hive 句柄（B11：检测不再经 PS，需要真实 hive）
@@ -27,15 +58,31 @@ pub(super) fn reg_hive(root: &str) -> Option<windows::Win32::System::Registry::H
 
 #[derive(Clone)]
 pub(super) struct Check {
-    kind: &'static str, // "reg" | "svc"
+    /// "reg" | "svc" | "svcStart"
+    ///
+    /// `svcStart` 与 `svc` 必须分开：`svc` 判「是不是 disabled」，`svcStart` 判
+    /// 「启动类型是不是某个具体值」。合成一个 kind 就得把期望值塞进 `data` 再在
+    /// 判定处反解，判据会散到两处。
+    kind: &'static str,
     // reg（B11：检测改原生，直接带 hive + 子键，不再经 PS 路径字符串）
     hive: windows::Win32::System::Registry::HKEY,
     subkey: String,
     key: String,
     is_dword: bool,
+    /// reg：期望值原文。svcStart：期望的 `dwStartType` 十进制字符串。
     data: String,
-    // svc
+    // svc / svcStart
     name: String,
+}
+
+impl Check {
+    /// 断言判据（kind + 期望值 + 目标名）—— 供 `contract_tests` 做形状对拍。
+    ///
+    /// 为什么不把字段直接改成 `pub`：`Check` 只在 `check_optimized` 一处被消费，
+    /// 字段公开等于把「谁能改判定」的范围扩大到全 crate，形状回归就拦不住了。
+    pub(super) fn probe(&self) -> (&'static str, &str, &str) {
+        (self.kind, self.data.as_str(), self.name.as_str())
+    }
 }
 
 /// 解析一个 .reg 值的期望数据（dword:hex→十进制 / 引号串 / 原串）
@@ -92,6 +139,39 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
                 key: String::new(),
                 is_dword: false,
                 data: String::new(),
+                name: name.to_string(),
+            });
+        }
+        // 第三条分支：startType（R0-b）。v0.5.0 之前这里**完全没有** svcStart 形态，
+        // 于是 `svc_*_manual` 四项 collect_checks 返回空 vec ⇒ 上游
+        // `if !checks.is_empty()` 直接跳过 ⇒ 体检恒显示「未生效」，而执行链其实
+        // 已经（错误地）动过服务。执行侧与检测侧的失配就是从这里来的。
+        // D0-EXEC-SIDE / D0-CHECK-SIDE / D0-BACKUP-SIDE 三个锚点见文件头契约表。
+        if let (Some(name), Some(raw)) = (
+            s.get("service").and_then(|v| v.as_str()),
+            s.get("startType").and_then(|v| v.as_str()),
+        ) {
+            // 未知取值 fail-closed：记一条恒 false 的 check，等价于「判未生效」。
+            // 不静默跳过 —— 跳过的后果是「collect_checks 空 ⇒ 体检显示无法检测」，
+            // 而数据显示这步确实该有个判据；那条空 vec 正是 v0.5.0 的病根形态。
+            // 真正的硬拦在 D0 门禁（未知取值会同时让门禁红），这里只保证不谎报。
+            let data = match crate::engine::native::start_type_from_label(raw) {
+                Ok(v) => v.to_string(),
+                Err(reason) => {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("优化项 startType 取值无法解析: {reason}，按未生效记账"),
+                    );
+                    u32::MAX.to_string()
+                }
+            };
+            checks.push(Check {
+                kind: "svcStart", // D0-CHECK-SIDE: startType 检测分支（R0-b 新增）
+                hive: reg_hive("HKEY_LOCAL_MACHINE").unwrap(),
+                subkey: String::new(),
+                key: String::new(),
+                is_dword: false,
+                data,
                 name: name.to_string(),
             });
         }
@@ -171,6 +251,13 @@ pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<Strin
             && checks.iter().all(|c| {
                 if c.kind == "svc" {
                     native::service_start_type_is(&c.name, native::SVC_START_DISABLED)
+                } else if c.kind == "svcStart" {
+                    // `data` 是 collect_checks 存进去的十进制期望值。解析失败即判 false：
+                    // 宁可说「未生效」也不给假阳性（与整条链的既有口径一致）。
+                    match c.data.parse::<u32>() {
+                        Ok(want) => native::service_start_type_is(&c.name, want),
+                        Err(_) => false,
+                    }
                 } else if c.is_dword {
                     match c.data.parse::<i64>() {
                         Ok(want) => native::read_reg_dword_opt(c.hive, &c.subkey, &c.key) == Some(want),

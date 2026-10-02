@@ -141,6 +141,103 @@ use super::restore_point::*;
         assert!(start_type_from_label("").is_err(), "空串不是合法取值");
     }
 
+    /// R0-b 判据 6：四项 startType 必须产出 svcStart 检测断言。
+    ///
+    /// v0.5.0 上本条会红：collect_checks 返回空 vec ⇒ 上游 `if !checks.is_empty()`
+    /// 跳过 ⇒ 体检恒显示「未生效」。这是「执行链已改系统、检测侧说没改」的失配。
+    #[test]
+    fn starttype产出检测断言() {
+        for opt_id in [
+            "svc_w32time_manual",
+            "svc_fdrespum_manual",
+            "svc_storsvc_manual",
+            "svc_xblauthmgr_manual",
+        ] {
+            let opt = find_option(opt_id).expect("选项应存在");
+            let checks = collect_checks(opt);
+            assert!(
+                !checks.is_empty(),
+                "{opt_id} 的 collect_checks 返回空 —— 体检会跳过它并显示「无法检测」"
+            );
+            let starts: Vec<(&'static str, String, String)> = checks
+                .iter()
+                .map(|c| {
+                    let (k, d, n) = c.probe();
+                    (k, d.to_string(), n.to_string())
+                })
+                .filter(|(k, _, _)| *k == "svcStart")
+                .collect();
+            assert_eq!(
+                starts.len(),
+                1,
+                "{opt_id} 应恰好产出 1 条 svcStart 断言，实得 {} 条（kind 分布: {:?}）",
+                starts.len(),
+                checks.iter().map(|c| c.probe().0).collect::<Vec<_>>()
+            );
+            // data 存的是十进制期望值：manual → SERVICE_DEMAND_START = 3
+            assert_eq!(
+                starts[0].1, "3",
+                "{opt_id} 的 svcStart 期望值应为 3（SERVICE_DEMAND_START），实得 {}",
+                starts[0].1
+            );
+            assert!(
+                !starts[0].2.is_empty(),
+                "{opt_id} 的 svcStart 断言缺服务名 —— 查不到该改谁"
+            );
+        }
+    }
+
+    /// R0-b 判据 7：`disable` 与 `startType` 两个形态各自的 check kind 不许混。
+    ///
+    /// 混了会让 `check_optimized` 拿 SVC_START_DISABLED 去比一个 manual 期望 ——
+    /// 恒判 false，而界面上看不出原因。
+    #[test]
+    fn disable与starttype的检测形态不混淆() {
+        let dis = find_option("privacy_permissions_tune").expect("选项应存在");
+        let dis_kinds: Vec<&'static str> = collect_checks(dis).iter().map(|c| c.probe().0).collect();
+        assert!(
+            dis_kinds.contains(&"svc"),
+            "disable 形态应产出 kind=svc 断言，实得 {dis_kinds:?}"
+        );
+        assert!(
+            !dis_kinds.contains(&"svcStart"),
+            "disable 形态不该产出 svcStart 断言（期望值语义不同：disabled vs manual）"
+        );
+        // 4 个 startType 项不应产出 kind=svc（它们没有 disable:true）
+        for opt_id in ["svc_w32time_manual", "svc_storsvc_manual"] {
+            let o = find_option(opt_id).expect("选项应存在");
+            let kinds: Vec<&'static str> = collect_checks(o).iter().map(|c| c.probe().0).collect();
+            assert!(
+                !kinds.contains(&"svc"),
+                "{opt_id} 无 disable:true，不该产出 kind=svc 断言；实得 {kinds:?}"
+            );
+        }
+    }
+
+    /// R0-b 判据 8：未知 startType 必须记成「判未生效」而不是「跳过」。
+    ///
+    /// 跳过的后果是 collect_checks 可能返回空 vec ⇒ 上游显示「无法检测」，
+    /// 而数据显示这步确实该有判据 —— 那正是 v0.5.0 的病根形态。fail-closed 的
+    /// 落点是「记一条恒 false」，让界面说「未生效」而不是「不知道」。
+    #[test]
+    fn 未知starttype记为未生效而非跳过() {
+        let fake = json!({
+            "id": "fake_unknown_starttype",
+            "steps": [{ "label": "x", "service": "SomeSvc", "startType": "Manual" }]
+        });
+        let checks = collect_checks(&fake);
+        assert_eq!(
+            checks.len(),
+            1,
+            "未知 startType 应产出 1 条断言（恒 false），不该被跳过；实得 {} 条",
+            checks.len()
+        );
+        let (kind, data, _) = checks[0].probe();
+        assert_eq!(kind, "svcStart");
+        // u32::MAX 永远不会等于真实 dwStartType ⇒ 判定恒 false
+        assert_eq!(data, u32::MAX.to_string());
+    }
+
     /// R0-a 判据 5：`startType` 三档期望值必须与 windows crate 常量逐一对齐。
     ///
     /// 这条看着像废话，但它是「数据层写 manual，代码却按错的数值去查」的唯一护栏。

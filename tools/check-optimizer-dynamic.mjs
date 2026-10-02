@@ -16,9 +16,11 @@
 //   A6 生效粒度侧表 optimizer-scope.json ⇄ 按步骤机械重算（详见块内注释）
 //   A7 虚拟合集卡（optimizer.js 的 VIRTUAL_GROUPS）⇄ 数据层：runId 必须真存在、
 //      一卡至少两态、同一真实项不得被两卡抢、整卡档位不得低于成员最高档
+//   A8 D0 三侧覆盖契约：数据层 steps 的每个字段必须被「执行 / 检测 / 备份」三侧
+//      同时消费（详见下方块内注释）
 //
 // 用法：node tools/check-optimizer-dynamic.mjs
-//   退出码 0 = 七条全绿；1 = 任一不符（无「只警告」档）。
+//   退出码 0 = 八条全绿；1 = 任一不符（无「只警告」档）。
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,6 +36,9 @@ const jsOpt = R('src/scripts/optimizer.js');
 // 拼接会让 overview.rs 里那个刻意改名的同名声明抢先命中，窗口就切错位置了。
 const rustOpt = R('src-tauri/src/commands/optimizer/apply.rs');
 const rustCatalog = R('src-tauri/src/commands/optimizer/catalog.rs');
+// D0 三侧覆盖需要另外两侧的源码：检测侧在 overview.rs，备份侧在 backup_restore.rs。
+const rustOverview = R('src-tauri/src/commands/optimizer/overview.rs');
+const rustBackup = R('src-tauri/src/commands/optimizer/backup_restore.rs');
 
 let fail = 0;
 function check(ok, name, detail) {
@@ -264,6 +269,110 @@ check(
       `A7. 虚拟合集卡 ⇄ 数据层（${cards.length} 张卡 / 聚合 ${seenRun.size} 个真实项）`,
       bad.join(' / '));
   }
+}
+
+// ==================== A8. D0 三侧覆盖契约（R0-b 新增） ====================
+//
+// 为什么是「三侧」而不是报告 §5.2 设计的「只查 collect_checks」：
+// v0.5.0 的 startType **执行链根本没读这个字段**（`grep -rn startType src-tauri/src/`
+// 全仓 3 处命中全是注释），而报告判定它是「检测盲区 · 0.5 天」并写明
+// 「执行链已走 Set-Service 解释器分支，是好的」。只查检测侧的门禁会把这个
+// 真缺陷完整放过去 —— 门禁查的那一侧恰好是当时唯一「看起来有进展」的一侧。
+//
+// 三侧各自的判据在 Rust 源码里用唯一锚点标记（overview.rs 文件头
+// D0-COVERAGE-ANCHOR 契约表声明了矩阵），门禁按锚点静态对拍。锚点被删或改名
+// 同样判红 —— 契约不许被静默撤销。
+{
+  const CONTRACT_ANCHOR = 'D0-COVERAGE-ANCHOR';
+
+  // ① 契约表本身必须存在且仍声明着三侧矩阵
+  const hasContract = rustOverview.includes(CONTRACT_ANCHOR);
+  check(hasContract,
+    `A8.1 D0 契约锚点存在（overview.rs 头部三侧矩阵）`,
+    hasContract ? '' : `${CONTRACT_ANCHOR} 缺失 —— 三侧覆盖契约被整体删除`);
+
+  // ② 数据层实际用到的 step 字段全集
+  const STEP_FIELDS = new Set();
+  for (const o of options) {
+    for (const s of (o.steps || [])) {
+      for (const k of Object.keys(s)) STEP_FIELDS.add(k);
+    }
+  }
+
+  // ③ 每侧的覆盖判据。执行/检测/备份三侧都按「锚点字符串出现次数」判，
+  //    不做正则猜字段名 —— 猜字段名会在重构时静默失配。
+  //
+  //    UNCOVERED_BY_DESIGN：显式白名单，必须带理由。新增字段**不许**顺手加进来。
+  const UNCOVERED_BY_DESIGN = {
+    // 纯展示字段，无系统副作用，三侧都不需要消费它
+    label: '纯展示文案，不参与写入/检测/备份',
+    // 下面两项的「已生效判定」要按脚本语义推：一条 pwsh 步骤可能改 3 个键
+    // 也可能只改 1 个，按字段名对拍会误红。要移出白名单必须先给出检测原语。
+    pwsh: '按脚本语义判定（pssteps 解释器），字段名对拍会误红',
+    cmd: '按命令语义判定（run_cmd_step + svc_names_writing_start），字段名对拍会误红',
+  };
+
+  const SIDE_ANCHORS = [
+    ['执行', rustOpt, 'D0-EXEC-SIDE'],
+    ['检测', rustOverview, 'D0-CHECK-SIDE'],
+    ['备份', rustBackup, 'D0-BACKUP-SIDE'],
+  ];
+
+  // 每个「有副作用的字段」在各侧应当出现的标记。label 不参与（纯展示）。
+  // service 的检测锚点与 startType 共用一行（同一个 svcStart 分支），
+  // 这里按「该字段是否有任一锚点覆盖」判，不要求一一对应。
+  //
+  // 标记一律取**该侧源码里真实存在的字符串**：执行侧 reg 步是直接
+  // `s.get("reg")` 消费（不经独立解析函数），所以判据不能用函数名。
+  const FIELD_REQUIRED_SIDES = {
+    reg: { 执行: 'get("reg")', 检测: 'kind: "reg"', 备份: 'parse_reg_targets' },
+    service: { 执行: 'service_stop_pub', 检测: 'kind: "svc"', 备份: 'svc_start_target' },
+    startType: { 执行: 'D0-EXEC-SIDE', 检测: 'D0-CHECK-SIDE', 备份: 'D0-BACKUP-SIDE' },
+    disable: { 执行: 'want_disable', 检测: 'kind: "svc"', 备份: 'has_disable' },
+  };
+
+  const uncovered = [];
+  for (const f of STEP_FIELDS) {
+    if (f in UNCOVERED_BY_DESIGN) continue;
+    const need = FIELD_REQUIRED_SIDES[f];
+    if (!need) {
+      uncovered.push(`未知 step 字段「${f}」：既不在 UNCOVERED_BY_DESIGN 白名单，也没有对应检测原语 —— 新增字段必须同时给出三侧覆盖`);
+      continue;
+    }
+    for (const [sideName] of SIDE_ANCHORS) {
+      if (!(sideName in need)) continue;
+      if (!need[sideName]) continue;
+      const src = sideName === '执行' ? rustOpt : sideName === '检测' ? rustOverview : rustBackup;
+      if (!src.includes(need[sideName])) {
+        uncovered.push(`「${f}」在${sideName}侧无覆盖标记（期望出现 \`${need[sideName]}\`）`);
+      }
+    }
+  }
+
+  const sideList = SIDE_ANCHORS.map(([n]) => n).join(' / ');
+  check(uncovered.length === 0,
+    `A8.2 step 字段三侧覆盖（${STEP_FIELDS.size} 个字段 / ${sideList}）`,
+    uncovered.join(' | '));
+
+  // ④ 三侧锚点在各自源码里必须真的存在（防止 FIELD_REQUIRED_SIDES 写了
+  //    一个源码里已经没有的标记，门禁却因为「字段集为空」而空绿）
+  const missingAnchors = SIDE_ANCHORS
+    .filter(([, src, marker]) => !src.includes(marker))
+    .map(([n, , marker]) => `${n}侧锚点 ${marker} 不在源码里`);
+  check(missingAnchors.length === 0,
+    'A8.3 三侧锚点均落在对应源码中',
+    missingAnchors.join(' | '));
+
+  // ⑤ 白名单不得为空转：白名单字段必须真的在数据层出现，否则是僵尸白名单
+  const zombie = Object.keys(UNCOVERED_BY_DESIGN)
+    .filter((f) => !STEP_FIELDS.has(f));
+  check(zombie.length === 0,
+    'A8.4 白名单无僵尸条目（每条都对应真实存在的字段）',
+    zombie.length ? `白名单里的 ${zombie.join(',')} 在数据层已不存在，应删除` : '');
+
+  // ⑥ 覆盖率棘轮：数据层出现新字段时，三侧覆盖必须跟上。
+  //    这条是本门禁的真正价值 —— v0.5.0 那 4 个盲区就是「扩库忘了扩检测器」。
+  console.log(`   · D0 三侧覆盖矩阵：${[...STEP_FIELDS].sort().join(', ')}`);
 }
 
 console.log(`\n${fail === 0 ? '门禁通过' : `${fail} 项未通过`}`);
