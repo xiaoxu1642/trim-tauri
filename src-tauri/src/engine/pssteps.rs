@@ -1515,12 +1515,48 @@ fn sz_bytes(s: &str) -> (u32, Vec<u8>) {
 /// 执行一组操作；任一失败即 Err（调用方据此把整条优化项报失败）。
 /// 返回 PsInline 算子产生的 stdout 累积串（`@@RECYCLE@@` 协议行在其中，
 /// 由 optimizer.rs 统一解析；纯原生操作不产生输出）。
-pub fn execute(ops: &[PsOp]) -> Result<String, String> {
+/// 执行一批 op，**逐条收集失败**（v5 O-2）。
+///
+/// 为什么不能首错即断：`foreach ($n in @(...))` 在编译期被展平成扁平 op 列表（见
+/// `parses_foreach_and_sc_config`：2 服务 = 4 个 op），于是一个 op 失败会砍掉同一步骤
+/// 余下的全部 op —— 「批量禁用 70+ 非必要服务」第 2 个服务停不下来，就把后面 62 个和该步
+/// 尾部的注册表写入一起跳过，而回执只有「1 项步骤失败」。收集式让每个 op 都有机会执行，
+/// 失败原因一条不丢。
+fn exec_group(ops: &[PsOp]) -> Result<String, String> {
     let mut out = String::new();
+    let mut errs: Vec<String> = Vec::new();
     for op in ops {
-        out.push_str(&exec_one(op)?);
+        match exec_one(op) {
+            Ok(s) => out.push_str(&s),
+            Err(e) => errs.push(e),
+        }
     }
-    Ok(out)
+    if errs.is_empty() {
+        Ok(out)
+    } else {
+        Err(format!("{} 处失败：{}", errs.len(), errs.join("；")))
+    }
+}
+
+/// 把「逐条收集」的结果并到外层累加器上（容器型 op 的迭代用，失败跨迭代也不中断）
+fn absorb(out: &mut String, errs: &mut Vec<String>, r: Result<String, String>) {
+    match r {
+        Ok(s) => out.push_str(&s),
+        Err(e) => errs.push(e),
+    }
+}
+
+/// 收尾：无失败回 stdout，有失败回聚合原因（外层只看到一个 Err 字符串）
+fn finish(out: String, errs: Vec<String>) -> Result<String, String> {
+    if errs.is_empty() {
+        Ok(out)
+    } else {
+        Err(errs.join("；"))
+    }
+}
+
+pub fn execute(ops: &[PsOp]) -> Result<String, String> {
+    exec_group(ops)
 }
 
 fn hive_handle(h: Hive) -> windows::Win32::System::Registry::HKEY {
@@ -1607,11 +1643,7 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             if !native::reg_key_exists(hive_handle(*hive), subkey) {
                 return Ok(String::new());
             }
-            let mut out = String::new();
-            for o in ops {
-                out.push_str(&exec_one(o)?);
-            }
-            Ok(out)
+            exec_group(ops)
         }
         PsOp::ForSubKey { hive, subkey, body, vars } => {
             // 键不存在 = 无迭代（PS Get-ChildItem -ErrorAction SilentlyContinue 语义）
@@ -1620,27 +1652,27 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             }
             let subs = native::reg_enum_subkeys_pub(hive_handle(*hive), subkey);
             let mut out = String::new();
+            let mut errs: Vec<String> = Vec::new();
             for name in subs {
                 let full = format!("{}:\\{}\\{}", hive_prefix(*hive), subkey, name);
                 let mut v = vars.clone();
                 v.insert("_".into(), Expr::Str(full));
                 // 编译期已探针干跑，此处理论上不可失败；仍如实上报
-                for o in parse_block(body, &mut v)? {
-                    out.push_str(&exec_one(&o)?);
-                }
+                let body_ops = parse_block(body, &mut v)?;
+                absorb(&mut out, &mut errs, exec_group(&body_ops));
             }
-            Ok(out)
+            finish(out, errs)
         }
         PsOp::ForDevKey { class, body, vars } => {
             let mut out = String::new();
+            let mut errs: Vec<String> = Vec::new();
             for id in native::reg_enum_dev_ids(class) {
                 let mut v = vars.clone();
                 v.insert("_".into(), Expr::Str(id));
-                for o in parse_block(body, &mut v)? {
-                    out.push_str(&exec_one(&o)?);
-                }
+                let body_ops = parse_block(body, &mut v)?;
+                absorb(&mut out, &mut errs, exec_group(&body_ops));
             }
-            Ok(out)
+            finish(out, errs)
         }
         PsOp::Spawn { program, args } => {
             // 编译期只从 "powercfg" 臂产生本算子；执行侧再核一次白名单（双保险）

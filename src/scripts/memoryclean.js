@@ -13,7 +13,10 @@
   // 顽固软件专杀(kind:'stubborn') 走独立脚本（memory:stubborn-kill），非内存区清理。
   const REGIONS = [
     { id: 'workingSet', name: '进程工作集', risk: 'low', checked: true,
-      desc: '逐进程收紧内存工作集，系统进程与游戏自动跳过，最常用' },
+      // v5 M-4：旧文案「逐进程收紧…系统进程与游戏自动跳过」与实现不符 ——
+      // perf.rs 走的是系统级 MemoryEmptyWorkingSets(80,1)，无进程枚举、无跳过名单。
+      // 给了不存在的安全保证，比不写更糟。
+      desc: '系统级清空所有进程的工作集（不逐进程、无跳过名单）：页移入待机列表，物理内存并未立即归还，再次访问即刻换回' },
     { id: 'standbyPriority0', name: '低优先级待机', risk: 'low', checked: true,
       desc: '仅清理 0 优先级待机页，不影响常用缓存，安全' },
     { id: 'combine', name: '即时合并物理内存页', risk: 'medium', checked: true,
@@ -21,7 +24,9 @@
     { id: 'modified', name: '修改页面列表', risk: 'high', checked: true,
       desc: '脏页写盘后回收，触发磁盘 I/O，可能短暂卡顿' },
     { id: 'standby', name: '待机列表', risk: 'high', checked: true,
-      desc: 'SuperFetch 预读缓存，回收最安全、释放量大' },
+      // v5 M-4：待机页本来就已计入「可用内存」，清它不会让可用量上升，只会让后续读取变冷。
+      // 旧文案「释放量大」与本模块 freed 的口径（全系统可用内存净变化）直接矛盾。
+      desc: '淘汰待机列表页（这部分本来就算作可用内存）：清完可用量几乎不变，代价是之后冷读变慢' },
     // 系统文件缓存(82)、注册表缓存(84)：Windows 11 27H2 上系统级调用返回错误，不可清理，
     // 仅作灰显说明展示（sysUnavailable），不进入可清理/勾选流程。
     { id: 'fileCache', name: '系统文件缓存', sysUnavailable: true,
@@ -221,11 +226,11 @@
     });
     // 单项清理
     root.querySelectorAll('.mem-region-clean').forEach(btn => {
-      btn.addEventListener('click', () => runClean([btn.dataset.clean]));
+      btn.addEventListener('click', () => withMemBusy(() => runClean([btn.dataset.clean])));
     });
     // N1：顽固软件治理第二层 —— 阻止开机自启（持久策略，独立确认）
     root.querySelectorAll('.mem-region-block').forEach(btn => {
-      btn.addEventListener('click', () => runStubbornBlock());
+      btn.addEventListener('click', () => withMemBusy(() => runStubbornBlock()));
     });
     // 点击条目主体（非按钮/勾选框）→ 弹窗展示详细简介（本地 + 联网 AI）
     root.querySelectorAll('.mem-region-row').forEach(row => {
@@ -281,6 +286,19 @@
   }
 
   // ==================== 执行清理 ====================
+  // v5 P2：内存页三条会改系统状态的入口（整页清理 / 单项清理 / 阻止开机自启）此前没有任何
+  // 串行闸门 —— 高危确认弹窗 await 期间连点，会并发跑两遍 NtSetSystemInformation 链、
+  // 并叠出两个确认弹窗。对照 sysrestore.js:140「进函数即 disabled」的既有写法。
+  let memBusy = false;
+  function withMemBusy(fn) {
+    if (memBusy) {
+      window.app?.toast('warning', '上一次操作尚未结束，请等待完成');
+      return;
+    }
+    memBusy = true;
+    Promise.resolve().then(fn).finally(() => { memBusy = false; });
+  }
+
   async function runClean(items) {
     const requested = items || REGIONS.filter(r => r.checked).map(r => r.id);
     const selected = REGIONS.filter(r => requested.includes(r.id));
@@ -337,8 +355,16 @@
         const note = (d.results || []).filter(x => !x.ok)
           .map(x => `${x.name}（${statusText(x.status)}）`).join('、');
         const freed = Number(d.freed) || 0;
-        window.app?.toast('success', `内存清理完成：释放 ${fmtBytes(freed)}${okCount ? `（成功 ${okCount} 项）` : ''}${failCount ? `，${failCount} 项失败${note ? '：' + note : ''}` : ''}`);
-        window.app?.log('info', `内存清理：释放 ${fmtBytes(freed)}，成功 ${okCount} 项，失败 ${failCount} 项`);
+        // v5 M-2：读数失败（freedMeasured=false）时不能写「释放 0 B」—— 那表达的是
+        // "确实没释放"，而真实结论是"没测到"，两者对用户的下一步动作完全不同
+        const freedTxt = d.freedMeasured ? fmtBytes(freed) : '未测到';
+        // v5 M-3：toast 档位必须跟 resp.success 走。此前只看 data.results 存不存在，
+        // 于是 5 个区域全被系统拒绝也弹 **success**「内存清理完成：释放 0 B，5 项失败」。
+        const tier = resp.success ? (failCount ? 'warning' : 'success') : 'error';
+        const parts = [`内存清理${resp.success ? '完成' : '未成功'}：释放 ${freedTxt}`, `成功 ${okCount} 项`];
+        if (failCount) parts.push(`${failCount} 项失败${note ? '：' + note : ''}`);
+        window.app?.toast(tier, parts.join('，'));
+        window.app?.log(tier === 'error' ? 'warn' : 'info', parts.join('，'));
         await loadInfo();
         return;
       }
@@ -476,7 +502,7 @@
   function init() {
     $('btnMemRefresh')?.addEventListener('click', () => { loadInfo(); });
     $('btnMemProcesses')?.addEventListener('click', () => { openProcessManager(); });
-    $('btnMemClean')?.addEventListener('click', () => { runClean(); });
+    $('btnMemClean')?.addEventListener('click', () => { withMemBusy(() => runClean()); });
     $('btnMemSelectAll')?.addEventListener('click', () => selectAll(true));
     $('btnMemSelectNone')?.addEventListener('click', () => selectAll(false));
     $('btnOpenProcessManager')?.addEventListener('click', () => { openProcessManager(); });

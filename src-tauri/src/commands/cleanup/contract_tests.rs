@@ -180,6 +180,46 @@ use super::state::*;
         }
     }
 
+    /// v5 C-1：删树 / 通配清值型 `regKeys` 必须过注册表禁删面。装载侧不拦，一条**验签通过**的
+    /// 规则就能把 `HKCU\Software\Microsoft\…` 整棵端掉，而执行侧那道闸要等到删除时才响。
+    /// 六条断言各钉一个方向 —— 只留拒的那几条，"把所有 regKeys 一刀切拒掉"也能全绿。
+    #[test]
+    fn 清理语义校验_删树与通配清值过注册表禁删面() {
+        let mut t = ok_item();
+        // ① Microsoft 树内删树 → 拒
+        t["regKeys"] = json!([{ "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" }]);
+        expect_reject(t.clone(), "禁删面");
+
+        // ② 同一目标改成通配清值（不在放行清单里）→ 同样拒：一次清空该键全部值与删树同族
+        t["regKeys"] = json!([
+            { "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "value": "*" }
+        ]);
+        expect_reject(t.clone(), "通配清值");
+
+        // ③ 具名单值删除 → 放行（`reg_target_block_reason` 自述只管递归删除，别越界裁功能）
+        t["regKeys"] = json!([
+            { "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "value": "OneDrive" }
+        ]);
+        validate_cleanup_package(&ok_pkg(t.clone()))
+            .expect("具名 value 被误拒 = 禁删面越出「递归删除」管辖语义");
+
+        // ④ 放行清单内的 MRU 键 → 放行（内置库两条 MRU 规则就是这个写法，清单必须自洽）
+        t["regKeys"] = json!([
+            { "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU", "value": "*" }
+        ]);
+        validate_cleanup_package(&ok_pkg(t.clone()))
+            .expect("CLEANUP_REG_WIPE_ALLOW 内的键被拒 = 内置库自身过不了自己的闸");
+
+        // ⑤ 树外产品键删树 → 放行（protect.rs 注释里点名的合法形态）
+        t["regKeys"] = json!([{ "path": "HKLM\\SOFTWARE\\ESET" }]);
+        validate_cleanup_package(&ok_pkg(t.clone())).expect("树外产品键被误拒 = 判据过宽");
+
+        // ⑥ 大小写不规范的写法同样拦得住：`normalize_reg_target` 归一成大写再比对，
+        //    `hkcu\…` 不得成为绕过禁删面的写法
+        t["regKeys"] = json!([{ "path": "hkcu\\Software\\microsoft\\windows\\currentversion\\Run" }]);
+        expect_reject(t, "禁删面");
+    }
+
     #[test]
     fn 清理语义校验_合法最小包通过() {
         validate_cleanup_package(&ok_pkg(ok_item())).expect("合法包被拒");

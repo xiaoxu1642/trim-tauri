@@ -808,12 +808,17 @@ unsafe fn enable_privilege(name: &str) -> bool {
     res
 }
 
-unsafe fn avail_phys_bytes() -> u64 {
+unsafe fn avail_phys_bytes() -> Option<u64> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     let mut ms: MEMORYSTATUSEX = std::mem::zeroed();
     ms.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-    GlobalMemoryStatusEx(&mut ms);
-    ms.ullAvailPhys
+    // 返回 0 = 失败，此时结构体仍是全零。旧写法把失败当「可用 0 字节」返回，于是
+    // before=0 ⇒ freed = after ≈ 整机空闲内存，能凭空报出「释放 12 GB」（v5 M-2）。
+    if GlobalMemoryStatusEx(&mut ms) == 0 {
+        None
+    } else {
+        Some(ms.ullAvailPhys)
+    }
 }
 
 /// 内存清理核心：Ok = 最终结果 JSON；Err = 失败原因消息（CLI 侧原样直写 stdout）。
@@ -850,10 +855,17 @@ fn mem_clean_core(want: &[String]) -> Result<String, String> {
             results.push(format!("{{\"id\":\"{}\",\"name\":\"{}\",\"ok\":{},\"status\":{}}}", id, label, status == 0, status));
         }
         let after = avail_phys_bytes();
-        let freed = after.saturating_sub(before);
+        // v5 M-2：任一端读失败 ⇒ 差值不可信，如实回 0 并置 freedMeasured=false，让渲染层
+        // 说「未测到释放量」而不是「释放 0 B」（后者看着像"确实没释放"，是两种不同的结论）。
+        // 口径提醒：freed 本来就是「这几秒内全系统可用内存的净变化」，不是本模块独占成果 ——
+        // 期间其它进程分配/释放、系统自行回收都算得进来，UI 文案不得写成"本模块释放了 X"。
+        let (freed, measured) = match (before, after) {
+            (Some(b), Some(a)) => (a.saturating_sub(b), true),
+            _ => (0, false),
+        };
         Ok(format!(
-            "{{\"before\":{},\"after\":{},\"freed\":{},\"results\":[{}]}}",
-            before, after, freed, results.join(",")
+            "{{\"before\":{},\"after\":{},\"freed\":{},\"freedMeasured\":{},\"results\":[{}]}}",
+            before.unwrap_or(0), after.unwrap_or(0), freed, measured, results.join(",")
         ))
     }
 }

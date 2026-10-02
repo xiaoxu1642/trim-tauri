@@ -451,14 +451,13 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                     }
                 }
             }
-            let (total_freed, success, partial, skipped) = summarize_details(&data);
+            // v5 C-2：这里只回写「回收站专属」两项。totalFreed / success / partial / skipped
+            // 曾在且只在这里写，而常规清理固定 toRecycle=false（AGENTS §3 v3.3.0 裁定）⇒
+            // 这四个字段在永久删路径上**从不出现**，前端 `result.totalFreed || 0` 于是恒显
+            // 「释放 0 B」。统一改由外层在 details 全部落定后无条件回写。
             if let Some(o) = data.as_object_mut() {
-                o.insert("totalFreed".into(), Value::from(total_freed));
                 o.insert("recycledBytes".into(), Value::from(recycled_bytes));
                 o.insert("recycledCount".into(), Value::from(recycled_count));
-                o.insert("success".into(), Value::from(success));
-                o.insert("partial".into(), Value::from(partial));
-                o.insert("skipped".into(), Value::from(skipped));
             }
         }
         if let Some(o) = data.as_object_mut() {
@@ -479,13 +478,21 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
             .and_then(|d| d.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some("error"))
+                    // v5 C-3：引擎侧的硬失败有**两种**写法 —— `"error"`（备份失败等前置中止）
+                    // 与 `"fail"`（DISM 失败 / 注册表全失败 / 文件全被占用）。此前只数 error，
+                    // 于是 `success: failed == 0` 把整批真失败渲染成成功提示。
+                    .filter(|d| matches!(d.get("status").and_then(|v| v.as_str()), Some("error") | Some("fail")))
                     .count()
             })
             .unwrap_or(0);
         if let Some(o) = data.as_object_mut() {
             o.insert("failed".into(), Value::from(failed as i64));
             o.insert("partial".into(), Value::from(n_partial as i64));
+            // v5 C-2：四个汇总字段一律无条件回写（永久删路径也要有 totalFreed / success /
+            // skipped，否则前端恒显「释放 0 B」）
+            o.insert("totalFreed".into(), Value::from(total_freed));
+            o.insert("success".into(), Value::from(success));
+            o.insert("skipped".into(), Value::from(skipped));
         }
         log::write_log(
             "info",
@@ -519,7 +526,8 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                 );
             }
         }
-        // 成功判据：硬失败（error）为 0 即算成功；partial 属「部分成功」，由渲染层另行提示
+        // 成功判据：硬失败（error ∪ fail，见上面 v5 C-3）为 0 才算成功；
+        // partial 属「部分成功」，由渲染层另行提示
         json!({ "success": failed == 0, "data": data })
     });
     match task.await {

@@ -370,6 +370,8 @@ pub fn cleanup_execute(
                     .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
                     .unwrap_or_default();
                 let mut reg_excluded = 0i64;
+                // v5 C-1：删树 / 通配清值目标的禁删面拦截记录（判据见下面循环里的同名注释）
+                let mut reg_blocked: Vec<String> = Vec::new();
                 for rk in reg_keys {
                     let path = rk.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     if path.is_empty() { continue; }
@@ -385,6 +387,28 @@ pub fn cleanup_execute(
                         continue;
                     }
                     let value = rk.get("value").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    // v5 C-1 第二道闸：删树 / 通配清值过禁删面，与装载侧**同一个函数同一判据**
+                    // （见 rules.rs 的同名注释）。命中即判 fail 不判 ok —— 能走到这里说明规则库
+                    // 绕过了装载校验（内置兜底副本 / 手工落盘），静默跳过会把事故做成"清理正常"。
+                    let wipe_form = match value.as_deref() {
+                        None => Some(false),
+                        Some("*") => Some(true),
+                        Some(_) => None,
+                    };
+                    if let Some(wipe) = wipe_form {
+                        if let Some(reason) =
+                            crate::engine::protect::cleanup_reg_wipe_block_reason(&expanded, wipe)
+                        {
+                            reg_blocked.push(format!("{expanded} —— {reason}"));
+                            crate::engine::log::write_log(
+                                "error",
+                                &format!(
+                                    "cleanup_execute 规则 {id}：注册表目标命中禁删面，已拒绝执行: {reason}"
+                                ),
+                            );
+                            continue;
+                        }
+                    }
                     if trim_finder::cleanup_scan::reg_target_excluded(&reg_excludes, &expanded, value.as_deref()) {
                         reg_excluded += 1;
                         continue;
@@ -394,16 +418,26 @@ pub fn cleanup_execute(
                     parsed.push((hive, rest, value));
                 }
                 if parsed.is_empty() {
-                    let message = if reg_unresolved.is_empty() {
-                        if reg_excluded > 0 {
-                            format!("注册表目标全部命中规则级排除（{reg_excluded} 项），无需清理")
-                        } else {
-                            "注册表项不存在，无需清理".to_string()
-                        }
+                    // 判据优先级：禁删面拦截（真异常，判 fail）> 变量未解析（skip）>
+                    // 规则级排除 / 键不存在（都是 benign，判 ok）
+                    let (status, message) = if !reg_blocked.is_empty() {
+                        (
+                            "fail",
+                            format!("删树目标命中注册表禁删面，已拒绝执行：{}", reg_blocked.join("；")),
+                        )
+                    } else if !reg_unresolved.is_empty() {
+                        (
+                            "skip",
+                            format!("路径变量 {} 未解析，未执行注册表清理", reg_unresolved.join("、")),
+                        )
+                    } else if reg_excluded > 0 {
+                        (
+                            "ok",
+                            format!("注册表目标全部命中规则级排除（{reg_excluded} 项），无需清理"),
+                        )
                     } else {
-                        format!("路径变量 {} 未解析，未执行注册表清理", reg_unresolved.join("、"))
+                        ("ok", "注册表项不存在，无需清理".to_string())
                     };
-                    let status = if reg_unresolved.is_empty() { "ok" } else { "skip" };
                     details.push(json!({"id": id, "name": name, "status": status, "freed": 0, "message": message, "fileCount": 0, "ruleVer": rule_ver}));
                     continue;
                 }
@@ -472,6 +506,8 @@ pub fn cleanup_execute(
                             }
                         }
                         None => {
+                            // v5 C-1：删树出口的第二道闸在解析阶段（`reg_target_block_reason`），
+                            // 能进到这里说明目标已过禁删面；此处不再重复判定，避免两处口径漂移。
                             if reg_key_remove(*hive, rest, true) {
                                 removed += 1;
                             } else {
@@ -481,16 +517,31 @@ pub fn cleanup_execute(
                     }
                 }
                 total_files += removed;
-                let status = if reg_failed == 0 { "ok" } else if removed > 0 { "partial" } else { "fail" };
+                // 命中禁删面 = 规则缺陷，即使同规则别的键清成功也一律判 fail（v5 C-3 起
+                // "fail" 计入 failed，界面不再给成功提示）。完整原因走上面的 log::error。
+                let status = if !reg_blocked.is_empty() {
+                    "fail"
+                } else if reg_failed == 0 {
+                    "ok"
+                } else if removed > 0 {
+                    "partial"
+                } else {
+                    "fail"
+                };
                 let excl_note = if reg_excluded > 0 {
                     format!("；{} 个注册表目标命中规则级排除已跳过", reg_excluded)
                 } else {
                     String::new()
                 };
-                let message = if reg_failed == 0 {
-                    format!("已清理 {} 项注册表记录{excl_note}", removed)
+                let block_note = if reg_blocked.is_empty() {
+                    String::new()
                 } else {
-                    format!("已清理 {} 项注册表记录，{} 项失败{excl_note}", removed, reg_failed)
+                    format!("；{} 个删树目标命中注册表禁删面被拒绝", reg_blocked.len())
+                };
+                let message = if reg_failed == 0 {
+                    format!("已清理 {} 项注册表记录{excl_note}{block_note}", removed)
+                } else {
+                    format!("已清理 {} 项注册表记录，{} 项失败{excl_note}{block_note}", removed, reg_failed)
                 };
                 details.push(json!({
                     "id": id, "name": name, "status": status,

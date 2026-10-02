@@ -209,6 +209,28 @@ fn runtimes_collect_shape() {
     let w = main_window();
     let res = invoke(&w, "runtimes_collect", json!({}));
     assert!(res["success"].is_boolean(), "success 必须是布尔: {res}");
+    // v5 P2：只断「success 是布尔」⇒ 检测整条失败（success:false、压根没有 items）也绿。
+    // 按 §4.1 纪律③「形状断言对渲染层消费口径写」补齐：前端 runtimes.js 对 data.items
+    // 直接 `.map`、读 summary.{total,ok,warn,fail}，并按 id 去 ITEM_META 取标签。
+    assert!(res["success"].as_bool().unwrap_or(false), "本机运行库检测整条失败: {res}");
+    let items = res["data"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data.items 必须是数组（前端直接 .map）: {res}"));
+    assert_eq!(
+        items.len(), 6,
+        "检测项数变了（前端 ITEM_META 与雷达节点按 id 取标签，增减要同步）: {items:?}"
+    );
+    for it in items {
+        let id = it["id"].as_str().unwrap_or("");
+        assert!(!id.is_empty(), "条目缺 id: {it}");
+        assert!(
+            matches!(it["status"].as_str(), Some("ok") | Some("warn") | Some("fail") | Some("info")),
+            "{id} 的 status 不在前端 STATUS_LABEL 枚举内: {it}"
+        );
+        assert!(it["evidence"].is_array(), "{id} 缺 evidence 数组（前端逐条渲染）: {it}");
+    }
+    let s = &res["data"]["summary"];
+    assert_eq!(s["total"].as_u64(), Some(items.len() as u64), "summary.total 与 items 数不符: {s}");
 }
 
 /// netcheck:collect 形状（`success` 为布尔）。

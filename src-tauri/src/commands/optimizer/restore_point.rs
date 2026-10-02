@@ -267,11 +267,17 @@ Write-Output ('@@SRPRE@@' + ({ globalDisabled = $gd; protectedVolumes = $vol.Cou
         }
     }
     let title = opt.get("title").and_then(|v| v.as_str()).unwrap_or("tf_restore_point");
-    let _ = opt_state::record_pending(
+    // v5 P2：`record_pending` 的契约明写着「false = 写入失败，调用方必须中止」
+    // （optimization_state.rs:53）。这条路径会真的创建还原点（改系统），账留不下就等于
+    // "改了系统但没有任何记录"—— 崩溃后连「未完成还原」横幅都不会提示。
+    if !opt_state::record_pending(
         "tf_restore_point",
         title,
         &classify_step_kinds(&steps),
-    );
+    ) {
+        log::write_log("error", "创建还原点前 pending 记账失败，已中止（不改系统）");
+        return json!({ "success": false, "message": "优化状态写入失败，已取消创建还原点" });
+    }
 
     let before = count_restore_points();
     let script = build_script(&steps);
@@ -286,13 +292,14 @@ Write-Output ('@@SRPRE@@' + ({ globalDisabled = $gd; protectedVolumes = $vol.Cou
         .and_then(|x| x.parse::<i64>().ok())
         .unwrap_or(0);
     let ok = out.code == 0 && out.stdout.contains("@@DONE@@") && failed_steps == 0;
-    if ok {
-        let _ = opt_state::mark_applied("tf_restore_point", "pass");
-    } else {
+    if !ok {
         let _ = opt_state::remove("tf_restore_point");
         log::write_log("warn", &format!("创建系统还原点未成功: code={} failedSteps={failed_steps}", out.code));
         return json!({ "success": false, "message": "系统还原点创建失败，请手动创建（需管理员权限，且至少一个卷已开启系统保护）" });
     }
+    // v5 O-5：账本改到**回读之后**再记。旧写法在这里就 mark_applied("pass")，而下面的回读
+    // 判失败时只 return、不改账 ⇒ 命令回执 success:false 与账本 applied/pass 同时存在；
+    // 更糟的是 applied 项不进 staleIds（overview.rs 的判据），界面永远看不到这条失败。
 
     // 回读：数量必须增长（轮询 ≤15s，每 1.5s）
     let mut last = before;
@@ -318,14 +325,25 @@ Write-Output ('@@SRPRE@@' + ({ globalDisabled = $gd; protectedVolumes = $vol.Cou
     }
     if let (Some(b), Some(a)) = (before, last) {
         if a <= b {
-            log::write_log("warn", &format!("创建还原点回读未增长: {b} -> {a}"));
+            // 回读判失败必须改账（v5 O-5）：partial 项由 optimizer_state_overview 如实呈现
+            let _ = opt_state::mark_partial("tf_restore_point");
+            log::write_log("warn", &format!("创建还原点回读未增长: {b} -> {a}，已记账为 partial"));
             return json!({ "success": false, "message": "未检测到新还原点，创建可能被系统限制或仍在进行，请稍后在「系统还原点管理」核对" });
         }
     }
     let btxt = before.map(|b| b.to_string()).unwrap_or_else(|| "?".into());
     let atxt = last.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
-    log::write_log("info", &format!("已创建系统还原点 ({btxt} -> {atxt})"));
-    json!({ "success": true, "message": "已创建系统还原点" })
+    // 结论强度 = 证据强度（v5 O-5）：基线计数取不到（WMI 抖动、本机 SR provider 坏）时
+    // 没有"数量增长"这回事，只能记 unknown，不许冒充已验证的 pass。
+    let (verify, msg) = if before.is_some() {
+        ("pass", "已创建系统还原点")
+    } else {
+        log::write_log("warn", "创建还原点：基线计数取不到，无法比对数量增长，按 unknown 记账");
+        ("unknown", "创建命令已完成，但未能比对还原点数量（基线计数不可读），请到「系统还原点管理」核对")
+    };
+    let _ = opt_state::mark_applied("tf_restore_point", verify);
+    log::write_log("info", &format!("已创建系统还原点 ({btxt} -> {atxt}) verify={verify}"));
+    json!({ "success": true, "message": msg, "verify": verify })
 }
 
 /// optimizer:list-restore —— 还原点列表 + 各卷保护状态

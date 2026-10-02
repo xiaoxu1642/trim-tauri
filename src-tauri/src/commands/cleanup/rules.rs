@@ -193,8 +193,11 @@ pub fn set_rules_watermark(version: f64) -> bool {
 //   靠 `tools/fixtures/cleanup-contract.json` 钉住 —— 不跨语言调用，也不让 JS 反过来生成 Rust。
 // - 失败一律**整包拒绝** + 隔离现场 + 回退内置，不做「坏条目剔除、其余生效」：那会让
 //   审核记录与线上行为不一致（残留域 Q2 同口径）。
-// - **不套用残留域的注册表禁删面**：清理的 `regKeys` 目标由执行侧过 `engine::protect`
-//   （三端同源）。在这里另接一套判定会让同一目标在装载侧与执行侧口径不同（AGENTS §5.16/N6）。
+// - **注册表禁删面套用范围 = 删树形态**（无 `value` 的 `regKeys` 条目）：装载侧与执行侧
+//   各查一次 `engine::protect::reg_target_block_reason`，同一函数同一口径（AGENTS §5.16/N6
+//   禁的是"另接一套判定"，不是"少接一处"）。清值形态（`value` 具名或 `"*"`）不在该函数
+//   的管辖语义内（它自述"必须拒绝递归删除"），故不套 —— 但删树会端掉整棵子树，且备份是
+//   事后可失败的，必须拦。审查 v5 C-1：此前注释声称执行侧有闸，实际清理域零调用。
 
 /// 递归收集一个值里所有 `%TOKEN%`（按出现顺序，不去重 ⇒ 报错能指到具体位置）
 pub(super) fn collect_rule_tokens(value: &Value) -> Vec<String> {
@@ -701,6 +704,30 @@ pub(super) fn check_cleanup_item(
         }
         let path = rk.get("path").and_then(Value::as_str).unwrap_or_default();
         let value = rk.get("value").and_then(Value::as_str).unwrap_or("");
+        // v5 C-1：删树（无 `value`）与通配清值（`value:"*"`）过注册表禁删面 —— 两者都是
+        // 「该键下全部没掉」，爆炸半径同族（本文件 excludePaths 那段就把两者并称原子操作）。
+        // 具名单值删除不在 `reg_target_block_reason` 的管辖语义内，不套。
+        // 带 `%TOKEN%` 的目标装载侧判不出落点，一并拒 —— 展开后落在哪棵树是审核看不见的盲区。
+        let wipe_form = match rk.get("value").and_then(Value::as_str) {
+            None => Some(false),
+            Some("*") => Some(true),
+            Some(_) => None,
+        };
+        if let Some(wipe_all_values) = wipe_form {
+            let form = if wipe_all_values { "通配清值" } else { "删树" };
+            if path.contains('%') {
+                return Err(format!(
+                    "规则 {id}: {form}型 regKeys 目标含变量，装载侧无法判定禁删面: {path}"
+                ));
+            }
+            if let Some(reason) =
+                crate::engine::protect::cleanup_reg_wipe_block_reason(path, wipe_all_values)
+            {
+                return Err(format!(
+                    "规则 {id}: {form}型 regKeys 目标命中注册表禁删面 —— {reason}"
+                ));
+            }
+        }
         let fp = format!("reg|{}|{}", path.to_lowercase(), value);
         if let Some(prev) = seen_targets.get(&fp) {
             return Err(format!("规则 {id}: 与 {prev} 精确重复（{fp}）"));

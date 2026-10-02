@@ -323,11 +323,20 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", key_part, file_str, "/y"]', reason: '残留 reg_value 删值前父键备份' },
+  // 顽固软件治理的 schtasks 三点（v5 M-1）：备份不判成败就无条件 /Delete 是"删了且没凭据"，
+  // 裸 .output() 又会让挂死的 schtasks 永久锁住这条 IPC。超时复用 REG_EXPORT_TIMEOUT（同为
+  // 备份类短命令：平时毫秒级，15s 已是宽限上界）。
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/NH"],', reason: '顽固软件治理：判任务是否存在' },
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/XML"],', reason: '顽固软件治理：删任务前导出 XML（唯一还原凭据）' },
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Delete", "/TN", task, "/F"],', reason: '顽固软件治理：删除计划任务' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'restart_service 的 sc stop', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("sc"), &["stop", "WSearch"], MAINT_CMD_TIMEOUT', reason: '维护：停 Windows Search 服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("sc"), &["stop", svc], MAINT_CMD_TIMEOUT', reason: '维护：停多个服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'stop_service_wait 的 sc stop（restart_service / search / wu 三条链共用）', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  // v5 S-1：store 任务从「spawn 不管结果」改成等退出码，于是它进入超时登记表
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("wsreset.exe"),', reason: '维护：wsreset 清 Store 缓存（等退出码，非 fire-and-forget）', timeoutConst: 'WSRESET_TIMEOUT', secs: 60 },
+  // v5 R-3：运行库装包/DISM 从裸 .output() 改成带超时 —— 挂住时这条 IPC 永不返回，
+  // 前端按钮卡在「安装中…」。上游 Electron 轨本来就带 600s，迁移时丢了。
+  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: 'REDIST_INSTALL_TIMEOUT', reason: '运行库修复：vc_redist / netfx48 静默安装与 DISM 启用 NetFx3', timeoutConst: 'REDIST_INSTALL_TIMEOUT', secs: 600 },
 ];
 const TIMEOUT_SECS = 15;
 

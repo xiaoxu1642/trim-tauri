@@ -563,6 +563,17 @@ pub async fn optimizer_run<R: Runtime>(
                     "verify": verify
                 });
             }
+            // v5 P2：`unknown` = 既没有值级备份可比、反向判据也给不出结论。此时**销账**等于
+            // 抹掉用户唯一的重试依据（「未完成还原」横幅靠这条记录才提示），界面上却写着"已恢复"。
+            // 只有拿到 pass 证据才销账；unknown 保留记录并如实说明。
+            if verify == "unknown" {
+                log::write_log("warn", &format!("还原后无法回读校验（无备份且反向判据不适用），账本保留: {title}"));
+                return json!({
+                    "success": true,
+                    "message": "还原命令已执行，但无法验证是否生效，请在详情里复核（该记录已保留，可重试）",
+                    "verify": verify
+                });
+            }
             let _ = opt_state::remove(&option_id);
             let _ = opt_state::set_detected_entry(&option_id, false);
             return json!({ "success": true, "message": ok_message, "verify": verify });

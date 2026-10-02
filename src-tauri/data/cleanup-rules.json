@@ -999,7 +999,8 @@
               "risk": "low",
               "regKeys": [
                 {
-                  "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs"
+                  "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs",
+                  "value": "*"
                 }
               ],
               "evidence": "资源管理器最近打开文档的注册表记录（隐私清理）",
@@ -1033,7 +1034,8 @@
               "risk": "low",
               "regKeys": [
                 {
-                  "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU"
+                  "path": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU",
+                  "value": "*"
                 }
               ],
               "evidence": "Win+R「运行」历史记录（隐私清理）",
@@ -2993,6 +2995,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "eKWx+34gz+GhkNxT26IvbbjAN7kw2uO67/KaRd/OcL0HbbOIAsFMbVgOTw/iUTMBIRPD8YZJ5vcEpHvJdLfjAw=="
+    "sig": "rmLe5YZ1n1LhIb0rLVvHq0ZnwKOnZAMsahAYZVcghbMHH0PKE1uIgEfS8Al8vdJJ2m4FOeB72IwLpUIR3XvlAw=="
   }
 }

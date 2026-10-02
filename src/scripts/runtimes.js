@@ -207,7 +207,10 @@
       if (resp && resp.needAdmin) {
         const elevated = await window.app?.requestElevation?.('运行库修复需要管理员权限才能安装系统组件。');
         if (elevated) {
-          window.app?.toast('info', '已获得管理员权限，请重新点击「一键修复」');
+          // v5 P2：提权是**重启进程**，新进程里的检测快照（后端 SNAPSHOTS）是空的。
+          // 旧文案让用户"重新点击一键修复"，那会直接撞 runtimes.rs 的
+          // 「该修复动作不在当前检测快照内」—— 出路必须指向重新扫描。
+          window.app?.toast('info', '已获得管理员权限并重启，请重新「开始扫描」后再点「一键修复」');
         }
         return;
       }

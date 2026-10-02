@@ -370,9 +370,12 @@ pub fn stubborn_block() -> Result<Value, String> {
         unsafe {
             // 先检查服务是否存在
             if service_status(svc).is_none() { continue; }
-            let _ = service_stop(svc);
+            // v5 M-P2：停止失败不再 `let _ =` 吞掉 —— 这条是「阻止开机自启」的持久策略，
+            // 停不动的进程下次开机照样起来，必须进失败清单。
+            let stopped = service_stop_pub(svc).is_ok();
             // SERVICE_DEMAND_START = 3 (Manual)
-            if service_set_start_type(svc, 3) {
+            let retyped = service_set_start_type(svc, 3).is_ok();
+            if stopped && retyped {
                 changed_services.push(svc.to_string());
             } else {
                 fail_services.push(svc.to_string());
@@ -383,8 +386,11 @@ pub fn stubborn_block() -> Result<Value, String> {
 
     // 2. 停止 wpscloudsvr（不改变启动类型）
     unsafe {
-        if service_status("wpscloudsvr").is_some() {
-            if service_stop("wpscloudsvr") {
+        // v5 M-P2：先判运行态再停。上游 PS 有 `if ($wc.Status -eq 'Running')` 前置，平移丢了
+        // 之后「服务本已停止」会被算成失败（1062），于是重复执行同一条持久策略反而报部分失败。
+        let running = service_status("wpscloudsvr").map(|(s, _)| s == 4).unwrap_or(false);
+        if running {
+            if service_stop_pub("wpscloudsvr").is_ok() {
                 changed_services.push("wpscloudsvr".to_string());
             } else {
                 fail_services.push("wpscloudsvr".to_string());
@@ -403,29 +409,75 @@ pub fn stubborn_block() -> Result<Value, String> {
     let block_tasks = ["WpsUpdateTask_CHENG", "WpsUpdateLogonTask_CHENG"];
     for task in &block_tasks {
         // 检查任务是否存在
-        let exists = match crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-            .args(["/Query", "/TN", task, "/NH"])
-            .output()
-        {
+        let exists = match crate::engine::systembin::quiet_cmd_timeout(
+            system_tool("schtasks"),
+            &["/Query", "/TN", task, "/NH"],
+            crate::engine::systembin::REG_EXPORT_TIMEOUT,
+        ) {
             Ok(o) => o.status.success(),
             Err(_) => false,
         };
         if !exists { continue; }
 
-        // 备份
-        if !backup_dir.as_os_str().is_empty() {
-            let xml_path = backup_dir.join(format!("{task}.xml"));
-            let _ = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-                .args(["/Query", "/TN", task, "/XML"])
-                .stdout(std::process::Stdio::from(std::fs::File::create(&xml_path).unwrap_or_else(|_| std::fs::File::open("NUL").unwrap())))
-                .status();
+        // 备份：导出件是「当时任务长什么样」的唯一凭据 —— 拿不到 / 空 / 不像 XML /
+        // 写盘失败，一律**不删任务**（v5 M-1：此前 `let _ = …status()` 把成败全丢，兜底
+        // `File::open("NUL")` 又是只读句柄当 stdout、还带可 panic 的 unwrap，于是
+        // 「备份没做成」与「备份做成了」在回执里长得一模一样）。
+        if backup_dir.as_os_str().is_empty() {
+            fail_tasks.push(format!("{task}（备份目录不可用，未删除）"));
+            failed += 1;
+            continue;
+        }
+        let xml_path = backup_dir.join(format!("{task}.xml"));
+        let xml = match crate::engine::systembin::quiet_cmd_timeout(
+            system_tool("schtasks"),
+            &["/Query", "/TN", task, "/XML"],
+            crate::engine::systembin::REG_EXPORT_TIMEOUT,
+        ) {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).trim().chars().take(120).collect::<String>();
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("顽固软件治理：{task} 导出失败 exit={:?}，已放弃删除。stderr={err}", o.status.code().unwrap_or(-1)),
+                );
+                fail_tasks.push(format!("{task}（导出失败，未删除）"));
+                failed += 1;
+                continue;
+            }
+            Err(e) => {
+                crate::engine::log::write_log("warn", &format!("顽固软件治理：{task} 无法执行 schtasks: {e}，已放弃删除"));
+                fail_tasks.push(format!("{task}（schtasks 无法执行，未删除）"));
+                failed += 1;
+                continue;
+            }
+        };
+        // /Query /XML 的产物以 `<?xml` 开头；长度下限挡掉「只剩 BOM/空行」这种假成功
+        if !xml.starts_with('<') || xml.len() < 64 {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("顽固软件治理：{task} 导出内容不像任务 XML（{} 字节），已放弃删除", xml.len()),
+            );
+            fail_tasks.push(format!("{task}（导出 XML 形态异常，未删除）"));
+            failed += 1;
+            continue;
+        }
+        if let Err(e) = std::fs::write(&xml_path, xml.as_bytes()) {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("顽固软件治理：{task} 备份落盘失败: {e}（{}），已放弃删除", xml_path.display()),
+            );
+            fail_tasks.push(format!("{task}（备份写盘失败，未删除）"));
+            failed += 1;
+            continue;
         }
 
-        // 删除
-        let deleted = match crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-            .args(["/Delete", "/TN", task, "/F"])
-            .output()
-        {
+        // 删除（只有备份已确认落盘才会走到这一行）
+        let deleted = match crate::engine::systembin::quiet_cmd_timeout(
+            system_tool("schtasks"),
+            &["/Delete", "/TN", task, "/F"],
+            crate::engine::systembin::REG_EXPORT_TIMEOUT,
+        ) {
             Ok(o) => o.status.success(),
             Err(_) => false,
         };

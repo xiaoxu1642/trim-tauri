@@ -33,21 +33,34 @@ fn load_tasks() -> TasksFile {
 /// 运行锁：Some(taskId) 表示已有任务在跑
 static RUNNING: Mutex<Option<String>> = Mutex::new(None);
 
-fn is_running() -> Option<String> {
-    RUNNING.lock().unwrap_or_else(|e| e.into_inner()).clone()
+/// **占位式**取锁：空则占上并回 None，非空则回正在跑的那个任务 id。
+///
+/// v5 S-4：旧写法是 `is_running()` 判空 + 后面 `set_running(Some)` 占位，两次独立 `lock()`
+/// 中间还夹着 `load_tasks()` 与权限判定 —— 两个 IPC 可在不同 worker 线程同时越过判空，
+/// 于是两条 sfc / DISM 真的并发跑（互相抢 CBS 锁，双双失败还看不出原因）。
+fn try_claim_running(id: &str) -> Option<String> {
+    let mut g = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
+        g.clone()
+    } else {
+        *g = Some(id.to_string());
+        None
+    }
 }
 
-fn set_running(id: Option<String>) {
-    *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = id;
-}
-
-/// v2-L4P-37（F-6）：运行锁改 RAII——此前 set_running(Some) 与 set_running(None)
-/// 夹着整条执行链，链上任何 panic 都会让 Some(taskId) 永久留锁，维护页从此
+/// v2-L4P-37（F-6）：运行锁改 RAII——此前「占位」与「复位」两次调用夹着整条执行链，
+/// 链上任何 panic 都会让 Some(taskId) 永久留锁，维护页从此
 /// 「已有任务在执行中」直到重启。Drop 复位覆盖 panic/早退全部路径。
-struct RunningGuard;
+///
+/// v5 S-4：guard 记住自己占的 id，只放开**自己那把** —— 无条件复位
+/// 会让先完成的人把别人仍在跑的锁放开。
+struct RunningGuard(Option<String>);
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        set_running(None);
+        let mut g = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if self.0.is_some() && *g == self.0 {
+            *g = None;
+        }
     }
 }
 
@@ -78,12 +91,17 @@ pub async fn maintenance_run<R: Runtime>(
     };
 
     // 串行锁
-    if let Some(running) = is_running() {
-        return json!({
-            "success": false,
-            "message": format!("已有维护任务在执行中（{running}），请等待完成")
-        });
-    }
+    // 串行锁：一次 lock() 内完成「判空 + 占位」（v5 S-4）。占到位就立刻挂上 RAII guard，
+    // 后面任何早退（未知任务 / 缺权限）都会自动复位，不会留锁。
+    let _guard = match try_claim_running(&task_id) {
+        Some(busy) => {
+            return json!({
+                "success": false,
+                "message": format!("已有维护任务在执行中（{busy}），请等待完成")
+            });
+        }
+        None => RunningGuard(Some(task_id.clone())),
+    };
 
     // 任务必须在清单内
     let tasks_file = load_tasks();
@@ -107,11 +125,9 @@ pub async fn maintenance_run<R: Runtime>(
         });
     }
 
-    // v2-L4P-37（F-6）：RAII 锁 + 阻塞链进 spawn_blocking。maint_run 内部是
-    // sfc/DISM/sc 等长耗时子进程（run_cmd 有 30 分钟超时上限，见 native.rs
-    // MAINT_CMD_TIMEOUT），必须离开 async runtime 线程。
-    set_running(Some(task_id.clone()));
-    let _guard = RunningGuard;
+    // v2-L4P-37（F-6）：阻塞链进 spawn_blocking。maint_run 内部是 sfc/DISM/sc 等长耗时
+    // 子进程（run_cmd 有 30 分钟超时上限，见 MAINT_CMD_TIMEOUT），必须离开 async runtime
+    // 线程。运行锁已在上面占好并由 `_guard` 的 Drop 复位。
     let wid = window.clone();
     let tid = task_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || run_one(&wid, &tid))

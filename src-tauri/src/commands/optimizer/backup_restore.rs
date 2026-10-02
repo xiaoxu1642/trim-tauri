@@ -124,11 +124,121 @@ pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
                 targets.extend(parse_reg_targets(block));
             }
         }
+        collect_service_start_targets(steps, &mut targets);
     }
     // 去重（root\sub::key）
     let mut seen = std::collections::HashSet::new();
     targets.retain(|t| seen.insert(format!("{}\\{}::{}", t.root, t.sub, t.key)));
     Some(targets)
+}
+
+/// 服务启动类型注册表位置（`sc config X start= N` 与 `New-ItemProperty … -Name Start` 的落点）
+fn svc_start_target(name: &str) -> RegTarget {
+    RegTarget {
+        root: "HKEY_LOCAL_MACHINE".into(),
+        sub: format!("SYSTEM\\CurrentControlSet\\Services\\{name}"),
+        key: "Start".into(),
+    }
+}
+
+/// v5 O-4：`pwsh` / `cmd` / `service` 三种步骤改的「服务启动类型」也要进值级备份基线。
+///
+/// 此前 `option_targets` 只解析 `s.reg`，于是 pwsh 步骤里的
+/// `New-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\X -Name Start -Value 4`
+/// 与 `sc.exe config X start= disabled` **没有基线**：还原只能靠数据层硬编码的
+/// 「猜的原值」（`tf_svc_extra5.restore` 就写着 `SensrSvc=3; StorSvc=2`），
+/// 用户改前的实际值永久丢失。
+fn collect_service_start_targets(steps: &[Value], out: &mut Vec<RegTarget>) {
+    for s in steps {
+        // ① service 步骤型：{ "service": "X", "disable": true } → sc config start= disabled
+        if let Some(name) = s.get("service").and_then(|v| v.as_str()) {
+            if s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false) {
+                out.push(svc_start_target(name));
+            }
+        }
+        // ② pwsh 步骤：交给原生解释器拿**结构化** op 列表，不猜正则
+        if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
+            if let Ok(ops) = crate::engine::pssteps::compile(pwsh) {
+                walk_ps_ops_for_start(&ops, out);
+            }
+        }
+        // ③ cmd 步骤：`reg add "…\Services\X" /v Start …` 与 `sc config X start= N`
+        if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
+            for name in svc_names_writing_start(cmd) {
+                out.push(svc_start_target(&name));
+            }
+        }
+    }
+}
+
+/// 递归收集 pwsh op 列表里会改 `Start` 的落点（含 `if (Test-Path …)` 守卫的内层）
+fn walk_ps_ops_for_start(ops: &[crate::engine::pssteps::PsOp], out: &mut Vec<RegTarget>) {
+    use crate::engine::pssteps::{Hive, PsOp};
+    for op in ops {
+        match op {
+            PsOp::ValueWrite { hive, subkey, name, .. } if name == "Start" => {
+                let root = match hive {
+                    Hive::Lm => "HKEY_LOCAL_MACHINE",
+                    Hive::Cu => "HKEY_CURRENT_USER",
+                    // 其余 hive 上没有 Services 树，收进来只会读不到值
+                    _ => continue,
+                };
+                out.push(RegTarget { root: root.into(), sub: subkey.clone(), key: "Start".into() });
+            }
+            PsOp::SvcSetStart { name, .. } => out.push(svc_start_target(name)),
+            PsOp::GuardedKeyExists { ops, .. } => walk_ps_ops_for_start(ops, out),
+            _ => {}
+        }
+    }
+}
+
+/// 从 cmd 文本里挑出「被写了 Start 的服务名」。两种形态分别认：
+///
+/// - A：`reg add "HKLM\SYSTEM\CurrentControlSet\Services\X" /v Start /t REG_DWORD /d 4 /f`
+/// - B：`sc config X start= disabled`（**不含** `Services\` 段，名字跟在 `config` 后面）
+///
+/// 判据要求"确实写了 Start"，否则不收 —— 宁可漏收（少一条基线）也不要把无关命令
+/// 当成改启动类型收进来。大小写一律走 `to_ascii_lowercase`：它按字节小写化、
+/// **不改变字节长度**，所以偏移量可以安全回切到原串（`to_lowercase` 遇非 ASCII 会变长）。
+pub(super) fn svc_names_writing_start(cmd: &str) -> Vec<String> {
+    let is_name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+    let mut names = Vec::new();
+
+    // A：注册表路径形态
+    if cmd.to_ascii_lowercase().contains("/v start") {
+        let mut from = 0usize;
+        while let Some(p) = cmd[from..].find("Services\\") {
+            let at = from + p + "Services\\".len();
+            let rest = &cmd[at..];
+            let end = at
+                + rest
+                    .char_indices()
+                    .find(|(_, c)| !is_name_char(*c))
+                    .map(|(i, _)| i)
+                    .unwrap_or(rest.len());
+            let name = &cmd[at..end];
+            if !name.is_empty() && name.len() <= 64 {
+                names.push(name.to_string());
+            }
+            from = if end > at { end } else { at + 1 };
+        }
+    }
+
+    // B：sc config 形态
+    let low = cmd.to_ascii_lowercase();
+    if low.contains("start=") {
+        if let Some(pos) = low.find("config") {
+            let rest = cmd[pos + "config".len()..].trim_start();
+            let name: String = rest.chars().take_while(|c| is_name_char(*c)).collect();
+            if !name.is_empty() && name.len() <= 64 {
+                names.push(name);
+            }
+        }
+    }
+
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// [`insert_backup_baseline`] 的三种结果，第三态携带**已存在基线**的项数。

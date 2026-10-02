@@ -72,23 +72,95 @@ pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> Result<(), 
 /// 页永久锁死。登记于 check-ps-callsites 的 F 组（quiet_cmd_timeout 调用点）。
 pub const MAINT_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// wsreset.exe 的超时上限（v5 S-1）：它自己会拉起商店窗口并清缓存，正常几秒自退；
+/// 60s 是宽限上界。刻意不复用 MAINT_CMD_TIMEOUT —— 那是 sfc/DISM 的量级，
+/// 拿 30 分钟兜一个恒挂的 wsreset 等于把维护锁占死半小时。
+pub const WSRESET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn run_cmd(program: &str, args: &[&str]) -> bool {
     // 审查 v2-F7：系统工具必须解析到 System32 再执行，不能用裸进程名 ——
     // 搜索顺序里「exe 所在目录」与「父进程 CWD」都排在 System32 之前。
     let exe = crate::engine::systembin::system_tool(program);
     match crate::engine::systembin::quiet_cmd_timeout(exe, args, MAINT_CMD_TIMEOUT) {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
+        Ok(out) if out.status.success() => true,
+        // v5 S-4：失败必须留痕。旧写法把 stdout/stderr 全丢，于是 sfc /scannow 的三态结论
+        // （未发现问题 / 已修复 / 无法修复）与 30 分钟超时被折叠成同一句「检查失败」，
+        // 用户无从判断该不该再跑一次。只留尾 400 字，避免整份 CBS 报告灌进日志文件。
+        Ok(out) => {
+            let clip = |s: &str| -> String {
+                s.trim().chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect()
+            };
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "维护命令未成功: {program} {args:?} exit={:?} stdout=「{}」stderr=「{}」",
+                    out.status.code().unwrap_or(-1),
+                    clip(&String::from_utf8_lossy(&out.stdout)),
+                    clip(&String::from_utf8_lossy(&out.stderr)),
+                ),
+            );
+            false
+        }
+        Err(e) => {
+            crate::engine::log::write_log("warn", &format!("维护命令无法执行: {program} — {e}"));
+            false
+        }
+    }
+}
+
+/// 当前服务状态码（`SERVICE_STOPPED`=1 / `SERVICE_RUNNING`=4）；查不到返回 None。
+fn service_state(name: &str) -> Option<u32> {
+    unsafe { super::services::service_status(name).map(|(s, _)| s) }
+}
+
+/// 请求停止服务并**轮询到 STOPPED**（v5 S-2 / S-3）。
+///
+/// `sc stop` 是异步的：返回 0 只代表停止请求被受理。旧写法固定睡 2s（search/wu）或 500ms
+/// （restart_service）就当停稳，于是索引库文件仍被占用时 `remove_dir_all` 必然失败，
+/// 而结果又被 `let _ =` 吞掉。
+fn stop_service_wait(name: &str, budget: std::time::Duration) -> bool {
+    let sc = crate::engine::systembin::system_tool("sc");
+    let _ = crate::engine::systembin::quiet_cmd_timeout(&sc, &["stop", name], MAINT_CMD_TIMEOUT);
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if service_state(name) == Some(1) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// 请求启动服务并轮询到 RUNNING（同上：`sc start` 返回 0 时服务可能还在 START_PENDING）
+fn start_service_wait(name: &str) -> bool {
+    if !run_cmd("sc", &["start", name]) {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if service_state(name) == Some(4) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
 fn restart_service(name: &str) -> bool {
-    let sc = crate::engine::systembin::system_tool("sc");
-    // v2-L4P-37：sc stop 同样套超时（快命令的兜底上限）
-    let _ = crate::engine::systembin::quiet_cmd_timeout(&sc, &["stop", name], MAINT_CMD_TIMEOUT)
-        .is_ok();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    run_cmd("sc", &["start", name])
+    // v5 S-3：旧写法 `let _ = quiet_cmd_timeout(..).is_ok()` 把停止结果丢掉（写了等于没写），
+    // 服务仍在运行时紧接着 `sc start` 会返回 1056（已在运行）→ 在**正常机器**上恒报
+    // 「音频服务重启失败」。改成按终态走：在跑就先停稳再启，本就停着则直接启。
+    match service_state(name) {
+        None => false, // 服务不存在：不谎报「重启成功」
+        Some(4) => {
+            stop_service_wait(name, std::time::Duration::from_secs(15)) && start_service_wait(name)
+        }
+        Some(_) => start_service_wait(name),
+    }
 }
 
 fn split_reg_hive(path: &str) -> Option<(HKEY, &str)> {
@@ -230,8 +302,21 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             Ok((ok, if ok { "性能计数器已重建".into() } else { "性能计数器重建失败".into() }))
         }
         "store" => {
-            let _ = crate::engine::systembin::quiet_cmd(system_tool("wsreset.exe")).spawn();
-            Ok((true, "Store 缓存清理已启动".into()))
+            // v5 S-1：旧写法 `let _ = …spawn(); Ok((true, …))` 是**恒真回执** —— wsreset 缺失、
+            // 被组策略拦、启动即崩，都照样报「已完成」；且 spawn 不 wait：子进程无人收、无超时、
+            // 不在任何登记表。改成等退出码（wsreset 正常几秒内自退，60s 是宽限上界）。
+            match crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("wsreset.exe"),
+                &[],
+                WSRESET_TIMEOUT,
+            ) {
+                Ok(o) if o.status.success() => Ok((true, "Store 缓存已清理".into())),
+                Ok(o) => Ok((false, format!(
+                    "wsreset 未成功（exit={}）",
+                    o.status.code().unwrap_or(-1)
+                ))),
+                Err(e) => Ok((false, format!("wsreset 无法执行: {e}"))),
+            }
         }
         "netstack" => {
             let mut ok = true;
@@ -252,12 +337,19 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
                 crate::engine::log::write_log("warn", &format!("维护：search 索引目录删除被拒 — {reason}"));
                 return Ok((false, format!("搜索索引目录未通过删除前校验，已取消：{reason}")));
             }
-            // 停止 WSearch，清空索引，启动
-            let _ = crate::engine::systembin::quiet_cmd_timeout(system_tool("sc"), &["stop", "WSearch"], MAINT_CMD_TIMEOUT).is_ok();
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = std::fs::remove_dir_all(&idx);
-            let ok = run_cmd("sc", &["start", "WSearch"]);
-            Ok((ok, if ok { "搜索服务已重启，索引将在后台重建".into() } else { "搜索服务重启失败".into() }))
+            // 停止 WSearch → 删索引 → 启动。三步各按终态判，删除结果必须进回执（v5 S-2）。
+            // 停不稳就**不删**：半途删一个被占用的索引库只会留下更坏的状态。
+            if !stop_service_wait("WSearch", std::time::Duration::from_secs(20)) {
+                return Ok((false, "WSearch 未能在时限内停止，已取消删除（避免删半个索引库），请稍后重试".into()));
+            }
+            let removed = std::fs::remove_dir_all(&idx);
+            let started = start_service_wait("WSearch");
+            let ok = removed.is_ok() && started;
+            let rm_msg = match &removed {
+                Ok(()) => "索引已清空，将在后台重建".to_string(),
+                Err(e) => format!("索引删除失败: {e}"),
+            };
+            Ok((ok, format!("{rm_msg}；服务{}", if started { "已重启" } else { "重启失败" })))
         }
         "wu" => {
             let cache = std::path::PathBuf::from(r"C:\Windows\SoftwareDistribution\DataStore");
@@ -265,17 +357,27 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
                 crate::engine::log::write_log("warn", &format!("维护：wu 缓存目录删除被拒 — {reason}"));
                 return Ok((false, format!("更新缓存目录未通过删除前校验，已取消：{reason}")));
             }
-            // 停止更新服务，清理缓存，启动
+            // 停止更新服务，清理缓存，启动（v5 S-2：同上，逐个轮询到 STOPPED 再删）
             for svc in ["wuauserv", "bits", "cryptsvc"] {
-                let _ = crate::engine::systembin::quiet_cmd_timeout(system_tool("sc"), &["stop", svc], MAINT_CMD_TIMEOUT).is_ok();
+                if !stop_service_wait(svc, std::time::Duration::from_secs(20)) {
+                    // 已经停掉的几个要恢复启动，别把它们留在停止态
+                    for done in ["wuauserv", "bits", "cryptsvc"] {
+                        if done == svc { break; }
+                        let _ = start_service_wait(done);
+                    }
+                    return Ok((false, format!("{svc} 未能在时限内停止，已取消删除更新缓存").into()));
+                }
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = std::fs::remove_dir_all(&cache);
-            let mut ok = true;
+            let removed = std::fs::remove_dir_all(&cache);
+            let mut ok = removed.is_ok();
             for svc in ["wuauserv", "bits", "cryptsvc"] {
-                ok &= run_cmd("sc", &["start", svc]);
+                ok &= start_service_wait(svc);
             }
-            Ok((ok, if ok { "更新服务已重启".into() } else { "更新服务重启部分失败".into() }))
+            let rm_msg = match &removed {
+                Ok(()) => "更新缓存已清空".to_string(),
+                Err(e) => format!("更新缓存删除失败: {e}"),
+            };
+            Ok((ok, format!("{rm_msg}；服务{}", if ok { "已重启" } else { "重启部分失败" })))
         }
         "tf_net_tcp" => {
             let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile]\r\n\"NetworkThrottlingIndex\"=dword:ffffffff\r\n\"SystemResponsiveness\"=dword:0000000a\r\n";
@@ -285,22 +387,22 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             ok &= run_cmd("netsh.exe", &["int", "tcp", "set", "heuristics", "disabled"]);
             ok &= run_cmd("netsh.exe", &["int", "ip", "set", "global", "neighborcachelimit=4096"]);
             ok &= run_cmd("netsh.exe", &["int", "tcp", "set", "supplemental", "Internet", "congestionprovider=ctcp"]);
-            Ok((ok, "TCP 全局参数已优化".into()))
+            Ok((ok, if ok { "TCP 全局参数已优化".into() } else { "TCP 全局参数部分命令未成功（详见操作日志）".into() }))
         }
         "tf_net_tcpip" => {
             let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters]\r\n\"Tcp1323Opts\"=dword:00000001\r\n\"TcpMaxDupAcks\"=dword:00000002\r\n\"SackOpts\"=dword:00000001\r\n";
             let ok = reg_import(reg);
-            Ok((ok, "TCP/IP 参数已优化".into()))
+            Ok((ok, if ok { "TCP/IP 参数已优化".into() } else { "TCP/IP 参数写入未成功（详见操作日志）".into() }))
         }
         "tf_net_lanman" => {
             let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\LanmanServer\\Parameters]\r\n\"Size\"=dword:00000003\r\n\"LmAnnounce\"=dword:00000000\r\n";
             let ok = reg_import(reg);
-            Ok((ok, "SMB 服务器参数已优化".into()))
+            Ok((ok, if ok { "SMB 服务器参数已优化".into() } else { "SMB 服务器参数写入未成功（详见操作日志）".into() }))
         }
         "tf_net_weakhost" => {
             let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters]\r\n\"WeakHostSend\"=dword:00000001\r\n\"WeakHostReceive\"=dword:00000001\r\n";
             let ok = reg_import(reg);
-            Ok((ok, "弱主机模型已启用".into()))
+            Ok((ok, if ok { "弱主机模型已启用".into() } else { "弱主机模型启用未成功（详见操作日志）".into() }))
         }
         // 审查 2026-09-27 M5：本分支此前是「空操作假成功」——.reg 只有节头零值行，
         // reg_import 只会建空类键却报「网卡参数已优化」。真正的网卡级调优需要遍历

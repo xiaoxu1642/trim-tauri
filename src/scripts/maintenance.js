@@ -378,10 +378,22 @@
     // 走 confirmDanger），从本页走却只是普通 confirm ⇒ **确认等级按出口不一致**，用户从哪
     // 个点进去决定了他被提醒的强度。判据统一取数据层的 `admin` 位（会改系统、需提权＝红档）。
     // 红色确认件缺失时按"拒绝执行"收口（fail-closed）：宁可不跑，不能降级成普通确认。
+    // v5 P2：占位必须发生在确认**之前**。旧写法 `running = taskId` 在 await 之后，而按钮
+    // 禁用读的是 `busy = !!running || !!batch` ⇒ 确认弹窗期间同页所有「执行」按钮仍可点，
+    // 两条任务能一起进后端（与后端 S-4 的 TOCTOU 叠加后真的会并发跑两条 sfc/DISM）。
+    if (running || batch) {
+      window.app?.toast?.('warning', '已有维护任务在执行中，请等待完成');
+      return;
+    }
+    running = taskId;
+    updateBatchbar();
+
     let ok = false;
     if (task.admin) {
       if (!window.app?.confirmDanger) {
         window.app?.toast?.('error', '高危确认对话框不可用，已中止');
+        running = null;
+        updateBatchbar();
         return;
       }
       ok = await window.app.confirmDanger(
@@ -399,10 +411,12 @@
         '取消'
       );
     }
-    if (!ok) return;
+    if (!ok) {
+      running = null;
+      updateBatchbar();
+      return;
+    }
 
-    running = taskId;
-    updateBatchbar();
     showOutput(`${task.title} · 执行输出`);
 
     try {

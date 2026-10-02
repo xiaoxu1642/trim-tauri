@@ -15,6 +15,18 @@ use super::services::*;
 
 /// 运行库检测（对应 runtimes_status.ps1，S3）
 ///
+/// VC++ 2015-2022 关键 dll 名单 —— **按架构分开**（v5 R-1）。
+///
+/// `vcruntime140_1.dll` 只随 **x64** 包分发：本机实测「Microsoft Visual C++ 2022 X64
+/// Minimum Runtime」的 MSI File 表里有它，而「X86 Minimum Runtime」的 11 条 File 里**没有**
+/// （它承载 `__CxxFrameHandler4` 的 64 位表式展开元数据，32 位不走这条路径）。
+/// 两侧共用一份名单时，x86 项**永远判 fail**、修复动作在物理上不可能消除它 ⇒
+/// 「运行库修复」点了永远不成功，还会回一句「可能被清理工具误删」倒打一耙。
+/// 这条判据来自实物 MSI 的 File 表，不是文档推断；改名单前先复跑
+/// `contract_tests::vc_dll_名单按架构分开` 的说明。
+const VC_DLLS_X64: &[&str] = &["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll"];
+const VC_DLLS_X86: &[&str] = &["msvcp140.dll", "vcruntime140.dll", "concrt140.dll"];
+
 /// 覆盖：VC++ 2015-2022 x64/x86（注册表+dll）、.NET Framework 4.x/3.5、
 /// DirectX 9.0c 附属组件、旧版 VC++ 2005-2013 信息级列举。
 pub fn runtimes_status() -> Result<Value, String> {
@@ -22,13 +34,21 @@ pub fn runtimes_status() -> Result<Value, String> {
         let mut items: Vec<Value> = Vec::new();
 
         // ---- VC++ 2015-2022 x64/x86 ----
-        let vc_dlls = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll"];
+        // v5 R-2：系统盘不在 C: 时，硬编码路径会让**所有** dll 判缺失 ⇒ VC/DX 集体永久 fail。
+        // 与 native/contextmenu.rs、systembin.rs 同口径走 %SystemRoot%，取不到才回落 C:\Windows。
+        let sys_root = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        // v5 R-1：两份名单**必须分开**，判据见 VC_DLLS_X64 / VC_DLLS_X86 的注释。
         for arch in ["x64", "x86"] {
+            let vc_dlls: &[&str] = if arch == "x64" { VC_DLLS_X64 } else { VC_DLLS_X86 };
             let (reg_path, dll_dir) = if arch == "x64" {
-                (r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64", r"C:\Windows\System32")
+                (r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64", sys_root.join("System32"))
             } else {
-                (r"SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86", r"C:\Windows\SysWOW64")
+                (r"SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86", sys_root.join("SysWOW64"))
             };
+            let dll_dir = dll_dir.display().to_string();
             let sk = to_wide(reg_path);
             let mut hk = HKEY::default();
             let installed = if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
@@ -132,9 +152,12 @@ pub fn runtimes_status() -> Result<Value, String> {
         let dx9_dlls = ["d3dx9_43.dll", "d3dx9_42.dll", "d3dx11_43.dll", "d3dx10_43.dll",
                         "d3dcompiler_43.dll", "xinput1_3.dll", "xaudio2_7.dll"];
         let mut dx_missing: Vec<&str> = Vec::new();
+        // v5 R-2：同 VC++ 段，一律从 %SystemRoot% 派生，不写死 C:\Windows
+        let sys32 = sys_root.join("System32");
+        let wow64 = sys_root.join("SysWOW64");
         for dll in &dx9_dlls {
-            let in64 = std::path::Path::new(&format!(r"C:\Windows\System32\{dll}")).exists();
-            let in86 = std::path::Path::new(&format!(r"C:\Windows\SysWOW64\{dll}")).exists();
+            let in64 = sys32.join(dll).exists();
+            let in86 = wow64.join(dll).exists();
             if !in64 && !in86 { dx_missing.push(dll); }
         }
         let mut dx_evidence: Vec<String> = Vec::new();
@@ -149,7 +172,7 @@ pub fn runtimes_status() -> Result<Value, String> {
         }
         // DX12 系统组件
         for dll in ["d3d12.dll", "d3d12core.dll"] {
-            if !std::path::Path::new(&format!(r"C:\Windows\System32\{dll}")).exists() {
+            if !sys32.join(dll).exists() {
                 dx_status = "fail";
                 dx_evidence.push(format!("System32\\{dll} 缺失（DX12 系统组件，建议系统文件修复）"));
             }
@@ -584,6 +607,14 @@ pub fn netcheck_status() -> Result<Value, String> {
 /// 静默执行安装包或 dism.exe，检查退出码。
 /// 返回 (success, message)。
 /// 退出码 0/3010/1638 视为成功。
+/// 装包 / DISM 的超时上限（v5 R-3）。
+///
+/// 旧写法是裸 `.output()`：msiexec 撞上「另一个安装正在进行」挂住、或 DISM 卡在源下载时，
+/// 这条 IPC **永不返回** —— 前端按钮卡在「安装中…」，运行库页整块失去响应。
+/// 上游 Electron 轨带 `timeout: 600000`（`runtimes-scripts.js` 按动作 300/300/600s），
+/// 迁移时被丢掉。这里取最宽的一档 600s：DISM 启用 NetFx3 可能要走 Windows Update。
+pub const REDIST_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<(bool, String), String> {
     let (program, args): (&str, Vec<&str>) = match action_id {
         "vc-x64" | "vc-x86" => {
@@ -605,10 +636,12 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
     // 便携版/提权实例场景下，CreateProcessW 的搜索顺序里 exe 所在目录与 CWD 都排在
     // System32 之前，裸名会以管理员权限执行植入的同名工具。安装包路径不在 PINNED，
     // system_tool 原样放行，不受影响。
-    let out = crate::engine::systembin::quiet_cmd(system_tool(program))
-        .args(&args)
-        .output()
-        .map_err(|e| format!("执行安装程序失败: {e}"))?;
+    let out = crate::engine::systembin::quiet_cmd_timeout(
+        system_tool(program),
+        &args,
+        REDIST_INSTALL_TIMEOUT,
+    )
+    .map_err(|e| format!("执行安装程序失败: {e}"))?;
 
     let code = out.status.code().unwrap_or(-1);
     let (success, message) = match code {
@@ -727,5 +760,34 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         _ => Err(format!("未知的修复动作: {action_id}")),
+    }
+}
+
+// ==================== 判据自检 ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v5 R-1：x86 名单里不得出现 `vcruntime140_1.dll`。
+    ///
+    /// 这条断言钉的是「运行库修复永不成功」那个缺陷的根：判据来自本机实物 MSI 的 File 表
+    /// （X64 Minimum Runtime 有该文件，X86 Minimum Runtime 的 11 条 File 里没有）。
+    /// 谁把两份名单合并回一份，这个用例立刻红 —— 而不是等用户再点一次「一键修复」。
+    /// 反向也要钉：三件共有项在任一侧缺席都是真漏判（少了 dll 检查 = 检测形同虚设）。
+    #[test]
+    fn vc_dll_名单按架构分开() {
+        assert!(
+            VC_DLLS_X64.contains(&"vcruntime140_1.dll"),
+            "x64 名单少了 EH4 展开元数据载体，会漏判真缺失"
+        );
+        assert!(
+            !VC_DLLS_X86.contains(&"vcruntime140_1.dll"),
+            "x86 名单混入 x64 独有 dll ⇒ 该项永远判 fail 且修复动作不可收敛"
+        );
+        for d in ["msvcp140.dll", "vcruntime140.dll", "concrt140.dll"] {
+            assert!(VC_DLLS_X64.contains(&d), "x64 名单缺 {d}");
+            assert!(VC_DLLS_X86.contains(&d), "x86 名单缺 {d}");
+        }
     }
 }

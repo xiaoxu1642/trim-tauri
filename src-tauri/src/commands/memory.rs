@@ -177,10 +177,18 @@ pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Op
                     .filter(|item| item.get("ok").and_then(|v| v.as_bool()) == Some(true))
                     .count();
                 let failed = results.len() - ok_count;
+                // v5 M-2：`freedMeasured=false` 表示前后两次 GlobalMemoryStatusEx 至少有一次
+                // 没读到 —— 日志必须写「未测到」而不是「释放 0」，后者与"确实没释放"是两种结论。
+                let freed_txt = match data.get("freedMeasured").and_then(|v| v.as_bool()) {
+                    Some(true) => data
+                        .get("freed")
+                        .and_then(|v| v.as_f64())
+                        .map(|f| format!("{f:.0} 字节"))
+                        .unwrap_or_else(|| "未测到".to_string()),
+                    _ => "未测到（可用内存读数失败）".to_string(),
+                };
                 log::write_log("info", &format!(
-                    "内存清理：释放 {}，成功 {} 项，失败 {} 项",
-                    data.get("freed").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                    ok_count, failed
+                    "内存清理：释放 {freed_txt}，成功 {ok_count} 项，失败 {failed} 项"
                 ));
                 json!({ "success": ok_count > 0, "data": data, "engine": "rust" })
             }

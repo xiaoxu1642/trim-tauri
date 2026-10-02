@@ -660,6 +660,33 @@ pub fn is_reg_target_protected(target: &str) -> bool {
     reg_target_block_reason(target).is_some()
 }
 
+/// 清理域「通配清值」（`value:"*"`）的显式放行清单。
+///
+/// [`reg_target_block_reason`] 自述管辖语义是**递归删树**，但清理规则库里的 `value:"*"`
+/// 是「把该键下所有值一次清空」，爆炸半径与删树同族（`rules.rs` 把两者并称"删树/通配形态"），
+/// 所以一并过禁删面。例外只有下面这几条：它们**本身就是 MRU / 显示缓存容器**，清值就是该项
+/// 语义的全部，键本身必须留着（删了 Explorer 会重建空键，等于白删）。而 `HKCU\Software\Classes`
+/// 整棵在禁删面内 —— 通配清值若也一律拒，`shellMuiCache` 这条内置规则就没有合法写法了。
+/// 新增条目要写清为什么不能用具名 `value` —— 否则应该改规则而不是加清单。
+const CLEANUP_REG_WIPE_ALLOW: &[&str] = &[
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs",
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU",
+    "HKCU\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache",
+];
+
+/// 清理域 `regKeys` 删除前的禁删面判定 —— **装载侧与执行侧共用这一个函数**
+/// （AGENTS §5.16/N6 禁的就是两处各一套判据）。
+///
+/// `wipe_all_values` = 规则写的是 `value:"*"`；删树（无 `value`）传 false 且**不吃**放行清单。
+/// 具名单值删除（`value:"某名"`）不走本函数：它不在禁删面的管辖语义内，且删前整父键 export。
+/// 大小写不在此处理 —— `normalize_reg_target` 已把段统一成大写再比对（`contract_tests` 有用例钉）。
+pub fn cleanup_reg_wipe_block_reason(target: &str, wipe_all_values: bool) -> Option<String> {
+    if wipe_all_values && CLEANUP_REG_WIPE_ALLOW.iter().any(|a| target.eq_ignore_ascii_case(a)) {
+        return None;
+    }
+    reg_target_block_reason(target)
+}
+
 // ==================== 与 JS 权威实现的三端同源对拍（cargo test 门禁） ====================
 
 #[cfg(test)]

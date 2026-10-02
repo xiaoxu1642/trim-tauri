@@ -828,26 +828,47 @@
   // 无备份记录时回退到优化项预置的还原脚本。
   // v2.6.0（P0-1）：提升到模块级，供详情弹窗与「未完成还原」横幅一键还原共用。
   async function restoreOption(opt) {
+    // v5 O-3：两条还原路径是**互补**，不是互斥。旧写法 reg 备份一成功就 return，于是预置
+    // 还原步里非 reg 的那部分（服务启动类型 / 计划任务 / 文件）永不执行，而账已被
+    // clearAllApplied 销掉、UI 弹「已恢复」—— tf_svc_extra5 实测就是只删了 WDI 值、
+    // 4 个服务照旧 Disabled。
+    // 顺序：先跑预置还原（数据层写的是"猜的出厂值"），再用值级备份回写 —— 真原值必须
+    // 最后落，否则会被预置里的猜测覆盖。
+    const hasPresetNonRegStep = Array.isArray(opt.restore) && opt.restore.some(s => !s || !s.reg);
+    let ok = true;
+
+    if (hasPresetNonRegStep) {
+      ok = await runOptionActive({ restore: true }, opt);
+      if (!ok) return false;
+    }
+
     if (window.api?.optimizer?.restoreReg) {
       let r = null;
       try { r = await window.api.optimizer.restoreReg(opt.id); } catch (e) { /* 走回退 */ }
       if (r && r.success) {
-        clearAllApplied(opt.id);
-        renderGroups(OPTIONS);
-        window.app?.toast('success', '已恢复：' + (opt.title || opt.id));
-        return true;
-      }
-      if (r && !r.missing) {
-        window.app?.log('warn', `按备份还原失败（回退预置脚本）: ${opt.title || opt.id}: ${r.message || ''}`);
+        ok = true;
+      } else if (hasPresetNonRegStep) {
+        // 预置那半确实成了；但要说清"真原值没能回写"，否则用户以为恢复的是改前的状态。
+        // 预置还原自己会销账，所以这里备份缺失（missing）是预期路径，不另判失败。
+        if (r && !r.missing) {
+          window.app?.log('warn', `预置还原已执行，但按备份回写失败（恢复的是数据层出厂值，非改前值）: ${opt.title || opt.id}: ${r.message || ''}`);
+        }
+        ok = true;
+      } else {
+        ok = false;
       }
     }
-    const okRun = await runOptionActive({ restore: true }, opt);
-    if (okRun) {
+
+    // 既没有备份可回写、该项也没有非 reg 预置步 → 原回退路径：整项按预置脚本跑一次
+    if (!ok && !hasPresetNonRegStep) {
+      ok = await runOptionActive({ restore: true }, opt);
+    }
+    if (ok) {
       clearAllApplied(opt.id);
       renderGroups(OPTIONS);
       window.app?.toast('success', '已恢复：' + (opt.title || opt.id));
     }
-    return okRun;
+    return ok;
   }
 
   // ==================== 未完成还原提醒（v2.6.0 P0-1 崩溃自愈） ====================

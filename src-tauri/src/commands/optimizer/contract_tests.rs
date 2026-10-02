@@ -14,6 +14,43 @@ use super::backup_restore::*;
 use super::catalog::*;
 use super::overview::*;
 use super::restore_point::*;
+    /// v5 O-4：pwsh / cmd / service 步骤改的「服务启动类型」必须进值级备份基线。
+    /// 此前 `option_targets` 只解析 `s.reg`，于是 `tf_svc_extra5` 那 4 个服务的 Start 没有基线
+    /// —— 还原只能写数据层硬编码的"猜的原值"（restore 步里明写着 `SensrSvc=3; StorSvc=2`），
+    /// 用户改前的实际值永久丢失。
+    #[test]
+    fn 服务启动类型进值级备份基线() {
+        let targets: Vec<String> = option_targets("tf_svc_extra5")
+            .unwrap_or_default()
+            .iter()
+            .map(|t| format!("{}::{}\\{}", t.root, t.sub, t.key))
+            .collect();
+        for svc in ["SensrSvc", "SensorDataService", "StorSvc", "PcaSvc"] {
+            let want = format!("HKEY_LOCAL_MACHINE::SYSTEM\\CurrentControlSet\\Services\\{svc}\\Start");
+            assert!(targets.contains(&want), "{svc} 的 Start 没进基线，实收: {targets:?}");
+        }
+        // cmd 两种形态都要认；没写 Start 的命令一律不收（宁可漏收一条基线，
+        // 也不能把无关命令当成"改了启动类型"收进来 —— 那会让还原回写出没动过的值）
+        assert_eq!(
+            svc_names_writing_start("sc config SysMain start= disabled"),
+            vec!["SysMain".to_string()]
+        );
+        assert_eq!(
+            svc_names_writing_start(
+                r#"reg add "HKLM\SYSTEM\CurrentControlSet\Services\Fax" /v Start /t REG_DWORD /d 4 /f"#
+            ),
+            vec!["Fax".to_string()]
+        );
+        assert!(
+            svc_names_writing_start(
+                r#"reg add "HKLM\SYSTEM\CurrentControlSet\Services\Fax" /v ImagePath /d x /f"#
+            )
+            .is_empty(),
+            "只改 ImagePath 的命令被当成了改启动类型"
+        );
+        assert!(svc_names_writing_start("net stop Spooler").is_empty());
+    }
+
     /// v2-M14：退役清单必须有真消费者，且不与在目录里的 id 重叠。
     /// 重叠意味着同一个 id 既走正常还原又被列进「待还原的退役项」，两本账会互相清账。
     #[test]

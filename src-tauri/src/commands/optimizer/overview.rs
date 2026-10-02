@@ -331,6 +331,9 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         }));
         match rec.get("status").and_then(|v| v.as_str()) {
             Some("pending") => pending_ids.push(id.clone()),
+            // v5 P2：非 checkable（纯 pwsh / cmd 项）的 partial 此前两个分支都不进 ⇒
+            // 界面永远看不到"这项只应用了一半"，用户只能从日志页发现（本次审计的起因就是这样）。
+            Some("partial") if !checkable => pending_ids.push(id.clone()),
             _ if checkable => check_ids.push(id.clone()),
             _ => {}
         }
