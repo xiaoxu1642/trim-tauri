@@ -1504,11 +1504,13 @@
   </div>
 
   <!-- v3.7.0 议题五：渲染脚本按需加载。
-       此前 38 个 <script> 全部同步加载并在启动时 init()，首屏解析 ~813 KB，
-       而用户默认只落在「系统体检」页。现在 index.html 只保留首屏必需的 13 个脚本，
-       其余改由 app.js 的 PAGE_SCRIPTS / IDLE_SCRIPTS 在进页或首帧空闲时动态注入。
+       此前 38 个 <script> 全部同步加载并在启动时 init()，而用户默认只落在「系统体检」页。
+       现在 index.html 只保留首屏必需的脚本，其余改由 app.js 的 PAGE_SCRIPTS / IDLE_SCRIPTS
+       在进页或首帧空闲时动态注入（首屏标签数与字节数由门禁现算，别在这里手抄数字）。
        两条硬约束不变：splash.js 必须是 body 末尾脚本的第一个；
-       ds.js 必须先于一切 window.ds 使用方（theme / modal / xtable 等）。 -->
+       ds.js 必须先于一切 window.ds 使用方（theme / modal / xtable 等）。
+       v3 C（2026-10-02）：磁盘清理域两份（cleanup-fallback.generated.js + cleanup.js，
+       合计 ~200 KB）也摘出首屏，改由 PAGE_SCRIPTS.cleanup / .backups 按需注入。 -->
   <!-- Tauri 适配层（迁移方案 D1，Phase 0 起）：脚本链最前加载，完整复刻 window.api；
        Electron 下自动 no-op（由 preload.js 接管），不影响双轨。不使用 window.ds，
        不打破 ds.js 先于其使用方的约束。 -->
@@ -1522,9 +1524,6 @@
   <script src="scripts/xtable.js"></script>
   <script src="scripts/icon-fallback.js"></script>
   <script src="scripts/liquid-glass.js"></script>
-  <!-- 审查 2-2：FALLBACK 原始数据（gen-fallback.js 生成，勿手改），须在 cleanup.js 之前加载 -->
-  <script src="scripts/cleanup-fallback.generated.js"></script>
-  <script src="scripts/cleanup.js"></script>
   <script src="scripts/overview.js"></script>
   <!-- deviceinfo.js：系统体检（默认首页）用它归一化硬件信息，留在首屏避免首屏降级为空 -->
   <script src="scripts/deviceinfo.js"></script>

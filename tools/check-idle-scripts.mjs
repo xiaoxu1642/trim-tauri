@@ -12,6 +12,10 @@
 // 判定：脚本若注册了顶层 `DOMContentLoaded` 监听，就必须同文件带
 // `document.readyState` 守卫；二者缺一即红。
 //
+// 断言 2（v3 C 的 P0，2026-10-02）：app.js「// 初始化各模块」启动名单里的模块名，
+// 必须是 index.html 已静态加载的脚本 —— 提前 init 会把模块名写进 _initedModules 台账，
+// 脚本随后按需注入时 init 永不重跑，页面按钮与 IPC 订阅静默缺失。
+//
 // 用法：node tools/check-idle-scripts.mjs
 
 import { readFileSync } from 'node:fs';
@@ -88,6 +92,27 @@ check(
   bad.length === 0,
   `${files.length} 个延迟/按页加载脚本均带 readyState 守卫（或未注册 DOMContentLoaded）`,
   bad.length ? `缺守卫 ${JSON.stringify(bad)} —— 注入时 DOMContentLoaded 已过，init 永不执行` : '',
+);
+
+// ---- 断言 2（v3 C 的 P0）：启动期 init 名单必须 ⊆ index.html 静态加载的脚本 ----
+// 为什么判红：`initModuleByName(name)` 会**先**把 name 写进 `_initedModules` 台账，再调
+// `window[name]?.init?.()`。脚本此刻还没注入 → 记账成功、init 空转，等 ensurePageScripts
+// 把脚本加载完，台账已经占用，init 永不重跑。磁盘清理页就是这么变成「按钮全没绑事件、
+// IPC 订阅缺失」的（v2 方案的 P0，本轮把 cleanup 两份摘出首屏时必须钉死）。
+const html = readFileSync(join(REPO_ROOT, 'src', 'index.html'), 'utf8');
+const staticNames = new Set(
+  [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1].split('/').pop()),
+);
+const startupBlock = appJs.match(/\/\/ 初始化各模块\n([\s\S]*?)\n\n/);
+if (!startupBlock) throw new Error('app.js 里找不到「// 初始化各模块」启动名单——锚点变了，请同步本门禁');
+const startupInits = [...startupBlock[1].matchAll(/initModuleByName\('([^']+)'\);/g)].map((m) => m[1]);
+const premature = startupInits.filter((n) => !staticNames.has(`${n}.js`));
+check(
+  premature.length === 0,
+  `启动期 init 名单 ${startupInits.length} 项均已在 index.html 静态加载（${staticNames.size} 个标签）`,
+  premature.length
+    ? `提前 init：${JSON.stringify(premature)} —— 脚本尚未注入就写台账，加载后端账已占用、init 永不重跑`
+    : startupInits.join(', '),
 );
 
 console.log('');

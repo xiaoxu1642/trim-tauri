@@ -143,7 +143,14 @@
   // 无需把 25 个 IIFE 改成 ESM、无需构建步骤、零新增依赖（AGENTS.md §5 红线）。
   // 数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
   const PAGE_SCRIPTS = {
-    // 磁盘清理的首屏脚本（cleanup.js / fallback）已在 index.html 内；
+    // v3 C（2026-10-02）：磁盘清理域两份脚本从 index.html 摘出，改由进页时按需注入
+    // （fallback 118 KB + cleanup 88 KB 是首屏最重的两块，不进清理页就不该解析）。
+    // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 会读
+    // window.CLEANUP_RULES_FALLBACK 构建分类，先注入才拿得到兜底数据。
+    cleanup: ['scripts/cleanup-fallback.generated.js', 'scripts/cleanup.js'],
+    // backups（一级「备份还原」页）是独立路由，不是 cleanup 的别名：它的进页钩子
+    // onBackupsEnter 就住在 cleanup.js 里，所以必须先补齐同一份依赖再执行钩子。
+    backups: ['scripts/cleanup-fallback.generated.js', 'scripts/cleanup.js'],
     // 查找器子视图（重复文件/空文件/磁盘分析）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
@@ -911,9 +918,12 @@
 
     // 初始化各模块
     // v3.7.0 议题五：只初始化首屏已加载的模块；其余改到 ensurePageScripts 加载后按需 init。
-    // 审查 K3：这四个也走 initModuleByName —— 它们同样在 MODULES_NEEDING_INIT 里，
+    // 审查 K3：这几个也走 initModuleByName —— 它们同样在 MODULES_NEEDING_INIT 里，
     // 原先各走一条路径（这里一次 + 首次进页 ensurePageScripts 再一次）等于绑两份。
-    initModuleByName('cleanup');
+    // v3 C 的 P0 修正：这里**不能有 cleanup**。initModuleByName 会先把模块名写进
+    // _initedModules 再调 window.cleanup?.init?.()，而脚本此刻还没注入 —— 记账成功、
+    // init 空转，随后 ensurePageScripts 加载完脚本也因台账已占用而永不重跑，表现为
+    // 清理页按钮全部没绑事件、IPC 订阅缺失。cleanup 的 init 唯一入口是加载完成后那次。
     initModuleByName('overview');
     initModuleByName('deviceinfo');
     initModuleByName('fontmanager');
