@@ -51,6 +51,46 @@ use super::restore_point::*;
         assert!(svc_names_writing_start("net stop Spooler").is_empty());
     }
 
+    /// RAINZ 对标 B4：游戏 QoS（DSCP 46）条目的形状棘轮。
+    ///
+    /// 8 个游戏进程 × 11 个值、**只走 reg** —— 因此还原可由推理补齐（这就是它有「立即恢复」
+    /// 入口的依据）。手工编辑数据层时掉一个进程、漏一个值、或为了省事改成 cmd 步，
+    /// 都会在这里红，而不是等用户点了发现某个游戏没被标记、或还原入口莫名消失。
+    #[test]
+    fn 游戏qos条目形状不变() {
+        let opt = find_option("net_qos_dscp").expect("net_qos_dscp 不在目录里");
+        let steps = opt.get("steps").and_then(|v| v.as_array()).expect("steps 缺失");
+        assert_eq!(steps.len(), 1, "QoS 项应是单条 reg 步骤（混入非 reg 步会让还原推理失效）");
+        let reg = steps[0].get("reg").and_then(|v| v.as_str()).expect("reg 缺失");
+        assert_eq!(reg.matches("\r\n[").count(), 8, "reg 段数应为 8（对应 8 个游戏进程）");
+        assert_eq!(reg.matches("\r\n\"").count(), 88, "值行数应为 88（8 进程 × 11 字段）");
+        for exe in [
+            "VALORANT-Win64-Shipping.exe",
+            "FortniteClient-Win64-Shipping.exe",
+            "DeltaForceClient-Win64-Shipping.exe",
+            "NarakaBladepoint.exe",
+            "LeagueClient.exe",
+            "TslGame.exe",
+            "cs2.exe",
+            "r5apex.exe",
+        ] {
+            assert!(reg.contains(exe), "进程 {exe} 不在 QoS 策略里");
+        }
+        // 键名带空格也必须原样写出（Rust 的 .reg 行解析按引号切，已实证支持）
+        assert!(reg.contains("\"Application Name\"=\"cs2.exe\""), "Application Name 值行缺失或形态变了");
+        assert!(reg.contains("\"DSCP Value\"=\"46\""), "DSCP 值必须是 46（Expedited Forwarding）");
+        // 88 个目标全部进值级备份：少一个 = 那一个值改了就还原不回去
+        assert_eq!(
+            option_targets("net_qos_dscp").map(|t| t.len()),
+            Some(88),
+            "值级备份目标数不是 88：有值没进基线"
+        );
+        assert_eq!(opt.get("restoreInferred").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(opt.get("restoreAvailable").and_then(|v| v.as_bool()), Some(true));
+        // 效果未在本机实测 ⇒ 不许登记「好话」，如实回落「未验证」
+        assert_eq!(opt.get("effect").and_then(|v| v.as_str()), Some("未验证"));
+    }
+
     /// v2-M14：退役清单必须有真消费者，且不与在目录里的 id 重叠。
     /// 重叠意味着同一个 id 既走正常还原又被列进「待还原的退役项」，两本账会互相清账。
     #[test]

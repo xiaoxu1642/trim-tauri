@@ -161,12 +161,19 @@ pub fn runtimes_status() -> Result<Value, String> {
             if !in64 && !in86 { dx_missing.push(dll); }
         }
         let mut dx_evidence: Vec<String> = Vec::new();
+        // RAINZ 对标 B1：DX9 附属组件属**可选遗留组件**（只在跑依赖 DX9 的老游戏/老软件时才需要），
+        // 而微软已下架独立安装包 —— 本工具给不出一条能收敛的一键修复。此前判 fail 的后果是
+        // 「雷达恒红 + 永久挂一条无法处置的异常」，与 RAINZ 侧同一能力（Jun2010 redist）相比
+        // 反而更刺眼（且 RAINZ 只用 `/Q /T:` 解包、从不执行 DXSETUP，等于空转）。
+        // 改为 warn：如实表达「缺件，但本机没有自动修复路径」，并给出可行的替代手段。
+        // 注意 DX12 系统组件缺失**仍判 fail** —— 那是系统完整性受损，处置路径明确。
         let mut dx_status = "ok";
         let mut dx_detail = String::new();
         if !dx_missing.is_empty() {
-            dx_status = "fail";
-            dx_detail = "DirectX 9.0c 附属组件缺失，部分老游戏无法启动".to_string();
+            dx_status = "warn";
+            dx_detail = "DirectX 9.0c 附属组件缺失：只在运行依赖 DirectX 9 的老游戏/老软件时才会报错。微软已下架独立安装包，本工具不提供一键修复".to_string();
             for m in &dx_missing { dx_evidence.push(format!("{m} 缺失（System32 与 SysWOW64 均未找到）")); }
+            dx_evidence.push("补齐方式：安装任意自带 DirectX 9 组件的游戏，或先做系统文件修复（sfc /scannow）".to_string());
         } else {
             dx_evidence.push("DirectX 9.0c 关键附属组件齐全".to_string());
         }

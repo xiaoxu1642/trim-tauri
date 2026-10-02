@@ -100,10 +100,16 @@
       const meta = ITEM_META[it.id] || { name: it.id, desc: '' };
       const evid = Array.isArray(it.evidence) ? it.evidence : [];
       const canRepair = !!(it.repair && it.repair.id);
+      // RAINZ 对标 B1：dx9 现在判 warn（缺件但无自动修复路径），所以「暂无一键修复」这句
+      // 不能只在 fail 时出现 —— 沉默会让用户以为是界面坏了。提示文案取后端的 detail，
+      // 保持「为什么没有修复路径」只有一个真源。
+      const noRepairNote = !canRepair && (it.status === 'fail' || it.status === 'warn')
+        ? `<span class="rt-no-repair" data-tip="${escapeHtml(it.detail || '本项没有自动修复路径')}">暂无一键修复</span>`
+        : '';
       const fixed = repairedSet.has(it.id) && it.status === 'ok' ? '<span class="rt-fixed-badge" data-tip="本次会话已修复成功">已修复</span>' : '';
       const repairBtn = canRepair
         ? `<button type="button" class="btn btn-danger btn-small rt-repair-btn" data-rt-repair="${escapeHtml(it.repair.id)}" data-rt-name="${escapeHtml(it.repair.name || meta.name)}">一键修复</button>`
-        : (it.status === 'fail' ? '<span class="rt-no-repair" data-tip="微软官方已下架独立安装包，建议通过安装含 DirectX 9 的游戏补齐，或使用系统文件修复">暂无一键修复</span>' : '');
+        : noRepairNote;
       return `
       <div class="rt-item" data-id="${escapeHtml(it.id)}">
         <div class="rt-item-head">

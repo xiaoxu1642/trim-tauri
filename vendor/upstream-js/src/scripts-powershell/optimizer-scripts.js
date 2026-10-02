@@ -50,6 +50,27 @@ function edgePolicyItem(id, title, risk, valueName, regValue, desc) {
   };
 }
 
+// 策略型 QoS（DSCP）单进程取值构造器 —— 11 个字段与「按 Application Name 匹配」的组策略
+// 形态一致：DSCP 46 = Expedited Forwarding，Throttle Rate -1 = 不限速，其余为通配。
+// 进程名清单取自 RAINZ DBUG 3.5.0 的 `网络优化修复/2.QoS调整.bat` 原文（[A] 级：实测其脚本
+// 字节），Trim **未在本机复现过其效果**，故该项不登记 EFFECT_MAP（如实回落到「未验证」）。
+// 已知边界：LeagueClient.exe 是英雄联盟的客户端/大厅进程，对局进程不是它 —— 本条只覆盖大厅
+// 流量；未取得对局进程名的可靠证据前不擅自替换（§9.3 纪律①：不拿推断当实测）。
+function qosDscpValues(exe) {
+  return {
+    'Version': '"1.0"',
+    'Application Name': `"${exe}"`,
+    'Protocol': '"*"',
+    'Local Port': '"*"',
+    'Local IP': '"*"',
+    'Local IP Prefix Length': '"*"',
+    'Remote Port': '"*"',
+    'Remote IP': '"*"',
+    'Remote IP Prefix Length': '"*"',
+    'DSCP Value': '"46"',
+    'Throttle Rate': '"-1"'
+  };
+}
 // ==================== 选项目录 ====================
 // risk: low / medium / high；title 在卡片上显示；steps 为执行动作；restore 可选（有源还原）
 
@@ -204,6 +225,24 @@ const OPTIONS = [
           'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\NarakaBladepoint.exe\\PerfOptions': {
             'CpuPriorityClass': 'dword:00000003'
           }
+        })
+      }
+    ]
+  },
+  {
+    id: 'net_qos_dscp', group: '游戏与多媒体', title: '游戏 QoS 优先（DSCP 46）', risk: 'medium',
+    desc: '为 8 款竞技游戏的进程写入策略型 QoS（DSCP 46 / Expedited Forwarding），给这些进程的本机出向流量打上高优先标记。只改写标记、不改变本机带宽分配与上行上限；是否真被提速取决于沿途路由器与运营商是否尊重 DSCP（多数家庭网络不做区分）。',
+    steps: [
+      {
+        label: 'QoS 策略 DSCP=46（8 个游戏进程）', reg: regBlock({
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\VALORANT-Win64-Shipping.exe': qosDscpValues('VALORANT-Win64-Shipping.exe'),
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\FortniteClient-Win64-Shipping.exe': qosDscpValues('FortniteClient-Win64-Shipping.exe'),
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\DeltaForceClient-Win64-Shipping.exe': qosDscpValues('DeltaForceClient-Win64-Shipping.exe'),
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\NarakaBladepoint.exe': qosDscpValues('NarakaBladepoint.exe'),
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\LeagueClient.exe': qosDscpValues('LeagueClient.exe'),
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\TslGame.exe': qosDscpValues('TslGame.exe'),
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\cs2.exe': qosDscpValues('cs2.exe'),
+          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\QoS\\r5apex.exe': qosDscpValues('r5apex.exe')
         })
       }
     ]
@@ -1988,6 +2027,7 @@ const PROS_CONS = {
   'mmcss_optimize': { pros: '合并游戏高优先级与系统级增强：游戏调度优先级、GPU 优先级与低延迟标记一体化，画面更稳、输入延迟更低。', cons: '非标准调度参数在个别音频设备上可能不稳定，且可能抢占音频与后台资源。' },
   'mmcss_svc': { pros: '禁用 MMCSS 服务后多媒体调度开销减少。', cons: '音频/视频应用的 QoS 调度失效，可能引起爆音或音画不稳。' },
   'nara_prio': { pros: '为永劫无间等游戏进程设置高 CPU 优先级，降低游戏卡顿。', cons: '仅对特定游戏进程有效，固定高优先级可能挤占其他程序。' },
+  'net_qos_dscp': { pros: '为本机 8 款竞技游戏的进程流量打上 DSCP 46 高优先标记，供沿途网络设备识别。', cons: '只改标记不改带宽：多数家用路由器与运营商不区分 DSCP，此时没有任何实际效果；其中 LeagueClient.exe 是英雄联盟的客户端进程而非对局进程，覆盖不到对局流量。' },
   'disable_uac': { pros: '关闭 UAC 可消除频繁弹窗，减少提权流程干扰。', cons: '显著降低系统安全性，恶意程序更易获得高权限。' },
   'tf_gamemode': { pros: '开启游戏模式，系统优先保障游戏所需的 CPU/GPU 资源。', cons: '后台任务（更新/同步）可能被推迟，影响日常使用。' },
   'tf_gamebar': { pros: '关闭游戏栏后台捕获与 PresenceWriter，减少叠加层与遥测开销。', cons: '无法使用 Win+G 游戏栏的录屏与性能面板。' },
