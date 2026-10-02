@@ -25,10 +25,9 @@ src-tauri/gen/
 node_modules/
 dist/
 build-release/
-# dist-app/：便携版稳定运行入口（桌面符号链接 Trim.exe 指向此处的固定名 Trim.exe）。
-# 刻意与 build-release/ 分开：后者是发版前会被逐个清理旧产物的暂存区，链接指过去会在
-# 下一次发版断链（2026-10-02 启动解耦方案 v3 A2 裁定不合并这两个目录）。
-dist-app/
+# 桌面稳定运行入口 = build-release\Trim.exe（固定名，符号链接指它）。2026-10-02 用户裁定
+# dist-app 并入 build-release，两者不再分家；发版清理旧产物时这个文件名属「永不删」位，
+# 由 tools/check-desktop-entry.mjs 守着（链接断掉/文件被裁掉都会红）。
 
 # ==================== 本机临时件与日志 ====================
 *.log
