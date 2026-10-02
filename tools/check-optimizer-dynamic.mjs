@@ -23,6 +23,35 @@
 // 用法：node tools/check-optimizer-dynamic.mjs
 //   退出码 0 = 九条全绿；1 = 任一不符（无「只警告」档）。
 
+// ==================== 决策 D4 的结论：硬件条件门控（C3）已废弃 ====================
+// 十四项目对标方案 §5.8 估「硬件条件门控 2 人日」（Winhance 33 项硬件门控 /
+// RyTuneX 三家 GPU 分判）。R1-4b 于 2026-10-03 做了机械重算，结论是**不该做**，
+// 写在这里作为后续会话的依据 —— 别再按方案 §5.8 的旧估重新提这一轮。
+//
+// **重算口径**（纯静态读数据层，**不探测本机硬件** —— 探测会把「本机是什么」
+// 混进「设计上有没有差异」，而门控要回答的是后者）：
+// 四条硬件差异判据在 126 项的 steps/restore 全文里逐条匹配 ——
+//   H1 GPU 厂商分判 / H2 电池电源状态 / H3 硬件能力存在性 / H4 电源状态机分档
+//
+// **结果：8 项命中**（tf_gamebar · tf_gpu_latency · telemetry_optimize ·
+// tf_nvidia_telemetry · tf_usb_power · tf_dev_disable · tf_onedrive ·
+// privacy_permissions_tune），逐条复核后 **0 项**的硬件条件是该项生效的前提：
+//   · tf_nvidia_telemetry 步骤里全是 `NVIDIA Corporation` 键路径 —— 那是**写入目标**，
+//     不是「有 N 卡才生效」的前置条件。无 N 卡的机器上这些键压根不存在，
+//     `New-Item -Force` 建出来也是空写，没有副作用也没有收益（正确形态是「灰化 +
+//     说明本机不适用」，不是硬跑）。
+//   · tf_dev_disable 的 `Intel ME` / `AMD PSP` 是**待禁用的设备名清单**，同理。
+//   · tf_usb_power / tf_gpu_latency / tf_gamebar / privacy_permissions_tune /
+//     telemetry_optimize / tf_onedrive 的命中全是 `Suspend` / `Latency` / `Presence`
+//     / `Capability` 这些**普通英文词撞上正则**，与硬件门控无关。
+//
+// **所以 C3 废弃的真正理由**（比「空集」更强）：即便实现了门控，126 项里
+// **0 项**会因为「本机硬件不满足」而变成不可用 —— 门控表恒为空，侧表与门禁
+// 全是纯维护成本。唯一有真实价值的是上面第一条那类「目标不存在就别跑」，
+// 而那属于**步骤级存在性判定**，不是项级硬件门控，范围小得多。
+//
+// 判据若要复核，重跑 `.workbuddy/tmp/d4-recompute.cjs --twice`（确定性自检含在内）。
+
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
