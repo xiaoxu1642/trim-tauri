@@ -24,6 +24,7 @@ const REGISTRY = [
   { file: 'check-html-contract.mjs', reason: 'HTML 合同：内联 script 样本自检' },
   { file: 'check-cleanup-rule-contract.mjs', reason: '规则契约：37 条反例自检（既有范本）' },
   { file: 'check-elapsed-facts.mjs', reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
+  { file: 'check-optimizer-write-contract.mjs', reason: 'M2 写入坐标侧表：7 条样本自检（含 1 条应放行的干净样本，防判据变成「永远红」）' },
 ];
 
 let fail = 0;

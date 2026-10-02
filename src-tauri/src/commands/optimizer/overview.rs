@@ -184,6 +184,50 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
                 name: name.to_string(),
             });
         }
+        // 第四条分支：写入坐标侧表（M2 · B类「服务可回读」）。
+        //
+        // 为什么需要：v0.5.0 时`tf_svc_bulk`（65 个服务）/ `tf_drv_disable`（19 个）
+        // / `svc_bluetooth_disable` 等6 项的 steps 全是 `pwsh` 文本，`collect_checks`
+        // 不解析 pwsh ⇒ 返回空 vec ⇒ 上游 `if !checks.is_empty()` 跳过 ⇒ 体检恒显示
+        // 「未生效」⇒ 用户看到「立即执行」而不是「立即恢复」，会**重复施加同一批改动**。
+        // 这与 v2-M1 那个重复项 bug 是同一种形态：把「没检到」显示成「没有」。
+        //
+        // 原语零新增：R0-b 已建`service_start_type_is(name, expected)`，这里只是
+        // 把「服务名清单」从 pwsh 文本搬到侧表（`optimizer-writes.json`）让检测侧能读。
+        // 数据真源仍是 pwsh 文本 —— `tools/check-optimizer-write-contract.mjs` 逐项对拍两侧。
+        let opt_id = opt.get("id").and_then(Value::as_str).unwrap_or("");
+        if !opt_id.is_empty() && checks.is_empty() {
+            if let Some(spec) = write_spec_of(opt_id) {
+                for (expect, services) in spec.groups {
+                    for svc in *services {
+                        checks.push(Check {
+                            kind: "svcStart",
+                            hive: reg_hive("HKEY_LOCAL_MACHINE").unwrap(),
+                            subkey: String::new(),
+                            key: String::new(),
+                            is_dword: false,
+                            data: expect.to_string(),
+                            name: svc.clone(),
+                        });
+                    }
+                }
+                // 商店那 5 项由 `svc_bulk_append_store` 条件追加（RunParams.includeStore，
+                // 用户弹窗确认过才执行）。这里**刻意不生成断言** ——
+                // `check_optimized` 只知道「当前启动类型」，不知道「用户当时勾没勾商店」。
+                // 判成未生效会让没勾商店的用户永远看到「立即执行」，
+                // 判成已生效会让勾了商店的用户看不到还原入口。**两者都是谎报**。
+                //
+                // 正确形态是让它们显示为「部分生效」，那需要把 `check_optimized`
+                // 的返回从 `bool` 扩成三态（影响 4 个调用方 + 前端三处消费），
+                // 属 M2 的独立一批。清单本身在这里取出来**只为了不漂移**：
+                // 见 `check-optimizer-write-contract.mjs` 的「storeServices 必须与
+                // apply.rs 的 STORE_SERVICES 逐项一致」—— 清单烂掉时门禁会红。
+                let _ = spec.store_services;
+                //
+                // 为什么不静默：这里刻意留注释说明「为什么不判」，避免下一个读代码的
+                // 人以为这里漏了。
+            }
+        }
     }
     checks
 }

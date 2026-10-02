@@ -139,10 +139,140 @@ pub(super) fn security_degrade_of(option_id: &str) -> Option<Value> {
     map.get(option_id).cloned()
 }
 
+// ==================== 写入坐标侧表（M2 · 检测断言的数据源）====================
+//
+// 为什么单独成表：这些项的 `steps` 全是 `pwsh` 文本，检测侧（`overview.rs` 的
+// `collect_checks`）**不解析 pwsh**——它只认 `reg` / `service+disable` / `service+startType`
+// 三种形态。于是 `tf_svc_bulk`（65 个服务）、`tf_drv_disable`（19 个）等项
+// `collect_checks` 返回空 vec ⇒ 体检恒显示「未生效」⇒ 用户点详情看到的是
+// 「立即执行」而不是「立即恢复」，会**重复施加同一批改动**。
+//
+// 为什么不写进 `optimizer-runtime.json`：那份与 `vendor/upstream-js/optimizer-scripts.js`
+// 的 OPTIONS 逐字段对拍（`check-data-parity` P2），往里加字段必判红。姿势同
+// `optimizer-scope.json` / `optimizer-security.json`：按 id 挂、缺键宽松、
+// `include_str!` 编译内嵌。
+//
+// **本表是单源数据，不进 `check-data-parity` 双源体系**（`_comment` 里也写了）。
+// 它是「执行侧写什么」的镜像，真源始终是 `optimizer-runtime.json` 的 pwsh 文本——
+// `tools/check-optimizer-write-contract.mjs` 逐项对拍两侧，改一处忘另一处即红。
+pub(super) const WRITES_JSON: &str = include_str!("../../../data/optimizer-writes.json");
+
+/// 某项的写入坐标：期望的服务启动类型 + 服务清单。
+///
+/// `store_services` 单独返回而不是并进 `services`：那5 个商店服务由
+/// `apply.rs::svc_bulk_append_store` **条件追加**（用户弹窗确认过才执行）。
+/// 并进 `services` 会让「没勾商店的用户」永远判未生效 —— 那5 项本来就没被禁用过。
+/// 某项的写入坐标：按「期望启动类型」分组的断言清单。
+///
+/// **为什么按组而不是一项一个 `expectStart`**：`tf_svc_bulk` 只有**一步** pwsh，
+/// 里面却有三段不同期望值的写入 —— 基础 65 个服务 `Start=4`（禁用）、
+/// `wuauserv` `Start=3`（手动，保持更新可用）。按「一项一个期望值」建模会把
+/// 后一段判成错值（那正是门禁第一次跑就抓到的缺陷）。
+///
+/// `store_services` 单独返回而不是并进任何组：那 5 个商店服务由
+/// `apply.rs::svc_bulk_append_store` **条件追加**（用户弹窗确认过才执行）。
+/// 并进去会让「没勾商店的用户」永远判未生效 —— 那 5 项本来就没被禁用过。
+#[derive(Clone)]
+pub(super) struct WriteSpec {
+    /// (期望Start, 服务清单)
+    pub groups: &'static [(u32, &'static [String])],
+    pub store_services: &'static [String],
+}
+
+fn writes_table() -> &'static std::collections::HashMap<String, Value> {
+    static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let parsed: Value = serde_json::from_str(WRITES_JSON).expect("optimizer-writes.json 合法");
+        parsed
+            .get("items")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// 取某项的写入坐标；不在表里 = None（**不是**「没有写入」—— 是「检不出」，
+/// 调用方据此跳过而不是判未生效，见 `overview.rs::collect_checks`）。
+///
+/// 生命周期说明：服务名池与本函数的结果都活在各自的 `OnceLock` 里（进程级），
+/// 所以 `&'static [String]` 借用成立，**不需要 `Box::leak`**（那会让每次热路径调用
+/// 都真正泄漏一份，虽然被 OnceLock 挡住只泄漏一次，但读代码的人会误以为有泄漏风险）。
+pub(super) fn write_spec_of(option_id: &str) -> Option<WriteSpec> {
+    static CACHE: OnceLock<std::collections::HashMap<String, WriteSpec>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        let table = writes_table();
+        // 服务名池：一次建好、按 "<id>\u{1}g<组序>" / "<id>\u{1}store" 取
+        static POOL: OnceLock<std::collections::HashMap<String, Vec<String>>> = OnceLock::new();
+        let pool: &'static std::collections::HashMap<String, Vec<String>> =
+            POOL.get_or_init(|| {
+                let mut m = std::collections::HashMap::new();
+                for (pid, pv) in table.iter() {
+                    if let Some(groups) = pv.get("groups").and_then(Value::as_array) {
+                        for (gi, g) in groups.iter().enumerate() {
+                            if let Some(arr) = g.get("services").and_then(Value::as_array) {
+                                m.insert(
+                                    format!("{pid}\u{1}g{gi}"),
+                                    arr.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(arr) = pv.get("storeServices").and_then(Value::as_array) {
+                        m.insert(
+                            format!("{pid}\u{1}store"),
+                            arr.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                        );
+                    }
+                }
+                m
+            });
+        // groups 池同样进程级：借用的是 pool 里的 Vec，寿命与进程一致
+        static GROUPS: OnceLock<std::collections::HashMap<String, Vec<(u32, &'static [String])>>> =
+            OnceLock::new();
+        let groups_map: &'static std::collections::HashMap<String, Vec<(u32, &'static [String])>> =
+            GROUPS.get_or_init(|| {
+                let mut m = std::collections::HashMap::new();
+                for (id, v) in table.iter() {
+                    let Some(arr) = v.get("groups").and_then(Value::as_array) else { continue };
+                    let groups: Vec<(u32, &'static [String])> = arr
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(gi, g)| {
+                            let expect = g.get("expectStart").and_then(Value::as_u64)? as u32;
+                            let list: &'static [String] = pool
+                                .get(&format!("{id}\u{1}g{gi}"))
+                                .map(|v| v.as_slice())
+                                .unwrap_or(&[]);
+                            if list.is_empty() { return None; }
+                            Some((expect, list))
+                        })
+                        .collect();
+                    if !groups.is_empty() {
+                        m.insert(id.clone(), groups);
+                    }
+                }
+                m
+            });
+        groups_map
+            .iter()
+            .map(|(id, groups)| {
+                let store: &'static [String] = pool
+                    .get(&format!("{id}\u{1}store"))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                (
+                    id.clone(),
+                    WriteSpec { groups: groups.as_slice(), store_services: store },
+                )
+            })
+            .collect()
+    });
+    map.get(option_id).cloned()
+}
+
 /// 本机确有备份的退役项。备份结构异常或 `values` 为空的条目按「没有备份」处理——
 /// 列出来只会给用户一个点了不会成功的按钮。
-pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
-    retired_items()
+pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {    retired_items()
         .iter()
         .filter_map(|i| {
             let id = i["id"].as_str()?;

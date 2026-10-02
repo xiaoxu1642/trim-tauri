@@ -1095,3 +1095,74 @@ use super::restore_point::*;
         // 反向：现存的 low 项必须找得到，否则「未知即拒」的断言没有对照
         assert!(options().iter().any(|o| o.get("id").and_then(|v| v.as_str()) == Some("perf_wu_pause")));
     }
+
+    /// M2 · B 类：6 项「写服务启动类型但检测不出」的项必须真能产出断言。
+    ///
+    /// v0.5.0 的形态：这 6 项的 `steps` 全是 `pwsh` 文本，`collect_checks` 不解析 pwsh
+    /// 所以返回空 vec，上游 `if !checks.is_empty()` 跳过，体检恒显示「未生效」，
+    /// 用户点详情看到「立即执行」而不是「立即恢复」，会**重复施加同一批改动**。
+    /// 与 v2-M1 那个重复项 bug 同一种形态：把「没检到」显示成「没有」。
+    #[test]
+    fn m2_服务类盲区项现在能产出断言() {
+        // (id, 期望的服务断言条数下限)
+        for (id, min_checks) in [
+            ("tf_svc_bulk", 70), // 65 基础 + wuauserv 手动 + 5 商店段
+            ("tf_drv_disable", 19),
+            ("svc_connected_devices_manual", 2),
+            ("svc_remote_connectivity_manual", 6),
+            ("svc_remote_registry_disable", 1),
+            ("svc_bluetooth_disable", 1),
+        ] {
+            let opt = find_option(id).unwrap_or_else(|| panic!("{id} 应存在于数据层"));
+            let checks = collect_checks(opt);
+            assert!(
+                checks.len() >= min_checks,
+                "{id} 只产出 {} 条断言（期望 >= {min_checks}）—— 检测侧仍读不到 pwsh 步骤的写入落点",
+                checks.len()
+            );
+            // 全部必须是 svcStart 形态，且 data 是合法启动类型
+            for c in &checks {
+                assert_eq!(c.probe().0, "svcStart", "{id} 产出了非 svcStart 断言：{:?}", c.probe());
+                let v: u32 = c
+                    .probe()
+                    .1
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{id} 的 data 不是十进制 u32：{:?}", c.probe()));
+                assert!(
+                    matches!(v, 2 | 3 | 4),
+                    "{id} 的期望 Start={v} 不是合法 win32 启动类型（AUTO=2/DEMAND=3/DISABLED=4）"
+                );
+            }
+        }
+    }
+
+    /// M2 侧表本身的自洽：每个登记项在数据层都存在，且服务清单非空。
+    ///
+    /// 侧表与 pwsh 文本的**逐项对拍**由 `tools/check-optimizer-write-contract.mjs`
+    /// 负责（跨语言，只能在 Node 侧做）；这条只钉 Rust 侧读得出来。
+    #[test]
+    fn m2_写入坐标侧表自洽() {
+        for id in [
+            "tf_svc_bulk",
+            "tf_drv_disable",
+            "svc_connected_devices_manual",
+            "svc_remote_connectivity_manual",
+            "svc_remote_registry_disable",
+            "svc_bluetooth_disable",
+        ] {
+            assert!(find_option(id).is_some(), "侧表登记了 {id} 但数据层没有它（退役了？）");
+            let spec = write_spec_of(id).unwrap_or_else(|| panic!("{id} 不在写入坐标侧表里"));
+            let total: usize = spec.groups.iter().map(|(_, s)| s.len()).sum();
+            assert!(total > 0, "{id} 的侧表里没有任何服务");
+        }
+        // 不在表里的项返回 None（语义是「检不出」，不是「没有写入」）
+        assert!(write_spec_of("__不在表里的id__").is_none());
+        // 条件追加那批只对 tf_svc_bulk 存在；其余项该字段为空
+        let bulk = write_spec_of("tf_svc_bulk").unwrap();
+        assert!(!bulk.store_services.is_empty(), "tf_svc_bulk 缺条件追加的商店服务清单");
+        let bt = write_spec_of("svc_bluetooth_disable").unwrap();
+        assert!(
+            bt.store_services.is_empty(),
+            "svc_bluetooth_disable 不该有 store_services（只有 tf_svc_bulk 有条件追加）"
+        );
+    }
