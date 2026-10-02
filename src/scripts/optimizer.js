@@ -502,6 +502,34 @@
     'perf_windows_update_off' // v3.7.0 P1：彻底禁用 Windows 更新（安全补丁不再送达）
   ]);
 
+  // ==================== R0-c 服务启动类型修复入口 ====================
+  // v0.5.0 的 `svc_*_manual` 四项在执行链里只做了 `sc stop`（startType 字段从未被读取），
+  // 于是「服务被停、启动类型仍是 Automatic」，而数据层 label/desc 都写着
+  // 「不立即停止」「当前运行不受影响」。R0-a 已修好执行链（只改启动类型、不停服）。
+  //
+  // 但**存量受害者**（在 v0.5.0 期间点过这四项的用户）机器上服务仍处于被 stop 状态，
+  // 而检测侧判「未生效」⇒ 这四项**不会**进灰态 ⇒ 用户点开详情看到的是
+  // 「立即执行」而不是「立即恢复」，没有任何入口告诉他「你机器上的服务被停了」。
+  //
+  // 所以这里给一个**显式**修复入口：只对这四项显示，点击走已有的 `restoreOption`
+  // （预置 restore 步骤 = startType 'automatic'，R0-a 已让它真正生效）。
+  //
+  // 为什么是显式按钮而不是自动修：自动改系统状态而不问用户，就是本仓 §3 红线里
+  // 「绝不静默改机器」。按钮只在用户点开这一项的详情时出现，不主动弹。
+  const START_TYPE_REPAIR_IDS = new Set([
+    'svc_w32time_manual',
+    'svc_fdrespum_manual',
+    'svc_storsvc_manual',
+    'svc_xblauthmgr_manual'
+  ]);
+
+  /** 该项是否需要「修复服务启动类型」入口（仅这四项，且必须能还原） */
+  function needsStartTypeRepair(opt) {
+    if (!START_TYPE_REPAIR_IDS.has(opt.id)) return false;
+    // 必须有可用的 restore 步骤，否则按钮会指向一个空操作
+    return Array.isArray(opt.restore) && opt.restore.length > 0;
+  }
+
   // 判据集合必须与 Rust 侧 needs_high_risk_confirm 完全一致：手写清单 **或** 数据层自认 high。
   // 三个调用点（confirmHazard / 回执标记 / 批量预览）都得走它——只改确认不改「是否发回执」，
   // 等于后端开始要回执而前端不给，那 7 项会被静默锁死。
@@ -1079,6 +1107,7 @@
       <div class="opt-detail-mem" style="display:none"></div>
       <span class="model-picker-spacer"></span>
       <button class="btn btn-opt-ai opt-btn-ai">AI 生成优缺点</button>
+      <button class="btn btn-secondary opt-btn-repair" style="display:none" data-tip="把服务启动类型改回自动，并恢复被停止的服务">修复服务启动类型</button>
       <button class="btn btn-secondary opt-btn-restore">还原</button>
       <button class="btn btn-accent opt-btn-run">立即执行</button>`;
 
@@ -1122,6 +1151,17 @@
       runBtn.dataset.mode = 'run';
     }
     // 安全兜底提示条：在按钮态确定后渲染（notice 由上方分支生成）
+    // R0-c：若该项属 startType 修复范围，notice 补一条 v0.5.0 存量受害者提示。
+    // 不覆盖已有 notice（灰态项的还原提示更该优先），用追加。
+    const repairBtn = $('.opt-btn-repair');
+    if (needsStartTypeRepair(o)) {
+      repairBtn.style.display = '';
+      const svc = (o.steps || []).find(s => s && s.service);
+      const svcName = svc ? svc.service : '';
+      notice = (notice ? notice + '　' : '') +
+        '若你的机器上该服务当前是「已停止」，这是 v0.5.0 的一处缺陷所致（当时只停了服务、没改启动类型）。点「修复服务启动类型」可把' +
+        (svcName ? '「' + svcName + '」' : '该服务') + '启动类型改回自动并重新启动它。';
+    }
     const noticeEl = $('.opt-detail-notice');
     if (notice) {
       noticeEl.textContent = notice;
@@ -1260,6 +1300,33 @@
       const opt = activeOption;
       closeOptModal();
       await restoreOption(opt);
+    });
+
+    // R0-c 修复入口：把服务启动类型改回自动 + 重新启动服务。
+    // 走已有的 restoreOption（预置 restore 步骤 = startType 'automatic'，R0-a 已让它真正
+    // 生效且不再停服）。刻意不做「自动检测到就静默修」：静默改系统状态是本仓红线。
+    repairBtn.addEventListener('click', async () => {
+      const opt = activeOption;
+      if (!opt || !needsStartTypeRepair(opt)) return;
+      const svc = (opt.steps || []).find(s => s && s.service);
+      const svcName = svc ? svc.service : '该服务';
+      const go = await window.app.confirmDanger(
+        '修复服务启动类型',
+        '将把「' + svcName + '」的启动类型改回「自动」并重新启动它。' +
+        '若你确实想让它保持手动，请点「取消」并直接关闭本窗口。',
+        '修复', '取消',
+        '只影响这一个服务的启动类型，不改其他系统设置。'
+      );
+      if (!go) return;
+      repairBtn.disabled = true;
+      repairBtn.textContent = '修复中…';
+      closeOptModal();
+      const ok = await restoreOption(opt);
+      if (!ok) {
+        window.app?.toast?.('error', '修复未完成：' + svcName + ' 启动类型未能改回自动，请稍后重试或用 services.msc 手动处理');
+      } else {
+        window.app?.toast?.('success', '已修复：' + svcName + ' 启动类型已改回自动');
+      }
     });
     aiBtn.addEventListener('click', genAdviceActive);
   }

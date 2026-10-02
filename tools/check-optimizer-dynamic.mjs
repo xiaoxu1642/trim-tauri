@@ -18,9 +18,10 @@
 //      一卡至少两态、同一真实项不得被两卡抢、整卡档位不得低于成员最高档
 //   A8 D0 三侧覆盖契约：数据层 steps 的每个字段必须被「执行 / 检测 / 备份」三侧
 //      同时消费（详见下方块内注释）
+//   A9 服务启动类型修复入口（R0-c）：四项 svc_*_manual 的显式修复入口不许被静默删掉
 //
 // 用法：node tools/check-optimizer-dynamic.mjs
-//   退出码 0 = 八条全绿；1 = 任一不符（无「只警告」档）。
+//   退出码 0 = 九条全绿；1 = 任一不符（无「只警告」档）。
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -373,6 +374,82 @@ check(
   // ⑥ 覆盖率棘轮：数据层出现新字段时，三侧覆盖必须跟上。
   //    这条是本门禁的真正价值 —— v0.5.0 那 4 个盲区就是「扩库忘了扩检测器」。
   console.log(`   · D0 三侧覆盖矩阵：${[...STEP_FIELDS].sort().join(', ')}`);
+}
+
+// ---------------------------------------------------------------------------
+// A9 服务启动类型修复入口（R0-c）—— 四项 svc_*_manual 的「显式修复入口」不许被
+//   静默删掉。
+//
+//   为什么必须有这条：这四项在 v0.5.0 期间的存量受害者机器上，服务处于「已停止」
+//   而启动类型仍是 Automatic。检测侧判「未生效」⇒ 这四项**不会**进灰态 ⇒ 用户点开
+//   详情看到的是「立即执行」，没有任何入口告诉他「你的服务被停了」。R0-c 加的修复
+//   按钮是唯一的告知途径，删掉它就等于让存量受害者永远无法自查。
+//
+//   三件事必须同时成立：① 集合与数据层 startType 项**双向**一致（不能只查前端集合
+//   非空 —— 那会在四项被改名后依然绿）；② 每一项在数据层真有 startType 步骤；
+//   ③ 按钮与 notice 接线都在（否则是僵尸集合）。
+// ---------------------------------------------------------------------------
+{
+  const REPAIR_IDS = [
+    'svc_w32time_manual',
+    'svc_fdrespum_manual',
+    'svc_storsvc_manual',
+    'svc_xblauthmgr_manual',
+  ];
+
+  // ① 前端集合与「数据层里真有 startType 步骤的项」双向一致
+  const dataStartTypeIds = new Set();
+  for (const o of options) {
+    for (const s of (o.steps || [])) if (s && s.startType) { dataStartTypeIds.add(o.id); break; }
+  }
+  const jsBlock = (jsOpt.match(/const START_TYPE_REPAIR_IDS = new Set\(\[([\s\S]*?)\]\)/) || ['', ''])[1];
+  const jsIds = [...jsBlock.matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]).sort();
+  const dataIds = [...dataStartTypeIds].sort();
+
+  check(
+    jsIds.length > 0 && JSON.stringify(jsIds) === JSON.stringify(dataIds),
+    `A9.1 修复入口集合 ⇄ 数据层 startType 项（前端 ${jsIds.length} / 数据层 ${dataIds.length}）`,
+    jsIds.length === 0
+      ? '前端取不到 START_TYPE_REPAIR_IDS（结构变了要同步改这里的正则）'
+      : JSON.stringify(jsIds) !== JSON.stringify(dataIds)
+        ? `两侧不一致：JS [${jsIds.join(',')}] vs 数据层 [${dataIds.join(',')}] —— 数据层新增 startType 项却没修复入口，或前端留了僵尸 id`
+        : ''
+  );
+
+  // ② 每一项在数据层真有可用的 restore 步骤（restore 里也要有 startType，
+  //    否则「修复」按钮会指向一个空操作 —— 正是 v0.5.0 那个缺陷的翻版）
+  const bad = [];
+  for (const id of REPAIR_IDS) {
+    const o = options.find((x) => x.id === id);
+    if (!o) { bad.push(`${id} 不在数据层`); continue; }
+    const rs = Array.isArray(o.restore) ? o.restore : [];
+    if (!rs.some((s) => s && s.startType)) {
+      bad.push(`${id} 的 restore 没有 startType 步骤 —— 修复按钮会退化成空操作`);
+    }
+  }
+  check(bad.length === 0,
+    `A9.2 修复入口指向的 restore 步骤真实可用（${REPAIR_IDS.length} 项）`,
+    bad.join(' / '));
+
+  // ③ 五处接线都在。判据必须逐处独立取**互不包含**的字符串，且对同一文件的多处
+  //    出现要能区分「哪一处被删了」：早先用 includes('opt-btn-repair') 一处判全部，
+  //    删掉 `const repairBtn = $('.opt-btn-repair')` 后门禁仍绿 —— 因为 footer 的
+  //    HTML 串与事件绑定那句里都含同一子串。只查子串 = 查「这四个字出现过」，
+  //    不是查「接好了」。现在每条判据只匹配**唯一**的那一行。
+  const WIRES = [
+    ['集合定义', /const START_TYPE_REPAIR_IDS = new Set\(\[/],
+    ['按钮元素', /class="btn btn-secondary opt-btn-repair"/],
+    ['元素取用', /const repairBtn = \$\('\.opt-btn-repair'\);/],
+    ['显隐判据', /if \(needsStartTypeRepair\(o\)\)/],
+    ['事件绑定', /repairBtn\.addEventListener\('click'/],
+    ['notice 文案', /这是 v0\.5\.0 的一处缺陷所致/],
+  ];
+  const missingWires = WIRES.filter(([, re]) => !re.test(jsOpt)).map(([n]) => n);
+  check(missingWires.length === 0,
+    `A9.3 六处接线齐全（${WIRES.length} 处）`,
+    missingWires.length ? `缺：${missingWires.join(' / ')}` : '');
+
+  console.log(`   · R0-c 修复入口覆盖：${jsIds.join(', ') || '（空）'}`);
 }
 
 console.log(`\n${fail === 0 ? '门禁通过' : `${fail} 项未通过`}`);
