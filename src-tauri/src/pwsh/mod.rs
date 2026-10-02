@@ -916,7 +916,16 @@ mod tests {
 /// 为什么这两件事都挂在本模块：`cleanup_temp_scripts` 已在 lib.rs 的启动与退出两处接线，
 /// 而 `.reg` 备份同样是「跑一次 `.ps1` 留下的件」；给 `prune_reg_backups` 另开一条
 /// 启动钩子要改 lib.rs（越界），故并到同一个入口，按批次史实登记在交付说明里。
+/// 修剪入口的互斥（v3 B3 第 5 条）：显示后的 housekeeping 线程与退出钩子 `on_app_exit`
+/// 调的是同一个入口，两条路径同时在同一批文件上 lstat+remove，后到的那个会拿到一堆
+/// 「文件不存在」的假错误。压成「后到者等前一个跑完」即可；持锁方 panic 时取回内层值继续，
+/// 退出路径不能因为一次毒化就再也不清临时脚本。
+static TEMP_SWEEP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn cleanup_temp_scripts() {
+    let _guard = TEMP_SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut dirs = Vec::new();
     if let Ok(d) = paths::temp_script_dir() {
         dirs.push(d);

@@ -223,6 +223,57 @@ pub fn show_main_window_when_ready<R: Runtime>(app: &AppHandle<R>, cause: &str) 
         }
     }
     log::write_log("info", &format!("主窗口显示（触发: {cause}）"));
+    // v3 B3：显示动作落地之后才排队 housekeeping。真实首帧握手与 3s / 8s 两级兜底都经过
+    // 这个函数，所以渲染脚本白屏时清理照样会跑；下面的闩锁保证三条路径最多排队一次。
+    schedule_startup_housekeeping_once(app);
+}
+
+// ==================== 显示后一次性 housekeeping（v3 B2 / B3） ====================
+
+/// 启动回收任务的排队闩锁。只回答「本次进程有没有排过队」，不承载别的业务状态。
+#[derive(Default)]
+pub(crate) struct StartupHousekeeping {
+    scheduled: AtomicBool,
+}
+
+impl StartupHousekeeping {
+    /// 抢到唯一名额返回 true，重复调用返回 false。
+    /// 刻意做成不依赖运行时的纯方法：「首帧 + 3s 兜底 + 8s 兜底最多排队一次」这条
+    /// 判据要能在无窗口环境里断言（线程与定时器组合在建窗测试里跑不起来）。
+    fn try_schedule(&self) -> bool {
+        !self.scheduled.swap(true, Ordering::SeqCst)
+    }
+}
+
+/// 由 `show_main_window_when_ready` 在实际显示之后调用：把回收类磁盘 IO 挪出主线程建窗路径。
+/// 拿不到状态 = 启动更早就断了，这里不替它兜底（与首帧看门狗同一判断）。
+fn schedule_startup_housekeeping_once<R: Runtime>(app: &AppHandle<R>) {
+    let Some(state) = app.try_state::<StartupHousekeeping>() else {
+        return;
+    };
+    if !state.try_schedule() {
+        return;
+    }
+    std::thread::spawn(run_startup_housekeeping);
+}
+
+/// 执行体：只调用无 UI 依赖的回收函数 —— 不碰窗口材质、不改保护清单、不重读并覆盖用户
+/// 设置（v3 B3 第 4 条）。这四项都是「不做就永远回收不掉」的被动清理，延后到显示之后
+/// 不改变任何用户可见的初始状态。
+fn run_startup_housekeeping() {
+    log::write_log(
+        "debug",
+        "启动 housekeeping（显示后一次性）：日志 / 隔离件 / 网速报告 / 临时脚本",
+    );
+    log::prune_old_logs();
+    // 审查 M15/G4：隔离件（*.corrupt-*）此前没有任何回收路径
+    crate::security::prune_quarantined(&paths::app_data_dir());
+    // 审查 v3-L3：网速报告的 7 天 TTL 此前只在 save/list 两个入口被动触发，用户不再打开
+    // 网速页就永远回收不掉；与退出端（`on_app_exit` → `realtime::shutdown_sampler`）合成
+    // 完整生命周期。
+    commands::realtime::prune_reports();
+    // 与退出钩子共用 pwsh 层互斥：避免启动线程和 on_app_exit 同时修剪同一批临时脚本。
+    pwsh::cleanup_temp_scripts();
 }
 
 // ==================== 入口 ====================
@@ -471,7 +522,11 @@ pub fn run() {
                 .build()
                 .expect("main 窗口创建失败");
 
-            // ---------- 启动期一次性任务（D5 / 日志口径 / 临时件） ----------
+            // ---------- 启动期同步任务（v3 B1：首帧前必须落地的迁移与安全边界） ----------
+            // 只留「后续读写依赖它」的四项：老根迁移、名单文件迁移、配置语义迁移、
+            // 受保护路径清单。回收类 housekeeping 已挪进显示后一次性批次（v3 B2/B3）——
+            // 它们不改变窗口布局、保护清单或初始材质，没理由在主窗建窗前抢占磁盘 IO；
+            // 反过来把迁移也延后，就会出现「扫描读老根、清理写新根」的两份真相。
             if let Some(note) = paths::migrate_legacy_once() {
                 log::write_log("info", &note);
             }
@@ -481,14 +536,6 @@ pub fn run() {
             if let Some(note) = paths::migrate_list_files_once() {
                 log::write_log("info", &note);
             }
-            log::prune_old_logs();
-            // 审查 M15/G4：隔离件（*.corrupt-*）此前没有任何回收路径
-            crate::security::prune_quarantined(&paths::app_data_dir());
-            // 审查 v3-L3：网速报告的 7 天 TTL 此前只在 save/list 两个入口被动触发，
-            // 用户不再打开网速页就永远回收不掉。启动补这一行，与退出端
-            // （`on_app_exit` → `realtime::shutdown_sampler`）合成完整生命周期。
-            commands::realtime::prune_reports();
-            pwsh::cleanup_temp_scripts();
             appearance::migrate_bg_opacity_fog();
             // C 批安全地基：受保护路径清单补全（Electron 用 app.getPath 取 known folder，
             // 可能被 OneDrive/组策略重定向，纯环境变量推导覆盖不到）
@@ -544,6 +591,10 @@ pub fn run() {
                 shown: AtomicBool::new(false),
                 maximized,
             });
+            // v3 B3：housekeeping 的排队闩锁与 ShowState.shown 分开两份状态。
+            // shown 表示「显示调用抢到了名额」，不代表窗口真的画出来了；把它当业务状态
+            // 复用，白屏路径与兜底路径的清理会绑成同一个真相，很难判「到底排队了几次」。
+            app.manage(StartupHousekeeping::default());
 
             // 首帧看门狗：必须排在 manage(ShowState) 之后 —— 它读的就是这个状态。
             commands::app::start_boot_watchdog(app.handle().clone());
@@ -628,5 +679,89 @@ mod tests {
             builders, guarded,
             "建窗点数 {builders} ≠ with_browser_args 调用数 {guarded}：有窗口没透传浏览器参数（K4 的静默 hwnd=0x0）"
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_housekeeping_tests {
+    /// lib.rs 自身：用来把「首帧前同步 / 显示后回收」这条边界钉成常驻断言。
+    /// 之所以要数源码而不是跑运行时：这三条触发路径（真实首帧、3s 兜底、8s 兜底）
+    /// 都靠线程 + 定时器，无窗口环境里跑不出「排队了几次」，而 v2 方案恰恰是把它们
+    /// 混进首帧前才暴露出问题的。
+    const SELF: &str = include_str!("lib.rs");
+
+    /// 只取生产段（本测试模块以下不参与计数）：断言里写的字符串字面量本身含有被数的
+    /// 模式，整份文件一起扫会把自己算进接线数，红得莫名其妙。
+    fn prod() -> &'static str {
+        let cut = SELF
+            .find("mod startup_housekeeping_tests")
+            .expect("找不到本测试模块——断言的截断锚点变了");
+        &SELF[..cut]
+    }
+
+    /// setup 闭包体（`.setup(|app| {` 到第一个 `Ok(())` 之前）。
+    fn setup_body() -> &'static str {
+        let src = prod();
+        let start = src.find(".setup(|app| {").expect("没找到 setup 闭包——lib.rs 结构变了");
+        let end = src[start..].find("Ok(())").expect("没找到 setup 闭包结尾");
+        &src[start..start + end]
+    }
+
+    /// 三条显示路径最多排队一次：闩锁本身是纯逻辑，直接点名断言。
+    #[test]
+    fn housekeeping_latch_queues_at_most_once() {
+        let latch = super::StartupHousekeeping::default();
+        assert!(latch.try_schedule(), "首帧握手那条路径必须抢到唯一名额");
+        assert!(!latch.try_schedule(), "3s 兜底不得再排一次");
+        assert!(!latch.try_schedule(), "8s 兜底不得再排一次");
+    }
+
+    /// v3 B1/B2 的分界：回收类任务不许回到首帧前的同步路径，迁移与安全边界不许被挪走。
+    #[test]
+    fn only_migrations_and_safety_stay_before_show() {
+        let body = setup_body();
+        for name in [
+            "prune_old_logs",
+            "prune_quarantined",
+            "prune_reports",
+            "cleanup_temp_scripts",
+        ] {
+            assert!(!body.contains(name), "回收任务 {name} 回到了首帧前（v3 B2 的边界被改回去）");
+        }
+        for name in [
+            "migrate_legacy_once",
+            "migrate_list_files_once",
+            "migrate_bg_opacity_fog",
+            "configure_from_app",
+            "force_round_corners",
+            "apply_material",
+            "init_env",
+        ] {
+            assert!(body.contains(name), "首帧前必须完成的 {name} 不见了（v3 B1）");
+        }
+    }
+
+    /// 接线数量：调度点一处、临时脚本修剪两处（显示后 + 退出）、其余回收各一处。
+    /// 多出来的那份就是「第二真源」，与本仓 §5.16/§7.1 反复踩过的分叉同类。
+    #[test]
+    fn housekeeping_wiring_is_single_source() {
+        let src = prod();
+        assert_eq!(
+            src.matches("schedule_startup_housekeeping_once(app);").count(),
+            1,
+            "显示路径上的调度点必须恰好一处（定义行带泛型参数，不以此模式计入）"
+        );
+        assert_eq!(
+            src.matches("pwsh::cleanup_temp_scripts();").count(),
+            2,
+            "临时脚本修剪只允许「显示后 housekeeping」与「on_app_exit」两处接线"
+        );
+        for name in [
+            "log::prune_old_logs();",
+            "crate::security::prune_quarantined(",
+            "commands::realtime::prune_reports();",
+        ] {
+            assert_eq!(src.matches(name).count(), 1, "{name} 出现不止一处——回收口径出现第二真源");
+        }
     }
 }
