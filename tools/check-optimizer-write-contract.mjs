@@ -565,6 +565,125 @@ check(
   comment ? '' : '_comment 缺失',
 );
 
+// ======================================================================
+// A4/A5/A6（M4）：优化目录的键集白名单 + provenance 覆盖 + 签名 sidecar
+// ----------------------------------------------------------------------
+// 三条都是「别让它退化成摆设」的断言：
+//   A4 键集白名单（**双向**，见下方口径说明）
+//   A5 provenance 覆盖棘轮（只增不减）
+//   A6 签名 sidecar 存在且 alg 正确
+// ======================================================================
+
+// ---- A4. 键集白名单：双向 ----
+//
+// **为什么不能是 `deny_unknown_fields` 式的「字段集完全相等」**（M4 实测）：
+// `restore`94 项 / `restoreInferred` 55 项 / `dynamic` 2 项 / `steps` 125 项
+// **都是可选的** —— 要求字段集完全相等会立刻判红。所以口径是：
+//   · 出现的键 ⊆ 白名单（防拼错字段名 / 混进别域的键）
+//   · **必填键全都在**（id / group / title / risk 四项，缺任一即红）
+const OPT_KEYS = new Set([
+  'id', 'group', 'title', 'risk', 'desc', 'effect', 'pros', 'cons',
+  'steps', 'restore', 'restoreAvailable', 'restoreInferred', 'dynamic',
+]);
+const STEP_KEYS = new Set(['label', 'reg', 'pwsh', 'cmd', 'service', 'disable', 'startType']);
+const OPT_REQUIRED = ['id', 'group', 'title', 'risk'];
+const a4Problems = [];
+let optKeyCount = 0;
+for (const o of opts) {
+  const id = o.id || '(无 id)';
+  for (const k of Object.keys(o)) {
+    optKeyCount++;
+    if (!OPT_KEYS.has(k)) a4Problems.push(`优化项 ${id}: 未知顶层键「${k}」`);
+  }
+  for (const k of OPT_REQUIRED) {
+    if (o[k] === undefined) a4Problems.push(`优化项 ${id}: 缺必填键「${k}」`);
+  }
+  for (const [where, arr] of [['steps', o.steps], ['restore', o.restore]]) {
+    for (const [i, s] of (arr || []).entries()) {
+      for (const k of Object.keys(s)) {
+        optKeyCount++;
+        if (!STEP_KEYS.has(k)) a4Problems.push(`${id}.${where}[${i}]: 未知 step 键「${k}」`);
+      }
+      if (s.label === undefined) a4Problems.push(`${id}.${where}[${i}]: 缺 label（渲染层要显示它）`);
+    }
+  }
+}
+// 反向：白名单里的键是否**都**真的在用 —— 一个从没出现过的白名单项说明它已失效
+const seenOpt = new Set();
+for (const o of opts) {
+  for (const k of Object.keys(o)) seenOpt.add(k);
+  for (const arr of [o.steps, o.restore]) {
+    for (const s of arr || []) for (const k of Object.keys(s)) seenOpt.add(k);
+  }
+}
+const staleKeys = [...OPT_KEYS, ...STEP_KEYS].filter((k) => !seenOpt.has(k));
+if (staleKeys.length) {
+  a4Problems.push(`白名单里有从未出现的键（说明它已失效或是笔误）：${staleKeys.join(', ')}`);
+}
+check(
+  a4Problems.length === 0,
+  `A4. 优化目录键集双向对拍（${opts.length} 项 / ${optKeyCount} 个键：出现的 ⊆ 白名单 且 必填齐全 且 白名单无僵尸）`,
+  a4Problems.join('; '),
+);
+
+// ---- A5. provenance 覆盖棘线（只增不减）----
+const prov = JSON.parse(read('src-tauri', 'data', 'optimizer-provenance.json'));
+const provItems = prov.items || {};
+const PROV_KEYS = new Set(['sourceClass', 'why', 'reviewedAt']);
+const PROV_CLASSES = new Set(['builtin', 'measured', 'vendor']);
+const a5Problems = [];
+for (const [id, p] of Object.entries(provItems)) {
+  if (!opts.some((o) => o.id === id)) a5Problems.push(`provenance 有 ${id} 但数据层没有此项`);
+  for (const k of Object.keys(p)) {
+    if (!PROV_KEYS.has(k)) a5Problems.push(`${id}: 未知 provenance 键「${k}」`);
+  }
+  if (!PROV_CLASSES.has(p.sourceClass)) a5Problems.push(`${id}: sourceClass=${p.sourceClass} 不在 ${[...PROV_CLASSES].join('/')}`);
+  if (!p.why || String(p.why).length < 8) a5Problems.push(`${id}: why 太短（判据不可解释）`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(p.reviewedAt || '')) a5Problems.push(`${id}: reviewedAt 不是 YYYY-MM-DD`);
+}
+// 必覆盖：全部 high risk + 每个分组至少一项
+const highIds = opts.filter((o) => o.risk === 'high').map((o) => o.id);
+const uncoveredHigh = highIds.filter((id) => !provItems[id]);
+if (uncoveredHigh.length) {
+  a5Problems.push(`这 ${uncoveredHigh.length} 个 high risk 项没有 provenance（高危项必须可解释）→ ${uncoveredHigh.join(', ')}`);
+}
+const allGroups = [...new Set(opts.map((o) => o.group))];
+const uncoveredGroups = allGroups.filter(
+  (g) => !opts.some((o) => o.group === g && provItems[o.id]),
+);
+if (uncoveredGroups.length) {
+  a5Problems.push(`这 ${uncoveredGroups.length} 个分组一项 provenance 都没有 → ${uncoveredGroups.join(', ')}`);
+}
+const PROV_BASELINE = 24; // 2026-10-03 首版：14 个 high + 10 个分组代表
+if (Object.keys(provItems).length < PROV_BASELINE) {
+  a5Problems.push(
+    `provenance 覆盖缩水：${Object.keys(provItems).length} < 基线 ${PROV_BASELINE} —— 若确有项退役，显式下调 PROV_BASELINE 并在提交信息里说明`,
+  );
+}
+check(
+  a5Problems.length === 0,
+  `A5. provenance 覆盖：${Object.keys(provItems).length} 项（high ${highIds.length} 全覆盖 / ${allGroups.length} 分组全覆盖 / 基线 ${PROV_BASELINE} 只增不减）`,
+  a5Problems.join('; '),
+);
+
+// ---- A6. 签名 sidecar 存在且 alg 正确 ----
+const a6Problems = [];
+let sidecar = null;
+try {
+  sidecar = JSON.parse(read('src-tauri', 'data', 'optimizer-runtime.json.sig.json'));
+} catch (e) {
+  a6Problems.push(`读不到 optimizer-runtime.json.sig.json（${e.message}）—— 优化目录必须带签名（M4）`);
+}
+if (sidecar) {
+  if (sidecar.alg !== 'ed25519') a6Problems.push(`sidecar alg=${sidecar.alg}，应为 ed25519`);
+  if (!sidecar.sig || String(sidecar.sig).length < 80) a6Problems.push('sidecar 的 sig 字段缺失或过短');
+}
+check(
+  a6Problems.length === 0,
+  'A6. 优化目录签名 sidecar 在位且 alg=ed25519',
+  a6Problems.join('; '),
+);
+
 console.log('');
 if (fail > 0) {
   console.error(`写入坐标侧表门禁失败 ${fail} 项。`);
@@ -661,7 +780,55 @@ console.log('✓ 写入坐标侧表：键集 / 双向对拍 / 启动类型 / 商
     if (hit !== c.expectHit) findings.push(`${c.name}（期望${c.expectHit ? '报红' : '放行'}，实际${hit ? '红' : '绿'}）`);
   }
 
-  const total = cases.length;
+  // 第二批（M4 新增 A4/A5/A6 三组）：对**同一份**判据跑违规样本。
+  // 与上面分开是因为这三组的判据形态不同（键集/覆盖/文件存在），共用一个
+  // 「找出问题」的小函数即可，但样本要能独立表达「哪些字段是坏的」。
+  const a4OptKeys = new Set(OPT_KEYS);
+  const a4StepKeys = new Set(STEP_KEYS);
+  const a4Check = (opt) => {
+    const bad = [];
+    for (const k of Object.keys(opt)) if (!a4OptKeys.has(k)) bad.push(k);
+    for (const k of OPT_REQUIRED) if (opt[k] === undefined) bad.push(`缺${k}`);
+    for (const arr of [opt.steps, opt.restore]) {
+      for (const s of arr || []) {
+        for (const k of Object.keys(s)) if (!a4StepKeys.has(k)) bad.push(`step.${k}`);
+        if (s.label === undefined) bad.push('step.缺label');
+      }
+    }
+    return bad;
+  };
+  const a5Check = (opt, provMap) => {
+    const bad = [];
+    if (opt.risk === 'high' && !provMap[opt.id]) bad.push('high 项无 provenance');
+    return bad;
+  };
+  const m4Cases = [
+    ['A4 未知顶层键',
+      a4Check({ id: 'x', group: 'g', title: 't', risk: 'low', bogusField: 1 }).length > 0,
+      true],
+    ['A4 缺必填键',
+      a4Check({ id: 'x', group: 'g', title: 't' }).length > 0,
+      true],
+    ['A4 未知 step 键',
+      a4Check({ id: 'x', group: 'g', title: 't', risk: 'low', steps: [{ label: 'a', bogus: 1 }] }).length > 0,
+      true],
+    ['A4 干净样本应放行',
+      a4Check({ id: 'x', group: 'g', title: 't', risk: 'low', steps: [{ label: 'a' }] }).length === 0,
+      true],
+    ['A5 high 项无 provenance',
+      a5Check({ id: 'x', risk: 'high' }, {}).length > 0,
+      true],
+    ['A5 high 项有 provenance 应放行',
+      a5Check({ id: 'x', risk: 'high' }, { x: { sourceClass: 'builtin' } }).length === 0,
+      true],
+    ['A6 sidecar 非对象',
+      (() => { try { const s = JSON.parse('{bad'); return s.alg !== 'ed25519'; } catch { return true; } })(),
+      true],
+  ];
+  for (const [name, got, want] of m4Cases) {
+    if (got !== want) findings.push(`M4 自检「${name}」判据行为不符预期`);
+  }
+  const total = cases.length + m4Cases.length;
   const ok = findings.length === 0;
   console.log(`${ok ? '✓' : '✗'} 自检：${total} 条已知样本（含 1 条**应当放行**的干净样本），判据行为全对 ${total - findings.length} 条`);
   if (!ok) {

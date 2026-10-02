@@ -32,13 +32,47 @@ const FALLBACK = path.join(ROOT, 'src', 'scripts', 'cleanup-fallback.generated.j
 const PRIV_KEY = path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
 
 function canonicalBodyText(parsed) {
-  // 键序必须等于原文件解析插入序（JS 对象保序），与 Rust 侧逐键重建口径一致
+  // ⚠️ **数组顶层必须原样序列化**（M4 实测踩到）：`Object.entries(array)`枚举出的是
+  // **索引键**，所以下面那段「逐键重建」会把 `[{...}]` 变成 `{"0":{...}}` ——
+  // 与 Rust 侧 `serde_json::to_string(&array)` 逐字节不同，签名永远对不上。
+  // 症状极具迷惑性：Node 侧「签名成功」、Rust 侧「验签失败，内容可能被篡改」。
+  if (Array.isArray(parsed)) {
+    return JSON.stringify(parsed);
+  }
+  // 对象顶层：键序必须等于原文件解析插入序（JS 对象保序），与 Rust 侧逐键重建口径一致
   const body = {};
   for (const [k, v] of Object.entries(parsed)) {
     if (k === '_sig') continue;
     body[k] = v;
   }
   return JSON.stringify(body);
+}
+
+/**
+ * 把 `_sig` 挂到解析结果上，返回实际写出的路径。
+ *
+ * **顶层是数组时不能挂**（M4 实测踩到）：`optimizer-runtime.json` 的顶层是
+ * 裸数组，`arr._sig = {...}` 静默无效 —— 那是给数组对象加了个普通属性，而
+ * `JSON.stringify` **不序列化**数组的非索引属性，于是「已签名」打印出来了、
+ * 文件里却一个字节都没变。本仓最讨厌的一类假绿。
+ *
+ * 也不能「追加一个 `{"_sig":…}` 元素」—— 那会污染 `options()` 的迭代。
+ * 所以数组形态用**独立 sidecar**：`<file>.sig.json`。
+ */
+function attachSig(parsed, sigObj) {
+  if (Array.isArray(parsed)) {
+    const sidecar = `${RULES}.sig.json`;
+    fs.writeFileSync(
+      sidecar,
+      `${JSON.stringify({ alg: 'ed25519', sig: sigObj.sig, covers: path.basename(RULES) }, null, 2)}\n`,
+      'utf8',
+    );
+    return sidecar;
+  }
+  delete parsed._sig;
+  parsed._sig = sigObj;
+  fs.writeFileSync(RULES, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+  return RULES;
 }
 
 function sign() {
@@ -51,11 +85,11 @@ function sign() {
   const sig = crypto
     .sign(null, Buffer.from(bodyText, 'utf8'), crypto.createPrivateKey(fs.readFileSync(PRIV_KEY, 'utf8')))
     .toString('base64');
-  // _sig 追加在键序末尾（与旧签名文件形态一致）；整体重写为 2 空格缩进 + 末尾换行
-  delete parsed._sig;
-  parsed._sig = { alg: 'ed25519', sig };
-  fs.writeFileSync(RULES, JSON.stringify(parsed, null, 2) + '\n', 'utf8');
-  console.log(`已签名: ${RULES}`);
+  // _sig 追加在键序末尾（与旧签名文件形态一致）；整体重写为 2 空格缩进 + 末尾换行。
+  // 顶层是数组时改走 sidecar（见 attachSig 的注释）——`arr._sig = …` 静默无效，
+  // 那是「打印了已签名但文件没变」的假绿。
+  const written = attachSig(parsed, { alg: 'ed25519', sig });
+  console.log(`已签名: ${written}`);
 }
 
 function genFallback() {

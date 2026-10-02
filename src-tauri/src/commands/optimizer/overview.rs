@@ -613,6 +613,11 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                 if let Some(sd) = security_degrade_of(sid) {
                     map.insert("securityDegrade".into(), sd);
                 }
+                // provenance 标签（M4）：判据来源 + 一句话依据。前端在高危项详情里
+                // 展示「为什么这条被判定为高危」，而不是让用户自己猜。
+                if let Some(pv) = provenance_of(sid) {
+                    map.insert("provenance".into(), pv);
+                }
             }
             tag_exec_modes(&mut row);
             row

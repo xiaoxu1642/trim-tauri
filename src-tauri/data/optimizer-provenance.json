@@ -1,0 +1,126 @@
+{
+  "_comment": "优化项 provenance 侧表（M4 · 借 Winaero 的可识别诉求：UI 上给高危项一个可解释的标记，而不是只靠 risk 字段暗示）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js/optimizer-scripts.js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。姿势同 optimizer-scope.json / optimizer-security.json：按 id 挂、include_str! 编译内嵌、缺键按「无 provenance」处理。  sourceClass 语义：builtin=按 Windows 公开机制推导 / measured=本机实测 / vendor=厂商公开文档。 覆盖基线（tools/check-optimizer-write-contract.mjs 的 A4 组钉住，只增不减）：全部 risk=high 项 + 每分组至少一项。",
+  "schemaVer": 1,
+  "items": {
+    "disable_uac": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_ifeo_perf": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_ifeo_wipe": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_svc_bulk": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_drv_disable": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_defender": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_dev_disable": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_dev_audio": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_dev_printer": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_appx": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_onedrive": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_windows_update_off": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_vbs_off": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "perf_exploit_protection_off": {
+      "sourceClass": "builtin",
+      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_ntfs": {
+      "sourceClass": "builtin",
+      "why": "启动与响应 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_nvidia_telemetry": {
+      "sourceClass": "builtin",
+      "why": "显卡优化 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "audio_disable_enhancements": {
+      "sourceClass": "builtin",
+      "why": "音频优化 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "desktop_show_ext": {
+      "sourceClass": "builtin",
+      "why": "桌面体验 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tasks_disable_defrag": {
+      "sourceClass": "builtin",
+      "why": "任务调度 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "peripheral_inactive_scroll": {
+      "sourceClass": "builtin",
+      "why": "外设调优 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "privacy_permissions_tune": {
+      "sourceClass": "builtin",
+      "why": "隐私防护 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "tf_svc_extra5": {
+      "sourceClass": "builtin",
+      "why": "系统服务 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "power_aspm_off": {
+      "sourceClass": "builtin",
+      "why": "系统调校 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    },
+    "edge_hide_firstrun": {
+      "sourceClass": "builtin",
+      "why": "浏览器优化 分组的代表项（该组 steps 最多，判据最复杂）",
+      "reviewedAt": "2026-10-03"
+    }
+  }
+}

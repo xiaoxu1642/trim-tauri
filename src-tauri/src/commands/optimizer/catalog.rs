@@ -14,9 +14,23 @@ pub(super) const OPTIONS_JSON: &str = include_str!("../../../data/optimizer-runt
 /// 哨兵步骤脚本（仅用于提取与 JS buildScript 完全一致的前置 preamble 段）
 pub(super) const BUILD_SENTINEL: &str = include_str!("../../../ps/optimizer_build.ps1");
 
+/// 优化项目录。**装载前先验 ed25519 签名**（M4）。
+///
+/// fail-closed：验签失败时返回**空 vec**（不是「返回未校验的数据」）。调用方看到
+/// 的是「优化目录不可用」这一条明确事实，而不是「126 项都生效了但一个都没验过」。
+/// 优化项是**会改用户系统**的目录 —— 未校验就装载等于把「数据文件被换掉」这件事
+/// 变成静默生效的劫持面。
 pub(super) fn options() -> &'static Vec<Value> {
     static OPTS: OnceLock<Vec<Value>> = OnceLock::new();
-    OPTS.get_or_init(|| serde_json::from_str(OPTIONS_JSON).expect("optimizer-runtime.json 合法"))
+    OPTS.get_or_init(|| {
+        if let Err(reason) = verify_optimizer_signature() {
+            // 不 panic（panic 会把整个应用带崩，而「优化项不可用」不该阻断磁盘清理等
+            // 无关域），也不放行（放行等于没验签）。
+            crate::engine::log::write_log("error", &format!("优化目录签名校验失败，已拒绝装载: {reason}"));
+            return Vec::new();
+        }
+        serde_json::from_str(OPTIONS_JSON).expect("optimizer-runtime.json 合法")
+    })
 }
 
 pub(super) fn find_option(id: &str) -> Option<&'static Value> {
@@ -123,6 +137,48 @@ pub(super) fn apply_scope(option_id: &str) -> &'static str {
 // 是开更新、`EnableLUA=1` 是开 UAC，都不算降级）。这里**只读表、不重算** ——
 // 同一判据两份实现必然漂移，那是本仓反复踩过的坑。
 pub(super) const SECURITY_JSON: &str = include_str!("../../../data/optimizer-security.json");
+
+// ==================== provenance 侧表（M4）====================
+//
+// 借 Winaero 的可识别诉求：**高危项在 UI 上要有一个可解释的标记**，而不是只靠
+// `risk: "high"` 暗示「这个会改系统」。trim 不用竞品的功能名后缀做法，用数据字段：
+// `sourceClass`（判据来源）+ `why`（凭什么这么判）+ `reviewedAt`（复核日期）。
+//
+// 姿势同 `optimizer-security.json`：按 id 挂、缺键宽松（缺 = 无 provenance，
+// **不是**「没有依据」—— 覆盖率棘轮在 `check-optimizer-write-contract.mjs` 的 A5 组）。
+pub(super) const PROVENANCE_JSON: &str = include_str!("../../../data/optimizer-provenance.json");
+
+/// 某项的 provenance；不在表里 = None
+pub(super) fn provenance_of(option_id: &str) -> Option<Value> {
+    static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        let parsed: Value =
+            serde_json::from_str(PROVENANCE_JSON).expect("optimizer-provenance.json 合法");
+        parsed
+            .get("items")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    });
+    map.get(option_id).cloned()
+}
+
+/// 优化目录的 ed25519 签名（M4）。**在装载期验一次**，不是每次读都验。
+///
+/// 为什么不每次读都验：签名的对象是**编译期内嵌的**那份 JSON
+/// （`OPTIONS_JSON` 是 `include_str!`），运行期没人能改它 —— 验一次就够。
+/// 真正的威胁是「构建产物里的数据文件被换掉」，那在 `include_str!` 的时点就定了。
+///
+/// ⚠️ **验签失败不许降级放行**：返回 `Err` 让 `options()` 走不到数据，
+/// 调用方看到的是「优化目录不可用」而不是「126 项全都没校验过」。
+pub(super) fn verify_optimizer_signature() -> Result<(), String> {
+    static ONCE: OnceLock<Result<(), String>> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let side = include_str!("../../../data/optimizer-runtime.json.sig.json");
+        crate::engine::rules_signature::verify_array_text(OPTIONS_JSON, side)
+    })
+    .clone()
+}
 
 /// 安全降级项的元信息（`level` / `why` / `writes` / `rules`）；不在表里 = 不是降级项
 pub(super) fn security_degrade_of(option_id: &str) -> Option<Value> {

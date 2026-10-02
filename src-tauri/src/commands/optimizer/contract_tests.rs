@@ -1750,3 +1750,77 @@ let ov = include_str!("overview.rs");
              不一致时备份已被清掉，用户失去唯一的还原依据"
         );
     }
+
+    /// M4：`options()` 在签名失效时**返回空 vec**（fail-closed），且不 panic。
+    ///
+    /// 为什么这条重要：优化项是**会改用户系统**的目录。签名失效时
+    /// · 返回未校验的数据 ⇒ 相当于没验签（「数据文件被换掉」变成静默劫持）
+    /// · panic ⇒ 整个应用崩，磁盘清理等无关域一起陪葬
+    /// 只有「返回空 + 写 error 日志」是对的。
+    ///
+    /// ⚠️ 本条用**源码结构断言**而不是行为断言：真要造出「验签失败的进程内状态」
+    /// 需要把公钥换掉再重启 lib 静态状态，`OnceLock` 已经缓存过了。
+    /// 结构断言守的是「失败分支是 return Vec::new() 而不是放行 / 不是 panic」——
+    /// 那正是会被改坏的地方。
+    #[test]
+    fn m4_优化目录装载必须fail_closed() {
+        let src = include_str!("catalog.rs");
+        let fn_at = src
+            .find("pub(super) fn options()")
+            .expect("找不到 options()");
+        let rest = &src[fn_at..];
+        let end = rest.find("\n}").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("verify_optimizer_signature"),
+            "options() 没有调verify_optimizer_signature —— 优化目录未验签就装载"
+        );
+        assert!(
+            body.contains("return Vec::new()"),
+            "验签失败必须返回空 vec（fail-closed），不能放行未校验的数据"
+        );
+        assert!(
+            !body.contains("panic!") && !body.contains("unwrap()"),
+            "options() 里出现 panic/unwrap —— 验签失败会把整个应用带崩（磁盘清理等无关域陪葬）"
+        );
+        // 验签函数本身必须走 fail-closed 的 verify_array_text（不是「有 sidecar 就算过」）
+        let vf_at = src
+            .find("pub(super) fn verify_optimizer_signature()")
+            .expect("找不到 verify_optimizer_signature()");
+        let vbody = &src[vf_at..];
+        let vend = vbody.find("\n}").unwrap_or(vbody.len());
+        assert!(
+            vbody[..vend].contains("verify_array_text"),
+            "verify_optimizer_signature 没调 verify_array_text"
+        );
+    }
+
+    /// M4：provenance 侧表与响应侧的接线。
+    #[test]
+    fn m4_provenance接线完整() {
+        // 侧表可读且覆盖到位
+        assert!(
+            verify_optimizer_signature().is_ok(),
+            "优化目录签名必须在本机验签通过（私钥在 ~/.trim-signing）"
+        );
+        let high = options().iter().filter(|o| o.get("risk").and_then(|v| v.as_str()) == Some("high"));
+        let high_ids: Vec<String> = high
+            .map(|o| o.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+            .collect();
+        assert!(high_ids.len() >= 5, "high risk 项数异常（{}）", high_ids.len());
+        for id in &high_ids {
+            assert!(
+                provenance_of(id).is_some(),
+                "high risk 项 {id} 没有 provenance —— 高危项必须可解释（A5 组会红）"
+            );
+        }
+        // 不在表里的项返回 None（语义是「无 provenance」，不是「没有依据」）
+        assert!(provenance_of("__不在表里的id__").is_none());
+
+        // 响应侧接线：optimizer_list 必须把 provenance 注入每行
+        let ov = include_str!("overview.rs");
+        assert!(
+            ov.contains("provenance_of(sid)") && ov.contains("\"provenance\".into()"),
+            "optimizer_list 没有把 provenance 注入响应行 —— 建了侧表却没接线"
+        );
+    }

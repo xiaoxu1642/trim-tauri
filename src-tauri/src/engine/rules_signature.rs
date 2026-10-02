@@ -140,6 +140,57 @@ pub fn verify_rules_text(text: &str) -> Result<(), String> {
     }
 }
 
+/// 取**数组顶层**规则文件的规范化签名文本（M4 · `optimizer-runtime.json`）。
+///
+/// 与 [`canonical_body_text`] 的区别：后者要求根是对象（剥掉对象里的 `_sig`），
+/// 而 `optimizer-runtime.json` 的根是**裸数组** —— 签名不在文件里，而在
+/// **sidecar** `<file>.sig.json` 里（见 `tools/sign-cleanup-rules.mjs` 的 `attachSig`：
+/// `arr._sig = …` 静默无效，`JSON.stringify` 不序列化数组的非索引属性，
+/// 那是「打印了已签名但文件没变」的假绿）。
+pub fn canonical_array_text(parsed: &Value) -> Option<String> {
+    if !parsed.is_array() {
+        return None;
+    }
+    serde_json::to_string(parsed).ok()
+}
+
+/// 校验数组顶层规则文件 + 它的 sidecar 签名（M4）。
+///
+/// `sidecar_text` 是 `<file>.sig.json` 的全文。**两个文件必须成对存在** ——
+/// 只有正文没有 sidecar 时返回 `Err`（fail-closed），绝不「没签名就算过」。
+pub fn verify_array_text(text: &str, sidecar_text: &str) -> Result<(), String> {
+    let parsed: Value =
+        serde_json::from_str(text).map_err(|_| "JSON 解析失败".to_string())?;
+    if !parsed.is_array() {
+        return Err("规则文件根不是 JSON 数组".to_string());
+    }
+    let side: Value = serde_json::from_str(sidecar_text)
+        .map_err(|_| "签名 sidecar 不是合法 JSON".to_string())?;
+    if let Some(alg) = side.get("alg") {
+        if js_truthy(alg) && alg.as_str() != Some("ed25519") {
+            return Err(format!("不支持的签名算法: {}", js_to_string(alg)));
+        }
+    }
+    let sig_b64 = side
+        .get("sig")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "签名 sidecar 缺少 sig 字段，已拒绝".to_string())?;
+    let body =
+        canonical_array_text(&parsed).ok_or_else(|| "签名数据规范化失败".to_string())?;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64.as_bytes())
+        .map_err(|_| "签名数据解码失败".to_string())?;
+    let key = verifying_key().map_err(|e| format!("签名校验异常: {e}"))?;
+    let arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+        "签名校验失败，内容可能被篡改，已拒绝".to_string()
+    })?;
+    match key.verify_strict(body.as_bytes(), &Signature::from_bytes(&arr)) {
+        Ok(()) => Ok(()),
+        Err(_) => Err("签名校验失败，内容可能被篡改，已拒绝".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +308,49 @@ mod tests {
         sig_block.insert("sig".into(), Value::from("A".repeat(86) + "=="));
         root.insert("_sig".into(), Value::Object(sig_block));
         serde_json::to_string(&Value::Object(root)).unwrap()
+    }
+
+    /// M4：`optimizer-runtime.json` 的数组形态签名校验（四态）。
+    ///
+    /// 覆盖：正常通过 / 正文篡改失败 / 缺 sig 失败 / alg 不支持失败 / sidecar 非JSON 失败。
+    /// 五条都断，因为它们对应五种**不同**的失效形态（只断「篡改」会漏掉
+    /// 「sidecar 缺失/字段改名/算法换掉」那几种 —— 而那几种恰恰是升级路径上
+    /// 最容易发生的：文件名改了、字段挪位了、有人想换算法）。
+    #[test]
+    fn m4_优化目录数组签名校验五态() {
+        const MAIN: &str = include_str!("../../data/optimizer-runtime.json");
+        const SIDECAR: &str = include_str!("../../data/optimizer-runtime.json.sig.json");
+
+        // ① 正常：验签通过
+        verify_array_text(MAIN, SIDECAR)
+            .unwrap_or_else(|e| panic!("本机签名的优化目录必须验签通过（私钥在~/.trim-signing）：{e}"));
+
+        // ② 正文被篡改 → 必须失败
+        let tampered = MAIN.replace("\"risk\": \"low\"", "\"risk\": \"high\"");
+        assert_ne!(tampered, MAIN, "前提失效：没能篡改出内容（数据层里没有 risk:low 形态）");
+        assert!(
+            verify_array_text(&tampered, SIDECAR).is_err(),
+            "篡改正文后验签竟然通过 —— 签名形同虚设"
+        );
+
+        // ③ sidecar 缺 sig / alg 不支持 / 非 JSON ⇒ 三种都必须 fail-closed
+        assert!(
+            verify_array_text(MAIN, "{}").is_err(),
+            "sidecar 为空对象时必须拒绝（没签名不许放行）"
+        );
+        let no_sig = SIDECAR.replace("\"sig\"", "\"notsig\"");
+        assert!(
+            verify_array_text(MAIN, &no_sig).is_err(),
+            "sidecar 缺 sig 字段时必须拒绝"
+        );
+        let wrong_alg = SIDECAR.replace("ed25519", "rsa");
+        assert!(
+            verify_array_text(MAIN, &wrong_alg).is_err(),
+            "sidecar 的 alg 改成 rsa 时必须拒绝（不支持的算法不许静默放行）"
+        );
+        assert!(
+            verify_array_text(MAIN, "not json").is_err(),
+            "sidecar 不是合法 JSON 时必须拒绝（不许 panic 也不许放行）"
+        );
     }
 }
