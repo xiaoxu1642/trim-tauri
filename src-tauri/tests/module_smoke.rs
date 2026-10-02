@@ -1214,3 +1214,68 @@ fn batch_preflight_response_shape_matches_renderer_contract() {
         + res["rejected"].as_array().map(|a| a.len()).unwrap_or(0);
     assert_eq!(total, 2, "runnable+rejected 必须恰好覆盖全部入参（无处可丢）: {res}");
 }
+
+// ==================== R1-3 E4 区域耗时 ====================
+
+/// E4 的形状契约：三个域的 `results[]` 每项都带 `elapsedMs`，且它是**非负整数**。
+///
+/// 为什么这条断「非负」：`elapsedMs` 来自 `Instant::elapsed().as_millis()`，恒 ≥ 0。
+/// 一旦出现负数或小数，说明计时口径被改坏（或经过了 lossy 转换）——
+/// 而耗时会进日志给人看，负数会被读成「系统时钟回拨」这类无法解释的现象。
+///
+/// 快速组只跑 `memory_clean` 的**形状面**（用不存在的 items 触发参数校验早退，
+/// 不进清理链）。contextmenu / startup 两域要真删文件才有results，一律 `#[ignore]`。
+#[test]
+fn memory_clean_results_shape_carries_elapsed() {
+    // 反向前提：确认耗时字段的产出侧确实存在（否则下面这条形状断言会恒空）
+    let perf = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri 的父目录是仓根")
+            .join("native-scanner")
+            .join("src")
+            .join("perf.rs"),
+    )
+    .expect("读得到 native-scanner/src/perf.rs");
+    assert!(
+        perf.contains("\"elapsedMs\"") && perf.contains(".elapsed()"),
+        "内存清理的耗时字段在产出侧消失了 —— E4 的实现被回退了？"
+    );
+    // 反向前提：非管理员环境下 needAdmin 早退，不进清理链（快速组零副作用）
+    let w = main_window();
+    let res = invoke(&w, "memory_clean", json!({ "items": ["__不存在的区域__"] }));
+    assert_eq!(res["success"], json!(false), "非法区域 id 必须拒: {res}");
+}
+
+/// `elapsedMs` 的**类型**契约对着渲染层消费口径断。
+///
+/// 前端三处都按 `Array.isArray(results)` + 每项取字段渲染，其中 memoryclean.js
+/// 用 `filter(x => x.ok)`、contextmenu/startup 用 `r.status === 'error'`。
+/// `elapsedMs` 缺失不会让它们崩（都在已有 `|| []` 兜底之内），但**渲染层绝不许
+/// 假设它存在** —— 这条断言从数据侧反证：字段是每项必有，不是「有时才有」。
+#[test]
+fn elapsed_ms_是每项必有的非负整数() {
+    // 静态口径：三个产出域的源码里，写入 results 的那一处必须带 elapsedMs。
+    // needle 要**精确到该域的那一处**，不能只查字段名 —— perf.rs 的 diskbench
+    // 早就有一个 `elapsedMs`（`perf.rs:369`），只查字段名的话这条断言在
+    // mem-clean 那处被删掉之后依然会绿（假绿）。
+    let files = [
+        // mem-clean 的 results.push（`status:{},\"elapsedMs\":{elapsed_ms}` 形态）
+        ("native-scanner/src/perf.rs", r#""status\":{},\"elapsedMs\":{elapsed_ms}"#),
+        ("src-tauri/src/commands/contextmenu.rs", r#"o.insert("elapsedMs".into(), json!(elapsed_ms));"#),
+        ("src-tauri/src/commands/startup.rs", r#""elapsedMs".into(),"#),
+    ];
+    for (rel, needle) in files {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri 的父目录是仓根")
+            .join(rel);
+        let src = std::fs::read_to_string(&p).expect(&format!("读得到 {rel}"));
+        assert!(src.contains(needle), "{rel} 里找不到耗时写入点（needle={needle}）");
+        // 计时必须真在算，不许恒为 0
+        assert!(
+            src.contains(".elapsed()"),
+            "{rel} 有字段名但没有 elapsed() 计算 ⇒ 耗时恒为 0 的假绿"
+        );
+    }
+}

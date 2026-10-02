@@ -23,6 +23,7 @@ const REGISTRY = [
   { file: 'check-escape-delegation.mjs', reason: 'escape 委托：非委托样本自检' },
   { file: 'check-html-contract.mjs', reason: 'HTML 合同：内联 script 样本自检' },
   { file: 'check-cleanup-rule-contract.mjs', reason: '规则契约：37 条反例自检（既有范本）' },
+  { file: 'check-elapsed-facts.mjs', reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
 ];
 
 let fail = 0;

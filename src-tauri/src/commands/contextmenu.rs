@@ -340,6 +340,24 @@ pub async fn contextmenu_remove<R: Runtime>(
 
     let fs_items: Vec<&Value> = safe.iter().filter(|it| is_file_source(it)).collect();
     let reg_items: Vec<Value> = safe.iter().filter(|it| !is_file_source(it)).cloned().collect();
+/// E4：把一条结果连同**本项耗时**压进 `results[]`。
+///
+/// 为什么不直接 `push(json!({...}))`：耗时字段要挂在同一处产出，四处 push 各写一遍
+/// `elapsedMs` 的话，下次改计时口径（换 Instant / 改毫秒 vs 微秒）必然漏一处。
+/// 单一入口 = 单一口径。
+///
+/// ⚠️ 本函数**只加字段，不改任何判定**：`success` / `failed` 两个计数在调用点各自
+/// 累加，不读 `elapsedMs`。E4 的「零风险」前提就是这个，改了就不是 E4 了。
+fn push_result(data: &mut Value, mut row: Value, started: &std::time::Instant) {
+    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    if let Some(o) = row.as_object_mut() {
+        o.insert("elapsedMs".into(), json!(elapsed_ms));
+    }
+    if let Some(arr) = data.get_mut("results").and_then(|v| v.as_array_mut()) {
+        arr.push(row);
+    }
+}
+
 
     let mut data = json!({ "success": 0, "failed": 0, "results": [] });
 
@@ -367,11 +385,14 @@ pub async fn contextmenu_remove<R: Runtime>(
             let p = it.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
             let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            // E4：每项耗时。计时从进入循环体开始，覆盖后面的保护闸与回收站调用。
+            // ⚠️ 只加字段，`success` / `failed` 两个计数**不看**它（见 set_result 注释）。
+            let t_item = std::time::Instant::now();
             if p.is_empty() {
                 data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
-                data["results"].as_array_mut().unwrap().push(json!({
+                push_result(&mut data, json!({
                     "id": id, "name": name, "status": "error", "message": "缺少文件路径"
-                }));
+                }), &t_item);
                 continue;
             }
             // 审查 M12：AGENTS §3 把「删除前先过 protect」写成无条件红线，本出口此前是唯一
@@ -381,9 +402,9 @@ pub async fn contextmenu_remove<R: Runtime>(
             // 属后代路径，不会被误拦。
             if protect::is_path_protected(p) {
                 data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
-                data["results"].as_array_mut().unwrap().push(json!({
+                push_result(&mut data, json!({
                     "id": id, "name": name, "status": "error", "message": "该路径受保护，已拒绝删除"
-                }));
+                }), &t_item);
                 continue;
             }
             // 审查 v2-F1：走 `_os` 版。`p` 来自快照、可能含非 UTF-8 / 孤立代理项，
@@ -396,15 +417,15 @@ pub async fn contextmenu_remove<R: Runtime>(
                         "path": p.replace('/', "\\"), "name": name, "recycled": true,
                         "deletedAt": delete_manifest::iso_now()
                     }));
-                    data["results"].as_array_mut().unwrap().push(json!({
+                    push_result(&mut data, json!({
                         "id": id, "name": name, "status": "ok", "message": "已移入回收站"
-                    }));
+                    }), &t_item);
                 }
                 Err(e) => {
                     data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
-                    data["results"].as_array_mut().unwrap().push(json!({
+                    push_result(&mut data, json!({
                         "id": id, "name": name, "status": "error", "message": e
-                    }));
+                    }), &t_item);
                 }
             }
         }

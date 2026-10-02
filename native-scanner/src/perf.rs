@@ -762,7 +762,7 @@ pub fn run_net_sample(args: &[String]) -> i32 {
 
 // ============================ R3: mem-clean ============================
 // 契约（v2 §2.5）：--items 恰好 5 个合法 id（含 standbyPriority0）；
-// 输出 {"before","after","freed","results":[{"id","name","ok","status"}]}；
+// 输出 {"before","after","freed","results":[{"id","name","ok","status","elapsedMs"}]}；
 // 顺序 workingSet(80,1)→modified(80,2)→standby(80,3)→standbyPriority0(80,4)→combine(130)；
 // combine 修正（真机 v0.1.6 反馈）：旧实现误用 info class 87（= SystemSpecialPoolInformation，
 // 内核以 C0000022 拒绝）+ 8 字节全零缓冲。Mem Reduct 同功能用的是
@@ -840,6 +840,13 @@ fn mem_clean_core(want: &[String]) -> Result<String, String> {
         let mut results: Vec<String> = Vec::new();
         for (id, cls, val, kind, label) in MEM_ITEMS.iter() {
             if !want.iter().any(|w| w == id) { continue; }
+            // E4：每区域耗时（方案 §3.5 E4）。计时**包住 NtSetSystemInformation 调用**，
+            // 失败路径同样计时 —— 只测成功路径等于把「慢的失败」藏起来，而那恰恰是用户
+            // 最想知道「为什么这一步卡了」的场合。
+            //
+            // ⚠️ 只加字段，不参与任何判定：ok/status/freed 三者都不看它。E4 的前提是
+            // 「只加日志字段」，一旦让耗时进判定就成了行为变更。
+            let t0 = std::time::Instant::now();
             let status: i32 = if *kind == 0 {
                 let buf: u64 = *val as u64;
                 NtSetSystemInformation(*cls, &buf as *const u64 as *mut u8, 8)
@@ -852,7 +859,8 @@ fn mem_clean_core(want: &[String]) -> Result<String, String> {
                     std::mem::size_of::<MemoryCombineInformationEx>() as u32,
                 )
             };
-            results.push(format!("{{\"id\":\"{}\",\"name\":\"{}\",\"ok\":{},\"status\":{}}}", id, label, status == 0, status));
+            let elapsed_ms = t0.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            results.push(format!("{{\"id\":\"{}\",\"name\":\"{}\",\"ok\":{},\"status\":{},\"elapsedMs\":{elapsed_ms}}}", id, label, status == 0, status));
         }
         let after = avail_phys_bytes();
         // v5 M-2：任一端读失败 ⇒ 差值不可信，如实回 0 并置 freedMeasured=false，让渲染层

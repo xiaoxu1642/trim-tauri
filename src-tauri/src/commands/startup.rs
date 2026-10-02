@@ -266,6 +266,9 @@ pub async fn startup_delete<R: Runtime>(
             let kind = fd.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             let item = safe.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id));
 
+            // E4：每项耗时（方案 §3.5 E4）。计时从进入本轮开始，覆盖路径校验与回收站调用；
+            // 失败路径同样计时。⚠️ 只加字段，`success`/`failed` 两个计数不看它。
+            let t_item = std::time::Instant::now();
             let allowed = if !p.is_empty() && item.is_some() {
                 match kind {
                     "startup-file" => item
@@ -306,10 +309,10 @@ pub async fn startup_delete<R: Runtime>(
                     "deletedAt": delete_manifest::iso_now()
                 }));
                 bump_counter(&mut data, "success");
-                set_result_entry(&mut data, id, "ok", &msg);
+                set_result_entry(&mut data, id, "ok", &msg, &t_item);
             } else {
                 bump_counter(&mut data, "failed");
-                set_result_entry(&mut data, id, "error", &msg);
+                set_result_entry(&mut data, id, "error", &msg, &t_item);
             }
         }
         if !manifest.is_empty() {
@@ -332,13 +335,27 @@ fn bump_counter(data: &mut Value, key: &str) {
     }
 }
 
-fn set_result_entry(data: &mut Value, id: &str, status: &str, message: &str) {
+/// E4：写回某一项的结果，并带上**本项耗时**（`elapsedMs`）。
+///
+/// ⚠️ 只加字段。`success` / `failed` 由 `bump_counter` 各自累加，不看耗时；
+/// 耗时为 0 或负值（时钟回拨）也不影响任何判定 —— E4 的「零风险」前提就是这个。
+fn set_result_entry(
+    data: &mut Value,
+    id: &str,
+    status: &str,
+    message: &str,
+    started: &std::time::Instant,
+) {
     if let Some(results) = data.get_mut("results").and_then(|v| v.as_array_mut()) {
         for r in results.iter_mut() {
             if r.get("id").and_then(|v| v.as_str()) == Some(id) {
                 if let Some(o) = r.as_object_mut() {
                     o.insert("status".into(), json!(status));
                     o.insert("message".into(), json!(message));
+                    o.insert(
+                        "elapsedMs".into(),
+                        json!(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+                    );
                 }
                 return;
             }
