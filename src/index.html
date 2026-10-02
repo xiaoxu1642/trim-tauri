@@ -764,6 +764,20 @@
           </div>
         </div>
 
+        <!-- E1/E2 态势分：5 分类加权（已应用 / 未动 / 高危未确认 / 部分应用 / 测不了） -->
+        <!-- 空分类返回 100 而非 0：没有待处理项 = 满分。判据见 engine/optimizer 的 readiness_score。 -->
+        <div class="opt-readiness" id="optReadiness" hidden>
+          <div class="opt-readiness-ring">
+            <svg viewBox="0 0 44 44" width="44" height="44" aria-hidden="true">
+              <circle class="opt-readiness-track" cx="22" cy="22" r="18" fill="none"></circle>
+              <circle class="opt-readiness-arc" id="optReadinessArc" cx="22" cy="22" r="18" fill="none"
+                      stroke-dasharray="0 999" stroke-linecap="round" transform="rotate(-90 22 22)"></circle>
+            </svg>
+            <span class="opt-readiness-num" id="optReadinessNum">—</span>
+          </div>
+          <ul class="opt-readiness-legend" id="optReadinessLegend"></ul>
+        </div>
+
         <!-- 优化分类分段栏（原侧边栏分类子菜单收拢于此，由 optimizer.js 按 OPT_CATEGORIES 渲染） -->
         <div class="filter-tabs optimizer-cats filter-tabs--scroll" id="optimizerCatNav" role="tablist" aria-label="优化分类"></div>
 

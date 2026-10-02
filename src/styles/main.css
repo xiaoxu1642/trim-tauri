@@ -6494,6 +6494,78 @@ body.pv-window {
   .ctx-blocked-row { transition: none !important; }
 }
 
+/* ==================== E1/E2 优化态势分 ==================== */
+/* 5 分类加权环 + 图例。零依赖：SVG circle 的 stroke-dasharray（不引图表库）。
+   判据在 Rust 侧 readiness_score（可单测），本段只负责画。
+
+   配色纪律：环与图例**全部走 token**，不写死 hex（AGENTS §2 离表色禁令）。
+   圆角按既有档位：环用 --radius-btn（8），图例项用 --radius-badge（4）。 */
+.opt-readiness {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-medium);
+}
+.opt-readiness-ring {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+}
+.opt-readiness-track {
+  stroke: var(--border-subtle);
+  stroke-width: 4;
+}
+.opt-readiness-arc {
+  /* 前景色走 token：分数越高越绿（--success），越低越警示（--warning）。
+     固定一个色而不用渐变 —— 渐变会把「多少分」的信息编码成色相，
+     而那个信息已经由数字给出（opt-readiness-num），重复编码反而难读。 */
+  stroke: var(--success);
+  stroke-width: 4;
+  transition: stroke-dasharray 0.25s var(--ease-standard);
+}
+.opt-readiness[data-band="mid"] .opt-readiness-arc { stroke: var(--warning); }
+.opt-readiness[data-band="low"] .opt-readiness-arc { stroke: var(--danger); }
+.opt-readiness-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  font-variant-numeric: tabular-nums;
+}
+.opt-readiness-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.opt-readiness-legend li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+}
+.opt-readiness-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-badge);
+  /* 图例点色由 JS 按分类内联 background（走 inline style 的token 值），
+     不用 var(--legend-color) —— 那个自定义属性在 CSS 里无定义面。 */
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
 .opt-kanban,
 .ctx-kanban {
   position: relative;

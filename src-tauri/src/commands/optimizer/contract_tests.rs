@@ -1824,3 +1824,106 @@ let ov = include_str!("overview.rs");
             "optimizer_list 没有把 provenance 注入响应行 —— 建了侧表却没接线"
         );
     }
+
+    /// E1/E2：态势分判据的机械对拍。
+    ///
+    /// 关键：**E2 ①「空输入返回 100 而非 0」** 是本项最容易被写反的一处。
+    /// 返回 0 等于把「没东西要做」显示成「全部都没做」，方向完全反了
+    /// （RyTuneX 那一版在 `IntelligentOptimizationEngine.cs:1206-1215` 专门处理，
+    /// 方案 §3.5 标为「细节必抄」）。
+    ///
+    /// 顺带钉住另外三条：单调性（未动项越多分越低）、范围（0~100 不越界）、
+    /// 权重序（risky 权重 > untouched > partial > unknown > applied）。
+    #[test]
+    fn e1_态势分判据四条契约() {
+        use super::overview::{readiness_score, Readiness, READINESS_WEIGHTS};
+
+        // ① 空输入 ⇒ 100（E2 硬要求）
+        assert_eq!(
+            readiness_score(&Readiness::default()),
+            100,
+            "空输入必须返回 100 ——「没有任何项」= 没有待处理的事 = 满分。返回 0 是把 \
+             「没东西要做」说成「全部都没做」，方向完全反了（RyTuneX :1206-1215 的细节必抄项）"
+        );
+
+        // ② 全已应用 ⇒ 100（applied 权重 0）
+        let all_applied = Readiness { applied: 126, ..Default::default() };
+        assert_eq!(readiness_score(&all_applied), 100, "全部已应用时必须是满分（applied 权重为 0）");
+
+        // ③ 全部高危未应用 ⇒ 0（risky 权重 100 ⇒ 待处理度 100 ⇒ 补 0）
+        let all_risky = Readiness { risky: 14, ..Default::default() };
+        assert_eq!(readiness_score(&all_risky), 0, "全部是高危未确认时必须是 0 分");
+
+        // ④ 范围与单调性
+        let mixed = Readiness { applied: 40, untouched: 30, risky: 4, partial: 10, unknown: 6 };
+        let sc = readiness_score(&mixed);
+        assert!(sc <= 100, "分数必须 <= 100，实际 {sc}");
+        let total: u64 = mixed.applied + mixed.untouched + mixed.risky + mixed.partial + mixed.unknown;
+        assert_eq!(total, 90, "前提失效：夹具项数变了");
+        // 未动项变多 ⇒ 分数不升（单调不增）
+        let more_untouched = Readiness { untouched: mixed.untouched + 10, ..mixed };
+        assert!(
+            readiness_score(&more_untouched) <= sc,
+            "未动项变多而分数上升 ⇒ 权重方向反了"
+        );
+        // 已应用项变多 ⇒ 分数不降
+        let more_applied = Readiness { applied: mixed.applied + 10, ..mixed };
+        assert!(
+            readiness_score(&more_applied) >= sc,
+            "已应用项变多而分数下降 ⇒ applied 权重不该是 0 以外的值"
+        );
+
+        // ⑤ 权重序：risky > untouched > partial > unknown > applied（E1「权重显式声明」的语义）
+        let w = |name: &str| READINESS_WEIGHTS.iter().find(|(k, _)| *k == name).map(|(_, v)| *v).unwrap_or(999);
+        assert_eq!(w("applied"), 0, "applied 权重必须是 0（已做完不该再扣分）");
+        assert!(w("risky") > w("untouched"), "risky 权重必须高于 untouched");
+        assert!(w("untouched") > w("partial"), "untouched 权重必须高于 partial");
+        assert!(w("partial") > w("unknown"), "partial 权重必须高于 unknown");
+        assert!(w("unknown") > w("applied"), "unknown 权重必须高于 applied（测不到≠没问题，但也不该同罚）");
+        assert_eq!(READINESS_WEIGHTS.len(), 5, "E1 固定 5 分类");
+    }
+
+    /// E1/E2：判据必须在**一处**。渲染层不许自己算一遍分。
+    #[test]
+    fn e1_渲染层不重复实现判据() {
+        let js = include_str!("../../../../src/scripts/optimizer.js");
+        // 允许：读 score、画环、画图例
+        assert!(js.contains("renderReadiness"), "渲染层缺 renderReadiness");
+        // 不允许：分类名与权重常数**相邻**（那才是加权公式的痕迹）。
+        //
+        // ⚠️ 首版写 `!js.contains("* 100")` 判红过一次，但那是**假阳性**：
+        // `optimizer.js:1579` 有 `const FIVE_DAYS = 5 * 24 * 60 * 60 * 1000`（时间换算），
+        // 与态势分无关。所以判据必须绑到「分类名 + 邻近的权重常数」这个组合上，
+        // 而不是单个数字 —— **含 substring 的判据在有同数字的无关代码时必假红**
+        // （与 R0-c / M2-B 那两次踩的同一类坑）。
+        for (cls, weight) in [("untouched", 65u64), ("risky", 100), ("partial", 50), ("unknown", 20)] {
+            // needle 形态：**同一行内**同时出现分类名与该分类的权重常数。
+            // 首版写成 `{cls}) * {weight}` 这样的精确子串，判红实验 3 注入
+            // `(d.untouched) * 65` **没被抓住** —— 精确子串太窄，形不成判红。
+            let offending = js.split('\n').find(|line| {
+                if !line.contains(cls) {
+                    return false;
+                }
+                // 排除图例定义行（那里是 key/label，不是判据）
+                if line.contains("READINESS_LEGEND") || line.contains("key:") {
+                    return false;
+                }
+                line.contains(&weight.to_string())
+            });
+            assert!(
+                offending.is_none(),
+                "渲染层出现「{cls} × {weight}」这一行：`{offending:?}` —— \
+                 判据必须只在 Rust 侧 readiness_score 一处。前端再算一遍就是两份判据，\
+                 漂移后界面照常显示、只是数字错了"
+            );
+        }
+        assert!(
+            !js.contains("weighted +=") && !js.contains("pending +="),
+            "渲染层出现加权求和变量（weighted / pending）—— 判据必须只在 Rust 侧一处"
+        );
+        // 分档阈值必须显式声明（E1 硬要求），不许散在三元里
+        assert!(
+            js.contains("READINESS_BANDS"),
+            "分档阈值必须显式声明为 READINESS_BANDS（E1：权重/阈值不许藏在代码里）"
+        );
+    }

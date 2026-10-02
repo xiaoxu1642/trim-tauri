@@ -203,7 +203,7 @@
     'peripheral:query': 'peripheral_query',
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
-    // quickcmds / optimizer（13）
+    // quickcmds / optimizer（14）
     'quickcmds:run': 'quickcmds_run',
     'optimizer:run': 'optimizer_run',
     'optimizer:list': 'optimizer_list',
@@ -218,6 +218,7 @@
     'optimizer:restore-reg': 'optimizer_restore_reg',
     'optimizer:state-overview': 'optimizer_state_overview',
     'optimizer:list-groups': 'optimizer_list_groups',
+    'optimizer:readiness': 'optimizer_readiness',
     // system / startup（5）
     'system:disk-type': 'system_disk_type',
     'system:disk-list': 'system_disk_list',
@@ -663,6 +664,7 @@
       restoreReg: function (optionId) { return invokeChannel('optimizer:restore-reg', { optionId: optionId }); },
       stateOverview: function () { return invokeChannel('optimizer:state-overview'); },
       listGroups: function () { return invokeChannel('optimizer:list-groups'); },
+      readiness: function () { return invokeChannel('optimizer:readiness'); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }
     },
 

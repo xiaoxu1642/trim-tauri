@@ -107,6 +107,7 @@ const TAURI_ADDED = {
   'syspanel:pagefile-apply': 'P2 §3.6（2026-10-03）：虚拟内存写侧（AutomaticManagedPagefile + PagingFiles；主窗档 + 高危确认 + 需重启）',
   'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',
   'optimizer:list-groups': 'E7（2026-10-03）：分类两层结构下发（default 主序列 + custom 重映射；纯只读侧表）',
+  'optimizer:readiness': 'E1/E2（2026-10-03）：5 分类加权态势分（判据在 Rust 侧 readiness_score，可单测；纯只读）',
 };
 
 function collect(set, re, text) {

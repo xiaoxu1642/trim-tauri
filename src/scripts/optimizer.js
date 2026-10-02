@@ -667,6 +667,48 @@
   }
 
   // 渲染分类分段栏（按 OPT_CATEGORIES 生成，含侧边栏旧版未展示的分类）
+  // ==================== E1/E2 态势分渲染 ====================
+  //
+  // 判据（5 分类权重、加权公式、空分类返回 100）在 Rust 侧 readiness_score ——
+  // **这里只画，不算**。理由：判据必须在**一处**才能被单测与门禁机械复核；
+  // 前端再算一遍就是两份判据，漂移后界面照常显示，只是数字错了。
+  //
+  // 图例色板走 CSS 变量（内联 style），不在JS 里硬编码色值 —— AGENTS §2 离表色禁令。
+  const READINESS_LEGEND = [
+    { key: 'risky', label: '高危未确认', color: 'var(--danger)' },
+    { key: 'partial', label: '部分应用', color: 'var(--warning)' },
+    { key: 'untouched', label: '未动', color: 'var(--accent)' },
+    { key: 'unknown', label: '测不了', color: 'var(--fg-tertiary)' },
+    { key: 'applied', label: '已应用', color: 'var(--success)' }
+  ];
+  const READINESS_R = 18;             // 与 index.html 里 circle 的 r 一致
+  const READINESS_C = 2 * Math.PI * READINESS_R;
+  const READINESS_BANDS = [[80, 'high'], [50, 'mid'], [0, 'low']];
+
+  function renderReadiness(d) {
+    const box = document.getElementById('optReadiness');
+    if (!box || !d || typeof d.score !== 'number') return;
+    box.hidden = false;
+    const numEl = document.getElementById('optReadinessNum');
+    const arcEl = document.getElementById('optReadinessArc');
+    if (numEl) numEl.textContent = String(d.score);
+    if (arcEl) {
+      // 零依赖画环：stroke-dasharray 的实线段 = 分数占比（E1 要求不引图表库）
+      const frac = Math.max(0, Math.min(100, d.score)) / 100;
+      arcEl.setAttribute('stroke-dasharray', (READINESS_C * frac).toFixed(2) + ' ' + READINESS_C.toFixed(2));
+    }
+    // 分档只影响语义色（绿/琥珀/红），阈值显式声明以便门禁对拍
+    const band = (READINESS_BANDS.find(([lo]) => d.score >= lo) || [0, 'low'])[1];
+    box.setAttribute('data-band', band);
+    const lg = document.getElementById('optReadinessLegend');
+    if (lg) {
+      lg.innerHTML = READINESS_LEGEND
+        .filter(row => Number(d[row.key] || 0) > 0)
+        .map(row => '<li><span class="opt-readiness-dot" style="background:' + row.color + '"></span>' + escapeHtml(row.label) + ' ' + Number(d[row.key] || 0) + '</li>')
+        .join('');
+    }
+  }
+
   function renderCatNav() {
     const nav = document.getElementById('optimizerCatNav');
     if (!nav) return;
@@ -1950,11 +1992,13 @@
         : Promise.resolve(null);
       // E7：先取分类侧表，再取目录 —— 渲染要用分组口径决定每项归到哪个看板。
       // 两条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
-      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups()])
-        .then(([dt, res, gs]) => {
+      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(), window.api.optimizer.readiness()])
+        .then(([dt, res, gs, rd]) => {
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
+        // E1/E2：态势分取数失败不阻塞目录渲染（盒子保持 hidden）
+        if (rd && rd.success) renderReadiness(rd.data);
         if (res && res.success && Array.isArray(res.data)) {
           OPTIONS = filterByDiskType(res.data);
           activeCategory = getSavedCategory();

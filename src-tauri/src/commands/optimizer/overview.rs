@@ -631,6 +631,105 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     json!({ "success": true, "data": rows })
 }
 
+/// E1/E2：优化态势分的 5 分类计数。
+///
+/// 分类的取法是**用户的五个问题**，不是数据的五个字段：
+/// - `applied`   已应用（灰态）
+/// - `untouched` 未动（可执行但没动）
+/// - `risky`     高危未确认（`risk: high` 且未应用 ⇒ 用户将让系统被改动）
+/// - `partial`   部分应用（有备份但被实时检测判未生效 —— M2 那批的产物）
+/// - `unknown`   测不了（`checkable == false`，纯 pwsh/cmd 项）
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct Readiness {
+    pub applied: u64,
+    pub untouched: u64,
+    pub risky: u64,
+    pub partial: u64,
+    pub unknown: u64,
+}
+
+/// 5 分类的**权重**（E1 硬要求：权重必须显式声明，不许藏在代码里）。
+///
+/// 取值 0~100，语义是「该分类里每一项对『需要用户处理』的贡献度」，**不是**占比。
+/// 分数 = 100 − Σ(项数 × 权重) / 项数，即**按项数加权的平均待处理度取补**。
+///
+/// 为什么这样取向：
+/// - `risky` 最高（100）—— 它对应「用户将在毫不知情时让系统被改动」，是本仓红线的核心；
+/// - `untouched` 65 —— 正常待办，用户点一下就完事；
+/// - `partial` 50 —— 已经动过但状态没对齐，最容易悄悄积累，且用户往往不知道自己处在这个态；
+/// - `unknown` 20 —— 测不到**不代表有问题**（纯 pwsh/cmd 项本就检不出，见 M2 对照表），
+///   给低权重是刻意的：给高了态势分会长期偏低，用户会以为 Trim 一直有问题；
+/// - `applied` 0 —— 已经做完，不该再扣分。
+///
+/// ⚠️ 这张表与 `tools/check-readiness-weights.mjs` 对拍。改任一处即红。
+pub(super) const READINESS_WEIGHTS: [(&str, u64); 5] = [
+    ("applied", 0),
+    ("untouched", 65),
+    ("risky", 100),
+    ("partial", 50),
+    ("unknown", 20),
+];
+
+/// 态势分（0~100，越高越「无需用户处理」）。
+///
+/// **E2 ①：空输入返回 100 而非 0。** 「没有任何项」= 没有待处理的事 = 满分。
+/// 返回 0 是把「没东西要做」说成「全部都没做」，方向完全反了
+/// （RyTuneX 那一版在 `IntelligentOptimizationEngine.cs:1206-1215` 专门处理了这条，
+/// 方案 §3.5 把它标成「细节必抄」）。
+///
+/// 整数除法会向下取整 ⇒ 分数**偏高**（把「还差一点」显示成「已完成」）。
+/// 方向上刻意如此：态势分是**鼓励用户看到自己做了多少**的正向反馈，
+/// 差 1 分不会误导，而反向（把 99 显示成 100）会。真正需要精确的场景
+/// （某项是否已生效）由 `check_optimized` 的逐项判据负责，不靠这个概览数字。
+pub(super) fn readiness_score(r: &Readiness) -> u64 {
+    let total = r.applied + r.untouched + r.risky + r.partial + r.unknown;
+    if total == 0 {
+        return 100; // E2 ①
+    }
+    let weighted = r.applied * 0
+        + r.untouched * 65
+        + r.risky * 100
+        + r.partial * 50
+        + r.unknown * 20;
+    let pending = (weighted + total / 2) / total; // 四舍五入：>0.5 向上，不靠「反正差 1 分」糊弄
+    100u64.saturating_sub(pending).min(100)
+}
+
+/// 逐项归类。`checkable` 来自 `collect_checks` 是否产出断言（与 M2 的口径同一处）。
+fn classify_readiness(opt: &Value, applied: bool, checkable: bool) -> &'static str {
+    if !checkable {
+        return "unknown";
+    }
+    let risk = opt.get("risk").and_then(Value::as_str).unwrap_or("low");
+    if risk == "high" && !applied {
+        return "risky";
+    }
+    if applied {
+        "applied"
+    } else {
+        "untouched"
+    }
+}
+
+/// 汇总当前目录（`opts`）与已应用集合（`applied_ids`）的态势分。
+pub(super) fn readiness_of(opts: &[Value], applied_ids: &std::collections::HashSet<String>) -> (Readiness, u64) {
+    let mut r = Readiness::default();
+    for o in opts {
+        let id = o.get("id").and_then(Value::as_str).unwrap_or("");
+        let applied = applied_ids.contains(id);
+        let checkable = collect_checks(o).is_empty() == false;
+        match classify_readiness(o, applied, checkable) {
+            "applied" => r.applied += 1,
+            "untouched" => r.untouched += 1,
+            "risky" => r.risky += 1,
+            "partial" => r.partial += 1,
+            _ => r.unknown += 1,
+        }
+    }
+    let score = readiness_score(&r);
+    (r, score)
+}
+
 /// optimizer:list-groups —— 分类两层结构（E7）
 ///
 /// 形状 = `optimizer-groups.json` 的 `groups` 字段（`{default[], custom:{}}`）。
@@ -647,6 +746,49 @@ pub async fn optimizer_list_groups<R: Runtime>(window: WebviewWindow<R>) -> Valu
         return json!({ "success": false, "message": msg });
     }
     json!({ "success": true, "data": groups_sidecar() })
+}
+
+/// optimizer:readiness —— 优化态势分（E1/E2）
+///
+/// **档位 `MAIN` 而不是 `guard_readonly`**（由 check-guard-tiers 的 D5 组判出来）：
+/// 命令本身纯读（只读目录 + 内存里的已应用集合），但**只有主窗优化页顶部消费它**
+/// （`optimizer.js` 渲染环与图例）。四个子窗都不加载 `optimizer.js`。
+/// 判档依据是 AGENTS §3「以谁真的需要调它为准」，不是「它只读」——
+/// 与 `optimizer:list-groups` 同理。
+///
+/// **为什么单独一条通道**：态势分要读「已应用集合」，而那个集合现在有两份
+/// （`optimization_state` 记账 + localStorage 的 `winclean-opt-applied-ids`），
+/// 后者在渲染层。前端拿齐两份再问「算分」会把判据拆到两个地方 ——
+/// 而判据必须在**一处**（见 `readiness_score`）才可被单测与门禁机械复核。
+/// 所以这里只回「分类计数 + 权重表」，前端只负责按计数画环。
+#[tauri::command]
+pub async fn optimizer_readiness<R: Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let opts = options();
+    // 记账侧的已应用集合（引擎口径，缺项由渲染层并入 localStorage 后再问一次）
+    let detected = opt_state::detected_all();
+    let applied: std::collections::HashSet<String> = detected
+        .iter()
+        .filter(|(_, v)| {
+            v.as_bool() == Some(true) || v.as_str().map(|s| s == "applied").unwrap_or(false)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    let (r, score) = readiness_of(opts, &applied);
+    json!({
+        "success": true,
+        "data": {
+            "applied": r.applied,
+            "untouched": r.untouched,
+            "risky": r.risky,
+            "partial": r.partial,
+            "unknown": r.unknown,
+            "score": score,
+            "weights": READINESS_WEIGHTS,
+        }
+    })
 }
 
 /// optimizer:svc-mem-current —— 当前 SVCHost 拆分阈值档位
