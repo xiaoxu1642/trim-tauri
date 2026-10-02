@@ -311,17 +311,17 @@ check(
 // 这张表抓两件事：① 新增 quiet_cmd_timeout 调用点不登记即红（登记制）；
 // ② 谁把 REG_EXPORT_TIMEOUT 常量改掉（换字面量/换时长）即红（超时一致性）。
 const TIMEOUT_SPAWN_SITES = [
-  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &export_path, reg_file_str, "/y"]', reason: '启动项禁用台账：删值前整键备份' },
-  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &write_path, reg_file_str, "/y"]', reason: '右键菜单删除前整键备份' },
-  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &reg_path, backup_file_str, "/y"]', reason: '外设优化写值前逐键备份' },
-  { file: 'src-tauri/src/engine/native.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
+  { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["export", &export_path, reg_file_str, "/y"]', reason: '启动项禁用台账：删值前整键备份' },
+  { file: 'src-tauri/src/engine/native/contextmenu.rs', anchor: '&["export", &write_path, reg_file_str, "/y"]', reason: '右键菜单删除前整键备份' },
+  { file: 'src-tauri/src/engine/native/peripheral.rs', anchor: '&["export", &reg_path, backup_file_str, "/y"]', reason: '外设优化写值前逐键备份' },
+  { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
   { file: 'src-tauri/src/commands/uninstall.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },
   { file: 'src-tauri/src/commands/uninstall.rs', anchor: '&["export", key_part, file_str, "/y"]', reason: '残留 reg_value 删值前父键备份' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
-  { file: 'src-tauri/src/engine/native.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
-  { file: 'src-tauri/src/engine/native.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'restart_service 的 sc stop', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
-  { file: 'src-tauri/src/engine/native.rs', anchor: 'system_tool("sc"), &["stop", "WSearch"], MAINT_CMD_TIMEOUT', reason: '维护：停 Windows Search 服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
-  { file: 'src-tauri/src/engine/native.rs', anchor: 'system_tool("sc"), &["stop", svc], MAINT_CMD_TIMEOUT', reason: '维护：停多个服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'restart_service 的 sc stop', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("sc"), &["stop", "WSearch"], MAINT_CMD_TIMEOUT', reason: '维护：停 Windows Search 服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("sc"), &["stop", svc], MAINT_CMD_TIMEOUT', reason: '维护：停多个服务', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
 ];
 const TIMEOUT_SECS = 15;
 
@@ -373,7 +373,9 @@ for (const e of TIMEOUT_SPAWN_SITES) {
         tProblems.push(`${e.file}:${e._site.line} 实参未引用登记的 ${tc}`);
       }
       const sysbin = texts.get('src-tauri/src/engine/systembin.rs') ?? '';
-      const native = texts.get('src-tauri/src/engine/native.rs') ?? '';
+      // v3 D1：native.rs 已按功能域拆成 native/ 目录，超时常量的定义处散在各域文件里
+      const nativeOf = (f) => f.startsWith('src-tauri/src/engine/native/');
+      const native = [...texts.entries()].filter(([f]) => nativeOf(f)).map(([, x]) => x).join('\n');
       const allSrc = sysbin + native;
       const defRe = new RegExp(`const\\s+${tc}\\s*:[^=;]*?=\\s*std::time::Duration::from_secs\\(([^)]*)\\)`);
       const def = allSrc.match(defRe);

@@ -1,0 +1,1034 @@
+//! B5 启动项：scan / toggle / delete / add + 「Trim 禁用台账」与备份文件归属。
+//!
+//! 台账（disabled.json / StartupApproved 位）是本域单一真相：读侧与写侧同在本文件，
+//! backup_root_tests 随实现走，避免升级前后老根兜底逻辑被实现与测试分两头改。
+//! 跨域共享的注册表 typed 读写在 `registry.rs`，路径与名清洗在 `common.rs`。
+
+
+use crate::engine::systembin::system_tool;
+use serde_json::{Value, json};
+use windows::core::PCWSTR;
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_BINARY, REG_CREATED_NEW_KEY, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
+use super::common::*;
+use super::registry::*;
+// ==================== B5：启动项扫描 ====================
+
+
+/// 从命令行提取可执行路径（支持引号包裹）
+fn extract_cmd_path(cmd: &str) -> String {
+    let c = cmd.trim();
+    if c.starts_with('"') {
+        if let Some(idx) = c[1..].find('"') {
+            return c[1..idx+1].to_string();
+        }
+    }
+    if let Some(sp) = c.find(' ') {
+        return c[..sp].to_string();
+    }
+    c.to_string()
+}
+
+
+
+/// 读 StartupApproved blob，返回是否禁用（首字节 bit0=1）
+unsafe fn read_startup_approved(hive: HKEY, subkey: &str, value_name: &str) -> Option<bool> {
+    let base = match hive {
+        h if h == HKEY_CURRENT_USER => r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved",
+        _ => r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved",
+    };
+    let full = format!("{base}\\{subkey}");
+    let fw = to_wide(&full);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(fw.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+        return None;
+    }
+    let result = reg_query_value(hk, value_name).map(|(ty, buf)| {
+        if ty == REG_BINARY && !buf.is_empty() {
+            (buf[0] & 1) == 1
+        } else {
+            false
+        }
+    });
+    let _ = RegCloseKey(hk);
+    result
+}
+
+/// 取文件发布者（CompanyName）
+fn get_publisher(path: &str) -> String {
+    if path.is_empty() { return String::new(); }
+    // 简化实现：不实现 GetFileVersionInfoW，留空
+    // 后续 S2 用 VerQueryValueW 实现
+    String::new()
+}
+
+/// 启动项扫描（对应 startup_scan.ps1）
+///
+/// 注册表 Run/RunOnce + 启动文件夹 + StartupApproved + disabled.json 合并。
+/// 计划任务暂用 schtasks 命令获取。.lnk 目标解析和文件发布者留空（S2 完善）。
+pub fn startup_scan() -> Result<Vec<Value>, String> {
+    let mut results: Vec<Value> = Vec::new();
+
+    unsafe {
+        // ---------- 注册表 Run/RunOnce（8 路径） ----------
+        let run_paths: &[(&str, HKEY, &str, &str, &str)] = &[
+            ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户\\Run", "HKCU"),
+            ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户\\RunOnce", "HKCU"),
+            ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户(32位)\\Run", "HKCU32"),
+            ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户(32位)\\RunOnce", "HKCU32"),
+            ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户\\Run", "HKLM"),
+            ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户\\RunOnce", "HKLM"),
+            ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户(32位)\\Run", "HKLM32"),
+            ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户(32位)\\RunOnce", "HKLM32"),
+        ];
+
+        for (hive_tag, hive, subkey, label, scope) in run_paths {
+            let sk = to_wide(&subkey);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                continue;
+            }
+            let values = reg_enum_values(hk);
+            for vp in values {
+                if vp.is_empty() { continue; }
+                let Some((ty, buf)) = reg_query_value(hk, &vp) else { continue; };
+                let value_type = match ty {
+                    REG_SZ => "String",
+                    REG_EXPAND_SZ => "ExpandString",
+                    REG_BINARY => "Binary",
+                    REG_MULTI_SZ => "MultiString",
+                    REG_DWORD => "DWord",
+                    _ => "Unknown",
+                };
+                let mut value_data = String::new();
+                let mut value_data_b64 = String::new();
+                let mut value_data_arr: Vec<String> = Vec::new();
+                let mut cmd_path = String::new();
+
+                if ty == REG_BINARY {
+                    value_data_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &buf);
+                } else if ty == REG_MULTI_SZ {
+                    // MULTI_SZ: 双 null 结尾的宽字符串序列
+                    let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let mut start = 0;
+                    for i in 0..wide.len() {
+                        if wide[i] == 0 {
+                            if i > start {
+                                value_data_arr.push(String::from_utf16_lossy(&wide[start..i]));
+                            }
+                            start = i + 1;
+                        }
+                    }
+                } else if ty == REG_SZ || ty == REG_EXPAND_SZ {
+                    let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+                    value_data = String::from_utf16_lossy(&wide[..end]);
+                    if ty == REG_EXPAND_SZ {
+                        value_data = expand_env(&value_data);
+                    }
+                    if !value_data.trim().is_empty() {
+                        cmd_path = extract_cmd_path(&value_data);
+                    }
+                }
+
+                if value_data.trim().is_empty() && value_data_b64.is_empty() && value_data_arr.is_empty() {
+                    continue;
+                }
+
+                // StartupApproved：32 位视图归到主 hive
+                let sa_hive = if hive_tag.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+                let sa_disabled = read_startup_approved(sa_hive, "Run", &vp);
+                let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
+                let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
+
+                let reg_path_full = match *hive {
+                    h if h == HKEY_CURRENT_USER => format!("HKEY_CURRENT_USER\\{subkey}"),
+                    _ => format!("HKEY_LOCAL_MACHINE\\{subkey}"),
+                };
+
+                results.push(json!({
+                    "id": format!("reg|{reg_path_full}|{vp}"),
+                    "name": vp,
+                    "command": value_data,
+                    "source": "registry",
+                    "hive": hive_tag,
+                    "regPath": reg_path_full,
+                    "valueName": vp,
+                    "valueType": value_type,
+                    "valueData": value_data,
+                    "valueDataB64": value_data_b64,
+                    "valueDataArray": value_data_arr,
+                    "filePath": "",
+                    "taskPath": "",
+                    "taskName": "",
+                    "enabled": enabled,
+                    "location": label,
+                    "scope": scope,
+                    "disabledBy": disabled_by,
+                    "publisher": get_publisher(&cmd_path),
+                    "resolvedPath": cmd_path,
+                }));
+            }
+            let _ = RegCloseKey(hk);
+        }
+
+        // ---------- 启动文件夹 ----------
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let programdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+        let folders: &[(&str, &str, &str)] = &[
+            (&appdata, r"Microsoft\Windows\Start Menu\Programs\Startup", "启动文件夹 · 当前用户"),
+            (&programdata, r"Microsoft\Windows\Start Menu\Programs\StartUp", "启动文件夹 · 所有用户"),
+        ];
+
+        for (base, sub, label) in folders {
+            let dir = std::path::Path::new(base).join(sub);
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
+            let scope = if base == &appdata { "HKCU" } else { "HKLM" };
+            let sa_hive = if scope == "HKLM" { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.eq_ignore_ascii_case("desktop.ini") { continue; }
+                let full_path = entry.path().to_string_lossy().to_string();
+                let name_stem = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
+                // 简化实现：.lnk 目标解析暂用文件路径（未做 IShellLink 深解析）
+                let resolved = full_path.clone();
+                // StartupApproved\StartupFolder：先按全名找，再按无扩展名找
+                let sa_disabled = read_startup_approved(sa_hive, "StartupFolder", &fname)
+                    .or_else(|| read_startup_approved(sa_hive, "StartupFolder", &name_stem));
+                let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
+                let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
+                results.push(json!({
+                    "id": format!("folder|{full_path}"),
+                    "name": name_stem,
+                    "command": full_path,
+                    "source": "folder",
+                    "hive": scope,
+                    "regPath": "",
+                    "valueName": "",
+                    "valueType": "",
+                    "valueData": "",
+                    "valueDataB64": "",
+                    "valueDataArray": Vec::<String>::new(),
+                    "filePath": full_path,
+                    "taskPath": "",
+                    "taskName": "",
+                    "enabled": enabled,
+                    "location": label,
+                    "scope": scope,
+                    "disabledBy": disabled_by,
+                    "publisher": get_publisher(&resolved),
+                    "resolvedPath": resolved,
+                }));
+            }
+        }
+    }
+
+    // ---------- 计划任务（schtasks 命令） ----------
+    if let Ok(output) = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
+        .args(["/query", "/fo", "csv", "/nh", "/v"])
+        .output()
+    {
+        if output.status.success() {
+            let csv = String::from_utf8_lossy(&output.stdout);
+            for line in csv.lines().skip(1) {
+                // CSV 字段：HostName,TaskName,Next Run Time,Status,Logon Mode,Last Run Time,Last Result,Author,Task To Run,Start In,Comment,Scheduled Task State,Idle Time,Power Management,Run As User,Delete Task If Not Rescheduled,Stop Task If Runs X Hours And X Mins,Schedule,Schedule Type,Start Time,Start Date,End Date,Days,Months,Repeat: Every,Repeat: Until: Time,Repeat: Until: Duration,Repeat: Stop If Still Running,Multiple Instances
+                let fields: Vec<&str> = line.split("\",\"").collect();
+                if fields.len() < 10 { continue; }
+                let task_name_raw = fields[1].trim_matches('"');
+                // TaskName 格式：\Path\Name
+                let task_path = match task_name_raw.rfind('\\') {
+                    Some(idx) => &task_name_raw[..=idx],
+                    None => "\\",
+                };
+                let task_name = match task_name_raw.rfind('\\') {
+                    Some(idx) => &task_name_raw[idx+1..],
+                    None => task_name_raw,
+                };
+                if task_path.starts_with("\\Microsoft\\") { continue; }
+                // Schedule Type 字段（索引 19）含 Logon/Boot
+                let schedule_type = fields.get(19).unwrap_or(&"").trim_matches('"');
+                if !schedule_type.contains("Logon") && !schedule_type.contains("Boot") && !schedule_type.contains("At log on") && !schedule_type.contains("At startup") {
+                    continue;
+                }
+                let task_to_run = fields.get(8).unwrap_or(&"").trim_matches('"');
+                let state = fields.get(11).unwrap_or(&"").trim_matches('"');
+                let enabled = state != "Disabled";
+                results.push(json!({
+                    "id": format!("task|{task_path}{task_name}"),
+                    "name": task_name,
+                    "command": task_to_run,
+                    "source": "task",
+                    "hive": "",
+                    "regPath": "",
+                    "valueName": "",
+                    "valueType": "",
+                    "valueData": "",
+                    "valueDataB64": "",
+                    "valueDataArray": Vec::<String>::new(),
+                    "filePath": "",
+                    "taskPath": task_path,
+                    "taskName": task_name,
+                    "enabled": enabled,
+                    "location": format!("计划任务{}", task_path.trim_end_matches('\\')),
+                    "scope": "HKLM",
+                    "disabledBy": if !enabled { "system" } else { "" },
+                    "publisher": "",
+                    "resolvedPath": "",
+                }));
+            }
+        }
+    }
+
+    // ---------- 合并 disabled.json ----------
+    // 与 read_disabled_records 同一取本口径（`startup_ledger_file`）：两处读同一本账，
+    // 一处认新根一处认老根就会出现「列表里有、恢复按钮说没有」
+    if let Some(disabled_file) = startup_ledger_file() {
+        if let Ok(text) = std::fs::read_to_string(&disabled_file) {
+            if let Ok(records) = serde_json::from_str::<Vec<Value>>(&text) {
+                for r in records {
+                    let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
+                    if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
+                    let mut item = r.clone();
+                    if let Some(o) = item.as_object_mut() {
+                        o.insert("enabled".into(), json!(false));
+                        o.insert("disabledBy".into(), json!("trim"));
+                    }
+                    results.push(item);
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+// ==================== B5 startup_toggle：启动项启用/禁用 ====================
+
+fn startup_backup_dir() -> std::path::PathBuf {
+    crate::engine::paths::backup_write_dir("startup-backup")
+}
+
+/// `disabled.json` 的候选（写入那份在前，历史老根那份兜底）。
+fn startup_disabled_file_candidates() -> Vec<std::path::PathBuf> {
+    crate::engine::paths::backup_read_dirs("startup-backup")
+        .into_iter()
+        .map(|d| d.join("disabled.json"))
+        .collect()
+}
+
+/// 在同名台账的多份候选里取**最近修改**的那本（同刻并列时偏向列表第一位=写入根）。
+fn pick_newest_file(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for p in paths {
+        let Ok(md) = p.metadata() else { continue };
+        let Ok(t) = md.modified() else { continue };
+        match &best {
+            // 严格大于才替换：第一位（写入根）在并列时保住优先权
+            Some((bt, _)) if *bt >= t => {}
+            _ => best = Some((t, p.clone())),
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// 当前生效的那本禁用台账。
+///
+/// 为什么按修改时间而不是"新根优先"：收口前所有写入都落老根，而启动迁移只是**按名复制一次**，
+/// 于是老根那份很可能比新根的副本新。新根优先会把用户后来禁用的项从列表里抹掉
+/// （账在老根那本上），而「恢复」按钮读的是同一本账——界面会说没有禁用项，系统里却还禁用着。
+fn startup_ledger_file() -> Option<std::path::PathBuf> {
+    pick_newest_file(&startup_disabled_file_candidates())
+}
+
+fn startup_disabled_file() -> std::path::PathBuf {
+    startup_backup_dir().join("disabled.json")
+}
+
+fn startup_files_dir() -> std::path::PathBuf {
+    startup_backup_dir().join("files")
+}
+
+/// v2-M19 备份根收口的回归位：写入恒新根、读取带老根兜底。
+#[cfg(test)]
+mod backup_root_tests {
+    use super::*;
+
+    #[test]
+    fn startup_ledger_writes_data_root_and_reads_both() {
+        let write = startup_disabled_file();
+        assert!(
+            write.starts_with(crate::engine::paths::app_data_dir()),
+            "禁用台账写回了老根，便携实例的台账带不走: {write:?}"
+        );
+        let cands = startup_disabled_file_candidates();
+        assert_eq!(cands[0], write, "读取候选的第一位必须就是写入那份，否则写完立刻读不到");
+        assert!(cands.len() >= 2, "老根那份历史台账必须还在候选里: {cands:?}");
+        assert!(
+            !startup_deleted_dir().to_string_lossy().contains(r"\Trim\"),
+            "删除备份又拼回 Electron 老根: {:?}",
+            startup_deleted_dir()
+        );
+    }
+
+    /// 台账取本口径：收口前写入全落老根，迁移只是**按名复制一次**，所以老根那份常常更新。
+    /// 按"新根优先"会把用户后来禁用的项从界面里抹掉，而系统里它们仍然禁用着。
+    #[test]
+    fn ledger_takes_the_newest_copy_not_the_new_root() {
+        use std::fs::File;
+        use std::io::Write;
+        use std::time::{Duration, SystemTime};
+        let t = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let root = std::env::temp_dir().join(format!("trim-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("new")).expect("临时目录");
+        std::fs::create_dir_all(root.join("old")).expect("临时目录");
+        let put = |dir: &str, secs: u64| -> std::path::PathBuf {
+            let p = root.join(dir).join("disabled.json");
+            let mut f = File::create(&p).expect("写台账");
+            f.write_all(b"[]").expect("写台账");
+            f.set_modified(t(secs)).expect("设时间");
+            p
+        };
+        let new_copy = put("new", 1_700_000_000);
+        let legacy_copy = put("old", 1_730_000_000);
+        assert_eq!(
+            pick_newest_file(&[new_copy.clone(), legacy_copy.clone()]).as_deref(),
+            Some(legacy_copy.as_path()),
+            "老根那份更新时必须认它，否则界面上看不到用户后来禁用的项"
+        );
+        // 同一时刻并列 → 偏向第一位（写入根），保证"刚写完立刻读"读到自己的写
+        let a = put("new", 1_740_000_000);
+        let b = put("old", 1_740_000_000);
+        assert_eq!(pick_newest_file(&[a.clone(), b]).as_deref(), Some(a.as_path()));
+        // 只剩一份 / 都不存在
+        assert_eq!(pick_newest_file(&[a.clone()]).as_deref(), Some(a.as_path()));
+        assert_eq!(
+            pick_newest_file(&[root.join("nope").join("disabled.json")]),
+            None,
+            "一本都没有就是没有台账，不该回退到某个写死路径"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 两根都要收，且**跨根一起排时间**：只认一根就是 v2-M19 收口后的新病——
+    /// 老根那批更早，新根这批才是"最近一次外设改动"，反过来也一样会挑错。
+    #[test]
+    fn peripheral_backup_scan_spans_both_roots_and_sorts_by_time() {
+        use std::fs::File;
+        use std::io::Write;
+        use std::time::{Duration, SystemTime};
+        let root = std::env::temp_dir().join(format!("trim-periph-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let current = root.join("current");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&current).expect("临时目录");
+        std::fs::create_dir_all(&legacy).expect("临时目录");
+        let put = |dir: &std::path::Path, name: &str, secs: u64| -> std::path::PathBuf {
+            let p = dir.join(name);
+            let mut f = File::create(&p).expect("写分片");
+            f.write_all(b"Windows Registry Editor Version 5.00\r\n").expect("写分片");
+            f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .expect("设时间");
+            p
+        };
+        let older = put(&current, "backup_20260101_000000_1.reg", 1_700_000_000);
+        let newer = put(&legacy, "backup_20260901_000000_1.reg", 1_730_000_000);
+        put(&current, "notes.txt", 1_800_000_000);
+        let got = collect_peripheral_backup_files(&[current.clone(), legacy.clone()]);
+        assert_eq!(got.len(), 2, "两个根都要收且只认 backup_*.reg: {got:?}");
+        assert_eq!(got[0], newer, "跨根必须一起排时间，否则还原挑到旧批次: {got:?}");
+        assert_eq!(got[1], older);
+        assert_eq!(
+            collect_peripheral_backup_files(&[current]).len(),
+            1,
+            "少给一个根就少一批可还原的备份"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// 读「本机被 Trim 禁用的启动项」台账（见 `startup_ledger_file` 的取本口径）。
+fn read_disabled_records() -> Vec<Value> {
+    let Some(f) = startup_ledger_file() else { return Vec::new() };
+    if let Ok(content) = std::fs::read_to_string(&f) {
+        if let Ok(Value::Array(arr)) = serde_json::from_str(&content) {
+            return arr.into_iter().filter(|v| !v.is_null()).collect();
+        }
+    }
+    Vec::new()
+}
+
+fn write_disabled_records(records: &[Value]) {
+    let dir = startup_backup_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let f = startup_disabled_file();
+    // 空台账写 `[]` 而不是删文件：删掉后「最近修改的那本」会回到老根那份历史账，
+    // 用户已经启用回来的项会被再次报成「Trim 禁用的」（见 startup_ledger_file）。
+    let payload = if records.is_empty() { Value::Array(Vec::new()) } else { Value::Array(records.to_vec()) };
+    // v2-L4P-23（A-5）：改走原子写。原实现 File::create 直接截断——进程在写入中途
+    // 崩溃/断电会留下半截 JSON，read_disabled_records 解析失败静默归空 ⇒ 启用回来的
+    // 项凭空消失。写日志留痕（原子写失败 = 台账更新没生效，得让维护者看得见）。
+    if let Err(e) = crate::security::atomic_write_json(&f, &payload) {
+        crate::engine::log::write_log("warn", &format!("启动项禁用台账写入失败（保留旧账）: {e}"));
+    }
+}
+
+
+
+/// StartupApproved 键路径
+fn startup_approved_key(hive: HKEY) -> String {
+    if hive == HKEY_CURRENT_USER {
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run".to_string()
+    } else {
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run".to_string()
+    }
+}
+
+/// 读 StartupApproved blob
+unsafe fn read_approved_blob(hive: HKEY, value_name: &str) -> Option<Vec<u8>> {
+    let key = startup_approved_key(hive);
+    let sk = to_wide(&key);
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
+    let nm = to_wide(value_name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        let _ = RegCloseKey(hk); return None;
+    }
+    if ty != REG_BINARY || size == 0 { let _ = RegCloseKey(hk); return None; }
+    let mut buf = vec![0u8; size as usize];
+    let r = RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size));
+    let _ = RegCloseKey(hk);
+    if r.is_err() { None } else { Some(buf) }
+}
+
+/// 写 StartupApproved blob，设置/清除 bit0，写后回读校验
+unsafe fn set_approved_bit(hive: HKEY, value_name: &str, disable: bool) -> Result<(), String> {
+    let key = startup_approved_key(hive);
+    // 确保键存在
+    let sk = to_wide(&key);
+    let mut hk = HKEY::default();
+    let mut disp = REG_CREATED_NEW_KEY;
+    if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+        return Err("无法创建 StartupApproved 键".into());
+    }
+    // 读现有 blob
+    let mut bytes = read_approved_blob(hive, value_name).unwrap_or_else(|| {
+        let mut b = vec![0u8; 12];
+        b[0] = 2; // 无记录时按启用起手
+        b
+    });
+    if bytes.len() < 12 { bytes.resize(12, 0); }
+    if disable { bytes[0] |= 1; } else { bytes[0] &= 0xFE; }
+    let nm = to_wide(value_name);
+    if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_BINARY, Some(&bytes)).is_err() {
+        let _ = RegCloseKey(hk);
+        return Err("写 StartupApproved blob 失败".into());
+    }
+    let _ = RegCloseKey(hk);
+    // 回读校验
+    if let Some(back) = read_approved_blob(hive, value_name) {
+        let got = back.first().map(|b| b & 1 == 1).unwrap_or(false);
+        if got != disable {
+            return Err("StartupApproved 回读不符（可能被策略或安全软件覆盖）".into());
+        }
+    }
+    Ok(())
+}
+
+
+
+/// 启动项启用/禁用（对应 startup_enable.ps1 / startup_disable.ps1，S3）
+///
+/// 覆盖：注册表项（StartupApproved blob 为主，删值式为回退）、文件夹项（移动备份）、
+/// 计划任务（schtasks /Change）。disabled.json 记账维护。
+pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
+    unsafe {
+        let mut records = read_disabled_records();
+        let mut results: Vec<Value> = Vec::new();
+        let mut success = 0i64;
+        let mut failed = 0i64;
+
+        for item in items {
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            let result = match source.as_str() {
+                "registry" => toggle_registry_item(item, enable, &mut records),
+                "folder" => toggle_folder_item(item, enable, &mut records),
+                "task" => toggle_task_item(item, enable),
+                _ => Err("未知来源类型".into()),
+            };
+
+            match result {
+                Ok(msg) => {
+                    success += 1;
+                    results.push(json!({"id": id, "name": name, "status": "ok", "message": msg}));
+                }
+                Err(e) => {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": e}));
+                }
+            }
+        }
+
+        write_disabled_records(&records);
+        Ok(json!({"success": success, "failed": failed, "results": results}))
+    }
+}
+
+unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<String, String> {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
+    let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
+    let hive_str = item.get("hive").and_then(|v| v.as_str()).unwrap_or("HKCU");
+    let hive = if hive_str.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+
+    let (_, subkey) = parse_reg_path(reg_path).ok_or("注册表路径格式错误")?;
+
+    if enable {
+        // 启用：优先清 StartupApproved bit0
+        if reg_read_value_typed(hive, &subkey, value_name).is_some() {
+            set_approved_bit(hive, value_name, false)?;
+            records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+            return Ok("已启用".into());
+        }
+        // 值已被删除：从 disabled.json 恢复
+        let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id))
+            .cloned().ok_or("缺少启用记录，且注册表中已无该项")?;
+        let kind_str = rec.get("valueType").and_then(|v| v.as_str()).unwrap_or("String");
+        let kind = match kind_str {
+            "ExpandString" => REG_EXPAND_SZ,
+            "DWord" => REG_DWORD,
+            "QWord" => REG_QWORD,
+            "Binary" => REG_BINARY,
+            "MultiString" => REG_MULTI_SZ,
+            _ => REG_SZ,
+        };
+        let data: Vec<u8> = if kind_str == "Binary" {
+            let b64 = rec.get("valueDataB64").and_then(|v| v.as_str()).unwrap_or("");
+            base64_decode(b64).unwrap_or_default()
+        } else if kind_str == "MultiString" {
+            let arr = rec.get("valueDataArray").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let mut bytes = Vec::new();
+            for s in arr {
+                let text = s.as_str().unwrap_or("");
+                let wide: Vec<u16> = text.encode_utf16().collect();
+                for w in &wide { bytes.extend_from_slice(&w.to_le_bytes()); }
+                bytes.extend_from_slice(&[0, 0]);
+            }
+            bytes.extend_from_slice(&[0, 0]);
+            bytes
+        } else if kind_str == "DWord" || kind_str == "QWord" {
+            let val = rec.get("valueData").and_then(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            if kind_str == "DWord" { (val as u32).to_le_bytes().to_vec() } else { val.to_le_bytes().to_vec() }
+        } else {
+            let text = rec.get("valueData").and_then(|v| v.as_str()).unwrap_or("");
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let mut bytes = Vec::new();
+            for w in &wide { bytes.extend_from_slice(&w.to_le_bytes()); }
+            bytes.extend_from_slice(&[0, 0]);
+            bytes
+        };
+        if !reg_write_value(hive, &subkey, value_name, kind, &data) {
+            return Err("回写未生效（可能需要管理员权限）".into());
+        }
+        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+        Ok("已启用".into())
+    } else {
+        // 禁用：优先写 StartupApproved blob
+        if reg_read_value_typed(hive, &subkey, value_name).is_none() {
+            return Err("注册表值不存在".into());
+        }
+        match set_approved_bit(hive, value_name, true) {
+            Ok(_) => Ok("已禁用（注册表值保留，可随时还原）".into()),
+            Err(e) => {
+                // 回退：删值 + 备份
+                let (kind, data) = reg_read_value_typed(hive, &subkey, value_name)
+                    .ok_or("读取注册表值失败")?;
+                let kind_str = match kind {
+                    REG_EXPAND_SZ => "ExpandString", REG_DWORD => "DWord", REG_QWORD => "QWord",
+                    REG_BINARY => "Binary", REG_MULTI_SZ => "MultiString", _ => "String",
+                };
+                let (v_data, v_b64, v_arr) = if kind == REG_BINARY {
+                    (String::new(), base64_encode(&data), Value::Array(vec![]))
+                } else if kind == REG_MULTI_SZ {
+                    let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let parts: Vec<String> = wide.split(|&c| c == 0).filter(|s| !s.is_empty())
+                        .map(|s| String::from_utf16_lossy(s)).collect();
+                    (String::new(), String::new(), Value::Array(parts.into_iter().map(|s| json!(s)).collect()))
+                } else if kind == REG_DWORD || kind == REG_QWORD {
+                    let val = if kind == REG_DWORD { u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64 }
+                        else { i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) };
+                    (val.to_string(), String::new(), Value::Array(vec![]))
+                } else {
+                    let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+                    (String::from_utf16_lossy(&wide[..end]), String::new(), Value::Array(vec![]))
+                };
+                if !reg_delete_value(hive, &subkey, value_name) {
+                    return Err(e);
+                }
+                let rec = json!({
+                    "id": id, "name": item.get("name"), "command": v_data,
+                    "source": "registry", "hive": item.get("hive"), "regPath": reg_path,
+                    "valueName": value_name, "valueType": kind_str,
+                    "valueData": v_data, "valueDataB64": v_b64, "valueDataArray": v_arr,
+                    "filePath": "", "taskPath": "", "taskName": "",
+                    "location": item.get("location"), "scope": item.get("scope"),
+                    "publisher": item.get("publisher"), "resolvedPath": item.get("resolvedPath"),
+                });
+                records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+                records.push(rec);
+                Ok(format!("已禁用（回退为删除值方式：{e}）"))
+            }
+        }
+    }
+}
+
+unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<String, String> {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let file_path = item.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
+
+    if enable {
+        let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id))
+            .cloned().ok_or("缺少启用记录")?;
+        let backup_path = rec.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
+        let orig_path = rec.get("valueData").and_then(|v| v.as_str()).unwrap_or("");
+        if backup_path.is_empty() || !std::path::Path::new(backup_path).exists() {
+            return Err("备份文件不存在".into());
+        }
+        if let Some(parent) = std::path::Path::new(orig_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::rename(backup_path, orig_path).map_err(|e| format!("移回失败: {e}"))?;
+        if std::path::Path::new(orig_path).exists() {
+            records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+            Ok("已启用".into())
+        } else {
+            Err("移回未生效".into())
+        }
+    } else {
+        if !std::path::Path::new(file_path).exists() {
+            return Err("文件不存在".into());
+        }
+        let files_dir = startup_files_dir();
+        let _ = std::fs::create_dir_all(&files_dir);
+        let stamp = chrono_now_str();
+        let safe_name: String = item.get("name").and_then(|v| v.as_str()).unwrap_or("item")
+            .chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+        let ext = std::path::Path::new(file_path).extension()
+            .and_then(|e| e.to_str()).unwrap_or("");
+        let dest = files_dir.join(format!("{stamp}_{safe_name}.{ext}"));
+        std::fs::rename(file_path, &dest).map_err(|e| format!("移动备份失败: {e}"))?;
+        let rec = json!({
+            "id": id, "name": item.get("name"), "command": file_path,
+            "source": "folder", "hive": item.get("hive"), "regPath": "", "valueName": "",
+            "valueType": "", "valueData": file_path, "valueDataB64": "", "valueDataArray": [],
+            "filePath": dest.to_string_lossy().to_string(), "taskPath": "", "taskName": "",
+            "location": item.get("location"), "scope": item.get("scope"),
+            "publisher": item.get("publisher"), "resolvedPath": item.get("resolvedPath"),
+        });
+        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+        records.push(rec);
+        Ok("已禁用".into())
+    }
+}
+
+unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String> {
+    let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
+    let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
+    if task_name.is_empty() { return Err("缺少任务名".into()); }
+    let full_name = format!("{task_path}{task_name}");
+    let arg = if enable { "/ENABLE" } else { "/DISABLE" };
+    let output = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
+        .args(["/Change", "/TN", &full_name, arg])
+        .output().map_err(|e| format!("schtasks 执行失败: {e}"))?;
+    if output.status.success() {
+        Ok(if enable { "已启用".into() } else { "已禁用".into() })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(if stderr.is_empty() { "操作未生效（可能需要管理员权限）".into() } else { stderr })
+    }
+}
+
+fn chrono_now_str() -> String {
+    let now = std::time::SystemTime::now();
+    let dur = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    // 简单格式：yyyyMMdd_HHmmss（本地时间近似）
+    let hours = (secs % 86400) / 3600 + 8; // UTC+8
+    format!("19700101_{:02}{:02}{:02}", hours % 24, (secs % 3600) / 60, secs % 60)
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((n >> 18) & 63) as usize] as char);
+        result.push(CHARS[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 { result.push(CHARS[((n >> 6) & 63) as usize] as char); } else { result.push('='); }
+        if chunk.len() > 2 { result.push(CHARS[(n & 63) as usize] as char); } else { result.push('='); }
+    }
+    result
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut result = Vec::new();
+    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 { return None; }
+        let mut n = 0u32;
+        let mut valid = 4;
+        for (i, &b) in chunk.iter().enumerate() {
+            let v = match b {
+                b'A'..=b'Z' => b - b'A',
+                b'a'..=b'z' => b - b'a' + 26,
+                b'0'..=b'9' => b - b'0' + 52,
+                b'+' => 62, b'/' => 63,
+                b'=' => { valid = i; break; }
+                _ => return None,
+            };
+            n |= (v as u32) << (18 - i * 6);
+        }
+        result.push((n >> 16) as u8);
+        if valid > 2 { result.push((n >> 8) as u8); }
+        if valid > 3 { result.push(n as u8); }
+    }
+    Some(result)
+}
+
+
+// ==================== B5 startup_delete：启动项删除 ====================
+
+fn startup_deleted_dir() -> std::path::PathBuf {
+    let dir = crate::engine::paths::backup_write_dir("startup-backup").join("deleted");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+
+
+/// 启动项删除（对应 startup_remove.ps1，S3）
+///
+/// 注册表：reg.exe export 备份整个键 + RegDeleteValueW 删值
+/// 文件夹：复制到 deleted/ 备份，返回 fsDelete 由主进程回收站删除
+/// 计划任务：schtasks /Query /XML 备份 + schtasks /Delete 删除
+pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
+    let deleted_dir = startup_deleted_dir();
+    let backup_dir = deleted_dir.parent().unwrap().to_path_buf();
+    let disabled_file = backup_dir.join("disabled.json");
+    let stamp = crate::engine::now_ms().to_string();
+
+    let mut records: Vec<Value> = if disabled_file.exists() {
+        std::fs::read_to_string(&disabled_file).ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| Value::Array(vec![]))
+            .as_array().cloned().unwrap_or_default()
+    } else { vec![] };
+
+    let mut results: Vec<Value> = Vec::new();
+    let mut fs_delete: Vec<Value> = Vec::new();
+    let mut success = 0i64;
+    let mut failed = 0i64;
+
+    for item in items {
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+
+        match source {
+            "registry" => {
+                let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
+                let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
+                if reg_path.is_empty() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "缺少注册表路径"}));
+                    continue;
+                }
+                let (hive, subkey) = match parse_reg_path(reg_path) {
+                    Some(v) => v,
+                    None => { failed += 1; results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表路径格式错误"})); continue; }
+                };
+                // 备份整个键到 .reg
+                let safe = safe_name(&name);
+                let reg_file = deleted_dir.join(format!("{stamp}_reg_{safe}.reg"));
+                let hive_short = if hive == HKEY_LOCAL_MACHINE { "HKLM" } else { "HKCU" };
+                let export_path = format!("{hive_short}\\{subkey}");
+                // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
+                let Some(reg_file_str) = reg_file.to_str() else {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "备份路径无法编码，未执行删除"}));
+                    continue;
+                };
+                // v2-L4P-29（B-7）：备份类子进程统一走带超时入口，reg.exe 被拖住不再永久挂死
+                let export_out = crate::engine::systembin::quiet_cmd_timeout(
+                    system_tool("reg.exe"),
+                    &["export", &export_path, reg_file_str, "/y"],
+                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                );
+                if export_out.is_err() || !reg_file.exists() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表备份失败，未执行删除"}));
+                    continue;
+                }
+                // 删值
+                unsafe {
+                    let sk = to_wide(&subkey);
+                    let mut hk = HKEY::default();
+                    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开注册表键"}));
+                        continue;
+                    }
+                    let nm = to_wide(value_name);
+                    let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+                    let _ = RegCloseKey(hk);
+                    // 回读
+                    let sk2 = to_wide(&subkey);
+                    let mut hk2 = HKEY::default();
+                    let still_exists = if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
+                        let nm2 = to_wide(value_name);
+                        let mut ty = REG_VALUE_TYPE::default();
+                        let mut size = 0u32;
+                        let exists = RegQueryValueExW(hk2, PCWSTR(nm2.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
+                        let _ = RegCloseKey(hk2);
+                        exists
+                    } else { false };
+                    if still_exists {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
+                    } else {
+                        // 从 disabled.json 移除记录
+                        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+                        success += 1;
+                        results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除（已备份注册表键）"}));
+                    }
+                }
+            }
+            "folder" => {
+                let file_path = item.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
+                // 检查是否为已禁用记录（在备份目录）
+                let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+                let backup_path = rec.and_then(|r| r.get("filePath").and_then(|v| v.as_str())).unwrap_or("");
+                if !backup_path.is_empty() && std::path::Path::new(backup_path).exists() && !std::path::Path::new(file_path).exists() {
+                    // 从备份目录删除
+                    fs_delete.push(json!({"id": id, "name": name, "path": backup_path, "kind": "backup-file"}));
+                    records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+                    results.push(json!({"id": id, "name": name, "status": "deferred", "message": "备份文件待主进程回收站删除"}));
+                } else if std::path::Path::new(file_path).exists() {
+                    // 备份到 deleted 目录
+                    let safe = safe_name(&name);
+                    let ext = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let dest = deleted_dir.join(format!("{stamp}_folder_{safe}.{ext}"));
+                    if std::fs::copy(file_path, &dest).is_err() {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "文件备份失败"}));
+                        continue;
+                    }
+                    fs_delete.push(json!({"id": id, "name": name, "path": file_path, "kind": "startup-file"}));
+                    results.push(json!({"id": id, "name": name, "status": "deferred", "message": "已备份，待主进程回收站删除"}));
+                } else {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "文件不存在"}));
+                }
+            }
+            "task" => {
+                let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
+                let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
+                if task_name.is_empty() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "缺少任务名"}));
+                    continue;
+                }
+                let tn = if task_path.is_empty() || task_path == "\\" { task_name.to_string() } else { format!("{}\\\\{}", task_path, task_name) };
+                // 导出 XML 备份
+                let safe = safe_name(&task_name);
+                let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
+                let query_out = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
+                    .args(["/Query", "/TN", &tn, "/XML"])
+                    .output();
+                if let Ok(out) = query_out {
+                    if out.status.success() {
+                        let _ = std::fs::write(&xml_file, &out.stdout);
+                    }
+                }
+                if !xml_file.exists() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "计划任务备份失败，未执行删除"}));
+                    continue;
+                }
+                // 删除
+                let del_out = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
+                    .args(["/Delete", "/TN", &tn, "/F"])
+                    .output();
+                if del_out.is_err() || !del_out.unwrap().status.success() {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
+                } else {
+                    success += 1;
+                    results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除（已导出任务备份）"}));
+                }
+            }
+            _ => {
+                failed += 1;
+                results.push(json!({"id": id, "name": name, "status": "error", "message": "未知来源类型"}));
+            }
+        }
+    }
+
+    // 写回 disabled.json
+    if records.is_empty() {
+        let _ = std::fs::remove_file(&disabled_file);
+    } else {
+        // 审查 v3-L1：禁用台账走原子写（直写崩溃/断电会留下半截 JSON，还原侧读不到）
+        let _ = crate::security::atomic_write_json(
+            &disabled_file,
+            &Value::Array(records),
+        );
+    }
+
+    Ok(json!({"success": success, "failed": failed, "results": results, "fsDelete": fs_delete}))
+}
+// ==================== B5 startup_add：新增启动项 ====================
+
+/// 新增启动项（对应 startup_add.ps1，S3）
+///
+/// 写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run，值为带引号的路径。
+/// 冲突检查：已存在同名启动项时返回原值，不覆盖。
+/// 返回 Ok(None) 表示成功，Ok(Some(existing_value)) 表示冲突。
+pub fn startup_add(path: &str, name: &str) -> Result<Option<String>, String> {
+    unsafe {
+        let key = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let sk = to_wide(key);
+        let mut hk = HKEY::default();
+        let mut disp = REG_CREATED_NEW_KEY;
+        if RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), None, PCWSTR::default(),
+            REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+            return Err("无法打开 Run 键".into());
+        }
+        // 冲突检查
+        let nm = to_wide(name);
+        if let Some(existing) = reg_read_string(hk, name) {
+            if !existing.is_empty() {
+                let _ = RegCloseKey(hk);
+                return Ok(Some(existing));
+            }
+        }
+        // 写入带引号的路径
+        let value = format!("\"{path}\"");
+        let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        let bytes: Vec<u8> = wide.iter().flat_map(|w| w.to_le_bytes()).collect();
+        if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_SZ, Some(&bytes)).is_err() {
+            let _ = RegCloseKey(hk);
+            return Err("写入注册表失败".into());
+        }
+        let _ = RegCloseKey(hk);
+        Ok(None)
+    }
+}

@@ -85,12 +85,12 @@ const SITE_EXEMPT = [
     reason: 'quiet_cmd_timeout（v2-L4P-29）函数体内的透传：program 由调用方经 system_tool 或已登记豁免解析，本函数只补超时收口',
   },
   {
-    file: 'src-tauri/src/engine/native.rs',
+    file: 'src-tauri/src/engine/native/contextmenu.rs',
     anchor: 'quiet_cmd(p).spawn()',
     reason: 'p 来自注册表 Run 键回读的绝对路径列表，非 PINNED 裸名',
   },
   {
-    file: 'src-tauri/src/engine/native.rs',
+    file: 'src-tauri/src/engine/native/contextmenu.rs',
     anchor: 'quiet_cmd(&fp).spawn()',
     reason: 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
   },
