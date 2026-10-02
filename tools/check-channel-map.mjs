@@ -106,6 +106,7 @@ const TAURI_ADDED = {
   'syspanel:pagefile-state': 'P2 §3.6（2026-10-03）：虚拟内存只读展示（写侧同批落地）',
   'syspanel:pagefile-apply': 'P2 §3.6（2026-10-03）：虚拟内存写侧（AutomaticManagedPagefile + PagingFiles；主窗档 + 高危确认 + 需重启）',
   'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',
+  'optimizer:list-groups': 'E7（2026-10-03）：分类两层结构下发（default 主序列 + custom 重映射；纯只读侧表）',
 };
 
 function collect(set, re, text) {

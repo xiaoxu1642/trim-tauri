@@ -7,24 +7,59 @@
 (function () {
   'use strict';
 
-  const GROUP_ORDER = ['内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '隐私防护', '系统调校', '系统精简', '显卡优化', '浏览器优化'];
   const RISK_TEXT = { low: '低风险', medium: '中风险', high: '高风险' };
 
-  // 旧分组 → 新分类重映射（Trim 分类风格：启动与响应→系统调校、游戏与多媒体→性能调优、键鼠与外设→外设调优、安全与隐私→隐私防护）
-  const GROUP_MAP = {
-    '启动与响应': '系统调校',
-    '游戏与多媒体': '性能调优',
-    '安全与隐私': '隐私防护',
-    '系统清理': '系统精简',
-    '显卡优化': '显卡优化',
-    '键鼠与外设': '外设调优',
-    '系统精简': '系统精简'
+  // ==================== E7：分类两层结构（default / custom）====================
+  //
+  // 借 Winaero `NavigationPane` 的 `pageNavPaneDefaultItems` 与
+  // `pageNavPaneCustomItems` 两层：主序列与逐项覆写分开，别混成一张表。
+  //
+  // 数据源 = `src-tauri/data/optimizer-groups.json`（E7 侧表），经
+  // `optimizer:list-groups` 通道下发。**为什么搬**：分类顺序与重映射规则是**产品口径**，
+  // 埋在渲染层里就没法被门禁对拍、也没法在不改前端口径的情况下单独调整。
+  //
+  // ⚠️ 侧表**刻意不含任何颜色字段** —— GROUP_COLORS（13 条 linear-gradient）与
+  // GROUP_ACCENT（13 个 hex）在 M20 已删除，分类列统一吃 `--c` / `--cf` 的 token 兜底。
+  // 借这次搬家把它们请回来就是离表色复活，`check-css-tokens` 会红。
+  //
+  // 兜底语义（**不许削弱**）：侧表缺席/损坏时用下面的 BUILTIN 常量，
+  // 它与侧表内容一致 —— 门禁 check-optimizer-groups-sidecar 对拍两侧，
+  // 改了一边忘了另一边即红。
+  const GROUP_FALLBACK = {
+    default: ['内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '隐私防护', '系统调校', '系统精简', '显卡优化', '浏览器优化'],
+    groupMap: {
+      '启动与响应': '系统调校',
+      '游戏与多媒体': '性能调优',
+      '安全与隐私': '隐私防护',
+      '系统清理': '系统精简',
+      '显卡优化': '显卡优化',
+      '键鼠与外设': '外设调优',
+      '系统精简': '系统精简'
+    },
+    itemOverride: {
+      svc_mem_gb: '内存优化', tf_mmagent: '内存优化',
+      tf_svc_bulk: '系统服务', tf_drv_disable: '系统服务'
+    }
   };
-  // 系统服务与内存 按条目拆分到「内存优化」/「系统服务」
-  const ITEM_GROUP_OVERRIDE = {
-    svc_mem_gb: '内存优化', tf_mmagent: '内存优化',
-    tf_svc_bulk: '系统服务', tf_drv_disable: '系统服务'
-  };
+  let GROUP_ORDER = GROUP_FALLBACK.default.slice();
+  let GROUP_MAP = GROUP_FALLBACK.groupMap;
+  let ITEM_GROUP_OVERRIDE = GROUP_FALLBACK.itemOverride;
+  let GROUPS_FROM_SIDECAR = false;
+
+  /** 用侧表覆盖内置常量。侧表缺席/形状不对时保留内置（并保持 GROUPS_FROM_SIDECAR=false，
+   *  便于门禁/日志区分「走的侧表」还是「走的兜底」）。 */
+  function applyGroupSidecar(raw) {
+    if (!raw || typeof raw !== 'object') return false;
+    const def = raw.default;
+    const cus = raw.custom;
+    if (!Array.isArray(def) || !def.length) return false;
+    if (!cus || typeof cus.groupMap !== 'object' || typeof cus.itemOverride !== 'object') return false;
+    GROUP_ORDER = def.slice();
+    GROUP_MAP = cus.groupMap;
+    ITEM_GROUP_OVERRIDE = cus.itemOverride;
+    GROUPS_FROM_SIDECAR = true;
+    return true;
+  }
 
   function displayGroup(o) {
     if (ITEM_GROUP_OVERRIDE[o.id]) return ITEM_GROUP_OVERRIDE[o.id];
@@ -1913,8 +1948,13 @@
       const pDisk = window.api.system?.diskType
         ? window.api.system.diskType().then(r => (r && r.success ? r.data : null)).catch(() => null)
         : Promise.resolve(null);
-      Promise.all([pDisk, window.api.optimizer.list()]).then(([dt, res]) => {
+      // E7：先取分类侧表，再取目录 —— 渲染要用分组口径决定每项归到哪个看板。
+      // 两条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
+      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups()])
+        .then(([dt, res, gs]) => {
         diskType = dt;
+        // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
+        if (gs && gs.success) applyGroupSidecar(gs.data);
         if (res && res.success && Array.isArray(res.data)) {
           OPTIONS = filterByDiskType(res.data);
           activeCategory = getSavedCategory();

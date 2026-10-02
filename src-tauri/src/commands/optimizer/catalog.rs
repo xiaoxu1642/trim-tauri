@@ -152,6 +152,9 @@ pub(super) const PROVENANCE_JSON: &str = include_str!("../../../data/optimizer-p
 /// `"unknown"` —— **不是猜的值**。见 `tools/check-optimizer-write-contract.mjs` 的 A7 组。
 pub(super) const DEFAULTS_JSON: &str = include_str!("../../../data/optimizer-defaults.json");
 
+/// E7：分类两层结构侧表。**刻意不含颜色字段**（M20 已删 GROUP_COLORS/GROUP_ACCENT）。
+pub(super) const GROUPS_JSON: &str = include_str!("../../../data/optimizer-groups.json");
+
 /// 某项的 provenance；不在表里 = None
 pub(super) fn provenance_of(option_id: &str) -> Option<Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
@@ -165,6 +168,20 @@ pub(super) fn provenance_of(option_id: &str) -> Option<Value> {
             .unwrap_or_default()
     });
     map.get(option_id).cloned()
+}
+
+/// E7：分类两层结构（`default` 主序列 / `custom` 重映射）。
+///
+/// 与其它侧表不同，这一份**要下发到渲染层**（分类导航要用），所以走通道而非
+/// 只在 Rust 侧读。形状与 `optimizer-groups.json` 的 `groups` 字段一致。
+pub(super) fn groups_sidecar() -> Value {
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let parsed: Value = serde_json::from_str(GROUPS_JSON).expect("optimizer-groups.json 合法");
+            parsed.get("groups").cloned().unwrap_or(Value::Null)
+        })
+        .clone()
 }
 
 /// C1：某项的「出厂默认值 / 产品建议」信息；不在表里 = None

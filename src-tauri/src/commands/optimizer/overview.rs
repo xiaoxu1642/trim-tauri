@@ -631,6 +631,24 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     json!({ "success": true, "data": rows })
 }
 
+/// optimizer:list-groups —— 分类两层结构（E7）
+///
+/// 形状 = `optimizer-groups.json` 的 `groups` 字段（`{default[], custom:{}}`）。
+///
+/// **档位 `MAIN` 而不是 `guard_readonly`**（由 check-guard-tiers 的 D5 组判出来的）：
+/// 本命令**只读侧表**，但只有**主窗的优化页**消费它（`optimizer.js::init` 调
+/// `applyGroupSidecar`）。四个子窗（预览 / 模型 / 进程管理 / 外设）都不加载
+/// `optimizer.js`、也不渲染分类导航 —— 给它 readonly 档就是 D5 说的「白给放宽」：
+/// 放行了全部五个窗口 label，却没有任何子窗消费方。
+/// 判档依据是 AGENTS §3「以谁真的需要调它为准」，不是「它只读」。
+#[tauri::command]
+pub async fn optimizer_list_groups<R: Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    json!({ "success": true, "data": groups_sidecar() })
+}
+
 /// optimizer:svc-mem-current —— 当前 SVCHost 拆分阈值档位
 ///
 /// B11：原先这里落一个 4 行的临时 `.ps1`、spawn pwsh、60s 超时、再从 stdout 里抠

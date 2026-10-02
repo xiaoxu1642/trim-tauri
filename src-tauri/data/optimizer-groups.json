@@ -1,0 +1,37 @@
+{
+  "_comment": "优化分类两层结构（E7 · 借 Winaero NavigationPane 的 defaultItems / CustomItems 两层）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。  default = 分类导航主序列（用户没自定义时的样子）；custom = 旧分组重映射 + 逐项覆写。  ⚠️ **本表刻意不含任何颜色字段**：GROUP_COLORS（13 条 linear-gradient）与 GROUP_ACCENT（13 个 hex）已在 M20 删除，分类列统一吃 --c / --cf 的 token 兜底。 借这次搬家把它们请回来就是离表色复活 —— 门禁 check-css-tokens 会红。  数据从 src/scripts/optimizer.js 机械提取（不手抄），门禁 check-optimizer-groups-sidecar.mjs 对拍两侧。",
+  "schemaVer": 1,
+  "groups": {
+    "default": [
+      "内存优化",
+      "性能调优",
+      "音频优化",
+      "外设调优",
+      "桌面体验",
+      "任务调度",
+      "系统服务",
+      "隐私防护",
+      "系统调校",
+      "系统精简",
+      "显卡优化",
+      "浏览器优化"
+    ],
+    "custom": {
+      "groupMap": {
+        "启动与响应": "系统调校",
+        "游戏与多媒体": "性能调优",
+        "安全与隐私": "隐私防护",
+        "系统清理": "系统精简",
+        "显卡优化": "显卡优化",
+        "键鼠与外设": "外设调优",
+        "系统精简": "系统精简"
+      },
+      "itemOverride": {
+        "svc_mem_gb": "内存优化",
+        "tf_mmagent": "内存优化",
+        "tf_svc_bulk": "系统服务",
+        "tf_drv_disable": "系统服务"
+      }
+    }
+  }
+}

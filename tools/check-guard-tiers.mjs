@@ -108,6 +108,7 @@ const MUST_MAIN = [
   'optimizer_create_restore',
   'optimizer_restore_reg',
   'optimizer_run',
+  'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
   // 'pwsh_prepare' 已于 B11（2026-09-26）整链摘除，不再是一条命令
   'runtimes_install',
   // 'settings_save' 已于 v2-F4 整链摘除（2026-09-26），不再是一条命令
