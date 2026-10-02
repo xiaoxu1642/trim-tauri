@@ -96,7 +96,40 @@ fn local_utc_offset_secs() -> i64 {
     }
 }
 
+/// 当前进程是不是「测试进程」——是则**不落盘**（返回行照旧，见 [`log_sink_enabled`]）。
+///
+/// 为什么要这个闸门：`cargo test` 会把测试夹具的日志写进**应用真正的日志目录**
+/// （`%APPDATA%\<identifier>\logs\app-YYYY-MM-DD.log`），而那正是「操作日志」页面读的同一份。
+/// 后果是用户在自己的日志里看到 `evil.reg 含受保护目标，已拒绝还原`、
+/// `拒绝：受保护路径 C:\Windows`、`[ERROR] 伪造的一行` 这类**测试产物**，看上去像应用在报错
+/// —— 2026-10-02 用户就是拿这条日志截图来问的。
+///
+/// 判据两条，覆盖两种测试形态：
+///  ① 单元测试：lib 内部 `#[cfg(test)]` 编译 → `cfg!(test)`；
+///  ② 集成/文档测试：产物落在 `target\<profile>\deps\<name>-<hash>.exe`。**应用本体不在此目录**
+///     （dev 是 `target\debug\trim-tauri.exe`，发布版是 `Trim.exe`），所以不会误伤真机运行。
+fn is_test_process() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.file_name().map(|n| n == "deps").unwrap_or(false)))
+        .unwrap_or(false)
+}
+
+/// 日志是否落盘。**真机运行为 true；任何测试进程为 false。**
+///
+/// 暴露出来是为了能被断言（`tests/` 里有一条用例钉它），否则这个闸门被人误删时是静默的：
+/// 测试又开始往用户日志里灌垃圾，而所有用例依旧全绿。
+pub fn log_sink_enabled() -> bool {
+    !is_test_process()
+}
+
 /// 写日志。返回完整日志行（对齐 Electron 版 writeLog 返回值）。
+///
+/// 测试进程只返回行、不入队（见 [`is_test_process`]）—— 既有用例断言的都是**返回值**
+/// （行格式、换行注入、长度截断），所以这条闸门不影响它们，也不需要给测试另开日志目录。
 pub fn write_log(level: &str, message: &str) -> String {
     let level = if level.is_empty() { "info" } else { level };
     let now = SystemTime::now();
@@ -111,6 +144,9 @@ pub fn write_log(level: &str, message: &str) -> String {
         level.to_uppercase(),
         message
     );
+    if !log_sink_enabled() {
+        return line;
+    }
     let file = paths::log_dir().join(format!("app-{}.log", local_date_str(now)));
     with_state(|st| st.queue.push((file, line.clone())));
     // 异步批量落盘：由 flush_async 在后台线程执行（等价 Electron 的 setImmediate 合并写）
@@ -283,5 +319,19 @@ mod tests {
         let bytes = s.as_bytes();
         assert_eq!(bytes[4], b'-');
         assert_eq!(bytes[7], b'-');
+    }
+
+    /// 测试进程**不许**落盘（2026-10-02 用户拿日志页截图来问的那个问题：测试夹具
+    /// `evil.reg` / `C:\Windows` / `伪造的一行` 全灌进了应用真正的日志里）。
+    ///
+    /// 这条用例钉的是闸门本身：谁把 `log_sink_enabled` 的判据删了或反转了，这里立刻红 ——
+    /// 否则污染会**静默**回来（所有用例照样全绿，用户那边日志又脏了）。
+    #[test]
+    fn 测试进程不落盘() {
+        assert!(cfg!(test), "本用例自身就该在测试构建里");
+        assert!(!log_sink_enabled(), "测试进程打开了生产日志落盘");
+        // 返回行照旧（既有用例全靠返回值断言格式/截断/换行注入）
+        let line = write_log("error", "闸门自检");
+        assert!(line.starts_with('[') && line.ends_with('\n') && line.contains("闸门自检"));
     }
 }

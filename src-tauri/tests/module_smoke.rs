@@ -1128,3 +1128,16 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
         p.file_name().unwrap().to_string_lossy().to_string()
     }
 }
+
+/// 集成测试进程同样不许写生产日志（2026-10-02 修：测试夹具灌进了用户看得见的日志页）。
+///
+/// 为什么这条必须放在**集成测试**里：单元测试靠 `cfg!(test)` 就够，而集成测试链的是
+/// **非 test 构建**的 lib，`cfg!(test)` 是 false —— 那条路径只能靠「产物落在 deps 目录」
+/// 这一判据兜住。本用例就是那条判据的活体证据：判据失效时它会红，而不是让污染静默回来。
+#[test]
+fn 集成测试进程不写生产日志() {
+    assert!(
+        !trim_tauri_lib::engine::log::log_sink_enabled(),
+        "集成测试进程打开了生产日志落盘 —— 测试夹具会再次灌进用户的「操作日志」"
+    );
+}
