@@ -358,7 +358,11 @@
             const regTag = result.regCount > 0 ? ` <span class="path-auto-tag">注册表 ${result.regCount} 项</span>` : '';
             const blockedTag = Array.isArray(result.blockedBy) && result.blockedBy.length
               ? ` <span class="path-blocked-tag" data-tip="执行前会跳过此项目并提示原因">需关闭: ${escapeHtml(result.blockedBy.join(', '))}</span>` : '';
-            inner = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(result.path)}">${escapeHtml(xtable.middleEllipsis(result.path, 72))}${autoTag}${fileTag}${regTag}${blockedTag}</span>`;
+            // R1-2：跳过 junction 必须让用户看见。不说的话，扫描结果天然比 Explorer 算的少，
+            // 用户会去手工核对目录、怀疑扫描漏了。复用 path-auto-tag（既有 token，零新增样式）。
+            const reparseTag = Number(result.skippedReparse) > 0
+              ? ` <span class="path-auto-tag" data-tip="扫描时跳过了 ${escapeHtml(String(result.skippedReparse))} 个联接点/挂载点目录（它们指向别的子树，深入会重复计数）">已跳过 ${escapeHtml(String(result.skippedReparse))} 个联接点</span>` : '';
+            inner = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(result.path)}">${escapeHtml(xtable.middleEllipsis(result.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${blockedTag}</span>`;
           } else {
             inner = '<span class="xtable-cell-muted">—</span>';
           }
@@ -795,7 +799,11 @@
       const regTag = r.regCount > 0 ? ` <span class="path-auto-tag">注册表 ${r.regCount} 项</span>` : '';
       const blockedTag = Array.isArray(r.blockedBy) && r.blockedBy.length
         ? ` <span class="path-blocked-tag" data-tip="执行前会跳过此项目并提示原因">需关闭: ${escapeHtml(r.blockedBy.join(', '))}</span>` : '';
-      pathCell.innerHTML = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(r.path)}">${escapeHtml(xtable.middleEllipsis(r.path, 72))}${autoTag}${fileTag}${regTag}${blockedTag}</span>`;
+      // R1-2：见上方同名标签的说明（流式阶段与全量渲染必须同口径，
+      // 否则行会在流式更新到最终值时把标签丢掉）
+      const reparseTag = Number(r.skippedReparse) > 0
+        ? ` <span class="path-auto-tag" data-tip="扫描时跳过了 ${escapeHtml(String(r.skippedReparse))} 个联接点/挂载点目录（它们指向别的子树，深入会重复计数）">已跳过 ${escapeHtml(String(r.skippedReparse))} 个联接点</span>` : '';
+      pathCell.innerHTML = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(r.path)}">${escapeHtml(xtable.middleEllipsis(r.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${blockedTag}</span>`;
     }
   }
 

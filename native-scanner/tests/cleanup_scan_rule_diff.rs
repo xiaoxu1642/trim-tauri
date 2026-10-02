@@ -14,6 +14,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::os::windows::process::CommandExt;
 
 fn temp_root(tag: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -260,5 +261,100 @@ fn 扫描是只读的() {
     assert_eq!(hits.len(), 2, "用例本身失效：没扫到两个文件 {hits:?}");
     assert!(root.join("a.log").is_file(), "扫描把文件删了");
     assert!(root.join("sub/c.log").is_file(), "扫描把子目录文件删了");
+    fs::remove_dir_all(&root).ok();
+}
+
+// ==================== R1-2 重解析点留痕 ====================
+
+/// 造一个 junction（`mklink /J`）。不用 `std::os::windows::fs::symlink_dir`：
+/// 那条API 建的是**符号链接**（要 SeCreateSymbolicLinkPrivilege），而本仓的跳过判据
+/// 认的是 `FILE_ATTRIBUTE_REPARSE_POINT` 属性位 —— 符号链接与 junction 都带该位，
+/// 但走不通符号链接会让用例在默认权限下直接造不出来。junction 零权限可建，
+/// 且它才是真实踩坑场景（`AppData\Roaming\Application Data` 就是 junction）。
+///
+/// 返回 false 表示环境不允许建（精简版 Windows 缺 mklink）⇒ 调用方跳过断言，
+/// **但不许把「造不出」当成「没跳过」**：此时用 `assert_skipped_or_unavailable`
+/// 显式登记，而不是静默通过。
+fn make_junction(link: &Path, target: &Path) -> bool {
+    let out = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW：不弹黑窗（R1 起本仓统一）
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// 从扫描输出里取某个 item 行的 `skippedReparse` 值（0 表示没这行 / 值为 0）。
+fn skipped_reparse_of(out: &str) -> Option<u64> {
+    let key = "\"skippedReparse\":";
+    let at = out.find(key)? + key.len();
+    let rest = &out[at..];
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// R1-2.1 + R1-2.2：跳过必须留痕，且**留痕不许改变判定**。
+///
+/// 这两条是一对，缺一条就废：
+/// - 只断「留痕 > 0」→ 实现可能顺手把跳过的也统计进 total（行为变更，没人审得出）；
+/// - 只断「total 不变」→ 实现可能压根没记，静默丢目录。
+///
+/// 场景用真实形态：目标目录里有 1 个文件，根下挂一个指向它的 junction。
+/// 期望：扫到 1 个文件、**total 仍为 1**、但 `skippedReparse == 1`。
+/// 若 junction 没被跳过，文件会被计两次（那就是 bug，本断言正好抓住）。
+#[test]
+fn 重解析点跳过必须留痕且不改变命中判定() {
+    let root = temp_root("reparse");
+    plant(&root, &[("sub/real.log", 7)]);
+    let link = root.join("junction_to_sub");
+    if !make_junction(&link, &root.join("sub")) {
+        // 环境造不出 junction：登记而不是静默通过。
+        // 这是本用例唯一允许的「不执行断言」路径，且必须显式可见。
+        eprintln!("[R1-2] 本环境无法创建 junction，跳过断言（造不出≠没跳过）");
+        fs::remove_dir_all(&root).ok();
+        return;
+    }
+    let (code, hits, err) = scan_hits(&root, &rules_json(&root, "*", true, ""));
+    assert_eq!(code, 0, "扫描失败: {err}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "junction 被跳过后只应命中 real.log 一次；命中 {hits:?} ⇒ 要么 junction 漏跳（重复计数），\
+         要么真文件没扫到"
+    );
+    let (_, out, _) = scan_raw(&rules_json(&root, "*", true, ""));
+    let skipped = skipped_reparse_of(&out);
+    assert!(
+        skipped.is_some(),
+        "输出里没有 skippedReparse 字段 —— 跳过 junction 是静默的，用户看不出「为什么少了这些」: {out}"
+    );
+    assert_eq!(
+        skipped.unwrap_or(0),
+        1,
+        "应恰好记1 个跳过的重解析点目录（造了 1 个 junction）: {out}"
+    );
+    // R1-2.2 反向判据：留痕**不许**改变判定字段。真文件仍在命中集里、且只一次。
+    assert!(
+        hits.iter().any(|h| h.ends_with("real.log")),
+        "留痕不许影响命中集，真实文件必须仍在其中: {hits:?}"
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
+/// R1-2.2 的另一半：**无 junction 时计数必须是 0**（不许无条件报非零）。
+///
+/// 这条是 R1-2 留痕的反向判据。实现很容易犯的错是「把计数初始化成非零」或者
+/// 「无条件把 `visits` 当跳过数报出来」—— 那种实现在上面那条用例里也能过。
+#[test]
+fn 没有重解析点时留痕计数必须为零() {
+    let root = temp_root("noreparse");
+    plant(&root, &[("a.log", 5), ("sub/b.log", 6)]);
+    let (_, out, _) = scan_raw(&rules_json(&root, "*", true, ""));
+    assert_eq!(
+        skipped_reparse_of(&out),
+        Some(0),
+        "样本树里没有 junction，计数必须是 0（无条件报非零 = 把别的计数冒充成跳过数）: {out}"
+    );
     fs::remove_dir_all(&root).ok();
 }

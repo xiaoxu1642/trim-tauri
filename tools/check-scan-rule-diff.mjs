@@ -17,12 +17,20 @@
 //
 // 用法：node tools/check-scan-rule-diff.mjs
 
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
 
 const CRATE = join(REPO_ROOT, 'native-scanner');
+const SRC = join(CRATE, 'src');
+
+let fail = 0;
+const check = (ok, label, detail = '') => {
+  console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
+  if (!ok) fail++;
+};
 
 console.log('=== 扫描器规则行为差分门禁 ===\n');
 console.log(`  cargo test --test cleanup_scan_rule_diff  （cwd=${CRATE}）\n`);
@@ -45,3 +53,131 @@ if (r.status !== 0) {
   process.exit(1);
 }
 console.log('\n✓ 通过：差分断言 / D19 死键双向桩 / 扫描只读前提');
+
+// ==================== R1-2 重解析点留痕的静态断言 ====================
+// 为什么静态面也要钉：上面的行为用例只在 `cleanup_scan_rule_diff` 这一个入口跑，
+// 而 `is_reparse` 在两个文件里有 **14 处**调用。将来新增一处「跳过 + continue」形态的
+// 站点而忘了留痕，行为用例碰不到那个入口 ⇒ 静默丢目录又回来了。
+//
+// ⚠️ **口径只覆盖「跳过 + continue」形态，不覆盖 `&& !is_reparse(...)` 条件过滤**。
+// 两者语义不同：
+//   · 跳过形态 = 「枚举到但主动丢弃」，用户会看到结果偏少，**必须留痕**；
+//   · 过滤形态 = 「按条件筛选」（如只要真目录、`rec` 为假时不递归），是枚举口径的一部分，
+//     记成「跳过」会把这个计数变成一个含义混乱的混合值。
+// 条件过滤那几处（scan.rs 的 dir_size / analyze / expand_tasks / topk 等）**当前无留痕**，
+// 它们的跳过量未被任何字段呈现 —— 这是已知缺口，已在下方显式登记（EXPECTED_UNTRACED），
+// 不靠「判据看不见」蒙混过去。补齐它们需要给每个域加累加器，属另一轮工作。
+//
+// 用「跳过分支的紧邻块」而不是「文件里出现过这个词」，是因为后者会把注释、
+// helper 定义（is_reparse_target）、条件过滤全部算进去 —— 判据必须能区分「哪一处被改」。
+const scanRs = readFileSync(join(SRC, 'scan.rs'), 'utf8');
+const cleanRs = readFileSync(join(SRC, 'cleanup_scan.rs'), 'utf8');
+
+/** 逐行判定：这一行是不是「命中即丢弃」的 reparse 跳过分支 */
+function isSkipBranch(line) {
+  if (/^\s*\/\//.test(line)) return false;
+  if (!/is_reparse\s*\(/.test(line)) return false;
+  // 条件过滤形态：`&& !is_reparse(...)` / `|| is_reparse(...)` 包在枚举条件里 —— 不算站点
+  if (/&&\s*!is_reparse\s*\(/.test(line)) return false;
+  if (/\|\|\s*is_reparse\s*\(/.test(line)) return false;
+  return true;
+}
+
+/** 找每处跳过站点，并检查其后续 3 行内是否有计数自增 */
+function reparseSkipSites(src, label) {
+  const lines = src.split('\n');
+  const bare = [];
+  let counted = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!isSkipBranch(lines[i])) continue;
+    const win = lines.slice(i, i + 4).join('\n');
+    if (/skipped_reparse\s*\+=\s*1|note_reparse_skip\(\)/.test(win)) counted++;
+    else bare.push(`${label}:${i + 1} ${lines[i].trim()}`);
+  }
+  return { bare, counted };
+}
+
+const scanSites = reparseSkipSites(scanRs, 'scan.rs');
+const cleanSites = reparseSkipSites(cleanRs, 'cleanup_scan.rs');
+check(
+  scanSites.bare.length === 0 && cleanSites.bare.length === 0,
+  `R1-2a. 每处「命中即丢弃」的重解析点跳过都有留痕计数（scan.rs ${scanSites.counted} 处 / cleanup_scan.rs ${cleanSites.counted} 处）`,
+  [...scanSites.bare, ...cleanSites.bare].join(' | '),
+);
+
+/**
+ * 已知未留痕的**条件过滤**站点（枚举口径的一部分，不是「丢弃」）。
+ * 每条登记是为了让「没留痕」这件事在门禁输出里可见，而不是靠判据失明蒙混。
+ *
+ * ⚠️ **匹配用「内容 needle + 唯一性」，不用行号**：行号会因任意一次插删而漂移，
+ * 判红信息会变成「8 条全过期」这种没法用的噪音（实测踩过：删掉 scan.rs:275 的一行计数
+ * 后，本组把其余 8 条全报成过期，而真正的问题在上一组已经点名了）。
+ * 现在口径是「needle 在该文件里**恰好出现一次**」，出现多次说明登记表写糊了，也判红。
+ */
+const EXPECTED_UNTRACED = [
+  ['scan.rs', 't.is_dir() && !is_reparse(ent)', 'analyze 的子目录枚举：只要真目录'],
+  ['scan.rs', 'stack.push(fp)', 'dir_size：只要真目录，防跨卷联接点重复计入'],
+  ['scan.rs', 'dirs += 1;\n                    stack.push', 'analyze_dir_deep：只要真目录'],
+  ['scan.rs', 'is_reparse(&ent) => subdirs.push', 'analyze：只要真目录'],
+  ['scan.rs', 'ft.is_dir() && !is_reparse(&ent)', 'expand_tasks：只要真目录'],
+  ['scan.rs', 'if rec && !is_reparse(&ent)', 'topk_in：非递归档或非真目录不下钻'],
+  ['scan.rs', '|| is_reparse(&ent)', 'empty 根下候选筛选：reparse 不作候选'],
+  ['scan.rs', 'if is_reparse_target(p)', 'delete 链的目标保护：reparse 目标直接拒绝删除'],
+];
+const untracked = EXPECTED_UNTRACED.filter(([f, needle]) => {
+  const src = f === 'scan.rs' ? scanRs : cleanRs;
+  return src.split(needle).length - 1 !== 1; // 恰好一次
+});
+check(
+  untracked.length === 0,
+  `R1-2a2. 条件过滤站点登记表仍对得上（${EXPECTED_UNTRACED.length} 条，均未留痕、已登记为已知缺口）`,
+  untracked.length
+    ? `这些登记项在磁盘上找不到或出现多次（代码改了或 needle 写得不够唯一）：${untracked.map((u) => `${u[0]} «${u[1]}»`).join(', ')}`
+    : '',
+);
+if (EXPECTED_UNTRACED.length) {
+  console.log(`  · R1-2 已知缺口：${EXPECTED_UNTRACED.length} 处「条件过滤」站点的跳过量未留痕（枚举口径的一部分，非丢弃；补齐需给各域加累加器）`);
+}
+
+// 反向判据（R1-2.2 的静态面）：**reparse 跳过块内不许改任何判定累加器**。
+//
+// 为什么不用「计数自增不许出现在判定字段的算式里」那种写法：判红实验 7 实测过——
+// 在跳过块里加一句 `acc.total_count += 1`，那个判据**抓不到**（它查的是
+// 「`skipped_reparse` 有没有出现在判定算式里」，而实验里加的是反向：判定字段被
+// 偷偷塞进了跳过分支）。扫全文件的 `X += 1` 也不成立：判定字段本来就有合法的自增。
+//
+// 现在的口径是**以站点为圆心**：跳过块内（往后 3 行）除计数自增外不许出现任何
+// `+= ` / `-= ` 形式的累加。这才是「留痕不许改变判定」的可判形态。
+const judgeAdds = [];
+for (const [src, label] of [[scanRs, 'scan.rs'], [cleanRs, 'cleanup_scan.rs']]) {
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!isSkipBranch(lines[i])) continue;
+    const win = lines.slice(i, i + 4);
+    win.forEach((l, k) => {
+      if (/skipped_reparse\s*\+=\s*1|note_reparse_skip\(\)/.test(l)) return;
+      if (/\w+\s*\+=\s*[0-9]/.test(l) || /\w+\s*-=\s*[0-9]/.test(l)) {
+        judgeAdds.push(`${label}:${i + k + 1} ${l.trim()}`);
+      }
+    });
+  }
+}
+check(
+  judgeAdds.length === 0,
+  'R1-2b. 重解析点跳过块内不许改判定累加器（留痕只许记 skipped_reparse，不许动判定）',
+  judgeAdds.join(' | '),
+);
+
+// 透出断言：留痕必须真的到达输出行，否则只是「记了个没人看的数」。
+check(
+  (cleanRs.match(/\("skippedReparse"/g) || []).length >= 2,
+  'R1-2c. 留痕计数已透出到行协议（fileKeys 与 path 两处 emit 都要有）',
+  `实际找到 ${(cleanRs.match(/\("skippedReparse"/g) || []).length} 处`,
+);
+
+console.log('');
+if (fail > 0) {
+  console.error(`静态留痕断言失败 ${fail} 项。`);
+  process.exit(1);
+}
+console.log('✓ 静态留痕断言全部通过');

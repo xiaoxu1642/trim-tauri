@@ -135,6 +135,16 @@ pub struct ScanCtx {
     files: Mutex<Vec<(PathBuf, u64)>>,
     counter: AtomicU64,
     truncated: AtomicBool,
+    /// 因`FILE_ATTRIBUTE_REPARSE_POINT` 跳过（不深入）的目录数（R1-2 留痕）。
+    ///
+    /// 为什么必须有这个计数：跳过本身是对的（junction 指向别的子树，
+    /// 深入会重复计数甚至循环），但**静默跳过等于把「没扫」伪装成「没有」**——
+    /// v2-M1 的重复项bug 就是同一种形态（只留最后一个根，界面却显示「未发现重复文件」）。
+    /// 用户看到扫描结果偏小却无从判断少在哪，这个计数就是那句话。
+    ///
+    /// ⚠️ **只留痕、不参与任何判定**：`files.len()` / `total` / `truncated` 一律不看它。
+    /// 让它进判定就是行为变更（扫描结果数字会变），混进留痕批次里没人审得出。
+    skipped_reparse: AtomicU64,
     cap: usize,
 }
 
@@ -148,8 +158,20 @@ impl ScanCtx {
             files: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
             truncated: AtomicBool::new(false),
+            skipped_reparse: AtomicU64::new(0),
             cap,
         }
+    }
+
+    /// 记一次「因重解析点跳过」。刻意不做去重/不排序：同一junction 被多个根各跳一次
+    /// 就该算两次，那是两条不同的扫描路径。
+    fn note_reparse_skip(&self) {
+        self.skipped_reparse.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 本次扫描因重解析点跳过的目录数（供留痕与测试；**不进任何判定字段**）。
+    pub fn skipped_reparse(&self) -> u64 {
+        self.skipped_reparse.load(Ordering::Relaxed)
     }
 
     /// 条目入桶，返回**实际收下**的条数（供心跳计数）。上限满时置 truncated 并告警一次。
@@ -190,11 +212,20 @@ impl ScanCtx {
 
     /// 收尾：交出条目并上报截断。`bump_scanned(0)` 按既有口径早退、不产出心跳行，
     /// 保留调用只为与迁移前的输出序列逐字对齐。
+    ///
+    /// R1-2：重解析点跳过数在此**一次性告警**。放finish 而不是每跳一次就warn，
+    /// 是因为一次扫描可能撞上几十个 junction，逐条刷屏会淹掉真正的错误告警。
     pub fn finish(&self, sink: &dyn Sink) -> Vec<(PathBuf, u64)> {
         bump_scanned(&self.counter, 0, sink);
         let files = std::mem::take(&mut *self.files.lock().unwrap_or_else(|e| e.into_inner()));
         if self.stopped() {
             sink.truncated();
+        }
+        let skipped = self.skipped_reparse();
+        if skipped > 0 {
+            sink.warn(&format!(
+                "已跳过 {skipped} 个重解析点目录（junction/挂载点，不深入以避免重复计数）"
+            ));
         }
         files
     }
@@ -242,6 +273,7 @@ fn walk_level(
         if ft.is_dir() {
             // 审查v4-M6：联接点/挂载点不深入
             if is_reparse(&ent) {
+                ctx.note_reparse_skip(); // R1-2：留痕，不参与判定
                 continue;
             }
             subdirs.push(ent.path());
@@ -948,6 +980,10 @@ struct EmptyAccum {
     /// 停在「正在准备... 2%」直到完成 —— 用户实测反馈「准备时间过长」。按
     /// HEARTBEAT_EVERY 间隔发 scanned 心跳，让前端显示「已枚举 N 个文件」。
     visits: AtomicU64,
+    /// 因重解析点跳过的目录数（R1-2 留痕）。语义与 `ScanCtx::skipped_reparse` 完全相同，
+    /// 两个累加器都要有是因为它们服务两个入口（`empty` 与 `duplicates`），
+    /// 少一个就有一个入口在静默丢目录。
+    skipped_reparse: AtomicU64,
 }
 
 /// 本地批达到这个条数就并入累积器：既让全局计数及时生效（下钻能真的停下来），
@@ -967,7 +1003,19 @@ impl EmptyAccum {
             truncated: AtomicBool::new(false),
             cap,
             visits: AtomicU64::new(0),
+            skipped_reparse: AtomicU64::new(0),
         }
+    }
+
+    /// 记一次「因重解析点跳过」（R1-2 留痕，不参与任何判定）。
+    fn note_reparse_skip(&self) {
+        self.skipped_reparse.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 本次扫描因重解析点跳过的目录数（测试与留痕用；**不进任何判定字段**）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn skipped_reparse(&self) -> u64 {
+        self.skipped_reparse.load(Ordering::Relaxed)
     }
 
     /// 枚举心跳：每个被遍历的条目调一次，跨过 HEARTBEAT_EVERY 就发一次 scanned。
@@ -1095,6 +1143,13 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
     if acc.stopped() {
         sink.truncated();
     }
+    // R1-2：重解析点跳过数一次性告警（放收尾而非每跳一次，避免刷屏淹掉真实告警）
+    let skipped = acc.skipped_reparse();
+    if skipped > 0 {
+        sink.warn(&format!(
+            "已跳过 {skipped} 个重解析点目录（junction/挂载点，不深入以避免重复计数）"
+        ));
+    }
     progress(sink, 100);
 }
 
@@ -1177,6 +1232,7 @@ fn collect_empty_fast(
             }
             Ok(t) if t.is_dir() => {
                 if is_reparse(&ent) {
+                    acc.note_reparse_skip(); // R1-2：留痕，不参与判定
                     empty = false;
                 } else if !collect_empty_fast(&fp, ignore, files, dirs, acc, sink) {
                     empty = false;

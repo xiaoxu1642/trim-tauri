@@ -830,6 +830,15 @@ fn wildcard_match(name: &str, pattern: &str) -> bool {
 pub struct DeletableResult {
     pub files: Vec<(String, u64)>, // 可删文件（探测通过）
     pub total: u64,                // 枚举到的全部文件数（被占用数 = total - files.len()）
+    /// 因`FILE_ATTRIBUTE_REPARSE_POINT` 跳过的目录数（R1-2 留痕）。
+    ///
+    /// 为什么必须有：`Win11` 上 `C:\Users\<u>\AppData\Roaming\Application Data` 就是
+    /// junction（指向 `..\Local\Application Data`）。跳过它是对的（深入会重复计数、
+    /// 极端情况成环），但**静默跳过等于把「没扫」伪装成「没有」**—— 用户看到清理
+    /// 候选偏少却不知道少在哪。这个计数是那句话。
+    ///
+    /// ⚠️ **只留痕、不参与任何判定**：`total` / `files` / 被占用数一律不看它。
+    pub skipped_reparse: u64,
 }
 
 /// 单遍递归枚举 + 探测。口径：跳 ReparsePoint（不深入）、目录不计数、
@@ -851,6 +860,7 @@ fn walk_deletable(
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
+            res.skipped_reparse += 1; // R1-2：留痕，不参与 total/files 判定
             continue; // 文件与目录均跳过，且不深入重解析目录
         }
         let ft = match ent.file_type() {
@@ -905,10 +915,14 @@ pub fn list_deletable(
             if old_enough && !excluded && file_deletable(root) {
                 files.push((root_str.to_string(), fl));
             }
-            return DeletableResult { files, total: if old_enough && !excluded { 1 } else { 0 } };
+            return DeletableResult {
+                files,
+                total: if old_enough && !excluded { 1 } else { 0 },
+                skipped_reparse: 0, // 单文件路径不枚举子项，无重解析点可跳
+            };
         }
     }
-    let mut res = DeletableResult { files: Vec::new(), total: 0 };
+    let mut res = DeletableResult { files: Vec::new(), total: 0, skipped_reparse: 0 };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
     walk_deletable(root, all, pattern, cutoff, excl_dirs, excl_files, &mut res);
     res
@@ -925,11 +939,17 @@ pub struct PathStats {
     pub size: u64,
     pub nfiles: u64,
     pub locked: u64,
+    /// 本次枚举因重解析点跳过的目录数（R1-2 留痕）。
+    ///
+    /// 这是「用户为什么觉得这个目录清理得少」的那句话：`AppData\Roaming\Application Data`
+    /// 这类 junction被跳过后，size 天然小于 Explorer 显示的值 —— 界面必须自己说出来，
+    /// 否则用户会以为扫描漏了。这里的值只做**呈现**，不进size/nfiles/locked 任何判定。
+    pub skipped_reparse: u64,
 }
 
 fn get_path_deletable_stats(path: &str, cutoff: Option<std::time::SystemTime>) -> PathStats {
     if path.is_empty() {
-        return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0 };
+        return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
     }
     let p = Path::new(path);
     // 存在性用同一套 API 判定（metadata 跟随链接，与 .NET Exists 同源）
@@ -937,27 +957,27 @@ fn get_path_deletable_stats(path: &str, cutoff: Option<std::time::SystemTime>) -
     if !is_dir {
         if fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
             if !file_deletable(p) {
-                return PathStats { ok: true, missing: false, size: 0, nfiles: 0, locked: 1 };
+                return PathStats { ok: true, missing: false, size: 0, nfiles: 0, locked: 1, skipped_reparse: 0 };
             }
             return match fs::metadata(p) {
-                Ok(m) => PathStats { ok: true, missing: false, size: m.len(), nfiles: 1, locked: 0 },
-                Err(_) => PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0 },
+                Ok(m) => PathStats { ok: true, missing: false, size: m.len(), nfiles: 1, locked: 0, skipped_reparse: 0 },
+                Err(_) => PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 },
             };
         }
         // 既非目录也非文件 = 不存在
-        return PathStats { ok: true, missing: true, size: 0, nfiles: 0, locked: 0 };
+        return PathStats { ok: true, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
     }
     // 枚举探针：连一个子项都列不出 = 无法统计（ACL 拒绝 / 重解析目标异常），绝不报 0
     let probe_ok = fs::read_dir(p).and_then(|mut rd| rd.next().transpose()).is_ok();
     if !probe_ok {
-        return PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0 };
+        return PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
     }
     // U1-b（2026-10-01）：全局排除名单整链下线。本探针历史上也只吃全局名单（规则级
     // excludePaths 到这层已经丢了规则上下文），传空集即等价于「名单为空」。
     let res = list_deletable(path, "*", cutoff, &[], &[]);
     let nfiles = res.files.len() as u64;
     let size: u64 = res.files.iter().map(|f| f.1).sum();
-    PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles }
+    PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles, skipped_reparse: res.skipped_reparse }
 }
 
 // ==================== Resolve-GlobDirs 口径（目录通配逐段展开） ====================
@@ -973,7 +993,7 @@ fn join_path(r: &str, seg: &str) -> String {
 }
 
 /// 列出 parent 下匹配通配段的目录（GCI -Directory [-Force]：跳 ReparsePoint；无 Force 时跳隐藏）
-fn list_matching_dirs(parent: &str, seg: &str, force: bool) -> Vec<String> {
+fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mut u64) -> Vec<String> {
     let pd = Path::new(parent);
     let mut out = Vec::new();
     let rd = match fs::read_dir(pd) {
@@ -982,6 +1002,7 @@ fn list_matching_dirs(parent: &str, seg: &str, force: bool) -> Vec<String> {
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
+            *skipped_reparse += 1; // R1-2：留痕，不进 out（展开结果）判定
             continue;
         }
         let ft = match ent.file_type() {
@@ -1010,6 +1031,16 @@ fn list_matching_dirs(parent: &str, seg: &str, force: bool) -> Vec<String> {
 }
 
 pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
+    // R1-2 留痕：本次展开跳过了多少重解析点目录。
+    //
+    // 为什么加这个函数：glob 展开是**用户可见的**——展开不出来就没法枚举，
+    // 而通配段下藏着 junction（`%AppData%\Roaming\*` 就会撞上 Application Data）
+    // 时，界面只显示「无匹配」而不说「跳过了 1 个 junction」，用户会去手工核对目录。
+    //
+    // 只读不写：局部变量，不回传也不进任何判定。调用方要呈现这句话需要新出口，
+    // 那是渲染层的事（当前由 list_deletable / walk_fk_dll 那两条路径的
+    // `skippedReparse` 字段承担呈现，本处只保证**不许静默**这件事在代码里可查）。
+    let mut skipped_reparse = 0u64;
     let expanded = expand_env_path(pattern);
     if !expanded.contains('*') {
         return if is_container(&expanded) { vec![expanded] } else { Vec::new() };
@@ -1031,7 +1062,7 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
         let mut next: Vec<String> = Vec::new();
         for r in &roots {
             if wild {
-                for d in list_matching_dirs(r, seg, force) {
+                for d in list_matching_dirs(r, seg, force, &mut skipped_reparse) {
                     next.push(d);
                 }
             } else {
@@ -1056,6 +1087,9 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
             return Vec::new();
         }
         roots = next;
+    }
+    if skipped_reparse > 0 {
+        eprintln!("[trim-scanner] glob 展开跳过 {skipped_reparse} 个重解析点目录（不深入以避免重复枚举）");
     }
     roots
 }
@@ -1429,6 +1463,8 @@ struct FkResult {
     locked: i64,
     files: Vec<(String, u64)>,
     truncated: bool,
+    /// 因重解析点跳过的目录数（R1-2 留痕）。只透出呈现，**不进上面三个判定字段**。
+    skipped_reparse: u64,
 }
 
 struct FkAcc {
@@ -1440,6 +1476,8 @@ struct FkAcc {
     item_rows: usize,
     global_rows: usize,
     truncated: bool,
+    /// 因重解析点跳过的目录数（R1-2 留痕，与 ScanCtx / DeletableResult 同语义）。
+    skipped_reparse: u64,
 }
 
 impl FkAcc {
@@ -1473,6 +1511,7 @@ fn walk_fk_dll(
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
+            acc.skipped_reparse += 1; // R1-2：留痕，不进 total_size/count/locked 判定
             continue;
         }
         let ft = match ent.file_type() {
@@ -1537,6 +1576,7 @@ fn walk_fk_snapshot(
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
+            acc.skipped_reparse += 1; // R1-2：留痕，不进 total_size/count/locked 判定
             continue;
         }
         let ft = match ent.file_type() {
@@ -1648,6 +1688,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
         item_rows: 0,
         global_rows: *global_rows,
         truncated: false,
+        skipped_reparse: 0,
     };
 
     if let Some(arr) = rule.get("fileKeys").and_then(|v| v.as_arr()) {
@@ -1701,6 +1742,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
         locked: acc.total_count - acc.deletable_count,
         files,
         truncated: acc.truncated,
+        skipped_reparse: acc.skipped_reparse,
     }
 }
 
@@ -1961,6 +2003,10 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
                 ("size", st.total_size.to_string()),
                 ("fileCount", st.count.to_string()),
                 ("lockedCount", st.locked.to_string()),
+                // R1-2 留痕：跳过的重解析点目录数。**只呈现不进判定**——
+                // size/fileCount/lockedCount 三者都不看它（见 walk_fk_dll 内注释）。
+                // 缺了它，用户看到清理候选比 Explorer 算的少，却无从判断少在哪。
+                ("skippedReparse", st.skipped_reparse.to_string()),
                 ("risk", jopt_str(rule.get("risk").and_then(|v| v.as_str()))),
                 ("exists", if st.count > 0 { "true" } else { "false" }.to_string()),
                 ("blockedBy", blocked_json),
@@ -2134,6 +2180,11 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             ("autoSize", auto_size_json),
             ("size", size_json),
             ("lockedCount", stats.locked.to_string()),
+            // R1-2 留痕：跳过的重解析点目录数。渲染层据此在清理项上写明
+            // 「已跳过 N 个 junction」，否则用户会以为扫描漏了（junction 指向别的子树，
+            // 深入会重复计数甚至成环，跳过是对的，但对用户不可见就成了「少了」）。
+            // **只呈现不进判定**：size/nfiles/locked 都不看它。
+            ("skippedReparse", stats.skipped_reparse.to_string()),
             ("risk", jopt_str(rule.get("risk").and_then(|v| v.as_str()))),
             ("exists", exists_json),
             ("blockedBy", blocked_json),
