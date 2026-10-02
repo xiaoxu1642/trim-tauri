@@ -1927,3 +1927,79 @@ let ov = include_str!("overview.rs");
             "分档阈值必须显式声明为 READINESS_BANDS（E1：权重/阈值不许藏在代码里）"
         );
     }
+
+    /// B4：可逐项还原清单的三条语义。
+    ///
+    /// ① 备份为空 / `values` 为空的项**一律不列** —— 列出来会让用户点一个
+    ///    「还原」然后拿到「无备份记录」，那是把「没有依据」说成「有入口但坏了」。
+    /// ② 在用项与退役项**分开返回** —— 渲染层要区别「正常项的还原」与
+    ///    「退役待还原」（后者在概览的既有位置）。
+    /// ③ 备份里有但**目录里没有**的 id（退役后又被清账）不列在 active 里 ——
+    ///    它由 retired 那条覆盖。
+    #[test]
+    fn b4_可还原清单三条语义() {
+        use super::catalog::{is_restorable, restorable_items};
+        use serde_json::json;
+
+        // 夹具：一个在用项（perf_wu_pause）+ 一个退役项（ssd_opt，见退役账本）
+        let map = json!({
+            "perf_wu_pause": { "at": "2026-10-03T00:00:00Z", "values": [
+                { "hive": "LocalMachine", "sub": "SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate",
+                  "key": "PauseUpdatesStartTime", "exists": true, "type": "REG_QWORD", "data": "1" }
+            ]},
+            "ssd_opt": { "at": "2026-10-03T00:00:00Z", "values": [
+                { "hive": "LocalMachine", "sub": "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
+                  "key": "GlobalFlag", "exists": true, "type": "REG_DWORD", "data": "0" }
+            ]},
+            // 三种「不该列」的形态
+            "tf_ntfs": { "at": "x", "values": [] },                       // values 空数组
+            "tf_hibern_off": { "at": "x" },                              // 压根没有 values 字段
+            "根本不存在的id": { "at": "x", "values": [{ "k": 1 }] },        // 目录里没有此项
+        });
+
+        let (active, retired) = restorable_items(&map);
+
+        // ① 在用清单只含真有备份的在用项
+        let a_ids: Vec<&str> = active.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert!(a_ids.contains(&"perf_wu_pause"), "有备份的在用项必须被列出：{a_ids:?}");
+        assert!(!a_ids.contains(&"tf_ntfs"), "values 为空数组的项不该被列出：{a_ids:?}");
+        assert!(!a_ids.contains(&"tf_hibern_off"), "没有 values 字段的项不该被列出：{a_ids:?}");
+        assert!(!a_ids.contains(&"根本不存在的id"), "目录里没有的 id 不该出现在 active：{a_ids:?}");
+
+        // active 项必须带 values 数与备份时间（前端要显示「N 个值 · 何时备份的」）
+        let hit = active.iter().find(|v| v["id"] == "perf_wu_pause").expect("应含 perf_wu_pause");
+        assert_eq!(hit["values"], json!(1), "必须带可还原的值条数");
+        assert!(hit["at"].is_string(), "必须带备份时间（用户要判断这个备份还值不值得用）");
+        assert!(hit["title"].is_string(), "必须带标题（列表要显示，不能只有 id）");
+
+        // ② 退役项走 retired 那条
+        let r_ids: Vec<&str> = retired.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert!(
+            r_ids.contains(&"ssd_opt"),
+            "退役项的有备份还原必须出现在 retired 清单里：{r_ids:?}"
+        );
+
+        // ③ is_restorable 与清单口径一致
+        assert_eq!(is_restorable(&map, "perf_wu_pause"), Some(1));
+        assert_eq!(is_restorable(&map, "tf_ntfs"), None, "values 空的项不可还原");
+        assert_eq!(is_restorable(&map, "tf_hibern_off"), None, "没有 values 字段的项不可还原");
+        assert_eq!(is_restorable(&map, "不存在的id"), None);
+    }
+
+    /// B4 的接线：`optimizer_list` 必须逐行注入 `restorable`。
+    ///
+    /// 没有这个字段时前端只能二选一：显示一个点了必然失败的「立即恢复」，
+    /// 或者对所有项都置灰（后者把真能还原的也堵了）。两个都是错的。
+    #[test]
+    fn b4_逐行注入restorable() {
+        let src = include_str!("overview.rs");
+        assert!(
+            src.contains("is_restorable(&backups, sid)") && src.contains("\"restorable\".into()"),
+            "optimizer_list 没有逐行注入 restorable —— 前端无法区分「可还原」与「点了会失败」"
+        );
+        // 且必须**只读一次**备份表（126 项循环里每项读一次 = 重复解 34KB JSON ×126）
+        assert!(
+            src.contains("let backups = load_opt_backups();"),
+            "备份表必须在循环外读一次"
+        );
+    }

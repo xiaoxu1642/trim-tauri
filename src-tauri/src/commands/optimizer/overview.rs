@@ -598,6 +598,8 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    // B4：备份表读**一次**（126 项循环里每项读一次会重复解 34KB JSON ×126）
+    let backups = load_opt_backups();
     let rows: Vec<Value> = options()
         .iter()
         .map(|o| {
@@ -622,6 +624,13 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                 // 必须显示「出厂默认值未知」而不是留空 —— 留空会被读成「不需要偏离」。
                 if let Some(dv) = defaults_of(sid) {
                     map.insert("defaults".into(), dv);
+                }
+                // B4：本项能否**逐项还原**（值级备份里有它，且 values 非空）。
+                // 前端据此决定「立即恢复」是可用还是置灰 + 说明原因 ——
+                // 没有这个字段时前端只能二选一：显示一个点了会失败的按钮，
+                // 或者对所有项都置灰（后者把能还原的也堵了）。
+                if let Some(n) = is_restorable(&backups, sid) {
+                    map.insert("restorable".into(), json!(n));
                 }
             }
             tag_exec_modes(&mut row);
@@ -881,6 +890,9 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         return json!({ "success": false, "message": msg });
     }
     let raw = opt_state::all();
+    // B4：备份表与可还原清单各读一次（原来同一份 34KB JSON 要解三次）
+    let backups_mig = load_opt_backups();
+    let restorable_mig = restorable_items(&backups_mig);
     let mut items: Vec<Value> = Vec::new();
     let mut pending_ids: Vec<String> = Vec::new();
     let mut check_ids: Vec<String> = Vec::new();
@@ -940,7 +952,14 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         // v2-M14：这里原先是 `{ "restored": [], "failed": [] }` 的字面空桩，渲染层据此弹
         // 「已自动还原 N 项」——那件事从没发生过。空桩删除后字段改成**待还原清单**：
         // 退役项在本机留有注册表备份的才出现，由用户点「按原值还原」走已提权的还原通道。
-        "migration": { "pending": retired_pending_backups(&load_opt_backups()) },
+        // B4：可逐项还原的清单。改写前只有 `pending`（**只**含退役项），
+        // 而本机实测 34 项备份里绝大多数是在用项 —— 能力在、入口找不到。
+        // 两个字段分开返回：active= 在用项的，retired= 退役待还原（概览既有位置）。
+        "migration": {
+            "pending": retired_pending_backups(&backups_mig),
+            "restorableActive": restorable_mig.0,
+            "restorableRetired": restorable_mig.1,
+        },
         "detected": Value::Object(opt_state::detected_all())
     })
 }

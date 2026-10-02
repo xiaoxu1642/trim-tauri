@@ -431,6 +431,63 @@ pub(super) fn write_spec_of(option_id: &str) -> Option<WriteSpec> {
 
 /// 本机确有备份的退役项。备份结构异常或 `values` 为空的条目按「没有备份」处理——
 /// 列出来只会给用户一个点了不会成功的按钮。
+/// B4：本机**可逐项还原**的优化项清单（在用 + 退役合一）。
+///
+/// ## 为什么要有这条
+///
+/// 改写前的形态：`optimizer_restore_reg` 已能按 `option_id` 单项还原（M3 补了回读
+/// 校验），但**用户不知道哪些项能还原** —— `state-overview` 的 `migration.pending`
+/// 只列**退役**项的备份，而本机实测 34 项备份里绝大多数是在用项。
+/// 结果是「能力在、入口找不到」。
+///
+/// ## 退役项为什么也要列
+///
+/// 退役项的备份同样可以还原（`optimizer_restore_reg` 认退役 id，v2-M14 接线），
+/// 且用户退役某项往往正是想把它改回去。分成两个字段返回而不是合成一个列表，
+/// 是为了让渲染层能区分「正常项的还原」与「退役待还原」（后者在概览的「待还原清单」里）。
+///
+/// ## 备份为空 / values 为空的项一律不列
+///
+/// 列出来会让用户点一个「还原」然后拿到「无备份记录」—— 那是把「没有依据」说成
+/// 「有入口但坏了」。
+pub(super) fn restorable_items(backup_map: &Value) -> (Vec<Value>, Vec<Value>) {
+    let count_of = |id: &str| -> Option<usize> {
+        backup_map
+            .get(id)?
+            .get("values")
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .filter(|n| *n > 0)
+    };
+    // 在用项
+    let active: Vec<Value> = options()
+        .iter()
+        .filter_map(|o| {
+            let id = o.get("id").and_then(|v| v.as_str())?;
+            let n = count_of(id)?;
+            Some(json!({
+                "id": id,
+                "title": o.get("title").and_then(|v| v.as_str()).unwrap_or(id),
+                "values": n,
+                "at": backup_map.get(id).and_then(|e| e.get("at")).cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect();
+    // 退役项（复用既有筛选，那条已过滤 values 为空的）
+    let retired: Vec<Value> = retired_pending_backups(backup_map);
+    (active, retired)
+}
+
+/// B4：某项是否可逐项还原（供 `optimizer_list` 逐行注入 `restorable`）
+pub(super) fn is_restorable(backup_map: &Value, option_id: &str) -> Option<usize> {
+    backup_map
+        .get(option_id)?
+        .get("values")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .filter(|n| *n > 0)
+}
+
 pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
     retired_items()
         .iter()
