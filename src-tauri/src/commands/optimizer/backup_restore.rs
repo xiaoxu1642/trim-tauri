@@ -366,8 +366,31 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     };
     let restored = values.len();
 
+    // 先看能不能构造出还原操作（构造失败即无可核对项，直接拒）
+    let Ok(ops) = build_restore_ops(&values) else {
+        return json!({ "success": false, "message": "备份数据无法解析成还原操作" });
+    };
     if !restore_backup_values(&values) {
         return json!({ "success": false, "message": "还原脚本执行失败" });
+    }
+    // M3：写完**独立回读**验证。RegSetValueExW 返回成功不等于「值写对了」——
+    // 类型标签映射错、字节序错、REG_MULTI_SZ 的双 NUL 终止漏一个都会让 API 成功
+    // 而值是错的。改过的 optimizer_run 有执行后回读校验，还原侧此前一直缺这一环。
+    //
+    // fail-closed：回读不一致时**保留备份记录**并报失败，让用户能再试一次 ——
+    // 清掉记录就等于删掉了唯一的还原依据。
+    let (checked, mismatched) = verify_restore_ops(&ops);
+    if mismatched > 0 {
+        log::write_log(
+            "error",
+            &format!("优化项还原后回读不一致: {option_id}（核对 {checked} 条 / 不一致 {mismatched} 条），已保留备份供重试"),
+        );
+        return json!({
+            "success": false,
+            "verifyFailed": mismatched,
+            "verified": checked,
+            "message": format!("还原后回读校验不一致（{mismatched}/{checked} 条），已保留备份记录，可重试或查看日志"),
+        });
     }
     if let Some(o) = map.as_object_mut() {
         o.remove(&option_id);
@@ -503,6 +526,102 @@ pub(super) fn restore_reg_kind(typ: &str) -> windows::Win32::System::Registry::R
         "REG_EXPAND_SZ" => REG_EXPAND_SZ,
         "REG_MULTI_SZ" => REG_MULTI_SZ,
         _ => REG_SZ,
+    }
+}
+
+/// 还原**后**回读验证（M3）：逐条检查「注册表里现在真的有我们写进去的东西」。
+///
+/// ## 为什么必须有这一步
+///
+/// B11 把「生成 pwsh 脚本」换成「Rust 直调注册表 API」之后，`restore_backup_values`
+/// 只看 `RegSetValueExW` 的返回值 —— 那是「API 调用成功」，**不是「值写对了」**。
+/// 类型标签映射错、字节序错、`REG_MULTI_SZ` 的双 NUL 终止漏一个，都会让 API 成功
+/// 而值是错的。改过的 `optimizer_run` 有执行后回读校验（`verify == 'partial'` 分支），
+/// **还原侧一直没有** —— 这是 M3 要补的纵深。
+///
+/// ## 为什么不能靠备份数据自证
+///
+/// 备份里的 `data` 与写回用的 `data` 是同一份字符串，自证恒成立。必须**独立回读
+/// 注册表**。这里用 `read_reg_value_faithful`（不展开 `REG_EXPAND_SZ`）—— 它与写侧的
+/// 编码是**同口径反函数**：展开过的 EXPAND_SZ 写回去会把 `%VAR%` 永久变成字面量，
+/// 那正是「还原后反而变了」的根因。
+///
+/// ## 三种判据
+///
+/// - `Write` → 回读的（类型标签, 数据）必须与写回时**类型标签一致**，且数据相等
+/// - `Delete` → 回读必须是 `None`（键已不存在）
+/// - 类型标签对不上（备份写的是 `REG_SZ`、注册表里现在是 `REG_DWORD`）⇒ 判失败。
+///   宁可报「还原不一致」也不要放过：那说明别的程序动了这个值，而用户的预期是
+///   「回到备份时的样子」。
+///
+/// ## 返回值
+///
+/// `(已核对条数, 不一致条数)`。调用方据此 fail-closed 报错。
+pub(super) fn verify_restore_ops(ops: &[RestoreOp]) -> (usize, usize) {
+    use crate::engine::native;
+    let mut checked = 0usize;
+    let mut mismatched = 0usize;
+    for op in ops {
+        match op {
+            RestoreOp::Write { hive, sub, key, typ, bytes } => {
+                let Some(h) = restore_hive(hive) else {
+                    mismatched += 1;
+                    continue;
+                };
+                checked += 1;
+                let want_kind = restore_reg_kind(typ);
+                let Some((got_type, got_data)) = native::read_reg_value_faithful(h, sub, key) else {
+                    mismatched += 1; // 写完读不到 ⇒ 还原没生效
+                    continue;
+                };
+                if got_type != canonical_type_label(want_kind) {
+                    mismatched += 1; // 类型变了（别的程序改过）
+                    continue;
+                }
+                let want_data = native::decode_reg_value_bytes(want_kind, bytes, false)
+                    .map(|(_, d)| d)
+                    .unwrap_or_default();
+                if got_data != want_data {
+                    mismatched += 1;
+                }
+            }
+            RestoreOp::Delete { hive, sub, key } => {
+                let Some(h) = restore_hive(hive) else {
+                    mismatched += 1;
+                    continue;
+                };
+                checked += 1;
+                if native::read_reg_value_faithful(h, sub, key).is_some() {
+                    mismatched += 1; // 该删的还在
+                }
+            }
+        }
+    }
+    (checked, mismatched)
+}
+
+/// win32 `REG_VALUE_TYPE` → 本仓备份里用的类型标签。
+///
+/// 为什么需要这层映射：读侧 `decode_reg_value_bytes` 返回的标签域与
+/// `restore_reg_kind` 吃的是同一个，但备份里可能存着**升级前的老标签**
+/// （当年把 EXPAND_SZ / MULTI_SZ 按 REG_SZ 记的历史数据），所以比对前先归一。
+fn canonical_type_label(kind: windows::Win32::System::Registry::REG_VALUE_TYPE) -> &'static str {
+    use windows::Win32::System::Registry::{
+        REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_QWORD,
+    };
+    if kind == REG_DWORD {
+        "REG_DWORD"
+    } else if kind == REG_QWORD {
+        "REG_QWORD"
+    } else if kind == REG_BINARY {
+        "REG_BINARY"
+    } else if kind == REG_MULTI_SZ {
+        "REG_MULTI_SZ"
+    } else if kind == REG_EXPAND_SZ {
+        // 备份里存的是 REG_SZ（老数据的记法）⇒ 归到 REG_SZ 才与读侧标签一致
+        "REG_SZ"
+    } else {
+        "REG_SZ"
     }
 }
 

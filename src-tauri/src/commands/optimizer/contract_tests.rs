@@ -1594,3 +1594,159 @@ let ov = include_str!("overview.rs");
 
         let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB");
     }
+
+    /// M3：还原**后**回读验证的三种判据（真机往返）。
+    ///
+    /// 为什么这三条都要断：它们对应三种**不同**的失败形态，只断一条会漏掉另两种。
+    /// · 写完读不到       → 还原根本没生效（`RegSetValueExW` 失败但被忽略）
+    /// · 类型标签变了     → 别的程序动过这个值（备份是 REG_SZ、现在是 REG_DWORD）
+    /// · 数据不等         → 字节序/编码错（API 成功但值是错的）
+    ///
+    /// 全部在 HKCU 的测试键上做（不改系统状态，快速组零副作用纪律）。
+    #[test]
+    fn m3_还原回读验证三种判据() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_BINARY, REG_DWORD, REG_SZ};
+        use crate::engine::native::{reg_key_ensure, reg_restore_write};
+
+        let sub = "Software\\Trim\\m3-verify";
+        assert!(reg_key_ensure(HKEY_CURRENT_USER, sub), "建夹具键失败");
+        let cleanup = || {
+            let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, "Ok");
+            let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, "Gone");
+            let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, "WrongType");
+        };
+        cleanup();
+
+        // ① 写对 → 回读一致（0 条不一致）
+        assert!(reg_restore_write(HKEY_CURRENT_USER, sub, "Ok", REG_DWORD, &42u32.to_le_bytes()));
+        let ops_ok = vec![RestoreOp::Write {
+            hive: "CurrentUser".into(),
+            sub: sub.into(),
+            key: "Ok".into(),
+            typ: "REG_DWORD".into(),
+            bytes: 42u32.to_le_bytes().to_vec(),
+        }];
+        let (checked, bad) = verify_restore_ops(&ops_ok);
+        assert_eq!((checked, bad), (1, 0), "写进去的 DWORD=42 必须回读一致");
+
+        // ② 写的是 A、期望读的是 B → 1 条不一致
+        let ops_wrong_data = vec![RestoreOp::Write {
+            hive: "CurrentUser".into(),
+            sub: sub.into(),
+            key: "Ok".into(),
+            typ: "REG_DWORD".into(),
+            bytes: 43u32.to_le_bytes().to_vec(),
+        }];
+        let (checked2, bad2) = verify_restore_ops(&ops_wrong_data);
+        assert_eq!((checked2, bad2), (1, 1), "注册表里是 42、期望 43 ⇒ 必须报不一致");
+
+        // ③ 类型标签不符（备份写 REG_SZ、实际是 DWORD）→ 1 条不一致
+        assert!(reg_restore_write(HKEY_CURRENT_USER, sub, "WrongType", REG_DWORD, &7u32.to_le_bytes()));
+        let ops_wrong_type = vec![RestoreOp::Write {
+            hive: "CurrentUser".into(),
+            sub: sub.into(),
+            key: "WrongType".into(),
+            typ: "REG_SZ".into(),
+            bytes: 7u32.to_le_bytes().to_vec(),
+        }];
+        let (_, bad3) = verify_restore_ops(&ops_wrong_type);
+        assert_eq!(bad3, 1, "备份说 REG_SZ、实际是 REG_DWORD ⇒ 必须报不一致（别的程序改过）");
+
+        // ④ Delete 判据：键还在 → 不一致；键不在 → 一致
+        let ops_del_exists = vec![RestoreOp::Delete {
+            hive: "CurrentUser".into(),
+            sub: sub.into(),
+            key: "Ok".into(),
+        }];
+        assert_eq!(verify_restore_ops(&ops_del_exists).1, 1, "键还在时 Delete 判据必须报不一致");
+        let ops_del_gone = vec![RestoreOp::Delete {
+            hive: "CurrentUser".into(),
+            sub: sub.into(),
+            key: "Gone".into(),
+        }];
+        assert_eq!(verify_restore_ops(&ops_del_gone).1, 0, "键不存在时 Delete 判据必须通过（幂等）");
+
+        // ⑤ 反向护栏：未知 hive 计入不一致而不是静默跳过
+        //（静默跳过 = 「核对了 0 条，一致」⇒ 调用方会以为还原干净）
+        let ops_bad_hive = vec![RestoreOp::Write {
+            hive: "NoSuchHive".into(),
+            sub: sub.into(),
+            key: "Ok".into(),
+            typ: "REG_DWORD".into(),
+            bytes: 42u32.to_le_bytes().to_vec(),
+        }];
+        let (checked3, bad4) = verify_restore_ops(&ops_bad_hive);
+        assert_eq!((checked3, bad4), (0, 1), "未知 hive 必须计入不一致，不能静默跳过（跳过会被当成「干净」）");
+
+        // ⑥ BINARY 也走同一判据（字节序列不等即报不一致）
+        assert!(reg_restore_write(HKEY_CURRENT_USER, sub, "Bin", REG_BINARY, &[1, 2, 3]));
+        let ops_bin_ok = vec![RestoreOp::Write {
+            hive: "CurrentUser".into(),
+            sub: sub.into(),
+            key: "Bin".into(),
+            typ: "REG_BINARY".into(),
+            bytes: vec![1, 2, 3],
+        }];
+        assert_eq!(verify_restore_ops(&ops_bin_ok).1, 0, "BINARY 字节一致时应通过");
+        let ops_bin_bad = vec![RestoreOp::Write {
+            hive: "CurrentUser".into(),
+            sub: sub.into(),
+            key: "Bin".into(),
+            typ: "REG_BINARY".into(),
+            bytes: vec![1, 2, 4],
+        }];
+        assert_eq!(verify_restore_ops(&ops_bin_bad).1, 1, "BINARY 字节不等必须报不一致");
+        let _ = REG_SZ;
+        let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, "Bin");
+        cleanup();
+    }
+
+    /// M3 的**反向**护栏：`optimizer_restore_reg` 必须真的调了回读验证。
+    ///
+    /// 为什么用源码结构断言而不用行为断言：回读不一致时的表现是「报失败」，
+    /// 而要造出「写成功但值错」需要在真机上破坏写侧（类型映射错等）——
+    /// 那是改代码不是测代码。所以这里守的是「调用点在不在」：
+    /// 判红实验 R1-M3-3 摘掉它之后本条必须红。
+    #[test]
+    fn m3_还原命令必须调回读验证() {
+        let src = include_str!("backup_restore.rs");
+        let fn_at = src
+            .find("pub async fn optimizer_restore_reg")
+            .expect("找不到 optimizer_restore_reg");
+        // 该函数体到下一个 `pub async fn` / `pub fn` 之前
+        let rest = &src[fn_at..];
+        let end = rest
+            .find("\npub ")
+            .unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("verify_restore_ops"),
+            "optimizer_restore_reg 没有调 verify_restore_ops —— 还原后回读校验这一环缺失 \
+             （RegSetValueExW 成功不等于值写对了）"
+        );
+        assert!(
+            body.contains("verifyFailed"),
+            "回读不一致时必须 fail-closed 报错（返回 verifyFailed），不许报成功"
+        );
+        // fail-closed 的前提：mismatched > 0 的那个 return 必须在**清备份记录之前**。
+        //
+        // ⚠️ 不能比 `verify_restore_ops` 与 `o.remove` 的位置 —— 判红实验 4 实测：
+        // 函数里可能有**多处** `o.remove`（正常路径一处、额外插入的一处），
+        // 而 `find` 只认首次出现，于是「把清备份挪到回读之后」这种改法照样绿。
+        // 必须锚定「报错 return 的闭合」与「清备份的**最后一次**出现」的相对顺序。
+        let bad_return = body
+            .find("verifyFailed")
+            .expect("找不到回读不一致的报错分支（返回体里应有 verifyFailed）");
+        let bad_return_close = body[bad_return..]
+            .find("});")
+            .map(|i| bad_return + i)
+            .expect("报错分支的 json 块没闭合");
+        let clear_last = body
+            .rfind("o.remove(&option_id)")
+            .expect("找不到清备份记录那行");
+        assert!(
+            bad_return_close < clear_last,
+            "回读不一致的 return 被挪到了清备份记录之后（{bad_return_close} vs {clear_last}）—— \
+             不一致时备份已被清掉，用户失去唯一的还原依据"
+        );
+    }
