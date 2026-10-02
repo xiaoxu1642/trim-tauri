@@ -1548,15 +1548,25 @@ fn hive_prefix(h: Hive) -> &'static str {
     }
 }
 
+/// win32 错误码 → 用户看得懂的一句话。
+///
+/// 为什么要翻：原来只报「写注册表值失败: <路径>」，用户读到的是"工具坏了"，
+/// 而真相往往是那条键根本不该由我们写（TrustedInstaller 独占）。判据要能指到下一步动作。
+fn reg_err(code: u32) -> String {
+    match code {
+        5 => "拒绝访问：该键的所有权不在 Administrators（多为 TrustedInstaller 独占），需先取得所有权；Trim 不代取所有权".to_string(),
+        2 | 3 => "找不到指定的注册表项或值（本机没有该功能对应的键）".to_string(),
+        13 => "数据长度与值类型不符".to_string(),
+        1406 => "写入值被拒（值名或类型不被该键接受）".to_string(),
+        other => format!("win32={other}"),
+    }
+}
+
 fn exec_one(op: &PsOp) -> Result<String, String> {
     match op {
-        PsOp::KeyCreate { hive, subkey } => {
-            if native::reg_key_ensure(hive_handle(*hive), subkey) {
-                Ok(String::new())
-            } else {
-                Err(format!("创建注册表键失败: {subkey}"))
-            }
-        }
+        PsOp::KeyCreate { hive, subkey } => native::reg_key_ensure_checked(hive_handle(*hive), subkey)
+            .map(|_| String::new())
+            .map_err(|c| format!("创建注册表键失败: {subkey} —— {}", reg_err(c))),
         PsOp::KeyRemove { hive, subkey, recurse } => {
             if native::reg_key_remove(hive_handle(*hive), subkey, *recurse) {
                 Ok(String::new())
@@ -1564,13 +1574,15 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
                 Err(format!("删除注册表键失败: {subkey}"))
             }
         }
-        PsOp::ValueWrite { hive, subkey, name, kind, data } => {
-            if native::reg_restore_write(hive_handle(*hive), subkey, name, kind_of(*kind), data) {
-                Ok(String::new())
-            } else {
-                Err(format!("写注册表值失败: {subkey}\\{name}"))
-            }
-        }
+        PsOp::ValueWrite { hive, subkey, name, kind, data } => native::reg_restore_write_checked(
+            hive_handle(*hive),
+            subkey,
+            name,
+            kind_of(*kind),
+            data,
+        )
+        .map(|_| String::new())
+        .map_err(|c| format!("写注册表值失败: {subkey}\\{name} —— {}", reg_err(c))),
         PsOp::ValueRemove { hive, subkey, name } => {
             if native::reg_restore_delete(hive_handle(*hive), subkey, name) {
                 Ok(String::new())
@@ -1669,6 +1681,21 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 失败原因必须指到下一步动作，而不是只报「失败了」。
+    /// 起因：`Speech_OneCore\Settings` 那两条写值失败，界面只给一句
+    /// 「写注册表值失败: <路径>」，用户读到的是"工具坏了 + 是不是缺 PowerShell"，
+    /// 而真相是该键由 TrustedInstaller 独占、这台机器上谁都写不进去。
+    #[test]
+    fn 注册表失败原因可诊断() {
+        let denied = reg_err(5);
+        assert!(
+            denied.contains("拒绝访问") && denied.contains("所有权"),
+            "写值被拒要说清是权限问题、且我们不代取所有权，否则只会误导去装 PowerShell: {denied}"
+        );
+        assert!(reg_err(2).contains("找不到"), "「键不存在」与「没权限」是两种完全不同的结论");
+        assert_eq!(reg_err(9999), "win32=9999", "未知错误码必须原样带出，不编造解释");
+    }
 
     #[test]
     fn parses_literal_item_property() {

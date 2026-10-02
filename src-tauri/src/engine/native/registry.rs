@@ -10,7 +10,7 @@
 
 
 use windows::core::PCWSTR;
-use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_BINARY, REG_CREATED_NEW_KEY, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
 use super::common::*;
 /// 读注册表 DWORD，失败返回 -1（保持 unsafe 签名，调用方维持既有 unsafe 块）
 pub(super) unsafe fn read_reg_dword(hkey: HKEY, subkey: &str, value: &str) -> i32 {
@@ -155,16 +155,31 @@ pub fn reg_key_exists(hive: HKEY, subkey: &str) -> bool {
     }
 }
 
-/// 确保键存在（对应 PS `New-Item -Path … -Force`；RegCreateKeyExW 幂等）
+/// 确保键存在（对应 PS `New-Item -Path … -Force`）
+///
+/// `-Force` 的语义是「有就用、没有才建」，所以创建被拒时还要判一次「键是否已存在」：
+/// 父键只授读权而子键早已存在的情况下，RegCreateKeyExW 会返回拒绝访问，但目标状态
+/// 其实已经满足——报失败就是假失败。
 pub fn reg_key_ensure(hive: HKEY, subkey: &str) -> bool {
+    reg_key_ensure_checked(hive, subkey).is_ok()
+}
+
+/// 同 `reg_key_ensure`，但把 win32 错误码交回调用方渲染成人话（5 = 拒绝访问等）。
+pub fn reg_key_ensure_checked(hive: HKEY, subkey: &str) -> Result<(), u32> {
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
     unsafe {
-        let ok = RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_READ, None, &mut hk, None).is_ok();
-        if ok {
+        let r = RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_READ, None, &mut hk, None);
+        if r.is_ok() {
             let _ = RegCloseKey(hk);
+            return Ok(());
         }
-        ok
+        // 建不了，但键本来就在 —— `-Force` 的目标状态已达成
+        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+            let _ = RegCloseKey(hk);
+            return Ok(());
+        }
+        Err(r.0)
     }
 }
 
@@ -470,6 +485,11 @@ pub fn reg_restore_write(hive: HKEY, subkey: &str, value_name: &str, kind: REG_V
     unsafe { reg_write_value(hive, subkey, value_name, kind, data) }
 }
 
+/// 带 win32 错误码的写值出口（原生解释器用它区分「拒绝访问」与「键不存在」）。
+pub fn reg_restore_write_checked(hive: HKEY, subkey: &str, value_name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(), u32> {
+    unsafe { reg_write_value_checked(hive, subkey, value_name, kind, data) }
+}
+
 /// 枚举文件的命名数据流（NTFS ADS）字节数与条数（HiBit §H5，2026-09-29）。
 ///
 /// **用的是 `FindFirstStreamW` / `FindNextStreamW`**。对标报告按 HiBit 的导入表
@@ -581,17 +601,37 @@ pub(super) unsafe fn reg_delete_value(hive: HKEY, subkey: &str, value_name: &str
 }
 
 /// 写注册表值（恢复用）
+/// 写注册表值（原生解释器与还原链共用）。
+///
+/// **权限掩码只要 `KEY_SET_VALUE`，不要 `KEY_WRITE`**。`KEY_WRITE` 里含
+/// `KEY_CREATE_SUB_KEY`，而 `HKLM\…\MMDevices\Audio\Render\{…}\FxProperties` 这类键的 DACL
+/// 给 Administrators 的只有 `SetValue, ReadKey`（本机实测：`KEY_WRITE` 打开返回 win32=5
+/// 拒绝访问，`KEY_SET_VALUE` 打开成功）。多要那一项权限会把**本来写得进去的值**报成失败——
+/// 「关闭音频增强 / 关闭空间音效」就是这么被误判成执行失败的。
+/// 顺序：先按写值权打开已存在的键 → 打不开再创建（键不存在时才需要父键给 CreateSubKey）。
 pub(super) unsafe fn reg_write_value(hive: HKEY, subkey: &str, value_name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> bool {
-    let sk = to_wide(&subkey);
+    reg_write_value_checked(hive, subkey, value_name, kind, data).is_ok()
+}
+
+/// 同 `reg_write_value`，但把 win32 错误码交回调用方（pssteps 用它渲染可诊断的失败原因）。
+pub(super) unsafe fn reg_write_value_checked(hive: HKEY, subkey: &str, value_name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(), u32> {
+    let sk = to_wide(subkey);
     let mut hk = HKEY::default();
-    let mut disp = REG_CREATED_NEW_KEY;
-    if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
-        return false;
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
+        // 键不存在才需要创建（这一步才真正要求父键给 KEY_CREATE_SUB_KEY）
+        let r = RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut hk, None);
+        if r.is_err() {
+            return Err(r.0);
+        }
     }
     let nm = to_wide(value_name);
     let r = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), kind, Some(data));
     let _ = RegCloseKey(hk);
-    r.is_ok()
+    if r.is_ok() {
+        Ok(())
+    } else {
+        Err(r.0)
+    }
 }
 
 pub(super) unsafe fn reg_count_values(hk: HKEY) -> usize {

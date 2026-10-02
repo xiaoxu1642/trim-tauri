@@ -577,3 +577,66 @@ use super::restore_point::*;
         let Some(RestoreOp::Write { bytes, .. }) = ops.first() else { panic!("{ops:?}") };
         assert_eq!(bytes.as_slice(), &[0x41u8, 0x42, 0x43]);
     }
+
+    /// 步骤标签不得谎报执行引擎（2026-10-02 用户诉求的直接落点）。
+    /// 判据只有一份：问 `pssteps::compile`，而不是看数据层有没有 `pwsh` 字段——
+    /// 数据层标 pwsh 的步骤里多数其实走原生解释器，一律显示「执行 PowerShell」
+    /// 会让人以为应用依赖 PowerShell（甚至以为要装 PowerShell 7）。
+    #[test]
+    fn 执行引擎按编译器实算而非按数据层标签() {
+        assert_eq!(
+            step_exec_mode(&json!({"pwsh": "New-ItemProperty -Path 'HKCU:\\Software\\trim-test' -Name a -Value 1 -PropertyType DWord -Force"})),
+            Some("native"),
+            "能被原生解释器吃下的 pwsh 步骤必须报 native"
+        );
+        assert_eq!(
+            step_exec_mode(&json!({"pwsh": "Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue"})),
+            Some("inbox-ps"),
+            "cmdlet 形态只能逐字交收件箱 PowerShell，必须如实报 inbox-ps"
+        );
+        assert_eq!(step_exec_mode(&json!({"cmd": "taskkill /f /im x.exe"})), Some("proc"));
+        assert_eq!(step_exec_mode(&json!({"reg": "Windows Registry Editor Version 5.00"})), Some("native"));
+        assert_eq!(step_exec_mode(&json!({"label": "无引擎字段"})), None);
+    }
+
+    /// 把 `data_layer_coverage_report` 的「编译失败 0」从一次性打印升级成常驻断言：
+    /// 数据层任何一步退化成 unsupported，就是「界面看得见可点、后端必然失败」那一族
+    /// （v2-M10 前科），必须当场红，而不是等发布前手动跑报告。
+    #[test]
+    fn 数据层没有编译不出来的步骤() {
+        let mut native = 0usize;
+        let mut inbox = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for o in options() {
+            for key in ["steps", "restore"] {
+                for s in o.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                    if s.get("pwsh").and_then(|v| v.as_str()).is_none() {
+                        continue;
+                    }
+                    match step_exec_mode(&s) {
+                        Some("native") => native += 1,
+                        Some("inbox-ps") => inbox += 1,
+                        other => bad.push(format!("{}: {:?} ← {}", o.get("id").and_then(|v| v.as_str()).unwrap_or("?"), other, s.get("label").and_then(|v| v.as_str()).unwrap_or(""))),
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "这些 pwsh 步骤既编译不成原生、也不在 PsInline 白名单里: {bad:?}");
+        assert!(native > 0 && inbox > 0, "覆盖报告形状变了（native={native} inbox-ps={inbox}），前端文案分支要跟着复核");
+        // 收件箱 PowerShell 步数**只减不增**的棘轮：新增优化项若退化成整段交 PS，
+        // 这里会红，逼着写清楚「为什么不能原生」。基线 11 是 2026-10-02 现算：
+        //   tf_ifeo_wipe×1（foreach + PSObject 属性枚举，误编译等于删错 IFEO 子键）、
+        //   tf_mmagent×2（Disable-MMAgent cmdlet，注册表落点未在本机实测，不猜）、
+        //   tf_dev_*×3（R5 裁定：设备禁用无原生投影且无自动还原）、
+        //   tf_restore_point×1（A11 裁定收口：本机 SR WMI provider 就是坏的）、
+        //   tf_appx/tf_cortana×2（NonRemovable 在 windows 0.61 无投影，已裁定停手）、
+        //   tf_onedrive×2（Start-Process /UNINSTALL + @@RECYCLE@@ 协议行，改原生要在真卸
+        //   OneDrive 的机器上验，本机不造这个副作用）。
+        const INBOX_PS_BASELINE: usize = 11;
+        assert!(
+            inbox <= INBOX_PS_BASELINE,
+            "收件箱 PowerShell 步骤从基线 {INBOX_PS_BASELINE} 涨到 {inbox}：新步骤要优先走原生解释器，\
+             确实不能原生请把理由补进本注释并显式抬基线"
+        );
+        println!("[执行引擎分账] 原生 {native} 步 / 收件箱 PowerShell 5.1 {inbox} 步 / 不支持 0 步");
+    }

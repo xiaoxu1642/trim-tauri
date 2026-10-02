@@ -35,7 +35,10 @@ pub fn app_get_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde
         "isAdmin": sysinfo::is_admin(),
         "username": username,
         "homedir": homedir,
-        "powerShell": "PowerShell 7",
+        // 刻意不再有 "powerShell" 字段：R1 起本应用不依赖 PowerShell 7，仅剩的 11 个
+        // 步骤走系统自带的收件箱 Windows PowerShell 5.1；这个字段此前硬编码
+        // "PowerShell 7" 且**零消费者**，是"应用要装 PS7"这个误解的唯一来源。
+        // 每步真实执行引擎改由 optimizer:list 的 execMode 按编译器实算下发。
         // v2.6.0（P2-9）：数据目录形态（设置页「系统信息」展示）
         "portable": paths::is_portable(),
         "dataDir": paths::app_data_dir().to_string_lossy(),

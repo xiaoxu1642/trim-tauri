@@ -538,7 +538,15 @@
     if (s.cmd) return s.cmd;
     if (s.service) return '停止服务 ' + s.service + (s.disable ? ' 并设为禁用' : '');
     if (s.reg) return '导入注册表项（多键值原样写入）';
-    if (s.pwsh) return '执行 PowerShell 内联脚本';
+    if (s.pwsh) {
+      // 执行引擎如实报：数据层标 pwsh 的 56 个步骤里 45 个走主进程原生解释器
+      // （execMode 由 optimizer:list 按 pssteps::compile 实算下发）。
+      // 一律写「执行 PowerShell 内联脚本」是在谎报引擎，会让人以为应用依赖 PowerShell。
+      if (s.execMode === 'inbox-ps') return '改系统设置（经系统自带的 Windows PowerShell，无需安装任何组件）';
+      if (s.execMode === 'native') return '改系统设置（主进程原生执行）';
+      if (s.execMode === 'unsupported') return '该步骤本机暂不支持（原生解释器与白名单都不认）';
+      return '改系统设置（主进程执行）';
+    }
     return '';
   }
 

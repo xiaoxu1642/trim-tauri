@@ -185,6 +185,43 @@ pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<Strin
     result
 }
 
+/// 这一步**实际由谁执行**：`native`（主进程原生解释器）/ `inbox-ps`（收件箱 Windows
+/// PowerShell 5.1，系统自带）/ `proc`（直接起进程）/ `unsupported`（编译不出来）。
+///
+/// 为什么要在后端算并随 `optimizer:list` 下发：数据层里标 `pwsh` 的 56 个步骤，实测有
+/// 45 个走的是原生解释器（`cargo test --lib data_layer_coverage_report -- --nocapture`
+/// 现算），前端却一律显示「执行 PowerShell 内联脚本」——那是在谎报执行引擎，用户据此
+/// 认为本应用依赖 PowerShell（并以为要装 PowerShell 7）。判据只有一份：直接问编译器。
+pub(super) fn step_exec_mode(s: &Value) -> Option<&'static str> {
+    if let Some(ps) = s.get("pwsh").and_then(Value::as_str) {
+        return Some(match crate::engine::pssteps::compile(ps) {
+            Ok(ops) if ops.iter().any(|o| matches!(o, crate::engine::pssteps::PsOp::PsInline { .. })) => "inbox-ps",
+            Ok(_) => "native",
+            Err(_) => "unsupported",
+        });
+    }
+    if s.get("cmd").is_some() {
+        return Some("proc");
+    }
+    if s.get("reg").is_some() || s.get("service").is_some() {
+        return Some("native");
+    }
+    None
+}
+
+/// 给一行选项的 steps[] / restore[] 每项补 `execMode`（响应侧字段，不进数据层文件）。
+pub(super) fn tag_exec_modes(row: &mut Value) {
+    for key in ["steps", "restore"] {
+        if let Some(arr) = row.get_mut(key).and_then(|v| v.as_array_mut()) {
+            for s in arr.iter_mut() {
+                if let (Some(mode), Some(map)) = (step_exec_mode(s), s.as_object_mut()) {
+                    map.insert("execMode".into(), json!(mode));
+                }
+            }
+        }
+    }
+}
+
 // ==================== IPC ====================
 
 /// optimizer:list —— 完整选项目录（含 steps/restore）
@@ -192,6 +229,7 @@ pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<Strin
 /// 每行补一个 `applyScope`（生效粒度），值来自 [`SCOPE_JSON`] 侧表而非数据层本身 ——
 /// `optimizer-runtime.json` 与上游基线是逐字段对拍的双源文件，加字段必判红。
 /// 前端在「执行所选优化」的批次结束时按各行取最大粒度，**只提示一次**重启建议。
+/// 另给每个步骤补 `execMode`（见 [`step_exec_mode`]），同样是响应侧字段。
 #[tauri::command]
 pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
@@ -207,6 +245,7 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                     json!(apply_scope(o.get("id").and_then(Value::as_str).unwrap_or(""))),
                 );
             }
+            tag_exec_modes(&mut row);
             row
         })
         .collect();
