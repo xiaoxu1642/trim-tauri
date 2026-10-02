@@ -326,6 +326,71 @@ pub fn overview_checkup() -> Result<Value, String> {
         }
     }
 
+    // 10. 蓝屏（BugCheck）历史 + 转储策略（对标 RAINZ bsod.ps1，**只读**）
+    //     只读是刻意的：改 CrashControl\CrashDumpEnabled 会改变系统崩溃时的行为，
+    //     属写侧，不在诊断域范围内（对标报告 §3 B2 的「不建议收」那条）。
+    {
+        let hist = super::bsod::crash_history();
+        let cc = &hist.control;
+        if let Some(e) = hist.read_error.as_deref() {
+            checks.push(check_item("crash_history", "蓝屏记录", "unknown", "无法读取", e, "未验证"));
+        } else if let Some(newest) = hist.records.first() {
+            let code_text = newest
+                .bugcheck
+                .map(|c| match super::bsod::bugcheck_name(c) {
+                    Some(n) => format!("0x{c:08X} {n}"),
+                    None => format!("0x{c:08X}（未收录的 bugcheck 码）"),
+                })
+                .unwrap_or_else(|| "码未读出（转储头部形态异常）".to_string());
+            let when = super::bsod::age_text(newest.mtime_ms, crate::engine::now_ms());
+            // 参数 1 常指向出错的驱动对象/地址，是排查的入口；为 0 时不占字数
+            let p0 = if newest.params[0] != 0 {
+                format!("，参数1 0x{:016X}", newest.params[0])
+            } else {
+                String::new()
+            };
+            let reboot = match cc.auto_reboot {
+                Some(v) if v != 0 => "，崩溃后自动重启已开",
+                Some(_) => "，崩溃后不自动重启",
+                None => "",
+            };
+            checks.push(check_item(
+                "crash_history",
+                "蓝屏记录",
+                "warn",
+                &format!("{} 个转储，最近 {when}", hist.records.len()),
+                &format!(
+                    "最近一次蓝屏码 {code_text}{p0}；转储 {}（{} KB）{reboot}。文件保持原样未动，可用 BlueScreenView 之类工具查驱动归属",
+                    newest.path,
+                    newest.size / 1024
+                ),
+                "本机实测",
+            ));
+        } else if cc.dump_enabled() {
+            checks.push(check_item(
+                "crash_history",
+                "蓝屏记录",
+                "ok",
+                "无转储",
+                &format!(
+                    "未发现转储文件（转储策略：{}）—— 若确实蓝屏过却没有转储，检查 {} 是否可写",
+                    cc.mode_text(),
+                    cc.minidump_dir.as_deref().unwrap_or("%SystemRoot%\\Minidump")
+                ),
+                "本机实测",
+            ));
+        } else {
+            checks.push(check_item(
+                "crash_history",
+                "蓝屏记录",
+                "warn",
+                "转储未启用",
+                "系统未启用崩溃转储：一旦蓝屏将不会留下可分析的证据。可在「系统属性 → 高级 → 启动和故障恢复」里开启",
+                "机制明确",
+            ));
+        }
+    }
+
     Ok(json!({ "checks": checks }))
 }
 
@@ -468,3 +533,38 @@ pub fn device_info() -> Result<Value, String> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 系统体检的**形状与接线**（此前该函数只有 IPC 路径、零单测覆盖）。
+    /// 钉两件事：① 每个 check 都带前端 `renderCheckup` 直接消费的六个字段，且 status
+    /// 落在前端枚举内；② 本批新增的「蓝屏记录」项确实在列 —— 它是只读诊断，
+    /// 任何机器上都应给出结论，最差也该是 unknown，不许缺席。
+    #[test]
+    fn 体检输出形状与蓝屏项接线() {
+        let v = overview_checkup().expect("体检应成功");
+        let checks = v
+            .get("checks")
+            .and_then(|c| c.as_array())
+            .expect("checks 必须是数组");
+        assert!(checks.len() >= 10, "体检项数异常偏少: {}", checks.len());
+        let mut ids: Vec<String> = Vec::new();
+        for c in checks {
+            for f in ["id", "title", "status", "value", "detail", "evidence"] {
+                assert!(c.get(f).and_then(|x| x.as_str()).is_some(), "体检项缺字段 {f}: {c}");
+            }
+            let st = c["status"].as_str().unwrap_or("");
+            assert!(
+                matches!(st, "ok" | "warn" | "bad" | "unknown"),
+                "未预期的 status「{st}」（前端按枚举取样式）: {c}"
+            );
+            ids.push(c["id"].as_str().unwrap_or("").to_string());
+        }
+        assert!(
+            ids.contains(&"crash_history".to_string()),
+            "蓝屏记录项缺席，实收: {ids:?}"
+        );
+    }
+}

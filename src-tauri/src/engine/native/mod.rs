@@ -7,6 +7,7 @@
 //! 状态：纯原生（方案 S3）。各域 `.ps1` 已删除，本模块是唯一实现，**不存在 PS 回退**；
 //! 调用失败一律如实返回错误，权限拒绝、参数非法等不回退，由调用方按错误类型判断。
 
+mod bsod;
 mod cleanup;
 pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute};
 mod common;
