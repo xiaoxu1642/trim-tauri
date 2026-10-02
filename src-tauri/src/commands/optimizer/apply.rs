@@ -417,6 +417,71 @@ impl Drop for OptRunGuard {
     }
 }
 
+/// M1 预检拒绝理由（方案 §5.3）。刻意做成枚举而不是裸 `String`：
+/// 调用方要按理由给不同的回执字段（`needAdmin` / `needConfirm` / 普通 message），
+/// 用字符串比的话新增一条理由就得去改三处 match，而漏改的那处会静默走进通用分支。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PreflightReject {
+    NeedAdmin,
+    NeedHighRiskConfirm,
+    /// 本机编译不出来的 pwsh 步骤。`String` 是 `step_exec_mode` 判出的 execMode。
+    UnsupportedStep(String),
+}
+
+impl PreflightReject {
+    /// 给渲染层看的文案。**中文、单一真源**：preflight 的 `rejected[].reason`
+    /// 与单条执行的 `message` 都从这里取，两处不许各写一份。
+    pub(super) fn message(&self) -> String {
+        match self {
+            Self::NeedAdmin => "需要管理员权限".to_string(),
+            Self::NeedHighRiskConfirm => "需高危确认".to_string(),
+            Self::UnsupportedStep(m) => format!("本机不支持（{m}）"),
+        }
+    }
+}
+
+/// M1（R1-1.3）**批量预检与单条执行链的唯一判据真源**。
+///
+/// 为什么必须是同一个函数：批量路径的价值就是「提前告诉用户哪几项会被拦」。
+/// 如果预检自己抄一份判据，将来单条执行新增/放宽了闸门而预检没跟上，用户看到的
+/// 就是「预检说能跑、点了却失败」—— 预检反而成了谎报源。
+///
+/// `restore` 方向必须传进来：高危确认在还原方向是**豁免**的（审查 2026-09-27 H1，
+/// 见 `optimizer_run` 处的完整注释）。漏传 `true` 会让无值级备份的高危项在
+/// 预检里被判「需高危确认」，而还原通道根本不弹那个确认框 ⇒ 又是整体死锁。
+///
+/// ⚠️ 本函数**只读**、不改任何系统状态，所以 `optimizer_batch_preflight` 用
+/// `guard_readonly` 档（不是 MAIN）。档位判据见 AGENTS §3「以谁真的需要调它为准」。
+pub(super) fn preflight_reason(
+    opt: &Value,
+    option_id: &str,
+    restore: bool,
+) -> Option<PreflightReject> {
+    if !sysinfo::is_admin() {
+        return Some(PreflightReject::NeedAdmin);
+    }
+    // 方向豁免：还原不是高危写入（审查 2026-09-27 H1）
+    if !restore && needs_high_risk_confirm(opt, option_id) {
+        return Some(PreflightReject::NeedHighRiskConfirm);
+    }
+    // 步骤不可执行预检：只查 restore 侧还是正向侧，按方向取对应数组。
+    // 判据复用 [`step_exec_mode`]，那是 execMode 的唯一真源 —— 预检自己判一次
+    // 「这一步能不能编译」就是第二份口径。
+    let steps_key = if restore { "restore" } else { "steps" };
+    if let Some(arr) = opt.get(steps_key).and_then(|v| v.as_array()) {
+        if !arr.is_empty() {
+            if let Some(bad) = arr
+                .iter()
+                .find(|s| step_exec_mode(s) == Some("unsupported"))
+                .and_then(|s| s.get("label").and_then(|v| v.as_str()).map(|l| l.to_string()))
+            {
+                return Some(PreflightReject::UnsupportedStep(bad));
+            }
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn optimizer_run<R: Runtime>(
     window: WebviewWindow<R>,
@@ -435,25 +500,38 @@ pub async fn optimizer_run<R: Runtime>(
     };
     let p = params.unwrap_or_default();
 
-    if !sysinfo::is_admin() {
-        return json!({
-            "success": false, "needAdmin": true,
-            "message": "优化操作需要管理员权限，请先提权"
-        });
-    }
-    // 审查 2026-09-27 H1：还原方向（restore=true）只执行预置 restore 步骤——把改动
-    // 回退到原值，不做正向写入，不属于高危写入；此前闸门不分方向地拒绝，而前端约定
-    // restore 不带 confirmedHighRisk 且不处理 needConfirm，导致无值级备份的高危项
-    // 走预置脚本还原时整体死锁（4 条还原入口全部命中）。故 restore 方向豁免回执。
-    if !p.restore && needs_high_risk_confirm(&opt, &option_id) && !p.confirmed_high_risk {
-        log::write_log(
-            "warn",
-            &format!("高危优化缺少确认回执，已拒绝: {option_id} (restore={})", p.restore),
-        );
-        return json!({
-            "success": false, "needConfirm": true,
-            "message": "高危操作缺少红色确认回执，请在界面重新确认后执行"
-        });
+    // M1（R1-1.3）：判据只有这一份，`optimizer_batch_preflight` 与本函数同源调用。
+    // 以前这里是三段内联的 early-return，preflight 若另抄一份，漂移后单条执行仍绿、
+    // 只有批量预检错 —— 属于最难发现的一类 bug（preflight 就是给用户看的那一层）。
+    //
+    // ⚠️ `restore` 方向豁免高危确认是**刻意**的（审查 2026-09-27 H1）：还原只把改动
+    // 回退到原值，不属于高危写入。此前闸门不分方向地拒绝，而前端约定 restore 不带
+    // confirmedHighRisk 且不处理 needConfirm，导致无值级备份的高危项走预置脚本还原时
+    // **整体死锁**（4 条还原入口全部命中）。preflight 必须复刻这个豁免，否则把死锁重造一遍。
+    match preflight_reason(&opt, &option_id, p.restore) {
+        Some(PreflightReject::NeedAdmin) => {
+            return json!({
+                "success": false, "needAdmin": true,
+                "message": "优化操作需要管理员权限，请先提权"
+            });
+        }
+        Some(PreflightReject::NeedHighRiskConfirm) if !p.confirmed_high_risk => {
+            log::write_log(
+                "warn",
+                &format!("高危优化缺少确认回执，已拒绝: {option_id} (restore={})", p.restore),
+            );
+            return json!({
+                "success": false, "needConfirm": true,
+                "message": "高危操作缺少红色确认回执，请在界面重新确认后执行"
+            });
+        }
+        // 步骤在本机编译不出来时预先拒绝：原先这条只在执行中段才暴露（apply.rs 的
+        // pwsh 分支 `failed += 1`），用户看到的是「第 5 项失败」而前 4 项已落盘。
+        Some(PreflightReject::UnsupportedStep(reason)) => {
+            log::write_log("warn", &format!("优化项步骤不可执行，已预先拒绝: {option_id} ({reason})"));
+            return json!({ "success": false, "message": format!("本机不支持该优化项的某一步：{reason}") });
+        }
+        _ => {}
     }
 
     let is_dynamic = opt.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false);

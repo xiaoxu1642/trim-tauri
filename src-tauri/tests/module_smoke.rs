@@ -1141,3 +1141,76 @@ fn 集成测试进程不写生产日志() {
         "集成测试进程打开了生产日志落盘 —— 测试夹具会再次灌进用户的「操作日志」"
     );
 }
+
+// ==================== M1 optimizer:batch-preflight ====================
+
+/// M1 档位：预检是**纯只读**判定，档位挂 `guard_readonly`（放行五个窗口 label）。
+///
+/// 与 `optimizer_restore_reg` 那条对照着看：还原写注册表，四个子窗调它必须被拒杀；
+/// 预检只读数据层与 `is_admin()`，子窗调它应当放行 —— 一放一拒之间就是档位的意义。
+#[test]
+fn batch_preflight_is_readonly_for_all_app_windows() {
+    // R1-1.7：子窗清单必须由 `sub_windows()` 派生，不许硬编码 label 字面量
+    for label in sub_windows() {
+        let w = window_with_label(&label);
+        let text = invoke_text(&w, "optimizer_batch_preflight", json!({ "ids": ["svc_w32time_manual"] }));
+        assert!(
+            !text.contains("IPC 来源校验失败"),
+            "{label} 窗调只读预检竟被拒杀（档位应与 optimizer_check_optimized 同档）: {text}"
+        );
+        assert!(
+            text.contains("\"runnable\"") || text.contains("\"rejected\""),
+            "{label} 窗应越过档位拿到预检结果形状，回执 {text}"
+        );
+    }
+}
+
+/// R1-1.4 / R1-1.5：空 ids 与未知 id 的**fail-closed** 形状。
+///
+/// 两条都是「不许乐观放行」：空入参若回「全部可执行」，前端会走进「零项全部通过」的
+/// 确认弹窗；未知 id 若被算进 `runnable`，用户会对一个不存在的项发 run。
+#[test]
+fn batch_preflight_empty_and_unknown_ids_are_fail_closed() {
+    let w = main_window();
+
+    let empty = invoke(&w, "optimizer_batch_preflight", json!({ "ids": [] }));
+    common::assert_guard_passed(
+        &serde_json::to_string(&empty).unwrap_or_default(),
+        "空 ids 预检",
+        &["runnable", "rejected"],
+    );
+    assert_eq!(empty["runnable"].as_array().map(|a| a.len()), Some(0), "空 ids 不得回任何可执行项: {empty}");
+    assert_eq!(empty["rejected"].as_array().map(|a| a.len()), Some(0), "空 ids 也没有拒绝项: {empty}");
+
+    let unknown = invoke(&w, "optimizer_batch_preflight", json!({ "ids": ["__不存在的id__"] }));
+    assert_eq!(unknown["success"], json!(true), "预检本身是只读判定，应报成功: {unknown}");
+    assert_eq!(unknown["runnable"].as_array().map(|a| a.len()), Some(0), "未知 id 不得进 runnable: {unknown}");
+    let rejected = unknown["rejected"].as_array().cloned().unwrap_or_default();
+    assert_eq!(rejected.len(), 1, "未知 id 必须进 rejected: {unknown}");
+    assert_eq!(rejected[0]["id"], json!("__不存在的id__"), "rejected 须点名是哪一项: {unknown}");
+    assert!(
+        common::message_of(&rejected[0]).is_empty() && rejected[0]["reason"].as_str().unwrap_or("").contains("未知选项"),
+        "拒绝理由必须在 reason 字段（不是 message）: {unknown}"
+    );
+}
+
+/// R1-1.3 命令层形状：`runnable` / `rejected` 的字段类型对着渲染层消费口径断。
+///
+/// 前端 `filterByPreflight` 直接 `.map` `rejected[].id/reason` 并 `new Set(res.runnable)`，
+/// 字段缺失或类型不对会让批量预检静默把整批判成「全被拦」。快速组只传零副作用 id。
+#[test]
+fn batch_preflight_response_shape_matches_renderer_contract() {
+    let w = main_window();
+    let res = invoke(&w, "optimizer_batch_preflight", json!({ "ids": ["svc_w32time_manual", "__不存在的id__"] }));
+    assert_eq!(res["success"], json!(true), "回执 {res}");
+    assert!(res["runnable"].is_array(), "runnable 必须是数组（前端 new Set(...)）: {res}");
+    assert!(res["rejected"].is_array(), "rejected 必须是数组（前端 .map）: {res}");
+    for r in res["rejected"].as_array().cloned().unwrap_or_default() {
+        assert!(r["id"].is_string(), "rejected[].id 必须是字符串: {r}");
+        assert!(r["reason"].is_string(), "rejected[].reason 必须是字符串: {r}");
+    }
+    // 两个 id 恰好一个未知 ⇒ 合计必须等于入参数，不许有第三个去向（既不 runnable 也不 rejected）
+    let total = res["runnable"].as_array().map(|a| a.len()).unwrap_or(0)
+        + res["rejected"].as_array().map(|a| a.len()).unwrap_or(0);
+    assert_eq!(total, 2, "runnable+rejected 必须恰好覆盖全部入参（无处可丢）: {res}");
+}

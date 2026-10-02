@@ -39,6 +39,11 @@ use super::catalog::*;
 ///
 /// 门禁能判红的前提是「锚点存在且唯一」：改这里的字符串而不同步门禁，门禁会红
 /// （说明两侧脱节）；删掉整段，门禁也会红（说明契约被整体删除）。
+///
+/// `allow(dead_code)` 的理由：它被 `tools/check-optimizer-dynamic.mjs` 当作**文本**
+/// 锚点静态对拍读取，Rust 侧没有运行期消费者。非测试构建下 rustc 看不到那个消费者，
+/// 于是报 dead_code —— 这是「跨语言契约锚点」的固有形态，不是死代码。
+#[allow(dead_code)]
 pub(super) const D0_COVERAGE_ANCHOR: &str = "D0-COVERAGE-ANCHOR";
 
 // ==================== .reg 块解析与回读检测 ====================
@@ -80,6 +85,10 @@ impl Check {
     ///
     /// 为什么不把字段直接改成 `pub`：`Check` 只在 `check_optimized` 一处被消费，
     /// 字段公开等于把「谁能改判定」的范围扩大到全 crate，形状回归就拦不住了。
+    ///
+    /// `allow(dead_code)`：消费者是 `contract_tests`（cfg(test)），非测试构建下
+    /// 没有调用点。方法本身带真实断言逻辑，不是死代码。
+    #[allow(dead_code)]
     pub(super) fn probe(&self) -> (&'static str, &str, &str) {
         (self.kind, self.data.as_str(), self.name.as_str())
     }
@@ -381,6 +390,51 @@ pub async fn optimizer_check_optimized<R: Runtime>(
     let ids = ids.unwrap_or_default();
     let results = check_optimized(&ids);
     json!({ "success": true, "results": results })
+}
+
+/// optimizer:batch-preflight —— 批量执行前的整批准入预检（M1）
+///
+/// **为什么要有这条**：单项闸门一直很严（`apply.rs` 的 `optimizer_run` 逐层
+/// `guard(MAIN)` → `OptRunGuard` → `find_option` → `is_admin` → 高危确认），但前端
+/// 批量是逐条 `await optimizer_run`，第 5 项失败时前 4 项**已经落盘**。预检把
+/// 「哪几项会被拦、为什么」提前到整批动手之前告知用户。
+///
+/// **判据唯一真源** = [`preflight_reason`]，与单条执行链同一个函数。两处各判一份
+/// 是本任务最容易犯的错：漂移后单条执行仍绿，只有预检错，而预检正是给用户看的那层。
+///
+/// **档位 `guard_readonly`（不是 MAIN）**：纯只读判定（只读 `is_admin` 与数据层
+/// steps），不改任何系统状态。它与 `optimizer_check_optimized` 同域同档。判档依据是
+/// AGENTS §3「以谁真的需要调它为准」—— 预检放在批量的确认弹窗之前，而确认弹窗由主窗
+/// 发起，但子窗（如设置页若将来内嵌批量入口）预检本身无害。
+///
+/// **空 `ids` 的语义**：返回 `runnable: []` + `rejected: []`，**不**回「全部可执行」。
+/// 空入参若被当成「没有要拒的」会让前端走进「零项全部通过」的确认弹窗，那是乐观放行。
+#[tauri::command]
+pub async fn optimizer_batch_preflight<R: Runtime>(
+    window: WebviewWindow<R>,
+    ids: Option<Vec<String>>,
+    restore: Option<bool>,
+) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let ids = ids.unwrap_or_default();
+    let restore = restore.unwrap_or(false);
+    let mut runnable: Vec<String> = Vec::new();
+    let mut rejected: Vec<Value> = Vec::new();
+    for id in &ids {
+        // 未知 id 记「未知选项」而不是跳过：跳过等于把它算进 runnable，
+        // 前端会对一个不存在的项发 run 并拿到「未知的优化选项」—— 预检形同虚设。
+        let Some(opt) = find_option(id) else {
+            rejected.push(json!({ "id": id, "reason": "未知选项" }));
+            continue;
+        };
+        match preflight_reason(opt, id, restore) {
+            Some(r) => rejected.push(json!({ "id": id, "reason": r.message() })),
+            None => runnable.push(id.clone()),
+        }
+    }
+    json!({ "success": true, "runnable": runnable, "rejected": rejected })
 }
 
 /// optimizer:state-overview —— 记账清单 + stale 判定 + detected

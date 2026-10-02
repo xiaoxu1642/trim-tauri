@@ -105,6 +105,7 @@ const TAURI_ADDED = {
   'syspanel:power-plan-apply': 'P2 §3.6（2026-10-03）：电源方案三档切换 + 400ms 回读校验（主窗档，白名单 GUID）',
   'syspanel:pagefile-state': 'P2 §3.6（2026-10-03）：虚拟内存只读展示（写侧同批落地）',
   'syspanel:pagefile-apply': 'P2 §3.6（2026-10-03）：虚拟内存写侧（AutomaticManagedPagefile + PagingFiles；主窗档 + 高危确认 + 需重启）',
+  'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',
 };
 
 function collect(set, re, text) {
@@ -339,6 +340,221 @@ function parseApiPaths(text) {
     console.log(`  · D4 现状孤儿 ${orphans.length} 条（v2-M15 遗留，摘除或接线后要同步删基线条目）：`);
     for (const o of orphans) console.log(`      ${o} → ${apiPaths.get(o)}（命令 ${allChannels.get(o)}）：${D4_ORPHANS.get(o) ?? '未登记原因'}`);
   }
+
+/**
+ * D5 基线（2026-10-03 R1-1.2b 登记）：只读档却**只有主窗在用**的命令。
+ *
+ * 语义：这些命令挂 `guard_readonly`（放行全部五个窗口 label），但四个子窗没有任何一个
+ * 在调它们 —— 那份放宽当前没有任何消费方在用，却把命令暴露给了全部窗口。
+ *
+ * **为什么是「登记基线」而不是「一条条改档」**：
+ * - 改档方向会锁死功能。`modal`/`ds` 那一类公共脚本未来完全可能加上对这些命令的调用，
+ *   现在锁回 MAIN 就等于提前把那条路堵死（AGENTS §3 的 M1~M3 教训）。
+ * - 是否有可利用性取决于「子窗脚本有没有消费方」，静态面认不出来的那部分
+ *   （如 `modal` 域的动态派发）必须靠人工判，不能靠门禁猜。
+ * - 本批交付物是**棘轮**：让「新增一条白给的放宽」变红，以及「已登记的条目不再白给」
+ * 也变红（豁免清单烂掉比没有更危险）。
+ *
+ * **棘轮方向**：本表只许**变短**。新增一条 readonly 而无子窗消费方 ⇒ 判红；
+ * 表里某条后来有了子窗调用点（应当从表里删掉）⇒ 也判红。
+ */
+const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
+  'aidesc_get',
+  'app_open_external',
+  'app_read_usage',
+  'appearance_set_material',
+  'appearance_set_material_enabled',
+  'bench_history_add',
+  'bench_history_clear',
+  'bench_history_delete',
+  'bench_history_list',
+  'cleanup_check_locked',
+  'cleanup_check_rules_version',
+  'cleanup_file_backup_list',
+  'cleanup_item_detail',
+  'cleanup_reg_backup_list',
+  'cleanup_rules',
+  'cleanup_scan',
+  'contextmenu_backup',
+  'contextmenu_blocked_list',
+  'contextmenu_icons',
+  'contextmenu_scan',
+  'device_scan',
+  'diag_dwm_conflict',
+  'fileclean_scan',
+  'finder_delete_manifest',
+  'finder_open_backup_dir',
+  'finder_scan',
+  'fonts_import',
+  'fonts_list',
+  'fonts_remove_imported',
+  'fonts_save_config',
+  'intro_load',
+  'log_export',
+  'log_read',
+  'maintenance_tasks',
+  'memory_info',
+  'models_open_window',
+  'models_set_scope',
+  'netcheck_collect',
+  'optimizer_batch_preflight',
+  'optimizer_check_optimized',
+  'optimizer_check_restore',
+  'optimizer_genadvice',
+  'optimizer_list',
+  'optimizer_list_restore',
+  'optimizer_state_overview',
+  'optimizer_svc_mem_current',
+  'overview_checkup',
+  'overview_hardware',
+  'overview_metrics',
+  'paths_app_icon',
+  'paths_browse',
+  'paths_load',
+  'paths_save',
+  'paths_scan',
+  'peripheral_open_window',
+  'preview_open_window',
+  'process_manager_open_window',
+  'quickcmds_run',
+  'realtime_adapters',
+  'realtime_loss',
+  'realtime_report_clear',
+  'realtime_report_delete',
+  'realtime_report_get',
+  'realtime_report_list',
+  'realtime_report_save',
+  'realtime_sample',
+  'runtimes_collect',
+  'startup_openlocation',
+  'startup_scan',
+  'system_disk_list',
+  'system_disk_type',
+  'uninstall_appx_logo',
+]);
+
+  // ---- D5. 只读档必须真有子窗消费方（R1-1.2b 补，独立真源） ----
+  //
+  // 为什么需要这一组（判红实验实测出来的缺陷，不是我预想的）：
+  // D 组是「代码档位 ⇄ MUST_READONLY 清单」双向对拍，而**清单是人维护的**。
+  // 实测把某readonly 命令改成 MAIN、并同步把登记从 MUST_READONLY 挪进 MUST_MAIN
+  // 后，A/B/C/D/E **五组全部绿** —— 两边一起改，双向对拍永远自洽。
+  // 只在 D 组里加断言治不了这个，因为改档的人会顺手改清单。
+  //
+  // 独立真源 = **子窗 HTML 实际加载的脚本里的调用点**。清单改不动 HTML：
+  // 想把一条只有主窗消费的 readonly 命令留在 readonly 档，就必须让某个子窗真的调它，
+  // 否则这里红。按 AGENTS §3「档位以谁真的需要调它为准」—— readonly 档的价值就是
+  // 「四个子窗也放行」，**没有一个子窗消费方，那份放宽就是白给的攻击面**。
+  //
+  // 口径与 D4 同源（复用 apiPaths / aliases / dynamic 推导，不另造一套匹配）：
+  //   - readonly 档命令 ⇒ 至少一个**子窗专属**脚本里有调用点；
+  //   - MAIN 档命令 ⇒ 不许有子窗调用点（有的话说明档位写松了，应下放而不是锁死）。
+  const SRC_DIR = join(TAURI_ROOT, 'src');
+  const htmlFiles = readdirSync(SRC_DIR).filter((f) => f.endsWith('.html'));
+  const MAIN_HTML = 'index.html';
+  // 子窗加载的脚本基名集合（tauri-api.js 被所有窗口加载，是适配层不是业务面，排除）
+  const subScriptNames = new Set(['tauri-api.js']);
+  for (const h of htmlFiles) {
+    if (h === MAIN_HTML) continue;
+    const txt = readFileSync(join(SRC_DIR, h), 'utf8').replace(/\?\./g, '.');
+    for (const m of txt.matchAll(/src="([^"]*\.js)"/g)) {
+      subScriptNames.add(m[1].split('/').pop());
+    }
+  }
+  const subSources = sources.filter(([rel]) => {
+    const base = rel.split(/[\\/]/).pop();
+    // *.html 只认子窗那四个；js 按脚本基名
+    return rel.endsWith('.html') ? !rel.endsWith(MAIN_HTML) : subScriptNames.has(base);
+  });
+  const usedIn = (ch, pool) => {
+    const path_ = apiPaths.get(ch);
+    if (!path_) return false;
+    const [domain, ...rest] = path_.split('.');
+    const method = rest.join('.');
+    const needle = `.${path_}`;
+    for (const [, text] of pool) {
+      if (text.includes(needle)) return true;
+      if (dynamic.has(domain) && new RegExp(`window\\.api\\.${domain}\\s*\\.?\\s*\\[`).test(text)) return true;
+      for (const v of aliases.get(domain) ?? []) {
+        if (new RegExp(`\\b${v}\\.${method}\\b`).test(text)) return true;
+      }
+    }
+    return false;
+  };
+
+  // 档位由 guard-tiers 门禁管；这里从 Rust 侧现算 readonly / MAIN 两条命令集合。
+  // 不读 check-guard-tiers.mjs 的清单（那就是 D 组，被本组取代的原因）。
+  const CMD_DIR = join(TAURI_ROOT, 'src-tauri', 'src', 'commands');
+  const readAllRs = (dir) => {
+    const acc = [];
+    const walk = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.rs')) acc.push(readFileSync(p, 'utf8'));
+      }
+    };
+    walk(dir);
+    return acc.join('\n');
+  };
+  const allCmdSrc = readAllRs(CMD_DIR);
+  const tierOf = () => {
+    const out = { MAIN: new Set(), READONLY: new Set() };
+    // 必须按 `#[tauri::command]` **切段**（段尾 =下一个 `#[tauri::command]`），
+    // 不能只取到 `pub fn` 为止 —— guard 调用在函数体内，取到签名就截断了。
+    // 这与 check-guard-tiers.mjs 的枚举口径一致（单向依赖它反而会引入「那边改了这边跟着红」）。
+    const marks = [...allCmdSrc.matchAll(/#\[tauri::command\]/g)].map((m) => m.index);
+    marks.push(allCmdSrc.length);
+    for (let i = 0; i < marks.length - 1; i++) {
+      const seg = allCmdSrc.slice(marks[i], marks[i + 1]);
+      const nm = seg.match(/pub\s+(?:async\s+)?fn\s+(\w+)/);
+      if (!nm) continue;
+      if (/guard::guard\(\s*&window,\s*guard::MAIN\s*\)/.test(seg)) out.MAIN.add(nm[1]);
+      else if (/guard::guard_readonly\(/.test(seg)) out.READONLY.add(nm[1]);
+    }
+    return out;
+  };
+  const tiers = tierOf();
+  // 命令名 → 通道名（反查 CHANNEL_MAP）
+  const chanOf = new Map([...channelMap].map(([ch, cmd]) => [cmd, ch]));
+  const readonlyNoSubConsumer = [];
+  const readonlyGrantsNoOne = [];
+  for (const cmd of [...tiers.READONLY].sort()) {
+    const ch = chanOf.get(cmd);
+    if (!ch) continue; // 无渲染层通道（如纯事件源）不在本组范围
+    if (!usedIn(ch, subSources)) {
+      // 主窗也在用 = 放宽白给（须登记）；主窗也不用 = 纯孤儿，归 D4 组管
+      if (usedIn(ch, sources)) readonlyGrantsNoOne.push(cmd);
+      readonlyNoSubConsumer.push(cmd);
+    }
+  }
+  const mainWithSubConsumer = [...tiers.MAIN].filter((cmd) => {
+    const ch = chanOf.get(cmd);
+    return ch && usedIn(ch, subSources);
+  });
+  // 棘轮①：新增一条「只读却无子窗消费方」即红（表只许变短）
+  const newGrants = readonlyGrantsNoOne.filter((n) => !D5_READONLY_WITHOUT_SUB_CONSUMER.has(n));
+  // 棘轮②：表里的条目后来有了子窗调用点 → 豁免失效，同样红（白名单烂掉比没有更危险）
+  const staleGrants = [...D5_READONLY_WITHOUT_SUB_CONSUMER].filter(
+    (n) => !readonlyGrantsNoOne.includes(n),
+  );
+  check(
+    newGrants.length === 0 && staleGrants.length === 0 && mainWithSubConsumer.length === 0,
+    `D5. 只读档的放宽有子窗消费方支撑（只读 ${tiers.READONLY.size} / 已登记豁免 ${D5_READONLY_WITHOUT_SUB_CONSUMER.size} / 主窗 ${tiers.MAIN.size}）`,
+    newGrants.length
+      ? `新增「只读档却无子窗调用点」的白给放宽 ${JSON.stringify(newGrants)}—— 确需只读档（子窗真会调它）请先接线；确无消费方请改 MAIN 档`
+      : staleGrants.length
+        ? `豁免清单已失效（这些命令现在有子窗调用点了，请从 D5_READONLY_WITHOUT_SUB_CONSUMER 删除）${JSON.stringify(staleGrants)}`
+        : mainWithSubConsumer.length
+          ? `MAIN 档却有子窗调用点（档位写松了，应下放）${JSON.stringify(mainWithSubConsumer)}`
+          : '',
+  );
+  if (readonlyGrantsNoOne.length) {
+    console.log(`  · D5 只读档「放宽给子窗但只有主窗在用」${readonlyGrantsNoOne.length} 条（已登记豁免，逐条理由见 D5_READONLY_WITHOUT_SUB_CONSUMER）`);
+  }
+  if (readonlyNoSubConsumer.length > readonlyGrantsNoOne.length) {
+    console.log(`  · D5 另有 ${readonlyNoSubConsumer.length - readonlyGrantsNoOne.length} 条只读命令主窗也没调用点（纯孤儿，归 D4 组管）`);
+  }
 }
 
 
@@ -404,15 +620,27 @@ if (!rustHazard || !jsHazard) {
     check(false, 'F2. 高危判据 ⇄ 数据层对拍', `读不到或不是数组：${optPath}`);
   } else {
     const dead = [...rustHazard].filter((i) => !optIds.has(i));
-    const rustUnion = rustOptSrc.includes('fn needs_high_risk_confirm')
-      && rustOptSrc.includes('needs_high_risk_confirm(&opt, &option_id)');
+    // 判据②（Rust 侧）：union 公式必须仍在**执行链的判定路径上**被调用。
+    // M1（2026-10-03）之后调用点从 `optimizer_run` 内联搬进了 `preflight_reason`
+    // （批量预检与单条执行同源），所以锚点不再只认 `&opt, &option_id` 那一种写法——
+    // 但**必须**同时钉住两件事，否则这条断言会被「把 union 判据删掉」骗过：
+    //   ① `preflight_reason` 函数体里真的有 union 调用，且带 restore 方向豁免；
+    //   ② `optimizer_run` 走的是 `preflight_reason`，没有自己另判一份。
+    const pfAt = rustOptSrc.indexOf('fn preflight_reason');
+    const preflightFn = pfAt >= 0 ? rustOptSrc.slice(pfAt, pfAt + 2000) : '';
+    const preflightCallsUnion =
+      preflightFn !== '' &&
+      /needs_high_risk_confirm\(\s*&?opt\s*,\s*&?option_id\s*\)/.test(preflightFn) &&
+      /if\s*!restore\s*&&\s*needs_high_risk_confirm\(/.test(preflightFn);
+    const runDelegates = /match\s+preflight_reason\(&opt,\s*&option_id,\s*p\.restore\)/.test(rustOptSrc);
+    const rustUnion = rustOptSrc.includes('fn needs_high_risk_confirm') && preflightCallsUnion && runDelegates;
     const jsUnion = jsOptSrc.includes('function needsHazardConfirm(opt)')
       && jsOptSrc.includes('needsHazardConfirm(opt)) runParams.confirmedHighRisk');
     check(
       dead.length === 0 && rustUnion && jsUnion && highIds.size >= HIGH_FLOOR,
       `F2. 高危判据三条对拍（清单 ${rustHazard.size} ∪ 数据层 high ${highIds.size}）`,
       !rustUnion || !jsUnion
-        ? '判据被退回「只认手写清单」：缺 union 公式锚点（Rust needs_high_risk_confirm / JS needsHazardConfirm）'
+        ? '判据被退回「只认手写清单」：缺 union 公式锚点（Rust：preflight_reason 内须调 needs_high_risk_confirm 且带 restore 方向豁免，optimizer_run 须委托它；JS：needsHazardConfirm）'
         : dead.length
           ? `清单里有数据层不存在的死条目 ${JSON.stringify(dead)}`
           : highIds.size < HIGH_FLOOR

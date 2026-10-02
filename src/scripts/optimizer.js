@@ -1631,16 +1631,24 @@
     const paramsByRun = await collectBatchChoices(entries);
     if (!paramsByRun) return;
     const batch = expandEntries(entries, paramsByRun);
+    // M1（R1-1.8）：与 runBatch 同一条预检前置 —— 只治一条入口等于没治，
+    // 用户从「执行所选」走仍然是第 5 项失败时前 4 项已落盘。
+    const allowed = await filterByPreflight(batch);
+    if (!allowed) return;
+    if (!allowed.length) {
+      window.app?.toast('warning', '勾选的优化项全部被预检拦下，没有可执行的项');
+      return;
+    }
     // 高危项统计
-    const hazardList = batch.filter(o => needsHazardConfirm(o));
-    const highCount = batch.filter(o => o.risk === 'high').length;
-    const preview = batch.slice(0, 12).map(o => '· ' + o.title).join('\n') +
-      (batch.length > 12 ? `\n…等共 ${batch.length} 项` : '');
+    const hazardList = allowed.filter(o => needsHazardConfirm(o));
+    const highCount = allowed.filter(o => o.risk === 'high').length;
+    const preview = allowed.slice(0, 12).map(o => '· ' + o.title).join('\n') +
+      (allowed.length > 12 ? `\n…等共 ${allowed.length} 项` : '');
     // 含高风险项时整批走红色二次确认，警示文案由 dangerHint 结构化渲染
     const hasHazard = hazardList.length > 0;
     const ok = await window.app.confirm(
       '执行所选优化',
-      `将依次执行已勾选的 ${batch.length} 项优化（其中高风险 ${highCount} 项）：\n\n${preview}\n\n是否确认执行？`,
+      `将依次执行已勾选的 ${allowed.length} 项优化（其中高风险 ${highCount} 项）：\n\n${preview}\n\n是否确认执行？`,
       '确认执行',
       '取消',
       (hasHazard || highCount > 0) ? {
@@ -1669,12 +1677,12 @@
     // 逐项提示会把用户推向「每改一项重启一次」；档位由后端侧表算好透在每行的 applyScope 上
     // （data/optimizer-scope.json，判定规则与档位序两侧同表，由 check-optimizer-dynamic 对拍）。
     let batchScope = 0, batchScopeCount = 0;
-    for (let i = 0; i < batch.length; i++) {
-      const opt = batch[i];
+    for (let i = 0; i < allowed.length; i++) {
+      const opt = allowed[i];
       // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
-      batchRemainingIds = batch.slice(i).map(o => o.id);
+      batchRemainingIds = allowed.slice(i).map(o => o.id);
       // 进度 Toast 由 runOptionActive 内部创建（此前这里先建一条、内部再建一条并销毁前者）
-      progressToastSuffix = `${i + 1}/${batch.length}`;
+      progressToastSuffix = `${i + 1}/${allowed.length}`;
       try {
         const p = batchParams(opt, paramsByRun);
         if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
@@ -1697,7 +1705,7 @@
     clearSelection();
     renderGroups(OPTIONS); // 刷新已优化灰态
     window.app?.toast(
-      okCount === batch.length ? 'success' : 'warning',
+      okCount === allowed.length ? 'success' : 'warning',
       `执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
       (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
     );
@@ -1706,6 +1714,58 @@
       window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
       window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
     }
+  }
+
+  // ==================== M1 批次整批预检 ====================
+  //
+  // 判据在 Rust 侧 `preflight_reason`，与 optimizer_run 单条执行链**同一个函数**
+  // （`commands/optimizer/apply.rs`）。这里只负责「问一次 + 把结果说清楚」。
+  //
+  // 返回语义（三态，勿改）：
+  //   null        → 用户取消或通道缺席，调用方必须**中止整批**（不是「按原样执行」）
+  //   []          → 全被拦，调用方提示「无可执行项」并中止
+  //   [可执行项] → 允许继续
+  async function filterByPreflight(batch) {
+    if (!batch.length) return batch;
+    const ids = batch.map(o => o.id);
+    let res;
+    try {
+      // 批量入口都是正向执行（还原是另一条路径），restore 恒 false —— 与服务端
+      // 「高危确认在还原方向豁免」的语义一致，两边不许各传各的。
+      res = await window.api?.optimizer?.batchPreflight?.(ids, false);
+    } catch (e) {
+      // R1-1.9：通道缺席 / IPC reject 必须**说清**，不许静默无反应。
+      // 这里选择中止而非放行：预检是 fail-closed 准入，放行等于退回逐条 await 的旧行为。
+      window.app?.toast('error', '整批预检失败（通道不可用），已中止本批，未执行任何项', 7000);
+      window.app?.log('error', `批量预检失败: ${e && e.message ? e.message : e}`);
+      return null;
+    }
+    if (!res || res.success !== true) {
+      window.app?.toast('error', '整批预检未通过（' + ((res && res.message) || '无回执') + '），已中止本批', 7000);
+      return null;
+    }
+    const rejected = Array.isArray(res.rejected) ? res.rejected : [];
+    if (!rejected.length) return batch;
+    const allowed = new Set(Array.isArray(res.runnable) ? res.runnable : []);
+    // 只保留后端点名 runnable 的项。后端少给一项我们就少跑一项，不自己乐观补齐 ——
+    // 「预检说能跑」和「实际会跑」必须是同一个集合。
+    const kept = batch.filter(o => allowed.has(o.id));
+    const titleOf = id => batch.find(o => o.id === id)?.title || id;
+    const detail = rejected
+      .slice(0, 10)
+      .map(r => '· ' + titleOf(r.id) + '：' + r.reason)
+      .join('\n') + (rejected.length > 10 ? `\n…等共 ${rejected.length} 项被拦` : '');
+    const go = await window.app.confirm(
+      '部分优化项无法执行',
+      `整批预检拦下 ${rejected.length} 项：\n\n${detail}\n\n是否只执行剩下的 ${kept.length} 项？`,
+      '只执行可执行项',
+      '取消整批'
+    );
+    if (!go) return null;
+    if (kept.length) {
+      window.app?.log('info', `批量预检拦下 ${rejected.length} 项：${rejected.map(r => `${r.id}(${r.reason})`).join(', ')}`);
+    }
+    return kept;
   }
 
   // ==================== 一键全选当前页并依次执行 ====================
@@ -1734,16 +1794,28 @@
     const paramsByRun = await collectBatchChoices(entries);
     if (!paramsByRun) return;
     const batch = expandEntries(entries, paramsByRun);
+    // M1（R1-1.8）：整批预检**先于**任何确认弹窗与执行。原先第 5 项失败时前 4 项已落盘，
+    // 现在把「哪几项会被拦、为什么」提前告知，用户一次决定。
+    //
+    // 预检只读、不改系统状态，所以拦下的项不会留下半成品。确认后才执行（用户可以
+    // 选择「仍然执行可执行的那部分」——被拦的项会被剔出批次，不会白等）。
+    const allowed = await filterByPreflight(batch);
+    if (!allowed) { setCardsSelected(false); return; }
+    if (!allowed.length) {
+      window.app?.toast('warning', '本批全部优化项都被预检拦下，没有可执行的项');
+      setCardsSelected(false);
+      return;
+    }
     // 全选高亮，提示即将执行的项
     setCardsSelected(true);
-    const highCount = batch.filter(o => o.risk === 'high').length;
-    const hazardList = batch.filter(o => needsHazardConfirm(o));
-    const preview = batch.slice(0, 12).map(o => '· ' + o.title).join('\n') +
-      (batch.length > 12 ? `\n…等共 ${batch.length} 项` : '');
+    const highCount = allowed.filter(o => o.risk === 'high').length;
+    const hazardList = allowed.filter(o => needsHazardConfirm(o));
+    const preview = allowed.slice(0, 12).map(o => '· ' + o.title).join('\n') +
+      (allowed.length > 12 ? `\n…等共 ${allowed.length} 项` : '');
     // 含高风险项时整批走红色二次确认，警示文案由 dangerHint 结构化渲染
     const ok = await window.app.confirm(
       '批量执行优化',
-      `将依次执行当前页全部 ${batch.length} 项优化（其中高风险 ${highCount} 项）：\n\n${preview}\n\n是否确认执行？`,
+      `将依次执行当前页全部 ${allowed.length} 项优化（其中高风险 ${highCount} 项）：\n\n${preview}\n\n是否确认执行？`,
       '确认执行',
       '取消',
       (hazardList.length > 0 || highCount > 0) ? {
@@ -1763,7 +1835,7 @@
 
     // 批次含「禁用 70+ 非必要服务」时：单独弹窗询问是否连商店相关服务一并禁用（一次询问作用于整批）
     let batchIncludeStore = false;
-    if (batch.some(o => o.id === 'tf_svc_bulk')) {
+    if (allowed.some(o => o.id === 'tf_svc_bulk')) {
       batchIncludeStore = await confirmIncludeStoreServices();
     }
 
@@ -1776,12 +1848,12 @@
     let okCount = 0, failCount = 0;
     const failedNames = [];
     let batchScope = 0, batchScopeCount = 0;
-    for (let i = 0; i < batch.length; i++) {
-      const opt = batch[i];
+    for (let i = 0; i < allowed.length; i++) {
+      const opt = allowed[i];
       // 审查 2026-09-27 M8：同 runSelected——提权中断时据此恢复剩余批次
-      batchRemainingIds = batch.slice(i).map(o => o.id);
+      batchRemainingIds = allowed.slice(i).map(o => o.id);
       // 进度 Toast 由 runOptionActive 内部创建（同上，消除每项一次白建白毁）
-      progressToastSuffix = `${i + 1}/${batch.length}`;
+      progressToastSuffix = `${i + 1}/${allowed.length}`;
       try {
         const p = opt.id === 'tf_svc_bulk'
           ? { includeStore: !!batchIncludeStore }
@@ -1807,7 +1879,7 @@
     clearSelection();
     renderGroups(OPTIONS); // 刷新已优化灰态
     window.app?.toast(
-      okCount === batch.length ? 'success' : 'warning',
+      okCount === allowed.length ? 'success' : 'warning',
       `批量执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
       (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
     );

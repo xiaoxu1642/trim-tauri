@@ -203,7 +203,7 @@
     'peripheral:query': 'peripheral_query',
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
-    // quickcmds / optimizer（11）
+    // quickcmds / optimizer（12）
     'quickcmds:run': 'quickcmds_run',
     'optimizer:run': 'optimizer_run',
     'optimizer:list': 'optimizer_list',
@@ -212,6 +212,7 @@
     'optimizer:create-restore': 'optimizer_create_restore',
     'optimizer:list-restore': 'optimizer_list_restore',
     'optimizer:check-optimized': 'optimizer_check_optimized',
+    'optimizer:batch-preflight': 'optimizer_batch_preflight',
     'optimizer:svc-mem-current': 'optimizer_svc_mem_current',
     'optimizer:backup-reg': 'optimizer_backup_reg',
     'optimizer:restore-reg': 'optimizer_restore_reg',
@@ -655,6 +656,7 @@
       createRestore: function () { return invokeChannel('optimizer:create-restore'); },
       listRestore: function () { return invokeChannel('optimizer:list-restore'); },
       checkOptimized: function (ids) { return invokeChannel('optimizer:check-optimized', { ids: ids }); },
+      batchPreflight: function (ids, restore) { return invokeChannel('optimizer:batch-preflight', { ids: ids, restore: !!restore }); },
       svcMemCurrent: function () { return invokeChannel('optimizer:svc-mem-current'); },
       backupReg: function (optionId) { return invokeChannel('optimizer:backup-reg', { optionId: optionId }); },
       restoreReg: function (optionId) { return invokeChannel('optimizer:restore-reg', { optionId: optionId }); },

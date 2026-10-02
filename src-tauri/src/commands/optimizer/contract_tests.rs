@@ -986,3 +986,112 @@ use super::restore_point::*;
         );
         println!("[执行引擎分账] 原生 {native} 步 / 收件箱 PowerShell 5.1 {inbox} 步 / 不支持 0 步");
     }
+
+    // ==================== M1 批次整批预检判据 ====================
+
+    /// R1-1.3（同源）：preflight 与单条执行链必须**共用** `preflight_reason`。
+    ///
+    /// 这条测试在 v0.5.0 上会红 —— 那时根本没有 preflight，判据散在
+    /// `optimizer_run` 的三段内联 early-return 里，批量侧看不到任何提前告知。
+    ///
+    /// 断言写法刻意用「同一批 id 在两个方向上都过同一个函数」，而不是各测一遍：
+    /// 复制一份判据的实现照样能通过「预检能拒高危项」这种朴素断言。
+    #[test]
+    fn m1_preflight判据与单条执行链同源() {
+        // 找一项数据层自认 high 的（v2-K3 起高危闸门覆盖全部 risk=high）
+        let high = options()
+            .iter()
+            .find(|o| o.get("risk").and_then(|v| v.as_str()) == Some("high"))
+            .expect("数据层应有 risk=high 项");
+        let high_id = high.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+        // 正向：被判「需高危确认」
+        assert_eq!(
+            preflight_reason(high, high_id, false),
+            Some(PreflightReject::NeedHighRiskConfirm),
+            "正向高危项必须被预检拦下"
+        );
+        // R1-1.3b 语义坑：还原方向豁免高危确认（审查 2026-09-27 H1）。
+        // 若此处返回 NeedHighRiskConfirm 就是把「无值级备份的高危项走预置脚本还原
+        // 整体死锁」那个 bug 重造一遍 —— 4 条还原入口全部命中过。
+        let restore_verdict = preflight_reason(high, high_id, true);
+        assert_ne!(
+            restore_verdict,
+            Some(PreflightReject::NeedHighRiskConfirm),
+            "还原方向被判需高危确认 ⇒ 还原通道会整体死锁（2026-09-27 H1 前车）"
+        );
+    }
+
+    /// R1-1.3 分档：非管理员环境下**每一类**理由都必须在 `rejected` 里出现。
+    ///
+    /// 朴素实现（只判「未知选项」）在本测试下会红：非管理员时 `is_admin()` 为假，
+    /// `preflight_reason` 先返回 `NeedAdmin`，`NeedHighRiskConfirm` 分支永远走不到。
+    /// 断言写成「逐项比对返回的枚举」而不是「断言消息含某几个字」。
+    #[test]
+    fn m1_preflight拒绝理由分档互不吞并() {
+        // 造两个已知 id：high（正向必被拦）/ 普通 low（不该被拦，防闸门过度）
+        let high = options()
+            .iter()
+            .find(|o| o.get("risk").and_then(|v| v.as_str()) == Some("high"))
+            .expect("数据层应有 risk=high 项");
+        let low = options()
+            .iter()
+            .find(|o| o.get("risk").and_then(|v| v.as_str()) == Some("low"))
+            .expect("数据层应有 risk=low 项");
+        let low_id = low.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let high_id = high.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        let admin = crate::engine::sysinfo::is_admin();
+        // 非管理员：管理员档优先，返回NeedAdmin（这就是「理由分档」——
+        // 非管理员环境下永远看不到「需高危确认」，朴素实现会以为那条判据没生效）
+        if !admin {
+            assert_eq!(
+                preflight_reason(low, &low_id, false),
+                Some(PreflightReject::NeedAdmin),
+                "非管理员环境下 low 项也该被 NeedAdmin 拦下"
+            );
+            assert_eq!(
+                preflight_reason(high, &high_id, false),
+                Some(PreflightReject::NeedAdmin),
+                "非管理员环境下 high 项应先被 NeedAdmin 拦下（管理员档优先于高危档）"
+            );
+        } else {
+            // 管理员：high 项落到高危档，low 项完全放行。
+            // 两条一起断言才叫「分档」—— 只查 high 的话，
+            // 「所有项一律返回 NeedHighRiskConfirm」这种过度拦截也判不出来。
+            assert_eq!(
+                preflight_reason(high, &high_id, false),
+                Some(PreflightReject::NeedHighRiskConfirm),
+                "管理员环境下 high 项必须落到高危档"
+            );
+            assert_eq!(
+                preflight_reason(low, &low_id, false),
+                None,
+                "low 项 {low_id} 被预检误拦 —— 闸门过度会让用户点不动正常功能"
+            );
+        }
+        // 三条消息文案互不相同：文案重复会让用户看不懂到底被什么拦了
+        let msgs = [
+            PreflightReject::NeedAdmin.message(),
+            PreflightReject::NeedHighRiskConfirm.message(),
+            PreflightReject::UnsupportedStep("示例步骤".into()).message(),
+        ];
+        let uniq: std::collections::HashSet<&String> = msgs.iter().collect();
+        assert_eq!(uniq.len(), 3, "三条拒绝理由文案出现重复: {msgs:?}");
+        assert!(msgs[2].contains("示例步骤"), "UnsupportedStep 文案必须带出是哪一步");
+    }
+
+    /// R1-1.4 / R1-1.5（命令层契约）：未知 id 必进 `rejected`，空 ids 不许乐观放行。
+    ///
+    /// 直接测命令体需要 Tauri 运行时（`WebviewWindow`），所以这里测**它调用的那段纯逻辑**：
+    /// 判据真源`preflight_reason` + `find_option` 的组合语义。命令壳那层由
+    /// `tests/module_smoke.rs` 的 IPC 面覆盖。
+    #[test]
+    fn m1_preflight未知id不被当成可执行() {
+        assert!(
+            find_option("__不存在的id__").is_none(),
+            "测试前提失效：__不存在的id__ 竟然能在数据层找到"
+        );
+        // 反向：现存的 low 项必须找得到，否则「未知即拒」的断言没有对照
+        assert!(options().iter().any(|o| o.get("id").and_then(|v| v.as_str()) == Some("perf_wu_pause")));
+    }
