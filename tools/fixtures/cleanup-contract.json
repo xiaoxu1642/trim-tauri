@@ -3,7 +3,7 @@
     "清理规则库契约夹具（V2 P0-C1，2026-09-30）。两个消费者读同一份文件、各自独立实现判定：",
     "  · Node 侧 tools/check-cleanup-rule-contract.mjs 调 tools/cleanup-contract.mjs::validateCleanupPackage，",
     "    并按 mustTrigger 断言「到底是哪条判的红」；",
-    "  · Rust 侧 commands/cleanup.rs::清理语义校验与夹具一致 断言 ok/拒绝方向一致。",
+    "  · Rust 侧 commands/cleanup/rules.rs::清理语义校验与夹具一致 断言 ok/拒绝方向一致。",
     "任何一侧放宽判定，另一侧立刻判红；不跨语言调用（方案 §4.3 第三步 / 残留库同姿势）。",
     "A8（父子路径重叠）是人工复核清单、非致命，故不出现在本文件的 assertionIds 里。"
   ],

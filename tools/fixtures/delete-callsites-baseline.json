@@ -1,6 +1,6 @@
 {
   "remove_file": {
-    "src-tauri/src/commands/cleanup.rs": 1,
+    "src-tauri/src/commands/cleanup/scan_execute.rs": 1,
     "src-tauri/src/commands/elevate.rs": 1,
     "src-tauri/src/commands/fonts.rs": 3,
     "src-tauri/src/commands/optimizer.rs": 1,
@@ -19,7 +19,7 @@
     "src-tauri/src/security/mod.rs": 2
   },
   "remove_dir_all": {
-    "src-tauri/src/commands/cleanup.rs": 1,
+    "src-tauri/src/commands/cleanup/scan_execute.rs": 1,
     "src-tauri/src/commands/diskbench.rs": 1,
     "src-tauri/src/commands/realtime.rs": 2,
     "src-tauri/src/commands/uninstall/backup_report.rs": 3,

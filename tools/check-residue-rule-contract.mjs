@@ -8,7 +8,7 @@
 //   C. residue 条目：kind ∈ {folder, file, reg_key}（Q8：reg_value / shortcut 不放行）；
 //      target 过文件形状与**注册表硬否决**判定；note 非空（面板 reason 要展示）；未知字段整包拒
 //   D. 签名：Ed25519 验签通过（与 sign-cleanup-rules.mjs 同密钥同规范化）
-//   E. 内置副本接线：src-tauri/src/commands/uninstall.rs 必须 include_str! 本文件
+//   E. 内置副本接线：commands/uninstall/ 目录（装载侧在 residue_update.rs）必须 include_str! 本文件
 //   F. 夹具对拍（A1/A2）：tools/fixtures/residue-contract.json 的 regVectors 与 packages
 //      两侧各自独立实现同一套判定 —— 本文件**不调用** Rust，靠夹具钉口径（方案 §4.3 第三步）。
 //      任一侧口径漂移，夹具立刻判红；新增保护类别必须同时补夹具反例。

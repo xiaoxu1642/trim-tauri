@@ -17,7 +17,7 @@
 //!   对**重定向终点** host 判定，不通过即中止 → 有宿主白名单。
 //! - **cleanup 规则库**：更新源可由用户在数据目录 `update-source.json` 覆盖（用户自选源），
 //!   不能用固定的宿主白名单收口，故 `allow_host = None`；这条链路的安全性由
-//!   **ed25519 验签 + JSON 结构校验 + 版本防降级**（见 `commands/cleanup.rs::validate_remote_rules`）
+//!   **ed25519 验签 + JSON 结构校验 + 版本防降级**（见 `commands/cleanup/rules_update.rs::validate_remote_rules`）
 //!   兜底——即「传输可去任意源，但内容必须凭内置公钥签名通过才算数」。
 //! - 自定义请求头（如 `Authorization`）：值是**不可信输入**，含 CR/LF 即丢弃该条，
 //!   防止把额外请求头/响应拆分行注入到 WinHTTP 的头部块里。
