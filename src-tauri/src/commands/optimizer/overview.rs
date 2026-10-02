@@ -739,6 +739,65 @@ pub(super) fn readiness_of(opts: &[Value], applied_ids: &std::collections::HashS
     (r, score)
 }
 
+/// optimizer:prefs —— 读偏好段（E10：收藏 + 最近使用）
+///
+/// 档位 `guard(MAIN)`：只有主窗优化页消费（子窗不加载 `optimizer.js`），
+/// 判档依据见 AGENTS §3「以谁真的需要调它为准」，不是「它只读」。
+#[tauri::command]
+pub async fn optimizer_prefs<R: Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let (favorites, recent) = opt_state::prefs_view();
+    json!({ "success": true, "data": { "favorites": favorites, "recent": recent } })
+}
+
+/// optimizer:set-favorite —— 收藏 / 取消收藏（E10）
+///
+/// 写侧：**必须报失败**，不能静默。收藏是用户主动操作，点了没反应而界面不变
+/// 会让用户以为功能坏了。写入失败时前端要 toast 出原因。
+#[tauri::command]
+pub async fn optimizer_set_favorite<R: Runtime>(
+    window: WebviewWindow<R>,
+    option_id: Option<String>,
+    on: Option<bool>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let option_id = option_id.unwrap_or_default();
+    let on = on.unwrap_or(false);
+    if option_id.is_empty() {
+        return json!({ "success": false, "message": "缺少优化项 id" });
+    }
+    if opt_state::set_favorite(&option_id, on) {
+        json!({ "success": true, "data": { "id": option_id, "on": on } })
+    } else {
+        // 不静默：收藏写了但没存 ⇒ 界面显示星标而实际没记，下次进来就没了
+        json!({ "success": false, "message": "收藏写入失败（数据目录不可写）" })
+    }
+}
+
+/// optimizer:touch-recent —— 记一次「最近使用」（E10）
+///
+/// 写侧失败**不报错**：最近使用是「顺手记一下」的辅助信息，不是用户主动操作，
+/// 写不进去不该打断流程。返回 `recorded: false` 供日志/排查，前端不弹提示。
+#[tauri::command]
+pub async fn optimizer_touch_recent<R: Runtime>(
+    window: WebviewWindow<R>,
+    option_id: Option<String>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let option_id = option_id.unwrap_or_default();
+    if option_id.is_empty() {
+        return json!({ "success": false, "recorded": false, "message": "缺少优化项 id" });
+    }
+    let recorded = opt_state::touch_recent(&option_id);
+    json!({ "success": true, "recorded": recorded })
+}
+
 /// optimizer:list-groups —— 分类两层结构（E7）
 ///
 /// 形状 = `optimizer-groups.json` 的 `groups` 字段（`{default[], custom:{}}`）。

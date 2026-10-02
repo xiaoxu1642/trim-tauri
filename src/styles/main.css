@@ -6742,6 +6742,55 @@ body.pv-window {
   filter: grayscale(1);
   opacity: 0.65;
 }
+/* B4 逐项还原入口：可还原=描边按钮；不可还原=置灰 + data-tip 说明原因。
+   刻意不给「不可还原」加 tooltip 之外的可点击行为 —— 置灰按钮在 HTML 层
+   就 disabled，点不动是浏览器保证的，不靠 JS 拦。 */
+.opt-row-restore {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 1px 8px;
+  white-space: nowrap;
+  color: var(--fg-secondary);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  transition: background 0.12s var(--ease-standard);
+}
+.opt-row-restore:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.opt-row-restore:disabled {
+  color: var(--fg-tertiary);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+/* E10 收藏星标：未收藏=空心，已收藏=实心 + 警示色。
+   用 text 字符（★/☆）而不是 SVG：零依赖、屏幕阅读器能读（配合 aria-pressed）。 */
+.opt-row-fav {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-badge);
+  color: var(--fg-tertiary);
+  cursor: pointer;
+}
+.opt-row-fav:hover {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+.opt-row-fav.on {
+  color: var(--warning);
+}
+
 .opt-row-opttag {
   flex: 0 0 auto;
   align-self: flex-start;

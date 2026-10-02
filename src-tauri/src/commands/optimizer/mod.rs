@@ -1,4 +1,4 @@
-//! optimizer 域（D 批）：优化中心 14 条通道
+//! optimizer 域（D 批）：优化中心 17 条通道
 //!
 //! 对照 Electron main.js 2825-3875、5145-5174 + src/scripts-powershell/optimizer-scripts.js。
 //!
@@ -30,7 +30,7 @@ mod catalog;
 #[cfg(test)]
 mod contract_tests;
 mod overview;
-pub use overview::{optimizer_list, __cmd__optimizer_list, __tauri_command_name_optimizer_list, optimizer_svc_mem_current, __cmd__optimizer_svc_mem_current, __tauri_command_name_optimizer_svc_mem_current, optimizer_check_optimized, __cmd__optimizer_check_optimized, __tauri_command_name_optimizer_check_optimized, optimizer_batch_preflight, __cmd__optimizer_batch_preflight, __tauri_command_name_optimizer_batch_preflight, optimizer_state_overview, __cmd__optimizer_state_overview, __tauri_command_name_optimizer_state_overview, optimizer_list_groups, __cmd__optimizer_list_groups, __tauri_command_name_optimizer_list_groups, optimizer_readiness, __cmd__optimizer_readiness, __tauri_command_name_optimizer_readiness};
+pub use overview::{optimizer_list, __cmd__optimizer_list, __tauri_command_name_optimizer_list, optimizer_svc_mem_current, __cmd__optimizer_svc_mem_current, __tauri_command_name_optimizer_svc_mem_current, optimizer_check_optimized, __cmd__optimizer_check_optimized, __tauri_command_name_optimizer_check_optimized, optimizer_batch_preflight, __cmd__optimizer_batch_preflight, __tauri_command_name_optimizer_batch_preflight, optimizer_state_overview, __cmd__optimizer_state_overview, __tauri_command_name_optimizer_state_overview, optimizer_list_groups, __cmd__optimizer_list_groups, __tauri_command_name_optimizer_list_groups, optimizer_readiness, __cmd__optimizer_readiness, __tauri_command_name_optimizer_readiness, optimizer_prefs, __cmd__optimizer_prefs, __tauri_command_name_optimizer_prefs, optimizer_set_favorite, __cmd__optimizer_set_favorite, __tauri_command_name_optimizer_set_favorite, optimizer_touch_recent, __cmd__optimizer_touch_recent, __tauri_command_name_optimizer_touch_recent};
 mod restore_point;
 pub use restore_point::{optimizer_check_restore, __cmd__optimizer_check_restore, __tauri_command_name_optimizer_check_restore, optimizer_create_restore, __cmd__optimizer_create_restore, __tauri_command_name_optimizer_create_restore, optimizer_list_restore, __cmd__optimizer_list_restore, __tauri_command_name_optimizer_list_restore};
 

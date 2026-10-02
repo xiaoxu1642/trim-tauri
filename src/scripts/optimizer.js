@@ -787,16 +787,65 @@
 
   // 看板条目行：复选框（固定）+ 序号（浅灰固定宽）+ 名称（自动换行，不省略）+ 风险标签（胶囊）
   // 已优化（optimizedIds 命中）的项整行灰态 + 「已优化」标签 + 复选框禁用，点击行弹出还原确认
+  // E10 收藏集合（渲染用视图；**禁止直接 add/delete**，走 toggleFavorite()）
+  const favoriteIds = new Set();
+  const isFavorite = id => favoriteIds.has(id);
+
   function renderOptRow(o, index) {
     const id = escapeHtml(o.id);
     const isOpt = optimizedIds.has(o.id);
+    // B4：`restorable` 由后端逐行注入（`catalog.rs::is_restorable`），值 = 可还原的
+    // 值条数。**没有这个字段就是没有备份** ⇒ 还原入口置灰并说明原因，
+    // 而不是显示一个点了必然拿「无备份记录」的按钮。
+    const restorable = typeof o.restorable === 'number' && o.restorable > 0;
+    const fav = isFavorite(o.id);
+    const restoreBtn = isOpt
+      ? (restorable
+        ? `<button type="button" class="opt-row-restore" data-restore="${id}" data-tip="按本机备份逐值还原（${o.restorable} 个注册表值）">立即恢复</button>`
+        : `<button type="button" class="opt-row-restore" disabled data-tip="本机没有该项的值级备份，无法逐值还原">无法还原</button>`)
+      : '';
     return `
       <div class="opt-row${isOpt ? ' optimized' : ''}" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击可还原' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
         <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" data-tip="${isOpt ? '已优化的项不可勾选，点击行可还原' : '勾选/取消选择该优化项'}"></div>
         <span class="opt-row-index">${index}</span>
         <span class="opt-row-name">${escapeHtml(o.title)}</span>
         ${riskBadge(o.risk)}${isOpt ? '<span class="opt-row-opttag">已优化</span>' : ''}
+        ${restoreBtn}
+        <button type="button" class="opt-row-fav${fav ? ' on' : ''}" data-fav="${id}" aria-pressed="${fav}"
+                data-tip="${fav ? '取消收藏' : '收藏这一项'}">${fav ? '★' : '☆'}</button>
       </div>`;
+  }
+
+  // E10：切换收藏。**失败必须让用户看到** —— 收藏是主动操作，点了没反应
+  // 而星标不变会让人以为功能坏了。通道缺席也要说清（不是静默 return）。
+  async function toggleFavorite(id) {
+    if (!window.api?.optimizer?.setFavorite) {
+      window.app?.toast('error', '收藏功能不可用（通道缺席），请重启应用');
+      return;
+    }
+    const next = !favoriteIds.has(id);
+    try {
+      const r = await window.api.optimizer.setFavorite(id, next);
+      if (r && r.success === false) {
+        window.app?.toast('error', r.message || '收藏写入失败');
+        return;
+      }
+      if (next) favoriteIds.add(id); else favoriteIds.delete(id);
+      applyFavStyles();
+    } catch (e) {
+      window.app?.toast('error', '收藏失败：' + (e && e.message ? e.message : '通道异常'));
+    }
+  }
+
+  // 只改 DOM class，不重渲染整个列表（重渲染会跳滚动位置）
+  function applyFavStyles() {
+    document.querySelectorAll('#optimizerGroups [data-fav]').forEach(btn => {
+      const on = favoriteIds.has(btn.dataset.fav);
+      btn.classList.toggle('on', on);
+      btn.textContent = on ? '★' : '☆';
+      btn.setAttribute('aria-pressed', String(on));
+      btn.dataset.tip = on ? '取消收藏' : '收藏这一项';
+    });
   }
 
   // ==================== 安全托底：已优化检测与还原 ====================
@@ -1137,6 +1186,14 @@
   let activeOption = null;
 
   function openModal(o, notice) {
+    // E10：打开详情即记一次「最近使用」。
+    // 失败**不打断**（不是用户主动操作，见 optimizer_touch_recent 的注释），
+    // 只吞掉异常并在日志里留痕 —— 浮动 Promise 会变成 v2-M22 那一类静默失败。
+    if (window.api?.optimizer?.touchRecent) {
+      Promise.resolve(window.api.optimizer.touchRecent(o.id)).catch((e) => {
+        window.app?.log('warn', '记录最近使用失败: ' + (e && e.message ? e.message : e));
+      });
+    }
     // 虚拟合集卡没有自己的 steps/restore，详情窗对它没有意义 —— 点开即弹「先选哪一态」。
     // openVirtualChoice 是 async：外层吞掉异常，否则点卡片就成了浮动 Promise（v2-M22 同族）。
     if (virtualOf(o.id)) {
@@ -1992,13 +2049,18 @@
         : Promise.resolve(null);
       // E7：先取分类侧表，再取目录 —— 渲染要用分组口径决定每项归到哪个看板。
       // 两条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
-      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(), window.api.optimizer.readiness()])
-        .then(([dt, res, gs, rd]) => {
+      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(), window.api.optimizer.readiness(), window.api.optimizer.prefs()])
+        .then(([dt, res, gs, rd, pf]) => {
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
         // E1/E2：态势分取数失败不阻塞目录渲染（盒子保持 hidden）
         if (rd && rd.success) renderReadiness(rd.data);
+        // E10：偏好取数失败不阻塞目录渲染（星标全空 = 视为没收藏，不是「收藏功能坏了」）
+        if (pf && pf.success && pf.data && Array.isArray(pf.data.favorites)) {
+          favoriteIds.clear();
+          pf.data.favorites.forEach(x => favoriteIds.add(x));
+        }
         if (res && res.success && Array.isArray(res.data)) {
           OPTIONS = filterByDiskType(res.data);
           activeCategory = getSavedCategory();
@@ -2068,6 +2130,14 @@
         e.stopPropagation();
         const id = check.dataset.check;
         if (id) toggleSelect(id);
+        return;
+      }
+      // E10 收藏星标：独立入口，点了不能顺带打开详情弹窗
+      const favBtn = e.target.closest('.opt-row-fav[data-fav]');
+      if (favBtn) {
+        e.stopPropagation();
+        const fid = favBtn.dataset.fav;
+        if (fid) toggleFavorite(fid);
         return;
       }
       const selAll = e.target.closest('.opt-col-selectall');

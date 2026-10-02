@@ -2003,3 +2003,73 @@ let ov = include_str!("overview.rs");
             "备份表必须在循环外读一次"
         );
     }
+
+    /// UI 消费批的**契约断言**（E10 星标 + B4 还原入口）。
+    ///
+    /// 这里断的是「结构与接线的关键形态」，不是视觉 —— 视觉由
+    /// `check-contrast` / `check-css-tokens` 覆盖。之所以还要断源码形态：
+    /// 这两处的**失效形态都是「静默的」**（星标点了没反应、还原按钮永远置灰），
+    /// 没有任何门禁会自己变红。
+    #[test]
+    fn ui_收藏星标与还原入口的契约() {
+        let js = include_str!("../../../../src/scripts/optimizer.js");
+
+        // ① 星标：点击必须**独立于**行点击（否则点收藏会顺带打开详情弹窗）
+        assert!(
+            js.contains(".opt-row-fav[data-fav]"),
+            "缺少星标的事件委托（点收藏会顺带打开详情弹窗）"
+        );
+        // ⚠️ 判据必须绑在**星标分支内部**：首版写 `js.contains("e.stopPropagation();")`
+        // 判红实验 1 没抓住 —— 因为同文件的 checkbox 分支里也有那一行，
+        // 删掉星标分支的那一处，断言照样绿。**含 substring 的判据在同类代码多处时必漏**
+        // （本仓第三次踩这同一类：R0-c / M2-B / 这里）。
+        let fav_branch: Option<&str> = js
+            .split("favBtn) {")
+            .nth(1)
+            .and_then(|t| t.split("return;").next());
+        assert!(
+            fav_branch.map(|b| b.contains("stopPropagation")) == Some(true),
+            "星标分支内缺 stopPropagation —— 点收藏会连带触发行点击打开详情"
+        );
+        // ② 收藏失败必须让用户看到（主动操作，点了没反应会被当成功能坏了）
+        assert!(
+            js.contains("收藏写入失败") || js.contains("收藏失败"),
+            "收藏失败路径没有提示 —— 主动操作静默失败会被当成功能坏了"
+        );
+        // ③ 还原入口：**没有备份就置灰**，不显示一个点了必然失败的按钮
+        assert!(
+            js.contains("typeof o.restorable === 'number'") && js.contains("disabled"),
+            "还原入口没有按 restorable 置灰 —— 无备份的项点了只会拿到「无备份记录」"
+        );
+        // ④ 置灰原因走 data-tip（禁 title，AGENTS §2）
+        assert!(
+            js.contains("本机没有该项的值级备份"),
+            "置灰按钮没有 data-tip 说明原因"
+        );
+        assert!(
+            !js.contains("title=\"本机没有"),
+            "用了 title 属性而不是 data-tip（AGENTS §2 明令）"
+        );
+        // ⑤ 偏好载入失败不阻塞目录渲染
+        assert!(
+            js.contains("pf && pf.success"),
+            "偏好取数失败没有守卫 —— 会连带阻塞优化目录首屏"
+        );
+    }
+
+    /// UI 消费批：**新通道的档位与接线**都到位（防「加了通道忘了登记」）。
+    #[test]
+    fn ui_新通道接线与档位() {
+        let api = include_str!("../../../../src/scripts/tauri-api.js");
+        for (chan, method) in [
+            ("optimizer:prefs", "prefs"),
+            ("optimizer:set-favorite", "setFavorite"),
+            ("optimizer:touch-recent", "touchRecent"),
+        ] {
+            assert!(api.contains(chan), "CHANNEL_MAP 缺 {chan}");
+            assert!(
+                api.contains(&format!("{method}:")) || api.contains(&format!("{method}()")),
+                "window.api.optimizer 缺 {method} 方法"
+            );
+        }
+    }

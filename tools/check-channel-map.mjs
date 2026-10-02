@@ -108,6 +108,9 @@ const TAURI_ADDED = {
   'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',
   'optimizer:list-groups': 'E7（2026-10-03）：分类两层结构下发（default 主序列 + custom 重映射；纯只读侧表）',
   'optimizer:readiness': 'E1/E2（2026-10-03）：5 分类加权态势分（判据在 Rust 侧 readiness_score，可单测；纯只读）',
+  'optimizer:prefs': 'E10（2026-10-03）：读偏好段（收藏 + 最近使用）',
+  'optimizer:set-favorite': 'E10（2026-10-03）：收藏 / 取消收藏（写侧，失败必须报出不静默）',
+  'optimizer:touch-recent': 'E10（2026-10-03）：记一次最近使用（写侧，失败不打断流程）',
 };
 
 function collect(set, re, text) {
