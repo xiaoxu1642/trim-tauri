@@ -25,12 +25,20 @@ const TITLE: &str = "外设优化";
 const ALLOWED_WIN32: &[i64] = &[2, 26, 36, 38, 40];
 const ALLOWED_KEYBOARD: &[i64] = &[16, 18, 20, 22, 100];
 const ALLOWED_MOUSE: &[i64] = &[16, 18, 20, 22, 100];
+/// 键盘端口路由预设档位（2026-10-03）。
+///
+/// **不是三个独立单选**：三值同父键且互相牵连，任意拼装都能得到「不合并 + 只服务 1 端口
+/// + 不广播」这类无意义组合。预设成组写，语义才闭合，具体三值见
+/// `native/peripheral.rs::peripheral_apply` 的 `KBD_PORT_PRESETS`。
+/// 档 1 = 驱动默认（本机当前值），2 = 单键鼠精简，3 = 多设备扩展。
+const ALLOWED_KBDPORTS: &[i64] = &[1, 2, 3];
 
 fn allowed_for(key: &str) -> Option<&'static [i64]> {
     match key {
         "win32" => Some(ALLOWED_WIN32),
         "keyboard" => Some(ALLOWED_KEYBOARD),
         "mouse" => Some(ALLOWED_MOUSE),
+        "kbdports" => Some(ALLOWED_KBDPORTS),
         _ => None,
     }
 }
@@ -48,8 +56,11 @@ pub async fn peripheral_open_window<R: tauri::Runtime>(
     }
     let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(PAGE.into()))
         .title(TITLE)
-        .inner_size(860.0, 760.0)
-        .min_inner_size(680.0, 560.0)
+        // 2026-10-03：760→880 宽、560→620 高。用户在优化中心点「更多调优项」进来时
+        // 期待「一屏能横向对比几档数值」，原来的 860×760 一屏只放得下 6~7 张卡
+        // （且第四组加入后更挤）。加宽让四列卡片的描述行不必折成碎字。
+        .inner_size(880.0, 780.0)
+        .min_inner_size(720.0, 560.0)
         .background_color(Color(243, 243, 243, 255))
         .center()
         .visible(false)
@@ -103,6 +114,8 @@ pub struct ApplyOptions {
     win32: Option<Value>,
     keyboard: Option<Value>,
     mouse: Option<Value>,
+    /// 键盘端口路由预设档位（2026-10-03 新增；成组写三值，见 `ALLOWED_KBDPORTS`）
+    kbdports: Option<Value>,
 }
 
 /// peripheral:apply —— 白名单校验后写 HKLM（成功修剪备份）
@@ -132,6 +145,7 @@ pub async fn peripheral_apply<R: tauri::Runtime>(
         ("win32", opts.win32),
         ("keyboard", opts.keyboard),
         ("mouse", opts.mouse),
+        ("kbdports", opts.kbdports),
     ] {
         match normalize_option(raw) {
             None => {
@@ -307,6 +321,35 @@ mod tests {
         // PE-3：白名单外取值不允许
         assert!(!allowed_for("win32").unwrap().contains(&99));
         assert!(allowed_for("unknown").is_none());
+    }
+
+    /// 键盘端口路由档位（2026-10-03）：白名单必须恰好三档，且与 native 侧预设表同长。
+    ///
+    /// 两处不同步的失效形态很具体：native 少一档 ⇒ 界面选得到、写进去却静默不生效
+    /// （`peripheral_apply` 的 `find` 落空 → 整组跳过 → 回执却说「完成」）。
+    /// 所以这里既断白名单内容，也断**数量**与 native 预设表一致。
+    #[test]
+    fn 键盘端口路由档位与native预设表一致() {
+        assert_eq!(
+            allowed_for("kbdports").unwrap(),
+            &[1, 2, 3],
+            "端口路由预设档位必须是 1/2/3（默认 / 单键鼠精简 / 多设备扩展）"
+        );
+        let native = include_str!("../engine/native/peripheral.rs");
+        // native 侧预设表逐档登记，且档位号与白名单同形
+        for (gear, connect, max_ports, send_all) in [(1, 0, 3, 1), (2, 0, 1, 0), (3, 1, 6, 1)] {
+            let needle = format!("({gear}, {connect}, {max_ports}, {send_all})");
+            assert!(
+                native.contains(&needle),
+                "native KBD_PORT_PRESETS 缺档位 {needle} —— 界面能选但写不进去"
+            );
+        }
+        // 备份必须按父键去重：kbdclass\Parameters 会被 keyboard + 三个 kbd_* 值共用，
+        // 不去重就导出三份同内容 .reg（还原时多跑两次 reg import）。
+        assert!(
+            native.contains("if backed_up.contains(subkey) { continue; }"),
+            "备份没有按父键去重 —— 同父键多值会产出多份同内容分片"
+        );
     }
 
     #[test]

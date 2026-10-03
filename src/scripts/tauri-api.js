@@ -219,8 +219,6 @@
     'optimizer:state-overview': 'optimizer_state_overview',
     'optimizer:list-groups': 'optimizer_list_groups',
     'optimizer:readiness': 'optimizer_readiness',
-    'optimizer:prefs': 'optimizer_prefs',
-    'optimizer:set-favorite': 'optimizer_set_favorite',
     'optimizer:touch-recent': 'optimizer_touch_recent',
     // system / startup（5）
     'system:disk-type': 'system_disk_type',
@@ -668,8 +666,6 @@
       stateOverview: function () { return invokeChannel('optimizer:state-overview'); },
       listGroups: function () { return invokeChannel('optimizer:list-groups'); },
       readiness: function () { return invokeChannel('optimizer:readiness'); },
-      prefs: function () { return invokeChannel('optimizer:prefs'); },
-      setFavorite: function (optionId, on) { return invokeChannel('optimizer:set-favorite', { optionId: optionId, on: !!on }); },
       touchRecent: function (optionId) { return invokeChannel('optimizer:touch-recent', { optionId: optionId }); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }
     },

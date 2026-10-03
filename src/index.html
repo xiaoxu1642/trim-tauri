@@ -1460,11 +1460,12 @@
             </div>
             <div class="about-row">
               <div class="about-row-copy">
-                <strong>更新镜像</strong>
-                <p id="updaterMirrorHint">GitHub 直连失败时自动回退镜像线路（下载内容经哈希校验）</p>
+                <strong>更新线路</strong>
+                <p id="updaterMirrorHint">优先 Gitee 国内源，不可用时自动回退 GitHub（安装包经 minisign 签名强校验）</p>
               </div>
-              <select class="field-input updater-mirror-select" id="updaterMirrorSelect" data-tip="自动：优先 GitHub，失败自动回退镜像；也可固定走某条线路">
+              <select class="field-input updater-mirror-select" id="updaterMirrorSelect" data-tip="自动：优先 Gitee 国内源，失败自动回退 GitHub；也可固定走某条线路">
                 <option value="auto">自动（推荐）</option>
+                <option value="gitee">Gitee 国内源</option>
                 <option value="github">GitHub 直连</option>
               </select>
             </div>

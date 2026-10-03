@@ -787,10 +787,11 @@
 
   // 看板条目行：复选框（固定）+ 序号（浅灰固定宽）+ 名称（自动换行，不省略）+ 风险标签（胶囊）
   // 已优化（optimizedIds 命中）的项整行灰态 + 「已优化」标签 + 复选框禁用，点击行弹出还原确认
-  // E10 收藏集合（渲染用视图；**禁止直接 add/delete**，走 toggleFavorite()）
-  const favoriteIds = new Set();
-  const isFavorite = id => favoriteIds.has(id);
-
+  //
+  // 2026-10-03 用户裁定：删除每行末尾的收藏星标（E10）。理由是它既无消费场景
+  // （没有「只看收藏」筛选、没有收藏排序），又把每行最右侧的横向空间吃掉一格，
+  // 长标题被挤成竖排单字。**不是隐藏，是整条链路下线**：渲染、事件、状态集合、
+  // 后端命令、CHANNEL_MAP、门禁登记一并摘掉，避免留下永不被调用的死通道。
   function renderOptRow(o, index) {
     const id = escapeHtml(o.id);
     const isOpt = optimizedIds.has(o.id);
@@ -798,7 +799,6 @@
     // 值条数。**没有这个字段就是没有备份** ⇒ 还原入口置灰并说明原因，
     // 而不是显示一个点了必然拿「无备份记录」的按钮。
     const restorable = typeof o.restorable === 'number' && o.restorable > 0;
-    const fav = isFavorite(o.id);
     const restoreBtn = isOpt
       ? (restorable
         ? `<button type="button" class="opt-row-restore" data-restore="${id}" data-tip="按本机备份逐值还原（${o.restorable} 个注册表值）">立即恢复</button>`
@@ -811,41 +811,7 @@
         <span class="opt-row-name">${escapeHtml(o.title)}</span>
         ${riskBadge(o.risk)}${isOpt ? '<span class="opt-row-opttag">已优化</span>' : ''}
         ${restoreBtn}
-        <button type="button" class="opt-row-fav${fav ? ' on' : ''}" data-fav="${id}" aria-pressed="${fav}"
-                data-tip="${fav ? '取消收藏' : '收藏这一项'}">${fav ? '★' : '☆'}</button>
       </div>`;
-  }
-
-  // E10：切换收藏。**失败必须让用户看到** —— 收藏是主动操作，点了没反应
-  // 而星标不变会让人以为功能坏了。通道缺席也要说清（不是静默 return）。
-  async function toggleFavorite(id) {
-    if (!window.api?.optimizer?.setFavorite) {
-      window.app?.toast('error', '收藏功能不可用（通道缺席），请重启应用');
-      return;
-    }
-    const next = !favoriteIds.has(id);
-    try {
-      const r = await window.api.optimizer.setFavorite(id, next);
-      if (r && r.success === false) {
-        window.app?.toast('error', r.message || '收藏写入失败');
-        return;
-      }
-      if (next) favoriteIds.add(id); else favoriteIds.delete(id);
-      applyFavStyles();
-    } catch (e) {
-      window.app?.toast('error', '收藏失败：' + (e && e.message ? e.message : '通道异常'));
-    }
-  }
-
-  // 只改 DOM class，不重渲染整个列表（重渲染会跳滚动位置）
-  function applyFavStyles() {
-    document.querySelectorAll('#optimizerGroups [data-fav]').forEach(btn => {
-      const on = favoriteIds.has(btn.dataset.fav);
-      btn.classList.toggle('on', on);
-      btn.textContent = on ? '★' : '☆';
-      btn.setAttribute('aria-pressed', String(on));
-      btn.dataset.tip = on ? '取消收藏' : '收藏这一项';
-    });
   }
 
   // ==================== 安全托底：已优化检测与还原 ====================
@@ -1236,6 +1202,23 @@
       <div class="opt-detail-section">
         <div class="opt-detail-section-title">详细操作</div>
         <div class="opt-detail-steps-wrap"></div>
+      </div>
+      <div class="opt-detail-section opt-pick-section" style="display:none">
+        <div class="opt-detail-section-title opt-pick-title">逐项选择</div>
+        <div class="opt-pick-bar">
+          <label class="opt-pick-all">
+            <span class="checkbox opt-pick-all-box"></span>
+            <span>全选</span>
+          </label>
+          <label class="opt-pick-none">
+            <span class="checkbox opt-pick-none-box"></span>
+            <span>全不选</span>
+          </label>
+          <span class="opt-pick-count"></span>
+        </div>
+        <p class="opt-pick-hint"></p>
+        <div class="opt-pick-list"></div>
+        <div class="opt-pick-extras"></div>
       </div>`;
     const footerHtml = `
       <div class="opt-detail-mem" style="display:none"></div>
@@ -1263,6 +1246,77 @@
     $('.opt-col-pros').textContent = o.pros || '暂缺，可点击下方「AI 生成优缺点」重新生成。';
     $('.opt-col-cons').textContent = o.cons || '暂缺，可点击下方「AI 生成优缺点」重新生成。';
     $('.opt-detail-steps-wrap').innerHTML = renderSteps(o.steps);
+
+    // 逐项选择区（2026-10-03 用户裁定）：这三项此前只有「一键全选 / 一键全还原」，
+    // 用户看到的是「禁用 70 个服务」这种不可拆的黑箱 —— 里面有 CryptSvc（证书与
+    // BitLocker 全靠它）也有 RetailDemo（一眼可弃），让人「一把梭」等于逼他在
+    // 「全选」和「放弃」之间二选一。默认**全选**（不改变既有行为），可逐项取消。
+    const pickState = { targets: new Set(), extras: new Set(), all: [] };
+    if (o.subitems && Array.isArray(o.subitems.items) && o.subitems.items.length) {
+      const sec = $('.opt-pick-section');
+      sec.style.display = '';
+      $('.opt-pick-title').textContent = o.subitems.label || '逐项选择';
+      // 「还有 N 个没有单独说明」必须如实说：清单里没登记解释的目标不列出来，
+      // 不说的话用户会以为「全选」就是这 M 项。
+      const un = Number(o.subitems.unexplained) || 0;
+      $('.opt-pick-hint').textContent = (o.subitems.hint || '')
+        + (un > 0 ? `（另有 ${un} 个目标未单独列出说明，全选时仍会执行。）` : '');
+      const list = $('.opt-pick-list');
+      list.innerHTML = o.subitems.items.map((it, i) => `
+        <label class="opt-pick-row">
+          <span class="checkbox opt-pick-box checked" data-pick="${escapeAttr(it.value)}"></span>
+          <span class="opt-pick-name">${escapeHtml(it.value)}</span>
+          <span class="opt-pick-note">${escapeHtml(it.note)}</span>
+        </label>`).join('');
+      o.subitems.items.forEach(it => { pickState.targets.add(it.value); pickState.all.push(it.value); });
+      // 附带开关：与清单不同形状的写入，**默认全不选**。
+      // 与清单取相反的默认值是刻意的：清单是「这项本来就会做的事」（旧行为=全做），
+      // 附带开关是「额外加码」（旧行为=没做），默认改掉旧行为才是静默越权。
+      const extras = Array.isArray(o.subitems.extras) ? o.subitems.extras : [];
+      if (extras.length) {
+        $('.opt-pick-extras').innerHTML = '<div class="opt-pick-extras-title">附带操作（默认不执行）</div>'
+          + extras.map(ex => `
+            <label class="opt-pick-row opt-pick-row-extra">
+              <span class="checkbox opt-pick-extra-box" data-pick-extra="${escapeAttr(ex.id)}"></span>
+              <span class="opt-pick-name">${escapeHtml(ex.label)}</span>
+              <span class="opt-pick-note">${escapeHtml(ex.note)}</span>
+            </label>`).join('');
+      }
+      const counter = $('.opt-pick-count');
+      const syncCount = () => {
+        counter.textContent = `已选 ${pickState.targets.size} / ${pickState.all.length} 项`;
+      };
+      const setAll = (on) => {
+        pickState.targets.clear();
+        if (on) pickState.all.forEach(v => pickState.targets.add(v));
+        list.querySelectorAll('.opt-pick-box').forEach(b => b.classList.toggle('checked', on));
+        $('.opt-pick-all-box').classList.toggle('checked', on);
+        $('.opt-pick-none-box').classList.toggle('checked', false);
+        syncCount();
+      };
+      $('.opt-pick-all').addEventListener('click', () => setAll(true));
+      $('.opt-pick-none').addEventListener('click', () => setAll(false));
+      $('.opt-pick-list').addEventListener('click', (e) => {
+        const box = e.target.closest('.opt-pick-box');
+        if (!box) return;
+        const v = box.dataset.pick;
+        if (pickState.targets.has(v)) pickState.targets.delete(v); else pickState.targets.add(v);
+        box.classList.toggle('checked', pickState.targets.has(v));
+        // 全选框要跟着实际状态走，不能停在「亮着」而清单已经全取消了
+        const allOn = pickState.targets.size === pickState.all.length;
+        $('.opt-pick-all-box').classList.toggle('checked', allOn);
+        $('.opt-pick-none-box').classList.toggle('checked', pickState.targets.size === 0);
+        syncCount();
+      });
+      $('.opt-pick-extras').addEventListener('click', (e) => {
+        const box = e.target.closest('.opt-pick-extra-box');
+        if (!box) return;
+        const v = box.dataset.pickExtra;
+        if (pickState.extras.has(v)) pickState.extras.delete(v); else pickState.extras.add(v);
+        box.classList.toggle('checked', pickState.extras.has(v));
+      });
+      setAll(true);
+    }
 
     // 安全兜底：已优化项「立即执行」→「立即恢复」；无法推理还原操作时按钮置灰。
     // dynamic 项（svc_mem_gb）例外：不走恢复流，由下方档位联动决定按钮态
@@ -1404,6 +1458,20 @@
         const selEl = optModal?.modal?.querySelector('.opt-dyn-select');
         preCloseRaw = selEl ? selEl.value : dynCtl.defaultValue;
       }
+      // 逐项选择（2026-10-03）：勾选结果必须在 closeOptModal **之前**读出来。
+      // 与 dynamic 档位同一个坑：弹窗一关 optModal 置 null，后续 querySelector
+      // 恒返回 undefined；而且更致命的是 —— 读不到就等于「没指定 = 全选」，
+      // 用户只勾了 3 个却禁了 70 个，且回执照样报「完成」。
+      const pickParams = opt.subitems
+        ? {
+            pickedTargets: Array.from(pickState.targets),
+            pickedExtras: Array.from(pickState.extras)
+          }
+        : {};
+      if (opt.subitems && pickState.targets.size === 0) {
+        window.app?.toast('warning', '一个目标都没勾选，请至少勾选一项后再执行');
+        return;
+      }
       // 立即执行后自动关闭弹窗
       closeOptModal();
       // tf_svc_bulk：单独弹窗询问是否连商店相关服务一并禁用（用户选择经 params 传递）
@@ -1424,7 +1492,12 @@
         }
       } else {
         try {
-          await runOptionActive(opt.id === 'tf_svc_bulk' ? { includeStore } : {}, opt);
+          await runOptionActive(
+            opt.id === 'tf_svc_bulk'
+              ? Object.assign({ includeStore }, pickParams)
+              : pickParams,
+            opt
+          );
         } catch (e) {
           window.app?.toast('error', '优化执行失败: ' + (e.message || e));
         }
@@ -2049,18 +2122,13 @@
         : Promise.resolve(null);
       // E7：先取分类侧表，再取目录 —— 渲染要用分组口径决定每项归到哪个看板。
       // 两条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
-      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(), window.api.optimizer.readiness(), window.api.optimizer.prefs()])
-        .then(([dt, res, gs, rd, pf]) => {
+      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(), window.api.optimizer.readiness()])
+        .then(([dt, res, gs, rd]) => {
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
         // E1/E2：态势分取数失败不阻塞目录渲染（盒子保持 hidden）
         if (rd && rd.success) renderReadiness(rd.data);
-        // E10：偏好取数失败不阻塞目录渲染（星标全空 = 视为没收藏，不是「收藏功能坏了」）
-        if (pf && pf.success && pf.data && Array.isArray(pf.data.favorites)) {
-          favoriteIds.clear();
-          pf.data.favorites.forEach(x => favoriteIds.add(x));
-        }
         if (res && res.success && Array.isArray(res.data)) {
           OPTIONS = filterByDiskType(res.data);
           activeCategory = getSavedCategory();
@@ -2130,14 +2198,6 @@
         e.stopPropagation();
         const id = check.dataset.check;
         if (id) toggleSelect(id);
-        return;
-      }
-      // E10 收藏星标：独立入口，点了不能顺带打开详情弹窗
-      const favBtn = e.target.closest('.opt-row-fav[data-fav]');
-      if (favBtn) {
-        e.stopPropagation();
-        const fid = favBtn.dataset.fav;
-        if (fid) toggleFavorite(fid);
         return;
       }
       const selAll = e.target.closest('.opt-col-selectall');

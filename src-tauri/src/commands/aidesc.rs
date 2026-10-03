@@ -470,10 +470,29 @@ fn is_ok_status(status: u16) -> bool {
 // ==================== AI 调用链 ====================
 
 /// `callOpenAICompat`：OpenAI 兼容 chat/completions（秘塔 / 知乎直答 / 自定义模型共用）
-fn call_openai_compat(url: &str, key: &str, model: &str, prompt: &str, timeout_ms: u64) -> Option<String> {
+///
+/// `key` 用于按服务商补**专有请求头**：知乎直答要求 `X-Request-Timestamp`（秒级 Unix
+/// 时间戳），缺了会被拒。上游 Electron 版有这个分支（`main.js` 的 `extraHeaders`），
+/// Tauri 迁移时**漏了**——表现是「配置已保存，但模型未返回内容」：地址、密钥、模型名
+/// 全对，只有这一个头缺席，而错误在 `post_json` 的 `None` 里被吞成静默失败。
+fn call_openai_compat(
+    key: &str,
+    url: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    timeout_ms: u64,
+) -> Option<String> {
     let mut headers: Vec<(String, String)> = vec![("Content-Type".into(), "application/json".into())];
-    if !key.is_empty() {
-        headers.push(("Authorization".into(), format!("Bearer {key}")));
+    if !api_key.is_empty() {
+        headers.push(("Authorization".into(), format!("Bearer {api_key}")));
+    }
+    // 知乎直答：Access Secret 走 Bearer 鉴权，且必须带秒级时间戳头（官方 API 文档）
+    if key == "zhihu" {
+        headers.push((
+            "X-Request-Timestamp".into(),
+            unix_seconds().to_string(),
+        ));
     }
     let body = json!({
         "model": model,
@@ -481,11 +500,46 @@ fn call_openai_compat(url: &str, key: &str, model: &str, prompt: &str, timeout_m
         "messages": [{ "role": "user", "content": prompt }],
     })
     .to_string();
-    let resp = post_json(url, &headers, &body, timeout_ms).ok()?;
+    let resp = match post_json(url, &headers, &body, timeout_ms) {
+        Ok(r) => r,
+        Err(e) => {
+            log::write_log("error", &format!("[{key}] 模型请求异常: {e}"));
+            return None;
+        }
+    };
     if !is_ok_status(resp.status) {
+        // 失败必须**可诊断**：只回 None 的话，界面上永远只有「未返回内容」这一句，
+        // 用户无从判断是地址、密钥、模型名还是缺头（这正是本次知乎直答的排查成本）。
+        log::write_log(
+            "warn",
+            &format!(
+                "[{key}] 模型返回 {}: {}",
+                resp.status,
+                resp.body.chars().take(200).collect::<String>()
+            ),
+        );
         return None;
     }
-    let data: Value = serde_json::from_str(resp.body.trim()).ok()?;
+    let data: Value = match serde_json::from_str(resp.body.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            log::write_log("warn", &format!("[{key}] 模型响应不是合法 JSON: {e}"));
+            return None;
+        }
+    };
+    // 知乎直答的错误体是 `{ "error": { "message", "code" } }`（HTTP 200 也可能带错误），
+    // 先把它捞出来 —— 否则「model_not_found」这类明确原因会被当成空回复丢掉。
+    if let Some(err) = data.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(无 message)");
+        let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("-");
+        log::write_log("warn", &format!("[{key}] 模型返回错误体: code={code} message={msg}"));
+        return None;
+    }
+    // 思考档位（zhida-thinking-1p5）会把分析过程放在 `reasoning_content`，
+    // 最终答案在 `content`；两者都可能缺失，缺一即视为无有效回复。
     let content = data
         .get("choices")
         .and_then(|v| v.get(0))
@@ -494,10 +548,27 @@ fn call_openai_compat(url: &str, key: &str, model: &str, prompt: &str, timeout_m
         .map(js_string)?;
     let content = content.trim().to_string();
     if content.is_empty() {
+        log::write_log(
+            "warn",
+            &format!(
+                "[{key}] 模型返回了空 content（choices 结构存在但无正文，可能是仅返回了思考过程）"
+            ),
+        );
         None
     } else {
         Some(content)
     }
+}
+
+/// 秒级 Unix 时间戳（知乎直答 `X-Request-Timestamp` 用）。
+///
+/// 不用 `now_ms()/1000`：`now_ms` 本身就是毫秒时间戳，除法得到的是**浮点**，
+/// 序列化成 `1788….123` 这种形状，服务端很可能按整数解析后判非法。
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// `callBaiduWebSummary`：百度千帆·智能搜索生成高性能版（v2 ai_search/web_summary）
@@ -587,7 +658,7 @@ pub(crate) fn call_model_text(key: &str, cfg: &Value, message: &str) -> Option<S
             timeout_ms,
         );
     }
-    call_openai_compat(&url, &api_key, &model, message, timeout_ms)
+    call_openai_compat(key, &url, &api_key, &model, message, timeout_ms)
 }
 
 /// `buildPrompt`：模板含 {menu}/{company} 占位符则替换，否则追加菜单名与厂商名
@@ -636,7 +707,7 @@ fn call_model_description(
             timeout_ms,
         );
     }
-    call_openai_compat(&url, &api_key, &model, &prompt, timeout_ms)
+    call_openai_compat(key, &url, &api_key, &model, &prompt, timeout_ms)
 }
 
 // ==================== 缓存与百度日调用计数 ====================
@@ -960,6 +1031,62 @@ mod tests {
         // IPv6 基址必须带方括号回写，否则 `https://::1:443` 之类的串无从解析
         let v6 = settings::parse_http_url("https://[2606:4700:4700::1111]/v1").unwrap();
         assert_eq!(origin_of(&v6), "https://[2606:4700:4700::1111]");
+    }
+
+    // ==================== 知乎直答专有请求头（2026-10-03 修复） ====================
+
+    /// 知乎直答必须携带 `X-Request-Timestamp`（秒级 Unix 时间戳）+ `Authorization: Bearer`。
+    ///
+    /// 缺陷形态（真实发生过）：地址 / 密钥 / 模型名三者全对，界面仍报
+    /// 「配置已保存，但模型未返回内容」—— 唯一原因是这个头在 Electron→Tauri 迁移时
+    /// 被漏掉，而 `post_json` 的失败被 `.ok()?` 吞成静默 `None`。
+    /// 判红点：把下面的条件改成 `key != "zhihu"` 或删掉整个 if，这条立刻红。
+    #[test]
+    fn 知乎直答必须带秒级时间戳头() {
+        // 全部判据都在**生产段**上匹配。锚点用 `#[cfg(test)]\nmod tests` 而不是裸
+        // `#[cfg(test)]` —— 本文件第 55 行的**注释里**就出现了那个裸字面量
+        // （「见文件末尾 #[cfg(test)]」），用裸串 split 会在那里就把文件截断，
+        // 生产段只剩前 55 行，任何真实定义都搜不到 ⇒ 恒红（本条实际踩过）。
+        // 带换行 + `mod tests` 只可能匹配到真正的测试模块声明。
+        //
+        // 为什么必须切生产段：`include_str!` 读整个文件、含测试模块自身。判据字面量
+        // 只要出现在注释或断言里，反向判据会匹配到自己 ⇒ 恒红；正向判据会匹配到
+        // 自己的注释 ⇒ 假绿。本仓反复踩这一族（R0-c / M2-B / optimization_state /
+        // check-readme 的 GROUP_ORDER）。写判据时别在注释里贴判据原文。
+        let src = include_str!("aidesc.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+        assert!(
+            prod.contains(r#"if key == "zhihu""#) && prod.contains(r#""X-Request-Timestamp".into()"#),
+            "知乎直答的 X-Request-Timestamp 头丢失 —— 官方 API 文档要求该头必填"
+        );
+        // 时间戳必须是**秒级整数**：用 now_ms()/1000 会得到浮点（形如 1788….123），
+        // 服务端按整数解析即判非法 ⇒ 头在但等于没带。
+        assert!(
+            prod.contains("duration_since(std::time::UNIX_EPOCH)") && prod.contains("d.as_secs() as i64"),
+            "时间戳没有用 as_secs() 取整 —— 秒级头里混进小数会让服务端判非法"
+        );
+        // 失败必须留痕：`post_json` 的 Err 不得被 `.ok()` 吞掉。
+        //
+        // 判据**只针对 post_json 的返回值**，不是全文件禁用 `.ok()`：
+        // `serde_json::from_str(..).ok()?`（解析响应体）解析失败时确实只能返回 None，
+        // 那是正确语义。为此本条第一版写成「全文件不得有 .ok()?」直接恒红 ——
+        // **判据比要求更严时，红的不是被测代码而是判据本身**。
+        // substring 判据必须与「被禁止的那个具体写法」逐字对齐，不能图省事写宽。
+        //
+        // 被禁的形态：`post_json(<args>).ok()` —— 一次网络失败被当正常返回。
+        assert!(
+            !prod.contains("post_json(url, &headers, &body, timeout_ms).ok()"),
+            "post_json 的返回值仍被 .ok() 吞掉 —— 用户只能看到「未返回内容」，无从定位原因"
+        );
+        // 正向：调用点必须走 match（错误分支各自留痕）
+        assert!(
+            prod.contains("match post_json("),
+            "post_json 的调用点没有走 match —— 失败分支要么被吞、要么没日志"
+        );
+        // 三个失败分支必须各自写了日志
+        for needle in ["模型请求异常", "模型返回 {}:", "模型返回错误体"] {
+            assert!(prod.contains(needle), "失败分支缺留痕（needle={needle}）—— 无法定位原因");
+        }
     }
 
     // ==================== 审查 v2-L13：简介缓存只判读不淘汰 ====================

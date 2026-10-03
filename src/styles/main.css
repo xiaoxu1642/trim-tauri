@@ -2948,6 +2948,56 @@ select.field-input { cursor: pointer; appearance: auto; }
   font-size: var(--fs-meta);
   color: var(--fg-tertiary);
 }
+
+/* ---------- 逐项选择区（2026-10-03，批量项可自选目标）----------
+   为什么不复用 .opt-choice-*（虚拟合集卡那套单选）：那套是「**互斥单选**」，
+   这里要的是「**多选**」，语义不同。复用一个 radio 样式的类去做 checkbox 是
+   拿视觉骗语义，键盘与读屏行为都会不对。行样式另起一套，但复用了 .checkbox 件。 */
+.opt-pick-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+.opt-pick-title { display: flex; align-items: center; gap: 6px; }
+.opt-pick-bar {
+  display: flex; align-items: center; gap: 16px;
+  margin: 8px 0 6px;
+}
+.opt-pick-all, .opt-pick-none {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-meta); color: var(--fg-secondary);
+  cursor: pointer; user-select: none;
+}
+.opt-pick-all:hover, .opt-pick-none:hover { color: var(--accent-text); }
+.opt-pick-count { margin-left: auto; font-size: var(--fs-meta); color: var(--fg-tertiary); }
+.opt-pick-hint { margin: 0 0 8px; font-size: var(--fs-meta); color: var(--fg-tertiary); line-height: 1.55; }
+.opt-pick-list {
+  display: flex; flex-direction: column; gap: 2px;
+  /* 70 项全展开会把弹窗撑到几千像素：限高 + 内部滚动。
+     刻意不虚拟滚动 —— 一次性渲染 70 个 label 的开销可忽略，
+     而虚拟列表会让「勾选状态 ↔ DOM 位置」的对应关系变脆。 */
+  max-height: 260px; overflow-y: auto;
+  padding: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-small);
+  background: var(--bg-card-hover);
+}
+.opt-pick-row {
+  display: grid;
+  grid-template-columns: 16px minmax(96px, auto) minmax(0, 1fr);
+  align-items: baseline; gap: 8px;
+  padding: 5px 6px;
+  border-radius: var(--radius-small);
+  cursor: pointer;
+}
+.opt-pick-row:hover { background: var(--accent-light); }
+.opt-pick-name {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: var(--fs-meta); font-weight: 600;
+  color: var(--fg-primary);
+  word-break: break-all;
+}
+.opt-pick-note { font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.5; }
+.opt-pick-extras { margin-top: 10px; }
+.opt-pick-extras-title { font-size: var(--fs-meta); font-weight: 600; color: var(--fg-secondary); margin-bottom: 4px; }
+/* 附带操作整体比清单淡一档：它默认不执行，是「额外加码」而非「这项本来就会做的事」 */
+.opt-pick-row-extra .opt-pick-name { font-family: inherit; color: var(--fg-secondary); }
 /* ---------- 执行前「先做选择」窗（虚拟合集卡 / dynamic 项共用）----------
    单选行复用 .model-picker-* 现成件（AGENTS §2：新交互先查 ds 有没有现成件），
    这里只补分组标题、说明与日期副行。 */
@@ -6654,19 +6704,26 @@ body.pv-window {
   transition: color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
 }
 .peri-back:hover { color: var(--accent); border-color: var(--accent); }
-.peri-body { flex: 1; padding: 22px 28px 26px; overflow-y: auto; }
-.peri-section { margin-bottom: 26px; }
-.peri-section-head { margin-bottom: 14px; }
+.peri-body { flex: 1; padding: 16px 22px 18px; overflow-y: auto; }
+/* 2026-10-03（用户裁定）：卡片整体压缩，单页可见选项 ≥ 10 个。
+   压的是**留白**不是信息量 —— 数值字号 26→22、卡内边距 20/16→12/10、
+   描述行高 1.5→1.4、分区间距 26→16。原版一屏只放得下 6~7 个，
+   用户要横向对比数值时被逼着反复滚动。 */
+.peri-section { margin-bottom: 16px; }
+.peri-section-head { margin-bottom: 9px; }
 .peri-section-title {
-  display: flex; align-items: center; gap: 8px; margin: 0 0 5px;
+  display: flex; align-items: center; gap: 8px; margin: 0 0 3px;
   font-size: 15px; font-weight: 700; color: var(--fg-primary);
 }
 .peri-section-title svg { color: var(--accent); flex: 0 0 auto; }
-.peri-section-sub { margin: 0; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; }
-.peri-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.peri-section-sub { margin: 0; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.45; }
+.peri-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+/* 端口组只有 3 个档，但每档描述较长（要写清三值分别是什么）——
+   给两列让描述有地方放行，避免又被压成三四行的碎字。 */
+.peri-cards-wide { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .peri-card {
   position: relative; display: flex; flex-direction: column; align-items: center; text-align: center;
-  padding: 20px 14px 16px;
+  padding: 12px 10px 10px;
   border: 1.5px solid var(--border-default); border-radius: var(--radius-medium);
   background: var(--bg-card); cursor: pointer;
   transition: border-color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard), transform var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
@@ -6684,18 +6741,88 @@ body.pv-window {
   font-size: 11px; font-weight: 600; line-height: 1.5;
 }
 .peri-radio {
-  width: 16px; height: 16px; margin-bottom: 10px;
+  width: 14px; height: 14px; margin-bottom: 5px;
   border-radius: 50%; border: 2px solid var(--border-strong);
   transition: border-color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
 }
-.peri-card.selected .peri-radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 5px, transparent 5.5px); }
-.peri-value { font-size: 26px; font-weight: 700; color: var(--fg-primary); line-height: 1.2; }
-.peri-regname { margin-top: 4px; font-size: 11px; color: var(--fg-tertiary); }
-.peri-desc { margin-top: 8px; font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.5; }
-.peri-note { margin: 2px 0 16px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.6; }
-.peri-footer { display: flex; justify-content: center; gap: 14px; padding-bottom: 6px; }
+.peri-card.selected .peri-radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 4px, transparent 4.5px); }
+.peri-value { font-size: 22px; font-weight: 700; color: var(--fg-primary); line-height: 1.15; }
+.peri-regname { margin-top: 2px; font-size: 11px; color: var(--fg-tertiary); }
+.peri-desc { margin-top: 5px; font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.4; }
+
+/* 「数值解释」按钮（2026-10-03）：贴在分组标题右侧。
+   刻意用 btn 家族而不是裸文字链 —— 它是一个**动作**（开面板），不是外链。 */
+.peri-explain-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 4px; padding: 1px 9px;
+  font-size: 11px; font-weight: 600; line-height: 1.6;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.peri-explain-btn:hover { background: var(--accent-light); }
+
+/* 数值解释面板：整窗遮罩 + 居中卡片，自绘（子窗不加载 modal.js）。
+   遮罩与容器**刻意复用** `.usage-backdrop` / `.usage-modal` 的口径（不另立一套）：
+   两处遮罩深浅不一致会让同一个 App 里的弹窗看起来像两个产品。 */
+.peri-explain {
+  position: fixed; inset: 0; z-index: 10000;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg-app) 60%, rgba(0, 0, 0, 0.4));
+  animation: fadeIn var(--duration-base) var(--ease-standard);
+}
+.peri-explain[hidden] { display: none; }
+.peri-explain-card {
+  position: relative;
+  width: min(680px, 100%);
+  margin: 0 24px;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  padding: 20px 22px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-btn);
+  box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  animation: modalScaleIn var(--duration-base) var(--ease-emphasized);
+}
+.peri-explain-head { display: flex; align-items: flex-start; gap: 12px; }
+.peri-explain-head > div:first-child { flex: 1; min-width: 0; }
+.peri-explain-title { margin: 0 0 6px; font-size: 15px; font-weight: 700; color: var(--fg-primary); }
+.peri-explain-intro { margin: 0 0 12px; color: var(--fg-secondary); font-size: var(--fs-secondary); line-height: 1.6; }
+.peri-explain-list { margin: 0; padding: 0; }
+.peri-explain-row {
+  display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 12px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.peri-explain-row dt { font-size: var(--fs-meta); font-weight: 600; color: var(--fg-primary); }
+.peri-explain-row dd { margin: 0; color: var(--fg-secondary); font-size: var(--fs-meta); line-height: 1.6; }
+.peri-explain-caveat {
+  margin: 12px 0 0; padding: 9px 11px;
+  color: var(--fg-secondary); font-size: var(--fs-meta); line-height: 1.6;
+  background: var(--bg-card-hover);
+  border-radius: var(--radius-small);
+}
+.peri-explain-close {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px;
+  font-size: 18px; line-height: 1;
+  color: var(--fg-secondary);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-small);
+  cursor: pointer;
+}
+.peri-explain-close:hover { color: var(--accent-text); }
+
+.peri-note { margin: 2px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; }
+.peri-footer { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; padding-bottom: 4px; }
 @media (max-width: 720px) {
-  .peri-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .peri-cards, .peri-cards-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .opt-col-body,
@@ -6767,28 +6894,6 @@ body.pv-window {
   color: var(--fg-tertiary);
   cursor: not-allowed;
   opacity: 0.65;
-}
-
-/* E10 收藏星标：未收藏=空心，已收藏=实心 + 警示色。
-   用 text 字符（★/☆）而不是 SVG：零依赖、屏幕阅读器能读（配合 aria-pressed）。 */
-.opt-row-fav {
-  flex: 0 0 auto;
-  align-self: flex-start;
-  font-size: 13px;
-  line-height: 1;
-  padding: 0 2px;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-badge);
-  color: var(--fg-tertiary);
-  cursor: pointer;
-}
-.opt-row-fav:hover {
-  color: var(--warning);
-  background: var(--warning-soft);
-}
-.opt-row-fav.on {
-  color: var(--warning);
 }
 
 .opt-row-opttag {

@@ -57,7 +57,15 @@ const optHighNoRestore = optItems.filter((o) => o.risk === 'high' && o.restoreAv
 
 // ---------- 前端口径（optimizer.js 解析，解析失败即红——不许静默跳过） ----------
 const optJs = read('src/scripts/optimizer.js');
-const groupOrder = optJs.match(/const GROUP_ORDER = \[([^\]]*)\]/);
+// 展示分组数的真源是 **`GROUP_FALLBACK.default` 数组**，不是 `GROUP_ORDER` 变量。
+// E7（2026-10-03）把分组改成两层侧表后，`GROUP_ORDER` 变成
+// `let GROUP_ORDER = GROUP_FALLBACK.default.slice()`（运行时可被侧表覆盖），
+// 原先那条 `const GROUP_ORDER = \[` 匹配从此永远落空 → 解析出 NaN →
+// 断言 4「优化项按 N 个分组」拿 NaN 当真源比，与 readme 写多少都不相等。
+// 这就是「判据自己悄悄失效」的那一类：门禁一直红着，红的原因却不是它在盯的东西。
+// 侧表 `optimizer-groups.json` 的 default 与此数组由 check-optimizer-groups-sidecar 对拍，
+// 本门禁只管读数，不重复那份对拍职责。
+const groupOrder = optJs.match(/const GROUP_FALLBACK = \{[\s\S]*?default:\s*\[([^\]]*)\]/);
 const groupCount = groupOrder ? groupOrder[1].split(',').filter((s) => s.trim()).length : NaN;
 const hideOnSsd = optJs.match(/const HIDE_ON_SSD = \[([^\]]*)\]/);
 const hideOnSsdCount = hideOnSsd ? hideOnSsd[1].split(',').filter((s) => s.trim()).length : NaN;
@@ -67,7 +75,7 @@ const virtualRunIds = virtualBlk ? (virtualBlk[1].match(/runId: '/g) ?? []).leng
 // 前端列表可见数：被聚合的 runId 摘掉、虚拟卡插回，再减 SSD 隐藏项
 const visibleSsd = optTotal - virtualRunIds + virtualCards - hideOnSsdCount;
 
-check(Number.isFinite(groupCount), 'optimizer.js GROUP_ORDER 可解析', `展示分组 ${groupCount}`);
+check(Number.isFinite(groupCount), 'optimizer.js GROUP_FALLBACK.default 可解析', `展示分组 ${groupCount}`);
 check(Number.isFinite(hideOnSsdCount) && Number.isFinite(virtualCards) && Number.isFinite(virtualRunIds),
   'optimizer.js HIDE_ON_SSD / VIRTUAL_GROUPS 可解析',
   `HIDE_ON_SSD=${hideOnSsdCount} 虚拟卡=${virtualCards} 聚合runId=${virtualRunIds}`);

@@ -32,8 +32,11 @@
 //! 1. minisign 密钥对已生成，公钥已回填 `tauri.conf.json` → `plugins.updater.pubkey`。
 //!    v2-L4P-25（A-7）：私钥路径与发版/签名流程只以 AGENTS §7.4 为唯一真源，本文件
 //!    不再维护第二份（文档互相抄路径是「红线指向虚无」的温床，L4 D-3 同族教训）。
-//! 2. FEEDS 三条已改指 xiaoxu1642/trim-tauri/releases/latest/download/（本仓库），
-//!    与 Electron 版 xiaoxu1642/Trim 完全分仓，不会混装。
+//! 2. FEEDS 两条：`gitee`（https://gitee.com/xiaoxu1642/trim-tauri/releases/latest/download/）
+//!    与 `github`（https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/），
+//!    auto 顺序 Gitee 优先。2026-10-03 用户拍板由三源（GitHub + 两个加速代理）改二源。
+//!    **两仓发版必须同步**：Gitee 侧 release 资产与 GitHub 侧同名同版本，
+//!    否则国内源会长期停在旧版（表现为「检查更新说已是最新」而 GitHub 有新版）。
 //! 3. v0.1.2 是首发手动安装包（无 latest.json，updater 从下一版 v0.1.3 起生效）；
 //!    老 Electron 用户迁移引导仍待 Phase 4 实现。
 
@@ -57,27 +60,27 @@ const MANIFEST: &str = "latest.json";
 
 /// 线路基址（对照上游 MIRRORS / GITHUB_DOWNLOAD_BASE，**尾斜杠 = 目录前缀**）。
 /// 实际端点 = 基址 + `latest.json`。
+///
+/// 2026-10-03 用户拍板：**三源改二源**。原三源是 `github` + `gh-proxy` + `ghfast`
+/// （两个都是 GitHub 加速代理），换成 `gitee`（国内源，直连）+ `github`。
+/// 删掉加速代理的另一个理由：它们的可用性不由本项目控制，且**清单与产物都经它们转发**——
+/// 信任模型里这条链已经够长（TLS → 清单 → minisign 验签），不该再叠一层第三方代理。
 const FEEDS: &[(&str, &str, &str)] = &[
+    (
+        "gitee",
+        "Gitee 国内源",
+        "https://gitee.com/xiaoxu1642/trim-tauri/releases/latest/download/",
+    ),
     (
         "github",
         "GitHub 直连",
         "https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/",
     ),
-    (
-        "gh-proxy",
-        "gh-proxy 镜像",
-        "https://gh-proxy.com/https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/",
-    ),
-    (
-        "ghfast",
-        "ghfast 镜像",
-        "https://ghfast.top/https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/",
-    ),
 ];
 
-/// auto = GitHub 优先、失败自动回退镜像；指定镜像 = 该镜像优先、其余兜底（含 GitHub）。
-/// 'github' 既是偏好项也是 FEEDS 里的一条真实线路。
-const MIRROR_IDS: &[&str] = &["auto", "github", "gh-proxy", "ghfast"];
+/// auto = Gitee 优先、失败自动回退 GitHub；指定线路 = 该线路优先、另一条兜底。
+/// 'gitee' / 'github' 既是偏好项也是 FEEDS 里的真实线路。
+const MIRROR_IDS: &[&str] = &["auto", "gitee", "github"];
 
 // ==================== 进程内状态（上游 autoUpdater 同样是进程单例） ====================
 
@@ -143,8 +146,11 @@ fn endpoint_of(base: &str) -> Option<Url> {
     Url::parse(&format!("{base}{MANIFEST}")).ok()
 }
 
-/// 按偏好排出线路尝试顺序（对照上游 `orderedFeeds()`）：指定镜像时该镜像优先、其余兜底。
+/// 按偏好排出线路尝试顺序（对照上游 `orderedFeeds()`）：指定线路时该线路优先、其余兜底。
 /// 未知偏好不返回空表，退回默认顺序 —— 配错偏好不该让「检查更新」整个失效。
+///
+/// **兜底序列里必须始终留着另一条真实线路**：国内线路被墙/仓库转私有、或 GitHub
+/// 在某网络下不可达时，另一条就是唯一出路。丢线路 = 更新功能整体失效。
 fn ordered_feeds(pref: &str) -> Vec<(&'static str, &'static str, &'static str)> {
     let mut all = FEEDS.to_vec();
     if let Some(pos) = all.iter().position(|(id, _, _)| *id == pref) {
@@ -507,29 +513,31 @@ mod tests {
     }
 
     #[test]
-    fn auto_偏好下_github_优先() {
-        assert_eq!(ids("auto"), vec!["github", "gh-proxy", "ghfast"]);
+    fn auto_偏好下_gitee_优先() {
+        assert_eq!(ids("auto"), vec!["gitee", "github"]);
     }
 
     #[test]
-    fn 指定镜像优先但_github_仍在兜底序列() {
-        let v = ids("ghfast");
-        assert_eq!(v[0], "ghfast");
-        assert_eq!(v.len(), 3, "不能丢线路");
-        assert!(v.contains(&"github"), "镜像被污染/下线时必须有直连可退");
-        // 'github' 作为显式偏好，结果等价于 auto
-        assert_eq!(ids("github"), ids("auto"));
+    fn 指定线路优先但另一条仍在兜底序列() {
+        let v = ids("github");
+        assert_eq!(v[0], "github");
+        assert_eq!(v.len(), 2, "不能丢线路");
+        assert!(v.contains(&"gitee"), "GitHub 不可达时必须有国内源可退");
+        // 'gitee' 作为显式偏好，结果等价于 auto
+        assert_eq!(ids("gitee"), ids("auto"));
     }
 
     #[test]
     fn 未知偏好退回默认顺序而非空表() {
-        assert_eq!(ids("evil-mirror"), vec!["github", "gh-proxy", "ghfast"]);
+        assert_eq!(ids("evil-mirror"), vec!["gitee", "github"]);
     }
 
     #[test]
     fn 端点由基址拼出_latest_json() {
         let u = endpoint_of("https://github.com/o/r/releases/latest/download/").unwrap();
         assert_eq!(u.as_str(), "https://github.com/o/r/releases/latest/download/latest.json");
+        let g = endpoint_of("https://gitee.com/o/r/releases/latest/download/").unwrap();
+        assert_eq!(g.as_str(), "https://gitee.com/o/r/releases/latest/download/latest.json");
         // 漏尾斜杠必须直接判非法，而不是拼出一个 404 端点被误当「线路不通」
         assert!(endpoint_of("https://github.com/o/r/releases/latest/download").is_none());
         assert!(endpoint_of("不是个 url").is_none());
@@ -542,8 +550,16 @@ mod tests {
             assert!(base.ends_with('/'), "{id} 基址必须带尾斜杠");
             assert!(base.starts_with("https://"), "{id} 必须走 https");
         }
-        // 白名单 = auto + 全部真实线路（'github' 本身就是线路，不额外占位）
+        // 白名单 = auto + 全部真实线路（'gitee'/'github' 本身就是线路，不额外占位）
         assert_eq!(MIRROR_IDS.len(), FEEDS.len() + 1);
+        // 线路表**恰好两条**：三源时代留下的加速代理不得复活（2026-10-03 用户拍板）
+        assert_eq!(FEEDS.len(), 2, "更新线路应只有 Gitee + GitHub 两条: {FEEDS:?}");
+        for gone in ["gh-proxy", "ghfast"] {
+            assert!(
+                !FEEDS.iter().any(|(id, _, _)| *id == gone) && !MIRROR_IDS.contains(&gone),
+                "{gone} 已下线，不得回到线路表或偏好白名单"
+            );
+        }
     }
 
     #[test]

@@ -632,6 +632,15 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                 if let Some(n) = is_restorable(&backups, sid) {
                     map.insert("restorable".into(), json!(n));
                 }
+                // 批量项的**可自选目标**（2026-10-03 用户裁定）：这三项此前只有
+                // 「一键全选 / 一键全还原」两个出口，用户看到的是「禁用 70 个服务」
+                // 这种不可拆的黑箱（里面有 CryptSvc 这种禁不得的，也有 RetailDemo
+                // 这种一眼可弃的）。前端据此在详情里渲染逐项勾选。
+                // 不在表里 = 不注入该字段，而不是注入空数组 ——
+                // 空数组会被前端读成「支持自选但一个目标都没有」。
+                if let Some(sub) = super::subitems::subitems_of(sid) {
+                    map.insert("subitems".into(), sub);
+                }
             }
             tag_exec_modes(&mut row);
             row
@@ -737,45 +746,6 @@ pub(super) fn readiness_of(opts: &[Value], applied_ids: &std::collections::HashS
     }
     let score = readiness_score(&r);
     (r, score)
-}
-
-/// optimizer:prefs —— 读偏好段（E10：收藏 + 最近使用）
-///
-/// 档位 `guard(MAIN)`：只有主窗优化页消费（子窗不加载 `optimizer.js`），
-/// 判档依据见 AGENTS §3「以谁真的需要调它为准」，不是「它只读」。
-#[tauri::command]
-pub async fn optimizer_prefs<R: Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    let (favorites, recent) = opt_state::prefs_view();
-    json!({ "success": true, "data": { "favorites": favorites, "recent": recent } })
-}
-
-/// optimizer:set-favorite —— 收藏 / 取消收藏（E10）
-///
-/// 写侧：**必须报失败**，不能静默。收藏是用户主动操作，点了没反应而界面不变
-/// 会让用户以为功能坏了。写入失败时前端要 toast 出原因。
-#[tauri::command]
-pub async fn optimizer_set_favorite<R: Runtime>(
-    window: WebviewWindow<R>,
-    option_id: Option<String>,
-    on: Option<bool>,
-) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    let option_id = option_id.unwrap_or_default();
-    let on = on.unwrap_or(false);
-    if option_id.is_empty() {
-        return json!({ "success": false, "message": "缺少优化项 id" });
-    }
-    if opt_state::set_favorite(&option_id, on) {
-        json!({ "success": true, "data": { "id": option_id, "on": on } })
-    } else {
-        // 不静默：收藏写了但没存 ⇒ 界面显示星标而实际没记，下次进来就没了
-        json!({ "success": false, "message": "收藏写入失败（数据目录不可写）" })
-    }
 }
 
 /// optimizer:touch-recent —— 记一次「最近使用」（E10）

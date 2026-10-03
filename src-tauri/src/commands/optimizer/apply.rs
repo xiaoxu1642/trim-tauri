@@ -395,6 +395,16 @@ pub struct RunParams {
     days: Option<f64>,
     #[serde(default, rename = "includeStore")]
     include_store: bool,
+    /// 批量项里用户**勾选**的目标（2026-10-03）。缺省 / 空数组 = 全选（保持旧行为）。
+    ///
+    /// 刻意不让「全选」与「未选」共用一个值：全选要跑**数据层原脚本**（不重建），
+    /// 未选要跑**重建脚本**。共用一个值的话，两者只能二选一，而二选一里必有一个
+    /// 是错的形态（要么把未选当全选越权写入，要么把全选当未选什么都不做）。
+    #[serde(default, rename = "pickedTargets")]
+    picked_targets: Option<Vec<String>>,
+    /// 批量项里用户勾选的附带开关（形状与目标不同，故分开一个字段）
+    #[serde(default, rename = "pickedExtras")]
+    picked_extras: Option<Vec<String>>,
 }
 
 /// optimizer:run —— 执行单个优化项（正向/还原）
@@ -555,6 +565,34 @@ pub async fn optimizer_run<R: Runtime>(
             wu_pause_steps(days)
         } else {
             Vec::new()
+        }
+    } else if !p.restore && super::subitems::supports_subitems(&option_id) {
+        // 批量项的子集执行（2026-10-03）。优先级高于 includeStore 分支：
+        // 勾了子集就是「我只要这几个」，此时再自动追加商店 5 项是越权。
+        // 勾了商店（include_store）却被子集分支吃掉的话，用户会拿到一份
+        // 「没禁成商店服务却报了成功」的假回执。
+        match super::subitems::rebuild_steps(
+            &option_id,
+            p.picked_targets.as_deref(),
+            p.picked_extras.as_deref(),
+        ) {
+            Some(rebuilt) if rebuilt.is_empty() => {
+                return json!({
+                    "success": false,
+                    "message": "一个目标都没勾选，请至少勾选一项再执行"
+                });
+            }
+            Some(rebuilt) => rebuilt,
+            // None = 全选 ⇒ 走下面原有的原脚本路径（含 includeStore 的条件追加）
+            None if option_id == "tf_svc_bulk" && p.include_store => {
+                let base = opt
+                    .get("steps")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                svc_bulk_append_store(base)
+            }
+            None => opt.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
         }
     } else if option_id == "tf_svc_bulk" && p.include_store {
         let base = opt

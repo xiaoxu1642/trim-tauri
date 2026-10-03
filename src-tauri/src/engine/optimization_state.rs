@@ -21,71 +21,50 @@ fn empty_state() -> Value {
     json!({ "version": 1, "items": {}, "detected": {}, "prefs": { "favorites": [], "recent": [] } })
 }
 
-/// E10：偏好段（收藏 + 最近使用）。
+/// E10：偏好段（最近使用）。
 ///
 /// ## 为什么放这里而不是新建一个文件
 ///
-/// `optimization-state.json` 已经是「与优化项相关、跨会话存活」的落点，而收藏与
-/// 最近使用正是同一类数据（引用优化项 id、随目录变化、需要容错）。新开一个文件
-/// 就多一份「损坏隔离 + 原子写 + 版本迁移」的维护面，而收益是零。
+/// `optimization-state.json` 已经是「与优化项相关、跨会话存活」的落点，而最近使用
+/// 正是同一类数据（引用优化项 id、随目录变化、需要容错）。新开一个文件就多一份
+/// 「损坏隔离 + 原子写 + 版本迁移」的维护面，而收益是零。
 ///
 /// ## 形状
 ///
 /// ```text
-/// prefs.favorites: [id, …]        无上限（用户主动收藏，量级天然小）
+/// prefs.favorites: [id, …]   已下线（2026-10-03），见下方说明；字段保留只因旧状态文件里有它
 /// prefs.recent:   [id, …]        上限 RECENT_LIMIT，**最近的在前**（索引 0 = 最新）
 /// ```
 ///
 /// `recent` 用「**删掉旧位置 → 插到索引 0 → 截尾**」实现 LRU。选这个方向而不是
 /// 「追加到尾部 + 读取时排序」：读取端只要取前 N 个，不用每次渲染都排一遍。
+///
+/// ## favorites 为什么整链下线（2026-10-03 用户裁定）
+///
+/// 优化列表每行末尾的收藏星标被删除：它既没有消费场景（没有「只看收藏」筛选、
+/// 没有按收藏排序），又吃掉行尾最贵的一格横向空间，把长标题挤成竖排单字。
+/// 与其留一个不产生任何决策的按钮，不如把 `favorites` 的**写侧**（`set_favorite`）
+/// 与命令面（`optimizer:set-favorite` 通道）一并摘掉，避免留下永不被调用的死通道。
+/// `favorites` 键在**旧状态文件里可能已存在**，读侧一律忽略、不迁移、不展示。
 const RECENT_LIMIT: usize = 10;
 
-/// 读偏好段。**孤儿 id 静默忽略**（方案 §3.5 E10 的明确要求）。
+/// 读偏好段。**孤儿 id 静默忽略**。
 ///
-/// 为什么静默而不是报错：用户收藏了某个优化项，之后目录把它退役了（`retired-optimizations.json`
-/// 收编、或直接删掉）。那不是用户的错，也不是数据损坏 —— 报「收藏项不存在」只会让
-/// 用户以为应用坏了。调用方（渲染层）拿到的列表里不会有那些 id，界面上自然不显示。
-pub fn prefs_view() -> (Vec<String>, Vec<String>) {
+/// 为什么静默而不是报错：用户打开过某个优化项，之后目录把它退役了（`retired-optimizations.json`
+/// 收编、或直接删掉）。那不是用户的错，也不是数据损坏 —— 报「记录项不存在」只会让用户
+/// 以为应用坏了。调用方（渲染层）拿到的列表里不会有那些 id。
+pub fn prefs_view() -> Vec<String> {
     let st = load();
-    let prefs = st.get("prefs").cloned().unwrap_or(json!({}));
-    let grab = |k: &str| -> Vec<String> {
-        prefs
-            .get(k)
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .filter(|id| !id.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    (grab("favorites"), grab("recent"))
-}
-
-/// 收藏/取消收藏。返回 false = 写入失败（调用方要如实告知，不能静默）。
-pub fn set_favorite(id: &str, on: bool) -> bool {
-    if id.is_empty() {
-        return false;
-    }
-    let mut st = load();
-    let mut fav = st
-        .get("prefs")
-        .and_then(|p| p.get("favorites"))
+    st.get("prefs")
+        .and_then(|p| p.get("recent"))
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
-        .unwrap_or_default();
-    fav.retain(|x| x != id);
-    if on {
-        fav.push(id.to_string());
-    }
-    if let Some(o) = st.as_object_mut() {
-        let prefs = o.entry("prefs").or_insert_with(|| json!({}));
-        if let Some(p) = prefs.as_object_mut() {
-            p.insert("favorites".into(), json!(fav));
-        }
-    }
-    save(&st)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 记一次「最近使用」。LRU：移到最前 + 截尾到 RECENT_LIMIT。
@@ -122,8 +101,9 @@ fn load() -> Value {
                 o.insert("detected".into(), json!({}));
             }
             // E10：prefs 段缺失时补空骨架（老状态文件没有这段）。
-            // 刻意**不校验内容**：favorites/recent 里的 id 可能在目录删项后变成孤儿，
+            // 刻意**不校验内容**：recent 里的 id 可能在目录删项后变成孤儿，
             // 那是**预期内**的（见 prefs_view 的注释），不是损坏。
+            // `favorites` 只在骨架里保留占位：旧状态文件里可能有它，读侧一律忽略。
             if !o.get("prefs").map(|x| x.is_object()).unwrap_or(false) {
                 o.insert("prefs".into(), json!({ "favorites": [], "recent": [] }));
             }
@@ -276,52 +256,32 @@ fn normalize_verify(v: &str) -> &'static str {
     }
 }
 
-    /// E10：偏好段（收藏 + 最近使用）的行为契约。
+#[cfg(test)]
+mod tests {
+    /// E10：最近使用（recent）的行为契约（LRU / 幂等 / 空 id / 孤儿 id）+ 收藏已下线的反向断言。
     ///
-    /// 四条要断的理由各不相同：
-    /// · 收藏幂等（重复收藏不产生重复项）
-    /// · 取消收藏真的移除（不是「不再显示」而是持久化地删掉）
+    /// 三条要断的理由各不相同：
     /// · recent LRU：最近的在**最前**，超上限丢**最久远的**
+    /// · 重复 touch 不产生重复项
     /// · 空 id 拒写（否则 prefs 里会出现空串项，渲染层会显示一个无名条目）
+    /// · 孤儿 id 静默读出（不剔除）
+    /// · 收藏链路**必须已经消失**（2026-10-03 用户裁定删星标）——反向断言防复活
     #[test]
-    fn e10_收藏与最近使用四条契约() {
+    fn e10_recent契约与收藏下线() {
         use crate::engine::optimization_state as st;
         // 上限在实现侧是 `RECENT_LIMIT`（模块私有）；测试侧复述一次并与实现比对
         const RECENT_LIMIT_FOR_TEST: usize = 10;
 
         // ⚠️ **不假设「初始为空」**：本组用例跑的是**真实状态文件**（同机开发），
-        // 判红实验跑过之后里面会留残留（首版就踩了：判红实验把 tmp* 写进去，
+        // 判红实验跑过之后里面会留残留（首版就踩过：判红实验把 tmp* 写进去，
         // 恢复后本条因「实际非空」而红 —— 看起来像实现坏了，其实是夹具脆弱）。
         // 正确做法：自己写自己清，且断言只看**自己造的那部分**。
-        // 前置清理：把上轮可能残留的收藏清掉
-        let (f0, _) = st::prefs_view();
-        for id in f0 {
-            let _ = st::set_favorite(&id, false);
-        }
 
-        // ① 收藏幂等
-        assert!(st::set_favorite("tf_ntfs", true), "收藏写入失败");
-        assert!(st::set_favorite("tf_ntfs", true), "重复收藏写入失败");
-        let (f1, _) = st::prefs_view();
-        assert_eq!(
-            f1.iter().filter(|x| *x == "tf_ntfs").count(),
-            1,
-            "重复收藏产生了重复项：{f1:?}"
-        );
-
-        // ② 取消收藏真的移除
-        assert!(st::set_favorite("tf_ntfs", false), "取消收藏写入失败");
-        let (f2, _) = st::prefs_view();
-        assert!(
-            !f2.contains(&"tf_ntfs".to_string()),
-            "取消收藏后仍在列表里（渲染层会继续显示星标）：{f2:?}"
-        );
-
-        // ③ recent LRU：最近的在最前 + 超上限丢最久远的
+        // ① recent LRU：最近的在最前 + 超上限丢最久远的
         for i in 0..12 {
             assert!(st::touch_recent(&format!("id{i}")), "写 recent 失败（id{i}）");
         }
-        let (_, r3) = st::prefs_view();
+        let r3 = st::prefs_view();
         assert_eq!(r3.len(), 10, "recent 超过上限 10 却没有截断：len={}", r3.len());
         assert_eq!(r3[0], "id11", "最近的必须在最前，实际 index0={}", r3[0]);
         assert!(
@@ -330,7 +290,7 @@ fn normalize_verify(v: &str) -> &'static str {
         );
         // 重复 touch 同一个 id：移到最前且**不重复**
         assert!(st::touch_recent("id11"), "重复 touch 失败");
-        let (_, r4) = st::prefs_view();
+        let r4 = st::prefs_view();
         assert_eq!(
             r4.iter().filter(|x| *x == "id11").count(),
             1,
@@ -338,31 +298,55 @@ fn normalize_verify(v: &str) -> &'static str {
         );
         assert_eq!(r4[0], "id11", "重复 touch 后应仍在最前");
 
-        // ④ 空 id 拒写
-        assert!(!st::set_favorite("", true), "空 id 的收藏必须被拒（否则 prefs 里会出现无名条目）");
+        // ② 空 id 拒写
         assert!(!st::touch_recent(""), "空 id 的 recent 必须被拒");
 
-        // 清理夹具：recent 无法逐条删除（只有 touch），用**超量 touch 把自己的条目挤出上限**，
-        // 再把可能残留的 tmp* 也挤出去。收藏已在上面逐条清了。
+        // ③ 收藏链路已下线：写侧函数与命令面都不该复活。
+        //    判红点很实——把 stars 改回来就会在这里红。
+        //
+        //    **判据必须切出生产段**（本条踩过两次）：`include_str!` 读整个文件、含测试
+        //    模块自身。判据字面量只要出现在注释或断言里，反向判据会匹配到自己 ⇒ 恒红；
+        //    正向判据会匹配到自己的注释 ⇒ 假绿。substring 判据撞上同类代码就会这样，
+        //    本仓已多次踩这族（R0-c / M2-B / aidesc 的 zhihu 头 / check-readme 的
+        //    GROUP_ORDER）。**写判据时不要在注释里贴判据原文**，否则又匹配回去。
+        //    锚点用带换行的 `#[cfg(test)`+`mod tests`：裸串在本文件的注释里也出现过，
+        //    用它 split 会在注释处提前截断 ⇒ 生产段为空 ⇒ 恒红。
+        let src = include_str!("optimization_state.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+        assert!(
+            !prod.contains("pub fn set_favorite"),
+            "收藏写侧函数又出现了 —— 收藏星标已于 2026-10-03 整链下线"
+        );
+        let ov = include_str!("../commands/optimizer/overview.rs");
+        assert!(
+            !ov.contains("pub async fn optimizer_set_favorite"),
+            "收藏写侧命令又出现了 —— 通道已下线"
+        );
+        // 正向：recent 的生产段必须还在（防「反向判据通过是因为整段被删了」这种假绿）
+        assert!(
+            prod.contains("pub fn prefs_view") && prod.contains("pub fn touch_recent"),
+            "recent 的读/写函数都不见了 —— 下线判据是因为代码被误删才通过的（假绿）"
+        );
+
+        // ③ 孤儿 id 静默忽略：目录删项后 recent 里的 id 仍能被读出，由渲染层决定
+        //    不显示 —— 后端**不报错、不剔除**（剔除会让「这项被打开过」这个事实消失）。
+        //
+        //    **为什么并进本用例而不是单开一条**（本条踩过）：`cargo test` 默认多线程跑，
+        //    两条用例共用**同一个真实状态文件**，而 recent 上限只有 10 —— 单开那条
+        //    写完夹具正要读时，这条的清理夹具正好 touch 了 20 个条目把它挤出上限，
+        //    于是「孤儿 id 读不出」而红了。看起来像实现坏了，其实是夹具竞态。
+        //    并进同一条 = 顺序执行，中间不会被另一条插进来。
+        assert!(st::touch_recent("__已退役的优化项__"), "写入夹具失败");
+        let r5 = st::prefs_view();
+        assert!(
+            r5.contains(&"__已退役的优化项__".to_string()),
+            "recent 里的孤儿 id 被后端悄悄剔除了 —— 语义应是「读出后由渲染层决定不显示」，             后端剔除会让「这项曾被打开过」这个事实消失（退役清单里仍可能想找回）：{r5:?}"
+        );
+
+        // 清理夹具：recent 无法逐条删除（只有 touch），用**超量 touch 把自己的条目挤出上限**。
         for i in 0..(RECENT_LIMIT_FOR_TEST * 2) {
             let _ = st::touch_recent(&format!("__cleanup{i}"));
         }
-    }
-
-    /// E10 的**孤儿 id 静默忽略**语义：目录删项后偏好里的 id 仍能被读出，
-    /// 由渲染层决定不显示 —— 后端**不报错、不剔除**（剔除会让「这项被收藏过
-    /// 历史上」这个事实消失，而用户在退役清单里仍可能想找回它）。
-    #[test]
-    fn e10_孤儿id读出不报错() {
-        use crate::engine::optimization_state as st;
-        assert!(st::set_favorite("__已退役的优化项__", true), "写入夹具失败");
-        let (favs, _) = st::prefs_view();
-        assert!(
-            favs.contains(&"__已退役的优化项__".to_string()),
-            "偏好里的孤儿 id 被后端悄悄剔除了 —— 语义应是「读出后由渲染层决定不显示」，\
-             后端剔除会让「这项曾被收藏」这个事实消失（退役清单里仍可能想找回）"
-        );
-        let _ = st::set_favorite("__已退役的优化项__", false);
     }
 
     /// E10：prefs 段缺失时（旧状态文件）能自动补骨架，不 panic。
@@ -373,10 +357,11 @@ fn normalize_verify(v: &str) -> &'static str {
         let src = include_str!("optimization_state.rs");
         assert!(
             src.contains("\"prefs\"") && src.contains("or_insert_with"),
-            "prefs 段缺失时没有补骨架的路径 —— 旧状态文件会让 set_favorite 静默失败"
+            "prefs 段缺失时没有补骨架的路径 —— 旧状态文件会让 touch_recent 静默失败"
         );
         assert!(
             src.contains("RECENT_LIMIT: usize = 10"),
             "recent 上限常量必须是 10（方案 §3.5 E10：recent 上限 10 + LRU）"
         );
     }
+}

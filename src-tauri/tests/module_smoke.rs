@@ -1279,3 +1279,41 @@ fn elapsed_ms_是每项必有的非负整数() {
         );
     }
 }
+
+// ==================== syspanel 回执形状（2026-10-03 读取失败根因） ====================
+
+/// syspanel 四条命令的回执必须是 `{ success, data }`，**不是裸对象**。
+///
+/// 根因（真实缺陷）：`syspanel_power_plan_get` / `pagefile_state` 早期直接
+/// `Ok(power_plan_state())` 返回裸 state，裸对象没有 `success` 字段 ⇒ 渲染层
+/// `syspanel.js` 的 `resp.success` 恒为 undefined ⇒ 两块面板永远显示
+/// 「读取电源方案失败 / 读取虚拟内存失败」，而后端其实读到了数据。
+///
+/// 为什么用静态口径而不是 `invoke`：这两条命令只在**主窗**放行（`guard(MAIN)`），
+/// 且电源方案读侧会拉起 `powercfg` 子进程 —— 不属快速组零副作用命令。断言改为
+/// 「源码里回执字面量必须带 success 包装」，锁的正是那次漂移本身。
+#[test]
+fn syspanel_回执必须是_success_data_包装() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/commands/syspanel.rs");
+    let src = std::fs::read_to_string(&p).expect("读得到 src-tauri/src/commands/syspanel.rs");
+    for needle in [
+        r#"Ok(json!({ "success": true, "data": power_plan_state() }))"#,
+        r#"Ok(json!({ "success": true, "data": pagefile_state() }))"#,
+    ] {
+        assert!(src.contains(needle), "syspanel 回执缺 success/data 包装（needle={needle}）");
+    }
+    // apply 侧走 map(...) 包装（power_plan_apply / pagefile_apply 返回 Result）
+    assert!(
+        src.contains(r#"map(|state| json!({ "success": true, "data": state }))"#),
+        "apply 侧回执缺 success/data 包装"
+    );
+    // 反向：Ok( 直接返回裸值的形态必须已经不存在。
+    // 判据**精确到带右括号的形态**（`Ok(power_plan_state())`）：写成 `Ok(power_plan_state`
+    // 会连 `Ok(json!({ "success": true, "data": power_plan_state() }))` 一起命中 ⇒ 恒红。
+    // substring 判据必须与被禁写法逐字对齐，本仓已因此踩过多次。
+    assert!(
+        !src.contains("Ok(power_plan_state())") && !src.contains("Ok(pagefile_state())"),
+        "仍有命令裸返回 state ⇒ 渲染层恒判读取失败"
+    );
+}
