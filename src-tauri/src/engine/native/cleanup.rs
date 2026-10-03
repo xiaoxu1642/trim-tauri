@@ -312,6 +312,83 @@ fn manifest_rels(manifest: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 单条规则的执行结果计数（判定 status/message 的全部输入）。
+///
+/// 抽成结构体 + 纯函数 `classify_outcome` 的理由：这段判定原先内联在
+/// `cleanup_execute` 的循环里，而它**无法在不碰全局 `protect::ROOTS` 的前提下
+/// 被单测**（`is_path_protected` 读全局清单；`configure()` 一写就污染同进程里
+/// 并发跑的保护断言，正是 protect.rs M13 注释里记的那个坑）。
+/// 纯函数化之后，「受保护拒绝不许混进被占用」这条就能被直接钉住。
+#[derive(Debug, Clone)]
+struct OutcomeCounters {
+    deleted: i64,
+    /// 文件被占用（真·用户侧问题：关掉占用程序后可重试）
+    failed: i64,
+    /// 被保护清单拒绝（安全闸门正常工作；关任何程序都不会变可删）
+    protected_blocked: i64,
+    too_new: i64,
+    excluded: i64,
+    unresolved: Vec<String>,
+    to_recycle: bool,
+}
+
+/// 由计数与三段后缀推出 `(status, message)`。
+///
+/// 判据的历史包袱都在这里，两条不可省：
+/// - **P0 fail-closed（2026-09-27）**：存在未解析变量且一无所删时不得报「成功 0 删」——
+///   那正是「扫描命中、执行 0 删」静默失效的形态。
+/// - **P0-M5**：`too_new` 同理，「全都是太新文件」必须显式说成 skip。
+/// - **§4.1（2026-10-04）**：`protected_blocked` 必须与 `failed` 分开。
+///   两者混在一起会让这次拦截在界面上长得跟「文件被占用」一模一样，而渲染层的
+///   toast（cleanup.js:1274）会据此提示「可关闭相关程序或重启后再试」——真因是
+///   这些目标本来就在保护清单里，那个建议永远无效。
+fn classify_outcome(
+    c: &OutcomeCounters,
+    too_new_suffix: &str,
+    excl_suffix: &str,
+    backup_suffix: &str,
+) -> (&'static str, String) {
+    if !c.unresolved.is_empty() && c.deleted == 0 && c.failed == 0 {
+        return ("skip", format!("路径变量 {} 未解析，未执行清理", c.unresolved.join("、")));
+    }
+    let nothing_done = c.deleted == 0 && c.failed == 0;
+    if nothing_done && c.protected_blocked > 0 {
+        return (
+            "skip",
+            format!("{} 个文件位于受保护路径，已按保护清单拒绝删除", c.protected_blocked),
+        );
+    }
+    if nothing_done && c.too_new > 0 {
+        return ("skip", format!("{} 个文件修改时间不足 minAge（时效护栏），未执行清理", c.too_new));
+    }
+    if nothing_done && c.excluded > 0 {
+        return ("skip", format!("{} 个文件在排除名单中，未执行清理", c.excluded));
+    }
+    let mut suffix = too_new_suffix.to_string();
+    if !excl_suffix.is_empty() {
+        suffix.push_str(excl_suffix);
+    }
+    if !backup_suffix.is_empty() {
+        suffix.push_str(backup_suffix);
+    }
+    if !c.unresolved.is_empty() {
+        suffix = format!("；{} 未解析已跳过{}", c.unresolved.join("、"), suffix);
+    }
+    if c.protected_blocked > 0 {
+        // 部分被拒时要单独说一句，且**不许混进「被占用」那个数**。
+        suffix = format!("{suffix}；{} 个位于受保护路径已拒绝", c.protected_blocked);
+    }
+    if c.to_recycle {
+        ("recycle", format!("待移入回收站（{} 个文件）{suffix}", c.deleted))
+    } else if c.failed == 0 {
+        ("ok", format!("已清理 {} 个文件{suffix}", c.deleted))
+    } else if c.deleted > 0 {
+        ("partial", format!("已清理 {} 个文件，{} 个被占用{suffix}", c.deleted, c.failed))
+    } else {
+        ("fail", format!("已清理 0 个文件，{} 个被占用{suffix}", c.failed))
+    }
+}
+
 /// 清理执行（对应 cleanup_execute.ps1，S3）
 ///
 /// 三类目标模型全部原生化（v0.1.6 真机修复）：fileKeys（含段级 glob 展开）、
@@ -666,9 +743,22 @@ pub fn cleanup_execute(
         });
         excluded = (before_excl - files.len()) as i64;
 
-        let mut freed = 0i64;
-        let mut deleted = 0i64;
-        let mut failed = 0i64;
+let mut freed = 0i64;
+    let mut deleted = 0i64;
+    let mut failed = 0i64;
+    // 受保护路径的拒绝**单独计数**（2026-10-04 审计 §4.1）。
+    //
+    // 原先它与「文件被占用」共用 `failed`，后果全部是用户可见的错误信息：
+    // 消息变成「N 个被占用」（**理由是假的**）、`residual` 触发渲染层的
+    // 「关闭相关程序后重试」提示（用户会去关程序，而真因是保护清单）、且**一行日志都不打**。
+    // 对照同文件里另外两处同类拒绝都记日志：注册表禁删面 :401（log::error + 独立
+    // fail 状态）、回收站支 scan_execute.rs:384（log::warn）——唯独永久删这条不记。
+    //
+    // 为什么要紧：这是全仓唯一执行永久删除的链，而「被保护路径拒绝」恰恰是
+    // AGENTS §3 明确要求**留痕**的那一类事件。把它混进「被占用」等于把安全闸门的
+    // 一次正常拦截伪装成用户的操作问题。
+    let mut protected_blocked = 0i64;
+    let mut protected_samples: Vec<String> = Vec::new();
         let mut backup_skipped = 0usize;
 
         for (path, size) in &files {
@@ -681,7 +771,15 @@ pub fn cleanup_execute(
                 // 审查 v2-F3：常规清理豁免的是「回收站优先」，**没有**豁免保护路径判定。
                 // 这是全仓唯一执行永久删除的链，保护清单在这里不能缺席 —— 同模块
                 // `retry_failed_delete`（cleanup.rs:1170）与回收站支（:942）都有这道闸门。
-                failed += 1;
+                //
+                // 单独计数而非并入 `failed`（审计 §4.1）：并进去会让这次拦截在界面上
+                // 长得跟「文件被占用」一模一样，用户去关程序而真因是保护清单。
+                protected_blocked += 1;
+                // 前若干条逐条留痕，之后只留汇总：一条规则命中上万文件时
+                // 逐条打会把真留痕淹掉（与扫描侧「首次翻转才留痕」同一取舍）。
+                if protected_samples.len() < 5 {
+                    protected_samples.push(path.clone());
+                }
             } else {
                 // C-4：删前备份（只对将真正删除的文件；复制失败不阻塞删除）
                 if *size <= FILE_BACKUP_MAX_FILE
@@ -724,6 +822,15 @@ pub fn cleanup_execute(
 
         total_freed += freed;
         total_files += deleted;
+        let outcome = OutcomeCounters {
+            deleted,
+            failed,
+            protected_blocked,
+            too_new,
+            excluded,
+            unresolved: unresolved.clone(),
+            to_recycle,
+        };
 
         // P0 fail-closed（规则库最终优化方案 2026-09-27）：存在未解析变量且一无所删时，
         // 不得报「已清理 0 个文件、状态成功」——这正是「扫描命中、执行 0 删」静默失效的
@@ -744,37 +851,33 @@ pub fn cleanup_execute(
         } else {
             String::new()
         };
-        let (status, message) = if !unresolved.is_empty() && deleted == 0 && failed == 0 {
-            ("skip", format!("路径变量 {} 未解析，未执行清理", unresolved.join("、")))
-        } else if deleted == 0 && failed == 0 && too_new > 0 {
-            ("skip", format!("{} 个文件修改时间不足 minAge（时效护栏），未执行清理", too_new))
-        } else if deleted == 0 && failed == 0 && excluded > 0 {
-            ("skip", format!("{} 个文件在排除名单中，未执行清理", excluded))
-        } else {
-            let mut suffix = too_new_suffix;
-            if !excl_suffix.is_empty() {
-                suffix.push_str(&excl_suffix);
-            }
-            if !backup_suffix.is_empty() {
-                suffix.push_str(&backup_suffix);
-            }
-            if !unresolved.is_empty() {
-                suffix = format!("；{} 未解析已跳过{}", unresolved.join("、"), suffix);
-            }
-            if to_recycle {
-                ("recycle", format!("待移入回收站（{} 个文件）{suffix}", deleted))
-            } else if failed == 0 {
-                ("ok", format!("已清理 {} 个文件{suffix}", deleted))
-            } else if deleted > 0 {
-                ("partial", format!("已清理 {} 个文件，{} 个被占用{suffix}", deleted, failed))
-            } else {
-                ("fail", format!("已清理 0 个文件，{} 个被占用{suffix}", failed))
-            }
-        };
+        let (status, message) = classify_outcome(
+            &outcome,
+            &too_new_suffix,
+            &excl_suffix,
+            &backup_suffix,
+        );
+
+        // 受保护路径的拦截必须留痕（审计 §4.1）。这是永久删除链的安全闸门在动作，
+        // 不是用户的操作问题，日志里要与「被占用」区分得开。
+        if protected_blocked > 0 {
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "规则 {id}：{protected_blocked} 个目标位于受保护路径，已拒绝删除。样本：{}",
+                    protected_samples.join("；")
+                ),
+            );
+        }
 
         details.push(json!({
             "id": id, "name": name, "status": status,
             "freed": freed, "message": message, "fileCount": deleted, "residual": failed,
+            // 受保护路径的拒绝**不进 residual**：residual 的语义是「文件被占用、
+            // 清理后重试」，而这一类是「按保护清单拒绝」——混进去会让渲染层弹出
+            // 「关闭相关程序后重试」的误导提示（审计 §4.1）。渲染层目前不消费这个
+            // 字段，它先在数据层备着，等前端要单独呈现时不必再改引擎。
+            "protectedBlocked": protected_blocked,
             "tooNew": too_new, "ruleVer": rule_ver,
         }));
 
@@ -1102,6 +1205,71 @@ mod cleanup_engine_contract_tests {
         assert_eq!(paths.len(), 1, "只有 mtime 满 3 天的文件进清单: {paths:?}");
         assert!(paths[0].ends_with("stale.txt"), "清单内容异常: {paths:?}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 2026-10-04 审计 §4.1：受保护路径的拒绝必须**独立记账、独立措辞、不进 residual**。
+    ///
+    /// 修前它与「文件被占用」共用 `failed`，于是界面上是「N 个被占用」、
+    /// `residual > 0` 触发渲染层 toast「可关闭相关程序或重启后再试」（cleanup.js:1274）
+    /// ——而真因是这些目标本来就在保护清单里，**关任何程序都不会让它们变成可删**。
+    ///
+    /// 为什么测的是 `classify_outcome` 而不是 `cleanup_execute`：后者内部调
+    /// `is_path_protected`，而那读全局 `protect::ROOTS`；用 `configure()` 注入就得
+    /// 写全局状态，会污染同进程并发跑的保护断言（protect.rs M13 记的正是这个坑，
+    /// 且本仓测试默认多线程）。纯函数化之后这条判据才可被直接钉住。
+    #[test]
+    fn 受保护路径的拒绝不混进被占用() {
+        let base = |deleted, failed, protected| OutcomeCounters {
+            deleted,
+            failed,
+            protected_blocked: protected,
+            too_new: 0,
+            excluded: 0,
+            unresolved: Vec::new(),
+            to_recycle: false,
+        };
+
+        // ① 全部候选都撞保护清单 ⇒ skip + 措辞指向保护清单
+        let (st, msg) = classify_outcome(&base(0, 0, 2), "", "", "");
+        assert_eq!(st, "skip", "全被拒时状态应是 skip（安全闸门正常工作，不是失败）");
+        assert!(msg.contains("受保护路径"), "措辞必须指向保护清单: {msg}");
+        assert!(!msg.contains("被占用"), "消息里出现「被占用」= 这次拦截被伪装成用户操作问题: {msg}");
+
+        // ② 部分被拒（同时有成功清理）⇒ 消息里单独说一句，且**不带「被占用」字样**
+        let (st, msg) = classify_outcome(&base(5, 0, 2), "", "", "");
+        assert_eq!(st, "ok", "有成功清理就该是 ok");
+        assert!(msg.contains("2 个位于受保护路径已拒绝"), "部分被拒必须单独留痕: {msg}");
+        assert!(msg.contains("已清理 5 个文件"), "成功数必须在: {msg}");
+
+        // ③ **部分被拒 + 真有被占用**：两个数必须分开出现，谁也不许吞掉谁
+        let (st, msg) = classify_outcome(&base(5, 3, 2), "", "", "");
+        assert_eq!(st, "partial", "有占用有成功 ⇒ partial");
+        assert!(msg.contains("3 个被占用"), "被占用数必须如实出现: {msg}");
+        assert!(msg.contains("2 个位于受保护路径已拒绝"), "受保护数必须独立出现: {msg}");
+
+        // ④ 只有被占用、没有被保护 ⇒ 消息里**不许**出现「受保护」（反向：别误报）
+        let (_, msg) = classify_outcome(&base(0, 4, 0), "", "", "");
+        assert!(msg.contains("4 个被占用"), "被占用措辞不变: {msg}");
+        assert!(!msg.contains("受保护"), "没有被保护拒绝时不得出现「受保护」字样: {msg}");
+
+        // ⑤ 与既有两条 P0 的优先级关系：未解析变量仍压过受保护（它更根本——
+        //    变量没解析时压根不知道目标是什么，谈不上「被保护拒绝」）
+        let mut c = base(0, 0, 2);
+        c.unresolved = vec!["%NOPE%".to_string()];
+        let (_, msg) = classify_outcome(&c, "", "", "");
+        assert!(msg.contains("未解析"), "未解析变量优先: {msg}");
+
+        // ⑥ too_new / excluded 的 skip 判定不被 protected 抢走
+        let mut c = base(0, 0, 0);
+        c.too_new = 7;
+        let (st, msg) = classify_outcome(&c, "", "", "");
+        assert_eq!(st, "skip");
+        assert!(msg.contains("minAge"), "too_new 的 skip 口径不变: {msg}");
+
+        // ⑦ 全成功 ⇒ ok，且不出现任何拒绝字样
+        let (st, msg) = classify_outcome(&base(9, 0, 0), "", "", "");
+        assert_eq!(st, "ok");
+        assert!(!msg.contains("受保护") && !msg.contains("被占用"), "成功时不得出现拒绝字样: {msg}");
     }
 }
 

@@ -269,6 +269,64 @@ use super::state::*;
         );
     }
 
+    /// 2026-10-04 审计 §4.1：受保护路径的拒绝必须走独立计数，且独立留痕。
+    ///
+    /// **为什么这条是源码形态断言而不是行为断言** —— 这是本轮唯一一处「判红实验
+    /// 暴露了测试没测到东西」的地方，值得写清楚：
+    ///
+    /// `engine/native/cleanup.rs` 里已有 `受保护路径的拒绝不混进被占用`（纯函数
+    /// `classify_outcome` 的 7 条行为断言）。但**把受保护拒绝并回 `failed` 那个
+    /// 真实缺陷态下，那 7 条全绿** —— 因为它们直接构造 `OutcomeCounters`，
+    /// 根本走不到引擎循环里「哪个分支 +1」那一步。也就是说它们钉住的是
+    /// **措辞与记账政策**，钉不住**接线**。
+    ///
+    /// 接线无法用行为测试覆盖的原因是环境性的：`is_path_protected` 读全局
+    /// `protect::ROOTS`，用 `configure()` 注入就得写全局状态，会污染同进程并发跑的
+    /// 保护断言（protect.rs M13 记的正是这个坑，本仓测试默认多线程）。
+    /// 所以这里退一步断源码形态 —— 与 §3.6 的 `to_recycle` 同款取舍。
+    #[test]
+    fn 受保护拒绝的接线不许并回被占用() {
+        let code = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+
+        // ① protect 分支必须 +1 到 protected_blocked
+        let at = code.find("is_path_protected(path)").expect("找不到 protect 判定");
+        let branch = &code[at..];
+        let end = branch.find("} else").unwrap_or(branch.len());
+        let br = &branch[..end];
+        assert!(
+            br.contains("protected_blocked += 1"),
+            "protect 分支没有给 protected_blocked 计数: {br}"
+        );
+        assert!(
+            !br.contains("failed += 1"),
+            "protect 分支又给 failed 计数了 —— 那就是「被占用」，\
+             渲染层会弹「关闭相关程序后重试」的误导提示（cleanup.js:1274）: {br}"
+        );
+
+        // ② 必须留痕。这是全仓唯一永久删除链的安全闸门在动作，不是用户的操作问题。
+        assert!(
+            code.contains("个目标位于受保护路径，已拒绝删除"),
+            "受保护拒绝没有留痕 —— 对照同文件注册表侧与回收站支都记日志，\
+             唯独永久删这条不记会让这次拦截完全无迹可查"
+        );
+
+        // ③ details 里必须有独立字段，且 residual 不得混入它
+        assert!(
+            code.contains("\"protectedBlocked\": protected_blocked"),
+            "details 缺 protectedBlocked 字段 —— 真实条数无处可查"
+        );
+
+        // ④ 分类必须走纯函数（否则行为断言与接线之间又会被一段内联逻辑隔开）
+        assert!(
+            code.contains("fn classify_outcome("),
+            "classify_outcome 不见了 —— status/message 的判定又内联回循环里"
+        );
+        assert!(
+            code.contains("classify_outcome(\n            &outcome,"),
+            "classify_outcome 的调用点不见了 —— 判定与接线脱钩"
+        );
+    }
+
     /// 2026-10-04 磁盘清理审计 §4.6：契约表查询不许有「取不到就挑个默认值」的形态。
     ///
     /// 契约表 `engine/rule_schema.rs` 头上声明的是 fail-closed：「所有校验器拿到
