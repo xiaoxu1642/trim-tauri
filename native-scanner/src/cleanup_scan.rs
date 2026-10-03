@@ -758,6 +758,24 @@ pub fn first_unexpanded_token(s: &str) -> Option<String> {
     None
 }
 
+/// 未解析 %TOKEN% 的**统一留痕出口**（2026-10-04 审计 §4.8）。
+///
+/// `first_unexpanded_token` 此前只在 fileKeys 主路径被调用，其余 5 个路径字段
+/// （detect[].path / fileKeys 版 detect 回退 / regKeys（detect 回退与 measure）、
+/// excludePaths/excludeKeys、pathPs 的 configured 覆盖值）拿到未解析展开结果后
+/// 静默按原文处理——方向安全（少报/不删），但违反「未解析 token 必须被
+/// REPORTED」：用户看到的「配置了却永远 0 命中」没有任何对账依据。
+///
+/// **只留痕，不改判定**：各字段的既有 fail-closed 语义（跳过 / 按原文判不存在 /
+/// 排除永不命中）原样保留，本函数只让「为什么 0 命中」可见。
+fn report_unexpanded_token(field: &str, rule_id: &str, expanded: &str) {
+    if let Some(tok) = first_unexpanded_token(expanded) {
+        err_line(&format!(
+            "[cleanup-scan] 规则 {rule_id} {field} 路径变量 %{tok}% 未解析，该字段按展开后原文处理（大概率永远不命中）"
+        ));
+    }
+}
+
 // ==================== 文件系统基础判定 ====================
 
 /// Test-Path -LiteralPath（文件或目录均算存在；空串 false）
@@ -1410,6 +1428,7 @@ fn checklocked_body(input: &str) -> i32 {
 // ==================== 安装检测（Test-RuleDetect 口径） ====================
 
 fn test_rule_detect(rule: &Json) -> bool {
+    let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     if let Some(d) = rule.get("detect") {
         if d.ps_count() > 0 {
             if let Some(arr) = d.as_arr() {
@@ -1421,11 +1440,14 @@ fn test_rule_detect(rule: &Json) -> bool {
                     let is_reg = c.get("type").and_then(|t| t.as_str()) == Some("reg");
                     if is_reg {
                         // Test-RegPathExists(Expand-EnvPath(path))——只读注册表存在性判定
-                        if ffi::reg_key_exists(&expand_env_path(path)) {
+                        let expanded = expand_env_path(path);
+                        report_unexpanded_token("detect[].path(reg)", rid, &expanded);
+                        if ffi::reg_key_exists(&expanded) {
                             return true;
                         }
                     } else {
                         let p = expand_env_path(path);
+                        report_unexpanded_token("detect[].path", rid, &p);
                         if p.contains('*') {
                             if !expand_glob_dirs(&p, true).is_empty() {
                                 return true;
@@ -1446,6 +1468,7 @@ fn test_rule_detect(rule: &Json) -> bool {
                 if let Some(first) = arr.first() {
                     if let Some(fp0) = first.get("path").and_then(|p| p.as_str()) {
                         let fp = expand_env_path(fp0);
+                        report_unexpanded_token("fileKeys[0].path(detect回退)", rid, &fp);
                         if fp.contains('*') {
                             return !expand_glob_dirs(&fp, true).is_empty();
                         }
@@ -1469,7 +1492,9 @@ fn test_rule_detect(rule: &Json) -> bool {
             if let Some(arr) = rk.as_arr() {
                 if let Some(first) = arr.first() {
                     if let Some(rp0) = first.get("path").and_then(|p| p.as_str()) {
-                        return ffi::reg_key_exists(&expand_env_path(rp0));
+                        let rp = expand_env_path(rp0);
+                        report_unexpanded_token("regKeys[0].path(detect回退)", rid, &rp);
+                        return ffi::reg_key_exists(&rp);
                     }
                 }
             }
@@ -1824,6 +1849,7 @@ fn walk_fk_snapshot(
 }
 
 fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
+    let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let skip_lock = rule.get("restartProcesses").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let has_excl = rule.get("excludeKeys").map(|v| v.ps_count()).unwrap_or(0) > 0;
     // 规则级 excludePaths（C-2，2026-09-28 开门）：字符串数组，与全局排除名单同口径
@@ -1850,6 +1876,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
             if ep.is_empty() || ep.starts_with('#') {
                 continue;
             }
+            report_unexpanded_token("excludePaths[]", rid, &ep);
             // 分类按磁盘实况（§4.9）：禁再退回「按扩展名推断」——带点目录会被
             // routed 进文件表、排除静默失效、子树照删（check-scan-rule-diff E9 组钉着）
             classify_exclude_entry(&ep, &mut excl_dirs, &mut excl_files);
@@ -1868,6 +1895,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
             if ep.is_empty() {
                 continue;
             }
+            report_unexpanded_token("excludeKeys[].path", rid, &ep);
             if ex.get("type").and_then(|t| t.as_str()) == Some("dir") {
                 excl_dirs.push(ep);
             } else {
@@ -1972,6 +2000,7 @@ pub fn reg_target_excluded(excludes: &[String], target: &str, value: Option<&str
 }
 
 fn measure_reg_rule(rule: &Json) -> (bool, i64) {
+    let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let mut exists = false;
     let mut count: i64 = 0;
     if let Some(arr) = rule.get("regKeys").and_then(|v| v.as_arr()) {
@@ -1985,6 +2014,7 @@ fn measure_reg_rule(rule: &Json) -> (bool, i64) {
                 continue;
             };
             let p = expand_env_path(path);
+            report_unexpanded_token("regKeys[].path", rid, &p);
             let value = rk.get("value").and_then(|v| v.as_str()).unwrap_or("");
             let value_opt = if value.is_empty() { None } else { Some(value) };
             if reg_target_excluded(&excludes, &p, value_opt) {
@@ -2285,6 +2315,9 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
                 .to_string();
         }
         if !configured_value.is_empty() {
+            // §4.8：设置页存量配置值也可能带未解析 %TOKEN%（按原文永远 0 命中）——
+            // 只留痕不拒用，让「为什么这项扫不出来」可对账
+            report_unexpanded_token("configured", cat_id, &configured_value);
             path = configured_value;
             path_source = "configured".to_string();
         }

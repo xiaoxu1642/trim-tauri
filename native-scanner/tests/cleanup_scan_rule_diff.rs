@@ -417,3 +417,31 @@ fn excludePaths_指向文件仍按精确匹配排除() {
     assert!(!hits.contains("keep.log"), "排除的文件必须从命中集消失: {hits:?}");
     fs::remove_dir_all(&root).ok();
 }
+
+/// 2026-10-04 审计 §4.8：未解析 %TOKEN% 必须被 REPORTED 而不是静默跳过。
+///
+/// 此前只有 fileKeys 主路径留痕，detect/configured 等字段的「永远 0 命中」没有任何
+/// 对账依据。走 run_json 的 stderr 捕获验证留痕真的到达诊断通道（§3.2 收编的出口），
+/// 且**判定不变**：该 detect 条目按原文判不存在（规则视为未安装），只是现在有话说。
+#[test]
+fn detect_未解析token必须留痕且不改判定() {
+    let root = temp_root("tokdiag");
+    plant(&root, &[("a.log", 10)]);
+    let item = format!(
+        r#"{},"detect":[{{"type":"file","path":{}}}]}}"#,
+        ITEM_HEAD,
+        jstr(&format!(r"{}\%TRIM_NO_SUCH_VAR_XYZ%\x", root.display()))
+    );
+    let (code, hits, err) = scan_hits(&root, &wrap_item(&item));
+    assert_eq!(code, 0, "扫描应正常退出: {err}");
+    assert!(
+        err.contains("TRIM_NO_SUCH_VAR_XYZ") && err.contains("detect[].path"),
+        "未解析 token 必须经 err_line 留痕（捕获模式 stderr）: {err}"
+    );
+    // 判定不变的另一半：未解析 detect 按「未安装」处理（不带未解析路径的条目照常命中）
+    let (code2, hits2, err2) = scan_hits(&root, &rules_json(&root, "*.log", true, ""));
+    assert_eq!(code2, 0, "扫描应正常退出: {err2}");
+    assert!(hits2.contains("a.log"), "正常条目不受留痕改动影响: {hits2:?}");
+    assert!(!hits.contains("a.log"), "detect 不命中时条目不得进命中集（判定语义原样）: {hits:?}");
+    fs::remove_dir_all(&root).ok();
+}

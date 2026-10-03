@@ -252,6 +252,33 @@ check(
   'E9d. 「按扩展名分类 excludePaths」的旧形态在两侧均已绝迹',
 );
 
+// ==================== E10 未解析 token 的留痕覆盖（2026-10-04 审计 §4.8） ====================
+// first_unexpanded_token 此前只有 fileKeys 主路径一处调用，其余路径字段拿到未解析
+// 展开结果后静默按原文处理——「配置了却永远 0 命中」没有任何对账依据。修复后统一
+// 走 report_unexpanded_token（只留痕不改判定）。这里钉两点：① 出口存在且走 err_line
+// ② 8 处字段接线一个不少（少一处 = 那个字段的 0 命中重新失明）。
+const e10calls = (cleanRs.match(/report_unexpanded_token\(/g) || []).length;
+check(
+  /fn report_unexpanded_token\(/.test(cleanRs) && e10calls === 9,
+  'E10a. 未解析 token 统一留痕出口存在，8 处字段接线全部在位（含定义共 9 处）',
+  `实际 ${e10calls} 处`,
+);
+for (const field of [
+  'detect[].path(reg)',
+  'detect[].path',
+  'fileKeys[0].path(detect回退)',
+  'regKeys[0].path(detect回退)',
+  'regKeys[].path',
+  'excludePaths[]',
+  'excludeKeys[].path',
+  'configured',
+]) {
+  check(
+    cleanRs.includes(`"${field}"`),
+    `E10b. 字段「${field}」的留痕接线在位`,
+  );
+}
+
 console.log('');
 if (fail > 0) {
   console.error(`静态留痕断言失败 ${fail} 项。`);
