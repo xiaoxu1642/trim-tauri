@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::WebviewWindow;
 use super::state::*;
 // ==================== 常量（对照 main.js 1170-1577 / 71-72 / 1944） ====================
@@ -143,26 +144,70 @@ pub(super) fn collect_group_items(group: &Value) -> Vec<Value> {
     }
 }
 
-/// 防回滚水位线读取（对照 getRulesWatermark；损坏/不可读按 0）
-pub fn rules_watermark() -> f64 {
-    let Ok(text) = std::fs::read_to_string(watermark_file()) else {
-        return 0.0;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return 0.0;
-    };
-    match v.get("rulesVersion").map(js_number) {
-        Some(n) if n.is_finite() && n > 0.0 => n,
-        _ => 0.0,
+/// 进程内防回滚高水位（2026-10-04 审计 §4.7）：磁盘上的水位线文件是「可被删的」
+/// ——用户手工清理、第三方「垃圾清理」工具都可能把 data 目录当缓存扫掉。文件一旦
+/// 消失，只读文件的地板就回落到 `builtin_version`，任何**合法签名**且
+/// rulesVersion >= 内置版本的旧包都会被接受（下方 :954 的比较是 `v < floor`，相等
+/// 通过）。把本进程记录过的最高 rulesVersion 存在进程内并折进地板：删文件丢的是
+/// 跨进程记忆，丢不掉本进程的记忆。AtomicU64 存 f64 bits（版本恒为正数日期戳）。
+pub(super) static WATERMARK_HIGH: AtomicU64 = AtomicU64::new(0);
+
+/// 读进程内高水位（f64 bits 还原）
+pub(super) fn watermark_high_get() -> f64 {
+    f64::from_bits(WATERMARK_HIGH.load(Ordering::Relaxed))
+}
+
+/// 抬进程内高水位：只升不降，非法值（非有限/非正）忽略（CAS 循环防并发丢更新）
+pub(super) fn watermark_high_raise(v: f64) {
+    if !v.is_finite() || v <= 0.0 {
+        return;
+    }
+    let mut cur = WATERMARK_HIGH.load(Ordering::Relaxed);
+    loop {
+        if v <= f64::from_bits(cur) {
+            return;
+        }
+        match WATERMARK_HIGH.compare_exchange_weak(cur, v.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(actual) => cur = actual,
+        }
     }
 }
 
-/// 防回滚水位线写入（只升不降；写失败不阻断本次更新）
+/// 防回滚水位线读取（对照 getRulesWatermark；损坏/不可读按 0）。
+///
+/// §4.7：返回值 = max(磁盘水位线, 进程内高水位)。首次调用会把磁盘值抬进进程内
+/// 高水位，此后即使磁盘文件被删（本进程运行期间），地板也不会回落。
+pub fn rules_watermark() -> f64 {
+    let disk = match std::fs::read_to_string(watermark_file()) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(v) => match v.get("rulesVersion").map(js_number) {
+                Some(n) if n.is_finite() && n > 0.0 => n,
+                _ => 0.0,
+            },
+            Err(_) => 0.0,
+        },
+        Err(_) => 0.0,
+    };
+    watermark_high_raise(disk);
+    let high = watermark_high_get();
+    if disk > high {
+        disk
+    } else {
+        high
+    }
+}
+
+/// 防回滚水位线写入（只升不降；写失败不阻断本次更新）。
+///
+/// §4.7：先抬进程内高水位再写盘 —— 原先写盘失败只 warn，这个版本的防回滚记忆
+/// 就**整条丢失**（「更新成功 + 水位线没写上」的组合）；现在本进程至少记得它。
 pub fn set_rules_watermark(version: f64) -> bool {
     if !version.is_finite() || version <= 0.0 || version <= rules_watermark() {
         return false;
     }
-    // 水位线只写新根：写老根会让两个根各自记住一个版本，读取侧的 max() 口径就失效了
+    watermark_high_raise(version);
+    // 水位线只写新根：写老根会让两个根各自记住一个版本，读取侧的口径就分叉了
     let file = watermark_write_file();
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);

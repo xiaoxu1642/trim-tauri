@@ -789,3 +789,52 @@ use super::state::*;
             "更新链退回了旧的弱形状检查（只查 id/name 是否存在）"
         );
     }
+
+// ==================== §4.7 防回滚水位线：进程内高水位（2026-10-04） ====================
+
+/// 高水位 CAS 只升不降、非法值忽略。
+///
+/// 静态量是进程级的：本测试开头先归零（全仓只有本用例触这个量，无并发竞争面）。
+#[test]
+fn 进程内高水位只升不降且忽略非法值() {
+    WATERMARK_HIGH.store(0, std::sync::atomic::Ordering::Relaxed);
+    watermark_high_raise(100.0);
+    assert_eq!(watermark_high_get(), 100.0, "抬升必须生效");
+    watermark_high_raise(50.0);
+    assert_eq!(watermark_high_get(), 100.0, "更低版本不得降地板");
+    watermark_high_raise(f64::NAN);
+    watermark_high_raise(0.0);
+    watermark_high_raise(-5.0);
+    assert_eq!(watermark_high_get(), 100.0, "非法值必须忽略");
+    watermark_high_raise(f64::INFINITY);
+    assert_eq!(watermark_high_get(), 100.0, "无限值也是非法值（版本是有限日期戳）");
+    watermark_high_raise(200.0);
+    assert_eq!(watermark_high_get(), 200.0, "更高版本必须抬上去");
+    WATERMARK_HIGH.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// §4.7 接线钉（审计 §9.4 教训）：高水位必须真的折进读取侧地板与写入侧落盘前。
+/// 纯函数测试走不到这两处接线 —— 把 raise 调用摘掉，上面那条用例照样全绿。
+#[test]
+fn 水位线高水位_两侧接线在位() {
+    let src = include_str!("rules.rs");
+    // 读取侧：磁盘值先抬进高水位、再与高水位取 max 返回
+    assert!(
+        src.contains("watermark_high_raise(disk);"),
+        "rules_watermark 必须把磁盘值抬进进程内高水位（否则文件被删后地板回落，§4.7 复发）"
+    );
+    assert!(
+        src.contains("watermark_high_get();") || src.contains("watermark_high_get()"),
+        "rules_watermark 必须折入进程内高水位"
+    );
+    // 写入侧：落盘前先抬高水位（写盘失败时本进程仍记得该版本）
+    assert!(
+        src.contains("watermark_high_raise(version);"),
+        "set_rules_watermark 必须在写盘前抬进程内高水位"
+    );
+    // 地板消费点：floor 仍取 max(builtin, rules_watermark())——rules_watermark 现含进程内记忆
+    assert!(
+        src.contains("let floor = builtin_version.max(rules_watermark());"),
+        "防回滚地板的消费点漂移了"
+    );
+}
