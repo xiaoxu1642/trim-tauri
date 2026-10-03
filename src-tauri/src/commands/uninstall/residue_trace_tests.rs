@@ -587,6 +587,88 @@ use super::residue_update::*;
         assert_eq!(out2[0]["ruleId"], json!("residue-ruleid-probe"), "候选必须带 ruleId: {out2:?}");
     }
 
+    /// 2026-10-04 扩库回归网：每条规则的**匹配条件**必须能在真实卸载项上命中。
+    ///
+    /// 这条测试守的是与 B2 落点棘轮互补的那一半。落点存在性没法在单测里断言
+    /// （依赖具体机器），但「匹配组能不能认出这个程序」是可以完全确定地判的：
+    /// 夹具里的 `(displayName, publisher, uninstallKey 末段)` 三元组全部取自
+    /// 2026-10-04 本机 `HKLM/HKCU\...\CurrentVersion\Uninstall` 的实读值。
+    ///
+    /// 为什么要这条：微信 4.x 那次腐坏里，`displayName/publisher/uninstallKey`
+    /// 三个条件组**照样命中**（名字还是「微信」、发行商还是腾讯），坏的只有落点。
+    /// 也就是说条件组这一侧当时是「绿的」—— 若只靠条件组自检，扩库时把 pattern
+    /// 写错（大小写、发行商全称 vs 简称、`uninstallKey` 填了 GUID 前的乱码）
+    /// 不会有任何东西变红。落点那侧由 B2 棘轮兜底，条件组这侧就归本测试。
+    #[test]
+    fn 每条残留规则的匹配组都能认出它的目标程序() {
+        // (规则 id, 实读 DisplayName, 实读 Publisher, 实读卸载键末段)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("residue-360safe", "360安全卫士", "奇虎", "360safe"),
+            ("residue-eset", "ESET Security", "ESET", "ESET"),
+            ("residue-roboform", "RoboForm", "Siber Systems", "RoboForm"),
+            ("residue-ccleaner", "CCleaner", "Piriform", "CCleaner"),
+            // 微信 4.x：卸载键从 WeChat 改名成 Weixin，实读发行商是「腾讯科技(深圳)有限公司」
+            ("residue-wechat", "微信", "腾讯科技(深圳)有限公司", "Weixin"),
+            ("residue-qq", "QQ", "腾讯科技(深圳)有限公司", "QQ"),
+            ("residue-mailmaster", "网易邮箱大师", "NetEase(Hangzhou) Network Co. Ltd.", "MailMaster"),
+            ("residue-hibit", "HiBit Uninstaller 4.0.10.100", "HiBitSoftware", "Uninstaller"),
+            ("residue-everything", "Everything 1.4.1.1032 (x64)", "voidtools", "Everything"),
+            ("residue-clash-verge", "Clash Verge", "Clash Verge Rev", "Clash Verge"),
+            ("residue-douyin", "抖音", "Beijing Microlive Vision Technology Co., Ltd.", "douyin"),
+            ("residue-potplayer", "PotPlayer-64 bit", "Kakao Corp.", "PotPlayer64"),
+        ];
+        let rules = load_residue_rules().expect("内置残留规则库应可装载（验签 + 语义校验）");
+
+        for (id, name, publisher, key_leaf) in cases {
+            let rule = rules["rules"]
+                .as_array()
+                .expect("rules 是数组")
+                .iter()
+                .find(|r| r["id"] == *id)
+                .unwrap_or_else(|| panic!("规则库里没有 {id}"));
+            // 判定逻辑直接照抄运行期口径（≥2 组命中，见 residue_update.rs），
+            // 不去调 residue_rules_hits —— 那个函数还会按路径存在性过滤落点，
+            // 而落点存在性是机器相关的，不该由这条测试负责。
+            let norm = |s: &str| -> String {
+                s.trim().to_lowercase().replace([' ', '-', '_', '.'], "")
+            };
+            let contains = |hay: &str, needle: &str| -> bool {
+                // 与 residue_update.rs 的 contains2 同口径：pattern 长���须 ≥ 2 字符
+                let n = norm(needle);
+                n.chars().count() >= NAME_MIN_RULE_WORD && norm(hay).contains(&n)
+            };
+            // 每个条件组各配各的实读值：拿 DisplayName 去撞 publisher 那组是错的
+            // （第一版就踩了这个，写出来免得后人再踩一次）。
+            let haystack = |field: &str| -> &str {
+                match field {
+                    "displayName" => name,
+                    "publisher" => publisher,
+                    _ => key_leaf,
+                }
+            };
+            let group_hit = |field: &str| -> bool {
+                rule[field]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .any(|p| contains(haystack(field), p))
+                    })
+                    .unwrap_or(false)
+            };
+            let hits = ["displayName", "publisher", "uninstallKey"]
+                .iter()
+                .filter(|f| group_hit(f))
+                .count();
+            assert!(
+                hits >= 2,
+                "{id} 的匹配条件认不出它的目标程序（只命中 {hits}/3 组）。\
+                 实读三元组：DisplayName={name:?} Publisher={publisher:?} 卸载键末段={key_leaf:?}。\
+                 少命中一组的后果：该规则在这台机器上永远不出候选，且不会有任何日志"
+            );
+        }
+    }
+
     /// 运行进程目录判定：候选与进程目录互为祖先/子孙都算在用；大小写与尾随分隔符不许绕过。
     #[test]
     fn running_process_ancestry_blocks_candidates() {

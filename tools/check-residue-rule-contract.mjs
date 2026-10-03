@@ -317,6 +317,25 @@ const badCond = rules.filter((r) => MATCH_GROUPS.filter((g) => Array.isArray(r?.
 check(badCond.length === 0, 'B1. 三条件组至少两组非空（双条件拍板口径）',
   badCond.length ? `不达标: ${badCond.map((r) => r.id).join(', ')}` : '');
 
+// ---- B2. 落点条目数棘轮（只许增，不许悄悄抽空） ----
+//
+// 为什么 `gen-rule-coverage.mjs` 的覆盖棘轮不够：它记的是**规则 id 集合**，
+// 不是每条规则的 `residue` 落点数。于是「把 residue-wechat 的 3 条落点全删掉、
+// 规则 id 留着」在那一层是完全绿的 —— 而这正是 2026-10-04 实测到的腐坏形态：
+// 微信 4.x 把落点从 `Tencent\WeChat` 改名成 `Tencent\Weixin`、数据目录改成
+// `Tencent\xwechat`，旧规则**一条都命中不了**，但规则本身「看起来」完好无损。
+// 删光落点比改错落点更难被发现（前者连一条 warn 日志都没有），所以单开一条棘轮。
+//
+// 基线 = 2026-10-04 实测（12 条规则 / 41 条落点）。有意收缩请改这里的数字并在
+// 审核记录里写明为什么那批落点不再需要（而不是顺手删掉）。
+const RESIDUE_ENTRY_BASELINE = 41;
+const entryCount = rules.reduce((n, r) => n + (Array.isArray(r.residue) ? r.residue.length : 0), 0);
+check(entryCount >= RESIDUE_ENTRY_BASELINE, `B2. 落点条目数 ${entryCount} ≥ 基线 ${RESIDUE_ENTRY_BASELINE}`,
+  entryCount < RESIDUE_ENTRY_BASELINE
+    ? `落点被抽空 ${RESIDUE_ENTRY_BASELINE - entryCount} 条。规则 id 还在但落点没了 = 规则永远命中不到，\
+且不会有任何运行期日志（比对条件组还过）。有意收缩请显式下调基线并写明原因。`
+    : '');
+
 // ---- C1. 现存合法规则必须继续放行（收紧不许把功能打死） ----
 const LEGIT_REG_KEYS = [
   'HKLM\\SOFTWARE\\ESET', 'HKLM\\SOFTWARE\\360Safe', 'HKLM\\SOFTWARE\\Piriform',

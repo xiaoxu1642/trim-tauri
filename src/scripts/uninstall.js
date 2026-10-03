@@ -252,15 +252,16 @@
         <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
         <td class="finder-col-size" style="width:90px"><span data-un-size="${esc(a.id)}">${fmtSizeKb(a.estimatedSizeKb)}</span></td>
         <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7" data-tip="${esc(installDateTip(a))}">${esc(a.installDate || '—')}</span></td>
-        <td class="finder-col-size" style="width:210px">
+        <td class="finder-col-size" style="width:290px">
           <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${noRemoveAttr(a)}>卸载</button>
           <button class="btn btn-secondary btn-small" data-un-modify="${esc(a.id)}"${modifyBtnAttr(a)}${noModifyAttr(a)}>修改</button>
           <button class="btn btn-secondary btn-small" data-un-repair="${esc(a.id)}"${modifyBtnAttr(a)}${noRepairAttr(a)}>修复</button>
+          <button class="btn btn-secondary btn-small" data-un-residue="${esc(a.id)}" data-tip="只看不删：按该程序的卸载键定位它在规则库里登记的残留落点">查残留</button>
         </td>
       </tr>`).join('');
     return `
       <table class="finder-table">
-        <thead><tr><th>程序<span class="page-summary">共 ${apps.length} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:210px">操作</th></tr></thead>
+        <thead><tr><th>程序<span class="page-summary">共 ${apps.length} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:290px">操作</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   }
@@ -287,13 +288,14 @@
           <td><div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div></td>
           <td class="finder-col-size" style="width:190px"><span class="finder-name-text" style="opacity:.7">${esc(a.publisher || '—')}</span></td>
           <td class="finder-col-size" style="width:130px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
-          <td class="finder-col-size" style="width:150px">
+          <td class="finder-col-size" style="width:230px">
             <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${uninstallBlockAttr(a)}>卸载</button>
+            <button class="btn btn-secondary btn-small" data-un-residue="${esc(a.id)}" data-tip="只看不删：按该包的卸载键定位它在规则库里登记的残留落点">查残留</button>
           </td>
         </tr>`).join('');
       return `<div class="finder-group-header"><span>${title} · ${list.length} 项</span></div>
         <table class="finder-table">
-          <thead><tr><th>应用名${withTotal ? `<span class="page-summary">共 ${apps.length} 个应用</span>` : ''}</th><th class="finder-col-size" style="width:190px">发布者</th><th class="finder-col-size" style="width:130px">版本</th><th class="finder-col-size" style="width:150px">操作</th></tr></thead>
+          <thead><tr><th>应用名${withTotal ? `<span class="page-summary">共 ${apps.length} 个应用</span>` : ''}</th><th class="finder-col-size" style="width:190px">发布者</th><th class="finder-col-size" style="width:130px">版本</th><th class="finder-col-size" style="width:230px">操作</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
     };
@@ -546,7 +548,7 @@
     ]);
     const groups = [];
     if (!app) {
-      groups.push({ title: '程序残留（规则库）', rows: [], hint: '未选中程序。在上方列表点一行再扫描，可带上它的规则库残留。' });
+      groups.push({ title: '程序残留（规则库）', rows: [], hint: '未选中程序。在上方列表点该程序的「查残留」，即可带上它的规则库残留。' });
     } else if (rApp && rApp.success) {
       const name = (rApp.data && rApp.data.appName) || '';
       groups.push({ title: `程序残留 · ${name}（规则库命中）`, rows: (rApp.data && rApp.data.findings) || [] });
@@ -583,6 +585,32 @@
     uninstall: '失效卸载项（可删该注册表键）',
     appPaths: '失效 App Paths（可删该注册表键）',
   };
+
+  /**
+   * 按单个程序扫残留（列表每行的「查残留」按钮，2026-10-04）。
+   *
+   * 为什么不复用 `currentAppId` + `scanAllResidue()` 就完事：改动前 `currentAppId`
+   * **全仓只有一处赋值** —— 卸载成功后（uninstall.js:348）。于是「程序残留（规则库）」
+   * 这一组在用户刚进页面时永远是 0 项，而空态文案却写着「在上方列表点一行再扫描」——
+   * 列表行上**没有任何选中态或选中事件**，那句话指向一个不存在的交互。
+   * 用户看到的就是图三那个面板：三组全 0，第一组还叫你去点一个点不动的行。
+   *
+   * 现在把「选中」做成一个**真实按钮**：显式、可聚焦、键盘天然可达（AGENTS §2），
+   * 不必在整行上猜点击语义，也不会和行内三个操作按钮抢事件。
+   *
+   * 语义边界：只读，不删。它把 `currentAppId` 设成目标程序后走同一条 `scanAllResidue()`，
+   * 于是规则库组按该程序的卸载键（DisplayName / Publisher 由**后端**读注册表，
+   * 不信渲染层给的显示名）去命中签名规则库。
+   */
+  async function scanResidueForApp(appId) {
+    if (!appId) return;
+    currentAppId = appId;
+    try {
+      await scanAllResidue();
+    } catch (e) {
+      window.app?.toast?.('error', '残留扫描异常: ' + ((e && e.message) || e));
+    }
+  }
 
   function groupHtml(g) {
     let h = `<div class="finder-group-header" style="margin-top:14px"><span>${esc(g.title)} · ${g.rows.length} 项</span></div>`;
@@ -883,6 +911,8 @@
       if (mod && !mod.disabled) runModify(mod.dataset.unModify, 'modify');
       const rep = e.target.closest('[data-un-repair]');
       if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair');
+      const res = e.target.closest('[data-un-residue]');
+      if (res && !res.disabled) scanResidueForApp(res.dataset.unResidue);
     });
     // 一个入口跑三条链：面板里的「重新扫描」与页头按钮走同一条路
     document.getElementById('residueBtnRescan')?.addEventListener('click', scanAllResidue);

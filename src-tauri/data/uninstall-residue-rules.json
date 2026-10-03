@@ -1,9 +1,9 @@
 {
-  "rulesVersion": 20261001,
+  "rulesVersion": 20261004,
   "prov": [
     {
       "sourceClass": "builtin-knowledge",
-      "reviewedAt": "2026-09-28"
+      "reviewedAt": "2026-10-04"
     }
   ],
   "rules": [
@@ -42,7 +42,7 @@
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20261001
+      "ver": 20261004
     },
     {
       "id": "residue-eset",
@@ -72,7 +72,7 @@
           "note": "配置键"
         }
       ],
-      "ver": 20261001
+      "ver": 20261004
     },
     {
       "id": "residue-roboform",
@@ -102,7 +102,7 @@
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20261001
+      "ver": 20261004
     },
     {
       "id": "residue-ccleaner",
@@ -132,7 +132,7 @@
           "note": "配置键（以发行商命名）"
         }
       ],
-      "ver": 20261001
+      "ver": 20261004
     },
     {
       "id": "residue-wechat",
@@ -162,14 +162,30 @@
           "kind": "reg_key",
           "target": "HKCU\\Software\\Tencent\\WeChat",
           "note": "当前用户配置键"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Tencent\\Weixin",
+          "note": "安装目录（微信 4.x / Weixin）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Tencent\\xwechat",
+          "note": "用户数据目录（微信 4.x，新目录名）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Tencent\\Weixin",
+          "note": "当前用户配置键（微信 4.x）"
         }
       ],
-      "ver": 20261001
+      "ver": 20261004
     },
     {
       "id": "residue-qq",
       "displayName": [
         "腾讯QQ",
+        "QQ",
         "TIM"
       ],
       "publisher": [
@@ -178,6 +194,7 @@
       ],
       "uninstallKey": [
         "Tencent QQ",
+        "QQ",
         "TIM"
       ],
       "residue": [
@@ -200,13 +217,195 @@
           "kind": "reg_key",
           "target": "HKCU\\Software\\Tencent\\QQ",
           "note": "当前用户配置键"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Tencent\\QQNT",
+          "note": "QQNT 用户数据目录（新架构）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\QQ",
+          "note": "QQ Chromium 内核配置目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Tencent\\QQNT",
+          "note": "当前用户配置键（QQNT）"
         }
       ],
-      "ver": 20261001
+      "ver": 20261004
+    },
+    {
+      "id": "residue-mailmaster",
+      "displayName": [
+        "网易邮箱大师"
+      ],
+      "publisher": [
+        "NetEase",
+        "网易"
+      ],
+      "uninstallKey": [
+        "MailMaster"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Netease\\MailMaster",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Netease\\MailMaster",
+          "note": "用户数据目录（与网易云音乐同级，仅本程序独占）"
+        }
+      ],
+      "ver": 20261004
+    },
+    {
+      "id": "residue-hibit",
+      "displayName": [
+        "HiBit Uninstaller"
+      ],
+      "publisher": [
+        "HiBitSoftware"
+      ],
+      "uninstallKey": [
+        "Uninstaller"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\HiBit Uninstaller",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\HiBit Uninstaller",
+          "note": "用户数据目录（卸载记录 / 工具配置）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\HiBit Uninstaller",
+          "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261004
+    },
+    {
+      "id": "residue-everything",
+      "displayName": [
+        "Everything"
+      ],
+      "publisher": [
+        "voidtools"
+      ],
+      "uninstallKey": [
+        "Everything"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Everything",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Everything",
+          "note": "用户配置（Everything.ini / 搜索历史）"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Everything",
+          "note": "索引数据库（Everything.db）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\voidtools\\Everything",
+          "note": "程序配置键"
+        }
+      ],
+      "ver": 20261004
+    },
+    {
+      "id": "residue-clash-verge",
+      "displayName": [
+        "Clash Verge"
+      ],
+      "publisher": [
+        "Clash Verge Rev"
+      ],
+      "uninstallKey": [
+        "Clash Verge"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Clash Verge",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\io.github.clash-verge-rev.clash-verge-rev",
+          "note": "用户配置与订阅数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Clash Verge Rev",
+          "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261004
+    },
+    {
+      "id": "residue-douyin",
+      "displayName": [
+        "抖音"
+      ],
+      "publisher": [
+        "Microlive",
+        "ByteDance"
+      ],
+      "uninstallKey": [
+        "douyin"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\ByteDance\\douyin",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\douyin",
+          "note": "用户数据目录（Chromium 内核缓存与配置）"
+        }
+      ],
+      "ver": 20261004
+    },
+    {
+      "id": "residue-potplayer",
+      "displayName": [
+        "PotPlayer"
+      ],
+      "publisher": [
+        "Kakao"
+      ],
+      "uninstallKey": [
+        "PotPlayer"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\PotPlayerMini64",
+          "note": "用户配置目录（64 位迷你版；主程序目录随安装位置变化，未登记）"
+        }
+      ],
+      "ver": 20261004
     }
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "U015FGi21QBEVC262l+KKAeLb0J6djlVIpJkD1vuJbPj4jJJt5THik6wdWB0GtZ1Vc4qQQWERYqPGxQChi1IAw=="
+    "sig": "A7ktLG309AZga1kKOIpO9cd7IgnKy8s2j81DtyEAD4xTjXabPuYWbyN2y56uX6CjpeXU6xbVcx4sVQVNQE7kCw=="
   }
 }
