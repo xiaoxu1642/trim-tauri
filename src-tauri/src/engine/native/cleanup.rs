@@ -704,21 +704,49 @@ pub fn cleanup_execute(
                         continue;
                     }
                     // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）；
-                    // 展开后的每个实际目录仍过 cleanup_root_ok（reparse 判拒，双保险）
+                    // 展开后的每个实际目录仍过 reparse 判拒（双保险）
                     for base in expand_glob_dirs(&expanded) {
-                        if !cleanup_root_ok(&base) { continue; }
-                        if let Ok(meta) = std::fs::metadata(&base) {
-                            if meta.is_file() {
-                                // fileKey 直指单文件：同样过时效护栏
-                                if cutoff.map(|c| !trim_finder::cleanup_scan::modified_before(&meta, c)).unwrap_or(false) {
+                        // 单文件目标要**先**分派、再判 reparse（2026-10-04 审计 §4.2）。
+                        //
+                        // 原顺序是「先 cleanup_root_ok（要求 is_dir）→ 再判 is_file」，
+                        // 于是文件目标永远在第一道就 `continue` 了，下面那个 is_file
+                        // 分支是**死代码**。后果不只是「单文件规则删不掉」：
+                        // collect_files 一个都没收到，而失败计数也没加，条目落到
+                        // 「deleted=0 && failed=0 && 无 too_new/excluded」的出口，
+                        // 报出「已清理 0 个文件」+ success:true ⇒ UI 弹「清理完成！释放 0 B」。
+                        // 那正是本文件 P0 纪律（见 classify_outcome 注释）禁止的形态。
+                        //
+                        // 为什么扫描侧也拦得住单文件、这里却不行：`cleanup_root_ok`
+                        // 是**执行侧自己的**闸门，而 fileKey 直指单文件时
+                        // `expand_glob_dirs` 的非通配快路径只回目录（is_container），
+                        // 两处都不覆盖「这个 fileKey 指向一个文件」这个形态。
+                        match std::fs::symlink_metadata(&base) {
+                            Ok(md) if md.is_file() => {
+                                if crate::engine::protect::is_reparse(&md) {
+                                    continue; // 单文件也不接受重解析点（与 collect_files 同口径）
+                                }
+                                // 时效护栏与目录分支同款：太新不删、且**如实计数**
+                                if cutoff
+                                    .map(|c| !trim_finder::cleanup_scan::modified_before(&md, c))
+                                    .unwrap_or(false)
+                                {
                                     too_new += 1;
                                     continue;
                                 }
-                                files.push((base, meta.len()));
+                                files.push((base, md.len()));
                                 continue;
                             }
+                            Ok(md) if md.is_dir() => {
+                                if crate::engine::protect::is_reparse(&md) {
+                                    continue;
+                                }
+                                collect_files(&base, pattern, recurse, cutoff, &mut files, &mut too_new);
+                            }
+                            // 既非目录也非文件（已消失 / 不可访问 / 多形态设备）：
+                            // 跳过。不记 failed —— 「读不到」与「被占用」不是一回事，
+                            // 混进去又是一次理由错报（与 §4.1 同族）。
+                            _ => {}
                         }
-                        collect_files(&base, pattern, recurse, cutoff, &mut files, &mut too_new);
                     }
                 }
             }
@@ -729,6 +757,28 @@ pub fn cleanup_execute(
                 .unwrap_or("");
             if !target.is_empty() && cleanup_root_ok(target) {
                 collect_files(target, "*", true, cutoff, &mut files, &mut too_new);
+            } else if !target.is_empty() {
+                // 「根不可用」必须留一个可见的痕迹（2026-10-04 审计 §4.2）。
+                //
+                // 缺口背景：根判不过时 `files` 空、`failed` 也没加，条目会落到
+                // classify_outcome 的最后一个出口，报「已清理 0 个文件」+ success:true
+                // —— 而 UI 会弹「清理完成！释放 0 B」。用户看到的是「我明明选了它、
+                // 它也确实在列表里」，却被告知一切正常。
+                //
+                // 归到 unresolved 而不是新造一个计数器：语义就是「这条规则的目标
+                // 此刻不可用/不存在」，与「变量未解析」同族（都是「没找到可删的东西」）。
+                // `unresolved` 非空且 deleted==0 时 classify_outcome 会判 skip 并
+                // 把原因带给前端，这正是我们要的出口。
+                let why = if std::fs::symlink_metadata(target).is_ok() {
+                    "目标是重解析点（不深入以避免重复枚举）"
+                } else {
+                    "目标不存在或不可访问"
+                };
+                unresolved.push(format!("{target}（{why}）"));
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("规则 {id}：根目标不可用，已跳过 —— {target}（{why}）"),
+                );
             }
         }
 
@@ -1270,6 +1320,99 @@ mod cleanup_engine_contract_tests {
         let (st, msg) = classify_outcome(&base(9, 0, 0), "", "", "");
         assert_eq!(st, "ok");
         assert!(!msg.contains("受保护") && !msg.contains("被占用"), "成功时不得出现拒绝字样: {msg}");
+    }
+
+    /// 2026-10-04 审计 §4.2：`fileKeys` 直指**单个文件**时必须真能删掉。
+    ///
+    /// 修前的形态是「静默跳过 + 报成功 0 个」：执行侧先 `cleanup_root_ok`
+    /// （要求 `is_dir`）再判 `is_file`，于是文件目标在第一道就 `continue`，
+    /// 那个 `is_file` 分支是死代码；接着 `files` 空、`failed` 也没加，
+    /// 条目落到「已清理 0 个文件」+ `success:true`，UI 弹「清理完成！释放 0 B」。
+    ///
+    /// 这条是**端到端**的（真造文件、真跑 `cleanup_execute`），因为要验的正是
+    /// 「分派顺序对不对」——纯函数级的断言看不到 `cleanup_root_ok` 与 `is_file`
+    /// 的先后。审查 §9.4 那条「纯函数钉不住接线」的教训在这里正好不适用：
+    /// 分派本身就是可执行行为，不需要源码形态断言。
+    #[test]
+    fn 单文件_filekey_能删且不被报成成功零删() {
+        let dir = std::env::temp_dir().join(format!("trim-singlefile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("only.log");
+        std::fs::write(&target, b"0123456789").unwrap();
+
+        // fileKey 直指该文件、recurse=true（规则里 recurse 是必填布尔）
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"singlefile","name":"单文件探测",
+            "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"singlefile","name":"单文件探测","path": target.to_string_lossy()})];
+
+        let res = cleanup_execute(&items, &rules, false, false).expect("执行应返回结果而不是 Err");
+        let d = &res.details[0];
+
+        assert!(
+            !target.exists(),
+            "单文件目标必须真被删掉（修前它活下来了，而回执说「已清理 0 个文件」）"
+        );
+        assert_eq!(
+            d["fileCount"].as_i64(),
+            Some(1),
+            "fileCount 必须是 1 —— 收不到就是 §4.2 的分派顺序没修对: {d}"
+        );
+        // 删到了就是 ok（这是**正确**状态；修前那条路径压根收不到文件、也照样报 ok，
+        // 但配的是 fileCount=0 /「已清理 0 个文件」）。所以判据落在计数与消息上，
+        // 不落在 status 上——我第一版误写了 `assert_ne!(status,"ok")`，那是错的。
+        assert_eq!(
+            d["freed"].as_i64(),
+            Some(10),
+            "释放量必须等于文件真实字节数（10）: {d}"
+        );
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("已清理 1 个文件"),
+            "消息必须如实报出删了 1 个: {msg}"
+        );
+        assert!(
+            !msg.contains("已清理 0 个文件"),
+            "消息宣称「已清理 0 个文件」= 假绿成功（P0 纪律明令禁止）: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-10-04 审计 §4.2 配套：根目标不可用时必须**留痕并降为 skip**，
+    /// 而不是报「已清理 0 个文件」。
+    ///
+    /// 与上一条同族：根判不过时 `files` 空、`failed` 也没加，条目落到
+    /// 「deleted==0 && failed==0 且无 too_new/excluded」的出口 ⇒ success:true +
+    /// 「已清理 0 个文件」，而 UI 会弹「清理完成！释放 0 B」。用户看到的是
+    /// 「我明明选了它、它也确实在列表里」，却被告知一切正常。
+    #[test]
+    fn 根目标不可用时降为_skip_而不是报成功零删() {
+        // 目录型条目（无 fileKeys），path 指向一个不存在的目录
+        let missing = std::env::temp_dir().join(format!("trim-nosuchroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"noroot","name":"根不存在探测"
+        }]}]});
+        let items = vec![serde_json::json!({"id":"noroot","name":"根不存在探测","path": missing.to_string_lossy()})];
+
+        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        let d = &res.details[0];
+        assert_eq!(
+            d["status"], "skip",
+            "根不可用必须降为 skip（安全闸门/前提不成立），不是 ok: {d}"
+        );
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(
+            !msg.contains("已清理 0 个文件"),
+            "消息宣称「已清理 0 个文件」= 假绿成功: {msg}"
+        );
+        assert!(
+            msg.contains("不存在") || msg.contains("不可用"),
+            "消息必须说清根为什么不可用，否则用户无从判断: {msg}"
+        );
     }
 }
 

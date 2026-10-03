@@ -1117,7 +1117,22 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
     let mut skipped_reparse = 0u64;
     let expanded = expand_env_path(pattern);
     if !expanded.contains('*') {
-        return if is_container(&expanded) { vec![expanded] } else { Vec::new() };
+        // 非通配快路径：目录直接回；**文件也要回**（2026-10-04 审计 §4.2）。
+        //
+        // 原先只认 `is_container`（即 is_dir），于是 `fileKeys` 里直指单个文件的条目
+        // 在扫描侧永远展开不出东西 ⇒ 该条目 exists:false / size:0，界面上根本选不中。
+        // 而执行侧（engine/native/cleanup.rs）本来是有单文件分支的，只是被
+        // cleanup_root_ok 挡在前面成了死代码 —— 两处都不覆盖这个形态，属同族分叉。
+        //
+        // 「扫描能选中、执行能删」必须同时成立，这就是 A2 那条契约的由来。
+        //
+        // 重解析点**刻意不在这里判**：扫描侧判了只是少报（执行侧会独立再判一次），
+        // 而在这里判会让「文件型目标」也承担目录型的 reparse 语义，两边口径更容易漂。
+        // 上层 `walk_fk_dll` / `walk_fk_snapshot` 本来就只收文件（`continue` 掉非文件）。
+        if is_container(&expanded) || path_exists(&expanded) {
+            return vec![expanded];
+        }
+        return Vec::new();
     }
     let segments: Vec<&str> = expanded.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
     if segments.is_empty() {
