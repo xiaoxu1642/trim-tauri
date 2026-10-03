@@ -67,6 +67,11 @@ const RAW_EXEMPT = [
     anchor: 'std::process::Command::new(program)',
     reason: 'quiet_cmd 自身的实现体',
   },
+  {
+    file: 'src-tauri/src/engine/native/cleanup.rs',
+    anchor: 'Command::new("cmd")',
+    reason: '2026-10-04 审计 §4.5 测试夹具：mklink /J 造 junction 验证备份裁剪包含性核验（cfg(test) 专用，native-scanner/tests 同款；junction 无稳定 Rust API，symlink_dir 需特权）',
+  },
 ];
 
 /**
