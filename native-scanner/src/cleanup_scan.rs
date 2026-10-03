@@ -709,11 +709,31 @@ pub fn resolve_rule_path(expr: &str) -> Option<String> {
 }
 
 // ==================== %ENV% 展开（对齐 Expand-EnvPath） ====================
+
+/// 盘符相对路径判定（2026-10-04 审计 §4.10）：以**单个** `\` 或 `/` 开头、且不是
+/// UNC / verbatim 设备前缀（`\\` 开头）的形态。
+///
+/// 为什么需要单一判据：Windows 把 `\Foo` 按「当前盘的根」解析（PS Get-ChildItem
+/// 同语义），而 Rust `Path::is_absolute` 对它判 false（无 prefix）⇒ 保护侧
+/// `protect::resolve_path` 会拼 `current_dir()`——同一字符串，扫描/执行侧枚举的是
+/// 当前盘根下的 `\Foo`，保护侧比较的却是 `CWD\Foo`。落到删除链上就是「保护闸门
+/// 比对的路径 ≠ 实际删除的路径」。这种形态只可能来自未定义环境变量的拼接
+/// （`$env:UNDEF + '\Foo'`）——「当前盘」是进程 CWD 的偶然属性，不是规则作者的
+/// 决定。扫描/执行两侧统一用本判据拒绝展开并留痕；**注册表路径不适用**（前导
+/// `\` 在注册表面是 hive 相对形态，两码事）。
+pub fn is_drive_relative(p: &str) -> bool {
+    let b = p.as_bytes();
+    if b.is_empty() || (b[0] != b'\\' && b[0] != b'/') {
+        return false;
+    }
+    // `\\` 开头是 UNC / verbatim 前缀（`\\?\`、`\\.\`），不属于盘符相对
+    !(b.len() >= 2 && (b[1] == b'\\' || b[1] == b'/'))
+}
+
 // %NAME% → 环境变量值；未定义或定义为空串时保持原文（便于在路径列直接看出配置问题）。
 // 本函数是全仓唯一的 %VAR% 展开实现（P0 统一，规则库最终优化方案 2026-09-27）：
 // src-tauri 执行侧的展开必须委托到这里，禁止再写第二份白名单展开器。
-pub fn expand_env_path(p: &str) -> String {
-    let ch: Vec<char> = p.chars().collect();
+pub fn expand_env_path(p: &str) -> String {    let ch: Vec<char> = p.chars().collect();
     let mut out = String::with_capacity(p.len());
     let mut i = 0usize;
     while i < ch.len() {
@@ -1134,6 +1154,15 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
     // `skippedReparse` 字段承担呈现，本处只保证**不许静默**这件事在代码里可查）。
     let mut skipped_reparse = 0u64;
     let expanded = expand_env_path(pattern);
+    // §4.10：盘符相对形态（`\Foo`）按「当前盘根」解析，与保护侧 CWD 口径分叉——
+    // 扫描/执行共用的单一展开口在这里统一拒绝（本函数是两侧 fileKey 枚举的
+    // 唯一咽喉，见 is_drive_relative 注释），留痕后返回空集。
+    if is_drive_relative(&expanded) {
+        err_line(&format!(
+            "[cleanup-scan] 盘符相对路径（{expanded}）无盘符语义（未定义环境变量拼接？），已拒绝展开（§4.10）"
+        ));
+        return Vec::new();
+    }
     if !expanded.contains('*') {
         // 非通配快路径：目录直接回；**文件也要回**（2026-10-04 审计 §4.2）。
         //
@@ -1448,7 +1477,12 @@ fn test_rule_detect(rule: &Json) -> bool {
                     } else {
                         let p = expand_env_path(path);
                         report_unexpanded_token("detect[].path", rid, &p);
-                        if p.contains('*') {
+                        if is_drive_relative(&p) {
+                            // §4.10：盘符相对形态两侧口径分叉，按「不可判定」处理（不命中）
+                            err_line(&format!(
+                                "[cleanup-scan] 规则 {rid} detect[].path 盘符相对路径（{p}），已按不存在处理（§4.10）"
+                            ));
+                        } else if p.contains('*') {
                             if !expand_glob_dirs(&p, true).is_empty() {
                                 return true;
                             }
@@ -1472,6 +1506,14 @@ fn test_rule_detect(rule: &Json) -> bool {
                         if fp.contains('*') {
                             return !expand_glob_dirs(&fp, true).is_empty();
                         }
+                        // §4.10：盘符相对形态在 detect 阶段就按「不存在」处理——
+                        // path_exists 对它按当前盘根解析，会命中 CWD 偶然属性下的同名目录
+                        if is_drive_relative(&fp) {
+                            err_line(&format!(
+                                "[cleanup-scan] 规则 {rid} fileKeys[0].path 为盘符相对路径（{fp}），detect 已按不存在处理（§4.10）"
+                            ));
+                            return false;
+                        }
                         return path_exists(&fp);
                     }
                 }
@@ -1481,7 +1523,17 @@ fn test_rule_detect(rule: &Json) -> bool {
     if let Some(pp) = rule.get("pathPs") {
         if let Some(expr) = pp.as_str() {
             return match resolve_rule_path(expr) {
-                Some(p) => path_exists(&p),
+                Some(p) => {
+                    if is_drive_relative(&p) {
+                        // §4.10：盘符相对形态按「不可判定」处理（不命中）
+                        err_line(&format!(
+                            "[cleanup-scan] 规则 {rid} pathPs 求值为盘符相对路径（{p}），已按不存在处理（§4.10）"
+                        ));
+                        false
+                    } else {
+                        path_exists(&p)
+                    }
+                }
                 // 表达式求值失败（受限语法）→ 保守命中，交给主循环 fail-closed 跳过
                 None => true,
             };
@@ -2289,6 +2341,14 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
                 continue;
             }
         };
+        // §4.10：盘符相对形态（`$env:UNDEF + '\Foo'` → `\Foo`）不枚举——
+        // 「当前盘」是 CWD 的偶然属性，不是规则作者的决定
+        if is_drive_relative(&evaluated) {
+            err_line(&format!(
+                "[cleanup-scan] [DIAG] stage=scan.pathPs mutation=skip detail={cat_id} pathPs 求值为盘符相对路径（{evaluated}），已拒绝枚举（§4.10）"
+            ));
+            continue;
+        }
         let mut path = evaluated.clone();
         let evaluated_path = evaluated;
         let mut path_source = "configured".to_string();
@@ -2332,6 +2392,13 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
                     for cexpr in arr {
                         if let Some(ce) = cexpr.as_str() {
                             if let Some(cp) = resolve_rule_path(ce) {
+                                // §4.10：盘符相对候选不进候选集（自动定位会按当前盘根枚举）
+                                if is_drive_relative(&cp) {
+                                    err_line(&format!(
+                                        "[cleanup-scan] 条目 {cat_id} candidatesPs 求值为盘符相对路径（{cp}），已跳过（§4.10）"
+                                    ));
+                                    continue;
+                                }
                                 path_candidates.push(cp);
                             }
                         }

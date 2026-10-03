@@ -129,6 +129,14 @@ fn fold_components(body: &str) -> String {
 }
 
 /// 解析为绝对路径：相对路径按当前工作目录拼接（对照 JS path.resolve 的 CWD 基准）。
+///
+/// ⚠️ 盘符相对形态（`\Foo`，2026-10-04 审计 §4.10）：Rust `Path::is_absolute` 对它
+/// 判 false ⇒ 这里拼 CWD；而 Windows 枚举/删除语义按「当前盘的根」解析——同一
+/// 字符串两侧会算出不同目标。这条分叉**不在本函数修**（本函数的消费输入是各域
+/// 已枚举/已展开的路径，把 CWD 拼接改成盘根拼接会波及五个域的比较口径）；
+/// 删除链的闭合在共用展开口 `trim_finder::cleanup_scan::expand_glob_dirs` 与
+/// `cleanup_execute` 的 fileKey/目录型守卫：盘符相对形态在枚举前就被拒绝并
+/// 留痕，永远到不了删除步骤。
 fn resolve_path(s: &str) -> Option<String> {
     let p = std::path::Path::new(s);
     let abs = if p.is_absolute() {

@@ -855,6 +855,19 @@ pub fn cleanup_execute(
                         );
                         continue;
                     }
+                    // §4.10：盘符相对形态不得进删除链——保护闸门（is_path_protected）
+                    // 对它按 CWD 折叠，而枚举/删除按当前盘根解析，两侧比对对象不同。
+                    // 记 unresolved 让条目显式 skip，不许伪装成「成功 0 删」。
+                    if trim_finder::cleanup_scan::is_drive_relative(&expanded) {
+                        unresolved.push(format!("{expanded}（盘符相对路径）"));
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!(
+                                "cleanup_execute 规则 {id}：fileKey 展开为盘符相对路径（{expanded}），已跳过（§4.10）"
+                            ),
+                        );
+                        continue;
+                    }
                     // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）；
                     // 展开后的每个实际目录仍过 reparse 判拒（双保险）
                     for base in expand_glob_dirs(&expanded) {
@@ -907,7 +920,17 @@ pub fn cleanup_execute(
             let target = item.get("path").and_then(|v| v.as_str())
                 .or_else(|| rule.get("pathPs").and_then(|v| v.as_str()))
                 .unwrap_or("");
-            if !target.is_empty() && cleanup_root_ok(target) {
+            // §4.10：盘符相对形态（`\Foo`，多来自 `$env:UNDEF + '\Foo'`）在保护侧
+            // 会被拼成 CWD 下的幽灵路径——保护闸门比对的路径 ≠ 实际删除的路径。
+            // 刻意排在 cleanup_root_ok **之前**：后者用 fs 判存在性，会把当前盘根下
+            // 真实存在的同名目录放进删除链（见 trim_finder::is_drive_relative 注释）。
+            if !target.is_empty() && trim_finder::cleanup_scan::is_drive_relative(target) {
+                unresolved.push(format!("{target}（盘符相对路径，无盘符语义，已拒绝枚举）"));
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("规则 {id}：目标为盘符相对路径（{target}），已拒绝枚举（§4.10）"),
+                );
+            } else if !target.is_empty() && cleanup_root_ok(target) {
                 collect_files(target, "*", true, cutoff, &mut files, &mut too_new);
             } else if !target.is_empty() {
                 // 「根不可用」必须留一个可见的痕迹（2026-10-04 审计 §4.2）。
@@ -1620,6 +1643,51 @@ mod cleanup_engine_contract_tests {
         assert_eq!(d["fileCount"].as_i64(), Some(1), "只应删 1 个: {d}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-10-04 审计 §4.10：盘符相对目标（`\Foo`）不得进删除链——保护闸门
+    /// is_path_protected 对它按 CWD 折叠，而枚举/删除按「当前盘根」解析，两侧
+    /// 比对对象不同（同一字符串两侧算出不同目标）。目录型与 fileKey 型都必须
+    /// 记 unresolved 并显式 skip，不许伪装成「成功 0 删」。
+    #[test]
+    fn 盘符相对目标在执行侧被拒绝并降为skip() {
+        // 目录型条目：path 直指盘符相对形态（刻意用不存在的名字，避免撞上
+        // 当前盘根下的真实目录；判据是拒绝理由，不是存在性）
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"drel","name":"盘符相对探测"
+        }]}]});
+        let items = vec![serde_json::json!({"id":"drel","name":"盘符相对探测","path": r"\trim-drel-exec-no-such-dir"})];
+
+        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        let d = &res.details[0];
+        assert_eq!(
+            d["status"], "skip",
+            "盘符相对目标必须显式 skip（拒绝理由进消息），不是 ok: {d}"
+        );
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("盘符相对"),
+            "拒绝理由必须带「盘符相对」，让 0 命中可对账（§4.10）: {msg}"
+        );
+        assert!(
+            !msg.contains("已清理 0 个文件"),
+            "「已清理 0 个文件」= 假绿成功（P0 纪律明令禁止）: {msg}"
+        );
+
+        // fileKey 型：同样的形态走同一判据（共用 trim_finder::is_drive_relative）
+        let rules_fk = serde_json::json!({"groups":[{"items":[{
+            "id":"drelfk","name":"盘符相对fileKey探测",
+            "fileKeys":[{"path": r"\trim-drel-exec-no-such-dir", "pattern":"*", "recurse":true}]
+        }]}]});
+        let items_fk = vec![serde_json::json!({"id":"drelfk","name":"盘符相对fileKey探测","path": r"\trim-drel-exec-no-such-dir"})];
+        let res_fk = cleanup_execute(&items_fk, &rules_fk, false, false).expect("不应 Err");
+        let dfk = &res_fk.details[0];
+        assert_eq!(dfk["status"], "skip", "fileKey 型盘符相对目标同样必须 skip: {dfk}");
+        let msg_fk = dfk["message"].as_str().unwrap_or("");
+        assert!(
+            msg_fk.contains("盘符相对") || msg_fk.contains("未解析") || msg_fk.contains("不可用"),
+            "fileKey 型拒绝理由必须可见: {msg_fk}"
+        );
     }
 }
 

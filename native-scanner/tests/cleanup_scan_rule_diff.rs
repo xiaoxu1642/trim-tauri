@@ -445,3 +445,27 @@ fn detect_未解析token必须留痕且不改判定() {
     assert!(!hits.contains("a.log"), "detect 不命中时条目不得进命中集（判定语义原样）: {hits:?}");
     fs::remove_dir_all(&root).ok();
 }
+
+/// 2026-10-04 审计 §4.10：盘符相对路径（`\Foo`，多来自 `$env:UNDEF + '\Foo'`）
+/// 必须在共用展开口被拒绝并留痕——Windows 按「当前盘根」枚举它，保护侧按 CWD
+/// 折叠它，同一字符串两侧算出不同目标；「当前盘」是进程 CWD 的偶然属性。
+#[test]
+fn 盘符相对路径在共用展开口被拒绝并留痕() {
+    let root = temp_root("drel");
+    plant(&root, &[("a.log", 10)]);
+
+    // 正向对照：绝对路径的同形态条目照常命中、无 §4.10 留痕
+    let (code0, base, err0) = scan_hits(&root, &rules_json(&root, "*.log", true, ""));
+    assert_eq!(code0, 0, "扫描应正常退出: {err0}");
+    assert!(base.contains("a.log"), "夹具自检：绝对路径必须命中: {base:?}");
+    assert!(!err0.contains("盘符相对"), "绝对路径不得触发盘符相对留痕: {err0}");
+
+    // fileKey 直指盘符相对路径：条目无命中 + stderr 留痕（只留痕不改其余判定）
+    let (code1, hits1, err1) =
+        scan_hits(&root, &rules_json(Path::new(r"\trim-drel-no-such-dir"), "*.log", true, ""));
+    assert_eq!(code1, 0, "扫描应正常退出: {err1}");
+    assert!(hits1.is_empty(), "盘符相对路径不得枚举出任何目标: {hits1:?}");
+    assert!(err1.contains("盘符相对"), "拒绝必须在诊断通道留痕（§4.10）: {err1}");
+
+    fs::remove_dir_all(&root).ok();
+}

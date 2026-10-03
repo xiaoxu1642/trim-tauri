@@ -279,6 +279,24 @@ for (const field of [
   );
 }
 
+// ==================== E11 盘符相对路径的两侧拒斥（2026-10-04 审计 §4.10） ====================
+// `\Foo` 形态（多来自 `$env:UNDEF + '\Foo'`）：Windows 按「当前盘根」枚举/删除它，
+// 保护侧 is_path_protected 按 CWD 折叠它 ⇒ 保护闸门比对的对象 ≠ 实际删除的对象。
+// 修复 = 判据单点化（trim_finder::is_drive_relative）+ 两侧在枚举前统一拒绝。
+// 这里钉判据定义与两侧接线数；行为面由 tests/ 的「盘符相对」用例与执行侧端到端用例承担。
+const e11scan = (cleanRs.match(/is_drive_relative\(/g) || []).length;
+check(
+  /pub fn is_drive_relative\(/.test(cleanRs) && e11scan === 7,
+  'E11a. 判据单点定义 + 扫描侧 6 处接线（expand_glob_dirs 咽喉 / detect 三处 / candidatesPs / pathPs 主路径）',
+  `实际 ${e11scan} 处`,
+);
+const e11exec = (execCleanupRs.match(/is_drive_relative\(/g) || []).length;
+check(
+  e11exec === 2,
+  'E11b. 执行侧 2 处接线（fileKey 分支 / 目录型分支，均在 cleanup_root_ok 之前）',
+  `实际 ${e11exec} 处`,
+);
+
 console.log('');
 if (fail > 0) {
   console.error(`静态留痕断言失败 ${fail} 项。`);
