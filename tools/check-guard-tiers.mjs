@@ -109,7 +109,6 @@ const MUST_MAIN = [
   'optimizer_restore_reg',
   'optimizer_run',
   'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
-  'optimizer_readiness', // E1/E2 态势分：只被主窗优化页顶部消费（D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
   'optimizer_touch_recent', // E10 最近使用写：主窗档
   'optimizer_stale_dismiss', // 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗
   // 'pwsh_prepare' 已于 B11（2026-09-26）整链摘除，不再是一条命令

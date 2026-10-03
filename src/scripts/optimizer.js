@@ -592,6 +592,29 @@
 
   // ==================== 工具 ====================
   function escapeHtml(s) { return window.ds.esc(s); }
+  // ⚠️ 属性位转义**刻意不建本地包装**，直接调 window.ds.escAttr（AGENTS §2：
+  // 「新代码禁止再定义本地 escapeHtml/escapeAttr」；check-escape-delegation 的
+  // 总数棘轮也只许递减）。
+  //
+  // 这里曾经**既没有包装也没有调用方定义** —— 逐项勾选弹窗在拼 data-pick 属性时
+  // 调了 escapeAttr(...)，IIFE + 'use strict' 下那是 ReferenceError，且异常发生在
+  // `bodyHtml` 构造阶段（早于 modal.create），于是「点立即执行」表现为
+  // **详情弹窗已关、勾选框没出现、什么提示都没有**。
+  // 证据：%APPDATA%\com.xiaoxu.trim\logs\app-2026-10-04.log 里两条
+  // 「渲染层未处理的 Promise 拒绝：escapeAttr is not defined」。
+  // 回归网见 optimizer/contract_tests.rs 的「渲染层转义函数必须都能解析到定义」。
+
+  /**
+   * 这一项有没有「逐项选择」界面。
+   *
+   * ⚠️ 必须**单一判据**：入口条显隐（详情弹窗）与「点立即执行时要不要弹勾选框」
+   * （runBtn）以前各写一遍 `o.subitems && …items.length`。两处一旦漂移，症状是
+   * 「界面上根本没有逐项选择入口，但点执行会弹一个空勾选框」或反过来 ——
+   * 前者用户以为功能没有，后者以为界面坏了。合成一个函数后无漂移可言。
+   */
+  function hasSubitemPick(o) {
+    return !!(o && o.subitems && Array.isArray(o.subitems.items) && o.subitems.items.length);
+  }
 
   /**
    * 逐项选择独立弹窗（2026-10-03 用户裁定形态：点「立即执行」后弹出，不内嵌在详情里）。
@@ -617,15 +640,22 @@
     const targets = new Set(pre.targets);
     const pickedExtras = new Set(pre.extras);
 
+    // 自绘勾选框的三个必备属性（AGENTS §2）：`role=checkbox` 让辅助技术读得出这是勾选框、
+    // `tabindex="0"` 让它可聚焦、`aria-checked` 让状态可读。三者缺一，键盘用户
+    // 就既看不到也摸不到这个控件 —— 而本清单动辄 70 项，鼠标逐个点是主要交互方式。
     const rowHtml = (it) => `
       <label class="pick-row">
-        <span class="checkbox pick-box${targets.has(it.value) ? ' checked' : ''}" data-pick="${escapeAttr(it.value)}"></span>
+        <span class="checkbox pick-box${targets.has(it.value) ? ' checked' : ''}" role="checkbox" tabindex="0"
+              aria-checked="${targets.has(it.value) ? 'true' : 'false'}"
+              data-pick="${window.ds.escAttr(it.value)}"></span>
         <span class="pick-name">${escapeHtml(it.value)}</span>
         <span class="pick-note">${escapeHtml(it.note)}</span>
       </label>`;
     const extraHtml = extras.map(ex => `
       <label class="pick-row pick-row-extra">
-        <span class="checkbox pick-extra-box${pickedExtras.has(ex.id) ? ' checked' : ''}" data-pick-extra="${escapeAttr(ex.id)}"></span>
+        <span class="checkbox pick-extra-box${pickedExtras.has(ex.id) ? ' checked' : ''}" role="checkbox" tabindex="0"
+              aria-checked="${pickedExtras.has(ex.id) ? 'true' : 'false'}"
+              data-pick-extra="${window.ds.escAttr(ex.id)}"></span>
         <span class="pick-name">${escapeHtml(ex.label)}</span>
         <span class="pick-note">${escapeHtml(ex.note)}</span>
       </label>`).join('');
@@ -636,9 +666,9 @@
         <span class="pick-summary-hint">${escapeHtml(hint)}</span>
       </div>
       <div class="pick-toolbar">
-        <button class="btn btn-secondary btn-sm" type="button" data-pick-all>全选</button>
-        <button class="btn btn-secondary btn-sm" type="button" data-pick-none>全不选</button>
-        <button class="btn btn-secondary btn-sm" type="button" data-pick-invert>反选</button>
+        <button class="btn btn-secondary btn-small" type="button" data-pick-all>全选</button>
+        <button class="btn btn-secondary btn-small" type="button" data-pick-none>全不选</button>
+        <button class="btn btn-secondary btn-small" type="button" data-pick-invert>反选</button>
       </div>
       <div class="pick-list">${items.map(rowHtml).join('')}</div>
       ${extras.length ? `<div class="pick-extras"><div class="pick-extras-title">附带操作（默认不执行）</div>${extraHtml}</div>` : ''}`;
@@ -663,15 +693,29 @@
       const $ = (s) => ctrl.modal.querySelector(s);
       const counter = $('[data-pick-count]');
       const syncCount = () => {
-        counter.textContent = `将执行 ${targets.size} / ${all.length} 项`;
+        const tail = extras.length
+          ? `，附带操作 ${pickedExtras.size} / ${extras.length} 项`
+          : '';
+        counter.textContent = `将执行 ${targets.size} / ${all.length} 项${tail}`;
         // 全不选时禁用确认按钮：让「至少选一项」在按钮态上就说清楚，
         // 而不是点了才 toast 一句又什么都不发生。
         $('[data-pick-ok]').disabled = targets.size === 0;
       };
+      // 勾选态回写三处（class / aria-checked / 集合）——只改 class 的话屏幕阅读器
+      // 读到的永远是「未勾选」，用户会以为自己没点上而反复点。
+      const setTarget = (box, v, on) => {
+        if (on) targets.add(v); else targets.delete(v);
+        box.classList.toggle('checked', on);
+        box.setAttribute('aria-checked', on ? 'true' : 'false');
+      };
+      const setExtra = (box, id, on) => {
+        if (on) pickedExtras.add(id); else pickedExtras.delete(id);
+        box.classList.toggle('checked', on);
+        box.setAttribute('aria-checked', on ? 'true' : 'false');
+      };
       const paint = () => {
-        ctrl.modal.querySelectorAll('.pick-box').forEach(b => {
-          b.classList.toggle('checked', targets.has(b.dataset.pick));
-        });
+        ctrl.modal.querySelectorAll('.pick-box').forEach(b => setTarget(b, b.dataset.pick, targets.has(b.dataset.pick)));
+        ctrl.modal.querySelectorAll('.pick-extra-box').forEach(b => setExtra(b, b.dataset.pickExtra, pickedExtras.has(b.dataset.pickExtra)));
         syncCount();
       };
 
@@ -682,14 +726,39 @@
         all.forEach(v => { if (targets.has(v)) targets.delete(v); else targets.add(v); });
         paint();
       });
-      $('.pick-list').addEventListener('click', (e) => {
-        const box = e.target.closest('.pick-box');
+
+      // 清单与附带开关共用一套「点击 + Enter/Space」的处理器（委托到两个容器）。
+      //
+      // 为什么必须分两处而不合并成一个容器：附带开关在 `extras.length === 0` 时
+      // **整个区块不渲染**，绑到不存在的节点上会在构造期抛 TypeError ——
+      // 那正是「点立即执行毫无反应」的同款形态（见 escapeAttr 那条注释）。
+      //
+      // keydown 分支：Enter / Space 与 click 走同一条 toggle 路径，Space 额外
+      // preventDefault 防页面滚动（AGENTS §2 自绘控件键盘路径）。
+      const onPick = (e) => {
+        const box = e.target.closest('.pick-box, .pick-extra-box');
         if (!box) return;
-        const v = box.dataset.pick;
-        if (targets.has(v)) targets.delete(v); else targets.add(v);
-        box.classList.toggle('checked', targets.has(v));
+        if (e.type === 'keydown') {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+        }
+        if (box.dataset.pickExtra !== undefined) {
+          const id = box.dataset.pickExtra;
+          setExtra(box, id, !pickedExtras.has(id));
+        } else {
+          const v = box.dataset.pick;
+          setTarget(box, v, !targets.has(v));
+        }
         syncCount();
-      });
+      };
+      $('.pick-list').addEventListener('click', onPick);
+      $('.pick-list').addEventListener('keydown', onPick);
+      const extrasBox = $('.pick-extras');
+      if (extrasBox) {
+        extrasBox.addEventListener('click', onPick);
+        extrasBox.addEventListener('keydown', onPick);
+      }
+
       $('[data-pick-ok]').addEventListener('click', () => {
         if (targets.size === 0) {
           window.app?.toast('warning', '一个目标都没勾选，请至少勾选一项后再执行');
@@ -778,48 +847,6 @@
   }
 
   // 渲染分类分段栏（按 OPT_CATEGORIES 生成，含侧边栏旧版未展示的分类）
-  // ==================== E1/E2 态势分渲染 ====================
-  //
-  // 判据（5 分类权重、加权公式、空分类返回 100）在 Rust 侧 readiness_score ——
-  // **这里只画，不算**。理由：判据必须在**一处**才能被单测与门禁机械复核；
-  // 前端再算一遍就是两份判据，漂移后界面照常显示，只是数字错了。
-  //
-  // 图例色板走 CSS 变量（内联 style），不在JS 里硬编码色值 —— AGENTS §2 离表色禁令。
-  const READINESS_LEGEND = [
-    { key: 'risky', label: '高危未确认', color: 'var(--danger)' },
-    { key: 'partial', label: '部分应用', color: 'var(--warning)' },
-    { key: 'untouched', label: '未动', color: 'var(--accent)' },
-    { key: 'unknown', label: '测不了', color: 'var(--fg-tertiary)' },
-    { key: 'applied', label: '已应用', color: 'var(--success)' }
-  ];
-  const READINESS_R = 18;             // 与 index.html 里 circle 的 r 一致
-  const READINESS_C = 2 * Math.PI * READINESS_R;
-  const READINESS_BANDS = [[80, 'high'], [50, 'mid'], [0, 'low']];
-
-  function renderReadiness(d) {
-    const box = document.getElementById('optReadiness');
-    if (!box || !d || typeof d.score !== 'number') return;
-    box.hidden = false;
-    const numEl = document.getElementById('optReadinessNum');
-    const arcEl = document.getElementById('optReadinessArc');
-    if (numEl) numEl.textContent = String(d.score);
-    if (arcEl) {
-      // 零依赖画环：stroke-dasharray 的实线段 = 分数占比（E1 要求不引图表库）
-      const frac = Math.max(0, Math.min(100, d.score)) / 100;
-      arcEl.setAttribute('stroke-dasharray', (READINESS_C * frac).toFixed(2) + ' ' + READINESS_C.toFixed(2));
-    }
-    // 分档只影响语义色（绿/琥珀/红），阈值显式声明以便门禁对拍
-    const band = (READINESS_BANDS.find(([lo]) => d.score >= lo) || [0, 'low'])[1];
-    box.setAttribute('data-band', band);
-    const lg = document.getElementById('optReadinessLegend');
-    if (lg) {
-      lg.innerHTML = READINESS_LEGEND
-        .filter(row => Number(d[row.key] || 0) > 0)
-        .map(row => '<li><span class="opt-readiness-dot" style="background:' + row.color + '"></span>' + escapeHtml(row.label) + ' ' + Number(d[row.key] || 0) + '</li>')
-        .join('');
-    }
-  }
-
   function renderCatNav() {
     const nav = document.getElementById('optimizerCatNav');
     if (!nav) return;
@@ -1399,31 +1426,44 @@
     // 内嵌版藏在详情弹窗下方要滚动才看到，用户反馈「弹窗没有出现」，
     // 而且它逼着详情弹窗一直开着，好与高危确认框叠在一起互相抢焦点。
     const pickState = { targets: new Set(), extras: new Set(), all: [] };
-    if (o.subitems && Array.isArray(o.subitems.items) && o.subitems.items.length) {
-      const sec = $('.opt-pick-section');
-      sec.style.display = '';
-      $('.opt-pick-title').textContent = o.subitems.label || '逐项选择';
-      // 「还有 N 个没有单独说明」必须如实说：清单里没登记解释的目标不列出来，
-      // 不说的话用户会以为「全选」就是这 M 项。
-      const un = Number(o.subitems.unexplained) || 0;
-      o.subitems.items.forEach(it => { pickState.targets.add(it.value); pickState.all.push(it.value); });
-      const openBtn = $('.opt-pick-open');
-      const paintEntry = () => {
-        openBtn.textContent = `逐项选择要执行的目标…（已选 ${pickState.targets.size} / ${pickState.all.length} 项）`;
-      };
-      $('.opt-pick-hint').textContent = (o.subitems.hint || '')
-        + (un > 0 ? `（另有 ${un} 个目标未单独列出说明，全选时仍会执行。）` : '')
-        + '点击下方按钮逐项确认。';
-      // 入口按钮：就地预览勾选（预览不改执行语义，只让用户先看清范围）。
-      // 与「立即执行」里那一次是同一个弹窗、同一份状态，不会出现两处结论。
-      openBtn.addEventListener('click', async () => {
-        const r = await confirmSubitemPick(o, pickState);
-        if (!r) return;
-        pickState.targets = new Set(r.targets);
-        pickState.extras = new Set(r.extras);
+    if (hasSubitemPick(o)) {
+      // ⚠️ 这一段只负责「入口条」的装饰与预览，**主按钮的绑定在它后面**。
+      // 以前这里是裸代码：`$('.opt-pick-section').style.display = ''` 一旦因为
+      // 模板与选择器漂移拿到 null，异常会一路冒到 openModal 末尾，
+      // 于是「立即执行」按钮**连监听器都没绑上** —— 点了毫无反应、连日志都只有
+      // 一行未处理拒绝（与 escapeAttr 同款形态，同一份「静默失效」家族）。
+      // 装饰性代码不许有能力杀掉主流程，所以整段兜 try/catch 并写日志。
+      try {
+        $('.opt-pick-section').style.display = '';
+        $('.opt-pick-title').textContent = o.subitems.label || '逐项选择';
+        // 「还有 N 个没有单独说明」必须如实说：清单里没登记解释的目标不列出来，
+        // 不说的话用户会以为「全选」就是这 M 项。
+        const un = Number(o.subitems.unexplained) || 0;
+        o.subitems.items.forEach(it => { pickState.targets.add(it.value); pickState.all.push(it.value); });
+        const openBtn = $('.opt-pick-open');
+        const paintEntry = () => {
+          openBtn.textContent = `逐项选择要执行的目标…（已选 ${pickState.targets.size} / ${pickState.all.length} 项）`;
+        };
+        $('.opt-pick-hint').textContent = (o.subitems.hint || '')
+          + (un > 0 ? `（另有 ${un} 个目标未单独列出说明，全选时仍会执行。）` : '')
+          + '点击下方按钮逐项确认。';
+        // 入口按钮：就地预览勾选（预览不改执行语义，只让用户先看清范围）。
+        // 与「立即执行」里那一次是同一个弹窗、同一份状态，不会出现两处结论。
+        openBtn.addEventListener('click', async () => {
+          const r = await confirmSubitemPick(o, pickState).catch(() => null);
+          if (!r) return;
+          pickState.targets = new Set(r.targets);
+          pickState.extras = new Set(r.extras);
+          paintEntry();
+        });
         paintEntry();
-      });
-      paintEntry();
+      } catch (e) {
+        // 入口条画不出来**不许**连带「立即执行」失效：清空 targets 让它退回
+        // 「未指定子集 = 全选」的既有语义（与 v0.5.6 上线前的行为一致），
+        // 逐项勾选仍会在点「立即执行」时以独立弹窗形态出现（它不依赖本区块）。
+        pickState.targets.clear();
+        window.app?.log?.('warn', `逐项选择入口条渲染失败（该项将按全选执行）: ${(e && e.message) || e}`);
+      }
     }
 
     // 安全兜底：已优化项「立即执行」→「立即恢复」；无法推理还原操作时按钮置灰。
@@ -1570,7 +1610,7 @@
         const selEl = optModal?.modal?.querySelector('.opt-dyn-select');
         preCloseRaw = selEl ? selEl.value : dynCtl.defaultValue;
       }
-      const prePick = opt.subitems
+      const prePick = hasSubitemPick(opt)
         ? {
             targets: new Set(pickState.targets),
             extras: new Set(pickState.extras),
@@ -2275,13 +2315,11 @@
         : Promise.resolve(null);
       // E7：先取分类侧表，再取目录 —— 渲染要用分组口径决定每项归到哪个看板。
       // 两条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
-      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(), window.api.optimizer.readiness()])
-        .then(([dt, res, gs, rd]) => {
+      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups()])
+        .then(([dt, res, gs]) => {
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
-        // E1/E2：态势分取数失败不阻塞目录渲染（盒子保持 hidden）
-        if (rd && rd.success) renderReadiness(rd.data);
         if (res && res.success && Array.isArray(res.data)) {
           OPTIONS = filterByDiskType(res.data);
           activeCategory = getSavedCategory();

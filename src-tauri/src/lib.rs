@@ -434,7 +434,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::optimizer::optimizer_state_overview,
         commands::optimizer::optimizer_stale_dismiss,
         commands::optimizer::optimizer_list_groups,
-        commands::optimizer::optimizer_readiness,
         commands::optimizer::optimizer_touch_recent,
         commands::optimizer::optimizer_svc_mem_current,
         commands::optimizer::optimizer_backup_reg,

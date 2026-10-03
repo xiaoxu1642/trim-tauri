@@ -219,7 +219,6 @@
     'optimizer:state-overview': 'optimizer_state_overview',
     'optimizer:stale-dismiss': 'optimizer_stale_dismiss',
     'optimizer:list-groups': 'optimizer_list_groups',
-    'optimizer:readiness': 'optimizer_readiness',
     'optimizer:touch-recent': 'optimizer_touch_recent',
     // system / startup（5）
     'system:disk-type': 'system_disk_type',
@@ -667,7 +666,6 @@
       stateOverview: function () { return invokeChannel('optimizer:state-overview'); },
       staleDismiss: function (ids) { return invokeChannel('optimizer:stale-dismiss', { ids: ids }); },
       listGroups: function () { return invokeChannel('optimizer:list-groups'); },
-      readiness: function () { return invokeChannel('optimizer:readiness'); },
       touchRecent: function (optionId) { return invokeChannel('optimizer:touch-recent', { optionId: optionId }); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }
     },

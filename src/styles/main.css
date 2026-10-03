@@ -2955,54 +2955,71 @@ select.field-input { cursor: pointer; appearance: auto; }
 /* ---------- 逐项选择区（2026-10-03，批量项可自选目标）----------
    为什么不复用 .opt-choice-*（虚拟合集卡那套单选）：那套是「**互斥单选**」，
    这里要的是「**多选**」，语义不同。复用一个 radio 样式的类去做 checkbox 是
-   拿视觉骗语义，键盘与读屏行为都会不对。行样式另起一套，但复用了 .checkbox 件。 */
+   拿视觉骗语义，键盘与读屏行为都会不对。行样式另起一套，但复用了 .checkbox 件。
+
+   ⚠️ 2026-10-04：勾选区已从「详情弹窗内嵌」搬成**独立弹窗**（optimizer.js 的
+   confirmSubitemPick），类名随之从 `opt-pick-` 前缀改成 `pick-` 前缀。原先内嵌版的
+   bar / all / none / count / list / row / name / note / extras 九条规则随之
+   全部变成死规则（grep 全仓无引用），已在本段替换为独立弹窗真正使用的 `pick-` 系列。
+   下面只保留三条**详情弹窗入口条仍在用**的规则：section / title / hint。 */
 .opt-pick-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
 .opt-pick-title { display: flex; align-items: center; gap: 6px; }
-.opt-pick-bar {
-  display: flex; align-items: center; gap: 16px;
-  margin: 8px 0 6px;
-}
-.opt-pick-all, .opt-pick-none {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: var(--fs-meta); color: var(--fg-secondary);
-  cursor: pointer; user-select: none;
-}
-/* 审查 M-13（2026-10-03 L4）：hover 前景原为 --accent-text（实底专用墨色），
-   在透明底（页面底）上暗 1.03/亮 1.07:1 不可见；accent on 页面底 5.75/4.96:1 */
-.opt-pick-all:hover, .opt-pick-none:hover { color: var(--accent); }
-.opt-pick-count { margin-left: auto; font-size: var(--fs-meta); color: var(--fg-tertiary); }
 .opt-pick-hint { margin: 0 0 8px; font-size: var(--fs-meta); color: var(--fg-tertiary); line-height: 1.55; }
-.opt-pick-list {
-  display: flex; flex-direction: column; gap: 2px;
+
+/* ---------- 逐项选择弹窗（optimizer.js::confirmSubitemPick）----------
+   顶部摘要条 → 工具条（全选/全不选/反选）→ 限高滚动的清单 → 默认关闭的附带开关。
+   圆角只用既有档位（small 6 / badge）；配色全走 token（AGENTS §2 离表色禁令）。 */
+.usage-body.pick-body { display: flex; flex-direction: column; gap: 12px; }
+.pick-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--accent-soft);
+  border-radius: var(--radius-small);
+}
+.pick-summary-num { font-size: var(--fs-body); font-weight: 600; color: var(--fg-primary); }
+.pick-summary-hint { font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.55; }
+.pick-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   /* 70 项全展开会把弹窗撑到几千像素：限高 + 内部滚动。
      刻意不虚拟滚动 —— 一次性渲染 70 个 label 的开销可忽略，
      而虚拟列表会让「勾选状态 ↔ DOM 位置」的对应关系变脆。 */
-  max-height: 260px; overflow-y: auto;
+  max-height: 300px;
+  overflow-y: auto;
   padding: 2px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-small);
   background: var(--bg-card-hover);
 }
-.opt-pick-row {
+.pick-row {
   display: grid;
   grid-template-columns: 16px minmax(96px, auto) minmax(0, 1fr);
-  align-items: baseline; gap: 8px;
+  align-items: baseline;
+  gap: 8px;
   padding: 5px 6px;
   border-radius: var(--radius-small);
   cursor: pointer;
 }
-.opt-pick-row:hover { background: var(--accent-light); }
-.opt-pick-name {
+.pick-row:hover { background: var(--accent-light); }
+/* 焦点圈必须画在**行**上而不是 .checkbox 上：自绘勾选框只有 16px 宽，
+   焦点圈会被相邻行盖掉，键盘用户看不出焦点落在哪一行（AGENTS §2 键盘可达）。 */
+.pick-row:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pick-name {
   font-family: var(--font-mono, ui-monospace, Consolas, monospace);
-  font-size: var(--fs-meta); font-weight: 600;
+  font-size: var(--fs-meta);
+  font-weight: 600;
   color: var(--fg-primary);
   word-break: break-all;
 }
-.opt-pick-note { font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.5; }
-.opt-pick-extras { margin-top: 10px; }
-.opt-pick-extras-title { font-size: var(--fs-meta); font-weight: 600; color: var(--fg-secondary); margin-bottom: 4px; }
+.pick-note { font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.5; }
+.pick-extras { margin-top: 4px; }
+.pick-extras-title { font-size: var(--fs-meta); font-weight: 600; color: var(--fg-secondary); margin-bottom: 4px; }
 /* 附带操作整体比清单淡一档：它默认不执行，是「额外加码」而非「这项本来就会做的事」 */
-.opt-pick-row-extra .opt-pick-name { font-family: inherit; color: var(--fg-secondary); }
+.pick-row-extra .pick-name { font-family: inherit; color: var(--fg-secondary); }
 /* ---------- 执行前「先做选择」窗（虚拟合集卡 / dynamic 项共用）----------
    单选行复用 .model-picker-* 现成件（AGENTS §2：新交互先查 ds 有没有现成件），
    这里只补分组标题、说明与日期副行。 */
@@ -6550,78 +6567,6 @@ body.pv-window {
   .ctx-apply-bar,
   .ctx-mode-card,
   .ctx-blocked-row { transition: none !important; }
-}
-
-/* ==================== E1/E2 优化态势分 ==================== */
-/* 5 分类加权环 + 图例。零依赖：SVG circle 的 stroke-dasharray（不引图表库）。
-   判据在 Rust 侧 readiness_score（可单测），本段只负责画。
-
-   配色纪律：环与图例**全部走 token**，不写死 hex（AGENTS §2 离表色禁令）。
-   圆角按既有档位：环用 --radius-btn（8），图例项用 --radius-badge（4）。 */
-.opt-readiness {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 8px 0 4px;
-  padding: 10px 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-medium);
-}
-.opt-readiness-ring {
-  position: relative;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 auto;
-}
-.opt-readiness-track {
-  stroke: var(--border-subtle);
-  stroke-width: 4;
-}
-.opt-readiness-arc {
-  /* 前景色走 token：分数越高越绿（--success），越低越警示（--warning）。
-     固定一个色而不用渐变 —— 渐变会把「多少分」的信息编码成色相，
-     而那个信息已经由数字给出（opt-readiness-num），重复编码反而难读。 */
-  stroke: var(--success);
-  stroke-width: 4;
-  transition: stroke-dasharray 0.25s var(--ease-standard);
-}
-.opt-readiness[data-band="mid"] .opt-readiness-arc { stroke: var(--warning); }
-.opt-readiness[data-band="low"] .opt-readiness-arc { stroke: var(--danger); }
-.opt-readiness-num {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg-primary);
-  font-variant-numeric: tabular-nums;
-}
-.opt-readiness-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.opt-readiness-legend li {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--fg-secondary);
-}
-.opt-readiness-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-badge);
-  /* 图例点色由 JS 按分类内联 background（走 inline style 的token 值），
-     不用 var(--legend-color) —— 那个自定义属性在 CSS 里无定义面。 */
-  background: var(--accent);
-  flex: 0 0 auto;
 }
 
 .opt-kanban,
