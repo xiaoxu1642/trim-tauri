@@ -180,6 +180,274 @@ use super::state::*;
         }
     }
 
+    /// 剥掉 Rust 行注释与块注释（保留换行）。
+    ///
+    /// 为什么本文件需要它：下面几条判据是**读源码形态**的，而源码里大量注释会
+    /// 复述被禁的写法本身（我自己在写 §3.6 那条的注释时就踩了一次：
+    /// 注释里的 `to_recycle.unwrap_or(false)` 被自己的断言抓到，假红）。
+    /// 「注释里写了被禁写法」从来不是缺陷，只有真实代码里写了才是。
+    fn strip_rust_comments(src: &str) -> String {
+        let blank = |m: &str| m.replace(|c: char| c != '\n', " ");
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        loop {
+            let b = rest.find("/*");
+            let l = rest.find("//");
+            match (b, l) {
+                (Some(bi), Some(li)) if bi < li => {
+                    out.push_str(&rest[..bi]);
+                    match rest[bi..].find("*/") {
+                        Some(e) => {
+                            out.push_str(&blank(&rest[bi..bi + e + 2]));
+                            rest = &rest[bi + e + 2..];
+                        }
+                        None => {
+                            out.push_str(&blank(&rest[bi..]));
+                            break;
+                        }
+                    }
+                }
+                (_, Some(li)) => {
+                    out.push_str(&rest[..li]);
+                    match rest[li..].find('\n') {
+                        Some(e) => {
+                            out.push_str(&blank(&rest[li..li + e]));
+                            out.push('\n');
+                            rest = &rest[li + e + 1..];
+                        }
+                        None => {
+                            out.push_str(&blank(&rest[li..]));
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    out.push_str(rest);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// 2026-10-04 磁盘清理审计 §3.6：v3.3.0「常规清理固定永久删」必须钉在删除发生处。
+    ///
+    /// 原实现 `let to_recycle = to_recycle.unwrap_or(false);` —— 裁定只在渲染层
+    /// （`cleanup.js` 的 `const toRecycle = false;`）强制，命令侧任何传 `true` 的
+    /// 调用方都能翻转。翻转的后果不是「换个删法」，而是给不可逆的
+    /// `cleanup:retry-failed-delete` 喂数据（`TRASH_FAILURES` 的唯一来源）。
+    ///
+    /// 判据是**赋值形态**而不是运行结果：`unwrap_or(false)` 与 `= false` 在
+    /// 「调用方传 false」时行为完全一样，只有读源码分得开 —— 所以这条必须断源码。
+    #[test]
+    fn 常规清理的永久删裁定钉在命令侧() {
+        let code = strip_rust_comments(include_str!("scan_execute.rs"));
+        // ① 命令体内不得再出现「把渲染层参数解包成运行开关」的形态
+        assert!(
+            !code.contains("to_recycle.unwrap_or("),
+            "cleanup_execute 又把渲染层的 to_recycle 解包成运行开关 —— \
+             v3.3.0 裁定只在本仓 JS 层强制时是「任何调用方都能翻转永久删」；\
+             正确形态是命令体内 `let to_recycle = false;`"
+        );
+        // ② 必须存在那句钉死（否则 ① 可能被改成别的形状而失去等价语义）
+        assert!(
+            code.contains("let to_recycle = false;"),
+            "命令体内找不到 `let to_recycle = false;` —— 永久删裁定没有被钉在删除发生处"
+        );
+        // ③ 回收站分支必须挂 debug_assert，让「恒不可达」写进可验位置：
+        //    有人把 to_recycle 改回变量时 debug 构建立刻响，而不是等真跑到线上。
+        assert!(
+            code.contains("debug_assert!(!to_recycle"),
+            "回收站分支没有 debug_assert 标注恒不可达 —— 该分支看起来像活代码，\
+         下次「顺手恢复回收站优先」的人不会知道自己踩的是 v3.3.0 裁定"
+        );
+        // ④ 渲染层那一侧也钉住：固定值不能被改成跟着用户勾选走
+        let js = include_str!("../../../../src/scripts/cleanup.js");
+        assert!(
+            js.contains("const toRecycle = false;"),
+            "cleanup.js 的 toRecycle 不再是固定 false —— 常规清理固定永久删是 v3.3.0 用户裁定"
+        );
+    }
+
+    /// 2026-10-04 磁盘清理审计 §4.6：契约表查询不许有「取不到就挑个默认值」的形态。
+    ///
+    /// 契约表 `engine/rule_schema.rs` 头上声明的是 fail-closed：「所有校验器拿到
+    /// `None` 都必须整包拒绝」。而 `validate_cleanup_package` 此前 19 处查询里有
+    /// 17 处 `unwrap_or(empty.clone())`、6 处 `unwrap_or(0)` —— 声明与实现相反。
+    ///
+    /// 多数默认值**碰巧**也是 fail-closed（空 `itemFields` 会让未知字段检查拒掉
+    /// 每一条），所以表整体坏掉时看起来仍然安全 —— 这正是它能活这么久的原因。
+    /// 但两条不是，而它们恰好是最要命的护栏：
+    ///   · `positiveIntFields` 变空 ⇒ `minAgeHours/minAgeDays` 不再要求正整数，
+    ///     扫描侧把 `minAgeHours: -5` 当「未声明」⇒ **minAge 护栏静默消失**，
+    ///     刚创建的文件变可删；
+    ///   · `exclusiveNumericFields` 变空 ⇒ 双声明时扫描侧按「未声明」处理
+    ///     （完全没有护栏）、执行侧按 `max()` 取 —— 正是代码注释警告的分叉。
+    ///
+    /// 判据是**结构形态**而不是运行结果：默认值选得对不对，行为上可能与整包拒绝
+    /// 无法区分（这正是问题），只有读源码分得开。
+    #[test]
+    fn 契约表查询一律走_req_不许挑默认值() {
+        let code = strip_rust_comments(include_str!("rules.rs"));
+        // ① 契约表查询不许直接 unwrap_or
+        for line in code.lines() {
+            let l = line.trim();
+            if !l.contains("rule_schema::") {
+                continue;
+            }
+            assert!(
+                !l.contains("unwrap_or("),
+                "契约表查询又出现了 unwrap_or（取不到就挑默认值，违反 fail-closed 声明）: {l}"
+            );
+        }
+        // ② 必须走那两个 helper（缺席/无调用方 = 有人绕开它们自己查表）
+        assert!(code.contains("fn req_list("), "缺少 req_list —— 契约表字符串数组查询的统一入口不见了");
+        assert!(code.contains("fn req_number("), "缺少 req_number —— 契约表数值查询的统一入口不见了");
+        for (helper, exact, what) in [
+            ("req_list", 21usize, "字符串数组类查询（字段白名单 / 必填集 / 枚举）"),
+            ("req_number", 9usize, "数值类查询（上限与权重）"),
+        ] {
+            let calls = code.matches(&format!("{helper}(\"cleanup\", ")).count();
+            assert_eq!(
+                calls, exact,
+                "{helper} 的调用方是 {calls} 个，与本清单登记的 {exact} 个不符（{what}）。\
+                 两种可能都要人工确认：① 新增了契约表查询 —— 请同步 tools/rule-schema.json \
+                 与 engine/rule_schema.rs 的 `清理域被查询的每个契约键都存在`，并把这里的数字 \
+                 改成新值；② 有查询被改回直接 rule_schema:: 读表 —— 那就是 fail-open 回潮，\
+                 必须走 {helper}。"
+            );
+        }
+        // ③ 两个 helper 自身必须是「取不到即 Err」，不能再有默认值分支
+        for helper in ["fn req_list(", "fn req_number("] {
+            let at = code.find(helper).expect("刚断言过存在");
+            let body = &code[at..];
+            // 花括号配平取函数体（在已剥注释的文本上做，字符串里的大括号不会截断）
+            let start = body.find('{').expect("函数体缺 {");
+            let mut depth = 0usize;
+            let mut end = body.len();
+            for (i, c) in body[start..].char_indices() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + i;
+                        break;
+                    }
+                }
+            }
+            let fbody = &body[..end];
+            assert!(
+                !fbody.contains("unwrap_or"),
+                "{helper} 内部又出现默认值分支（fail-closed 声明被架空）: {fbody}"
+            );
+            assert!(
+                fbody.contains("ok_or_else"),
+                "{helper} 内部没有 ok_or_else —— 取不到时不是整包拒绝: {fbody}"
+            );
+        }
+        // ④ 关键：那两个护栏键在契约表里必须**非空**（空数组比缺键更隐蔽，
+        //    `rule_schema::list` 返回 Some(空 vec)，`is_some()` 照样过）
+        for (key, why) in [
+            ("positiveIntFields", "minAge 护栏（minAgeHours/minAgeDays 必须是正整数）"),
+            ("exclusiveNumericFields", "双声明互斥（扫描/执行两侧不得对同一份规则给出不同护栏）"),
+            ("nonEmptyArrayFields", "非空数组约束"),
+        ] {
+            let v = crate::engine::rule_schema::list("cleanup", key).unwrap_or_default();
+            assert!(!v.is_empty(), "cleanup.{key} 为空数组 —— {why} 形同虚设");
+        }
+    }
+
+    /// 2026-10-04 磁盘清理审计 §3.2：扫描成功路径必须留痕。
+    /// 引擎把「变量未解析 / pathPs 被拒 / 深度上限 / 跳过 junction」全部写到 stderr，
+    /// 而命令侧此前**只在退出码非 0 时读它** —— 成功路径直接丢弃。偏偏「扫描成功
+    /// 但某个条目空」只发生在成功路径，于是引擎自述「供对账用的通道」在对账最需要的
+    /// 时刻是关的。这条断「成功路径也读 stderr」这个形态。
+    #[test]
+    fn 扫描成功路径也记留痕() {
+        let code = strip_rust_comments(include_str!("scan_execute.rs"));
+        assert!(
+            code.contains("清理扫描留痕"),
+            "扫描成功路径没有写留痕日志 —— 「有条目但一个文件都没扫到」这类问题将无迹可查"
+        );
+        // 且必须记 warn 而不是 error：这些不是失败，是「已按规则降级并留痕」。
+        // 记成 error 会把正常降级刷成故障，真出故障时反而被淹。
+        assert!(
+            code.contains("\"warn\", &format!(\"清理扫描留痕"),
+            "扫描留痕应记 warn（降级留痕 ≠ 失败）"
+        );
+        // 空 stderr 是绝大多数扫描的常态，不要为它写一行日志
+        assert!(
+            code.contains("if !stderr.trim().is_empty()"),
+            "扫描留痕没有空串守卫 —— 正常扫描也会每次写一条空日志"
+        );
+        // 原先那个恒假的 `if code != 0`（块内已 return）必须已被删掉：
+        // 它让 `code` 在块外留一个看似有意义的绑定，掩盖「成功路径无人读 stderr」这件事。
+        assert!(
+            !code.contains("扫描失败: {}"),
+            "scan_execute 里又出现了块外那个恒假的 `if code != 0`（块内已 return）"
+        );
+    }
+
+    /// 2026-10-04 磁盘清理审计 §3.1：规则侧不许出现设备/verbatim 路径前缀。
+    ///
+    /// 为什么必须在**装载端**拦（而不是只靠 `engine::protect`）：设备路径目标在
+    /// 扫描侧会被当成合法路径枚举与计数，在执行侧又过不了保护判定 ——
+    /// 净效果是「有条目、体积也报出来了，清理完什么都没释放」，用户无从判断。
+    /// 同一条链的另一头是 `paths_save`：存进来的值会被原样采纳成条目 path，
+    /// 那条入口的闸门在 `commands/paths.rs::path_value_problem`（同批新增）。
+    ///
+    /// ⚠️ 写这条用例时踩到的一件事，值得留在断言里：**`\\?\` 与 `\??\` 早就被
+    /// 原有那条「含 `?` 通配」检查拒掉了**（两个前缀自身含 `?`）。也就是说
+    /// §3.1 里真正漏网的只有 `\\.\`（不含 `?`）。但「被拒」不等于「对」——
+    /// 原理由把一个安全语义问题报成 glob 能力问题，排查会被引到 `expand_glob_dirs`
+    /// 上去、找不到真正的防线。所以下面逐条断**理由**，不只是断「被拒」。
+    #[test]
+    fn 清理语义校验_设备路径前缀不许进规则库() {
+        // ① 设备路径：三个形态各钉一条，且理由必须指向「设备路径」
+        for bad in [r"\\.\C:\Windows\Temp", r"\??\C:\Windows\Temp", r"\\.\PIPE\foo"] {
+            let mut t = ok_item();
+            t["fileKeys"] = json!([{ "path": bad, "pattern": "*", "recurse": true }]);
+            expect_reject(t, "设备路径");
+        }
+        // ② `\\?\` 长路径前缀：合法但执行侧不支持，理由不许再被报成「含 ? 通配」
+        let mut t = ok_item();
+        t["fileKeys"] = json!([{ "path": r"\\?\C:\Users\tester\AppData\Local\TrimTest", "pattern": "*", "recurse": true }]);
+        expect_reject(t.clone(), "长路径前缀");
+        assert!(
+            validate_cleanup_package(&ok_pkg(t.clone())).is_err(),
+            "长路径前缀必须被拒（执行侧不还原长路径，会扫描命中但执行漏删）"
+        );
+        // ③ 真正的单问号通配仍按原理由拒 —— 防止上面两条把 `?` 分支整体废掉
+        let mut t = ok_item();
+        t["fileKeys"] = json!([{ "path": r"C:\Users\tester\AppData\Local\Tri?Test", "pattern": "*", "recurse": true }]);
+        expect_reject(t, "含 ? 通配");
+        // ④ 正向对照：普通形态必须仍放行（收紧过头会把正常规则打死）
+        for good in [r"%LOCALAPPDATA%\TrimTest", r"C:\Users\tester\AppData\Local\TrimTest"] {
+            let mut t = ok_item();
+            t["fileKeys"] = json!([{ "path": good, "pattern": "*", "recurse": true }]);
+            if let Err(reason) = validate_cleanup_package(&ok_pkg(t)) {
+                panic!("合法形态 `{good}` 被误拒: {reason}");
+            }
+        }
+        // ⑤ 直接断判定器本身
+        for bad in [r"\\.\C:\x", r"\??\C:\x", r"\\.\PIPE\foo", r"\\.\PhysicalDrive0", r"\\?\C:\x"] {
+            assert!(
+                file_path_form_problem(bad, 260).is_some(),
+                "file_path_form_problem 放过前缀形态 `{bad}`"
+            );
+        }
+        // ⑥ 已知缺口（审计 §4.11 同族，本轮**未**关，记在案免得当成已修）：
+        //    `detect[].path` 与 `excludePaths[]` 不经 file_path_form_problem。
+        //    判据写成「当前确实不拦」，等 §4.11 把形态闸扩到全部路径字段时改掉。
+        let mut t = ok_item();
+        t["detect"] = json!([{ "path": r"\\.\C:\Windows\Temp" }]);
+        assert!(
+            validate_cleanup_package(&ok_pkg(t)).is_ok(),
+            "detect[].path 现在竟已过形态闸 —— §4.11 已把它纳入，请把这条缺口断言改成 expect_reject"
+        );
+    }
+
     /// v5 C-1：删树 / 通配清值型 `regKeys` 必须过注册表禁删面。装载侧不拦，一条**验签通过**的
     /// 规则就能把 `HKCU\Software\Microsoft\…` 整棵端掉，而执行侧那道闸要等到删除时才响。
     /// 六条断言各钉一个方向 —— 只留拒的那几条，"把所有 regKeys 一刀切拒掉"也能全绿。

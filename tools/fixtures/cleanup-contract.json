@@ -240,6 +240,138 @@
       }
     },
     {
+      "label": "A2 fileKeys.path 是设备路径 \\\\.\\ 前缀（审计 §3.1）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-device-dot",
+                "name": "A2 fileKeys.path 是设备路径 \\\\.\\ 前缀（审计 §3.1）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "\\\\.\\C:\\Windows\\Temp",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 fileKeys.path 是设备路径 \\??\\ 前缀（审计 §3.1）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-device-nt",
+                "name": "A2 fileKeys.path 是设备路径 \\??\\ 前缀（审计 §3.1）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "\\??\\C:\\Windows\\Temp",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 fileKeys.path 是 \\\\?\\ 长路径前缀（审计 §3.1：理由不得被报成「含 ? 通配」）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-verb-prefix",
+                "name": "A2 fileKeys.path 是 \\\\?\\ 长路径前缀（审计 §3.1：理由不得被报成「含 ? 通配」）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "\\\\?\\C:\\Users\\tester\\AppData\\Local\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "label": "A2 pattern 多星超出执行侧单星能力",
       "ok": false,
       "mustTrigger": [

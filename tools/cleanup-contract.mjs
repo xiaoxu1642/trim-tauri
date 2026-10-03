@@ -288,6 +288,18 @@ export function validateCleanupPackage(pkg) {
         say('A2', `规则 ${id}: fileKeys.path 缺失或为空白`);
       } else {
         if ([...p].length > maxTarget) say('A2', `规则 ${id}: fileKeys.path 超长（${[...p].length} > ${maxTarget}）`);
+        // 2026-10-04 磁盘清理审计 §3.1：设备/verbatim 前缀必须排在 `?` 之前判。
+        // 两条含 `?` 的前缀若让通配检查先命中，理由会变成「含 ? 通配」——
+        // 把安全语义问题报成 glob 能力问题，排查会被引到 expand_glob_dirs 上、
+        // 找不到真正的防线。顺序与 reasons 与 Rust 侧 file_path_form_problem 逐字对齐
+        // （check-cleanup-rule-contract 的共享夹具会因不一致判红）。
+        const pt = p.trim();
+        if (pt.startsWith('\\\\.\\') || pt.startsWith('\\??\\')) {
+          say('A2', `规则 ${id}: fileKeys.path 是设备路径（Win32 跳过路径解析，无法判定保护归属）: ${p}`);
+        }
+        if (pt.startsWith('\\\\?\\')) {
+          say('A2', `规则 ${id}: fileKeys.path 是 \\\\?\\ 长路径前缀（执行侧 expand_glob_dirs 不还原长路径，会扫描命中但执行漏删）: ${p}`);
+        }
         if (p.includes('/')) say('A2', `规则 ${id}: fileKeys.path 含 / 分隔符（执行侧只按 \\ 切分）: ${p}`);
         if (p.includes('?')) say('A2', `规则 ${id}: fileKeys.path 含 ? 通配（执行侧 expand_glob_dirs 不支持）: ${p}`);
       }

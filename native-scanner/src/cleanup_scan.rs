@@ -94,6 +94,11 @@ fn out_line(line: &str) {
 }
 
 /// 输出一行到 stderr（捕获模式下进内存）
+///
+/// **所有**面向人的诊断都必须走这里，不能用 `eprintln!`：
+/// Tauri 侧调的是 `run_json`（捕获模式），`eprintln!` 写的是进程真实 stderr，
+/// 而 GUI 子系统进程没有控制台，那几个字直接蒸发 —— 引擎「已按规则降级并留痕」
+/// 的承诺就落空了。2026-10-04 磁盘清理审计 §3.2 把散落的 4 处 `eprintln!` 全部收编。
 fn err_line(line: &str) {
     CAP.with(|c| {
         let mut cap = c.borrow_mut();
@@ -828,8 +833,16 @@ fn wildcard_match(name: &str, pattern: &str) -> bool {
 // ==================== ListDeletable 口径枚举（对齐 TrimFastSize.cs） ====================
 
 pub struct DeletableResult {
-    pub files: Vec<(String, u64)>, // 可删文件（探测通过）
-    pub total: u64,                // 枚举到的全部文件数（被占用数 = total - files.len()）
+    pub files: Vec<(String, u64)>, // 可删文件（探测通过）。仅 collect_files=true 时填充
+    pub total: u64,                // 枚举到的全部文件数（被占用数 = total - deletable_count）
+    /// 可删文件的**个数**与**字节和**，两种模式下都填。
+    ///
+    /// 为什么要有这两个字段（2026-10-04 磁盘清理审计 §3.3）：统计口径只需要计数与
+    /// 求和，而 `files` 是「每文件一个堆String + 一次独占打开」。`%TEMP%` 里几十万
+    /// 文件意味着几十万条常驻字符串，而 `get_path_deletable_stats` 算完就把它们
+    /// 全丢掉。改成折叠累加后，统计路径**不再持有每文件的路径**。
+    pub deletable_count: u64,
+    pub deletable_bytes: u64,
     /// 因`FILE_ATTRIBUTE_REPARSE_POINT` 跳过的目录数（R1-2 留痕）。
     ///
     /// 为什么必须有：`Win11` 上 `C:\Users\<u>\AppData\Roaming\Application Data` 就是
@@ -858,9 +871,10 @@ fn walk_deletable(
     excl_files: &[String],
     res: &mut DeletableResult,
     depth: usize,
+    collect_files: bool,
 ) {
     if depth >= crate::scan::MAX_WALK_DEPTH {
-        eprintln!("[trim-scanner] depth cap reached at {}", dir.display());
+        err_line(&format!("[trim-scanner] depth cap reached at {}", dir.display()));
         return;
     }
     let rd = match fs::read_dir(dir) {
@@ -877,7 +891,7 @@ fn walk_deletable(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            walk_deletable(&ent.path(), all, pattern, cutoff, excl_dirs, excl_files, res, depth + 1);
+            walk_deletable(&ent.path(), all, pattern, cutoff, excl_dirs, excl_files, res, depth + 1, collect_files);
             continue;
         }
         if !ft.is_file() {
@@ -887,8 +901,8 @@ fn walk_deletable(
         if !all && !wildcard_match(&name, pattern) {
             continue; // 未命中 pattern：不计入 total（对齐 Skip() 在 total++ 之前）
         }
-        let full_s = ent.path().to_string_lossy().to_string();
-        if path_excluded(excl_dirs, excl_files, &full_s.to_lowercase()) {
+        let full = ent.path();
+        if path_excluded(excl_dirs, excl_files, &full.to_string_lossy().to_lowercase()) {
             continue;
         }
         if cutoff.map(|c| !ent.metadata().map(|m| modified_before(&m, c)).unwrap_or(false)).unwrap_or(false) {
@@ -896,8 +910,14 @@ fn walk_deletable(
         }
         res.total += 1;
         let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
-        if file_deletable(Path::new(&full_s)) {
-            res.files.push((full_s, size));
+        if file_deletable(&full) {
+            // 计数与字节和**两种模式都记**（统计口径的唯一数据源）；
+            // 路径字符串只在真要交给调用方时才留（审计 §3.3）。
+            res.deletable_count += 1;
+            res.deletable_bytes += size;
+            if collect_files {
+                res.files.push((full.to_string_lossy().to_string(), size));
+            }
         }
     }
 }
@@ -908,6 +928,33 @@ pub fn list_deletable(
     cutoff: Option<std::time::SystemTime>,
     excl_dirs: &[String],
     excl_files: &[String],
+) -> DeletableResult {
+    list_deletable_inner(root_str, pattern, cutoff, excl_dirs, excl_files, true)
+}
+
+/// 只算计数与字节和，**不持有每文件路径**（审计 §3.3）。
+///
+/// 统计口径（`get_path_deletable_stats`）是这个函数的唯一消费者，而它要的只是
+/// `nfiles` 与 `size`。让它走 `files` 就是「为算一个和先造几十万条字符串，
+/// 算完立刻全丢」—— 全程在 `spawn_blocking` 里持扫描互斥锁，而现库里有
+/// `%TEMP%` / `%WINDIR%\Temp` / `%LOCALAPPDATA%\NVIDIA` 这类无界树。
+pub fn list_deletable_stats(
+    root_str: &str,
+    pattern: &str,
+    cutoff: Option<std::time::SystemTime>,
+    excl_dirs: &[String],
+    excl_files: &[String],
+) -> DeletableResult {
+    list_deletable_inner(root_str, pattern, cutoff, excl_dirs, excl_files, false)
+}
+
+fn list_deletable_inner(
+    root_str: &str,
+    pattern: &str,
+    cutoff: Option<std::time::SystemTime>,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    collect_files: bool,
 ) -> DeletableResult {
     let all = pattern.is_empty() || pattern == "*";
     let root = Path::new(root_str);
@@ -921,19 +968,33 @@ pub fn list_deletable(
             let root_low = root.to_string_lossy().to_lowercase();
             let excluded = path_excluded(excl_dirs, excl_files, &root_low);
             let mut files = Vec::new();
+            let mut deletable_count = 0u64;
+            let mut deletable_bytes = 0u64;
             if old_enough && !excluded && file_deletable(root) {
-                files.push((root_str.to_string(), fl));
+                deletable_count = 1;
+                deletable_bytes = fl;
+                if collect_files {
+                    files.push((root_str.to_string(), fl));
+                }
             }
             return DeletableResult {
                 files,
                 total: if old_enough && !excluded { 1 } else { 0 },
+                deletable_count,
+                deletable_bytes,
                 skipped_reparse: 0, // 单文件路径不枚举子项，无重解析点可跳
             };
         }
     }
-    let mut res = DeletableResult { files: Vec::new(), total: 0, skipped_reparse: 0 };
+    let mut res = DeletableResult {
+        files: Vec::new(),
+        total: 0,
+        deletable_count: 0,
+        deletable_bytes: 0,
+        skipped_reparse: 0,
+    };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
-    walk_deletable(root, all, pattern, cutoff, excl_dirs, excl_files, &mut res, 0);
+    walk_deletable(root, all, pattern, cutoff, excl_dirs, excl_files, &mut res, 0, collect_files);
     res
 }
 
@@ -983,9 +1044,13 @@ fn get_path_deletable_stats(path: &str, cutoff: Option<std::time::SystemTime>) -
     }
     // U1-b（2026-10-01）：全局排除名单整链下线。本探针历史上也只吃全局名单（规则级
     // excludePaths 到这层已经丢了规则上下文），传空集即等价于「名单为空」。
-    let res = list_deletable(path, "*", cutoff, &[], &[]);
-    let nfiles = res.files.len() as u64;
-    let size: u64 = res.files.iter().map(|f| f.1).sum();
+    // 统计口径走 list_deletable_stats：**不物化每文件路径**（审计 §3.3）。
+    // nfiles / size 从 deletable_count / deletable_bytes 取，那是唯一数据源；
+    // 两者口径必须恒等（下面有断言钉住），否则「列表说 N 个、统计说 M 个」会被
+    // 用户读成扫描漏项。
+    let res = list_deletable_stats(path, "*", cutoff, &[], &[]);
+    let nfiles = res.deletable_count;
+    let size = res.deletable_bytes;
     PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles, skipped_reparse: res.skipped_reparse }
 }
 
@@ -1098,7 +1163,7 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
         roots = next;
     }
     if skipped_reparse > 0 {
-        eprintln!("[trim-scanner] glob 展开跳过 {skipped_reparse} 个重解析点目录（不深入以避免重复枚举）");
+        err_line(&format!("[trim-scanner] glob 展开跳过 {skipped_reparse} 个重解析点目录（不深入以避免重复枚举）"));
     }
     roots
 }
@@ -1484,15 +1549,41 @@ struct FkAcc {
     deletable_count: i64,
     item_rows: usize,
     global_rows: usize,
+    /// 遍历预算上限，构造时取生产常量（见 `FkAcc::new`）。
+    ///
+    /// 为什么做成字段而不是直接读常量（2026-10-04 审计 §3.4）：这个上限的行为
+    /// ——「撞上限后是否真的停止下钻」——是本轮修复的核心，而生产值是 10 万 /
+    /// 100 万行，**没有任何一条能在 CI 里跑完的用例能碰到它**。做成字段后
+    /// 单测可以把阈值压到 3，用一棵树就验证早退逻辑；生产路径走 `FkAcc::new`
+    /// 拿同样的常量，行为不变。
+    item_cap: usize,
+    global_cap: usize,
     truncated: bool,
     /// 因重解析点跳过的目录数（R1-2 留痕，与 ScanCtx / DeletableResult 同语义）。
     skipped_reparse: u64,
 }
 
 impl FkAcc {
+    /// 生产构造：预算取 `PLAN_CAP_*` 常量。
+    fn new(global_rows: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            files: Vec::new(),
+            total_count: 0,
+            total_size: 0,
+            deletable_count: 0,
+            item_rows: 0,
+            global_rows,
+            item_cap: PLAN_CAP_PER_ITEM,
+            global_cap: PLAN_CAP_TOTAL,
+            truncated: false,
+            skipped_reparse: 0,
+        }
+    }
+
     /// 推入可删清单：受 PLAN_CAP 约束（推入即计数，超限标截断）
     fn push_budget(&mut self, full: String, size: u64) {
-        if self.item_rows >= PLAN_CAP_PER_ITEM || self.global_rows >= PLAN_CAP_TOTAL {
+        if self.item_rows >= self.item_cap || self.global_rows >= self.global_cap {
             self.truncated = true;
             return;
         }
@@ -1525,7 +1616,20 @@ fn walk_fk_dll(
     // 审查 L-9：与 walk_deletable 同口径——超限子目录整棵跳过并 stderr 留痕，
     // 防病态深嵌套撑爆递归栈（原先无上限是对 PS 无界递归的口径）。
     if depth >= crate::scan::MAX_WALK_DEPTH {
-        eprintln!("[trim-scanner] depth cap reached at {}", dir.display());
+        err_line(&format!("[trim-scanner] depth cap reached at {}", dir.display()));
+        return;
+    }
+    // 遍历预算耗尽 ⇒ 整棵子树不再下钻（2026-10-04 磁盘清理审计 §3.4）。
+    //
+    // 为什么必须在这里停，而不是只靠 `push_budget` 的计数上限：
+    // `push_budget` 只约束**输出行数**。`seen` 集合、`file_deletable` 的独占打开、
+    // 以及目录遍历本身都不受限 —— 也就是 `PLAN_CAP` 声明的「单条目 10 万 /
+    // 全扫描 100 万行，超限止推」**只对输出成立，对内存与 IO 不成立**：
+    // 撞上限之后原本还要把剩下的整棵树走完，而 `seen` 还在继续增长。
+    //
+    // 现库里就有无界树：`cargoRegistryCache` 递归 `%USERPROFILE%\.cargo\registry\src`，
+    // `jetbrainsCache`/`chromeCache` 以 `recurse: true` glob 用户缓存目录。
+    if acc.truncated {
         return;
     }
     let rd = match fs::read_dir(dir) {
@@ -1574,7 +1678,16 @@ fn walk_fk_dll(
         if file_deletable(Path::new(&full_s)) {
             acc.deletable_count += 1; // 去重前累加（对齐 PS DLL 分支）
             if acc.seen.insert(low) {
+                let before = acc.truncated;
                 acc.push_budget(full_s, size);
+                if !before && acc.truncated {
+                    // 只在**首次**翻转到截断时留一次痕：后续每层都打的话，
+                    // 一次扫描能刷出上千行同样的日志，把真留痕淹掉。
+                    err_line(&format!(
+                        "[trim-scanner] PLAN_CAP 已耗尽（单条目上限 {PLAN_CAP_PER_ITEM} 行 / 全扫描 {PLAN_CAP_TOTAL} 行），\
+                         剩余子树停止遍历（已记 filesTruncated）"
+                    ));
+                }
             }
         }
     }
@@ -1593,6 +1706,11 @@ fn walk_fk_snapshot(
     skip_lock: bool,
     acc: &mut FkAcc,
 ) {
+    // 遍历预算耗尽 ⇒ 整棵子树不再下钻（2026-10-04 磁盘清理审计 §3.4，理由见
+    // walk_fk_dll 里同一条注释）。快照模式的 `seen` 同样在无界增长。
+    if acc.truncated {
+        return;
+    }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return,
@@ -1616,10 +1734,10 @@ fn walk_fk_snapshot(
                 if depth < FK_SNAPSHOT_MAX_DEPTH {
                     walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, cutoff, excl_dirs, excl_files, skip_lock, acc);
                 } else {
-                    eprintln!(
+                    err_line(&format!(
                         "[trim-scanner] depth cap {FK_SNAPSHOT_MAX_DEPTH} reached at {}",
                         ent.path().display()
-                    );
+                    ));
                 }
             }
             continue;
@@ -1655,7 +1773,15 @@ fn walk_fk_snapshot(
         let size = md.len();
         if skip_lock || file_deletable(Path::new(&full_s)) {
             acc.deletable_count += 1;
+            let before = acc.truncated;
             acc.push_budget(full_s, size);
+            if !before && acc.truncated {
+                // 首次翻转才留痕（理由同 walk_fk_dll 那处）
+                err_line(&format!(
+                    "[trim-scanner] PLAN_CAP 已耗尽（单条目上限 {PLAN_CAP_PER_ITEM} 行 / 全扫描 {PLAN_CAP_TOTAL} 行），\
+                     剩余子树停止遍历（已记 filesTruncated）"
+                ));
+            }
         }
     }
 }
@@ -1714,17 +1840,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
         }
     }
 
-    let mut acc = FkAcc {
-        seen: HashSet::new(),
-        files: Vec::new(),
-        total_count: 0,
-        total_size: 0,
-        deletable_count: 0,
-        item_rows: 0,
-        global_rows: *global_rows,
-        truncated: false,
-        skipped_reparse: 0,
-    };
+    let mut acc = FkAcc::new(*global_rows);
 
     if let Some(arr) = rule.get("fileKeys").and_then(|v| v.as_arr()) {
         for fk in arr {
@@ -2241,6 +2357,91 @@ fn flush_stdout() {
 mod tests {
     use super::*;
 
+    /// 2026-10-04 磁盘清理审计 §3.2：诊断通道不许有第二出口。
+    ///
+    /// 判据是**结构性**的而不是「某条诊断出现了没」：扫描侧任何面向人的留痕
+    /// 都必须经 `err_line` 进内存捕获，Tauri 侧才拿得到。写 `eprintln!` 的话，
+    /// 字会打到进程真实 stderr，而 GUI 子系统进程没有控制台 —— 字直接蒸发，
+    /// 引擎「已按规则降级并留痕」的承诺落空，而且**不报任何错**。
+    ///
+    /// 这条之所以能机械复核：`native-scanner/tests/` 不并 workspace（AGENTS §5.11），
+    /// 主仓 `cargo test` 跑不到本文件，只有 `node tools/check-scan-rule-diff.mjs`
+    /// 包着跑 —— 所以断言必须写在这里，不能指望别的门禁顺手发现。
+    ///
+    /// ⚠️ **自指 `include_str!` 的重编陷阱**（实测踩了两次）：本用例读的就是本文件，
+    /// 改完源码后 cargo 偶发沿用旧内容 ⇒ 明明改对了却报红。判红前若与源码对不上，
+    /// 先 `(Get-Item src/cleanup_scan.rs).LastWriteTime = Get-Date` 强制重编再下结论。
+    #[test]
+    fn 诊断只走_err_line_不许有第二出口() {
+        let src = include_str!("cleanup_scan.rs");
+        // 剥注释后扫：`eprintln!` 在本文件只应剩 err_line 自己那一个 fallback。
+        let no_comments: String = {
+            let mut out = String::with_capacity(src.len());
+            let mut rest = src;
+            loop {
+                let b = rest.find("/*");
+                let l = rest.find("//");
+                match (b, l) {
+                    (Some(bi), Some(li)) if bi < li => {
+                        out.push_str(&rest[..bi]);
+                        match rest[bi..].find("*/") {
+                            Some(e) => {
+                                out.push_str(&rest[bi..bi + e + 2].replace(|c: char| c != '\n', " "));
+                                rest = &rest[bi + e + 2..];
+                            }
+                            None => {
+                                out.push_str(&rest[bi..].replace(|c: char| c != '\n', " "));
+                                break;
+                            }
+                        }
+                    }
+                    (_, Some(li)) => {
+                        out.push_str(&rest[..li]);
+                        match rest[li..].find('\n') {
+                            Some(e) => {
+                                out.push_str(&rest[li..li + e].replace(|c: char| c != '\n', " "));
+                                out.push('\n');
+                                rest = &rest[li + e + 1..];
+                            }
+                            None => {
+                                out.push_str(&rest[li..].replace(|c: char| c != '\n', " "));
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        out.push_str(rest);
+                        break;
+                    }
+                }
+            }
+            out
+        };
+        // needle 动态拼：本测试自己的代码里也会出现那个词，静态字面量会把
+        // 测试自己算成违规（第一版就这么假红了一次）。
+        let needle = format!("eprint{}n!", "l");
+        let hits: Vec<&str> = no_comments.lines().filter(|l| l.contains(needle.as_str())).collect();
+        // 唯一允许的一处是 err_line 自己的非捕获分支 fallback。
+        assert_eq!(
+            hits.len(),
+            1,
+            "扫描侧诊断出现第二出口（直接打印到进程 stderr）：\n{}\n\
+             必须走 err_line —— Tauri 走 run_json 捕获模式，GUI 子系统进程没有控制台，\
+             直接打印的字会蒸发且不报错（审计 §3.2）",
+            hits.join("\n")
+        );
+        assert!(
+            hits[0].contains("line"),
+            "剩下的唯一直接打印不在 err_line 的 fallback 里：{}",
+            hits[0]
+        );
+        // 正向对照：引擎真的在用 err_line 记「变量未解析」这条关键降级
+        assert!(
+            no_comments.contains("err_line(&format!(\"[cleanup-scan]"),
+            "引擎已不再用 err_line 记降级留痕 —— §3.2 依赖的那条通道被搬走了"
+        );
+    }
+
     /// 审查 L-9：超过 scan::MAX_WALK_DEPTH 的病态深嵌套不再下钻（防递归栈溢出）。
     /// 造 70 层嵌套、最深处放匹配文件：扫描必须正常返回，且只收浅层文件。
     #[test]
@@ -2255,13 +2456,71 @@ mod tests {
         fs::write(deep.join("deep.tmp"), b"x").unwrap();
         fs::write(root.join("shallow.tmp"), b"x").unwrap();
 
-        let mut res = DeletableResult { files: Vec::new(), total: 0, skipped_reparse: 0 };
-        walk_deletable(&root, true, "*.tmp", None, &[], &[], &mut res, 0);
+        let mut res = DeletableResult {
+            files: Vec::new(),
+            total: 0,
+            deletable_count: 0,
+            deletable_bytes: 0,
+            skipped_reparse: 0,
+        };
+        walk_deletable(&root, true, "*.tmp", None, &[], &[], &mut res, 0, true);
         assert_eq!(res.files.len(), 1, "浅层文件必须收到：{:?}", res.files);
         assert!(
             res.files.iter().all(|(p, _)| !p.contains("d69")),
             "超限深处的文件不得出现：{:?}", res.files
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 2026-10-04 磁盘清理审计 §3.3：统计路径与列表路径**口径必须恒等**。
+    ///
+    /// 这条是 §3.3 那次改动的核心风险：`get_path_deletable_stats` 改成读
+    /// `deletable_count`/`deletable_bytes` 而不是 `files.len()`/`sum()`。
+    /// 两个数据源一旦漂移，用户看到的就是「列表里 N 个文件、体积统计却是 M」，
+    /// 会被读成扫描漏项 —— 而这正是审计里那条「静默失效」的同族。
+    #[test]
+    fn 统计口径与列表口径逐项恒等() {
+        let root = std::env::temp_dir().join(format!("trim-stats-parity-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        for (name, body) in [
+            ("a.tmp", b"aaaa".as_slice()),
+            ("sub/b.tmp", b"bb".as_slice()),
+            ("sub/c.log", b"cccccccc".as_slice()),
+            ("d.txt", b"d".as_slice()),
+        ] {
+            fs::write(root.join(name), body).unwrap();
+        }
+
+        // pattern='*' 覆盖全部（统计口径固定用这个）
+        let with_files = list_deletable(root.to_str().unwrap(), "*", None, &[], &[]);
+        let stats_only = list_deletable_stats(root.to_str().unwrap(), "*", None, &[], &[]);
+
+        assert_eq!(
+            stats_only.deletable_count, with_files.files.len() as u64,
+            "可删个数口径漂移：列表 {} vs 统计 {}",
+            with_files.files.len(),
+            stats_only.deletable_count
+        );
+        assert_eq!(
+            stats_only.deletable_bytes,
+            with_files.files.iter().map(|f| f.1).sum::<u64>(),
+            "字节和口径漂移：列表 {} vs 统计 {}",
+            with_files.files.iter().map(|f| f.1).sum::<u64>(),
+            stats_only.deletable_bytes
+        );
+        assert_eq!(stats_only.total, with_files.total, "total 口径漂移");
+        assert_eq!(stats_only.skipped_reparse, with_files.skipped_reparse, "reparse 留痕漂移");
+
+        // 本次改动的**全部意义**在这一条：统计模式不得持有任何路径
+        assert!(
+            stats_only.files.is_empty(),
+            "统计模式竟仍持有 {} 条路径 —— §3.3 的改动没生效",
+            stats_only.files.len()
+        );
+        // 反向：列表模式必须仍拿得到路径（不能为了省内存把功能改没了）
+        assert_eq!(with_files.files.len(), 4, "列表模式必须仍返回全部路径");
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2278,23 +2537,79 @@ mod tests {
         fs::write(deep.join("deep.dll"), b"x").unwrap();
         fs::write(root.join("shallow.dll"), b"x").unwrap();
 
-        let mut acc = FkAcc {
-            seen: HashSet::new(),
-            files: Vec::new(),
-            total_count: 0,
-            total_size: 0,
-            deletable_count: 0,
-            item_rows: 0,
-            global_rows: 0,
-            truncated: false,
-            skipped_reparse: 0,
-        };
+        let mut acc = FkAcc::new(0);
         walk_fk_dll(&root, true, "*.dll", true, None, &[], &[], &mut acc, 0);
         assert_eq!(acc.files.len(), 1, "浅层文件必须收到：{:?}", acc.files);
         assert!(
             acc.files.iter().all(|(p, _)| !p.contains("d69")),
             "超限深处的文件不得出现：{:?}", acc.files
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 2026-10-04 磁盘清理审计 §3.4：遍历预算耗尽后**真的不再下钻**。
+    ///
+    /// 判据用「`total_count` 停在上限附近」而不是「`files.len()` 等于上限」——
+    /// 后者在修复前也成立（`push_budget` 只让输出停在上限，遍历照旧继续），
+    /// 所以它压根区分不出修没修。`total_count` 是**遍历量**的口径：撞上限后
+    /// 立刻 return，剩下那棵树一个文件都不再 `metadata()`，它必须停在上限附近。
+    ///
+    /// 用 `max_item_rows=3` 而不是生产常量 10 万：这条要能在 CI 里跑完，
+    /// 而它验的是「早退有没有发生」，与上限值无关（`push_budget` 的比较是
+    /// `>=`，换成参数只是把阈值挪到能测的量级）。
+    #[test]
+    fn 遍历预算耗尽后不再下钻() {
+        // 造一棵够深够宽的树：3 层 × 每层 8 个子目录 × 每个 4 个文件
+        let root = std::env::temp_dir().join(format!("trim-walk-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut dirs = vec![root.clone()];
+        for level in 0..3 {
+            let mut next = Vec::new();
+            for d in &dirs {
+                for i in 0..8 {
+                    let sub = if level == 0 { d.clone() } else { d.join(format!("l{i}")) };
+                    fs::create_dir_all(&sub).unwrap();
+                    for f in 0..4 {
+                        fs::write(sub.join(format!("f{f}.tmp")), b"x").unwrap();
+                    }
+                    next.push(sub);
+                }
+            }
+            dirs = next;
+            if dirs.len() > 64 {
+                break;
+            }
+        }
+        let total_files: usize = dirs.len() * 4;
+        assert!(total_files > 50, "夹具太小，撞不到 3 的上限: {total_files}");
+
+        // DLL 分支：把条目上限压到 3（生产是 10 万，跑不出来；见 item_cap 字段注释）
+        let mut acc = FkAcc::new(0);
+        acc.item_cap = 3;
+        acc.global_cap = 3;
+        walk_fk_dll(&root, true, "*.tmp", true, None, &[], &[], &mut acc, 0);
+        assert!(acc.truncated, "撞上限必须标 truncated（否则界面不显示「已截断」）");
+        assert_eq!(acc.files.len(), 3, "输出必须停在上限");
+        assert!(
+            acc.total_count <= 12,
+            "遍历量必须远小于夹具的 {total_files} 个文件 —— \
+             §3.4 未修的话这里会是 {total_files}（输出停在 3、遍历照旧走完整棵树）。实测 {}",
+            acc.total_count
+        );
+
+        // 快照分支：同一棵树，同一断言
+        let mut acc2 = FkAcc::new(0);
+        acc2.item_cap = 3;
+        acc2.global_cap = 3;
+        walk_fk_snapshot(&root, true, "*.tmp", true, 0, None, &[], &[], true, &mut acc2);
+        assert!(acc2.truncated, "快照分支撞上限必须标 truncated");
+        assert_eq!(acc2.files.len(), 3, "快照分支输出必须停在上限");
+        assert!(
+            acc2.total_count <= 12,
+            "快照分支遍历量必须远小于 {total_files}，实测 {}",
+            acc2.total_count
+        );
+
         let _ = fs::remove_dir_all(&root);
     }
 }

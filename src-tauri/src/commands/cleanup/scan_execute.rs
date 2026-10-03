@@ -72,6 +72,17 @@ impl ScanAccum {
                                 &format!("可删文件清单超过 {PLAN_CAP_PER_ITEM} 条上限: {id}"),
                             );
                         }
+                    } else {
+                        // 2026-10-04 审计 §3.4：超长行原先**既不入清单也不计数、不告警**
+                        // —— 与本函数上面 `count_malformed` 建立的「必须计数或告警」
+                        // 基线（v2-L4P-34 C-6）矛盾。一条 >2000 字符的路径
+                        // （`\\?\` + 深树，MAX_PATH 是 32767）就这么从「明细」列表和
+                        // 占用检测候选集里消失，无任何痕迹。
+                        self.count_malformed(&format!(
+                            "@@PLANFILE@@ 行超长（id {} 字符 / path {} 字符，上限 160 / 2000）",
+                            id.chars().count(),
+                            path.chars().count()
+                        ));
                     }
                 }
                 _ => self.count_malformed("@@PLANFILE@@ 行缺少 id 或 path 字段"),
@@ -137,23 +148,29 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
         ingest_and_emit(&hook_accum, &hook_window, line);
     }));
     // S3：纯 Rust 原生
-    let (code, _stdout, stderr) = {
-        let (code, stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json], &rules_json, hook);
+    //
+    // 退出码非 0 的分支**就地 return**（下面没有第二个 `if code != 0`）：原实现
+    // 在块外又判了一次 `code != 0`，而块内已经 return 了，那句恒假、且让 `code`
+    // 在块外留一个看似有意义的绑定。2026-10-04 审计 §3.2 顺手删掉。
+    let stderr = {
+        let (code, _stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json], &rules_json, hook);
         if code != 0 {
             let msg = if stderr.trim().is_empty() { format!("退出码 {code}") } else { stderr.trim().to_string() };
             log::write_log("error", &format!("Rust 清理扫描失败: {msg}"));
             return json!({ "success": false, "message": format!("原生扫描失败: {msg}"), "data": [] });
         }
-        (code, stdout, stderr)
+        stderr
     };
-    if code != 0 {
-        log::write_log("error", &format!("扫描失败: {}", stderr.trim()));
-        let msg = if stderr.trim().is_empty() {
-            "扫描失败".to_string()
-        } else {
-            stderr.trim().to_string()
-        };
-        return json!({ "success": false, "message": msg, "data": [] });
+    // 2026-10-04 磁盘清理审计 §3.2：stderr 是扫描引擎**唯一**的 fail-closed 留痕通道，
+    // 此前只在退出码非 0 时被读，成功路径直接丢弃 —— 而「扫描成功但某个条目空」
+    // 恰恰只发生在成功路径（单条规则变量没解析 / pathPs 被拒 → 该条目 exists:false、
+    // size:0，用户看到「有条目但一个文件都没扫到」）。引擎自己给的判据是
+    // 「供『扫描命中、执行 0 删』类问题对账」，对账通道在对账最需要的时候是关的。
+    //
+    // 刻意记 `warn` 而不是 `error`：这些不是失败，是「已按规则降级并留痕」。
+    // 空 stderr 是绝大多数扫描的常态，不要为它写一行日志。
+    if !stderr.trim().is_empty() {
+        log::write_log("warn", &format!("清理扫描留痕（已降级处理，非失败）:\n{}", stderr.trim()));
     }
     // 把可删文件清单并进条目（无清单的条目补空数组，执行/明细侧统一按数组消费）
     let (data, plan_total, malformed) = {
@@ -253,7 +270,22 @@ pub(super) fn move_to_recycle_bin(path: &std::path::Path) -> Result<(), String> 
     trim_finder::scan::recycle::send_to_trash_os(path.as_os_str())
 }
 
-/// cleanup:execute — 执行清理（危险通道：快照校验 + 删除前刷盘 + 回收站优先）
+/// cleanup:execute — 执行清理（危险通道：快照校验 + 删除前刷盘 + **固定永久删**）
+///
+/// # `to_recycle` 为什么收下参数却恒为 false
+///
+/// v3.3.0 用户裁定：常规清理**固定永久删**，`toRecycle` 恒 false。此前这条裁定
+/// 只在渲染层强制（`cleanup.js` 里 `const toRecycle = false;`），命令侧是
+/// `to_recycle.unwrap_or(false)` —— 也就是**任何**传 `true` 的调用方都能翻转。
+/// 审计 §3.6 把它钉到删除真正发生的地方。翻转的三个后果：
+/// ① `TRASH_FAILURES` 被填充，而它是 `cleanup:retry-failed-delete`（**不可逆**的
+///    永久删命令）的唯一来源；② 回收站模式下 `freed` 计的是「枚举到」而非
+///    「删掉」的字节；③ 代码注释里「不可达」的说法只在 JS 层成立，下次重构
+///    碰 IPC 签名就会继承一条活路径而不知情。
+///
+/// 参数**保留**是为了不破坏 `CHANNEL_MAP` 的载荷键（删字段会让渲染层与
+/// `tauri-api.js` 两侧同时改，且旧版前端传了它会被静默吞掉）。收到 true 时
+/// 如实回执并写日志，不静默改写 —— 让调用方知道自己的参数没生效。
 #[tauri::command]
 pub async fn cleanup_execute<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -267,7 +299,13 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
     }
     let label = window.label().to_string();
     let force = force.unwrap_or(false);
-    let to_recycle = to_recycle.unwrap_or(false);
+    if to_recycle == Some(true) {
+        log::write_log(
+            "warn",
+            "cleanup:execute 收到 to_recycle=true，已按 v3.3.0 裁定忽略（常规清理固定永久删）",
+        );
+    }
+    let to_recycle = false;
     let auto_rebuild = auto_rebuild.unwrap_or(false);
     let snapshot = snapshots()
         .lock()
@@ -375,6 +413,16 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
             return json!({ "success": false, "message": "解析结果失败", "raw": diag_stripped });
         };
         let mut failures: Vec<Value> = Vec::new();
+        // 2026-10-04 审计 §3.6：`to_recycle` 已在上方钉成 `false`（`let to_recycle =
+        // false;`），所以这个分支**恒不进入**。刻意保留而不是删掉，理由两条：
+        // ① 「回收站优先」是本仓的红线口径（§3 除常规清理外一律回收站优先），
+        //    万一将来某个域要复用这条链，闸门（`protect::is_path_protected` 逐条 +
+        //    `TRASH_FAILURES` 记账）必须**已经在代码里**，不能等启用时再补；
+        // ② 它是 `@@RECYCLE@@` 回环协议唯一的消费者，删掉会让那段解析变成纯死码，
+        //    而协议形状的删除要单独一次有记录的改动（审计 §5.4 同族的谨慎）。
+        // 但必须让它**看起来**是死的：下面那句 `debug_assert!(false)` 把「恒假」写进
+        // 类型可验的位置 —— 有人日后把 `to_recycle` 改回变量时，debug 构建立刻响。
+        debug_assert!(!to_recycle, "常规清理固定永久删（v3.3.0 裁定），回收站分支恒不可达");
         if to_recycle && !recycle_entries.is_empty() {
             let mut per_item: HashMap<String, RecycleStat> = HashMap::new();
             for entry in &recycle_entries {
@@ -746,34 +794,32 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
         .get(&label)
         .cloned()
         .unwrap_or_default();
-    let mut files: Vec<Value> = Vec::new();
-    if let Some(arr) = ids.as_ref().and_then(|v| v.as_array()) {
-        for s in arr {
-            let Some(id) = s.as_str() else { continue };
-            let Some(it) = snapshot.get(id) else { continue };
-            if let Some(list) = it.get("files").and_then(|f| f.as_array()) {
-                for f in list {
-                    if let Some(p) = f.get("path").and_then(|v| v.as_str()) {
-                        if !p.is_empty() {
-                            files.push(json!({ "path": p, "id": id }));
-                        }
-                    }
-                }
-            }
-        }
+    // 2026-10-04 磁盘清理审计 §3.5：候选装配已抽成纯函数 `collect_lock_candidates`
+    // （state.rs），上限与去重在**装配过程中**生效 —— 原实现先把 ids 展开完再施加
+    // PLAN_LOCK_CAP，而 ids 无长度限制、无去重，单条目 fileKeys 上限 10 万 ⇒
+    // 渲染层一次 Array(200000).fill(<已扫 id>) 就能堆 2×10¹⁰ 个 Value 把主进程打爆。
+    // 抽成纯函数也是因为这个形状**没法用集成测试验**（测它等于真 OOM 一次），
+    // 只能在无盘无 IPC 的纯函数上钉住。口径与理由见该函数注释。
+    let (files, truncated) = collect_lock_candidates(ids.as_ref(), &snapshot, PLAN_LOCK_CAP);
+    if truncated {
+        log::write_log(
+            "warn",
+            &format!("占用检测：候选装配被截断（上限 {PLAN_LOCK_CAP} 个文件），面板会标「已截断」"),
+        );
     }
     lock_whitelist()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(label.clone(), Vec::new());
+    // 截断信号由纯函数在装配过程中给出（见 collect_lock_candidates 的注释：
+    // 装配后再比 len() 会让那句比较恒假、「被截断」永远报 false）
     if files.is_empty() {
         return json!({
             "success": true, "locked": [], "byApp": {}, "procs": [],
-            "lockedByItem": {}, "scanned": 0, "truncated": false
+            "lockedByItem": {}, "scanned": 0, "truncated": truncated
         });
     }
-    let truncated = files.len() > PLAN_LOCK_CAP;
-    let list: Vec<Value> = files.into_iter().take(PLAN_LOCK_CAP).collect();
+    let list: Vec<Value> = files;
     let scanned = list.len();
     let payload = json_text(&json!({ "files": list }));
     let win = window.clone();

@@ -264,12 +264,36 @@ pub(super) fn require_rule_str(obj: &Map<String, Value>, field: &str, max_len: u
 
 /// 路径形态：执行侧 `expand_glob_dirs` 只认 `*`、`glob_match` 只支持单星、分隔符只认 `\`；
 /// 扫描侧支持 `?` 与 `/` —— 规则里出现这些形态就是「扫描命中、执行漏删」。
+///
+/// 2026-10-04 磁盘清理审计 §3.1 增设备/verbatim 前缀一节。`\\.\` / `\??\` 之所以要在
+/// 装载端拦（而不是只靠 `engine::protect` 判保护）：那两条目标在扫描侧会被当成合法
+/// 路径枚举并计入体积，在执行侧又永远过不了 `is_path_protected` ⇒ 呈现成
+/// 「有条目、体积报出来了，清理完什么都没释放」，用户无从判断是哪一层出的问题。
+/// 而 `engine/protect.rs` 侧的收紧（把这两个前缀按 fail-closed 拒绝）是**另一端**：
+/// 「配置与运行时输入不许绕过」。两端都要在 —— 只关一端，下一个入口会重新打开。
 pub(super) fn file_path_form_problem(path: &str, max_len: usize) -> Option<String> {
     if path.trim().is_empty() {
         return Some("path 为空白".to_string());
     }
     if path.chars().count() > max_len {
         return Some(format!("path 超长（{} > {max_len}）", path.chars().count()));
+    }
+    // **设备/verbatim 前缀必须在 `?` 检查之前判**。这三条各自都会被后面的检查
+    // 以错误的理由命中（`\??\` 与 `\\?\` 都含 `?`），而理由指错方向会把排查
+    // 引到 glob 实现上、找不到真正的防线：
+    //   · `\\.\`  = 设备路径（`\\.\C:\…` 与 `C:\…` 同树，但保护判定结论相反）
+    //   · `\??\` = NT 对象管理器路径，同上
+    //   · `\\?\` = **合法**的 Win32 长路径前缀，不是安全问题；但执行侧
+    //     `expand_glob_dirs` 只按 `\` 切分、不还原长路径，会「扫描命中、执行漏删」
+    //     —— 与本函数上面那三类形态同一族后果，所以一并在这里说清。
+    let trimmed = path.trim();
+    if trimmed.starts_with("\\\\.\\") || trimmed.starts_with("\\??\\") {
+        return Some(format!("path 是设备路径（Win32 跳过路径解析，无法判定保护归属）: {path}"));
+    }
+    if trimmed.starts_with("\\\\?\\") {
+        return Some(format!(
+            "path 是 \\\\?\\ 长路径前缀（执行侧 expand_glob_dirs 不还原长路径，会扫描命中但执行漏删）: {path}"
+        ));
     }
     if path.contains('/') {
         return Some(format!("path 含 / 分隔符（执行侧只按 \\ 切分）: {path}"));
@@ -285,33 +309,49 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
     let top = pkg
         .as_object()
         .ok_or_else(|| "规则包不是 JSON 对象".to_string())?;
-    let empty: Vec<String> = Vec::new();
-    let top_fields = rule_schema::list("cleanup", "topFields").ok_or_else(|| SCHEMA_UNAVAILABLE.to_string())?;
-    let top_required = rule_schema::list("cleanup", "topRequired").unwrap_or(empty.clone());
-    let group_fields = rule_schema::list("cleanup", "groupFields").unwrap_or(empty.clone());
-    let group_required = rule_schema::list("cleanup", "groupRequired").unwrap_or(empty.clone());
-    let sub_fields = rule_schema::list("cleanup", "subGroupFields").unwrap_or(empty.clone());
-    let sub_required = rule_schema::list("cleanup", "subGroupRequired").unwrap_or(empty.clone());
-    let item_fields = rule_schema::list("cleanup", "itemFields").unwrap_or(empty.clone());
-    let item_required = rule_schema::list("cleanup", "itemRequired").unwrap_or(empty.clone());
-    let banned = rule_schema::list("cleanup", "itemBannedKeys").unwrap_or(empty.clone());
-    let fk_fields = rule_schema::list("cleanup", "fileKeyFields").unwrap_or(empty.clone());
-    let fk_required = rule_schema::list("cleanup", "fileKeyRequired").unwrap_or(empty.clone());
-    let rk_fields = rule_schema::list("cleanup", "regKeyFields").unwrap_or(empty.clone());
-    let rk_required = rule_schema::list("cleanup", "regKeyRequired").unwrap_or(empty.clone());
-    let prov_fields = rule_schema::list("cleanup", "provFields").unwrap_or(empty.clone());
-    let prov_required = rule_schema::list("cleanup", "provRequired").unwrap_or(empty.clone());
-    let risk_levels = rule_schema::list("cleanup", "riskLevels").unwrap_or(empty.clone());
-    let source_classes = rule_schema::list("cleanup", "sourceClasses").unwrap_or(empty.clone());
-    let non_empty_arrays = rule_schema::list("cleanup", "nonEmptyArrayFields").unwrap_or(empty.clone());
-    let positive_ints = rule_schema::list("cleanup", "positiveIntFields").unwrap_or(empty.clone());
-    let exclusive = rule_schema::list("cleanup", "exclusiveNumericFields").unwrap_or(empty.clone());
-    let ev_fields = rule_schema::list("cleanup", "evidenceItemFields").unwrap_or(empty.clone());
-    let ev_weight_max = rule_schema::number("cleanup", "evidenceWeightMax").unwrap_or(3) as f64;
+    // 契约表查询一律走这两个 helper，**不写 `unwrap_or(empty)`**（2026-10-04 审计 §4.6）。
+    //
+    // 契约表自己在 `engine/rule_schema.rs` 头上声明的是 fail-closed：
+    // 「所有校验器拿到 `None` 都必须整包拒绝，不许回退到『跳过语义校验只验签』」。
+    // 而原实现 19 处查询里有 17 处是 `unwrap_or(empty.clone())`、`evidenceWeightMax`
+    // 是硬编码的 `3` —— 声明与实现相反。
+    //
+    // 为什么这不是纯洁癖：多数默认值**碰巧**也是 fail-closed（空 `itemFields`
+    // 会让未知字段检查拒掉每一条；`maxItems` 默认 0 会拒掉一切），所以「表坏了」
+    // 时看起来仍然安全。但两条不是：
+    //   · `positiveIntFields` 变空 ⇒ `minAgeHours/minAgeDays` 不再要求正整数，
+    //     而扫描侧把 `minAgeHours: -5` 当作「未声明」⇒ **minAge 护栏静默消失**，
+    //     刚创建的文件变可删；
+    //   · `exclusiveNumericFields` 变空 ⇒ 两个字段可同时声明，扫描侧按「未声明」
+    //     处理（完全没有护栏），执行侧按 `max()` 取 —— 正是代码注释警告的分叉。
+    // `evidenceWeightMax` 的 `3` 与 `maxTextLen/maxTargetLen` 的 `0` 更是第二份真源
+    // （AGENTS §5.16：数值表的唯一真源是 tools/rule-schema.json）。
+    let top_fields = req_list("cleanup", "topFields")?;
+    let top_required = req_list("cleanup", "topRequired")?;
+    let group_fields = req_list("cleanup", "groupFields")?;
+    let group_required = req_list("cleanup", "groupRequired")?;
+    let sub_fields = req_list("cleanup", "subGroupFields")?;
+    let sub_required = req_list("cleanup", "subGroupRequired")?;
+    let item_fields = req_list("cleanup", "itemFields")?;
+    let item_required = req_list("cleanup", "itemRequired")?;
+    let banned = req_list("cleanup", "itemBannedKeys")?;
+    let fk_fields = req_list("cleanup", "fileKeyFields")?;
+    let fk_required = req_list("cleanup", "fileKeyRequired")?;
+    let rk_fields = req_list("cleanup", "regKeyFields")?;
+    let rk_required = req_list("cleanup", "regKeyRequired")?;
+    let prov_fields = req_list("cleanup", "provFields")?;
+    let prov_required = req_list("cleanup", "provRequired")?;
+    let risk_levels = req_list("cleanup", "riskLevels")?;
+    let source_classes = req_list("cleanup", "sourceClasses")?;
+    let non_empty_arrays = req_list("cleanup", "nonEmptyArrayFields")?;
+    let positive_ints = req_list("cleanup", "positiveIntFields")?;
+    let exclusive = req_list("cleanup", "exclusiveNumericFields")?;
+    let ev_fields = req_list("cleanup", "evidenceItemFields")?;
+    let ev_weight_max = req_number("cleanup", "evidenceWeightMax")? as f64;
     let (token_allowed, token_ci) =
         rule_schema::tokens("cleanup").ok_or_else(|| SCHEMA_UNAVAILABLE.to_string())?;
-    let max_text = rule_schema::number("cleanup", "maxTextLen").unwrap_or(0);
-    let max_target = rule_schema::number("cleanup", "maxTargetLen").unwrap_or(0);
+    let max_text = req_number("cleanup", "maxTextLen")?;
+    let max_target = req_number("cleanup", "maxTargetLen")?;
 
     if let Some(k) = unknown_rule_field(top, &top_fields) {
         return Err(format!("顶层未知字段 {k}"));
@@ -333,7 +373,7 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
         .and_then(Value::as_array)
         .filter(|a| !a.is_empty())
         .ok_or_else(|| "groups 缺失或为空数组".to_string())?;
-    if groups.len() > rule_schema::number("cleanup", "maxGroups").unwrap_or(0) {
+    if groups.len() > req_number("cleanup", "maxGroups")? {
         return Err(format!("组数 {} 超上限", groups.len()));
     }
 
@@ -355,7 +395,7 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
         }
         let owned_items = go.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
         let owned_subs = go.get("subGroups").and_then(Value::as_array).cloned().unwrap_or_default();
-        if owned_subs.len() > rule_schema::number("cleanup", "maxSubGroupsPerGroup").unwrap_or(0) {
+        if owned_subs.len() > req_number("cleanup", "maxSubGroupsPerGroup")? {
             return Err("subGroups 数量超上限".to_string());
         }
         for io in owned_items.iter().filter_map(Value::as_object) {
@@ -416,7 +456,7 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
             }
         }
     }
-    if item_count > rule_schema::number("cleanup", "maxItems").unwrap_or(0) {
+    if item_count > req_number("cleanup", "maxItems")? {
         return Err(format!("条目数 {item_count} 超上限"));
     }
     // token 登记集：规则库是签名发布物，未登记变量混进来会造成跨机器行为漂移
@@ -436,6 +476,23 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
 }
 
 pub(super) const SCHEMA_UNAVAILABLE: &str = "规则契约表不可用（tools/rule-schema.json 解析失败），已按 fail-closed 拒绝";
+
+/// 契约表字符串数组查询，**取不到即整包拒绝**（审计 §4.6）。
+///
+/// 与 `rule_schema::list` 的区别只有一个：把 `None` 从「调用方随便选个默认值」
+/// 变成「调用方必须处理」。契约表头声明的是 fail-closed，这里就是那句话的落点。
+fn req_list(domain: &str, key: &str) -> Result<Vec<String>, String> {
+    rule_schema::list(domain, key).ok_or_else(|| format!("{SCHEMA_UNAVAILABLE}（缺 {domain}.{key}）"))
+}
+
+/// 契约表数值查询，**取不到即整包拒绝**（审计 §4.6）。
+///
+/// 原实现对上限类用 `unwrap_or(0)`。那个默认值**方向上是 fail-closed**（0 会拒掉
+/// 一切），但错误原因是假的：用户/维护者看到的是「条数超上限」，而真实原因是
+/// 契约表缺这个键 —— 排查会跑去数条目数，找不到问题。
+fn req_number(domain: &str, key: &str) -> Result<usize, String> {
+    rule_schema::number(domain, key).ok_or_else(|| format!("{SCHEMA_UNAVAILABLE}（缺 {domain}.{key}）"))
+}
 
 /// 一条规则的检查参数（避免 20 个位置参数）
 pub(super) struct Ctx<'a> {
@@ -652,7 +709,7 @@ pub(super) fn check_cleanup_item(
         return Err(format!("规则 {id}: prov.sourceClass「{sc}」不在 {:?} 之内", c.source_classes));
     }
     let fk_list = it.get("fileKeys").and_then(Value::as_array).cloned().unwrap_or_default();
-    if fk_list.len() > rule_schema::number("cleanup", "maxFileKeysPerItem").unwrap_or(0) {
+    if fk_list.len() > req_number("cleanup", "maxFileKeysPerItem")? {
         return Err(format!("规则 {id}: fileKeys 条数超上限"));
     }
     for fk in fk_list.iter().filter_map(Value::as_object) {
@@ -690,7 +747,7 @@ pub(super) fn check_cleanup_item(
         seen_targets.insert(fp, id.clone());
     }
     let rk_list = it.get("regKeys").and_then(Value::as_array).cloned().unwrap_or_default();
-    if rk_list.len() > rule_schema::number("cleanup", "maxRegKeysPerItem").unwrap_or(0) {
+    if rk_list.len() > req_number("cleanup", "maxRegKeysPerItem")? {
         return Err(format!("规则 {id}: regKeys 条数超上限"));
     }
     for rk in rk_list.iter().filter_map(Value::as_object) {
@@ -738,7 +795,7 @@ pub(super) fn check_cleanup_item(
         let arr = ep
             .as_array()
             .ok_or_else(|| format!("规则 {id}: excludePaths 必须是数组"))?;
-        if arr.len() > rule_schema::number("cleanup", "maxExcludePathsPerItem").unwrap_or(0) {
+        if arr.len() > req_number("cleanup", "maxExcludePathsPerItem")? {
             return Err(format!("规则 {id}: excludePaths 条数超上限"));
         }
         let mut has_named_value_exclude = false;

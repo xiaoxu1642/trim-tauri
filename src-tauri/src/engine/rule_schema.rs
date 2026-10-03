@@ -138,6 +138,79 @@ mod tests {
         }
     }
 
+    /// 2026-10-04 磁盘清理审计 §4.6：清理域**每一个**被查询的键都必须在表里存在。
+    ///
+    /// 为什么这条与上面那条并存、而不是并进去：上面只钉了「关键的几个键在不在」，
+    /// 而 `validate_cleanup_package` 实际查询 21 个字符串数组键 + 9 个数值。任何一个
+    /// 键被从 `tools/rule-schema.json` 里删掉或改名，`rule_schema::list` 就返回
+    /// `None` —— 修复前那 17 处会各自挑一个默认值（多数碰巧 fail-closed，两条不是：
+    /// `positiveIntFields` 变空会让 **minAge 护栏静默消失**，`exclusiveNumericFields`
+    /// 变空会让扫描/执行两侧对「双声明」的处理分叉）。
+    ///
+    /// 修复后这些键走 `req_list`/`req_number`，取不到即整包拒绝。这条测试确保
+    /// 「清单」与「实现」不漂：实现里新增一个键查询，必须同步登记到这里。
+    #[test]
+    fn 清理域被查询的每个契约键都存在() {
+        // 与 rules.rs::validate_cleanup_package / check_cleanup_item 的查询一一对应
+        for k in [
+            "topFields",
+            "topRequired",
+            "groupFields",
+            "groupRequired",
+            "subGroupFields",
+            "subGroupRequired",
+            "itemFields",
+            "itemRequired",
+            "itemBannedKeys",
+            "fileKeyFields",
+            "fileKeyRequired",
+            "regKeyFields",
+            "regKeyRequired",
+            "provFields",
+            "provRequired",
+            "riskLevels",
+            "sourceClasses",
+            // ↓ 这三个此前**不在**上面那条存在性测试里，而恰好就是 fail-open 的那批
+            "nonEmptyArrayFields",
+            "positiveIntFields",
+            "exclusiveNumericFields",
+            "evidenceItemFields",
+        ] {
+            assert!(
+                list("cleanup", k).is_some(),
+                "cleanup.{k} 缺失 —— validate_cleanup_package 会因此整包拒绝（fail-closed），\
+                 说明实现与契约表漂了。改实现请同步改 tools/rule-schema.json 并更新本清单。"
+            );
+        }
+        for k in [
+            "evidenceWeightMax",
+            "maxTextLen",
+            "maxTargetLen",
+            "maxGroups",
+            "maxSubGroupsPerGroup",
+            "maxItems",
+            "maxFileKeysPerItem",
+            "maxRegKeysPerItem",
+            "maxExcludePathsPerItem",
+        ] {
+            assert!(
+                number("cleanup", k).is_some(),
+                "cleanup.{k} 缺失 —— 同上；且原实现曾对它 `unwrap_or(0)`，\
+                 方向虽 fail-closed 但错误原因是假的（会报成「条数超上限」）"
+            );
+        }
+        // 三个关键键必须**非空**：空数组 = 该类校验形同虚设（比缺键更隐蔽，
+        // 因为 `list` 会返回 Some(空 vec)，`is_some()` 照样过）
+        for k in ["positiveIntFields", "exclusiveNumericFields", "nonEmptyArrayFields"] {
+            let v = list("cleanup", k).unwrap_or_default();
+            assert!(
+                !v.is_empty(),
+                "cleanup.{k} 是**空数组** —— 比缺键更隐蔽：`list` 返回 Some(空)，\
+                 `is_some()` 过得去，但那一条校验等于没写。minAge 护栏就靠它。"
+            );
+        }
+    }
+
     #[test]
     fn 两域token集保持刻意不同() {
         // 这条断言防的是"哪天有人把两张清单合并成一份等价集"（AGENTS §5.16 / N6）

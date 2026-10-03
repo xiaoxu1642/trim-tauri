@@ -212,6 +212,24 @@ pub fn normalize_for_compare(p: &str) -> Norm {
     } else if s.starts_with("\\\\?\\") {
         s = s[4..].to_string();
     }
+    // 2026-10-04（磁盘清理审计 §3.1）：`\\.\` 与 `\??\` 是**设备路径**，Win32 直接
+    // 交给对象管理器、跳过常规路径解析。`\\.\C:\Users\<me>\Documents` 与
+    // `C:\Users\<me>\Documents` 是同一棵树，但前者会一路穿过 split_prefix 的 UNC
+    // 分支被归一化成字面量 `\\.\c:\users\…`，与任何根都不匹配 ⇒ 判定从
+    // 「受保护」翻转成「放行」。本机实测该形态被 OS 承认：
+    // `Get-Item -LiteralPath "\\.\$env:TEMP"` 正常返回绝对路径。
+    //
+    // 选**拒绝**而不是归一化：设备路径里还有 `\\.\PIPE\…`、`\\.\PhysicalDrive0`
+    // 这类根本不按路径语义解释的形态，我们没有能力枚举它们是否安全。
+    // 「无法判定 ⇒ 按受保护处理」正是本函数的 fail-closed 契约（`!n.ok` 即拦）。
+    //
+    // ⚠️ 与 JS 权威（vendor/upstream-js/src/main/ps-protect-path.js）**刻意分歧**：
+    // 那侧同样漏了这两个前缀，但 vendor 只读不回改。沿用本段上一条的既定处置——
+    // 「Tauri 侧判定统一走本函数，先在执行端收紧」，向量由本文件下方用例钉住，
+    // 不塞进 JS 生成的 parity 夹具（塞进去会与 `matches_js_authority` 打架）。
+    if s.starts_with("\\\\.\\") || s.starts_with("\\??\\") {
+        return fail();
+    }
     // v2-L4P-17（B-3）续：前导 `//`（正斜杠 UNC）。Node `path.win32.resolve` 把两个
     // 前导分隔符（不分方向）都认作 UNC 起点（实测 `//srv/pub/x` → `\\srv\pub\x`），
     // 而 Rust `Path::is_absolute` 只认反斜杠 ⇒ `//srv/...` 会被当相对路径拼 CWD，
@@ -846,5 +864,52 @@ mod tests {
             "同 share 根之外的目标被过度保护");
         // 无 UNC 根（默认清单）时：UNC 目标不命中任何本地根，放行（夹具同结论）
         assert!(!is_path_protected_with(r"\\srv\pub\Windows\System32", &roots()));
+    }
+
+    /// 2026-10-04 磁盘清理审计 §3.1：设备路径前缀不得翻转保护判定。
+    ///
+    /// 判据的形状是**同一条路径的两种写法必须同结论**——这比「某个具体输入被拒」
+    /// 更强：只要 `\\.\C:\…\Documents` 放行而 `C:\…\Documents` 受保护，就是缺陷，
+    /// 不管中间经过了几层归一化。改动归一化实现时这条会自动跟着走。
+    #[test]
+    fn 设备路径前缀不得把受保护翻成放行() {
+        let r = build_roots(
+            // 两个都放 subtree 位：extraExact 是**精确**匹配（见 build_roots 语义），
+            // 放进去的话 `…\Documents\a.txt` 不命中，基线断言会假失败。
+            &[
+                r"C:\Users\tester\AppData\Local\Trim".to_string(),
+                r"C:\Users\tester\Documents".to_string(),
+            ],
+            &[],
+            &[],
+        );
+        // 基线：不带前缀的形态必须受保护（否则下面几条的对照无意义）
+        assert!(
+            is_path_protected_with(r"C:\Users\tester\Documents\a.txt", &r),
+            "前提失效：普通形态本身就未被保护，夹具/根构造变了"
+        );
+        for spelling in [
+            r"\\.\C:\Users\tester\Documents\a.txt",
+            r"\??\C:\Users\tester\Documents\a.txt",
+            r"\\.\C:\Users\tester\AppData\Local\Trim",
+            r"\??\C:\Users\tester\AppData\Local\Trim",
+        ] {
+            assert!(
+                is_path_protected_with(spelling, &r),
+                "设备路径形态 `{spelling}` 被放行 —— 与不带前缀的同一路径结论相反，\
+                 等于用一个前缀同时绕过「永久删除」与「保护清单」两道设计"
+            );
+        }
+        // 归一化层必须判为「无法判定」（fail-closed），而不是归一成了别的路径
+        for spelling in [r"\\.\C:\x", r"\??\C:\x", r"\\.\PIPE\foo", r"\\.\PhysicalDrive0"] {
+            assert!(
+                !normalize_for_compare(spelling).ok,
+                "设备路径 `{spelling}` 被归一化成合法路径而不是拒绝 —— \
+                 拒绝才是本函数的 fail-closed 契约（`!n.ok` ⇒ 调用方按受保护拦）"
+            );
+        }
+        // 刻意**不**放进 matches_js_authority 的 parity 向量：JS 权威有同一缺口，
+        // 塞进去会与 `!js.contains(...)` 打架；分歧与理由记在 normalize_for_compare
+        // 的注释里，由本用例钉住 Rust 侧结论。
     }
 }

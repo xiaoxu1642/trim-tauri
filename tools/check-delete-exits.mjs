@@ -79,7 +79,6 @@ const EXEMPTS = new Map([
 // apply.rs 命令体内（714 行），此前只靠第 3 组「恰好 includes is_path_protected」放行
 // ——谁删掉那行，门禁不会红。进正向清单后「掉闸即红」。
 const MUST_PROTECT = [
-  'cleanup_execute',
   'fileclean_delete_file',
   'fileclean_execute',
   'finder_delete',
@@ -94,8 +93,29 @@ const MUST_PROTECT = [
 // remove_dir_all/remove_file + is_path_protected 全在 retry_failed_delete_blocking ——
 // 命令体口径的 MUST_PROTECT 对它恒红，所以单独登记 {命令, helper}，钉住 helper 体内
 // 的 protect 调用。helper 改名/protect 被删/搬出 src 均红。
+//
+// ⚠️ 第三段 `file` 是 2026-10-04 磁盘清理审计 §2.1 补的，且**不是可选的锦上添花**：
+//
+//   cleanup_execute 此前登记在 MUST_PROTECT（命令体口径）。但命令体
+//   （commands/cleanup/scan_execute.rs）里唯一的 is_path_protected 在 384 行，位于
+//   `if to_recycle && …` 分支内 —— v3.3.0 用户裁定「常规清理 toRecycle 恒 false」
+//   之后**产品语义上不可达**。真正执行永久删除的闸门在
+//   `engine/native/cleanup.rs::cleanup_execute:680`，那个文件不在本门禁扫描网内。
+//   判红实验：把 680 行改成 `else if false`，本门禁四组断言**全部照绿**（已实测）。
+//   也就是说「删掉全仓唯一永久删除链的保护判定」是零告警的。
+//
+//   修法两条，缺一不可：
+//   ① 把 cleanup_execute 从 MUST_PROTECT 挪进本表，并**指名文件**——
+//      `extractBody` 只按函数名搜索，而命令体与引擎函数**同名**
+//      （scan_execute.rs / engine/native/cleanup.rs 都是 `cleanup_execute`），
+//      不指名就会解析到命令体那个，等于什么都没修。
+//   ② 指名文件后本组判的是引擎函数；命令体那处 384 行不再能满足任何一条棘轮，
+//      也就回到报告里要求的「384 单独不足以满足正向棘轮」。
+//
+//   第三段 file 是**相对 src-tauri** 的（ROOT 就是 src-tauri，见 :28）。
 const MUST_PROTECT_VIA_HELPER = [
   ['cleanup_retry_failed_delete', 'retry_failed_delete_blocking'],
+  ['cleanup_execute', 'cleanup_execute', 'src/engine/native/cleanup.rs'],
 ];
 
 // 审查 L-5（2026-10-03）二跳盲区登记（只登记不改，按白名单纪律）：
@@ -195,6 +215,36 @@ function extractBody(name) {
   return null;
 }
 
+// 二跳登记表可带第三段 `file`（相对 src-tauri）。**同名函数必须指名**：
+// 命令体与引擎函数可以同名（cleanup_execute 就是这种），按名字搜会命中
+// readdir 顺序里的第一个，那正是审计 §2.1 里「登记了等于没登记」的成因。
+// 不指名时这里显式报歧义而不是默默取第一个 —— 歧义本身就该红。
+function resolveHelperBody(helper, file) {
+  if (!file) {
+    const all = srcFiles
+      .filter((f) => new RegExp(`\\bfn\\s+${helper}\\s*[<(]`).test(stripRustComments(fs.readFileSync(f, 'utf8'))))
+      .map((f) => path.relative(ROOT, f).replace(/\\/g, '/'));
+    if (all.length > 1) {
+      return { err: `helper ${helper} 在 ${all.length} 个文件里同名（${all.join(' / ')}）——必须登记第三段 file 指名` };
+    }
+    return { body: extractBody(helper) };
+  }
+  const abs = path.join(ROOT, file);
+  if (!fs.existsSync(abs)) return { err: `helper ${helper} 登记的文件 ${file} 不存在` };
+  const src = fs.readFileSync(abs, 'utf8');
+  const re = new RegExp(`\\bfn\\s+${helper}\\s*[<(]`);
+  const clean = stripRustComments(src);
+  const mc = clean.match(re);
+  if (!mc) return { err: `${file} 里找不到 fn ${helper}（改名/搬走了？）` };
+  const start = clean.indexOf('{', mc.index);
+  let depth = 0, end = -1;
+  for (let i = start; i < clean.length; i++) {
+    if (clean[i] === '{') depth++;
+    else if (clean[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  return { body: { file, body: end > 0 ? clean.slice(mc.index, end) : '' } };
+}
+
 const bodies = new Map();
 const missing = [];
 for (const name of commands) {
@@ -204,10 +254,19 @@ for (const name of commands) {
 }
 
 // ---- 3. 三层断言 ----
+// 二跳登记的命令同样算「已受控」：它的闸门由 2b 钉在 helper 体内，不在命令体里。
+const HELPER_CMDS = new Set(MUST_PROTECT_VIA_HELPER.map(([cmd]) => cmd));
 const exemptStale = [...EXEMPTS.keys()].filter((k) => !commands.includes(k));
 check(exemptStale.length === 0, '1a. 豁免清单无陈旧条目（命令已退役须同步摘除）', exemptStale.join(', ') || '全部在册');
 const mustStale = MUST_PROTECT.filter((k) => !commands.includes(k));
 check(mustStale.length === 0, '1b. 正向清单无陈旧条目', mustStale.join(', ') || '全部在册');
+const helperStale = [...HELPER_CMDS].filter((k) => !commands.includes(k));
+check(helperStale.length === 0, '1d. 二跳登记表无陈旧条目', helperStale.join(', ') || '全部在册');
+// 同一命令不得同时出现在两张表：命令体口径与 helper 体口径互斥，
+// 同时登记等于「哪张表漏了都能被另一张表顶替」，棘轮就松了。
+const dualRegistered = MUST_PROTECT.filter((k) => HELPER_CMDS.has(k));
+check(dualRegistered.length === 0, '1e. 同一命令不得同时登记在正向清单与二跳表',
+  dualRegistered.join(', ') || '无重复登记');
 
 const missMUST = MUST_PROTECT.filter((k) => !bodies.has(k));
 check(missMUST.length === 0, '1c. 正向清单命令全部在源码中定位到函数体', missMUST.length ? missMUST.join(', ') : `${MUST_PROTECT.length}/${MUST_PROTECT.length}`);
@@ -220,11 +279,12 @@ check(lostProtect.length === 0, '2. 正向出口的 is_path_protected 前置不�
 //     helper 体内的 is_path_protected 被删即红。
 {
   const helperIssues = [];
-  for (const [cmd, helper] of MUST_PROTECT_VIA_HELPER) {
+  for (const [cmd, helper, file] of MUST_PROTECT_VIA_HELPER) {
     if (!commands.includes(cmd)) { helperIssues.push(`命令 ${cmd} 已不在 generate_handler! 清单——登记陈旧`); continue; }
-    const hb = extractBody(helper);
-    if (!hb) { helperIssues.push(`${cmd} 的 helper ${helper} 未能在源码中定位（改名/搬走了？）`); continue; }
-    if (!hb.body.includes('is_path_protected')) helperIssues.push(`${helper}(${hb.file}) 体内已无 is_path_protected——${cmd} 的删除闸被拆`);
+    const r = resolveHelperBody(helper, file);
+    if (r.err) { helperIssues.push(r.err); continue; }
+    if (!r.body) { helperIssues.push(`${cmd} 的 helper ${helper} 未能在源码中定位（改名/搬走了？）`); continue; }
+    if (!r.body.body.includes('is_path_protected')) helperIssues.push(`${helper}(${r.body.file}) 体内已无 is_path_protected——${cmd} 的删除闸被拆`);
   }
   check(helperIssues.length === 0, '2b. 二跳出口的 helper 体内 is_path_protected 在位（L-4 棘轮）',
     helperIssues.length ? helperIssues.join('；') : `${MUST_PROTECT_VIA_HELPER.length} 条 helper 链全部在位`);
@@ -237,6 +297,19 @@ for (const [name, { file, body }] of bodies) {
   if (!hit) continue;
   if (body.includes('is_path_protected')) continue;
   if (EXEMPTS.has(name)) continue;
+  if (HELPER_CMDS.has(name)) {
+    // 闸门在 helper 体内，由 2b 钉住；命令体自身没有 protect 是**登记形态**而非缺口。
+    // 反向盲区：若某天命令体自己开始删文件（不再委托 helper），命令体里出现删除标记
+    // 而 protect 仍只在 helper 里，就成了「新出口未被棘轮覆盖」。那种情况必须红。
+    const helperResolved = MUST_PROTECT_VIA_HELPER
+      .filter(([cmd]) => cmd === name)
+      .map(([, helper, f]) => resolveHelperBody(helper, f))
+      .some((r) => !r.err && r.body && r.body.body.includes('is_path_protected'));
+    if (!helperResolved) {
+      unknownExits.push(`${name}(${file}) 命令体命中删除标记 [${hit}]，而其 helper 体内已无 is_path_protected——新出口未被棘轮覆盖`);
+    }
+    continue;
+  }
   if (MUST_PROTECT.includes(name)) {
     unknownExits.push(`${name}(${file}) 正向清单出口却未扫到 is_path_protected`);
   } else {
@@ -256,11 +329,11 @@ check(exemptMissing.length === 0, '4. 豁免条目与函数体现状一致', exe
 // v2-L4P-16（E-5）：定位失败从「ℹ 放行」改为判红。函数改名/搬出 src-tauri/src 会让
 // 删除出口网整条脱网——「新永久删出口默认红」的防线可以在无声中被绕掉，方向必须
 // fail-closed。豁免/正向清单里的命令仍允许仅提示（它们的受控性由登记理由兜住）。
-const missingCmds = missing.filter((n) => !EXEMPTS.has(n) && !MUST_PROTECT.includes(n));
+const missingCmds = missing.filter((n) => !EXEMPTS.has(n) && !MUST_PROTECT.includes(n) && !HELPER_CMDS.has(n));
 check(missingCmds.length === 0, '5. 命令体定位失败即红（fail-closed，防出口网无声脱网）',
   missingCmds.length ? `未定位：${missingCmds.join(', ')}` : `${commands.length} 条命令全部定位到函数体`);
 if (missing.length > missingCmds.length) {
-  console.log(`ℹ 豁免/正向清单内未定位的命令（受控性由登记理由兜住）：${missing.filter((n) => EXEMPTS.has(n) || MUST_PROTECT.includes(n)).join(', ')}`);
+  console.log(`ℹ 豁免/正向清单内未定位的命令（受控性由登记理由兜住）：${missing.filter((n) => EXEMPTS.has(n) || MUST_PROTECT.includes(n) || HELPER_CMDS.has(n)).join(', ')}`);
 }
 
 console.log('');
