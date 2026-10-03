@@ -13,6 +13,12 @@ use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW};
 use super::common::*;
 use super::registry::*;
+
+/// DISM /StartComponentCleanup /ResetBase 的超时上限（2026-10-04 审计 §4.4）。
+/// 与 maintenance.rs 的 MAINT_CMD_TIMEOUT 同级（sfc/DISM/sc 属同级长耗时子进程，
+/// 合法就要跑几十分钟）；登记在 `tools/check-ps-callsites.mjs` 的
+/// TIMEOUT_SPAWN_SITES 表（F 组），秒数一致性由该门禁对拍。
+const DISM_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 // ==================== B10 cleanup_detail：条目明细枚举 ====================
 
 /// 清理条目明细枚举（对应 cleanup_detail.ps1，S3）
@@ -631,19 +637,37 @@ pub fn cleanup_execute(
 
         // special=dism：DISM /StartComponentCleanup /ResetBase（对齐 PS 执行语义；
         // 高危提示已在前端红色确认层，/ResetBase 后更新不可卸载）
+        // 2026-10-04 审计 §4.4：必须带超时。/ResetBase 合法就要跑几十分钟，裸
+        // .output() 等的是 stdout/stderr 管道关闭——DISM 前端进程把活交给 TiWorker
+        // 等后代后若被占住管道，这里就永久挂住整条清理链（同文件 reg export 备份
+        // 早在 v2-L4P-29 就为此走了 quiet_cmd_timeout，本处是漏改的同类）。
+        // 到点 kill 的是 DISM 前端进程本身：CBS/TiWorker 的事务由组件栈自行回滚
+        // 或续跑，中断是安全的，最坏结果是本条报失败、用户可重跑。
         if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
-            let dism = crate::engine::systembin::quiet_cmd(system_tool("dism.exe"))
-                .args(["/Online", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase"])
-                .output();
+            let dism = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("dism.exe"),
+                &["/Online", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase"],
+                DISM_CLEANUP_TIMEOUT,
+            );
             let (status, message) = match &dism {
                 Ok(o) if o.status.success() => (
                     "ok",
                     "DISM 组件存储清理完成（/ResetBase 已执行，更新将不可卸载）".to_string(),
                 ),
-                Ok(o) => (
-                    "fail",
-                    format!("DISM 清理失败，退出码 {}", o.status.code().unwrap_or(-1)),
-                ),
+                Ok(o) => {
+                    // 超时收口时 quiet_cmd_timeout 把原因写进 stderr，必须带给用户，
+                    // 否则「失败但不知道是超时还是 DISM 自己报错」又是一层雾
+                    let note = String::from_utf8_lossy(&o.stderr);
+                    let note = note.trim();
+                    (
+                        "fail",
+                        if note.is_empty() {
+                            format!("DISM 清理失败，退出码 {}", o.status.code().unwrap_or(-1))
+                        } else {
+                            format!("DISM 清理失败，退出码 {}：{note}", o.status.code().unwrap_or(-1))
+                        },
+                    )
+                }
                 Err(e) => ("fail", format!("DISM 执行失败: {e}")),
             };
             details.push(json!({

@@ -337,6 +337,11 @@ const TIMEOUT_SPAWN_SITES = [
   // v5 R-3：运行库装包/DISM 从裸 .output() 改成带超时 —— 挂住时这条 IPC 永不返回，
   // 前端按钮卡在「安装中…」。上游 Electron 轨本来就带 600s，迁移时丢了。
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: 'REDIST_INSTALL_TIMEOUT', reason: '运行库修复：vc_redist / netfx48 静默安装与 DISM 启用 NetFx3', timeoutConst: 'REDIST_INSTALL_TIMEOUT', secs: 600 },
+  // 2026-10-04 审计 §4.4：清理页 special=dism 的 /ResetBase 是漏改的同类裸 .output()，
+  // /ResetBase 合法就要跑几十分钟，后代 TiWorker 占住管道即永久挂住整条清理链。
+  // 1800s 对齐 MAINT_CMD_TIMEOUT（sfc/DISM/sc 同级长耗时）；到点杀的是 DISM 前端
+  // 进程，CBS/TiWorker 事务自回滚，中断安全。
+  { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: 'DISM_CLEANUP_TIMEOUT', reason: '清理页 DISM /StartComponentCleanup /ResetBase（审计 §4.4）', timeoutConst: 'DISM_CLEANUP_TIMEOUT', secs: 1800 },
 ];
 const TIMEOUT_SECS = 15;
 
