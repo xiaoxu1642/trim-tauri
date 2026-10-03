@@ -234,7 +234,35 @@ fn backup_rel_name(rule_id: &str, batch_ts: i64, seq: u32, fname: &str) -> Strin
     format!("{rule_id}\\{batch_ts}_{seq}_{fname}")
 }
 
+/// 孤儿副本回收的冷静期（2026-10-04 审计 §4.5③）：清单落盘失败的那批副本要等
+/// 24h 才回收——副本刚写完、清单还没落盘的瞬间窗口，以及「清单写失败但磁盘稍后
+/// 可写」的重试窗口，都不允许被 GC 抢跑。生产用常量；测试经 `_with` 变体注入 0。
+const ORPHAN_GC_MIN_AGE_MS: i64 = 24 * 3600 * 1000;
+
+/// 备份根的包含性核验（2026-10-04 审计 §4.5①）。
+///
+/// 词法准入（拒 `..`/绝对/盘符）拦不住**根内的重解析段**：`rel = "sub\file"` 且
+/// `sub` 是指向根外的 junction 时，`root.join(rel)` 解析到根外，而
+/// `symlink_metadata` 报的是**目标**属性 ⇒ `is_reparse` 为 false ⇒ 旧实现照删。
+/// 这里用 canonicalize 拿 victim 的真实落点：解析不出（不存在/悬空）或解析到
+/// 备份根之外一律 fail-closed 拒删——裁剪是多删一份坏处有限的操作，删错根外
+/// 文件的代价不对称。
+fn backup_victim_within_root(root_canon: &std::path::Path, victim: &std::path::Path) -> bool {
+    let Ok(real) = std::fs::canonicalize(victim) else {
+        return false;
+    };
+    let real_low = real.to_string_lossy().to_lowercase();
+    let root_low = root_canon.to_string_lossy().to_lowercase();
+    let root_low = root_low.trim_end_matches('\\');
+    real_low != root_low && real_low.starts_with(&format!("{root_low}\\"))
+}
+
 fn prune_file_backups(root: &std::path::Path, keep: usize) {
+    prune_file_backups_with(root, keep, ORPHAN_GC_MIN_AGE_MS);
+}
+
+/// 同上，`min_orphan_age_ms` 可注入（测试传 0；见 ORPHAN_GC_MIN_AGE_MS 注释）。
+fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_ms: i64) {
     let Ok(rd) = std::fs::read_dir(root) else { return };
     let mut manifests: Vec<String> = rd
         .flatten()
@@ -245,52 +273,154 @@ fn prune_file_backups(root: &std::path::Path, keep: usize) {
                 .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
         })
         .collect();
-    if manifests.len() <= keep {
-        return;
-    }
-    manifests.sort(); // 时间戳升序：前面是最老的批次
-    // 幸存者 = **最新的 keep 份** ⇒ 切点必须按长度算。写成 `split_off(keep)` 会留下
-    // `len - keep` 份（3 份 keep=2 时只活 1 份），实测把我自己的用例当场判红才暴露。
-    let survivors = manifests.split_off(manifests.len() - keep);
-    // **幸存清单仍引用的 rel 一律不删**。批次段是 N10 才加进 `rel` 的，改名之前写的
-    // 存量批次里 `rel` 可以跨批次相同 —— 那份物理文件同时属于两份清单，跟着老批次删掉
-    // 就等于把幸存批次的还原凭据一起毁掉（症状与 N10 同源：还原静默拿回别的时间点的内容
-    // 或干脆"备份文件已不存在"）。
-    let mut kept_rels: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for m in &survivors {
+    // §4.5③ 的真源：**现存全部清单**引用的 rel 集合。孤儿副本（清单写失败的那批）
+    // 不在任何清单里，这是它们唯一可判定的「无人认领」口径。
+    let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &manifests {
         for rel in manifest_rels(&root.join(m)) {
-            kept_rels.insert(rel.to_lowercase());
+            referenced.insert(rel.to_lowercase());
         }
     }
-    for oldest in &manifests {
-        let mpath = root.join(oldest);
-        for rel in manifest_rels(&mpath) {
-            // 与还原通道同一道准入：不含 .. / 不是绝对路径 / 不带盘符
-            if rel.is_empty()
-                || rel.contains("..")
-                || rel.starts_with('\\')
-                || rel.starts_with('/')
-                || rel.contains(':')
-            {
-                continue;
+    // 裁剪失败计数（§4.5②）：回收站满/禁用时旧实现 `let _ =` 静默停摆，
+    // BACKUP_KEEP 上限形同虚设且无人知晓——现在逐条 warn + 汇总。
+    let mut prune_failed = 0usize;
+    let root_canon = std::fs::canonicalize(root).ok();
+    if manifests.len() > keep {
+        manifests.sort(); // 时间戳升序：前面是最老的批次
+        // 幸存者 = **最新的 keep 份** ⇒ 切点必须按长度算。写成 `split_off(keep)` 会留下
+        // `len - keep` 份（3 份 keep=2 时只活 1 份），实测把我自己的用例当场判红才暴露。
+        let survivors = manifests.split_off(manifests.len() - keep);
+        // **幸存清单仍引用的 rel 一律不删**。批次段是 N10 才加进 `rel` 的，改名之前写的
+        // 存量批次里 `rel` 可以跨批次相同 —— 那份物理文件同时属于两份清单，跟着老批次删掉
+        // 就等于把幸存批次的还原凭据一起毁掉（症状与 N10 同源：还原静默拿回别的时间点的内容
+        // 或干脆"备份文件已不存在"）。
+        let mut kept_rels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for m in &survivors {
+            for rel in manifest_rels(&root.join(m)) {
+                kept_rels.insert(rel.to_lowercase());
             }
-            if kept_rels.contains(&rel.to_lowercase()) {
-                continue; // 还有幸存批次指着它，只删清单不删字节
+        }
+        for oldest in &manifests {
+            let mpath = root.join(oldest);
+            for rel in manifest_rels(&mpath) {
+                // 与还原通道同一道准入：不含 .. / 不是绝对路径 / 不带盘符
+                if rel.is_empty()
+                    || rel.contains("..")
+                    || rel.starts_with('\\')
+                    || rel.starts_with('/')
+                    || rel.contains(':')
+                {
+                    continue;
+                }
+                if kept_rels.contains(&rel.to_lowercase()) {
+                    continue; // 还有幸存批次指着它，只删清单不删字节
+                }
+                // v2-L4P-33（C-5）：引擎级裁剪出口回收站优先；先拒 reparse，链接件不投
+                let victim = root.join(&rel);
+                let reparse = std::fs::symlink_metadata(&victim)
+                    .map(|m| crate::engine::protect::is_reparse(&m))
+                    .unwrap_or(true);
+                if reparse {
+                    continue;
+                }
+                // §4.5①：junction 段可把词法合法的 rel 重定向到备份根之外——
+                // 真实落点必须在根内，且解析不出来就拒（包含性核验先行，见函数注释）
+                if let Some(rc) = &root_canon {
+                    if !backup_victim_within_root(rc, &victim) {
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!("备份裁剪：副本 {rel} 的真实落点不在备份根内（根内含重解析段？），已拒删"),
+                        );
+                        continue;
+                    }
+                }
+                if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(victim.as_os_str()) {
+                    prune_failed += 1;
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("备份裁剪：副本 {rel} 移入回收站失败: {e}"),
+                    );
+                }
             }
-            // v2-L4P-33（C-5）：引擎级裁剪出口回收站优先；先拒 reparse，链接件不投
-            let victim = root.join(&rel);
-            let reparse = std::fs::symlink_metadata(&victim)
+            let reparse_m = std::fs::symlink_metadata(&mpath)
                 .map(|m| crate::engine::protect::is_reparse(&m))
                 .unwrap_or(true);
-            if !reparse {
-                let _ = trim_finder::scan::recycle::send_to_trash_os(victim.as_os_str());
+            if !reparse_m {
+                if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(mpath.as_os_str()) {
+                    prune_failed += 1;
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("备份裁剪：清单 {oldest} 移入回收站失败: {e}"),
+                    );
+                }
             }
         }
-        let reparse_m = std::fs::symlink_metadata(&mpath)
-            .map(|m| crate::engine::protect::is_reparse(&m))
-            .unwrap_or(true);
-        if !reparse_m {
-            let _ = trim_finder::scan::recycle::send_to_trash_os(mpath.as_os_str());
+    }
+    if prune_failed > 0 {
+        crate::engine::log::write_log(
+            "warn",
+            &format!(
+                "备份裁剪有 {prune_failed} 个对象移入回收站失败（回收站满/禁用？）， \
+                 保留上限本轮超限；将在下次清理时重试裁剪"
+            ),
+        );
+    }
+    // §4.5③：孤儿副本回收——清单写失败时那批副本没有清单指向，按旧实现永不回收。
+    // 判定口径 = 不被任何现存清单引用 + 已过冷静期 + 非 reparse。这里也是「自有
+    // 数据根内的删除出口」：root 是 paths::backup_write_dir 自有备份根，protect
+    // 清单整含 app_data_dir 对自有目录恒拒、无判定意义（同 realtime_report_delete 豁免理由）。
+    let now = crate::engine::now_ms();
+    if let Ok(rd) = std::fs::read_dir(root) {
+        let mut orphan_count = 0usize;
+        for ent in rd.flatten() {
+            let rule_dir = ent.path();
+            if !rule_dir.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&rule_dir) else { continue };
+            for f in files.flatten() {
+                let fp = f.path();
+                if !fp.is_file() {
+                    continue; // 副本形状是 `<规则id>\` 下的平面文件，子目录非预期形态不动
+                }
+                let Some(rel) = fp
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_lowercase())
+                else {
+                    continue;
+                };
+                if referenced.contains(&rel) {
+                    continue;
+                }
+                let Ok(md) = std::fs::symlink_metadata(&fp) else { continue };
+                if crate::engine::protect::is_reparse(&md) {
+                    continue;
+                }
+                let age_ok = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| (now - d.as_millis() as i64) >= min_orphan_age_ms)
+                    .unwrap_or(false);
+                if !age_ok {
+                    continue; // 冷静期内可能是「清单还没落盘」的在途副本
+                }
+                if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(fp.as_os_str()) {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("孤儿备份副本回收失败（{rel}）: {e}"),
+                    );
+                    continue;
+                }
+                orphan_count += 1;
+            }
+        }
+        if orphan_count > 0 {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("回收了 {orphan_count} 个孤儿备份副本（其清单曾写入失败，无还原依据）"),
+            );
         }
     }
     // 空规则目录回收（副本按 `<规则id>\` 分目录，删空了才收，非目录自然跳过）
@@ -980,11 +1110,29 @@ let mut freed = 0i64;
                     // 审查 L-6：manifest 是该批还原的唯一依据，裸 std::fs::write 断电可留
                     // 半截 JSON，还原通道按清单失配。走 security 原子写（temp→fsync→rename）。
                     if let Err(e) = crate::security::atomic_write_file(&mpath, text.as_bytes()) {
-                        crate::engine::log::write_log("warn", &format!("files 备份清单写入失败: {e}"));
+                        // §4.5③：清单写失败 = 这批副本成为无人认领的孤儿（还原通道按清单
+                        // 逐条拷回，没有清单就还原不了）。prune_file_backups 的孤儿回收会
+                        // 按冷静期（24h）把这类副本清掉，这里把数量说清，别让「备份写了
+                        // 多少」在日志里失明。
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!(
+                                "files 备份清单写入失败: {e}；本批 {} 个文件副本无还原依据，\
+                                 24h 后由孤儿回收清理",
+                                backup_entries.len()
+                            ),
+                        );
                     }
                 }
                 Err(_) => {
-                    crate::engine::log::write_log("warn", "files 备份清单序列化失败");
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!(
+                            "files 备份清单序列化失败；本批 {} 个文件副本无还原依据，\
+                             24h 后由孤儿回收清理",
+                            backup_entries.len()
+                        ),
+                    );
                 }
             }
             // N3：副本按清单裁最老批次（副本目录是 `规则id\`，不能按批次时间戳找）
@@ -1627,6 +1775,97 @@ mod file_backup_retention_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
+    }
+
+    /// 2026-10-04 审计 §4.5③：孤儿副本（清单写失败的那批，无任何清单指向）必须被
+    /// 回收——旧实现里它们永不回收，最多堆 50×256MB。同时钉两条护栏：
+    /// 清单**引用的**副本不得被牵连；冷静期内的副本不得抢跑（在途批次保护）。
+    #[test]
+    fn 孤儿副本按冷静期回收且不牵连清单引用的副本() {
+        let root = sandbox("orphan");
+        // 一份正常批次（keep=5，不触发裁剪——GC 与裁剪是两件独立的事）
+        make_batch(&root, 1_700_000_000_010, &["keep_rule\\0_a.log"]);
+        // 造孤儿：副本在规则目录里，但没有任何清单条目指向它
+        let orphan_dir = root.join("orphan_rule");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("0_lost.log"), b"payload").unwrap();
+
+        // 冷静期 0：孤儿必须被回收，清单引用的副本必须幸存
+        prune_file_backups_with(&root, 5, 0);
+        assert!(
+            !orphan_dir.join("0_lost.log").exists(),
+            "无人认领的副本必须被孤儿回收清掉（§4.5③）"
+        );
+        assert!(
+            root.join("keep_rule\\0_a.log").is_file(),
+            "清单引用的副本不得被孤儿回收牵连"
+        );
+
+        // 冷静期未过：同形态孤儿必须幸存（清单可能还没落盘的在途批次）
+        // 注：上一轮 GC 后空规则目录已被回收，这里先重建
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("1_fresh.log"), b"payload").unwrap();
+        prune_file_backups_with(&root, 5, 3_600_000); // 1h 冷静期，副本 mtime 是现在
+        assert!(
+            orphan_dir.join("1_fresh.log").is_file(),
+            "冷静期内的副本不得被回收（在途批次保护）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 2026-10-04 审计 §4.5①：根内的重解析段可把词法合法的 rel 重定向到备份根外。
+    /// `sub` 是指向根外的 junction 时，`sub\f.txt` 的真实落点在根外——旧实现只对
+    /// victim 自身做 `is_reparse`（f.txt 是普通文件，判不出父段是链接），照删。
+    /// canonicalize 拿真实落点后必须在根内，且解析失败一律拒。
+    #[test]
+    fn 根内重解析段重定向的副本拒删() {
+        use std::os::windows::process::CommandExt;
+        let root = sandbox("junction");
+        // junction 目标在备份根之外，里面放着「将被裁清单」指向的文件
+        let target = root
+            .parent()
+            .unwrap()
+            .join(format!("trim-filekeep-jtarget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("f.txt"), b"outside").unwrap();
+        let sub = root.join("sub");
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&sub)
+            .arg(&target)
+            .creation_flags(0x0800_0000)
+            .output();
+        if !matches!(&out, Ok(o) if o.status.success()) {
+            // 环境造不出 junction：显式登记跳过（造不出 ≠ 不会发生），与其他用例同口径
+            eprintln!("[§4.5①] 本环境无法创建 junction，跳过断言");
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&target);
+            return;
+        }
+        // 老批次独占 sub\f.txt（词法合法：无 ..、无盘符、非绝对），新批次引用别的文件
+        // ——keep=1 ⇒ 老批次被裁，它的条目走删副本路径，撞上包含性核验
+        make_batch(&root, 1_700_000_000_001, &["sub\\f.txt"]);
+        make_batch(&root, 1_700_000_000_002, &["safe\\g.txt"]);
+
+        prune_file_backups_with(&root, 1, 0);
+
+        assert!(
+            target.join("f.txt").is_file(),
+            "重解析段重定向到备份根之外的落点必须拒删（§4.5①）"
+        );
+        assert!(
+            !root.join("manifest-1700000000001.json").exists(),
+            "清单自身仍按上限裁掉（拒删条目不等于放弃限额）"
+        );
+        assert!(
+            root.join("safe\\g.txt").is_file(),
+            "幸存批次的正常副本不得被牵连"
+        );
+        // 收尾：junction 要先拆再清树，remove_dir_all 不会跟进去，但目标目录独立清
+        let _ = std::fs::remove_dir(&sub);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&target);
     }
 }
 
