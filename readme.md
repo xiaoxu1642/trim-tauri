@@ -3,7 +3,7 @@
 > **Windows 11 清理与优化工具。中文界面，Fluent Design 风格，Tauri v2 + Rust 原生实现，零前端框架。**
 > 由小旭个人开发制作，仅供个人测试交流使用。
 
-> 版本 **0.5.8**　本版改动见 [update.md](update.md)。
+> 版本 **0.5.9**　本版改动见 [update.md](update.md)。
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)
 ![Stack](https://img.shields.io/badge/stack-Tauri%20v2%20%7C%20Rust%20%7C%20原生%20Win32%20%2F%20WinHTTP-blueviolet)
