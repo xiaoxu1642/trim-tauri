@@ -358,3 +358,62 @@ fn 没有重解析点时留痕计数必须为零() {
     );
     fs::remove_dir_all(&root).ok();
 }
+
+/// 2026-10-04 审计 §4.9：`excludePaths` 的目录/文件分类不得按扩展名推断。
+///
+/// 修前判据是 `extension().is_some()` ⇒ `Vendor.Tool` 这类**带点目录**被 routed
+/// 进文件表，而 `path_excluded` 对文件表只做精确相等匹配 ⇒ 排除静默失效、
+/// 整个子树照删。这里用行为差分钉住接线（不是只测分类纯函数）：排除条目
+/// 指向真实存在的带点目录，断言其内部文件从命中集里消失。
+///
+/// 判红纪律（报告 §9.4）：本用例的夹具自检（无排除时带点目录内文件必须命中）
+/// 先排除「夹具本身坏了」的可能，再断排除生效——避免把隔壁字段的失败误当通过。
+#[test]
+fn excludePaths_带点目录按目录前缀排除() {
+    let root = temp_root("dotdir");
+    plant(&root, &[("a.log", 10), ("Vendor.Tool/inside.log", 40)]);
+
+    // 夹具自检：不排除时，带点目录内的文件必须在命中集里
+    let (code0, base, err0) = scan_hits(&root, &rules_json(&root, "*.log", true, ""));
+    assert_eq!(code0, 0, "扫描应正常退出：{err0}");
+    assert!(
+        base.contains("Vendor.Tool/inside.log"),
+        "夹具自检失败：无排除时带点目录内文件未命中（夹具坏了，不是被测行为）: {base:?}"
+    );
+
+    // 排除条目是一个**带点目录**：修前它带扩展名 ⇒ 进文件表 ⇒ 精确匹配排不掉子树
+    let extra = format!(
+        r#","excludePaths":[{}]"#,
+        jstr(&root.join("Vendor.Tool").to_string_lossy())
+    );
+    let (code1, excl, err1) = scan_hits(&root, &rules_json(&root, "*.log", true, &extra));
+    assert_eq!(code1, 0, "扫描应正常退出：{err1}");
+    assert!(
+        !excl.contains("Vendor.Tool/inside.log"),
+        "带点目录内的文件必须被排除（§4.9 修复没生效或被回退）: {excl:?}"
+    );
+    assert!(
+        excl.contains("a.log"),
+        "排除面不得殃及无辜 —— 目录外文件仍应命中: {excl:?}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+}
+
+/// §4.9 反向面：指向**文件**的排除条目仍走精确匹配（分类器不得把文件误当目录
+/// 做前缀排除——那会让 `keep.log` 之外所有 `xxx.log\...` 形态意外豁免，方向虽
+/// 安全但口径混乱；钉住「按实况分类」的另一半）。
+#[test]
+fn excludePaths_指向文件仍按精确匹配排除() {
+    let root = temp_root("dotfile");
+    plant(&root, &[("a.log", 10), ("keep.log", 30)]);
+    let extra = format!(
+        r#","excludePaths":[{}]"#,
+        jstr(&root.join("keep.log").to_string_lossy())
+    );
+    let (code, hits, err) = scan_hits(&root, &rules_json(&root, "*.log", true, &extra));
+    assert_eq!(code, 0, "扫描应正常退出：{err}");
+    assert!(hits.contains("a.log"), "未排除文件必须命中: {hits:?}");
+    assert!(!hits.contains("keep.log"), "排除的文件必须从命中集消失: {hits:?}");
+    fs::remove_dir_all(&root).ok();
+}

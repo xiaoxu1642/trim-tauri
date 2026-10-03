@@ -221,6 +221,37 @@ check(
   `实际找到 ${(cleanRs.match(/\("skippedReparse"/g) || []).length} 处`,
 );
 
+// ==================== E9 excludePaths 分类的静态断言（2026-10-04 审计 §4.9） ====================
+// 带点目录（`Vendor.Tool`）曾被 `extension().is_some()` 误 routed 进文件表，
+// 而 path_excluded 对文件只做精确相等 ⇒ 排除静默失效、子树照删（安全特性被静默
+// 关掉，且扫描/执行两侧同款、没有分叉可查）。修复后两侧都走 classify_exclude_entry
+// （按磁盘实况分类）。行为用例钉住扫描侧接线（tests/cleanup_scan_rule_diff.rs）
+// 与执行侧行为（engine/native/cleanup.rs），这里钉**双侧接线 + 旧形态绝迹**：
+// 行为用例碰不到「有人把调用换回扩展名推断但没删测试」的组合，静态面补上。
+const execCleanupRs = readFileSync(join(REPO_ROOT, 'src-tauri/src/engine/native/cleanup.rs'), 'utf8');
+check(
+  /pub fn classify_exclude_entry\(/.test(cleanRs) &&
+    /fn classify_exclude_entry[\s\S]{0,700}?symlink_metadata/.test(cleanRs),
+  'E9a. excludePaths 分类器存在且按磁盘实况（symlink_metadata）判',
+);
+const e9b = (cleanRs.match(/classify_exclude_entry\(&ep/g) || []).length;
+check(
+  e9b === 1,
+  'E9b. 扫描侧 excludePaths 循环走分类器（恰好 1 处接线）',
+  `实际 ${e9b} 处`,
+);
+const e9c = (execCleanupRs.match(/classify_exclude_entry\(&ep/g) || []).length;
+check(
+  e9c === 1,
+  'E9c. 执行侧 excludePaths 循环走分类器（恰好 1 处接线）',
+  `实际 ${e9c} 处`,
+);
+check(
+  !cleanRs.includes('if Path::new(&ep).extension().is_some()') &&
+    !execCleanupRs.includes('if std::path::Path::new(&ep).extension().is_some()'),
+  'E9d. 「按扩展名分类 excludePaths」的旧形态在两侧均已绝迹',
+);
+
 console.log('');
 if (fail > 0) {
   console.error(`静态留痕断言失败 ${fail} 项。`);

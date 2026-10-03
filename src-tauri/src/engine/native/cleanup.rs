@@ -699,11 +699,9 @@ pub fn cleanup_execute(
                 if ep.is_empty() || ep.starts_with('#') {
                     continue;
                 }
-                if std::path::Path::new(&ep).extension().is_some() {
-                    excl_files.push(ep);
-                } else {
-                    excl_dirs.push(ep);
-                }
+                // 分类走 trim_finder 同一个函数（§4.9）：按磁盘实况分目录/文件，
+                // 禁按扩展名推断——带点目录会误 routed 进文件表、排除静默失效
+                trim_finder::cleanup_scan::classify_exclude_entry(&ep, &mut excl_dirs, &mut excl_files);
             }
         }
         let excluded;
@@ -1437,6 +1435,43 @@ mod cleanup_engine_contract_tests {
             msg.contains("不存在") || msg.contains("不可用"),
             "消息必须说清根为什么不可用，否则用户无从判断: {msg}"
         );
+    }
+
+    /// 2026-10-04 审计 §4.9：带点目录（`Vendor.Tool`）必须按**目录前缀**排除，
+    /// 子树不得被删。修前执行侧按 `extension().is_some()` 分类，带点目录被 routed
+    /// 进文件表、精确匹配排不掉 ⇒ 排除静默失效、整个子树照删。执行侧与扫描侧
+    /// 共用 `classify_exclude_entry`；扫描侧的接线由
+    /// `native-scanner/tests/cleanup_scan_rule_diff.rs` 的差分用例钉住（本仓
+    /// cargo test 跑不到那边，唯一自动入口是 check-scan-rule-diff 门禁）。
+    #[test]
+    fn 带点目录的排除按目录前缀生效() {
+        let dir = std::env::temp_dir().join(format!("trim-dotdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Vendor.Tool")).unwrap();
+        std::fs::write(dir.join("Vendor.Tool").join("inside.log"), b"xxxxxxxx").unwrap();
+        std::fs::write(dir.join("a.log"), b"aa").unwrap();
+
+        // fileKeys 扫整个根、excludePaths 指向其中的带点目录
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"dotdir","name":"带点目录排除探测",
+            "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*.log", "recurse":true}],
+            "excludePaths":[dir.join("Vendor.Tool").to_string_lossy()]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"dotdir","name":"带点目录排除探测","path": dir.to_string_lossy()})];
+
+        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        assert!(
+            dir.join("Vendor.Tool").join("inside.log").exists(),
+            "带点目录内的文件必须幸存 —— 排除被按扩展名误分类成文件时，它会随子树一起被删"
+        );
+        assert!(
+            !dir.join("a.log").exists(),
+            "排除面不得殃及无辜 —— 目录外的文件仍应被删"
+        );
+        let d = &res.details[0];
+        assert_eq!(d["fileCount"].as_i64(), Some(1), "只应删 1 个: {d}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

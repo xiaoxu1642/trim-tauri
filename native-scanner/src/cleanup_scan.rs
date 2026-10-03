@@ -1543,6 +1543,28 @@ pub fn path_excluded(excl_dirs: &[String], excl_files: &[String], low: &str) -> 
     excl_dirs.iter().any(|d| low.starts_with(&format!("{}\\", d))) || excl_files.iter().any(|f| *f == low)
 }
 
+/// excludePaths 条目按磁盘实况分类（2026-10-04 审计 §4.9）。
+///
+/// 原判据「`extension().is_some()` 即文件」把 `Vendor.Tool` 这类**带点目录**
+/// routed 进文件表，而 `path_excluded` 对文件表只做精确相等匹配 ⇒ 该排除
+/// 静默失效、整个子树照删——安全特性被静默关掉，且两侧同款所以没有分叉可查。
+/// 现按磁盘实况分类：是目录进前缀表、是文件进精确表；磁盘上查不到的条目
+/// 两表都进（两类物态各自有覆盖，排除面扩大的失败方向是「少删」，安全）。
+/// 扫描侧与执行侧共用本函数，两侧口径不分叉。
+///
+/// 刻意用 `symlink_metadata`（不跟随重解析点）：排除一个 junction 时按其
+/// 本相分类即可，子树是否可穿越由枚举层的 reparse 规则管，不归这里。
+pub fn classify_exclude_entry(ep: &str, excl_dirs: &mut Vec<String>, excl_files: &mut Vec<String>) {
+    match std::fs::symlink_metadata(Path::new(ep)) {
+        Ok(md) if md.is_dir() => excl_dirs.push(ep.to_string()),
+        Ok(_) => excl_files.push(ep.to_string()),
+        Err(_) => {
+            excl_dirs.push(ep.to_string());
+            excl_files.push(ep.to_string());
+        }
+    }
+}
+
 const PLAN_CAP_PER_ITEM: usize = 100_000;
 const PLAN_CAP_TOTAL: usize = 1_000_000;
 
@@ -1805,9 +1827,10 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
     let skip_lock = rule.get("restartProcesses").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let has_excl = rule.get("excludeKeys").map(|v| v.ps_count()).unwrap_or(0) > 0;
     // 规则级 excludePaths（C-2，2026-09-28 开门）：字符串数组，与全局排除名单同口径
-    // （%VAR% 展开 / 有扩展名=文件全路径 / 否则=目录前缀）。excludeKeys（对象型、reg 面）
-    // 仍被门禁 A2 禁用，回潮即红。走 excludePaths 同样要求快照模式（逐文件过滤必须在
-    // 受控枚举里做，DLL 快照模式没有排除通道）。
+    // （%VAR% 展开 / 目录=前缀排除、文件=精确排除，按磁盘实况分类，见
+    // classify_exclude_entry —— 原按扩展名推断的判据会把带点目录误 routed，§4.9）。
+    // excludeKeys（对象型、reg 面）仍被门禁 A2 禁用，回潮即红。走 excludePaths
+    // 同样要求快照模式（逐文件过滤必须在受控枚举里做，DLL 快照模式没有排除通道）。
     let has_expaths = rule.get("excludePaths").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let any_recurse_false = rule
         .get("fileKeys")
@@ -1827,11 +1850,9 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
             if ep.is_empty() || ep.starts_with('#') {
                 continue;
             }
-            if Path::new(&ep).extension().is_some() {
-                excl_files.push(ep);
-            } else {
-                excl_dirs.push(ep);
-            }
+            // 分类按磁盘实况（§4.9）：禁再退回「按扩展名推断」——带点目录会被
+            // routed 进文件表、排除静默失效、子树照删（check-scan-rule-diff E9 组钉着）
+            classify_exclude_entry(&ep, &mut excl_dirs, &mut excl_files);
         }
     }
     if let Some(arr) = rule.get("excludeKeys").and_then(|v| v.as_arr()) {
@@ -2623,6 +2644,43 @@ mod tests {
             acc2.total_count <= 12,
             "快照分支遍历量必须远小于 {total_files}，实测 {}",
             acc2.total_count
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 2026-10-04 审计 §4.9：分类器三态直测（目录→前缀表 / 文件→精确表 /
+    /// 不存在→两表都进）。集成差分用例（tests/cleanup_scan_rule_diff.rs）钉接线，
+    /// 本条钉三态语义本身——含「不存在两表都进」这个集成用例造不出来的形态。
+    #[test]
+    fn excludePaths_分类器按实况分三态() {
+        let root = std::env::temp_dir().join(format!("trim-excl-class-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Vendor.Tool")).unwrap();
+        fs::write(root.join("plain.log"), b"x").unwrap();
+
+        // 带点**目录**：进前缀表
+        let mut dirs: Vec<String> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
+        let dot_dir = root.join("Vendor.Tool").to_string_lossy().to_lowercase();
+        classify_exclude_entry(&dot_dir, &mut dirs, &mut files);
+        assert!(dirs.contains(&dot_dir) && files.is_empty(), "带点目录必须进目录表: {dirs:?} / {files:?}");
+
+        // 真**文件**：进精确表
+        dirs.clear();
+        files.clear();
+        let file = root.join("plain.log").to_string_lossy().to_lowercase();
+        classify_exclude_entry(&file, &mut dirs, &mut files);
+        assert!(files.contains(&file) && dirs.is_empty(), "文件必须进文件表: {dirs:?} / {files:?}");
+
+        // **不存在**的条目：两表都进——两类物态各自有覆盖，排除面扩大的失败方向是「少删」
+        dirs.clear();
+        files.clear();
+        let ghost = root.join("no.such.thing").to_string_lossy().to_lowercase();
+        classify_exclude_entry(&ghost, &mut dirs, &mut files);
+        assert!(
+            dirs.contains(&ghost) && files.contains(&ghost),
+            "不存在的条目必须两表都进（物态未定前不许押单边）: {dirs:?} / {files:?}"
         );
 
         let _ = fs::remove_dir_all(&root);
