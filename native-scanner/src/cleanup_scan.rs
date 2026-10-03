@@ -733,7 +733,8 @@ pub fn is_drive_relative(p: &str) -> bool {
 // %NAME% → 环境变量值；未定义或定义为空串时保持原文（便于在路径列直接看出配置问题）。
 // 本函数是全仓唯一的 %VAR% 展开实现（P0 统一，规则库最终优化方案 2026-09-27）：
 // src-tauri 执行侧的展开必须委托到这里，禁止再写第二份白名单展开器。
-pub fn expand_env_path(p: &str) -> String {    let ch: Vec<char> = p.chars().collect();
+pub fn expand_env_path(p: &str) -> String {
+    let ch: Vec<char> = p.chars().collect();
     let mut out = String::with_capacity(p.len());
     let mut i = 0usize;
     while i < ch.len() {

@@ -284,7 +284,18 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
     // 裁剪失败计数（§4.5②）：回收站满/禁用时旧实现 `let _ =` 静默停摆，
     // BACKUP_KEEP 上限形同虚设且无人知晓——现在逐条 warn + 汇总。
     let mut prune_failed = 0usize;
-    let root_canon = std::fs::canonicalize(root).ok();
+    let root_canon = match std::fs::canonicalize(root) {
+        Ok(rc) => Some(rc),
+        Err(e) => {
+            // 包含性核验的前提是根的真实落点可解析；解析不出 ⇒ 无法证明 victim
+            // 在根内，本轮的裁剪删除必须整体放弃（fail-closed，不允许跳过核验继续删）
+            crate::engine::log::write_log(
+                "warn",
+                &format!("备份裁剪：备份根真实路径解析失败（{e}），本轮放弃裁剪删除"),
+            );
+            None
+        }
+    };
     if manifests.len() > keep {
         manifests.sort(); // 时间戳升序：前面是最老的批次
         // 幸存者 = **最新的 keep 份** ⇒ 切点必须按长度算。写成 `split_off(keep)` 会留下
@@ -324,7 +335,7 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
                     continue;
                 }
                 // §4.5①：junction 段可把词法合法的 rel 重定向到备份根之外——
-                // 真实落点必须在根内，且解析不出来就拒（包含性核验先行，见函数注释）
+                // 真实落点必须在根内；根不可解析时核验前提不成立，一律拒删
                 if let Some(rc) = &root_canon {
                     if !backup_victim_within_root(rc, &victim) {
                         crate::engine::log::write_log(
@@ -333,6 +344,8 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
                         );
                         continue;
                     }
+                } else {
+                    continue;
                 }
                 if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(victim.as_os_str()) {
                     prune_failed += 1;
