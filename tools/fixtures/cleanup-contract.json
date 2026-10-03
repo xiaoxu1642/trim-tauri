@@ -372,6 +372,248 @@
       }
     },
     {
+      "label": "A2 detect[].path 是设备路径 \\\\.\\ 前缀（审计 §4.11）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-detect-dot",
+                "name": "A2 detect[].path 是设备路径 \\\\.\\ 前缀（审计 §4.11）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "detect": [
+                  {
+                    "path": "\\\\.\\C:\\Windows\\Temp"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 detect[].path 是设备路径 \\??\\ 前缀（审计 §4.11）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-detect-nt",
+                "name": "A2 detect[].path 是设备路径 \\??\\ 前缀（审计 §4.11）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "detect": [
+                  {
+                    "path": "\\??\\C:\\Windows\\Temp"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 excludePaths 含设备路径 \\\\.\\ 前缀（审计 §4.11）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-excl-dot",
+                "name": "A2 excludePaths 含设备路径 \\\\.\\ 前缀（审计 §4.11）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "excludePaths": [
+                  "\\\\.\\C:\\Windows\\Temp"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 excludePaths 含 \\\\?\\ 长路径前缀（审计 §4.11）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-excl-verb",
+                "name": "A2 excludePaths 含 \\\\?\\ 长路径前缀（审计 §4.11）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "excludePaths": [
+                  "\\\\?\\C:\\Users\\x"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A2 detect type=reg 的 path 非 hive 开头（审计 §4.11）",
+      "ok": false,
+      "mustTrigger": [
+        "A2"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a2-detect-reg-bad",
+                "name": "A2 detect type=reg 的 path 非 hive 开头（审计 §4.11）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928,
+                "detect": [
+                  {
+                    "type": "reg",
+                    "path": "C:\\Windows\\Temp"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "label": "A2 pattern 多星超出执行侧单星能力",
       "ok": false,
       "mustTrigger": [

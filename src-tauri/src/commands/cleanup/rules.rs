@@ -262,10 +262,37 @@ pub(super) fn require_rule_str(obj: &Map<String, Value>, field: &str, max_len: u
     }
 }
 
+/// verbatim / 设备路径前缀闸（2026-10-04 审计 §3.1，§4.11 扩面）。
+///
+/// 抽成独立函数是因为除 `fileKeys[].path` 外还有两个字段也是**文件路径**：
+/// `detect[].path`（安装检测的判据，直接喂 `path_exists`）与 `excludePaths[]`
+/// （排除名单，按目录前缀匹配）。三处都必须是同一条判据 —— 各自写一遍的形态就是
+/// §3.1 那个「只关一个入口、另一个仍能重开」的老问题。
+///
+/// 只判前缀，不判 `/`、`?`、长度：那两项各有各的理由（执行侧只按 `\` 切分、
+/// glob 只支持单星），由调用方各自补，`excludePaths` 已经有自己的一套。
+pub(super) fn path_prefix_problem(path: &str) -> Option<String> {
+    let t = path.trim();
+    // 设备路径：Win32 跳过路径解析，`\\.\C:\…` 与 `C:\…` 同树但保护判定结论相反
+    //（`engine/protect.rs` 同批收紧为 fail-closed 拒绝）。
+    if t.starts_with("\\\\.\\") || t.starts_with("\\??\\") {
+        return Some(format!("是设备路径（Win32 跳过路径解析，无法判定保护归属）: {path}"));
+    }
+    // `\\?\` 是**合法**的 Win32 长路径前缀，不是安全问题；但执行侧
+    // `expand_glob_dirs` 只按 `\` 切分、不还原长路径，会「扫描命中、执行漏删」。
+    if t.starts_with("\\\\?\\") {
+        return Some(format!(
+            "是 \\\\?\\ 长路径前缀（执行侧 expand_glob_dirs 不还原长路径，会扫描命中但执行漏删）: {path}"
+        ));
+    }
+    None
+}
+
 /// 路径形态：执行侧 `expand_glob_dirs` 只认 `*`、`glob_match` 只支持单星、分隔符只认 `\`；
 /// 扫描侧支持 `?` 与 `/` —— 规则里出现这些形态就是「扫描命中、执行漏删」。
 ///
-/// 2026-10-04 磁盘清理审计 §3.1 增设备/verbatim 前缀一节。`\\.\` / `\??\` 之所以要在
+/// 2026-10-04 磁盘清理审计 §3.1 增 verbatim 前缀一节（判定本体在 [`path_prefix_problem`]，
+/// §4.11 把同一道闸扩到 `detect[].path` 与 `excludePaths[]`）。`\\.\` / `\??\` 之所以要在
 /// 装载端拦（而不是只靠 `engine::protect` 判保护）：那两条目标在扫描侧会被当成合法
 /// 路径枚举并计入体积，在执行侧又永远过不了 `is_path_protected` ⇒ 呈现成
 /// 「有条目、体积报出来了，清理完什么都没释放」，用户无从判断是哪一层出的问题。
@@ -278,22 +305,13 @@ pub(super) fn file_path_form_problem(path: &str, max_len: usize) -> Option<Strin
     if path.chars().count() > max_len {
         return Some(format!("path 超长（{} > {max_len}）", path.chars().count()));
     }
-    // **设备/verbatim 前缀必须在 `?` 检查之前判**。这三条各自都会被后面的检查
-    // 以错误的理由命中（`\??\` 与 `\\?\` 都含 `?`），而理由指错方向会把排查
-    // 引到 glob 实现上、找不到真正的防线：
-    //   · `\\.\`  = 设备路径（`\\.\C:\…` 与 `C:\…` 同树，但保护判定结论相反）
-    //   · `\??\` = NT 对象管理器路径，同上
-    //   · `\\?\` = **合法**的 Win32 长路径前缀，不是安全问题；但执行侧
-    //     `expand_glob_dirs` 只按 `\` 切分、不还原长路径，会「扫描命中、执行漏删」
-    //     —— 与本函数上面那三类形态同一族后果，所以一并在这里说清。
-    let trimmed = path.trim();
-    if trimmed.starts_with("\\\\.\\") || trimmed.starts_with("\\??\\") {
-        return Some(format!("path 是设备路径（Win32 跳过路径解析，无法判定保护归属）: {path}"));
-    }
-    if trimmed.starts_with("\\\\?\\") {
-        return Some(format!(
-            "path 是 \\\\?\\ 长路径前缀（执行侧 expand_glob_dirs 不还原长路径，会扫描命中但执行漏删）: {path}"
-        ));
+    // **设备/verbatim 前缀必须在 `?` 检查之前判**（判定本体在 `path_prefix_problem`，
+    // §4.11 把同一道闸扩到 `detect[].path` 与 `excludePaths[]`）。
+    // 顺序理由：`\??\` 与 `\\?\` 自身含 `?`，若让通配检查先命中，拒绝理由会变成
+    // 「含 ? 通配」——把一个安全语义问题报成能力问题，排查时会去查 glob 实现、
+    // 找不到真正的防线。
+    if let Some(why) = path_prefix_problem(path) {
+        return Some(format!("path {why}"));
     }
     if path.contains('/') {
         return Some(format!("path 含 / 分隔符（执行侧只按 \\ 切分）: {path}"));
@@ -791,6 +809,63 @@ pub(super) fn check_cleanup_item(
         }
         seen_targets.insert(fp, id.clone());
     }
+
+    // detect（2026-10-04 审计 §4.11）：安装检测判据，扫描侧 `test_rule_detect`
+    // 直接把 `path` 喂给 `path_exists` / `reg_key_exists`。
+    //
+    // 此前这个字段**完全不过任何形态校验** —— 它在 `itemFields` 白名单里（不是
+    // 未知字段），于是设备路径能从这里进库：`\\.\C:\Users\<me>` 在扫描侧会被
+    // 当合法路径判存在、在执行侧又永远过不了 `is_path_protected`，净效果是
+    // 「条目恒显示存在、清理时一条不删」。§3.1 只给 `fileKeys[].path` 装了闸，
+    // 这里就是那个「另一个入口」。
+    //
+    // 上限复用 `maxFileKeysPerItem` 而不新增契约键：detect 的语义是 fileKeys 的
+    // 前置判据、量级同档，且新增键要同时动 schema + 两处计数棘轮，不值当。
+    if let Some(det) = it.get("detect") {
+        let arr = det
+            .as_array()
+            .ok_or_else(|| format!("规则 {id}: detect 必须是数组"))?;
+        if arr.len() > req_number("cleanup", "maxFileKeysPerItem")? {
+            return Err(format!("规则 {id}: detect 条数超上限"));
+        }
+        for (i, entry) in arr.iter().enumerate() {
+            let Some(o) = entry.as_object() else {
+                return Err(format!("规则 {id}: detect[{i}] 必须是对象"));
+            };
+            for k in o.keys() {
+                if k != "type" && k != "path" {
+                    return Err(format!("规则 {id}: detect[{i}] 未知字段 {k}"));
+                }
+            }
+            let path = o
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("规则 {id}: detect[{i}] 缺 path 或不是字符串"))?;
+            if path.trim().is_empty() {
+                return Err(format!("规则 {id}: detect[{i}].path 为空白"));
+            }
+            // type 缺省 = file（对齐扫描侧 `c.get("type") == Some("reg")` 的判定）。
+            let is_reg = o.get("type").and_then(|v| v.as_str()) == Some("reg");
+            if is_reg {
+                // 注册表形态：套文件闸是错的（它按盘符路径的形态判）。
+                // 这里只做最小口径 —— hive 前缀 + 不含变量（变量会让装载侧
+                // 无法判定注册表禁删面，与 regKeys 同理由）。
+                let head = path.trim().to_uppercase();
+                if !(head.starts_with("HKLM\\") || head.starts_with("HKCU\\") || head.starts_with("HKCR\\")) {
+                    return Err(format!(
+                        "规则 {id}: detect[{i}] type=reg 的 path 必须以 HKLM\\ / HKCU\\ / HKCR\\ 开头: {path}"
+                    ));
+                }
+                if path.contains('%') {
+                    return Err(format!(
+                        "规则 {id}: detect[{i}].path 是注册表目标却含变量，装载侧无法判定: {path}"
+                    ));
+                }
+            } else if let Some(why) = file_path_form_problem(path, c.max_target) {
+                return Err(format!("规则 {id}: detect[{i}].{why}"));
+            }
+        }
+    }
     if let Some(ep) = it.get("excludePaths") {
         let arr = ep
             .as_array()
@@ -806,11 +881,20 @@ pub(super) fn check_cleanup_item(
             if s.trim().is_empty() {
                 return Err(format!("规则 {id}: excludePaths 含空白项"));
             }
-            if s.contains('/') || s.contains('?') {
-                return Err(format!("规则 {id}: excludePaths 形态非法（禁 / 与 ?）: {s}"));
-            }
+            // §4.11：excludePaths 是**文件路径**（按目录前缀 / 全路径匹配），
+            // 与 fileKeys[].path 同属一个家族，必须过同一道 verbatim 前缀闸。
+            //
+            // 顺序要点（与 file_path_form_problem 同款）：**前缀闸必须在 `?` 检查
+            // 之前**。`\??\` 与 `\\?\` 自身含 `?`，让禁 `?` 那条先命中的话，理由会
+            // 变成「形态非法（禁 / 与 ?）」——把安全语义问题报成格式问题。
             if s.contains("::") {
+                // 具名值形态是**注册表面**（`键路径::值名`），不是文件路径，
+                // 不得套文件闸；它自己的口径在下面那段「与 regKeys 冲突」检查里。
                 has_named_value_exclude = true;
+            } else if let Some(why) = path_prefix_problem(s) {
+                return Err(format!("规则 {id}: excludePaths {why}"));
+            } else if s.contains('/') || s.contains('?') {
+                return Err(format!("规则 {id}: excludePaths 形态非法（禁 / 与 ?）: {s}"));
             }
         }
         if has_named_value_exclude {

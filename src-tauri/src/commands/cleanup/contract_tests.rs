@@ -363,7 +363,7 @@ use super::state::*;
         assert!(code.contains("fn req_number("), "缺少 req_number —— 契约表数值查询的统一入口不见了");
         for (helper, exact, what) in [
             ("req_list", 21usize, "字符串数组类查询（字段白名单 / 必填集 / 枚举）"),
-            ("req_number", 9usize, "数值类查询（上限与权重）"),
+            ("req_number", 10usize, "数值类查询（上限与权重）"),
         ] {
             let calls = code.matches(&format!("{helper}(\"cleanup\", ")).count();
             assert_eq!(
@@ -495,15 +495,43 @@ use super::state::*;
                 "file_path_form_problem 放过前缀形态 `{bad}`"
             );
         }
-        // ⑥ 已知缺口（审计 §4.11 同族，本轮**未**关，记在案免得当成已修）：
-        //    `detect[].path` 与 `excludePaths[]` 不经 file_path_form_problem。
-        //    判据写成「当前确实不拦」，等 §4.11 把形态闸扩到全部路径字段时改掉。
+        // ⑥ detect[].path 已纳入形态闸（审计 §4.11）。
+        //    detect 此前**完全不过任何校验**（它在 itemFields 白名单里，不是未知
+        //    字段），于是设备路径能从这里进库：扫描侧判「存在」、执行侧永远删不掉，
+        //    净效果是「条目恒显示存在、清理时一条不删」。§3.1 只给 fileKeys 装了闸。
+        for bad in [r"\\.\C:\Windows\Temp", r"\??\C:\Windows\Temp"] {
+            let mut t = ok_item();
+            t["detect"] = json!([{ "path": bad }]);
+            expect_reject(t, "设备路径");
+        }
+        // detect 的 type=reg 形态是**注册表**路径，不能套文件闸（那份闸按盘符判形态）
+        let mut t2 = ok_item();
+        t2["detect"] = json!([{ "type": "reg", "path": r"HKCU\Software\SomeVendor" }]);
+        if let Err(reason) = validate_cleanup_package(&ok_pkg(t2)) {
+            panic!("detect type=reg 的正常注册表路径被误拒: {reason}");
+        }
+        // …但注册表形态也必须有自己的最小口径（hive 前缀）
+        let mut t3 = ok_item();
+        t3["detect"] = json!([{ "type": "reg", "path": r"C:\Windows\Temp" }]);
+        expect_reject(t3, "必须以 HKLM");
+
+        // ⑦ excludePaths[] 同样纳入（它是**字符串**数组，与 detect 不同形）
+        for (bad, needle) in [
+            (r"\\.\C:\Windows\Temp", "设备路径"),
+            (r"\??\C:\Windows\Temp", "设备路径"),
+            (r"\\?\C:\Users\x", "长路径前缀"),
+        ] {
+            let mut t = ok_item();
+            t["excludePaths"] = json!([bad]);
+            expect_reject(t, needle);
+        }
+        // 正向对照：`::` 具名值形态是**注册表面**，不得被文件闸误伤
         let mut t = ok_item();
-        t["detect"] = json!([{ "path": r"\\.\C:\Windows\Temp" }]);
-        assert!(
-            validate_cleanup_package(&ok_pkg(t)).is_ok(),
-            "detect[].path 现在竟已过形态闸 —— §4.11 已把它纳入，请把这条缺口断言改成 expect_reject"
-        );
+        t["excludePaths"] = json!([r"HKLM\SOFTWARE\SomeVendor::KeepMe"]);
+        if let Err(reason) = validate_cleanup_package(&ok_pkg(t.clone())) {
+            // 该形态要求 regKeys 不含删树/通配；ok_item 没有 regKeys，应当放行
+            panic!("excludePaths 的 :: 具名值形态被文件闸误伤: {reason}");
+        }
     }
 
     /// v5 C-1：删树 / 通配清值型 `regKeys` 必须过注册表禁删面。装载侧不拦，一条**验签通过**的

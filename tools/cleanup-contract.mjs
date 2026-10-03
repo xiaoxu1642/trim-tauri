@@ -39,6 +39,38 @@ const itemLabel = (it, fallback) => {
   return id || fallback;
 };
 
+/**
+ * verbatim / 设备路径前缀闸（2026-10-04 审计 §3.1，§4.11 扩面）。
+ *
+ * 与 Rust 侧 `rules.rs::path_prefix_problem` **逐字对齐**（措辞也一致）——
+ * 两份实现在共享夹具上对拍，任何一侧改动而另一侧没跟上，`check-cleanup-rule-contract`
+ * 与 `清理语义校验与夹具一致` 会同时判红。
+ *
+ * 为什么是「拒绝」而不是「归一化」：`\\.\` / `\??\` 是设备路径，Win32 直接交给
+ * 对象管理器、跳过常规路径解析。`\\.\C:\Users\<me>\Documents` 与不带前缀的同一路径
+ * 是同一棵树，但前者会穿过 protect 的 UNC 分支被归一化成字面量 `\\.\c:\users\…`，
+ * 与任何根都不匹配 ⇒ 判定从「受保护」翻转成「放行」（`engine/protect.rs` 同批
+ * 收紧为 fail-closed 拒绝）。而设备路径里还有 `\\.\PIPE\…`、`\\.\PhysicalDrive0`
+ * 这类根本不按路径语义解释的形态，我们没有能力枚举它们是否安全。
+ *
+ * `\\?\` 单独一条且**不是安全问题**：它是合法的 Win32 长路径前缀。但执行侧
+ * `expand_glob_dirs` 只按 `\` 切分、不还原长路径，会「扫描命中、执行漏删」，
+ * 与其余形态同一族后果，所以一并拒。
+ *
+ * @param {string} p 路径字段值
+ * @returns {string|null} 拒绝理由（含原文），通过则 null
+ */
+export function pathPrefixProblem(p) {
+  const t = String(p ?? '').trim();
+  if (t.startsWith('\\\\.\\') || t.startsWith('\\??\\')) {
+    return `是设备路径（Win32 跳过路径解析，无法判定保护归属）: ${p}`;
+  }
+  if (t.startsWith('\\\\?\\')) {
+    return `是 \\\\?\\ 长路径前缀（执行侧 expand_glob_dirs 不还原长路径，会扫描命中但执行漏删）: ${p}`;
+  }
+  return null;
+}
+
 /** 收集一条规则里的所有目标指纹（与 A3 的口径一致：类型 + 可移植模板 + pattern + recurse + reg value） */
 function targetFingerprints(it) {
   const fps = [];
@@ -343,9 +375,24 @@ export function validateCleanupPackage(pkg) {
         for (const t of eps) {
           if (typeof t !== 'string' || !t.trim()) say('A2', `规则 ${id}: excludePaths 含非字符串或空项`);
           else {
-            if (t.includes('/')) say('A2', `规则 ${id}: excludePaths 含 / 分隔符（执行侧只按 \\ 归一）: ${t}`);
-            if (t.includes('?')) say('A2', `规则 ${id}: excludePaths 含 ? 通配（执行侧不支持）: ${t}`);
-            if (t.includes('::')) namedValueExclude = true;
+            // 2026-10-04 审计 §4.11：verbatim/设备前缀闸，判定与 Rust 侧
+            // rules.rs::path_prefix_problem 逐字对齐（共享夹具会因不一致判红）。
+            //
+            // 顺序要点：**前缀闸必须在禁 `/` 与禁 `?` 之前**。`\??\` 与 `\\?\` 自身
+            // 含 `?`，让禁 `?` 先命中的话，理由会变成「含 ? 通配」——把安全语义
+            // 问题报成格式问题，排查会去查 glob 而不是真正的防线。
+            //
+            // `::` 是**注册表面**（键路径::值名），不是文件路径，不得套文件闸。
+            if (t.includes('::')) {
+              namedValueExclude = true;
+            } else {
+              const why = pathPrefixProblem(t);
+              if (why) say('A2', `规则 ${id}: excludePaths ${why}`);
+              else {
+                if (t.includes('/')) say('A2', `规则 ${id}: excludePaths 含 / 分隔符（执行侧只按 \\ 归一）: ${t}`);
+                if (t.includes('?')) say('A2', `规则 ${id}: excludePaths 含 ? 通配（执行侧不支持）: ${t}`);
+              }
+            }
           }
         }
         if (namedValueExclude) {
@@ -354,6 +401,61 @@ export function validateCleanupPackage(pkg) {
             say('A2', `规则 ${id}: excludePaths 含具名值排除（::），但 regKeys 存在删树/通配形态（无法保留个别值）`);
           }
         }
+      }
+    }
+    // A2 detect（2026-10-04 审计 §4.11）：安装检测判据，扫描侧 `test_rule_detect`
+    // 直接把 `path` 喂给 `path_exists` / `reg_key_exists`。
+    //
+    // 此前这个字段**完全不过任何校验**（它在 itemFields 白名单里，不是未知字段），
+    // 于是设备路径能从这里进库：扫描侧判「存在」、执行侧永远过不了 is_path_protected，
+    // 净效果是「条目恒显示存在、清理时一条不删」。§3.1 只给 fileKeys[].path 装了闸，
+    // 这里就是那个「另一个入口」。
+    if ('detect' in it) {
+      const det = it.detect;
+      if (!Array.isArray(det)) {
+        say('A2', `规则 ${id}: detect 必须是数组`);
+      } else {
+        if (det.length > number('cleanup', 'maxFileKeysPerItem')) {
+          say('A5', `规则 ${id}: detect 条数 ${det.length} 超上限`);
+        }
+        det.forEach((entry, i) => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            say('A2', `规则 ${id}: detect[${i}] 必须是对象`);
+            return;
+          }
+          for (const k of Object.keys(entry)) {
+            if (k !== 'type' && k !== 'path') say('A2', `规则 ${id}: detect[${i}] 未知字段 ${k}`);
+          }
+          const dp = entry.path;
+          if (typeof dp !== 'string') {
+            say('A2', `规则 ${id}: detect[${i}] 缺 path 或不是字符串`);
+            return;
+          }
+          if (!dp.trim()) {
+            say('A2', `规则 ${id}: detect[${i}].path 为空白`);
+            return;
+          }
+          // type 缺省 = file（对齐扫描侧 `c.get('type') == Some("reg")` 的判定）
+          const isReg = entry.type === 'reg';
+          if (isReg) {
+            // 注册表形态：套文件闸是错的（那份闸按盘符路径的形态判）
+            const head = dp.trim().toUpperCase();
+            if (!(head.startsWith('HKLM\\') || head.startsWith('HKCU\\') || head.startsWith('HKCR\\'))) {
+              say('A2', `规则 ${id}: detect[${i}] type=reg 的 path 必须以 HKLM\\ / HKCU\\ / HKCR\\ 开头: ${dp}`);
+            }
+            if (dp.includes('%')) {
+              say('A2', `规则 ${id}: detect[${i}].path 是注册表目标却含变量，装载侧无法判定: ${dp}`);
+            }
+            return;
+          }
+          const why = pathPrefixProblem(dp);
+          if (why) say('A2', `规则 ${id}: detect[${i}].path ${why}`);
+          else if (dp.includes('/')) say('A2', `规则 ${id}: detect[${i}].path 含 / 分隔符（执行侧只按 \\ 切分）: ${dp}`);
+          else if (dp.includes('?')) say('A2', `规则 ${id}: detect[${i}].path 含 ? 通配（执行侧 expand_glob_dirs 不支持）: ${dp}`);
+          else if (dp.length > number('cleanup', 'maxTargetLen')) {
+            say('A2', `规则 ${id}: detect[${i}].path 超长（${dp.length} > ${number('cleanup', 'maxTargetLen')}）`);
+          }
+        });
       }
     }
     // A3 目标精确重复
