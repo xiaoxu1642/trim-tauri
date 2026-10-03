@@ -689,7 +689,15 @@ pub(super) fn retry_failed_delete_blocking(targets: Vec<Value>) -> Value {
             details.push(json!({ "path": path, "status": "error", "freed": 0, "message": "受保护路径，已拒绝" }));
             continue;
         }
-        let size = std::fs::symlink_metadata(&path).map(|m| m.len() as i64).unwrap_or(0);
+        // §5.2：目录的释放量用失败条目里存的**扫描时累计大小**——symlink_metadata
+        // 对目录给的是目录项大小（0 或 4096），totalFreed 对唯一不可逆分支少报几个
+        // 数量级；条目没有大小（存量槽）时保持 0，不拿目录项大小充数。文件仍用
+        // 删除前实测（symlink_metadata.len 对文件是真实字节数，比扫描时更准）。
+        let size = if is_dir {
+            js_num_or_zero(t.get("size")) as i64
+        } else {
+            std::fs::symlink_metadata(&path).map(|m| m.len() as i64).unwrap_or(0)
+        };
         let rm = if is_dir {
             std::fs::remove_dir_all(&path)
         } else {
@@ -1037,3 +1045,47 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
     json!({ "success": true, "killed": killed, "failed": failed })
 }
 
+
+#[cfg(test)]
+mod retry_accounting_tests {
+    use super::*;
+
+    /// 2026-10-04 审计 §5.2：重试永久删的释放量口径。目录必须用失败条目里存的
+    /// **扫描时累计大小**（symlink_metadata 对目录给的是目录项大小 0/4096）；
+    /// 条目没带大小就报 0 不编数；文件用删除前实测、拒绝条目里的陈旧值。
+    #[test]
+    fn 重试永久删_目录释放量用扫描时累计大小() {
+        let root = std::env::temp_dir().join(format!("trim-retry-drel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::write(root.join("b.bin"), vec![0u8; 2000]).unwrap();
+
+        // 目录条目带扫描时累计大小 7777（与目录项大小 0/4096 可区分）
+        let targets = vec![json!({ "path": root.to_string_lossy(), "isDir": true, "size": 7777i64 })];
+        let res = retry_failed_delete_blocking(targets);
+        assert_eq!(res["data"]["totalFreed"], json!(7777), "目录释放量必须用扫描时累计大小: {}", res["data"]);
+        assert_eq!(res["data"]["ok"], json!(1));
+        assert!(!root.exists(), "目录必须真被删掉");
+
+        // 存量形态（条目没带 size）：freed = 0，不拿目录项大小充数，但照样删
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("c.bin"), vec![0u8; 500]).unwrap();
+        let targets2 = vec![json!({ "path": root.to_string_lossy(), "isDir": true })];
+        let res2 = retry_failed_delete_blocking(targets2);
+        assert_eq!(res2["data"]["totalFreed"], json!(0), "条目没有大小就报 0: {}", res2["data"]);
+        assert_eq!(res2["data"]["ok"], json!(1));
+        assert!(!root.exists());
+
+        // 文件：用删除前实测字节数，不用条目里的陈旧值
+        let fpath = std::env::temp_dir().join(format!("trim-retry-file-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&fpath);
+        std::fs::write(&fpath, vec![0u8; 300]).unwrap();
+        let targets3 = vec![json!({ "path": fpath.to_string_lossy(), "isDir": false, "size": 999999i64 })];
+        let res3 = retry_failed_delete_blocking(targets3);
+        assert_eq!(res3["data"]["totalFreed"], json!(300), "文件释放量必须是删除前实测: {}", res3["data"]);
+        assert!(!fpath.exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&fpath);
+    }
+}

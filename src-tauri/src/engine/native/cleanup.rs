@@ -957,9 +957,11 @@ pub fn cleanup_execute(
             }
         }
 
-        // 去重
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        files.dedup_by(|a, b| a.0 == b.0);
+        // 去重（§5.3：与扫描侧同口径按大小写不敏感折叠——两条仅大小写不同的
+        // 规则根会让同一文件收进两行，旧判据放行重复 ⇒ 释放量重复计数，且第二次
+        // remove 返回 NotFound 被记成「1 个被占用」）
+        files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        files.dedup_by(|a, b| a.0.to_lowercase() == b.0.to_lowercase());
 
         // 全局排除名单 + 规则级 excludePaths 过滤：显式记账，不混进「被占用」或「成功 0 删」
         let before_excl = files.len();
@@ -1183,7 +1185,13 @@ fn rule_min_age_secs_json(rule: &Value) -> Option<u64> {
     Some(secs as u64)
 }
 
-fn find_rule_by_id(rules: &Value, id: &str) -> Option<Value> {
+/// 按 id 查规则条目（§5.4：全仓**唯一**真源）。
+///
+/// 遍历口径 = subGroups 条目优先、组内自有条目也扫（超集）——旧的双实现里命令侧
+/// 用 `collect_group_items` 的互斥 else（有 subGroups 就不再看 g.items），同时带
+/// 两者的组会出现「引擎按它动刀、命令侧报未找到清理规则」的口径分叉。命令侧
+/// `find_cleanup_rule_by_id` 现在委托到这里，禁止再写第二份遍历。
+pub fn find_rule_by_id(rules: &Value, id: &str) -> Option<Value> {
     let groups = rules.get("groups").and_then(|v| v.as_array())?;
     for g in groups {
         if let Some(subgroups) = g.get("subGroups").and_then(|v| v.as_array()) {
@@ -1688,6 +1696,40 @@ mod cleanup_engine_contract_tests {
             msg_fk.contains("盘符相对") || msg_fk.contains("未解析") || msg_fk.contains("不可用"),
             "fileKey 型拒绝理由必须可见: {msg_fk}"
         );
+    }
+
+    /// 2026-10-04 审计 §5.3：两条仅大小写不同的规则根指向同一目录时，同一文件
+    /// 不得收进两行——旧去重是大小写敏感的精确比较，会释放量重复计数 + 第二次
+    /// remove 返回 NotFound 被记成「1 个被占用」。
+    #[test]
+    fn 仅大小写不同的规则根去重后只算一次() {
+        let dir = std::env::temp_dir().join(format!("trim-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.log"), b"0123456789").unwrap();
+
+        let lower = dir.to_string_lossy().to_string();
+        // 整条路径翻大写：Windows 文件系统大小写不敏感，两条根展开出同一批文件
+        let upper = lower.to_uppercase();
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"dedup","name":"大小写去重探测",
+            "fileKeys":[
+                {"path": lower, "pattern":"*.log", "recurse":true},
+                {"path": upper, "pattern":"*.log", "recurse":true}
+            ]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"dedup","name":"大小写去重探测","path": lower})];
+
+        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        let d = &res.details[0];
+        assert_eq!(d["fileCount"].as_i64(), Some(1), "同一文件必须只删/只算一次: {d}");
+        assert_eq!(d["freed"].as_i64(), Some(10), "释放量不得重复计数: {d}");
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(
+            !msg.contains("被占用"),
+            "重复行消除后不得残留 NotFound 误报的「被占用」: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

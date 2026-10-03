@@ -9,7 +9,7 @@
 
 mod bsod;
 mod cleanup;
-pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute};
+pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute, find_rule_by_id};
 mod common;
 mod contextmenu;
 pub use contextmenu::{cm_win11_mode, cm_blocked_list, cm_restart_explorer, cm_scan, cm_toggle, cm_remove, cm_backup, cm_restore};

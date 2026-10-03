@@ -838,3 +838,47 @@ fn 水位线高水位_两侧接线在位() {
         "防回滚地板的消费点漂移了"
     );
 }
+
+// ==================== §5.4 规则查找单点真源（2026-10-04） ====================
+
+/// 命令侧 find_cleanup_rule_by_id 必须与引擎侧 find_rule_by_id 同源且同结果。
+/// 旧双实现里命令侧的互斥 else（有 subGroups 就不看 g.items）会与引擎侧
+/// （subGroups 优先、自有条目也扫）在「双形态组」上分叉：引擎按它动刀、
+/// 命令侧报「未找到清理规则」。
+#[test]
+fn 规则查找单点真源_双形态组两侧同结果() {
+    let rules = json!({
+        "groups": [{
+            "key": "g",
+            "subGroups": [{"items": [
+                {"id": "in_sub", "name": "子组条目"}
+            ]}],
+            "items": [
+                {"id": "in_own", "name": "组内自有条目"}
+            ]
+        }]
+    });
+    // 双形态组：g.items 里的条目引擎侧历来找得到，命令侧必须同样找得到
+    let own = find_cleanup_rule_by_id(&rules, "in_own");
+    assert!(own.is_some(), "双形态组里 g.items 的条目命令侧不得报「未找到清理规则」");
+    let via_engine = crate::engine::native::find_rule_by_id(&rules, "in_own");
+    assert_eq!(own, via_engine, "两侧必须返回同一份条目");
+    assert!(find_cleanup_rule_by_id(&rules, "in_sub").is_some(), "subGroups 条目照常命中");
+    // 单点真源的另一半：不许存在第二份遍历（计数棘轮）
+    let rules_src = include_str!("rules.rs");
+    let engine_src = include_str!("../../engine/native/cleanup.rs");
+    assert_eq!(
+        rules_src.matches("fn find_cleanup_rule_by_id").count(),
+        1,
+        "命令侧委托入口必须恰好一个"
+    );
+    assert_eq!(
+        engine_src.matches("fn find_rule_by_id").count(),
+        1,
+        "引擎侧遍历实现必须恰好一个"
+    );
+    assert!(
+        rules_src.contains("crate::engine::native::find_rule_by_id(rules, id)"),
+        "命令侧必须是薄委托，不是自写遍历"
+    );
+}

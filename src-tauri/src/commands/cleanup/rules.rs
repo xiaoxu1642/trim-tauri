@@ -1223,15 +1223,14 @@ pub fn rules_value() -> Result<Value, String> {
 }
 
 /// 按 id 定位规则条目（groups→subGroups→items 与 groups→items 并存，需通用遍历）
+/// 按 id 查规则条目（§5.4：薄委托到引擎唯一真源）。
+///
+/// 原先这里用 `collect_group_items` 的互斥 else 自写遍历（有 subGroups 就不再看
+/// g.items），与引擎侧 find_rule_by_id 的「subGroups 优先、自有条目也扫」口径
+/// 分叉：同时带两者的组会出现「引擎按它动刀、命令侧报未找到清理规则」。命令层
+/// 禁再写第二份遍历。
 pub(super) fn find_cleanup_rule_by_id(rules: &Value, id: &str) -> Option<Value> {
-    for g in rules.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        for it in collect_group_items(&g) {
-            if it.get("id").and_then(|v| v.as_str()) == Some(id) {
-                return Some(it);
-            }
-        }
-    }
-    None
+    crate::engine::native::find_rule_by_id(rules, id)
 }
 
 
