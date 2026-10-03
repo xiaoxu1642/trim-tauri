@@ -1332,3 +1332,32 @@ fn optimizer_stale_dismiss_is_main_only() {
         );
     }
 }
+
+/// 2026-10-04 磁盘清理审计 §5.6：item-detail 的 path 形参必须与扫描快照同源。
+/// MockRuntime 没有真实扫描（快照为空）⇒ 任意非空 path 必须被拒——这正好是
+/// 「任意目录读暴露面」的拒收面；空 path 走规则自身枚举，不得触发该拒绝。
+#[test]
+fn cleanup_item_detail_path_不在快照时被拒() {
+    let w = main_window();
+    // ① 任意非空 path（快照为空 = 必然不同源）必须被拒
+    let text = invoke_text(
+        &w,
+        "cleanup_item_detail",
+        json!({ "id": "__no_such_id__", "path": r"C:\Windows\Web" }),
+    );
+    assert!(
+        text.contains("已拒绝枚举") || text.contains("不是本次扫描结果"),
+        "任意目录读必须被拒（§5.6）: {text}"
+    );
+    // ② 空 path：不得触发 §5.6 拒绝（走规则自身的枚举面，回执可能是成功或
+    //    规则不存在，但必须是别的理由）
+    let text2 = invoke_text(
+        &w,
+        "cleanup_item_detail",
+        json!({ "id": "__no_such_id__", "path": "" }),
+    );
+    assert!(
+        !text2.contains("不是本次扫描结果") && !text2.contains("已拒绝枚举"),
+        "空 path 不得被 §5.6 拒绝误伤: {text2}"
+    );
+}

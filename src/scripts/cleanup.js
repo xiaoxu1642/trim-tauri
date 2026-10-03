@@ -1183,7 +1183,10 @@
     // Electron 轨的事实；本轨（Tauri/Rust）没有 trashOrUnlink，`toRecycle=false` 使
     // `cleanup.rs` 的回收站支对该链不可达，永久删发生在 `cleanup_execute.ps1` 里，**刻意不做
     // 永久删除兜底之外的补救**。红线口径已按这条裁定改写在 AGENTS §3（含"唯一例外"表述）。
-    const force = (highRisk.length > 0 || mediumRisk.length > 0); // F-P2-07：确认过高/中风险弹窗后放行 PS 闸
+    // 2026-10-04 审计 §5.5：force 是载荷兼容残留——「PS 闸」已随 S3 纯原生删除，
+    // 主进程对 force 无任何判定语义（只进日志对账）。risk 确认弹窗的真实用途是
+    // D10 分级告知；值照传只为不破坏 CHANNEL_MAP 载荷键。
+    const force = (highRisk.length > 0 || mediumRisk.length > 0);
     const toRecycle = false;
     const autoRebuild = true;
     setProgress(0, '开始清理...');

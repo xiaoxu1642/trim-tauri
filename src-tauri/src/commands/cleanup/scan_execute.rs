@@ -286,6 +286,11 @@ pub(super) fn move_to_recycle_bin(path: &std::path::Path) -> Result<(), String> 
 /// 参数**保留**是为了不破坏 `CHANNEL_MAP` 的载荷键（删字段会让渲染层与
 /// `tauri-api.js` 两侧同时改，且旧版前端传了它会被静默吞掉）。收到 true 时
 /// 如实回执并写日志，不静默改写 —— 让调用方知道自己的参数没生效。
+///
+/// 2026-10-04 审计 §5.5（NIT）：`force` 同属载荷兼容残留——「PS 闸」已随 S3
+/// 纯原生删除，主进程对它**没有任何判定语义**，只进开始清理的日志供对账。
+/// 渲染层 cleanup.js 侧指向这道不存在的门的旧注释已同步订正；别让日志里
+/// 的 `force=true/false` 被误读成还有一道闸。
 #[tauri::command]
 pub async fn cleanup_execute<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -787,6 +792,26 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
         Some(p) if !p.is_empty() && p.chars().count() <= 600 => p,
         _ => String::new(),
     };
+    // 2026-10-04 审计 §5.6：path 形参必须与**本窗口扫描快照**里该条目的 path
+    // 同源（渲染层传的就是 result.path，与快照同一数据源，产品功能不受影响）。
+    // 原先任意可读目录都会被枚举回最多 600 条路径，guard_readonly 又放行全部
+    // 五窗——一条没有产品收益的任意目录读暴露面。口径沿用
+    // validate_snapshot_items 的 path_resolve 词法折叠比对。
+    if !safe_path.is_empty() {
+        let snapshot_path = {
+            let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());
+            buckets
+                .get(window.label())
+                .and_then(|m| m.get(&id))
+                .and_then(|it| it.get("path"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        let known = snapshot_path.as_deref().unwrap_or("");
+        if known.is_empty() || path_resolve(&safe_path) != path_resolve(known) {
+            return json!({ "success": false, "message": "明细路径不是本次扫描结果，已拒绝枚举" });
+        }
+    }
     // S3：纯 Rust 原生
     if let Some(rule) = find_cleanup_rule_by_id(&rules, &id) {
         match crate::engine::native::cleanup_detail(&rule, &safe_path) {
