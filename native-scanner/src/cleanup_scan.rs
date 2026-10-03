@@ -1587,9 +1587,16 @@ fn get_blocked(rule: &Json, running: &HashSet<String>) -> Vec<String> {
 // 处理（fail-closed：误删正在写入的文件不可逆，宁可少删）。扫描（本文件）与执行
 // （engine::native::cleanup_execute）两侧共用同一谓词，防「扫描排除、执行照删」。
 
-/// 由秒数推 cutoff（现在 − secs）。Duration 溢出只在天文数字下发生，panic 可接受。
+/// 由秒数推 cutoff（现在 − secs）。
+///
+/// §5.1：`f64 as u64` 在天文数字下饱和到 `u64::MAX`，`SystemTime - Duration` 会
+/// panic —— 且 panic 从 `cleanup_execute` 展开时清单**还没写盘**，已落盘的备份
+/// 副本会变成无清单孤儿（可恢复删除变不可恢复）。改为 checked_sub：溢出时
+/// 饱和到 `UNIX_EPOCH`（时间门槛 = 「所有文件都够老」，语义正确方向且不 panic）。
 pub fn min_age_cutoff(secs: u64) -> std::time::SystemTime {
-    std::time::SystemTime::now() - std::time::Duration::from_secs(secs)
+    std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(secs))
+        .unwrap_or(std::time::UNIX_EPOCH)
 }
 
 /// 文件修改时间是否早于 cutoff（= 年龄达标）。mtime 读不到 ⇒ false（按太新处理）。
@@ -2491,6 +2498,19 @@ fn flush_stdout() {
 
 #[cfg(test)]
 mod tests {
+
+    /// 2026-10-04 审计 §5.1：minAge 天文数字（minAgeDays > 20729 时 f64 as u64
+    /// 饱和到 u64::MAX）不得 panic——改为饱和到 UNIX_EPOCH。panic 会从
+    /// cleanup_execute 展开、发生在清单写盘之前，把可恢复删除变成不可恢复。
+    #[test]
+    fn min_age_cutoff_溢出饱和到epoch不panic() {
+        let cutoff = min_age_cutoff(u64::MAX);
+        assert_eq!(cutoff, std::time::UNIX_EPOCH, "溢出必须饱和到 epoch（所有文件视为够老）");
+        let normal = min_age_cutoff(3600);
+        assert!(normal < std::time::SystemTime::now(), "常规秒数 cutoff 必须在过去");
+        assert!(min_age_cutoff(0) <= std::time::SystemTime::now(), "0 秒 cutoff = 现在");
+    }
+
     use super::*;
 
     /// 2026-10-04 磁盘清理审计 §3.2：诊断通道不许有第二出口。

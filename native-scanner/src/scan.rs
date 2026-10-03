@@ -1471,11 +1471,16 @@ fn lexically_normalize(p: &str) -> String {
         }
         comps.push(c);
     }
-    if prefix.is_empty() {
-        comps.join("\\").to_lowercase()
+    let joined = if prefix.is_empty() {
+        comps.join("\\")
     } else {
-        format!(r"{}\{}", prefix, comps.join("\\")).to_lowercase()
-    }
+        format!(r"{}\{}", prefix, comps.join("\\"))
+    };
+    // 2026-10-04 审计 §5.7：尾部点号/空白裁剪对齐 protect.rs::normalize（Win32
+    // 忽略路径尾部的点与空格，`Test-Path "$env:TEMP."` 为 True）——不裁的话
+    // `c:\foo\bar.` 与 `c:\foo\bar` 词法错开一位，前缀比对漏判（纵深层分叉）。
+    // 与 protect.rs 同口径：只在**整条路径末端**裁，不做逐组件裁剪。
+    joined.trim_end_matches([' ', '.']).to_lowercase()
 }
 
 /// 对应主进程 isProtectedDeletePath：拒绝磁盘根与系统关键目录。
@@ -1772,6 +1777,30 @@ fn canonical(s: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// 2026-10-04 审计 §5.7：尾部点号/空白裁剪对齐 protect.rs::normalize ——
+    /// Win32 忽略路径尾部的点与空格，不裁的话前缀比对漏判（纵深层分叉）。
+    #[test]
+    fn lexically_normalize_尾部点号空白与主进程对齐() {
+        assert_eq!(
+            lexically_normalize(r"C:\Foo\Bar."),
+            lexically_normalize(r"C:\Foo\Bar"),
+            "尾点必须折叠"
+        );
+        assert_eq!(
+            lexically_normalize(r"C:\Foo\Bar  "),
+            lexically_normalize(r"C:\Foo\Bar"),
+            "尾空白必须折叠"
+        );
+        assert_eq!(
+            lexically_normalize(r"C:\Foo\Bar. . "),
+            lexically_normalize(r"C:\Foo\Bar"),
+            "混合尾点/空白必须全折叠"
+        );
+        // 非尾部组件的点不得受影响（逐组件裁剪是另一个语义，刻意不做）
+        assert_eq!(lexically_normalize(r"C:\Foo.\Bar"), r"c:\foo.\bar");
+    }
+
     use super::*;
     use std::sync::Arc;
 
