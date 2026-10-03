@@ -33,9 +33,13 @@ const check = (ok, label, detail = '') => {
 };
 
 console.log('=== 扫描器规则行为差分门禁 ===\n');
-console.log(`  cargo test --test cleanup_scan_rule_diff  （cwd=${CRATE}）\n`);
+// M-3（2026-10-03 L3）：`cargo test --test cleanup_scan_rule_diff` 只跑 tests/，
+// native-scanner/src/ 下的 21 个 #[cfg(test)] 单测（全局上限、锁中毒口径、控制字符
+// 转义等关键钉桩）不在任何门禁内 —— 靠人不主动跑就无人跑。改为 `cargo test`
+// 一次接入全部：集成测试（cleanup_scan_rule_diff 等）+ src 单测。
+console.log(`  cargo test  （cwd=${CRATE}）\n`);
 
-const r = spawnSync('cargo', ['test', '--test', 'cleanup_scan_rule_diff'], {
+const r = spawnSync('cargo', ['test'], {
   cwd: CRATE,
   stdio: 'inherit',
 });

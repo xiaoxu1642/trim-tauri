@@ -151,6 +151,8 @@ pub fn record_pending(id: &str, title: &str, kinds: &[String]) -> bool {
             }),
         );
     }
+    // 重新执行 = 状态刚变过，用户之前的「不再提醒」失效（若又落 partial 应重新提醒）
+    clear_stale_dismissed(&mut state, id);
     save(&state)
 }
 
@@ -169,6 +171,9 @@ pub fn mark_applied(id: &str, verify: &str) -> bool {
     rec.insert("status".into(), json!("applied"));
     rec.insert("lastVerify".into(), json!(v));
     rec.insert("verifiedAt".into(), json!(iso_now()));
+    // 根治「未完成还原横幅每次都弹」（2026-10-03 用户拍板）：记账写入路径统一清忽略——
+    // 该项状态刚被本轮执行改变，忽略记录代表的是「对上一轮结果的处置」，已失效。
+    clear_stale_dismissed(&mut state, id);
     save(&state)
 }
 
@@ -178,6 +183,14 @@ pub fn mark_applied(id: &str, verify: &str) -> bool {
 /// 才转正 applied」——账本谎报。partial 状态如实表达「没有执行成功，pending
 /// 期间可能有已落盘的步骤」，optimizer_state_overview 原样呈现。
 pub fn mark_partial(id: &str) -> bool {
+    mark_partial_with_reasons(id, &[])
+}
+
+/// mark_partial 的完整形态：带**失败子步原因明细**（根治「未完成还原横幅」第二只脚，
+/// 2026-10-03 用户拍板）。此前 partial 只记状态不记原因，失败细节只在日志里——
+/// 用户看到「状态不明」却无从判断该还原还是该重跑。reasons 截前 8 条防记账膨胀
+/// （70+ 服务项可能有几十个失败步，横幅与详情只需要头部原因）。
+pub fn mark_partial_with_reasons(id: &str, reasons: &[String]) -> bool {
     if id.is_empty() {
         return false;
     }
@@ -191,6 +204,11 @@ pub fn mark_partial(id: &str) -> bool {
         return false;
     };
     rec.insert("status".into(), json!("partial"));
+    rec.insert(
+        "partialReasons".into(),
+        json!(reasons.iter().take(8).cloned().collect::<Vec<_>>()),
+    );
+    clear_stale_dismissed(&mut state, id);
     save(&state)
 }
 
@@ -200,14 +218,62 @@ pub fn remove(id: &str) -> bool {
         return false;
     }
     let mut state = load();
+    // 销账 = 该项不再有 stale 状态，忽略记录一并清掉（留着是垃圾，还会在
+    // 「重新执行 → 又 partial」时让第一次提醒被旧忽略错误吞掉）。
+    clear_stale_dismissed(&mut state, id);
     let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) else {
-        return true;
+        return save(&state);
     };
     if !items.contains_key(id) {
-        return true;
+        return save(&state);
     }
     items.remove(id);
     save(&state)
+}
+
+// ==================== 「未完成还原」横幅的 per-id 忽略（2026-10-03 根治） ====================
+//
+// 背景：v5 P2 让「非可检测项的 partial」也进启动横幅（修复「半成功不可见」），
+// 但 cmd 类项每次重跑都必有失败子步（Edge 计划任务会被系统重建、服务里有禁不掉的），
+// 记账停在 partial 永不自愈，横幅又没有忽略出口 ⇒ 每次启动都弹。根治方案：
+// ① 横幅加「不再提醒」⇒ dismiss_stale；② 记账带失败原因 ⇒ mark_partial_with_reasons；
+// ③ 该项重新执行/还原销账时自动移除忽略（clear_stale_dismissed）——状态刚变过，
+// 若又 partial 应重新提醒，旧忽略不得吞掉新提示。
+
+/// 记录「不再提醒」。幂等（重复 dismiss 更新时间戳）。
+pub fn dismiss_stale(id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    let mut state = load();
+    if let Some(p) = state.get_mut("prefs").and_then(|v| v.as_object_mut()) {
+        let d = p.entry("staleDismissed").or_insert_with(|| json!({}));
+        if let Some(m) = d.as_object_mut() {
+            m.insert(id.into(), json!(iso_now()));
+        }
+    }
+    save(&state)
+}
+
+/// 读取忽略名单（overview 过滤 staleIds 用）
+pub fn dismissed_map() -> Map<String, Value> {
+    load()
+        .get("prefs")
+        .and_then(|p| p.get("staleDismissed"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 从忽略名单移除单项（无则静默成功）
+fn clear_stale_dismissed(state: &mut Value, id: &str) {
+    if let Some(d) = state
+        .get_mut("prefs")
+        .and_then(|p| p.get_mut("staleDismissed"))
+        .and_then(Value::as_object_mut)
+    {
+        d.remove(id);
+    }
 }
 
 /// 全部记账条目
@@ -363,5 +429,47 @@ mod tests {
             src.contains("RECENT_LIMIT: usize = 10"),
             "recent 上限常量必须是 10（方案 §3.5 E10：recent 上限 10 + LRU）"
         );
+    }
+
+    /// 根治「未完成还原横幅每次都弹」（2026-10-03 用户拍板）的行为契约：
+    /// dismiss 后进忽略名单；该项**重新记账/转正/销账**时忽略被自动清除；
+    /// mark_partial_with_reasons 把失败原因写进条目。跑真实状态文件，
+    /// 夹具「自己写自己清」，断言只看自己造的部分。
+    #[test]
+    fn stale忽略与失败原因记账契约() {
+        use crate::engine::optimization_state as st;
+        let id = "__stale_dismiss_fixture__";
+        // 造一条 pending 记账（record_pending 会清忽略——先 dismiss 再验证清除语义）
+        let kinds = vec!["cmd".to_string()];
+        assert!(st::record_pending(id, "夹具项", &kinds), "写 pending 失败");
+        assert!(st::dismiss_stale(id), "写忽略失败");
+        assert!(st::dismissed_map().contains_key(id), "dismiss 后必须在忽略名单里");
+
+        // 重新记账（record_pending）= 状态变了，忽略必须被自动清除
+        assert!(st::record_pending(id, "夹具项", &kinds), "重写 pending 失败");
+        assert!(
+            !st::dismissed_map().contains_key(id),
+            "重新记账后旧忽略必须被自动清除 —— 否则新一轮 partial 会被旧忽略吞掉"
+        );
+
+        // partial + 失败原因：原因进条目（截 8 条）
+        let reasons: Vec<String> = (1..12).map(|i| format!("步骤「t{i}」: 命令返回非零")).collect();
+        assert!(st::mark_partial_with_reasons(id, &reasons), "写 partial 失败");
+        let rec = st::get(id).expect("partial 记账消失");
+        let got = rec.get("partialReasons").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        assert_eq!(got.len(), 8, "失败原因必须截前 8 条（防记账膨胀），实际 {}", got.len());
+        assert!(got[0].as_str().unwrap_or("").contains("t1"), "截断方向反了（留下的不是头部原因）");
+
+        // dismiss → 销账：条目与忽略记录一起消失
+        assert!(st::dismiss_stale(id), "写忽略失败");
+        assert!(st::remove(id), "销账失败");
+        assert!(st::get(id).is_none(), "销账后条目应消失");
+        assert!(
+            !st::dismissed_map().contains_key(id),
+            "销账后忽略记录必须一并清掉 —— 留着会在「重新执行 → 又 partial」时吞掉第一次提醒"
+        );
+
+        // 边界：空 id 拒绝
+        assert!(!st::dismiss_stale(""), "空 id 必须被拒");
     }
 }

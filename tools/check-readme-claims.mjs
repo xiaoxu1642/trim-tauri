@@ -136,6 +136,96 @@ if (psClaims.length === 0) {
 }
 
 console.log('');
+
+// ---------- 9~12（审查 M-8 补，2026-10-03）：分域明细 / 右键分类数 / 内存区域数 / 网络诊断数 ----------
+// 此前只有总数进了对拍：分域 35/23/9/5/4、16 类、6 区域、6 诊断各自对应一份独立清单
+// （cleanup-rules.json groups、contextmenu.rs scenes ⇄ contextmenu.js CATEGORY_ORDER、
+// memoryclean.js REGIONS、netcheck.js ITEM_META），改任一份只漂分项、总断言全绿——
+// 这正是 B5「数字漂移」最隐蔽的形态。四组真源全部现算，不在本文件维护第二份数字。
+
+// 9. 清理项分域明细：readme「系统 35 / 应用 23 / 浏览器 9 / 显卡 5 / 特殊 4」⇄ groups 逐组实算。
+//    readme 用简称，与 groups title 的对应关系登记在 DOMAIN_MAP（「显卡」↔「图形与加速」、
+//    「特殊」↔「维护与特殊操作」不是字面前缀）；groups 增删组或改名都会红，引导同步改 readme。
+const DOMAIN_MAP = [
+  ['系统', '系统清理'], ['应用', '应用清理'], ['浏览器', '浏览器清理'],
+  ['显卡', '图形与加速'], ['特殊', '维护与特殊操作'],
+];
+const groupCounts = new Map((cleanup.groups ?? []).map((g) => [
+  g.title, (g.subGroups ?? []).reduce((a, s) => a + (s.items ?? []).length, 0),
+]));
+const domainRe = new RegExp(DOMAIN_MAP.map(([short]) => `${short}\\s*(\\d+)`).join('\\s*/\\s*'), 'g');
+const domainClaims = [...readme.matchAll(domainRe)];
+if (domainClaims.length === 0) {
+  check(false, '9. 清理项分域明细', 'readme 中未找到分域声明（措辞变了或被删？）');
+} else {
+  const expected = DOMAIN_MAP.map(([, title]) => groupCounts.get(title));
+  const bad = domainClaims.filter((m) => DOMAIN_MAP.some((_, i) => Number(m[i + 1]) !== expected[i]));
+  check(bad.length === 0, `9. 清理项分域明细 = groups 逐组实算（${domainClaims.length} 处）`,
+    bad.length === 0
+      ? `全部为 ${expected.join(' / ')}`
+      : `漂移：${bad.map((m) => DOMAIN_MAP.map((_, i) => m[i + 1]).join('/')).join('、')} ≠ 真源 ${expected.join(' / ')}`);
+}
+// 9b. groups 分组名单 ⇄ 门禁登记的 title 集合双向一致（改名/加组/减组即红，
+//     防止「title 变了但 items 数没变」让简称映射静默失配）。
+{
+  const titles = new Set((cleanup.groups ?? []).map((g) => g.title));
+  const mapped = new Set(DOMAIN_MAP.map(([, t]) => t));
+  const extra = [...titles].filter((t) => !mapped.has(t));
+  const missing = [...mapped].filter((t) => !titles.has(t));
+  check(extra.length === 0 && missing.length === 0, '9b. groups 分组名单 ⇄ 门禁登记一致',
+    extra.length ? `groups 多出未登记分组：${extra.join('、')}`
+      : missing.length ? `登记分组在 groups 中不存在：${missing.join('、')}`
+        : `${titles.size} 组全部登记`);
+}
+// 9c. 「5 大类」本身也是承诺数字，对 groups.length。
+assertAllEqual('9c. 清理项大类数 = groups.length', /(\d+)\s*大类共\s*\d+\s*个清理项/g, (cleanup.groups ?? []).length);
+
+// 10. 右键菜单扫描类数：readme「按 N 类扫描」⇄ 后端可达类数实算
+//     = contextmenu.rs scenes 表条目数 + 四个特殊 category 字面量（发送到/Win+X/新建菜单/
+//     打开方式，各自只有一段生成代码）。UWP/PackagedCom 后端未实现（contextmenu.rs:440
+//     自述「暂未实现」），所以这个数小于侧边栏 CATEGORY_ORDER.length —— readme 只承诺
+//     「扫得出数据的类数」。补实现或隐藏 UWP 属业务裁定： whichever 方向落地，两侧
+//     数字一起动，本门禁的对拍会引导 readme 同步。
+const ctxRs = read('src-tauri/src/engine/native/contextmenu.rs');
+const scenesBlk = ctxRs.match(/let scenes: &\[\(&str, &\[&str\]\)\] = &\[([\s\S]*?)\];/);
+const sceneCount = scenesBlk ? (scenesBlk[1].match(/\("([^"]+)"/g) ?? []).length : NaN;
+const SPECIAL_CATS = ['发送到', 'Win+X', '新建菜单', '打开方式'];
+const specialHit = scenesBlk ? SPECIAL_CATS.filter((c) => ctxRs.includes(`category: "${c}"`)) : [];
+const ctxReachable = Number.isFinite(sceneCount) ? sceneCount + specialHit.length : NaN;
+check(Number.isFinite(ctxReachable), 'contextmenu.rs scenes 表 + 特殊类别可解析',
+  `scenes 表 ${sceneCount} 类 + 特殊 ${specialHit.length} 类 = 后端可达 ${ctxReachable}`);
+assertAllEqual('10. 右键菜单扫描类数 = 后端可达类数实算', /按\s*(\d+)\s*类扫描/g, ctxReachable);
+const ctxJs = read('src/scripts/contextmenu.js');
+const catOrderBlk = ctxJs.match(/const CATEGORY_ORDER = \[([\s\S]*?)\];/);
+const catOrderCount = catOrderBlk ? catOrderBlk[1].split(',').filter((s) => s.trim()).length : NaN;
+check(Number.isFinite(catOrderCount) && catOrderCount >= ctxReachable,
+  '10b. 侧边栏 CATEGORY_ORDER ≥ 后端可达类数',
+  `侧边栏 ${catOrderCount} 类 / 后端可达 ${ctxReachable} 类`);
+if (Number.isFinite(catOrderCount) && catOrderCount > ctxReachable) {
+  console.log(`   ↳ 提醒（不判红，业务裁定项）：侧边栏有 ${catOrderCount - ctxReachable} 类后端未实现（UWP应用），点击恒为空列表`);
+}
+
+// 11. 内存清理区域数：readme「按 N 个区域勾选」⇄ REGIONS 非灰显条目实算。
+//     口径：条目以首行 `{ id: '` 计（desc 跨行不影响）；sysUnavailable: true 标记在
+//     条目首行上（fileCache/registryCache 两项灰显不计入「可勾选区域」）。
+const mcJs = read('src/scripts/memoryclean.js');
+const regionsBlk = mcJs.match(/const REGIONS = \[([\s\S]*?)\n  \];/);
+const regionTotal = regionsBlk ? (regionsBlk[1].match(/^\s*\{ id: '/gm) ?? []).length : NaN;
+const regionUnavailable = regionsBlk ? (regionsBlk[1].match(/sysUnavailable: true/g) ?? []).length : 0;
+const regionUsable = Number.isFinite(regionTotal) ? regionTotal - regionUnavailable : NaN;
+check(Number.isFinite(regionUsable), 'memoryclean.js REGIONS 可解析',
+  `共 ${regionTotal} 项 / 灰显 ${regionUnavailable} / 可勾选 ${regionUsable}`);
+assertAllEqual('11. 内存清理可勾选区域数 = REGIONS 实算', /按\s*(\d+)\s*个区域勾选/g, regionUsable);
+
+// 12. 网络检测诊断项数：readme「N 项只读诊断」⇄ netcheck.js ITEM_META 键数
+//     （该表注释自述「键名与后端回传 items 一致」——前端表即口径真源）。
+const ncJs = read('src/scripts/netcheck.js');
+const metaBlk = ncJs.match(/const ITEM_META = \{([\s\S]*?)\n  \};/);
+const netItems = metaBlk ? (metaBlk[1].match(/^\s{4}\w+: \{ name:/gm) ?? []).length : NaN;
+check(Number.isFinite(netItems), 'netcheck.js ITEM_META 可解析', `诊断项 ${netItems}`);
+assertAllEqual('12. 网络检测诊断项数 = ITEM_META 实算', /(\d+)\s*项只读诊断/g, netItems);
+
+console.log('');
 if (fail > 0) {
   console.error('门禁失败：readme 承诺数字与数据真源不一致（或声明措辞变更导致对拍落空）');
   process.exit(1);

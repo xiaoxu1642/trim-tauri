@@ -550,7 +550,12 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
     if u.host.is_empty() {
         return true;
     }
-    if u.host == "localhost" || u.host.ends_with(".localhost") || u.host == "0.0.0.0" {
+    // 审查 M-7（2026-10-03 L3）：`localhost.` 带尾点的域名在 Windows 解析器里等同
+    // `localhost`（回环），却因不等于 "localhost" 也不以 ".localhost" 结尾而漏到
+    // 「未知域名」分支被放行。先做一次尾点归一（剥一个尾点）再判 localhost 族，
+    // 与下面 IPv4 尾点重试同一族逻辑。
+    let host = u.host.strip_suffix('.').unwrap_or(&u.host);
+    if host == "localhost" || host.ends_with(".localhost") || host == "0.0.0.0" {
         return true;
     }
     if let Some(o) = is_ipv4(&u.host).or_else(|| parse_ipv4_aton(&u.host)) {
@@ -1035,6 +1040,10 @@ mod tests_private_url {
             "http://127.0.0.1./",
             "http://127.1./",
             "http://10.0.0.1./",
+            // M-7（2026-10-03 L3）：`localhost.` 尾点域名在 Windows 解析器等同回环
+            "http://localhost./",
+            "https://LOCALHOST./",
+            "https://foo.localhost./",
         ] {
             assert!(is_private_api_url(u), "{u} 应判私有");
         }

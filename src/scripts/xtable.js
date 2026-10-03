@@ -303,6 +303,10 @@
 
     function play(container, selector, first) {
       if (!first) return;
+      // M-4（2026-10-03 L3）：看板 FLIP 走 Web Animations API，CSS 的
+      // prefers-reduced-motion 通配归零管不到 Element.animate()（独立时间线）。
+      // 系统开「减少动态效果」时必须整体跳过，否则窗口宽度变化仍会平移 300ms。
+      if (window.ds?.reducedMotion?.()) return;
       container.querySelectorAll(selector).forEach(n => {
         const f = first.get(n);
         if (!f) return;

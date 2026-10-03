@@ -266,7 +266,7 @@ pub fn write_temp_script(content: &str, suffix: &str) -> Result<TempScript, Stri
     Ok(TempScript(file))
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEQ: AtomicU32 = AtomicU32::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -298,7 +298,17 @@ fn run_inbox_ps(script_path: &Path, timeout: Duration, diag_op: Option<&str>) ->
 /// （PS 5.1 按 ANSI 读无 BOM 文件，中文注释会乱码到解析失败）。登记台账见
 /// `tools/check-ps-callsites.mjs`。
 pub fn run_inbox_script(script: &str, timeout: Duration, diag_op: Option<&str>) -> Result<PsOutput, String> {
-    let path = write_temp_script(script, ".ps1")?;
+    // 审查 M-1（2026-10-03 L3）：把 `[Console]::OutputEncoding` 下沉到**咽喉**。
+    // 背景：PS 5.1 把重定向到管道的 stdout 按 OEM 码页写（本机 cp936），Rust 侧统一按
+    // UTF-8 lossy 解（read_all 的 String::from_utf8_lossy）。路径含中文（中文用户名机器上
+    // `%LOCALAPPDATA%\Microsoft\OneDrive` 就是中文路径）时，若脚本自己没设 OutputEncoding，
+    // 中文字节会塌成 U+FFFD，下游 `@@RECYCLE@@` 协议把不存在的路径送进回收站逻辑。
+    // 此前 appx.rs 在脚本内容里手写前缀（既定做法），但每个调用点各自记得写 —— 漏一处就
+    // 复现一次。现在在唯一入口强制注入，一次免疫全部 inbox 调用点。重复注入无害（幂等）。
+    let prefixed = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n{script}"
+    );
+    let path = write_temp_script(&prefixed, ".ps1")?;
     run_inbox_ps(path.path(), timeout, diag_op)
 }
 
@@ -435,23 +445,51 @@ fn run_with_exe(
 /// R1（2026-10-01）随 PS7 一起删掉的是 `on_line` 逐行回调：它唯一的使用者是
 /// `run_file_streaming`，而清理/维护类 `.ps1` 早在 S3 就退役了，收件箱 PS 的 PsInline
 /// 算子只看收尾的 `@@RESULT@@`/`@@RECYCLE@@`，没有行级进度可流。
+/// stdout 读取上限（审查 L-8，2026-10-03）：正常收件箱输出是 KB~MB 级，失控脚本
+/// （如卡在 `Write-Output` 循环）可在最长 1800s 的登记超时窗口里产出 GB 级 stdout
+/// 把内存撑爆——此前 `acc` 只受超时约束。到达上限即停读：交出已读部分 + warn 日志；
+/// 被截断的 JSON/协议行会走上游既有的畸形行处理（M-1 起有计数告警），不会静默装好。
+const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
 fn read_all(pipe: Option<impl Read>, snapshot: Option<&Snapshot>) -> String {
+    read_all_capped(pipe, snapshot, MAX_OUTPUT_BYTES)
+}
+
+/// 实际读取体；cap 拆成参数是为了单测能用小上限验证截断行为，生产恒走 `MAX_OUTPUT_BYTES`。
+fn read_all_capped(mut pipe: Option<impl Read>, snapshot: Option<&Snapshot>, cap: usize) -> String {
     let mut acc: Vec<u8> = Vec::new();
-    if let Some(mut p) = pipe {
+    let mut truncated = false;
+    if let Some(p) = pipe.as_mut() {
         let mut chunk = [0u8; 4096];
         loop {
             match p.read(&mut chunk) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    acc.extend_from_slice(&chunk[..n]);
+                    let room = cap.saturating_sub(acc.len());
+                    if room == 0 {
+                        truncated = true;
+                        break;
+                    }
+                    let take = n.min(room);
+                    acc.extend_from_slice(&chunk[..take]);
                     if let Some(s) = snapshot {
-                        s.append(&chunk[..n]);
+                        s.append(&chunk[..take]);
+                    }
+                    if take < n {
+                        truncated = true;
+                        break;
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
         }
+    }
+    if truncated {
+        log::write_log(
+            "warn",
+            &format!("PowerShell stdout 超过 {cap} 字节读取上限，已截断（防失控脚本撑爆内存）"),
+        );
     }
     String::from_utf8_lossy(&acc).to_string()
 }
@@ -498,6 +536,22 @@ mod tests {
         // 单块 4096 字节，构造 3 倍长度的行序列逼出多次 read 拼接
         let input = "x".repeat(5000) + "\n" + &"y".repeat(8000) + "\n";
         assert_eq!(drain(&input), input);
+    }
+
+    // ==================== 审查 L-8：stdout 读取上限 ====================
+
+    #[test]
+    fn stdout_超限即截断停读() {
+        let input = "a".repeat(10_000);
+        let out = read_all_capped(Some(std::io::Cursor::new(input.as_bytes())), None, 1_000);
+        assert_eq!(out.len(), 1_000, "交出字节必须恰好等于上限（多读一块都会越限）");
+    }
+
+    #[test]
+    fn stdout_恰好等于上限不算截断() {
+        let input = "b".repeat(1_000);
+        let out = read_all_capped(Some(std::io::Cursor::new(input.as_bytes())), None, 1_000);
+        assert_eq!(out, input, "等于上限的正常输出必须完整交出");
     }
 
     // ==================== 审查 v2-M8：宽限期语义与降级不丢 stdout ====================

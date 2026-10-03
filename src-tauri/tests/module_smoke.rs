@@ -1317,3 +1317,18 @@ fn syspanel_回执必须是_success_data_包装() {
         "仍有命令裸返回 state ⇒ 渲染层恒判读取失败"
     );
 }
+
+/// 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略是写操作（记账 prefs 段），
+/// 优化页只在主窗 ⇒ 档位必须 MAIN，子窗被拒。正向特征（主窗能通过来源校验）
+/// 由 pending 侧同名模板核对过的同族形态覆盖；这里按模板纪律只点子窗拒绝侧。
+#[test]
+fn optimizer_stale_dismiss_is_main_only() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "optimizer_stale_dismiss", json!({ "ids": ["x"] }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调 optimizer_stale_dismiss 必须被来源校验拒杀，回执 {text}"
+        );
+    }
+}

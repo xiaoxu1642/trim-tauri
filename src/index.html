@@ -142,7 +142,9 @@
             <svg class="nav-parent-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>
           </span>
         </button>
-        <div class="nav-submenu" data-nav-submenu="speed">
+        <!-- 审查 M-12：静态默认折叠态即置 inert，堵住 JS 初始化前那一瞬的 Tab 空窗；
+             applyNavSubState 会按用户持久化的展开状态接管这个属性 -->
+        <div class="nav-submenu" data-nav-submenu="speed" inert>
           <button class="nav-subitem" data-page="diskbench"><span class="nav-subdot"></span><span>磁盘测速</span></button>
           <button class="nav-subitem active" data-page="netspeed"><span class="nav-subdot"></span><span>网络测速</span></button>
           <button class="nav-subitem" data-page="netcheck"><span class="nav-subdot"></span><span>网络检测</span></button>
@@ -785,13 +787,16 @@
         <div class="optimizer-banner" id="optimizerBanner" style="display:none"></div>
 
         <!-- v2.6.0（P0-1）：未完成还原提醒——启动扫描发现「有记账但未生效/执行中断」的项时显示。
-             「状态不明」有两个收敛方向，所以这里必须并列给两个出口：退回执行前的原值（还原），
-             或把优化目标值重新写到位（应用）。只给一个等于替用户猜方向（2026-09-29 目检反馈）。 -->
+             「状态不明」有三个收敛方向（2026-10-03 根治补第三出口）：退回执行前的原值（还原）、
+             把优化目标值重新写到位（应用）、或不再于每次启动时提醒（忽略——该项重新执行或
+             还原销账后忽略自动失效，若又 partial 会重新提醒）。只给前两个等于逼用户在
+             「还原掉想要的优化」和「永远弹窗」之间二选一。 -->
         <div class="optimizer-banner stale" id="optimizerStaleBanner" style="display:none">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2L1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
           <span id="optimizerStaleText"></span>
           <button type="button" class="btn btn-secondary btn-small" id="btnStaleRestore" data-tip="按执行前记录的原值逐项还原这些改动">一键还原</button>
           <button type="button" class="btn btn-secondary btn-small" id="btnStaleApply" data-tip="把这些项重新按优化目标值写入；走与逐项「应用」同一条链——含高危红色二次确认、还原点检查与批次生效粒度提示">一键应用</button>
+          <button type="button" class="btn btn-secondary btn-small" id="btnStaleDismiss" data-tip="保持现状不再于启动时提醒；这些项重新执行或还原后忽略自动失效，若又出现半成功会重新提醒">不再提醒</button>
         </div>
 
         <!-- v2-M14：退役优化项在本机仍留有注册表备份时的出口。刻意不学上游那样启动即静默写回，

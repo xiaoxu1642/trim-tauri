@@ -71,6 +71,26 @@
   // （子窗不加载 app.js，window.app 不存在），此处仅薄委托。
   function toast(type, message) { window.subToast?.hintLine('mwGlobalHint', type, message); }
 
+  /**
+   * 自绘确认弹窗（2026-10-03 用户裁定「本窗弹窗改自绘」）。
+   *
+   * 为什么不走 window.app.confirm：本窗是子窗口，**不加载 app.js**，`window.app` 不存在。
+   * 之前唯一的路径是 window.modal.confirm，而 modal.js 在本窗压根没挂载 ——
+   * 结果是本窗**一个弹窗骨架都没有**，覆盖已有密钥这类破坏性动作连二次确认都没有，
+   * 用户点一下就直接落盘。本函数是本窗唯一的确认出口。
+   *
+   * modal.js 缺席时**明确降级为 false（不执行）**，不退回原生 window.confirm：
+   * 原生框会冻住整个子窗口（Tauri 里同步阻塞）。而「弹不出来」比「不确认」更危险 ——
+   * 静默放行等于没有护栏，所以宁可中止并在日志里说清。
+   */
+  async function selfConfirm({ title, message, okText = '确认', danger = false, hint = '' }) {
+    if (!window.modal?.confirm) {
+      toast('error', '弹窗组件未就绪，已中止该操作以免无确认覆盖');
+      return false;
+    }
+    return window.modal.confirm({ title, message, confirmText: okText, cancelText: '取消', danger, dangerHint: hint });
+  }
+
   function stateBadge(key) {
     const cfg = models[key] || {};
     if (cfg.enabled && cfg.verified) return '<span class="mw-state ok">已启用 · 已验证</span>';
@@ -266,6 +286,24 @@
         if (key === 'custom' && !String(cfg.model || '').trim()) {
           log(key, '自定义模型需要填写模型名称', 'error');
           return;
+        }
+        // 覆盖已有密钥前拦一道自绘确认（2026-10-03 用户裁定）。
+        // 只在**已有非空密钥**时拦：首次填写直接放行，否则每次配置都要多点一次，
+        // 护栏就变成了骚扰（与「不可逆动作才确认」同一条原则）。
+        const prevKey = String((models[key] || {}).apiKey || '').trim();
+        const newKey = String(cfg.apiKey || '').trim();
+        if (prevKey && newKey && newKey !== prevKey) {
+          const go = await selfConfirm({
+            title: `覆盖「${MODEL_META[key].name}」的密钥`,
+            message: `将用新密钥替换已保存的密钥。\n\n覆盖后，依赖旧密钥的联网功能会立即改用新密钥，旧密钥无法在本应用内找回。`,
+            okText: '覆盖保存',
+            danger: true,
+            hint: '密钥不会离开本机，也不会上传到除该模型服务端以外的地方。'
+          });
+          if (!go) {
+            log(key, '用户取消覆盖密钥，未做改动', 'info');
+            return;
+          }
         }
         btn.disabled = true;
         btn.textContent = '保存中…';

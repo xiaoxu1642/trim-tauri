@@ -75,15 +75,33 @@ const EXEMPTS = new Map([
 ]);
 
 // ---- 正向清单：审查矩阵逐列核过的文件型删除出口，protect 判定不许掉 ----
+// 审查 L-4（2026-10-03）补入 optimizer_run：@@RECYCLE@@ 回收站出口的 protect 调用就在
+// apply.rs 命令体内（714 行），此前只靠第 3 组「恰好 includes is_path_protected」放行
+// ——谁删掉那行，门禁不会红。进正向清单后「掉闸即红」。
 const MUST_PROTECT = [
   'cleanup_execute',
   'fileclean_delete_file',
   'fileclean_execute',
   'finder_delete',
+  'optimizer_run',
   'uninstall_residue_execute',
   'uninstall_pending_add',
   'contextmenu_remove',
 ];
+
+// 二跳出口的正向棘轮（审查 L-4）：protect 不在命令体内、而在本仓 helper 里。
+// cleanup_retry_failed_delete 命令体是薄包装（guard + 组装 targets），真正的
+// remove_dir_all/remove_file + is_path_protected 全在 retry_failed_delete_blocking ——
+// 命令体口径的 MUST_PROTECT 对它恒红，所以单独登记 {命令, helper}，钉住 helper 体内
+// 的 protect 调用。helper 改名/protect 被删/搬出 src 均红。
+const MUST_PROTECT_VIA_HELPER = [
+  ['cleanup_retry_failed_delete', 'retry_failed_delete_blocking'],
+];
+
+// 审查 L-5（2026-10-03）二跳盲区登记（只登记不改，按白名单纪律）：
+// diskbench_run 的 remove_dir_all 住在 helper cleanup_residue 里，命令体不含删除标记，
+// 不进本门禁扫描网。**已有防护**：cleanup_residue 前置 dir_delete_blocked（属性位逐层查）。
+// 若该 helper 的防护被动过，须回本门禁补扫描口径，而不是依赖这条注释。
 
 // ---- 1. 命令清单：generate_handler! 派生 ----
 const libSrc = fs.readFileSync(path.join(ROOT, 'src', 'lib.rs'), 'utf8');
@@ -197,6 +215,20 @@ check(missMUST.length === 0, '1c. 正向清单命令全部在源码中定位到�
 const lostProtect = MUST_PROTECT.filter((k) => bodies.has(k) && !bodies.get(k).body.includes('is_path_protected'));
 check(lostProtect.length === 0, '2. 正向出口的 is_path_protected 前置不许掉（双向棘轮）',
   lostProtect.length ? lostProtect.map((k) => `${k}(${bodies.get(k).file})`).join(', ') : `${MUST_PROTECT.length} 条全部在位`);
+
+// 2b. 二跳出口的 helper 正向棘轮（L-4）：helper 定位失败即红（fail-closed），
+//     helper 体内的 is_path_protected 被删即红。
+{
+  const helperIssues = [];
+  for (const [cmd, helper] of MUST_PROTECT_VIA_HELPER) {
+    if (!commands.includes(cmd)) { helperIssues.push(`命令 ${cmd} 已不在 generate_handler! 清单——登记陈旧`); continue; }
+    const hb = extractBody(helper);
+    if (!hb) { helperIssues.push(`${cmd} 的 helper ${helper} 未能在源码中定位（改名/搬走了？）`); continue; }
+    if (!hb.body.includes('is_path_protected')) helperIssues.push(`${helper}(${hb.file}) 体内已无 is_path_protected——${cmd} 的删除闸被拆`);
+  }
+  check(helperIssues.length === 0, '2b. 二跳出口的 helper 体内 is_path_protected 在位（L-4 棘轮）',
+    helperIssues.length ? helperIssues.join('；') : `${MUST_PROTECT_VIA_HELPER.length} 条 helper 链全部在位`);
+}
 
 const unknownExits = [];
 const exemptMissing = [];

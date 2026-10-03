@@ -53,6 +53,11 @@
   <!-- 审查 M17：本窗的删除确认与 data-tip 都走 window.ds，此前整条链里没有 ds.js
        ⇒ ds.css 白挂、tooltip 退回原生 title、modal 的焦点陷阱按缺席降级。 -->
   <script src="scripts/ds.js"></script>
+  <!-- 2026-10-03 用户裁定「本窗弹窗改自绘」：本窗原先**只加载了 ds.js**，
+       modal.js 从未在此挂载 ⇒ 本窗根本没有弹窗骨架（ds.focusTrap 也只能按缺席降级）。
+       覆盖已有密钥/删除配置这类破坏性动作此前连二次确认都没有。
+       modal.js 依赖 ds.js（转义 + 焦点陷阱），必须排在其后、business 之前。 -->
+  <script src="scripts/modal.js"></script>
   <!-- NEW-6：子窗轻量提示共用件（各窗 toast 薄委托至此，须先于主脚本加载） -->
   <script src="scripts/sub-toast.js"></script>
   <script src="scripts/models-window.js"></script>

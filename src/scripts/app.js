@@ -102,6 +102,11 @@
     item?.classList.toggle('expanded', expanded);
     submenu?.classList.toggle('expanded', expanded);
     if (submenu) {
+      // 审查 M-12：折叠态的 max-height:0 + opacity:0 只裁剪绘制，内部按钮仍在 Tab
+      // 序列里 —— 默认全折叠的子菜单（磁盘测速/网络测速/网络检测）会收下看不见的
+      // 焦点。inert 是语义级「不可交互」：焦点与读屏都跳过整个子树，且不需要像
+      // visibility:hidden 那样管 transitionend 时机（inert 不参与 max-height 过渡）。
+      submenu.inert = !expanded;
       // 展开时回填带缓冲的 max-height：内容高度 + 缓冲，避免展开后滚动条出现/文本回流导致的轻微裁切
       // （收起时清空内联样式，回退到 CSS 的 max-height:0）
       if (expanded) {

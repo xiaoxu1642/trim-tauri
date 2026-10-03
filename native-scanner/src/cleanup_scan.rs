@@ -842,7 +842,11 @@ pub struct DeletableResult {
 }
 
 /// 单遍递归枚举 + 探测。口径：跳 ReparsePoint（不深入）、目录不计数、
-/// IgnoreInaccessible（不可读子目录静默跳过）、**无深度上限**（PS DLL 路径即此口径）。
+/// IgnoreInaccessible（不可读子目录静默跳过）。
+/// 审查 L-9（2026-10-03）：原先「无深度上限」（对齐 PS `Get-ChildItem -Recurse`
+/// 的无界递归）收窄为 `scan::MAX_WALK_DEPTH`——超限子目录整棵跳过并 stderr 留痕。
+/// 清理候选宁可少报（fail-safe），也不冒病态深嵌套撑爆递归栈的险；正常目录树
+/// （含 node_modules）远达不到该深度，对真实扫描结果无可观测影响。
 /// minAge 时效护栏：cutoff 命中时太新的文件不计入 total（对齐 pattern 未命中的口径）。
 /// 全局排除名单：命中前缀/全路径的文件不计入 total。
 fn walk_deletable(
@@ -853,7 +857,12 @@ fn walk_deletable(
     excl_dirs: &[String],
     excl_files: &[String],
     res: &mut DeletableResult,
+    depth: usize,
 ) {
+    if depth >= crate::scan::MAX_WALK_DEPTH {
+        eprintln!("[trim-scanner] depth cap reached at {}", dir.display());
+        return;
+    }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return, // IgnoreInaccessible
@@ -868,7 +877,7 @@ fn walk_deletable(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            walk_deletable(&ent.path(), all, pattern, cutoff, excl_dirs, excl_files, res);
+            walk_deletable(&ent.path(), all, pattern, cutoff, excl_dirs, excl_files, res, depth + 1);
             continue;
         }
         if !ft.is_file() {
@@ -924,7 +933,7 @@ pub fn list_deletable(
     }
     let mut res = DeletableResult { files: Vec::new(), total: 0, skipped_reparse: 0 };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
-    walk_deletable(root, all, pattern, cutoff, excl_dirs, excl_files, &mut res);
+    walk_deletable(root, all, pattern, cutoff, excl_dirs, excl_files, &mut res, 0);
     res
 }
 
@@ -1504,7 +1513,14 @@ fn walk_fk_dll(
     excl_dirs: &[String],
     excl_files: &[String],
     acc: &mut FkAcc,
+    depth: usize,
 ) {
+    // 审查 L-9：与 walk_deletable 同口径——超限子目录整棵跳过并 stderr 留痕，
+    // 防病态深嵌套撑爆递归栈（原先无上限是对 PS 无界递归的口径）。
+    if depth >= crate::scan::MAX_WALK_DEPTH {
+        eprintln!("[trim-scanner] depth cap reached at {}", dir.display());
+        return;
+    }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return, // IgnoreInaccessible
@@ -1520,7 +1536,7 @@ fn walk_fk_dll(
         };
         if ft.is_dir() {
             if recurse {
-                walk_fk_dll(&ent.path(), all, pattern, recurse, cutoff, excl_dirs, excl_files, acc);
+                walk_fk_dll(&ent.path(), all, pattern, recurse, cutoff, excl_dirs, excl_files, acc, depth + 1);
             }
             continue;
         }
@@ -1719,7 +1735,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
                         &excl_dirs, &excl_files, skip_lock, &mut acc,
                     );
                 } else {
-                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, cutoff, &excl_dirs, &excl_files, &mut acc);
+                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, cutoff, &excl_dirs, &excl_files, &mut acc, 0);
                 }
             }
         }
@@ -2200,4 +2216,66 @@ fn iostdin_read(out: &mut String) -> std::io::Result<()> {
 
 fn flush_stdout() {
     let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 审查 L-9：超过 scan::MAX_WALK_DEPTH 的病态深嵌套不再下钻（防递归栈溢出）。
+    /// 造 70 层嵌套、最深处放匹配文件：扫描必须正常返回，且只收浅层文件。
+    #[test]
+    fn walk_deletable_深度超限不再下钻() {
+        let root = std::env::temp_dir().join(format!("trim-depth-del-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut deep = root.clone();
+        for i in 0..70 {
+            deep = deep.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("deep.tmp"), b"x").unwrap();
+        fs::write(root.join("shallow.tmp"), b"x").unwrap();
+
+        let mut res = DeletableResult { files: Vec::new(), total: 0, skipped_reparse: 0 };
+        walk_deletable(&root, true, "*.tmp", None, &[], &[], &mut res, 0);
+        assert_eq!(res.files.len(), 1, "浅层文件必须收到：{:?}", res.files);
+        assert!(
+            res.files.iter().all(|(p, _)| !p.contains("d69")),
+            "超限深处的文件不得出现：{:?}", res.files
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 审查 L-9：walk_fk_dll 的 recurse 分支同受深度上限保护。
+    #[test]
+    fn walk_fk_dll_深度超限不再下钻() {
+        let root = std::env::temp_dir().join(format!("trim-depth-fk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut deep = root.clone();
+        for i in 0..70 {
+            deep = deep.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("deep.dll"), b"x").unwrap();
+        fs::write(root.join("shallow.dll"), b"x").unwrap();
+
+        let mut acc = FkAcc {
+            seen: HashSet::new(),
+            files: Vec::new(),
+            total_count: 0,
+            total_size: 0,
+            deletable_count: 0,
+            item_rows: 0,
+            global_rows: 0,
+            truncated: false,
+            skipped_reparse: 0,
+        };
+        walk_fk_dll(&root, true, "*.dll", true, None, &[], &[], &mut acc, 0);
+        assert_eq!(acc.files.len(), 1, "浅层文件必须收到：{:?}", acc.files);
+        assert!(
+            acc.files.iter().all(|(p, _)| !p.contains("d69")),
+            "超限深处的文件不得出现：{:?}", acc.files
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 }

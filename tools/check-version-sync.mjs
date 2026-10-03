@@ -65,6 +65,35 @@ check(distinct.length === 1, '5. 四处版本号完全一致',
 const semver = /^\d+\.\d+\.\d+$/;
 check(semver.test(confVer), '6. 版本号是 x.y.z 三段（updater 与 NSIS 产物名都按这个形状拼）', confVer);
 
+// 7) 审查 L-1（2026-10-03）：conf 的 updater endpoints ⇄ updater.rs FEEDS 字面对拍。
+// 运行时以代码为准（每个 builder 都 .endpoints(vec![endpoint]) 覆盖 conf），conf 那份
+// 是「读配置的人看到的线路清单」——漂了不产生漏洞，但会让人得出错误结论（K5 的
+// 教训：清单侧与产物侧各改各的，没有任何东西会红）。字面双向包含：URL 改任何
+// 一段（协议/基址/清单名）都会红，不解析 Rust 元组表、不做 URL 归一化。
+const updaterSrc = read('src-tauri/src/commands/updater.rs');
+let endpoints = [];
+try {
+  endpoints = JSON.parse(read('src-tauri/tauri.conf.json')).plugins?.updater?.endpoints ?? [];
+} catch { /* conf 解析失败时 endpoints 保持空，走下方判红 */ }
+const feedUrls = [];
+{
+  // FEEDS 元组里的 (基址, 清单名) 对：清单名按 *.json 识别，拼成完整 URL
+  const re = /"(https:\/\/[^"]+)",\s*\n\s*"([^"]*\.json)"/g;
+  let m;
+  while ((m = re.exec(updaterSrc))) feedUrls.push(m[1] + m[2]);
+}
+const missingInSrc = endpoints.filter((u) => !feedUrls.includes(u));
+const missingInConf = feedUrls.filter((u) => !endpoints.includes(u));
+check(
+  endpoints.length > 0 && missingInSrc.length === 0 && missingInConf.length === 0,
+  '7. conf updater endpoints ⇄ updater.rs FEEDS 一致（L-1：死配置也要自洽）',
+  endpoints.length === 0 ? 'conf endpoints 为空或 conf 不可读'
+    : feedUrls.length === 0 ? 'FEEDS 里没解析出任何 线路基址+清单.json 对（线路表形态变了？）'
+      : [missingInSrc.length ? `conf 有而 FEEDS 无：${missingInSrc.join('、')}` : '',
+        missingInConf.length ? `FEEDS 有而 conf 无：${missingInConf.join('、')}` : '']
+        .filter(Boolean).join('；') || `双方 ${endpoints.length} 条一致`,
+);
+
 console.log('');
 if (fail > 0) {
   console.error('门禁失败：有断言未通过');

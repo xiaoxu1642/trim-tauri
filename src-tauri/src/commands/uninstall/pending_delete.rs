@@ -4,6 +4,7 @@
 //! 改动等于改系统行为；本域只登记、不立即删文件。
 
 use crate::engine::{guard, log, protect};
+use crate::security;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
@@ -33,11 +34,27 @@ pub(super) fn pending_delete_path() -> std::path::PathBuf {
 
 pub(super) fn pending_load() -> Value {
     let p = pending_delete_path();
-    std::fs::read(&p)
-        .ok()
-        .and_then(|b| serde_json::from_str::<Value>(&String::from_utf8_lossy(&b)).ok())
-        .filter(|v| v.get("version").and_then(Value::as_u64) == Some(1))
-        .unwrap_or_else(|| json!({ "version": 1, "entries": [] }))
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        // 文件不存在 = 首次使用，正常空表（不隔离不告警）
+        Err(_) => return json!({ "version": 1, "entries": [] }),
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(v) if v.get("version").and_then(Value::as_u64) == Some(1) => v,
+        Ok(_) | Err(_) => {
+            // M-6（2026-10-03 L3）：这是**用户已确认的永久删除清单**（PFRO 撤回凭据），
+            // 不是可重扫缓存。损坏时不能静默返回空 entries —— 那会让撤回按钮隐藏、
+            // 而 PFRO 里的条目仍在，重启照样删。改走配置损坏的标准隔离路径：
+            // 留现场（.corrupt-<ts>）+ 回执带 degraded 标记，前端据此明示用户。
+            let reason = match bytes.first() {
+                Some(_) => "JSON 解析失败或版本不符",
+                None => "空文件",
+            };
+            security::quarantine_file(&p, reason);
+            log::write_log("error", &format!("重启后删台账损坏，已隔离并降级: {reason}"));
+            json!({ "version": 1, "entries": [], "degraded": true })
+        }
+    }
 }
 
 pub(super) fn pending_save(doc: &Value) -> Result<(), String> {
@@ -213,6 +230,45 @@ pub(super) fn pfro_strip_deletes(entries: Vec<String>, targets: &HashSet<String>
 /// 只会拉长重启阶段会话管理器的消费时间（v2-B2，2026-10-01 复核）。
 pub(super) const PENDING_ADD_MAX_ITEMS: usize = 32;
 
+/// 台账保留窗口（审查 L-10，2026-10-03）：entries 原先只增不减——单批 32 有上限、
+/// 累计无界、永不过期，只有用户手动撤回才减。口径对齐备份类保留策略（还原包
+/// KEEP_BATCHES=20）：最近 20 批 / 30 天内的登记保留撤回能力，更旧的裁掉。
+/// ⚠️ 语义：被裁条目的 PFRO 系统项**仍在**（重启后照样被会话管理器删除），Trim 侧
+/// 只是不再提供撤回入口——30 天不重启的机器上「撤回窗口已过」是接受的取舍。
+pub(super) const PENDING_KEEP_BATCHES: usize = 20;
+pub(super) const PENDING_MAX_AGE_DAYS: u64 = 30;
+
+/// 按「30 天 + 最近 N 批」裁剪 entries，返回剔除条数（纯函数，可测）。
+/// addedAt 缺失/不可解析的条目按最老处理（裁掉）——无法判年龄的撤回凭据不可信。
+pub(super) fn prune_pending_entries(entries: &mut Vec<Value>, now_secs: u64) -> usize {
+    let before = entries.len();
+    let cutoff = now_secs.saturating_sub(PENDING_MAX_AGE_DAYS * 86_400);
+    entries.retain(|e| {
+        e["addedAt"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|t| t >= cutoff)
+            .unwrap_or(false)
+    });
+    // 同一秒内可能有多批/多批同秒：按批次 secs 排序去重后保最近 N 批
+    if entries.len() > PENDING_KEEP_BATCHES {
+        let batch_secs = |e: &Value| -> Option<u64> {
+            e["batchId"]
+                .as_str()
+                .and_then(|b| b.strip_prefix('p'))
+                .and_then(|s| s.parse::<u64>().ok())
+        };
+        let mut batches: Vec<u64> = entries.iter().filter_map(batch_secs).collect();
+        batches.sort_unstable();
+        batches.dedup();
+        if batches.len() > PENDING_KEEP_BATCHES {
+            let keep_from = batches[batches.len() - PENDING_KEEP_BATCHES];
+            entries.retain(|e| batch_secs(e).map(|t| t >= keep_from).unwrap_or(false));
+        }
+    }
+    before - entries.len()
+}
+
 /// uninstall:pending-add — 把回收站失败的文件项登记为重启后删除（主窗档）。
 /// 只接受**文件**路径（PFRO 对非空目录的延迟删除并不可靠，登记了也删不掉，
 /// 与其制造"已登记=会删掉"的错觉，不如入口就拒）。
@@ -296,6 +352,15 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
             }
         }
         if added > 0 {
+            // 审查 L-10：写回前按保留窗口裁剪（最近 20 批 / 30 天），台账不再只增不减。
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let pruned = prune_pending_entries(entries, now_secs);
+            if pruned > 0 {
+                log::write_log("info", &format!("重启后删除台账：按保留窗口裁剪 {pruned} 条过期登记（撤回窗口已过）"));
+            }
             write_pfro(&pfro)?;
             pending_save(&doc)?;
             log::flush_sync();
@@ -347,7 +412,13 @@ pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>)
                 })
             })
             .collect();
-        Ok(json!({ "entries": rows, "pfroReadable": true }))
+        let degraded = doc.get("degraded").and_then(Value::as_bool).unwrap_or(false);
+        Ok(json!({
+            "entries": rows,
+            "pfroReadable": true,
+            // M-6：台账损坏时前端不能把撤回按钮隐藏 —— 要置灰并显示提示
+            "degraded": degraded,
+        }))
     })
     .await;
     match res {
@@ -409,3 +480,49 @@ pub async fn uninstall_pending_revoke<R: tauri::Runtime>(
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(batch_secs: u64) -> Value {
+        json!({
+            "target": format!("C:/f{batch_secs}.tmp"),
+            "batchId": format!("p{batch_secs}"),
+            "addedAt": batch_secs.to_string(),
+        })
+    }
+
+    /// 审查 L-10：超 30 天的登记裁掉，窗口内的保留。
+    #[test]
+    fn 超期条目被裁剪() {
+        let now = 1_800_000_000u64;
+        let mut v = vec![entry(now - 31 * 86_400), entry(now - 29 * 86_400)];
+        let n = prune_pending_entries(&mut v, now);
+        assert_eq!(n, 1);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["addedAt"], (now - 29 * 86_400).to_string());
+    }
+
+    /// 审查 L-10：全部未超期但批次超量时，只保留最近 N 批。
+    #[test]
+    fn 批次超量只留最近批() {
+        let now = 1_800_000_000u64;
+        let mut v: Vec<Value> = (0..25).map(|i| entry(now - (25 - i) * 3_600)).collect();
+        let n = prune_pending_entries(&mut v, now);
+        assert_eq!(n, 5);
+        assert_eq!(v.len(), PENDING_KEEP_BATCHES);
+        assert!(!v.iter().any(|e| e["batchId"] == format!("p{}", now - 25 * 3_600)), "最老一批必须被裁");
+        assert!(v.iter().any(|e| e["batchId"] == format!("p{}", now - 3_600)), "最近一批必须保留");
+    }
+
+    /// 审查 L-10：addedAt 缺失/不可解析的条目按最老处理——无法判年龄的撤回凭据不可信。
+    #[test]
+    fn addedat缺失视为过期裁掉() {
+        let now = 1_800_000_000u64;
+        let mut v = vec![json!({ "target": "C:/x.tmp", "batchId": "p1" })];
+        let n = prune_pending_entries(&mut v, now);
+        assert_eq!(n, 1);
+        assert!(v.is_empty());
+    }
+}

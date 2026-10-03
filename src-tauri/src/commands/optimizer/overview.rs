@@ -952,6 +952,8 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
             "kinds": rec.get("kinds"),
             "status": rec.get("status"),
             "lastVerify": rec.get("lastVerify"),
+            // 根治（2026-10-03）：失败子步原因随条目下发——横幅与详情能显示「剩哪步失败」
+            "partialReasons": rec.get("partialReasons").cloned().unwrap_or(Value::Null),
             "checkable": checkable
         }));
         match rec.get("status").and_then(|v| v.as_str()) {
@@ -973,6 +975,11 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
             }
         }
     }
+    // 根治（2026-10-03 用户拍板）：用户点过「不再提醒」的 id 不再进 staleIds。
+    // 忽略记录在该项重新执行（record_pending / mark_applied / mark_partial）或
+    // 还原销账时自动清除——状态刚变过，若又 partial 应重新提醒。
+    let dismissed = opt_state::dismissed_map();
+    stale_ids.retain(|id| !dismissed.contains_key(id));
 
     json!({
         "success": true,
@@ -991,5 +998,30 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         },
         "detected": Value::Object(opt_state::detected_all())
     })
+}
+
+/// optimizer:stale-dismiss —— 「未完成还原」横幅的 per-id 忽略（主窗档）。
+///
+/// 根治「横幅每次启动都弹」（2026-10-03 用户拍板）：用户点「不再提醒」把 id 记进
+/// prefs.staleDismissed，state_overview 不再把它们判进 staleIds。写侧是记账文件的
+/// prefs 段（与优化项状态同文件原子写），不是前端 localStorage——「重新执行自动
+/// 清除」的语义在 Rust 记账路径上才能保证（record_pending / mark_applied /
+/// mark_partial / remove 统一清忽略），跨进程边界的前端自持名单做不到。
+///
+/// 档位按「谁真的需要调它」判：优化页只在主窗，dismiss 是写操作 → MAIN。
+#[tauri::command]
+pub async fn optimizer_stale_dismiss<R: Runtime>(window: WebviewWindow<R>, ids: Vec<String>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    // 上限取「优化目录规模 × 2」的量级：防渲染层异常批量塞垃圾写爆记账文件
+    const DISMISS_MAX: usize = 300;
+    let mut n = 0usize;
+    for id in ids.into_iter().take(DISMISS_MAX) {
+        if opt_state::dismiss_stale(&id) {
+            n += 1;
+        }
+    }
+    json!({ "success": true, "data": { "dismissed": n } })
 }
 

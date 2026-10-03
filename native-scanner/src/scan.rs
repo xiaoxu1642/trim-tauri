@@ -65,7 +65,9 @@ const PAR_DEPTH: usize = 3;
 /// 目录」的环，防不了病态深嵌套树把递归栈撑爆。正常磁盘目录树（含 node_modules
 /// 这类 nesting 重灾区）远达不到此深度；超过即不再下钻，stderr 留痕——stderr 不进
 /// 协议输出，不影响退出码，只给排障留证据。
-const MAX_WALK_DEPTH: usize = 64;
+/// 审查 L-9（2026-10-03）：cleanup_scan 的 walk_deletable / walk_fk_dll 与本文件
+/// collect_empty_fast 原先无深度上限（对 PS 无界递归口径），统一收口到此常量。
+pub(crate) const MAX_WALK_DEPTH: usize = 64;
 /// I/O 密集场景线程上限：核数再多也不盲目拉满，避免随机寻道互相拖累。
 const MAX_IO_THREADS: usize = 8;
 /// bigfiles 心跳输出间隔：每累积多少文件输出一行 @@SCANNED:n@@。
@@ -1124,7 +1126,7 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
         tops.par_iter().for_each(|d| {
             let mut f: Vec<PathBuf> = Vec::new();
             let mut dd: Vec<PathBuf> = Vec::new();
-            collect_empty_fast(d, &ignore, &mut f, &mut dd, &acc, sink);
+            collect_empty_fast(d, &ignore, &mut f, &mut dd, &acc, sink, 0);
             acc.flush(&mut f, &mut dd);
         });
     }
@@ -1202,9 +1204,17 @@ fn collect_empty_fast(
     dirs: &mut Vec<PathBuf>,
     acc: &EmptyAccum,
     sink: &dyn Sink,
+    depth: usize,
 ) -> bool {
     // 审查 v2-M2：上限满后停止下钻 —— 剩下的 IO 只会产出被丢掉的结果
     if acc.stopped() {
+        return false;
+    }
+    // 审查 L-9：与 walk_level 同用 MAX_WALK_DEPTH。超限不再下钻，本目录直接按
+    // 「非空」处理（父目录不会作为空目录被连带删除），深处的空目录本轮放弃收集
+    // ——宁可漏收，也不让病态深嵌套把递归栈撑爆。
+    if depth >= MAX_WALK_DEPTH {
+        eprintln!("[trim-scanner] depth cap {MAX_WALK_DEPTH} reached at {}", dir.display());
         return false;
     }
     // dot 目录不下钻、自身不算空候选、并让父目录视其为「有内容」（is_dot_dir 文档）
@@ -1234,7 +1244,7 @@ fn collect_empty_fast(
                 if is_reparse(&ent) {
                     acc.note_reparse_skip(); // R1-2：留痕，不参与判定
                     empty = false;
-                } else if !collect_empty_fast(&fp, ignore, files, dirs, acc, sink) {
+                } else if !collect_empty_fast(&fp, ignore, files, dirs, acc, sink, depth + 1) {
                     empty = false;
                 }
             }
@@ -2244,5 +2254,42 @@ mod tests {
             "树内含太新 0 字节标记的目录不得判空（活跃标记保护）"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+}
+#[cfg(test)]
+mod depth_cap_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// 审查 L-9：collect_empty_fast 超限不再下钻。造 70 层嵌套空目录链，扫描必须
+    /// 正常返回（不栈溢出）且根链判「非空」——父目录不会作为空目录被连带删除。
+    /// 说明：深处空目录「不进 dirs」无法在此钉死——目录收集有「创建满 14 天」时效
+    /// 护栏（created_too_new），单测造不出老目录，新建目录本就不进候选。
+    #[test]
+    fn collect_empty_fast_深度超限判非空且不炸() {
+        let root = std::env::temp_dir().join(format!("trim-depth-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut deep = root.clone();
+        for i in 0..70 {
+            deep = deep.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+
+        struct NullSink;
+        impl Sink for NullSink {
+            fn item(&self, _p: &Path, _l: &str) {}
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        let acc = EmptyAccum::new();
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+        let empty = collect_empty_fast(
+            &root, &HashSet::new(), &mut files, &mut dirs, &acc, &NullSink, 0,
+        );
+        assert!(!empty, "超限链的父目录必须判「非空」，不得被连带删除");
+        assert!(dirs.is_empty(), "超限深处的目录不得成为删除候选");
+        let _ = fs::remove_dir_all(&root);
     }
 }

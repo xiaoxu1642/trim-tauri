@@ -190,7 +190,15 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
 
         if let Some(reg) = s.get("reg").and_then(|v| v.as_str()) {
             // reg 类型：写 .reg 临时文件 + 原生 import（A6，v2-R4）
-            let reg_path = tmp_dir.join(format!("wcopt_{}.reg", crate::engine::now_ms()));
+            // 审查 M-5（2026-10-03 L3）：旧文件名为 `wcopt_{ms}.reg`，毫秒时间戳可预测，
+            // 同用户低权限进程可预先在 %APPDATA%\<id>\tmp 下创建指向任意目标的 reparse 点，
+            // 管理员实例随后以 UTF-16LE 覆写 ⇒ 任意文件写。与 pwsh::write_temp_script 的
+            // 随机 token 同源（nanos + 序号），竞争窗口从「可预测」变成不可预测。
+            let reg_path = tmp_dir.join(format!(
+                "wcopt_{}_{}.reg",
+                crate::engine::now_ms(),
+                crate::pwsh::random_token()
+            ));
             // 审查 2026-09-27 L1：.reg 临时文件为 UTF-16LE + BOM（.reg 的 Unicode 格式），
             // 与 `reg.exe export` 的产物同编码。原先「路径非 UTF-8 就跳过该步」（v3-L7）
             // 是 reg.exe 需要字符串参数才有的限制，原生拿 &Path 后随 reg.exe 一起删除。
@@ -661,7 +669,11 @@ pub async fn optimizer_run<R: Runtime>(
             // 审查 v3-K1：执行链整体失败（没跑成）≠ 执行成功但验证不了。
             // 旧代码在这里 mark_applied("unknown") 谎报 applied，违反记账不变式②；
             // 改落 partial，由 optimizer_state_overview 如实呈现。
-            let _ = opt_state::mark_partial(&option_id);
+            // 根治（2026-10-03）：失败原因一并记账，横幅/详情里能看出败在哪。
+            let _ = opt_state::mark_partial_with_reasons(
+                &option_id,
+                &[format!("执行链整体失败: {e}")],
+            );
         }
         return json!({ "success": false, "message": e });
     };
@@ -678,14 +690,28 @@ pub async fn optimizer_run<R: Runtime>(
     }
 
     // B-2：@@RECYCLE@@ 协议——受保护路径拒绝，其余进回收站（PS 侧只枚举不删除）
-    let (mut rec_ok, mut rec_fail) = (0i64, 0i64);
+    let (mut rec_ok, mut rec_fail, mut rec_malformed) = (0i64, 0i64, 0i64);
     {
         let mut seen = std::collections::HashSet::new();
         for raw in stdout.lines() {
             let line = raw.trim();
             let Some(rest) = line.strip_prefix("@@RECYCLE@@") else { continue };
-            let Ok(entry) = serde_json::from_str::<Value>(rest) else { continue };
-            let Some(p) = entry.get("path").and_then(|v| v.as_str()) else { continue };
+            let entry = match serde_json::from_str::<Value>(rest) {
+                Ok(v) => v,
+                Err(e) => {
+                    // 审查 M-1（2026-10-03 L3）：畸形行**必须计数并告警**，不能静默丢。
+                    // 与 cleanup/scan_execute.rs 的 count_malformed 同口径：否则 PS 输出被
+                    // 截断/掺噪声时，用户与审计者都无从知道有目录漏进回收站。
+                    rec_malformed += 1;
+                    log::write_log("warn", &format!("优化回收站协议畸形行（解析失败）: {e}"));
+                    continue;
+                }
+            };
+            let Some(p) = entry.get("path").and_then(|v| v.as_str()) else {
+                rec_malformed += 1;
+                log::write_log("warn", "优化回收站协议畸形行（缺少 path 字段）");
+                continue;
+            };
             if p.is_empty() || !seen.insert(p.to_string()) {
                 continue;
             }
@@ -704,6 +730,9 @@ pub async fn optimizer_run<R: Runtime>(
                 }
             }
         }
+        if rec_malformed > 0 {
+            log::write_log("warn", &format!("优化回收站协议共 {rec_malformed} 条畸形行已跳过"));
+        }
     }
     // 审查 2026-09-27 M4：失败不再只报「部分步骤可能失败」——携带逐步原因（label +
     // 失败方式），前端 toast 与日志按此呈现，排障不再两眼一抹黑
@@ -713,9 +742,17 @@ pub async fn optimizer_run<R: Runtime>(
         } else {
             format!("{} 项步骤失败：{}", failed_reasons.len(), failed_reasons.join("；"))
         }
-    } else if rec_ok > 0 || rec_fail > 0 {
+    } else if rec_ok > 0 || rec_fail > 0 || rec_malformed > 0 {
+        let mut suffix = String::new();
         if rec_fail > 0 {
-            format!("完成（{rec_ok} 个目录已移入回收站，{rec_fail} 个失败）")
+            suffix.push_str(&format!("，{rec_fail} 个失败"));
+        }
+        if rec_malformed > 0 {
+            // M-1（2026-10-03 L3）：畸形行不再静默 —— 用户与审计者要能看到有目录漏掉了
+            suffix.push_str(&format!("，{rec_malformed} 条畸形行已跳过"));
+        }
+        if rec_fail > 0 || rec_malformed > 0 {
+            format!("完成（{rec_ok} 个目录已移入回收站{suffix}）")
         } else {
             format!("完成（{rec_ok} 个目录已移入回收站，可在系统回收站还原）")
         }
@@ -778,7 +815,9 @@ pub async fn optimizer_run<R: Runtime>(
         // 审查 2026-09-27 M1：部分步骤失败（failed>0 但链路跑完）不再 mark_applied("unknown")
         // 转正为「已应用」——违反记账不变式②「执行成功才转正」，且纯 cmd/pwsh 项不可回读、
         // 错误状态永无纠正机会。改落 partial，由 optimizer_state_overview 如实呈现（可重试）。
-        let _ = opt_state::mark_partial(&option_id);
+        // 根治（2026-10-03）：失败子步原因随记账落盘——此前只在日志里，用户看到
+        // 「状态不明」却无从判断该还原还是该重跑。
+        let _ = opt_state::mark_partial_with_reasons(&option_id, &failed_reasons);
         log::write_log(
             "warn",
             &format!("优化项部分步骤失败（{} 项），已记账为 partial: {title}", failed_reasons.len()),

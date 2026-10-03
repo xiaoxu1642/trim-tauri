@@ -111,6 +111,7 @@ const TAURI_ADDED = {
   'optimizer:list-groups': 'E7（2026-10-03）：分类两层结构下发（default 主序列 + custom 重映射；纯只读侧表）',
   'optimizer:readiness': 'E1/E2（2026-10-03）：5 分类加权态势分（判据在 Rust 侧 readiness_score，可单测；纯只读）',
   'optimizer:touch-recent': 'E10（2026-10-03）：记一次最近使用（写侧，失败不打断流程）',
+  'optimizer:stale-dismiss': '根治（2026-10-03）：「未完成还原」横幅 per-id 忽略（写记账 prefs 段；上游无启动对账横幅这一层）',
 };
 
 function collect(set, re, text) {
@@ -561,6 +562,157 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
     console.log(`  · D5 另有 ${readonlyNoSubConsumer.length - readonlyGrantsNoOne.length} 条只读命令主窗也没调用点（纯孤儿，归 D4 组管）`);
   }
 }
+
+
+// ---- D6. 前端 invoke 参数名 ⇄ Rust 形参名对拍（审查 K4，2026-10-03 新增） ----
+// 为什么需要这一组：K3 的根因是 `fileclean:scan` 前端传 `{ type: ... }`，Rust 形参叫
+// `scan_type` —— Tauri 只做顶层 camelCase→snake_case 转换（AGENTS §5.4），不匹配就静默
+// 收不到。D1~D5 全查「命令名集合」，对「形参名」是瞎的：命令名对得上、参数对不上时
+// 功能表现为「扫不出东西」而不是报错，最难发现（K3 就是带着这个缺陷长期存活）。
+//
+// 判据（双向，都要求为 0）：
+//   ① 前端传了但 Rust 无：**硬断言为 0**（K3 修完后应归零）——这是最危险的方向：
+//      前端传了但后端根本不收，说明参数名拼错或载荷过期，功能必然静默死。
+//   ② Rust 有 / 前端无：由 PARAM_WHITELIST 登记豁免，未登记即红。
+//
+// 归一化口径：前端键 camelCase → snake_case（`scanType`→`scan_type`、`optionId`→`option_id`），
+// 与 Rust 形参名比对。以下划线 `_` 开头的 Rust 形参（如 `_scan_type`）视为前端可省略。
+const JS_METHOD_RE = /^\s*(\w+):\s*function\s*\(([^)]*)\)\s*\{[\s\S]*?invokeChannel\(\s*['"]([^'"]+)['"]\s*,\s*\{/gm;
+
+// 前端不传、但 Rust 必须有的形参白名单（按命令名登记，只许新增不许删）
+const PARAM_WHITELIST = {
+  // uninstall_run 的 silent：Electron 轨 silent 卸载无 UI，Tauri 前端从不传（只走普通卸载）
+  'uninstall_run': ['silent'],
+};
+
+const jsParams = new Map(); // channel -> { keys: string[] }
+// 括号平衡：只取 invokeChannel('ch', { ... }) 的**这一层**对象字面量，绝不越界到
+// 兄弟方法 / 外层 map 键（`fileclean:` / `scan:` 是方法声明，不是载荷键）。
+// 用平衡扫描而不是 indexOf('}')：嵌套对象（如 execute 的 { groups:[...] }）里有
+// 自己的花括号，直接找下一个 } 会把邻居方法的键也算进来（K4 首版实测 74 条里
+// fileclean:scan 混进了 "fileclean"/"scan" 两个假键）。
+function balancedBrace(text, from) {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return text.slice(from, i + 1);
+    }
+  }
+  return null;
+}
+for (const m of adapter.matchAll(JS_METHOD_RE)) {
+  const ch = m[3];
+  // m[0] 以 invokeChannel('ch', { 结尾：最后那个 { 才是载荷对象字面量的起点
+  // （前面的 { 是 function 体花括号）。用 lastIndexOf 而不是 indexOf，
+  // 否则从函数体花括号起算会把整个函数体当载荷，混进兄弟方法的键。
+  const objStart = m.index + m[0].lastIndexOf('{');
+  const obj = balancedBrace(adapter, objStart);
+  if (!obj) continue;
+  const keys = [...obj.matchAll(/([A-Za-z_$][\w$]*)\s*:(?!\s*(?:function|=>))/g)].map((x) => x[1]);
+  if (keys.length) jsParams.set(ch, keys);
+}
+
+const camelToSnake = (s) => s.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
+
+
+const d6Bad = [];       // 前端传了但 Rust 没有（硬断言 = 0）
+const d6RustOnly = [];  // Rust 有但前端没传且未登记白名单
+for (const { rel, abs } of cmdFiles) {
+  const text = readFileSync(abs, 'utf8');
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].includes('#[tauri::command]')) continue;
+    const fnm = lines.slice(i + 1, i + 7).join(' ').match(/pub\s+(?:async\s+)?fn\s+(\w+)/);
+    if (!fnm) continue;
+    const cmdName = fnm[1];
+    const ch = [...channelMap.entries()].find(([, v]) => v === cmdName)?.[0];
+    if (!ch) continue;
+    const jsKeys = jsParams.get(ch);
+
+    if (!jsKeys) continue;
+    // Rust 形参：从命令函数签名中提取。窗口参数 `window` 是 Tauri 注入的，不算前端参数。
+    // 泛型参数 `<R: Runtime>` 与 `WebviewWindow<R>` 里的 < > 是**嵌套括号**，用正则
+    // 非贪婪到第一个 `)` 会截断在 `WebviewWindow<R>` 处（K4 实测把 app_open_external
+    // 的 `url` 形参截丢了）。这里用括号平衡扫描，< 与 ( 都计深度。
+    // 注意：i 是**行号**，不能直接当字符偏移用（text.slice(i,…) 会从文件开头第 i 个
+    // 字符起切，把任意一行拦腰截断 —— K4 实测抓 app.rs 时 fnBody 从字符 60 起切，
+    // 找到的是别的函数）。改用行拼接保证从 #[tauri::command] 那行开始。
+    const fnBody = lines.slice(i, i + 30).join('\n');
+    const fnAt = fnBody.search(/fn\s+\w+\s*</);
+    if (fnAt < 0) continue;
+    const openParen = fnBody.indexOf('(', fnAt);
+    if (openParen < 0) continue;
+    let depth = 0;
+    let closeParen = -1;
+    for (let p = openParen; p < fnBody.length; p++) {
+      const c = fnBody[p];
+      if (c === '(' || c === '<') depth++;
+      else if (c === ')' || c === '>') {
+        depth--;
+        if (c === ')' && depth === 0) { closeParen = p; break; }
+      }
+    }
+    if (closeParen < 0) continue;
+    const paramsPart = fnBody.slice(openParen + 1, closeParen);
+    // 剔除 `//` 注释行：注释与形参混在同一逗号分块时（如 residue.rs 的
+    // `// ...默认备份...\n    backup: Option<bool>` 整块开头是 `/`），
+    // `^([a-z_][a-z0-9_]*)\s*:` 匹配不到形参名 —— K4 实测把 `backup` 静默丢了。
+    const sigClean = paramsPart
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n');
+    // 顶层逗号切分：< > 深度为 0 的逗号才是参数分隔（`WebviewWindow<R>` 里的逗号不计）
+    depth = 0;
+    const params = [];
+    let cur = '';
+    for (const ch2 of sigClean) {
+      if (ch2 === '<') depth++;
+      else if (ch2 === '>') depth--;
+      if (ch2 === ',' && depth === 0) { params.push(cur.trim()); cur = ''; }
+      else cur += ch2;
+    }
+    if (cur.trim()) params.push(cur.trim());
+    const rustNames = [];
+    for (const p of params) {
+      const nm = p.match(/^([a-z_][a-z0-9_]*)\s*:/);
+      if (!nm) continue;
+      // `window`（WebviewWindow）与 `app`（AppHandle）都是 Tauri 框架注入参数，
+      // 不是前端传参；preview_open_window 的 `app: AppHandle<R>` 若计入会误报。
+      if (nm[1] === 'window' || nm[1] === 'app') continue;
+      rustNames.push(nm[1]);
+    }
+    // 前端有 / Rust 无
+    for (const k of jsKeys) {
+      const sn = camelToSnake(k);
+      if (!rustNames.includes(sn) && !rustNames.includes('_' + sn)) {
+        d6Bad.push(`${cmdName}@${rel}: 前端传 \`${k}\`，Rust 无 \`${sn}\``);
+      }
+    }
+    // Rust 有 / 前端无（未登记白名单即红）
+    // 注意：jsKeys 是 camelCase（optionId），rustNames 是 snake_case（option_id），
+    // 直接 includes 会误报 30+ 条（K4 实测把 option_id 当成「前端未传」）。
+    const snakeJsKeys = jsKeys.map(camelToSnake);
+    const wl = PARAM_WHITELIST[cmdName] || [];
+    for (const rn of rustNames) {
+      if (!snakeJsKeys.includes(rn) && !wl.includes(rn)) {
+        d6RustOnly.push(`${cmdName}@${rel}: Rust 有 \`${rn}\`，前端未传且未登记白名单`);
+      }
+    }
+  }
+}
+
+check(
+  d6Bad.length === 0 && d6RustOnly.length === 0,
+  `D6. 前端 invoke 参数名与 Rust 形参对拍（camel→snake 归一，带参通道 ${jsParams.size}）`,
+  d6Bad.length
+    ? d6Bad.join('；')
+    : d6RustOnly.length
+      ? d6RustOnly.join('；')
+      : '',
+);
 
 
 // ---- F. 高危优化清单双源对拍（审查 L6） ----

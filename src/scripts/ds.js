@@ -373,7 +373,23 @@
       release() {
         container.removeEventListener('focusin', onFocusIn);
         container.removeEventListener('keydown', onKey);
-        if (prevFocus && prevFocus.isConnected) prevFocus.focus();
+        // ⚠️ 焦点归还必须让位给「弹窗关闭后立刻出现的下一个界面」。
+        //
+        // 2026-10-03 用户实测「高危确认框一闪而过、点确认等于被拒绝」的根因：
+        // 详情弹窗开着时点「立即执行」→ 红色确认框叠在上面 → 用户点「仍然执行」→
+        // release() 把焦点抢回详情弹窗的触发按钮 → 该 click 仍在冒泡，被全局
+        // 点击委托再触发一次 → 详情弹窗重建，把刚 resolve(true) 的确认结果
+        // 连同用户注意力一起吃掉。用户看到的就是「框闪一下，什么都没发生」。
+        //
+        // 判据：释放时若焦点已经落在**别的弹窗/容器**里（activeElement 不再是本容器
+        // 的后代，且不是 null），说明调用方已经在关闭后接管界面了 —— 这时抢回焦点
+        // 只会制造上面那条连锁。null 是「用户点了页面上别处」，同样不该抢。
+        const cur = document.activeElement;
+        const focusStolenElsewhere = !cur || cur === document.body
+          || (!container.contains(cur) && !container.isConnected);
+        if (prevFocus && prevFocus.isConnected && !focusStolenElsewhere) {
+          prevFocus.focus();
+        }
       }
     };
   }
@@ -507,6 +523,12 @@
   // 「值为空」——用户显式选了「无背景」会存 ''、拖到 0% 会存 0，那些都是选择而不是缺省。
   ds.DEFAULT_PRESET_BG = 'wp-doll';
   ds.DEFAULT_WALLPAPER_BLUR = 20;
+
+  // M-4（2026-10-03 L3）：把实时求值的 reducedMotion 挂到 window.ds。
+  // 背景：CSS 的 prefers-reduced-motion 通配归零只影响 CSS animation，管不到 JS 传进
+  // WAAPI/scrollIntoView 的选项；各文件此前各写各的 matchMedia 求值。挂到 ds 后，
+  // 新交互统一走 window.ds.reducedMotion()（AGENTS §2「新交互先查 ds 有没有现成件」）。
+  ds.reducedMotion = reducedMotion;
 
   window.ds = ds;
 })();

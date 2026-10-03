@@ -221,10 +221,11 @@ impl Pack {
         let Pack { dir, batch_id, zip, entries, total, reg_copied } = self;
         zip.finish().map_err(|e| format!("收尾 payload.zip 失败: {e}"))?;
         let body = render_manifest(&entries);
-        let tmp = dir.join(format!("{MANIFEST_NAME}.writing"));
-        std::fs::write(&tmp, body).map_err(|e| format!("写 manifest 失败: {e}"))?;
-        std::fs::rename(&tmp, dir.join(MANIFEST_NAME))
-            .map_err(|e| format!("manifest 落位失败: {e}"))?;
+        // 审查 L-6/L-7b：manifest 是还原的唯一依据。原为手写 tmp+rename（无 fsync，
+        // 断电可留半截），收敛到 security::atomic_write_file 单一出口（temp→fsync→rename，
+        // 失败自动清临时件），与 reg_backup / cleanup 备份清单同口径。
+        crate::security::atomic_write_file(&dir.join(MANIFEST_NAME), body.as_bytes())
+            .map_err(|e| format!("写 manifest 失败: {e}"))?;
         prune(&write_root());
         Ok(json!({
             "id": batch_id,

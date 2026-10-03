@@ -343,11 +343,19 @@
   // 为什么是自绘而不是 modal.js：外设子窗**不加载** modal.js（见 peripheral-window.html
   // 脚本清单，子窗只挂 ds.js 做转义），而这些子窗刻意不引 app.js 那套大依赖。
   // 这里就地起一个 `hidden` 面板，全部文本走 window.ds.esc（AGENTS §2 硬红线）。
+  //
+  // 卡片声明了 aria-modal="true"（审查 M-10），模态行为由 ds.focusTrap 兑现：
+  // Tab 圈闭在卡片内、关闭时焦点归还触发按钮。trap 必须存模块级引用 —— 面板开着时
+  // 再点另一组「数值解释」会二次 open，不先 release 旧 trap 会让两套 focusin/keydown
+  // 并存，Tab 循环紊乱。三条关闭路径（关闭钮/遮罩点击/Esc）都收口到 closeExplain。
+  let explainTrap = null;
+
   function openExplain(groupKey) {
     const panel = document.getElementById('periExplain');
     const body = document.getElementById('periExplainBody');
     const data = EXPLAIN[groupKey];
     if (!panel || !body || !data) return;
+    if (explainTrap) { explainTrap.release(); explainTrap = null; }
     const esc = (t) => window.ds.esc(String(t));
     body.innerHTML = `
       <h3 class="peri-explain-title">${esc(data.title)}</h3>
@@ -361,10 +369,14 @@
       </dl>
       <p class="peri-explain-caveat">${esc(data.caveat)}</p>`;
     panel.hidden = false;
-    document.getElementById('btnPeriExplainClose')?.focus();
+    explainTrap = window.ds?.focusTrap?.(
+      panel.querySelector('.peri-explain-card'),
+      { initialFocus: '#btnPeriExplainClose' }
+    ) || null;
   }
 
   function closeExplain() {
+    if (explainTrap) { explainTrap.release(); explainTrap = null; }
     const panel = document.getElementById('periExplain');
     if (panel) panel.hidden = true;
   }

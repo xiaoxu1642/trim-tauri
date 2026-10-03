@@ -467,6 +467,19 @@ fn is_ok_status(status: u16) -> bool {
     (200..300).contains(&status)
 }
 
+/// 审查 L-12（2026-10-03）：错误体回显进日志前，把本次请求的密钥原文替换成掩码。
+/// 正常端点不会回显密钥，但「错误体里 echo 请求头/请求体」的调试型端点存在——
+/// 诊断价值（状态码 + 错误 message）保留，密钥落本地日志的面关死（SECRET_MASK
+/// 掩码即视为未修改，与 settings/models 出口同口径）。错误体可能回显的 prompt
+/// 内容维持现状：本地日志不外发，且既有日志内容（扫描路径、卸载清单）敏感级相当。
+fn mask_secret_in(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(secret, crate::security::SECRET_MASK)
+    }
+}
+
 // ==================== AI 调用链 ====================
 
 /// `callOpenAICompat`：OpenAI 兼容 chat/completions（秘塔 / 知乎直答 / 自定义模型共用）
@@ -515,7 +528,7 @@ fn call_openai_compat(
             &format!(
                 "[{key}] 模型返回 {}: {}",
                 resp.status,
-                resp.body.chars().take(200).collect::<String>()
+                mask_secret_in(&resp.body.chars().take(200).collect::<String>(), api_key)
             ),
         );
         return None;
@@ -612,7 +625,7 @@ fn call_baidu_web_summary(
             &format!(
                 "百度千帆高性能版返回 {}: {}",
                 resp.status,
-                resp.body.chars().take(200).collect::<String>()
+                mask_secret_in(&resp.body.chars().take(200).collect::<String>(), key)
             ),
         );
         return None;

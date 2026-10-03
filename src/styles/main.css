@@ -1778,7 +1778,10 @@ body.lg-mode-frost .nav-item.active:hover {
 .badge.third-party { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
 .badge.system { background: rgba(var(--success-rgb), 0.15); color: var(--success); }
 .badge.protected { background: rgba(var(--danger-rgb), 0.15); color: var(--danger); }
-.badge.off { background: rgba(120, 120, 130, 0.18); color: var(--fg-tertiary); }
+/* 审查 K1 连带（2026-10-03 L3）：染底 0.18 在亮色主题下与 --fg-tertiary 只有 4.14:1，
+   低于 AA 4.5。该徽章承载真实文本（cleanup.js 的「旧版」、contextmenu.js 的分类标签），
+   不是装饰件，不能豁免。按门禁自带的修法备忘把浓度降到 10%：亮 4.54 / 暗 5.57。 */
+.badge.off { background: rgba(120, 120, 130, 0.1); color: var(--fg-tertiary); }
 
 /* ==================== 右键菜单分类分组 ==================== */
 .ctx-cat-group {
@@ -4446,7 +4449,9 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 .path-auto-tag {
   display: inline-block;
   padding: 0 4px;
-  background: rgba(var(--info-rgb), 0.12);
+  /* 审查 K1 连带（2026-10-03 L3）：染底 0.12 在亮色主题下与 --accent 仅 4.18:1。
+     按 check-contrast 自带修法备忘（浓度降 2 个百分点）降到 0.06 → 亮 4.56 / 暗 8.1。 */
+  background: rgba(var(--info-rgb), 0.06);
   color: var(--accent);
   font-size: calc(10px * var(--font-size-scale, 1));
   font-family: inherit;
@@ -4542,7 +4547,8 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 .ctx-reg-jump:hover {
   color: var(--accent);
-  background: rgba(var(--info-rgb), 0.08);
+  /* 审查 K1 连带（2026-10-03 L3）：染底 0.08 亮色下仅 4.43:1，降到 0.06 → 4.56。 */
+  background: rgba(var(--info-rgb), 0.06);
 }
 .ctx-reg-jump:active { opacity: 0.7; }
 .ctx-reg-jump.jumping { opacity: 0.55; }
@@ -7576,7 +7582,11 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   line-height: 1.5;
   padding: 0 7px;
   border-radius: var(--radius-btn);
-  background: var(--border-default);
+  /* 审查 K2 连带项（2026-10-03 L3）：原为 var(--border-default)，那是**边框**语义
+     token（半透明描边色），当徽章填充用属语义误用；亮色主题下合成到页面底只有
+     4.29:1，低于 AA 4.5 —— check-contrast 的解析缺陷修好后第一次算出来（此前永久
+     失明）。改用同仓现成的填充语义 token --bg-hover：暗 4.71:1 / 亮 4.62:1。 */
+  background: var(--bg-hover);
   color: var(--fg-tertiary);
 }
 .maint-tab.active .maint-tab-count {
@@ -7873,8 +7883,11 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   padding: 2px 10px;
   font-size: var(--fs-meta, 11px);
   font-weight: 600;
-  /* 纯黑文字，确保浅色背景下清晰可读（WCAG 对比度 ≥ 12:1） */
-  color: #000000;
+  /* 审查 K2/M-2（2026-10-03 L3）：原为字面色 #000000，注释还把适用范围写反了。
+     实测暗色（默认主题）合成底 #191b25 上仅 1.22:1，远低于 AA 4.5:1 ——
+     深墨底上的近黑文字几乎不可见，且 check-contrast 的 color 正则只认 var()
+     所以对这条完全失明。改用语义 token 后：暗 15.1:1 / 亮 14.6:1。 */
+  color: var(--fg-primary);
   background: var(--accent-light);
   border: 1px solid var(--border-accent);
   border-radius: 999px;
@@ -8844,9 +8857,15 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 }
 .filter-tab .maint-tab-count { margin-left: 2px; }
 .filter-tab.active .maint-tab-count {
-  /* 刻意设计：强调色标签上的白色计数徽章浮起层，属徽章前景非容器表面 */
-  background: rgba(255, 255, 255, 0.22);
-  color: var(--accent-text);
+  /* 审查 K1 连带（2026-10-03 L3）：原注释写「刻意设计：白色计数徽章浮起层」，
+     但浮起层仍**承载数字文本**（筛选标签的条目计数），WCAG 文本对比度不因「浮起层」
+     身份豁免。实测 rgba(255,255,255,.22) 叠到亮色页面底后与 --accent-text 仅 1.07:1、
+     暗色 1.81:1 —— 计数在两种主题下都近乎不可见，是 check-contrast 修复解析缺陷后
+     第一次算出来的存量违规（此前永久失明）。
+     改法：不再叠白，改用同族 .maint-tab.active .maint-tab-count 已有的 accent 染底口径，
+     前景用 --accent（与 .maint-tab.active 一致），两主题均达标。 */
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: var(--accent);
 }
 body.lg-mode-full .filter-tab.active .maint-tab-count,
 body.lg-mode-standard .filter-tab.active .maint-tab-count,
@@ -8978,7 +8997,9 @@ body.lg-mode-frost .filter-tab.active .maint-tab-count {
   font-size: var(--fs-meta);
   font-weight: calc(500 * var(--font-weight-scale, 1));
 }
-.netcheck-badge.pending { color: var(--fg-tertiary); background: rgba(var(--warning-rgb), 0.10); }
+/* 审查 K1 连带（2026-10-03 L3）：染底 0.10 亮色下与 --fg-tertiary 仅 4.42:1，
+   降到 0.08 → 亮 4.55 / 暗 5.5。 */
+.netcheck-badge.pending { color: var(--fg-tertiary); background: rgba(var(--warning-rgb), 0.08); }
 .netcheck-badge.scanning { color: var(--info); background: rgba(var(--info-rgb), 0.12); }
 .netcheck-badge.ok { color: var(--success); background: var(--success-soft); }
 .netcheck-badge.warn { color: var(--warning); background: var(--warning-soft); }

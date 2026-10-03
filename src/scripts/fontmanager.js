@@ -77,16 +77,21 @@
       ? `当前：${meta.family}${meta.imported ? '（已导入）' : meta.builtin ? '（内嵌可变字体，字重 100-1000 无级调节）' : ''} · 字重 ${settings.weight}（${weightPercent(settings.weight)}）· 字号 ${settings.size}px`
       : `当前：${settings.family}`;
     const isMisans = settings.family === 'MiSans';
-    modal.weightInput.title = isMisans
+    // M-9（2026-10-03 L3）：原生 title 延迟约 1s、样式不受 ds.css 控制、键盘不可达。
+    // data-tip 由 ds.js 委托在 pointerover/focusin 时即时显示，键盘聚焦也看得到。
+    modal.weightInput.setAttribute('data-tip', isMisans
       ? 'MiSans 可变字体：100-1000 无级连续调节'
-      : '系统字体受自身字重限制，滑块按最接近的可用字重渲染';
+      : '系统字体受自身字重限制，滑块按最接近的可用字重渲染');
   }
 
   function refreshDeleteBtn() {
     if (!modal) return;
     const has = fontList.some(f => f.imported);
     modal.delBtn.disabled = !has;
-    modal.delBtn.title = has ? `删除已导入字体「${importedFamily}」（本地副本一并删除，不影响原始文件）` : '当前没有已导入的字体';
+    // M-9：同上，改用 data-tip（ds.js 委托实时读属性，动态文案照样即时显示）
+    modal.delBtn.setAttribute('data-tip', has
+      ? `删除已导入字体「${importedFamily}」（本地副本一并删除，不影响原始文件）`
+      : '当前没有已导入的字体');
   }
 
   // 需要改为：调整仅实时预览（只改预览区），点击「应用」才全局生效并保持打开
@@ -254,7 +259,7 @@
               <div class="fm-row">
                 <select class="field-input" data-role="select" aria-label="选择界面字体"></select>
                 <button class="btn btn-secondary btn-small" data-role="importBtn" type="button" data-tip="导入 1 款外部字体文件（.ttf / .otf / .woff / .woff2），将替换当前已导入字体">导入字体</button>
-                <button class="btn btn-secondary btn-small" data-role="delBtn" type="button">删除导入字体</button>
+                <button class="btn btn-secondary btn-small" data-role="delBtn" type="button" data-tip="删除导入字体">删除导入字体</button>
               </div>
               <span class="fm-field-tip" data-role="tip">正在读取字体配置…</span>
             </div>
@@ -263,7 +268,7 @@
             <span class="fm-field-label">字重</span>
             <div class="fm-field-main">
               <div class="fm-slider-row">
-                <input type="range" data-role="weightInput" min="100" max="1000" step="10" value="400" />
+                <input type="range" data-role="weightInput" min="100" max="1000" step="10" value="400" aria-label="界面字重" />
                 <span class="fm-slider-val" data-role="weightVal">400 · 40%</span>
               </div>
               <span class="fm-field-tip">基准 400 · 范围 100-1000 · 显示当前粗细百分比（400 = 40%）</span>

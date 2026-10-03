@@ -407,9 +407,24 @@
     if (revBtn) {
       window.api.uninstall.pendingList().then((r) => {
         const entries = (r && r.success && r.data && r.data.entries) || [];
+        const degraded = !!(r && r.success && r.data && r.data.degraded);
         const n = entries.filter((e) => e.status === 'pending').length;
-        revBtn.style.display = n ? '' : 'none';
-        revBtn.textContent = `撤回重启后删（${n} 项）`;
+        if (degraded) {
+          // M-6（2026-10-03 L3）：台账损坏 = 撤回凭据不可信。
+          // 不能隐藏按钮（那样用户根本不知道有东西待删、PFRO 里还挂着）；
+          // 置灰 + data-tip 说明，与「真的没有待删项」区分开。
+          revBtn.style.display = '';
+          revBtn.disabled = true;
+          revBtn.textContent = '重启后删台账已损坏';
+          revBtn.setAttribute(
+            'data-tip',
+            '待删清单文件损坏，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。'
+          );
+        } else {
+          revBtn.style.display = n ? '' : 'none';
+          revBtn.disabled = !n;
+          revBtn.textContent = `撤回重启后删（${n} 项）`;
+        }
       }).catch(() => {});
     }
   }

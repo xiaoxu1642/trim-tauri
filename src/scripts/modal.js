@@ -200,8 +200,17 @@
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary" data-confirm="cancel" type="button">${escapeHtml(cancelText)}</button>
           <button class="btn ${severity === 'danger' ? 'btn-danger' : (severity === 'warning' ? 'btn-warning' : 'btn-primary')}" data-confirm="ok" type="button">${escapeHtml(confirmText)}</button>`,
-        // B10：高危操作默认聚焦「取消」（防回车误触确认）；普通确认聚焦主按钮
-        initialFocus: severity ? '[data-confirm="cancel"]' : '[data-confirm="ok"]',
+        // ⚠️ 焦点落点：统一落在**主按钮**（含高危的红色「仍然执行」）。
+        //
+        // 原口径是高危聚焦「取消」（B10，防回车误触）。2026-10-03 用户实测后推翻：
+        // 用户能走到这一步的前提是**已经主动点了「立即执行」**，即确认意愿已表达；
+        // 这时把焦点扣在「取消」上，等于用默认焦点替用户否决定��� —— 用户按回车
+        // （肌肉记忆）就变成「拒绝」，表现为「怎么点都不执行」。
+        //
+        // 风险并未丢失，护栏换了更强的位置：① 按钮本身是红色 + 文案是「仍然执行」，
+        // 不是无脑回车能滑过去的「确定」；② Esc 与点击遮罩/取消键都仍是取消；
+        // ③ 警示文案由 dangerHint 结构化渲染在正文下方，不需要靠焦点位置强调。
+        initialFocus: '[data-confirm="ok"]',
         onClose() { finish(false); }
       });
       ctrl.footer.querySelector('[data-confirm="ok"]').addEventListener('click', () => { finish(true); ctrl.close(); });

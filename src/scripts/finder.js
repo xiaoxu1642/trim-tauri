@@ -81,13 +81,19 @@
 
   function renderDriveChips(key, box, drives) {
     box.innerHTML = drives.map((d) => `
-      <span class="drive-chip ${driveSel[key].has(d) ? 'active' : ''}" data-drive="${esc(d)}" data-drive-for="${key}" role="checkbox" aria-checked="${driveSel[key].has(d)}">${esc(d)}</span>
+      <span class="drive-chip ${driveSel[key].has(d) ? 'active' : ''}" data-drive="${esc(d)}" data-drive-for="${key}" role="checkbox" tabindex="0" aria-checked="${driveSel[key].has(d)}">${esc(d)}</span>
     `).join('');
   }
 
   function onDriveClick(e) {
     const chip = e.target.closest('[data-drive]');
     if (!chip) return;
+    // M-11（2026-10-03 L3）：role=checkbox 的 span 需要键盘可达。
+    // Enter / Space 与 click 走同一路径；Space 在 keydown 时 preventDefault 防页面滚动。
+    if (e.type === 'keydown') {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
     const key = chip.dataset.driveFor;
     const d = chip.dataset.drive;
     if (!driveSel[key]) return;
@@ -1027,6 +1033,7 @@
       // 盘符点选器（empty/an）：委托点击 + 拉取盘符渲染（默认全选）
       if (cfg.drivesEl) {
         document.getElementById(cfg.drivesEl)?.addEventListener('click', onDriveClick);
+document.getElementById(cfg.drivesEl)?.addEventListener('keydown', onDriveClick);
         initDrivePicker(key);
       }
     }

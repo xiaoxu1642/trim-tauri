@@ -593,6 +593,117 @@
   // ==================== 工具 ====================
   function escapeHtml(s) { return window.ds.esc(s); }
 
+  /**
+   * 逐项选择独立弹窗（2026-10-03 用户裁定形态：点「立即执行」后弹出，不内嵌在详情里）。
+   *
+   * 为什么从详情弹窗搬出来：内嵌版那个区块在详情弹窗**下方**，要滚动才看得到，
+   * 用户反馈「点击执行出现弹窗可选择每一项的页面也没有出现」—— 它确实存在，
+   * 只是长得像不存在。而且内嵌时详情弹窗必须一直开着，于是和高危确认框
+   * 叠在 DOM 里互相抢 z 序与焦点，表现为「确认框一闪而过」（见 runBtn 处注释）。
+   *
+   * 返回 Promise<{targets,extras} | null>：null = 用户取消（调用方据此中止执行）。
+   *
+   * `pre` 是从详情弹窗里读出的初值快照（打开这个弹窗时详情已关，但勾选状态
+   * 要延续用户在详情里已经调过的那份，而不是每次重置回全选）。
+   */
+  function confirmSubitemPick(opt, pre) {
+    const items = opt.subitems.items || [];
+    const extras = Array.isArray(opt.subitems.extras) ? opt.subitems.extras : [];
+    const label = opt.subitems.label || '逐项选择';
+    const un = Number(opt.subitems.unexplained) || 0;
+    const hint = (opt.subitems.hint || '') + (un > 0 ? `（另有 ${un} 个目标未单独列出说明，全选时仍会执行。）` : '');
+
+    // 顶部摘要条：让用户先看到「这一步到底要动多少东西」，再看清单。
+    const targets = new Set(pre.targets);
+    const pickedExtras = new Set(pre.extras);
+
+    const rowHtml = (it) => `
+      <label class="pick-row">
+        <span class="checkbox pick-box${targets.has(it.value) ? ' checked' : ''}" data-pick="${escapeAttr(it.value)}"></span>
+        <span class="pick-name">${escapeHtml(it.value)}</span>
+        <span class="pick-note">${escapeHtml(it.note)}</span>
+      </label>`;
+    const extraHtml = extras.map(ex => `
+      <label class="pick-row pick-row-extra">
+        <span class="checkbox pick-extra-box${pickedExtras.has(ex.id) ? ' checked' : ''}" data-pick-extra="${escapeAttr(ex.id)}"></span>
+        <span class="pick-name">${escapeHtml(ex.label)}</span>
+        <span class="pick-note">${escapeHtml(ex.note)}</span>
+      </label>`).join('');
+
+    const bodyHtml = `
+      <div class="pick-summary">
+        <span class="pick-summary-num" data-pick-count></span>
+        <span class="pick-summary-hint">${escapeHtml(hint)}</span>
+      </div>
+      <div class="pick-toolbar">
+        <button class="btn btn-secondary btn-sm" type="button" data-pick-all>全选</button>
+        <button class="btn btn-secondary btn-sm" type="button" data-pick-none>全不选</button>
+        <button class="btn btn-secondary btn-sm" type="button" data-pick-invert>反选</button>
+      </div>
+      <div class="pick-list">${items.map(rowHtml).join('')}</div>
+      ${extras.length ? `<div class="pick-extras"><div class="pick-extras-title">附带操作（默认不执行）</div>${extraHtml}</div>` : ''}`;
+
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = v => { if (!settled) { settled = true; resolve(v); } };
+      const all = items.map(it => it.value);
+      const ctrl = window.modal.create({
+        id: 'subitemPick-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        title: label,
+        bodyHtml,
+        bodyClass: 'pick-body',
+        footerHtml: `
+          <span class="model-picker-spacer"></span>
+          <button class="btn btn-secondary" data-pick-cancel type="button">取消</button>
+          <button class="btn btn-primary" data-pick-ok type="button">按此勾选执行</button>`,
+        initialFocus: '[data-pick-ok]',
+        onClose() { finish(null); }
+      });
+
+      const $ = (s) => ctrl.modal.querySelector(s);
+      const counter = $('[data-pick-count]');
+      const syncCount = () => {
+        counter.textContent = `将执行 ${targets.size} / ${all.length} 项`;
+        // 全不选时禁用确认按钮：让「至少选一项」在按钮态上就说清楚，
+        // 而不是点了才 toast 一句又什么都不发生。
+        $('[data-pick-ok]').disabled = targets.size === 0;
+      };
+      const paint = () => {
+        ctrl.modal.querySelectorAll('.pick-box').forEach(b => {
+          b.classList.toggle('checked', targets.has(b.dataset.pick));
+        });
+        syncCount();
+      };
+
+      $('[data-pick-all]').addEventListener('click', () => { targets.clear(); all.forEach(v => targets.add(v)); paint(); });
+      $('[data-pick-none]').addEventListener('click', () => { targets.clear(); paint(); });
+      // 反选是全选/全不选都缺的那块：清单动辄几十项，手工逐个取消某一项最磨人。
+      $('[data-pick-invert]').addEventListener('click', () => {
+        all.forEach(v => { if (targets.has(v)) targets.delete(v); else targets.add(v); });
+        paint();
+      });
+      $('.pick-list').addEventListener('click', (e) => {
+        const box = e.target.closest('.pick-box');
+        if (!box) return;
+        const v = box.dataset.pick;
+        if (targets.has(v)) targets.delete(v); else targets.add(v);
+        box.classList.toggle('checked', targets.has(v));
+        syncCount();
+      });
+      $('[data-pick-ok]').addEventListener('click', () => {
+        if (targets.size === 0) {
+          window.app?.toast('warning', '一个目标都没勾选，请至少勾选一项后再执行');
+          return;
+        }
+        finish({ targets: Array.from(targets), extras: Array.from(pickedExtras) });
+        ctrl.close();
+      });
+      $('[data-pick-cancel]').addEventListener('click', () => ctrl.close());
+
+      syncCount();
+    });
+  }
+
   // 阶段三：风险徽章统一 design-system（ds-badge sm：低=ok 中=warn 高=bad）
   function riskBadge(risk) {
     const type = risk === 'high' ? 'bad' : risk === 'medium' ? 'warn' : 'ok';
@@ -1021,7 +1132,17 @@
       const mig = resp.migration;
       if (mig && Array.isArray(mig.pending) && mig.pending.length) showRetiredBanner(mig.pending);
       const staleIds = (Array.isArray(resp.staleIds) ? resp.staleIds : []).filter(id => OPTIONS.some(o => o.id === id));
-      if (staleIds.length) showStaleBanner(staleIds);
+      if (staleIds.length) {
+        // 根治（2026-10-03）：条目带失败子步原因——横幅文本与悬浮提示都从这里出
+        const staleItems = staleIds.map(id => {
+          const it = (resp.items || []).find(x => x && x.id === id) || null;
+          return {
+            id,
+            reasons: (it && Array.isArray(it.partialReasons)) ? it.partialReasons.filter(Boolean) : []
+          };
+        });
+        showStaleBanner(staleItems);
+      }
     } catch (e) { /* 状态总览失败不影响正常使用 */ }
   }
 
@@ -1044,12 +1165,24 @@
     window.app?.toast('info', `检测到上次因提权重启中断的优化批次（${valid.length} 项），已恢复勾选，可点「执行所选优化」继续`, 6000);
   }
 
-  function showStaleBanner(ids) {
+  function showStaleBanner(items) {
     const banner = document.getElementById('optimizerStaleBanner');
     const text = document.getElementById('optimizerStaleText');
     if (!banner || !text) return;
-    const names = ids.slice(0, 3).map(id => getOptionTitle(id)).join('、') + (ids.length > 3 ? ` 等 ${ids.length} 项` : '');
-    text.textContent = `检测到 ${ids.length} 项优化改动未完成还原（${names}）：可能因执行中断或被系统回写导致状态不明。可退回原值，或把优化值重新写到位。`;
+    const ids = items.map(x => x.id);
+    // 根治（2026-10-03）：partial 项带失败步数，悬浮提示给头部原因——
+    // 此前「状态不明」无从判断该还原还是该重跑（明细只在日志里）。
+    const names = items.slice(0, 3).map(x => {
+      const t = getOptionTitle(x.id);
+      return x.reasons.length ? `${t}（${x.reasons.length} 步失败）` : t;
+    }).join('、') + (items.length > 3 ? ` 等 ${items.length} 项` : '');
+    text.textContent = `检测到 ${items.length} 项优化改动未完成还原（${names}）：可能因执行中断或被系统回写导致状态不明。可退回原值，或把优化值重新写到位。`;
+    const detail = items.flatMap(x => x.reasons.map(r => `${getOptionTitle(x.id)}：${r}`));
+    if (detail.length) {
+      text.setAttribute('data-tip', detail.slice(0, 8).join('；') + (detail.length > 8 ? `；等 ${detail.length} 条，完整明细见日志页` : ''));
+    } else {
+      text.removeAttribute('data-tip');
+    }
     banner.style.display = 'flex';
     const btn = document.getElementById('btnStaleRestore');
     if (btn) {
@@ -1089,6 +1222,27 @@
           keep.forEach((id) => selectedIds.add(id));
           renderGroups(OPTIONS);
         }
+      };
+    }
+    // 根治第三出口（2026-10-03 用户拍板）：「不再提醒」= per-id 记进主进程记账的
+    // prefs.staleDismissed。该项重新执行（pending/applied/partial 落账）或还原销账时
+    // 忽略自动失效——若又 partial 会重新提醒，旧忽略不会吞掉新状态。
+    const dismissBtn = document.getElementById('btnStaleDismiss');
+    if (dismissBtn) {
+      dismissBtn.onclick = async () => {
+        dismissBtn.disabled = true;
+        try {
+          const resp = await window.api.optimizer.staleDismiss(ids);
+          if (resp && resp.success) {
+            window.app?.toast('info', `已忽略这 ${ids.length} 项的启动提醒；重新执行或还原后忽略会自动失效`, 5000);
+          } else {
+            window.app?.toast('error', '忽略失败：' + ((resp && resp.message) || '未知原因'));
+          }
+        } catch (e) {
+          window.app?.toast('error', '忽略失败：' + ((e && e.message) || e));
+        }
+        banner.style.display = 'none';
+        dismissBtn.disabled = false;
       };
     }
   }
@@ -1205,20 +1359,8 @@
       </div>
       <div class="opt-detail-section opt-pick-section" style="display:none">
         <div class="opt-detail-section-title opt-pick-title">逐项选择</div>
-        <div class="opt-pick-bar">
-          <label class="opt-pick-all">
-            <span class="checkbox opt-pick-all-box"></span>
-            <span>全选</span>
-          </label>
-          <label class="opt-pick-none">
-            <span class="checkbox opt-pick-none-box"></span>
-            <span>全不选</span>
-          </label>
-          <span class="opt-pick-count"></span>
-        </div>
         <p class="opt-pick-hint"></p>
-        <div class="opt-pick-list"></div>
-        <div class="opt-pick-extras"></div>
+        <button class="btn btn-secondary opt-pick-open" type="button">逐项选择要执行的目标…</button>
       </div>`;
     const footerHtml = `
       <div class="opt-detail-mem" style="display:none"></div>
@@ -1247,10 +1389,15 @@
     $('.opt-col-cons').textContent = o.cons || '暂缺，可点击下方「AI 生成优缺点」重新生成。';
     $('.opt-detail-steps-wrap').innerHTML = renderSteps(o.steps);
 
-    // 逐项选择区（2026-10-03 用户裁定）：这三项此前只有「一键全选 / 一键全还原」，
+    // 逐项选择（2026-10-03 用户裁定）：这三项此前只有「一键全选 / 一键全还原」，
     // 用户看到的是「禁用 70 个服务」这种不可拆的黑箱 —— 里面有 CryptSvc（证书与
     // BitLocker 全靠它）也有 RetailDemo（一眼可弃），让人「一把梭」等于逼他在
     // 「全选」和「放弃」之间二选一。默认**全选**（不改变既有行为），可逐项取消。
+    //
+    // 形态变更（同日第二轮）：勾选区已搬成**独立弹窗**（点「立即执行」后弹出）。
+    // 这里退化为一个入口条 + 勾选状态的持有者。原因见 confirmSubitemPick 的注释：
+    // 内嵌版藏在详情弹窗下方要滚动才看到，用户反馈「弹窗没有出现」，
+    // 而且它逼着详情弹窗一直开着，好与高危确认框叠在一起互相抢焦点。
     const pickState = { targets: new Set(), extras: new Set(), all: [] };
     if (o.subitems && Array.isArray(o.subitems.items) && o.subitems.items.length) {
       const sec = $('.opt-pick-section');
@@ -1259,63 +1406,24 @@
       // 「还有 N 个没有单独说明」必须如实说：清单里没登记解释的目标不列出来，
       // 不说的话用户会以为「全选」就是这 M 项。
       const un = Number(o.subitems.unexplained) || 0;
-      $('.opt-pick-hint').textContent = (o.subitems.hint || '')
-        + (un > 0 ? `（另有 ${un} 个目标未单独列出说明，全选时仍会执行。）` : '');
-      const list = $('.opt-pick-list');
-      list.innerHTML = o.subitems.items.map((it, i) => `
-        <label class="opt-pick-row">
-          <span class="checkbox opt-pick-box checked" data-pick="${escapeAttr(it.value)}"></span>
-          <span class="opt-pick-name">${escapeHtml(it.value)}</span>
-          <span class="opt-pick-note">${escapeHtml(it.note)}</span>
-        </label>`).join('');
       o.subitems.items.forEach(it => { pickState.targets.add(it.value); pickState.all.push(it.value); });
-      // 附带开关：与清单不同形状的写入，**默认全不选**。
-      // 与清单取相反的默认值是刻意的：清单是「这项本来就会做的事」（旧行为=全做），
-      // 附带开关是「额外加码」（旧行为=没做），默认改掉旧行为才是静默越权。
-      const extras = Array.isArray(o.subitems.extras) ? o.subitems.extras : [];
-      if (extras.length) {
-        $('.opt-pick-extras').innerHTML = '<div class="opt-pick-extras-title">附带操作（默认不执行）</div>'
-          + extras.map(ex => `
-            <label class="opt-pick-row opt-pick-row-extra">
-              <span class="checkbox opt-pick-extra-box" data-pick-extra="${escapeAttr(ex.id)}"></span>
-              <span class="opt-pick-name">${escapeHtml(ex.label)}</span>
-              <span class="opt-pick-note">${escapeHtml(ex.note)}</span>
-            </label>`).join('');
-      }
-      const counter = $('.opt-pick-count');
-      const syncCount = () => {
-        counter.textContent = `已选 ${pickState.targets.size} / ${pickState.all.length} 项`;
+      const openBtn = $('.opt-pick-open');
+      const paintEntry = () => {
+        openBtn.textContent = `逐项选择要执行的目标…（已选 ${pickState.targets.size} / ${pickState.all.length} 项）`;
       };
-      const setAll = (on) => {
-        pickState.targets.clear();
-        if (on) pickState.all.forEach(v => pickState.targets.add(v));
-        list.querySelectorAll('.opt-pick-box').forEach(b => b.classList.toggle('checked', on));
-        $('.opt-pick-all-box').classList.toggle('checked', on);
-        $('.opt-pick-none-box').classList.toggle('checked', false);
-        syncCount();
-      };
-      $('.opt-pick-all').addEventListener('click', () => setAll(true));
-      $('.opt-pick-none').addEventListener('click', () => setAll(false));
-      $('.opt-pick-list').addEventListener('click', (e) => {
-        const box = e.target.closest('.opt-pick-box');
-        if (!box) return;
-        const v = box.dataset.pick;
-        if (pickState.targets.has(v)) pickState.targets.delete(v); else pickState.targets.add(v);
-        box.classList.toggle('checked', pickState.targets.has(v));
-        // 全选框要跟着实际状态走，不能停在「亮着」而清单已经全取消了
-        const allOn = pickState.targets.size === pickState.all.length;
-        $('.opt-pick-all-box').classList.toggle('checked', allOn);
-        $('.opt-pick-none-box').classList.toggle('checked', pickState.targets.size === 0);
-        syncCount();
+      $('.opt-pick-hint').textContent = (o.subitems.hint || '')
+        + (un > 0 ? `（另有 ${un} 个目标未单独列出说明，全选时仍会执行。）` : '')
+        + '点击下方按钮逐项确认。';
+      // 入口按钮：就地预览勾选（预览不改执行语义，只让用户先看清范围）。
+      // 与「立即执行」里那一次是同一个弹窗、同一份状态，不会出现两处结论。
+      openBtn.addEventListener('click', async () => {
+        const r = await confirmSubitemPick(o, pickState);
+        if (!r) return;
+        pickState.targets = new Set(r.targets);
+        pickState.extras = new Set(r.extras);
+        paintEntry();
       });
-      $('.opt-pick-extras').addEventListener('click', (e) => {
-        const box = e.target.closest('.opt-pick-extra-box');
-        if (!box) return;
-        const v = box.dataset.pickExtra;
-        if (pickState.extras.has(v)) pickState.extras.delete(v); else pickState.extras.add(v);
-        box.classList.toggle('checked', pickState.extras.has(v));
-      });
-      setAll(true);
+      paintEntry();
     }
 
     // 安全兜底：已优化项「立即执行」→「立即恢复」；无法推理还原操作时按钮置灰。
@@ -1447,33 +1555,46 @@
         }
         return;
       }
-      const go = await confirmHazard(opt);
-      if (!go) return;
-      // R3（v3.6.6 M1）：dynamic 项的下拉值必须在 closeOptModal 之前读取，
-      // 否则 optModal 被置 null 后 querySelector 恒返回 undefined → 任何档位都回落 8GB。
-      // v2-M10：取的是「原始下拉文本」，参数对象由 dynamicParams 按 id 造（{gb} 或 {days}）。
+      // ⚠️ 读取顺序：所有依赖详情弹窗 DOM 的取值必须在 closeOptModal 之前完成。
+      // 与 dynamic 档位同一个坑：弹窗一关 optModal 置 null，后续 querySelector
+      // 恒返回 undefined；而且更致命的是 —— 读不到就等于「没指定 = 全选」，
+      // 用户只勾了 3 个却禁了 70 个，且回执照样报「完成」。
+      //
+      // 2026-10-03：这里新增了「先关详情弹窗、再弹确认」的顺序修正。
+      // 原顺序是 confirmHazard 先弹、closeOptModal 后关 ⇒ 两个弹窗叠在 DOM 里，
+      // 红色确认框被详情弹窗的遮罩压住（z 序与焦点都被抢），用户点「仍然执行」
+      // 时框已经「一闪而过」。新顺序保证任何时刻只有一个弹窗。
       const dynCtl = DYNAMIC_CONTROLS[opt.id];
       let preCloseRaw = null;
       if (opt.dynamic && dynCtl) {
         const selEl = optModal?.modal?.querySelector('.opt-dyn-select');
         preCloseRaw = selEl ? selEl.value : dynCtl.defaultValue;
       }
-      // 逐项选择（2026-10-03）：勾选结果必须在 closeOptModal **之前**读出来。
-      // 与 dynamic 档位同一个坑：弹窗一关 optModal 置 null，后续 querySelector
-      // 恒返回 undefined；而且更致命的是 —— 读不到就等于「没指定 = 全选」，
-      // 用户只勾了 3 个却禁了 70 个，且回执照样报「完成」。
-      const pickParams = opt.subitems
+      const prePick = opt.subitems
         ? {
-            pickedTargets: Array.from(pickState.targets),
-            pickedExtras: Array.from(pickState.extras)
+            targets: new Set(pickState.targets),
+            extras: new Set(pickState.extras),
+            all: pickState.all.slice()
           }
-        : {};
-      if (opt.subitems && pickState.targets.size === 0) {
-        window.app?.toast('warning', '一个目标都没勾选，请至少勾选一项后再执行');
-        return;
-      }
-      // 立即执行后自动关闭弹窗
+        : null;
+      // 详情弹窗立刻关闭：确认框/逐项选择框要成为唯一可见弹窗。
+      // 用户若在后续确认里点「取消」，详情弹窗不会回来（下方 return 明确不再 openModal）
+      // —— 这是刻意取舍：重开详情弹窗会再次触发「刚点的按钮被重建」的连锁。
       closeOptModal();
+
+      // 逐项选择（2026-10-03 用户裁定）：点「立即执行」后弹**独立弹窗**逐项勾选，
+      // 不再是详情弹窗内嵌的一个区块（内嵌版用户反馈「弹窗没出现」——
+      // 它藏在详情下方，要滚动才看得到，被当成了不存在）。
+      // 附带开关（extras）也一起在这里确认，默认仍全不选（默认改旧行为=静默越权）。
+      const picked = prePick ? await confirmSubitemPick(opt, prePick) : null;
+      if (prePick && picked === null) return; // 用户取消逐项选择，不执行
+
+      const pickParams = picked
+        ? { pickedTargets: picked.targets, pickedExtras: picked.extras }
+        : {};
+
+      const go = await confirmHazard(opt);
+      if (!go) return;
       // tf_svc_bulk：单独弹窗询问是否连商店相关服务一并禁用（用户选择经 params 传递）
       const includeStore = opt.id === 'tf_svc_bulk' ? await confirmIncludeStoreServices() : false;
       // 执行前检查系统还原点（警示/风险确认；用户最终拒绝则不执行）。
@@ -1867,9 +1988,29 @@
     );
     if (!ok) return;
 
-    // 高危项逐个红色二次确认
-    for (const opt of hazardList) {
-      const go = await confirmHazard(opt);
+    // 高危项红色二次确认（2026-10-03 用户裁定由「逐个弹」改为「合并成一次」）。
+    //
+    // 原实现是 `for (const opt of hazardList) await confirmHazard(opt)` ——
+    // 每项弹一个独立红色框。同一批里若有 3 项高危，用户要点 3 次「仍然执行」；
+    // 而且**相邻两个框之间必然出问题**：前一个 resolve 后 focusTrap.release()
+    // 把焦点抢回触发按钮，下一帧新框弹出并再次走 initialFocus，弹窗在视觉上
+    // 「闪一下又闪一下」（用户实测反馈：确认框一闪而过、像是被自动拒绝）。
+    //
+    // 合并成一次后语义更强也更省事：把所有高危项点名列在同一个框里，用户一次看清
+    // 「这批里到底有哪几项在降低安全防护」，一次表态。护栏没有变松 ——
+    // 批量框本身已经是红色 danger（见上方 hasHazard 分支），这里只是不再重复 N 次。
+    if (hazardList.length) {
+      const detail = hazardList.map(o => {
+        const sd = o.securityDegrade;
+        return `· ${o.title}${sd && sd.why ? `（${sd.why}）` : ''}`;
+      }).join('\n');
+      const go = await window.app.confirmDanger(
+        '⚠️ 高危安全操作确认',
+        `本批 ${hazardList.length} 项高危优化会显著降低系统安全防护：\n\n${detail}`,
+        '仍然全部执行',
+        '取消',
+        '此操作可能使系统更容易受到恶意软件或攻击的侵害，请确认已了解风险。'
+      );
       if (!go) return;
     }
 
@@ -2034,9 +2175,21 @@
     );
     if (!ok) { setCardsSelected(false); return; }
 
-    // 高危项逐个红色二次确认（合规强化）
-    for (const opt of hazardList) {
-      const go = await confirmHazard(opt);
+    // 高危项红色二次确认（与「执行所选」链同一裁定：合并成一次，不逐个弹）
+    // 逐个弹的害处见 runBatch 处注释：要连点 N 次「仍然执行」，且相邻两框之间
+    // focusTrap 的焦点归还会造成视觉上「框闪一下」。这里点名列出，一次表态。
+    if (hazardList.length) {
+      const detail = hazardList.map(o => {
+        const sd = o.securityDegrade;
+        return `· ${o.title}${sd && sd.why ? `（${sd.why}）` : ''}`;
+      }).join('\n');
+      const go = await window.app.confirmDanger(
+        '⚠️ 高危安全操作确认',
+        `本页 ${hazardList.length} 项高危优化会显著降低系统安全防护：\n\n${detail}`,
+        '仍然全部执行',
+        '取消',
+        '此操作可能使系统更容易受到恶意软件或攻击的侵害，请确认已了解风险。'
+      );
       if (!go) { setCardsSelected(false); return; }
     }
 

@@ -217,6 +217,7 @@
     'optimizer:backup-reg': 'optimizer_backup_reg',
     'optimizer:restore-reg': 'optimizer_restore_reg',
     'optimizer:state-overview': 'optimizer_state_overview',
+    'optimizer:stale-dismiss': 'optimizer_stale_dismiss',
     'optimizer:list-groups': 'optimizer_list_groups',
     'optimizer:readiness': 'optimizer_readiness',
     'optimizer:touch-recent': 'optimizer_touch_recent',
@@ -592,9 +593,9 @@
     },
 
     fileclean: {
-      scan: function (type, customPath, total, doneBase) {
+      scan: function (scanType, customPath) {
         return invokeChannel('fileclean:scan', {
-          type: type, customPath: customPath, total: total, doneBase: doneBase
+          scanType: scanType, customPath: customPath
         });
       },
       readImage: function (filePath) { return invokeChannel('fileclean:read-image', { filePath: filePath }); },
@@ -664,6 +665,7 @@
       backupReg: function (optionId) { return invokeChannel('optimizer:backup-reg', { optionId: optionId }); },
       restoreReg: function (optionId) { return invokeChannel('optimizer:restore-reg', { optionId: optionId }); },
       stateOverview: function () { return invokeChannel('optimizer:state-overview'); },
+      staleDismiss: function (ids) { return invokeChannel('optimizer:stale-dismiss', { ids: ids }); },
       listGroups: function () { return invokeChannel('optimizer:list-groups'); },
       readiness: function () { return invokeChannel('optimizer:readiness'); },
       touchRecent: function (optionId) { return invokeChannel('optimizer:touch-recent', { optionId: optionId }); },

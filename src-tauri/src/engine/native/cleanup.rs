@@ -802,7 +802,9 @@ pub fn cleanup_execute(
         if std::fs::create_dir_all(&files_backup_root).is_ok() {
             match serde_json::to_string_pretty(&manifest) {
                 Ok(text) => {
-                    if let Err(e) = std::fs::write(&mpath, text) {
+                    // 审查 L-6：manifest 是该批还原的唯一依据，裸 std::fs::write 断电可留
+                    // 半截 JSON，还原通道按清单失配。走 security 原子写（temp→fsync→rename）。
+                    if let Err(e) = crate::security::atomic_write_file(&mpath, text.as_bytes()) {
                         crate::engine::log::write_log("warn", &format!("files 备份清单写入失败: {e}"));
                     }
                 }

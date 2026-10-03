@@ -876,7 +876,7 @@
           if (!item || !item.fileCleanType) continue;
           const customPath = item.fileCleanType === 'qq' ? pathConfig.qqFileDir : pathConfig.wechatFileDir;
           try {
-            const fcResp = await window.api.fileclean.scan(item.fileCleanType, customPath, scanTotal, fcDoneBase);
+            const fcResp = await window.api.fileclean.scan(item.fileCleanType, customPath);
             if (fcResp.success && fcResp.data) {
               fileCleanData.set(id, fcResp.data);
               results.push({
