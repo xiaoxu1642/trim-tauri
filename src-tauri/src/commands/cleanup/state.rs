@@ -190,8 +190,56 @@ pub(super) fn collect_lock_candidates(
     (out, truncated)
 }
 
-// ==================== 数值/字符串的 JS 口径 ====================
+/// 2026-10-04 审计 §4.3：确认清单与实际删除集的口径差留痕（纯函数，便于断言）。
+///
+/// 执行侧**重新遍历**每个目标、从不读快照的 `files` 数组；用户在确认弹窗里看到
+/// 的是快照那份清单。于是「扫描后新增的文件」「超出 `PLAN_CAP_*` 被截掉的行」
+/// 会被永久删除却从未被列出、从未计入确认体积。**语义不在这里改**——把执行绑死
+/// 到快照文件集是另一个产品裁定（会同时改变「新增文件也清」的既定行为，且
+/// `filesTruncated` 时绑定一份残缺清单反而少删），本轮只让差异可见：
+/// 返回逐条 warn 文案（清单被截断的条目、实测清理数超过清单条数的条目），
+/// 由 `scan_execute::cleanup_execute` 原样 `write_log`。
+pub(super) fn plan_delta_warnings(details: &[Value], snapshot: &HashMap<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    for d in details {
+        let Some(id) = d.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(known) = snapshot.get(id) else {
+            continue;
+        };
+        // 只对「真的删了文件」的条目对账：skip/error/fail 的条目没有「删多」可言，
+        // 回收站/注册表/DISM 型条目没有 files 清单概念（listed=0 时两条都不触发）
+        if !matches!(
+            d.get("status").and_then(Value::as_str),
+            Some("ok") | Some("partial")
+        ) {
+            continue;
+        }
+        let listed = known
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let truncated = known
+            .get("filesTruncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let deleted = js_num_or_zero(d.get("fileCount")) as usize;
+        if truncated {
+            out.push(format!(
+                "条目 {id} 的确认清单超出单次上限被截断（清单仅列 {listed} 项），实际清理范围可能大于所列"
+            ));
+        } else if listed > 0 && deleted > listed {
+            out.push(format!(
+                "条目 {id} 实际清理 {deleted} 项，多于确认清单列出的 {listed} 项（扫描与执行之间新增的文件也在清理范围内）"
+            ));
+        }
+    }
+    out
+}
 
+// ==================== 数值/字符串的 JS 口径 ====================
 /// `Number(x)`：不可解析为 NaN
 pub(super) fn js_number(v: &Value) -> f64 {
     match v {
@@ -338,5 +386,77 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
         let (out, trunc) = collect_lock_candidates(Some(&json!(many)), &s3, 100_000);
         assert!(trunc, "600 个 id 超过 EXECUTE_MAX_ITEMS 上限，truncated 必须为 true");
         assert!(out.len() <= EXECUTE_MAX_ITEMS, "越界 id 不得被展开: {}", out.len());
+    }
+
+    fn snap_item(files: usize, truncated: bool) -> Value {
+        let mut it = json!({
+            "path": "C:\\Temp",
+            "files": (0..files).map(|i| json!({ "path": format!("C:\\Temp\\f{i}"), "size": 1 })).collect::<Vec<_>>(),
+        });
+        if truncated {
+            it["filesTruncated"] = json!(true);
+        }
+        it
+    }
+
+    /// 2026-10-04 磁盘清理审计 §4.3：确认清单与实际删除集的口径差必须留痕。
+    ///
+    /// 本函数体测的是 `plan_delta_warnings` 的**记账政策**（谁该出 warn、文案带不带数）；
+    /// 「命令层真的把它喂给了 write_log」这层接线由末尾的源码形态断言钉住 ——
+    /// 审计 §9.4 教训：纯函数断言走不到接线那一步，判红实验必须两条路都验。
+    #[test]
+    fn 口径差留痕_截断与删多都要出warn() {
+        let mut s = HashMap::new();
+        s.insert("trunc".to_string(), snap_item(3, true));
+        s.insert("grown".to_string(), snap_item(3, false));
+        s.insert("reg".to_string(), json!({ "path": "HKCU\\Foo" })); // 注册表型：无 files
+
+        let details = vec![
+            // 截断条目：哪怕删得不多也要报（清单本身不完整）
+            json!({ "id": "trunc", "status": "ok", "fileCount": 3 }),
+            // 删多：快照列 3 项、实测清了 5 项
+            json!({ "id": "grown", "status": "ok", "fileCount": 5 }),
+            // 删得比清单少（部分被占用）：不是「清单外多删」，不报
+            json!({ "id": "grown", "status": "partial", "fileCount": 2 }),
+            // 注册表型条目没有 files 概念：listed=0，两条判据都不触发
+            json!({ "id": "reg", "status": "ok", "fileCount": 7 }),
+            // skip/error 条目没有「删多」可言
+            json!({ "id": "grown", "status": "skip", "fileCount": 99 }),
+            // 快照外 id / 无 id：直接跳过
+            json!({ "id": "ghost", "status": "ok", "fileCount": 9 }),
+            json!({ "status": "ok", "fileCount": 9 }),
+        ];
+        let warns = plan_delta_warnings(&details, &s);
+        assert_eq!(warns.len(), 2, "截断 1 条 + 删多 1 条，其余不得误报: {warns:?}");
+        assert!(warns[0].contains("trunc") && warns[0].contains("截断"), "截断文案要能对上条目: {}", warns[0]);
+        assert!(warns[1].contains("grown") && warns[1].contains("5") && warns[1].contains("3"), "删多文案要带两个数: {}", warns[1]);
+
+        // 刚好等于清单条数：不算删多（口径是「多于」）
+        let mut s2 = HashMap::new();
+        s2.insert("a".to_string(), snap_item(4, false));
+        let warns2 = plan_delta_warnings(&[json!({ "id": "a", "status": "ok", "fileCount": 4 })], &s2);
+        assert!(warns2.is_empty(), "删除数 == 清单数不得报: {warns2:?}");
+    }
+
+    /// §4.3 的接线钉：纯函数的 warn 文案必须在 scan_execute 的清理完成路径里
+    /// 被逐条 write_log —— 只测函数不测接线的话，把调用删了测试照样全绿
+    /// （审计 §9.4 第一次判红实验没红的同款盲区）。
+    #[test]
+    fn 口径差留痕_命令层接线在位() {
+        let src = include_str!("scan_execute.rs");
+        let calls: Vec<usize> = src
+            .match_indices("plan_delta_warnings(")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "plan_delta_warnings 在命令层应恰好 1 处调用（多了=口径分叉，少了=接线被摘）: {}",
+            calls.len()
+        );
+        assert!(
+            src.contains("for w in plan_delta_warnings("),
+            "接线形态变了（不再是逐条 write_log 的循环）——请同步改本断言并复核判红"
+        );
     }
 }

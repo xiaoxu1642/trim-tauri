@@ -596,6 +596,16 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                 );
             }
         }
+        // 2026-10-04 审计 §4.3：确认清单（快照 files）与实际删除集（执行侧重遍历）
+        // 的口径差逐条留痕 —— 不改语义（绑文件集是另一个裁定），只让「删了清单外
+        // 的文件」这件事在日志里可对账。plan_delta_warnings 本体与断言在 state.rs。
+        {
+            let empty: Vec<Value> = Vec::new();
+            let details = data.get("details").and_then(|d| d.as_array()).unwrap_or(&empty);
+            for w in plan_delta_warnings(details, &snapshot) {
+                log::write_log("warn", &w);
+            }
+        }
         // 成功判据：硬失败（error ∪ fail，见上面 v5 C-3）为 0 才算成功；
         // partial 属「部分成功」，由渲染层另行提示
         json!({ "success": failed == 0, "data": data })

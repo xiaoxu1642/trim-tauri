@@ -362,7 +362,11 @@
             // 用户会去手工核对目录、怀疑扫描漏了。复用 path-auto-tag（既有 token，零新增样式）。
             const reparseTag = Number(result.skippedReparse) > 0
               ? ` <span class="path-auto-tag" data-tip="扫描时跳过了 ${escapeHtml(String(result.skippedReparse))} 个联接点/挂载点目录（它们指向别的子树，深入会重复计数）">已跳过 ${escapeHtml(String(result.skippedReparse))} 个联接点</span>` : '';
-            inner = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(result.path)}">${escapeHtml(xtable.middleEllipsis(result.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${blockedTag}</span>`;
+            // 2026-10-04 审计 §4.3：filesTruncated 此前标记了但渲染层零消费 —— 清单被
+            // 截断意味着确认时看到的文件数 < 实际将清理的文件数，必须在行上可见。
+            const truncTag = result.filesTruncated
+              ? ' <span class="path-auto-tag" data-tip="文件清单超出单次上限被截断，实际清理范围可能大于所列">清单已截断</span>' : '';
+            inner = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(result.path)}">${escapeHtml(xtable.middleEllipsis(result.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${truncTag}${blockedTag}</span>`;
           } else {
             inner = '<span class="xtable-cell-muted">—</span>';
           }
@@ -803,7 +807,10 @@
       // 否则行会在流式更新到最终值时把标签丢掉）
       const reparseTag = Number(r.skippedReparse) > 0
         ? ` <span class="path-auto-tag" data-tip="扫描时跳过了 ${escapeHtml(String(r.skippedReparse))} 个联接点/挂载点目录（它们指向别的子树，深入会重复计数）">已跳过 ${escapeHtml(String(r.skippedReparse))} 个联接点</span>` : '';
-      pathCell.innerHTML = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(r.path)}">${escapeHtml(xtable.middleEllipsis(r.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${blockedTag}</span>`;
+      // 2026-10-04 审计 §4.3：同口径的截断标签（流式/补丁路径）
+      const truncTag = r.filesTruncated
+        ? ' <span class="path-auto-tag" data-tip="文件清单超出单次上限被截断，实际清理范围可能大于所列">清单已截断</span>' : '';
+      pathCell.innerHTML = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(r.path)}">${escapeHtml(xtable.middleEllipsis(r.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${truncTag}${blockedTag}</span>`;
     }
   }
 
@@ -1123,6 +1130,29 @@
       );
       if (!ok) {
         isCleaning = false;
+        updateUI();
+        return;
+      }
+    }
+
+    // 2026-10-04 审计 §4.3：确认清单与实际删除集来自两份数据——执行侧重新遍历
+    // 目标，扫描后新增的文件、超出单次清单上限被截掉的行也会被清理，却从未出现在
+    // 确认清单里。filesTruncated 此前标记了但渲染层零消费；清单被截断的条目必须在
+    // 确认环节如实告知，让用户带着这个事实做决定（语义不变：差异可见而非绑定文件集）。
+    const truncatedItems = Array.from(selectedIds)
+      .map(id => scanResults.get(id))
+      .filter(r => r && r.filesTruncated);
+    if (truncatedItems.length > 0) {
+      const ok = await window.app?.confirmWarning(
+        '清理清单已截断确认',
+        `所选 ${truncatedItems.length} 个条目的文件清单超出单次上限已截断：\n${truncatedItems.map(r => '• ' + r.name).join('\n')}\n实际清理范围可能大于上面列出的清单。`,
+        '仍然执行',
+        '取消',
+        '清单截断意味着确认时看到的文件数少于将要清理的文件数；执行后请以日志与实测释放量为准。'
+      );
+      if (!ok) {
+        isCleaning = false;
+        setCleaningBtn(false);
         updateUI();
         return;
       }
