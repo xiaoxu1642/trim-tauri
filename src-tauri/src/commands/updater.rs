@@ -55,26 +55,44 @@ use crate::security;
 const MIRROR_FILE: &str = "update-mirror.json";
 /// 单线路检查超时（对照上游 CHECK_TIMEOUT_MS）
 const CHECK_TIMEOUT_MS: u64 = 20_000;
-/// 清单文件名（上游拼 latest.yml，插件约定 latest.json）
-const MANIFEST: &str = "latest.json";
+// 原先这里有个全局 `MANIFEST = "latest.json"`（上游拼 latest.yml，插件约定 latest.json）。
+// 2026-10-03 二源改造后**删掉**：清单名已由 FEEDS 逐线路自带（Gitee 走 raw 托管、
+// 文件名 latest-gitee.json），留一个全局常量会让人以为「所有线路共用一个清单名」，
+// 于是给 Gitee 线路也拼 latest.json —— 而 GitHub 的 latest.json 里 url 指向 GitHub，
+// 拼出来的端点会给出「从 Gitee 查更新、点下载却回 GitHub」的假象。死字段不留。
 
-/// 线路基址（对照上游 MIRRORS / GITHUB_DOWNLOAD_BASE，**尾斜杠 = 目录前缀**）。
-/// 实际端点 = 基址 + `latest.json`。
+/// 线路表：(id, 显示名, 基址, 清单文件名)
 ///
 /// 2026-10-03 用户拍板：**三源改二源**。原三源是 `github` + `gh-proxy` + `ghfast`
 /// （两个都是 GitHub 加速代理），换成 `gitee`（国内源，直连）+ `github`。
 /// 删掉加速代理的另一个理由：它们的可用性不由本项目控制，且**清单与产物都经它们转发**——
 /// 信任模型里这条链已经够长（TLS → 清单 → minisign 验签），不该再叠一层第三方代理。
-const FEEDS: &[(&str, &str, &str)] = &[
+///
+/// # 为什么 Gitee 走 raw 而不是 release 资产（实测踩出来的，别改回去）
+///
+/// 最初按 GitHub 的同形写法填了 `releases/latest/download/`，**看起来对、实际 404**：
+/// Gitee 实现了 `/releases/latest`（会 302 到最新 tag 的 release 页），但**没有实现
+/// `/releases/latest/download/`** —— 它把这条路径当普通仓库路径处理，302 到
+/// `repository/archive/latest/download/latest.json`，那个地址恒 404。
+/// 表现是「Gitee 线路配了、auto 也确实先试它、但永远查不到新版，然后静默退到 GitHub」——
+/// 线路表改了而国内用户一点流量没省，且**日志里看不出是线路配错**（只是「这条线路不通」）。
+///
+/// 改成 `raw/main/` 托管清单：清单作为仓库文件随 commit 走，**端点与 tag 无关**，
+/// 天然稳定。`raw/main/` 已实测可用（会 302 到 CDN，属正常行为）。
+/// 清单文件名也因此必须与 GitHub 侧区分开（`url` 字段指向各自的下载源），
+/// 故 Gitee 侧叫 `latest-gitee.json`、GitHub 侧仍叫 `latest.json`。
+const FEEDS: &[(&str, &str, &str, &str)] = &[
     (
         "gitee",
         "Gitee 国内源",
-        "https://gitee.com/xiaoxu1642/trim-tauri/releases/latest/download/",
+        "https://gitee.com/xiaoxu1642/trim-tauri/raw/main/",
+        "latest-gitee.json",
     ),
     (
         "github",
         "GitHub 直连",
         "https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/",
+        "latest.json",
     ),
 ];
 
@@ -139,11 +157,14 @@ fn save_mirror_pref(id: &str) -> Result<(), String> {
 
 /// 基址必须是带尾斜杠的目录前缀 —— 少了斜杠会拼出一个 404 端点，
 /// 而 404 会被当成「这条线路不通」去退下一条，镜像配错就永远查不出来。
-fn endpoint_of(base: &str) -> Option<Url> {
+///
+/// `manifest` 由**线路自带**（见 FEEDS 注释：Gitee 走 raw 托管、文件名与 GitHub 侧不同），
+/// 不能用全局常量 `MANIFEST` —— 那是 GitHub 侧的约定。
+fn endpoint_of(base: &str, manifest: &str) -> Option<Url> {
     if !base.ends_with('/') {
         return None;
     }
-    Url::parse(&format!("{base}{MANIFEST}")).ok()
+    Url::parse(&format!("{base}{manifest}")).ok()
 }
 
 /// 按偏好排出线路尝试顺序（对照上游 `orderedFeeds()`）：指定线路时该线路优先、其余兜底。
@@ -151,9 +172,9 @@ fn endpoint_of(base: &str) -> Option<Url> {
 ///
 /// **兜底序列里必须始终留着另一条真实线路**：国内线路被墙/仓库转私有、或 GitHub
 /// 在某网络下不可达时，另一条就是唯一出路。丢线路 = 更新功能整体失效。
-fn ordered_feeds(pref: &str) -> Vec<(&'static str, &'static str, &'static str)> {
+fn ordered_feeds(pref: &str) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     let mut all = FEEDS.to_vec();
-    if let Some(pos) = all.iter().position(|(id, _, _)| *id == pref) {
+    if let Some(pos) = all.iter().position(|(id, _, _, _)| *id == pref) {
         all.rotate_left(pos);
     }
     all
@@ -173,8 +194,13 @@ fn is_dev_build() -> bool {
 /// 对**单条**线路检查一次。插件的 `check()` 内部已完成清单获取 + minisign 验签，
 /// 返回 Err 即该线路不可信或不可达，调用方换下一条（对齐上游逐线路独立验签）。
 /// `Ok(None)` = 线路可用且清单已验签，只是版本不高于当前。
-async fn check_once<R: Runtime>(app: &AppHandle<R>, base: &str) -> Result<Option<Update>, String> {
-    let endpoint = endpoint_of(base).ok_or("线路基址非法（需带尾斜杠的 https 目录前缀）")?;
+async fn check_once<R: Runtime>(
+    app: &AppHandle<R>,
+    base: &str,
+    manifest: &str,
+) -> Result<Option<Update>, String> {
+    let endpoint = endpoint_of(base, manifest)
+        .ok_or("线路基址非法（需带尾斜杠的 https 目录前缀）")?;
     let updater = app
         .updater_builder()
         .endpoints(vec![endpoint])
@@ -208,8 +234,8 @@ async fn safe_check<R: Runtime>(app: AppHandle<R>, silent: bool) -> Value {
     // 网络抖动，与 :255-260 自述的保守方向相反（用户会对着一个永远无解的签名问题反复点）。
     let mut sig_failed_any = false;
 
-    for (id, label, base) in ordered_feeds(&pref) {
-        match check_once(&app, base).await {
+    for (id, label, base, manifest) in ordered_feeds(&pref) {
+        match check_once(&app, base, manifest).await {
             Ok(Some(update)) => {
                 log::write_log(
                     "info",
@@ -325,12 +351,15 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
         return Ok(json!({ "ok": false, "error": "unsigned-or-unverified" }));
     };
 
-    let base = FEEDS
+    // 复验必须用**当初那条线路的基址 + 清单名**：清单名线路自带（Gitee 是
+    // latest-gitee.json），漏传 manifest 会拿 GitHub 的清单名去拼 Gitee 的 raw 基址
+    // —— 拼出一个 404 端点，把「已锁定的锚点」判成「变了」，于是下载被无理由拒绝。
+    let (base, manifest) = FEEDS
         .iter()
-        .find(|(id, _, _)| *id == pending.mirror)
-        .map(|(_, _, b)| *b)
-        .unwrap_or(FEEDS[0].2);
-    let reverified = match check_once(&app, base).await {
+        .find(|(id, _, _, _)| *id == pending.mirror)
+        .map(|(_, _, b, m)| (*b, *m))
+        .unwrap_or((FEEDS[0].2, FEEDS[0].3));
+    let reverified = match check_once(&app, base, manifest).await {
         Ok(Some(re)) => {
             re.version == pending.update.version && re.signature == pending.update.signature
         }
@@ -482,7 +511,7 @@ pub fn updater_set_mirror<R: Runtime>(
 pub fn updater_get_mirror<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
     let mut options = vec![json!({ "id": "auto", "label": "自动（推荐）" })];
-    options.extend(FEEDS.iter().map(|(id, label, _)| json!({ "id": id, "label": label })));
+    options.extend(FEEDS.iter().map(|(id, label, _, _)| json!({ "id": id, "label": label })));
     Ok(json!({ "mirror": mirror_pref(), "options": options }))
 }
 
@@ -533,22 +562,55 @@ mod tests {
     }
 
     #[test]
-    fn 端点由基址拼出_latest_json() {
-        let u = endpoint_of("https://github.com/o/r/releases/latest/download/").unwrap();
+    fn 端点由基址加线路自带清单名拼出() {
+        let u = endpoint_of("https://github.com/o/r/releases/latest/download/", "latest.json").unwrap();
         assert_eq!(u.as_str(), "https://github.com/o/r/releases/latest/download/latest.json");
-        let g = endpoint_of("https://gitee.com/o/r/releases/latest/download/").unwrap();
-        assert_eq!(g.as_str(), "https://gitee.com/o/r/releases/latest/download/latest.json");
+        // Gitee 走 raw 托管，清单名线路自带
+        let g = endpoint_of("https://gitee.com/o/r/raw/main/", "latest-gitee.json").unwrap();
+        assert_eq!(g.as_str(), "https://gitee.com/o/r/raw/main/latest-gitee.json");
         // 漏尾斜杠必须直接判非法，而不是拼出一个 404 端点被误当「线路不通」
-        assert!(endpoint_of("https://github.com/o/r/releases/latest/download").is_none());
-        assert!(endpoint_of("不是个 url").is_none());
+        assert!(endpoint_of("https://github.com/o/r/releases/latest/download", "latest.json").is_none());
+        assert!(endpoint_of("不是个 url", "latest.json").is_none());
+    }
+
+    /// **Gitee 线路不得写回 GitHub 同形的 `releases/latest/download/`**（2026-10-03 实测）。
+    ///
+    /// 这条是本批最贵的教训：那个地址**看起来完全正确**（与 GitHub 线路同形），
+    /// 但 Gitee 没实现这个别名 —— 它 302 到 `repository/archive/latest/download/…`，
+    /// 那个地址恒 404。表现是「线路表改了、auto 也确实先试 Gitee、但永远查不到新版，
+    /// 然后静默退到 GitHub」：国内用户一点流量没省，**日志里也看不出是线路配错**
+    ///（只记「这条线路检查失败」）。所以判据直接钉住形态。
+    #[test]
+    fn gitee线路不得用latest别名_必须走raw() {
+        let g = FEEDS.iter().find(|(id, ..)| *id == "gitee").expect("必须有 gitee 线路");
+        assert!(
+            g.2.contains("/raw/"),
+            "Gitee 基址必须走 raw 托管（清单入库），实测 releases/latest/download/ 恒 404：{}",
+            g.2
+        );
+        assert!(
+            !g.2.contains("releases/latest"),
+            "Gitee 不实现 releases/latest/download/ 别名，别写回这个同形但无效的地址：{}",
+            g.2
+        );
+        // 清单名必须与 GitHub 侧区分：url 字段指向各自的下载源，同名会串
+        assert_eq!(g.3, "latest-gitee.json", "Gitee 侧清单名必须带 -gitee 后缀");
+        let gh = FEEDS.iter().find(|(id, ..)| *id == "github").expect("必须有 github 线路");
+        assert_eq!(gh.3, "latest.json", "GitHub 侧清单名保持 latest.json");
     }
 
     #[test]
     fn 线路表与偏好白名单一致() {
-        for (id, _, base) in FEEDS {
+        for (id, _, base, manifest) in FEEDS {
             assert!(MIRROR_IDS.contains(id), "{id} 未登记进偏好白名单");
             assert!(base.ends_with('/'), "{id} 基址必须带尾斜杠");
             assert!(base.starts_with("https://"), "{id} 必须走 https");
+            // 清单名要能安全拼进 URL：不能带斜杠/查询串（否则拼出不可预期的端点）
+            assert!(
+                !manifest.contains('/') && !manifest.contains('?'),
+                "{id} 清单名含路径分隔符或查询串，会拼出不可预期端点：{manifest}"
+            );
+            assert!(manifest.ends_with(".json"), "{id} 清单应为 json：{manifest}");
         }
         // 白名单 = auto + 全部真实线路（'gitee'/'github' 本身就是线路，不额外占位）
         assert_eq!(MIRROR_IDS.len(), FEEDS.len() + 1);
@@ -556,10 +618,12 @@ mod tests {
         assert_eq!(FEEDS.len(), 2, "更新线路应只有 Gitee + GitHub 两条: {FEEDS:?}");
         for gone in ["gh-proxy", "ghfast"] {
             assert!(
-                !FEEDS.iter().any(|(id, _, _)| *id == gone) && !MIRROR_IDS.contains(&gone),
+                !FEEDS.iter().any(|(id, ..)| *id == gone) && !MIRROR_IDS.contains(&gone),
                 "{gone} 已下线，不得回到线路表或偏好白名单"
             );
         }
+        // 清单名不得两条相同（相同则 url 字段必有一个指错仓库）
+        assert_ne!(FEEDS[0].3, FEEDS[1].3, "两条线路的清单名不能相同（url 字段会指错源）");
     }
 
     #[test]
