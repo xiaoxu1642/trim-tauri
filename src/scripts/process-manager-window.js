@@ -35,8 +35,19 @@
         </div>`;
       document.body.appendChild(backdrop);
 
+      // 审查 M-15（2026-10-03 L4）：aria-modal="true" 承诺模态就要兑现 —— 本窗挂了
+      // ds.js，接 ds.focusTrap 获得 Tab 圈闭 + 初始焦点 + 关闭归还。初始焦点按
+      // AGENTS §2 裁定落主按钮（结束进程），与主窗 modal.js confirm() 同口径。
+      const modalCard = backdrop.querySelector('.usage-modal');
+      const trap = (window.ds && typeof window.ds.focusTrap === 'function')
+        ? window.ds.focusTrap(modalCard, { initialFocus: '#pmConfirmOk' })
+        : null;
+
       function cleanup(result) {
         document.removeEventListener('keydown', escHandler);
+        // 审查 M-14 教训：release 必须在 remove 之前 —— 先移除 backdrop 会让
+        // activeElement 回落 body、容器 isConnected 变 false，归还判据永远走不进
+        trap?.release();
         backdrop.remove();
         resolve(result);
       }

@@ -324,6 +324,32 @@ fn normalize_verify(v: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// **本组用例共用一个真实状态文件**（`<数据目录>/optimization-state.json`），
+    /// 而 `cargo test` 默认多线程跑 —— 两条用例各自 `load()` 出快照、改一处、
+    /// `save()` 整个写回，就是**后写覆盖先写**。撞上时哪条都可能是输家：
+    /// `touch_recent` 的清理夹具会把别人的 recent 条目挤出上限，
+    /// `record_pending` 造的条目也会被对方的整份写回抹掉 ⇒
+    /// `mark_partial_with_reasons` 因 `items` 里找不到 id 而返 false。
+    ///
+    /// **为什么用锁而不是「把两条并成一条」**（本条踩过两次）：
+    /// 合并法只对**当时那两条**有效，2026-10-03 新增 `stale忽略与失败原因记账契约`
+    /// 后又立刻复发（3 次连跑 2 红）。只要还有人往这个 mod 里加用例，合并就会被
+    /// 推翻第三次。锁是**对新增用例自动生效**的方案 —— 规矩写在 mod 头，
+    /// 下一条用例照抄一行 `_state_guard()` 即可，不必知道历史上撞过什么。
+    ///
+    /// 锁本身不解决「断言互相污染」（两人都往同一份文件里写），只保证**不并发交错**。
+    /// 残留：顺序执行下 A 的清理夹具仍会留下 B 的 recent 条目，但 B 的断言只看
+    /// **自己造的那部分**（见各用例注释），所以不构成失败。
+    fn _state_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            // 中毒（前一 panic 持锁退出）也要能跑，否则一次失败会连锁成整组红
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// E10：最近使用（recent）的行为契约（LRU / 幂等 / 空 id / 孤儿 id）+ 收藏已下线的反向断言。
     ///
     /// 三条要断的理由各不相同：
@@ -334,6 +360,7 @@ mod tests {
     /// · 收藏链路**必须已经消失**（2026-10-03 用户裁定删星标）——反向断言防复活
     #[test]
     fn e10_recent契约与收藏下线() {
+        let _guard = _state_guard();
         use crate::engine::optimization_state as st;
         // 上限在实现侧是 `RECENT_LIMIT`（模块私有）；测试侧复述一次并与实现比对
         const RECENT_LIMIT_FOR_TEST: usize = 10;
@@ -397,11 +424,12 @@ mod tests {
         // ③ 孤儿 id 静默忽略：目录删项后 recent 里的 id 仍能被读出，由渲染层决定
         //    不显示 —— 后端**不报错、不剔除**（剔除会让「这项被打开过」这个事实消失）。
         //
-        //    **为什么并进本用例而不是单开一条**（本条踩过）：`cargo test` 默认多线程跑，
-        //    两条用例共用**同一个真实状态文件**，而 recent 上限只有 10 —— 单开那条
-        //    写完夹具正要读时，这条的清理夹具正好 touch 了 20 个条目把它挤出上限，
+        //    **为什么这段并在本用例里、而不是单开一条**：本条历史上踩过 —— 单开那条
+        //    写完夹具正要读时，本条的清理夹具正好 touch 了 20 个条目把它挤出上限，
         //    于是「孤儿 id 读不出」而红了。看起来像实现坏了，其实是夹具竞态。
-        //    并进同一条 = 顺序执行，中间不会被另一条插进来。
+        //    并进来只是当时的权宜之计；**根治是 mod 头的 `_state_guard()`**（本组
+        //    全部用例持同一把锁，不并发交错）—— 合并只对当时那两条有效，新增第三条
+        //    就会复发（`stale忽略与失败原因记账契约` 加进来时确实又红过）。
         assert!(st::touch_recent("__已退役的优化项__"), "写入夹具失败");
         let r5 = st::prefs_view();
         assert!(
@@ -437,6 +465,7 @@ mod tests {
     /// 夹具「自己写自己清」，断言只看自己造的部分。
     #[test]
     fn stale忽略与失败原因记账契约() {
+        let _guard = _state_guard();
         use crate::engine::optimization_state as st;
         let id = "__stale_dismiss_fixture__";
         // 造一条 pending 记账（record_pending 会清忽略——先 dismiss 再验证清除语义）

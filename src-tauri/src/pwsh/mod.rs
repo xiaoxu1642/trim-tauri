@@ -247,12 +247,6 @@ impl Drop for TempScript {
 /// 写临时 PowerShell 脚本：返回**守卫**，脚本随作用域结束自动删除（审查 v2-L2）。
 pub fn write_temp_script(content: &str, suffix: &str) -> Result<TempScript, String> {
     let dir = paths::temp_script_dir()?;
-    let file = dir.join(format!(
-        "script_{}_{}{}",
-        crate::engine::now_ms(),
-        random_token(),
-        suffix
-    ));
     // .ps1 写入带 BOM 的 UTF-8：PS 5.1 默认按系统 ANSI 读取无 BOM 脚本，
     // 中文注释会乱码导致解析失败；PS7 亦兼容 BOM。
     let bytes: Vec<u8> = if suffix.eq_ignore_ascii_case(".ps1") {
@@ -262,8 +256,33 @@ pub fn write_temp_script(content: &str, suffix: &str) -> Result<TempScript, Stri
     } else {
         content.as_bytes().to_vec()
     };
-    std::fs::write(&file, bytes).map_err(|e| format!("写入临时脚本失败: {e}"))?;
-    Ok(TempScript(file))
+    // 审查 L-19（2026-10-03 L4）：独占创建（CREATE_NEW 语义）而非 create+truncate。
+    // 同名文件若被同用户进程预先放好（哪怕做成 reparse 点），truncate 写入会跟随它
+    // 写进去；独占创建下名字碰撞直接报错重取（random_token 内含原子序号，重试必得
+    // 新名），与熵强弱无关地消灭「观察目录 → 换件」的竞态窗口。
+    use std::io::Write;
+    for _ in 0..3 {
+        let candidate = dir.join(format!(
+            "script_{}_{}{}",
+            crate::engine::now_ms(),
+            random_token(),
+            suffix
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut f) => {
+                f.write_all(&bytes)
+                    .map_err(|e| format!("写入临时脚本失败: {e}"))?;
+                return Ok(TempScript(candidate));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("写入临时脚本失败: {e}")),
+        }
+    }
+    Err("写入临时脚本失败: 文件名连续碰撞（异常环境）".to_string())
 }
 
 pub(crate) fn random_token() -> String {

@@ -550,6 +550,15 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
     if u.host.is_empty() {
         return true;
     }
+    // 审查 M-17（2026-10-03 L4）：全角/兼容折叠字面族。Windows 解析器（getaddrinfo，
+    // WinHTTP 同源）对 host 做 NFKC 兼容折叠——`ｌｏｃａｌｈｏｓｔ`/`localhost。`/`１２７．０．０．１`
+    // 实测全部解析到回环/私网，而下面全部字面判定只认 ASCII，这类 host 会逐级漏到
+    // 末尾的「未知域名」分支被当公网放行。判定器与连接器拿到的是同一字符串
+    // （aidesc.rs 的 WinHttpConnect 直送），二者对「全角=半角」口径相反即为绕过。
+    // 正规 AI 端点没有非 ASCII 域名（IDN 应以 punycode 形态填写），直接 fail-closed。
+    if u.host.bytes().any(|b| b >= 0x80) {
+        return true;
+    }
     // 审查 M-7（2026-10-03 L3）：`localhost.` 带尾点的域名在 Windows 解析器里等同
     // `localhost`（回环），却因不等于 "localhost" 也不以 ".localhost" 结尾而漏到
     // 「未知域名」分支被放行。先做一次尾点归一（剥一个尾点）再判 localhost 族，
@@ -1044,6 +1053,12 @@ mod tests_private_url {
             "http://localhost./",
             "https://LOCALHOST./",
             "https://foo.localhost./",
+            // M-17（2026-10-03 L4）：全角/兼容折叠族——解析器 NFKC 折叠到回环/私网，
+            // 字面判定只认 ASCII；fail-closed 一律判私有
+            "http://ｌｏｃａｌｈｏｓｔ/",
+            "http://localhost。/",
+            "http://１２７．０．０．１/",
+            "http://①27.0.0.1/",
         ] {
             assert!(is_private_api_url(u), "{u} 应判私有");
         }

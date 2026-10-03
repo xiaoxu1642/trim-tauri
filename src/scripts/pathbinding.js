@@ -583,6 +583,14 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
       materialMaster?.setAttribute('aria-checked', on ? 'true' : 'false');
       materialMaster?.closest('.appearance-card')?.classList.toggle('material-off', !on);
     }
+    // 审查 M-16（2026-10-03 L4）：role="switch" + tabindex="0" 承诺了可操作语义，
+    // 唯一激活监听是 click ⇒ 键盘用户看得见焦点圈却按不动（M-11 同族漏网）。
+    // Enter/Space 走同一 click 路径（overview.js 跳转卡同款）。
+    materialMaster?.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      materialMaster.click();
+    });
     materialMaster?.addEventListener('click', async () => {
       const next = !materialOn;
       materialOn = next;
@@ -597,8 +605,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
         } else {
           materialOn = !next;
           syncMaterialMaster(materialOn);
-          window.app?.toast('error', (resp && resp.message) || '材质开关切换失败');
-        }
+          window.app?.toast('error', (resp && resp.message) || '材质开关切换失败');        }
       } catch (e) {
         materialOn = !next;
         syncMaterialMaster(materialOn);

@@ -17,7 +17,7 @@
 //
 // 用法：node tools/check-scan-rule-diff.mjs
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
@@ -25,6 +25,35 @@ import { REPO_ROOT } from './ps-origin.mjs';
 
 const CRATE = join(REPO_ROOT, 'native-scanner');
 const SRC = join(CRATE, 'src');
+
+/**
+ * 现算 `src/` 下的 `#[test]` 条数（审查 L-31，2026-10-03 L4）。
+ *
+ * 为什么不能写死数字：上一版注释写「21 个」，实测 25 个 —— 而 M-3 恰好就是把这些
+ * 单测接进本门禁的那次修复。**注释里的数字与实际数量漂移，本身没有任何东西会红**，
+ * 于是「门禁守着多少条钉桩」这件事在文档层面失明了。改成现算：注释里只说「全部」，
+ * 数量打在门禁输出里（随代码变，不会漂）。
+ *
+ * 口径：只数 `src/*.rs`（`tests/` 由 `cargo test` 另跑，那侧不归这条注释管）。
+ */
+function countUnitTests() {
+  let n = 0;
+  let files;
+  try {
+    files = readdirSync(SRC, { withFileTypes: true });
+  } catch {
+    // 目录不存在/不可读**不能让门禁崩掉**：崩掉虽然也是非零退出码，但输出是一段
+    // node 堆栈，判红原因（路径写错了 or src 被搬走）被埋在栈里，人要反推。
+    // fail-closed 的正确形态是「明确判红并说清为什么」，不是「以异常的形式失败」。
+    return -1;
+  }
+  for (const f of files) {
+    if (!f.isFile() || !f.name.endsWith('.rs')) continue;
+    const src = readFileSync(join(SRC, f.name), 'utf8');
+    n += (src.match(/^[ \t]*#\[test\][ \t]*$/gm) || []).length;
+  }
+  return n;
+}
 
 let fail = 0;
 const check = (ok, label, detail = '') => {
@@ -34,9 +63,22 @@ const check = (ok, label, detail = '') => {
 
 console.log('=== 扫描器规则行为差分门禁 ===\n');
 // M-3（2026-10-03 L3）：`cargo test --test cleanup_scan_rule_diff` 只跑 tests/，
-// native-scanner/src/ 下的 21 个 #[cfg(test)] 单测（全局上限、锁中毒口径、控制字符
+// native-scanner/src/ 下的 #[cfg(test)] 单测（全局上限、锁中毒口径、控制字符
 // 转义等关键钉桩）不在任何门禁内 —— 靠人不主动跑就无人跑。改为 `cargo test`
 // 一次接入全部：集成测试（cleanup_scan_rule_diff 等）+ src 单测。
+// 审查 L-31（2026-10-03 L4）：单测数量**现算**（见 countUnitTests 的注释），
+// 不在注释里写死数字 —— 写死的那个「21」与真实值分叉了很久，无人报警。
+// 判红点很实：把 src 下所有 #[test] 删光即红（门禁必须还挂着东西）。
+const UNIT_TESTS = countUnitTests();
+check(
+  UNIT_TESTS > 0,
+  `0. src/ 下 #[test] 单测已纳入本门禁（现算 ${UNIT_TESTS < 0 ? '读不到 src 目录' : `${UNIT_TESTS} 条`}，由 cargo test 全包执行）`,
+  UNIT_TESTS < 0
+    ? `native-scanner/src 不可读（路径写错、或 crate 被搬走）——本门禁此刻什么都守不住，判红`
+    : UNIT_TESTS === 0
+      ? 'src/ 下数不到任何 #[test]：要么全被删了，要么单测被挪到了 tests/（那侧本门禁也跑，但要改注释口径）'
+      : '',
+);
 console.log(`  cargo test  （cwd=${CRATE}）\n`);
 
 const r = spawnSync('cargo', ['test'], {

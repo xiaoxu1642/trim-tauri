@@ -17,6 +17,12 @@ const AGENTS = join(ROOT, 'AGENTS.md');
 const OPTIONAL = [
   // 上游基线腐烂检查：依赖 vendor/ 只读快照，日常迭代不动 vendor 时跑它只会常绿
   { name: 'check-origin-drift', reason: '可选：仅 vendor/ 或上游同步动作后必跑' },
+  // 产物新鲜度（审查 K5 彻底方案，两轮未落地，2026-10-03 L4 收口时补上）：
+  // 判「build-release/ 的产物 mtime 早于源码」—— 源码改了、产物没重发。
+  // **不能进必跑**：改完代码还没到发版时刻是流程的**正常中间态**，进必跑等于天天红，
+  // 天天红的门禁会被忽略，那才是真失明。只在①发版前人工触发 ②审查复核线上产物
+  // 这两个时刻跑。无产物时脚本自己 SKIP（不判红）。
+  { name: 'check-release-freshness', reason: '可选：发版前 / 审查复核产物时人工触发（日常迭代产物本就该旧）' },
 ];
 const RETIRED = [
   // D-2 裁定退役：PS 替换管线随外部 PS7 通道整条删除（AGENTS §4.1 有退役理由）

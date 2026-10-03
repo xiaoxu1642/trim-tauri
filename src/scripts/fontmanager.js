@@ -278,7 +278,7 @@
             <span class="fm-field-label">字号</span>
             <div class="fm-field-main">
               <div class="fm-slider-row">
-                <input type="range" data-role="sizeInput" min="12" max="24" step="1" value="16" />
+                <input type="range" data-role="sizeInput" min="12" max="24" step="1" value="16" aria-label="界面字号" />
                 <span class="fm-slider-val" data-role="sizeVal">16px</span>
               </div>
               <span class="fm-field-tip">范围 12px-24px · 对所有字体全局生效（基准 16px）</span>

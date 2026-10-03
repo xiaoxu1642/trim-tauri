@@ -327,21 +327,43 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
         let diag_stripped = crate::diag::extract_diag_lines(&raw, "cleanup.execute");
         let mut recycle_entries: Vec<Value> = Vec::new();
         let mut clean_lines: Vec<&str> = Vec::new();
+        // 审查 L-22（2026-10-03 L4）：本段是 Electron 遗留协议的回环形状——原生结果被
+        // 重新拼成 @@RECYCLE@@ 行再自己解析回来，等于「自己发的报文自己收」。畸形行若
+        // 静默丢，删除结果行凭空消失且无任何痕迹，与 L-21 / apply.rs（M-1）同基线
+        // 「必须计数或告警」。仅在 to_recycle=true（v2-M20 下死路径）被消费，所以只进
+        // 日志、不改回执形状。空体行（to_string 失败的 unwrap_or_default 产物）同样计。
+        let mut recycle_malformed = 0usize;
         for line in raw.lines() {
             if let Some(rest) = line.strip_prefix("@@RECYCLE@@") {
-                if let Ok(entry) = serde_json::from_str::<Value>(rest) {
-                    let ok = entry
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .map(|p| !p.is_empty())
-                        .unwrap_or(false);
-                    if ok {
-                        recycle_entries.push(entry);
-                    }
+                if rest.trim().is_empty() {
+                    recycle_malformed += 1;
+                    continue;
+                }
+                let Ok(entry) = serde_json::from_str::<Value>(rest) else {
+                    recycle_malformed += 1;
+                    continue;
+                };
+                let ok = entry
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|p| !p.is_empty())
+                    .unwrap_or(false);
+                if ok {
+                    recycle_entries.push(entry);
+                } else {
+                    recycle_malformed += 1;
                 }
                 continue;
             }
             clean_lines.push(line);
+        }
+        if recycle_malformed > 0 {
+            log::write_log(
+                "warn",
+                &format!(
+                    "清理回执含 {recycle_malformed} 条畸形 @@RECYCLE@@ 行，已跳过（原生结果回环协议异常）"
+                ),
+            );
         }
         let joined = clean_lines.join("\n");
         let body = if joined.trim().is_empty() {
@@ -771,18 +793,26 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
         let mut procs: Vec<Value> = Vec::new();
         let mut seen_pids: HashSet<i64> = HashSet::new();
         let self_pid = std::process::id() as i64;
+        // 审查 L-21（2026-10-03 L4）：畸形行不许静默丢——与 ScanAccum（v2-L4P-34）、
+        // apply.rs（M-1）同基线（「必须计数或告警」）。来源是进程内 native-scanner 自产
+        // （checklocked_body 已走 jstr 转义），畸形仅可能意味着扫描器自身 bug，warn 留痕
+        // 即可让审计可见，不必改回执形状。
+        let mut malformed = 0usize;
         for line in stdout.lines() {
             // 前缀 '@@LOCKED@@' 恰 10 字符（勿与 '@@PLANFILE@@' 的 12 混淆）
             let Some(rest) = line.strip_prefix("@@LOCKED@@") else {
                 continue;
             };
             let Ok(pf) = serde_json::from_str::<Value>(rest) else {
+                malformed += 1;
                 continue;
             };
             let Some(path) = pf.get("path").and_then(|v| v.as_str()) else {
+                malformed += 1;
                 continue;
             };
             if path.is_empty() {
+                malformed += 1;
                 continue;
             }
             let id = pf.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -824,6 +854,12 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
             .filter(|p| p.get("critical").and_then(|v| v.as_bool()) == Some(false))
             .cloned()
             .collect();
+        if malformed > 0 {
+            log::write_log(
+                "warn",
+                &format!("占用检测输出含 {malformed} 条畸形 @@LOCKED@@ 行，已跳过（扫描器协议异常）"),
+            );
+        }
         (Some((locked, by_app, procs, locked_by_item, whitelist)), String::new())
     });
     let (payload, err) = match task.await {

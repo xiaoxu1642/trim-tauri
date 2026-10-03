@@ -192,13 +192,10 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // reg 类型：写 .reg 临时文件 + 原生 import（A6，v2-R4）
             // 审查 M-5（2026-10-03 L3）：旧文件名为 `wcopt_{ms}.reg`，毫秒时间戳可预测，
             // 同用户低权限进程可预先在 %APPDATA%\<id>\tmp 下创建指向任意目标的 reparse 点，
-            // 管理员实例随后以 UTF-16LE 覆写 ⇒ 任意文件写。与 pwsh::write_temp_script 的
-            // 随机 token 同源（nanos + 序号），竞争窗口从「可预测」变成不可预测。
-            let reg_path = tmp_dir.join(format!(
-                "wcopt_{}_{}.reg",
-                crate::engine::now_ms(),
-                crate::pwsh::random_token()
-            ));
+            // 管理员实例随后以 UTF-16LE 覆写 ⇒ 任意文件写。随机 token 让文件名不可预测。
+            // 审查 L-19（2026-10-03 L4）：再进一步用独占创建（CREATE_NEW）——即便攻击者
+            // 碰中名字，预置的 reparse 点会让写入直接报错重取，而不是跟随已有文件覆写；
+            // 与 pwsh::write_temp_script 同口径（random_token 内含原子序号，重试必得新名）。
             // 审查 2026-09-27 L1：.reg 临时文件为 UTF-16LE + BOM（.reg 的 Unicode 格式），
             // 与 `reg.exe export` 的产物同编码。原先「路径非 UTF-8 就跳过该步」（v3-L7）
             // 是 reg.exe 需要字符串参数才有的限制，原生拿 &Path 后随 reg.exe 一起删除。
@@ -206,22 +203,62 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // 编码感知（reg_backup::read_reg_text_file）兜住。
             let mut reg_bytes = vec![0xFFu8, 0xFEu8];
             reg_bytes.extend(reg.encode_utf16().flat_map(|u| u.to_le_bytes()));
-            if std::fs::write(&reg_path, &reg_bytes).is_err() {
-                failed += 1;
-                failed_reasons.push(format!("步骤「{label}」: .reg 临时文件写入失败"));
-            } else {
-                // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。
-                // 文件仍按 UTF-16LE+BOM 写（那是这份 .reg 文本格式既有的约定，v2 明令不动），
-                // 读侧的编码感知在 reg_backup::read_reg_text_file。
-                // 失败原因现在进 failed_reasons —— 旧实现只说"返回非零"，用户看不到为什么。
-                match crate::engine::reg_backup::reg_import_apply(std::path::Path::new(&reg_path)) {
-                    Ok(_) => {}
+            let mut reg_path: Option<std::path::PathBuf> = None;
+            let mut write_err: Option<String> = None;
+            for _ in 0..3 {
+                let candidate = tmp_dir.join(format!(
+                    "wcopt_{}_{}.reg",
+                    crate::engine::now_ms(),
+                    crate::pwsh::random_token()
+                ));
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                {
+                    Ok(mut f) => {
+                        use std::io::Write;
+                        match f.write_all(&reg_bytes) {
+                            Ok(_) => {
+                                reg_path = Some(candidate);
+                                break;
+                            }
+                            Err(e) => {
+                                write_err = Some(e.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                     Err(e) => {
-                        failed += 1;
-                        failed_reasons.push(format!("步骤「{label}」: {e}"));
+                        write_err = Some(e.to_string());
+                        break;
                     }
                 }
-                let _ = std::fs::remove_file(&reg_path);
+            }
+            match (reg_path, write_err) {
+                (Some(reg_path), _) => {
+                    // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。
+                    // 文件仍按 UTF-16LE+BOM 写（那是这份 .reg 文本格式既有的约定，v2 明令不动），
+                    // 读侧的编码感知在 reg_backup::read_reg_text_file。
+                    // 失败原因现在进 failed_reasons —— 旧实现只说"返回非零"，用户看不到为什么。
+                    match crate::engine::reg_backup::reg_import_apply(std::path::Path::new(&reg_path)) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            failed += 1;
+                            failed_reasons.push(format!("步骤「{label}」: {e}"));
+                        }
+                    }
+                    let _ = std::fs::remove_file(&reg_path);
+                }
+                (_, Some(e)) => {
+                    failed += 1;
+                    failed_reasons.push(format!("步骤「{label}」: .reg 临时文件写入失败: {e}"));
+                }
+                (None, None) => {
+                    failed += 1;
+                    failed_reasons.push(format!("步骤「{label}」: .reg 临时文件写入失败: 文件名连续碰撞"));
+                }
             }
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
             // cmd 类型：spawn cmd /c。形状必须是 raw_arg("/s /c \"…\"")，不能用 args(["/c", cmd])。

@@ -1503,6 +1503,13 @@ impl FkAcc {
     }
 }
 
+/// 快照模式递归深度上限，**对齐 PS `Get-FileKeySnapshot -Depth 24`**。
+///
+/// 为什么不用 `scan::MAX_WALK_DEPTH`（64）：那个是防递归栈溢出的**工程护栏**，
+/// 快照模式要对齐的是 PS 原实现的**语义口径**（第 25 层起不枚举）——两者目的不同，
+/// 数值也不同。审查 L-25 只要求「超限要留痕」，口径本身不改（报告 §10.2 白名单第 6 条）。
+const FK_SNAPSHOT_MAX_DEPTH: usize = 24;
+
 #[allow(clippy::too_many_arguments)]
 fn walk_fk_dll(
     dir: &Path,
@@ -1600,8 +1607,20 @@ fn walk_fk_snapshot(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            if recurse && depth < 24 {
-                walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, cutoff, excl_dirs, excl_files, skip_lock, acc);
+            if recurse {
+                // 审查 L-25（2026-10-03 L4）：depth 上限的**口径**（24）对齐 PS
+                // `Get-FileKeySnapshot -Depth 24`，不是缺陷（报告 §10.2 白名单第 6 条已
+                // 裁定）；缺的是**留痕**——walk_deletable / walk_level / walk_fk_dll 三处
+                // 超限都 eprintln，这里静默 `continue` ⇒ 「深处的文件没进清单」和
+                // 「文件本来就不存在」在日志里长得一模一样。补齐 eprintln 与三处同格式。
+                if depth < FK_SNAPSHOT_MAX_DEPTH {
+                    walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, cutoff, excl_dirs, excl_files, skip_lock, acc);
+                } else {
+                    eprintln!(
+                        "[trim-scanner] depth cap {FK_SNAPSHOT_MAX_DEPTH} reached at {}",
+                        ent.path().display()
+                    );
+                }
             }
             continue;
         }

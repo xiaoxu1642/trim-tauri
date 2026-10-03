@@ -548,6 +548,9 @@ fn call_openai_compat(
             .and_then(|v| v.as_str())
             .unwrap_or("(无 message)");
         let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("-");
+        // 审查 L-18（2026-10-03 L4）：200 状态错误体与非 2xx 同口径过掩码——
+        // 「错误体 echo 请求头」的调试型端点在 200 分支同样可能回显密钥
+        let msg = mask_secret_in(msg, api_key);
         log::write_log("warn", &format!("[{key}] 模型返回错误体: code={code} message={msg}"));
         return None;
     }

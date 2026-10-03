@@ -6,10 +6,18 @@
 // 「背景 token × 前景 token」的对比度可以纯算，不需要 WebView。
 //
 // 三组断言：
-//   A. 实底组合：同一规则内 `background: <实底>` + `color: var(--x)`（两主题）≥ 4.5:1
+//   A. 实底组合：同一规则内 `background: <底>` + `color: var(--x)`（两主题）≥ 4.5:1
+//      A1  实底（合成后不透明）
+//      A1b 纯图标/图形控件 ≥ 3:1（WCAG 1.4.11），登记制 + 双向棘轮
+//      A2  浅染底 4.4~4.5 边界项，登记制 + 双向棘轮（非致命但带棘轮）
 //   B. 正文组合：--fg-primary/secondary/tertiary × 页面底/卡片合成底（两主题）≥ 4.5:1
 //   C. 覆盖率下限：算出来的组合数不得低于 BASELINE_MIN —— 防止选择器写法一变
 //      就静默变成「0 组全通过」的假绿（本项目有假绿前科：v1 M13 / v2-M16）。
+//      C2 逐文件地板：每份在扫描面里的 CSS 各自的组合数下限（见 SCAN_FLOOR）
+//
+// 扫描面（2026-10-03 L4 审查 L-28 收口后）：`main.css` + `ds.css` 两份。
+// 解析失明（K1）与**覆盖面失明**（L-28）是两回事：K1 修的是「能算的算不出来」，
+// L-28 修的是「压根没进扫描面 / 按 token 后缀整族跳过」。两者都要判红才算修完。
 //
 // 已知不覆盖（如实标注，不冒充已验）：
 //   - ::before/::after 伪元素：本仓一律是装饰件（content:'' 或纯色圆点/竖条），
@@ -22,18 +30,57 @@
 
 import { readFileSync } from 'node:fs';
 
-const CSS_PATH = new URL('../src/styles/main.css', import.meta.url);
-const CSS_RAW = readFileSync(CSS_PATH, 'utf8');
-// 剥离注释但**保留换行与字符数**：这样 `CSS.slice(0, index)` 算出来的行号仍然准确，
+/**
+ * 扫描面：**两份 CSS 都算**（审查 L-28，2026-10-03 L4 收口）。
+ *
+ * 原先只扫 main.css，ds.css 完全在射程外 —— 那是纯 CSS 盲区（不是 main.css 里解析
+ * 不到，是根本没读那份文件）。ds.css 的 18 条 bg+fg 组合全是真实产品件：
+ * 徽章六色（.ds-badge.ok/.warn/.bad/.neutral/.accent）+ 旧类别名后置覆盖 8 条
+ * + .ds-tooltip + .ds-menu-item 四个态。任何一条将来写错 token 组合，
+ * 旧门禁一律看不见。
+ *
+ * **各自解析、不合并**（与 CSS 真实加载序无关，只为解析干净）：
+ * 主题变量表（`:root` / `.theme-light`）只在 main.css 里，合并会让 ds.css 的
+ * 任何选择器都参与 theme-block 扫描，多一层「ds.css 里冒出个 :root 就污染主题表」
+ * 的隐患。行号也因此天然是**文件内行号**，不需要跨文件偏移量 —— 合并方案要手工
+ * 维护偏移，ds.css 一增删行就整体漂移（已实测踩过：拼 offsets 算出的
+ * `ds.css:9793` 指向 main.css 第 9000 行，比不写行号更难查）。
+ *
+ * ds.css 必须在 main.css **之后加载**（其文件头明写），所以它的规则在级联里更晚，
+ * 冲突时以它为准 —— 这与「先扫谁」无关，门禁只是把两者的组合各自算一遍。
+ */
+const CSS_FILES = [
+  { label: 'main.css', path: new URL('../src/styles/main.css', import.meta.url) },
+  { label: 'ds.css', path: new URL('../src/styles/ds.css', import.meta.url) },
+];
+// 剥离注释但**保留换行与字符数**：这样按 index 算出来的行号仍然准确，
 // 且选择器不会被块前注释污染 —— 否则棘轮键「选择器|前景」会随注释文字改动而漂移
 // （与 check-system-bin 的 file:line 漂移是同一类坑）。
-const CSS = CSS_RAW.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
-const LINES = CSS.split('\n');
+const stripComments = (raw) => raw.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+// 每份文件独立成一份「带标签的解析原料」。THEME 变量表只取 main.css（见上方说明）。
+const CSS_PARTS = CSS_FILES.map((f) => ({
+  label: f.label,
+  text: stripComments(readFileSync(f.path, 'utf8')),
+}));
+const MAIN = CSS_PARTS[0];
+const LINES = MAIN.text.split('\n');
+const lineRef = (file, lineNo) => `${file}:${lineNo}`;
 
 const AA_NORMAL = 4.5;
 
 // 算出来的组合数下限：低于它说明选择器/变量解析退化成了空集，而不是「真的都达标」
+//
+// 审查 L-28：这是**下限**棘轮（防退化）。收口 SOLID_SKIP 盲区 + 纳入 ds.css 后
+// 现算 454 组（原先 278）—— 下限故意留在 30 不动，因为下限只能证明「没退化」，
+// 证明不了「新收进来的那 176 组没被解析层悄悄吃掉」。那件事由下面
+// SCAN_FLOOR 单独钉住。
 const BASELINE_MIN = 30;
+// 审查 L-28：**每一份**在扫描面里的 CSS 都必须至少产出 N 组组合。
+// 为什么需要：LOWER 是总量下限，两份文件里若有一份整体解析失败（比如 ds.css
+// 某次重构把 background 全改成 shorthand 之外的形式），总量仍可能靠 main.css
+// 撑过 30 ⇒ 假绿。逐文件设地板才能把「某一整份失明」与「组合变少」区分开。
+// 2026-10-03 现算：main.css 422 / ds.css 32（收口后）。
+const SCAN_FLOOR = { 'main.css': 380, 'ds.css': 24 };
 
 // ---------- 1. 两个主题变量块 ----------
 function blockVars(startIdx) {
@@ -235,13 +282,32 @@ const UNKNOWN_BASE_ALLOW = [
   '.maint-status-warn',
   '.ctx-apply-bar',
   'body.theme-light .nav-subdot',
+  // 审查 L-28 连带：--splash-* 是开屏覆盖层的独立局部调色板（刻意固定、不随主题
+  // 联动，见 UNKNOWN_BASE_ALLOW 上方说明），主主题变量表里根本没有这些 token。
+  // 收口 SOLID_SKIP 盲区后 .splash-enter:hover 的 --splash-brand-hover 落进 E 组，
+  // 按「未登记 = 失明 = 红」的规矩必须显式登记理由（与 .splash-enter 同一个理由）。
+  '.splash-enter:hover',
 ];
 // 这些选择器的半透明底一律按 PREVIEW_WINDOW_BASE 合成（窗内白控件的真实底）
 const PREVIEW_BASE_SELECTORS = /^\.pv-/;
 const TINT_WEAK_ALLOW = [];
 // ---------- 3. A 组：实底背景 × 前景 ----------
 // 实底 = background 直接是 var(--x)，且不是 -soft/-light/-glow 这类染底 token
-const SOLID_SKIP = /-(soft|light|glow|tint|alpha|hover|press)$/;
+//
+// 审查 L-28（2026-10-03 L4）——**这里原先是一处覆盖面盲区，不是解析盲区**：
+// K1 修好了「解析失明」（能算的都算了），但 SOLID_SKIP 按 token 后缀整族跳过
+// `-soft|-light|-hover|-press`，而 M-13 的五条真违规恰好全都是「`-soft`/`-light` 染底
+// × 专用墨色字」—— 修好了「看得见」，「看得见的范围」本身还有个洞。
+//
+// 改成**不按后缀跳过、改按「能不能合成出底色」判定**：
+//   · 染底（-soft/-light/-hover）本身是可算的（flattenBg 会把它合成到 --bg-app），
+//     所以它们进 A 组、走 TINT 组判定（TINT_WEAK_ALLOW 那套 4.4~4.5 边界棘轮）；
+//   · 真正算不出的是 --splash-* 族（独立局部调色板，不随主题联动）——
+//     那些走 UNKNOWN_BASE_ALLOW 登记，登记项仍由 E 组棘轮守着。
+// 实测代价（本次收口时现算）：+144 组，仅 `.bg-list-del:hover` 一条落到 4.16:1，
+// 且它是**纯图标**按钮（`✕`，pathbinding.js:461），适用 WCAG 1.4.11 的 3:1 而非
+// 1.4.3 的 4.5:1 ⇒ 进 ICON_ONLY 清单，不是违规。
+const SOLID_SKIP = /^$/;
 // K1 失明源一（2026-10-03 L3 审查）：属性值的**括号平衡**读取器。
 // 为什么不能用一层嵌套的正则：color-mix(in srgb, var(--a) 5%, var(--b)) 里 var() 自己
 // 带括号，两层正则对"第二分量含 var()"会截断或不匹配，而截断是**无声**的（整行被
@@ -284,29 +350,38 @@ function readValues(body, prop) {
 }
 const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
 const rules = [];
-let mm;
-while ((mm = ruleRe.exec(CSS))) {
-  const body = mm[2];
-  // color-mix 里嵌套 var() 带括号，模式要允许一层嵌套
-  const bgRaw = readValues(body, "background");
-  // K2 失明源（2026-10-03 L3 审查）：前景不只可能是 var(--x)——`color: #000000`
-  // 这类字面色此前整条不落进 fgs，于是 .qc-admin-note 的暗色 1.22:1 对门禁完全不可见。
-  // 改成记原始表达式，字面色交给 parseColor 走同一套字面量解析。
-  const fgs = [...body.matchAll(/(?:^|;)\s*color\s*:\s*([^;]+)/g)].map((x) => x[1].trim())
-    .filter((x) => x !== "inherit" && x !== "transparent");
-  if (!bgRaw.length && !fgs.length) continue;
-  rules.push({
-    selector: mm[1].trim().replace(/\s+/g, ' '),
-    lineNo: CSS.slice(0, mm.index).split('\n').length,
-    bgRaw,
-    fgs,
-  });
+// 审查 L-28：两份 CSS 各解析一遍，`file` 字段带上来源，行号是**文件内行号**
+// （各自 parse 自己的 text，所以不需要任何跨文件偏移量）。
+for (const part of CSS_PARTS) {
+  let mm;
+  const localRe = new RegExp(ruleRe.source, 'g');
+  while ((mm = localRe.exec(part.text))) {
+    const body = mm[2];
+    // color-mix 里嵌套 var() 带括号，模式要允许一层嵌套
+    const bgRaw = readValues(body, "background");
+    // K2 失明源（2026-10-03 L3 审查）：前景不只可能是 var(--x)——`color: #000000`
+    // 这类字面色此前整条不落进 fgs，于是 .qc-admin-note 的暗色 1.22:1 对门禁完全不可见。
+    // 改成记原始表达式，字面色交给 parseColor 走同一套字面量解析。
+    const fgs = [...body.matchAll(/(?:^|;)\s*color\s*:\s*([^;]+)/g)].map((x) => x[1].trim())
+      .filter((x) => x !== "inherit" && x !== "transparent");
+    if (!bgRaw.length && !fgs.length) continue;
+    rules.push({
+      selector: mm[1].trim().replace(/\s+/g, ' '),
+      file: part.label,
+      lineNo: part.text.slice(0, mm.index).split('\n').length,
+      bgRaw,
+      fgs,
+    });
+  }
 }
 
 const baseOf = (sel) => sel.replace(/::?[\w-]+(\([^()]*\))?/g, '').replace(/\s+/g, ' ').trim();
+// 键是 `file|base`：审查 L-28 引入 ds.css 后，前景回溯**必须按文件分区**——
+// 否则 `.ds-menu-item` 在 ds.css 里、它的 `:hover` 态如果只写 color，回溯会拿到
+// main.css 里同名 base 的 color（或者反过来），算出跨文件的假组合。
+// ds.css 明确是「后置覆盖」语义，与 main.css 是覆盖关系而不是同一条规则的两半。
 const colorByBase = new Map();
 for (const r of rules) {
-  if (!r.fgs.length) continue;
   if (!r.fgs.length) continue;
   // K1 失明源四（2026-10-03 L3）：伪元素的 color 不是父级的 color。
   // ::before / ::after 是独立元素、自带 color，baseOf 把选择器剥成同一个 base 后，
@@ -314,15 +389,17 @@ for (const r of rules) {
   // ⇒ 实算出 1.04:1 的假违规（真实 ::before 组合 5.81:1 达标，且 ::before 按装饰件口径已跳过）。
   if (/::(before|after)\b/.test(r.selector)) continue;
   const b = baseOf(r.selector);
-  if (b && !colorByBase.has(b)) colorByBase.set(b, r.fgs);
+  const k = `${r.file}|${b}`;
+  if (b && !colorByBase.has(k)) colorByBase.set(k, r.fgs);
 }
-function inheritedFg(sel) {
+function inheritedFg(sel, file) {
   const base = baseOf(sel);
   if (!base) return null;
   const parts = base.split(' ');
   for (let i = parts.length; i > 0; i--) {
     const cand = parts.slice(0, i).join(' ');
-    if (colorByBase.has(cand)) return colorByBase.get(cand);
+    const hit = colorByBase.get(`${file}|${cand}`);
+    if (hit) return hit;
   }
   return null;
 }
@@ -377,7 +454,7 @@ for (const r of rules) {
   if (!r.bgRaw.length) continue;
   // 伪元素一律装饰件，不承载文本 → 不适用文本对比度，跳过（否则全是误报）
   if (/::(before|after)\b/.test(r.selector)) continue;
-  const fgs = r.fgs.length ? r.fgs : inheritedFg(r.selector) || [];
+  const fgs = r.fgs.length ? r.fgs : inheritedFg(r.selector, r.file) || [];
   for (const raw of r.bgRaw) {
     const varOnly = raw.match(/^var\(\s*(--[\w-]+)\s*\)$/);
     if (varOnly && SOLID_SKIP.test(varOnly[1])) continue;
@@ -395,10 +472,13 @@ for (const r of rules) {
           continue;
         }
         solidRows.push({
-          theme: t.name, selector: r.selector, lineNo: r.lineNo,
+          theme: t.name, selector: r.selector, file: r.file, lineNo: r.lineNo,
           bgExpr: raw.replace(/\s+/g, ' '), fg, ratio: contrast(b, fFlat), bgHex: hex(b), fgHex: hex(fFlat),
-          // 浅染底（低浓度叠底）与实底分开判定：见 TINT_WEAK_ALLOW 的说明
-          tint: /^color-mix\(/.test(raw.trim()),
+          // 浅染底与实底分开判定：见 TINT_WEAK_ALLOW 的说明。
+          // 审查 L-28：判据从「写法是不是 color-mix(」扩成「**合成前有没有透明度**」——
+          // 前者只认字面写法，于是 `var(--accent-soft)`（rgba(...,0.08)）这种更常见的
+          // 染底形态被归进「实底」走 A1 硬判；后者按语义判，染底一律走 A2 边界棘轮。
+          tint: /^color-mix\(/.test(raw.trim()) || (parseBg(raw, t.vars) || { a: 1 }).a < 1,
         });
       }
     }
@@ -444,7 +524,7 @@ const check = (ok, label, detail = '') => {
 
 console.log('=== 对比度门禁（WCAG 2.1 AA，普通文本 4.5:1）===\n');
 
-const fmt = (r) => `${r.ratio.toFixed(2)}:1 ${r.theme} ${r.selector}(main.css:${r.lineNo}) 底${r.bgExpr}=${r.bgHex} 字${r.fg}=${r.fgHex}`;
+const fmt = (r) => `${r.ratio.toFixed(2)}:1 ${r.theme} ${r.selector}(${lineRef(r.file, r.lineNo)}) 底${r.bgExpr}=${r.bgHex} 字${r.fg}=${r.fgHex}`;
 
 check(
   THEME_INCOMPLETE.length === 0,
@@ -457,7 +537,21 @@ check(
   SKIPPED.length ? `新增失明组合：${[...new Set(SKIPPED)].slice(0, 6).join("；")}` : "",
 );
 const weak = solidRows.filter((r) => r.ratio < AA_NORMAL);
-const hardBad = weak.filter((r) => !r.tint).sort((a, b) => a.ratio - b.ratio);
+// 审查 L-28：纯图标/图形控件走 WCAG **1.4.11 非文本对比度 = 3:1**，不是 1.4.3 的 4.5:1。
+// 登记制 + 双向棘轮：登记项必须仍然低于 4.5（否则说明它修好了，从清单移除），
+// 未登记的一律按 4.5 硬判 ⇒ 有人拿「这是图标」当借口放行新组合，门禁会红。
+//
+// 2026-10-03 现算：收口 SOLID_SKIP 盲区后 +144 组，只有 1 组落到 4.5~3 之间 ——
+// `.bg-list-del:hover`（✕ 删除按钮，pathbinding.js:461，**纯图标无文本**）实测 4.16:1。
+const ICON_ONLY_MIN = 3.0;
+const ICON_ONLY_ALLOW = [
+  '.bg-list-del:hover',
+];
+const iconRows = solidRows.filter((r) => r.ratio >= ICON_ONLY_MIN && r.ratio < AA_NORMAL);
+const iconNew = [...new Set(iconRows.map((r) => r.selector))].filter((s) => !ICON_ONLY_ALLOW.includes(s)).sort();
+const iconStale = ICON_ONLY_ALLOW.filter((s) => !iconRows.some((r) => r.selector === s));
+const iconBad = solidRows.filter((r) => r.ratio < ICON_ONLY_MIN);
+const hardBad = weak.filter((r) => !r.tint && !ICON_ONLY_ALLOW.includes(r.selector)).sort((a, b) => a.ratio - b.ratio);
 const tintBad = weak.filter((r) => r.tint);
 // 棘轮键：选择器|前景（同一处两主题各算一行，去重后比对）
 const tintKeys = [...new Set(tintBad.map((r) => `${r.selector}|${r.fg}`))].sort();
@@ -469,6 +563,21 @@ check(
   `A1. 实底前景组合 ${solidRows.filter((r) => !r.tint).length} 组全部 ≥ ${AA_NORMAL}:1`,
   hardBad.length ? hardBad.map(fmt).join('；') : '',
 );
+check(
+  iconNew.length === 0 && iconStale.length === 0 && iconBad.length === 0,
+  `A1b. 纯图标控件（WCAG 1.4.11 = ${ICON_ONLY_MIN}:1）登记一致（登记 ${ICON_ONLY_ALLOW.length} / 实际 ${iconRows.length}）`,
+  iconBad.length
+    ? `低于 ${ICON_ONLY_MIN}:1（连图形都看不清）：${iconBad.map(fmt).join('；')}`
+    : iconNew.length
+      ? `新增未登记的图标组合 ${JSON.stringify(iconNew)}`
+      : iconStale.length
+        ? `清单已失效（该项已达标，请移除）${JSON.stringify(iconStale)}`
+        : '',
+);
+if (iconRows.length) {
+  console.log('\n   A1b 清单（纯图标，适用 3:1 而非 4.5:1）：');
+  for (const r of iconRows) console.log(`     ${fmt(r)}`);
+}
 check(
   tintNew.length === 0 && tintStale.length === 0,
   `A2. 浅染底 AA 边界项与登记清单一致（登记 ${TINT_WEAK_ALLOW.length} / 实际 ${tintKeys.length}，非致命但带棘轮）`,
@@ -496,6 +605,23 @@ check(
   total >= BASELINE_MIN,
   `C. 覆盖率不低于基线（实算 ${total} 组 / 下限 ${BASELINE_MIN}）`,
   total < BASELINE_MIN ? '组合数骤降说明解析退化，不是「真的都达标」' : '',
+);
+// 审查 L-28：逐文件地板。solidRows 里带 file 字段（B 组是 token 对，不归属文件）。
+const perFile = {};
+for (const r of solidRows) perFile[r.file] = (perFile[r.file] || 0) + 1;
+const floorBad = Object.entries(SCAN_FLOOR)
+  .filter(([f, n]) => (perFile[f] || 0) < n)
+  .map(([f, n]) => `${f} 实算 ${perFile[f] || 0} < 地板 ${n}`);
+// 台账里有、扫描面里没有的也算漂移（有人把文件移出扫描面就会在这里红）
+const orphanFiles = Object.keys(SCAN_FLOOR).filter((f) => !perFile[f]);
+check(
+  floorBad.length === 0 && orphanFiles.length === 0,
+  `C2. 逐文件组合数不低于地板（${Object.entries(SCAN_FLOOR).map(([f, n]) => `${f} ${perFile[f] || 0}/${n}`).join(' / ')}）`,
+  floorBad.length
+    ? floorBad.join('；')
+    : orphanFiles.length
+      ? `扫描面台账里的文件已无组合产出（被移出扫描面？）：${orphanFiles.join('、')}`
+      : '',
 );
 
 const worst = [...solidRows, ...textRows].sort((a, b) => a.ratio - b.ratio)[0];

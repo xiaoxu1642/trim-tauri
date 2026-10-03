@@ -2384,7 +2384,7 @@ select.field-input { cursor: pointer; appearance: auto; }
 .benchmark-note, .benchmark-status-detail { color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; margin: 14px 0 0; }
 .benchmark-status { font-size: calc(24px * var(--font-size-scale, 1)); font-weight: calc(700 * var(--font-weight-scale, 1)); color: var(--accent); }
 .bench-progress { margin-top: 12px; height: 6px; border-radius: var(--radius-badge); background: var(--bg-elevated); border: 1px solid var(--border-default); overflow: hidden; }
-.bench-progress-fill { height: 100%; width: 0%; border-radius: var(--radius-badge); background: linear-gradient(90deg, var(--accent), var(--accent-light)); transition: width .3s ease; }
+.bench-progress-fill { height: 100%; width: 0%; border-radius: var(--radius-badge); background: linear-gradient(90deg, var(--accent), var(--accent-light)); transition: width var(--duration-base) var(--ease-standard); }
 .external-site-picker { display: flex; justify-content: flex-end; margin: -10px 0 16px; }
 .external-site-select { display: inline-grid; grid-template-columns: auto minmax(220px, 280px); align-items: center; gap: 8px; color: var(--fg-secondary); font-size: var(--fs-meta); }
 .external-site-select .field-input { min-height: 32px; }
@@ -2967,7 +2967,9 @@ select.field-input { cursor: pointer; appearance: auto; }
   font-size: var(--fs-meta); color: var(--fg-secondary);
   cursor: pointer; user-select: none;
 }
-.opt-pick-all:hover, .opt-pick-none:hover { color: var(--accent-text); }
+/* 审查 M-13（2026-10-03 L4）：hover 前景原为 --accent-text（实底专用墨色），
+   在透明底（页面底）上暗 1.03/亮 1.07:1 不可见；accent on 页面底 5.75/4.96:1 */
+.opt-pick-all:hover, .opt-pick-none:hover { color: var(--accent); }
 .opt-pick-count { margin-left: auto; font-size: var(--fs-meta); color: var(--fg-tertiary); }
 .opt-pick-hint { margin: 0 0 8px; font-size: var(--fs-meta); color: var(--fg-tertiary); line-height: 1.55; }
 .opt-pick-list {
@@ -6762,7 +6764,9 @@ body.pv-window {
   display: inline-flex; align-items: center; gap: 4px;
   margin-left: 4px; padding: 1px 9px;
   font-size: 11px; font-weight: 600; line-height: 1.6;
-  color: var(--accent-text);
+  /* 审查 M-13（2026-10-03 L4）：--accent-text 是 accent 实底专用墨色，配 -soft 染底
+     合成后暗 1.13/亮 1.17:1 两主题不可见；--accent 在同底上暗 5.14/亮 4.60:1 达标 */
+  color: var(--accent);
   background: var(--accent-soft);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-btn);
@@ -6823,7 +6827,9 @@ body.pv-window {
   border-radius: var(--radius-small);
   cursor: pointer;
 }
-.peri-explain-close:hover { color: var(--accent-text); }
+/* 审查 M-13（2026-10-03 L4）：hover 前景原为 --accent-text，bg 走基态 bg-card-hover，
+   合成 1.05/1.06:1 近不可见；改 accent（图标位 ≥3:1 达标） */
+.peri-explain-close:hover { color: var(--accent); }
 
 .peri-note { margin: 2px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; }
 .peri-footer { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; padding-bottom: 4px; }
@@ -6894,7 +6900,8 @@ body.pv-window {
 }
 .opt-row-restore:hover:not(:disabled) {
   background: var(--accent-soft);
-  color: var(--accent-text);
+  /* 审查 M-13（2026-10-03 L4）：染底配 --accent-text 墨色 1.13/1.17:1，改 accent */
+  color: var(--accent);
 }
 .opt-row-restore:disabled {
   color: var(--fg-tertiary);
@@ -8263,7 +8270,8 @@ body.bg-image-on .main-content {
 }
 .drive-picker .drive-chip:hover { border-color: var(--accent); color: var(--fg-primary); }
 .drive-picker .drive-chip.active {
-  color: var(--accent-text, var(--fg-primary));
+  /* 审查 M-13（2026-10-03 L4）：选中态同 .peri-explain-btn 的染底×墨色误配，改 accent */
+  color: var(--accent);
   background: var(--accent-light);
   border-color: var(--accent);
   font-weight: 600;

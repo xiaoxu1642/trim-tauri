@@ -139,9 +139,10 @@
     let closed = false;
     let escHandler = null;
 
-    // B10：焦点管理统一走 ds.focusTrap（design-system 单一实现）。
-    // 打开时移焦点入弹窗（opts.initialFocus 选择器优先，高危确认聚焦「取消」）、
-    // Tab 循环限制在弹窗内、关闭时归还焦点给触发元素；ds.js 缺席时优雅降级为无陷阱。
+    // 焦点管理统一走 ds.focusTrap（design-system 单一实现）。
+    // 打开时移焦点入弹窗（opts.initialFocus 选择器优先；AGENTS §2 裁定：高危确认
+    // 统一落主按钮，见 confirm() 的 '[data-confirm="ok"]'）、Tab 循环限制在弹窗内、
+    // 关闭时归还焦点给触发元素；ds.js 缺席时优雅降级为无陷阱。
     const trap = (window.ds && typeof window.ds.focusTrap === 'function')
       ? window.ds.focusTrap(modalEl, { initialFocus: opts.initialFocus || null })
       : { release() {} };

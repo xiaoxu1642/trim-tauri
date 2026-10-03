@@ -373,20 +373,22 @@
       release() {
         container.removeEventListener('focusin', onFocusIn);
         container.removeEventListener('keydown', onKey);
-        // ⚠️ 焦点归还必须让位给「弹窗关闭后立刻出现的下一个界面」。
+        // ⚠️ 焦点归还判据（审查 M-14，2026-10-03 L4 修订）：
         //
-        // 2026-10-03 用户实测「高危确认框一闪而过、点确认等于被拒绝」的根因：
-        // 详情弹窗开着时点「立即执行」→ 红色确认框叠在上面 → 用户点「仍然执行」→
-        // release() 把焦点抢回详情弹窗的触发按钮 → 该 click 仍在冒泡，被全局
-        // 点击委托再触发一次 → 详情弹窗重建，把刚 resolve(true) 的确认结果
-        // 连同用户注意力一起吃掉。用户看到的就是「框闪一下，什么都没发生」。
+        // 「焦点被劫持」只应指一种状态：容器**还开着**（仍在文档里），而用户已经把
+        // 焦点点到/移到了容器之外 —— 此时抢回焦点才会制造干扰。其余形态都该归还：
+        // 容器已从文档移除（backdrop.remove() 后 activeElement 按规范回落 body）或
+        // 聚焦元素被隐藏（display:none 同样回落 body），这个 body 是**瞬时态**，不是
+        // 「用户点了别处」；activeElement 为 null 亦同理。
         //
-        // 判据：释放时若焦点已经落在**别的弹窗/容器**里（activeElement 不再是本容器
-        // 的后代，且不是 null），说明调用方已经在关闭后接管界面了 —— 这时抢回焦点
-        // 只会制造上面那条连锁。null 是「用户点了页面上别处」，同样不该抢。
+        // 2026-10-03 上一版把「!cur || cur === body」也判成劫持，导致 close() 里
+        // 「先 remove 后 release」的固定顺序下归还路径整体死亡（回归，M-14）。
+        // 曾据此防的「高危确认框一闪而过」真实根因是 optimizer.js 连续弹确认框时
+        // 相邻两帧互抢焦点，已在同批「合并成一次弹框」根治（optimizer.js 确认执行
+        // 处注释）；叠层确认场景归还目标在仍开着的详情弹窗内，本来就是正确落点。
         const cur = document.activeElement;
-        const focusStolenElsewhere = !cur || cur === document.body
-          || (!container.contains(cur) && !container.isConnected);
+        const focusStolenElsewhere = !!cur && cur !== document.body
+          && !container.contains(cur) && container.isConnected;
         if (prevFocus && prevFocus.isConnected && !focusStolenElsewhere) {
           prevFocus.focus();
         }

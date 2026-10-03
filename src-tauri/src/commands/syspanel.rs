@@ -4,7 +4,8 @@
 //! 虚拟内存本轮只读但同域，一并 MAIN —— 下一批加写侧时不用再改档位。
 //! 前端只在 `settings` 页底部"系统面板"卡里调用，其他窗口拿不到入口。
 //!
-//! 命令命名与 CHANNEL_MAP 键一一对应：`syspanel:power-plan-get` / `-apply` / `pagefile-state`。
+//! 命令命名与 CHANNEL_MAP 键一一对应：`syspanel:power-plan-get` / `-apply` / `pagefile-state` / `pagefile-apply`。
+//! （审查 L-20：pagefile-apply 此前漏登本清单——CHANNEL_MAP 四条齐全，纯注释漂移。）
 //!
 //! # 返回体必须是 `{ success, data }`（不是裸对象）
 //!

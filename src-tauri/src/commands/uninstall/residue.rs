@@ -1124,12 +1124,38 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             }
             let protect_json = protect::protected_roots_json();
             // 删除结果行解析 Sink：只收 @@ITEM@@ 行里的 delresult（对齐 finder 的 FinderSink 口径）
-            struct RowSink(Mutex<Vec<Value>>);
+            //
+            // 审查 L-23（2026-10-03 L4）：解析失败原本是**静默 return**，且 `warn` 是
+            // 显式空实现 —— 也就是说删除结果行凭空消失时**一点痕迹都不留**，用户看到的
+            // 回执里那一条就是「没删也没记录」。与 L-21（@@LOCKED@@）、L-22（@@RECYCLE@@）、
+            // apply.rs（M-1）同基线「畸形行必须计数或告警」。这里改成：解析失败即计数，
+            // 扫描结束后统一 warn 一次（warn 是热路径，逐行打日志会淹掉日志）。
+            struct RowSink {
+                rows: Mutex<Vec<Value>>,
+                malformed: Mutex<usize>,
+            }
+            impl RowSink {
+                fn count_malformed(&self) {
+                    *self.malformed.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                }
+                fn malformed(&self) -> usize {
+                    *self.malformed.lock().unwrap_or_else(|e| e.into_inner())
+                }
+            }
             impl trim_finder::scan::Sink for RowSink {
                 fn item(&self, _p: &Path, line: &str) {
                     let Some(body) = line.strip_prefix("@@ITEM@@") else { return };
-                    let Ok(v) = trim_finder::cleanup_scan::parse_json(body) else { return };
+                    // 空体行是 @@ITEM@@{ 之后的续行被拆行时的产物，与 JSON 解析失败同口径
+                    if body.trim().is_empty() {
+                        self.count_malformed();
+                        return;
+                    }
+                    let Ok(v) = trim_finder::cleanup_scan::parse_json(body) else {
+                        self.count_malformed();
+                        return;
+                    };
                     if v.get("type").and_then(|t| t.as_str()) != Some("delresult") {
+                        // 非 delresult 行是协议内的正常行（进度/目录项等），不算畸形
                         return;
                     }
                     let jnum = |j: Option<&trim_finder::cleanup_scan::Json>| -> u64 {
@@ -1138,28 +1164,50 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                             _ => 0,
                         }
                     };
-                    self.0.lock().unwrap_or_else(|e| e.into_inner()).push(json!({
+                    let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if path.is_empty() {
+                        // delresult 行却没有 path：回执里会挂一条空路径的 detail，
+                        // 形状上无法与真实删除结果区分 —— 计畸形，不进 details
+                        self.count_malformed();
+                        return;
+                    }
+                    self.rows.lock().unwrap_or_else(|e| e.into_inner()).push(json!({
                         "kind": match v.get("kind").and_then(|k| k.as_str()) {
                             Some("dir") => "dir",
                             _ => "file",
                         },
-                        "path": v.get("path").and_then(|p| p.as_str()).unwrap_or(""),
+                        "path": path,
                         "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
                         "freed": jnum(v.get("freed")),
                     }));
                 }
                 fn progress(&self, _n: u64) {}
                 fn scanned(&self, _n: u64) {}
-                fn warn(&self, _m: &str) {}
+                fn warn(&self, m: &str) {
+                    // 扫描器自己发的告警不能吞：它是「部分失败」的唯一线索
+                    log::write_log("warn", &format!("残留删除扫描器告警: {m}"));
+                }
                 fn truncated(&self) {}
             }
-            let sink = RowSink(Mutex::new(Vec::new()));
+            let sink = RowSink {
+                rows: Mutex::new(Vec::new()),
+                malformed: Mutex::new(0),
+            };
             let _ = trim_finder::scan::delete(&paths, Some(protect_json.as_str()), &sink);
+            if sink.malformed() > 0 {
+                log::write_log(
+                    "warn",
+                    &format!(
+                        "残留删除回执含 {} 条畸形 @@ITEM@@ delresult 行，已跳过（扫描器协议异常）",
+                        sink.malformed()
+                    ),
+                );
+            }
             // P2-D4：只读占用自检只花在真正失败的文件行上，且最多查 3 个——模块枚举是
             // 全进程开销，为拼提示文案不值得在整批全败时查几十次；目录行不查（目录不是
             // 可加载模块，占用的也是里面的文件，逐个查反而把消息拉长）。
             let mut probe_budget = 3usize;
-            for row in sink.0.into_inner().unwrap_or_default() {
+            for row in sink.rows.into_inner().unwrap_or_default() {
                 let ok = row["status"] == "ok";
                 let message = if ok {
                     "已移入回收站".to_string()
