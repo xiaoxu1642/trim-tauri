@@ -373,6 +373,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::actions::actions_list,
         commands::actions::actions_apply,
         commands::actions::actions_remove,
+        commands::actions::actions_run_script,
         // ---- B 批：runtimes / netcheck / diskbench ----
         // R1（2026-10-01）：`pwsh_status` 随整条 PowerShell 7 链退役 —— 右键图标改原生取图后
         // 本应用不再需要用户自装 PS7，「探测候选链并回报状态」这件事失去了对象。

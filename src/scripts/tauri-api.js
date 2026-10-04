@@ -211,6 +211,7 @@
     'actions:list': 'actions_list',
     'actions:apply': 'actions_apply',
     'actions:remove': 'actions_remove',
+    'actions:run-script': 'actions_run_script',
     'peripheral:query': 'peripheral_query',
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
@@ -676,7 +677,8 @@
       closeWindow: function () { return invokeChannel('actions:close-window'); },
       list: function () { return invokeChannel('actions:list'); },
       apply: function (ids) { return invokeChannel('actions:apply', { ids: ids }); },
-      remove: function (ids) { return invokeChannel('actions:remove', { ids: ids }); }
+      remove: function (ids) { return invokeChannel('actions:remove', { ids: ids }); },
+      runScript: function (script) { return invokeChannel('actions:run-script', { script: script }); }
     },
 
     quickCmds: {

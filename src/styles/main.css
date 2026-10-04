@@ -9617,6 +9617,30 @@ body.bg-image-on .titlebar {
   background: transparent;
 }
 
+/* 右键菜单动作副窗（v0.7.0）：脚本输入与输出预览，只用既有 token */
+.ac-script {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.ac-boundary { flex: 1; min-width: 240px; }
+.ac-output {
+  margin: 10px 0 0;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-radius: var(--radius-small);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--fg-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 /* ==================== 残留扫描副窗（v0.7.0：三链候选 + 深扫只读报告同页） ====================
    面板从主窗搬进副窗后，操作条与详情视图是这一窗专属的布局件；只用既有 token，
    圆角限定在 small/btn/medium（AGENTS §2 设计系统红线）。 */

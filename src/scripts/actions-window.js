@@ -67,6 +67,8 @@
   function updateButtons() {
     const any = state.checked.size > 0;
     el('acApplyBtn').disabled = !any || state.busy;
+    const sb = el('acRunBtn');
+    if (sb) sb.disabled = state.busy || !(el('acScript').value || '').trim();
     el('acRemoveBtn').disabled = !any || state.busy;
   }
 
@@ -150,10 +152,47 @@
     onClick({ target: t });
   }
 
+  async function runScript() {
+    const src = (el('acScript').value || '').trim();
+    if (!src || state.busy) return;
+    const ok = await confirmChange({
+      title: '运行自己写的 PowerShell 脚本',
+      message: '将在当前账号的 PowerShell 里执行这段脚本（通常非提权，固定 120 秒超时）。',
+      confirmText: '运行',
+      cancelText: '取消',
+      danger: true,
+      dangerHint: '脚本不经过 Trim 的删除红线：A1 禁删面与回收站优先都不在它路上。Remove-Item 这类语句会以你当前权限直接生效，请自己确认过内容。'
+    });
+    if (!ok) return;
+    state.busy = true;
+    updateButtons();
+    el('acFootHint').textContent = '脚本执行中…';
+    try {
+      const r = await window.api.actionsWindow.runScript(src);
+      if (!r || r.success !== true) throw new Error((r && r.message) || '执行失败');
+      const d = r.data || {};
+      const out = el('acOutput');
+      out.hidden = false;
+      out.textContent = 'exit=' + (d.exitCode == null ? '?' : d.exitCode)
+        + (d.timedOut ? ' · 超时被终止（子进程一并收掉）' : '')
+        + (d.elevated ? ' · 当前是高权限令牌' : '')
+        + '\n\n' + String(d.stdout || '') + (d.stderr ? '\n[stderr]\n' + d.stderr : '');
+      toast(d.exitCode === 0 ? 'success' : 'warning', d.exitCode === 0 ? '脚本执行完成' : '脚本返回非零退出码 ' + d.exitCode);
+    } catch (e) {
+      toast('error', '脚本执行失败：' + ((e && e.message) || e));
+    } finally {
+      state.busy = false;
+      el('acFootHint').textContent = '命令串来自随包数据，界面只表达「选了哪些项」。';
+      updateButtons();
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     el('acBody').addEventListener('click', onClick);
     el('acBody').addEventListener('keydown', onKeydown);
     el('acRefreshBtn').addEventListener('click', load);
+    el('acRunBtn').addEventListener('click', runScript);
+    el('acScript').addEventListener('input', updateButtons);
     el('acApplyBtn').addEventListener('click', apply);
     el('acRemoveBtn').addEventListener('click', remove);
     el('acCloseBtn').addEventListener('click', function () {

@@ -25,6 +25,22 @@
     </div>
 
     <div class="mw-content">
+      <!-- ② 用户自写脚本直调（裁定 7）。边界必须显示给用户，不只是写在代码注释里 -->
+      <div class="mw-card">
+        <div class="mw-card-head">
+          <span class="mw-card-title">运行自己的 PowerShell 脚本</span>
+          <span class="mw-card-desc">在当前（通常非提权）令牌里跑，固定 120 秒超时；超时连同子进程一起终止。</span>
+        </div>
+        <div class="mw-body">
+          <textarea class="field-input ac-script" id="acScript" rows="7" spellcheck="false"
+            placeholder="例如：Get-ChildItem $env:LOCALAPPDATA | Sort-Object LastWriteTime -Descending | Select-Object -First 5 Name, LastWriteTime"></textarea>
+          <div class="rs-actionbar">
+            <button class="btn btn-danger" id="acRunBtn" disabled>运行脚本</button>
+            <span class="xtable-cell-muted ac-boundary">注意：<b>你自己写的脚本不经过 Trim 的删除红线</b>（A1 禁删面、回收站优先都不在它路上）。Trim 只做三件事：逐项确认、留痕、不代提权。</span>
+          </div>
+          <pre class="ac-output" id="acOutput" hidden></pre>
+        </div>
+      </div>
       <div class="mw-card">
         <div class="mw-card-head">
           <span class="mw-card-title">内置动作</span>

@@ -441,7 +441,7 @@ const MUST_WINDOWSET = {
   // v0.7.0 第四期：右键菜单动作面板的写侧（只写 HKCU，删除只走 TRIM. 前缀窄口子）
   ACTIONS_WINDOWS: {
     labels: ['actions'],
-    cmds: ['actions_apply', 'actions_remove'],
+    cmds: ['actions_apply', 'actions_remove', 'actions_run_script'],
   },
 };
 

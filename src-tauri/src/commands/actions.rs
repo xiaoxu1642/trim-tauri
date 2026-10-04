@@ -287,6 +287,70 @@ pub async fn actions_remove<R: tauri::Runtime>(
     Ok(json!({ "success": true, "data": { "details": details, "okCount": ok } }))
 }
 
+/// 用户脚本的形状闸（**纯函数**，单测直接吃向量）。
+/// 只做三件事：非空、长度上限、拒 ` `。刻意**不**做关键字黑名单 ——
+/// 那不是安全边界（`Rm-Out` 拼一下就越得过），给了只会让人误以为这里拦住了什么。
+/// 真正的边界是：跑在非提权令牌里 + 逐项确认 + 全量留痕（见 actions_run_script 的注释）。
+fn user_script_deny(script: &str) -> Option<String> {
+    const MAX_CHARS: usize = 8000;
+    let s = script.trim();
+    if s.is_empty() {
+        return Some("脚本为空".to_string());
+    }
+    if s.chars().count() > MAX_CHARS {
+        return Some(format!("脚本 {} 字超上限 {MAX_CHARS}，请拆小", s.chars().count()));
+    }
+    if s.contains(' ') {
+        return Some("脚本含 NUL".to_string());
+    }
+    None
+}
+
+/// actions:run-script —— 用户在副窗里自己写的 PowerShell 直调（裁定 7）。
+///
+/// 七条护栏里落在后端的四条，逐条写明「为什么是这条」：
+/// ① **唯一入口** `pwsh::run_inbox_script`（私有 tmp + BOM + `-File` + Job Object 超时收树，§3）；
+///    不自己 `fs::write` 一份 .ps1 再跑，也不 `pub` 出低层 `run_inbox_ps`。
+/// ② 超时是**固定 120 秒、用户不可配** —— 能配超时等于能把「超时收树」这道护栏关掉；
+///    超时会把 pwsh 连同子孙进程一起终止（§5.13），UI 必须写这句，别让人以为脚本会跑完。
+/// ③ **不代提权**：脚本就在当前（通常非提权）令牌里跑。写不动 HKLM/受保护区是操作系统在挡，
+///    不是我们自己实现的一套拦截 —— 后者一定会漏。`elevate:request` 不下放给本副窗。
+/// ④ 全量留痕：脚本正文进日志（过 `log::write_log` 的长度上限与 sanitize）。
+///
+/// 必须说清的边界（AGENTS §9.3 话术纪律，也写进回执给前端显示）：
+/// **用户自己写的脚本不经过 Trim 的删除红线** —— A1 禁删面、回收站优先、驱动独立禁删面
+/// 都在 Rust 命令体里，脚本一句 `Remove-Item` 就绕过去了。本面板的承诺只有
+/// 「不代提权 + 逐项确认 + 全程留痕」三件，不把它当安全边界卖。
+#[tauri::command]
+pub async fn actions_run_script<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    script: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::ACTIONS_WINDOWS)?;
+    if let Some(reason) = user_script_deny(&script) {
+        return Err(reason);
+    }
+    let body = script.trim().to_string();
+    log::write_log("info", &format!("actions:run-script 提交执行，{} 字（非提权令牌，超时 120 秒整树终止）", body.chars().count()));
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        crate::pwsh::run_inbox_script(&body, std::time::Duration::from_secs(120), Some("actions:run-script"))
+    })
+    .await
+    .map_err(|e| format!("脚本任务异常: {e}"))??;
+    Ok(json!({
+        "success": true,
+        "data": {
+            "exitCode": out.code,
+            "timedOut": out.timed_out,
+            "stdout": out.stdout,
+            "stderr": out.stderr,
+            "elevated": sysinfo::is_admin(),
+            // 这句必须显示给用户，而不是只写在代码注释里
+            "boundary": "你自己写的脚本不经过 Trim 的删除红线（A1 禁删面/回收站优先都不在它路上）；Trim 只做确认、留痕与不代提权。",
+        },
+    }))
+}
+
 /// actions:open-window —— 打开「右键菜单动作」副窗（单例，已开则聚焦）
 ///
 /// 档位 MAIN：只有主窗入口按钮会调它，副窗自己不调（与 residue 窗同一口径；
@@ -368,6 +432,17 @@ mod tests {
             assert!(valid_class(it["class"].as_str().unwrap_or("")));
             assert!(Path::new(it["command"].as_str().unwrap_or("")).is_absolute());
         }
+    }
+
+    #[test]
+    fn user_script_gate_is_shape_only_and_names_every_reject() {
+        assert!(user_script_deny("   ").is_some());
+        assert!(user_script_deny(&"x".repeat(8001)).is_some());
+        assert!(user_script_deny("Get-Process
+").is_none());
+        assert!(user_script_deny("a b").is_some());
+        // 正向对照：合法脚本必须真的通过（否则上面几条是"恒拒"也在绿）
+        assert!(user_script_deny("Write-Output 'ok'").is_none());
     }
 
     #[test]

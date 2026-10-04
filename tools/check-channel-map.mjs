@@ -120,6 +120,7 @@ const TAURI_ADDED = {
   'actions:list': 'v0.7.0：内置动作 + HKCU 当前落点 + removable 标记（判据与执行侧同一个函数）',
   'actions:apply': 'v0.7.0：把内置动作投影成 HKCU 经典菜单键（窄窗口集 actions）',
   'actions:remove': 'v0.7.0：只撤 TRIM. 前缀自己写的键，走 A1 窄口子（窄窗口集 actions）',
+  'actions:run-script': 'v0.7.0：用户自写 PowerShell 直调，唯一入口 run_inbox_script、固定 120 秒、不代提权（窄窗口集 actions）',
   'residue:open-window': 'v0.5.0（2026-10-04）：打开残留扫描副窗（用户裁决 4：扫描全部在自绘副窗，主窗只留入口）',
   'residue:close-window': 'v0.5.0（2026-10-04）：关闭残留扫描副窗（同 preview/models/peripheral 的子窗关窗轨）',
 };
