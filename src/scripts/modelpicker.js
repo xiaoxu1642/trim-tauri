@@ -10,7 +10,9 @@
     optimizer: { label: '电脑优化中心' },
     startup: { label: '启动项管理' },
     contextmenu: { label: '右键管理' },
-    memoryclean: { label: '内存清理' }
+    memoryclean: { label: '内存清理' },
+    // v0.7.0：漏这档不会报错，只会在残留窗里静默按「右键管理」显示模型选择器标题
+    residue: { label: '应用卸载残留' }
   };
 
   let settingsCache = null;

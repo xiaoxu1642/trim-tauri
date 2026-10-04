@@ -9,8 +9,18 @@
 //   ③ 与 catalog / retired 集合对拍：目录里有 → intro 里必须有；intro 里有 → 要么在目录、
 //      要么在 `retired-optimizations.json`（AGENTS §5.12 允许退役 id 的简介保留）；
 //   ④ tips 覆盖率棘轮：只许增不许减（防下一次"清理过期项"顺手把 tips 也清了）；
-//   ⑤ 其他 scope（startup/contextmenu/memoryclean）保持"键 → string"，别乱改形状；
+//   ⑤ 其他 scope（startup/contextmenu/memoryclean/residue）保持"键 → string"，别乱改形状；
 //   ⑥ 判据正向自检：伪造一份违规数据，validate 必须报错。
+//   ⑦ scope 对拍（v0.7.0，2026-10-05）：以**真实调用点现算**出的简介面板消费档为准，
+//      对拍 `intro.js getLocal` 分支 ⇄ `modelpicker.js SCOPE_META` ⇄ `AI_SCOPES` ⇄
+//      `item-intro.json scopes` 四个方向。
+//      为什么单独钉这一组：这几处的兜底都是**静默**的 —— `getLocal` 里没列出的档会落到
+//      `getContextmenu`，`SCOPE_META[scope] ? … : 'contextmenu'` 同理，`aidesc_get` 里
+//      未知 scope 也直接按右键管理处理。新增一档忘了任何一处，表现不是报错而是
+//      「拿右键管理的简介去解释一个服务键」，肉眼与普通自测都看不出来（本轮加这组时
+//      就当场抓到过一处同类漏档）。
+//      为什么不按 AI_SCOPES 要求每档都写 getLocal：maintenance 档是 maintenance.js
+//      直连 aidesc.get 的，不走简介面板 —— 按表要求会变成误红。
 //
 // 用法：node tools/check-item-intro.mjs
 // 退出码：0 = 全绿；1 = 任一断言未通过
@@ -118,7 +128,7 @@ check(tipsCount >= TIPS_BASELINE,
   tipsCount < TIPS_BASELINE ? `比基线少 ${TIPS_BASELINE - tipsCount} —— 补回来或明确 --bump-baseline 降基线（须书面理由）` : '');
 
 // ⑤ 其他 scope 保持"键 → string"，别乱改形状（这几块本轮 §3.4 不动）
-for (const scope of ['startup', 'contextmenu', 'memoryclean']) {
+for (const scope of ['startup', 'contextmenu', 'memoryclean', 'residue']) {
   const cfg = intro?.scopes?.[scope] || {};
   const maps = Object.entries(cfg).filter(([k, v]) => v && typeof v === 'object' && !Array.isArray(v) && !['label', 'match', 'default'].includes(k));
   const badShape = [];
@@ -150,6 +160,63 @@ for (const scope of ['startup', 'contextmenu', 'memoryclean']) {
   check(caught === 2,
     `⑥ 判据正向自检（伪造 4 条、期望抓到 2 条 → 实际 ${caught}）`,
     caught !== 2 ? '判据疑似坏成永远放行或过度误伤 —— 修 check 逻辑' : '');
+}
+
+// ---- ⑦ scope 三表对拍（v0.7.0）----
+{
+  const SETTINGS = path.join(ROOT, 'src-tauri', 'src', 'commands', 'settings.rs');
+  const INTRO_JS = path.join(ROOT, 'src', 'scripts', 'intro.js');
+  const PICKER = path.join(ROOT, 'src', 'scripts', 'modelpicker.js');
+  const scopeSet = (text, re) => {
+    const m = text.match(re);
+    if (!m) return null;
+    return [...m[1].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+  };
+  const aiScopes = scopeSet(fs.readFileSync(SETTINGS, 'utf8'), /AI_SCOPES: &\[&str\] = &\[([^\]]*)\]/);
+  check(Array.isArray(aiScopes) && aiScopes.length > 0,
+    `⑦0 settings.rs 里解析到 AI_SCOPES（${aiScopes ? aiScopes.length : '解析失败'} 档）`,
+    aiScopes ? '' : '正则没抓到常量体 —— 改写法必须同步本门禁，否则下面四组全是空跑');
+  if (aiScopes && aiScopes.length) {
+    const introJs = fs.readFileSync(INTRO_JS, 'utf8');
+    const pickerJs = fs.readFileSync(PICKER, 'utf8');
+    // 消费方集合从**真实调用点**现算，不照抄 AI_SCOPES：maintenance 档是 maintenance.js
+    // 直连 aidesc.get 的，根本不经过简介面板 —— 按 AI_SCOPES 要求它写 getLocal 分支就是误红。
+    const scriptDir = path.join(ROOT, 'src', 'scripts');
+    const callers = new Set();
+    for (const f of fs.readdirSync(scriptDir).filter((x) => x.endsWith('.js'))) {
+      const t = fs.readFileSync(path.join(scriptDir, f), 'utf8');
+      for (const m of t.matchAll(/mountIntroPanel\(\{[\s\S]{0,220}?scope:\s*'([a-z]+)'/g)) callers.add(m[1]);
+    }
+    const called = [...callers].sort();
+    check(called.length > 0, `⑦1 现算出简介面板的消费档（${called.join(',')}）`,
+      called.length ? '' : '一个都没抓到 = 调用点写法变了，本组会空跑');
+    const noBranch = called.filter((s) => s !== 'contextmenu'
+      && !new RegExp(`scope === '${s}'`).test(introJs));
+    check(noBranch.length === 0,
+      `⑦a intro.js getLocal 为每个消费档都写了显式分支（${called.length} 档全查）`,
+      noBranch.length ? `这些档会静默拿右键管理的简介：${noBranch.join(',')}` : '');
+    const noMeta = called.filter((s) => !new RegExp(`\\n?\\s*${s}: \\{ label:`).test(pickerJs));
+    check(noMeta.length === 0,
+      `⑦b modelpicker.js SCOPE_META 覆盖每个消费档（${called.length} 档全查）`,
+      noMeta.length ? `模型选择器会按「右键管理」显示标题：${noMeta.join(',')}` : '');
+    // 反向：intro.json 里不该有 AI_SCOPES 之外的孤儿 scope（没人会请求它）
+    const dataScopes = Object.keys(intro?.scopes || {});
+    const orphan = dataScopes.filter((s) => !aiScopes.includes(s));
+    check(orphan.length === 0,
+      `⑦c item-intro.json 的 scopes 全部在 AI_SCOPES 内（数据侧 ${dataScopes.length} 档）`,
+      orphan.length ? `孤儿 scope（前端拿不到、也没人会请求）：${orphan.join(',')}` : '');
+    // 消费档也必须在 AI_SCOPES 里（前端在请求一档后端不认的 scope = 静默按 contextmenu 处理）
+    const unknownCall = called.filter((s) => !aiScopes.includes(s));
+    check(unknownCall.length === 0,
+      `⑦e 每个消费档都在 AI_SCOPES 内（否则 aidesc_get 会静默按右键管理档出 prompt）`,
+      unknownCall.length ? `${unknownCall.join(',')} 不在表里` : '');
+    // 正向对照：判定确实在做事 —— 伪造一个"新增档没写分支"的场景必须被抓到
+    const fakeJs = introJs.replace(/if \(scope === 'residue'\) return getResidue\(item\);/, '');
+    const fakeMiss = called.filter((s) => s !== 'contextmenu' && !new RegExp(`scope === '${s}'`).test(fakeJs));
+    check(fakeMiss.includes('residue'),
+      '⑦d 正向对照：抹掉 residue 分支后判据必须抓到它',
+      fakeMiss.length ? `抓到 ${fakeMiss.join(',')}` : '判据疑似坏成恒绿（伪造的缺失没被识别）');
+  }
 }
 
 console.log(`\n简介库：optimizer byId ${Object.keys(byId).length} 条 / 有 tips ${tipsCount} 条 / 覆盖率 ${(tipsCount / Object.keys(byId).length * 100).toFixed(1)}%`);

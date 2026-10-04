@@ -13,7 +13,9 @@
     optimizer: '电脑优化中心',
     startup: '启动项管理',
     contextmenu: '右键管理',
-    memoryclean: '内存清理'
+    memoryclean: '内存清理',
+    maintenance: '系统维护',
+    residue: '应用卸载残留'
   };
 
   function escapeHtml(text) { return window.ds.esc(text); }
@@ -160,10 +162,39 @@
     return { text: cfg.default || '', level: 'default', label: '通用说明' };
   }
 
+  // 应用卸载残留（v0.7.0）：按后端给的稳定 `class` 命中，其次按来源链 origin，最后兜底。
+  // 为什么按 class/origin 而不按 target 文本：target 是本机路径，逐台不同、也最不适合当键；
+  // 而 contribs 的 code 与 class 是后端稳定标识（方案 §6：按 code 寻址不按文案寻址）。
+  function getResidue(item) {
+    const cfg = scopeConfig('residue');
+    const byClass = cfg.byClass || {};
+    const cls = String((item && (item.class || item.deadClass)) || '').trim();
+    const origin = String((item && item.origin) || '').trim();
+    const hit = (cls && byClass[cls]) || (origin && byClass[origin]) || '';
+    const base = hit || cfg.default || '';
+    const facts = [
+      item && item.target ? `落点为 ${compact(item.target, 140)}` : '',
+      item && item.kind ? `形状为 ${compact(KIND_TEXT[item.kind] || item.kind, 24)}` : '',
+      item && item.reason ? `本轮判定：${compact(item.reason, 90)}` : '',
+      item && item.deleteCapable === false ? '本链只登记、不提供删除' : '',
+      item && item.readonly === true ? '深扫区只出报告，未进执行快照' : ''
+    ];
+    return {
+      text: appendFacts(base, facts),
+      level: hit ? 'class' : 'default',
+      label: hit ? '本类残留说明' : '通用说明'
+    };
+  }
+
+  const KIND_TEXT = { reg_key: '注册表项', reg_value: '注册表值', folder: '目录', file: '文件', shortcut: '快捷方式' };
+
   function getLocal(scope, item) {
     if (scope === 'optimizer') return getOptimizer(item);
     if (scope === 'startup') return getStartup(item);
     if (scope === 'memoryclean') return getMemoryclean(item);
+    // 必须显式列出 residue：这里原本只有三条分支 + 落到 getContextmenu 的兜底，
+    // 新 scope 不加分支的话不会报错，而是**静默拿右键管理的简介**去解释一个服务键。
+    if (scope === 'residue') return getResidue(item);
     return getContextmenu(item);
   }
 
@@ -197,6 +228,9 @@
     const name = String((opts && opts.name) || '').trim();
     const company = String((opts && opts.company) || '').trim();
     const item = (opts && opts.item) || { name, company };
+    // 外发明细（只有 residue 档用得上）：{target,kind,class} 三键，
+    // 白名单在后端 residue_detail_line 里再过一遍 —— 前端列全不等于能发全。
+    const detail = (opts && opts.detail) || null;
 
     await load();
     const local = getLocal(scope, item);
@@ -279,7 +313,7 @@
       fetchBtn.textContent = '获取中…';
       contentEl.innerHTML = '<div class="intro-ai-skeleton"><span></span><span></span></div>';
       try {
-        const resp = await window.api.aidesc.get(name, company, !!force, scope);
+        const resp = await window.api.aidesc.get(name, company, !!force, scope, detail);
         if (resp && resp.success && resp.data && resp.data.desc) {
           contentEl.innerHTML = `
             <div class="intro-ai-text">${escapeHtml(resp.data.desc)}</div>

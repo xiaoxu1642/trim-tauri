@@ -552,8 +552,9 @@
     },
 
     aidesc: {
-      get: function (name, company, force, scope) {
-        return invokeChannel('aidesc:get', { name: name, company: company, force: force, scope: scope });
+      // detail 只给 scope='residue' 用：{target,kind,class}，后端按白名单筛后再进 prompt
+      get: function (name, company, force, scope, detail) {
+        return invokeChannel('aidesc:get', { name: name, company: company, force: force, scope: scope, detail: detail || null });
       }
     },
 

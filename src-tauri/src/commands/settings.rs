@@ -41,7 +41,13 @@ pub(crate) const AI_ENGINE_ORDER: &[&str] = &["baidu", "metaso", "zhihu"];
 /// 大模型管理四个模型项（顺序即渲染层 modelList 的 order）
 pub(crate) const AI_MODEL_KEYS: &[&str] = &["baidu_pro", "zhihu", "metaso", "custom"];
 /// 各模块 AI 简介作用域
-pub(crate) const AI_SCOPES: &[&str] = &["optimizer", "startup", "contextmenu", "memoryclean", "maintenance"];
+///
+/// v0.7.0 新增 `residue`（残留扫描副窗的「点击查看」）。加这里的同一轮**必须**同步：
+/// `scope_meta` 的具名分支、`data/item-intro.json` 的 scopes.residue、前端
+/// `intro.js`（SCOPE_LABEL + getLocal 分支）与 `modelpicker.js`（SCOPE_META）——
+/// 漏任何一处的症状都是「静默按右键管理出简介」，内容错但不报错，
+/// 由 `aidesc::ai_scopes_all_have_named_scope_meta` 用例钉住 Rust 侧那一半。
+pub(crate) const AI_SCOPES: &[&str] = &["optimizer", "startup", "contextmenu", "memoryclean", "maintenance", "residue"];
 /// AI 简介全局槽位（统筹全局：所有模块统一使用该模型）
 pub(crate) const GLOBAL_ENGINE_KEY: &str = "global";
 /// 百度千帆默认端点（web_summary，instruction 必填）
@@ -845,6 +851,12 @@ pub(crate) fn scope_meta(scope: &str) -> (&'static str, &'static str) {
         "maintenance" => (
             "系统维护",
             "请用简体中文简要解释下面这个 Windows 系统维护修复项：它是什么、什么情况下需要执行、执行后预期达到的效果与注意事项，控制在150字以内，只输出最终结论，不要思考过程与额外话术。",
+        ),
+        // residue：残留扫描副窗「点击查看」。给的是条目名 + 厂商 + 落点（reg 路径或文件路径），
+        // 话术纪律同 §9.3：只说「建议 / 优先怀疑」，不写「已验证」，不替用户下「一定能删」的结论。
+        "residue" => (
+            "应用卸载残留",
+            "请用简体中文简要说明下面这个 Windows 卸载残留条目是什么（服务、驱动、IFEO 调试器、厂商配置键或游戏库目录）、通常由什么软件留下、优先怀疑的原因，以及删除前建议先确认哪一点，控制在150字以内，只输出最终结论，不要思考过程与额外话术；不要断言一定可以安全删除。",
         ),
         // contextmenu：未传 scope / 未知 scope 的兜底（与 JS 的 scopeKey 兜底同域）
         _ => (

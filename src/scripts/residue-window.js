@@ -320,6 +320,9 @@
         scope: 'residue',
         name: String((item.details && (item.details.serviceName || item.details.ownerName)) || item.target || ''),
         company: String((item.details && item.details.publisher) || ''),
+        // 外发明细：只有这三键。后端 residue_detail_line 再按白名单筛一遍，
+        // 用户名/机器名/卷号/平台整表根本不往这里取（裁定 4 的边界）
+        detail: { target: item.target || '', kind: item.kind || '', class: item.class || '' },
         item: item
       });
     }

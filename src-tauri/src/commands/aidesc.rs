@@ -677,17 +677,49 @@ pub(crate) fn call_model_text(key: &str, cfg: &Value, message: &str) -> Option<S
     call_openai_compat(key, &url, &api_key, &model, message, timeout_ms)
 }
 
+/// 残留条目的「可外发明细」——**字段白名单**，不是「有什么发什么」。
+///
+/// 用户 2026-10-05 裁定外发范围含 reg/文件路径，但白名单之外的键（用户名、机器名、
+/// 卷序列号、`%APPDATA%` 完整用户目录、平台清单整表）一律不进 prompt：
+/// 渲染层传什么都拦在这里按字段筛，判据只有这一处（§5.16）。
+/// 只接受字符串值，非字符串（数组/对象/数字）当没给 —— 免得整张表被塞进一句 prompt。
+fn residue_detail_line(v: &Value) -> String {
+    const ALLOW: [&str; 3] = ["target", "kind", "class"];
+    let Some(map) = v.as_object() else { return String::new(); };
+    let bits: Vec<String> = ALLOW
+        .iter()
+        .filter_map(|k| map.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // 单条上限：注册表路径再长也不该把整段预算吃光（超限截断，不留半截键名误导模型）
+    let line = bits.join(" · ");
+    if line.chars().count() > 400 {
+        let cut: String = line.chars().take(400).collect();
+        format!("{cut}…")
+    } else {
+        line
+    }
+}
+
 /// `buildPrompt`：模板含 {menu}/{company} 占位符则替换，否则追加菜单名与厂商名
-fn build_prompt(template: &str, name: &str, company: &str) -> String {
+fn build_prompt(template: &str, name: &str, company: &str, detail: &str) -> String {
     let p = if template.is_empty() {
         settings::AI_DEFAULT_PROMPT
     } else {
         template
     };
-    if p.contains("{menu}") || p.contains("{company}") {
-        return p.replace("{menu}", name).replace("{company}", company);
+    let base = if p.contains("{menu}") || p.contains("{company}") {
+        p.replace("{menu}", name).replace("{company}", company)
+    } else {
+        format!("{p}\n菜单名称：{name}，所属软件：{company}")
+    };
+    // detail 只在非空时追加：其余 scope 一个字节都不变（缓存键与既有 prompt 都保持原样）
+    if detail.is_empty() {
+        base
+    } else {
+        format!("{base}\n涉及对象：{detail}")
     }
-    format!("{p}\n菜单名称：{name}，所属软件：{company}")
 }
 
 /// `callModelDescription`：按模型种类分发（百度走 AI 搜索摘要，其余走 OpenAI 兼容）
@@ -696,6 +728,7 @@ fn call_model_description(
     cfg: &Value,
     name: &str,
     company: &str,
+    detail: &str,
     scope_prompt: &str,
 ) -> Option<String> {
     let cfg_prompt = cfg
@@ -708,20 +741,19 @@ fn call_model_description(
         if cfg_prompt.is_empty() { scope_prompt } else { &cfg_prompt },
         name,
         company,
+        detail,
     );
     let url = cfg.get("apiUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let api_key = cfg.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let model = cfg.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let timeout_ms = clamp_timeout(cfg.get("timeout"), 30) as u64 * 1000;
     if key == "baidu_pro" {
-        return call_baidu_web_summary(
-            &url,
-            &api_key,
-            None,
-            Some(&prompt),
-            &format!("名称：{name}，所属：{company}"),
-            timeout_ms,
-        );
+        let query = if detail.is_empty() {
+            format!("名称：{name}，所属：{company}")
+        } else {
+            format!("名称：{name}，所属：{company}，涉及对象：{detail}")
+        };
+        return call_baidu_web_summary(&url, &api_key, None, Some(&prompt), &query, timeout_ms);
     }
     call_openai_compat(key, &url, &api_key, &model, &prompt, timeout_ms)
 }
@@ -840,6 +872,10 @@ fn increment_baidu_daily_count() -> i64 {
 // ==================== 命令 ====================
 
 /// aidesc:get — 获取条目联网简介（按全局模型；缓存 7 天；百度日限额 100）
+///
+/// `detail` 只服务 `scope="residue"`：残留条目的落点（reg 路径 / 文件路径）。
+/// 进 prompt 前一律过 `residue_detail_line` 的**字段白名单**；其它 scope 即便传了
+/// 也按空处理 —— 免得别处的调用形状悄悄变味、把外发面越铺越宽。
 #[tauri::command]
 pub async fn aidesc_get<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -847,6 +883,7 @@ pub async fn aidesc_get<R: tauri::Runtime>(
     company: Option<String>,
     force: Option<bool>,
     scope: Option<String>,
+    detail: Option<Value>,
 ) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
     let menu_name = name.unwrap_or_default().trim().to_string();
@@ -863,6 +900,12 @@ pub async fn aidesc_get<R: tauri::Runtime>(
     };
     let (scope_label, scope_prompt) = scope_meta(&scope_key);
     let force = force.unwrap_or(false);
+    // 白名单筛一遍再进 prompt；非 residue 一律当空串（既有 scope 的字节完全不变）
+    let detail_line = if scope_key == "residue" {
+        detail.as_ref().map(residue_detail_line).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let result = tauri::async_runtime::spawn_blocking(move || -> Value {
         let models = models_config();
@@ -875,11 +918,15 @@ pub async fn aidesc_get<R: tauri::Runtime>(
         let cfg = models.get(&engine_key).cloned().unwrap_or_else(|| json!({}));
         let model = cfg.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let cache = load_ai_cache();
-        let cache_key = ai_cache_key(
-            &menu_name,
-            &vendor,
-            &format!("global:{engine_key}:{model}"),
-        );
+        // 带明细的条目必须按明细分键：同一个服务名在不同机器上落点不同，
+        // 共用一条缓存会把「A 机器的解释」端给 B 路径。键里只放明细的摘要，
+        // 不把本机路径写进缓存文件（缓存件是明文 JSON，落在 appdata）。
+        let engine_tag = format!("global:{engine_key}:{model}");
+        let cache_key = if detail_line.is_empty() {
+            ai_cache_key(&menu_name, &vendor, &engine_tag)
+        } else {
+            ai_cache_key(&menu_name, &vendor, &format!("{engine_tag}|{}", md5_hex(&detail_line)))
+        };
 
         if !force {
             if let Some(hit) = cache.get(&cache_key) {
@@ -928,7 +975,7 @@ pub async fn aidesc_get<R: tauri::Runtime>(
             increment_baidu_daily_count();
         }
 
-        let desc = call_model_description(&engine_key, &cfg, &menu_name, &vendor, scope_prompt);
+        let desc = call_model_description(&engine_key, &cfg, &menu_name, &vendor, &detail_line, scope_prompt);
         let Some(desc) = desc else {
             log::write_log(
                 "warn",
@@ -1131,5 +1178,72 @@ mod tests {
         // 非对象整表：当作空表处理，不 panic
         let (v, removed) = prune_ai_cache(&json!([]), now, ttl);
         assert_eq!((v, removed), (json!({}), 0));
+    }
+
+    /// 外发白名单（用户 2026-10-05 裁定「连 reg/文件路径一起发」的**边界**）：
+    /// 只有 target/kind/class 三个键能进 prompt，其余一律丢弃。
+    /// 断言点名「哪些被丢掉了」（`leaked`），不是只断「没有报错」——后者在
+    /// 「函数坏成整表原样输出」时照样绿（§4.1 纪律①）。
+    #[test]
+    fn residue_detail_line_keeps_only_the_whitelisted_fields() {
+        let line = residue_detail_line(&json!({
+            "target": r"HKLM\SYSTEM\CurrentControlSet\Services\NeacSafe",
+            "kind": "reg_key",
+            "class": "dead_landing",
+            // 下面这些都在白名单之外：用户名 / 机器名 / 卷号 / 用户目录 / 整张平台表
+            "userName": "XIAOXU-SENTINEL",
+            "machineName": "PC-SENTINEL",
+            "volumeSerial": "1234-ABCD",
+            "appdata": "C:\\Users\\XIAOXU-SENTINEL\\AppData\\Roaming\\acme",
+            "platforms": ["steam", "epic", "wegame"],
+            "confidence": 0.9
+        }));
+        assert!(
+            line.contains("NeacSafe") && line.contains("reg_key") && line.contains("dead_landing"),
+            "白名单内字段必须出现在待发串里: {line}"
+        );
+        let leaked: Vec<&str> = ["XIAOXU-SENTINEL", "PC-SENTINEL", "1234-ABCD", "steam", "0.9"]
+            .iter()
+            .filter(|needle| line.contains(*needle))
+            .copied()
+            .collect();
+        assert!(leaked.is_empty(), "白名单外字段泄漏进 prompt: {leaked:?}");
+        // 正向对照：空对象/非对象都不该造出内容（免得整表原样输出还「通过」上面那条）
+        assert_eq!(residue_detail_line(&json!({})), "");
+        assert_eq!(residue_detail_line(&json!("整串原样")), "");
+        assert_eq!(residue_detail_line(&json!([1, 2, 3])), "");
+    }
+
+    #[test]
+    fn residue_detail_line_truncates_overlong_targets() {
+        let long = format!("{}TAIL-MARKER", "x".repeat(500));
+        let line = residue_detail_line(&json!({ "target": long }));
+        assert!(line.chars().count() <= 401, "超限没截断: {} 字", line.chars().count());
+        assert!(!line.contains("TAIL-MARKER"), "截断后不该留半截内容");
+    }
+
+    /// 每个 AI_SCOPES 成员都必须有 `scope_meta` 的**具名分支**。
+    /// 为什么钉这条：`scope_meta` 的 `_ =>` 兜底是「右键管理」，新增 scope 忘了加分支时
+    /// 不报错、不 panic，只是**静默按右键管理出简介**（内容错、看起来正常）。
+    /// 判据：非 contextmenu 的 scope，label 不得等于兜底 label。
+    #[test]
+    fn ai_scopes_all_have_named_scope_meta() {
+        const FALLBACK_LABEL: &str = "右键管理";
+        let mut checked = 0usize;
+        for scope in settings::AI_SCOPES {
+            let (label, prompt) = settings::scope_meta(scope);
+            if *scope != "contextmenu" {
+                assert_ne!(
+                    label, FALLBACK_LABEL,
+                    "AI_SCOPES 里的 {scope} 落到了 scope_meta 的兜底分支——忘了加分支（会静默出右键管理简介）"
+                );
+                assert!(!prompt.is_empty(), "{scope} 的 prompt 不能为空");
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, settings::AI_SCOPES.len(), "遍历没覆盖全部 scope");
+        // 正向对照：residue 这一档必须真的在表里（否则上面整组是空跑）
+        assert!(settings::AI_SCOPES.contains(&"residue"), "residue 没进 AI_SCOPES");
+        assert_eq!(settings::scope_meta("residue").0, "应用卸载残留");
     }
 }
