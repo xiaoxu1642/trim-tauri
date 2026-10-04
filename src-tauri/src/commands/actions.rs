@@ -16,7 +16,7 @@
 //!    渲染层只能回传 id —— 与 §9.1「不透传外部命令行」是同一条姿势。
 //! 3. 写与删都过 A1 判据 `reg_target_block_reason`：数据文件被改坏时，不会把写引到别处。
 
-use crate::engine::{guard, log, native, sysinfo};
+use crate::engine::{guard, log, native, protect, sysinfo};
 use serde_json::{Value, json};
 use std::path::Path;
 use tauri::webview::PageLoadEvent;
