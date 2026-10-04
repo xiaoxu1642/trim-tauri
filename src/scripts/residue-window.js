@@ -38,6 +38,7 @@
   const state = {
     appId: '',
     rows: [],            // 三链候选（扁平数组，勾选按全局下标寻址）
+    deepRows: [],        // 深扫区**可删**的那一撮（deleteCapable=true，后端类白名单决定）
     scanGroups: [],
     report: null,        // 深扫报告
     filter: '',
@@ -175,29 +176,47 @@
       state.report = res.data && res.data.report ? res.data.report : null;
       if (!state.report) throw new Error('回执里没有报告数据');
       renderDeep();
-      toast('info', '深扫完成（这一区只出报告，不参与删除）');
+      toast('info', '深扫完成（只有后端放进执行快照的类能勾，其余只出说明）');
     } catch (e) {
       box.innerHTML = '<div class="finder-empty">深扫失败：' + esc(e && e.message ? e.message : e) + '</div>';
       toast('error', '深扫失败：' + (e && e.message ? e.message : e));
     }
   }
 
-  function deepTableHtml(title, items, kind) {
+  function deepTableHtml(title, items, groupKind) {
     const head = '<div class="finder-group-header" style="margin-top:14px"><span>' + esc(title) + ' · ' + items.length + ' 项</span></div>';
     if (!items.length) return head + '<div class="finder-empty">' + esc('本组没有候选。') + '</div>';
     const rows = items.map(function (it, idx) {
-      // 只读区的断言：后端不该给出任何「默认选中」的候选（它没有删除入口，勾选态无处可去）
-      const drift = it.defaultChecked === true ? ' <span class="badge badge-warn">形态漂移：只读区不该有默认勾选项</span>' : '';
+      // 只读区的断言仍在：后端不该给「默认勾选」的候选（危险能力默认关，§9.2）
+      const drift = it.defaultChecked === true ? ' <span class="badge badge-warn">形态漂移：本阶段不该有默认勾选项</span>' : '';
       const gi = state.groupsIndex.get(title) || [];
-      gi.push({ item: it, kind: kind, idx: idx });
+      gi.push({ item: it, kind: groupKind, idx: idx });
       state.groupsIndex.set(title, gi);
+      // 可删与否**只信后端的 deleteCapable**（它由快照集合反推，§5.16）；
+      // protected 区整块传 groupKind='protected'，永远画不出勾选框
+      const can = groupKind !== 'protected' && it.deleteCapable === true;
+      let cell;
+      if (groupKind === 'protected') {
+        cell = '<span class="finder-name-text" style="opacity:.5" data-tip="受保护：不允许删除，只说明为什么">保护</span>';
+      } else if (can) {
+        // 勾选态记在**报告项本身**（不是副本）：搜索框每敲一次都会重渲染这一区，
+        // 记在副本上等于「一改搜索就悄悄取消勾选」
+        if (typeof it._checked !== 'boolean') it._checked = false;
+        const di = state.deepRows.push(it) - 1;
+        it._deepIdx = di;
+        cell = '<span class="checkbox' + (it._checked ? ' checked' : '') + '" data-dcheck="' + di
+          + '" tabindex="0" role="checkbox" aria-checked="' + (it._checked ? 'true' : 'false') + '"></span>';
+      } else {
+        cell = '<span class="finder-name-text" style="opacity:.5" data-tip="这一类不进执行快照：删除判据还没评审过，或删了也不解决问题">—</span>';
+      }
       return '<tr>'
+        + '<td style="width:34px">' + cell + '</td>'
         + '<td><div class="xtable-cell-path">' + esc(it.target) + '</div>'
         + '<div class="xtable-cell-muted">' + esc(it.reason || '') + drift + '</div></td>'
         + '<td style="width:96px"><button class="btn btn-secondary rs-mini-btn" data-detail="d:' + esc(title) + ':' + idx + '" data-tip="查看落点、可否删除与判定依据">点击查看</button></td>'
         + '</tr>';
     }).join('');
-    return head + '<table class="finder-table"><thead><tr><th>目标</th><th style="width:96px">详情</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    return head + '<table class="finder-table"><thead><tr><th style="width:34px"></th><th>目标</th><th style="width:96px">详情</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
   function summaryHtml(r) {
@@ -228,6 +247,7 @@
 
   function renderDeep() {
     state.groupsIndex = new Map();
+    state.deepRows = [];
     const body = el('rsDeepBody');
     const r = state.report;
     if (!r) { body.innerHTML = '<div class="finder-empty">尚无深扫结果。</div>'; return; }
@@ -275,11 +295,25 @@
     }).join('') + '</tbody></table>';
   }
 
-  // 可否删：三链看 deleteCapable，深扫区本轮一律只读（后端不写快照，勾了也执行不了）
+  // 可否删：三链看 deleteCapable；深扫区只看后端回带的 deleteCapable ——
+  // 那个标记由快照集合反推（residue_deep.rs），前端不再自己判一遍类白名单（§5.16）。
+  // 这里只负责把「为什么不给删」说清楚，判据不在这一层。
   function deletableText(item, from) {
     if (from === 'deep') {
-      return '本轮不提供删除：这一区的结果**没有写进执行快照**，后端拿它当报告用。'
-        + '（深扫七器进执行链是方案 §4 的第二期，先把判据与快照形态评审过再开。）';
+      if (item.deleteCapable === true) {
+        return '可以删除：移入回收站（可还原），不进永久删兜底。勾上之后仍要逐项确认。';
+      }
+      const WHY = {
+        orphan_sys_file: '不进执行快照：drivers 目录不在路径保护覆盖范围内，判错即删没有兜底 —— 独立禁删面评审过之前不给删。',
+        minifilter_after_key_deleted: '不作为删除目标：服务键已删而滤镜仍挂载，删文件不解决问题，需要重启。',
+        dead_landing: '不进执行快照：删除服务键要动 HKLM\\SYSTEM，与 A1 禁删面的窄口子同批评审（方案 §5）。',
+        stale_live_service: '不进执行快照：落点还在、服务可能仍在用，且同属服务键一类。',
+        ifeo_debugger: '不进执行快照：IFEO 属微软根，A1 拦着；本区只给说明。',
+        ifeo_stale_options: '不建议删除：键本身要留着（删了 Explorer 会重建空键），这一类只是提示。',
+        capability_consent_dead_landing: '不进执行快照：ConsentStore 属微软根，A1 拦着；本区只给说明。',
+        vendor_product_key_no_landing: '不进执行快照（本阶段）：注册表键的删除链与 A1 窄口子同批评审。'
+      };
+      return WHY[item.class] || '本区默认只读：这一类没进执行快照，前端画不出勾选框。';
     }
     if (item.deleteCapable === false) return '不允许删除：' + (item.reason || '本链只登记、不删除');
     if (item.class === 'minifilter_after_key_deleted') return '不作为删除目标：键已删而滤镜仍挂载，需要重启，不是删文件能解决的。';
@@ -348,7 +382,8 @@
   // ==================== 执行（删除选中） ====================
 
   function updateActionButtons() {
-    const any = state.rows.some(function (f) { return f._checked; });
+    const any = state.rows.some(function (f) { return f._checked; })
+      || state.deepRows.some(function (f) { return f._checked; });
     const clean = el('rsBtnClean');
     if (clean) clean.disabled = !any || state.running;
   }
@@ -363,7 +398,8 @@
   }
 
   async function cleanSelected() {
-    const picked = state.rows.filter(function (f) { return f._checked; });
+    const picked = state.rows.filter(function (f) { return f._checked; })
+      .concat(state.deepRows.filter(function (f) { return f._checked; }));
     if (!picked.length || state.running) return;
     const backup = readBackupPref();
     const ok = await confirmViaModal({
@@ -404,6 +440,18 @@
         return Object.assign({}, g, { rows: g.rows.filter(function (f) { return !done.has(f.kind + '|' + f.target); }) });
       });
       renderChains();
+      // 深扫区同步摘掉已成功项：直接改报告里的 items（不是改渲染出来的 HTML），
+      // 否则「重新扫描」之前那一条还会留在页面上，勾第二次会被快照闸判成过期
+      if (state.report && Array.isArray(state.report.groups)) {
+        state.report.groups.forEach(function (g) {
+          if (Array.isArray(g.items)) {
+            g.items = g.items.filter(function (it) { return !done.has(it.kind + '|' + it.target); });
+            if (typeof g.count === 'number') g.count = g.items.length;
+          }
+        });
+        state.deepRows = [];
+        renderDeep();
+      }
       // 失败的文件项（被占用/无权限）才有「重启后删除」出口；目录后端会拒
       const failedFiles = (d.details || [])
         .filter(function (x) { return x.status !== 'ok' && x.kind === 'file'; })
@@ -414,7 +462,7 @@
     } finally {
       state.running = false;
       updateActionButtons();
-      el('rsFootHint').textContent = '三链区可勾选删除；深扫区只出报告，不改动本机任何东西。';
+      el('rsFootHint').textContent = '勾选来自两个区：三链候选与深扫白名单候选；删除一律回收站优先、逐项确认。';
     }
   }
 
@@ -522,15 +570,29 @@
       return;
     }
     const t = e.target.closest('[data-rcheck]');
-    if (!t) return;
-    const f = state.rows[Number(t.dataset.rcheck)];
-    if (!f || f.deleteCapable === false) return;
-    f._checked = !f._checked;
-    t.classList.toggle('checked', f._checked);
-    t.setAttribute('aria-checked', f._checked ? 'true' : 'false');
-    const tr = t.closest('tr');
-    if (tr) tr.classList.toggle('finder-row-selected', f._checked);
-    updateActionButtons();
+    if (t) {
+      const f = state.rows[Number(t.dataset.rcheck)];
+      if (!f || f.deleteCapable === false) return;
+      f._checked = !f._checked;
+      t.classList.toggle('checked', f._checked);
+      t.setAttribute('aria-checked', f._checked ? 'true' : 'false');
+      const tr = t.closest('tr');
+      if (tr) tr.classList.toggle('finder-row-selected', f._checked);
+      updateActionButtons();
+      return;
+    }
+    // 深扫区勾选：只有后端 deleteCapable=true 的那几项画得出勾选框（类白名单在后端）
+    const d = e.target.closest('[data-dcheck]');
+    if (d) {
+      const it = state.deepRows[Number(d.dataset.dcheck)];
+      if (!it) return;
+      it._checked = !it._checked;
+      d.classList.toggle('checked', it._checked);
+      d.setAttribute('aria-checked', it._checked ? 'true' : 'false');
+      const tr = d.closest('tr');
+      if (tr) tr.classList.toggle('finder-row-selected', it._checked);
+      updateActionButtons();
+    }
   }
 
   // 勾选框是 span 不是 input：键盘可达性要自己补（AGENTS §2，行上「查残留」同理）
