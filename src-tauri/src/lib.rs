@@ -367,6 +367,12 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         // v0.5.0 残留扫描副窗（label `residue`，与 guard::APP_WINDOWS / capabilities 同步）
         commands::residue::residue_open_window,
         commands::residue::residue_close_window,
+        // v0.7.0 第四期：右键菜单动作面板（新副窗，四处同步之一）
+        commands::actions::actions_open_window,
+        commands::actions::actions_close_window,
+        commands::actions::actions_list,
+        commands::actions::actions_apply,
+        commands::actions::actions_remove,
         // ---- B 批：runtimes / netcheck / diskbench ----
         // R1（2026-10-01）：`pwsh_status` 随整条 PowerShell 7 链退役 —— 右键图标改原生取图后
         // 本应用不再需要用户自装 PS7，「探测候选链并回报状态」这件事失去了对象。

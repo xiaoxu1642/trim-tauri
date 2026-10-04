@@ -713,6 +713,54 @@ pub fn cleanup_reg_wipe_block_reason(target: &str, wipe_all_values: bool) -> Opt
     reg_target_block_reason(target)
 }
 
+/// A1 的第二个窄口子：`actions` 域自己写的右键菜单键。
+///
+/// 为什么这里需要口子：A1 把整棵 `HKCU\Software\Classes` 列为禁删面是对的 —— 卸载残留那条
+/// 链会按扫描结果删菜单项，放开了就能删到**别人软件**的键。但「右键菜单动作」面板要能撤销
+/// 自己刚写的那几个键，那些键正好在这棵树下。要么功能永久不可用，要么开一个只认
+/// Trim 自己命名形状的口 —— 选后者，且形状要求苛刻到「不可能是别人的键」。
+///
+/// 与 `cleanup_reg_wipe_block_reason` 同一条纪律（AGENTS §5.16/N6）：**装载侧与执行侧共用
+/// 这一个函数**。两处各写一份「看起来等价」的判据会造出假一致，比单点实现更难发现漂移。
+///
+/// 允许的形状（归一化后，`normalize_reg_target` 已做大写与单反斜杠）：
+/// `HKCU\SOFTWARE\CLASSES\<class>\SHELL\TRIM.<xxx>` —— `<class>` 只认下面四个，
+/// `TRIM.` 之后到键名结束**不得再有 `\`**（不递归），id 字符集限 `[A-Z0-9._-]` 且不允许纯点。
+/// 不满足其中任何一条 ⇒ 返回 `Some(理由)` = 不许走窄口子（A1 的拒绝继续生效）。
+pub const TRIM_SHELL_CLASSES: &[&str] = &["*", "DIRECTORY", r"DIRECTORY\BACKGROUND", "DRIVE"];
+pub const TRIM_SHELL_ID_PREFIX: &str = "TRIM.";
+
+pub fn trim_shell_key_narrow_deny(target: &str) -> Option<String> {
+    // normalize 吐的是 (hive, 去掉 hive 的段数组)，段已大写、已拒空段与 `.`/`..`。
+    // 按段判而不是切字符串：class 自己就能含 `\`（Directory\Background），
+    // 用字符串前缀切会把它的第二段当成层级分隔符。
+    let Some((hive, segs)) = normalize_reg_target(target) else {
+        return Some("目标无法归一化，不享受窄口子".to_string());
+    };
+    if hive != "HKCU" || segs.len() < 5 || segs[0] != "SOFTWARE" || segs[1] != "CLASSES" {
+        return Some("不是 HKCU\\Software\\Classes 下的键，不享受窄口子".to_string());
+    }
+    let last = segs.len() - 1;
+    if segs[last - 1] != "SHELL" {
+        return Some(r"缺少 \shell\ 这一层".to_string());
+    }
+    let class = segs[2..last - 1].join("\\");
+    if !TRIM_SHELL_CLASSES.contains(&class.as_str()) {
+        return Some(format!("类 {class:?} 不在四个白名单类里"));
+    }
+    let id = &segs[last];
+    let Some(tail) = id.strip_prefix(TRIM_SHELL_ID_PREFIX) else {
+        return Some(format!("键名不是 {} 前缀，可能是别人软件的菜单项", TRIM_SHELL_ID_PREFIX));
+    };
+    if tail.is_empty() || tail.chars().all(|c| c == '.') {
+        return Some("键名为空或全是点".to_string());
+    }
+    if id.len() > 70 || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Some("键名字符集或长度不合格".to_string());
+    }
+    None
+}
+
 // ==================== 与 JS 权威实现的三端同源对拍（cargo test 门禁） ====================
 
 #[cfg(test)]

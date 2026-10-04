@@ -205,6 +205,12 @@
     // residue 窗口（2）—— v0.5.0 残留扫描副窗（用户裁决 4：扫描全在副窗，主窗只留入口）
     'residue:open-window': 'residue_open_window',
     'residue:close-window': 'residue_close_window',
+    // v0.7.0 第四期：右键菜单动作面板（只写 HKCU，命令串取随包数据，前端只回传 id）
+    'actions:open-window': 'actions_open_window',
+    'actions:close-window': 'actions_close_window',
+    'actions:list': 'actions_list',
+    'actions:apply': 'actions_apply',
+    'actions:remove': 'actions_remove',
     'peripheral:query': 'peripheral_query',
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
@@ -663,6 +669,14 @@
       closeWindow: function () { return invokeChannel('residue:close-window'); },
       // 副窗已开着时主窗又点了「查残留」：新目标走事件进来（能力面已授 core:event:allow-listen）
       onTarget: function (callback) { return onEvent('residue:target', function (payload) { callback(payload); }); }
+    },
+
+    actionsWindow: {
+      openWindow: function () { return invokeChannel('actions:open-window'); },
+      closeWindow: function () { return invokeChannel('actions:close-window'); },
+      list: function () { return invokeChannel('actions:list'); },
+      apply: function (ids) { return invokeChannel('actions:apply', { ids: ids }); },
+      remove: function (ids) { return invokeChannel('actions:remove', { ids: ids }); }
     },
 
     quickCmds: {

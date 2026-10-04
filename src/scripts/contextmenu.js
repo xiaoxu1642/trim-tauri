@@ -1000,6 +1000,15 @@
       window.app?.toast('info', '改动已写入注册表，稍后可在资源管理器任务栏右键或重登后生效');
     });
     document.getElementById('btnCtxModePanel')?.addEventListener('click', toggleModePanel);
+    // v0.7.0：内置动作的写入面在副窗里，主窗只留入口（与残留窗同一形态，§2 单窗纪律）
+    document.getElementById('btnActionsWindow')?.addEventListener('click', async () => {
+      try {
+        const r = await window.api.actionsWindow.openWindow();
+        if (r && r.success === false) window.app?.toast?.('error', r.message || '打开「右键菜单动作」窗口失败');
+      } catch (e) {
+        window.app?.toast?.('error', '打开「右键菜单动作」窗口失败: ' + ((e && e.message) || e));
+      }
+    });
     renderApplyBar();
     // v3.2.1：进入页面自动加载缓存（首次无缓存时自动扫描一次并落盘）
     scan(false);

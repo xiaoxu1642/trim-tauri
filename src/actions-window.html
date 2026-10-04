@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="theme-color" content="#f3f3f3" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file: asset: http://asset.localhost; font-src 'self' file: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
+  <title>右键菜单动作</title>
+  <link rel="icon" href="./assets/ico/Trim.ico" />
+  <link rel="stylesheet" href="styles/main.css" />
+  <link rel="stylesheet" href="styles/ds.css" />
+</head>
+<body class="mw-window ac-window">
+  <div class="mw-shell">
+    <div class="pw-topbar">
+      <div class="pw-topbar-copy">
+        <h1>右键菜单动作</h1>
+        <div class="pw-topbar-sub">把下面的项投影成 Windows 资源管理器右键菜单里的自定义条目。<b>只写当前账号的 HKCU，不需要管理员，也不改任何别人的菜单项。</b></div>
+      </div>
+      <div class="pw-topbar-actions">
+        <button class="btn btn-secondary" id="acRefreshBtn" data-tip="重新读取清单与当前 HKCU 落点">重新读取</button>
+        <button class="btn btn-secondary" id="acRemoveBtn" disabled data-tip="删除已勾选条目写过的 HKCU 键（只删清单里的 id，别的软件的键一律不碰）">移除选中</button>
+        <button class="btn btn-primary" id="acApplyBtn" disabled data-tip="把勾选项写入 HKCU\Software\Classes">写入选中</button>
+        <button class="btn btn-secondary" id="acCloseBtn">完成</button>
+      </div>
+    </div>
+
+    <div class="mw-content">
+      <div class="mw-card">
+        <div class="mw-card-head">
+          <span class="mw-card-title">内置动作</span>
+          <span class="mw-card-desc" id="acSummary">正在读取…</span>
+        </div>
+        <div class="mw-body" id="acBody">
+          <div class="finder-empty"><p>正在读取内置动作清单…</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mw-footer">
+      <span class="mw-foot-hint" id="acFootHint">命令串来自随包数据，界面只表达「选了哪些项」。</span>
+      <span class="mw-foot-hint" id="acGlobalHint" style="margin:0"></span>
+    </div>
+  </div>
+
+  <!-- 脚本链：tauri-api 最前（加载期就读 window.api）；ds.js 先于 modal.js/intro 使用方（§2 M17） -->
+  <script src="scripts/tauri-api.js"></script>
+  <script src="scripts/window-material.js"></script>
+  <script src="scripts/ds.js"></script>
+  <script src="scripts/modal.js"></script>
+  <script src="scripts/sub-toast.js"></script>
+  <script src="scripts/actions-window.js"></script>
+</body>
+</html>

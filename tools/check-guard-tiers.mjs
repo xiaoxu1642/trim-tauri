@@ -75,6 +75,7 @@ const EXEMPT = {
  * 由 v2 审查现场枚举（138 条走 guard，其中 guard(MAIN) 35 条）+ 本轮 F4/F6 升档得出。
  */
 const MUST_MAIN = [
+  'actions_open_window',  // v0.7.0：只有主窗入口按钮会调（副窗只调 close），同 residue_open_window 口径
   'appearance_bg_delete',
   'appearance_bg_import',
   'appearance_bg_list',
@@ -310,6 +311,8 @@ const MUST_READONLY = [
   // 却挂在 readonly 档（放行全部五个窗口 label）—— 逐条列在文件头「已知档位疑点」一节。
   // 本批**不改**这些档位：改档会锁死或放开功能，须按 AGENTS §3「档位以谁真的需要调它
   // 为准」的 M1~M3 教训单独评审。
+  'actions_close_window',  // v0.7.0：副窗自己关自己
+  'actions_list',  // v0.7.0：副窗读清单与落点（无副作用）
   'aidesc_get',
   'app_get_info',
   'app_open_external', // 疑点：起浏览器/协议处理器
@@ -434,6 +437,11 @@ const MUST_WINDOWSET = {
       'uninstall_residue_execute',
       'uninstall_residue_scan',
     ],
+  },
+  // v0.7.0 第四期：右键菜单动作面板的写侧（只写 HKCU，删除只走 TRIM. 前缀窄口子）
+  ACTIONS_WINDOWS: {
+    labels: ['actions'],
+    cmds: ['actions_apply', 'actions_remove'],
   },
 };
 

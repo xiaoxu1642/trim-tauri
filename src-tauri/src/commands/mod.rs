@@ -20,6 +20,7 @@ pub mod netcheck;
 pub mod diskbench;
 pub mod preview;
 pub mod residue;
+pub mod actions;
 pub mod processmanager;
 pub mod runtimes;
 // ---- C 批（安全与规则）----

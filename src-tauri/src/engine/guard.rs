@@ -18,7 +18,7 @@ use crate::engine::log;
 /// `residue` 是 v0.5.0 新增的残留扫描副窗（`commands/residue.rs`）；
 /// 加这里的同一轮必须同步 `capabilities/subwindows.json`，否则窗口建得出来、
 /// 权限却拿不到 IPC。
-pub const APP_WINDOWS: &[&str] = &["main", "models", "preview", "processManager", "peripheral", "residue"];
+pub const APP_WINDOWS: &[&str] = &["main", "models", "preview", "processManager", "peripheral", "residue", "actions"];
 
 /// 主窗口 label（多数高危及「主窗专属」通道只允许它调用）
 pub const MAIN: &[&str] = &["main"];
@@ -37,6 +37,13 @@ pub const MAIN: &[&str] = &["main"];
 /// 新增成员必须同步 `tools/check-guard-tiers.mjs` 的 E 组（双向棘轮）与
 /// `capabilities/subwindows.json`，否则窗口建得出来、IPC 判越权。
 pub const RESIDUE_WINDOWS: &[&str] = &["residue"];
+
+/// 右键菜单动作面板（`commands/actions.rs`）专属窗口集。
+///
+/// 这里的两条写侧命令（`actions_apply` / `actions_remove`）会往 `HKCU\Software\Classes`
+/// 底下建键删键，合法调用方只有那一扇窗。同 RESIDUE_WINDOWS 的理由：留 MAIN 副窗判越权，
+/// 放宽到 APP_WINDOWS 又等于「注入任一子窗就能改右键菜单」。
+pub const ACTIONS_WINDOWS: &[&str] = &["actions"];
 
 /// 校验调用来源窗口；返回 label 或错误消息（错误消息直接回给渲染层）。
 /// 校验失败同时写日志——静默拒绝会掩盖注入尝试。
