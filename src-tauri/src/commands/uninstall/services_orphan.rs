@@ -87,6 +87,113 @@ pub(super) fn anticheat_marker(name: &str, image_stem: &str) -> Option<&'static 
     ANTICHEAT_MARKERS.iter().find(|(k, _)| n.contains(*k) || i.contains(*k)).map(|(_, label)| *label)
 }
 
+const SERVICE_KEY_PFX: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\";
+
+/// 形状判定（**纯**，可穷举测试）：合格则返回 Services 下那一层的服务名。
+/// 只认 `CurrentControlSet`：改 `ControlSet001` 那份不生效，等于假还原。
+fn service_key_name(target: &str) -> Option<&str> {
+    let t = target.trim();
+    if t.len() <= SERVICE_KEY_PFX.len() || !t[..SERVICE_KEY_PFX.len()].eq_ignore_ascii_case(SERVICE_KEY_PFX) {
+        return None;
+    }
+    let name = &t[SERVICE_KEY_PFX.len()..];
+    if name.is_empty() || name.contains('\\') {
+        return None;
+    }
+    Some(name)
+}
+
+/// 形状不合格时的拒因（与 `service_key_name` 同一套前缀常量，不重复判据）。
+fn service_key_shape_reject(target: &str) -> Option<String> {
+    let t = target.trim();
+    if t.len() > SERVICE_KEY_PFX.len() && t[..SERVICE_KEY_PFX.len()].eq_ignore_ascii_case(SERVICE_KEY_PFX) {
+        let name = &t[SERVICE_KEY_PFX.len()..];
+        if name.contains('\\') {
+            return Some("服务键下面还有子键，本口子不递归删".to_string());
+        }
+        return Some("Services 下的服务名为空".to_string());
+    }
+    Some(format!("不是 {SERVICE_KEY_PFX}<服务名> 这种一层服务键形状"))
+}
+
+/// [`service_key_delete_block_reason`] 的形状预筛：执行侧用它决定「要不要现读注册表问一次」。
+/// 只做大小写无关的前缀判断，不带任何语义 —— 语义全在判据函数里（§5.16 禁两套实现）。
+pub(super) fn looks_like_service_key(target: &str) -> bool {
+    service_key_name(target).is_some()
+}
+
+/// **服务键删除的唯一判据**：装载侧（深扫标记 deleteCapable）与执行侧
+/// （`classify_residue_op` 的 A1 窄口子）必须调这同一个函数（AGENTS §5.16/N6）。
+/// 返回 `None` = 允许进删除链；`Some(reason)` = 拒，reason 直接进报告与日志。
+///
+/// 这是本仓唯一一处「A1 禁删面 `HKLM\SYSTEM` 让路」的口子，所以每条都是**排除式**的：
+/// 有一点不确定就拒。八道条件缺一不可 ——
+/// 1. 形状：`HKLM\SYSTEM\CurrentControlSet\Services\<name>`，Services 下**恰好一层**，
+///    且只认 `CurrentControlSet`（改 ControlSet001 那份不生效，等于假还原）；
+/// 2. 键真的存在（不存在就没东西可删）；
+/// 3. `ImagePath` 解析不出落点 ⇒ 拒。解析不出（相对名 / `Device\` / 变量取不到）
+///    意味着对「它是什么」没有事实，只能留；
+/// 4. 落点文件**还在** ⇒ 拒。本口子只处理「文件已经没了、键还挂着」这一类：
+///    落点在的服务可能被 SCM、依赖方或计划任务正用着，判错方向不可逆；
+/// 5. 落点在 `%windir%` 之下 ⇒ 拒。**这条是「微软组件」的替身判据**：文件已不存在就读不到
+///    签名，`signature_known=false` 此时毫无信息量，而 Windows 自身组件的 ImagePath 必然
+///    指向 System32/SysWOW64 —— 用路径挡，才不依赖一个此刻拿不到的证据；
+/// 6. `Type` 是内核驱动(0x1)/文件系统驱动(0x2)，或 `Start` 是 boot(0)/system(1) ⇒ 拒。
+///    这类键由会话早期加载器读，删了出问题就是蓝屏或起不来，与「清一条残留」的收益不成比例；
+/// 7. 有 `DependOnService` ⇒ 拒。还有别的服务声明依赖它，「没人用」这条不成立；
+/// 8. 命中反作弊名单（`ANTICHEAT_MARKERS`）⇒ 拒。无条件生效，不吃「清单读全」这种条件。
+///
+/// 提权（`is_admin()`）**不在这里判**：判据函数不该知道调用方的权限态，那一闸由执行侧
+/// 在调完本函数之后再补一道（缺了它写 HKLM 会失败，不是安全问题）。
+///
+/// 本函数**现读注册表**，不读快照里缓存的结论：扫描与执行之间用户可能重装了游戏、
+/// 也可能把服务重新起来了 —— 拿那一刻的事实去删这一刻的键，正是「按过期证据动系统」那类缺陷。
+pub(super) unsafe fn service_key_delete_block_reason(target: &str) -> Option<String> {
+    use std::path::Path;
+    let name = match service_key_name(target) {
+        Some(n) => n,
+        None => return service_key_shape_reject(target),
+    };
+    let name = name.to_string();
+    let Some(hk) = open_key_read(windows::Win32::System::Registry::HKEY_LOCAL_MACHINE, &format!(r"{SERVICES_ROOT}\{name}")) else {
+        return Some("服务键打不开或已不存在".to_string());
+    };
+    let image_raw = reg_sz(hk, "ImagePath").unwrap_or_default();
+    let start = reg_dword(hk, "Start");
+    let svc_type = reg_dword(hk, "Type");
+    let depends = reg_multi_sz(hk, "DependOnService");
+    let _ = windows::Win32::System::Registry::RegCloseKey(hk);
+    let landing = if image_raw.trim().is_empty() { None } else { dead_landing(&image_raw) };
+    let Some(landing) = landing else {
+        return Some(format!("ImagePath 解析不出落点（原串 {image_raw}），对「它是什么」没有事实"));
+    };
+    if Path::new(&landing).exists() {
+        return Some(format!("落点仍然存在（{landing}），本口子只处理文件已失踪的键"));
+    }
+    // %windir% 取不到 ⇒ 第 5 道闸无法判 ⇒ 按不确定处理，拒
+    let windir = std::env::var("SystemRoot").or_else(|_| std::env::var("WINDIR")).unwrap_or_default();
+    if windir.trim().is_empty() {
+        return Some("读不到 %SystemRoot%，无法判断落点是否属于 Windows 自身组件".to_string());
+    }
+    if landing.to_lowercase().starts_with(&windir.to_lowercase()) {
+        return Some(format!("落点在系统目录内（{landing}），按 Windows 自身组件对待，不删"));
+    }
+    if matches!(svc_type, Some(0x1) | Some(0x2)) {
+        return Some("服务类型是内核/文件系统驱动，删键的失败模式是启动期故障，不可接受".to_string());
+    }
+    if matches!(start, Some(0) | Some(1)) {
+        return Some("启动类型是 boot/system，由会话早期加载，删键可能导致系统起不来".to_string());
+    }
+    if !depends.is_empty() {
+        return Some(format!("仍有 {} 项依赖声明指向它，「没人用」不成立", depends.len()));
+    }
+    let stem = Path::new(&landing).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    if let Some(marker) = anticheat_marker(&name, &stem) {
+        return Some(format!("命中反作弊名单（{marker}），无条件不删"));
+    }
+    None
+}
+
 /// 分类判定（纯函数，单测覆盖 §2.1 的三分类与两条闸门）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServiceClass {
@@ -584,8 +691,77 @@ mod tests {
 
     #[test]
     fn services_root_is_the_narrow_scope_named_in_the_plan() {
-        // 方案 §2.3 的窄口子只针对这一棵；本阶段整棵仍属 A1 禁删面，
-        // 这条断言钉住扫描面与将来口子同一路径，避免扫描器扫 A、删除口开在 B
+        // 方案 §5 的窄口子开在这一棵上（v0.7.0 第三阶段已落地）。钉住扫描面与删除口
+        // 走同一条路径，避免将来扫描器扫 A、口子开在 B。
         assert_eq!(SERVICES_ROOT, r"SYSTEM\CurrentControlSet\Services");
+    }
+
+    /// 形状判据穷举（纯函数，不碰注册表）：合格只有一种，其余全是拒。
+    /// 特别钉三条：`ControlSet001` 不吃（改了不生效 = 假还原）、二级子键不吃（不递归）、
+    /// 别的 hive 前缀不吃（HKCU 下没有服务键，写它只会静默失败）。
+    #[test]
+    fn service_key_shape_accepts_exactly_one_level_under_currentcontrolset() {
+        assert_eq!(service_key_name(r"HKLM\SYSTEM\CurrentControlSet\Services\AcmeSvc").unwrap(), "AcmeSvc");
+        assert_eq!(service_key_name(r"hklm\system\currentcontrolset\services\ACME").unwrap(), "ACME");
+        let rejected = [
+            r"HKLM\SYSTEM\CurrentControlSet\Services",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\Acme\Params",
+            r"HKLM\SYSTEM\ControlSet001\Services\Acme",
+            r"HKCU\SOFTWARE\Acme",
+            r"HKLM\SYSTEM\CurrentControlSet\Serviceset\Acme",
+            "",
+        ];
+        for t in rejected {
+            assert_eq!(service_key_name(t), None, "形状判据误接受: {t:?}");
+            assert!(!looks_like_service_key(t), "预筛与主判据不一致: {t:?}");
+        }
+        // 首尾空白：判据自己 trim，不接受「看着不对」的分裂口径
+        assert_eq!(service_key_name("  HKLM\\SYSTEM\\CurrentControlSet\\Services\\Acme  ").unwrap(), "Acme");
+        // 拒因要具体到「为什么」：报告与日志都靠这句话解释「为什么不给删」
+        assert!(service_key_shape_reject(r"HKLM\SYSTEM\CurrentControlSet\Services\Acme\Params")
+            .unwrap()
+            .contains("子键"));
+        assert!(service_key_shape_reject(r"HKLM\SYSTEM\ControlSet001\Services\Acme")
+            .unwrap()
+            .contains("CurrentControlSet"));
+    }
+
+    /// 预筛（执行侧用来决定要不要现读注册表）与主判据的形状段必须口径一致。
+    #[test]
+    fn shape_prefilter_and_main_predicate_agree() {
+        for t in [
+            r"HKLM\SYSTEM\CurrentControlSet\Services\Acme",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\Acme\Params",
+            r"HKLM\SYSTEM\ControlSet001\Services\Acme",
+            r"HKCU\SOFTWARE\Acme",
+        ] {
+            let pre = looks_like_service_key(t);
+            let main_passes_shape = service_key_name(t).is_some();
+            assert_eq!(pre, main_passes_shape, "预筛与主判据对 {t:?} 判得不一致: 预筛 {pre} / 主判据 {main_passes_shape}");
+        }
+    }
+
+    /// **真机、只读**：Windows 自身的几条服务必须一律被拒（八道判据里至少命中一条）。
+    /// 这条是窄口子最重要的负向保险：它证明「现读判据」真的在挡系统组件，
+    /// 而不是只在假数据上成立。读 HKLM\...\Services 不需要管理员。
+    #[test]
+    fn real_windows_services_are_rejected() {
+        for name in ["Winmgmt", "RpcSs", "Schedule", "BITS", "W32Time"] {
+            let target = format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{name}");
+            let reason = unsafe { service_key_delete_block_reason(&target) };
+            assert!(reason.is_some(), "系统服务 {name} 竟然被判成可删 —— 至少一条判据该挡住它");
+            let r = reason.unwrap();
+            let expected = ["仍然存在", "系统目录", "boot", "驱动", "依赖", "解析不出", "打不开"];
+            assert!(
+                expected.iter().any(|w| r.contains(w)),
+                "{name} 的拒因不在预期集合里，判据可能已退化: {r}"
+            );
+        }
+        // 正向对照的另一半：本机不存在的键也必须被拒（否则「键不存在」那道闸坏了，
+        // 删除会静默假成功）
+        let ghost =
+            unsafe { service_key_delete_block_reason(r"HKLM\SYSTEM\CurrentControlSet\Services\TrimNoSuchSvc-9f3a") };
+        assert!(ghost.is_some(), "不存在的键被判成可删: {ghost:?}");
     }
 }

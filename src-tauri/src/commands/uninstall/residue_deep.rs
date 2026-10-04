@@ -160,27 +160,46 @@ unsafe fn scan_all() -> Value {
 ///
 /// 白名单只有一类：`untracked_game_dir` 的 `folder` —— 平台库根下、清单没记录的一级目录，
 /// 删除走回收站（`trim_finder::scan::delete`），失败不降级永久删（§3）。
-pub(super) fn deep_executable_candidates(report: &Value) -> Vec<Value> {
+/// 白名单里有两类（v0.7.0 第二阶段 + 第三阶段窄口子）：
+/// - `untracked_game_dir` 的 folder —— 回收站优先；
+/// - `dead_landing` 的 service reg_key —— 且必须**现读**八道排除式判据全过
+///   （`services_orphan::service_key_delete_block_reason`，执行侧调的是同一个函数）。
+pub(super) unsafe fn deep_executable_candidates(report: &Value) -> Vec<Value> {
     let groups = match report.get("groups").and_then(Value::as_array) {
         Some(g) => g,
         None => return Vec::new(),
     };
     let mut out = Vec::new();
     for g in groups {
-        if g.get("id").and_then(Value::as_str) != Some("gameDirs") {
-            continue;
-        }
-        let items = g.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+        let id = g.get("id").and_then(Value::as_str).unwrap_or("");
+        let items = match g.get("items").and_then(Value::as_array) {
+            Some(i) => i,
+            None => continue,
+        };
         for it in items {
-            if it.get("kind").and_then(Value::as_str) != Some("folder")
-                || it.get("class").and_then(Value::as_str) != Some("untracked_game_dir")
-            {
+            let kind = it.get("kind").and_then(Value::as_str).unwrap_or("");
+            let class = it.get("class").and_then(Value::as_str).unwrap_or("");
+            let admitted = match id {
+                "gameDirs" => kind == "folder" && class == "untracked_game_dir",
+                // 服务键：类必须是 dead_landing（落点失踪），再过八道现读判据。
+                // 判据里已经含「落点在 %windir% 就拒」——那是「微软组件」的替身证据，
+                // 文件不在了就读不到签名，不能拿「读不到」当「不是微软」。
+                "services" => {
+                    kind == "reg_key"
+                        && class == "dead_landing"
+                        && it.get("target").and_then(Value::as_str)
+                            .map(|t| services_orphan::service_key_delete_block_reason(t).is_none())
+                            .unwrap_or(false)
+                }
+                _ => false,
+            };
+            if !admitted {
                 continue;
             }
             let Some(obj) = it.as_object() else { continue };
             let mut entry = obj.clone();
             // origin 是分桶键（`residue_snapshot_put` 按它替换），必须在这里落上；
-            // deleteCapable=false 的行前端画不出勾选框，深扫区默认全是只读
+            // defaultChecked=false：危险能力默认关（§9.2）
             entry.insert("origin".into(), json!("deep"));
             entry.insert("deleteCapable".into(), json!(true));
             entry.insert("defaultChecked".into(), json!(false));
@@ -196,19 +215,14 @@ pub async fn uninstall_residue_deep_scan<R: tauri::Runtime>(window: WebviewWindo
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let scanned = tauri::async_runtime::spawn_blocking(|| unsafe { scan_all() })
+    let (mut scanned, executable) = tauri::async_runtime::spawn_blocking(|| unsafe {
+            let r = scan_all();
+            let c = if r.get("fatal").is_some() { Vec::new() } else { deep_executable_candidates(&r) };
+            (r, c)
+        })
         .await
-        .unwrap_or_else(|e| json!({ "fatal": format!("扫描线程未返回：{e}") }));
-    // 快照只写白名单内的那一撮（deep_executable_candidates 的注释是判据本体）。
-    // 按 label 分槽 ⇒ 副窗只能执行自己扫出来的东西；扫描失败/线程 panic 时不写，
-    // 保持「读不到就别动手」的 fail-closed 口径。
-    let executable = if scanned.get("fatal").is_some() {
-        Vec::new()
-    } else {
-        deep_executable_candidates(&scanned)
-    };
+        .unwrap_or_else(|e| (json!({ "fatal": format!("扫描线程未返回：{e}") }), Vec::new()));
     let count = executable.len();
-    let mut scanned = scanned;
     if count > 0 {
         residue_snapshot_put(window.label(), "deep", executable.clone());
         // 报告里的可删标记**由快照集合反推**，不另写一遍判据（§5.16/N6）：
@@ -308,19 +322,26 @@ mod tests {
     /// 所以这里同时断言 `passed` 集合恰好等于白名单，且构造里必须真的出现被拒的类。
     #[test]
     fn deep_whitelist_admits_only_untracked_game_folders() {
-        let mk = |kind: &str, class: &str| json!({ "kind": kind, "class": class, "target": "X", "readonly": true });
+        let mk = |kind: &str, class: &str, target: &str| json!({ "kind": kind, "class": class, "target": target, "readonly": true });
         let report = json!({
             "groups": [
-                { "id": "gameDirs", "items": [ mk("folder", "untracked_game_dir"), mk("file", "untracked_game_dir") ] },
-                { "id": "drivers", "items": [ mk("file", "orphan_sys_file") ] },
-                { "id": "minifilters", "items": [ mk("note_only", "minifilter_after_key_deleted") ] },
-                { "id": "services", "items": [ mk("reg_key", "dead_landing"), mk("reg_key", "stale_live_service") ] },
-                { "id": "ifeo", "items": [ mk("reg_key", "ifeo_debugger") ] },
-                { "id": "capability", "items": [ mk("reg_key", "capability_consent_dead_landing") ] },
-                { "id": "vendor", "items": [ mk("reg_key", "vendor_product_key_no_landing") ] },
+                { "id": "gameDirs", "items": [ mk("folder", "untracked_game_dir", r"E:\Steam\library\acme"), mk("file", "untracked_game_dir", r"E:\Steam\library\x.bin") ] },
+                { "id": "drivers", "items": [ mk("file", "orphan_sys_file", r"C:\Windows\System32\drivers\acme.sys") ] },
+                { "id": "minifilters", "items": [ mk("note_only", "minifilter_after_key_deleted", "AcmeFlt") ] },
+                // 服务组三条：形状不合格的、形状合格但本机没有这个键的、类不是 dead_landing 的
+                { "id": "services", "items": [
+                    mk("reg_key", "dead_landing", "HKLM\\SOFTWARE\\acme"),
+                    mk("reg_key", "dead_landing", r"HKLM\SYSTEM\CurrentControlSet\Services\TrimNoSuchSvc-9f3a"),
+                    mk("reg_key", "stale_live_service", r"HKLM\SYSTEM\CurrentControlSet\Services\TrimNoSuchSvc2-9f3a"),
+                ] },
+                { "id": "ifeo", "items": [ mk("reg_key", "ifeo_debugger", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\acme.exe") ] },
+                { "id": "capability", "items": [ mk("reg_key", "capability_consent_dead_landing", "HKLM\\SOFTWARE\\...") ] },
+                { "id": "vendor", "items": [ mk("reg_key", "vendor_product_key_no_landing", "HKCU\\SOFTWARE\\acme") ] },
             ]
         });
-        let got = deep_executable_candidates(&report);
+        // 服务键那两条要现读注册表才能判 ⇒ 本函数是 unsafe fn；读的是 HKLM\...\Services\TrimNoSuchSvc-*，
+        // 本机不存在这些键，判定必然是「服务键打不开或已不存在」，与在谁的机器上跑无关。
+        let got = unsafe { deep_executable_candidates(&report) };
         let keys: Vec<(String, String)> = got
             .iter()
             .map(|v| {
@@ -344,9 +365,9 @@ mod tests {
             assert_eq!(v["readonly"], json!(true), "原始字段必须保留，筛子不许改坏报告内容");
         }
         // 缺组/坏形状都不许 panic，且不得产出候选
-        assert!(deep_executable_candidates(&json!({})).is_empty());
-        assert!(deep_executable_candidates(&json!({ "groups": [] })).is_empty());
-        assert!(deep_executable_candidates(&json!({ "groups": [{ "id": "gameDirs" }] })).is_empty());
+        assert!(unsafe { deep_executable_candidates(&json!({})) }.is_empty());
+        assert!(unsafe { deep_executable_candidates(&json!({ "groups": [] })) }.is_empty());
+        assert!(unsafe { deep_executable_candidates(&json!({ "groups": [{ "id": "gameDirs" }] })) }.is_empty());
     }
 
     /// 七个分组必须一个不少，且 id 与方案 §3 的扫描器一一对应

@@ -5,7 +5,7 @@
 //! 先过 `engine::protect::is_path_protected` + 回收站优先，**不做永久删除兜底**；
 //! 注册表先 export 备份再删，备份失败整项跳过。
 
-use crate::engine::{delete_manifest, guard, log, protect};
+use crate::engine::{delete_manifest, guard, log, protect, sysinfo};
 use crate::engine::reg_backup::write_reg_backup_seal;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -17,6 +17,8 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use super::helpers::*;
 use super::appx::*;
 use super::list_run::*;
+// A1 服务键窄口子：判据只在 services_orphan 那一处实现，这里只调它（§5.16/N6）
+use super::services_orphan;
 use super::residue_update::*;
 use super::ownership::*;
 use super::dead::*;
@@ -871,10 +873,21 @@ pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
             // A1 执行侧硬闸（与扫描侧同一判定）：快照闸只证明「来自上次扫描」，
             // 证明不了「这个目标不该删」—— 危险候选本来就是扫描器按规则产出的。
             if let Some(reason) = protect::reg_target_block_reason(target) {
-                log::write_log("warn", &format!("uninstall_residue_execute 拒绝注册表目标: {reason}"));
-                // 状态只用既有的 skip：报告明细按 ok/fail/skip 三态渲染中文标签，
-                // 新增 status 会在前端漏出英文字面量（uninstall.js:487）
-                return OpVerdict::Skip(format!("已拒绝删除：{reason}"));
+                // 唯一的例外：服务键窄口子（方案 §5）。三条同时成立才放行 ——
+                // 形状合格、**此刻**现读八道排除式判据全过、且已提权（HKLM 写不进去的
+                // 话删了也是假成功）。判据本体在 `services_orphan::service_key_delete_block_reason`，
+                // 装载侧调的是同一个函数，所以「UI 说能删」与「执行侧肯删」不可能各判一次。
+                let narrow = services_orphan::looks_like_service_key(target)
+                    && sysinfo::is_admin()
+                    && unsafe { services_orphan::service_key_delete_block_reason(target) }.is_none();
+                if !narrow {
+                    log::write_log("warn", &format!("uninstall_residue_execute 拒绝注册表目标: {reason}"));
+                    // 状态只用既有的 skip：报告明细按 ok/fail/skip 三态渲染中文标签，
+                    // 新增 status 会在前端漏出英文字面量（uninstall.js:487）
+                    return OpVerdict::Skip(format!("已拒绝删除：{reason}"));
+                }
+                // 放行必须留痕：这条是本仓唯一一处「A1 让路」，事后要能在日志里数出来
+                log::write_log("warn", &format!("A1 服务键窄口子放行（八道判据现读全过 + 已提权）: {target}"));
             }
             if !crate::engine::native::reg_key_exists(hive, &rest) {
                 return skip("注册表项已不存在");

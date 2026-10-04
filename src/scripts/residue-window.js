@@ -301,13 +301,20 @@
   function deletableText(item, from) {
     if (from === 'deep') {
       if (item.deleteCapable === true) {
+        if (item.kind === 'reg_key') {
+          // 服务键的还原语义必须说全：.reg 还原是「把键加回来」，不恢复删除那一刻的
+          // 运行态（服务不会自动重新起来），且 SCM 读到新键可能要重启。§9.3：不写「一键还原」
+          return '可以删除：八道判据此刻全部现读通过（落点已失踪、不在系统目录、非内核驱动、'
+            + '非 boot/system 启动、无依赖声明、不在反作弊名单）。删除前会先整键导出 .reg 备份；'
+            + '还原是把键加回去，不恢复运行状态，可能需重启才生效。已提权才允许执行。';
+        }
         return '可以删除：移入回收站（可还原），不进永久删兜底。勾上之后仍要逐项确认。';
       }
       const WHY = {
         orphan_sys_file: '不进执行快照：drivers 目录不在路径保护覆盖范围内，判错即删没有兜底 —— 独立禁删面评审过之前不给删。',
         minifilter_after_key_deleted: '不作为删除目标：服务键已删而滤镜仍挂载，删文件不解决问题，需要重启。',
-        dead_landing: '不进执行快照：删除服务键要动 HKLM\\SYSTEM，与 A1 禁删面的窄口子同批评审（方案 §5）。',
-        stale_live_service: '不进执行快照：落点还在、服务可能仍在用，且同属服务键一类。',
+        dead_landing: '本条未进执行快照：服务键窄口子的八道现读判据里至少有一条不成立（详情见 reason 与下方判定依据）。',
+        stale_live_service: '不进执行快照：落点还在、服务可能仍在用 —— 窄口子只处理文件已失踪的键。',
         ifeo_debugger: '不进执行快照：IFEO 属微软根，A1 拦着；本区只给说明。',
         ifeo_stale_options: '不建议删除：键本身要留着（删了 Explorer 会重建空键），这一类只是提示。',
         capability_consent_dead_landing: '不进执行快照：ConsentStore 属微软根，A1 拦着；本区只给说明。',
