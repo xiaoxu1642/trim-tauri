@@ -19,20 +19,13 @@
   let running = false;      // 卸载 / 残留清理互斥
   let enumerating = false;  // 列表枚举互斥
   // 最近一次残留扫描结果（渲染与勾选用）
-  let findings = [];
   let currentAppId = '';
   // 三条链（规则库 / 失效登记 / 卸载记录）共用一个面板与一份快照，分组结果留在这里渲染
-  let scanGroups = [];
   // 无选中程序时的合成 id：残留不属于任何单个程序，批次报告按它归档（执行侧只用于落报告）
   const MACHINE_APP_ID = 'MACHINE|all';
 
   // 删前备份偏好（HiBit §H1 还原包）。取「显式关过才算关」以外的最保守解：
   // 读不到 / 读失败一律按关，因为开备份会带来几百 MB 落盘，猜错方向的代价不对称。
-  const BACKUP_PREF_KEY = 'trim.residue.backupPack';
-  function readBackupPref() {
-    try { return localStorage.getItem(BACKUP_PREF_KEY) === '1'; } catch (e) { return false; }
-  }
-
   function esc(s) { return window.ds.esc(s); }
   function fmtSizeKb(kb) {
     kb = Number(kb) || 0;
@@ -42,11 +35,6 @@
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
     return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
   }
-
-  const KIND_LABEL = {
-    reg_key: '注册表', folder: '目录', file: '文件', shortcut: '快捷方式',
-  };
-  const CONF_LABEL = { high: '高置信', medium: '中置信', low: '低置信（建议人工核对）' };
 
   // ==================== 应用图标（用户要求 2026-09-28：名称前显示真实图标） ====================
   // 复用 paths:file-icon / paths:app-icon（shellicon 提取）。两层缓存：
@@ -346,9 +334,10 @@
         window.app?.toast?.('success', '卸载完成，可以继续扫描残留');
       }
       await loadApps();
-      // 卸载完成后自动扫三类残留（U-4 拍板 2026-09-28：Appx 移除后 Packages 数据也进扫描）
+      // v0.7.0 用户拍板：卸载完成后弹的就是残留副窗（面板不再留在主窗里）。
+      // 主窗只负责把「刚卸载的是哪个」递过去；扫描、勾选、删除全在那扇窗内。
       currentAppId = appId;
-      await scanAllResidue();
+      await openResidueWindow(appId);
     } catch (e) {
       // P1-D1（2026-10-01）：对齐 Geek msgUninstallFailed 的语义——失败后一句话把两件事
       // 说清：卸载没成 + 已存在的残留仍可清。只改呈现：不自动扫、不预勾选任何删除项，
@@ -391,88 +380,6 @@
     }
   }
 
-  // ==================== P1-B3 重启后删（2026-10-01 拍板） ====================
-  // 四条硬约束见 uninstall.rs 同名段：明示+单独确认 / 只限回收站失败文件项 /
-  // 可撤回 / 待删清单可见。这里没有任何静默登记路径——按钮必须由一次真实的
-  // 清理失败结果驱动，登记前还有单独的确认框。
-  let pendingFailedTargets = [];
-
-  function updatePendingButtons(failedFiles) {
-    const addBtn = document.getElementById('residueBtnPending');
-    const revBtn = document.getElementById('residueBtnPendingRevoke');
-    if (addBtn) {
-      if (Array.isArray(failedFiles)) pendingFailedTargets = failedFiles;
-      addBtn.style.display = pendingFailedTargets.length ? '' : 'none';
-      addBtn.textContent = `重启后删除失败的 ${pendingFailedTargets.length} 项…`;
-      addBtn.disabled = !pendingFailedTargets.length;
-    }
-    if (revBtn) {
-      window.api.uninstall.pendingList().then((r) => {
-        const entries = (r && r.success && r.data && r.data.entries) || [];
-        const degraded = !!(r && r.success && r.data && r.data.degraded);
-        const n = entries.filter((e) => e.status === 'pending').length;
-        if (degraded) {
-          // M-6（2026-10-03 L3）：台账损坏 = 撤回凭据不可信。
-          // 不能隐藏按钮（那样用户根本不知道有东西待删、PFRO 里还挂着）；
-          // 置灰 + data-tip 说明，与「真的没有待删项」区分开。
-          revBtn.style.display = '';
-          revBtn.disabled = true;
-          revBtn.textContent = '重启后删台账已损坏';
-          revBtn.setAttribute(
-            'data-tip',
-            '待删清单文件损坏，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。'
-          );
-        } else {
-          revBtn.style.display = n ? '' : 'none';
-          revBtn.disabled = !n;
-          revBtn.textContent = `撤回重启后删（${n} 项）`;
-        }
-      }).catch(() => {});
-    }
-  }
-
-  async function addPendingDeletes() {
-    if (!pendingFailedTargets.length) return;
-    const ok = await window.app?.confirmDanger?.(
-      '登记重启后删除',
-      `把 ${pendingFailedTargets.length} 个回收站删不掉的文件登记为「下次重启时删除」。这是永久删除：不进回收站、无法还原；重启前可撤回。目录不支持该机制，登记时会被跳过。`,
-      '登记',
-      '取消',
-      '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
-    );
-    if (!ok) return;
-    try {
-      const resp = await window.api.uninstall.pendingAdd(pendingFailedTargets);
-      if (!resp.success) throw new Error(resp.message || '登记失败');
-      const d = resp.data || {};
-      window.app?.toast?.(d.added ? 'success' : 'info',
-        d.added
-          ? `已登记 ${d.added} 项，将在下次重启时永久删除（重启前可撤回）`
-          : '没有新登记项（可能都已登记过或目标已不在）');
-      pendingFailedTargets = [];
-      updatePendingButtons([]);
-    } catch (e) {
-      window.app?.toast?.('error', '登记失败: ' + (e.message || e));
-    }
-  }
-
-  async function revokePendingDeletes() {
-    const ok = await window.app?.confirmDanger?.(
-      '撤回重启后删除',
-      '将把已登记的「重启后删除」条目从系统中摘除：相关文件不会被删除，保持原样。',
-      '撤回全部',
-      '取消'
-    );
-    if (!ok) return;
-    try {
-      const resp = await window.api.uninstall.pendingRevoke();
-      if (!resp.success) throw new Error(resp.message || '撤回失败');
-      window.app?.toast?.('success', `已撤回 ${resp.data.revoked} 项登记，相关文件不会被删除`);
-      updatePendingButtons([]);
-    } catch (e) {
-      window.app?.toast?.('error', '撤回失败: ' + (e.message || e));
-    }
-  }
 
   function setBusy(busy, label) {
     const overlay = document.getElementById('uninstallBusy');
@@ -517,256 +424,7 @@
     if (busyTicker) { clearInterval(busyTicker); busyTicker = null; }
   }
 
-  // ==================== 残留扫描（一个入口，三条链） ====================
-  // 面板标题统一叫「残留扫描」，内部按证据来源分三组：
-  //   程序残留     —— 规则库命中，要有选中或刚卸载的那个程序；
-  //   失效残留     —— 全机扫描，判据只有一条：卸载项/App Paths 里记着的落点文件已不存在，
-  //                   不要求本机有卸载记录（用户拍板 2026-09-28）。服务与设备刻意不扫：
-  //                   判据虽成立，但删除要提权走 SCM/SetupAPI，我们缺这块实操经验；
-  //   卸载遗留     —— 仍要「本机确实卸载过它」这条所有权事实，精确同名目录本身不是证据；
-  //                   厂商配置键走「卸载前基线 → 卸载后差分」，还要键名与这程序的 name/发行商/
-  //                   安装目录名互含才算到它头上（HiBit §9.1，两条证据缺一不可）。
-  // 三组共用同一份快照（后端按 origin 分桶存）与同一条执行链，所以先扫哪组都不会让
-  // 另一组的勾选项在执行时被快照闸判成"已过期"。
-  async function scanAllResidue() {
-    const panel = document.getElementById('residuePanel');
-    const box = document.getElementById('residueList');
-    panel.style.display = 'block';
-    box.innerHTML = '<div class="finder-empty">正在扫描三类残留（规则库 / 失效登记 / 卸载记录）…</div>';
-    // U-8 感知修复：面板在长列表下方，不滚动就等于"没弹出"
-    // 审查 L16 / v2 批次A2：CSS 的 prefers-reduced-motion 通配归零管不到 JS 传进去的
-    // scroll 选项，必须在这里自己求值——否则系统关掉动画的用户仍会被这段 smooth 滚动
-    // 推着走（与 app.js toggleNavSub 同口径）。
-    const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-    panel.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
-    const app = currentAppId && currentAppId !== MACHINE_APP_ID ? currentAppId : '';
-    const fail = (e) => ({ success: false, message: String((e && e.message) || e) });
-    const [rApp, rDead, rOrphan] = await Promise.all([
-      app ? window.api.uninstall.residueScan(app).catch(fail) : Promise.resolve(null),
-      window.api.uninstall.deadScan().catch(fail),
-      window.api.uninstall.orphanScan().catch(fail),
-    ]);
-    const groups = [];
-    if (!app) {
-      groups.push({ title: '程序残留（规则库）', rows: [], hint: '未选中程序。在上方列表点该程序的「查残留」，即可带上它的规则库残留。' });
-    } else if (rApp && rApp.success) {
-      const name = (rApp.data && rApp.data.appName) || '';
-      groups.push({ title: `程序残留 · ${name}（规则库命中）`, rows: (rApp.data && rApp.data.findings) || [] });
-    } else {
-      groups.push({ title: '程序残留（规则库）', rows: [], hint: ((rApp && rApp.message) || '本组扫描失败') });
-    }
-    if (rDead && rDead.success) {
-      groups.push({ title: '失效残留 · 全机（卸载项与 App Paths 记着的落点已不存在）', rows: (rDead.data && rDead.data.findings) || [], byClass: true });
-    } else {
-      groups.push({ title: '失效残留 · 全机', rows: [], hint: ((rDead && rDead.message) || '本组扫描失败') });
-    }
-    if (rOrphan && rOrphan.success) {
-      groups.push({ title: '卸载遗留 · 按本机卸载记录（应用数据目录与卸后新增的厂商配置键）', rows: (rOrphan.data && rOrphan.data.findings) || [] });
-    } else {
-      // 这一组拒绝扫描是**正确行为**（档案为空时拿空集会被读成"这台机器没有遗留"），
-      // 所以按组的说明行呈现，不再让整页扫描失败
-      groups.push({ title: '卸载遗留 · 按本机卸载记录', rows: [], hint: ((rOrphan && rOrphan.message) || '本组未执行') });
-    }
-    scanGroups = groups;
-    findings = groups.reduce((acc, g) => acc.concat(g.rows), []);
-    // 勾选初值在渲染前定好：只展示不给删的行永远不该被勾上
-    findings.forEach((f) => {
-      f._checked = f.deleteCapable !== false && !!f.defaultChecked;
-    });
-    document.getElementById('residueTitle').textContent = '残留扫描';
-    renderResidue();
-    const n = findings.length;
-    const notes = (rDead && rDead.success && rDead.data.notes && rDead.data.notes.length) ? rDead.data.notes[0] : '';
-    window.app?.toast?.(n ? 'info' : 'success',
-      n ? `共 ${n} 项候选，一律未自动勾选，请逐项确认` : (notes || '三类扫描都没有发现残留'));
-  }
 
-  const DEAD_CLASS_TITLE = {
-    uninstall: '失效卸载项（可删该注册表键）',
-    appPaths: '失效 App Paths（可删该注册表键）',
-  };
-
-  /**
-   * 按单个程序扫残留（列表每行的「查残留」按钮，2026-10-04）。
-   *
-   * 为什么不复用 `currentAppId` + `scanAllResidue()` 就完事：改动前 `currentAppId`
-   * **全仓只有一处赋值** —— 卸载成功后（uninstall.js:348）。于是「程序残留（规则库）」
-   * 这一组在用户刚进页面时永远是 0 项，而空态文案却写着「在上方列表点一行再扫描」——
-   * 列表行上**没有任何选中态或选中事件**，那句话指向一个不存在的交互。
-   * 用户看到的就是图三那个面板：三组全 0，第一组还叫你去点一个点不动的行。
-   *
-   * 现在把「选中」做成一个**真实按钮**：显式、可聚焦、键盘天然可达（AGENTS §2），
-   * 不必在整行上猜点击语义，也不会和行内三个操作按钮抢事件。
-   *
-   * 语义边界：只读，不删。它把 `currentAppId` 设成目标程序后走同一条 `scanAllResidue()`，
-   * 于是规则库组按该程序的卸载键（DisplayName / Publisher 由**后端**读注册表，
-   * 不信渲染层给的显示名）去命中签名规则库。
-   */
-  async function scanResidueForApp(appId) {
-    if (!appId) return;
-    currentAppId = appId;
-    try {
-      await scanAllResidue();
-    } catch (e) {
-      window.app?.toast?.('error', '残留扫描异常: ' + ((e && e.message) || e));
-    }
-  }
-
-  function groupHtml(g) {
-    let h = `<div class="finder-group-header" style="margin-top:14px"><span>${esc(g.title)} · ${g.rows.length} 项</span></div>`;
-    if (!g.rows.length) return h + `<div class="finder-empty">${esc(g.hint || '本组没有候选。')}</div>`;
-    if (g.byClass) {
-      for (const cls of ['uninstall', 'appPaths']) {
-        const rows = g.rows.filter((f) => f.deadClass === cls);
-        if (rows.length) h += residueTableHtml(DEAD_CLASS_TITLE[cls] || cls, rows);
-      }
-      return h;
-    }
-    const regs = g.rows.filter((f) => f.kind === 'reg_key' || f.kind === 'reg_value');
-    const files = g.rows.filter((f) => f.kind !== 'reg_key' && f.kind !== 'reg_value');
-    if (regs.length) h += residueTableHtml('注册表', regs);
-    if (files.length) h += residueTableHtml('文件与目录', files);
-    return h;
-  }
-
-  function residueTableHtml(title, rows) {
-    let h = `<div class="finder-group-header" style="margin-top:8px;font-size:12px;opacity:.8"><span>${esc(title)} · ${rows.length} 项</span></div>`;
-    h += '<table class="finder-table"><thead><tr><th style="width:34px"></th><th>目标</th><th style="width:110px">置信度</th><th style="width:220px">判定原因</th></tr></thead><tbody>';
-    for (const f of rows) {
-      const i = findings.indexOf(f);
-      const cell = f.deleteCapable === false
-        ? '<span class="finder-name-text" style="opacity:.5" data-tip="本链只登记、不删除">—</span>'
-        : `<span class="checkbox ${f._checked ? 'checked' : ''}" data-rcheck="${i}"></span>`;
-      // 应用数据遗留的处置出口：所有权判定可能有误（同名另一款软件、用户自己放的目录），
-      // 必须能把某个历史 owner 永久排除，而不是每次扫描都重复看到同一条
-      const ignoreBtn = f.origin === 'orphan'
-        ? `<button class="btn btn-secondary" style="margin-left:8px;padding:2px 8px;font-size:12px" data-orphan-ignore="${i}" data-tip="此后不再按这条卸载记录提示遗留数据（只影响应用数据遗留这一组，不动残留规则库）">不再提示该程序</button>`
-        : '';
-      const tested = (f.testedPaths && f.testedPaths.length) ? f.testedPaths.join('\n') : f.target;
-      // C4：判定依据按离散贡献项逐条给（后端只产事实、不产分数），一行一条。
-      const contribs = f.contribs || [];
-      const whyTip = contribs.length
-        ? ` data-tip="${esc(contribs.map((c) => '· ' + (c.text || '')).join('\n'))}"`
-        : '';
-      const whyHint = contribs.length
-        ? `<span class="finder-name-text" style="opacity:.5;font-size:11px">· 依据 ${contribs.length} 条</span>`
-        : '';
-      h += `<tr class="${f._checked ? 'finder-row-selected' : ''}">
-          <td>${cell}</td>
-          <td><div class="finder-cell"><span class="finder-path-text" data-tip="${esc(tested)}">${esc(f.target)}</span></div></td>
-          <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75">${CONF_LABEL[f.confidence] || f.confidence || '—'}</span></td>
-          <td class="finder-col-size"><span class="finder-name-text" style="opacity:.75"${whyTip}>${esc(f.reason || '')}</span>${whyHint}${ignoreBtn}</td>
-        </tr>`;
-    }
-    return h + '</tbody></table>';
-  }
-
-  function renderResidue() {
-    const box = document.getElementById('residueList');
-    if (!findings.length && !scanGroups.length) {
-      box.innerHTML = '<div class="finder-empty">未发现残留。程序卸载得很干净。</div>';
-      updateResidueButtons();
-      return;
-    }
-    box.innerHTML = scanGroups.map(groupHtml).join('');
-    updateResidueButtons();
-  }
-
-  async function ignoreOrphanOwner(f) {
-    try {
-      const resp = await window.api.uninstall.orphanIgnore(f.ownerAppId, f.ownerName || '');
-      if (!resp || !resp.success) throw new Error((resp && resp.message) || '写入忽略记录失败');
-      window.app?.toast?.('success', `已不再提示「${esc(f.ownerName || '')}」的遗留数据`);
-      await scanAllResidue();
-    } catch (e) {
-      window.app?.toast?.('error', '忽略失败: ' + (e && e.message ? e.message : String(e)));
-    }
-  }
-  function onResidueClick(e) {
-    const ign = e.target.closest('[data-orphan-ignore]');
-    if (ign) {
-      const target = findings[Number(ign.dataset.orphanIgnore)];
-      if (target) ignoreOrphanOwner(target);
-      return;
-    }
-    const t = e.target.closest('[data-rcheck]');
-    if (!t) return;
-    // 勾选按 findings 全局下标寻址：面板现在有多组多表，段内序号会跨表串位
-    const f = findings[Number(t.dataset.rcheck)];
-    if (!f || f.deleteCapable === false) return;
-    f._checked = !f._checked;
-    t.classList.toggle('checked', f._checked);
-    t.closest('tr').classList.toggle('finder-row-selected', f._checked);
-    updateResidueButtons();
-  }
-
-  function updateResidueButtons() {
-    const any = findings.some((f) => f._checked);
-    document.getElementById('residueBtnClean').disabled = !any;
-  }
-
-  // ==================== 残留清理 ====================
-  async function cleanResidue() {
-    const picked = findings.filter((f) => f._checked);
-    if (!picked.length || running) return;
-    const ok = await window.app?.confirmDanger?.(
-      '确认清理残留',
-      `将删除选中的 ${picked.length} 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。${readBackupPref() ? '已开启删前备份：选中内容会先打进本机还原包，之后可整批写回原位置。' : ''}`,
-      '开始清理',
-      '取消',
-      '低置信项为名称启发式结果，请确认路径确实属于已卸载的程序再勾选。'
-    );
-    if (!ok) {
-      // P1-D2（2026-10-01）：对齐 Geek msgCancelWizard——取消时把「已发现的候选不会被删」
-      // 说明白，N 取当前面板的真实候选数（含未勾选的展示行，而不是只数勾选项：
-      // 用户取消时关心的是"整批都不会动"）。取消路径到此为止，之后没有任何删除调用。
-      window.app?.toast?.('info', `已取消：本次已发现的 ${findings.length} 项候选不会被删除，内容保持原样`);
-      return;
-    }
-    running = true;
-    setBusy(true, '正在清理残留…');
-    startFakeProgress('正在清理残留…');
-    try {
-      const resp = await window.api.uninstall.residueExecute(
-        currentAppId,
-        picked.map((f) => ({ kind: f.kind, target: f.target })),
-        readBackupPref()
-      );
-      if (!resp.success) throw new Error(resp.message || '残留清理失败');
-      const d = resp.data || {};
-      // 还原包结果要说清：勾了备份却没成（收尾失败）时必须当场讲，不能等用户去还原才发现
-      const pack = d.restorePack;
-      if (pack && pack.error) {
-        window.app?.toast?.('error', `还原包写入失败：${pack.error}（文件已删除，内容无法还原，回收站仍可查看）`);
-      } else if (pack) {
-        window.app?.log?.('info', `还原包已生成：${pack.files} 个文件 / ${pack.dirs} 个目录 / ${(pack.bytes / 1048576).toFixed(1)} MB（${pack.id}）`);
-      }
-      const okCount = Number(d.okCount) || 0;
-      const failCount = Number(d.failCount) || 0;
-      if (failCount > 0) {
-        window.app?.toast?.('warning', `残留清理完成：${okCount} 项成功，${failCount} 项失败（详见报告）`);
-      } else {
-        window.app?.toast?.('success', `残留清理完成：${okCount} 项已处理`);
-      }
-      // 成功项从面板移除，重渲染
-      const done = new Set((d.details || []).filter((x) => x.status === 'ok').map((x) => x.kind + '|' + x.target));
-      findings = findings.filter((f) => !done.has(f.kind + '|' + f.target));
-      renderResidue();
-      await loadApps();
-      // P1-B3（2026-10-01）：失败的文件项（被占用/无权限）可显式降级为重启后删。
-      // 按钮只是入口，登记前还有单独确认框；只送文件，目录项后端会拒（PFRO 对非空目录不可靠）。
-      const failedFiles = (d.details || [])
-        .filter((x) => x.status !== 'ok' && x.kind === 'file')
-        .map((x) => x.target);
-      updatePendingButtons(failedFiles);
-    } catch (e) {
-      window.app?.toast?.('error', '残留清理失败: ' + (e.message || e));
-    } finally {
-      stopFakeProgress();
-      setBusy(false);
-      running = false;
-    }
-  }
 
   // ==================== U-6 批次报告查看 ====================
 
@@ -874,13 +532,30 @@
         'success',
         `残留规则库已更新：${esc(String(cur))} → ${esc(String(up.data.rulesVersion))}，重新扫描后生效`
       );
-      // 面板已展开时立刻按新规则重扫，免得用户以为「更新了但还是那几条」
-      if (currentAppId) await scanAllResidue();
+      // v0.7.0：主窗没有面板了，新规则在下一次副窗扫描时自然生效，这里不再回头重扫
     } catch (e) {
       window.app?.toast?.('error', '残留规则库更新失败: ' + (e && e.message ? e.message : String(e)));
     } finally {
       rulesUpdating = false;
       if (btn) btn.disabled = false;
+    }
+  }
+
+  // ==================== 残留副窗入口（v0.7.0：残留链在这一扇窗里的唯一界面） ====================
+  //
+  // 开窗失败必须说清 —— 用户点了「查残留」而窗口没起来，最容易读成「这台机器没问题」。
+  // appId 只是提示后端扫哪个，取值闸在 Rust 侧（开窗前一次、执行链再一次），这里不自己判形状。
+  async function openResidueWindow(appId) {
+    try {
+      const r = await window.api.residueWindow.openWindow(appId || '');
+      if (r && r.success === false) {
+        window.app?.toast?.('error', r.message || '打开残留扫描窗口失败');
+        return false;
+      }
+      return true;
+    } catch (e) {
+      window.app?.toast?.('error', '打开残留扫描窗口失败: ' + ((e && e.message) || e));
+      return false;
     }
   }
 
@@ -895,22 +570,15 @@
           b.classList.toggle('active', b.dataset.unScope === currentScope);
           b.setAttribute('aria-selected', b.dataset.unScope === currentScope ? 'true' : 'false');
         });
-        // 切换范围时收起残留面板（上一范围的扫描结果对另一范围无意义）
-        const panel = document.getElementById('residuePanel');
-        if (panel) panel.style.display = 'none';
+        // v0.7.0：残留面板不在主窗了，切范围只需重载列表；副窗里那一版结果由用户自己重扫
         loadApps();
       });
     });
     document.getElementById('uninstallBtnRefresh')?.addEventListener('click', loadApps);
-    // v0.5.0 裁决 4：主窗只留入口，扫描与展示都在副窗里；开窗失败要如实说，
+    // 主窗只留入口，扫描与展示都在副窗里；开窗失败要如实说，
     // 不能让人以为「点了没反应」是扫描在跑
-    document.getElementById('btnResidueWindow')?.addEventListener('click', async () => {
-      try {
-        const r = await window.api.residueWindow.openWindow();
-        if (r && r.success === false) window.app?.toast?.('error', r.message || '打开残留扫描窗口失败');
-      } catch (e) {
-        window.app?.toast?.('error', '打开残留扫描窗口失败: ' + ((e && e.message) || e));
-      }
+    document.getElementById('btnResidueWindow')?.addEventListener('click', () => {
+      openResidueWindow(currentAppId);
     });
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
     document.getElementById('btnResidueRulesUpdate')?.addEventListener('click', updateResidueRules);
@@ -922,27 +590,14 @@
       const rep = e.target.closest('[data-un-repair]');
       if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair');
       const res = e.target.closest('[data-un-residue]');
-      if (res && !res.disabled) scanResidueForApp(res.dataset.unResidue);
+      if (res && !res.disabled) {
+        // 「查残留」= 把这一步的 appId 带进副窗（副窗开着也认，走 residue:target 事件）
+        currentAppId = res.dataset.unResidue;
+        openResidueWindow(currentAppId);
+      }
     });
-    // 一个入口跑三条链：面板里的「重新扫描」与页头按钮走同一条路
-    document.getElementById('residueBtnRescan')?.addEventListener('click', scanAllResidue);
-    document.getElementById('btnResidueScanAll')?.addEventListener('click', scanAllResidue);
-    document.getElementById('residueBtnClean')?.addEventListener('click', cleanResidue);
-    document.getElementById('residueBtnPending')?.addEventListener('click', addPendingDeletes);
-    document.getElementById('residueBtnPendingRevoke')?.addEventListener('click', revokePendingDeletes);
-    // HiBit §H1：删前是否先打还原包。**默认关**（2026-09-29 裁定不做默认备份）——
-    // 整目录动辄几百 MB，静默打包既慢又占盘；勾了才备，且勾了建包失败就整批不删（后端钉）
-    const bk = document.getElementById('residueBackupToggle');
-    if (bk) {
-      bk.checked = readBackupPref();
-      bk.addEventListener('change', () => {
-        try { localStorage.setItem(BACKUP_PREF_KEY, bk.checked ? '1' : '0'); } catch (e) { /* 偏好写不进不影响本次判断 */ }
-        window.app?.toast?.('info', bk.checked
-          ? '已开启：删除前会把选中项的内容打进本机还原包，之后可在「备份」列表整批还原'
-          : '已关闭：文件只进回收站，不再生成内容还原包');
-      });
-    }
-    document.getElementById('residueList')?.addEventListener('click', onResidueClick);
+    // v0.7.0：residueBtn* / residueBackupToggle / residueList 这些主窗元素随面板一起搬走了，
+    // 对应的监听不在这儿 —— 勾选、删除、删前备份偏好、重启后撤回落 in src/scripts/residue-window.js
     loadApps();
   }
 

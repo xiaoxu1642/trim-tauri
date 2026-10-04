@@ -132,19 +132,12 @@ const MUST_MAIN = [
   'uninstall_list',
   'uninstall_run',
   'uninstall_modify',
-  'uninstall_pending_add',
-  'uninstall_pending_list',
-  'uninstall_pending_revoke',
-  'uninstall_residue_scan',
-  'uninstall_residue_execute',
+  // v0.7.0：残留链 8 条（三链扫描 / 执行 / 不再提示 / 重启后删除三件套）从 MAIN 迁到
+  // **窄窗口集** `guard::RESIDUE_WINDOWS`，登记口在下面 MUST_WINDOWSET —— 面板整块搬进
+  // residue 副窗后主窗不再调它们，留在 MAIN 会让副窗每次 IPC 判越权（§3 M1~M3）。
   'uninstall_check_residue_version',
   'uninstall_update_residue_rules',
-  // C2 孤儿判定同样只有主窗卸载页需要；执行仍复用 residue_execute 的快照闸与硬否决，
-  // 所以这两条不给子窗放行（AGENTS §3「档位以谁真的需要调它为准」）。
-  'uninstall_orphan_scan',
-  'uninstall_dead_scan',
   'uninstall_dir_size',
-  'uninstall_orphan_ignore',
   // D1 还原入口：列表也走 MAIN（与 restore 同一弹窗，没必要放行子窗），
   // restore 会 reg import 写注册表，必须主窗专属 + 危险确认。
   'uninstall_reg_backup_list',
@@ -199,17 +192,28 @@ for (const f of files) {
     if (!name) continue;
 
     let tier = null;
+    let windowSetConst = null;
     for (let j = start; j < end && tier === null; j++) {
       const line = lines[j];
+      // 顺序即判据：MAIN / readonly / APP_WINDOWS 全集先认，剩下才可能是「自定义窄窗口集」。
+      // 窗口集分支必须留在 `tier === null` 之后 —— 早先把它写成独立语句时，
+      // `guard::MAIN` 会被第二段 else-if 重判成 GUARD_OTHER，B 组当场 59 条全红。
+      const cm = line.match(/guard::guard\(\s*&window,\s*guard::(\w+)\s*\)/);
       if (/guard::guard\(\s*&window,\s*guard::MAIN\s*\)/.test(line)) tier = 'MAIN';
       else if (/guard::guard_readonly\(/.test(line)) tier = 'READONLY';
       else if (/guard::guard\(\s*&window,\s*guard::APP_WINDOWS\s*\)/.test(line)) tier = 'APP_WINDOWS';
-      else if (/guard::guard\(/.test(line)) tier = 'GUARD_OTHER';
+      // E 组（v0.7.0）：`guard(&window, guard::<某窗口集常量>)` —— 既不是 MAIN 也不是
+      // 全集 readonly 的**窄窗口集**。抓住常量名，E2 再去 guard.rs 对拍成员。
+      // 不认这一形态的话，「MAIN 改成任意窗口集」会落进 GUARD_OTHER 而两条棘轮都不红。
+      else if (cm) {
+        tier = 'WINDOWSET';
+        windowSetConst = cm[1];
+      } else if (/guard::guard\(/.test(line)) tier = 'GUARD_OTHER';
       // 手写 label 判定：`window.label() != "main"` 之外，也可能先取出 label 再比较
       // （`app_first_paint` 为写日志就是这样）。认 `.label()` 调用，避免改个写法就漏判。
       else if (/window\.label\(\)/.test(line)) tier = 'HANDWRITTEN';
     }
-    tiers.set(name, { file: f, tier, line: start + 1 });
+    tiers.set(name, { file: f, tier, line: start + 1, windowSetConst });
   }
 }
 
@@ -407,6 +411,63 @@ const MUST_READONLY = [
 ];
 const actualReadonly = [...tiers.entries()].filter(([, v]) => v.tier === 'READONLY').map(([k]) => k).sort();
 const wantReadonly = [...MUST_READONLY].sort();
+
+// ==================== E 组：窄窗口集（v0.7.0，2026-10-05） ====================
+//
+// 为什么要有这一组：D 组把「MAIN → guard_readonly」这条静默放宽路径堵住了，但同一族的
+// 另一条它管不到 —— 把 `guard(MAIN)` 改成 `guard(&window, guard::某个窗口集常量)`，
+// 命令就同时离开 MUST_MAIN 与 MUST_READONLY 两张表，A 组只看「有没有 guard」照样绿。
+// 残留链 8 条正是走这条形态（副窗要调、又不该给全集放行），所以判据必须**双向**登记：
+//   E1 命令 ⇄ 表 ⇄ 实际档位三方集合完全相等；
+//   E2 表里声明的成员标签 ⇄ engine/guard.rs 常量实体的成员**逐字相等**（顺序无关）；
+//   E3 常量成员必须 ⊆ APP_WINDOWS（往常量里塞一个没在 capabilities 登记过的 label 即红）。
+const MUST_WINDOWSET = {
+  RESIDUE_WINDOWS: {
+    labels: ['residue'],
+    cmds: [
+      'uninstall_dead_scan',
+      'uninstall_orphan_ignore',
+      'uninstall_orphan_scan',
+      'uninstall_pending_add',
+      'uninstall_pending_list',
+      'uninstall_pending_revoke',
+      'uninstall_residue_execute',
+      'uninstall_residue_scan',
+    ],
+  },
+};
+
+// 从 guard.rs 里把 `pub const X: &[&str] = &[...]` 的成员抠出来（现算，不抄静态数字）
+const guardSrc = readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'engine', 'guard.rs'), 'utf8');
+const constMembers = {};
+for (const m of guardSrc.matchAll(/pub const (\w+): &\[&str\] = &\[([^\]]*)\];/g)) {
+  constMembers[m[1]] = [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1]).sort();
+}
+const appWindowsSet = constMembers.APP_WINDOWS || [];
+
+const actualWindowset = [...tiers.entries()].filter(([, v]) => v.tier === 'WINDOWSET');
+const wsTableCmds = Object.entries(MUST_WINDOWSET).flatMap(([k, v]) => v.cmds.map((c) => `${c}@${k}`)).sort();
+const wsActualCmds = actualWindowset.map(([n, v]) => `${n}@${v.windowSetConst}`).sort();
+const wsUnknown = wsTableCmds.filter((s) => !tiers.has(s.split('@')[0]));
+check(
+  wsUnknown.length === 0 && wsTableCmds.length === wsActualCmds.length
+    && wsTableCmds.every((s, i) => s === wsActualCmds[i]),
+  `E1. 窄窗口集档位清单与实际完全一致（登记 ${wsTableCmds.length} / 实际 ${wsActualCmds.length}）`,
+  wsUnknown.length
+    ? `表里登记了不存在的命令 ${JSON.stringify(wsUnknown)}`
+    : `差异 ${JSON.stringify({ 只在表里: wsTableCmds.filter((s) => !wsActualCmds.includes(s)), 只在代码: wsActualCmds.filter((s) => !wsTableCmds.includes(s)) })}`,
+);
+
+for (const [konst, spec] of Object.entries(MUST_WINDOWSET)) {
+  const members = constMembers[konst];
+  check(!!members, `E2a. engine/guard.rs 里找得到常量 ${konst}`, members ? '' : '改名/删除必须同步本表');
+  if (!members) continue;
+  const want = [...spec.labels].sort();
+  const eq = want.length === members.length && want.every((v, i) => v === members[i]);
+  check(eq, `E2b. ${konst} 成员与登记完全相等`, `登记 ${JSON.stringify(want)} ⇄ 代码 ${JSON.stringify(members)}`);
+  const alien = members.filter((lbl) => !appWindowsSet.includes(lbl));
+  check(alien.length === 0, `E3. ${konst} 的每个 label 都在 APP_WINDOWS 内`, alien.length ? `多出来 ${JSON.stringify(alien)}（capabilities/subwindows.json 里没有它，IPC 必判越权）` : '');
+}
 const roMissing = wantReadonly.filter((n) => !actualReadonly.includes(n));
 const roExtra = actualReadonly.filter((n) => !wantReadonly.includes(n));
 const roUnknown = wantReadonly.filter((n) => !tiers.has(n));

@@ -277,7 +277,8 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     targets: Vec<String>,
 ) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 「重启后删除失败项」的入口随残留面板一起搬进 residue 副窗
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     if targets.is_empty() {
@@ -383,7 +384,8 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
 /// 三个状态分开：pending（PFRO 还挂着）/ consumed（重启已消费）/ missing（文件已不在）。
 #[tauri::command]
 pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
@@ -435,7 +437,8 @@ pub async fn uninstall_pending_revoke<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     batch_id: Option<String>,
 ) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {

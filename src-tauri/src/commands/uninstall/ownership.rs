@@ -744,7 +744,8 @@ pub(super) fn path_within(inner: &str, outer: &str) -> bool {
 /// 主窗档，只产候选，删除仍走 residue-execute）
 #[tauri::command]
 pub async fn uninstall_orphan_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let label = window.label().to_string();
@@ -998,7 +999,8 @@ pub async fn uninstall_orphan_ignore<R: tauri::Runtime>(
     app_id: String,
     display_name: String,
 ) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let Some((hive_str, key_path)) = app_id.split_once('|') else {

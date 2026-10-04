@@ -46,6 +46,10 @@ mod pending_delete;
 pub use pending_delete::{uninstall_pending_add, __cmd__uninstall_pending_add, __tauri_command_name_uninstall_pending_add, uninstall_pending_list, __cmd__uninstall_pending_list, __tauri_command_name_uninstall_pending_list, uninstall_pending_revoke, __cmd__uninstall_pending_revoke, __tauri_command_name_uninstall_pending_revoke};
 mod residue;
 pub use residue::{uninstall_residue_scan, __cmd__uninstall_residue_scan, __tauri_command_name_uninstall_residue_scan, uninstall_residue_execute, __cmd__uninstall_residue_execute, __tauri_command_name_uninstall_residue_execute};
+// v0.7.0：`commands::residue`（副窗建窗侧）要复用执行侧那对取值闸，AGENTS §5.16/N6 禁止
+// 在第二处再写一份「看起来等价」的 app_id 校验。模块本体继续私有，只把这两个判据函数透出去。
+pub(crate) use appx::valid_appx_fullname;
+pub(crate) use helpers::valid_uninstall_key_path;
 mod residue_deep;
 pub use residue_deep::{uninstall_residue_deep_scan, __cmd__uninstall_residue_deep_scan, __tauri_command_name_uninstall_residue_deep_scan};
 #[cfg(test)]

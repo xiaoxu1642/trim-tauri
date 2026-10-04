@@ -8,7 +8,7 @@ use crate::engine::guard;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tauri::WebviewWindow;
-pub(super) fn valid_appx_fullname(fullname: &str) -> bool {
+pub(crate) fn valid_appx_fullname(fullname: &str) -> bool {
     !fullname.is_empty()
         && fullname.len() <= 200
         && fullname

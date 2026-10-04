@@ -466,7 +466,8 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     app_id: String,
 ) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let Some((hive_str, key_path)) = app_id.split_once('|') else {
@@ -941,7 +942,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     // 由残留面板上的开关逐项决定；勾了却建包失败则整批不删（见下面 closure 开头）。
     backup: Option<bool>,
 ) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 唯一调用方是 residue 副窗的「删除选中残留」；档位从 MAIN 换成窄窗口集，
+    // 既不让副窗判越权（§3 M1~M3），也不外放到 APP_WINDOWS 全集（删残留是写侧能力）。
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     if targets.is_empty() || targets.len() > 200 {

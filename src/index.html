@@ -521,8 +521,8 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
               <span>刷新列表</span>
             </button>
-            <!-- v0.5.0 裁决 4：残留扫描全部在副窗里做，主窗只留这一个入口 -->
-            <button class="btn btn-secondary" id="btnResidueWindow" data-tip="打开残留扫描窗口（只读报告：服务、驱动、IFEO、厂商键、能力授权、游戏库残留，不提供删除）">
+            <!-- v0.7.0：残留扫描的唯一界面是那扇副窗（三链候选可勾可删 + 深扫只读报告），主窗只留这一个入口 -->
+            <button class="btn btn-secondary" id="btnResidueWindow" data-tip="打开残留扫描窗口：上半区按三链（规则库 / 失效登记 / 卸载遗留）出候选，可逐项勾选删除；下半区是七个深扫器的只读报告（服务、驱动、IFEO、厂商键、能力授权、游戏库）。有保护的只说明、不给删。">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 4h16v12H4V4zm0 14h7v2H4v-2zm9 0h7v2h-7v-2zM6 6v8h12V6H6z"/></svg>
               <span>残留扫描</span>
             </button>
@@ -533,10 +533,6 @@
             <button class="btn btn-secondary" id="btnResidueRulesUpdate" data-tip="检查并更新「已知程序残留规则库」（签名包，只影响候选建议；删除仍要逐项勾选并复核，不做定时自动更新）">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .88-.29 1.7-.77 2.37l1.46 1.46C18.9 15.84 19.5 14.5 19.5 13c0-3.87-3.13-7-7.5-7zm0 14c-2.76 0-5-2.24-5-5 0-.88.29-1.7.77-2.37L6.31 11.17C5.1 12.16 4.5 13.5 4.5 15c0 3.87 3.13 7 7.5 7v3l4-4-4-4v3z"/></svg>
               <span>更新残留规则</span>
-            </button>
-            <button class="btn btn-secondary" id="btnResidueScanAll" data-tip="一次扫描三类残留：选中程序的规则库残留、全机失效登记（卸载项与 App Paths 里记着的落点文件已不存在，不需要卸载记录）、按本机卸载记录找应用数据遗留。除规则库高置信项外一律不自动勾选。服务与设备残留刻意不扫：删除要提权且我们缺这块实操经验。">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
-              <span>残留扫描</span>
             </button>
             <!-- B1（2026-09-28 拍板）：静默勾选框已删——默认静默优先、失败自动回退原厂 UI -->
             <!-- 应用计数改由列表表头「程序」列承载（2026-09-30 用户要求），此处不再重复一处 -->
@@ -553,23 +549,8 @@
         <div class="table-card" id="uninstallList"></div>
 
         <!-- 残留扫描面板（卸载完成后自动展开，也可手动重扫） -->
-        <div id="residuePanel" style="display:none">
-          <div class="finder-group-header" style="margin-top:14px">
-            <span id="residueTitle">残留扫描</span>
-          </div>
-          <div class="cleanup-toolbar-actions active" style="margin:8px 0">
-            <button class="btn btn-accent" id="residueBtnClean" disabled>删除选中残留</button>
-            <button class="btn btn-secondary" id="residueBtnRescan">重新扫描</button>
-            <button class="btn btn-secondary" id="residueBtnPending" style="display:none" data-tip="回收站删不掉的文件可登记为下次重启时删除（永久删除，重启前可撤回）">重启后删除</button>
-            <button class="btn btn-secondary" id="residueBtnPendingRevoke" style="display:none" data-tip="把已登记的「重启后删除」条目从系统摘除，文件保持原样">撤回重启后删</button>
-            <label class="toggle-switch" for="residueBackupToggle" data-tip="开启后，删除前先把选中的文件与目录内容打进本机还原包（zip），之后可在「备份」列表里整批写回原位置。关闭时文件只进回收站、不留内容副本。注册表项无论开关都会先导出 .reg 备份。">
-              <input type="checkbox" id="residueBackupToggle" />
-              <span class="toggle-track"><span class="toggle-thumb"></span></span>
-            </label>
-            <span class="clean-filter-hint">规则库高置信项默认勾选；失效登记与应用数据遗留一律不自动勾选。注册表删除前自动备份，文件移入回收站。</span>
-          </div>
-          <div class="table-card" id="residueList"></div>
-        </div>
+        <!-- v0.7.0：残留面板（勾选 / 删除 / 删前备份 / 重启后删）整块搬进 src/residue-window.html，
+             主窗这里只留上面那排入口按钮 —— 同一件事不留第二个界面（用户拍板 2026-10-05） -->
       </div><!-- /#page-uninstall -->
 
       <!-- 大文件查找已下线（2026-09-30 用户裁定：与「磁盘分析」逐层按体积排序重复）；磁盘健康度功能已移除 -->

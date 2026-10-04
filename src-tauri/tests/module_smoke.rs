@@ -129,33 +129,68 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
 
 const GHOST_APP_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TrimNoSuch-9f3a";
 
-#[test]
-fn residue_scan_is_main_only_and_passes_guard_from_main() {
+// ==================== v0.7.0 残留链窄窗口集的统一断言 ====================
+//
+// 面板整块搬进 `residue` 副窗后，这 8 条命令的档位从 `guard::MAIN` 换成
+// `guard::RESIDUE_WINDOWS`（= 只有 "residue"）。断言形状随之翻转，但**判据要点名「做到了什么」**
+// （AGENTS §4.1 纪律①）：
+// - `residue` 窗必须越过档位，并且必须读得到命令体自己的早退特征 `needle`
+//   —— 只断「不含拒杀」会被「命令整条消失」假绿穿透（v2-M16② 的前车）；
+// - 其余四个子窗**和主窗**都必须被拒杀。主窗被拒是本轮的**新事实**：留在主窗能调，
+//   就等于面板搬走了却还留着第二条入口，注入主窗渲染层仍是同一份能力。
+// - `reached` 集合显式断言「越过的窗口恰好一个」，不是「至少一个」。
+const RESIDUE_LABEL: &str = "residue";
+
+fn assert_residue_window_only(cmd: &str, args: serde_json::Value, needle: &str) {
+    let mut reached: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
-        let text = invoke_text(&w, "uninstall_residue_scan", json!({ "appId": GHOST_APP_ID }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调残留扫描必须被来源校验拒杀，回执 {text}"
-        );
+        let text = invoke_text(&w, cmd, args.clone());
+        if label == RESIDUE_LABEL {
+            assert!(
+                !text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 不该被档位拒杀，回执 {text}"
+            );
+            assert!(
+                text.contains(needle),
+                "{label} 窗应越过档位进入命令体（期望特征 {needle}），回执 {text}"
+            );
+            reached.push(label);
+        } else {
+            assert!(
+                text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
+            );
+        }
     }
-    let w = main_window();
-    // 正向特征用「缺 | 分隔」的早退文案：它在档位之后、任何注册表读取之前，
-    // 拿得到它就证明档位已越过（只断「不含拒杀」会被命令消失假绿穿透，v2-M16②）
-    let res = invoke(&w, "uninstall_residue_scan", json!({ "appId": "no-separator" }));
-    assert_eq!(res["success"], json!(false), "非法 app_id 必须失败: {res}");
+    assert_eq!(
+        reached,
+        vec![RESIDUE_LABEL],
+        "越过档位的窗口必须恰好是 residue 一个（其余窗口被拒杀了）"
+    );
+    let m = invoke_text(&main_window(), cmd, args.clone());
     assert!(
-        common::message_of(&res).contains("app_id 格式错误"),
-        "主窗应越过档位进入命令体（期望读到格式错误早退），回执 {res}"
+        m.contains("IPC 来源校验失败"),
+        "主窗调 {cmd} 现在必须被拒杀：残留面板已不在主窗，留入口就是第二条调用路径，回执 {m}"
+    );
+}
+
+#[test]
+fn residue_scan_is_residue_window_only() {
+    // 正向特征取「缺 | 分隔」的早退文案：它在档位之后、任何注册表读取之前
+    assert_residue_window_only(
+        "uninstall_residue_scan",
+        json!({ "appId": "no-separator" }),
+        "app_id 格式错误",
     );
 }
 
 /// 合法形状但不存在的卸载键 → 空集（不是报错），且 `findings` 必须是数组。
 /// 这条同时是 A1 的反向保险：硬否决把候选丢掉之后，命令仍必须回一个合法空集，
-/// 不许变成 `null` 或整条失败。
+/// 不许变成 `null` 或整条失败。调用方 = residue 副窗（v0.7.0）。
 #[test]
 fn residue_scan_unknown_key_returns_empty_findings_array() {
-    let w = main_window();
+    let w = window_with_label(RESIDUE_LABEL);
     let res = invoke(&w, "uninstall_residue_scan", json!({ "appId": GHOST_APP_ID }));
     assert_eq!(res["success"], json!(true), "不存在的卸载键应回空集而非报错: {res}");
     let findings = res["data"]["findings"]
@@ -168,36 +203,24 @@ fn residue_scan_unknown_key_returns_empty_findings_array() {
 /// 也必须在任何删除动作之前被整批拒绝。
 ///
 /// 刻意只选**任何扫描都产不出**的注册表容器，不选目录：快照槽是进程级 static
-/// （按 label 分槽、跨用例共享），万一将来有用例先往 main 槽写过快照，这些目标也不
+/// （按 label 分槽、跨用例共享），万一将来有用例先往 residue 槽写过快照，这些目标也不
 /// 可能在里面；即便快照闸被改坏，A1 硬否决是第二道 —— 本用例永远不会真的删掉东西。
 #[test]
 fn residue_execute_requires_snapshot_before_any_delete() {
     const HOSTILE: &str = "HKLM\\SOFTWARE";
     const HOSTILE2: &str = "HKLM\\SYSTEM";
-    for label in sub_windows() {
-        let w = window_with_label(label);
-        let text = invoke_text(
-            &w,
-            "uninstall_residue_execute",
-            json!({ "appId": GHOST_APP_ID, "targets": [{ "kind": "reg_key", "target": HOSTILE }] }),
-        );
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调残留执行必须被来源校验拒杀，回执 {text}"
-        );
-    }
-    let w = main_window();
-    let res = invoke(
-        &w,
-        "uninstall_residue_execute",
-        json!({
-            "appId": GHOST_APP_ID,
-            "targets": [
-                { "kind": "reg_key", "target": HOSTILE },
-                { "kind": "reg_key", "target": HOSTILE2 }
-            ]
-        }),
-    );
+    let args = json!({
+        "appId": GHOST_APP_ID,
+        "targets": [
+            { "kind": "reg_key", "target": HOSTILE },
+            { "kind": "reg_key", "target": HOSTILE2 }
+        ]
+    });
+    // 档位：residue 越过并读到快照闸文案，其余窗口与主窗被拒杀
+    assert_residue_window_only("uninstall_residue_execute", args.clone(), "不在本次扫描快照");
+    // 形状：整批拒绝必须指向快照闸本身，而不是任何删除原语被跑过
+    let w = window_with_label(RESIDUE_LABEL);
+    let res = invoke(&w, "uninstall_residue_execute", args);
     assert_eq!(res["success"], json!(false), "无快照时不得执行任何删除: {res}");
     assert!(
         common::message_of(&res).contains("不在本次扫描快照"),
@@ -251,36 +274,47 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
     );
 }
 
-/// P1-B3 三条重启后删命令都是 MAIN 档（唯一调用方是主窗卸载页残留面板）。
-/// 快速组只断子窗被拒杀；add/list/revoke 的正例都要触真实注册表（PFRO），属
-/// 发布前人工/真机组，静默快速组不做。
+/// P1-B3 三条重启后删命令随面板一起迁到 `residue` 副窗专属档（v0.7.0）。
+/// add 用「空目标早退」做正向特征（零副作用）；list 只断「不是档位拒杀」（读 PFRO，
+/// 返回值随环境变，不做形状断言）；revoke 会写 PFRO ⇒ **只断被拒的一侧**，
+/// 正例留给发布前 `#[ignore]` 组，符合 §4.2 纪律②「触盘/改系统的不进快速组」。
 #[test]
-fn pending_delete_channels_are_main_only() {
-    for (cmd, args) in [
-        ("uninstall_pending_add", json!({ "targets": [] })),
-        ("uninstall_pending_list", json!({})),
-        ("uninstall_pending_revoke", json!({})),
-    ] {
-        for label in sub_windows() {
-            let w = window_with_label(label);
-            let text = invoke_text(&w, cmd, args.clone());
-            assert!(
-                text.contains("IPC 来源校验失败"),
-                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
-            );
+fn pending_delete_channels_are_residue_window_only() {
+    assert_residue_window_only(
+        "uninstall_pending_add",
+        json!({ "targets": [] }),
+        "没有要登记的目标",
+    );
+    // needle 用数据形状里的键名：档位拒杀的回执只有 {success:false,message}，读不到 entries
+    assert_residue_window_only("uninstall_pending_list", json!({}), "entries");
+    // revoke：只验拒杀侧
+    for label in sub_windows() {
+        if label == RESIDUE_LABEL {
+            continue;
         }
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "uninstall_pending_revoke", json!({ "batchId": "no-such-batch" }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调重启后删撤销必须被拒杀，回执 {text}"
+        );
     }
+    let m = invoke_text(&main_window(), "uninstall_pending_revoke", json!({ "batchId": "no-such-batch" }));
+    assert!(
+        m.contains("IPC 来源校验失败"),
+        "主窗调重启后删撤销现在必须被拒杀（面板已搬走），回执 {m}"
+    );
 }
 
 /// v2-B1/B2（2026-10-01 复核批次）：pending-add 的纵深防御正例。
 /// 两条路径都在**写入任何东西之前**短路：受保护/不可归一化目标在循环内第一道闸被
 /// skip（`added=0` → 不写 PFRO、不写待删文档），超限在 spawn_blocking 之前整批拒绝；
-/// 除只读 PFRO/文档读取外零副作用，可进快速组。
+/// 除只读 PFRO/文档读取外零副作用，可进快速组。v0.7.0 起调用方是 residue 副窗。
 /// 向量口径（对照 protect::build_default_roots）：空串=归一化失败、裸盘符与盘符根=
 /// drive_root、`System32\config` 子树与 `C:\Windows` exact=受保护清单本体。
 #[test]
 fn pending_add_rejects_protected_paths_and_over_limit() {
-    let w = main_window();
+    let w = window_with_label(RESIDUE_LABEL);
     let res = invoke(
         &w,
         "uninstall_pending_add",
@@ -332,40 +366,33 @@ fn residue_rule_update_channels_are_main_only() {
     }
 }
 
-/// C2 两条应用数据遗留命令都是 MAIN 档（唯一调用方是主窗卸载页）。
+/// C2 两条应用数据遗留命令 v0.7.0 起是 `residue` 副窗专属档。
 ///
-/// 快速组里主窗正向特征只走 `orphan_ignore` 的参数校验早退路（格式错即返回，
-/// 不 load/save 所有权档案，零副作用）；`orphan_scan` 会读档案并可能写回（升级/过期），
-/// 且要逐目录读盘，正例只在下面的 `#[ignore]` 组里跑。
+/// 正向特征只走 `orphan_ignore` 的参数校验早退路（格式错即返回，不 load/save 所有权
+/// 档案，零副作用）；`orphan_scan` 会读档案并可能写回（升级/过期），且要逐目录读盘
+/// ⇒ 这里**只验拒杀侧**，正例留在下面的 `#[ignore]` 组（§4.2 纪律②）。
 #[test]
-fn orphan_channels_are_main_only() {
+fn orphan_channels_are_residue_window_only() {
+    assert_residue_window_only(
+        "uninstall_orphan_ignore",
+        json!({ "appId": "no-separator", "displayName": "Acme" }),
+        "app_id 格式错误",
+    );
     for label in sub_windows() {
+        if label == RESIDUE_LABEL {
+            continue; // 正例触盘，不进快速组
+        }
         let w = window_with_label(label);
         let scan = invoke_text(&w, "uninstall_orphan_scan", json!({}));
         assert!(
             scan.contains("IPC 来源校验失败"),
             "{label} 窗调应用数据遗留扫描必须被来源校验拒杀，回执 {scan}"
         );
-        let ign = invoke_text(
-            &w,
-            "uninstall_orphan_ignore",
-            json!({ "appId": "no-separator", "displayName": "x" }),
-        );
-        assert!(
-            ign.contains("IPC 来源校验失败"),
-            "{label} 窗调遗留忽略必须被拒杀，回执 {ign}"
-        );
     }
-    let w = main_window();
-    let res = invoke(
-        &w,
-        "uninstall_orphan_ignore",
-        json!({ "appId": "no-separator", "displayName": "Acme" }),
-    );
-    assert_eq!(res["success"], json!(false), "非法 appId 必须早退: {res}");
+    let m = invoke_text(&main_window(), "uninstall_orphan_scan", json!({}));
     assert!(
-        common::message_of(&res).contains("app_id 格式错误"),
-        "主窗应越过档位进入参数校验，回执 {res}"
+        m.contains("IPC 来源校验失败"),
+        "主窗调遗留扫描现在必须被拒杀（面板已搬走），回执 {m}"
     );
 }
 
@@ -415,19 +442,13 @@ fn reg_backup_channels_are_main_only() {
     );
 }
 
-/// M6 失效残留扫描是 MAIN 档：它产出的注册表候选会进同一条删除链，子窗一律拒杀。
-/// 正向特征放在下面的 `#[ignore]` 真机用例里（那条断言 success、采集计数与候选硬约束）；
-/// 这里只断"拒杀"，因为命令本体要读注册表三根，不属于快速组的零副作用范围。
+/// M6 失效残留扫描 v0.7.0 起是 `residue` 副窗专属档：它产出的注册表候选会进同一条删除链，
+/// 其余窗口与主窗一律拒杀。本体只读注册表三根（无写、无出网），所以这里给得起正向特征：
+/// 越过档位的回执里必须有 `findings` 键 —— 档位拒杀的回执只有 {success,message}。
+/// （采集计数与候选硬约束那条仍在下面的 `#[ignore]` 真机用例里。）
 #[test]
-fn dead_scan_channel_is_main_only() {
-    for label in sub_windows() {
-        let w = window_with_label(label);
-        let text = invoke_text(&w, "uninstall_dead_scan", json!({}));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调失效残留扫描必须被拒杀，回执 {text}"
-        );
-    }
+fn dead_scan_channel_is_residue_window_only() {
+    assert_residue_window_only("uninstall_dead_scan", json!({}), "findings");
 }
 
 /// B6 体积兜底：MAIN 档 + 入参形状闸。
@@ -1050,9 +1071,10 @@ fn batch_restore_refuses_hostile_batch_id() {
 
 /// 新增的 `backup` 参数是 Option——旧调用形状（只送 appId+targets）必须仍然进实现，
 /// 否则前端一处没改就是整条残留清理不可用。这里用空 targets 触发**零副作用**的入参闸门。
+/// v0.7.0 起调用方是 residue 副窗（主窗已没有这条链的入口）。
 #[test]
 fn residue_execute_still_accepts_call_without_backup_arg() {
-    let w = main_window();
+    let w = window_with_label(RESIDUE_LABEL);
     let r = invoke(&w, "uninstall_residue_execute", json!({ "appId": "MACHINE|all", "targets": [] }));
     assert!(
         r["message"].as_str().unwrap_or("").contains("targets 为空"),

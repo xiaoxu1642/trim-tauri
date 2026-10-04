@@ -653,8 +653,15 @@
     },
 
     residueWindow: {
-      openWindow: function () { return invokeChannel('residue:open-window'); },
-      closeWindow: function () { return invokeChannel('residue:close-window'); }
+      // v0.7.0：残留面板整块搬进这扇窗，卸载成功后带目标进来。
+      // appId 只是「提示后端扫哪个」——真正的取值闸在 Rust 侧（开窗前一次、执行链再一次），
+      // 这里空串一律不送，免得把 `?app=` 空值当成合法目标。
+      openWindow: function (appId) {
+        return invokeChannel('residue:open-window', appId ? { appId: appId } : undefined);
+      },
+      closeWindow: function () { return invokeChannel('residue:close-window'); },
+      // 副窗已开着时主窗又点了「查残留」：新目标走事件进来（能力面已授 core:event:allow-listen）
+      onTarget: function (callback) { return onEvent('residue:target', function (payload) { callback(payload); }); }
     },
 
     quickCmds: {

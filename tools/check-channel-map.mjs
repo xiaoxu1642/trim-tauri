@@ -369,7 +369,9 @@ function parseApiPaths(text) {
  * 表里某条后来有了子窗调用点（应当从表里删掉）⇒ 也判红。
  */
 const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
-  'aidesc_get',
+  // v0.7.0 摘掉三条：残留副窗挂上了 intro.js（点击查看里的本地简介 + 联网 AI 简介），
+  // 于是 aidesc_get / intro_load / models_open_window（「去设置」开大模型管理窗）
+  // 真的有了子窗调用点。本表是只许变短的棘轮 —— 有了消费方还留在表里即红。
   'app_open_external',
   'app_read_usage',
   'appearance_set_material',
@@ -399,12 +401,10 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'fonts_list',
   'fonts_remove_imported',
   'fonts_save_config',
-  'intro_load',
   'log_export',
   'log_read',
   'maintenance_tasks',
   'memory_info',
-  'models_open_window',
   'models_set_scope',
   'netcheck_collect',
   'optimizer_batch_preflight',

@@ -9616,3 +9616,54 @@ body[data-preset-bg] .titlebar,
 body.bg-image-on .titlebar {
   background: transparent;
 }
+
+/* ==================== 残留扫描副窗（v0.7.0：三链候选 + 深扫只读报告同页） ====================
+   面板从主窗搬进副窗后，操作条与详情视图是这一窗专属的布局件；只用既有 token，
+   圆角限定在 small/btn/medium（AGENTS §2 设计系统红线）。 */
+.rs-actionbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0 4px;
+}
+.rs-actionbar .toggle-switch { margin-left: auto; }
+.toggle-label { color: var(--fg-secondary); font-size: 12px; }
+.rs-mini-btn {
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: var(--radius-btn);
+  margin-left: 8px;
+}
+.rs-detail { display: flex; flex-direction: column; gap: 14px; }
+.rs-detail-block { display: flex; flex-direction: column; gap: 6px; }
+.rs-detail-h {
+  font-size: 12px;
+  letter-spacing: .02em;
+  color: var(--fg-tertiary);
+}
+.rs-detail-verdict {
+  padding: 8px 10px;
+  border-radius: var(--radius-small);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--fg-primary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.rs-contrib {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--fg-secondary);
+}
+.rs-contrib-code {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-badge);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}

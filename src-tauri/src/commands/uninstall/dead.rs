@@ -401,7 +401,8 @@ pub(super) unsafe fn collect_dead_app_path_raws() -> Vec<DeadAppPathRaw> {
 /// uninstall:dead-scan — 失效残留扫描（主窗档；不依赖卸载事实，只产候选）
 #[tauri::command]
 pub async fn uninstall_dead_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
+    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let label = window.label().to_string();

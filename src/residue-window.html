@@ -14,11 +14,11 @@
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
         <h1>应用卸载残留扫描</h1>
-        <div class="pw-topbar-sub">只读报告：扫描服务、驱动、IFEO、厂商键、能力授权与游戏库残留。<b>本窗口不提供删除入口</b>，任何一项都不会被改动。</div>
+        <div class="pw-topbar-sub">残留扫描的唯一入口：上半区是可逐项勾选删除的三链候选，下半区是七个深扫器的只读报告。<b>有保护的项不给删除，没有保护的自己确认后再删。</b></div>
       </div>
       <div class="pw-topbar-actions">
         <input type="text" class="field-input rs-search" id="rsSearch" placeholder="搜索目标路径 / 服务名…" spellcheck="false" />
-        <button class="btn btn-secondary" id="rsRescanBtn" data-tip="重新扫描（只读，不改本机任何东西）">
+        <button class="btn btn-secondary" id="rsRescanBtn" data-tip="两条区一起重扫：三链候选 + 七个深扫器">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
           重新扫描
         </button>
@@ -27,12 +27,34 @@
     </div>
 
     <div class="mw-content">
+      <!-- ① 三链候选：唯一可执行区。勾选态只在本窗内存里，执行时后端按本窗 label 取快照 -->
       <div class="mw-card">
         <div class="mw-card-head">
-          <span class="mw-card-title">扫描概览</span>
-          <span class="mw-card-desc" id="rsSummary">正在扫描…</span>
+          <span class="mw-card-title">可清理残留（规则库 / 失效登记 / 卸载遗留）</span>
+          <span class="mw-card-desc" id="rsChainHint">除规则库高置信项外一律不自动勾选。</span>
         </div>
-        <div class="mw-body" id="rsBody">
+        <div class="rs-actionbar">
+          <button class="btn btn-danger" id="rsBtnClean" disabled>删除选中残留</button>
+          <button class="btn btn-secondary" id="rsBtnPending" style="display:none" disabled data-tip="回收站删不掉的文件可登记为下次重启时删除（永久删除，重启前可撤回）">重启后删除</button>
+          <button class="btn btn-secondary" id="rsBtnPendingRevoke" style="display:none" data-tip="把已登记的「重启后删除」条目从系统摘除，文件保持原样">撤回重启后删</button>
+          <label class="toggle-switch" for="rsBackupToggle" data-tip="开启后，删除前先把选中的文件与目录内容打进本机还原包（zip），之后可在「备份」列表里整批写回原位置。关闭时文件只进回收站、不留内容副本。注册表项无论开关都会先导出 .reg 备份。">
+            <input type="checkbox" id="rsBackupToggle" />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span class="toggle-label">删前备份到还原包</span>
+          </label>
+        </div>
+        <div class="mw-body" id="rsChainBody">
+          <div class="finder-empty"><p>正在扫描三类残留…</p></div>
+        </div>
+      </div>
+
+      <!-- ② 深扫报告：只读。后端保证这一批候选不写执行快照，所以本页这里也不给勾选框 -->
+      <div class="mw-card">
+        <div class="mw-card-head">
+          <span class="mw-card-title">深度扫描报告（只读）</span>
+          <span class="mw-card-desc" id="rsDeepSummary">正在扫描…</span>
+        </div>
+        <div class="mw-body" id="rsDeepBody">
           <div class="empty-state"><p>正在读取服务表、驱动目录与注册表残留…</p></div>
         </div>
       </div>
@@ -46,10 +68,14 @@
 
   <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——业务件在加载期就会读 window.api -->
   <script src="scripts/tauri-api.js"></script>
-  <!-- 子窗口材质/主题同步：与其余四个子窗同一件（预览窗是唯一例外） -->
+  <!-- 子窗口材质/主题同步：与其余子窗同一件（预览窗是唯一例外） -->
   <script src="scripts/window-material.js"></script>
-  <!-- ds.js：data-tip 委托 + window.ds.esc（本窗所有插值一律走它，见复核 LG-2） -->
+  <!-- ds.js：data-tip 委托 + window.ds.esc（本窗所有插值一律走它，见复核 LG-2）。
+       modal.js / intro.js 都必须排在它之后——两者的焦点圈闭与转义都按 window.ds 写（§2 M17） -->
   <script src="scripts/ds.js"></script>
+  <script src="scripts/modal.js"></script>
+  <!-- 简介面板共用件：本地简介 + 联网 AI 简介（点击查看里的那一块） -->
+  <script src="scripts/intro.js"></script>
   <!-- NEW-6：子窗轻量提示共用件（须先于主脚本加载） -->
   <script src="scripts/sub-toast.js"></script>
   <script src="scripts/residue-window.js"></script>

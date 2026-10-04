@@ -23,6 +23,21 @@ pub const APP_WINDOWS: &[&str] = &["main", "models", "preview", "processManager"
 /// 主窗口 label（多数高危及「主窗专属」通道只允许它调用）
 pub const MAIN: &[&str] = &["main"];
 
+/// 残留链（三链扫描 + 执行 + 重启后删除登记）专属窗口集。
+///
+/// v0.7.0 把主窗内联的残留面板整体搬进 `residue` 副窗，这 8 条命令的**唯一**渲染层调用方
+/// 就变成了那扇窗（现算证据：`grep -rn "uninstall\.\(residueScan\|deadScan\|orphanScan\|orphanIgnore\|residueExecute\|pendingAdd\|pendingList\|pendingRevoke\)" src/scripts`
+/// 命中的全在搬走前的 uninstall.js 残留面板里）。所以这里刻意**不**用 `MAIN`、也刻意**不**
+/// 放宽到 `APP_WINDOWS` 全集：
+/// - 用 `MAIN`：副窗一调就判越权，功能 100% 不可用（§3 M1~M3 的老坑）；
+/// - 用 `APP_WINDOWS`：注入 `preview`／`peripheral` 任一子窗就能拿到「自己扫一遍再删一遍」
+///   的完整能力 —— 按 label 分槽的快照只保证「只能执行自己扫出来的东西」，不保证
+///   「别的窗口不能自己扫」。
+///
+/// 新增成员必须同步 `tools/check-guard-tiers.mjs` 的 E 组（双向棘轮）与
+/// `capabilities/subwindows.json`，否则窗口建得出来、IPC 判越权。
+pub const RESIDUE_WINDOWS: &[&str] = &["residue"];
+
 /// 校验调用来源窗口；返回 label 或错误消息（错误消息直接回给渲染层）。
 /// 校验失败同时写日志——静默拒绝会掩盖注入尝试。
 pub fn guard<R: Runtime>(window: &WebviewWindow<R>, allowed: &[&str]) -> Result<String, String> {

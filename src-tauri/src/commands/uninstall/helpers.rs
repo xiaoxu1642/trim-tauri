@@ -159,7 +159,7 @@ pub(super) fn parse_reg_target(target: &str) -> Option<(windows::Win32::System::
 /// Appx 包全名准入：只允许 `[A-Za-z0-9._-]`（PackageFullName 的合法字符集），
 /// 喂给 PowerShell 前必须过这道闸（防引号/换行注入命令串）。
 
-pub(super) fn valid_uninstall_key_path(path: &str) -> bool {
+pub(crate) fn valid_uninstall_key_path(path: &str) -> bool {
     let p = path.to_lowercase();
     p.starts_with("software\\")
         && p.contains("microsoft\\windows\\currentversion\\uninstall\\")
