@@ -35,7 +35,7 @@ const ALLOW_BARE = {
 
 /** 与 `engine/systembin.rs` 的 PINNED 保持一致（顺序无关） */
 const PINNED = [
-  'cmd.exe', 'dism.exe', 'explorer.exe', 'ipconfig.exe', 'lodctr.exe',
+  'cmd.exe', 'dism.exe', 'explorer.exe', 'fltmc.exe', 'ipconfig.exe', 'lodctr.exe',
   'netsh.exe', 'netsh', 'powercfg.exe', 'powershell.exe', 'reg.exe', 'reg',
   'sc.exe', 'sc', 'schtasks.exe', 'schtasks', 'sfc.exe', 'tasklist.exe',
   'where.exe', 'wsreset.exe',

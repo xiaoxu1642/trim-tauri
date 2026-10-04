@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="theme-color" content="#f3f3f3" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file: asset: http://asset.localhost; font-src 'self' file: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
+  <title>应用卸载残留扫描</title>
+  <link rel="icon" href="./assets/ico/Trim.ico" />
+  <link rel="stylesheet" href="styles/main.css" />
+  <link rel="stylesheet" href="styles/ds.css" />
+</head>
+<body class="mw-window rs-window">
+  <div class="mw-shell">
+    <div class="pw-topbar">
+      <div class="pw-topbar-copy">
+        <h1>应用卸载残留扫描</h1>
+        <div class="pw-topbar-sub">只读报告：扫描服务、驱动、IFEO、厂商键、能力授权与游戏库残留。<b>本窗口不提供删除入口</b>，任何一项都不会被改动。</div>
+      </div>
+      <div class="pw-topbar-actions">
+        <input type="text" class="field-input rs-search" id="rsSearch" placeholder="搜索目标路径 / 服务名…" spellcheck="false" />
+        <button class="btn btn-secondary" id="rsRescanBtn" data-tip="重新扫描（只读，不改本机任何东西）">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+          重新扫描
+        </button>
+        <button class="btn btn-primary" id="rsCloseBtn">完成</button>
+      </div>
+    </div>
+
+    <div class="mw-content">
+      <div class="mw-card">
+        <div class="mw-card-head">
+          <span class="mw-card-title">扫描概览</span>
+          <span class="mw-card-desc" id="rsSummary">正在扫描…</span>
+        </div>
+        <div class="mw-body" id="rsBody">
+          <div class="empty-state"><p>正在读取服务表、驱动目录与注册表残留…</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mw-footer">
+      <span class="mw-foot-hint" id="rsFootHint"></span>
+      <span class="mw-foot-hint" id="rsGlobalHint" style="margin:0"></span>
+    </div>
+  </div>
+
+  <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——业务件在加载期就会读 window.api -->
+  <script src="scripts/tauri-api.js"></script>
+  <!-- 子窗口材质/主题同步：与其余四个子窗同一件（预览窗是唯一例外） -->
+  <script src="scripts/window-material.js"></script>
+  <!-- ds.js：data-tip 委托 + window.ds.esc（本窗所有插值一律走它，见复核 LG-2） -->
+  <script src="scripts/ds.js"></script>
+  <!-- NEW-6：子窗轻量提示共用件（须先于主脚本加载） -->
+  <script src="scripts/sub-toast.js"></script>
+  <script src="scripts/residue-window.js"></script>
+</body>
+</html>

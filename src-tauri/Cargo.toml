@@ -1,6 +1,6 @@
 [package]
 name = "trim-tauri"
-version = "0.5.9"
+version = "0.6.0"
 description = "Trim"
 authors = ["xiaoxu"]
 edition = "2021"
@@ -34,8 +34,10 @@ tauri = { version = "2", features = ["protocol-asset"] }
 # 而 native-scanner 自带 opt-level=3 / lto=true / codegen-units=1，并进来会被静默降级
 # —— 那几个参数直接决定扫描性能。故让它独立成包、仅作 path 依赖。
 #
-# ⚠️ 双份维护：这份副本与 `C:\KaiFa\Trim\native-scanner`（Electron 轨）从此各自演化，
-# 改扫描器要说清改的是哪一份。Phase 5 清理双轨时 Electron 侧那份随 Electron 退役。
+# ⚠️ 双份维护：这份 vendor 副本与 Electron 轨的原版从此各自演化，改扫描器要说清改的是哪一份。
+# 原版位于**本仓库之外**，此处刻意不写它的路径：那是本机绑定的绝对路径，写进跟踪文件后
+# 换一台机器就成了指向虚无的注释（AGENTS §2 红线：跟踪文件不得关联仓库外/未跟踪路径）。
+# Phase 5 清理双轨时 Electron 侧那份随 Electron 退役。
 trim-finder = { path = "../native-scanner" }
 # 原生文件对话框（log:export 保存 / paths:browse 选目录）——官方插件，仅用 Rust 侧 API，
 # 不向渲染层暴露 JS 命令面（少一个权限面）

@@ -336,6 +336,8 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_pending_revoke,
         commands::uninstall::uninstall_residue_scan,
         commands::uninstall::uninstall_residue_execute,
+        // v0.5.0 只读残留报告（副窗档，无删除入口；档位登记见 check-guard-tiers MUST_READONLY）
+        commands::uninstall::uninstall_residue_deep_scan,
         commands::uninstall::uninstall_check_residue_version,
         commands::uninstall::uninstall_update_residue_rules,
         commands::uninstall::uninstall_orphan_scan,
@@ -362,6 +364,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::preview::preview_open_window,
         commands::preview::preview_close_window,
         commands::preview::preview_image_deleted,
+        // v0.5.0 残留扫描副窗（label `residue`，与 guard::APP_WINDOWS / capabilities 同步）
+        commands::residue::residue_open_window,
+        commands::residue::residue_close_window,
         // ---- B 批：runtimes / netcheck / diskbench ----
         // R1（2026-10-01）：`pwsh_status` 随整条 PowerShell 7 链退役 —— 右键图标改原生取图后
         // 本应用不再需要用户自装 PS7，「探测候选链并回报状态」这件事失去了对象。

@@ -14,6 +14,7 @@
 //! - read-image 仅图片扩展名 + ≤10MB，base64 dataURL。
 //! - 危险操作前 flush_sync；success 语义=通道执行成功（失败明细随 data 返回）。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -53,7 +54,8 @@ fn scope_store(label: &str, ty: &str, root: String, files: HashSet<String>) {
 }
 
 fn scope_get(label: &str, ty: &str) -> Option<Scope> {
-    SCOPES.lock()
+    SCOPES
+        .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .and_then(|m| m.get(&slot_key(label, ty)).cloned())
@@ -72,10 +74,26 @@ fn scope_owner(label: &str) -> &str {
     }
 }
 
-/// 词法规范化（不触盘）：折叠 . / .. 组件、统一反斜杠、小写、去尾部分隔符。
+/// 去掉 `\\?\` / `\\?\UNC\` verbatim 前缀（只做比较用，不改实际扫描路径）。
+///
+/// `std::fs::canonicalize` 在 Windows 上会返回 verbatim 形式，而已保存的
+/// `paths.json` 值来自用户手输/目录选择器，通常是普通形式。比较前必须同口径，
+/// 否则同一目录会被判成两个字符串（v2 磁盘清理审计的独立隐患 D）。
+fn strip_verbatim(p: &str) -> Cow<'_, str> {
+    if let Some(rest) = p.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix("UNC\\") {
+            return Cow::Owned(format!(r"\\{unc}"));
+        }
+        return Cow::Borrowed(rest);
+    }
+    Cow::Borrowed(p)
+}
+
+/// 词法规范化（不触盘）：剥 verbatim 前缀、折叠 . / .. 组件、统一反斜杠、小写、去尾部分隔符。
 fn path_key(p: &str) -> String {
+    let stripped = strip_verbatim(p);
     let mut s: String = String::new();
-    for c in Path::new(p).components() {
+    for c in Path::new(stripped.as_ref()).components() {
         match c {
             Component::Prefix(pre) => s.push_str(&pre.as_os_str().to_string_lossy()),
             Component::RootDir => s.push('\\'),
@@ -106,7 +124,9 @@ fn config_key(ty: &str) -> &'static str {
 }
 
 fn default_dirs(ty: &str) -> Vec<PathBuf> {
-    let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     let docs = home.join("Documents");
     if ty == "qq" {
         vec![docs.join("Tencent Files")]
@@ -115,19 +135,47 @@ fn default_dirs(ty: &str) -> Vec<PathBuf> {
     }
 }
 
-fn configured_dir(ty: &str, custom: &Option<String>) -> Option<PathBuf> {
-    if let Some(c) = custom {
-        if !c.is_empty() {
-            return Some(PathBuf::from(c));
-        }
-    }
+/// 读已保存的路径配置。读不到 / 解析失败 / 空串都返回 None，调用方 fail-closed。
+fn saved_dir(ty: &str) -> Option<String> {
     let cfg = security::read_json_or_quarantine(&paths::paths_config_file());
-    if let Some(v) = cfg.get(config_key(ty)).and_then(|v| v.as_str()) {
-        if !v.is_empty() {
-            return Some(PathBuf::from(v));
+    cfg.get(config_key(ty))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// 解析实际扫描目录。
+///
+/// v2 口径（2026-10-04 用户裁决 1）：`customPath` 只能是对已保存路径的确认，
+/// 不能作为覆盖值。这样渲染层即使被注入，也不能借 `customPath` 让扫描读任意目录。
+/// 实际文件操作仍用配置里的值，不用渲染层回传的字符串。
+fn resolve_dir(
+    ty: &str,
+    custom: &Option<String>,
+    saved: Option<String>,
+) -> Result<PathBuf, String> {
+    let gate_msg = "扫描路径必须来自已保存的路径配置，请先在设置中保存该路径";
+    if let Some(c) = custom.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        let Some(saved) = saved.as_deref() else {
+            return Err(gate_msg.to_string());
+        };
+        if path_key(c) != path_key(saved) {
+            return Err(gate_msg.to_string());
         }
+        return Ok(PathBuf::from(saved));
     }
-    default_dirs(ty).into_iter().find(|p| p.is_dir())
+    if let Some(saved) = saved {
+        return Ok(PathBuf::from(saved));
+    }
+    default_dirs(ty)
+        .into_iter()
+        .find(|p| p.is_dir())
+        .ok_or_else(|| "路径不存在，请在设置中配置文件目录".to_string())
+}
+
+fn configured_dir(ty: &str, custom: &Option<String>) -> Result<PathBuf, String> {
+    resolve_dir(ty, custom, saved_dir(ty))
 }
 
 fn ext_of(name: &str) -> String {
@@ -276,12 +324,15 @@ pub async fn fileclean_scan<R: Runtime>(
         _ => return json!({ "success": false, "data": [], "message": "未知类型" }),
     };
 
-    let Some(scan_path) = configured_dir(&ty, &custom_path) else {
-        return json!({
-            "success": false,
-            "data": [],
-            "message": "路径不存在，请在设置中配置文件目录"
-        });
+    let scan_path = match configured_dir(&ty, &custom_path) {
+        Ok(path) => path,
+        Err(message) => {
+            return json!({
+                "success": false,
+                "data": [],
+                "message": message
+            });
+        }
     };
 
     // 存在 + 普通目录 + 非链接
@@ -303,15 +354,6 @@ pub async fn fileclean_scan<R: Runtime>(
         .to_string_lossy()
         .replace('/', "\\");
 
-    // customPath 必须等于已保存配置（防借扫描读任意目录）
-    if let Some(c) = custom_path.as_ref() {
-        if !c.is_empty() && path_key(c) != path_key(&resolved) {
-            return json!({
-                "success": false, "data": [],
-                "message": "扫描路径必须来自已保存的路径配置，请先在设置中保存该路径"
-            });
-        }
-    }
     if resolved.len() > MAX_PATH_LEN {
         return json!({ "success": false, "data": [], "message": "扫描路径过长" });
     }
@@ -321,8 +363,7 @@ pub async fn fileclean_scan<R: Runtime>(
     let root2 = resolved.clone();
     let heavy = scan_path.to_string_lossy().contains("tencent")
         || resolved.to_lowercase().contains("xwechat");
-    let result = tauri::async_runtime::spawn_blocking(move || scan_root(Path::new(&root2)))
-        .await;
+    let result = tauri::async_runtime::spawn_blocking(move || scan_root(Path::new(&root2))).await;
     let (items, scanned, unhandled) = match result {
         Ok(v) => v,
         Err(e) => {
@@ -339,7 +380,7 @@ pub async fn fileclean_scan<R: Runtime>(
     // 分槽：root + 文件路径集合
     let files: HashSet<String> = items
         .iter()
-        .filter_map(|f| f.get("path").and_then(|v| v.as_str()).map(|s| path_key(s)))
+        .filter_map(|f| f.get("path").and_then(|v| v.as_str()).map(path_key))
         .collect();
     scope_store(&label, &ty2, path_key(&resolved), files);
 
@@ -351,7 +392,11 @@ pub async fn fileclean_scan<R: Runtime>(
             items.len(),
             total_size,
             scanned,
-            if unhandled > 0 { format!("，{unhandled} 项文件名无法无损处理已跳过") } else { String::new() },
+            if unhandled > 0 {
+                format!("，{unhandled} 项文件名无法无损处理已跳过")
+            } else {
+                String::new()
+            },
             if heavy { "（大目录）" } else { "" }
         ),
     );
@@ -360,11 +405,20 @@ pub async fn fileclean_scan<R: Runtime>(
         json!({ "scanType": ty2, "done": items.len(), "total": items.len() }),
     );
 
+    scan_response(items, total_size, resolved, unhandled)
+}
+
+/// `fileclean:scan` 的成功回执形状。
+///
+/// `totalSize` 必须是 JSON 数字：渲染层把它直接参与 `+` 求和，字符串会让
+/// 累加器退化成拼接（v2 的 22.7 TB / NaN undefined 根因）。抽成纯函数是为了
+/// 让这条形状约束能在不触盘的单元测试里直接判红。
+fn scan_response(items: Vec<Value>, total_size: u64, resolved: String, unhandled: usize) -> Value {
     json!({
         "success": true,
         "data": {
             "files": items,
-            "totalSize": total_size.to_string(),
+            "totalSize": total_size,
             "scanPath": resolved,
             // 审查 v2-M5：名字无法无损表示的条目**没有**进扫描槽（不可预览也不可删），
             // 数量回给渲染层说清楚，而不是让它们静默消失
@@ -408,9 +462,9 @@ pub async fn fileclean_read_image<R: Runtime>(
         return json!({ "success": false, "message": "文件不存在" });
     }
     // 找到包含该文件的槽（qq/wechat 任一）
-    let scope = ["qq", "wechat"]
-        .iter()
-        .find_map(|t| scope_get(scope_owner(window.label()), t).filter(|s| in_scope(s, &file_path)));
+    let scope = ["qq", "wechat"].iter().find_map(|t| {
+        scope_get(scope_owner(window.label()), t).filter(|s| in_scope(s, &file_path))
+    });
     let Some(scope) = scope else {
         return json!({ "success": false, "message": "路径不在扫描范围内，已拒绝访问" });
     };
@@ -438,7 +492,8 @@ pub async fn fileclean_read_image<R: Runtime>(
 /// 回收站删除单个文件（供 delete-file / execute 共用），返回 (ok, recycled, message)
 fn recycle_one(file_path: &str) -> (bool, bool, String) {
     // 审查 v2-F1：走 `_os` 版。`has_lossy_path` 是第二道闸，这里不重复做名称转换。
-    match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(file_path).as_os_str()) {
+    match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(file_path).as_os_str())
+    {
         Ok(()) => (true, true, String::new()),
         Err(e1) => {
             // 回收站失败仅在明确失败时才永久删除（与 Electron trashOrUnlink 不同：
@@ -467,13 +522,11 @@ pub async fn fileclean_delete_file<R: Runtime>(
     if file_path.is_empty() || file_path.len() > MAX_PATH_LEN {
         return json!({ "success": false, "message": "文件不存在" });
     }
-    let ty = ["qq", "wechat"]
-        .iter()
-        .find_map(|t| {
-            scope_get(scope_owner(window.label()), t)
-                .filter(|s| in_scope(s, &file_path))
-                .map(|_| *t)
-        });
+    let ty = ["qq", "wechat"].iter().find_map(|t| {
+        scope_get(scope_owner(window.label()), t)
+            .filter(|s| in_scope(s, &file_path))
+            .map(|_| *t)
+    });
     let Some(ty) = ty else {
         return json!({ "success": false, "message": "路径不在扫描范围内，已拒绝删除" });
     };
@@ -516,10 +569,7 @@ pub async fn fileclean_delete_file<R: Runtime>(
                 m.insert(slot_key(owner, ty), s);
             }
         }
-        log::write_log(
-            "info",
-            &format!("删除预览图片（回收站）: {file_path}"),
-        );
+        log::write_log("info", &format!("删除预览图片（回收站）: {file_path}"));
         json!({ "success": true, "recycled": recycled, "manifestPath": format!("deleted-{batch}.json") })
     } else {
         json!({ "success": false, "message": msg })
@@ -545,9 +595,11 @@ pub async fn fileclean_execute<R: Runtime>(
         .first()
         .and_then(|f| f.get("path").and_then(|v| v.as_str()))
         .unwrap_or("");
-    let ty = ["qq", "wechat"]
-        .iter()
-        .find_map(|t| scope_get(window.label(), t).filter(|s| in_scope(s, first_path)).map(|_| *t));
+    let ty = ["qq", "wechat"].iter().find_map(|t| {
+        scope_get(window.label(), t)
+            .filter(|s| in_scope(s, first_path))
+            .map(|_| *t)
+    });
     let Some(ty) = ty else {
         return json!({ "success": false, "message": "至少一个文件不在扫描范围内，已拒绝整批" });
     };
@@ -584,7 +636,11 @@ pub async fn fileclean_execute<R: Runtime>(
     let mut removed_keys: HashSet<String> = HashSet::new();
 
     for f in &files {
-        let p = f.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let p = f
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         let (ok, recycled, message) = recycle_one(&p);
         if ok {
@@ -678,21 +734,93 @@ mod tests {
         assert_eq!(path_key("c:\\a\\b"), "c:\\a\\b");
     }
 
+    /// v2 审计的独立隐患 D：canonicalize 产的 `\\?\` 前缀与用户保存的普通路径
+    /// 必须在比较口径上等价；剥前缀只影响比较，不影响实际扫描仍是 verbatim。
+    #[test]
+    fn path_key_strips_verbatim_prefix() {
+        assert_eq!(path_key(r"\\?\C:\A\B"), path_key(r"C:\A\B"));
+        assert_eq!(path_key(r"\\?\C:\A\B\"), path_key(r"C:\A\B"));
+        assert_eq!(
+            path_key(r"\\?\UNC\server\share\A\B"),
+            path_key(r"\\server\share\A\B")
+        );
+        assert_ne!(path_key(r"C:\A\B"), path_key(r"C:\A\C"));
+    }
+
+    /// v2 用户裁决 1：customPath 只能确认已保存值，不能覆盖它。
+    /// 正向：普通/verbatim 两种拼法都能确认；反向：另一目录、缺配置都必须拒。
+    #[test]
+    fn custom_path_must_equal_saved_value() {
+        let saved = Some(r"C:\Users\me\Documents\Tencent Files".to_string());
+        let ok = Some(r"C:\Users\me\Documents\Tencent Files".to_string());
+        assert!(resolve_dir("qq", &ok, saved.clone()).is_ok());
+
+        let verbatim = Some(r"\\?\C:\Users\me\Documents\Tencent Files".to_string());
+        assert!(
+            resolve_dir("qq", &verbatim, saved.clone()).is_ok(),
+            "verbatim 拼写应视为同一个已保存目录"
+        );
+
+        let other = Some(r"C:\Windows".to_string());
+        assert!(
+            resolve_dir("qq", &other, saved.clone()).is_err(),
+            "非已保存目录必须拒绝"
+        );
+        assert!(
+            resolve_dir("qq", &ok, None).is_err(),
+            "没有已保存值时必须拒绝 customPath"
+        );
+
+        // 不传 customPath 时仍走已保存值 / 默认目录；空串等同不传。
+        let empty = Some(String::new());
+        assert!(resolve_dir("qq", &empty, saved.clone()).is_ok());
+        assert_eq!(
+            resolve_dir("qq", &empty, saved).unwrap(),
+            PathBuf::from(r"C:\Users\me\Documents\Tencent Files")
+        );
+    }
+
+    /// 回归根因：`totalSize` 必须是 JSON 数字，字符串会让前端 `+` 退化成拼接。
+    #[test]
+    fn scan_response_serializes_total_size_as_number() {
+        let res = scan_response(
+            vec![json!({ "path": r"C:\probe\imgs\a.jpg", "size": 4096 })],
+            4096,
+            r"\\?\C:\probe".to_string(),
+            0,
+        );
+        assert_eq!(res["data"]["totalSize"], json!(4096));
+        assert!(
+            res["data"]["totalSize"].is_u64(),
+            "totalSize 必须是 JSON number，不能是 \"4096\""
+        );
+    }
+
     /// 审查 v2-M5：只有能无损往返于 `String` 的名字才允许进扫描槽（进槽=可预览、可删）。
     /// 合法的多字节 Unicode 名字（中文/emoji）必须照常放行 —— 判错方向就等于把功能关掉。
     #[test]
     fn only_lossless_names_are_admissible() {
-        assert!(deletable_name(Path::new(r"C:\Users\me\Documents\微信聊天记录 1.jpg")));
-        assert!(deletable_name(Path::new("")), "空串本身是合法文本，不该被误判成 lossy");
+        assert!(deletable_name(Path::new(
+            r"C:\Users\me\Documents\微信聊天记录 1.jpg"
+        )));
+        assert!(
+            deletable_name(Path::new("")),
+            "空串本身是合法文本，不该被误判成 lossy"
+        );
         #[cfg(windows)]
         {
             use std::ffi::OsString;
             use std::os::windows::ffi::OsStringExt;
             // 孤立代理项：字节级拷来的 GBK 名字在 NTFS 上的真实形态
-            let broken = OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD800, 0x61, 0x2E, 0x6A, 0x70, 0x67]);
-            assert!(!deletable_name(Path::new(&broken)), "含孤立代理项的名字不得进槽");
+            let broken =
+                OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD800, 0x61, 0x2E, 0x6A, 0x70, 0x67]);
+            assert!(
+                !deletable_name(Path::new(&broken)),
+                "含孤立代理项的名字不得进槽"
+            );
             // 配对代理项（合法 emoji）不是问题
-            let fine = OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD83C, 0xDFAF, 0x2E, 0x6A, 0x70, 0x67]);
+            let fine =
+                OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD83C, 0xDFAF, 0x2E, 0x6A, 0x70, 0x67]);
             assert!(deletable_name(Path::new(&fine)));
         }
     }
@@ -709,8 +837,14 @@ mod tests {
 
         assert_eq!(scope_owner("preview"), "main");
         let shared = scope_get(scope_owner("preview"), "qq").expect("预览窗应读到主窗那次扫描的槽");
-        assert!(in_scope(&shared, r"C:\FakeQqRoot\photo.jpg"), "大小写/分隔符归一后仍须在范围内");
-        assert!(!in_scope(&shared, r"C:\Windows\x.jpg"), "范围外路径不得放行");
+        assert!(
+            in_scope(&shared, r"C:\FakeQqRoot\photo.jpg"),
+            "大小写/分隔符归一后仍须在范围内"
+        );
+        assert!(
+            !in_scope(&shared, r"C:\Windows\x.jpg"),
+            "范围外路径不得放行"
+        );
 
         assert_eq!(scope_owner("attacker"), "attacker");
         assert!(scope_get(scope_owner("attacker"), "qq").is_none());

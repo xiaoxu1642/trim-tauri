@@ -27,12 +27,18 @@
 
 mod appx;
 pub use appx::{uninstall_appx_logo, __cmd__uninstall_appx_logo, __tauri_command_name_uninstall_appx_logo};
+mod authenticode;
+mod capability_orphan;
 mod backup_report;
 pub use backup_report::{uninstall_reg_backup_list, __cmd__uninstall_reg_backup_list, __tauri_command_name_uninstall_reg_backup_list, uninstall_reg_backup_restore, __cmd__uninstall_reg_backup_restore, __tauri_command_name_uninstall_reg_backup_restore, uninstall_batch_list, __cmd__uninstall_batch_list, __tauri_command_name_uninstall_batch_list, uninstall_batch_restore, __cmd__uninstall_batch_restore, __tauri_command_name_uninstall_batch_restore, uninstall_report_list, __cmd__uninstall_report_list, __tauri_command_name_uninstall_report_list, uninstall_report_get, __cmd__uninstall_report_get, __tauri_command_name_uninstall_report_get};
 mod dead;
+mod drivers_orphan;
 pub use dead::{uninstall_dead_scan, __cmd__uninstall_dead_scan, __tauri_command_name_uninstall_dead_scan};
+mod game_platform_orphan;
 mod helpers;
+mod ifeo_orphan;
 mod list_run;
+mod minifilter_orphan;
 pub use list_run::{uninstall_dir_size, __cmd__uninstall_dir_size, __tauri_command_name_uninstall_dir_size, uninstall_list, __cmd__uninstall_list, __tauri_command_name_uninstall_list, uninstall_run, __cmd__uninstall_run, __tauri_command_name_uninstall_run};
 mod ownership;
 pub use ownership::{uninstall_orphan_scan, __cmd__uninstall_orphan_scan, __tauri_command_name_uninstall_orphan_scan, uninstall_orphan_ignore, __cmd__uninstall_orphan_ignore, __tauri_command_name_uninstall_orphan_ignore};
@@ -40,8 +46,12 @@ mod pending_delete;
 pub use pending_delete::{uninstall_pending_add, __cmd__uninstall_pending_add, __tauri_command_name_uninstall_pending_add, uninstall_pending_list, __cmd__uninstall_pending_list, __tauri_command_name_uninstall_pending_list, uninstall_pending_revoke, __cmd__uninstall_pending_revoke, __tauri_command_name_uninstall_pending_revoke};
 mod residue;
 pub use residue::{uninstall_residue_scan, __cmd__uninstall_residue_scan, __tauri_command_name_uninstall_residue_scan, uninstall_residue_execute, __cmd__uninstall_residue_execute, __tauri_command_name_uninstall_residue_execute};
+mod residue_deep;
+pub use residue_deep::{uninstall_residue_deep_scan, __cmd__uninstall_residue_deep_scan, __tauri_command_name_uninstall_residue_deep_scan};
 #[cfg(test)]
 mod residue_trace_tests;
 mod residue_update;
 pub use residue_update::{residue_rules_dir, residue_watermark, set_residue_watermark, uninstall_modify, __cmd__uninstall_modify, __tauri_command_name_uninstall_modify, uninstall_check_residue_version, __cmd__uninstall_check_residue_version, __tauri_command_name_uninstall_check_residue_version, uninstall_update_residue_rules, __cmd__uninstall_update_residue_rules, __tauri_command_name_uninstall_update_residue_rules};
+mod services_orphan;
+mod vendor_registry;
 

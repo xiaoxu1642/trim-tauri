@@ -111,6 +111,11 @@ const TAURI_ADDED = {
   'optimizer:list-groups': 'E7（2026-10-03）：分类两层结构下发（default 主序列 + custom 重映射；纯只读侧表）',
   'optimizer:touch-recent': 'E10（2026-10-03）：记一次最近使用（写侧，失败不打断流程）',
   'optimizer:stale-dismiss': '根治（2026-10-03）：「未完成还原」横幅 per-id 忽略（写记账 prefs 段；上游无启动对账横幅这一层）',
+  // v0.5.0 应用卸载残留扫描（只读报告阶段，方案 §3/§4）：上游 Electron 无残留副窗，
+  // 七个新扫描器全部只产报告，没有删除通道，故三条都是新增而非迁移。
+  'uninstall:residue-deep-scan': 'v0.5.0（2026-10-04）：七个只读残留扫描器聚合报告（服务/驱动/minifilter/IFEO/厂商键/能力授权/游戏库；无删除入口，上游无此能力）',
+  'residue:open-window': 'v0.5.0（2026-10-04）：打开残留扫描副窗（用户裁决 4：扫描全部在自绘副窗，主窗只留入口）',
+  'residue:close-window': 'v0.5.0（2026-10-04）：关闭残留扫描副窗（同 preview/models/peripheral 的子窗关窗轨）',
 };
 
 function collect(set, re, text) {

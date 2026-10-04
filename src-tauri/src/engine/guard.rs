@@ -14,7 +14,11 @@ use tauri::{Runtime, WebviewWindow};
 use crate::engine::log;
 
 /// 已知应用窗口 label 全集（与 tauri-api.js 的 currentLabel 取值、各域建窗时的 label 一致）
-pub const APP_WINDOWS: &[&str] = &["main", "models", "preview", "processManager", "peripheral"];
+///
+/// `residue` 是 v0.5.0 新增的残留扫描副窗（`commands/residue.rs`）；
+/// 加这里的同一轮必须同步 `capabilities/subwindows.json`，否则窗口建得出来、
+/// 权限却拿不到 IPC。
+pub const APP_WINDOWS: &[&str] = &["main", "models", "preview", "processManager", "peripheral", "residue"];
 
 /// 主窗口 label（多数高危及「主窗专属」通道只允许它调用）
 pub const MAIN: &[&str] = &["main"];

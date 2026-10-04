@@ -156,13 +156,21 @@
   // 文件清理扫描结果：id -> { files: [...], totalSize, scanPath }
   let fileCleanData = new Map();
 
+  // 工具：把任意后端 size 收敛成有限非负数。字符串、NaN、Infinity 一律归零，
+  // 否则裸 `+` 会把累加器变成字符串或 Infinity（v2 尺寸异常根因的放大器）。
+  function sizeNumber(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
   // 工具：格式化字节
   function formatSize(bytes) {
-    if (bytes === 0 || bytes === null || bytes === undefined) return '0 B';
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     const k = 1024;
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), units.length - 1);
-    const v = bytes / Math.pow(k, i);
+    const i = Math.min(Math.floor(Math.log(n) / Math.log(k)), units.length - 1);
+    const v = n / Math.pow(k, i);
     return v.toFixed(v < 10 && i > 0 ? 2 : v < 100 && i > 0 ? 1 : 0) + ' ' + units[i];
   }
 
@@ -249,7 +257,7 @@
   function escapeHtml(s) { return window.ds.esc(s); }
 
   function groupTotalSize(items) {
-    return items.reduce((s, i) => s + (scanResults.get(i.id)?.size || 0), 0);
+    return items.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
   }
 
   function toggleCollapsible(group, content, key) {
@@ -668,9 +676,9 @@
         const line1 = metaEl && metaEl.querySelector(`[data-sub-meta-line1="${sg.id}"]`);
         const line2 = metaEl && metaEl.querySelector(`[data-sub-meta-line2="${sg.id}"]`);
         if (line1 && line2) { // 双行结构由 renderSubGroup 渲染，缺失则跳过本条刷新
-          const sgAllSize = sgItems.reduce((s, i) => s + (scanResults.get(i.id)?.size || 0), 0);
+          const sgAllSize = sgItems.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
           const sgSelected = sgItems.filter(i => selectedIds.has(i.id));
-          const selSize = sgSelected.reduce((s, i) => s + (scanResults.get(i.id)?.size || 0), 0);
+          const selSize = sgSelected.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
           if (sgSelected.length > 0) {
             line1.textContent = selSize > 0
               ? `${sgSelected.length}/${sgItems.length} 项 · 已选 ${formatSize(selSize)}`
@@ -685,7 +693,7 @@
 
     // 总览
     const totalSize = Array.from(selectedIds)
-      .map(id => scanResults.get(id)?.size || 0)
+      .map(id => sizeNumber(scanResults.get(id)?.size))
       .reduce((a, b) => a + b, 0);
     const totalEl = document.getElementById('totalSize');
     const countEl = document.getElementById('selectedCount');
@@ -777,7 +785,7 @@
     scanResults.set(r.id, r);
     if (r.size > 0) {
       const gk = groupKeyForItem(r.id);
-      if (gk) streamTotals.set(gk, (streamTotals.get(gk) || 0) + r.size);
+      if (gk) streamTotals.set(gk, sizeNumber(streamTotals.get(gk)) + sizeNumber(r.size));
     }
     const pct = payload.total > 0 ? Math.min(90, Math.round((payload.done / payload.total) * 90)) : 0;
     setProgress(pct, `扫描中... ${payload.done}/${payload.total} 项 · ${Math.round(pct)}%`);
@@ -993,7 +1001,7 @@
       // 重新渲染带 size
       renderCategoryList();
       updateUI();
-      const total = Array.from(scanResults.values()).reduce((s, r) => s + r.size, 0);
+      const total = Array.from(scanResults.values()).reduce((s, r) => s + sizeNumber(r.size), 0);
       window.app?.toast('success', `扫描完成，共发现 ${formatSize(total)} 可清理空间`);
     } catch (e) {
       hideProgress();
@@ -1261,7 +1269,7 @@
         // 预览模式：模拟清理
         await new Promise(r => setTimeout(r, 2000));
         result = {
-          totalFreed: allItems.reduce((s, i) => s + (i.size || 0), 0),
+          totalFreed: allItems.reduce((s, i) => s + sizeNumber(i.size), 0),
           success: allItems.length,
           failed: 0,
           skipped: 0,
@@ -1345,7 +1353,7 @@
   // 渲染层不能指定任意路径。
   async function offerTrashRetry(failures) {
     try {
-      const total = failures.reduce((s, f) => s + (Number(f.size) || 0), 0);
+      const total = failures.reduce((s, f) => s + sizeNumber(f.size), 0);
       const ok = await window.app?.confirmDanger(
         '部分项目无法移入回收站',
         `有 ${failures.length} 项（共 ${formatSize(total)}）无法移入回收站（回收站可能已满或已禁用）。\n是否改为永久删除？`,

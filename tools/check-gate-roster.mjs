@@ -34,10 +34,19 @@ const fail = (msg) => { console.error(`✗ ${msg}`); failed++; };
 const ok = (msg) => console.log(`✓ ${msg}`);
 
 // ── 1. 解析 AGENTS §4 的 node tools/ 清单 ──
-const agentsText = readFileSync(AGENTS, 'utf8');
+// AGENTS.md 是**未跟踪**的本机协作约束（.gitignore 第 10 行明确排除，不随仓库分发），
+// 所以干净克隆里根本没有这个文件。必做门禁去读跟踪集合之外的文件 = 换环境必崩
+// （2026-10-04 实测：本机 AGENTS.md 丢失后本门禁直接 ENOENT 抛出）。
+// 现在的姿势：缺文件就显式 SKIP 三方对拍并声明「本节未校验」——既不崩溃，也不打 ✓ 冒充通过。
+const agentsPresent = existsSync(AGENTS);
+if (!agentsPresent) {
+  console.log('⚠ AGENTS.md 不在本机（未跟踪文件）：§4 必跑清单 ⇄ 磁盘 ⇄ 注册表 的三方对拍**未执行**');
+  console.log('  本机协作约束齐全时本门禁才会判红/判绿；换环境后它是 SKIP，不是通过。');
+}
+const agentsText = agentsPresent ? readFileSync(AGENTS, 'utf8') : '';
 const s4 = agentsText.indexOf('## 4.');
 const s41 = agentsText.indexOf('### 4.1');
-if (s4 < 0 || s41 < 0 || s41 < s4) fail('AGENTS.md 找不到 §4 区间（## 4. … ### 4.1）');
+if (agentsPresent && (s4 < 0 || s41 < 0 || s41 < s4)) fail('AGENTS.md 找不到 §4 区间（## 4. … ### 4.1）');
 const sec4 = s4 >= 0 && s41 > s4 ? agentsText.slice(s4, s41) : '';
 const agentsTools = [...sec4.matchAll(/node tools\/([A-Za-z0-9_-]+\.mjs)/g)].map((m) => m[1]);
 const agentsCheck = agentsTools.filter((n) => n.startsWith('check-')).map((n) => n.replace(/\.mjs$/, ''));
@@ -57,7 +66,8 @@ for (const name of agentsTools) {
   if (!diskAll.includes(name)) fail(`AGENTS §4 列出的 tools/${name} 磁盘上不存在`);
 }
 // 3b. 磁盘 check 文件必须三方有其一：AGENTS 必跑 / OPTIONAL / RETIRED
-for (const f of diskCheck) {
+// （AGENTS.md 缺席时这条没有对照物，强行跑会把全部门禁判成违规 —— 那是假红，跳过）
+for (const f of agentsPresent ? diskCheck : []) {
   if (agentsCheck.includes(f)) continue;
   if (optionalNames.includes(f) || retiredNames.includes(f)) continue;
   fail(`磁盘存在 tools/${f}，但既不在 AGENTS §4 清单、也不在 OPTIONAL/RETIRED 注册表（新门禁必须先进清单再进验收）`);
@@ -76,7 +86,11 @@ const dup = agentsTools.filter((n, i) => agentsTools.indexOf(n) !== i);
 for (const n of dup) fail(`AGENTS §4 重复列出 tools/${n}`);
 
 // ── 4. 台账输出（报告引用数字只能从这里抄） ──
-if (failed === 0) {
+if (failed === 0 && !agentsPresent) {
+  // 注册表侧（3c/3d）仍然真跑过，所以这不是「什么都没检查」；但 §4 对照确实没做
+  ok(`注册表侧对拍一致（磁盘 check ${diskCheck.length} 条 / OPTIONAL ${optionalNames.length} / RETIRED ${retiredNames.length}）`);
+  console.log(`check-gate-roster: SKIP（AGENTS.md 不在本机，§4 清单对照未执行；注册表侧已校验）`);
+} else if (failed === 0) {
   ok(`门禁运行集合台账对拍一致：磁盘 check ${diskCheck.length} 条 = §4 必跑 ${agentsCheck.length} + OPTIONAL ${optionalNames.length} + RETIRED ${retiredNames.length}`);
   ok(`§4 非 check 工具 ${agentsNonCheck.length} 条（${agentsNonCheck.join(', ')}）全部存在于磁盘`);
   console.log(`check-gate-roster: 全部通过（check 必跑 ${agentsCheck.length} / 可选 ${optionalNames.length} / 退役 ${retiredNames.length}）`);

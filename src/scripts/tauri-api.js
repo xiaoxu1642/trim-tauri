@@ -101,6 +101,8 @@
     'uninstall:pending-revoke': 'uninstall_pending_revoke',
     'uninstall:residue-scan': 'uninstall_residue_scan',
     'uninstall:residue-execute': 'uninstall_residue_execute',
+    // v0.5.0 只读残留报告（七个扫描器聚合；只在残留扫描副窗里消费，无删除入口）
+    'uninstall:residue-deep-scan': 'uninstall_residue_deep_scan',
     'uninstall:check-residue-version': 'uninstall_check_residue_version',
     'uninstall:update-residue-rules': 'uninstall_update_residue_rules',
     'uninstall:orphan-scan': 'uninstall_orphan_scan',
@@ -200,6 +202,9 @@
     'processManager:close-window': 'process_manager_close_window',
     'peripheral:open-window': 'peripheral_open_window',
     'peripheral:close-window': 'peripheral_close_window',
+    // residue 窗口（2）—— v0.5.0 残留扫描副窗（用户裁决 4：扫描全在副窗，主窗只留入口）
+    'residue:open-window': 'residue_open_window',
+    'residue:close-window': 'residue_close_window',
     'peripheral:query': 'peripheral_query',
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
@@ -468,6 +473,7 @@
       updateResidueRules: function () { return invokeChannel('uninstall:update-residue-rules'); },
       orphanScan: function () { return invokeChannel('uninstall:orphan-scan'); },
       deadScan: function () { return invokeChannel('uninstall:dead-scan'); },
+      residueDeepScan: function () { return invokeChannel('uninstall:residue-deep-scan'); },
       dirSize: function (path) { return invokeChannel('uninstall:dir-size', { path: path }); },
       orphanIgnore: function (appId, displayName) { return invokeChannel('uninstall:orphan-ignore', { appId: appId, displayName: displayName }); },
       regBackupList: function () { return invokeChannel('uninstall:reg-backup-list'); },
@@ -644,6 +650,11 @@
       query: function () { return invokeChannel('peripheral:query'); },
       apply: function (options) { return invokeChannel('peripheral:apply', { options: options }); },
       restoreBackup: function () { return invokeChannel('peripheral:restore-backup'); }
+    },
+
+    residueWindow: {
+      openWindow: function () { return invokeChannel('residue:open-window'); },
+      closeWindow: function () { return invokeChannel('residue:close-window'); }
     },
 
     quickCmds: {

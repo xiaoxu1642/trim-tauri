@@ -112,6 +112,8 @@ const MUST_MAIN = [
   'optimizer_touch_recent', // E10 最近使用写：主窗档
   'optimizer_stale_dismiss', // 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗
   // 'pwsh_prepare' 已于 B11（2026-09-26）整链摘除，不再是一条命令
+  // v0.5.0 残留扫描副窗：主窗入口按钮是唯一调用点（关窗侧在 MUST_READONLY）
+  'residue_open_window',
   'runtimes_install',
   // 'settings_save' 已于 v2-F4 整链摘除（2026-09-26），不再是一条命令
   'startup_add',
@@ -390,6 +392,9 @@ const MUST_READONLY = [
   'realtime_report_list',
   'realtime_report_save', // 疑点：写实时报告
   'realtime_sample',
+  // v0.5.0 残留扫描副窗（label `residue`）：关窗由副窗自己调，属放行全窗的只读档；
+  // 开窗只有主窗入口会调，落在 MUST_MAIN（D5 的判据：没有子窗调用点就不给放宽）
+  'residue_close_window',
   'runtimes_collect',
   'settings_load',
   'startup_openlocation', // 疑点：打开资源管理器目录
@@ -397,6 +402,8 @@ const MUST_READONLY = [
   'system_disk_list',
   'system_disk_type',
   'uninstall_appx_logo', // 疑点：写 logo 缓存文件
+  // v0.5.0 只读残留报告（七个扫描器聚合）：无副作用、不写执行快照，副窗消费
+  'uninstall_residue_deep_scan',
 ];
 const actualReadonly = [...tiers.entries()].filter(([, v]) => v.tier === 'READONLY').map(([k]) => k).sort();
 const wantReadonly = [...MUST_READONLY].sort();

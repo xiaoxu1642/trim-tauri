@@ -28,6 +28,7 @@ const PINNED: &[&str] = &[
     "cmd.exe",
     "dism.exe",
     "explorer.exe", // 注意：在系统根而非 System32，靠第二个候选目录命中
+    "fltmc.exe", // v0.5.0 残留扫描：过滤管理器实时状态（minifilter 挂载判定）
     "ipconfig.exe",
     "lodctr.exe",
     "netsh.exe",
@@ -99,6 +100,11 @@ pub fn quiet_cmd(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command 
 /// reg.exe export 备份类调用的统一超时（v2-L4P-29）：正常毫秒级，15s 已是宽限上界。
 /// 登记在 `tools/check-ps-callsites.mjs` 的 REG_EXPORT 表，与源码实参一致性由门禁对拍。
 pub const REG_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `fltmc filters` 的超时（v0.5.0 残留扫描）：正常毫秒级，10s 已覆盖杀软钩住的宽限上界。
+/// 与 `REG_EXPORT_TIMEOUT` 同理由收在这里：本模块是后台子进程的咽喉，超时常量的真源必须
+/// 只有一处可查（`tools/check-ps-callsites.mjs` 的 F 组就是按 systembin.rs + native/ 找定义的）。
+pub const FLTMC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 带超时的静默子进程执行（v2-L4P-29 / B-7）。
 ///

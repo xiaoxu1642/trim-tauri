@@ -337,6 +337,9 @@ const TIMEOUT_SPAWN_SITES = [
   // v5 R-3：运行库装包/DISM 从裸 .output() 改成带超时 —— 挂住时这条 IPC 永不返回，
   // 前端按钮卡在「安装中…」。上游 Electron 轨本来就带 600s，迁移时丢了。
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: 'REDIST_INSTALL_TIMEOUT', reason: '运行库修复：vc_redist / netfx48 静默安装与 DISM 启用 NetFx3', timeoutConst: 'REDIST_INSTALL_TIMEOUT', secs: 600 },
+  // v0.5.0 残留扫描（只读）：fltmc 是 minifilter 挂载态的唯一权威来源。它挂在扫描线程的
+  // 同步链上，一旦被杀软钩住不退出，整轮报告就永远不返回 —— 与 reg export 同族，必须带超时。
+  { file: 'src-tauri/src/commands/uninstall/minifilter_orphan.rs', anchor: 'system_tool("fltmc.exe"), &["filters"], FLTMC_TIMEOUT', reason: '残留扫描：读过滤管理器挂载清单（只读，失败即整组不产候选）', timeoutConst: 'FLTMC_TIMEOUT', secs: 10 },
   // 2026-10-04 审计 §4.4：清理页 special=dism 的 /ResetBase 是漏改的同类裸 .output()，
   // /ResetBase 合法就要跑几十分钟，后代 TiWorker 占住管道即永久挂住整条清理链。
   // 1800s 对齐 MAINT_CMD_TIMEOUT（sfc/DISM/sc 同级长耗时）；到点杀的是 DISM 前端

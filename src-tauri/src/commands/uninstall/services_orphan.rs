@@ -1,0 +1,591 @@
+//! 服务键残留扫描（v0.5.0 只读，方案 §2.1 / §3 `services_orphan`）。
+//!
+//! 为什么要单独一个扫描器：v1 只判「ImagePath 落点缺失」，而 NEAC 这类组件的真实形态是
+//! 服务键在、`NeacSafe.sys` 在、还在 Running —— v1 的三条判据一条都不命中，于是用户在
+//! 游戏早就不在了的机器上永远看不到它。方案 §2.1 把它收成第三类 `stale_live_service`。
+//!
+//! 三类互不混报（§2.1 的表）：
+//! - `dead_landing`：落点全部缺失（与 `dead.rs` 同口径，但作用域是服务键）；
+//! - `stale_live_service`：落点存在 + 对应程序查不在任何平台库清单里；
+//! - `minifilter_after_key_deleted`：在 `minifilter_orphan.rs`，判据是挂载态不是键态。
+//!
+//! 两条不能省的闸门：
+//! 1. **微软签名件永不进候选**（`authenticode::is_microsoft_signed`）。服务表里绝大多数是
+//!    系统组件，少了这道闸，报告会被几百条系统服务淹掉，用户就看不见真正的那几条。
+//! 2. **没有证据就不判「已卸载」**：平台清单没读全（`index_complete=false`）时，
+//!    反作弊类只报「无法判定」，不报候选 —— 把仍在用的 ACE 驱动写成残留，等第二阶段
+//!    接上删除链就是删用户正在玩的游戏。
+//!
+//! v0.5.0 只读：本文件不写快照（`RESIDUE_SNAPSHOTS`）、不产可执行目标。写快照会把候选
+//! 送进 `uninstall_residue_execute` 的快照闸，那是第二阶段的口子，现在必须保持关着。
+
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::path::Path;
+use super::authenticode;
+use super::dead::dead_landing;
+use super::game_platform_orphan::PlatformIndex;
+use super::helpers::{open_key_read, reg_dword, reg_multi_sz, reg_sz};
+use super::residue::reg_enum_subkeys;
+use super::residue_update::contribs;
+
+/// 服务表根（相对 HKLM）。A1 面里这棵整棵禁删，窄口子属第二阶段（方案 §2.3 / §6）。
+pub(super) const SERVICES_ROOT: &str = r"SYSTEM\CurrentControlSet\Services";
+
+/// 服务键枚举上限：本机实测常规量级 400~700，留三倍余量防爆但不设无限
+const SERVICE_ENUM_CAP: usize = 2048;
+
+/// `Services\<name>` 的只读采集结果（判定所需字段全在这里，判定本身是纯函数）。
+#[derive(Debug, Clone)]
+pub(super) struct ServiceEntry {
+    pub(super) name: String,
+    /// ImagePath 原串（可能带 `\??\`、`\SystemRoot`、`%SystemRoot%` 三种写法）
+    pub(super) image_raw: String,
+    /// `dead_landing` 解析出的落点；None = 解析不出（相对名 / `Device\` / 变量取不到）
+    pub(super) landing: Option<String>,
+    pub(super) start: Option<u32>,
+    pub(super) svc_type: Option<u32>,
+    pub(super) depends: Vec<String>,
+}
+
+impl ServiceEntry {
+    /// 镜像文件名（小写、含扩展名），用于反作弊名单匹配。
+    pub(super) fn image_stem_lc(&self) -> String {
+        self.landing
+            .as_deref()
+            .or(if self.image_raw.is_empty() { None } else { Some(self.image_raw.as_str()) })
+            .map(|p| {
+                Path::new(p.trim_end_matches('\\'))
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// 已知反作弊组件名单（方案 §2.2 点名的四家）。
+///
+/// 这张表**不是保护名单**，只是归属线索：命中的服务才会被追问「它对应的游戏还在不在库」，
+/// 未命中且落点又不在游戏库根下的服务一律判「无法归因」。保护与否由平台清单决定。
+const ANTICHEAT_MARKERS: &[(&str, &str)] = &[
+    ("neac", "NEAC"),
+    ("sguard", "ACE"),
+    ("ace-game", "ACE"),
+    ("ace_game", "ACE"),
+    ("aceservice", "ACE"),
+    ("battleye", "BattlEye"),
+    ("beservice", "BattlEye"),
+    ("easyanticheat", "EAC"),
+    ("eac_eos", "EAC"),
+];
+
+/// 服务名或镜像文件名命中的反作弊组件名（都没命中返回 None）。
+pub(super) fn anticheat_marker(name: &str, image_stem: &str) -> Option<&'static str> {
+    let n = name.to_lowercase();
+    let i = image_stem.to_lowercase();
+    ANTICHEAT_MARKERS.iter().find(|(k, _)| n.contains(*k) || i.contains(*k)).map(|(_, label)| *label)
+}
+
+/// 分类判定（纯函数，单测覆盖 §2.1 的三分类与两条闸门）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServiceClass {
+    /// 落点全部缺失
+    DeadLanding,
+    /// 落点存在，但对应程序查不在平台清单里
+    StaleLiveService,
+    /// 游戏仍在库 / 卸载键仍活 / 进程在跑 —— 保护，不进候选
+    ProtectedInUse,
+    /// 微软签名组件 —— 保护，不进候选
+    MicrosoftComponent,
+    /// 证据不足（ImagePath 解析不出、清单没读全、无法归因）—— 不报候选
+    NoEvidence,
+}
+
+/// 判定输入。刻意全是已归约的布尔信号：让「哪条形据压过哪条」在单测里可直接摆。
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ServiceSignals {
+    /// ImagePath 能解析出落点
+    pub(super) landing_resolved: bool,
+    pub(super) landing_exists: bool,
+    /// 签名读得出来且主体是微软。读不出签名 ⇒ false：判 `dead_landing` 不要求签名可读
+    /// （落点已失踪时根本没有文件可问签名），而「不是微软件」这件事由 `microsoft_signed`
+    /// 单独承担，不再用一个 `signature_known` 布尔位去区分两种 false
+    pub(super) microsoft_signed: bool,
+    /// 落点落在某个**在库**游戏的安装目录里
+    pub(super) in_library_dir: bool,
+    /// 落点落在平台库根下，但不在任何在库游戏目录里
+    pub(super) under_library_root: bool,
+    /// 命中反作弊名单
+    pub(super) anticheat: bool,
+    /// 三处平台清单本轮都读到了
+    pub(super) index_complete: bool,
+    /// 反作弊归属的游戏名在清单里查得到
+    pub(super) game_named_present: bool,
+    /// 该服务对应的卸载注册表项仍活着（原厂卸载没走完，程序还在）
+    pub(super) uninstall_key_alive: bool,
+    /// 服务镜像正在进程表里跑
+    pub(super) process_running: bool,
+}
+
+/// 判据顺序（每一条都有理由，改动前先想清楚压的是哪条）：
+/// 1. 解析不出落点 ⇒ 无证据；
+/// 2. 微软签名 ⇒ 系统组件，永不进候选；
+/// 3. 在库目录 / 卸载键仍活 / 进程在跑 ⇒ 在用保护；
+/// 4. 落点不存在 ⇒ `dead_landing`；
+/// 5. 落点在库根下但不在任何在库游戏目录里 ⇒ `stale_live_service`（最强的一条实据）；
+/// 6. 反作弊组件 + 清单读全 + 游戏查不在库 ⇒ `stale_live_service`（NEAC 形态）；
+/// 7. 其余 ⇒ 无法归因，不报。第 6 条要求 `index_complete`，就是为了不把
+///    「读不到清单」伪装成「程序已卸载」。
+pub(super) fn classify_service(s: &ServiceSignals) -> ServiceClass {
+    if !s.landing_resolved {
+        return ServiceClass::NoEvidence;
+    }
+    if s.microsoft_signed {
+        return ServiceClass::MicrosoftComponent;
+    }
+    if s.landing_exists && (s.in_library_dir || s.uninstall_key_alive || s.process_running || (s.anticheat && s.game_named_present)) {
+        return ServiceClass::ProtectedInUse;
+    }
+    if !s.landing_exists {
+        return ServiceClass::DeadLanding;
+    }
+    if s.under_library_root {
+        return ServiceClass::StaleLiveService;
+    }
+    if s.anticheat && s.index_complete && !s.game_named_present {
+        return ServiceClass::StaleLiveService;
+    }
+    ServiceClass::NoEvidence
+}
+
+/// `ServiceClass` → 报告里的分类标签（前端按它分组，措辞只在这一处定义）
+pub(super) fn class_label(c: ServiceClass) -> &'static str {
+    match c {
+        ServiceClass::DeadLanding => "dead_landing",
+        ServiceClass::StaleLiveService => "stale_live_service",
+        ServiceClass::ProtectedInUse => "protected_in_use",
+        ServiceClass::MicrosoftComponent => "microsoft_component",
+        ServiceClass::NoEvidence => "no_evidence",
+    }
+}
+
+/// `Start` / `Type` 的中文标签（读不到就留空，不拿 0 当「手动」或「内核驱动」）。
+pub(super) fn start_label(start: Option<u32>) -> Option<&'static str> {
+    start.map(|v| match v {
+        0 => "BOOT_START（开机早期）",
+        1 => "SYSTEM_START（系统加载期）",
+        2 => "AUTO_START（自动）",
+        3 => "MANUAL（手动）",
+        4 => "DISABLED（已禁用）",
+        _ => "未知启动类型",
+    })
+}
+
+pub(super) fn type_label(ty: Option<u32>) -> Option<&'static str> {
+    // Type 是位标志与类型的混合体，常见取值就是下面五个；猜不出来如实写「其他」而不是
+    // 拿 `& 0x03` 把 16/32（Win32 独立/共享进程）折成内核驱动。
+    ty.map(|v| match v {
+        1 => "内核驱动",
+        2 => "自动加载驱动",
+        4 => "文件系统驱动",
+        16 => "独立进程服务",
+        32 => "共享进程服务",
+        _ => "其他类型",
+    })
+}
+
+/// SCM 当前状态码（1=Stopped 2=Start Pending 4=Running 5=Continue Pending …）。
+///
+/// 刻意不复用 `engine::native::services` 那份：它的 `service_status` 是 `pub(super)`，
+/// 跨不出 native 模块；而分层门禁禁的是下层反向引用上层，上层读下层是合法方向 ——
+/// 这里要的只是一个只读状态码，自己开句柄比要求引擎层改可见性更省事。
+/// 打不开 SCM（未提权读某些服务）返回 None，报告里如实写「状态读不到」。
+pub(super) unsafe fn scm_state(name: &str) -> Option<u32> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
+        SERVICE_STATUS,
+    };
+    let wide = super::helpers::to_wide(name);
+    let Ok(scm) = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) else {
+        return None;
+    };
+    let svc = OpenServiceW(scm, PCWSTR(wide.as_ptr()), SERVICE_QUERY_STATUS);
+    if svc.is_err() {
+        let _ = CloseServiceHandle(scm);
+        return None;
+    }
+    let svc = svc.ok()?;
+    let mut status: SERVICE_STATUS = std::mem::zeroed();
+    let ok = QueryServiceStatus(svc, &mut status).is_ok();
+    let _ = CloseServiceHandle(svc);
+    let _ = CloseServiceHandle(scm);
+    ok.then_some(status.dwCurrentState.0)
+}
+
+pub(super) fn state_label(state: Option<u32>) -> &'static str {
+    match state {
+        Some(1) => "已停止",
+        Some(2) => "正在启动",
+        Some(3) => "正在停止",
+        Some(4) => "运行中",
+        Some(5) => "正在继续",
+        Some(6) => "暂停中",
+        Some(7) => "启动挂起",
+        _ => "状态读不到（未提权或服务已不可打开）",
+    }
+}
+
+/// 枚举服务表（只读）。返回 (条目, 是否至少读到一个键)。
+///
+/// `ok=false` = 连 `Services` 根都打不开，调用方必须整组不产候选并写 note：
+/// 拿空清单去做「已卸载」判定，等于把全部服务算成残留。
+pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, bool) {
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RegCloseKey};
+    let names = reg_enum_subkeys(HKEY_LOCAL_MACHINE, SERVICES_ROOT, cap.min(SERVICE_ENUM_CAP));
+    if names.is_empty() {
+        return (Vec::new(), false);
+    }
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(hk) = open_key_read(HKEY_LOCAL_MACHINE, &format!("{SERVICES_ROOT}\\{name}")) else {
+            continue;
+        };
+        let image_raw = reg_sz(hk, "ImagePath").unwrap_or_default();
+        let landing = if image_raw.trim().is_empty() { None } else { dead_landing(&image_raw) };
+        out.push(ServiceEntry {
+            name,
+            image_raw,
+            landing,
+            start: reg_dword(hk, "Start"),
+            svc_type: reg_dword(hk, "Type"),
+            depends: reg_multi_sz(hk, "DependOnService"),
+        });
+        let _ = RegCloseKey(hk);
+    }
+    (out, true)
+}
+
+/// 全部服务落点的归一集合（小写、去尾 `\`）—— `drivers_orphan` 用它反查未被引用的 sys。
+pub(super) fn referenced_landings(entries: &[ServiceEntry]) -> HashSet<String> {
+    entries
+        .iter()
+        .filter_map(|e| e.landing.as_deref())
+        .map(|p| p.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase())
+        .collect()
+}
+
+/// 本组的扫描口径注释（写进 notes，让用户知道哪些保护是「读不出来」而不是「确认在用」）。
+pub(super) fn protection_note(c: ServiceClass) -> Option<&'static str> {
+    match c {
+        ServiceClass::MicrosoftComponent => Some("微软签名组件，按系统件保护"),
+        ServiceClass::ProtectedInUse => Some("对应程序仍在库 / 卸载键仍活 / 进程在跑，按在用保护"),
+        _ => None,
+    }
+}
+
+/// 产出服务类候选（纯函数部分已在上，这里只做拼装）。
+///
+/// `uninstall_alive_names` = 三根卸载键里的 DisplayName/KeyName 小写集合，用来判
+/// 「这个服务所属的程序还在卸载列表里」；`process_dirs` = 运行进程镜像全路径（小写）。
+pub(super) unsafe fn service_findings(
+    entries: &[ServiceEntry],
+    index: &PlatformIndex,
+    uninstall_alive_names: &HashSet<String>,
+    process_dirs: &Option<HashSet<String>>,
+    cap: usize,
+) -> (Vec<Value>, Vec<Value>, Vec<String>) {
+    let mut candidates: Vec<Value> = Vec::new();
+    let mut protected: Vec<Value> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut no_evidence = 0usize;
+    for e in entries {
+        let Some(landing) = e.landing.as_deref() else {
+            if !e.image_raw.trim().is_empty() {
+                no_evidence += 1;
+            }
+            continue;
+        };
+        let landing_exists = Path::new(landing).exists();
+        let stem = e.image_stem_lc();
+        let ac = anticheat_marker(&e.name, &stem);
+        let owner = index.owner_of(landing);
+        let signature_known = landing_exists && authenticode::signer_subject(landing).is_some();
+        let microsoft_signed = landing_exists && authenticode::is_microsoft_signed(landing);
+        // 卸载键是否还活着：服务名与卸载键 DisplayName 互含。用本域最短的那档阈值（2 字），
+        // 因为这是「拿已知表里的名字撞已知表」，不是自由文本猜测 —— 见 residue.rs 的
+        // NAME_MIN_EXACT 注释里那条中文产品名全军覆没的教训。
+        let uninstall_key_alive = {
+            let n = e.name.to_lowercase();
+            n.len() >= 2 && uninstall_alive_names.iter().any(|d| d == &n || d.contains(&n) || n.contains(d.as_str()))
+        };
+        let process_running = process_dirs
+            .as_ref()
+            .map(|set| set.contains(&landing.to_ascii_lowercase()))
+            .unwrap_or(false);
+        let signals = ServiceSignals {
+            landing_resolved: true,
+            landing_exists,
+            microsoft_signed,
+            in_library_dir: owner.is_some(),
+            under_library_root: owner.is_none() && index.under_library_root(landing),
+            anticheat: ac.is_some(),
+            index_complete: index.complete(),
+            game_named_present: ac.map(|label| index.has_game_named(label)).unwrap_or(false),
+            uninstall_key_alive,
+            process_running,
+        };
+        let cls = classify_service(&signals);
+        let target = format!("HKLM\\{SERVICES_ROOT}\\{}", e.name);
+        let state = scm_state(&e.name);
+        let details = json!({
+            "serviceName": e.name,
+            "imagePath": e.image_raw,
+            "landing": landing,
+            "landingExists": landing_exists,
+            "start": start_label(e.start),
+            "type": type_label(e.svc_type),
+            "depends": e.depends,
+            "state": state_label(state),
+            "rawState": state,
+            "signer": if signature_known { authenticode::signer_label(landing) } else { "落点已不存在，未查签名".to_string() },
+            "antiCheat": ac,
+            "inLibraryGame": owner.map(|r| r.name.clone()),
+        });
+        match cls {
+            ServiceClass::DeadLanding | ServiceClass::StaleLiveService => {
+                if candidates.len() >= cap {
+                    notes.push(format!("服务残留候选已达上限 {cap} 条，其余省略"));
+                    break;
+                }
+                let stale = cls == ServiceClass::StaleLiveService;
+                candidates.push(json!({
+                    "kind": "reg_key", "target": target,
+                    "class": class_label(cls),
+                    "reason": if stale {
+                        "服务键与二进制都还在，但对应游戏/程序在 Steam / Epic / WeGame 清单里都查不到（已卸载程序的常驻服务或驱动）"
+                    } else {
+                        "服务键还在，但 ImagePath 指向的二进制已不存在"
+                    },
+                    "confidence": if stale { "medium" } else { "high" },
+                    "risk": "high",
+                    "readonly": true, "defaultChecked": false,
+                    "details": details,
+                    "contribs": contribs(&[
+                        ("serviceKeyAlive", format!("{SERVICES_ROOT}\\{} 仍可打开", e.name)),
+                        ("landingState", if landing_exists { format!("落点存在：{landing}") } else { format!("落点不存在：{landing}") }),
+                        ("platformIndex", if index.complete() { "三处平台清单均读到".to_string() } else { format!("清单不完整：{}", index.unreadable.join("、")) }),
+                        ("antiCheat", ac.map(|a| format!("命中反作弊名单：{a}")).unwrap_or_else(|| "未命中反作弊名单".to_string())),
+                    ]),
+                }));
+            }
+            c => {
+                if let Some(note) = protection_note(c) {
+                    if candidates.len() + protected.len() < cap * 2 {
+                        protected.push(json!({
+                            "kind": "reg_key", "target": target,
+                            "class": class_label(c),
+                            "reason": note,
+                            "readonly": true, "details": details,
+                        }));
+                    }
+                } else {
+                    no_evidence += 1;
+                }
+            }
+        }
+    }
+    if no_evidence > 0 {
+        notes.push(format!("{no_evidence} 个服务因证据不足未进候选（ImagePath 解析不出 / 无法归因到某个已卸载程序）"));
+    }
+    if let Some(dirs) = process_dirs {
+        if dirs.is_empty() {
+            notes.push("进程快照读到空集合，「镜像正在运行」这条保护本轮不可用".to_string());
+        }
+    } else {
+        notes.push("进程快照取不到，「镜像正在运行」这条保护本轮不可用".to_string());
+    }
+    (candidates, protected, notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sig(f: impl FnOnce(&mut ServiceSignals)) -> ServiceSignals {
+        let mut s = ServiceSignals::default();
+        f(&mut s);
+        s
+    }
+
+    #[test]
+    fn unresolved_image_path_is_no_evidence() {
+        // 落点解析不出来（相对名 / Device\）时，「不存在」不成立，任何分类都不给
+        let s = sig(|x| {
+            x.landing_resolved = false;
+            x.landing_exists = false;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::NoEvidence);
+    }
+
+    #[test]
+    fn microsoft_signed_never_enters_candidates() {
+        let s = sig(|x| {
+            x.landing_resolved = true;
+            x.landing_exists = false;
+            x.microsoft_signed = true;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::MicrosoftComponent);
+    }
+
+    #[test]
+    fn missing_landing_is_dead_landing() {
+        let s = sig(|x| {
+            x.landing_resolved = true;
+            x.landing_exists = false;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::DeadLanding);
+    }
+
+    #[test]
+    /// 方案 §6 的复现用例：服务键存在 + sys 存在 + 游戏不在库 ⇒ 必须报出候选
+    fn neac_shape_reports_stale_live_service() {
+        let s = sig(|x| {
+            x.landing_resolved = true;
+            x.landing_exists = true;
+            x.anticheat = true;
+            x.index_complete = true;
+            x.game_named_present = false;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::StaleLiveService);
+    }
+
+    #[test]
+    /// 同一条证据，游戏仍在库 ⇒ 反过来必须保护（方案 §2.2 的条件保护）
+    fn same_service_is_protected_while_game_in_library() {
+        let s = sig(|x| {
+            x.landing_resolved = true;
+            x.landing_exists = true;
+            x.anticheat = true;
+            x.index_complete = true;
+            x.game_named_present = true;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::ProtectedInUse);
+    }
+
+    #[test]
+    fn incomplete_index_does_not_claim_uninstalled() {
+        // 清单没读全 ⇒ 不能说「游戏不在库」，只能落回无证据
+        let s = sig(|x| {
+            x.landing_resolved = true;
+            x.landing_exists = true;
+            x.anticheat = true;
+            x.index_complete = false;
+            x.game_named_present = false;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::NoEvidence);
+    }
+
+    #[test]
+    fn library_root_without_record_is_stale_live() {
+        // 落点在 D:\SteamLibrary 下，但不在任何在库游戏目录里 —— 最强的 stale 实据
+        let s = sig(|x| {
+            x.landing_resolved = true;
+            x.landing_exists = true;
+            x.under_library_root = true;
+            x.in_library_dir = false;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::StaleLiveService);
+    }
+
+    #[test]
+    fn running_image_or_live_uninstall_key_wins_over_stale() {
+        let protections: [fn(&mut ServiceSignals); 3] = [
+            |x| x.process_running = true,
+            |x| x.uninstall_key_alive = true,
+            |x| x.in_library_dir = true,
+        ];
+        for f in protections {
+            let s = sig(|x| {
+                x.landing_resolved = true;
+                x.landing_exists = true;
+                x.under_library_root = true;
+                f(x);
+            });
+            assert_eq!(classify_service(&s), ServiceClass::ProtectedInUse);
+        }
+    }
+
+    #[test]
+    fn unknown_third_party_service_is_not_attributed() {
+        // 普通第三方服务（活着的落点、库外、非反作弊）不是残留，不能报
+        let s = sig(|x| {
+            x.landing_resolved = true;
+            x.landing_exists = true;
+        });
+        assert_eq!(classify_service(&s), ServiceClass::NoEvidence);
+    }
+
+    #[test]
+    fn anticheat_markers_match_name_or_image_and_nothing_else() {
+        assert_eq!(anticheat_marker("NeacSafe", ""), Some("NEAC"));
+        assert_eq!(anticheat_marker("svc", "NeacSafe.sys"), Some("NEAC"));
+        assert_eq!(anticheat_marker("BEService", ""), Some("BattlEye"));
+        assert_eq!(anticheat_marker("EasyAntiCheat_EOS", ""), Some("EAC"));
+        assert_eq!(anticheat_marker("GoogleUpdateExecution", "gemini.exe"), None);
+    }
+
+    #[test]
+    fn labels_do_not_fabricate_zero_as_known() {
+        // 读不到留 None：把 0 当成「BOOT_START」会把读不到伪装成有把握
+        assert_eq!(start_label(None), None);
+        assert_eq!(type_label(None), None);
+        assert_eq!(start_label(Some(4)), Some("DISABLED（已禁用）"));
+        assert_eq!(type_label(Some(1)), Some("内核驱动"));
+        assert_eq!(type_label(Some(4)), Some("文件系统驱动"));
+        assert_eq!(type_label(Some(16)), Some("独立进程服务"));
+        // 复合位标志（16|32=48）不该被折成某个单一类型冒充已知
+        assert_eq!(type_label(Some(48)), Some("其他类型"));
+        assert_eq!(state_label(None), "状态读不到（未提权或服务已不可打开）");
+        assert_eq!(state_label(Some(4)), "运行中");
+    }
+
+    #[test]
+    fn referenced_landings_are_normalized_for_reverse_lookup() {
+        let e = |name: &str, landing: Option<&str>| ServiceEntry {
+            name: name.to_string(),
+            image_raw: landing.unwrap_or("").to_string(),
+            landing: landing.map(|s| s.to_string()),
+            start: None,
+            svc_type: None,
+            depends: Vec::new(),
+        };
+        let set = referenced_landings(&[e("A", Some(r"C:\Windows\System32\DRIVERS\x.sys")), e("B", Some("C:\\other\\Y.SYS")), e("C", None)]);
+        assert!(set.contains(r"c:\windows\system32\drivers\x.sys"));
+        assert!(set.contains(r"c:\other\y.sys"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn image_stem_prefers_resolved_landing() {
+        let mut e = ServiceEntry {
+            name: "svc".to_string(),
+            image_raw: r"\SystemRoot\system32\drivers\NeacSafe.sys".to_string(),
+            landing: Some(r"C:\Windows\system32\drivers\NeacSafe.sys".to_string()),
+            start: None,
+            svc_type: None,
+            depends: Vec::new(),
+        };
+        assert_eq!(e.image_stem_lc(), "neacsafe.sys");
+        e.landing = None;
+        assert_eq!(e.image_stem_lc(), "neacsafe.sys");
+    }
+
+    #[test]
+    fn services_root_is_the_narrow_scope_named_in_the_plan() {
+        // 方案 §2.3 的窄口子只针对这一棵；本阶段整棵仍属 A1 禁删面，
+        // 这条断言钉住扫描面与将来口子同一路径，避免扫描器扫 A、删除口开在 B
+        assert_eq!(SERVICES_ROOT, r"SYSTEM\CurrentControlSet\Services");
+    }
+}

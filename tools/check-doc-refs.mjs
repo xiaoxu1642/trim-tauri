@@ -26,6 +26,16 @@ const check = (ok, label, detail = '') => {
 };
 
 // docs/ 下的真实文件集合（相对小写路径，供快速命中）
+//
+// `docs/` 与 `AGENTS.md` 都是**未跟踪**的本机资料区（.gitignore 第 8/10 行），干净克隆里
+// 根本不存在。必做门禁读它们之前必须先问在不在：
+// - 直接 readdirSync 会 ENOENT 崩（2026-10-04 实测）；
+// - 把「对照集为空」当成判定基础更糟 —— 空集会让每一条 docs/ 引用都判「不存在」，
+//   于是缺文件被渲染成满屏假红。两种都改成显式 SKIP 并声明未校验。
+const DOCS_DIR = join(ROOT, 'docs');
+const AGENTS_MD = join(ROOT, 'AGENTS.md');
+const docsPresent = existsSync(DOCS_DIR);
+const agentsPresent = existsSync(AGENTS_MD);
 function walkDocs(dir, out = []) {
   for (const e of readdirSync(dir)) {
     const p = join(dir, e);
@@ -34,33 +44,39 @@ function walkDocs(dir, out = []) {
   }
   return out;
 }
-const docsFiles = new Set(walkDocs(join(ROOT, 'docs')));
+const docsFiles = new Set(docsPresent ? walkDocs(DOCS_DIR) : []);
+if (!docsPresent) console.log('⚠ docs/ 不在本机（未跟踪的本机资料区）：docs 引用存在性**未校验**');
+if (!agentsPresent) console.log('⚠ AGENTS.md 不在本机（未跟踪）：1b 未执行');
 
 // 引用形态：`docs/xxx.md` / `docs\xxx.md`（词边界内，排除 https:// 等 URL）
 const REF_RE = /(?<![:\w/\\])(docs[\\/][A-Za-z0-9\u4e00-\u9fa5._\-\\/\s]+?\.(?:md|json|mjs|js|ps1))(?![\w\\/])/g;
-// 1a. 源码 + 前端注释里引用的 docs/ 路径必须存在
+// 1a. 源码 + 前端注释里引用的 docs/ 路径必须存在（docs/ 缺席时跳过，见上方说明）
 const refHits = [];
 const scanRoots = [SRC, FRONTEND];
-for (const base of scanRoots) {
-  for (const f of walkDocs(base)) {
-    const text = readFileSync(join(ROOT, f), 'utf8');
-    for (const m of text.matchAll(REF_RE)) {
-      const norm = normalize(m[1].replace(/\\/g, '/')).replace(/\\/g, '/').toLowerCase();
-      if (!docsFiles.has(norm)) {
-        refHits.push(`${relative(ROOT, f).replace(/\\/g, '/')}: ${m[1].trim()}`);
+if (docsPresent) {
+  for (const base of scanRoots) {
+    for (const f of walkDocs(base)) {
+      const text = readFileSync(join(ROOT, f), 'utf8');
+      for (const m of text.matchAll(REF_RE)) {
+        const norm = normalize(m[1].replace(/\\/g, '/')).replace(/\\/g, '/').toLowerCase();
+        if (!docsFiles.has(norm)) {
+          refHits.push(`${relative(ROOT, f).replace(/\\/g, '/')}: ${m[1].trim()}`);
+        }
       }
     }
   }
 }
 check(
-  refHits.length === 0,
-  '1a. 源码注释引用的 docs/ 路径全部真实存在（D-3：红线不许指向虚无）',
+  !docsPresent || refHits.length === 0,
+  docsPresent
+    ? '1a. 源码注释引用的 docs/ 路径全部真实存在（D-3：红线不许指向虚无）'
+    : '1a. docs/ 引用检查 SKIP（本机未跟踪资料区不存在）',
   refHits.length ? refHits.join('；') : `${docsFiles.size} 个 docs 文件作为对照集`,
 );
 
 // 1b. AGENTS.md 自身引用的 docs/ 路径必须存在
-{
-  const text = readFileSync(join(ROOT, 'AGENTS.md'), 'utf8');
+if (agentsPresent && docsPresent) {
+  const text = readFileSync(AGENTS_MD, 'utf8');
   const bad = [];
   for (const m of text.matchAll(REF_RE)) {
     const norm = normalize(m[1].replace(/\\/g, '/')).replace(/\\/g, '/').toLowerCase();

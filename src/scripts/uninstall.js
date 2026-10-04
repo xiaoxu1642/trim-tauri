@@ -902,6 +902,16 @@
       });
     });
     document.getElementById('uninstallBtnRefresh')?.addEventListener('click', loadApps);
+    // v0.5.0 裁决 4：主窗只留入口，扫描与展示都在副窗里；开窗失败要如实说，
+    // 不能让人以为「点了没反应」是扫描在跑
+    document.getElementById('btnResidueWindow')?.addEventListener('click', async () => {
+      try {
+        const r = await window.api.residueWindow.openWindow();
+        if (r && r.success === false) window.app?.toast?.('error', r.message || '打开残留扫描窗口失败');
+      } catch (e) {
+        window.app?.toast?.('error', '打开残留扫描窗口失败: ' + ((e && e.message) || e));
+      }
+    });
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
     document.getElementById('btnResidueRulesUpdate')?.addEventListener('click', updateResidueRules);
     document.getElementById('uninstallList')?.addEventListener('click', (e) => {
