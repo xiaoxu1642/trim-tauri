@@ -1,12 +1,15 @@
-//! uninstall:residue-deep-scan —— v0.5.0 七个只读扫描器的聚合入口（方案 §3 / §6）。
+//! uninstall:residue-deep-scan —— 七个深扫器的聚合入口（方案 §3 / §6）。
 //!
 //! 两条边界写在这里，不在各扫描器里重复：
 //!
-//! 1. **不写快照**。`helpers::RESIDUE_SNAPSHOTS` 是「执行只认本次扫描目标」这条安全前置的
-//!    唯一载体（`uninstall_residue_execute` 按窗口 label 取槽、拿 kind+target 逐个命中校验）。
-//!    本命令如果把自己的候选写进同一槽，等于给服务键 / IFEO / HKLM\SYSTEM 开出一条
-//!    现成的删除路径 —— 那是方案 §6 明确留给第二阶段、且要求先单独评审的东西。
-//!    所以这里只返回展示数据，`residue_snapshot_put` 一次都不调（文件末尾有常驻断言守着）。
+//! 1. **快照只写「类白名单」内的那一撮**（v0.7.0 第二阶段，判据见
+//!    `deep_executable_candidates`）。v0.5.0 这条边界是「一次都不写」，理由是
+//!    `helpers::RESIDUE_SNAPSHOTS` 是「执行只认本次扫描目标」的唯一载体
+//!    （`uninstall_residue_execute` 按窗口 label 取槽、拿 kind+target 逐个命中校验），
+//!    整表写入等于给服务键 / IFEO / HKLM\SYSTEM 直接开出一条删除路径。
+//!    第二阶段放开的前提是：写入范围由**后端**按 class 筛，不由渲染层决定；
+//!    驱动、minifilter、以及所有 reg 类仍然进不了快照，
+//!    服务键要等方案 §5 的 A1 窄口子单独评审。文件末尾有常驻断言守着这条。
 //!
 //! 2. **每个分组自己声明读不到什么**。残缺必须可见（notes），不能渲染成「本机干净」。
 //!    这与 `uninstall_dead_scan` 的 `scanned` 计数同一口径：候选为 0 在干净机器上是合法结果，
@@ -17,7 +20,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use tauri::WebviewWindow;
 use super::capability_orphan;
-use super::dead::collect_dead_uninstall_raws;
+use super::dead::{collect_dead_uninstall_raws, residue_snapshot_put};
 use super::drivers_orphan;
 use super::game_platform_orphan::{self as gpo, LibraryListing, list_game_dirs, untracked_dir_findings};
 use super::ifeo_orphan;
@@ -142,7 +145,52 @@ unsafe fn scan_all() -> Value {
     })
 }
 
-/// uninstall:residue-deep-scan —— v0.5.0 只读残留报告（副窗档；无删除入口）。
+/// 深扫候选里**允许进执行快照**的那一小撮 —— 类白名单，不是「扫出来什么就写什么」。
+///
+/// 为什么必须有这张表：`uninstall_residue_execute` 的闸门只看「kind+target 在不在本窗口
+/// 快照槽」，它不知道候选来自哪台扫描器。深扫七器里有三类根本不该被删：
+/// - `orphan_sys_file`（`System32\drivers\*.sys`）：`protect.rs` 的路径保护**覆盖不到**
+///   `%windir%\System32\drivers`（只有 `%windir%` 的 exact 与 System32\config 一条 subtree），
+///   所以「判错即删走系统驱动」没有任何兜底 —— 独立禁删面评审过之前不进快照；
+/// - `minifilter_after_key_deleted`：键已删、滤镜仍挂载，删文件不解决问题，只能重启；
+/// - 微软签名件 / 反作弊在用项：后端本来就不产候选（进的是 protected），这里再挡一层
+///   是防「将来某台扫描器改了分类口径」。
+/// - reg 类（服务键、IFEO、ConsentStore、厂商产品键）：留给方案 §5 那一轮和 A1 窄口子
+///   一起评审，本批不开。
+///
+/// 白名单只有一类：`untracked_game_dir` 的 `folder` —— 平台库根下、清单没记录的一级目录，
+/// 删除走回收站（`trim_finder::scan::delete`），失败不降级永久删（§3）。
+pub(super) fn deep_executable_candidates(report: &Value) -> Vec<Value> {
+    let groups = match report.get("groups").and_then(Value::as_array) {
+        Some(g) => g,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for g in groups {
+        if g.get("id").and_then(Value::as_str) != Some("gameDirs") {
+            continue;
+        }
+        let items = g.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+        for it in items {
+            if it.get("kind").and_then(Value::as_str) != Some("folder")
+                || it.get("class").and_then(Value::as_str) != Some("untracked_game_dir")
+            {
+                continue;
+            }
+            let Some(obj) = it.as_object() else { continue };
+            let mut entry = obj.clone();
+            // origin 是分桶键（`residue_snapshot_put` 按它替换），必须在这里落上；
+            // deleteCapable=false 的行前端画不出勾选框，深扫区默认全是只读
+            entry.insert("origin".into(), json!("deep"));
+            entry.insert("deleteCapable".into(), json!(true));
+            entry.insert("defaultChecked".into(), json!(false));
+            out.push(Value::Object(entry));
+        }
+    }
+    out
+}
+
+/// uninstall:residue-deep-scan —— v0.5.0 建档，v0.7.0 起按类白名单写执行快照。
 #[tauri::command]
 pub async fn uninstall_residue_deep_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
@@ -151,12 +199,56 @@ pub async fn uninstall_residue_deep_scan<R: tauri::Runtime>(window: WebviewWindo
     let scanned = tauri::async_runtime::spawn_blocking(|| unsafe { scan_all() })
         .await
         .unwrap_or_else(|e| json!({ "fatal": format!("扫描线程未返回：{e}") }));
+    // 快照只写白名单内的那一撮（deep_executable_candidates 的注释是判据本体）。
+    // 按 label 分槽 ⇒ 副窗只能执行自己扫出来的东西；扫描失败/线程 panic 时不写，
+    // 保持「读不到就别动手」的 fail-closed 口径。
+    let executable = if scanned.get("fatal").is_some() {
+        Vec::new()
+    } else {
+        deep_executable_candidates(&scanned)
+    };
+    let count = executable.len();
+    let mut scanned = scanned;
+    if count > 0 {
+        residue_snapshot_put(window.label(), "deep", executable.clone());
+        // 报告里的可删标记**由快照集合反推**，不另写一遍判据（§5.16/N6）：
+        // 两处各判一次迟早会不一致，而 UI 画勾选框、后端把闸门，判错方向就是
+        // 「勾了执行被拒」或更糟的「没勾却进了快照」。
+        let admitted: HashSet<String> = executable
+            .iter()
+            .filter_map(|v| Some(format!("{}|{}", v.get("kind")?.as_str()?, v.get("target")?.as_str()?)))
+            .collect();
+        if let Some(groups) = scanned.get_mut("groups").and_then(Value::as_array_mut) {
+            for g in groups {
+                let items = match g.get_mut("items").and_then(Value::as_array_mut) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                for it in items {
+                    let key = it
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .zip(it.get("target").and_then(Value::as_str))
+                        .map(|(k, t)| format!("{k}|{t}"));
+                    let can = key.map(|k| admitted.contains(&k)).unwrap_or(false);
+                    if let Some(obj) = it.as_object_mut() {
+                        obj.insert("deleteCapable".into(), json!(can));
+                        obj.insert("readonly".into(), json!(!can));
+                        obj.insert("origin".into(), json!("deep"));
+                    }
+                }
+            }
+        }
+    }
     json!({
         "success": true,
         "data": {
             "generatedAt": crate::engine::now_ms(),
-            // 副窗按 label 分槽展示；本阶段没有执行链，label 只用于日志归因
+            // 副窗按 label 分槽展示；label 同时是快照分槽的键
             "windowLabel": window.label(),
+            // 回执里回带「这一轮进快照几条」：UI 要据此决定画不画勾选框，
+            // 不能靠前端自己猜白名单（判据只有一份，§5.16）
+            "executableCount": count,
             "report": scanned,
         },
     })
@@ -166,19 +258,21 @@ pub async fn uninstall_residue_deep_scan<R: tauri::Runtime>(window: WebviewWindo
 mod tests {
     use super::*;
 
-    /// 常驻断言：聚合命令**永不**写执行快照。
+    /// 常驻断言（v0.7.0 反转）：聚合命令**只**允许写 origin="deep" 这一桶，
+    /// 而且写入必须走 `deep_executable_candidates` 这道筛。
     ///
-    /// 为什么用扫源码而不是跑一次命令：`uninstall_residue_execute` 只看「kind+target 是否
-    /// 命中该窗口 label 的快照槽」，跑一次真实扫描需要真机注册表与用户配置，fast 组里做不到；
-    /// 而这条约束的内容恰好就是「这个文件里不许出现那次调用」，扫源码是等价且恒跑的判法。
-    /// 与 `lib.rs::every_window_builder_goes_through_browser_args` 同一手法。
+    /// 为什么仍是扫源码而不是跑一次命令：`uninstall_residue_execute` 只看
+    /// 「kind+target 命中不命中该窗口 label 的快照槽」，真机扫描在快速组里做不到；
+    /// 而这条约束的内容恰好落在「这个文件里有几次、以什么参数调用那次写入」，
+    /// 扫源码是等价且恒跑的判法。
+    ///
+    /// 原断言（「一次都不许出现 residue_snapshot_put」）在第二阶段必须**反过来**，
+    /// 但不能只是删掉——反向的断言要更严：调用次数 == 1、且紧跟 "deep"。
     #[test]
-    fn deep_scan_never_writes_the_execute_snapshot() {
-        // 扫描范围 = `#[cfg(test)]` 之前的**代码行**：
-        // - 上面的注释正是在解释这两个名字，算进命中会让断言永远为假，
-        //   进而被下一个改注释的人整条删掉；
-        // - 本测试自己的 needle 数组也含这两个字面量，所以测试体必须在范围外。
+    fn deep_scan_writes_only_the_deep_bucket_through_the_whitelist() {
         let text = include_str!("residue_deep.rs");
+        // 扫描范围 = `#[cfg(test)]` 之前的代码行，注释一律排除：
+        // 本文件顶部的边界说明正写着这两个名字，算进命中会让断言永远为假。
         let production = text.split("#[cfg(test)]").next().unwrap_or("");
         let code: String = production
             .lines()
@@ -186,12 +280,73 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(code.contains("spawn_blocking"), "扫描体为空或生产代码段变了：本断言已失去意义");
-        for forbidden in ["residue_snapshot_put", "RESIDUE_SNAPSHOTS"] {
-            assert!(
-                !code.contains(forbidden),
-                "只读聚合命令里出现了 {forbidden}：那会把候选送进 uninstall_residue_execute 的快照闸"
-            );
+        // 判据：写入必须经过白名单函数，不许出现「整表 candidates 直接塞进快照」的写法
+        assert!(
+            code.contains("fn deep_executable_candidates(report: &Value) -> Vec<Value>"),
+            "白名单筛子不见了 —— 快照写入失去唯一入口"
+        );
+        let calls: Vec<&str> = code.lines().filter(|l| l.contains("residue_snapshot_put(")).collect();
+        assert_eq!(calls.len(), 1, "residue_snapshot_put 必须恰好一处调用点，实得 {}", calls.len());
+        let line = calls[0].trim();
+        assert!(
+            line.contains("\"deep\""),
+            "唯一的写入点必须写 origin=\"deep\"，别的桶会顶掉三链快照：{line}"
+        );
+        assert!(
+            line.contains("executable"),
+            "写入的必须是 deep_executable_candidates 筛出来的集合，不是整份报告：{line}"
+        );
+        // RESIDUE_SNAPSHOTS 仍不许在本文件里被直接摸（只能经 residue_snapshot_put 这一个口子）
+        assert!(
+            !code.contains("RESIDUE_SNAPSHOTS"),
+            "绕过 residue_snapshot_put 直接操作快照表 = 绕开按 origin 分桶替换的语义"
+        );
+    }
+
+    /// 类白名单本身：逐条点名「谁进了快照、谁被挡在外面」。
+    /// 只断「驱动没进」是不够的 —— 万一筛子坏成「什么都不进」，那也是一路绿。
+    /// 所以这里同时断言 `passed` 集合恰好等于白名单，且构造里必须真的出现被拒的类。
+    #[test]
+    fn deep_whitelist_admits_only_untracked_game_folders() {
+        let mk = |kind: &str, class: &str| json!({ "kind": kind, "class": class, "target": "X", "readonly": true });
+        let report = json!({
+            "groups": [
+                { "id": "gameDirs", "items": [ mk("folder", "untracked_game_dir"), mk("file", "untracked_game_dir") ] },
+                { "id": "drivers", "items": [ mk("file", "orphan_sys_file") ] },
+                { "id": "minifilters", "items": [ mk("note_only", "minifilter_after_key_deleted") ] },
+                { "id": "services", "items": [ mk("reg_key", "dead_landing"), mk("reg_key", "stale_live_service") ] },
+                { "id": "ifeo", "items": [ mk("reg_key", "ifeo_debugger") ] },
+                { "id": "capability", "items": [ mk("reg_key", "capability_consent_dead_landing") ] },
+                { "id": "vendor", "items": [ mk("reg_key", "vendor_product_key_no_landing") ] },
+            ]
+        });
+        let got = deep_executable_candidates(&report);
+        let keys: Vec<(String, String)> = got
+            .iter()
+            .map(|v| {
+                (
+                    v.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+                    v.get("class").and_then(Value::as_str).unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![("folder".to_string(), "untracked_game_dir".to_string())],
+            "白名单只该放进 untracked_game_dir 的 folder，实得 {keys:?}"
+        );
+        // 进快照的三条必备标记：origin 是分桶键，deleteCapable 决定画不画勾选框，
+        // defaultChecked 必须是 false（危险能力默认关，§9.2）
+        for v in &got {
+            assert_eq!(v["origin"], json!("deep"), "origin 没落上，residue_snapshot_put 会把它并进别的桶");
+            assert_eq!(v["deleteCapable"], json!(true));
+            assert_eq!(v["defaultChecked"], json!(false), "深扫候选一律不许默认勾选");
+            assert_eq!(v["readonly"], json!(true), "原始字段必须保留，筛子不许改坏报告内容");
         }
+        // 缺组/坏形状都不许 panic，且不得产出候选
+        assert!(deep_executable_candidates(&json!({})).is_empty());
+        assert!(deep_executable_candidates(&json!({ "groups": [] })).is_empty());
+        assert!(deep_executable_candidates(&json!({ "groups": [{ "id": "gameDirs" }] })).is_empty());
     }
 
     /// 七个分组必须一个不少，且 id 与方案 §3 的扫描器一一对应
