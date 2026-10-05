@@ -1160,6 +1160,44 @@ use super::residue_update::*;
         assert!(msi.args.starts_with("/X{1D180B6A") && msi.args.contains("/qn /norestart"));
     }
 
+    /// §2.4（2026-10-06 拍板·选项②）：vendor 串过闸后，Inno 且含独立 /SILENT token
+    /// 才升级为全静默；/VERYSILENT 天然不重复触发；非 Inno 保持 vendor 原文。
+    /// 升级只动参数，exe 与 source 语义不变。
+    #[test]
+    fn inno_vendor_silent_is_upgraded_to_verysilent() {
+        let original = (r"C:\Program Files\Foo\unins000.exe".to_string(), String::new());
+        // inno + /SILENT（大小写不敏感）→ 升级，且保留其余参数原序
+        let quiet = r#""C:\Program Files\Foo\unins000.exe" /LANG=zh /SILENT /NOICONS"#;
+        let c = pick_silent_candidate("inno", None, &original, Some(quiet), &exists_all).expect("过闸候选");
+        assert_eq!(c.source, "vendor");
+        assert_eq!(c.args, "/LANG=zh /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS");
+        // 小写 /silent 同样命中（Inno 命令行大小写不敏感）
+        let lower = r#""C:\Program Files\Foo\unins000.exe" /silent"#;
+        assert_eq!(
+            pick_silent_candidate("inno", None, &original, Some(lower), &exists_all)
+                .expect("过闸候选")
+                .args,
+            "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+        );
+        // inno + /VERYSILENT：无独立 /SILENT token，不重复升级（保持原文）
+        let very = r#""C:\Program Files\Foo\unins000.exe" /VERYSILENT /NORESTART"#;
+        assert_eq!(
+            pick_silent_candidate("inno", None, &original, Some(very), &exists_all)
+                .expect("过闸候选")
+                .args,
+            "/VERYSILENT /NORESTART"
+        );
+        // 非 inno（nsis）带 /SILENT：保持 vendor 原文，不套 Inno 语义
+        let nsis_quiet = r#""C:\Program Files\Foo\u.exe" /SILENT"#;
+        assert_eq!(
+            pick_silent_candidate("nsis", None, &original, Some(nsis_quiet), &exists_all)
+                .expect("过闸候选")
+                .args,
+            "/SILENT"
+        );
+        // 升级条件不满足 ≠ 失败路径：失败回退仍由 rejected_vendor_falls_back_to_whitelist 接住
+    }
+
     /// B2 分档：语义与「是否回退原厂界面」成对钉住。
     /// 用户取消(1602) 与并发安装(1618) **不回退**（2026-09-28 裁定：取消是用户决定，
     /// 自动重弹界面等于无视取消；1618 的有界重试要真机证据才定）。

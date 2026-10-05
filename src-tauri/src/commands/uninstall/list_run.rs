@@ -577,8 +577,35 @@ pub(super) fn quiet_string_reject_reason(
     None
 }
 
+/// Inno vendor 串的 /SILENT 升级（HiBit 借鉴 v2 §2.4·选项②，2026-10-06 拍板）：
+/// `/SILENT` → `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`，保留其余参数原序。
+/// 只认独立的 `/SILENT` token（大小写不敏感，对齐 Inno 命令行语义）；
+/// `/VERYSILENT` 里没有 `/S` 相邻序列，不会被再次命中，天然不重复升级。
+/// 升级后**执行**失败仍走既有 fell_back → 原厂卸载界面，不在本函数处理；
+/// 条件不满足（非 inno / 无该 token）→ 原样返回，即「退回选项①保持 vendor 原文」。
+fn upgrade_inno_silent(kind: &str, exe: String, args: String) -> (String, String) {
+    if !kind.eq_ignore_ascii_case("inno") {
+        return (exe, args);
+    }
+    let mut upgraded = false;
+    let tokens: Vec<String> = args
+        .split_whitespace()
+        .map(|t| {
+            if t.eq_ignore_ascii_case("/SILENT") {
+                upgraded = true;
+                "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART".to_string()
+            } else {
+                t.to_string()
+            }
+        })
+        .collect();
+    if upgraded { (exe, tokens.join(" ")) } else { (exe, args) }
+}
+
 /// 静默命令裁决（B1）：厂商静默串优先于本地拼参数，但必须先过构造闸；
 /// 构造失败或语义不明 → 记录原因并回退现有白名单派生（不永久放弃该程序的静默能力）。
+/// vendor 串过闸后若为 Inno 且含 /SILENT，按 §2.4 升级为全静默（与白名单模板同级，
+/// 补齐「vendor 优先」带来的静默档位降级口子）。
 pub(super) fn pick_silent_candidate(
     kind: &str,
     product_code: Option<&str>,
@@ -593,7 +620,8 @@ pub(super) fn pick_silent_candidate(
             Some((qe, qa)) => match quiet_string_reject_reason(&qe, &qa, file_exists) {
                 Some(reason) => vendor_reject = Some(reason),
                 None => {
-                    return Some(SilentCandidate { exe: qe, args: qa, source: "vendor", vendor_reject: None })
+                    let (exe, args) = upgrade_inno_silent(kind, qe, qa);
+                    return Some(SilentCandidate { exe, args, source: "vendor", vendor_reject: None })
                 }
             },
         }
