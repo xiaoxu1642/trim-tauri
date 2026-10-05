@@ -1505,6 +1505,47 @@
                   "weight": 1
                 }
               ]
+            },
+            {
+              "id": "onedriveLogs",
+              "name": "OneDrive 日志",
+              "risk": "low",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Microsoft\\OneDrive"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Microsoft\\OneDrive\\logs\\*",
+                  "recurse": true
+                }
+              ],
+              "evidence": "OneDrive 同步客户端的诊断日志（可再生）",
+              "recommended": true,
+              "domain": "app",
+              "group": "netdisk",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "apps",
+                "importedAt": "2026-10-06",
+                "reviewedAt": "2026-10-06"
+              },
+              "ver": 20261006,
+              "evidenceItems": [
+                {
+                  "text": "OneDrive 同步日志（SyncEngine 等诊断日志，滚动生成）",
+                  "weight": 2
+                },
+                {
+                  "text": "内容可按需重建（日志），删除后客户端会再生成",
+                  "weight": 1
+                }
+              ]
             }
           ]
         },
@@ -2832,6 +2873,72 @@
               ]
             }
           ]
+        },
+        {
+          "id": "drivers",
+          "name": "驱动安装包残留",
+          "items": [
+            {
+              "id": "nvidiaInstallerCache",
+              "name": "NVIDIA 驱动安装包缓存",
+              "risk": "low",
+              "pathPs": "$env:PROGRAMDATA + '\\NVIDIA Corporation\\Downloader'",
+              "evidence": "GeForce Experience / 驱动安装程序下载的驱动安装包，安装完成后无运行用途",
+              "recommended": false,
+              "domain": "gfx",
+              "group": "drivers",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "gpu",
+                "importedAt": "2026-10-06",
+                "reviewedAt": "2026-10-06"
+              },
+              "ver": 20261006,
+              "evidenceItems": [
+                {
+                  "text": "NVIDIA 驱动安装包缓存（安装程序下载的完整驱动包）",
+                  "weight": 2
+                },
+                {
+                  "text": "内容可按需重建（重装驱动时重新下载），建议保留网络受限环境的用户手动复核",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "id": "amdDriverPackageCache",
+              "name": "AMD 驱动解压目录",
+              "risk": "low",
+              "pathPs": "$env:SystemDrive + '\\AMD'",
+              "evidence": "AMD 驱动安装器的默认解压目录，安装完成后仅作重新安装用途",
+              "recommended": false,
+              "domain": "gfx",
+              "group": "drivers",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "gpu",
+                "importedAt": "2026-10-06",
+                "reviewedAt": "2026-10-06"
+              },
+              "ver": 20261006,
+              "evidenceItems": [
+                {
+                  "text": "AMD 驱动安装器解压产物（安装完成后不再被引用）",
+                  "weight": 2
+                },
+                {
+                  "text": "内容可按需重建（重装驱动时重新下载解压），建议保留网络受限环境的用户手动复核",
+                  "weight": 1
+                }
+              ]
+            }
+          ]
         }
       ]
     },
@@ -2995,6 +3102,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "dlqPDYCJTqJ79VXFPzkrsQcso7Np9Y2WHGFCGHWRbjxnNbls8ewWU1SLqnTbcQbEXZNMsiryISElsIZT9cozBg=="
+    "sig": "D94B/hZ/Q6uGYTuu3Ewk9OIOYiW6uWDCFrR6KI6cxGx6bTk/WaUp+PZTodZXypDTnk9joErB2uagfY21j2S3Cg=="
   }
 }
