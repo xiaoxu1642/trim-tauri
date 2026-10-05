@@ -14,7 +14,6 @@
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
         <h1>应用卸载残留扫描</h1>
-        <div class="pw-topbar-sub">残留扫描的唯一入口：上半区是三链候选（规则库 / 失效登记 / 卸载遗留），下半区是七个深扫器的报告。<b>有保护的不给删、判据没评审过的也不给删</b>，能勾的只有后端放进执行快照的那几项，删前逐项确认。</div>
       </div>
       <div class="pw-topbar-actions">
         <input type="text" class="field-input rs-search" id="rsSearch" placeholder="搜索目标路径 / 服务名…" spellcheck="false" />
@@ -30,8 +29,7 @@
       <!-- ① 三链候选：唯一可执行区。勾选态只在本窗内存里，执行时后端按本窗 label 取快照 -->
       <div class="mw-card">
         <div class="mw-card-head">
-          <span class="mw-card-title">可清理残留（规则库 / 失效登记 / 卸载遗留）</span>
-          <span class="mw-card-desc" id="rsChainHint">除规则库高置信项外一律不自动勾选。</span>
+          <span class="mw-card-title">可清理残留</span>
         </div>
         <div class="rs-actionbar">
           <button class="btn btn-danger" id="rsBtnClean" disabled>删除选中残留</button>
@@ -52,7 +50,7 @@
            判据在 residue_deep.rs 的 deep_executable_candidates，前端只看 deleteCapable -->
       <div class="mw-card">
         <div class="mw-card-head">
-          <span class="mw-card-title">深度扫描报告（服务 / 驱动 / 滤镜 / IFEO / 厂商键 / 能力授权 / 游戏库）</span>
+          <span class="mw-card-title">深度扫描报告</span>
           <span class="mw-card-desc" id="rsDeepSummary">正在扫描…</span>
         </div>
         <div class="mw-body" id="rsDeepBody">

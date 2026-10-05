@@ -28,8 +28,8 @@
   const CONF_LABEL = { high: '高置信', medium: '中置信', low: '低置信（建议人工核对）' };
   const KIND_LABEL = { reg_key: '注册表项', reg_value: '注册表值', folder: '目录', file: '文件', shortcut: '快捷方式' };
   const DEAD_CLASS_TITLE = {
-    uninstall: '失效卸载项（可删该注册表键）',
-    appPaths: '失效 App Paths（可删该注册表键）',
+    uninstall: '失效卸载项',
+    appPaths: '失效 App Paths',
   };
 
   // appId 从哪来：主窗卸载成功后经 URL query 带进来（后端开窗前先过取值闸）；
@@ -45,6 +45,7 @@
     pendingFailed: [],
     running: false,
     scanning: false,
+    protOpen: undefined,  // 已保护项手风琴：undefined=默认折叠；true=手动展开过（搜索清空也不收回）
   };
 
   function targetFromSearch() {
@@ -69,7 +70,7 @@
   async function scanChains() {
     const box = el('rsChainBody');
     state.scanning = true;
-    box.innerHTML = '<div class="finder-empty">正在扫描三类残留（规则库 / 失效登记 / 卸载记录）…</div>';
+    box.innerHTML = '<div class="finder-empty">正在扫描三类残留…</div>';
     const app = state.appId;
     const fail = (e) => ({ success: false, message: String((e && e.message) || e) });
     const [rApp, rDead, rOrphan] = await Promise.all([
@@ -79,23 +80,23 @@
     ]);
     const groups = [];
     if (!app) {
-      groups.push({ title: '程序残留（规则库）', rows: [], hint: '未选中程序。从卸载页某一行的「查残留」进来，就会带上它的规则库残留。' });
+      groups.push({ title: '程序残留', rows: [], hint: '未选中程序。从卸载页某一行的「查残留」进来，就会带上它的规则库残留。' });
     } else if (rApp && rApp.success) {
       const name = (rApp.data && rApp.data.appName) || '';
-      groups.push({ title: `程序残留 · ${name}（规则库命中）`, rows: (rApp.data && rApp.data.findings) || [] });
+      groups.push({ title: `程序残留 · ${name}`, rows: (rApp.data && rApp.data.findings) || [] });
     } else {
-      groups.push({ title: '程序残留（规则库）', rows: [], hint: ((rApp && rApp.message) || '本组扫描失败') });
+      groups.push({ title: '程序残留', rows: [], hint: ((rApp && rApp.message) || '本组扫描失败') });
     }
     if (rDead && rDead.success) {
-      groups.push({ title: '失效残留 · 全机（卸载项与 App Paths 记着的落点已不存在）', rows: (rDead.data && rDead.data.findings) || [], byClass: true });
+      groups.push({ title: '失效残留 · 全机', rows: (rDead.data && rDead.data.findings) || [], byClass: true });
     } else {
       groups.push({ title: '失效残留 · 全机', rows: [], hint: ((rDead && rDead.message) || '本组扫描失败') });
     }
     if (rOrphan && rOrphan.success) {
-      groups.push({ title: '卸载遗留 · 按本机卸载记录（应用数据目录与卸后新增的厂商配置键）', rows: (rOrphan.data && rOrphan.data.findings) || [] });
+      groups.push({ title: '卸载遗留', rows: (rOrphan.data && rOrphan.data.findings) || [] });
     } else {
       // 这一组拒绝扫描是**正确行为**（档案为空时拿空集会被读成"这台机器没有遗留"）
-      groups.push({ title: '卸载遗留 · 按本机卸载记录', rows: [], hint: ((rOrphan && rOrphan.message) || '本组未执行') });
+      groups.push({ title: '卸载遗留', rows: [], hint: ((rOrphan && rOrphan.message) || '本组未执行') });
     }
     state.scanGroups = groups;
     state.rows = groups.reduce(function (acc, g) { return acc.concat(g.rows); }, []);
@@ -176,7 +177,7 @@
       state.report = res.data && res.data.report ? res.data.report : null;
       if (!state.report) throw new Error('回执里没有报告数据');
       renderDeep();
-      toast('info', '深扫完成（只有后端放进执行快照的类能勾，其余只出说明）');
+      toast('info', '深扫完成');
     } catch (e) {
       box.innerHTML = '<div class="finder-empty">深扫失败：' + esc(e && e.message ? e.message : e) + '</div>';
       toast('error', '深扫失败：' + (e && e.message ? e.message : e));
@@ -225,7 +226,7 @@
     const platform = r.platforms || {};
     const parts = [
       '候选合计 ' + total + ' 项',
-      '已保护 ' + (r.protectedCount || 0) + ' 项（在库 / 在用 / 微软签名）',
+      '已保护 ' + (r.protectedCount || 0) + ' 项',
       '服务 ' + (s.services || 0),
       '驱动文件 ' + (s.driverFiles || 0),
       '挂载滤镜 ' + (s.mountedFilters || 0),
@@ -258,12 +259,31 @@
     }
     el('rsDeepSummary').innerHTML = summaryHtml(r);
     const groups = (r.groups || []).map(function (g) {
-      return deepTableHtml(g.title + '（' + g.id + '）', (g.items || []).filter(passes), 'group');
+      return deepTableHtml(g.title, (g.items || []).filter(passes), 'group');
     }).join('');
     const protectedItems = (r.protected || []).filter(passes);
-    // 「有保护的不允许删除」就在这一栏：只给说明，不给勾选、不给按钮
-    const protHtml = protectedItems.length ? deepTableHtml('已保护项（不允许删除，只说明为什么）', protectedItems, 'protected') : '';
+    // 「有保护的不允许删除」就在这一栏：只给说明，不给勾选、不给按钮。
+    // §2.6b：默认折叠成手风琴（行数可达数百，常驻展开会把可执行区挤出视野）；
+    // 搜索命中时自动展开（否则「搜到了却看不见」），手动展开过则搜索清空也不收回。
+    const protHtml = protectedItems.length ? protectedAccordionHtml(protectedItems) : '';
     body.innerHTML = groups + protHtml;
+  }
+
+  /// 已保护项手风琴（§2.6b）：复用 finder 空文件/空目录页的 .empty-pane 件（main.css 现成样式，
+  /// 零新增 token）。表格本体仍由 deepTableHtml 产出（title 参与详情寻址，必须与普通组一致），
+  /// 这里只剥掉普通组头、换上手风琴头；折叠态由「手动开合 + 搜索命中」两个信号共同决定。
+  function protectedAccordionHtml(items) {
+    const inner = deepTableHtml('已保护项', items, 'protected');
+    const table = inner.slice(inner.indexOf('<table'));
+    const open = state.protOpen === true || !!(state.filter.trim());
+    return '<section class="empty-pane' + (open ? '' : ' collapsed') + '" data-rs-acc>'
+      + '<button class="empty-pane-head" type="button" aria-expanded="' + (open ? 'true' : 'false') + '">'
+      + '<span class="empty-pane-chevron">▾</span>'
+      + '<span class="empty-pane-title">已保护项</span>'
+      + '<span class="empty-pane-count">' + items.length + ' 项</span>'
+      + '</button>'
+      + '<div class="empty-pane-body">' + table + '</div>'
+      + '</section>';
   }
 
   // ==================== 详情（点击查看） ====================
@@ -435,12 +455,12 @@
       const d = resp.data || {};
       const pack = d.restorePack;
       if (pack && pack.error) {
-        toast('error', '还原包写入失败：' + pack.error + '（文件已删除，内容无法还原，回收站仍可查看）');
+        toast('error', '还原包写入失败：' + pack.error + '。文件已删除、内容无法还原，回收站仍可查看。');
       }
       const okCount = Number(d.okCount) || 0;
       const failCount = Number(d.failCount) || 0;
       toast(failCount ? 'warning' : 'success',
-        failCount ? `残留清理完成：${okCount} 项成功，${failCount} 项失败（详见报告）` : `残留清理完成：${okCount} 项已处理`);
+        failCount ? `残留清理完成：${okCount} 项成功，${failCount} 项失败，详见报告` : `残留清理完成：${okCount} 项已处理`);
       const done = new Set((d.details || []).filter(function (x) { return x.status === 'ok'; }).map(function (x) { return x.kind + '|' + x.target; }));
       state.rows = state.rows.filter(function (f) { return !done.has(f.kind + '|' + f.target); });
       state.scanGroups = state.scanGroups.map(function (g) {
@@ -499,7 +519,7 @@
         } else {
           revBtn.style.display = n ? '' : 'none';
           revBtn.disabled = !n;
-          revBtn.textContent = `撤回重启后删（${n} 项）`;
+          revBtn.textContent = `撤回重启后删 ${n} 项`;
         }
       }).catch(function () {});
     }
@@ -563,6 +583,16 @@
   // ==================== 交互装配 ====================
 
   function onClick(e) {
+    // §2.6b：已保护项手风琴的开合（照 finder.js 的 empty-pane 模式，状态记在 state.protOpen）
+    const accHead = e.target.closest('.empty-pane-head');
+    if (accHead && accHead.closest('[data-rs-acc]')) {
+      const pane = accHead.closest('.empty-pane');
+      pane.classList.toggle('collapsed');
+      const collapsed = pane.classList.contains('collapsed');
+      accHead.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      state.protOpen = !collapsed;
+      return;
+    }
     const ign = e.target.closest('[data-orphan-ignore]');
     if (ign) {
       const target = state.rows[Number(ign.dataset.orphanIgnore)];
