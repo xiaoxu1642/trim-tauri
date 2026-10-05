@@ -290,6 +290,43 @@
   }
 
   // ==================== 卸载 ====================
+  // §2.3（2026-10-06 拍板）：卸载前可选创建系统还原点。默认关；失败只提示、不拦卸载
+  // —— 还原点是保护，不是前置条件（对齐 HiBit 语义）。复用 optimizer 域现有命令，
+  // Rust 侧零改动：check_restore 是 readonly 档、create_restore 是 MAIN 档，主窗都能调。
+  const RESTORE_PREF_KEY = 'trim.uninstall.restorePoint';
+  function readRestorePref() {
+    try { return localStorage.getItem(RESTORE_PREF_KEY) === '1'; } catch (e) { return false; }
+  }
+
+  async function createRestorePointIfEnabled() {
+    const check = window.api?.optimizer?.checkRestore;
+    const create = window.api?.optimizer?.createRestore;
+    if (!check || !create) return; // 通道缺失按「无此能力」处理，不拦卸载
+    // 先查环境：检查链路明确失败多为系统还原未启用——如实提示并跳过，省一次数十秒的无效创建
+    startFakeProgress('正在检查系统还原点环境…');
+    let probe = null;
+    try { probe = await check(); } catch (e) { probe = null; }
+    if (probe && probe.success === false) {
+      window.app?.toast?.('warning', '系统还原点检查未通过（系统还原可能未启用），将继续卸载');
+      finishFakeProgress();
+      return;
+    }
+    // 创建中给独立进度提示：创建还原点耗时可到数十秒，沿用卸载等待的假进度条避免「像卡死」
+    startFakeProgress('正在创建系统还原点…可能需要数十秒');
+    try {
+      const cr = await create();
+      if (cr && cr.success) {
+        window.app?.toast?.('success', '系统还原点已创建，开始卸载');
+      } else {
+        window.app?.toast?.('warning', '还原点创建失败，将继续卸载: ' + ((cr && cr.message) || '原因未知'));
+      }
+    } catch (e) {
+      window.app?.toast?.('warning', '还原点创建失败，将继续卸载: ' + (e.message || e));
+    } finally {
+      finishFakeProgress();
+    }
+  }
+
   async function runUninstall(appId) {
     const app = apps.find((a) => a.id === appId);
     if (!app || running) return;
@@ -309,6 +346,10 @@
     );
     if (!ok) return;
     running = true;
+    // §2.3：确认通过后、卸载器启动前建还原点（开关关时直进卸载，行为与现状一致）
+    if (readRestorePref()) {
+      await createRestorePointIfEnabled();
+    }
     startFakeProgress(isAppx ? '正在移除 Windows 应用…' : '卸载器运行中…等待卸载完成');
     try {
       const resp = await window.api.uninstall.run(appId);
@@ -580,6 +621,14 @@
     });
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
     document.getElementById('btnResidueRulesUpdate')?.addEventListener('click', updateResidueRules);
+    // §2.3：还原点开关的偏好持久化（新式命名对齐 trim.residue.backupPack；读失败按默认关）
+    const restoreToggle = document.getElementById('uninstallRestoreToggle');
+    if (restoreToggle) {
+      restoreToggle.checked = readRestorePref();
+      restoreToggle.addEventListener('change', () => {
+        try { localStorage.setItem(RESTORE_PREF_KEY, restoreToggle.checked ? '1' : '0'); } catch (e) { /* 写不进去就本次会话有效 */ }
+      });
+    }
     document.getElementById('uninstallList')?.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-un-app]');
       if (btn && !btn.disabled) runUninstall(btn.dataset.unApp);

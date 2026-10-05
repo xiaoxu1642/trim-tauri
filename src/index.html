@@ -546,6 +546,13 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .88-.29 1.7-.77 2.37l1.46 1.46C18.9 15.84 19.5 14.5 19.5 13c0-3.87-3.13-7-7.5-7zm0 14c-2.76 0-5-2.24-5-5 0-.88.29-1.7.77-2.37L6.31 11.17C5.1 12.16 4.5 13.5 4.5 15c0 3.87 3.13 7 7.5 7v3l4-4-4-4v3z"/></svg>
               <span>更新残留规则</span>
             </button>
+            <!-- §2.3（2026-10-06 拍板）：卸载前可选创建系统还原点。默认关（对齐「还原包建包默认关」口径）；
+                 创建失败只提示、不拦卸载——还原点是保护，不是前置条件 -->
+            <label class="toggle-switch" for="uninstallRestoreToggle" data-tip="卸载前先创建一个系统还原点（可能需要数十秒）；创建失败只提示、不拦截卸载。系统还原未启用时此开关无效。">
+              <input type="checkbox" id="uninstallRestoreToggle" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-label">卸载前建还原点</span>
+            </label>
             <!-- B1（2026-09-28 拍板）：静默勾选框已删——默认静默优先、失败自动回退原厂 UI -->
             <!-- 应用计数改由列表表头「程序」列承载（2026-09-30 用户要求），此处不再重复一处 -->
           </div>
