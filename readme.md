@@ -123,4 +123,10 @@ Trim 的原则：**说不清收益的改动，宁可不做**。以下常见「�
 
 ## 社区
 
-[Linux.do](https://linux.do/)
+| 平台 | 同步内容 | 说明 |
+|---|---|---|
+| [GitHub](https://github.com/xiaoxu1642/trim-tauri) | 代码 + Release | 主仓库：代码与 Release 主要在此发布 |
+| [AtomGit](https://atomgit.com/xiaoxiaoxu1642/trim-tauri) | 代码 + Release | 国内镜像：与 GitHub 同步更新 |
+| [Gitee](https://gitee.com/xiaoxu1642/trim-tauri) | 仅代码 | 国内镜像：只同步代码，不再更新 Release |
+
+交流讨论：[Linux.do](https://linux.do/)
