@@ -410,7 +410,9 @@ const MUST_READONLY = [
   'system_disk_list',
   'system_disk_type',
   'uninstall_appx_logo', // 疑点：写 logo 缓存文件
-  // v0.5.0 只读残留报告（七个扫描器聚合）：无副作用、不写执行快照，副窗消费
+  // v0.5.0 只读残留报告（七个扫描器聚合）：无副作用，但会写「本窗 label 分槽」的
+  // 执行快照（residue_deep.rs 的 residue_snapshot_put），删除链据此判定目标有效性；
+  // 副窗消费。
   'uninstall_residue_deep_scan',
 ];
 const actualReadonly = [...tiers.entries()].filter(([, v]) => v.tier === 'READONLY').map(([k]) => k).sort();

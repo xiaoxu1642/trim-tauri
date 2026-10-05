@@ -649,13 +649,17 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
                 // TOCTOU 剩留场景：「扫描时空、删除时已非空」的目标跳过，
                 // 防止把扫描后新放入的内容整棵连进回收站
                 if it.empty && it.kind == "dir" {
-                    let child_count = std::fs::read_dir(&target).map(|r| r.count()).unwrap_or(0);
-                    if child_count > 0 {
+                    // 扫描侧的空目录是**折叠后**的最外层父目录：它体内恰是那些空子目录
+                    // （或扫描认作空的 0 字节文件），`read_dir().count() > 0` 必然成立 ⇒
+                    // 默认勾选的折叠父目录 100% 被跳过。判据与扫描侧同源
+                    // （`prune_tree_effectively_empty`，AGENTS §5.16），按空树复检。
+                    if !trim_finder::scan::prune_tree_effectively_empty(std::path::Path::new(&target)) {
+                        let child_count = std::fs::read_dir(&target).map(|r| r.count()).unwrap_or(0);
                         log::write_log(
                             "warn",
                             &format!(
-                                "finder 删除预检: 空目录已不再为空（{} 项），跳过 -> {}",
-                                child_count, it.path
+                                "finder 删除预检: 空目录树内已有实际内容（顶层 {} 项），跳过 -> {}",
+                                child_count, it.path,
                             ),
                         );
                         continue;
@@ -780,6 +784,7 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
         }
     })
 }
+
 
 // ==================== 删除清单（共享存储见 engine::delete_manifest） ====================
 

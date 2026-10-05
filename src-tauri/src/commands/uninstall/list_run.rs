@@ -411,13 +411,15 @@ pub async fn uninstall_list<R: tauri::Runtime>(
             apps.extend(enum_uninstall_root(HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"));
         }
         // 跨根去重（HiBit 同口径）：同一程序常同时出现在 HKLM 64 位与 WOW6432Node 键下。
-        // 键 = 显示名+版本（小写）；保留先出现者（HKCU 优先，用户级条目更贴近当前用户）。
+        // 键 = 显示名+版本+发布者（小写）；保留先出现者（HKCU 优先，用户级条目更贴近当前用户）。
+        // 带上 publisher 是为了不再把「同名同版本的两家产品」静默折叠成一行（id 本身无碰撞）。
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         apps.retain(|a| {
             let key = format!(
-                "{}|{}",
+                "{}|{}|{}",
                 a["displayName"].as_str().unwrap_or("").to_lowercase(),
-                a["displayVersion"].as_str().unwrap_or("")
+                a["displayVersion"].as_str().unwrap_or(""),
+                a["publisher"].as_str().unwrap_or("").to_lowercase()
             );
             seen.insert(key)
         });
@@ -609,6 +611,11 @@ pub(super) fn pick_silent_candidate(
 /// （用户既然取消就不再替他决定，自动重弹等于无视取消）；`1618` 只做提示、
 /// 不做有界重试（重试策略要真机证据才定，方案 §5·B2 证据边界）。
 /// NSIS 的 `1/2` 不特判：与通用码空间重叠，未确认前按「其它」走原回退路径。
+///
+/// 2026-10-05 复核收口：这张表只在 `installerKind == "msi"` 时决定「是否回退原厂界面」；
+/// Inno/NSIS 的退出码空间与 MSI 重叠但语义不同（NSIS 1/2 = 用户取消/错误），
+/// 按 MSI「其它 ⇒ 自动重弹」会让用户刚点的取消被无视。未取到真机样本前，
+/// 非 MSI 安装器只在**启动失败**时回退，不按退出码回退（`list_run` 调用点按 kind 判）。
 pub(super) fn classify_exit(code: u32) -> (&'static str, bool) {
     match code {
         0 => ("卸载成功", false),
@@ -1077,7 +1084,9 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         };
         if used_silent && !fell_back {
             let (meaning, fall_back) = classify_exit(exit_code);
-            if fall_back {
+            // 码表语义只对 MSI 成立；Inno/NSIS 的退出码不套这张表（见 classify_exit 注释）。
+            let by_exit_code = fall_back && kind == "msi";
+            if by_exit_code {
                 log::write_log(
                     "info",
                     &format!("uninstall_run {display_name}: 静默卸载退出码 {exit_code}（{meaning}），自动回退原厂卸载界面"),
@@ -1088,7 +1097,9 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             } else {
                 log::write_log(
                     "info",
-                    &format!("uninstall_run {display_name}: 静默卸载退出码 {exit_code}（{meaning}），按分档不回退原厂界面"),
+                    &format!(
+                        "uninstall_run {display_name}: 静默卸载退出码 {exit_code}（{meaning}），安装器 {kind} 不按退出码回退原厂界面"
+                    ),
                 );
             }
         }
@@ -1177,4 +1188,3 @@ pub(super) mod install_date_tier_tests {
         assert_eq!(install_date_from_epoch(0), None, "0 必须退回兜底档，否则 exact 标志会撒谎");
     }
 }
-

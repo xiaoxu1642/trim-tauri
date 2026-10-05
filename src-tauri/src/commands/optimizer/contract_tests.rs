@@ -1157,7 +1157,7 @@ fn strip_js_comments(src: &str) -> String {
     fn m2_服务类盲区项现在能产出断言() {
         // (id, 期望的服务断言条数下限)
         for (id, min_checks) in [
-            ("tf_svc_bulk", 70), // 65 基础 + wuauserv 手动 + 5 商店段
+            ("tf_svc_bulk", 65), // 仅 65 个基础服务；wuauserv 与商店 5 项期望值取决于运行期选项，静态不可断言
             ("tf_drv_disable", 19),
             ("svc_connected_devices_manual", 2),
             ("svc_remote_connectivity_manual", 6),
@@ -1185,6 +1185,37 @@ fn strip_js_comments(src: &str) -> String {
                 );
             }
         }
+    }
+
+    /// 2026-10-05 复核（批量项恒判「部分生效」的根因）：静态断言不得包含
+    /// 「条件追加」的商店服务，也不得让同一服务带两个互斥的期望 Start。
+    ///
+    /// 两条都会让 `all()` 恒假：前者在「没勾商店」的用户机上必然不成立，
+    /// 后者（wuauserv：基础段=3 / 商店段=4）无论实际是 3 还是 4 都有一条断言失败。
+    /// 用正向特征点名被排除的目标，避免「命令整条消失」式假绿。
+    #[test]
+    fn 批量服务断言不含条件追加与跨组互斥目标() {
+        let opt = find_option("tf_svc_bulk").expect("tf_svc_bulk 在目录里");
+        let spec = write_spec_of("tf_svc_bulk").expect("tf_svc_bulk 应在写入坐标侧表里");
+        let checks = collect_checks(opt);
+        assert!(checks.len() >= 60, "服务清单断言数异常：{}", checks.len());
+
+        let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for c in &checks {
+            let (kind, data, name) = c.probe();
+            assert_eq!(kind, "svcStart", "批量项产出了非 svcStart 断言：{:?}", c.probe());
+            assert!(
+                !spec.store_services.iter().any(|s| s == name),
+                "条件追加的商店服务 {name} 混进静态断言 —— 没勾商店的用户会恒判未生效",
+            );
+            if let Some(prev) = seen.insert(name, data) {
+                assert_eq!(prev, data, "服务 {name} 出现互斥断言 {prev}/{data} —— all() 必有一条恒假");
+            }
+        }
+        assert!(
+            !seen.contains_key("wuauserv"),
+            "wuauserv 的期望值取决于是否追加商店段，必须排除在静态断言之外",
+        );
     }
 
     /// M2 侧表本身的自洽：每个登记项在数据层都存在，且服务清单非空。
@@ -2226,4 +2257,50 @@ let ov = include_str!("overview.rs");
                 "window.api.optimizer 缺 {method} 方法"
             );
         }
+    }
+
+    /// 子集作用域：批量项只勾了一部分时，回读断言必须**只保留勾中的服务**，
+    /// 而且注册表类断言一条都不许被筛掉。
+    ///
+    /// 为什么钉这两条：收窄方向写反的两种形态都不会红在别处 ——
+    /// ① 不收窄 ⇒ 子集用户每次开机被报「未完成还原」（2026-10-05 真机反馈）；
+    /// ② 把 reg 断言一起筛掉 ⇒ 该项恒无判据，退回 v0.5.0「collect_checks 为空
+    ///    ⇒ 恒显示未生效」的病根。两条都用正向特征断言（保留/剔除的具体名字）。
+    #[test]
+    fn 子集作用域只收窄服务断言() {
+        let bulk = find_option("tf_svc_bulk").expect("tf_svc_bulk 在目录里");
+        let checks = collect_checks(bulk);
+        assert!(checks.len() >= 60, "服务清单断言数异常：{}", checks.len());
+
+        let picked = vec!["RetailDemo".to_string(), "lltdsvc".to_string()];
+        let scoped = scope_checks(&checks, Some(&picked));
+        let names: Vec<&str> = scoped
+            .iter()
+            .filter_map(|c| {
+                let (k, _, n) = c.probe();
+                if k.starts_with("svc") { Some(n) } else { None }
+            })
+            .collect();
+        assert_eq!(
+            names.len(),
+            picked.len(),
+            "收窄后应只剩勾中的服务，实际：{names:?}"
+        );
+        assert!(names.contains(&"RetailDemo") && names.contains(&"lltdsvc"), "{names:?}");
+        assert!(!names.contains(&"CryptSvc"), "未勾中的服务混进了断言范围");
+
+        // 全选（None / 空 vec）⇒ 一条不动，与既有行为一致
+        assert_eq!(scope_checks(&checks, None).len(), checks.len());
+        assert_eq!(scope_checks(&checks, Some(&[])).len(), checks.len());
+
+        // 注册表类断言不参与收窄：拿一个纯 reg 项的断言验
+        let reg = find_option("tf_hibern_off").expect("tf_hibern_off 在目录里");
+        let reg_checks = collect_checks(reg);
+        assert!(!reg_checks.is_empty(), "tf_hibern_off 应产出注册表断言");
+        let reg_scoped = scope_checks(&reg_checks, Some(&picked));
+        assert_eq!(
+            reg_scoped.len(),
+            reg_checks.len(),
+            "注册表断言被勾选清单筛掉了 —— 该项会退回「恒无判据」"
+        );
     }

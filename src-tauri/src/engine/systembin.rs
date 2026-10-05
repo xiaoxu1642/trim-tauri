@@ -25,25 +25,65 @@
 /// 只收**随 Windows 分发、位于 System32（或系统根）**的工具。用户可自行安装的
 /// 工具（如 `git`）不进这张表 —— 它们的真实位置不在系统目录，硬解析反而会把它弄坏。
 const PINNED: &[&str] = &[
+    "appwiz.cpl",
+    "calc.exe",
+    "charmap.exe",
+    "cleanmgr.exe",
     "cmd.exe",
+    "control.exe",
+    "desk.cpl",
+    "devmgmt.msc",
+    "dfrgui.exe",
     "dism.exe",
+    "diskmgmt.msc",
+    "dxdiag.exe",
+    "eventvwr.msc",
     "explorer.exe", // 注意：在系统根而非 System32，靠第二个候选目录命中
     "fltmc.exe", // v0.5.0 残留扫描：过滤管理器实时状态（minifilter 挂载判定）
     "ipconfig.exe",
     "lodctr.exe",
+    "main.cpl",
+    "mmsys.cpl",
+    "msconfig.exe",
+    "msinfo32.exe",
+    "mspaint.exe",
+    "msra.exe",
+    "mstsc.exe",
+    "narrator.exe",
+    "ncpa.cpl",
     "netsh.exe",
     "netsh",
+    "notepad.exe",
+    "optionalfeatures.exe",
+    "osk.exe",
+    "perfmon.exe",
+    "perfmon.msc",
     "powercfg.exe",
+    "powercfg.cpl",
     "powershell.exe", // 注意：在 System32\WindowsPowerShell\v1.0 子目录，见下方专属候选
+    "psr.exe",
     "reg.exe",
     "reg",
+    "regedit.exe",
+    "resmon.exe",
+    "rstrui.exe",
+    "rundll32.exe",
     "sc.exe",
     "sc",
     "schtasks.exe",
     "schtasks",
+    "sdclt.exe",
+    "services.msc",
     "sfc.exe",
+    "snippingtool.exe",
+    "sysdm.cpl",
     "tasklist.exe",
+    "taskmgr.exe",
+    "taskschd.msc",
+    "utilman.exe",
     "where.exe",
+    "wf.msc",
+    "winver.exe",
     "wsreset.exe",
 ];
 
@@ -105,6 +145,10 @@ pub const REG_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// 与 `REG_EXPORT_TIMEOUT` 同理由收在这里：本模块是后台子进程的咽喉，超时常量的真源必须
 /// 只有一处可查（`tools/check-ps-callsites.mjs` 的 F 组就是按 systembin.rs + native/ 找定义的）。
 pub const FLTMC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 计划任务查询/修改/删除（schtasks）的超时。挂在启动项扫描主链与删除链上，
+/// 平时毫秒级；任务计划服务被拖住时不能让它永久锁住 IPC。30s 是宽限上界。
+pub const SCHTASKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 带超时的静默子进程执行（v2-L4P-29 / B-7）。
 ///

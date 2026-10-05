@@ -152,10 +152,12 @@ fn do_repair(action_id: &str, repair: &Value, label: &str) -> Value {
 /// netcheck:repair — 白名单动作修复（快照校验 + 管理员判定）
 #[tauri::command]
 pub async fn netcheck_repair<R: tauri::Runtime>(window: WebviewWindow<R>, action_id: String) -> Result<Value, String> {
+    // 先闸后参：来源校验必须在参数校验之前（与本域其它命令同口径）。
+    // 先校验参数会把「谁在调」这层挡在门外，越权调用者先拿到参数是否合法的信号。
+    let label = guard::guard(&window, guard::MAIN)?;
     if action_id.is_empty() || action_id.len() > 40 {
         return Ok(json!({ "success": false, "message": "参数不合法" }));
     }
-    let label = guard::guard(&window, guard::MAIN)?;
 
     // 动作必须属于本窗口最近一次检测快照；参数只取快照里的值
     let repair = match find_repair(&label, &action_id) {

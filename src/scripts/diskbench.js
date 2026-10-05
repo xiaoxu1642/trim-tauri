@@ -427,7 +427,7 @@
             const home = info && info.homedir;
             if (home && pathInput) {
               const current = pathInput.value || '';
-              if (!current || /16076/.test(current)) {
+              if (!current) {
                 pathInput.value = home.replace(/\\+$/, '') + '\\Downloads';
               }
             }

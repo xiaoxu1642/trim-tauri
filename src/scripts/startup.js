@@ -479,18 +479,22 @@
         if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行本操作');
         return;
       }
-      const failed = resp && resp.failed ? resp.failed : 0;
+      // 后端回执形状是 `{success: bool, data: {success: n, failed: n, results}}`——
+      // 顶层 success 是布尔，计数在 data 里。读错层级会渲染「成功 true 项」，
+      // 且失败清单一律为空、失败项还被记进防恢复指纹。
+      const data = (resp && resp.data) || {};
+      const failed = Number(data.failed) || 0;
       if (resp && resp.success) {
-        window.app?.toast('success', `${act}完成，成功 ${resp.success || 0} 项`);
+        window.app?.toast('success', `${act}完成，成功 ${Number(data.success) || 0} 项`);
       } else {
         window.app?.toast('warning', `${act}部分失败：${failed} 项未生效`);
       }
-      const failedIds = new Set((resp && resp.results || []).filter(r => r.status === 'error').map(r => r.id));
+      const failedIds = new Set((data.results || []).filter(r => r.status === 'error').map(r => r.id));
       // 防恢复跟踪：禁用成功 → 记录指纹；手动启用成功 → 清除跟踪
       if (!enable) {
         const defend = loadStore(DEFEND_KEY, {});
         selItems.forEach(i => {
-          const r = (resp && resp.results || []).find(x => x.id === i.id);
+          const r = (data.results || []).find(x => x.id === i.id);
           if (!r || r.status !== 'error') {
             const fp = fpOf(i);
             defend[fp] = { name: i.name || '未命名', strikes: defend[fp]?.strikes || 0 };
@@ -502,9 +506,8 @@
         selItems.forEach(i => { delete defend[fpOf(i)]; });
         saveStore(DEFEND_KEY, defend);
       }
-      // 刷新：成功的项状态变更后重扫；失败项标记
+      // 刷新：成功的项状态变更后重扫；有失败项时当前列表保持原样（失败明细已 toast）
       if (failedIds.size) {
-        items.forEach(i => { if (failedIds.has(i.id)) i._flag = 'error'; });
         render();
       } else {
         await scan(true);

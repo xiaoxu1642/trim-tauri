@@ -32,7 +32,9 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const VERBOSE = process.argv.includes('--verbose');
 
 // 必须登记的批量项（新增同类项时追加；忘了登记 = 界面上仍是一键全选）
-const REQUIRED = ['tf_svc_bulk', 'tf_drv_disable', 'tf_appx'];
+// tf_dev_disable 是 2026-10-05 补的：用户反馈「禁用 24 个冗余板载设备」只能一键全禁，
+// 而它根本没进侧表 ⇒ `rebuild_steps` 走 `_ => None` ⇒ 界面上连勾选弹窗都不会出现。
+const REQUIRED = ['tf_svc_bulk', 'tf_drv_disable', 'tf_appx', 'tf_dev_disable'];
 
 // labels 覆盖率棘轮（已登记解释文案的目标数 / 清单总数，取下界）
 const LABEL_COVERAGE_FLOOR = 0.6;
@@ -137,6 +139,28 @@ for (const id of REQUIRED) {
   const cov = full.length ? labelKeys.filter((k) => full.includes(k)).length / full.length : 0;
   check(cov >= LABEL_COVERAGE_FLOOR, `6. ${id} 的解释文案覆盖率 ≥ ${LABEL_COVERAGE_FLOOR}`,
     `${labelKeys.length}/${full.length} = ${(cov * 100).toFixed(0)}%`);
+}
+
+// ---- 7. 标题：数字不许写死（2026-10-05 用户裁定）----
+// 数据层那三条标题里的「70+」「24 个」「25 个」与侧表实数（65 / 23 / 25）已经不符，
+// 而且清单每增补一次就再谎报一次。落法是侧表给一条**无数字**的说法，实数由勾选区
+// 按清单长度现算（`subitems_of` 的 `total`）。这里判红而不是提醒：标题覆盖只在
+// `display_title` 一处生效，侧表漏登记 = 界面退回带假数字的旧标题，肉眼看不出来。
+for (const id of REQUIRED) {
+  const row = items[id];
+  const opt = byId.get(id);
+  if (!row || !opt) continue;
+  const dataTitle = String(opt.title ?? '');
+  const t = row.title;
+  if (!check(typeof t === 'string' && t.trim() !== '', `7. ${id} 侧表登记了标题`)) continue;
+  if (/\d/.test(dataTitle)) {
+    check(!/\d/.test(t), `7. ${id} 的侧表标题不含写死的数字`, `数据层「${dataTitle}」→ 侧表「${t}」`);
+    check(t !== dataTitle, `7. ${id} 的侧表标题确实替换了带数字的那条`, `侧表「${t}」`);
+  } else {
+    // 数据层本来就没写数字 ⇒ 不许借「覆盖」改名：两条说法并存会让日志与界面对不上
+    check(t === dataTitle, `7. ${id} 的侧表标题与数据层逐字一致（无数字就不该改名）`,
+      `数据层「${dataTitle}」/ 侧表「${t}」`);
+  }
 }
 
 // ---- 反向：侧表里不得有数据层不存在的项（防残留登记腐化，与 channel-map 的 RETIRED 同向）----

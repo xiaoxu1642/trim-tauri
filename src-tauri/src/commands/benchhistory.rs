@@ -154,7 +154,9 @@ pub fn bench_history_add<R: tauri::Runtime>(window: WebviewWindow<R>, record: Op
         entry.insert(k, v);
     }
     records.insert(0, Value::Object(entry));
-    save_bench_history(&records);
+    if !save_bench_history(&records) {
+        return Ok(json!({ "success": false, "message": "测速历史写入失败，本次结果未保存" }));
+    }
     Ok(json!({ "success": true }))
 }
 
@@ -174,7 +176,9 @@ pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Opt
         .into_iter()
         .filter(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()))
         .collect();
-    save_bench_history(&records);
+    if !save_bench_history(&records) {
+        return Ok(json!({ "success": false, "message": "测速历史写入失败，记录未删除" }));
+    }
     Ok(json!({ "success": true }))
 }
 
@@ -182,6 +186,8 @@ pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Opt
 #[tauri::command]
 pub fn bench_history_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    save_bench_history(&[]);
+    if !save_bench_history(&[]) {
+        return Ok(json!({ "success": false, "message": "测速历史写入失败，记录未清空" }));
+    }
     Ok(json!({ "success": true }))
 }

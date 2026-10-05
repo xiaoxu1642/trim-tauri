@@ -637,12 +637,17 @@
     if (dirs.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; } // 单项画了没信息量
     const shown = dirs.slice(0, 24); // 上限：再多格子小到无法点，也只是噪声
     const cells = anTreemapLayout(shown, 100, 46); // 逻辑坐标系（百分比 × 高度 px 由 CSS 换算）
+    // 「占本层」的分母必须是本层总量（summary 优先，退回所有子目录之和）——
+    // 用铺开的 24 格面积当分母会把占比虚高 N/24 倍，读屏/悬浮都在播报错数字。
+    const layerTotal = (layer.summary && layer.summary.size > 0)
+      ? layer.summary.size
+      : (dirs.reduce((a, r) => a + (Number(r.size) || 0), 0) || 1);
     let html = `<div style="flex:1;min-width:0">
       <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层 Treemap（最大 ${shown.length} 个子目录，格子面积 = 占比，点击下钻）</div>
       <div class="an-tm-box">`;
     cells.forEach((c) => {
       const name = nameOf(c.item.path);
-      const pct = (c.w * c.h) / (100 * 46) * 100;
+      const pct = (Number(c.item.size) || 0) / layerTotal * 100;
       const sizeText = formatSize(Number(c.item.size));
       // 只有放得下才写字：小格子标名会溢出成一片糊，不如留白 + data-tip
       const label = (c.w > 11 && c.h > 8) ? `<div class="an-tm-cell-name">${esc(name)}</div>` : '';
@@ -943,6 +948,15 @@
           : `删除完成！共 ${freedText}`);
       }
       if (Number(data.failed) > 0) window.app?.toast?.('warning', `${data.failed} 项删除失败（可能被占用）`);
+      // 预检剔除的项此前不上屏：纯目录批次（默认勾选的折叠父目录若被误跳）会
+      // 「全程无声」，用户以为删完了。skipped / unhandled 必须显式说出来。
+      const skippedCount = Number(data.skipped) || 0;
+      const unhandledCount = Number(data.unhandled) || 0;
+      if (skippedCount > 0) {
+        window.app?.toast?.('warning',
+          `${skippedCount} 项已跳过（空目录复检未通过或目标已变化）`
+          + (unhandledCount > 0 ? `，其中 ${unhandledCount} 项文件名无法无损处理` : ''));
+      }
     } catch (e) {
       hideProgress(cfg);
       window.app?.toast?.('error', '删除失败: ' + e.message);

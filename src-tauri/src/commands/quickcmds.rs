@@ -238,8 +238,9 @@ fn is_uri(s: &str) -> bool {
 }
 
 /// ShellExecute「open」（= Electron `shell.openExternal` / `shell.openPath`）。
-/// HINSTANCE ≤ 32 视为失败（Win32 约定），只记日志、不影响同步回执。
-fn shell_open(target: &str, id: &str, stage: &str) {
+/// HINSTANCE ≤ 32 视为失败（Win32 约定）；失败必须如实回 false，
+/// 否则目标缺失的环境（如家庭版无 gpedit.msc）会弹「已打开」假成功。
+fn shell_open(target: &str, id: &str, stage: &str) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_NORMAL;
@@ -260,14 +261,21 @@ fn shell_open(target: &str, id: &str, stage: &str) {
             "warn",
             &format!("快捷指令 {stage} 失败 {id}: ShellExecute 返回 {}", result.0 as isize),
         );
+        return false;
     }
+    true
 }
 
-/// 参数数组 spawn（`CREATE_NEW_CONSOLE`：控制台类工具需独立可见控制台）
+/// 参数数组 spawn（`CREATE_NEW_CONSOLE`：控制台类工具需独立可见控制台）。
+///
+/// 程序名先经 `systembin::system_tool` 解析：`CreateProcess` 的搜索顺序是
+/// 「exe 目录 → 父 CWD → System32」，便携版/提权实例的 exe 目录可写，
+/// 同目录植入同名 `notepad.exe` 之类会被优先执行。白名单外的程序原样返回。
 fn spawn_detached(exe: &str, args: &[String]) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    Command::new(exe)
+    let program = crate::engine::systembin::system_tool(exe);
+    Command::new(program)
         .args(args)
         .creation_flags(CREATE_NEW_CONSOLE)
         .spawn()
@@ -296,24 +304,31 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
     let args = &toks[1..];
     // URI（ms-settings: 等）：仅无参数时识别
     if args.is_empty() && is_uri(&exe) {
-        shell_open(&exe, id, "openExternal");
-        return (true, String::new());
+        if shell_open(&exe, id, "openExternal") {
+            return (true, String::new());
+        }
+        return (false, format!("无法打开「{exe}」"));
     }
     // .msc / .cpl：ShellExecute 解析
     let lower = exe.to_ascii_lowercase();
     if lower.ends_with(".msc") || lower.ends_with(".cpl") {
+        // 先落到 System32 的绝对路径，避免 ShellExecute 先命中 exe 同目录的同名件。
+        let resolved = crate::engine::systembin::system_tool(&exe);
+        let first = resolved.to_string_lossy().to_string();
         let target = if args.is_empty() {
-            exe.clone()
+            first
         } else {
-            toks.join(" ")
+            std::iter::once(first).chain(toks[1..].iter().cloned()).collect::<Vec<_>>().join(" ")
         };
-        shell_open(&target, id, "openPath");
-        return (true, String::new());
+        if shell_open(&target, id, "openPath") {
+            return (true, String::new());
+        }
+        return (false, format!("无法打开「{exe}」"));
     }
     // 其余裸应用名 / .exe / 带参系统工具（control/explorer/cmd/powershell/perfmon 等）：spawn
     if let Err(e) = spawn_detached(&exe, args) {
-        // 与 Electron 同回执：JS 的 spawn 错误走 'error' 事件异步记日志，同步仍返回 ok:true
         log::write_log("warn", &format!("快捷指令 spawn 失败 {id}: {e}"));
+        return (false, format!("启动失败：{e}"));
     }
     (true, String::new())
 }
@@ -391,6 +406,28 @@ mod tests {
             .collect()
     }
 
+    /// 渲染层那份 (id, cmd) 对。展示与复制取 JS 文本，执行取 Rust 表 ——
+    /// 只对拍 id 会让两条 cmd 文本各自漂移而测试恒绿（用户看到/复制的命令
+    /// 与真实执行的不是同一条）。
+    fn js_cmds() -> Vec<(String, String)> {
+        JS_CMDS
+            .split("{ id: '")
+            .skip(1)
+            .filter_map(|seg| {
+                let id = seg.split('\'').next()?.to_string();
+                let at = seg.find("cmd: '")? + "cmd: '".len();
+                // JS 单引号字符串里的 `\\` 是运行时的一个反斜杠（`\\'` 是转义单引号）——
+                // 不解这一步会把源码字面量与 Rust 的运行时值错比对（diag-documents 曾误红）。
+                let cmd = seg[at..]
+                    .split('\'')
+                    .next()?
+                    .replace("\\'", "'")
+                    .replace("\\\\", "\\");
+                Some((id, cmd))
+            })
+            .collect()
+    }
+
     #[test]
     fn whitelist_is_wellformed() {
         let js = js_ids();
@@ -405,6 +442,16 @@ mod tests {
         js_sorted.sort();
         js_sorted.dedup();
         assert_eq!(ids, js_sorted, "id 集合与渲染层清单不一致（左边缺=界面上点了报未知指令，右边多=界面没有却能被调起）");
+        let js_cmds = js_cmds();
+        assert_eq!(js_cmds.len(), js.len(), "JS 清单里 cmd 解析结果为空 = 解析器写坏了");
+        for (id, _, cmd) in QUICKCMDS {
+            let js_cmd = js_cmds
+                .iter()
+                .find(|(jid, _)| jid == id)
+                .map(|(_, c)| c.as_str())
+                .unwrap_or("");
+            assert_eq!(*cmd, js_cmd, "{id} 的 cmd 原文与渲染层不一致（展示/复制取 JS，执行取 Rust）");
+        }
         for (id, _, cmd) in QUICKCMDS {
             let toks: Vec<String> = tokenize_quick_cmd(cmd);
             assert!(!toks.is_empty() && !toks[0].is_empty(), "{id} 空指令");

@@ -52,6 +52,11 @@ pub(super) fn subitems_of(option_id: &str) -> Option<Value> {
     // 摊平之后：未登记解释的目标**不出现**在勾选列表里（全选路径仍会执行到它们，
     // 由门禁断言覆盖率棘轮盯着解释文案的补齐进度）。
     let labels = raw.get("labels").and_then(Value::as_object).cloned().unwrap_or_default();
+    let total = raw
+        .get("targets")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
     let items: Vec<Value> = raw
         .get("targets")
         .and_then(Value::as_array)
@@ -69,20 +74,35 @@ pub(super) fn subitems_of(option_id: &str) -> Option<Value> {
         "hint": raw.get("hint"),
         "items": items,
         "extras": raw.get("extras").cloned().unwrap_or(json!([])),
+        // 清单实数：界面上「共 N 个目标」由它现算，不抄标题里的数字。
+        "total": total,
         // 未登记解释的目标数：界面上如实告知「还有 N 个没有单独说明」，
         // 而不是让用户以为清单就这么多。
-        "unexplained": raw
-            .get("targets")
-            .and_then(Value::as_array)
-            .map(|a| a.len())
-            .unwrap_or(0)
-            .saturating_sub(items.len()),
+        "unexplained": total.saturating_sub(items.len()),
     }))
 }
 
 /// 这一项是否支持自选目标
 pub(super) fn supports_subitems(option_id: &str) -> bool {
     subitems_of(option_id).is_some()
+}
+
+/// 界面上显示的标题（2026-10-05 用户裁定：标题里的数字不许写死）。
+///
+/// 为什么要覆盖而不是改数据层：`optimizer-runtime.json` 的上游是只读基线，标题
+/// 里的「禁用 70+ 非必要服务」「禁用 24 个冗余板载设备」与侧表实数（65 / 23）已经
+/// 不一致，而且清单一旦增补，数字就变成谎报（AGENTS §9.3：没有证据的主张不进文案）。
+/// 侧表的 `title` 是不带数字的说法，实数由勾选区自己按清单长度现算。
+///
+/// 单一实现：列表响应、状态总览、执行日志与记账标题都走本函数，
+/// 不在前端做字符串替换（那是第二份实现，会和数据层各说各话）。
+pub(super) fn display_title(option_id: &str, fallback: &str) -> String {
+    raw_of(option_id)
+        .and_then(|v| v.get("title"))
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 /// 侧表里的原始一行（未经摊平）
@@ -179,6 +199,16 @@ foreach ($n in $picked) {{ $p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n
 foreach ($a in $picked) {{ Get-AppxPackage -AllUsers -Name $a -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue }}"
             ),
         ),
+        // 板载设备：按 FriendlyName 匹配且当前处于 OK 才禁（与数据层原脚本逐字同语义）。
+        // 刻意不改成 `-in $picked` 的一次性过滤：那会把「一个名字对应多个设备实例」的
+        // 逐个禁用行为改掉，重建出的脚本就该与原脚本只差「清单被裁成选中的那几个」。
+        "tf_dev_disable" => (
+            format!("按选择禁用 {} / {} 个板载设备", selected.len(), all.len()),
+            format!(
+                "$picked = @({list})\n\
+foreach ($n in $picked) {{ Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -eq $n -and $_.Status -eq \"OK\" }} | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }}"
+            ),
+        ),
         _ => return None,
     };
 
@@ -224,8 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn 三项都支持自选且有目标() {
-        for id in ["tf_svc_bulk", "tf_drv_disable", "tf_appx"] {
+    fn 四项都支持自选且有目标() {
+        for id in ["tf_svc_bulk", "tf_drv_disable", "tf_appx", "tf_dev_disable"] {
             assert!(supports_subitems(id), "{id} 应支持自选目标");
             assert!(
                 targets_of(id).len() >= 19,
@@ -243,8 +273,21 @@ mod tests {
             // unexplained 必须等于「总数 - 有解释数」，界面上要如实告知
             let total = sub["unexplained"].as_u64().unwrap() + items.len() as u64;
             assert_eq!(total as usize, targets_of(id).len(), "{id} unexplained 口径不对");
+            // total 是界面计数的分母（「已选 3 / 65 项」），必须等于清单实数
+            assert_eq!(
+                sub["total"].as_u64().unwrap() as usize,
+                targets_of(id).len(),
+                "{id} total 与清单实数不符"
+            );
+            // 标题覆盖：数字不许写死在标题里（2026-10-05 用户裁定），
+            // 覆盖值只走 display_title 一处
+            let titled = display_title(id, "数据层标题");
+            assert!(!titled.is_empty() && !titled.chars().any(|c| c.is_ascii_digit()),
+                "{id} 标题里还有写死的数字：{titled}");
         }
         assert!(!supports_subitems("tf_ntfs"), "非批量项不该被判为支持自选");
+        // 未登记项：display_title 原样返回数据层标题（不做无依据的改名）
+        assert_eq!(display_title("tf_ntfs", "NTFS 文件系统调优"), "NTFS 文件系统调优");
     }
 
     /// 勾选子集 ⇒ 脚本里**只出现**选中的名字，且带正确的动作语义。
@@ -280,6 +323,30 @@ mod tests {
         assert!(pwsh.contains("'*solit*'") && pwsh.contains("'*Sway*'"), "{pwsh}");
         assert!(!pwsh.contains("*OneNote*"), "未选中项混入: {pwsh}");
         assert!(pwsh.contains("Remove-AppxPackage"), "{pwsh}");
+    }
+
+    /// 板载设备子集（2026-10-05 补）：只禁勾中的设备，且动作语义与数据层逐字同形。
+    ///
+    /// 为什么不断言「脚本被简化成一次性过滤」：原脚本是逐个名字跑一遍
+    /// `Get-PnpDevice | Where | Disable-PnpDevice`（同名多实例会被逐个禁用），
+    /// 重建只允许裁清单，不许顺手动结构 —— 结构变了就必须重新过编译链与真机。
+    #[test]
+    fn 板载设备子集只禁用勾中的() {
+        let picked = s(&["System Speaker", "Amdlog"]);
+        let steps = rebuild_steps("tf_dev_disable", Some(&picked), None).expect("应重建出步骤");
+        assert_eq!(steps.len(), 1, "板载设备只有清单这一步");
+        let pwsh = steps[0]["pwsh"].as_str().unwrap();
+        assert!(pwsh.contains("'System Speaker'") && pwsh.contains("'Amdlog'"), "{pwsh}");
+        for absent in ["WAN Miniport", "UMBus", "Microsoft GS Wavetable Synth", "Intel Management Engine"] {
+            assert!(!pwsh.contains(absent), "未勾中的 {absent} 混入重建脚本: {pwsh}");
+        }
+        assert!(pwsh.contains("Disable-PnpDevice") && pwsh.contains("$_.Status -eq \"OK\""), "{pwsh}");
+        // 重建脚本必须过原生编译链：编译不出来的话执行侧只剩「收件箱 PS」一条路，
+        // 而这条链的整个意义是把步骤留在原生解释器里（`step_exec_mode` 会如实标 unsupported）。
+        assert!(
+            crate::engine::pssteps::compile(pwsh).is_ok(),
+            "板载设备重建脚本编译失败——执行侧会退化成 unsupported"
+        );
     }
 
     /// 全选路径必须**原样返回 None**（= 走数据层原脚本），不得重跑一遍「用清单重建」。

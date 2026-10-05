@@ -47,8 +47,11 @@ pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
         }
         let h_term = OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|_| "无法打开进程（权限不足）".to_string())?;
         let name_display = if exe_name.is_empty() { format!("PID {pid}") } else { exe_name.clone() };
-        TerminateProcess(h_term, 1).map_err(|_| "结束进程失败".to_string())?;
+        // 先接住结果再关句柄：`?` 早退会让 CloseHandle 被跳过，反复对受保护进程
+        // 点「结束」就每次泄漏一个内核句柄。
+        let terminated = TerminateProcess(h_term, 1);
         let _ = CloseHandle(h_term);
+        terminated.map_err(|_| "结束进程失败".to_string())?;
         std::thread::sleep(std::time::Duration::from_millis(300));
         let still_alive = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).is_ok();
         if still_alive {

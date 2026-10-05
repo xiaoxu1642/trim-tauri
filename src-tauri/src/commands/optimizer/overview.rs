@@ -264,8 +264,29 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
     let opt_id = opt.get("id").and_then(Value::as_str).unwrap_or("");
     if !opt_id.is_empty() && checks.is_empty() {
         if let Some(spec) = write_spec_of(opt_id) {
+            // 静态可断言的只有「无条件写入」的那批：
+            //  · store_services 由 `svc_bulk_append_store` 条件追加，没勾商店时根本没写，
+            //    对它出断言会让没勾的用户恒判「未生效」；
+            //  · 同一服务在多组里期望值不同（wuauserv：基础段=3 手动 / 商店段=4 禁用）
+            //    时，静态断言无论实际值如何都有一条恒假 —— 这正是批量项恒报
+            //    「部分生效」的根因。两类都跳过；真值取决于运行时选项，不能静态下结论。
+            let mut expects_by_svc: std::collections::HashMap<&str, std::collections::BTreeSet<u32>> =
+                std::collections::HashMap::new();
             for (expect, services) in spec.groups {
-                for svc in *services {
+                for svc in services.iter() {
+                    expects_by_svc.entry(svc.as_str()).or_default().insert(*expect);
+                }
+            }
+            let conditional: std::collections::HashSet<&str> =
+                spec.store_services.iter().map(|s| s.as_str()).collect();
+            for (expect, services) in spec.groups {
+                for svc in services.iter() {
+                    if conditional.contains(svc.as_str()) {
+                        continue;
+                    }
+                    if expects_by_svc.get(svc.as_str()).map(|s| s.len() > 1).unwrap_or(false) {
+                        continue;
+                    }
                     checks.push(Check {
                         kind: "svcStart",
                         hive: reg_hive("HKEY_LOCAL_MACHINE").unwrap(),
@@ -277,21 +298,9 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
                     });
                 }
             }
-            // 商店那 5 项由 `svc_bulk_append_store` 条件追加（RunParams.includeStore，
-            // 用户弹窗确认过才执行）。这里**刻意不生成断言** ——
-            // `check_optimized` 只知道「当前启动类型」，不知道「用户当时勾没勾商店」。
-            // 判成未生效会让没勾商店的用户永远看到「立即执行」，
-            // 判成已生效会让勾了商店的用户看不到还原入口。**两者都是谎报**。
-            //
-            // 正确形态是让它们显示为「部分生效」，那需要把 `check_optimized`
-            // 的返回从 `bool` 扩成三态（影响 4 个调用方 + 前端三处消费），
-            // 属 M2 的独立一批。清单本身在这里取出来**只为了不漂移**：
-            // 见 `check-optimizer-write-contract.mjs` 的「storeServices 必须与
-            // apply.rs 的 STORE_SERVICES 逐项一致」—— 清单烂掉时门禁会红。
-            let _ = spec.store_services;
-            //
-            // 为什么不静默：这里刻意留注释说明「为什么不判」，避免下一个读代码的
-            // 人以为这里漏了。
+            // 上面两类的清单由 `tools/check-optimizer-write-contract.mjs` 的 D 组
+            // 与「跨组互斥」断言钉住（storeServices == apply.rs 的 STORE_SERVICES）；
+            // 检测侧跳过「条件追加」与「跨组互斥」两类，避免恒假断言。
         }
     }
     // 第五条分支：注册表写入坐标（M2-B · A 类「注册表可回读」）。
@@ -538,14 +547,60 @@ pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<Strin
     if grouped.is_empty() {
         return result;
     }
+    // 子集作用域只有一份真源：账本里那次执行记下的 `picked`（见
+    // [`optimization_state::record_pending_scoped`]）。启动回读没有 RunParams，
+    // 不记账就只能按全量清单判 ⇒ 勾了 3 个服务的用户每次开机都被报「未完成还原」。
+    let ledger = opt_state::all();
 
     for (id, checks) in &grouped {
-        // 全部 check 都生效才算生效（与原 PS 的 `$gv -and (...)` 链一致）；
-        // 一条都解析不出来也按「未生效」处理，不给假阳性。
-        let all_ok = !checks.is_empty() && checks.iter().all(judge_check);
+        let picked = ledger
+            .get(id)
+            .and_then(|r| r.get("picked"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            });
+        let scoped = scope_checks(checks, picked.as_deref());
+        // 全部 check 都生效才算生效（与原 PS 的 `$gv -and (...)` 链一致）。
+        // 但「一条断言都解析不出来」是 **unknown**，不是「未生效」：后者会把
+        // 「检不了」报成「没生效」，用户看到错误的「立即执行」。不插入条目，
+        // 让消费者按 `None` 处理（与 apply::verify_applied 的 "unknown" 对齐）。
+        if scoped.is_empty() {
+            continue;
+        }
+        let all_ok = scoped.iter().all(|c| judge_check(c));
         result.insert(id.clone(), all_ok);
     }
     result
+}
+
+/// 子集执行时的断言收窄（2026-10-05 真机反馈的根因）：用户只勾了 3 个目标，
+/// 另外 62 个的启动类型当然还是原值 —— 拿全量清单判「全部生效」就是把
+/// 「按我的选择做完了」报成「未生效」。
+///
+/// **只收窄服务类断言**：`svc` / `svcStart` 的 `name` 才是可勾选清单里的目标名；
+/// 注册表类断言（kind 以 `reg` 开头）按 hive + 子键 + 值名定位，不属于清单，
+/// 一起筛掉等于把该项的判据整条丢弃 —— 那正是 v0.5.0「collect_checks 返回空 ⇒
+/// 恒显示未生效」的病根形态。
+///
+/// 执行后回读（[`super::apply::verify_applied`]）与启动回读（[`check_optimized`]）
+/// 共用本函数，判定本身仍是同一条 [`judge_check`]，不另写一份（AGENTS §5.16）。
+///
+/// 返回**收窄后的断言引用**；调用方必须自己处理「空集 = 无从回读」，
+/// 不许把空集当成「全部满足」（那会谎报成功）。
+pub(super) fn scope_checks<'a>(checks: &'a [Check], picked: Option<&[String]>) -> Vec<&'a Check> {
+    let Some(list) = picked.filter(|p| !p.is_empty()) else {
+        return checks.iter().collect();
+    };
+    checks
+        .iter()
+        .filter(|c| {
+            let (kind, _, name) = c.probe();
+            kind.starts_with("reg") || list.iter().any(|t| *t == name)
+        })
+        .collect()
 }
 
 /// 这一步**实际由谁执行**：`native`（主进程原生解释器）/ `inbox-ps`（收件箱 Windows
@@ -639,6 +694,13 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                 // 不在表里 = 不注入该字段，而不是注入空数组 ——
                 // 空数组会被前端读成「支持自选但一个目标都没有」。
                 if let Some(sub) = super::subitems::subitems_of(sid) {
+                    // 标题覆盖（2026-10-05）：数据层标题写死的数字与侧表实数不符，
+                    // 换成侧表那条无数字的说法。取值只走 [`display_title`]，
+                    // 与状态总览、记账标题同一份实现。
+                    let titled = super::subitems::display_title(sid, "");
+                    if !titled.is_empty() {
+                        map.insert("title".into(), json!(titled));
+                    }
                     map.insert("subitems".into(), sub);
                 }
             }
@@ -800,9 +862,14 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
             .map(collect_checks)
             .map(|c| !c.is_empty())
             .unwrap_or(false);
-        let title = opt
-            .and_then(|o| o.get("title").cloned())
-            .unwrap_or_else(|| rec.get("title").cloned().unwrap_or(json!(id)));
+        // 标题与列表同一份实现（[`super::subitems::display_title`]）：账本里存的
+        // 是执行当时写入的标题，升级前那条可能还带写死的数字，显示口径不能分叉。
+        let title = json!(super::subitems::display_title(
+            id,
+            opt.and_then(|o| o.get("title").and_then(Value::as_str))
+                .or_else(|| rec.get("title").and_then(Value::as_str))
+                .unwrap_or(id.as_str())
+        ));
         items.push(json!({
             "id": id,
             "title": title,
@@ -882,4 +949,3 @@ pub async fn optimizer_stale_dismiss<R: Runtime>(window: WebviewWindow<R>, ids: 
     }
     json!({ "success": true, "data": { "dismissed": n } })
 }
-

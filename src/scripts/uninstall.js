@@ -244,7 +244,6 @@
           <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${noRemoveAttr(a)}>卸载</button>
           <button class="btn btn-secondary btn-small" data-un-modify="${esc(a.id)}"${modifyBtnAttr(a)}${noModifyAttr(a)}>修改</button>
           <button class="btn btn-secondary btn-small" data-un-repair="${esc(a.id)}"${modifyBtnAttr(a)}${noRepairAttr(a)}>修复</button>
-          <button class="btn btn-secondary btn-small" data-un-residue="${esc(a.id)}" data-tip="只看不删：按该程序的卸载键定位它在规则库里登记的残留落点">查残留</button>
         </td>
       </tr>`).join('');
     return `
@@ -278,7 +277,6 @@
           <td class="finder-col-size" style="width:130px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
           <td class="finder-col-size" style="width:230px">
             <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${uninstallBlockAttr(a)}>卸载</button>
-            <button class="btn btn-secondary btn-small" data-un-residue="${esc(a.id)}" data-tip="只看不删：按该包的卸载键定位它在规则库里登记的残留落点">查残留</button>
           </td>
         </tr>`).join('');
       return `<div class="finder-group-header"><span>${title} · ${list.length} 项</span></div>
@@ -589,12 +587,8 @@
       if (mod && !mod.disabled) runModify(mod.dataset.unModify, 'modify');
       const rep = e.target.closest('[data-un-repair]');
       if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair');
-      const res = e.target.closest('[data-un-residue]');
-      if (res && !res.disabled) {
-        // 「查残留」= 把这一步的 appId 带进副窗（副窗开着也认，走 residue:target 事件）
-        currentAppId = res.dataset.unResidue;
-        openResidueWindow(currentAppId);
-      }
+      // 行内「查残留」按钮已按用户 2026-10-05 裁定删除：软件既然还装在机器上，谈不上残留。
+      // 真正的入口是卸载完成后自动打开残留副窗（见 runUninstall 尾部），以及工具栏那个总入口。
     });
     // v0.7.0：residueBtn* / residueBackupToggle / residueList 这些主窗元素随面板一起搬走了，
     // 对应的监听不在这儿 —— 勾选、删除、删前备份偏好、重启后撤回落 in src/scripts/residue-window.js

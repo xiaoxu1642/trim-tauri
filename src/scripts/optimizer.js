@@ -692,11 +692,15 @@
 
       const $ = (s) => ctrl.modal.querySelector(s);
       const counter = $('[data-pick-count]');
+      // 分母用后端下发的**清单实数**（`subitems.total`），不是可勾选行数：
+      // 未登记解释的目标不在列表里，但全选路径照样会执行到它们 ——
+      // 分母写成可勾选行数会让界面上的总数小于真实受影响目标数。
+      const totalCount = Number(opt.subitems.total) || all.length;
       const syncCount = () => {
         const tail = extras.length
           ? `，附带操作 ${pickedExtras.size} / ${extras.length} 项`
           : '';
-        counter.textContent = `将执行 ${targets.size} / ${all.length} 项${tail}`;
+        counter.textContent = `将执行 ${targets.size} / ${totalCount} 项${tail}`;
         // 全不选时禁用确认按钮：让「至少选一项」在按钮态上就说清楚，
         // 而不是点了才 toast 一句又什么都不发生。
         $('[data-pick-ok]').disabled = targets.size === 0;
@@ -1441,8 +1445,9 @@
         const un = Number(o.subitems.unexplained) || 0;
         o.subitems.items.forEach(it => { pickState.targets.add(it.value); pickState.all.push(it.value); });
         const openBtn = $('.opt-pick-open');
+        const entryTotal = Number(o.subitems.total) || pickState.all.length;
         const paintEntry = () => {
-          openBtn.textContent = `逐项选择要执行的目标…（已选 ${pickState.targets.size} / ${pickState.all.length} 项）`;
+          openBtn.textContent = `逐项选择要执行的目标…（已选 ${pickState.targets.size} / ${entryTotal} 项）`;
         };
         $('.opt-pick-hint').textContent = (o.subitems.hint || '')
           + (un > 0 ? `（另有 ${un} 个目标未单独列出说明，全选时仍会执行。）` : '')
@@ -2383,7 +2388,25 @@
 
     // 看板行点击打开弹窗；点击勾选框仅切换选择状态；列底「全选本类」批量勾选；
     // 已优化（灰态）行点击 → 弹「是否还原此项优化？」确认
-    root.addEventListener('click', (e) => {
+    root.addEventListener('click', async (e) => {
+      // 行内「立即恢复」：早期只有 data-restore 属性、没有委托分支，点击冒泡到
+      // `.opt-row` 变成「打开详情」，与文案承诺不符。这里直通 restoreOption，
+      // 与弹窗里那条还原入口同一实现。
+      const restoreBtn = e.target.closest('.opt-row-restore[data-restore]');
+      if (restoreBtn) {
+        e.stopPropagation();
+        const o = findEntry(restoreBtn.dataset.restore);
+        if (o) {
+          restoreBtn.disabled = true;
+          try {
+            const ok = await restoreOption(o);
+            if (!ok) window.app?.toast?.('warning', '恢复未能执行，请在详情里查看说明');
+          } catch (err) {
+            window.app?.toast?.('error', '恢复失败：' + (err && err.message ? err.message : err));
+          }
+        }
+        return;
+      }
       const check = e.target.closest('.checkbox[data-check]');
       if (check) {
         e.stopPropagation();

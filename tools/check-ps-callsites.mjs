@@ -347,6 +347,12 @@ const TIMEOUT_SPAWN_SITES = [
   // v0.5.0 残留扫描（只读）：fltmc 是 minifilter 挂载态的唯一权威来源。它挂在扫描线程的
   // 同步链上，一旦被杀软钩住不退出，整轮报告就永远不返回 —— 与 reg export 同族，必须带超时。
   { file: 'src-tauri/src/commands/uninstall/minifilter_orphan.rs', anchor: 'system_tool("fltmc.exe"), &["filters"], FLTMC_TIMEOUT', reason: '残留扫描：读过滤管理器挂载清单（只读，失败即整组不产候选）', timeoutConst: 'FLTMC_TIMEOUT', secs: 10 },
+  // 2026-10-05 复核：启动项域的 4 处 schtasks（扫描主链 + 计划任务启停/备份/删除）
+  // 此前是裸 quiet_cmd().output()，被任务计划服务拖住即永久锁住 IPC。
+  { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["/query", "/fo", "csv", "/nh", "/v"]', reason: '启动项扫描：枚举计划任务（扫描主链）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["/Change", "/TN", &full_name, arg]', reason: '启动项启停：schtasks /Change 计划任务状态', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["/Query", "/TN", &tn, "/XML"]', reason: '启动项删除：删任务前导出 XML 备份', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["/Delete", "/TN", &tn, "/F"]', reason: '启动项删除：删除计划任务', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
   // 2026-10-04 审计 §4.4：清理页 special=dism 的 /ResetBase 是漏改的同类裸 .output()，
   // /ResetBase 合法就要跑几十分钟，后代 TiWorker 占住管道即永久挂住整条清理链。
   // 1800s 对齐 MAINT_CMD_TIMEOUT（sfc/DISM/sc 同级长耗时）；到点杀的是 DISM 前端

@@ -161,9 +161,40 @@ pub(super) fn parse_reg_target(target: &str) -> Option<(windows::Win32::System::
 
 pub(crate) fn valid_uninstall_key_path(path: &str) -> bool {
     let p = path.to_lowercase();
-    p.starts_with("software\\")
-        && p.contains("microsoft\\windows\\currentversion\\uninstall\\")
-        && !p.contains("..")
-        && !p.contains('%')
+    if p.contains("..") || p.contains('%') {
+        return false;
+    }
+    // 锚定真实枚举根，且只认「根下的直接子键」——`contains` 形式连
+    // `HKCU\Software\Evil\Microsoft\...\Uninstall\x` 也放行，等于把形状闸写成摆设。
+    const ROOTS: [&str; 2] = [
+        "software\\microsoft\\windows\\currentversion\\uninstall\\",
+        "software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall\\",
+    ];
+    ROOTS.iter().any(|root| {
+        p.strip_prefix(root)
+            .map(|rest| !rest.is_empty() && !rest.contains('\\'))
+            .unwrap_or(false)
+    })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 卸载键形状闸必须**锚定**真实枚举根：`contains` 形式连
+    /// `Software\Evil\Microsoft\...\Uninstall\x` 也放行（2026-10-05 复核）。
+    #[test]
+    fn 卸载键路径必须是真实枚举根下的直接子键() {
+        // 三条真实根（HKCU/HKLM/HKLM32）都要放行
+        assert!(valid_uninstall_key_path(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Foo"));
+        assert!(valid_uninstall_key_path(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{guid}"));
+        assert!(valid_uninstall_key_path(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Bar"));
+        // 夹带路径必须被拒（原 contains 口径会放行第一条）
+        assert!(!valid_uninstall_key_path(r"Software\Evil\Microsoft\Windows\CurrentVersion\Uninstall\x"));
+        // 穿越 / 变量 / 根下多层子键都不许
+        assert!(!valid_uninstall_key_path(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\..\x"));
+        assert!(!valid_uninstall_key_path(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\%TEMP%"));
+        assert!(!valid_uninstall_key_path(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\a\b"));
+        assert!(!valid_uninstall_key_path(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\"));
+    }
+}

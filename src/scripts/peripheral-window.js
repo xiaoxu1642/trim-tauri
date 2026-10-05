@@ -140,13 +140,17 @@
     wrap.innerHTML = def.options.map(opt => {
       const isRec = opt.value === def.recommended;
       const isSel = selected[key] === opt.value;
+      // 渲染统一走 ds.esc / ds.escAttr（AGENTS §2：转义唯一真源）。
+      // 数据源目前是编译期常量，但「常量就不过闸」会让下一次数据层改动带着注入面。
+      const esc = window.ds.esc;
+      const escA = window.ds.escAttr;
       return `
-        <div class="peri-card${isSel ? ' selected' : ''}" data-group="${key}" data-value="${opt.value}" data-tip="${def.regName} = ${opt.value}">
+        <div class="peri-card${isSel ? ' selected' : ''}" data-group="${escA(key)}" data-value="${escA(opt.value)}" data-tip="${escA(def.regName + ' = ' + opt.value)}">
           ${isRec ? '<span class="peri-rec">推荐</span>' : ''}
           <span class="peri-radio" aria-hidden="true"></span>
-          <div class="peri-value">${opt.value}</div>
-          <div class="peri-regname">${def.regName}</div>
-          <div class="peri-desc">${opt.desc}</div>
+          <div class="peri-value">${esc(opt.value)}</div>
+          <div class="peri-regname">${esc(def.regName)}</div>
+          <div class="peri-desc">${esc(opt.desc)}</div>
         </div>`;
     }).join('');
   }

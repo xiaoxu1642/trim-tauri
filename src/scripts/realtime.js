@@ -117,11 +117,22 @@
     const risk = $('realtimeLossRisk');
     if (down) down.textContent = formatSpeed(state.down);
     if (up) up.textContent = formatSpeed(state.up);
-    if (loss) loss.textContent = (isFinite(state.loss.lossRate) ? state.loss.lossRate : 0).toFixed(1) + '%';
+    // 无默认网关（后端 lossRate=null）表示「测不了」，不是 0% 也不是 100%：
+    // 显示 `--` 并收起风险徽标，与下方详情文案保持一致。
+    const lr = state.loss.lossRate;
+    const lossKnown = lr != null && isFinite(lr) && !!state.loss.gateway;
+    if (loss) loss.textContent = lossKnown ? lr.toFixed(1) + '%' : '--';
     if (risk) {
-      const r = lossRisk(state.loss.lossRate);
-      risk.className = 'category-risk ' + r.cls;
-      risk.textContent = r.text;
+      if (lossKnown) {
+        const r = lossRisk(lr);
+        risk.className = 'category-risk ' + r.cls;
+        risk.textContent = r.text;
+        risk.style.display = '';
+      } else {
+        risk.className = 'category-risk';
+        risk.textContent = '';
+        risk.style.display = 'none';
+      }
     }
     const detail = $('realtimeLossDetail');
     if (detail) {
@@ -253,7 +264,7 @@
         const resp = await window.api.realtime.loss();
         if (resp && resp.success) {
           state.loss = {
-            lossRate: Number(resp.lossRate) || 0,
+            lossRate: resp.lossRate == null ? null : (Number(resp.lossRate) || 0),
             sent: Number(resp.sent) || 0,
             received: Number(resp.received) || 0,
             latencyMs: Number(resp.latencyMs) || 0,

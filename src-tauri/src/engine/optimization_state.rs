@@ -129,6 +129,24 @@ fn iso_now() -> String {
 
 /// 执行前记账（pending）。false = 写入失败，调用方必须中止（fail-closed）。
 pub fn record_pending(id: &str, title: &str, kinds: &[String]) -> bool {
+    record_pending_scoped(id, title, kinds, None)
+}
+
+/// [`record_pending`] 的完整形态：把「本次只施加了哪几个目标」一起记账。
+///
+/// 为什么必须落盘而不是只在内存里传（2026-10-05 真机反馈）：批量项支持逐项勾选后，
+/// 回读判据要按**当时勾的那几个**收窄。执行链里拿得到 `RunParams`，而启动时的
+/// `optimizer:state-overview` 只拿得到账本 —— 不记这一笔，子集用户每次开机都被
+/// 按全量清单判成「未完成还原」（另外 62 个服务当然还是原值）。
+///
+/// `None` 或空 = 全选 ⇒ **删掉** `picked` 键（不写 null）：旧账本里残留的子集会
+/// 把下一次全选的判定继续收窄，那是「做了 65 个只报 3 个」的反向谎报。
+pub fn record_pending_scoped(
+    id: &str,
+    title: &str,
+    kinds: &[String],
+    picked: Option<&[String]>,
+) -> bool {
     if id.is_empty() {
         return false;
     }
@@ -139,17 +157,18 @@ pub fn record_pending(id: &str, title: &str, kinds: &[String]) -> bool {
         .map(|k| json!(k))
         .collect();
     if let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) {
-        items.insert(
-            id.into(),
-            json!({
-                "title": if title.is_empty() { id } else { title },
-                "appliedAt": iso_now(),
-                "kinds": allowed,
-                "status": "pending",
-                "lastVerify": Value::Null,
-                "verifiedAt": Value::Null
-            }),
-        );
+        let mut rec = json!({
+            "title": if title.is_empty() { id } else { title },
+            "appliedAt": iso_now(),
+            "kinds": allowed,
+            "status": "pending",
+            "lastVerify": Value::Null,
+            "verifiedAt": Value::Null
+        });
+        if let Some(list) = picked.filter(|p| !p.is_empty()) {
+            rec["picked"] = json!(list);
+        }
+        items.insert(id.into(), rec);
     }
     // 重新执行 = 状态刚变过，用户之前的「不再提醒」失效（若又落 partial 应重新提醒）
     clear_stale_dismissed(&mut state, id);

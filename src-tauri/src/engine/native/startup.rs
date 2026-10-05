@@ -173,9 +173,12 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     continue;
                 }
 
-                // StartupApproved：32 位视图归到主 hive
+                // StartupApproved：32 位视图的批准面在 `Run32` 子键（不是 `Run`），
+                // hive 仍归主 hive。此前所有来源恒传 "Run"，32 位项禁用/启用写错键、
+                // 回读自校验因为读的也是错键而恒过。
                 let sa_hive = if hive_tag.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
-                let sa_disabled = read_startup_approved(sa_hive, "Run", &vp);
+                let sa_subkey = if subkey.to_ascii_uppercase().contains("WOW6432NODE") { "Run32" } else { "Run" };
+                let sa_disabled = read_startup_approved(sa_hive, sa_subkey, &vp);
                 let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
                 let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
 
@@ -267,10 +270,11 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     }
 
     // ---------- 计划任务（schtasks 命令） ----------
-    if let Ok(output) = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-        .args(["/query", "/fo", "csv", "/nh", "/v"])
-        .output()
-    {
+    if let Ok(output) = crate::engine::systembin::quiet_cmd_timeout(
+        system_tool("schtasks"),
+        &["/query", "/fo", "csv", "/nh", "/v"],
+        crate::engine::systembin::SCHTASKS_TIMEOUT,
+    ) {
         if output.status.success() {
             let csv = String::from_utf8_lossy(&output.stdout);
             for line in csv.lines().skip(1) {
@@ -572,18 +576,19 @@ fn write_disabled_records(records: &[Value]) {
 
 
 
-/// StartupApproved 键路径
-fn startup_approved_key(hive: HKEY) -> String {
+/// StartupApproved 键路径。`subkey` = `Run` / `Run32` / `StartupFolder`——
+/// 批准位按来源分键存放，写死 `Run` 会让 32 位项（Run32）被写错位置。
+fn startup_approved_key(hive: HKEY, subkey: &str) -> String {
     if hive == HKEY_CURRENT_USER {
-        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run".to_string()
+        format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\{subkey}")
     } else {
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run".to_string()
+        format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\{subkey}")
     }
 }
 
 /// 读 StartupApproved blob
-unsafe fn read_approved_blob(hive: HKEY, value_name: &str) -> Option<Vec<u8>> {
-    let key = startup_approved_key(hive);
+unsafe fn read_approved_blob(hive: HKEY, subkey: &str, value_name: &str) -> Option<Vec<u8>> {
+    let key = startup_approved_key(hive, subkey);
     let sk = to_wide(&key);
     let mut hk = HKEY::default();
     if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
@@ -601,8 +606,8 @@ unsafe fn read_approved_blob(hive: HKEY, value_name: &str) -> Option<Vec<u8>> {
 }
 
 /// 写 StartupApproved blob，设置/清除 bit0，写后回读校验
-unsafe fn set_approved_bit(hive: HKEY, value_name: &str, disable: bool) -> Result<(), String> {
-    let key = startup_approved_key(hive);
+unsafe fn set_approved_bit(hive: HKEY, subkey: &str, value_name: &str, disable: bool) -> Result<(), String> {
+    let key = startup_approved_key(hive, subkey);
     // 确保键存在
     let sk = to_wide(&key);
     let mut hk = HKEY::default();
@@ -611,7 +616,7 @@ unsafe fn set_approved_bit(hive: HKEY, value_name: &str, disable: bool) -> Resul
         return Err("无法创建 StartupApproved 键".into());
     }
     // 读现有 blob
-    let mut bytes = read_approved_blob(hive, value_name).unwrap_or_else(|| {
+    let mut bytes = read_approved_blob(hive, subkey, value_name).unwrap_or_else(|| {
         let mut b = vec![0u8; 12];
         b[0] = 2; // 无记录时按启用起手
         b
@@ -625,7 +630,7 @@ unsafe fn set_approved_bit(hive: HKEY, value_name: &str, disable: bool) -> Resul
     }
     let _ = RegCloseKey(hk);
     // 回读校验
-    if let Some(back) = read_approved_blob(hive, value_name) {
+    if let Some(back) = read_approved_blob(hive, subkey, value_name) {
         let got = back.first().map(|b| b & 1 == 1).unwrap_or(false);
         if got != disable {
             return Err("StartupApproved 回读不符（可能被策略或安全软件覆盖）".into());
@@ -684,11 +689,14 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
     let hive = if hive_str.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
 
     let (_, subkey) = parse_reg_path(reg_path).ok_or("注册表路径格式错误")?;
+    // 32 位 Run 项的批准位在 StartupApproved\Run32；写死了 Run 会既禁不掉该项，
+    // 又可能误标同名 64 位项。回读校验与写入用同一个子键名，不再自证清白。
+    let approved_subkey = if subkey.to_ascii_uppercase().contains("WOW6432NODE") { "Run32" } else { "Run" };
 
     if enable {
         // 启用：优先清 StartupApproved bit0
         if reg_read_value_typed(hive, &subkey, value_name).is_some() {
-            set_approved_bit(hive, value_name, false)?;
+            set_approved_bit(hive, approved_subkey, value_name, false)?;
             records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
             return Ok("已启用".into());
         }
@@ -739,7 +747,7 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
         if reg_read_value_typed(hive, &subkey, value_name).is_none() {
             return Err("注册表值不存在".into());
         }
-        match set_approved_bit(hive, value_name, true) {
+        match set_approved_bit(hive, approved_subkey, value_name, true) {
             Ok(_) => Ok("已禁用（注册表值保留，可随时还原）".into()),
             Err(e) => {
                 // 回退：删值 + 备份
@@ -840,9 +848,11 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String>
     if task_name.is_empty() { return Err("缺少任务名".into()); }
     let full_name = format!("{task_path}{task_name}");
     let arg = if enable { "/ENABLE" } else { "/DISABLE" };
-    let output = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-        .args(["/Change", "/TN", &full_name, arg])
-        .output().map_err(|e| format!("schtasks 执行失败: {e}"))?;
+    let output = crate::engine::systembin::quiet_cmd_timeout(
+        system_tool("schtasks"),
+        &["/Change", "/TN", &full_name, arg],
+        crate::engine::systembin::SCHTASKS_TIMEOUT,
+    ).map_err(|e| format!("schtasks 执行失败: {e}"))?;
     if output.status.success() {
         Ok(if enable { "已启用".into() } else { "已禁用".into() })
     } else {
@@ -919,16 +929,12 @@ fn startup_deleted_dir() -> std::path::PathBuf {
 /// 计划任务：schtasks /Query /XML 备份 + schtasks /Delete 删除
 pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
     let deleted_dir = startup_deleted_dir();
-    let backup_dir = deleted_dir.parent().unwrap().to_path_buf();
-    let disabled_file = backup_dir.join("disabled.json");
     let stamp = crate::engine::now_ms().to_string();
 
-    let mut records: Vec<Value> = if disabled_file.exists() {
-        std::fs::read_to_string(&disabled_file).ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| Value::Array(vec![]))
-            .as_array().cloned().unwrap_or_default()
-    } else { vec![] };
+    // 取本口径必须与读取链同一份（`startup_ledger_file` → 最近修改那本）：
+    // 固定读新根会在老根存有历史账时形成两个「权威账本」——删除链改的那本
+    // 不是界面/还原链读的那本，清空后老根历史还会复活。
+    let mut records: Vec<Value> = read_disabled_records();
 
     let mut results: Vec<Value> = Vec::new();
     let mut fs_delete: Vec<Value> = Vec::new();
@@ -1048,9 +1054,11 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 // 导出 XML 备份
                 let safe = safe_name(&task_name);
                 let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
-                let query_out = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-                    .args(["/Query", "/TN", &tn, "/XML"])
-                    .output();
+                let query_out = crate::engine::systembin::quiet_cmd_timeout(
+                    system_tool("schtasks"),
+                    &["/Query", "/TN", &tn, "/XML"],
+                    crate::engine::systembin::SCHTASKS_TIMEOUT,
+                );
                 if let Ok(out) = query_out {
                     if out.status.success() {
                         let _ = std::fs::write(&xml_file, &out.stdout);
@@ -1062,9 +1070,11 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     continue;
                 }
                 // 删除
-                let del_out = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-                    .args(["/Delete", "/TN", &tn, "/F"])
-                    .output();
+                let del_out = crate::engine::systembin::quiet_cmd_timeout(
+                    system_tool("schtasks"),
+                    &["/Delete", "/TN", &tn, "/F"],
+                    crate::engine::systembin::SCHTASKS_TIMEOUT,
+                );
                 if del_out.is_err() || !del_out.unwrap().status.success() {
                     failed += 1;
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
@@ -1080,16 +1090,10 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
         }
     }
 
-    // 写回 disabled.json
-    if records.is_empty() {
-        let _ = std::fs::remove_file(&disabled_file);
-    } else {
-        // 审查 v3-L1：禁用台账走原子写（直写崩溃/断电会留下半截 JSON，还原侧读不到）
-        let _ = crate::security::atomic_write_json(
-            &disabled_file,
-            &Value::Array(records),
-        );
-    }
+    // 写回禁用台账：空台账写 `[]` 而不是删文件（删掉后「最近修改的那本」会
+    // 退回老根历史账，用户已清空的记录会复活）。写入恒落新根，等于顺带把
+    // 老根那本迁移过来。
+    write_disabled_records(&records);
 
     Ok(json!({"success": success, "failed": failed, "results": results, "fsDelete": fs_delete}))
 }

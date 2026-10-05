@@ -250,6 +250,18 @@ fn bg_ext_ok(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 生成一个当前不存在的背景图目标名（同毫秒并发时用序号兜底，避免后者覆盖前者）。
+fn available_bg_path(dir: &Path, ext: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    loop {
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = dir.join(format!("bg_{}_{seq}{ext}", crate::engine::now_ms()));
+        if !p.exists() {
+            return p;
+        }
+    }
+}
+
 /// appearance:bg-import — 原生对话框选图 → 复制到 backgrounds
 #[tauri::command]
 pub fn appearance_bg_import<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
@@ -285,7 +297,9 @@ pub fn appearance_bg_import<R: Runtime>(window: WebviewWindow<R>) -> Result<Valu
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
         .unwrap_or_else(|| ".png".into());
-    let dest = dir.join(format!("bg_{}{ext}", crate::engine::now_ms()));
+    // 生成名 = `bg_<毫秒>_<序号><ext>`：同一毫秒两次换壁纸会落到同一目标名、后者覆盖前者。
+    // 序号是进程内原子自增，保证同毫秒也不撞。删除闸认同一形态（bg_ 后两段纯数字）。
+    let dest = available_bg_path(&dir, &ext);
     // 审查 L9：先量体积再拷。扩展名白名单挡不住一个 4 GB 的 .png —— 这条命令是同步的
     // （对话框本身要阻塞主线程），无上限的 fs::copy 会把 UI 钉死并写满数据盘。
     const MAX_BG_BYTES: u64 = 50 * 1024 * 1024;
@@ -339,6 +353,24 @@ pub fn appearance_bg_delete<R: Runtime>(
         return Ok(json!({ "success": false, "message": "路径无效" }));
     }
     if !bg_ext_ok(&raw) {
+        return Ok(json!({ "success": false, "message": "路径无效" }));
+    }
+    // 豁免理由是「只删自己生成的副本」，就得由代码兑现：生成名固定为
+    // `bg_<毫秒>[_<序号>]<ext>`。目录里若被塞进别的 png（同步盘、手工拷贝），
+    // 没有这道名字闸会被一并删掉。
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let owned_name = name
+        .strip_prefix("bg_")
+        .and_then(|rest| rest.rsplit_once('.'))
+        .map(|(stem, _)| {
+            !stem.is_empty()
+                && stem
+                    .split('_')
+                    .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .unwrap_or(false);
+    if !owned_name {
+        log::write_log("warn", &format!("拒绝删除 backgrounds 下非生成名的文件: {raw}"));
         return Ok(json!({ "success": false, "message": "路径无效" }));
     }
     // 名字受控但父目录可能被换成交换点，删除前再确认目标自身不是链接。

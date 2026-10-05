@@ -315,7 +315,12 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     if let Some(map) = next.as_object_mut() {
         map.insert("fontImported".into(), record);
     }
-    settings::save_settings(&next);
+    if !settings::save_settings(&next) {
+        // 设置目录不可写时必须如实回失败：此前丢回执 + 无条件 success:true，
+        // 用户看到「导入成功」，重启后字体记录全部还原（假成功一族）。
+        log::write_log("error", "字体导入：设置保存失败，已回 success:false");
+        return Ok(json!({ "success": false, "message": "字体已复制，但设置写入失败，重启后会丢失该记录" }));
+    }
     log::write_log("info", &format!("导入字体: {family}（副本已复制到 {copy_str}）"));
     Ok(json!({
         "success": true,
@@ -334,8 +339,18 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
 ///（与背景图删除同口径，可恢复），不因「自己是副本」就永久删。
 fn remove_owned_font_copy(raw: &str) -> bool {
     let p = PathBuf::from(raw);
-    if p.parent().map(|d| d == fonts_dir()) != Some(true) {
+    if p.parent().map(|d| same_path(&d.to_string_lossy(), &fonts_dir().to_string_lossy())) != Some(true) {
         log::write_log("warn", &format!("拒绝删除 fonts 目录外的字体副本: {raw}"));
+        return false;
+    }
+    // 豁免理由是「只删 Trim 导入时生成的副本」，就得由代码兑现：副本名固定为
+    // `imported.<ext>`（单字体约束，同名覆盖）。目录里被塞进别的字体不该被这一链删掉。
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let owned_name = [".ttf", ".otf", ".woff", ".woff2"]
+        .iter()
+        .any(|ext| name.eq_ignore_ascii_case(&format!("imported{ext}")));
+    if !owned_name {
+        log::write_log("warn", &format!("拒绝删除 fonts 下非生成名的字体副本: {raw}"));
         return false;
     }
     match std::fs::symlink_metadata(&p) {
@@ -403,7 +418,7 @@ pub fn fonts_remove_imported<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
             map.insert("font".into(), font);
         }
     }
-    settings::save_settings(&next);
+    let settings_saved = settings::save_settings(&next);
     let mut file_deleted = true;
     if let Some(copy_path) = truthy_string(prev.get("copyPath")) {
         if !copy_path.is_empty() {
@@ -421,6 +436,10 @@ pub fn fonts_remove_imported<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
             if file_deleted { "" } else { "（副本文件删除失败，记录已移除）" }
         ),
     );
+    if !settings_saved {
+        log::write_log("error", "移除导入字体：设置保存失败，已回 success:false");
+        return Ok(json!({ "success": false, "message": "设置写入失败，导入字体记录未能移除" }));
+    }
     Ok(json!({
         "success": true,
         "data": { "removed": true, "fileDeleted": file_deleted }
@@ -460,7 +479,10 @@ pub fn fonts_save_config<R: tauri::Runtime>(window: WebviewWindow<R>, config: Op
     if let Some(map) = next.as_object_mut() {
         map.insert("font".into(), font.clone());
     }
-    settings::save_settings(&next);
+    if !settings::save_settings(&next) {
+        log::write_log("error", "保存字体配置：设置写入失败，已回 success:false");
+        return Ok(json!({ "success": false, "message": "设置写入失败，字体配置未生效" }));
+    }
     Ok(json!({ "success": true, "data": font }))
 }
 

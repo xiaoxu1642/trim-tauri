@@ -1420,6 +1420,7 @@ pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
         let mut results: Vec<Value> = Vec::new();
         let mut success = 0i64;
         let mut failed = 0i64;
+        let mut skipped = 0i64;
 
         for item in items {
             let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1433,10 +1434,12 @@ pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
 
             // 系统保护项拒绝
             if risk == "protected" {
+                skipped += 1;
                 results.push(json!({"id": id, "name": name, "regPath": display_path, "status": "skip", "message": "系统保护项"}));
                 continue;
             }
             if target.is_empty() {
+                skipped += 1;
                 results.push(json!({"name": name, "regPath": "", "status": "skip", "message": "缺少目标路径"}));
                 continue;
             }
@@ -1457,7 +1460,7 @@ pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
             }
         }
 
-        Ok(json!({"success": success, "failed": failed, "results": results}))
+        Ok(json!({"success": success, "failed": failed, "skipped": skipped, "results": results}))
     }
 }
 

@@ -536,7 +536,16 @@ fn prune(root: &Path) {
     dirs.sort();
     while dirs.len() > KEEP_BATCHES {
         let oldest = dirs.remove(0);
-        let _ = std::fs::remove_dir_all(root.join(oldest));
+        let target = root.join(oldest);
+        // 引擎级裁剪出口一律回收站优先（AGENTS §3，与 paths::prune_backups 同口径）：
+        // 这是工具自产备份，但「超上限就永久删」会绕过回收站兜底。reparse 先拒，
+        // 链接件进回收站等于把它指向的实体卷进来。
+        let reparse = std::fs::symlink_metadata(&target)
+            .map(|m| crate::engine::protect::is_reparse(&m))
+            .unwrap_or(true);
+        if !reparse {
+            let _ = trim_finder::scan::recycle::send_to_trash_os(target.as_os_str());
+        }
     }
 }
 

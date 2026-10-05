@@ -590,7 +590,27 @@ pub async fn optimizer_run<R: Runtime>(
     }
 
     let is_dynamic = opt.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false);
-    let title = opt.get("title").and_then(|v| v.as_str()).unwrap_or(&option_id).to_string();
+    let title = super::subitems::display_title(
+        &option_id,
+        opt.get("title").and_then(|v| v.as_str()).unwrap_or(&option_id),
+    );
+
+    // includeStore 与子集选择是**正交**参数：早期实现里子集分支优先，把 includeStore
+    // 整个吞掉（勾了商店段却不写、回执仍成功）。把商店服务并进子集清单，让
+    // `rebuild_steps` 一并重建；全选路径保持原样（append 在后面的分支里）。
+    let picked_targets_effective: Option<Vec<String>> =
+        match (p.picked_targets.as_ref(), option_id.as_str(), p.include_store) {
+            (Some(list), "tf_svc_bulk", true) if !list.is_empty() => {
+                let mut v = list.clone();
+                for s in STORE_SERVICES {
+                    if !v.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                        v.push((*s).to_string());
+                    }
+                }
+                Some(v)
+            }
+            _ => p.picked_targets.clone(),
+        };
 
     // 组装步骤
     let steps: Vec<Value> = if is_dynamic {
@@ -618,7 +638,7 @@ pub async fn optimizer_run<R: Runtime>(
         // 「没禁成商店服务却报了成功」的假回执。
         match super::subitems::rebuild_steps(
             &option_id,
-            p.picked_targets.as_deref(),
+            picked_targets_effective.as_deref(),
             p.picked_extras.as_deref(),
         ) {
             Some(rebuilt) if rebuilt.is_empty() => {
@@ -668,7 +688,12 @@ pub async fn optimizer_run<R: Runtime>(
     // fail-closed ①：执行前记账
     if !is_restore_run {
         let kinds = classify_step_kinds(&steps);
-        if !opt_state::record_pending(&option_id, &title, &kinds) {
+        if !opt_state::record_pending_scoped(
+            &option_id,
+            &title,
+            &kinds,
+            picked_targets_effective.as_deref(),
+        ) {
             log::write_log("error", &format!("优化状态记账失败，已按 fail-closed 中止执行: {title}"));
             return json!({
                 "success": false,
@@ -890,13 +915,25 @@ pub(super) fn verify_applied(option_id: &str, opt: &Value, p: &RunParams) -> &'s
             None => "unknown",
         };
     }
-    if collect_checks(opt).is_empty() {
+    let checks = collect_checks(opt);
+    if checks.is_empty() {
         return "unknown";
     }
-    match check_optimized(&[option_id.to_string()]).get(option_id) {
-        Some(true) => "pass",
-        Some(false) => "partial",
-        None => "unknown",
+    // 子集执行时**只断言真正下过写的目标**（2026-10-05 真机反馈的根因）：
+    // 用户在 65 个服务里勾了 3 个，另外 62 个的启动类型当然还是原值 —— 拿全量清单
+    // 判 `all()` 就是把「按我的选择做完了」报成「未生效」，还会每次启动都挂上
+    // 「未完成还原」横幅。收窄规则与启动回读共用 [`scope_checks`]（同一份判据，
+    // AGENTS §5.16）；同一份 `picked` 也已写进账本，两条路径不会分叉。
+    let scoped = scope_checks(&checks, p.picked_targets.as_deref());
+    // 勾的子集在这份清单里一条断言都没有（例如只选了 pwsh-only 的目标）⇒ 无从回读，
+    // 如实 unknown，不许落到「未生效」
+    if scoped.is_empty() {
+        return "unknown";
+    }
+    if scoped.iter().all(|c| judge_check(c)) {
+        "pass"
+    } else {
+        "partial"
     }
 }
 
@@ -987,4 +1024,3 @@ pub(super) fn svc_mem_current_kb() -> Option<i64> {
         "SvcHostSplitThresholdInKB",
     )
 }
-

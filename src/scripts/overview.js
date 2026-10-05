@@ -77,7 +77,9 @@
   // ===== 实时指标渲染 =====
   function renderMetrics(data) {
     const d = data || {};
-    const cpu = Number(d.cpu);
+    // 契约（overview.rs）写明首拍 cpu=null、渲染层显示 `--`；`Number(null)===0`
+    // 会把「没有样本」画成「0% 负载」，所以先判 null 再转数字。
+    const cpu = d.cpu == null ? NaN : Number(d.cpu);
     const cpuEl = $('ovCpuValue');
     if (cpuEl) cpuEl.textContent = isFinite(cpu) ? fmtPercent(cpu) : '--';
     setBar('ovCpuBar', isFinite(cpu) ? cpu : 0);

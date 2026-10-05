@@ -73,13 +73,15 @@
           return `<tr><td>${esc(e.path || '(未设置)')}</td><td>${esc(fmt(initMb))}</td><td>${esc(fmt(maxMb))}</td></tr>`;
         }).join('')
       : '<tr><td colspan="3" class="empty-cell">未读到 PagingFiles 项（可能全在托管模式）</td></tr>';
+    // 提示只留卡片头没覆盖的那一条事实：「改前自动备份 · 需重启生效」卡片头已写；
+    // 而原实现把 markdown 的 ** 直接写进了 HTML（页面上显示成两颗星号），整段三行也太长。
     el.innerHTML = `
       <p class="syspanel-pf-mode">${esc(modeText)}</p>
       <table class="syspanel-pf-table">
         <thead><tr><th>路径</th><th>初始大小</th><th>最大值</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p class="syspanel-pf-hint">改虚拟内存**需要重启才生效**；配错（例如把全部卷都关完）可能让物理内存耗尽时蓝屏。写前 Trim 会把当前配置备份到应用私有备份目录，可通过导入备份手动回退。</p>
+      <p class="syspanel-pf-hint">全部卷都关掉会让物理内存耗尽时蓝屏；写前的原配置已备份，可在「备份还原」导入回退。</p>
       <div class="syspanel-pf-actions">
         <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPfEdit">编辑配置</button>
       </div>

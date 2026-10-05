@@ -241,7 +241,16 @@ pub async fn actions_apply<R: tauri::Runtime>(
     log::write_log("info", &format!("actions_apply HKCU 自定义菜单项：成功 {ok} / 提交 {}", details.len()));
     // restartExplorerHelp：HKCU 经典菜单项通常即时生效，但已开着的资源管理器窗口
     // 不一定重读 —— 文案给「没出现就重启资源管理器」，不假装一定立刻可见（§9.3）
-    Ok(json!({ "success": true, "data": { "details": details, "okCount": ok, "restartExplorerHelp": true } }))
+    // 聚合按 failed 判负：跳过/失败也回 success:true 会让 UI 记录成「已添加」，
+    // 而 HKCU 里根本没有那个键。
+    let failed = details.len() - ok;
+    if failed > 0 {
+        log::write_log("warn", &format!("actions_apply 有 {failed} 项未写入"));
+    }
+    Ok(json!({
+        "success": failed == 0,
+        "data": { "details": details, "okCount": ok, "restartExplorerHelp": true }
+    }))
 }
 
 /// actions:remove —— 撤掉内置动作写过的 HKCU 键（清单之外一项都不删）
@@ -284,7 +293,11 @@ pub async fn actions_remove<R: tauri::Runtime>(
     .map_err(|e| format!("删除任务异常: {e}"))?;
     let ok = details.iter().filter(|d| d["status"] == json!("ok")).count();
     log::write_log("info", &format!("actions_remove HKCU 自定义菜单项：删除 {ok} / 提交 {}", details.len()));
-    Ok(json!({ "success": true, "data": { "details": details, "okCount": ok } }))
+    let failed = details.len() - ok;
+    if failed > 0 {
+        log::write_log("warn", &format!("actions_remove 有 {failed} 项未删除"));
+    }
+    Ok(json!({ "success": failed == 0, "data": { "details": details, "okCount": ok } }))
 }
 
 /// 用户脚本的形状闸（**纯函数**，单测直接吃向量）。
@@ -462,9 +475,18 @@ mod tests {
         // 别人的菜单项（不带 TRIM. 前缀）必须仍被拒；这条就是「豁免只给 TRIM.」的凭证
         assert!(a1_gate(r"Software\Classes\*\shell\VSCode")  .is_some(), "非 TRIM 前缀被放行了");
         assert!(a1_gate(r"Software\Classes\Directory\shell").is_some());
-        // HKLM 同形状也不给走（口子只认 HKCU）
-        assert!(a1_gate(r"Software\Classes\*\shell\TRIM.x").is_some()
-            || protect::reg_target_block_reason(r"HKLM\Software\Classes\*\shell\TRIM.x").is_some());
+        // a1_gate 只拼 HKCU：TRIM. 形状要走得通（放行凭证）
+        assert!(a1_gate(r"Software\Classes\*\shell\TRIM.x").is_none(), "TRIM. 形状被误拒");
+        // HKLM 同形状必须被窄口子拒（`trim_shell_key_narrow_deny` 的 hive != HKCU 分支），
+        // 且 A1 禁删面确实拦着整棵 Classes —— 两条独立断言，不再是「任一支命中即过」的恒真析取
+        assert!(
+            protect::trim_shell_key_narrow_deny(r"HKLM\Software\Classes\*\shell\TRIM.x").is_some(),
+            "窄口子放行了非 HKCU 的键"
+        );
+        assert!(
+            protect::reg_target_block_reason(r"HKLM\Software\Classes\*\shell\TRIM.x").is_some(),
+            "HKLM Classes 下的键没被 A1 拦住"
+        );
         // 而 A1 确实拦着整棵 Classes —— 这条变绿说明禁删面缩了，要回来复核本域
         assert!(protect::reg_target_block_reason(r"HKCU\Software\Classes\*\shellnything").is_some());
     }

@@ -636,14 +636,17 @@ pub async fn contextmenu_toggle<R: Runtime>(
     }
 
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
-    if failed > 0 {
+    // skip 与 fail 一样是「没切成」：系统保护项/缺目标的 skip 若只统计 failed，
+    // 整次操作会回 success:true，UI 上那些行被当成已切换。与 cm_remove 同口径。
+    let skipped = data.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
+    if failed > 0 || skipped > 0 {
         let first_msg = data
             .get("results")
             .and_then(|v| v.as_array())
-            .and_then(|a| a.iter().find(|r| r.get("status").and_then(|s| s.as_str()) == Some("error")))
+            .and_then(|a| a.iter().find(|r| r.get("status").and_then(|s| s.as_str()) != Some("ok")))
             .and_then(|r| r.get("message").and_then(|v| v.as_str()))
             .unwrap_or("部分项切换失败（可能需要管理员权限）");
-        log::write_log("warn", &format!("启停切换部分失败: {failed} 项"));
+        log::write_log("warn", &format!("启停切换未全部生效: failed={failed} skipped={skipped}"));
         return json!({ "success": false, "message": first_msg, "data": data });
     }
     json!({ "success": true, "data": data })

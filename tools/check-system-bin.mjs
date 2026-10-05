@@ -35,10 +35,17 @@ const ALLOW_BARE = {
 
 /** 与 `engine/systembin.rs` 的 PINNED 保持一致（顺序无关） */
 const PINNED = [
-  'cmd.exe', 'dism.exe', 'explorer.exe', 'fltmc.exe', 'ipconfig.exe', 'lodctr.exe',
-  'netsh.exe', 'netsh', 'powercfg.exe', 'powershell.exe', 'reg.exe', 'reg',
-  'sc.exe', 'sc', 'schtasks.exe', 'schtasks', 'sfc.exe', 'tasklist.exe',
-  'where.exe', 'wsreset.exe',
+  'appwiz.cpl', 'calc.exe', 'charmap.exe', 'cleanmgr.exe', 'cmd.exe', 'control.exe',
+  'desk.cpl', 'devmgmt.msc', 'dfrgui.exe', 'dism.exe', 'diskmgmt.msc', 'dxdiag.exe',
+  'eventvwr.msc', 'explorer.exe', 'fltmc.exe', 'ipconfig.exe', 'lodctr.exe',
+  'main.cpl', 'mmsys.cpl', 'msconfig.exe', 'msinfo32.exe', 'mspaint.exe', 'msra.exe',
+  'mstsc.exe', 'narrator.exe', 'ncpa.cpl', 'netsh.exe', 'netsh', 'notepad.exe',
+  'optionalfeatures.exe', 'osk.exe', 'perfmon.exe', 'perfmon.msc', 'powercfg.exe',
+  'powercfg.cpl', 'powershell.exe', 'psr.exe', 'reg.exe', 'reg', 'regedit.exe',
+  'resmon.exe', 'rstrui.exe', 'rundll32.exe', 'sc.exe', 'sc', 'schtasks.exe',
+  'schtasks', 'sdclt.exe', 'services.msc', 'sfc.exe', 'snippingtool.exe', 'sysdm.cpl',
+  'tasklist.exe', 'taskmgr.exe', 'taskschd.msc', 'utilman.exe', 'where.exe',
+  'wf.msc', 'winver.exe', 'wsreset.exe',
 ];
 
 /**
@@ -59,8 +66,8 @@ const RAW_EXEMPT = [
   },
   {
     file: 'src-tauri/src/commands/quickcmds.rs',
-    anchor: 'Command::new(exe)',
-    reason: '用户自定义快捷指令的可见控制台（CREATE_NEW_CONSOLE 是产品功能，禁静默）',
+    anchor: 'Command::new(program)',
+    reason: '快捷指令的可见控制台（CREATE_NEW_CONSOLE 是产品功能，禁静默）；program 已由 system_tool 解析，非裸名',
   },
   {
     file: 'src-tauri/src/engine/systembin.rs',
@@ -307,6 +314,22 @@ check(
 console.log('\n调用点分布：' + hits.map((h) => `${h.name ?? h.ident ?? '变量'}${h.wrapped ? '(已解析)' : ''}`).length + ' 处');
 const wrappedCount = hits.filter((h) => h.wrapped).length;
 console.log(`  已走 system_tool: ${wrappedCount} ／ 登记豁免: ${hits.length - wrappedCount}`);
+
+// ---- E. Rust PINNED ⇄ 本文件 PINNED 双向同步（本清单决定 B/C 组判据） ----
+const systembinSrc = readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'engine', 'systembin.rs'), 'utf8');
+const pinnedBlock = systembinSrc.match(/const PINNED: &\[&str\] = &\[([\s\S]*?)\n\];/);
+const rustPinned = pinnedBlock
+  ? [...pinnedBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort()
+  : [];
+const jsPinned = [...PINNED].sort();
+const pinnedSame = rustPinned.length > 0 && JSON.stringify(rustPinned) === JSON.stringify(jsPinned);
+check(
+  pinnedSame,
+  `E. Rust PINNED ⇄ 门禁 PINNED 双向同步（${rustPinned.length} / ${jsPinned.length}）`,
+  pinnedSame
+    ? ''
+    : `Rust=[${rustPinned.join(', ')}] / 门禁=[${jsPinned.join(', ')}]`,
+);
 
 console.log('');
 if (fail > 0) {

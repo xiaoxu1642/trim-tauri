@@ -161,6 +161,16 @@ pub fn reg_backup_restore_guards(
         return Err("备份文件不是合法的 .reg（缺版本头或没有任何键段），已拒绝还原".to_string());
     };
     for k in &keys {
+        // `[-HKEY...]` 是「删除键段」，解析器保留前导 `-`；它既不是 Trim 的导出形态，
+        // 也没有对应的保护面判定。单独报「不支持删除段」，别让用户从
+        // 「含受保护的注册表容器」这句误以为是自己导错了键。
+        if k.trim_start().starts_with('-') {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("备份 {name} 含删除键段（{k}），已拒绝还原"),
+            );
+            return Err("备份内含删除键段（[-HKEY…]），本工具不支持导入该形态，已拒绝还原".to_string());
+        }
         if let Some(reason) = crate::engine::protect::reg_target_block_reason(k) {
             crate::engine::log::write_log(
                 "warn",
@@ -223,6 +233,30 @@ mod reg_backup_common_tests {
         assert_eq!(
             passed.seal, "missing",
             "合法 HKCU 备份在无封条时也必须放行（missing 不是拒的理由）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `[-HKEY...]` 删除段（外来/手改 .reg）此前被当成普通键名 → `normalize_reg_target`
+    /// 判不出 → 整份被「含受保护的注册表容器」误报拒。2026-10-05 复核：改成点名
+    /// 「不支持删除键段」，既不误报成因，也不放行（fail-closed）。
+    #[test]
+    fn 删除键段单独报不支持而不是误报受保护容器() {
+        let root = sandbox("delseg");
+        let p = root.join("del.reg");
+        std::fs::write(
+            &p,
+            "Windows Registry Editor Version 5.00\r\n\r\n[-HKEY_CURRENT_USER\\Software\\Acme]\r\n",
+        )
+        .unwrap();
+        let err = reg_backup_restore_guards(&p, "del.reg", true).unwrap_err();
+        assert!(
+            err.contains("删除键段"),
+            "删除段应点名「删除键段」而不是误报受保护容器: {err}",
+        );
+        assert!(
+            !err.contains("受保护"),
+            "删除段不是受保护容器问题，文案不许误导: {err}",
         );
         let _ = std::fs::remove_dir_all(&root);
     }

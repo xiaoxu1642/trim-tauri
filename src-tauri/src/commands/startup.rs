@@ -41,9 +41,10 @@ fn snapshot_by_id(items: &[Value]) -> HashMap<String, Value> {
     let mut m = HashMap::new();
     for it in items {
         if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
-            if id.len() <= 160 {
-                m.insert(id.to_string(), it.clone());
-            }
+            // 不再按长度静默剔除：长路径/长参数的启动项（id 是 `reg|<path>|<name>`）
+            // 被剔除后，禁用/删除/打开位置会永远回「不是最近一次扫描结果」，
+            // 而重扫同样进不了快照——用户被引导做一件必然无效的事。
+            m.insert(id.to_string(), it.clone());
         }
     }
     m

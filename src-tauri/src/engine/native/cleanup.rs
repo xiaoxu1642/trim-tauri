@@ -477,6 +477,8 @@ struct OutcomeCounters {
     protected_blocked: i64,
     too_new: i64,
     excluded: i64,
+    /// 文件名含孤立代理项/无法无损解码（保护清单按 lossy 串比对不可靠）而拒删的数量
+    lossy: i64,
     unresolved: Vec<String>,
     to_recycle: bool,
 }
@@ -513,6 +515,9 @@ fn classify_outcome(
     if nothing_done && c.excluded > 0 {
         return ("skip", format!("{} 个文件在排除名单中，未执行清理", c.excluded));
     }
+    if nothing_done && c.lossy > 0 {
+        return ("skip", format!("{} 个文件名无法无损解码，保护判定不可靠，已拒绝删除", c.lossy));
+    }
     let mut suffix = too_new_suffix.to_string();
     if !excl_suffix.is_empty() {
         suffix.push_str(excl_suffix);
@@ -526,6 +531,9 @@ fn classify_outcome(
     if c.protected_blocked > 0 {
         // 部分被拒时要单独说一句，且**不许混进「被占用」那个数**。
         suffix = format!("{suffix}；{} 个位于受保护路径已拒绝", c.protected_blocked);
+    }
+    if c.lossy > 0 {
+        suffix = format!("{suffix}；{} 个文件名无法无损解码已跳过", c.lossy);
     }
     if c.to_recycle {
         ("recycle", format!("待移入回收站（{} 个文件）{suffix}", c.deleted))
@@ -829,6 +837,10 @@ pub fn cleanup_execute(
         // 刚被应用写入——执行侧必须自己拒绝，不能只信扫描结果。
         let cutoff = rule_min_age_secs_json(&rule).map(trim_finder::cleanup_scan::min_age_cutoff);
         let mut too_new = 0i64;
+        // finder 域已有 `has_lossy_path` 闸门，清理链此前漏了：孤立代理项经 U+FFFD
+        // 往返可能指向另一个真实路径，而保护清单也按 lossy 串比对。收集阶段即拒收，
+        // 失败不会降级成「可能被占用」的误导文案。
+        let mut lossy = 0i64;
         // 规则级 excludePaths（C-2，2026-09-28 开门）：与扫描侧同一判定/归一口径
         //（trim_finder 同源），执行侧再拦一次——规则可能换版本，执行时必须以当下为准。
         // U1-b（2026-10-01）：全局排除名单已整链下线，这里不再有任何全局种子。
@@ -904,6 +916,10 @@ pub fn cleanup_execute(
                                     continue; // 单文件也不接受重解析点（与 collect_files 同口径）
                                 }
                                 // 时效护栏与目录分支同款：太新不删、且**如实计数**
+                                if trim_finder::util::has_lossy_path(std::path::Path::new(&base)) {
+                                    lossy += 1;
+                                    continue;
+                                }
                                 if cutoff
                                     .map(|c| !trim_finder::cleanup_scan::modified_before(&md, c))
                                     .unwrap_or(false)
@@ -918,7 +934,7 @@ pub fn cleanup_execute(
                                 if crate::engine::protect::is_reparse(&md) {
                                     continue;
                                 }
-                                collect_files(&base, pattern, recurse, cutoff, &mut files, &mut too_new);
+                                collect_files(&base, pattern, recurse, cutoff, &mut files, &mut too_new, &mut lossy);
                             }
                             // 既非目录也非文件（已消失 / 不可访问 / 多形态设备）：
                             // 跳过。不记 failed —— 「读不到」与「被占用」不是一回事，
@@ -944,7 +960,7 @@ pub fn cleanup_execute(
                     &format!("规则 {id}：目标为盘符相对路径（{target}），已拒绝枚举（§4.10）"),
                 );
             } else if !target.is_empty() && cleanup_root_ok(target) {
-                collect_files(target, "*", true, cutoff, &mut files, &mut too_new);
+                collect_files(target, "*", true, cutoff, &mut files, &mut too_new, &mut lossy);
             } else if !target.is_empty() {
                 // 「根不可用」必须留一个可见的痕迹（2026-10-04 审计 §4.2）。
                 //
@@ -1068,6 +1084,7 @@ let mut freed = 0i64;
             protected_blocked,
             too_new,
             excluded,
+            lossy,
             unresolved: unresolved.clone(),
             to_recycle,
         };
@@ -1118,6 +1135,7 @@ let mut freed = 0i64;
             // 「关闭相关程序后重试」的误导提示（审计 §4.1）。渲染层目前不消费这个
             // 字段，它先在数据层备着，等前端要单独呈现时不必再改引擎。
             "protectedBlocked": protected_blocked,
+            "lossySkipped": lossy,
             "tooNew": too_new, "ruleVer": rule_ver,
         }));
 
@@ -1250,8 +1268,9 @@ fn collect_files(
     cutoff: Option<std::time::SystemTime>,
     files: &mut Vec<(String, u64)>,
     too_new: &mut i64,
+    lossy: &mut i64,
 ) {
-    collect_files_at(dir, pattern, recurse, cutoff, files, too_new, 0)
+    collect_files_at(dir, pattern, recurse, cutoff, files, too_new, lossy, 0)
 }
 
 fn collect_files_at(
@@ -1261,6 +1280,7 @@ fn collect_files_at(
     cutoff: Option<std::time::SystemTime>,
     files: &mut Vec<(String, u64)>,
     too_new: &mut i64,
+    lossy: &mut i64,
     depth: usize,
 ) {
     if depth >= ENGINE_WALK_MAX_DEPTH { return; }
@@ -1273,10 +1293,20 @@ fn collect_files_at(
         // 这类 reparse 目录当普通目录递归进去、在永久删除分支下不可恢复地删到另一块存储。
         if crate::engine::protect::is_reparse(&meta) { continue; }
         if meta.is_dir() {
+            // 目录名无法无损表示时，`to_string_lossy()` 递进去的可能是另一个目录：
+            // 宁可不深入，也不要把别处的文件带进永久删除清单。
+            if trim_finder::util::has_lossy_path(&path) {
+                *lossy += 1;
+                continue;
+            }
             if recurse {
-                collect_files_at(&path.to_string_lossy(), pattern, recurse, cutoff, files, too_new, depth + 1);
+                collect_files_at(&path.to_string_lossy(), pattern, recurse, cutoff, files, too_new, lossy, depth + 1);
             }
         } else if meta.is_file() {
+            if trim_finder::util::has_lossy_path(&path) {
+                *lossy += 1;
+                continue;
+            }
             let name = entry.file_name().to_string_lossy().to_string();
             if !glob_match(pattern, &name) { continue; }
             // P0-M5 时效护栏：太新（mtime 不足 minAge 或读不到 mtime）不进删除清单
@@ -1363,6 +1393,7 @@ mod cleanup_engine_contract_tests {
         assert!(linked);
         let mut files = Vec::new();
         let mut too_new = 0i64;
+        let mut lossy = 0i64;
         collect_files(
             &link.parent().unwrap().to_string_lossy(),
             "*.txt",
@@ -1370,6 +1401,7 @@ mod cleanup_engine_contract_tests {
             None,
             &mut files,
             &mut too_new,
+            &mut lossy,
         );
         let _ = std::fs::remove_dir_all(&base);
         assert!(
@@ -1392,7 +1424,8 @@ mod cleanup_engine_contract_tests {
         std::fs::write(cur.join("deep-marker.txt"), b"x").expect("写深处标记");
         let mut files = Vec::new();
         let mut too_new = 0i64;
-        collect_files(&base.to_string_lossy(), "*.txt", true, None, &mut files, &mut too_new);
+        let mut lossy = 0i64;
+        collect_files(&base.to_string_lossy(), "*.txt", true, None, &mut files, &mut too_new, &mut lossy);
         let _ = std::fs::remove_dir_all(&base);
         assert!(
             !files.iter().any(|(p, _)| p.contains("deep-marker.txt")),
@@ -1489,6 +1522,7 @@ mod cleanup_engine_contract_tests {
             protected_blocked: protected,
             too_new: 0,
             excluded: 0,
+            lossy: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -1991,4 +2025,3 @@ mod file_backup_retention_tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 }
-

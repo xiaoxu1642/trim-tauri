@@ -549,6 +549,36 @@ check(
   storeProblems.join('; '),
 );
 
+// ---- D2. 跨组期望值互斥的服务必须属于「条件追加」清单 ----
+//
+// 检测侧对 `groups` 出的是**静态**断言：同一服务若在多组里期望值不同，就必有一条
+// 恒假（wuauserv 基础段=3 / 商店段=4，2026-10-05 复核坐实为「批量项恒报部分生效」
+// 的根因）。合法形态只有一种：该服务的最终值取决于运行期选项，因此必须属于
+// `storeServices`（条件追加），检测侧会整条跳过。
+const conflictProblems = [];
+for (const [id, spec] of Object.entries(items)) {
+  const bySvc = new Map();
+  for (const g of spec.groups || []) {
+    for (const n of g.services || []) {
+      if (!bySvc.has(n)) bySvc.set(n, new Set());
+      bySvc.get(n).add(g.expectStart);
+    }
+  }
+  const store = new Set(spec.storeServices || []);
+  for (const [n, set] of bySvc) {
+    if (set.size > 1 && !store.has(n)) {
+      conflictProblems.push(
+        `${id}: 服务 ${n} 跨组期望值互斥（${[...set].join('/')}），且不在 storeServices 里 —— 检测侧必有一条恒假`,
+      );
+    }
+  }
+}
+check(
+  conflictProblems.length === 0,
+  'D2. 跨组互斥的服务必须属于条件追加清单（wuauserv 语义）',
+  conflictProblems.join('; '),
+);
+
 // ---- E. 覆盖率棘轮（只增不减）----
 const BASELINE = 6;
 const n = Object.keys(items).length;

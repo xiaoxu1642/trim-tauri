@@ -236,10 +236,12 @@ pub fn realtime_loss() -> Result<Value, String> {
                 "sent": sent,
                 "received": 0,
                 "lost": sent,
-                "lossRate": 100.0,
+                // 无默认网关 = 没有可探测的下一跳，不构成「100% 丢包」这个结论。
+                // 回 null 让渲染层显示 `--` 并收起风险徽标（旧写法与同卡详情
+                // 「暂无法检测丢包」直接矛盾）。
+                "lossRate": Value::Null,
                 "latencyMs": 0,
             }))
         }
     }
 }
-

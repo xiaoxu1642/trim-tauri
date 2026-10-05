@@ -280,21 +280,34 @@ pub fn uninstall_appx_logo<R: tauri::Runtime>(window: WebviewWindow<R>, logo_pat
     }
     let p = logo_path.trim();
     let pl = p.to_lowercase();
+    // 「纯字符串 contains」不是路径闸：Win32 会按字面折叠 `..`（中间目录不必存在），
+    // 而 `\\attacker\share\windowsapps\a.png` 这类 UNC 会让任意窗口渲染层强制
+    // SMB 外连。这里先拒「含 `..` 段」与 UNC，再做 canonicalize 复核——解析后的
+    // 真身仍必须落在 WindowsApps 之下，junction/短名绕行也拦得住。
+    let has_dotdot = p.split(['\\', '/']).any(|s| s == "..");
     let looks_ok = p.len() <= 1024
         && pl.ends_with(".png")
-        && (pl.as_bytes().get(1) == Some(&b':') || pl.starts_with("\\\\"))
+        && !has_dotdot
+        && !pl.starts_with("\\\\")
+        && pl.as_bytes().get(1) == Some(&b':')
         && pl.contains("\\windowsapps\\");
     if !looks_ok {
         return json!({ "success": false, "message": "logo 路径不在 Appx 安装资产范围内" });
     }
     let path = PathBuf::from(p);
+    let Ok(canon) = std::fs::canonicalize(&path) else {
+        return json!({ "success": false, "message": "logo 文件不存在" });
+    };
+    if !canon.to_string_lossy().to_lowercase().contains("\\windowsapps\\") {
+        return json!({ "success": false, "message": "logo 路径不在 Appx 安装资产范围内" });
+    }
     let Ok(meta) = std::fs::metadata(&path) else {
         return json!({ "success": false, "message": "logo 文件不存在" });
     };
     if !meta.is_file() || meta.len() > 512 * 1024 {
         return json!({ "success": false, "message": "logo 文件缺失或超过 512KB 上限" });
     }
-    match std::fs::read(&path) {
+    match std::fs::read(&canon) {
         Ok(bytes) => {
             use base64::Engine as _;
             // 形状对齐 paths:file-icon / paths:app-icon（顶层 dataUrl）——前端
@@ -383,4 +396,3 @@ pub(super) mod uninstall_appx_tests {
         // 这条用例真正钉的是「调用成功 + 每一项都过形状」，脚本跑歪会直接 Err。
     }
 }
-

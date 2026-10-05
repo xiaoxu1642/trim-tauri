@@ -257,9 +257,19 @@ fn encrypt_secrets(
             for (k, v) in map {
                 let new_v = if SECRET_FIELDS.contains(&k.as_str()) {
                     match v {
-                        serde_json::Value::String(s) => serde_json::Value::String(
-                            safestorage::encrypt_dpapi_v1(s, key).map_err(|e| e.to_string())?,
-                        ),
+                        serde_json::Value::String(s) => {
+                            // 已经是密文 ⇒ 原样透传。这条是密钥不可逆清空的修复：
+                            // 主密钥暂不可读时 [`decrypt_settings_with_oscrypt`] 会保留
+                            // 原密文（不再回落空串），随后被 fonts 等读-改-写命令整份保存；
+                            // 若这里再包一层，密文会被二次加密而永久不可解。
+                            if s.starts_with(safestorage::DPAPI_V1_PREFIX) {
+                                serde_json::Value::String(s.clone())
+                            } else {
+                                serde_json::Value::String(
+                                    safestorage::encrypt_dpapi_v1(s, key).map_err(|e| e.to_string())?,
+                                )
+                            }
+                        }
                         other => encrypt_secrets(other, key)?,
                     }
                 } else {
@@ -279,20 +289,23 @@ fn encrypt_secrets(
     }
 }
 
-/// 解密一组遗留 dpapi:v1: 密钥（供 settings 域迁移使用；主密钥取不到时按未配置回落空串）
+/// 解密一组遗留 dpapi:v1: 密钥（供 settings 域迁移使用）。
+///
+/// **解不开就保留原密文**，绝不回落空串：主密钥暂不可读（Local State 被移走/被锁）
+/// 时回落空串，随后任意读-改-写命令（字体导入/移除/save-config）会把空串当
+/// 「未配置」整份写回 ⇒ 用户密钥物理丢失且界面毫无异常。保留密文 + 加密侧透传
+/// （见 `encrypt_secrets`）让读-改-写对密钥字段是无损的，等主密钥恢复后仍可解。
+/// 旧格式 `v10 + 裸 DPAPI` 即便没有主密钥也能解开，所以恒带 `key.as_deref()` 尝试。
 pub fn decrypt_settings_with_oscrypt(settings: &serde_json::Value) -> serde_json::Value {
     let key = safestorage::load_oscrypt_key().ok();
     transform_secrets(settings, &|v| {
         if !v.starts_with(safestorage::DPAPI_V1_PREFIX) {
             return v.to_string();
         }
-        match key.as_deref() {
-            Some(k) => safestorage::decrypt_dpapi_v1(v, Some(k))
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_default(),
-            None => String::new(),
-        }
+        safestorage::decrypt_dpapi_v1(v, key.as_deref())
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_else(|| v.to_string())
     })
 }
 
@@ -363,5 +376,50 @@ mod tests {
         assert!(plain.exists());
         assert!(as_dir.is_dir(), "目录不得被 remove_file 端掉");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-10-05 复核 P1：主密钥不可读时的密钥不可逆清空。
+    ///
+    /// 两条链路必须同时成立，缺一条就还是丢数据：
+    /// · decrypt 解不开 ⇒ 保留原密文（不是空串）；
+    /// · encrypt 见到密文 ⇒ 原样透传（不再套一层）。
+    /// 合起来的效果：任意读-改-写（fonts 三处整份 load→save）对密钥字段是无损的。
+    #[test]
+    fn 解不开的密文既不回落空串也不被二次加密() {
+        // 一个解不开的密文（缺主密钥 / 结构损坏都会走到 unwrap_or_else 那条）
+        let ciphertext = "dpapi:v1:AAAA";
+        let settings = serde_json::json!({
+            "aiApiKey": ciphertext,
+            "font": { "family": "MiSans" },
+        });
+
+        let decrypted = decrypt_settings_with_oscrypt(&settings);
+        assert_eq!(
+            decrypted.get("aiApiKey").and_then(|v| v.as_str()),
+            Some(ciphertext),
+            "解不开的密文必须原样保留，回落空串会让下一次保存把它覆盖掉",
+        );
+        // 非密钥字段不受影响
+        assert_eq!(
+            decrypted.pointer("/font/family").and_then(|v| v.as_str()),
+            Some("MiSans"),
+        );
+
+        // 写回侧：密文透传，不能被再包一层（否则永久不可解）
+        let reencrypted = encrypt_secrets(&decrypted, None).expect("透传不应失败");
+        assert_eq!(
+            reencrypted.get("aiApiKey").and_then(|v| v.as_str()),
+            Some(ciphertext),
+            "已是密文的值必须透传，二次加密会让密钥永久不可解",
+        );
+
+        // 正向对照：真·明文仍然会被加密（透传不能把整个加密出口变成摆设）
+        let plain = serde_json::json!({ "aiApiKey": "sk-live-abc" });
+        let enc = encrypt_settings_with_oscrypt(&plain).expect("明文加密不应失败");
+        let got = enc.get("aiApiKey").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            got.starts_with(safestorage::DPAPI_V1_PREFIX) && got != "sk-live-abc",
+            "明文密钥没有被加密（透传分支误吞了明文）：{got}",
+        );
     }
 }

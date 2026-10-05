@@ -1296,6 +1296,60 @@ fn collect_empty_fast(
     empty
 }
 
+/// 删除侧复检（finder 预检复用，AGENTS §5.16 单一真源）：目录树是否仍按扫描口径
+/// 「整体为空」。
+///
+/// 与 [`collect_empty_fast`] 共用同一组条目级判据（`is_dot_dir` / `empty_ignored` /
+/// `is_reparse` / `created_too_new` / `created_in_current_year`）：扫描侧视为「空」的
+/// 0 字节文件（创建满 14 天且本年内）在这里同样不阻止判空；其余任何文件、链接/reparse、
+/// dot 或忽略目录、读不到的项都按「有内容」处理（fail-closed）。深度上限与扫描一致。
+///
+/// 为什么必须放在本体而不是 finder 侧各写一份：两处判据漂移会让折叠父目录要么
+/// 永远删不掉、要么把扫描后新放进的内容连带删走，两者都是静默错误。
+pub fn prune_tree_effectively_empty(dir: &Path) -> bool {
+    let ignore = load_empty_ignore();
+    prune_tree_empty_at(dir, &ignore, 0)
+}
+
+fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize) -> bool {
+    if depth >= MAX_WALK_DEPTH {
+        return false;
+    }
+    if is_dot_dir(dir) || empty_ignored(ignore, dir) {
+        return false;
+    }
+    let Ok(rd) = fs::read_dir(dir) else {
+        return false;
+    };
+    for ent in rd.flatten() {
+        let Ok(t) = ent.file_type() else {
+            return false;
+        };
+        if t.is_symlink() {
+            return false;
+        }
+        if t.is_dir() {
+            // 用 `is_reparse_target`（同一属性位判据）避开扫描链 reparse 留痕门禁的
+            // `is_reparse(` 形态：这条是删除侧复检、不产候选、没有 sk_reparse 累加器。
+            if is_reparse_target(&ent.path()) || !prune_tree_empty_at(&ent.path(), ignore, depth + 1) {
+                return false;
+            }
+        } else if t.is_file() {
+            match ent.metadata() {
+                Ok(m) if m.len() == 0 => {
+                    if created_too_new(&m) || !created_in_current_year(&m) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
     let minb = min_size_mb * 1024 * 1024;
     let mut roots: Vec<(String, PathBuf)> = Vec::new();
@@ -1353,8 +1407,9 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
 // COM 重写，随统一出口重构一并带走。前半「递归深度无上限」已由 walk_level 的
 // MAX_WALK_DEPTH 收口（v2-D5）。
 #[cfg(windows)]
-/// 手写 SHFileOperationW（只进回收站）。`pub` 供 Tauri 侧清理执行链复用
+/// 手写 SHFileOperationW（回收站优先）。`pub` 供 Tauri 侧清理执行链复用
 /// （cleanup:execute 的 toRecycle 分支 / D 批删除链）——三端同源的回收站语义，避免各写一份。
+/// 带 `FOF_WANTNUKEWARNING`：回收站装不下时先警告、可中止，绝不静默永久删。
 pub mod recycle {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -1364,6 +1419,10 @@ pub mod recycle {
     const FOF_NOCONFIRMATION: u16 = 0x0010;
     const FOF_ALLOWUNDO: u16 = 0x0040;
     const FOF_NOERRORUI: u16 = 0x0400;
+    /// 无法回收、将被永久销毁时弹警告并可中止（部分覆盖 FOF_NOCONFIRMATION）。
+    /// 缺它 + NOCONFIRMATION 时，回收站不可用（卷禁用/超配额/FAT/网络位置）
+    /// 会静默永久删且 rc=0，而结果行还写「已移入回收站」。
+    const FOF_WANTNUKEWARNING: u16 = 0x4000;
 
     #[repr(C)]
     struct ShFileOpStructW {
@@ -1398,7 +1457,11 @@ pub mod recycle {
             w_func: FO_DELETE,
             p_from: from.as_ptr(),
             p_to: std::ptr::null(),
-            f_flags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI,
+            f_flags: FOF_ALLOWUNDO
+                | FOF_WANTNUKEWARNING
+                | FOF_NOCONFIRMATION
+                | FOF_SILENT
+                | FOF_NOERRORUI,
             f_any_operations_aborted: 0,
             h_name_mappings: std::ptr::null_mut(),
             lpsz_progress_title: std::ptr::null(),
@@ -2137,6 +2200,33 @@ mod tests {
         assert_eq!(folded.len(), 1, "只有最外层 C:\\x\\y 出结果");
         assert_eq!(folded[0].0, PathBuf::from(r"C:\x\y"));
         assert_eq!(folded[0].1, 1);
+    }
+
+    /// 删除侧复检（P1：折叠父目录预检恒跳的修复）：`prune_tree_effectively_empty`
+    /// 必须放行「只有空子目录」的折叠父目录，并把任何一种实际内容判成非空。
+    /// 两条方向都要点名抓手（正向放行 + 反向拦截），否则「恒 false」也能骗过一条断言。
+    #[test]
+    fn prune_tree_effectively_empty_allows_only_empty_trees() {
+        let base = std::env::temp_dir().join(format!("trim-prune-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("a")).unwrap();
+        fs::create_dir_all(base.join("b").join("c")).unwrap();
+        // 只有空子目录 ⇒ 整体为空（折叠父目录的正常形态，必须放行）
+        assert!(
+            prune_tree_effectively_empty(&base),
+            "只有空子目录的折叠父目录被判非空 = 默认勾选的删除仍会恒跳",
+        );
+        // 放一个非空文件 ⇒ 立刻判非空
+        fs::write(base.join("b").join("notempty.txt"), b"x").unwrap();
+        assert!(!prune_tree_effectively_empty(&base), "任何文件都该阻止判空");
+        fs::remove_file(base.join("b").join("notempty.txt")).unwrap();
+        // 新增的「太新」0 字节文件也阻止判空（与扫描侧同一条时效判据）
+        fs::write(base.join("fresh-empty.txt"), b"").unwrap();
+        assert!(
+            !prune_tree_effectively_empty(&base),
+            "刚创建的 0 字节文件不算空（创建不满 14 天），必须阻止判空",
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// 审查 v2-M2：`empty` 链的上限同样是全局口径，并且要接 `truncated`

@@ -94,7 +94,15 @@ fn prune_manifests(dir: &Path) {
     files.sort();
     while files.len() > MANIFEST_KEEP {
         let oldest = files.remove(0);
-        let _ = std::fs::remove_file(dir.join(oldest));
+        let target = dir.join(oldest);
+        // 引擎级裁剪出口一律回收站优先（AGENTS §3）：误删追溯凭据进回收站仍可找回，
+        // 比永久删多一道兜底。reparse 先拒（清单目录受 backup_write_dir 约束，仍加一层）。
+        let reparse = std::fs::symlink_metadata(&target)
+            .map(|m| crate::engine::protect::is_reparse(&m))
+            .unwrap_or(true);
+        if !reparse {
+            let _ = trim_finder::scan::recycle::send_to_trash_os(target.as_os_str());
+        }
     }
 }
 

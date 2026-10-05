@@ -18,10 +18,12 @@ use super::residue::*;
 // 已知程序知识库：规则文件与 cleanup-rules.json 同款签名链（Ed25519 + 去掉 _sig 的
 // 紧凑 JSON 规范化，rules_signature::verify_rules_text 验签）。数据目录规则优先于内置，
 // 验签失败 / 版本低于防回滚下限一律 fail-closed 回退内置。
-// 在线更新（A3，M3 批次）：cleanup 域的 HTTP 传输层已落地（`engine::winhttp` + 验签 +
-// 原子落盘 + 水位线），残留库尚未接入。接入的**前置条件**是本文件 A1/A2 两道闸已生效
-// （方案 §6.2：先硬否决与语义校验，再上远程分发），另有数据目录归属、是否建前端兜底
-// 副本、版本语义等 7 项待拍板，未拍板前不得新增 `residue:update` 通道。
+// 在线更新（A3，M3 批次）：cleanup 域的 HTTP 传输层（`engine::winhttp` + 验签 +
+// 原子落盘 + 水位线）与残留库的在线更新通道均已落地——本文件下方实现
+// `uninstall:update-residue-rules` / `uninstall:check-residue-version`（MAIN 档、
+// 原子写 + 验签 + 防回滚），`lib.rs` 已注册、`module_smoke.rs` 有档位用例。
+// 早期「尚未接入、未拍板前不得新增 `residue:update`」的说法只描述当时状态，
+// 通道名也不是字面 `residue:update`；A1/A2 两道闸与验签前置条件不变。
 
 /// 内置残留规则库（编译期嵌入，与 data/uninstall-residue-rules.json 逐字节一致）
 pub(super) const BUILTIN_RESIDUE_RULES_JSON: &str = include_str!("../../../data/uninstall-residue-rules.json");
@@ -893,4 +895,3 @@ pub async fn uninstall_update_residue_rules<R: tauri::Runtime>(window: WebviewWi
         Err(e) => json!({ "success": false, "message": format!("残留规则更新异常: {e}") }),
     }
 }
-
