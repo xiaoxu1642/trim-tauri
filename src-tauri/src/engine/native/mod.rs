@@ -29,7 +29,7 @@ pub use process::{kill_process, stubborn_kill, stubborn_block};
 mod realtime;
 pub use realtime::{realtime_adapters, realtime_loss};
 mod registry;
-pub use registry::{read_reg_binary_opt, read_reg_dword_opt, read_reg_qword_opt, read_hklm_dword, reg_key_exists, reg_key_ensure, reg_key_ensure_checked, reg_key_remove, reg_enum_subkeys_pub, reg_enum_dev_ids, reg_key_last_write_ms, read_reg_string, read_reg_value_text, read_reg_value_faithful, decode_reg_value_bytes, hive_hklm, hive_hkcu, hive_hkcr, hive_hku, hive_hkcc, reg_restore_write, reg_restore_write_checked, file_ads_bytes, reg_enum_value_names_pub, reg_restore_delete};
+pub use registry::{read_reg_binary_opt, read_reg_dword_opt, read_reg_qword_opt, read_hklm_dword, reg_key_exists, reg_key_ensure, reg_key_ensure_checked, reg_key_remove, reg_enum_subkeys_pub, reg_enum_dev_ids, reg_key_last_write_ms, read_reg_string, read_reg_value_text, read_reg_value_faithful, reg_read_value_typed, decode_reg_value_bytes, hive_hklm, hive_hkcu, hive_hkcr, hive_hku, hive_hkcc, reg_restore_write, reg_restore_write_checked, file_ads_bytes, reg_enum_value_names_pub, reg_restore_delete};
 mod runtimes_net;
 pub use runtimes_net::{runtimes_status, netcheck_status, runtimes_repair, netcheck_repair};
 mod services;

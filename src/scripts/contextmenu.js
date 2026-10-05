@@ -184,7 +184,7 @@
       // 审查 v2-F14：同源的另一处（pathbinding.js groupIconHtml）写了 `escapeAttr` 而这里没写。
       // 该值不可注入（唯一产出口是「固定前缀 + 标准 base64」，字符集不含引号），
       // 但两处写法分裂会在下一次改动时踩雷 —— 统一走 `ds.escAttr` 这一唯一真源。
-      return `<img class="ctx-item-icon" src="${escapeAttr(iconMap[item.clsid])}" alt="" width="${size || 28}" height="${size || 28}" />`;
+      return `<img class="ctx-item-icon" src="${window.ds.escAttr(iconMap[item.clsid])}" alt="" width="${size || 28}" height="${size || 28}" />`;
     }
     return placeholderIconHtml(size);
   }

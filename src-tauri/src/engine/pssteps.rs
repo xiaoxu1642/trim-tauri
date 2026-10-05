@@ -1592,6 +1592,26 @@ fn kind_of(v: u32) -> windows::Win32::System::Registry::REG_VALUE_TYPE {
     windows::Win32::System::Registry::REG_VALUE_TYPE(v)
 }
 
+/// 现值是否已经等于目标（**类型 + 字节逐项相等**）。纯函数、不吃注册表句柄，
+/// 所以能在没有真实键的环境里测（AGENTS §4.1 纪律①：采集与判定拆开）。
+fn bytes_already_match(current: Option<(u32, Vec<u8>)>, kind: u32, data: &[u8]) -> bool {
+    current.is_some_and(|(k, d)| k == kind && d == data)
+}
+
+/// [`bytes_already_match`] 的采集侧：读回真实类型与原始字节。
+/// 读不到（键或值不存在）⇒ `None` ⇒ 判不达标，绝不把"读不到"当成"已经是这个值"。
+fn value_already_matches(
+    kind: u32,
+    data: &[u8],
+    hive: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+    name: &str,
+) -> bool {
+    let current =
+        unsafe { native::reg_read_value_typed(hive, subkey, name) }.map(|(k, d)| (k.0, d));
+    bytes_already_match(current, kind, data)
+}
+
 fn hive_prefix(h: Hive) -> &'static str {
     match h {
         Hive::Lm => "HKLM",
@@ -1605,10 +1625,16 @@ fn hive_prefix(h: Hive) -> &'static str {
 /// win32 错误码 → 用户看得懂的一句话。
 ///
 /// 为什么要翻：原来只报「写注册表值失败: <路径>」，用户读到的是"工具坏了"，
-/// 而真相往往是那条键根本不该由我们写（TrustedInstaller 独占）。判据要能指到下一步动作。
+/// 而真相往往是那条键根本不该由我们写。判据要能指到下一步动作。
+///
+/// **5 的措辞按 2026-10-05 实测改过**：原话写「所有权不在 Administrators（多为 TrustedInstaller
+/// 独占）」，但 `Services\TrkWks` 那一类键的 Owner 恰恰是 `BUILTIN\Administrators`，卡住写入的是
+/// **DACL 没给 Administrators 写值权**（Get-Acl 实测：SYSTEM=FullControl、Administrators 只有读）。
+/// 把"所有权"当结论会把人支使去做一件不解决问题的操作（AGENTS §9.3：没有复现证据的主张不许当事实写）。
+/// 达标与否由 [`bytes_already_match`] 单独判：已经在目标值的写入不会走到这里。
 fn reg_err(code: u32) -> String {
     match code {
-        5 => "拒绝访问：该键的所有权不在 Administrators（多为 TrustedInstaller 独占），需先取得所有权；Trim 不代取所有权".to_string(),
+        5 => "拒绝访问：当前账号在该键上没有写值权限（系统组件键的写值权常只给 SYSTEM）；Trim 不改 DACL、也不代取所有权".to_string(),
         2 | 3 => "找不到指定的注册表项或值（本机没有该功能对应的键）".to_string(),
         13 => "数据长度与值类型不符".to_string(),
         1406 => "写入值被拒（值名或类型不被该键接受）".to_string(),
@@ -1628,15 +1654,23 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
                 Err(format!("删除注册表键失败: {subkey}"))
             }
         }
-        PsOp::ValueWrite { hive, subkey, name, kind, data } => native::reg_restore_write_checked(
-            hive_handle(*hive),
-            subkey,
-            name,
-            kind_of(*kind),
-            data,
-        )
-        .map(|_| String::new())
-        .map_err(|c| format!("写注册表值失败: {subkey}\\{name} —— {}", reg_err(c))),
+        PsOp::ValueWrite { hive, subkey, name, kind, data } => {
+            match native::reg_restore_write_checked(hive_handle(*hive), subkey, name, kind_of(*kind), data) {
+                Ok(()) => Ok(String::new()),
+                // **终态判定，不是动作判定**：写被拒时读回现值，类型与字节都已等于目标 ⇒ 目标本就达成。
+                // 起因（2026-10-05 真机日志）：批量禁用服务里 `TrkWks / DPS / WdiServiceHost /
+                // WdiSystemHost` 四项写 `Start` 报「拒绝访问」，而这台机器上它们的 `Start` **已经是 4**
+                // （Get-Acl 实测：键的 DACL 只给 Administrators 读，写值权在 SYSTEM）。
+                // 按动作语义报失败 = 把「已经在目标状态」说成「没做成」，与
+                // `services::service_stop_pub` 对 1062/1060 的处理是同一条口径（v5 O-1）。
+                // 只有逐字节相等才判达标：类型不同（如 REG_NONE vs REG_DWORD）仍按失败上报，
+                // 不猜"差不多"。
+                Err(_) if value_already_matches(*kind, data, hive_handle(*hive), subkey, name) => {
+                    Ok(String::new())
+                }
+                Err(c) => Err(format!("写注册表值失败: {subkey}\\{name} —— {}", reg_err(c))),
+            }
+        }
         PsOp::ValueRemove { hive, subkey, name } => {
             if native::reg_restore_delete(hive_handle(*hive), subkey, name) {
                 Ok(String::new())
@@ -1735,16 +1769,44 @@ mod tests {
     /// 失败原因必须指到下一步动作，而不是只报「失败了」。
     /// 起因：`Speech_OneCore\Settings` 那两条写值失败，界面只给一句
     /// 「写注册表值失败: <路径>」，用户读到的是"工具坏了 + 是不是缺 PowerShell"，
-    /// 而真相是该键由 TrustedInstaller 独占、这台机器上谁都写不进去。
+    /// 而真相是这台机器上当前账号写不进那条键。
     #[test]
     fn 注册表失败原因可诊断() {
         let denied = reg_err(5);
         assert!(
-            denied.contains("拒绝访问") && denied.contains("所有权"),
-            "写值被拒要说清是权限问题、且我们不代取所有权，否则只会误导去装 PowerShell: {denied}"
+            denied.contains("拒绝访问") && denied.contains("写值权限") && denied.contains("不代取所有权"),
+            "写值被拒要说清「是权限、且我们不改 DACL」，否则只会误导去装 PowerShell 或去改所有权: {denied}"
+        );
+        // 不许把没证据的归因写成事实（§9.3）：Services\TrkWks 的 Owner 就是 Administrators，
+        // 所以「所有权不在 Administrators」这句旧文案在这类键上是错的。
+        assert!(
+            !denied.contains("所有权不在 Administrators"),
+            "5 的归因必须是「没有写值权限」，不能断言所有权归属: {denied}"
         );
         assert!(reg_err(2).contains("找不到"), "「键不存在」与「没权限」是两种完全不同的结论");
         assert_eq!(reg_err(9999), "win32=9999", "未知错误码必须原样带出，不编造解释");
+    }
+
+    /// 写被拒时的**终态判定**：类型与字节都等于目标 ⇒ 已经在目标状态，不报失败。
+    /// 采集（真实注册表）与判定（本用例）分开，是为了在没有那些键的环境里也能测到判定本身。
+    #[test]
+    fn 现值已达标时不把拒绝访问报成失败() {
+        let want = 4i32.to_le_bytes().to_vec();
+        // 命中形态：DPS / TrkWks 这类 Start 已经是 4 的系统组件键
+        assert!(
+            bytes_already_match(Some((KIND_DWORD, want.clone())), KIND_DWORD, &want),
+            "类型与字节都相等时必须判达标（否则「已经在目标状态」会被报成执行失败）"
+        );
+        // 三种必须不命中的形态，逐条点名，防止判定退化成「读到了就算达标」
+        assert!(!bytes_already_match(None, KIND_DWORD, &want), "读不到值 ⇒ 不达标");
+        assert!(
+            !bytes_already_match(Some((KIND_DWORD, 3i32.to_le_bytes().to_vec())), KIND_DWORD, &want),
+            "字节不同（现值=手动 3、目标=禁用 4）⇒ 不达标"
+        );
+        assert!(
+            !bytes_already_match(Some((KIND_SZ, want.clone())), KIND_DWORD, &want),
+            "类型不同 ⇒ 不达标，不猜「差不多」"
+        );
     }
 
     #[test]

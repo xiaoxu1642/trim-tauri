@@ -677,8 +677,12 @@ pub fn reg_restore_delete(hive: HKEY, subkey: &str, value_name: &str) -> bool {
     }
 }
 
-/// 读注册表值（返回类型+数据）
-pub(super) unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -> Option<(REG_VALUE_TYPE, Vec<u8>)> {
+/// 读注册表值（返回**真实**类型标签 + 原始字节，不做任何解码/展平）。
+///
+/// `pub` 的唯一新消费者是 `pssteps` 的写值终态判定（写被拒时读回现值，逐字节比对目标）：
+/// 那里要的是「与 `RegSetValueExW` 同一条口径」的字节，所以不能复用
+/// [`read_reg_value_faithful`]（它给的是解码后的字符串，DWORD 会变成十进制文本）。
+pub unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -> Option<(REG_VALUE_TYPE, Vec<u8>)> {
     let sk = to_wide(&subkey);
     let mut hk = HKEY::default();
     if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }

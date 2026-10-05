@@ -611,25 +611,53 @@
     onClick({ target: t, });
   }
 
+  // 事件委托的宿主是**两个区各自的容器**，不是一个整页 `#rsBody`：本窗由主窗内联面板
+  // 搬进副窗时改名成了 rsChainBody / rsDeepBody，而绑定行还写着旧 id —— 在 null 上取
+  // addEventListener 抛 TypeError，DOMContentLoaded 因此中断在 scanAll() 之前，
+  // 真机症状是界面永远停在「正在扫描三类残留…」（2026-10-05 用户截图坐实）。
+  // 所以绑定一律走下面的 on()：缺件只降级成控制台告警，绝不许把整条初始化带崩。
+  function on(id, type, handler) {
+    const node = el(id);
+    if (!node) {
+      console.warn('[residue-window] 缺少元素 #' + id + '，' + type + ' 未绑定');
+      return false;
+    }
+    node.addEventListener(type, handler);
+    return true;
+  }
+
   async function scanAll() {
-    await Promise.all([scanChains(), scanDeep()]);
+    // scanChains 体内容错比 scanDeep 弱（后者自带 try/catch）：三链里任何一处抛错
+    // —— 包括渲染阶段的抛错 —— 都会把界面留在「正在扫描三类残留…」，而原因只在控制台里，
+    // 用户和日志都看不到（2026-10-05 真机就是这个形态）。这里补一道收口，把抛错变成可见文案。
+    await Promise.all([
+      scanChains().catch(function (e) {
+        const msg = String((e && e.message) || e);
+        const box = el('rsChainBody');
+        if (box) box.innerHTML = '<div class="finder-empty">三链扫描中断：' + esc(msg) + '</div>';
+        toast('error', '残留扫描出错：' + msg);
+      }),
+      scanDeep(),
+    ]);
   }
 
   document.addEventListener('DOMContentLoaded', function () {
     state.appId = targetFromSearch();
-    el('rsBody').addEventListener('click', onClick);
-    el('rsBody').addEventListener('keydown', onKeydown);
-    el('rsRescanBtn').addEventListener('click', scanAll);
-    el('rsBtnClean').addEventListener('click', cleanSelected);
-    el('rsBtnPending').addEventListener('click', addPendingDeletes);
-    el('rsBtnPendingRevoke').addEventListener('click', revokePendingDeletes);
-    el('rsCloseBtn').addEventListener('click', function () {
+    for (const host of ['rsChainBody', 'rsDeepBody']) {
+      on(host, 'click', onClick);
+      on(host, 'keydown', onKeydown);
+    }
+    on('rsRescanBtn', 'click', scanAll);
+    on('rsBtnClean', 'click', cleanSelected);
+    on('rsBtnPending', 'click', addPendingDeletes);
+    on('rsBtnPendingRevoke', 'click', revokePendingDeletes);
+    on('rsCloseBtn', 'click', function () {
       window.api.residueWindow.closeWindow().catch(function () { toast('warn', '关闭窗口失败，请手动关闭'); });
     });
+    on('rsBackupToggle', 'change', function (e) { writeBackupPref(e.target.checked); });
     const toggle = el('rsBackupToggle');
-    toggle.checked = readBackupPref();
-    toggle.addEventListener('change', function () { writeBackupPref(toggle.checked); });
-    el('rsSearch').addEventListener('input', function (e) {
+    if (toggle) toggle.checked = readBackupPref();
+    on('rsSearch', 'input', function (e) {
       state.filter = e.target.value || '';
       renderChains();
       renderDeep();

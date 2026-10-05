@@ -204,6 +204,9 @@ pub fn start_type_from_label(label: &str) -> Result<u32, String> {
 fn svc_err(code: u32) -> String {
     match code {
         5 => "拒绝访问：停止/改写服务需要管理员权限".to_string(),
+        1051 => "它还有依赖服务在跑，因此没能停下来（启动类型那一步不受影响，重启后按新启动类型生效）；\
+                Trim 不连带停掉它的依赖服务——那会把正在用这些依赖的功能一起带走"
+            .to_string(),
         1060 => "本机没有安装该服务（目标状态已达成）".to_string(),
         1062 => "服务本就未启动（目标状态已达成）".to_string(),
         1058 => "服务已被禁用、无法启动".to_string(),
