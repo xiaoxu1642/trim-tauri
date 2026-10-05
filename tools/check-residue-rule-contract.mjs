@@ -355,9 +355,10 @@ check(badCond.length === 0, 'B1. 三条件组至少两组非空（双条件拍�
 // `Tencent\xwechat`，旧规则**一条都命中不了**，但规则本身「看起来」完好无损。
 // 删光落点比改错落点更难被发现（前者连一条 warn 日志都没有），所以单开一条棘轮。
 //
-// 基线 = 2026-10-04 实测（12 条规则 / 41 条落点）。有意收缩请改这里的数字并在
-// 审核记录里写明为什么那批落点不再需要（而不是顺手删掉）。
-const RESIDUE_ENTRY_BASELINE = 41;
+// 基线 = 2026-10-06 HiBit 借鉴 v2 §2.2 扩容实测（78 条规则 / 209 条落点；此前 2026-10-04
+// 基线为 12 规则 / 41 落点）。有意收缩请改这里的数字并在审核记录里写明为什么那批落点
+// 不再需要（而不是顺手删掉）。
+const RESIDUE_ENTRY_BASELINE = 209;
 const entryCount = rules.reduce((n, r) => n + (Array.isArray(r.residue) ? r.residue.length : 0), 0);
 check(entryCount >= RESIDUE_ENTRY_BASELINE, `B2. 落点条目数 ${entryCount} ≥ 基线 ${RESIDUE_ENTRY_BASELINE}`,
   entryCount < RESIDUE_ENTRY_BASELINE

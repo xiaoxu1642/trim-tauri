@@ -8,6 +8,41 @@
   ],
   "rules": [
     {
+      "id": "residue-10router",
+      "displayName": [
+        "10Router"
+      ],
+      "publisher": [
+        "techysy"
+      ],
+      "uninstallKey": [
+        "d06897b6-43ce-5451-986c-a52486d415bb"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\10Router",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\10Router",
+          "note": "安装目录（默认装此处）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\d06897b6-43ce-5451-986c-a52486d415bb",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\10Router.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-360safe",
       "displayName": [
         "360安全卫士",
@@ -71,6 +106,96 @@
       "ver": 20261006
     },
     {
+      "id": "residue-51d76d93-5c99-52d8-8eaf-e2973435dc9b",
+      "displayName": [
+        "直播伴侣"
+      ],
+      "publisher": [
+        "ByteDance Inc"
+      ],
+      "uninstallKey": [
+        "51d76d93-5c99-52d8-8eaf-e2973435dc9b"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\直播伴侣",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\51d76d93-5c99-52d8-8eaf-e2973435dc9b",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\51d76d93-5c99-52d8-8eaf-e2973435dc9b",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\直播伴侣.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-6fcbefa0-dd11-4eb0-a87d-46daf26bf2b7-is1",
+      "displayName": [
+        "夸克网盘"
+      ],
+      "publisher": [
+        "广州市动悦信息技术有限公司"
+      ],
+      "uninstallKey": [
+        "{6FCBEFA0-DD11-4EB0-A87D-46DAF26BF2B7}_is1"
+      ],
+      "residue": [
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\夸克网盘.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-7zip",
+      "displayName": [
+        "7-Zip"
+      ],
+      "publisher": [
+        "Igor Pavlov"
+      ],
+      "uninstallKey": [
+        "7-Zip"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\7-Zip",
+          "note": "安装目录（64 位）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\7-Zip",
+          "note": "安装目录（32 位）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\7-Zip",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\7-Zip",
+          "note": "程序配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-adguard",
       "displayName": [
         "AdGuard"
@@ -96,6 +221,29 @@
           "kind": "reg_key",
           "target": "HKCU\\Software\\AdGuard",
           "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-anticheatexpert",
+      "displayName": [
+        "AntiCheatExpert"
+      ],
+      "publisher": [],
+      "uninstallKey": [
+        "AntiCheatExpert"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMDATA%\\AntiCheatExpert",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\AntiCheatExpert",
+          "note": "安装目录（默认装此处）"
         }
       ],
       "ver": 20261006
@@ -278,6 +426,26 @@
       "ver": 20261006
     },
     {
+      "id": "residue-cc-switch",
+      "displayName": [
+        "CC Switch"
+      ],
+      "publisher": [
+        "ccswitch"
+      ],
+      "uninstallKey": [
+        "{BEFED1FE-9C7E-4E51-87C3-7E105C777C5F}"
+      ],
+      "residue": [
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\CC Switch.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-ccleaner",
       "displayName": [
         "CCleaner"
@@ -321,18 +489,121 @@
       "residue": [
         {
           "kind": "folder",
+          "target": "%LOCALAPPDATA%\\io.github.clash-verge-rev.clash-verge-rev",
+          "note": "用户配置与订阅数据目录"
+        },
+        {
+          "kind": "folder",
           "target": "%PROGRAMFILES%\\Clash Verge",
           "note": "安装目录"
         },
         {
-          "kind": "folder",
-          "target": "%LOCALAPPDATA%\\io.github.clash-verge-rev.clash-verge-rev",
-          "note": "用户配置与订阅数据目录"
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Clash Verge.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
         },
         {
           "kind": "reg_key",
           "target": "HKCU\\Software\\Clash Verge Rev",
           "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-cline",
+      "displayName": [
+        "Cline"
+      ],
+      "publisher": [
+        "cline"
+      ],
+      "uninstallKey": [
+        "Cline"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Cline",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Cline",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Cline.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\Cline.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-creditdaddy",
+      "displayName": [
+        "CreditDaddy"
+      ],
+      "publisher": [
+        "techysy"
+      ],
+      "uninstallKey": [
+        "7729e4bf-cbb2-54ce-aff5-d51efb621805"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\CreditDaddy",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\CreditDaddy",
+          "note": "安装目录（默认装此处）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\7729e4bf-cbb2-54ce-aff5-d51efb621805",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\CreditDaddy.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-deepseek-harness-0-2-0-rc-2",
+      "displayName": [
+        "DeepSeek Harness 0.2.0-rc.2"
+      ],
+      "publisher": [],
+      "uninstallKey": [
+        "1bf39983-50d0-5fe0-9ef4-cece76f67c5e"
+      ],
+      "residue": [
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\1bf39983-50d0-5fe0-9ef4-cece76f67c5e",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\DeepSeek Harness.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\DeepSeek Harness.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
         }
       ],
       "ver": 20261006
@@ -485,6 +756,31 @@
       "ver": 20261006
     },
     {
+      "id": "residue-ffb0f51c-12ba-5803-a677-ac4568a78a2a",
+      "displayName": [
+        "千问办公"
+      ],
+      "publisher": [
+        "DingTalk"
+      ],
+      "uninstallKey": [
+        "ffb0f51c-12ba-5803-a677-ac4568a78a2a"
+      ],
+      "residue": [
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\ffb0f51c-12ba-5803-a677-ac4568a78a2a",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\千问办公.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-foxit",
       "displayName": [
         "Foxit"
@@ -530,6 +826,47 @@
           "kind": "folder",
           "target": "%APPDATA%\\GIMP",
           "note": "用户配置目录（笔刷与插件配置）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-git-windows",
+      "displayName": [
+        "Git"
+      ],
+      "publisher": [
+        "The Git Development Community"
+      ],
+      "uninstallKey": [
+        "Git",
+        "Git_is1"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Git",
+          "note": "安装目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-google-chrome",
+      "displayName": [
+        "Google Chrome"
+      ],
+      "publisher": [
+        "Google LLC"
+      ],
+      "uninstallKey": [
+        "Google Chrome"
+      ],
+      "residue": [
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Google Chrome.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
         }
       ],
       "ver": 20261006
@@ -643,6 +980,36 @@
       "ver": 20261006
     },
     {
+      "id": "residue-jianyingpro",
+      "displayName": [
+        "剪映专业版"
+      ],
+      "publisher": [
+        "Shenzhen Lianmeng Technology"
+      ],
+      "uninstallKey": [
+        "JianyingPro"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\JianyingPro",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\JianyingPro",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\剪映专业版.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-k-lite",
       "displayName": [
         "K-Lite Codec Pack"
@@ -736,6 +1103,68 @@
       "ver": 20261006
     },
     {
+      "id": "residue-minimax-code",
+      "displayName": [
+        "MiniMax Code"
+      ],
+      "publisher": [
+        "MiniMax"
+      ],
+      "uninstallKey": [
+        "f2219de5-6104-50ab-8a91-95ff0ef719de"
+      ],
+      "residue": [
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\f2219de5-6104-50ab-8a91-95ff0ef719de",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\MiniMax Code.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\MiniMax Code.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-netease-music",
+      "displayName": [
+        "CloudMusic",
+        "网易云音乐"
+      ],
+      "publisher": [
+        "NetEase",
+        "网易"
+      ],
+      "uninstallKey": [
+        "CloudMusic"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Netease\\CloudMusic",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Netease\\CloudMusic",
+          "note": "用户数据目录（歌单缓存）"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\网易云音乐.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-nordvpn",
       "displayName": [
         "NordVPN"
@@ -819,6 +1248,76 @@
       "ver": 20261006
     },
     {
+      "id": "residue-obsidian",
+      "displayName": [
+        "Obsidian"
+      ],
+      "publisher": [
+        "Obsidian"
+      ],
+      "uninstallKey": [
+        "bd400747-f0c1-5638-a859-982036102edf"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Obsidian",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\bd400747-f0c1-5638-a859-982036102edf",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Obsidian.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-oopz",
+      "displayName": [
+        "Oopz"
+      ],
+      "publisher": [
+        "绍兴未来山海科技有限公司"
+      ],
+      "uninstallKey": [
+        "oopz"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Oopz",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Oopz",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Oopz",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Oopz.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\Oopz.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-pidgin",
       "displayName": [
         "Pidgin"
@@ -890,6 +1389,76 @@
           "kind": "reg_key",
           "target": "HKCU\\Software\\Proton",
           "note": "当前用户配置键（套件级）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-qoder",
+      "displayName": [
+        "Qoder"
+      ],
+      "publisher": [
+        "Qoder"
+      ],
+      "uninstallKey": [
+        "14d8c5cd-3d3a-5fb8-8746-849118a754ce"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Qoder",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\14d8c5cd-3d3a-5fb8-8746-849118a754ce",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Qoder.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\Qoder.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-qoder-cn",
+      "displayName": [
+        "Qoder CN"
+      ],
+      "publisher": [
+        "Qoder"
+      ],
+      "uninstallKey": [
+        "f160a86b-5726-553b-9fff-d78743c4373f"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Qoder CN",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\f160a86b-5726-553b-9fff-d78743c4373f",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Qoder CN.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\Qoder CN.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
         }
       ],
       "ver": 20261006
@@ -1103,6 +1672,41 @@
       "ver": 20261006
     },
     {
+      "id": "residue-steam",
+      "displayName": [
+        "Steam"
+      ],
+      "publisher": [
+        "Valve"
+      ],
+      "uninstallKey": [
+        "Steam"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Steam",
+          "note": "安装目录（含库文件，删前确认游戏已迁走）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Steam\\steamapps\\shadercache",
+          "note": "着色器缓存（可独立清理）"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Steam",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\Steam.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-sublime-text",
       "displayName": [
         "Sublime Text"
@@ -1232,6 +1836,56 @@
       "ver": 20261006
     },
     {
+      "id": "residue-traecode-cn-user",
+      "displayName": [
+        "TraeCode CN (User)"
+      ],
+      "publisher": [
+        "Beijing Yinli Catapult Technology Co., Ltd."
+      ],
+      "uninstallKey": [
+        "{98EB0EF0-1DE3-4838-B14A-3B0DC4570E8B}_is1"
+      ],
+      "residue": [
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\TraeCode CN.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-uu",
+      "displayName": [
+        "UU远程"
+      ],
+      "publisher": [
+        "Netease"
+      ],
+      "uninstallKey": [
+        "GameViewer"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\GameViewer",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\UU远程.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\UU远程.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-vlc",
       "displayName": [
         "VLC",
@@ -1284,6 +1938,31 @@
       "ver": 20261006
     },
     {
+      "id": "residue-watt-toolkit",
+      "displayName": [
+        "Watt Toolkit"
+      ],
+      "publisher": [
+        "江苏蒸汽凡星科技有限公司"
+      ],
+      "uninstallKey": [
+        "Steam++"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Steam++",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Steam++",
+          "note": "安装目录（默认装此处）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-wechat",
       "displayName": [
         "微信",
@@ -1331,6 +2010,31 @@
       "ver": 20261006
     },
     {
+      "id": "residue-wegame",
+      "displayName": [
+        "WeGame"
+      ],
+      "publisher": [
+        "WeGame"
+      ],
+      "uninstallKey": [
+        "WeGame"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\WeGame",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\WeGame",
+          "note": "安装目录（默认装此处）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
       "id": "residue-winrar",
       "displayName": [
         "WinRAR"
@@ -1352,6 +2056,178 @@
           "kind": "folder",
           "target": "%APPDATA%\\WinRAR",
           "note": "用户配置目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-workbuddy",
+      "displayName": [
+        "WorkBuddy"
+      ],
+      "publisher": [
+        "Tencent Technology (Shenzhen) Company Limited"
+      ],
+      "uninstallKey": [
+        "BFD312E9-1019-4F57-9F44-F86246833B50"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\WorkBuddy",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\WorkBuddy",
+          "note": "安装目录（默认装此处）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\WorkBuddy",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\BFD312E9-1019-4F57-9F44-F86246833B50",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\WorkBuddy.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-workdaddy",
+      "displayName": [
+        "WorkDaddy"
+      ],
+      "publisher": [
+        "WorkDaddy 团队"
+      ],
+      "uninstallKey": [
+        "{4B857D52-8C5A-4A9A-A17D-0EE8A34A12C7}_is1"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\WorkDaddy",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\WorkDaddy.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-wps-office",
+      "displayName": [
+        "WPS Office"
+      ],
+      "publisher": [
+        "Kingsoft",
+        "金山"
+      ],
+      "uninstallKey": [
+        "Kingsoft Office",
+        "WPS Office"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Kingsoft\\WPS Office",
+          "note": "安装目录（用户级布局）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\kingsoft",
+          "note": "用户配置目录"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\WPS Office.lnk",
+          "note": "开始菜单快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\WPS Office.lnk",
+          "note": "桌面快捷方式残留"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Kingsoft",
+          "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-yklauncher-10100001-110001",
+      "displayName": [
+        "三国杀"
+      ],
+      "publisher": [
+        "Yoka Technology Co., Ltd."
+      ],
+      "uninstallKey": [
+        "YKLauncher-10100001-110001"
+      ],
+      "residue": [
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\三国杀.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%USERPROFILE%\\Desktop\\三国杀.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-zcode",
+      "displayName": [
+        "ZCode"
+      ],
+      "publisher": [
+        "ZCode"
+      ],
+      "uninstallKey": [
+        "268ce9e6-a30b-5890-ad18-d4b3ebba5377"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\ZCode",
+          "note": "用户数据目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\ZCode",
+          "note": "安装目录（默认装此处）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\268ce9e6-a30b-5890-ad18-d4b3ebba5377",
+          "note": "程序配置键"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\ZCode.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
+        },
+        {
+          "kind": "shortcut",
+          "target": "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\ZCode.lnk",
+          "note": "开始菜单/桌面快捷方式残留"
         }
       ],
       "ver": 20261006
@@ -1384,6 +2260,6 @@
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "wB/FcQb90qjAErtFs/0RXXYDqZn0CbBiWx0ZeMMkoF2/ADO0od7o07NHZaVXI1IxShVesIIyOuNa65/giI5cCQ=="
+    "sig": "4A80G+itIszJ0yaqDm49CplrHwzsZDkiPcVOn7xoEvdlanrEnegWjPEdviYAe7sAhxZ57aiCXJ5+XXjMF/FgAw=="
   }
 }
