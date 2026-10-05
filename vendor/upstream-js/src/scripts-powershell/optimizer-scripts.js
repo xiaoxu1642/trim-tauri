@@ -775,12 +775,11 @@ const OPTIONS = [
   },
   {
     id: 'tf_keyboard', group: '键鼠与外设', title: '键盘：零延迟 + 队列深度', risk: 'low',
-    desc: 'Trim：KeyboardDelay="0"、KeyboardSpeed="31"（控制面板里最短重复延迟/最快重复速度），mouclass MouseDataQueueSize=16、kbdclass KeyboardDataQueueSize=16、kernel DebugPollInterval=1000，减少输入排队延迟。',
+    desc: 'Trim：KeyboardDelay="0"、KeyboardSpeed="31"（控制面板里最短重复延迟/最快重复速度）、kbdclass KeyboardDataQueueSize=8、端口路由三值回驱动默认档（ConnectMultiplePorts=0 / MaximumPortsServed=3 / SendOutputToAllPorts=1）、kernel DebugPollInterval=1000，减少输入排队延迟。鼠标队列深度由「外设优化」窗口的鼠标组单独管理，本项不写鼠标驱动键。',
     steps: [
-      { label: '键盘/鼠标类参数', reg: regBlock({
+      { label: '键盘类参数', reg: regBlock({
         'HKEY_CURRENT_USER\\Control Panel\\Keyboard': { 'KeyboardDelay': '0', 'KeyboardSpeed': '31' },
-        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\mouclass\\Parameters': { 'MouseDataQueueSize': 'dword:00000010' },
-        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'KeyboardDataQueueSize': 'dword:00000010' },
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'KeyboardDataQueueSize': 'dword:00000008', 'ConnectMultiplePorts': 'dword:00000000', 'MaximumPortsServed': 'dword:00000003', 'SendOutputToAllPorts': 'dword:00000001' },
         'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel': { 'DebugPollInterval': 'dword:000003e8' }
       }) }
     ]
@@ -2331,7 +2330,7 @@ const PROS_CONS = {
   'tf_usb_msi': { pros: 'USB 控制器启用 MSI 中断，改善键鼠输入响应。', cons: '个别老旧 USB 设备在 MSI 模式下可能不稳定。' },
   'tf_usb_power': { pros: '关闭 USB 选择性暂停，避免外设休眠唤醒延迟。', cons: 'USB 设备持续供电，笔记本轻微增加耗电。' },
   'mouse_optimize': { pros: '去加速 + 6/11 灵敏度 + 平滑曲线清零一体完成，指针移动完全线性，定位更精准一致。', cons: '习惯带加速手感的用户需要重新适应，少数驱动会重建曲线值，需重启后生效。' },
-  'tf_keyboard': { pros: '键盘零延迟并加大数据队列，输入响应更快、更少丢键。', cons: '加大队列在极端情况下可能引入轻微输入滞后。' },
+  'tf_keyboard': { pros: '键盘零延迟并把驱动队列深度与端口路由一并写为目标档，输入响应更直接。', cons: '队列深度固定写 8、端口路由固定为驱动默认档（不再提供档位选择），修改需重启电脑后生效。' },
   'tf_dev_disable': { pros: '禁用 HPET/ME 等冗余设备，减少中断与延迟。', cons: '可能影响设备管理、虚拟化或系统稳定性，风险较高。' },
   'tf_dev_audio': { pros: '禁用板载/HDMI 声卡控制器，消除多余音频设备。', cons: '板载与 HDMI 音频将不可用，仅适用独立 USB 声卡用户。' },
   'tf_dev_printer': { pros: '禁用打印队列根设备，无打印需求者减少后台开销。', cons: '之后无法打印，需要打印时须重新启用该设备。' },

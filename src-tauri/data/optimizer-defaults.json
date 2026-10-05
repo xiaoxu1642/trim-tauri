@@ -174,7 +174,7 @@
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
+      "reviewedAt": "2026-10-06"
     },
     "tf_dev_disable": {
       "defaultKnown": false,

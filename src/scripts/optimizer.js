@@ -892,7 +892,7 @@
       const items = byGroup[group];
       // 外设调优：列头提供「更多调优项」入口 → 打开外设优化窗口（Win32PrioritySeparation 等深度调优）
       const moreBtn = group === '外设调优'
-        ? `<button type="button" class="opt-col-more" data-more-group="外设调优" data-tip="打开外设优化：处理器调度 / 键盘注册表 / 鼠标队列深度调优">更多调优项</button>`
+        ? `<button type="button" class="opt-col-more" data-more-group="外设调优" data-tip="打开外设优化：处理器调度 / 鼠标队列深度调优">更多调优项</button>`
         : '';
       return `
       <section class="opt-col">

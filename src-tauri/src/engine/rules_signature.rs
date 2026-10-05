@@ -22,9 +22,21 @@ use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::{Map, Value};
 
-/// 内置公钥 PEM（发布方 scripts/sign-rules.js gen 生成；更换密钥对必须同步发新版应用）
+/// 内置公钥 PEM · 旧钥（2026-10 上旬前签发的数据包全由它签名）。
+///
+/// 2026-10-04 系统重装致该钥私钥丢失且无备份，0.6.6 起轮换出新钥（见 [`RULES_PUBKEY_V2_PEM`]）。
+/// 保留旧钥是**刻意的兼容设计**：清理 / 残留规则库内容未变、继续带旧签名分发，
+/// 老版本（≤0.6.5）用户照常可在线更新 —— 验签改为**任一内置公钥通过即放行**。
+/// 退役计划：线上与内置全部换成新签名后摘掉本常量（写入发版清单，勿单方面提前删）。
 pub const RULES_PUBKEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
 MCowBQYDK2VwAyEAQehWbhuKKCxcWOje/8AZXYN192Z3Ryi8+cQ6ENwXAtY=\n\
+-----END PUBLIC KEY-----";
+
+/// 内置公钥 PEM · 轮换新钥（2026-10-06 生成；此后新签发的数据包用它签名）。
+///
+/// 私钥在发布机的本机密钥目录（`tools/sign-cleanup-rules.mjs` 读取），绝不入库。
+pub const RULES_PUBKEY_V2_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+MCowBQYDK2VwAyEAcfi1pq5dJY2x3/d+sDdLmj1N6eGIqOmttQh5rTbKCro=\n\
 -----END PUBLIC KEY-----";
 
 /// 取规则对象的规范化签名文本（无 `_sig` 的紧凑 JSON 文本）
@@ -44,11 +56,12 @@ pub fn canonical_body_text(parsed: &Value) -> Option<String> {
     serde_json::to_string(&Value::Object(body)).ok()
 }
 
-/// PEM → Ed25519 公钥字节（SubjectPublicKeyInfo 的末尾 32 字节）
-fn verifying_key() -> Result<VerifyingKey, String> {
+/// 单份 PEM → Ed25519 公钥字节（SubjectPublicKeyInfo 的末尾 32 字节）。
+/// `tag` 只进错误文案——两把公钥哪把坏掉要能从日志里一眼分辨。
+fn parse_pubkey(pem: &str, tag: &str) -> Result<VerifyingKey, String> {
     let mut b64 = String::new();
     let mut inside = false;
-    for line in RULES_PUBKEY_PEM.lines() {
+    for line in pem.lines() {
         let t = line.trim();
         if t == "-----BEGIN PUBLIC KEY-----" {
             inside = true;
@@ -60,13 +73,21 @@ fn verifying_key() -> Result<VerifyingKey, String> {
     }
     let der = base64::engine::general_purpose::STANDARD
         .decode(b64.as_bytes())
-        .map_err(|e| format!("内置公钥解码失败: {e}"))?;
+        .map_err(|e| format!("内置公钥({tag})解码失败: {e}"))?;
     if der.len() < 32 {
-        return Err("内置公钥长度不足".to_string());
+        return Err(format!("内置公钥({tag})长度不足"));
     }
     let mut raw = [0u8; 32];
     raw.copy_from_slice(&der[der.len() - 32..]);
-    VerifyingKey::from_bytes(&raw).map_err(|e| format!("内置公钥非法: {e}"))
+    VerifyingKey::from_bytes(&raw).map_err(|e| format!("内置公钥({tag})非法: {e}"))
+}
+
+/// 全部内置公钥（0.6.6 起两把：旧钥 + 轮换新钥；验签**任一通过即放行**）。
+fn verifying_keys() -> Result<[VerifyingKey; 2], String> {
+    Ok([
+        parse_pubkey(RULES_PUBKEY_PEM, "legacy")?,
+        parse_pubkey(RULES_PUBKEY_V2_PEM, "v2")?,
+    ])
 }
 
 /// JS 真值判定（`if (sig.alg && ...)`）——用于 `alg` 字段的跳过语义
@@ -123,7 +144,7 @@ pub fn verify_rules_text(text: &str) -> Result<(), String> {
         Ok(b) => b,
         Err(_) => return Err("签名数据解码失败".to_string()),
     };
-    let key = match verifying_key() {
+    let keys = match verifying_keys() {
         Ok(k) => k,
         Err(e) => return Err(format!("签名校验异常: {e}")),
     };
@@ -134,9 +155,14 @@ pub fn verify_rules_text(text: &str) -> Result<(), String> {
         Err(_) => return Err("签名校验失败，内容可能被篡改，已拒绝".to_string()),
     };
     let signature = Signature::from_bytes(&arr);
-    match key.verify_strict(body.as_bytes(), &signature) {
-        Ok(()) => Ok(()),
-        Err(_) => Err("签名校验失败，内容可能被篡改，已拒绝".to_string()),
+    // 任一内置公钥通过即放行（双钥轮换期，见 RULES_PUBKEY_PEM 注释）；全失败统一按原文案拒绝
+    if keys
+        .iter()
+        .any(|k| k.verify_strict(body.as_bytes(), &signature).is_ok())
+    {
+        Ok(())
+    } else {
+        Err("签名校验失败，内容可能被篡改，已拒绝".to_string())
     }
 }
 
@@ -181,13 +207,18 @@ pub fn verify_array_text(text: &str, sidecar_text: &str) -> Result<(), String> {
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(sig_b64.as_bytes())
         .map_err(|_| "签名数据解码失败".to_string())?;
-    let key = verifying_key().map_err(|e| format!("签名校验异常: {e}"))?;
+    let keys = verifying_keys().map_err(|e| format!("签名校验异常: {e}"))?;
     let arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
         "签名校验失败，内容可能被篡改，已拒绝".to_string()
     })?;
-    match key.verify_strict(body.as_bytes(), &Signature::from_bytes(&arr)) {
-        Ok(()) => Ok(()),
-        Err(_) => Err("签名校验失败，内容可能被篡改，已拒绝".to_string()),
+    let signature = Signature::from_bytes(&arr);
+    if keys
+        .iter()
+        .any(|k| k.verify_strict(body.as_bytes(), &signature).is_ok())
+    {
+        Ok(())
+    } else {
+        Err("签名校验失败，内容可能被篡改，已拒绝".to_string())
     }
 }
 
@@ -196,10 +227,11 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer;
 
-    /// 内置公钥可解析
+    /// 内置公钥（两把）都可解析
     #[test]
     fn pubkey_parses() {
-        assert!(verifying_key().is_ok());
+        let keys = verifying_keys().expect("两把内置公钥都应可解析");
+        assert_eq!(keys.len(), 2, "0.6.6 起内置公钥应为「旧钥 + 轮换新钥」两把");
     }
 
     /// 篡改正文 → 必须拒绝（文案与 JS 一致）
@@ -212,7 +244,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
 
-    /// 用另一密钥对签名 → 必须拒绝（内置公钥固定）。种子写死，避免引入随机数依赖
+    /// 用另一密钥对签名 → 必须拒绝（内置公钥集固定，0.6.6 起为两把）。种子写死，避免引入随机数依赖
     #[test]
     fn wrong_key_rejected() {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
@@ -274,6 +306,10 @@ mod tests {
     /// 审查 M13：路径改用 `CARGO_MANIFEST_DIR` 拼接（原先写 `..\src\data\...`，
     /// 规则库随 M14 移出 frontendDist 后相对基准一变就**静默跳过**、却仍计入 passed）；
     /// 该文件是仓库跟踪文件，找不到即真缺陷，故直接 panic 而不是 return。
+    ///
+    /// 注记（0.6.6 密钥轮换）：清理库存量内容仍是**旧钥签名**（content 未变、不重签），
+    /// 故 JS 基线（只认旧钥）的对拍结论依旧成立；待清理库换新签名（旧钥退役）后，
+    /// 这条对拍要改成「记录式」而不能继续断言两侧一致。
     #[test]
     fn real_rules_file_verdict() {
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -299,7 +335,7 @@ mod tests {
     }
 
     fn tamper_body() -> String {
-        // 一份自造的最小签名：用签名私钥不可得，故直接构造「签名与正文不匹配」的样本
+        // 一份自造的最小签名：测试不依赖本机私钥（要可复现），故直接构造「签名与正文不匹配」的样本
         let mut root: Map<String, Value> = Map::new();
         root.insert("rulesVersion".into(), Value::from(1));
         root.insert("groups".into(), Value::from(Vec::<Value>::new()));

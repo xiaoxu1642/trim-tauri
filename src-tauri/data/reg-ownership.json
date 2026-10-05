@@ -4,7 +4,8 @@
   "modules": {
     "optimizer": "电脑优化中心（src/scripts-powershell/optimizer-scripts.js 的 OPTIONS）",
     "maintenance": "系统维护（src/scripts-powershell/maintenance-scripts.js 的 TASKS）",
-    "cleanup": "磁盘清理（src/data/cleanup-rules.json 的 regKeys）"
+    "cleanup": "磁盘清理（src/data/cleanup-rules.json 的 regKeys）",
+    "peripheral": "外设优化窗口（src/scripts/peripheral-window.js 的分组写入）"
   },
   "entries": [
     {
@@ -122,6 +123,39 @@
       "owner": "optimizer",
       "source": "telemetry_optimize",
       "note": "传递优化下载模式归优化中心（遥测优化）；系统维护侧已于 2026-09-14 按 M1 移除同名写入"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\KBDCLASS\\PARAMETERS",
+      "name": "KEYBOARDDATAQUEUESIZE",
+      "owner": "optimizer",
+      "source": "tf_keyboard",
+      "note": "键盘驱动队列深度归优化中心（tf_keyboard 固定写 8）；外设优化窗口的键盘档位选择（16/18/20/22）已于 0.6.6 下线，该键不再有第二写入方"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\KBDCLASS\\PARAMETERS",
+      "name": "CONNECTMULTIPLEPORTS",
+      "owner": "optimizer",
+      "source": "tf_keyboard",
+      "note": "键盘端口路由三值归优化中心（tf_keyboard 写驱动默认档 0/3/1）；外设优化窗口的端口预设档已于 0.6.6 下线"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\KBDCLASS\\PARAMETERS",
+      "name": "MAXIMUMPORTSSERVED",
+      "owner": "optimizer",
+      "source": "tf_keyboard"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\KBDCLASS\\PARAMETERS",
+      "name": "SENDOUTPUTTOALLPORTS",
+      "owner": "optimizer",
+      "source": "tf_keyboard"
+    },
+    {
+      "key": "HKLM\\SYSTEM\\CURRENTCONTROLSET\\SERVICES\\MOUCLASS\\PARAMETERS",
+      "name": "MOUSEDATAQUEUESIZE",
+      "owner": "peripheral",
+      "source": "mouse（外设优化窗口鼠标组）",
+      "note": "鼠标队列深度归外设优化窗口；tf_keyboard 已于 0.6.6 停止写该键（避免优化中心的推理还原与窗口的 .reg 备份还原互相连坐）"
     }
   ]
 }

@@ -3,13 +3,16 @@
 //! 对照 Electron main.js 6891-7040 + src/scripts-powershell/peripheral-scripts.js。
 //!
 //! 安全/语义（PE-3/PE-4/N1/N2/PE-5 全部保留）：
-//! - 应用值白名单以主进程为唯一权威（win32/keyboard/mouse 三组固定取值集合），
+//! - 应用值白名单以主进程为唯一权威（win32/mouse 两组固定取值集合），
 //!   未命中不再静默跳过，而是整批拒绝（PE-3，防渲染层漏更导致假成功）。
-//! - 三项全写 HKLM，apply/restore 恒需管理员（PE-4）。
-//! - 缺省/-1 表示该组不改；三组都 -1 拒绝空应用。
+//! - 两项全写 HKLM，apply/restore 恒需管理员（PE-4）。
+//! - 缺省/-1 表示该组不改；两组都 -1 拒绝空应用。
 //! - 原生写入前用 `reg.exe export` 导出父键 .reg 备份（`engine/native/peripheral.rs`，
 //!   非 PowerShell）；成功后主进程修剪备份目录（保留 10 份，旧的进回收站）。
 //! - 「还原修改前的值」= 导入最新一份备份 .reg，与「恢复默认」语义分开（N1/PE-5）。
+//! - **2026-10-06 起本窗瘦身为两组**（win32 / mouse）：键盘队列深度与端口路由收编进
+//!   优化中心 `tf_keyboard`（固定写 8 + 驱动默认端口档），`keyboard` / `kbdports`
+//!   键不再受理 —— 白名单里它们随组件一并删除，旧渲染层（若有残留调用）必被整批拒绝。
 
 use serde_json::{json, Value};
 use tauri::webview::PageLoadEvent;
@@ -24,22 +27,12 @@ const TITLE: &str = "外设优化";
 
 /// PE-3：主进程唯一权威合法值集合
 const ALLOWED_WIN32: &[i64] = &[2, 26, 36, 38, 40];
-const ALLOWED_KEYBOARD: &[i64] = &[16, 18, 20, 22, 100];
 const ALLOWED_MOUSE: &[i64] = &[16, 18, 20, 22, 100];
-/// 键盘端口路由预设档位（2026-10-03）。
-///
-/// **不是三个独立单选**：三值同父键且互相牵连，任意拼装都能得到「不合并 + 只服务 1 端口
-/// + 不广播」这类无意义组合。预设成组写，语义才闭合，具体三值见
-/// `native/peripheral.rs::peripheral_apply` 的 `KBD_PORT_PRESETS`。
-/// 档 1 = 驱动默认（本机当前值），2 = 单键鼠精简，3 = 多设备扩展。
-const ALLOWED_KBDPORTS: &[i64] = &[1, 2, 3];
 
 fn allowed_for(key: &str) -> Option<&'static [i64]> {
     match key {
         "win32" => Some(ALLOWED_WIN32),
-        "keyboard" => Some(ALLOWED_KEYBOARD),
         "mouse" => Some(ALLOWED_MOUSE),
-        "kbdports" => Some(ALLOWED_KBDPORTS),
         _ => None,
     }
 }
@@ -58,8 +51,8 @@ pub async fn peripheral_open_window<R: tauri::Runtime>(
     let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(PAGE.into()))
         .title(TITLE)
         // 2026-10-03：760→880 宽、560→620 高。用户在优化中心点「更多调优项」进来时
-        // 期待「一屏能横向对比几档数值」，原来的 860×760 一屏只放得下 6~7 张卡
-        // （且第四组加入后更挤）。加宽让四列卡片的描述行不必折成碎字。
+        // 期待「一屏能横向对比几档数值」，原来的 860×760 一屏只放得下 6~7 张卡。
+        // 加宽让卡片的描述行不必折成碎字。
         .inner_size(880.0, 780.0)
         .min_inner_size(720.0, 560.0)
         .background_color(Color(243, 243, 243, 255))
@@ -97,7 +90,7 @@ pub fn peripheral_close_window<R: tauri::Runtime>(window: WebviewWindow<R>) -> R
     Ok(json!({ "success": true }))
 }
 
-/// peripheral:query —— 读三组当前值
+/// peripheral:query —— 读两组当前值
 ///
 /// S3：纯 Rust 原生，无 PS 回退。
 #[tauri::command]
@@ -113,10 +106,7 @@ pub async fn peripheral_query<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
 #[derive(serde::Deserialize, Default)]
 pub struct ApplyOptions {
     win32: Option<Value>,
-    keyboard: Option<Value>,
     mouse: Option<Value>,
-    /// 键盘端口路由预设档位（2026-10-03 新增；成组写三值，见 `ALLOWED_KBDPORTS`）
-    kbdports: Option<Value>,
 }
 
 /// peripheral:apply —— 白名单校验后写 HKLM（成功修剪备份）
@@ -142,12 +132,7 @@ pub async fn peripheral_apply<R: tauri::Runtime>(
     // null/缺省 → -1（该组不改）；显式整数必须命中白名单，否则记下非法组
     let mut filtered = serde_json::Map::new();
     let mut invalid: Vec<&str> = Vec::new();
-    for (key, raw) in [
-        ("win32", opts.win32),
-        ("keyboard", opts.keyboard),
-        ("mouse", opts.mouse),
-        ("kbdports", opts.kbdports),
-    ] {
+    for (key, raw) in [("win32", opts.win32), ("mouse", opts.mouse)] {
         match normalize_option(raw) {
             None => {
                 filtered.insert(key.into(), json!(-1));
@@ -317,39 +302,43 @@ mod tests {
     #[test]
     fn allowed_value_tables() {
         assert!(allowed_for("win32").unwrap().contains(&38));
-        assert!(allowed_for("keyboard").unwrap().contains(&100));
         assert!(allowed_for("mouse").unwrap().contains(&16));
         // PE-3：白名单外取值不允许
         assert!(!allowed_for("win32").unwrap().contains(&99));
         assert!(allowed_for("unknown").is_none());
+        // 0.6.6：键盘组与端口组随「更多调优项」瘦身下线，白名单必须同步清空——
+        // 一边留白名单、另一边删写入逻辑会造出「校验过、写不进」的静默假成功。
+        assert!(allowed_for("keyboard").is_none(), "keyboard 组应已下线");
+        assert!(allowed_for("kbdports").is_none(), "kbdports 组应已下线");
     }
 
-    /// 键盘端口路由档位（2026-10-03）：白名单必须恰好三档，且与 native 侧预设表同长。
+    /// 键盘 / 端口组下线（2026-10-06）的两端一致性：白名单与 native 侧必须**同时**删干净。
     ///
-    /// 两处不同步的失效形态很具体：native 少一档 ⇒ 界面选得到、写进去却静默不生效
-    /// （`peripheral_apply` 的 `find` 落空 → 整组跳过 → 回执却说「完成」）。
-    /// 所以这里既断白名单内容，也断**数量**与 native 预设表一致。
+    /// 反面形态（本测试正是为它写的）：只删一侧 —— 白名单留着而 native 不写 ⇒
+    /// 「校验通过、写不进」的静默假成功；native 留着而白名单删了 ⇒ 残留死代码随时可能
+    /// 被重新接线。两侧都断「已删除」，任一侧残留即红。
+    /// 另：备份按父键去重的守卫**必须保留**（0.6.6 起虽无同父键多值场景，但它是
+    /// 2026-10-03 为 kbdclass 引入的修复，删除会让未来同类写组静默重演多导 .reg）。
     #[test]
-    fn 键盘端口路由档位与native预设表一致() {
-        assert_eq!(
-            allowed_for("kbdports").unwrap(),
-            &[1, 2, 3],
-            "端口路由预设档位必须是 1/2/3（默认 / 单键鼠精简 / 多设备扩展）"
+    fn 键盘与端口组在白名单与native两侧同步下线() {
+        assert!(allowed_for("keyboard").is_none(), "keyboard 白名单应已删除");
+        assert!(allowed_for("kbdports").is_none(), "kbdports 白名单应已删除");
+        assert!(
+            allowed_for("win32").is_some() && allowed_for("mouse").is_some(),
+            "win32 / mouse 两组是本窗剩下的全部能力，不能跟着一起误删"
         );
         let native = include_str!("../engine/native/peripheral.rs");
-        // native 侧预设表逐档登记，且档位号与白名单同形
-        for (gear, connect, max_ports, send_all) in [(1, 0, 3, 1), (2, 0, 1, 0), (3, 1, 6, 1)] {
-            let needle = format!("({gear}, {connect}, {max_ports}, {send_all})");
-            assert!(
-                native.contains(&needle),
-                "native KBD_PORT_PRESETS 缺档位 {needle} —— 界面能选但写不进去"
-            );
-        }
-        // 备份必须按父键去重：kbdclass\Parameters 会被 keyboard + 三个 kbd_* 值共用，
-        // 不去重就导出三份同内容 .reg（还原时多跑两次 reg import）。
+        assert!(
+            !native.contains("KBD_PORT_PRESETS"),
+            "native 预设表应随端口组下线一并删除（残留即死代码）"
+        );
+        assert!(
+            !native.contains("kbdConnectMultiple") && !native.contains("KeyboardDataQueueSize"),
+            "native 查询 / 写入不应再引用键盘值"
+        );
         assert!(
             native.contains("if backed_up.contains(subkey) { continue; }"),
-            "备份没有按父键去重 —— 同父键多值会产出多份同内容分片"
+            "按父键去重的备份守卫必须保留（kbdclass 时代引入，防未来同类写组重演）"
         );
     }
 

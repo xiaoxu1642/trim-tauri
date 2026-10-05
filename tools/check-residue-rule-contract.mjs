@@ -18,7 +18,6 @@
 'use strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,7 +30,6 @@ const UNINSTALL_DIR = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall
 import { leadingToken, makeTokenChecker } from './rule-tokens.mjs';
 import { list as schemaList, number as schemaNumber, tokens as schemaTokens } from './rule-schema.mjs';
 const FIXTURE = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
-const PRIV_KEY = path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
 // 词汇与上限取自 `tools/rule-schema.json`（V2 P0-A2，2026-09-30）：同一份字节也被 Rust 装载侧
 // 编译期嵌入（engine/rule_schema.rs），本文件不再抄第二份清单 —— 抄了就会出现"改了表没改门禁"
 // 或反过来的分叉（本仓 A7/N6 记过同源化的边界：只共享查法与报错，**不共享允许集**）。
@@ -360,15 +358,26 @@ let sigOk = false;
 let sigDetail = '';
 if (!sigB64) {
   sigDetail = '缺少 _sig（先跑 node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/uninstall-residue-rules.json）';
-} else if (!fs.existsSync(PRIV_KEY)) {
-  sigDetail = '本机无私钥，无法做存在性对拍；改用公钥验签（见下）';
 }
-// 公钥验签（不依赖本机私钥）：内置公钥与 rules_signature.rs::RULES_PUBKEY_PEM 一致
-const PUBKEY_PEM = '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAQehWbhuKKCxcWOje/8AZXYN192Z3Ryi8+cQ6ENwXAtY=\n-----END PUBLIC KEY-----';
+// 公钥验签（不依赖本机私钥）。0.6.6 密钥轮换后为**双钥**：legacy（历史签发钥）+ v2（轮换新钥），
+// 任一通过即放行——清理 / 残留库存量内容仍是旧钥签名，只认新钥会把合法存量判红。
+// 两把公钥与 src-tauri/src/engine/rules_signature.rs 的 RULES_PUBKEY_PEM / RULES_PUBKEY_V2_PEM 逐字一致；
+// 轮换背景（2026-10-04 重装丢钥 + 双钥兼容）见该文件注释。
+const PUBKEY_PEMS = {
+  legacy: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAQehWbhuKKCxcWOje/8AZXYN192Z3Ryi8+cQ6ENwXAtY=\n-----END PUBLIC KEY-----',
+  v2: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcfi1pq5dJY2x3/d+sDdLmj1N6eGIqOmttQh5rTbKCro=\n-----END PUBLIC KEY-----',
+};
 try {
-  const pubKey = crypto.createPublicKey(PUBKEY_PEM);
-  sigOk = crypto.verify(null, Buffer.from(JSON.stringify(body), 'utf8'), pubKey, Buffer.from(sigB64 || '', 'base64'));
-  if (!sigOk) sigDetail = '验签失败：内容与签名不匹配（篡改或未重新签名）';
+  const msg = Buffer.from(JSON.stringify(body), 'utf8');
+  for (const tag of Object.keys(PUBKEY_PEMS)) {
+    const pubKey = crypto.createPublicKey(PUBKEY_PEMS[tag]);
+    if (crypto.verify(null, msg, pubKey, Buffer.from(sigB64 || '', 'base64'))) {
+      sigOk = true;
+      sigDetail = `（${tag} 钥验签通过）`;
+      break;
+    }
+  }
+  if (!sigOk) sigDetail = '验签失败：内容与两把内置公钥均不匹配（篡改或未重新签名）';
 } catch (e) {
   sigOk = false;
   sigDetail = `验签异常: ${e.message}`;
