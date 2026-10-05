@@ -79,13 +79,10 @@
     'cleanup:file-backup-restore': 'cleanup_file_backup_restore',
     'cleanup:scan': 'cleanup_scan',
     'cleanup:execute': 'cleanup_execute',
-    'cleanup:update-rules': 'cleanup_update_rules',
-    'cleanup:check-rules-version': 'cleanup_check_rules_version',
     'cleanup:retry-failed-delete': 'cleanup_retry_failed_delete',
     'cleanup:check-locked': 'cleanup_check_locked',
     'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
     'cleanup:item-detail': 'cleanup_item_detail',
-    'cleanup:export-plan': 'cleanup_export_plan',
     // runtimes
     'runtimes:collect': 'runtimes_collect',
     'runtimes:install': 'runtimes_install',
@@ -108,8 +105,6 @@
     'uninstall:residue-execute': 'uninstall_residue_execute',
     // v0.5.0 只读残留报告（七个扫描器聚合；只在残留扫描副窗里消费，无删除入口）
     'uninstall:residue-deep-scan': 'uninstall_residue_deep_scan',
-    'uninstall:check-residue-version': 'uninstall_check_residue_version',
-    'uninstall:update-residue-rules': 'uninstall_update_residue_rules',
     'uninstall:orphan-scan': 'uninstall_orphan_scan',
     'uninstall:dead-scan': 'uninstall_dead_scan',
     'uninstall:dir-size': 'uninstall_dir_size',
@@ -441,9 +436,6 @@
           autoRebuild: autoRebuild === true
         });
       },
-      updateRules: function () { return invokeChannel('cleanup:update-rules'); },
-      checkRulesVersion: function () { return invokeChannel('cleanup:check-rules-version'); },
-      onRulesDownloadProgress: function (callback) { return onEvent('cleanup:rules-download-progress', callback); },
       retryFailedDelete: function () { return invokeChannel('cleanup:retry-failed-delete'); },
       checkLocked: function (ids) { return invokeChannel('cleanup:check-locked', { ids: ids }); },
       killLockedProcesses: function () { return invokeChannel('cleanup:kill-locked-processes'); },
@@ -451,7 +443,6 @@
         if (path === void 0) path = '';
         return invokeChannel('cleanup:item-detail', { id: id, path: path });
       },
-      exportPlan: function (text) { return invokeChannel('cleanup:export-plan', { text: text }); },
       onScanProgress: function (callback) { return onEvent('cleanup:scan-progress', callback); }
     },
 
@@ -487,8 +478,6 @@
       pendingRevoke: function (batchId) { return invokeChannel('uninstall:pending-revoke', { batchId: batchId }); },
       residueScan: function (appId) { return invokeChannel('uninstall:residue-scan', { appId: appId }); },
       residueExecute: function (appId, targets, backup) { return invokeChannel('uninstall:residue-execute', { appId: appId, targets: targets, backup: !!backup }); },
-      checkResidueVersion: function () { return invokeChannel('uninstall:check-residue-version'); },
-      updateResidueRules: function () { return invokeChannel('uninstall:update-residue-rules'); },
       orphanScan: function () { return invokeChannel('uninstall:orphan-scan'); },
       deadScan: function () { return invokeChannel('uninstall:dead-scan'); },
       residueDeepScan: function () { return invokeChannel('uninstall:residue-deep-scan'); },

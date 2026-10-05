@@ -20,10 +20,6 @@
 //! - **删除安全**：受保护路径判定统一走 `engine::protect`（三端同源）；危险操作前
 //!   `log::flush_sync()`；回收站优先（`trim_finder::scan::recycle::send_to_trash`），
 //!   回收站失败项留槽等渲染层红色确认后再永久删除。
-//! - **HTTP 已接入**：`cleanup:update-rules` / `cleanup:check-rules-version` 走
-//!   `engine::winhttp::get_text`（不新增 Cargo 依赖），全链为来源清单 → 尺寸闸 →
-//!   ed25519 验签 → 结构校验 → 版本防降级 → 字节级原子落盘 → 抬水位线，git 回退仅开发机。
-//!
 //! 需在 `lib.rs` 的 `generate_handler!` 注册：
 //! ```text
 //! // ---- C 批：cleanup ----
@@ -32,8 +28,6 @@
 //! commands::cleanup::cleanup_execute,
 //! commands::cleanup::cleanup_retry_failed_delete,
 //! commands::cleanup::cleanup_item_detail,
-//! commands::cleanup::cleanup_update_rules,
-//! commands::cleanup::cleanup_check_rules_version,
 //! commands::cleanup::cleanup_check_locked,
 //! commands::cleanup::cleanup_kill_locked_processes,
 //! ```
@@ -50,27 +44,23 @@
 //!    且 `guard` 只放行 main（唯一槽），未注册 destroy 钩子。
 //! 5. **结束进程失败文案**：Node `process.kill` 抛 errno 文案（ESRCH/EPERM），
 //!    Rust 侧用 TerminateProcess 的可读文案（`{...p, message}` 字段形状一致）。
-//! 6. **HTTP 传输层**：已接 `engine::winhttp`（见上），真网用例是 `#[ignore]` 的发布前
-//!    门禁用例（`cargo test --lib -- --ignored`），日常 `cargo test` 不触网。
 
 //!
 //! v3 D3（2026-10-02）按命令契约拆成 commands/cleanup/ 目录：
 //! rules（规则库装载与语义校验）/ state（路径绑定 + 分槽快照 + JS 口径）/
-//! backup（reg 与 file 两类备份还原入口）/ scan_execute（扫描、执行、重试、明细、锁定进程）/
-//! rules_update（在线更新）；跨面的验收用例单独放 contract_tests（cfg(test)）。
+//! backup（reg 与 file 两类备份还原入口）/ scan_execute（扫描、执行、重试、明细、锁定进程）；
+//! 跨面的验收用例单独放 contract_tests（cfg(test)）。
+//! 在线更新链已整链退役（2026-10-06 用户裁定：规则只随包体更新而更新，无 UI、无网络拉取、
+//! 无后台替换），rules_update.rs 已删除；装载侧（数据目录 → 内置）与水位线读侧保留。
 //! `#[tauri::command]` 留在定义处，mod.rs 只做模块声明与 pub use 台账，
 //! 因此 lib.rs 的 generate_handler!、CHANNEL_MAP 与 guard 档位不因物理移动改变。
 
 mod backup;
 pub use backup::{cleanup_reg_backup_list, __cmd__cleanup_reg_backup_list, __tauri_command_name_cleanup_reg_backup_list, cleanup_reg_backup_restore, __cmd__cleanup_reg_backup_restore, __tauri_command_name_cleanup_reg_backup_restore, cleanup_file_backup_list, __cmd__cleanup_file_backup_list, __tauri_command_name_cleanup_file_backup_list, cleanup_file_backup_restore, __cmd__cleanup_file_backup_restore, __tauri_command_name_cleanup_file_backup_restore};
 mod rules;
-pub use rules::{data_rules_dir, rules_watermark, set_rules_watermark, rules_value, cleanup_rules, __cmd__cleanup_rules, __tauri_command_name_cleanup_rules};
-pub(crate) use rules::{release_source_urls_for};
-mod rules_update;
-pub use rules_update::{cleanup_update_rules, __cmd__cleanup_update_rules, __tauri_command_name_cleanup_update_rules, cleanup_check_rules_version, __cmd__cleanup_check_rules_version, __tauri_command_name_cleanup_check_rules_version};
-pub(crate) use rules_update::{load_update_override, assemble_sources, http_get_limited};
+pub use rules::{data_rules_dir, rules_watermark, rules_value, cleanup_rules, __cmd__cleanup_rules, __tauri_command_name_cleanup_rules};
 mod scan_execute;
-pub use scan_execute::{cleanup_scan, __cmd__cleanup_scan, __tauri_command_name_cleanup_scan, cleanup_execute, __cmd__cleanup_execute, __tauri_command_name_cleanup_execute, cleanup_retry_failed_delete, __cmd__cleanup_retry_failed_delete, __tauri_command_name_cleanup_retry_failed_delete, cleanup_item_detail, __cmd__cleanup_item_detail, __tauri_command_name_cleanup_item_detail, cleanup_check_locked, __cmd__cleanup_check_locked, __tauri_command_name_cleanup_check_locked, cleanup_kill_locked_processes, __cmd__cleanup_kill_locked_processes, __tauri_command_name_cleanup_kill_locked_processes, cleanup_export_plan, __cmd__cleanup_export_plan, __tauri_command_name_cleanup_export_plan};
+pub use scan_execute::{cleanup_scan, __cmd__cleanup_scan, __tauri_command_name_cleanup_scan, cleanup_execute, __cmd__cleanup_execute, __tauri_command_name_cleanup_execute, cleanup_retry_failed_delete, __cmd__cleanup_retry_failed_delete, __tauri_command_name_cleanup_retry_failed_delete, cleanup_item_detail, __cmd__cleanup_item_detail, __tauri_command_name_cleanup_item_detail, cleanup_check_locked, __cmd__cleanup_check_locked, __tauri_command_name_cleanup_check_locked, cleanup_kill_locked_processes, __cmd__cleanup_kill_locked_processes, __tauri_command_name_cleanup_kill_locked_processes};
 mod state;
 
 #[cfg(test)]

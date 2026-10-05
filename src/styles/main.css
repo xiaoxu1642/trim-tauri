@@ -8711,6 +8711,9 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* 2026-10-06 用户裁定：「主要」视图的三按钮与软件卸载页的三按钮与分段栏同一水平线、
+   恒右对齐（margin-left:auto 把按钮组顶到容器右缘；flex-wrap 下窗口极窄时自然回落到下一行） */
+.cleanup-toolbar-actions--inline.active { flex-basis: auto; margin-left: auto; }
 
 /* ---------- P2 规模化浏览：清理页搜索与筛选栏（规则库最终优化方案 2026-09-27） ----------
    只用既有 token；圆角走 btn 档（8px）；无过渡动画（prefers-reduced-motion 兼容，

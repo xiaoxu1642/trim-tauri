@@ -30,7 +30,6 @@ const SRC = join(REPO_ROOT, 'src-tauri', 'src');
  * 判据：该程序**不随 Windows 分发**，硬解析到 System32 只会把它弄坏。
  */
 const ALLOW_BARE = {
-  git: '可选工具，位置由用户环境决定（cleanup.rs 规则库拉取）；随系统分发的工具不在此列',
 };
 
 /** 与 `engine/systembin.rs` 的 PINNED 保持一致（顺序无关） */

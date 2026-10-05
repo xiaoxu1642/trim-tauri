@@ -341,8 +341,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_residue_execute,
         // v0.5.0 只读残留报告（副窗档，无删除入口；档位登记见 check-guard-tiers MUST_READONLY）
         commands::uninstall::uninstall_residue_deep_scan,
-        commands::uninstall::uninstall_check_residue_version,
-        commands::uninstall::uninstall_update_residue_rules,
         commands::uninstall::uninstall_orphan_scan,
         commands::uninstall::uninstall_dead_scan,
         commands::uninstall::uninstall_dir_size,
@@ -394,12 +392,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::cleanup::cleanup_file_backup_restore,
         commands::cleanup::cleanup_scan,
         commands::cleanup::cleanup_execute,
-        commands::cleanup::cleanup_update_rules,
-        commands::cleanup::cleanup_check_rules_version,
         commands::cleanup::cleanup_retry_failed_delete,
         commands::cleanup::cleanup_check_locked,
         commands::cleanup::cleanup_kill_locked_processes,
-        commands::cleanup::cleanup_export_plan,
         commands::cleanup::cleanup_item_detail,
         // ---- C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan ----
         // 审查 v2-F4 彻底方案：`settings_save` 已整链摘除（零调用方的死写入通道，

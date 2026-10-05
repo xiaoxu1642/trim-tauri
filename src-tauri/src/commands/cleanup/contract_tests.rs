@@ -1,74 +1,13 @@
-//! 清理规则的验收三件套（D6 第 1 条）：源清单拼装、https-only、语义校验判定器、
-//! 装载与更新两处同校——跨 rules 与 rules_update 两个契约面，故单独成文。
+//! 清理规则的验收三件套（D6 第 1 条）：语义校验判定器、装载面接线——
+//! 在线更新链已退役（2026-10-06 用户裁定：规则只随包体更新），本文件只保留装载侧契约。
 //!
 //! 各面 glob 引进来是为了让「实现搬走 / 判据改名」立刻变成编译错误，
 //! 而不是让用例静默少测一条。
 
 
 use serde_json::{Value, json};
-use std::time::Duration;
 use super::rules::*;
-use super::rules_update::*;
 use super::state::*;
-    use super::*;
-
-    /// 发布源清单的唯一拼装口是 `release_source_urls_for`（残留库共用）。
-    /// 清理库这份 const 若与它漂移（改了一个镜像、漏了另一个），在线更新会**只坏一个域**，
-    /// 而那种半坏形态最容易长期无人发现 —— 故按整条 URL 逐字钉住。
-    #[test]
-    fn 三条源与仓库内路径的拼装必须同源() {
-        let built = release_source_urls_for("src-tauri/data/cleanup-rules.json");
-        assert_eq!(built.len(), RULES_UPDATE_URLS.len(), "源条数漂移");
-        for (i, url) in RULES_UPDATE_URLS.iter().enumerate() {
-            assert_eq!(built[i], *url, "第 {i} 条源与拼装口不一致");
-        }
-        // 残留库用同一函数换路径，禁止再抄第二份清单
-        let residue = release_source_urls_for("src-tauri/data/uninstall-residue-rules.json");
-        for u in &residue {
-            assert!(u.ends_with("uninstall-residue-rules.json"), "残留源路径错: {u}");
-            assert!(u.starts_with("https://"), "源必须 https: {u}");
-        }
-    }
-
-    /// 审查 v2-L4：自定义规则源只认 https —— 明文 http 与非法协议一律进「被拒」，
-    /// 且大小写不敏感（`HTTPS://` 也要认）。
-    #[test]
-    fn custom_rules_source_is_https_only() {
-        let cfg = json!({
-            "urls": [
-                "https://example.com/rules.json",
-                "HTTPS://mirror.example.org/r.json",
-                "http://plain.example.net/r.json",
-                "ftp://nope/r.json",
-                "rules.json"
-            ]
-        });
-        let (accepted, rejected) = pick_https_urls(&cfg);
-        assert_eq!(
-            accepted,
-            vec![
-                "https://example.com/rules.json".to_string(),
-                "HTTPS://mirror.example.org/r.json".to_string()
-            ],
-            "https 源必须全部保留（大小写不敏感）: {accepted:?}"
-        );
-        assert_eq!(
-            rejected,
-            vec![
-                "http://plain.example.net/r.json".to_string(),
-                "ftp://nope/r.json".to_string(),
-                "rules.json".to_string()
-            ],
-            "非 https 源必须全部被拒: {rejected:?}"
-        );
-    }
-
-    /// 缺 `urls`（或不是数组）→ 两个列表都空，不许回退到内置源之外的隐式行为。
-    #[test]
-    fn custom_rules_source_missing_urls_is_empty() {
-        let (accepted, rejected) = pick_https_urls(&json!({ "headers": {} }));
-        assert!(accepted.is_empty() && rejected.is_empty());
-    }
 
     /// 首个差异的定位信息（行号 + 两侧原文片段）
 
@@ -76,60 +15,23 @@ use super::state::*;
     ///
 
 
+/// 版本号文案（`Number(x)||0` 与 JS String(n) 同口径）——随更新链退役后仅测试消费，收进本文件
+fn js_num_str(n: f64) -> String {
+    if !n.is_finite() {
+        return "NaN".to_string();
+    }
+    if n.fract() == 0.0 && n.abs() < 9e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
     /// 版本号文案（`Number(x)||0` 与 JS String(n) 同口径）
     #[test]
     fn version_text() {
         assert_eq!(js_num_str(js_num_or_zero(Some(&json!("42")))), "42");
         assert_eq!(js_num_str(js_num_or_zero(Some(&json!(0)))), "0");
-    }
-
-    /// 规则更新链路真实网络验证（默认 `#[ignore]`，发布前手动跑）：
-    /// 真拉内置发布源 → `http_get`（`allow_host = None`，用户自选源链路）→
-    /// `validate_remote_rules`（尺寸 → **ed25519 验签** → JSON 结构 → 条目形状 → 版本防降级）
-    /// → `rulesVersion` 可解析、原文可 JSON 解析。
-    ///
-    /// 该链路的信任边界是「验签 + 防降级」而非宿主白名单，本用例正是验证这一点。
-    /// 源不可达（无网络/私有仓库未公开）时打印原因并跳过——改用 git 回退路径的结论代替。
-    /// 执行：`cargo test -- --ignored rules_update`
-    #[test]
-    #[ignore = "需要网络；发布前手动执行"]
-    fn rules_update_chain_verify() {
-        let mut last_err = String::new();
-        let mut fetched: Option<(&str, String)> = None;
-        for url in RULES_UPDATE_URLS {
-            match http_get(url, &[], Duration::from_millis(RULES_DOWNLOAD_TIMEOUT_MS), None) {
-                Ok(t) => {
-                    fetched = Some((url, t));
-                    break;
-                }
-                Err(e) => last_err = format!("{url} -> {e}"),
-            }
-        }
-        let Some((source, text)) = fetched else {
-            // 审查 M13：这里原本 `return` —— 断网时这条发布前门禁**绿灯通过**，
-            // 而它是唯一真跑过网络 + 真验签的链路用例，"跑过了" 与 "没网" 无法区分。
-            // 发布前门禁的语义是「必须真验成」，所以拿不到源就失败，让人去处理网络/源。
-            panic!(
-                "所有发布源均不可达，规则库更新链未被真正验证（最后错误：{last_err}）。\
-                 本用例是发布前门禁：请联网后重跑 `cargo test rules_update_chain_verify -- --ignored --nocapture`，\
-                 不许把跳过状态计入通过。"
-            );
-        };
-        // current_version 传 0：只验签名/结构/形状，不做降级比较（本地版本无关）
-        let (version, ok_text) =
-            validate_remote_rules(&text, 0.0).expect("远端规则未通过 ed25519 验签/结构校验");
-        assert_eq!(ok_text, text, "校验通过时返回文本应与原文一致");
-        let parsed: Value = serde_json::from_str(&ok_text).expect("验签通过的文本必须可 JSON 解析");
-        assert!(
-            parsed.get("rulesVersion").is_some(),
-            "规则缺少 rulesVersion 字段"
-        );
-        assert!(version > 0.0, "rulesVersion 无法解析为正数（得到 {}）", version);
-        eprintln!(
-            "[rules-update] ✓ 源 {} 验签通过，rulesVersion={}",
-            source,
-            js_num_str(version)
-        );
     }
 
     // ==================== V2 P1-B0 清理库语义校验（2026-09-30） ====================
@@ -740,12 +642,10 @@ use super::state::*;
     }
 
     #[test]
-    fn 清理装载与更新两处都接同一个语义校验器() {
-        // 接线断言（口径同 tools/check-residue-rule-contract.mjs 的 E2/E4b）：数据目录与
-        // 更新链各写一套字段规则，就是"更新放行、装载拒绝"那种分叉的起点。
-        // v3 D3 起本域拆成 commands/cleanup/ 目录，断言读整个目录而不是单个文件——
-        // 装载侧在 rules.rs、更新侧在 rules_update.rs，两侧都必须在这份文本里看得见，
-        // 少一侧就等于断言静默脱网。
+    fn 清理装载面接线_数据目录与内置同一校验器() {
+        // 接线断言（口径同 tools/check-residue-rule-contract.mjs 的 E2）：数据目录与
+        // 内置副本必须各过同一道语义校验，漏一侧就等于给那一侧开豁免通道。
+        // v3 D3 起本域拆成 commands/cleanup/ 目录，断言读整个目录而不是单个文件。
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands/cleanup");
         let mut files: Vec<_> = std::fs::read_dir(dir)
             .expect("读自身源码做接线断言")
@@ -778,15 +678,6 @@ use super::state::*;
         assert!(
             builtin.contains("validate_cleanup_package(&v)"),
             "内置副本没过同一道语义校验 = 给内置开了豁免通道"
-        );
-        let remote = fn_body("fn validate_remote_rules");
-        assert!(
-            remote.contains("validate_cleanup_package(&parsed)") && remote.contains("verify_rules_text"),
-            "更新链必须复用装载侧校验器（不许另写一套字段规则）"
-        );
-        assert!(
-            !remote.contains("\"条目缺少 id/name 字段\""),
-            "更新链退回了旧的弱形状检查（只查 id/name 是否存在）"
         );
     }
 
@@ -827,12 +718,8 @@ fn 水位线高水位_两侧接线在位() {
         src.contains("watermark_high_get();") || src.contains("watermark_high_get()"),
         "rules_watermark 必须折入进程内高水位"
     );
-    // 写入侧：落盘前先抬高水位（写盘失败时本进程仍记得该版本）
-    assert!(
-        src.contains("watermark_high_raise(version);"),
-        "set_rules_watermark 必须在写盘前抬进程内高水位"
-    );
-    // 地板消费点：floor 仍取 max(builtin, rules_watermark())——rules_watermark 现含进程内记忆
+    // 地板消费点：floor 仍取 max(builtin, rules_watermark())——rules_watermark 现含进程内记忆；
+    // 写侧（set_rules_watermark）已随在线更新链退役，读侧保留。
     assert!(
         src.contains("let floor = builtin_version.max(rules_watermark());"),
         "防回滚地板的消费点漂移了"

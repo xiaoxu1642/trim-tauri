@@ -13,7 +13,6 @@
   function toast(type, msg) { window.subToast?.hintLine('acGlobalHint', type, msg); }
 
   const state = { items: [], checked: new Set(), dropped: 0, busy: false };
-  const CLASS_TEXT = { '*': '文件', 'Directory': '文件夹', 'Directory\\Background': '文件夹背景', 'Drive': '驱动器' };
 
   async function confirmChange(opts) {
     // 确认组件没加载成功 ⇒ 拒绝执行：跳过确认直接改注册表是不可接受的
@@ -53,8 +52,7 @@
       return '<tr class="' + (on ? 'finder-row-selected' : '') + '">'
         + '<td style="width:34px"><span class="checkbox' + (on ? ' checked' : '') + '" data-acheck="' + i
         + '" tabindex="0" role="checkbox" aria-checked="' + (on ? 'true' : 'false') + '"></span></td>'
-        + '<td><div class="finder-cell"><span class="finder-path-text">' + esc(it.title) + '</span></div>'
-        + '<div class="xtable-cell-muted">' + esc(CLASS_TEXT[it.class] || it.class) + ' · ' + esc(it.note || '') + '</div></td>'
+        + '<td><div class="finder-cell"><span class="finder-path-text">' + esc(it.title) + '</span></div></td>'
         + '<td style="width:120px">' + (it.installed
           ? '<span class="badge badge-ok">已写入</span>'
           : '<span class="badge">未写入</span>') + '</td>'
@@ -110,7 +108,6 @@
   async function run(op, ids) {
     state.busy = true;
     updateButtons();
-    el('acFootHint').textContent = op === 'apply' ? '正在写入…' : '正在移除…';
     try {
       const fn = op === 'apply' ? window.api.actionsWindow.apply : window.api.actionsWindow.remove;
       const r = await fn(ids);
@@ -120,12 +117,10 @@
       if (failed.length) {
         toast('warning', (op === 'apply' ? '写入' : '移除') + '完成 ' + (d.okCount || 0) + ' 项，' + failed.length + ' 项未执行：' + failed[0].message);
       } else {
-        toast('success', (op === 'apply' ? '已写入 ' : '已移除 ') + (d.okCount || 0) + ' 项');
+        toast('success', (op === 'apply' ? '已写入 ' : '已移除 ') + (d.okCount || 0) + ' 项'
+          + (op === 'apply' ? '；没在资源管理器里看到新条目？重启一次资源管理器即可' : ''));
       }
       state.checked.clear();
-      el('acFootHint').textContent = op === 'apply'
-        ? '没在资源管理器里看到新条目？重启一次资源管理器即可（HKCU 项不需要管理员）。'
-        : '命令串来自随包数据，界面只表达「选了哪些项」。';
       await load();
     } catch (e) {
       toast('error', '操作失败：' + ((e && e.message) || e));
@@ -166,7 +161,6 @@
     if (!ok) return;
     state.busy = true;
     updateButtons();
-    el('acFootHint').textContent = '脚本执行中…';
     try {
       const r = await window.api.actionsWindow.runScript(src);
       if (!r || r.success !== true) throw new Error((r && r.message) || '执行失败');
@@ -182,7 +176,6 @@
       toast('error', '脚本执行失败：' + ((e && e.message) || e));
     } finally {
       state.busy = false;
-      el('acFootHint').textContent = '命令串来自随包数据，界面只表达「选了哪些项」。';
       updateButtons();
     }
   }

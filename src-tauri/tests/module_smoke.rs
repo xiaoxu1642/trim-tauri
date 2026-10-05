@@ -347,25 +347,6 @@ fn pending_add_rejects_protected_paths_and_over_limit() {
 }
 
 /// A3 两条残留库更新命令都是 MAIN 档（唯一调用方是主窗卸载页）。
-///
-/// 快速组这里**只断子窗被拒杀**，不测主窗正向特征：这两条命令过了档位就要出网
-/// （更新还会写数据目录），属 §4.1 纪律② 的「外呼/触盘」，正例落在
-/// `cargo test --lib -- --ignored` 的 `residue_update_chain_verify`（只读不落盘）。
-/// 子窗这条断言本身也能证明命令已注册：未注册时回执是「命令不存在」而不是来源校验失败。
-#[test]
-fn residue_rule_update_channels_are_main_only() {
-    for cmd in ["uninstall_check_residue_version", "uninstall_update_residue_rules"] {
-        for label in sub_windows() {
-            let w = window_with_label(label);
-            let text = invoke_text(&w, cmd, json!({}));
-            assert!(
-                text.contains("IPC 来源校验失败"),
-                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
-            );
-        }
-    }
-}
-
 /// C2 两条应用数据遗留命令 v0.7.0 起是 `residue` 副窗专属档。
 ///
 /// 正向特征只走 `orphan_ignore` 的参数校验早退路（格式错即返回，不 load/save 所有权
@@ -1438,13 +1419,14 @@ fn optimizer_restore_frequency_子窗一律拒杀() {
     }
 }
 
-/// 2026-10-06 任务四：空目录忽略名单三命令 + 清理计划导出 —— 档位与负例。
+/// 2026-10-06 任务四：空目录忽略名单三命令 —— 档位与负例。
+/// （清理计划导出已随 2026-10-06 用户裁定全链路退役，本用例中的相应段落同撤。）
 ///
-/// 全部 MAIN 档：① 子窗一律拒杀（零副作用）；② 主窗负例都在**对话框 / 写盘之前**
-/// 被拒（不存在的目录 / 空清单 / 不在名单的条目）—— 快速组零副作用；
-/// 真写名单与真弹保存对话框的路径留给真机验收（§4.1：对话框 MockRuntime 覆盖不到）。
+/// 全部 MAIN 档：① 子窗一律拒杀（零副作用）；② 主窗负例都在**写盘之前**
+/// 被拒（不存在的目录 / 不在名单的条目）—— 快速组零副作用；
+/// 真写名单的路径留给真机验收（§4.1：MockRuntime 覆盖不到真实 IO 后果）。
 #[test]
-fn finder_ignore与清理计划导出_档位与负例() {
+fn finder_ignore名单_档位与负例() {
     // ① 子窗一律拒杀
     for label in sub_windows() {
         let w = window_with_label(label);
@@ -1452,7 +1434,6 @@ fn finder_ignore与清理计划导出_档位与负例() {
             ("finder_ignore_folder", json!({ "path": "C:\\__trim_test_missing__" })),
             ("finder_ignore_list", json!({})),
             ("finder_ignore_remove", json!({ "path": "C:\\__trim_test_missing__" })),
-            ("cleanup_export_plan", json!({ "text": "x" })),
         ] {
             let text = invoke_text(&w, cmd, args);
             assert!(
@@ -1469,10 +1450,7 @@ fn finder_ignore与清理计划导出_档位与负例() {
     let res = invoke(&w, "finder_ignore_remove", json!({ "path": "C:\\__trim_test_missing__" }));
     assert_eq!(res["success"], json!(false), "不在名单的条目必须拒: {res}");
     assert_eq!(res["missing"], json!(true), "拒绝形态应为 missing: {res}");
-    // ④ 空清单在保存对话框之前被拒（零副作用）
-    let res = invoke(&w, "cleanup_export_plan", json!({ "text": "   " }));
-    assert_eq!(res["success"], json!(false), "空清单必须拒: {res}");
-    // ⑤ 读侧（只读，零副作用）：主窗越过档位
+    // ④ 读侧（只读，零副作用）：主窗越过档位
     let res = invoke(&w, "finder_ignore_list", json!({}));
     common::assert_guard_passed(&res.to_string(), "主窗调 finder_ignore_list", &["success"]);
 }

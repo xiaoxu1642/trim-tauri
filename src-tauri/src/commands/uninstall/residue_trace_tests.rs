@@ -132,30 +132,6 @@ use super::residue_update::*;
         assert!(diff.is_empty(), "语义校验与夹具不一致：\n{}", diff.join("\n"));
     }
 
-    /// A3 真网门禁（照 `cleanup::tests::rules_update_chain_verify` 的形状）：
-    /// 逐源取包 → 验签 → 语义校验 → 版本比对，**只读不落盘**（不写用户数据目录）。
-    /// 取不到源必须失败，不许 SKIP 当通过——`check-ps-substitution` 恒 SKIP 变死门禁是前车之鉴。
-    /// 跑法：`cargo test --lib -- --ignored`
-    #[test]
-    #[ignore = "需要网络；发布前手动执行（只取包并校验，不落盘）"]
-    fn residue_update_chain_verify() {
-        let sources = residue_sources();
-        assert!(!sources.is_empty(), "残留库没有可用更新源，本用例失去意义");
-        let (version, text, source) =
-            fetch_verified_residue_package().expect("至少一条源应能取到合签的残留规则包");
-        assert!(version > 0.0, "rulesVersion 必须解析出来: {version}");
-        assert!(text.contains("\"rules\""), "取回的不是规则包: {}B", text.len());
-        let builtin_ver = serde_json::from_str::<Value>(BUILTIN_RESIDUE_RULES_JSON)
-            .ok()
-            .and_then(|b| b.get("rulesVersion").and_then(|x| x.as_f64()))
-            .unwrap_or(0.0);
-        assert!(
-            version >= builtin_ver,
-            "线上包版本({version})低于内置副本({builtin_ver})，发布链没跟上"
-        );
-        println!("[residue-update] 命中源={source} rulesVersion={version} 字节={}", text.len());
-    }
-
     // ==================== C2 所有权状态机 / C3 阈值表 ====================
 
     fn ids_of(list: &[&str]) -> HashSet<String> {
@@ -979,73 +955,6 @@ use super::residue_update::*;
             matches!(classify_residue_op("folder", &sys32), OpVerdict::Ready(_)),
             "真实系统目录被误拦: {sys32}"
         );
-    }
-
-    /// A3 更新链的校验序（尺寸 → 验签 → JSON → **语义** → 版本）。
-    /// 正例直接用内置库原文：它是签过名的合法包，于是「happy path」不必联网、
-    /// 也不需要在测试里造第二把私钥（私钥只在发布机 `~/.trim-signing/`）。
-    #[test]
-    fn residue_remote_package_gate_accepts_the_signed_builtin() {
-        let builtin = include_str!("../../../data/uninstall-residue-rules.json");
-        let ver = verify_residue_remote_text(builtin, 0.0).expect("内置签名库必须能过更新链校验");
-        assert!(ver > 0.0, "版本必须解析出来: {ver}");
-        // 防降级：下限高于它就必须拒（重放旧签名包的路径）
-        let err = verify_residue_remote_text(builtin, ver + 1.0).expect_err("低于下限必须拒绝");
-        assert!(err.contains("防回滚下限"), "文案要指向防降级，实测: {err}");
-    }
-
-    /// v2-L4P-15（C-2）：运行期契约必须等于 rule-schema.json 的值（单一真源自证）。
-    /// 本测试用具体数值锚定 schema 关键项——谁改了 tools/rule-schema.json 的数值而
-    /// 没有同步重签与登记，这里立即判红；反过来装载侧与 Node 门禁读的是同一份字节，
-    /// 不可能再出现「改 schema 只动门禁、运行期纹丝不动」的双源分叉。
-    #[test]
-    fn residue_contract_matches_rule_schema_values() {
-        assert!(crate::engine::rule_schema::available(), "嵌入契约表必须可解析");
-        let c = residue_contract();
-        // 数值锚点（与 tools/rule-schema.json residue.limits 逐项对拍）
-        assert_eq!(c.max_rules, 400, "maxRules 漂移：改 schema 须同步 review 门禁与 readme");
-        assert_eq!(c.max_residue, 64, "maxResiduePerRule 漂移");
-        assert_eq!(c.max_group_items, 32, "maxGroupItems 漂移");
-        assert_eq!(c.max_target_len, 260, "maxTargetLen 漂移");
-        assert_eq!(c.max_text_len, 200, "maxTextLen 漂移");
-        assert_eq!(c.max_segments, 32, "maxSegments 漂移");
-        // 词汇锚点：token 集与 kind 集非空且含代表项（防止 schema 键改名后静默取空集
-        // ——空集会让校验器整包拒绝，属 fail-closed 安全方向，但会瞬间停用残留域）
-        assert!(c.tokens.iter().any(|t| t == "APPDATA"), "residue tokens 必须含 APPDATA");
-        assert!(c.tokens.iter().any(|t| t == "SYSTEMROOT"), "residue tokens 必须含 SYSTEMROOT");
-        assert_eq!(c.rule_kinds, vec!["folder", "file", "shortcut", "reg_key", "reg_value"], "ruleKinds 漂移");
-        assert_eq!(c.match_groups, vec!["displayName", "publisher", "uninstallKey"], "matchGroups 漂移");
-        // 内置库必须能通过语义校验（空契约/漂移都会在此暴露）
-        let builtin: Value = serde_json::from_str(BUILTIN_RESIDUE_RULES_JSON).expect("内置库 JSON");
-        validate_residue_package(&builtin).expect("内置库必须通过语义校验（契约快照与 schema 同源）");
-    }
-
-    /// 尺寸闸的两侧都要能判红；且**不共用清理域的 4096B 下限**——
-    /// 残留库只有 6 条规则，共用会把合法的小包当异常响应拒了。
-    #[test]
-    fn residue_size_gates_reject_both_ends() {
-        assert!(
-            RESIDUE_RULES_MIN_SIZE < 4096 || RESIDUE_BUILTIN_LEN / 2 >= 4096,
-            "下限与内置库量级脱节：内置 {RESIDUE_BUILTIN_LEN}B，下限 {RESIDUE_RULES_MIN_SIZE}B"
-        );
-        let small = "x".repeat(RESIDUE_RULES_MIN_SIZE - 1);
-        let e1 = verify_residue_remote_text(&small, 0.0).expect_err("过小必须拒");
-        assert!(e1.contains("过小"), "实测: {e1}");
-        let big = "x".repeat(RESIDUE_RULES_MAX_SIZE + 1);
-        let e2 = verify_residue_remote_text(&big, 0.0).expect_err("过大必须拒");
-        assert!(e2.contains("过大"), "实测: {e2}");
-    }
-
-    /// 更新链必须先过语义校验（与装载侧同一个函数）：验签通过但字段不合规的包
-    /// 不能因为「是更新流进来的」就放行——否则会出现更新放行、装载拒绝的分叉。
-    #[test]
-    fn residue_update_gate_calls_the_same_semantic_validator() {
-        // 顶层塞一个未知字段：JSON 合法、尺寸够、但语义必拒（验签会先失败，
-        // 所以这里直接断言校验器本身在这类包上判红，序位由上一条测试覆盖）
-        let mut pkg: Value = serde_json::from_str(BUILTIN_RESIDUE_RULES_JSON).unwrap();
-        pkg.as_object_mut().unwrap().insert("__smoke_extra".to_string(), json!(1));
-        let err = validate_residue_package(&pkg).expect_err("未知字段必须整包拒");
-        assert!(err.contains("未知字段"), "实测: {err}");
     }
 
     // ==================== M2 静默知识（B1 构造闸 / B2 分档 / B4 第二证据） ====================

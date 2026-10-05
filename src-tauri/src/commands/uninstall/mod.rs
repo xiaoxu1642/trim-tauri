@@ -55,7 +55,7 @@ pub use residue_deep::{uninstall_residue_deep_scan, __cmd__uninstall_residue_dee
 #[cfg(test)]
 mod residue_trace_tests;
 mod residue_update;
-pub use residue_update::{residue_rules_dir, residue_watermark, set_residue_watermark, uninstall_modify, __cmd__uninstall_modify, __tauri_command_name_uninstall_modify, uninstall_check_residue_version, __cmd__uninstall_check_residue_version, __tauri_command_name_uninstall_check_residue_version, uninstall_update_residue_rules, __cmd__uninstall_update_residue_rules, __tauri_command_name_uninstall_update_residue_rules};
+pub use residue_update::{residue_rules_dir, residue_watermark, uninstall_modify, __cmd__uninstall_modify, __tauri_command_name_uninstall_modify};
 mod services_orphan;
 mod vendor_registry;
 

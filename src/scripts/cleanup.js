@@ -1428,97 +1428,6 @@
     });
   }
 
-  // ==================== 规则库版本显示与检测（v3.2.1 / v3.3.0 三段版本） ====================
-  // 「更新规则库」右侧显示当前规则库版本；首次进入磁盘清理页自动检测远端
-  // （远端验签后只读版本号，不落盘）；有更新 toast 提示；每次会话只自动检测一次。
-  // P1 版本语义收口（规则库最终优化方案 2026-09-27）：winapp2 两段从主要状态文案
-  // 下线——winapp2 只是历史素材基线，不再是扩库成果指标，主文案只保留当前规则库
-  // 版本。winapp2Version 字段本身保留兼容（JSON / IPC resp / 远端检测逻辑均不动）。
-  let versionChecked = false;
-
-  function setVersionInfo(curRules, hasUpdate) {
-    const el = document.getElementById('rulesVersionInfo');
-    if (!el) return;
-    // 「无需更新」只看主规则库远端检测结论（hasUpdate === false）；检测未跑/失败不显徽标
-    const base = `（当前规则库版本：${curRules ?? '--'}）`;
-    el.textContent = hasUpdate === false ? `${base} · 无需更新` : base;
-  }
-
-  function onPageEnter() {
-    if (versionChecked) return;
-    versionChecked = true;
-    if (!window.api?.cleanup?.checkRulesVersion) return;
-    window.api.cleanup.checkRulesVersion().then((resp) => {
-      if (resp && resp.success) {
-        setVersionInfo(resp.currentVersion, resp.hasUpdate);
-        if (resp.hasUpdate) {
-          window.app?.toast('info', `规则库有新版本：v${resp.remoteVersion}（当前 v${resp.currentVersion}），可点击「更新规则库」升级`, 6000);
-        }
-      } else {
-        // 检测失败（网络/源不可达）：本地版本照常展示，不打扰
-        setVersionInfo(resp?.currentVersion ?? null);
-      }
-    }).catch(() => {});
-  }
-
-  // 规则库更新进度 toast（0-100%）：主进程流式推送下载进度，完成后弹「更新完成」
-  let rulesProgressToastEl = null;
-  function showRulesProgressToast() {
-    dismissRulesProgressToast();
-    const container = document.getElementById('toastContainer');
-    if (!container) return;
-    const el = document.createElement('div');
-    el.className = 'toast info rules-progress-toast';
-    el.innerHTML = `
-      <div class="toast-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg></div>
-      <div class="toast-message"><div class="toast-title">正在更新规则库</div><div data-role="pct">0%</div></div>`;
-    container.appendChild(el);
-    rulesProgressToastEl = el;
-  }
-  function updateRulesProgressToast(pct) {
-    if (!rulesProgressToastEl) return;
-    const t = rulesProgressToastEl.querySelector('[data-role="pct"]');
-    if (t) t.textContent = `${pct}%`;
-  }
-  function dismissRulesProgressToast() {
-    rulesProgressToastEl?.remove();
-    rulesProgressToastEl = null;
-  }
-
-  // P2：规则库在线更新（数据目录规则优先于内置规则），成功后重载规则并重渲染
-  async function updateRules() {
-    const btn = document.getElementById('btnUpdateRules');
-    if (!window.api?.cleanup?.updateRules) {
-      window.app?.toast('warning', '当前环境不支持在线更新规则库');
-      return;
-    }
-    if (btn) btn.disabled = true;
-    showRulesProgressToast();
-    const unbindProgress = window.api.cleanup.onRulesDownloadProgress?.((d) => {
-      if (d && typeof d.percent === 'number') updateRulesProgressToast(d.percent);
-    });
-    try {
-      const resp = await window.api.cleanup.updateRules();
-      if (resp && resp.success) {
-        updateRulesProgressToast(100);
-        setTimeout(dismissRulesProgressToast, 500);
-        window.app?.toast('success', `规则库更新完成（当前版本为：${resp.rulesVersion}）`);
-        hiddenIds.clear();
-        await loadRulesFromMain();
-        setVersionInfo(resp.rulesVersion, false); // 本地已是最新（更新成功即无更新）
-      } else {
-        dismissRulesProgressToast();
-        window.app?.toast('error', (resp && resp.message) || '规则库更新失败');
-      }
-    } catch (e) {
-      dismissRulesProgressToast();
-      window.app?.toast('error', '规则库更新失败: ' + e.message);
-    } finally {
-      unbindProgress?.();
-      if (btn) btn.disabled = false;
-    }
-  }
-
   // ==================== P3 条目明细弹窗 ====================
   // 枚举单个条目将删除的具体文件清单（只读，最多展示 600 条），支持复制完整清单。
   // v3.2.0 弹窗统一批次：骨架改由 modal.js 工厂生成（Esc/遮罩/× 关闭统一）
@@ -1790,52 +1699,6 @@
 
   // 导出「本次将清理」的 Markdown 计划清单（2026-10-06 任务四）：扫描勾选后、执行前
   // 一键另存（Rust 侧走保存对话框，口径同日志导出）。只读扫描结果与勾选状态，不触删除链。
-  function selectedItemsForExport() {
-    const out = [];
-    const collect = (items) => {
-      for (const it of items || []) {
-        if (selectedIds.has(it.id)) out.push(it);
-      }
-    };
-    for (const group of Object.values(CATEGORIES)) {
-      if (group.subGroups) group.subGroups.forEach(sg => collect(sg.items));
-      else collect(group.items);
-    }
-    return out;
-  }
-
-  async function exportPlan() {
-    if (!window.api?.cleanup?.exportPlan) return;
-    const items = selectedItemsForExport();
-    if (!items.length) {
-      window.app?.toast('warning', '请先勾选要清理的条目（导出的是你当前勾选的计划）');
-      return;
-    }
-    const total = items.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
-    const now = new Date();
-    const p = n => String(n).padStart(2, '0');
-    const stamp = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`;
-    const cell = (s) => String(s == null ? '' : s).replace(/\|/g, '\\|');
-    const lines = [
-      '# Trim 清理计划',
-      '',
-      `> 生成时间：${stamp} · 计划清理 ${items.length} 个条目 · 预计释放 ${formatSize(total)}`,
-      '> 本清单仅供核对，尚未执行任何删除；实际释放量以删除后实测为准。',
-      '',
-      '| 条目 | 类别 | 风险 | 预计释放 |',
-      '|---|---|---|---|',
-      ...items.map(it => `| ${cell(it.name || it.id)} | ${cell(NATURE_LABELS[it.nature] || '')} | ${cell(RISK_LABELS[it.risk] || it.risk || '')} | ${formatSize(sizeNumber(scanResults.get(it.id)?.size))} |`),
-      '',
-    ];
-    try {
-      const resp = await window.api.cleanup.exportPlan(lines.join('\n'));
-      if (resp && resp.success) window.app?.toast('success', '已导出：' + (resp.path || ''));
-      else window.app?.toast('info', (resp && resp.message) || '导出失败');
-    } catch (e) {
-      window.app?.toast('error', '导出失败: ' + ((e && e.message) || e));
-    }
-  }
-
   function init() {
     renderCategoryList();
     updateUI();
@@ -1843,9 +1706,7 @@
 
     document.getElementById('btnScan')?.addEventListener('click', scan);
     document.getElementById('btnClean')?.addEventListener('click', clean);
-    document.getElementById('btnExportPlan')?.addEventListener('click', exportPlan);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
-    document.getElementById('btnUpdateRules')?.addEventListener('click', updateRules);
     document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
@@ -1902,8 +1763,6 @@
     clean,
     formatSize,
     MOCK_SIZES,
-    // v3.2.1：首次进入磁盘清理页自动检测规则库云端版本（会话内仅一次）
-    onPageEnter,
     // U1-d：一级「备份还原」页的进页钩子（app.js switchPage 调）
     onBackupsEnter: renderBackupsPage,
     // 审查 4-2：供 app.js 优雅关闭前判断清理任务是否在执行（执行中最长等待 10 分钟）

@@ -29,7 +29,6 @@
 //   appearance_set_material / appearance_set_material_enabled ·
 //   bench_history_add / bench_history_clear / bench_history_delete ·
 //   realtime_report_save / realtime_report_clear / realtime_report_delete ·
-//   uninstall_appx_logo · cleanup_check_rules_version
 //
 // **本批刻意不改这些档位**。理由三条：
 //   1. 改档会锁死或放开功能，是 AGENTS §3「M1~M3 教训」点名的方向性风险，必须先查
@@ -81,12 +80,10 @@ const MUST_MAIN = [
   'appearance_bg_list',
   'appearance_bg_open_dir',
   'cleanup_execute',
-  'cleanup_export_plan', // 2026-10-06 任务四：清理计划清单另存（保存对话框 + 写盘，主窗档）
   'cleanup_kill_locked_processes',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
   'cleanup_retry_failed_delete',
-  'cleanup_update_rules',
   'contextmenu_open_in_regedit', // v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC
   'contextmenu_remove',
   'contextmenu_restart_explorer',
@@ -142,8 +139,6 @@ const MUST_MAIN = [
   // v0.7.0：残留链 8 条（三链扫描 / 执行 / 不再提示 / 重启后删除三件套）从 MAIN 迁到
   // **窄窗口集** `guard::RESIDUE_WINDOWS`，登记口在下面 MUST_WINDOWSET —— 面板整块搬进
   // residue 副窗后主窗不再调它们，留在 MAIN 会让副窗每次 IPC 判越权（§3 M1~M3）。
-  'uninstall_check_residue_version',
-  'uninstall_update_residue_rules',
   'uninstall_dir_size',
   // D1 还原入口：列表也走 MAIN（与 restore 同一弹窗，没必要放行子窗），
   // restore 会 reg import 写注册表，必须主窗专属 + 危险确认。
@@ -332,7 +327,6 @@ const MUST_READONLY = [
   'bench_history_delete', // 疑点：删测速历史
   'bench_history_list',
   'cleanup_check_locked',
-  'cleanup_check_rules_version', // 疑点：写规则版本戳
   'cleanup_file_backup_list',
   'cleanup_item_detail',
   'cleanup_reg_backup_list',

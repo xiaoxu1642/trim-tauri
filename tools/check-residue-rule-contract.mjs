@@ -11,6 +11,7 @@
 //      target 过文件形状与**注册表硬否决**判定；note 非空（面板 reason 要展示）；未知字段整包拒
 //   D. 签名：Ed25519 验签通过（与 sign-cleanup-rules.mjs 同密钥同规范化）
 //   E. 内置副本接线：commands/uninstall/ 目录（装载侧在 residue_update.rs）必须 include_str! 本文件
+//      （E4-E6 更新链接线断言已随在线更新链退役 —— 2026-10-06 用户裁定：规则只随包体更新）
 //   F. 夹具对拍（A1/A2）：tools/fixtures/residue-contract.json 的 regVectors 与 packages
 //      两侧各自独立实现同一套判定 —— 本文件**不调用** Rust，靠夹具钉口径（方案 §4.3 第三步）。
 //      任一侧口径漂移，夹具立刻判红；新增保护类别必须同时补夹具反例。
@@ -447,37 +448,6 @@ function fnBody(text, header) {
   const j = text.indexOf('\n}\n', i);
   return j < 0 ? '' : text.slice(i, j);
 }
-
-// A3 更新链的接线断言：远程包校验必须复用装载侧那个语义校验器。
-// 「更新放行、装载拒绝」这种分叉两边都觉得自己对，只有钉住调用关系才发现得了。
-const verifyFn = fnBody(rsText, 'fn verify_residue_remote_text');
-check(verifyFn.length > 200, 'E4a. 更新链的远程校验函数存在且非空');
-check(
-  /validate_residue_package\(&parsed\)/.test(verifyFn),
-  'E4b. 远程包校验调用同一个语义校验器（不许在更新侧另写一套字段规则）',
-);
-check(
-  /verify_rules_text/.test(verifyFn) && /rulesVersion/.test(verifyFn),
-  'E4c. 远程包校验序里验签与版本防降级都在',
-);
-const updateFn = fnBody(rsText, 'pub async fn uninstall_update_residue_rules');
-check(
-  /atomic_write_file\(&target, text\.as_bytes\(\)\)/.test(updateFn),
-  'E5a. 更新落盘走字节级原子写（重序列化 JSON 会让 _sig 验的不是签的那份字节，审查 M10）',
-);
-check(
-  !/serde_json::to_string|to_string_pretty/.test(updateFn),
-  'E5b. 更新落盘禁止重新序列化规则文本',
-);
-check(
-  /set_residue_watermark\(/.test(updateFn),
-  'E5c. 更新成功后必须抬升水位线（防回滚链不能只读不写）',
-);
-const checkFn = fnBody(rsText, 'pub async fn uninstall_check_residue_version');
-check(
-  checkFn.length > 100 && !/atomic_write_file/.test(checkFn),
-  'E6. 「检查版本」命令不得写盘（只读语义，别顺手改成静默自动更新）',
-);
 
 // ---- F. 夹具对拍：与 Rust 运行期校验器共用同一组正反例 ----
 let fixture = null;

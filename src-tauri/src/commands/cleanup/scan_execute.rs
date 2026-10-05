@@ -14,7 +14,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use tauri::WebviewWindow;
-use tauri_plugin_dialog::DialogExt;
 use trim_finder::cleanup_scan;
 use super::rules::*;
 use super::state::*;
@@ -1071,48 +1070,6 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
     json!({ "success": true, "killed": killed, "failed": failed })
 }
 
-/// cleanup:export-plan —— 把「本次计划删除」的 Markdown 清单另存到用户选定位置
-/// （2026-10-06 任务四）。内容由渲染层从扫描结果与勾选状态生成；本命令只做
-/// **保存对话框 + 写盘**（与 `log:export` 同一口径——Tauri 无浏览器下载面，
-/// 「纯前端导出」在本仓没有既有落点，故按既有口径补这一条窄命令）。
-///
-/// 安全面：文本上限 2MiB、只写 UTF-8 文本、落点一律由系统保存对话框选定
-/// （用户显式动作）；不接受无对话框的直写路径，也不落任何自动目录。
-#[tauri::command]
-pub async fn cleanup_export_plan<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    window: WebviewWindow<R>,
-    text: Option<String>,
-) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    let text = text.unwrap_or_default();
-    if text.trim().is_empty() {
-        return json!({ "success": false, "message": "没有可导出的内容（先扫描并勾选要清理的条目）" });
-    }
-    if text.len() > 2 * 1024 * 1024 {
-        return json!({ "success": false, "message": "清单内容过大（上限 2MB）" });
-    }
-    let file = app
-        .dialog()
-        .file()
-        .set_title("导出清理计划")
-        .set_file_name(format!("Trim-清理计划-{}.md", crate::engine::now_ms()))
-        .add_filter("Markdown", &["md"])
-        .blocking_save_file();
-    let Some(path) = file else {
-        return json!({ "success": false, "message": "已取消" });
-    };
-    let dest = match path.into_path() {
-        Ok(p) => p,
-        Err(e) => return json!({ "success": false, "message": format!("无效的保存路径: {e}") }),
-    };
-    match std::fs::write(&dest, text.as_bytes()) {
-        Ok(()) => json!({ "success": true, "path": dest.to_string_lossy() }),
-        Err(e) => json!({ "success": false, "message": format!("写入失败: {e}") }),
-    }
-}
 
 #[cfg(test)]
 mod retry_accounting_tests {

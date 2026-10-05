@@ -341,7 +341,6 @@
     // （页面 DOM 是 display 切换、不重建）。
     if (pageName === 'quickcmds') initModuleByName('quickcmds');
     // v3.2.1：首次进入磁盘清理页自动检测规则库云端版本（右上角 toast 提示更新）
-    if (pageName === 'cleanup') window.cleanup?.onPageEnter?.();
     // U1-d：一级「备份还原」页（cleanup.js 是首屏脚本，无需懒加载；每次进页重读列表）
     if (pageName === 'backups') window.cleanup?.onBackupsEnter?.();
     if (pageName === 'memoryclean') {

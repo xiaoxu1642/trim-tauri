@@ -57,6 +57,10 @@ const RETIRED = {
   'settings:save': 'v2-F4（2026-09-26）：零调用方 + 无 UI 面 + 写入面在 models:save，整链摘除',
   'pwsh:prepare': 'v2-M15/B11（2026-09-26）：D4 孤儿，且 Tauri 轨无内置运行时可准备，与 pwsh:status 完全重复',
   'pwsh:status': 'v2-R1（2026-10-01）：右键图标改原生 ExtractIconExW 后，PS7 候选链与 pwshruntime.rs 整条退役，本应用不再启动 pwsh.exe',
+  'cleanup:update-rules': '2026-10-06（用户裁定）：规则库在线更新全链路退役，规则只随包体更新；cleanup 域 rules_update.rs 整文件删除',
+  'cleanup:check-rules-version': '2026-10-06（用户裁定）：同上，检测链随更新链一并退役（版本徽标 UI 同撤）',
+  'uninstall:check-residue-version': '2026-10-06（用户裁定）：残留规则库在线更新全链路退役（更新源枚举与网络校验一并删除，装载侧保留）',
+  'uninstall:update-residue-rules': '2026-10-06（用户裁定）：同上；防回滚水位线写侧同撤，读侧保留',
   // D4 基线清零（2026-09-28，用户拍板「零引用功能全部清除」）：六条孤儿整链摘除
   // （命令 fn + lib.rs 注册 + CHANNEL_MAP + api 包装器一并删除；shutdown:begin/complete
   // 保留为刻意登记的扩展点，见 D4_ORPHANS）
@@ -98,8 +102,6 @@ const TAURI_ADDED = {
   'uninstall:batch-restore': 'H1（2026-09-29）：整批还原文件内容（往磁盘写，主窗档）',
   'cleanup:file-backup-list': 'C-4（2026-09-28）：永久删批次文件备份清单（2026-09-28 拍板补删前备份）',
   'cleanup:file-backup-restore': 'C-4（2026-09-28）：文件备份拷回原路径（主窗档）',
-  'uninstall:check-residue-version': 'A3/M3（2026-09-28）：残留规则库版本检查（上游无残留库热更新能力）',
-  'uninstall:update-residue-rules': 'A3/M3（2026-09-28）：残留规则库在线更新（主窗档，显式动作不做定时）',
   'uninstall:orphan-scan': 'C2/M4（2026-09-28）：孤儿应用数据扫描（上游无所有权历史这一层）',
   'uninstall:orphan-ignore': 'C2/M4（2026-09-28）：把某历史 owner 记入忽略清单（同上）',
   'uninstall:reg-backup-list': 'D1/M5（2026-09-28）：卸载域注册表备份列表（此前备份只写不读）',
@@ -128,7 +130,6 @@ const TAURI_ADDED = {
   'finder:ignore-folder': '任务四（2026-10-06）：空目录「忽略此文件夹」持久化忽略（写 app_data 名单；上游 Electron 只有读侧没有管理入口）',
   'finder:ignore-list': '任务四（2026-10-06）：忽略名单弹窗的读侧（路径 + 是否存在；上游无此面）',
   'finder:ignore-remove': '任务四（2026-10-06）：从忽略名单移除一条（上游无此面）',
-  'cleanup:export-plan': '任务四（2026-10-06）：清理计划清单「扫描勾选后导出 Markdown」（保存对话框口径同 log:export；上游无此能力）',
 };
 
 function collect(set, re, text) {
@@ -394,7 +395,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'bench_history_delete',
   'bench_history_list',
   'cleanup_check_locked',
-  'cleanup_check_rules_version',
   'cleanup_file_backup_list',
   'cleanup_item_detail',
   'cleanup_reg_backup_list',

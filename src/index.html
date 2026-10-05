@@ -283,8 +283,9 @@
           <button class="filter-tab" data-cleanup-view="cleanup-analyze" role="tab" aria-selected="false">磁盘分析</button>
         </div>
 
-        <!-- 各子视图操作行：随分段切换显示，与分段栏保持齐平（窗口界面升级3） -->
-        <div class="cleanup-toolbar-actions active" data-actions-for="cleanup">
+        <!-- 各子视图操作行：随分段切换显示；「主要」视图的操作与分段栏同行、恒右对齐（2026-10-06 用户裁定：
+             导出计划与更新规则库已全链路退役，规则只随包体更新） -->
+        <div class="cleanup-toolbar-actions cleanup-toolbar-actions--inline active" data-actions-for="cleanup">
           <button class="btn btn-secondary" id="btnSelectAll">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
             <span id="btnSelectAllText">全选</span>
@@ -297,17 +298,6 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
             <span>开始清理</span>
           </button>
-          <button class="btn btn-secondary" id="btnExportPlan" type="button" data-tip="把本次将清理的条目、预计释放空间导出为 Markdown 清单（不会执行任何删除）">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 7V3.5L18.5 9H13zM8 13h8v2H8v-2zm0 4h8v2H8v-2z"/></svg>
-            <span>导出计划</span>
-          </button>
-          <button class="btn btn-secondary" id="btnUpdateRules" data-tip="从发布源下载最新清理规则库（数据目录规则优先于内置规则，支持版本校验与防降级）">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-            <span>更新规则库</span>
-          </button>
-          <div class="clean-inline-opts" id="cleanInlineOpts">
-            <span class="rules-version-info" id="rulesVersionInfo" data-tip="当前=本机规则库版本；云端=官方发布源上的最新版本（进入本页自动联网检测，连不上发布源时不显徽标）。winapp2 基线版本已从主文案下线，字段保留兼容">（当前规则库版本：--）</span>
-          </div>
         </div>
         <div class="cleanup-toolbar-actions" data-actions-for="cleanup-dups">
           <button class="btn btn-secondary" id="dupBtnSelect">
@@ -528,7 +518,12 @@
             <button class="filter-tab active" data-un-scope="user" role="tab" aria-selected="true">用户应用</button>
             <button class="filter-tab" data-un-scope="windows" role="tab" aria-selected="false">Windows应用</button>
           </div>
-          <div class="cleanup-toolbar-actions active">
+          <div class="cleanup-toolbar-actions cleanup-toolbar-actions--inline active">
+            <label class="toggle-switch" for="uninstallRestoreToggle" data-tip="卸载前先创建一个系统还原点（可能需要数十秒）；创建失败只提示、不拦截卸载。系统还原未启用时此开关无效。">
+              <input type="checkbox" id="uninstallRestoreToggle" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-label">卸载前建还原点</span>
+            </label>
             <button class="btn btn-secondary" id="uninstallBtnRefresh">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
               <span>刷新列表</span>
@@ -542,17 +537,6 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
               <span>清理报告</span>
             </button>
-            <button class="btn btn-secondary" id="btnResidueRulesUpdate" data-tip="检查并更新「已知程序残留规则库」（签名包，只影响候选建议；删除仍要逐项勾选并复核，不做定时自动更新）">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5 0 .88-.29 1.7-.77 2.37l1.46 1.46C18.9 15.84 19.5 14.5 19.5 13c0-3.87-3.13-7-7.5-7zm0 14c-2.76 0-5-2.24-5-5 0-.88.29-1.7.77-2.37L6.31 11.17C5.1 12.16 4.5 13.5 4.5 15c0 3.87 3.13 7 7.5 7v3l4-4-4-4v3z"/></svg>
-              <span>更新残留规则</span>
-            </button>
-            <!-- §2.3（2026-10-06 拍板）：卸载前可选创建系统还原点。默认关（对齐「还原包建包默认关」口径）；
-                 创建失败只提示、不拦卸载——还原点是保护，不是前置条件 -->
-            <label class="toggle-switch" for="uninstallRestoreToggle" data-tip="卸载前先创建一个系统还原点（可能需要数十秒）；创建失败只提示、不拦截卸载。系统还原未启用时此开关无效。">
-              <input type="checkbox" id="uninstallRestoreToggle" />
-              <span class="toggle-track"><span class="toggle-thumb"></span></span>
-              <span class="toggle-label">卸载前建还原点</span>
-            </label>
             <!-- B1（2026-09-28 拍板）：静默勾选框已删——默认静默优先、失败自动回退原厂 UI -->
             <!-- 应用计数改由列表表头「程序」列承载（2026-09-30 用户要求），此处不再重复一处 -->
           </div>

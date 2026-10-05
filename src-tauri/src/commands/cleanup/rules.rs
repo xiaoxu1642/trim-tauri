@@ -19,37 +19,6 @@ use super::state::*;
 
 /// 内置规则库（gen 产物，与上游 `src/data/cleanup-rules.json` 逐字节一致；本仓副本已移出 frontendDist（审查 M14），故编译期从 `src-tauri/data/` 取）
 pub(super) const BUILTIN_RULES_JSON: &str = include_str!("../../../data/cleanup-rules.json");
-/// 内容下限/上限（审查 1-1：先拦超大响应再解析，防 OOM）
-pub(super) const RULES_MIN_SIZE: usize = 4096;
-pub(super) const RULES_MAX_SIZE: usize = 2 * 1024 * 1024;
-/// 单源超时（毫秒）
-pub(super) const RULES_DOWNLOAD_TIMEOUT_MS: u64 = 15000;
-/// 发布源按序回退：GitHub raw → jsDelivr → gh-proxy
-///
-/// 审查 v2-C1：这三条原本全指向 `xiaoxu1642/Trim`（Electron 轨）的 `src/data/…`，实测该路径
-/// 在 `main`/`HEAD` 两个 ref 上都 **404**（同仓库的 `readme.md` 是 200，所以不是仓库或分支问题，
-/// 是这个文件根本没在那边发布）；而规则库的真源现在在本仓库 `src-tauri/data/`，同三条源的
-/// 新路径实测 `jsDelivr` 与 `gh-proxy` 均 **200**。指向不存在的源意味着**在线规则更新一直是
-/// 全源失败**、只能靠内置副本，而这条回退链看起来"配好了"——正是最容易被忽略的形态。
-pub(super) const RULES_UPDATE_URLS: [&str; 3] = [
-    "https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/src-tauri/data/cleanup-rules.json",
-    "https://cdn.jsdelivr.net/gh/xiaoxu1642/trim-tauri@main/src-tauri/data/cleanup-rules.json",
-    "https://gh-proxy.com/https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/src-tauri/data/cleanup-rules.json",
-];
-
-/// 三条发布源对**仓库内路径**的 URL 形态。清理库与残留库共用这一个函数而不是各写一份清单：
-/// 镜像的路径结构各不相同（raw 走 `/main/<路径>`、jsDelivr 走 `/gh/<仓库>@main/<路径>`、
-/// gh-proxy 是前缀套娃），两份常量抄下来必然漂移（决策清单 D6）。
-/// 漂移由测试 `三条源与仓库内路径的拼装必须同源` 钉住。
-pub(crate) fn release_source_urls_for(rel_path: &str) -> Vec<String> {
-    vec![
-        format!("https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/{rel_path}"),
-        format!("https://cdn.jsdelivr.net/gh/xiaoxu1642/trim-tauri@main/{rel_path}"),
-        format!(
-            "https://gh-proxy.com/https://raw.githubusercontent.com/xiaoxu1642/trim-tauri/main/{rel_path}"
-        ),
-    ]
-}
 /// 可删文件清单防呆上限（D13）
 pub(super) const PLAN_CAP_PER_ITEM: usize = 100_000;
 pub(super) const PLAN_CAP_TOTAL: usize = 1_000_000;
@@ -59,8 +28,7 @@ pub(super) const PLAN_CAP_TOTAL: usize = 1_000_000;
 /// 而扫描侧已有 `PLAN_CAP_PER_ITEM` / `PLAN_CAP_TOTAL` 防呆；这里再卡一道条数上限，
 /// 于是「一次能删多少」的边界是**显式常量**而不是埋在判断里的 500。
 /// 未做的事：总字节数上限**没有加**——那会拒绝合法的大清理（几十 GB 缓存一次清完是
-/// 正常用法），属产品取舍，需拍板后再动；当前靠 `RULES_MAX_SIZE` 拦的是**规则文件**体积，
-/// 与被清理内容的体积不是一回事，别混为一谈。
+/// 正常用法），属产品取舍，需拍板后再动。
 pub(super) const EXECUTE_MAX_ITEMS: usize = 500;
 
 /// 占用检测防呆上限
@@ -86,17 +54,8 @@ pub fn data_rules_dir() -> PathBuf {
     paths::data_subdir_for_read("cleanup")
 }
 
-/// **写入**专用规则根：恒新根。双写会让两个根长期分叉（v2-M19 记的同一类病）。
-pub(super) fn data_rules_write_dir() -> PathBuf {
-    paths::data_subdir_for_write("cleanup")
-}
-
 pub(super) fn data_rules_file() -> PathBuf {
     paths::data_file_for_read("cleanup/rules.json")
-}
-
-pub(super) fn data_rules_write_file() -> PathBuf {
-    data_rules_write_dir().join("rules.json")
 }
 
 pub(super) fn custom_rules_dir() -> PathBuf {
@@ -105,10 +64,6 @@ pub(super) fn custom_rules_dir() -> PathBuf {
 
 pub(super) fn watermark_file() -> PathBuf {
     paths::data_file_for_read("cleanup/rules-watermark.json")
-}
-
-pub(super) fn watermark_write_file() -> PathBuf {
-    data_rules_write_dir().join("rules-watermark.json")
 }
 
 /// 规则缓存（键 = 数据 mtime|size|custom 数量|各 custom mtime；对照 RULES_CACHE_SIG）
@@ -195,30 +150,6 @@ pub fn rules_watermark() -> f64 {
         disk
     } else {
         high
-    }
-}
-
-/// 防回滚水位线写入（只升不降；写失败不阻断本次更新）。
-///
-/// §4.7：先抬进程内高水位再写盘 —— 原先写盘失败只 warn，这个版本的防回滚记忆
-/// 就**整条丢失**（「更新成功 + 水位线没写上」的组合）；现在本进程至少记得它。
-pub fn set_rules_watermark(version: f64) -> bool {
-    if !version.is_finite() || version <= 0.0 || version <= rules_watermark() {
-        return false;
-    }
-    watermark_high_raise(version);
-    // 水位线只写新根：写老根会让两个根各自记住一个版本，读取侧的口径就分叉了
-    let file = watermark_write_file();
-    if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let payload = json!({ "rulesVersion": version, "at": iso_now() });
-    match security::atomic_write_json(&file, &payload) {
-        Ok(()) => true,
-        Err(e) => {
-            log::write_log("warn", &format!("写规则版本水位线失败: {e}"));
-            false
-        }
     }
 }
 

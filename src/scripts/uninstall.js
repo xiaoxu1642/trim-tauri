@@ -552,34 +552,6 @@
   // 「异步失败被同步 try/catch 静默吞掉」那一类缺陷，这里不重犯。
   let rulesUpdating = false;
 
-  async function updateResidueRules() {
-    if (rulesUpdating) return;
-    const btn = document.getElementById('btnResidueRulesUpdate');
-    rulesUpdating = true;
-    if (btn) btn.disabled = true;
-    try {
-      const chk = await window.api.uninstall.checkResidueVersion();
-      if (!chk || !chk.success) throw new Error((chk && chk.message) || '检查版本失败');
-      const cur = chk.data.currentVersion;
-      if (!chk.data.newerAvailable) {
-        window.app?.toast?.('info', `残留规则库已是最新（版本 ${esc(String(cur))}）`);
-        return;
-      }
-      const up = await window.api.uninstall.updateResidueRules();
-      if (!up || !up.success) throw new Error((up && up.message) || '更新失败');
-      window.app?.toast?.(
-        'success',
-        `残留规则库已更新：${esc(String(cur))} → ${esc(String(up.data.rulesVersion))}，重新扫描后生效`
-      );
-      // v0.7.0：主窗没有面板了，新规则在下一次副窗扫描时自然生效，这里不再回头重扫
-    } catch (e) {
-      window.app?.toast?.('error', '残留规则库更新失败: ' + (e && e.message ? e.message : String(e)));
-    } finally {
-      rulesUpdating = false;
-      if (btn) btn.disabled = false;
-    }
-  }
-
   // ==================== 残留副窗入口（v0.7.0：残留链在这一扇窗里的唯一界面） ====================
   //
   // 开窗失败必须说清 —— 用户点了「查残留」而窗口没起来，最容易读成「这台机器没问题」。
@@ -620,7 +592,6 @@
       openResidueWindow(currentAppId);
     });
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
-    document.getElementById('btnResidueRulesUpdate')?.addEventListener('click', updateResidueRules);
     // §2.3：还原点开关的偏好持久化（新式命名对齐 trim.residue.backupPack；读失败按默认关）
     const restoreToggle = document.getElementById('uninstallRestoreToggle');
     if (restoreToggle) {
