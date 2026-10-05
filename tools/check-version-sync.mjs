@@ -94,47 +94,50 @@ check(
         .filter(Boolean).join('；') || `双方 ${endpoints.length} 条一致`,
 );
 
-// 8) 审查 M-18（2026-10-03 L4）：仓根 **latest-gitee.json 的 version 必须 == conf version**。
+// 8) 审查 M-18（2026-10-03 L4）：仓根 **latest-atomgit.json 的 version 必须 == conf version**。
 //
 // 为什么单开一组而不是并进第 5 组：第 5 组比的是「人手工维护的四处」（conf/Cargo/
-// lock/readme），而这份清单是**发版脚本的产物**（`make-latest-json.py <ver>`）。
-// 两者漏法不同 —— 人会忘改其中一处，脚本会「只跑 Gitee 线路那次」。
-// M-18 的真实形态就是后者：v0.5.7 发版只重新生成了 latest-gitee.json，仓根
+// lock/readme），而这份清单是**发版脚本的产物**（`tools/publish-atomgit.mjs`）。
+// 两者漏法不同 —— 人会忘改其中一处，脚本会「只跑一条线路那次」。
+// M-18 的真实形态就是后者：v0.5.7 发版只重新生成了当班线路的清单，仓根
 // latest.json 停在 0.5.6，而**没有任何门禁读它**（updater 运行时从网络拉，
 // tools 零门禁读取）⇒ 漂了两个月没人发现。
 //
-// 为什么只钉 latest-gitee.json、不钉 latest.json：前者是 Gitee raw/main 线路的
+// 为什么只钉 latest-atomgit.json、不钉 latest.json：前者是 AtomGit api raw 线路的
 // **真源**（FEEDS[0] 指的就是它，必须随 commit 走）；后者对应 GitHub 侧
 // `releases/latest/download/latest.json`，那是 **Release 资产**、由
 // publish 脚本上传，仓根副本零消费方，已在同批 `git rm`（见下方 GONE 清单）。
 // 钉一个零消费的死文件等于给假绿加固 —— 那正是 M-18 的病因。
-const giteeManifestPath = 'latest-gitee.json';
-let giteeVer = '';
-let giteeRawErr = '';
+//（2026-10-05：Gitee 线换成 AtomGit，本组从 latest-gitee.json 平移到新清单名。）
+const atomgitManifestPath = 'latest-atomgit.json';
+let atomgitVer = '';
+let atomgitRawErr = '';
 try {
-  giteeVer = String(JSON.parse(read(giteeManifestPath)).version ?? '');
+  atomgitVer = String(JSON.parse(read(atomgitManifestPath)).version ?? '');
 } catch (e) {
-  giteeRawErr = e.message;
+  atomgitRawErr = e.message;
 }
 check(
-  !!giteeVer && giteeVer === confVer,
-  `8. 仓根 ${giteeManifestPath} 的 version == conf version（Gitee raw 真源，M-18）`,
-  giteeRawErr ? `读取/解析失败：${giteeRawErr}`
-    : !giteeVer ? '清单缺 version 字段'
-      : giteeVer === confVer ? `双方均为 ${giteeVer}`
-        : `分叉：清单=${giteeVer} / conf=${confVer} —— 发版时漏跑 make-latest-json.py 的 gitee 线路？`,
+  !!atomgitVer && atomgitVer === confVer,
+  `8. 仓根 ${atomgitManifestPath} 的 version == conf version（AtomGit raw 真源，M-18）`,
+  atomgitRawErr ? `读取/解析失败：${atomgitRawErr}`
+    : !atomgitVer ? '清单缺 version 字段'
+      : atomgitVer === confVer ? `双方均为 ${atomgitVer}`
+        : `分叉：清单=${atomgitVer} / conf=${confVer} —— 发版时漏跑 tools/publish-atomgit.mjs？`,
 );
 
 // 8b) 仓根**不该再存在**的清单文件（双向：文件回来了就红，防「删了又被人拷回来」）。
 // 这不是洁癖：M-18 里那份 latest.json「看起来像官方清单、内容是上一版+旧签名」，
-// 一旦有人把仓根副本当资产上传（GitHub/Gitee 资产名恰好都叫 latest.json），
+// 一旦有人把仓根副本当资产上传（GitHub 资产名恰好也叫 latest.json），
 // 客户端会被钉死在旧版并验签失败。GitHub 侧资产由 publish 脚本从
 // build-release/latest.json 上传，与仓根无关。
-const GONE_MANIFESTS = ['latest.json'];
+// latest-gitee.json 在 2026-10-05 随「Gitee 线换 AtomGit」退役 —— 留着它会让人
+// 以为国内线路仍是 Gitee raw，且它的 url 指旧下载源，属于同类误导。
+const GONE_MANIFESTS = ['latest.json', 'latest-gitee.json'];
 const resurrected = GONE_MANIFESTS.filter((f) => fs.existsSync(path.join(ROOT, f)));
 check(
   resurrected.length === 0,
-  '8b. 零消费清单已从仓根移除（M-18：latest.json 会被误当 Release 资产上传）',
+  '8b. 退役/零消费清单已从仓根移除（M-18：latest.json 会被误当 Release 资产上传）',
   resurrected.length
     ? `这些文件已裁定删除却又出现了：${resurrected.join('、')}（GitHub 侧资产请用 build-release/latest.json）`
     : `已移除：${GONE_MANIFESTS.join('、')}`,

@@ -42,7 +42,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg0OEQyQzNGOTY0MzdGRTUKUldUbGYwT1dQeXlOaEx6MCtGTk9DOTltWVpFbzZZR2NjN1d6QS9iL0pNSlcrRGF1YkQ0T29VY1IK",
       "endpoints": [
-        "https://gitee.com/xiaoxu1642/trim-tauri/raw/main/latest-gitee.json",
+        "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/raw/latest-atomgit.json",
         "https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/latest.json"
       ],
       "requireSignedVersion": true,

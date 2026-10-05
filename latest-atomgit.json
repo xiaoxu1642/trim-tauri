@@ -1,13 +1,13 @@
 {
   "version": "0.6.4",
   "notes": "## 版本 0.6.4（2026-10-05）\n\n① **自动更新的验签修好了** —— 客户端内置的更新公钥多包了一层 base64，插件解不开，症状是「检查到新版本、安装包也下完了，最后永远报 `Invalid encoding in minisign data`」。用真实老客户端跑一遍才暴露：**0.6.3 及之前没有任何用户真正自动升级成功过**。本版把公钥改成正确形状，因此需要**手动安装 0.6.4**；装上之后往后的版本才能自动升。\n\n② **更新流程按指定重做** —— 启动 3 秒后自动检查，发现新版本直接弹窗；下载的安装包放进用户「下载」文件夹（弹窗里给出路径）；下载完成后除 minisign 验签外再核对包体 SHA-256（本版起清单声明该值）；替换完成、新版本首启提示「更新完成」，同时清掉下载目录里那份安装包，按钮是「完成更新」和「启动应用」。清理没成功时如实说明，不谎报「已清理」。\n\n③ **两条新门禁把这类事故固化成判据** —— `check-updater-pubkey` 校验公钥形状并和签名产物对 keyid；`check-release-freshness` 扩展为逐份检查清单里的 signature 是不是「一层 base64 的四行 minisign 文本」、trusted comment 有没有 `version:`、声明的 sha256 是否等于实际安装包。此前这些只能靠人眼数 base64 层数。",
-  "pub_date": "2026-10-05T09:19:50Z",
-  "url": "https://gitee.com/xiaoxu1642/trim-tauri/releases/download/v0.6.4/Trim_0.6.4_x64-setup.exe",
+  "pub_date": "2026-10-05T12:19:16Z",
+  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.4/attach_files/Trim_0.6.4_x64-setup.exe/download",
   "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEpLaCs1Z1EzdUVkd0xxRHJCZjBxeFR4WFgxUTM5N0ZUdzFxOFdMTVpPZ3VZdzJiRHl2cS8rK2lpd2J5UlFER3psQzVkcFRUd1RYWGZ1d2FQdU1RZUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMTkxOTczCWZpbGU6VHJpbV8wLjYuNF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjQKUzM0SGxnekFMWEdNREVhZFd1Y0FSL3lNcE1MdVlRbnpMdnNibWJSaHN1ZnQxZ2tUcERrWTQvSVI3V3pEeGlWS1lZWFZsRU50c0lNeGJmWFZ4WkRVRFE9PQo=",
   "sha256": "be8c254b7a8c292905e5babb7c04801c950d026d6d345e2cc27d6b09bc1f2f06",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://gitee.com/xiaoxu1642/trim-tauri/releases/download/v0.6.4/Trim_0.6.4_x64-setup.exe",
+      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.4/attach_files/Trim_0.6.4_x64-setup.exe/download",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEpLaCs1Z1EzdUVkd0xxRHJCZjBxeFR4WFgxUTM5N0ZUdzFxOFdMTVpPZ3VZdzJiRHl2cS8rK2lpd2J5UlFER3psQzVkcFRUd1RYWGZ1d2FQdU1RZUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMTkxOTczCWZpbGU6VHJpbV8wLjYuNF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjQKUzM0SGxnekFMWEdNREVhZFd1Y0FSL3lNcE1MdVlRbnpMdnNibWJSaHN1ZnQxZ2tUcERrWTQvSVI3V3pEeGlWS1lZWFZsRU50c0lNeGJmWFZ4WkRVRFE9PQo=",
       "sha256": "be8c254b7a8c292905e5babb7c04801c950d026d6d345e2cc27d6b09bc1f2f06"
     }

@@ -32,10 +32,11 @@
 //! 1. minisign 密钥对已生成，公钥已回填 `tauri.conf.json` → `plugins.updater.pubkey`。
 //!    v2-L4P-25（A-7）：私钥路径与发版/签名流程只以 AGENTS §7.4 为唯一真源，本文件
 //!    不再维护第二份（文档互相抄路径是「红线指向虚无」的温床，L4 D-3 同族教训）。
-//! 2. FEEDS 两条：`gitee`（https://gitee.com/xiaoxu1642/trim-tauri/releases/latest/download/）
+//! 2. FEEDS 两条：`atomgit`（https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/raw/）
 //!    与 `github`（https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/），
-//!    auto 顺序 Gitee 优先。2026-10-03 用户拍板由三源（GitHub + 两个加速代理）改二源。
-//!    **两仓发版必须同步**：Gitee 侧 release 资产与 GitHub 侧同名同版本，
+//!    auto 顺序 AtomGit 优先。2026-10-03 用户拍板由三源（GitHub + 两个加速代理）改二源；
+//!    2026-10-05 再由 Gitee 换成 AtomGit（Gitee 附件只能网页手动传，AtomGit 有发布 API）。
+//!    **两仓发版必须同步**：AtomGit 侧 release 资产与 GitHub 侧同名同版本，
 //!    否则国内源会长期停在旧版（表现为「检查更新说已是最新」而 GitHub 有新版）。
 //! 3. v0.1.2 是首发手动安装包（无 latest.json，updater 从下一版 v0.1.3 起生效）；
 //!    老 Electron 用户迁移引导仍待 Phase 4 实现。
@@ -59,8 +60,8 @@ const DONE_FILE: &str = "update-applied.json";
 /// 单线路检查超时（对照上游 CHECK_TIMEOUT_MS）
 const CHECK_TIMEOUT_MS: u64 = 20_000;
 // 原先这里有个全局 `MANIFEST = "latest.json"`（上游拼 latest.yml，插件约定 latest.json）。
-// 2026-10-03 二源改造后**删掉**：清单名已由 FEEDS 逐线路自带（Gitee 走 raw 托管、
-// 文件名 latest-gitee.json），留一个全局常量会让人以为「所有线路共用一个清单名」，
+// 2026-10-03 二源改造后**删掉**：清单名已由 FEEDS 逐线路自带（AtomGit 走 api raw 托管、
+// 文件名 latest-atomgit.json），留一个全局常量会让人以为「所有线路共用一个清单名」，
 // 于是给 Gitee 线路也拼 latest.json —— 而 GitHub 的 latest.json 里 url 指向 GitHub，
 // 拼出来的端点会给出「从 Gitee 查更新、点下载却回 GitHub」的假象。死字段不留。
 
@@ -70,26 +71,28 @@ const CHECK_TIMEOUT_MS: u64 = 20_000;
 /// （两个都是 GitHub 加速代理），换成 `gitee`（国内源，直连）+ `github`。
 /// 删掉加速代理的另一个理由：它们的可用性不由本项目控制，且**清单与产物都经它们转发**——
 /// 信任模型里这条链已经够长（TLS → 清单 → minisign 验签），不该再叠一层第三方代理。
+/// 2026-10-05 用户拍板：**Gitee 换成 AtomGit** —— Gitee 的 release 附件只能网页手动两步
+/// 上传（每发一版都要人工拖文件），AtomGit 建 release / 传附件 / 下载全是 API，可自动化。
 ///
-/// # 为什么 Gitee 走 raw 而不是 release 资产（实测踩出来的，别改回去）
+/// # 为什么 AtomGit 走 api raw 端点（实测踩出来的，别改回去）
 ///
-/// 最初按 GitHub 的同形写法填了 `releases/latest/download/`，**看起来对、实际 404**：
-/// Gitee 实现了 `/releases/latest`（会 302 到最新 tag 的 release 页），但**没有实现
-/// `/releases/latest/download/`** —— 它把这条路径当普通仓库路径处理，302 到
-/// `repository/archive/latest/download/latest.json`，那个地址恒 404。
-/// 表现是「Gitee 线路配了、auto 也确实先试它、但永远查不到新版，然后静默退到 GitHub」——
-/// 线路表改了而国内用户一点流量没省，且**日志里看不出是线路配错**（只是「这条线路不通」）。
-///
-/// 改成 `raw/main/` 托管清单：清单作为仓库文件随 commit 走，**端点与 tag 无关**，
-/// 天然稳定。`raw/main/` 已实测可用（会 302 到 CDN，属正常行为）。
-/// 清单文件名也因此必须与 GitHub 侧区分开（`url` 字段指向各自的下载源），
-/// 故 Gitee 侧叫 `latest-gitee.json`、GitHub 侧仍叫 `latest.json`。
+/// 清单仍走「仓库文件随 commit 走」的托管形态（端点与 tag 无关，天然稳定），
+/// 但取文件的端点换成了 API：`api.atomgit.com/api/v5/repos/{owner}/{repo}/raw/{path}`
+/// —— 匿名 200、application/octet-stream、无重定向、与库内文件逐字节一致（2026-10-05 实测）。
+/// 两条死路别再试：① `raw.gitcode.com/.../raw/main/*.json` 恒 403「暂不支持预览」
+///（该域名只服务预览，json/toml 拿不到）；② 抄 GitHub 的 `releases/latest/download/`
+/// 同形别名同样不存在 —— Gitee 当年就栽在这个别名上（302 到 `repository/archive/…`
+/// 恒 404，「线路配了、永远查不到新版、日志只记线路不通」）。
+/// 另外 `gitcode.com/.../releases/download/...` 网页直链匿名 curl 是 418（反爬），
+/// 所以清单里的下载 url 必须用 attach_files 的 API 下载端点（见发版脚本）。
+/// 清单文件名也因此与 GitHub 侧区分开：AtomGit 侧叫 `latest-atomgit.json`、
+/// GitHub 侧仍叫 `latest.json`（两条线路的 `url` 字段各指自己的下载源）。
 const FEEDS: &[(&str, &str, &str, &str)] = &[
     (
-        "gitee",
-        "Gitee 国内源",
-        "https://gitee.com/xiaoxu1642/trim-tauri/raw/main/",
-        "latest-gitee.json",
+        "atomgit",
+        "AtomGit 国内源",
+        "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/raw/",
+        "latest-atomgit.json",
     ),
     (
         "github",
@@ -99,9 +102,10 @@ const FEEDS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// auto = Gitee 优先、失败自动回退 GitHub；指定线路 = 该线路优先、另一条兜底。
-/// 'gitee' / 'github' 既是偏好项也是 FEEDS 里的真实线路。
-const MIRROR_IDS: &[&str] = &["auto", "gitee", "github"];
+/// auto = AtomGit 优先、失败自动回退 GitHub；指定线路 = 该线路优先、另一条兜底。
+/// 'atomgit' / 'github' 既是偏好项也是 FEEDS 里的真实线路。
+///（历史偏好值 'gitee' 已不在白名单内：读到即退回 auto，老用户无需处理）
+const MIRROR_IDS: &[&str] = &["auto", "atomgit", "github"];
 
 // ==================== 进程内状态（上游 autoUpdater 同样是进程单例） ====================
 
@@ -218,7 +222,7 @@ fn save_mirror_pref(id: &str) -> Result<(), String> {
 /// 基址必须是带尾斜杠的目录前缀 —— 少了斜杠会拼出一个 404 端点，
 /// 而 404 会被当成「这条线路不通」去退下一条，镜像配错就永远查不出来。
 ///
-/// `manifest` 由**线路自带**（见 FEEDS 注释：Gitee 走 raw 托管、文件名与 GitHub 侧不同），
+/// `manifest` 由**线路自带**（见 FEEDS 注释：AtomGit 走 api raw 托管、文件名与 GitHub 侧不同），
 /// 不能用全局常量 `MANIFEST` —— 那是 GitHub 侧的约定。
 fn endpoint_of(base: &str, manifest: &str) -> Option<Url> {
     if !base.ends_with('/') {
@@ -411,8 +415,8 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
         return Ok(json!({ "ok": false, "error": "unsigned-or-unverified" }));
     };
 
-    // 复验必须用**当初那条线路的基址 + 清单名**：清单名线路自带（Gitee 是
-    // latest-gitee.json），漏传 manifest 会拿 GitHub 的清单名去拼 Gitee 的 raw 基址
+    // 复验必须用**当初那条线路的基址 + 清单名**：清单名线路自带（AtomGit 是
+    // latest-atomgit.json），漏传 manifest 会拿 GitHub 的清单名去拼 AtomGit 的 raw 基址
     // —— 拼出一个 404 端点，把「已锁定的锚点」判成「变了」，于是下载被无理由拒绝。
     let (base, manifest) = FEEDS
         .iter()
@@ -875,8 +879,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_偏好下_gitee_优先() {
-        assert_eq!(ids("auto"), vec!["gitee", "github"]);
+    fn auto_偏好下_atomgit_优先() {
+        assert_eq!(ids("auto"), vec!["atomgit", "github"]);
     }
 
     #[test]
@@ -884,50 +888,59 @@ mod tests {
         let v = ids("github");
         assert_eq!(v[0], "github");
         assert_eq!(v.len(), 2, "不能丢线路");
-        assert!(v.contains(&"gitee"), "GitHub 不可达时必须有国内源可退");
-        // 'gitee' 作为显式偏好，结果等价于 auto
-        assert_eq!(ids("gitee"), ids("auto"));
+        assert!(v.contains(&"atomgit"), "GitHub 不可达时必须有国内源可退");
+        // 'atomgit' 作为显式偏好，结果等价于 auto
+        assert_eq!(ids("atomgit"), ids("auto"));
     }
 
     #[test]
     fn 未知偏好退回默认顺序而非空表() {
-        assert_eq!(ids("evil-mirror"), vec!["gitee", "github"]);
+        assert_eq!(ids("evil-mirror"), vec!["atomgit", "github"]);
+        // 历史偏好值 'gitee' 已不在白名单：按未知值退回默认顺序，而不是空表
+        assert_eq!(ids("gitee"), ids("auto"));
     }
 
     #[test]
     fn 端点由基址加线路自带清单名拼出() {
         let u = endpoint_of("https://github.com/o/r/releases/latest/download/", "latest.json").unwrap();
         assert_eq!(u.as_str(), "https://github.com/o/r/releases/latest/download/latest.json");
-        // Gitee 走 raw 托管，清单名线路自带
-        let g = endpoint_of("https://gitee.com/o/r/raw/main/", "latest-gitee.json").unwrap();
-        assert_eq!(g.as_str(), "https://gitee.com/o/r/raw/main/latest-gitee.json");
+        // AtomGit 走 api raw 托管，清单名线路自带
+        let a = endpoint_of("https://api.atomgit.com/api/v5/repos/o/r/raw/", "latest-atomgit.json").unwrap();
+        assert_eq!(a.as_str(), "https://api.atomgit.com/api/v5/repos/o/r/raw/latest-atomgit.json");
         // 漏尾斜杠必须直接判非法，而不是拼出一个 404 端点被误当「线路不通」
         assert!(endpoint_of("https://github.com/o/r/releases/latest/download", "latest.json").is_none());
         assert!(endpoint_of("不是个 url", "latest.json").is_none());
     }
 
-    /// **Gitee 线路不得写回 GitHub 同形的 `releases/latest/download/`**（2026-10-03 实测）。
+    /// **AtomGit 线路必须走 api raw 端点**（2026-10-05 三条实测死路的判据形态）。
     ///
-    /// 这条是本批最贵的教训：那个地址**看起来完全正确**（与 GitHub 线路同形），
-    /// 但 Gitee 没实现这个别名 —— 它 302 到 `repository/archive/latest/download/…`，
-    /// 那个地址恒 404。表现是「线路表改了、auto 也确实先试 Gitee、但永远查不到新版，
-    /// 然后静默退到 GitHub」：国内用户一点流量没省，**日志里也看不出是线路配错**
-    ///（只记「这条线路检查失败」）。所以判据直接钉住形态。
+    /// ① 抄 GitHub 的 `releases/latest/download/` 同形别名不存在 —— Gitee 当年即栽在这里
+    ///（302 到 `repository/archive/…` 恒 404，表现为「线路配了、永远查不到新版、
+    /// 日志只记线路不通」）；② `raw.gitcode.com/.../raw/main/*.json` 恒 403「暂不支持预览」
+    ///（该域名只服务预览，json/toml 拿不到）；③ 唯一可用的是 API raw：
+    /// `api.atomgit.com/api/v5/repos/{owner}/{repo}/raw/{path}` —— 匿名 200、
+    /// application/octet-stream、字节与库内文件一致。形态错了不会红，只会静默退回 GitHub，
+    /// 所以把判据直接钉死。
     #[test]
-    fn gitee线路不得用latest别名_必须走raw() {
-        let g = FEEDS.iter().find(|(id, ..)| *id == "gitee").expect("必须有 gitee 线路");
+    fn atomgit线路必须走api_raw端点() {
+        let a = FEEDS.iter().find(|(id, ..)| *id == "atomgit").expect("必须有 atomgit 线路");
         assert!(
-            g.2.contains("/raw/"),
-            "Gitee 基址必须走 raw 托管（清单入库），实测 releases/latest/download/ 恒 404：{}",
-            g.2
+            a.2.contains("api.atomgit.com") && a.2.contains("/raw/"),
+            "AtomGit 基址必须走 API raw 端点（实测 raw.gitcode.com 对 json 恒 403）：{}",
+            a.2
         );
         assert!(
-            !g.2.contains("releases/latest"),
-            "Gitee 不实现 releases/latest/download/ 别名，别写回这个同形但无效的地址：{}",
-            g.2
+            !a.2.contains("raw.gitcode.com") && !a.2.contains("gitcode.com/"),
+            "AtomGit 的网页 raw 端点拿不到 json，别写回这些同形但无效的地址：{}",
+            a.2
+        );
+        assert!(
+            !a.2.contains("releases/latest"),
+            "releases/latest/download/ 别名在 AtomGit 上不存在（Gitee 当年即栽在这里）：{}",
+            a.2
         );
         // 清单名必须与 GitHub 侧区分：url 字段指向各自的下载源，同名会串
-        assert_eq!(g.3, "latest-gitee.json", "Gitee 侧清单名必须带 -gitee 后缀");
+        assert_eq!(a.3, "latest-atomgit.json", "AtomGit 侧清单名必须带 -atomgit 后缀");
         let gh = FEEDS.iter().find(|(id, ..)| *id == "github").expect("必须有 github 线路");
         assert_eq!(gh.3, "latest.json", "GitHub 侧清单名保持 latest.json");
     }
@@ -945,11 +958,13 @@ mod tests {
             );
             assert!(manifest.ends_with(".json"), "{id} 清单应为 json：{manifest}");
         }
-        // 白名单 = auto + 全部真实线路（'gitee'/'github' 本身就是线路，不额外占位）
+        // 白名单 = auto + 全部真实线路（'atomgit'/'github' 本身就是线路，不额外占位）
         assert_eq!(MIRROR_IDS.len(), FEEDS.len() + 1);
         // 线路表**恰好两条**：三源时代留下的加速代理不得复活（2026-10-03 用户拍板）
-        assert_eq!(FEEDS.len(), 2, "更新线路应只有 Gitee + GitHub 两条: {FEEDS:?}");
-        for gone in ["gh-proxy", "ghfast"] {
+        assert_eq!(FEEDS.len(), 2, "更新线路应只有 AtomGit + GitHub 两条: {FEEDS:?}");
+        // 已退役的线路 id 不得回到线路表或偏好白名单：加速代理（2026-10-03）、
+        // Gitee（2026-10-05 换成 AtomGit；历史偏好值 'gitee' 走「未知值退回默认顺序」）
+        for gone in ["gh-proxy", "ghfast", "gitee"] {
             assert!(
                 !FEEDS.iter().any(|(id, ..)| *id == gone) && !MIRROR_IDS.contains(&gone),
                 "{gone} 已下线，不得回到线路表或偏好白名单"

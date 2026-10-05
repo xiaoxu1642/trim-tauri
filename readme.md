@@ -7,7 +7,7 @@
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)
 ![Stack](https://img.shields.io/badge/stack-Tauri%20v2%20%7C%20Rust%20%7C%20原生%20Win32%20%2F%20WinHTTP-blueviolet)
-![Update](https://img.shields.io/badge/update-Gitee%20%E5%9B%BD%E5%86%85%E6%BA%90%20%2B%20GitHub-green)
+![Update](https://img.shields.io/badge/update-AtomGit%20%E5%9B%BD%E5%86%85%E6%BA%90%20%2B%20GitHub-green)
 
 ---
 

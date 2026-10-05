@@ -476,7 +476,7 @@
     const cur = state.currentVersion ? 'v' + state.currentVersion : '';
     switch (state.phase) {
       case 'checking':
-        setRow('正在检查…', true, '正在多线路检查新版本（Gitee 国内源 + GitHub）…');
+        setRow('正在检查…', true, '正在多线路检查新版本（AtomGit 国内源 + GitHub）…');
         break;
       case 'available':
         setRow('检查更新', false, '发现新版本 v' + (state.version || '') + '，可在弹窗中下载');
@@ -634,7 +634,7 @@
   }
 
   function viaLabel(id) {
-    return id === 'gitee' ? 'Gitee 国内源' : (id === 'github' ? 'GitHub 直连' : id);
+    return id === 'atomgit' ? 'AtomGit 国内源' : (id === 'github' ? 'GitHub 直连' : id);
   }
 
   function pullCompletion() {
@@ -672,7 +672,7 @@
           window.api.updater.setMirror(id).then(r => {
             if (r && r.ok) {
               if (mirrorHint) mirrorHint.textContent = id === 'auto'
-                ? '优先走 Gitee 国内源，不可用时自动回退 GitHub（安装包仍经 minisign 签名强校验）'
+                ? '优先走 AtomGit 国内源，不可用时自动回退 GitHub（安装包仍经 minisign 签名强校验）'
                 : '已固定线路；安装包仍经 minisign 签名强校验，线路只是传输通道';
               toast('success', '更新镜像偏好已保存');
             } else {

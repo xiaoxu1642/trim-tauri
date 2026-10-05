@@ -139,7 +139,7 @@ const artifacts = [
   { name: `Trim_${ver}_x64-setup.exe.sig`, why: 'minisign 签名（requireSignedVersion 硬要求）' },
   { name: `Trim_${ver}_x64-portable.zip`, why: '便携包' },
   { name: 'latest.json', why: 'GitHub 线路清单（Release 资产）' },
-  { name: 'latest-gitee.json', why: 'Gitee 线路清单（raw/main 托管，同时是仓根那份的源）' },
+  { name: 'latest-atomgit.json', why: 'AtomGit 线路清单（api raw 托管，同时是仓根那份的源）' },
 ];
 
 if (LIST_ONLY) {
@@ -202,7 +202,7 @@ if (oldestArt <= newestSrc) {
 }
 
 // ── 3. 清单 version 自洽（产物区两份清单必须指向当前版本） ──
-for (const name of ['latest.json', 'latest-gitee.json']) {
+for (const name of ['latest.json', 'latest-atomgit.json']) {
   const p = join(OUT, name);
   if (!existsSync(p)) continue;
   try {
