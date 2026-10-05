@@ -937,22 +937,15 @@
   function renderOptRow(o, index) {
     const id = escapeHtml(o.id);
     const isOpt = optimizedIds.has(o.id);
-    // B4：`restorable` 由后端逐行注入（`catalog.rs::is_restorable`），值 = 可还原的
-    // 值条数。**没有这个字段就是没有备份** ⇒ 还原入口置灰并说明原因，
-    // 而不是显示一个点了必然拿「无备份记录」的按钮。
-    const restorable = typeof o.restorable === 'number' && o.restorable > 0;
-    const restoreBtn = isOpt
-      ? (restorable
-        ? `<button type="button" class="opt-row-restore" data-restore="${id}" data-tip="按本机备份逐值还原（${o.restorable} 个注册表值）">立即恢复</button>`
-        : `<button type="button" class="opt-row-restore" disabled data-tip="本机没有该项的值级备份，无法逐值还原">无法还原</button>`)
-      : '';
+    // 2026-10-06（任务二）：**可否恢复只在详情弹窗判定**（弹窗消费 restorable / restoreAvailable），
+    // 主列表只做灰显 + 「已优化」标签。行内的「立即恢复 / 无法还原」按钮已整条下线 ——
+    // 一处判定、一处入口，避免两个地方对「能不能还原」各说各话（B4 的判据在弹窗里继续生效）。
     return `
-      <div class="opt-row${isOpt ? ' optimized' : ''}" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击可还原' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
-        <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" data-tip="${isOpt ? '已优化的项不可勾选，点击行可还原' : '勾选/取消选择该优化项'}"></div>
+      <div class="opt-row${isOpt ? ' optimized' : ''}" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击查看详情与还原入口' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
+        <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" data-tip="${isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项'}"></div>
         <span class="opt-row-index">${index}</span>
         <span class="opt-row-name">${escapeHtml(o.title)}</span>
         ${riskBadge(o.risk)}${isOpt ? '<span class="opt-row-opttag">已优化</span>' : ''}
-        ${restoreBtn}
       </div>`;
   }
 
@@ -1482,8 +1475,15 @@
       runBtn.disabled = !canRestore;
       runBtn.dataset.mode = 'restore';
       if (!notice) {
+        // 任务二（2026-10-06）：主列表不再有行内还原按钮，「可否恢复」在此**唯一判定**。
+        // `restorable` 由后端逐行注入（`catalog.rs::is_restorable`，值 = 本机值级备份的键数）；
+        // >0 时把「按本机备份逐值还原」讲出来（restoreOption 会经 restoreReg 把真原值回写），
+        // 否则这个字段在前端就是零消费方的死字段。
+        const backupHint = (typeof o.restorable === 'number' && o.restorable > 0)
+          ? `本机存有值级备份：按本机备份逐值还原（${o.restorable} 个值）。`
+          : '';
         notice = canRestore
-          ? '您已完成优化。点击「立即恢复」将删除对应的注册表修改，恢复系统默认状态。'
+          ? `您已完成优化。点击「立即恢复」将删除对应的注册表修改，恢复系统默认状态。${backupHint}`
           : '您已完成优化，该项暂不提供恢复功能';
       }
     } else if (!o.dynamic) {
@@ -2389,24 +2389,6 @@
     // 看板行点击打开弹窗；点击勾选框仅切换选择状态；列底「全选本类」批量勾选；
     // 已优化（灰态）行点击 → 弹「是否还原此项优化？」确认
     root.addEventListener('click', async (e) => {
-      // 行内「立即恢复」：早期只有 data-restore 属性、没有委托分支，点击冒泡到
-      // `.opt-row` 变成「打开详情」，与文案承诺不符。这里直通 restoreOption，
-      // 与弹窗里那条还原入口同一实现。
-      const restoreBtn = e.target.closest('.opt-row-restore[data-restore]');
-      if (restoreBtn) {
-        e.stopPropagation();
-        const o = findEntry(restoreBtn.dataset.restore);
-        if (o) {
-          restoreBtn.disabled = true;
-          try {
-            const ok = await restoreOption(o);
-            if (!ok) window.app?.toast?.('warning', '恢复未能执行，请在详情里查看说明');
-          } catch (err) {
-            window.app?.toast?.('error', '恢复失败：' + (err && err.message ? err.message : err));
-          }
-        }
-        return;
-      }
       const check = e.target.closest('.checkbox[data-check]');
       if (check) {
         e.stopPropagation();

@@ -383,6 +383,38 @@ fn strip_js_comments(src: &str) -> String {
         assert_eq!(opt.get("effect").and_then(|v| v.as_str()), Some("未验证"));
     }
 
+    /// 任务二（2026-10-06）「可否恢复只在弹窗判定」的代表用例：**纯 reg 步 ⇒ 推理还原必命中**。
+    ///
+    /// 主列表删掉行内还原按钮后，「能否还原」只剩弹窗一条判定链，它依赖
+    /// `restoreAvailable`（= restore 段存在）。peripheral_snap_to 是纯 reg 步、
+    /// **数据层没写 restore 段**的形态 —— 靠推理补齐（`restoreInferred=true`）。
+    /// 钉住它 = 钉住「推理还原对纯 reg 项真的生效」这条准则：推理器哪天坏掉，
+    /// 用户在弹窗里只会看到置灰按钮，没有任何门禁会自己红。
+    #[test]
+    fn 纯reg项推理还原可用() {
+        let opt = find_option("peripheral_snap_to").expect("peripheral_snap_to 不在目录里");
+        let steps = opt.get("steps").and_then(|v| v.as_array()).expect("steps 缺失");
+        assert!(
+            !steps.is_empty() && steps.iter().all(|s| s.get("reg").is_some()),
+            "peripheral_snap_to 应是纯 reg 步（混入非 reg 步会让还原推理失效）"
+        );
+        assert_eq!(
+            opt.get("restore").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(1),
+            "纯 reg 项必须由推理补齐 restore（弹窗「可否恢复」的唯一依据）"
+        );
+        assert_eq!(
+            opt.get("restoreInferred").and_then(|v| v.as_bool()),
+            Some(true),
+            "推断出的 restore 必须标记 restoreInferred=true（区别于数据层手写）"
+        );
+        assert_eq!(
+            opt.get("restoreAvailable").and_then(|v| v.as_bool()),
+            Some(true),
+            "推理命中的项必须 restoreAvailable=true —— 否则弹窗对可还原项也置灰"
+        );
+    }
+
     /// RAINZ 对标 §4 R2：安全降级侧表与目录的一致性。
     ///
     /// 分类的**唯一实现**在 `tools/check-optimizer-security.mjs`（(段,名,值) 三元组 + 命令面
@@ -2009,10 +2041,11 @@ let ov = include_str!("overview.rs");
         assert_eq!(is_restorable(&map, "不存在的id"), None);
     }
 
-    /// B4 的接线：`optimizer_list` 必须逐行注入 `restorable`。
+    /// B4 的接线：`optimizer_list` 必须逐行注入 `restorable`（值 = 本机值级备份的键数）。
     ///
-    /// 没有这个字段时前端只能二选一：显示一个点了必然失败的「立即恢复」，
-    /// 或者对所有项都置灰（后者把真能还原的也堵了）。两个都是错的。
+    /// 2026-10-06（任务二）后它的消费方是**详情弹窗**：>0 时在还原提示里讲明
+    /// 「按本机备份逐值还原（N 个值）」。注入断了 = 弹窗少讲一条还原路径的依据；
+    /// 「备份表只读一次」的约束照旧（126 项逐项读 = 重复解 34KB JSON ×126）。
     #[test]
     fn b4_逐行注入restorable() {
         let src = include_str!("overview.rs");
@@ -2032,24 +2065,40 @@ let ov = include_str!("overview.rs");
     /// 这里断的是「结构与接线的关键形态」，不是视觉 —— 视觉由
     /// `check-contrast` / `check-css-tokens` 覆盖。之所以还要断源码形态：
     /// 还原入口的**失效形态是「静默的」**（按钮永远置灰或点了必然失败），
-    /// 没有任何门禁会自己变红。
+    /// 没有任何门禁会自己变红。2026-10-06（任务二）起行内入口整条下线、
+    /// 「可否恢复」只在详情弹窗判定 —— ②③ 转为**反向形态**锁「不许复活」。
     #[test]
-    fn ui_还原入口契约且收藏星标已下线() {
+    fn ui_还原入口仅在弹窗且收藏星标已下线() {
         let js = include_str!("../../../../src/scripts/optimizer.js");
 
-        // ① 还原入口：**没有备份就置灰**，不显示一个点了必然失败的按钮
+        // ① 行内还原入口（B4）必须**整条链路都不存在**（2026-10-06 任务二下线。
+        //    正向形态会随实现演进失效，反向形态才能锁住「不许复活」—— 与 ③ 星标同写法）。
+        for (needle, why) in [
+            (".opt-row-restore", "行内还原按钮类名"),
+            ("data-restore", "行内还原按钮属性"),
+            ("closest('.opt-row-restore", "行点击里的按钮委托分支"),
+        ] {
+            assert!(!js.contains(needle), "行内还原入口残留：{why}（{needle}）仍在 optimizer.js");
+        }
+        let css = include_str!("../../../../src/styles/main.css");
         assert!(
-            js.contains("typeof o.restorable === 'number'") && js.contains("disabled"),
-            "还原入口没有按 restorable 置灰 —— 无备份的项点了只会拿到「无备份记录」"
+            !css.contains(".opt-row-restore"),
+            "行内还原按钮的 CSS 还在 main.css 里（永不显示的死规则）"
         );
-        // ② 置灰原因走 data-tip（禁 title，AGENTS §2）
+        // ② 弹窗是本任务后**唯一**的还原判定点：必须消费 restorable（>0 时讲明
+        //    「按本机备份逐值还原（N 个值）」），否则该字段成为零消费方死字段
+        //    （后端 overview.rs 仍在逐行注入）。
+        //
+        // 断言形态说明：断**代码结构 + 带插值的模板字面量**，不断散词 ——
+        // 首版按散词 `按本机备份逐值还原` 判过，但注释里留了同一个词，
+        // 把消费代码整段删掉后注释仍让断言通过（判红实验当场抓住的假绿）。
         assert!(
-            js.contains("本机没有该项的值级备份"),
-            "置灰按钮没有 data-tip 说明原因"
+            js.contains("const backupHint = (typeof o.restorable === 'number' && o.restorable > 0)"),
+            "详情弹窗没有消费 restorable —— 值级备份条数无处显示（死字段）"
         );
         assert!(
-            !js.contains("title=\"本机没有"),
-            "用了 title 属性而不是 data-tip（AGENTS §2 明令）"
+            js.contains("按本机备份逐值还原（${o.restorable} 个值）"),
+            "弹窗还原提示没有把「按本机备份逐值还原（N 个值）」讲出来（备份条数必须来自 restorable）"
         );
         // ③ 收藏星标必须**整条链路都不存在**（2026-10-03 用户裁定删）。
         //    正向形态（存在某段代码）会随实现演进失效，反向形态（不存在）
@@ -2063,7 +2112,6 @@ let ov = include_str!("overview.rs");
         ] {
             assert!(!js.contains(needle), "收藏星标残留：{why}（{needle}）仍在 optimizer.js");
         }
-        let css = include_str!("../../../../src/styles/main.css");
         assert!(
             !css.contains(".opt-row-fav"),
             "收藏星标的 CSS 还在 main.css 里（会留下永不显示的死规则）"
