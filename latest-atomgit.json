@@ -1,15 +1,15 @@
 {
-  "version": "0.6.5",
-  "notes": "## 版本 0.6.5（2026-10-05）\n\n① **国内更新线路切换到 AtomGit** —— 此前国内检查更新走 Gitee；本版起国内首选 AtomGit（gitcode.com 与 atomgit.com 是同一平台的两个域名），失败自动回落 GitHub，完整性锚点仍是 minisign 签名 + SHA-256 核对。Gitee 此后只同步代码、不再发布新版本。0.6.3 及更早的客户端内置公钥是坏的、升不了级（0.6.4 已修），请手动安装一次。\n\n② **回收站兜底更硬** —— 删除在回收站不可用时（卷禁用、配额满、网络盘）此前会静默转成永久删除、结果还写着「已移入回收站」。现在沿用系统警告、可以中止。内部文件的自动裁剪（删除清单、还原包）同样改为回收站优先。\n\n③ **「空文件夹」删除的默认勾选修好了** —— 折叠显示的父目录（体内只有空子目录）此前会被删除前预检 100% 跳过，勾了也删不掉；现在按与扫描一致的「整树为空」判据复检，只有真出现新内容才跳过。\n\n④ **密钥与设置写入更诚实** —— 系统密钥（AI 接口密钥等）解不开时保留原密文，不再写回空值把密钥抹掉；字体导入、测速历史、自定义菜单项等写入失败时如实报错，不再「提示成功、重启消失」。\n\n⑤ **启动项与计划任务** —— 32 位启动项的启用/禁用此前写错注册表位置（应写 `Run32`），修好；计划任务枚举加超时护栏，不再可能卡住整个扫描。\n\n⑥ **批量优化项按「你勾选的子集」判定** —— 完成状态此前要求全量目标都通过才算完成，与自选子集矛盾；现在按实际勾选范围评估。新增「禁用冗余板载设备」批量项（HPET 计时器、虚拟设备枚举器、WAN Miniport 等），可逐项勾选、随时还原。\n\n⑦ **界面修复若干** —— 启动项禁用计数、无网关时测速丢包显示「--」而非 100%、磁盘树图占比口径、右键菜单图标转义、服务启停未全部生效时的如实提示。",
-  "pub_date": "2026-10-05T14:02:16Z",
-  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.5/attach_files/Trim_0.6.5_x64-setup.exe/download",
-  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE9KS2tVMVR4QkxFVXZiL09nVndOR0w3SzAreFBua2txOS8rNHc2ekpwdXVld3VVQ2tUV3F2bnZWSlp6RTRuNTlLVjI3L25PQ3ByWll0UHlhZGJmYWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjA1NTkzCWZpbGU6VHJpbV8wLjYuNV94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjUKMUw5eFo2cTIvN2ZqSXgwV3dBWVArMHNPWlZjam9XRmxOSWx0cDlKWHlqV01OZnBCQ0VmNXcyZjU5MnBTdDdMSjhuNW8xU1dMNTd0dTFrV1hscUlzQnc9PQo=",
-  "sha256": "5c34428524f575ab2e19c53f87c0f82dfcdac41bb7574038b8671fb6c09b9b2f",
+  "version": "0.6.6",
+  "notes": "## 版本 0.6.6（2026-10-06）\n\n> 本版做四件事：键盘调优合并、还原点能力收编、清理四子页升级，另含一次签名密钥轮换。\n\n① **键盘调优合并** —— 键盘队列深度与端口路由收编进「优化中心」的键盘项（队列深度固定写 8、端口路由固定为驱动默认档，为减少输入排队延迟并对齐 PS/2 转发层）；「更多调优项」窗口只保留**处理器调度**与**鼠标队列**两组，原键盘队列档位（16/18/20/22）与「出厂 100 复位」、端口路由预设一并下线——想改键盘这两项，到优化中心的键盘项执行，不再有两处入口。\n\n② **还原点能力收编** —— 「创建系统还原点」从优化中心列表移到右上角「系统还原点」弹窗。创建前预检改为 fail-closed 并分级报因：系统保护全局关闭 / **系统还原组件缺失**（还原驱动、服务或提供程序不可用——此前这种情况会「转一圈然后假装完成」）/ 没有任何卷开启保护，三种情况各自给出对应指引。创建流程无论成败都会把临时解除的「创建频率限制」恢复原值，弹窗新增「恢复默认创建频率」按钮作为手动回收出口。\n\n③ **清理四子页升级** ——\n- **重复文件**：每组「保留」的那份改为**最后修改时间最新**的一份（不再固定留第一份）；同一文件连续下载产生的「xxx (1).ext」「xxx - 副本.ext」这类副本，内容一致时成组标记为「**下载副本**」。\n- **空文件/空目录**：空目录行新增「**忽略**」——加入名单后重扫不再显示；工具栏「忽略名单」可随时查看与移出（移出后重扫会重新出现）。\n- **磁盘分析**：类型构成改按**类型家族**（图片 / 视频 / 音频 / 文档 / 压缩包 / 安装包 / 开发文件 / 字体 / 其他）聚合；新增「**老旧大文件**」视图——超过 180 天未修改的按大小取前 20，可勾选移入回收站，支持只看「安装包 / 压缩包」。\n- **清理页**：新增「**导出计划**」——扫描勾选后一键导出 Markdown 清单（条目、类别、风险、预计释放），执行前可核对；不执行任何删除。\n\n④ **规则签名密钥轮换（内部加固）** —— 规则库的签名密钥完成一次轮换，客户端改为新旧两把钥匙并行验签；对现有用户无感知（规则更新照常，更新链的可信性不变）。",
+  "pub_date": "2026-10-05T17:02:43Z",
+  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.6/attach_files/Trim_0.6.6_x64-setup.exe/download",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaFBpYm13cU1JWHpIZENNNHJ5QTFoM0JGVXVtdkFLdFcwV21KMytCZW1SbTIySUhJSEVzSzRCeGpkaW5mMnRhYmcrc2dOR2lLVjNobytqWUVBbFcrNFF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjE5NjE3CWZpbGU6VHJpbV8wLjYuNl94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjYKenpKblN6YmMxY281RUhHVThRUzdKaEVqd2U1UXhtV1BXYmVCODdoSHhYV0J0a3VMV3dCY0lNeXRYU2pQZWo2bWtyMTJ0c0pXVjJxV1NFMTdBdzY4Q1E9PQo=",
+  "sha256": "640dfab891f17bdff82c2e832faa222e85caf022a268ec964c8d5514cfded183",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.5/attach_files/Trim_0.6.5_x64-setup.exe/download",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE9KS2tVMVR4QkxFVXZiL09nVndOR0w3SzAreFBua2txOS8rNHc2ekpwdXVld3VVQ2tUV3F2bnZWSlp6RTRuNTlLVjI3L25PQ3ByWll0UHlhZGJmYWdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjA1NTkzCWZpbGU6VHJpbV8wLjYuNV94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjUKMUw5eFo2cTIvN2ZqSXgwV3dBWVArMHNPWlZjam9XRmxOSWx0cDlKWHlqV01OZnBCQ0VmNXcyZjU5MnBTdDdMSjhuNW8xU1dMNTd0dTFrV1hscUlzQnc9PQo=",
-      "sha256": "5c34428524f575ab2e19c53f87c0f82dfcdac41bb7574038b8671fb6c09b9b2f"
+      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.6/attach_files/Trim_0.6.6_x64-setup.exe/download",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaFBpYm13cU1JWHpIZENNNHJ5QTFoM0JGVXVtdkFLdFcwV21KMytCZW1SbTIySUhJSEVzSzRCeGpkaW5mMnRhYmcrc2dOR2lLVjNobytqWUVBbFcrNFF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjE5NjE3CWZpbGU6VHJpbV8wLjYuNl94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjYKenpKblN6YmMxY281RUhHVThRUzdKaEVqd2U1UXhtV1BXYmVCODdoSHhYV0J0a3VMV3dCY0lNeXRYU2pQZWo2bWtyMTJ0c0pXVjJxV1NFMTdBdzY4Q1E9PQo=",
+      "sha256": "640dfab891f17bdff82c2e832faa222e85caf022a268ec964c8d5514cfded183"
     }
   }
 }
