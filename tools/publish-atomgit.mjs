@@ -4,7 +4,7 @@
 // 用法（发版顺序见 §7；本工具只碰 AtomGit API。GitHub 侧上传仍归 gh CLI，不在这里）：
 //   node tools/publish-atomgit.mjs --dry-run         # 本地预检 + 打印计划，不写文件不联网
 //   node tools/publish-atomgit.mjs --offline         # 只生成三份清单（产物区两份 + 仓根 latest-atomgit.json）
-//   node tools/publish-atomgit.mjs --token-file <p>  # 全流程：等 tag 同步 → 建 release → 传三件 → 匿名回读验 sha256
+//   node tools/publish-atomgit.mjs --token-file <p>  # 全流程：等 tag 就位 → 建 release → 传三件 → 匿名回读验 sha256
 //   node tools/publish-atomgit.mjs --verify-feed     # push 之后：轮询 AtomGit raw 清单直到与仓根逐字节一致
 //
 // 令牌：环境变量 ATOMGIT_TOKEN，或 --token-file 指向一个只含令牌的文件（首尾空白剔除）。
@@ -39,8 +39,8 @@ const GITHUB_SLUG = 'xiaoxu1642/trim-tauri';
 const API = `https://api.atomgit.com/api/v5/repos/${ATOMGIT_SLUG}`;
 const FEED_URL = `${API}/raw/${MANIFEST_NAME}`;
 
-// 同步等待上限：AtomGit 从 GitHub 单向同步（代码只推 GitHub），实测 tag 会同步，
-// 但延迟未知 —— 轮询给足 10 分钟，超时只报「再等等重跑」，不留半成品。
+// 等待上限：平台镜像同步已于 2026-10-05 停用，代码/tag 改为直推 AtomGit，应立刻可见；
+// 保留 10 分钟上限只是容忍账号侧延迟 —— 超时只报「再等等重跑」，不留半成品。
 const TAG_WAIT_MS = 10 * 60 * 1000;
 const FEED_WAIT_MS = 10 * 60 * 1000;
 const POLL_MS = 30_000;
@@ -207,9 +207,9 @@ async function waitTag(token) {
     const r = await api('/tags?per_page=100', { token });
     if (r.ok && Array.isArray(r.data) && r.data.some((t) => t.name === `v${ver}`)) return;
     if (Date.now() > deadline) {
-      die(`等不到 AtomGit 同步 tag v${ver}（已等 ${TAG_WAIT_MS / 60000} 分钟）。同步来自 GitHub push：确认 tag 已推，稍后重跑本脚本（重跑安全，不会留半成品）`);
+      die(`等不到 AtomGit 的 tag v${ver}（已等 ${TAG_WAIT_MS / 60000} 分钟）。确认 tag 已直推到 AtomGit，稍后重跑本脚本（重跑安全，不会留半成品）`);
     }
-    info(`AtomGit 尚无 tag v${ver}（等 GitHub → AtomGit 同步），30s 后重查`);
+    info(`AtomGit 尚无 tag v${ver}（等 push 到达），30s 后重查`);
     await sleep(POLL_MS);
   }
 }
@@ -291,13 +291,13 @@ async function verifyFeed() {
         ok(`AtomGit raw 清单已与仓根逐字节一致（version=${ver}，sha256=${localSha.slice(0, 12)}…）`);
         return;
       }
-      warn('raw 清单已存在但与仓根不一致（同步未跟上或内容分叉），30s 后再查');
+      warn('raw 清单已存在但与仓根不一致（push 未到达或内容分叉），30s 后再查');
     } else if (res.status === 404) {
-      info('raw 清单还没出现（push 尚未同步到 AtomGit），30s 后再查');
+      info('raw 清单还没出现（push 尚未到达 AtomGit），30s 后再查');
     } else {
       warn(`raw 清单读取异常 HTTP ${res.status}，30s 后再查`);
     }
-    if (Date.now() > deadline) die(`等不到 raw 清单同步（已等 ${FEED_WAIT_MS / 60000} 分钟）—— 确认已 push 到 GitHub main，之后再跑 --verify-feed`);
+    if (Date.now() > deadline) die(`等不到 raw 清单更新（已等 ${FEED_WAIT_MS / 60000} 分钟）—— 确认仓根清单已直推到 AtomGit main，之后再跑 --verify-feed`);
     await sleep(POLL_MS);
   }
 }
@@ -315,7 +315,7 @@ try {
       console.log('');
       console.log('[dry-run] 将写入：');
       console.log(`  build-release/${MANIFEST_NAME}、build-release/latest.json、仓根 ${MANIFEST_NAME}`);
-      console.log(`[dry-run] 将执行（联网）：等 tag v${ver} 同步 → 建 release（name=Trim ${ver}）→ 上传 ${setupName} / ${portableName} / ${sigName} → 匿名回读验 sha256`);
+      console.log(`[dry-run] 将执行（联网）：等 tag v${ver} 就位 → 建 release（name=Trim ${ver}）→ 上传 ${setupName} / ${portableName} / ${sigName} → 匿名回读验 sha256`);
       console.log('[dry-run] 不写文件、不联网。');
       process.exit(0);
     }
@@ -329,15 +329,15 @@ try {
       const token = loadToken();
       console.log('');
       await waitTag(token);
-      ok(`AtomGit 已有 tag v${ver}（同步到位）`);
+      ok(`AtomGit 已有 tag v${ver}`);
       await ensureRelease(token, notes);
       await ensureAsset(token, setupName, files.setup);
       await ensureAsset(token, portableName, files.portable);
       await ensureAsset(token, sigName, files.sig);
       console.log('');
       console.log('附件已全部上线。下一步（顺序不能反）：');
-      console.log(`  git add ${MANIFEST_NAME} && git commit && git push   # 推仓根清单到 GitHub main`);
-      console.log('  等 AtomGit 同步后：node tools/publish-atomgit.mjs --verify-feed');
+      console.log(`  git add ${MANIFEST_NAME} && git commit && git push   # 推仓根清单；镜像已停用，AtomGit 须直推（§7.4）`);
+      console.log('  AtomGit 收到后：node tools/publish-atomgit.mjs --verify-feed');
     }
   }
 } catch (e) {
