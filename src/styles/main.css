@@ -3291,6 +3291,24 @@ body.electron-mica.win-maximized .main-content {
   background: transparent;
 }
 
+/* 2026-10-06 用户报告:最大化后壁纸丢失且背景设置无效。
+   根因:壁纸层 .app-wallpaper 是 z-index:-1 的 fixed 容器,按 CSS 层序画在 body 背景
+   之下;上面的不透明护栏底色(bg-base)把壁纸整个盖死 —— 非最大化时 body 是半透明
+   veil 才透得出壁纸。壁纸激活时恢复同一份 veil,黑帧防线转由壁纸伪元素承担:
+   ::before 提到完全不透明(inset:0 铺满客户区),WebView 无透明像素,
+   「不依赖 DWM 材质自绘整窗」的护栏目的不受影响,壁纸观感与非最大化一致。 */
+body.electron-mica.win-maximized[data-preset-bg] {
+  background: var(--mat-veil) !important;
+  background-image: none !important;
+}
+body.electron-mica.win-maximized.bg-image-on {
+  background: var(--mat-veil) !important;
+  background-image: none !important;
+}
+body.win-maximized[data-preset-bg] .app-wallpaper::before {
+  opacity: 1 !important;
+}
+
 body.electron-mica.win-maximized .layout {
   background: var(--bg-base);
 }

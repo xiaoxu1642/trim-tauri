@@ -100,10 +100,90 @@ fn get_publisher(path: &str) -> String {
     String::new()
 }
 
+/// 任务 XML 文本解码：Windows 任务文件是 UTF-16LE(带 BOM)，少数导出件是 UTF-8
+fn decode_task_xml(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        let wide: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&wide)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// 取 `<tag>…</tag>` 的第一个文本内容（大小写按 Windows 写出形态精确匹配）
+fn xml_first(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let Some(a) = text.find(&open) else { return String::new() };
+    let rest = &text[a + open.len()..];
+    let Some(b) = rest.find(&close) else { return String::new() };
+    rest[..b].trim().to_string()
+}
+
+/// 递归枚举 `C:\Windows\System32\Tasks`，把「登录/开机触发」的任务收成启动项候选。
+/// 跳过 `\Microsoft\` 子树（系统任务，与旧 schtasks 口径一致）。
+fn scan_task_files() -> Vec<Value> {
+    let root = std::path::Path::new(r"C:\Windows\System32\Tasks");
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let rel_str = rel.to_string_lossy().replace('/', "\\");
+            if rel_str.starts_with("Microsoft\\") { continue; }
+            let Ok(bytes) = std::fs::read(&p) else { continue };
+            let text = decode_task_xml(&bytes);
+            if !text.contains("<LogonTrigger") && !text.contains("<BootTrigger") { continue; }
+            let task_path = match rel_str.rfind('\\') {
+                Some(idx) => format!("\\{}", &rel_str[..=idx]),
+                None => "\\".to_string(),
+            };
+            let task_name = rel_str.rsplit('\\').next().unwrap_or(&rel_str).to_string();
+            let task_to_run = xml_first(&text, "Command");
+            let enabled = !xml_first(&text, "Enabled").eq_ignore_ascii_case("false");
+            let task_missing = missing_target_of(&extract_cmd_path(&task_to_run)).unwrap_or_default();
+            out.push(json!({
+                "id": format!("task|{task_path}{task_name}"),
+                "name": task_name,
+                "command": task_to_run,
+                "source": "task",
+                "hive": "",
+                "regPath": "",
+                "valueName": "",
+                "valueType": "",
+                "valueData": "",
+                "valueDataB64": "",
+                "valueDataArray": Vec::<String>::new(),
+                "filePath": "",
+                "taskPath": task_path,
+                "taskName": task_name,
+                "enabled": enabled,
+                "location": format!("计划任务{}", task_path.trim_end_matches('\\')),
+                "scope": "HKLM",
+                "disabledBy": if !enabled { "system" } else { "" },
+                "publisher": "",
+                "resolvedPath": "",
+                "missingTarget": task_missing,
+            }));
+        }
+    }
+    out
+}
+
 /// 启动项扫描（对应 startup_scan.ps1）
 ///
 /// 注册表 Run/RunOnce + 启动文件夹 + StartupApproved + disabled.json 合并。
-/// 计划任务暂用 schtasks 命令获取。.lnk 目标解析和文件发布者留空（S2 完善）。
+/// 计划任务直接解析 Tasks 目录 XML（schtasks /v 逐任务深查实测 60s+，2026-10-06 已替换）。
+/// .lnk 目标解析和文件发布者留空（S2 完善）。
 pub fn startup_scan() -> Result<Vec<Value>, String> {
     let mut results: Vec<Value> = Vec::new();
 
@@ -269,64 +349,12 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
         }
     }
 
-    // ---------- 计划任务（schtasks 命令） ----------
-    if let Ok(output) = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool("schtasks"),
-        &["/query", "/fo", "csv", "/nh", "/v"],
-        crate::engine::systembin::SCHTASKS_TIMEOUT,
-    ) {
-        if output.status.success() {
-            let csv = String::from_utf8_lossy(&output.stdout);
-            for line in csv.lines().skip(1) {
-                // CSV 字段：HostName,TaskName,Next Run Time,Status,Logon Mode,Last Run Time,Last Result,Author,Task To Run,Start In,Comment,Scheduled Task State,Idle Time,Power Management,Run As User,Delete Task If Not Rescheduled,Stop Task If Runs X Hours And X Mins,Schedule,Schedule Type,Start Time,Start Date,End Date,Days,Months,Repeat: Every,Repeat: Until: Time,Repeat: Until: Duration,Repeat: Stop If Still Running,Multiple Instances
-                let fields: Vec<&str> = line.split("\",\"").collect();
-                if fields.len() < 10 { continue; }
-                let task_name_raw = fields[1].trim_matches('"');
-                // TaskName 格式：\Path\Name
-                let task_path = match task_name_raw.rfind('\\') {
-                    Some(idx) => &task_name_raw[..=idx],
-                    None => "\\",
-                };
-                let task_name = match task_name_raw.rfind('\\') {
-                    Some(idx) => &task_name_raw[idx+1..],
-                    None => task_name_raw,
-                };
-                if task_path.starts_with("\\Microsoft\\") { continue; }
-                // Schedule Type 字段（索引 19）含 Logon/Boot
-                let schedule_type = fields.get(19).unwrap_or(&"").trim_matches('"');
-                if !schedule_type.contains("Logon") && !schedule_type.contains("Boot") && !schedule_type.contains("At log on") && !schedule_type.contains("At startup") {
-                    continue;
-                }
-                let task_to_run = fields.get(8).unwrap_or(&"").trim_matches('"');
-                let state = fields.get(11).unwrap_or(&"").trim_matches('"');
-                let enabled = state != "Disabled";
-                let task_missing = missing_target_of(&extract_cmd_path(task_to_run)).unwrap_or_default();
-                results.push(json!({
-                    "id": format!("task|{task_path}{task_name}"),
-                    "name": task_name,
-                    "command": task_to_run,
-                    "source": "task",
-                    "hive": "",
-                    "regPath": "",
-                    "valueName": "",
-                    "valueType": "",
-                    "valueData": "",
-                    "valueDataB64": "",
-                    "valueDataArray": Vec::<String>::new(),
-                    "filePath": "",
-                    "taskPath": task_path,
-                    "taskName": task_name,
-                    "enabled": enabled,
-                    "location": format!("计划任务{}", task_path.trim_end_matches('\\')),
-                    "scope": "HKLM",
-                    "disabledBy": if !enabled { "system" } else { "" },
-                    "publisher": "",
-                    "resolvedPath": "",
-                    "missingTarget": task_missing,
-                }));
-            }
-        }
-    }
+    // ---------- 计划任务（Tasks 目录 XML 直读） ----------
+    // 2026-10-06 性能修复（用户报告「扫描一分钟还多」）：旧实现 `schtasks /query /v`
+    // 会为**每个**任务做一次深查（本机数百任务 ⇒ 实测 60s+），而我们要的三件事
+    // （触发类型 / 命令行 / 启用态）全部写在任务 XML 文件里 —— 纯文件读，毫秒级。
+    // XML 按固定写出形态做子串判读，不引解析依赖（§2 零新增依赖）。
+    results.extend(scan_task_files());
 
     // ---------- 合并 disabled.json ----------
     // 与 read_disabled_records 同一取本口径（`startup_ledger_file`）：两处读同一本账，

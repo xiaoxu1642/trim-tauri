@@ -31,11 +31,17 @@ pub fn memory_info() -> Result<Value, String> {
         let load = ms.dwMemoryLoad as i64;
         let page_size = pi.PageSize as u64;
         let cache = pi.SystemCache as u64 * page_size;
+        // 页面文件容量 = 提交上限 − 物理总量（CommitLimit = 物理 + 页面文件上限）
         let page_total = (pi.CommitLimit as u64)
             .saturating_sub(pi.PhysicalTotal as u64)
             * page_size;
+        // 页面文件已用 = 提交量 − 物理已用量（commit charge 中不在物理里的部分）。
+        // 2026-10-06 用户报告「7.4 GB / 2.9 GB」倒挂：旧式 `CommitTotal − PhysicalAvailable`
+        // 把提交口径与物理可用口径直接相减，物理越空闲分子反而越大，数学上可以超出
+        // pageTotal；改为减「PhysicalTotal − PhysicalAvailable」（物理已用）后，
+        // 分子分母同口径且分子恒 ≤ 分母（commit ≤ limit ⇒ 差式恒 ≤ 容量差）。
         let page_used = (pi.CommitTotal as u64)
-            .saturating_sub(pi.PhysicalAvailable as u64)
+            .saturating_sub((pi.PhysicalTotal as u64).saturating_sub(pi.PhysicalAvailable as u64))
             * page_size;
 
         Ok(json!({

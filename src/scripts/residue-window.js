@@ -101,13 +101,16 @@
     state.scanGroups = groups;
     state.rows = groups.reduce(function (acc, g) { return acc.concat(g.rows); }, []);
     // 勾选初值在渲染前定好：只展示不给删的行永远不该被勾上
-    state.rows.forEach(function (f) { f._checked = f.deleteCapable !== false && !!f.defaultChecked; });
+    // 勾选初值在渲染前定好：只展示不给删的行永远不该被勾上。
+    // 2026-10-06 用户裁定：进残留列表后可直接执行删除 ⇒ 后端判可删的候选一律默认勾上
+    // （原口径「除规则库高置信项外不自动勾选」废止）；删除仍走逐批确认，保护项不给勾。
+    state.rows.forEach(function (f) { f._checked = f.deleteCapable !== false; });
     renderChains();
     updateActionButtons();
     state.scanning = false;
     const n = state.rows.length;
     const notes = (rDead && rDead.success && rDead.data.notes && rDead.data.notes.length) ? rDead.data.notes[0] : '';
-    toast(n ? 'info' : 'success', n ? `三链候选共 ${n} 项，一律未自动勾选，请逐项确认` : (notes || '三类扫描都没有发现残留'));
+    toast(n ? 'info' : 'success', n ? `三链候选共 ${n} 项，可删项已默认勾选，确认后即可执行删除` : (notes || '三类扫描都没有发现残留'));
   }
 
   function chainTableHtml(title, rows) {
@@ -202,7 +205,8 @@
       } else if (can) {
         // 勾选态记在**报告项本身**（不是副本）：搜索框每敲一次都会重渲染这一区，
         // 记在副本上等于「一改搜索就悄悄取消勾选」
-        if (typeof it._checked !== 'boolean') it._checked = false;
+        // 2026-10-06 用户裁定：可删候选默认勾上（删除仍走确认，保护项画不出勾选框）
+        if (typeof it._checked !== 'boolean') it._checked = true;
         const di = state.deepRows.push(it) - 1;
         it._deepIdx = di;
         cell = '<span class="checkbox' + (it._checked ? ' checked' : '') + '" data-dcheck="' + di

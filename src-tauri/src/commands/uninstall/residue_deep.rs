@@ -32,9 +32,31 @@ use super::vendor_registry;
 /// 单个分组候选上限（总量由 7 组共同决定，不再叠加一个总数闸）
 const GROUP_CAP: usize = 60;
 
-/// 一个分组渲染所需的最小信息：id 给前端做锚点，title 是人读标题。
-fn group(id: &str, title: &str, items: Vec<Value>) -> Value {
-    json!({ "id": id, "title": title, "count": items.len(), "items": items })
+
+/// 2026-10-06 用户裁定：反作弊与游戏平台的运行面不作为残留候选 ——
+/// ACE（AntiCheatExpert）、WeGame、腾讯系（Tencent/腾讯）的服务、驱动、厂商键
+/// 在游戏仍在使用时会被深扫当成「残留」报出，而删它们触的是反作弊完整性与
+/// 账号风险，收益远小于风险。按 target 子串排除；词表刻意收窄，
+/// 不要扩成 `anti` 这类通配（会把系统自己的反作弊基线也扫进去）。
+fn platform_protected_skip(target: &str) -> bool {
+    let t = target.to_lowercase();
+    ["anticheatexpert", "ace-base", "ace-user", "wegame", "tencent", "腾讯"]
+        .iter()
+        .any(|w| t.contains(w))
+}
+
+/// 组装 + 平台保护排除。被排除的条数在 notes 留痕 —— 「没报」与「没有」必须可区分。
+fn group_with_platform_skip(id: &str, title: &str, items: Vec<Value>, notes: &mut Vec<String>) -> Value {
+    let total = items.len();
+    let kept: Vec<Value> = items
+        .into_iter()
+        .filter(|it| !platform_protected_skip(it.get("target").and_then(Value::as_str).unwrap_or("")))
+        .collect();
+    let skipped = total - kept.len();
+    if skipped > 0 {
+        notes.push(format!("{title}：已按平台保护名单（ACE / WeGame / 腾讯系）排除 {skipped} 项，不作为残留候选"));
+    }
+    json!({ "id": id, "title": title, "count": kept.len(), "items": kept })
 }
 
 /// 汇总七个扫描器（只读）。在 `spawn_blocking` 里跑：整轮要枚举服务表、驱动目录、
@@ -117,13 +139,13 @@ unsafe fn scan_all() -> Value {
         "readonly": true,
         "phase": "v0.5.0-read-only",
         "groups": [
-            group("services", "服务残留", svc_items),
-            group("drivers", "无服务引用的驱动文件", drv_items),
-            group("minifilters", "仍挂载但服务键已不在的过滤驱动", flt_items),
-            group("ifeo", "IFEO 映像执行选项", ifeo_items),
-            group("vendor", "厂商产品注册表键", vendor_items),
-            group("capability", "非打包程序能力授权", cap_items),
-            group("gameDirs", "游戏库目录残留", game_items),
+            group_with_platform_skip("services", "服务残留", svc_items, &mut notes),
+            group_with_platform_skip("drivers", "无服务引用的驱动文件", drv_items, &mut notes),
+            group_with_platform_skip("minifilters", "仍挂载但服务键已不在的过滤驱动", flt_items, &mut notes),
+            group_with_platform_skip("ifeo", "IFEO 映像执行选项", ifeo_items, &mut notes),
+            group_with_platform_skip("vendor", "厂商产品注册表键", vendor_items, &mut notes),
+            group_with_platform_skip("capability", "非打包程序能力授权", cap_items, &mut notes),
+            group_with_platform_skip("gameDirs", "游戏库目录残留", game_items, &mut notes),
         ],
         "protected": protected,
         "protectedCount": protected.len(),
@@ -371,16 +393,45 @@ mod tests {
     }
 
     /// 七个分组必须一个不少，且 id 与方案 §3 的扫描器一一对应
+    /// 平台保护名单（2026-10-06 用户裁定）：ACE / WeGame / 腾讯系的运行面不进候选，
+    /// 词表之外的目标必须照常放行（防把排除做成过宽通配）。
+    #[test]
+    fn platform_protected_skip_hits_cheat_and_tencent_names_only() {
+        for hit in [
+            r"HKLM\SYSTEM\CurrentControlSet\Services\AntiCheatExpert Protection",
+            r"C:\Windows\System32\drivers\ACE-BASE.sys",
+            r"C:\Windows\System32\drivers\ace-user.sys",
+            r"HKLM\SOFTWARE\WOW6432Node\WeGame",
+            r"HKCU\Software\Tencent\QQMusic",
+            r"HKLM\SOFTWARE\腾讯游戏",
+        ] {
+            assert!(platform_protected_skip(hit), "该目标应被平台名单排除: {hit}");
+        }
+        for keep in [
+            r"C:\Program Files\Everything\Everything64.exe",
+            r"HKCU\Software\Tencent WeGame Clone Ltd\Other", // 假想对抗样本：词表是子串判，仍命中 wegame——见下一行
+            r"HKCU\Software\Acme\Editor",
+        ] {
+            let expected = keep.contains("Tencent WeGame Clone");
+            assert_eq!(
+                platform_protected_skip(keep),
+                expected,
+                "放行/排除判定漂移: {keep}"
+            );
+        }
+    }
+
     #[test]
     fn group_ids_cover_all_seven_scanners() {
+        let mut notes = Vec::new();
         let built: Vec<Value> = vec![
-            group("services", "服务残留", vec![]),
-            group("drivers", "无服务引用的驱动文件", vec![]),
-            group("minifilters", "仍挂载但服务键已不在的过滤驱动", vec![]),
-            group("ifeo", "IFEO 映像执行选项", vec![]),
-            group("vendor", "厂商产品注册表键", vec![]),
-            group("capability", "非打包程序能力授权", vec![]),
-            group("gameDirs", "游戏库目录残留", vec![]),
+            group_with_platform_skip("services", "服务残留", vec![], &mut notes),
+            group_with_platform_skip("drivers", "无服务引用的驱动文件", vec![], &mut notes),
+            group_with_platform_skip("minifilters", "仍挂载但服务键已不在的过滤驱动", vec![], &mut notes),
+            group_with_platform_skip("ifeo", "IFEO 映像执行选项", vec![], &mut notes),
+            group_with_platform_skip("vendor", "厂商产品注册表键", vec![], &mut notes),
+            group_with_platform_skip("capability", "非打包程序能力授权", vec![], &mut notes),
+            group_with_platform_skip("gameDirs", "游戏库目录残留", vec![], &mut notes),
         ];
         let ids: Vec<&str> = built.iter().map(|g| g["id"].as_str().unwrap_or("")).collect();
         assert_eq!(
