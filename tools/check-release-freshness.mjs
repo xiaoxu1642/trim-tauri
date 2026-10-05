@@ -32,6 +32,7 @@
 // 但「有 setup.exe 却缺 .sig / 缺清单」判红 —— 那是资产不齐（v0.3.5/0.3.6 同型事故）。
 
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -205,9 +206,52 @@ for (const name of ['latest.json', 'latest-gitee.json']) {
   const p = join(OUT, name);
   if (!existsSync(p)) continue;
   try {
-    const v = String(JSON.parse(readFileSync(p, 'utf8')).version ?? '');
+    const j = JSON.parse(readFileSync(p, 'utf8'));
+    const v = String(j.version ?? '');
     if (v !== ver) fail(`${name} 的 version=${v} ≠ 当前版本 ${ver} —— 该清单会把客户端钉在旧版`);
     else ok(`${name} version 与当前版本一致（${v}）`);
+
+    // 3b. signature 必须是「一层 base64 的四行 minisign 文本」。
+    //     多套一层就是 2026-10-05 那次事故：客户端下载完报 Invalid encoding in minisign data，
+    //     而检查更新一路正常 —— 只有真跑一遍下载才暴露，所以这条必须在发版前静态拦住。
+    const sig = String(j.signature ?? '');
+    const platSig = String(j?.platforms?.['windows-x86_64']?.signature ?? '');
+    if (!sig) {
+      fail(`${name} 缺 signature 字段`);
+    } else {
+      const inner = Buffer.from(sig, 'base64').toString('utf8').split(/\r?\n/).filter((l) => l.length);
+      const shapeOk = inner.length === 4
+        && inner[0].startsWith('untrusted comment: ')
+        && inner[2].startsWith('trusted comment: ')
+        && Buffer.from(inner[1], 'base64').length === 74
+        && Buffer.from(inner[3], 'base64').length === 64;
+      if (!shapeOk) {
+        fail(`${name} 的 signature 不是「一层 base64 的四行 minisign 文本」（解出 ${inner.length} 行，长度 ${sig.length}）`
+          + ' —— 插件 verify_signature 只做一次 base64 解码，多套一层会让全部客户端验签失败');
+      } else if (!new RegExp(`version:${ver.replace(/\./g, '\\.')}`).test(inner[2])) {
+        fail(`${name} 的 signature trusted comment 里没有 version:${ver} —— requireSignedVersion 会判 MissingSignedVersion`);
+      } else {
+        ok(`${name} signature 形状与 version:${ver} 正确`);
+      }
+      if (platSig !== sig) fail(`${name} 顶层 signature 与 platforms.windows-x86_64.signature 不一致（客户端按平台位取，两处不同必有一处验不过）`);
+    }
+
+    // 3c. 清单声明的 sha256 必须等于**实际安装包**的哈希（没声明就 SKIP，不判红：
+    //     清单可以不写这个字段，客户端只把它当交叉核对值）
+    const exe = join(OUT, `Trim_${ver}_x64-setup.exe`);
+    const declared = String(j?.platforms?.['windows-x86_64']?.sha256 ?? j.sha256 ?? '');
+    if (!declared) {
+      skip(`${name} 未声明 sha256 —— 客户端只做 minisign 验签，哈希交叉核对**未启用**`);
+    } else if (!existsSync(exe)) {
+      skip(`${name} 声明了 sha256，但本机没有 Trim_${ver}_x64-setup.exe 可比对`);
+    } else {
+      const actual = createHash('sha256').update(readFileSync(exe)).digest('hex');
+      if (actual !== declared.toLowerCase()) {
+        fail(`${name} 的 sha256=${declared} ≠ 实际安装包 ${actual} —— 客户端会拒绝安装（清单与产物不是同一份）`);
+      } else {
+        ok(`${name} 的 sha256 与实际安装包一致（${actual.slice(0, 12)}…）`);
+      }
+    }
   } catch (e) {
     fail(`${name} 解析失败：${e.message}`);
   }

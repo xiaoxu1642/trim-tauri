@@ -75,7 +75,7 @@ const EXEMPTS = new Map([
   // 路径参数），protect 对它恒拒（app_data_dir 整棵是 subtree）反而会让功能 100% 不可用，
   // 所以按 realtime_report_delete 那条例外姿势登记，不套一层无意义的闸门。
   ['updater_install', '安装失败时清掉 Trim 自写的 update-applied.json 标记（文件名常量，无外部输入）；protect 对自有数据目录恒拒无判定意义'],
-  ['updater_completion', '读后即删同一份 update-applied.json 标记（防「更新已完成」提示反复弹）；文件名常量，无外部输入'],
+  ['updater_completion', '读后即删同一份 update-applied.json 标记（防「更新已完成」提示反复弹）；另经 clean_installer 删**下载目录里我们自己存的那份安装包**——路径取自标记，删除前过「文件名必须是 Trim_<版本>_x64-setup.exe 形状 + 父目录必须等于 %USERPROFILE%\\Downloads」双闸，不合形状直接不碰文件'],
   // v2-L4P-27（B-5）：fonts_import 旧副本删除补齐归属校验后的口径说明由代码兑现；
   // 豁免理由不变（只删自有副本目录内目标）。
 ]);

@@ -129,6 +129,38 @@ struct Downloaded {
     sha256: String,
     /// 这次包体实际来自哪条线路（回退换线时与检查阶段的线路可能不同）
     via: String,
+    /// 落在用户「下载」目录里的那份安装包路径（插件自己只用内存字节安装，
+    /// 这份是给用户看得见/事后自查的；写失败为空，不影响更新本身）
+    saved_to: String,
+}
+
+/// 把下载好的安装包按发布时的文件名放进用户「下载」目录。
+///
+/// 为什么放这里而不是只留在内存：用户 2026-10-05 指定的流程要求「下载到下载文件夹」，
+/// 而且一份看得见的安装包是自动更新唯一的事后凭证 —— 装完想核对哈希、或想再装一次，
+/// 都不用重新下载。文件名沿用发布名，与下载 URL 末段一致，避免同名不同物。
+/// 返回 `None` = 没写成（没有下载目录 / 磁盘或权限问题），调用方只记日志不阻断。
+fn save_to_downloads(bytes: &[u8], file_name: &str) -> Option<String> {
+    let dir = std::env::var_os("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join("Downloads"))
+        .filter(|d| d.is_dir())?;
+    // 只接受一个纯文件名：URL 末段理论上可被清单写坏，路径分隔符一律拒绝
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || file_name.contains("..")
+    {
+        return None;
+    }
+    let path = dir.join(file_name);
+    match std::fs::write(&path, bytes) {
+        Ok(_) => Some(path.to_string_lossy().to_string()),
+        Err(e) => {
+            log::write_log("warn", &format!("[updater] 安装包写入下载目录失败（不影响更新）: {e}"));
+            None
+        }
+    }
 }
 
 /// 清单里声明的包体 SHA-256（可选字段）。
@@ -534,14 +566,26 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
                         if declared.is_some() { "，哈希已核对" } else { "，清单未声明哈希" }
                     ),
                 );
+                // 下载 URL 的末段就是发布名（Trim_x.y.z_x64-setup.exe）
+                let file_name = update
+                    .download_url
+                    .path_segments()
+                    .and_then(|mut s| s.next_back())
+                    .unwrap_or("")
+                    .to_string();
+                let saved = save_to_downloads(&bytes, &file_name).unwrap_or_default();
                 *lock(&DOWNLOADED) = Some(Downloaded {
-                    update,
-                    bytes,
                     sha256: actual.clone(),
                     via: via.clone(),
+                    saved_to: saved.clone(),
+                    update,
+                    bytes,
                 });
                 *lock(&PENDING) = None;
-                push(&app, json!({ "phase": "ready", "version": version, "sha256": actual, "via": via }));
+                push(&app, json!({
+                    "phase": "ready", "version": version, "sha256": actual, "via": via,
+                    "savedTo": saved,
+                }));
             }
             None => {
                 // 用户主动取消由 updater:cancel-download 直接 abort 任务并推 idle，
@@ -599,6 +643,7 @@ pub fn updater_install<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
         "toVersion": d.update.version,
         "sha256": d.sha256,
         "via": d.via,
+        "installerPath": d.saved_to,
         "at": crate::engine::now_ms(),
     });
     if let Err(e) = security::atomic_write_json(&paths::join_data(DONE_FILE), &marker) {
@@ -631,6 +676,10 @@ pub fn updater_install<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
 /// 读后即删：这台机器已经告诉过用户「装好了」，第二次启动再弹一次就成了骚扰。
 /// 只认 `toVersion == 当前版本` 的标记：装的是 0.7.0 而当前跑的是 0.6.3，说明那次替换
 /// 没落地（或用户又装了旧包），此时谎报成功比不报更糟。
+///
+/// 顺带做用户 2026-10-05 要的最后一步：清掉下载目录里那份安装包。清理结果**照实回报**
+/// （`cleaned` / `cleanFailed`），程序文件本身由 NSIS 覆盖安装替换，Trim 不另外删
+/// 「旧版代码文件」—— 那是安装器的职责，我们看不到也没有那份清单。
 #[tauri::command]
 pub fn updater_completion<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
@@ -650,7 +699,57 @@ pub fn updater_completion<R: Runtime>(window: WebviewWindow<R>) -> Result<Value,
         );
         return Ok(json!({ "ok": true, "data": Value::Null }));
     }
-    Ok(json!({ "ok": true, "data": v }))
+    let mut data = serde_json::Map::from_iter(v);
+    let installer = data
+        .get("installerPath")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let (cleaned, clean_failed) = match clean_installer(&installer) {
+        Cleaned::Yes => (true, false),
+        Cleaned::Nothing => (false, false),
+        Cleaned::Failed => (false, true),
+    };
+    data.insert("cleaned".into(), json!(cleaned));
+    data.insert("cleanFailed".into(), json!(clean_failed));
+    Ok(json!({ "ok": true, "data": Value::Object(data) }))
+}
+
+enum Cleaned {
+    /// 真的删掉了一份
+    Yes,
+    /// 没有可删的（路径为空，或文件已经不在了）
+    Nothing,
+    /// 想删但没删动（权限/占用）
+    Failed,
+}
+
+/// 只删「我们自己放进下载目录的那一个文件」：文件名必须还是发布名形状
+/// （`Trim_<版本>_x64-setup.exe`），且必须真的在某个 Downloads 目录下。
+/// 标记里的路径来自磁盘上的一份 JSON，虽然只有本应用写得进去，但删除出口一律不信任输入。
+fn clean_installer(path: &str) -> Cleaned {
+    if path.is_empty() {
+        return Cleaned::Nothing;
+    }
+    let p = std::path::Path::new(path);
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let shape_ok = name.starts_with("Trim_") && name.ends_with("_x64-setup.exe") && !name.contains("..");
+    let in_downloads = std::env::var_os("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .map(|h| p.parent() == Some(h.join("Downloads").as_path()))
+        .unwrap_or(false);
+    if !shape_ok || !in_downloads {
+        log::write_log("warn", &format!("[updater] 清理跳过：安装包路径不在下载目录或文件名不合形状: {path}"));
+        return Cleaned::Nothing;
+    }
+    match std::fs::remove_file(p) {
+        Ok(()) => Cleaned::Yes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Cleaned::Nothing,
+        Err(e) => {
+            log::write_log("warn", &format!("[updater] 清理安装包失败: {e}"));
+            Cleaned::Failed
+        }
+    }
 }
 
 /// updater:set-mirror —— 切换更新线路偏好
@@ -688,7 +787,9 @@ pub fn schedule_silent_check<R: Runtime>(app: &AppHandle<R>) {
     }
     let app = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(8));
+        // 3 秒：够首帧画完（更新弹窗不该跟开屏动画抢），又不至于让用户以为「打开就没反应」。
+        // 用户 2026-10-05 指定的时点；发现新版本由渲染层无条件弹 available 弹窗（不是静默）。
+        std::thread::sleep(std::time::Duration::from_secs(3));
         tauri::async_runtime::spawn(async move {
             let _ = safe_check(app, true).await;
         });
@@ -703,6 +804,44 @@ mod tests {
 
     fn ids(pref: &str) -> Vec<&'static str> {
         ordered_feeds(pref).iter().map(|f| f.0).collect()
+    }
+
+    /// 清理出口的输入不可信：标记里的路径来自磁盘上的一份 JSON，
+    /// 只有「下载目录 + 发布名形状」同时成立才允许删，其余一律不碰文件。
+    #[test]
+    fn clean_installer_refuses_anything_but_our_own_download_file() {
+        // 空路径 = 没写过下载目录
+        assert!(matches!(clean_installer(""), Cleaned::Nothing));
+        // 名字对但不在下载目录（这里刻意用一个必然不存在的路径：判据必须在**触盘之前**就拒掉，
+        // 所以返回 Nothing 而不是 Failed）
+        assert!(matches!(clean_installer(r"C:\Windows\Trim_9.9.9_x64-setup.exe"), Cleaned::Nothing));
+        assert!(matches!(clean_installer(r"C:\Users\someone\Documents\Trim_9.9.9_x64-setup.exe"), Cleaned::Nothing));
+        // 形状不合（缺前后缀、带穿越）
+        let dl = std::env::var_os("USERPROFILE")
+            .map(|h| std::path::PathBuf::from(h).join("Downloads").join("whatever.txt").to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert!(matches!(clean_installer(&dl), Cleaned::Nothing));
+        assert!(matches!(clean_installer(r"C:\Users\x\Downloads\Trim_..\..\evil-setup.exe"), Cleaned::Nothing));
+        // 真的不存在的那个下载目录文件 → Nothing（不是 Failed：没删动不是因为权限）
+        let missing = std::env::var_os("USERPROFILE")
+            .map(|h| {
+                std::path::PathBuf::from(h)
+                    .join("Downloads")
+                    .join("Trim_0.0.0-should-not-exist_x64-setup.exe")
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        assert!(matches!(clean_installer(&missing), Cleaned::Nothing));
+    }
+
+    /// 下载文件名来自清单里的 URL 末段，不可信：路径分隔符与穿越一律拒绝。
+    #[test]
+    fn save_to_downloads_rejects_names_with_path_parts() {
+        assert!(save_to_downloads(b"x", "").is_none());
+        assert!(save_to_downloads(b"x", "..\\setup.exe").is_none());
+        assert!(save_to_downloads(b"x", "a/b.exe").is_none());
+        assert!(save_to_downloads(b"x", r"a\b.exe").is_none());
     }
 
     /// 清单里的 sha256 只是**交叉核对值**（信任锚始终是内置公钥背书的 minisign 签名），

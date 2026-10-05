@@ -25,9 +25,10 @@
     speed: 0,
     transferred: 0,
     total: 0,
-    // ready 态由主进程带上：实际走的那条线路 + 包体 SHA-256（换线重试时线路可能与检查时不同）
+    // ready 态由主进程带上：实际走的那条线路 + 包体 SHA-256 + 存到下载目录的安装包路径
     via: '',
-    sha256: ''
+    sha256: '',
+    savedTo: ''
   };
 
   let ctrl = null;          // window.modal.create 返回的控制器
@@ -417,6 +418,7 @@
         '新版本 v' + (state.version || '') + ' 已下载并通过发布签名校验'
         + (state.via ? '（经 ' + viaLabel(state.via) + '）' : '')
         + (state.sha256 ? '。\n安装包 SHA-256：' + state.sha256 : '')
+        + (state.savedTo ? '\n安装包已存到：' + state.savedTo : '')
         + '\n点击「立即重启」将关闭 Trim 并执行文件替换，完成后自动启动新版本。';
     } else if (kind === 'error') {
       $('.upd-error-msg', root).textContent = state.message || '检查更新失败，请稍后重试。';
@@ -579,17 +581,33 @@
   //   用户点完通常就是要回到应用主界面）。
   // 文案只陈述事实（从哪个版本到哪个版本、包体哈希、走的哪条线路），不声称
   // 「已验证安全」—— 完整性锚点是内置公钥背书的 minisign 签名，哈希只是交叉核对。
+  /**
+   * 「更新已完成」确认（新版本实例首启一次）。
+   * 文案只说主进程**真的做到**的事：清理结果由 updater:completion 如实回报
+   * （cleaned / cleanFailed），程序文件的替换是 NSIS 覆盖安装做的，
+   * 不写「旧版代码文件已删除」这种我们没做过的话（AGENTS §9.3）。
+   */
+  function completionDescOf(info) {
+    const via = info.via ? '本次经 ' + viaLabel(String(info.via)) + ' 下载。' : '';
+    if (info.cleanFailed) {
+      return '安装包已替换完成，现在运行的是新版本。' + via + '下载目录里那份安装包没能删掉（可能被占用），你可以手动删除。';
+    }
+    if (info.cleaned) {
+      return '安装包已替换完成，下载的安装包也已清理，现在运行的是新版本。' + via;
+    }
+    return '安装包已替换完成，现在运行的是新版本。' + via;
+  }
+
   function showCompletion(info) {
     if (!window.modal || !window.modal.create) return;
     const from = String((info && info.fromVersion) || '');
     const to = String((info && info.toVersion) || '');
     const sha = String((info && info.sha256) || '');
-    const via = String((info && info.via) || '');
     let done = null;
     const close = () => { try { done && done.close(); } catch (_) {} };
     done = window.modal.create({
       id: 'updaterCompletionModal',
-      title: '更新已完成',
+      title: '更新完成',
       width: 460,
       bodyHtml:
         '<div class="upd-ready"><div class="upd-ready-title" data-role="ver"></div>' +
@@ -598,16 +616,17 @@
       footerHtml:
         '<span class="model-picker-spacer"></span>' +
         '<button class="btn btn-secondary" type="button" data-role="finish">完成更新</button>' +
-        '<button class="btn btn-primary" type="button" data-role="open">打开应用</button>'
+        '<button class="btn btn-primary" type="button" data-role="open">启动应用</button>'
     });
     const root = done.backdrop || done.modal;
     const q = (sel) => root.querySelector(sel);
     q('[data-role="ver"]').textContent = from && to ? `${from} → ${to}` : `已更新到 ${to}`;
-    q('[data-role="desc"]').textContent =
-      '安装包已替换完成，现在运行的是新版本。' +
-      (via ? `本次经 ${viaLabel(via)} 下载。` : '');
+    q('[data-role="desc"]').textContent = completionDescOf(info || {});
     q('[data-role="sha"]').textContent = sha ? `安装包 SHA-256：${sha}` : '';
     q('[data-role="finish"]').addEventListener('click', close);
+    // 「启动应用」= 关掉提示并进入应用主界面（检查更新这一动作藏在设置页深处，
+    // 用户点完通常就是要回到总览）。安装器已经把这个新版本进程拉起来了，
+    // 所以这里不做"再开一个进程"那种事，只是把界面交回给应用。
     q('[data-role="open"]').addEventListener('click', () => {
       close();
       try { window.app && window.app.switchPage && window.app.switchPage('overview'); } catch (_) {}
