@@ -823,39 +823,6 @@ const OPTIONS = [
   // 该项另用裸 Remove-Item 绕过 trashOrUnlink / 删除清单 / confirmDanger，违反项目安全红线。
   // ---------- 系统精简 ----------
   {
-    // 对比审查 P0（2026-09-14）：此前 PROS_CONS 有本项文案、main.js optimizer:create-restore
-    // 也按本 id 取脚本，但 OPTIONS 无定义 → 还原点创建链路整体失效（回退保障为空）。
-    id: 'tf_restore_point', group: '系统精简', title: '创建系统还原点', risk: 'low',
-    desc: '为所有已启用系统保护的磁盘创建一个还原点，作为后续高风险优化的回退保障（异常时到「系统设置 → 恢复」或本页「系统还原点管理」回退）。注意：创建过程会临时将还原点创建频率限制改为 0（解除 24h 限制，原始值已进值级备份，可经「还原」回写）。PS7 无 Checkpoint-Computer，走 root\\default SystemRestore WMI 静态方法创建；需管理员权限，且至少一个卷已开启系统保护。',
-    steps: [
-      {
-        label: '解除还原点创建频率限制',
-        // 用 reg 步骤（而非 pwsh 写注册表）：可进 optimizer-backups 值级备份，
-        // 也让 checkOptimizedInternal / verifyOptionApplied 有逐键比对手段。
-        reg: regBlock({
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore': {
-            'SystemRestorePointCreationFrequency': 'dword:00000000'
-          }
-        })
-      },
-      {
-        label: '创建还原点', pwsh: [
-          "# EventType 100 = BEGIN_SYSTEM_CHANGE，RestorePointType 0 = APPLICATION_INSTALL",
-          "$null = Invoke-CimMethod -Namespace 'root/default' -ClassName 'SystemRestore' -MethodName 'CreateRestorePoint' -Arguments @{ Description = 'Trim 优化前还原点'; EventType = [uint32]100; RestorePointType = [uint32]0 } -ErrorAction Stop"
-        ].join('\n')
-      }
-    ],
-    // 一键还原：删除本项写入的频率覆写（无该值时系统按默认 24 小时限制工作）；
-    // 还原点本身属系统快照，不提供脚本级撤销。
-    restore: [
-      { label: '还原：移除创建频率覆写', reg: regBlock({
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore': {
-          'SystemRestorePointCreationFrequency': '-'
-        }
-      }) }
-    ]
-  },
-  {
     id: 'tf_appx', group: '系统精简', title: '移除 25 个内置 UWP 应用', risk: 'high',
     desc: 'Trim Debloat：按名称通配移除所有用户下的预装 AppX——3D Builder、Bing 全家桶（资讯/财经/体育/天气）、CommsPhone、Drawboard PDF、Facebook、Getstarted、Messaging、Office Hub、OneNote、人脉、Skype、纸牌合集、Sway、Twitter、闹钟时钟、手机、地图、反馈中心、录音机、邮件日历、Zune（Groove/影视）等。移除后部分应用需从商店重装。',
     steps: [

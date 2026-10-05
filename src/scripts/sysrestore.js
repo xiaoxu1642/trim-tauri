@@ -150,13 +150,56 @@
         return;
       }
       if (resp && resp.success) {
-        window.app?.toast('success', '系统还原点创建成功');
+        // 回执文案用服务端 message：创建流程无论成败都回收频率覆写值，
+        // 回收结果（已还原 / 回收失败需手动）都在 message 里，别用前端硬编码文案吞掉它。
+        window.app?.toast('success', (resp && resp.message) || '系统还原点创建成功');
         await load();
       } else {
         window.app?.toast('warning', (resp && resp.message) || '创建失败，建议手动创建');
       }
     } catch (e) {
       window.app?.toast('error', `创建失败: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = oldText;
+    }
+  }
+
+  // 恢复默认创建频率（2026-10-06）：创建流程会临时把还原点创建频率限制改为 0，
+  // 正常路径每次结束都会自动回收；本按钮是**手动出口**——回收失败时（或老版本残留了
+  // 覆写值）用户在这里一键恢复，不必去注册表编辑器。
+  async function restoreFrequency() {
+    if (!window.api?.optimizer?.restoreFrequency) {
+      window.app?.toast('error', '恢复创建频率不可用：本地接口未就绪（window.api 缺失），请重启应用后再试');
+      return;
+    }
+    const ok = await window.app?.confirmDanger?.(
+      '恢复默认创建频率',
+      '将把系统还原点的创建频率限制恢复为你修改前的值。\n\n若本机没有修改前的记录，则删除覆写值、恢复 Windows 默认的 24 小时限制。',
+      '恢复',
+      '取消',
+      '此操作写入系统注册表，需要管理员权限。'
+    );
+    if (!ok) return;
+    const btn = q('#btnSrFrequency');
+    if (!btn) return;
+    const oldText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '恢复中…';
+    try {
+      const resp = await window.api.optimizer.restoreFrequency();
+      if (resp && resp.needAdmin) {
+        const elevated = await window.app?.requestElevation?.('恢复创建频率需要管理员权限。');
+        if (elevated) window.app?.toast('info', '已获得管理员权限，请重新点击「恢复默认创建频率」');
+        return;
+      }
+      if (resp && resp.success) {
+        window.app?.toast('success', (resp && resp.message) || '已恢复默认创建频率');
+      } else {
+        window.app?.toast('warning', (resp && resp.message) || '恢复失败');
+      }
+    } catch (e) {
+      window.app?.toast('error', `恢复失败: ${e.message}`);
     } finally {
       btn.disabled = false;
       btn.innerHTML = oldText;
@@ -206,6 +249,9 @@
             <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
             刷新
           </button>
+          <button class="btn btn-secondary" id="btnSrFrequency" type="button" data-tip="把还原点创建频率限制恢复为修改前的值；无记录则删除覆写值、恢复 Windows 默认的 24 小时限制">
+            恢复默认创建频率
+          </button>
           <button class="btn btn-accent" id="btnRestoreCreate" type="button">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
             创建还原点
@@ -226,6 +272,7 @@
     ctrl.footer.querySelector('#btnSrClose').addEventListener('click', close);
     ctrl.footer.querySelector('#btnRestoreRefresh').addEventListener('click', () => load());
     ctrl.footer.querySelector('#btnRestoreCreate').addEventListener('click', () => create());
+    ctrl.footer.querySelector('#btnSrFrequency').addEventListener('click', () => restoreFrequency());
 
     load();
   }

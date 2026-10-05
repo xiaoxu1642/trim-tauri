@@ -1053,15 +1053,16 @@ fn strip_js_comments(src: &str) -> String {
         assert!(bad.is_empty(), "这些 pwsh 步骤既编译不成原生、也不在 PsInline 白名单里: {bad:?}");
         assert!(native > 0 && inbox > 0, "覆盖报告形状变了（native={native} inbox-ps={inbox}），前端文案分支要跟着复核");
         // 收件箱 PowerShell 步数**只减不增**的棘轮：新增优化项若退化成整段交 PS，
-        // 这里会红，逼着写清楚「为什么不能原生」。基线 11 是 2026-10-02 现算：
-        //   tf_ifeo_wipe×1（foreach + PSObject 属性枚举，误编译等于删错 IFEO 子键）、
-        //   tf_mmagent×2（Disable-MMAgent cmdlet，注册表落点未在本机实测，不猜）、
-        //   tf_dev_*×3（R5 裁定：设备禁用无原生投影且无自动还原）、
-        //   tf_restore_point×1（A11 裁定收口：本机 SR WMI provider 就是坏的）、
-        //   tf_appx/tf_cortana×2（NonRemovable 在 windows 0.61 无投影，已裁定停手）、
-        //   tf_onedrive×2（Start-Process /UNINSTALL + @@RECYCLE@@ 协议行，改原生要在真卸
-        //   OneDrive 的机器上验，本机不造这个副作用）。
-        const INBOX_PS_BASELINE: usize = 11;
+        // 这里会红，逼着写清楚「为什么不能原生」。基线 10 是 2026-10-06 收紧：
+        // 原基线 11（2026-10-02 现算）含 tf_restore_point×1，随条目摘除、能力改走
+        // 命令层内联脚本（restore_point.rs），数据层不再有此步骤 ⇒ 显式降回 10。
+        // 其余 10 步成分：tf_ifeo_wipe×1（foreach + PSObject 属性枚举，误编译等于删错
+        // IFEO 子键）、tf_mmagent×2（Disable-MMAgent cmdlet，注册表落点未在本机实测，
+        // 不猜）、tf_dev_*×3（R5 裁定：设备禁用无原生投影且无自动还原）、
+        // tf_appx/tf_cortana×2（NonRemovable 在 windows 0.61 无投影，已裁定停手）、
+        // tf_onedrive×2（Start-Process /UNINSTALL + @@RECYCLE@@ 协议行，改原生要在真卸
+        // OneDrive 的机器上验，本机不造这个副作用）。
+        const INBOX_PS_BASELINE: usize = 10;
         assert!(
             inbox <= INBOX_PS_BASELINE,
             "收件箱 PowerShell 步骤从基线 {INBOX_PS_BASELINE} 涨到 {inbox}：新步骤要优先走原生解释器，\

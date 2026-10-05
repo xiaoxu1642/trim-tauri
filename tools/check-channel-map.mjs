@@ -124,6 +124,7 @@ const TAURI_ADDED = {
   'actions:run-script': 'v0.7.0：用户自写 PowerShell 直调，唯一入口 run_inbox_script、固定 120 秒、不代提权（窄窗口集 actions）',
   'residue:open-window': 'v0.5.0（2026-10-04）：打开残留扫描副窗（用户裁决 4：扫描全部在自绘副窗，主窗只留入口）',
   'residue:close-window': 'v0.5.0（2026-10-04）：关闭残留扫描副窗（同 preview/models/peripheral 的子窗关窗轨）',
+  'optimizer:restore-frequency': '任务三（2026-10-06）：还原点弹窗「恢复默认创建频率」手动回收入口（主窗档；创建流程已自动回收，此钮是回收失败时的出口，上游 Electron 无此能力）',
 };
 
 function collect(set, re, text) {

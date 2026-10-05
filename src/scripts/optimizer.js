@@ -1643,8 +1643,8 @@
       // tf_svc_bulk：单独弹窗询问是否连商店相关服务一并禁用（用户选择经 params 传递）
       const includeStore = opt.id === 'tf_svc_bulk' ? await confirmIncludeStoreServices() : false;
       // 执行前检查系统还原点（警示/风险确认；用户最终拒绝则不执行）。
-      // tf_restore_point 本身就是创建动作，再走检查会「先弹建议创建、再重复创建」，直接放行。
-      if (opt.id !== 'tf_restore_point' && !(await ensureRestorePoint())) return;
+      // （原「tf_restore_point 本身就是创建动作、直接放行」的特例判断已随条目摘除删除。）
+      if (!(await ensureRestorePoint())) return;
       if (opt.dynamic && dynCtl) {
         const dynP = dynamicParams(opt.id, preCloseRaw);
         // 本会话立即记录已应用档位：重开弹窗时该档位按钮置灰（只有 mem 档有这个概念）

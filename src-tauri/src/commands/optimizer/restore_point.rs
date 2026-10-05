@@ -7,9 +7,7 @@
 use crate::engine::{guard, log, optimization_state as opt_state, sysinfo};
 use serde_json::{Value, json};
 use tauri::{Runtime, WebviewWindow};
-use super::apply::*;
 use super::backup_restore::*;
-use super::catalog::*;
 // ==================== 系统还原点 ====================
 
 /// 解析 WMI DMTF（yyyymmddHHMMSS.mmmmmm±UUU）。SR-5：偏移 000 按本地时间构造。
@@ -218,84 +216,156 @@ pub async fn optimizer_create_restore<R: Runtime>(window: WebviewWindow<R>) -> V
     result
 }
 
-pub(super) fn create_restore_inner() -> Value {
-    let Some(opt) = find_option("tf_restore_point") else {
-        return json!({ "success": false, "message": "缺少还原点脚本" });
+/// 频率覆写值的注册表坐标（能力已搬进「系统还原点」弹窗；`tf_restore_point` 仅作
+/// **历史备份 id** 沿用 —— 写入侧与还原侧共用本函数，§5.16 一处定义）。
+/// 先例：`backup_restore.rs::option_targets` 的 `svc_mem_gb` 硬编码分支。
+/// 要改这个坐标时把「弹窗命令 / 创建流程 / 备份 id」三处一起对——它们是同一条链。
+pub(super) fn restore_freq_target() -> RegTarget {
+    RegTarget {
+        root: "HKEY_LOCAL_MACHINE".into(),
+        sub: "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore".into(),
+        key: "SystemRestorePointCreationFrequency".into(),
+    }
+}
+
+/// 把频率覆写值恢复为修改前的原值；原值不存在（备份 `exists=false`）则删除该值
+/// （= 恢复系统默认的 24 小时限制）。`Ok(描述)` = 干了什么；`Err(原因)` = 失败原因。
+///
+/// 创建流程（无论成败）与弹窗「恢复默认创建频率」命令**共用这一处实现**（§5.16：
+/// 同一判定只许一处定义）——两个调用方各写一份「写回/删值」逻辑，漂移时谁也发现不了。
+pub(super) fn recycle_freq_override() -> Result<String, String> {
+    let map = load_opt_backups();
+    let some_values = map
+        .get("tf_restore_point")
+        .and_then(|e| e.get("values"))
+        .and_then(|v| v.as_array())
+        .cloned();
+    let Some(values) = some_values.filter(|a| !a.is_empty()) else {
+        return Err("没有可用于恢复的备份记录".to_string());
     };
-    let steps = opt.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    if steps.is_empty() {
-        return json!({ "success": false, "message": "缺少还原点脚本" });
+    if !restore_backup_values(&values) {
+        return Err("写回注册表失败".to_string());
     }
+    let any_exists = values
+        .iter()
+        .any(|v| v.get("exists").and_then(|x| x.as_bool()).unwrap_or(false));
+    Ok(if any_exists {
+        "已写回修改前的创建频率值".to_string()
+    } else {
+        "已删除创建频率覆写值（恢复系统默认的 24 小时限制）".to_string()
+    })
+}
 
-    // 预检：系统保护全局开关 + 受保护卷
+/// 失败回执 + 频率覆写回收结果（D2：无论成败都回收；回收失败如实报出口，不谎报已回收）。
+fn fail_with_recycle(base: &str, rec: Result<String, String>) -> Value {
+    let tail = match rec {
+        Ok(d) => format!("；创建频率覆写已还原（{d}）"),
+        Err(e) => format!(
+            "；但创建频率覆写值回收失败（{e}），请打开「系统还原点」弹窗点「恢复默认创建频率」手动回收"
+        ),
+    };
+    json!({ "success": false, "message": format!("{base}{tail}") })
+}
+
+pub(super) fn create_restore_inner() -> Value {
+    // 预检：fail-closed（**拿不到确定结论 ⇒ 中止**，绝不往下写覆写值）+ 分级报因。
+    // 旧实现是三层 fail-open（脚本没跑成 / 标记缺失 / JSON 坏 —— 任一层落空都跳过预检
+    // 继续创建）；本机日志里「protectedVolumes=0 却仍走到 Invoke-CimMethod」与它一致。
     let pre = "$ErrorActionPreference = \"SilentlyContinue\"\n\
+$out = @{ globalDisabled = $false; protectedVolumes = 0; srDriver = $false; srService = $false; providerOk = $false }\n\
 $srKey = Get-ItemProperty \"HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore\"\n\
-$gd = ($srKey -and $null -ne $srKey.DisableSR -and [int]$srKey.DisableSR -eq 1)\n\
-$vol = @(Get-CimInstance Win32_ShadowStorage -ErrorAction SilentlyContinue)\n\
-Write-Output ('@@SRPRE@@' + ({ globalDisabled = $gd; protectedVolumes = $vol.Count } | ConvertTo-Json -Compress))";
-    if let Some(out) = run_inline_ps(pre, 20, None) {
-        if let Some(line) = out.stdout.lines().map(str::trim).find(|l| l.starts_with("@@SRPRE@@")) {
-            if let Ok(v) = serde_json::from_str::<Value>(&line["@@SRPRE@@".len()..]) {
-                if v.get("globalDisabled").and_then(|x| x.as_bool()).unwrap_or(false) {
-                    return json!({ "success": false, "message": "系统保护已被全局关闭（DisableSR=1），请先在「系统 → 关于 → 系统保护」中开启后再创建还原点" });
-                }
-                if v.get("protectedVolumes").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
-                    return json!({ "success": false, "message": "没有任何卷开启系统保护，请先在「系统 → 关于 → 系统保护」中为系统盘开启保护" });
-                }
-            }
-        }
+if ($srKey -and $null -ne $srKey.DisableSR -and [int]$srKey.DisableSR -eq 1) { $out.globalDisabled = $true }\n\
+$out.protectedVolumes = @(Get-CimInstance Win32_ShadowStorage).Count\n\
+$out.srDriver = Test-Path \"$env:SystemRoot\\System32\\drivers\\sr.sys\"\n\
+$out.srService = ($null -ne (Get-Service -Name SRService -ErrorAction SilentlyContinue))\n\
+try { $null = Get-CimInstance -Namespace 'root/default' -ClassName SystemRestore -ErrorAction Stop; $out.providerOk = $true } catch { $out.providerOk = $false }\n\
+Write-Output ('@@SRPRE@@' + ($out | ConvertTo-Json -Compress))";
+    let Some(out) = run_inline_ps(pre, 20, None) else {
+        log::write_log("warn", "还原点预检未能完成：预检脚本未跑成");
+        return json!({ "success": false, "message": "预检未能完成（查询脚本未执行），已中止创建；可稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点" });
+    };
+    let Some(line) = out.stdout.lines().map(str::trim).find(|l| l.starts_with("@@SRPRE@@")) else {
+        log::write_log("warn", "还原点预检未能完成：无 @@SRPRE@@ 输出");
+        return json!({ "success": false, "message": "预检未能完成（无有效输出），已中止创建；可稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点" });
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&line["@@SRPRE@@".len()..]) else {
+        log::write_log("warn", "还原点预检未能完成：输出不是合法 JSON");
+        return json!({ "success": false, "message": "预检未能完成（输出解析失败），已中止创建；可稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点" });
+    };
+    // 分级报因，判定顺序：全局关闭 → 组件缺失 → 无受保护卷。
+    // 「组件缺失」必须先于「0 个受保护卷」判 —— 组件缺失时 0 卷是伪因，照实报到
+    // 「需修复系统组件」才对得上本机实况（sr.sys / SRService / 提供程序三者任一缺）。
+    if v.get("globalDisabled").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return json!({ "success": false, "message": "系统保护已被全局关闭（DisableSR=1），请先在「系统 → 关于 → 系统保护」中开启后再创建还原点" });
+    }
+    let provider_ok = v.get("providerOk").and_then(|x| x.as_bool()).unwrap_or(false);
+    let sr_driver = v.get("srDriver").and_then(|x| x.as_bool()).unwrap_or(false);
+    let sr_service = v.get("srService").and_then(|x| x.as_bool()).unwrap_or(false);
+    if !provider_ok || !sr_driver || !sr_service {
+        log::write_log(
+            "warn",
+            &format!("还原点预检：系统还原组件缺失（provider={provider_ok} driver={sr_driver} service={sr_service}）"),
+        );
+        return json!({ "success": false, "message": "系统还原组件缺失或未安装（还原驱动 / 服务 / 还原点提供程序不可用）。可在「系统 → 关于 → 系统保护」查看状态；或用 sfc /scannow 与 DISM /Online /Cleanup-Image /RestoreHealth 尝试修复系统组件（不保证修复成功），修复后再回来创建" });
+    }
+    if v.get("protectedVolumes").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
+        return json!({ "success": false, "message": "没有任何卷开启系统保护，请先在「系统 → 关于 → 系统保护」中为系统盘开启保护" });
     }
 
-    // 频率覆写值级备份 + 记账（失败仅 warn，不阻断）
-    let targets = option_targets("tf_restore_point").unwrap_or_default();
-    if !targets.is_empty() {
-        match read_reg_values(&targets) {
-            Some(values) => {
-                let mut map = load_opt_backups();
-                // v2-M9：这条也走「首份不覆盖」——同一项重复应用时不得把基线刷成已优化值
-                let inserted =
-                    matches!(insert_backup_baseline(&mut map, "tf_restore_point", values), BackupInsert::Inserted);
-                if !inserted {
-                    log::write_log("warn", "还原点频率覆写值级备份未写入（基线已存在或结构异常）");
-                } else if !save_opt_backups(&map) {
-                    log::write_log("warn", "还原点频率覆写值级备份失败");
-                }
-            }
-            None => {
-                log::write_log("warn", "还原点频率覆写值级备份失败");
-            }
+    // 频率覆写值的原值备份（**必须在写入前**读）。两条失败路径都中止创建：
+    // 回收依赖备份，没有备份就留一台「覆写值写了、原值找不回」的机器
+    // —— 本机残留的 `SystemRestorePointCreationFrequency=0x0` 正是这个形态的历史证据。
+    let targets = vec![restore_freq_target()];
+    let Some(values) = read_reg_values(&targets) else {
+        log::write_log("warn", "还原点频率覆写值备份失败（读取原值失败），已中止创建");
+        return json!({ "success": false, "message": "频率覆写值备份失败，已中止创建（不留无法回收的中间状态）" });
+    };
+    {
+        let mut map = load_opt_backups();
+        // v2-M9：这条也走「首份不覆盖」——同一项重复创建时不得把基线刷成已覆写值。
+        // 不覆盖是安全的：新逻辑下每次创建结束都回收，当前值必等于原值，旧基线依然正确。
+        let inserted =
+            matches!(insert_backup_baseline(&mut map, "tf_restore_point", values), BackupInsert::Inserted);
+        if !inserted {
+            log::write_log("warn", "还原点频率覆写值级备份未写入（基线已存在或结构异常）");
+        } else if !save_opt_backups(&map) {
+            log::write_log("warn", "还原点频率覆写值级备份保存失败，已中止创建");
+            return json!({ "success": false, "message": "频率覆写值备份保存失败，已中止创建（不留无法回收的中间状态）" });
         }
     }
-    let title = opt.get("title").and_then(|v| v.as_str()).unwrap_or("tf_restore_point");
     // v5 P2：`record_pending` 的契约明写着「false = 写入失败，调用方必须中止」
     // （optimization_state.rs:53）。这条路径会真的创建还原点（改系统），账留不下就等于
     // "改了系统但没有任何记录"—— 崩溃后连「未完成还原」横幅都不会提示。
+    // kinds 与内联前数据层两步（reg + pwsh）等价，概览展示口径不变。
     if !opt_state::record_pending(
         "tf_restore_point",
-        title,
-        &classify_step_kinds(&steps),
+        "创建系统还原点",
+        &["reg".to_string(), "pwsh".to_string()],
     ) {
         log::write_log("error", "创建还原点前 pending 记账失败，已中止（不改系统）");
         return json!({ "success": false, "message": "优化状态写入失败，已取消创建还原点" });
     }
 
+    // 创建脚本：先写频率覆写值（解除 24h 限制），再经 root\default SystemRestore 的
+    // WMI 静态方法创建（PS7 没有 Checkpoint-Computer）。原为数据层两步（reg + pwsh）
+    // 经 build_script 生成；条目摘除后内联，文本与原步骤逐语义等价
+    // （EventType 100 = BEGIN_SYSTEM_CHANGE，RestorePointType 0 = APPLICATION_INSTALL）。
+    let create_ps = "$ErrorActionPreference = \"Stop\"\n\
+New-ItemProperty -Path \"HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore\" -Name \"SystemRestorePointCreationFrequency\" -Value 0 -PropertyType DWord -Force | Out-Null\n\
+$null = Invoke-CimMethod -Namespace 'root/default' -ClassName 'SystemRestore' -MethodName 'CreateRestorePoint' -Arguments @{ Description = 'Trim 优化前还原点'; EventType = [uint32]100; RestorePointType = [uint32]0 }\n\
+Write-Output \"@@DONE@@\"";
     let before = count_restore_points();
-    let script = build_script(&steps);
-    let Some(out) = run_inline_ps(&script, 120, Some("optimizer.create-restore")) else {
+    let Some(out) = run_inline_ps(create_ps, 120, Some("optimizer.create-restore")) else {
         let _ = opt_state::remove("tf_restore_point");
-        return json!({ "success": false, "message": "创建还原点执行异常" });
+        let rec = recycle_freq_override();
+        return fail_with_recycle("创建还原点执行异常", rec);
     };
-    let failed_steps = out
-        .stdout
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("@@FAILED:").and_then(|x| x.strip_suffix("@@")))
-        .and_then(|x| x.parse::<i64>().ok())
-        .unwrap_or(0);
-    let ok = out.code == 0 && out.stdout.contains("@@DONE@@") && failed_steps == 0;
+    let ok = out.code == 0 && out.stdout.contains("@@DONE@@");
     if !ok {
         let _ = opt_state::remove("tf_restore_point");
-        log::write_log("warn", &format!("创建系统还原点未成功: code={} failedSteps={failed_steps}", out.code));
-        return json!({ "success": false, "message": "系统还原点创建失败，请手动创建（需管理员权限，且至少一个卷已开启系统保护）" });
+        log::write_log("warn", &format!("创建系统还原点未成功: code={}", out.code));
+        let rec = recycle_freq_override();
+        return fail_with_recycle("系统还原点创建失败，请手动创建（需管理员权限，且至少一个卷已开启系统保护）", rec);
     }
     // v5 O-5：账本改到**回读之后**再记。旧写法在这里就 mark_applied("pass")，而下面的回读
     // 判失败时只 return、不改账 ⇒ 命令回执 success:false 与账本 applied/pass 同时存在；
@@ -328,7 +398,11 @@ Write-Output ('@@SRPRE@@' + ({ globalDisabled = $gd; protectedVolumes = $vol.Cou
             // 回读判失败必须改账（v5 O-5）：partial 项由 optimizer_state_overview 如实呈现
             let _ = opt_state::mark_partial("tf_restore_point");
             log::write_log("warn", &format!("创建还原点回读未增长: {b} -> {a}，已记账为 partial"));
-            return json!({ "success": false, "message": "未检测到新还原点，创建可能被系统限制或仍在进行，请稍后在「系统还原点管理」核对" });
+            let rec = recycle_freq_override();
+            return fail_with_recycle(
+                "未检测到新还原点，创建可能被系统限制或仍在进行，请稍后在「系统还原点管理」核对",
+                rec,
+            );
         }
     }
     let btxt = before.map(|b| b.to_string()).unwrap_or_else(|| "?".into());
@@ -342,8 +416,16 @@ Write-Output ('@@SRPRE@@' + ({ globalDisabled = $gd; protectedVolumes = $vol.Cou
         ("unknown", "创建命令已完成，但未能比对还原点数量（基线计数不可读），请到「系统还原点管理」核对")
     };
     let _ = opt_state::mark_applied("tf_restore_point", verify);
-    log::write_log("info", &format!("已创建系统还原点 ({btxt} -> {atxt}) verify={verify}"));
-    json!({ "success": true, "message": msg, "verify": verify })
+    // 无论成败都回收频率覆写值（D2）：成功也要收 —— 别把「解除 24h 限制」留在机器上。
+    let rec = recycle_freq_override();
+    let tail = match rec {
+        Ok(d) => format!("；创建频率覆写已还原（{d}）"),
+        Err(e) => format!(
+            "；但创建频率覆写值回收失败（{e}），请打开「系统还原点」弹窗点「恢复默认创建频率」手动回收"
+        ),
+    };
+    log::write_log("info", &format!("已创建系统还原点 ({btxt} -> {atxt}) verify={verify}{tail}"));
+    json!({ "success": true, "message": format!("{msg}{tail}"), "verify": verify })
 }
 
 /// optimizer:list-restore —— 还原点列表 + 各卷保护状态
@@ -413,5 +495,30 @@ Write-Output ('@@RESTORE@@' + ($out | ConvertTo-Json -Depth 4 -Compress))";
         }
     }
     json!({ "success": true, "data": data })
+}
+
+/// optimizer:restore-frequency —— 把还原点创建频率限制恢复为修改前的值（弹窗窄口子）
+///
+/// 只服务「系统还原点」弹窗的一个按钮：**无入参**、只认历史备份 id `tf_restore_point`。
+/// 刻意**不放宽** `optimizer_restore_reg` 的 `find_option || is_retired_id` 白名单
+/// （那条是通用入口，放宽会削弱「未知 id 一律拒」的守卫）；走自己的窄口子即够。
+#[tauri::command]
+pub async fn optimizer_restore_frequency<R: Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    if !sysinfo::is_admin() {
+        return json!({
+            "success": false, "needAdmin": true,
+            "message": "恢复创建频率需要管理员权限，请先提权"
+        });
+    }
+    match recycle_freq_override() {
+        Ok(desc) => json!({ "success": true, "message": desc }),
+        Err(e) => {
+            let missing = e.contains("没有可用于恢复");
+            json!({ "success": false, "missing": missing, "message": format!("恢复创建频率失败：{e}") })
+        }
+    }
 }
 

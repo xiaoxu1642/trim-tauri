@@ -781,8 +781,8 @@ for (const [id, d] of Object.entries(defItems)) {
   if (!d.why || String(d.why).length < 8) a7Problems.push(`${id}: why 太短（依据不可复核）`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d.reviewedAt || '')) a7Problems.push(`${id}: reviewedAt 不是 YYYY-MM-DD`);
 }
-// 覆盖率棘轮：登记项数只增不减
-const DEF_BASELINE = 126; // 2026-10-03 首版：全部项都登记（known 或 unknown）
+// 覆盖率棘轮：登记项数只增不减（确有项退役时显式下调并注明）
+const DEF_BASELINE = 125; // 2026-10-03 首版 126（全部项都登记）；2026-10-06 任务三：tf_restore_point 摘除 ⇒ 显式降 125
 if (Object.keys(defItems).length < DEF_BASELINE) {
   a7Problems.push(
     `defaults 覆盖缩水：${Object.keys(defItems).length} < 基线 ${DEF_BASELINE} —— `

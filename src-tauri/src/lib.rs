@@ -453,6 +453,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::optimizer::optimizer_check_restore,
         commands::optimizer::optimizer_create_restore,
         commands::optimizer::optimizer_list_restore,
+        commands::optimizer::optimizer_restore_frequency,
         commands::optimizer::optimizer_genadvice,
         commands::peripheral::peripheral_open_window,
         commands::peripheral::peripheral_close_window,

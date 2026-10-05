@@ -5,12 +5,18 @@
 //! tools/check-ps-callsites.mjs；build_script 产出的协议行（@@PROC@@ 等）与
 //! `src-tauri/ps/optimizer_build.ps1` 哨兵模板由 check-ps-extraction 逐字节对拍。
 //! OptRunGuard / OPT_RUN_INFLIGHT 是「同一时刻只跑一次优化」的闩锁，Drop 里释放。
+//!
+//! **PS 轨现状（2026-10-06）**：`build_script` 链（build_preamble / ps_quote /
+//! BUILD_SENTINEL）已无生产调用 —— 最后一个生产用户 `tf_restore_point` 随条目摘除、
+//! 改走内联脚本（`restore_point.rs`）。本链保留并标 `#[cfg(test)]`，继续服务契约测试
+//! 对「数据层步骤能被完整编译」的校验；哪天要恢复 PS 轨生产使用，去掉 cfg(test)，
+//! 并先读 cmd/service 两分支里的引号陷阱批注。
 
 use crate::pwsh;
 use crate::engine::{guard, log, optimization_state as opt_state, protect, sysinfo};
 use crate::engine::systembin::system_tool;
 use serde_json::{Value, json};
-use std::sync::OnceLock;
+#[cfg(test)] use std::sync::OnceLock; // 仅 build_preamble（PS 轨链，cfg(test)）使用
 use tauri::{Runtime, WebviewWindow};
 use tauri::Emitter;
 use std::os::windows::process::CommandExt;
@@ -37,6 +43,9 @@ pub(super) const STORE_SERVICES: &[&str] =
 
 /// 从生成器抽取的哨兵脚本中切出 provenance 之后、`# step 1:` 之前的固定前置，
 /// 与 JS buildScript 前 4 个 push（三行设置 + DIAG.PS_PREAMBLE.trim()）逐字一致。
+///
+/// 2026-10-06 起仅契约测试使用（见文件头「PS 轨现状」）。
+#[cfg(test)]
 pub(super) fn build_preamble() -> &'static str {
     static P: OnceLock<String> = OnceLock::new();
     P.get_or_init(|| {
@@ -49,11 +58,16 @@ pub(super) fn build_preamble() -> &'static str {
     })
 }
 
+#[cfg(test)]
 pub(super) fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// steps JSON 数组 → PowerShell 脚本（与 JS buildScript 同口径）
+/// steps JSON 数组 → PowerShell 脚本（与 JS buildScript 同口径）。
+///
+/// 2026-10-06 起仅契约测试使用（见文件头「PS 轨现状」；生产唯一用户 tf_restore_point
+/// 已改内联脚本，本函数保留是为继续校验数据层步骤的可编译性）。
+#[cfg(test)]
 pub(super) fn build_script(steps: &[Value]) -> String {
     let total = steps.len();
     let mut l: Vec<String> = vec![build_preamble().to_string()];
@@ -81,9 +95,10 @@ pub(super) fn build_script(steps: &[Value]) -> String {
             l.push("Remove-Item $___rf -Force -ErrorAction SilentlyContinue".into());
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
             // 注意：PS 轨这条 `& $env:ComSpec /c $___cmd` 与已修的 `run_cmd_step` 是同一类
-            // 引号陷阱（PS 也会把内嵌引号重写成子进程不认的形状）。今天不可达——唯一调用
-            // build_script 的 tf_restore_point 只有 reg + pwsh 两种步骤。若哪天有 cmd 步骤
-            // 走到这里，先照 run_cmd_step 的实测结论改这条，别等回读校验报不符再查。
+            // 引号陷阱（PS 也会把内嵌引号重写成子进程不认的形状）。历史上不可达（唯一生产
+            // 用户 tf_restore_point 只有 reg + pwsh 步骤，2026-10-06 已摘）；现仅测试用例
+            // 走到这里。若哪天恢复 PS 轨生产使用或加 cmd 步骤用例，先照 run_cmd_step 的
+            // 实测结论改这条，别等回读校验报不符再查。
             let safe = cmd.replace('\'', "''");
             l.push(format!("$___cmd='{safe}'"));
             l.push("& $env:ComSpec /c $___cmd *> $null".into());
@@ -91,8 +106,9 @@ pub(super) fn build_script(steps: &[Value]) -> String {
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
             // 与 `native_execute_steps` 的 service 分支**同口径**（R0-a）。这里原来只认
             // `disable`，startType 形态在 PS 轨上同样会退化成「只停服」。两条轨的分歧不是
-            // 美观问题：tf_restore_point 这类项走 build_script，而备份/回读按 native 轨的
-            // 语义记账，两轨对同一份 steps 给出不同解释 = 备份与实际写入不匹配。
+            // 美观问题（当时 tf_restore_point 走 build_script，而备份/回读按 native 轨的
+            // 语义记账，两轨对同一份 steps 给出不同解释 = 备份与实际写入不匹配）；PS 轨
+            // 停用后此分支仍须与 native 轨一致，供契约测试逐项断言两轨语义不漂移。
             let svc_ps = ps_quote(service);
             let start_label = s.get("startType").and_then(|v| v.as_str());
             let want_disable = s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false);

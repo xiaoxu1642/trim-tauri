@@ -11,7 +11,13 @@ use std::sync::OnceLock;
 // ==================== 选项数据（运行时完整导出，含推理 restore） ====================
 pub(super) const OPTIONS_JSON: &str = include_str!("../../../data/optimizer-runtime.json");
 
-/// 哨兵步骤脚本（仅用于提取与 JS buildScript 完全一致的前置 preamble 段）
+/// 哨兵步骤脚本（仅用于提取与 JS buildScript 完全一致的前置 preamble 段）。
+///
+/// 2026-10-06 起该用途仅存于契约测试（PS 轨生产链停用，见 `apply.rs` 文件头
+/// 「PS 轨现状」），故标 `#[cfg(test)]`：非测试构建不再把这段模板编进产物。
+/// `ps/optimizer_build.ps1` 文件本身仍受 `sync-ps-from-js --check` 与
+/// `check-ps-extraction` 的对拍约束，不因本标注而脱离监管。
+#[cfg(test)]
 pub(super) const BUILD_SENTINEL: &str = include_str!("../../../ps/optimizer_build.ps1");
 
 /// 优化项目录。**装载前先验 ed25519 签名**（M4）。

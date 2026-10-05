@@ -1388,3 +1388,52 @@ fn cleanup_item_detail_path_不在快照时被拒() {
         "空 path 不得被 §5.6 拒绝误伤: {text2}"
     );
 }
+
+/// 2026-10-06 任务三：`optimizer_restore_frequency`（还原点弹窗「恢复默认创建频率」）
+/// 的档位正例 —— 主窗调用必须越过档位，且回执是三态之一（needAdmin / missing / success）
+/// 且带 message，绝不许静默。
+///
+/// `#[ignore]` 的原因：本机若为管理员且已存在 `tf_restore_point` 备份（开发机就是），
+/// 命令会**真的执行一次回收**（把 `SystemRestorePointCreationFrequency` 恢复为备份原值 /
+/// 无原值则删值）—— 幂等且只动这一个键，但按纪律②「改系统的进发布前门禁组」。
+#[test]
+#[ignore = "管理员环境会真写注册表（恢复频率键，幂等；顺带清本机 0x0 残留），发布前门禁跑"]
+fn optimizer_restore_frequency_主窗越档且回执确定() {
+    let w = main_window();
+    let res = invoke(&w, "optimizer_restore_frequency", json!({}));
+    let text = res.to_string();
+    common::assert_guard_passed(
+        &text,
+        "主窗调 optimizer_restore_frequency",
+        &["needAdmin", "missing", "success"],
+    );
+    let msg = common::message_of(&res);
+    assert!(!msg.is_empty(), "无论成败都必须有 message（回收了什么 / 为什么不能回收）: {res}");
+    if res["success"] == json!(true) {
+        // 成功回执必须写明「写了什么」：写回原值 or 删除覆写值（recycle_freq_override 两个成功分支）
+        assert!(
+            msg.contains("已写回") || msg.contains("已删除"),
+            "成功回执必须写明回收动作（写回原值 / 删除覆写值）: {res}"
+        );
+    } else {
+        let need_admin = res["needAdmin"] == json!(true);
+        let missing = res["missing"] == json!(true);
+        assert!(
+            need_admin || missing,
+            "失败必须显式回 needAdmin 或 missing（未知失败 = 静默黑洞）: {res}"
+        );
+    }
+}
+
+/// 同一命令的子窗侧：一律被来源校验拒杀（MAIN 档，guard 先于一切 ⇒ 零副作用，留快速组）。
+#[test]
+fn optimizer_restore_frequency_子窗一律拒杀() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "optimizer_restore_frequency", json!({}));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调 optimizer_restore_frequency 必须被来源校验拒杀，回执 {text}"
+        );
+    }
+}

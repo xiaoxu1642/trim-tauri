@@ -107,6 +107,7 @@ const MUST_MAIN = [
   'netcheck_repair',
   'optimizer_backup_reg',
   'optimizer_create_restore',
+  'optimizer_restore_frequency', // 2026-10-06：还原点弹窗「恢复默认创建频率」——写 HKLM，只从主窗弹窗触发
   'optimizer_restore_reg',
   'optimizer_run',
   'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）

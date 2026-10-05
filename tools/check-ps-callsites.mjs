@@ -92,8 +92,8 @@ const PS_CALL_SITES = [
 const RUN_INLINE_PS_SITES = [
   { anchor: 'fn optimizer_check_restore | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:check-restore 最近还原点', timeout: 30 },
   { anchor: 'fn count_restore_points | let out = run_inline_ps(ps, 30, None)?;', reason: '创建前后计数（含回读轮询）', timeout: 30 },
-  { anchor: 'fn create_restore_inner | if let Some(out) = run_inline_ps(pre, 20, None)', reason: '创建前系统保护预检', timeout: 20 },
-  { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(&script, 120', reason: '创建还原点脚本本体', timeout: 120 },
+  { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(pre, 20, None) else', reason: '创建前系统保护预检（fail-closed 扩展版：全局开关 / 组件存在性 / 受保护卷一次探完）', timeout: 20 },
+  { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(create_ps, 120', reason: '创建还原点脚本本体（2026-10-06 摘条目后内联；原经 build_script 生成）', timeout: 120 },
   { anchor: 'fn optimizer_list_restore | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:list-restore 列表', timeout: 30 },
 ];
 
