@@ -1,7 +1,7 @@
 //! quickcmds 域（C 批）：quickcmds:run
 //!
 //! 对照 main.js 6830-6889（QUICKCMDS 白名单 + tokenize/expand/runQuickCmd +
-//! quickcmds:run）与 `src/scripts/quickcmds-data.js`（63 条 / 8 分类）。
+//! quickcmds:run）与 `src/scripts/quickcmds-data.js`（64 条 / 8 分类）。
 //!
 //! # 安全模型（QC-1，2026-09-15）
 //!
@@ -40,7 +40,7 @@ const QUICKCMD_METACHAR: &[char] = &[
     ';', '&', '|', '>', '<', '^', '`', '(', ')', '[', ']', '{', '}', '$',
 ];
 
-/// 编译期白名单：(id, name, cmd)——逐条照抄 `quickcmds-data.js` 的 CMDS（63 条）。
+/// 编译期白名单：(id, name, cmd)——逐条照抄 `quickcmds-data.js` 的 CMDS（条数由测试与 JS 那份对拍，不手抄）。
 /// `name` 仅用于日志（与 Electron 的日志文本同形），`cmd` 才是执行真源。
 const QUICKCMDS: &[(&str, &str, &str)] = &[
     // 系统工具
@@ -109,6 +109,9 @@ const QUICKCMDS: &[(&str, &str, &str)] = &[
     ("diag-dfrgui", "磁盘碎片整理", "dfrgui"),
     ("diag-slmgr", "系统激活状态", "cmd /k slmgr.vbs /xpr"),
     ("diag-storagesense", "存储感知", "ms-settings:storagesense"),
+    // 安全中心入口：启动项「目标文件已不存在」那条链的出口之一（用户自己去查，Trim 不代扫描、
+    // 也不替用户判定是不是恶意）。URI 由微软文档给定：ms-settings:windowsdefender = Windows Security。
+    ("sec-defender", "Windows 安全中心", "ms-settings:windowsdefender"),
     ("diag-documents", "文档目录", "explorer %userprofile%\\Documents"),
     // 休眠唤醒排查
     ("power-lastwake", "上次唤醒设备", "cmd /k powercfg -lastwake"),
@@ -374,14 +377,34 @@ mod tests {
         }
     }
 
-    /// 白名单是编译期的：63 条、id 唯一、无 shell 元字符
+    /// 渲染层那份清单（`src/scripts/quickcmds-data.js`）与本表必须**同集合**。
+    /// 靠手写数字对拍迟早会漂（本次加 `sec-defender` 就是靠 include_str 直接读同一份字节抓齐的），
+    /// 所以判据只留一份：解析 JS 里的 `{ id: '…'` 序列，与 QUICKCMDS 逐字比。
+    const JS_CMDS: &str = include_str!("../../../src/scripts/quickcmds-data.js");
+
+    fn js_ids() -> Vec<String> {
+        JS_CMDS
+            .split("{ id: '")
+            .skip(1)
+            .map(|seg| seg.split('\'').next().unwrap_or("").to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
     #[test]
     fn whitelist_is_wellformed() {
-        assert_eq!(QUICKCMDS.len(), 63);
+        let js = js_ids();
+        assert!(!js.is_empty(), "JS 清单解析结果为空 = 解析器写坏了，这条会退化成恒真");
+        assert_eq!(QUICKCMDS.len(), js.len(), "两张表的条数不一致（Rust 执行真源 ⇄ JS 界面清单）");
         let mut ids: Vec<&str> = QUICKCMDS.iter().map(|(id, _, _)| *id).collect();
         ids.sort_unstable();
+        let before = ids.len();
         ids.dedup();
-        assert_eq!(ids.len(), 63, "id 必须唯一");
+        assert_eq!(before, ids.len(), "id 必须唯一");
+        let mut js_sorted = js.clone();
+        js_sorted.sort();
+        js_sorted.dedup();
+        assert_eq!(ids, js_sorted, "id 集合与渲染层清单不一致（左边缺=界面上点了报未知指令，右边多=界面没有却能被调起）");
         for (id, _, cmd) in QUICKCMDS {
             let toks: Vec<String> = tokenize_quick_cmd(cmd);
             assert!(!toks.is_empty() && !toks[0].is_empty(), "{id} 空指令");

@@ -56,6 +56,7 @@
     'app:open-external': 'app_open_external',
     // updater 域（onState 是事件）
     'updater:check': 'updater_check',
+    'updater:completion': 'updater_completion',
     'updater:download': 'updater_download',
     'updater:cancel-download': 'updater_cancel_download',
     'updater:install': 'updater_install',
@@ -378,6 +379,7 @@
 
     updater: {
       check: function () { return invokeChannel('updater:check'); },
+      completion: function () { return invokeChannel('updater:completion'); },
       download: function () { return invokeChannel('updater:download'); },
       cancelDownload: function () { return invokeChannel('updater:cancel-download'); },
       install: function () { return invokeChannel('updater:install'); },

@@ -472,6 +472,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::elevate::elevate_request,
         // ---- E 批：updater（多线路容灾 + minisign 断代，6 条）----
         commands::updater::updater_check,
+        commands::updater::updater_completion,
         commands::updater::updater_download,
         commands::updater::updater_cancel_download,
         commands::updater::updater_install,

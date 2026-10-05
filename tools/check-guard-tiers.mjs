@@ -122,6 +122,7 @@ const MUST_MAIN = [
   'startup_toggle',
   'updater_cancel_download',
   'updater_check',
+  'updater_completion', // 读后即删的「更新已完成」标记：只有主窗首启要弹完成提示，不给子窗
   'updater_download',
   'updater_get_mirror',
   'updater_install',

@@ -1,4 +1,4 @@
-// quickcmds-data.js - 快捷指令数据（63 条 / 8 分类）
+// quickcmds-data.js - 快捷指令数据（64 条 / 8 分类）
 // 来源：old\快捷指令\QuickLauncher-解包分析报告.md（快捷指令大全 v6.0 解包逆向）
 // 每条：{ id, name, desc, cmd, cat }
 //   id   —— 稳定标识（主进程白名单校验用，渲染层仅传 id）
@@ -83,6 +83,7 @@
     { id: 'diag-dfrgui', name: '磁盘碎片整理', desc: 'dfrgui', cmd: 'dfrgui', cat: '维护与诊断' },
     { id: 'diag-slmgr', name: '系统激活状态', desc: 'slmgr /xpr', cmd: 'cmd /k slmgr.vbs /xpr', cat: '维护与诊断' },
     { id: 'diag-storagesense', name: '存储感知', desc: 'ms-settings:storagesense', cmd: 'ms-settings:storagesense', cat: '维护与诊断' },
+    { id: 'sec-defender', name: 'Windows 安全中心', desc: 'ms-settings:windowsdefender', cmd: 'ms-settings:windowsdefender', cat: '维护与诊断' },
     { id: 'diag-documents', name: '文档目录', desc: 'Documents', cmd: 'explorer %userprofile%\\Documents', cat: '维护与诊断' },
     // 休眠唤醒排查
     { id: 'power-lastwake', name: '上次唤醒设备', desc: 'powercfg -lastwake', cmd: 'cmd /k powercfg -lastwake', cat: '休眠唤醒排查' },

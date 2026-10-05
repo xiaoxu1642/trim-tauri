@@ -15,11 +15,47 @@
 
   // 分类定义（顺序固定）。批次 C 起补齐三个原本「有 tab 无数据源」的分类：
   // 新建菜单 / 打开方式 / Win+X —— 侧边栏一直挂着这三个入口却永远为空。
+  // ==================== 按软件分组（2026-10-05 用户裁定，替代原「按位置分类」） ====================
+  // 归属由后端算：`owner` 是软件名，`ownerSource` 是它的判据来源（见 native/contextmenu.rs
+  // 的 owner_of）。**空 owner = 后端明确说"不知道"**，一律进未识别组，前端绝不自己猜一个。
+  const OWNER_UNKNOWN = '未识别 / 需人工确认';
+  // 判据来源 → 组头上的可见注记：推断得来的必须标出来，不装作权威结论（§9.3 话术纪律）
+  const OWNER_SOURCE_NOTE = {
+    dir: '按安装目录识别',
+    registry: '按注册表厂商',
+    'pe-desc': '按文件说明',
+    'pe-company': '按文件厂商',
+  };
+  // 判据权威性排序（与后端 owner_of 的优先级逐字一致）：同一软件在 PE 的 ProductName、
+  // FileDescription、注册表 Company 里写法各不一样，组头要显示「最像软件名」的那条。
+  const OWNER_LABEL_RANK = { system: 0, 'pe-product': 1, 'pe-desc': 2, registry: 3, 'pe-company': 4, dir: 5 };
+  const rankOfSource = (s) => (Object.prototype.hasOwnProperty.call(OWNER_LABEL_RANK, s) ? OWNER_LABEL_RANK[s] : 99);
+
+  /**
+   * 分组键：把软件名里的「版本位 / 位数 / 壳扩展后缀 / 公司后缀」去掉，只留产品主干。
+   * 不做这一步，WinRAR 会占三列（`WinRAR`、`WinRAR 64-bit Shell Extension`、`win.rar GmbH`），
+   * 用户看到的就不是「这个软件挂了几处」而是「我们算了几遍归属」。
+   * 只在主干完全相等时合并，所以 `Microsoft Edge` 与 `Microsoft Visual Studio` 不会被并成一列。
+   */
+  const OWNER_TOKEN_NOISE = new Set(['shell', 'shells', 'extension', 'extensions', 'ext',
+    'context', 'menu', 'addin', 'add-in', 'plugin', 'bit', 'x64', 'x86', 'amd64',
+    'gmbh', 'mbh', 'ag', 'inc', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company',
+    'technologies', 'technology', 'software', 'systems', 'solutions', 'group', 'interactive', 'bv', 'sa']);
+  function ownerGroupKey(label) {
+    return String(label).toLowerCase().split(/[\s()]+/)
+      .map(t => t.replace(/[^a-z0-9+]/g, ''))
+      .filter(t => t && !OWNER_TOKEN_NOISE.has(t) && !/^\d+(bit)?$/.test(t))
+      .join(' ');
+  }
+
+  // 位置（原「分类」）现在的用途只剩两个：行上的标签，以及组内排序的固定顺序。
+  // 顺序表保留是因为它同时是扫描范围的可读清单（13 场景 + 发送到/Win+X/新建菜单/打开方式）。
   const CATEGORY_ORDER = [
     '文件', 'EXE文件', 'LNK文件', '目录', '文件夹',
     '驱动器', '回收站', '目录背景', '桌面背景',
     '此电脑', '库', '发送到', '新建菜单', '打开方式', 'Win+X', 'UWP应用'
   ];
+  const CATEGORY_RANK = new Map(CATEGORY_ORDER.map((c, i) => [c, i]));
 
   const CATEGORY_ICONS = {
     '文件': '\u{1F4C4}',
@@ -40,34 +76,31 @@
     'UWP应用': '\u{1F4F1}'
   };
 
-  // ==================== 侧边栏分类筛选（叠加生效，切换时保留勾选） ====================
-  // 侧边栏分组选项 -> 条目匹配函数（「全部」为扁平汇总视图；
-  // 标准分类直接匹配，特殊分类按注册表路径正则匹配）
-  const SIDEBAR_CATEGORY_MATCH = {
-    '全部': () => true,
-    '文件': it => ['文件', 'EXE文件', 'LNK文件'].includes(it.category),
-    '文件夹': it => it.category === '文件夹',
-    '目录': it => it.category === '目录',
-    '目录背景': it => it.category === '目录背景',
-    '桌面背景': it => it.category === '桌面背景',
-    '磁盘分区': it => it.category === '驱动器',
-    '所有对象': it => /AllFilesystemObjects/i.test(it.regPath || it.location || ''),
-    '此电脑': it => /\{20D04FE0-/i.test(it.regPath || it.location || ''),
-    '回收站': it => it.category === '回收站' || /Recycle\.Bin/i.test(it.regPath || it.location || ''),
-    '库': it => /Library/i.test(it.regPath || it.location || ''),
-    '新建菜单': it => it.category === '新建菜单',
-    '发送到': it => it.category === '发送到' || /SendTo/i.test(it.regPath || it.location || ''),
-    '打开方式': it => it.category === '打开方式',
-    'Win+X': it => it.category === 'Win+X'
-  };
-  let currentCategory = '文件';
-
-  // ==================== 看板式多列布局 ====================
-  // 每个分类一列（白色圆角卡片），条目竖排：复选框(启用/禁用) + 序号 + 名称(可换行不截断) + 类型/状态标签；
-  // 列头 = 分类名 + 项数徽章；列底 = 「全选本类」；窗口不够宽时容器横向滚动。
+  // ==================== 看板式多列布局（按软件分组） ====================
+  // 每个软件一列（白色圆角卡片），条目竖排：复选框(启用/禁用) + 序号 + 名称 + 位置 + 状态标签；
+  // 列头 = 软件名（带该软件的真实图标）+「N 项 · M 个位置」；列底 =「全选本软件」；
+  // 默认一行两列（kanbanMasonry 的 maxCols），窗口不够宽时退成一列。
 
   // 阶段三：类型/状态徽章统一 design-system（ds-badge sm 紧凑变体）
-  function typeBadgeHtml(item) {
+  // 「什么来路」这一维（系统保护 / 第三方 / 系统原生）按软件成列后是**组级事实**：
+  // 同一家的菜单项来路相同，逐行重复一遍既抢宽度又没信息量，所以列头说一次、行内省略
+  // （用户 2026-10-05 看真机截图后指定：徽章放到软件名后面，形如「WPS Office（第三方）」）。
+  // 组内来路不一致时例外 —— 那种组每行都得自己说清楚，否则就是拿组头掩盖差异。
+  const RISK_META = {
+    protected: { tone: 'bad', label: '系统保护' },
+    third: { tone: 'warn', label: '第三方' },
+    system: { tone: 'ok', label: '系统原生' },
+  };
+  function riskKeyOf(item) {
+    if (item.risk === 'protected') return 'protected';
+    return item.isThirdParty ? 'third' : 'system';
+  }
+  function riskBadgeHtml(item) {
+    const m = RISK_META[riskKeyOf(item)];
+    return window.ds.badgeHtml(m.tone, m.label, { small: true });
+  }
+  function typeBadgeHtml(item, opts) {
+    const hideRisk = !!(opts && opts.hideRisk);
     const badges = [];
     if (item.enabled === false) {
       // 三种禁用机制要如实区分：屏蔽表（Explorer 不加载）/ 外部工具的改名约定 / Trim 自己的可逆禁用
@@ -77,22 +110,18 @@
         : (item.unknownConvention
           ? '由其他工具（如 Autoruns）以改名方式禁用，Trim 未改动它'
           : '已禁用（取消勾选即可重新启用）');
-      badges.push(window.ds
-        ? window.ds.badgeHtml('neutral', label, { small: true, title })
-        : `<span class="badge off" data-tip="${escapeHtml(title)}">${escapeHtml(label)}</span>`);
+      // 审计 P2-15：这些徽章原来各带一条「ds 缺席」降级分支，而降级分支里调的 escapeHtml
+      // 本身就是 `window.ds.esc` —— ds 真不在时它先抛 TypeError，"降级"形同虚设。
+      // ds.js 是子窗/主窗的强制依赖（§2 M17，由 check-html-contract 判红兜着），
+      // 所以直接走 ds，不留一条走不通的假退路。
+      badges.push(window.ds.badgeHtml('neutral', label, { small: true, title }));
     }
     if (item.orphan) {
       const why = item.orphanReason || '对应组件已不存在（多为软件卸载遗留）';
-      badges.push(window.ds
-        ? window.ds.badgeHtml('warn', '残留', { small: true, title: why + '；可安全清理' })
-        : `<span class="badge third-party" data-tip="${escapeHtml(why)}">残留</span>`);
+      badges.push(window.ds.badgeHtml('warn', '残留', { small: true, title: why + '；可安全清理' }));
     }
-    const risk = item.risk === 'protected'
-      ? (window.ds ? window.ds.badgeHtml('bad', '系统保护', { small: true }) : '<span class="badge protected">系统保护</span>')
-      : (item.isThirdParty
-        ? (window.ds ? window.ds.badgeHtml('warn', '第三方', { small: true }) : '<span class="badge third-party">第三方</span>')
-        : (window.ds ? window.ds.badgeHtml('ok', '系统原生', { small: true }) : '<span class="badge system">系统原生</span>'));
-    return risk + (badges.length ? ' ' + badges.join(' ') : '');
+    const risk = hideRisk ? '' : riskBadgeHtml(item);
+    return risk + (badges.length ? (risk ? ' ' : '') + badges.join(' ') : '');
   }
 
   // 是否支持启停切换。批次 B 起 UWP/打包 COM 走 Shell Extensions\Blocked 屏蔽表实现可逆禁用，
@@ -139,27 +168,49 @@
   ];
 
   // 获取按分类分组的项（叠加侧边栏分类筛选 + 顶部筛选标签）
-  function getGroupedItems() {
-    const grouped = {};
-    for (const cat of CATEGORY_ORDER) {
-      grouped[cat] = [];
+  /**
+   * 按软件分组（替代原先的「按位置分类」）。
+   *
+   * 排序权重是判据：这页的主用途是「看哪个软件挂了一堆菜单、能不能关掉」，所以
+   * ① 第三方软件在最前，② Windows 系统组件其次（量大但基本不可动，排前面只会挤掉正主），
+   * ③ 未识别组永远垫后（它是"我们也没查出来"的诚实兜底，不该出现在第一屏）。
+   * 同权重内按项数降序 —— 挂得越多的软件越该先看。
+   */
+  function groupOwnerBy(list) {
+    const map = new Map();
+    for (const it of list) {
+      const label = String(it.owner || '').trim() || OWNER_UNKNOWN;
+      const key = label === OWNER_UNKNOWN ? OWNER_UNKNOWN : (ownerGroupKey(label) || label);
+      if (!map.has(key)) map.set(key, { label, source: it.ownerSource || '', items: [] });
+      const g = map.get(key);
+      if (label !== OWNER_UNKNOWN && rankOfSource(g.source) > rankOfSource(it.ownerSource)) {
+        g.label = label;
+        g.source = it.ownerSource;
+      }
+      g.items.push(it);
     }
-    const catMatcher = SIDEBAR_CATEGORY_MATCH[currentCategory] || SIDEBAR_CATEGORY_MATCH['全部'];
+    // 排序看的是**判据来源**而不是标签文本：后端哪天改了这个显示名，前端不会静默失配
+    const rank = (g) => (g.label === OWNER_UNKNOWN ? 2 : (g.source === 'system' ? 1 : 0));
+    for (const g of map.values()) {
+      // 组内按位置固定顺序排，同一位置的相邻 —— 「这个软件挂在哪些地方」一眼能数完
+      g.items.sort((a, b) => (CATEGORY_RANK.has(a.category) ? CATEGORY_RANK.get(a.category) : 99)
+        - (CATEGORY_RANK.has(b.category) ? CATEGORY_RANK.get(b.category) : 99));
+      // 组内来路集合：只有一个值时由列头代答，行内就不再重复那枚徽章
+      g.riskKeys = [...new Set(g.items.map(riskKeyOf))];
+    }
+    return [...map.values()].sort((a, b) => rank(a) - rank(b) || b.items.length - a.items.length);
+  }
+
+  // 界面分组与扫描完成的提示语走同一个 groupOwnerBy，不许有两套口径（AGENTS §5.16）
+  function getGroupedOwners() {
     const filtered = items.filter(it => {
-      // 侧边栏分类筛选（叠加生效）
-      if (catMatcher && !catMatcher(it)) return false;
       if (currentFilter === 'all') return true;
       if (currentFilter === 'high') return it.risk === 'high' || it.risk === 'protected';
       if (currentFilter === 'low') return it.risk === 'low';
       if (currentFilter === 'disabled') return it.enabled === false;
       return true;
     });
-    for (const it of filtered) {
-      const cat = it.category || '其他';
-      if (!grouped[cat]) grouped[cat] = [];
-      grouped[cat].push(it);
-    }
-    return grouped;
+    return groupOwnerBy(filtered);
   }
 
   // 获取某个分类下所有项的唯一标识
@@ -198,34 +249,23 @@
       return;
     }
 
-    const grouped = getGroupedItems();
-    // 扫描完成后固定展示全部分类，即使某一类暂时没有注册项，也能明确看到扫描范围。
-    const activeCategories = (currentFilter === 'all' || currentFilter === 'disabled')
-      ? CATEGORY_ORDER
-      : CATEGORY_ORDER.filter(cat => grouped[cat] && grouped[cat].length > 0);
-
-    const nonEmptyCategories = activeCategories.filter(cat => (grouped[cat] || []).length > 0);
-    if (nonEmptyCategories.length === 0) {
-      const msg = currentFilter === 'disabled'
-        ? '暂无已禁用的项'
-        : (hasScanned ? `「${currentCategory}」分类下暂无匹配项` : '没有匹配的项');
+    const groups = getGroupedOwners();
+    if (!groups.length) {
+      const msg = currentFilter === 'disabled' ? '暂无已禁用的项' : '没有匹配的项';
       container.innerHTML = renderEmptyState(msg);
+      updateUI();
       return;
     }
 
-    // 页头汇总：总条目数 + 分类总数
-    const totalShown = nonEmptyCategories.reduce((s, cat) => s + (grouped[cat] || []).length, 0);
+    // 页头汇总：总条目数 + 软件数（原来是「N 个分类」）
+    const totalShown = groups.reduce((s, g) => s + g.items.length, 0);
     const summary = document.getElementById('contextSummary');
-    if (summary) summary.textContent = `共 ${totalShown} 项 · ${nonEmptyCategories.length} 个分类`;
+    if (summary) summary.textContent = `共 ${totalShown} 项 · ${groups.length} 个软件`;
 
-    // 所有看板按项数从少到多升序排列（稳定排序，项数相同保持原相对顺序）
-    const sortedCategories = [...nonEmptyCategories].sort(
-      (a, b) => (grouped[a] || []).length - (grouped[b] || []).length
-    );
-
-    // 看板：瀑布流（Masonry）排布，按升序依次放入最矮列底部
+    // 看板：一列 = 一个软件。原来「空分类也占一列」是为了让扫描范围可见，
+    // 按软件分组后空组根本不存在，扫描范围改由页头与详情弹窗交代。
     container.innerHTML = `<div class="ctx-kanban">` +
-      sortedCategories.map(cat => renderCategoryColumn(cat, grouped[cat])).join('') +
+      groups.map(g => renderOwnerColumn(g)).join('') +
       `</div>`;
 
     // 绑定看板行：点击复选框切换启用/禁用，点击其余区域打开详情弹窗
@@ -244,19 +284,21 @@
       });
     });
 
-    // 列底「全选本类」：批量启用/禁用该分类全部可操作项
-    container.querySelectorAll('[data-col-selectall]').forEach(btn => {
+    // 列底「全选本软件」：批量启用/禁用该软件全部可操作项
+    container.querySelectorAll('[data-owner-selectall]').forEach(btn => {
       btn.addEventListener('click', () => {
-        const cat = btn.dataset.colSelectall;
-        toggleCategoryItems(cat, grouped[cat] || []);
+        const g = groups.find(x => x.label === btn.dataset.ownerSelectall);
+        if (g) toggleOwnerItems(g.label, g.items);
       });
     });
 
     // 瀑布流布局：重新渲染后立即放置；窗口 resize 由 attach 内部防抖 + FLIP 动画重排
     // 注意：布局容器是每次重渲染重建的 .ctx-kanban，须用 getter 动态获取
+    // maxCols:2 —— 用户裁定「默认一行两列，最大限度展示信息」：软件组要放得下
+    // 「挂在哪些位置」这一列信息，列数一多就被挤回原来的窄条样子。
     if (!kanbanMasonry && window.kanbanMasonry) {
       kanbanMasonry = window.kanbanMasonry.attach(
-        () => container.querySelector('.ctx-kanban'), '.ctx-col', { gap: 14, minCard: 246 }
+        () => container.querySelector('.ctx-kanban'), '.ctx-col', { gap: 14, minCard: 380, maxCols: 2 }
       );
     }
     if (kanbanMasonry) kanbanMasonry.relayout(false);
@@ -264,28 +306,66 @@
     updateUI();
   }
 
-  // 看板列：列头（分类名 + 项数徽章）+ 条目竖排 + 列底「全选本类」
-  function renderCategoryColumn(cat, catItems) {
-    const icon = CATEGORY_ICONS[cat] || '\u{1F4C4}';
-    const disabledCount = catItems.filter(it => it.enabled === false).length;
-    const metaText = disabledCount > 0 ? `${catItems.length} 项 · ${disabledCount} 已禁用` : `${catItems.length} 项`;
-    const rows = catItems.map((item, i) => renderKanbanRow(item, i + 1)).join('');
-    return `
-      <div class="ctx-col" data-category="${escapeHtml(cat)}">
+  /**
+   * 看板列：列头（软件名 + 来路徽章 + 真实程序图标 + 「N 项 · M 个位置」+ 判据注记）
+   * + 条目竖排（按位置排序）+ 列底「全选本软件」。
+   *
+   * 超过 50 项的组自动拆成两栏（用户 2026-10-05 指定）：本机「Windows 系统组件」104 项
+   * 独占一栏时，整页高度被它一根柱子拉到几百屏，其它软件全被挤到它下面。拆成两栏后
+   * 两栏各约一半，瀑布流正好把它们并排放进同一行。
+   * 序号跨栏连续（1..N），所以「第 37 项」在两栏里指的是同一个东西；
+   * 「全选本软件」两栏都给，且作用域都是**整组**，不是本栏那半 —— 否则点一栏只改半组。
+   */
+  const OWNER_SPLIT_AT = 50;
+  function renderOwnerColumn(g) {
+    const total = g.items.length;
+    const uniform = g.riskKeys.length === 1;
+    const headRisk = g.riskKeys.map(k => window.ds.badgeHtml(RISK_META[k].tone, RISK_META[k].label, { small: true })).join(' ');
+    const icon = ownerIconHtml(g);
+    const note = OWNER_SOURCE_NOTE[g.source];
+    const parts = total > OWNER_SPLIT_AT
+      ? [g.items.slice(0, Math.ceil(total / 2)), g.items.slice(Math.ceil(total / 2))]
+      : [g.items];
+    let offset = 0;
+    return parts.map((part, pi) => {
+      const start = offset;
+      offset += part.length;
+      const disabledCount = part.filter(it => it.enabled === false).length;
+      const whereCount = new Set(part.map(it => it.category || '其他')).size;
+      const bits = [`${part.length} 项`, `${whereCount} 个位置`];
+      if (disabledCount > 0) bits.push(`${disabledCount} 已禁用`);
+      if (parts.length > 1) bits.push(`共 ${total} 项 · 第 ${pi + 1}/${parts.length} 栏`);
+      return `
+      <div class="ctx-col" data-owner="${escapeHtml(g.label)}">
         <div class="ctx-col-head">
-          <span class="ctx-col-title"><span class="ctx-col-icon">${icon}</span>${escapeHtml(cat)}</span>
-          <span class="ctx-col-count" data-cat-meta="${escapeHtml(cat)}">${escapeHtml(metaText)}</span>
+          <span class="ctx-col-title">${icon}${escapeHtml(g.label)}${headRisk ? ` ${headRisk}` : ''}</span>
+          <span class="ctx-col-count">${escapeHtml(bits.join(' · '))}${note ? ` · ${escapeHtml(note)}` : ''}</span>
         </div>
-        <div class="ctx-col-body">${rows}</div>
+        <div class="ctx-col-body">${part.map((item, i) => renderKanbanRow(item, start + i + 1, { hideRisk: uniform })).join('')}</div>
         <div class="ctx-col-foot">
-          <button type="button" class="ctx-col-selectall" data-col-selectall="${escapeHtml(cat)}" data-tip="批量启用/禁用该分类全部可操作项">全选本类</button>
+          <button type="button" class="ctx-col-selectall" data-owner-selectall="${escapeHtml(g.label)}" data-tip="批量启用/禁用该软件的全部 ${total} 个菜单项（切换可逆）">全选本软件</button>
         </div>
-      </div>
-    `;
+      </div>`;
+    }).join('');
   }
 
-  // 看板条目行：复选框(启用/禁用) + 序号 + 名称(可换行) + 类型/状态标签 + 详情图标（厂商信息只在详情弹窗展示）
-  function renderKanbanRow(item, index) {
+  /**
+   * 组头图标：用该组第一个「提取到真实图标」的条目（多数壳扩展都能提到），
+   * 这样软件名旁边就是用户在那个菜单里眼熟的图标，比通用占位更符合「一目了然」。
+   * 一个都没有才退占位。
+   */
+  function ownerIconHtml(g) {
+    const hit = g.items.find(it => it.clsid && iconMap[it.clsid]);
+    if (hit) {
+      return `<img class="ctx-col-icon" src="${window.ds.escAttr(iconMap[hit.clsid])}" alt="" width="20" height="20" />`;
+    }
+    return `<span class="ctx-col-icon">${placeholderIconHtml(20)}</span>`;
+  }
+
+  // 看板条目行：复选框 + 序号 + 名称 + 位置标签 + 状态标签（同一行内），详情图标钉在最右。
+  // 两个标签都紧跟名称（用户 2026-10-05 裁定）：原来位置在名称下一行、状态在最右侧，
+  // 一行只放得下六七个字却要占两行高，整页要多滑一倍；名称后面连着读也才是「什么东西·在哪·什么状态」。
+  function renderKanbanRow(item, index, opts) {
     const key = getItemKey(item);
     const enabled = item.enabled !== false;
     const toggleable = isToggleable(item);
@@ -295,8 +375,10 @@
         <span class="ctx-row-index">${index}</span>
         <span class="ctx-row-main">
           <span class="ctx-row-name">${escapeHtml(item.name)}</span>
+          <span class="ctx-row-where">${escapeHtml(item.category || '其他')}</span>
+          <span class="ctx-row-badges">${typeBadgeHtml(item, opts)}</span>
         </span>
-        <span class="ctx-row-side">${typeBadgeHtml(item)}<span class="ctx-row-detail" data-tip="查看详情">
+        <span class="ctx-row-side"><span class="ctx-row-detail" data-tip="查看详情">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
         </span></span>
       </div>
@@ -311,6 +393,19 @@
     const display = item.regPath || item.location || '';
     if (!native || native.toLowerCase() === display.toLowerCase()) return '';
     return `<div class="ctx-detail-row"><span class="ctx-detail-label">实际所在分支</span><span class="ctx-detail-value mono">${escapeHtml(native)}</span></div>`;
+  }
+
+  /**
+   * 详情里的「软件归属」行：分组是它算出来的，所以判据必须在这看得见。
+   * 未识别的条目也要出这一行 —— 空着比"看起来没有这个概念"更诚实。
+   */
+  function ownerRowHtml(item) {
+    const owner = String(item.owner || '').trim() || OWNER_UNKNOWN;
+    const note = OWNER_SOURCE_NOTE[item.ownerSource];
+    const value = note ? `${owner}（${note}）` : owner;
+    const tip = item.ownerSource === 'system' ? '文件在 Windows 目录下且厂商指向微软，按系统组件归组'
+      : (item.ownerSource ? '' : '没有可执行文件线索（命令为空或只写了一个 verb），因此不猜软件名');
+    return `<div class="ctx-detail-row"${tip ? ` data-tip="${escapeHtml(tip)}"` : ''}><span class="ctx-detail-label">软件归属</span><span class="ctx-detail-value">${escapeHtml(value)}</span></div>`;
   }
 
   // CM-13 / 批次 B、C：详情里常驻「为什么是这个状态」——风险提示、失效原因、屏蔽来源、外部约定。
@@ -355,6 +450,7 @@
             ${nativeRowHtml(item)}
             ${riskRowHtml(item)}
              <div class="ctx-detail-row"><span class="ctx-detail-label">所属公司</span><span class="ctx-detail-value">${escapeHtml(item.company || '--')}</span></div>
+             ${ownerRowHtml(item)}
              ${item.filePath ? `<div class="ctx-detail-row"><span class="ctx-detail-label">组件路径</span><span class="ctx-detail-value mono">${escapeHtml(item.filePath)}</span></div>` : ''}
              ${item.command ? `<div class="ctx-detail-row"><span class="ctx-detail-label">执行命令</span><span class="ctx-detail-value mono">${escapeHtml(item.command)}</span></div>` : ''}
              ${item.clsid ? `<div class="ctx-detail-row"><span class="ctx-detail-label">CLSID</span><span class="ctx-detail-value mono">${escapeHtml(item.clsid)}</span></div>` : ''}
@@ -455,7 +551,7 @@
 
   function renderEmptyState(msg) {
     return window.emptyState
-      ? window.emptyState({ icon: 'box', title: msg, desc: hasScanned ? '可尝试切换分类或筛选条件，或重新扫描' : '点击右上角「扫描右键菜单」开始检测' })
+      ? window.emptyState({ icon: 'box', title: msg, desc: hasScanned ? '可尝试切换筛选条件，或重新扫描一次' : '点击右上角「扫描右键菜单」开始检测' })
       : `<div class="empty-state">
       <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" opacity="0.3">
         <path d="M4 8h16v2H4V8zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/>
@@ -465,18 +561,8 @@
   }
 
   function updateUI() {
-    // 更新分类元信息（含禁用计数）
-    const grouped = getGroupedItems();
-    for (const cat of CATEGORY_ORDER) {
-      const catItems = grouped[cat] || [];
-      if (catItems.length === 0) continue;
-      const metaEl = document.querySelector(`[data-cat-meta="${cat}"]`);
-      if (!metaEl) continue;
-      const disabledCount = catItems.filter(it => it.enabled === false).length;
-      metaEl.textContent = disabledCount > 0 ? `${catItems.length} 项 · ${disabledCount} 已禁用` : `${catItems.length} 项`;
-    }
-
-    // 总览：已禁用计数
+    // 组头的「N 项 · M 个位置 · K 已禁用」由 renderOwnerColumn 直接写（每次重渲染重建 DOM），
+    // 这里只留页面上那个常驻的已禁用总数。
     const countEl = document.getElementById('contextSelectedCount');
     if (countEl) countEl.textContent = items.filter(it => it.enabled === false).length;
   }
@@ -512,13 +598,28 @@
         return;
       }
       const results = (resp.data && resp.data.results) || [];
+      // 审计 P1-2：命令层判负时回的是 `{success:false, message}` 且没有 data。旧代码不看
+      // success，results 为空 ⇒ 下面既不 changed 也不 failed ⇒ 弹绿色「XX 已禁用」，
+      // 真正的拒绝原因被丢掉。先认 success。
+      if (resp && resp.success === false) {
+        window.app?.toast('error', resp.message || '切换未生效');
+        renderList();
+        updateUI();
+        return;
+      }
+      // 审计 P1-3：结果按 **id** 对位。原来按 regPath 对位，而「新建菜单」的 N 条项
+      // 共享同一个 regPath（只有 target 不同）⇒ 后写的覆盖前写的 ⇒ 失败项被当成成功。
+      const byId = {};
       const byPath = {};
-      for (const r of results) byPath[r.regPath] = r;
-      let changed = 0, failed = 0;
+      for (const r of results) {
+        if (!r) continue;
+        if (r.id) byId[r.id] = r;
+        else if (r.regPath) byPath[r.regPath] = r;
+      }
+      let changed = 0, failed = 0, lastErr = '';
       for (const p of payloads) {
         const key = p.item.regPath || p.item.location || '';
-        if (results.length === 0) continue;
-        const r = byPath[key];
+        const r = (p.item.id ? byId[p.item.id] : null) || byPath[key];
         if (r && r.status === 'ok') {
           // 重命名类切换（shellex '-' 前缀 / 禁用前缀还原）后更新条目路径，
           // 保证不重新扫描的情况下反向切换仍能定位到键
@@ -529,10 +630,13 @@
           changed++;
         } else {
           failed++;
+          if (r && r.message) lastErr = r.message;
         }
       }
       if (failed > 0) {
-        window.app?.toast('error', `${failed} 项切换失败（可能需要管理员权限）`);
+        window.app?.toast('error', lastErr
+          ? `${failed} 项切换失败：${lastErr}`
+          : `${failed} 项切换失败（可能需要管理员权限）`);
       } else if (payloads.length === 1) {
         const p = payloads[0];
         window.app?.toast(p.enabled ? 'success' : 'info', `${p.item.name} ${p.enabled ? '已启用' : '已禁用'}`);
@@ -581,8 +685,8 @@
     await applyToggles(payloads);
   }
 
-  async function toggleCategoryItems(cat, catItems) {
-    const toggleableItems = catItems.filter(it => isToggleable(it));
+  async function toggleOwnerItems(owner, ownerItems) {
+    const toggleableItems = ownerItems.filter(it => isToggleable(it));
     if (!toggleableItems.length) return;
     const target = !toggleableItems.every(it => it.enabled !== false);
     const affected = toggleableItems.filter(it => (it.enabled !== false) !== target);
@@ -590,12 +694,12 @@
     if (affected.length > 3) {
       const ok = await window.app?.confirm(
         '批量切换',
-        `即将${target ? '启用' : '禁用'}「${cat}」分类下 ${affected.length} 项（切换为可逆操作）。\n\n是否继续？`,
+        `即将${target ? '启用' : '禁用'}「${owner}」的 ${affected.length} 个右键菜单项（切换为可逆操作）。\n\n是否继续？`,
         '确认切换'
       );
       if (!ok) return;
     }
-    // CM-13：批量路径同样要过基础打开项的红色确认（否则「全选本类」可一键禁掉 open 动词）
+    // CM-13：批量路径同样要过基础打开项的红色确认（否则「全选本软件」可一键禁掉 open 动词）
     toggleItemsWithGuard(affected.map(item => ({ item, enabled: target })));
   }
 
@@ -673,7 +777,14 @@
       } else {
         // 预览模式
         await new Promise(r => setTimeout(r, 1200));
-        items = MOCK_ITEMS.map(m => ({ ...m, regPath: m.location + '\\' + m.name }));
+        items = MOCK_ITEMS.map(m => ({
+          ...m,
+          regPath: m.location + '\\' + m.name,
+          // 浏览器预览模式没有后端那条解析链，归属退到「注册表厂商」这一级；
+          // 厂商也没有的就进未识别组（与真实链路同一行为，不为了预览好看而编）
+          owner: m.company || '',
+          ownerSource: m.company ? 'registry' : '',
+        }));
       }
       hasScanned = true;
       renderList();
@@ -681,8 +792,9 @@
       // 后台加载程序图标，加载完成后刷新列表
       loadIcons();
 
-      const catCount = CATEGORY_ORDER.filter(c => items.some(i => (i.category || '其他') === c)).length;
-      window.app?.toast('success', `扫描完成，共发现 ${items.length} 项，分布于 ${catCount} 个分类`);
+      // 提示语跟着分组轴走：用户现在看到的是「几个软件」，报「几个分类」会对不上界面
+      const ownerCount = groupOwnerBy(items).length;
+      window.app?.toast('success', `扫描完成，共发现 ${items.length} 项，属于 ${ownerCount} 个软件（含未识别组）`);
     } catch (e) {
       window.app?.toast('error', '扫描失败: ' + e.message);
       if (container) {
@@ -723,10 +835,11 @@
         const n = Number(d.imported || 0) + Number(d.restored || 0);
         window.app?.toast('success', `已从 ${d.backupDir} 恢复 ${n} 项`);
         // CM-9：旧版本产出的备份头是 HKCR，导入会落到 HKLM，服务端一律拒收并回报 skipped。
-        // 这种情况必须如实告诉用户，不能让他以为「恢复成功了」。
+        // 这种情况必须如实告诉用户，不能让他以为「恢复成功了」。原因由服务端逐条给出，
+        // 这里不把某一种猜测写死成结论（拒收原因实际有五种，见 native 的 skipReasons）。
         if (Number(d.skipped || 0) > 0) {
           const reasons = Array.isArray(d.skipReasons) ? d.skipReasons.slice(0, 3).join('；') : '';
-          window.app?.toast('warning', `有 ${d.skipped} 个备份被拒绝导入（备份头不是真实注册表分支，多为旧版本产生）${reasons ? '：' + reasons : ''}`, 6000);
+          window.app?.toast('warning', `有 ${d.skipped} 个备份被拒绝导入${reasons ? '：' + reasons : ''}`, 6000);
         }
         if (n > 0) markPendingApply(n);
       } else {
@@ -744,39 +857,6 @@
     document.querySelectorAll('#contextFilter .filter-tab').forEach(el => {
       el.classList.toggle('active', el.dataset.filter === filter);
     });
-    renderList();
-    updateUI();
-  }
-
-  // ==================== 侧边栏分类树导航（树状分组，选中项持久化） ====================
-  const CATEGORY_STORAGE_KEY = 'winclean-ctx-category';
-
-  function getStoredCategory() {
-    try {
-      const saved = localStorage.getItem(CATEGORY_STORAGE_KEY);
-      // 仅接受合法分类（防止残留旧值）
-      return saved && SIDEBAR_CATEGORY_MATCH[saved] ? saved : '文件';
-    } catch (e) {
-      return '文件';
-    }
-  }
-
-  function storeCategory(cat) {
-    try { localStorage.setItem(CATEGORY_STORAGE_KEY, cat); } catch (e) {}
-  }
-
-  // 分类树子项高亮（圆点 + 底色，与测速分组视觉一致）
-  function applyCategoryNavActive() {
-    document.querySelectorAll('#ctxCategoryNav [data-category]').forEach(el => {
-      el.classList.toggle('active', el.dataset.category === currentCategory);
-    });
-  }
-
-  function setCategory(cat) {
-    if (!SIDEBAR_CATEGORY_MATCH[cat]) return;
-    currentCategory = cat;
-    storeCategory(cat);
-    applyCategoryNavActive();
     renderList();
     updateUI();
   }
@@ -1016,22 +1096,8 @@
     document.querySelectorAll('#contextFilter .filter-tab').forEach(el => {
       el.addEventListener('click', () => setFilter(el.dataset.filter));
     });
-
-    // 侧边栏分类树：点击子项切换分类筛选（与顶部筛选标签叠加生效，保留勾选状态；选中项持久化）
-    currentCategory = getStoredCategory();
-    applyCategoryNavActive();
-    document.querySelectorAll('#ctxCategoryNav [data-category]').forEach(el => {
-      el.addEventListener('click', () => {
-        const cat = el.dataset.category;
-        if (cat === currentCategory) return; // 点击当前激活项不重复刷新
-        setCategory(cat);
-        if (hasScanned && items.length) {
-          const grouped = getGroupedItems();
-          const count = Object.values(grouped).reduce((s, arr) => s + arr.length, 0);
-          window.app?.toast('info', `已切换到「${cat}」分类，匹配 ${count} 项`);
-        }
-      });
-    });
+    // 原「侧边栏分类树」那一段（点击切分类 + 持久化 + 切换提示）随分类栏一起删除：
+    // 分组轴改成软件后，位置已经是行上看得见的标签，不需要再靠切视图才能看到全貌。
   }
 
   window.contextmenu = { init, scan, removeItem, restore, MOCK_ITEMS, CATEGORY_ORDER, openDetail };

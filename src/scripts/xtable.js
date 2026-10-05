@@ -325,14 +325,18 @@
     }
 
     // 计算并应用瀑布流布局（无动画）
-    function layout(container, cardSelector, gap, minCard) {
+    function layout(container, cardSelector, gap, minCard, maxCols) {
       const cards = [...container.querySelectorAll(cardSelector)];
       const width = container.clientWidth;
       if (width <= 0 || !cards.length) {
         container.style.height = '0px';
         return;
       }
-      const colCount = Math.max(1, Math.min(cards.length, Math.floor((width + gap) / (minCard + gap))));
+      let colCount = Math.max(1, Math.min(cards.length, Math.floor((width + gap) / (minCard + gap))));
+      // maxCols：有的看板要的是「固定几列」而不是「塞得下几列算几列」——
+      // 右键管理按软件分组后，列里要放「挂在哪些位置」这类附加信息，
+      // 宽屏下自动列数会涨到四五列，行就被挤回原来那种窄条样子。
+      if (maxCols && maxCols > 0) colCount = Math.min(colCount, maxCols);
       const colWidth = Math.floor((width - gap * (colCount - 1)) / colCount);
       const heights = new Array(colCount).fill(0);
       // 先统一设置宽度，保证测得的高度准确
@@ -357,6 +361,7 @@
     function attach(getContainer, cardSelector, opts) {
       const gap = (opts && opts.gap) != null ? opts.gap : 14;
       const minCard = (opts && opts.minCard) || 246;
+      const maxCols = (opts && opts.maxCols) || 0;
       let lastW = -1;
       let ro = null;
       let roTarget = null;
@@ -369,7 +374,7 @@
         const w = container.clientWidth;
         if (w <= 0) return;               // 页面隐藏时不布局，留待可见后重排
         const cap = animate && lastW > 0 ? capture(container, cardSelector) : null;
-        layout(container, cardSelector, gap, minCard);
+        layout(container, cardSelector, gap, minCard, maxCols);
         if (cap) play(container, cardSelector, cap);
         lastW = w;
       }

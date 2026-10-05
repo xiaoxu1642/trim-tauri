@@ -37,6 +37,7 @@
     let base;
     if (filter === 'all') base = items;
     else if (filter === 'disabled') base = items.filter(i => !i.enabled);
+    else if (filter === 'missing') base = items.filter(i => !!String(i.missingTarget || ''));
     else base = items.filter(i => i.source === filter);
     // 幽灵项只在「全部」筛选下置底展示：它已不在当前系统里，不应污染分类/禁用筛选视图，
     // 也不参与顶部计数（计数仍以真实存在的 items 为准）。
@@ -350,12 +351,28 @@
       const cmd = i.command || '';
       const loc = i.location || meta.label;
       const pub = i.publisher ? `<span class="startup-item-pub" data-tip="发布者">${escapeHtml(i.publisher)}</span>` : '';
+      // 目标文件已不存在 = 只报事实，不判定恶意（用户 2026-10-05 裁定：按可疑处理，
+      // 给「查看详情 / 删除启动项 / 打开系统安全中心」三个出口，不弹红色恐吓、不带用户去第三方下载）。
+      // 判据在 native/startup.rs 的 missing_target_of：只有「已展开的绝对路径且文件不在」才给结论。
+      const missing = String(i.missingTarget || '');
+      const missingBadge = missing
+        ? window.ds.badgeHtml('warn', '待确认 · 目标文件不存在', {
+          small: true,
+          title: '启动时写的程序文件已经不在这个路径：可能是软件卸载后的残留登记，也可能确实异常。点这条项目看详情，或自行到安全中心确认。'
+        })
+        : '';
       const cmdHtml = cmd
         ? `<div class="startup-item-cmd" data-tip="${escapeHtml(cmd)}">${escapeHtml(truncate(cmd, 120))}</div>`
+        : '';
+      const missingHtml = missing
+        ? `<div class="startup-item-cmd" data-tip="这个文件已经不存在（原样来自注册表/任务定义，Trim 未改动）">${escapeHtml(missing)}</div>`
         : '';
       const locPath = i.resolvedPath || i.filePath || '';
       const locBtn = locPath
         ? `<button class="btn btn-small btn-opt-loc" data-id="${escapeHtml(i.id)}" data-path="${escapeHtml(locPath)}" data-tip="打开文件所在位置">位置</button>`
+        : '';
+      const secBtn = missing
+        ? `<button class="btn btn-small btn-opt-sec" data-id="${escapeHtml(i.id)}" data-tip="打开系统自带的 Windows 安全中心，由你决定要不要扫描">安全中心</button>`
         : '';
       return `
         <div class="startup-item ${i.enabled ? '' : 'disabled'}" data-id="${escapeHtml(i.id)}">
@@ -365,12 +382,14 @@
             <img class="startup-item-icon-img" alt="" width="18" height="18" data-icon-path="${escapeHtml(locPath)}" hidden>
           </div>
           <div class="startup-item-info">
-            <div class="startup-item-title">${escapeHtml(i.name || '未命名')} ${badge}</div>
+            <div class="startup-item-title">${escapeHtml(i.name || '未命名')} ${badge}${missingBadge}</div>
             ${cmdHtml}
+            ${missingHtml}
             <div class="startup-item-meta">${escapeHtml(loc)}${pub}</div>
           </div>
           <div class="startup-item-ops">
             ${locBtn}
+            ${secBtn}
             ${i.enabled
               ? `<button class="btn btn-small btn-opt-toggle off" data-id="${escapeHtml(i.id)}" data-act="disable" data-tip="禁用（可逆）">禁用</button>`
               : `<button class="btn btn-small btn-opt-toggle on" data-id="${escapeHtml(i.id)}" data-act="enable" data-tip="重新启用">启用</button>`}
@@ -537,17 +556,48 @@
     }
   }
 
+  /**
+   * 「目标文件已不存在」那条链的第三个出口：请系统打开 Windows 安全中心。
+   *
+   * 刻意只说「已请求」：走的是 quickcmds 白名单里那条 `ms-settings:windowsdefender`
+   * （URI 由微软文档给定），ShellExecute 返回成功只代表请求交出去了，
+   * 本机有没有装了安全中心、页面能不能落地都由系统决定 —— Trim 不代扫描，
+   * 也不替用户判定是不是恶意（AGENTS §9.3：没有复现证据的话术不进文案）。
+   */
+  async function openSecurityCenter() {
+    if (!window.api?.quickCmds?.run) {
+      window.app?.toast('info', '当前环境不支持打开系统设置，请手动进入「设置 › 隐私和安全性 › Windows 安全中心」');
+      return;
+    }
+    try {
+      const resp = await window.api.quickCmds.run('sec-defender');
+      if (resp && resp.success) {
+        window.app?.toast('info', '已请求打开 Windows 安全中心；若本机没有该页面，请手动进入「设置 › 隐私和安全性 › Windows 安全中心」');
+      } else {
+        window.app?.toast('warning', (resp && resp.message) || '打开 Windows 安全中心失败，请手动进入「设置 › 隐私和安全性 › Windows 安全中心」');
+      }
+    } catch (e) {
+      window.app?.toast('error', `打开 Windows 安全中心失败: ${e.message}`);
+    }
+  }
+
   // ==================== 启动项简介 ====================
   // 点击行内「简介」按钮 → 弹窗展示本地内置简介；
   // 联网 AI 简介不会自动请求，需用户再次点击面板中的「获取AI简介」才调用所选大模型。
   // v3.2.0 弹窗统一批次：骨架改由 modal.js 工厂生成（原手写 backdrop 重复打开会留双实例、无焦点陷阱）
   function showIntro(item) {
     const sourceLabel = (item.source && SOURCE_META[item.source] ? SOURCE_META[item.source].label : '') || item.location || '';
+    // 详情里也要看得见那条事实（三个出口中的「查看详情」不能只给简介不给依据）
+    const missing = String(item.missingTarget || '');
+    const missingRow = missing
+      ? `<div class="startup-intro-meta">启动时写的文件已不存在：${escapeHtml(missing)}</div>`
+      : '';
     const ctrl = window.modal.create({
       id: 'startupIntroBackdrop',
       title: item.name || '未命名',
       bodyHtml: `
         <div class="startup-intro-meta">启动项 · ${escapeHtml(sourceLabel)}${item.publisher ? ' · ' + escapeHtml(item.publisher) : ''}</div>
+        ${missingRow}
         <div data-role="introMount"></div>`,
       bodyClass: 'startup-intro-body',
       footerHtml: `
@@ -612,6 +662,11 @@
     el('btnStartupDelete')?.addEventListener('click', () => doDelete(getSelected()));
     // 列表内事件委托（筛选变更后列表会重新渲染）
     el('startupList')?.addEventListener('click', (e) => {
+      const secBtn = e.target.closest('.btn-opt-sec');
+      if (secBtn) {
+        openSecurityCenter();
+        return;
+      }
       const locBtn = e.target.closest('.btn-opt-loc');
       if (locBtn) {
         openLocation(locBtn.dataset.path);

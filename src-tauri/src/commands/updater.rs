@@ -53,6 +53,9 @@ use crate::security;
 
 /// 镜像偏好文件（与上游 `MIRROR_FILE` 同名，同一数据目录两侧可共用）
 const MIRROR_FILE: &str = "update-mirror.json";
+/// 安装前留下的「本次要装到哪个版本」标记：替换完成后本进程已退出，
+/// 由新版本实例首启读一次并给出完成提示（读后即删）。
+const DONE_FILE: &str = "update-applied.json";
 /// 单线路检查超时（对照上游 CHECK_TIMEOUT_MS）
 const CHECK_TIMEOUT_MS: u64 = 20_000;
 // 原先这里有个全局 `MANIFEST = "latest.json"`（上游拼 latest.yml，插件约定 latest.json）。
@@ -121,6 +124,31 @@ struct Pending {
 struct Downloaded {
     update: Update,
     bytes: Vec<u8>,
+    /// 已核对通过的包体 SHA-256（小写 hex）。安装前写的完成标记要带上它，
+    /// 用户在「更新已完成」弹窗里能看见并自行与发布页核对。
+    sha256: String,
+    /// 这次包体实际来自哪条线路（回退换线时与检查阶段的线路可能不同）
+    via: String,
+}
+
+/// 清单里声明的包体 SHA-256（可选字段）。
+///
+/// 取的是插件已经拉回来并**随对象带出**的 `Update::raw_json`，不再自己发一次 HTTP ——
+/// 第二条获取路径就是第二条会漂移的链（AGENTS §5.16）。
+/// 优先 `platforms.<target>.sha256`，退回顶层 `sha256`；两处都没有就返回 None（不猜）。
+fn manifest_sha256(raw: &Value, target: &str) -> Option<String> {
+    let obj = raw.as_object()?;
+    let cand = obj
+        .get("platforms")
+        .and_then(|p| p.get(target))
+        .and_then(|p| p.get("sha256"))
+        .or_else(|| obj.get("sha256"));
+    let s = cand?.as_str()?.trim().to_ascii_lowercase();
+    // 只认 64 位十六进制：长度/字符集不合格的值等于清单写坏了，不当声明用
+    if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(s)
 }
 
 /// 锁中毒（持有者 panic）不该让更新链路整个失效，取回内层值继续用
@@ -386,59 +414,148 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
 
     let update = pending.update.clone();
     let version = update.version.clone();
+    let pinned_mirror = pending.mirror.clone();
     let task = tauri::async_runtime::spawn(async move {
-        // 插件回的是**增量**字节数，累计值、百分比与速度由我们自己算
-        let mut transferred: u64 = 0;
-        let started = std::time::Instant::now();
+        // 插件回的是**增量**字节数，累计值、百分比与速度由我们自己算。
+        // 每次尝试的开头各自赋值（见下面循环里那两行），所以这里只声明不初始化。
+        let mut transferred: u64;
+        let mut started: std::time::Instant;
         let app2 = app.clone();
-        let outcome = update
-            .download(
-                |chunk, total| {
-                    transferred += chunk as u64;
-                    let percent = total
-                        .filter(|t| *t > 0)
-                        .map(|t| ((transferred as f64 / t as f64) * 100.0).round() as u32)
-                        .unwrap_or(0);
-                    let secs = started.elapsed().as_secs_f64().max(0.001);
-                    let _ = app2.emit(
-                        "updater:state-changed",
-                        json!({
-                            "phase": "downloading",
-                            "percent": percent,
-                            "speed": (transferred as f64 / secs) as u64,
-                            "transferred": transferred,
-                            "total": total.unwrap_or(0),
-                        }),
+        // 下载候选：锁定那条线路优先，其余线路**只有在给出同一个版本、同一份签名**时才入列。
+        // 「换线路」允许的只是换通道，不允许换包 —— 两线给不同签名意味着有人在中间换包，
+        // 那必须拒绝而不是"那就试另一条"（用户 2026-10-05 裁定的「先试快的、失败自动换另一个」
+        // 就是这个前提下的自动换线）。
+        let mut candidates: Vec<(String, Update)> = vec![(pinned_mirror.clone(), update.clone())];
+        for (id, _, base, manifest) in FEEDS.iter().filter(|(id, _, _, _)| *id != pinned_mirror) {
+            match check_once(&app2, base, manifest).await {
+                Ok(Some(u)) if u.version == update.version && u.signature == update.signature => {
+                    candidates.push(((*id).to_string(), u));
+                }
+                Ok(Some(_)) => {
+                    log::write_log(
+                        "warn",
+                        &format!("[updater] 线路 {id} 的清单与已锁定锚点不一致，不作为下载候选（不换包原则）"),
                     );
-                },
-                || {},
-            )
-            .await;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::write_log(
+                        "warn",
+                        &format!("[updater] 备用线路 {id} 取清单失败，跳过: {e}"),
+                    );
+                }
+            }
+        }
+        let mut outcome: Option<(String, Vec<u8>)> = None;
+        let mut last_err = String::new();
+        let mut last_sig_failed = false;
+        for (via, cand) in &candidates {
+            transferred = 0;
+            // 换线后重新计时：否则第二条线路的速度被第一条的等待时间摊薄，界面显示会误导
+            started = std::time::Instant::now();
+            let r = cand
+                .download(
+                    |chunk, total| {
+                        transferred += chunk as u64;
+                        let percent = total
+                            .filter(|t| *t > 0)
+                            .map(|t| ((transferred as f64 / t as f64) * 100.0).round() as u32)
+                            .unwrap_or(0);
+                        let secs = started.elapsed().as_secs_f64().max(0.001);
+                        let _ = app2.emit(
+                            "updater:state-changed",
+                            json!({
+                                "phase": "downloading",
+                                "percent": percent,
+                                "speed": (transferred as f64 / secs) as u64,
+                                "transferred": transferred,
+                                "total": total.unwrap_or(0),
+                            }),
+                        );
+                    },
+                    || {},
+                )
+                .await;
+            match r {
+                Ok(bytes) => {
+                    outcome = Some((via.clone(), bytes));
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    last_sig_failed = is_signature_failure(&msg);
+                    last_err = msg;
+                    // 签名/清单类失败**不自动换线**：那正是最需要停下来的判据，
+                    // 换线重试等于给同一次篡改再试一次的机会。
+                    if last_sig_failed {
+                        log::write_log("error", &format!("[updater] {via} 下载被签名判据阻止，不再尝试其它线路"));
+                        break;
+                    }
+                    log::write_log(
+                        "warn",
+                        &format!("[updater] {via} 下载失败，尝试自动换到下一条线路: {last_err}"),
+                    );
+                }
+            }
+        }
         match outcome {
-            Ok(bytes) => {
+            Some((via, bytes)) => {
                 // 走到这里说明插件**已经**用内置公钥验过 minisign 签名
                 // （verify_signature 在 download 返回前），故 ready 意味着包体可信，
-                // 不只是「下载完成」
-                log::write_log("info", &format!("[updater] {version} 已下载并验签，等待用户确认安装"));
-                *lock(&DOWNLOADED) = Some(Downloaded { update, bytes });
+                // 不只是「下载完成」。
+                //
+                // sha256 是**交叉核对**，不是第二道信任锚：锚仍然是内置公钥背书的 minisign 签名。
+                // 清单若声明了 sha256，就得和实际字节一致——不一致说明清单与产物对不上
+                // （截断、错配、发布侧只更新了一处），一律不进安装。
+                let actual = crate::engine::hash::sha256_bytes(&bytes);
+                let declared = manifest_sha256(&update.raw_json, &update.target);
+                if let Some(d) = &declared {
+                    if *d != actual {
+                        log::write_log(
+                            "error",
+                            &format!("[updater] 包体哈希与清单声明不一致（声明 {d}，实际 {actual}），已阻止安装"),
+                        );
+                        push(
+                            &app,
+                            json!({
+                                "phase": "error", "sigFailed": true,
+                                "message": "安装包哈希与发布清单声明不一致，已阻止安装。请重新检查更新或前往官方 Releases 页面手动下载。"
+                            }),
+                        );
+                        *lock(&DOWNLOAD_TASK) = None;
+                        return;
+                    }
+                }
+                log::write_log(
+                    "info",
+                    &format!(
+                        "[updater] {} 已下载并验签（经 {via}，sha256={actual}{}），等待用户确认安装",
+                        version,
+                        if declared.is_some() { "，哈希已核对" } else { "，清单未声明哈希" }
+                    ),
+                );
+                *lock(&DOWNLOADED) = Some(Downloaded {
+                    update,
+                    bytes,
+                    sha256: actual.clone(),
+                    via: via.clone(),
+                });
                 *lock(&PENDING) = None;
-                push(&app, json!({ "phase": "ready", "version": version }));
+                push(&app, json!({ "phase": "ready", "version": version, "sha256": actual, "via": via }));
             }
-            Err(e) => {
+            None => {
                 // 用户主动取消由 updater:cancel-download 直接 abort 任务并推 idle，
                 // 不会走到这里；所以此分支只剩真实失败。
                 // 验签就在 download 返回前发生（见文件头），故**下载阶段才是签名问题
                 // 真正会浮现的地方** —— 这里不过一遍分类，用户看到的会是
                 // 「更新失败，点击按钮重试」，而重试永远不会有结果。
-                let msg = e.to_string();
-                let sig_failed = is_signature_failure(&msg);
                 log::write_log(
                     "error",
-                    &format!("[updater] 下载{}: {msg}", if sig_failed { "被阻止" } else { "失败" }),
+                    &format!("[updater] 下载{}（{}）: {last_err}", if last_sig_failed { "被阻止" } else { "失败，含全部线路" }, candidates.len()),
                 );
                 push(
                     &app,
-                    json!({ "phase": "error", "sigFailed": sig_failed, "message": msg }),
+                    json!({ "phase": "error", "sigFailed": last_sig_failed, "message": last_err }),
                 );
             }
         }
@@ -473,6 +590,20 @@ pub fn updater_install<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
         return Ok(json!({ "ok": false, "error": "nothing-downloaded" }));
     };
     log::write_log("info", "[updater] 用户确认安装，退出并执行替换");
+    // 安装前留「本次要装到哪个版本」的标记：install 走的是 NSIS 静默替换，替换完成后
+    // 本进程已经不存在（`process::exit(0)`），新实例起来后才能读到它，从而给出
+    // 「更新已完成」的确认界面（用户 2026-10-05 要求的「完成更新 / 打开应用」两按钮出口）。
+    // 写失败不阻断安装——标记只影响完成后的一句提示，不影响更新本身。
+    let marker = json!({
+        "fromVersion": d.update.current_version,
+        "toVersion": d.update.version,
+        "sha256": d.sha256,
+        "via": d.via,
+        "at": crate::engine::now_ms(),
+    });
+    if let Err(e) = security::atomic_write_json(&paths::join_data(DONE_FILE), &marker) {
+        log::write_log("warn", &format!("[updater] 更新完成标记写入失败（不影响安装）: {e}"));
+    }
     // v2-L4P-21（A-3）：install 的 Windows 路径以 `std::process::exit(0)` 收尾，
     // 其间不会再回到 RunEvent::Exit——on_before_exit 钩子已在 builder 上挂
     // on_app_exit，这里再补一次日志刷盘，保证「安装中」之前的最后一条日志落盘
@@ -484,9 +615,42 @@ pub fn updater_install<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
         Ok(()) => Ok(json!({ "ok": true })),
         Err(e) => {
             log::write_log("error", &format!("[updater] 安装失败: {e}"));
+            // 安装既然没起来，标记就是废信息：立刻清掉，免得下次启动谎报「更新已完成」。
+            if let Err(e) = std::fs::remove_file(paths::join_data(DONE_FILE)) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::write_log("warn", &format!("[updater] 清理更新完成标记失败: {e}"));
+                }
+            }
             Ok(json!({ "ok": false, "error": e.to_string() }))
         }
     }
+}
+
+/// updater:completion —— 取走并清除「更新已完成」标记（新版本实例首启读一次）
+///
+/// 读后即删：这台机器已经告诉过用户「装好了」，第二次启动再弹一次就成了骚扰。
+/// 只认 `toVersion == 当前版本` 的标记：装的是 0.7.0 而当前跑的是 0.6.3，说明那次替换
+/// 没落地（或用户又装了旧包），此时谎报成功比不报更糟。
+#[tauri::command]
+pub fn updater_completion<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    let path = paths::join_data(DONE_FILE);
+    let Some(v) = crate::security::read_json_or_default(&path).as_object().cloned() else {
+        return Ok(json!({ "ok": true, "data": Value::Null }));
+    };
+    let _ = std::fs::remove_file(&path);
+    let current = window.app_handle().package_info().version.to_string();
+    if v.get("toVersion").and_then(|x| x.as_str()) != Some(current.as_str()) {
+        log::write_log(
+            "warn",
+            &format!(
+                "[updater] 更新完成标记指向 {}，当前版本 {current}，不作为「已更新」上报",
+                v.get("toVersion").and_then(|x| x.as_str()).unwrap_or("(空)")
+            ),
+        );
+        return Ok(json!({ "ok": true, "data": Value::Null }));
+    }
+    Ok(json!({ "ok": true, "data": v }))
 }
 
 /// updater:set-mirror —— 切换更新线路偏好
@@ -539,6 +703,36 @@ mod tests {
 
     fn ids(pref: &str) -> Vec<&'static str> {
         ordered_feeds(pref).iter().map(|f| f.0).collect()
+    }
+
+    /// 清单里的 sha256 只是**交叉核对值**（信任锚始终是内置公钥背书的 minisign 签名），
+    /// 所以取不到/不合格式的声明一律当"清单没写"，绝不拿一个畸形串去拦正常更新。
+    #[test]
+    fn manifest_sha256_reads_declared_value_or_none() {
+        let good = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let raw = json!({
+            "version": "9.9.9",
+            "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platforms": { "windows-x86_64": { "sha256": good } }
+        });
+        // 平台位优先于顶层：换平台时顶层那个值不属于这个包
+        assert_eq!(manifest_sha256(&raw, "windows-x86_64").as_deref(), Some(good));
+        // 大写声明归一化成小写比较口径
+        let upper = json!({ "platforms": { "windows-x86_64": { "sha256": good.to_uppercase() } } });
+        assert_eq!(manifest_sha256(&upper, "windows-x86_64").as_deref(), Some(good));
+        // 没有平台项时退回顶层
+        assert_eq!(manifest_sha256(&raw, "linux-x64").as_deref(), Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+        // 格式不合格（短串、非 hex、空、类型错）都当没声明 —— 正向对照：不合格清单不得拦下载
+        for bad in [
+            json!({ "sha256": "abc" }),
+            json!({ "sha256": "zz".repeat(32).as_str() }),
+            json!({ "sha256": "" }),
+            json!({ "sha256": 123 }),
+            json!({}),
+            json!([]),
+        ] {
+            assert_eq!(manifest_sha256(&bad, "windows-x86_64"), None, "畸形声明被当成了有效值: {bad}");
+        }
     }
 
     #[test]

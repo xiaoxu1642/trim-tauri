@@ -31,6 +31,13 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(to_hex(&hasher.finalize()))
 }
 
+/// 内存字节的 SHA-256（与 `sha256_file` 同一份 to_hex，不另起一套十六进制编码）。
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    to_hex(&hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,5 +51,25 @@ mod tests {
         let h = sha256_file(&p).expect("哈希失败");
         let _ = std::fs::remove_file(&p);
         assert_eq!(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    /// 两条入口必须给同一个值：字节版与流式版各写一份编码就会在某一侧悄悄漂掉
+    /// （AGENTS §5.16「判据不许有两套实现」）。
+    #[test]
+    fn bytes_and_file_hashes_agree() {
+        let dir = std::env::temp_dir().join(format!("trim-hash2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("same.bin");
+        let body: Vec<u8> = (0..1000u32).flat_map(|i| i.to_le_bytes()).collect();
+        std::fs::write(&p, &body).unwrap();
+        let from_file = sha256_file(&p).expect("文件哈希失败");
+        let from_bytes = sha256_bytes(&body);
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(from_file, from_bytes, "同一份内容两种算法给出不同摘要");
+        // 已知向量（空串）：锁住 to_hex 的小写与补零口径
+        assert_eq!(
+            sha256_bytes(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

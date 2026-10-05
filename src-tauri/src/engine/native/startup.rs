@@ -30,6 +30,45 @@ fn extract_cmd_path(cmd: &str) -> String {
 
 
 
+/// 「启动项写的程序文件已经不在了」判据（注册表 Run 与计划任务**共用同一份**，AGENTS §5.16）。
+///
+/// 只对**已展开的绝对路径**下结论：
+/// · 裸名（`OneDrive.exe`）要先走 PATH/App Paths 才谈得上存在，直接判「不存在」会把大半正常项
+///   误标成可疑；
+/// · 还带 `%VAR%` 的串根本没展开，`exists()` 当然为假，那不代表文件没了；
+/// · **必须以可执行文件后缀结尾** —— 真机抓到的误判就是这条：注册表里写着
+///   `C:\Program Files (x86)\ByteDance\douyin\douyin.exe --start_type=autorun`（裸路径带空格），
+///   `extract_cmd_path` 按第一个空格切出 `C:\Program`，它不是「文件没了」而是「没切对」。
+///   这个字段是给用户在界面上看的断言（「目标文件不存在」），宁可不下结论，
+///   也不能给一个没证据的判断（AGENTS §9.3）。
+/// 返回 `Some(原路径)` = 判据成立（文件确实不在）；`None` = 不下结论。
+fn missing_target_of(cmd_path: &str) -> Option<String> {
+    let p = cmd_path.trim().trim_matches('"');
+    if p.is_empty() || p.contains('%') {
+        return None;
+    }
+    let b = p.as_bytes();
+    let is_drive_abs = b.len() >= 3 && b[1] == b':' && b[2] == b'\\' && p[..2].starts_with(|c: char| c.is_ascii_alphabetic());
+    if !is_drive_abs && !p.starts_with(r"\\") {
+        return None;
+    }
+    // 后缀闸：切错的半截路径（`C:\Program`）与目录名一律不作答
+    let ext = std::path::Path::new(p)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !["exe", "com", "bat", "cmd", "vbs", "js", "msc", "scr", "lnk"].contains(&ext.as_str()) {
+        return None;
+    }
+    if std::path::Path::new(p).exists() {
+        None
+    } else {
+        Some(p.to_string())
+    }
+}
+
+
 /// 读 StartupApproved blob，返回是否禁用（首字节 bit0=1）
 unsafe fn read_startup_approved(hive: HKEY, subkey: &str, value_name: &str) -> Option<bool> {
     let base = match hive {
@@ -144,6 +183,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     h if h == HKEY_CURRENT_USER => format!("HKEY_CURRENT_USER\\{subkey}"),
                     _ => format!("HKEY_LOCAL_MACHINE\\{subkey}"),
                 };
+                let missing = missing_target_of(&cmd_path).unwrap_or_default();
 
                 results.push(json!({
                     "id": format!("reg|{reg_path_full}|{vp}"),
@@ -166,6 +206,8 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "disabledBy": disabled_by,
                     "publisher": get_publisher(&cmd_path),
                     "resolvedPath": cmd_path,
+                    // 目标已消失：只报事实（写在哪、找不着），不推断「是病毒」——见 missing_target_of
+                    "missingTarget": missing,
                 }));
             }
             let _ = RegCloseKey(hk);
@@ -217,6 +259,8 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "disabledBy": disabled_by,
                     "publisher": get_publisher(&resolved),
                     "resolvedPath": resolved,
+                    // 启动文件夹的项是 read_dir 当场枚举出来的，文件必然在 —— 恒空，但三个来源同形状
+                    "missingTarget": "",
                 }));
             }
         }
@@ -252,6 +296,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                 let task_to_run = fields.get(8).unwrap_or(&"").trim_matches('"');
                 let state = fields.get(11).unwrap_or(&"").trim_matches('"');
                 let enabled = state != "Disabled";
+                let task_missing = missing_target_of(&extract_cmd_path(task_to_run)).unwrap_or_default();
                 results.push(json!({
                     "id": format!("task|{task_path}{task_name}"),
                     "name": task_name,
@@ -273,6 +318,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "disabledBy": if !enabled { "system" } else { "" },
                     "publisher": "",
                     "resolvedPath": "",
+                    "missingTarget": task_missing,
                 }));
             }
         }
@@ -348,6 +394,58 @@ fn startup_files_dir() -> std::path::PathBuf {
 }
 
 /// v2-M19 备份根收口的回归位：写入恒新根、读取带老根兜底。
+#[cfg(test)]
+mod missing_target_tests {
+    use super::*;
+
+    /// 判据只在「绝对路径 + 已展开」时下结论，其余一律不猜（这是给用户看的断言）。
+    #[test]
+    fn missing_target_only_judges_expanded_absolute_paths() {
+        // 存在的那一侧用测试进程自己的 exe：它必然在，且不依赖本机装了什么软件
+        let here = std::env::current_exe().expect("测试 exe 自己必然存在")
+            .to_string_lossy().to_string();
+        assert_eq!(missing_target_of(&here), None, "存在的文件被判成已消失");
+
+        // 不存在的绝对路径 → 给结论，并把原路径带出去（界面要显示「写着哪个路径」）
+        assert_eq!(
+            missing_target_of(r"Z:\trim-no-such-dir\gone.exe").as_deref(),
+            Some(r"Z:\trim-no-such-dir\gone.exe")
+        );
+        // 带引号的写法（注册表里常见）：先剥引号再判
+        assert_eq!(
+            missing_target_of("\"C:\\trim-no-such-dir\\gone.exe\"").as_deref(),
+            Some(r"C:\trim-no-such-dir\gone.exe")
+        );
+        // 裸名要走 PATH/App Paths 才谈得上存在 —— 不下结论
+        assert_eq!(missing_target_of("OneDrive.exe"), None);
+        // 真机抓到的误判：`C:\Program Files (x86)\...\douyin.exe --start_type=autorun`
+        // 被按第一个空格切成 `C:\Program`。它不是「文件没了」而是「没切对」，
+        // 所以没有可执行后缀的一律不作答。
+        assert_eq!(missing_target_of(r"C:\Program"), None);
+        assert_eq!(missing_target_of(r"C:\Program Files (x86)"), None);
+        // 有后缀且确实不在 → 给结论
+        assert_eq!(
+            missing_target_of(r"C:\trim-no-such-dir\douyin.exe").as_deref(),
+            Some(r"C:\trim-no-such-dir\douyin.exe")
+        );
+        // 环境变量还没展开 —— 判 exists() 必然为假，那不代表文件没了
+        assert_eq!(missing_target_of(r"%ProgramFiles%\Foo\bar.exe"), None);
+        // 空串与纯空格
+        assert_eq!(missing_target_of("   "), None);
+        // UNC 也认（网络路径消失同样是事实）
+        assert_eq!(
+            missing_target_of(r"\\trim-none\share\a.exe").as_deref(),
+            Some(r"\\trim-none\share\a.exe")
+        );
+    }
+
+    /// 正向对照：把判据改坏成「一律说存在」时，上面的用例必须抓得到（防恒绿）。
+    #[test]
+    fn missing_target_probe_is_not_always_none() {
+        assert!(missing_target_of(r"C:\trim-definitely-absent\x.exe").is_some());
+    }
+}
+
 #[cfg(test)]
 mod backup_root_tests {
     use super::*;

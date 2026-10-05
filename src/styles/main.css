@@ -4578,7 +4578,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 /* 分类树子菜单：完全展开在侧边栏内，滚动统一交给 .nav-section；
    不设独立滚动容器、不阻断滚动链，保证鼠标在展开项上滚动时可带动整个侧边栏，
    侧边栏滚满后再联动主内容区。 */
-#ctxCategoryNav.expanded,
+/* 右键管理那半条 `#ctxCategoryNav.expanded` 已随分类栏一起删除（2026-10-05 改按软件分组） */
 #optimizerCatNav.expanded {
   max-height: 2000px;
   overflow: visible;
@@ -6616,6 +6616,14 @@ body.pv-window {
   white-space: normal;
 }
 .ctx-col-icon { font-size: 14px; }
+/* 按软件分组后组头放的是该软件的真实图标（提取自它的 DLL/EXE），
+   与条目名并排；提取不到才退占位图。 */
+img.ctx-col-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-small);
+}
 .opt-col-count,
 .ctx-col-count {
   margin-left: auto;
@@ -6793,9 +6801,9 @@ body.pv-window {
 .opt-row,
 .ctx-kanban-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 5px 8px;
   border-radius: var(--radius-small);
   cursor: pointer;
   /* v3.5.1 动效审查修正：这两行是优化中心看板 / 右键管理看板的**活体**可点击行
@@ -6921,13 +6929,16 @@ body.pv-window {
   background: color-mix(in srgb, var(--c, var(--accent)) 4%, transparent);
 }
 
-/* 右键管理看板行：复选框 + 序号 + 名称 + 类型标签 + 详情图标（厂商信息只在详情弹窗展示） */
+/* 右键管理看板行：复选框 + 序号 + 名称 + 位置 + 状态（同一行内换行排） + 详情图标。
+   行内信息走 flex-wrap：名称长就换行，但标签永远跟在名称后面，不再各占一行。 */
 .ctx-row-main {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
 }
 .ctx-row-name {
   font-size: 13px;
@@ -6936,6 +6947,25 @@ body.pv-window {
   word-break: normal;
   overflow-wrap: break-word;
   white-space: normal;
+}
+/* 位置标签：按软件分组后，「挂在哪个位置」从一级分类降级成行内信息。
+   只用既有 token，不按位置注入颜色（§2 M20 分类不得用离表色）。 */
+.ctx-row-where {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-tertiary);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  padding: 0 7px;
+  white-space: nowrap;
+}
+/* 状态徽章组（系统原生 / 第三方 / 残留 / 已禁用…）：与位置同一行，靠右不留白 */
+.ctx-row-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .ctx-row-side {
   display: flex;
@@ -9208,6 +9238,10 @@ body[data-preset-bg] .layout {
   color: var(--fg-secondary);
   font-size: var(--fs-secondary);
   line-height: 1.7;
+  /* 就绪态要分三行说清「签名校验 / 线路 / SHA-256」：pre-line 让换行真的生效，
+     而 64 字符哈希是不可断行的长词，必须允许任意位置折行，否则会把弹窗撑破 */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 .upd-error-msg {
   padding: 10px 12px;

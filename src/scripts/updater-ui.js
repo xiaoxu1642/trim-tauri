@@ -24,7 +24,10 @@
     message: '',
     speed: 0,
     transferred: 0,
-    total: 0
+    total: 0,
+    // ready 态由主进程带上：实际走的那条线路 + 包体 SHA-256（换线重试时线路可能与检查时不同）
+    via: '',
+    sha256: ''
   };
 
   let ctrl = null;          // window.modal.create 返回的控制器
@@ -408,8 +411,13 @@
     } else if (kind === 'downloading') {
       fillDownload();
     } else if (kind === 'ready') {
+      // 把「校验过了什么」写实：锚点是内置公钥背书的 minisign 签名，哈希是包体交叉核对值，
+      // 线路只是传输通道。三者各说各的，不笼统说「校验完成」。
       $('.upd-ready-desc', root).textContent =
-        '新版本 v' + (state.version || '') + ' 已下载并校验完成，重启 Trim 后即可生效。';
+        '新版本 v' + (state.version || '') + ' 已下载并通过发布签名校验'
+        + (state.via ? '（经 ' + viaLabel(state.via) + '）' : '')
+        + (state.sha256 ? '。\n安装包 SHA-256：' + state.sha256 : '')
+        + '\n点击「立即重启」将关闭 Trim 并执行文件替换，完成后自动启动新版本。';
     } else if (kind === 'error') {
       $('.upd-error-msg', root).textContent = state.message || '检查更新失败，请稍后重试。';
       // v3.6.5 M1-1：签名类失败额外展示说明并露出手动下载出口
@@ -559,6 +567,64 @@
     }
   }
 
+  // ---------------- 更新完成提示（新版本实例首启一次） ----------------
+  //
+  // 为什么由新实例来说这句话：安装走 NSIS 静默替换，替换开始前本进程已经退出
+  // （插件的 install 末尾是 process::exit(0)），旧实例不可能"等替换完成后提醒"。
+  // 安装前留下的标记由 updater:completion 读一次即删，所以这台机器只会问一遍。
+  //
+  // 两个按钮的语义（用户 2026-10-05 指定）：
+  // · 「完成更新」= 承认收到、关掉提示，停在当前页；
+  // · 「打开应用」= 关掉提示并切到总览页（检查更新这一动作藏在设置页深处，
+  //   用户点完通常就是要回到应用主界面）。
+  // 文案只陈述事实（从哪个版本到哪个版本、包体哈希、走的哪条线路），不声称
+  // 「已验证安全」—— 完整性锚点是内置公钥背书的 minisign 签名，哈希只是交叉核对。
+  function showCompletion(info) {
+    if (!window.modal || !window.modal.create) return;
+    const from = String((info && info.fromVersion) || '');
+    const to = String((info && info.toVersion) || '');
+    const sha = String((info && info.sha256) || '');
+    const via = String((info && info.via) || '');
+    let done = null;
+    const close = () => { try { done && done.close(); } catch (_) {} };
+    done = window.modal.create({
+      id: 'updaterCompletionModal',
+      title: '更新已完成',
+      width: 460,
+      bodyHtml:
+        '<div class="upd-ready"><div class="upd-ready-title" data-role="ver"></div>' +
+        '<p class="upd-ready-desc" data-role="desc"></p>' +
+        '<p class="upd-ready-desc mono" data-role="sha"></p></div>',
+      footerHtml:
+        '<span class="model-picker-spacer"></span>' +
+        '<button class="btn btn-secondary" type="button" data-role="finish">完成更新</button>' +
+        '<button class="btn btn-primary" type="button" data-role="open">打开应用</button>'
+    });
+    const root = done.backdrop || done.modal;
+    const q = (sel) => root.querySelector(sel);
+    q('[data-role="ver"]').textContent = from && to ? `${from} → ${to}` : `已更新到 ${to}`;
+    q('[data-role="desc"]').textContent =
+      '安装包已替换完成，现在运行的是新版本。' +
+      (via ? `本次经 ${viaLabel(via)} 下载。` : '');
+    q('[data-role="sha"]').textContent = sha ? `安装包 SHA-256：${sha}` : '';
+    q('[data-role="finish"]').addEventListener('click', close);
+    q('[data-role="open"]').addEventListener('click', () => {
+      close();
+      try { window.app && window.app.switchPage && window.app.switchPage('overview'); } catch (_) {}
+    });
+  }
+
+  function viaLabel(id) {
+    return id === 'gitee' ? 'Gitee 国内源' : (id === 'github' ? 'GitHub 直连' : id);
+  }
+
+  function pullCompletion() {
+    if (!window.api || !window.api.updater || !window.api.updater.completion) return;
+    Promise.resolve(window.api.updater.completion())
+      .then(r => { if (r && r.ok && r.data) showCompletion(r.data); })
+      .catch(() => { /* 标记读不到就等于没有更新要汇报，不打扰用户 */ });
+  }
+
   // ---------------- 初始化 ----------------
   function init() {
     rowBtn = document.getElementById('btnCheckUpdate');
@@ -611,6 +677,8 @@
     });
 
     rowBtn.addEventListener('click', manualCheck);
+    // 刚替换完安装包的那次启动给一次「更新已完成」确认（读后即删，只问一遍）
+    pullCompletion();
 
     // 设置页行展示当前版本（与 app.js loadAppInfo 同源，独立获取避免时序耦合）
     if (window.api.app && window.api.app.getInfo) {

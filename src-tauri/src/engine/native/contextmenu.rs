@@ -109,11 +109,11 @@ pub fn cm_blocked_list() -> Result<Value, String> {
             let names = reg_enum_values(hk);
             for name in names {
                 let g = name.trim();
-                // GUID 格式：{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
-                if g.len() == 38
-                    && g.starts_with('{') && g.ends_with('}')
-                    && g.as_bytes().iter().skip(1).take(8).all(|b| b.is_ascii_hexdigit())
-                {
+                // GUID 形状判定用同一份 `is_guid`（AGENTS §5.16）：这里原先自带一份弱判据
+                // （长度 38 + 花括号 + 首段 8 位十六进制），凡是满足这四条的键名都会进表，
+                // 而扫描端做的是完整五段校验 —— 两套口径会让「屏蔽表里有」和「扫描认它是扩展」
+                // 不一致，界面上就多出一批点不动的条目。
+                if is_guid(g) {
                     entries.push(json!({ "guid": g, "scope": scope }));
                 }
             }
@@ -164,20 +164,30 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
             }));
         }
 
-        let killed = targets.len();
+        // 逐个杀。`killed` 数的是**真的终止成功**的个数，不是「打算杀的个数」：
+        // OpenProcess/TerminateProcess 失败原先被 `let _ =` 吞掉，界面照样报「已结束 N 个资源管理器」
+        // （AGENTS §4.1 纪律①：断言要点名做到了什么）。
+        let mut killed = 0usize;
         // 记录唯一路径
         let paths: Vec<String> = targets.iter().map(|(_, p)| p.clone())
             .filter(|p| !p.is_empty()).collect::<std::collections::HashSet<_>>()
             .into_iter().collect();
 
-        // 逐个杀
         for (pid, _) in &targets {
             if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
-                let _ = TerminateProcess(h, 1);
+                if TerminateProcess(h, 1).is_ok() { killed += 1; }
                 let _ = CloseHandle(h);
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(700));
+        // 一个都没结束成就不要往下走：旧资源管理器还在，再拉起一个 explorer 只会让
+        // 「重启后才生效」的判据（下面的 alive>0）在什么都没发生的情况下报成功。
+        if killed == 0 {
+            return Ok(json!({
+                "success": false, "killed": 0, "restarted": 0, "alive": targets.len(),
+                "message": "未能结束现有资源管理器进程（权限不足或被占用），未执行重启"
+            }));
+        }
 
         // 重新启动
         let mut started = 0;
@@ -312,6 +322,34 @@ fn clean_str(s: &str) -> String {
     }).collect()
 }
 
+/// 目录包含判据（只用于安全闸门）：`file` 必须落在 `dir` **里面**。
+///
+/// 三条口径都是被真实缺陷教出来的：
+/// 1. 大小写不敏感 —— NTFS 不区分，而 canonicalize 会保留盘符与目录名的原样大小写，
+///    严格比字符串会把同一个目录判成两个；
+/// 2. 必须补分隔符 —— 少了它，`…\右键菜单备份_1` 会放行 `…\右键菜单备份_12\*.reg`
+///    （兄弟目录当前缀），闸门形同不存在；
+/// 3. canonicalize 的 `\\?\` verbatim 形式由**调用方**负责两种都送进来比（见 cm_restore），
+///    这里不猜前缀，因为真机上的 canonical 结果还可能因联结点解析而整体换路径。
+fn under_dir(file: &str, dir: &str) -> bool {
+    let f = file.to_lowercase();
+    let d = dir.to_lowercase().trim_end_matches('\\').to_string();
+    !d.is_empty() && f.starts_with(&format!("{d}\\"))
+}
+
+/// 把绝对路径（注册表全路径或文件全路径）的最后一段换成 `new_leaf`，前面的根原样保留。
+///
+/// 重命名类切换（shellex 的 `-` 前缀、AutorunsDisabled 还原、`.lnk.disabled`）必须回写新路径，
+/// 而回写的依据是**调用方带来的那条真实 hive 路径**，不是「HKCU 就是 HKCU、否则就是 HKLM」这种
+/// 二分：扫描端虽然只产这两种，但把别的根（HKCR 合并视图、HKU）二分进 else 分支会写回一个
+/// 根本不存在的坐标，快照与缓存就此指向别处（真机审计 P2-16）。
+fn swap_last_segment(path: &str, new_leaf: &str) -> String {
+    match path.rfind('\\') {
+        Some(pos) => format!("{}{}", &path[..=pos], new_leaf),
+        None => new_leaf.to_string(),
+    }
+}
+
 /// 动词隐藏判据（四值模型）
 unsafe fn verb_hidden(hk: HKEY) -> bool {
     for vn in ["LegacyDisable", "Blocked", "ProgrammaticAccessOnly"] {
@@ -347,10 +385,18 @@ const KNOWN_SYSTEM: &[&str] = &[
 ];
 
 /// 第三方判定
+///
+/// `company` 传的是「CLSID 键的 Company 值，缺省时退回 PE 的 CompanyName」（见 cm_scan 的
+/// P1-9 注释）—— 只认注册表那一个值会把大批条目当成"没有厂商信息"。
 fn is_third_party(name: &str, company: &str, source: &str, file_path: &str) -> bool {
     let cl = company.to_lowercase();
     if cl.contains("microsoft") || cl.contains("windows corporation") { return false; }
-    if company.is_empty() && file_path.to_lowercase().starts_with(r"c:\windows") { return false; }
+    let fl = file_path.to_lowercase();
+    // 「文件在 Windows 目录下」只是**弱**依据：DriverStore\FileRepository 是第三方驱动包
+    // 的落点（NVIDIA 的壳扩展 dll 就在那），WinSxS 同理混装 —— 拿它当"系统原生"会把
+    // 最该标第三方的那批压成绿色。这两个存储目录不算。
+    let in_driver_store = fl.contains(r"\driverstore\filerepository\") || fl.contains(r"\winsxs\");
+    if company.is_empty() && fl.starts_with(r"c:\windows") && !in_driver_store { return false; }
     if KNOWN_SYSTEM.contains(&name) { return false; }
     if source == "shell" {
         let nl = name.to_lowercase();
@@ -361,6 +407,341 @@ fn is_third_party(name: &str, company: &str, source: &str, file_path: &str) -> b
 
 /// CLSID 信息（名称/厂商/文件路径）
 struct ClsidInfo { name: String, company: String, file_path: String }
+
+// ==================== 软件归属（右键管理「按软件分组」的地基） ====================
+//
+// 为什么必须新加这一层，而不是直接拿现成的 `company` 分组：本机 172 条候选里 `company`
+// 只有 27 条有值，且那 27 条全是 `Microsoft Corporation`（它来自 CLSID 键的 `Company` 值，
+// 绝大多数 shell/verb/Win+X 条目根本没有这个键）。按它分组 = 84% 落进「未识别」，
+// 用户要的「一个软件下有哪些位置」根本不成立。真正的归属只能从**文件本体**读。
+//
+// `startup.rs` 当年留的就是这个坑（注释原文：「简化实现：不实现 GetFileVersionInfoW，留空」），
+// 本模块把它补上并只用于展示分组——分组不参与任何删除/禁用判据，判据仍逐条按 item 自己算。
+
+/// 一个 PE 文件能拿到的三段版本信息。三段都要取：不同厂商只填其中一两段是常态
+/// （很多壳扩展只有 `FileDescription`），所以「先用哪段」本身就是判据，见 [`owner_of`]。
+#[derive(Clone, Default, Debug)]
+pub struct PeInfo {
+    pub product: String,
+    pub company: String,
+    pub description: String,
+}
+
+/// 从命令行里取可执行文件名/路径。注册表里三种写法都常见，且**引号会套在裸名上**：
+/// `"C:\...\x.exe" "%1"`、目录含空格的裸路径 `C:\Program Files\Git\git-bash.exe --cd`、
+/// 裸名 `cmd.exe /s /k pushd "%V"` 与带引号的裸名 `"cmd.exe" /s /k pushd "%V"`
+/// （最后这两种是未识别里的大头）。
+///
+/// **纯函数**：不碰文件系统，所以能在没装对应软件的环境里测（AGENTS §4.1 纪律①）。
+/// 取不到就返回 `None` 而不是猜 —— `"%1" %*` 这种压根没有 exe 的条目，硬猜一个名字出来
+/// 会把「打开」这种系统 verb 算成某个真实软件，那比不分组更糟。
+pub fn exe_from_command(cmd: &str) -> Option<String> {
+    let s = cmd.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // 第一步只干一件事：取出「命令名」候选。带引号取引号内；不带引号就逐段累加，
+    // 每加一段先看整体像不像路径 —— 像就立刻收口。晚一步判断会把参数拼进路径
+    // （`C:\...\bdeunlock.exe %1` 与 `"cmd.exe" /s /k ...` 早先都因此整条落进未识别）。
+    let cand = if let Some(rest) = s.strip_prefix('"') {
+        rest.split('"').next().unwrap_or("").trim().to_string()
+    } else {
+        let mut acc = String::new();
+        let mut done: Option<String> = None;
+        for tok in s.split_whitespace() {
+            if is_path_like(&acc) {
+                done = Some(std::mem::take(&mut acc));
+                break;
+            }
+            if !acc.is_empty() {
+                acc.push(' ');
+            }
+            acc.push_str(tok);
+        }
+        done.unwrap_or(acc)
+    };
+    if is_path_like(&cand) {
+        return Some(cand);
+    }
+    // 第二步：裸名。判断必须落在**第一个 token** 上，不能用第一步拼过参数的整串
+    // （`cmd.exe /s /k pushd "%V"` 整串里有 `%`，按整串判会被当参数丢掉）。
+    let first = if s.starts_with('"') {
+        cand.clone()
+    } else {
+        s.split_whitespace().next().unwrap_or("").to_string()
+    };
+    if first.is_empty() || first.contains('\\') || first.contains('/') || first.contains('%') {
+        return None;
+    }
+    if first.starts_with('-') || first.contains('"') {
+        return None;
+    }
+    let bare_ok = match first.rsplit_once('.') {
+        Some((stem, ext)) => !stem.is_empty() && matches!(ext.to_ascii_lowercase().as_str(), "exe" | "com"),
+        None => !first.contains('-'),
+    };
+    bare_ok.then_some(first)
+}
+
+/// 只判形状：盘符开头 + 有反斜杠 + 扩展名是 exe/com/dll。
+fn is_path_like(p: &str) -> bool {
+    let b = p.as_bytes();
+    p.len() > 4 && b.len() > 3 && b[1] == b':' && matches!(b[0], b'A'..=b'Z' | b'a'..=b'z')
+        && p.contains('\\')
+        && {
+            let name = p.rsplit('\\').next().unwrap_or("");
+            let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            matches!(ext.as_str(), "exe" | "com" | "dll")
+        }
+}
+
+/// [`resolve_exe_for_owner`] 的带缓存版：同一次扫描里同一个裸名只查一遍
+/// （App Paths 是三次注册表打开 + PATH 是几十次 stat，172 条候选不做缓存会明显拖慢扫描）。
+/// 缓存键取小写：Windows 文件名大小写不敏感。解析不到的名字也要缓存（存 `None`），
+/// 否则每条未识别项都会把整条 PATH 重扫一遍。
+fn resolve_cached(
+    cache: &mut std::collections::HashMap<String, Option<String>>,
+    raw: &str,
+) -> Option<String> {
+    cache
+        .entry(raw.to_ascii_lowercase())
+        .or_insert_with_key(|k| resolve_exe_for_owner(k))
+        .clone()
+}
+
+/// 把命令行里取到的 exe 名解析成**真实存在的路径**，好去读 PE。
+///
+/// 为什么必须这一级：注册表里大量 shell 命令写的是裸名 —— `cmd.exe /s /k pushd "%V"`、
+/// `powershell.exe -noexit ...`、`wps.exe`。只按形状判会全部落空：真机实测未识别 50/171
+/// 里绝大多数就是这一类。解析顺序（都是只读）：
+/// ① 本来就是存在的路径 ⇒ 原样；② `App Paths`（先 HKCU 再 HKLM，与系统自己的查找顺序一致）；
+/// ③ `%SystemRoot%\System32\<名>`。三处都不中 ⇒ `None` —— **不猜路径**，
+/// 归属就退到未识别，也不能把「同名的某个文件」当结论。
+fn resolve_exe_for_owner(raw: &str) -> Option<String> {
+    let name = raw.trim().trim_matches('"').to_string();
+    if name.is_empty() {
+        return None;
+    }
+    if std::path::Path::new(&name).exists() {
+        return Some(name);
+    }
+    // 已经是个带目录的路径但不存在（卸载遗留）：不再去 App Paths 碰运气，交给上层退判据
+    if name.contains('\\') {
+        return None;
+    }
+    // 注册表里 `notepad %1` 这种连扩展名都不写的确实存在（系统就这么登记的），
+    // 所以每个候选名都试两次：原名与补 `.exe`。两次都不中才算解析不到。
+    let mut cands: Vec<String> = vec![name.clone()];
+    if !name.contains('.') {
+        cands.push(format!("{name}.exe"));
+    }
+    for cand in &cands {
+        let sub = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{cand}");
+        for hive in [
+            windows::Win32::System::Registry::HKEY_CURRENT_USER,
+            windows::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+        ] {
+            if let Some(v) = crate::engine::native::read_reg_string(hive, &sub, "") {
+                let p = v.trim().trim_matches('"').to_string();
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
+                    return Some(p);
+                }
+            }
+        }
+        let root = std::env::var("SystemRoot").unwrap_or_default();
+        if !root.is_empty() {
+            let p = format!(r"{root}\System32\{cand}");
+            if std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+        // ④ PATH 里逐目录找：`powershell.exe` 这类既不在 System32 根下、也没登记 App Paths，
+        // 但系统解析裸名时走的就是 PATH —— 不补这一级，「在此处打开 PowerShell 窗口」永远未识别。
+        // 只对**写了 .exe 扩展名**的裸名扫 PATH：打开方式列表里的 command 常是 verb 串（open / edit），
+        // 而 npm、Git 之流会在 PATH 里放无扩展名垫片，拿 verb 去撞会撞出一个假归属。
+        if cand.to_ascii_lowercase().ends_with(".exe") {
+            if let Some(path) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&path) {
+                    let p = dir.join(cand);
+                    if p.is_file() {
+                        return Some(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 算软件归属：`(标签, 判据来源)`。标签为空 = **拿不准就不分组**，
+/// 前端把它归进「未识别厂商 / 系统组件」组并如实标注，不硬猜一个名字糊上去。
+///
+/// 优先级就是判据本身，改动要连带改单测：
+/// 1. `system`：文件在系统根目录下 **且** 厂商/产品名指向微软 —— 这两条同时成立才敢并组，
+///    否则 `C:\Windows\Temp` 下某个第三方 dll 会被错并进「Windows 系统组件」；
+/// 2. `pe-product`：PE 的 `ProductName`，最贴近用户心里的「那个软件」；
+/// 3. `pe-desc`：`FileDescription`，常是「WinRAR Shell Extension」这种比厂商更具体的名字；
+/// 4. `registry`：CLSID 键的 `Company` 值（只有厂商名，退而求其次）；
+/// 5. `pe-company`：PE 的 `CompanyName`；
+/// 6. `dir`：安装目录名兜底（`C:\Program Files\WinRAR\...` → `WinRAR`）—— 这是**推断**，
+///    所以来源要一路带到界面，组头上写「按安装目录识别」，不装作是权威结论。
+pub fn owner_of(pe: &PeInfo, reg_company: &str, file_path: &str, system_root: &str) -> (String, String) {
+    let f = file_path.to_ascii_lowercase();
+    let root = system_root.trim_end_matches('\\').to_ascii_lowercase();
+    let has_file = !f.is_empty();
+    // 带分隔符比：`C:\Windows.old\...` 不是系统目录，不能因为前缀相同就被并进「Windows 系统组件」
+    let in_system_root = !root.is_empty() && has_file && f.starts_with(&format!("{root}\\"));
+    let ms = |s: &str| {
+        let l = s.to_ascii_lowercase();
+        l.contains("microsoft") || l.contains("windows corporation")
+    };
+    // 审计 P1-6：系统组件有两种形态，都必须落到 `system`，否则它们会以「Microsoft Corporation」
+    // 之名按第三方权重排进第一屏，还把组头标成"按注册表厂商"：
+    // ① 文件确实在系统根下且厂商是微软；
+    // ② **压根没有文件线索**（Win+X、新建菜单、系统发送到那 100 多条：扫描器给它们硬编了
+    //    company，file_path 与 command 都是空的）—— 这类就是 Windows 自己的菜单项。
+    // 有文件且文件不在系统根下（Office / Edge 之类）不走这里，交给 PE 判产品名。
+    if (ms(&pe.company) || ms(&pe.product) || ms(reg_company)) && (!has_file || in_system_root) {
+        return ("Windows 系统组件".to_string(), "system".to_string());
+    }
+    for (label, src) in [
+        (pe.product.as_str(), "pe-product"),
+        (pe.description.as_str(), "pe-desc"),
+        (reg_company, "registry"),
+        (pe.company.as_str(), "pe-company"),
+    ] {
+        let t = label.trim();
+        if !t.is_empty() {
+            return (t.to_string(), src.to_string());
+        }
+    }
+    if let Some(dir) = install_dir_name(file_path) {
+        return (dir, "dir".to_string());
+    }
+    (String::new(), String::new())
+}
+
+/// 从文件路径里取「安装目录名」：往上找到 `Program Files` / `Program Files (x86)` /
+/// `ProgramData` 之后的那一段（那才是产品目录），没有这些锚点时退回直接父目录名。
+/// 纯函数，形状不对一律 `None`。
+///
+/// 三条「宁可不分组」的边界：① 文件直接躺在容器目录里（`C:\Program Files\x.dll`）时，
+/// 容器名当组名毫无意义；② 父目录本身就是系统/容器目录（`System32`、`WindowsApps`）——
+/// 那类条目该走 `system` 判据或落进未识别，不该被目录名兜底糊成一个"软件"；
+/// ③ 锚点下面套的还是容器（`Program Files\WindowsApps\...`）同样不算产品名。
+pub fn install_dir_name(path: &str) -> Option<String> {
+    /// 容器锚点：它后面的那一段才是产品目录
+    const ANCHORS: &[&str] = &["program files", "program files (x86)", "program files (arm64)", "programdata"];
+    /// 出现在结果里一律判为「这不是产品名」的目录（锚点本身 + 系统/包容器目录）
+    const NOT_A_PRODUCT: &[&str] = &[
+        "program files", "program files (x86)", "program files (arm64)", "programdata",
+        "windows", "system32", "syswow64", "winnt", "windowsapps", "common files",
+    ];
+    let is_in = |list: &[&str], s: &str| list.iter().any(|g| s.eq_ignore_ascii_case(g));
+    if path.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = path.split('\\').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    for (i, seg) in parts.iter().enumerate() {
+        // i+1 必须是产品目录：i+1 == len-1 说明那一段已经是文件名本身 ⇒ 文件躺在容器里
+        if is_in(ANCHORS, seg) && i + 1 < parts.len() - 1 && !is_in(NOT_A_PRODUCT, parts[i + 1]) {
+            return Some(parts[i + 1].to_string());
+        }
+    }
+    let parent = parts[parts.len() - 2];
+    if parent.is_empty() || is_in(NOT_A_PRODUCT, parent) {
+        return None;
+    }
+    Some(parent.to_string())
+}
+
+/// 读 PE 的 StringFileInfo 三段。走 `version.dll` 的 `GetFileVersionInfo*` / `VerQueryValueW`，
+/// 它们在 `windows` crate 里归 `Win32_Storage_FileSystem`（本仓已开该 feature，不新增依赖）。
+///
+/// 语言/代码页对必须从 `\\VarFileInfo\\Translation` 现读再拼成 8 位十六进制：
+/// 硬写 `000004b0`（中性英文）在只有本地化资源块的文件上会取到空，
+/// 于是国产壳扩展全被判成「未识别」。
+/// 失败（文件不存在/无版本资源/非 PE）一律回空 `PeInfo` —— 归属是展示层信息，
+/// 读不到就退回下一级判据，绝不为它报错打断整轮扫描。
+unsafe fn pe_info_of(path: &str) -> PeInfo {
+    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    let mut info = PeInfo::default();
+    if path.trim().is_empty() || !std::path::Path::new(path).exists() {
+        return info;
+    }
+    let pw = to_wide(path);
+    let size = GetFileVersionInfoSizeW(PCWSTR(pw.as_ptr()), None);
+    if size == 0 || size > 1 << 20 {
+        return info;
+    }
+    let mut buf = vec![0u8; size as usize];
+    if GetFileVersionInfoW(PCWSTR(pw.as_ptr()), None, size, buf.as_mut_ptr() as *mut core::ffi::c_void).is_err() {
+        return info;
+    }
+    let base = buf.as_ptr() as *const core::ffi::c_void;
+    let read_str = |key: &str| -> Option<String> {
+        let kw = to_wide(key);
+        let mut val: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        if !VerQueryValueW(base, PCWSTR(kw.as_ptr()), &mut val, &mut len).as_bool() || val.is_null() {
+            return None;
+        }
+        let units = std::slice::from_raw_parts(val as *const u16, len as usize);
+        // 只取**第一个 NUL 之前**的内容：VerQueryValue 给的长度含结尾 NUL，而版本资源里
+        // 常见「值后面紧跟下一段数据的字节」，按尾部裁会把这些垃圾读进标签
+        // （真机实测见过 `NVIDIA App<Product` 这种串味，2026-10-05）。
+        let s = String::from_utf16_lossy(units)
+            .split('\0')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        (!s.is_empty()).then_some(s)
+    };
+    // 先拿 Translation 对，再按对去取三段字符串
+    let mut tp: *mut core::ffi::c_void = std::ptr::null_mut();
+    let mut tl = 0u32;
+    let sub = to_wide(r"\VarFileInfo\Translation");
+    if !VerQueryValueW(base, PCWSTR(sub.as_ptr()), &mut tp, &mut tl).as_bool() || tp.is_null() {
+        return info;
+    }
+    let words = std::slice::from_raw_parts(tp as *const u16, (tl as usize) / 2);
+    // chunks_exact：长度不是 4 的倍数（畸形资源）时丢掉尾巴，不能让 pair[1] 越界 panic ——
+    // 这条扫描跑在 spawn_blocking 里，panic 会把整轮扫描变成「扫描线程未返回」
+    for pair in words.chunks_exact(2) {
+        let (lang, cp) = (pair[0], pair[1]);
+        let got = [
+            read_str(&format!(r"\StringFileInfo\{lang:04x}{cp:04x}\ProductName")),
+            read_str(&format!(r"\StringFileInfo\{lang:04x}{cp:04x}\CompanyName")),
+            read_str(&format!(r"\StringFileInfo\{lang:04x}{cp:04x}\FileDescription")),
+        ];
+        if got.iter().any(|g| g.is_some()) {
+            info.product = got[0].clone().unwrap_or_default();
+            info.company = got[1].clone().unwrap_or_default();
+            info.description = got[2].clone().unwrap_or_default();
+            break;
+        }
+    }
+    info
+}
+
+/// 同一次扫描里同一个文件只读一次 PE（172 条候选去重后通常只剩几十个文件）。
+/// 缓存按小写路径键：Windows 路径大小写不敏感，`...\WinRAR\` 与 `...\winrar\` 必须命中同一条。
+fn pe_info_cached(path: &str, cache: &mut std::collections::HashMap<String, PeInfo>) -> PeInfo {
+    let key = path.to_ascii_lowercase();
+    if key.is_empty() {
+        return PeInfo::default();
+    }
+    if let Some(hit) = cache.get(&key) {
+        return hit.clone();
+    }
+    let got = unsafe { pe_info_of(path) };
+    cache.insert(key, got.clone());
+    got
+}
 
 /// 解析 CLSID 信息（简化版：只读注册表，不做文件版本信息）
 unsafe fn get_clsid_info(guid: &str, clsid_views: &[(HKEY, &str)]) -> ClsidInfo {
@@ -518,11 +899,19 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                     "Microsoft Corporation".to_string()
                 } else { String::new() };
                 let name = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
+                // 审计 P2-18：「发送到」的启停是用**隐藏属性**表达的（见 toggle_cm_item 的
+                // filesystem 分支），而这里原先把 enabled 写死成 true —— 已被隐藏的项目在界面上
+                // 显示为「启用」，取消勾选时报「已禁用」再勾回来又显示启用，用户看不出任何变化。
+                // 状态必须由同一条判据读出来，否则显示与写入不是同一件事。
+                use windows::Win32::Storage::FileSystem::{GetFileAttributesW, FILE_ATTRIBUTE_HIDDEN};
+                let aw = to_wide(&full);
+                let attrs = GetFileAttributesW(PCWSTR(aw.as_ptr()));
+                let hidden = attrs != 0xFFFFFFFF && attrs & FILE_ATTRIBUTE_HIDDEN.0 != 0;
                 items.push(CmItem {
                     name, clsid: String::new(), reg_path: full.clone(), native_reg_path: full.clone(),
                     company, location: sendto_dir.clone(), category: "发送到".to_string(),
                     source: "filesystem".to_string(), file_path: String::new(), command: String::new(),
-                    enabled: true, confirm_required: false, confirm_reason: String::new(),
+                    enabled: !hidden, confirm_required: false, confirm_reason: String::new(),
                     unknown_convention: false, blocked_by: String::new(), target: String::new(),
                     orphan: false, orphan_reason: String::new(),
                 });
@@ -628,13 +1017,38 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                 let mut aphk = HKEY::default();
                 let mut friendly = app.clone();
                 let mut no_open = false;
+                let mut app_path_val = String::new();
+                let mut cmd_line = String::new();
                 if RegOpenKeyExW(*hive, PCWSTR(apk.as_ptr()), Some(0), KEY_READ, &mut aphk).is_ok() {
                     if let Some(f) = reg_read_string(aphk, "FriendlyAppName") {
                         if !f.trim().is_empty() { friendly = direct_string(&f); }
                     }
                     if friendly.is_empty() { friendly = app.clone(); }
                     no_open = reg_value_exists(aphk, "NoOpenWith");
+                    // `AppPath` 是这个应用 exe 的绝对路径，归属判据的第一选择
+                    if let Some(p) = reg_read_string(aphk, "AppPath") {
+                        app_path_val = direct_string(&p).trim().trim_matches('"').to_string();
+                    }
                     let _ = RegCloseKey(aphk);
+                }
+                // 拿不到 AppPath 时，从第一个 verb 的 command 默认值里取 exe：
+                // 「打开方式」的条目名常是 FriendlyAppName（「抖音」「Trae CN」），
+                // 按软件分组时猜不出归属，真机 27 条未识别里 13 条卡在这。
+                if app_path_val.is_empty() {
+                    for v in &verbs {
+                        let ckey = format!(r"{app_path}\shell\{v}\command");
+                        let csk = to_wide(&ckey);
+                        let mut chk = HKEY::default();
+                        if RegOpenKeyExW(*hive, PCWSTR(csk.as_ptr()), Some(0), KEY_READ, &mut chk).is_err() {
+                            continue;
+                        }
+                        if let Some(c) = reg_read_string(chk, "") {
+                            let c = direct_string(&c);
+                            if !c.trim().is_empty() { cmd_line = c; }
+                        }
+                        let _ = RegCloseKey(chk);
+                        if !cmd_line.is_empty() { break; }
+                    }
                 }
                 let std_path = if *hive == HKEY_CURRENT_USER {
                     format!("HKEY_CURRENT_USER\\{app_path}")
@@ -646,10 +1060,18 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                     native_reg_path: resolve_native_reg_path(&std_path),
                     company: String::new(), location: app_root.clone(),
                     category: "打开方式".to_string(), source: "openwith".to_string(),
-                    file_path: String::new(), command: verbs.join(", "),
+                    // 组件路径只在**文件确实存在**时给：归属段会直接读它的 PE 版本资源；
+                    // 路径已失效（软件被删但 Applications 键还在）就不填，让它落到「未识别」
+                    // 而不是按一个不存在的目录猜个厂商。
+                    file_path: if !app_path_val.is_empty() && std::path::Path::new(&app_path_val).is_file() {
+                        app_path_val.clone()
+                    } else { String::new() },
+                    // 命令串要么给真实命令行，要么退回 verb 清单（两者给的是不同信息：
+                    // 前者能给归属与「执行命令」一行，后者只是 verb 名单）
                     enabled: !no_open, confirm_required: false, confirm_reason: String::new(),
                     unknown_convention: false, blocked_by: String::new(), target: String::new(),
                     orphan: false, orphan_reason: String::new(),
+                    command: if cmd_line.is_empty() { verbs.join(", ") } else { cmd_line.clone() },
                 });
             }
             let _ = RegCloseKey(ahk);
@@ -658,6 +1080,12 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
         // ---- 去重 ----
         let mut dedup: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut result: Vec<Value> = Vec::new();
+        // 归属解析的三份共享输入：PE 读缓存 + 裸名 exe 的解析缓存 + 系统根目录（判「Windows 系统组件」用）
+        let mut pe_cache: std::collections::HashMap<String, PeInfo> = std::collections::HashMap::new();
+        let mut exe_cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let system_root = std::env::var_os("SystemRoot")
+            .map(|v| v.to_string_lossy().to_string())
+            .unwrap_or_default();
         for item in items {
             let enabled_text = if item.enabled { "1" } else { "0" };
             let key = if item.clsid.is_empty() {
@@ -668,7 +1096,35 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
             if !dedup.insert(key) { continue; }
 
             let is_protected = PROTECTED_CLASSES.contains(&item.clsid.as_str());
-            let is_tp = is_third_party(&item.name, &item.company, &item.source, &item.file_path);
+
+            // 软件归属：CLSID 有处理程序文件就按它读 PE；没有（shell/verb/Win+X 那 109 条）
+            // 就从命令行里取 exe，裸名再走 App Paths / System32 / PATH 解析成真实路径。
+            // 打开方式列表特殊：它的**条目名就是 exe 名**（`wps.exe`），而命令行里只有 verb
+            // （`open`）。所以退路挂在「解析结果为空」上，而不是挂在「取不到命令」上 ——
+            // `open` 会被当成裸名取出来，却解析不到文件，那时必须继续试条目名。
+            let owner_file = if !item.file_path.is_empty() {
+                item.file_path.clone()
+            } else {
+                let mut hit = exe_from_command(&item.command)
+                    .and_then(|raw| resolve_cached(&mut exe_cache, &raw));
+                if hit.is_none() && item.source == "openwith" && !item.name.is_empty() {
+                    hit = resolve_cached(&mut exe_cache, &item.name);
+                }
+                hit.unwrap_or_default()
+            };
+            let pe = pe_info_cached(&owner_file, &mut pe_cache);
+            let (owner, owner_source) = owner_of(&pe, &item.company, &owner_file, &system_root);
+
+            // 审计 P1-9（真机坐实）：「第三方 / 系统原生」这维过去只看 CLSID 键的 `Company`
+            // 值，而本机 171 条里只有 27 条有那个值 —— 于是 PE 明明写着 Microsoft Corporation
+            // 的「旧版 Windows Media Player」被判成第三方（虚高警告），而躺在
+            // `C:\Windows\System32\DriverStore\FileRepository\nv_*.dll` 的 NVIDIA 壳扩展
+            // 因为「路径在 Windows 目录下 + 没有 Company」被算成系统原生（**该警惕的反而被压低**）。
+            // DriverStore 是第三方驱动包的存放处，那条捷径在这里恰好判反。
+            // 修法是把 PE 的厂商与解析出的真实文件路径喂进同一条判据，不另起一套。
+            let company_eff = if item.company.trim().is_empty() { pe.company.as_str() } else { &item.company };
+            let path_eff = if item.file_path.is_empty() { owner_file.as_str() } else { &item.file_path };
+            let is_tp = is_third_party(&item.name, company_eff, &item.source, path_eff);
             let risk = if is_protected { "protected" } else if is_tp { "high" } else { "low" };
             let component_missing = is_guid(&item.clsid) && !item.file_path.is_empty()
                 && !std::path::Path::new(&item.file_path).exists();
@@ -683,6 +1139,11 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                 "regPath": clean_str(&item.reg_path),
                 "nativeRegPath": clean_str(&item.native_reg_path),
                 "company": clean_str(&item.company),
+                // 分组键与它的判据来源（pe-product / pe-desc / registry / pe-company / dir /
+                // system / 空=未识别）。界面上「按安装目录识别」这类推断必须能看出来，
+                // 不装作权威结论（AGENTS §9.3：没有证据的主张不进文案）。
+                "owner": clean_str(&owner),
+                "ownerSource": clean_str(&owner_source),
                 "location": clean_str(&item.location),
                 "category": clean_str(&item.category),
                 "source": clean_str(&item.source),
@@ -803,9 +1264,13 @@ unsafe fn scan_shell_items(
             }
         }
         let std_path = if hive == HKEY_CURRENT_USER {
-            format!("HKEY_CURRENT_USER\\{}", key_path.trim_start_matches(r"Software\\"))
+            // key_path 本身就是 `Software\Classes\...` 相对路径，直接拼 hive 全名即可。
+            // 审计 P2-14：这里原来还套了 `.trim_start_matches(r"Software\\")`，而原始串里是
+            // **两个**反斜杠、真实路径只有一个 ⇒ 恒不匹配的死代码；谁哪天把它"修对"，
+            // 反而会削掉 Software 前缀让 HKCU 写侧全灭。删掉，不留陷阱。
+            format!("HKEY_CURRENT_USER\\{key_path}")
         } else {
-            format!("HKEY_LOCAL_MACHINE\\{}", key_path.trim_start_matches(r"SOFTWARE\\"))
+format!("HKEY_LOCAL_MACHINE\\{key_path}")
         };
         // 幽灵项过滤
         if name.trim().is_empty() { let _ = RegCloseKey(chk); continue; }
@@ -857,9 +1322,13 @@ unsafe fn scan_shellex_handlers(
             // Autoruns 约定
             if real_name.to_lowercase().starts_with("autorunsdisabled") {
                 let std_path = if hive == HKEY_CURRENT_USER {
-                    format!("HKEY_CURRENT_USER\\{}", key_path.trim_start_matches(r"Software\\"))
+                    // key_path 本身就是 `Software\Classes\...` 相对路径，直接拼 hive 全名即可。
+            // 审计 P2-14：这里原来还套了 `.trim_start_matches(r"Software\\")`，而原始串里是
+            // **两个**反斜杠、真实路径只有一个 ⇒ 恒不匹配的死代码；谁哪天把它"修对"，
+            // 反而会削掉 Software 前缀让 HKCU 写侧全灭。删掉，不留陷阱。
+            format!("HKEY_CURRENT_USER\\{key_path}")
                 } else {
-                    format!("HKEY_LOCAL_MACHINE\\{}", key_path.trim_start_matches(r"SOFTWARE\\"))
+        format!("HKEY_LOCAL_MACHINE\\{key_path}")
                 };
                 items.push(CmItem {
                     name: format!("未识别的禁用项（{real_name}）"), clsid: String::new(),
@@ -890,9 +1359,13 @@ unsafe fn scan_shellex_handlers(
             enabled = false;
         }
         let std_path = if hive == HKEY_CURRENT_USER {
-            format!("HKEY_CURRENT_USER\\{}", key_path.trim_start_matches(r"Software\\"))
+            // key_path 本身就是 `Software\Classes\...` 相对路径，直接拼 hive 全名即可。
+            // 审计 P2-14：这里原来还套了 `.trim_start_matches(r"Software\\")`，而原始串里是
+            // **两个**反斜杠、真实路径只有一个 ⇒ 恒不匹配的死代码；谁哪天把它"修对"，
+            // 反而会削掉 Software 前缀让 HKCU 写侧全灭。删掉，不留陷阱。
+            format!("HKEY_CURRENT_USER\\{key_path}")
         } else {
-            format!("HKEY_LOCAL_MACHINE\\{}", key_path.trim_start_matches(r"SOFTWARE\\"))
+format!("HKEY_LOCAL_MACHINE\\{key_path}")
         };
         if name.trim().is_empty() { continue; }
         items.push(CmItem {
@@ -1060,11 +1533,18 @@ unsafe fn toggle_cm_item(
             return Ok(json!({"status": "ok", "message": "已处于禁用状态"}));
         }
         let new_leaf = if want_enabled {
-            leaf.trim_end_matches(".disabled").trim_end_matches(".DISABLED").to_string()
+            // 按小写判据反切固定 9 字节，不用 trim_end_matches（它区分大小写，两次调用仍漏
+            // `.Disabled` 这种混合大小写 —— NTFS 大小写不敏感，摘掉大小写之一就会截出空名或错名）。
+            // 后缀能小写匹配上 `.disabled` 就必然是 ASCII 的 9 个字节，切片不会落在字符中间。
+            leaf[..leaf.len() - 9].to_string()
         } else {
             format!("{leaf}.disabled")
         };
-        let parent = std::path::Path::new(target).parent().unwrap();
+        // 审计 P2-11：写侧唯一的裸 unwrap。上面的 exists() 判据让它在真实路径上取不到 None，
+        // 但"当前不可达"不是留着 panic 的理由 —— 盘符根（`D:\`）这类输入 parent() 就是 None。
+        let Some(parent) = std::path::Path::new(target).parent() else {
+            return Err("发送到项路径无法定位所在目录".into());
+        };
         let new_path = parent.join(&new_leaf);
         std::fs::rename(target, &new_path).map_err(|e| format!("重命名失败: {e}"))?;
         if new_path.exists() && !std::path::Path::new(target).exists() {
@@ -1216,13 +1696,19 @@ unsafe fn toggle_cm_item(
                     let mut old_hk = HKEY::default();
                     if RegOpenKeyExW(hive, PCWSTR(old_sk.as_ptr()), Some(0), KEY_READ, &mut old_hk).is_ok() {
                         let _ = RegCloseKey(old_hk);
-                        // 重命名
+                        // 重命名。**改名失败绝不能继续**：下面按新路径回读，键其实还叫旧名，
+                        // 打不开 ⇒ now_hidden=false ⇒ 与 want_enabled=true 相等 ⇒ 报「已启用」，
+                        // 并把不存在的新路径写回快照与缓存（真机审计 P1-1）。
                         let new_name = to_wide(&renamed_to);
                         let parent_sk = to_wide(parent);
                         let mut parent_hk = HKEY::default();
-                        if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_ok() {
-                            let _ = RegRenameKey(parent_hk, PCWSTR(to_wide(&leaf).as_ptr()), PCWSTR(new_name.as_ptr()));
-                            let _ = RegCloseKey(parent_hk);
+                        if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_err() {
+                            return Err("无法打开父键以重命名（权限不足或键被占用）".into());
+                        }
+                        let rn = RegRenameKey(parent_hk, PCWSTR(to_wide(&leaf).as_ptr()), PCWSTR(new_name.as_ptr()));
+                        let _ = RegCloseKey(parent_hk);
+                        if rn.is_err() {
+                            return Err(format!("重命名 {leaf} → {renamed_to} 被拒（可能需要管理员权限）"));
                         }
                         reg_path = format!("{parent}\\{renamed_to}");
                     }
@@ -1279,11 +1765,8 @@ unsafe fn toggle_cm_item(
         if now_hidden == !want_enabled {
             let mut res = json!({"status": "ok", "message": if want_enabled { "已启用" } else { "已禁用" }});
             if !renamed_to.is_empty() {
-                let std_new = if hive == HKEY_CURRENT_USER { format!("HKEY_CURRENT_USER\\{reg_path}") } else { format!("HKEY_LOCAL_MACHINE\\{reg_path}") };
-                res["newNativeRegPath"] = json!(std_new);
-                if let Some(dpos) = display_path.rfind('\\') {
-                    res["newRegPath"] = json!(format!("{}{}", &display_path[..=dpos], renamed_to));
-                }
+                res["newNativeRegPath"] = json!(swap_last_segment(target, &renamed_to));
+                res["newRegPath"] = json!(swap_last_segment(display_path, &renamed_to));
             }
             return Ok(res);
         } else {
@@ -1315,11 +1798,8 @@ unsafe fn toggle_cm_item(
         if r.is_err() {
             return Err("重命名未生效（可能需要管理员权限）".into());
         }
-        let new_path = format!("{parent}\\{new_name}");
-        let std_new = if hive == HKEY_CURRENT_USER { format!("HKEY_CURRENT_USER\\{new_path}") } else { format!("HKEY_LOCAL_MACHINE\\{new_path}") };
-        let new_display = if let Some(dpos) = display_path.rfind('\\') {
-            format!("{}{}", &display_path[..=dpos], new_name)
-        } else { new_name.clone() };
+        let std_new = swap_last_segment(target, &new_name);
+        let new_display = swap_last_segment(display_path, &new_name);
         return Ok(json!({"status": "ok", "newRegPath": new_display, "newNativeRegPath": std_new, "message": if want_enabled { "已启用" } else { "已禁用" }}));
     }
 
@@ -1337,6 +1817,10 @@ pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
         let mut results: Vec<Value> = Vec::new();
         let mut success = 0i64;
         let mut failed = 0i64;
+        // 审计 P1-4：`skip`（保护项 / 该走启停 / 路径非法）以前既不进 success 也不进 failed，
+        // 命令层按 `failed == 0` 判成功 ⇒ 前端弹「已备份并删除所选菜单项」并把行删掉，
+        // 而注册表什么都没动。skip 必须单独计数，命令层据此判「这一项没删成」。
+        let mut skipped = 0i64;
 
         for item in items {
             let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1345,16 +1829,18 @@ pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
             let risk = item.get("risk").and_then(|v| v.as_str()).unwrap_or("");
 
             if risk == "protected" {
+                skipped += 1;
                 results.push(json!({"id": id, "name": name, "status": "skip", "message": "系统保护项"}));
                 continue;
             }
-            // 文件系统项由主进程回收站删除
+            // 文件系统项由主进程回收站删除：这一条由命令层接着办，不算"没删成"
             if source == "filesystem" || source == "winx" {
                 results.push(json!({"id": id, "name": name, "status": "skip", "message": "文件系统项由主进程回收站删除"}));
                 continue;
             }
             // shellnew 禁止整键删除
             if source == "shellnew" {
+                skipped += 1;
                 results.push(json!({"id": id, "name": name, "status": "skip", "message": "新建菜单项请通过启停操作管理，禁止整键删除"}));
                 continue;
             }
@@ -1362,24 +1848,33 @@ pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
             let mut target = item.get("nativeRegPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if target.is_empty() { target = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("").to_string(); }
             if target.is_empty() {
+                skipped += 1;
                 results.push(json!({"id": id, "name": name, "status": "skip", "message": "无效或过宽路径"}));
                 continue;
             }
-            // 路径校验：不能是根键
+            // 路径校验：不能是根键本身（审计 P2-14 顺手清掉一条恒假分支：
+            // `starts_with("hkey_classes_root\\") && !contains("\\")` 永远为假，
+            // 根键的拦截实际由上面那几条 `==` 完成）
             let lower = target.to_lowercase();
-            if lower == "hkey_classes_root" || lower == "hkey_local_machine" || lower == "hkey_current_user"
-                || lower == "hkey_users" || lower == "hkey_current_config"
-                || lower.starts_with("hkey_classes_root\\") && !lower.contains("\\") {
+            if ["hkey_classes_root", "hkey_local_machine", "hkey_current_user", "hkey_users", "hkey_current_config"]
+                .contains(&lower.as_str())
+                || ["hkcr", "hklm", "hkcu", "hku", "hkcc"].contains(&lower.as_str())
+            {
+                skipped += 1;
                 results.push(json!({"id": id, "name": name, "status": "skip", "message": "无效或过宽路径"}));
                 continue;
             }
 
             let (hive, subkey) = match parse_reg_path(&target) {
                 Some(v) => v,
-                None => { results.push(json!({"id": id, "name": name, "status": "skip", "message": "注册表路径格式错误"})); continue; }
+                None => {
+                    skipped += 1;
+                    results.push(json!({"id": id, "name": name, "status": "skip", "message": "注册表路径格式错误"}));
+                    continue;
+                }
             };
 
-            // 检查键是否存在
+            // 检查键是否存在：不存在 = 目标状态已达成，不算 skipped
             let sk = to_wide(&subkey);
             let mut hk = HKEY::default();
             if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
@@ -1389,43 +1884,42 @@ pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
             let _ = RegCloseKey(hk);
 
             // 删除键（需要父键的 DELETE 权限）
-            if let Some(pos) = subkey.rfind('\\') {
-                let parent = &subkey[..pos];
-                let leaf = &subkey[pos+1..];
-                let parent_sk = to_wide(parent);
-                let mut parent_hk = HKEY::default();
-                if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_err() {
-                    failed += 1;
-                    results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开父键（可能需要管理员权限）"}));
-                    continue;
-                }
-                let leaf_nm = to_wide(leaf);
-                let r = RegDeleteTreeW(parent_hk, PCWSTR(leaf_nm.as_ptr()));
-                let _ = RegCloseKey(parent_hk);
-                if r.is_err() {
-                    failed += 1;
-                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除失败（可能需要管理员权限）"}));
-                } else {
-                    // 回读确认
-                    let sk2 = to_wide(&subkey);
-                    let mut hk2 = HKEY::default();
-                    let still_exists = RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok();
-                    if still_exists { let _ = RegCloseKey(hk2); }
-                    if still_exists {
-                        failed += 1;
-                        results.push(json!({"id": id, "name": name, "status": "error", "message": "删除后键仍存在（可能被占用或权限不足）"}));
-                    } else {
-                        success += 1;
-                        results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除"}));
-                    }
-                }
+            // 审计 P1-6：subkey 只有一段时，「父键 + 叶子」拆不出来，旧代码走的是
+            // `RegDeleteTreeW(根键, 整条 subkey)` —— 那等于把 `HKLM\Software` 这类**一级子键**
+            // 整棵删掉，而不是删某个菜单键。真实扫描项最少也有 `Software\Classes\…` 两段，
+            // 所以这不是现在就有的洞，而是上游一旦放宽就一击致命；删除出口按 fail-closed 收深度。
+            let Some(pos) = subkey.rfind('\\') else {
+                skipped += 1;
+                results.push(json!({
+                    "id": id, "name": name, "status": "skip",
+                    "message": "键路径层级过浅（根键下的一级子键），已拒绝删除"
+                }));
+                continue;
+            };
+            let parent = &subkey[..pos];
+            let leaf = &subkey[pos + 1..];
+            let parent_sk = to_wide(parent);
+            let mut parent_hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_err() {
+                failed += 1;
+                results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开父键（可能需要管理员权限）"}));
+                continue;
+            }
+            let leaf_nm = to_wide(leaf);
+            let r = RegDeleteTreeW(parent_hk, PCWSTR(leaf_nm.as_ptr()));
+            let _ = RegCloseKey(parent_hk);
+            if r.is_err() {
+                failed += 1;
+                results.push(json!({"id": id, "name": name, "status": "error", "message": "删除失败（可能需要管理员权限）"}));
             } else {
-                // 直接是根键下的一级键，用 RegDeleteTreeW(hive, leaf)
-                let leaf_nm = to_wide(&subkey);
-                let r = RegDeleteTreeW(hive, PCWSTR(leaf_nm.as_ptr()));
-                if r.is_err() {
+                // 回读确认
+                let sk2 = to_wide(&subkey);
+                let mut hk2 = HKEY::default();
+                let still_exists = RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok();
+                if still_exists { let _ = RegCloseKey(hk2); }
+                if still_exists {
                     failed += 1;
-                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除失败（可能需要管理员权限）"}));
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除后键仍存在（可能被占用或权限不足）"}));
                 } else {
                     success += 1;
                     results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除"}));
@@ -1433,7 +1927,7 @@ pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
             }
         }
 
-        Ok(json!({"success": success, "failed": failed, "results": results}))
+        Ok(json!({"success": success, "failed": failed, "skipped": skipped, "results": results}))
     }
 }
 // ==================== B6 cm_backup：右键菜单备份 ====================
@@ -1596,16 +2090,23 @@ fn reg_file_all_keys(file: &std::path::Path) -> Vec<String> {
     keys
 }
 
+/// 恢复白名单：只放行「真实住在 Classes 下」的键。
+///
+/// 审计 P1-8：这条判据原来**大小写敏感**，而注册表键名是大小写不敏感、**大小写保留**的：
+/// `reg.exe export` 写出的头按键在树里的真实拼法给，HKCU 侧是 `Software\Classes`（首字母大写、
+/// 其余小写），拿 `"HKCU\\SOFTWARE\\Classes\\"` 去 starts_with 必然为假 ⇒ HKCU 的备份**全部**
+/// 被判「不在合法范围内」。HKLM 侧侥幸通过，只是因为那个键历来就被写成全大写 `SOFTWARE`。
+/// 判据先归一到上位再比，两边同口径。
 fn reg_key_allowed_for_restore(key: &str) -> bool {
-    let p = key.trim();
-    // 转换长 hive 为短名
+    let p = key.trim().to_uppercase();
+    // 转换长 hive 为短名（上位形式，所以替换词也写成上位）
     let p = p
         .replace("HKEY_LOCAL_MACHINE", "HKLM")
         .replace("HKEY_CURRENT_USER", "HKCU")
         .replace("HKEY_USERS", "HKU")
         .replace("HKEY_CLASSES_ROOT", "HKCR")
         .replace("HKEY_CURRENT_CONFIG", "HKCC");
-    p.starts_with("HKLM\\SOFTWARE\\Classes\\") || p.starts_with("HKCU\\SOFTWARE\\Classes\\")
+    p.starts_with(r"HKLM\SOFTWARE\CLASSES\") || p.starts_with(r"HKCU\SOFTWARE\CLASSES\")
 }
 
 /// 右键菜单防篡改恢复（对应 cm_restore.ps1，S3）
@@ -1631,7 +2132,17 @@ pub fn cm_restore() -> Result<Value, String> {
     let Some(latest_backup) = backup_dirs.first() else {
         return Ok(json!({"success": false, "message": "未找到备份目录"}));
     };
-    let backup_prefix = latest_backup.to_string_lossy().to_string() + "\\";
+    // 审计 P1-6：备份目录要参与两处闸门（.reg 与文件项的「必须在本次备份目录内」），
+    // 而**被比的那一侧是 `std::fs::canonicalize` 的结果 —— Windows 上它带 `\\?\` verbatim 前缀**
+    // （本仓在 fileclean/diskbench 都为此写过 `strip_verbatim`）。原来拿普通形式的前缀去比，
+    // 判据恒 false：所有 .reg 都被记「不在本次选中的备份目录内」，恢复永远 0 项。
+    // 所以两种形式都留作根，比较时任一命中即算在同一目录内。
+    let backup_plain = latest_backup.to_string_lossy().to_string();
+    let backup_verbatim = std::fs::canonicalize(latest_backup)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| backup_plain.clone());
+    let backup_roots = [backup_plain.as_str(), backup_verbatim.as_str()];
+    let in_backup = |p: &str| backup_roots.iter().any(|r| under_dir(p, r));
 
     // 读 manifest
     let manifest_path = latest_backup.join("manifest.json");
@@ -1674,7 +2185,7 @@ pub fn cm_restore() -> Result<Value, String> {
                 Err(_) => { skipped += 1; skip_reasons.push(format!("{name}（无法解析路径）")); continue; }
             };
             // ① 在备份目录内
-            if !full.starts_with(&backup_prefix) && !full.starts_with(&latest_backup.to_string_lossy().to_string()) {
+            if !in_backup(&full) {
                 skipped += 1;
                 skip_reasons.push(format!("{name}（不在本次选中的备份目录内，已拒绝导入）"));
                 continue;
@@ -1751,9 +2262,19 @@ pub fn cm_restore() -> Result<Value, String> {
             let b = record.get("backup").and_then(|v| v.as_str()).unwrap_or("");
             let s = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
             let b_full = std::fs::canonicalize(b).unwrap_or_else(|_| std::path::PathBuf::from(b)).to_string_lossy().to_string();
-            let ok_backup = b_full.starts_with(&backup_prefix) || b_full.starts_with(&latest_backup.to_string_lossy().to_string());
-            let ok_source = allowed_roots.iter().any(|r| s.starts_with(&format!("{r}\\")));
-            if !ok_backup || !ok_source {
+            // 审计 P1-6：两个条件的 skip 文案原来合并成一条「来源不合法」，而真实拦下的是
+            // 备份目录那条（见上）—— 用户会以为是自己的目录被改了。分开报，各说各的原因。
+            if !in_backup(&b_full) {
+                skipped += 1;
+                skip_reasons.push(format!("文件项（备份副本不在本次选中的备份目录内，已拒绝还原：{b}）"));
+                continue;
+            }
+            // 与 under_dir 同一条口径：NTFS 大小写不敏感，闸门按小写比，
+            // 否则「同一个目录、两种写法」会被判成不合法而拒绝还原。
+            let ok_source = allowed_roots
+                .iter()
+                .any(|r| s.to_lowercase().starts_with(&format!("{}\\", r.to_lowercase())));
+            if !ok_source {
                 skipped += 1;
                 skip_reasons.push(format!("文件项（来源不在发送到/Win+X 合法目录内，已拒绝还原：{s}）"));
                 continue;
@@ -1780,4 +2301,287 @@ pub fn cm_restore() -> Result<Value, String> {
         "skipReasons": skip_reasons,
         "failed": failed,
     }))
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    /// 命令行取 exe：注册表里两种写法都常见，取错等于归属判错
+    #[test]
+    fn exe_from_command_covers_quoted_and_bare_forms() {
+        assert_eq!(
+            exe_from_command(r#""C:\Program Files\WinRAR\WinRAR.exe" "%1""#).as_deref(),
+            Some(r"C:\Program Files\WinRAR\WinRAR.exe")
+        );
+        // 裸路径 + 目录名带空格：要一路拼到整体像路径为止，不能只取第一个 token
+        assert_eq!(
+            exe_from_command(r"C:\Program Files\Git\git-bash.exe --cd-to-home").as_deref(),
+            Some(r"C:\Program Files\Git\git-bash.exe")
+        );
+        // 裸路径后面跟参数：整体已经像路径时必须立刻收口，不能把 " -pw %1" 拼进路径
+        assert_eq!(
+            exe_from_command(r"C:\Windows\System32\bdechangepin.exe -pw %1").as_deref(),
+            Some(r"C:\Windows\System32\bdechangepin.exe")
+        );
+        // 裸名（未识别里的大头）：cmd.exe / powershell.exe 要交出去给解析层
+        assert_eq!(
+            exe_from_command(r#"cmd.exe /s /k pushd "%V""#).as_deref(),
+            Some("cmd.exe")
+        );
+        // 引号套在裸名上（注册表就这么写的）：必须和上面等价，早先这里直接判 None
+        assert_eq!(
+            exe_from_command(r#""cmd.exe" /s /k pushd "%V""#).as_deref(),
+            Some("cmd.exe")
+        );
+        assert_eq!(
+            exe_from_command(r#""powershell.exe" -noexit -WorkingDirectory "%V""#).as_deref(),
+            Some("powershell.exe")
+        );
+        assert_eq!(
+            exe_from_command(r#"powershell.exe -noexit -WorkingDirectory "%V""#).as_deref(),
+            Some("powershell.exe")
+        );
+        // 连扩展名都不写的（`notepad %1`）也认，由解析层补 .exe
+        assert_eq!(exe_from_command("notepad %1").as_deref(), Some("notepad"));
+        // 不是 exe 的开头必须 None：`"%1" %*` 这种系统 verb 压根没有可执行文件
+        assert_eq!(exe_from_command(r#""%1" %*"#), None);
+        assert_eq!(exe_from_command("-flag.exe"), None);
+        assert_eq!(exe_from_command(""), None);
+        assert_eq!(exe_from_command("   "), None);
+    }
+
+    /// 安装目录名：Program Files 系锚点优先，没有锚点才退父目录，系统目录不退
+    #[test]
+    fn install_dir_name_prefers_the_product_segment() {
+        assert_eq!(
+            install_dir_name(r"C:\Program Files\Tencent\WeChat\WeChatExt.dll").as_deref(),
+            Some("Tencent")
+        );
+        assert_eq!(
+            install_dir_name(r"C:\Program Files (x86)\WinRAR\ContextMenu.dll").as_deref(),
+            Some("WinRAR")
+        );
+        // 文件直接躺在 Program Files 下：那一层不是「产品目录」，退到父目录名会得出
+        // "Program Files" 这种没意义的组名 ⇒ 宁可不分组
+        assert_eq!(install_dir_name(r"C:\Program Files\x.dll"), None);
+        // 没有 Program Files 锚点 ⇒ 退一层父目录，但系统目录不退（会被并进「系统组件」误判）
+        assert_eq!(install_dir_name(r"D:\Tools\Foo\bar.dll").as_deref(), Some("Foo"));
+        assert_eq!(install_dir_name(r"C:\Windows\System32\shell32.dll"), None);
+        // 商店包的容器目录不是产品名
+        assert_eq!(install_dir_name(r"C:\Program Files\WindowsApps\x.dll"), None);
+        assert_eq!(install_dir_name(""), None);
+    }
+
+    /// 归属优先级与「不猜」边界：判据顺序就是这条用例，改顺序必须连带改这里
+    #[test]
+    fn owner_of_priority_and_refusal_to_guess() {
+        let sys = r"C:\WINDOWS";
+        // 1) 系统组件要两条同时成立：文件在系统根下 **且** 厂商指向微软
+        let ms = PeInfo { product: "Microsoft Windows".into(), company: "Microsoft Corporation".into(), description: String::new() };
+        let (label, src) = owner_of(&ms, "", r"C:\Windows\System32\shell32.dll", sys);
+        assert_eq!((label.as_str(), src.as_str()), ("Windows 系统组件", "system"));
+        // 第三方 dll 恰好躺在系统目录下：绝不能并进「Windows 系统组件」
+        let third = PeInfo { product: "某播放器壳".into(), company: "SomeVendor Inc.".into(), description: String::new() };
+        let (label, src) = owner_of(&third, "", r"C:\Windows\Temp\v.dll", sys);
+        assert_eq!((label.as_str(), src.as_str()), ("某播放器壳", "pe-product"));
+        // 微软厂商但文件不在系统根下（Office 之类）⇒ 按产品名分组，不算系统组件
+        let (label, src) = owner_of(&ms, "", r"C:\Program Files\Microsoft Office\root\OIS.dll", sys);
+        assert_eq!((label.as_str(), src.as_str()), ("Microsoft Windows", "pe-product"));
+        // 2) ProductName 缺失时用 FileDescription（国产壳扩展常只有这一段）
+        let desc_only = PeInfo { description: "WinRAR Shell Extension".into(), ..Default::default() };
+        let (label, src) = owner_of(&desc_only, "", r"C:\Program Files\WinRAR\c.dll", sys);
+        assert_eq!((label.as_str(), src.as_str()), ("WinRAR Shell Extension", "pe-desc"));
+        // 3) PE 全空 ⇒ 退注册表厂商；再空 ⇒ 退安装目录名
+        let (label, src) = owner_of(&PeInfo::default(), "EagleGet", r"C:\Program Files\EagleGet\a.dll", sys);
+        assert_eq!((label.as_str(), src.as_str()), ("EagleGet", "registry"));
+        let (label, src) = owner_of(&PeInfo::default(), "", r"C:\Program Files\Bandizip\bz.dll", sys);
+        assert_eq!((label.as_str(), src.as_str()), ("Bandizip", "dir"));
+        // 4) 什么都不知道 ⇒ 空标签，让前端归进「未识别」，不硬造一个组名
+        let (label, src) = owner_of(&PeInfo::default(), "", "", sys);
+        assert!(label.is_empty() && src.is_empty(), "拿不准时必须不分组，实际得到 {label:?}/{src:?}");
+    }
+
+    /// 真读一个系统 DLL：纯函数测不到 Win32 那条链（Translation 对拼键名最容易错）。
+    /// 缺文件时按 §2 显式跳过并说明，不 expect 炸。
+    #[test]
+    fn pe_info_of_reads_a_real_system_file() {
+        let root = std::env::var("SystemRoot").unwrap_or_default();
+        let path = format!(r"{root}\System32\shell32.dll");
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("skip：本机没有 {path}，PE 读取这条未校验");
+            return;
+        }
+        let info = unsafe { pe_info_of(&path) };
+        assert!(
+            !info.product.is_empty() || !info.description.is_empty(),
+            "shell32.dll 必然带版本资源，三段全空说明 VerQueryValue 的键名拼错了（Translation 对没现读？）"
+        );
+        let (label, src) = owner_of(&info, "", &path, &root);
+        assert_eq!(src, "system", "系统 DLL 的归属必须是「Windows 系统组件」，实际判成 {src} / {label}");
+        assert_eq!(label, "Windows 系统组件");
+    }
+
+    /// 「第三方 / 系统原生」判据（真机审计 P1-9 换来的三条）：
+    /// 看 PE 厂商，且不被 DriverStore/WinSxS 的存放位置骗到。
+    #[test]
+    fn third_party_verdict_uses_pe_company_and_not_the_windows_prefix() {
+        // PE 厂商是微软 → 系统原生。真机原状：「旧版 Windows Media Player」被标成第三方
+        assert!(!is_third_party("旧版 Windows Media Player", "Microsoft Corporation", "openwith", ""));
+        // DriverStore 是第三方驱动包的落点，不能因「在 C:\Windows 下」就压成绿色
+        assert!(is_third_party("NvAppShExt Class", "", "shellex",
+            r"C:\Windows\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_d95662815b9b13a8\nv3dappshext.dll"));
+        assert!(is_third_party("某组件", "", "shellex", r"C:\Windows\WinSxS\amd64_x\some.dll"));
+        // 而真正躺在 System32 根下的系统文件仍算系统原生（这条不许被上面两条带坏）
+        assert!(!is_third_party("库项", "", "shellex", r"C:\Windows\System32\shell32.dll"));
+        // 已知系统动词名一律不标第三方
+        assert!(!is_third_party("Open", "", "shell", ""));
+        // 普通第三方
+        assert!(is_third_party("WinRAR 压缩", "win.rar GmbH", "shellex", r"C:\Program Files\WinRAR\rarext.dll"));
+    }
+
+    /// 真机只读：跑一次完整扫描，打印「按软件分组」的分布。    ///
+    /// 为什么要这条：分组质量只能拿真数据判 —— 未识别占比过高就说明这套判据在白做，
+    /// 而这在纯函数用例里看不出来。`#[ignore]` 进发布前门禁组（它读全机注册表，慢且环境相关）。
+    #[test]
+    #[ignore = "真机只读扫描：读全机 shell 键与 PE，秒级到十几秒，发布前人工跑"]
+    fn real_scan_owner_distribution() {
+        // 裸名解析（真机才有这些文件）：`cmd.exe` 必须经 App Paths / System32 落到系统目录下，
+        // 而不存在的名字必须返回 None —— 猜一个同路径出来会把归属算错
+        let cmd = resolve_exe_for_owner("cmd.exe");
+        assert!(
+            cmd.as_deref().is_some_and(|p| p.to_ascii_lowercase().ends_with("cmd.exe")),
+            "cmd.exe 应能解析到真实路径，实际 {cmd:?}"
+        );
+        assert_eq!(resolve_exe_for_owner("no-such-tool-trim-test.exe"), None, "不存在的裸名不许猜路径");
+        // 带目录但不存在（卸载遗留）：不去 App Paths 碰运气
+        assert_eq!(resolve_exe_for_owner(r"C:\gone\x.exe"), None);
+
+        let items = cm_scan().expect("扫描失败");
+        let mut by_src: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut groups: std::collections::BTreeMap<String, usize> = Default::default();
+        for it in &items {
+            let owner = it["owner"].as_str().unwrap_or("").to_string();
+            let src = it["ownerSource"].as_str().unwrap_or("").to_string();
+            *by_src.entry(if src.is_empty() { "(未识别)".into() } else { src }).or_default() += 1;
+            *groups.entry(if owner.is_empty() { "(未识别)".into() } else { owner }).or_default() += 1;
+        }
+        println!("条目总数 {}，分组数 {}", items.len(), groups.len());
+        println!("按判据来源：{by_src:?}");
+        for (k, v) in groups.iter().rev().take(25) {
+            println!("  {v:>3}  {k}");
+        }
+        let unknown = *by_src.get("(未识别)").unwrap_or(&0);
+        // 未识别的都要能看见是为什么未识别（判据缺哪一级，看这条就知道）
+        for it in items.iter().filter(|i| i["owner"].as_str().unwrap_or("").is_empty()).take(60) {
+            let cmd = it["command"].as_str().unwrap_or("");
+            println!(
+                "  未识别: {} | {} | {} | cmd={:?} → exe={:?} → 解析={:?} | file={:?}",
+                it["name"].as_str().unwrap_or(""),
+                it["category"].as_str().unwrap_or(""),
+                it["source"].as_str().unwrap_or(""),
+                cmd,
+                exe_from_command(cmd),
+                exe_from_command(cmd).and_then(|r| resolve_exe_for_owner(&r)),
+                it["filePath"].as_str().unwrap_or(""),
+            );
+        }
+        assert!(
+            items.len() < 2 || unknown * 2 < items.len(),
+            "未识别占比过半（{unknown}/{}），这套判据不足以支撑按软件分组，得回炉",
+            items.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod path_gate_tests {
+    use super::*;
+
+    /// 恢复闸门的正向判据：命中目录内的文件，且不区分大小写。
+    #[test]
+    fn under_dir_accepts_inside_and_ignores_case() {
+        assert!(under_dir(r"C:\D\右键菜单备份_1\registry_2_x.reg", r"C:\D\右键菜单备份_1"));
+        assert!(under_dir(r"C:\D\右键菜单备份_1\files\a.lnk", r"c:\d\右键菜单备份_1\"));
+    }
+
+    /// 反向判据：兄弟目录不能当前缀（少补一个分隔符就会放行 `备份_12` 的文件）。
+    #[test]
+    fn under_dir_rejects_sibling_prefix_and_self() {
+        assert!(!under_dir(r"C:\D\右键菜单备份_12\registry_2_x.reg", r"C:\D\右键菜单备份_1"));
+        assert!(!under_dir(r"C:\Other\a.reg", r"C:\D\右键菜单备份_1"));
+        // 目录自身不算「在里面」
+        assert!(!under_dir(r"C:\D\右键菜单备份_1", r"C:\D\右键菜单备份_1"));
+        // 空前缀会把任何路径都放行 —— 闸门必须拒绝
+        assert!(!under_dir(r"C:\Windows\regedit.exe", ""));
+    }
+
+    /// 真机判据：`std::fs::canonicalize` 到底给不给 `\\?\` 前缀。
+    /// 这条决定了「只拿普通形式路径去比」是不是恒假 —— 在 Windows 上必然成立。
+    /// 样本自己造（临时目录里的一个文件），不依赖本机既有路径。
+    #[test]
+    fn canonicalize_returns_verbatim_prefix() {
+        let dir = std::env::temp_dir().join(format!("trim-cm-verbatim-{}", std::process::id()));
+        let file = dir.join("a.reg");
+        std::fs::create_dir_all(&dir).expect("临时目录建不出来（环境问题，不是判据问题）");
+        std::fs::write(&file, "x").expect("临时文件写不进去（同上）");
+        let plain_dir = dir.to_string_lossy().to_string();
+        let canon_file = std::fs::canonicalize(&file).expect("刚写的文件必然可解析").to_string_lossy().to_string();
+        let canon_dir = std::fs::canonicalize(&dir).expect("刚建的目录必然可解析").to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+        if !cfg!(windows) { return; }
+        assert!(canon_file.starts_with(r"\\?\"), "Windows 上 canonicalize 应给 verbatim 形式，实得 {canon_file}");
+        assert!(
+            !under_dir(&canon_file, &plain_dir),
+            "verbatim 与普通形式必须判成两个（这正是恢复闸门曾经的失效原因：恒 false）"
+        );
+        assert!(under_dir(&canon_file, &canon_dir), "两侧同口径（都 canonicalize）时必须命中");
+    }
+
+    /// 重命名类切换回写的新路径：换叶子必须保留原来的根，且只换最后一段。
+    #[test]
+    fn swap_last_segment_keeps_root() {
+        assert_eq!(
+            swap_last_segment(r"HKEY_CURRENT_USER\Software\Classes\*\shellex\ContextMenuHandlers\-Foo", "Foo"),
+            r"HKEY_CURRENT_USER\Software\Classes\*\shellex\ContextMenuHandlers\Foo"
+        );
+        // 二分到「非 HKCU 就是 HKLM」会把 HKCR/HKU 写回一个不存在的坐标（真机审计 P2-16）
+        assert_eq!(
+            swap_last_segment(r"HKEY_USERS\.DEFAULT\Software\Classes\-A", "A"),
+            r"HKEY_USERS\.DEFAULT\Software\Classes\A"
+        );
+        assert_eq!(swap_last_segment("NoBackslashHere", "Leaf"), "Leaf");
+    }
+
+    /// 恢复白名单：真实 .reg 头的拼法。HKCU 侧键名历来是 `Software`（混合大小写），
+    /// 判据若大小写敏感就会把整批 HKCU 备份拒掉（审计 P1-8 的真实形状）。
+    /// 入参形状 = `reg_file_all_keys` 剥掉方括号后的键路径。
+    #[test]
+    fn restore_whitelist_accepts_real_key_casing() {
+        let hits = [
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\*\shellex\ContextMenuHandlers\WinRAR",
+            r"HKEY_CURRENT_USER\Software\Classes\.rar\ShellEx",
+            r"HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\cmd",
+            r"HKLM\Software\classes\WOW6432Node\CLSID\{000214FF-0000-0000-C000-000000000046}\InprocServer32",
+        ];
+        for k in hits {
+            assert!(reg_key_allowed_for_restore(k), "合法备份头被判拒：{k}");
+        }
+    }
+
+    /// 反向：Classes 之外的键、以及 HKU/HKCR 这些合并视图一律不许导入。
+    #[test]
+    fn restore_whitelist_rejects_out_of_scope_keys() {
+        let misses = [
+            r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons",
+            r"HKEY_USERS\.DEFAULT\Software\Classes\Foo",
+            r"HKEY_CLASSES_ROOT\*\shellex\ContextMenuHandlers\X",
+            r"HKCR\*\shellex\ContextMenuHandlers\X",
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes",
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\ClassesX\Foo",
+        ];
+        for k in misses {
+            assert!(!reg_key_allowed_for_restore(k), "越界备份头被判放行：{k}");
+        }
+    }
 }

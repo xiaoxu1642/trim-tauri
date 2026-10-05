@@ -844,25 +844,9 @@
           </div>
         </div>
 
-        <!-- 右键菜单分类分段栏（原侧边栏分类树收拢于此，位于筛选标签上方） -->
-        <div class="filter-tabs ctx-cats filter-tabs--scroll" id="ctxCategoryNav" role="tablist" aria-label="右键菜单分类">
-          <button class="filter-tab" data-category="全部">全部</button>
-          <button class="filter-tab active" data-category="文件">文件</button>
-          <button class="filter-tab" data-category="文件夹">文件夹</button>
-          <button class="filter-tab" data-category="目录">目录</button>
-          <button class="filter-tab" data-category="目录背景">目录背景</button>
-          <button class="filter-tab" data-category="桌面背景">桌面背景</button>
-          <button class="filter-tab" data-category="磁盘分区">磁盘分区</button>
-          <button class="filter-tab" data-category="所有对象">所有对象</button>
-          <button class="filter-tab" data-category="此电脑">此电脑</button>
-          <button class="filter-tab" data-category="回收站">回收站</button>
-          <button class="filter-tab" data-category="库">库</button>
-          <button class="filter-tab" data-category="新建菜单">新建菜单</button>
-          <button class="filter-tab" data-category="发送到">发送到</button>
-          <button class="filter-tab" data-category="打开方式">打开方式</button>
-          <button class="filter-tab" data-category="Win+X">Win+X</button>
-        </div>
-
+        <!-- 2026-10-05 用户裁定：分类分段栏整条删除。看板改为**按软件分组**
+             （一个软件下有哪些位置的菜单项），位置降级成行上的小标签，
+             所以不再需要"先选一个位置再看项"这一层导航。剩下的只有状态筛选。 -->
         <!-- 筛选标签 -->
         <div class="filter-tabs" id="contextFilter">
           <button class="filter-tab active" data-filter="all">全部</button>
@@ -1072,6 +1056,7 @@
           <button class="filter-tab" data-filter="folder">启动文件夹</button>
           <button class="filter-tab" data-filter="task">计划任务</button>
           <button class="filter-tab" data-filter="disabled">已禁用</button>
+          <button class="filter-tab" data-filter="missing">目标缺失</button>
           <span class="startup-filter-ops">
             <input type="checkbox" id="startupSelectAll" class="startup-check">
             <label for="startupSelectAll" class="startup-check-label">全选</label>

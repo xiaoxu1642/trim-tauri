@@ -70,6 +70,12 @@ const EXEMPTS = new Map([
   // app_data_dir() 整棵登记为 subtree ⇒ is_path_protected 恒拒，功能 100% 不可用。
   // 闸门收口为四件套（见命令体注释），故从 MUST_PROTECT 挪入豁免并写明依据：
   ['appearance_bg_delete', '仅删 backgrounds 直接子项：父目录归属校验 + 扩展名白名单 + is_reparse 拒 + 回收站 _os；文件面 protect 对自有数据目录恒拒无判定意义'],
+  // S3（2026-10-05）更新完成标记：路径是 `paths::join_data("update-applied.json")` ——
+  // 一个 Trim 自己写的单文件标记名，既不是用户内容也不接受任何外部输入（命令体里没有
+  // 路径参数），protect 对它恒拒（app_data_dir 整棵是 subtree）反而会让功能 100% 不可用，
+  // 所以按 realtime_report_delete 那条例外姿势登记，不套一层无意义的闸门。
+  ['updater_install', '安装失败时清掉 Trim 自写的 update-applied.json 标记（文件名常量，无外部输入）；protect 对自有数据目录恒拒无判定意义'],
+  ['updater_completion', '读后即删同一份 update-applied.json 标记（防「更新已完成」提示反复弹）；文件名常量，无外部输入'],
   // v2-L4P-27（B-5）：fonts_import 旧副本删除补齐归属校验后的口径说明由代码兑现；
   // 豁免理由不变（只删自有副本目录内目标）。
 ]);

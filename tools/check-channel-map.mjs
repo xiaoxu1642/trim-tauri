@@ -81,6 +81,7 @@ const RETIRED = {
  * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
  */
 const TAURI_ADDED = {
+  'updater:completion': 'S3（2026-10-05）：新版本实例首领取一次「更新已完成」标记（读后即删，主窗档）。上游 Electron 的 ready-to-install 提示由主进程弹，没有渲染层查询接口',
   'uninstall:modify': 'P1-D6（2026-10-01）：修改/修复入口，执行 ModifyPath（主窗档）',
   'uninstall:pending-add': 'P1-B3（2026-10-01）：回收站失败项登记重启后删（主窗档）',
   'uninstall:pending-list': 'P1-B3（2026-10-01）：重启后删待删清单（主窗档，只读）',

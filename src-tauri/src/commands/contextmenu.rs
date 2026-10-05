@@ -67,7 +67,11 @@ fn cache_file() -> std::path::PathBuf {
     paths::scan_cache_file("contextmenu-scan.json")
 }
 
-/// 读持久缓存；CM-9：所有项必须带 nativeRegPath 字符串才可用
+/// 读持久缓存；CM-9：所有项必须带 nativeRegPath 字符串才可用。
+///
+/// 同一条判据再加 `ownerSource`（2026-10-05 按软件分组）：升级前留下的缓存里没有这个键，
+/// 直接拿来用会让整页 172 项全落进「未识别」组 —— 那不是"缓存能用"，那是把新功能显示成坏了。
+/// 判据缺失就当没有缓存、走一次真实扫描，代价是首次进页面慢几秒，比静默错分组划算。
 fn load_cache() -> Option<Vec<Value>> {
     let v = crate::security::read_json_or_default(&cache_file());
     let obj = v.as_object()?;
@@ -76,10 +80,10 @@ fn load_cache() -> Option<Vec<Value>> {
     if arr.is_empty() {
         return None;
     }
-    if arr
-        .iter()
-        .all(|it| it.get("nativeRegPath").and_then(|v| v.as_str()).is_some())
-    {
+    if arr.iter().all(|it| {
+        it.get("nativeRegPath").and_then(|v| v.as_str()).is_some()
+            && it.get("ownerSource").and_then(|v| v.as_str()).is_some()
+    }) {
         Some(arr.clone())
     } else {
         None
@@ -98,28 +102,55 @@ fn save_cache(items: &[Value]) {
 
 /// 归一化 id：缺 id 时用 regPath|target（R7：ShellNew 共享 regPath 需复合键）
 fn normalize_ids(items: Vec<Value>) -> Vec<Value> {
+    // 快照是 `id -> 项` 的 Map：**同 id 的两条里后一条会静默覆盖前一条**，
+    // 于是界面上两行都能点，而 toggle/remove 拿到的永远是同一个坐标（写错项）。
+    // 扫描端当前不产重复 id，但去重键（category|name|clsid|enabled）比 id 的构成更宽，
+    // 这个覆盖只隔着「上游改一次去重规则」的距离 —— 唯一性在这里就地上锁，不指望上游。
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     items
         .into_iter()
         .enumerate()
         .map(|(index, mut it)| {
             let has_id = it.get("id").and_then(|v| v.as_str()).is_some();
-            if !has_id {
+            let base = if has_id {
+                it.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string()
+            } else {
                 let target = it.get("target").and_then(|v| v.as_str()).unwrap_or("");
                 let reg = it.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
-                let id = if !target.is_empty() && !reg.is_empty() {
+                if !target.is_empty() && !reg.is_empty() {
                     format!("{reg}|{target}")
                 } else if !reg.is_empty() {
                     reg.to_string()
                 } else {
                     index.to_string()
-                };
-                if let Some(obj) = it.as_object_mut() {
-                    obj.insert("id".into(), json!(id));
                 }
+            };
+            // 审计 P2-12：id 就是整条注册表路径，中文键名 3 字节/字，深路径能超过
+            // `snapshot_by_id` 的 160 字节上限 —— 那种项会被快照悄悄丢掉，于是界面看得到、
+            // 点得动，但 toggle/remove/backup 恒被拒「不是最近一次扫描结果」。
+            // 超长就换成稳定哈希（同一轮扫描内 id 与快照键仍然一致，且不可能撞车：
+            // 哈希前缀带序号）。
+            let mut id = if base.len() > 160 { format!("id{index}-{:x}", fnv1a(base.as_bytes())) } else { base };
+            if !used.insert(id.clone()) {
+                id = format!("{id}#{index}");
+                used.insert(id.clone());
+            }
+            if let Some(obj) = it.as_object_mut() {
+                obj.insert("id".into(), json!(id));
             }
             it
         })
         .collect()
+}
+
+/// FNV-1a 64 位：只用来给超长 id 生成稳定短键，不涉安全（不是签名、不是防篡改）。
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
 }
 
 /// 校验调用方传入的 items 全部命中快照，返回**快照副本**（拒绝调用方篡改副作用参数）。
@@ -130,23 +161,13 @@ fn validate_snapshot_items(items: &[Value], snap: &HashMap<String, Value>) -> Op
     let mut result = Vec::with_capacity(items.len());
     for it in items {
         let id = it.get("id").and_then(|v| v.as_str())?;
-        // 只认可快照里的 id；path 字段若双方都有也须一致（防替换路径）
         let known = snap.get(id)?;
-        if let (Some(a), Some(b)) = (
-            it.get("path").and_then(|v| v.as_str()),
-            known.get("path").and_then(|v| v.as_str()),
-        ) {
-            if path_key(a) != path_key(b) {
-                return None;
-            }
-        }
+        // 真正的防篡改是「返回快照副本」：调用方带的 regPath/target/source 等一律不被采信。
+        // 审计 P2-13：原先这里比的是 `path` 字段，而扫描产出根本没有 `path` ⇒ 那段判断恒不生效，
+        // 注释却写着"防替换路径"。删掉死分支，别留一条看起来在防其实没防的判据。
         result.push(known.clone());
     }
     Some(result)
-}
-
-fn path_key(p: &str) -> String {
-    p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 /// CM-3/CM-9：写操作是否需要管理员（看真实 hive 路径 + machine 屏蔽表）
@@ -309,6 +330,17 @@ pub async fn contextmenu_backup<R: Runtime>(
             "message": format!("有 {failed} 项未能生成有效备份（无法归位到真实注册表 hive），已停止删除")
         });
     }
+    // 审计 P1-5：`manifestOk` 由 cm_backup 产出却没人看。恢复侧（cm_restore）对
+    // 「没有 manifest 的备份目录」一律拒导，所以 manifest 写失败时这份备份就是废纸；
+    // 而删除流程的第一步正是「备份成功才允许删」——不判它就会出现
+    // 「删了，且声称备份可恢复，实际恢复不了」。备份失败即整批不许删（fail-closed）。
+    if data.get("manifestOk").and_then(|v| v.as_bool()) != Some(true) {
+        log::write_log("error", "右键菜单备份的 manifest.json 写入失败，本次不可用于恢复");
+        return json!({
+            "success": false,
+            "message": "备份清单（manifest.json）写入失败，这份备份无法用于恢复，已停止删除"
+        });
+    }
     json!({ "success": true, "data": data })
 }
 
@@ -386,7 +418,7 @@ fn push_result(data: &mut Value, mut row: Value, started: &std::time::Instant) {
             let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
             // E4：每项耗时。计时从进入循环体开始，覆盖后面的保护闸与回收站调用。
-            // ⚠️ 只加字段，`success` / `failed` 两个计数**不看**它（见 set_result 注释）。
+            // ⚠️ 只加字段，`success` / `failed` 两个计数**不看**它（见 push_result 注释）。
             let t_item = std::time::Instant::now();
             if p.is_empty() {
                 data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
@@ -464,7 +496,25 @@ fn push_result(data: &mut Value, mut row: Value, started: &std::time::Instant) {
     }
 
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
-    json!({ "success": failed == 0, "data": data })
+    // 审计 P1-4：以前只看 `failed == 0`，而「系统保护项 / 新建菜单禁止整键删除」这类
+    // 走的是 `skip` 分支 —— 于是一项都没删成也回 success:true，前端弹「已备份并删除」
+    // 并把行从界面上抹掉。skip 与 fail 一样都是"没删成"，必须让整次操作判负并带上原因。
+    let skipped = data.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
+    if failed > 0 || skipped > 0 {
+        let why = data
+            .get("results")
+            .and_then(|v| v.as_array())
+            .and_then(|a| {
+                a.iter()
+                    .find(|r| r.get("status").and_then(|s| s.as_str()) != Some("ok"))
+                    .and_then(|r| r.get("message").and_then(|m| m.as_str()))
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "部分项未删除".to_string());
+        log::write_log("warn", &format!("右键菜单删除未全部生效: failed={failed} skipped={skipped} ({why})"));
+        return json!({ "success": false, "data": data, "message": why });
+    }
+    json!({ "success": true, "data": data })
 }
 
 /// contextmenu:toggle —— 可逆启停（渲染层只表达目标 enabled，其余取快照）
@@ -627,6 +677,10 @@ pub async fn contextmenu_restore<R: Runtime>(window: WebviewWindow<R>) -> Value 
     let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false) && imported > 0;
     let skipped = data.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
     if !success && skipped > 0 && imported == 0 {
+        // 审计 P2-17：这句原来把原因写死成「备份头不是真实注册表分支」，而 skipReasons 里
+        // 实际有五种（不在本次备份目录、未在 manifest 登记、备份头、键路径不合法、无法解析路径），
+        // 上面刚修的那条就是「不在备份目录内」——把一种猜测当结论报给用户，等于掩盖真因。
+        // 原因一律由 native 逐条产出，这里只报数量。
         let reasons = data
             .get("skipReasons")
             .and_then(|v| v.as_array())
@@ -641,7 +695,7 @@ pub async fn contextmenu_restore<R: Runtime>(window: WebviewWindow<R>) -> Value 
         return json!({
             "success": false, "data": data,
             "message": format!(
-                "{} 个备份被拒绝导入（备份头不是真实注册表分支，多为旧版本产生）{}",
+                "{} 个备份被拒绝导入{}",
                 skipped,
                 if reasons.is_empty() { String::new() } else { format!("：{reasons}") }
             )
@@ -729,8 +783,8 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
     reg_path: Option<String>,
 ) -> Value {
     // 审查 v2-F6：本命令体内会写 HKCU（`Regedit\LastKey`）并在普通拉起失败时以 `runas`
-    // 弹 UAC，具备提权能力；唯一调用方在主窗（`contextmenu.js:408`）。挂 `guard_readonly`
-    // 等于让 4 个子窗都能触发它 —— 按「谁真的需要调它」判档，这里必须收回主窗。
+    // 弹 UAC，具备提权能力；唯一调用方在主窗（`contextmenu.js` 详情弹窗的 regJump 分支）。
+    // 挂 `guard_readonly` 等于让所有子窗都能触发它 —— 按「谁真的需要调它」判档，这里必须收回主窗。
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
@@ -894,7 +948,7 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
             // 审查 v2-F16：值名先落到局部变量再取裸指针。原先写
             // `PCWSTR(to_wide16("LastKey").as_ptr())` —— 临时值当前能活到语句结束因而不算 UB，
             // 但只要有人把这条语句拆开、或在中间插入 `.await`/提前返回，指针立刻悬垂，
-            // 而 FFI 路径上不会有任何编译错误。同函数 `:840`/`:876` 都已用局部变量写法。
+            // 而 FFI 路径上不会有任何编译错误。同函数里其余几处 FFI 取值都已用局部变量写法。
             let name = to_wide16("LastKey");
             let r = RegSetValueExW(
                 hk,
@@ -1058,5 +1112,29 @@ mod tests {
         let ok = validate_snapshot_items(&[json!({ "id": "a", "regPath": "HKCU\\EVIL" })], &snap).unwrap();
         // 副作用参数取快照值，调用方篡改不生效
         assert_eq!(ok[0].get("regPath").and_then(|v| v.as_str()), Some("HKCU\\X"));
+    }
+
+    /// 快照按 id 存，重复 id 会互相覆盖 ⇒ 每轮扫描的 id 必须两两不同。
+    #[test]
+    fn normalize_ids_is_unique_per_round() {
+        let long = format!("HKCU\\Software\\Classes\\{}\\shell\\open", "深".repeat(60));
+        let out = normalize_ids(vec![
+            json!({ "regPath": "HKCU\\A", "target": "t1" }),
+            json!({ "regPath": "HKCU\\A", "target": "t1" }), // 与上一条同坐标不同名（上游去重放宽的形状）
+            json!({ "regPath": "HKCU\\A", "target": "t2" }),
+            json!({ "regPath": long.clone(), "target": "" }),
+            json!({ "regPath": long, "target": "" }),
+            json!({}),
+        ]);
+        let ids: Vec<&str> = out.iter().filter_map(|v| v.get("id").and_then(|x| x.as_str())).collect();
+        assert_eq!(ids.len(), 6, "每条都必须拿到 id：{ids:?}");
+        let uniq: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(uniq.len(), 6, "id 必须唯一，实得 {ids:?}");
+        // 超长路径要换成短哈希，否则会被 snapshot_by_id 的 160 字节上限丢掉
+        for id in &ids {
+            assert!(id.len() <= 160, "id 超过快照上限（{id}）");
+        }
+        // 快照必须真收进 6 条（丢件的表现就是这里少一条）
+        assert_eq!(snapshot_by_id(&out).len(), 6);
     }
 }

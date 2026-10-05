@@ -1,4 +1,4 @@
-// quickcmds.js - 快捷指令页（63 条系统快捷入口 / 8 分类）
+// quickcmds.js - 快捷指令页（64 条系统快捷入口 / 8 分类）
 // 数据：quickcmds-data.js（来自 old\快捷指令 解包分析）
 // 执行：通过 IPC quickcmds:run 由主进程按白名单 spawn，渲染层不接触命令原文
 (function () {
