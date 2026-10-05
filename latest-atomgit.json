@@ -1,15 +1,15 @@
 {
-  "version": "0.6.7",
-  "notes": "## 版本 0.6.7（2026-10-06）\n\n> 本版做四件事：残留规则库扩容、卸载前可选还原点、Inno 静默串升级、残留扫描窗界面精简。\n\n① **残留规则库大幅扩容** —— 「已知程序残留规则库」从 12 条程序 / 41 条落点扩到 **78 条程序 / 209 条落点**，并新增两类可表达的残留：**注册表值**（删单个值，删除前仍先整键导出 .reg 备份）与**快捷方式**（开始菜单 / 桌面遗留的 .lnk，走回收站）。系统容器的硬否决对新增的注册表值类型同样生效——否决按整条键路径判、不按值名，Run 等系统命名空间下的值依旧进不了候选。落点来源是公开安装惯例模板加本机逐项实测（存在才收录）；SDK 与运行库类候选刻意不收（它们的落点是语言生态共享目录，登记成单程序残留会误报）。\n\n② **卸载前可选创建系统还原点** —— 软件卸载页新增「卸载前建还原点」开关，**默认关**。打开后每次卸载前先创建一个系统还原点（可能需要数十秒，有独立进度提示）；创建失败只提示原因、不拦卸载——还原点是保护，不是前置条件。系统还原未启用时开关无效。\n\n③ **Inno 安装器的静默卸载更彻底** —— 厂商自己在卸载串里写了 `/SILENT`（仍会弹卸载器确认框）的，Trim 现在自动把它升级为全静默（不弹框、抑制自带提示、不自动重启）；写法不合规或非 Inno 安装器保持厂商原文执行，升级后执行失败仍自动回落原厂卸载界面。\n\n④ **残留扫描窗界面精简** —— 各组标题只留主词（括号里的来源说明删除）；「已保护项」改为**默认折叠**的手风琴（此前数百行常驻展开，把可清理区挤出视野），搜索命中时自动展开、手动展开过则搜索清空后不收回。保护判定与删除链路本身没有任何变化。\n\n⑤ **规则库防收缩棘轮（内部加固）** —— 落点条目数棘轮基线随扩容抬到 209，并把扩容产线（只读探测生成器）与新增类型的契约用例（49 条正反例，Node 门禁与运行期校验双侧对拍）落进验收清单；规则更新链的可信性对用户无感。",
-  "pub_date": "2026-10-05T19:33:01Z",
-  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.7/attach_files/Trim_0.6.7_x64-setup.exe/download",
-  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEJZeFlQWnZJcnA5RGo4ek53dGFNVTRZMHZicXYxU0xuTFBHQUdzNEY0KytQdytFUzRRNFdnbGt3M1NLYXNxTmZIWFIrdEpPQ2s4YmxkY3E5V2ZUQndFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjI4NzU3CWZpbGU6VHJpbV8wLjYuN194NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjcKbElFUTBBdThoc3VTTGZlTGY5b21CemNSVWhoWkZnTE10L2tuZEtxSitza0NsWHFxTk1JVk9waWhMeitTRjlaM0RLVU9ObFdPQUxlUDlXb0ZvM244Q2c9PQo=",
-  "sha256": "a1cf1ebcafe0f56d6d3e19f67928d006e0e70a77a0b989f7a7dcd23719cc9b79",
+  "version": "0.6.8",
+  "notes": "## 版本 0.6.8（2026-10-06）\n\n> 本版做四件事：两处退役（按用户裁定收缩产品面）、启动项扫描提速、若干修复。\n\n① **规则库在线更新全链路退役** —— 磁盘清理的「更新规则库」按钮与软件卸载的「更新残留规则」按钮删除，对应的检查、下载、落盘、版本徽标整链摘除；**规则只随程序包体更新而更新**，线上拿到的新规则永远是新版本安装包的一部分。本地的规则装载、签名校验与防回滚护栏全部保留，已更新过规则库的老机器行为不受影响。同批退役的还有磁盘清理页的「导出计划」按钮（扫描勾选导出 Markdown 清单）。\n\n② **启动项扫描从一分钟以上提速到秒级** —— 旧实现对每个计划任务（本机数百个）调一次 `schtasks` 深查，串行耗满一分钟还多；现在改为直接读取系统的任务文件（触发类型、命令行、启用状态都在里面，纯文件读取）。启停用与删除计划任务的链路不变。\n\n③ **两处修复** —— **最大化后背景壁纸丢失**：壁纸层画在窗口底色之下，最大化时的防黑帧底色把壁纸盖死、背景设置全部无效；现在壁纸激活时防黑帧改由壁纸自身承担，最大化与还原的壁纸观感一致。**内存清理页「页面文件使用」数字倒挂**（此前显示如 7.4 GB / 2.9 GB，用量大于容量）：修正了提交量与物理可用两个口径混减的算式，现在分子恒不大于分母。\n\n④ **残留扫描更顺手** —— 扫描结果里判定可删的候选现在**默认全部勾选**，进入列表确认后即可直接执行删除（删除确认与保护判定不变）；深扫报告新增**平台保护名单**：ACE（AntiCheatExpert）、WeGame、腾讯系的运行面不再作为残留候选报出，避免游戏在用时被误报，被排除的数量会在扫描说明里留痕。\n\n⑤ **界面与规则库** —— 右键菜单动作窗口只留标题与操作，解释性小字全部删除；磁盘清理与软件卸载的工具栏按钮改为与页签同一行、恒右对齐；磁盘清理库补三条高价值条目（**NVIDIA 驱动安装包缓存、AMD 驱动解压目录、OneDrive 日志**），清理库共 **79 条**。",
+  "pub_date": "2026-10-05T20:56:44Z",
+  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.8/attach_files/Trim_0.6.8_x64-setup.exe/download",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEhPMGNIUnNTWVl0Z2NlNGdISjQ2VFp0RVRoZWhjUkRxaUc5WWhiamhKdWRrUXVYbWxmOFZwNS8vZytBT1llY0hOOG9aNFowWHhwUDVKY3JHMnl4K3dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjMzNzk1CWZpbGU6VHJpbV8wLjYuOF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjgKZ0JudWZOTVp3M0NkUWhwTlhPdExXVU13N1I0dXR2cWpVTGpTTUpJK1FMME52NjZQbzhpUlhQMzhEOUpFNnR2UkZObHdLMzYzcjFDSWRxd0gzT3JnRHc9PQo=",
+  "sha256": "789b9b91fcd9ee279339fddb25fd5fc5aa80f2bcc459df1a2f16001db0f09335",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.7/attach_files/Trim_0.6.7_x64-setup.exe/download",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEJZeFlQWnZJcnA5RGo4ek53dGFNVTRZMHZicXYxU0xuTFBHQUdzNEY0KytQdytFUzRRNFdnbGt3M1NLYXNxTmZIWFIrdEpPQ2s4YmxkY3E5V2ZUQndFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjI4NzU3CWZpbGU6VHJpbV8wLjYuN194NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjcKbElFUTBBdThoc3VTTGZlTGY5b21CemNSVWhoWkZnTE10L2tuZEtxSitza0NsWHFxTk1JVk9waWhMeitTRjlaM0RLVU9ObFdPQUxlUDlXb0ZvM244Q2c9PQo=",
-      "sha256": "a1cf1ebcafe0f56d6d3e19f67928d006e0e70a77a0b989f7a7dcd23719cc9b79"
+      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.6.8/attach_files/Trim_0.6.8_x64-setup.exe/download",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEhPMGNIUnNTWVl0Z2NlNGdISjQ2VFp0RVRoZWhjUkRxaUc5WWhiamhKdWRrUXVYbWxmOFZwNS8vZytBT1llY0hOOG9aNFowWHhwUDVKY3JHMnl4K3dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMjMzNzk1CWZpbGU6VHJpbV8wLjYuOF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjgKZ0JudWZOTVp3M0NkUWhwTlhPdExXVU13N1I0dXR2cWpVTGpTTUpJK1FMME52NjZQbzhpUlhQMzhEOUpFNnR2UkZObHdLMzYzcjFDSWRxd0gzT3JnRHc9PQo=",
+      "sha256": "789b9b91fcd9ee279339fddb25fd5fc5aa80f2bcc459df1a2f16001db0f09335"
     }
   }
 }
