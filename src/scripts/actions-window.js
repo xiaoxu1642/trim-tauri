@@ -187,17 +187,32 @@
     }
   }
 
+  // 与残留副窗同一条纪律（见 residue-window.js 里 on() 的注释）：绑定按 id 走这个口子，
+  // 缺件只降级成控制台告警。副窗的初始化一旦抛错就再也不会发起首次加载，
+  // 而真机症状长得像"功能没做"，Node 门禁与 cargo 测试都碰不到 DOM。
+  function on(id, type, handler) {
+    const node = el(id);
+    if (!node) {
+      console.warn('[actions-window] 缺少元素 #' + id + '，' + type + ' 未绑定');
+      return false;
+    }
+    node.addEventListener(type, handler);
+    return true;
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
-    el('acBody').addEventListener('click', onClick);
-    el('acBody').addEventListener('keydown', onKeydown);
-    el('acRefreshBtn').addEventListener('click', load);
-    el('acRunBtn').addEventListener('click', runScript);
-    el('acScript').addEventListener('input', updateButtons);
-    el('acApplyBtn').addEventListener('click', apply);
-    el('acRemoveBtn').addEventListener('click', remove);
-    el('acCloseBtn').addEventListener('click', function () {
+    on('acBody', 'click', onClick);
+    on('acBody', 'keydown', onKeydown);
+    on('acRefreshBtn', 'click', load);
+    on('acRunBtn', 'click', runScript);
+    on('acScript', 'input', updateButtons);
+    on('acApplyBtn', 'click', apply);
+    on('acRemoveBtn', 'click', remove);
+    on('acCloseBtn', 'click', function () {
       window.api.actionsWindow.closeWindow().catch(function () { toast('warn', '关闭失败，请手动关闭'); });
     });
-    load();
+    load().catch(function (e) {
+      toast('error', '清单加载失败：' + ((e && e.message) || e));
+    });
   });
 })();
