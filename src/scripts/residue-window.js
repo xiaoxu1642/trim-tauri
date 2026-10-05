@@ -602,10 +602,12 @@
     }
   }
 
-  // 勾选框是 span 不是 input：键盘可达性要自己补（AGENTS §2，行上「查残留」同理）
+  // 勾选框是 span 不是 input：键盘可达性要自己补（AGENTS §2，行上「查残留」同理）。
+  // 两个区的勾选框都要覆盖：深扫区的 data-dcheck 也是 tabindex=0 的 span，
+  // 早先只处理 data-rcheck，Tab 过去按空格没有任何反应。
   function onKeydown(e) {
     if (e.key !== ' ' && e.key !== 'Enter') return;
-    const t = e.target.closest && e.target.closest('[data-rcheck]');
+    const t = e.target.closest && e.target.closest('[data-rcheck], [data-dcheck]');
     if (!t) return;
     e.preventDefault();
     onClick({ target: t, });
