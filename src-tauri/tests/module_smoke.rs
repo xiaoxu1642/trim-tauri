@@ -560,7 +560,8 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
 #[ignore = "逐目录读盘且依赖本机卸载记录，发布前门禁跑"]
 fn orphan_scan_refuses_or_returns_unchecked_candidates() {
     use serde_json::Value;
-    let w = main_window();
+    // 档位：孤儿扫描在窄窗口集内（v0.7.0 面板搬进 residue 副窗），主窗调用会被来源校验拒杀
+    let w = window_with_label(RESIDUE_LABEL);
     let res = invoke(&w, "uninstall_orphan_scan", json!({}));
     // 自己读一遍档案判断"该不该有产出"，而不是靠回执猜
     let own = trim_tauri_lib::engine::paths::app_data_dir().join("uninstall-ownership.json");
@@ -642,6 +643,8 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
     let sample: Vec<&Value> = apps.iter().take(8).collect();
     assert!(!sample.is_empty(), "本机没有桌面程序可采样，本用例失去意义");
 
+    // 列表档位是 MAIN（主窗取）、残留扫描在窄窗口集内（residue 副窗取）——两窗分工不可互换
+    let wr = window_with_label(RESIDUE_LABEL);
     let mut checked = 0;
     for a in sample {
         let Some(app_id) = a["id"].as_str() else { continue };
@@ -649,7 +652,7 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
         if !app_id.contains('|') || app_id.starts_with("APPX|") {
             continue;
         }
-        let res = invoke(&w, "uninstall_residue_scan", json!({ "appId": app_id }));
+        let res = invoke(&wr, "uninstall_residue_scan", json!({ "appId": app_id }));
         assert_eq!(res["success"], json!(true), "{app_id} 扫描应成功: {res}");
         let findings = res["data"]["findings"].as_array().unwrap_or_else(|| {
             panic!("{app_id} 的 data.findings 必须是数组: {res}");
@@ -716,7 +719,8 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
 #[ignore = "读注册表三根（含 App Paths），发布前门禁跑"]
 fn dead_scan_collects_registry_roots_under_hard_constraints() {
     use trim_tauri_lib::engine::protect;
-    let w = main_window();
+    // 档位：失效扫描在窄窗口集内（v0.7.0 面板搬进 residue 副窗），主窗调用会被来源校验拒杀
+    let w = window_with_label(RESIDUE_LABEL);
     let res = invoke(&w, "uninstall_dead_scan", json!({}));
     assert_eq!(res["success"], json!(true), "扫描应成功: {res}");
     let scanned_uninstall = res["data"]["scanned"]["uninstallKeys"].as_u64().unwrap_or(0);
@@ -925,7 +929,8 @@ fn orphan_chain_produces_real_candidate_and_ignore_works() {
     });
     std::fs::write(&doc_path, serde_json::to_vec_pretty(&doc).unwrap()).expect("档案应可写");
 
-    let w = main_window();
+    // 档位：扫描 / 执行 / 忽略三条都在窄窗口集内（v0.7.0 面板搬进 residue 副窗）
+    let w = window_with_label(RESIDUE_LABEL);
     let scan = invoke(&w, "uninstall_orphan_scan", json!({}));
     assert_eq!(scan["success"], json!(true), "有 historical 档案时扫描应成功: {scan}");
     let findings = scan["data"]["findings"].as_array().cloned().unwrap_or_default();
