@@ -297,6 +297,10 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
             <span>开始清理</span>
           </button>
+          <button class="btn btn-secondary" id="btnExportPlan" type="button" data-tip="把本次将清理的条目、预计释放空间导出为 Markdown 清单（不会执行任何删除）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 7V3.5L18.5 9H13zM8 13h8v2H8v-2zm0 4h8v2H8v-2z"/></svg>
+            <span>导出计划</span>
+          </button>
           <button class="btn btn-secondary" id="btnUpdateRules" data-tip="从发布源下载最新清理规则库（数据目录规则优先于内置规则，支持版本校验与防降级）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
             <span>更新规则库</span>
@@ -335,6 +339,10 @@
           <button class="btn btn-accent" id="emptyBtnDelete" disabled>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
             <span>删除选中</span>
+          </button>
+          <button class="btn btn-secondary" id="emptyBtnIgnoreList" type="button" data-tip="管理「不扫描的空目录」名单：可查看与移出；移出后重扫会重新出现">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg>
+            <span>忽略名单</span>
           </button>
           <button class="btn btn-secondary" type="button" data-finder-manifest>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
@@ -498,6 +506,10 @@
         </div>
         <div class="finder-toolbar card" id="anTreemapSection" style="display:none">
           <!-- M6 Treemap：本层一级子目录按体积铺满矩形，点击格子下钻。纯 CSS 定位、无动画 -->
+        </div>
+        <div class="finder-toolbar card" id="anOldSection" style="display:none">
+          <!-- 老旧大文件（2026-10-06 任务四）：超过 180 天未修改按大小 Top20，含类型过滤
+               （全部/安装包/压缩包）与逐文件删除（回收站链）；表体由 finder.js 渲染 -->
         </div>
         <div class="table-card" id="anTable"></div>
       </div>

@@ -116,9 +116,11 @@ fn store_snapshot(
             continue;
         };
         // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记。
-        // analyzer（C-5）：只有 kind=dir 的条目有删除语义，summary/ext 不入快照槽
+        // analyzer（C-5）：kind=dir 有删除语义；2026-10-06 任务四起 kind=oldfile（老旧大文件）
+        // 也有（file 粒度）；summary/ext/time 不入快照槽。
         let t = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if t == "analyzer" && item.get("kind").and_then(|v| v.as_str()) != Some("dir") {
+        let akind = item.get("kind").and_then(|v| v.as_str());
+        if t == "analyzer" && !matches!(akind, Some("dir") | Some("oldfile")) {
             continue;
         }
         let key = path_key(p);
@@ -132,15 +134,14 @@ fn store_snapshot(
                 continue;
             }
         }
+        let kind_dir = t == "emptyfolder"
+            || t == "appdata"
+            || (t == "analyzer" && akind == Some("dir"));
         slot.insert(
             key,
             SnapEntry {
                 path: p.to_string(),
-                kind: if t == "emptyfolder" || t == "appdata" || t == "analyzer" {
-                    "dir".to_string()
-                } else {
-                    "file".to_string()
-                },
+                kind: if kind_dir { "dir".to_string() } else { "file".to_string() },
                 empty: t == "emptyfolder",
                 ts,
                 raw,
@@ -926,6 +927,121 @@ fn resolve_existing_dirs(list: &[String]) -> (Vec<String>, Vec<String>) {
     }
     (found, missing)
 }
+
+// ==================== 空目录忽略名单（2026-10-06 任务四）====================
+//
+// 读侧在 native（`scan.rs::load_empty_ignore` → `<数据根>\empty-ignore.txt`，数据根由
+// `engine::paths` 注入——便携模式感知，N2）；写侧必须与读侧**同落点同格式**：每行一个
+// 绝对路径、UTF-8、CRLF 行尾（沿用既有文件的行尾风格；空文件用 CRLF）。写入走
+// `security::atomic_write_file`（原子写，坏写不留半份名单）。
+// 三条命令全 MAIN 档：写操作只有主窗调；list 放只读档会被 check-channel-map D5
+// 判「只读档却没有子窗消费方」——它服务的是主窗的空目录页/名单弹窗。
+
+const EMPTY_IGNORE_FILE: &str = "empty-ignore.txt";
+const EMPTY_IGNORE_MAX: usize = 200;
+
+fn empty_ignore_path() -> std::path::PathBuf {
+    crate::engine::paths::app_data_dir().join(EMPTY_IGNORE_FILE)
+}
+
+fn read_empty_ignore_lines() -> Vec<String> {
+    std::fs::read_to_string(empty_ignore_path())
+        .map(|t| {
+            t.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_empty_ignore_lines(lines: &[String]) -> Result<(), String> {
+    let body = if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\r\n") + "\r\n"
+    };
+    crate::security::atomic_write_file(&empty_ignore_path(), body.as_bytes())
+}
+
+/// finder:ignore-folder —— 把目录加入空目录忽略名单（重扫不再出现）。
+#[tauri::command]
+pub async fn finder_ignore_folder<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    path: Option<String>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let path = path.unwrap_or_default();
+    // 只收存在的绝对目录：忽略一个不存在/非目录的路径没有意义，且会把名单污染成
+    // 无法复核的条目（list 的 exists 列与重扫的路径比对都依赖它是真实路径）。
+    let p = Path::new(&path);
+    if path.is_empty() || !p.is_absolute() || !p.is_dir() {
+        return json!({ "success": false, "message": "只能忽略本机存在的文件夹" });
+    }
+    let mut lines = read_empty_ignore_lines();
+    let lower = path.to_lowercase();
+    if lines.iter().any(|l| l.to_lowercase() == lower) {
+        return json!({ "success": true, "already": true, "count": lines.len() });
+    }
+    if lines.len() >= EMPTY_IGNORE_MAX {
+        return json!({ "success": false, "message": format!("忽略名单已达上限（{EMPTY_IGNORE_MAX} 条），请先在「忽略名单」里移除一些") });
+    }
+    lines.push(path.clone());
+    if let Err(e) = write_empty_ignore_lines(&lines) {
+        log::write_log("warn", &format!("空目录忽略名单写入失败: {e}"));
+        return json!({ "success": false, "message": format!("写入忽略名单失败: {e}") });
+    }
+    json!({ "success": true, "count": lines.len() })
+}
+
+/// finder:ignore-list —— 列出忽略名单（路径 + 当前是否仍存在，供名单弹窗展示）。
+#[tauri::command]
+pub async fn finder_ignore_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let items: Vec<Value> = read_empty_ignore_lines()
+        .into_iter()
+        .map(|l| {
+            let exists = Path::new(&l).is_dir();
+            json!({ "path": l, "exists": exists })
+        })
+        .collect();
+    json!({ "success": true, "data": items })
+}
+
+/// finder:ignore-remove —— 从忽略名单移除一条（拿掉后该目录重扫会重新出现）。
+#[tauri::command]
+pub async fn finder_ignore_remove<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    path: Option<String>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let path = path.unwrap_or_default();
+    if path.is_empty() {
+        return json!({ "success": false, "message": "参数缺失" });
+    }
+    let lower = path.to_lowercase();
+    let lines = read_empty_ignore_lines();
+    let kept: Vec<String> = lines
+        .iter()
+        .filter(|l| l.to_lowercase() != lower)
+        .cloned()
+        .collect();
+    if kept.len() == lines.len() {
+        return json!({ "success": false, "missing": true, "message": "该条目不在忽略名单里" });
+    }
+    if let Err(e) = write_empty_ignore_lines(&kept) {
+        log::write_log("warn", &format!("空目录忽略名单写入失败: {e}"));
+        return json!({ "success": false, "message": format!("写入忽略名单失败: {e}") });
+    }
+    json!({ "success": true, "count": kept.len() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1437,3 +1437,42 @@ fn optimizer_restore_frequency_子窗一律拒杀() {
         );
     }
 }
+
+/// 2026-10-06 任务四：空目录忽略名单三命令 + 清理计划导出 —— 档位与负例。
+///
+/// 全部 MAIN 档：① 子窗一律拒杀（零副作用）；② 主窗负例都在**对话框 / 写盘之前**
+/// 被拒（不存在的目录 / 空清单 / 不在名单的条目）—— 快速组零副作用；
+/// 真写名单与真弹保存对话框的路径留给真机验收（§4.1：对话框 MockRuntime 覆盖不到）。
+#[test]
+fn finder_ignore与清理计划导出_档位与负例() {
+    // ① 子窗一律拒杀
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        for (cmd, args) in [
+            ("finder_ignore_folder", json!({ "path": "C:\\__trim_test_missing__" })),
+            ("finder_ignore_list", json!({})),
+            ("finder_ignore_remove", json!({ "path": "C:\\__trim_test_missing__" })),
+            ("cleanup_export_plan", json!({ "text": "x" })),
+        ] {
+            let text = invoke_text(&w, cmd, args);
+            assert!(
+                text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
+            );
+        }
+    }
+    let w = main_window();
+    // ② 不存在的目录：在读取 / 写盘之前拒绝
+    let res = invoke(&w, "finder_ignore_folder", json!({ "path": "C:\\__trim_test_missing__" }));
+    assert_eq!(res["success"], json!(false), "不存在的目录必须拒: {res}");
+    // ③ 不在名单的条目 → missing 且零副作用（不写盘）
+    let res = invoke(&w, "finder_ignore_remove", json!({ "path": "C:\\__trim_test_missing__" }));
+    assert_eq!(res["success"], json!(false), "不在名单的条目必须拒: {res}");
+    assert_eq!(res["missing"], json!(true), "拒绝形态应为 missing: {res}");
+    // ④ 空清单在保存对话框之前被拒（零副作用）
+    let res = invoke(&w, "cleanup_export_plan", json!({ "text": "   " }));
+    assert_eq!(res["success"], json!(false), "空清单必须拒: {res}");
+    // ⑤ 读侧（只读，零副作用）：主窗越过档位
+    let res = invoke(&w, "finder_ignore_list", json!({}));
+    common::assert_guard_passed(&res.to_string(), "主窗调 finder_ignore_list", &["success"]);
+}

@@ -1788,6 +1788,54 @@
     })();
   }
 
+  // 导出「本次将清理」的 Markdown 计划清单（2026-10-06 任务四）：扫描勾选后、执行前
+  // 一键另存（Rust 侧走保存对话框，口径同日志导出）。只读扫描结果与勾选状态，不触删除链。
+  function selectedItemsForExport() {
+    const out = [];
+    const collect = (items) => {
+      for (const it of items || []) {
+        if (selectedIds.has(it.id)) out.push(it);
+      }
+    };
+    for (const group of Object.values(CATEGORIES)) {
+      if (group.subGroups) group.subGroups.forEach(sg => collect(sg.items));
+      else collect(group.items);
+    }
+    return out;
+  }
+
+  async function exportPlan() {
+    if (!window.api?.cleanup?.exportPlan) return;
+    const items = selectedItemsForExport();
+    if (!items.length) {
+      window.app?.toast('warning', '请先勾选要清理的条目（导出的是你当前勾选的计划）');
+      return;
+    }
+    const total = items.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
+    const now = new Date();
+    const p = n => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`;
+    const cell = (s) => String(s == null ? '' : s).replace(/\|/g, '\\|');
+    const lines = [
+      '# Trim 清理计划',
+      '',
+      `> 生成时间：${stamp} · 计划清理 ${items.length} 个条目 · 预计释放 ${formatSize(total)}`,
+      '> 本清单仅供核对，尚未执行任何删除；实际释放量以删除后实测为准。',
+      '',
+      '| 条目 | 类别 | 风险 | 预计释放 |',
+      '|---|---|---|---|',
+      ...items.map(it => `| ${cell(it.name || it.id)} | ${cell(NATURE_LABELS[it.nature] || '')} | ${cell(RISK_LABELS[it.risk] || it.risk || '')} | ${formatSize(sizeNumber(scanResults.get(it.id)?.size))} |`),
+      '',
+    ];
+    try {
+      const resp = await window.api.cleanup.exportPlan(lines.join('\n'));
+      if (resp && resp.success) window.app?.toast('success', '已导出：' + (resp.path || ''));
+      else window.app?.toast('info', (resp && resp.message) || '导出失败');
+    } catch (e) {
+      window.app?.toast('error', '导出失败: ' + ((e && e.message) || e));
+    }
+  }
+
   function init() {
     renderCategoryList();
     updateUI();
@@ -1795,6 +1843,7 @@
 
     document.getElementById('btnScan')?.addEventListener('click', scan);
     document.getElementById('btnClean')?.addEventListener('click', clean);
+    document.getElementById('btnExportPlan')?.addEventListener('click', exportPlan);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnUpdateRules')?.addEventListener('click', updateRules);
     document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);

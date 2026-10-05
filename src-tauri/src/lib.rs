@@ -327,6 +327,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::finder::finder_delete,
         commands::finder::finder_delete_manifest,
         commands::finder::finder_open_backup_dir,
+        commands::finder::finder_ignore_folder,
+        commands::finder::finder_ignore_list,
+        commands::finder::finder_ignore_remove,
         // ---- 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）----
         commands::uninstall::uninstall_list,
         commands::uninstall::uninstall_run,
@@ -396,6 +399,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::cleanup::cleanup_retry_failed_delete,
         commands::cleanup::cleanup_check_locked,
         commands::cleanup::cleanup_kill_locked_processes,
+        commands::cleanup::cleanup_export_plan,
         commands::cleanup::cleanup_item_detail,
         // ---- C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan ----
         // 审查 v2-F4 彻底方案：`settings_save` 已整链摘除（零调用方的死写入通道，

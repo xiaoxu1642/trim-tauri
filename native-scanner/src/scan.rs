@@ -372,10 +372,55 @@ fn analyze_ext_key(name: &str) -> String {
     }
 }
 
-/// du 原语带计数与扩展名聚合。与 dir_size 同口径：跳过 symlink、联接点不深入；
-/// 大小用 DirEntry.metadata 复用（不额外 syscall）。exts 键数上限 64——巨型目录
-/// 的扩展名种类可能上万，聚合表只保留先到的前 64 键（Top-N 语义近似，够「看大头」）。
-fn analyze_dir_deep(dir: &Path, exts: &mut std::collections::HashMap<String, u64>, times: &mut [u64; TIME_BUCKETS]) -> (u64, u64, u64) {
+/// 扩展名（`analyze_ext_key` 的键形态，带前导点）→ 类型家族。
+///
+/// **磁盘分析页与「老旧大文件」类型过滤的唯一实现**（§5.16：同一判定不许两套——
+/// 前端只渲染 `family` 字段，不自己建第二张映射表）。纯展示判据、不进删除面语义，
+/// 所以不需要共享夹具；类目表就是这九个（其余归「其他」）。
+pub fn ext_family(ext_key: &str) -> &'static str {
+    let e = ext_key.strip_prefix('.').unwrap_or(ext_key);
+    match e {
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "heic" | "heif" | "tif" | "tiff"
+        | "svg" | "ico" | "raw" | "cr2" | "nef" | "arw" | "psd" | "ai" => "图片",
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg"
+        | "ts" | "rmvb" | "rm" | "3gp" => "视频",
+        "mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "wma" | "opus" | "ape" | "mid" => "音频",
+        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pdf" | "txt" | "md" | "rtf"
+        | "csv" | "odt" | "ods" | "odp" | "epub" | "mobi" | "log" => "文档",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "cab" | "iso" | "tgz" => "压缩包",
+        "exe" | "msi" | "msix" | "appx" | "apk" | "dmg" | "pkg" | "deb" | "rpm" => "安装包",
+        // `.ts` 有歧义（MPEG-TS 视频 vs TypeScript）：归「视频」——磁盘分析的主要受众是
+        // 普通用户（录像/下载分段视频多），开发者场景下的误标属可接受（纯展示不影响删除面）。
+        // `tsx` 无歧义，仍在「开发文件」。
+        "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "rs" | "go" | "java" | "kt" | "py" | "js"
+        | "jsx" | "tsx" | "html" | "css" | "scss" | "json" | "xml" | "yaml" | "yml"
+        | "toml" | "sql" | "sh" | "ps1" | "cmd" | "vbs" | "lua" | "rb" | "php" | "swift"
+        | "gradle" | "patch" | "diff" => "开发文件",
+        "ttf" | "otf" | "woff" | "woff2" | "eot" | "fon" => "字体",
+        _ => "其他",
+    }
+}
+
+/// 老旧大文件：mtime 超过该天数视为「老旧」（与磁盘分析的时间桶口径独立——桶是展示，
+/// 这里是 Top-K 筛选）。180 天对齐常见「半年没动过」直觉。
+const OLDFILE_DAYS: u64 = 180;
+/// 每根输出多少条老旧大文件（按大小 Top-K）。
+const OLDFILE_TOP: usize = 20;
+/// 老旧大文件候选：(size, mtime_ms, path)。
+type OldFile = (u64, u64, PathBuf);
+
+/// du 原语带计数、扩展名聚合与老旧大文件候选。与 dir_size 同口径：跳过 symlink、
+/// 联接点不深入；大小用 DirEntry.metadata 复用（不额外 syscall）。exts 键数上限 64
+/// ——巨型目录的扩展名种类可能上万，聚合表只保留先到的前 64 键（Top-N 语义近似，
+/// 够「看大头」）。`old` 是子树局部 Top-K（分治 Top-K：全局 Top-N 必落在「各子树
+/// Top-N 的并集 ∪ 顶层直属文件」内 —— 若某文件是子树的第 N+1 名，子树内至少 N 个
+/// 比它大，全局名次也 ≥N+1，所以局部截断不丢全局正确性）。
+fn analyze_dir_deep(
+    dir: &Path,
+    exts: &mut std::collections::HashMap<String, u64>,
+    times: &mut [u64; TIME_BUCKETS],
+    old: &mut BinaryHeap<std::cmp::Reverse<OldFile>>,
+) -> (u64, u64, u64) {
     let (mut total, mut dirs, mut files) = (0u64, 0u64, 0u64);
     let now = now_millis();
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
@@ -396,13 +441,23 @@ fn analyze_dir_deep(dir: &Path, exts: &mut std::collections::HashMap<String, u64
                     let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                     total += sz;
                     files += 1;
-                    // M6 时间维度：取不到 mtime 也要落桶，否则「各桶相加 = 总量」不成立
+                                        // M6 时间维度：取不到 mtime 也要落桶，否则「各桶相加 = 总量」不成立
                     // meta.as_ref() 是 Result<&Metadata,&Error>：先 .ok() 再 and_then，
                     // 否则拿到的是 Result<Option<SystemTime>,&Error>，没有 flatten 可用
                     let mtime = meta.as_ref().ok().and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_millis() as u64);
                     times[analyze_time_bucket(mtime, now)] += sz;
+                    if sz > 0 {
+                        if let Some(ms) = mtime {
+                            if now.saturating_sub(ms) > OLDFILE_DAYS * 86_400_000 {
+                                old.push(std::cmp::Reverse((sz, ms, ent.path())));
+                                if old.len() > OLDFILE_TOP {
+                                    old.pop();
+                                }
+                            }
+                        }
+                    }
                     if let Some(name) = ent.file_name().to_str() {
                         let key = analyze_ext_key(name);
                         if exts.len() < 64 || exts.contains_key(&key) {
@@ -455,8 +510,9 @@ fn now_millis() -> u64 {
 /// 磁盘分析一层。输出（type=analyzer，extra 字段均为字符串，前端 Number() 转换）：
 ///   kind=summary：path/size(=子树总字节)/dirCount/fileCount/elapsedMs/childrenTruncated
 ///   kind=dir    ：一级子目录，size=子树字节，降序（快照槽按此登记 kind=dir 供删除复用）
-///   kind=ext    ：扩展名聚合，ext=键名，降序 ≤16 条
+///   kind=ext    ：扩展名聚合，ext=键名，family=类型家族（`ext_family`，2026-10-06 任务四），降序 ≤16 条
 ///   kind=time   ：按最后修改时间的 6 桶聚合，bucket/label 见 `TIME_BUCKET_LABELS`（M6）
+///   kind=oldfile：老旧大文件（mtime > 180 天按大小 Top-20，file 粒度；快照槽已放行供删除）
 pub fn analyze(paths: &[String], sink: &dyn Sink) {
     for p in paths {
         let root = Path::new(p);
@@ -472,6 +528,7 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
         let (mut top_total, mut top_files) = (0u64, 0u64);
         let mut exts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         let mut times = [0u64; TIME_BUCKETS];
+        let mut old_all: BinaryHeap<std::cmp::Reverse<OldFile>> = BinaryHeap::new();
         let now = now_millis();
         for ent in rd.flatten() {
             match ent.file_type() {
@@ -488,6 +545,16 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_millis() as u64);
                     times[analyze_time_bucket(mtime, now)] += sz;
+                    if sz > 0 {
+                        if let Some(ms) = mtime {
+                            if now.saturating_sub(ms) > OLDFILE_DAYS * 86_400_000 {
+                                old_all.push(std::cmp::Reverse((sz, ms, ent.path())));
+                                if old_all.len() > OLDFILE_TOP {
+                                    old_all.pop();
+                                }
+                            }
+                        }
+                    }
                     if let Some(name) = ent.file_name().to_str() {
                         let key = analyze_ext_key(name);
                         if exts.len() < 64 || exts.contains_key(&key) {
@@ -499,17 +566,18 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
             }
         }
         // 每个子目录整树 du + 子树 ext / 时间聚合（rayon 并行，child_dir_sizes 同款通道）
-        let results: Vec<(PathBuf, u64, u64, u64, Vec<(String, u64)>, [u64; TIME_BUCKETS])> = subdirs
+        let results: Vec<(PathBuf, u64, u64, u64, Vec<(String, u64)>, [u64; TIME_BUCKETS], Vec<OldFile>)> = subdirs
             .par_iter()
             .map(|d| {
                 let mut m: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
                 let mut t = [0u64; TIME_BUCKETS];
-                let (sz, dc, fc) = analyze_dir_deep(d, &mut m, &mut t);
-                (d.clone(), sz, dc, fc, m.into_iter().collect(), t)
+                let mut o: BinaryHeap<std::cmp::Reverse<OldFile>> = BinaryHeap::new();
+                let (sz, dc, fc) = analyze_dir_deep(d, &mut m, &mut t, &mut o);
+                (d.clone(), sz, dc, fc, m.into_iter().collect(), t, o.into_iter().map(|std::cmp::Reverse(x)| x).collect())
             })
             .collect();
         let (mut total, mut dir_count, mut file_count) = (top_total, subdirs.len() as u64, top_files);
-        for (_d, sz, dc, fc, m, t) in &results {
+        for (_d, sz, dc, fc, m, t, o) in &results {
             total += sz;
             dir_count += dc;
             file_count += fc;
@@ -521,10 +589,16 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
                     *exts.entry(k.clone()).or_insert(0) += v;
                 }
             }
+            for cand in o {
+                old_all.push(std::cmp::Reverse(cand.clone()));
+                if old_all.len() > OLDFILE_TOP {
+                    old_all.pop();
+                }
+            }
         }
         let mut children: Vec<(PathBuf, u64)> = results
             .iter()
-            .map(|(d, sz, _, _, _, _)| (d.clone(), *sz))
+            .map(|(d, sz, _, _, _, _, _)| (d.clone(), *sz))
             .filter(|(_, sz)| *sz >= 1)
             .collect();
         children.sort_by(|a, b| b.1.cmp(&a.1));
@@ -548,7 +622,13 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
         ext_list.sort_by(|a, b| b.1.cmp(&a.1));
         ext_list.truncate(16);
         for (name, sz) in ext_list {
-            item(sink, "analyzer", root, sz, &[("kind", "ext".to_string()), ("ext", name)]);
+            // family：类型家族由 Rust 一处实现（`ext_family`），前端分组渲染与「老旧大文件」
+            // 类型过滤共用，不在 JS 侧建第二张映射表（§5.16）
+            item(sink, "analyzer", root, sz, &[
+                ("kind", "ext".to_string()),
+                ("ext", name.clone()),
+                ("family", ext_family(&name).to_string()),
+            ]);
         }
         // M6 时间维度：6 桶全发（含 0 字节桶），渲染层因此可以无条件按下标取标签，
         // 也才能当场校验「各桶相加 = 总量」。
@@ -557,6 +637,22 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
                 ("kind", "time".to_string()),
                 ("bucket", i.to_string()),
                 ("label", (*label).to_string()),
+            ]);
+        }
+        // 老旧大文件（mtime > 180 天按大小 Top-20，2026-10-06 任务四）：file 粒度。
+        // finder.rs 快照槽已放行 kind=oldfile 供勾选删除（回收站 + 保护判定 + 清单记账，
+        // 与既有 dir 粒度同一删除链）；mtimeMs 供前端显示「最后修改」。
+        let mut old_list: Vec<OldFile> = old_all.into_iter().map(|std::cmp::Reverse(x)| x).collect();
+        old_list.sort_by(|a, b| b.0.cmp(&a.0));
+        for (sz, ms, p) in old_list {
+            let fam = p
+                .file_name()
+                .map(|n| ext_family(&analyze_ext_key(&n.to_string_lossy())))
+                .unwrap_or("其他");
+            item(sink, "analyzer", &p, sz, &[
+                ("kind", "oldfile".to_string()),
+                ("mtimeMs", ms.to_string()),
+                ("family", fam.to_string()),
             ]);
         }
         progress(sink, 100);
@@ -671,11 +767,27 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     }
     for (sz, v) in &content_groups {
         gid += 1;
+        // 「下载副本」判定（2026-10-06 任务四）：内容一致（本组已由 Blake3 证明）+ **归一化
+        // 同名一致** 双条件 —— 典型形态是浏览器连点下载产生的 `xxx (1).ext`。只有全部成员
+        // 归一化后同名才算；否则保持 content（不同名的真重复，语义不同）。
+        // 已知边界（不假装覆盖）：min_size 以下的文件不参与指纹（上方 filter），
+        // 小于阈值的副本识别不到。
+        let first = v
+            .first()
+            .and_then(|p| p.file_name())
+            .map(|n| normalize_artifact_name(&n.to_string_lossy()))
+            .unwrap_or_default();
+        let all_artifact = !first.is_empty()
+            && v.iter().all(|p| {
+                p.file_name()
+                    .map(|n| normalize_artifact_name(&n.to_string_lossy()) == first)
+                    .unwrap_or(false)
+            });
         emit_dup_group(
             sink,
             &v.iter().map(|p| (p.clone(), *sz)).collect::<Vec<_>>(),
             &format!("dupc{:04}", gid),
-            "content",
+            if all_artifact { "artifact" } else { "content" },
             None,
         );
     }
@@ -686,16 +798,81 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
 }
 
 fn emit_dup_group(sink: &dyn Sink, v: &[(PathBuf, u64)], gid: &str, match_kind: &str, sim: Option<u64>) {
-    for (idx, (p, sz)) in v.iter().enumerate() {
+    for (rank, idx) in order_group_by_mtime(v).into_iter().enumerate() {
+        let (p, sz) = &v[idx];
         let mut extra: Vec<(&str, String)> = vec![
             ("group", gid.to_string()),
-            ("role", if idx == 0 { "kept".to_string() } else { "candidate".to_string() }),
+            ("role", if rank == 0 { "kept".to_string() } else { "candidate".to_string() }),
             ("match", match_kind.to_string()),
         ];
         if let Some(s) = sim {
             extra.push(("sim", format!("{}%", s)));
         }
         item(sink, "duplicate", p, *sz, &extra);
+    }
+}
+
+/// 组内「保留谁」的排序：**mtime 最新者第一**（= kept），其余按新→旧为候选（2026-10-06 任务四）。
+///
+/// 为什么不在 walk 时带出 mtime：`files` 集合只累积 (path, size)，重复组规模有限而
+/// stat 廉价，组内补读即可；read 不到的（文件消失等）按最旧处理、排在最后。
+/// `sort_by_key` 是**稳定排序**：同 mtime 并列时保持原顺序，不会因排序把哪一份随机变成 kept。
+/// 返回排序后的下标序列（不动入参，调用方按序取）。
+pub fn order_group_by_mtime(v: &[(PathBuf, u64)]) -> Vec<usize> {
+    let mut ordered: Vec<usize> = (0..v.len()).collect();
+    let mtimes: Vec<Option<std::time::SystemTime>> = v
+        .iter()
+        .map(|(p, _)| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .collect();
+    ordered.sort_by_key(|&i| std::cmp::Reverse(mtimes[i]));
+    ordered
+}
+
+/// 「下载副本」归一化：把浏览器连点下载 / 资源管理器复制产生的副本后缀还原成「宿主名」。
+///
+/// 规则：**只在首段主名（第一个 `.` 之前）的尾部**剥两种标记，扩展名（含 `.tar.gz`
+/// 这类多段形式）原样保留：
+///   `xxx (1).ext` / `xxx(1).ext` → `xxx.ext`（尾括号纯数字序数）
+///   `xxx - 副本.ext` / `xxx - 副本 (2).ext` → `xxx.ext`
+///   `xxx - copy.ext` / `xxx_copy.ext` → `xxx.ext`（大小写不敏感）
+///   `b (1).tar.gz` → `b.tar.gz`（多段扩展名：序号插在主名后，两种下载器习惯之一）
+///
+/// **已知不支持形态**（测试里显式记录，防将来误以为支持）：序号插在中间扩展名前的
+/// `b.tar (1).gz` 归一到自身。影响面仅「标签显示」——artifact 与 content 同为
+/// 「内容指纹一致」组、默认勾选行为相同，识别不到不会放宽任何删除面（安全侧：
+/// 不误标 artifact）。跨下载器混用同一宿主名两种命名（同一组里既有 `b (1).tar.gz`
+/// 又有 `b.tar (1).gz`）同样不识别。
+///
+/// 与内容指纹**双条件**共用于 artifact 组判定（见 `duplicates` 输出循环）：
+/// 仅同名不证内容同（FD-3 的教训），仅内容同则不覆盖「不同名的真重复」（content 语义）。
+pub fn normalize_artifact_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let (main, rest) = match lower.find('.') {
+        Some(i) if i > 0 => (&lower[..i], &lower[i..]),
+        _ => (lower.as_str(), ""),
+    };
+    let mut s = strip_trailing_index(main.trim_end());
+    for marker in ["- 副本", "-副本", "- copy", "-copy", "_copy"] {
+        if let Some(x) = s.strip_suffix(marker) {
+            s = strip_trailing_index(x.trim_end());
+            break;
+        }
+    }
+    format!("{s}{rest}")
+}
+
+/// 剥「末尾的括号纯数字」（`(1)` / `(12)`），其余原样返回（`(final)` 这类非序数不剥）。
+fn strip_trailing_index(s: &str) -> &str {
+    let t = s.trim_end();
+    if !t.ends_with(')') {
+        return s;
+    }
+    let Some(open) = t.rfind('(') else { return s };
+    let inner = &t[open + 1..t.len() - 1];
+    if !inner.is_empty() && inner.bytes().all(|c| c.is_ascii_digit()) {
+        t[..open].trim_end()
+    } else {
+        s
     }
 }
 

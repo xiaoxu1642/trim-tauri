@@ -220,7 +220,7 @@
   // ==================== 重复文件 ====================
   // match 字段由扫描器输出：name=同名同大小（文件名优先命中）/ content=内容指纹相同。
   // 2026-09-28 七轮拍板：similar（文档内容相似）组已移除——不同名文件塞一组的明细不成立。
-  const DUP_MATCH_LABEL = { content: '内容相同组', name: '同名文件组' };
+  const DUP_MATCH_LABEL = { content: '内容相同组', name: '同名文件组', artifact: '下载副本' };
 
   // v2-L4P-18（F-3）：重复文件与空侧同病同治——全组全行一次性拼 HTML 在十万级结果下
   // 会把渲染层卡死（空目录侧早已因同一病根做了分页，属修复未跟齐）。分页口径：
@@ -268,7 +268,7 @@
       const kept = g.rows.find(r => r.role === 'kept');
       const candSum = cands.reduce((a, r) => a + (r.size || 0), 0);
       let head = `${DUP_MATCH_LABEL[g.match] || '重复组'} · ${g.rows.length} 份`;
-      if (g.match === 'content') head += ` · 每份 ${formatSize(g.size)}`;
+      if (g.match === 'content' || g.match === 'artifact') head += ` · 每份 ${formatSize(g.size)}`;
       html += `<div class="finder-group-header">
         <span>${head}</span>
         <span class="finder-group-sum">保留 1 · 可释放 ${formatSize(candSum)}</span>
@@ -355,14 +355,14 @@
     }
 
     if (dirs.length) {
-      let hd = '<table class="finder-table finder-table-fixed"><thead><tr><th style="width:34px"></th><th>路径</th><th class="finder-col-size" style="width:110px">创建日期</th><th class="finder-col-size" style="width:80px">连带</th></tr></thead><tbody>';
+      let hd = '<table class="finder-table finder-table-fixed"><thead><tr><th style="width:34px"></th><th>路径</th><th class="finder-col-size" style="width:110px">创建日期</th><th class="finder-col-size" style="width:80px">连带</th><th class="finder-col-size" style="width:70px">操作</th></tr></thead><tbody>';
       for (const r of dirs.slice((s.pageD - 1) * EMPTY_PAGE_SIZE, s.pageD * EMPTY_PAGE_SIZE)) {
         const nested = Number(r.nested) || 0;
         const checked = s.selected.has(r.path);
         const nestedCell = nested > 0
           ? `<span class="finder-name-text" data-tip="删除该目录会整树移入回收站，连带其下 ${nested} 个空子目录与树内的 0 字节文件（可在回收站还原）">${nested} 个</span>`
           : '<span class="finder-name-text" style="opacity:.55">—</span>';
-        hd += `<tr class="${checked ? 'finder-row-selected' : ''}"><td>${checkboxHtml('ed_' + esc(r.path), checked)}</td><td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-name-text" style="opacity:.55">·</span><span class="finder-path-text" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 64))}</span></div></td><td class="finder-col-size">${fmtDate(r.created)}</td><td class="finder-col-size">${nestedCell}</td></tr>`;
+        hd += `<tr class="${checked ? 'finder-row-selected' : ''}"><td>${checkboxHtml('ed_' + esc(r.path), checked)}</td><td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-name-text" style="opacity:.55">·</span><span class="finder-path-text" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 64))}</span></div></td><td class="finder-col-size">${fmtDate(r.created)}</td><td class="finder-col-size">${nestedCell}</td><td class="finder-col-size"><span class="finder-reveal" data-empty-ignore="${esc(r.path)}" data-tip="加入忽略名单，重扫不再显示（可在「忽略名单」里移出）" style="cursor:pointer">忽略</span></td></tr>`;
       }
       hd += '</tbody></table>';
       if (pagesD > 1) hd += pagerHtml('dirs', s.pageD, pagesD);
@@ -371,6 +371,86 @@
       boxD.innerHTML = '<div class="finder-empty">未发现空目录</div>';
     }
     updateAllButtons();
+  }
+
+  // ==================== 空目录忽略名单（2026-10-06 任务四）====================
+  // 读侧在扫描器内部（empty-ignore.txt）；这里只有三个动作：行内「忽略」、名单弹窗
+  // （查看/移出）。忽略后立即从当前结果集摘除，不必重扫（重扫也会因名单而跳过）。
+
+  async function emptyIgnore(path) {
+    if (!window.api?.finder?.ignoreFolder) return;
+    try {
+      const resp = await window.api.finder.ignoreFolder(path);
+      if (resp && resp.success) {
+        window.app?.toast?.('success', resp.already ? '该文件夹已在忽略名单里' : '已加入忽略名单，重扫不再显示');
+        const s = st.empty;
+        s.results = s.results.filter(r => r.path !== path);
+        s.selected.delete(path);
+        renderEmpty();
+      } else {
+        window.app?.toast?.('warning', (resp && resp.message) || '加入忽略名单失败');
+      }
+    } catch (e) {
+      window.app?.toast?.('error', '加入忽略名单失败: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  let ignoreModal = null;
+
+  async function openIgnoreList() {
+    if (!window.api?.finder?.ignoreList) return;
+    if (!window.modal?.create) return;
+    if (ignoreModal) { ignoreModal.close(); ignoreModal = null; }
+    const ctrl = window.modal.create({
+      id: 'finderIgnoreBackdrop',
+      title: '空目录忽略名单',
+      bodyHtml: '<div id="finderIgnoreBody" class="finder-empty">加载中…</div>',
+      footerHtml: '<span class="model-picker-spacer"></span><button class="btn btn-primary" id="btnFinderIgnoreClose" type="button">完成</button>',
+      onClose() { ignoreModal = null; }
+    });
+    ignoreModal = ctrl;
+    ctrl.footer.querySelector('#btnFinderIgnoreClose').addEventListener('click', () => ctrl.close());
+    // 弹窗内事件：移出名单条目（弹窗随开随建，委托挂在本弹窗的 backdrop 上）
+    ctrl.backdrop.addEventListener('click', async (e) => {
+      const rm = e.target.closest('[data-ignore-remove]');
+      if (!rm) return;
+      try {
+        const resp = await window.api.finder.ignoreRemove(rm.dataset.ignoreRemove);
+        if (resp && resp.success) {
+          window.app?.toast?.('success', '已移出名单，重扫该目录会重新出现');
+          await refreshIgnoreList();
+        } else {
+          window.app?.toast?.('warning', (resp && resp.message) || '移出失败');
+        }
+      } catch (err) {
+        window.app?.toast?.('error', '移出失败: ' + (err && err.message ? err.message : err));
+      }
+    });
+    await refreshIgnoreList();
+  }
+
+  async function refreshIgnoreList() {
+    if (!ignoreModal) return;
+    const box = ignoreModal.backdrop.querySelector('#finderIgnoreBody');
+    if (!box) return;
+    try {
+      const resp = await window.api.finder.ignoreList();
+      if (!resp || !resp.success) {
+        box.innerHTML = `<div class="finder-empty">${esc((resp && resp.message) || '读取失败')}</div>`;
+        return;
+      }
+      const rows = resp.data || [];
+      if (!rows.length) {
+        box.innerHTML = '<div class="finder-empty">名单为空。在空目录行的「忽略」链接上点击即可加入。</div>';
+        return;
+      }
+      box.className = '';
+      box.innerHTML = '<table class="finder-table finder-table-fixed"><thead><tr><th>路径</th><th class="finder-col-size" style="width:90px">状态</th><th class="finder-col-size" style="width:70px">操作</th></tr></thead><tbody>' +
+        rows.map(r => `<tr><td><span class="finder-path-text" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 80))}</span></td><td class="finder-col-size">${r.exists ? '存在' : '已消失'}</td><td class="finder-col-size"><span data-ignore-remove="${esc(r.path)}" style="cursor:pointer;color:var(--danger-text)">移出</span></td></tr>`).join('') +
+        '</tbody></table>';
+    } catch (e) {
+      box.innerHTML = `<div class="finder-empty">读取失败: ${esc(e.message)}</div>`;
+    }
   }
 
   const RENDER_FN = { dups: renderDups, empty: renderEmpty, an: renderAn };
@@ -421,7 +501,8 @@
         summary: items.find(r => r.kind === 'summary') || null,
         dirs: items.filter(r => r.kind === 'dir'),
         exts: items.filter(r => r.kind === 'ext'),
-        times: items.filter(r => r.kind === 'time')
+        times: items.filter(r => r.kind === 'time'),
+        oldfiles: items.filter(r => r.kind === 'oldfile')
       });
       stopFakeProgress(cfg);
       setProgress(cfg, 100, '分析完成');
@@ -506,29 +587,71 @@
     }
   }
 
+  // 老旧大文件（file 粒度）删除：与 anDelete（dir 整树）同链路——finder:delete 的
+  // 三重校验（快照命中 + 受保护 + 预检）+ 回收站 + 删除清单记账；kind 传 'file'。
+  async function anDeleteFile(path) {
+    if (an.scanning) return;
+    const cur = anCurrent();
+    const layer = cur ? an.cache.get(cur.key) : null;
+    const row = layer && (layer.oldfiles || []).find(r => r.path === path);
+    const total = row ? row.size : 0;
+    const ok = await window.app?.confirmDanger?.(
+      '确认删除',
+      `将把「${nameOf(path)}」移入回收站，约 ${formatSize(total)}。`,
+      '确认删除',
+      '取消',
+      '移入回收站（可在回收站还原）；删除会记入「已删除清单」。受保护的系统路径会被拒绝。'
+    );
+    if (!ok) return;
+    try {
+      const resp = await window.api.finder.delete([{ path, kind: 'file' }]);
+      if (!resp || (!resp.success && !resp.data)) throw new Error((resp && resp.message) || '删除失败');
+      const removed = new Set((resp.data.details || []).filter(d => d.status === 'ok').map(d => d.path));
+      if (removed.has(path)) {
+        if (layer) layer.oldfiles = layer.oldfiles.filter(r => r.path !== path);
+        renderAn();
+        window.app?.toast?.('success', '已移入回收站（清空回收站后释放空间）');
+      } else {
+        window.app?.toast?.('warning', '删除失败（可能被占用）');
+      }
+    } catch (e) {
+      window.app?.toast?.('error', '删除失败: ' + e.message);
+    }
+  }
+
   const AN_EXT_COLORS = ['var(--accent)', 'var(--success)', 'var(--warning)', 'var(--info)', 'var(--danger)'];
 
+  // 本层类型构成：按「类型家族」聚合的 bar（family 由 Rust 一处判定——scan.rs 的
+  // ext_family，前端只做 sum-by-family 的展示变换，不建第二张映射表）+ Top 扩展名细目。
+  // 聚合基于后端已截断的 Top16 ext（与前版 top5-ext 条形图同一「看大头」口径，非全量精确）。
   function renderAnExt(layer) {
     const box = document.getElementById('anExtSection');
     if (!box) return;
     const exts = (layer && layer.exts) || [];
     if (!exts.length) { box.style.display = 'none'; return; }
     const total = exts.reduce((a, r) => a + r.size, 0) || 1;
-    const top = exts.slice(0, 5);
-    const segs = top.map((r, i) => {
-      const pct = Math.round(r.size * 100 / total);
+    const famMap = new Map();
+    for (const r of exts) {
+      const f = r.family || '其他';
+      famMap.set(f, (famMap.get(f) || 0) + r.size);
+    }
+    const fams = [...famMap.entries()].sort((a, b) => b[1] - a[1]);
+    const famSegs = fams.map(([, sz], i) => {
+      const pct = Math.round(sz * 100 / total);
       return `<div style="width:${pct}%;background:${AN_EXT_COLORS[i] || 'var(--fg-tertiary)'}"></div>`;
     }).join('');
-    const legend = top.map((r, i) => {
-      const pct = Math.round(r.size * 100 / total);
+    const famLegend = fams.map(([f, sz], i) => {
+      const pct = Math.round(sz * 100 / total);
       const color = AN_EXT_COLORS[i] || 'var(--fg-tertiary)';
-      return `<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:4px"></span>${esc(r.ext)} ${pct}% · ${formatSize(r.size)}</span>`;
+      return `<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:4px"></span>${esc(f)} ${pct}% · ${formatSize(sz)}</span>`;
     }).join('');
+    const topExt = exts.slice(0, 5).map(r => `${esc(r.ext)} ${formatSize(r.size)}`).join(' · ');
     box.style.display = 'flex';
     box.innerHTML = `<div style="flex:1;min-width:0">
-      <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层类型构成（子树扩展名聚合）</div>
-      <div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${segs}</div>
-      <div style="display:flex;gap:14px;margin-top:6px;font-size:12px;flex-wrap:wrap;opacity:.85">${legend}</div>
+      <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层类型构成（按类型家族聚合）</div>
+      <div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${famSegs}</div>
+      <div style="display:flex;gap:14px;margin-top:6px;font-size:12px;flex-wrap:wrap;opacity:.85">${famLegend}</div>
+      <div style="font-size:11px;opacity:.55;margin-top:4px">Top 扩展名：${topExt}</div>
     </div>`;
   }
 
@@ -669,6 +792,46 @@
     box.innerHTML = html;
   }
 
+  // ── 老旧大文件（2026-10-06 任务四）────────────────────────────────────
+  // 超过 180 天未修改的文件里按大小取前 20（后端算好，每层一份）。类型过滤只暴露
+  // 「安装包 / 压缩包」两类（D3 的落点；family 同样来自后端一处判定，前端不建第二张表）。
+  // 删除走 finder:delete 的 file 粒度链（回收站 + 保护判定 + 清单记账）。
+  let anOldFilter = 'all';
+
+  function renderAnOld(layer) {
+    const box = document.getElementById('anOldSection');
+    if (!box) return;
+    const rows = (layer && layer.oldfiles) || [];
+    if (!rows.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    const filtered = anOldFilter === 'all' ? rows : rows.filter(r => r.family === anOldFilter);
+    const btn = (val, label) => `<button type="button" class="btn btn-small ${anOldFilter === val ? 'btn-accent' : 'btn-secondary'}" data-an-oldfilter="${esc(val)}">${esc(label)}</button>`;
+    let html = `<div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <span style="font-size:12px;opacity:.65">老旧大文件（超过 180 天未修改 · 按大小取前 20）</span>
+        <span style="flex:1"></span>
+        ${btn('all', '全部')}${btn('安装包', '安装包')}${btn('压缩包', '压缩包')}
+      </div>`;
+    if (!filtered.length) {
+      html += `<div class="finder-empty">当前过滤下没有条目</div></div>`;
+      box.style.display = 'flex';
+      box.innerHTML = html;
+      return;
+    }
+    html += `<table class="finder-table finder-table-fixed"><thead><tr><th>文件</th><th class="finder-col-size" style="width:110px">大小</th><th class="finder-col-size" style="width:150px">最后修改</th><th class="finder-col-size" style="width:130px">操作</th></tr></thead><tbody>`;
+    for (const r of filtered) {
+      const when = r.mtimeMs ? new Date(Number(r.mtimeMs)).toLocaleDateString() : '-';
+      html += `<tr>
+        <td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-path-text" style="opacity:.55" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
+        <td class="finder-col-size">${formatSize(r.size)}</td>
+        <td class="finder-col-size">${esc(when)}</td>
+        <td class="finder-col-size"><span class="finder-reveal" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span data-an-del-file="${esc(r.path)}" data-tip="移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+    box.style.display = 'flex';
+    box.innerHTML = html;
+  }
+
   function renderAnBreadcrumb() {
     const box = document.getElementById('anBreadcrumb');
     if (!box) return;
@@ -701,6 +864,8 @@
       if (extBox) extBox.style.display = 'none';
       if (timeBox) timeBox.style.display = 'none';
       if (tmBox) tmBox.style.display = 'none';
+      const oldBox = document.getElementById('anOldSection');
+      if (oldBox) oldBox.style.display = 'none';
       return;
     }
     const sm = layer.summary;
@@ -710,6 +875,8 @@
     renderAnExt(layer);
     renderAnTime(layer);
     renderAnTreemap(layer);
+    // 老旧大文件独立于子目录表：即使本层无子目录（或全被截断）也要展示
+    renderAnOld(layer);
     if (!layer.dirs.length) {
       el.innerHTML = '<div class="finder-empty">该层没有非空子目录</div>';
       return;
@@ -740,9 +907,10 @@
     const s = st[key];
     s.selected.clear();
     if (key === 'dups') {
-      // 仅「内容相同」组默认勾选可删项；similar/name 组内容可能不同，默认不勾，交用户确认
+      // 仅「内容相同」组默认勾选可删项（content 与 artifact —— artifact 已由内容指纹
+      // 证明同内容，与 content 同构）；similar/name 组内容可能不同，默认不勾，交用户确认
       s.results.forEach(r => {
-        if (r.type === 'duplicate' && r.role !== 'kept' && r.match === 'content') s.selected.add(r.path);
+        if (r.type === 'duplicate' && r.role !== 'kept' && (r.match === 'content' || r.match === 'artifact')) s.selected.add(r.path);
       });
     } else if (key === 'empty') {
       // 空文件全勾；空目录仅默认勾选「连带空子目录」的父目录（nested>0），普通空目录交用户勾选
@@ -836,8 +1004,16 @@
     // C-5 分析器：目录下钻 / 行内删除（先于 reveal 判定，属性集互不相交但顺序更稳）
     const drill = e.target.closest('[data-an-drill]');
     if (drill) { anDrill(drill.dataset.anDrill); return; }
+    const anDelFile = e.target.closest('[data-an-del-file]');
+    if (anDelFile) { anDeleteFile(anDelFile.dataset.anDelFile); return; }
     const anDel = e.target.closest('[data-an-del]');
     if (anDel) { anDelete(anDel.dataset.anDel); return; }
+    // 老旧大文件的类型过滤按钮（全部 / 安装包 / 压缩包）
+    const anFilt = e.target.closest('[data-an-oldfilter]');
+    if (anFilt) { anOldFilter = anFilt.dataset.anOldfilter; renderAn(); return; }
+    // 空目录行内「忽略」：加入 empty-ignore 名单（重扫不再出现；可在「忽略名单」弹窗移出）
+    const emptyIgnoreBtn = e.target.closest('[data-empty-ignore]');
+    if (emptyIgnoreBtn) { emptyIgnore(emptyIgnoreBtn.dataset.emptyIgnore); return; }
     // 路径点击：资源管理器定位（explorer /select，复用 startup:openlocation 通道）
     const reveal = e.target.closest('[data-reveal]');
     if (reveal) {
@@ -1078,6 +1254,8 @@ document.getElementById(cfg.drivesEl)?.addEventListener('keydown', onDriveClick)
     document.querySelectorAll('[data-finder-manifest]').forEach(btn => {
       btn.addEventListener('click', showDeleteManifest);
     });
+    // 空目录「忽略名单」管理弹窗入口（任务四，2026-10-06）
+    document.getElementById('emptyBtnIgnoreList')?.addEventListener('click', openIgnoreList);
     if (window.api?.finder?.onProgress && !subscribed) {
       subscribed = true;
       window.api.finder.onProgress(onProgress);

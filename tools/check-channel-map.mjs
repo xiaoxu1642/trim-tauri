@@ -125,6 +125,10 @@ const TAURI_ADDED = {
   'residue:open-window': 'v0.5.0（2026-10-04）：打开残留扫描副窗（用户裁决 4：扫描全部在自绘副窗，主窗只留入口）',
   'residue:close-window': 'v0.5.0（2026-10-04）：关闭残留扫描副窗（同 preview/models/peripheral 的子窗关窗轨）',
   'optimizer:restore-frequency': '任务三（2026-10-06）：还原点弹窗「恢复默认创建频率」手动回收入口（主窗档；创建流程已自动回收，此钮是回收失败时的出口，上游 Electron 无此能力）',
+  'finder:ignore-folder': '任务四（2026-10-06）：空目录「忽略此文件夹」持久化忽略（写 app_data 名单；上游 Electron 只有读侧没有管理入口）',
+  'finder:ignore-list': '任务四（2026-10-06）：忽略名单弹窗的读侧（路径 + 是否存在；上游无此面）',
+  'finder:ignore-remove': '任务四（2026-10-06）：从忽略名单移除一条（上游无此面）',
+  'cleanup:export-plan': '任务四（2026-10-06）：清理计划清单「扫描勾选后导出 Markdown」（保存对话框口径同 log:export；上游无此能力）',
 };
 
 function collect(set, re, text) {

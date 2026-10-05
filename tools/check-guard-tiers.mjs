@@ -81,6 +81,7 @@ const MUST_MAIN = [
   'appearance_bg_list',
   'appearance_bg_open_dir',
   'cleanup_execute',
+  'cleanup_export_plan', // 2026-10-06 任务四：清理计划清单另存（保存对话框 + 写盘，主窗档）
   'cleanup_kill_locked_processes',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
@@ -98,6 +99,9 @@ const MUST_MAIN = [
   'elevate_request', // AGENTS §3：提权入口只认主窗口 label
   'fileclean_execute',
   'finder_delete',
+  'finder_ignore_folder', // 2026-10-06 任务四：空目录忽略名单写侧（app_data 名单文件，只从主窗空目录页/名单弹窗触发）
+  'finder_ignore_list',   // 同上：名单弹窗的读侧（只读语义但只有主窗消费方，同档 MAIN）
+  'finder_ignore_remove', // 同上：名单移除（写侧）
   'maintenance_run',
   'memory_clean',
   // v2-H2：两条顽固软件治理命令会批量结束进程 / 改服务启动类型 + 删计划任务，

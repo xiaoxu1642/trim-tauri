@@ -85,6 +85,7 @@
     'cleanup:check-locked': 'cleanup_check_locked',
     'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
     'cleanup:item-detail': 'cleanup_item_detail',
+    'cleanup:export-plan': 'cleanup_export_plan',
     // runtimes
     'runtimes:collect': 'runtimes_collect',
     'runtimes:install': 'runtimes_install',
@@ -93,6 +94,9 @@
     'finder:delete': 'finder_delete',
     'finder:delete-manifest': 'finder_delete_manifest',
     'finder:open-backup-dir': 'finder_open_backup_dir',
+    'finder:ignore-folder': 'finder_ignore_folder',
+    'finder:ignore-list': 'finder_ignore_list',
+    'finder:ignore-remove': 'finder_ignore_remove',
     // uninstall（7）：卸载域（report/appx-logo 为只读档，其余 MAIN）
     'uninstall:list': 'uninstall_list',
     'uninstall:run': 'uninstall_run',
@@ -447,6 +451,7 @@
         if (path === void 0) path = '';
         return invokeChannel('cleanup:item-detail', { id: id, path: path });
       },
+      exportPlan: function (text) { return invokeChannel('cleanup:export-plan', { text: text }); },
       onScanProgress: function (callback) { return onEvent('cleanup:scan-progress', callback); }
     },
 
@@ -467,7 +472,10 @@
       delete: function (items) { return invokeChannel('finder:delete', { items: items }); },
       onProgress: function (callback) { return onEvent('finder:progress', callback); },
       deleteManifest: function () { return invokeChannel('finder:delete-manifest'); },
-      openBackupDir: function () { return invokeChannel('finder:open-backup-dir'); }
+      openBackupDir: function () { return invokeChannel('finder:open-backup-dir'); },
+      ignoreFolder: function (path) { return invokeChannel('finder:ignore-folder', { path: path }); },
+      ignoreList: function () { return invokeChannel('finder:ignore-list'); },
+      ignoreRemove: function (path) { return invokeChannel('finder:ignore-remove', { path: path }); }
     },
 
     uninstall: {
