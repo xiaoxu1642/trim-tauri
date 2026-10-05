@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Trim",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "identifier": "com.xiaoxu.trim",
   "build": {
     "frontendDist": "../src"
@@ -40,7 +40,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUcxcGJtbHphV2R1SUhCMVlteHBZeUJyWlhrNklEZzBPRVF5UXpOR09UWTBNemRHUlRVS1VsZFViR1l3VDFkUWVYbE9hRXg2TUN0R1RrOURPVGx0V1ZwRmJ6WlpSMk5qTjFkNlFTOWlMMHBOU2xjclJHRjFZa1EwVDI5VlkxSUs=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg0OEQyQzNGOTY0MzdGRTUKUldUbGYwT1dQeXlOaEx6MCtGTk9DOTltWVpFbzZZR2NjN1d6QS9iL0pNSlcrRGF1YkQ0T29VY1IK",
       "endpoints": [
         "https://gitee.com/xiaoxu1642/trim-tauri/raw/main/latest-gitee.json",
         "https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/latest.json"

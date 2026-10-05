@@ -1,13 +1,15 @@
 {
-  "version": "0.6.3",
-  "notes": "## 版本 0.6.3（2026-10-05）\n\n① **右键菜单管理改按软件分组** —— 一列一个软件（列头带程序图标与「N 项 · M 个位置」），位置与状态标签紧跟名称，默认一行两列。归属由程序文件的版本信息判定，推断来的标注出来，查不出的进「未识别」，不硬猜。\n\n② **启动项「目标文件已不存在」标为待确认** —— 显示注册表里写的那个路径原样，并给查看详情 / 删除启动项 / 打开系统自带 Windows 安全中心三个出口。只陈述事实，不判定病毒、不跳转第三方下载。\n\n③ **右键菜单的备份恢复修好了** —— 两处判据（规范路径前缀比对、注册表键名大小写）恒不相等，导致「恢复」从未成功导入过任何一份 .reg，而拒绝原因还报错了方向。现在同口径比较、原因逐条上报。\n\n④ **更新链路** —— 下载失败自动换另一条线路（仅当版本号与签名逐字相同才换线）；包体 SHA-256 显示出来，清单声明了就逐字核对、不一致不装；替换后新版本首启弹一次「更新已完成」，按钮为「完成更新」「打开应用」。完整性锚点仍是 minisign 签名。\n\n⑤ **其余加固** —— 根键下一级子键一律拒删；扫描内重复 id 不再互相覆盖；重命名切换回写保留真实根键；「发送到」启用状态改读隐藏属性；重启资源管理器报的计数只算真终止成功的。",
-  "pub_date": "2026-10-05T08:50:26Z",
-  "url": "https://gitee.com/xiaoxu1642/trim-tauri/releases/download/v0.6.3/Trim_0.6.3_x64-setup.exe",
-  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEZ2ZVZqYUtFM0U0bDY5b0xJOGRHN2pWbG1kUUNRR2FGUVhzU3ZxbUtsampUdUhrTG91Y0tzQ0ZYaXdnWWhjanZqNUd1ZjA5bzZ0SEtRcU1hKzVrZEFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMTg4ODIyCWZpbGU6VHJpbV8wLjYuM194NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjMKY2IvalFHWm0wTEp4K05qM0kxdklJL0RWWU1LVVpxN3Zyb2hvd0tBQmxqekpvWkN4KzhiQzNOdk0wVzBYMU1GR09QeFkxNUNTT1QwSTBWZm5oazEzQlE9PQo=",
+  "version": "0.6.4",
+  "notes": "## 版本 0.6.4（2026-10-05）\n\n① **自动更新的验签修好了** —— 客户端内置的更新公钥多包了一层 base64，插件解不开，症状是「检查到新版本、安装包也下完了，最后永远报 `Invalid encoding in minisign data`」。用真实老客户端跑一遍才暴露：**0.6.3 及之前没有任何用户真正自动升级成功过**。本版把公钥改成正确形状，因此需要**手动安装 0.6.4**；装上之后往后的版本才能自动升。\n\n② **更新流程按指定重做** —— 启动 3 秒后自动检查，发现新版本直接弹窗；下载的安装包放进用户「下载」文件夹（弹窗里给出路径）；下载完成后除 minisign 验签外再核对包体 SHA-256（本版起清单声明该值）；替换完成、新版本首启提示「更新完成」，同时清掉下载目录里那份安装包，按钮是「完成更新」和「启动应用」。清理没成功时如实说明，不谎报「已清理」。\n\n③ **两条新门禁把这类事故固化成判据** —— `check-updater-pubkey` 校验公钥形状并和签名产物对 keyid；`check-release-freshness` 扩展为逐份检查清单里的 signature 是不是「一层 base64 的四行 minisign 文本」、trusted comment 有没有 `version:`、声明的 sha256 是否等于实际安装包。此前这些只能靠人眼数 base64 层数。",
+  "pub_date": "2026-10-05T09:19:50Z",
+  "url": "https://gitee.com/xiaoxu1642/trim-tauri/releases/download/v0.6.4/Trim_0.6.4_x64-setup.exe",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEpLaCs1Z1EzdUVkd0xxRHJCZjBxeFR4WFgxUTM5N0ZUdzFxOFdMTVpPZ3VZdzJiRHl2cS8rK2lpd2J5UlFER3psQzVkcFRUd1RYWGZ1d2FQdU1RZUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMTkxOTczCWZpbGU6VHJpbV8wLjYuNF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjQKUzM0SGxnekFMWEdNREVhZFd1Y0FSL3lNcE1MdVlRbnpMdnNibWJSaHN1ZnQxZ2tUcERrWTQvSVI3V3pEeGlWS1lZWFZsRU50c0lNeGJmWFZ4WkRVRFE9PQo=",
+  "sha256": "be8c254b7a8c292905e5babb7c04801c950d026d6d345e2cc27d6b09bc1f2f06",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://gitee.com/xiaoxu1642/trim-tauri/releases/download/v0.6.3/Trim_0.6.3_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEZ2ZVZqYUtFM0U0bDY5b0xJOGRHN2pWbG1kUUNRR2FGUVhzU3ZxbUtsampUdUhrTG91Y0tzQ0ZYaXdnWWhjanZqNUd1ZjA5bzZ0SEtRcU1hKzVrZEFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMTg4ODIyCWZpbGU6VHJpbV8wLjYuM194NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjMKY2IvalFHWm0wTEp4K05qM0kxdklJL0RWWU1LVVpxN3Zyb2hvd0tBQmxqekpvWkN4KzhiQzNOdk0wVzBYMU1GR09QeFkxNUNTT1QwSTBWZm5oazEzQlE9PQo="
+      "url": "https://gitee.com/xiaoxu1642/trim-tauri/releases/download/v0.6.4/Trim_0.6.4_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEpLaCs1Z1EzdUVkd0xxRHJCZjBxeFR4WFgxUTM5N0ZUdzFxOFdMTVpPZ3VZdzJiRHl2cS8rK2lpd2J5UlFER3psQzVkcFRUd1RYWGZ1d2FQdU1RZUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMTkxOTczCWZpbGU6VHJpbV8wLjYuNF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC42LjQKUzM0SGxnekFMWEdNREVhZFd1Y0FSL3lNcE1MdVlRbnpMdnNibWJSaHN1ZnQxZ2tUcERrWTQvSVI3V3pEeGlWS1lZWFZsRU50c0lNeGJmWFZ4WkRVRFE9PQo=",
+      "sha256": "be8c254b7a8c292905e5babb7c04801c950d026d6d345e2cc27d6b09bc1f2f06"
     }
   }
 }
