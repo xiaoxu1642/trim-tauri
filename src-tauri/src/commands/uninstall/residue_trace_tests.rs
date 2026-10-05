@@ -1013,7 +1013,7 @@ use super::residue_update::*;
         // ——空集会让校验器整包拒绝，属 fail-closed 安全方向，但会瞬间停用残留域）
         assert!(c.tokens.iter().any(|t| t == "APPDATA"), "residue tokens 必须含 APPDATA");
         assert!(c.tokens.iter().any(|t| t == "SYSTEMROOT"), "residue tokens 必须含 SYSTEMROOT");
-        assert_eq!(c.rule_kinds, vec!["folder", "file", "reg_key"], "ruleKinds 漂移");
+        assert_eq!(c.rule_kinds, vec!["folder", "file", "shortcut", "reg_key", "reg_value"], "ruleKinds 漂移");
         assert_eq!(c.match_groups, vec!["displayName", "publisher", "uninstallKey"], "matchGroups 漂移");
         // 内置库必须能通过语义校验（空契约/漂移都会在此暴露）
         let builtin: Value = serde_json::from_str(BUILTIN_RESIDUE_RULES_JSON).expect("内置库 JSON");

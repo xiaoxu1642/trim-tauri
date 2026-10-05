@@ -219,7 +219,9 @@
     "ruleKinds": [
       "folder",
       "file",
-      "reg_key"
+      "shortcut",
+      "reg_key",
+      "reg_value"
     ],
     "idCharset": "A-Za-z0-9._-",
     "tokens": {

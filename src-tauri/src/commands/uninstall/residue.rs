@@ -806,7 +806,7 @@ pub(super) fn learn_from_deletions(app_id: &str, details: &[Value]) -> usize {
             "dir" | "folder" => "folder",
             "file" => "file",
             "reg_key" => "reg_key",
-            _ => continue, // shortcut / reg_value 不在签名库允许集里，也不该出现在学习库里
+            _ => continue, // 学习库只收扫描器产出的三类落点；shortcut/reg_value 是签名库独有的 kind（Q8 2026-10-06 放行），学习库允许集维持不变
         };
         let Some(t) = d["target"].as_str() else { continue };
         entries.push((mapped, t.to_string()));

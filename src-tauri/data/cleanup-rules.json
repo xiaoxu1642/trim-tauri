@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "rulesVersion": 20261001,
+  "rulesVersion": 20261006,
   "groups": [
     {
       "key": "system",
@@ -30,7 +30,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Windows Update 安装日志",
@@ -64,7 +64,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Windows Update 下载缓存",
@@ -98,7 +98,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "更新分发缓存",
@@ -128,7 +128,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "WinSAT 磁盘/图形评估缓存（HiBit 逆向新增）",
@@ -158,7 +158,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Windows Update 会话日志（HiBit 逆向新增）",
@@ -195,7 +195,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Windows 错误报告存档",
@@ -225,7 +225,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "系统诊断预取数据",
@@ -255,7 +255,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "系统/HTTPERR 等日志文件（HiBit 逆向新增，主要清理 HTTPERR 与 W3SVC 站点日志）",
@@ -285,7 +285,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Windows 组件安装与修复日志（CBS.log；原「电脑优化中心 - PCCleaner 深度清理」携带项，C1 整合，2026-09-14）",
@@ -315,7 +315,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "DISM 组件维护日志（dism.log；原「电脑优化中心 - PCCleaner 深度清理」携带项，C1 整合，2026-09-14）",
@@ -345,7 +345,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Windows 调试输出目录（HiBit 逆向新增）",
@@ -375,7 +375,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "setupact/setuperr 安装日志与镜像部署残留（HiBit 逆向新增）",
@@ -405,7 +405,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "待上报的 WER 错误报告队列（与 ReportArchive 配套，HiBit 逆向新增）",
@@ -435,7 +435,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Defender 扫描历史",
@@ -465,7 +465,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "事件日志目录",
@@ -502,7 +502,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "远程桌面位图缓存",
@@ -532,7 +532,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "CLR 使用日志",
@@ -563,7 +563,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeDays": 7,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Prefetch 预读",
@@ -610,7 +610,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "资源管理器缩略图缓存数据库。清理时会临时重启资源管理器",
@@ -656,7 +656,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "资源管理器图标缓存数据库（与缩略图缓存同目录，按模式区分）。清理时会临时重启资源管理器 —— M2 起该项承接原「系统维护 - 重建图标与缩略图缓存」的能力",
@@ -690,7 +690,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "系统级网页缓存",
@@ -720,7 +720,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "内核实时崩溃报告（HiBit 逆向新增）",
@@ -758,7 +758,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "组件服务临时",
@@ -793,7 +793,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "挂起重命名临时",
@@ -828,7 +828,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "用户 TEMP",
@@ -862,7 +862,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "驱动安装解压残留",
@@ -893,7 +893,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "系统级 TEMP（区别于用户 TEMP，HiBit 逆向新增）",
@@ -935,7 +935,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeDays": 2,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "应用崩溃 .dmp",
@@ -970,7 +970,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeDays": 2,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "蓝屏 minidump",
@@ -1016,7 +1016,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "资源管理器最近打开文档的注册表记录（隐私清理）",
@@ -1051,7 +1051,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Win+R「运行」历史记录（隐私清理）",
@@ -1086,7 +1086,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "MuiCache 显示名缓存，仅清键值不删键，系统自动重建",
@@ -1116,7 +1116,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "系统级 Cookie",
@@ -1146,7 +1146,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "最近使用文件的 .lnk 快捷方式（隐私清理，执行后自动重建目录）",
@@ -1183,7 +1183,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Dism++ 组件操作历史备份",
@@ -1227,7 +1227,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "QQ 临时",
@@ -1264,7 +1264,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "微信文件缓存",
@@ -1307,7 +1307,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "QQ 缓存",
@@ -1341,7 +1341,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "QQ 图片/视频/文件分类清理",
@@ -1371,7 +1371,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "微信图片/视频/文件分类清理",
@@ -1416,7 +1416,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "网易云音乐缓存",
@@ -1453,7 +1453,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "抖音缓存",
@@ -1494,7 +1494,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "百度网盘日志",
@@ -1531,7 +1531,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "WPS 版本升级备份",
@@ -1578,7 +1578,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Office 上传中心文件缓存（通配 15.0/16.0 版本目录）",
@@ -1622,7 +1622,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Steam 下载缓存",
@@ -1670,7 +1670,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Steam 客户端内置浏览器（CEF）缓存",
@@ -1718,7 +1718,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Epic Games Launcher 内置浏览器缓存",
@@ -1785,7 +1785,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "VS Code 渲染/程序/GPU 缓存",
@@ -1834,7 +1834,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "JetBrains 系列 IDE 的索引缓存与日志（通配各产品版本目录）",
@@ -1875,7 +1875,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "npm 下载缓存（内容寻址校验，可安全清除）",
@@ -1916,7 +1916,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "pip 下载/构建缓存",
@@ -1957,7 +1957,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "NuGet 全局包目录（删除后首次构建将自动重新还原）",
@@ -1998,7 +1998,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "pnpm v6 及更早版本的下载缓存目录（v7 起迁移到 %LOCALAPPDATA%\\pnpm\\store）。内容可安全清除，下次安装依赖时重新下载。本机实测 87 MB。",
@@ -2039,7 +2039,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "NuGet 的 HTTP 响应缓存（v3-cache），与全局包目录（.nuget\\packages，另条规则）相互独立。清除后还原包时重新下载，不影响已安装包。本机实测 300 MB。",
@@ -2084,7 +2084,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "cargo 的 registry 下载缓存（.crate 压缩包）与解压源码缓存。src 可由本机 cache 离线重建，cache 清除后重编译需重新下载。CARGO_HOME 自定义迁移的机器（如本机）不命中，detect 未命中时自动隐藏。删除代价与重建耗时相关，故定 medium。",
@@ -2125,7 +2125,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "uv（Astral 的 Python 包管理器）默认缓存目录，官方提供 uv cache clean 同语义清理。清除后安装依赖时重新下载。本机实测存在（体积小，随使用增长）。",
@@ -2166,7 +2166,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "OpenAI Codex CLI 存放在用户 .cache 下的运行时文件缓存。清除后下次启动 CLI 重新下载（可能达 GB 级），本机实测 1.3 GB。代价为重新下载流量与时间，故定 medium。",
@@ -2240,7 +2240,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Chrome 各 Profile 网页缓存（新版 Network\\Cache + 旧版 Cache + GPU/Dawn 着色器缓存，通配所有 Profile）",
@@ -2296,7 +2296,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Edge 各 Profile 网页缓存（新版 Network\\Cache + 旧版 Cache + GPUCache，通配所有 Profile）",
@@ -2344,7 +2344,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "QQ浏览器各 Profile 网页缓存",
@@ -2399,7 +2399,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Chrome 各 Profile JS/WASM 缓存",
@@ -2447,7 +2447,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Chrome 各 Profile 媒体缓存",
@@ -2495,7 +2495,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Edge 各 Profile 媒体缓存",
@@ -2551,7 +2551,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Firefox 各 Profile 网页/启动/着色器缓存",
@@ -2611,7 +2611,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "由 Winapp2 云端浏览器同步缓存规则转换（Chrome/Edge Sync Data），仅清空目录内容，浏览器自动重建",
@@ -2648,7 +2648,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Chrome 升级残留旧版本备份",
@@ -2692,7 +2692,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "NVIDIA 编译着色器缓存",
@@ -2722,7 +2722,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "NVIDIA 全局安装缓存",
@@ -2752,7 +2752,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "AMD 着色器缓存",
@@ -2782,7 +2782,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "Intel 核显着色器缓存",
@@ -2819,7 +2819,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "DX 着色器缓存",
@@ -2863,7 +2863,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
@@ -2894,7 +2894,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "回收站内容",
@@ -2941,7 +2941,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "打印假脱机文件（卡住的打印任务）。原「系统维护 - 清理打印队列」与「电脑优化中心 - PCCleaner 深度清理」整合项（2026-09-14）；旧实现写的 C:\\Windows\\spool\\printers 在现代 Windows 上并不存在。清理时会临时停止并重启 Print Spooler 服务（M3 承接原「系统维护 - 清理打印队列」的能力）",
@@ -2975,7 +2975,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261001,
+              "ver": 20261006,
               "evidenceItems": [
                 {
                   "text": "压缩组件存储，更新将不可卸载",
@@ -2995,6 +2995,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "rmLe5YZ1n1LhIb0rLVvHq0ZnwKOnZAMsahAYZVcghbMHH0PKE1uIgEfS8Al8vdJJ2m4FOeB72IwLpUIR3XvlAw=="
+    "sig": "dlqPDYCJTqJ79VXFPzkrsQcso7Np9Y2WHGFCGHWRbjxnNbls8ewWU1SLqnTbcQbEXZNMsiryISElsIZT9cozBg=="
   }
 }

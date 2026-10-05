@@ -575,7 +575,7 @@
       }
     },
     {
-      "label": "未知 kind reg_value",
+      "label": "reg_value 缺 :: 分隔",
       "ok": false,
       "pkg": {
         "rulesVersion": 20260928,
@@ -624,7 +624,301 @@
       }
     },
     {
-      "label": "未知 kind shortcut",
+      "label": "reg_value 值名为空",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_value",
+                "target": "HKCU\\Software\\Acme\\Editor::",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "reg_value 键路径为系统容器",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_value",
+                "target": "HKLM\\SOFTWARE::Acme",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "reg_value 键路径在 Run（系统命名空间按键路径否决）",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_value",
+                "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::Acme AutoStart",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "reg_value 含两个 ::",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_value",
+                "target": "HKCU\\Software\\Acme::a::b",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "reg_value 键路径用变量",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_value",
+                "target": "%APPDATA%\\Acme::Foo",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "reg_value 值名首尾含空白",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_value",
+                "target": "HKCU\\Software\\Acme\\Editor::Foo ",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "shortcut 非 .lnk 后缀",
       "ok": false,
       "pkg": {
         "rulesVersion": 20260928,
@@ -651,6 +945,153 @@
               {
                 "kind": "shortcut",
                 "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_key",
+                "target": "HKCU\\Software\\Acme\\Editor",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "shortcut 含通配符",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "shortcut",
+                "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\*.lnk",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_key",
+                "target": "HKCU\\Software\\Acme\\Editor",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "合法：reg_value 目标（键路径::值名）",
+      "ok": true,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\Acme\\Editor",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_value",
+                "target": "HKCU\\Software\\Acme\\Editor::InstallDir",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      }
+    },
+    {
+      "label": "合法：shortcut 目标（.lnk）",
+      "ok": true,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "shortcut",
+                "target": "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Editor.lnk",
                 "note": "用户配置目录"
               },
               {

@@ -65,8 +65,20 @@ const cases = [
   { label: '条目 ver 非数字', ok: false, mutate: (p) => set(p, 'rules.0.ver', '20260928') },
   { label: '规则条目未知字段 recurse', ok: false, mutate: (p) => set(p, 'rules.0.recurse', true) },
   { label: 'residue 条目未知字段 flags', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.flags', 'x') },
-  { label: '未知 kind reg_value', ok: false, mutate: (p) => set(p, 'rules.0.residue.2.kind', 'reg_value') },
-  { label: '未知 kind shortcut', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.kind', 'shortcut') },
+  // Q8 2026-10-06 重拍：reg_value / shortcut 已放行，原「未知 kind」两条用例改造成
+  // 新 kind 的边界用例（缺 :: / 值名空 / 键路径系统容器 / Run 系统命名空间 / 双 :: /
+  // 变量形态 / 非 .lnk），另补两条放行回测防「过度收口把功能打死」
+  { label: 'reg_value 缺 :: 分隔', ok: false, mutate: (p) => set(p, 'rules.0.residue.2.kind', 'reg_value') },
+  { label: 'reg_value 值名为空', ok: false, mutate: (p) => { set(p, 'rules.0.residue.2.kind', 'reg_value'); set(p, 'rules.0.residue.2.target', 'HKCU\\Software\\Acme\\Editor::'); } },
+  { label: 'reg_value 键路径为系统容器', ok: false, mutate: (p) => { set(p, 'rules.0.residue.2.kind', 'reg_value'); set(p, 'rules.0.residue.2.target', 'HKLM\\SOFTWARE::Acme'); } },
+  { label: 'reg_value 键路径在 Run（系统命名空间按键路径否决）', ok: false, mutate: (p) => { set(p, 'rules.0.residue.2.kind', 'reg_value'); set(p, 'rules.0.residue.2.target', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::Acme AutoStart'); } },
+  { label: 'reg_value 含两个 ::', ok: false, mutate: (p) => { set(p, 'rules.0.residue.2.kind', 'reg_value'); set(p, 'rules.0.residue.2.target', 'HKCU\\Software\\Acme::a::b'); } },
+  { label: 'reg_value 键路径用变量', ok: false, mutate: (p) => { set(p, 'rules.0.residue.2.kind', 'reg_value'); set(p, 'rules.0.residue.2.target', '%APPDATA%\\Acme::Foo'); } },
+  { label: 'reg_value 值名首尾含空白', ok: false, mutate: (p) => { set(p, 'rules.0.residue.2.kind', 'reg_value'); set(p, 'rules.0.residue.2.target', 'HKCU\\Software\\Acme\\Editor::Foo '); } },
+  { label: 'shortcut 非 .lnk 后缀', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.kind', 'shortcut') },
+  { label: 'shortcut 含通配符', ok: false, mutate: (p) => { set(p, 'rules.0.residue.0.kind', 'shortcut'); set(p, 'rules.0.residue.0.target', '%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\*.lnk'); } },
+  { label: '合法：reg_value 目标（键路径::值名）', ok: true, mutate: (p) => { set(p, 'rules.0.residue.2.kind', 'reg_value'); set(p, 'rules.0.residue.2.target', 'HKCU\\Software\\Acme\\Editor::InstallDir'); } },
+  { label: '合法：shortcut 目标（.lnk）', ok: true, mutate: (p) => { set(p, 'rules.0.residue.0.kind', 'shortcut'); set(p, 'rules.0.residue.0.target', '%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Editor.lnk'); } },
   { label: '三条件组只剩一组（双条件拍板）', ok: false, mutate: (p) => { set(p, 'rules.0.publisher', []); del(p, 'rules.0.uninstallKey'); } },
   { label: '三条件组全空', ok: false, mutate: (p) => { set(p, 'rules.0.displayName', []); set(p, 'rules.0.publisher', []); set(p, 'rules.0.uninstallKey', []); } },
   { label: '合法：恰好两组（放行边界）', ok: true, mutate: (p) => set(p, 'rules.0.publisher', []) },

@@ -90,8 +90,10 @@ pub fn set_residue_watermark(version: f64) -> bool {
 //   (`tools/fixtures/residue-contract.json`) 独立实现同一套断言，不跨语言调用 Rust。
 // - 清理域与残留域字段规则不同，只共享「外层流程」（尺寸/验签/版本），不共享白名单。
 
-/// 签名残留规则库允许的 kind（Q8 拍板：`reg_value` / `shortcut` 不放行。一旦放行，
-/// 校验器、执行侧保护判定、夹具与备份策略必须同时改，不得出现「校验器放行、执行器不支持」）
+/// 签名残留规则库允许的 kind（Q8 于 2026-10-06 重拍放开 `reg_value` / `shortcut`。
+/// 允许集单一真源是 rule-schema.json 的 residue.ruleKinds，本文件不再硬编码；
+/// 但两类新 kind 的**目标形状分支**必须与 Node 门禁同步落在这里 —— 出现「校验器放行、
+/// 执行器不支持」的形状时两侧都会拒，见 reg_value_target_problem / shortcut_target_problem）
 
 // v2-L4P-15（C-2）：残留域词汇与数值的**唯一真源** = tools/rule-schema.json（经
 // engine::rule_schema 编译期嵌入，与 Node 门禁读同一份字节）。此前这里是硬编码第二真源
@@ -260,6 +262,47 @@ pub(super) fn reg_target_problem(target: &str) -> Option<String> {
     protect::reg_target_block_reason(target)
 }
 
+/// reg_value 目标 =「键路径::值名」。执行侧按 `rsplit_once("::")` 拆键与值名
+/// （residue.rs::classify_residue_op），这里对齐同款拆法；硬否决判据**按键路径、
+/// 不按值名**（§2.1 第 7 步）—— 拆开后键路径部分走与 reg_key 完全同一套判定，
+/// Run 等系统命名空间下的值照样进不来，kind 放开不放松否决面。
+pub(super) fn reg_value_target_problem(target: &str) -> Option<String> {
+    if let Some(reason) = path_shape_problem(target) {
+        return Some(reason);
+    }
+    if target.contains('%') {
+        return Some("注册表目标不允许变量形态".to_string());
+    }
+    let mut parts = target.split("::");
+    let key_part = parts.next().unwrap_or("");
+    let value_name = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return Some("reg_value 目标必须是「键路径::值名」形态（恰好一个 :: 分隔）".to_string());
+    }
+    if key_part.trim().is_empty() {
+        return Some("reg_value 的键路径为空".to_string());
+    }
+    if value_name.trim().is_empty() {
+        return Some("reg_value 的值名为空".to_string());
+    }
+    if value_name.trim() != value_name {
+        return Some("reg_value 值名首尾含空白".to_string());
+    }
+    reg_target_problem(key_part)
+}
+
+/// shortcut 目标 = 文件形状 + 必须 `.lnk` 后缀（防拿快捷方式 kind 写任意路径）。
+/// 执行侧 `classify_residue_op` 把 shortcut 与 folder/file 同走保护路径 + 回收站链。
+pub(super) fn shortcut_target_problem(target: &str) -> Option<String> {
+    if let Some(reason) = file_target_problem(target) {
+        return Some(reason);
+    }
+    if !target.to_ascii_lowercase().ends_with(".lnk") {
+        return Some("shortcut 目标必须是 .lnk 快捷方式文件".to_string());
+    }
+    None
+}
+
 /// 整包语义校验。`Err(原因)` = 调用方必须拒绝这份规则库。
 pub(super) fn validate_residue_package(pkg: &Value) -> Result<(), String> {
     let c = residue_contract();
@@ -389,7 +432,9 @@ pub(super) fn validate_residue_package(pkg: &Value) -> Result<(), String> {
             }
             let problem = match kind {
                 "folder" | "file" => file_target_problem(target),
+                "shortcut" => shortcut_target_problem(target),
                 "reg_key" => reg_target_problem(target),
+                "reg_value" => reg_value_target_problem(target),
                 _ => Some("kind 不在允许集".to_string()),
             };
             if let Some(reason) = problem {

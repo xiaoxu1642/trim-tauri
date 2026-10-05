@@ -5,7 +5,9 @@
 //   A. 根结构：rulesVersion（≥ 20260928 棘轮，只升不降）/ prov / rules 数组
 //   B. 规则条目：id 唯一非空且字符集受限；displayName / publisher / uninstallKey 三条件组
 //      **至少两组非空**（与 Rust 侧 residue_rules_hits 的「双条件命中」拍板口径对齐，单侧维护即红）
-//   C. residue 条目：kind ∈ {folder, file, reg_key}（Q8：reg_value / shortcut 不放行）；
+//   C. residue 条目：kind ∈ {folder, file, reg_key, reg_value, shortcut}（Q8 于 2026-10-06
+//      重拍放开后两类：执行侧早已支持、无新删除面；边界：reg_value 删值+整父键 export 兜底，
+//      shortcut 走回收站）；
 //      target 过文件形状与**注册表硬否决**判定；note 非空（面板 reason 要展示）；未知字段整包拒
 //   D. 签名：Ed25519 验签通过（与 sign-cleanup-rules.mjs 同密钥同规范化）
 //   E. 内置副本接线：commands/uninstall/ 目录（装载侧在 residue_update.rs）必须 include_str! 本文件
@@ -173,6 +175,31 @@ function regTargetProblem(target) {
   return null;
 }
 
+/** reg_value 目标 =「键路径::值名」（执行侧 residue.rs::classify_residue_op 按 rsplit_once("::") 拆）。
+ *  硬否决判据**按键路径、不按值名**（§2.1 第 7 步）：先拆开，再对键路径部分走与 reg_key
+ *  完全同一套判定 —— Run 等系统命名空间下的值照样进不来，kind 放开不放松否决面。 */
+function regValueTargetProblem(target) {
+  if ([...target].length > MAX_TARGET_LEN) return '目标长度超过 260（MAX_PATH）';
+  if (target.includes('*') || target.includes('?')) return '目标含通配符（残留规则只允许精确路径）';
+  if (/[\0\r\n\t]/.test(target)) return '目标含控制字符';
+  if (target.includes('%')) return '注册表目标不允许变量形态';
+  const parts = target.split('::');
+  if (parts.length !== 2) return 'reg_value 目标必须是「键路径::值名」形态（恰好一个 :: 分隔）';
+  const [keyPart, valueName] = parts;
+  if (!keyPart.trim()) return 'reg_value 的键路径为空';
+  if (!valueName.trim()) return 'reg_value 的值名为空';
+  if (valueName !== valueName.trim()) return 'reg_value 值名首尾含空白';
+  return regTargetProblem(keyPart);
+}
+
+/** shortcut 目标 = 文件形状 + 必须 .lnk 后缀（防拿快捷方式 kind 写任意路径）。 */
+function shortcutTargetProblem(target) {
+  const base = fileTargetProblem(target);
+  if (base) return base;
+  if (!/\.lnk$/i.test(target)) return 'shortcut 目标必须是 .lnk 快捷方式文件';
+  return null;
+}
+
 /** 返回 null = 通过；返回字符串 = 整包拒绝原因 */
 function validateResiduePackage(pkg) {
   if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return '规则包不是 JSON 对象';
@@ -236,7 +263,11 @@ function validateResiduePackage(pkg) {
       if (typeof e.target !== 'string' || !e.target.trim() || e.target !== e.target.trim()) {
         return `规则 ${id}: residue.target 为空白或首尾含空白`;
       }
-      const problem = e.kind === 'reg_key' ? regTargetProblem(e.target) : fileTargetProblem(e.target);
+      const problem =
+        e.kind === 'reg_key' ? regTargetProblem(e.target)
+          : e.kind === 'reg_value' ? regValueTargetProblem(e.target)
+            : e.kind === 'shortcut' ? shortcutTargetProblem(e.target)
+              : fileTargetProblem(e.target);
       if (problem) return `规则 ${id}: ${e.kind} 目标 ${e.target} 不合规 — ${problem}`;
       if (typeof e.note !== 'string' || !e.note.trim() || [...e.note].length > MAX_TEXT_LEN) {
         return `规则 ${id}: residue.note 缺失或为空白（面板 reason 要展示）`;
@@ -343,8 +374,11 @@ const LEGIT_REG_KEYS = [
 const falseBlocked = LEGIT_REG_KEYS.filter((t) => regTargetBlockReason(t));
 check(falseBlocked.length === 0, 'C1. 合法产品键放行回测', falseBlocked.length ? `被误拒: ${falseBlocked.join(', ')}` : '');
 const inLibRegKeys = rules.flatMap((r) => (r.residue || []).filter((e) => e.kind === 'reg_key').map((e) => e.target));
-const libBlocked = inLibRegKeys.filter((t) => regTargetBlockReason(t));
-check(libBlocked.length === 0, 'C2. 当前库内 reg_key 目标全部通过保护判定',
+// reg_value 的否决判据按键路径不按值名（§2.1 第 7 步）：入库面检查同样只取键路径部分
+const inLibRegValues = rules.flatMap((r) =>
+  (r.residue || []).filter((e) => e.kind === 'reg_value').map((e) => String(e.target).split('::')[0]));
+const libBlocked = [...inLibRegKeys, ...inLibRegValues].filter((t) => regTargetBlockReason(t));
+check(libBlocked.length === 0, 'C2. 当前库内 reg_key/reg_value 键路径全部通过保护判定',
   libBlocked.length ? `被拒: ${libBlocked.join(', ')}` : '');
 
 // ---- D. 签名验签 ----

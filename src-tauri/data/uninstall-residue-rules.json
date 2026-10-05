@@ -1,9 +1,9 @@
 {
-  "rulesVersion": 20261004,
+  "rulesVersion": 20261006,
   "prov": [
     {
       "sourceClass": "builtin-knowledge",
-      "reviewedAt": "2026-10-04"
+      "reviewedAt": "2026-10-06"
     }
   ],
   "rules": [
@@ -42,67 +42,240 @@
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-eset",
+      "id": "residue-360zip",
       "displayName": [
-        "ESET"
+        "360压缩"
       ],
       "publisher": [
-        "ESET"
+        "Qihoo 360",
+        "奇虎"
       ],
       "uninstallKey": [
-        "ESET"
+        "360zip"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES%\\ESET",
+          "target": "%PROGRAMFILES(X86)%\\360\\360zip",
+          "note": "安装目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\360Zip",
+          "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-adguard",
+      "displayName": [
+        "AdGuard"
+      ],
+      "publisher": [
+        "AdGuard"
+      ],
+      "uninstallKey": [
+        "AdGuard"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\AdGuard",
+          "note": "安装目录（32 位安装惯例）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMDATA%\\AdGuard",
+          "note": "全局数据目录（过滤日志与统计）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\AdGuard",
+          "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-anydesk",
+      "displayName": [
+        "AnyDesk"
+      ],
+      "publisher": [
+        "AnyDesk Software"
+      ],
+      "uninstallKey": [
+        "AnyDesk"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\AnyDesk",
+          "note": "安装目录（32 位安装惯例）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMDATA%\\AnyDesk",
+          "note": "全局数据目录（连接日志与痕迹）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\AnyDesk",
+          "note": "用户配置目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\AnyDesk",
+          "note": "主程序配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-audacity",
+      "displayName": [
+        "Audacity"
+      ],
+      "publisher": [
+        "Audacity"
+      ],
+      "uninstallKey": [
+        "Audacity"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Audacity",
           "note": "安装目录"
         },
         {
           "kind": "folder",
-          "target": "%PROGRAMDATA%\\ESET",
-          "note": "全局数据目录（日志/隔离区索引）"
-        },
-        {
-          "kind": "reg_key",
-          "target": "HKLM\\SOFTWARE\\ESET",
-          "note": "配置键"
+          "target": "%APPDATA%\\Audacity",
+          "note": "用户配置目录"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-roboform",
+      "id": "residue-avg",
       "displayName": [
-        "RoboForm"
+        "AVG"
       ],
       "publisher": [
-        "Siber Systems"
+        "AVG Technologies"
       ],
       "uninstallKey": [
-        "RoboForm"
+        "AVG"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES%\\Siber Systems",
-          "note": "安装目录（以发行商命名）"
+          "target": "%PROGRAMFILES%\\AVG",
+          "note": "安装目录"
         },
         {
           "kind": "folder",
-          "target": "%APPDATA%\\RoboForm",
-          "note": "用户数据目录"
+          "target": "%PROGRAMDATA%\\AVG",
+          "note": "全局数据目录"
         },
         {
           "kind": "reg_key",
-          "target": "HKCU\\Software\\RoboForm",
-          "note": "当前用户配置键"
+          "target": "HKLM\\SOFTWARE\\AVG",
+          "note": "主程序配置键"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
+    },
+    {
+      "id": "residue-baidu-netdisk",
+      "displayName": [
+        "BaiduNetdisk",
+        "百度网盘"
+      ],
+      "publisher": [
+        "Baidu",
+        "百度"
+      ],
+      "uninstallKey": [
+        "BaiduNetdisk"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\BaiduNetdiskDownload",
+          "note": "默认下载目录（删前确认文件已迁移）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\BaiduNetdisk",
+          "note": "用户配置目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-bandizip",
+      "displayName": [
+        "Bandizip"
+      ],
+      "publisher": [
+        "Bandisoft"
+      ],
+      "uninstallKey": [
+        "Bandizip"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Bandizip",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Bandizip",
+          "note": "安装目录（32 位版本）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-bitdefender",
+      "displayName": [
+        "Bitdefender"
+      ],
+      "publisher": [
+        "Bitdefender"
+      ],
+      "uninstallKey": [
+        "Bitdefender"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Bitdefender",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMDATA%\\Bitdefender",
+          "note": "全局数据目录（隔离区与日志索引）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Bitdefender",
+          "note": "安装目录（32 位组件）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\Bitdefender",
+          "note": "主程序配置键"
+        }
+      ],
+      "ver": 20261006
     },
     {
       "id": "residue-ccleaner",
@@ -132,54 +305,594 @@
           "note": "配置键（以发行商命名）"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-wechat",
+      "id": "residue-clash-verge",
       "displayName": [
-        "微信",
-        "WeChat"
+        "Clash Verge"
       ],
       "publisher": [
-        "Tencent",
-        "腾讯"
+        "Clash Verge Rev"
       ],
       "uninstallKey": [
-        "WeChat"
+        "Clash Verge"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES%\\Tencent\\WeChat",
+          "target": "%PROGRAMFILES%\\Clash Verge",
           "note": "安装目录"
         },
         {
           "kind": "folder",
-          "target": "%APPDATA%\\Tencent\\WeChat",
-          "note": "用户数据目录（聊天记录另存路径不在本规则面）"
+          "target": "%LOCALAPPDATA%\\io.github.clash-verge-rev.clash-verge-rev",
+          "note": "用户配置与订阅数据目录"
         },
         {
           "kind": "reg_key",
-          "target": "HKCU\\Software\\Tencent\\WeChat",
+          "target": "HKCU\\Software\\Clash Verge Rev",
           "note": "当前用户配置键"
-        },
-        {
-          "kind": "folder",
-          "target": "%PROGRAMFILES%\\Tencent\\Weixin",
-          "note": "安装目录（微信 4.x / Weixin）"
-        },
-        {
-          "kind": "folder",
-          "target": "%APPDATA%\\Tencent\\xwechat",
-          "note": "用户数据目录（微信 4.x，新目录名）"
-        },
-        {
-          "kind": "reg_key",
-          "target": "HKCU\\Software\\Tencent\\Weixin",
-          "note": "当前用户配置键（微信 4.x）"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
+    },
+    {
+      "id": "residue-discord",
+      "displayName": [
+        "Discord"
+      ],
+      "publisher": [
+        "Discord Inc."
+      ],
+      "uninstallKey": [
+        "Discord"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\discord",
+          "note": "用户数据目录（Chromium 内核缓存）"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Discord",
+          "note": "应用本体与更新缓存（Update.exe 布局）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-douyin",
+      "displayName": [
+        "抖音"
+      ],
+      "publisher": [
+        "Microlive",
+        "ByteDance"
+      ],
+      "uninstallKey": [
+        "douyin"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\ByteDance\\douyin",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\douyin",
+          "note": "用户数据目录（Chromium 内核缓存与配置）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-epic-games",
+      "displayName": [
+        "Epic Games",
+        "Epic Games Launcher"
+      ],
+      "publisher": [
+        "Epic Games"
+      ],
+      "uninstallKey": [
+        "Epic Games Launcher"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Epic Games",
+          "note": "安装目录（含已装游戏，删前确认）"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\EpicGamesLauncher",
+          "note": "启动器缓存目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Epic Games Launcher",
+          "note": "启动器缓存目录（空格命名变体）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-eset",
+      "displayName": [
+        "ESET"
+      ],
+      "publisher": [
+        "ESET"
+      ],
+      "uninstallKey": [
+        "ESET"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\ESET",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMDATA%\\ESET",
+          "note": "全局数据目录（日志/隔离区索引）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\ESET",
+          "note": "配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-everything",
+      "displayName": [
+        "Everything"
+      ],
+      "publisher": [
+        "voidtools"
+      ],
+      "uninstallKey": [
+        "Everything"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Everything",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Everything",
+          "note": "用户配置（Everything.ini / 搜索历史）"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Everything",
+          "note": "索引数据库（Everything.db）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKLM\\SOFTWARE\\voidtools\\Everything",
+          "note": "程序配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-foxit",
+      "displayName": [
+        "Foxit"
+      ],
+      "publisher": [
+        "Foxit Software"
+      ],
+      "uninstallKey": [
+        "Foxit"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Foxit Software",
+          "note": "安装目录（以发行商命名）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Foxit Software",
+          "note": "用户配置目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-gimp",
+      "displayName": [
+        "GIMP"
+      ],
+      "publisher": [
+        "GIMP"
+      ],
+      "uninstallKey": [
+        "GIMP"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\GIMP 2",
+          "note": "安装目录（GIMP 2 系列）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\GIMP",
+          "note": "用户配置目录（笔刷与插件配置）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-hibit",
+      "displayName": [
+        "HiBit Uninstaller"
+      ],
+      "publisher": [
+        "HiBitSoftware"
+      ],
+      "uninstallKey": [
+        "Uninstaller"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\HiBit Uninstaller",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\HiBit Uninstaller",
+          "note": "用户数据目录（卸载记录 / 工具配置）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\HiBit Uninstaller",
+          "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-idm",
+      "displayName": [
+        "IDM",
+        "Internet Download Manager"
+      ],
+      "publisher": [
+        "Tonec"
+      ],
+      "uninstallKey": [
+        "Internet Download Manager"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Internet Download Manager",
+          "note": "安装目录（32 位安装惯例）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\IDM",
+          "note": "用户配置目录（含下载队列与站点凭据库）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-iqiyi",
+      "displayName": [
+        "iQIYI",
+        "爱奇艺"
+      ],
+      "publisher": [
+        "iQIYI",
+        "爱奇艺"
+      ],
+      "uninstallKey": [
+        "iQIYI"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\IQIYI Video",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\IQIYI Video",
+          "note": "用户数据目录（视频缓存）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-irfanview",
+      "displayName": [
+        "IrfanView"
+      ],
+      "publisher": [
+        "Irfan Skiljan"
+      ],
+      "uninstallKey": [
+        "IrfanView"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\IrfanView",
+          "note": "安装目录（32 位安装惯例）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\IrfanView",
+          "note": "用户配置目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-k-lite",
+      "displayName": [
+        "K-Lite Codec Pack"
+      ],
+      "publisher": [
+        "Codec Guide"
+      ],
+      "uninstallKey": [
+        "K-Lite Codec Pack"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\K-Lite Codec Pack",
+          "note": "安装目录（32 位安装惯例）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-mailmaster",
+      "displayName": [
+        "网易邮箱大师"
+      ],
+      "publisher": [
+        "NetEase",
+        "网易"
+      ],
+      "uninstallKey": [
+        "MailMaster"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Netease\\MailMaster",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Netease\\MailMaster",
+          "note": "用户数据目录（与网易云音乐同级，仅本程序独占）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-meeting-teams",
+      "displayName": [
+        "Microsoft Teams"
+      ],
+      "publisher": [
+        "Microsoft"
+      ],
+      "uninstallKey": [
+        "Microsoft Teams"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Microsoft\\Teams",
+          "note": "经典版缓存目录（new Teams 不落此处）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-meitu",
+      "displayName": [
+        "Meitu",
+        "美图秀秀"
+      ],
+      "publisher": [
+        "Meitu",
+        "美图"
+      ],
+      "uninstallKey": [
+        "Meitu"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Meitu",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Meitu",
+          "note": "用户配置目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-nordvpn",
+      "displayName": [
+        "NordVPN"
+      ],
+      "publisher": [
+        "Nord Security",
+        "NordVPN"
+      ],
+      "uninstallKey": [
+        "NordVPN"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\NordVPN",
+          "note": "用户数据目录（缓存与连接日志）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\NordVPN",
+          "note": "安装目录"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\NordVPN",
+          "note": "当前用户配置键"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-notepad-plus-plus",
+      "displayName": [
+        "Notepad++"
+      ],
+      "publisher": [
+        "Don HO",
+        "Notepad++"
+      ],
+      "uninstallKey": [
+        "Notepad++"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Notepad++",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Notepad++",
+          "note": "用户配置目录（含插件配置）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-obs-studio",
+      "displayName": [
+        "OBS Studio",
+        "Open Broadcaster Software"
+      ],
+      "publisher": [
+        "OBS Project"
+      ],
+      "uninstallKey": [
+        "OBS Studio"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\obs-studio",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\obs-studio",
+          "note": "用户配置目录（场景集与插件）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-pidgin",
+      "displayName": [
+        "Pidgin"
+      ],
+      "publisher": [
+        "Pidgin"
+      ],
+      "uninstallKey": [
+        "Pidgin"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Pidgin",
+          "note": "安装目录（32 位安装惯例）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\.purple",
+          "note": "用户数据目录（libpurple 账号与日志）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-potplayer",
+      "displayName": [
+        "PotPlayer"
+      ],
+      "publisher": [
+        "Kakao"
+      ],
+      "uninstallKey": [
+        "PotPlayer"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\PotPlayerMini64",
+          "note": "用户配置目录（64 位迷你版；主程序目录随安装位置变化，未登记）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-protonvpn",
+      "displayName": [
+        "Proton VPN",
+        "ProtonVPN"
+      ],
+      "publisher": [
+        "Proton"
+      ],
+      "uninstallKey": [
+        "Proton VPN"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Proton\\Proton VPN",
+          "note": "用户数据目录（Proton 套件子目录）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Proton\\Proton VPN",
+          "note": "安装目录（Proton 套件目录布局）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Proton",
+          "note": "当前用户配置键（套件级）"
+        }
+      ],
+      "ver": 20261006
     },
     {
       "id": "residue-qq",
@@ -234,178 +947,443 @@
           "note": "当前用户配置键（QQNT）"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-mailmaster",
+      "id": "residue-qq-music",
       "displayName": [
-        "网易邮箱大师"
+        "QQMusic",
+        "QQ音乐"
       ],
       "publisher": [
-        "NetEase",
-        "网易"
+        "Tencent",
+        "腾讯"
       ],
       "uninstallKey": [
-        "MailMaster"
+        "QQMusic"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES(X86)%\\Netease\\MailMaster",
+          "target": "%PROGRAMFILES(X86)%\\Tencent\\QQMusic",
           "note": "安装目录"
         },
         {
           "kind": "folder",
-          "target": "%LOCALAPPDATA%\\Netease\\MailMaster",
-          "note": "用户数据目录（与网易云音乐同级，仅本程序独占）"
+          "target": "%APPDATA%\\Tencent\\QQMusic",
+          "note": "用户数据目录（歌曲缓存）"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-hibit",
+      "id": "residue-roboform",
       "displayName": [
-        "HiBit Uninstaller"
+        "RoboForm"
       ],
       "publisher": [
-        "HiBitSoftware"
+        "Siber Systems"
       ],
       "uninstallKey": [
-        "Uninstaller"
+        "RoboForm"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES(X86)%\\HiBit Uninstaller",
-          "note": "安装目录"
+          "target": "%PROGRAMFILES%\\Siber Systems",
+          "note": "安装目录（以发行商命名）"
         },
         {
           "kind": "folder",
-          "target": "%APPDATA%\\HiBit Uninstaller",
-          "note": "用户数据目录（卸载记录 / 工具配置）"
+          "target": "%APPDATA%\\RoboForm",
+          "note": "用户数据目录"
         },
         {
           "kind": "reg_key",
-          "target": "HKCU\\Software\\HiBit Uninstaller",
+          "target": "HKCU\\Software\\RoboForm",
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-everything",
+      "id": "residue-skype",
       "displayName": [
-        "Everything"
+        "Skype"
       ],
       "publisher": [
-        "voidtools"
+        "Microsoft",
+        "Skype"
       ],
       "uninstallKey": [
-        "Everything"
+        "Skype"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES%\\Everything",
-          "note": "安装目录"
+          "target": "%APPDATA%\\Skype",
+          "note": "用户数据目录（聊天记录与缓存）"
         },
         {
           "kind": "folder",
-          "target": "%APPDATA%\\Everything",
-          "note": "用户配置（Everything.ini / 搜索历史）"
-        },
-        {
-          "kind": "folder",
-          "target": "%LOCALAPPDATA%\\Everything",
-          "note": "索引数据库（Everything.db）"
-        },
-        {
-          "kind": "reg_key",
-          "target": "HKLM\\SOFTWARE\\voidtools\\Everything",
-          "note": "程序配置键"
+          "target": "%LOCALAPPDATA%\\Skype",
+          "note": "用户缓存目录"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-clash-verge",
+      "id": "residue-slack",
       "displayName": [
-        "Clash Verge"
+        "Slack"
       ],
       "publisher": [
-        "Clash Verge Rev"
+        "Slack Technologies"
       ],
       "uninstallKey": [
-        "Clash Verge"
+        "Slack"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES%\\Clash Verge",
+          "target": "%APPDATA%\\Slack",
+          "note": "用户数据目录（Chromium 内核缓存）"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Slack",
+          "note": "更新缓存目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-snipaste",
+      "displayName": [
+        "Snipaste"
+      ],
+      "publisher": [
+        "Le Liu"
+      ],
+      "uninstallKey": [
+        "Snipaste"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Snipaste",
+          "note": "用户配置目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-spotify",
+      "displayName": [
+        "Spotify"
+      ],
+      "publisher": [
+        "Spotify"
+      ],
+      "uninstallKey": [
+        "Spotify"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Spotify",
+          "note": "应用本体与缓存目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Spotify",
+          "note": "更新缓存目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-sublime-text",
+      "displayName": [
+        "Sublime Text"
+      ],
+      "publisher": [
+        "Sublime HQ"
+      ],
+      "uninstallKey": [
+        "Sublime Text"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Sublime Text",
           "note": "安装目录"
         },
         {
           "kind": "folder",
-          "target": "%LOCALAPPDATA%\\io.github.clash-verge-rev.clash-verge-rev",
-          "note": "用户配置与订阅数据目录"
+          "target": "%APPDATA%\\Sublime Text",
+          "note": "用户配置目录（包与许可证）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-sumatrapdf",
+      "displayName": [
+        "SumatraPDF"
+      ],
+      "publisher": [
+        "Krzysztof Kowalczyk"
+      ],
+      "uninstallKey": [
+        "SumatraPDF"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\SumatraPDF",
+          "note": "用户数据目录（设置与缓存）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-teamviewer",
+      "displayName": [
+        "TeamViewer"
+      ],
+      "publisher": [
+        "TeamViewer"
+      ],
+      "uninstallKey": [
+        "TeamViewer"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\TeamViewer",
+          "note": "安装目录（32 位安装惯例）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\TeamViewer",
+          "note": "用户配置目录"
         },
         {
           "kind": "reg_key",
-          "target": "HKCU\\Software\\Clash Verge Rev",
+          "target": "HKCU\\Software\\TeamViewer",
           "note": "当前用户配置键"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-douyin",
+      "id": "residue-telegram",
       "displayName": [
-        "抖音"
+        "Telegram",
+        "Telegram Desktop"
       ],
       "publisher": [
-        "Microlive",
-        "ByteDance"
+        "Telegram",
+        "Telegram FZ-LLC"
       ],
       "uninstallKey": [
-        "douyin"
+        "Telegram Desktop"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%PROGRAMFILES(X86)%\\ByteDance\\douyin",
+          "target": "%APPDATA%\\Telegram Desktop",
+          "note": "用户数据目录（会话与媒体缓存）"
+        },
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Telegram Desktop",
+          "note": "更新缓存目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-thunder",
+      "displayName": [
+        "Thunder",
+        "迅雷"
+      ],
+      "publisher": [
+        "Xunlei",
+        "迅雷"
+      ],
+      "uninstallKey": [
+        "Thunder"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Thunder",
           "note": "安装目录"
         },
         {
           "kind": "folder",
-          "target": "%APPDATA%\\douyin",
-          "note": "用户数据目录（Chromium 内核缓存与配置）"
+          "target": "%APPDATA%\\Thunder",
+          "note": "用户数据目录（任务记录）"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
     },
     {
-      "id": "residue-potplayer",
+      "id": "residue-vlc",
       "displayName": [
-        "PotPlayer"
+        "VLC",
+        "VLC media player"
       ],
       "publisher": [
-        "Kakao"
+        "VideoLAN"
       ],
       "uninstallKey": [
-        "PotPlayer"
+        "VLC"
       ],
       "residue": [
         {
           "kind": "folder",
-          "target": "%APPDATA%\\PotPlayerMini64",
-          "note": "用户配置目录（64 位迷你版；主程序目录随安装位置变化，未登记）"
+          "target": "%PROGRAMFILES%\\VideoLAN\\VLC",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\vlc",
+          "note": "用户配置目录（ML.xspf 与缓存）"
         }
       ],
-      "ver": 20261004
+      "ver": 20261006
+    },
+    {
+      "id": "residue-vscode",
+      "displayName": [
+        "Microsoft Visual Studio Code",
+        "Visual Studio Code"
+      ],
+      "publisher": [
+        "Microsoft"
+      ],
+      "uninstallKey": [
+        "Visual Studio Code"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%LOCALAPPDATA%\\Programs\\Microsoft VS Code",
+          "note": "用户级安装目录（默认装此处）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Code",
+          "note": "用户数据目录（扩展与工作区缓存）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-wechat",
+      "displayName": [
+        "微信",
+        "WeChat"
+      ],
+      "publisher": [
+        "Tencent",
+        "腾讯"
+      ],
+      "uninstallKey": [
+        "WeChat"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Tencent\\WeChat",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Tencent\\WeChat",
+          "note": "用户数据目录（聊天记录另存路径不在本规则面）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Tencent\\WeChat",
+          "note": "当前用户配置键"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\Tencent\\Weixin",
+          "note": "安装目录（微信 4.x / Weixin）"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Tencent\\xwechat",
+          "note": "用户数据目录（微信 4.x，新目录名）"
+        },
+        {
+          "kind": "reg_key",
+          "target": "HKCU\\Software\\Tencent\\Weixin",
+          "note": "当前用户配置键（微信 4.x）"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-winrar",
+      "displayName": [
+        "WinRAR"
+      ],
+      "publisher": [
+        "RARLAB",
+        "win.rar"
+      ],
+      "uninstallKey": [
+        "WinRAR"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES%\\WinRAR",
+          "note": "安装目录"
+        },
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\WinRAR",
+          "note": "用户配置目录"
+        }
+      ],
+      "ver": 20261006
+    },
+    {
+      "id": "residue-zoom",
+      "displayName": [
+        "Zoom"
+      ],
+      "publisher": [
+        "Zoom Video Communications"
+      ],
+      "uninstallKey": [
+        "Zoom"
+      ],
+      "residue": [
+        {
+          "kind": "folder",
+          "target": "%APPDATA%\\Zoom",
+          "note": "用户数据目录（会议记录与日志）"
+        },
+        {
+          "kind": "folder",
+          "target": "%PROGRAMFILES(X86)%\\Zoom",
+          "note": "安装目录（32 位安装惯例）"
+        }
+      ],
+      "ver": 20261006
     }
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "A7ktLG309AZga1kKOIpO9cd7IgnKy8s2j81DtyEAD4xTjXabPuYWbyN2y56uX6CjpeXU6xbVcx4sVQVNQE7kCw=="
+    "sig": "wB/FcQb90qjAErtFs/0RXXYDqZn0CbBiWx0ZeMMkoF2/ADO0od7o07NHZaVXI1IxShVesIIyOuNa65/giI5cCQ=="
   }
 }
