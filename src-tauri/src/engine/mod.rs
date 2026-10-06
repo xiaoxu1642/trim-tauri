@@ -20,6 +20,7 @@ pub mod pssteps;
 pub mod rule_schema;
 pub mod rules_signature;
 pub mod shellicon;
+pub mod snapshot;
 /// A11 还原点原生侧（只读 spike，未接任何 IPC 命令）
 pub mod sysrestore;
 pub mod sysinfo;
@@ -60,4 +61,24 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Unix 天数（1970-01-01 起）→ 公历 `(年, 月, 日)`。
+///
+/// Howard Hinnant `civil_from_days`（含闰年修正）。P2-3（审查 2026-10-07）：该算法此前在
+/// `engine::log` / `engine::delete_manifest` / `commands::settings` /
+/// `commands::uninstall::list_run` / `commands::optimizer::restore_point` 各存一份，
+/// 收敛为这里的唯一实现。（`native-scanner` 是独立 crate，无法反向依赖本 crate，
+/// 其 `scan.rs::civil_year` 只取年份，另保一份同源算法。）
+pub fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (y + if m <= 2 { 1 } else { 0 }, m, d)
 }

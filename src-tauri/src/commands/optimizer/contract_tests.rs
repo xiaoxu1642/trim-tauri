@@ -906,8 +906,9 @@ fn strip_js_comments(src: &str) -> String {
         assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "expand", REG_SZ, &utf16z(r"C:\Users\me\AppData\Roaming")));
         assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "dw", REG_DWORD, &0u32.to_le_bytes()));
 
-        // ③ 还原
-        assert!(restore_backup_values(&backup), "值级还原必须整体成功");
+        // ③ 还原（M-11：构造 ops 一次，写回与回读共用）
+        let ops = build_restore_ops(&backup).expect("备份应能构造还原操作");
+        assert!(restore_backup_values(&ops), "值级还原必须整体成功");
 
         // ④ 绝对期望：还原后注册表里就是这个类型与这串内容
         let now = read_reg_values(&targets).expect("还原后应能读回");

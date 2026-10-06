@@ -58,7 +58,7 @@ fn decrypts_electron44_oscrypt_and_dotnet_dpapi() {
     for (field, plain_field) in [("electron1", "plain"), ("electron2", "plain2")] {
         let cipher = json[field].as_str().unwrap();
         let plain = json[plain_field].as_str().unwrap();
-        let got = decrypt_dpapi_v1(cipher, Some(&key))
+        let got = decrypt_dpapi_v1(cipher, Some(key.as_slice()))
             .unwrap_or_else(|e| panic!("{field} 解密失败: {e}"));
         assert_eq!(got, plain.as_bytes(), "{field} 明文不一致");
         println!("[{field}] AES-256-GCM 解密成功（{} 字节明文）", plain.len());

@@ -998,7 +998,11 @@ pub(super) fn terminate_process(pid: i64) -> Result<(), String> {
             return Err("无法打开目标进程（可能已退出或缺权限）".to_string());
         }
         let rc = kill_ffi::TerminateProcess(h, 1);
-        kill_ffi::CloseHandle(h);
+        // M-7（审查 2026-10-07）：CloseHandle 失败会泄漏内核句柄，此前返回值被直接丢弃。
+        // 终止请求已发出，泄漏不影响本次结果语义，但必须留痕（句柄耗尽是累积症状）。
+        if kill_ffi::CloseHandle(h) == 0 {
+            log::write_log("warn", &format!("结束进程 {pid} 后 CloseHandle 失败，进程句柄可能泄漏"));
+        }
         if rc == 0 {
             return Err("结束进程失败".to_string());
         }

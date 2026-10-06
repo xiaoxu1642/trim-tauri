@@ -53,7 +53,8 @@ pub fn system_disk_list<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, String> {
     guard::guard_readonly(&window)?;
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDriveStringsW};
-    // DRIVE_FIXED = 3（winnt.h 宏；windows 0.61 未导出该常量，按 SDK 原值硬编码）
+    // DRIVE_FIXED = 3（winnt.h 宏；windows 0.61 把它收在 WindowsProgramming 小模块，
+    // 为不引入 Win32_System_WindowsProgramming feature 就地按 SDK 原值声明）
     const DRIVE_FIXED: u32 = 3;
     let mut buf = [0u16; 512];
     let len = unsafe { GetLogicalDriveStringsW(Some(&mut buf)) } as usize;

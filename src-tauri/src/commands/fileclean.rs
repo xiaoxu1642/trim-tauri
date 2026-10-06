@@ -14,15 +14,17 @@
 //! - read-image 仅图片扩展名 + ≤10MB，base64 dataURL。
 //! - 危险操作前 flush_sync；success 语义=通道执行成功（失败明细随 data 返回）。
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use base64::Engine;
 use serde_json::{json, Value};
 use tauri::{Emitter, Runtime, WebviewWindow};
 
+// P2-1（审查 2026-10-07）：路径键统一走 engine 唯一实现（原先本文件另有一份
+// strip_verbatim + Path::components 折叠版，与 finder/startup/appearance 口径不一）
+use crate::engine::paths::path_key;
 use crate::engine::{delete_manifest, guard, log, paths, protect};
 use crate::security;
 
@@ -72,47 +74,6 @@ fn scope_owner(label: &str) -> &str {
         "preview" => "main",
         other => other,
     }
-}
-
-/// 去掉 `\\?\` / `\\?\UNC\` verbatim 前缀（只做比较用，不改实际扫描路径）。
-///
-/// `std::fs::canonicalize` 在 Windows 上会返回 verbatim 形式，而已保存的
-/// `paths.json` 值来自用户手输/目录选择器，通常是普通形式。比较前必须同口径，
-/// 否则同一目录会被判成两个字符串（v2 磁盘清理审计的独立隐患 D）。
-fn strip_verbatim(p: &str) -> Cow<'_, str> {
-    if let Some(rest) = p.strip_prefix(r"\\?\") {
-        if let Some(unc) = rest.strip_prefix("UNC\\") {
-            return Cow::Owned(format!(r"\\{unc}"));
-        }
-        return Cow::Borrowed(rest);
-    }
-    Cow::Borrowed(p)
-}
-
-/// 词法规范化（不触盘）：剥 verbatim 前缀、折叠 . / .. 组件、统一反斜杠、小写、去尾部分隔符。
-fn path_key(p: &str) -> String {
-    let stripped = strip_verbatim(p);
-    let mut s: String = String::new();
-    for c in Path::new(stripped.as_ref()).components() {
-        match c {
-            Component::Prefix(pre) => s.push_str(&pre.as_os_str().to_string_lossy()),
-            Component::RootDir => s.push('\\'),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                // 绝对路径回退：弹掉末段（盘符/根保留）
-                if let Some(pos) = s.rfind('\\').filter(|&i| i > 2) {
-                    s.truncate(pos);
-                }
-            }
-            Component::Normal(n) => {
-                if !s.ends_with('\\') && !s.is_empty() {
-                    s.push('\\');
-                }
-                s.push_str(&n.to_string_lossy());
-            }
-        }
-    }
-    s.trim_end_matches('\\').to_lowercase()
 }
 
 fn config_key(ty: &str) -> &'static str {

@@ -129,7 +129,13 @@ pub(super) fn validate_snapshot_items(items: Option<&Value>, snapshot: &HashMap<
             item.get("path").and_then(|v| v.as_str()),
             known.get("path").and_then(|v| v.as_str()),
         ) {
-            if !a.is_empty() && !b.is_empty() && path_resolve(a) != path_resolve(b) {
+            // M-5（审查 2026-10-07）：Windows 路径大小写不敏感，比较前统一小写，
+            // 否则 `C:\Users\X\a.log` 与 `c:\users\x\A.LOG` 这类同路径不同写法
+            // 会被判成「路径被改写」而误拒合法清理。
+            if !a.is_empty()
+                && !b.is_empty()
+                && path_resolve(a).to_lowercase() != path_resolve(b).to_lowercase()
+            {
                 return None;
             }
         }

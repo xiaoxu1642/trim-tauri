@@ -1,6 +1,6 @@
 [package]
 name = "trim-tauri"
-version = "0.7.1"
+version = "0.7.2"
 description = "Trim"
 authors = ["xiaoxu"]
 edition = "2021"
@@ -64,6 +64,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 base64 = "0.22"
 # D5：Chromium OSCrypt v10 = AES-256-GCM（Phase 0 第 6 项实测，见 safestorage.rs）
 aes-gcm = "0.10"
+# M-19（审查 2026-10-07）：AES 主密钥用完即擦 —— 明文密钥留在堆上会被页面文件取证读到。
+# zeroize 本就在依赖树内（aes-gcm 的传递依赖，Cargo.lock 已解析为 1.9.0），提为直接依赖不增编译成本。
+zeroize = "1"
 # paths:app-icon / paths:file-icon：Shell 图标 → PNG dataURL
 # （Electron app.getFileIcon 返回 NativeImage.toDataURL()，即 PNG；保持格式一致）
 png = "0.17"

@@ -601,10 +601,36 @@ const jsParams = new Map(); // channel -> { keys: string[] }
 // 用平衡扫描而不是 indexOf('}')：嵌套对象（如 execute 的 { groups:[...] }）里有
 // 自己的花括号，直接找下一个 } 会把邻居方法的键也算进来（K4 首版实测 74 条里
 // fileclean:scan 混进了 "fileclean"/"scan" 两个假键）。
+//
+// P3-3（审查 2026-10-07）：原实现只数 `{`/`}`，**字符串字面量与注释里的括号也被计入** ——
+// 载荷里只要出现 `'…{'`、`// }` 这类内容，计数就会提前/滞后收尾（或返回 null 让该通道
+// 静默丢掉参数对拍，D6 便成了瞎的）。这里跟踪「字符串 / 模板串 / 行注释 / 块注释」状态，
+// 括号只认代码本体里的，并把 `\` 转义一并跳过。
 function balancedBrace(text, from) {
   let depth = 0;
   for (let i = from; i < text.length; i++) {
     const c = text[i];
+    // 字符串与模板串：整段跳过（含 `\` 转义），内部括号一律不算
+    if (c === '"' || c === "'" || c === '`') {
+      i++;
+      while (i < text.length && text[i] !== c) {
+        if (text[i] === '\\') i++;
+        i++;
+      }
+      continue;
+    }
+    // 行注释：跳到行尾
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    // 块注释：跳到 `*/`
+    if (c === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
     if (c === '{') depth++;
     else if (c === '}') {
       depth--;

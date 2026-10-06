@@ -13,12 +13,11 @@
 //! - toggle 后把 PS 回写的新路径/屏蔽态同步回快照与缓存（CM-12）。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 
-use crate::engine::{delete_manifest, guard, log, native, paths, protect, shellicon, sysinfo};
+use crate::engine::{delete_manifest, guard, log, native, paths, protect, shellicon, snapshot, sysinfo};
 
 // open-in-regedit 纯原生实现所需（审计 F-05：原内联 PS 改 Win32 等价，见 open_regedit_native）
 use windows::core::{BOOL, PCWSTR};
@@ -26,42 +25,6 @@ use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_SHOWNORMAL, WM_CLOSE,
 };
-
-/// 窗口快照：item.id -> 扫描项（完整字段）
-static SNAPSHOTS: Mutex<Option<HashMap<String, HashMap<String, Value>>>> =
-    Mutex::new(None);
-
-fn snap_get(label: &str) -> Option<HashMap<String, Value>> {
-    SNAPSHOTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|m| m.get(label).cloned())
-}
-
-fn snap_set(label: &str, map: HashMap<String, Value>) {
-    let mut g = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(HashMap::new).insert(label.to_string(), map);
-}
-
-fn snap_clear(label: &str) {
-    if let Some(g) = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        g.remove(label);
-    }
-}
-
-/// 扫描项数组 -> id Map（id 必须是 ≤160 字符的字符串）
-fn snapshot_by_id(items: &[Value]) -> HashMap<String, Value> {
-    let mut m = HashMap::new();
-    for it in items {
-        if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
-            if id.len() <= 160 {
-                m.insert(id.to_string(), it.clone());
-            }
-        }
-    }
-    m
-}
 
 fn cache_file() -> std::path::PathBuf {
     paths::scan_cache_file("contextmenu-scan.json")
@@ -125,11 +88,11 @@ fn normalize_ids(items: Vec<Value>) -> Vec<Value> {
                     index.to_string()
                 }
             };
-            // 审计 P2-12：id 就是整条注册表路径，中文键名 3 字节/字，深路径能超过
-            // `snapshot_by_id` 的 160 字节上限 —— 那种项会被快照悄悄丢掉，于是界面看得到、
-            // 点得动，但 toggle/remove/backup 恒被拒「不是最近一次扫描结果」。
+            // 审计 P2-12：id 就是整条注册表路径，中文键名 3 字节/字，深路径会很长。
             // 超长就换成稳定哈希（同一轮扫描内 id 与快照键仍然一致，且不可能撞车：
-            // 哈希前缀带序号）。
+            // 哈希前缀带序号）。P2-2 起快照侧（`engine::snapshot::by_id`）已不再按长度
+            // 剔除长 id，这里保留短哈希是为了 id 在日志/缓存里可读，并避免长注册表路径
+            // 被下游误当成路径处理。
             let mut id = if base.len() > 160 { format!("id{index}-{:x}", fnv1a(base.as_bytes())) } else { base };
             if !used.insert(id.clone()) {
                 id = format!("{id}#{index}");
@@ -256,8 +219,8 @@ pub async fn contextmenu_scan<R: Runtime>(
 
     if refresh != Some(true) {
         if let Some(cached) = load_cache() {
-            let map = snapshot_by_id(&cached);
-            snap_set(&label, map);
+            let map = snapshot::by_id(&cached);
+            snapshot::set(&label, map);
             if let Some(ts) = crate::security::read_json_or_default(&cache_file())
                 .get("timestamp")
                 .and_then(|v| v.as_i64())
@@ -267,7 +230,7 @@ pub async fn contextmenu_scan<R: Runtime>(
         }
     }
 
-    snap_clear(&label);
+    snapshot::clear(&label);
     log::write_log("info", "扫描右键菜单");
 
     // S3：纯 Rust 原生
@@ -280,7 +243,7 @@ pub async fn contextmenu_scan<R: Runtime>(
     };
     let normalized = normalize_ids(data);
     log::write_log("info", &format!("扫描右键菜单完成: {} 项", normalized.len()));
-    snap_set(&label, snapshot_by_id(&normalized));
+    snapshot::set(&label, snapshot::by_id(&normalized));
     save_cache(&normalized);
     json!({ "success": true, "data": normalized })
 }
@@ -295,7 +258,7 @@ pub async fn contextmenu_backup<R: Runtime>(
         return json!({ "success": false, "message": msg });
     }
     let items = items.unwrap_or_default();
-    let Some(snap) = snap_get(window.label()) else {
+    let Some(snap) = snapshot::get(window.label()) else {
         return json!({ "success": false, "message": "备份项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
@@ -354,7 +317,7 @@ pub async fn contextmenu_remove<R: Runtime>(
         return json!({ "success": false, "message": msg });
     }
     let items = items.unwrap_or_default();
-    let Some(snap) = snap_get(window.label()) else {
+    let Some(snap) = snapshot::get(window.label()) else {
         return json!({ "success": false, "message": "删除项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
@@ -480,11 +443,11 @@ fn push_result(data: &mut Value, mut row: Value, started: &std::time::Instant) {
         .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect();
     if !gone.is_empty() {
-        if let Some(mut s) = snap_get(window.label()) {
+        if let Some(mut s) = snapshot::get(window.label()) {
             for id in &gone {
                 s.remove(id);
             }
-            snap_set(window.label(), s);
+            snapshot::set(window.label(), s);
         }
         if let Some(items) = load_cache() {
             let kept: Vec<Value> = items
@@ -527,7 +490,7 @@ pub async fn contextmenu_toggle<R: Runtime>(
         return json!({ "success": false, "message": msg });
     }
     let items = items.unwrap_or_default();
-    let Some(snap) = snap_get(window.label()) else {
+    let Some(snap) = snapshot::get(window.label()) else {
         return json!({ "success": false, "message": "切换项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
@@ -602,7 +565,7 @@ pub async fn contextmenu_toggle<R: Runtime>(
     // CM-12：回写新路径/屏蔽态到快照 + 缓存
     if let Some(results) = data.get("results").and_then(|v| v.as_array()) {
         let mut touched = false;
-        let mut snap2 = snap_get(window.label()).unwrap_or_default();
+        let mut snap2 = snapshot::get(window.label()).unwrap_or_default();
         let updates: Vec<&Value> = results
             .iter()
             .filter(|r| {
@@ -630,7 +593,7 @@ pub async fn contextmenu_toggle<R: Runtime>(
         }
         if touched {
             let arr: Vec<Value> = snap2.values().cloned().collect();
-            snap_set(window.label(), snap2);
+            snapshot::set(window.label(), snap2);
             save_cache(&arr);
         }
     }
@@ -716,7 +679,7 @@ pub async fn contextmenu_icons<R: Runtime>(
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let Some(snap) = snap_get(window.label()) else {
+    let Some(snap) = snapshot::get(window.label()) else {
         return json!({ "success": true, "data": {} });
     };
     let known: std::collections::HashSet<String> = snap
@@ -796,7 +759,7 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
         return json!({ "success": false, "message": "无效的注册表路径" });
     }
     let wanted = canon_reg_key(&p);
-    let in_snap = snap_get(window.label())
+    let in_snap = snapshot::get(window.label())
         .map(|snap| {
             snap.values()
                 .any(|it| it.get("regPath").map(|v| canon_reg_key(v.as_str().unwrap_or("")) == wanted).unwrap_or(false))
@@ -1105,7 +1068,7 @@ mod tests {
 
     #[test]
     fn snapshot_validation_takes_snapshot_copy() {
-        let snap = snapshot_by_id(&[json!({ "id": "a", "regPath": "HKCU\\X" })]);
+        let snap = snapshot::by_id(&[json!({ "id": "a", "regPath": "HKCU\\X" })]);
         // 未知 id 拒绝
         assert!(validate_snapshot_items(&[json!({ "id": "x" })], &snap).is_none());
         // 数量上限
@@ -1133,11 +1096,11 @@ mod tests {
         assert_eq!(ids.len(), 6, "每条都必须拿到 id：{ids:?}");
         let uniq: std::collections::HashSet<&str> = ids.iter().copied().collect();
         assert_eq!(uniq.len(), 6, "id 必须唯一，实得 {ids:?}");
-        // 超长路径要换成短哈希，否则会被 snapshot_by_id 的 160 字节上限丢掉
+        // 超长路径要换成短哈希（id 保持短形态；快照侧 P2-2 起已不按长度剔除）
         for id in &ids {
-            assert!(id.len() <= 160, "id 超过快照上限（{id}）");
+            assert!(id.len() <= 160, "id 超过短哈希上限（{id}）");
         }
         // 快照必须真收进 6 条（丢件的表现就是这里少一条）
-        assert_eq!(snapshot_by_id(&out).len(), 6);
+        assert_eq!(snapshot::by_id(&out).len(), 6);
     }
 }

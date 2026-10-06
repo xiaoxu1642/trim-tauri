@@ -4,7 +4,7 @@
 //! （登记在 check-ps-callsites 的 D 表）；创建还原点是最后防线的兜底，默认不自动删旧。
 //! InflightGuard 在 Drop 里释放在途标记，异常路径也要放行下一次创建。
 
-use crate::engine::{guard, log, optimization_state as opt_state, sysinfo};
+use crate::engine::{civil_from_days, guard, log, optimization_state as opt_state, sysinfo};
 use serde_json::{Value, json};
 use tauri::{Runtime, WebviewWindow};
 use super::backup_restore::*;
@@ -41,17 +41,28 @@ pub(super) fn parse_dmtf(raw: &str) -> Option<String> {
     Some(ms_to_iso(utc_ms))
 }
 
-/// Windows 本地时区 Bias（分钟；UTC = 本地 + Bias）
+/// Windows 本地时区 Bias（分钟；UTC = 本地 + Bias）。
+///
+/// M-10（审查 2026-10-07）：原实现只取 `Bias`（标准时间档），夏令时生效期间漏加
+/// `DaylightBias` —— 会把 DMTF `+000`（本地时间）换算成差一小时的 UTC，还原点创建
+/// 时间显示偏一小时。`GetTimeZoneInformation` 的返回值就标明当前处于标准档还是夏令档
+/// （TIME_ZONE_ID_DAYLIGHT=2），据此补 `DaylightBias`。
 pub(super) fn local_tz_bias_minutes() -> i64 {
-    use windows::Win32::System::Time::GetTimeZoneInformation;
+    use windows::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
     unsafe {
-        let mut tz = windows::Win32::System::Time::TIME_ZONE_INFORMATION::default();
+        let mut tz = TIME_ZONE_INFORMATION::default();
         // 返回 TIME_ZONE_ID_*(0/1/2)；0xFFFFFFFF 才是失败。ID_UNKNOWN(0) 时 Bias 仍有效。
-        if GetTimeZoneInformation(&mut tz) != u32::MAX {
-            tz.Bias as i64
+        let id = GetTimeZoneInformation(&mut tz);
+        if id == u32::MAX {
+            return 0;
+        }
+        let daylight = if id == TIME_ZONE_ID_DAYLIGHT {
+            tz.DaylightBias as i64
         } else {
             0
-        }
+        };
+        tz.Bias as i64 + daylight
     }
 }
 
@@ -76,27 +87,14 @@ pub(super) fn ms_to_iso(ms: i64) -> String {
     let milli = ms.rem_euclid(1000);
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
-    // days_from_civil 的逆（复用 delete_manifest 同源算法）：借用 civil_from_days
-    let (y, m, d) = civil_from_days_pub(days);
+    // days_from_civil 的逆（engine 唯一实现，P2-3 去重）
+    let (y, m, d) = civil_from_days(days);
     format!(
         "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{milli:03}Z",
         rem / 3600,
         (rem % 3600) / 60,
         rem % 60
     )
-}
-
-pub(super) fn civil_from_days_pub(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (y + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
 /// 命令层直调收件箱 PS 的薄封装（v3-K1：还原点查询属 WMI 面，交给 System32 自带的
@@ -243,7 +241,11 @@ pub(super) fn recycle_freq_override() -> Result<String, String> {
     let Some(values) = some_values.filter(|a| !a.is_empty()) else {
         return Err("没有可用于恢复的备份记录".to_string());
     };
-    if !restore_backup_values(&values) {
+    // M-11：构造还原操作只做一次，写回与（调用方后续）回读核对共用同一份 ops。
+    let Ok(ops) = build_restore_ops(&values) else {
+        return Err("备份数据无法解析成还原操作".to_string());
+    };
+    if !restore_backup_values(&ops) {
         return Err("写回注册表失败".to_string());
     }
     let any_exists = values

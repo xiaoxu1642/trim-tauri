@@ -157,6 +157,43 @@ pub(super) fn valid_files_manifest_name(name: &str) -> bool {
     !stem.is_empty() && stem.len() <= 20 && stem.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// 还原目标（清单 `path` 字段）准入 —— C-2（审查 2026-10-07）。
+///
+/// 与同域 `rel` 的穿越准入同源：两字段出自**同一份可被外部写入的清单 JSON**，
+/// 副本侧的检查不能替代目标侧。判据（任一不满足即拒，fail-closed）：
+/// - 非空、不含 NUL；
+/// - 不含 `..` 组件（折叠后即穿越）；
+/// - 不是设备/对象管理器路径（`\\.\` / `\??\`，Win32 会跳过常规路径解析）；
+/// - 是绝对路径：盘符绝对形态（`X:\`）或 UNC（`\\server\share`）。
+/// 不在此处判受保护面 —— 那由调用方的 `is_path_protected` 负责（两层职责分离）。
+pub(super) fn valid_restore_target(p: &str) -> bool {
+    let t = p.trim();
+    if t.is_empty() || t.contains('\0') {
+        return false;
+    }
+    if t.starts_with(r"\\.\") || t.starts_with(r"\??\") {
+        return false;
+    }
+    if t.split(|c| c == '\\' || c == '/').any(|seg| seg == "..") {
+        return false;
+    }
+    let bytes = t.as_bytes();
+    let drive_abs = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    // UNC 要求至少 `\\server\share` 两段；`\\?\…` 形态允许（长路径），由保护面归一化剥前缀
+    let unc_parts = if t.starts_with(r"\\") {
+        t[2..]
+            .split(|c| c == '\\' || c == '/')
+            .filter(|s| !s.is_empty())
+            .count()
+    } else {
+        0
+    };
+    drive_abs || unc_parts >= 2
+}
+
 /// cleanup:file-backup-list — 列出永久删批次的文件备份清单（只读；≤50 份按时间倒序）
 #[tauri::command]
 pub fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
@@ -245,6 +282,12 @@ pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
     let Some(original) = entry.get("path").and_then(|s| s.as_str()) else {
         return json!({ "success": false, "message": "条目缺少原始路径" });
     };
+    // C-2（审查 2026-10-07）：`original` 与 `rel` 来自同一份可被外部写入的清单 JSON，
+    // 只对副本侧做穿越准入是不够的 —— 目标侧少了这道闸，篡改清单即可让备份落到
+    // 任意**未被保护面覆盖**的位置（如启动目录）。与 `rel` 同口径收紧后再走保护面判定。
+    if !valid_restore_target(original) {
+        return json!({ "success": false, "message": "原始路径非法，已拒绝还原" });
+    }
     if crate::engine::protect::is_path_protected(original) {
         return json!({ "success": false, "message": "原始路径现为受保护路径，已拒绝还原" });
     }
@@ -274,6 +317,37 @@ pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
             log::write_log("error", &format!("cleanup 文件备份还原失败: {original} {e}"));
             json!({ "success": false, "message": format!("拷回失败: {e}") })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_restore_target as ok;
+
+    /// C-2（审查 2026-10-07）回归：还原目标准入必须拦住穿越与设备路径。
+    /// 每条都对应一个「篡改清单后把备份落到别处」的具体形状 —— 去掉守卫这里就红。
+    #[test]
+    fn restore_target_rejects_traversal_and_device_paths() {
+        // 相对/穿越：折叠后会落到备份根或系统目录之外
+        assert!(!ok(r"..\..\Windows\System32\evil.dll"));
+        assert!(!ok(r"C:\Users\me\..\..\Windows\evil.dll"));
+        assert!(!ok(r"foo\bar.txt"), "盘符相对路径不是绝对路径，必须拒");
+        assert!(!ok(r"C:foo\bar.txt"), "盘符相对（无根）必须拒");
+        // 设备/对象管理器路径：Win32 会跳过常规解析，保护面归一化也拦不住
+        assert!(!ok(r"\\.\C:\evil.dll"));
+        assert!(!ok(r"\??\C:\evil.dll"));
+        // 空与非法字符
+        assert!(!ok("   "));
+        assert!(!ok("C:\\a\0b"));
+    }
+
+    #[test]
+    fn restore_target_accepts_absolute_paths() {
+        // 正常落盘形态（cleanup.rs 写入清单的就是这两种）不能被误伤
+        assert!(ok(r"C:\Program Files\App\cfg.ini"));
+        assert!(ok(r"D:/data/file.log"), "正斜杠同为绝对形态");
+        assert!(ok(r"\\server\share\dir\file.txt"), "UNC 至少要 server\\share 两段");
+        assert!(!ok(r"\\server"), "UNC 只有一段不是合法共享路径");
     }
 }
 

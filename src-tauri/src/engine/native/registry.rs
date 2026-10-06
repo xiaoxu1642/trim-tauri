@@ -10,6 +10,7 @@
 
 
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
 use super::common::*;
 /// 读注册表 DWORD，失败返回 -1（保持 unsafe 签名，调用方维持既有 unsafe 块）
@@ -109,7 +110,12 @@ pub(super) unsafe fn reg_query_value(hk: HKEY, name: &str) -> Option<(REG_VALUE_
     Some((ty, buf))
 }
 
-/// 枚举注册表键的所有值名
+/// 枚举注册表键的所有值名。
+///
+/// 审查 M-2（2026-10-07）：原实现把**任何**错误都当「枚举结束」—— 权限不足等情况下
+/// 静默返回空集，上层把「读不到」当成「没有」，扫描结果不完整且无从察觉。现在只把
+/// `ERROR_NO_MORE_ITEMS`(259) 认作正常结束；其余错误记一条 warn 后再终止（不中断
+/// 调用方，但留下痕迹）。键/值名长度受 Windows 限制（≤255 字符），260 缓冲足够。
 pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
     let mut names = Vec::new();
     let mut index = 0u32;
@@ -122,7 +128,14 @@ pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
             &mut name_len,
             None, None, None, None,
         );
-        if r.is_err() { break; }
+        // RegEnumValueW 直接返回 LSTATUS（WIN32_ERROR）
+        if r == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        if r.is_err() {
+            crate::engine::log::write_log("warn", &format!("注册表值枚举非正常结束（index={index}, err={}）", r.0));
+            break;
+        }
         let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
         if !name.is_empty() { names.push(name); }
         index += 1;
@@ -130,7 +143,7 @@ pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
     names
 }
 
-/// 枚举注册表键的所有子键名
+/// 枚举注册表键的所有子键名。错误处置同 [`reg_enum_values`]（M-2）。
 pub(super) unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
     let mut names = Vec::new();
     let mut index = 0u32;
@@ -143,7 +156,13 @@ pub(super) unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
             &mut name_len,
             None, None, None, None,
         );
-        if r.is_err() { break; }
+        if r == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        if r.is_err() {
+            crate::engine::log::write_log("warn", &format!("注册表子键枚举非正常结束（index={index}, err={}）", r.0));
+            break;
+        }
         names.push(String::from_utf16_lossy(&name_buf[..name_len as usize]));
         index += 1;
     }

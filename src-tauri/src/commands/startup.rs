@@ -11,44 +11,15 @@
 //! - add：原生对话框选程序（白名单扩展名），写 HKCU Run 键；同名项 EXISTS 冲突不覆盖。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::engine::{delete_manifest, guard, log, native, paths, sysinfo};
+use crate::engine::paths::path_key;
+use crate::engine::{delete_manifest, guard, log, native, paths, snapshot, sysinfo};
 // 审查 v2-F7：系统工具走绝对路径，不用裸进程名
 use crate::engine::systembin::system_tool;
-
-static SNAPSHOTS: Mutex<Option<HashMap<String, HashMap<String, Value>>>> =
-    Mutex::new(None);
-
-fn snap_get(label: &str) -> Option<HashMap<String, Value>> {
-    SNAPSHOTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|m| m.get(label).cloned())
-}
-
-fn snap_set(label: &str, map: HashMap<String, Value>) {
-    let mut g = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(HashMap::new).insert(label.to_string(), map);
-}
-
-fn snapshot_by_id(items: &[Value]) -> HashMap<String, Value> {
-    let mut m = HashMap::new();
-    for it in items {
-        if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
-            // 不再按长度静默剔除：长路径/长参数的启动项（id 是 `reg|<path>|<name>`）
-            // 被剔除后，禁用/删除/打开位置会永远回「不是最近一次扫描结果」，
-            // 而重扫同样进不了快照——用户被引导做一件必然无效的事。
-            m.insert(id.to_string(), it.clone());
-        }
-    }
-    m
-}
 
 fn cache_file() -> std::path::PathBuf {
     paths::scan_cache_file("startup-scan.json")
@@ -93,10 +64,6 @@ fn normalize_ids(items: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-fn path_key(p: &str) -> String {
-    p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
-}
-
 /// 校验全部命中快照，返回快照副本（副作用参数不可由调用方篡改）。
 fn validate_snapshot_items(items: &[Value], snap: &HashMap<String, Value>) -> Option<Vec<Value>> {
     if items.is_empty() || items.len() > 500 {
@@ -138,12 +105,12 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
 
     if refresh != Some(true) {
         if let Some((data, ts)) = load_cache() {
-            snap_set(&label, snapshot_by_id(&data));
+            snapshot::set(&label, snapshot::by_id(&data));
             return json!({ "success": true, "data": data, "cached": true, "cachedAt": ts });
         }
     }
 
-    snap_set(&label, HashMap::new());
+    snapshot::set(&label, HashMap::new());
 
     // S3：纯 Rust 原生
     let data: Vec<Value> = match tauri::async_runtime::spawn_blocking(native::startup_scan).await {
@@ -159,7 +126,7 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
     };
 
     let normalized = normalize_ids(data);
-    snap_set(&label, snapshot_by_id(&normalized));
+    snapshot::set(&label, snapshot::by_id(&normalized));
     save_cache(&normalized);
     json!({ "success": true, "data": normalized })
 }
@@ -177,7 +144,7 @@ pub async fn startup_toggle<R: Runtime>(
     if items.is_empty() {
         return json!({ "success": false, "message": "缺少启动项" });
     }
-    let Some(snap) = snap_get(window.label()) else {
+    let Some(snap) = snapshot::get(window.label()) else {
         return json!({ "success": false, "message": "启动项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
@@ -216,7 +183,7 @@ pub async fn startup_delete<R: Runtime>(
     if items.is_empty() {
         return json!({ "success": false, "message": "缺少启动项" });
     }
-    let Some(snap) = snap_get(window.label()) else {
+    let Some(snap) = snapshot::get(window.label()) else {
         return json!({ "success": false, "message": "启动项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
@@ -450,7 +417,7 @@ mod tests {
 
     #[test]
     fn snapshot_items_only() {
-        let snap = snapshot_by_id(&[json!({ "id": "r1", "filePath": "C:\\A\\x.lnk" })]);
+        let snap = snapshot::by_id(&[json!({ "id": "r1", "filePath": "C:\\A\\x.lnk" })]);
         assert!(validate_snapshot_items(&[json!({ "id": "r1" })], &snap).is_some());
         assert!(validate_snapshot_items(&[json!({ "id": "nope" })], &snap).is_none());
         // filePath 与快照不一致即拒绝（防替换删除目标）

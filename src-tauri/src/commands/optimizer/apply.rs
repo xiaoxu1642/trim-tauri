@@ -198,7 +198,10 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
     // 提权实例在 %TEMP% 写可预测路径的 .reg 再以管理员 reg import，是经典 TOCTOU 窗口。
     // 与 pwsh/mod.rs 同口径：Err 直接失败。
     let tmp_dir = crate::engine::paths::temp_script_dir()?;
-    let _ = std::fs::create_dir_all(&tmp_dir);
+    // P1-6（审查 2026-10-07）：原为 `let _ = create_dir_all(...)` —— 建目录失败被静默吞掉，
+    // 执行链会在一个写不进去的私有 tmp 下继续跑（reparse 点/权限异常时）。与 temp_script_dir
+    // 的 Err 语义一致：建不出来就直接失败，绝不降级、不继续。
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("临时脚本目录不可用: {e}"))?;
 
     for (i, s) in steps.iter().enumerate() {
         let pct = (((i + 1) as f64 / total as f64) * 100.0).round() as u32;

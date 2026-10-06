@@ -21,6 +21,14 @@ pub(super) fn to_wide(s: &str) -> Vec<u16> {
 
 // ==================== 注册表读取助手（本文件自含，不动 native.rs 私有层） ====================
 
+/// 字符串类注册表值的字节上限（M-13，审查 2026-10-07）。
+///
+/// `RegQueryValueExW` 首次查询回报的 `size` 直接来自注册表数据，随后被用来
+/// `vec![0u8; size as usize]`。损坏或恶意写入的值可回报一个超大 size 让分配直接 OOM/panic。
+/// 正常 REG_SZ / REG_MULTI_SZ 远小于此（注册表值本身有 1MB 量级上限），超限一律按
+/// 「读不到」处理（fail-closed），绝不按报告的长度去分配。
+const MAX_REG_STR_BYTES: u32 = 4 * 1024 * 1024;
+
 pub(super) unsafe fn reg_sz(hk: windows::Win32::System::Registry::HKEY, name: &str) -> Option<String> {
     use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
     let nm = to_wide(name);
@@ -31,6 +39,9 @@ pub(super) unsafe fn reg_sz(hk: windows::Win32::System::Registry::HKEY, name: &s
     }
     if ty.0 != 1 && ty.0 != 2 {
         return None; // 只读 REG_SZ / REG_EXPAND_SZ
+    }
+    if size == 0 || size > MAX_REG_STR_BYTES {
+        return None; // M-13：空值无需读；超限视为不可信，不按报告长度分配
     }
     let mut buf = vec![0u8; size as usize];
     let ok = RegQueryValueExW(hk, windows::core::PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_ok();
@@ -94,6 +105,9 @@ pub(super) unsafe fn reg_multi_sz(hk: windows::Win32::System::Registry::HKEY, na
     }
     if ty.0 != 7 || size < 4 {
         return Vec::new(); // 只认 REG_MULTI_SZ（至少要两个 NUL 才是合法空表）
+    }
+    if size > MAX_REG_STR_BYTES {
+        return Vec::new(); // M-13：超限视为不可信，不按报告长度分配
     }
     let mut buf = vec![0u8; size as usize];
     let mut got = size;

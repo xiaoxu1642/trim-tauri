@@ -234,12 +234,10 @@ fn bg_dir() -> PathBuf {
     paths::app_data_dir().join("backgrounds")
 }
 
-/// 词法绝对化 + 小写化（Windows 路径大小写不敏感），不触盘、可折叠 `..`
+/// 路径比对键：委托 `engine::paths::path_key` 的唯一实现（P2-1 去重）。
+/// 本域调用点传的是 `&Path`（含 `.parent().map(path_key)` 形态），这里只做一次字符串化转接。
 fn path_key(p: &Path) -> String {
-    std::path::absolute(p)
-        .unwrap_or_else(|_| p.to_path_buf())
-        .to_string_lossy()
-        .to_lowercase()
+    crate::engine::paths::path_key(&p.to_string_lossy())
 }
 
 fn bg_ext_ok(name: &str) -> bool {

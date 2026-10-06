@@ -503,6 +503,76 @@ fn copy_dir_missing_only(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 路径比较键（纯词法，不触盘）：`path.resolve(p).toLowerCase()` 的等价物。
+///
+/// P2-1（审查 2026-10-07）：此前 finder / fileclean / startup / appearance 各有一份
+/// 宽严不一的实现（有的只 replace + lowercase、有的走 `std::path::absolute`），
+/// 同一路径在不同域可能算成两个键，于是「刚扫到的项」在写操作里被判成「不是本次扫描结果」。
+/// 收敛为这里的唯一实现，口径：
+/// 剥 `\\?\` / `\\?\UNC\` verbatim 前缀 → 相对路径拼进程 CWD → 拆出**不可折叠**的根前缀
+/// （盘符 `X:` 或 UNC `\\server\share`）→ 折叠 `.` / `..` → 统一 `\` → 去尾分隔符 → 小写。
+///
+/// 注意：`..` 只做词法回退（弹掉上一段），不解析 junction/符号链接 —— 与 Node
+/// `path.resolve` 同口径，调用方不得据此做安全判定（那是 `protect` 的职责）。
+pub fn path_key(p: &str) -> String {
+    let stripped = if let Some(rest) = p.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = p.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        p.to_string()
+    };
+    let mut text = stripped;
+    let rooted = text.starts_with('\\')
+        || text.starts_with('/')
+        || text
+            .as_bytes()
+            .get(0..2)
+            .map(|b| b[0].is_ascii_alphabetic() && b[1] == b':')
+            .unwrap_or(false);
+    if !rooted {
+        // 相对路径按进程 CWD 解析（对照 Node path.resolve 的 CWD 基准）
+        if let Ok(cwd) = std::env::current_dir() {
+            text = format!("{}\\{}", cwd.to_string_lossy(), text);
+        }
+    }
+    // 不可折叠的根前缀：盘符（X:）或 UNC（\\server\share）
+    let bytes = text.as_bytes();
+    let mut prefix_len = 0usize;
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        prefix_len = 2;
+    } else if text.starts_with(r"\\") {
+        let parts: Vec<&str> = text[2..]
+            .split(|c| c == '\\' || c == '/')
+            .filter(|c| !c.is_empty())
+            .collect();
+        if parts.len() >= 2 {
+            prefix_len = 2 + parts[0].len() + 1 + parts[1].len();
+        }
+    }
+    let (prefix, body) = text.split_at(prefix_len.min(text.len()));
+    let mut segs: Vec<&str> = Vec::new();
+    for c in body.split(|c| c == '\\' || c == '/') {
+        if c.is_empty() || c == "." {
+            continue;
+        }
+        if c == ".." {
+            segs.pop();
+            continue;
+        }
+        segs.push(c);
+    }
+    let joined = segs.join("\\");
+    let full = if prefix.is_empty() {
+        joined
+    } else if joined.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}\\{joined}")
+    };
+    full.to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

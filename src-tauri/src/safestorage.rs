@@ -28,6 +28,7 @@
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
+use zeroize::Zeroizing;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{
@@ -104,13 +105,20 @@ pub fn crypt_unprotect(input: &[u8]) -> Result<Vec<u8>, StorageError> {
         let mut plain = Vec::<u8>::with_capacity(len);
         std::ptr::copy_nonoverlapping(output_blob.pbData as *const u8, plain.as_mut_ptr(), len);
         plain.set_len(len);
+        // M-19（审查 2026-10-07）：LocalFree 只归还内存、不清内容 —— 内核分配的
+        // 明文缓冲（DPAPI 解出的是 AES 主密钥等敏感材料）会在归还后仍留有可读字节，
+        // 可被页面文件/同进程取证读到。释放前置零。
+        std::ptr::write_bytes(output_blob.pbData, 0, len);
         let _ = LocalFree(Some(HLOCAL(output_blob.pbData as *mut _)));
         Ok(plain)
     }
 }
 
 /// 从 Local State JSON 文本提取并 DPAPI 解密 OSCrypt AES 主密钥（32 字节）。
-pub fn load_oscrypt_key_from_local_state(local_state_json: &str) -> Result<Vec<u8>, StorageError> {
+///
+/// 返回 `Zeroizing<Vec<u8>>`（M-19）：主密钥是明文密钥材料，离开作用域即擦除，
+/// 不留在堆上等页面文件取证。
+pub fn load_oscrypt_key_from_local_state(local_state_json: &str) -> Result<Zeroizing<Vec<u8>>, StorageError> {
     let root: serde_json::Value =
         serde_json::from_str(local_state_json).map_err(|e| StorageError::KeyFormat(e.to_string()))?;
     let wrapped_b64 = root
@@ -124,7 +132,7 @@ pub fn load_oscrypt_key_from_local_state(local_state_json: &str) -> Result<Vec<u
     let dpapi_blob = wrapped
         .strip_prefix(DPAPI_KEY_TAG)
         .ok_or_else(|| StorageError::KeyFormat("encrypted_key 缺少 DPAPI 标签".into()))?;
-    let key = crypt_unprotect(dpapi_blob)?;
+    let key = Zeroizing::new(crypt_unprotect(dpapi_blob)?);
     if key.len() != AES_KEY_LEN {
         return Err(StorageError::KeyFormat(format!(
             "主密钥长度应为 {AES_KEY_LEN}，实际 {}",
@@ -156,7 +164,8 @@ fn aes_gcm_open(key: &[u8], body: &[u8]) -> Result<Vec<u8>, StorageError> {
 /// 定位并解密本机 OSCrypt 主密钥：按 `engine::paths::local_state_candidates()`
 /// 依次尝试（新数据目录搬迁副本 → 旧 Electron 目录），取第一个成功的。
 /// 供 settings 域解密遗留 `dpapi:v1:` 密钥；全部失败时调用方按「未配置」处理（D5 语义）。
-pub fn load_oscrypt_key() -> Result<Vec<u8>, StorageError> {
+/// 返回 `Zeroizing<Vec<u8>>`（M-19）：主密钥用完即擦。
+pub fn load_oscrypt_key() -> Result<Zeroizing<Vec<u8>>, StorageError> {
     let mut last_err = StorageError::KeyFormat("未找到 Local State".into());
     for path in crate::engine::paths::local_state_candidates() {
         match std::fs::read_to_string(&path) {

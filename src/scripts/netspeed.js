@@ -112,7 +112,15 @@
       endDetector: window.netSpeedDetection?.createUploadEndDetector?.() || null
     };
     setStatus('测速流量检测已启动：请在下方网页内点击「开始测速」，软件将在页面加载完成后自动记录实测带宽…');
-    detectTimer = setInterval(() => { void detectTick(); }, POLL_MS);
+    // P3-1（审查 2026-10-07）：detectTick 是 async，若在采样/结束判定处抛出，tickInFlight
+    // 会永久留在 true（此后每轮首行直接 return）——测速检测静默停摆。收口：catch 里复位
+    // 在途标志并留痕，下一轮采样照常。
+    detectTimer = setInterval(() => {
+      detectTick().catch((e) => {
+        tickInFlight = false;
+        window.app?.log?.('warn', '测速流量采样异常: ' + ((e && e.message) || e));
+      });
+    }, POLL_MS);
   }
 
   function enterPhase(phase) {

@@ -8,12 +8,17 @@
 use std::ffi::OsStr;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use std::os::windows::ffi::OsStrExt;
+/// C 字符串解码的硬上限（元素数）。Win32 结构体未初始化/无 NUL 终止符时，原实现
+/// 的 `take_while` 会一直读到相邻内存的越界位置 —— UB/崩溃。加上限后最坏只是截断，
+/// 不再越界。32768 个 u16 = 64 KiB，远大于任何真实路径/键名/设备名（Win32 上限 32K）。
+const MAX_C_STR_UNITS: isize = 32_768;
+
 /// 从 `*const u16` 以 null 结尾宽字符串构造 String（null 指针返回空串）
 pub(super) unsafe fn wide_str(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
     }
-    let len = (0isize..).take_while(|&i| *ptr.offset(i) != 0).count();
+    let len = (0isize..MAX_C_STR_UNITS).take_while(|&i| *ptr.offset(i) != 0).count();
     String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
 }
 
@@ -22,7 +27,7 @@ pub(super) unsafe fn pstr_to_string(ptr: *const u8) -> String {
     if ptr.is_null() {
         return String::new();
     }
-    let len = (0isize..).take_while(|&i| *ptr.offset(i) != 0).count();
+    let len = (0isize..MAX_C_STR_UNITS).take_while(|&i| *ptr.offset(i) != 0).count();
     String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).to_string()
 }
 

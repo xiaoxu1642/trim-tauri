@@ -370,7 +370,7 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     let Ok(ops) = build_restore_ops(&values) else {
         return json!({ "success": false, "message": "备份数据无法解析成还原操作" });
     };
-    if !restore_backup_values(&values) {
+    if !restore_backup_values(&ops) {
         return json!({ "success": false, "message": "还原脚本执行失败" });
     }
     // M3：写完**独立回读**验证。RegSetValueExW 返回成功不等于「值写对了」——
@@ -625,12 +625,14 @@ fn canonical_type_label(kind: windows::Win32::System::Registry::REG_VALUE_TYPE) 
     }
 }
 
-/// 按备份条目回写（任一失败即返回 false；调用方据此报「还原不完整」）
-pub(super) fn restore_backup_values(values: &[Value]) -> bool {
+/// 按已构造的还原操作回写（任一失败即返回 false；调用方据此报「还原不完整」）。
+///
+/// M-11（审查 2026-10-07）：原签名收 `&[Value]`，内部再 `build_restore_ops` 一次 ——
+/// 调用方（`optimizer_restore_reg` / `recycle_freq_override`）为了先判可构造性已经建过
+/// 一遍 ops，等于同一份备份解析两次，且写失败时无法定位到具体条目。改成收 ops，
+/// 构造只发生一次，回读校验（`verify_restore_ops`）也复用同一份 ops。
+pub(super) fn restore_backup_values(ops: &[RestoreOp]) -> bool {
     use crate::engine::native;
-    let Ok(ops) = build_restore_ops(values) else {
-        return false;
-    };
     let mut failed = 0usize;
     for op in ops {
         let ok = match op {

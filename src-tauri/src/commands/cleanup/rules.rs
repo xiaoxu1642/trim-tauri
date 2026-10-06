@@ -980,8 +980,10 @@ pub(super) fn safe_read_json_from_str(text: &str) -> Option<Value> {
 /// 自定义开关合并（对照 applyCustomToggles，审查 B-3 fail-closed）
 pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label: &str) -> bool {
     let allowed: [&str; 2] = ["id", "enabled"];
-    let mut by_id: HashMap<String, usize> = HashMap::new();
-    // 内置条目 id → (组下标, 条目下标)
+    // 内置条目 id → (组下标, 条目下标)。M-8（审查 2026-10-07）：原先把这两维压成
+    // `gi * 100_000 + ii` 一个 usize，某组条目数 ≥ 10 万时 ii 会进位撞进下一组
+    //（开关作用到错误条目）。直接用二元组，不设编码上界。
+    let mut by_id: HashMap<String, (usize, usize)> = HashMap::new();
     let groups_len = rules
         .get("groups")
         .and_then(|g| g.as_array())
@@ -996,7 +998,7 @@ pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label
             .unwrap_or_default();
         for (ii, it) in items.iter().enumerate() {
             if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
-                by_id.insert(id.to_string(), gi * 100_000 + ii);
+                by_id.insert(id.to_string(), (gi, ii));
             }
         }
     }
@@ -1033,7 +1035,7 @@ pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label
             let Some(id) = it.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let Some(idx) = by_id.get(id).copied() else {
+            let Some(&(gi, ii)) = by_id.get(id) else {
                 log::write_log(
                     "warn",
                     &format!("[cleanup] 自定义规则 {file_label} 引用未知条目 id: {id}，已忽略"),
@@ -1043,8 +1045,6 @@ pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label
             let Some(enabled) = it.get("enabled").and_then(|v| v.as_bool()) else {
                 continue;
             };
-            let gi = idx / 100_000;
-            let ii = idx % 100_000;
             if let Some(target) = rules
                 .get_mut("groups")
                 .and_then(|g| g.as_array_mut())

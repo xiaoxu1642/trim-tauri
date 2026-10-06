@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
+use super::civil_from_days;
 use super::paths;
 
 const LOG_RETENTION_DAYS: u64 = 30;
@@ -53,21 +54,7 @@ fn local_parts(t: SystemTime) -> (i32, u32, u32, u32, u32, u32) {
     let days = local.div_euclid(86_400);
     let rem = local.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
-    (y, m, d, (rem / 3600) as u32, ((rem % 3600) / 60) as u32, (rem % 60) as u32)
-}
-
-/// 由 days since 1970-01-01 求公历年月日（Howard Hinnant 的 civil_from_days 算法）
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as i64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    ((y + if m <= 2 { 1 } else { 0 }) as i32, m, d)
+    (y as i32, m, d, (rem / 3600) as u32, ((rem % 3600) / 60) as u32, (rem % 60) as u32)
 }
 
 /// 本机相对于 UTC 的偏移秒数（本地 SYSTEMTIME 与 UTC SYSTEMTIME 各自转 FILETIME 后相减）。

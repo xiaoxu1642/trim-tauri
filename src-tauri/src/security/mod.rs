@@ -244,7 +244,8 @@ pub fn mask_settings(settings: &serde_json::Value) -> serde_json::Value {
 /// 「safeStorage 不可用 → 拒绝保存」同语义回 `success:false`。
 pub fn encrypt_settings_with_oscrypt(settings: &serde_json::Value) -> Result<serde_json::Value, String> {
     let key = safestorage::load_oscrypt_key().ok();
-    encrypt_secrets(settings, key.as_deref())
+    // M-19：主密钥现在是 Zeroizing<Vec<u8>>，显式取切片传入。
+    encrypt_secrets(settings, key.as_deref().map(|v| v.as_slice()))
 }
 
 fn encrypt_secrets(
@@ -302,7 +303,7 @@ pub fn decrypt_settings_with_oscrypt(settings: &serde_json::Value) -> serde_json
         if !v.starts_with(safestorage::DPAPI_V1_PREFIX) {
             return v.to_string();
         }
-        safestorage::decrypt_dpapi_v1(v, key.as_deref())
+        safestorage::decrypt_dpapi_v1(v, key.as_deref().map(|k| k.as_slice()))
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_else(|| v.to_string())

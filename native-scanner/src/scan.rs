@@ -252,7 +252,9 @@ fn walk_level(
     // v2-D5：深度天花板在此收口——不是错误，是「这一支不再往下」的扫描边界，
     // 与 reparse 跳过同属防环/防失控语义，只留痕不报错。
     if depth >= MAX_WALK_DEPTH {
-        eprintln!("[trim-scanner] depth cap {MAX_WALK_DEPTH} reached at {}", dir.display());
+        // M-18（审查 2026-10-07）：诊断必须走 Sink —— 原 `eprintln!` 在 lib 直调 /
+        // 捕获模式下写进进程真实 stderr（GUI 子系统无控制台即蒸发），调用方看不见留痕。
+        sink.warn(&format!("[trim-scanner] depth cap {MAX_WALK_DEPTH} reached at {}", dir.display()));
         return;
     }
     let rd = match fs::read_dir(dir) {
@@ -348,7 +350,9 @@ fn dir_size(dir: &Path) -> u64 {
                 // 审查v4-M6：联接点/挂载点不深入（同 walk）
                 Ok(t) if t.is_dir() && !is_reparse(&ent) => stack.push(fp),
                 Ok(t) if t.is_file() => {
-                    if let Ok(md) = fs::metadata(&fp) {
+                    // M-17（审查 2026-10-07）：DirEntry 已带元数据，复用 `ent.metadata()`
+                    // 省掉每文件一次 `fs::metadata` 的额外 syscall（整盘扫描不可忽略）。
+                    if let Ok(md) = ent.metadata() {
                         total += md.len();
                     }
                 }
@@ -1418,7 +1422,8 @@ fn collect_empty_fast(
     // 「非空」处理（父目录不会作为空目录被连带删除），深处的空目录本轮放弃收集
     // ——宁可漏收，也不让病态深嵌套把递归栈撑爆。
     if depth >= MAX_WALK_DEPTH {
-        eprintln!("[trim-scanner] depth cap {MAX_WALK_DEPTH} reached at {}", dir.display());
+        // M-18（审查 2026-10-07）：同 walk_level，诊断只走 Sink。
+        sink.warn(&format!("[trim-scanner] depth cap {MAX_WALK_DEPTH} reached at {}", dir.display()));
         return false;
     }
     // dot 目录不下钻、自身不算空候选、并让父目录视其为「有内容」（is_dot_dir 文档）

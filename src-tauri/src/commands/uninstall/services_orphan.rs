@@ -309,25 +309,37 @@ pub(super) fn type_label(ty: Option<u32>) -> Option<&'static str> {
 /// 这里要的只是一个只读状态码，自己开句柄比要求引擎层改可见性更省事。
 /// 打不开 SCM（未提权读某些服务）返回 None，报告里如实写「状态读不到」。
 pub(super) unsafe fn scm_state(name: &str) -> Option<u32> {
+    use windows::Win32::System::Services::CloseServiceHandle;
+    let scm = open_scm()?;
+    let out = scm_state_with(scm, name);
+    let _ = CloseServiceHandle(scm);
+    out
+}
+
+/// 打开 SCM（一次）供批量查询复用；调用方用完负责 `CloseServiceHandle`。
+///
+/// M-12（审查 2026-10-07）：`scm_state` 原实现每次调用都 OpenSCManagerW + Close ——
+/// 在服务残留扫描里是 per-service 的 N+1。批量场景改用本函数开一次、循环内复用。
+pub(super) unsafe fn open_scm() -> Option<windows::Win32::System::Services::SC_HANDLE> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Services::{OpenSCManagerW, SC_MANAGER_CONNECT};
+    OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT).ok()
+}
+
+/// 用**已有的** SCM 句柄查单个服务状态（不接管 scm 生命周期）。
+pub(super) unsafe fn scm_state_with(
+    scm: windows::Win32::System::Services::SC_HANDLE,
+    name: &str,
+) -> Option<u32> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Services::{
-        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
-        SERVICE_STATUS,
+        CloseServiceHandle, OpenServiceW, QueryServiceStatus, SERVICE_QUERY_STATUS, SERVICE_STATUS,
     };
     let wide = super::helpers::to_wide(name);
-    let Ok(scm) = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) else {
-        return None;
-    };
-    let svc = OpenServiceW(scm, PCWSTR(wide.as_ptr()), SERVICE_QUERY_STATUS);
-    if svc.is_err() {
-        let _ = CloseServiceHandle(scm);
-        return None;
-    }
-    let svc = svc.ok()?;
+    let svc = OpenServiceW(scm, PCWSTR(wide.as_ptr()), SERVICE_QUERY_STATUS).ok()?;
     let mut status: SERVICE_STATUS = std::mem::zeroed();
     let ok = QueryServiceStatus(svc, &mut status).is_ok();
     let _ = CloseServiceHandle(svc);
-    let _ = CloseServiceHandle(scm);
     ok.then_some(status.dwCurrentState.0)
 }
 
@@ -407,6 +419,8 @@ pub(super) unsafe fn service_findings(
     let mut protected: Vec<Value> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let mut no_evidence = 0usize;
+    // M-12（审查 2026-10-07）：SCM 句柄整轮开一次复用（原先每个服务都 Open/Close 一轮）。
+    let scm = open_scm();
     for e in entries {
         let Some(landing) = e.landing.as_deref() else {
             if !e.image_raw.trim().is_empty() {
@@ -445,7 +459,10 @@ pub(super) unsafe fn service_findings(
         };
         let cls = classify_service(&signals);
         let target = format!("HKLM\\{SERVICES_ROOT}\\{}", e.name);
-        let state = scm_state(&e.name);
+        let state = match scm {
+            Some(h) => scm_state_with(h, &e.name),
+            None => None,
+        };
         let details = json!({
             "serviceName": e.name,
             "imagePath": e.image_raw,
@@ -512,6 +529,10 @@ pub(super) unsafe fn service_findings(
         }
     } else {
         notes.push("进程快照取不到，「镜像正在运行」这条保护本轮不可用".to_string());
+    }
+    if let Some(h) = scm {
+        use windows::Win32::System::Services::CloseServiceHandle;
+        let _ = CloseServiceHandle(h);
     }
     (candidates, protected, notes)
 }

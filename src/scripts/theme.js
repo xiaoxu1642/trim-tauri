@@ -96,7 +96,15 @@
   }
 
   // 初始化
-  document.addEventListener('DOMContentLoaded', async () => {
+  document.addEventListener('DOMContentLoaded', () => {
+    // P3-1（审查 2026-10-07）：原为 async 处理器，reject 即浮动 Promise —— 启动期外观
+    // 初始化会静默中断且不留痕。抽成命名函数 + 显式 catch 收口。
+    initAppearance().catch((e) => {
+      window.app?.log?.('warn', '主题初始化异常: ' + ((e && e.message) || e));
+    });
+  });
+
+  async function initAppearance() {
     applyTheme();
     applySkinAndPreset();
 
@@ -118,5 +126,5 @@
         // 忽略
       }
     }
-  });
+  }
 })();

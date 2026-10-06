@@ -63,20 +63,9 @@ pub(super) fn install_date_from_epoch(secs: u32) -> Option<String> {
     if secs == 0 {
         return None;
     }
-    // Howard Hinnant 的 civil_from_days：不引时区库、不加依赖（AGENTS §2 零新增依赖）
+    // civil_from_days 走 engine 唯一实现（P2-3 去重）：不引时区库、不加依赖（AGENTS §2 零新增依赖）
     let days = (secs / 86_400) as i64;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let mut y = yoe as i64 + era * 400;
-    if m <= 2 {
-        y += 1;
-    }
+    let (y, m, d) = crate::engine::civil_from_days(days);
     if !(1990..=2100).contains(&y) {
         return None;
     }

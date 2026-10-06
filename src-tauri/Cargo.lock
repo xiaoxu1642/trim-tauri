@@ -4674,7 +4674,7 @@ dependencies = [
 
 [[package]]
 name = "trim-tauri"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -4692,6 +4692,7 @@ dependencies = [
  "url",
  "window-vibrancy 0.8.1",
  "windows",
+ "zeroize",
  "zip 8.6.0",
 ]
 

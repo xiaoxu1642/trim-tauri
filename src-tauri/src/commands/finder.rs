@@ -40,6 +40,8 @@ use tauri::{Emitter, WebviewWindow};
 use trim_finder::scan::{self, Sink};
 
 use crate::engine::delete_manifest;
+// P2-1（审查 2026-10-07）：路径键统一走 engine 唯一实现，本文件不再自持一份
+use crate::engine::paths::path_key;
 use crate::engine::{guard, log, protect};
 
 /// 合法扫描类型（对照 FINDER_SCAN_TYPES）。analyze = C-5 磁盘分析器（逐层下钻）
@@ -156,68 +158,6 @@ fn store_snapshot(
         }
     }
     slot.len()
-}
-
-/// 键函数：`path.resolve(p).toLowerCase()` 的等价物。
-/// 仅字符串层折叠（不触盘）：剥 `\\?\` 前缀 → 相对路径拼 CWD → 拆盘符/UNC 前缀 →
-/// 折叠 `.`/`..` → 统一分隔符 → 去尾斜杠 → 小写。
-fn path_key(p: &str) -> String {
-    let stripped = if let Some(rest) = p.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = p.strip_prefix(r"\\?\") {
-        rest.to_string()
-    } else {
-        p.to_string()
-    };
-    let mut text = stripped;
-    let rooted = text.starts_with('\\')
-        || text.starts_with('/')
-        || text
-            .as_bytes()
-            .get(0..2)
-            .map(|b| b[0].is_ascii_alphabetic() && b[1] == b':')
-            .unwrap_or(false);
-    if !rooted {
-        // 相对路径按进程 CWD 解析（对照 Node path.resolve 的 CWD 基准）
-        if let Ok(cwd) = std::env::current_dir() {
-            text = format!("{}\\{}", cwd.to_string_lossy(), text);
-        }
-    }
-    // 不可折叠的根前缀：盘符（X:）或 UNC（\\server\share）
-    let bytes = text.as_bytes();
-    let mut prefix_len = 0usize;
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        prefix_len = 2;
-    } else if text.starts_with(r"\\") {
-        let parts: Vec<&str> = text[2..]
-            .split(|c| c == '\\' || c == '/')
-            .filter(|c| !c.is_empty())
-            .collect();
-        if parts.len() >= 2 {
-            prefix_len = 2 + parts[0].len() + 1 + parts[1].len();
-        }
-    }
-    let (prefix, body) = text.split_at(prefix_len.min(text.len()));
-    let mut segs: Vec<&str> = Vec::new();
-    for c in body.split(|c| c == '\\' || c == '/') {
-        if c.is_empty() || c == "." {
-            continue;
-        }
-        if c == ".." {
-            segs.pop();
-            continue;
-        }
-        segs.push(c);
-    }
-    let joined = segs.join("\\");
-    let full = if prefix.is_empty() {
-        joined
-    } else if joined.is_empty() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}\\{joined}")
-    };
-    full.to_lowercase()
 }
 
 // ==================== 输出汇聚器（Sink） ====================

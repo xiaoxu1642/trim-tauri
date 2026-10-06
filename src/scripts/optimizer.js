@@ -9,6 +9,19 @@
 
   const RISK_TEXT = { low: '低风险', medium: '中风险', high: '高风险' };
 
+  // P3-1（审查 2026-10-07）：async 事件处理器一旦 reject 就是浮动 Promise —— 用户侧表现为
+  // 「点了没反应」，只有一条渲染层未处理拒绝进日志。统一收口：捕获后落 toast + 日志，绝不静默。
+  // 与 init 里的 guardBatch（v2-M22）同一口径，只是把「包装整段 async 处理器」这件事提出来复用。
+  function guardAsync(label, handler) {
+    return (...args) => {
+      Promise.resolve(handler(...args)).catch((e) => {
+        const msg = (e && e.message) || e;
+        window.app?.toast?.('error', label + '失败: ' + msg);
+        window.app?.log?.('error', label + '异常: ' + msg);
+      });
+    };
+  }
+
   // ==================== E7：分类两层结构（default / custom）====================
   //
   // 借 Winaero `NavigationPane` 的 `pageNavPaneDefaultItems` 与
@@ -1215,7 +1228,7 @@
     banner.style.display = 'flex';
     const btn = document.getElementById('btnStaleRestore');
     if (btn) {
-      btn.onclick = async () => {
+      btn.onclick = guardAsync('一键还原未完成项', async () => {
         btn.disabled = true;
         btn.textContent = '还原中…';
         let okCount = 0;
@@ -1228,7 +1241,7 @@
         renderGroups(OPTIONS);
         window.app?.toast(okCount === ids.length ? 'success' : 'warning',
           `一键还原完成：成功 ${okCount} 项，共 ${ids.length} 项`);
-      };
+      });
     }
     // 「一键应用」= 把状态不明的项重新写成优化目标值。刻意**不另起一条 apply 链**：
     // 直接把这批 id 装进选择集再走 runSelected，这样高危红色二次确认、还原点检查、
@@ -1240,7 +1253,7 @@
       if (applicable.length === 0) {
         applyBtn.setAttribute('data-tip', '这些项已不在优化目录里，只能按原值还原');
       }
-      applyBtn.onclick = async () => {
+      applyBtn.onclick = guardAsync('一键重新应用', async () => {
         // 保住用户此前的手勾：本入口只是"临时借用选择集"，不该把人家的勾选清掉
         const keep = new Set(selectedIds);
         selectedIds.clear();
@@ -1251,7 +1264,7 @@
           keep.forEach((id) => selectedIds.add(id));
           renderGroups(OPTIONS);
         }
-      };
+      });
     }
     // 根治第三出口（2026-10-03 用户拍板）：「不再提醒」= per-id 记进主进程记账的
     // prefs.staleDismissed。该项重新执行（pending/applied/partial 落账）或还原销账时
@@ -1290,7 +1303,7 @@
     banner.style.display = 'flex';
     const btn = document.getElementById('btnRetiredRestore');
     if (!btn) return;
-    btn.onclick = async () => {
+    btn.onclick = guardAsync('退役优化项还原', async () => {
       const ok = await window.app?.confirmDanger?.(
         '按原值还原退役优化项',
         `将把 ${items.length} 项已退役优化在执行前记录的注册表原值写回系统（共 ${items.reduce((n, i) => n + (i.values || 0), 0)} 个值）。`,
@@ -1324,7 +1337,7 @@
       if (done && !fails.length) banner.style.display = 'none';
       btn.disabled = false;
       btn.textContent = '按原值还原';
-    };
+    });
   }
 
   // ==================== 详情弹窗（v3.2.0 弹窗统一批次：迁移到 modal.js 工厂） ====================
@@ -1452,13 +1465,13 @@
           + '点击下方按钮逐项确认。';
         // 入口按钮：就地预览勾选（预览不改执行语义，只让用户先看清范围）。
         // 与「立即执行」里那一次是同一个弹窗、同一份状态，不会出现两处结论。
-        openBtn.addEventListener('click', async () => {
+        openBtn.addEventListener('click', guardAsync('逐项选择', async () => {
           const r = await confirmSubitemPick(o, pickState).catch(() => null);
           if (!r) return;
           pickState.targets = new Set(r.targets);
           pickState.extras = new Set(r.extras);
           paintEntry();
-        });
+        }));
         paintEntry();
       } catch (e) {
         // 入口条画不出来**不许**连带「立即执行」失效：清空 targets 让它退回
@@ -1592,7 +1605,7 @@
 
     // 弹窗按钮：立即执行（未优化）/ 立即恢复（已优化灰项）/ 还原 / AI
     // （v3.2.0：每次 open 重建 DOM，事件绑定随实例走；还原入口 restoreOption 为模块级共用）
-    runBtn.addEventListener('click', async () => {
+    runBtn.addEventListener('click', guardAsync('优化项执行', async () => {
       if (!activeOption) return;
       const opt = activeOption;
       if (runBtn.dataset.mode === 'restore') {
@@ -1673,17 +1686,17 @@
           window.app?.toast('error', '优化执行失败: ' + (e.message || e));
         }
       }
-    });
-    restoreBtn.addEventListener('click', async () => {
+    }));
+    restoreBtn.addEventListener('click', guardAsync('恢复优化项', async () => {
       const opt = activeOption;
       closeOptModal();
       await restoreOption(opt);
-    });
+    }));
 
     // R0-c 修复入口：把服务启动类型改回自动 + 重新启动服务。
     // 走已有的 restoreOption（预置 restore 步骤 = startType 'automatic'，R0-a 已让它真正
     // 生效且不再停服）。刻意不做「自动检测到就静默修」：静默改系统状态是本仓红线。
-    repairBtn.addEventListener('click', async () => {
+    repairBtn.addEventListener('click', guardAsync('修复服务启动类型', async () => {
       const opt = activeOption;
       if (!opt || !needsStartTypeRepair(opt)) return;
       const svc = (opt.steps || []).find(s => s && s.service);
@@ -1705,8 +1718,8 @@
       } else {
         window.app?.toast?.('success', '已修复：' + svcName + ' 启动类型已改回自动');
       }
-    });
-    aiBtn.addEventListener('click', genAdviceActive);
+    }));
+    aiBtn.addEventListener('click', guardAsync('AI 生成优缺点', genAdviceActive));
   }
 
   function closeOptModal() {
@@ -2393,7 +2406,7 @@
 
     // 看板行点击打开弹窗；点击勾选框仅切换选择状态；列底「全选本类」批量勾选；
     // 已优化（灰态）行点击 → 弹「是否还原此项优化？」确认
-    root.addEventListener('click', async (e) => {
+    root.addEventListener('click', guardAsync('优化看板点击', async (e) => {
       const check = e.target.closest('.checkbox[data-check]');
       if (check) {
         e.stopPropagation();
@@ -2432,17 +2445,17 @@
         return;
       }
       openModal(o);
-    });
+    }));
 
     // v3.2.0：弹窗按钮（立即执行/恢复/还原/AI）绑定已随 openModal 实例化，init 不再预绑
     // （还原入口 restoreOption 仍为模块级，弹窗与 stale 横幅共用，见文件上方定义）
 
     const elevateBtn = document.getElementById('btnOptimizerElevate');
     if (elevateBtn) {
-      elevateBtn.addEventListener('click', async () => {
+      elevateBtn.addEventListener('click', guardAsync('提权', async () => {
         const ok = await window.app.requestElevation('优化电脑部分选项需要管理员权限才能修改系统注册表与服务。');
         if (!ok) window.app.toast('info', '已取消提权，仅可执行无需提升权限的选项');
-      });
+      }));
     }
 
     // 审查 v2-M22（v1 L13 点名的 optimizer 开窗/执行入口）：runBatch/runSelected 是 async，
