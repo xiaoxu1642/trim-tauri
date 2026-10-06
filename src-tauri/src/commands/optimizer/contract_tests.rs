@@ -15,6 +15,40 @@ use super::catalog::*;
 use super::overview::*;
 use super::restore_point::*;
 
+#[test]
+fn 全量体检覆盖每一个产得出断言的项() {
+    let full = check_optimized(None);
+    assert!(full.len() > 50, "全量体检结果异常少（{} 项），不可能只检了零头", full.len());
+
+    let mut detectable = 0usize;
+    let mut missing = Vec::new();
+    for o in options() {
+        let id = o.get("id").and_then(Value::as_str).unwrap();
+        if !collect_checks(o).is_empty() {
+            detectable += 1;
+            if !full.contains_key(id) {
+                missing.push(id);
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "collect_checks 产得出断言的项却没进全量体检结果（可检测性分叉）: {missing:?}"
+    );
+    assert_eq!(full.len(), detectable, "结果条数必须与可检测项数一致");
+    assert!(check_optimized(Some(&[])).is_empty());
+    for id in ["perf_vbs_off", "disable_uac", "svc_w32time_manual", "perf_wu_enable"] {
+        assert!(full.contains_key(id), "{id} 不在全量体检结果里");
+    }
+}
+
+#[test]
+fn 全量体检是纯读且两次一致() {
+    let a = check_optimized(None);
+    let b = check_optimized(None);
+    assert_eq!(a, b, "连续两次只读体检结果不一致 —— 检测里混入了写或副作用");
+}
+
 /// 剥掉 JS 的行注释与块注释（保留换行，让行号偏移不致错乱）。
 ///
 /// 为什么需要：本文件里到处是「注释里复述被调用点形态」的说明文字
@@ -1450,7 +1484,7 @@ fn strip_js_comments(src: &str) -> String {
             "前提失效：夹具值写不进 HKLM（需要管理员）"
         );
         // 键在 ⇒ 该判「未生效」
-        let res = check_optimized(&["perf_wu_enable".to_string()]);
+        let res = check_optimized(Some(&["perf_wu_enable".to_string()]));
         assert_eq!(
             res.get("perf_wu_enable"),
             Some(&false),
@@ -1464,7 +1498,7 @@ fn strip_js_comments(src: &str) -> String {
             None,
             "前提失效：夹具值删不掉"
         );
-        let res = check_optimized(&["perf_wu_enable".to_string()]);
+        let res = check_optimized(Some(&["perf_wu_enable".to_string()]));
         assert_eq!(
             res.get("perf_wu_enable"),
             Some(&true),

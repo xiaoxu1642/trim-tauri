@@ -694,7 +694,13 @@
       createRestore: function () { return invokeChannel('optimizer:create-restore'); },
       listRestore: function () { return invokeChannel('optimizer:list-restore'); },
       restoreFrequency: function () { return invokeChannel('optimizer:restore-frequency'); },
-      checkOptimized: function (ids) { return invokeChannel('optimizer:check-optimized', { ids: ids }); },
+      // ids 缺省（不传）= 后端对整个优化目录做一次静默只读体检（启动时全量检测）；
+      // 显式传 id 数组 = 只检指定项。两种都不改任何系统状态。
+      checkOptimized: function (ids) {
+        return arguments.length === 0 || ids == null
+          ? invokeChannel('optimizer:check-optimized', {})
+          : invokeChannel('optimizer:check-optimized', { ids: ids });
+      },
       batchPreflight: function (ids, restore) { return invokeChannel('optimizer:batch-preflight', { ids: ids, restore: !!restore }); },
       svcMemCurrent: function () { return invokeChannel('optimizer:svc-mem-current'); },
       backupReg: function (optionId) { return invokeChannel('optimizer:backup-reg', { optionId: optionId }); },

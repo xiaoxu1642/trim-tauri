@@ -1050,13 +1050,15 @@
 
   function startOptimizedCheck() {
     if (!window.api?.optimizer?.checkOptimized) return; // 预览模式不检测
-    // 检测范围：含 reg 块或服务禁用步骤的项（启动初始阶段静默扫描宿主机是否已完成该项优化）。
-    // dynamic 项（svc_mem_gb）不参与启动时批量检测 —— 它是按当前内存档位动态判断的，
-    // 由用户点击详情弹窗时根据实际注册表值单独判定。
-    const checkIds = OPTIONS
-      .filter(o => !o.dynamic && (o.steps || []).some(s => s && (typeof s.reg === 'string' || (s.service && s.disable))))
-      .map(o => o.id);
-    // dynamic 项单独检测：读当前注册表阈值映射档位，命中则该行灰态（已优化）
+    // 启动静默全量体检：**不传 id**，后端按 collect_checks 的单一真源检测整个目录
+    // （reg/service.startType/侧表 regWrites 全覆盖，本机实测 125 项约 10ms、纯只读）。
+    // 不要再在前端手抄一份「哪些项能检」的 steps 过滤——旧过滤只认 reg 串与
+    // service.disable，实测漏掉 18 个后端可检测项（startType 项、侧表覆盖项），
+    // 其中 4 个在本机早已被外部途径优化（含 VBS 被系统设置关闭），界面却不打
+    // 「已优化」标签，用户可重复执行。结果里没有的键 = 检不了（纯 pwsh/cmd 项），
+    // 保持原态，不谎报。
+    //
+    // dynamic 项 svc_mem_gb 仍单独检测：它按当前内存阈值档位判定，有专用通道。
     if (window.api?.optimizer?.svcMemCurrent) {
       window.api.optimizer.svcMemCurrent().then(r => {
         if (r && r.success && r.gb != null) {
@@ -1068,19 +1070,22 @@
         window.app?.log?.('warn', `SVCHost 档位检测失败（保留本地与记账灰态）: ${e && e.message ? e.message : e}`);
       });
     }
-    if (!checkIds.length) return;
-    window.api.optimizer.checkOptimized(checkIds).then(resp => {
+    window.api.optimizer.checkOptimized().then(resp => {
       if (!resp || !resp.success || !resp.results) return;
       // 审查 v3：实时检测只维护自己那一源 —— 命中加、未命中撤，
-      // **不再动 appliedLocal / appliedDetected**（旧实现 delete 掉了它们 → 漏灰 → 可重复优化）。
-      for (const id of checkIds) {
-        if (resp.results[id] === true) appliedChecked.add(id);
+      // **不动 appliedLocal / appliedDetected**（否则检测漏判会清掉另两源 → 漏灰 → 可重复优化）。
+      // 只迭代后端实际返回的键（可检测项全集），不碰检不了的项。
+      // svc_mem_gb 交给上方专用通道（按当前内存阈值映射档位），跳过全量结果里的它，
+      // 避免 regEnum 与专用档位两个判据并发回写同一灰态。
+      for (const [id, done] of Object.entries(resp.results)) {
+        if (id === 'svc_mem_gb') continue;
+        if (done === true) appliedChecked.add(id);
         else appliedChecked.delete(id);
       }
       syncOptimized();
     }).catch((e) => {
-      // 审查 v3-L6：检测失败必须留痕。此时另外两源仍在，灰态不会因一次失败而消失。
-      window.app?.log?.('warn', `优化状态检测失败（以本地与记账灰态为准）: ${e && e.message ? e.message : e}`);
+      // 检测失败必须留痕。此时另外两源仍在，灰态不会因一次失败而消失。
+      window.app?.log?.('warn', `优化状态全量检测失败（以本地与记账灰态为准）: ${e && e.message ? e.message : e}`);
     });
   }
 

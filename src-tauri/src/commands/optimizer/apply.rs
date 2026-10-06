@@ -994,7 +994,7 @@ pub(super) fn verify_option_restored(option_id: &str, opt: &Value) -> &'static s
     if collect_checks(opt).is_empty() {
         return "unknown";
     }
-    match check_optimized(&[option_id.to_string()]).get(option_id) {
+    match check_optimized(Some(&[option_id.to_string()])).get(option_id) {
         Some(false) => "pass",
         Some(true) => "partial",
         None => "unknown",

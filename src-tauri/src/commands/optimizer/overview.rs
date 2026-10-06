@@ -420,6 +420,15 @@ pub(super) fn parse_reg_value_lines(body: &str) -> Vec<(String, String)> {
 /// 就为了读一批注册表值和服务启动类型。现在直接走注册表 / SCM API：
 /// 语义逐条对齐原 PS（缺值 / 类型不对 / 打不开键 / 服务不存在 都算「未生效」）。
 ///
+/// **`ids = None` = 静默全量体检整个目录**（2026-10-06 用户需求）：渲染层启动时
+/// 调一次把「系统里已完成、但不是经 Trim 做的」优化（例：用户在 Windows 安全中心
+/// 关了 VBS）也标成已优化，防重复执行。全程只读、不写任何键——本机实测 125 项 11ms
+/// （全原生注册表/SCM 读取，零 PowerShell）。**可检测性的唯一真源在
+/// [`collect_checks`]**：产不出断言的项（纯 pwsh/cmd 且无侧表）不进结果，
+/// 渲染层不许自己再维护一份「哪些项能检」的过滤——那份手写过滤实测漏掉 18 个
+/// 后端可检测项（其中 4 个在本机已优化），VBS 漏标就是这类分叉。
+/// `ids = Some(&[])` 显式空 = 不检任何项（返回空 map）。
+///
 /// 与原 PS 的**一处刻意差异**：DWORD 比较按无符号 32 位读出（`read_reg_dword_opt`），
 /// 原 PS 的 `[int]$v -eq [int]$d` 是 32 位**有符号**，`dword:ffffffff` 这类值会判不上。
 /// 优化项里没有 > 2^31-1 的期望值，此差异不改变现有行为，但让实现不再有这个坑。
@@ -533,8 +542,20 @@ pub(super) fn judge_check(c: &Check) -> bool {
             }
 }
 
-pub(super) fn check_optimized(ids: &[String]) -> std::collections::HashMap<String, bool> {
+pub(super) fn check_optimized(ids: Option<&[String]>) -> std::collections::HashMap<String, bool> {
     let mut result = std::collections::HashMap::new();
+    // None = 全目录静默体检（id 顺序以目录为准，结果按 id 索引不依赖顺序）
+    let all_ids: Vec<String>;
+    let ids: &[String] = match ids {
+        Some(s) => s,
+        None => {
+            all_ids = options()
+                .iter()
+                .filter_map(|o| o.get("id").and_then(Value::as_str).map(String::from))
+                .collect();
+            &all_ids
+        }
+    };
     // id -> checks（保留请求顺序）
     let mut grouped: Vec<(String, Vec<Check>)> = Vec::new();
     for id in ids {
@@ -782,8 +803,8 @@ pub async fn optimizer_check_optimized<R: Runtime>(
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let ids = ids.unwrap_or_default();
-    let results = check_optimized(&ids);
+    // ids 缺键（None）= 启动时静默全量体检；显式 [] = 空结果。
+    let results = check_optimized(ids.as_deref());
     json!({ "success": true, "results": results })
 }
 
@@ -893,7 +914,7 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
 
     let mut stale_ids = pending_ids;
     if !check_ids.is_empty() {
-        let results = check_optimized(&check_ids);
+        let results = check_optimized(Some(&check_ids));
         for id in &check_ids {
             if results.get(id) == Some(&false) {
                 stale_ids.push(id.clone());
