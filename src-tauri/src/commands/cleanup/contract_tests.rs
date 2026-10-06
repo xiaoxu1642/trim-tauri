@@ -171,6 +171,159 @@ fn js_num_str(n: f64) -> String {
         );
     }
 
+    // ==================== P0 约束条款回归断言（G-1 同批，2026-10-07） ====================
+    //
+    // R-3 / R-4 / S-2 是方案 §2.3–§2.4 的**约束条款**：价值不在"现在对"，而在防止后续
+    // 重构把口径放宽 —— 所以判据断的是**源码形态**。行为测试在放宽的当天往往照样全绿
+    // （例：还原成功后顺手删掉备份，用户那天确实还原到了；只有读源码分得开）。
+
+    /// R-3：具名单值删除前必须导出**整父键**，且备份失败时整条不删。
+    ///
+    /// 导出目标若掺进具名值（`键::值` 那种形态），零长度值与同键其它值就丢了还原依据；
+    /// 备份失败若继续删除，等于「无备份地删」——R-3 两条都要钉住。
+    #[test]
+    fn 注册表删除前置备份_导出整父键且失败不删() {
+        let code = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+        let at = code.find("let stamp = crate::engine::now_ms();").expect("找不到清理域注册表备份段");
+        let seg = &code[at..];
+        let seg = &seg[..seg.find("let mut removed = 0i64;").unwrap_or(seg.len())];
+        // ① 导出目标由键路径 rest 拼成（整父键）；备份循环里具名值被显式忽略（`rest, _`）
+        assert!(
+            seg.contains("format!(\"{hive_short}\\\\{rest}\")"),
+            "注册表备份的导出目标必须由键路径拼成（整父键）: {seg}"
+        );
+        assert!(
+            seg.contains("for (i, (hive, rest, _)) in parsed.iter().enumerate()"),
+            "备份循环必须显式忽略具名值（`rest, _`）—— 掺进值名就不是整父键了"
+        );
+        // ② 备份失败分支必须排在删除循环之前（先备份后删，失败即整条不删）
+        let fail_at = seg.find("if backup_failed").expect("找不到备份失败分支");
+        let remove_at = code[at..]
+            .find("for (hive, rest, value) in &parsed")
+            .expect("找不到删除循环");
+        assert!(fail_at < remove_at, "备份失败分支必须排在删除循环之前（先备份后删）");
+    }
+
+    /// R-4：还原成功不得自删还原依据（`.reg` / 清单 / 副本只按统一保留上限裁撤）。
+    ///
+    /// 判据分两半：还原链**一个删除调用都不许有**；删除链的保留上限裁撤必须还在位。
+    #[test]
+    fn 还原链不得删除自己的还原依据() {
+        let restore = strip_rust_comments(include_str!("backup.rs"));
+        for needle in ["remove_file", "remove_dir_all", "remove_dir("] {
+            assert!(
+                !restore.contains(needle),
+                "backup.rs 出现 {needle}：还原链不得删除 .reg 备份 / 清单 / 副本\
+                 （保留裁剪只走 paths::prune_backups 与 native::prune_file_backups）"
+            );
+        }
+        // 另一半：不是"不裁"，而是"只按统一上限裁"——裁撤接线必须还在
+        let engine = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+        assert!(engine.contains("paths::prune_backups("), "注册表备份的保留上限裁撤不见了");
+        assert!(engine.contains("prune_file_backups("), "永久删副本的保留上限裁撤不见了");
+        let paths = strip_rust_comments(include_str!("../../engine/paths.rs"));
+        assert!(paths.contains("BACKUP_KEEP"), "统一保留上限常量 BACKUP_KEEP 不见了");
+    }
+
+    /// S-2：结束进程只允许使用「占用检测确认过的一次性白名单」；系统关键进程不可结束。
+    #[test]
+    fn 结束进程只认一次性白名单快照() {
+        let code = strip_rust_comments(include_str!("scan_execute.rs"));
+        assert!(
+            code.contains(
+                "pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {"
+            ),
+            "结束进程入口的签名必须只有 window —— 接受调用方传入的 PID 清单 = 绕过占用检测"
+        );
+        let at = code.find("pub fn cleanup_kill_locked_processes").expect("找不到结束进程入口");
+        let body = &code[at..];
+        let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+        assert!(
+            body.contains(".remove(&label)"),
+            "白名单必须一次性取走（remove）：反复读同一份陈旧 PID 快照会杀到被复用的 PID"
+        );
+        assert!(body.contains("pid == self_pid"), "缺自身 PID 剔除：存在结束自己的路径");
+        assert!(
+            code.contains(r#".filter(|p| p.get("critical").and_then(|v| v.as_bool()) == Some(false))"#),
+            "白名单构建必须剔除 critical 进程（系统关键进程只展示、无结束入口）"
+        );
+    }
+
+    /// S-2 的另一半：占用检测必须**先于**执行删除（渲染层流程）。
+    #[test]
+    fn 占用检测先于执行删除() {
+        let js = include_str!("../../../../src/scripts/cleanup.js");
+        let lock = js.find("await offerCloseLocked(lockIds)").expect("找不到清理前占用检测调用点");
+        let exec = js.find("api.cleanup.execute(").expect("找不到清理执行调用点");
+        assert!(lock < exec, "占用检测必须在清理执行之前（S-2：锁定检查先于删除）");
+    }
+
+    // ==================== G-2 全局年龄策略（2026-10-07） ====================
+    //
+    // 行为面（只收紧 / 关闭不变 / 三档）已由 native-scanner 的
+    // `global_min_age_only_tightens` 与 `global_min_age_file_text_shapes` 钉住；
+    // 这里钉的是**接线**与**双真源**——两条都是行为测试看不见的那一类。
+
+    /// G-2：扫描侧与执行侧必须调**同一个**读取函数与**同一个** tighten，
+    /// 且文件名只有一个字面量（写侧引用读侧常量）。
+    #[test]
+    fn 全局年龄策略两侧共用同一读取与并法() {
+        let engine = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+        assert!(
+            engine.contains("trim_finder::cleanup_scan::load_global_min_age_days()"),
+            "执行侧没有走共享的全局阈值读取函数 —— 自己解析就是第二份口径（AGENTS §5.16 N6）"
+        );
+        assert!(
+            engine.contains(".tighten("),
+            "执行侧没有把全局阈值并进年龄护栏（G-2 的核心：max(规则阈值, 全局阈值)）"
+        );
+        let scan = strip_rust_comments(include_str!("../../../../native-scanner/src/cleanup_scan.rs"));
+        assert!(
+            scan.contains(".tighten(global_min_age_days)"),
+            "扫描侧没有把全局阈值并进年龄护栏 —— 那会出现「扫描按规则阈值、执行按全局阈值」的分叉"
+        );
+        // 文件名唯一真源：整个 Rust 源码里 `cleanup-min-age-days.txt` 只许出现在常量定义那一处
+        let mut literals = 0usize;
+        for src in [&scan, &engine] {
+            literals += src.matches("cleanup-min-age-days.txt").count();
+        }
+        let policy = strip_rust_comments(include_str!("policy.rs"));
+        literals += policy.matches("cleanup-min-age-days.txt").count();
+        assert_eq!(
+            literals, 1,
+            "`cleanup-min-age-days.txt` 字面量出现 {literals} 次（应只在 native-scanner 的常量定义处）—— \
+             两端各写一遍就是「设置页写 A 文件、扫描读 B 文件」的静默失效"
+        );
+        assert!(
+            policy.contains("trim_finder::cleanup_scan::GLOBAL_MIN_AGE_FILE"),
+            "写侧没有引用读侧的文件名常量"
+        );
+    }
+
+    /// G-2：写入侧只放行 UI 档位，且「关闭」写空文件（不是写 0）。
+    #[test]
+    fn 全局年龄策略写入侧卡档且关闭写空文件() {
+        let policy = strip_rust_comments(include_str!("policy.rs"));
+        assert!(
+            policy.contains("if !AGE_POLICY_TIERS.contains(&days)"),
+            "写入侧缺少档位闸 —— 前端被绕过就能传任意天数（方案 §2.1 G-2 明令不许绕过）"
+        );
+        assert!(
+            policy.contains("AGE_POLICY_TIERS: [u64; 3] = [0, 14, 30]"),
+            "档位表必须是 UI 提供的三档（0 = 关闭 / 14 / 30）"
+        );
+        assert!(
+            policy.contains(r#"if days == 0 { String::new() } else { format!("{days}\r\n") }"#),
+            "「关闭」必须写**空文件**（写 0 会让人工核查时读出「0 天」这种不存在的档位）"
+        );
+        // 前端那条选择器的档位必须与后端一致（措辞/取值漂了会出现「选了 14 实际 30」）
+        let js = include_str!("../../../../src/scripts/cleanup.js");
+        assert!(
+            js.contains("const AGE_POLICY_TIERS = [0, 14, 30];"),
+            "前端档位表与后端不一致（两处必须同值）"
+        );
+    }
+
     /// 2026-10-04 审计 §4.1：受保护路径的拒绝必须走独立计数，且独立留痕。
     ///
     /// **为什么这条是源码形态断言而不是行为断言** —— 这是本轮唯一一处「判红实验
@@ -264,7 +417,7 @@ fn js_num_str(n: f64) -> String {
         assert!(code.contains("fn req_list("), "缺少 req_list —— 契约表字符串数组查询的统一入口不见了");
         assert!(code.contains("fn req_number("), "缺少 req_number —— 契约表数值查询的统一入口不见了");
         for (helper, exact, what) in [
-            ("req_list", 21usize, "字符串数组类查询（字段白名单 / 必填集 / 枚举）"),
+            ("req_list", 22usize, "字符串数组类查询（字段白名单 / 必填集 / 枚举）"),
             ("req_number", 10usize, "数值类查询（上限与权重）"),
         ] {
             let calls = code.matches(&format!("{helper}(\"cleanup\", ")).count();
@@ -555,6 +708,26 @@ fn js_num_str(n: f64) -> String {
         let mut it = ok_item();
         it["minAgeDays"] = json!(0);
         expect_reject(it, "必须是正整数");
+
+        // 年龄轴（G-1）：缺省合法、单轴合法、脱离 minAge* 与非法枚举/双轴一律拒
+        for axis in ["mtime", "ctime"] {
+            let mut it = ok_item();
+            it["minAgeDays"] = json!(7);
+            it["ageAxis"] = json!(axis);
+            validate_cleanup_package(&ok_pkg(it))
+                .unwrap_or_else(|e| panic!("合法单轴 ageAxis={axis} 被拒: {e}"));
+        }
+        let mut it = ok_item();
+        it["ageAxis"] = json!("mtime");
+        expect_reject(it, "只能在声明 minAgeHours/minAgeDays 时出现");
+        let mut it = ok_item();
+        it["minAgeDays"] = json!(7);
+        it["ageAxis"] = json!("birthtime");
+        expect_reject(it, "只允许单轴");
+        let mut it = ok_item();
+        it["minAgeDays"] = json!(7);
+        it["ageAxis"] = json!(["mtime", "ctime"]);
+        expect_reject(it, "只允许单轴");
 
         // 进程约束字段写了就必须非空
         let mut it = ok_item();

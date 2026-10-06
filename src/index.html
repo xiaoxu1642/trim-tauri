@@ -1202,6 +1202,24 @@
               </div>
             </div>
           </div>
+          <!-- G-2（2026-10-07）：全局清理年龄门槛。只收紧不放宽 —— 后端按
+               max(规则阈值, 全局阈值) 并，档位由后端闸死（0 = 关闭 / 14 / 30）。
+               真源是数据目录里的策略文件（Rust 侧），前端 localState 只做展示。 -->
+          <div class="settings-section settings-age-section">
+            <div class="appearance-card-head">
+              <h4>清理年龄门槛</h4>
+              <p>对已声明时间门槛的清理规则生效，且只会让门槛更严，不会放宽</p>
+            </div>
+            <div class="skin-row">
+              <span class="skin-row-label">全局门槛</span>
+              <select id="cleanupAgePolicy" data-tip="关闭时完全按规则自身门槛执行；选 14/30 天时取两者更严格的那个">
+                <option value="0">关闭（按规则自身门槛）</option>
+                <option value="14">14 天</option>
+                <option value="30">30 天</option>
+              </select>
+            </div>
+            <p class="appearance-hint" id="cleanupAgeHint">正在读取当前设置…</p>
+          </div>
           <!-- 拆分批次：背景与主题独立卡 —— 根因：原 HTML 在本卡末尾少一个闭合标签，
                致材质卡/动效卡/关于我们/系统信息全部嵌套进「显示」大容器（设置页所有模块挤在同一
                大白容器内的来源）；按需求将本模块剥离为 settings-grid 顶层独立卡片，内容原样搬移 -->

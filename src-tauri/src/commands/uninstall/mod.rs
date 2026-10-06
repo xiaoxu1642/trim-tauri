@@ -29,6 +29,8 @@ mod appx;
 pub use appx::{uninstall_appx_logo, __cmd__uninstall_appx_logo, __tauri_command_name_uninstall_appx_logo};
 mod authenticode;
 mod capability_orphan;
+// R-1 后续阶段（2026-10-07）：COM/CLSID 与 File Types / Applications 只读可见面
+mod com_orphan;
 mod backup_report;
 pub use backup_report::{uninstall_reg_backup_list, __cmd__uninstall_reg_backup_list, __tauri_command_name_uninstall_reg_backup_list, uninstall_reg_backup_restore, __cmd__uninstall_reg_backup_restore, __tauri_command_name_uninstall_reg_backup_restore, uninstall_batch_list, __cmd__uninstall_batch_list, __tauri_command_name_uninstall_batch_list, uninstall_batch_restore, __cmd__uninstall_batch_restore, __tauri_command_name_uninstall_batch_restore, uninstall_report_list, __cmd__uninstall_report_list, __tauri_command_name_uninstall_report_list, uninstall_report_get, __cmd__uninstall_report_get, __tauri_command_name_uninstall_report_get};
 mod dead;
@@ -56,6 +58,8 @@ pub use residue_deep::{uninstall_residue_deep_scan, __cmd__uninstall_residue_dee
 mod residue_trace_tests;
 mod residue_update;
 pub use residue_update::{residue_rules_dir, residue_watermark, uninstall_modify, __cmd__uninstall_modify, __tauri_command_name_uninstall_modify};
+// R-1（2026-10-07）：Run/RunOnce 只读可见面
+mod run_keys;
 mod services_orphan;
 mod vendor_registry;
 

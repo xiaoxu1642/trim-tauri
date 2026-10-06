@@ -26,7 +26,7 @@ export const ASSERTIONS = {
   A5: '根结构底线（rulesVersion 为正数、groups 非空、数量与深度上限）',
   A6: '准入必填字段与溯源形态（含 risk / sourceClass 枚举、布尔字段）',
   A7: 'fileKeys 显式布尔 recurse；进程约束字段写了就必须是非空数组',
-  A9: '时效护栏字段形态（minAgeHours/minAgeDays 互斥且为正整数）',
+  A9: '时效护栏字段形态（minAgeHours/minAgeDays 互斥且为正整数；ageAxis 只能在有 minAge* 时出现，且只允许契约表单轴枚举）',
   A10: '未知字段白名单（顶层 / 组 / 子组 / 条目 / fileKeys / regKeys / prov）',
   A11: '条目 id 字符集与非空唯一',
   A12: '条目级版本戳 ver 必须存在且等于顶层 rulesVersion（V2 P2-A1：报告要能回答"这条是哪一版规则判的"）',
@@ -119,6 +119,8 @@ export function validateCleanupPackage(pkg) {
   const nonEmptyArrays = list('cleanup', 'nonEmptyArrayFields');
   const positiveInts = list('cleanup', 'positiveIntFields');
   const exclusive = list('cleanup', 'exclusiveNumericFields');
+  // G-1 年龄轴枚举（mtime/ctime）：缺失即抛（表缺枚举 = 判定失明，不许静默放行）
+  const ageAxes = list('cleanup', 'ageAxes');
   const maxText = number('cleanup', 'maxTextLen');
   const maxTarget = number('cleanup', 'maxTargetLen');
   const { allowed, caseInsensitive } = tokens('cleanup');
@@ -211,6 +213,19 @@ export function validateCleanupPackage(pkg) {
       const v = it[f];
       if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
         say('A9', `规则 ${id}: ${f} 必须是正整数（当前 ${JSON.stringify(v)}）`);
+      }
+    }
+    // A9 年龄轴（G-1，2026-10-07）：ageAxis 是**单轴**枚举，且只能挂在已声明 minAge* 的条目上。
+    // 与 Rust 装载侧 rules.rs::check_cleanup_item 同口径（共享夹具双向核对，任一侧放宽另一侧红；措辞各随本侧既有格式）：
+    //   · 没有 minAge* 却声明 ageAxis ⇒ 轴没人消费 = 静默失效，判红；
+    //   · 取值不在契约表 cleanup.ageAxes 内（含写成数组的「双轴」形态）⇒ 判红。
+    // 缺省（不写 ageAxis）由运行期按 mtime 解释，不是非法，不进这条断言。
+    if ('ageAxis' in it) {
+      if (declaredExclusive.length === 0) {
+        say('A9', `规则 ${id}: ageAxis 只能在声明 minAgeHours/minAgeDays 时出现（没有年龄护栏却声明轴 = 静默失效）`);
+      }
+      if (!ageAxes.includes(it.ageAxis)) {
+        say('A9', `规则 ${id}: ageAxis「${JSON.stringify(it.ageAxis)}」不在 ${ageAxes.join('/')} 之内（本版只允许单轴）`);
       }
     }
     // A6 prov 溯源形态

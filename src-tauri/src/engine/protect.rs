@@ -625,6 +625,37 @@ fn normalize_reg_target(target: &str) -> Option<(String, Vec<String>)> {
     Some((hive.to_string(), segs[1..].to_vec()))
 }
 
+/// 归一化注册表键路径为 `HIVE\段\段`（大写、单 `\` 分隔、去首尾空白）。
+///
+/// 与 [`reg_target_block_reason`] 内部的归一化是**同一个实现**（AGENTS §5.16/N6 禁的就是
+/// 「看起来等价的两套判据」）：R-2 的启动项窄口子要拿它去比「父键是否恰好是某条 Run 根」，
+/// 自己再写一份大写/分隔符折叠，就会造出「A1 判它受保护、窄口子判它合格」这类假一致。
+///
+/// 返回 `None` = 判不出来（未知 hive、空段、`.`/`..`、含 NUL 或换行）——
+/// 调用方必须按拒绝处理（与 `dir_delete_blocked` 的「读不到属性即拒」同口径）。
+pub fn canonical_reg_key(target: &str) -> Option<String> {
+    let (hive, rest) = normalize_reg_target(target)?;
+    if rest.is_empty() {
+        return Some(hive);
+    }
+    Some(format!("{}\\{}", hive, rest.join("\\")))
+}
+
+/// 目标是否落在 `…\SOFTWARE\Microsoft` 系统命名空间树内（含 32 位视图与 HKCU 三份）。
+///
+/// R-2（2026-10-07）用它作**反向兜底**：启动项删值窄口子只开六条 Run/RunOnce 根的具名值，
+/// 其余落在 Microsoft 树下的 `reg_value` 目标（例如将来有人把 `RunOnceEx` 也扫进来）
+/// 必须继续整棵拒绝 —— 否则「新增一个扫描组」就等于「无声多出一条注册表删除面」。
+/// 归一化失败按「在内」处理（fail-closed）。
+pub fn reg_in_microsoft_tree(target: &str) -> bool {
+    let Some(canon) = canonical_reg_key(target) else {
+        return true;
+    };
+    REG_MICROSOFT_ROOTS
+        .iter()
+        .any(|m| canon == **m || canon.starts_with(&format!("{m}\\")))
+}
+
 /// 注册表删除目标判定：返回 `Some(原因)` = 拒绝递归删除（原因进日志与明细行）。
 pub fn reg_target_block_reason(target: &str) -> Option<String> {
     let (hive, rest) = match normalize_reg_target(target) {

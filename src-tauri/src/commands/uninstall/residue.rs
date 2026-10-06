@@ -906,6 +906,36 @@ pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
             let Some((hive, rest)) = parse_reg_target(key_part) else {
                 return skip("注册表目标无法解析（只支持 HKCU/HKLM）");
             };
+            // R-2（2026-10-07）：`reg_value` 的 A1 判据（本分支此前**一道都没有**）。
+            //
+            // 为什么现在必须有：既有三类 reg_value 候选（MuiCache / 防火墙规则 / BAM）
+            // 取自**代码内固定反查**，它们的合法性来自「是谁生成的」；而启动项候选来自
+            // **扫描器**（run_keys::run_findings），一旦进了快照就会被删，且 Run 六条根
+            // 全在 `REG_MICROSOFT_ROOTS`（A1 整棵默认拒绝）之下。三态语义：
+            //   · NotGoverned —— 不在管辖内（既有三类），按原口径继续；
+            //   · Denied      —— Microsoft 树内且不是那六条根，或 Run 根下形态不合格；
+            //   · Allowed     —— 六条根下的具名单值，还要过**现读复检**才放行。
+            // 形状判据与快照白名单（residue_deep::deep_executable_candidates）共用
+            // 同一个函数，§5.16/N6 禁的就是两处各写一份「看起来等价」的判据。
+            match super::run_keys::reg_value_gate(target) {
+                super::run_keys::RegValueGate::NotGoverned => {}
+                super::run_keys::RegValueGate::Denied(reason) => {
+                    log::write_log("warn", &format!("uninstall_residue_execute 拒绝注册表值目标: {reason}"));
+                    // 状态只用既有的 skip（渲染层按 ok/fail/skip 三态出中文标签）
+                    return skip(&format!("已拒绝删除：{reason}"));
+                }
+                super::run_keys::RegValueGate::Allowed => {
+                    // 第 5 条「失败不扩大范围」的落点：删除**当下**再读一次值，
+                    // 只有「值仍是字符串类型 且 取出的目标仍不在本机」才允许删。
+                    if let Err(reason) = unsafe { super::run_keys::recheck_run_value(key_part, value_name) } {
+                        log::write_log("warn", &format!("启动项现读复检未通过，跳过 {target}: {reason}"));
+                        return skip(&format!("启动项现读复检未通过：{reason}"));
+                    }
+                    // 放行必须留痕：这是本仓第二处「A1 让路」，事后要能在日志里数出来
+                    // （第一处是服务键窄口子，见上面 reg_key 分支的同类登记）。
+                    log::write_log("warn", &format!("R-2 启动项删值窄口子放行（形状合格 + 现读复检通过）: {target}"));
+                }
+            }
             OpVerdict::Ready(ResidueOp::RegValue {
                 target: target.to_string(),
                 key_part: key_part.to_string(),

@@ -825,6 +825,32 @@ mod reg_import_tests {
         });
     }
 
+    /// R-3（P0 约束条款，2026-10-07）：零长度值必须能被 `.reg` 表达、解析并原样还原 ——
+    /// 「先备份后删」的还原依据得装得下空字符串值与零长度二进制值，否则那类值一旦删掉就回不来。
+    /// 输入形态就是 `reg.exe export` 对两者的写法（`""` 与 `hex:`）。
+    #[test]
+    fn 零长度值_空串与空二进制可表达可还原() {
+        let text = format!("{HDR}[HKEY_CURRENT_USER\\Zero]\r\n\"empty\"=\"\"\r\n\"bin\"=hex:\r\n@=\"\"\r\n");
+        let secs = parse_reg_text(&text).expect("含零长度值的 .reg 必须能解析");
+        let w = &secs[0].writes;
+        assert_eq!(w.len(), 3, "三条值行都要解析出来: {w:?}");
+        assert_eq!(
+            w[0],
+            RegWrite::Set { name: "empty".into(), kind: RK_SZ, data: utf16_with_nul("") },
+            "空字符串值必须是 REG_SZ + 单个尾 NUL（不是被拒、也不是 0 字节）"
+        );
+        assert_eq!(
+            w[1],
+            RegWrite::Set { name: "bin".into(), kind: RK_BINARY, data: Vec::new() },
+            "零长度二进制必须解析成 0 字节 REG_BINARY"
+        );
+        assert_eq!(
+            w[2],
+            RegWrite::Set { name: String::new(), kind: RK_SZ, data: utf16_with_nul("") },
+            "默认值也要能表达空串"
+        );
+    }
+
     /// 默认值 `@=` 的名字必须是空串，而不是字面量 "@"。
     /// 写错会得到一个叫 "@" 的值，而真正的默认值没被还原 —— 回执却像成功。
     #[test]

@@ -686,6 +686,27 @@ pub(super) fn check_cleanup_item(
             }
         }
     }
+    // G-1 年龄轴（2026-10-07）：ageAxis 是**单轴**枚举，且只能挂在已声明 minAge* 的条目上。
+    // 与 Node 门禁 cleanup-contract.mjs 的 A9 同口径（共享夹具双向核对，任一侧放宽另一侧红）：
+    //   · 没有 minAge* 却声明 ageAxis ⇒ 轴没人消费 = 静默失效，拒载；
+    //   · 取值不在契约表 cleanup.ageAxes 内（含写成数组的「双轴」形态）⇒ 拒载。
+    // 缺省（不写 ageAxis）由运行期按 mtime 解释，不是非法，不走这条。
+    if let Some(ax) = it.get("ageAxis") {
+        if declared == 0 {
+            return Err(format!(
+                "规则 {id}: ageAxis 只能在声明 minAgeHours/minAgeDays 时出现（没有年龄护栏却声明轴 = 静默失效）"
+            ));
+        }
+        let axes = req_list("cleanup", "ageAxes")?;
+        let ok = ax.as_str().map(|s| axes.iter().any(|a| a == s)).unwrap_or(false);
+        if !ok {
+            return Err(format!(
+                "规则 {id}: ageAxis「{}」不在 {:?} 之内（本版只允许单轴）",
+                json_text(ax),
+                axes
+            ));
+        }
+    }
     let prov = it
         .get("prov")
         .and_then(Value::as_object)

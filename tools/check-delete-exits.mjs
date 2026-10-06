@@ -41,6 +41,10 @@ const DELETE_MARKERS = [
   'remove_file',          // 单文件删
   'DeleteFileW',
   'SHFileOperation',
+  // G-4（2026-10-07）：回收站清空改 Shell API。清空回收站没有「一个具体路径」可判，
+  // 闸门形状与文件型出口不同（见 EXEMPTS 的登记理由），但**它必须出现在这张发现网里**
+  // —— 否则「新增破坏性出口默认红」对本次改动就是失明的。
+  'SHEmptyRecycleBinW',
   'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW', 'RegDeleteKeyExW',
   'remove_dir',          // 单目录删（B-9：此前漏登，只盯了递归删）
   // 引擎删除函数（二跳委托的发现网）
@@ -80,6 +84,14 @@ const EXEMPTS = new Map([
   ['updater_completion', '读后即删同一份 update-applied.json 标记（防「更新已完成」提示反复弹）；另经 clean_installer 删**下载目录里我们自己存的那份安装包**——路径取自标记，删除前过「文件名必须是 Trim_<版本>_x64-setup.exe 形状 + 父目录必须等于 %USERPROFILE%\\Downloads」双闸，不合形状直接不碰文件'],
   // v2-L4P-27（B-5）：fonts_import 旧副本删除补齐归属校验后的口径说明由代码兑现；
   // 豁免理由不变（只删自有副本目录内目标）。
+  // G-4（2026-10-07）：清空回收站走系统 Shell API（SHEmptyRecycleBinW），**没有路径参数**
+  // ——它作用于「所有盘的回收站」这一系统实体，文件面 is_path_protected 无从判定。
+  // 本次改动的真实闸门是三条，逐条列出（缺一条这条豁免就不成立）：
+  //   ① 主窗档 `guard(&window, guard::MAIN)`（不可逆动作不给四个子窗放行）；
+  //   ② 渲染层红色高危确认 `confirmDanger`，且确认文案里带**清空前的条目数与体积**
+  //      （cleanup:recycle-stats 现查，不是扫描占位行的 0）；
+  //   ③ 条目 `domain == "special"` ⇒ 永不默认勾选（cleanup.js 的默认勾选分支显式跳过）。
+  ['cleanup_empty_recycle_bin', '清空回收站（SHEmptyRecycleBinW）作用于系统回收站整体、无路径参数，protect 不适用；闸门=主窗档 + 渲染层红色高危确认（含条目数/体积）+ special 域默认不勾选'],
 ]);
 
 // ---- 正向清单：审查矩阵逐列核过的文件型删除出口，protect 判定不许掉 ----

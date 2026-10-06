@@ -144,6 +144,13 @@
   // 文件清理项 ID（使用独立扫描/清理逻辑）
   const FILECLEAN_IDS = ['qqFileClean', 'wechatFileClean'];
 
+  // G-4（2026-10-07）：回收站条目的 id。它是**唯一**不走常规清理链的条目 ——
+  // 清空走系统 Shell API（cleanup:empty-recycle-bin），体积由 cleanup:recycle-stats 现查。
+  // 规则侧已撤掉 `pathPs`（不再把 $Recycle.Bin 当普通目录永久删），引擎只发一条
+  // size=0 的占位行（native-scanner 的 emit_recycle_bin）。判据集中在这一个常量上，
+  // 不要在别处再写字符串字面量。
+  const RECYCLE_ID = 'recycleBin';
+
   // P1 安装检测（detect）未命中的条目：扫描后从列表隐藏（重新扫描/换规则后自动恢复）
   const hiddenIds = new Set();
   function visibleItems(items) { return items.filter(i => !hiddenIds.has(i.id)); }
@@ -962,6 +969,35 @@
         }
       }
 
+      // G-4：回收站条目的「占用大小」由 Shell API 现查覆盖。
+      // 扫描引擎对它只发一条 size=0 的占位行（native-scanner 的 emit_recycle_bin），
+      // 真实条目数/体积只有 SHQueryRecycleBinW 能回答。查询失败**不编数字**：
+      // 条目保持 size 0 且仍然可见，用户点清理时会拿到失败原因。
+      // 注：条目不存在时这里补一条——它必须始终可见（入口不能因「扫描不产路径」消失）。
+      if (window.api?.cleanup?.recycleStats) {
+        let recycle = results.find(r => r.id === RECYCLE_ID);
+        if (!recycle) {
+          const meta = getItemById(RECYCLE_ID);
+          if (meta) {
+            recycle = { id: RECYCLE_ID, name: meta.name, path: '', pathSource: 'shell', size: 0, risk: meta.risk, exists: true };
+            results.push(recycle);
+          }
+        }
+        if (recycle) {
+          try {
+            const st = await window.api.cleanup.recycleStats();
+            if (st && st.success) {
+              recycle.size = sizeNumber(st.bytes);
+              recycle.recycleCount = Number(st.count) || 0;
+            } else {
+              recycle.recycleStatsError = (st && st.message) || '查询回收站失败';
+            }
+          } catch (e) {
+            recycle.recycleStatsError = e.message || String(e);
+          }
+        }
+      }
+
       // P1：detect 未命中的条目不会出现在扫描结果中——标记为隐藏（重新扫描/换规则后恢复）
       hiddenIds.clear();
       const gotIds = new Set(results.map(r => r.id));
@@ -1105,9 +1141,11 @@
 
     // D10：risk 分级二次确认——高风险走红色 confirmDanger，中风险走黄色 confirmWarning。
     // 信任源统一为 $rule.risk（PS 侧门禁同源，见 cleanup-scripts.js），渲染层不做二次映射。
+    // G-4：回收站**不参与这两档分级**——它是不可逆的批量动作，单独走下面那段
+    // 「先现查条目数与体积、再红色确认」，避免同一件事被弹两次。
     const risky = Array.from(selectedIds)
       .map(id => scanResults.get(id))
-      .filter(r => r && (r.risk === 'high' || r.risk === 'medium'));
+      .filter(r => r && r.id !== RECYCLE_ID && (r.risk === 'high' || r.risk === 'medium'));
     const highRisk = risky.filter(r => r.risk === 'high');
     const mediumRisk = risky.filter(r => r.risk === 'medium');
 
@@ -1143,6 +1181,47 @@
       }
     }
 
+    // G-4：回收站的红色高危确认。方案 §2.2 G-4 的三条要求在这里兑现两条：
+    //   ① 「先出条目数与体积」——**点击时现查一次**而不是用扫描时的数字：勾选到点
+    //      「开始清理」之间回收站可能已被别的程序改动，拿旧数字做确认依据是骗人；
+    //   ② 「走高危确认」——不可逆动作一律 confirmDanger（红色），不是中风险的黄色确认。
+    // 空回收站直接摘掉勾选、不弹确认（没什么可清空的，弹窗只会训练用户无脑点确认）。
+    if (selectedIds.has(RECYCLE_ID)) {
+      const st = scanResults.get(RECYCLE_ID) || { name: '回收站' };
+      let count = Number(st.recycleCount) || 0;
+      let bytes = sizeNumber(st.size);
+      try {
+        const fresh = await window.api?.cleanup?.recycleStats?.();
+        if (fresh && fresh.success) {
+          count = Number(fresh.count) || 0;
+          bytes = sizeNumber(fresh.bytes);
+          st.recycleCount = count;
+          st.size = bytes;
+          scanResults.set(RECYCLE_ID, st);
+        }
+      } catch (_) {
+        // 现查失败：沿用扫描时的数字（可能为 0）仍要确认——不能因为「查不到」就跳过提示
+      }
+      if (count === 0 && bytes === 0) {
+        selectedIds.delete(RECYCLE_ID);
+        window.app?.toast('info', '回收站已经是空的，已取消该项');
+      } else {
+        const ok = await window.app?.confirmDanger(
+          '清空回收站确认',
+          `将永久清空回收站中的 ${count} 个条目（约 ${formatSize(bytes)}）。\n清空后这些内容无法通过系统还原恢复。`,
+          '清空回收站',
+          '取消',
+          '这是不可逆操作：清空回收站不经过 Trim 的删除备份，也没有回收站可再还原。'
+        );
+        if (!ok) {
+          isCleaning = false;
+          setCleaningBtn(false);
+          updateUI();
+          return;
+        }
+      }
+    }
+
     // 2026-10-04 审计 §4.3：确认清单与实际删除集来自两份数据——执行侧重新遍历
     // 目标，扫描后新增的文件、超出单次清单上限被截掉的行也会被清理，却从未出现在
     // 确认清单里。filesTruncated 此前标记了但渲染层零消费；清单被截断的条目必须在
@@ -1168,7 +1247,9 @@
 
     // v3.3.4：清理前占用检测——被占用的文件会清理失败，提前告知并给用户处置选择。
     // 只在常规清理项（有扫描计划清单）上做检测；文件清理项（FILECLEAN_IDS）不走此通道。
-    const lockIds = Array.from(selectedIds).filter(id => scanResults.has(id) && !FILECLEAN_IDS.includes(id));
+    // G-4：回收站也不走——占用检测按**文件路径**问「谁锁着它」，而清空回收站是
+    // 系统级动作，没有「某个被锁的文件」可以指认，列进去只会给出一堆无关进程。
+    const lockIds = Array.from(selectedIds).filter(id => scanResults.has(id) && !FILECLEAN_IDS.includes(id) && id !== RECYCLE_ID);
     let abandonIds = new Set();
     const lockDecision = await offerCloseLocked(lockIds);
     if (lockDecision === 'cancel') {
@@ -1183,9 +1264,12 @@
       .filter(id => !abandonIds.has(id))
       .map(id => scanResults.get(id))
       .filter(Boolean);
-    // 分离常规清理项和文件清理项
-    const regularItems = allItems.filter(i => !FILECLEAN_IDS.includes(i.id));
+    // 分离三类：常规清理项 / 文件清理项 / 回收站（G-4，唯一走 Shell API 的条目）
+    const regularItems = allItems.filter(i => !FILECLEAN_IDS.includes(i.id) && i.id !== RECYCLE_ID);
     const fileCleanItems = allItems.filter(i => FILECLEAN_IDS.includes(i.id));
+    const recycleItems = allItems.filter(i => i.id === RECYCLE_ID);
+    // 回收站是单独的不可逆动作：只要它在场，force 就为真（沿用既有「有确认过就带 force」口径）
+    const force = (highRisk.length > 0 || mediumRisk.length > 0 || recycleItems.length > 0);
     // v3.3.0（用户裁定）：执行选项 UI 已移除，固定语义——常规清理**不进回收站、直接永久删**。
     // 审查 v2-M20 订正：后半句原先写「回收站优先删除逻辑仍在主进程 trashOrUnlink 内」，那是
     // Electron 轨的事实；本轨（Tauri/Rust）没有 trashOrUnlink，`toRecycle=false` 使
@@ -1194,7 +1278,7 @@
     // 2026-10-04 审计 §5.5：force 是载荷兼容残留——「PS 闸」已随 S3 纯原生删除，
     // 主进程对 force 无任何判定语义（只进日志对账）。risk 确认弹窗的真实用途是
     // D10 分级告知；值照传只为不破坏 CHANNEL_MAP 载荷键。
-    const force = (highRisk.length > 0 || mediumRisk.length > 0);
+    // （值本身在 :1272 处按「高风险 ∪ 中风险 ∪ 回收站」现算，这里不再重算。）
     const toRecycle = false;
     const autoRebuild = true;
     setProgress(0, '开始清理...');
@@ -1256,14 +1340,42 @@
           }
         }
 
+        // G-4：回收站清空（Shell API）。与常规/文件清理分开调用、结果并入同一份明细
+        // —— 它**不是** cleanup:execute 的一条：那条链是「按快照文件集永久删」，
+        // 对回收站既没有文件集也没有意义（见 backend 的 recycle_bin.rs 文件头）。
+        let rcFreed = 0, rcSuccess = 0, rcFailed = 0;
+        const rcDetails = [];
+        for (const item of recycleItems) {
+          const beforeBytes = sizeNumber(item.size);
+          let detail;
+          try {
+            const rr = await window.api.cleanup.emptyRecycleBin();
+            if (rr && rr.success) {
+              // freed 取后端回执（清空前的系统口径体积）；后端没给就用扫描时数字兜底，
+              // 但**不编**：两者都没有就是 0。
+              const freed = Number(rr.freed) || beforeBytes || 0;
+              detail = { id: RECYCLE_ID, name: item.name, status: 'ok', freed: freed, message: `已清空回收站（${Number(rr.count) || 0} 个条目）` };
+              rcFreed += freed;
+              rcSuccess += 1;
+            } else {
+              detail = { id: RECYCLE_ID, name: item.name, status: 'error', freed: 0, message: (rr && rr.message) || '清空回收站失败' };
+              rcFailed += 1;
+            }
+          } catch (e) {
+            detail = { id: RECYCLE_ID, name: item.name, status: 'error', freed: 0, message: (e && e.message) || '清空回收站失败' };
+            rcFailed += 1;
+          }
+          rcDetails.push(detail);
+        }
+
         result = {
-          totalFreed: (regularResult.totalFreed || 0) + fcFreed,
-          success: (regularResult.success || 0) + fcSuccess,
-          failed: (regularResult.failed || 0) + fcFailed,
+          totalFreed: (regularResult.totalFreed || 0) + fcFreed + rcFreed,
+          success: (regularResult.success || 0) + fcSuccess + rcSuccess,
+          failed: (regularResult.failed || 0) + fcFailed + rcFailed,
           // v3.3.4 文案纠偏：partial（部分成功，其余文件被占用）与 failed（硬失败）分开上报
           partial: regularResult.partial || 0,
           skipped: regularResult.skipped || 0,
-          details: [...(regularResult.details || []), ...fcDetails]
+          details: [...(regularResult.details || []), ...fcDetails, ...rcDetails]
         };
       } else {
         // 预览模式：模拟清理
@@ -1717,6 +1829,55 @@
     // P1-9：Electron 运行时从 cleanup-rules.json（唯一数据源）加载分类，
     // 成功后覆盖 FALLBACK 并重算 ALL_IDS、重渲染。浏览器预览模式跳过。
     loadRulesFromMain();
+
+    initAgePolicy();
+  }
+
+  // ==================== G-2 全局年龄门槛（设置页控件） ====================
+  // 只收紧不放宽：后端把规则阈值与全局阈值取更严格的那个（max），且只作用于
+  // 已声明时间门槛的规则。**真源是 Rust 侧策略文件**（数据目录里的
+  // cleanup-min-age-days.txt）—— 这里不落 localStorage，避免出现第二真源；
+  // 读不到就保持「关闭」的展示，提交结果一律以后端回执为准。
+  const AGE_POLICY_TIERS = [0, 14, 30]; // 与后端 cleanup/set-age-policy 的档位闸一致
+  function renderAgePolicyHint(days) {
+    const hint = document.getElementById('cleanupAgeHint');
+    if (!hint) return;
+    hint.textContent = days > 0
+      ? `已启用 ${days} 天：规则自身门槛更严格时按规则执行；本项只会让门槛更严，不会放宽。`
+      : '已关闭：完全按每条规则自身的门槛执行（与升级前一致）。';
+  }
+  function initAgePolicy() {
+    const sel = document.getElementById('cleanupAgePolicy');
+    if (!sel || !window.api?.cleanup?.agePolicy) return;
+    window.api.cleanup.agePolicy().then(function (resp) {
+      const days = resp && resp.success && resp.data ? Number(resp.data.days) || 0 : 0;
+      if (AGE_POLICY_TIERS.includes(days)) sel.value = String(days);
+      renderAgePolicyHint(days);
+    }).catch(function () {
+      // 读失败不冒充「已关闭」：把不确定性说出来，用户仍可重新选择
+      const hint = document.getElementById('cleanupAgeHint');
+      if (hint) hint.textContent = '当前设置读取失败，可重新选择一次以写入。';
+    });
+    sel.addEventListener('change', function () {
+      const days = Number(sel.value);
+      if (!AGE_POLICY_TIERS.includes(days)) return; // DOM 被改也不提交非法档
+      window.api.cleanup.setAgePolicy(days).then(function (resp) {
+        if (resp && resp.success) {
+          renderAgePolicyHint(days);
+          window.app?.toast?.('success', days > 0 ? `清理年龄门槛已设为 ${days} 天` : '清理年龄门槛已关闭');
+        } else {
+          // 失败要把选择器拨回旧值，否则界面显示的和实际生效的不一致
+          window.api.cleanup.agePolicy().then(function (r2) {
+            const cur = r2 && r2.success && r2.data ? Number(r2.data.days) || 0 : 0;
+            if (AGE_POLICY_TIERS.includes(cur)) sel.value = String(cur);
+            renderAgePolicyHint(cur);
+          }).catch(function () {});
+          window.app?.toast?.('error', (resp && resp.message) || '年龄门槛写入失败');
+        }
+      }).catch(function (e) {
+        window.app?.toast?.('error', '年龄门槛写入失败：' + ((e && e.message) || e));
+      });
+    });
   }
 
   // C2（2026-09-14 重复点审查）：HDD 上隐藏 Prefetch 清理项 ——

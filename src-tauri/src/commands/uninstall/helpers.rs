@@ -45,6 +45,24 @@ pub(super) unsafe fn reg_sz(hk: windows::Win32::System::Registry::HKEY, name: &s
     Some(String::from_utf16_lossy(&words).trim().to_string())
 }
 
+/// 值的类型码（`REG_VALUE_TYPE.0`）。`None` = 值不存在**或**查询失败。
+///
+/// R-2（2026-10-07）现读复检要分开「值已不存在」（幂等，无需删）与「值在但不是字符串类型」
+/// （无法证明是残留 ⇒ 拒绝）—— `reg_sz` 把这两种情况都折叠成 None，分不出来。
+pub(super) unsafe fn reg_value_type_of(
+    hk: windows::Win32::System::Registry::HKEY,
+    name: &str,
+) -> Option<u32> {
+    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
+    let nm = to_wide(name);
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    if RegQueryValueExW(hk, windows::core::PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        return None;
+    }
+    Some(ty.0)
+}
+
 pub(super) unsafe fn reg_dword(hk: windows::Win32::System::Registry::HKEY, name: &str) -> Option<u32> {
     use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
     let nm = to_wide(name);

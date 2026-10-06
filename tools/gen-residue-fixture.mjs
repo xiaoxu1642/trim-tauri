@@ -138,6 +138,9 @@ const regVectors = [
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced', blocked: true, cls: '枚举漏网靠默认拒绝' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList', blocked: true, cls: '用户配置文件表' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\acme.exe', blocked: true, cls: 'IFEO 钩子' },
+  // R-1a（2026-10-07）：IFEO 补了 32 位视图（`SOFTWARE\\WOW6432Node\\...`）——
+  // 32 位程序的钩子只挂在这棵下，禁删面必须同样拦住它（漏了就等于给新视图开了口子）。
+  { target: 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\acme.exe', blocked: true, cls: 'IFEO 钩子（32 位视图）' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows Defender', blocked: true, cls: '安全产品' },
   { target: 'HKCU\\Software\\Microsoft\\Windows\\Shell\\MuiCache', blocked: true, cls: 'Shell 缓存' },
   { target: 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\FirewallRules', blocked: true, cls: 'SYSTEM 子树覆盖' },
@@ -167,6 +170,59 @@ const regVectors = [
   { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AcmeEditor', blocked: false, cls: '当前用户卸载键' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Tracing\\acme_RASAPI32', blocked: false, cls: 'Tracing 叶键' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe', blocked: false, cls: 'App Paths 叶键' },
+  // R-1a 的**非 IFEO 正对照**：产品键路径里**含** "Image File Execution Options" 字样，
+  // 但它不在系统 IFEO 那棵树下 ⇒ 必须放行。这条钉的是「判据认全路径、不是认子串」——
+  // 只按关键字匹配的实现会在这里红。
+  { target: 'HKLM\\SOFTWARE\\Acme\\Image File Execution Options\\acme.exe', blocked: false, cls: '非 IFEO 路径（同名字样的产品键）' },
+];
+
+// R-2（2026-10-07）启动项**删值**窄口子的正负样本（方案 §2.3 R-2 第 2 条）。
+//
+// 为什么必须进共享夹具：这是本仓第二处「A1 让路」，而且它开的是一棵**系统命名空间**
+// （`…\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`）的删除面。判据有**两个独立实现**
+// —— Rust `run_keys::reg_value_gate`（执行侧与快照白名单的真源）与 Node 门禁里的
+// 独立实现（`check-residue-rule-contract.mjs` 的 F2）—— 两者谁也不调谁，只能靠
+// 同一份字节钉住。任一侧放宽都会在这里红（第 3 条：Rust 判定与 Node 门禁读同一份夹具）。
+//
+// `gate` 取值即三态语义：allowed / denied / not-governed。
+const runValueVectors = [
+  // —— 放行：六条根 × 具名单值（现读复检不在这层，由执行侧另行现查） ——
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::Acme AutoStart', gate: 'allowed', cls: 'HKCU Run 具名值' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce::Acme', gate: 'allowed', cls: 'HKCU RunOnce 具名值' },
+  { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run::Acme', gate: 'allowed', cls: 'HKLM 64 位 Run' },
+  { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce::Acme', gate: 'allowed', cls: 'HKLM 64 位 RunOnce' },
+  { target: 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run::Acme', gate: 'allowed', cls: 'HKLM 32 位 Run' },
+  { target: 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnce::Acme', gate: 'allowed', cls: 'HKLM 32 位 RunOnce' },
+  { target: 'HKEY_CURRENT_USER\\Software\\MICROSOFT\\windows\\currentversion\\run::Acme', gate: 'allowed', cls: '长写法 + 大小写混写归一后放行' },
+  // —— 拒绝：父键是 Run 根但形态不合格（每一种都对应一条显式判据） ——
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::', gate: 'denied', cls: '值名为空' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::   ', gate: 'denied', cls: '值名纯空白' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::*', gate: 'denied', cls: '通配清值' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::Acme ', gate: 'denied', cls: '值名尾随空白' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run:: Acme', gate: 'denied', cls: '值名前导空白' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::a\\b', gate: 'denied', cls: '值名含反斜杠（多层）' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::a::b', gate: 'denied', cls: '值名含 ::' },
+  // —— 拒绝：Microsoft 树内、但不是那六条根（反向兜底，防「新增扫描组 = 无声多一条删除面」） ——
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx::Acme', gate: 'denied', cls: 'RunOnceEx 不在本轮范围' },
+  { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunServices::Acme', gate: 'denied', cls: 'RunServices 不在本轮范围' },
+  { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\Sub::Acme', gate: 'denied', cls: '更深一层不是根' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU::X', gate: 'denied', cls: 'Microsoft 树内其它叶子' },
+  { target: 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx::Acme', gate: 'denied', cls: '32 位视图的 RunOnceEx' },
+  // —— 不管辖：不在 Microsoft 树内、也不是 Run 值 ——
+  // 这三条是**既有三类候选的替身**：它们必须保持 NotGoverned，否则 R-2 会把
+  // MuiCache / 防火墙 / BAM 一起误拒（功能 100% 不可用）。
+  { target: 'HKCU\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache::acme.exe.FriendlyAppName', gate: 'not-governed', cls: 'MuiCache（既有候选）' },
+  { target: 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\FirewallRules::{GUID-1}', gate: 'not-governed', cls: '防火墙规则（既有候选）' },
+  { target: 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\bam\\State\\UserSettings\\S-1-5-21-0::C:\\Gone\\a.exe', gate: 'not-governed', cls: 'BAM（既有候选）' },
+  { target: 'HKCU\\Software\\Acme\\Editor::InstallDir', gate: 'not-governed', cls: '普通 HKCU 产品键值' },
+  { target: 'HKLM\\SOFTWARE\\ESET::InstallDir', gate: 'not-governed', cls: '普通 HKLM 产品键值' },
+  // —— 不管辖：根本不是「键::值名」形态（键目标/形状坏） ——
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', gate: 'not-governed', cls: '键目标（该走删树分支与 A1）' },
+  { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\', gate: 'not-governed', cls: '尾随分隔符归一化失败附近形态（无 ::）' },
+  // —— 拒绝：父键无法归一化（fail-closed，不许因「判不出来」而放行） ——
+  { target: 'HKCR\\Acme::X', gate: 'denied', cls: '不支持的 hive' },
+  { target: 'HKCU\\Software\\.\\Microsoft::X', gate: 'denied', cls: '含 . 段' },
+  { target: 'HKCU\\Software\\Acme\\..\\Microsoft::X', gate: 'denied', cls: '含 .. 段' },
 ];
 
 const packages = cases.map(({ label, ok, mutate }) => {
@@ -188,9 +244,10 @@ const doc = {
   _note:
     '卸载残留规则库契约夹具：Rust 运行期校验器与 Node 门禁各自独立实现断言，用同一组正反例钉口径（方案 §4.3 / §6.1）。改判定必须两侧同改并在此补用例。',
   regVectors,
+  runValueVectors,
   packages,
 };
 fs.writeFileSync(OUT, JSON.stringify(doc, null, 2) + '\n', 'utf8');
 console.log(
-  `已生成 ${path.relative(ROOT, OUT)}：regVectors ${regVectors.length} 条（拒绝 ${regVectors.filter((v) => v.blocked).length} / 放行 ${regVectors.filter((v) => !v.blocked).length}），packages ${packages.length} 条（拒绝 ${packages.filter((c) => !c.ok).length} / 放行 ${packages.filter((c) => c.ok).length}）`,
+  `已生成 ${path.relative(ROOT, OUT)}：regVectors ${regVectors.length} 条（拒绝 ${regVectors.filter((v) => v.blocked).length} / 放行 ${regVectors.filter((v) => !v.blocked).length}），runValueVectors ${runValueVectors.length} 条（放行 ${runValueVectors.filter((v) => v.gate === 'allowed').length} / 拒绝 ${runValueVectors.filter((v) => v.gate === 'denied').length} / 不管辖 ${runValueVectors.filter((v) => v.gate === 'not-governed').length}），packages ${packages.length} 条（拒绝 ${packages.filter((c) => !c.ok).length} / 放行 ${packages.filter((c) => c.ok).length}）`,
 );

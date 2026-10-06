@@ -899,13 +899,14 @@ pub struct DeletableResult {
 /// 的无界递归）收窄为 `scan::MAX_WALK_DEPTH`——超限子目录整棵跳过并 stderr 留痕。
 /// 清理候选宁可少报（fail-safe），也不冒病态深嵌套撑爆递归栈的险；正常目录树
 /// （含 node_modules）远达不到该深度，对真实扫描结果无可观测影响。
-/// minAge 时效护栏：cutoff 命中时太新的文件不计入 total（对齐 pattern 未命中的口径）。
+/// minAge 时效护栏：够老判定的唯一入口是 [`AgeGuard`]（G-1），太新的文件不计入 total
+/// （对齐 pattern 未命中的口径）。
 /// 全局排除名单：命中前缀/全路径的文件不计入 total。
 fn walk_deletable(
     dir: &Path,
     all: bool,
     pattern: &str,
-    cutoff: Option<std::time::SystemTime>,
+    guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
     res: &mut DeletableResult,
@@ -930,7 +931,7 @@ fn walk_deletable(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            walk_deletable(&ent.path(), all, pattern, cutoff, excl_dirs, excl_files, res, depth + 1, collect_files);
+            walk_deletable(&ent.path(), all, pattern, guard, excl_dirs, excl_files, res, depth + 1, collect_files);
             continue;
         }
         if !ft.is_file() {
@@ -944,11 +945,17 @@ fn walk_deletable(
         if path_excluded(excl_dirs, excl_files, &full.to_string_lossy().to_lowercase()) {
             continue;
         }
-        if cutoff.map(|c| !ent.metadata().map(|m| modified_before(&m, c)).unwrap_or(false)).unwrap_or(false) {
-            continue; // 太新：不计入 total（fail-closed，metadata 读不到按太新处理）
+        let md = ent.metadata();
+        // 太新不计入 total（fail-closed：有护栏且元数据读不到按太新；无护栏维持既有口径）
+        let old_enough = md
+            .as_ref()
+            .map(|m| guard.old_enough(m))
+            .unwrap_or_else(|_| guard.old_enough_when_missing());
+        if !old_enough {
+            continue;
         }
         res.total += 1;
-        let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+        let size = md.map(|m| m.len()).unwrap_or(0);
         if file_deletable(&full) {
             // 计数与字节和**两种模式都记**（统计口径的唯一数据源）；
             // 路径字符串只在真要交给调用方时才留（审计 §3.3）。
@@ -964,11 +971,11 @@ fn walk_deletable(
 pub fn list_deletable(
     root_str: &str,
     pattern: &str,
-    cutoff: Option<std::time::SystemTime>,
+    guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
 ) -> DeletableResult {
-    list_deletable_inner(root_str, pattern, cutoff, excl_dirs, excl_files, true)
+    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, true)
 }
 
 /// 只算计数与字节和，**不持有每文件路径**（审计 §3.3）。
@@ -980,17 +987,17 @@ pub fn list_deletable(
 pub fn list_deletable_stats(
     root_str: &str,
     pattern: &str,
-    cutoff: Option<std::time::SystemTime>,
+    guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
 ) -> DeletableResult {
-    list_deletable_inner(root_str, pattern, cutoff, excl_dirs, excl_files, false)
+    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, false)
 }
 
 fn list_deletable_inner(
     root_str: &str,
     pattern: &str,
-    cutoff: Option<std::time::SystemTime>,
+    guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
     collect_files: bool,
@@ -1000,10 +1007,9 @@ fn list_deletable_inner(
     // 根本身是文件（pattern='*'）：单文件口径（对齐 TryFileLength 分支）
     if all {
         if let Some(fl) = try_file_length(root) {
-            // minAge：单文件同样要过时效护栏（mtime 读不到按太新处理）
-            let old_enough = cutoff
-                .map(|c| fs::metadata(root).map(|m| modified_before(&m, c)).unwrap_or(false))
-                .unwrap_or(true);
+            // minAge：单文件同样要过时效护栏（够老判定与递归分支同一入口；
+            // 有护栏且元数据读不到按太新，无护栏维持既有口径）
+            let old_enough = guard.old_enough_path(root);
             let root_low = root.to_string_lossy().to_lowercase();
             let excluded = path_excluded(excl_dirs, excl_files, &root_low);
             let mut files = Vec::new();
@@ -1033,7 +1039,7 @@ fn list_deletable_inner(
         skipped_reparse: 0,
     };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
-    walk_deletable(root, all, pattern, cutoff, excl_dirs, excl_files, &mut res, 0, collect_files);
+    walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, &mut res, 0, collect_files);
     res
 }
 
@@ -1056,7 +1062,7 @@ pub struct PathStats {
     pub skipped_reparse: u64,
 }
 
-fn get_path_deletable_stats(path: &str, cutoff: Option<std::time::SystemTime>) -> PathStats {
+fn get_path_deletable_stats(path: &str, guard: AgeGuard) -> PathStats {
     if path.is_empty() {
         return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
     }
@@ -1087,7 +1093,7 @@ fn get_path_deletable_stats(path: &str, cutoff: Option<std::time::SystemTime>) -
     // nfiles / size 从 deletable_count / deletable_bytes 取，那是唯一数据源；
     // 两者口径必须恒等（下面有断言钉住），否则「列表说 N 个、统计说 M 个」会被
     // 用户读成扫描漏项。
-    let res = list_deletable_stats(path, "*", cutoff, &[], &[]);
+    let res = list_deletable_stats(path, "*", guard, &[], &[]);
     let nfiles = res.deletable_count;
     let size = res.deletable_bytes;
     PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles, skipped_reparse: res.skipped_reparse }
@@ -1582,45 +1588,221 @@ fn get_blocked(rule: &Json, running: &HashSet<String>) -> Vec<String> {
 //     声明条目不做占用探测（执行侧会临时停占用进程，探测会把文件全部误判 locked）。
 // PLAN_CAP（D13，方案 v1.1）：单条目 10 万 / 全扫描 100 万行，超限止推并标 filesTruncated。
 
-// ==================== 时效护栏 minAge（P0-M5，竞品借鉴落地方案 §5） ====================
-// 规则可声明 minAgeHours 或 minAgeDays（互斥，契约门禁 A9 钉死）。年龄口径 =
-// 当前时间 − 文件**修改时间**；mtime 早于 cutoff 才算够老。mtime 读不到按「太新」
-// 处理（fail-closed：误删正在写入的文件不可逆，宁可少删）。扫描（本文件）与执行
-// （engine::native::cleanup_execute）两侧共用同一谓词，防「扫描排除、执行照删」。
+// ==================== 时效护栏 minAge（P0-M5；G-1 年龄轴 2026-10-07） ====================
+// 规则可声明 minAgeHours 或 minAgeDays（二者互斥，契约门禁 A9 钉死）加可选 ageAxis。
+// 年龄口径 = 当前时间 − 元数据时间戳；早于 cutoff 才算够老。**解析与判定只有这一份实现**
+// （AGENTS §5.16/N6）：扫描（本文件）与执行（engine::native::cleanup_execute）两侧共用，
+// 防「扫描排除、执行照删」。
+// G-1 收敛掉的分叉：旧实现两侧各有一份解析，双声明时扫描按「无护栏」、执行侧按 max——
+// 同一份规则两个删除面。现在统一在 [`rule_age_guard`]。
+// fail-closed（G-1 验收口径）：元数据读不到、时间戳在未来、字段非法一律按「太新」处理 ——
+// 误删正在写入的文件不可逆，宁可少删。
+
+/// 年龄轴：读哪个时间戳。
+///
+/// 缺省（规则不写 `ageAxis`）必须按 mtime 解释 —— G-1 明确禁止把缺省改成 ctime
+/// （现有条目不得改变命中集合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeAxis {
+    Mtime,
+    Ctime,
+}
+
+/// 解析规则的 `ageAxis` 字段：缺省/`mtime` → mtime，`ctime` → ctime，
+/// 其余（含写成数组的「双轴」形态）→ None。非法枚举由契约门禁 A9 整包判红；
+/// 运行期兜底见 [`AgeGuard::Invalid`]。
+pub fn parse_age_axis(v: Option<&str>) -> Option<AgeAxis> {
+    match v {
+        None | Some("mtime") => Some(AgeAxis::Mtime),
+        Some("ctime") => Some(AgeAxis::Ctime),
+        Some(_) => None,
+    }
+}
+
+/// 规则年龄护栏（G-1）：解析结果 + 判定本体。`Copy`，便于在递归枚举里逐层传参。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeGuard {
+    /// 未声明 minAge*：无年龄护栏（既有口径，命中集合不变）
+    Off,
+    /// 已声明且可判定：元数据时间早于 `cutoff` 才算够老。
+    ///
+    /// `secs` 与 `cutoff` 同时保留：`cutoff` 是每个规则算一次的判定门槛（逐文件调
+    /// `SystemTime::now()` 既慢又会随时间漂），`secs` 供 [`AgeGuard::tighten`] 做
+    /// max 比较（G-2 全局策略要拿它和全局阈值取更严格的那个）。
+    On {
+        axis: AgeAxis,
+        secs: u64,
+        cutoff: std::time::SystemTime,
+    },
+    /// 声明了但字段非法（阈值非正/非数、轴枚举非法、有轴无阈值）：契约门禁 A9 判红并
+    /// 整包拒绝，运行期兜底一律判「太新」—— 不许「字段读不懂 ⇒ 无护栏 ⇒ 照删」。
+    Invalid,
+}
+
+impl AgeGuard {
+    /// G-2 全局年龄策略：把规则阈值**只收紧不放宽**地并上全局阈值
+    /// （最终门槛 = `max(规则阈值, 全局阈值)`）。
+    ///
+    /// 三条边界（方案 §2.1 G-2）：
+    /// - `Off` 保持 `Off`：全局策略**只作用于已声明 minAge\* 的规则**，不给无护栏的规则
+    ///   凭空加护栏（否则「关闭全局策略时命中集合与升级前一致」这条验收不成立）。
+    /// - `Invalid` 保持 `Invalid`：已经是最严的那一档，不因全局策略变松。
+    /// - `None` / `0` 表示**关闭**（不是「取消护栏」）：原样返回，规则自己的阈值继续生效。
+    pub fn tighten(self, global_days: Option<u64>) -> AgeGuard {
+        match (self, global_days) {
+            (AgeGuard::On { axis, secs, .. }, Some(d)) if d > 0 => {
+                let g = d.saturating_mul(86_400);
+                let eff = secs.max(g);
+                AgeGuard::On {
+                    axis,
+                    secs: eff,
+                    cutoff: min_age_cutoff(eff),
+                }
+            }
+            (g, _) => g,
+        }
+    }
+
+    /// 元数据是否够老。fail-closed：轴对应的时间戳读不到（`modified`/`created` Err）⇒ false。
+    pub fn old_enough(&self, m: &fs::Metadata) -> bool {
+        let t = match self {
+            AgeGuard::On { axis: AgeAxis::Mtime, .. } => m.modified(),
+            AgeGuard::On { axis: AgeAxis::Ctime, .. } => m.created(),
+            AgeGuard::Off => return true,
+            AgeGuard::Invalid => return false,
+        };
+        self.old_enough_at(t.ok())
+    }
+
+    /// 元数据**读不到**时是否够老：无护栏（Off）维持既有口径（不受限），
+    /// 有护栏（On/Invalid）fail-closed 判「太新」。
+    ///
+    /// 为什么要单独一条：旧调用点是 `cutoff.map(...).unwrap_or(false)`，即
+    /// 「有护栏且读不到 ⇒ 太新」；改成共享判定后这层语义必须跟着护栏走，不能丢。
+    pub fn old_enough_when_missing(&self) -> bool {
+        matches!(self, AgeGuard::Off)
+    }
+
+    /// 判定本体（`None` = 时间戳读不到）。时间戳在未来/非法值同走 `t <= cutoff` ⇒ 太新。
+    pub fn old_enough_at(&self, t: Option<std::time::SystemTime>) -> bool {
+        match self {
+            AgeGuard::Off => true,
+            AgeGuard::Invalid => false,
+            AgeGuard::On { cutoff, .. } => t.map(|t| t <= *cutoff).unwrap_or(false),
+        }
+    }
+
+    /// 按路径取元数据并判定（判定与「读不到」兜底都收敛在这一处）。
+    pub fn old_enough_path(&self, p: &Path) -> bool {
+        match fs::metadata(p) {
+            Ok(m) => self.old_enough(&m),
+            Err(_) => self.old_enough_when_missing(),
+        }
+    }
+}
+
+/// 由规则的三个字段解析年龄护栏。入参是**已抽出的字段值**（两侧 JSON 类型不同：
+/// 扫描侧 studjson::Json、执行侧 serde_json::Value —— 共享的是解析与判定口径，
+/// 不是 JSON 解析器）。
+///
+/// - 无 minAge* 且无 ageAxis → [`AgeGuard::Off`]（无护栏，既有口径）
+/// - 单声明 → 该值换算秒数；`minAgeDays = 24h 的整数倍`
+/// - 双声明 → 取**更严格**（更大）的那个：门禁 A9 判红，运行期宁可少删
+/// - 任一字段非法（非正/非有限/轴枚举非法/有轴无阈值）→ [`AgeGuard::Invalid`]
+pub fn rule_age_guard(hours: Option<f64>, days: Option<f64>, axis: Option<&str>) -> AgeGuard {
+    // 先过滤出「正有限数」；被过滤掉但**确实声明过**的值是非法值，必须 fail-closed
+    let declared_bad = [hours, days]
+        .into_iter()
+        .flatten()
+        .any(|n| !(n.is_finite() && n > 0.0));
+    if declared_bad {
+        return AgeGuard::Invalid;
+    }
+    let h = hours.filter(|n| n.is_finite() && *n > 0.0);
+    let d = days.filter(|n| n.is_finite() && *n > 0.0);
+    let secs = match (h, d) {
+        (Some(h), Some(d)) => (h * 3600.0).max(d * 86400.0),
+        (Some(h), None) => h * 3600.0,
+        (None, Some(d)) => d * 86400.0,
+        // 无阈值：未声明轴 = 无护栏（既有口径）；声明了轴 = 自相矛盾（门禁 A9 判红）
+        (None, None) => {
+            return if axis.is_some() { AgeGuard::Invalid } else { AgeGuard::Off };
+        }
+    };
+    let Some(axis) = parse_age_axis(axis) else {
+        return AgeGuard::Invalid;
+    };
+    AgeGuard::On {
+        axis,
+        secs: secs as u64,
+        cutoff: min_age_cutoff(secs as u64),
+    }
+}
+
+/// G-2 全局年龄策略的**文件名**（唯一真源）：写侧（`commands/cleanup/policy.rs`）与
+/// 读侧（本文件的 [`global_min_age_file`]）都从这里取，别在两处各写一遍字面量。
+pub const GLOBAL_MIN_AGE_FILE: &str = "cleanup-min-age-days.txt";
+
+/// G-2 全局年龄策略文件的落点：`<数据根>\cleanup-min-age-days.txt`。
+///
+/// 为什么与 `empty-ignore.txt` 同落点、同「行文本」格式（而不是另开一份 JSON 配置）：
+/// - 落点由宿主注入（`util::list_file_path` ⇒ 便携模式感知），扫描器不自己拼 `%APPDATA%`（N2）；
+/// - 同域已有的策略文件都是行文本（空目录忽略名单），多开一种格式就多一处会漂的口径；
+///   这里的内容就一行整数，不需要 JSON。
+pub fn global_min_age_file() -> Option<std::path::PathBuf> {
+    crate::util::list_file_path(GLOBAL_MIN_AGE_FILE)
+}
+
+/// 读全局年龄阈值（天）。`None` = 关闭（不覆盖规则阈值）。
+///
+/// 只认**第一行**、必须是正整数；空文件 / 缺文件 / 解析失败一律按「关闭」。
+/// 为什么不在这里把取值卡成 UI 提供的档位（14/30）：全局策略**只能收紧**，
+/// 手改成一个更大的值不会放宽删除面（方向安全）；卡档次会让「读了但看起来没生效」
+/// 变成一处静默失效。非法/负值按关闭处理，同样不会放宽（关闭 = 不覆盖，不是取消护栏）。
+pub fn load_global_min_age_days() -> Option<u64> {
+    let f = global_min_age_file()?;
+    let text = fs::read_to_string(&f).ok()?;
+    parse_global_min_age(&text)
+}
+
+/// 策略文件文本 → 天数（纯函数，便于把「空文件 / 非法值 / 多行」这几类样本钉住）。
+pub fn parse_global_min_age(text: &str) -> Option<u64> {
+    let first = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    first.parse::<u64>().ok().filter(|d| *d > 0)
+}
+
+/// 从规则 JSON（本文件 studjson::Json）抽 minAge*/ageAxis 三个字段，调共享解析
+/// [`rule_age_guard`]：扫描侧不得再写第二份换算（G-1 / AGENTS §5.16 N6）。
+/// 只做「取字段」这一层胶水（JSON 类型两侧不同）；换算、轴解析、fail-closed 判定全在共享函数。
+///
+/// `global_min_age_days`（G-2）由调用方**每次扫描读一次**后逐层传入：逐条规则读文件是
+/// N 次 IO，而进程内缓存会让「改了档次要重启才生效」—— 两种都不能接受。
+/// 并法固定为 `max(规则阈值, 全局阈值)`（[`AgeGuard::tighten`]），只收紧不放宽。
+fn rule_age_guard_of(rule: &Json, global_min_age_days: Option<u64>) -> AgeGuard {
+    let num = |k: &str| match rule.get(k) {
+        Some(Json::Num(n)) => Some(*n),
+        _ => None,
+    };
+    rule_age_guard(
+        num("minAgeHours"),
+        num("minAgeDays"),
+        rule.get("ageAxis").and_then(|v| v.as_str()),
+    )
+    .tighten(global_min_age_days)
+}
 
 /// 由秒数推 cutoff（现在 − secs）。
 ///
 /// §5.1：`f64 as u64` 在天文数字下饱和到 `u64::MAX`，`SystemTime - Duration` 会
 /// panic —— 且 panic 从 `cleanup_execute` 展开时清单**还没写盘**，已落盘的备份
 /// 副本会变成无清单孤儿（可恢复删除变不可恢复）。改为 checked_sub：溢出时
-/// 饱和到 `UNIX_EPOCH`（时间门槛 = 「所有文件都够老」，语义正确方向且不 panic）。
+/// 饱和到 `UNIX_EPOCH`。**方向说明**：门槛落在 1970 之前 ⇒ 任何真实文件都判「太新」
+/// （宁可少删、且不 panic），是 minAge 变大时本就该有的方向（旧注释把这里写成
+/// 「所有文件都够老」，与实际判定相反，G-1 一并订正）。
 pub fn min_age_cutoff(secs: u64) -> std::time::SystemTime {
     std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(secs))
         .unwrap_or(std::time::UNIX_EPOCH)
-}
-
-/// 文件修改时间是否早于 cutoff（= 年龄达标）。mtime 读不到 ⇒ false（按太新处理）。
-pub fn modified_before(m: &fs::Metadata, cutoff: std::time::SystemTime) -> bool {
-    match m.modified() {
-        Ok(t) => t <= cutoff,
-        Err(_) => false,
-    }
-}
-
-/// 解析规则的 minAge 字段为秒数。minAgeDays = 24h 的整数倍；非正数/非数字按缺失处理。
-fn rule_min_age_secs(rule: &Json) -> Option<u64> {
-    let pos = |v: &Json| match v {
-        Json::Num(n) if *n > 0.0 => Some(*n),
-        _ => None,
-    };
-    let h = rule.get("minAgeHours").and_then(pos);
-    let d = rule.get("minAgeDays").and_then(pos);
-    match (h, d) {
-        (Some(h), None) => Some((h * 3600.0) as u64),
-        (None, Some(d)) => Some((d * 86400.0) as u64),
-        _ => None, // 双声明或全缺：门禁 A9 判双声明；全缺 = 无时效护栏
-    }
 }
 
 /// 全路径（小写）是否被排除名单命中。
@@ -1729,7 +1911,7 @@ fn walk_fk_dll(
     all: bool,
     pattern: &str,
     recurse: bool,
-    cutoff: Option<std::time::SystemTime>,
+    guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
     acc: &mut FkAcc,
@@ -1769,7 +1951,7 @@ fn walk_fk_dll(
         };
         if ft.is_dir() {
             if recurse {
-                walk_fk_dll(&ent.path(), all, pattern, recurse, cutoff, excl_dirs, excl_files, acc, depth + 1);
+                walk_fk_dll(&ent.path(), all, pattern, recurse, guard, excl_dirs, excl_files, acc, depth + 1);
             }
             continue;
         }
@@ -1781,7 +1963,7 @@ fn walk_fk_dll(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if cutoff.map(|c| !modified_before(&md, c)).unwrap_or(false) {
+        if !guard.old_enough(&md) {
             continue;
         }
         let full_s = ent.path().to_string_lossy().to_string();
@@ -1822,7 +2004,7 @@ fn walk_fk_snapshot(
     pattern: &str,
     recurse: bool,
     depth: usize,
-    cutoff: Option<std::time::SystemTime>,
+    guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
     skip_lock: bool,
@@ -1854,7 +2036,7 @@ fn walk_fk_snapshot(
                 // 超限都 eprintln，这里静默 `continue` ⇒ 「深处的文件没进清单」和
                 // 「文件本来就不存在」在日志里长得一模一样。补齐 eprintln 与三处同格式。
                 if depth < FK_SNAPSHOT_MAX_DEPTH {
-                    walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, cutoff, excl_dirs, excl_files, skip_lock, acc);
+                    walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, guard, excl_dirs, excl_files, skip_lock, acc);
                 } else {
                     err_line(&format!(
                         "[trim-scanner] depth cap {FK_SNAPSHOT_MAX_DEPTH} reached at {}",
@@ -1876,7 +2058,7 @@ fn walk_fk_snapshot(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if cutoff.map(|c| !modified_before(&md, c)).unwrap_or(false) {
+        if !guard.old_enough(&md) {
             continue;
         }
         let full_s = ent.path().to_string_lossy().to_string();
@@ -1908,7 +2090,7 @@ fn walk_fk_snapshot(
     }
 }
 
-fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
+fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_days: Option<u64>) -> FkResult {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let skip_lock = rule.get("restartProcesses").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let has_excl = rule.get("excludeKeys").map(|v| v.ps_count()).unwrap_or(0) > 0;
@@ -1924,7 +2106,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
         .map(|arr| arr.iter().any(|fk| fk.get("recurse") == Some(&Json::Bool(false))))
         .unwrap_or(false);
     let snapshot_mode = skip_lock || has_excl || has_expaths || any_recurse_false;
-    let cutoff = rule_min_age_secs(rule).map(min_age_cutoff);
+    let guard = rule_age_guard_of(rule, global_min_age_days);
     // 规则级 excludePaths 的过滤面（excludeKeys 本身仍被门禁 A2 禁用）。
     // U1-b（2026-10-01）：全局排除名单整链下线，这里不再有全局种子；
     // 执行侧 cleanup_execute 用同一谓词复核，两侧口径仍然一致。
@@ -1990,11 +2172,11 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize) -> FkResult {
             for dir in expand_glob_dirs(fp, true) {
                 if snapshot_mode {
                     walk_fk_snapshot(
-                        Path::new(&dir), all, pattern, recurse, 0, cutoff,
+                        Path::new(&dir), all, pattern, recurse, 0, guard,
                         &excl_dirs, &excl_files, skip_lock, &mut acc,
                     );
                 } else {
-                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, cutoff, &excl_dirs, &excl_files, &mut acc, 0);
+                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, guard, &excl_dirs, &excl_files, &mut acc, 0);
                 }
             }
         }
@@ -2132,6 +2314,32 @@ fn emit_dism(id: &str, rule: &Json) {
     ]);
 }
 
+/// 回收站条目的占位行（G-4 选项 B）。
+///
+/// 两条刻意的取值：
+///   · `size` 恒 0 / `path` 恒空 —— 真实的条目数与体积**只有 Shell API
+///     （`SHQueryRecycleBinW`）能权威回答**，引擎在这里报任何非零数字都是编的；
+///     展示值由渲染层调 `cleanup:recycle-stats` 现查后覆盖。
+///   · `exists` 恒 true —— 条目在 UI 上必须始终可见。扫描不产路径 ≠ 该入口消失，
+///     否则用户再也点不到「清空回收站」。
+fn emit_recycle_bin(id: &str, rule: &Json) {
+    let name = rule.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+    emit_item(&[
+        ("id", jstr(id)),
+        ("name", jstr(name)),
+        ("configuredPath", jstr("")),
+        ("path", jstr("")),
+        ("pathSource", jstr("shell")),
+        ("pathCandidates", "[]".to_string()),
+        ("autoPath", jstr("")),
+        ("autoSize", "0".to_string()),
+        ("size", "0".to_string()),
+        ("risk", jopt_str(rule.get("risk").and_then(|v| v.as_str()))),
+        ("exists", "true".to_string()),
+        ("blockedBy", "[]".to_string()),
+    ]);
+}
+
 // ==================== 主入口 ====================
 
 /// 致命错误。CLI：flush stdout → stderr → exit(2)（与迁移前逐字一致）；
@@ -2214,6 +2422,8 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
         Ok(Json::Arr(a)) => a,
         _ => fatal("扫描分类参数解析失败"),
     };
+    // G-2 全局年龄策略：**一次扫描读一次**，逐层传给年龄护栏构造（见 rule_age_guard_of 注释）
+    let global_min_age_days = load_global_min_age_days();
     if categories.is_empty() {
         fatal("扫描分类参数解析失败：categories 为空");
     }
@@ -2237,11 +2447,25 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             None => continue,
         };
 
-        // DISM 组件清理：非路径型条目，固定返回「可执行」状态（大小以实际执行结果为准）
-        if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
-            emit_dism(cat_id, rule);
-            flush_stdout();
-            continue;
+        // special 分流（非路径型条目，方案 v2 §2.2 G-4 / §2.3）：
+        //   · dism —— 组件清理，固定返回「可执行」状态（大小以实际执行结果为准）；
+        //   · recycleBin —— **G-4 选项 B**：回收站改由渲染层的 Shell API 动作清空
+        //     （cleanup:recycle-stats 查条目数与体积 / cleanup:empty-recycle-bin 走
+        //     SHEmptyRecycleBinW）。扫描侧**刻意不枚举任何路径** —— 这条分支就是
+        //     「`$Recycle.Bin` 不再作为普通清理目录交给永久删链」的引擎侧落点，
+        //     删掉它会让旧条目的 pathPs 重新生效（见 rule 条目与 §2.2 G-4 第 4 条）。
+        match rule.get("special").and_then(|v| v.as_str()) {
+            Some("dism") => {
+                emit_dism(cat_id, rule);
+                flush_stdout();
+                continue;
+            }
+            Some("recycleBin") => {
+                emit_recycle_bin(cat_id, rule);
+                flush_stdout();
+                continue;
+            }
+            _ => {}
         }
 
         // 安装检测——目标应用未安装的条目直接不输出（渲染层扫描后隐藏）
@@ -2257,7 +2481,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
 
         // ---- 文件模式条目（fileKeys）：扫描即产「可删文件清单」（P1，D7/D13）----
         if rule.get("fileKeys").map(|f| f.ps_count()).unwrap_or(0) > 0 {
-            let st = get_file_key_deletable(rule, &mut plan_global_rows);
+            let st = get_file_key_deletable(rule, &mut plan_global_rows, global_min_age_days);
             let fk_arr = rule.get("fileKeys").and_then(|v| v.as_arr());
             let keys = fk_arr.map(|a| a.len()).unwrap_or(0);
             let display0 = fk_arr
@@ -2448,7 +2672,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
 
         // 目录型统计走可删口径：被占用文件不计入 size，locked 只进协议不进 UI。
         // minAge 时效护栏（P0-M5）：目录型规则的统计与执行侧同口径过滤太新文件。
-        let stats = get_path_deletable_stats(&path, rule_min_age_secs(rule).map(min_age_cutoff));
+        let stats = get_path_deletable_stats(&path, rule_age_guard_of(rule, global_min_age_days));
         // 统计失败上报 size=null——渲染层对 null 走「—」分支，不用 0 B 冒充可清理
         let size_json = if stats.ok { stats.size.to_string() } else { "null".to_string() };
         // autoPath 命中时 size 即 autoPath 的大小，不再二次枚举
@@ -2506,10 +2730,144 @@ mod tests {
     #[test]
     fn min_age_cutoff_溢出饱和到epoch不panic() {
         let cutoff = min_age_cutoff(u64::MAX);
-        assert_eq!(cutoff, std::time::UNIX_EPOCH, "溢出必须饱和到 epoch（所有文件视为够老）");
+        assert_eq!(cutoff, std::time::UNIX_EPOCH, "溢出必须饱和到 epoch（门槛落在 1970 前 ⇒ 任何真实文件都判太新，宁可少删）");
         let normal = min_age_cutoff(3600);
         assert!(normal < std::time::SystemTime::now(), "常规秒数 cutoff 必须在过去");
         assert!(min_age_cutoff(0) <= std::time::SystemTime::now(), "0 秒 cutoff = 现在");
+    }
+
+    /// G-1（2026-10-07）：年龄护栏是**扫描/执行共用的唯一解析实现**，
+    /// 这里钉住全部口径 —— 缺省轴、单轴换算、双声明取更严格、非法值 fail-closed。
+    /// 任何一侧想「顺手」放宽删除面（比如把非法值按无护栏处理），先在这里红。
+    #[test]
+    fn age_guard_解析与判定口径() {
+        // 轴解析：缺省 = mtime（G-1 明确禁止把缺省改成 ctime——旧条目命中集合必须不变）
+        assert_eq!(parse_age_axis(None), Some(AgeAxis::Mtime));
+        assert_eq!(parse_age_axis(Some("mtime")), Some(AgeAxis::Mtime));
+        assert_eq!(parse_age_axis(Some("ctime")), Some(AgeAxis::Ctime));
+        // 非法枚举（拼写近似 / 大小写 / 空串）一律 None：契约表枚举是字面量，不做模糊匹配
+        assert_eq!(parse_age_axis(Some("birthtime")), None);
+        assert_eq!(parse_age_axis(Some("Mtime")), None);
+        assert_eq!(parse_age_axis(Some("")), None);
+
+        // 无 minAge* 且无轴 ⇒ Off（既有口径：命中集合不变）
+        assert_eq!(rule_age_guard(None, None, None), AgeGuard::Off);
+        // 单声明换算（minAgeDays = 24h 的整数倍；轴上到护栏）
+        assert!(matches!(
+            rule_age_guard(Some(24.0), None, None),
+            AgeGuard::On { axis: AgeAxis::Mtime, .. }
+        ));
+        assert!(matches!(
+            rule_age_guard(None, Some(7.0), Some("ctime")),
+            AgeGuard::On { axis: AgeAxis::Ctime, .. }
+        ));
+        // 双声明：门禁 A9 判红；运行期取**更严格**（2 天 > 24 小时）——宁可少删，
+        // 且绝不能退化成 Off（旧扫描侧就是按「无护栏」处理，那是 G-1 消灭掉的分叉）
+        match rule_age_guard(Some(24.0), Some(2.0), None) {
+            AgeGuard::On { cutoff, .. } => assert!(
+                cutoff <= min_age_cutoff(2 * 86400),
+                "双声明必须取更严格的那个（门槛必须不晚于 2 天前）"
+            ),
+            other => panic!("双声明应得到 On（取更严格），实际 {other:?}"),
+        }
+        // 非法值一律 Invalid（fail-closed）：不许「读不懂 ⇒ 无护栏 ⇒ 照删」
+        assert_eq!(rule_age_guard(Some(-1.0), None, None), AgeGuard::Invalid);
+        assert_eq!(rule_age_guard(None, Some(0.0), None), AgeGuard::Invalid);
+        assert_eq!(rule_age_guard(None, Some(f64::NAN), None), AgeGuard::Invalid);
+        assert_eq!(rule_age_guard(None, None, Some("ctime")), AgeGuard::Invalid);
+        assert_eq!(rule_age_guard(None, Some(7.0), Some("birthtime")), AgeGuard::Invalid);
+    }
+
+    /// G-1 fail-closed 判定本体：时间戳缺失/未来一律「太新」；护栏非法全拒；
+    /// 「元数据读不到」按护栏有无分开（无护栏维持既有口径）。
+    #[test]
+    fn age_guard_判定本体_fail_closed() {
+        let now = std::time::SystemTime::now();
+        let ten_days_ago = now - std::time::Duration::from_secs(10 * 86400);
+        let future = now + std::time::Duration::from_secs(3600);
+        let guard = rule_age_guard(None, Some(7.0), None);
+        assert!(guard.old_enough_at(Some(ten_days_ago)), "10 天前必须够老");
+        assert!(!guard.old_enough_at(Some(now)), "刚写入必须判太新");
+        assert!(!guard.old_enough_at(None), "时间戳读不到必须判太新（fail-closed）");
+        assert!(!guard.old_enough_at(Some(future)), "时间戳在未来必须判太新（fail-closed）");
+        // 无护栏：不过时间（既有口径）
+        assert!(AgeGuard::Off.old_enough_at(Some(now)));
+        assert!(AgeGuard::Off.old_enough_at(None));
+        // 非法护栏：任何时间戳都不放行
+        assert!(!AgeGuard::Invalid.old_enough_at(Some(ten_days_ago)));
+        // 元数据读不到时的出口：有护栏按太新，无护栏维持既有口径
+        assert!(!guard.old_enough_when_missing());
+        assert!(!AgeGuard::Invalid.old_enough_when_missing());
+        assert!(AgeGuard::Off.old_enough_when_missing());
+    }
+
+    /// G-1：扫描侧字段抽取（studjson::Json → 共享解析）必须认 ageAxis，
+    /// 且缺省/非法取值与共享函数同结论（适配层不得再写一套判断）。
+    #[test]
+    fn rule_age_guard_of_识别年龄轴三字段() {
+        let obj = |fields: Vec<(&str, Json)>| {
+            Json::Obj(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        };
+        let r = obj(vec![("minAgeDays", Json::Num(7.0))]);
+        assert!(matches!(rule_age_guard_of(&r, None), AgeGuard::On { axis: AgeAxis::Mtime, .. }), "缺省轴必须按 mtime");
+        let r = obj(vec![("minAgeDays", Json::Num(7.0)), ("ageAxis", Json::Str("ctime".into()))]);
+        assert!(matches!(rule_age_guard_of(&r, None), AgeGuard::On { axis: AgeAxis::Ctime, .. }), "声明 ctime 必须走创建时间");
+        let r = obj(vec![("minAgeDays", Json::Num(7.0)), ("ageAxis", Json::Str("birthtime".into()))]);
+        assert_eq!(rule_age_guard_of(&r, None), AgeGuard::Invalid, "非法轴必须与共享函数同判 Invalid");
+        let r = obj(vec![("id", Json::Str("x".into()))]);
+        assert_eq!(rule_age_guard_of(&r, None), AgeGuard::Off, "无 minAge* 必须是无护栏");
+        // G-2：全局阈值只在规则**自己声明了** minAge* 时并上去，且只收紧
+        let r = obj(vec![("minAgeDays", Json::Num(3.0))]);
+        match rule_age_guard_of(&r, Some(14)) {
+            AgeGuard::On { secs, .. } => assert_eq!(secs, 14 * 86_400, "全局阈值更大时必须由它生效"),
+            other => panic!("应仍是 On，实际 {other:?}"),
+        }
+        match rule_age_guard_of(&r, Some(1)) {
+            AgeGuard::On { secs, .. } => assert_eq!(secs, 3 * 86_400, "全局阈值更小时规则阈值生效（不放宽）"),
+            other => panic!("应仍是 On，实际 {other:?}"),
+        }
+        assert_eq!(rule_age_guard_of(&obj(vec![("id", Json::Str("x".into()))]), Some(14)), AgeGuard::Off,
+            "没声明 minAge* 的规则不因全局策略被加上护栏");
+    }
+
+    /// G-2（2026-10-07）：全局年龄策略只收紧不放宽，且三条边界都要成立。
+    #[test]
+    fn global_min_age_only_tightens() {
+        let rule_guard = rule_age_guard(None, Some(3.0), None);
+        let secs_of = |g: AgeGuard| match g {
+            AgeGuard::On { secs, .. } => secs,
+            other => panic!("期望 On，实际 {other:?}"),
+        };
+        assert_eq!(secs_of(rule_guard), 3 * 86_400);
+        // 关闭（None / 0）：规则阈值原样生效 —— 「关闭 = 不覆盖」，不是「取消护栏」
+        assert_eq!(secs_of(rule_guard.tighten(None)), 3 * 86_400);
+        assert_eq!(secs_of(rule_guard.tighten(Some(0))), 3 * 86_400);
+        // 全局更小 ⇒ 规则阈值生效（只收紧，决不放宽）
+        assert_eq!(secs_of(rule_guard.tighten(Some(1))), 3 * 86_400);
+        // 全局更大 ⇒ 全局阈值生效
+        assert_eq!(secs_of(rule_guard.tighten(Some(14))), 14 * 86_400);
+        assert_eq!(secs_of(rule_guard.tighten(Some(30))), 30 * 86_400);
+        // Off / Invalid 不因全局策略改变（Off 不加护栏；Invalid 已是最严）
+        assert_eq!(AgeGuard::Off.tighten(Some(30)), AgeGuard::Off);
+        assert_eq!(AgeGuard::Invalid.tighten(Some(30)), AgeGuard::Invalid);
+        // ctime 轴在收紧后必须保留（别在被 tighten 时丢轴）
+        match rule_age_guard(None, Some(1.0), Some("ctime")).tighten(Some(30)) {
+            AgeGuard::On { axis, .. } => assert_eq!(axis, AgeAxis::Ctime, "收紧不得把轴改回 mtime"),
+            other => panic!("期望 On，实际 {other:?}"),
+        }
+    }
+
+    /// G-2：策略文件文本的解析口径 —— 空文件 = 关闭，非法值 = 关闭（不是「无护栏」）。
+    #[test]
+    fn global_min_age_file_text_shapes() {
+        assert_eq!(parse_global_min_age(""), None, "空文件 = 关闭");
+        assert_eq!(parse_global_min_age("   \r\n"), None, "只有空白 = 关闭");
+        assert_eq!(parse_global_min_age("14\r\n"), Some(14));
+        assert_eq!(parse_global_min_age("\r\n30\r\n"), Some(30), "跳过空行取第一行非空");
+        assert_eq!(parse_global_min_age("0"), None, "0 视为关闭（不覆盖规则阈值）");
+        assert_eq!(parse_global_min_age("-7"), None, "负值 = 关闭，不得放宽删除面");
+        assert_eq!(parse_global_min_age("abc"), None);
+        assert_eq!(parse_global_min_age("14.5"), None, "小数不认（档位是整数天）");
     }
 
     use super::*;
@@ -2620,7 +2978,7 @@ mod tests {
             deletable_bytes: 0,
             skipped_reparse: 0,
         };
-        walk_deletable(&root, true, "*.tmp", None, &[], &[], &mut res, 0, true);
+        walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], &mut res, 0, true);
         assert_eq!(res.files.len(), 1, "浅层文件必须收到：{:?}", res.files);
         assert!(
             res.files.iter().all(|(p, _)| !p.contains("d69")),
@@ -2650,8 +3008,8 @@ mod tests {
         }
 
         // pattern='*' 覆盖全部（统计口径固定用这个）
-        let with_files = list_deletable(root.to_str().unwrap(), "*", None, &[], &[]);
-        let stats_only = list_deletable_stats(root.to_str().unwrap(), "*", None, &[], &[]);
+        let with_files = list_deletable(root.to_str().unwrap(), "*", AgeGuard::Off, &[], &[]);
+        let stats_only = list_deletable_stats(root.to_str().unwrap(), "*", AgeGuard::Off, &[], &[]);
 
         assert_eq!(
             stats_only.deletable_count, with_files.files.len() as u64,
@@ -2695,7 +3053,7 @@ mod tests {
         fs::write(root.join("shallow.dll"), b"x").unwrap();
 
         let mut acc = FkAcc::new(0);
-        walk_fk_dll(&root, true, "*.dll", true, None, &[], &[], &mut acc, 0);
+        walk_fk_dll(&root, true, "*.dll", true, AgeGuard::Off, &[], &[], &mut acc, 0);
         assert_eq!(acc.files.len(), 1, "浅层文件必须收到：{:?}", acc.files);
         assert!(
             acc.files.iter().all(|(p, _)| !p.contains("d69")),
@@ -2744,7 +3102,7 @@ mod tests {
         let mut acc = FkAcc::new(0);
         acc.item_cap = 3;
         acc.global_cap = 3;
-        walk_fk_dll(&root, true, "*.tmp", true, None, &[], &[], &mut acc, 0);
+        walk_fk_dll(&root, true, "*.tmp", true, AgeGuard::Off, &[], &[], &mut acc, 0);
         assert!(acc.truncated, "撞上限必须标 truncated（否则界面不显示「已截断」）");
         assert_eq!(acc.files.len(), 3, "输出必须停在上限");
         assert!(
@@ -2758,7 +3116,7 @@ mod tests {
         let mut acc2 = FkAcc::new(0);
         acc2.item_cap = 3;
         acc2.global_cap = 3;
-        walk_fk_snapshot(&root, true, "*.tmp", true, 0, None, &[], &[], true, &mut acc2);
+        walk_fk_snapshot(&root, true, "*.tmp", true, 0, AgeGuard::Off, &[], &[], true, &mut acc2);
         assert!(acc2.truncated, "快照分支撞上限必须标 truncated");
         assert_eq!(acc2.files.len(), 3, "快照分支输出必须停在上限");
         assert!(

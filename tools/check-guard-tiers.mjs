@@ -81,6 +81,14 @@ const MUST_MAIN = [
   'appearance_bg_list',
   'appearance_bg_open_dir',
   'cleanup_execute',
+  // G-2 全局年龄策略：读写都只从主窗设置页发起（同 finder_ignore_* 三命令口径）
+  'cleanup_age_policy',
+  'cleanup_set_age_policy',
+  // G-4（2026-10-07）回收站清空改 Shell API：查询条目数与体积（幂等只读，但消费方
+  // 只有主窗清理页，按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN）、
+  // 清空（不可逆破坏性动作，必须主窗专属）
+  'cleanup_recycle_stats',
+  'cleanup_empty_recycle_bin',
   'cleanup_kill_locked_processes',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗

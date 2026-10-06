@@ -24,7 +24,7 @@
     "src-tauri/src/commands/realtime.rs": 2,
     "src-tauri/src/commands/uninstall/backup_report.rs": 3,
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 3,
-    "src-tauri/src/engine/native/cleanup.rs": 24,
+    "src-tauri/src/engine/native/cleanup.rs": 26,
     "src-tauri/src/engine/native/contextmenu.rs": 1,
     "src-tauri/src/engine/native/maintenance.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 5,
@@ -34,7 +34,7 @@
     "src-tauri/src/pwsh/mod.rs": 6,
     "src-tauri/src/security/mod.rs": 2,
     "native-scanner/src/cleanup_scan.rs": 10,
-    "native-scanner/src/scan.rs": 9,
+    "native-scanner/src/scan.rs": 13,
     "native-scanner/src/util.rs": 2
   },
   "remove_dir": {

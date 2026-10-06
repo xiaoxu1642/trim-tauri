@@ -400,6 +400,52 @@ fn excludePaths_带点目录按目录前缀排除() {
     fs::remove_dir_all(&root).ok();
 }
 
+// ==================== G-4：回收站条目不再枚举路径（2026-10-07） ====================
+
+/// G-4（方案 v2 §2.2 G-4 选项 B）的行为钉桩：`special: "recycleBin"` 的条目
+/// **必须发一条占位行、且一条 `@@PLANFILE@@` 都不产**。
+///
+/// 为什么这条断言必须存在：把回收站从「直扫 `$Recycle.Bin` 交给永久删链」改成
+/// 「Shell API 清空」的全部安全性都建立在「扫描侧不再枚举回收站路径」上。
+/// 这条 special 分支被删掉、或有人给条目加回 `pathPs`，症状都是**静默回到旧行为**
+/// —— 而旧行为在 UI 上看起来完全正常（有条目、有大小），没有任何东西会红。
+///
+/// 夹具**刻意带着 `pathPs`**：分支的先后顺序本身就是被钉住的东西
+/// （special 判定在 pathPs 之前），带路径才测得出「special 抢在路径枚举前面」。
+///
+/// 三条断言各有分工：
+///   ① 占位行在（exists=true）—— 否则条目从扫描结果里消失，入口再也点不到；
+///   ② size 恒 0 —— 真实数字只有 SHQueryRecycleBinW 能给，引擎报非零就是编的；
+///   ③ 零 PLANFILE —— 「不把 `$Recycle.Bin` 当普通清理目录交给永久删链」的直接证据。
+#[test]
+fn 回收站条目只发占位行不枚举任何路径() {
+    let root = temp_root("recyclenopath");
+    plant(&root, &[("a.log", 10)]);
+
+    let item = format!(
+        r#"{ITEM_HEAD},"special":"recycleBin","pathPs":{}}}"#,
+        jstr(&ps_lit(&root))
+    );
+    let (code, out, err) = scan_raw(&wrap_item(&item));
+    assert_eq!(code, 0, "扫描应正常退出: {err}");
+
+    assert!(
+        out.contains(r#""id":"diffProbe""#),
+        "回收站条目必须仍有占位行（入口不能因「扫描不产路径」而消失）: {out}"
+    );
+    assert!(
+        out.contains(r#""size":0"#),
+        "占位行的 size 必须恒为 0（真实体积由 cleanup:recycle-stats 现查）: {out}"
+    );
+    assert!(
+        !out.contains("@@PLANFILE@@"),
+        "special=recycleBin 的条目不得枚举出任何可删文件 —— 旧「直扫 $Recycle.Bin」\
+         的行为被回退了: {out}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+}
+
 /// §4.9 反向面：指向**文件**的排除条目仍走精确匹配（分类器不得把文件误当目录
 /// 做前缀排除——那会让 `keep.log` 之外所有 `xxx.log\...` 形态意外豁免，方向虽
 /// 安全但口径混乱；钉住「按实况分类」的另一半）。

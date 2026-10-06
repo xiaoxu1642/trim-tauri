@@ -1135,12 +1135,27 @@ fn userprofile_root() -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// 路径是否落在用户目录子树内（前缀匹配；canonical 化后比较，防 `C:\Users\XY` 误伤同前缀名）。
-fn under_userprofile(p: &Path, up: Option<&Path>) -> bool {
-    let Some(up) = up else { return false };
-    match (p.canonicalize(), up.canonicalize()) {
-        (Ok(a), Ok(b)) => a.starts_with(&b),
-        _ => false, // canonical 失败保守放行（后续 dot/age 过滤仍兜底）
+/// 用户目录根（canonical 形态）。**一次算出、逐层传参**——见 [`under_userprofile`]。
+fn userprofile_root_canon() -> Option<PathBuf> {
+    userprofile_root()?.canonicalize().ok()
+}
+
+/// 路径是否落在用户目录子树内（前缀匹配）。
+///
+/// E-3 方向 B（2026-10-07 产品裁定）：排除面从「只判扫描根的一级子目录」改成
+/// **递归入口逐层判**——否则整盘扫描（根 = `C:\`）下 `C:\Users` 不被该前缀命中，
+/// 会继续下钻到 `C:\Users\<me>`（= %USERPROFILE%）与 AppData，把用户目录整棵
+/// 当普通目录扫。旧注释写的「整棵不下钻」与当时的实现不符，本次把实现补成那句话。
+///
+/// 为什么不逐次 `canonicalize(p)`（旧实现如此）：递归里每个目录都做一次是 syscall，
+/// 整盘扫描下是性能悬崖。传进来的路径由 `canonical(根)` 经 `read_dir` 派生，
+/// 且 junction/symlink（重解析点）在枚举层就被跳过 ⇒ 形态已经规范。
+/// canonical 拿不到用户目录（`None`）时不排除：与旧实现的「canonical 失败保守放行」同向
+/// ——这一层只是**少删**策略，硬禁删面另有 `engine::protect` 兜底。
+fn under_userprofile(p: &Path, up_canon: Option<&Path>) -> bool {
+    match up_canon {
+        Some(up) => p.starts_with(up),
+        None => false,
     }
 }
 
@@ -1255,7 +1270,8 @@ impl EmptyAccum {
 pub fn empty(roots: &[String], sink: &dyn Sink) {
     init_scan_threads();
     let ignore = load_empty_ignore();
-    let up = userprofile_root();
+    // E-3 方向 B：canonical 一次，逐层传参（Sink 化后递归在并行闭包里，见 under_userprofile）
+    let up = userprofile_root_canon();
     // 审查 v2-M1/M2：跨根共用一个累积器（上限与截断都是全局口径）
     let acc = EmptyAccum::new();
 
@@ -1270,7 +1286,8 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
                     acc.heartbeat(sink);
                     match ent.file_type() {
                         Ok(t) if t.is_dir() => {
-                            // dot 目录（.claude/.dotnet/…）与用户目录子树不下钻、不作候选
+                            // dot 目录（.claude/.dotnet/…）与用户目录子树（**任何深度**，E-3 方向 B）
+                            // 不下钻、不作候选
                             if is_dot_dir(&ent.path())
                                 || under_userprofile(&ent.path(), up.as_deref())
                                 || is_reparse(&ent)
@@ -1283,7 +1300,16 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
                         Ok(t) if t.is_file() => {
                             // FD-6（2026-09-15）：根第一层的 0 字节文件此前被忽略（tops 只收子目录），
                             // 与 duplicates 链路「根层文件也参与」的口径不一致。补上根层空文件。
-                            // 2026-09-28：创建满 3 天的空文件才收（见 EMPTY_MIN_AGE）。
+                            // 2026-09-28 五轮裁定：创建满 **14 天**（EMPTY_MIN_AGE，不是注释早前写的
+                            // 3 天）才收；口径按**创建时间**而非修改时间，创建时间读不到时
+                            // `created_too_new` 按「太新」返回 true（宁可不删，见其注释）。
+                            //
+                            // E-3 方向 B：用户目录子树内的根层文件同样不产候选。判据与目录分支
+                            // 同一函数 —— 因此「根本身 = %USERPROFILE%」时本分支零产出，
+                            // 而不是「子目录全滤掉、根层文件漏出去」。
+                            if under_userprofile(&ent.path(), up.as_deref()) {
+                                continue;
+                            }
                             let keep = ent
                                 .metadata()
                                 .map(|m| m.len() == 0 && !created_too_new(&m))
@@ -1303,7 +1329,7 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
         tops.par_iter().for_each(|d| {
             let mut f: Vec<PathBuf> = Vec::new();
             let mut dd: Vec<PathBuf> = Vec::new();
-            collect_empty_fast(d, &ignore, &mut f, &mut dd, &acc, sink, 0);
+            collect_empty_fast(d, &ignore, &mut f, &mut dd, &acc, sink, 0, up.as_deref());
             acc.flush(&mut f, &mut dd);
         });
     }
@@ -1382,6 +1408,7 @@ fn collect_empty_fast(
     acc: &EmptyAccum,
     sink: &dyn Sink,
     depth: usize,
+    up: Option<&Path>,
 ) -> bool {
     // 审查 v2-M2：上限满后停止下钻 —— 剩下的 IO 只会产出被丢掉的结果
     if acc.stopped() {
@@ -1396,6 +1423,11 @@ fn collect_empty_fast(
     }
     // dot 目录不下钻、自身不算空候选、并让父目录视其为「有内容」（is_dot_dir 文档）
     if is_dot_dir(dir) {
+        return false;
+    }
+    // E-3 方向 B（2026-10-07）：用户目录子树**任何深度**都不下钻，并按「有内容」处理
+    // ——父目录不得因它而被判空（否则连带删除把用户目录整棵带走）。
+    if under_userprofile(dir, up) {
         return false;
     }
     if empty_ignored(ignore, dir) {
@@ -1421,7 +1453,7 @@ fn collect_empty_fast(
                 if is_reparse(&ent) {
                     acc.note_reparse_skip(); // R1-2：留痕，不参与判定
                     empty = false;
-                } else if !collect_empty_fast(&fp, ignore, files, dirs, acc, sink, depth + 1) {
+                } else if !collect_empty_fast(&fp, ignore, files, dirs, acc, sink, depth + 1, up) {
                     empty = false;
                 }
             }
@@ -1477,19 +1509,30 @@ fn collect_empty_fast(
 /// 「整体为空」。
 ///
 /// 与 [`collect_empty_fast`] 共用同一组条目级判据（`is_dot_dir` / `empty_ignored` /
-/// `is_reparse` / `created_too_new` / `created_in_current_year`）：扫描侧视为「空」的
-/// 0 字节文件（创建满 14 天且本年内）在这里同样不阻止判空；其余任何文件、链接/reparse、
-/// dot 或忽略目录、读不到的项都按「有内容」处理（fail-closed）。深度上限与扫描一致。
+/// `under_userprofile` / `is_reparse` / `created_too_new` / `created_in_current_year`）：
+/// 扫描侧视为「空」的 0 字节文件（创建满 14 天且本年内）在这里同样不阻止判空；
+/// 其余任何文件、链接/reparse、dot 或忽略目录、用户目录子树、读不到的项都按
+/// 「有内容」处理（fail-closed）。深度上限与扫描一致。
 ///
 /// 为什么必须放在本体而不是 finder 侧各写一份：两处判据漂移会让折叠父目录要么
 /// 永远删不掉、要么把扫描后新放进的内容连带删走，两者都是静默错误。
 pub fn prune_tree_effectively_empty(dir: &Path) -> bool {
     let ignore = load_empty_ignore();
-    prune_tree_empty_at(dir, &ignore, 0)
+    // E-3 方向 B：删除侧复检与扫描侧同口径 —— 用户目录子树一律按「有内容」处理
+    // （扫描侧不产候选，复检不得反而放行）。
+    // 路径形态假设与扫描侧一致：候选由 `empty()` 产出，而那条链的根过 `canonical(r)`
+    // （fs::canonicalize ⇒ Windows 上是 `\\?\` 逐字路径），`up` 同样 canonical，
+    // 两侧前缀可比。若将来候选能跨进程持久化，这里要改成按需 canonical —— 记在此处，
+    // 别让它变成静默的形态陷阱。
+    prune_tree_empty_at(dir, &ignore, 0, userprofile_root_canon().as_deref())
 }
 
-fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize) -> bool {
+fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize, up: Option<&Path>) -> bool {
     if depth >= MAX_WALK_DEPTH {
+        return false;
+    }
+    // 扫描侧在递归入口就这么判；复检少这一条会出现「扫描不产候选、复检却放行」
+    if under_userprofile(dir, up) {
         return false;
     }
     if is_dot_dir(dir) || empty_ignored(ignore, dir) {
@@ -1508,7 +1551,7 @@ fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize) -> bo
         if t.is_dir() {
             // 用 `is_reparse_target`（同一属性位判据）避开扫描链 reparse 留痕门禁的
             // `is_reparse(` 形态：这条是删除侧复检、不产候选、没有 sk_reparse 累加器。
-            if is_reparse_target(&ent.path()) || !prune_tree_empty_at(&ent.path(), ignore, depth + 1) {
+            if is_reparse_target(&ent.path()) || !prune_tree_empty_at(&ent.path(), ignore, depth + 1, up) {
                 return false;
             }
         } else if t.is_file() {
@@ -2015,6 +2058,50 @@ fn canonical(s: &str) -> Option<PathBuf> {
     }
 }
 
+/// 测试辅助：用 SetFileTime 把条目的创建时间拨回 days 天前（真实文件系统，读方向没法用
+/// 假路径替代）。放在模块级而非某个测试模块内，是因为**两个**测试模块都要用它
+/// （`tests` 的空扫描年龄用例、`depth_cap_tests` 的 E-3 用户目录用例）——
+/// 各自抄一份会在下次改判据时漂。
+#[cfg(all(test, windows))]
+fn set_creation_time_days_ago(p: &Path, days: u64) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, SetFileTime, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = p
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let h = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(h as isize, -1, "CreateFileW 失败: {p:?}");
+    // FILETIME = 1601-01-01 起 100ns 计数；Unix 纪元偏移 11644473600s
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let old = ((now - (days as i64) * 86400 + 11644473600) * 10_000_000) as u64;
+    let ft = FILETIME {
+        dwLowDateTime: (old & 0xFFFF_FFFF) as u32,
+        dwHighDateTime: (old >> 32) as u32,
+    };
+    let ok = unsafe { SetFileTime(h, &ft, std::ptr::null(), std::ptr::null()) };
+    assert_ne!(ok, 0, "SetFileTime 失败: {p:?}");
+    unsafe { CloseHandle(h) };
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2422,47 +2509,6 @@ mod tests {
         assert_eq!(sink.warns.load(Ordering::Relaxed), 1, "截断只告警一次");
     }
 
-    #[cfg(windows)]
-    /// 用 SetFileTime 把条目的创建时间拨回 days 天前（真实文件系统，读方向没法用假路径替代）。
-    fn set_creation_time_days_ago(p: &Path, days: u64) {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_WRITE};
-        use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, SetFileTime, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        };
-        let wide: Vec<u16> = p
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let h = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-                std::ptr::null_mut(),
-            )
-        };
-        assert_ne!(h as isize, -1, "CreateFileW 失败: {p:?}");
-        // FILETIME = 1601-01-01 起 100ns 计数；Unix 纪元偏移 11644473600s
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let old = ((now - (days as i64) * 86400 + 11644473600) * 10_000_000) as u64;
-        let ft = FILETIME {
-            dwLowDateTime: (old & 0xFFFF_FFFF) as u32,
-            dwHighDateTime: (old >> 32) as u32,
-        };
-        let ok = unsafe { SetFileTime(h, &ft, std::ptr::null(), std::ptr::null()) };
-        assert_ne!(ok, 0, "SetFileTime 失败: {p:?}");
-        unsafe { CloseHandle(h) };
-    }
-
     /// 2026-09-28 五轮拍板：空文件/空目录只收创建满 14 天的条目（EMPTY_MIN_AGE，
     /// 3 天 → 7 天 → 30 天 → 14 天）。
     /// 在用应用常用 0 字节标记文件（.lock/.sentinel）表达「活着」，全是刚建的；
@@ -2582,10 +2628,163 @@ mod depth_cap_tests {
         let mut files = Vec::new();
         let mut dirs = Vec::new();
         let empty = collect_empty_fast(
-            &root, &HashSet::new(), &mut files, &mut dirs, &acc, &NullSink, 0,
+            &root, &HashSet::new(), &mut files, &mut dirs, &acc, &NullSink, 0, None,
         );
         assert!(!empty, "超限链的父目录必须判「非空」，不得被连带删除");
         assert!(dirs.is_empty(), "超限深处的目录不得成为删除候选");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // ==================== E-3 用户目录策略（方向 B，2026-10-07 产品裁定） ====================
+    //
+    // 缺口（方案 §1.2）：旧实现只在**扫描根的一级子目录**上判 `under_userprofile`。
+    // 整盘扫描（根 = `C:\`）时 `C:\Users` 不落在 `%USERPROFILE%` 前缀内 ⇒ 它会进 tops，
+    // 下一层递归进 `C:\Users\<me>` 再无人拦 ⇒ 用户目录与 AppData 整棵参与扫描。
+    // 方向 B 把判定移到**递归入口**：任何深度命中 `%USERPROFILE%` 都不下钻、不产候选。
+
+    /// 前缀判定的纯函数面：命中/不命中/同前缀不误伤/拿不到用户目录时不排除。
+    #[test]
+    fn 用户目录前缀判定_按路径组件比较() {
+        let up = Some(Path::new(r"C:\Users\Me"));
+        // 一级子目录本身不是用户目录 ⇒ 允许下钻（盘符根的真实形态）
+        assert!(!under_userprofile(Path::new(r"C:\Users"), up), "C:\\Users 不是用户目录自身");
+        // 下一层命中 ⇒ 必须拦住（旧实现就是在这里漏的）
+        assert!(under_userprofile(Path::new(r"C:\Users\Me"), up), "用户目录自身必须命中");
+        assert!(
+            under_userprofile(Path::new(r"C:\Users\Me\AppData\Local\Temp\x"), up),
+            "任意深度命中都必须拦住"
+        );
+        // 同前缀名不得误伤（`Path::starts_with` 按组件比较，不是字符串前缀）
+        assert!(
+            !under_userprofile(Path::new(r"C:\Users\XY"), Some(Path::new(r"C:\Users\X"))),
+            "C:\\Users\\XY 不在 C:\\Users\\X 之下，不得误伤"
+        );
+        // 拿不到用户目录（canonical 失败 / 变量缺失）时不排除：少删策略，硬禁删面另有 protect
+        assert!(!under_userprofile(Path::new(r"C:\Users\Me"), None));
+    }
+
+    /// 根本身就是用户目录：子目录与根层文件都必须零产出（tops 层 + 根文件分支）。
+    ///
+    /// 用真机 `%USERPROFILE%`（不依赖本机专有文件，环境缺失时显式跳过并说明）。
+    /// 「递归入口」那一层由 `空扫描_递归入口拦住用户目录子树且父目录不判空` 用合成前缀覆盖 ——
+    /// 本用例走的是 `empty()` 的 tops 层，两者合起来才是完整的「整棵排除」。
+    #[cfg(windows)]
+    #[test]
+    fn 空扫描_根本身是用户目录时零候选() {
+        struct CollectSink(std::sync::Mutex<Vec<String>>);
+        impl Sink for CollectSink {
+            fn item(&self, p: &Path, _line: &str) {
+                self.0.lock().unwrap().push(p.to_string_lossy().to_string());
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        let Some(up) = std::env::var_os("USERPROFILE") else {
+            eprintln!("⚠ 跳过：本环境没有 USERPROFILE，无法验证「根 = 用户目录」形态");
+            return;
+        };
+        let sink = CollectSink(std::sync::Mutex::new(Vec::new()));
+        empty(&[PathBuf::from(&up).to_string_lossy().to_string()], &sink);
+        let got = sink.0.lock().unwrap();
+        assert!(
+            got.is_empty(),
+            "E-3 方向 B：根 = %USERPROFILE% 时整棵排除，不得有任何候选，实际 {got:?}"
+        );
+    }
+
+    /// **递归入口**那一层：任何深度命中用户目录前缀都不下钻、不产候选，且父目录不得被判空。
+    ///
+    /// 用**合成前缀**（测试自建树 + 把它的 `Users\Me` 当作用户目录）而不是真机 profile：
+    /// 这样判据落在 `collect_empty_fast` 的递归入口本身，才能与旧实现区分开 ——
+    /// 旧实现只在 tops 层判，本用例的深层空树会被报成候选、`dirs` 非空。
+    /// 候选还受「创建满 14 天且本年内」约束，故条目要拨老；一月上旬运行时该约束会
+    /// 清空全部候选（规则本身正确），此时断言自适应（同 `empty_scan_only_reports_...`）。
+    #[cfg(windows)]
+    #[test]
+    fn 空扫描_递归入口拦住用户目录子树且父目录不判空() {
+        struct CollectSink(std::sync::Mutex<Vec<String>>);
+        impl Sink for CollectSink {
+            fn item(&self, p: &Path, _line: &str) {
+                self.0.lock().unwrap().push(p.to_string_lossy().to_string());
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        let base = std::env::temp_dir().join(format!("trim-e3-synth-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        // 合成「用户目录」= <base>\Users\Me：它下面的空树都不得进候选
+        let fake_profile = base.join("Users").join("Me");
+        fs::create_dir_all(fake_profile.join("older").join("deep")).unwrap();
+        fs::create_dir_all(fake_profile.join("Documents")).unwrap();
+        for d in ["older", "older\\deep", "Documents"] {
+            set_creation_time_days_ago(&fake_profile.join(d), 15);
+        }
+        set_creation_time_days_ago(&fake_profile, 15);
+        let now_days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            / 86_400;
+        let expect_results = civil_year(now_days) == civil_year(now_days - 15);
+
+        let acc = EmptyAccum::new();
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let sink = CollectSink(std::sync::Mutex::new(Vec::new()));
+        // 从 <base>\Users 这一层进去（它不在合成前缀内 ⇒ 会被下钻，正是缺口发生的位置）
+        let ok = collect_empty_fast(
+            &base.join("Users"),
+            &HashSet::new(),
+            &mut files,
+            &mut dirs,
+            &acc,
+            &sink,
+            0,
+            Some(&fake_profile),
+        );
+        assert!(
+            !ok,
+            "E-3 方向 B：用户目录子树必须按「有内容」处理，父目录不得被判空（旧实现会判空并连带删除整棵）"
+        );
+        assert!(files.is_empty(), "用户目录子树内不得有文件候选，实际 {files:?}");
+        if expect_results {
+            assert!(
+                dirs.is_empty(),
+                "E-3 方向 B：用户目录子树内的空目录不得成为候选（旧实现会整棵报出来），实际 {dirs:?}"
+            );
+        } else {
+            eprintln!("ℹ 一月上旬运行：15 天前落去年，「本年内」约束清空候选，本轮的 dirs 断言自适应跳过");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 删除侧复检与扫描侧同口径：用户目录子树内的目录一律「非空」。
+    ///
+    /// 复检这条链**没有**年龄约束（只看树里有没有东西），所以用一棵刚建的空树即可判别：
+    /// 拨了 `under_userprofile` 就返回 false（拒删），没拨会返回 true —— 正是「扫描不产
+    /// 候选、复检却放行」的缺口形态。
+    #[cfg(windows)]
+    #[test]
+    fn 删除侧复检_用户目录子树一律判非空() {
+        if std::env::var_os("USERPROFILE").is_none() {
+            eprintln!("⚠ 跳过：本环境没有 USERPROFILE");
+            return;
+        }
+        // 刻意用 %TEMP%：它在 %USERPROFILE% 之下，整棵都在排除面内。
+        // 必须过 canonical 再喂进去 —— 生产上候选来自 `empty()`（根过 `canonical(r)`），
+        // 而 %TEMP% 的原始串在本机是 `C:\Users\ADMINI~1\...` 这种**短名**形态，
+        // 与 canonical 后的 `%USERPROFILE%` 前缀对不上（形态陷阱，见函数注释）。
+        let raw = std::env::temp_dir().join(format!("trim-e3-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&raw);
+        fs::create_dir_all(raw.join("a").join("b")).unwrap();
+        let base = raw.canonicalize().expect("临时目录应可 canonical");
+        let got = prune_tree_effectively_empty(&base);
+        let _ = fs::remove_dir_all(&raw);
+        assert!(
+            !got,
+            "E-3 方向 B：删除侧复检也必须对用户目录子树判「非空」（这会是一棵空树，旧实现返回 true）"
+        );
     }
 }

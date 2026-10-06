@@ -20,12 +20,14 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use tauri::WebviewWindow;
 use super::capability_orphan;
+use super::com_orphan;
 use super::dead::{collect_dead_uninstall_raws, residue_snapshot_put};
 use super::drivers_orphan;
 use super::game_platform_orphan::{self as gpo, LibraryListing, list_game_dirs, untracked_dir_findings};
 use super::ifeo_orphan;
 use super::minifilter_orphan;
 use super::ownership::running_process_dirs;
+use super::run_keys;
 use super::services_orphan;
 use super::vendor_registry;
 
@@ -126,6 +128,48 @@ unsafe fn scan_all() -> Value {
     let (cap_items, cap_notes) = capability_orphan::collect_capability_findings();
     notes.extend(cap_notes);
 
+    // R-1（2026-10-07）：Run/RunOnce 只读可见面。六条根（3 视图 × Run/RunOnce）分别枚举，
+    // 「读到过」与「一条候选都没有」分开落 note。
+    let (run_raws, run_readable) = run_keys::collect_run_raws();
+    let run_items = if run_readable {
+        let (items, g_notes) = run_keys::run_findings(&run_raws, &|t: &str| run_keys::run_target_present(t), GROUP_CAP);
+        notes.extend(g_notes);
+        items
+    } else {
+        notes.push("Run/RunOnce 六条根都打不开，启动项残留本组未采集".to_string());
+        Vec::new()
+    };
+
+    // R-1 后续阶段（2026-10-07）：COM/CLSID 与 File Types / Applications 只读可见面。
+    let (com_raws, com_readable) = com_orphan::collect_com_raws();
+    let com_items = if com_readable {
+        let (items, g_notes) = com_orphan::com_findings(&com_raws, &|p: &str| com_orphan::path_file_exists(p), GROUP_CAP);
+        notes.extend(g_notes);
+        items
+    } else {
+        notes.push("三份 CLSID 根都枚举不到内容，COM/CLSID 本组未采集".to_string());
+        Vec::new()
+    };
+
+    let ft = com_orphan::collect_filetype_raws();
+    if !ft.any {
+        notes.push("两份 Classes 根都枚举不到内容，文件类型/应用登记本组未采集".to_string());
+    }
+    let (ft_items, ft_notes) = com_orphan::filetype_findings(
+        &ft.file_types,
+        &|progid: &str| unsafe { com_orphan::progid_key_exists_any(progid) },
+        GROUP_CAP,
+    );
+    notes.extend(ft_notes);
+    // Applications 复用 IFEO 那条 `image_executable_present`（一处实现两个域共用，§5.16/N6）
+    let (app_items, app_notes) = com_orphan::app_reg_findings(
+        &ft.apps,
+        &|n: &str| ifeo_orphan::image_executable_present(n),
+        GROUP_CAP,
+    );
+    notes.extend(app_notes);
+    let filetype_items: Vec<Value> = ft_items.into_iter().chain(app_items).collect();
+
     // 游戏目录组：库根下实际存在的一级目录，与平台清单做差
     let listings: Vec<LibraryListing> = index
         .roots_lc
@@ -145,6 +189,9 @@ unsafe fn scan_all() -> Value {
             group_with_platform_skip("ifeo", "IFEO 映像执行选项", ifeo_items, &mut notes),
             group_with_platform_skip("vendor", "厂商产品注册表键", vendor_items, &mut notes),
             group_with_platform_skip("capability", "非打包程序能力授权", cap_items, &mut notes),
+            group_with_platform_skip("runKeys", "启动项残留（Run/RunOnce）", run_items, &mut notes),
+            group_with_platform_skip("comClsid", "COM/CLSID 孤儿（组件文件已不存在）", com_items, &mut notes),
+            group_with_platform_skip("fileTypes", "文件类型 / 应用登记残留", filetype_items, &mut notes),
             group_with_platform_skip("gameDirs", "游戏库目录残留", game_items, &mut notes),
         ],
         "protected": protected,
@@ -155,6 +202,10 @@ unsafe fn scan_all() -> Value {
             "driverFiles": drv_files_scanned,
             "mountedFilters": filters_scanned,
             "ifeoKeys": ifeo_raws.len(),
+            "runValues": run_raws.len(),
+            "clsidKeys": com_raws.len(),
+            "fileTypeKeys": ft.file_types.len(),
+            "appRegKeys": ft.apps.len(),
             "vendorProductKeys": vendor_raws.len(),
             "uninstallKeys": u_raws.len(),
             "platformRecords": index.records.len(),
@@ -201,17 +252,28 @@ pub(super) unsafe fn deep_executable_candidates(report: &Value) -> Vec<Value> {
         for it in items {
             let kind = it.get("kind").and_then(Value::as_str).unwrap_or("");
             let class = it.get("class").and_then(Value::as_str).unwrap_or("");
+            let target = it.get("target").and_then(Value::as_str).unwrap_or("");
             let admitted = match id {
                 "gameDirs" => kind == "folder" && class == "untracked_game_dir",
                 // 服务键：类必须是 dead_landing（落点失踪），再过八道现读判据。
                 // 判据里已经含「落点在 %windir% 就拒」——那是「微软组件」的替身证据，
-                // 文件不在了就读不到签名，不能拿「读不到」当「不是微软」。
+                // 文件不在了就读不到签名，不能拿「读不到当「不是微软」。
                 "services" => {
                     kind == "reg_key"
                         && class == "dead_landing"
-                        && it.get("target").and_then(Value::as_str)
-                            .map(|t| services_orphan::service_key_delete_block_reason(t).is_none())
-                            .unwrap_or(false)
+                        && services_orphan::service_key_delete_block_reason(target).is_none()
+                }
+                // R-2（2026-10-07）：启动项残留**具名单值**。三条同时成立才放行 ——
+                // 组/类对得上（`run_target_missing` = 取出的目标已不在本机，
+                // 另两类 `run_no_target` / `run_unparseable` 是「判不出来」，**不放行**）、
+                // 父键恰好是六条 Run/RunOnce 根之一、且是具名值形态（形状判据在
+                // `run_keys::reg_value_gate`，执行侧调的是同一个函数，§5.16/N6）。
+                // 现读复检（目标此刻是否仍失踪）**不在这里**做：快照是「候选」不是「判决」，
+                // 真正的删除当下还会再过一次 `run_keys::recheck_run_value`（见 residue.rs）。
+                "runKeys" => {
+                    kind == "reg_value"
+                        && class == "run_target_missing"
+                        && matches!(run_keys::reg_value_gate(target), run_keys::RegValueGate::Allowed)
                 }
                 _ => false,
             };
@@ -359,6 +421,16 @@ mod tests {
                 { "id": "ifeo", "items": [ mk("reg_key", "ifeo_debugger", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\acme.exe") ] },
                 { "id": "capability", "items": [ mk("reg_key", "capability_consent_dead_landing", "HKLM\\SOFTWARE\\...") ] },
                 { "id": "vendor", "items": [ mk("reg_key", "vendor_product_key_no_landing", "HKCU\\SOFTWARE\\acme") ] },
+                // R-2：启动项组四条 —— 只有「六条根 + 具名值 + 类为 run_target_missing」那条能进
+                { "id": "runKeys", "items": [
+                    mk("reg_value", "run_target_missing", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run::Acme"),
+                    // 类不对：判不出来（空值 / 形态坏）的候选不许进 —— 猜的方向是多删
+                    mk("reg_value", "run_no_target", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run::Empty"),
+                    // 父键不在六条根上（Microsoft 树内：RunOnceEx）—— 反向兜底必须挡住
+                    mk("reg_value", "run_target_missing", r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnceEx::Acme"),
+                    // 通配清值不是「具名单值」
+                    mk("reg_value", "run_target_missing", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run::*"),
+                ] },
             ]
         });
         // 服务键那两条要现读注册表才能判 ⇒ 本函数是 unsafe fn；读的是 HKLM\...\Services\TrimNoSuchSvc-*，
@@ -375,9 +447,14 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            vec![("folder".to_string(), "untracked_game_dir".to_string())],
-            "白名单只该放进 untracked_game_dir 的 folder，实得 {keys:?}"
+            vec![
+                ("folder".to_string(), "untracked_game_dir".to_string()),
+                ("reg_value".to_string(), "run_target_missing".to_string()),
+            ],
+            "白名单只该放进 untracked_game_dir 的 folder 与 Run 根下的具名值，实得 {keys:?}"
         );
+        // runKeys 只该进那一条（四条里三条被挡）—— 单独点名，防「类判据被删掉后三条一起进」
+        assert_eq!(got.len(), 2, "白名单放进来的条数不对：{got:#?}");
         // 进快照的三条必备标记：origin 是分桶键，deleteCapable 决定画不画勾选框，
         // defaultChecked 必须是 false（危险能力默认关，§9.2）
         for v in &got {
@@ -422,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn group_ids_cover_all_seven_scanners() {
+    fn group_ids_cover_all_scanners() {
         let mut notes = Vec::new();
         let built: Vec<Value> = vec![
             group_with_platform_skip("services", "服务残留", vec![], &mut notes),
@@ -431,12 +508,18 @@ mod tests {
             group_with_platform_skip("ifeo", "IFEO 映像执行选项", vec![], &mut notes),
             group_with_platform_skip("vendor", "厂商产品注册表键", vec![], &mut notes),
             group_with_platform_skip("capability", "非打包程序能力授权", vec![], &mut notes),
+            group_with_platform_skip("runKeys", "启动项残留（Run/RunOnce）", vec![], &mut notes),
+            group_with_platform_skip("comClsid", "COM/CLSID 孤儿（组件文件已不存在）", vec![], &mut notes),
+            group_with_platform_skip("fileTypes", "文件类型 / 应用登记残留", vec![], &mut notes),
             group_with_platform_skip("gameDirs", "游戏库目录残留", vec![], &mut notes),
         ];
         let ids: Vec<&str> = built.iter().map(|g| g["id"].as_str().unwrap_or("")).collect();
         assert_eq!(
             ids,
-            vec!["services", "drivers", "minifilters", "ifeo", "vendor", "capability", "gameDirs"]
+            vec![
+                "services", "drivers", "minifilters", "ifeo", "vendor", "capability", "runKeys",
+                "comClsid", "fileTypes", "gameDirs"
+            ]
         );
         // count 与 items 同步：前端按 count 判「这组空不空」，不一致会显示 0 条却能展开
         for g in &built {

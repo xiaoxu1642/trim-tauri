@@ -138,6 +138,43 @@ function regTargetBlockReason(target) {
   return null;
 }
 
+// ==================== R-2 启动项删值窄口子（与 run_keys::reg_value_gate 同口径的独立实现） ====================
+//
+// 这是本仓第二处「A1 让路」（第一处是服务键窄口子），而且它开的是**系统命名空间**
+// （`…\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`）的删除面。方案 §2.3 R-2 明确要求
+// 「Rust 判定与 Node 门禁读同一份夹具字节」——所以两侧刻意各写一份实现，谁也不调谁，
+// 靠 `tools/fixtures/residue-contract.json` 的 `runValueVectors` 钉住。
+// Rust 侧真源：`src-tauri/src/commands/uninstall/run_keys.rs::reg_value_gate`。
+// 任一侧放宽（尤其把「Microsoft 树内、但不是那六条根」从拒绝改成放行）F5 立刻红。
+const RUN_VALUE_ROOTS = [
+  'HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS\\CURRENTVERSION\\RUN',
+  'HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS\\CURRENTVERSION\\RUNONCE',
+  'HKLM\\SOFTWARE\\WOW6432NODE\\MICROSOFT\\WINDOWS\\CURRENTVERSION\\RUN',
+  'HKLM\\SOFTWARE\\WOW6432NODE\\MICROSOFT\\WINDOWS\\CURRENTVERSION\\RUNONCE',
+  'HKCU\\SOFTWARE\\MICROSOFT\\WINDOWS\\CURRENTVERSION\\RUN',
+  'HKCU\\SOFTWARE\\MICROSOFT\\WINDOWS\\CURRENTVERSION\\RUNONCE',
+];
+
+/** 三态：'allowed' | 'denied' | 'not-governed'（语义见 run_keys.rs 的 RegValueGate） */
+function runValueGate(target) {
+  const t = String(target ?? '');
+  const at = t.lastIndexOf('::');
+  if (at < 0) return 'not-governed'; // 不是「键::值名」形态 ⇒ 不在管辖内
+  const keyPart = t.slice(0, at);
+  const valueName = t.slice(at + 2);
+  const n = normalizeRegTarget(keyPart);
+  if (!n) return 'denied'; // 父键归一化失败 ⇒ fail-closed
+  const parent = n.canon;
+  const inMsTree = REG_MICROSOFT_ROOTS.some((m) => parent === m || parent.startsWith(m + '\\'));
+  if (!RUN_VALUE_ROOTS.includes(parent)) return inMsTree ? 'denied' : 'not-governed';
+  if (!valueName || valueName !== valueName.trim()) return 'denied';
+  if (valueName === '*') return 'denied';
+  if (valueName.includes('\\') || valueName.includes('::')) return 'denied';
+  if (/[\u0000-\u001f\u007f]/.test(valueName)) return 'denied';
+  if ([...valueName].length > 260) return 'denied';
+  return 'allowed';
+}
+
 // ==================== 规则包语义校验（与 uninstall.rs::validate_residue_package 同口径） ====================
 
 function fileTargetProblem(target) {
@@ -499,6 +536,31 @@ if (fixture) {
   check(dupLabel.length === 0, 'F4d. 夹具用例 label 唯一（重名会让"缺样本"看不出来）', dupLabel.join('；'));
   const badLabelled = (fixture.packages || []).filter((c) => typeof c.label !== 'string' || !c.label.trim());
   check(badLabelled.length === 0, `F4e. 夹具用例都有名字（无名 ${badLabelled.length} 条）`);
+
+  // ---- F5~F7. R-2 启动项删值窄口子（与 run_keys::reg_value_gate 共用同一份夹具字节） ----
+  const rvVectors = fixture.runValueVectors || [];
+  const gateBad = rvVectors.filter((v) => runValueGate(v.target) !== v.gate);
+  check(
+    gateBad.length === 0,
+    `F5. R-2 启动项删值窄口子与夹具一致（${rvVectors.length} 条向量）`,
+    gateBad.length
+      ? `${gateBad.length} 处不一致：${gateBad.map((v) => `${v.cls || v.target} 期望 ${v.gate} 实得 ${runValueGate(v.target)}`).join('；')}`
+      : '',
+  );
+  // 三态各自的下限是**棘轮**：只留放行向（或只留拒绝向）时，把判定实现成常量也能过。
+  // 删向量必须同时改这里的下限，等于逼人来写明理由。
+  const RV_MIN = { allowed: 5, denied: 10, 'not-governed': 5 };
+  const rvCount = { allowed: 0, denied: 0, 'not-governed': 0 };
+  for (const v of rvVectors) if (v.gate in rvCount) rvCount[v.gate] += 1;
+  check(
+    Object.keys(RV_MIN).every((k) => rvCount[k] >= RV_MIN[k]),
+    `F6. R-2 向量三态足量（放 ${rvCount.allowed}/${RV_MIN.allowed}，拒 ${rvCount.denied}/${RV_MIN.denied}，不管辖 ${rvCount['not-governed']}/${RV_MIN['not-governed']}）`,
+    Object.keys(RV_MIN).filter((k) => rvCount[k] < RV_MIN[k]).length
+      ? '三态缺一时，把判据实现成常量（全放行 / 全拒绝）也能一路绿'
+      : '',
+  );
+  const rvNoCls = rvVectors.filter((v) => !v.cls).length;
+  check(rvNoCls === 0, `F7. R-2 向量都归了类（未分类 ${rvNoCls} 条）`);
 }
 
 console.log(fail === 0 ? '\n门禁通过' : `\n${fail} 项未通过`);

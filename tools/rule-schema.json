@@ -68,6 +68,7 @@
       "fileCleanType",
       "detect",
       "special",
+      "ageAxis",
       "minAgeDays",
       "minAgeHours",
       "requiredStoppedProcesses",
@@ -141,6 +142,10 @@
     "positiveIntFields": [
       "minAgeHours",
       "minAgeDays"
+    ],
+    "ageAxes": [
+      "mtime",
+      "ctime"
     ],
     "tokens": {
       "caseInsensitive": false,
@@ -306,11 +311,12 @@
       {
         "key": "special",
         "values": [
-          "dism"
+          "dism",
+          "recycleBin"
         ],
         "consumer": "native-scanner/src/cleanup_scan.rs",
-        "anchor": "rule.get(\"special\").and_then(|v| v.as_str()) == Some(\"dism\")",
-        "via": "引擎分流：DISM 组件清理，不走文件系统路径来源"
+        "anchor": "match rule.get(\"special\").and_then(|v| v.as_str()) {",
+        "via": "引擎分流（非路径型条目）：dism 走 DISM 组件清理；recycleBin 是渲染层驱动的 Shell 动作（G-4 选项 B，清空走 SHEmptyRecycleBinW，条目数与体积由 cleanup:recycle-stats 现查），扫描侧只发 size=0 的占位行、不枚举任何文件系统路径"
       },
       {
         "key": "fileCleanType",

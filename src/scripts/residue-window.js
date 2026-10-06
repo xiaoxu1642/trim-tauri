@@ -235,6 +235,8 @@
       '驱动文件 ' + (s.driverFiles || 0),
       '挂载滤镜 ' + (s.mountedFilters || 0),
       'IFEO ' + (s.ifeoKeys || 0),
+      // R-1（2026-10-07）：Run/RunOnce 六条根一共读到多少条启动项值
+      '启动项 ' + (s.runValues || 0),
       '厂商产品键 ' + (s.vendorProductKeys || 0),
       '平台记录 ' + (s.platformRecords || 0)
     ];

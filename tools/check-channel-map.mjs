@@ -133,6 +133,10 @@ const TAURI_ADDED = {
   'finder:ignore-folder': '任务四（2026-10-06）：空目录「忽略此文件夹」持久化忽略（写 app_data 名单；上游 Electron 只有读侧没有管理入口）',
   'finder:ignore-list': '任务四（2026-10-06）：忽略名单弹窗的读侧（路径 + 是否存在；上游无此面）',
   'finder:ignore-remove': '任务四（2026-10-06）：从忽略名单移除一条（上游无此面）',
+  'cleanup:age-policy': 'G-2（2026-10-07）：全局年龄策略读侧（只收紧不放宽；上游 Electron 无此设置）',
+  'cleanup:set-age-policy': 'G-2（2026-10-07）：全局年龄策略写侧（档位由后端闸死：0/14/30；主窗档）',
+  'cleanup:recycle-stats': 'G-4（2026-10-07）：回收站条目数与体积现查（SHQueryRecycleBinW；上游 Electron 无此面，旧实现是直扫 $Recycle.Bin 的普通规则）',
+  'cleanup:empty-recycle-bin': 'G-4（2026-10-07）：清空回收站（SHEmptyRecycleBinW，不可逆；主窗档 + 渲染层红色高危确认；取代原先把 $Recycle.Bin 当普通清理目录永久删的做法）',
 };
 
 function collect(set, re, text) {

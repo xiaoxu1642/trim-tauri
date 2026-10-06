@@ -5,7 +5,10 @@
     "    并按 mustTrigger 断言「到底是哪条判的红」；",
     "  · Rust 侧 commands/cleanup/rules.rs::清理语义校验与夹具一致 断言 ok/拒绝方向一致。",
     "任何一侧放宽判定，另一侧立刻判红；不跨语言调用（方案 §4.3 第三步 / 残留库同姿势）。",
-    "A8（父子路径重叠）是人工复核清单、非致命，故不出现在本文件的 assertionIds 里。"
+    "A8（父子路径重叠）是人工复核清单、非致命，故不出现在本文件的 assertionIds 里。",
+    "G-1（2026-10-07）ageAxis 四类样本由本夹具钉住：缺省轴（只声明 minAge* 不写轴，合法）、",
+    "合法单轴（ageAxis=ctime，合法）、脱离 minAge*（非法）、非法枚举与双轴数组（非法）；",
+    "两侧运行期口径（缺省按 mtime、单轴判定、fail-closed）由 native-scanner 的共享函数钉，不在这里。"
   ],
   "assertionIds": [
     "A1",
@@ -1294,6 +1297,233 @@
                 "nature": "log",
                 "regenerable": true,
                 "minAgeDays": 0,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A9 缺省轴：只声明 minAgeDays、不写 ageAxis（G-1：按 mtime 解释，合法）",
+      "ok": true,
+      "mustTrigger": [],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-age-axis-default",
+                "name": "缺省轴",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "minAgeDays": 7,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A9 合法单轴：minAgeDays + ageAxis=ctime（G-1）",
+      "ok": true,
+      "mustTrigger": [],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-age-axis-ctime",
+                "name": "创建时间轴",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "minAgeDays": 7,
+                "ageAxis": "ctime",
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A9 ageAxis 脱离 minAge*：没有年龄护栏却声明轴（G-1）",
+      "ok": false,
+      "mustTrigger": [
+        "A9"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-age-axis-orphan",
+                "name": "孤立轴",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "ageAxis": "mtime",
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A9 ageAxis 非法枚举（G-1）",
+      "ok": false,
+      "mustTrigger": [
+        "A9"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-age-axis-badenum",
+                "name": "非法轴",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "minAgeDays": 7,
+                "ageAxis": "birthtime",
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A9 ageAxis 双轴数组形态（G-1：本版只允许单轴，不设计 AND/OR 语义）",
+      "ok": false,
+      "mustTrigger": [
+        "A9"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-age-axis-dual",
+                "name": "双轴",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "minAgeDays": 7,
+                "ageAxis": [
+                  "mtime",
+                  "ctime"
+                ],
                 "prov": {
                   "source": "builtin",
                   "sourceClass": "independent",

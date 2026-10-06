@@ -2986,7 +2986,7 @@
               "id": "recycleBin",
               "name": "回收站",
               "risk": "medium",
-              "pathPs": "'C:\\$Recycle.Bin'",
+              "special": "recycleBin",
               "evidence": "回收站内容",
               "recommended": false,
               "domain": "special",
@@ -2998,9 +2998,8 @@
                 "sourceClass": "windows-doc",
                 "ref": "windows/temp",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-07"
               },
-              "minAgeHours": 24,
               "ver": 20261006,
               "evidenceItems": [
                 {
@@ -3008,11 +3007,11 @@
                   "weight": 2
                 },
                 {
-                  "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
+                  "text": "内容不可再生（系统动作），清空后无法由系统重建，请确认后再勾选",
                   "weight": 1
                 },
                 {
-                  "text": "只处理超过 24 小时的旧内容（时效护栏）",
+                  "text": "清空走系统 Shell API（SHEmptyRecycleBinW），不是按目录永久删；执行前会先列出条目数与体积",
                   "weight": 1
                 }
               ]
@@ -3102,6 +3101,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "D94B/hZ/Q6uGYTuu3Ewk9OIOYiW6uWDCFrR6KI6cxGx6bTk/WaUp+PZTodZXypDTnk9joErB2uagfY21j2S3Cg=="
+    "sig": "jiQTunt2yItBJL8THN/reGdxOFFIrgobrintmiUgxvls2NvoNW55tpv8wxI5v/HRl9NAxuYpMPB8Qv/tnlhOBQ=="
   }
 }

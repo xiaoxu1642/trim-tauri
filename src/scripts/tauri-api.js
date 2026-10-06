@@ -83,6 +83,11 @@
     'cleanup:check-locked': 'cleanup_check_locked',
     'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
     'cleanup:item-detail': 'cleanup_item_detail',
+    'cleanup:age-policy': 'cleanup_age_policy',
+    'cleanup:set-age-policy': 'cleanup_set_age_policy',
+    // G-4：回收站清空改 Shell API（选项 B）——查询条目数与体积 / 清空（不可逆）
+    'cleanup:recycle-stats': 'cleanup_recycle_stats',
+    'cleanup:empty-recycle-bin': 'cleanup_empty_recycle_bin',
     // runtimes
     'runtimes:collect': 'runtimes_collect',
     'runtimes:install': 'runtimes_install',
@@ -441,6 +446,13 @@
         if (path === void 0) path = '';
         return invokeChannel('cleanup:item-detail', { id: id, path: path });
       },
+      // G-2 全局年龄策略：只收紧不放宽（档位由后端闸死，前端只是三选一）
+      agePolicy: function () { return invokeChannel('cleanup:age-policy'); },
+      setAgePolicy: function (days) { return invokeChannel('cleanup:set-age-policy', { days: days }); },
+      // G-4：回收站条目数与体积（权威来源，扫描占位行刻意写 0）
+      recycleStats: function () { return invokeChannel('cleanup:recycle-stats'); },
+      // G-4：清空回收站（不可逆；渲染层必须先走 confirmDanger 再调）
+      emptyRecycleBin: function () { return invokeChannel('cleanup:empty-recycle-bin'); },
       onScanProgress: function (callback) { return onEvent('cleanup:scan-progress', callback); }
     },
 

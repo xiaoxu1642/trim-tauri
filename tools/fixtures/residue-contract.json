@@ -103,6 +103,11 @@
       "cls": "IFEO 钩子"
     },
     {
+      "target": "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\acme.exe",
+      "blocked": true,
+      "cls": "IFEO 钩子（32 位视图）"
+    },
+    {
       "target": "HKLM\\SOFTWARE\\Microsoft\\Windows Defender",
       "blocked": true,
       "cls": "安全产品"
@@ -226,6 +231,158 @@
       "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe",
       "blocked": false,
       "cls": "App Paths 叶键"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\Acme\\Image File Execution Options\\acme.exe",
+      "blocked": false,
+      "cls": "非 IFEO 路径（同名字样的产品键）"
+    }
+  ],
+  "runValueVectors": [
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::Acme AutoStart",
+      "gate": "allowed",
+      "cls": "HKCU Run 具名值"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce::Acme",
+      "gate": "allowed",
+      "cls": "HKCU RunOnce 具名值"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run::Acme",
+      "gate": "allowed",
+      "cls": "HKLM 64 位 Run"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce::Acme",
+      "gate": "allowed",
+      "cls": "HKLM 64 位 RunOnce"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run::Acme",
+      "gate": "allowed",
+      "cls": "HKLM 32 位 Run"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnce::Acme",
+      "gate": "allowed",
+      "cls": "HKLM 32 位 RunOnce"
+    },
+    {
+      "target": "HKEY_CURRENT_USER\\Software\\MICROSOFT\\windows\\currentversion\\run::Acme",
+      "gate": "allowed",
+      "cls": "长写法 + 大小写混写归一后放行"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::",
+      "gate": "denied",
+      "cls": "值名为空"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::   ",
+      "gate": "denied",
+      "cls": "值名纯空白"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::*",
+      "gate": "denied",
+      "cls": "通配清值"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::Acme ",
+      "gate": "denied",
+      "cls": "值名尾随空白"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run:: Acme",
+      "gate": "denied",
+      "cls": "值名前导空白"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::a\\b",
+      "gate": "denied",
+      "cls": "值名含反斜杠（多层）"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run::a::b",
+      "gate": "denied",
+      "cls": "值名含 ::"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx::Acme",
+      "gate": "denied",
+      "cls": "RunOnceEx 不在本轮范围"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunServices::Acme",
+      "gate": "denied",
+      "cls": "RunServices 不在本轮范围"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\Sub::Acme",
+      "gate": "denied",
+      "cls": "更深一层不是根"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU::X",
+      "gate": "denied",
+      "cls": "Microsoft 树内其它叶子"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx::Acme",
+      "gate": "denied",
+      "cls": "32 位视图的 RunOnceEx"
+    },
+    {
+      "target": "HKCU\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache::acme.exe.FriendlyAppName",
+      "gate": "not-governed",
+      "cls": "MuiCache（既有候选）"
+    },
+    {
+      "target": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\FirewallRules::{GUID-1}",
+      "gate": "not-governed",
+      "cls": "防火墙规则（既有候选）"
+    },
+    {
+      "target": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\bam\\State\\UserSettings\\S-1-5-21-0::C:\\Gone\\a.exe",
+      "gate": "not-governed",
+      "cls": "BAM（既有候选）"
+    },
+    {
+      "target": "HKCU\\Software\\Acme\\Editor::InstallDir",
+      "gate": "not-governed",
+      "cls": "普通 HKCU 产品键值"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\ESET::InstallDir",
+      "gate": "not-governed",
+      "cls": "普通 HKLM 产品键值"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+      "gate": "not-governed",
+      "cls": "键目标（该走删树分支与 A1）"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\",
+      "gate": "not-governed",
+      "cls": "尾随分隔符归一化失败附近形态（无 ::）"
+    },
+    {
+      "target": "HKCR\\Acme::X",
+      "gate": "denied",
+      "cls": "不支持的 hive"
+    },
+    {
+      "target": "HKCU\\Software\\.\\Microsoft::X",
+      "gate": "denied",
+      "cls": "含 . 段"
+    },
+    {
+      "target": "HKCU\\Software\\Acme\\..\\Microsoft::X",
+      "gate": "denied",
+      "cls": "含 .. 段"
     }
   ],
   "packages": [

@@ -141,7 +141,7 @@ mod tests {
     /// 2026-10-04 磁盘清理审计 §4.6：清理域**每一个**被查询的键都必须在表里存在。
     ///
     /// 为什么这条与上面那条并存、而不是并进去：上面只钉了「关键的几个键在不在」，
-    /// 而 `validate_cleanup_package` 实际查询 21 个字符串数组键 + 9 个数值。任何一个
+    /// 而 `validate_cleanup_package` 实际查询 22 个字符串数组键 + 9 个数值。任何一个
     /// 键被从 `tools/rule-schema.json` 里删掉或改名，`rule_schema::list` 就返回
     /// `None` —— 修复前那 17 处会各自挑一个默认值（多数碰巧 fail-closed，两条不是：
     /// `positiveIntFields` 变空会让 **minAge 护栏静默消失**，`exclusiveNumericFields`
@@ -174,6 +174,8 @@ mod tests {
             "nonEmptyArrayFields",
             "positiveIntFields",
             "exclusiveNumericFields",
+            // ↓ G-1（2026-10-07）：年龄轴枚举，rules.rs 的 ageAxis 校验经 req_list 查询
+            "ageAxes",
             "evidenceItemFields",
         ] {
             assert!(

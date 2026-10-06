@@ -510,7 +510,7 @@ fn classify_outcome(
         );
     }
     if nothing_done && c.too_new > 0 {
-        return ("skip", format!("{} 个文件修改时间不足 minAge（时效护栏），未执行清理", c.too_new));
+        return ("skip", format!("{} 个文件未达 minAge 年龄门槛（时效护栏），未执行清理", c.too_new));
     }
     if nothing_done && c.excluded > 0 {
         return ("skip", format!("{} 个文件在排除名单中，未执行清理", c.excluded));
@@ -832,10 +832,18 @@ pub fn cleanup_execute(
         let mut files: Vec<(String, u64)> = Vec::new();
         // P0 fail-closed：本条规则里展开失败的 %TOKEN%（变量名）清单
         let mut unresolved: Vec<String> = Vec::new();
-        // P0-M5 时效护栏：minAge 规则在执行侧**重新逐文件判定**修改时间，与扫描侧
-        // 同口径（同一谓词）。扫描与执行之间有时间差，太新文件可能在两次枚举之间
-        // 刚被应用写入——执行侧必须自己拒绝，不能只信扫描结果。
-        let cutoff = rule_min_age_secs_json(&rule).map(trim_finder::cleanup_scan::min_age_cutoff);
+        // P0-M5 时效护栏（G-1 收敛）：minAge 规则在执行侧**重新逐文件判定**，与扫描侧
+        // 同一函数（trim_finder::cleanup_scan::rule_age_guard + AgeGuard::old_enough）。
+        // 扫描与执行之间有时间差，太新文件可能在两次枚举之间刚被应用写入——执行侧必须自己
+        // 拒绝，不能只信扫描结果。axis 缺省 = mtime；声明 ctime 时读创建时间。
+        // G-2：全局年龄策略在工作线程内**现读一次**（与扫描侧同一次读法、同一个 tighten），
+        // 并法 = max(规则阈值, 全局阈值)，只收紧不放宽。
+        let guard = trim_finder::cleanup_scan::rule_age_guard(
+            rule.get("minAgeHours").and_then(Value::as_f64),
+            rule.get("minAgeDays").and_then(Value::as_f64),
+            rule.get("ageAxis").and_then(Value::as_str),
+        )
+        .tighten(trim_finder::cleanup_scan::load_global_min_age_days());
         let mut too_new = 0i64;
         // finder 域已有 `has_lossy_path` 闸门，清理链此前漏了：孤立代理项经 U+FFFD
         // 往返可能指向另一个真实路径，而保护清单也按 lossy 串比对。收集阶段即拒收，
@@ -920,10 +928,7 @@ pub fn cleanup_execute(
                                     lossy += 1;
                                     continue;
                                 }
-                                if cutoff
-                                    .map(|c| !trim_finder::cleanup_scan::modified_before(&md, c))
-                                    .unwrap_or(false)
-                                {
+                                if !guard.old_enough(&md) {
                                     too_new += 1;
                                     continue;
                                 }
@@ -934,7 +939,7 @@ pub fn cleanup_execute(
                                 if crate::engine::protect::is_reparse(&md) {
                                     continue;
                                 }
-                                collect_files(&base, pattern, recurse, cutoff, &mut files, &mut too_new, &mut lossy);
+                                collect_files(&base, pattern, recurse, guard, &mut files, &mut too_new, &mut lossy);
                             }
                             // 既非目录也非文件（已消失 / 不可访问 / 多形态设备）：
                             // 跳过。不记 failed —— 「读不到」与「被占用」不是一回事，
@@ -960,7 +965,7 @@ pub fn cleanup_execute(
                     &format!("规则 {id}：目标为盘符相对路径（{target}），已拒绝枚举（§4.10）"),
                 );
             } else if !target.is_empty() && cleanup_root_ok(target) {
-                collect_files(target, "*", true, cutoff, &mut files, &mut too_new, &mut lossy);
+                collect_files(target, "*", true, guard, &mut files, &mut too_new, &mut lossy);
             } else if !target.is_empty() {
                 // 「根不可用」必须留一个可见的痕迹（2026-10-04 审计 §4.2）。
                 //
@@ -1094,7 +1099,7 @@ let mut freed = 0i64;
         // 结果形态，必须显式降为 skip 并把原因带给前端。部分成功时也要在 message 里留痕。
         // P0-M5：too_new 同理——「全都是太新文件」必须显式说成 skip，不许伪装成成功 0 删。
         let too_new_suffix = if too_new > 0 {
-            format!("；{} 个文件修改时间不足 minAge 已跳过", too_new)
+            format!("；{} 个文件未达 minAge 年龄门槛已跳过", too_new)
         } else {
             String::new()
         };
@@ -1199,23 +1204,6 @@ let mut freed = 0i64;
     Ok(CleanupExecuteResult { details, freed: total_freed, file_count: total_files, recycle_entries })
 }
 
-/// 时效护栏 minAge（P0-M5，竞品借鉴落地方案 §5）：解析规则的 minAgeHours/minAgeDays
-/// 为秒数。与扫描侧（trim_finder::cleanup_scan::rule_min_age_secs）同口径：互斥由契约
-/// 门禁 A9 钉死，双声明/非法值在这里按「无护栏」处理会静默放宽删除面——所以双声明时
-/// 取**更严格**（更大）的那个，宁可少删。
-fn rule_min_age_secs_json(rule: &Value) -> Option<u64> {
-    let pos = |v: &Value| v.as_f64().filter(|n| *n > 0.0 && n.is_finite());
-    let h = rule.get("minAgeHours").and_then(pos);
-    let d = rule.get("minAgeDays").and_then(pos);
-    let secs = match (h, d) {
-        (Some(h), None) => h * 3600.0,
-        (None, Some(d)) => d * 86400.0,
-        (Some(h), Some(d)) => (h * 3600.0).max(d * 86400.0),
-        (None, None) => return None,
-    };
-    Some(secs as u64)
-}
-
 /// 按 id 查规则条目（§5.4：全仓**唯一**真源）。
 ///
 /// 遍历口径 = subGroups 条目优先、组内自有条目也扫（超集）——旧的双实现里命令侧
@@ -1265,19 +1253,19 @@ fn collect_files(
     dir: &str,
     pattern: &str,
     recurse: bool,
-    cutoff: Option<std::time::SystemTime>,
+    guard: trim_finder::cleanup_scan::AgeGuard,
     files: &mut Vec<(String, u64)>,
     too_new: &mut i64,
     lossy: &mut i64,
 ) {
-    collect_files_at(dir, pattern, recurse, cutoff, files, too_new, lossy, 0)
+    collect_files_at(dir, pattern, recurse, guard, files, too_new, lossy, 0)
 }
 
 fn collect_files_at(
     dir: &str,
     pattern: &str,
     recurse: bool,
-    cutoff: Option<std::time::SystemTime>,
+    guard: trim_finder::cleanup_scan::AgeGuard,
     files: &mut Vec<(String, u64)>,
     too_new: &mut i64,
     lossy: &mut i64,
@@ -1300,7 +1288,7 @@ fn collect_files_at(
                 continue;
             }
             if recurse {
-                collect_files_at(&path.to_string_lossy(), pattern, recurse, cutoff, files, too_new, lossy, depth + 1);
+                collect_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, too_new, lossy, depth + 1);
             }
         } else if meta.is_file() {
             if trim_finder::util::has_lossy_path(&path) {
@@ -1309,8 +1297,9 @@ fn collect_files_at(
             }
             let name = entry.file_name().to_string_lossy().to_string();
             if !glob_match(pattern, &name) { continue; }
-            // P0-M5 时效护栏：太新（mtime 不足 minAge 或读不到 mtime）不进删除清单
-            if cutoff.map(|c| !trim_finder::cleanup_scan::modified_before(&meta, c)).unwrap_or(false) {
+            // P0-M5 时效护栏（G-1）：太新（轴时间戳不足 minAge、读不到、时间在未来）
+            // 不进删除清单 —— 判定由共享 AgeGuard 给（扫描侧同一函数）
+            if !guard.old_enough(&meta) {
                 *too_new += 1;
                 continue;
             }
@@ -1398,7 +1387,7 @@ mod cleanup_engine_contract_tests {
             &link.parent().unwrap().to_string_lossy(),
             "*.txt",
             true,
-            None,
+            trim_finder::cleanup_scan::AgeGuard::Off,
             &mut files,
             &mut too_new,
             &mut lossy,
@@ -1425,7 +1414,7 @@ mod cleanup_engine_contract_tests {
         let mut files = Vec::new();
         let mut too_new = 0i64;
         let mut lossy = 0i64;
-        collect_files(&base.to_string_lossy(), "*.txt", true, None, &mut files, &mut too_new, &mut lossy);
+        collect_files(&base.to_string_lossy(), "*.txt", true, trim_finder::cleanup_scan::AgeGuard::Off, &mut files, &mut too_new, &mut lossy);
         let _ = std::fs::remove_dir_all(&base);
         assert!(
             !files.iter().any(|(p, _)| p.contains("deep-marker.txt")),
@@ -1434,9 +1423,17 @@ mod cleanup_engine_contract_tests {
         );
     }
 
-    /// P0-M5 时效护栏：测试辅助——把文件 mtime 拨回 days 天前（SetFileTime，真实文件系统）。
+    /// P0-M5 时效护栏：测试辅助——把文件时间戳拨回 days 天前（SetFileTime，真实文件系统）。
     #[cfg(windows)]
     fn set_file_mtime_days_ago(p: &std::path::Path, days: i64) {
+        set_file_times_days_ago(p, Some(days), Some(days))
+    }
+
+    /// G-1（2026-10-07）：创建时间与修改时间**分开**拨（SetFileTime 三个时间戳独立）。
+    /// 传 None = 该时间戳保持原样 —— 年龄轴用例需要「ctime 旧而 mtime 新」这类不对称样本，
+    /// 原来的 helper 把两者一起拨，造不出来。
+    #[cfg(windows)]
+    fn set_file_times_days_ago(p: &std::path::Path, ctime_days: Option<i64>, mtime_days: Option<i64>) {
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_WRITE};
         use windows::Win32::Storage::FileSystem::{
@@ -1462,13 +1459,19 @@ mod cleanup_engine_contract_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let old = ((now - days * 86400 + 11644473600) * 10_000_000) as u64;
-        let ft = FILETIME {
-            dwLowDateTime: (old & 0xFFFF_FFFF) as u32,
-            dwHighDateTime: (old >> 32) as u32,
+        let ft_of = |days: i64| {
+            let old = ((now - days * 86400 + 11644473600) * 10_000_000) as u64;
+            FILETIME {
+                dwLowDateTime: (old & 0xFFFF_FFFF) as u32,
+                dwHighDateTime: (old >> 32) as u32,
+            }
         };
-        // minAge 谓词按**修改时间**判定，创建/写入两个时间都要拨回
-        unsafe { SetFileTime(h, Some(&ft), None, Some(&ft)) }.expect("SetFileTime 失败");
+        let creation = ctime_days.map(ft_of);
+        let write = mtime_days.map(ft_of);
+        // SetFileTime 要 `Option<*const FILETIME>`：`Option<&T>` 不会自动 coerce，得显式取指针
+        let creation_ptr = creation.as_ref().map(|f| f as *const FILETIME);
+        let write_ptr = write.as_ref().map(|f| f as *const FILETIME);
+        unsafe { SetFileTime(h, creation_ptr, None, write_ptr) }.expect("SetFileTime 失败");
         unsafe { let _ = CloseHandle(h); }
     }
 
@@ -1501,6 +1504,86 @@ mod cleanup_engine_contract_tests {
             .collect();
         assert_eq!(paths.len(), 1, "只有 mtime 满 3 天的文件进清单: {paths:?}");
         assert!(paths[0].ends_with("stale.txt"), "清单内容异常: {paths:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// G-1 验收（2026-10-07）：**扫描命中集合与执行删除集合逐项一致** ——
+    /// 两侧必须调同一个 `trim_finder::cleanup_scan::rule_age_guard` + `AgeGuard::old_enough`
+    /// （AGENTS §5.16 N6；旧实现两侧各一份解析，双声明时结论不同）。
+    ///
+    /// 样本（真实文件系统 + SetFileTime 把两个时间戳拆开）：
+    ///   · stale.txt      ：mtime/ctime 都拨回 10 天 ⇒ 两种轴都命中；
+    ///   · ctime_only.txt ：ctime 拨回 10 天、mtime 留在现在 ⇒ 只有 ctime 轴命中；
+    ///   · fresh.lock     ：两个时间戳都不动 ⇒ 两种轴都不命中。
+    /// 第三类「元数据读不到」无法在真实文件系统上确定性造出（要读取失败，不是读到旧值），
+    /// 由 native-scanner 的 `age_guard_判定本体_fail_closed` 在共享函数层钉住 ——
+    /// 两侧调的是同一个函数，时间戳缺失的结论必然一致。
+    ///
+    /// 零删除副作用：执行侧走回收站模式（to_recycle=true，只枚举不删除）。
+    #[test]
+    #[cfg(windows)]
+    fn age_axis_扫描命中集与执行删除集一致() {
+        use trim_finder::cleanup_scan::{list_deletable, rule_age_guard};
+        let base = std::env::temp_dir().join(format!("trim-ageaxis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("stale.txt"), b"old").unwrap();
+        std::fs::write(base.join("ctime_only.txt"), b"old").unwrap();
+        std::fs::write(base.join("fresh.lock"), b"new").unwrap();
+        set_file_times_days_ago(&base.join("stale.txt"), Some(10), Some(10));
+        set_file_times_days_ago(&base.join("ctime_only.txt"), Some(10), None);
+
+        let rule_json = |axis: Option<&str>| {
+            let mut item = serde_json::json!({
+                "id": "ageaxis", "name": "年龄轴",
+                "fileKeys": [{ "path": base.to_string_lossy(), "pattern": "*", "recurse": true }],
+                "minAgeDays": 3
+            });
+            if let Some(a) = axis {
+                item["ageAxis"] = serde_json::json!(a);
+            }
+            serde_json::json!({ "groups": [{ "items": [item] }] })
+        };
+        let items = vec![serde_json::json!({ "id": "ageaxis", "name": "年龄轴", "path": base.to_string_lossy() })];
+
+        let names = |paths: Vec<String>| -> Vec<String> {
+            let mut v: Vec<String> = paths
+                .iter()
+                .filter_map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect();
+            v.sort();
+            v
+        };
+        // 扫描侧：生产路径由 `rule_age_guard_of` 抽字段后调同一函数；这里直接给字段值，
+        // 测的是共享判定本身（字段抽取另有 native-scanner 的 `rule_age_guard_of_识别年龄轴三字段`）。
+        let scan_hits = |axis: Option<&str>| -> Vec<String> {
+            let guard = rule_age_guard(None, Some(3.0), axis);
+            names(list_deletable(&base.to_string_lossy(), "*", guard, &[], &[]).files.into_iter().map(|(p, _)| p).collect())
+        };
+        let exec_hits = |axis: Option<&str>| -> (Vec<String>, i64) {
+            let res = cleanup_execute(&items, &rule_json(axis), true, false).unwrap();
+            let hits = names(res.recycle_entries.iter().filter_map(|e| e["path"].as_str().map(String::from)).collect());
+            (hits, res.details[0]["tooNew"].as_i64().unwrap_or(-1))
+        };
+
+        // ① 缺省轴（mtime）：ctime_only.txt 的 mtime 是现在 ⇒ 不该命中
+        let mtime_hits = vec!["stale.txt".to_string()];
+        assert_eq!(scan_hits(None), mtime_hits, "扫描侧 mtime 轴命中集");
+        let (exec_mtime, too_new_mtime) = exec_hits(None);
+        assert_eq!(exec_mtime, mtime_hits, "执行侧 mtime 轴删除集");
+        assert_eq!(too_new_mtime, 2, "太新记账：ctime_only.txt 与 fresh.lock");
+
+        // ② ctime 轴：ctime_only.txt 创建于 10 天前 ⇒ 两侧都该命中
+        let ctime_hits = vec!["ctime_only.txt".to_string(), "stale.txt".to_string()];
+        assert_eq!(scan_hits(Some("ctime")), ctime_hits, "扫描侧 ctime 轴命中集");
+        let (exec_ctime, too_new_ctime) = exec_hits(Some("ctime"));
+        assert_eq!(exec_ctime, ctime_hits, "执行侧 ctime 轴删除集");
+        assert_eq!(too_new_ctime, 1, "太新记账：只剩 fresh.lock");
+
+        // ③ 直接对拍两个轴的集合（这条才是「逐项一致」的主张）
+        for axis in [None, Some("ctime")] {
+            assert_eq!(scan_hits(axis), exec_hits(axis).0, "轴 {axis:?} 上扫描命中集与执行删除集必须逐项一致");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
