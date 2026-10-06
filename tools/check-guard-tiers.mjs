@@ -127,9 +127,9 @@ const MUST_MAIN = [
   'updater_check',
   'updater_completion', // 读后即删的「更新已完成」标记：只有主窗首启要弹完成提示，不给子窗
   'updater_download',
-  'updater_get_mirror',
   'updater_install',
-  'updater_set_mirror',
+  // updater_get_mirror / updater_set_mirror 已于 2026-10-06 随「更新线路」UI 整链退役
+  // （顺序固化 AtomGit 国内源优先、GitHub 兜底，不再暴露选择）。
   // 卸载域 MVP（竞品借鉴落地方案 P0 §11）：卸载/残留执行是高危写操作，
   // 且只有主窗加载 uninstall.js —— 六条命令全档 MAIN。
   // 其中 check/update-residue 两条按「谁真的需要调它」定档（AGENTS §3 的 M1~M3 教训）：

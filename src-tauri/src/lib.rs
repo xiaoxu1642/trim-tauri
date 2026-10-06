@@ -476,8 +476,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::updater::updater_download,
         commands::updater::updater_cancel_download,
         commands::updater::updater_install,
-        commands::updater::updater_set_mirror,
-        commands::updater::updater_get_mirror,
     ])
 }
 

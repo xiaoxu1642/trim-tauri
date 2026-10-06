@@ -34,7 +34,10 @@
 //!    不再维护第二份（文档互相抄路径是「红线指向虚无」的温床，L4 D-3 同族教训）。
 //! 2. FEEDS 两条：`atomgit`（https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/raw/）
 //!    与 `github`（https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/），
-//!    auto 顺序 AtomGit 优先。2026-10-03 用户拍板由三源（GitHub + 两个加速代理）改二源；
+//!    **顺序固定 AtomGit 国内源优先、失败自动回退 GitHub**（2026-10-06 起不再提供线路
+//!    选择 UI 与 per-machine 偏好：默认就该是国内源，用户不需要理解「线路」概念；
+//!    已退役的 `updater:set-mirror` / `updater:get-mirror` 见 git 历史）。
+//!    2026-10-03 用户拍板由三源（GitHub + 两个加速代理）改二源；
 //!    2026-10-05 再由 Gitee 换成 AtomGit（Gitee 附件只能网页手动传，AtomGit 有发布 API）。
 //!    **两仓发版必须同步**：AtomGit 侧 release 资产与 GitHub 侧同名同版本，
 //!    否则国内源会长期停在旧版（表现为「检查更新说已是最新」而 GitHub 有新版）。
@@ -52,8 +55,6 @@ use url::Url;
 use crate::engine::{guard, log, paths};
 use crate::security;
 
-/// 镜像偏好文件（与上游 `MIRROR_FILE` 同名，同一数据目录两侧可共用）
-const MIRROR_FILE: &str = "update-mirror.json";
 /// 安装前留下的「本次要装到哪个版本」标记：替换完成后本进程已退出，
 /// 由新版本实例首启读一次并给出完成提示（读后即删）。
 const DONE_FILE: &str = "update-applied.json";
@@ -101,11 +102,6 @@ const FEEDS: &[(&str, &str, &str, &str)] = &[
         "latest.json",
     ),
 ];
-
-/// auto = AtomGit 优先、失败自动回退 GitHub；指定线路 = 该线路优先、另一条兜底。
-/// 'atomgit' / 'github' 既是偏好项也是 FEEDS 里的真实线路。
-///（历史偏好值 'gitee' 已不在白名单内：读到即退回 auto，老用户无需处理）
-const MIRROR_IDS: &[&str] = &["auto", "atomgit", "github"];
 
 // ==================== 进程内状态（上游 autoUpdater 同样是进程单例） ====================
 
@@ -201,23 +197,7 @@ impl Drop for CheckingGuard {
     }
 }
 
-// ==================== 线路与偏好 ====================
-
-fn mirror_pref() -> String {
-    std::fs::read_to_string(paths::join_data(MIRROR_FILE))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v.get("mirror").and_then(|m| m.as_str()).map(String::from))
-        .filter(|id| MIRROR_IDS.contains(&id.as_str()))
-        .unwrap_or_else(|| "auto".into())
-}
-
-fn save_mirror_pref(id: &str) -> Result<(), String> {
-    if !MIRROR_IDS.contains(&id) {
-        return Err("unknown-mirror".into());
-    }
-    security::atomic_write_json(&paths::join_data(MIRROR_FILE), &json!({ "mirror": id }))
-}
+// ==================== 线路顺序 ====================
 
 /// 基址必须是带尾斜杠的目录前缀 —— 少了斜杠会拼出一个 404 端点，
 /// 而 404 会被当成「这条线路不通」去退下一条，镜像配错就永远查不出来。
@@ -231,17 +211,15 @@ fn endpoint_of(base: &str, manifest: &str) -> Option<Url> {
     Url::parse(&format!("{base}{manifest}")).ok()
 }
 
-/// 按偏好排出线路尝试顺序（对照上游 `orderedFeeds()`）：指定线路时该线路优先、其余兜底。
-/// 未知偏好不返回空表，退回默认顺序 —— 配错偏好不该让「检查更新」整个失效。
+/// 线路尝试顺序 = FEEDS 表顺序（**AtomGit 国内源优先、GitHub 兜底**）。
+///
+/// 2026-10-06 线路选择 UI 与 per-machine 偏好整链退役后顺序固化：默认就该是国内源，
+/// 不该再出现「某台机器被固定到 GitHub 直连、国内用户每次检查都先吃超时」的状态。
 ///
 /// **兜底序列里必须始终留着另一条真实线路**：国内线路被墙/仓库转私有、或 GitHub
 /// 在某网络下不可达时，另一条就是唯一出路。丢线路 = 更新功能整体失效。
-fn ordered_feeds(pref: &str) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
-    let mut all = FEEDS.to_vec();
-    if let Some(pos) = all.iter().position(|(id, _, _, _)| *id == pref) {
-        all.rotate_left(pos);
-    }
-    all
+fn ordered_feeds() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    FEEDS.to_vec()
 }
 
 fn push<R: Runtime>(app: &AppHandle<R>, state: Value) {
@@ -291,14 +269,13 @@ async fn safe_check<R: Runtime>(app: AppHandle<R>, silent: bool) -> Value {
     let _guard = CheckingGuard;
 
     push(&app, json!({ "phase": "checking" }));
-    let pref = mirror_pref();
     let mut last_error = String::new();
     // 审查 L8：签名判定要**跨线路累积**。只看循环结束后残留的那条错误，会出现
     // 「GitHub 线路验签失败 + 镜像线路网络超时」= 最后一条是网络错 ⇒ 被报成可重试的
     // 网络抖动，与 :255-260 自述的保守方向相反（用户会对着一个永远无解的签名问题反复点）。
     let mut sig_failed_any = false;
 
-    for (id, label, base, manifest) in ordered_feeds(&pref) {
+    for (id, label, base, manifest) in ordered_feeds() {
         match check_once(&app, base, manifest).await {
             Ok(Some(update)) => {
                 log::write_log(
@@ -756,32 +733,6 @@ fn clean_installer(path: &str) -> Cleaned {
     }
 }
 
-/// updater:set-mirror —— 切换更新线路偏好
-#[tauri::command]
-pub fn updater_set_mirror<R: Runtime>(
-    window: WebviewWindow<R>,
-    mirror: Option<String>,
-) -> Result<Value, String> {
-    guard::guard(&window, guard::MAIN)?;
-    let id = mirror.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "auto".into());
-    match save_mirror_pref(&id) {
-        Ok(()) => {
-            log::write_log("info", &format!("[updater] 更新镜像偏好已保存: {id}"));
-            Ok(json!({ "ok": true, "mirror": id }))
-        }
-        Err(e) => Ok(json!({ "ok": false, "reason": e, "mirror": mirror_pref() })),
-    }
-}
-
-/// updater:get-mirror —— 当前偏好 + 下拉选项（选项由线路表推导，避免两处清单漂移）
-#[tauri::command]
-pub fn updater_get_mirror<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard(&window, guard::MAIN)?;
-    let mut options = vec![json!({ "id": "auto", "label": "自动（推荐）" })];
-    options.extend(FEEDS.iter().map(|(id, label, _, _)| json!({ "id": id, "label": label })));
-    Ok(json!({ "mirror": mirror_pref(), "options": options }))
-}
-
 /// 启动 8s 后静默检查一次（对照上游 initUpdater 的 setTimeout）。
 /// 为什么延后：避开窗口动画与概览预热的资源抢占期。
 pub fn schedule_silent_check<R: Runtime>(app: &AppHandle<R>) {
@@ -806,8 +757,8 @@ pub fn schedule_silent_check<R: Runtime>(app: &AppHandle<R>) {
 mod tests {
     use super::*;
 
-    fn ids(pref: &str) -> Vec<&'static str> {
-        ordered_feeds(pref).iter().map(|f| f.0).collect()
+    fn feed_ids() -> Vec<&'static str> {
+        ordered_feeds().iter().map(|f| f.0).collect()
     }
 
     /// 清理出口的输入不可信：标记里的路径来自磁盘上的一份 JSON，
@@ -879,25 +830,10 @@ mod tests {
     }
 
     #[test]
-    fn auto_偏好下_atomgit_优先() {
-        assert_eq!(ids("auto"), vec!["atomgit", "github"]);
-    }
-
-    #[test]
-    fn 指定线路优先但另一条仍在兜底序列() {
-        let v = ids("github");
-        assert_eq!(v[0], "github");
-        assert_eq!(v.len(), 2, "不能丢线路");
-        assert!(v.contains(&"atomgit"), "GitHub 不可达时必须有国内源可退");
-        // 'atomgit' 作为显式偏好，结果等价于 auto
-        assert_eq!(ids("atomgit"), ids("auto"));
-    }
-
-    #[test]
-    fn 未知偏好退回默认顺序而非空表() {
-        assert_eq!(ids("evil-mirror"), vec!["atomgit", "github"]);
-        // 历史偏好值 'gitee' 已不在白名单：按未知值退回默认顺序，而不是空表
-        assert_eq!(ids("gitee"), ids("auto"));
+    fn 国内源恒优先且_github_始终在兜底位() {
+        // 2026-10-06 线路选择 UI 退役后顺序固化：每次检查都 AtomGit 先、GitHub 兜底，
+        // 任何机器上都不再可能被固定到 GitHub 直连。
+        assert_eq!(feed_ids(), vec!["atomgit", "github"]);
     }
 
     #[test]
@@ -946,9 +882,8 @@ mod tests {
     }
 
     #[test]
-    fn 线路表与偏好白名单一致() {
+    fn 线路表恰好两条且形态合法() {
         for (id, _, base, manifest) in FEEDS {
-            assert!(MIRROR_IDS.contains(id), "{id} 未登记进偏好白名单");
             assert!(base.ends_with('/'), "{id} 基址必须带尾斜杠");
             assert!(base.starts_with("https://"), "{id} 必须走 https");
             // 清单名要能安全拼进 URL：不能带斜杠/查询串（否则拼出不可预期的端点）
@@ -958,16 +893,13 @@ mod tests {
             );
             assert!(manifest.ends_with(".json"), "{id} 清单应为 json：{manifest}");
         }
-        // 白名单 = auto + 全部真实线路（'atomgit'/'github' 本身就是线路，不额外占位）
-        assert_eq!(MIRROR_IDS.len(), FEEDS.len() + 1);
         // 线路表**恰好两条**：三源时代留下的加速代理不得复活（2026-10-03 用户拍板）
         assert_eq!(FEEDS.len(), 2, "更新线路应只有 AtomGit + GitHub 两条: {FEEDS:?}");
-        // 已退役的线路 id 不得回到线路表或偏好白名单：加速代理（2026-10-03）、
-        // Gitee（2026-10-05 换成 AtomGit；历史偏好值 'gitee' 走「未知值退回默认顺序」）
+        // 已退役的线路 id 不得回到线路表：加速代理（2026-10-03）、Gitee（2026-10-05）
         for gone in ["gh-proxy", "ghfast", "gitee"] {
             assert!(
-                !FEEDS.iter().any(|(id, ..)| *id == gone) && !MIRROR_IDS.contains(&gone),
-                "{gone} 已下线，不得回到线路表或偏好白名单"
+                !FEEDS.iter().any(|(id, ..)| *id == gone),
+                "{gone} 已下线，不得回到线路表"
             );
         }
         // 清单名不得两条相同（相同则 url 字段必有一个指错仓库）

@@ -60,8 +60,8 @@
     'updater:download': 'updater_download',
     'updater:cancel-download': 'updater_cancel_download',
     'updater:install': 'updater_install',
-    'updater:set-mirror': 'updater_set_mirror',
-    'updater:get-mirror': 'updater_get_mirror',
+    // updater:set-mirror / updater:get-mirror 2026-10-06 随更新线路 UI 整链退役
+    // （顺序固化国内源优先，无需用户选择）。
     // device / overview
     'device:scan': 'device_scan',
     'overview:metrics': 'overview_metrics',
@@ -383,8 +383,6 @@
       download: function () { return invokeChannel('updater:download'); },
       cancelDownload: function () { return invokeChannel('updater:cancel-download'); },
       install: function () { return invokeChannel('updater:install'); },
-      setMirror: function (mirror) { return invokeChannel('updater:set-mirror', { mirror: mirror }); },
-      getMirror: function () { return invokeChannel('updater:get-mirror'); },
       onState: function (callback) { return onEvent('updater:state-changed', callback); }
     },
 

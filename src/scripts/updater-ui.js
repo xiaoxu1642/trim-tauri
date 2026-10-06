@@ -650,38 +650,8 @@
     rowHint = document.getElementById('updaterCheckHint');
     if (!rowBtn || !window.api || !window.api.updater) return; // 优雅降级
 
-    // v2.6.0（P2-8）：更新镜像偏好下拉（主进程返回可选项与当前值，持久化在数据目录）
-    const mirrorSelect = document.getElementById('updaterMirrorSelect');
-    const mirrorHint = document.getElementById('updaterMirrorHint');
-    if (mirrorSelect && window.api.updater.getMirror) {
-      window.api.updater.getMirror().then(cfg => {
-        if (!cfg || !Array.isArray(cfg.options)) return;
-        // 主进程线路清单为准（新增镜像只改 updater.js 与此处渲染，无需改 HTML）
-        mirrorSelect.innerHTML = '';
-        cfg.options.forEach(opt => {
-          const el = document.createElement('option');
-          el.value = opt.id;
-          el.textContent = opt.label;
-          mirrorSelect.appendChild(el);
-        });
-        mirrorSelect.value = cfg.mirror || 'auto';
-      }).catch(() => {});
-      mirrorSelect.addEventListener('change', () => {
-        const id = mirrorSelect.value || 'auto';
-        try {
-          window.api.updater.setMirror(id).then(r => {
-            if (r && r.ok) {
-              if (mirrorHint) mirrorHint.textContent = id === 'auto'
-                ? '优先走 AtomGit 国内源，不可用时自动回退 GitHub（安装包仍经 minisign 签名强校验）'
-                : '已固定线路；安装包仍经 minisign 签名强校验，线路只是传输通道';
-              toast('success', '更新镜像偏好已保存');
-            } else {
-              toast('error', '镜像偏好保存失败');
-            }
-          }).catch(() => toast('error', '镜像偏好保存失败'));
-        } catch (_) { /* 预览模式无 API */ }
-      });
-    }
+    // 更新线路下拉 2026-10-06 整链退役：后端顺序固化 AtomGit 国内源优先、
+    // GitHub 兜底（updater.rs FEEDS），设置页不再渲染选择器，也无 set/get-mirror 通道。
 
     unbind = window.api.updater.onState(s => {
       if (!s || !s.phase) return;

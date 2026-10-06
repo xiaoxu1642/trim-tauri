@@ -888,25 +888,7 @@
         window.app?.toast?.('error', '打开链接失败：' + (e && e.message ? e.message : e));
       }
     });
-    // v3.1.0：123 云盘备用下载渠道——先复制提取码（剪贴板写入需窗口在前台，须先于 openExternal）再打开链接
-    document.getElementById('btn123Pan')?.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText('1642');
-        window.app?.toast?.('success', '提取码 1642 已复制');
-      } catch (e) {
-        window.app?.toast?.('warning', '提取码复制失败，请在网盘页手动输入 1642');
-      }
-      // 同上（审查 v2-L8）：openExternal 的失败必须显式反馈，不静默吞掉
-      if (typeof window.api?.app?.openExternal === 'function') {
-        try {
-          await window.api.app.openExternal('https://1813260438.share.123pan.cn/123pan/AzxUVv-APFIh?pwd=1642#');
-        } catch (e) {
-          window.app?.toast?.('error', '打开网盘链接失败：' + (e && e.message ? e.message : e));
-        }
-      } else {
-        window.app?.toast?.('warning', '当前环境不支持打开外部链接');
-      }
-    });
+    // 123 云盘备用下载渠道 2026-10-06 整链退役（按钮与链接一并删除）。
     const usageBackdrop = document.getElementById('usageBackdrop');
     usageBackdrop?.addEventListener('click', (e) => {
       if (e.target === usageBackdrop) closeUsageGuide();

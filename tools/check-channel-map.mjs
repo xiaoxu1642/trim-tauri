@@ -77,6 +77,8 @@ const RETIRED = {
   'shutdown:complete': 'J3 清零（2026-09-29）：渲染层零调用，且 readonly 档可 app.exit(0) 是多余退出面',
   'optimizer:set-favorite': 'E10 收藏下线（2026-10-03）：用户裁定删优化列表星标（无消费场景且挤压排版），写侧函数 + 命令 + 通道整链摘除',
   'optimizer:prefs': 'E10 偏好读侧下线（2026-10-03）：唯一消费方是收藏星标（读 favorites），星标摘除后本通道零调用方；recent 由 touch-recent 单向写入、暂不读出',
+  'updater:set-mirror': '2026-10-06（用户裁定）：「更新线路」选择整链退役，顺序固化 AtomGit 国内源优先、GitHub 兜底（updater.rs FEEDS），不再暴露线路偏好；命令 + 注册 + UI 同撤',
+  'updater:get-mirror': '2026-10-06（用户裁定）：同上 set-mirror，偏好读取面随下拉一并摘除',
 };
 
 /**

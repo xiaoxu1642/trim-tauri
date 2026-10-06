@@ -1421,23 +1421,12 @@
                 <strong>检查更新</strong>
                 <p id="updaterCheckHint">检查 Trim 是否有新版本</p>
               </div>
-              <!-- v3.1.0：123 云盘备用下载渠道，点击复制提取码并打开链接 -->
               <div class="about-row-actions">
-                <button class="btn btn-secondary btn-small" id="btn123Pan" type="button" data-tip="打开 123 云盘下载页，提取码已自动复制">123云盘</button>
                 <button class="btn btn-secondary btn-small" id="btnCheckUpdate" type="button">检查更新</button>
               </div>
             </div>
-            <div class="about-row">
-              <div class="about-row-copy">
-                <strong>更新线路</strong>
-                <p id="updaterMirrorHint">优先 AtomGit 国内源，不可用时自动回退 GitHub（安装包经 minisign 签名强校验）</p>
-              </div>
-              <select class="field-input updater-mirror-select" id="updaterMirrorSelect" data-tip="自动：优先 AtomGit 国内源，失败自动回退 GitHub；也可固定走某条线路">
-                <option value="auto">自动（推荐）</option>
-                <option value="atomgit">AtomGit 国内源</option>
-                <option value="github">GitHub 直连</option>
-              </select>
-            </div>
+            <!-- 更新线路选择 2026-10-06 整链退役：顺序固化 AtomGit 国内源优先、失败自动回退
+                 GitHub（updater.rs FEEDS 单一真源），不再向用户暴露「线路」概念。 -->
             <div class="about-row">
               <div class="about-row-copy">
                 <strong>联系我</strong>
