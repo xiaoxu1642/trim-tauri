@@ -4967,9 +4967,11 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 
 .usage-modal {
   width: 100%;
-  max-width: 720px;
-  max-height: calc(100vh - 100px);
-  margin: 0 24px;
+  /* 2026-10-07 用户反馈「自绘弹窗偏小」：骨架整体放大一档。回收站清空确认、更新、
+     安装路径绑定、AI 简介等全部走这条骨架；内容量大的类再各自按下面加宽。 */
+  max-width: 880px;
+  max-height: calc(100vh - 80px);
+  margin: 0 32px;
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
@@ -5020,7 +5022,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 
 .usage-body {
-  padding: 18px 24px 24px;
+  padding: 22px 30px 30px;
   overflow: auto;
   line-height: 1.6;
 }
@@ -5617,7 +5619,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
    字体选择弹窗（设置 → 功能入口 → 字体选择）
    复用 usage-backdrop > usage-modal 三段式结构
    ================================================================ */
-.font-modal { max-width: 640px; }
+.font-modal { max-width: 760px; }
 .fm-body { display: flex; flex-direction: column; gap: 14px; }
 .fm-field {
   display: grid;
@@ -5778,7 +5780,7 @@ input[type="range"].fm-slider:disabled,
 /* ================================================================
    模型选择弹窗（各模块独立选择 AI 简介模型）
    ================================================================ */
-.model-picker-modal { max-width: 560px; }
+.model-picker-modal { max-width: 680px; }
 .model-picker-body { padding-top: 6px; }
 .model-picker-tip { margin: 0 0 12px; font-size: var(--fs-meta); line-height: 1.7; color: var(--fg-secondary); }
 .model-picker-list { display: flex; flex-direction: column; gap: 8px; }
@@ -5833,7 +5835,7 @@ input[type="range"].fm-slider:disabled,
 /* ================================================================
    安装路径绑定弹窗（分组卡片 + 输入框，样式沿用路径窗口）
    ================================================================ */
-.path-binding-modal { max-width: 760px; }
+.path-binding-modal { max-width: 960px; }
 .path-binding-body { max-height: calc(100vh - 220px); overflow-y: auto; }
 .pw-body { padding: 16px 20px 20px; }
 .pw-group {
@@ -5877,13 +5879,13 @@ input[type="range"].fm-slider:disabled,
 .pw-hint.ok { color: var(--success); }
 .pw-empty { text-align: center; color: var(--fg-tertiary); padding: 32px 0; font-size: var(--fs-secondary); }
 .pw-last-scan { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
-.startup-intro-modal { max-width: 620px; }
+.startup-intro-modal { max-width: 760px; }
 .startup-intro-meta { margin-bottom: 12px; font-size: var(--fs-meta); color: var(--fg-tertiary); }
 
 /* ================================================================
    大模型管理（设置页应用内弹窗，复用 usage-modal 三段式结构）
    ================================================================ */
-.models-modal { max-width: 780px; }
+.models-modal { max-width: 940px; }
 .models-modal-body { max-height: calc(100vh - 230px); overflow-y: auto; }
 
 /* ---------- 以下为原独立窗口遗留结构（old/20260830-大模型管理弹窗化），保留通用分组样式 ---------- */
@@ -6164,7 +6166,7 @@ body.pv-window {
 /* ================================================================
    实时网速：记录报告弹窗（与「大模型管理」同款白色圆角卡片）
    ================================================================ */
-.rt-report-modal { max-width: 680px; }
+.rt-report-modal { max-width: 840px; }
 .rt-report-body { padding: 16px 20px 18px; overflow-y: auto; max-height: calc(100vh - 220px); }
 /* 审查 v3-M1：报告列表读取失败态（不得与「暂无记录」空态同形 —— 失败必须看得出来） */
 .rt-report-loadfail {
@@ -6238,7 +6240,7 @@ body.pv-window {
 /* ================================================================
    系统还原点弹窗（电脑优化中心 → 系统还原点）
    ================================================================ */
-.rt-sr-modal { max-width: 720px; }
+.rt-sr-modal { max-width: 880px; }
 .rt-sr-body { padding: 16px 20px 18px; overflow-y: auto; max-height: calc(100vh - 220px); }
 .rt-sr-cards {
   display: grid;
@@ -6644,18 +6646,10 @@ img.ctx-col-icon {
 .opt-col-more:hover { background: var(--accent-light); border-color: var(--accent); }
 .opt-col-more + .opt-col-count { margin-left: 0; }
 
-/* ==================== 外设优化窗口（更多调优项） ==================== */
-.peripheral-window { display: flex; flex-direction: column; min-height: 100vh; }
-.peri-topbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.peri-back {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px; flex: 0 0 auto;
-  border-radius: var(--radius-small); border: 1px solid var(--border-default);
-  background: var(--bg-elevated); color: var(--fg-secondary); cursor: pointer;
-  transition: color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
-}
-.peri-back:hover { color: var(--accent); border-color: var(--accent); }
-.peri-body { flex: 1; padding: 16px 22px 18px; overflow-y: auto; }
+/* ==================== 外设优化弹窗（更多调优项） ==================== */
+/* 2026-10-07：外设优化由独立子窗改为应用内弹窗 —— 子窗外壳（.peripheral-window /
+   .peri-topbar-left / .peri-back / .peri-body）随窗口一并删除，正文挂在
+   window.modal.create 的 .usage-body 里（内边距与滚动由它提供）。 */
 /* 2026-10-03（用户裁定）：卡片整体压缩，单页可见选项 ≥ 10 个。
    压的是**留白**不是信息量 —— 数值字号 26→22、卡内边距 20/16→12/10、
    描述行高 1.5→1.4、分区间距 26→16。原版一屏只放得下 6~7 个，
@@ -6718,32 +6712,8 @@ img.ctx-col-icon {
 }
 .peri-explain-btn:hover { background: var(--accent-light); }
 
-/* 数值解释面板：整窗遮罩 + 居中卡片，自绘（子窗不加载 modal.js）。
-   遮罩与容器**刻意复用** `.usage-backdrop` / `.usage-modal` 的口径（不另立一套）：
-   两处遮罩深浅不一致会让同一个 App 里的弹窗看起来像两个产品。 */
-.peri-explain {
-  position: fixed; inset: 0; z-index: 10000;
-  display: flex; align-items: center; justify-content: center;
-  background: color-mix(in srgb, var(--bg-app) 60%, rgba(0, 0, 0, 0.4));
-  animation: fadeIn var(--duration-base) var(--ease-standard);
-}
-.peri-explain[hidden] { display: none; }
-.peri-explain-card {
-  position: relative;
-  width: min(680px, 100%);
-  margin: 0 24px;
-  max-height: calc(100vh - 100px);
-  overflow-y: auto;
-  padding: 20px 22px 18px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-btn);
-  box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
-  animation: modalScaleIn var(--duration-base) var(--ease-emphasized);
-}
-.peri-explain-head { display: flex; align-items: flex-start; gap: 12px; }
-.peri-explain-head > div:first-child { flex: 1; min-width: 0; }
-.peri-explain-title { margin: 0 0 6px; font-size: 15px; font-weight: 700; color: var(--fg-primary); }
+/* 「数值解释」子弹窗正文（2026-10-07 起走 window.modal.create 的统一骨架，
+   标题由弹窗 header 承担，这里只留正文排版类）。 */
 .peri-explain-intro { margin: 0 0 12px; color: var(--fg-secondary); font-size: var(--fs-secondary); line-height: 1.6; }
 .peri-explain-list { margin: 0; padding: 0; }
 .peri-explain-row {
@@ -6759,23 +6729,8 @@ img.ctx-col-icon {
   background: var(--bg-card-hover);
   border-radius: var(--radius-small);
 }
-.peri-explain-close {
-  flex: 0 0 auto;
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px;
-  font-size: 18px; line-height: 1;
-  color: var(--fg-secondary);
-  background: var(--bg-card-hover);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-small);
-  cursor: pointer;
-}
-/* 审查 M-13（2026-10-03 L4）：hover 前景原为 --accent-text，bg 走基态 bg-card-hover，
-   合成 1.05/1.06:1 近不可见；改 accent（图标位 ≥3:1 达标） */
-.peri-explain-close:hover { color: var(--accent); }
 
 .peri-note { margin: 2px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; }
-.peri-footer { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; padding-bottom: 4px; }
 @media (max-width: 720px) {
   .peri-cards, .peri-cards-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

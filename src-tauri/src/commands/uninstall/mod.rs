@@ -14,7 +14,8 @@
 //! 文件划分（v3 D2：一个命令契约一文件，`#[tauri::command]` 留在定义处，本 mod.rs 只
 //! re-export —— 所以 lib.rs 的 generate_handler!、CHANNEL_MAP 与 guard 档位都不因物理
 //! 移动改变）：helpers（注册表读取助手 + 快照台账）/ appx / list_run / residue /
-//! residue_update / ownership / dead / backup_report / pending_delete；
+//! residue_update / pending_delete；`dead` / `ownership` / 七个深扫器模块在机-wide 扫描
+//! 整条退役后**保留为内部代码**（只由 residue 的四类扫描复用），不再暴露命令。
 //! 跨契约面的回归网单独放 residue_trace_tests（cfg(test)）。
 //!
 //! 注册（lib.rs generate_handler + CHANNEL_MAP + check-guard-tiers MUST_MAIN 同步落）：
@@ -27,23 +28,30 @@
 
 mod appx;
 pub use appx::{uninstall_appx_logo, __cmd__uninstall_appx_logo, __tauri_command_name_uninstall_appx_logo};
+// v0.7.0 机-wide 扫描整条退役后，七个深扫器与它们的判据/签名助手**保留为内部代码**（不再有
+// 界面、也不再有可直接调用的命令）。`services_orphan` / `drivers_orphan` 仍被 residue 的四类扫描
+// 部分复用，其余模块当前没有生产调用方 —— 逐模块 `allow(dead_code)` 是为了不让「刻意保留」
+// 撞上 AGENTS §4 的零警告线（先例：engine/pnp.rs、engine/native/bsod.rs 的同类标注）。
+#[allow(dead_code)]
 mod authenticode;
+#[allow(dead_code)]
 mod capability_orphan;
 // R-1 后续阶段（2026-10-07）：COM/CLSID 与 File Types / Applications 只读可见面
+#[allow(dead_code)]
 mod com_orphan;
 mod backup_report;
 pub use backup_report::{uninstall_reg_backup_list, __cmd__uninstall_reg_backup_list, __tauri_command_name_uninstall_reg_backup_list, uninstall_reg_backup_restore, __cmd__uninstall_reg_backup_restore, __tauri_command_name_uninstall_reg_backup_restore, uninstall_batch_list, __cmd__uninstall_batch_list, __tauri_command_name_uninstall_batch_list, uninstall_batch_restore, __cmd__uninstall_batch_restore, __tauri_command_name_uninstall_batch_restore, uninstall_report_list, __cmd__uninstall_report_list, __tauri_command_name_uninstall_report_list, uninstall_report_get, __cmd__uninstall_report_get, __tauri_command_name_uninstall_report_get};
 mod dead;
+#[allow(dead_code)]
 mod drivers_orphan;
-pub use dead::{uninstall_dead_scan, __cmd__uninstall_dead_scan, __tauri_command_name_uninstall_dead_scan};
+#[allow(dead_code)]
 mod game_platform_orphan;
 mod helpers;
+#[allow(dead_code)]
 mod ifeo_orphan;
 mod list_run;
-mod minifilter_orphan;
 pub use list_run::{uninstall_dir_size, __cmd__uninstall_dir_size, __tauri_command_name_uninstall_dir_size, uninstall_list, __cmd__uninstall_list, __tauri_command_name_uninstall_list, uninstall_run, __cmd__uninstall_run, __tauri_command_name_uninstall_run};
 mod ownership;
-pub use ownership::{uninstall_orphan_scan, __cmd__uninstall_orphan_scan, __tauri_command_name_uninstall_orphan_scan, uninstall_orphan_ignore, __cmd__uninstall_orphan_ignore, __tauri_command_name_uninstall_orphan_ignore};
 mod pending_delete;
 pub use pending_delete::{uninstall_pending_add, __cmd__uninstall_pending_add, __tauri_command_name_uninstall_pending_add, uninstall_pending_list, __cmd__uninstall_pending_list, __tauri_command_name_uninstall_pending_list, uninstall_pending_revoke, __cmd__uninstall_pending_revoke, __tauri_command_name_uninstall_pending_revoke};
 mod residue;
@@ -52,14 +60,15 @@ pub use residue::{uninstall_residue_scan, __cmd__uninstall_residue_scan, __tauri
 // 在第二处再写一份「看起来等价」的 app_id 校验。模块本体继续私有，只把这两个判据函数透出去。
 pub(crate) use appx::valid_appx_fullname;
 pub(crate) use helpers::valid_uninstall_key_path;
-mod residue_deep;
-pub use residue_deep::{uninstall_residue_deep_scan, __cmd__uninstall_residue_deep_scan, __tauri_command_name_uninstall_residue_deep_scan};
 #[cfg(test)]
 mod residue_trace_tests;
 mod residue_update;
 pub use residue_update::{residue_rules_dir, residue_watermark, uninstall_modify, __cmd__uninstall_modify, __tauri_command_name_uninstall_modify};
-// R-1（2026-10-07）：Run/RunOnce 只读可见面
+// R-1（2026-10-07）：Run/RunOnce 只读可见面（`reg_value_gate` 仍被 residue 执行链复用）
+#[allow(dead_code)]
 mod run_keys;
+#[allow(dead_code)]
 mod services_orphan;
+#[allow(dead_code)]
 mod vendor_registry;
 

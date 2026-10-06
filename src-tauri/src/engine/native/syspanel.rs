@@ -12,14 +12,19 @@
 //! 用户可通过备份 JSON 手动 reg import 恢复。
 //!
 //! 四条命令都走 `guard(window, MAIN)`（AGENTS §3 三层）：写侧、系统级、只在主窗触发。
-//! `powercfg` 走 `system_tool` 固定到 `%SystemRoot%\System32`（`check-system-bin` 纪律），
-//! 禁裸进程名。
+//! 电源方案**不再拉 `powercfg` 子进程**：改走 `powrprof.dll` 的 Power API（UTF-16 直出），
+//! 中文系统不再出现方案名乱码，也不引入 `check-system-bin` 之外的进程。
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-use crate::engine::systembin::{quiet_cmd, system_tool};
+use windows::core::GUID;
+use windows::Win32::Foundation::{HLOCAL, LocalFree};
+use windows::Win32::System::Power::{
+    ACCESS_SCHEME, PowerEnumerate, PowerGetActiveScheme, PowerReadFriendlyName,
+    PowerSetActiveScheme,
+};
 
 /// Windows 保留方案 GUID（微软公开文档，随系统分发）。三档在**每台机器上**都可通过
 /// `powercfg /duplicate` 或原生存在；用户自定义方案 GUID 不在白名单，读到就展示、
@@ -30,133 +35,184 @@ pub const KNOWN_PLANS: &[(&str, &str)] = &[
     ("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "高性能"),
 ];
 
-/// 一行 powercfg 输出 → (guid 小写, 括号里的名字)。
-///
-/// 中英文系统都能吃：`电源方案 GUID: ...  (高性能)` 与 `Power Scheme GUID: ...  (High performance)`。
-/// GUID 归一化小写，与 KNOWN_PLANS 判据一致。
-pub fn parse_scheme_line(line: &str) -> Option<(String, String)> {
-    let guid = find_guid(line)?;
-    let name = find_paren_tail(line)?;
-    Some((guid, name))
-}
-
-fn find_guid(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.len() < 36 {
+/// 36 字符 GUID 文本 → [`GUID`]。长度/分段/hex 任一不合即 `None`，不做模糊匹配。
+fn parse_guid_str(s: &str) -> Option<GUID> {
+    let b = s.as_bytes();
+    if b.len() != 36 {
         return None;
     }
-    for i in 0..=(bytes.len() - 36) {
-        if is_guid_at(bytes, i) {
-            return Some(s[i..i + 36].to_ascii_lowercase());
-        }
-    }
-    None
-}
-
-fn is_guid_at(b: &[u8], i: usize) -> bool {
-    // 形状：8-4-4-4-12，段间 '-'。前后不允许紧跟字母数字（防"xxGUID 里嵌了 32-hex"这类误伤）
-    let boundary_ok = |idx: usize| -> bool {
-        if idx == 0 {
-            return true;
-        }
-        !b[idx - 1].is_ascii_alphanumeric()
-    };
-    if !boundary_ok(i) {
-        return false;
-    }
-    let tail = i + 36;
-    if tail < b.len() && b[tail].is_ascii_alphanumeric() {
-        return false;
-    }
     let seg = [8usize, 4, 4, 4, 12];
-    let mut p = i;
+    let mut p = 0usize;
+    let mut groups: [&[u8]; 5] = [&[]; 5];
     for (k, &len) in seg.iter().enumerate() {
         if k > 0 {
             if b.get(p) != Some(&b'-') {
-                return false;
+                return None;
             }
             p += 1;
         }
+        let start = p;
         for _ in 0..len {
             match b.get(p) {
                 Some(c) if c.is_ascii_hexdigit() => p += 1,
-                _ => return false,
+                _ => return None,
             }
         }
+        groups[k] = &b[start..p];
     }
-    true
+    let hex = |g: &[u8]| -> u64 {
+        g.iter()
+            .fold(0u64, |acc, &c| acc * 16 + (c as char).to_digit(16).unwrap_or(0) as u64)
+    };
+    Some(GUID {
+        data1: hex(groups[0]) as u32,
+        data2: hex(groups[1]) as u16,
+        data3: hex(groups[2]) as u16,
+        data4: [
+            hex(&groups[3][0..2]) as u8,
+            hex(&groups[3][2..4]) as u8,
+            hex(&groups[4][0..2]) as u8,
+            hex(&groups[4][2..4]) as u8,
+            hex(&groups[4][4..6]) as u8,
+            hex(&groups[4][6..8]) as u8,
+            hex(&groups[4][8..10]) as u8,
+            hex(&groups[4][10..12]) as u8,
+        ],
+    })
 }
 
-fn find_paren_tail(line: &str) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    let open = chars.iter().rposition(|c| *c == '(' || *c == '（')?;
-    let close_rel = chars[open + 1..].iter().position(|c| *c == ')' || *c == '）')?;
-    let close = open + 1 + close_rel;
-    if close <= open + 1 {
-        return None; // 空括号 ( )
-    }
-    let inner: String = chars[open + 1..close].iter().collect();
-    let trimmed = inner.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+/// [`GUID`] → 小写 36 字符文本（与 `KNOWN_PLANS` 的写法同形，判据因此可直接比）。
+fn guid_string(g: &GUID) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        g.data1,
+        g.data2,
+        g.data3,
+        g.data4[0],
+        g.data4[1],
+        g.data4[2],
+        g.data4[3],
+        g.data4[4],
+        g.data4[5],
+        g.data4[6],
+        g.data4[7]
+    )
+}
+
+/// power API 回填的 16 字节内存布局（小端）→ [`GUID`]。
+fn guid_from_le_bytes(b: &[u8]) -> GUID {
+    GUID {
+        data1: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        data2: u16::from_le_bytes([b[4], b[5]]),
+        data3: u16::from_le_bytes([b[6], b[7]]),
+        data4: [b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]],
     }
 }
 
-fn run_powercfg(args: &[&str]) -> Result<String, String> {
-    let out = quiet_cmd(system_tool("powercfg"))
-        .args(args)
-        .output()
-        .map_err(|e| format!("powercfg 启动失败：{e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "powercfg {} 退出码 {}",
-            args.join(" "),
-            out.status.code().unwrap_or(-1)
-        ));
+/// 读方案友好名（`PowerReadFriendlyName`，UTF-16 直出，与系统语言无关）。
+///
+/// 本模块**不再解析 powercfg 文本**的原因就在这里：中文版 powercfg 的 stdout 是 OEM 代码页
+/// （GBK/CP936）字节，`from_utf8_lossy` 会把中文方案名糊成替换符；`powrprof.dll` 这套 API
+/// 直接回 UTF-16，宽度与语言都不需要猜。
+fn scheme_friendly_name(g: &GUID) -> Option<String> {
+    let mut size: u32 = 0;
+    let rc =
+        unsafe { PowerReadFriendlyName(None, Some(g as *const GUID), None, None, None, &mut size) };
+    if rc.0 != 0 || size == 0 {
+        return None;
     }
-    // Windows 中文版 powercfg 走 OEM 代码页（GBK/CP936）—— `String::from_utf8_lossy`
-    // 会把中文名 mojibake 成替换符。**GUID 是 ASCII**、判据不受影响；名字可能乱码，
-    // 展示层能容忍（真机看是英文系统就完全没问题）。不做 GBK 解码是刻意不给本模块引
-    // `encoding_rs` 之类新依赖 —— AGENTS §2 硬红线。
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    let mut buf = vec![0u8; size as usize];
+    let rc = unsafe {
+        PowerReadFriendlyName(None, Some(g as *const GUID), None, None, Some(buf.as_mut_ptr()), &mut size)
+    };
+    if rc.0 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let name = String::from_utf16_lossy(&units);
+    let name = name.trim_end_matches('\0').trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// 枚举本机全部电源方案 GUID（`ACCESS_SCHEME`）。
+fn scheme_guids() -> Vec<GUID> {
+    let mut out = Vec::new();
+    let mut idx: u32 = 0;
+    loop {
+        // ACCESS_SCHEME 每次回填一个 GUID。**必须给足缓冲**：buffer=NULL 时该 API 回的是
+        // `ERROR_MORE_DATA(234)`（不是 0），照「rc != 0 即结束」写会在第一项就空手而归
+        // （真机实测踩过）。
+        let mut buf = [0u8; std::mem::size_of::<GUID>()];
+        let mut size: u32 = buf.len() as u32;
+        let rc = unsafe {
+            PowerEnumerate(None, None, None, ACCESS_SCHEME, idx, Some(buf.as_mut_ptr()), &mut size)
+        };
+        if rc.0 != 0 {
+            break; // ERROR_NO_MORE_ITEMS(259) 或其它失败 → 收工
+        }
+        out.push(guid_from_le_bytes(&buf));
+        idx += 1;
+        if idx >= 512 {
+            break; // 防御：正常机器方案数远小于此
+        }
+    }
+    out
+}
+
+/// 当前生效方案 GUID（`PowerGetActiveScheme`；返回内存由 `LocalFree` 回收，不能泄漏）。
+fn active_scheme() -> Option<GUID> {
+    let mut p: *mut GUID = std::ptr::null_mut();
+    let rc = unsafe { PowerGetActiveScheme(None, &mut p) };
+    if rc.0 != 0 || p.is_null() {
+        return None;
+    }
+    let g = unsafe { *p };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(p as *mut core::ffi::c_void)));
+    }
+    Some(g)
 }
 
 /// 读电源方案状态：当前 GUID + 名字 + 列表。
 ///
-/// `powercfg /list` 拿到"机器上所有可用方案"，包括用户克隆的自定义 GUID —— 这些**只展示**、
-/// 不列入白名单；面板下拉里带"自定义"标签，点击会被 apply 拒。
+/// 枚举本机所有可用方案（含用户克隆的自定义 GUID）—— 自定义方案**只展示**、不列入白名单，
+/// 面板下拉里带"自定义"标签，点击会被 apply 拒。
 pub fn power_plan_state() -> Value {
-    let active = run_powercfg(&["/getactivescheme"])
-        .ok()
-        .and_then(|s| s.lines().find_map(parse_scheme_line));
-    let list = run_powercfg(&["/list"])
-        .ok()
-        .map(|s| s.lines().filter_map(parse_scheme_line).collect::<Vec<_>>())
-        .unwrap_or_default();
+    let active = active_scheme();
+    let active_guid = active.as_ref().map(guid_string).unwrap_or_default();
+    let active_name = active.as_ref().and_then(scheme_friendly_name).unwrap_or_default();
+    let options = scheme_guids()
+        .iter()
+        .map(|g| {
+            let guid = guid_string(g);
+            let name = scheme_friendly_name(g).unwrap_or_else(|| guid.clone());
+            let known = KNOWN_PLANS.iter().any(|(kg, _)| kg.eq_ignore_ascii_case(&guid));
+            json!({ "guid": guid, "name": name, "known": known })
+        })
+        .collect::<Vec<Value>>();
     json!({
-        "activeGuid": active.as_ref().map(|(g, _)| g.clone()).unwrap_or_default(),
-        "activeName": active.as_ref().map(|(_, n)| n.clone()).unwrap_or_default(),
-        "options": list.iter().map(|(g, n)| json!({
-            "guid": g,
-            "name": n,
-            "known": KNOWN_PLANS.iter().any(|(kg, _)| kg == g),
-        })).collect::<Vec<Value>>(),
+        "activeGuid": active_guid,
+        "activeName": active_name,
+        "options": options,
     })
 }
 
 /// 切换电源方案：白名单外拒绝 + 400ms 回读校验。
 ///
-/// **回读校验不能省**：`powercfg /setactive` 在组策略锁定或休眠状态冲突时会"看起来成功"
-/// 但当前方案没变（退出码 0）。RAINZ 用同样判据（`Test-Scheme` 里也是切完再查）；
+/// **回读校验不能省**：`PowerSetActiveScheme` 在组策略锁定或休眠状态冲突时会"返回成功"
+/// 但当前方案没变。RAINZ 用同样判据（`Test-Scheme` 里也是切完再查）；
 /// 我们把它做成**错误回执**而不是"成功但状态没变"的静默。
 pub fn power_plan_apply(guid: &str) -> Result<Value, String> {
     let target = KNOWN_PLANS
         .iter()
         .find(|(g, _)| g.eq_ignore_ascii_case(guid))
         .ok_or_else(|| "GUID 不在允许的方案内（白名单：平衡 / 节能 / 高性能）".to_string())?;
-    run_powercfg(&["/setactive", target.0])?;
+    let want = parse_guid_str(target.0)
+        .ok_or_else(|| format!("内置方案 GUID 形状非法：{}", target.0))?;
+    let rc = unsafe { PowerSetActiveScheme(None, Some(&want as *const GUID)) };
+    if rc.0 != 0 {
+        return Err(format!("切换电源方案失败（Win32 错误码 {}）", rc.0));
+    }
     std::thread::sleep(Duration::from_millis(400));
     let state = power_plan_state();
     let got = state
@@ -395,63 +451,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 一行powercfg能解析出guid与名字() {
-        let line = "电源方案 GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (高性能)";
-        let (g, n) = parse_scheme_line(line).expect("解析失败");
-        assert_eq!(g, "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
-        assert_eq!(n, "高性能");
-    }
-
-    #[test]
-    fn 英文powercfg输出也能解析() {
-        let line = "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)";
-        let (g, n) = parse_scheme_line(line).expect("解析失败");
-        assert_eq!(g, "381b4222-f694-41f0-9685-ff5bb260df2e");
-        assert_eq!(n, "Balanced");
+    fn guid文本解析与格式化往返一致() {
+        let s = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+        let g = parse_guid_str(s).expect("解析失败");
+        assert_eq!(guid_string(&g), s);
     }
 
     #[test]
     fn guid大小写归一化小写() {
-        let line = "Power Scheme GUID: 8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C (High performance)";
-        let (g, _) = parse_scheme_line(line).expect("解析失败");
-        assert_eq!(g, "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+        let g = parse_guid_str("8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C").expect("解析失败");
+        assert_eq!(guid_string(&g), "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
     }
 
-    /// **反向**：形状不对一律不认。老实现用"任何位置的 36 字符"当判据会把
-    /// `aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaaXX`（后面紧跟字母）误认成 GUID，
-    /// 白名单里 GUID 前后边界判据是这条测试钉的。
+    /// **反向**：形状不对一律不认 —— 长度、hex、分段连字符任一不合都拒。
     #[test]
     fn 非guid形状一律拒判() {
-        assert!(find_guid("no guid here").is_none());
-        assert!(find_guid("381b4222-f694-41f0-9685-ff5bb260df2").is_none(), "少一位");
-        assert!(find_guid("zzzzzzzz-f694-41f0-9685-ff5bb260df2e").is_none(), "非 hex");
-        // 前后紧跟字母数字（边界）也要拒
-        assert!(find_guid("X381b4222-f694-41f0-9685-ff5bb260df2e").is_none(), "前有字母");
-        assert!(find_guid("381b4222-f694-41f0-9685-ff5bb260df2eX").is_none(), "后有字母");
-        // 前后是标点或非字母数字，允许
-        assert!(find_guid("(381b4222-f694-41f0-9685-ff5bb260df2e)").is_some());
+        assert!(parse_guid_str("no guid here").is_none());
+        assert!(parse_guid_str("381b4222-f694-41f0-9685-ff5bb260df2").is_none(), "少一位");
+        assert!(parse_guid_str("zzzzzzzz-f694-41f0-9685-ff5bb260df2e").is_none(), "非 hex");
+        assert!(parse_guid_str("X381b4222-f694-41f0-9685-ff5bb260df2e").is_none(), "前有字母");
+        assert!(parse_guid_str("381b4222-f694-41f0-9685-ff5bb260df2eX").is_none(), "后有字母");
+        assert!(parse_guid_str("381b4222f694-41f0-9685-ff5bb260df2e").is_none(), "少一个连字符");
     }
 
+    /// power API 回填的是内存布局（小端），与字符串形态的**字节序不同**：
+    /// 第一段 `8c5e7fda` 在内存里是 `da 7f 5e 8c`。这条钉住换算方向。
     #[test]
-    fn 括号缺失或空即无名字() {
-        assert!(find_paren_tail("Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c").is_none());
-        assert!(find_paren_tail("...( )").is_none(), "空括号应无名字");
-        assert_eq!(find_paren_tail("...(高性能)").as_deref(), Some("高性能"));
-        assert_eq!(find_paren_tail("…（Balanced）").as_deref(), Some("Balanced"), "中文括号也吃");
+    fn guid内存小端字节与字符串形态对得上() {
+        let b = [
+            0xda, 0x7f, 0x5e, 0x8c, 0xbf, 0xe8, 0x96, 0x4a, 0x9a, 0x85, 0xa6, 0xe2, 0x3a, 0x8c,
+            0x63, 0x5c,
+        ];
+        assert_eq!(guid_string(&guid_from_le_bytes(&b)), "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
     }
 
     #[test]
     fn 白名单外的_guid_一定被拒() {
-        // 白名单外走 apply 早退分支，不真跑 powercfg（不然 CI 上会改用户方案）
+        // 白名单外走 apply 早退分支，不真改用户方案
         let e = power_plan_apply("00000000-0000-0000-0000-000000000000")
             .expect_err("白名单外应被拒");
         assert!(e.contains("GUID 不在允许"), "错因文案漂了：{e}");
     }
 
-    /// 真跑 powercfg 会拉起子进程读系统方案表；机器语言 / 自定义方案都可能让结果差异，
+    /// 真调 Power API 读系统方案表；机器语言 / 自定义方案都可能让结果差异，
     /// 只断"能跑到、不 panic、返回结构合法"，不硬钉内容。发布前手工核对。
     #[test]
-    #[ignore = "真调 powercfg：结果依赖本机方案表，只在发布前手工核对不崩"]
+    #[ignore = "真调 Power API：结果依赖本机方案表，只在发布前手工核对不崩"]
     fn 真跑拿到电源方案状态与虚拟内存只读结构() {
         let s = power_plan_state();
         assert!(s["activeGuid"].is_string(), "activeGuid 应为字符串");

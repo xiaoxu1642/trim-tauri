@@ -20,7 +20,7 @@ use super::residue::{reg_enum_subkeys, reg_enum_sz_values};
 use super::residue_update::contribs;
 use crate::engine::protect;
 
-/// 三个软件根（与 `collect_vendor_keys` / 所有权链同一套根，不另立口径）
+/// 三个软件根（卸载域统一这一套根，不另立口径）
 const VENDOR_ROOTS: [(&str, windows::Win32::System::Registry::HKEY, &str); 3] = {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     [

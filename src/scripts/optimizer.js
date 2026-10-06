@@ -2411,13 +2411,13 @@
         window.app?.toast('info', `已全选「${group}」${ids.length} 项，可点击「执行所选优化」批量执行`);
         return;
       }
-      // 「更多调优项」→ 打开外设优化独立窗口
+      // 「更多调优项」→ 打开应用内「外设优化」弹窗（随本页一起注入的 scripts/peripheral.js）
       const moreBtn = e.target.closest('.opt-col-more');
       if (moreBtn) {
-        if (window.api?.peripheralWindow?.openWindow) {
-          window.api.peripheralWindow.openWindow().catch(function (e) { window.app?.toast?.('error', '外设优化窗口打开失败：' + ((e && e.message) || e)); });
+        if (window.peripheral?.open) {
+          window.peripheral.open();
         } else {
-          window.app?.toast('info', '外设优化窗口需在 Trim 应用内打开');
+          window.app?.toast?.('error', '外设优化组件未加载，请稍后重试');
         }
         return;
       }

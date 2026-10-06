@@ -254,14 +254,16 @@ fn scan_install_paths() -> serde_json::Value {
     }
     // SET-5（2026-09-15）：时间戳统一写 scannedAt。原写 lastScanAt，而渲染层/
     // paths:load 只读 scannedAt → 重启后页脚恒显「尚未扫描」（键名两侧不一致）。
-    let scanned_at = data
-        .get("scannedAt")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(crate::commands::settings::iso_utc_now);
+    // 2026-10-07 修：时间戳改由本层**唯一**产生（ISO-8601 UTC）并回填进回执。
+    // 此前上游 `paths_scan` 自己塞 `format!("{:?}", SystemTime::now())` 的 Debug 形态，
+    // JS `new Date()` 解析不了 → 页脚恒显 "Invalid Date"（用户反馈）。渲染层拿到的
+    // 就是可解析值，落盘与回执同源，不会再有第二份口径。
+    let scanned_at = crate::commands::settings::iso_utc_now();
     if let Some(pmap) = persisted.as_object_mut() {
-        pmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at));
+        pmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at.clone()));
+    }
+    if let Some(dmap) = data.as_object_mut() {
+        dmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at));
     }
     save_paths_config(&persisted);
     log::write_log("info", "路径扫描完成");

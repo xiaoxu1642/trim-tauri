@@ -123,6 +123,11 @@ const MUST_MAIN = [
   'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
   'optimizer_touch_recent', // E10 最近使用写：主窗档
   'optimizer_stale_dismiss', // 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗
+  // 2026-10-07：外设优化由独立子窗改为**主窗应用内弹窗**（src/scripts/peripheral.js），
+  // label `peripheral` 退役，三条通道的唯一调用方变成主窗，档位由 APP_WINDOWS 升到 MAIN。
+  'peripheral_query',
+  'peripheral_apply',
+  'peripheral_restore_backup',
   // 'pwsh_prepare' 已于 B11（2026-09-26）整链摘除，不再是一条命令
   // v0.5.0 残留扫描副窗：主窗入口按钮是唯一调用点（关窗侧在 MUST_READONLY）
   'residue_open_window',
@@ -380,9 +385,6 @@ const MUST_READONLY = [
   'paths_load',
   'paths_save', // 疑点：写路径配置
   'paths_scan',
-  'peripheral_close_window',
-  'peripheral_open_window',
-  'peripheral_query',
   'preview_close_window',
   'preview_image_deleted',
   'preview_open_window',
@@ -408,10 +410,6 @@ const MUST_READONLY = [
   'system_disk_list',
   'system_disk_type',
   'uninstall_appx_logo', // 疑点：写 logo 缓存文件
-  // v0.5.0 只读残留报告（七个扫描器聚合）：无副作用，但会写「本窗 label 分槽」的
-  // 执行快照（residue_deep.rs 的 residue_snapshot_put），删除链据此判定目标有效性；
-  // 副窗消费。
-  'uninstall_residue_deep_scan',
 ];
 const actualReadonly = [...tiers.entries()].filter(([, v]) => v.tier === 'READONLY').map(([k]) => k).sort();
 const wantReadonly = [...MUST_READONLY].sort();
@@ -428,10 +426,9 @@ const wantReadonly = [...MUST_READONLY].sort();
 const MUST_WINDOWSET = {
   RESIDUE_WINDOWS: {
     labels: ['residue'],
+    // v0.7.0 机-wide 扫描整条退役：dead-scan / orphan-scan / orphan-ignore / residue-deep-scan
+    // 四条命令已删除，本集只剩「该应用四类残留扫描 + 执行 + 重启后删三件套」。
     cmds: [
-      'uninstall_dead_scan',
-      'uninstall_orphan_ignore',
-      'uninstall_orphan_scan',
       'uninstall_pending_add',
       'uninstall_pending_list',
       'uninstall_pending_revoke',

@@ -464,7 +464,7 @@
 
   // ---------- ⑪ 全局未处理 rejection 兜底（审查 v2-M22）----------
   // 为什么真源在 ds 而不是 app.js：兜底此前只在 app.js 里有一份，而 **app.js + logger.js
-  // 只有主窗 index.html 加载**——四个子窗（preview / models / processManager / peripheral）
+  // 只有主窗 index.html 加载**——三个子窗（preview / models / processManager）
   // 一条 rejection 监听都没有，任何漏 catch 的异步调用在子窗里既不留痕也不报错。
   // AGENTS §2 已把「子窗必须挂 ds.css + ds.js」钉成硬线，所以 ds.js 是唯一能同时到达
   // 五个窗口的落点；再往各窗脚本里各写一份，等于回到「漏窗」的原点。

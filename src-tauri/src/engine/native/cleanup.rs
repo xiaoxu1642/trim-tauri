@@ -1478,6 +1478,11 @@ mod cleanup_engine_contract_tests {
     /// P0-M5 时效护栏：执行侧必须**自己**按修改时间拒绝太新文件，不能只信扫描结果
     /// （扫描与执行之间有时间差，太新文件可能刚被应用写入）。用回收站模式
     /// （to_recycle=true，只枚举不删除）断言清单内容，测试零删除副作用。
+    ///
+    /// **样本年龄必须大于全局年龄阈值**（G-2 默认 14 天，见
+    /// `cleanup_scan::DEFAULT_GLOBAL_MIN_AGE_DAYS`）：执行侧并的是
+    /// `max(规则阈值, 全局阈值)`，样本若只有 10 天就会被全局阈值判成「太新」，
+    /// 与「按规则 minAgeDays=3 应删」的意图相悖。这里取 30 天留出余量。
     #[test]
     #[cfg(windows)]
     fn cleanup_execute_enforces_min_age() {
@@ -1486,7 +1491,7 @@ mod cleanup_engine_contract_tests {
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(base.join("stale.txt"), b"old").unwrap();
         std::fs::write(base.join("fresh.lock"), b"new").unwrap();
-        set_file_mtime_days_ago(&base.join("stale.txt"), 10);
+        set_file_mtime_days_ago(&base.join("stale.txt"), 30);
 
         let rules = serde_json::json!({"groups":[{"items":[{
             "id":"m5test","name":"M5测试",
@@ -1512,9 +1517,12 @@ mod cleanup_engine_contract_tests {
     /// （AGENTS §5.16 N6；旧实现两侧各一份解析，双声明时结论不同）。
     ///
     /// 样本（真实文件系统 + SetFileTime 把两个时间戳拆开）：
-    ///   · stale.txt      ：mtime/ctime 都拨回 10 天 ⇒ 两种轴都命中；
-    ///   · ctime_only.txt ：ctime 拨回 10 天、mtime 留在现在 ⇒ 只有 ctime 轴命中；
+    ///   · stale.txt      ：mtime/ctime 都拨回 30 天 ⇒ 两种轴都命中；
+    ///   · ctime_only.txt ：ctime 拨回 30 天、mtime 留在现在 ⇒ 只有 ctime 轴命中；
     ///   · fresh.lock     ：两个时间戳都不动 ⇒ 两种轴都不命中。
+    /// 年龄取 30 天是为了**越过全局年龄阈值**（G-2 默认 14 天）：执行侧并的是
+    /// `max(规则阈值, 全局阈值)`，样本只要比全局阈值新就会被判「太新」，两侧集合
+    /// 就不可比了。
     /// 第三类「元数据读不到」无法在真实文件系统上确定性造出（要读取失败，不是读到旧值），
     /// 由 native-scanner 的 `age_guard_判定本体_fail_closed` 在共享函数层钉住 ——
     /// 两侧调的是同一个函数，时间戳缺失的结论必然一致。
@@ -1530,8 +1538,8 @@ mod cleanup_engine_contract_tests {
         std::fs::write(base.join("stale.txt"), b"old").unwrap();
         std::fs::write(base.join("ctime_only.txt"), b"old").unwrap();
         std::fs::write(base.join("fresh.lock"), b"new").unwrap();
-        set_file_times_days_ago(&base.join("stale.txt"), Some(10), Some(10));
-        set_file_times_days_ago(&base.join("ctime_only.txt"), Some(10), None);
+        set_file_times_days_ago(&base.join("stale.txt"), Some(30), Some(30));
+        set_file_times_days_ago(&base.join("ctime_only.txt"), Some(30), None);
 
         let rule_json = |axis: Option<&str>| {
             let mut item = serde_json::json!({

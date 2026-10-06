@@ -1,15 +1,14 @@
 //! 跨契约面的残留/追踪回归网（v3 D0：无法归属单一契约面，按纪律单独成文）。
 //!
-//! 这些用例同时盯 list_run 的第三方模块口径、residue 的前缀反查、ownership 状态机、
+//! 这些用例同时盯 list_run 的第三方模块口径、residue 的前缀反查、本机学习库判定、
 //! C3 阈值表与 M2 静默知识（B1 构造闸 / B2 分档 / B4 第二证据），
 //! 所以它不属于任何单个域文件；glob 引进各域符号是为了让「实现搬走」立刻反映成
 //! 编译错误，而不是悄悄少测一条。
 
 
 
-use crate::engine::{protect, rules_signature};
+use crate::engine::rules_signature;
 use serde_json::{Value, json};
-use std::collections::HashSet;
 use std::path::Path;
 use super::appx::*;
 use super::backup_report::*;
@@ -132,247 +131,7 @@ use super::residue_update::*;
         assert!(diff.is_empty(), "语义校验与夹具不一致：\n{}", diff.join("\n"));
     }
 
-    // ==================== C2 所有权状态机 / C3 阈值表 ====================
-
-    fn ids_of(list: &[&str]) -> HashSet<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-    const A_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Acme";
-
-    /// 状态机全路径：pending 不被"点击卸载"直接升级成事实；程序消失且安装目录 ENOENT 才
-    /// historical；目录还在就不升级；超稳定期回收；重装的 historical 撤销。
-    #[test]
-    fn ownership_state_machine_only_promotes_on_closed_evidence() {
-        let norm = |s: &str| s.to_lowercase();
-        let mut doc = ownership::empty_doc();
-        assert!(ownership::record_pending(
-            &mut doc, A_ID, "Acme", "Acme Corp", r"C:\Program Files\Acme", &[], 1000, norm
-        ));
-        assert_eq!(doc["owners"].as_array().unwrap().len(), 1);
-        assert_eq!(doc["owners"][0]["state"], json!("pending"));
-        // 再卸一次同一程序：刷新而不是叠记录
-        assert!(ownership::record_pending(
-            &mut doc, A_ID, "Acme", "Acme Corp", r"C:\Program Files\Acme", &[], 2000, norm
-        ));
-        assert_eq!(doc["owners"].as_array().unwrap().len(), 1, "同一 appId 必须刷新");
-        assert_eq!(doc["owners"][0]["recordedAt"], json!(2000));
-
-        // ① 程序仍在清单 → 继续 pending
-        let exists_all = |_: &Path| true;
-        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[A_ID]), 3000, &exists_all);
-        assert_eq!((p, r), (0, 0));
-        assert_eq!(doc["owners"][0]["state"], json!("pending"));
-
-        // ② 程序消失但安装目录还在 → 不升级（可能是半途退出/别人复用同目录）
-        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[]), 3000, &exists_all);
-        assert_eq!((p, r), (0, 0), "安装目录仍在时不得升级");
-        assert_eq!(doc["owners"][0]["state"], json!("pending"));
-
-        // ③ 程序消失且目录 ENOENT → historical
-        let gone = |_: &Path| false;
-        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[]), 3000, &gone);
-        assert_eq!((p, r), (1, 0));
-        assert_eq!(doc["owners"][0]["state"], json!("historical"));
-        assert_eq!(doc["owners"][0]["confirmedAt"], json!(3000));
-
-        // ④ 重装：historical 记录撤销（否则会被当成应用数据遗留来源）
-        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[A_ID]), 4000, &gone);
-        assert_eq!((p, r), (0, 1));
-        assert!(doc["owners"].as_array().unwrap().is_empty());
-
-        // ⑤ pending 超稳定期 → 回收（卸载没继续的事实不该永久挂着）
-        let mut doc2 = ownership::empty_doc();
-        ownership::record_pending(&mut doc2, A_ID, "Acme", "", "", &[], 1000, norm);
-        let later = 1000 + ownership::PENDING_TTL_MS + 1;
-        let (_, removed) = ownership::rescan(&mut doc2, &ids_of(&[]), later, &exists_all);
-        assert_eq!(removed, 1, "超稳定期的 pending 必须回收");
-        assert!(doc2["owners"].as_array().unwrap().is_empty());
-    }
-
-    /// 忽略清单：既挡住后续再被记录，也让历史里的同一条消失（否则用户忽略了还反复出现）。
-    #[test]
-    fn ownership_ignore_stops_re_adopting_the_owner() {
-        let norm = |s: &str| s.to_lowercase();
-        let mut doc = ownership::empty_doc();
-        ownership::record_pending(&mut doc, A_ID, "Acme", "", r"C:\Program Files\Acme", &[], 1000, norm);
-        ownership::ignore(&mut doc, A_ID, "Acme", 2000, norm);
-        assert!(doc["owners"].as_array().unwrap().is_empty(), "忽略后 owners 必须清空该条");
-        assert!(ownership::is_ignored(&doc, A_ID, "acme"));
-        assert!(
-            !ownership::record_pending(&mut doc, A_ID, "Acme", "", "", &[], 3000, norm),
-            "被忽略的 owner 不得重新记录"
-        );
-        // 同显示名、不同 hive 的条目也按名字挡住（同一款程序可能两处都有键）
-        assert!(ownership::is_ignored(&doc, "HKCU|SOFTWARE\\x", "acme"));
-    }
-
-    /// 上限裁剪只动最旧的 historical，pending 有生命周期意义不被裁；
-    /// 全是 pending 且超限时才动 pending（宁可丢历史也不无界增长）。
-    /// HiBit §9.1 足迹差分的判据：时序（差集）+ 归属（token）+ 基线可信，三者缺一不可。
-    #[test]
-    fn footprint_diff_needs_timing_ownership_and_a_trustworthy_baseline() {
-        let baseline = vec![
-            r"HKCU\Software\Netease".to_string(),
-            r"HKCU\Software\7-Zip".to_string(),
-        ];
-        let current = vec![
-            r"HKCU\Software\Netease".to_string(),
-            r"HKCU\Software\NETEASEGODLIKE".to_string(),
-            r"HKCU\Software\Clash Verge Rev".to_string(),
-        ];
-        let fresh = footprint::new_keys_since(&baseline, &current);
-        assert_eq!(fresh.len(), 2, "基线里没有的两条才算新增: {fresh:?}");
-        let owner = json!({
-            "displayName": "网易大神",
-            "publisher": "Netease",
-            "installLocation": r"C:\Games\GodLike",
-            "ownedPaths": [r"C:\Games\GodLike\unins000.exe"]
-        });
-        let toks = footprint::tokens_of(&owner);
-        assert!(
-            footprint::key_belongs_to(r"HKCU\Software\NeteaseGodLike", &toks),
-            "厂商段 + 产品段都在 token 里，这条必须有归属证据: {toks:?}"
-        );
-        assert!(
-            !footprint::key_belongs_to(r"HKCU\Software\Clash Verge Rev", &toks),
-            "别家程序的键不能算到这个 owner 头上"
-        );
-        // 基线缺失或被截断 = 不可信，差分侧必须整条跳过（不能拿半份基线去判"新键"）
-        assert!(footprint::baseline_of(&json!({ "state": "historical" })).is_none());
-        assert!(footprint::baseline_of(&json!({ "footprint": { "keys": [], "capped": true } })).is_none());
-        assert_eq!(
-            footprint::baseline_of(&json!({ "footprint": { "keys": ["a"], "capped": false } })),
-            Some(vec!["a".to_string()])
-        );
-        // 结构性容器与 GUID 形态键都不是厂商落点
-        for deny in [
-            "Microsoft",
-            "Classes",
-            "WOW6432Node",
-            "Policies",
-            "RegisteredApplications",
-            "appdatalow",
-            "14d8c5cd-3d3a-5fb8-8746-849118a754ce",
-            "x",
-            "",
-        ] {
-            assert!(!footprint::is_vendor_key(deny), "{deny} 不该被当成厂商键");
-        }
-        assert!(footprint::is_vendor_key("NeteaseGodLike"));
-        assert!(footprint::is_vendor_key("7-Zip"));
-    }
-
-    /// 基线写入的两个边界：owner 不在档里不写；超上限必须标 capped（差分侧据此拒产候选）。
-    #[test]
-    fn footprint_baseline_records_only_known_owner_and_flags_capped() {
-        let mut doc = ownership::empty_doc();
-        assert!(
-            !ownership::set_footprint(&mut doc, "HKCU|X", &[r"HKCU\Software\X".to_string()], 1),
-            "档里没有这个 owner 就不该凭空写基线"
-        );
-        let norm = |s: &str| s.to_lowercase();
-        assert!(ownership::record_pending(
-            &mut doc, "HKCU|X", "Acme", "", r"C:\Acme", &[], 1000, norm
-        ));
-        let many: Vec<String> = (0..=footprint::MAX_KEYS_PER_OWNER)
-            .map(|i| format!(r"HKCU\Software\K{i}"))
-            .collect();
-        assert!(ownership::set_footprint(&mut doc, "HKCU|X", &many, 1500));
-        let o = &doc["owners"][0];
-        assert_eq!(o["footprint"]["capped"], json!(true), "超上限必须如实标截断");
-        assert_eq!(
-            o["footprint"]["keys"].as_array().unwrap().len(),
-            footprint::MAX_KEYS_PER_OWNER
-        );
-        assert!(
-            footprint::baseline_of(o).is_none(),
-            "截断的基线不可信，差分必须跳过这一条"
-        );
-        assert!(ownership::set_footprint(&mut doc, "HKCU|X", &[r"HKCU\Software\Keep".to_string()], 2000));
-        assert_eq!(
-            footprint::baseline_of(&doc["owners"][0]),
-            Some(vec![r"HKCU\Software\Keep".to_string()]),
-            "刷新后要能读回，且 capped 标记跟着清掉"
-        );
-        // 空清单一律拒写：那会把"一个根都没枚举到"伪装成"这台机器没有厂商键"
-        assert!(
-            !ownership::set_footprint(&mut doc, "HKCU|X", &[], 2500),
-            "空基线不能写进去，否则下一轮差分把全部现存键算成新键"
-        );
-        assert!(
-            footprint::baseline_of(&doc["owners"][0]).unwrap().len() == 1,
-            "被拒的写入不许留下半份基线"
-        );
-    }
-
-    /// 真机足迹采集（`#[ignore]`）：三个 Software 根能枚举出厂商键集合，且**同一台机器上
-    /// 连读两次的差集为空** —— 差分不稳定就说明采集在漂（排除表没生效或枚举被 cap 截断），
-    /// 那这条链产出的"新键"全是假候选。
-    #[test]
-    #[ignore = "读注册表三个 Software 根，发布前门禁跑"]
-    fn vendor_footprint_captures_real_keys_and_is_stable() {
-        let a = unsafe { collect_vendor_keys() };
-        assert!(
-            a.len() >= 20,
-            "本机实测三根有上百个顶层键，只取到 {} 条说明枚举或排除表坏了",
-            a.len()
-        );
-        assert!(
-            a.iter()
-                .all(|k| k.starts_with(r"HKCU\Software\") || k.starts_with(r"HKLM\SOFTWARE\")),
-            "目标串必须与执行侧同口径: {a:?}"
-        );
-        assert!(
-            !a.iter().any(|k| k.to_lowercase().contains("\\microsoft")
-                || k.to_lowercase().contains("\\classes")),
-            "结构性容器漏排除: {a:?}"
-        );
-        let b = unsafe { collect_vendor_keys() };
-        assert_eq!(
-            footprint::new_keys_since(&a, &b),
-            Vec::<String>::new(),
-            "同一台机器连读两次不该差出新键"
-        );
-    }
-
-    #[test]
-    fn ownership_cap_prefers_dropping_oldest_historical() {
-        let norm = |s: &str| s.to_lowercase();
-        let pid = |i: usize| format!(r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\P{i}");
-        let mut doc = ownership::empty_doc();
-        for i in 0..ownership::MAX_RECORDS {
-            ownership::record_pending(
-                &mut doc, &pid(i), "P", "", &format!(r"C:\Program Files\P{i}"), &[], 1000, norm,
-            );
-        }
-        // ① 安装目录都还在 → 一条都不升级，也不裁（400 条刚好在上限内）
-        let (p, r) = ownership::rescan(&mut doc, &ids_of(&[]), 1500, &|_: &Path| true);
-        assert_eq!((p, r), (0, 0), "目录还在时不该有升级");
-        assert_eq!(doc["owners"].as_array().unwrap().len(), ownership::MAX_RECORDS);
-
-        // ② 越过上限：全部目录消失 → 升级为 historical，同时裁回上限
-        ownership::record_pending(&mut doc, &pid(999), "P999", "", r"C:\Program Files\P999", &[], 1500, norm);
-        let (p, _) = ownership::rescan(&mut doc, &ids_of(&[]), 1600, &|_: &Path| false);
-        assert!(p >= 1, "目录消失后必须升级，实测 {p}");
-        assert_eq!(
-            doc["owners"].as_array().unwrap().len(),
-            ownership::MAX_RECORDS,
-            "超限必须裁回上限"
-        );
-
-        // ③ 混合形态：新进来的 pending 不许被裁，该裁的是最旧的 historical
-        ownership::record_pending(&mut doc, &pid(1000), "Fresh", "", r"C:\Program Files\P1000", &[], 9000, norm);
-        let (_, _) = ownership::rescan(&mut doc, &ids_of(&[]), 9500, &|p: &Path| {
-            // 只有新记录的目录还在 → 它保持 pending，其余已在清单外且目录消失
-            p.to_string_lossy().ends_with("P1000")
-        });
-        let owners = doc["owners"].as_array().unwrap();
-        assert_eq!(owners.len(), ownership::MAX_RECORDS, "仍然超限即裁失败");
-        assert!(
-            owners.iter().any(|o| o["displayName"] == json!("Fresh") && o["state"] == json!("pending")),
-            "新写入的 pending 被裁掉了"
-        );
-    }
+    // ==================== C3 阈值表 ====================
 
     /// B6：体积兜底必须有界且诚实标注截断；不存在的目录与相对路径不接受。
     /// H5：顺带把命名数据流（ADS）算出来——这条是真跑 `FindFirstStreamW`，
@@ -643,47 +402,6 @@ use super::residue_update::*;
                  少命中一组的后果：该规则在这台机器上永远不出候选，且不会有任何日志"
             );
         }
-    }
-
-    /// 运行进程目录判定：候选与进程目录互为祖先/子孙都算在用；大小写与尾随分隔符不许绕过。
-    #[test]
-    fn running_process_ancestry_blocks_candidates() {
-        let mut procs = HashSet::new();
-        procs.insert(r"c:\program files\acme\bin".to_lowercase());
-        assert!(under_running_process(Path::new(r"C:\Program Files\Acme"), &procs));
-        assert!(under_running_process(Path::new(r"C:\Program Files\Acme\bin"), &procs));
-        // 候选在运行进程目录**里面**：只查祖先就会漏掉这一半
-        assert!(
-            under_running_process(Path::new(r"C:\Program Files\Acme\bin\plugins"), &procs),
-            "候选位于正在运行的进程目录之内，必须视为在用"
-        );
-        assert!(!under_running_process(Path::new(r"D:\Data\Other"), &procs));
-        // 同盘但毫不相干的目录 —— M4 真机缺陷的回归钉：旧实现走 `dir.ancestors()`，
-        // 走到 `C:\` 时任何进程路径都 starts_with 它，于是**全盘恒为在用**，
-        // 应用数据遗留链在任何机器上都产不出一个候选（2026-09-29 探针实测暴露）。
-        assert!(
-            !under_running_process(Path::new(r"C:\Users\x\AppData\Local\SomeLeftover"), &procs),
-            "同盘无关目录不得被判成在用"
-        );
-        // 同级兄弟前缀不许互相污染（裸字符串前缀比就会）
-        let mut sib = HashSet::new();
-        sib.insert(r"c:\program files\acmebackup".to_string());
-        assert!(
-            !under_running_process(Path::new(r"C:\Program Files\Acme"), &sib),
-            r"按裸前缀比会把兄弟目录 acmebackup 误判进 Acme 的树里"
-        );
-        // 快照为空（取不到）时不该放行任何候选 —— 由调用方按 None 拒绝扫描
-        assert!(!under_running_process(Path::new(r"C:\Program Files\Acme"), &HashSet::new()));
-    }
-
-    /// 可弃子目录清单必须与 norm_name 的输出同形（小写、无首尾空白）——
-    /// 否则条目永远匹配不上，成了一条静默失效的白名单。
-    #[test]
-    fn disposable_subdir_names_are_normalized() {
-        for name in ORPHAN_DISPOSABLE_SUBDIRS {
-            assert_eq!(&norm_name(name), name, "清单里的 {name} 不是归一化形态，永远不会命中");
-        }
-        assert!(ORPHAN_SCAN_ROOTS.contains(&"LOCALAPPDATA"), "应用数据遗留扫描必须覆盖用户级数据根");
     }
 
     /// A1 扫描侧硬闸：受保护的注册表目标**不得进候选列表**。
@@ -1193,123 +911,6 @@ use super::residue_update::*;
         assert_eq!(dead_landing(r#""C:\Program Files\Foo\unins000.exe /S"#), None);
     }
 
-    /// M6 卸载项判据：全部落点缺失才算失效；MSI 产品码键要求两条落点。
-    /// C4 的贡献项断言也挂在这里——这两个函数的判据是同一条证据链。
-    #[test]
-    fn dead_uninstall_needs_every_landing_missing() {
-        let present: std::collections::HashSet<String> = [
-            r"C:\Program Files\Alive",
-            r"C:\Program Files\Alive\unins000.exe",
-            r"C:\Program Files\Half\unins000.exe",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let exists = |p: &str| present.iter().any(|x| x.eq_ignore_ascii_case(p));
-        let mk = |name: &str, key: &str, install: &str, un: &str| DeadUninstallRaw {
-            hive: "HKLM".to_string(),
-            key: key.to_string(),
-            path: format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{key}"),
-            name: name.to_string(),
-            install: install.to_string(),
-            uninstall: un.to_string(),
-            quiet: String::new(),
-            last_write_ms: Some(1_700_000_000_000),
-        };
-        let guid = "{1D4E2B7A-2F3C-4D5E-8A9B-0C1D2E3F4A5B}";
-        let rows = vec![
-            mk("Alive", "Alive", r"C:\Program Files\Alive", r"C:\Program Files\Alive\unins000.exe"),
-            mk("Half", "Half", r"C:\Program Files\Half", r"C:\Program Files\Half\unins000.exe"),
-            mk("Gone", "Gone", r"C:\Program Files\Gone", r"C:\Program Files\Gone\unins000.exe"),
-            mk("NoLanding", "NoLanding", "", ""),
-            mk("RelativeOnly", "RelativeOnly", "", "unins000.exe"),
-            mk("", "Nameless", r"C:\Program Files\Nameless", r"C:\Program Files\Nameless\u.exe"),
-            mk("MsiOne", guid, r"C:\Program Files\MsiOne", ""),
-        ];
-        let out = dead_uninstall_findings(&rows, &exists, 1_700_000_900_000);
-        let targets: Vec<&str> = out.iter().map(|f| f["target"].as_str().unwrap_or("")).collect();
-        assert_eq!(
-            targets,
-            vec![r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Gone"],
-            "候选集合不符（半存活/无落点/相对名/无名/MSI 单证据都不该出）: {out:?}"
-        );
-        assert_eq!(out[0]["confidence"], json!("medium"), "两条落点全部缺失才给 medium");
-        assert_eq!(out[0]["defaultChecked"], json!(false));
-        assert_eq!(out[0]["deleteCapable"], json!(true));
-        // MSI 键两条落点全部缺失才放行，且置信度按证据条数走
-        let msi_two = mk("MsiTwo", guid, r"C:\Program Files\MsiTwo", r"C:\Program Files\MsiTwo\setup.exe /x");
-        let out2 = dead_uninstall_findings(&[msi_two], &exists, 1_700_000_900_000);
-        assert_eq!(out2.len(), 1, "MSI 键两条落点全缺应产出: {out2:?}");
-        assert_eq!(out2[0]["confidence"], json!("medium"), "两条落点全缺给 medium: {out2:?}");
-        // 普通键单条落点缺失即产出，但置信度只到 low
-        let one = mk("OneLanding", "OneLanding", "", r"C:\Program Files\OneLanding\unins000.exe");
-        let out3 = dead_uninstall_findings(&[one], &exists, 1_700_000_900_000);
-        assert_eq!(out3.len(), 1, "普通键单条落点缺失就该产出: {out3:?}");
-        assert_eq!(out3[0]["confidence"], json!("low"), "一条落点不给 medium: {out3:?}");
-        // C4：贡献项按 code 断言（不按中文文案断言，改文案不该碎掉测试），每条都得有 text。
-        let c = &out[0]["contribs"];
-        let codes: Vec<&str> = c.as_array().unwrap().iter().map(|x| x["code"].as_str().unwrap_or("")).collect();
-        assert_eq!(codes.iter().filter(|k| *k == &"landingMissing").count(), 2, "两条落点各一条: {c}");
-        assert!(codes.contains(&"entry") && codes.contains(&"dormant"), "键位置与沉睡证据都要在: {c}");
-        assert!(
-            c.as_array().unwrap().iter().all(|x| !x["text"].as_str().unwrap_or("").is_empty()),
-            "有 code 没 text 等于给用户一个看不懂的代号: {c}"
-        );
-        assert!(
-            !codes.contains(&"msiRule"),
-            "普通键不该出现 MSI 口径: {c}"
-        );
-        assert!(out2[0]["contribs"]
-            .as_array().unwrap()
-            .iter().any(|x| x["code"] == json!("msiRule")),
-            "MSI 键要说明为什么要求两条落点: {}", out2[0]);
-        let one_codes: Vec<&str> = out3[0]["contribs"].as_array().unwrap()
-            .iter().map(|x| x["code"].as_str().unwrap_or("")).collect();
-        assert_eq!(one_codes.iter().filter(|k| *k == &"landingMissing").count(), 1, "一条落点只该有一条证据: {one_codes:?}");
-    }
-
-    #[test]
-    fn dead_app_paths_rows_target_only_their_own_key() {
-        let raws = vec![
-            DeadAppPathRaw {
-                hive: "HKLM".to_string(),
-                key: "foo.exe".to_string(),
-                path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\foo.exe".to_string(),
-                value: r"C:\Program Files\Foo\foo.exe".to_string(),
-                last_write_ms: None,
-            },
-            DeadAppPathRaw {
-                hive: "HKLM".to_string(),
-                key: "bar.exe".to_string(),
-                path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\bar.exe".to_string(),
-                value: "bar.exe".to_string(),
-                last_write_ms: None,
-            },
-            DeadAppPathRaw {
-                hive: "HKLM".to_string(),
-                key: "live.exe".to_string(),
-                path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\live.exe".to_string(),
-                value: r"C:\Windows\explorer.exe".to_string(),
-                last_write_ms: None,
-            },
-        ];
-        let out = dead_app_paths_findings(&raws, &|p| p.eq_ignore_ascii_case(r"C:\Windows\explorer.exe"), 1_700_000_900_000);
-        assert_eq!(out.len(), 1, "只有落点确实缺失的那条该出候选: {out:?}");
-        let target = out[0]["target"].as_str().unwrap_or("");
-        assert_eq!(target, r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\foo.exe");
-        assert_eq!(out[0]["deleteCapable"], json!(true));
-        assert!(
-            protect::reg_target_block_reason(target).is_none(),
-            "M1 给 App Paths 留的例外放行没生效，本类候选会被执行侧全量拒杀: {target}"
-        );
-        // C4：读不到写入时间时明确给 dormantUnknown，不许出现"沉默即很久"那种暗示
-        let codes: Vec<&str> = out[0]["contribs"].as_array().unwrap()
-            .iter().map(|x| x["code"].as_str().unwrap_or("")).collect();
-        assert!(codes.contains(&"entry") && codes.contains(&"targetMissing"), "键与缺失目标都要点名: {codes:?}");
-        assert!(codes.contains(&"dormantUnknown"), "无写入时间不该编沉睡证据: {codes:?}");
-        assert!(!codes.contains(&"dormant"), "{codes:?}");
-    }
-
     /// 快照分桶：面板现在同时展示多组候选，整槽覆盖会让先扫那组在执行时被快照闸判过期。
     #[test]
     fn residue_snapshot_buckets_replace_only_their_own_origin() {
@@ -1339,11 +940,23 @@ use super::residue_update::*;
         let _ = residue_snapshots().lock().map(|mut g| g.remove(label));
     }
 
-    /// 沉睡时长：读不到就留未知。把 0 显示成"很久没动过"是把没把握说成有把握。
+    /// v0.7.0 四类口径：服务键归属判据（纯函数）。落点在该应用安装目录之下、或服务名与
+    /// 程序名 token 互含，才算属于这个应用；兄弟目录前缀与无关服务名都要挡住。
     #[test]
-    fn dormant_stays_unknown_instead_of_looking_ancient() {
-        assert_eq!(dormant_delta(None, 1_700_000_900_000), Value::Null);
-        assert_eq!(dormant_delta(Some(0), 1_700_000_900_000), Value::Null);
-        assert_eq!(dormant_delta(Some(1_700_000_900_001), 1_700_000_900_000), Value::Null, "时钟回拨不给负数");
-        assert_eq!(dormant_delta(Some(1_700_000_000_000), 1_700_000_900_000), json!(900_000));
+    fn service_belongs_to_app_matches_landing_or_name_token() {
+        let tokens = vec!["acme".to_string(), "editor".to_string()];
+        let app_dir = r"c:\program files\acme";
+        // ① 落点在安装目录之下（大小写不敏感、按 `\` 段前缀比较）
+        assert!(service_belongs_to_app("AcmeSvc", Some(r"C:\Program Files\Acme\bin\a.exe"), &tokens, app_dir));
+        // ② 服务名与 token 互含（token 可能比服务名长，也可能短）
+        assert!(service_belongs_to_app("AcmeUpdateService", None, &tokens, ""));
+        assert!(service_belongs_to_app("editor", None, &tokens, ""));
+        // 兄弟目录前缀不许被当成「之下」：Acme2 不属于 Acme（否则同级目录互相污染）
+        assert!(!service_belongs_to_app("Other", Some(r"C:\Program Files\Acme2\a.exe"), &tokens, app_dir));
+        // 落点与名字都对不上 ⇒ 不归属
+        assert!(!service_belongs_to_app("WindowsUpdate", Some(r"C:\Windows\System32\svc.exe"), &tokens, app_dir));
+        // token 不足 2 字符不参与名字互含（短名字误报率爆炸）
+        assert!(!service_belongs_to_app("x", None, &["x".to_string()], ""));
+        // 落点缺失、安装目录也为空时不靠空字符串误判
+        assert!(!service_belongs_to_app("Other", None, &tokens, ""));
     }

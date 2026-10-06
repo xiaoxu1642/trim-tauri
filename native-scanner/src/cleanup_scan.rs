@@ -1753,16 +1753,27 @@ pub fn global_min_age_file() -> Option<std::path::PathBuf> {
     crate::util::list_file_path(GLOBAL_MIN_AGE_FILE)
 }
 
+/// 全局年龄阈值的**默认值**（天）：入口已改为隐藏式（2026-10-07 用户裁定），
+/// 「从未设置过」不再等价于「关闭」，而是按 14 天收紧。
+pub const DEFAULT_GLOBAL_MIN_AGE_DAYS: u64 = 14;
+
 /// 读全局年龄阈值（天）。`None` = 关闭（不覆盖规则阈值）。
 ///
-/// 只认**第一行**、必须是正整数；空文件 / 缺文件 / 解析失败一律按「关闭」。
-/// 为什么不在这里把取值卡成 UI 提供的档位（14/30）：全局策略**只能收紧**，
+/// 只认**第一行**、必须是正整数。三种情形分开处理（2026-10-07 起）：
+/// - 数据根未注入 ⇒ `None`（不猜路径，与 `empty-ignore.txt` 同口径，测试环境走这条）；
+/// - 数据根已知但**文件不存在** ⇒ 默认 [`DEFAULT_GLOBAL_MIN_AGE_DAYS`]（入口已隐藏，
+///   不设置 = 用默认值）；
+/// - 文件存在 ⇒ 以文件为准（空文件 / 非法值 = 显式「关闭」，返回 `None`）。
+///
+/// 为什么不在这里把取值卡成 UI 档位（14/30）：全局策略**只能收紧**，
 /// 手改成一个更大的值不会放宽删除面（方向安全）；卡档次会让「读了但看起来没生效」
 /// 变成一处静默失效。非法/负值按关闭处理，同样不会放宽（关闭 = 不覆盖，不是取消护栏）。
 pub fn load_global_min_age_days() -> Option<u64> {
     let f = global_min_age_file()?;
-    let text = fs::read_to_string(&f).ok()?;
-    parse_global_min_age(&text)
+    match fs::read_to_string(&f) {
+        Ok(text) => parse_global_min_age(&text),
+        Err(_) => Some(DEFAULT_GLOBAL_MIN_AGE_DAYS),
+    }
 }
 
 /// 策略文件文本 → 天数（纯函数，便于把「空文件 / 非法值 / 多行」这几类样本钉住）。

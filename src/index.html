@@ -505,7 +505,7 @@
       </div>
       </div><!-- /#page-cleanup（磁盘清理四合一：四个子视图收拢于此） -->
 
-      <!-- 软件卸载页（卸载域 MVP：列表 → 原厂卸载 → 残留扫描/受控清理） -->
+      <!-- 软件卸载页（卸载域 MVP：列表 → 原厂卸载；残留扫描整块在卸载完成后自动弹出的 residue 副窗内） -->
       <div class="page" id="page-uninstall">
         <div class="page-header">
           <div>
@@ -528,11 +528,6 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
               <span>刷新列表</span>
             </button>
-            <!-- v0.7.0：残留扫描的唯一界面是那扇副窗（三链候选可勾可删 + 深扫只读报告），主窗只留这一个入口 -->
-            <button class="btn btn-secondary" id="btnResidueWindow" data-tip="打开残留扫描窗口：上半区按三链（规则库 / 失效登记 / 卸载遗留）出候选，下半区是七个深扫器（服务、驱动、滤镜、IFEO、厂商键、能力授权、游戏库）的报告。能勾的只有后端放进执行快照的那几类，删除一律回收站优先、逐项确认；有保护的只说明、不给删。">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 4h16v12H4V4zm0 14h7v2H4v-2zm9 0h7v2h-7v-2zM6 6v8h12V6H6z"/></svg>
-              <span>残留扫描</span>
-            </button>
             <button class="btn btn-secondary" id="btnUninstallReports" data-tip="查看历次残留清理的批次报告（每项的删除结果与失败原因）">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
               <span>清理报告</span>
@@ -551,9 +546,8 @@
 
         <div class="table-card" id="uninstallList"></div>
 
-        <!-- 残留扫描面板（卸载完成后自动展开，也可手动重扫） -->
-        <!-- v0.7.0：残留面板（勾选 / 删除 / 删前备份 / 重启后删）整块搬进 src/residue-window.html，
-             主窗这里只留上面那排入口按钮 —— 同一件事不留第二个界面（用户拍板 2026-10-05） -->
+        <!-- 残留面板整块在 src/residue-window.html：只有「卸载成功后自动弹出」这一条来路，
+             主窗不再提供常驻入口（v0.7.0 用户拍板：同一件事不留第二个界面） -->
       </div><!-- /#page-uninstall -->
 
       <!-- 大文件查找已下线（2026-09-30 用户裁定：与「磁盘分析」逐层按体积排序重复）；磁盘健康度功能已移除 -->
@@ -1204,8 +1198,11 @@
           </div>
           <!-- G-2（2026-10-07）：全局清理年龄门槛。只收紧不放宽 —— 后端按
                max(规则阈值, 全局阈值) 并，档位由后端闸死（0 = 关闭 / 14 / 30）。
-               真源是数据目录里的策略文件（Rust 侧），前端 localState 只做展示。 -->
-          <div class="settings-section settings-age-section">
+               真源是数据目录里的策略文件（Rust 侧），前端 localState 只做展示。
+               2026-10-07 用户裁定：本项改为**隐藏式入口**，默认 14 天（见
+               native-scanner 的 DEFAULT_GLOBAL_MIN_AGE_DAYS）—— 节点保留、
+               绑定照旧，只是不再显式出现在设置页。 -->
+          <div class="settings-section settings-age-section" style="display:none">
             <div class="appearance-card-head">
               <h4>清理年龄门槛</h4>
               <p>对已声明时间门槛的清理规则生效，且只会让门槛更严，不会放宽</p>

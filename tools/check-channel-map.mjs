@@ -62,6 +62,13 @@ const RETIRED = {
   'cleanup:check-rules-version': '2026-10-06（用户裁定）：同上，检测链随更新链一并退役（版本徽标 UI 同撤）',
   'uninstall:check-residue-version': '2026-10-06（用户裁定）：残留规则库在线更新全链路退役（更新源枚举与网络校验一并删除，装载侧保留）',
   'uninstall:update-residue-rules': '2026-10-06（用户裁定）：同上；防回滚水位线写侧同撤，读侧保留',
+  // 2026-10-07（用户裁定）：机-wide 扫描整条退役 —— 残留副窗只展示「该应用」的服务 / 驱动 /
+  // 注册表 / 文件四类残留，四条机-wide 通道连同 Rust 命令、lib.rs 注册、CHANNEL_MAP、
+  // window.api 包装与门禁登记一并摘除（深扫器模块保留为内部代码，不再有界面/命令）。
+  'uninstall:dead-scan': '2026-10-07（用户裁定）：失效残留全机扫描整条退役',
+  'uninstall:orphan-scan': '2026-10-07（用户裁定）：卸载遗留（所有权档案）扫描整条退役',
+  'uninstall:orphan-ignore': '2026-10-07（用户裁定）：卸载遗留忽略清单随该链一并退役',
+  'uninstall:residue-deep-scan': '2026-10-07（用户裁定）：七个深扫器只读报告整条退役（模块保留为内部代码）',
   // D4 基线清零（2026-09-28，用户拍板「零引用功能全部清除」）：六条孤儿整链摘除
   // （命令 fn + lib.rs 注册 + CHANNEL_MAP + api 包装器一并删除；shutdown:begin/complete
   // 保留为刻意登记的扩展点，见 D4_ORPHANS）
@@ -79,6 +86,11 @@ const RETIRED = {
   'optimizer:prefs': 'E10 偏好读侧下线（2026-10-03）：唯一消费方是收藏星标（读 favorites），星标摘除后本通道零调用方；recent 由 touch-recent 单向写入、暂不读出',
   'updater:set-mirror': '2026-10-06（用户裁定）：「更新线路」选择整链退役，顺序固化 AtomGit 国内源优先、GitHub 兜底（updater.rs FEEDS），不再暴露线路偏好；命令 + 注册 + UI 同撤',
   'updater:get-mirror': '2026-10-06（用户裁定）：同上 set-mirror，偏好读取面随下拉一并摘除',
+  // 2026-10-07：外设优化由独立子窗改为**主窗应用内弹窗**（src/scripts/peripheral.js 走
+  // window.modal.create），label `peripheral` 退役 —— 开窗/关窗两条通道随子窗一并摘除，
+  // 保留的 peripheral:query/apply/restore-backup 三条改由主窗调用。
+  'peripheral:open-window': '2026-10-07（用户裁定）：外设优化改应用内弹窗，子窗与开窗命令整链退役',
+  'peripheral:close-window': '2026-10-07（用户裁定）：同上，弹窗用 ctrl.close() 关闭，不再需要子窗关窗通道',
 };
 
 /**
@@ -95,7 +107,6 @@ const TAURI_ADDED = {
   'uninstall:pending-revoke': 'P1-B3（2026-10-01）：撤回重启后删登记（主窗档）',
   'uninstall:report-list': 'U-6（2026-09-28）：批次报告列表（上游只写报告无查看面）',
   'uninstall:report-get': 'U-6（2026-09-28）：批次报告明细读取（同上）',
-  'uninstall:dead-scan': 'M6（2026-09-28）：失效残留扫描（不依赖卸载事实的无主残留，上游无此能力）',
   'uninstall:dir-size': 'B6（2026-09-29）：EstimatedSize 缺失时的安装目录体积兜底估算（上游无此能力）',
   'realtime:report-get': 'v2-L4P-35（2026-10-02）：网速报告列表瘦身后按需取单份明细（上游无此能力）',
   'uninstall:appx-logo': 'U-3（2026-09-28）：Appx Logo 懒加载（上游无此能力）',
@@ -105,8 +116,6 @@ const TAURI_ADDED = {
   'uninstall:batch-restore': 'H1（2026-09-29）：整批还原文件内容（往磁盘写，主窗档）',
   'cleanup:file-backup-list': 'C-4（2026-09-28）：永久删批次文件备份清单（2026-09-28 拍板补删前备份）',
   'cleanup:file-backup-restore': 'C-4（2026-09-28）：文件备份拷回原路径（主窗档）',
-  'uninstall:orphan-scan': 'C2/M4（2026-09-28）：孤儿应用数据扫描（上游无所有权历史这一层）',
-  'uninstall:orphan-ignore': 'C2/M4（2026-09-28）：把某历史 owner 记入忽略清单（同上）',
   'uninstall:reg-backup-list': 'D1/M5（2026-09-28）：卸载域注册表备份列表（此前备份只写不读）',
   'uninstall:reg-backup-restore': 'D1/M5（2026-09-28）：单个备份 reg import 还原（主窗档 + 危险确认）',
   'syspanel:power-plan-get': 'P2 §3.6（2026-10-03）：电源方案读侧（RAINZ 对标系统面板）',
@@ -117,9 +126,9 @@ const TAURI_ADDED = {
   'optimizer:list-groups': 'E7（2026-10-03）：分类两层结构下发（default 主序列 + custom 重映射；纯只读侧表）',
   'optimizer:touch-recent': 'E10（2026-10-03）：记一次最近使用（写侧，失败不打断流程）',
   'optimizer:stale-dismiss': '根治（2026-10-03）：「未完成还原」横幅 per-id 忽略（写记账 prefs 段；上游无启动对账横幅这一层）',
-  // v0.5.0 应用卸载残留扫描（只读报告阶段，方案 §3/§4）：上游 Electron 无残留副窗，
-  // 七个新扫描器全部只产报告，没有删除通道，故三条都是新增而非迁移。
-  'uninstall:residue-deep-scan': 'v0.5.0（2026-10-04）：七个只读残留扫描器聚合报告（服务/驱动/minifilter/IFEO/厂商键/能力授权/游戏库；无删除入口，上游无此能力）',
+  // 2026-10-07：机-wide 扫描整条退役 —— 失效残留 / 卸载遗留 / 七个深扫器报告四条通道
+  // （连同 Rust 命令、CHANNEL_MAP、window.api 包装、门禁登记）一起摘除，残留副窗只留
+  // 「该应用四类残留」一条扫描通道 `uninstall:residue-scan`。登记进 RETIRED（见该表）。
   // v0.7.0 第四期：右键菜单动作面板（只写 HKCU 的当前账号，Electron 轨没有这个域）
   'actions:open-window': 'v0.7.0：打开「右键菜单动作」副窗（主窗入口，MAIN 档）',
   'actions:close-window': 'v0.7.0：副窗自身关闭（只读档）',
@@ -128,7 +137,7 @@ const TAURI_ADDED = {
   'actions:remove': 'v0.7.0：只撤 TRIM. 前缀自己写的键，走 A1 窄口子（窄窗口集 actions）',
   'actions:run-script': 'v0.7.0：用户自写 PowerShell 直调，唯一入口 run_inbox_script、固定 120 秒、不代提权（窄窗口集 actions）',
   'residue:open-window': 'v0.5.0（2026-10-04）：打开残留扫描副窗（用户裁决 4：扫描全部在自绘副窗，主窗只留入口）',
-  'residue:close-window': 'v0.5.0（2026-10-04）：关闭残留扫描副窗（同 preview/models/peripheral 的子窗关窗轨）',
+  'residue:close-window': 'v0.5.0（2026-10-04）：关闭残留扫描副窗（同 preview/models 的子窗关窗轨）',
   'optimizer:restore-frequency': '任务三（2026-10-06）：还原点弹窗「恢复默认创建频率」手动回收入口（主窗档；创建流程已自动回收，此钮是回收失败时的出口，上游 Electron 无此能力）',
   'finder:ignore-folder': '任务四（2026-10-06）：空目录「忽略此文件夹」持久化忽略（写 app_data 名单；上游 Electron 只有读侧没有管理入口）',
   'finder:ignore-list': '任务四（2026-10-06）：忽略名单弹窗的读侧（路径 + 是否存在；上游无此面）',
@@ -432,7 +441,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'paths_load',
   'paths_save',
   'paths_scan',
-  'peripheral_open_window',
   'preview_open_window',
   'process_manager_open_window',
   'quickcmds_run',

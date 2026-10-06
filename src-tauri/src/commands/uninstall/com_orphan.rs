@@ -7,8 +7,7 @@
 //! 1. **COM/CLSID 孤儿**：`HKLM\SOFTWARE\Classes\CLSID\{…}` 下
 //!    `InprocServer32` / `LocalServer32` 指向的 DLL / EXE 已经不在了。
 //!    竞品把它排在第一（价值最高），但爆炸半径也最大（删错一个 CLSID 可能让某类
-//!    文件打不开），所以本阶段**只报不删**：`readonly:true` + 不进执行快照
-//!    （`deep_executable_candidates` 的类白名单里没有它，见 residue_deep.rs）。
+//!    文件打不开），所以**只报不删**，且从不进执行快照（深扫入口已退役，本模块保留为内部代码）。
 //! 2. **File Types / Applications**：两类悬空登记 ——
 //!    ① 文件扩展名键的默认值 ProgID 指向一个**已不存在的 ProgID 键**；
 //!    ② `…\Classes\Applications\<exe>` 登记的程序在本机常规落点找不到。

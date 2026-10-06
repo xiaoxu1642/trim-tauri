@@ -400,6 +400,10 @@
         case 'actions':
           if (isFileClean) {
             inner = previewBtnHtml(item, hasImages, imageCount);
+          } else if (item.id === RECYCLE_ID) {
+            // G-4：回收站是 Shell 动作条目（清空走系统接口、体积现查），规则侧已无
+            // pathPs/fileKeys —— 再渲染「明细」只会弹出恒为空的清单（用户 2026-10-07 反馈）。
+            inner = '<span class="xtable-cell-muted" data-tip="回收站由系统接口管理，不提供逐文件清单；上方体积为清空前现查">—</span>';
           } else {
             // P3：明细按钮——弹窗枚举该条目将删除的具体文件清单（只读）
             inner = `<button class="fileclean-preview-btn" data-detail="${item.id}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>`;

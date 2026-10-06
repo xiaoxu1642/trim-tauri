@@ -249,7 +249,12 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
 
   function updateFooter() {
     if (!modal) return;
-    const at = pathConfig.scannedAt ? new Date(pathConfig.scannedAt).toLocaleString('zh-CN') : '';
+    // 升级前落盘的 scannedAt 是 Rust 的 Debug 形态（`SystemTime { .. }`）—— `new Date()`
+    // 对它返回**truthy 的 Invalid Date**，照字面拼进页脚就是「上次扫描：Invalid Date」。
+    // 解析不出（getTime() 非有限值）一律按「未扫描」呈现；重新扫描会写入 ISO-8601
+    // （见 commands/paths.rs），正常路径不受影响。
+    const d = pathConfig.scannedAt ? new Date(pathConfig.scannedAt) : null;
+    const at = d && Number.isFinite(d.getTime()) ? d.toLocaleString('zh-CN') : '';
     modal.hint.textContent = at ? `上次扫描：${at}` : '尚未扫描，可点击「重新扫描」自动识别';
   }
 

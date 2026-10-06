@@ -33,24 +33,20 @@ const PAGES = [
     html: 'residue-window.html',
     script: 'scripts/residue-window.js',
     // 首屏必须发出的请求（点名对象，§4.1 纪律①：只断「没报错」会被「根本没跑到」穿透）
-    expectCalls: ['uninstall.deadScan', 'uninstall.orphanScan', 'uninstall.residueDeepScan'],
-    expectHosts: ['rsChainBody:click', 'rsDeepBody:click'],
+    expectCalls: ['uninstall.residueScan'],
+    expectHosts: ['rsChainBody:click'],
+    // 本窗只由「卸载完成后自动弹出」唤起，appId 经 URL query 带入；无 appId 时前端不发起
+    // 扫描请求（避免对着空目标发一次必失败的命令），所以桩里必须带上 query 才谈得上首屏请求。
+    search: '?app=' + encodeURIComponent('HKLM|SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\TrimProbe'),
     // 注入点：该页 DOMContentLoaded 里的第一行真实语句
     poisonAnchor: "state.appId = targetFromSearch();",
     dropIdProbe: 'rsBackupToggle',
     api: () => ({
-      'uninstall.residueScan': async (a) => ({ success: true, data: { appName: '示例程序', findings: [] }, _echo: a }),
-      'uninstall.deadScan': async () => ({ success: true, data: { findings: [], notes: [] } }),
-      'uninstall.orphanScan': async () => ({ success: true, data: { findings: [] } }),
-      'uninstall.residueDeepScan': async () => ({
-        success: true,
-        data: { report: { groups: [], protected: [], protectedCount: 0, notes: [], scanned: {}, platforms: {} } },
-      }),
-      'uninstall.execute': async () => ({ success: true, data: { results: [] } }),
+      'uninstall.residueScan': async (a) => ({ success: true, data: { appName: '示例程序', findings: [], notes: [] }, _echo: a }),
+      'uninstall.residueExecute': async () => ({ success: true, data: { details: [], okCount: 0, failCount: 0 } }),
       'uninstall.pendingAdd': async () => ({ success: true, data: {} }),
       'uninstall.pendingRevoke': async () => ({ success: true, data: { revoked: 0 } }),
-      'uninstall.pendingList': async () => ({ success: true, data: { items: [] } }),
-      'uninstall.orphanIgnore': async () => ({ success: true, data: {} }),
+      'uninstall.pendingList': async () => ({ success: true, data: { entries: [] } }),
       'residueWindow.closeWindow': async () => ({ success: true }),
       'residueWindow.onTarget': () => undefined,
     }),
@@ -156,7 +152,7 @@ function buildCtx(page, poison, dropId) {
   const win = {
     api,
     ds: { esc, escAttr: esc, fmtBytes: (n) => String(n) },
-    location: { search: '', href: 'http://localhost/' + page.html },
+    location: { search: page.search || '', href: 'http://localhost/' + page.html },
     localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
     subToast: { hintLine: () => {} },
     modal: null,

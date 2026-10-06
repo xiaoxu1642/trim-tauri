@@ -339,8 +339,9 @@
       id: MODAL_ID,
       title: titleOf(kind),
       // v3.5.1：更新说明要成块排版，原 440px 太窄导致每行只放得下十来个字；
-      // 只在 available 态放宽，其余态维持紧凑宽度
-      width: kind === 'available' ? 620 : 440,
+      // 只在 available 态放宽，其余态维持紧凑宽度。
+      // 2026-10-07：随骨架整体放大一档（用户反馈弹窗偏小）。
+      width: kind === 'available' ? 780 : 560,
       bodyHtml: bodyHtml(kind),
       footerHtml: footerHtml(kind),
       onRequestClose: () => {
@@ -608,7 +609,7 @@
     done = window.modal.create({
       id: 'updaterCompletionModal',
       title: '更新完成',
-      width: 460,
+      width: 560,
       bodyHtml:
         '<div class="upd-ready"><div class="upd-ready-title" data-role="ver"></div>' +
         '<p class="upd-ready-desc" data-role="desc"></p>' +

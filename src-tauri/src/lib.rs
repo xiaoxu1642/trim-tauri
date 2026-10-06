@@ -339,12 +339,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_pending_revoke,
         commands::uninstall::uninstall_residue_scan,
         commands::uninstall::uninstall_residue_execute,
-        // v0.5.0 只读残留报告（副窗档，无删除入口；档位登记见 check-guard-tiers MUST_READONLY）
-        commands::uninstall::uninstall_residue_deep_scan,
-        commands::uninstall::uninstall_orphan_scan,
-        commands::uninstall::uninstall_dead_scan,
+        // 机-wide 扫描（失效残留 / 卸载遗留 / 七个深扫器报告）已整条退役：只剩
+        // `uninstall_residue_scan` 按应用维度产出四类残留（服务/驱动/注册表/文件）
         commands::uninstall::uninstall_dir_size,
-        commands::uninstall::uninstall_orphan_ignore,
         commands::uninstall::uninstall_reg_backup_list,
         commands::uninstall::uninstall_reg_backup_restore,
         commands::uninstall::uninstall_batch_list,
@@ -459,8 +456,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::optimizer::optimizer_list_restore,
         commands::optimizer::optimizer_restore_frequency,
         commands::optimizer::optimizer_genadvice,
-        commands::peripheral::peripheral_open_window,
-        commands::peripheral::peripheral_close_window,
         commands::peripheral::peripheral_query,
         commands::peripheral::peripheral_apply,
         commands::peripheral::peripheral_restore_backup,

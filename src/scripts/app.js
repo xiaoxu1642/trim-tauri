@@ -160,8 +160,9 @@
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
     uninstall: ['scripts/uninstall.js'],
-    // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载
-    optimizer: ['scripts/optimizer.js', 'scripts/sysrestore.js'],
+    // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载；
+    // peripheral.js 提供「更多调优项」的应用内弹窗（window.peripheral.open），也随本页注入
+    optimizer: ['scripts/optimizer.js', 'scripts/peripheral.js', 'scripts/sysrestore.js'],
     contextmenu: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/contextmenu.js'],
     startup: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/startup.js'],
     maintenance: ['scripts/maintenance.js'],
@@ -562,12 +563,26 @@
     }
   }
 
-  // 轻量 Markdown 渲染（支持标题/表格/列表/引用/粗体/行内代码/分隔线，满足 readme.md 需要）
+  // 轻量 Markdown 渲染（支持标题/表格/列表/引用/粗体/行内代码/分隔线/链接，满足 readme.md 需要）
   function renderMarkdown(md) {
+    // 行内元素：**粗体**、`代码`、链接、图片。顺序要紧 —— 图片先于链接被吃掉，
+    // 否则 `![alt](url)` 会被链接规则拆成裸 `!`+锚点。
+    // 外链图（readme 顶部的 shields 徽章）一律**剔除**：CSP 的 img-src 不放行 https，
+    // 渲染出来只会是碎图；`<a href>` 只对 http(s) 生效，相对链接（如 update.md）
+    // 降级成纯文本，避免点出一个走不通的死链。
     const escapeHtmlInline = (text) => escapeHtml(text)
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/`([^`]+)`/g, '<code>$1</code>');
-    const lines = String(md || '').split(/\r?\n/);
+    // readme.md 顶部用的是**字面 HTML 标题**（`<h1>Trim</h1>`）。本渲染器不解析内联 HTML，
+    // 原样透传会把标签显示成源码，所以先逐行把成对的 <hN>…</hN> 折成等价的 Markdown 标题。
+    const src = String(md || '').replace(
+      /^[ \t]*<h([1-6])>(.*?)<\/h\1>[ \t]*$/gim,
+      (m, lv, text) => '#'.repeat(Number(lv)) + ' ' + text
+    );
+    const lines = src.split(/\r?\n/);
     let html = '';
     let listType = null; // 'ol' | 'ul'
     let inTable = false;
@@ -583,6 +598,9 @@
       const line = lines[i].replace(/\r$/, '');
       const trimmed = line.trim();
       if (!trimmed) { closeList(); closeTable(); html += '\n'; continue; }
+      // 纯图片行（readme 顶部三行 shields 徽章）：外层链接穿透后本行只剩空串，
+      // 不作为段落输出，避免每条徽章留一个空 <p>。
+      if (/^!\[[^\]]*\]\([^)]*\)$/.test(trimmed)) continue;
 
       // 分隔线
       if (/^(-{3,}|\*{3,})$/.test(trimmed)) { closeList(); closeTable(); html += '<hr>'; continue; }
@@ -654,6 +672,17 @@
       const resp = await window.api.app.readUsage();
       if (resp && resp.success) {
         body.innerHTML = renderMarkdown(resp.content);
+        // 外链一律走受控出口（`app:open-external` 只放行 https）：直接交给 webview 导航
+        // 会把整个应用页面顶掉，且渲染层导航本就被 CSP 与窗口策略禁止。
+        body.querySelectorAll('a[href]').forEach((a) => {
+          a.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            const url = a.getAttribute('href') || '';
+            if (/^https?:\/\//i.test(url)) {
+              try { window.api?.app?.openExternal?.(url); } catch (e) {}
+            }
+          });
+        });
       } else {
         body.innerHTML = `<div class="empty-state"><p>${escapeHtml((resp && resp.message) || '加载使用说明失败')}</p></div>`;
       }

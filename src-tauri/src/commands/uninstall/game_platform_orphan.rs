@@ -468,7 +468,7 @@ unsafe fn collect_wegame(index: &mut PlatformIndex, notes: &mut Vec<String>) {
 }
 
 /// 采集三平台清单。任何一处失败都只影响该平台的判定力，不让整轮扫描失败
-/// （与 `uninstall_dead_scan` 的 notes 口径一致：残缺要可见，不能装成干净）。
+/// （与残留扫描的 notes 口径一致：残缺要可见，不能装成干净）。
 pub(super) unsafe fn collect_platform_index() -> (PlatformIndex, Vec<String>) {
     let mut index = PlatformIndex::default();
     let mut notes = Vec::new();
@@ -483,7 +483,7 @@ pub(super) unsafe fn collect_platform_index() -> (PlatformIndex, Vec<String>) {
 // ==================== 游戏目录残留（平台扫描器自身的产出） ====================
 
 /// 「库根 + 该根下实际存在的游戏目录」采集结果（把只读列目录与判定分开，
-/// 判定因此可在单测里注入目录清单，不碰磁盘 —— 与本域 `dead_uninstall_findings` 同构）。
+/// 判定因此可在单测里注入目录清单，不碰磁盘 —— 与本域其余扫描器的「采集/判定分离」同构）。
 pub(super) struct LibraryListing {
     pub(super) root: String,
     pub(super) game_dirs: Vec<String>,

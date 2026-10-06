@@ -554,7 +554,8 @@
 
   // ==================== 残留副窗入口（v0.7.0：残留链在这一扇窗里的唯一界面） ====================
   //
-  // 开窗失败必须说清 —— 用户点了「查残留」而窗口没起来，最容易读成「这台机器没问题」。
+  // 只有「卸载完成后自动弹出」这一条来路（runUninstall 尾部调本函数）；主窗工具栏不再提供
+  // 常驻入口。开窗失败必须说清 —— 窗口没起来时，最容易读成「这台机器没问题」。
   // appId 只是提示后端扫哪个，取值闸在 Rust 侧（开窗前一次、执行链再一次），这里不自己判形状。
   async function openResidueWindow(appId) {
     try {
@@ -586,11 +587,6 @@
       });
     });
     document.getElementById('uninstallBtnRefresh')?.addEventListener('click', loadApps);
-    // 主窗只留入口，扫描与展示都在副窗里；开窗失败要如实说，
-    // 不能让人以为「点了没反应」是扫描在跑
-    document.getElementById('btnResidueWindow')?.addEventListener('click', () => {
-      openResidueWindow(currentAppId);
-    });
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
     // §2.3：还原点开关的偏好持久化（新式命名对齐 trim.residue.backupPack；读失败按默认关）
     const restoreToggle = document.getElementById('uninstallRestoreToggle');
@@ -608,7 +604,7 @@
       const rep = e.target.closest('[data-un-repair]');
       if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair');
       // 行内「查残留」按钮已按用户 2026-10-05 裁定删除：软件既然还装在机器上，谈不上残留。
-      // 真正的入口是卸载完成后自动打开残留副窗（见 runUninstall 尾部），以及工具栏那个总入口。
+      // 唯一的入口是卸载完成后自动打开残留副窗（见 runUninstall 尾部），主窗已无常驻入口。
     });
     // v0.7.0：residueBtn* / residueBackupToggle / residueList 这些主窗元素随面板一起搬走了，
     // 对应的监听不在这儿 —— 勾选、删除、删前备份偏好、重启后撤回落 in src/scripts/residue-window.js

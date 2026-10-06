@@ -120,9 +120,9 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
 // ==================== 卸载残留链三道闸（M1 安全收口 2026-09-28） ====================
 //
 // 覆盖对象是**命令边界**而不是判定函数本身（判定函数的正反例在 lib 单测里由
-// `tools/fixtures/residue-contract.json` 驱动）。这三条用例各自钉住一条顺序/形状，
+// `tools/fixtures/residue-contract.json` 驱动）。这些用例各自钉住一条顺序/形状，
 // 都是零副作用（纯读或在任何删除动作之前整批拒绝）：
-// - 残留扫描与残留执行是 `guard::MAIN` 档（唯一调用方是主窗卸载页），子窗必须被拒杀；
+// - 残留扫描与残留执行是窄窗口集（`guard::RESIDUE_WINDOWS`）档，其余窗口与主窗必须被拒杀；
 // - 执行侧的快照闸必须**先于**删除：受保护注册表容器在无快照时也要被整批拒绝，
 //   这条防的是「把快照闸挪到删除之后」那类改动；
 // - 扫描返回形状是渲染层直接 `.map` 的 `data.findings`，塌成 null 会让残留面板整片崩。
@@ -131,7 +131,7 @@ const GHOST_APP_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Unin
 
 // ==================== v0.7.0 残留链窄窗口集的统一断言 ====================
 //
-// 面板整块搬进 `residue` 副窗后，这 8 条命令的档位从 `guard::MAIN` 换成
+// 面板整块搬进 `residue` 副窗后，残留链命令的档位从 `guard::MAIN` 换成
 // `guard::RESIDUE_WINDOWS`（= 只有 "residue"）。断言形状随之翻转，但**判据要点名「做到了什么」**
 // （AGENTS §4.1 纪律①）：
 // - `residue` 窗必须越过档位，并且必须读得到命令体自己的早退特征 `needle`
@@ -346,37 +346,6 @@ fn pending_add_rejects_protected_paths_and_over_limit() {
     );
 }
 
-/// A3 两条残留库更新命令都是 MAIN 档（唯一调用方是主窗卸载页）。
-/// C2 两条应用数据遗留命令 v0.7.0 起是 `residue` 副窗专属档。
-///
-/// 正向特征只走 `orphan_ignore` 的参数校验早退路（格式错即返回，不 load/save 所有权
-/// 档案，零副作用）；`orphan_scan` 会读档案并可能写回（升级/过期），且要逐目录读盘
-/// ⇒ 这里**只验拒杀侧**，正例留在下面的 `#[ignore]` 组（§4.2 纪律②）。
-#[test]
-fn orphan_channels_are_residue_window_only() {
-    assert_residue_window_only(
-        "uninstall_orphan_ignore",
-        json!({ "appId": "no-separator", "displayName": "Acme" }),
-        "app_id 格式错误",
-    );
-    for label in sub_windows() {
-        if label == RESIDUE_LABEL {
-            continue; // 正例触盘，不进快速组
-        }
-        let w = window_with_label(label);
-        let scan = invoke_text(&w, "uninstall_orphan_scan", json!({}));
-        assert!(
-            scan.contains("IPC 来源校验失败"),
-            "{label} 窗调应用数据遗留扫描必须被来源校验拒杀，回执 {scan}"
-        );
-    }
-    let m = invoke_text(&main_window(), "uninstall_orphan_scan", json!({}));
-    assert!(
-        m.contains("IPC 来源校验失败"),
-        "主窗调遗留扫描现在必须被拒杀（面板已搬走），回执 {m}"
-    );
-}
-
 /// M5 D1：卸载域注册表备份的列表/还原两条通道都是 MAIN 档。
 ///
 /// 还原会经 `reg import` 写注册表，所以档位是它的第一道闸，子窗一律拒杀。
@@ -421,15 +390,6 @@ fn reg_backup_channels_are_main_only() {
         common::message_of(&restore).contains("备份文件名非法"),
         "主窗应越过档位进入参数校验，回执 {restore}"
     );
-}
-
-/// M6 失效残留扫描 v0.7.0 起是 `residue` 副窗专属档：它产出的注册表候选会进同一条删除链，
-/// 其余窗口与主窗一律拒杀。本体只读注册表三根（无写、无出网），所以这里给得起正向特征：
-/// 越过档位的回执里必须有 `findings` 键 —— 档位拒杀的回执只有 {success,message}。
-/// （采集计数与候选硬约束那条仍在下面的 `#[ignore]` 真机用例里。）
-#[test]
-fn dead_scan_channel_is_residue_window_only() {
-    assert_residue_window_only("uninstall_dead_scan", json!({}), "findings");
 }
 
 /// B6 体积兜底：MAIN 档 + 入参形状闸。
@@ -532,73 +492,6 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
     );
 }
 
-/// 真机应用数据遗留扫描（`#[ignore]`）：先按**档案实际状态**决定断言哪条，两条路都要能钉红。
-/// - 档案空 / 没有任何 historical → 必须**拒绝扫描并给出可读原因**，不许回空集
-///   （空集会被读成「这台机器没有遗留数据」，那是把"不知道"伪装成"知道"）；
-/// - 有 historical 且产出候选 → 断言候选形状与「一律不自动勾选、置信度封顶 medium、
-///   不是受保护路径、带 ownerAppId」这四条硬约束。
-#[test]
-#[ignore = "逐目录读盘且依赖本机卸载记录，发布前门禁跑"]
-fn orphan_scan_refuses_or_returns_unchecked_candidates() {
-    use serde_json::Value;
-    // 档位：孤儿扫描在窄窗口集内（v0.7.0 面板搬进 residue 副窗），主窗调用会被来源校验拒杀
-    let w = window_with_label(RESIDUE_LABEL);
-    let res = invoke(&w, "uninstall_orphan_scan", json!({}));
-    // 自己读一遍档案判断"该不该有产出"，而不是靠回执猜
-    let own = trim_tauri_lib::engine::paths::app_data_dir().join("uninstall-ownership.json");
-    let has_historical = std::fs::read_to_string(&own)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|d| {
-            d["owners"].as_array().map(|a| {
-                a.iter()
-                    .any(|o| o["state"].as_str() == Some("historical"))
-            })
-        })
-        .unwrap_or(false);
-    if !has_historical {
-        assert_eq!(
-            res["success"],
-            json!(false),
-            "没有已确认卸载完成的记录时不得回空集伪装「没有遗留数据」，实测 {res}"
-        );
-        let msg = common::message_of(&res);
-        assert!(
-            msg.contains("还没有卸载记录") || msg.contains("还没有已确认卸载完成") || msg.contains("获取失败"),
-            "拒绝扫描必须给出可读原因，实测: {msg}"
-        );
-        println!("[orphan] 档案无 historical，按预期拒绝扫描：{msg}");
-        return;
-    }
-    assert_eq!(res["success"], json!(true), "有 historical 时扫描应成功: {res}");
-    let findings = res["data"]["findings"]
-        .as_array()
-        .unwrap_or_else(|| panic!("data.findings 必须是数组: {res}"));
-    for f in findings {
-        assert_eq!(f["kind"], json!("folder"), "该组候选只给目录: {f}");
-        assert_eq!(f["origin"], json!("orphan"), "候选要标明来源: {f}");
-        assert_eq!(
-            f["defaultChecked"],
-            json!(false),
-            "该组候选一律不得默认勾选: {f}"
-        );
-        assert!(
-            f["confidence"] == json!("low") || f["confidence"] == json!("medium"),
-            "该组候选置信度封顶 medium: {f}"
-        );
-        let t = f["target"].as_str().unwrap_or("");
-        assert!(
-            !trim_tauri_lib::engine::protect::is_path_protected(t),
-            "该组候选不得是受保护路径: {t}"
-        );
-        assert!(
-            !f["ownerAppId"].as_str().unwrap_or("").is_empty(),
-            "忽略操作要靠 ownerAppId 寻址: {f}"
-        );
-    }
-    println!("[orphan] 本机产出 {} 条候选（均未自动勾选）", findings.len());
-}
-
 // ==================== 重/外呼组（默认 ignore，发布前跑） ====================
 
 /// A1 收紧的**放行回测**（真机、只读）：装机清单里每个桌面程序的卸载键必然存在，
@@ -687,64 +580,6 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
 // }
 //
 // 跑法：cargo test --test module_smoke -- --ignored
-
-/// M6 失效残留扫描（真机 `#[ignore]`）：注册表两类的采集链要跑通，候选硬约束一条不许破。
-///
-/// 服务与设备两类已按用户裁定 2026-09-28 摘掉（判据成立但删除要提权，我们没有这块实操经验）。
-///
-/// 这条用例**不要求本机产出候选**：原厂卸载器自己把卸载键删干净时，0 条就是正确答案
-/// （网易大神实测就是这样）。它靠 `scanned` 两个计数判"扫过但确实没有"和"根本没扫"——
-/// 只断 findings 为空/非空都会空转：前者把断链读成成功，后者把干净机器读成故障。
-/// 判定本体的正反例在 lib 单测里非空转地钉着。
-#[test]
-#[ignore = "读注册表三根（含 App Paths），发布前门禁跑"]
-fn dead_scan_collects_registry_roots_under_hard_constraints() {
-    use trim_tauri_lib::engine::protect;
-    // 档位：失效扫描在窄窗口集内（v0.7.0 面板搬进 residue 副窗），主窗调用会被来源校验拒杀
-    let w = window_with_label(RESIDUE_LABEL);
-    let res = invoke(&w, "uninstall_dead_scan", json!({}));
-    assert_eq!(res["success"], json!(true), "扫描应成功: {res}");
-    let scanned_uninstall = res["data"]["scanned"]["uninstallKeys"].as_u64().unwrap_or(0);
-    let scanned_paths = res["data"]["scanned"]["appPathsKeys"].as_u64().unwrap_or(0);
-    assert!(
-        scanned_uninstall > 0 && scanned_paths > 0,
-        "采集链断了：卸载键扫到 {scanned_uninstall} 条、App Paths 扫到 {scanned_paths} 条（真机不可能都是 0）"
-    );
-    let findings = res["data"]["findings"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    for f in &findings {
-        assert_eq!(f["origin"], json!("dead"), "候选必须标 origin=dead: {f}");
-        assert!(
-            matches!(f["deadClass"].as_str(), Some("uninstall") | Some("appPaths")),
-            "本链只剩注册表两类: {f}"
-        );
-        assert_eq!(
-            f["defaultChecked"],
-            json!(false),
-            "失效残留一律不自动勾选（落点缺失也可能是移动盘/网络盘没插）: {f}"
-        );
-        let conf = f["confidence"].as_str().unwrap_or("");
-        assert!(conf == "low" || conf == "medium", "置信度封顶 medium: {f}");
-        assert_eq!(f["kind"], json!("reg_key"), "本链只产注册表候选: {f}");
-        assert_eq!(f["deleteCapable"], json!(true));
-        let t = f["target"].as_str().unwrap_or("");
-        assert!(
-            protect::reg_target_block_reason(t).is_none(),
-            "可删候选被禁删面挡住 = 结构收口把功能误杀，目标 {t}"
-        );
-        assert!(
-            f["testedPaths"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
-            "每条候选必须写清测过哪些落点，用户才有判断依据: {f}"
-        );
-    }
-    println!(
-        "失效残留：扫过 卸载键 {scanned_uninstall} / App Paths {scanned_paths}，产出候选 {} 条，说明 {:?}",
-        findings.len(),
-        res["data"]["notes"]
-    );
-}
 
 /// M6 图标第四源（真机 `#[ignore]`）：`shortcutPath` 是后端算好的，前端只按优先级尝试，
 /// 所以这里钉三条 —— 字段形状（要么没有、要么是个真实存在的 .lnk）、至少有一行命中
@@ -844,119 +679,6 @@ fn reg_backup_restore_writes_registry_end_to_end() {
         "回执必须说明是封条拦下的，实测 {again}"
     );
     assert_eq!(probe_val().as_deref(), Some("restored"), "被拒的还原不得改动已有键值");
-}
-
-/// 所有权链探针守卫：档案恢复原样 + 探针目录整体删除，panic 也要执行。
-struct OrphanProbeGuard {
-    doc_path: std::path::PathBuf,
-    backup: Option<Vec<u8>>,
-    root: std::path::PathBuf,
-}
-
-impl Drop for OrphanProbeGuard {
-    fn drop(&mut self) {
-        match &self.backup {
-            Some(bytes) => {
-                let _ = std::fs::write(&self.doc_path, bytes);
-            }
-            None => {
-                let _ = std::fs::remove_file(&self.doc_path);
-            }
-        }
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-/// M4 所有权链的「有产出」分支真机验证：候选真出现 → 真送回收站 → 「不再提示」真生效。
-///
-/// 之前这条链只在单测里用注入的 `exists` 闭包跑过判定，真机上从没产出过候选
-/// （本机唯一档案项网易大神没有精确同名目录），所以候选渲染、快照闸、回收站、
-/// 忽略写档这一段全是未验证状态。
-///
-/// 探针只在 `%LOCALAPPDATA%\TrimOrphanProbe\cache` 里造，删除走回收站（可还原）；
-/// 真实所有权档案先读后恢复，测试不留痕。
-#[test]
-#[ignore = "写所有权档案与 %LOCALAPPDATA% 探针目录并真送回收站，发布前门禁跑"]
-fn orphan_chain_produces_real_candidate_and_ignore_works() {
-    use trim_tauri_lib::engine::paths;
-    let doc_path = paths::app_data_dir().join("uninstall-ownership.json");
-    let probe = "TrimOrphanProbe";
-    let app_id = format!(r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{probe}");
-    let root = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA"))
-        .join(probe);
-    let cache = root.join("cache");
-    std::fs::create_dir_all(&cache).expect("探针目录应可建");
-    std::fs::write(cache.join("probe.txt"), b"probe").expect("探针文件应可写");
-    let backup = std::fs::read(&doc_path).ok();
-    let _guard = OrphanProbeGuard { doc_path: doc_path.clone(), backup, root: root.clone() };
-    let gone = std::env::temp_dir().join(format!("TrimOrphanProbe-Gone-{}", std::process::id()));
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let doc = json!({
-        "schemaVersion": 1,
-        "owners": [{
-            "appId": app_id,
-            "displayName": probe,
-            "publisher": "",
-            "installLocation": gone.to_string_lossy(),
-            "ownedPaths": [],
-            "recordedAt": now - 2000,
-            "state": "historical",
-            "confirmedAt": now - 2000,
-        }],
-        "ignored": [],
-    });
-    std::fs::write(&doc_path, serde_json::to_vec_pretty(&doc).unwrap()).expect("档案应可写");
-
-    // 档位：扫描 / 执行 / 忽略三条都在窄窗口集内（v0.7.0 面板搬进 residue 副窗）
-    let w = window_with_label(RESIDUE_LABEL);
-    let scan = invoke(&w, "uninstall_orphan_scan", json!({}));
-    assert_eq!(scan["success"], json!(true), "有 historical 档案时扫描应成功: {scan}");
-    let findings = scan["data"]["findings"].as_array().cloned().unwrap_or_default();
-    let cand = findings
-        .iter()
-        .find(|f| {
-            f["kind"] == json!("folder")
-                && f["target"]
-                    .as_str()
-                    .map(|t| t.replace('/', "\\").ends_with(&format!("\\{probe}\\cache")))
-                    .unwrap_or(false)
-        })
-        .unwrap_or_else(|| panic!("探针目录的 cache 子目录必须成为候选，实测 {findings:?}"));
-    assert_eq!(cand["defaultChecked"], json!(false), "该组候选一律不自动勾选");
-    assert_eq!(cand["ownerName"], json!(probe), "候选要写清归属: {cand}");
-    let target = cand["target"].as_str().unwrap_or("").to_string();
-
-    let exec = invoke(
-        &w,
-        "uninstall_residue_execute",
-        json!({ "appId": app_id, "targets": [{ "kind": "folder", "target": target }] }),
-    );
-    assert_eq!(exec["success"], json!(true), "快照内的探针目录应可送回收站: {exec}");
-    assert!(exec["data"]["okCount"].as_i64().unwrap_or(0) >= 1, "回执要报成功数: {exec}");
-    assert!(
-        !std::path::Path::new(&target).exists(),
-        "送删后探针 cache 目录必须真的不在了（回收站可还原）: {target}"
-    );
-
-    // 「不再提示该程序」必须写档并在下一次扫描里生效
-    let ign = invoke(
-        &w,
-        "uninstall_orphan_ignore",
-        json!({ "appId": app_id, "displayName": probe }),
-    );
-    assert_eq!(ign["success"], json!(true), "忽略入口应成功: {ign}");
-    let after = invoke(&w, "uninstall_orphan_scan", json!({}));
-    let left = after["data"]["findings"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|f| f["ownerName"] == json!(probe))
-        .count();
-    assert_eq!(left, 0, "忽略后该 owner 不得再产候选，实测 {after}");
 }
 
 /// log:write 的边界行为（N3）：五个应用窗都可调（子窗没有 logger.js，直连本通道），

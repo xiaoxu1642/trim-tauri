@@ -456,7 +456,10 @@ pub fn paths_scan(rules_json: &str) -> Result<Value, String> {
             "douyinCacheDir": douyin_cache,
             "qqCacheDir": qq_cache,
             "scanVersion": 2,
-            "scannedAt": format!("{:?}", std::time::SystemTime::now()),
+            // 时间戳**不在这里产生**：本函数只负责找路径。扫描时间由命令层
+            // （`commands::paths`）统一以 ISO-8601 写入 —— 此前这里塞的是
+            // `format!("{:?}", SystemTime::now())` 的 Debug 形态，JS `new Date()`
+            // 解析不了，页脚恒显 "Invalid Date"（用户 2026-10-07 反馈）。
         }))
     }
 }

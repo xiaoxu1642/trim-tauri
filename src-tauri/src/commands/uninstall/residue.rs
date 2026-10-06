@@ -58,6 +58,42 @@ pub(super) const NAME_HIT_CAP: usize = 20;
 pub(super) const SIDE_TRACE_CAP: usize = 20;
 /// 参与反查的程序 exe 数量上限（collect_program_objects 的产出面）
 pub(super) const PROGRAM_EXE_CAP: usize = 16;
+/// 应用归属的服务 / 驱动残留候选上限（回执按 bucket 分四组，超过即截断并在 notes 说明）
+pub(super) const SERVICE_RESIDUE_CAP: usize = 60;
+
+/// 一个服务键是否**属于这个应用**（纯函数，可单测）。两条判据任一成立即算归属：
+/// 1. `ImagePath` 解析出的落点在该应用的安装目录之下（大小写不敏感、按 `\` 段前缀比较，
+///    不会把 `C:\Apps\Acme` 与 `C:\Apps\Acme2` 误判成同一家）；
+/// 2. 服务名与程序名 token 互含（token 由 `norm_name(display_name)` 按空白切分、过滤长度 < 2
+///    的项得到）。刻意**不新造相似度算法**——沿用 `norm_name`，与目录/快捷方式启发式同一口径。
+///
+/// `app_tokens` 是调用方预算好的（同一轮对所有服务复用），`dir_lc` 是安装目录的小写形态。
+pub(super) fn service_belongs_to_app(
+    service_name: &str,
+    landing: Option<&str>,
+    app_tokens: &[String],
+    dir_lc: &str,
+) -> bool {
+    if let Some(l) = landing {
+        let ll = l.trim_end_matches('\\').to_ascii_lowercase();
+        let d = dir_lc.trim_end_matches('\\');
+        if !d.is_empty()
+            && ll.len() > d.len()
+            && ll.starts_with(d)
+            && matches!(ll.as_bytes().get(d.len()), Some(b'\\'))
+        {
+            return true;
+        }
+    }
+    let n = service_name.to_ascii_lowercase();
+    if n.chars().count() < 2 {
+        return false;
+    }
+    app_tokens.iter().any(|t| {
+        let tl = t.trim().to_ascii_lowercase();
+        tl.chars().count() >= 2 && (n.contains(&tl) || tl.contains(&n))
+    })
+}
 
 /// 同名多候选降级（C3 的后半）：同一归一化名字在**不同父目录**下命中多个结果时，
 /// 无法判定哪一条才是这个程序自己的东西，整组降 low 并默认不勾。
@@ -459,10 +495,16 @@ pub(super) fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec
 
 
 /// 卸载域·残留扫描（方案 M3 MVP + U-2 固定系统侧痕）。
+///
+/// **v0.7.0 起只产出该应用的四类残留**：服务残留 / 驱动残留 / 注册表残留 / 文件·文件夹残留。
+/// 每条候选带一个 `bucket` 字段（`service` / `driver` / `registry` / `file`），前端据此分四组渲染。
+/// 服务与驱动两类由 `service_belongs_to_app` 判归属（落点在安装目录之下，或服务名与程序名 token 互含），
+/// 且只报「落点已失踪」的键；服务表读不到（readable=false）时本两类不产候选。
+///
 /// 来源与置信度：卸载键仍在=high（reg_key）；InstallLocation 仍在=high（folder）；
 /// 名称启发式=low（folder，默认不勾）；开始菜单快捷方式=medium（默认勾）；
 /// 固定系统侧痕（U-2）=medium 全默认不勾（拍板口径 2026-09-28：侧痕删除无原厂依据，
-/// 只作候选交用户逐项决定）。签名残留规则库按方案后置接入（U-1）。
+/// 只作候选交用户逐项决定）；应用归属的服务/驱动残留=medium（落点失踪）。
 #[tauri::command]
 pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -492,11 +534,11 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 小旭拍板并入：目录存在才入候选，进回收站（可还原），先过 is_path_protected。
         if hive_str.eq_ignore_ascii_case("APPX") {
             let Some(pfn) = package_family_name(&key_path) else {
-                return (Vec::new(), "Windows 应用".to_string());
+                return (Vec::new(), "Windows 应用".to_string(), Vec::new());
             };
             let base = std::env::var("LOCALAPPDATA").unwrap_or_default();
             if base.is_empty() {
-                return (Vec::new(), "Windows 应用".to_string());
+                return (Vec::new(), "Windows 应用".to_string(), Vec::new());
             }
             let dir = PathBuf::from(&base).join("Packages").join(&pfn);
             let mut findings: Vec<Value> = Vec::new();
@@ -505,25 +547,26 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                     "kind": "folder", "target": dir.to_string_lossy(),
                     "reason": "Windows 应用已移除，其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据成为应用数据遗留（进回收站，可还原）",
                     "confidence": "high", "risk": "low", "defaultChecked": true,
+                    "bucket": "file",
                     "contribs": contribs(&[
                         ("appxRemoved", format!("包 {pfn} 已从当前用户移除（清单里查不到）")),
                         ("pkgDataDir", format!("遗留位置由包名唯一确定：{}", dir.to_string_lossy())),
                     ]),
                 }));
             }
-            return (findings, pfn);
+            return (findings, pfn, Vec::new());
         }
         let (hive, full_target) = if hive_str.eq_ignore_ascii_case("HKCU") {
             (HKEY_CURRENT_USER, format!("HKCU\\{key_path}"))
         } else if hive_str.eq_ignore_ascii_case("HKLM") {
             (HKEY_LOCAL_MACHINE, format!("HKLM\\{key_path}"))
         } else {
-            return (Vec::new(), String::new());
+            return (Vec::new(), String::new(), Vec::new());
         };
         let sk = to_wide(&key_path);
         let mut hk = windows::Win32::System::Registry::HKEY::default();
         if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-            return (Vec::new(), String::new());
+            return (Vec::new(), String::new(), Vec::new());
         }
         let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
         let publisher = reg_sz(hk, "Publisher").unwrap_or_default();
@@ -751,16 +794,92 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                 }
             }
         }
-        (findings, display_name)
+        // ---- 每条候选落一个 bucket（v0.7.0 四类口径）：只有四个取值 ----
+        // 既有的文件/目录/快捷方式归 file，注册表键/值归 registry；下面新加的服务/驱动候选
+        // 自带 bucket，靠「已存在即跳过」避免被这里覆盖成 registry。前端按这个字段分四组渲染。
+        for f in findings.iter_mut() {
+            if f.get("bucket").is_some() {
+                continue;
+            }
+            let bucket = match f.get("kind").and_then(Value::as_str) {
+                Some("reg_key") | Some("reg_value") => "registry",
+                _ => "file",
+            };
+            if let Some(obj) = f.as_object_mut() {
+                obj.insert("bucket".into(), json!(bucket));
+            }
+        }
+        // ---- v0.7.0：应用归属的服务 / 驱动残留（复用 services_orphan 的服务表）----
+        // 只报「落点已失踪」那一类：服务键还在、ImagePath 指向的二进制已不存在，且归属判据成立。
+        // 落点仍存在的服务是「还在用」，一律不报。服务表读不到（readable=false）时不产候选、
+        // 只留 note —— 拿空表去判「已卸载」等于把全部服务算成残留。
+        let mut notes: Vec<String> = Vec::new();
+        let (svc_entries, svc_readable) = services_orphan::collect_service_entries(2048);
+        if !svc_readable {
+            notes.push("服务表读不到（HKLM\\SYSTEM\\CurrentControlSet\\Services 打不开），服务与驱动两类残留本组未采集".to_string());
+        } else {
+            let app_tokens: Vec<String> = norm_name(&display_name)
+                .split_whitespace()
+                .filter(|t| t.chars().count() >= 2)
+                .map(|t| t.to_string())
+                .collect();
+            let svc_dir_lc = loc.trim_end_matches('\\').to_ascii_lowercase();
+            let mut svc_count = 0usize;
+            let mut svc_capped = false;
+            for e in &svc_entries {
+                let Some(landing) = e.landing.as_deref() else { continue };
+                if Path::new(landing).exists() {
+                    continue; // 落点还在 = 还在用，不是残留
+                }
+                if !service_belongs_to_app(&e.name, e.landing.as_deref(), &app_tokens, &svc_dir_lc) {
+                    continue;
+                }
+                if svc_count >= SERVICE_RESIDUE_CAP {
+                    svc_capped = true;
+                    break;
+                }
+                // Type 1|2|4 = 内核/自动加载/文件系统驱动 → 驱动桶；其余（含 Type 读不到）→ 服务桶
+                let is_driver = matches!(e.svc_type, Some(1) | Some(2) | Some(4));
+                let bucket = if is_driver { "driver" } else { "service" };
+                let state = services_orphan::scm_state(&e.name);
+                findings.push(json!({
+                    "kind": "reg_key",
+                    "target": format!("HKLM\\{}\\{}", services_orphan::SERVICES_ROOT, e.name),
+                    "class": if is_driver { "dead_driver_landing" } else { "dead_service_landing" },
+                    "reason": "服务/驱动键还在，但 ImagePath 指向的二进制已不存在",
+                    "confidence": "medium", "risk": "medium", "defaultChecked": false,
+                    "bucket": bucket,
+                    "contribs": contribs(&[
+                        ("serviceKeyAlive", format!("{}\\{} 仍可打开", services_orphan::SERVICES_ROOT, e.name)),
+                        ("imagePathMissing", format!("ImagePath 指向的落点已不存在：{landing}")),
+                        ("belongsToApp", "服务名或落点与本应用的名称/安装目录相符".to_string()),
+                    ]),
+                    "details": json!({
+                        "serviceName": e.name,
+                        "imagePath": e.image_raw,
+                        "landing": landing,
+                        "landingExists": false,
+                        "type": services_orphan::type_label(e.svc_type),
+                        "start": services_orphan::start_label(e.start),
+                        "state": services_orphan::state_label(state),
+                    }),
+                }));
+                svc_count += 1;
+            }
+            if svc_capped {
+                notes.push(format!("服务/驱动残留候选已达上限 {SERVICE_RESIDUE_CAP} 条，其余省略"));
+            }
+        }
+        (findings, display_name, notes)
     })
     .await
-    .unwrap_or((Vec::new(), String::new()));
+    .unwrap_or((Vec::new(), String::new(), Vec::new()));
 
-    // 快照落槽：执行只认这份集合
-    let (finding_list, app_name) = findings;
+    // 快照落槽：执行只认这份集合（四类都进同一个 "app" 桶）
+    let (finding_list, app_name, notes) = findings;
     let label = window.label().to_string();
     residue_snapshot_put(&label, "app", finding_list.clone());
-    json!({ "success": true, "data": { "appName": app_name, "findings": finding_list } })
+    json!({ "success": true, "data": { "appName": app_name, "findings": finding_list, "notes": notes } })
 }
 
 // ==================== uninstall:residue-execute ====================
@@ -915,8 +1034,8 @@ pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
             //   · NotGoverned —— 不在管辖内（既有三类），按原口径继续；
             //   · Denied      —— Microsoft 树内且不是那六条根，或 Run 根下形态不合格；
             //   · Allowed     —— 六条根下的具名单值，还要过**现读复检**才放行。
-            // 形状判据与快照白名单（residue_deep::deep_executable_candidates）共用
-            // 同一个函数，§5.16/N6 禁的就是两处各写一份「看起来等价」的判据。
+            // 形状判据只此一处（`run_keys::reg_value_gate`），执行侧与扫描侧共用同一个函数，
+            // §5.16/N6 禁的就是两处各写一份「看起来等价」的判据。
             match super::run_keys::reg_value_gate(target) {
                 super::run_keys::RegValueGate::NotGoverned => {}
                 super::run_keys::RegValueGate::Denied(reason) => {

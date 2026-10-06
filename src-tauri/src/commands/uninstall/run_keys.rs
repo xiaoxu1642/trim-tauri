@@ -12,8 +12,8 @@
 //! 2. **三种「取不出目标」要给不同原因**：值里没有路径 / 形态解析不出来 /
 //!    目标在本机不存在 —— 混成一句「路径不存在」，用户就分不清「是我写错了」还是
 //!    「程序真的被卸了」。
-//! 3. **只读、不进执行快照**：`deep_executable_candidates` 的类白名单不含本类，
-//!    天然不写快照（有断言钉着）。
+//! 3. **只读、不进执行快照**：深扫入口（写快照那一层）已随「机-wide 扫描整条退役」删除，
+//!    本模块保留为内部代码；`reg_value_gate` / `recheck_run_value` 仍被 residue 执行链复用。
 //!
 //! 判据刻意保守：**只有拿不到可用目标（或目标已不存在）才报告**。目标还在的启动项
 //! 是「仍在用的程序的正常配置」，一条都不报 —— 与 IFEO 的 `image_present` 同口径。
@@ -252,7 +252,7 @@ pub(super) fn run_findings(raws: &[RunRaw], present: &dyn Fn(&str) -> bool, cap:
 /// 采集六条根（3 视图 × Run/RunOnce）。返回 (值, 是否有任一根读到)。
 ///
 /// 「读到过但一条候选都没有」与「一根都打不开」是两件事：前者说明本机启动项都健康，
-/// 后者只能说明没扫到（由 `residue_deep` 落成 note）。
+/// 后者只能说明没扫到（由调用方落成可见的 note）。
 pub(super) unsafe fn collect_run_raws() -> (Vec<RunRaw>, bool) {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegCloseKey};
     let mut out = Vec::new();
@@ -537,32 +537,6 @@ mod tests {
         let (items, notes) = run_findings(&raws, &|_: &str| false, 10);
         assert!(items.is_empty());
         assert!(notes.is_empty(), "空输入不得编出 note: {notes:?}");
-    }
-
-    /// R-1 第 3 条（R-2 反转，2026-10-07）：本组候选**可以**进执行快照了，但只能经
-    /// `deep_executable_candidates` 的 `runKeys` arm —— 且那个 arm 必须同时要求
-    /// 类为 `run_target_missing`（目标已不在本机，另两类是「判不出来」）**和**
-    /// `reg_value_gate` 判 `Allowed`（形状合格）。
-    ///
-    /// 原断言（「一次都不许出现 runKeys arm」）在开闸这一轮必须**反过来**，但不能只删掉：
-    /// 反向断言要更严 —— arm 恰好一处，两个条件缺一即红。判红实验：删掉 arm 里的
-    /// `reg_value_gate` 一段，本用例当场失败。
-    #[test]
-    fn run_candidates_enter_snapshot_only_through_the_gate() {
-        let code = include_str!("residue_deep.rs");
-        let production = code.split("#[cfg(test)]").next().unwrap_or("");
-        let arms: Vec<&str> = production.lines().filter(|l| l.contains(r#""runKeys" =>"#)).collect();
-        assert_eq!(arms.len(), 1, "runKeys 白名单 arm 必须恰好一处，实得 {}: {arms:?}", arms.len());
-        let at = production.find(r#""runKeys" =>"#).unwrap();
-        let win: String = production[at..].lines().take(6).collect::<Vec<_>>().join("\n");
-        assert!(
-            win.contains("run_target_missing"),
-            "runKeys arm 丢了类判据 —— `run_no_target`/`run_unparseable`（判不出来）也会被删: {win}"
-        );
-        assert!(
-            win.contains("reg_value_gate") && win.contains("Allowed"),
-            "runKeys arm 丢了形状判据 —— A1 让路退化成「六条根下什么值都能删」: {win}"
-        );
     }
 
     /// R-2 第 2/3 条：`reg_value_gate` 与 `tools/fixtures/residue-contract.json` 的

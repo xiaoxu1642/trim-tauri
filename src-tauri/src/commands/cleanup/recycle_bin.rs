@@ -70,7 +70,7 @@ mod shell_ffi {
 /// 查询回收站条目数与占用体积（所有盘合计）。
 ///
 /// **fail-closed**：Shell 调用失败就返回 `Err`，调用方不许拿一个编造的数字接着走
-/// —— 「查不到」与「是 0」是两件事（同 `residue_deep` 的 notes 口径）。
+/// —— 「查不到」与「是 0」是两件事（同残留扫描的 notes 口径）。
 #[cfg(windows)]
 fn query_recycle_stats() -> Result<(u64, u64), String> {
     use shell_ffi::{SHQueryRecycleBinW, ShQueryRbInfo};

@@ -108,12 +108,7 @@
     'uninstall:pending-revoke': 'uninstall_pending_revoke',
     'uninstall:residue-scan': 'uninstall_residue_scan',
     'uninstall:residue-execute': 'uninstall_residue_execute',
-    // v0.5.0 只读残留报告（七个扫描器聚合；只在残留扫描副窗里消费，无删除入口）
-    'uninstall:residue-deep-scan': 'uninstall_residue_deep_scan',
-    'uninstall:orphan-scan': 'uninstall_orphan_scan',
-    'uninstall:dead-scan': 'uninstall_dead_scan',
     'uninstall:dir-size': 'uninstall_dir_size',
-    'uninstall:orphan-ignore': 'uninstall_orphan_ignore',
     'uninstall:reg-backup-list': 'uninstall_reg_backup_list',
     'uninstall:reg-backup-restore': 'uninstall_reg_backup_restore',
     'uninstall:batch-list': 'uninstall_batch_list',
@@ -196,7 +191,7 @@
     // preview 窗口（2）
     'preview:open-window': 'preview_open_window',
     'preview:close-window': 'preview_close_window',
-    // memory（6）/ processManager 窗口（2）/ peripheral（5）
+    // memory（6）/ processManager 窗口（2）/ peripheral（3）
     'memory:info': 'memory_info',
     'memory:clean': 'memory_clean',
     'memory:stubborn-kill': 'memory_stubborn_kill',
@@ -205,8 +200,6 @@
     'memory:kill': 'memory_kill',
     'processManager:open-window': 'process_manager_open_window',
     'processManager:close-window': 'process_manager_close_window',
-    'peripheral:open-window': 'peripheral_open_window',
-    'peripheral:close-window': 'peripheral_close_window',
     // residue 窗口（2）—— v0.5.0 残留扫描副窗（用户裁决 4：扫描全在副窗，主窗只留入口）
     'residue:open-window': 'residue_open_window',
     'residue:close-window': 'residue_close_window',
@@ -488,11 +481,7 @@
       pendingRevoke: function (batchId) { return invokeChannel('uninstall:pending-revoke', { batchId: batchId }); },
       residueScan: function (appId) { return invokeChannel('uninstall:residue-scan', { appId: appId }); },
       residueExecute: function (appId, targets, backup) { return invokeChannel('uninstall:residue-execute', { appId: appId, targets: targets, backup: !!backup }); },
-      orphanScan: function () { return invokeChannel('uninstall:orphan-scan'); },
-      deadScan: function () { return invokeChannel('uninstall:dead-scan'); },
-      residueDeepScan: function () { return invokeChannel('uninstall:residue-deep-scan'); },
       dirSize: function (path) { return invokeChannel('uninstall:dir-size', { path: path }); },
-      orphanIgnore: function (appId, displayName) { return invokeChannel('uninstall:orphan-ignore', { appId: appId, displayName: displayName }); },
       regBackupList: function () { return invokeChannel('uninstall:reg-backup-list'); },
       regBackupRestore: function (file) { return invokeChannel('uninstall:reg-backup-restore', { file: file }); },
       batchList: function () { return invokeChannel('uninstall:batch-list'); },
@@ -663,8 +652,6 @@
     },
 
     peripheralWindow: {
-      openWindow: function () { return invokeChannel('peripheral:open-window'); },
-      closeWindow: function () { return invokeChannel('peripheral:close-window'); },
       query: function () { return invokeChannel('peripheral:query'); },
       apply: function (options) { return invokeChannel('peripheral:apply', { options: options }); },
       restoreBackup: function () { return invokeChannel('peripheral:restore-backup'); }
@@ -867,8 +854,8 @@
 
   function injectCaption() {
     if (document.querySelector('.tauri-caption')) return;
-    // 审查 M4：自绘 caption 只给主窗装。四个子窗（preview / models / processManager /
-    // peripheral）建窗时没关原生装饰，标题栏本来就由系统提供，这层叠加件在它们身上只是
+    // 审查 M4：自绘 caption 只给主窗装。三个子窗（preview / models / processManager）
+    // 建窗时没关原生装饰，标题栏本来就由系统提供，这层叠加件在它们身上只是
     // 一套「点了会去要 close/drag/resize 权限」的空壳 —— 正是它逼着 capabilities 给所有
     // 窗口发 allow-close。去掉叠加件，权限就能收回主窗一处（见 capabilities/default.json
     // 与 subwindows.json 的拆分）。

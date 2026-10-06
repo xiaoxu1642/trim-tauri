@@ -12,9 +12,6 @@ use std::path::{Path, PathBuf};
 use tauri::WebviewWindow;
 use super::helpers::*;
 use super::appx::*;
-use super::residue::*;
-use super::ownership::*;
-use super::dead::*;
 // ==================== uninstall:list ====================
 
 /// 安装器类型判定（方案 §4.2 installerKind）：
@@ -1000,7 +997,6 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
         let quiet_string = reg_sz(hk, "QuietUninstallString").unwrap_or_default();
         let install_location = reg_sz(hk, "InstallLocation").unwrap_or_default();
-        let publisher = reg_sz(hk, "Publisher").unwrap_or_default();
         let key_name = key_path.rsplit('\\').next().unwrap_or("").to_string();
         let (mut kind, product_code) = detect_installer(&key_name, &uninstall_string);
         let _ = RegCloseKey(hk);
@@ -1041,56 +1037,8 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 e
             })
         };
-        // C2 所有权事件：在启动卸载器**之前**记 pending —— 此刻还不知道卸载会不会成功，
-        // 所以只登记「用户打算卸它」这一事实。应用数据遗留判定要等复扫确认程序已消失、且原安装目录
-        // ENOENT，才升级为 historical（Q9 拍板：取消/失败不回滚成"已卸载"，交给稳定期回收）。
-        let mut owned_paths: Vec<String> = Vec::new();
-        if !install_location.trim().is_empty() {
-            owned_paths.push(install_location.trim().trim_end_matches('\\').to_string());
-        }
-        if let Some(parent) = Path::new(&original.0).parent() {
-            let p = parent.to_string_lossy().to_string();
-            if !p.is_empty() && !owned_paths.iter().any(|x| x.eq_ignore_ascii_case(&p)) {
-                owned_paths.push(p);
-            }
-        }
-        {
-            let mut own_doc = ownership::load();
-            let app_id = format!("{hive_name}|{key_path}");
-            let recorded = ownership::record_pending(
-                &mut own_doc,
-                &app_id,
-                &display_name,
-                &publisher,
-                install_location.trim(),
-                &owned_paths,
-                crate::engine::now_ms(),
-                norm_name,
-            );
-            // HiBit §9.1 那条基线：卸载**之前**取一次厂商顶层键集合。之后扫描时
-            // 「卸载前没有、现在有了」的键才可能是这程序自己写的配置键（卸载器不认的那批）。
-            // 一个根都没枚举到就**不写基线**：空集合不是"这台机器没有厂商键"，写成基线会让
-            // 下一轮差分把全部现存键算成新键。没有基线时那一类候选整段不出，目录候选不受影响。
-            let footprinted = if recorded {
-                let vendor = collect_vendor_keys();
-                if vendor.is_empty() {
-                    log::write_log(
-                        "warn",
-                        "卸载前厂商键基线未记录：三个 Software 根都枚举不到（不写空基线，否则下轮差分全是假候选）",
-                    );
-                    false
-                } else {
-                    ownership::set_footprint(&mut own_doc, &app_id, &vendor, crate::engine::now_ms())
-                }
-            } else {
-                false
-            };
-            if recorded || footprinted {
-                if let Err(e) = ownership::save(&own_doc) {
-                    log::write_log("warn", &format!("所有权事件落盘失败（不影响卸载）: {e}"));
-                }
-            }
-        }
+        // 原「卸载前写所有权档案 / 厂商键足迹基线」已随「机-wide 扫描整条退役」删除：
+        // 那是应用数据遗留链（uninstall:orphan-scan）的唯一写入点，档案已无读者。
         log::flush_sync(); // 危险操作前刷盘
         let mut fell_back = false;
         let mut exit_code = match shell_run_wait(&exe, &args) {

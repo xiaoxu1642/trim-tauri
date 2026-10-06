@@ -1,6 +1,10 @@
-//! peripheral 域（D 批）：外设优化 5 条通道
+//! peripheral 域（D 批）：外设优化 3 条通道
 //!
 //! 对照 Electron main.js 6891-7040 + src/scripts-powershell/peripheral-scripts.js。
+//!
+//! 形态（2026-10-07）：外设优化从**独立子窗**改为**应用内自绘弹窗**（`src/scripts/peripheral.js`
+//! 走主窗 `window.modal.create`），窗口 label `peripheral` 随之退役。三条通道的唯一调用方
+//! 变成主窗，档位因此一律收紧为主窗档（`guard::MAIN`，原来放行全部应用窗口）。
 //!
 //! 安全/语义（PE-3/PE-4/N1/N2/PE-5 全部保留）：
 //! - 应用值白名单以主进程为唯一权威（win32/mouse 两组固定取值集合），
@@ -15,15 +19,9 @@
 //!   键不再受理 —— 白名单里它们随组件一并删除，旧渲染层（若有残留调用）必被整批拒绝。
 
 use serde_json::{json, Value};
-use tauri::webview::PageLoadEvent;
-use tauri::window::Color;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::WebviewWindow;
 
 use crate::engine::{guard, log, native, paths};
-
-const LABEL: &str = "peripheral";
-const PAGE: &str = "peripheral-window.html";
-const TITLE: &str = "外设优化";
 
 /// PE-3：主进程唯一权威合法值集合
 const ALLOWED_WIN32: &[i64] = &[2, 26, 36, 38, 40];
@@ -37,65 +35,12 @@ fn allowed_for(key: &str) -> Option<&'static [i64]> {
     }
 }
 
-/// peripheral:open-window —— 单例子窗口（已开则聚焦）
-#[tauri::command]
-pub async fn peripheral_open_window<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    window: WebviewWindow<R>,
-) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
-    if let Some(existing) = app.get_webview_window(LABEL) {
-        crate::focus_window(&existing);
-        return Ok(json!({ "success": true, "alreadyOpen": true }));
-    }
-    let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(PAGE.into()))
-        .title(TITLE)
-        // 2026-10-03：760→880 宽、560→620 高。用户在优化中心点「更多调优项」进来时
-        // 期待「一屏能横向对比几档数值」，原来的 860×760 一屏只放得下 6~7 张卡。
-        // 加宽让卡片的描述行不必折成碎字。
-        .inner_size(880.0, 780.0)
-        .min_inner_size(720.0, 560.0)
-        .background_color(Color(243, 243, 243, 255))
-        .center()
-        .visible(false)
-        .on_page_load(|win, payload| {
-            if payload.event() == PageLoadEvent::Finished {
-                crate::activate_window(&win);
-            }
-        });
-    // 审查 K4 复盘：子窗也必须透传浏览器参数，否则带调试端口启动时静默建不出窗
-    let builder = crate::with_browser_args(builder);
-    match builder.parent(&window) {
-        Ok(b) => match b.build() {
-            Ok(_) => Ok(json!({ "success": true })),
-            Err(e) => {
-                log::write_log("error", &format!("创建「外设优化」窗口失败: {e}"));
-                Ok(json!({ "success": false, "message": format!("创建「外设优化」窗口失败: {e}") }))
-            }
-        },
-        Err(e) => {
-            log::write_log("error", &format!("「外设优化」窗口挂靠主窗口失败: {e}"));
-            Ok(json!({ "success": false, "message": format!("「外设优化」窗口挂靠主窗口失败: {e}") }))
-        }
-    }
-}
-
-/// peripheral:close-window —— 关闭发起调用的窗口
-#[tauri::command]
-pub fn peripheral_close_window<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
-    if let Err(e) = window.close() {
-        log::write_log("warn", &format!("关闭「外设优化」窗口失败: {e}"));
-    }
-    Ok(json!({ "success": true }))
-}
-
 /// peripheral:query —— 读两组当前值
 ///
 /// S3：纯 Rust 原生，无 PS 回退。
 #[tauri::command]
 pub async fn peripheral_query<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     match tauri::async_runtime::spawn_blocking(native::peripheral_query).await {
         Ok(Ok(data)) => Ok(json!({ "success": true, "data": data, "engine": "rust" })),
         Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生读取失败: {e}") })),
@@ -111,16 +56,14 @@ pub struct ApplyOptions {
 
 /// peripheral:apply —— 白名单校验后写 HKLM（成功修剪备份）
 ///
-/// 审查 M3：档位是 `APP_WINDOWS` 而非 `MAIN` —— 本通道的**唯一**调用方就是外设子窗
-/// （`peripheral-window.js`），按 MAIN 校验等于把它自己锁死（100% 返回「来源校验失败」）。
-/// 上游 Electron 侧按 `file://` 来源判定（main.js:105-118 isTrustedRenderer），子窗本就可调，
-/// 故放开到全集不是降标准，而是与上游同等级；真正的闸门是下面的 `is_admin()` + 取值白名单。
+/// 档位（2026-10-07）：外设优化改应用内弹窗后，唯一调用方是主窗，故用 `guard::MAIN`。
+/// 真正的闸门始终是下面的 `is_admin()` + 取值白名单（PE-3/PE-4）。
 #[tauri::command]
 pub async fn peripheral_apply<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     options: Option<ApplyOptions>,
 ) -> Result<Value, String> {
-    guard::guard(&window, guard::APP_WINDOWS)?;
+    guard::guard(&window, guard::MAIN)?;
     if !crate::engine::sysinfo::is_admin() {
         return Ok(json!({
             "success": false, "needAdmin": true,
@@ -239,14 +182,14 @@ fn backup_batch_of(name: &str) -> Option<&str> {
 
 /// peripheral:restore-backup —— 导入**最新一批**备份 .reg（v2-M12 起同批可能含多个分片）
 ///
-/// 档位同 `peripheral_apply`（审查 M3）：唯一调用方是外设子窗，真正的闸门是 `is_admin()`
+/// 档位同 `peripheral_apply`（2026-10-07）：唯一调用方是主窗弹窗，真正的闸门是 `is_admin()`
 /// 与「文件名必须是 `backup_<15 位时间戳>[_<数字分片号>].reg` 且只在本应用备份目录内取件」
 /// 的自产文件约束，不含任意路径入参。
 #[tauri::command]
 pub async fn peripheral_restore_backup<R: tauri::Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<Value, String> {
-    guard::guard(&window, guard::APP_WINDOWS)?;
+    guard::guard(&window, guard::MAIN)?;
     if !crate::engine::sysinfo::is_admin() {
         return Ok(json!({
             "success": false, "needAdmin": true,

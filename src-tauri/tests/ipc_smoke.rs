@@ -251,17 +251,25 @@ fn netcheck_collect_shape() {
 // 这些用例只打快速组，不建真实窗口、不跑 PowerShell。
 // helper（window_with_label / invoke_text / assert_guard_passed）见 tests/common/mod.rs。
 
-/// 外设子窗必须能调 `peripheral_apply`（非管理员时回 needAdmin，而不是被拒杀）。
-/// 传空 options → 三组都归一为 -1 → 命令在写注册表之前就返回「没有需要应用的设置」，
+/// 外设优化改应用内弹窗（2026-10-07）后的档位：**主窗**可调 `peripheral_apply`，
+/// 旧子窗 label `peripheral` 调则被来源校验拒杀（防残留/被注入的窗口写 HKLM）。
+/// 传空 options → 两组都归一为 -1 → 命令在写注册表之前就返回「没有需要应用的设置」，
 /// 因此本用例在任何权限等级下都不会改动系统。
 #[test]
-fn peripheral_subwindow_can_call_apply() {
-    let w = window_with_label("peripheral");
+fn peripheral_apply_is_main_only() {
+    let w = main_window();
     let text = invoke_text(&w, "peripheral_apply", json!({ "options": {} }));
     assert_guard_passed(
         &text,
-        "peripheral_apply 应允许外设窗调用",
+        "peripheral_apply 应允许主窗调用",
         &["needAdmin", "没有需要应用"],
+    );
+
+    let sub = window_with_label("peripheral");
+    let text = invoke_text(&sub, "peripheral_apply", json!({ "options": {} }));
+    assert!(
+        text.contains("IPC 来源校验失败"),
+        "外设优化已退役子窗档，peripheral label 调 peripheral_apply 必须被拒，回执 {text}"
     );
 }
 

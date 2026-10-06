@@ -1,7 +1,14 @@
-// peripheral-window.js - 外设优化（更多调优项）窗口
+// peripheral.js - 外设优化（应用内弹窗）
 // 两组注册表调优：Win32PrioritySeparation / MouseDataQueueSize（均为卡片单选）。
-// 键盘队列深度与端口路由已收编进「优化中心」的 tf_keyboard 项（0.6.6 起本窗不再提供）。
+// 键盘队列深度与端口路由已收编进「优化中心」的 tf_keyboard 项（0.6.6 起本模块不再提供）。
 // 卡片单选 → 「应用到注册表」写入；「恢复默认」写回 Windows 默认值。
+//
+// 形态：走主窗 index.html 已有的 window.modal.create 三段式骨架（usage-backdrop >
+// usage-modal）；此前的独立子窗连同自绘标题栏（子窗原生标题栏 + 自绘顶栏叠加出的
+// 一条黑带）一并退役。
+//
+// 加载方式：随 optimizer 页按需注入（app.js 的 PAGE_SCRIPTS），注入时 DOMContentLoaded
+// 早已发生 —— 故不在顶层注册任何启动钩子，全部初始化收在 open() 里做。
 (function () {
   'use strict';
 
@@ -31,7 +38,7 @@
     }
   };
 
-  // 「数值解释」面板的内容：每组一段，讲清这个数在系统里到底控制什么。
+  // 「数值解释」子弹窗的内容：每组一段，讲清这个数在系统里到底控制什么。
   // 为什么要有它（用户 2026-10-03 提的）：这些是十进制魔法数，光看「越小延迟越低」
   // 用户没法判断自己机器该选哪个，也不敢改。给出**它在系统里的作用 + 改动的代价**，
   // 才算把选择权真正交给用户。
@@ -65,29 +72,53 @@
   /** 一次「应用推荐设置」要写入的各组档位。 */
   const RECOMMENDED = { win32: 38, mouse: 18 };
 
+  // 弹窗骨架的静态内容（编译期常量，无注入面；卡片本体在 renderGroup 里按 ds.esc 渲染）
+  const BODY_HTML = `
+    <section class="peri-section">
+      <div class="peri-section-head">
+        <h2 class="peri-section-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M11 2h2v6h-2V2zm-1 6h4a4 4 0 0 1 4 4v1H6v-1a4 4 0 0 1 4-4zm-4 7h6v7h-2a4 4 0 0 1-4-4v-3zm8 0h6v3a4 4 0 0 1-4 4h-2v-7z"/></svg>
+          处理器调度优化
+          <button type="button" class="peri-explain-btn" data-explain="win32" data-tip="这个数在系统里控制什么">数值解释</button>
+        </h2>
+        <p class="peri-section-sub">按需设置 Win32PrioritySeparation 的十进制数值（处理器优先级，越大越偏向前台响应）</p>
+      </div>
+      <div class="peri-cards" data-group="win32"></div>
+    </section>
+
+    <section class="peri-section">
+      <div class="peri-section-head">
+        <h2 class="peri-section-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5z"/></svg>
+          鼠标队列优化
+          <button type="button" class="peri-explain-btn" data-explain="mouse" data-tip="这个数在系统里控制什么">数值解释</button>
+        </h2>
+        <p class="peri-section-sub">按需设置 MouseDataQueueSize 的十进制数值（驱动事件缓冲，默认 100，越小延迟越低，过小可能丢事件）</p>
+      </div>
+      <div class="peri-cards" data-group="mouse"></div>
+    </section>
+
+    <p class="peri-note" id="periNote">鼠标队列大小修改后需重启电脑生效；当前值以注册表实时读取为准。</p>`;
+
+  const FOOTER_HTML = `
+    <button class="btn btn-primary" id="btnPeriApply">应用到注册表</button>
+    <button class="btn btn-secondary" id="btnPeriRecommended" data-tip="按推荐档位一次性预选上面两组，再点「应用到注册表」才真正写入">应用推荐设置</button>
+    <button class="btn btn-secondary" id="btnPeriRestore" data-tip="导入最近一份备份，回到你修改前的注册表值">还原修改前的值</button>
+    <button class="btn btn-secondary" id="btnPeriReset" data-tip="写回 Windows 出厂默认值（非你修改前的值）">恢复 Windows 默认</button>`;
+
   // 当前选中值（key → value；null = 未选择，应用时跳过该组）
   const selected = { win32: null, mouse: null };
 
-  // 审查 PE-1（2026-09-15）：独立窗口未加载 app.js/modal.js（见 peripheral-window.html 脚本清单），
-  // 原实现 window.app?.toast 与 window.modal?.toast 两条分支都不可能命中，且 window.modal 本无 toast 方法
-  // → 8 处调用全部静默，失败路径（未提权写 HKLM）与输入校验守卫完全没有反馈。
-  // NEW-6（L3 2026-10-01）收敛：堆叠形态实现移入 scripts/sub-toast.js（stack 形态，
-  // 宿主容器 id 统一 subToastHost），此处仅薄委托；行为与原实现一致。
-  function toast(type, msg) { window.subToast?.stack(type, msg); }
+  // 主弹窗与「数值解释」子弹窗的控制器句柄：关闭前一个再开新的，避免同 id 节点被
+  // 直接 remove 后遗留未释放的 Esc 监听与焦点陷阱。
+  let mainCtrl = null;
+  let explainCtrl = null;
 
-  /**
-   * 需要管理员权限时的统一出口（审查 M3）。
-   * 本窗**不能**调 elevate:request：AGENTS.md §3 的硬红线是「提权入口只认主窗口 label」，
-   * 子窗调用必被来源校验拒杀 —— 旧代码先 confirm 再提权，用户点了必然得到一条失败提示。
-   * 因此这里只把用户指回主窗口，不在子窗里碰提权通道。
-   */
-  function guideToMainElevation(action) {
-    toast('warning', `${action}需要管理员权限：请回到 Trim 主窗口点「以管理员身份运行」重启应用后再试。本次操作已取消。`);
-  }
+  function toast(type, msg) { window.app?.toast?.(type, msg); }
 
   // ==================== 渲染 ====================
-  function renderGroup(key) {
-    const wrap = document.querySelector(`.peri-cards[data-group="${key}"]`);
+  function renderGroup(root, key) {
+    const wrap = root.querySelector(`.peri-cards[data-group="${key}"]`);
     if (!wrap) return;
     const def = GROUPS[key];
     wrap.innerHTML = def.options.map(opt => {
@@ -108,10 +139,10 @@
     }).join('');
   }
 
-  function renderAll() { Object.keys(GROUPS).forEach(renderGroup); }
+  function renderAll(root) { Object.keys(GROUPS).forEach(key => renderGroup(root, key)); }
 
-  function setNote(text) {
-    const note = document.getElementById('periNote');
+  function setNote(root, text) {
+    const note = root.querySelector('#periNote');
     if (note && text) note.textContent = text;
   }
 
@@ -124,35 +155,68 @@
     });
   }
 
-  async function loadCurrent() {
+  async function loadCurrent(root) {
     if (!window.api?.peripheralWindow?.query) return;
     try {
       const resp = await window.api.peripheralWindow.query();
       if (resp && resp.success) {
         applyCurrentToSelection(resp.data);
-        renderAll();
+        renderAll(root);
         const d = resp.data || {};
-        setNote(`当前注册表值：Win32PrioritySeparation = ${d.win32 ?? '未知'} · MouseDataQueueSize = ${d.mouse ?? '未知'}。鼠标队列大小修改后需重启电脑生效。`);
+        setNote(root, `当前注册表值：Win32PrioritySeparation = ${d.win32 ?? '未知'} · MouseDataQueueSize = ${d.mouse ?? '未知'}。鼠标队列大小修改后需重启电脑生效。`);
       }
     } catch (e) { /* 读取失败保持未选状态 */ }
   }
 
+  // ==================== 提权 ====================
+  // 主窗可调 elevate:request（AGENTS §3：提权入口只认主窗口 label），故这里直接用
+  // window.app.requestElevation；提权成功会以管理员身份重启应用，本次操作不续跑。
+  async function elevateFor(action) {
+    if (!window.app?.requestElevation) { toast('error', `${action}需要管理员权限，请重启应用并以管理员身份运行`); return; }
+    const ok = await window.app.requestElevation(`${action}需要管理员权限才能修改系统注册表。`);
+    if (!ok) toast('info', '已取消提权，本次操作未执行');
+  }
+
+  // ==================== 数值解释子弹窗 ====================
+  function openExplain(groupKey) {
+    const data = EXPLAIN[groupKey];
+    if (!data || !window.modal?.create) return;
+    if (explainCtrl) { explainCtrl.close(); explainCtrl = null; }
+    const esc = (t) => window.ds.esc(String(t));
+    explainCtrl = window.modal.create({
+      id: 'peripheralExplainModal',
+      title: data.title,
+      bodyHtml: `
+        <p class="peri-explain-intro">${esc(data.intro)}</p>
+        <dl class="peri-explain-list">
+          ${data.rows.map(([k, v]) => `
+            <div class="peri-explain-row">
+              <dt>${esc(k)}</dt>
+              <dd>${esc(v)}</dd>
+            </div>`).join('')}
+        </dl>
+        <p class="peri-explain-caveat">${esc(data.caveat)}</p>`,
+      onClose() { explainCtrl = null; }
+    });
+  }
+
+  function closeExplain() {
+    if (explainCtrl) { explainCtrl.close(); explainCtrl = null; }
+  }
+
   // ==================== 交互 ====================
-  function bindEvents() {
-    // 卡片单选（事件委托）
-    document.querySelector('.peri-body').addEventListener('click', (e) => {
-      // 「数值解释」与「应用推荐设置」是独立按钮，点了不能顺带选卡片
+  function bindEvents(ctrl) {
+    // 卡片单选 / 「数值解释」/ 「应用推荐设置」统一走 backdrop 事件委托
+    ctrl.backdrop.addEventListener('click', (e) => {
       const explainBtn = e.target.closest('[data-explain]');
       if (explainBtn) {
-        e.stopPropagation();
         openExplain(explainBtn.dataset.explain);
         return;
       }
       const recBtn = e.target.closest('#btnPeriRecommended');
       if (recBtn) {
-        e.stopPropagation();
         Object.keys(RECOMMENDED).forEach(k => { selected[k] = RECOMMENDED[k]; });
-        renderAll();
+        renderAll(ctrl.backdrop);
         toast('info', '已按推荐档位预选两组（尚未写入，点「应用到注册表」生效）');
         return;
       }
@@ -162,21 +226,10 @@
       const value = Number(card.dataset.value);
       if (!GROUPS[key]) return;
       selected[key] = value;
-      renderGroup(key);
+      renderGroup(ctrl.backdrop, key);
     });
 
-    document.getElementById('btnPeriBack')?.addEventListener('click', close);
-    document.getElementById('btnPeriClose')?.addEventListener('click', close);
-    document.getElementById('btnPeriExplainClose')?.addEventListener('click', closeExplain);
-    // 解释面板点遮罩关闭：点击目标必须**就是**遮罩本身，点面板内部不关
-    document.getElementById('periExplain')?.addEventListener('click', (e) => {
-      if (e.target === e.currentTarget) closeExplain();
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeExplain();
-    });
-
-    document.getElementById('btnPeriApply')?.addEventListener('click', async () => {
+    ctrl.footer.querySelector('#btnPeriApply')?.addEventListener('click', async (e) => {
       if (!window.api?.peripheralWindow?.apply) { toast('info', '请在 Trim 应用内使用该功能'); return; }
       const payload = {};
       Object.keys(GROUPS).forEach(key => { payload[key] = selected[key] ?? -1; });
@@ -184,21 +237,18 @@
         toast('info', '请先为至少一组调优选择一个数值');
         return;
       }
-      const btn = document.getElementById('btnPeriApply');
+      const btn = e.currentTarget;
       btn.disabled = true;
       try {
         const resp = await window.api.peripheralWindow.apply(payload);
-        // 复核 N3（提权半闭环，2026-09-16）：服务端 PE-4 门禁回传 needAdmin。
-        // 审查 M3：本窗**不得**直接调 elevate:request —— AGENTS.md §3 是硬红线
-        // 「提权入口只认主窗口 label」，子窗调用必被来源校验拒杀（此前正是因此死路一条：
-        // 界面引导用户点提权，点了必然失败）。提权请回主窗口做，这里只负责把话说明白。
+        // 后端 PE-4 门禁回传 needAdmin：主窗直接发起提权（提权成功会以管理员重启）。
         if (resp && resp.needAdmin) {
-          guideToMainElevation('应用这些调优（写入 HKLM 注册表）');
+          await elevateFor('应用这些调优（写入 HKLM 注册表）');
           return;
         }
         if (resp && resp.success) {
           toast('success', '已应用到注册表' + (payload.mouse !== -1 ? '，鼠标队列大小重启电脑后生效' : ''));
-          await loadCurrent();
+          await loadCurrent(ctrl.backdrop);
         } else {
           toast('error', resp?.message || '应用失败，可能需要以管理员身份运行 Trim');
         }
@@ -211,19 +261,19 @@
 
     // 复核 N1/PE-5（2026-09-16）：新增「还原修改前的值」——读最新一份备份 .reg 导入，
     // 与「恢复 Windows 默认」写出厂默认值是两个语义；用户在 Trim 之前的原始定制由此找回
-    document.getElementById('btnPeriRestore')?.addEventListener('click', async () => {
+    ctrl.footer.querySelector('#btnPeriRestore')?.addEventListener('click', async (e) => {
       if (!window.api?.peripheralWindow?.restoreBackup) { toast('info', '请在 Trim 应用内使用该功能'); return; }
-      const btn = document.getElementById('btnPeriRestore');
+      const btn = e.currentTarget;
       btn.disabled = true;
       try {
         const resp = await window.api.peripheralWindow.restoreBackup();
         if (resp && resp.needAdmin) {
-          guideToMainElevation('还原修改前的值（导入备份 .reg）');
+          await elevateFor('还原修改前的值（导入备份 .reg）');
           return;
         }
         if (resp && resp.success) {
           toast('success', '已导入最近一份备份，还原修改前的注册表值');
-          await loadCurrent();
+          await loadCurrent(ctrl.backdrop);
         } else {
           toast('warning', resp?.message || '还原失败');
         }
@@ -234,25 +284,24 @@
       }
     });
 
-    document.getElementById('btnPeriReset')?.addEventListener('click', async () => {
+    ctrl.footer.querySelector('#btnPeriReset')?.addEventListener('click', async (e) => {
       if (!window.api?.peripheralWindow?.apply) { toast('info', '请在 Trim 应用内使用该功能'); return; }
-      const btn = document.getElementById('btnPeriReset');
+      const btn = e.currentTarget;
       btn.disabled = true;
       try {
         const resp = await window.api.peripheralWindow.apply({
           win32: GROUPS.win32.defaultValue,
           mouse: GROUPS.mouse.defaultValue
         });
-        // 复核 N3：提权半闭环收口（同「应用到注册表」）
         if (resp && resp.needAdmin) {
-          guideToMainElevation('恢复默认值（写入 HKLM 注册表）');
+          await elevateFor('恢复默认值（写入 HKLM 注册表）');
           return;
         }
         if (resp && resp.success) {
           // 复核 N1：如文案说明这是 Windows 出厂默认值，不是「你修改前的值」——
           // 想回到修改前的状态请用「还原修改前的值」按钮
           toast('success', '已恢复 Windows 默认值（注意：这不是你修改前的值，鼠标队列大小重启电脑后生效）');
-          await loadCurrent();
+          await loadCurrent(ctrl.backdrop);
         } else {
           toast('error', resp?.message || '恢复失败，可能需要以管理员身份运行 Trim');
         }
@@ -264,63 +313,27 @@
     });
   }
 
-  function close() {
-    // 审查 v2-M22（v1 L13 未修）：关窗是浮动 Promise，子窗此前零兜底 —— 失败即「点了没反应」。
-    if (window.api?.peripheralWindow?.closeWindow) {
-      window.api.peripheralWindow.closeWindow().catch((e) => toast('error', '关闭窗口失败：' + ((e && e.message) || e)));
-    } else {
-      window.close();
-    }
+  // ==================== 打开 ====================
+  function open() {
+    if (!window.modal?.create) { toast('error', '弹窗组件未就绪，请稍后重试'); return; }
+    if (mainCtrl) { mainCtrl.close(); mainCtrl = null; }
+    selected.win32 = null;
+    selected.mouse = null;
+    mainCtrl = window.modal.create({
+      id: 'peripheralModal',
+      title: '外设优化',
+      bodyHtml: BODY_HTML,
+      footerHtml: FOOTER_HTML,
+      // 「数值解释」是叠在主弹窗之上的第二层弹窗，两层都注册了 document 级 Esc 监听。
+      // 不拦一下，按一次 Esc 会把主弹窗一起关掉（Esc 先落到先注册的主窗处理器）。
+      // 这里让主弹窗在子弹窗开着时拒绝关闭请求，Esc 只会关掉最上层那层。
+      onRequestClose() { return !explainCtrl; },
+      onClose() { closeExplain(); mainCtrl = null; }
+    });
+    renderAll(mainCtrl.backdrop);
+    bindEvents(mainCtrl);
+    loadCurrent(mainCtrl.backdrop);
   }
 
-  // ==================== 数值解释面板 ====================
-  //
-  // 为什么是自绘而不是 modal.js：外设子窗**不加载** modal.js（见 peripheral-window.html
-  // 脚本清单，子窗只挂 ds.js 做转义），而这些子窗刻意不引 app.js 那套大依赖。
-  // 这里就地起一个 `hidden` 面板，全部文本走 window.ds.esc（AGENTS §2 硬红线）。
-  //
-  // 卡片声明了 aria-modal="true"（审查 M-10），模态行为由 ds.focusTrap 兑现：
-  // Tab 圈闭在卡片内、关闭时焦点归还触发按钮。trap 必须存模块级引用 —— 面板开着时
-  // 再点另一组「数值解释」会二次 open，不先 release 旧 trap 会让两套 focusin/keydown
-  // 并存，Tab 循环紊乱。三条关闭路径（关闭钮/遮罩点击/Esc）都收口到 closeExplain。
-  let explainTrap = null;
-
-  function openExplain(groupKey) {
-    const panel = document.getElementById('periExplain');
-    const body = document.getElementById('periExplainBody');
-    const data = EXPLAIN[groupKey];
-    if (!panel || !body || !data) return;
-    if (explainTrap) { explainTrap.release(); explainTrap = null; }
-    const esc = (t) => window.ds.esc(String(t));
-    body.innerHTML = `
-      <h3 class="peri-explain-title">${esc(data.title)}</h3>
-      <p class="peri-explain-intro">${esc(data.intro)}</p>
-      <dl class="peri-explain-list">
-        ${data.rows.map(([k, v]) => `
-          <div class="peri-explain-row">
-            <dt>${esc(k)}</dt>
-            <dd>${esc(v)}</dd>
-          </div>`).join('')}
-      </dl>
-      <p class="peri-explain-caveat">${esc(data.caveat)}</p>`;
-    panel.hidden = false;
-    explainTrap = window.ds?.focusTrap?.(
-      panel.querySelector('.peri-explain-card'),
-      { initialFocus: '#btnPeriExplainClose' }
-    ) || null;
-  }
-
-  function closeExplain() {
-    if (explainTrap) { explainTrap.release(); explainTrap = null; }
-    const panel = document.getElementById('periExplain');
-    if (panel) panel.hidden = true;
-  }
-
-  function init() {
-    renderAll();
-    bindEvents();
-    loadCurrent();
-  }
-
-  document.addEventListener('DOMContentLoaded', init);
+  window.peripheral = { open };
 })();
