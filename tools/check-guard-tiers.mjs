@@ -46,10 +46,11 @@ const UPDATE = process.argv.includes('--update')
   ? (process.argv[process.argv.indexOf('--update') + 1] === 'readonly' ? 'readonly' : true)
   : false;
 
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkRs } from './lib/fs-walk.mjs';
 
 const CMD_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'commands');
 
@@ -161,18 +162,8 @@ const MUST_MAIN = [
 // ---- 枚举所有 #[tauri::command] 及其档位 ----
 // v3 D2：命令文件会再往下沉目录（commands/uninstall/*.rs），这里必须递归扫——
 // 只扫一层等于「搬进子目录的命令自动退出档位台账」，那是假绿不是收敛。
-const relFiles = [];
-(() => {
-  const walk = (dir, prefix = '') => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) walk(p, `${prefix}${e.name}/`);
-      else if (e.name.endsWith('.rs')) relFiles.push(prefix + e.name);
-    }
-  };
-  walk(CMD_DIR);
-})();
-const files = relFiles;
+// 相对 CMD_DIR 的正斜杠路径（下方按 join(CMD_DIR, f) 回拼绝对路径读文件）。
+const files = walkRs(CMD_DIR).map((p) => relative(CMD_DIR, p).replace(/\\/g, '/'));
 /** @type {Map<string, {file:string, tier:string|null, line:number}>} */
 const tiers = new Map();
 

@@ -17,10 +17,11 @@
 //   --verbose  逐条打印每个资源的命中处
 // 退出码：0 = 全部资源都有引用（或在白名单里登记了理由）；1 = 有零引用资源
 
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, statSync, existsSync } from 'node:fs';
 import { join, basename, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkFiles } from './lib/fs-walk.mjs';
 
 const VERBOSE = process.argv.includes('--verbose');
 const DIST = join(REPO_ROOT, 'src');            // = tauri.conf.json 的 build.frontendDist
@@ -44,24 +45,14 @@ const CORPUS_FILES = [
   join(REPO_ROOT, 'src-tauri', 'Cargo.toml'),   // bundle/resources 之类的清单也可能点名
 ];
 
-function walk(dir, out = []) {
-  if (!existsSync(dir)) return out;
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) walk(p, out);
-    else out.push(p);
-  }
-  return out;
-}
-
 // 语料只收文本件（图片/字体当语料既慢又会误命中字节序列）
 const isCorpusText = (f) => /\.(?:js|mjs|cjs|css|html|json|toml|rs|md|txt)$/i.test(f);
 const corpus = [];
-for (const d of CORPUS_DIRS) for (const f of walk(d)) if (isCorpusText(f)) corpus.push(f);
+for (const d of CORPUS_DIRS) for (const f of walkFiles(d)) if (isCorpusText(f)) corpus.push(f);
 for (const f of CORPUS_FILES) if (existsSync(f) && isCorpusText(f)) corpus.push(f);
 
 const texts = corpus.map((f) => [f, readFileSync(f, 'utf8')]);
-const assets = walk(DIST);
+const assets = walkFiles(DIST);
 
 let unused = 0;
 let unusedBytes = 0;
@@ -106,7 +97,7 @@ const ICONS_DIR = join(REPO_ROOT, 'src-tauri', 'icons');
 if (existsSync(ICONS_DIR)) {
   const conf = JSON.parse(readFileSync(join(REPO_ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'));
   const bundled = new Set((conf.bundle?.icon ?? []).map((s) => s.replace(/^icons\//, '')));
-  const icons = walk(ICONS_DIR);
+  const icons = walkFiles(ICONS_DIR);
   const orphan = [];
   for (const f of icons) {
     const name = basename(f);

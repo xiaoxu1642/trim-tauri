@@ -25,6 +25,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { walkRs } from './lib/fs-walk.mjs';
+
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri');
 let fail = 0;
 const check = (ok, label, detail = '') => {
@@ -140,15 +142,7 @@ const commands = [...new Set(handlerBlk[1].split(',').map((s) => s.trim().split(
 console.log(`=== 删除出口枚举门禁 ===\n命令清单（generate_handler! 派生）：${commands.length} 条\n`);
 
 // ---- 2. 函数体定位（命令名 → {file, body}） ----
-const srcFiles = [];
-const walk = (dir) => {
-  for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
-    const p = path.join(dir, f.name);
-    if (f.isDirectory()) walk(p);
-    else if (f.name.endsWith('.rs')) srcFiles.push(p);
-  }
-};
-walk(path.join(ROOT, 'src'));
+const srcFiles = walkRs(path.join(ROOT, 'src'));
 
 // v2-L4P-31（E-6 同族）：剥离 Rust 注释与字符串字面量后再做标记匹配。实测教训：
 // appearance_bg_delete 的说明注释里写了 API 名，`body.includes()` 被注释文本洗白——

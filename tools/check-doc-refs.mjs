@@ -11,9 +11,11 @@
 // 口径：只检查「看起来像本仓路径」的引用（docs/... 或 `docs\xxx`），排除 URL、
 // 代码目录（src/、src-tauri/、tools/ 等由既有门禁管）、Cargo/registry 路径。
 'use strict';
-import { readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, relative, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { walkFiles } from './lib/fs-walk.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src-tauri', 'src');
@@ -36,15 +38,11 @@ const DOCS_DIR = join(ROOT, 'docs');
 const AGENTS_MD = join(ROOT, 'AGENTS.md');
 const docsPresent = existsSync(DOCS_DIR);
 const agentsPresent = existsSync(AGENTS_MD);
-function walkDocs(dir, out = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walkDocs(p, out);
-    else out.push(relative(ROOT, p).replace(/\\/g, '/').toLowerCase());
-  }
-  return out;
-}
-const docsFiles = new Set(docsPresent ? walkDocs(DOCS_DIR) : []);
+const docsFiles = new Set(
+  docsPresent
+    ? walkFiles(DOCS_DIR).map((p) => relative(ROOT, p).replace(/\\/g, '/').toLowerCase())
+    : [],
+);
 if (!docsPresent) console.log('⚠ docs/ 不在本机（未跟踪的本机资料区）：docs 引用存在性**未校验**');
 if (!agentsPresent) console.log('⚠ AGENTS.md 不在本机（未跟踪）：1b 未执行');
 
@@ -55,12 +53,13 @@ const refHits = [];
 const scanRoots = [SRC, FRONTEND];
 if (docsPresent) {
   for (const base of scanRoots) {
-    for (const f of walkDocs(base)) {
-      const text = readFileSync(join(ROOT, f), 'utf8');
+    for (const fAbs of walkFiles(base)) {
+      const text = readFileSync(fAbs, 'utf8');
+      const rel = relative(ROOT, fAbs).replace(/\\/g, '/');
       for (const m of text.matchAll(REF_RE)) {
         const norm = normalize(m[1].replace(/\\/g, '/')).replace(/\\/g, '/').toLowerCase();
         if (!docsFiles.has(norm)) {
-          refHits.push(`${relative(ROOT, f).replace(/\\/g, '/')}: ${m[1].trim()}`);
+          refHits.push(`${rel}: ${m[1].trim()}`);
         }
       }
     }
@@ -88,12 +87,12 @@ if (agentsPresent && docsPresent) {
 // 2. 源码注释禁止第二真源私钥路径（签发流程唯一真源 = AGENTS §7.4）
 const KEY_TOKENS = ['trim-updater.key', '~/.tauri-signer', 'TAURI_SIGNING_PRIVATE_KEY'];
 const keyHits = [];
-for (const f of walkDocs(SRC)) {
-  const lines = readFileSync(join(ROOT, f), 'utf8').split(/\r?\n/);
+for (const fAbs of walkFiles(SRC)) {
+  const lines = readFileSync(fAbs, 'utf8').split(/\r?\n/);
   lines.forEach((line, i) => {
     if (!line.trimStart().startsWith('//') && !line.trimStart().startsWith('//!')) return;
     for (const t of KEY_TOKENS) {
-      if (line.includes(t)) keyHits.push(`${relative(SRC, f).replace(/\\/g, '/')}:${i + 1} 含 ${t}`);
+      if (line.includes(t)) keyHits.push(`${relative(SRC, fAbs).replace(/\\/g, '/')}:${i + 1} 含 ${t}`);
     }
   });
 }

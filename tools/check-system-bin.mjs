@@ -18,10 +18,12 @@
 //
 // 用法：node tools/check-system-bin.mjs
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkRs } from './lib/fs-walk.mjs';
+import { gate } from './lib/gate.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 
@@ -130,16 +132,7 @@ function resolveExemption(entry, pool) {
   return { ok: true, hits: matched, why: '' };
 }
 
-function walk(dir, out = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else if (p.endsWith('.rs')) out.push(p);
-  }
-  return out;
-}
-
-const files = walk(SRC);
+const files = walkRs(SRC);
 
 /** 文件全文缓存（断言 C 的绑定扫描用） */
 const fileTexts = new Map();
@@ -206,10 +199,10 @@ for (const f of files) {
   }
 }
 
-let fail = 0;
+const g = gate(import.meta.url);
 const check = (ok, label, detail = '') => {
-  console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
-  if (!ok) fail++;
+  const line = `${label}${detail ? ' — ' + detail : ''}`;
+  if (ok) g.ok(line); else g.fail(line);
 };
 
 console.log('=== 系统工具裸进程名门禁 ===\n');
@@ -331,8 +324,4 @@ check(
 );
 
 console.log('');
-if (fail > 0) {
-  console.error(`门禁失败：${fail} 组断言未通过`);
-  process.exit(1);
-}
-console.log('系统工具门禁全部通过');
+g.finish('系统工具门禁全部通过');

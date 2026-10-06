@@ -31,10 +31,12 @@
 // **无产物时 SKIP 而非判红**：新克隆的仓库没有 build-release/，那是正常状态。
 // 但「有 setup.exe 却缺 .sig / 缺清单」判红 —— 那是资产不齐（v0.3.5/0.3.6 同型事故）。
 
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, statSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { walkFiles } from './lib/fs-walk.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'build-release');
@@ -84,26 +86,11 @@ const SRC_ROOTS = [
 ];
 const EXCLUDE_DIRS = new Set(['target', 'node_modules', '.git', 'build-release', 'docs']);
 
-function walk(dir, out) {
-  let ents;
-  try {
-    ents = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return; // 目录不存在 = 该路径没进包，跳过（不是缺陷）
-  }
-  for (const e of ents) {
-    if (EXCLUDE_DIRS.has(e.name)) continue;
-    const p = join(dir, e.name);
-    if (e.isDirectory()) walk(p, out);
-    else if (e.isFile()) out.push(p);
-  }
-}
-
 const srcFiles = [];
 for (const r of SRC_ROOTS) {
   const p = join(ROOT, r);
   if (existsSync(p) && statSync(p).isFile()) srcFiles.push(p);
-  else walk(p, srcFiles);
+  else srcFiles.push(...walkFiles(p, null, { ignoreDir: (n) => EXCLUDE_DIRS.has(n) }));
 }
 
 console.log('=== 产物新鲜度门禁（源码 mtime vs build-release 产物 mtime）===\n');

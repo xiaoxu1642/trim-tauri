@@ -17,10 +17,12 @@
 //
 // 用法：node tools/check-fail-closed.mjs
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkRs } from './lib/fs-walk.mjs';
+import { gate } from './lib/gate.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 // N2（2026-09-29）：老根棘轮必须把原生扫描器一起扫。它在仓库里是 path 依赖、不是
@@ -28,15 +30,6 @@ const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 // （排除名单与空目录忽略名单），标准实例与便携实例共写同一份文件。
 // A/B 两段与扫描器无关（它没有 temp_script_dir），只有 C 段扩范围。
 const SCANNER = join(REPO_ROOT, 'native-scanner', 'src');
-
-function walk(dir, out = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else if (p.endsWith('.rs')) out.push(p);
-  }
-  return out;
-}
 
 /**
  * 豁免清单（file:line → 理由）。line 以门禁自己的行号计算为准。
@@ -80,11 +73,11 @@ function statementFrom(text, idx) {
   return text.slice(idx, end);
 }
 
-const files = walk(SRC);
-let fail = 0;
+const files = walkRs(SRC);
+const g = gate(import.meta.url);
 const check = (ok, label, detail = '') => {
-  console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
-  if (!ok) fail++;
+  const line = `${label}${detail ? ' — ' + detail : ''}`;
+  if (ok) g.ok(line); else g.fail(line);
 };
 
 console.log('=== fail-closed 口径门禁 ===\n');
@@ -175,7 +168,7 @@ const ROOT_OWNERS = [
   'src-tauri/src/engine/paths.rs',
   'native-scanner/src/util.rs',
 ];
-const cFiles = [...files, ...walk(SCANNER)];
+const cFiles = [...files, ...walkRs(SCANNER)];
 const cHits = [];
 for (const f of cFiles) {
   const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
@@ -204,7 +197,7 @@ check(
 // 运行时不会立刻报错（OnceLock 静默为空），只能靠这条源码断言拦住。
 const pathsSrc = readFileSync(join(SRC, 'engine', 'paths.rs'), 'utf8');
 const injected = /trim_finder::util::set_data_roots\s*\(/.test(pathsSrc);
-const scannerUsesRoots = walk(SCANNER).some((f) =>
+const scannerUsesRoots = walkRs(SCANNER).some((f) =>
   /crate::util::list_file_path\s*\(/.test(readFileSync(f, 'utf8')));
 check(
   injected && scannerUsesRoots,
@@ -252,8 +245,4 @@ check(
 );
 
 console.log('');
-if (fail > 0) {
-  console.error(`门禁失败：${fail} 组断言未通过`);
-  process.exit(1);
-}
-console.log('fail-closed 门禁全部通过');
+g.finish('fail-closed 门禁全部通过');

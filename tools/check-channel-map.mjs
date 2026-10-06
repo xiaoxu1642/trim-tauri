@@ -23,6 +23,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
+import { walkRs, walkFiles } from './lib/fs-walk.mjs';
 
 const STRICT = process.argv.includes('--strict');
 const TAURI_ROOT = REPO_ROOT;
@@ -162,16 +163,11 @@ for (const m of handlerBlock.matchAll(/commands::\w+::(\w+)/g)) registered.add(m
 // v3 D2：递归扫——命令下沉到子目录（commands/uninstall/*.rs）时，只扫一层会让 D3
 // 「注册了但找不到声明」集体判红，反过来若改成静默跳过就是把注入面台账掏空。
 const cmdDir = join(TAURI_ROOT, 'src-tauri', 'src', 'commands');
-const cmdFiles = [];
-(() => {
-  const walk = (dir, prefix = '') => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      if (e.isDirectory()) walk(join(dir, e.name), `${prefix}${e.name}/`);
-      else if (e.name.endsWith('.rs')) cmdFiles.push({ rel: prefix + e.name, abs: join(dir, e.name) });
-    }
-  };
-  walk(cmdDir);
-})();
+// rel = 相对 commands/ 的正斜杠路径（声明定位用），abs = 绝对路径（读文件用）
+const cmdFiles = walkRs(cmdDir).map((abs) => ({
+  abs,
+  rel: relative(cmdDir, abs).replace(/\\/g, '/'),
+}));
 const declared = new Map(); // fn -> file
 for (const { rel, abs } of cmdFiles) {
   const text = readFileSync(abs, 'utf8');
@@ -267,17 +263,11 @@ const D4_ORPHANS = new Map([
 ]);
 
 /** 递归取 src/ 下的渲染层源码（适配层自身除外：它定义包装器，不是调用点） */
-function rendererSources(dir, out = []) {
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) rendererSources(p, out);
-    else if (/\.(?:js|html)$/.test(e.name) && !p.endsWith(`tauri-api.js`)) {
-      // `?.` 归一：渲染层大量写 `window.api?.x?.y()`，不归一会把在用通道判成孤儿
-      out.push([relative(TAURI_ROOT, p), readFileSync(p, 'utf8').replace(/\?\./g, '.')]);
-    }
-  }
-  return out;
-}
+const rendererSources = (dir) =>
+  walkFiles(dir, (n) => /\.(?:js|html)$/.test(n) && !n.endsWith('tauri-api.js')).map((p) => {
+    // `?.` 归一：渲染层大量写 `window.api?.x?.y()`，不归一会把在用通道判成孤儿
+    return [relative(TAURI_ROOT, p), readFileSync(p, 'utf8').replace(/\?\./g, '.')];
+  });
 
 /** 从适配层的 `var api = {…}` 里解析「通道 → window.api 点路径」 */
 function parseApiPaths(text) {
@@ -508,19 +498,8 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   // 档位由 guard-tiers 门禁管；这里从 Rust 侧现算 readonly / MAIN 两条命令集合。
   // 不读 check-guard-tiers.mjs 的清单（那就是 D 组，被本组取代的原因）。
   const CMD_DIR = join(TAURI_ROOT, 'src-tauri', 'src', 'commands');
-  const readAllRs = (dir) => {
-    const acc = [];
-    const walk = (d) => {
-      for (const e of readdirSync(d, { withFileTypes: true })) {
-        const p = join(d, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.name.endsWith('.rs')) acc.push(readFileSync(p, 'utf8'));
-      }
-    };
-    walk(dir);
-    return acc.join('\n');
-  };
-  const allCmdSrc = readAllRs(CMD_DIR);
+  // 拼整个 commands 目录做档位现算（口径与 check-guard-tiers 一致，但不单向依赖它）
+  const allCmdSrc = walkRs(CMD_DIR).map((p) => readFileSync(p, 'utf8')).join('\n');
   const tierOf = () => {
     const out = { MAIN: new Set(), READONLY: new Set() };
     // 必须按 `#[tauri::command]` **切段**（段尾 =下一个 `#[tauri::command]`），

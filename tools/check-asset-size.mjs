@@ -10,10 +10,12 @@
 //
 // 用法：node tools/check-asset-size.mjs
 
-import { readdirSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkFiles } from './lib/fs-walk.mjs';
+import { gate } from './lib/gate.mjs';
 
 const SRC = join(REPO_ROOT, 'src');
 const PER_FILE_LIMIT = 1024 * 1024;   // 1 MiB：未登记单文件超限线（现第二大文件是 593KB 壁纸，留有距离）
@@ -29,24 +31,15 @@ const BASELINE = {
   'assets/fonts/MiSansVF.ttf': 20_093_424,
 };
 
-function walk(dir, out = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else out.push(p);
-  }
-  return out;
-}
-
-const files = walk(SRC).map((p) => {
+const files = walkFiles(SRC).map((p) => {
   const st = statSync(p);
   return { rel: relative(SRC, p).replace(/\\/g, '/'), size: st.size };
 });
 
-let fail = 0;
+const g = gate(import.meta.url);
 const check = (ok, label, detail = '') => {
-  console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
-  if (!ok) fail++;
+  const line = `${label}${detail ? ' — ' + detail : ''}`;
+  if (ok) g.ok(line); else g.fail(line);
 };
 
 const fmt = (n) => (n / 1024 / 1024).toFixed(2) + ' MiB';
@@ -90,8 +83,4 @@ check(
 );
 
 console.log('');
-if (fail > 0) {
-  console.error(`门禁失败：${fail} 组断言未通过`);
-  process.exit(1);
-}
-console.log('体积门禁全部通过');
+g.finish('体积门禁全部通过');

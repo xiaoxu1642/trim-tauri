@@ -23,10 +23,12 @@
 //
 // 用法：node tools/check-ps-callsites.mjs
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkRs } from './lib/fs-walk.mjs';
+import { gate } from './lib/gate.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 /// PS 执行层本体：`system_tool("powershell.exe")` 与低层 `run_*` 的唯一归属地。
@@ -99,15 +101,6 @@ const RUN_INLINE_PS_SITES = [
 
 /// 白名单条数的真源：只从这里读，别抄进文档
 const PS_INLINE_ALLOW_FILE = 'src-tauri/src/engine/pssteps.rs';
-
-function walk(dir, out = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else if (p.endsWith('.rs')) out.push(p);
-  }
-  return out;
-}
 
 const rel = (p) => relative(REPO_ROOT, p).replace(/\\/g, '/');
 const cut = (s) => (s.length > 52 ? s.slice(0, 52) + '…' : s);
@@ -230,14 +223,14 @@ function resolveSecs(entry, argsText) {
   return null;
 }
 
-const files = walk(SRC);
+const files = walkRs(SRC);
 const texts = new Map();
 for (const f of files) texts.set(rel(f), readFileSync(f, 'utf8'));
 
-let fail = 0;
+const g = gate(import.meta.url);
 const check = (ok, label, detail = '') => {
-  console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
-  if (!ok) fail++;
+  const line = `${label}${detail ? ' — ' + detail : ''}`;
+  if (ok) g.ok(line); else g.fail(line);
 };
 
 console.log('=== PowerShell 调用点门禁（v2 R0）===\n');
@@ -454,8 +447,4 @@ console.log(`  外部 PowerShell 7 通道 : ${execPool.filter((h) => h.raw.inclu
 console.log(`  合计 inbox PS 生产入口 : ${callPool.length} 处（登记表 ${PS_CALL_SITES.length} 条）`);
 
 console.log('');
-if (fail > 0) {
-  console.error(`门禁失败：${fail} 组断言未通过`);
-  process.exit(1);
-}
-console.log('PowerShell 调用点门禁全部通过');
+g.finish('PowerShell 调用点门禁全部通过');

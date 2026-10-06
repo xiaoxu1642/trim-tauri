@@ -14,23 +14,17 @@
 //
 // 用法：node tools/check-delete-callsites.mjs [--write]
 'use strict';
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { walkRs } from './lib/fs-walk.mjs';
+import { gate } from './lib/gate.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE_PATH = join(ROOT, 'tools', 'fixtures', 'delete-callsites-baseline.json');
 const SCAN_ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner', 'src')];
 const APIS = ['remove_file', 'remove_dir_all', 'remove_dir', 'DeleteFileW', 'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW', 'RegDeleteKeyExW'];
-
-function walk(dir, out = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else if (p.endsWith('.rs')) out.push(p);
-  }
-  return out;
-}
 
 /** 剥 Rust 注释与字符串字面量（与 check-delete-exits 的 stripRustComments 同口径） */
 function stripRustComments(src) {
@@ -81,7 +75,7 @@ function stripRustComments(src) {
 const current = {};
 let scanned = 0;
 for (const root of SCAN_ROOTS) {
-  for (const f of walk(root)) {
+  for (const f of walkRs(root)) {
     scanned++;
     const clean = stripRustComments(readFileSync(f, 'utf8'));
     const rel = relative(ROOT, f).replace(/\\/g, '/');
@@ -103,13 +97,13 @@ if (process.argv.includes('--write')) {
   console.log(`✓ 基线已重算落盘：${BASELINE_PATH}（删除 API 调用点共 ${total} 处，文件 ${scanned} 个）`);
   process.exit(0);
 }
+const g = gate(import.meta.url);
 if (!existsSync(BASELINE_PATH)) {
-  console.error('✗ 基线文件缺失，先跑一次 --write 生成');
-  process.exit(1);
+  g.fail('基线文件缺失，先跑一次 --write 生成');
+  g.finish();
 }
 const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
 
-let fail = 0;
 const problems = [];
 const shrinkHints = [];
 for (const api of APIS) {
@@ -132,14 +126,10 @@ const baseTotal = Object.values(baseline).reduce((a, o) => a + Object.values(o).
 if (problems.length === 0) {
   console.log(`✓ 删除原语调用点 ${total} 处（基线 ${baseTotal}），扫描 Rust 文件 ${scanned} 个，无未登记新增`);
 } else {
-  console.error(`✗ 删除原语调用点出现未登记变化：\n  ${problems.join('\n  ')}`);
-  fail++;
+  g.fail(`删除原语调用点出现未登记变化：\n  ${problems.join('\n  ')}`);
 }
 if (shrinkHints.length) {
   console.log(`ℹ 有 ${shrinkHints.length} 处收敛（${shrinkHints.slice(0, 5).join('；')}${shrinkHints.length > 5 ? '…' : ''}）——确认无误后跑 --write 收紧基线（只减不增的棘轮方向）`);
 }
 
-if (fail > 0) {
-  process.exit(1);
-}
-console.log('check-delete-callsites: 全部通过');
+g.finish('check-delete-callsites: 全部通过');
