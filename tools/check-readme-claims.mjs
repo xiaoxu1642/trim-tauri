@@ -205,9 +205,11 @@ if (Number.isFinite(catOrderCount) && catOrderCount > ctxReachable) {
   console.log(`   ↳ 提醒（不判红，业务裁定项）：侧边栏有 ${catOrderCount - ctxReachable} 类后端未实现（UWP应用），点击恒为空列表`);
 }
 
-// 11. 内存清理区域数：readme「按 N 个区域勾选」⇄ REGIONS 非灰显条目实算。
-//     口径：条目以首行 `{ id: '` 计（desc 跨行不影响）；sysUnavailable: true 标记在
-//     条目首行上（fileCache/registryCache 两项灰显不计入「可勾选区域」）。
+// 11. 内存清理区域数：readme「按 N 个区域勾选」⇄ REGIONS 实算。
+//     口径：条目以首行 `{ id: '` 计（desc 跨行不影响）。2026-10-06 起列表不含灰显项——
+//     fileCache/registryCache（系统文件缓存/注册表缓存）按用户裁定直接隐藏入口（后端
+//     mem_clean 白名单本就不提供 82/84）。regionUnavailable 兜底保留：将来若再出现
+//     `sysUnavailable: true` 条目，仍不计入「可勾选区域」。
 const mcJs = read('src/scripts/memoryclean.js');
 const regionsBlk = mcJs.match(/const REGIONS = \[([\s\S]*?)\n  \];/);
 const regionTotal = regionsBlk ? (regionsBlk[1].match(/^\s*\{ id: '/gm) ?? []).length : NaN;

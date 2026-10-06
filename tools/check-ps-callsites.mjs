@@ -329,6 +329,7 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/NH"],', reason: '顽固软件治理：判任务是否存在' },
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/XML"],', reason: '顽固软件治理：删任务前导出 XML（唯一还原凭据）' },
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Delete", "/TN", task, "/F"],', reason: '顽固软件治理：删除计划任务' },
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["export", &run_reg_path, reg_file_str, "/y"]', reason: '顽固软件治理：删抖音托盘 Run 值前整键备份（2026-10-06 扩链）' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'stop_service_wait 的 sc stop（restart_service / search / wu 三条链共用）', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },

@@ -46,6 +46,7 @@
   },
   "RegDeleteValueW": {
     "src-tauri/src/engine/native/contextmenu.rs": 5,
+    "src-tauri/src/engine/native/process.rs": 1,
     "src-tauri/src/engine/native/registry.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 1
   },

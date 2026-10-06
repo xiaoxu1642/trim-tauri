@@ -6350,7 +6350,6 @@ body.pv-window {
   color: var(--fg-tertiary);
   word-break: break-word;
 }
-.mem-region-na { font-size: var(--fs-meta); color: var(--fg-tertiary); white-space: nowrap; }
 .xtable-cell-desc {
   display: block;
   margin-top: 2px;
@@ -6392,33 +6391,6 @@ body.pv-window {
 }
 .mem-check input:focus-visible + .mem-check-box {
   box-shadow: 0 0 0 2px var(--accent-light);
-}
-
-/* 系统级不可用的内存区域：整行灰显、勾选框禁用、风险/操作置灰 */
-.mem-region-disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  filter: grayscale(0.35);
-}
-.mem-region-disabled .mem-check {
-  cursor: not-allowed;
-}
-.mem-region-disabled .mem-check-box {
-  background: var(--bg-input);
-  border-color: var(--border-strong);
-}
-.mem-region-disabled .mem-region-desc {
-  color: var(--fg-tertiary);
-}
-.category-risk.unused {
-  background: transparent;
-  color: var(--fg-tertiary);
-  border: 1px solid var(--border-default);
-}
-.mem-region-na {
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-  white-space: nowrap;
 }
 
 /* 进程行 */
