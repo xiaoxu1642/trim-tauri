@@ -27,7 +27,7 @@
     "src-tauri/src/engine/native/cleanup.rs": 24,
     "src-tauri/src/engine/native/contextmenu.rs": 1,
     "src-tauri/src/engine/native/maintenance.rs": 2,
-    "src-tauri/src/engine/native/startup.rs": 4,
+    "src-tauri/src/engine/native/startup.rs": 5,
     "src-tauri/src/engine/paths.rs": 8,
     "src-tauri/src/engine/reg_backup.rs": 8,
     "src-tauri/src/engine/restore_pack.rs": 4,

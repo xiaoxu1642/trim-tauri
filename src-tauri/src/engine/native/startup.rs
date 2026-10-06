@@ -28,6 +28,115 @@ fn extract_cmd_path(cmd: &str) -> String {
     c.to_string()
 }
 
+/// 可启动文件后缀白名单：图标/定位只认真实落盘的这些类型，半截目录名混不进来。
+const RUNNABLE_EXTS: &[&str] = &["exe", "com", "bat", "cmd", "vbs", "js", "scr", "lnk", "ps1", "cpl", "msc"];
+
+/// 解释器宿主：这类行的真正程序在 Arguments 里（`/c x.exe` / `-File x.ps1` / rundll32 dll），
+/// 命令本体只给得到解释器自己的图标。
+const INTERPRETER_HOSTS: &[&str] = &[
+    "cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe",
+    "mshta.exe", "rundll32.exe", "conhost.exe", "explorer.exe",
+];
+
+fn ext_lc(p: &std::path::Path) -> String {
+    p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+}
+
+/// 已存在的可启动文件（allow_dll 仅给 rundll32 的 dll/cpl 开口）。
+fn is_runnable_path(s: &str, allow_dll: bool) -> bool {
+    let p = std::path::Path::new(s.trim_matches('"'));
+    if !p.is_file() {
+        return false;
+    }
+    let ext = ext_lc(p);
+    RUNNABLE_EXTS.contains(&ext.as_str()) || (allow_dll && matches!(ext.as_str(), "dll" | "cpl"))
+}
+
+/// 在一行文本里找**真实存在**的可启动目标：
+/// 1. 成对引号内（`"C:\Program Files\App\app.exe" /s` —— 注册表里最常见写法）；
+/// 2. 逐词拼接的最长现存前缀（未加引号的 `C:\Program Files\App\app.exe /s`，
+///    真机上抖音自启就是这个形态）。
+/// 只认现存文件，找不到返 None —— 图标失败由前端回退默认，不许凭字符串形状猜。
+fn find_existing_target(text: &str, allow_dll: bool) -> Option<String> {
+    // ① 引号对：取第一个现存的（程序永远排在参数前面）
+    let mut rest = text;
+    while let Some(a) = rest.find('"') {
+        if let Some(b) = rest[a + 1..].find('"') {
+            let inner = &rest[a + 1..a + 1 + b];
+            if is_runnable_path(inner, allow_dll) {
+                return Some(inner.to_string());
+            }
+            rest = &rest[a + 1 + b + 1..];
+        } else {
+            break;
+        }
+    }
+    // ② 逐词前缀：保留「最后一个命中的最长前缀」
+    let stripped: String = text.chars().filter(|&c| c != '"').collect();
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
+    let mut hit: Option<String> = None;
+    for k in 1..=tokens.len() {
+        let cand = tokens[..k].join(" ");
+        if is_runnable_path(&cand, allow_dll) {
+            hit = Some(cand);
+        }
+    }
+    hit
+}
+
+/// 启动项命令行 → 图标与「打开位置」用的真实目标路径（任务 XML 与注册表 Run 共用）。
+///
+/// 解析顺序：解释器宿主先翻参数里的程序 → 命令本体（引号/最长现存前缀）→ 裸名 + 工作目录。
+/// 找不到返空串：调用方（任务扫描）据此回退默认图标；注册表分支为保持旧行为会回落到
+/// [`extract_cmd_path`] 的粗切结果。
+fn resolve_running_target(command: &str, arguments: &str, working_dir: &str) -> String {
+    let cmd = expand_env(command.trim());
+    let args = expand_env(arguments);
+    let wd = expand_env(working_dir.trim());
+    if cmd.is_empty() {
+        return String::new();
+    }
+
+    // 命令本体是解释器宿主时，真正的程序/脚本藏在参数里（含命令行自带的后半截）
+    let host_name = std::path::Path::new(&extract_cmd_path(&cmd).to_ascii_lowercase())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    if INTERPRETER_HOSTS.contains(&host_name.as_str()) {
+        let allow_dll = host_name == "rundll32.exe";
+        // 任务 XML 的参数是独立字段；注册表把参数拼在同一行，两种文本合起来找
+        let mut tail = String::new();
+        if let Some(sp) = cmd.find(char::is_whitespace) {
+            tail.push_str(cmd[sp..].trim());
+        }
+        if !args.is_empty() {
+            if !tail.is_empty() {
+                tail.push(' ');
+            }
+            tail.push_str(args.trim());
+        }
+        if let Some(t) = find_existing_target(&tail, allow_dll) {
+            return t;
+        }
+    }
+
+    // 命令本体里就带着真实路径（绝大多数 Run 项与计划任务是这种）
+    if let Some(t) = find_existing_target(&cmd, false) {
+        return t;
+    }
+
+    // 裸名 + 工作目录（任务 XML 常见：Command=app.exe、WorkingDirectory=安装目录）
+    if !cmd.chars().any(char::is_whitespace) && !wd.is_empty() {
+        let joined = std::path::Path::new(&wd).join(&cmd);
+        if is_runnable_path(&joined.to_string_lossy(), false) {
+            return joined.to_string_lossy().into_owned();
+        }
+    }
+
+    String::new()
+}
+
 
 
 /// 「启动项写的程序文件已经不在了」判据（注册表 Run 与计划任务**共用同一份**，AGENTS §5.16）。
@@ -149,8 +258,14 @@ fn scan_task_files() -> Vec<Value> {
             };
             let task_name = rel_str.rsplit('\\').next().unwrap_or(&rel_str).to_string();
             let task_to_run = xml_first(&text, "Command");
+            let task_args = xml_first(&text, "Arguments");
+            let task_workdir = xml_first(&text, "WorkingDirectory");
             let enabled = !xml_first(&text, "Enabled").eq_ignore_ascii_case("false");
             let task_missing = missing_target_of(&extract_cmd_path(&task_to_run)).unwrap_or_default();
+            // 图标/位置用的真实目标：任务被应用自禁用时 XML 的 Command 会被写成
+            // 「by user disabled」这类标记串（GoogleUpdater/抖音真机如此），解析不出
+            // 现存文件就留空——前端按空路径回退默认图标，不拿标记串冒充路径。
+            let resolved_target = resolve_running_target(&task_to_run, &task_args, &task_workdir);
             out.push(json!({
                 "id": format!("task|{task_path}{task_name}"),
                 "name": task_name,
@@ -171,7 +286,7 @@ fn scan_task_files() -> Vec<Value> {
                 "scope": "HKLM",
                 "disabledBy": if !enabled { "system" } else { "" },
                 "publisher": "",
-                "resolvedPath": "",
+                "resolvedPath": resolved_target,
                 "missingTarget": task_missing,
             }));
         }
@@ -245,7 +360,11 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                         value_data = expand_env(&value_data);
                     }
                     if !value_data.trim().is_empty() {
-                        cmd_path = extract_cmd_path(&value_data);
+                        // 优先解析真实存在的目标（未加引号的带空格路径/解释器参数里的程序，
+                        // 粗切会切成 `C:\Program` 导致图标与定位双双失败）；解析不出时
+                        // 回落到 extract_cmd_path 原口径，OneDrive.exe 这类裸名行为不变。
+                        let resolved = resolve_running_target(&value_data, "", "");
+                        cmd_path = if resolved.is_empty() { extract_cmd_path(&value_data) } else { resolved };
                     }
                 }
 
@@ -475,6 +594,118 @@ mod missing_target_tests {
     #[test]
     fn missing_target_probe_is_not_always_none() {
         assert!(missing_target_of(r"C:\trim-definitely-absent\x.exe").is_some());
+    }
+}
+
+/// 启动命令行 → 真实目标解析（图标/「打开位置」用）。
+/// 真机背景：任务 XML 自禁用标记 `by user disabled`、未加引号的带空格路径、
+/// 解释器参数里藏程序，是计划任务项整页回退默认图标的三个来源（2026-10-06 截图实测）。
+#[cfg(test)]
+mod resolve_target_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// 用例临时目录：Drop 时自动清空（断言 panic 的栈展开也会跑 Drop，不留垃圾）。
+    /// 刻意做成守卫而不是每个用例手写 remove_dir_all——后者在 startup.rs 里每写一个
+    /// 用例就多一处删除原语文本，会推高 check-delete-callsites 棘轮基线。
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(case: &str) -> TempDir {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "trim-resolve-{}-{}-{}",
+                std::process::id(),
+                case,
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&p).expect("临时目录");
+            TempDir(p)
+        }
+        /// 在临时根下建一个（内容无关的）文件，返回反斜杠形态的绝对路径。
+        fn touch(&self, rel: &str) -> String {
+            let p = self.0.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).expect("建父目录");
+            fs::write(&p, b"x").expect("写临时文件");
+            p.to_string_lossy().replace('/', "\\")
+        }
+        fn as_str(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn 引号包裹的真实程序直接命中() {
+        let root = TempDir::new("quoted");
+        let exe = root.touch("bin/app.exe");
+        assert_eq!(resolve_running_target(&format!("\"{exe}\" /s"), "", ""), exe);
+    }
+
+    #[test]
+    fn 未加引号的带空格路径按最长现存前缀命中() {
+        // 真机抖音自启：`C:\Program Files (x86)\ByteDance\douyin\douyin.exe --start_type=autorun`
+        let root = TempDir::new("spaces");
+        let exe = root.touch("Program Files/App/app.exe");
+        let line = format!("{exe} --start_type=autorun");
+        assert_eq!(resolve_running_target(&line, "", ""), exe, "粗切只会得到半截 `C:\\Program`");
+    }
+
+    #[test]
+    fn 应用自禁用标记串解析为空_不留假路径() {
+        // GoogleUpdater / 抖音任务被应用自身禁用时，XML Command 被整串写成标记文本
+        assert_eq!(resolve_running_target("by user disabled", "--wake --system", ""), "");
+        assert_eq!(resolve_running_target("by user disabled", "--start-from=taskschd", ""), "");
+        // 随便一个不存在的裸名同样不猜
+        assert_eq!(resolve_running_target("OneDrive.exe", "", ""), "");
+    }
+
+    #[test]
+    fn 解释器参数里的程序才是真目标() {
+        let root = TempDir::new("host");
+        let exe = root.touch("deep/app.exe");
+        let ps1 = root.touch("scripts/run.ps1");
+        // 宿主可以是裸名（不要求宿主自身存在）——任务 XML 里常见 cmd.exe 不带全路径
+        assert_eq!(
+            resolve_running_target("cmd.exe", &format!("/c \"{exe}\""), ""),
+            exe,
+            "cmd /c 后面的程序没被翻出来"
+        );
+        assert_eq!(
+            resolve_running_target(
+                "powershell.exe",
+                &format!("-ExecutionPolicy Bypass -File \"{ps1}\""),
+                "",
+            ),
+            ps1,
+            "powershell -File 的脚本没被翻出来"
+        );
+    }
+
+    #[test]
+    fn 裸名命令配工作目录可命中() {
+        let root = TempDir::new("workdir");
+        let exe = root.touch("app.exe");
+        assert_eq!(resolve_running_target("app.exe", "", &root.as_str()), exe);
+    }
+
+    #[test]
+    fn 整行没有现存文件时返回空_由前端回退默认图标() {
+        assert_eq!(resolve_running_target(r"Z:\no-such\a.exe /x", "", ""), "");
+        assert_eq!(resolve_running_target("", "", ""), "");
+    }
+
+    /// 正向对照：解析器若被改成恒空实现，本用例必须红（防上面用例被恒空骗过）。
+    #[test]
+    fn 解析器不是恒空实现() {
+        let root = TempDir::new("positive");
+        let exe = root.touch("a.exe");
+        assert!(!resolve_running_target(&format!("\"{exe}\""), "", "").is_empty());
     }
 }
 
