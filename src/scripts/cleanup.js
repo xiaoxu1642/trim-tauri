@@ -394,9 +394,17 @@
         case 'risk':
           inner = `<span class="category-risk ${item.risk}">${RISK_LABELS[item.risk] || item.risk}</span>`;
           break;
-        case 'size':
-          inner = size !== null && size !== undefined ? formatSize(size) : '<span class="xtable-cell-muted">—</span>';
+        case 'size': {
+          let sizeInner = size !== null && size !== undefined ? formatSize(size) : '<span class="xtable-cell-muted">—</span>';
+          // G-4 追补（用户 2026-10-07 反馈「只显示体积、条目数一直不出来」）：recycleCount
+          // 扫描时已由 cleanup:recycle-stats 现查赋值，但此前只有清空确认弹窗消费它——
+          // 列表行从未渲染。方案 G-4 的承诺是「先出条目数与体积」，两处都要齐。
+          if (item.id === RECYCLE_ID && result && Number(result.recycleCount) > 0) {
+            sizeInner += ` <span class="xtable-cell-muted">· ${Number(result.recycleCount)} 个条目</span>`;
+          }
+          inner = sizeInner;
           break;
+        }
         case 'actions':
           if (isFileClean) {
             inner = previewBtnHtml(item, hasImages, imageCount);
