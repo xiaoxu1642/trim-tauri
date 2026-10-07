@@ -16,7 +16,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -38,25 +37,25 @@ const VIDEO_EXTS: &[&str] = &["mp4", "avi", "mov", "mkv", "flv"];
 const CACHE_EXTS: &[&str] = &["tmp", "log", "bak", "cache"];
 
 #[derive(Clone)]
-struct Scope {
+pub(crate) struct Scope {
     root: String,
     files: HashSet<String>,
 }
 
-static SCOPES: Mutex<Option<HashMap<String, Scope>>> = Mutex::new(None);
+use crate::commands::state::FILECLEAN_SCOPES;
 
 fn slot_key(label: &str, ty: &str) -> String {
     format!("{label}:{ty}")
 }
 
 fn scope_store(label: &str, ty: &str, root: String, files: HashSet<String>) {
-    let mut g = SCOPES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = FILECLEAN_SCOPES.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(HashMap::new)
         .insert(slot_key(label, ty), Scope { root, files });
 }
 
 fn scope_get(label: &str, ty: &str) -> Option<Scope> {
-    SCOPES
+    FILECLEAN_SCOPES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
@@ -525,7 +524,7 @@ pub async fn fileclean_delete_file<R: Runtime>(
         let owner = scope_owner(window.label());
         if let Some(mut s) = scope_get(owner, ty) {
             s.files.remove(&path_key(&file_path));
-            let mut g = SCOPES.lock().unwrap_or_else(|e| e.into_inner());
+            let mut g = FILECLEAN_SCOPES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = g.as_mut() {
                 m.insert(slot_key(owner, ty), s);
             }
@@ -565,7 +564,7 @@ pub async fn fileclean_execute<R: Runtime>(
         return json!({ "success": false, "message": "至少一个文件不在扫描范围内，已拒绝整批" });
     };
     let Some(scope) = scope_get(window.label(), ty) else {
-        // 反查（:538-540）命中与这里取槽之间无 await，但 SCOPES 是全局槽，可能被并发
+        // 反查（:538-540）命中与这里取槽之间无 await，但 FILECLEAN_SCOPES 是全局槽，可能被并发
         // 重扫清空。旧实现直接 unwrap：理论 panic 会被 Tauri command 包装兜住，但与其
         // 让渲染层吃一个未分类错误，不如显式报「会话已过期」（审查 L1）。
         return json!({ "success": false, "message": "扫描会话已过期，请重新扫描后再删除" });
@@ -638,7 +637,7 @@ pub async fn fileclean_execute<R: Runtime>(
             for k in &removed_keys {
                 s.files.remove(k);
             }
-            let mut g = SCOPES.lock().unwrap_or_else(|e| e.into_inner());
+            let mut g = FILECLEAN_SCOPES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = g.as_mut() {
                 m.insert(slot_key(window.label(), ty), s);
             }

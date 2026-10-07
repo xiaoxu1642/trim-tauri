@@ -7,6 +7,150 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// Rust str → null 结尾宽字符串（本 crate 唯一实现；原 perf 与 cleanup_scan 里的三份本地
+/// 副本已随 v3 C-1 删除。native-scanner 是独立 crate，与 src-tauri 侧各留一份，刻意不跨 crate 共享）。
+pub(crate) fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+// ==================== Win32 FFI 声明集中区（v3 C-3） ====================
+// 本 crate 手写的 `extern "system"` 声明与配套结构体集中在此、按 DLL 分组；
+// perf / scan::recycle / cleanup_scan 只 `use crate::util::ffi::…`，不再自建 extern 块
+//（历史上 RegOpenKeyExW / RegCloseKey 等曾被分散声明多份）。
+//
+// 纪律（沿用各处原注）：
+// - 不为此新开 windows-sys feature（零新增依赖面）；**签名与结构体布局逐字保持**。
+// - L6（2026-09-19）：Win32 结构体字段名与 SDK 原名逐字一致 —— 重命名既不改变内存布局，
+//   也破坏 #[repr(C)] 的可读性契约；故整体豁免 non_snake_case，改动字段名属高危改动。
+// - 本模块不加 cfg：extern 声明跨目标可编译；调用点原有的 #[cfg(windows)] 维持原样。
+#[allow(non_snake_case)]
+pub(crate) mod ffi {
+    #[repr(C)]
+    pub struct PROCESSENTRY32W {
+        pub dwSize: u32,
+        pub cntUsage: u32,
+        pub th32ProcessID: u32,
+        pub th32DefaultHeapID: usize,
+        pub th32ModuleID: u32,
+        pub cntThreads: u32,
+        pub th32ParentProcessID: u32,
+        pub pcPriClassBase: i32, // Win32 LONG（32 位）——误用 isize 会使 dwSize 多 4 字节，Process32FirstW 报 BAD_LENGTH
+        pub dwFlags: u32,
+        pub szExeFile: [u16; 260],
+    }
+
+    #[repr(C)]
+    pub struct ShFileOpStructW {
+        pub hwnd: isize,
+        pub w_func: u32,
+        pub p_from: *const u16,
+        pub p_to: *const u16,
+        pub f_flags: u16,
+        pub f_any_operations_aborted: i32,
+        pub h_name_mappings: *mut core::ffi::c_void,
+        pub lpsz_progress_title: *const u16,
+    }
+
+    /// FILETIME 本体是 { DWORD low, DWORD high }，4 字节对齐、共 8 字节——
+    /// 用 u64 会引入 8 字节对齐 pad，使 strAppName 错位 4 字节（实测应用名丢首 2 字符）。
+    #[repr(C)]
+    pub struct RM_UNIQUE_PROCESS {
+        pub dwProcessId: u32,
+        pub ProcessStartTimeLow: u32,
+        pub ProcessStartTimeHigh: u32,
+    }
+
+    // 2026-09-30 实测：Windows 按 **668 字节**步长写这条记录，SDK 头文件那六个成员只推出 664。
+    // 少这 4 字节的后果不是「显示难看」而是三件实事：① 第 i 条记录整体前移 4×i 字节，
+    // 应用名前多出 2i 个乱码字符（用户看到的「偁aWindows 资源管理器」）；② `pid` 与
+    // `ApplicationType` 跟着错位 ⇒ 结束进程拿的是错 PID、critical 判错；③ 按 664 申请的
+    // 缓冲区被按 668 写满 ⇒ 越界写（72 条时越界 288 字节）。
+    // 字段位置同样实测钉住：strAppName@12、strServiceShortName@524（服务短名干净）、
+    // ApplicationType@652（lsass 读出 1000=RmCritical）、bRestartable@660。
+    // 这个尾巴 DWORD 是什么微软没写进头文件，本模块不消费它，只负责让步长对齐。
+    #[repr(C)]
+    pub struct RM_PROCESS_INFO {
+        pub Process: RM_UNIQUE_PROCESS,
+        pub strAppName: [u16; 255 + 1],         // CCH_RM_MAX_APP_NAME + 1
+        pub strServiceShortName: [u16; 63 + 1], // CCH_RM_MAX_SERVICE_NAME_SHORT + 1
+        pub ApplicationType: u32,
+        pub TSSessionId: u32,
+        pub bRestartable: i32,
+        pub _reserved: u32,
+    }
+
+    impl Clone for RM_PROCESS_INFO {
+        fn clone(&self) -> Self {
+            unsafe { std::ptr::read(self) } // POD 结构体逐位复制（含数组字段，无堆所有权）
+        }
+    }
+
+    // 布局不变式放编译期而不是 #[test]：native-scanner 是 path 依赖、非 workspace 成员，
+    // 它的单测只有显式 --manifest-path 才跑，靠测试兜不住「有人改回六个成员」这种回归。
+    const _: () = {
+        if std::mem::size_of::<RM_PROCESS_INFO>() != 668 {
+            panic!("RM_PROCESS_INFO 步长必须 668 字节：Windows 就按这个宽度写，错了会错位读名/pid 并越界写");
+        }
+        if std::mem::offset_of!(RM_PROCESS_INFO, strAppName) != 12 {
+            panic!("strAppName 偏移必须是 12：RM_UNIQUE_PROCESS 是 DWORD+FILETIME 共 12 字节而非 16");
+        }
+        if std::mem::offset_of!(RM_PROCESS_INFO, ApplicationType) != 652 {
+            panic!("ApplicationType 偏移必须是 652：critical 判定（==1000 RmCritical）按它读");
+        }
+    };
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetLongPathNameW(lpszShortPath: *const u16, lpszLongPath: *mut u16, cchBuffer: u32) -> u32;
+        pub fn QueryPerformanceCounter(lpPerformanceCount: *mut i64) -> i32;
+        pub fn QueryPerformanceFrequency(lpFrequency: *mut i64) -> i32;
+        pub fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> isize;
+        pub fn Process32FirstW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        pub fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        pub fn CloseHandle(hObject: isize) -> i32;
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        pub fn NtQuerySystemInformation(class: u32, info: *mut u8, len: u32, return_len: *mut u32) -> i32;
+        pub fn NtSetSystemInformation(class: u32, info: *mut u8, len: u32) -> i32;
+        pub fn RtlGetVersion(info: *mut u8) -> i32;
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        pub fn RegOpenKeyExW(hKey: isize, lpSubKey: *const u16, ulOptions: u32, samDesired: u32, phkResult: *mut isize) -> i32;
+        pub fn RegQueryValueExW(key: isize, name: *const u16, res: *mut u32, typ: *mut u32, data: *mut u8, len: *mut u32) -> i32;
+        pub fn RegQueryInfoKeyW(
+            hKey: isize, lpClass: *mut u16, lpcchClass: *mut u32, lpReserved: *mut u32,
+            lpcSubKeys: *mut u32, lpcchMaxSubKeyLen: *mut u32, lpcchMaxClassLen: *mut u32,
+            lpcValues: *mut u32, lpcchMaxValueNameLen: *mut u32, lpcbMaxValueLen: *mut u32,
+            lpcbSecurityDescriptor: *mut u32, lpftLastWriteTime: *mut u64,
+        ) -> i32;
+        pub fn RegCloseKey(hKey: isize) -> i32;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        pub fn SHFileOperationW(lpfileop: *mut ShFileOpStructW) -> i32;
+    }
+
+    #[link(name = "rstrtmgr")]
+    extern "system" {
+        pub fn RmStartSession(pSessionHandle: *mut u32, dwSessionFlags: u32, strSessionKey: *mut u16) -> i32;
+        pub fn RmRegisterResources(
+            dwSessionHandle: u32, nFiles: u32, rgsFileNames: *const *const u16,
+            nApplications: u32, rgApplications: *const RM_PROCESS_INFO,
+            nServices: u32, rgsServiceNames: *const *const u16,
+        ) -> i32;
+        pub fn RmGetList(
+            dwSessionHandle: u32, pnProcInfoNeeded: *mut u32, pnProcInfo: *mut u32,
+            rgAffectedApps: *mut RM_PROCESS_INFO, lpdwRebootReasons: *mut u32,
+        ) -> i32;
+        pub fn RmEndSession(dwSessionHandle: u32) -> i32;
+    }
+}
+
 /// 宿主注入的数据根：`(当前数据根, 升级前的老数据根)`。
 ///
 /// 为什么不在这里自己拼 `%APPDATA%\<产品名>`（N2，2026-09-29）：
@@ -119,15 +263,10 @@ pub fn is_reparse(_ent: &fs::DirEntry) -> bool {
 pub fn to_long_path(p: &str) -> String {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    #[allow(non_snake_case)]
-    extern "system" {
-        fn GetLongPathNameW(lpszShortPath: *const u16, lpszLongPath: *mut u16, cchBuffer: u32) -> u32;
-    }
     let wide: Vec<u16> = OsStr::new(p).encode_wide().chain(std::iter::once(0)).collect();
     let mut buf: Vec<u16> = vec![0u16; wide.len().max(1024)];
     loop {
-        let n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        let n = unsafe { ffi::GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
         if n == 0 {
             return p.to_string(); // 不存在/无权限 → 原样返回（短名组件由 fail-closed 兜底）
         }

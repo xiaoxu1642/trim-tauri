@@ -9,22 +9,15 @@
 //! - checkup：磁盘缓存 checkup.json + TTL 30 分钟（F1：原实现永不过期的旧"正常"结论
 //!   会在系统恶化时误报，故加 TTL 到期自动重扫）。
 
-use std::sync::Mutex;
-
 use serde_json::Value;
 use tauri::WebviewWindow;
 
 use crate::engine::{guard, paths};
 use crate::security;
 
-/// metrics 结果缓存与串行锁
-static METRICS_CACHE: Mutex<Option<(i64, Value)>> = Mutex::new(None);
-static METRICS_LOCK: Mutex<()> = Mutex::new(());
+use crate::commands::state::{CPU_PREV, METRICS_CACHE, METRICS_LOCK};
+
 const METRICS_CACHE_TTL_MS: i64 = 2500;
-/// CPU 差分用上一拍原始计数（`cpuRaw`）。
-/// 对照 main.js 5279-5290：原生引擎无状态，只输出原始 busy/idle 计数，
-/// **差分必须由调用方持有**——首拍或计数回绕时 cpu 保持 null（渲染层显示 `--`）。
-static CPU_PREV: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 const CHECKUP_CACHE_TTL_MS: i64 = 30 * 60 * 1000;
 

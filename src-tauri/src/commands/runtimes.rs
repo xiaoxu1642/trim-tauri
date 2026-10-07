@@ -20,7 +20,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -94,15 +93,15 @@ fn is_allowed_action(action_id: &str) -> bool {
 }
 
 // ==================== 快照（按窗口 label 分槽，对齐 Electron runtimesSnapshots 的 sender.id 分槽） ====================
-static SNAPSHOTS: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
+use crate::commands::state::RUNTIMES_SNAPSHOTS;
 
 fn snapshot_store(label: &str, items: Value) {
-    let mut g = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = RUNTIMES_SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(HashMap::new).insert(label.to_string(), items);
 }
 
 fn snapshot_get(label: &str) -> Option<Value> {
-    SNAPSHOTS
+    RUNTIMES_SNAPSHOTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()

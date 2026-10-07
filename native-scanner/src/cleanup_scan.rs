@@ -152,8 +152,12 @@ fn write_back(out: &str, err: &str) {
 #[cfg(windows)]
 mod ffi {
     use std::collections::HashSet;
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
+    // FFI 声明与结构体已集中到 `crate::util::ffi`（v3 C-3）；本模块只留 HKEY 常量与助手。
+    use crate::util::ffi::{
+        CloseHandle, CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW,
+    };
+    use crate::util::to_wide;
 
     pub const HKEY_CLASSES_ROOT: isize = -2147483648; // 0x80000000
     pub const HKEY_CURRENT_USER: isize = -2147483647; // 0x80000001
@@ -163,47 +167,6 @@ mod ffi {
 
     const KEY_READ: u32 = 0x0002_0019;
     const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
-
-    #[link(name = "advapi32")]
-    #[allow(non_snake_case)]
-    extern "system" {
-        fn RegOpenKeyExW(hKey: isize, lpSubKey: *const u16, ulOptions: u32, samDesired: u32, phkResult: *mut isize) -> i32;
-        fn RegQueryInfoKeyW(
-            hKey: isize, lpClass: *mut u16, lpcchClass: *mut u32, lpReserved: *mut u32,
-            lpcSubKeys: *mut u32, lpcchMaxSubKeyLen: *mut u32, lpcchMaxClassLen: *mut u32,
-            lpcValues: *mut u32, lpcchMaxValueNameLen: *mut u32, lpcbMaxValueLen: *mut u32,
-            lpcbSecurityDescriptor: *mut u32, lpftLastWriteTime: *mut u64,
-        ) -> i32;
-        fn RegCloseKey(hKey: isize) -> i32;
-    }
-
-    #[link(name = "kernel32")]
-    #[allow(non_snake_case)]
-    extern "system" {
-        fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> isize;
-        fn Process32FirstW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
-        fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
-        fn CloseHandle(hObject: isize) -> i32;
-    }
-
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct PROCESSENTRY32W {
-        dwSize: u32,
-        cntUsage: u32,
-        th32ProcessID: u32,
-        th32DefaultHeapID: usize,
-        th32ModuleID: u32,
-        cntThreads: u32,
-        th32ParentProcessID: u32,
-        pcPriClassBase: i32, // Win32 LONG（32 位）——误用 isize 会使 dwSize 多 4 字节，Process32FirstW 报 BAD_LENGTH
-        dwFlags: u32,
-        szExeFile: [u16; 260],
-    }
-
-    fn to_wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
-    }
 
     /// Convert-RegPath 的 hive 映射（首个 '\' 前为缩写，大小写不敏感）
     fn map_hive(reg_path: &str) -> Option<(isize, &str)> {
@@ -1247,85 +1210,14 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
 
 #[cfg(windows)]
 mod rstrtmgr {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-
-    const CCH_RM_MAX_APP_NAME: usize = 255;
-    const CCH_RM_MAX_SERVICE_NAME_SHORT: usize = 63;
     const CCH_RM_SESSION_KEY: usize = 32;
     const ERROR_MORE_DATA: i32 = 234;
 
-    // L6（2026-09-19）：Win32 结构体字段名必须与 SDK 原名逐字一致，重命名既不改变内存布局
-    // 也破坏 #[repr(C)] 的可读性契约，故局部豁免 non_snake_case（改动字段名属于高危改动，禁止）。
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct RM_UNIQUE_PROCESS {
-        dwProcessId: u32,
-        // FILETIME 本体是 { DWORD low, DWORD high }，4 字节对齐、共 8 字节——
-        // 用 u64 会引入 8 字节对齐 pad，使 strAppName 错位 4 字节（实测应用名丢首 2 字符）
-        ProcessStartTimeLow: u32,
-        ProcessStartTimeHigh: u32,
-    }
-
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct RM_PROCESS_INFO {
-        Process: RM_UNIQUE_PROCESS,
-        strAppName: [u16; CCH_RM_MAX_APP_NAME + 1],
-        strServiceShortName: [u16; CCH_RM_MAX_SERVICE_NAME_SHORT + 1],
-        ApplicationType: u32,
-        TSSessionId: u32,
-        bRestartable: i32,
-        // 2026-09-30 实测：Windows 按 **668 字节**步长写这条记录，SDK 头文件那六个成员只推出 664。
-        // 少这 4 字节的后果不是「显示难看」而是三件实事：① 第 i 条记录整体前移 4×i 字节，
-        // 应用名前多出 2i 个乱码字符（用户看到的「偁aWindows 资源管理器」）；② `pid` 与
-        // `ApplicationType` 跟着错位 ⇒ 结束进程拿的是错 PID、critical 判错；③ 按 664 申请的
-        // 缓冲区被按 668 写满 ⇒ 越界写（72 条时越界 288 字节）。
-        // 字段位置同样实测钉住：strAppName@12、strServiceShortName@524（服务短名干净）、
-        // ApplicationType@652（lsass 读出 1000=RmCritical）、bRestartable@660。
-        // 这个尾巴 DWORD 是什么微软没写进头文件，本模块不消费它，只负责让步长对齐。
-        _reserved: u32,
-    }
-
-    impl Clone for RM_PROCESS_INFO {
-        fn clone(&self) -> Self {
-            unsafe { std::ptr::read(self) } // POD 结构体逐位复制（含数组字段，无堆所有权）
-        }
-    }
-
-    // 布局不变式放编译期而不是 #[test]：native-scanner 是 path 依赖、非 workspace 成员，
-    // 它的单测只有显式 --manifest-path 才跑，靠测试兜不住「有人改回六个成员」这种回归。
-    const _: () = {
-        if std::mem::size_of::<RM_PROCESS_INFO>() != 668 {
-            panic!("RM_PROCESS_INFO 步长必须 668 字节：Windows 就按这个宽度写，错了会错位读名/pid 并越界写");
-        }
-        if std::mem::offset_of!(RM_PROCESS_INFO, strAppName) != 12 {
-            panic!("strAppName 偏移必须是 12：RM_UNIQUE_PROCESS 是 DWORD+FILETIME 共 12 字节而非 16");
-        }
-        if std::mem::offset_of!(RM_PROCESS_INFO, ApplicationType) != 652 {
-            panic!("ApplicationType 偏移必须是 652：critical 判定（==1000 RmCritical）按它读");
-        }
+    // 结构、布局断言与 FFI 声明已上移 `crate::util::ffi`（v3 C-3）。
+    use crate::util::ffi::{
+        RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
     };
-
-    #[link(name = "rstrtmgr")]
-    #[allow(non_snake_case)]
-    extern "system" {
-        fn RmStartSession(pSessionHandle: *mut u32, dwSessionFlags: u32, strSessionKey: *mut u16) -> i32;
-        fn RmRegisterResources(
-            dwSessionHandle: u32, nFiles: u32, rgsFileNames: *const *const u16,
-            nApplications: u32, rgApplications: *const RM_PROCESS_INFO,
-            nServices: u32, rgsServiceNames: *const *const u16,
-        ) -> i32;
-        fn RmGetList(
-            dwSessionHandle: u32, pnProcInfoNeeded: *mut u32, pnProcInfo: *mut u32,
-            rgAffectedApps: *mut RM_PROCESS_INFO, lpdwRebootReasons: *mut u32,
-        ) -> i32;
-        fn RmEndSession(dwSessionHandle: u32) -> i32;
-    }
-
-    fn to_wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
-    }
+    use crate::util::to_wide;
 
     /// Restart Manager 查询单个文件的占用者：返回进程列表（PID + 应用名 + 是否系统关键进程）。
     /// RM 不提供 file→process 归属，session 只注册本文件，结果即本文件占用者。

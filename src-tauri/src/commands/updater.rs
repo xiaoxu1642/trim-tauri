@@ -44,7 +44,7 @@
 //! 3. v0.1.2 是首发手动安装包（无 latest.json，updater 从下一版 v0.1.3 起生效）；
 //!    老 Electron 用户迁移引导仍待 Phase 4 实现。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
 use serde_json::{json, Value};
@@ -104,33 +104,20 @@ const FEEDS: &[(&str, &str, &str, &str)] = &[
 ];
 
 // ==================== 进程内状态（上游 autoUpdater 同样是进程单例） ====================
-
-static CHECKING: AtomicBool = AtomicBool::new(false);
-/// 检查通过、等用户点下载的更新，连它**来自哪条线路**一起锁定（下载前要复验同一线路）
-static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
-/// 已下载并验签通过、等用户点重启安装的包
-static DOWNLOADED: Mutex<Option<Downloaded>> = Mutex::new(None);
-/// 正在跑的下载任务句柄（取消走 abort，对齐上游 CancellationToken）。
-///
-/// **句柄只供 cancel 的 abort 用，「是否在下载」的判据是下面的 [`DOWNLOADING`]**——
-/// 这是技术债 T2 的收尾（2026-10-07）：原先 Option 的有无关兼职「下载中」语义，
-/// 而任务闭包结束时置 None 与 spawn 返回后主线程置 Some 之间存在理论乱序（下载
-/// 瞬时完成时闭包先跑），死句柄会盖回 Some 让守卫误判「下载中」。现在判据与句柄
-/// 分离：标志由 spawn 前 store(true) 铺垫、闭包所有出口 store(false) 收尾，abort
-/// 路径由 cancel 自己收尾——三个写点都不依赖句柄的存废，乱序不再影响判定。
-static DOWNLOAD_TASK: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = Mutex::new(None);
-/// 「下载正在进行」的权威标志（T2 收尾，见 [`DOWNLOAD_TASK`] 注释）。
-static DOWNLOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// v3 C-2：状态与锁序登记已集中到 `crate::commands::state`（本文件只消费）。
+use crate::commands::state::{
+    CHECKING, DOWNLOADED, DOWNLOADING, DOWNLOAD_TASK, PENDING, SILENT_CHECK_THREAD,
+};
 
 /// 检查阶段锁定的可信锚点。`signature` 是 minisign 签名字符串 —— 复验时比对它，
 /// 等价于上游比对 sha512：清单里的签名变了就意味着指向的产物变了。
 #[derive(Clone)]
-struct Pending {
+pub(crate) struct Pending {
     update: Update,
     mirror: String,
 }
 
-struct Downloaded {
+pub(crate) struct Downloaded {
     update: Update,
     bytes: Vec<u8>,
     /// 已核对通过的包体 SHA-256（小写 hex）。安装前写的完成标记要带上它，
@@ -775,11 +762,6 @@ pub fn schedule_silent_check<R: Runtime>(app: &AppHandle<R>) {
         }
     }
 }
-
-/// 静默检查线程句柄槽（审查 M-05）。用 OnceLock 而非裸 `Mutex`：本槽只在
-/// [`schedule_silent_check`] 里写入，写入前无并发读，且不需要 `const fn` 新值。
-static SILENT_CHECK_THREAD: std::sync::OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> =
-    std::sync::OnceLock::new();
 
 /// 退出路径收尾：若静默检查线程仍在 sleep，尽力 join 一次。
 ///

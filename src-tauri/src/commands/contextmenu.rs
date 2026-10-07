@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 
 use crate::engine::{delete_manifest, guard, log, native, paths, protect, shellicon, snapshot, sysinfo};
+// v3 C-1：宽字符串转换统一走 engine 唯一实现（原 to_wide16 已删）。
+use crate::engine::native::to_wide;
 
 // open-in-regedit 纯原生实现所需（审计 F-05：原内联 PS 改 Win32 等价，见 open_regedit_native）
 use windows::core::{BOOL, PCWSTR};
@@ -835,10 +837,6 @@ unsafe extern "system" fn close_regedit_wndproc(hwnd: HWND, lparam: LPARAM) -> B
     BOOL(1) // 继续枚举
 }
 
-fn to_wide16(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// 关旧 regedit → 写 LastKey → 拉起 regedit（失败转 RunAs）。
 /// 返回 Ok(elevated)；Err 表示两次拉起均失败。
 fn open_regedit_native(last_key: &str) -> Result<bool, String> {
@@ -903,7 +901,7 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
 
     // 3. 写 LastKey（键不存在则创建；写失败不阻断——对齐原脚本 catch{}）
     unsafe {
-        let path = to_wide16(r"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit");
+        let path = to_wide(r"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit");
         let mut hk = HKEY::default();
         let mut disp = REG_CREATE_KEY_DISPOSITION::default();
         if RegCreateKeyExW(
@@ -919,13 +917,13 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
         )
         .is_ok()
         {
-            let val = to_wide16(last_key);
+            let val = to_wide(last_key);
             let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
             // 审查 v2-F16：值名先落到局部变量再取裸指针。原先写
-            // `PCWSTR(to_wide16("LastKey").as_ptr())` —— 临时值当前能活到语句结束因而不算 UB，
+            // `PCWSTR(to_wide("LastKey").as_ptr())` —— 临时值当前能活到语句结束因而不算 UB，
             // 但只要有人把这条语句拆开、或在中间插入 `.await`/提前返回，指针立刻悬垂，
             // 而 FFI 路径上不会有任何编译错误。同函数里其余几处 FFI 取值都已用局部变量写法。
-            let name = to_wide16("LastKey");
+            let name = to_wide("LastKey");
             let r = RegSetValueExW(
                 hk,
                 PCWSTR(name.as_ptr()),
@@ -949,7 +947,7 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
     let regedit = std::env::var("SystemRoot")
         .map(|r| format!(r"{r}\System32\regedit.exe"))
         .unwrap_or_else(|_| r"C:\Windows\System32\regedit.exe".to_string());
-    let exe = to_wide16(&regedit);
+    let exe = to_wide(&regedit);
     let open = unsafe {
         ShellExecuteW(
             None,

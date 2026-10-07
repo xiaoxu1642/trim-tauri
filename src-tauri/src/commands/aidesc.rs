@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
+use crate::engine::native::to_wide;
 use crate::engine::{guard, log};
 use crate::security;
 
@@ -142,10 +143,6 @@ struct HttpResult {
     body: String,
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// WinHTTP 句柄 RAII（任一提前返回都不泄漏句柄）
 struct WinHttpHandle(*mut std::ffi::c_void);
 
@@ -190,7 +187,7 @@ fn post_json(
     // 不按「上一跳」判 —— 后者会让 A→B→A 这种两跳把主机限制绕过去。
     let origin_host = target.host.clone();
     // 版本号取编译期常量：写死字面量就成了第 4 处需要手工同步的版本源
-    let agent = wide(&format!("Trim/{}", env!("CARGO_PKG_VERSION")));
+    let agent = to_wide(&format!("Trim/{}", env!("CARGO_PKG_VERSION")));
     let header_text: String = headers
         .iter()
         .map(|(k, v)| format!("{k}: {v}\r\n"))
@@ -229,8 +226,8 @@ fn post_json(
         let mut current = target;
         // 跳数封顶：同主机 + 非私有仍可能配一个自指的 Location 形成死循环
         for hop in 0..=MAX_REDIRECT_HOPS {
-            let host = wide(&current.host);
-            let object = wide(&current.path);
+            let host = to_wide(&current.host);
+            let object = to_wide(&current.path);
             let connect = WinHttpConnect(session, PCWSTR(host.as_ptr()), current.port, 0);
             if connect.is_null() {
                 return Err(format!("WinHTTP 连接失败: {}", current.host));
@@ -407,7 +404,7 @@ unsafe fn query_header(request: *mut std::ffi::c_void, name: &str) -> Option<Str
     use windows::core::PCWSTR;
     use windows::Win32::Networking::WinHttp::*;
     const BUF_U16: usize = 2048;
-    let name_w = wide(name);
+    let name_w = to_wide(name);
     let mut buf = vec![0u16; BUF_U16];
     let mut len = (BUF_U16 * 2) as u32;
     WinHttpQueryHeaders(

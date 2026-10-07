@@ -23,18 +23,16 @@
 //!   commands::memory::memory_stubborn_block,
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
 use crate::engine::{guard, log, native, sysinfo};
 
-/// 进程快照分槽（key = 调用窗口 label）。`Vec` 代替 `HashMap` 以支持 const 初始化。
-static PROCESS_SNAPSHOTS: Mutex<Vec<(String, HashMap<i64, ProcInfo>)>> = Mutex::new(Vec::new());
+use crate::commands::state::PROCESS_SNAPSHOTS;
 
 #[derive(Clone)]
-struct ProcInfo {
+pub(crate) struct ProcInfo {
     process_name: String,
     path: String,
 }

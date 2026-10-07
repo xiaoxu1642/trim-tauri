@@ -17,7 +17,6 @@
 //! - 修复后自动重跑一次 collect，把最新 items 一并回传（整页快照刷新）。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
@@ -34,15 +33,15 @@ const NETCHECK_ADMIN_ACTIONS: &[&str] = &[
 ];
 
 // ==================== 快照（按窗口 label 分槽） ====================
-static SNAPSHOTS: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
+use crate::commands::state::NETCHECK_SNAPSHOTS;
 
 fn snapshot_store(label: &str, items: Value) {
-    let mut g = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = NETCHECK_SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(HashMap::new).insert(label.to_string(), items);
 }
 
 fn snapshot_get(label: &str) -> Option<Value> {
-    SNAPSHOTS
+    NETCHECK_SNAPSHOTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()

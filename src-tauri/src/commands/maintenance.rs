@@ -10,8 +10,6 @@
 //! - 超时 30 分钟（SFC/DISM 耗时长）。
 //! - S3：纯 Rust 原生实现，无 PS 回退。
 
-use std::sync::Mutex;
-
 use serde_json::{json, Value};
 use tauri::{Emitter, Runtime, WebviewWindow};
 
@@ -30,8 +28,7 @@ fn load_tasks() -> TasksFile {
     serde_json::from_str(TASKS_JSON).expect("maintenance-tasks.json 由生成器保证合法")
 }
 
-/// 运行锁：Some(taskId) 表示已有任务在跑
-static RUNNING: Mutex<Option<String>> = Mutex::new(None);
+use crate::commands::state::RUNNING;
 
 /// **占位式**取锁：空则占上并回 None，非空则回正在跑的那个任务 id。
 ///

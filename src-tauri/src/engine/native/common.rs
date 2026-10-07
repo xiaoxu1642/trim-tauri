@@ -31,13 +31,10 @@ pub(super) unsafe fn pstr_to_string(ptr: *const u8) -> String {
     String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).to_string()
 }
 
-/// Rust str → null 结尾宽字符串
-pub(super) fn wide_str_from_str(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-
-pub(super) fn to_wide(s: &str) -> Vec<u16> {
+/// Rust str → null 结尾宽字符串（全仓唯一实现：v3 C-1 把 `wide_str_from_str`、
+/// `uninstall::helpers::to_wide`、`contextmenu::to_wide16` 与 elevate/aidesc 的
+/// 内联 `wide` 全部收敛到此；禁止再写第二份）
+pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 

@@ -3,6 +3,9 @@
 //! 命令命名：Rust snake_case，`<域>_<动作>`；适配层 CHANNEL_MAP 是通道名的唯一真源（D2）。
 //! 新增命令必须同时登记 CHANNEL_MAP 与一致性断言，防"Rust 有了、前端没接"的静默断裂。
 
+// v3 C-2：命令层全局状态集中登记 + 锁序文档（唯一清单，新状态先登记再落点）
+pub(crate) mod state;
+
 pub mod app;
 pub mod device;
 pub mod log;

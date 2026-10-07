@@ -16,8 +16,8 @@ unsafe fn net_connection_name(adapter_guid: &str) -> Option<String> {
     let sub = format!(
         r"SYSTEM\CurrentControlSet\Control\Network\{{4d36e972-e325-11ce-bfc1-08002be10318}}\{adapter_guid}"
     );
-    let sub_w = wide_str_from_str(&sub);
-    let name_w = wide_str_from_str("Name");
+    let sub_w = to_wide(&sub);
+    let name_w = to_wide("Name");
 
     let mut hkey = HKEY_LOCAL_MACHINE;
     if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sub_w.as_ptr()), None, KEY_READ, &mut hkey).is_err() {

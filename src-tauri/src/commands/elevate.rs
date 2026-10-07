@@ -78,12 +78,7 @@ fn new_nonce() -> String {
     format!("{:016x}", b.finish())
 }
 
-/// 审查 2026-09-27 M9：提权请求防重入。此前连点两次会生成两个 nonce 原子覆写同一条
-/// 握手记录——第一个监视线程认不出自己的 nonce，20s 超时后误报「未检测到新实例启动」，
-/// 且可能弹出两个 UAC。用 AtomicBool 让并发第二个请求直接被拒；释放点覆盖全部退出
-/// 路径（runas 失败 / 写状态失败），成功路径不显式复位——握手完成后本进程即将退出，
-/// 新实例是全新的内存空间，复位反而可能放行「同进程内第三次点击」与让位流程竞争。
-static ELEVATE_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+use crate::commands::state::ELEVATE_INFLIGHT;
 
 fn write_phase(nonce: &str, phase: &str) -> bool {
     let payload = json!({
@@ -365,13 +360,12 @@ fn runas_launch(exe: &std::path::Path, params: &str) -> Result<(), String> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-    let exe_w = wide(&exe.to_string_lossy());
-    let params_w = wide(params);
-    let verb_w = wide("runas");
-    let workdir_w = wide(&exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
+    // v3 C-1：宽字符串转换统一走 engine 唯一实现（原内联 wide 已删）。
+    use crate::engine::native::to_wide;
+    let exe_w = to_wide(&exe.to_string_lossy());
+    let params_w = to_wide(params);
+    let verb_w = to_wide("runas");
+    let workdir_w = to_wide(&exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
     let code = unsafe {
         ShellExecuteW(
             None,

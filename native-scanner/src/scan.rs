@@ -1663,22 +1663,8 @@ pub mod recycle {
     /// 会静默永久删且 rc=0，而结果行还写「已移入回收站」。
     const FOF_WANTNUKEWARNING: u16 = 0x4000;
 
-    #[repr(C)]
-    struct ShFileOpStructW {
-        hwnd: isize,
-        w_func: u32,
-        p_from: *const u16,
-        p_to: *const u16,
-        f_flags: u16,
-        f_any_operations_aborted: i32,
-        h_name_mappings: *mut core::ffi::c_void,
-        lpsz_progress_title: *const u16,
-    }
-
-    #[link(name = "shell32")]
-    extern "system" {
-        fn SHFileOperationW(lpfileop: *mut ShFileOpStructW) -> i32;
-    }
+    // 结构与 FFI 声明已上移 `crate::util::ffi`（v3 C-3）。
+    use crate::util::ffi::{SHFileOperationW, ShFileOpStructW};
 
     /// OsStr 版：直接把宽字符喂给 SHFileOperationW，全程无损。
     ///

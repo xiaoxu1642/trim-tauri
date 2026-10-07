@@ -19,7 +19,7 @@
 //! 不改成 dataURL（那是渲染层共享代码，改一处要动两侧）。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
@@ -38,12 +38,7 @@ const BG_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 
 // ==================== 环境态（对照 main.js 4139-4150） ====================
 
-/// 电池供电中（会话级降级判据，不改用户存储的偏好）
-static ENV_ON_BATTERY: AtomicBool = AtomicBool::new(false);
-/// 系统「透明效果」开关为开（读不到按开处理，不误降级）
-static ENV_TRANSPARENCY_ON: AtomicBool = AtomicBool::new(true);
-/// 电池降级是否**已由本机制施加**。接电时只还原自己降的那一次，避免覆盖用户切换
-static BATTERY_SWAPPED: AtomicBool = AtomicBool::new(false);
+use crate::commands::state::{BATTERY_SWAPPED, ENV_ON_BATTERY, ENV_TRANSPARENCY_ON};
 
 fn env_payload() -> Value {
     json!({

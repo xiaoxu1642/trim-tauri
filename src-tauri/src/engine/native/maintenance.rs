@@ -266,7 +266,7 @@ pub(crate) fn dir_delete_blocked(path: &std::path::Path) -> Option<String> {
     const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
     // Path::ancestors() 自带「自身 → 逐级父目录 → 根」，正是要逐层查的链
     for level in path.ancestors() {
-        let wide = wide_str_from_str(&level.to_string_lossy());
+        let wide = to_wide(&level.to_string_lossy());
         let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
         if attrs == INVALID_FILE_ATTRIBUTES {
             return Some(format!("无法读取目录属性（{}），按拒绝处理", level.display()));

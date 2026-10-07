@@ -33,11 +33,14 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use tauri::{Emitter, WebviewWindow};
 use trim_finder::scan::{self, Sink};
+// %VAR% 展开唯一真源；本文件此前的私有实现已随 v3 C-1 删除（旧版把「已定义但为空」
+// 的变量展开成空串，与真源的「保持原文」口径不一致）。
+use trim_finder::cleanup_scan::expand_env_path;
 
 use crate::engine::delete_manifest;
 // P2-1（审查 2026-10-07）：路径键统一走 engine 唯一实现，本文件不再自持一份
@@ -65,7 +68,7 @@ const FINDER_MANIFEST_READ_MAX: usize = 200;
 // ==================== 扫描快照槽（本窗口专属） ====================
 
 #[derive(Clone)]
-struct SnapEntry {
+pub(crate) struct SnapEntry {
     /// 原始路径（保持扫描输出的正斜杠形态，删除详情与渲染层据此匹配）
     path: String,
     /// "dir" | "file"
@@ -94,12 +97,10 @@ impl SnapEntry {
     }
 }
 
-/// label -> (规范化小写路径 -> 条目)。Electron 用 Map（插入序 + 按 ts 清理）；
-/// 这里用 HashMap，清理时显式按 ts 排序，语义等价且查找 O(1)。
-static SNAPSHOTS: OnceLock<Mutex<HashMap<String, HashMap<String, SnapEntry>>>> = OnceLock::new();
+use crate::commands::state::FINDER_SNAPSHOTS;
 
 fn snapshots() -> &'static Mutex<HashMap<String, HashMap<String, SnapEntry>>> {
-    SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
+    FINDER_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 结果写入本窗口快照槽（累积合并，不整体重置——对齐 FD-7）。
@@ -823,36 +824,6 @@ fn js_uint(v: Option<&Value>) -> u64 {
         Some(n) if n > 0.0 => n as u64,
         _ => 0,
     }
-}
-
-/// 展开路径中的 `%VAR%` 环境变量（缺失时保留原样，对照 expandEnvPath）
-fn expand_env_path(p: &str) -> String {
-    let mut out = String::with_capacity(p.len());
-    let mut rest = p;
-    while let Some(i) = rest.find('%') {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 1..];
-        match after.find('%') {
-            Some(j) => {
-                let name = &after[..j];
-                match std::env::var(name) {
-                    Ok(v) if !name.is_empty() => out.push_str(&v),
-                    _ => {
-                        out.push('%');
-                        out.push_str(name);
-                        out.push('%');
-                    }
-                }
-                rest = &after[j + 1..];
-            }
-            None => {
-                out.push_str(&rest[i..]);
-                rest = "";
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// 存在性筛分：返回（存在且为目录, 缺失或不可用），对照 resolveExistingDirs

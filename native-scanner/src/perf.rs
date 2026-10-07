@@ -11,12 +11,12 @@
 use crate::json_escape;
 use std::io::Write as _;
 
-// 手写 ntdll / kernel32 补充声明（windows-sys 覆盖不到或类型 Hunt 成本高的少量函数）
-#[link(name = "ntdll")]
-extern "system" {
-    fn NtQuerySystemInformation(class: u32, info: *mut u8, len: u32, return_len: *mut u32) -> i32;
-    fn NtSetSystemInformation(class: u32, info: *mut u8, len: u32) -> i32;
-}
+// 手写 ntdll / kernel32 / advapi32 补充声明已集中到 `crate::util::ffi`（v3 C-3）；
+// 本文件不再自建 extern 块（windows-sys 覆盖不到或类型 Hunt 成本高的少量函数）。
+use crate::util::ffi::{
+    NtQuerySystemInformation, NtSetSystemInformation, QueryPerformanceCounter,
+    QueryPerformanceFrequency, RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RtlGetVersion,
+};
 
 const SYS_PROCESSOR_PERFORMANCE_INFORMATION: u32 = 8;
 /// `SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION` 单结构体字节数（按逻辑处理器数返回 N 份）
@@ -48,11 +48,7 @@ fn now_ms() -> u64 {
 // 而结果照样标 `measured:true` —— 计时口径必须与系统时间解耦，所以走 QPC。
 // 手写 kernel32 声明：windows-sys 的 `Win32_System_Performance` feature 本 crate 未开
 // （红线：不新开 feature），且这两个函数无类型负担。
-#[link(name = "kernel32")]
-extern "system" {
-    fn QueryPerformanceCounter(lpPerformanceCount: *mut i64) -> i32;
-    fn QueryPerformanceFrequency(lpFrequency: *mut i64) -> i32;
-}
+// 声明已上移 crate::util::ffi（v3 C-3）。
 
 /// (起点计数, 频率)，进程内只取一次；`None` = QPC 不可用（理论不发生，留回落）
 static QPC_BASE: std::sync::OnceLock<Option<(i64, i64)>> = std::sync::OnceLock::new();
@@ -90,7 +86,8 @@ fn mono_ns() -> u128 {
 fn mono_ms() -> u64 {
     (mono_ns() / 1_000_000) as u64
 }
-fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain([0]).collect() }
+// v3 C-1：宽字符串转换统一走 crate::util::to_wide（原本文件副本已删）。
+use crate::util::to_wide as wide;
 fn utf16_str(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..end])
@@ -513,8 +510,6 @@ unsafe fn uptime_text() -> String {
 unsafe fn os_version_strings() -> (String, String, String) {
     // RtlGetVersion（避开 manifest 兼容清单）；caption 取注册表 ProductName（与 PS 的
     // 本地化 Caption 措辞可能有别，已知差异，见交付报告）
-    #[link(name = "ntdll")]
-    extern "system" { fn RtlGetVersion(info: *mut u8) -> i32; }
     let mut vi = [0u8; 276]; // OSVERSIONINFOW
     vi[0..4].copy_from_slice(&276u32.to_le_bytes());
     RtlGetVersion(vi.as_mut_ptr());
@@ -524,13 +519,6 @@ unsafe fn os_version_strings() -> (String, String, String) {
     let caption = reg_get_string(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName")
         .unwrap_or_else(|| "Windows".to_string());
     (caption, format!("{}.{}.{}", major, minor, build), build.to_string())
-}
-
-#[link(name = "advapi32")]
-extern "system" {
-    fn RegOpenKeyExW(key: isize, sub: *const u16, opt: u32, sam: u32, out: *mut isize) -> i32;
-    fn RegQueryValueExW(key: isize, name: *const u16, res: *mut u32, typ: *mut u32, data: *mut u8, len: *mut u32) -> i32;
-    fn RegCloseKey(key: isize) -> i32;
 }
 
 unsafe fn reg_get_string(sub: &str, name: &str) -> Option<String> {

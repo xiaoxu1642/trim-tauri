@@ -5,13 +5,11 @@
 //! 反而藏掉用户要用的选项。系统盘介质不会变化，进程内缓存一次即可。
 //! S3：已删除 PS 回退，纯 Rust 原生实现。
 
-use std::sync::Mutex;
-
 use tauri::WebviewWindow;
 
 use crate::engine::guard;
 
-static CACHE: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+use crate::commands::state::SYSTEM_DISK_CACHE;
 
 #[tauri::command]
 pub async fn system_disk_type<R: tauri::Runtime>(
@@ -21,7 +19,7 @@ pub async fn system_disk_type<R: tauri::Runtime>(
     guard::guard_readonly(&window)?;
     let refresh = refresh.unwrap_or(false);
     if !refresh {
-        if let Some(cached) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if let Some(cached) = SYSTEM_DISK_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(serde_json::json!({ "success": true, "data": cached, "cached": true }));
         }
     }
@@ -35,7 +33,7 @@ pub async fn system_disk_type<R: tauri::Runtime>(
 
     match result {
         Ok(Ok(data)) => {
-            *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(data.clone());
+            *SYSTEM_DISK_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(data.clone());
             Ok(serde_json::json!({ "success": true, "data": data, "cached": false }))
         }
         Ok(Err(message)) => Ok(serde_json::json!({ "success": false, "message": message })),

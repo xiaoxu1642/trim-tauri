@@ -12,7 +12,7 @@
 //! - 报告目录 `cache/realtime-reports`，超过 7 天自动清理。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -31,15 +31,13 @@ const REPORT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// 报告样本数上限（超长记录防爆盘）
 const REPORT_MAX_SAMPLES: usize = 1_000_000;
 
-struct Sampler {
+pub(crate) struct Sampler {
     stop: Option<Arc<AtomicBool>>,
     last_request_at: i64,
     reaper_started: bool,
 }
 
-static SAMPLER: Mutex<Option<Sampler>> = Mutex::new(None);
-/// 采样器最近一帧（{ t, adapters:[{name,up,down,ifIndex}] }）
-static LATEST: Mutex<Option<Value>> = Mutex::new(None);
+use crate::commands::state::{LATEST, SAMPLER};
 
 fn with_sampler<T>(f: impl FnOnce(&mut Sampler) -> T) -> T {
     let mut guard = SAMPLER.lock().unwrap_or_else(|e| e.into_inner());

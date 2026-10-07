@@ -5,7 +5,6 @@
 //! - 再 schtasks 查 DWMBlurGlass_Extend 计划任务；
 //! - 完全启动 12s 后跑一次，**只提示不干预**（命中时设置页「系统信息」出现兼容性提示行）。
 
-use std::sync::Mutex;
 use std::time::Duration;
 
 use tauri::{AppHandle, WebviewWindow};
@@ -15,8 +14,7 @@ use crate::engine::{guard, log, paths};
 use crate::engine::systembin::system_tool;
 use crate::security;
 
-/// DWM 注入工具检测结论（冷启动 12s 后回填）
-static DWM_TOOL_HINT: Mutex<Option<String>> = Mutex::new(None);
+use crate::commands::state::DWM_TOOL_HINT;
 
 /// 内置简介库（离线，随应用分发，不联网、不上传任何本机信息）
 const ITEM_INTRO_JSON: &str = include_str!("../../data/item-intro.json");

@@ -15,9 +15,8 @@ pub(super) fn residue_snapshots() -> &'static Mutex<HashMap<String, (i64, Vec<Va
     RESIDUE_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(super) fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+// v3 C-1 去重：宽字符串转换统一走 engine 唯一实现（本文件曾有等价私有实现）。
+pub(super) use crate::engine::native::to_wide;
 
 // ==================== 注册表读取助手（本文件自含，不动 native.rs 私有层） ====================
 
