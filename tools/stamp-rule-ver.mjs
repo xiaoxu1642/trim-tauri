@@ -11,7 +11,7 @@
 //   node tools/stamp-rule-ver.mjs --write    重刷两份库的 ver（**不签名**）
 //   node tools/stamp-rule-ver.mjs --bump 20261005   先把 rulesVersion 抬到该值再重刷
 //
-// 为什么本脚本刻意不签名：私钥只在发布机（AGENTS §5.16），且"改内容"与"签内容"是两步——
+// 为什么本脚本刻意不签名：私钥只在发布机（AGENTS §5.20），且"改内容"与"签内容"是两步——
 // 合成一步会让人以为写完就直接能发。写完后必须自己跑：
 //   node tools/sign-cleanup-rules.mjs sign + gen-fallback
 //   node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/uninstall-residue-rules.json

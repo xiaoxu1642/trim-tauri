@@ -23,7 +23,7 @@
   }
 
   // 侧边栏折叠/展开
-  const SIDEBAR_KEY = 'winclean-sidebar-collapsed';
+  const SIDEBAR_KEY = 'trim-sidebar-collapsed';
 
   function getSidebarCollapsed() {
     try { return localStorage.getItem(SIDEBAR_KEY) === 'true'; } catch (e) { return false; }
@@ -76,7 +76,7 @@
   }
 
   // 侧边栏子菜单（父级条目箭头）展开/折叠状态持久化
-  const NAVSUB_KEY_PREFIX = 'winclean-navsub-';
+  const NAVSUB_KEY_PREFIX = 'trim-navsub-';
 
   // 返回 null 表示用户从未手动设置过；业务层据此决定默认展开策略
   function getNavSubExpanded(key) {
@@ -255,11 +255,11 @@
   }
 
   // 路由
-  const ACTIVE_PAGE_KEY = 'winclean-active-page';
+  const ACTIVE_PAGE_KEY = 'trim-active-page';
 
   // 磁盘清理四合一：原五个独立页面收拢为 page-cleanup 内的分段视图
   const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-empty', 'cleanup-analyze'];
-  const CLEANUP_VIEW_KEY = 'winclean-cleanup-view';
+  const CLEANUP_VIEW_KEY = 'trim-cleanup-view';
 
   function getCleanupView() {
     try {

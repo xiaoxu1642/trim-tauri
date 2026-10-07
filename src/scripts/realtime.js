@@ -4,7 +4,7 @@
   'use strict';
 
   // ===== 预留配置项 =====
-  const STORAGE_KEY = 'winclean-realtime';   // localStorage 键
+  const STORAGE_KEY = 'trim-realtime';   // localStorage 键
   const POLL_INTERVAL = 1500;                // 流量采样轮询间隔(ms)，可调
   const LOSS_INTERVAL = 5000;                // 丢包检测轮询间隔(ms)，可调
   const MAX_POINTS = 60;                     // 图表保留最大数据点数（时间窗口）

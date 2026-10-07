@@ -146,7 +146,7 @@
     sys_drive_free: { page: 'cleanup', tip: '前往磁盘清理，释放系统盘空间' },
     power_plan: { page: 'quickcmds', tip: '前往快捷指令，打开「电源选项」调整计划' }
   };
-  const CHECKUP_IGNORE_KEY = 'winclean-checkup-ignored';
+  const CHECKUP_IGNORE_KEY = 'trim-checkup-ignored';
 
   function loadIgnoredChecks() {
     try {

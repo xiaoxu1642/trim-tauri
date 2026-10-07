@@ -14,7 +14,7 @@
   let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested } | null
   // 审查 2026-09-27 M8：批量执行中触发提权时，应用将重启、内存勾选集丢失。
   // 剩余批次在提权确认瞬间写入 localStorage，重启进页时恢复预勾选并提示续跑。
-  const MAINT_PENDING_BATCH_KEY = 'winclean-maint-pending-batch';
+  const MAINT_PENDING_BATCH_KEY = 'trim-maint-pending-batch';
   let batchRemainingIds = null;
   let outputBound = false;
 

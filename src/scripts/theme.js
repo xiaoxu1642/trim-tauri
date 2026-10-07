@@ -47,10 +47,10 @@
   };
 
   // 全局应用「设计系统」外观（背景模糊度 + 预设背景）：跨页面/启动即生效，
-  // 与设置页共用 localStorage 键 'winclean-appearance'，避免仅设置页生效。
+  // 与设置页共用 localStorage 键 'trim-appearance'，避免仅设置页生效。
   function applySkinAndPreset() {
     let ap = {};
-    try { ap = JSON.parse(localStorage.getItem('winclean-appearance') || '{}') || {}; } catch (e) {}
+    try { ap = JSON.parse(localStorage.getItem('trim-appearance') || '{}') || {}; } catch (e) {}
     // 背景模糊度（设置页整合4）：>0 挂 body[data-skin="glass"] 并按百分比缩放模糊半径
     // （100% = 26px，与原液态玻璃一致；与 pathbinding.js 的 GLASS_MAX_BLUR_PX 共用同一约定，
     // 改动需两处同步）。v3.0 全局玻璃化：0% 仅表示「无磨砂」，容器仍为玻璃 alpha
@@ -74,7 +74,7 @@
       dirty = true;
     }
     if (dirty) {
-      try { localStorage.setItem('winclean-appearance', JSON.stringify(ap)); } catch (e) {}
+      try { localStorage.setItem('trim-appearance', JSON.stringify(ap)); } catch (e) {}
     }
     if (blur > 0) {
       document.body.dataset.skin = 'glass';

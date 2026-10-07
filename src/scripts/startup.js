@@ -48,13 +48,13 @@
   // 用户禁用启动项后，若连续 3 次扫描发现该项仍被外部程序自动恢复（重新启用），
   // 则自动执行「删除 + 加入防恢复黑名单」；黑名单项再次出现时会被立即自动删除，
   // 从源头阻止程序反复创建该启动项。状态持久化在 localStorage。
-  const DEFEND_KEY = 'winclean-startup-defend';     // { 指纹: { name, strikes } }
-  const BLACKLIST_KEY = 'winclean-startup-blacklist'; // [指纹...]
+  const DEFEND_KEY = 'trim-startup-defend';     // { 指纹: { name, strikes } }
+  const BLACKLIST_KEY = 'trim-startup-blacklist'; // [指纹...]
   const DEFEND_STRIKES_LIMIT = 3;
   // SU-2（2026-09-15，S7）：防恢复自动删除总开关。原实现扫描到顽固恢复项即
   // 「静默删除 + 拉黑」，用户既无法关闭也无法预知；且用户经 Windows 原生 UI 主动
   // 重新启用会被误计为「外部恢复」。现改为：总开关可关 + 每次自动删除前逐条红色确认。
-  const DEFEND_ENABLED_KEY = 'winclean-startup-defend-enabled'; // 总开关（默认开）
+  const DEFEND_ENABLED_KEY = 'trim-startup-defend-enabled'; // 总开关（默认开）
 
   function loadStore(key, fallback) {
     try {

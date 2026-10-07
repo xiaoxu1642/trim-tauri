@@ -836,7 +836,7 @@
   // ==================== 列表渲染：胶囊卡片（一行 3 / 6 列） ====================
   // 优化中心分类过滤（'全部' 显示全部分组）
   let activeCategory = '全部';
-  const OPT_CATEGORY_KEY = 'winclean-optcat-active';
+  const OPT_CATEGORY_KEY = 'trim-optcat-active';
   // 审查 2026-09-27 L11：「游戏安全诊断」无任何数据项映射（12 个最终展示组外），常驻
   // 空分类已删除；如日后新增该分组任务，在此补回即可
   const OPT_CATEGORIES = ['全部', '内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '隐私防护', '系统调校', '系统精简', '显卡优化', '浏览器优化'];
@@ -980,7 +980,7 @@
   const appliedDetected = new Set();  // 来源②：主进程持久化记账
   const appliedChecked = new Set();   // 来源③：实时检测
 
-  const OPT_APPLIED_KEY = 'winclean-opt-applied-ids';
+  const OPT_APPLIED_KEY = 'trim-opt-applied-ids';
 
   function loadAppliedLocal() {
     try {
@@ -1978,7 +1978,7 @@
   // 审查 2026-09-27 M8：批量执行中触发提权时，应用会以管理员身份重启、内存勾选集
   // 全部丢失。剩余批次在提权确认瞬间写入 localStorage，重启进页时恢复为预勾选并提示，
   // 用户点「执行所选优化」即可续跑；单项执行（无批量上下文）不写键、行为不变。
-  const OPT_PENDING_BATCH_KEY = 'winclean-opt-pending-batch';
+  const OPT_PENDING_BATCH_KEY = 'trim-opt-pending-batch';
   let batchRemainingIds = null;
 
   function toggleSelect(id) {

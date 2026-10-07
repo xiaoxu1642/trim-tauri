@@ -49,7 +49,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
   ];
 
   const ALL_KEYS = GROUPS.flatMap(g => g.items.map(i => i.key));
-  const FIRST_LAUNCH_KEY = 'winclean-paths-first-launch-done';
+  const FIRST_LAUNCH_KEY = 'trim-paths-first-launch-done';
 
   let pathConfig = {};
   let icons = {};        // groupId -> dataUrl
@@ -324,7 +324,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
   }
 
   // ==================== 外观设置（强调色 / 背景图片 / 系统信息折叠） ====================
-  const APPEARANCE_KEY = 'winclean-appearance';
+  const APPEARANCE_KEY = 'trim-appearance';
 
   function escapeHtml(text) { return window.ds.esc(text); }
 
@@ -562,14 +562,14 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     const sec = document.getElementById('systemInfoSection');
     const chevron = document.getElementById('systemInfoChevron');
     try {
-      if (localStorage.getItem('winclean-systeminfo-open') === '1' && sec) sec.classList.remove('collapsed');
+      if (localStorage.getItem('trim-systeminfo-open') === '1' && sec) sec.classList.remove('collapsed');
     } catch (e) {}
     if (sec && !sec.classList.contains('collapsed') && chevron) chevron.textContent = '▴';
     document.getElementById('systemInfoToggle')?.addEventListener('click', () => {
       if (!sec) return;
       const open = sec.classList.toggle('collapsed') === false;
       if (chevron) chevron.textContent = open ? '▴' : '▾';
-      try { localStorage.setItem('winclean-systeminfo-open', open ? '1' : '0'); } catch (e) {}
+      try { localStorage.setItem('trim-systeminfo-open', open ? '1' : '0'); } catch (e) {}
     });
     // 阶段三：折叠区补齐 ARIA（不改视觉逻辑，ds.accordion 只同步 aria-expanded/hidden）
     if (sec) window.ds?.accordion?.enhance(document.getElementById('systemInfoToggle'), sec);
@@ -825,7 +825,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     });
     // ==================== 内置实拍壁纸轮换（v2.8.0） ====================
     // 仅 wp-* 实拍壁纸预设参与轮换（渐变/无背景时计时器空转）；默认 10s，可调/可关；
-    // 窗口隐藏时自动暂停（visibilitychange），省电不打扰。状态存 winclean-appearance。
+    // 窗口隐藏时自动暂停（visibilitychange），省电不打扰。状态存 trim-appearance。
     // v3.2.0：预设壁纸下架「山峰 wp-mountain」（连同极光/落日渐变），WP_LIST 仅保留在售实拍壁纸
     const WP_LIST = ['wp-winter', 'wp-gaming', 'wp-anime', 'wp-doll'];
     const wpRotateToggle = document.getElementById('wallpaperRotateToggle');
@@ -939,9 +939,9 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
       clearTimeout(blurSaveTimer);
       blurSaveTimer = setTimeout(function () {
         try {
-          var ap = JSON.parse(localStorage.getItem('winclean-appearance') || '{}');
+          var ap = JSON.parse(localStorage.getItem('trim-appearance') || '{}');
           ap.wallpaperBlur = Math.round(pct);
-          localStorage.setItem('winclean-appearance', JSON.stringify(ap));
+          localStorage.setItem('trim-appearance', JSON.stringify(ap));
         } catch (e) {}
       }, 150);
     }
@@ -963,7 +963,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
       if (dragging) { dragging = false; range.classList.remove('dragging'); }
     });
     try {
-      var ap2 = JSON.parse(localStorage.getItem('winclean-appearance') || '{}');
+      var ap2 = JSON.parse(localStorage.getItem('trim-appearance') || '{}');
       // 兜底用同一个默认值：theme.js 正常已在启动期把 wallpaperBlur 落进存储，
       // 走到这里说明它是空的（老配置/写入失败），滑块位置要和实际生效值一致，不能显示 0%
       var defBlur = window.ds?.DEFAULT_WALLPAPER_BLUR ?? 0;

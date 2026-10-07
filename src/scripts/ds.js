@@ -5,6 +5,25 @@
 (function () {
   'use strict';
 
+  // ---------- ⓪ localStorage 键前缀迁移（winclean-* → trim-*，2026-10-07） ----------
+  // 历史前缀来自 Electron 时代的项目名，与现在身份不一致（AGENTS §0.2「已知残留」）。
+  // ds.js 是全部页面（主窗 + 五子窗）最早必挂的脚本，且排在它前面的
+  // tauri-api/window-material/theme-boot/splash 都不碰这些键——迁移放这里，
+  // 保证任何业务读写发生前旧值已搬进新键。**无条件覆盖**：用户降级回旧版时旧版
+  // 仍读写 winclean- 键，再升级回来那才是最新数据，以旧键为准才不丢尾部写入。
+  // 正常单次迁移后旧键已删、后续加载 olds 为空，重复执行是幂等的。
+  try {
+    const olds = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.indexOf('winclean-') === 0) olds.push(k);
+    }
+    for (const k of olds) {
+      localStorage.setItem('trim-' + k.slice('winclean-'.length), localStorage.getItem(k));
+      localStorage.removeItem(k);
+    }
+  } catch (e) { /* 存储不可用不拦启动 */ }
+
   const ds = { version: '1.0.0' };
 
   function reducedMotion() {

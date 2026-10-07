@@ -3,7 +3,7 @@
 (function () {
   'use strict';
 
-  const KEY = 'winclean-mouse-trail';
+  const KEY = 'trim-mouse-trail';
   const THROTTLE_MS = 22;      // 生成节流
   const FADE_MS = 520;         // 与 main.css 的过渡时长保持一致
   // 审查v4-M1：reduced-motion 必须使用时实时求值，禁止模块加载时固化快照

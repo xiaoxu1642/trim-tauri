@@ -1,5 +1,5 @@
 // liquid-glass.js - 全局「液态玻璃」引擎 2.0
-// 模式（localStorage 'winclean-liquid-motion'，四档；旧值 refract 自动迁移为 standard）。
+// 模式（localStorage 'trim-liquid-motion'，四档；旧值 refract 自动迁移为 standard）。
 // 材质语义对齐 Apple Liquid Glass（docs规范/update/2026-09-14 五方案评估·B1）：
 //   full     ≈ clear+ ：完整液态玻璃——分段栏滑块 + 按钮 + 弹层 SVG 物理折射（斯涅尔定律位移贴图）
 //              + RGB 三通道边缘色散 + 高光贴图 + 指针弹性形变 + WebGL 弹层焦散高光
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  const MODE_KEY = 'winclean-liquid-motion';
+  const MODE_KEY = 'trim-liquid-motion';
   const MODES = ['full', 'standard', 'frost', 'off'];
   const LEGACY_MODE_MAP = { refract: 'standard' };
 
