@@ -552,10 +552,22 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
             }
             if f["kind"].as_str() == Some("reg_key") {
                 let t = f["target"].as_str().unwrap_or("");
-                assert!(
-                    protect::reg_target_block_reason(t).is_none(),
-                    "扫描侧硬闸漏放受保护目标 {t}（{app_id}）"
-                );
+                // 服务/驱动桶（v0.7.0 四类残留）的 target 天生落在 HKLM\SYSTEM 整棵禁删树内，
+                // 执行链走的是服务键窄口子（八道现读判据），**不适用** protect 通用闸——
+                // 对它断 protect 放行等于要求产品把服务键候选全部撤掉，与 0.7.1 设计
+                // （扫出来、点执行由窄口子现读判定，本机 ACE-CORE 驱动实例坐实）直接冲突。
+                // 这里断「形状命中窄口子」：形状合法 ⇒ 执行侧必然进八道判定，保护语义不缺位。
+                if matches!(f["bucket"].as_str(), Some("service") | Some("driver")) {
+                    assert!(
+                        trim_tauri_lib::commands::uninstall::looks_like_service_key(t),
+                        "服务/驱动桶候选 {t} 不是一层服务键形状，执行链不会走窄口子（{app_id}）"
+                    );
+                } else {
+                    assert!(
+                        protect::reg_target_block_reason(t).is_none(),
+                        "扫描侧硬闸漏放受保护目标 {t}（{app_id}）"
+                    );
+                }
                 if f["reason"].as_str().unwrap_or("").contains("卸载注册表项仍存在") {
                     has_uninstall_key = true;
                 }

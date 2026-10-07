@@ -118,7 +118,9 @@ fn service_key_shape_reject(target: &str) -> Option<String> {
 
 /// [`service_key_delete_block_reason`] 的形状预筛：执行侧用它决定「要不要现读注册表问一次」。
 /// 只做大小写无关的前缀判断，不带任何语义 —— 语义全在判据函数里（§5.16 禁两套实现）。
-pub(super) fn looks_like_service_key(target: &str) -> bool {
+/// `pub`（经 uninstall/mod.rs 再导出）的唯一理由：集成测试断「服务/驱动桶候选的 target
+/// 命中窄口子形状」时必须调这同一个函数，手写前缀匹配就是第二套形状判据。
+pub fn looks_like_service_key(target: &str) -> bool {
     service_key_name(target).is_some()
 }
 

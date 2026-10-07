@@ -69,6 +69,10 @@ pub use residue_update::{residue_rules_dir, residue_watermark, uninstall_modify,
 mod run_keys;
 #[allow(dead_code)]
 mod services_orphan;
+// 服务键形状预筛透出给集成测试：服务/驱动桶候选的 target 天生落在 HKLM\SYSTEM 禁删树内
+// （执行走八道判据的窄口子，不走 protect 通用闸），测试断「形状命中窄口子」必须调同一个
+// 函数（§5.16/N6），不许在 tests/ 手写第二份前缀匹配。
+pub use services_orphan::looks_like_service_key;
 #[allow(dead_code)]
 mod vendor_registry;
 
