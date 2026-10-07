@@ -46,6 +46,7 @@ const MUST_RUN = [
   'check-item-intro',
   'check-desktop-entry',
   'check-data-parity',
+  'check-rule-schema-sync',
   'check-optimizer-dynamic',
   'check-optimizer-security',
   'check-optimizer-subitem-contract',
