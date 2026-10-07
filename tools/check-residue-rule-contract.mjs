@@ -432,13 +432,13 @@ let sigDetail = '';
 if (!sigB64) {
   sigDetail = '缺少 _sig（先跑 node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/uninstall-residue-rules.json）';
 }
-// 公钥验签（不依赖本机私钥）。0.6.6 密钥轮换后为**双钥**：legacy（历史签发钥）+ v2（轮换新钥），
-// 任一通过即放行——清理 / 残留库存量内容仍是旧钥签名，只认新钥会把合法存量判红。
-// 两把公钥与 src-tauri/src/engine/rules_signature.rs 的 RULES_PUBKEY_PEM / RULES_PUBKEY_V2_PEM 逐字一致；
-// 轮换背景（2026-10-04 重装丢钥 + 双钥兼容）见该文件注释。
+// 公钥验签（不依赖本机私钥）。0.7.3 起**只余当前钥一把**：残留库在 0.7.x 改库批次重签
+// 时已换新钥签名；legacy 随 rules_signature.rs 的退役一并摘除（用户 2026-10-07 拍板
+// 「抛弃旧用户」——≤0.6.5 老客户端拉新库 fail-closed 拒收，不砖机）。
+// 公钥与 src-tauri/src/engine/rules_signature.rs 的 RULES_PUBKEY_PEM 逐字一致；
+// 轮换背景（2026-10-04 重装丢钥 → 0.6.6 双钥兼容 → 0.7.3 完成退役）见该文件注释。
 const PUBKEY_PEMS = {
-  legacy: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAQehWbhuKKCxcWOje/8AZXYN192Z3Ryi8+cQ6ENwXAtY=\n-----END PUBLIC KEY-----',
-  v2: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcfi1pq5dJY2x3/d+sDdLmj1N6eGIqOmttQh5rTbKCro=\n-----END PUBLIC KEY-----',
+  current: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcfi1pq5dJY2x3/d+sDdLmj1N6eGIqOmttQh5rTbKCro=\n-----END PUBLIC KEY-----',
 };
 try {
   const msg = Buffer.from(JSON.stringify(body), 'utf8');
@@ -450,7 +450,7 @@ try {
       break;
     }
   }
-  if (!sigOk) sigDetail = '验签失败：内容与两把内置公钥均不匹配（篡改或未重新签名）';
+  if (!sigOk) sigDetail = '验签失败：内容与内置公钥不匹配（篡改或未重新签名）';
 } catch (e) {
   sigOk = false;
   sigDetail = `验签异常: ${e.message}`;

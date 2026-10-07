@@ -22,20 +22,16 @@ use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::{Map, Value};
 
-/// 内置公钥 PEM · 旧钥（2026-10 上旬前签发的数据包全由它签名）。
+/// 内置公钥 PEM · 当前唯一在用（2026-10-06 轮换的钥）。
 ///
-/// 2026-10-04 系统重装致该钥私钥丢失且无备份，0.6.6 起轮换出新钥（见 [`RULES_PUBKEY_V2_PEM`]）。
-/// 保留旧钥是**刻意的兼容设计**：清理 / 残留规则库内容未变、继续带旧签名分发，
-/// 老版本（≤0.6.5）用户照常可在线更新 —— 验签改为**任一内置公钥通过即放行**。
-/// 退役计划：线上与内置全部换成新签名后摘掉本常量（写入发版清单，勿单方面提前删）。
-pub const RULES_PUBKEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
-MCowBQYDK2VwAyEAQehWbhuKKCxcWOje/8AZXYN192Z3Ryi8+cQ6ENwXAtY=\n\
------END PUBLIC KEY-----";
-
-/// 内置公钥 PEM · 轮换新钥（2026-10-06 生成；此后新签发的数据包用它签名）。
-///
+/// 演进史：2026-10-04 系统重装致上一把私钥丢失且无备份 → 0.6.6 起双钥并存
+/// （旧 legacy + 本钥），任一通过即放行；0.7.x 的改库批次把清理 / 残留 / 优化
+/// 三库全部改为本钥签名（每库最近一次改动即重签，实测三库均 v2 PASS / legacy FAIL）。
+/// **0.7.3 按用户 2026-10-07 拍板「抛弃旧用户」摘除 legacy**：库与内置公钥自此全换
+/// 新钥，≤0.6.5 老客户端拉新库时 fail-closed 拒收（不砖机，只是收不到规则热更；
+/// 该影响已写入 0.7.3 更新说明）。
 /// 私钥在发布机的本机密钥目录（`tools/sign-cleanup-rules.mjs` 读取），绝不入库。
-pub const RULES_PUBKEY_V2_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+pub const RULES_PUBKEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
 MCowBQYDK2VwAyEAcfi1pq5dJY2x3/d+sDdLmj1N6eGIqOmttQh5rTbKCro=\n\
 -----END PUBLIC KEY-----";
 
@@ -82,12 +78,9 @@ fn parse_pubkey(pem: &str, tag: &str) -> Result<VerifyingKey, String> {
     VerifyingKey::from_bytes(&raw).map_err(|e| format!("内置公钥({tag})非法: {e}"))
 }
 
-/// 全部内置公钥（0.6.6 起两把：旧钥 + 轮换新钥；验签**任一通过即放行**）。
-fn verifying_keys() -> Result<[VerifyingKey; 2], String> {
-    Ok([
-        parse_pubkey(RULES_PUBKEY_PEM, "legacy")?,
-        parse_pubkey(RULES_PUBKEY_V2_PEM, "v2")?,
-    ])
+/// 全部内置公钥（0.7.3 起只余当前钥一把；legacy 随旧签名库一并无对象而摘除）。
+fn verifying_keys() -> Result<[VerifyingKey; 1], String> {
+    Ok([parse_pubkey(RULES_PUBKEY_PEM, "current")?])
 }
 
 /// JS 真值判定（`if (sig.alg && ...)`）——用于 `alg` 字段的跳过语义
@@ -155,7 +148,7 @@ pub fn verify_rules_text(text: &str) -> Result<(), String> {
         Err(_) => return Err("签名校验失败，内容可能被篡改，已拒绝".to_string()),
     };
     let signature = Signature::from_bytes(&arr);
-    // 任一内置公钥通过即放行（双钥轮换期，见 RULES_PUBKEY_PEM 注释）；全失败统一按原文案拒绝
+    // 遍历内置公钥集（0.7.3 起只余一把）任一通过即放行；全失败统一按原文案拒绝
     if keys
         .iter()
         .any(|k| k.verify_strict(body.as_bytes(), &signature).is_ok())
@@ -227,11 +220,11 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer;
 
-    /// 内置公钥（两把）都可解析
+    /// 内置公钥（当前唯一一把）可解析
     #[test]
     fn pubkey_parses() {
-        let keys = verifying_keys().expect("两把内置公钥都应可解析");
-        assert_eq!(keys.len(), 2, "0.6.6 起内置公钥应为「旧钥 + 轮换新钥」两把");
+        let keys = verifying_keys().expect("内置公钥应可解析");
+        assert_eq!(keys.len(), 1, "0.7.3 起 legacy 退役，内置公钥只余当前钥一把");
     }
 
     /// 篡改正文 → 必须拒绝（文案与 JS 一致）
@@ -244,7 +237,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
 
-    /// 用另一密钥对签名 → 必须拒绝（内置公钥集固定，0.6.6 起为两把）。种子写死，避免引入随机数依赖
+    /// 用另一密钥对签名 → 必须拒绝（内置公钥集固定，0.7.3 起只余当前钥）。种子写死，避免引入随机数依赖
     #[test]
     fn wrong_key_rejected() {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
@@ -299,17 +292,16 @@ mod tests {
         assert_eq!(canonical_body_text(&parsed).unwrap(), r#"{"a":1,"b":2,"z":[3]}"#);
     }
 
-    /// 真实规则文件双端对拍（D6 规则 1）：本测试给出 Rust 侧结论，
-    /// 与 JS 侧 `vendor/upstream-js/src/main/rules-signature.js` 的 `verifyRulesSignature(...)`
-    /// 结论必须一致（JS 侧对拍命令：`node -e "const r=require('./vendor/upstream-js/src/main/rules-signature'),fs=require('fs');console.log(r.verifyRulesSignature(fs.readFileSync('src-tauri/data/cleanup-rules.json','utf8')))"`）。
+    /// 真实规则文件验签（D6 规则 1 的历史形态）：本测试给出 Rust 侧结论。
+    ///
+    /// 对拍状态（0.7.3 更新）：清理库已换轮换新钥签名（0.7.x 改库批次重签时换的钥），
+    /// 而 vendor 基线 `rules-signature.js` 内置的是 legacy 公钥（只读上游快照、不回填）
+    /// —— **JS 侧对同一文件会报「签名校验失败」，Rust 侧应报 ok，两者不再一致**。
+    /// 这不是回归而是密钥轮换的预期终态；本测试只断 Rust 侧（见下方 assert）。
     ///
     /// 审查 M13：路径改用 `CARGO_MANIFEST_DIR` 拼接（原先写 `..\src\data\...`，
     /// 规则库随 M14 移出 frontendDist 后相对基准一变就**静默跳过**、却仍计入 passed）；
     /// 该文件是仓库跟踪文件，找不到即真缺陷，故直接 panic 而不是 return。
-    ///
-    /// 注记（0.6.6 密钥轮换）：清理库存量内容仍是**旧钥签名**（content 未变、不重签），
-    /// 故 JS 基线（只认旧钥）的对拍结论依旧成立；待清理库换新签名（旧钥退役）后，
-    /// 这条对拍要改成「记录式」而不能继续断言两侧一致。
     #[test]
     fn real_rules_file_verdict() {
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
