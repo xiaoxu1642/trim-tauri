@@ -89,6 +89,9 @@ const MUST_MAIN = [
   // 清空（不可逆破坏性动作，必须主窗专属）
   'cleanup_recycle_stats',
   'cleanup_empty_recycle_bin',
+  // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站。幂等无写面，但
+  // 消费方只有主窗清理页——同 cleanup_recycle_stats 口径判 MAIN。
+  'cleanup_open_recycle_bin',
   'cleanup_kill_locked_processes',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗

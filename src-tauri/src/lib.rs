@@ -398,6 +398,8 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         // G-4（2026-10-07）：回收站清空改 Shell API（选项 B）——查询条目数与体积 + 清空
         commands::cleanup::cleanup_recycle_stats,
         commands::cleanup::cleanup_empty_recycle_bin,
+        // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（Shell 虚拟命名空间）
+        commands::cleanup::cleanup_open_recycle_bin,
         // ---- C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan ----
         // 审查 v2-F4 彻底方案：`settings_save` 已整链摘除（零调用方的死写入通道，
         // 摘除记录见 settings.rs 头部注释）。AI 模型配置写入由 `models_save` 承载。

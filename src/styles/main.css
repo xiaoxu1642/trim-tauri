@@ -4482,6 +4482,12 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 .xtable-cell-muted { color: var(--fg-tertiary); }
 
+/* 大小单元格「· N 个条目」追加段（2026-10-07 目检缺陷 1）：体积与条目数两段并排时，
+   .xtable-td[data-align="end"] 的 flex-end + overflow:hidden 会把不可缩溢出段
+   整段左裁——体积数值先被裁掉（坏形态：只剩「GB · 555 个条目」）。min-width:0
+   让它成为唯一的收缩方，空间不足时收缩出省略号，体积数值恒完整。 */
+.xtable-size-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
 /* 自动定位标记 */
 .path-auto-tag {
   display: inline-block;

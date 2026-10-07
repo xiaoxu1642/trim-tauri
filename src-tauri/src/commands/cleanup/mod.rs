@@ -62,7 +62,7 @@ pub use policy::{cleanup_age_policy, __cmd__cleanup_age_policy, __tauri_command_
 // G-4（2026-10-07）：回收站清空改 Shell API（选项 B）。两条命令都是主窗档：
 // 只有主窗的清理页有消费方，且清空是不可逆动作，不给子窗放行。
 mod recycle_bin;
-pub use recycle_bin::{cleanup_recycle_stats, __cmd__cleanup_recycle_stats, __tauri_command_name_cleanup_recycle_stats, cleanup_empty_recycle_bin, __cmd__cleanup_empty_recycle_bin, __tauri_command_name_cleanup_empty_recycle_bin};
+pub use recycle_bin::{cleanup_recycle_stats, __cmd__cleanup_recycle_stats, __tauri_command_name_cleanup_recycle_stats, cleanup_empty_recycle_bin, __cmd__cleanup_empty_recycle_bin, __tauri_command_name_cleanup_empty_recycle_bin, cleanup_open_recycle_bin, __cmd__cleanup_open_recycle_bin, __tauri_command_name_cleanup_open_recycle_bin};
 mod rules;
 pub use rules::{data_rules_dir, rules_watermark, rules_value, cleanup_rules, __cmd__cleanup_rules, __tauri_command_name_cleanup_rules};
 mod scan_execute;

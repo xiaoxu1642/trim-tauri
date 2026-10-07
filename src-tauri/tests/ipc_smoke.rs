@@ -343,3 +343,19 @@ fn preview_subwindow_reaches_fileclean_delete() {
         "预览窗删除必须由 in_scope 拦下，而不是放行任意路径，回执 {text}"
     );
 }
+
+/// G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（主窗档）。
+/// 子窗调用必须在来源校验处被拒——否则被注入的子窗能直接弹系统回收站窗口。
+/// 主窗正向不在快速组覆盖：它**真的会打开系统窗口**，留真机目检（同 peripheral_apply
+/// 用空参数早退的招数在无参数命令上不存在）。
+#[test]
+fn subwindow_cannot_open_recycle_bin() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "cleanup_open_recycle_bin", json!({}));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调 cleanup_open_recycle_bin 必须被拒（主窗档），回执 {text}"
+        );
+    }
+}

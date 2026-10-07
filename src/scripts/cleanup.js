@@ -229,7 +229,10 @@
   // v3.2.1 类目重构 S2：性质标签列（缓存/日志/临时/转储/隐私/更新残留/过时备份/动作）
   const COL_NATURE = { key: 'nature', label: '性质', width: 76, minWidth: 64, align: 'center' };
   const COL_RISK = { key: 'risk', label: '风险', width: 84, minWidth: 64, align: 'center' };
-  const COL_SIZE = { key: 'size', label: '占用大小', width: 110, minWidth: 84, align: 'end' };
+  // 160：回收站行要并显示「体积 + · N 个条目」两段文本。110 时该行放不下，
+  // 而 flex-end + overflow:hidden 的溢出发生在左端、体积数值被整段裁掉
+  // （用户 2026-10-07 目检缺陷 1「只显示『GB · 555 个条目』」）。
+  const COL_SIZE = { key: 'size', label: '占用大小', width: 160, minWidth: 84, align: 'end' };
   const COL_ACTIONS = { key: 'actions', label: '操作', width: 112, minWidth: 84, sortable: false, align: 'center' };
 
   const NATURE_LABELS = {
@@ -400,7 +403,8 @@
           // 扫描时已由 cleanup:recycle-stats 现查赋值，但此前只有清空确认弹窗消费它——
           // 列表行从未渲染。方案 G-4 的承诺是「先出条目数与体积」，两处都要齐。
           if (item.id === RECYCLE_ID && result && Number(result.recycleCount) > 0) {
-            sizeInner += ` <span class="xtable-cell-muted">· ${Number(result.recycleCount)} 个条目</span>`;
+            // xtable-size-count：可收缩段，放不下时它出省略号，而不是把体积数值左裁（见 main.css）
+            sizeInner += ` <span class="xtable-cell-muted xtable-size-count">· ${Number(result.recycleCount)} 个条目</span>`;
           }
           inner = sizeInner;
           break;
@@ -409,9 +413,10 @@
           if (isFileClean) {
             inner = previewBtnHtml(item, hasImages, imageCount);
           } else if (item.id === RECYCLE_ID) {
-            // G-4：回收站是 Shell 动作条目（清空走系统接口、体积现查），规则侧已无
-            // pathPs/fileKeys —— 再渲染「明细」只会弹出恒为空的清单（用户 2026-10-07 反馈）。
-            inner = '<span class="xtable-cell-muted" data-tip="回收站由系统接口管理，不提供逐文件清单；上方体积为清空前现查">—</span>';
+            // G-4 修订（用户 2026-10-07 二次反馈「还是没有明细按钮」）：Shell 动作条目的
+            // 「明细」不能弹出恒空清单，但可以打开系统回收站——条目清单由系统窗口承载
+            // （自绘枚举要 IShellFolder 遍历，慢且权限面大），与清空同一 Shell 语义。
+            inner = '<button class="fileclean-preview-btn" data-open-recycle type="button" data-tip="回收站条目由系统管理，点击打开系统回收站查看">明细</button>';
           } else {
             // P3：明细按钮——弹窗枚举该条目将删除的具体文件清单（只读）
             inner = `<button class="fileclean-preview-btn" data-detail="${item.id}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>`;
@@ -460,6 +465,12 @@
         if (detailBtn) {
           e.stopPropagation();
           openItemDetail(detailBtn.dataset.detail);
+          return;
+        }
+        const recycleBtn = e.target.closest('[data-open-recycle]');
+        if (recycleBtn) {
+          e.stopPropagation();
+          openSystemRecycleBin();
           return;
         }
         const row = e.target.closest('.xtable-row');
@@ -862,12 +873,23 @@
   }
 
   // 扫描
+  // 2026-10-07 用户裁定：扫描范围 = 当前勾选项（一项未勾 = 全量）。「全选」与全量等价；
+  // 「只勾一项」就只扫那项 —— 与「开始清理」只看勾选的执行范围口径对齐。
   async function scan() {
     if (isScanning) return;
     isScanning = true;
-    selectedIds.clear();
-    scanResults.clear();
-    fileCleanData.clear();
+    const isFullScan = selectedIds.size === 0;
+    const scopeIds = isFullScan ? ALL_IDS.slice() : ALL_IDS.filter(id => selectedIds.has(id));
+    if (isFullScan) {
+      scanResults.clear();
+      fileCleanData.clear();
+    } else {
+      // 子集扫描只刷新本次范围：其余条目保留上次结果、勾选不动（扫描不替用户做选择）
+      for (const id of scopeIds) {
+        scanResults.delete(id);
+        fileCleanData.delete(id);
+      }
+    }
     updateUI();
 
     setProgress(0, '正在准备扫描...');
@@ -893,19 +915,21 @@
       let results = [];
       if (window.api?.cleanup) {
         // Electron 模式：调用 PowerShell（排除文件清理项）
-        const regularIds = ALL_IDS.filter(id => !FILECLEAN_IDS.includes(id));
-        const resp = await window.api.cleanup.scan(regularIds);
+        const regularIds = scopeIds.filter(id => !FILECLEAN_IDS.includes(id));
+        // partial：后端保快照桶并合并（只覆盖本次命中的 id）；全量沿用清桶重建
+        const resp = await window.api.cleanup.scan(regularIds, !isFullScan);
         if (!resp.success) {
           throw new Error(resp.message || '扫描失败');
         }
         results = resp.data;
 
         // 文件清理项独立扫描（FC-4：传 total/doneBase 让主进程与常规条目共用同一进度条；
-        // total = 常规则数 + fileclean 项数，与渲染层 ALL_IDS 口径一致）
+        // total = 常规则数 + fileclean 项数，与本次扫描范围口径一致）
         const pathConfig = window.pathbinding?.getConfig?.() || {};
-        const scanTotal = regularIds.length + FILECLEAN_IDS.length;
+        const fcScope = FILECLEAN_IDS.filter(id => scopeIds.includes(id));
+        const scanTotal = regularIds.length + fcScope.length;
         let fcDoneBase = regularIds.length;
-        for (const id of FILECLEAN_IDS) {
+        for (const id of fcScope) {
           const item = getItemById(id);
           if (!item || !item.fileCleanType) continue;
           const customPath = item.fileCleanType === 'qq' ? pathConfig.qqFileDir : pathConfig.wechatFileDir;
@@ -986,7 +1010,9 @@
       // 真实条目数/体积只有 SHQueryRecycleBinW 能回答。查询失败**不编数字**：
       // 条目保持 size 0 且仍然可见，用户点清理时会拿到失败原因。
       // 注：条目不存在时这里补一条——它必须始终可见（入口不能因「扫描不产路径」消失）。
-      if (window.api?.cleanup?.recycleStats) {
+      // G-4 追补：回收站数字仅在本轮范围含它（或全量）时现查覆盖；子集扫描不含它时
+      // 完全不动（不补条目、不查、不覆盖），「只扫勾选项」的口径才自洽。
+      if ((isFullScan || scopeIds.includes(RECYCLE_ID)) && window.api?.cleanup?.recycleStats) {
         let recycle = results.find(r => r.id === RECYCLE_ID);
         if (!recycle) {
           const meta = getItemById(RECYCLE_ID);
@@ -1010,11 +1036,23 @@
         }
       }
 
-      // P1：detect 未命中的条目不会出现在扫描结果中——标记为隐藏（重新扫描/换规则后恢复）
-      hiddenIds.clear();
+      // P1：detect 未命中的条目不会出现在扫描结果中——标记为隐藏（重新扫描/换规则后恢复）。
+      // 子集扫描只更新本次点名的 id：命中即恢复显示，未命中即隐藏（其余条目保持原状）。
       const gotIds = new Set(results.map(r => r.id));
-      for (const id of ALL_IDS) {
-        if (!FILECLEAN_IDS.includes(id) && !gotIds.has(id)) hiddenIds.add(id);
+      if (isFullScan) {
+        hiddenIds.clear();
+        for (const id of ALL_IDS) {
+          if (!FILECLEAN_IDS.includes(id) && !gotIds.has(id)) hiddenIds.add(id);
+        }
+      } else {
+        for (const id of scopeIds) {
+          if (gotIds.has(id)) {
+            hiddenIds.delete(id);
+          } else {
+            hiddenIds.add(id);
+            selectedIds.delete(id); // 本机已无此内容的条目不该继续留在勾选里
+          }
+        }
       }
       for (const r of results) {
         scanResults.set(r.id, r);
@@ -1036,13 +1074,15 @@
         scanResults.set(result.id, result);
       }
       setProgress(100, '扫描完成');
-      // 默认勾选所有安全项
+      // 默认勾选所有安全项（**仅无勾选的全量扫描**——子集扫描不替用户改勾选）
       // v3.2.1 类目重构：维护与特殊操作域（special，DISM/回收站/Installer 缓存）为不可逆
       // 系统动作，永不默认勾选（文档 §2.2 域 5 / P4）
-      for (const r of results) {
-        const meta = getItemById(r.id);
-        if (meta && meta.domain === 'special') continue;
-        if (r.risk === 'low' && r.size > 0) selectedIds.add(r.id);
+      if (isFullScan) {
+        for (const r of results) {
+          const meta = getItemById(r.id);
+          if (meta && meta.domain === 'special') continue;
+          if (r.risk === 'low' && r.size > 0) selectedIds.add(r.id);
+        }
       }
       await new Promise(r => setTimeout(r, 400));
       hideProgress();
@@ -1050,7 +1090,9 @@
       renderCategoryList();
       updateUI();
       const total = Array.from(scanResults.values()).reduce((s, r) => s + sizeNumber(r.size), 0);
-      window.app?.toast('success', `扫描完成，共发现 ${formatSize(total)} 可清理空间`);
+      window.app?.toast('success', isFullScan
+        ? `扫描完成，共发现 ${formatSize(total)} 可清理空间`
+        : `扫描完成，已刷新所选 ${scopeIds.length} 项`);
     } catch (e) {
       hideProgress();
       window.app?.toast('error', '扫描失败: ' + e.message);
@@ -1763,6 +1805,19 @@
     if (!body) return;
     body.innerHTML = '<div class="empty-state"><p>正在读取备份列表…</p></div>';
     renderRegBackupList({ body });
+  }
+
+  // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（条目清单由系统窗口承载）
+  async function openSystemRecycleBin() {
+    if (!window.api?.cleanup?.openRecycleBin) return;
+    try {
+      const resp = await window.api.cleanup.openRecycleBin();
+      if (resp && resp.success === false) {
+        window.app?.toast('error', resp.message || '打开系统回收站失败');
+      }
+    } catch (err) {
+      window.app?.toast('error', '打开系统回收站失败: ' + (err.message || err));
+    }
   }
 
   function openItemDetail(id) {

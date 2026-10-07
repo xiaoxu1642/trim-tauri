@@ -125,7 +125,7 @@ pub(super) fn ingest_and_emit<R: tauri::Runtime>(accum: &Arc<Mutex<ScanAccum>>, 
 }
 
 /// 扫描主体（纯原生引擎；PS 回退已随 S3 删除，见 :11）
-pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>) -> Value {
+pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>, partial: bool) -> Value {
     let configured = load_paths_config();
     let rules = match rules_value() {
         Ok(r) => r,
@@ -209,14 +209,23 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
             plan_total
         ),
     );
-    *snapshots().lock().unwrap_or_else(|e| e.into_inner()) =
-        [(label.to_string(), snapshot_by_id(&data))].into_iter().collect();
+    {
+        let fresh = snapshot_by_id(&data);
+        let mut guard = snapshots().lock().unwrap_or_else(|e| e.into_inner());
+        if partial {
+            // partial：只覆盖本次命中的 id，其余条目的旧快照保留——否则「只刷新回收站」
+            // 之后，未重扫条目的执行校验（validate_snapshot_items 缺快照即整批拒绝）会全部失败。
+            guard.entry(label.to_string()).or_default().extend(fresh);
+        } else {
+            *guard = [(label.to_string(), fresh)].into_iter().collect();
+        }
+    }
     json!({ "success": true, "data": data })
 }
 
 /// cleanup:scan — 扫描可清理项（纯原生引擎；进度走 `cleanup:scan-progress`）
 #[tauri::command]
-pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categories: Option<Value>) -> Value {
+pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categories: Option<Value>, partial: Option<bool>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg, "data": [] });
     }
@@ -237,15 +246,21 @@ pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categorie
     let Some(cats) = cats else {
         return json!({ "success": false, "message": "清理分类参数无效", "data": [] });
     };
+    let partial = partial.unwrap_or(false);
     let label = window.label().to_string();
-    // 审查 2-3：先置空桶，扫描成功后填充
-    snapshots()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(label.clone(), HashMap::new());
-    log::write_log("info", &format!("开始扫描: {}", cats.join(", ")));
+    // 审查 2-3：先置空桶，扫描成功后填充（**仅全量扫描**）。
+    // 2026-10-07 用户裁定「扫描范围 = 勾选项」：partial 扫描必须**保桶**并合并——其余
+    // 条目的旧快照要供 cleanup:execute 校验（validate_snapshot_items 对缺快照的条目
+    // 整批拒绝，清桶会让「只刷新回收站」之后清理其他项全部报快照失败）。
+    if !partial {
+        snapshots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(label.clone(), HashMap::new());
+    }
+    log::write_log("info", &format!("开始扫描{}: {}", if partial { "（仅勾选）" } else { "" }, cats.join(", ")));
     let win = window.clone();
-    let task = tauri::async_runtime::spawn_blocking(move || do_cleanup_scan(&win, &label, cats));
+    let task = tauri::async_runtime::spawn_blocking(move || do_cleanup_scan(&win, &label, cats, partial));
     match task.await {
         Ok(v) => v,
         Err(e) => json!({ "success": false, "message": e.to_string(), "data": [] }),

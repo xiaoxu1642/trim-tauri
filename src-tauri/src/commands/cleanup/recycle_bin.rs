@@ -154,6 +154,54 @@ pub async fn cleanup_empty_recycle_bin<R: tauri::Runtime>(window: WebviewWindow<
     }
 }
 
+/// cleanup:open-recycle-bin —— 打开系统回收站（回收站行「明细」入口；主窗档）
+///
+/// G-4 修订（用户 2026-10-07 二次反馈「还是没有明细按钮」）：回收站是 Shell 虚拟
+/// 命名空间，条目清单由**系统回收站窗口**承载——自绘枚举需要 IShellFolder 遍历
+/// （慢、权限面大、海量条目下不现实），打开系统窗口才是「看明细」的合理落地。
+///
+/// `shell:RecycleBinFolder` 是 explorer 注册的协议名（与 `ms-settings:` 同类），
+/// 经 ShellExecuteW「open」解析——与 app.rs 打开 https、finder.rs 打开目录同一姿势，
+/// 不经 shell 拼接命令，无命令注入面。
+#[tauri::command]
+pub fn cleanup_open_recycle_bin<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    // 幂等动作（重复点击 = 再次激活同一系统窗口），不经危险确认、不写日志刷盘
+    match open_recycle_bin() {
+        Ok(()) => json!({ "success": true }),
+        Err(e) => json!({ "success": false, "message": e }),
+    }
+}
+
+/// 打开回收站（ShellExecuteW，不经 shell 拼接命令，避免命令注入）
+#[cfg(windows)]
+fn open_recycle_bin() -> Result<(), String> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    let op = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            windows::core::w!("shell:RecycleBinFolder"),
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW 返回值 <= 32 表示失败
+    if op.0 as usize > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecute 返回 {}", op.0 as usize))
+    }
+}
+
+#[cfg(not(windows))]
+fn open_recycle_bin() -> Result<(), String> {
+    Err("仅支持 Windows".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     /// 布局契约：`SHQUERYRBINFO` 在 x64 上必须是 24 字节。

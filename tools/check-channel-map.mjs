@@ -146,6 +146,7 @@ const TAURI_ADDED = {
   'cleanup:set-age-policy': 'G-2（2026-10-07）：全局年龄策略写侧（档位由后端闸死：0/14/30；主窗档）',
   'cleanup:recycle-stats': 'G-4（2026-10-07）：回收站条目数与体积现查（SHQueryRecycleBinW；上游 Electron 无此面，旧实现是直扫 $Recycle.Bin 的普通规则）',
   'cleanup:empty-recycle-bin': 'G-4（2026-10-07）：清空回收站（SHEmptyRecycleBinW，不可逆；主窗档 + 渲染层红色高危确认；取代原先把 $Recycle.Bin 当普通清理目录永久删的做法）',
+  'cleanup:open-recycle-bin': 'G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（ShellExecuteW shell:RecycleBinFolder；主窗档。上游 Electron 无此面，旧「明细」对回收站是恒空清单）',
 };
 
 function collect(set, re, text) {

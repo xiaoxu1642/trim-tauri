@@ -88,6 +88,7 @@
     // G-4：回收站清空改 Shell API（选项 B）——查询条目数与体积 / 清空（不可逆）
     'cleanup:recycle-stats': 'cleanup_recycle_stats',
     'cleanup:empty-recycle-bin': 'cleanup_empty_recycle_bin',
+    'cleanup:open-recycle-bin': 'cleanup_open_recycle_bin',
     // runtimes
     'runtimes:collect': 'runtimes_collect',
     'runtimes:install': 'runtimes_install',
@@ -423,7 +424,8 @@
       regBackupRestore: function (file) { return invokeChannel('cleanup:reg-backup-restore', { file: file }); },
       fileBackupList: function () { return invokeChannel('cleanup:file-backup-list'); },
       fileBackupRestore: function (file, index) { return invokeChannel('cleanup:file-backup-restore', { file: file, index: index }); },
-      scan: function (categories) { return invokeChannel('cleanup:scan', { categories: categories }); },
+      // partial：扫描范围是勾选项的子集（后端保快照桶并合并；全量扫描传 false）
+      scan: function (categories, partial) { return invokeChannel('cleanup:scan', { categories: categories, partial: partial === true }); },
       execute: function (items, force, toRecycle, autoRebuild) {
         return invokeChannel('cleanup:execute', {
           items: items,
@@ -446,6 +448,8 @@
       recycleStats: function () { return invokeChannel('cleanup:recycle-stats'); },
       // G-4：清空回收站（不可逆；渲染层必须先走 confirmDanger 再调）
       emptyRecycleBin: function () { return invokeChannel('cleanup:empty-recycle-bin'); },
+      // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（幂等，无危险确认）
+      openRecycleBin: function () { return invokeChannel('cleanup:open-recycle-bin'); },
       onScanProgress: function (callback) { return onEvent('cleanup:scan-progress', callback); }
     },
 
