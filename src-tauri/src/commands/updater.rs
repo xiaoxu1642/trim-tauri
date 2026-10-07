@@ -110,8 +110,17 @@ static CHECKING: AtomicBool = AtomicBool::new(false);
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 /// 已下载并验签通过、等用户点重启安装的包
 static DOWNLOADED: Mutex<Option<Downloaded>> = Mutex::new(None);
-/// 正在跑的下载任务（取消走 abort，对齐上游 CancellationToken）
+/// 正在跑的下载任务句柄（取消走 abort，对齐上游 CancellationToken）。
+///
+/// **句柄只供 cancel 的 abort 用，「是否在下载」的判据是下面的 [`DOWNLOADING`]**——
+/// 这是技术债 T2 的收尾（2026-10-07）：原先 Option 的有无关兼职「下载中」语义，
+/// 而任务闭包结束时置 None 与 spawn 返回后主线程置 Some 之间存在理论乱序（下载
+/// 瞬时完成时闭包先跑），死句柄会盖回 Some 让守卫误判「下载中」。现在判据与句柄
+/// 分离：标志由 spawn 前 store(true) 铺垫、闭包所有出口 store(false) 收尾，abort
+/// 路径由 cancel 自己收尾——三个写点都不依赖句柄的存废，乱序不再影响判定。
 static DOWNLOAD_TASK: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = Mutex::new(None);
+/// 「下载正在进行」的权威标志（T2 收尾，见 [`DOWNLOAD_TASK`] 注释）。
+static DOWNLOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 检查阶段锁定的可信锚点。`signature` 是 minisign 签名字符串 —— 复验时比对它，
 /// 等价于上游比对 sha512：清单里的签名变了就意味着指向的产物变了。
@@ -377,7 +386,7 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
     guard::guard(&window, guard::MAIN)?;
     let app = window.app_handle().clone();
 
-    if lock(&DOWNLOAD_TASK).is_some() {
+    if DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(json!({ "ok": false, "error": "already-downloading" }));
     }
     // fail-closed：没有已验签的锚点绝不下载。用户可能隔几分钟才点下载，期间发布侧内容
@@ -428,6 +437,10 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
     let update = pending.update.clone();
     let version = update.version.clone();
     let pinned_mirror = pending.mirror.clone();
+    // 标志铺垫必须在 spawn **之前**（同步、无 await）：闭包 spawn 后第一行就可能跑到，
+    // 瞬时完成时它会先于本函数返回执行 store(false)——铺垫晚了会被那句 false 覆盖成
+    // true 永久卡住。先 true 再 spawn，闭包出口与 cancel 各自收 false。
+    DOWNLOADING.store(true, std::sync::atomic::Ordering::Relaxed);
     let task = tauri::async_runtime::spawn(async move {
         // 插件回的是**增量**字节数，累计值、百分比与速度由我们自己算。
         // 每次尝试的开头各自赋值（见下面循环里那两行），所以这里只声明不初始化。
@@ -535,7 +548,7 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
                                 "message": "安装包哈希与发布清单声明不一致，已阻止安装。请重新检查更新或前往官方 Releases 页面手动下载。"
                             }),
                         );
-                        *lock(&DOWNLOAD_TASK) = None;
+                        DOWNLOADING.store(false, std::sync::atomic::Ordering::Relaxed);
                         return;
                     }
                 }
@@ -584,12 +597,11 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
                 );
             }
         }
-        // 技术债 T2（v2 审查，2026-10-01 登记维持）：本行与 spawn 后的 `= Some(task)` 存在
-        // 理论乱序 —— 若下载在本行执行前就瞬时完成（微秒级，实测不可达），此处置 None 会被
-        // Some(已完成句柄) 覆盖 → `is_some()` 守卫误判「下载中」。干净修法需 JoinHandle 终态
-        // 判活（tauri 2.11 的 JoinHandle 无 is_finished，已查证）或显式 DownloadState 枚举，
-        // 随统一出口重构一并带走；现实兜底是 updater:cancel-download 的 take() 会清掉死句柄，可自愈。
-        *lock(&DOWNLOAD_TASK) = None;
+        // 技术债 T2 已收尾（2026-10-07）：闭包所有出口只落「下载中」标志（DOWNLOADING
+        // → false），不再写 DOWNLOAD_TASK——句柄由 spawn 返回后主线程一次性放入，
+        // 供 cancel abort 用；死句柄留在槽里无害（守卫不再看它，下次 download 覆盖、
+        // cancel take 清走）。原先「闭包置 None ⇄ 主线程置 Some」的乱序窗口随之消失。
+        DOWNLOADING.store(false, std::sync::atomic::Ordering::Relaxed);
     });
     *lock(&DOWNLOAD_TASK) = Some(task);
     Ok(json!({ "ok": true }))
@@ -602,6 +614,9 @@ pub fn updater_cancel_download<R: Runtime>(window: WebviewWindow<R>) -> Result<V
     if let Some(task) = lock(&DOWNLOAD_TASK).take() {
         task.abort();
     }
+    // abort 之后闭包不会再执行到出口，标志必须在这里收（T2 收尾的三写点之一：
+    // spawn 前铺垫 true / 闭包出口 false / 这里 false——abort 路径没有闭包出口可依赖）。
+    DOWNLOADING.store(false, std::sync::atomic::Ordering::Relaxed);
     *lock(&DOWNLOADED) = None;
     push(window.app_handle(), json!({ "phase": "idle" }));
     Ok(json!({ "ok": true }))

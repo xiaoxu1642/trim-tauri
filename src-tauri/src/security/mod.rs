@@ -42,9 +42,9 @@ fn random_suffix() -> String {
 }
 
 /// 原子写文件：temp（同目录）→ fsync → rename 覆盖；失败清理临时件
-/// 技术债 T5（v2 审查，2026-10-01 登记维持）：未对父目录 fsync——断电极端场景下 rename
-/// 可能不落目录项。Windows 上 std 打不开目录句柄（需 FILE_FLAG_BACKUP_SEMANTICS 旗标，
-/// std::fs 不提供），补丁做不成且收益有限，刻意不加；切原生句柄 / IFileOperation 时可一并补。
+/// 技术债 T5（v2 审查，2026-10-01 登记）**已于 2026-10-07 收尾**：rename 成功后对
+/// 父目录 FlushFileBuffers（原生句柄，`FILE_FLAG_BACKUP_SEMANTICS` 打开目录——
+/// std::fs 打不开目录句柄，这正是当初「补丁做不成」的原因，见 [`flush_dir_for_persistence`]）。
 pub fn atomic_write_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or_else(|| "无效路径".to_string())?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -62,9 +62,48 @@ pub fn atomic_write_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
+        return result;
     }
-    result
+    flush_dir_for_persistence(dir);
+    Ok(())
 }
+
+/// 落目录项的断电持久性（T5 收尾）：rename 返回只保证本进程可见，断电极端场景下
+/// 目录项可能不落盘。对父目录开写句柄后 `FlushFileBuffers` 把目录元数据刷盘。
+/// **尽力而为**：此刻写本身已成功，flush 失败（权限/文件系统不支持/句柄打不开）
+/// 只影响断电极端场景的持久性，不把一次成功的写改判成失败——那会让调用方把
+/// 「实际已写好的配置」当「保存失败」重走一遍。
+#[cfg(windows)]
+fn flush_dir_for_persistence(dir: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FlushFileBuffers, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_MODE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let opened = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0),
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    };
+    if let Ok(h) = opened {
+        unsafe {
+            let _ = FlushFileBuffers(h);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn flush_dir_for_persistence(_dir: &Path) {}
 
 /// 原子写 JSON（2 空格缩进，与 JS 侧 JSON.stringify(v, null, 2) 一致）
 pub fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
