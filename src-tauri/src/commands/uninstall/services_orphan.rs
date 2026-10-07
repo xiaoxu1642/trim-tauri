@@ -70,6 +70,13 @@ impl ServiceEntry {
 /// 未命中且落点又不在游戏库根下的服务一律判「无法归因」。保护与否由平台清单决定。
 const ANTICHEAT_MARKERS: &[(&str, &str)] = &[
     ("neac", "NEAC"),
+    // 2026-10-07 用户拍板：'ace-' 前缀一网打尽 ACE 全系。补它之前只列了三个具名
+    // （ace-game / ace_game / aceservice），本机实测「AntiCheatExpert Protection」
+    // （镜像 ace-service64.exe）**不命中**——第 8 道「反作弊无条件拒」对它失明；
+    // 内核驱动侧还有第 6 道兜底，用户态侧只剩「落点文件还在」这种一过性条件。
+    // 代价如实登记：含 'ace-' 的普通服务名（race-engine 类）同样命中，方向是
+    // 「拒绝而非误删」；本机全谱现算误伤为 0（含连字符的 race-/space-/trace- 名不存在）。
+    ("ace-", "ACE"),
     ("sguard", "ACE"),
     ("ace-game", "ACE"),
     ("ace_game", "ACE"),
@@ -664,6 +671,14 @@ mod tests {
         assert_eq!(anticheat_marker("BEService", ""), Some("BattlEye"));
         assert_eq!(anticheat_marker("EasyAntiCheat_EOS", ""), Some("EAC"));
         assert_eq!(anticheat_marker("GoogleUpdateExecution", "gemini.exe"), None);
+        // 2026-10-07 拍板补的 'ace-' 前缀：用户态本体（镜像名）+ 内核驱动服务名都命中
+        assert_eq!(anticheat_marker("svc", "ACE-Service64.exe"), Some("ACE"));
+        assert_eq!(anticheat_marker("ACE-CORE102706", ""), Some("ACE"));
+        // 无 'ace-' 子串的负例继续守住（space 开头的普通驱动不带连字符，不命中）
+        assert_eq!(anticheat_marker("Spaceport", "spaceport.sys"), None);
+        // 刻意承认 'ace-' 的泛化代价：含该子串的普通服务名同样命中（误拦方向安全，
+        // 用户 2026-10-07 拍板接受）。想改匹配策略前先读懂这条断言。
+        assert_eq!(anticheat_marker("race-engine", ""), Some("ACE"));
     }
 
     #[test]
