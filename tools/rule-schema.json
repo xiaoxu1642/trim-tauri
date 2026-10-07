@@ -343,12 +343,12 @@
       {
         "area": "winapp2.ini 整库导入",
         "reason": "FluentCleaner 只是 winapp2 的 CC-BY-SA 包装，可直译率 16.3%，且许可要求派生署名；批量导入会制造不可溯源的规则",
-        "status": "评估后不做（docs/规则库对比-FluentCleaner-winapp2-2026-09-27.md）"
+        "status": "评估后不做（FluentCleaner / winapp2 对比结论，对比笔记已删除）"
       },
       {
         "area": "SpaceMint 云端规则库抓取导入",
         "reason": "语法可直译率≈100%，但协议明文禁止批量抓取服务数据且下载需登录",
-        "status": "只借字段模型（docs/规则库对比-SpaceMint-2026-09-27.md）"
+        "status": "只借字段模型（SpaceMint 对比结论，对比笔记已删除）"
       },
       {
         "area": "永久删除兜底（回收站失败后强删）",

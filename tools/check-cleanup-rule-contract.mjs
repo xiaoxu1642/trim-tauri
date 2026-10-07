@@ -211,7 +211,7 @@ function main() {
   }
   if (overlaps.length > 0) {
     console.log(
-      `\n〔人工复核清单〕父子路径重叠 ${overlaps.length} 组（不判红，但每批发布前须有明确合并/排除/共存结论，记录见 docs/规则库审核记录-*.md）：`,
+      `\n〔人工复核清单〕父子路径重叠 ${overlaps.length} 组（不判红，但每批发布前须有明确合并/排除/共存结论，结论留档于本机资料区）：`,
     );
     for (const [parent, child] of overlaps) {
       console.log(`  · ${parent.id}（${parent.path}）⊃ ${child.id}（${child.path}）`);

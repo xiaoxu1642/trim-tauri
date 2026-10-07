@@ -136,7 +136,7 @@ features = [
     # System_Registry：读取网络连接名（NetConnectionID）等注册表只读键
     "Win32_System_Registry",
     # System_Environment：ExpandEnvironmentStringsW —— B11 值级备份读 REG_EXPAND_SZ 时
-    # 展开，对齐 .NET GetValue 的口径（依赖准入见 docs/PS转Rust迁移方案.md §4.1）
+    # 展开，对齐 .NET GetValue 的口径（依赖准入见 本机资料区《依赖清单》）
     "Win32_System_Environment",
     # B2 PS→Rust 迁移：进程控制
     # System_Services：OpenSCManager/ControlService/ChangeServiceConfig（停服务/改启动类型）
@@ -158,14 +158,14 @@ features = [
     # v0.4.9 RAINZ 对标 §3.3：崩溃时间线。`engine::native::bsod::event_timeline` 用
     # EvtQuery/EvtNext/EvtRender 读 System 日志里 Kernel-Power 41 / EventLog 6008 /
     # WER-BugCheck 1001 三类事件（近 30 天），把「最近一次崩是什么时候」从"转储文件
-    # mtime 近似"升级成"权威时间线"。依赖准入登记见 docs/PS转Rust迁移方案.md §4.1。
+    # mtime 近似"升级成"权威时间线"。依赖准入登记见 本机资料区《依赖清单》。
     "Win32_System_EventLog",
     # v2-R5 / A3 PnP 设备原生侧（engine::pnp 只读 spike）：
     # Devices_DeviceAndDriverInstallation = CM_Get_Device_ID_List* / CM_Locate_DevNodeW /
     # CM_Get_DevNode_Status / CM_Get_DevNode_PropertyW；
     # Devices_Properties = DEVPKEY_Device_FriendlyName 与 DEVPROPTYPE
     # （0.61 里 DEVPROPKEY 在 Foundation、DEVPROPTYPE 在 Properties，不是一个命名空间）。
-    # 依赖准入见 docs/Trim-111项目全量对比与去PowerShell原生落地-2026-10-01-v2.md §7
+    # 依赖准入见本机资料区《依赖清单》
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
 ]
