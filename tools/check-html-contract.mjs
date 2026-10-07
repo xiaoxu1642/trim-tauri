@@ -4,7 +4,7 @@
 // 两条硬红线此前无任何机检（E-4），全靠「注释里写了要这么做」：
 //   1. src/*.html 禁内联 <script>（无 src 属性的 script 会被 CSP 静默拦截，
 //      「页面功能失灵但零报错」——本仓最阴的一类回归）；
-//   2. 五个窗口 HTML 都必须挂 ds.css + ds.js（modal 焦点陷阱按「window.ds 缺席即降级」
+//   2. 每个窗口 HTML 都必须挂 ds.css + ds.js（modal 焦点陷阱按「window.ds 缺席即降级」
 //      写，少挂 = 子窗高危确认没有 Tab 圈闭、data-tip 退回无样式）。
 //   3. 加载序：ds.js 必须先于 liquid-glass.js / spotlight.js（AGENTS §2）。
 // 判红自证：注入一个内联 script / 摘掉一个 ds 引用都会红。

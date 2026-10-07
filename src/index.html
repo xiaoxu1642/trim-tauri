@@ -801,14 +801,6 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
               联网 AI 简介
             </button>
-            <button class="btn btn-secondary" id="btnActionsWindow" data-tip="打开「右键菜单动作」窗口：把内置动作写进当前账号的 HKCU 右键菜单（不需要管理员，也不碰别的软件的菜单项）">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 2v6h6c-.02 4.97-3.02 9.19-7.5 11.57C7.02 17.19 4 12.97 3.98 8H10V2h3zm0 0h-2v4H5.02C5.5 9.9 8.5 14.4 12 16.9 15.5 14.4 18.5 9.9 18.98 6H13V2z"/></svg>
-              <span>菜单动作</span>
-            </button>
-            <button class="btn btn-secondary" id="btnCtxModePanel" data-tip="Windows 11 菜单形态开关与 Shell 扩展屏蔽表" aria-expanded="false" aria-controls="ctxModePanel">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 5h18v2H3zm0 6h12v2H3zm0 6h18v2H3z"/></svg>
-              菜单形态
-            </button>
           </div>
         </div>
 
@@ -819,26 +811,6 @@
           <span class="ctx-apply-text" id="ctxApplyText"></span>
           <button type="button" class="btn btn-primary" id="btnCtxRestartExplorer">重启资源管理器</button>
           <button type="button" class="ctx-apply-dismiss" id="btnCtxApplyDismiss" data-tip="改动已写入注册表，只是菜单还没刷新">稍后</button>
-        </div>
-
-        <!-- 批次 B：Win11 菜单形态 + 屏蔽表（默认收起，由「菜单形态」按钮展开） -->
-        <div class="ctx-mode-panel" id="ctxModePanel" hidden>
-          <div class="ctx-mode-card">
-            <div class="ctx-mode-head">
-              <span class="ctx-mode-title">Windows 11 右键菜单形态</span>
-              <span class="ctx-mode-current" id="ctxWin11Mode">读取中…</span>
-            </div>
-            <p class="ctx-mode-desc" id="ctxWin11Desc">「新版精简」只显示少量内置命令，第三方扩展折叠进「显示更多选项」；「经典完整」把所有扩展直接平铺（等同 Win10 行为）。仅对当前用户生效，切换后需重启资源管理器。</p>
-            <div class="ctx-mode-switch" id="ctxWin11Switch"></div>
-          </div>
-          <div class="ctx-mode-card">
-            <div class="ctx-mode-head">
-              <span class="ctx-mode-title">已屏蔽的 Shell 扩展</span>
-              <span class="ctx-mode-current" id="ctxBlockedCount"></span>
-            </div>
-            <p class="ctx-mode-desc">屏蔽表（Shell Extensions\Blocked）里的扩展不会被资源管理器加载——比改键名更彻底，也常被其他工具改动。系统内置扩展不允许入表，否则整个新式菜单可能失效。</p>
-            <div class="ctx-blocked-list" id="ctxBlockedList"></div>
-          </div>
         </div>
 
         <!-- 2026-10-05 用户裁定：分类分段栏整条删除。看板改为**按软件分组**

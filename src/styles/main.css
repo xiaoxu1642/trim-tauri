@@ -6486,7 +6486,7 @@ body.pv-window {
   white-space: nowrap;
 }
 
-/* ==================== 批次 B：生效条 / Win11 菜单形态 / 屏蔽表 ==================== */
+/* ==================== 批次 B：生效条 ==================== */
 /* 只用既有 token；卡片范式与 .ctx-col 一致（bg-card + border-default + 顶部 3px 强调边 + radius-medium） */
 .ctx-apply-bar {
   display: flex;
@@ -6517,54 +6517,8 @@ body.pv-window {
 }
 .ctx-apply-dismiss:hover { color: var(--fg-primary); background: var(--bg-hover); }
 
-.ctx-mode-panel {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 14px;
-  margin: 0 0 14px;
-}
-.ctx-mode-panel[hidden] { display: none; }
-.ctx-mode-card {
-  padding: 12px 14px 14px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-default);
-  border-top: 3px solid var(--accent);
-  border-radius: var(--radius-medium);
-  box-shadow: var(--shadow-card);
-}
-.ctx-mode-head { display: flex; align-items: center; gap: 8px; }
-.ctx-mode-title { font-size: 14px; font-weight: 700; color: var(--fg-primary); }
-.ctx-mode-current { margin-left: auto; font-size: 12px; color: var(--fg-tertiary); }
-.ctx-mode-desc { margin: 8px 0 10px; font-size: 12px; line-height: 1.6; color: var(--fg-secondary); }
-.ctx-mode-switch { display: flex; align-items: center; gap: 10px; }
-.ctx-mode-caption { font-size: 12px; color: var(--fg-secondary); }
-.ctx-blocked-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
-.ctx-blocked-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-small);
-  font-size: 12px;
-}
-.ctx-blocked-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg-primary);
-}
-.ctx-blocked-guid { flex: 0 0 auto; font-size: 11px; color: var(--fg-tertiary); }
-.ctx-blocked-row .btn { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; }
-.ctx-blocked-empty { padding: 6px 0; font-size: 12px; color: var(--fg-tertiary); }
-
 @media (prefers-reduced-motion: reduce) {
-  .ctx-apply-bar,
-  .ctx-mode-card,
-  .ctx-blocked-row { transition: none !important; }
+  .ctx-apply-bar { transition: none !important; }
 }
 
 .opt-kanban,
@@ -9570,30 +9524,6 @@ body[data-preset-bg] .app-wallpaper::before {
 body[data-preset-bg] .titlebar,
 body.bg-image-on .titlebar {
   background: transparent;
-}
-
-/* 右键菜单动作副窗（v0.7.0）：脚本输入与输出预览，只用既有 token */
-.ac-script {
-  width: 100%;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
-  resize: vertical;
-}
-.ac-boundary { flex: 1; min-width: 240px; }
-.ac-output {
-  margin: 10px 0 0;
-  padding: 10px;
-  max-height: 260px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  border-radius: var(--radius-small);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  color: var(--fg-secondary);
-  font-family: var(--font-mono);
-  font-size: 12px;
 }
 
 /* ==================== 残留扫描副窗（v0.7.0：三链候选 + 深扫只读报告同页） ====================

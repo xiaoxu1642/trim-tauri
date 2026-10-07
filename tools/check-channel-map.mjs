@@ -91,6 +91,18 @@ const RETIRED = {
   // 保留的 peripheral:query/apply/restore-backup 三条改由主窗调用。
   'peripheral:open-window': '2026-10-07（用户裁定）：外设优化改应用内弹窗，子窗与开窗命令整链退役',
   'peripheral:close-window': '2026-10-07（用户裁定）：同上，弹窗用 ctrl.close() 关闭，不再需要子窗关窗通道',
+  // 2026-10-07（用户裁定）：「右键菜单动作」副窗与「菜单形态 / 屏蔽表」两个入口全线退役 ——
+  // 副窗（label actions）与六条 actions 通道、contextmenu:win11-classic / blocked-list 连同
+  // Rust 命令、lib.rs 注册、CHANNEL_MAP、window.api 包装、capabilities 与门禁登记一并摘除；
+  // 写侧用过的 HKCU\Software\Classes 窄口子（protect::trim_shell_key_narrow_deny）同步退役。
+  'actions:open-window': '2026-10-07（用户裁定）：右键菜单动作副窗整链退役（主窗入口按钮同撤）',
+  'actions:close-window': '2026-10-07（用户裁定）：同上，副窗 label actions 退役',
+  'actions:list': '2026-10-07（用户裁定）：同上',
+  'actions:apply': '2026-10-07（用户裁定）：同上；写侧 TRIM.* 窄口子同步退役',
+  'actions:remove': '2026-10-07（用户裁定）：同上',
+  'actions:run-script': '2026-10-07（用户裁定）：同上；pwsh 调用点门禁登记一并摘除',
+  'contextmenu:win11-classic': '2026-10-07（用户裁定）：「菜单形态」开关整条退役（卡片 + 命令 + 原生实现同撤）',
+  'contextmenu:blocked-list': '2026-10-07（用户裁定）：「已屏蔽的 Shell 扩展」卡片整条退役（命令 + 原生实现同撤）',
 };
 
 /**
@@ -129,13 +141,6 @@ const TAURI_ADDED = {
   // 2026-10-07：机-wide 扫描整条退役 —— 失效残留 / 卸载遗留 / 七个深扫器报告四条通道
   // （连同 Rust 命令、CHANNEL_MAP、window.api 包装、门禁登记）一起摘除，残留副窗只留
   // 「该应用四类残留」一条扫描通道 `uninstall:residue-scan`。登记进 RETIRED（见该表）。
-  // v0.7.0 第四期：右键菜单动作面板（只写 HKCU 的当前账号，Electron 轨没有这个域）
-  'actions:open-window': 'v0.7.0：打开「右键菜单动作」副窗（主窗入口，MAIN 档）',
-  'actions:close-window': 'v0.7.0：副窗自身关闭（只读档）',
-  'actions:list': 'v0.7.0：内置动作 + HKCU 当前落点 + removable 标记（判据与执行侧同一个函数）',
-  'actions:apply': 'v0.7.0：把内置动作投影成 HKCU 经典菜单键（窄窗口集 actions）',
-  'actions:remove': 'v0.7.0：只撤 TRIM. 前缀自己写的键，走 A1 窄口子（窄窗口集 actions）',
-  'actions:run-script': 'v0.7.0：用户自写 PowerShell 直调，唯一入口 run_inbox_script、固定 120 秒、不代提权（窄窗口集 actions）',
   'residue:open-window': 'v0.5.0（2026-10-04）：打开残留扫描副窗（用户裁决 4：扫描全部在自绘副窗，主窗只留入口）',
   'residue:close-window': 'v0.5.0（2026-10-04）：关闭残留扫描副窗（同 preview/models 的子窗关窗轨）',
   'optimizer:restore-frequency': '任务三（2026-10-06）：还原点弹窗「恢复默认创建频率」手动回收入口（主窗档；创建流程已自动回收，此钮是回收失败时的出口，上游 Electron 无此能力）',
@@ -407,7 +412,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'cleanup_rules',
   'cleanup_scan',
   'contextmenu_backup',
-  'contextmenu_blocked_list',
   'contextmenu_icons',
   'contextmenu_scan',
   'device_scan',

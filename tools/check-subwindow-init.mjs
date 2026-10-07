@@ -51,24 +51,6 @@ const PAGES = [
       'residueWindow.onTarget': () => undefined,
     }),
   },
-  {
-    html: 'actions-window.html',
-    script: 'scripts/actions-window.js',
-    expectCalls: ['actionsWindow.list'],
-    expectHosts: ['acBody:click'],
-    poisonAnchor: "on('acBody', 'click', onClick);",
-    dropIdProbe: 'acRunBtn',
-    api: () => ({
-      'actionsWindow.list': async () => ({
-        success: true,
-        data: { items: [{ id: 'openInNotepad', name: '用记事本打开', class: '*', installed: false, removable: false }], droppedInvalid: 0 },
-      }),
-      'actionsWindow.apply': async () => ({ success: true, data: { written: [], failed: [] } }),
-      'actionsWindow.remove': async () => ({ success: true, data: { removed: [], failed: [] } }),
-      'actionsWindow.runScript': async () => ({ success: true, data: { exitCode: 0, stdout: '', stderr: '', timedOut: false, elevated: false } }),
-      'actionsWindow.closeWindow': async () => ({ success: true }),
-    }),
-  },
 ];
 
 let fail = 0;

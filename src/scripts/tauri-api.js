@@ -117,7 +117,7 @@
     'uninstall:report-list': 'uninstall_report_list',
     'uninstall:report-get': 'uninstall_report_get',
     'uninstall:appx-logo': 'uninstall_appx_logo',
-    // contextmenu（10）
+    // contextmenu（8）
     'contextmenu:scan': 'contextmenu_scan',
     'contextmenu:backup': 'contextmenu_backup',
     'contextmenu:remove': 'contextmenu_remove',
@@ -126,8 +126,6 @@
     'contextmenu:icons': 'contextmenu_icons',
     'contextmenu:open-in-regedit': 'contextmenu_open_in_regedit',
     'contextmenu:restart-explorer': 'contextmenu_restart_explorer',
-    'contextmenu:win11-classic': 'contextmenu_win11_classic',
-    'contextmenu:blocked-list': 'contextmenu_blocked_list',
     // modal（2）/ diag / settings / intro
     'modal:open': 'modal_open',
     'modal:close': 'modal_close',
@@ -204,13 +202,6 @@
     // residue 窗口（2）—— v0.5.0 残留扫描副窗（用户裁决 4：扫描全在副窗，主窗只留入口）
     'residue:open-window': 'residue_open_window',
     'residue:close-window': 'residue_close_window',
-    // v0.7.0 第四期：右键菜单动作面板（只写 HKCU，命令串取随包数据，前端只回传 id）
-    'actions:open-window': 'actions_open_window',
-    'actions:close-window': 'actions_close_window',
-    'actions:list': 'actions_list',
-    'actions:apply': 'actions_apply',
-    'actions:remove': 'actions_remove',
-    'actions:run-script': 'actions_run_script',
     'peripheral:query': 'peripheral_query',
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
@@ -507,8 +498,6 @@
       icons: function (items) { return invokeChannel('contextmenu:icons', { items: items }); },
       openInRegedit: function (regPath) { return invokeChannel('contextmenu:open-in-regedit', { regPath: regPath }); },
       restartExplorer: function () { return invokeChannel('contextmenu:restart-explorer'); },
-      win11Mode: function (action) { return invokeChannel('contextmenu:win11-classic', { action: action }); },
-      blockedList: function () { return invokeChannel('contextmenu:blocked-list'); }
     },
 
     modal: {
@@ -671,15 +660,6 @@
       closeWindow: function () { return invokeChannel('residue:close-window'); },
       // 副窗已开着时主窗又点了「查残留」：新目标走事件进来（能力面已授 core:event:allow-listen）
       onTarget: function (callback) { return onEvent('residue:target', function (payload) { callback(payload); }); }
-    },
-
-    actionsWindow: {
-      openWindow: function () { return invokeChannel('actions:open-window'); },
-      closeWindow: function () { return invokeChannel('actions:close-window'); },
-      list: function () { return invokeChannel('actions:list'); },
-      apply: function (ids) { return invokeChannel('actions:apply', { ids: ids }); },
-      remove: function (ids) { return invokeChannel('actions:remove', { ids: ids }); },
-      runScript: function (script) { return invokeChannel('actions:run-script', { script: script }); }
     },
 
     quickCmds: {

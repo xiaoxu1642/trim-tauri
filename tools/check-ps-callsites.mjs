@@ -50,13 +50,6 @@ const PS_EXEC_SITES = [];
  */
 const PS_CALL_SITES = [
   {
-    file: 'src-tauri/src/commands/actions.rs',
-    anchor: 'crate::pwsh::run_inbox_script(&body, std::time::Duration::from_secs(120), Some("actions:run-script"))',
-    reason: 'v0.7.0 B7：用户自写 PowerShell 直调。超时是固定 120 秒且用户不可配 —— 能配超时等于关掉「超时收树」这道护栏；不代提权（elevate:request 未下放给 actions 副窗）',
-    owner: 'commands/actions.rs',
-    timeout: 120,
-  },
-  {
     file: 'src-tauri/src/engine/pssteps.rs',
     anchor: 'run_inbox_script(script, std::time::Duration::from_secs(300)',
     reason: '数据层 PsInline 算子：原生解释器表达不了的构造逐字交给收件箱 PS',

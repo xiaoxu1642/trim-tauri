@@ -1,4 +1,4 @@
-//! B6 右键菜单全链：win11 模式、屏蔽清单、深度扫描、启停、删除、备份、防篡改恢复、explorer 重启。
+//! B6 右键菜单全链：深度扫描、启停、删除、备份、防篡改恢复、explorer 重启。
 //!
 //! 本域是 native 里最大的一块（约 2.4k 行），写侧副作用真实（RegRenameKey 改 Verbs、
 //! 删 clsid、导入 .reg 还原、杀 explorer）。COM 类名与厂商判定表（PROTECTED_CLASSES /
@@ -12,7 +12,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, FreeLibrary, HMODULE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
 use windows::Win32::System::LibraryLoader::LoadLibraryW;
-use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_CREATED_NEW_KEY, REG_CREATE_KEY_DISPOSITION, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegRenameKey, RegSetValueExW};
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_CREATED_NEW_KEY, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegRenameKey, RegSetValueExW};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 use windows::Win32::UI::WindowsAndMessaging::LoadStringW;
@@ -20,108 +20,6 @@ use super::common::*;
 use super::registry::*;
 // ==================== B6：右键菜单 ====================
 
-
-/// Win11 经典/现代右键菜单切换（对应 cm_win11_mode.ps1）
-///
-/// action: "get" / "set-classic" / "set-modern"
-pub fn cm_win11_mode(action: &str) -> Result<Value, String> {
-    const CLSID_PATH: &str = r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}";
-    const INPROC_PATH: &str = r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
-
-    unsafe {
-        // 读当前模式
-        let get_mode = || -> &'static str {
-            let sk = to_wide(INPROC_PATH);
-            let mut hk = HKEY::default();
-            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-                return "modern";
-            }
-            // 读默认值（空名）
-            let empty = to_wide("");
-            let mut ty = REG_VALUE_TYPE::default();
-            let mut size = 0u32;
-            let r = RegQueryValueExW(hk, PCWSTR(empty.as_ptr()), None, Some(&mut ty), None, Some(&mut size));
-            let _ = RegCloseKey(hk);
-            if r.is_err() { return "modern"; }
-            // 默认值存在且为空字符串 → classic
-            "classic"
-        };
-
-        let before = get_mode();
-        if action == "get" {
-            return Ok(json!({ "success": true, "mode": before, "changed": false, "requireRestart": false }));
-        }
-
-        let target_mode = if action == "set-classic" { "classic" }
-            else if action == "set-modern" { "modern" }
-            else { return Ok(json!({ "success": false, "mode": before, "changed": false, "message": "未知动作" })); };
-
-        if action == "set-classic" {
-            let sk = to_wide(INPROC_PATH);
-            let mut hk = HKEY::default();
-            let mut disposition = REG_CREATE_KEY_DISPOSITION(0);
-            let r = RegCreateKeyExW(
-                HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), None,
-                REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disposition),
-            );
-            if r.is_err() { return Err(format!("创建注册表键失败: 错误码 {}", r.0)); }
-            // 写空字符串默认值（必须存在，不是不写）；一个 null u16 = 4 字节
-            let empty = to_wide("");
-            let data: [u8; 4] = [0, 0, 0, 0];
-            let r2 = RegSetValueExW(
-                hk, PCWSTR(empty.as_ptr()), Some(0), REG_SZ, Some(&data),
-            );
-            if r2.is_err() { return Err(format!("写入默认值失败: 错误码 {}", r2.0)); }
-            let _ = RegCloseKey(hk);
-        } else {
-            // set-modern：删除整个 CLSID 键树
-            let sk = to_wide(CLSID_PATH);
-            let r = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()));
-            if r.is_err() { return Err(format!("删除注册表键失败: 错误码 {}", r.0)); }
-        }
-
-        let after = get_mode();
-        let success = after == target_mode;
-        Ok(json!({
-            "success": success,
-            "mode": after,
-            "changed": after != before,
-            "requireRestart": true,
-            "message": if success { "已切换，重启资源管理器后生效" } else { "切换未生效" },
-        }))
-    }
-}
-
-/// 被拦截的右键项清单（对应 cm_blocked_list.ps1，只读）
-pub fn cm_blocked_list() -> Result<Value, String> {
-    let roots: &[(HKEY, &str, &str)] = &[
-        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked", "machine"),
-        (HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked", "user"),
-    ];
-    let mut entries: Vec<Value> = Vec::new();
-    unsafe {
-        for (hive, subkey, scope) in roots {
-            let sk = to_wide(&subkey);
-            let mut hk = HKEY::default();
-            if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-                continue;
-            }
-            let names = reg_enum_values(hk);
-            for name in names {
-                let g = name.trim();
-                // GUID 形状判定用同一份 `is_guid`（AGENTS §5.16）：这里原先自带一份弱判据
-                // （长度 38 + 花括号 + 首段 8 位十六进制），凡是满足这四条的键名都会进表，
-                // 而扫描端做的是完整五段校验 —— 两套口径会让「屏蔽表里有」和「扫描认它是扩展」
-                // 不一致，界面上就多出一批点不动的条目。
-                if is_guid(g) {
-                    entries.push(json!({ "guid": g, "scope": scope }));
-                }
-            }
-            let _ = RegCloseKey(hk);
-        }
-    }
-    Ok(json!({ "success": true, "entries": entries }))
-}
 
 /// 重启资源管理器（对应 cm_restart_explorer.ps1）
 pub fn cm_restart_explorer() -> Result<Value, String> {

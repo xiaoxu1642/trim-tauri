@@ -995,44 +995,6 @@ pub async fn contextmenu_restart_explorer<R: Runtime>(window: WebviewWindow<R>) 
     }
 }
 
-/// contextmenu:win11-classic —— action 白名单 get/set-classic/set-modern
-#[tauri::command]
-pub async fn contextmenu_win11_classic<R: Runtime>(
-    window: WebviewWindow<R>,
-    action: Option<String>,
-) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    const ALLOWED: [&str; 3] = ["get", "set-classic", "set-modern"];
-    let act = action.unwrap_or_else(|| "get".into());
-    let act = if ALLOWED.contains(&act.as_str()) { act } else { "get".to_string() };
-    if act != "get" {
-        log::write_log("warn", &format!("切换 Win11 右键菜单模式: {act}"));
-    }
-    // S3：纯 Rust 原生
-    let act_clone = act.clone();
-    match tauri::async_runtime::spawn_blocking(move || native::cm_win11_mode(&act_clone)).await {
-        Ok(Ok(data)) => json!({ "success": data.get("success").and_then(|v| v.as_bool()).unwrap_or(false), "data": data }),
-        Ok(Err(e)) => json!({ "success": false, "message": format!("原生操作失败: {e}") }),
-        Err(e) => json!({ "success": false, "message": format!("任务异常: {e}") }),
-    }
-}
-
-/// contextmenu:blocked-list —— Shell Extensions\Blocked 只读枚举（≤500，GUID 校验）
-#[tauri::command]
-pub async fn contextmenu_blocked_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
-        return json!({ "success": false, "message": msg });
-    }
-    // S3：纯 Rust 原生
-    match tauri::async_runtime::spawn_blocking(native::cm_blocked_list).await {
-        Ok(Ok(data)) => json!({ "success": true, "data": data }),
-        Ok(Err(e)) => json!({ "success": false, "message": format!("原生枚举失败: {e}") }),
-        Err(e) => json!({ "success": false, "message": format!("任务异常: {e}") }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

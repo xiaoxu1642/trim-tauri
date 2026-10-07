@@ -1,6 +1,6 @@
 // check-csp-consistency.mjs —— 5 份 CSP meta 共同前缀一致性门禁（审查 v3-L4）
 //
-// 为什么判红：CSP 唯一真源在 index.html 的 meta 标签（AGENTS §5.9），4 个子窗 HTML
+// 为什么判红：CSP 唯一真源在 index.html 的 meta 标签（AGENTS §5.9），3 个子窗 HTML
 // 各带一份逐字拷贝（历史上靠人肉同步）。改 index.html 的 CSP 而忘了子窗 → 叠加取严
 // 之下子窗行为漂移，且没有任何报错。
 //
