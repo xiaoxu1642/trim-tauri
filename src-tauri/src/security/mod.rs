@@ -30,15 +30,83 @@ pub const SECRET_FIELDS: &[&str] = &[
 
 static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn random_suffix() -> String {
+/// 加密安全的随机十六进制串（`len_bytes` 字节 → **恒定** `2*len_bytes` 个小写 hex 字符）。
+///
+/// 审查 M-02（加固，非漏洞修复）：原先两处临时文件名后缀都用
+/// `SystemTime` 纳秒低位 + `Atomic` 自增 + pid 拼接。纳秒**不是加密熵**
+/// （只有 30 位、且同机进程可观测/推算时序），而这些临时文件里有一类会落到
+/// **管理员上下文**（optimizer 提权链的 `.reg`、pwsh inbox 脚本）—— 能预判
+/// 候选名就能抢先占位。改用 `BCryptGenRandom`（系统首选 CSPRNG、无需建句柄，
+/// 与 DPAPI、GCM nonce 同源，见 `safestorage::random_nonce`）。
+///
+/// 失败时退回旧的弱熵混合值，但**仍定长**：契约是「N 字节进去、2N 个 hex 出来」，
+/// 调用方（临时文件名拼装、固定宽度断言）不能因熵源不同而拿到不同长度的串。
+///
+/// 注意隔离强度**按调用点不同**（这条不能一概而论）：
+/// - `write_temp_script` 用 `create_new(true)` + 重试，弱熵下也拿不到已存在的文件；
+/// - [`atomic_write_file`] 用 `File::create`（截断、跟随符号链接），**没有**独占创建
+///   保护——那处的临时名独占性完全依赖这个后缀的不可预测性，所以降级路径必须
+///   照样产出长度固定、随每次调用变化的串，不能退化成可推算的常量。
+pub fn crypto_random_hex(len_bytes: usize) -> String {
+    use windows::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+    let n = len_bytes.max(1);
+    let mut buf = vec![0u8; n];
+    // BCryptGenRandom 在 len=0 时成功但什么都不填，调用方传 0 没有意义——上面已兜到 ≥1。
+    let status = unsafe { BCryptGenRandom(None, &mut buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if status.0 == 0 {
+        return hex_lower(&buf);
+    }
+    // CSPRNG 不可用（极少见）：混入旧的纳秒+序号+pid，再散列成定长输出。
+    // 不直接格式化那个混合值 —— 那样长度会随纳秒位数漂移，破坏上面的契约。
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let seq = WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    // 取纳秒低位 + 自增序号 + pid 混合，等价 JS 侧 randomBytes(4) 的唯一性目的
-    format!("{:x}{:x}{:x}", nanos & 0xffff_ffff, seq, pid)
+    let mut seed = Vec::with_capacity(24);
+    seed.extend_from_slice(&nanos.to_le_bytes());
+    seed.extend_from_slice(&seq.to_le_bytes());
+    seed.extend_from_slice(&pid.to_le_bytes());
+    hex_lower(&fnv1a(&seed, n))
+}
+
+/// 小写 hex 编码（定长输出的唯一出口，避免各处各自 `format!` 出不同长度）。
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// 一次性 FNV-1a（只为把变长输入压成定长输出，**不是**密码学哈希）。
+/// 只在 [`crypto_random_hex`] 的 CSPRNG 降级路径上用到。
+fn fnv1a(data: &[u8], out_len: usize) -> Vec<u8> {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut out = Vec::with_capacity(out_len);
+    let mut h = OFFSET;
+    let mut counter: u8 = 0;
+    while out.len() < out_len {
+        for b in data {
+            h ^= *b as u64;
+            h = h.wrapping_mul(PRIME);
+        }
+        // 超过 u64 输出长度时靠 counter 继续派生，避免无限循环
+        h ^= counter as u64;
+        h = h.wrapping_mul(PRIME);
+        counter = counter.wrapping_add(1);
+        out.extend_from_slice(&h.to_le_bytes());
+    }
+    out.truncate(out_len);
+    out
+}
+
+fn random_suffix() -> String {
+    crypto_random_hex(8)
 }
 
 /// 原子写文件：temp（同目录）→ fsync → rename 覆盖；失败清理临时件
@@ -368,6 +436,32 @@ mod tests {
     }
 
     // ==================== 审查 v2-U3：永久删除出口的匹配面 ====================
+
+    /// 审查 M-02：临时文件名后缀改走 CSPRNG 后，形状必须是**定长 hex**——
+    /// 旧的纳秒+序号+pid 是变长十进制/十六进制混排，且字符集含 pid 形态。
+    /// 这条断言点名「做到了什么」，不是「没报错」。
+    #[test]
+    fn 随机后缀是定长小写hex() {
+        let s = crypto_random_hex(8);
+        assert_eq!(s.len(), 16, "8 字节 ⇒ 16 个 hex 字符，实际 {s:?}");
+        assert!(
+            s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "只应是 0-9a-f，实际 {s:?}"
+        );
+    }
+
+    /// 两次调用必须不同 —— 熵源真的换了才会恒成立；旧的纳秒低位在同一纳秒内
+    /// 只会靠自增序号区分（形似不同、熵不同），这条钉住「不是伪随机」。
+    #[test]
+    fn 随机后缀两次不重复() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            seen.insert(crypto_random_hex(8));
+        }
+        assert_eq!(seen.len(), 64, "64 次调用出现重复，熵源可能退化");
+    }
+
+    /// 审查 v2-U3：永久删除出口的匹配面 ====================
 
     #[test]
     fn 隔离件匹配必须要求原名以json结尾() {

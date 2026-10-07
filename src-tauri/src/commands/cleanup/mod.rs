@@ -70,6 +70,4 @@ pub use scan_execute::{cleanup_scan, __cmd__cleanup_scan, __tauri_command_name_c
 mod state;
 
 #[cfg(test)]
-
-#[cfg(test)]
 mod contract_tests;

@@ -814,7 +814,17 @@ struct RegEditCloseCtx {
     hits: usize,
 }
 
+/// EnumWindows 回调：把属于 regedit.exe 的可见顶层窗口关掉。
+///
+/// `lparam` 是 Win32 裸指针，没有类型保证：目前唯一调用者传的是栈上局部变量的地址
+/// 且 EnumWindows 同步回调（生命周期覆盖整个调用），现行路径安全。这里加空值防御是
+/// 为了**将来的复用**——这是 `unsafe extern "system"` 的公共回调签名，若被挂到别的
+/// 枚举场景而 lparam 不是本结构体地址，裸解引用就是立即 UB。
 unsafe extern "system" fn close_regedit_wndproc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if lparam.0 == 0 {
+        // 回调约定：返回非 0 表示「继续枚举」。这里没有 ctx 可用，直接让枚举跑完。
+        return BOOL(1);
+    }
     let ctx = &mut *(lparam.0 as *mut RegEditCloseCtx);
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));

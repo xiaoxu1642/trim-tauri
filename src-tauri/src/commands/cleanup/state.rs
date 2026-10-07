@@ -25,12 +25,44 @@ pub(super) fn load_paths_config() -> Value {
                 if v.is_object() {
                     v
                 } else {
+                    // 审查 M-08：三种回退原本都零日志，用户只会看到「扫描结果为空」，
+                    // 分不清是首启动没有配置、还是配置损坏被丢弃了。逐条说清是哪一种。
+                    let actual = if v.is_array() {
+                        "array"
+                    } else if v.is_string() {
+                        "string"
+                    } else if v.is_number() {
+                        "number"
+                    } else {
+                        "其他非 object 值"
+                    };
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!(
+                            "路径配置 {} 顶层不是 object（实际 {actual}），已按空配置继续",
+                            file.display()
+                        ),
+                    );
                     json!({})
                 }
             }
-            Err(_) => json!({}),
+            Err(e) => {
+                crate::engine::log::write_log(
+                    "error",
+                    &format!("路径配置 {} JSON 解析失败: {e}（已按空配置继续，绑定项会退回默认值）", file.display()),
+                );
+                json!({})
+            }
         },
-        Err(_) => json!({}),
+        Err(e) => {
+            // NotFound 属首启动正常态，用 info；其余（权限/占用等）才是 warn。
+            let level = if e.kind() == std::io::ErrorKind::NotFound { "info" } else { "warn" };
+            crate::engine::log::write_log(
+                level,
+                &format!("路径配置 {} 读取失败: {e}（已按空配置继续，绑定项会退回默认值）", file.display()),
+            );
+            json!({})
+        }
     }
 }
 

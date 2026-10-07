@@ -883,34 +883,43 @@
   }
 
   async function restartExplorer() {
-    if (!window.api?.contextmenu?.restartExplorer) {
-      window.app?.toast('info', '当前环境不支持重启资源管理器');
-      return;
-    }
-    // 重启会关掉用户已打开的文件夹窗口，按红线走红色确认，不静默执行
-    const ok = await window.app?.confirmDanger(
-      '重启资源管理器',
-      '将结束并重新打开当前会话的资源管理器（explorer.exe）。\n桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。',
-      '确认重启',
-      '取消',
-      '只影响当前登录会话；其他用户与服务会话的资源管理器不受影响。'
-    );
-    if (!ok) return;
-    const btn = document.getElementById('btnCtxRestartExplorer');
-    if (btn) btn.disabled = true;
+    // 审查 M-07 订正：原判「整处未包裹」不成立——下方 restartExplorer 调用本身已有
+    // try/catch/finally。真正的缺口是这个函数被**直接当事件监听器**注册
+    // （init(): btnCtxRestartExplorer.addEventListener('click', restartExplorer)），
+    // 而 confirmDanger 那次 await 在 try 之外：它一旦 reject（模态被异常关闭等），
+    // 就会变成无人接的 Promise rejection，调用方连 toast 都拿不到。
     try {
-      const resp = await window.api.contextmenu.restartExplorer();
-      if (resp && resp.success) {
-        pendingApply = 0;
-        renderApplyBar();
-        window.app?.toast('success', (resp.data && resp.data.message) || '已重启资源管理器');
-      } else {
-        window.app?.toast('error', (resp && resp.message) || '重启资源管理器失败');
+      if (!window.api?.contextmenu?.restartExplorer) {
+        window.app?.toast('info', '当前环境不支持重启资源管理器');
+        return;
+      }
+      // 重启会关掉用户已打开的文件夹窗口，按红线走红色确认，不静默执行
+      const ok = await window.app?.confirmDanger(
+        '重启资源管理器',
+        '将结束并重新打开当前会话的资源管理器（explorer.exe）。\n桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。',
+        '确认重启',
+        '取消',
+        '只影响当前登录会话；其他用户与服务会话的资源管理器不受影响。'
+      );
+      if (!ok) return;
+      const btn = document.getElementById('btnCtxRestartExplorer');
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await window.api.contextmenu.restartExplorer();
+        if (resp && resp.success) {
+          pendingApply = 0;
+          renderApplyBar();
+          window.app?.toast('success', (resp.data && resp.data.message) || '已重启资源管理器');
+        } else {
+          window.app?.toast('error', (resp && resp.message) || '重启资源管理器失败');
+        }
+      } catch (e) {
+        window.app?.toast('error', '重启资源管理器失败: ' + e.message);
+      } finally {
+        if (btn) btn.disabled = false;
       }
     } catch (e) {
-      window.app?.toast('error', '重启资源管理器失败: ' + e.message);
-    } finally {
-      if (btn) btn.disabled = false;
+      window.app?.toast('error', '重启资源管理器失败: ' + ((e && e.message) || e));
     }
   }
 

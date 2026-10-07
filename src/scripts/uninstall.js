@@ -361,6 +361,13 @@
       const meaning = d.exitMeaning ? `（退出码 ${d.exitCode}：${d.exitMeaning}）` : '';
       if (isAppx) {
         window.app?.toast?.('success', `「${app.displayName}」已移除`);
+      } else if (d.exitCode == null) {
+        // 审查 M-07 订正：后端硬等待超时（UninstallerWait::TimedOut）时 exitCode 为 null，
+        // 而 watch_uninstaller 只要卸载键消失就立刻返回 stillListed=false——**不代表
+        // 卸载器退出了**。若继续往下走分支链，这里会落到 usedSilent 的「静默卸载完成」
+        // 并照样打开残留窗，把「进程可能还在跑」播报成「已完成」。超时必须最先判，
+        // 且只播报后端那句如实结论，不在这里合成「成功/仍在列表中」的结论。
+        window.app?.toast?.('warning', d.message || '等待卸载器超时，卸载状态未知（未强制终止）');
       } else if (d.stillListed) {
         window.app?.toast?.('warning', `卸载器已退出，但该程序仍在卸载列表中${meaning}。可稍后再试一次卸载`);
       } else if (Number(d.exitCode) === 3010) {
@@ -373,6 +380,13 @@
         window.app?.toast?.('success', '卸载完成，可以继续扫描残留');
       }
       await loadApps();
+      // 审查 M-07 订正：超时态**不**自动开残留副窗——卸载器可能还在写盘，
+      // 此时扫描到的「残留」是卸载中途的半成品，照着删会和安装器抢文件。
+      // 用户等卸载真正结束（或重启后）再手动点扫描即可，入口在残留副窗自己那里。
+      if (d.exitCode == null && !isAppx) {
+        window.app?.toast?.('info', '请等卸载器自行结束后再扫描残留；也可重启系统后重试');
+        return;
+      }
       // v0.7.0 用户拍板：卸载完成后弹的就是残留副窗（面板不再留在主窗里）。
       // 主窗只负责把「刚卸载的是哪个」递过去；扫描、勾选、删除全在那扇窗内。
       currentAppId = appId;

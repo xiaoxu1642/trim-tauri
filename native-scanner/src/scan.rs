@@ -1578,11 +1578,25 @@ fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize, up: O
 pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
     let minb = min_size_mb * 1024 * 1024;
     let mut roots: Vec<(String, PathBuf)> = Vec::new();
-    if let Ok(l) = std::env::var("LOCALAPPDATA") {
-        roots.push(("Local".to_string(), PathBuf::from(l)));
+    // 审查 M-08：原先 `if let Ok(..)` 把「环境变量缺失」和「值为空」一起吞掉，
+    // 受限环境（沙箱 / 服务账户）下 appdata 会静默返回空结果，与「确实没有可清项」
+    // 在 UI 上无法区分。缺失要出声——但逐条说清缺哪个，别只说「失败」。
+    for name in ["LOCALAPPDATA", "APPDATA"] {
+        match std::env::var(name) {
+            Ok(v) if !v.trim().is_empty() => {
+                let label = if name == "LOCALAPPDATA" { "Local" } else { "Roaming" };
+                roots.push((label.to_string(), PathBuf::from(v)));
+            }
+            Ok(_) => sink.warn(&format!(
+                "应用数据扫描：环境变量 {name} 为空，跳过该根（其余根继续）"
+            )),
+            Err(e) => sink.warn(&format!(
+                "应用数据扫描：读不到环境变量 {name}（{e}），跳过该根（其余根继续）"
+            )),
+        }
     }
-    if let Ok(r) = std::env::var("APPDATA") {
-        roots.push(("Roaming".to_string(), PathBuf::from(r)));
+    if roots.is_empty() {
+        sink.warn("应用数据扫描：LOCALAPPDATA 与 APPDATA 均不可用，本轮无应用数据可扫");
     }
     let mut out: Vec<(String, PathBuf, u64)> = Vec::new();
     for (label, root) in roots {

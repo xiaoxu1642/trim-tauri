@@ -285,15 +285,14 @@ pub fn write_temp_script(content: &str, suffix: &str) -> Result<TempScript, Stri
     Err("写入临时脚本失败: 文件名连续碰撞（异常环境）".to_string())
 }
 
+/// 临时脚本文件名的随机尾巴。
+///
+/// 审查 M-02：原先是 `subsec_nanos()` + `AtomicU32` 自增（熵只有 30 位纳秒、且可被
+/// 同机进程推算时序）。这些脚本会落到**管理员上下文**的私有 tmp，能预判候选名就能
+/// 抢先占位。改走 [`crate::security::crypto_random_hex`]（`BCryptGenRandom` CSPRNG，
+/// 与 DPAPI/GCM nonce 同源），签名保持 `String` 不变以免调用点扩散。
 pub(crate) fn random_token() -> String {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static SEQ: AtomicU32 = AtomicU32::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}{n:x}")
+    crate::security::crypto_random_hex(8)
 }
 
 /// 审查 v3-K1：用**收件箱 Windows PowerShell 5.1**（System32 自带，无需用户安装）

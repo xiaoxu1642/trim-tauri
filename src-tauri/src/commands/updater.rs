@@ -756,7 +756,9 @@ pub fn schedule_silent_check<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
     let app = app.clone();
-    std::thread::spawn(move || {
+    // 审查 M-05：原先 JoinHandle 被直接丢弃，这段 sleep 期间进程退出无从 join。
+    // 与上面 DOWNLOAD_TASK 同姿势存句柄，退出路径可 take() 后 join。
+    let handle = std::thread::spawn(move || {
         // 3 秒：够首帧画完（更新弹窗不该跟开屏动画抢），又不至于让用户以为「打开就没反应」。
         // 用户 2026-10-05 指定的时点；发现新版本由渲染层无条件弹 available 弹窗（不是静默）。
         std::thread::sleep(std::time::Duration::from_secs(3));
@@ -764,6 +766,34 @@ pub fn schedule_silent_check<R: Runtime>(app: &AppHandle<R>) {
             let _ = safe_check(app, true).await;
         });
     });
+    // 竞态说明：句柄槽是 OnceLock + Mutex，重复调用时**保留先到的那一个**——
+    // 静默检查是一次性的，重复调度没有产品语义，join 任意一个即可。
+    let slot = SILENT_CHECK_THREAD.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        if guard.is_none() {
+            *guard = Some(handle);
+        }
+    }
+}
+
+/// 静默检查线程句柄槽（审查 M-05）。用 OnceLock 而非裸 `Mutex`：本槽只在
+/// [`schedule_silent_check`] 里写入，写入前无并发读，且不需要 `const fn` 新值。
+static SILENT_CHECK_THREAD: std::sync::OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> =
+    std::sync::OnceLock::new();
+
+/// 退出路径收尾：若静默检查线程仍在 sleep，尽力 join 一次。
+///
+/// 只在**仍在 sleep 阶段**才有意义（最多 3s）；若它已把检查 spawn 进
+/// `async_runtime`，那个任务是异步的、不受本函数约束（与 DOWNLOAD_TASK 的
+/// cancel 是两套语义，这里刻意不做 abort —— 自动检查无用户数据可保护）。
+pub fn join_silent_check_thread() {
+    let Some(slot) = SILENT_CHECK_THREAD.get() else {
+        return;
+    };
+    let handle = slot.lock().ok().and_then(|mut g| g.take());
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
 }
 
 // ==================== 纯函数单测 ====================

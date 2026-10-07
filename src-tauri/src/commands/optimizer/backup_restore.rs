@@ -240,15 +240,39 @@ pub(super) fn svc_names_writing_start(cmd: &str) -> Vec<String> {
         }
     }
 
-    // B：sc config 形态
+    // B：sc config 形态。
+    // 审查 M-09：原先只取**第一个** `config`，一条 cmd 串多个
+    // `sc config A start= disabled & sc config B start= demand` 时只有 A 进基线，
+    // 而 A 分支（上面）是循环 —— 两侧覆盖能力不对称。这里改成遍历全部出现位置。
+    //
+    // 边界：仍然要求这一步**确实写了 start=**（外层前置门），否则不收 ——
+    // 宁可漏收（少一条基线）也不要把无关命令当成改启动类型收进来。
     let low = cmd.to_ascii_lowercase();
     if low.contains("start=") {
-        if let Some(pos) = low.find("config") {
-            let rest = cmd[pos + "config".len()..].trim_start();
+        let mut from = 0usize;
+        while let Some(rel) = low[from..].find("config") {
+            let at = from + rel;
+            // `config` 必须是独立的词，左右两侧都得有边界：
+            //   右侧（下面判）—— `configure` / `configuration` 的子串后面紧跟服务名字符；
+            //   左侧 —— `autoconfig` / `reconfig` 这类更长单词的前半段。
+            // （原先取首个 find 时这两侧同样会误收；循环化后命中面变大，词边界必须钉住。）
+            let left_ok = at == 0 || cmd[..at].ends_with(char::is_whitespace);
+            if !left_ok {
+                from = at + "config".len();
+                continue;
+            }
+            let after = &cmd[at + "config".len()..];
+            if !after.starts_with(char::is_whitespace) {
+                from = at + "config".len();
+                continue;
+            }
+            let rest = after.trim_start();
             let name: String = rest.chars().take_while(|c| is_name_char(*c)).collect();
             if !name.is_empty() && name.len() <= 64 {
                 names.push(name);
             }
+            // 推进量恒 ≥1：find 命中必然 from 严格增大，不会死循环。
+            from = at + "config".len();
         }
     }
 
@@ -653,5 +677,71 @@ pub(super) fn restore_backup_values(ops: &[RestoreOp]) -> bool {
         }
     }
     failed == 0
+}
+
+#[cfg(test)]
+mod svc_names_tests {
+    use super::svc_names_writing_start;
+
+    /// B 分支单发形态（回归护栏：循环化后单条仍要收得到）。
+    #[test]
+    fn sc_config_单条() {
+        assert_eq!(
+            svc_names_writing_start("sc config Spooler start= disabled"),
+            vec!["Spooler".to_string()]
+        );
+    }
+
+    /// 审查 M-09 的正向断言：**一条 cmd 串多个 `sc config` 时必须全部收齐**。
+    /// 修复前只取第一个 `config`，SvcB 会整条漏掉基线 ⇒ 优化后再「还原」时
+    /// SvcB 的启动类型永远回不去出厂值。
+    #[test]
+    fn sc_config_一条串多个要收齐() {
+        let got = svc_names_writing_start(
+            "sc config Spooler start= disabled & sc config Schedule start= demand",
+        );
+        assert_eq!(
+            got,
+            vec!["Schedule".to_string(), "Spooler".to_string()],
+            "两个服务名都必须进基线（结果已排序去重）"
+        );
+    }
+
+    /// 三个及以上 + 大小写混写：确认循环推进量不会漏掉靠后的命中。
+    #[test]
+    fn sc_config_三个且大小写混写() {
+        let got = svc_names_writing_start(
+            "SC CONFIG Alpha start= disabled; sc config Beta start= demand; Sc Config Gamma start= delayed-auto",
+        );
+        assert_eq!(
+            got,
+            vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()]
+        );
+    }
+
+    /// 没写 `start=` 就不收（沿用既有前置门：宁可漏收也不收无关命令）。
+    #[test]
+    fn 只改别的参数不收() {
+        assert!(svc_names_writing_start("sc config Spooler binPath= \"C:\\x.exe\"").is_empty());
+    }
+
+    /// `config` 前后没有词边界时不得误命中：右侧挡住 `configure`，
+    /// 左侧挡住 `autoconfig`。修复前两边都会凭空收出一条垃圾服务名。
+    #[test]
+    fn config_缺词边界不收() {
+        // 右侧：`configure` 的前缀
+        assert!(svc_names_writing_start("set CONFIGURE=1 & echo start= x").is_empty());
+        // 左侧：`autoconfig` 的后半段
+        assert!(svc_names_writing_start("set AUTOCONFIG=1 & echo start= x").is_empty());
+    }
+
+    /// A 分支（注册表形态）循环能力不受影响。
+    #[test]
+    fn reg_add_多条也收齐() {
+        let got = svc_names_writing_start(
+            r#"reg add "HKLM\SYSTEM\CurrentControlSet\Services\Alpha" /v Start /t REG_DWORD /d 4 /f & reg add "HKLM\SYSTEM\CurrentControlSet\Services\Beta" /v Start /t REG_DWORD /d 4 /f"#,
+        );
+        assert_eq!(got, vec!["Alpha".to_string(), "Beta".to_string()]);
+    }
 }
 

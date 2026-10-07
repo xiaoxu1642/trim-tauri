@@ -726,13 +726,24 @@ pub async fn uninstall_modify<R: tauri::Runtime>(
         let (exe, args) = split_uninstall_cmd(&modify_path)
             .ok_or_else(|| "ModifyPath 无法解析出可执行文件".to_string())?;
         log::flush_sync();
-        let code = shell_run_wait(&exe, &args).map_err(|e| {
-            log::write_log(
-                "error",
-                &format!("uninstall_modify {display_name}: {label}启动失败: {e}"),
-            );
-            e
-        })?;
+        let code = match shell_run_wait(&exe, &args) {
+            Ok(UninstallerWait::Exited(code)) => code,
+            Ok(UninstallerWait::TimedOut) => {
+                // 审查 M-03：硬等待有上界了，但本路径没有 watch_uninstaller 轮询兜底，
+                // 超时即「状态未知」。如实报错、不杀进程（强杀会留半卸载/半修复状态）。
+                let msg = format!(
+                    "uninstall_modify {display_name}: {label}等待超过 {} ms 仍未退出（未强制终止），状态未知",
+                    UNINSTALLER_WAIT_TIMEOUT_MS
+                );
+                log::write_log("warn", &msg);
+                return Err(msg);
+            }
+            Err(e) => {
+                let msg = format!("uninstall_modify {display_name}: {label}启动失败: {e}");
+                log::write_log("error", &msg);
+                return Err(msg);
+            }
+        };
         log::write_log(
             "info",
             &format!("uninstall_modify {display_name}: {label}完成，退出码 {code}"),

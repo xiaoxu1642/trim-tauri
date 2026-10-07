@@ -656,11 +656,14 @@ pub fn run() {
 }
 
 /// 进程退出前的统一收尾（对齐 Electron 的 before-quit 编排中 Phase 1 已实现的部分）：
-/// 刷盘日志 → 停掉进程内实时采样线程 → 清理临时 pwsh 脚本。
+/// 刷盘日志 → 停掉进程内实时采样线程 → 收掉静默检查线程 → 清理临时 pwsh 脚本。
 /// 不这样做会留下半截日志与残留脚本文件（渲染层异常退出路径同样会走到这里）。
 pub fn on_app_exit() {
     log::flush_sync();
     commands::realtime::shutdown_sampler();
+    // 审查 M-05：静默检查线程的 3s sleep 阶段此前无从 join；这里 join 一次。
+    // 有上界（最多 3s），不会把退出卡成无限等待。
+    commands::updater::join_silent_check_thread();
     pwsh::cleanup_temp_scripts();
 }
 

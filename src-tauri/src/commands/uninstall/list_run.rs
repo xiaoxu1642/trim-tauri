@@ -662,10 +662,33 @@ pub(super) fn second_evidence_kind(install_location: &str, file_exists: &dyn Fn(
     None
 }
 
-/// ShellExecuteEx 启动卸载器并等待退出。返回 (exitCode, 是否拿到进程句柄)。
+/// 硬等待上界（毫秒）。审查 M-03：原实现 `INFINITE`，卸载器挂起（等 UAC 交互 /
+/// 安装器自身卡死）会把 `spawn_blocking` 的 worker **永久**占住——而
+/// `watch_uninstaller` 要等本函数返回才启动（调用点顺序），INFINITE 等于让监视永不开始。
+pub(super) const UNINSTALLER_WAIT_TIMEOUT_MS: u32 = 10 * 60 * 1000;
+
+/// `shell_run_wait` 的两种正常结局。
+///
+/// 为什么不用 `Err` 表达超时：调用点的 `Err(e) if used_silent` 分支语义是
+/// 「静默卸载**启动失败** → 回退原厂卸载界面」。超时若也走 `Err`，会在卸载器其实
+/// 还在跑的时候**重拉一遍界面**（对 NSIS/Inno 等于把用户刚点的取消/等待无视掉），
+/// 比阻塞更糟。所以超时必须是独立信号，由上层转入 `watch_uninstaller` 轮询口径。
+pub(super) enum UninstallerWait {
+    /// 拿到退出码。
+    Exited(u32),
+    /// 硬等待超时，**进程未被终止**——退出码未知，卸载是否完成未知。
+    TimedOut,
+}
+
+/// ShellExecuteEx 启动卸载器并等待退出，最长等 `UNINSTALLER_WAIT_TIMEOUT_MS`。
 /// 不加 RUNAS verb：卸载器自带 manifest 会按需弹 UAC（对齐 Trim 按需提权模型）。
-pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<u32, String> {
-    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+///
+/// 超时后**不** `TerminateProcess`：厂商卸载器被强杀会留下半卸载状态（注册表键已删、
+/// 文件没删干净），比「如实报未知」更难恢复。此时只关句柄放行，上层继续走
+/// `watch_uninstaller` 轮询卸载键与卸载器进程家族，由它给出真实结论。
+pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<UninstallerWait, String> {
+    use windows::Win32::Foundation::WAIT_TIMEOUT;
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     use windows::core::PCWSTR;
 
@@ -685,11 +708,16 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<u32, String
         // 拿不到句柄（目标拒绝 NOCLOSEPROCESS 等）：无法等待，如实上报
         return Err("卸载器已启动但无法等待其完成（未返回进程句柄）".to_string());
     }
-    WaitForSingleObject(h, INFINITE);
+    let r = WaitForSingleObject(h, UNINSTALLER_WAIT_TIMEOUT_MS);
+    if r == WAIT_TIMEOUT {
+        // 只关句柄，不杀进程（见函数注释「超时后不 TerminateProcess」的理由）
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+        return Ok(UninstallerWait::TimedOut);
+    }
     let mut code: u32 = 0;
     let _ = GetExitCodeProcess(h, &mut code);
     let _ = windows::Win32::Foundation::CloseHandle(h);
-    Ok(code)
+    Ok(UninstallerWait::Exited(code))
 }
 
 // ==================== 卸载进程监视（2026-09-28 用户拍板） ====================
@@ -1019,19 +1047,38 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 &format!("uninstall_run {display_name}: 厂商 QuietUninstallString 被构造闸拒绝（{reason}），改用白名单派生"),
             );
         }
-        let run_original_ui = || -> Result<u32, String> {
+        let run_original_ui = || -> Result<Option<u32>, String> {
             log::flush_sync();
-            shell_run_wait(&original.0, &original.1).map_err(|e| {
-                log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂卸载界面启动失败: {e}"));
-                e
-            })
+            shell_run_wait(&original.0, &original.1)
+                .map_err(|e| {
+                    log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂卸载界面启动失败: {e}"));
+                    e
+                })
+                .map(|w| match w {
+                    UninstallerWait::Exited(code) => Some(code),
+                    // 回退界面同样等不到：退出码未知，不能伪造成 0（会被当成卸载成功）
+                    UninstallerWait::TimedOut => None,
+                })
         };
         // 原「卸载前写所有权档案 / 厂商键足迹基线」已随「机-wide 扫描整条退役」删除：
         // 那是应用数据遗留链（uninstall:orphan-scan）的唯一写入点，档案已无读者。
         log::flush_sync(); // 危险操作前刷盘
         let mut fell_back = false;
-        let mut exit_code = match shell_run_wait(&exe, &args) {
-            Ok(code) => code,
+        // `exit_code` 是 Option：硬等待超时时退出码未知（UninstallerWait::TimedOut），
+        // 此时不套 classify_exit 码表、也不触发按码回退——直接转入 watch_uninstaller
+        // 如实判定。前端 `uninstall.js` 已能安全消费 null（`?? '未知'`）。
+        let mut exit_code: Option<u32> = match shell_run_wait(&exe, &args) {
+            Ok(UninstallerWait::Exited(code)) => Some(code),
+            Ok(UninstallerWait::TimedOut) => {
+                // 超时不是「启动失败」：绝不重拉原厂界面，交给下面的进程监视收尾。
+                log::write_log(
+                    "warn",
+                    &format!(
+                        "uninstall_run {display_name}: 等待卸载器 {UNINSTALLER_WAIT_TIMEOUT_MS} ms 仍未退出（未强杀），退出码未知，转入进程监视"
+                    ),
+                );
+                None
+            }
             Err(e) if used_silent => {
                 log::write_log(
                     "info",
@@ -1048,13 +1095,14 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             }
         };
         if used_silent && !fell_back {
-            let (meaning, fall_back) = classify_exit(exit_code);
+            let (meaning, fall_back) = exit_code.map(classify_exit).unwrap_or(("", false));
             // 码表语义只对 MSI 成立；Inno/NSIS 的退出码不套这张表（见 classify_exit 注释）。
             let by_exit_code = fall_back && kind == "msi";
             if by_exit_code {
+                let code = exit_code.unwrap_or(0);
                 log::write_log(
                     "info",
-                    &format!("uninstall_run {display_name}: 静默卸载退出码 {exit_code}（{meaning}），自动回退原厂卸载界面"),
+                    &format!("uninstall_run {display_name}: 静默卸载退出码 {code}（{meaning}），自动回退原厂卸载界面"),
                 );
                 fell_back = true;
                 exe = original.0.clone();
@@ -1063,26 +1111,31 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 log::write_log(
                     "info",
                     &format!(
-                        "uninstall_run {display_name}: 静默卸载退出码 {exit_code}（{meaning}），安装器 {kind} 不按退出码回退原厂界面"
+                        "uninstall_run {display_name}: 静默卸载退出码 {}（{meaning}），安装器 {kind} 不按退出码回退原厂界面",
+                        exit_code.map(|c| c.to_string()).unwrap_or_else(|| "未知".into())
                     ),
                 );
             }
         }
-        let (exit_meaning, _) = classify_exit(exit_code);
+        // 超时（exit_code == None）时不给伪语义：空串让前端 `d.exitMeaning ? ... : ''` 走空分支
+        let (exit_meaning, _) = exit_code.map(classify_exit).unwrap_or(("", false));
 
         // 进程监视（2026-09-28 用户拍板）：句柄退出 ≠ 卸载结束——继续轮询卸载键与
         // 卸载器家族进程，直到键消失或进程绝迹（上限 15 分钟）
         let (still_listed, timed_out) = watch_uninstaller(hive, &key_path, &exe);
+        let code_txt = exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "未知".to_string());
         if still_listed {
             log::write_log(
                 "warn",
                 &format!(
-                    "uninstall_run {display_name}: 卸载器退出（码 {exit_code}，监视{}）但卸载键仍在，原厂卸载可能未完成",
+                    "uninstall_run {display_name}: 卸载器退出（码 {code_txt}，监视{}）但卸载键仍在，原厂卸载可能未完成",
                     if timed_out { "超时" } else { "结束" }
                 ),
             );
         } else {
-            log::write_log("info", &format!("uninstall_run {display_name}: 卸载完成（码 {exit_code}）"));
+            log::write_log("info", &format!("uninstall_run {display_name}: 卸载完成（码 {code_txt}）"));
         }
         Ok(json!({
             "exitCode": exit_code,
@@ -1092,7 +1145,14 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             "installerKind": kind,
             "usedSilent": used_silent,
             "fellBack": fell_back,
-            "message": if still_listed {
+            "message": if exit_code.is_none() {
+                // 硬等待超时的口径：卸载器**可能仍在运行**，不能报「已结束」也不能报「已完成」
+                if still_listed {
+                    "等待卸载器超时（未强制终止），卸载器可能仍在运行；该程序仍在卸载列表中，卸载状态未知".to_string()
+                } else {
+                    "等待卸载器超时（未强制终止），卸载键已消失但未能确认卸载器退出码".to_string()
+                }
+            } else if still_listed {
                 if fell_back {
                     "静默卸载未完成，已回退原厂卸载界面；卸载器已退出但该程序仍在卸载列表中（可能未完成或已取消）".to_string()
                 } else {
