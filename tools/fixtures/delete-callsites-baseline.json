@@ -14,6 +14,7 @@
     "src-tauri/src/engine/native/peripheral.rs": 1,
     "src-tauri/src/engine/reg_backup.rs": 2,
     "src-tauri/src/engine/restore_pack.rs": 2,
+    "src-tauri/src/engine/shellicon.rs": 2,
     "src-tauri/src/pwsh/mod.rs": 3,
     "src-tauri/src/security/mod.rs": 2,
     "native-scanner/src/scan.rs": 1
@@ -31,6 +32,7 @@
     "src-tauri/src/engine/paths.rs": 8,
     "src-tauri/src/engine/reg_backup.rs": 8,
     "src-tauri/src/engine/restore_pack.rs": 4,
+    "src-tauri/src/engine/shellicon.rs": 3,
     "src-tauri/src/pwsh/mod.rs": 6,
     "src-tauri/src/security/mod.rs": 2,
     "native-scanner/src/cleanup_scan.rs": 10,
