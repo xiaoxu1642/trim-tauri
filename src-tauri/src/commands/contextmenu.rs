@@ -203,7 +203,7 @@ pub async fn contextmenu_scan<R: Runtime>(
     if refresh != Some(true) {
         if let Some(cached) = load_cache() {
             let map = snapshot::by_id(&cached);
-            snapshot::set(&label, map);
+            snapshot::set(&snapshot::domain_key(&label, "contextmenu"), map);
             if let Some(ts) = crate::security::read_json_or_default(&cache_file())
                 .get("timestamp")
                 .and_then(|v| v.as_i64())
@@ -213,7 +213,7 @@ pub async fn contextmenu_scan<R: Runtime>(
         }
     }
 
-    snapshot::clear(&label);
+    snapshot::clear(&snapshot::domain_key(&label, "contextmenu"));
     log::write_log("info", "扫描右键菜单");
 
     // S3：纯 Rust 原生
@@ -226,7 +226,7 @@ pub async fn contextmenu_scan<R: Runtime>(
     };
     let normalized = normalize_ids(data);
     log::write_log("info", &format!("扫描右键菜单完成: {} 项", normalized.len()));
-    snapshot::set(&label, snapshot::by_id(&normalized));
+    snapshot::set(&snapshot::domain_key(&label, "contextmenu"), snapshot::by_id(&normalized));
     save_cache(&normalized);
     json!({ "success": true, "data": normalized })
 }
@@ -241,7 +241,7 @@ pub async fn contextmenu_toggle<R: Runtime>(
         return json!({ "success": false, "message": msg });
     }
     let items = items.unwrap_or_default();
-    let Some(snap) = snapshot::get(window.label()) else {
+    let Some(snap) = snapshot::get(&snapshot::domain_key(window.label(), "contextmenu")) else {
         return json!({ "success": false, "message": "切换项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
@@ -316,7 +316,7 @@ pub async fn contextmenu_toggle<R: Runtime>(
     // CM-12：回写新路径/屏蔽态到快照 + 缓存
     if let Some(results) = data.get("results").and_then(|v| v.as_array()) {
         let mut touched = false;
-        let mut snap2 = snapshot::get(window.label()).unwrap_or_default();
+        let mut snap2 = snapshot::get(&snapshot::domain_key(window.label(), "contextmenu")).unwrap_or_default();
         let updates: Vec<&Value> = results
             .iter()
             .filter(|r| {
@@ -344,7 +344,7 @@ pub async fn contextmenu_toggle<R: Runtime>(
         }
         if touched {
             let arr: Vec<Value> = snap2.values().cloned().collect();
-            snapshot::set(window.label(), snap2);
+            snapshot::set(&snapshot::domain_key(window.label(), "contextmenu"), snap2);
             save_cache(&arr);
         }
     }
@@ -375,7 +375,7 @@ pub async fn contextmenu_icons<R: Runtime>(
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let Some(snap) = snapshot::get(window.label()) else {
+    let Some(snap) = snapshot::get(&snapshot::domain_key(window.label(), "contextmenu")) else {
         return json!({ "success": true, "data": {} });
     };
     let known: std::collections::HashSet<String> = snap
@@ -455,7 +455,7 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
         return json!({ "success": false, "message": "无效的注册表路径" });
     }
     let wanted = canon_reg_key(&p);
-    let in_snap = snapshot::get(window.label())
+    let in_snap = snapshot::get(&snapshot::domain_key(window.label(), "contextmenu"))
         .map(|snap| {
             snap.values()
                 .any(|it| it.get("regPath").map(|v| canon_reg_key(v.as_str().unwrap_or("")) == wanted).unwrap_or(false))

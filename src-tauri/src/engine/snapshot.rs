@@ -40,6 +40,19 @@ pub fn clear(label: &str) {
     }
 }
 
+/// **域限定槽键**（2026-10-09 真机修复）：`{label}|{domain}`。
+///
+/// 为什么必须有它：P2-2 把 startup / contextmenu 两张同名快照表合并到本模块时，
+/// 槽键只取了**窗口 label** —— 主窗里两个域共用 `"main"` 槽，后扫描的域会把先扫描
+/// 域的账顶掉。真机症状（2026-10-09 复现）：先开右键管理页（扫描 → 槽=右键项），
+/// 再去启动项管理页（进页读缓存也写槽 → 槽=启动项），切回右键管理页点勾选 ——
+/// 页面用的是内存里的旧列表，快照却已是启动项的 id 集，整批拒绝并弹
+/// 「切换项不是最近一次扫描结果」。页内不重扫就不会自愈，来回切页必现。
+/// 键 = `{label}|{domain}`：同窗不同域互不覆盖，跨窗语义不变（label 仍在前）。
+pub fn domain_key(label: &str, domain: &str) -> String {
+    format!("{label}|{domain}")
+}
+
 /// 扫描项数组 → `id → 项`。
 ///
 /// **不按 id 长度剔除**：长路径/长参数的项（如启动项 id = `reg|<path>|<name>`）被剔除后，
@@ -93,5 +106,28 @@ mod tests {
         assert_eq!(get(label_b).map(|m| m.len()), Some(1), "清除 A 不得影响 B");
         clear(label_b);
         assert!(get(label_b).is_none());
+    }
+
+    /// 2026-10-09 真机修复回归：**同窗两域互不覆盖**（domain_key 限定槽）。
+    /// 判红点：把 domain_key 退回纯 label（startup/contextmenu 共用槽）⇒ 首条断言红。
+    #[test]
+    fn domain_slots_are_isolated_within_one_window() {
+        let label = "snapshot-domain-test";
+        let k_startup = domain_key(label, "startup");
+        let k_ctx = domain_key(label, "contextmenu");
+        assert_ne!(k_startup, k_ctx, "域限定键不得退化回纯 label");
+        set(&k_startup, by_id(&[json!({ "id": "s1" })]));
+        set(&k_ctx, by_id(&[json!({ "id": "c1" })]));
+        assert!(
+            get(&k_startup).unwrap().contains_key("s1"),
+            "后写右键域不得顶掉启动项域槽（切页后勾选整批被拒的真机根因）"
+        );
+        assert!(get(&k_ctx).unwrap().contains_key("c1"), "右键域槽必须在");
+        clear(&k_startup);
+        assert!(
+            get(&k_startup).is_none() && get(&k_ctx).is_some(),
+            "清一域不得影响另一域"
+        );
+        clear(&k_ctx);
     }
 }

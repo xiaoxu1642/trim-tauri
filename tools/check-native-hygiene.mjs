@@ -106,6 +106,16 @@ function hygieneViolations(clean) {
       out.push(`${m[0].trim()} 返回值被 is_ok/is_err 直接判定（句柄被丢弃）@${m.index}`);
     }
   }
+  // N8 快照槽必须域限定（2026-10-09 真机修复）：主窗里 startup / contextmenu 共用
+  // label 槽会互相顶账 —— 切页回来后勾选/启停按另一域的 id 集校验，整批被拒
+  //（真机症状「切换项不是最近一次扫描结果」）。所有 snapshot::{set,get,clear} 的
+  // 键参数必须经 domain_key 组合。
+  for (const m of clean.matchAll(/snapshot::(?:set|get|clear)\s*\(/g)) {
+    const win = clean.slice(m.index, m.index + 200);
+    if (!win.includes('domain_key')) {
+      out.push(`snapshot 调用未用 domain_key 限定域（跨域顶账）@${m.index}`);
+    }
+  }
   return out;
 }
 
@@ -153,6 +163,15 @@ console.log('=== 原生层卫生门禁（N1 裸 output / N2 定长解码 / N3 �
   const goodV = hygieneViolations(POSITIVE_CONTROLS.good);
   check(badV.length >= 3, `对照N1-N3a：三类违例样本合计命中 ${badV.length} 条（应 ≥3；注释里的提及不算数）`);
   check(goodV.length === 0, '对照N1-N3b：合规样本（timeout 版 / wide_str / match 接句柄 / out-param）全部放行', goodV.join('；'));
+  // N8 判定器：裸 label 槽必须判红、domain_key 槽必须放行
+  check(
+    hygieneViolations('snapshot::set(&label, map);').some((v) => v.includes('domain_key')),
+    '对照N8a：裸 label 槽的 snapshot 调用必须判红',
+  );
+  check(
+    hygieneViolations('snapshot::set(&snapshot::domain_key(&label, "startup"), map);').length === 0,
+    '对照N8b：domain_key 限定的调用必须放行',
+  );
   // N4 判定器：同窗口代码出现 .reg 的读取必须判红；JSON 清单读取不得假红
   check(
     regReaderViolations(
@@ -177,13 +196,16 @@ let n1 = 0;
 let n2 = 0;
 let n3 = 0;
 let n4 = 0;
+let n8sites = 0;
 for (const f of files) {
   const rel = relative(ROOT, f).replace(/\\/g, '/');
   const original = readFileSync(f, 'utf8');
   const clean = stripRust(original);
+  n8sites += [...clean.matchAll(/snapshot::(?:set|get|clear)\s*\(/g)].length;
   for (const v of hygieneViolations(clean)) {
     if (v.startsWith('裸 quiet_cmd')) n1++;
     else if (v.startsWith('定长 UTF-16')) n2++;
+    else if (v.startsWith('snapshot 调用')) n8sites += 0;
     else n3++;
     g.fail(`${rel}: ${v}`);
   }
@@ -238,11 +260,12 @@ const NEWEST_FN = /fn\s+\w*(?:newest|latest)\w*\s*\(/g;
   if (!found.some((x) => x.includes('pick_newest_file'))) g.fail('N7：pick_newest_file 没找到（扫描面或改名漂移）');
 }
 
-// 扫描面地板：源文件数过少 ⇒ walkRs 失明
+// 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);
+if (n8sites < 10) g.fail(`snapshot 调用点命中 ${n8sites} 处（< 10）⇒ N8 语料/正则失明`);
 
 console.log(
-  `\n扫描：${files.length} 个 .rs · 违例 N1=${n1} / N2=${n2} / N3=${n3} / N4=${n4} / N5=${unreachable.length}`,
+  `\n扫描：${files.length} 个 .rs · 违例 N1=${n1} / N2=${n2} / N3=${n3} / N4=${n4} / N5=${unreachable.length} · snapshot 槽位 ${n8sites}`,
 );
 if (fail > 0) {
   console.error(`check-native-hygiene: 正向对照自检 ${fail} 处失败（判定器失效）`);

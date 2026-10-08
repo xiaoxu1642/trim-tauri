@@ -105,12 +105,12 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
 
     if refresh != Some(true) {
         if let Some((data, ts)) = load_cache() {
-            snapshot::set(&label, snapshot::by_id(&data));
+            snapshot::set(&snapshot::domain_key(&label, "startup"), snapshot::by_id(&data));
             return json!({ "success": true, "data": data, "cached": true, "cachedAt": ts });
         }
     }
 
-    snapshot::set(&label, HashMap::new());
+    snapshot::set(&snapshot::domain_key(&label, "startup"), HashMap::new());
 
     // S3：纯 Rust 原生
     let data: Vec<Value> = match tauri::async_runtime::spawn_blocking(native::startup_scan).await {
@@ -126,7 +126,7 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
     };
 
     let normalized = normalize_ids(data);
-    snapshot::set(&label, snapshot::by_id(&normalized));
+    snapshot::set(&snapshot::domain_key(&label, "startup"), snapshot::by_id(&normalized));
     save_cache(&normalized);
     json!({ "success": true, "data": normalized })
 }
@@ -144,7 +144,7 @@ pub async fn startup_toggle<R: Runtime>(
     if items.is_empty() {
         return json!({ "success": false, "message": "缺少启动项" });
     }
-    let Some(snap) = snapshot::get(window.label()) else {
+    let Some(snap) = snapshot::get(&snapshot::domain_key(window.label(), "startup")) else {
         return json!({ "success": false, "message": "启动项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
@@ -183,7 +183,7 @@ pub async fn startup_delete<R: Runtime>(
     if items.is_empty() {
         return json!({ "success": false, "message": "缺少启动项" });
     }
-    let Some(snap) = snapshot::get(window.label()) else {
+    let Some(snap) = snapshot::get(&snapshot::domain_key(window.label(), "startup")) else {
         return json!({ "success": false, "message": "启动项不是最近一次扫描结果，已拒绝执行" });
     };
     let Some(safe) = validate_snapshot_items(&items, &snap) else {
