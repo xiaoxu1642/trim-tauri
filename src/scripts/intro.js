@@ -284,16 +284,26 @@
 
     // 审查 v2-M22（v1 L13 未修部分）：开窗是**面向用户**的动作，原先是浮动 Promise ——
     // open 失败既不提示也不落日志，用户点了就是「没反应」，事后日志里也查不到。
-    // 统一走这个出口：失败必给 toast + 落日志（子窗缺席时 window.app 已在，此处是主窗）。
+    // 统一走这个出口：失败必给 toast + 落日志。
+    // P3-5（F3-G-3）：本面板在主窗与残留副窗都会挂载 —— 反馈出口必须两窗可用：
+    // 主窗有 window.app（toast/log），副窗只有 subToast 与 log_write 通道。
+    function toastOut(type, msg) {
+      if (window.app?.toast) window.app.toast(type, msg);
+      else window.subToast?.stack?.(type, msg);
+    }
+    function logOut(level, msg) {
+      if (window.app?.log) window.app.log(level, msg);
+      else { try { window.api?.log?.write?.(level, msg); } catch (e) { /* 日志通道不可用则静默 */ } }
+    }
     function openModelsWindow() {
       if (!window.api?.modelsWindow?.open) {
-        window.app?.toast('warning', '当前环境不支持打开大模型管理窗口');
+        toastOut('warning', '当前环境不支持打开大模型管理窗口');
         return;
       }
       Promise.resolve(window.api.modelsWindow.open()).catch((e) => {
         const msg = (e && e.message) || String(e);
-        window.app?.toast('error', '打开「大模型管理」窗口失败：' + msg);
-        window.app?.log('error', '打开大模型管理窗口失败: ' + msg);
+        toastOut('error', '打开「大模型管理」窗口失败：' + msg);
+        logOut('error', '打开大模型管理窗口失败: ' + msg);
       });
     }
 
@@ -338,7 +348,7 @@
     // （v2-M22：点了没反应、日志里也查不到）—— 两个异步出口统一在此兜一手，只落日志不叠弹窗。
     fetchBtn.addEventListener('click', () => {
       Promise.resolve(fetchAi(false)).catch((e) => {
-        window.app?.log?.('error', 'AI 简介获取异常: ' + ((e && e.message) || e));
+        logOut('error', 'AI 简介获取异常: ' + ((e && e.message) || e));
       });
     });
     pickBtn.addEventListener('click', async () => {
@@ -347,11 +357,11 @@
           await window.modelpicker.open(scope);
         } catch (e) {
           const msg = (e && e.message) || String(e);
-          window.app?.toast('error', '打开模型选择器失败：' + msg);
-          window.app?.log('error', '打开模型选择器失败: ' + msg);
+          toastOut('error', '打开模型选择器失败：' + msg);
+          logOut('error', '打开模型选择器失败: ' + msg);
         }
       } else {
-        window.app?.toast('warning', '模型选择暂不可用，请稍后重试');
+        toastOut('warning', '模型选择暂不可用，请稍后重试');
       }
     });
     manageBtn.addEventListener('click', () => openModelsWindow());

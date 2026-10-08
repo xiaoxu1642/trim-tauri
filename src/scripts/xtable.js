@@ -333,9 +333,11 @@
         if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
         // Web Animations API：transform 合成器动画（60fps），结束后自动无残留
         if (typeof n.animate === 'function') {
+          // P3-5（F5-G-5）：曲线/时长进 token 值集 —— 原 cubic-bezier(0.4,0,0.2,1)
+          // 正是雾屿 V1 已退役的 M2 legacy 曲线；时长取 --duration-slow（320ms）。
           n.animate(
             [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
-            { duration: 300, easing: 'cubic-bezier(0.4, 0, 0.2, 1)' }
+            { duration: 320, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' }
           );
         }
       });

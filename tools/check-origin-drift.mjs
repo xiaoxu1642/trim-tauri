@@ -57,4 +57,9 @@ console.log(
     ? `${drift}/${checked} 个基线文件与源仓库不一致：整文件重新复制回 vendor/upstream-js/ 后重跑 sync-ps-from-js.mjs 与三套门禁`
     : `✓ ${checked} 个基线文件与源仓库逐字节一致`,
 );
+// P3-5（组 2 棘轮地板）：核对文件数为 0 ⇒ 快照目录塌陷/改名，上面的 ✓ 是空集假绿
+if (checked === 0) {
+  console.log('✗ 快照面 0 个文件（vendor/upstream-js 目录塌陷或命名漂移）⇒ 本门禁失明，拒绝判绿');
+  process.exit(1);
+}
 process.exit(drift ? 1 : 0);

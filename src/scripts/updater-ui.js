@@ -44,16 +44,9 @@
     try { window.app && window.app.toast(type, message, duration || 3500); } catch (_) {}
   }
 
-  // 字节数/速率格式化（electron-updater 给的是 byte 与 byte/s）
-  function fmtBytes(n) {
-    const v = Number(n) || 0;
-    if (v < 1024) return v + ' B';
-    const units = ['KB', 'MB', 'GB'];
-    let val = v / 1024;
-    let i = 0;
-    while (val >= 1024 && i < units.length - 1) { val /= 1024; i++; }
-    return val.toFixed(val >= 100 ? 0 : 1) + ' ' + units[i];
-  }
+  // 字节数/速率格式化 —— P3-5（F4a-M01）：并轨真源 ds.fmtBytes（AGENTS §2 红线；
+  // 展示精度统一为真源口径：B 档取整、KB 及以上 1 位小数）
+  function fmtBytes(n) { return window.ds.fmtBytes(n); }
 
   // ---------------- 更新说明渲染 ----------------
   // 背景（v3.5.1）：releaseNotes 原样 textContent 输出，导致两类内容都不可读——

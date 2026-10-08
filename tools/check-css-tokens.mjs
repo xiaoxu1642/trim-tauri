@@ -202,7 +202,73 @@ console.log(`引用面 ${refs.size} 个自定义属性；定义面 ${defined.siz
 console.log(`圆角纪律：${radiusBad.length ? `${radiusBad.length} 处违档` : '✓ 全部字面值落在档位或 token 上'}`);
 for (const r of radiusBad) console.log(`✗ ${r}`);
 
-if (!bad.length && !radiusBad.length) {
+// ---- 动效曲线纪律（P3-5 / F5-G-5）：JS 内联 cubic-bezier 必须 ∈ token 值集 ----
+// 背景：F5 审查现算命中 xtable.js 的 `cubic-bezier(0.4,0,0.2,1)` —— 正是雾屿 V1
+// 已退役的 M2 legacy 曲线（token 注释明写）。判据：从两份 CSS 里解析 `--ease-*` 的
+// cubic-bezier 值集，JS 里任何 cubic-bezier 字面量的**数值序列**必须落在值集内；
+// 开屏一次性走场（splash.js）按 AGENTS §2 豁免登记。
+const EASE_TOKENS = new Set();
+for (const file of cssFiles) {
+  const text = blankComments(readFileSync(file, 'utf8'));
+  for (const m of text.matchAll(/--ease-[\w-]+\s*:\s*cubic-bezier\(([^)]+)\)/g)) {
+    EASE_TOKENS.add(m[1].split(',').map((x) => Number(x.trim())).join(','));
+  }
+}
+const CURVE_EXEMPT = new Map([['splash.js', '开屏一次性走场（AGENTS §2 唯一豁免）']]);
+const curveBad = [];
+let curveSites = 0;
+{
+  const jsDir = join(REPO_ROOT, 'src', 'scripts');
+  for (const f of readdirSync(jsDir).filter((n) => n.endsWith('.js'))) {
+    // 剥注释再扫：注释里说明「原曲线是 X」是史实，不是违规（判定面=可执行代码）
+    const text = readFileSync(join(jsDir, f), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:\w])\/\/.*$/gm, '$1');
+    for (const m of text.matchAll(/cubic-bezier\(([^)]+)\)/g)) {
+      curveSites++;
+      if (CURVE_EXEMPT.has(f)) continue;
+      const norm = m[1].split(',').map((x) => Number(x.trim())).join(',');
+      if (!EASE_TOKENS.has(norm)) {
+        curveBad.push(`${f}:${text.slice(0, m.index).split('\n').length} cubic-bezier(${m[1].trim()}) 不在 token 值集（${[...EASE_TOKENS].join(' | ')}）`);
+      }
+    }
+  }
+}
+console.log(`动效曲线纪律：${curveBad.length ? `${curveBad.length} 处越集` : `✓ JS 内 ${curveSites - CURVE_EXEMPT.size} 处曲线全在 token 值集`}`);
+for (const c of curveBad) console.log(`✗ ${c}`);
+// 正向对照：值集外样本必须判红、值集内样本必须放行（判定器自检）
+{
+  const inSet = EASE_TOKENS.size > 0 && EASE_TOKENS.has('0.23,1,0.32,1');
+  const outSet = !EASE_TOKENS.has('0.4,0,0.2,1');
+  if (!inSet || !outSet) {
+    console.log('✗ 动效曲线判定器失效（token 值集解析异常）');
+    curveBad.push('判定器自检失败');
+  }
+}
+if (curveSites === 0) {
+  console.log('✗ JS 内曲线扫描 0 处 ⇒ 语料/正则失明');
+  curveBad.push('扫描面失明');
+}
+
+// ---- 数值双真源逐值对拍（P3-5 / F5-G-3）：--glass-blur 基准 ⇄ ds.GLASS_MAX_BLUR_PX ----
+// （`--bg-blur` 由 theme/pathbinding 运行时写入，无静态定义面，不在本对拍内——如实标注。）
+{
+  const mainCss = readFileSync(join(REPO_ROOT, 'src', 'styles', 'main.css'), 'utf8');
+  const dsJs = readFileSync(join(REPO_ROOT, 'src', 'scripts', 'ds.js'), 'utf8');
+  const cssBlur = mainCss.match(/--glass-blur:\s*(\d+)px/);
+  const jsBlur = dsJs.match(/GLASS_MAX_BLUR_PX\s*=\s*(\d+)/);
+  if (!cssBlur || !jsBlur) {
+    console.log('✗ 数值双真源：--glass-blur 或 GLASS_MAX_BLUR_PX 找不到（改名/删除？）');
+    curveBad.push('数值双真源解析失明');
+  } else if (cssBlur[1] !== jsBlur[1]) {
+    console.log(`✗ 数值双真源漂移：--glass-blur=${cssBlur[1]}px ⇄ ds.GLASS_MAX_BLUR_PX=${jsBlur[1]}（两处必须同值）`);
+    curveBad.push('--glass-blur ⇄ GLASS_MAX_BLUR_PX 漂移');
+  } else {
+    console.log(`✓ 数值双真源同值：--glass-blur = GLASS_MAX_BLUR_PX = ${cssBlur[1]}px`);
+  }
+}
+
+if (!bad.length && !radiusBad.length && !curveBad.length) {
   console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）');
   process.exit(0);
 }
@@ -213,5 +279,5 @@ for (const name of bad) {
   console.log(`✗ ${name} 无定义 —— ${sites.length} 处引用：${sites.map((s) => s.at).join(', ')}`);
   console.log(`  ${noFallback ? `其中 ${noFallback} 处连 fallback 都没有 ⇒ 整条声明被解析器丢弃（功能静默消失）` : '全部恒吃 fallback ⇒ token 被架空'}`);
 }
-console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）${radiusBad.length ? `；${radiusBad.length} 处圆角违档（v2 批次 D4）` : ''}`);
+console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）${radiusBad.length ? `；${radiusBad.length} 处圆角违档（v2 批次 D4）` : ''}${curveBad.length ? `；${curveBad.length} 处动效曲线越集（F5-G-5）` : ''}`);
 process.exit(1);

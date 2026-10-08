@@ -11,20 +11,10 @@
     memory: 'Asgard DDR5-6000 (3000 MHz) 8GB；Asgard DDR5-6000 (3000 MHz) 8GB；容量 16 GB，通道 2，频率 6000 MHz，时序 28-38-38-38 1T'
   };
 
-  function text(value) { return String(value ?? '').trim() || '--'; }
   // 💭1：硬件/固件字符串来自 WMI，虽非用户输入，仍按项目惯例转义后再进 innerHTML，保持一致与纵深。
-  function esc(s) { return window.ds.esc(s); }
-  function render(data) {
-    const rows = [
-      ['系统', data.system], ['处理器', data.processor], ['显卡', data.graphics],
-      ['主板', data.motherboard], ['硬盘', data.disks], ['显示器', data.monitors], ['内存', data.memory]
-    ];
-    const el = document.getElementById('deviceInfoRows');
-    if (!el) return;
-    el.innerHTML = rows.map(([label, value]) => `<div class="device-info-row"><span class="device-info-label">${label}</span><span class="device-info-value">${esc(text(value))}</span></div>`).join('');
-    const status = document.getElementById('deviceInfoStatus');
-    if (status) status.textContent = data.preview ? '已加载' : `已扫描 · ${new Date().toLocaleTimeString()}`;
-  }
+  // P3-5（F4a-G-8 派生）：本文件曾有的 render/scan（引 deviceInfoRows/deviceInfoStatus）随
+  // 「设置页设备信息板块移除」已成死代码 —— 那两个 id 全仓不存在、且 scan 零调用方，
+  // 按「不留死代码」删净；本模块只剩 normalize 供系统概览复用 + init 预热缓存。
 
   function normalize(raw) {
     if (!raw) return { ...PREVIEW, preview: true };
@@ -58,29 +48,6 @@
     };
   }
 
-  async function scan() {
-    const status = document.getElementById('deviceInfoStatus');
-    if (status) status.textContent = '扫描中...';
-    try {
-      // 手动扫描：强制刷新并更新缓存配置
-      if (window.api?.overview?.hardware) {
-        const response = await window.api.overview.hardware({ refresh: true });
-        if (!response.success) throw new Error(response.message);
-        render(normalize(response.data));
-      } else if (window.api?.device) {
-        const response = await window.api.device.scan();
-        if (!response.success) throw new Error(response.message);
-        render(normalize(response.data));
-      } else {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        render({ ...PREVIEW, preview: true });
-      }
-    } catch (error) {
-      if (status) status.textContent = '扫描失败';
-      window.app?.toast('error', `设备信息扫描失败：${error.message}`);
-    }
-  }
-
   async function init() {
     // 设置页「设备信息」板块已移除（系统概览页已展示硬件信息），
     // 本模块仅保留 normalize 供系统概览复用；首次进入概览时由 overview 拉取缓存。
@@ -93,5 +60,5 @@
       }
     } catch (e) {}
   }
-  window.deviceinfo = { init, scan, normalize };
+  window.deviceinfo = { init, normalize };
 })();

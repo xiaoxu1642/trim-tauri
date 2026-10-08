@@ -98,6 +98,50 @@ const okCount = count <= BASELINE;
 console.log(`${okCount ? '✓' : '✗'} 定义总数 ${count} ${okCount ? '≤' : '>'} 基线 ${BASELINE}（只许递减，禁止新增）`);
 if (!okCount) fail++;
 
+// ---- P3-5（F4a-M01）：字节格式化同口径 —— 本地 formatSize/formatBytes/fmtBytes 只许委托 ----
+// 与 escape* 同一红线（AGENTS §2：转义/字节格式化唯一真源 ds.js）。真源本体在 ds.js，
+// 不计入；其余文件的本地定义必须是纯委托 `window.ds.fmtBytes(...)`（棘轮 ≤ 现算 7）。
+const BYTE_BASELINE = 7;
+const RE_BYTE_DEF = /function\s+(formatSize|formatBytes|fmtBytes)\s*\([^)]*\)\s*\{([^}]*)\}/g;
+let byteCount = 0;
+const byteBad = [];
+for (const f of files) {
+  if (f === 'ds.js') continue; // 真源本体
+  const text = stripBlockComments(readFileSync(join(dir, f), 'utf8'));
+  RE_BYTE_DEF.lastIndex = 0;
+  let m;
+  while ((m = RE_BYTE_DEF.exec(text)) !== null) {
+    byteCount++;
+    if (!/window\.ds\.fmtBytes\s*\(/.test(m[2])) {
+      byteBad.push(`${f}:${text.slice(0, m.index).split('\n').length} ${m[1]}`);
+    }
+  }
+}
+if (BYTE_BASELINE > 0 && byteCount === 0) {
+  console.error(`✗ 字节格式化定义排查 0 条（基线 ${BYTE_BASELINE}）⇒ 判定正则或语料失效，不允许判绿`);
+  fail++;
+}
+for (const b of byteBad) {
+  console.error(`✗ ${b} — 本地字节格式化不是 window.ds.fmtBytes 纯委托（§2 红线：真源唯一在 ds.js）`);
+  fail++;
+}
+const byteOk = byteCount <= BYTE_BASELINE;
+console.log(`${byteOk ? '✓' : '✗'} 字节格式化本地包装 ${byteCount} ${byteOk ? '≤' : '>'} 基线 ${BYTE_BASELINE}（只许递减）`);
+if (!byteOk) fail++;
+// 正向对照：非委托样本必须判形态红；委托样本必须放行
+{
+  const bad = 'function formatSize(bytes) { return bytes.toFixed(1) + " KB"; }';
+  const good = 'function formatSize(bytes) { return window.ds.fmtBytes(bytes); }';
+  const re = new RegExp(RE_BYTE_DEF.source, 'g');
+  const bm = re.exec(bad);
+  re.lastIndex = 0;
+  const gm = re.exec(good);
+  if (!bm || /window\.ds\.fmtBytes\s*\(/.test(bm[2]) || !gm || !/window\.ds\.fmtBytes\s*\(/.test(gm[2])) {
+    console.error('✗ 正向对照失败：字节格式化判定器失效（非委托未判红或委托被误判）');
+    fail++;
+  }
+}
+
 console.log('');
 if (fail > 0) {
   console.error('门禁失败：本地 escape* 包装违反委托/棘轮约束（见上）');

@@ -209,6 +209,35 @@ for (const f of files) {
 const unreachable = files.filter((f) => !declared.has(f) && !f.endsWith('lib.rs') && !f.endsWith('main.rs'));
 for (const f of unreachable) g.fail(`${relative(ROOT, f).replace(/\\/g, '/')}：没有任何 mod 声明链可达（不在编译面/不在可达面）`);
 
+// ---- N6/N7（P3-5，R5-G-9/G-5）：登记式棘轮（防回退，不是全覆盖） ----
+// N6：两条已收口的递归遍历（现算的 MAX_WALK_DEPTH 使用点）必须保留深度常量 ——
+// 这是「DFS 必须有深度上限或登记豁免」的登记面；新增递归遍历时把文件登记进来。
+const WALK_DEPTH_SITES = [
+  { file: 'src-tauri/src/engine/native/cleanup.rs', name: '执行侧删除遍历' },
+  { file: 'native-scanner/src/cleanup_scan.rs', name: '清理扫描遍历（两处递归共用）' },
+];
+for (const s of WALK_DEPTH_SITES) {
+  const f = join(ROOT, s.file);
+  const text = existsSync(f) ? readFileSync(f, 'utf8') : '';
+  if (!text.includes('MAX_WALK_DEPTH')) g.fail(`N6：${s.file}（${s.name}）不再引用 MAX_WALK_DEPTH —— 深度护栏被移除？`);
+}
+// N7：按 mtime 取最新的实现唯一化 —— 现算唯一实现是 startup::pick_newest_file；
+// 新出现同名职责函数（fn *newest*/*latest*）即红，须复用或在登记表加一条理由。
+const NEWEST_FN = /fn\s+\w*(?:newest|latest)\w*\s*\(/g;
+{
+  const found = [];
+  for (const f of files) {
+    const rel = relative(ROOT, f).replace(/\\/g, '/');
+    const clean = stripRust(readFileSync(f, 'utf8'));
+    for (const m of clean.matchAll(NEWEST_FN)) {
+      found.push(`${rel}: ${m[0].trim()}`);
+    }
+  }
+  const unexpected = found.filter((x) => !x.includes('native/startup.rs: fn pick_newest_file'));
+  if (unexpected.length) g.fail(`N7：出现新的「取最新」实现（应复用 pick_newest_file 或在此登记理由）：${unexpected.join('；')}`);
+  if (!found.some((x) => x.includes('pick_newest_file'))) g.fail('N7：pick_newest_file 没找到（扫描面或改名漂移）');
+}
+
 // 扫描面地板：源文件数过少 ⇒ walkRs 失明
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);
 

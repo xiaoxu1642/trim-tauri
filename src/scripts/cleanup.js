@@ -170,16 +170,9 @@
     return Number.isFinite(n) && n > 0 ? n : 0;
   }
 
-  // 工具：格式化字节
-  function formatSize(bytes) {
-    const n = Number(bytes);
-    if (!Number.isFinite(n) || n <= 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const k = 1024;
-    const i = Math.min(Math.floor(Math.log(n) / Math.log(k)), units.length - 1);
-    const v = n / Math.pow(k, i);
-    return v.toFixed(v < 10 && i > 0 ? 2 : v < 100 && i > 0 ? 1 : 0) + ' ' + units[i];
-  }
+  // 工具：格式化字节 —— P3-5（F4a-M01）：本地实现并轨真源 ds.fmtBytes（AGENTS §2
+  // 红线「字节格式化唯一真源」；原实现自带 1024 边界假值的独立舍入口径）。
+  function formatSize(bytes) { return window.ds.fmtBytes(bytes); }
 
   function getItemById(id) {
     for (const group of Object.values(CATEGORIES)) {

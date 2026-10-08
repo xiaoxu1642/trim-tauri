@@ -24,7 +24,9 @@
 
   var MAX_ANGLE = 7;        // 最大角度（°）
   var PERSPECTIVE = 900;    // 透视距离（px）
-  var RESET_TRANSITION = 'transform .5s cubic-bezier(0.2, 0.8, 0.2, 1)';
+  // P3-5（F5-G-5）：曲线/时长进 token 值集（--ease-standard / --duration-slow），
+  // 原 .5s cubic-bezier(0.2,0.8,0.2,1) 是 token 外的自造值
+  var RESET_TRANSITION = 'transform .32s cubic-bezier(0.23, 1, 0.32, 1)';
   var MOVE_TRANSITION = 'transform .12s ease-out';
 
   var current = null;

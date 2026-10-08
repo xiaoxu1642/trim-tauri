@@ -80,6 +80,64 @@ check(
   idDups.join('；'),
 );
 
+// ---- 5. DOM 契约名双向对拍（P3-5 / F4a-G-8） ----
+// 判据：JS 里 `getElementById('x')` / `el('x')` 引用的 id，必须在**某份 HTML** 里存在，
+// 或能在 src 全量里找到**生成点**（模板 `id="x"` / `.id = 'x'` / `setAttribute('id','x')` /
+// `id: 'x'`——运行时创建的弹窗/Toast 覆盖这一列）。找不到 = 拼写漂移或死代码引用
+// （现算实例：deviceinfo.js 的 deviceInfoRows/deviceInfoStatus —— 板块移除后成了死引用）。
+const jsIds = new Map();
+const jsFiles5 = readdirSync(join(SRC, 'scripts')).filter((f) => f.endsWith('.js'));
+const jsSources = jsFiles5.map((f) => [f, readFileSync(join(SRC, 'scripts', f), 'utf8')]);
+const allSources = [
+  ...jsSources,
+  ...htmlFiles.map((f) => [f, readFileSync(join(SRC, f), 'utf8')]),
+];
+for (const [f, text] of jsSources) {
+  if (f === 'tauri-api.js') continue; // 适配层自身引用 caption 节点，生成点也在这里
+  for (const m of text.matchAll(/(?:el|getElementById)\(\s*'([A-Za-z][\w-]*)'\s*\)/g)) {
+    if (!jsIds.has(m[1])) jsIds.set(m[1], f);
+  }
+}
+const knownIds = new Set();
+for (const [f, text] of allSources) {
+  for (const m of text.matchAll(/\bid="([^"]+)"/g)) knownIds.add(m[1]);
+}
+const generatedId = (id) => {
+  const pats = [
+    new RegExp(`\\.id\\s*=\\s*['"]${id}['"]`),
+    new RegExp(`setAttribute\\(\\s*['"]id['"]\\s*,\\s*['"]${id}['"]`),
+    new RegExp(`id:\\s*['"]${id}['"]`),
+  ];
+  return allSources.some(([, t]) => pats.some((p) => p.test(t)));
+};
+const ghostIds = [...jsIds].filter(([id]) => !knownIds.has(id) && !generatedId(id));
+check(
+  jsIds.size >= 100,
+  `5. JS 引用的 id 总量 ${jsIds.size}（≥100 为地板，防扫描面失明）`,
+  jsIds.size < 100 ? '引用集趋零 ⇒ 语料或正则失明' : '',
+);
+check(
+  ghostIds.length === 0,
+  `5b. JS 引用的 ${jsIds.size} 个 id 全部在 HTML 或生成点里成立`,
+  ghostIds.length ? ghostIds.slice(0, 10).map(([id, f]) => `${f}: ${id}`).join('；') : '',
+);
+
+// ---- 6. 表头 ⇄ 行单元属性名成对（P3-5 / F5-G-4） ----
+// xtable 的表头 `data-col`（xtable.js 渲染）与行单元 `data-cell`（cleanup.js 渲染）
+// 必须由**同一个列键表达式**派生（`${col.key}`）—— 一旦两侧各写各的键名，
+// 列宽/排序改的是表头、行却对不上（F5-M07 的同族形态）。
+{
+  const xtable = readFileSync(join(SRC, 'scripts', 'xtable.js'), 'utf8');
+  const cleanup = readFileSync(join(SRC, 'scripts', 'cleanup.js'), 'utf8');
+  const colSide = /data-col="\$\{col\.key\}"/.test(xtable);
+  const cellSide = /data-cell="\$\{col\.key\}"/.test(cleanup);
+  check(
+    colSide && cellSide,
+    '6. xtable 表头 data-col 与行单元 data-cell 同源（${col.key}）',
+    colSide && cellSide ? '' : `表头侧=${colSide} / 行侧=${cellSide} —— 两侧键名表达式必须同为 \${col.key}`,
+  );
+}
+
 if (fail > 0) {
   console.error('check-html-contract: 存在违规');
   process.exit(1);

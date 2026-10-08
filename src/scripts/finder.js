@@ -102,14 +102,8 @@
     chip.setAttribute('aria-checked', driveSel[key].has(d) ? 'true' : 'false');
   }
 
-  function formatSize(bytes) {
-    if (!bytes || bytes <= 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const k = 1024;
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), units.length - 1);
-    const v = bytes / Math.pow(k, i);
-    return v.toFixed(v < 10 && i > 0 ? 2 : v < 100 && i > 0 ? 1 : 0) + ' ' + units[i];
-  }
+  // P3-5（F4a-M01）：本地实现并轨真源 ds.fmtBytes（AGENTS §2 红线）
+  function formatSize(bytes) { return window.ds.fmtBytes(bytes); }
 
   function esc(s) { return window.ds.esc(s); }
 
