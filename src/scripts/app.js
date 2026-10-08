@@ -143,7 +143,7 @@
   }
 
   // ==================== 渲染脚本按需加载（v3.7.0 议题五） ====================
-  // 改造前：38 个 <script> 全部同步加载、全部在启动时 init()，首屏解析 ~813 KB，
+  // 改造前：38 个脚本标签曾全部同步加载、全部在启动时 init()，首屏解析量级约 0.8 MB，
   // 其中磁盘测速、网络检测、运行库修复、快捷指令等页面用户可能永远不进。
   // 改造后：非首屏脚本从 index.html 摘出，进入对应页面（或首帧空闲）时动态注入。
   // 选型说明：动态 <script> 注入与现有 CSP（script-src 'self'）完全兼容，
@@ -151,7 +151,7 @@
   // 数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
   const PAGE_SCRIPTS = {
     // v3 C（2026-10-02）：磁盘清理域两份脚本从 index.html 摘出，改由进页时按需注入
-    // （fallback 118 KB + cleanup 88 KB 是首屏最重的两块，不进清理页就不该解析）。
+    // （fallback 与 cleanup 是首屏最重的两块，不进清理页就不该解析）。
     // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 会读
     // window.CLEANUP_RULES_FALLBACK 构建分类，先注入才拿得到兜底数据。
     cleanup: ['scripts/cleanup-fallback.generated.js', 'scripts/cleanup.js'],

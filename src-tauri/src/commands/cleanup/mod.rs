@@ -18,7 +18,7 @@
 //! - **快照槽**：扫描快照 / 回收站失败项 / 占用检测 PID 白名单全部按 `window.label()` 分槽
 //!   （Electron 按 `event.sender.id`），执行与结束进程只认本槽内容。
 //! - **删除安全**：受保护路径判定统一走 `engine::protect`（三端同源）；危险操作前
-//!   `log::flush_sync()`；回收站优先（`trim_finder::scan::recycle::send_to_trash`），
+//!   `log::flush_sync()`；回收站优先（`trim_finder::scan::recycle::send_to_trash_os`），
 //!   回收站失败项留槽等渲染层红色确认后再永久删除。
 //! 需在 `lib.rs` 的 `generate_handler!` 注册：
 //! ```text

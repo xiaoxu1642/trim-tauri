@@ -225,7 +225,7 @@ pub(super) fn pfro_strip_deletes(entries: Vec<String>, targets: &HashSet<String>
     out
 }
 
-/// 单批登记上限：口径对齐残留执行 `RESIDUE_MAX_GROUP_ITEMS=32`。PFRO 是系统级全局队列，
+/// 单批登记上限：口径对齐残留执行侧的 200 项目标上限（`residue.rs` 的 execute 闸）。PFRO 是系统级全局队列，
 /// 登记逐条走 MoveFileExW，超大批次没有业务场景（可登记项天然来自「回收站删不掉」的少数派），
 /// 只会拉长重启阶段会话管理器的消费时间（v2-B2，2026-10-01 复核）。
 pub(super) const PENDING_ADD_MAX_ITEMS: usize = 32;

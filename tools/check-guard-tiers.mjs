@@ -184,6 +184,8 @@ const MUST_MAIN = [
 const files = walkRs(CMD_DIR).map((p) => relative(CMD_DIR, p).replace(/\\/g, '/'));
 /** @type {Map<string, {file:string, tier:string|null, line:number}>} */
 const tiers = new Map();
+/** @type {Map<string, string>} 命令名 → 命令体全文（group F 的判据面） */
+const commandBodies = new Map();
 
 for (const f of files) {
   const text = readFileSync(join(CMD_DIR, f), 'utf8');
@@ -225,6 +227,7 @@ for (const f of files) {
       else if (/window\.label\(\)/.test(line)) tier = 'HANDWRITTEN';
     }
     tiers.set(name, { file: f, tier, line: start + 1, windowSetConst });
+    commandBodies.set(name, lines.slice(start, end).join('\n'));
   }
 }
 
@@ -500,6 +503,30 @@ check(
   'E. MAIN 与只读两张清单无交集',
   inBoth.length ? `同时登记在两张表里 ${JSON.stringify(inBoth)}` : '',
 );
+
+// ---- F. runas ⇒ 必须 MAIN 档（P3-5，R1-G-4） ----
+// 命令体内出现 runas（ShellExecuteW 的提权动词 / `-Verb RunAs`）⇒ 等效提权出口 ——
+// 挂 readonly 档等于让子窗渲染层失陷即可弹 UAC（AGENTS §3「不得下放」）。
+// 现算靶心三条：elevate_request / contextmenu_open_in_regedit / quickcmds_run。
+{
+  const runasCmds = [];
+  const wrongTier = [];
+  for (const [name, body] of commandBodies) {
+    if (!/runas/i.test(body)) continue;
+    runasCmds.push(name);
+    if (!MUST_MAIN.includes(name)) wrongTier.push(`${name}（${tiers.get(name)?.file}:${tiers.get(name)?.line}）`);
+  }
+  check(
+    runasCmds.length >= 3,
+    `F. 命令体含 runas 的 ${runasCmds.length} 条（≥3 为地板，防语料失明）`,
+    runasCmds.length < 3 ? 'runas 判定器疑似失明' : runasCmds.join(', '),
+  );
+  check(
+    wrongTier.length === 0,
+    'F2. 含 runas（等效提权出口）的命令全部登记 MAIN 档',
+    wrongTier.length ? `未升档：${JSON.stringify(wrongTier)}` : '',
+  );
+}
 
 // ---- 统计报告（不判红） ----
 const byTier = {};

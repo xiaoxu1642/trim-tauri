@@ -18,7 +18,7 @@ import { walkFiles } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
 
 const SRC = join(REPO_ROOT, 'src');
-const PER_FILE_LIMIT = 1024 * 1024;   // 1 MiB：未登记单文件超限线（现第二大文件是 593KB 壁纸，留有距离）
+const PER_FILE_LIMIT = 1024 * 1024;   // 1 MiB：未登记单文件超限线（现第二大文件是壁纸，留有距离）
 const TOTAL_LIMIT = 24 * 1024 * 1024; // 24 MiB：当前实测 21.97 MiB，留 ~2MiB 迭代余量
 
 /**

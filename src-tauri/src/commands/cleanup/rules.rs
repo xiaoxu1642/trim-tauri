@@ -48,7 +48,7 @@ pub(super) fn json_text(v: &Value) -> String {
 ///
 /// 本函数原注释写的是「与 Electron 逐字一致，便携模式同样落 Roaming」，那是收口前的口径：
 /// 它造成便携实例下载的规则带不走、标准与便携两实例互相覆盖 `rules.json` 与水位线、
-/// AGENTS §7.3 的清缓存步骤够不着规则文件。老根仍在 `MIGRATION_DIRS` 里做一次性搬迁，
+/// 发版手册 §7.3 的清缓存步骤够不着规则文件。老根仍在 `MIGRATION_DIRS` 里做一次性搬迁，
 /// 兜底读只服务于「搬迁没跑成」的场景。
 pub fn data_rules_dir() -> PathBuf {
     paths::data_subdir_for_read("cleanup")

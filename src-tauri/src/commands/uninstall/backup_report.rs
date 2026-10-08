@@ -1,7 +1,7 @@
 //! reg-backup-*（D1 还原入口 + D2 封条）、batch-*（还原包列表与整批还原）、report-*（批次报告）。
 //!
 //! 命令名与主窗 guard 档位不变；备份名与 batch_id 走白名单校验后才拼路径。
-//! 还原点/整批还原是最后防线，默认不自动删旧（对齐 AGENTS §9.2 的「危险能力默认关」）。
+//! 还原点/整批还原是最后防线，默认不自动删旧（对齐红线依据 §9.2 的「危险能力默认关」）。
 
 use crate::engine::{guard, log};
 use crate::engine::reg_backup::reg_backup_seal_state;

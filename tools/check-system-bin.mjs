@@ -94,8 +94,13 @@ const SITE_EXEMPT = [
   },
   {
     file: 'src-tauri/src/engine/systembin.rs',
-    anchor: 'let mut child = quiet_cmd(program)',
+    anchor: 'spawn_and_wait_with_timeout(quiet_cmd(program).args(args), timeout)',
     reason: 'quiet_cmd_timeout（v2-L4P-29）函数体内的透传：program 由调用方经 system_tool 或已登记豁免解析，本函数只补超时收口',
+  },
+  {
+    file: 'src-tauri/src/engine/systembin.rs',
+    anchor: 'spawn_and_wait_with_timeout(quiet_cmd(program).raw_arg(raw_arg), timeout)',
+    reason: 'quiet_cmd_timeout_raw（P3-5）：同 args 版的透传形态，raw_arg 逐字保留命令行走同一等待实现',
   },
   {
     file: 'src-tauri/src/engine/native/contextmenu.rs',

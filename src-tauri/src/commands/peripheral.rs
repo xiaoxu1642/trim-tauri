@@ -130,7 +130,7 @@ fn normalize_option(raw: Option<Value>) -> Option<i64> {
 /// 修剪外设备份目录：backup_YYYYMMDD_HHMMSS.reg 按名倒序保留 keep 份，更旧的进回收站
 fn prune_backups(keep: usize) {
     // 裁根 = 写侧单根（v2-L4P-14，B-2/C-3 用户拍板 D-1）：老根是升级前备份的唯一还原
-    // 依据，AGENTS §9.2① 冻结「老根只读不裁」。此前把 backup_read_dirs 的读兜底清单
+    // 依据，红线依据 §9.2① 冻结「老根只读不裁」。此前把 backup_read_dirs 的读兜底清单
     // 直接当裁根清单用，超额老根会被投回收站——文档与代码互相说谎（L4 B-2/C-3）。
     // 老根超额文件宁可留存，读取兜底仍可见、可还原。
     let dirs = vec![paths::backup_write_dir("peripheral-backup")];

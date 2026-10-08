@@ -674,7 +674,7 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    // B4：备份表读**一次**（126 项循环里每项读一次会重复解 34KB JSON ×126）
+    // B4：备份表读**一次**（126 项循环里每项读一次会重复解同一份备份表 JSON ×126）
     let backups = load_opt_backups();
     let rows: Vec<Value> = options()
         .iter()
@@ -860,7 +860,7 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         return json!({ "success": false, "message": msg });
     }
     let raw = opt_state::all();
-    // B4：备份表与可还原清单各读一次（原来同一份 34KB JSON 要解三次）
+    // B4：备份表与可还原清单各读一次（原来同一份备份表 JSON 要解三次）
     let backups_mig = load_opt_backups();
     let restorable_mig = restorable_items(&backups_mig);
     let mut items: Vec<Value> = Vec::new();

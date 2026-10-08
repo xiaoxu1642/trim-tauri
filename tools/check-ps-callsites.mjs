@@ -357,6 +357,9 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"start", "Dnscache"', reason: '网络修复：启动 DNS 缓存服务（sc start）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"winhttp", "reset", "proxy"', reason: '网络修复：重置 WinHTTP 代理', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/pssteps.rs', anchor: 'system_tool(program)', reason: '优化项 Spawn 算子（编译期白名单仅 powercfg.exe）', timeoutConst: 'POWERCFG_TIMEOUT', secs: 30 },
+  // P3-5（R5-G-4 补收）：cmd 步骤此前是裸 .output()，与其余调用点不同形态（raw_arg）——
+  // 门禁须把 raw 版一并收进池子，否则「形似不合」的新调用点天然隐身。
+  { file: 'src-tauri/src/commands/optimizer/apply.rs', anchor: '&cmd_line_of(cmd)', reason: '优化项 cmd 步骤（/s /c 引号形状必须逐字保留，故走 raw_arg 形态）', timeoutConst: 'CMD_STEP_TIMEOUT', secs: 60 },
 ];
 const TIMEOUT_SECS = 15;
 
@@ -389,6 +392,8 @@ const timeoutPool = [];
 for (const [file, text] of texts) {
   // 定义行本身不是调用点（collect 的 defRe 归一化对此函数名失效，这里显式剔除）
   timeoutPool.push(...collect(text, file, 'quiet_cmd_timeout(').filter((h) => !h.raw.includes('fn quiet_cmd_timeout')));
+  // P3-5：raw_arg 形态（quiet_cmd_timeout_raw）同属 F 组登记面，不许漏收
+  timeoutPool.push(...collect(text, file, 'quiet_cmd_timeout_raw(').filter((h) => !h.raw.includes('fn quiet_cmd_timeout_raw')));
 }
 const tUsed = new Set();
 const tProblems = [];

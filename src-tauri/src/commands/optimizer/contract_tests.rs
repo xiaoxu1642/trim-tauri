@@ -2118,7 +2118,7 @@ let ov = include_str!("overview.rs");
     ///
     /// 2026-10-06（任务二）后它的消费方是**详情弹窗**：>0 时在还原提示里讲明
     /// 「按本机备份逐值还原（N 个值）」。注入断了 = 弹窗少讲一条还原路径的依据；
-    /// 「备份表只读一次」的约束照旧（126 项逐项读 = 重复解 34KB JSON ×126）。
+    /// 「备份表只读一次」的约束照旧（126 项逐项读 = 重复解一份备份表 JSON ×126）。
     #[test]
     fn b4_逐行注入restorable() {
         let src = include_str!("overview.rs");
@@ -2126,7 +2126,7 @@ let ov = include_str!("overview.rs");
             src.contains("is_restorable(&backups, sid)") && src.contains("\"restorable\".into()"),
             "optimizer_list 没有逐行注入 restorable —— 前端无法区分「可还原」与「点了会失败」"
         );
-        // 且必须**只读一次**备份表（126 项循环里每项读一次 = 重复解 34KB JSON ×126）
+        // 且必须**只读一次**备份表（126 项循环里每项读一次 = 重复解同一份备份表 JSON ×126）
         assert!(
             src.contains("let backups = load_opt_backups();"),
             "备份表必须在循环外读一次"

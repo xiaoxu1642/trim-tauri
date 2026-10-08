@@ -19,7 +19,6 @@ use serde_json::{Value, json};
 #[cfg(test)] use std::sync::OnceLock; // 仅 build_preamble（PS 轨链，cfg(test)）使用
 use tauri::{Runtime, WebviewWindow};
 use tauri::Emitter;
-use std::os::windows::process::CommandExt;
 use super::backup_restore::*;
 use super::catalog::*;
 use super::overview::*;
@@ -171,9 +170,15 @@ pub(super) fn cmd_line_of(cmd: &str) -> String {
 /// 命令行形状，生产改回 `args(["/c", cmd])` 就测不出来了（而那条形状是错的，见下）。
 /// 完整根因与实测证据见 `native_execute_steps` 的 cmd 分支注释。
 pub(super) fn run_cmd_step(cmd: &str) -> std::io::Result<std::process::Output> {
-    crate::engine::systembin::quiet_cmd(system_tool("cmd"))
-        .raw_arg(cmd_line_of(cmd))
-        .output()
+    // P3-5（R5-G-4 漏网的一处）：原为裸 `.output()` 无超时 —— 挂死的 cmd 步骤
+    // 会永久锁住整批执行（optimizer_run 在 async 链上等它 = 界面假死）。
+    // 走 raw 版超时入口：`/s /c` 引号形状由 cmd_line_of 逐字保留、等待/终止语义
+    // 与其余 quiet_cmd_timeout 调用点共用同一实现（超时常量登记见 check-ps-callsites F 组）。
+    crate::engine::systembin::quiet_cmd_timeout_raw(
+        system_tool("cmd"),
+        &cmd_line_of(cmd),
+        crate::engine::systembin::CMD_STEP_TIMEOUT,
+    )
 }
 
 /// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）

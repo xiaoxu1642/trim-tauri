@@ -166,6 +166,10 @@ pub const SC_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// 正常秒级，30s 宽限上界。
 pub const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 优化项 cmd 步骤的超时（P3-5 补收 R5-G-4 漏网的一处）：正常毫秒级～秒级；
+/// cmd 步骤不带交互，60s 之外的等待只可能是挂了（等输入 / 被钩住），到点杀。
+pub const CMD_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// 带超时的静默子进程执行（v2-L4P-29 / B-7）。
 ///
 /// 为什么必须有它：6 处 `reg.exe export` 备份点此前都是裸 `.output()`——平时毫秒级，
@@ -179,11 +183,30 @@ pub fn quiet_cmd_timeout(
     args: &[&str],
     timeout: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
+    spawn_and_wait_with_timeout(quiet_cmd(program).args(args), timeout)
+}
+
+/// 同 [`quiet_cmd_timeout`]，但命令行以 `raw_arg` **原样**传入 —— cmd.exe 的
+/// `/s /c "…"` 引号形状必须逐字保留，`args()` 的转义规则会弄坏它（optimizer 的
+/// cmd 步骤链是唯一使用方，见 `optimizer::apply::cmd_line_of` 的根因注释）。
+/// 超时与终止语义与 args 版共用同一实现，不存在第二套等待逻辑。
+pub fn quiet_cmd_timeout_raw(
+    program: impl AsRef<std::ffi::OsStr>,
+    raw_arg: &str,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    spawn_and_wait_with_timeout(quiet_cmd(program).raw_arg(raw_arg), timeout)
+}
+
+fn spawn_and_wait_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
     use std::process::{Output, Stdio};
     use std::time::Instant;
 
-    let mut child = quiet_cmd(program)
-        .args(args)
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

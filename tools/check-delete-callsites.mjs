@@ -24,7 +24,10 @@ import { gate } from './lib/gate.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE_PATH = join(ROOT, 'tools', 'fixtures', 'delete-callsites-baseline.json');
 const SCAN_ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner', 'src')];
-const APIS = ['remove_file', 'remove_dir_all', 'remove_dir', 'DeleteFileW', 'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW', 'RegDeleteKeyExW'];
+const APIS = ['remove_file', 'remove_dir_all', 'remove_dir', 'DeleteFileW', 'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW', 'RegDeleteKeyExW',
+  // P3-5（组 3，G-7）：reg 导入 = 「往回写」的破坏性出口（reg import 整键覆写），
+  // 调用点必须 review 后进基线 —— 与删除原语同一条棘轮。
+  'reg_import_apply'];
 
 /** 剥 Rust 注释与字符串字面量（与 check-delete-exits 的 stripRustComments 同口径） */
 function stripRustComments(src) {

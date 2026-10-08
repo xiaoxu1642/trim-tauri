@@ -86,14 +86,22 @@ function commentLines(text) {
   return out;
 }
 
-const SCAN_ROOTS = [SRC_RS, SRC_TESTS, NATIVE_RS, FRONTEND_JS, FRONTEND_CSS];
-const EXTS = (n) => n.endsWith('.rs') || n.endsWith('.js') || n.endsWith('.css');
+// P3-5（T1-M01，2026-10-09）语料扩容：收 tools/ 与 .mjs —— 门禁自己的注释里
+// 写死的数字/坐标同样会腐烂，而旧语料只扫 src 侧，`tools/` 不在 SCAN_ROOTS、
+// `.mjs` 不在 EXTS，属「判据对象整片缺席」。
+const SCAN_ROOTS = [SRC_RS, SRC_TESTS, NATIVE_RS, FRONTEND_JS, FRONTEND_CSS, TOOLS];
+const EXTS = (n) => n.endsWith('.rs') || n.endsWith('.js') || n.endsWith('.css') || n.endsWith('.mjs');
+// 本门禁自己的 POSITIVE_CONTROLS 合成样本（`'// …99999 个 .ps1…'` 这类字符串字面量）
+// 会被 commentLines 当成注释行扫到 —— 样本是刻意写假的，扫描语料必须排除本文件
+// （与 check-idle-scripts 的 include_str! 自指是同一类坑：判定器不得吃自己的样本）。
+const SELF_FILE = 'tools/check-comment-rot.mjs';
 
 const commentsByFile = new Map();
 let commentLineTotal = 0;
 for (const base of SCAN_ROOTS) {
   for (const fAbs of walkFiles(base, EXTS, { ignoreDir: IGNORE_DIR })) {
     const rel = relative(ROOT, fAbs).replace(/\\/g, '/');
+    if (rel === SELF_FILE) continue; // 自指豁免：本文件的合成样本见上注
     const cs = commentLines(readFileSync(fAbs, 'utf8'));
     if (cs.length) {
       commentsByFile.set(rel, cs);
@@ -227,12 +235,9 @@ const ALLOW_SYMBOLS = new Set([
   // 初版空表 —— 跑通后按实际误报逐条补（与 check-escape-delegation 的 BASELINE 同纪律）。
 ]);
 // 已确认腐烂但暂不改注释的（**待修**：修完注释即从本表移除，理由必须写清实情）
-const TOLERATED_SYMBOLS = new Map([
-  ['trim_finder::scan::recycle::send_to_trash', '实际函数名是 send_to_trash_os（native-scanner/src/scan.rs:1676），注释差 `_os` 后缀'],
-  // 该符号确已删除，而注释陈述的正是「v3 C-1 把它收敛到 engine::native::to_wide」这桩史实
-  // （同段落首行有「v3 C-1 …全部收敛到此」，但命中行本身不含历史词，故按坐标登记）。
-  ['contextmenu::to_wide16', '符号已随 v3 C-1 收敛删除；注释在陈述收敛史，建议改写为「原 contextmenu::to_wide16」'],
-]);
+// P3-5（2026-10-09）：两条历史命中已按建议改注释（`send_to_trash_os` 补后缀 /
+// 「原 contextmenu::to_wide16」补历史词），本表清零 —— 清零态就是棘轮上限，再出现只能真修。
+const TOLERATED_SYMBOLS = new Map([]);
 // Electron 轨（上游只读基线）坐标：本仓是 Tauri 轨，`src/main/`、`src/data/`、
 // `src/platform_impl/` 是上游的目录形态，注释引用它们是**跨轨说明**不是腐烂。
 const ALLOW_FILE_PREFIXES = [
@@ -293,13 +298,9 @@ check(
 // ────────────────────────────────────────────────────────────────────
 
 // 已确认腐烂但暂不改注释的章节号（**待修**）。
-// AGENTS.md 2026-10-07 重排后把原 §7.1–§7.6、§8 迁去《本机发版手册》，并在文末
-// 留了「## 旧编号锚点」对照表。注释里仍写 `AGENTS §7.3` / `AGENTS §9.2` 的，
-// 指向的是**迁移前**的编号——现在按图索骥会找不到，属真腐烂，应改指发版手册。
-const TOLERATED_SECTIONS = new Map([
-  ['7.3', '原 §7.3 已迁《本机发版手册》同名小节（AGENTS.md「旧编号锚点」节），注释应改指发版手册'],
-  ['9.2', 'AGENTS.md §9 现为 `-` 列表无子编号，§9.2 是重排前残留，注释应改指实际小节'],
-]);
+// P3-5（2026-10-09）：7.3 / 9.2 的六处引用已改指《本机发版手册》《红线依据-竞品反例》
+// 同名小节（AGENTS.md「## 旧编号锚点」节给了对照），本表清零。
+const TOLERATED_SECTIONS = new Map([]);
 
 const agentsPresent = existsSync(AGENTS_MD);
 let rotSections = [];
@@ -374,19 +375,85 @@ check(
 );
 
 // ────────────────────────────────────────────────────────────────────
-// R3 数字腐烂（历史叙述豁免）
+// R3 数字腐烂（历史叙述豁免）—— P3-5 扩到四种形态（T1-M01，2026-10-09）：
+//   ① .ps1 脚本数 / Node 门禁条数（原有）
+//   ② 命令条数（「N 条命令」）—— 现算 = lib.rs generate_handler! 注册条目数
+//   ③ `NAME=NUM`（反引号内）—— 现算 = 源码里该常量的数值字面量；常量不存在即红
+//   ④ `file:行` 坐标 —— 文件须在盘上且行号 ≤ 文件行数（禁「按图索骥找不到」）
+//   KB 体积**不设硬数字比对**（体积随每次编辑合法漂移，硬比对必假红）——
+//   改为策略性禁止：注释不写精确 KB（判据=模式命中即红，改「约百 KB 量级」措辞）。
+//   这套形态取自 v4 报告组 10 的 11 个实例（R6-L02/R8-L02/R2-L01/R3-L02/R1-L02/
+//   F3-L01/L14 等），每条的实例修法见对应提交。
 // ────────────────────────────────────────────────────────────────────
 
 const ps1Count = existsSync(PS_DIR) ? readdirSync(PS_DIR).filter((f) => f.endsWith('.ps1')).length : -1;
 const gateCount = readdirSync(TOOLS).filter((f) => /^check-.*\.mjs$/.test(f)).length;
+// 命令条数与 check-channel-map 的 D2 口径一致：只数 generate_handler! 块里的注册条目
+const registeredCmdCount = (() => {
+  const lib = readFileSync(join(ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf8');
+  const s = lib.indexOf('generate_handler![');
+  const e = lib.indexOf('])', s);
+  return s < 0 || e < 0 ? -1 : [...lib.slice(s, e).matchAll(/commands::\w+::\w+/g)].length;
+})();
+
+// `NAME=NUM` 的现算源：全仓源码里该常量的数值字面量（const/static，RS 与 JS 通用）
+const CONST_DEF_RE = (name) =>
+  new RegExp(String.raw`(?:const|static)\s+` + name + String.raw`\b[^=\n]*=\s*(\d+)`);
+/** 源码全文（用于常量现算；语料面与注释扫描一致） */
+const srcTexts = (() => {
+  const out = [];
+  for (const base of SCAN_ROOTS) {
+    for (const fAbs of walkFiles(base, (n) => n.endsWith('.rs') || n.endsWith('.js') || n.endsWith('.mjs'), { ignoreDir: IGNORE_DIR })) {
+      out.push(readFileSync(fAbs, 'utf8'));
+    }
+  }
+  return out;
+})();
+function constValueOf(name) {
+  for (const t of srcTexts) {
+    const m = CONST_DEF_RE(name).exec(t);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
 
 const R3_PATTERNS = [
   { re: /(\d+)\s*(?:个|条|份|只)?\s*\.ps1/g, expect: ps1Count, label: '.ps1 脚本数' },
   { re: /(\d+)\s*条\s*(?:Node\s*)?门禁/g, expect: gateCount, label: '门禁条数' },
+  { re: /(\d+)\s*条(?:已注册|注册)?命令/g, expect: registeredCmdCount, label: '注册命令条数' },
 ];
 // RE_HISTORICAL 已在 R1 段定义，此处复用（「曾经 66 个 .ps1」是史实，不是承诺）
 
+// ③ `NAME=NUM`（反引号内，全大写常量名——避免误伤 `x=1` 这类示意）
+const RE_CONST_EQ = /`([A-Z][A-Z0-9_]{2,})=(\d+)`/g;
+// 外部 API 常量登记：这些名字的数值定义在 windows crate（本仓只引用），
+// 现算不到不代表腐烂；登记须写明属于哪个 API 族。
+const ALLOW_EXTERNAL_CONST = new Map([
+  ['DN_STARTED', 'Windows cfgmgr32 设备状态位（windows crate 常量）'],
+  ['DN_HAS_PROBLEM', '同上'],
+  ['CR_BUFFER_SMALL', 'Windows cfgmgr32 CONFIGRET 返回码'],
+]);
+// ④ `file:行`：只判带仓内前缀的路径（裸文件名与 docs/ 本机资料区不在判定面——
+// 前者无法解析、后者不入库；判据是「干净克隆里按图索骥仍找得到」）
+const RE_FILE_LINE = /`((?:src|src-tauri|tools|native-scanner)\/[\w./-]+\.(?:rs|js|mjs|ps1|json|css|html)):(\d+)`/g;
+// ⑤ KB 体积：注释不写「测量型」精确 KB（体积随编辑漂移，硬数字必腐烂）；
+//    「约定常量型」（缓冲区/截断/规格值）按 {file, needle} 登记放行 —— 这类数字
+//    描述的是代码常量或系统规格，不是对当前文件的测量。带「级」的量级措辞天然放行。
+const RE_KB_CLAIM = /(\d+)\s*KB\b(?!\s*级)/g;
+const KB_SPEC_ALLOW = [
+  { file: 'src-tauri/src/engine/log.rs', needle: '512KB', reason: '日志读取截断常量（代码常量，非测量）' },
+  { file: 'src-tauri/src/commands/log.rs', needle: '512KB', reason: '同上（log:read 语义对齐注释）' },
+  { file: 'src-tauri/src/commands/settings.rs', needle: '64KB', reason: '偏好值上限闸（代码常量）' },
+  { file: 'src-tauri/src/engine/winhttp.rs', needle: '64KB', reason: '流式读取缓冲尺寸（代码常量）' },
+  { file: 'src-tauri/src/engine/native/bsod.rs', needle: '256 KB', reason: 'Windows 小内存转储规格（系统定义）' },
+  { file: 'src/scripts/netspeed.js', needle: '256 KB/s', reason: '活动判定阈值（SPIKE_BPS 常量）' },
+];
+
 const rotNumbers = [];
+const rotConstEq = [];
+const rotFileLine = [];
+const rotKb = [];
+let r3Objects = 0; // 断言对象计数（0 ⇒ 语料/模式失明，是 T1-M01 的复现形态）
 for (const [rel, cs] of commentsByFile) {
   for (const c of cs) {
     if (RE_HISTORICAL.test(c.text)) continue;
@@ -395,15 +462,61 @@ for (const [rel, cs] of commentsByFile) {
       p.re.lastIndex = 0;
       let m;
       while ((m = p.re.exec(c.text)) !== null) {
+        r3Objects++;
         if (Number(m[1]) !== p.expect) rotNumbers.push(`${rel}:${c.line} 写「${m[0]}」现算 ${p.expect}（${p.label}）`);
       }
+    }
+    RE_CONST_EQ.lastIndex = 0;
+    let m;
+    while ((m = RE_CONST_EQ.exec(c.text)) !== null) {
+      r3Objects++;
+      if (ALLOW_EXTERNAL_CONST.has(m[1])) continue; // 外部 API 常量（见登记表）
+      const actual = constValueOf(m[1]);
+      if (actual === null) rotConstEq.push(`${rel}:${c.line} 写 \`${m[1]}=${m[2]}\`，但全仓找不到该常量的数值定义`);
+      else if (actual !== Number(m[2])) rotConstEq.push(`${rel}:${c.line} 写 \`${m[1]}=${m[2]}\`，现算 ${actual}`);
+    }
+    RE_FILE_LINE.lastIndex = 0;
+    while ((m = RE_FILE_LINE.exec(c.text)) !== null) {
+      r3Objects++;
+      const p = join(ROOT, m[1]);
+      if (!existsSync(p)) { rotFileLine.push(`${rel}:${c.line} 引用 ${m[1]}:${m[2]}，但文件不存在`); continue; }
+      const lineNo = Number(m[2]);
+      const total = readFileSync(p, 'utf8').split('\n').length;
+      if (lineNo > total) rotFileLine.push(`${rel}:${c.line} 引用 ${m[1]}:${lineNo}，但该文件只有 ${total} 行`);
+    }
+    RE_KB_CLAIM.lastIndex = 0;
+    while ((m = RE_KB_CLAIM.exec(c.text)) !== null) {
+      r3Objects++;
+      const allowed = KB_SPEC_ALLOW.some((a) => rel === a.file && c.text.includes(a.needle));
+      if (!allowed) rotKb.push(`${rel}:${c.line} 写「${m[0]}」—— 测量型精确体积必腐烂；约定常量请登记 KB_SPEC_ALLOW，其余改「约百 KB 量级」措辞`);
     }
   }
 }
 check(
   rotNumbers.length === 0,
-  `R3. 注释写死的数字与现算一致（.ps1 ${ps1Count} / 门禁 ${gateCount}）`,
+  `R3a. 注释写死的数字与现算一致（.ps1 ${ps1Count} / 门禁 ${gateCount} / 命令 ${registeredCmdCount}）`,
   rotNumbers.length ? rotNumbers.slice(0, 10).join('；') + (rotNumbers.length > 10 ? ` …共 ${rotNumbers.length} 处` : '') : '无腐烂',
+);
+check(
+  rotConstEq.length === 0,
+  'R3b. 注释里 `NAME=NUM` 与源码常量值一致（含常量不存在的情况）',
+  rotConstEq.length ? rotConstEq.slice(0, 10).join('；') : '无腐烂',
+);
+check(
+  rotFileLine.length === 0,
+  'R3c. 注释里的 `file:行` 坐标在盘上成立（文件存在且行号在范围内）',
+  rotFileLine.length ? rotFileLine.slice(0, 10).join('；') : '无腐烂',
+);
+check(
+  rotKb.length === 0,
+  'R3d. 注释不写精确 KB 体积（改量级措辞，防体积漂移腐烂）',
+  rotKb.length ? rotKb.slice(0, 10).join('；') : '无腐烂',
+);
+// 扫描面地板：四类数字断言的对象总数为 0 ⇒ 模式/语料失明（T1-M01 的复现形态），判红
+check(
+  r3Objects >= 3,
+  `R3 扫描面地板（数字断言对象 ${r3Objects} 处 ≥ 3）`,
+  r3Objects < 3 ? '断言对象趋零 ⇒ 语料或模式失明' : '',
 );
 
 // ────────────────────────────────────────────────────────────────────
@@ -472,6 +585,32 @@ const POSITIVE_CONTROLS = (() => {
   R3_PATTERNS[0].re.lastIndex = 0;
   while ((mm = R3_PATTERNS[0].re.exec(good)) !== null) if (Number(mm[1]) !== ps1Count) falseRed = true;
   if (falseRed) problems.push('R3 失效：与现算一致的数字被判红');
+
+  // R3a 命令条数：合成错数必须命中；现算数必须放行
+  R3_PATTERNS[2].re.lastIndex = 0;
+  const cmdSynth = `// 共 ${registeredCmdCount + 1} 条注册命令`;
+  if (!R3_PATTERNS[2].re.test(cmdSynth)) problems.push('R3a 失效：命令条数合成样本未被抓到');
+  const cmdGood = `// 共 ${registeredCmdCount} 条注册命令`;
+  R3_PATTERNS[2].re.lastIndex = 0;
+  const gm = R3_PATTERNS[2].re.exec(cmdGood);
+  if (!gm || Number(gm[1]) !== registeredCmdCount) problems.push('R3a 失效：现算命令条数被判红');
+
+  // R3b：不存在的常量必须现算 null；真实常量（mouse-trail.js THROTTLE_MS=22）必须现算到
+  if (constValueOf('NO_SUCH_CONST_XYZ') !== null) problems.push('R3b 失效：不存在的常量现算不为 null');
+  if (constValueOf('THROTTLE_MS') !== 22) problems.push('R3b 失效：真实常量 THROTTLE_MS 现算不到 22');
+
+  // R3c：真实存在的 file:行 不得假红；不存在的文件必须命中
+  const realRef = '`tools/check-comment-rot.mjs:1`';
+  const realPath = join(ROOT, 'tools/check-comment-rot.mjs');
+  if (!existsSync(realPath) || 1 > readFileSync(realPath, 'utf8').split('\n').length) problems.push('R3c 失效：真实 file:行 被判红');
+  const ghost = '`tools/no-such-file-xyz.mjs:9`';
+  const g2 = /`((?:src|src-tauri|tools|native-scanner)\/[\w./-]+\.(?:rs|js|mjs|ps1|json|css|html)):(\d+)`/.exec(ghost);
+  if (!g2 || existsSync(join(ROOT, g2[1]))) problems.push('R3c 失效：不存在的坐标未被抓到');
+
+  // R3d：带「级」的量级措辞与登记常量必须放行；裸测量型 KB 必须命中
+  if (RE_KB_CLAIM.test('规则 JSON 全文（60KB 级）')) problems.push('R3d 失效：量级措辞「60KB 级」被判红');
+  RE_KB_CLAIM.lastIndex = 0;
+  if (!RE_KB_CLAIM.test('首屏解析 ~813 KB')) problems.push('R3d 失效：测量型 KB 未被抓到');
 
   if (problems.length) {
     for (const p of problems) console.error(`✗ ${p}`);

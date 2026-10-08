@@ -45,8 +45,18 @@ function stripBlockComments(text) {
 // （判红验证实测抓出：无匹配时毫秒级绿跑，一旦有匹配即挂死）
 const RE_BARE = /(?:^|[^\w.$])(?:confirmDanger|confirmWarning)\s*\(\s*\{/g;
 const RE_APP = /\bapp\s*\??\.confirm(?:Danger|Warning)?\s*\(\s*\{/g;
+// P3-5（v4-K05）：高危确认凭据不得硬编码 —— `confirmedHighRisk: true` 字面量出现在
+// 渲染层（含桥接层）即红：凭据必须由调用点从确认结果派生（变量 / `!!x`）传入，
+// 硬编码 true 等于把安全门拆掉（v2-F4 历史形态）。局部对象赋值（`= true`，且上游
+// 刚 await 过确认）不在判定面。
+const RE_HARDCODED_CRED = /confirmedHighRisk\s*:\s*true\b/g;
+// 正向对照自检（合成样本，见文末）
+function hardcodedCredViolations(text) {
+  return [...text.matchAll(RE_HARDCODED_CRED)].map((m) => m[0]);
+}
 
 const bad = [];
+const hardcoded = [];
 for (const f of files) {
   const text = stripBlockComments(readFileSync(join(dir, f), 'utf8'));
   for (const re of [RE_BARE, RE_APP]) {
@@ -65,6 +75,29 @@ for (const f of files) {
       re.lastIndex = m.index + m[0].length;
     }
   }
+  // P3-5：凭据字面量检查（行注释跳过，注释里的提及不算数）
+  RE_HARDCODED_CRED.lastIndex = 0;
+  let h;
+  while ((h = RE_HARDCODED_CRED.exec(text)) !== null) {
+    const lineStart = text.lastIndexOf('\n', h.index - 1) + 1;
+    if (text.slice(lineStart, h.index).includes('//')) continue;
+    hardcoded.push(`${f}:${text.slice(0, h.index).split('\n').length}`);
+  }
+}
+
+// 正向对照自检（合成样本）
+{
+  const POSITIVE_CONTROLS = {
+    bad: 'window.api.syspanel.pagefileApply(true, [], { confirmedHighRisk: true });',
+    good: 'window.api.syspanel.pagefileApply(true, [], { confirmedHighRisk: !!ok });\nrunParams.confirmedHighRisk = true;',
+  };
+  const b = hardcodedCredViolations(POSITIVE_CONTROLS.bad).length;
+  const g2 = hardcodedCredViolations(POSITIVE_CONTROLS.good).length;
+  if (b !== 1 || g2 !== 0) {
+    console.error(`✗ 正向对照失败：字面量样本命中 ${b}（应 1）/ 合规样本命中 ${g2}（应 0）`);
+    process.exit(1);
+  }
+  console.log('✓ 正向对照自检通过（凭据字面量判定器可判红、合规样本放行）');
 }
 
 console.log('=== app 确认入口调用形态门禁（confirmDanger/confirmWarning/confirm 位置参数契约）===\n');
@@ -75,10 +108,17 @@ if (bad.length) {
 } else {
   console.log(`✓ ${files.length} 个 src/scripts 脚本无「对象形态调用 app 确认入口」`);
 }
+if (hardcoded.length) {
+  for (const h of hardcoded) {
+    console.error(`✗ src/scripts/${h} — confirmedHighRisk 被字面量为 true（高危确认凭据硬编码 = 绕过安全门；v4-K05 回归形态）`);
+  }
+} else {
+  console.log('✓ 渲染层无 confirmedHighRisk 字面量（凭据均由调用点从确认结果派生）');
+}
 
 console.log('');
-if (bad.length > 0) {
-  console.error('门禁失败：确认入口调用形态回归（见上）');
+if (bad.length > 0 || hardcoded.length > 0) {
+  console.error('门禁失败：确认入口调用形态/凭据回归（见上）');
   process.exit(1);
 }
 console.log('确认入口调用形态门禁通过');

@@ -2,7 +2,7 @@
 //!
 //! 字段表/上限/允许 token 集的单一真源是 `tools/rule-schema.json`，不是本文件；
 //! 更新侧必须复用装载侧的同一个校验器（validate_residue_package）与同一个
-//! `assemble_sources`，避免出现第二套口径（AGENTS §9.2 的 https-only 约束同源）。
+//! `assemble_sources`，避免出现第二套口径（红线依据 §9.2 的 https-only 约束同源）。
 //! 内置副本 `include_str!` 在此，体积下限跟着它走。
 
 use crate::engine::{guard, log, protect, rules_signature};
