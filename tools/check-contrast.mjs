@@ -624,6 +624,42 @@ check(
       : '',
 );
 
+// ---- F. 玻璃面必须消费 --lg-glass-floor（P3-2，2026-10-09） ----
+//
+// 为什么要有这一组：F5 探针的 8 条 FAIL 全落在「tint 栈没垫 floor」的滑块/玻璃按钮上
+//（导入图 + 雾化=0 + 像素近黑时纯 tint 栈只有 ~3.4:1，垫 floor 后 ≥6.7:1）。
+// 弹层/菜单早就消费 floor，滑块与玻璃按钮没有 —— 护栏不对称就是这条缺口的形状。
+// 判据：任何用 `--lg-tint-*` 画底（background/background-color）的声明，必须同声明
+// 含 `--lg-glass-floor`。新增玻璃面漏垫 floor 即红。
+const TINT_LAYER = /background(-color)?\s*:[^;]*--lg-tint-/;
+const floorViolations = (text) =>
+  text
+    .split(';')
+    .filter((decl) => TINT_LAYER.test(decl) && !decl.includes('--lg-glass-floor'))
+    .map((decl) => decl.trim().replace(/\s+/g, ' ').slice(0, 100));
+const tintNoFloor = [];
+let tintSites = 0;
+for (const part of CSS_PARTS) {
+  tintSites += (part.text.match(/--lg-tint-/g) || []).length;
+  for (const decl of floorViolations(part.text)) tintNoFloor.push(`${part.label}: ${decl}`);
+}
+// 正向对照自检：判定器必须能对「tint 无 floor」样本判红、对「tint+floor」样本放行
+{
+  const POSITIVE_CONTROLS = {
+    bad: 'background: linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));',
+    good: 'background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));',
+  };
+  check(
+    floorViolations(POSITIVE_CONTROLS.bad).length === 1 && floorViolations(POSITIVE_CONTROLS.good).length === 0,
+    'F0. 正向对照自检：tint 无 floor 判红、tint+floor 放行',
+  );
+}
+check(
+  tintSites >= 6 && tintNoFloor.length === 0,
+  `F. 玻璃面底必须消费 --lg-glass-floor（tint 声明命中 ${tintSites} 处）`,
+  tintSites < 6 ? '扫描面疑似失明（tint 命中 < 6）' : tintNoFloor.join('；'),
+);
+
 const worst = [...solidRows, ...textRows].sort((a, b) => a.ratio - b.ratio)[0];
 if (worst) console.log(`\n最低一档：${worst.ratio.toFixed(2)}:1（${worst.theme} ${worst.selector || worst.fg + ' on ' + worst.bg}）`);
 console.log('');
