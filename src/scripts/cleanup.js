@@ -348,7 +348,9 @@
       let inner = '';
       switch (col.key) {
         case 'check':
-          inner = `<div class="checkbox ${isSelected ? 'checked' : ''}" data-checkbox="${item.id}"></div>`;
+          // P3-1（可达性）：三属性同现（role/tabindex/aria-checked），键盘 Space 激活
+          // 由 ds.bindCheckboxKeys 合成 click；aria-checked 在 updateUI 里随选中态同步
+          inner = `<div class="checkbox ${isSelected ? 'checked' : ''}" data-checkbox="${item.id}" role="checkbox" tabindex="0" aria-checked="${isSelected ? 'true' : 'false'}"></div>`;
           break;
         case 'name': {
           // 中缝省略：超长文件名保留首尾（title 仍展示完整原文）
@@ -454,6 +456,9 @@
     // 分批追加的新行无需重新绑定事件。
     if (!rowDelegationBound) {
       rowDelegationBound = true;
+      // P3-1（可达性）：勾选框（span/div 伪装控件）键盘激活 —— Space/Enter 合成 click，
+      // 走下方既有的容器级 click 委托（[data-sub-checkbox] 有自己的 stopPropagation 处理器）
+      window.ds.bindCheckboxKeys(container, '.checkbox');
       container.addEventListener('click', e => {
         const previewBtn = e.target.closest('.fileclean-preview-btn[data-preview]');
         if (previewBtn) {
@@ -621,7 +626,7 @@
       <div class="sub-group" data-sub-group="${sg.id}">
         <div class="sub-group-header" data-sub-toggle="${sg.id}">
           <span class="sub-group-chevron">${chevronSvg()}</span>
-          <div class="checkbox" data-sub-checkbox="${sg.id}"></div>
+          <div class="checkbox" data-sub-checkbox="${sg.id}" role="checkbox" tabindex="0" aria-checked="false"></div>
           <span class="sub-group-name">${sg.name}</span>
           <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary);text-align:right;line-height:1.5" data-sub-meta="${sg.id}"><span data-sub-meta-line1="${sg.id}">${sg.items.length} 项</span><span data-sub-meta-line2="${sg.id}" style="display:block"></span></span>
         </div>
@@ -677,10 +682,12 @@
   }
 
   function updateUI() {
-    // 子项复选框
+    // 子项复选框（P3-1：aria-checked 与视觉态同源同步，读屏才跟得上批量操作）
     document.querySelectorAll('[data-checkbox]').forEach(cb => {
       const id = cb.dataset.checkbox;
-      cb.classList.toggle('checked', selectedIds.has(id));
+      const on = selectedIds.has(id);
+      cb.classList.toggle('checked', on);
+      cb.setAttribute('aria-checked', on ? 'true' : 'false');
     });
 
     // 父级（二级分类）复选框：none / indeterminate / all
@@ -701,6 +708,8 @@
         } else {
           cb.classList.add('indeterminate');
         }
+        // P3-1：三段态映射到 ARIA（none/indeterminate/all → false/mixed/true）
+        cb.setAttribute('aria-checked', selected === 0 ? 'false' : (selected === total ? 'true' : 'mixed'));
         // 元信息更新（v3.3.3 两行化：第一行数量+已选大小，第二行可选总大小）
         const metaEl = document.querySelector(`[data-sub-meta="${sg.id}"]`);
         const line1 = metaEl && metaEl.querySelector(`[data-sub-meta-line1="${sg.id}"]`);

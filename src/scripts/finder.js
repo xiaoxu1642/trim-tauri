@@ -208,7 +208,9 @@
   }
 
   function checkboxHtml(id, checked) {
-    return `<span class="checkbox ${checked ? 'checked' : ''}" data-fcheck="${id}"></span>`;
+    // P3-1（可达性）：三属性同现（键盘 Space 激活由 ds.bindCheckboxKeys 合成 click，
+    // 选中态同步在 onTableClick 里随 class 一起写 aria-checked）
+    return `<span class="checkbox ${checked ? 'checked' : ''}" data-fcheck="${id}" role="checkbox" tabindex="0" aria-checked="${checked ? 'true' : 'false'}"></span>`;
   }
 
   function nameOf(path) {
@@ -1065,6 +1067,7 @@
     const row = t.closest('tr');
     if (row) row.classList.toggle('finder-row-selected', s.selected.has(path));
     t.classList.toggle('checked', s.selected.has(path));
+    t.setAttribute('aria-checked', s.selected.has(path) ? 'true' : 'false');
     if (key === 'dups') refreshDupSummary();
     updateAllButtons();
   }
@@ -1220,6 +1223,8 @@
       document.getElementById(cfg.deleteBtn)?.addEventListener('click', () => onDelete(key));
       // 表格复选框委托 + 分页翻页 + 折叠栏目头（dups 的表名为 dupTable；empty 用自己表 id）
       document.getElementById(cfg.table)?.addEventListener('click', e => onTableClick(e, cfg.table, key));
+      // P3-1（可达性）：表格勾选框键盘激活（Space/Enter ⇒ 合成 click 走同一 onTableClick）
+      window.ds?.bindCheckboxKeys?.(document.getElementById(cfg.table), '[data-fcheck]');
       // 盘符点选器（empty/an）：委托点击 + 拉取盘符渲染（默认全选）
       if (cfg.drivesEl) {
         document.getElementById(cfg.drivesEl)?.addEventListener('click', onDriveClick);

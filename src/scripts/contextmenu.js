@@ -12,6 +12,7 @@
   let detailItem = null;   // 当前详情弹窗展示的条目
   let ctxModalCtrl = null; // v3.2.0：详情弹窗工厂 ctrl（焦点陷阱/Esc 由工厂统一管理）
   let kanbanMasonry = null; // 瀑布流布局引擎（resize 防抖 + FLIP）
+  let checkboxKeysBound = false; // P3-1：容器级键盘激活委托（一次性，看板每次重建）
 
   // 分类定义（顺序固定）。批次 C 起补齐三个原本「有 tab 无数据源」的分类：
   // 新建菜单 / 打开方式 / Win+X —— 侧边栏一直挂着这三个入口却永远为空。
@@ -301,6 +302,12 @@
 
     // 绑定看板行：点击复选框切换启用/禁用，点击其余区域打开详情弹窗
     //（文字选中时跳过以支持复制）
+    // P3-1（可达性）：勾选框键盘激活（Space/Enter ⇒ 合成 click，走下面的行处理器）；
+    // 容器常驻、随图标重建而重建的是行节点，故这里用一次性旗标防重复绑定。
+    if (!checkboxKeysBound) {
+      checkboxKeysBound = true;
+      window.ds.bindCheckboxKeys(container, '.checkbox');
+    }
     container.querySelectorAll('.ctx-kanban-row').forEach(el => {
       el.addEventListener('click', e => {
         const key = el.dataset.itemKey;
@@ -402,7 +409,7 @@
     const toggleable = isToggleable(item);
     return `
       <div class="ctx-kanban-row ${item.risk === 'protected' ? 'protected' : ''} ${enabled ? '' : 'disabled-row'}" data-item-key="${escapeHtml(key)}" data-tip="单击查看详情">
-        <div class="checkbox ${enabled ? 'checked' : ''} ${toggleable ? '' : 'disabled'}" data-tip="${enabled ? '取消勾选禁用此项' : '勾选启用此项'}"></div>
+        <div class="checkbox ${enabled ? 'checked' : ''} ${toggleable ? '' : 'disabled'}" role="checkbox" tabindex="0" aria-checked="${enabled ? 'true' : 'false'}"${toggleable ? '' : ' aria-disabled="true"'} data-tip="${enabled ? '取消勾选禁用此项' : '勾选启用此项'}"></div>
         <span class="ctx-row-index">${index}</span>
         <span class="ctx-row-main">
           <span class="ctx-row-name">${escapeHtml(item.name)}</span>

@@ -101,6 +101,8 @@
     const submenu = document.querySelector(`[data-nav-submenu="${key}"]`);
     item?.classList.toggle('expanded', expanded);
     submenu?.classList.toggle('expanded', expanded);
+    // P3-1（可达性）：展开态同步给箭头按钮（读屏据此播报「已展开/已折叠」）
+    item?.querySelector('.nav-parent-toggle')?.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     if (submenu) {
       // 审查 M-12：折叠态的 max-height:0 + opacity:0 只裁剪绘制，内部按钮仍在 Tab
       // 序列里 —— 默认全折叠的子菜单（磁盘测速/网络测速/网络检测）会收下看不见的
@@ -800,6 +802,13 @@
       const arrow = el.querySelector('.nav-parent-toggle');
       if (arrow) {
         arrow.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (el.dataset.navToggle) toggleNavSub(el.dataset.navToggle);
+        });
+        // P3-1（可达性）：role=button 的箭头要能用键盘激活（Enter/Space 同鼠标点击）
+        arrow.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
           e.stopPropagation();
           if (el.dataset.navToggle) toggleNavSub(el.dataset.navToggle);
         });

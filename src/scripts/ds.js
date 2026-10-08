@@ -551,5 +551,22 @@
   // 新交互统一走 window.ds.reducedMotion()（AGENTS §2「新交互先查 ds 有没有现成件」）。
   ds.reducedMotion = reducedMotion;
 
+  /**
+   * P3-1（可达性）：`span/div.checkbox` 伪装控件的键盘激活。
+   * 宿主上挂一次即可；Space/Enter 合成一次**真实 click**，复用各页既有的 click 委托
+   *（不另写激活逻辑，避免两套判定漂移）。各页勾选框模板仍须自带
+   * role="checkbox" tabindex="0" aria-checked（门禁 check-a11y 强制）。
+   */
+  ds.bindCheckboxKeys = function (host, selector) {
+    if (!host) return;
+    host.addEventListener('keydown', (e) => {
+      if (e.key !== ' ' && e.key !== 'Enter') return;
+      const t = e.target && e.target.closest ? e.target.closest(selector) : null;
+      if (!t || !host.contains(t)) return;
+      e.preventDefault();
+      t.click();
+    });
+  };
+
   window.ds = ds;
 })();

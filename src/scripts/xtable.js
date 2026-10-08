@@ -33,14 +33,21 @@
     const cells = layout.map(({ col, style }) => {
       const sortable = col.sortable !== false;
       const align = col.align === 'end' ? 'end' : (col.align === 'center' ? 'center' : 'start');
+      // P3-1（可达性）：可排序表头必须键盘可达并可播报排序态 —— tabindex=0 +
+      // aria-sort（ascending/descending/none，仅排序型表头合法）+ role=columnheader；
+      // 激活逻辑在 bindHeader 的 keydown 分支（与 click 走同一 applySort）。
+      const ariaSort = state && state.key === col.key
+        ? (state.dir === 'asc' ? 'ascending' : 'descending')
+        : 'none';
+      const a11y = sortable ? ` tabindex="0" role="columnheader" aria-sort="${ariaSort}"` : '';
       return `<div class="xtable-th${sortable ? ' sortable' : ''}${state && state.key === col.key ? ' sorted' : ''}${sortable ? '' : ' no-sort'}"
-        data-col="${col.key}" style="${style}" data-align="${align}"${sortable ? ' data-tip="点击排序"' : ''}>
+        data-col="${col.key}" style="${style}" data-align="${align}"${a11y}${sortable ? ' data-tip="点击排序"' : ''}>
         <span class="xtable-th-label">${col.label}</span>
         ${sortable && state ? sortIndicatorHtml(state, col.key) : ''}
         ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动调整列宽"></span>`}
       </div>`;
     }).join('');
-    return `<div class="xtable-head${opts.compact ? ' xtable-head-compact' : ''}">${cells}</div>`;
+    return `<div class="xtable-head${opts.compact ? ' xtable-head-compact' : ''}" role="row">${cells}</div>`;
   }
 
   // M2（v3.6.5）M2-4：表头交互改为幂等绑定。
@@ -72,11 +79,8 @@
     container.querySelectorAll('.xtable-th.sortable').forEach(th => {
       if (headerBound.has(th)) return;
       headerBound.add(th);
-      th.addEventListener('click', e => {
-        if (e.target.closest('.xtable-resizer')) return;
-        // 文字被选中时不触发排序（避免与复制操作冲突）
-        const sel = window.getSelection ? window.getSelection().toString() : '';
-        if (sel) return;
+      // P3-1：排序动作单一实现 —— click 与 keydown（Enter/Space）共用
+      const applySort = () => {
         const ctx = headerContextOf(th);
         if (!ctx || !ctx.state || typeof ctx.onChange !== 'function') return;
         const key = th.dataset.col;
@@ -87,6 +91,19 @@
           ctx.state.dir = 'asc';
         }
         ctx.onChange();
+      };
+      th.addEventListener('click', e => {
+        if (e.target.closest('.xtable-resizer')) return;
+        // 文字被选中时不触发排序（避免与复制操作冲突）
+        const sel = window.getSelection ? window.getSelection().toString() : '';
+        if (sel) return;
+        applySort();
+      });
+      // P3-1（可达性）：键盘 Enter/Space 与点击同路（Space 默认滚动，需拦掉）
+      th.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        applySort();
       });
     });
 

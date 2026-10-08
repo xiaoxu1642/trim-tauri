@@ -732,6 +732,11 @@ body {
      取既有 --bg-hover（比 :hover 的 --bg-card-hover 更实一档，符合"按下更深"）。 */
   background: var(--bg-hover);
 }
+/* P3-1（可达性）：箭头改 role=button + tabindex 后必须看得见焦点（键盘 Tab 走位） */
+.nav-parent-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .nav-parent-chevron {
   color: var(--fg-tertiary);
   flex-shrink: 0;

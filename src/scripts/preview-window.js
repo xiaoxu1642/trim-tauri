@@ -51,7 +51,10 @@
     document.title = `${itemName} · ${fileData.name} (${index + 1}/${images.length})`;
     if (fileInfoEl) {
       fileInfoEl.textContent = `${fileData.name} · ${formatSize(fileData.size)}`;
-      fileInfoEl.title = fileData.path || '';
+      // P3-1：路径提示走 data-tip（AGENTS §2 禁原生 title；ds.js 的委托每次悬停/聚焦
+      // 实时读属性，换图后照样即时生效）
+      if (fileData.path) fileInfoEl.setAttribute('data-tip', fileData.path);
+      else fileInfoEl.removeAttribute('data-tip');
     }
 
     try {

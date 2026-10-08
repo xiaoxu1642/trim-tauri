@@ -37,6 +37,10 @@
       host = document.createElement('div');
       host.id = 'subToastHost';
       host.className = 'toast-container';
+      // P3-1（可达性）：运行时创建的提示容器也要能被读屏播报（主窗那份静态容器已有）
+      host.setAttribute('role', 'status');
+      host.setAttribute('aria-live', 'polite');
+      host.setAttribute('aria-atomic', 'false');
       document.body.appendChild(host);
     }
     var el = document.createElement('div');

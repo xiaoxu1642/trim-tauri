@@ -34,6 +34,7 @@ const MUST_RUN = [
   'check-ps-extraction',
   'check-html-contract',
   'check-csp-consistency',
+  'check-a11y',
   'check-css-tokens',
   'check-assets-used',
   'check-asset-size',

@@ -484,7 +484,8 @@
     container.appendChild(el);
     const entry = {
       el,
-      title,
+      // P3-1 改名：避开 DOM .title（data-tip 门禁禁止 title 赋值），这里是自建对象的数据属性
+      label: title,
       finished: false,
       removeTimer: null,
       // 让「点击空白关最顶层 Toast」也够得到进度 Toast（此前它游离在 activeToasts 之外）
@@ -500,7 +501,7 @@
     const fill = progressToast.el.querySelector('.toast-progress-fill');
     const tune = progressToast.el.querySelector('.toast-tune');
     if (fill) fill.style.width = pct + '%';
-    if (tune) tune.textContent = `执行中 ${pct}%（${progressToast.title}）`;
+    if (tune) tune.textContent = `执行中 ${pct}%（${progressToast.label}）`;
   }
 
   function finishProgressToast(ok, message) {
@@ -955,7 +956,7 @@
     // 一处判定、一处入口，避免两个地方对「能不能还原」各说各话（B4 的判据在弹窗里继续生效）。
     return `
       <div class="opt-row${isOpt ? ' optimized' : ''}" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击查看详情与还原入口' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
-        <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" data-tip="${isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项'}"></div>
+        <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" role="checkbox" tabindex="0" aria-checked="${selectedIds.has(o.id) ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''} data-tip="${isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项'}"></div>
         <span class="opt-row-index">${index}</span>
         <span class="opt-row-name">${escapeHtml(o.title)}</span>
         ${riskBadge(o.risk)}${isOpt ? '<span class="opt-row-opttag">已优化</span>' : ''}
@@ -1796,7 +1797,7 @@
       const t = progressToast;
       const titleEl = t && t.el ? t.el.querySelector('.toast-title') : null;
       const optName = opt.title || opt.id;
-      if (t && t.el) { t.title = optName; const tune = t.el.querySelector('.toast-tune'); if (tune) tune.textContent = '正在执行「' + optName + '」…'; }
+      if (t && t.el) { t.label = optName; const tune = t.el.querySelector('.toast-tune'); if (tune) tune.textContent = '正在执行「' + optName + '」…'; }
       setProgressToastProgress(1);
       // OPT-1（2026-09-15 v7）：高危项红色确认已在上游通过，这里携带服务端镜像回执；
       // restore 还原方向不属高危写入，不带标记。
@@ -1988,7 +1989,10 @@
     const row = document.querySelector(`.opt-row[data-id="${CSS.escape(id)}"]`);
     if (row) row.classList.toggle('selected', selectedIds.has(id));
     const check = document.querySelector(`.opt-row[data-id="${CSS.escape(id)}"] .checkbox[data-check]`);
-    if (check) check.classList.toggle('checked', selectedIds.has(id));
+    if (check) {
+      check.classList.toggle('checked', selectedIds.has(id));
+      check.setAttribute('aria-checked', selectedIds.has(id) ? 'true' : 'false'); // P3-1：视觉态与 ARIA 同步
+    }
     updateSelectedButtonState();
   }
 
@@ -2403,6 +2407,9 @@
   function bindEvents() {
     const root = document.getElementById('optimizerGroups');
     if (!root) return;
+
+    // P3-1（可达性）：看板行勾选框键盘激活（Space/Enter ⇒ 合成 click，走同一 toggleSelect）
+    window.ds?.bindCheckboxKeys?.(root, '.checkbox[data-check]');
 
     // 看板行点击打开弹窗；点击勾选框仅切换选择状态；列底「全选本类」批量勾选；
     // 已优化（灰态）行点击 → 弹「是否还原此项优化？」确认

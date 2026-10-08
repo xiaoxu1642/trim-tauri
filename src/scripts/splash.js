@@ -46,6 +46,31 @@
   // 从而错误地在别处依赖它。若将来真要按系统偏好降级，请在真正读取它的位置重新引入。
   try { document.body.classList.add('splash-live'); } catch (e) {}
 
+  // P3-1（可达性）：开屏期背景不可达 —— splash 之外的 body 一级子元素全部 inert
+  //（焦点与读屏都跳过主界面；Tab 不会落进看不见的标题栏/内容区），finish 时逐个解除。
+  // 本文件是 body 末尾第一个脚本，此时 document.body 必然存在；脚本标签不在交互面，跳过。
+  var sealedEls = [];
+  (function sealBackground() {
+    if (!document.body) return;
+    var kids = document.body.children;
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (el === splash || el.tagName === 'SCRIPT' || el.hasAttribute('inert')) continue;
+      el.inert = true;
+      sealedEls.push(el);
+    }
+  })();
+
+  // P3-1（可达性）：键盘用户不必等开屏动画 —— Esc/Enter 直接进入（enterApp 幂等，
+  // 与「点击进入」按钮、紧凑模式自动进入共用同一条终点）。
+  function onSplashKey(e) {
+    if (e.key !== 'Escape' && e.key !== 'Enter') return;
+    if (state === 'entered') return;
+    e.preventDefault();
+    enterApp();
+  }
+  document.addEventListener('keydown', onSplashKey, true);
+
   var state = 'loading'; // loading → done → entered
   var finished = false;
   var bootReady = false;
@@ -78,6 +103,11 @@
     clearTimeout(hardTimer);
     // 开屏结束即摘标，主界面恢复 reduced-motion 无动画常态
     try { document.body.classList.remove('splash-live'); } catch (e) {}
+    // P3-1（可达性）：解除开屏期对主界面的 inert 封锁，并摘掉跳过键监听
+    for (var i = 0; i < sealedEls.length; i++) {
+      try { sealedEls[i].inert = false; } catch (e) {}
+    }
+    try { document.removeEventListener('keydown', onSplashKey, true); } catch (e) {}
     // 火眼眼审查 2026-09-14（LOW）：节点摘除的同时解绑 window 级监听
     try { window.removeEventListener('trim:boot-ready', onBootReady); } catch (e) {}
     try { if (canvasResizeHandler) window.removeEventListener('resize', canvasResizeHandler); } catch (e) {}
