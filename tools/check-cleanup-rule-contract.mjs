@@ -37,6 +37,9 @@ const errors = [];
 function fail(msg) {
   console.error(`✗ ${msg}`);
   errors.push(msg);
+  // T1-K01（v4-K07）：任何一条 fail 都必须让进程退出码非 0。此前三处「致命错误 + return」
+  // 绕过末尾的 exit(1)，打 ✗ 也 exit 0；exitCode 兜底后，将来再有人写 return 短路同样判红。
+  process.exitCode = 1;
 }
 
 function collectItems(rules) {
@@ -55,7 +58,7 @@ function main() {
     schema = loadSchema();
   } catch (e) {
     fail(`[A0] 契约表不可用：${e.message}`);
-    return;
+    return process.exit(1);
   }
 
   // ---- 1. 判定器自检（坏判定器必红，且不放过"过严"这一侧） ----
@@ -70,7 +73,7 @@ function main() {
     fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
   } catch (e) {
     fail(`[A0] 夹具不可读：${e.message}`);
-    return;
+    return process.exit(1);
   }
   const declaredIds = Array.isArray(fixture.assertionIds) ? fixture.assertionIds : [];
   const cases = Array.isArray(fixture.packages) ? fixture.packages : [];
@@ -120,7 +123,7 @@ function main() {
     rules = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (e) {
     fail(`规则 JSON 不可读: ${e.message}`);
-    return;
+    return process.exit(1);
   }
   const items = collectItems(rules);
   if (items.length === 0) fail('规则库没有任何条目（groups 结构异常？）');

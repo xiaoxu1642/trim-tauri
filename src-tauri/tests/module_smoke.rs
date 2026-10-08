@@ -36,6 +36,38 @@ fn sub_windows_derives_from_guard_list() {
     }
 }
 
+/// X1-K02（v4-K10，2026-10-09）：清单塌缩的元断言。
+///
+/// 上面那条老元断言在清单塌成 `["main"]` 时全部仍成立（`0 == 1-1`、空集不含 main、
+/// 循环 0 次），于是依赖 `sub_windows()` 的档位用例 100% 空转而测试全绿。这里加两条硬钉：
+/// ① 双方长度下界（按现算值取粗下界：APP_WINDOWS 5 含主窗 / 子窗 4；新增子窗自动满足，
+///    塌缩即红）；② `sub_windows()` 与 `capabilities/subwindows.json` 的 windows 数组
+///    逐条相等 —— 这是 AGENTS §2「新增子窗 label 四处同步」里前两处的机检（漏同步的症状：
+///    窗口建得出来、每次 IPC 都判越权）。
+#[test]
+fn sub_windows_matches_capabilities_manifest() {
+    let subs = sub_windows();
+    assert!(APP_WINDOWS.len() >= 5, "APP_WINDOWS 塌缩（现算 5 含主窗）: {APP_WINDOWS:?}");
+    assert!(subs.len() >= 4, "sub_windows() 塌缩（现算 4）: {subs:?}");
+
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/subwindows.json");
+    let text = std::fs::read_to_string(&p).expect("读得到 capabilities/subwindows.json");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("subwindows.json 是合法 JSON");
+    let mut declared: Vec<String> = v["windows"]
+        .as_array()
+        .expect("subwindows.json 缺 windows 数组（四处同步之一）")
+        .iter()
+        .map(|x| x.as_str().expect("windows 元素必须是字符串").to_string())
+        .collect();
+    let mut actual: Vec<String> = subs.iter().map(|s| s.to_string()).collect();
+    declared.sort();
+    actual.sort();
+    assert_eq!(
+        actual, declared,
+        "sub_windows() ⇄ capabilities/subwindows.json 的 windows 必须逐条相等（顺序不计）"
+    );
+}
+
 /// 未知 label 的窗口不得调过 guard_readonly 档（防「白名单靠猜」）：
 /// 子窗清单外注入的窗口（模拟被注入页）调只读档命令必须被拒杀。
 #[test]
@@ -102,6 +134,7 @@ fn paths_save_rejects_unknown_key() {
 /// 只读档降成主窗专属会让子窗功能 100% 不可用。
 #[test]
 fn readonly_channel_passes_guard_from_every_subwindow() {
+    let mut reached: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "settings_load", json!({}));
@@ -114,7 +147,9 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
             text.contains("success"),
             "{label} 窗应越过档位进入命令体（回执含 success），回执 {text}"
         );
+        reached.push(label);
     }
+    assert_eq!(reached, sub_windows(), "每个子窗 label 都必须被点名走过（清单塌缩时这条红）");
 }
 
 // ==================== 卸载残留链三道闸（M1 安全收口 2026-09-28） ====================
@@ -235,6 +270,7 @@ fn residue_execute_requires_snapshot_before_any_delete() {
 /// 所以本用例零副作用（不会有进程被拉起来），同时证明档位已越过。
 #[test]
 fn uninstall_run_is_main_only_and_passes_guard_from_main() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "uninstall_run", json!({ "appId": GHOST_APP_ID }));
@@ -242,7 +278,9 @@ fn uninstall_run_is_main_only_and_passes_guard_from_main() {
             text.contains("IPC 来源校验失败"),
             "{label} 窗调卸载命令必须被来源校验拒杀，回执 {text}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
     let w = main_window();
     let res = invoke(&w, "uninstall_run", json!({ "appId": GHOST_APP_ID }));
     assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
@@ -257,6 +295,7 @@ fn uninstall_run_is_main_only_and_passes_guard_from_main() {
 /// ModifyPath 进程被启动之前，所以零副作用（不会有修改/修复程序被拉起来）。
 #[test]
 fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "uninstall_modify", json!({ "appId": GHOST_APP_ID }));
@@ -264,7 +303,9 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
             text.contains("IPC 来源校验失败"),
             "{label} 窗调修改/修复命令必须被来源校验拒杀，回执 {text}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
     let w = main_window();
     let res = invoke(&w, "uninstall_modify", json!({ "appId": GHOST_APP_ID }));
     assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
@@ -287,7 +328,8 @@ fn pending_delete_channels_are_residue_window_only() {
     );
     // needle 用数据形状里的键名：档位拒杀的回执只有 {success:false,message}，读不到 entries
     assert_residue_window_only("uninstall_pending_list", json!({}), "entries");
-    // revoke：只验拒杀侧
+    // revoke：只验拒杀侧（residue 正例留给发布前 #[ignore] 组）
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         if label == RESIDUE_LABEL {
             continue;
@@ -298,7 +340,10 @@ fn pending_delete_channels_are_residue_window_only() {
             text.contains("IPC 来源校验失败"),
             "{label} 窗调重启后删撤销必须被拒杀，回执 {text}"
         );
+        rejected.push(label);
     }
+    let expected: Vec<&str> = sub_windows().into_iter().filter(|l| *l != RESIDUE_LABEL).collect();
+    assert_eq!(rejected, expected, "residue 以外的每个子窗都必须被点名拒杀（清单塌缩时这条红）");
     let m = invoke_text(&main_window(), "uninstall_pending_revoke", json!({ "batchId": "no-such-batch" }));
     assert!(
         m.contains("IPC 来源校验失败"),
@@ -354,6 +399,7 @@ fn pending_add_rejects_protected_paths_and_over_limit() {
 /// 渲染层对 `data.backups` 直接 `.map`，塌成 null 会让备份弹窗整片崩。
 #[test]
 fn reg_backup_channels_are_main_only() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let list = invoke_text(&w, "uninstall_reg_backup_list", json!({}));
@@ -370,7 +416,9 @@ fn reg_backup_channels_are_main_only() {
             restore.contains("IPC 来源校验失败"),
             "{label} 窗调卸载域备份还原必须被拒杀，回执 {restore}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
 
     let w = main_window();
     let list = invoke(&w, "uninstall_reg_backup_list", json!({}));
@@ -400,6 +448,7 @@ fn reg_backup_channels_are_main_only() {
 /// 渲染层直接消费的 `sizeKb`/`partial` 两个字段类型。
 #[test]
 fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "uninstall_dir_size", json!({ "path": "C:\\Windows\\Temp" }));
@@ -407,7 +456,9 @@ fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
             text.contains("IPC 来源校验失败"),
             "{label} 窗调体积兜底必须被拒杀，回执 {text}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
 
     let w = main_window();
     // `"."` 而不是随便一个相对串：它**一定**存在，所以去掉绝对路径闸后这条必然变绿，
@@ -447,6 +498,7 @@ fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
 /// 刻意只挑一个**本机没有备份记录**的退役 id：有备份的话命令会真去写注册表，快速组不许碰。
 #[test]
 fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_restore_reg", json!({ "optionId": "any" }));
@@ -454,7 +506,9 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
             text.contains("IPC 来源校验失败"),
             "{label} 窗调优化项还原必须被拒杀，回执 {text}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
 
     let w = main_window();
     let unknown = invoke(&w, "optimizer_restore_reg", json!({ "optionId": "trim-不存在的选项" }));
@@ -742,6 +796,7 @@ fn log_write_is_readonly_tier_and_sanitizes_renderer_input() {
 /// 「命令整条没注册/直接消失」假绿穿透（v2-M16② 的前科就在这条上）。
 #[test]
 fn batch_pack_channels_are_main_only() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let list = invoke_text(&w, "uninstall_batch_list", json!({}));
@@ -754,7 +809,9 @@ fn batch_pack_channels_are_main_only() {
             restore.contains("IPC 来源校验失败"),
             "{label} 窗调整批还原必须被拒杀（它往磁盘写文件），回执 {restore}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
 
     let w = main_window();
     let list = invoke(&w, "uninstall_batch_list", json!({}));
@@ -807,11 +864,24 @@ fn residue_execute_still_accepts_call_without_backup_arg() {
 /// 被拿去写注册表）在卸载域收了四道；N1 之后列表还会跨根列出 Electron 轨写的老文件，
 /// 弱链的输入面同步扩大。
 ///
-/// 三条断言都停在**写注册表之前**，所以是零副作用的快速用例：
-/// 越界文件名（档位之后参数闸门）、缺版本头的形状、内容指向受保护容器。
+/// 覆盖分两层，全部停在**写注册表之前**，零副作用：
+/// ① 命令边界（真实 IPC）：子窗一律被档位拒杀；主窗的文件名白名单与「文件不存在」两个早退。
+/// ② 内容闸（命令链直接调用的**同一函数** `reg_backup_restore_guards`）：缺版本头、
+///    内容指向受保护容器。
+///
+/// X1-K01（v4-K09，2026-10-09）隔离改造：②原先靠往**用户真实备份根**
+/// `%APPDATA%\<id>\cleanup-reg-backup` 写假 .reg 让命令的 resolve 命中——测试假件与用户
+/// 真备份混居（进程被杀时 Drop 不跑会永久残留；发版前 #[ignore] 实跑还会读到假基线）。
+/// 现在文件落 `temp_script_dir()`（应用私有 tmp，AGENTS §3 指定的临时产物位置）；
+/// 让 `cleanup_reg_backup_restore` 读到文件的唯一位置就是两个用户备份根，那正是本条要根除
+/// 的写入面。「命令链确实调了这道闸」由 backup.rs 的单点调用维持，调用点登记见 P3-5。
 #[test]
 fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
     use trim_tauri_lib::engine::paths;
+    use trim_tauri_lib::engine::reg_backup::reg_backup_restore_guards;
+
+    // ① 档位：子窗一律拒杀（rejected 全等防清单塌缩时整段空转）
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let r = invoke_text(&w, "cleanup_reg_backup_restore", json!({ "file": "1_x.reg" }));
@@ -819,14 +889,37 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
             r.contains("IPC 来源校验失败"),
             "{label} 窗调清理域备份还原必须被拒杀，回执 {r}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
 
-    let dir = paths::backup_write_dir("cleanup-reg-backup");
-    std::fs::create_dir_all(&dir).expect("备份目录应可建");
+    // ② 命令边界两个早退面（零触盘、不依赖备份根内容）
+    let w = main_window();
+    let bad = invoke(&w, "cleanup_reg_backup_restore", json!({ "file": "..\\x.reg" }));
+    assert_eq!(bad["success"], json!(false), "越界文件名必须早退: {bad}");
+    assert!(
+        common::message_of(&bad).contains("备份文件名非法"),
+        "主窗应越过档位停在文件名白名单，实得 {bad}"
+    );
+    let missing = invoke(
+        &w,
+        "cleanup_reg_backup_restore",
+        json!({ "file": "1700000000000_reg_zzgate_9.reg" }),
+    );
+    assert_eq!(missing["success"], json!(false), "备份根里没有的文件必须拒: {missing}");
+    assert!(
+        common::message_of(&missing).contains("备份文件不存在"),
+        "回执应指明是 resolve 出口拦下的，实得 {missing}"
+    );
+
+    // ③ 内容闸：文件落应用私有 tmp（不进用户备份根）
+    let dir = paths::temp_script_dir().expect("私有 tmp 应可用");
     let stamp = 1_700_000_000_000i64;
-    let no_header = dir.join(format!("{stamp}_reg_zzgate_1.reg"));
-    let deny_target = dir.join(format!("{}_reg_zzgate_2.reg", stamp + 1));
-    // 用例中途 panic 也必须清掉探针文件，否则用户备份目录里会长出两条永远还原不了的假备份
+    let no_header_name = format!("{stamp}_reg_zzgate_1.reg");
+    let deny_name = format!("{}_reg_zzgate_2.reg", stamp + 1);
+    let no_header = dir.join(&no_header_name);
+    let deny_target = dir.join(&deny_name);
+    // 用例中途 panic 也必须清掉探针文件（私有 tmp 里也不留垃圾）
     struct Cleanup(Vec<std::path::PathBuf>);
     impl Drop for Cleanup {
         fn drop(&mut self) {
@@ -849,26 +942,13 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
     )
     .unwrap();
 
-    let w = main_window();
-    let r = invoke(&w, "cleanup_reg_backup_restore", json!({ "file": file_name(&no_header) }));
-    assert_eq!(r["success"], json!(false), "缺版本头的 .reg 必须拒: {r}");
-    assert!(
-        common::message_of(&r).contains("合法的 .reg"),
-        "回执要说清是哪道闸拦的，实得 {r}"
-    );
+    let e1 = reg_backup_restore_guards(&no_header, &no_header_name, true).unwrap_err();
+    assert!(e1.contains("合法的 .reg"), "缺版本头必须被形状闸拒，实得 {e1}");
+    let e2 = reg_backup_restore_guards(&deny_target, &deny_name, true).unwrap_err();
+    assert!(e2.contains("受保护"), "指向 HKLM\\SOFTWARE 必须被禁删面拒，实得 {e2}");
 
-    let r2 = invoke(&w, "cleanup_reg_backup_restore", json!({ "file": file_name(&deny_target) }));
-    assert_eq!(r2["success"], json!(false), "指向 HKLM\\SOFTWARE 的 .reg 必须拒: {r2}");
-    assert!(
-        common::message_of(&r2).contains("受保护"),
-        "回执应写明是禁删面拦下的，实得 {r2}"
-    );
-
-    // 判红自测口径：把 cleanup 侧那次 guards 调用摘掉 ⇒ 上面两条断言都会变成
-    // "success:true 或直接走 reg.exe 失败"，本用例必红。
-    fn file_name(p: &std::path::Path) -> String {
-        p.file_name().unwrap().to_string_lossy().to_string()
-    }
+    // 判红自测口径：任一道闸被摘掉，对应的 unwrap_err 当场 panic 变红；①的 rejected 全等
+    // 在清单塌缩时变红。命令链侧接线（backup.rs 调 guards）由 P3-5 的调用点登记门禁接续。
 }
 
 /// 集成测试进程同样不许写生产日志（2026-10-02 修：测试夹具灌进了用户看得见的日志页）。
@@ -893,6 +973,7 @@ fn 集成测试进程不写生产日志() {
 #[test]
 fn batch_preflight_is_readonly_for_all_app_windows() {
     // R1-1.7：子窗清单必须由 `sub_windows()` 派生，不许硬编码 label 字面量
+    let mut reached: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(&label);
         let text = invoke_text(&w, "optimizer_batch_preflight", json!({ "ids": ["svc_w32time_manual"] }));
@@ -904,7 +985,9 @@ fn batch_preflight_is_readonly_for_all_app_windows() {
             text.contains("\"runnable\"") || text.contains("\"rejected\""),
             "{label} 窗应越过档位拿到预检结果形状，回执 {text}"
         );
+        reached.push(label);
     }
+    assert_eq!(reached, sub_windows(), "每个子窗 label 都必须被点名走过（清单塌缩时这条红）");
 }
 
 /// R1-1.4 / R1-1.5：空 ids 与未知 id 的**fail-closed** 形状。
@@ -1065,6 +1148,7 @@ fn syspanel_回执必须是_success_data_包装() {
 /// 由 pending 侧同名模板核对过的同族形态覆盖；这里按模板纪律只点子窗拒绝侧。
 #[test]
 fn optimizer_stale_dismiss_is_main_only() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_stale_dismiss", json!({ "ids": ["x"] }));
@@ -1072,7 +1156,9 @@ fn optimizer_stale_dismiss_is_main_only() {
             text.contains("IPC 来源校验失败"),
             "{label} 窗调 optimizer_stale_dismiss 必须被来源校验拒杀，回执 {text}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
 }
 
 /// 2026-10-04 磁盘清理审计 §5.6：item-detail 的 path 形参必须与扫描快照同源。
@@ -1143,6 +1229,7 @@ fn optimizer_restore_frequency_主窗越档且回执确定() {
 /// 同一命令的子窗侧：一律被来源校验拒杀（MAIN 档，guard 先于一切 ⇒ 零副作用，留快速组）。
 #[test]
 fn optimizer_restore_frequency_子窗一律拒杀() {
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_restore_frequency", json!({}));
@@ -1150,7 +1237,9 @@ fn optimizer_restore_frequency_子窗一律拒杀() {
             text.contains("IPC 来源校验失败"),
             "{label} 窗调 optimizer_restore_frequency 必须被来源校验拒杀，回执 {text}"
         );
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
 }
 
 /// 2026-10-06 任务四：空目录忽略名单三命令 —— 档位与负例。
@@ -1162,6 +1251,7 @@ fn optimizer_restore_frequency_子窗一律拒杀() {
 #[test]
 fn finder_ignore名单_档位与负例() {
     // ① 子窗一律拒杀
+    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         for (cmd, args) in [
@@ -1175,7 +1265,9 @@ fn finder_ignore名单_档位与负例() {
                 "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
             );
         }
+        rejected.push(label);
     }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
     let w = main_window();
     // ② 不存在的目录：在读取 / 写盘之前拒绝
     let res = invoke(&w, "finder_ignore_folder", json!({ "path": "C:\\__trim_test_missing__" }));

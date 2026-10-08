@@ -90,11 +90,57 @@ for (const root of SCAN_ROOTS) {
   }
 }
 
+const totalOf = (m) => Object.values(m).reduce((a, o) => a + Object.values(o).reduce((x, y) => x + y, 0), 0);
+const total = totalOf(current);
+
+// ---- 扫描面地板（T1-K02 / v4-K08）----
+// 扫描器失明的三种触发：SCAN_ROOTS 被搬/改名、APIS 名单没跟新增、stripRustComments 回归
+// 把代码吞成空白。任一发生，结果逼近空集，而棘轮「数量下降不红」会静默放行 —— 一次
+// --write 就能把基线永久清零，此后新增任何删除出口都不再判红。地板：0 文件直接拒；
+// 有基线时命中数 < 30% 也拒（--write 同样拦：收紧基线是人工决定，不许一次收紧清账）。
+const FLOOR_RATIO = 0.3;
+const oldBaseline = existsSync(BASELINE_PATH) ? JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) : null;
+const oldTotal = oldBaseline ? totalOf(oldBaseline) : 0;
+const floorViolation = () => {
+  for (const root of SCAN_ROOTS) {
+    if (!existsSync(root)) return `扫描根 ${relative(ROOT, root).replace(/\\/g, '/')} 不存在 ⇒ 该根下调用点整批静默消失（被搬/改名？）`;
+  }
+  if (scanned === 0) return '扫描 Rust 文件 0 个 ⇒ 扫描面失明';
+  if (oldTotal > 0 && total < oldTotal * FLOOR_RATIO)
+    return `命中 ${total} 处 < 基线 ${oldTotal} 处的 ${FLOOR_RATIO * 100}% ⇒ 疑似扫描器失明或批量退役`;
+  return null;
+};
+/** 相对旧基线被移除/减少的调用点（首次生成无对比，返回空表） */
+const removedVsBaseline = () => {
+  const out = [];
+  for (const api of Object.keys(oldBaseline || {})) {
+    for (const f of Object.keys(oldBaseline[api])) {
+      const was = oldBaseline[api][f];
+      const now = current[api]?.[f] ?? 0;
+      if (now < was) out.push(`${f} ${api} ${was}→${now}`);
+    }
+  }
+  return out;
+};
+
 // ---- 基线 ----
 if (process.argv.includes('--write')) {
+  const removed = removedVsBaseline();
+  const floor = floorViolation();
+  if (floor) {
+    console.error(`✗ --write 被扫描面地板拦下：${floor}`);
+    if (removed.length) {
+      console.error(`  本次将被移除的调用点 ${removed.length} 条（逐条核对属实后再重跑 --write）：`);
+      for (const r of removed) console.error(`    · ${r}`);
+    }
+    process.exit(1);
+  }
   writeFileSync(BASELINE_PATH, JSON.stringify(current, null, 2) + '\n', 'utf8');
-  const total = Object.values(current).reduce((a, o) => a + Object.values(o).reduce((x, y) => x + y, 0), 0);
   console.log(`✓ 基线已重算落盘：${BASELINE_PATH}（删除 API 调用点共 ${total} 处，文件 ${scanned} 个）`);
+  if (removed.length) {
+    console.log(`  本次收紧移除 ${removed.length} 条：`);
+    for (const r of removed) console.log(`    · ${r}`);
+  }
   process.exit(0);
 }
 const g = gate(import.meta.url);
@@ -102,7 +148,7 @@ if (!existsSync(BASELINE_PATH)) {
   g.fail('基线文件缺失，先跑一次 --write 生成');
   g.finish();
 }
-const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
+const baseline = oldBaseline;
 
 const problems = [];
 const shrinkHints = [];
@@ -121,12 +167,16 @@ for (const api of APIS) {
   }
 }
 
-const total = Object.values(current).reduce((a, o) => a + Object.values(o).reduce((x, y) => x + y, 0), 0);
-const baseTotal = Object.values(baseline).reduce((a, o) => a + Object.values(o).reduce((x, y) => x + y, 0), 0);
-if (problems.length === 0) {
-  console.log(`✓ 删除原语调用点 ${total} 处（基线 ${baseTotal}），扫描 Rust 文件 ${scanned} 个，无未登记新增`);
-} else {
+const baseTotal = totalOf(baseline);
+if (problems.length > 0) {
   g.fail(`删除原语调用点出现未登记变化：\n  ${problems.join('\n  ')}`);
+}
+const floor = floorViolation();
+if (floor) {
+  g.fail(`扫描面地板判红：${floor} —— 先人工核对是真实退役还是扫描器失明，再决定是否 --write`);
+}
+if (problems.length === 0 && !floor) {
+  console.log(`✓ 删除原语调用点 ${total} 处（基线 ${baseTotal}），扫描 Rust 文件 ${scanned} 个，无未登记新增`);
 }
 if (shrinkHints.length) {
   console.log(`ℹ 有 ${shrinkHints.length} 处收敛（${shrinkHints.slice(0, 5).join('；')}${shrinkHints.length > 5 ? '…' : ''}）——确认无误后跑 --write 收紧基线（只减不增的棘轮方向）`);

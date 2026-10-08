@@ -59,6 +59,7 @@ const MUST_RUN = [
   'check-readme-claims',
   'check-readme-negative-claims',
   'check-doc-refs',
+  'check-comment-rot',
   'check-positive-controls',
   'check-gate-roster',
 ];
@@ -147,11 +148,23 @@ if (!RUN) {
 
 // ── 5. --run：按 MUST_RUN 顺序跑完全部必跑门禁 ──
 let runFailed = 0;
+const selfReported = [];
 for (const name of MUST_RUN) {
   const args = [join(TOOLS, `${name}.mjs`), ...(GATE_ARGS[name] || [])];
   const res = spawnSync(process.execPath, args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (res.status === 0) {
     ok(`run ${name}`);
+    // T1-M06（v4-K07）：exit 0 ≠ 无失败断言 —— 子门禁可能自报 ✗（短路 bug / 未修完的断言），
+    // 也可能自报 SKIP/未校验/0 对象。计数后单列，让「全绿」不再盖住子门禁自己的失败输出。
+    // skip 的判据收紧到独立词形态（`skipped_reparse`/「跳过块」这类代码术语不算，否则满是误报）。
+    const out = `${res.stdout || ''}\n${res.stderr || ''}`;
+    const count = (re) => (out.match(re) || []).length;
+    const marks = {
+      x: count(/✗/g),
+      skip: count(/(?:^|[^\w])SKIP(?![A-Za-z0-9_])|未校验/g),
+      zero: count(/(?:^|[^\w])0\s*(?:个|条|处)(?![\w])/g),
+    };
+    if (marks.x + marks.skip + marks.zero > 0) selfReported.push({ name, ...marks });
   } else {
     runFailed++;
     console.error(`✗ run ${name}（exit ${res.status ?? 'null'}）`);
@@ -163,5 +176,14 @@ for (const name of MUST_RUN) {
 if (runFailed > 0) {
   console.error(`check-gate-roster --run: ${runFailed}/${MUST_RUN.length} 条门禁失败`);
   process.exit(1);
+}
+if (selfReported.length > 0) {
+  console.log(
+    `\n〔子门禁自报标记〕以下 ${selfReported.length} 条 exit 0，但输出含失败（✗）/SKIP·未校验/0 对象标记——` +
+      '「exit 0」只等于没有非 0 退出码，不等于没有失败断言：',
+  );
+  for (const s of selfReported) {
+    console.log(`  · ${s.name}: ✗${s.x} / SKIP·未校验${s.skip} / 0 对象${s.zero}`);
+  }
 }
 console.log(`check-gate-roster --run: ${MUST_RUN.length} 条必跑门禁全部通过`);

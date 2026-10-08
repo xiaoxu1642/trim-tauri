@@ -123,6 +123,13 @@ console.log(runCompare
   ? `行为层：开启（--run，pwsh=${pwsh}；真起 PowerShell 执行不带 noRun 的映射，有扫盘/网络副作用）`
   : `行为层：未验证（默认不执行真实 .ps1；需要时用 --run）`);
 console.log('');
+// 扫描面地板（P0-4）：MAPPING 为空时循环 0 次、fail 恒 0 ⇒「✓ 文本层门禁通过」是空集假绿。
+// 真源 ps-mapping.mjs 已有 throw 兜底（审查 F2）；这里加二道保险，防真源那条被改/删后
+// 空表静默通过。
+if (MAPPING.length === 0) {
+  console.error('✗ MAPPING 为空：逐字搬运对拍 0 条对象 ⇒ 扫描面失效，拒绝判绿');
+  process.exit(1);
+}
 for (const m of MAPPING) {
   if (ONLY && !ONLY.has(m.name)) continue;
   const jsText = loadBody(m, require, readFileSync);

@@ -51,6 +51,10 @@ const check = (ok, label, detail = '') => {
 
 console.log('=== 延迟加载脚本 DOMContentLoaded 守卫门禁 ===\n');
 
+// 扫描面地板（P0-4）：清单解析成空集时循环 0 次、bad 恒空 ⇒「✓ 0 个延迟加载脚本均带守卫」
+// 是空集假绿。0 对象不允许判绿（AGENTS §4.1）。
+check(files.length > 0, '延迟/按页加载清单非空（0 个 = 扫描面失效）', `解析得 ${files.length} 个脚本`);
+
 const bad = [];
 for (const rel of files) {
   const text = readFileSync(join(REPO_ROOT, 'src', rel.replace(/^src\//, '')), 'utf8');
@@ -107,6 +111,9 @@ const startupBlock = appJs.match(/\/\/ 初始化各模块\n([\s\S]*?)\n\n/);
 if (!startupBlock) throw new Error('app.js 里找不到「// 初始化各模块」启动名单——锚点变了，请同步本门禁');
 const startupInits = [...startupBlock[1].matchAll(/initModuleByName\('([^']+)'\);/g)].map((m) => m[1]);
 const premature = startupInits.filter((n) => !staticNames.has(`${n}.js`));
+// 扫描面地板（P0-4）：锚点失配解析出 0 项时，旧输出「✓ 启动期 init 名单 0 项均已静态加载」
+// 是空集假绿。真出现「合法为空」的形态时改本门禁（fail-loud 好过静默）。
+check(startupInits.length > 0, '启动期 init 名单解析非空（0 项 = 锚点失配）', `解析得 ${startupInits.length} 项`);
 check(
   premature.length === 0,
   `启动期 init 名单 ${startupInits.length} 项均已在 index.html 静态加载（${staticNames.size} 个标签）`,

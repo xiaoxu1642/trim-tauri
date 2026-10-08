@@ -135,7 +135,11 @@ const MUST_PROTECT = [
 //   第三段 file 是**相对 src-tauri** 的（ROOT 就是 src-tauri，见 :28）。
 const MUST_PROTECT_VIA_HELPER = [
   ['cleanup_retry_failed_delete', 'retry_failed_delete_blocking'],
-  ['cleanup_execute', 'cleanup_execute', 'src/engine/native/cleanup.rs'],
+  // 2026-10-09（v4-K09 修复）：cleanup_execute 拆出薄包装——删前备份根需要可注入
+  // （三个端到端用例的备份副本原先写进用户真实数据目录），实现体搬进
+  // `cleanup_execute_with_backup_root`，`cleanup_execute` 退化为一行转发。protect 闸随
+  // 实现体移动，本表 helper 名同步跟随；该函数再改名/搬走时 2b 依旧判红。
+  ['cleanup_execute', 'cleanup_execute_with_backup_root', 'src/engine/native/cleanup.rs'],
 ];
 
 // 审查 L-5（2026-10-03）二跳盲区登记（只登记不改，按白名单纪律）：

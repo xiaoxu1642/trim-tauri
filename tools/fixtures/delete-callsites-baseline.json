@@ -25,7 +25,7 @@
     "src-tauri/src/commands/realtime.rs": 2,
     "src-tauri/src/commands/uninstall/backup_report.rs": 3,
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 3,
-    "src-tauri/src/engine/native/cleanup.rs": 26,
+    "src-tauri/src/engine/native/cleanup.rs": 28,
     "src-tauri/src/engine/native/contextmenu.rs": 1,
     "src-tauri/src/engine/native/maintenance.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 5,
@@ -43,7 +43,7 @@
     "src-tauri/src/engine/native/cleanup.rs": 2
   },
   "RegDeleteTreeW": {
-    "src-tauri/src/engine/native/contextmenu.rs": 2,
+    "src-tauri/src/engine/native/contextmenu.rs": 1,
     "src-tauri/src/engine/native/registry.rs": 1
   },
   "RegDeleteValueW": {

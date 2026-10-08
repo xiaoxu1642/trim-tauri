@@ -29,6 +29,13 @@ import { REPO_ROOT } from './ps-origin.mjs';
 const dir = join(REPO_ROOT, 'src', 'scripts');
 const files = readdirSync(dir).filter((f) => f.endsWith('.js')).sort();
 
+// 扫描面地板（P0-4）：目录塌陷/改名 ⇒ files=[]，末尾「✓ 0 个脚本无对象形态调用」是空集假绿。
+// 下限 10 是现算值（48 个 .js）的明显下界——只拦整目录消失/几近塌陷，不拦正常增删。
+if (files.length < 10) {
+  console.error(`✗ src/scripts 只剩 ${files.length} 个 .js ⇒ 扫描面塌陷（现算 48），拒绝判绿`);
+  process.exit(1);
+}
+
 // 剥离块注释（等长替换保偏移量与行号），行注释在命中处按行前缀判定
 function stripBlockComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));

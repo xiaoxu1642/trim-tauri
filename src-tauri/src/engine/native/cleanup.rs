@@ -557,6 +557,22 @@ pub fn cleanup_execute(
     to_recycle: bool,
     auto_rebuild: bool,
 ) -> Result<CleanupExecuteResult, String> {
+    cleanup_execute_with_backup_root(items, rules, to_recycle, auto_rebuild, None)
+}
+
+/// [`cleanup_execute`] 的实现体。`backup_root` 允许把「删前备份」定向到调用方给定的根——
+/// 生产恒 None（= 数据目录新根，行为不变）；三个端到端用例传私有 tmp 沙箱。
+///
+/// X1-K01（v4-K09，2026-10-09）：那三个用例（单文件 fileKey / 带点目录排除 / 大小写去重）
+/// 真跑删除链时，临时探针的备份副本会被写进**用户真实数据目录**的 `cleanup-files-backup\`
+/// ——测试假件与用户真备份混居，进程被杀还会永久残留（发版前 #[ignore] 实跑还会读到假基线）。
+fn cleanup_execute_with_backup_root(
+    items: &[Value],
+    rules: &Value,
+    to_recycle: bool,
+    auto_rebuild: bool,
+    backup_root: Option<&std::path::Path>,
+) -> Result<CleanupExecuteResult, String> {
     let mut details = Vec::new();
     let mut total_freed = 0i64;
     let mut total_files = 0i64;
@@ -568,7 +584,9 @@ pub fn cleanup_execute(
     // 复制失败/超限都不阻塞删除，否则清理主链被备份故障绑架）。
     const FILE_BACKUP_MAX_FILE: u64 = 64 * 1024 * 1024;
     const FILE_BACKUP_MAX_BATCH: u64 = 256 * 1024 * 1024;
-    let files_backup_root = crate::engine::paths::backup_write_dir("cleanup-files-backup");
+    let files_backup_root = backup_root
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| crate::engine::paths::backup_write_dir("cleanup-files-backup"));
     let backup_batch_ts = crate::engine::now_ms();
     let mut backup_entries: Vec<Value> = Vec::new();
     let mut backup_total: u64 = 0;
@@ -1315,6 +1333,27 @@ fn collect_files_at(
 mod cleanup_engine_contract_tests {
     use super::*;
 
+    /// X1-K01（v4-K09）：端到端删除用例的「删前备份」重定向根——私有 tmp 下的 per-test
+    /// 沙箱。构造先清残、Drop 清垃圾（断言 panic 也不留）；不进用户备份根。
+    struct BackupSandbox(std::path::PathBuf);
+    impl BackupSandbox {
+        fn new(tag: &str) -> Self {
+            let dir = crate::engine::paths::temp_script_dir()
+                .expect("私有 tmp 应可用")
+                .join(format!("test-cleanup-backup-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for BackupSandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// 执行侧展开必须与扫描侧同源且大小写不敏感：`%WINDIR%`（大写）在旧白名单
     /// 展开器下永远展不开（printSpoolCache 静默失效根因），统一实现后必须解析。
     #[test]
@@ -1687,7 +1726,9 @@ mod cleanup_engine_contract_tests {
         }]}]});
         let items = vec![serde_json::json!({"id":"singlefile","name":"单文件探测","path": target.to_string_lossy()})];
 
-        let res = cleanup_execute(&items, &rules, false, false).expect("执行应返回结果而不是 Err");
+        let bk = BackupSandbox::new("singlefile");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()))
+            .expect("执行应返回结果而不是 Err");
         let d = &res.details[0];
 
         assert!(
@@ -1776,7 +1817,9 @@ mod cleanup_engine_contract_tests {
         }]}]});
         let items = vec![serde_json::json!({"id":"dotdir","name":"带点目录排除探测","path": dir.to_string_lossy()})];
 
-        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        let bk = BackupSandbox::new("dotdir");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()))
+            .expect("不应 Err");
         assert!(
             dir.join("Vendor.Tool").join("inside.log").exists(),
             "带点目录内的文件必须幸存 —— 排除被按扩展名误分类成文件时，它会随子树一起被删"
@@ -1858,7 +1901,9 @@ mod cleanup_engine_contract_tests {
         }]}]});
         let items = vec![serde_json::json!({"id":"dedup","name":"大小写去重探测","path": lower})];
 
-        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        let bk = BackupSandbox::new("dedup");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()))
+            .expect("不应 Err");
         let d = &res.details[0];
         assert_eq!(d["fileCount"].as_i64(), Some(1), "同一文件必须只删/只算一次: {d}");
         assert_eq!(d["freed"].as_i64(), Some(10), "释放量不得重复计数: {d}");

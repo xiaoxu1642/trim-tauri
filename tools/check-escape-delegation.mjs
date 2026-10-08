@@ -80,6 +80,16 @@ for (const f of files) {
 }
 
 console.log('=== 本地 escape* 薄包装委托与棘轮门禁 ===\n');
+// 扫描面地板（P0-4）：src/scripts 被改名/清空 ⇒ files=[]、count=0，旧输出
+// 「✓ 定义总数 0 ≤ 基线 30」是空集假绿。基线 > 0 时定义数归零只能是正则或语料损坏。
+if (files.length === 0) {
+  console.error('✗ src/scripts 下没有 .js 文件 ⇒ 扫描面失效（目录被搬/改名？），拒绝判绿');
+  fail++;
+}
+if (BASELINE > 0 && count === 0) {
+  console.error(`✗ escape* 定义排查结果 0 条（基线 ${BASELINE}）⇒ 判定正则或语料失效，不允许判绿`);
+  fail++;
+}
 for (const b of badForm) {
   console.error(`✗ ${b} — 定义体不是 window.ds.esc/escAttr 纯委托（重实现会与真源字符集分叉）`);
   fail++;
