@@ -1098,7 +1098,7 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
         }
         let files_dir = startup_files_dir();
         let _ = std::fs::create_dir_all(&files_dir);
-        let stamp = chrono_now_str();
+        let stamp = backup_stamp();
         let safe_name: String = item.get("name").and_then(|v| v.as_str()).unwrap_or("item")
             .chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let ext = std::path::Path::new(file_path).extension()
@@ -1138,13 +1138,14 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String>
     }
 }
 
-fn chrono_now_str() -> String {
-    let now = std::time::SystemTime::now();
-    let dur = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let secs = dur.as_secs();
-    // 简单格式：yyyyMMdd_HHmmss（本地时间近似）
-    let hours = (secs % 86400) / 3600 + 8; // UTC+8
-    format!("19700101_{:02}{:02}{:02}", hours % 24, (secs % 3600) / 60, secs % 60)
+/// 备份文件名的时间戳（v4 R5-M08 改真源）。
+///
+/// 旧实现日期段恒 `19700101`（从不写真实日期）且 `+8` 硬编码——备份名只随「时分秒」
+/// 变化：**不同天同一秒**的两次备份同名，`rename` 直接静默覆盖前一份。
+/// 改走仓库时间真源 `now_ms()`（毫秒时间戳，定宽 13 位）：唯一性大升、不再手搓时区。
+/// 名字不被任何解析链消费（台账存全路径），只影响人眼可读性。
+fn backup_stamp() -> String {
+    crate::engine::now_ms().to_string()
 }
 
 fn base64_encode(data: &[u8]) -> String {

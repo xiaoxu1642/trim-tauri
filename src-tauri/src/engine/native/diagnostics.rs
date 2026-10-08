@@ -4,7 +4,6 @@
 //! 概览页与设备信息页，动之前对照 src/scripts/overview.js 与 deviceinfo.js。
 
 
-use crate::engine::systembin::system_tool;
 use serde_json::{Value, json};
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW};
@@ -209,28 +208,27 @@ pub fn overview_checkup() -> Result<Value, String> {
     // 2. 内存通道（WMI，返回 unknown 触发回退）
     checks.push(check_item("memory_channels", "内存通道", "unknown", "无法读取", "SMBIOS 未返回内存条信息", "未验证"));
 
-    // 3. 电源计划（powercfg /getactivescheme）
-    if let Ok(out) = crate::engine::systembin::quiet_cmd(system_tool("powercfg")).args(["/getactivescheme"]).output() {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if let Some(start) = stdout.find('(') {
-            if let Some(end) = stdout[start..].find(')') {
-                let plan = &stdout[start+1..start+end];
-                let plan_lower = plan.to_lowercase();
-                if plan_lower.contains("节能") || plan_lower.contains("power saver") {
-                    checks.push(check_item("power_plan", "电源计划", "warn", plan, "节能计划会限制性能释放，建议切换平衡或高性能", "本机实测"));
-                } else if plan_lower.contains("高性能") || plan_lower.contains("卓越") || plan_lower.contains("high") || plan_lower.contains("ultimate") {
-                    checks.push(check_item("power_plan", "电源计划", "ok", plan, "高性能计划已启用", "本机实测"));
-                } else {
-                    checks.push(check_item("power_plan", "电源计划", "ok", plan, "平衡计划（系统默认）；追求极限响应可切换高性能", "本机实测"));
-                }
-            } else {
-                checks.push(check_item("power_plan", "电源计划", "unknown", "无法读取", "powercfg 无有效输出", "未验证"));
-            }
+    // 3. 电源计划（v4 R5-M09：删 powercfg 文本判据，改调 syspanel 的 Power API 实现）
+    //
+    // 旧实现拉 `powercfg /getactivescheme` 再 `from_utf8_lossy` 解析括号里的方案名 ——
+    // 中文系统该输出不是 UTF-8：lossy 后整段乱码，「节能」判不出（告警永不触发）、
+    // 「高性能」也判不出，任何方案都掉进 else 报「平衡（系统默认）」，还标称「本机实测」。
+    // syspanel 侧已**书面废弃**这条姿势（改走 powrprof.dll 的 Power API、UTF-16 直出），
+    // 体检项直接复用同一实现 —— 口径唯一，也不再引入 systembin 目录之外的进程调用。
+    {
+        let st = super::power_plan_state();
+        let name = st.get("activeName").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let name_lower = name.to_lowercase();
+        let cjk_hit = |needles: &[&str]| needles.iter().any(|n| name_lower.contains(n));
+        if name.trim().is_empty() {
+            checks.push(check_item("power_plan", "电源计划", "unknown", "无法读取", "Power API 未返回活动方案名", "未验证"));
+        } else if cjk_hit(&["节能", "power saver"]) {
+            checks.push(check_item("power_plan", "电源计划", "warn", &name, "节能计划会限制性能释放，建议切换平衡或高性能", "本机实测"));
+        } else if cjk_hit(&["高性能", "卓越", "high", "ultimate"]) {
+            checks.push(check_item("power_plan", "电源计划", "ok", &name, "高性能计划已启用", "本机实测"));
         } else {
-            checks.push(check_item("power_plan", "电源计划", "unknown", "无法读取", "powercfg 无有效输出", "未验证"));
+            checks.push(check_item("power_plan", "电源计划", "ok", &name, "平衡计划（系统默认）；追求极限响应可切换高性能", "本机实测"));
         }
-    } else {
-        checks.push(check_item("power_plan", "电源计划", "unknown", "无法读取", "powercfg 无有效输出", "未验证"));
     }
 
     // 4. 开机自启数量（注册表 Run/RunOnce + 启动文件夹）
