@@ -30,7 +30,7 @@
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
-use crate::engine::{civil_from_days, guard, log, paths};
+use crate::engine::{civil_from_days, guard, paths};
 use crate::security::{self, SECRET_MASK};
 
 // ==================== 常量（与 main.js 逐条同值） ====================
@@ -596,22 +596,23 @@ pub(crate) fn load_settings() -> Value {
     security::decrypt_settings_with_oscrypt(&v)
 }
 
-/// `saveAiSettings`：密钥加密后原子落盘（失败仅记日志，返回 false 与 Electron 同回执）
-pub(crate) fn save_settings(settings: &Value) -> bool {
-    match security::encrypt_settings_with_oscrypt(settings) {
-        Ok(encrypted) => match security::atomic_write_json(&settings_file(), &encrypted) {
-            Ok(()) => true,
-            Err(e) => {
-                log::write_log("error", &format!("保存设置失败: {e}"));
-                false
-            }
-        },
-        Err(e) => {
-            // 与 Electron「safeStorage 不可用即拒绝明文保存」同语义（返回 false → 渲染层提示写入失败）
-            log::write_log("error", &format!("保存设置失败: {e}"));
-            false
-        }
-    }
+/// **settings.json 的读-改-写唯一入口**（v4 组 1 / R1-M02）：在 `security::update_json`
+/// 之上叠加明文/密文转换（盘上是 `dpapi:v1:` 密文，闭包收到明文、写回自动加密）。
+///
+/// 为什么必须收口：旧链 `load_settings() → 改克隆 → save_settings(&next)` 在「读失败」时
+/// 拿到 `{}`，随后把基于空对象的合并结果**整表覆写**回磁盘 —— settings.json 含 dpapi
+/// 密文密钥，覆写即永久丢失，而回执仍可能是 success:true。`update_json` 保证读失败
+/// （Corrupt，含解析失败已隔离）时**拒绝写入**并返回 Err，由调用方如实回执。
+pub(crate) fn update_settings<F>(f: F) -> Result<Value, String>
+where
+    F: FnOnce(&mut Value) -> Result<(), String>,
+{
+    security::update_json(&settings_file(), |disk| {
+        let mut plain = security::decrypt_settings_with_oscrypt(disk);
+        f(&mut plain)?;
+        *disk = security::encrypt_settings_with_oscrypt(&plain)?;
+        Ok(())
+    })
 }
 
 /// 旧版平铺字段：秘塔地址

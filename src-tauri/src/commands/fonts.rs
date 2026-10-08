@@ -311,14 +311,16 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
         "copyPath": copy_str,
         "importedAt": settings::iso_utc_now(),
     });
-    let mut next = s.clone();
-    if let Some(map) = next.as_object_mut() {
+    // v4 组 1（R1-M02）：读-改-写收口 —— 损坏/读失败时拒绝写入，绝不拿空对象整表
+    // 覆写含 dpapi 密文密钥的 settings.json（旧链读空即覆盖，回执还是成功）。
+    if let Err(msg) = settings::update_settings(|next| {
+        let Some(map) = next.as_object_mut() else {
+            return Err("设置结构异常".into());
+        };
         map.insert("fontImported".into(), record);
-    }
-    if !settings::save_settings(&next) {
-        // 设置目录不可写时必须如实回失败：此前丢回执 + 无条件 success:true，
-        // 用户看到「导入成功」，重启后字体记录全部还原（假成功一族）。
-        log::write_log("error", "字体导入：设置保存失败，已回 success:false");
+        Ok(())
+    }) {
+        log::write_log("error", &format!("字体导入：设置保存失败（已拒绝写入）: {msg}"));
         return Ok(json!({ "success": false, "message": "字体已复制，但设置写入失败，重启后会丢失该记录" }));
     }
     log::write_log("info", &format!("导入字体: {family}（副本已复制到 {copy_str}）"));
@@ -400,8 +402,11 @@ pub fn fonts_remove_imported<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
     let Some(prev) = s.get("fontImported").filter(|v| v.is_object()).cloned() else {
         return Ok(json!({ "success": true, "data": { "removed": false } }));
     };
-    let mut next = s.clone();
-    if let Some(map) = next.as_object_mut() {
+    // v4 组 1：读-改-写收口（同上）
+    let settings_saved = settings::update_settings(|next| {
+        let Some(map) = next.as_object_mut() else {
+            return Err("设置结构异常".into());
+        };
         map.remove("fontImported");
         // 若当前选中字体正是被删除的导入字体，回退默认 MiSans
         let current_family = map
@@ -417,8 +422,9 @@ pub fn fonts_remove_imported<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
             }
             map.insert("font".into(), font);
         }
-    }
-    let settings_saved = settings::save_settings(&next);
+        Ok(())
+    })
+    .is_ok();
     let mut file_deleted = true;
     if let Some(copy_path) = truthy_string(prev.get("copyPath")) {
         if !copy_path.is_empty() {
@@ -475,12 +481,16 @@ pub fn fonts_save_config<R: tauri::Runtime>(window: WebviewWindow<R>, config: Op
         "weight": if weight.fract() == 0.0 { json!(weight as i64) } else { json!(weight) },
         "size": if size.fract() == 0.0 { json!(size as i64) } else { json!(size) },
     });
-    let mut next = s.clone();
-    if let Some(map) = next.as_object_mut() {
-        map.insert("font".into(), font.clone());
-    }
-    if !settings::save_settings(&next) {
-        log::write_log("error", "保存字体配置：设置写入失败，已回 success:false");
+    // v4 组 1：读-改-写收口（同上）
+    let font_for_save = font.clone();
+    if let Err(msg) = settings::update_settings(|next| {
+        let Some(map) = next.as_object_mut() else {
+            return Err("设置结构异常".into());
+        };
+        map.insert("font".into(), font_for_save);
+        Ok(())
+    }) {
+        log::write_log("error", &format!("保存字体配置：设置写入失败（已拒绝写入）: {msg}"));
         return Ok(json!({ "success": false, "message": "设置写入失败，字体配置未生效" }));
     }
     Ok(json!({ "success": true, "data": font }))

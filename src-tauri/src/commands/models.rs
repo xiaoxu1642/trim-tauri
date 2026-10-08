@@ -96,7 +96,6 @@ pub async fn models_save<R: tauri::Runtime>(
         }));
     }
     let timeout = clamp_timeout(cfg.get("timeout"), 30);
-    let current = settings::load_settings();
     let mut models = models_config();
     // 百度千帆走专用 web_summary 接口（不归一化）；其余统一归一为 OpenAI 兼容 chat/completions
     let api_url = if key == "baidu_pro" {
@@ -167,8 +166,13 @@ pub async fn models_save<R: tauri::Runtime>(
                 item.remove("verifiedAt");
             }
         }
-        let next = build_next(&current, &models, scope.as_deref().unwrap_or(""), &key);
-        let saved = settings::save_settings(&next);
+        // v4 组 1：读-改-写收口 —— update_settings 内部的「最新盘上值」替代旧 current 克隆
+        let saved = settings::update_settings(|next| {
+            let built = build_next(next, &models, scope.as_deref().unwrap_or(""), &key);
+            *next = built;
+            Ok(())
+        })
+        .is_ok();
         log::write_log(
             "info",
             &format!(
@@ -209,8 +213,13 @@ pub async fn models_save<R: tauri::Runtime>(
             }
         }
     }
-    let next = build_next(&current, &models, scope.as_deref().unwrap_or(""), &key);
-    let saved = settings::save_settings(&next);
+    // v4 组 1：读-改-写收口（同上）
+    let saved = settings::update_settings(|next| {
+        let built = build_next(next, &models, scope.as_deref().unwrap_or(""), &key);
+        *next = built;
+        Ok(())
+    })
+    .is_ok();
     let entry = models.get(&key).cloned().unwrap_or_else(|| json!({}));
     log::write_log(
         "info",
@@ -251,16 +260,19 @@ pub fn models_set_scope<R: tauri::Runtime>(
     if !js_truthy(selected.get("enabled")) || !js_truthy(selected.get("verified")) {
         return Ok(json!({ "success": false, "message": "只能选择已验证且已启用的模型" }));
     }
-    let current = settings::load_settings();
     let mut scopes = scope_engines();
     if let Some(map) = scopes.as_object_mut() {
         map.insert(GLOBAL_ENGINE_KEY.into(), json!(key));
     }
-    let mut next = current.clone();
-    if let Some(map) = next.as_object_mut() {
+    // v4 组 1：读-改-写收口（同上）
+    let ok = settings::update_settings(|next| {
+        let Some(map) = next.as_object_mut() else {
+            return Err("设置结构异常".into());
+        };
         map.insert("aiScopes".into(), scopes);
-    }
-    let ok = settings::save_settings(&next);
+        Ok(())
+    })
+    .is_ok();
     log::write_log(
         "info",
         &format!(

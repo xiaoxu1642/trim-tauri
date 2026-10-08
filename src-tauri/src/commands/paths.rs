@@ -265,7 +265,13 @@ fn scan_install_paths() -> serde_json::Value {
     if let Some(dmap) = data.as_object_mut() {
         dmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at));
     }
-    save_paths_config(&persisted);
+    // v4 组 1（R1-M04）：写失败不得被吞 —— 旧实现丢返回值、无条件 success:true，
+    // 于是「扫描完成」的落盘记录（scannedAt + 路径配置合并）写失败后用户完全不知情，
+    // 重启后页脚又显「尚未扫描」、路径配置可能回退。
+    if !save_paths_config(&persisted) {
+        log::write_log("error", "路径扫描：扫描记录落盘失败，已如实回失败");
+        return serde_json::json!({ "success": false, "message": "扫描记录写入失败，本次结果未保存，请检查数据目录可写性" });
+    }
     log::write_log("info", "路径扫描完成");
     serde_json::json!({ "success": true, "data": data })
 }
