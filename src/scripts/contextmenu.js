@@ -655,9 +655,11 @@
           // CM-9：真实 hive 路径同步更新，后续启停都以它为准
           if (r.newNativeRegPath) p.item.nativeRegPath = r.newNativeRegPath;
           p.item.enabled = p.enabled;
-          // 净变化入/出待生效集合（2026-10-09 用户实测：动作计数来回点会虚涨）；
-          // 回到基线状态的项自动移除，基线只有在「重启生效 / 稍后」时才重置。
-          const itemKey = getItemKey(p.item);
+          // 净变化入/出待生效集合（2026-10-09 用户实测：动作计数来回点会虚涨；
+          // 同日再修：键必须用 stableItemKey —— 启停会重命名叶名，getItemKey 在
+          // 禁/启两侧算出两个键，集合清不掉）。回到基线状态的项自动移除，
+          // 基线只有在「重启生效 / 稍后」时才重置。
+          const itemKey = stableItemKey(p.item);
           let base = origEnabledByKey.get(itemKey);
           if (base === undefined) {
             // 基线缺失（未扫描过 / 用户点过「稍后」重置）：按本次切换**前**的状态立基线，
@@ -820,9 +822,25 @@
   const pendingKeys = new Set();
   const origEnabledByKey = new Map();
 
+  /** 待生效集合的**稳定键**（2026-10-09 真机修复）：`getItemKey` 含 regPath，而两类
+   * 启停走的都是**重命名**——shellex 叶名加 '-' 前缀、winx 叶名加/去 '.disabled' 后缀。
+   * 同一条目在禁/启两侧会算出两个不同的键，净变化集合永远清不掉（用户实测：关一项
+   * 计数 1 正常，再打开不归零、「本轮没有任何改动」提示不出现）。
+   * 键 = getItemKey 的字段组成，但**叶名归一**（剥 '-' 前缀 / 剥 .disabled 后缀）；
+   * DOM 路由仍用 getItemKey（每轮渲染两侧同源，不需要跨态稳定）。 */
+  function stableItemKey(item) {
+    const raw = item.regPath || item.location || '';
+    const idx = raw.lastIndexOf('\\');
+    const head = idx >= 0 ? raw.slice(0, idx + 1) : '';
+    let leaf = idx >= 0 ? raw.slice(idx + 1) : raw;
+    if (leaf.startsWith('-')) leaf = leaf.slice(1);
+    if (/\.disabled$/i.test(leaf)) leaf = leaf.slice(0, -9);
+    return [item.category || '', head + leaf, item.name || '', item.clsid || ''].join('|');
+  }
+
   /** 记录基线：只记首见（重扫/重建都不覆盖），基线只在「重启生效 / 用户点稍后」时重置。 */
   function noteBaseline(item) {
-    const key = getItemKey(item);
+    const key = stableItemKey(item);
     if (!origEnabledByKey.has(key)) origEnabledByKey.set(key, item.enabled);
   }
 
