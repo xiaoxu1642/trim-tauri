@@ -29,6 +29,7 @@ const REGISTRY = [
   { file: 'check-subwindow-init.mjs', reason: '副窗初始化：每页两条正向对照（注入指向不存在元素的绑定 + 抽掉一个真实 id），对照失效即红' },
   { file: 'check-a11y.mjs', reason: '可达性四断言：勾选框三属性 / aria-live 宿主 / data-tip 反 title / RM 归零覆盖面各配正反样本自检 + 三类扫描面地板' },
   { file: 'check-contrast.mjs', reason: 'F 组玻璃面 floor 断言配正反向样本自检（P3-2）；A1/B/C 与 token 表等既有组仍缺合成样本' },
+  { file: 'check-idle-scripts.mjs', reason: 'loadScript 三态断言配「违例 3 条全命中 / 合规放行」样本自检（P3-4）；守卫与启动名单两组仍靠扫描面地板兜底' },
   { file: 'check-comment-rot.mjs', reason: '注释腐烂：三条断言各配正反向对照（不存在路径/章节号/数字必判红 + 真实样本不假红）；另经真破坏验证——关掉待修豁免表后 8 处真实腐烂全被抓到，exit 1' },
 ];
 
@@ -51,7 +52,6 @@ const PENDING_CONTROLS = [
   { name: 'check-css-tokens', reason: '找违规型：未定义 token 引用 / 圆角离档即红，缺违规样本自检' },
   { name: 'check-assets-used', reason: '找违规型：src/assets 零引用文件即红，缺违规样本自检' },
   { name: 'check-asset-size', reason: '棘轮型：资源体积超基线即红，缺「人为塞大文件必须红」样本' },
-  { name: 'check-idle-scripts', reason: '找违规型：缺 readyState 守卫 / 提前 init 即红，缺违规样本自检（已有空集地板）' },
   { name: 'check-confirm-danger', reason: '找违规型：确认入口首参对象字面量即红，缺违规样本自检（已有目录塌陷地板）' },
   { name: 'check-treemap-layout', reason: '性质型：squarified 布局数学性质（面积和/包含关系），缺「人为破坏性质必须红」样本' },
   { name: 'check-item-intro', reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径，缺合成样本' },

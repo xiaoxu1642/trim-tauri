@@ -81,7 +81,16 @@
   });
 
   function startObserver() {
-    observer.observe(document.body, { childList: true, attributes: true, attributeFilter: ['style'] });
+    // P3-4（F3-M02）：必须开 subtree —— 无 subtree 时 attributes 只观察 body 自身，
+    // 静态弹窗（如 #usageBackdrop，body 的直接子元素）display 切换属**子元素**的属性
+    // 变更，观察不到 ⇒ 「使用说明」弹窗的开合从来不进日志；subtree 下全树的
+    // style 变更都会过一遍 syncNode（非 backdrop 节点即时跳过，开销可忽略）。
+    observer.observe(document.body, {
+      childList: true,
+      attributes: true,
+      attributeFilter: ['style'],
+      subtree: true,
+    });
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', startObserver);
@@ -224,7 +233,13 @@
     Array.from(document.body.children).forEach(node => {
       if (isModalNode(node) && node.style.display !== 'none') {
         node.style.display = 'none';
-        if (visible.has(node)) visible.delete(node);
+        // P3-4（F3-M02）：必须**显式上报** —— 旧实现只把节点移出 visible，
+        // 观察器回调随后看到「已隐藏且不在 visible」，close 日志被这条提前的簿记吞掉
+        // （批量关窗从此不进日志，「弹窗为什么全关了」无从追溯）。
+        if (visible.has(node)) {
+          visible.delete(node);
+          report('close', infoOf(node));
+        }
       }
     });
   }

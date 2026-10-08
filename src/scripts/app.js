@@ -202,18 +202,23 @@
   // 重试正好把「重复绑定」从 N+1 变成 N+2 —— 幂等责任留给模块自己的守卫。
   const _initedModules = new Set();
 
+  // P3-4（F3-M01）：三态返回 —— true=已加载（或本次加载成功）/ false=本次注入失败。
+  // 失败**不记账**（不进 _scriptLoaded）：下次进页会重新注入重试；旧实现失败也 resolve()，
+  // 上游无条件 initModuleOf 会把模块名写进 _initedModules —— 空 init 占台账，
+  // 此后即使补载成功也永不再初始化（页面按钮/订阅全无响应）。
   function loadScript(src) {
-    if (_scriptLoaded.has(src)) return Promise.resolve();
+    if (_scriptLoaded.has(src)) return Promise.resolve(true);
     if (_scriptLoading.has(src)) return _scriptLoading.get(src); // 快速连点去重：同一 src 只注入一次
     const p = new Promise((resolve) => {
       const s = document.createElement('script');
       s.src = src;
-      s.onload = () => { _scriptLoaded.add(src); _scriptLoading.delete(src); resolve(); };
-      // 注入失败不能让 switchPage 永久挂起：标记失败并放行，页面自身会优雅降级
+      s.onload = () => { _scriptLoaded.add(src); _scriptLoading.delete(src); resolve(true); };
+      // 注入失败不能让 switchPage 永久挂起：标记失败并放行（不占 loaded，可重试），
+      // 页面自身会优雅降级
       s.onerror = () => {
         _scriptLoading.delete(src);
-        console.warn('[Trim] 脚本加载失败: ' + src);
-        resolve();
+        console.warn('[Trim] 脚本加载失败（不记账，下次进页重试）: ' + src);
+        resolve(false);
       };
       document.body.appendChild(s);
     });
@@ -225,8 +230,10 @@
     const list = PAGE_SCRIPTS[page];
     if (!list || !list.length) return;
     for (const src of list) {
-      await loadScript(src); // 顺序加载，保证依赖序
-      initModuleOf(src);
+      const ok = await loadScript(src); // 顺序加载，保证依赖序
+      // P3-4（F3-M01）：只有加载成功才 init —— 失败时 window.X 尚不存在，
+      // 空 init 占了台账后补载成功也不再初始化（见 loadScript 头注）
+      if (ok) initModuleOf(src);
     }
   }
 
@@ -250,7 +257,11 @@
   // pathbinding 放这里是因为 cleanup.js 的 QQ/微信文件清理要读它的路径配置。
   function scheduleIdleLoads() {
     const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1000));
-    idle(() => { IDLE_SCRIPTS.forEach((src) => loadScript(src).then(() => initModuleOf(src)).catch((e) => {
+    idle(() => { IDLE_SCRIPTS.forEach((src) => loadScript(src).then((ok) => {
+      // P3-4（F3-M01）：失败不 init（空 init 会占 _initedModules 台账，此后补载成功也不再初始化）
+      if (ok) initModuleOf(src);
+      else window.app?.log?.('warn', '空闲脚本加载失败（未占 init 台账，下次进页重试） ' + src);
+    }).catch((e) => {
       // NEW-4（L3 2026-10-01）：空闲预取脚本加载失败必须留痕——模块不 init 且无声 = 「功能消失」无从排查
       window.app?.log?.('warn', '空闲脚本加载失败 ' + src + ': ' + ((e && e.message) || e));
     })); });

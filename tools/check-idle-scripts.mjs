@@ -122,6 +122,49 @@ check(
     : startupInits.join(', '),
 );
 
+// ---- 断言 3（P3-4 / F3-M01，2026-10-09）：loadScript 失败必须三态、不得占 init 台账 ----
+// 为什么判红：loadScript 失败旧实现也 resolve()，ensurePageScripts / scheduleIdleLoads
+// 无条件 initModuleOf ⇒ 空 init 把模块名写进 _initedModules，此后即使补载成功
+// 也永不再初始化（断网进页 = 该页按钮全无响应且无从自愈）。判据三条：
+//   ① onerror 分支不得把 src 计入 _scriptLoaded（失败可重试）；
+//   ② ensurePageScripts 必须按加载结果守护 init（`if (ok) initModuleOf(src)`）；
+//   ③ scheduleIdleLoads 的 .then 必须判 ok 后再 init。
+function loadScriptViolations(jsText) {
+  const out = [];
+  const onerr = jsText.match(/s\.onerror\s*=\s*\(\)\s*=>\s*\{([\s\S]*?)\};/);
+  if (!onerr) out.push('loadScript 的 onerror 分支没找到（形状变了？同步本门禁）');
+  else if (/_scriptLoaded/.test(onerr[1])) out.push('onerror 分支把 src 计入 _scriptLoaded（失败被记账 = 不可重试）');
+  const eps = jsText.match(/async function ensurePageScripts\(page\)\s*\{([\s\S]*?)\n  \}/);
+  if (!eps) out.push('ensurePageScripts 没找到（形状变了？同步本门禁）');
+  else if (!/if\s*\(ok\)\s*initModuleOf\(src\)/.test(eps[1])) {
+    out.push('ensurePageScripts 未按加载结果守护 init（失败也会占 _initedModules 台账）');
+  }
+  const idle = jsText.match(/function scheduleIdleLoads\(\)\s*\{([\s\S]*?)\n  \}/);
+  if (!idle) out.push('scheduleIdleLoads 没找到（形状变了？同步本门禁）');
+  else if (!/then\(\(ok\)\s*=>/.test(idle[1])) out.push('scheduleIdleLoads 的 .then 未判加载结果');
+  return out;
+}
+{
+  const POSITIVE_CONTROLS = {
+    bad: "s.onerror = () => { _scriptLoading.delete(src); _scriptLoaded.add(src); resolve(); };\n" +
+      "async function ensurePageScripts(page) {\n    await loadScript(src);\n    initModuleOf(src);\n  }\n" +
+      "function scheduleIdleLoads() {\n    loadScript(src).then(() => initModuleOf(src));\n  }\n",
+    good: "s.onerror = () => { _scriptLoading.delete(src); resolve(false); };\n" +
+      "async function ensurePageScripts(page) {\n    const ok = await loadScript(src);\n    if (ok) initModuleOf(src);\n  }\n" +
+      "function scheduleIdleLoads() {\n    loadScript(src).then((ok) => { if (ok) initModuleOf(src); });\n  }\n",
+  };
+  check(
+    loadScriptViolations(POSITIVE_CONTROLS.bad).length === 3 && loadScriptViolations(POSITIVE_CONTROLS.good).length === 0,
+    'loadScript 三态判定器自检（违例 3 条全命中 / 合规样本放行）',
+  );
+  const real = loadScriptViolations(appJs);
+  check(
+    real.length === 0,
+    'loadScript 失败不占 init 台账（三态 + 两处 init 守卫）',
+    real.join('；'),
+  );
+}
+
 console.log('');
 if (fail > 0) {
   console.error('门禁失败：有断言未通过');
