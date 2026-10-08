@@ -4217,14 +4217,6 @@ input[type="radio"]:focus-visible {
   100% { background-position: -200% 0; }
 }
 
-.ctx-detail-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 14px 20px;
-  border-top: 1px solid var(--border-default);
-}
-
 /* ================================================================
    图片预览删除按钮（垃圾桶）
    ================================================================ */
@@ -6492,6 +6484,9 @@ body.pv-window {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* 两态等高（2026-10-09 用户实测）：有改动态=padding 20 + 边框 2 + 按钮 32 = 54；
+     归零态按钮收起后靠这条 min-height 撑住，避免横幅上下高度变化挤动下方列表 */
+  min-height: 54px;
   margin: 0 0 12px;
   padding: 10px 14px;
   background: var(--warning-soft, rgba(176, 129, 0, 0.10));
@@ -6502,6 +6497,9 @@ body.pv-window {
   color: var(--fg-primary);
 }
 .ctx-apply-bar[hidden] { display: none; }
+/* `.btn` 基类声明了 display:inline-flex（作者样式恒胜 UA 的 [hidden]{display:none}），
+   不给这条规则就藏不掉归零态的「重启资源管理器」按钮（2026-10-09 用户实测生效条改版） */
+.ctx-apply-bar .btn[hidden] { display: none; }
 .ctx-apply-bar > svg { flex: 0 0 auto; color: var(--warning); }
 .ctx-apply-text { flex: 1 1 auto; min-width: 0; }
 .ctx-apply-bar .btn { flex: 0 0 auto; padding: 6px 12px; font-size: 12px; }
@@ -6868,30 +6866,6 @@ img.ctx-col-icon {
 .ctx-kanban-row:hover .ctx-row-detail {
   color: var(--fg-secondary);
   background: var(--bg-hover);
-}
-
-/* 右键详情弹窗：备份并删除（默认视图移除的删除功能保留在详情内） */
-.ctx-detail-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding: 12px 4px 0;
-}
-.ctx-detail-delete {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 14px;
-  font-size: 12px;
-  border-radius: var(--radius-small);
-  border: 1px solid var(--danger);
-  color: var(--danger);
-  background: transparent;
-  cursor: pointer;
-  transition: background-color 0.3s ease, color 0.3s ease;
-}
-.ctx-detail-delete:hover {
-  background: var(--danger);
-  color: var(--danger-text); /* 审查 E3-1 同族：danger 实底上的白字在暗色仅 3.49:1 不达 AA */
 }
 
 /* ================================================================

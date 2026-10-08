@@ -1074,20 +1074,22 @@ fn memory_clean_results_shape_carries_elapsed() {
 
 /// `elapsedMs` 的**类型**契约对着渲染层消费口径断。
 ///
-/// 前端三处都按 `Array.isArray(results)` + 每项取字段渲染，其中 memoryclean.js
-/// 用 `filter(x => x.ok)`、contextmenu/startup 用 `r.status === 'error'`。
+/// 前端按 `Array.isArray(results)` + 每项取字段渲染，其中 memoryclean.js
+/// 用 `filter(x => x.ok)`、startup 用 `r.status === 'error'`。
 /// `elapsedMs` 缺失不会让它们崩（都在已有 `|| []` 兜底之内），但**渲染层绝不许
 /// 假设它存在** —— 这条断言从数据侧反证：字段是每项必有，不是「有时才有」。
+///
+/// 2026-10-09（D3）：contextmenu 域随右键删除链整链退役（载体 remove + 嵌套 push_result
+/// 已删），本断言的登记面同步收缩到 startup / perf 两个域。
 #[test]
 fn elapsed_ms_是每项必有的非负整数() {
-    // 静态口径：三个产出域的源码里，写入 results 的那一处必须带 elapsedMs。
+    // 静态口径：产出域的源码里，写入 results 的那一处必须带 elapsedMs。
     // needle 要**精确到该域的那一处**，不能只查字段名 —— perf.rs 的 diskbench
     // 早就有一个 `elapsedMs`（`perf.rs:369`），只查字段名的话这条断言在
     // mem-clean 那处被删掉之后依然会绿（假绿）。
     let files = [
         // mem-clean 的 results.push（`status:{},\"elapsedMs\":{elapsed_ms}` 形态）
         ("native-scanner/src/perf.rs", r#""status\":{},\"elapsedMs\":{elapsed_ms}"#),
-        ("src-tauri/src/commands/contextmenu.rs", r#"o.insert("elapsedMs".into(), json!(elapsed_ms));"#),
         ("src-tauri/src/commands/startup.rs", r#""elapsedMs".into(),"#),
     ];
     for (rel, needle) in files {
@@ -1279,4 +1281,32 @@ fn finder_ignore名单_档位与负例() {
     // ④ 读侧（只读，零副作用）：主窗越过档位
     let res = invoke(&w, "finder_ignore_list", json!({}));
     common::assert_guard_passed(&res.to_string(), "主窗调 finder_ignore_list", &["success"]);
+}
+
+// ==================== v4-K04：quickcmds_run 升 MAIN 档 ====================
+
+/// quickcmds_run 挂 `guard::MAIN`（白名单含等效提权出口 `sys-cmd-admin`：
+/// `Start-Process cmd -Verb RunAs`，子窗失陷即可弹 UAC 交出管理员 CMD）。
+/// 子窗一律拒杀（rejected 全等防清单塌缩）；主窗越过档位后停在白名单查询
+/// （未知 id 早退，零副作用）。
+#[test]
+fn quickcmds_run_is_main_only() {
+    let mut rejected: Vec<&str> = Vec::new();
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "quickcmds_run", json!({ "id": "__trim_smoke_unknown__" }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调快捷指令必须被来源校验拒杀（v4-K04 升 MAIN），回执 {text}"
+        );
+        rejected.push(label);
+    }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    let w = main_window();
+    let res = invoke(&w, "quickcmds_run", json!({ "id": "__trim_smoke_unknown__" }));
+    assert_eq!(res["success"], json!(false), "主窗越过档位后未知 id 必须被白名单拒: {res}");
+    assert!(
+        common::message_of(&res).contains("未知指令"),
+        "主窗应越过档位进入白名单查询（正向特征），回执 {res}"
+    );
 }

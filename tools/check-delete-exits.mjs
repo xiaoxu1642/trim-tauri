@@ -54,7 +54,8 @@ const DELETE_MARKERS = [
   'reg_key_remove',       // native::RegDeleteTree 封装
   'reg_restore_delete',   // native::reg_value 恢复语义的删值
   'startup_delete',       // native::启动项删除
-  'cm_remove',            // native::右键菜单移除
+  // 2026-10-09（D3）：cm_remove 随右键删除链整链退役，marker 摘除（再新增同名删除函数
+  // 会被 check-delete-callsites 的基线棘轮接住）。
 ];
 
 // ---- 豁免注册制：命中删除标记但**不该**走 is_path_protected 的出口，逐条带理由 ----
@@ -105,7 +106,8 @@ const MUST_PROTECT = [
   'optimizer_run',
   'uninstall_residue_execute',
   'uninstall_pending_add',
-  'contextmenu_remove',
+  // 2026-10-09（D3）：contextmenu_remove 随右键删除链整链退役，从正向清单摘除
+  // （cm_remove 与其 RegDeleteTreeW/回收站出口一并删除；toggle 不删文件）。
 ];
 
 // 二跳出口的正向棘轮（审查 L-4）：protect 不在命令体内、而在本仓 helper 里。

@@ -195,7 +195,9 @@
     const btn = document.getElementById('btnSyspanelPfApply');
     if (btn) { btn.disabled = true; btn.textContent = '写入中…'; }
     try {
-      const resp = await window.api.syspanel.pagefileApply(!!managed, entries);
+      // v4-K05：高危凭据由本调用点在红档确认**之后**显式传入（桥接层不再硬编码），
+      // 后端 syspanel.rs 以 confirmedHighRisk 为闸 —— 证明确认在调用点真的发生过。
+      const resp = await window.api.syspanel.pagefileApply(!!managed, entries, true);
       if (resp && resp.success) {
         const data = resp.data || {};
         window.app?.toast?.('info', '虚拟内存配置已写入并回读校验通过；**需要重启生效**');

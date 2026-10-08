@@ -19,8 +19,31 @@
 
   // 与主窗同一个键：同一 origin 的 localStorage 是共享的，偏好不该有两份真源
   const BACKUP_PREF_KEY = 'trim.residue.backupPack';
-  function readBackupPref() { try { return localStorage.getItem(BACKUP_PREF_KEY) === '1'; } catch (e) { return false; } }
-  function writeBackupPref(on) { try { localStorage.setItem(BACKUP_PREF_KEY, on ? '1' : '0'); } catch (e) { /* 写不进去就用当前值，不拦删除 */ } }
+  // D2（v4 审查）：读失败/坏值一律走「未开启」方向并留痕（控制台 + 应用日志，log_write
+  // 五窗可调）。误拨到「开」的代价只是删除前多一次打包，方向本身安全；留痕是为了能解释
+  // 「开关为什么回到关」——静默降级正是这条被记下来的原因。
+  function readBackupPref() {
+    let raw = null;
+    try { raw = localStorage.getItem(BACKUP_PREF_KEY); }
+    catch (e) {
+      console.warn('[Trim] 备份开关偏好读取失败，已按未开启处理:', e);
+      try { window.api?.log?.write?.('warn', '残留副窗：备份开关偏好读取失败，已按未开启处理'); } catch (_) { /* 日志通道不可用则降级到控制台 */ }
+      return false;
+    }
+    if (raw === '1') return true;
+    if (raw !== null && raw !== '' && raw !== '0') {
+      console.warn(`[Trim] 备份开关偏好值异常（${raw}），已按未开启处理`);
+      try { window.api?.log?.write?.('warn', '残留副窗：备份开关偏好值异常，已按未开启处理'); } catch (_) { /* 同上 */ }
+    }
+    return false;
+  }
+  function writeBackupPref(on) {
+    try { localStorage.setItem(BACKUP_PREF_KEY, on ? '1' : '0'); }
+    catch (e) {
+      console.warn('[Trim] 备份开关偏好写入失败:', e);
+      try { window.api?.log?.write?.('warn', '残留副窗：备份开关偏好写入失败，本次选择下次启动会丢失'); } catch (_) { /* 同上 */ }
+    }
+  }
 
   const CONF_LABEL = { high: '高置信', medium: '中置信', low: '低置信（建议人工核对）' };
   const KIND_LABEL = { reg_key: '注册表项', reg_value: '注册表值', folder: '目录', file: '文件', shortcut: '快捷方式' };

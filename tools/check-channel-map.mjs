@@ -103,6 +103,12 @@ const RETIRED = {
   'actions:run-script': '2026-10-07（用户裁定）：同上；pwsh 调用点门禁登记一并摘除',
   'contextmenu:win11-classic': '2026-10-07（用户裁定）：「菜单形态」开关整条退役（卡片 + 命令 + 原生实现同撤）',
   'contextmenu:blocked-list': '2026-10-07（用户裁定）：「已屏蔽的 Shell 扩展」卡片整条退役（命令 + 原生实现同撤）',
+  // 2026-10-09（用户裁定 D3）：右键菜单「删除/备份/恢复」整链退役——命令（contextmenu_backup/
+  // remove/restore）+ 原生实现（cm_backup/cm_remove/cm_restore）+ 桥接 + 前端入口 + 档位/门禁登记
+  // 一并摘除；页面只保留启停（toggle）。桌面既有「右键菜单备份_*」目录不动、无程序入口。
+  'contextmenu:backup': '2026-10-09（用户裁定 D3）：删除/备份/恢复整链退役（启停保留）',
+  'contextmenu:remove': '2026-10-09（用户裁定 D3）：同上',
+  'contextmenu:restore': '2026-10-09（用户裁定 D3）：同上',
 };
 
 /**
@@ -411,7 +417,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'cleanup_reg_backup_list',
   'cleanup_rules',
   'cleanup_scan',
-  'contextmenu_backup',
   'contextmenu_icons',
   'contextmenu_scan',
   'device_scan',
@@ -448,7 +453,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'paths_scan',
   'preview_open_window',
   'process_manager_open_window',
-  'quickcmds_run',
   'realtime_adapters',
   'realtime_loss',
   'realtime_report_clear',

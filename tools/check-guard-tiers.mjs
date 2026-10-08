@@ -22,10 +22,10 @@
 // MUST_READONLY 是**现状如实登记**，不是背书。以下条目实测确有写/删/起进程副作用，
 // 却挂在 readonly 档（放行全部五个窗口 label），逐条带「疑点」注释：
 //
-//   memory_kill · quickcmds_run · app_open_external · paths_browse ·
+//   memory_kill · app_open_external · paths_browse ·
 //   startup_openlocation · models_save / models_test / models_set_scope ·
 //   fonts_import / fonts_remove_imported / fonts_save_config ·
-//   log_write / log_export · paths_save · contextmenu_backup ·
+//   log_write / log_export · paths_save ·
 //   appearance_set_material / appearance_set_material_enabled ·
 //   bench_history_add / bench_history_clear / bench_history_delete ·
 //   realtime_report_save / realtime_report_clear / realtime_report_delete ·
@@ -96,9 +96,8 @@ const MUST_MAIN = [
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
   'cleanup_retry_failed_delete',
   'contextmenu_open_in_regedit', // v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC
-  'contextmenu_remove',
+  // 2026-10-09（D3）：contextmenu_remove / contextmenu_restore 随右键删除链整链退役
   'contextmenu_restart_explorer',
-  'contextmenu_restore',
   'contextmenu_toggle',
   'uninstall_report_get', // U-6：读批次报告，卸载域全档 MAIN 约定
   'uninstall_report_list', // U-6：同上
@@ -171,6 +170,11 @@ const MUST_MAIN = [
   'syspanel_power_plan_apply',
   'syspanel_pagefile_state',
   'syspanel_pagefile_apply',
+  // v4-K04（2026-10-09）：quickcmds_run 从 readonly 升 MAIN —— 白名单里含
+  // `sys-cmd-admin`（`Start-Process cmd -Verb RunAs`）：挂 readonly 档等于让子窗
+  // 渲染层失陷即可弹 UAC、拿到管理员 CMD，等效提权出口按 §3「不得下放」。
+  // 子窗消费面实测为 0（四份子窗 HTML 均未挂 quickcmds.js），改档零功能代价。
+  'quickcmds_run',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----
@@ -335,7 +339,6 @@ const MUST_READONLY = [
   'cleanup_reg_backup_list',
   'cleanup_rules',
   'cleanup_scan',
-  'contextmenu_backup', // 疑点：导出右键菜单备份到磁盘
   'contextmenu_icons',
   'contextmenu_scan',
   'debug_data_dirs',
@@ -389,7 +392,6 @@ const MUST_READONLY = [
   'process_manager_close_window',
   'process_manager_open_window',
   'process_manager_report',
-  'quickcmds_run', // 疑点：起 cmd 执行系统命令
   'realtime_adapters',
   'realtime_loss',
   'realtime_report_clear', // 疑点：清实时报告

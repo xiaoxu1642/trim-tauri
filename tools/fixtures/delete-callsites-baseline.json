@@ -10,7 +10,6 @@
     "src-tauri/src/engine/hash.rs": 2,
     "src-tauri/src/engine/log.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 4,
-    "src-tauri/src/engine/native/contextmenu.rs": 1,
     "src-tauri/src/engine/native/peripheral.rs": 1,
     "src-tauri/src/engine/reg_backup.rs": 2,
     "src-tauri/src/engine/restore_pack.rs": 2,
@@ -26,7 +25,6 @@
     "src-tauri/src/commands/uninstall/backup_report.rs": 3,
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 3,
     "src-tauri/src/engine/native/cleanup.rs": 28,
-    "src-tauri/src/engine/native/contextmenu.rs": 1,
     "src-tauri/src/engine/native/maintenance.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 5,
     "src-tauri/src/engine/paths.rs": 8,
@@ -42,15 +40,14 @@
   "remove_dir": {
     "src-tauri/src/engine/native/cleanup.rs": 2
   },
-  "RegDeleteTreeW": {
-    "src-tauri/src/engine/native/contextmenu.rs": 1,
-    "src-tauri/src/engine/native/registry.rs": 1
-  },
   "RegDeleteValueW": {
     "src-tauri/src/engine/native/contextmenu.rs": 5,
     "src-tauri/src/engine/native/process.rs": 1,
     "src-tauri/src/engine/native/registry.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 1
+  },
+  "RegDeleteTreeW": {
+    "src-tauri/src/engine/native/registry.rs": 1
   },
   "RegDeleteKeyW": {
     "src-tauri/src/engine/native/registry.rs": 2

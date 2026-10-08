@@ -666,13 +666,39 @@ use super::residue_update::*;
         assert!(skip_msg("reg_value", r"HKCU\Software\Acme::").unwrap_or_default().contains("为空"));
         // ⑥ 未知 kind 不静默放行
         assert!(skip_msg("whatever", r"C:\x").unwrap_or_default().contains("未知残留类型"));
-        // ⑦ 真实系统目录（整条链非 reparse、不属保护面）应进入变更清单
+        // ⑦ 系统目录（整条链非 reparse、不属 protect 面）在**执行侧**也必须拒 ——
+        // v4-K02 修复前这里是 `Ready`，意味着 System32 真能被送进回收站（还被本用例
+        // 钉成了「期望行为」）。现在与扫描侧共用 in_system_namespace 判据：Skip
+        // （系统目标是扫描面漏网、不是恶意请求，不整批 Abort）。
         let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
         let sys32 = format!("{}\\Windows\\System32", drive.trim_end_matches('\\'));
         assert!(
-            matches!(classify_residue_op("folder", &sys32), OpVerdict::Ready(_)),
-            "真实系统目录被误拦: {sys32}"
+            matches!(classify_residue_op("folder", &sys32), OpVerdict::Skip(_)),
+            "系统目录必须被拒（v4-K02）: {sys32}"
         );
+        // ⑧ 反例：合法安装位置（%ProgramFiles% 子孙）不许被系统命名空间判据误伤。
+        // 用 Windows 自带的 Common Files（几乎必然存在）；不存在时显式跳过并说明。
+        let pf = format!("{}\\Program Files\\Common Files", drive.trim_end_matches('\\'));
+        if Path::new(&pf).is_dir() {
+            assert!(
+                matches!(classify_residue_op("folder", &pf), OpVerdict::Ready(_)),
+                "合法安装位置被误拦: {pf}"
+            );
+        } else {
+            println!("跳过 Program Files 反例：{pf} 不在本机（不影响系统目录判据的判定）");
+        }
+    }
+
+    /// v4-K02 共用化：系统组件 exe 判据在反查侧与 exeParent 分支同源
+    /// （`<System32>\msiexec.exe` 的父目录不得成为候选依据）。
+    /// 系统命名空间判据本体（`protect::is_system_namespace`）的单测在 protect.rs
+    /// 归属地（K02 与 K01 两个消费方共用同一实现）。
+    #[test]
+    fn system_component_exe_is_shared_judgement() {
+        assert!(is_system_component_exe(r"C:\Windows\System32\msiexec.exe"));
+        assert!(is_system_component_exe(r"c:\windows\system32\MSIEXEC.EXE"));
+        assert!(!is_system_component_exe(r"C:\Apps\Foo\unins000.exe"));
+        assert!(!is_system_component_exe("msiexec.exe"), "裸名不进判据（由空父目录闸挡）");
     }
 
     // ==================== M2 静默知识（B1 构造闸 / B2 分档 / B4 第二证据） ====================

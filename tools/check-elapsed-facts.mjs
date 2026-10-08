@@ -7,9 +7,13 @@
 // 那就不再是 E4 了，而这类改动在 review 里极容易混过去（多一个字段而已）。
 //
 // 本门禁三条断言：
-//   A. 三个域的每条结果都带 `elapsedMs`（漏一条 = 留痕有缺口，正是 v2-M1 那个形态）
+//   A. 两个域的每条结果都带 `elapsedMs`（漏一条 = 留痕有缺口，正是 v2-M1 那个形态）
 //   B. 耗时**不参与任何判定**（反向判据，见下）
 //   C. 失败路径同样计时（只测成功路径等于把「慢的失败」藏起来）
+//
+// 2026-10-09（D3）：contextmenu 域随右键菜单删除链整链退役（载体 remove + 嵌套 push_result
+// 已删）——本门禁如实在两个域（startup / perf）上继续生效；将来谁的 results 加回耗时字段，
+// 按本文件同口径把它登记进 DOMAINS。
 //
 // B 与 C 都是反向判据，也是本门禁最容易做坏的地方。已实测踩过两个坑：
 //   ① B 的窗口正则若只查「`.elapsed()` 附近有没有比较符」，会漏掉**最常见**的
@@ -34,7 +38,6 @@ const check = (ok, label, detail = '') => {
 };
 
 const read = (...p) => readFileSync(join(ROOT, ...p), 'utf8');
-const ctxRs = read('src-tauri', 'src', 'commands', 'contextmenu.rs');
 const startupRs = read('src-tauri', 'src', 'commands', 'startup.rs');
 const perfRs = read('native-scanner', 'src', 'perf.rs');
 
@@ -167,11 +170,6 @@ function scanFailPathTimer(src, failRe) {
 // 所以每个域登记**它自己那处**的精确形态。
 const DOMAINS = [
   {
-    label: 'contextmenu（右键菜单删除）',
-    src: ctxRs,
-    needle: 'o.insert("elapsedMs".into(), json!(elapsed_ms));',
-  },
-  {
     label: 'startup（启动项删除）',
     src: startupRs,
     needle: '"elapsedMs".into(),',
@@ -199,7 +197,7 @@ for (const d of DOMAINS) {
 // B. 耗时不得参与判定
 // ============================================================
 const judgeSites = [];
-for (const [label, src] of [['contextmenu.rs', ctxRs], ['startup.rs', startupRs], ['perf.rs', perfRs]]) {
+for (const [label, src] of [['startup.rs', startupRs], ['perf.rs', perfRs]]) {
   for (const hit of scanJudgement(src)) judgeSites.push(`${label}:${hit}`);
 }
 check(
@@ -222,8 +220,6 @@ check(
 // C. 失败路径同样计时
 // ============================================================
 const DOMAIN_FAIL = [
-  // contextmenu：push_result 的三处 `"status": "error"` 写入
-  ['contextmenu.rs', ctxRs, /"status":\s*"error"/],
   // startup：set_result_entry 的 error 写入
   ['startup.rs', startupRs, /set_result_entry\(&mut data, id, "error"/],
   // perf：mem_clean 的 items 循环（成功/失败共用一个 push 点，`ok` 由 status==0 派生）
@@ -244,7 +240,7 @@ if (fail > 0) {
   console.error(`E4 耗时字段门禁失败 ${fail} 项。`);
   process.exit(1);
 }
-console.log('✓ E4 耗时字段：三个域都带、都不参与判定、失败路径都计时');
+console.log('✓ E4 耗时字段：两个域都带、都不参与判定、失败路径都计时');
 
 // ============================================================
 // POSITIVE_CONTROLS（正向自检）

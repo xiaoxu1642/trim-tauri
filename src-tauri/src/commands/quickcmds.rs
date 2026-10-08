@@ -334,9 +334,15 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
 }
 
 /// quickcmds:run — 按 id 执行白名单快捷指令（渲染层只传 id）
+///
+/// v4-K04（2026-10-09）：档位从 `guard_readonly` 升 `guard::MAIN` —— 白名单里含
+/// `sys-cmd-admin`（`Start-Process cmd -Verb RunAs`）：挂在 readonly 档等于让四个子窗
+/// 任一渲染层失陷就能弹 UAC，用户点「是」后拿到管理员令牌的交互式 cmd，绕过 elevate 链
+/// 的全部配套（MAIN 档 / 防重入 / nonce 握手 / 日志）。子窗消费面实测为 0（四份子窗
+/// HTML 均未挂 quickcmds.js），改档零功能代价。
 #[tauri::command]
 pub fn quickcmds_run<R: tauri::Runtime>(window: WebviewWindow<R>, id: Option<String>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let id = id.unwrap_or_default();
     let Some((_, name, cmd)) = QUICKCMDS.iter().find(|(cid, _, _)| *cid == id) else {
         return Ok(json!({ "success": false, "message": "未知指令" }));

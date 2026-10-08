@@ -367,6 +367,43 @@
     }
   }
 
+  // ==================== 「确认 → 执行」唯一出口（v4-K03） ====================
+  // 单任务的确认与执行收在**这一个函数**里：四个入口（列表行「执行」按钮、
+  // 详解弹窗「开始本项修复」、「执行选中」、「全部执行」）一律经它 ——
+  // 出口级确认由函数保证，而不是靠每个调用点自己记得加。
+  //
+  // v4-K03 修复的形态：批量链此前只弹一次**普通** confirm（文案仅「其中 N 项需要
+  // 管理员权限」）就直接循环 runOne，netstack/dns 这类带红档文案与独占承诺的
+  // admin 项被整批放过。现在循环内逐项走 task.admin 红档，取消即停止后续。
+  // 返回：cancelled（用户取消）/ aborted（确认件不可用，fail-closed）/
+  // 其余 = runOne 的状态串（ok / warn / error / elevating）。
+  async function confirmAndRunOne(task) {
+    if (task.admin) {
+      if (!window.app?.confirmDanger) {
+        window.app?.toast?.('error', '高危确认对话框不可用，已中止');
+        return 'aborted';
+      }
+      const ok = await window.app.confirmDanger(
+        `⚠️ 执行「${task.title}」（需要管理员权限）`,
+        `${task.desc}\n\n该操作会立即修改系统设置，期间请勿关闭应用。`,
+        '仍然执行',
+        '取消',
+        '部分修改需重启才完全生效，请确认已了解后果。'
+      );
+      if (!ok) return 'cancelled';
+    } else {
+      const ok = await window.app?.confirm?.(
+        `执行「${task.title}」`,
+        `${task.desc}\n\n该操作将立即开始，期间请勿关闭应用。`,
+        '确认执行',
+        '取消'
+      );
+      if (!ok) return 'cancelled';
+    }
+    showOutput(`${task.title} · 执行输出`);
+    return await runOne(task);
+  }
+
   async function runTask(taskId) {
     if (running || batch) { window.app?.toast?.('warning', '已有维护任务在执行，请稍候'); return; }
     const task = tasks.find(t => t.id === taskId);
@@ -388,39 +425,11 @@
     running = taskId;
     updateBatchbar();
 
-    let ok = false;
-    if (task.admin) {
-      if (!window.app?.confirmDanger) {
-        window.app?.toast?.('error', '高危确认对话框不可用，已中止');
-        running = null;
-        updateBatchbar();
-        return;
-      }
-      ok = await window.app.confirmDanger(
-        `⚠️ 执行「${task.title}」（需要管理员权限）`,
-        `${task.desc}\n\n该操作会立即修改系统设置，期间请勿关闭应用。`,
-        '仍然执行',
-        '取消',
-        '部分修改需重启才完全生效，请确认已了解后果。'
-      );
-    } else {
-      ok = await window.app?.confirm?.(
-        `执行「${task.title}」`,
-        `${task.desc}\n\n该操作将立即开始，期间请勿关闭应用。`,
-        '确认执行',
-        '取消'
-      );
-    }
-    if (!ok) {
-      running = null;
-      updateBatchbar();
-      return;
-    }
-
-    showOutput(`${task.title} · 执行输出`);
-
     try {
-      const st = await runOne(task);
+      // v4-K03：确认与执行收进 confirmAndRunOne（四个出口共用同一函数；本出口
+      // 不再自己弹确认，也就不会与批量链的确认等级再次分叉）。
+      const st = await confirmAndRunOne(task);
+      if (st === 'cancelled' || st === 'aborted') return;
       window.app?.toast?.(st === 'ok' ? 'success' : (st === 'warn' ? 'warning' : 'error'),
         `${task.title} ${STATUS_LABEL[st] || '完成'}`);
     } finally {
@@ -467,7 +476,19 @@
       appendOutput(`—— [${batch.done + 1}/${batch.total}] ${task.title} ——`);
       updateBatchbar();
 
-      const st = await runOne(task);
+      // v4-K03：逐项确认经 confirmAndRunOne —— admin 项在此弹**红色**确认（带
+      // 该项自己的 dangerHint），用户取消即停止后续。此前批量链只弹一次普通
+      // confirm 就循环 runOne，netstack/dns 的红档与独占承诺被整批放过。
+      const st = await confirmAndRunOne(task);
+      if (st === 'cancelled' || st === 'aborted') {
+        appendOutput(st === 'cancelled'
+          ? `—— 已在确认框取消「${task.title}」，跳过本项及后续项目 ——`
+          : '—— 高危确认对话框不可用，批量已停止 ——');
+        batch.cancelRequested = true;
+        running = null;
+        updateBatchbar();
+        break;
+      }
       if (st === 'elevating') {
         // 提权已获同意，应用即将以管理员身份重启——剩余批次已持久化，中止循环
         appendOutput('—— 应用即将以管理员身份重启，批量已暂停，重启后将自动恢复勾选 ——');

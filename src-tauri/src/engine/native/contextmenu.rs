@@ -1,18 +1,18 @@
-//! B6 右键菜单全链：深度扫描、启停、删除、备份、防篡改恢复、explorer 重启。
+//! B6 右键菜单全链：深度扫描、启停（toggle）、CLSID 图标、open-in-regedit、explorer 重启。
 //!
-//! 本域是 native 里最大的一块（约 2.4k 行），写侧副作用真实（RegRenameKey 改 Verbs、
-//! 删 clsid、导入 .reg 还原、杀 explorer）。COM 类名与厂商判定表（PROTECTED_CLASSES /
-//! KNOWN_SYSTEM）是本域判据真源，改动等于改判定结果。
-//! 注册表底层枚举/读取在 `registry.rs`；本文件只做业务组装。
+//! 本域是 native 里最大的一块，写侧副作用真实（RegRenameKey 改 Verbs、写 LastKey、
+//! 杀 explorer）。COM 类名与厂商判定表（PROTECTED_CLASSES / KNOWN_SYSTEM）是本域
+//! 判据真源，改动等于改判定结果。注册表底层枚举/读取在 `registry.rs`；本文件只做业务组装。
+//!
+//! 2026-10-09（用户裁定 D3）：删除/备份/恢复（cm_remove/cm_backup/cm_restore）整链退役。
 
 
-use crate::engine::systembin::system_tool;
 use serde_json::{Value, json};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, FreeLibrary, HMODULE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, FreeLibrary, HANDLE, HMODULE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
-use windows::Win32::System::LibraryLoader::LoadLibraryW;
-use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_CREATED_NEW_KEY, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegRenameKey, RegSetValueExW};
+use windows::Win32::System::LibraryLoader::{LoadLibraryExW, LOAD_LIBRARY_AS_DATAFILE};
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_CREATED_NEW_KEY, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegRenameKey, RegSetValueExW};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 use windows::Win32::UI::WindowsAndMessaging::LoadStringW;
@@ -169,11 +169,21 @@ unsafe fn resolve_resource_string(raw: &str) -> Option<String> {
         let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         format!("{windir}\\System32\\{dll_part}")
     } else {
-        expand_env(&dll_part)
+        let p = expand_env(&dll_part);
+        // 审查 v4-K01（2026-10-09）：HKCU 下的 MUIVerb / LocalizedString / FriendlyAppName
+        // 对当前用户可写 —— 绝对路径分支此前只判 exists() 就 LoadLibraryW，等于给出
+        // 「medium 进程写注册表 → Trim（可提权）进程加载任意 DLL」的代码执行原语
+        // （DllMain 会被执行）。资源串的绝对路径只放行系统 DLL 的规范落点
+        // （System32 / SysWOW64 且非链接），其余一律 None ⇒ direct_string 回退空串
+        // ⇒ 用键名当标签（功能降级，不丢）。
+        if !resource_dll_allowed(&p) { return None; }
+        p
     };
     if !std::path::Path::new(&dll_path).exists() { return None; }
     let dll_w = to_wide(&dll_path);
-    let Ok(hmod) = LoadLibraryW(PCWSTR(dll_w.as_ptr())) else { return None; };
+    // v4-K01：LOAD_LIBRARY_AS_DATAFILE = 只把 DLL 映射为数据文件读字符串资源，
+    // **不执行 DllMain** —— 这是读资源的正确姿势（LoadStringW 对 datafile 句柄照常可用）。
+    let Ok(hmod) = LoadLibraryExW(PCWSTR(dll_w.as_ptr()), Some(HANDLE::default()), LOAD_LIBRARY_AS_DATAFILE) else { return None; };
     if hmod == HMODULE::default() { return None; }
     let mut buf = [0u16; 1024];
     let len = LoadStringW(Some(windows::Win32::Foundation::HINSTANCE(hmod.0)), id as u32, windows::core::PWSTR(buf.as_mut_ptr()), buf.len() as i32);
@@ -184,6 +194,32 @@ unsafe fn resolve_resource_string(raw: &str) -> Option<String> {
 
 fn dll_path_needs_system(dll: &str) -> bool {
     !dll.contains('\\') && !dll.contains('/')
+}
+
+/// v4-K01：`@<绝对路径 dll>,<id>` 的落点白名单 —— 只放行 `%SystemRoot%\System32` 与
+/// `%SystemRoot%\SysWOW64` 之下（报告口径：SystemRoot 根与其可写子目录如 Temp 均不放行）。
+/// 判据三条任一不满足即拒：前缀在允许根之下（带分隔符，`…\System32x` 不算子树）、
+/// 路径不含 `..` 组件（防 `System32\..\Temp\x.dll` 折叠穿越）、目标非重解析点；
+/// 元数据读不到也拒（回退 = 用键名当标签，不损失功能面）。
+fn resource_dll_allowed(p: &str) -> bool {
+    let n = p.trim().replace('/', "\\");
+    if n.is_empty() || n.contains("..") {
+        return false;
+    }
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let windir = windir.trim_end_matches('\\').replace('/', "\\").to_ascii_lowercase();
+    if windir.is_empty() {
+        return false;
+    }
+    let low = n.to_ascii_lowercase();
+    let allowed = [format!("{windir}\\system32\\"), format!("{windir}\\syswow64\\")];
+    if !allowed.iter().any(|r| low.starts_with(r)) {
+        return false;
+    }
+    match std::fs::symlink_metadata(&n) {
+        Ok(md) => !crate::engine::protect::is_reparse(&md),
+        Err(_) => false,
+    }
 }
 
 /// 直接字符串：@ 引用串优先走资源解析，解析失败回退空串
@@ -220,27 +256,6 @@ fn clean_str(s: &str) -> String {
     }).collect()
 }
 
-/// 目录包含判据（只用于安全闸门）：`file` 必须落在 `dir` **里面**。
-///
-/// 三条口径都是被真实缺陷教出来的：
-/// 1. 大小写不敏感 —— NTFS 不区分，而 canonicalize 会保留盘符与目录名的原样大小写，
-///    严格比字符串会把同一个目录判成两个；
-/// 2. 必须补分隔符 —— 少了它，`…\右键菜单备份_1` 会放行 `…\右键菜单备份_12\*.reg`
-///    （兄弟目录当前缀），闸门形同不存在；
-/// 3. canonicalize 的 `\\?\` verbatim 形式由**调用方**负责两种都送进来比（见 cm_restore），
-///    这里不猜前缀，因为真机上的 canonical 结果还可能因联结点解析而整体换路径。
-fn under_dir(file: &str, dir: &str) -> bool {
-    let f = file.to_lowercase();
-    let d = dir.to_lowercase().trim_end_matches('\\').to_string();
-    !d.is_empty() && f.starts_with(&format!("{d}\\"))
-}
-
-/// 把绝对路径（注册表全路径或文件全路径）的最后一段换成 `new_leaf`，前面的根原样保留。
-///
-/// 重命名类切换（shellex 的 `-` 前缀、AutorunsDisabled 还原、`.lnk.disabled`）必须回写新路径，
-/// 而回写的依据是**调用方带来的那条真实 hive 路径**，不是「HKCU 就是 HKCU、否则就是 HKLM」这种
-/// 二分：扫描端虽然只产这两种，但把别的根（HKCR 合并视图、HKU）二分进 else 分支会写回一个
-/// 根本不存在的坐标，快照与缓存就此指向别处（真机审计 P2-16）。
 fn swap_last_segment(path: &str, new_leaf: &str) -> String {
     match path.rfind('\\') {
         Some(pos) => format!("{}{}", &path[..=pos], new_leaf),
@@ -1707,501 +1722,29 @@ unsafe fn toggle_cm_item(
     Err(format!("未知 source 类型: {source}"))
 }
 
-// ==================== B6 cm_remove：右键菜单删除 ====================
+#[cfg(test)]
+mod resource_dll_tests {
+    use super::*;
 
-/// 右键菜单删除（对应 cm_remove.ps1，S3）
-///
-/// 删除注册表键（RegDeleteTreeW 递归删除）。文件系统项由主进程回收站删除，
-/// shellnew 项通过启停管理（禁止整键删除），系统保护项拒绝。
-pub fn cm_remove(items: &[Value]) -> Result<Value, String> {
-    unsafe {
-        let mut results: Vec<Value> = Vec::new();
-        let mut success = 0i64;
-        let mut failed = 0i64;
-        // 审计 P1-4：`skip`（保护项 / 该走启停 / 路径非法）以前既不进 success 也不进 failed，
-        // 命令层按 `failed == 0` 判成功 ⇒ 前端弹「已备份并删除所选菜单项」并把行删掉，
-        // 而注册表什么都没动。skip 必须单独计数，命令层据此判「这一项没删成」。
-        let mut skipped = 0i64;
-
-        for item in items {
-            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
-            let risk = item.get("risk").and_then(|v| v.as_str()).unwrap_or("");
-
-            if risk == "protected" {
-                skipped += 1;
-                results.push(json!({"id": id, "name": name, "status": "skip", "message": "系统保护项"}));
-                continue;
-            }
-            // 文件系统项由主进程回收站删除：这一条由命令层接着办，不算"没删成"
-            if source == "filesystem" || source == "winx" {
-                results.push(json!({"id": id, "name": name, "status": "skip", "message": "文件系统项由主进程回收站删除"}));
-                continue;
-            }
-            // shellnew 禁止整键删除
-            if source == "shellnew" {
-                skipped += 1;
-                results.push(json!({"id": id, "name": name, "status": "skip", "message": "新建菜单项请通过启停操作管理，禁止整键删除"}));
-                continue;
-            }
-
-            let mut target = item.get("nativeRegPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if target.is_empty() { target = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("").to_string(); }
-            if target.is_empty() {
-                skipped += 1;
-                results.push(json!({"id": id, "name": name, "status": "skip", "message": "无效或过宽路径"}));
-                continue;
-            }
-            // 路径校验：不能是根键本身（审计 P2-14 顺手清掉一条恒假分支：
-            // `starts_with("hkey_classes_root\\") && !contains("\\")` 永远为假，
-            // 根键的拦截实际由上面那几条 `==` 完成）
-            let lower = target.to_lowercase();
-            if ["hkey_classes_root", "hkey_local_machine", "hkey_current_user", "hkey_users", "hkey_current_config"]
-                .contains(&lower.as_str())
-                || ["hkcr", "hklm", "hkcu", "hku", "hkcc"].contains(&lower.as_str())
-            {
-                skipped += 1;
-                results.push(json!({"id": id, "name": name, "status": "skip", "message": "无效或过宽路径"}));
-                continue;
-            }
-
-            let (hive, subkey) = match parse_reg_path(&target) {
-                Some(v) => v,
-                None => {
-                    skipped += 1;
-                    results.push(json!({"id": id, "name": name, "status": "skip", "message": "注册表路径格式错误"}));
-                    continue;
-                }
-            };
-
-            // 检查键是否存在：不存在 = 目标状态已达成，不算 skipped
-            let sk = to_wide(&subkey);
-            let mut hk = HKEY::default();
-            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-                results.push(json!({"id": id, "name": name, "status": "skip", "message": "路径不存在"}));
-                continue;
-            }
-            let _ = RegCloseKey(hk);
-
-            // 删除键（需要父键的 DELETE 权限）
-            // 审计 P1-6：subkey 只有一段时，「父键 + 叶子」拆不出来，旧代码走的是
-            // `RegDeleteTreeW(根键, 整条 subkey)` —— 那等于把 `HKLM\Software` 这类**一级子键**
-            // 整棵删掉，而不是删某个菜单键。真实扫描项最少也有 `Software\Classes\…` 两段，
-            // 所以这不是现在就有的洞，而是上游一旦放宽就一击致命；删除出口按 fail-closed 收深度。
-            let Some(pos) = subkey.rfind('\\') else {
-                skipped += 1;
-                results.push(json!({
-                    "id": id, "name": name, "status": "skip",
-                    "message": "键路径层级过浅（根键下的一级子键），已拒绝删除"
-                }));
-                continue;
-            };
-            let parent = &subkey[..pos];
-            let leaf = &subkey[pos + 1..];
-            let parent_sk = to_wide(parent);
-            let mut parent_hk = HKEY::default();
-            if RegOpenKeyExW(hive, PCWSTR(parent_sk.as_ptr()), Some(0), KEY_WRITE, &mut parent_hk).is_err() {
-                failed += 1;
-                results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开父键（可能需要管理员权限）"}));
-                continue;
-            }
-            let leaf_nm = to_wide(leaf);
-            let r = RegDeleteTreeW(parent_hk, PCWSTR(leaf_nm.as_ptr()));
-            let _ = RegCloseKey(parent_hk);
-            if r.is_err() {
-                failed += 1;
-                results.push(json!({"id": id, "name": name, "status": "error", "message": "删除失败（可能需要管理员权限）"}));
-            } else {
-                // 回读确认
-                let sk2 = to_wide(&subkey);
-                let mut hk2 = HKEY::default();
-                let still_exists = RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok();
-                if still_exists { let _ = RegCloseKey(hk2); }
-                if still_exists {
-                    failed += 1;
-                    results.push(json!({"id": id, "name": name, "status": "error", "message": "删除后键仍存在（可能被占用或权限不足）"}));
-                } else {
-                    success += 1;
-                    results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除"}));
-                }
-            }
-        }
-
-        Ok(json!({"success": success, "failed": failed, "skipped": skipped, "results": results}))
+    /// v4-K01：资源串绝对路径白名单 —— 只放行 System32 / SysWOW64 下的真实非链接文件。
+    /// 判红自证：把 resource_dll_allowed 改成恒 true ⇒ 第 2~5 条断言全红。
+    #[test]
+    fn resource_dll_whitelist_gates_system32_only() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let sysdll = format!("{windir}\\System32\\shell32.dll");
+        assert!(resource_dll_allowed(&sysdll), "System32 下的真实 DLL 必须放行: {sysdll}");
+        // 字符串前缀命中但 `..` 折叠后实际不在白名单内（穿越）
+        let escape = format!("{windir}\\System32\\..\\Temp\\evil.dll");
+        assert!(!resource_dll_allowed(&escape), "含 `..` 的路径必须拒: {escape}");
+        // SystemRoot 下但用户可写的位置
+        let temp = format!("{windir}\\Temp\\evil.dll");
+        assert!(!resource_dll_allowed(&temp), "SystemRoot\\Temp 不在白名单: {temp}");
+        assert!(!resource_dll_allowed(r"C:\Apps\Foo\x.dll"));
+        assert!(!resource_dll_allowed(""));
+        // 元数据读不到（文件不存在）⇒ 拒（后面还有 exists 闸，早退不损失功能面）
+        let ghost = format!("{windir}\\System32\\trim-no-such-dll-9f3a.dll");
+        assert!(!resource_dll_allowed(&ghost), "不存在的文件必须拒: {ghost}");
     }
-}
-// ==================== B6 cm_backup：右键菜单备份 ====================
-
-fn desktop_dir() -> std::path::PathBuf {
-    if let Ok(desktop) = std::env::var("USERPROFILE") {
-        let p = std::path::PathBuf::from(desktop).join("Desktop");
-        if p.exists() { return p; }
-    }
-    std::path::PathBuf::from(r"C:\Users\Public\Desktop")
-}
-
-fn reg_file_header_hive(file: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(file).ok()?;
-    for line in content.lines().take(8) {
-        let t = line.trim();
-        if t.starts_with('[') {
-            let h = &t[1..];
-            for root in ["HKEY_CLASSES_ROOT", "HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE", "HKEY_USERS"] {
-                if h.starts_with(root) { return Some(root.to_string()); }
-            }
-            return Some("OTHER".to_string());
-        }
-    }
-    None
-}
-
-/// 右键菜单备份（对应 cm_backup.ps1，S3）
-///
-/// 在桌面创建「右键菜单备份_时间戳」目录，注册表项用 reg.exe export 导出 .reg，
-/// 文件项复制到 files/ 子目录，生成 manifest.json。
-pub fn cm_backup(items: &[Value]) -> Result<Value, String> {
-    let now_ms = crate::engine::now_ms();
-    let stamp = format!("{}", now_ms);
-    let backup_dir = desktop_dir().join(format!("右键菜单备份_{stamp}"));
-    let files_dir = backup_dir.join("files");
-    std::fs::create_dir_all(&files_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
-
-    let mut backup_files: Vec<String> = Vec::new();
-    let mut file_records: Vec<Value> = Vec::new();
-    let mut reg_records: Vec<Value> = Vec::new();
-    let mut exported = 0i64;
-    let mut copied = 0i64;
-    let mut failed = 0i64;
-
-    for (index, item) in items.iter().enumerate() {
-        let idx = index + 1;
-        let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
-        let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
-
-        // 文件类来源：复制备份
-        if source == "filesystem" || source == "winx" {
-            if !std::path::Path::new(reg_path).exists() { continue; }
-            let file_name = std::path::Path::new(reg_path).file_name().and_then(|n| n.to_str()).unwrap_or("file");
-            let stem = std::path::Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-            let ext = std::path::Path::new(file_name).extension().and_then(|e| e.to_str()).unwrap_or("");
-            let dest_name = format!("file_{idx}_{stem}_{ext}");
-            let dest = files_dir.join(&dest_name);
-            if std::fs::copy(reg_path, &dest).is_ok() {
-                let dest_str = dest.to_string_lossy().to_string();
-                file_records.push(json!({"source": reg_path, "backup": dest_str}));
-                backup_files.push(dest_str);
-                copied += 1;
-            } else {
-                failed += 1;
-            }
-            continue;
-        }
-
-        // 注册表类：reg.exe export
-        let mut write_path = item.get("nativeRegPath").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if write_path.is_empty() { write_path = reg_path.to_string(); }
-        if write_path.is_empty() { failed += 1; continue; }
-        // 拒绝 HKCR 头
-        if write_path.starts_with("HKEY_CLASSES_ROOT\\") || write_path == "HKEY_CLASSES_ROOT" {
-            failed += 1;
-            continue;
-        }
-        // 转换为 reg.exe 短路径
-        let native_path = write_path
-            .replace("HKEY_CURRENT_USER", "HKCU")
-            .replace("HKEY_LOCAL_MACHINE", "HKLM")
-            .replace("HKEY_USERS", "HKU")
-            .replace("HKEY_CLASSES_ROOT", "HKCR");
-        // 安全文件名
-        let mut safe_name = native_path.clone();
-        safe_name = safe_name.replace('\\', "_").replace('/', "_").replace(':', "_").replace('*', "_")
-            .replace('?', "_").replace('"', "_").replace('<', "_").replace('>', "_").replace('|', "_");
-        // v2-L4P-32（C-4）：按字符截断——`safe_name[高字节切片]` 在含中文键名时
-        // 会切在 UTF-8 多字节序列中间直接 panic（同族已修过、此处是漏网点）。
-        if safe_name.chars().count() > 120 {
-            let keep: String = safe_name.chars().rev().take(120).collect::<Vec<_>>()
-                .into_iter().rev().collect();
-            safe_name = keep;
-        }
-        let reg_file = backup_dir.join(format!("registry_{idx}_{safe_name}.reg"));
-
-        // reg.exe export
-        // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
-        let Some(reg_file_str) = reg_file.to_str() else { failed += 1; continue; };
-        // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
-        let out = crate::engine::systembin::quiet_cmd_timeout(
-            system_tool("reg.exe"),
-            &["export", &write_path, reg_file_str, "/y"],
-            crate::engine::systembin::REG_EXPORT_TIMEOUT,
-        );
-        let success = out.map(|o| o.status.success()).unwrap_or(false);
-        let header_hive = reg_file_header_hive(&reg_file);
-        let hive_ok = header_hive.as_ref()
-            .map(|h| h != "HKEY_CLASSES_ROOT" && write_path.starts_with(h))
-            .unwrap_or(false);
-
-        if success && hive_ok {
-            let reg_str = reg_file.to_string_lossy().to_string();
-            backup_files.push(reg_str.clone());
-            reg_records.push(json!({"source": write_path, "backup": reg_str, "hive": header_hive.unwrap_or_default()}));
-            exported += 1;
-        } else {
-            let _ = std::fs::remove_file(&reg_file);
-            failed += 1;
-        }
-    }
-
-    // 生成 manifest.json
-    let manifest = json!({
-        "version": 2,
-        "created": now_ms,
-        "items": items,
-        "files": file_records,
-        "registryFiles": reg_records,
-    });
-    let manifest_path = backup_dir.join("manifest.json");
-    // 审查 v3-L1：manifest 是还原侧 fail-closed 的判据（缺失/不可解析即拒绝导入），
-    // 直写崩溃会留下半截 JSON 让整份备份变废纸 —— 走原子写，失败要如实记账
-    let manifest_ok = crate::security::atomic_write_json(&manifest_path, &manifest).is_ok();
-
-    Ok(json!({
-        "backupDir": backup_dir.to_string_lossy().to_string(),
-        "files": backup_files,
-        "count": exported + copied,
-        "exported": exported,
-        "copied": copied,
-        "failed": failed,
-        "manifestOk": manifest_ok,
-    }))
-}
-// ==================== B6 cm_restore：右键菜单防篡改恢复 ====================
-
-fn reg_file_all_keys(file: &std::path::Path) -> Vec<String> {
-    let mut keys = Vec::new();
-    if let Ok(content) = std::fs::read_to_string(file) {
-        for line in content.lines() {
-            let t = line.trim();
-            if t.starts_with('[') && t.ends_with(']') {
-                let key = &t[1..t.len()-1];
-                keys.push(key.trim_end_matches('\\').to_string());
-            }
-        }
-    }
-    keys
-}
-
-/// 恢复白名单：只放行「真实住在 Classes 下」的键。
-///
-/// 审计 P1-8：这条判据原来**大小写敏感**，而注册表键名是大小写不敏感、**大小写保留**的：
-/// `reg.exe export` 写出的头按键在树里的真实拼法给，HKCU 侧是 `Software\Classes`（首字母大写、
-/// 其余小写），拿 `"HKCU\\SOFTWARE\\Classes\\"` 去 starts_with 必然为假 ⇒ HKCU 的备份**全部**
-/// 被判「不在合法范围内」。HKLM 侧侥幸通过，只是因为那个键历来就被写成全大写 `SOFTWARE`。
-/// 判据先归一到上位再比，两边同口径。
-fn reg_key_allowed_for_restore(key: &str) -> bool {
-    let p = key.trim().to_uppercase();
-    // 转换长 hive 为短名（上位形式，所以替换词也写成上位）
-    let p = p
-        .replace("HKEY_LOCAL_MACHINE", "HKLM")
-        .replace("HKEY_CURRENT_USER", "HKCU")
-        .replace("HKEY_USERS", "HKU")
-        .replace("HKEY_CLASSES_ROOT", "HKCR")
-        .replace("HKEY_CURRENT_CONFIG", "HKCC");
-    p.starts_with(r"HKLM\SOFTWARE\CLASSES\") || p.starts_with(r"HKCU\SOFTWARE\CLASSES\")
-}
-
-/// 右键菜单防篡改恢复（对应 cm_restore.ps1，S3）
-///
-/// 从桌面最新「右键菜单备份_*」目录恢复，三道安全闸门：
-/// ① .reg 必须在 manifest.registryFiles 登记且在备份目录内
-/// ② .reg 正文每条键路径都过白名单（HKLM/HKCU\SOFTWARE\Classes\）
-/// ③ 文件项 source 必须在 SendTo/WinX 合法目录内
-pub fn cm_restore() -> Result<Value, String> {
-    let desktop = desktop_dir();
-    // 找最新备份目录
-    let mut backup_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&desktop)
-        .map_err(|e| format!("读取桌面失败: {e}"))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("右键菜单备份_")).unwrap_or(false))
-        .collect();
-    backup_dirs.sort_by(|a, b| {
-        let ta = a.metadata().and_then(|m| m.modified()).ok();
-        let tb = b.metadata().and_then(|m| m.modified()).ok();
-        tb.cmp(&ta)
-    });
-    let Some(latest_backup) = backup_dirs.first() else {
-        return Ok(json!({"success": false, "message": "未找到备份目录"}));
-    };
-    // 审计 P1-6：备份目录要参与两处闸门（.reg 与文件项的「必须在本次备份目录内」），
-    // 而**被比的那一侧是 `std::fs::canonicalize` 的结果 —— Windows 上它带 `\\?\` verbatim 前缀**
-    // （本仓在 fileclean/diskbench 都为此写过 `strip_verbatim`）。原来拿普通形式的前缀去比，
-    // 判据恒 false：所有 .reg 都被记「不在本次选中的备份目录内」，恢复永远 0 项。
-    // 所以两种形式都留作根，比较时任一命中即算在同一目录内。
-    let backup_plain = latest_backup.to_string_lossy().to_string();
-    let backup_verbatim = std::fs::canonicalize(latest_backup)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| backup_plain.clone());
-    let backup_roots = [backup_plain.as_str(), backup_verbatim.as_str()];
-    let in_backup = |p: &str| backup_roots.iter().any(|r| under_dir(p, r));
-
-    // 读 manifest
-    let manifest_path = latest_backup.join("manifest.json");
-    let manifest: Value = std::fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
-
-    let mut listed_backups: Vec<String> = Vec::new();
-    if let Some(regs) = manifest.get("registryFiles").and_then(|v| v.as_array()) {
-        for rec in regs {
-            if let Some(b) = rec.get("backup").and_then(|v| v.as_str()) {
-                if let Ok(full) = std::fs::canonicalize(b) {
-                    listed_backups.push(full.to_string_lossy().to_string());
-                } else {
-                    listed_backups.push(b.to_string());
-                }
-            }
-        }
-    }
-
-    let mut imported = 0i64;
-    let mut failed = 0i64;
-    let mut skipped = 0i64;
-    let mut skip_reasons: Vec<String> = Vec::new();
-
-    if manifest.is_null() {
-        skip_reasons.push("manifest.json 缺失或不可解析：本次拒绝导入任何 .reg".into());
-    }
-
-    // 处理 registry_*.reg
-    if let Ok(entries) = std::fs::read_dir(latest_backup) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !name.starts_with("registry_") || !name.ends_with(".reg") { continue; }
-
-            let full = match std::fs::canonicalize(&path) {
-                Ok(f) => f.to_string_lossy().to_string(),
-                Err(_) => { skipped += 1; skip_reasons.push(format!("{name}（无法解析路径）")); continue; }
-            };
-            // ① 在备份目录内
-            if !in_backup(&full) {
-                skipped += 1;
-                skip_reasons.push(format!("{name}（不在本次选中的备份目录内，已拒绝导入）"));
-                continue;
-            }
-            // ① 在 manifest 登记
-            let listed = listed_backups.iter().any(|b| b.eq_ignore_ascii_case(&full) || b.eq_ignore_ascii_case(&path.to_string_lossy()));
-            if !listed {
-                skipped += 1;
-                skip_reasons.push(format!("{name}（未在 manifest.registryFiles 登记，已拒绝导入）"));
-                continue;
-            }
-            // ② 头部 hive 校验
-            let hdr = reg_file_header_hive(&path);
-            if hdr.is_none() || hdr.as_deref() == Some("HKEY_CLASSES_ROOT") || hdr.as_deref() == Some("OTHER") {
-                skipped += 1;
-                let hdr_text = hdr.unwrap_or_else(|| "无法识别".into());
-                skip_reasons.push(format!("{name}（备份头为 {hdr_text}，非真实 hive，已拒绝导入）"));
-                continue;
-            }
-            // ② 逐条键路径白名单
-            let keys = reg_file_all_keys(&path);
-            let mut bad_key = String::new();
-            if keys.is_empty() { bad_key = "正文里没有可识别的键行".into(); }
-            for k in &keys {
-                if !reg_key_allowed_for_restore(k) { bad_key = k.clone(); break; }
-            }
-            if !bad_key.is_empty() {
-                skipped += 1;
-                skip_reasons.push(format!("{name}（键路径不在右键菜单合法范围内，已拒绝导入：{bad_key}）"));
-                continue;
-            }
-            // A6（v2-R4）：原生 `.reg` 写入，替换 `reg.exe import`。
-            // 备份是 reg.exe export 产的 UTF-16LE，编码感知收在
-            // `reg_backup::read_reg_text_file` 一处，不在这里各解一遍。
-            // 原来那档「路径 to_str() 为 None 就跳过」（审查 v3-L7）随 reg.exe 一起消失 ——
-            // 那是外部进程需要字符串参数才有的限制，原生拿 &Path 不受影响。
-            // 失败原因现在进 skip_reasons（旧实现只 failed += 1，用户看不到为什么没还原上）。
-            if let Err(e) = crate::engine::reg_backup::reg_import_apply(&path) {
-                failed += 1;
-                skip_reasons.push(format!("{name}（还原写入失败：{e}）"));
-                continue;
-            }
-            // 导入后回读
-            let first_key = keys.first().cloned().unwrap_or_default();
-            if !first_key.is_empty() {
-                if let Some((hive, subkey)) = parse_reg_path(&first_key) {
-                    let sk = to_wide(&subkey);
-                    let mut hk = HKEY::default();
-                    let exists = unsafe { RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() };
-                    if exists { unsafe { let _ = RegCloseKey(hk); } }
-                    if !exists {
-                        failed += 1;
-                        skip_reasons.push(format!("{name}（reg import 报成功但键未出现）"));
-                        continue;
-                    }
-                }
-            }
-            imported += 1;
-        }
-    }
-
-    // 文件项恢复
-    let mut restored = 0i64;
-    if let Some(files) = manifest.get("files").and_then(|v| v.as_array()) {
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let programdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
-        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let allowed_roots = [
-            format!("{appdata}\\Microsoft\\Windows\\SendTo"),
-            format!("{programdata}\\Microsoft\\Windows\\SendTo"),
-            format!("{localappdata}\\Microsoft\\Windows\\WinX"),
-        ];
-        for record in files {
-            let b = record.get("backup").and_then(|v| v.as_str()).unwrap_or("");
-            let s = record.get("source").and_then(|v| v.as_str()).unwrap_or("");
-            let b_full = std::fs::canonicalize(b).unwrap_or_else(|_| std::path::PathBuf::from(b)).to_string_lossy().to_string();
-            // 审计 P1-6：两个条件的 skip 文案原来合并成一条「来源不合法」，而真实拦下的是
-            // 备份目录那条（见上）—— 用户会以为是自己的目录被改了。分开报，各说各的原因。
-            if !in_backup(&b_full) {
-                skipped += 1;
-                skip_reasons.push(format!("文件项（备份副本不在本次选中的备份目录内，已拒绝还原：{b}）"));
-                continue;
-            }
-            // 与 under_dir 同一条口径：NTFS 大小写不敏感，闸门按小写比，
-            // 否则「同一个目录、两种写法」会被判成不合法而拒绝还原。
-            let ok_source = allowed_roots
-                .iter()
-                .any(|r| s.to_lowercase().starts_with(&format!("{}\\", r.to_lowercase())));
-            if !ok_source {
-                skipped += 1;
-                skip_reasons.push(format!("文件项（来源不在发送到/Win+X 合法目录内，已拒绝还原：{s}）"));
-                continue;
-            }
-            if std::path::Path::new(b).exists() && !s.is_empty() {
-                if let Some(parent) = std::path::Path::new(s).parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::copy(b, s).is_ok() {
-                    restored += 1;
-                } else {
-                    failed += 1;
-                }
-            }
-        }
-    }
-
-    Ok(json!({
-        "success": (imported + restored) > 0 && failed == 0,
-        "backupDir": latest_backup.to_string_lossy().to_string(),
-        "imported": imported,
-        "restored": restored,
-        "skipped": skipped,
-        "skipReasons": skip_reasons,
-        "failed": failed,
-    }))
 }
 
 #[cfg(test)]
@@ -2396,48 +1939,8 @@ mod owner_tests {
 }
 
 #[cfg(test)]
-mod path_gate_tests {
+mod path_edit_tests {
     use super::*;
-
-    /// 恢复闸门的正向判据：命中目录内的文件，且不区分大小写。
-    #[test]
-    fn under_dir_accepts_inside_and_ignores_case() {
-        assert!(under_dir(r"C:\D\右键菜单备份_1\registry_2_x.reg", r"C:\D\右键菜单备份_1"));
-        assert!(under_dir(r"C:\D\右键菜单备份_1\files\a.lnk", r"c:\d\右键菜单备份_1\"));
-    }
-
-    /// 反向判据：兄弟目录不能当前缀（少补一个分隔符就会放行 `备份_12` 的文件）。
-    #[test]
-    fn under_dir_rejects_sibling_prefix_and_self() {
-        assert!(!under_dir(r"C:\D\右键菜单备份_12\registry_2_x.reg", r"C:\D\右键菜单备份_1"));
-        assert!(!under_dir(r"C:\Other\a.reg", r"C:\D\右键菜单备份_1"));
-        // 目录自身不算「在里面」
-        assert!(!under_dir(r"C:\D\右键菜单备份_1", r"C:\D\右键菜单备份_1"));
-        // 空前缀会把任何路径都放行 —— 闸门必须拒绝
-        assert!(!under_dir(r"C:\Windows\regedit.exe", ""));
-    }
-
-    /// 真机判据：`std::fs::canonicalize` 到底给不给 `\\?\` 前缀。
-    /// 这条决定了「只拿普通形式路径去比」是不是恒假 —— 在 Windows 上必然成立。
-    /// 样本自己造（临时目录里的一个文件），不依赖本机既有路径。
-    #[test]
-    fn canonicalize_returns_verbatim_prefix() {
-        let dir = std::env::temp_dir().join(format!("trim-cm-verbatim-{}", std::process::id()));
-        let file = dir.join("a.reg");
-        std::fs::create_dir_all(&dir).expect("临时目录建不出来（环境问题，不是判据问题）");
-        std::fs::write(&file, "x").expect("临时文件写不进去（同上）");
-        let plain_dir = dir.to_string_lossy().to_string();
-        let canon_file = std::fs::canonicalize(&file).expect("刚写的文件必然可解析").to_string_lossy().to_string();
-        let canon_dir = std::fs::canonicalize(&dir).expect("刚建的目录必然可解析").to_string_lossy().to_string();
-        let _ = std::fs::remove_dir_all(&dir);
-        if !cfg!(windows) { return; }
-        assert!(canon_file.starts_with(r"\\?\"), "Windows 上 canonicalize 应给 verbatim 形式，实得 {canon_file}");
-        assert!(
-            !under_dir(&canon_file, &plain_dir),
-            "verbatim 与普通形式必须判成两个（这正是恢复闸门曾经的失效原因：恒 false）"
-        );
-        assert!(under_dir(&canon_file, &canon_dir), "两侧同口径（都 canonicalize）时必须命中");
-    }
 
     /// 重命名类切换回写的新路径：换叶子必须保留原来的根，且只换最后一段。
     #[test]
@@ -2452,37 +1955,5 @@ mod path_gate_tests {
             r"HKEY_USERS\.DEFAULT\Software\Classes\A"
         );
         assert_eq!(swap_last_segment("NoBackslashHere", "Leaf"), "Leaf");
-    }
-
-    /// 恢复白名单：真实 .reg 头的拼法。HKCU 侧键名历来是 `Software`（混合大小写），
-    /// 判据若大小写敏感就会把整批 HKCU 备份拒掉（审计 P1-8 的真实形状）。
-    /// 入参形状 = `reg_file_all_keys` 剥掉方括号后的键路径。
-    #[test]
-    fn restore_whitelist_accepts_real_key_casing() {
-        let hits = [
-            r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\*\shellex\ContextMenuHandlers\WinRAR",
-            r"HKEY_CURRENT_USER\Software\Classes\.rar\ShellEx",
-            r"HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\cmd",
-            r"HKLM\Software\classes\WOW6432Node\CLSID\{000214FF-0000-0000-C000-000000000046}\InprocServer32",
-        ];
-        for k in hits {
-            assert!(reg_key_allowed_for_restore(k), "合法备份头被判拒：{k}");
-        }
-    }
-
-    /// 反向：Classes 之外的键、以及 HKU/HKCR 这些合并视图一律不许导入。
-    #[test]
-    fn restore_whitelist_rejects_out_of_scope_keys() {
-        let misses = [
-            r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons",
-            r"HKEY_USERS\.DEFAULT\Software\Classes\Foo",
-            r"HKEY_CLASSES_ROOT\*\shellex\ContextMenuHandlers\X",
-            r"HKCR\*\shellex\ContextMenuHandlers\X",
-            r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes",
-            r"HKEY_LOCAL_MACHINE\SOFTWARE\ClassesX\Foo",
-        ];
-        for k in misses {
-            assert!(!reg_key_allowed_for_restore(k), "越界备份头被判放行：{k}");
-        }
     }
 }

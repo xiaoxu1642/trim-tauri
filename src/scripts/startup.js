@@ -57,20 +57,50 @@
   const DEFEND_ENABLED_KEY = 'trim-startup-defend-enabled'; // 总开关（默认开）
 
   function loadStore(key, fallback) {
-    try {
-      const v = JSON.parse(localStorage.getItem(key) || '');
-      return v == null ? fallback : v;
-    } catch (e) { return fallback; }
+    const r = loadStore3(key);
+    return r.state === 'ok' ? r.value : fallback;
   }
+  // D2（v4 审查 · 用户裁定「先别自动删」）：三态读取 —— ok=合法值 / absent=没存过 /
+  // corrupt=读了但解析失败（含存储整体不可用）。此前 absent 与 corrupt 都走 fallback，
+  // 一次存储清空（清缓存/隐私模式/坏值）就能把用户关掉的防恢复开关拨回默认值。
+  function loadStore3(key) {
+    let raw = null;
+    try { raw = localStorage.getItem(key); }
+    catch (e) {
+      window.app?.log?.('warn', `本地存储「${key}」不可读，已按未设置处理: ${e.message}`);
+      return { state: 'corrupt' };
+    }
+    if (raw == null || raw === '') return { state: 'absent' };
+    try {
+      const v = JSON.parse(raw);
+      return v == null ? { state: 'absent' } : { state: 'ok', value: v };
+    } catch (e) {
+      window.app?.log?.('warn', `本地存储「${key}」解析失败，已按未设置处理: ${e.message}`);
+      return { state: 'corrupt' };
+    }
+  }
+  let saveStoreWarned = false;
   function saveStore(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+    try { localStorage.setItem(key, JSON.stringify(value)); }
+    catch (e) {
+      window.app?.log?.('warn', `本地存储「${key}」写入失败: ${e.message}`);
+      if (!saveStoreWarned) {
+        saveStoreWarned = true;
+        window.app?.toast?.('warning', '设置未能保存（本地存储不可用），下次启动会回到关闭状态');
+      }
+    }
   }
   function fpOf(item) {
     return [item.source || '', item.name || '', item.command || ''].join('|');
   }
 
   // SU-2（S7）：防恢复总开关读写 + 开关条 UI 同步
-  function isDefendEnabled() { return loadStore(DEFEND_ENABLED_KEY, true) !== false; }
+  // D2：只认显式 true —— absent（首次）与 corrupt（被清/损坏）都按**关**处理：
+  // 猜错方向的代价不对称（默认开 = 一次存储清空就把自动删除能力拨回去）。
+  function isDefendEnabled() {
+    const r = loadStore3(DEFEND_ENABLED_KEY);
+    return r.state === 'ok' && r.value === true;
+  }
   function setDefendEnabled(v) { saveStore(DEFEND_ENABLED_KEY, !!v); }
   function updateDefendToggleUI() {
     const t = el('startupDefendToggle');
@@ -212,7 +242,7 @@
     // 阶段二：扫描期间以骨架屏占位（ds.skeletonRows），完成后由 render()/renderError() 替换
     // 缓存命中时主进程立即返回，骨架屏一闪而过不影响体验
     const skeletonList = el('startupList');
-    if (skeletonList && window.ds && refresh && !silent) skeletonList.innerHTML = window.ds.skeletonRows(6);
+    if (skeletonList && window.ds && refresh && !silent) { lockListHeight(); skeletonList.innerHTML = window.ds.skeletonRows(6); }
     try {
       const resp = await window.api.startup.scan(refresh);
       if (!resp || !resp.success) {
@@ -287,6 +317,40 @@
       btn.innerHTML = btn.dataset.orig;
       delete btn.dataset.orig;
     }
+  }
+
+  // ==================== 滚动位置保留（2026-10-09 用户实测） ====================
+  // 现象：禁用/启用一个下方启动项后视图被强制滚回顶部，没法连续操作。
+  // 根因：列表整块 innerHTML 重建（刷新路径还有骨架屏中间态，先丢一次），
+  // .main-content 的 scrollTop 被夹回 0 后没人回填。
+  let lastMainScrollTop = 0;
+  document.addEventListener('scroll', (e) => {
+    const t = e.target;
+    if (!t || !t.classList || !t.classList.contains('main-content')) return;
+    if (!document.getElementById('page-startup')?.classList.contains('active')) return;
+    lastMainScrollTop = t.scrollTop;
+  }, true);
+  function restoreMainScroll() {
+    const s = document.querySelector('.main-content');
+    if (s && lastMainScrollTop > 0) s.scrollTop = lastMainScrollTop;
+  }
+
+  // 骨架屏/整块重建期间锁住列表高度（2026-10-09 用户实测：刷新路径先塌陷再回填，
+  // 出现「跳上去又弹回来」的抖动）。锁高让滚动位置全程不失位；渲染落定后解锁。
+  let listHeightLock = 0;
+  function lockListHeight() {
+    const list = el('startupList');
+    if (!list) return;
+    listHeightLock = list.offsetHeight;
+    if (listHeightLock > 0) list.style.minHeight = listHeightLock + 'px';
+  }
+  function unlockListHeight() {
+    const list = el('startupList');
+    if (!list) return;
+    requestAnimationFrame(() => {
+      list.style.minHeight = '';
+      restoreMainScroll();
+    });
   }
 
   function render() {
@@ -433,6 +497,8 @@
         show(fallbackUrl);
       }
     });
+    restoreMainScroll();
+    unlockListHeight();
   }
 
   function renderError(msg) {
@@ -441,6 +507,7 @@
     el('startupDisabled').textContent = '-';
     el('startupListCount').textContent = '0 项';
     el('startupList').innerHTML = `<div class="empty-state"><p>${escapeHtml(msg)}</p></div>`;
+    unlockListHeight();
   }
 
   function getSelected() {

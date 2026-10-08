@@ -294,8 +294,19 @@
   // —— 还原点是保护，不是前置条件（对齐 HiBit 语义）。复用 optimizer 域现有命令，
   // Rust 侧零改动：check_restore 是 readonly 档、create_restore 是 MAIN 档，主窗都能调。
   const RESTORE_PREF_KEY = 'trim.uninstall.restorePoint';
+  // D2（v4 审查）：读失败/坏值走「未开启」方向 + 留痕（同残留副窗备份开关的口径）。
   function readRestorePref() {
-    try { return localStorage.getItem(RESTORE_PREF_KEY) === '1'; } catch (e) { return false; }
+    let raw = null;
+    try { raw = localStorage.getItem(RESTORE_PREF_KEY); }
+    catch (e) {
+      window.app?.log?.('warn', `卸载页还原点开关偏好读取失败，已按未开启处理: ${e.message}`);
+      return false;
+    }
+    if (raw === '1') return true;
+    if (raw !== null && raw !== '' && raw !== '0') {
+      window.app?.log?.('warn', `卸载页还原点开关偏好值异常（${raw}），已按未开启处理`);
+    }
+    return false;
   }
 
   async function createRestorePointIfEnabled() {
@@ -607,7 +618,8 @@
     if (restoreToggle) {
       restoreToggle.checked = readRestorePref();
       restoreToggle.addEventListener('change', () => {
-        try { localStorage.setItem(RESTORE_PREF_KEY, restoreToggle.checked ? '1' : '0'); } catch (e) { /* 写不进去就本次会话有效 */ }
+        try { localStorage.setItem(RESTORE_PREF_KEY, restoreToggle.checked ? '1' : '0'); }
+        catch (e) { window.app?.log?.('warn', `卸载页还原点开关偏好写入失败（本次会话有效）: ${e.message}`); }
       });
     }
     document.getElementById('uninstallList')?.addEventListener('click', (e) => {

@@ -311,7 +311,6 @@ check(
 // ② 谁把 REG_EXPORT_TIMEOUT 常量改掉（换字面量/换时长）即红（超时一致性）。
 const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["export", &export_path, reg_file_str, "/y"]', reason: '启动项禁用台账：删值前整键备份' },
-  { file: 'src-tauri/src/engine/native/contextmenu.rs', anchor: '&["export", &write_path, reg_file_str, "/y"]', reason: '右键菜单删除前整键备份' },
   { file: 'src-tauri/src/engine/native/peripheral.rs', anchor: '&["export", &reg_path, backup_file_str, "/y"]', reason: '外设优化写值前逐键备份' },
   { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },

@@ -13,7 +13,7 @@ pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute, find_ru
 mod common;
 pub(crate) use common::to_wide;
 mod contextmenu;
-pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle, cm_remove, cm_backup, cm_restore};
+pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle};
 mod diagnostics;
 pub use diagnostics::{sysdisk, overview_checkup, device_info};
 mod maintenance;

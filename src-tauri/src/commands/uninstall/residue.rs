@@ -191,7 +191,19 @@ pub(super) fn start_menu_shortcut_hits(app_name: &str) -> Vec<String> {
 // 原则：按「系统对象里记录的程序路径」反查，不按程序名猜。已知线索 = 卸载键的
 // InstallLocation / UninstallString / DisplayIcon 推出的 exe 路径与安装目录。
 // 全部来源置信度 medium、默认不勾（拍板口径见 uninstall_residue_scan 的文档注释）。
+//
+// v4-K02（D4 止血）：系统命名空间判据复用 `protect::is_system_namespace`
+// （与右键资源串白名单 K01 同一实现，禁止各写一份）——两条 folder 分支与执行侧
+// `classify_residue_op` 都在用，防「厂商把 InstallLocation/UninstallString 写成
+// System32 的系统组件路径」时整棵系统目录进删除清单。
 
+/// 系统组件 exe 判据（v4-K02 共用化）：MSI 卸载走 `msiexec.exe` 不代表程序装在 System32。
+/// 「反查线索集」（[`collect_program_objects`]）与「exeParent folder 分支」必须同一判据 ——
+/// 此前只在反查侧挡了它，folder 侧漏掉 ⇒ `<System32>\msiexec.exe /x {GUID}` 的父目录
+/// 会成「高置信、默认勾选」候选。
+pub(super) fn is_system_component_exe(exe: &str) -> bool {
+    exe.trim().to_ascii_lowercase().ends_with("\\msiexec.exe")
+}
 
 /// 从卸载键线索收集「程序对象」：(exe 全路径集合, 安装目录)。
 /// exe 来源 = UninstallString / DisplayIcon 解析 + 安装目录一级 *.exe 直查（上限 16）。
@@ -203,7 +215,7 @@ pub(super) fn collect_program_objects(loc: &str, uninstall_string: &str, display
             // msiexec.exe 是系统组件：MSI 卸载走它不代表程序装在 System32，反查它只会误伤
             if !exe.is_empty()
                 && exe.to_ascii_lowercase().ends_with(".exe")
-                && !exe.to_ascii_lowercase().ends_with("\\msiexec.exe")
+                && !is_system_component_exe(&exe)
             {
                 exes.push(exe);
             }
@@ -593,6 +605,9 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         if !loc.is_empty()
             && Path::new(&loc).is_dir()
             && !protect::is_path_protected(&loc)
+            // v4-K02 止血：厂商写 InstallLocation=%SystemRoot%\System32 这类系统目录时，
+            // protect 的 exact 语义拦不住子孙 —— 用系统命名空间判据整棵拒（ProgramFiles 不拒）
+            && !protect::is_system_namespace(&loc)
         {
             let why = contribs(&[("installLocationAlive", format!("厂商写的安装目录仍在磁盘上：{loc}"))]);
             findings.push(json!({
@@ -624,11 +639,18 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                 continue;
             }
             if let Some((exe, _)) = split_uninstall_cmd(src) {
+                // v4-K02 止血：系统组件 exe（msiexec 等）不代表程序住在那——与反查侧
+                // （collect_program_objects）用同一判据，此前这里漏了
+                if is_system_component_exe(&exe) {
+                    continue;
+                }
                 if let Some(parent) = Path::new(&exe).parent() {
                     let pd = parent.to_path_buf();
                     if pd.as_os_str().is_empty()
                         || !pd.is_dir()
                         || protect::is_path_protected(&pd.to_string_lossy())
+                        // v4-K02 止血：exe 落点（或其祖先）在系统命名空间时不得据此产候选
+                        || protect::is_system_namespace(&pd.to_string_lossy())
                         || findings.iter().any(|f| {
                             f["kind"] == "folder"
                                 && f["target"].as_str().map(|s| s.eq_ignore_ascii_case(&pd.to_string_lossy())).unwrap_or(false)
@@ -1068,6 +1090,14 @@ pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
             if protect::is_path_protected(&shown) {
                 log::write_log("warn", &format!("uninstall_residue_execute 拒绝: 受保护路径 {shown}"));
                 return OpVerdict::Abort(format!("包含受保护的系统路径，已拒绝：{shown}"));
+            }
+            // v4-K02 止血（D4）的执行侧纵深：`%WINDIR%` 在 protect 里是 exact 语义，
+            // System32 这类系统命名空间会被判「不受保护」——扫描侧已拦，这里是漏网兜底。
+            // 与受保护路径不同，这里用 **Skip 不 Abort**：系统目标是扫描面的漏网而非恶意
+            // 请求，不该因此拒绝整批（其余合法项照常执行）。
+            if protect::is_system_namespace(&shown) {
+                log::write_log("warn", &format!("uninstall_residue_execute 跳过系统目录目标: {shown}"));
+                return OpVerdict::Skip(format!("目标位于系统目录（Windows/System32 等），已拒绝：{shown}"));
             }
             if std::fs::symlink_metadata(target).is_err() {
                 // 原本这里是被静默滤掉（报告里连一行都没有），现按 skip 记因：

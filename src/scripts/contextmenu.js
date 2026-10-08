@@ -1,6 +1,6 @@
 // contextmenu.js - 右键菜单管理模块（列表条目 + 详情弹窗 + AI 简介）
-// 交互模式：勾选=启用，取消=禁用（可逆，直接写注册表/文件属性）；
-// 删除为行内「备份并删除」按钮，操作不可逆。
+// 交互模式：勾选=启用，取消=禁用（可逆，直接写注册表/文件属性）。
+// 2026-10-09（用户裁定 D3）：删除/备份/恢复整链退役，本页只保留启停能力。
 (function () {
   'use strict';
 
@@ -240,10 +240,41 @@
     return placeholderIconHtml(size);
   }
 
+  // ==================== 滚动位置保留（2026-10-09 用户实测） ====================
+  // 现象：禁/启用一个下方条目后视图被强制滚回顶部，没法连续操作。
+  // 根因：列表整块 innerHTML 重建——重建瞬间 .main-content 内容高度归零，scrollTop
+  // 被浏览器夹回 0，重建完没人回填（扫描路径还有骨架屏中间态，先丢一次）。
+  // 机制：滚动事件跟踪本页用户最后停留位置；重建落定后回填（同一同步块内，无闪动）。
+  let lastMainScrollTop = 0;
+  document.addEventListener('scroll', (e) => {
+    const t = e.target;
+    if (!t || !t.classList || !t.classList.contains('main-content')) return;
+    if (!document.getElementById('page-contextmenu')?.classList.contains('active')) return;
+    lastMainScrollTop = t.scrollTop;
+  }, true);
+  function restoreMainScroll() {
+    const s = document.querySelector('.main-content');
+    if (s && lastMainScrollTop > 0) s.scrollTop = lastMainScrollTop;
+  }
+
   function renderList() {
     const container = document.getElementById('contextMenuList');
     if (!container) return;
+    // 2026-10-09 用户实测（抖动）：看板列是 absolute 定位、高度由 masonry 布局写回 ——
+    // 整块重建后「布局落定前」容器高度为 0，.main-content 的滚动位置会被夹住又弹回
+    // （表现为想回顶又被拽住的抖动）。重建前锁住旧高度、布局落定后解锁再对一次位置，
+    // 塌陷窗口从此不存在；两次操作都在同一帧内完成（rAF 在绘制前执行），无可见闪动。
+    const prevH = container.offsetHeight;
+    if (prevH > 0) container.style.minHeight = prevH + 'px';
+    renderListInner(container);
+    restoreMainScroll();
+    requestAnimationFrame(() => {
+      if (prevH > 0) container.style.minHeight = '';
+      restoreMainScroll();
+    });
+  }
 
+  function renderListInner(container) {
     if (items.length === 0 && !hasScanned) {
       container.innerHTML = renderEmptyState('点击"扫描右键菜单"开始检测');
       return;
@@ -269,7 +300,7 @@
       `</div>`;
 
     // 绑定看板行：点击复选框切换启用/禁用，点击其余区域打开详情弹窗
-    //（文字选中时跳过以支持复制；删除入口在详情弹窗内）
+    //（文字选中时跳过以支持复制）
     container.querySelectorAll('.ctx-kanban-row').forEach(el => {
       el.addEventListener('click', e => {
         const key = el.dataset.itemKey;
@@ -387,7 +418,7 @@
 
   // ==================== 详情弹窗 ====================
   // CM-9（2026-09-19）：HKCR 只是合并视图，条目真正住在哪个 hive 必须可见——
-  // 备份/恢复/删除都按真实 hive 走，展示层再给一个 HKCR 路径会让人误判。
+  // 启停按真实 hive 走，展示层再给一个 HKCR 路径会让人误判。
   function nativeRowHtml(item) {
     const native = item.nativeRegPath || '';
     const display = item.regPath || item.location || '';
@@ -414,7 +445,7 @@
     const row = (label, value) => `<div class="ctx-detail-row"><span class="ctx-detail-label">${escapeHtml(label)}</span><span class="ctx-detail-value">${escapeHtml(value)}</span></div>`;
     const rows = [];
     if (item.confirmRequired) {
-      rows.push(row('风险提示', item.confirmReason || '该项承载资源管理器的默认「打开/浏览」行为，禁用或删除需谨慎'));
+      rows.push(row('风险提示', item.confirmReason || '该项承载资源管理器的默认「打开/浏览」行为，禁用后需谨慎'));
     }
     if (item.orphan) {
       rows.push(row('失效残留', item.orphanReason || '对应组件已不存在（多为软件卸载遗留），可安全清理'));
@@ -460,9 +491,6 @@
           <div class="ctx-detail-desc">
             <div class="ctx-detail-desc-title">简介</div>
             <div data-role="introMount"></div>
-          </div>
-          <div class="ctx-detail-actions">
-            <button class="ctx-detail-delete" data-role="deleteBtn" data-tip="备份到桌面后删除此项（不可逆）">备份并删除</button>
           </div>`
     });
     const backdrop = ctxModalCtrl.backdrop;
@@ -482,13 +510,6 @@
         item
       });
     }
-
-    // 详情内删除：先关闭弹窗，再走统一的「备份并删除」确认流程
-    backdrop.querySelector('[data-role="deleteBtn"]').addEventListener('click', () => {
-      const target = item;
-      closeDetail();
-      removeItem(target);
-    });
 
     // 注册表路径：点击打开 regedit 并定位（需要时自动提权）
     const regJump = backdrop.querySelector('[data-role="regJump"]');
@@ -624,9 +645,21 @@
           // 重命名类切换（shellex '-' 前缀 / 禁用前缀还原）后更新条目路径，
           // 保证不重新扫描的情况下反向切换仍能定位到键
           if (r.newRegPath) p.item.regPath = r.newRegPath;
-          // CM-9：真实 hive 路径同步更新，后续备份/删除/启停都以它为准
+          // CM-9：真实 hive 路径同步更新，后续启停都以它为准
           if (r.newNativeRegPath) p.item.nativeRegPath = r.newNativeRegPath;
           p.item.enabled = p.enabled;
+          // 净变化入/出待生效集合（2026-10-09 用户实测：动作计数来回点会虚涨）；
+          // 回到基线状态的项自动移除，基线只有在「重启生效 / 稍后」时才重置。
+          const itemKey = getItemKey(p.item);
+          let base = origEnabledByKey.get(itemKey);
+          if (base === undefined) {
+            // 基线缺失（未扫描过 / 用户点过「稍后」重置）：按本次切换**前**的状态立基线，
+            // 使这次改动计入集合（否则 undefined 会把改动静默吞掉）。
+            base = !p.item.enabled;
+            origEnabledByKey.set(itemKey, base);
+          }
+          if (p.item.enabled === base) pendingKeys.delete(itemKey);
+          else pendingKeys.add(itemKey);
           changed++;
         } else {
           failed++;
@@ -643,8 +676,8 @@
       } else {
         window.app?.toast('success', `已${payloads[0].enabled ? '启用' : '禁用'} ${changed} 项`);
       }
-      // 批次 B：改动要重启资源管理器才在菜单里可见，累计到生效条（不每次打断用户）
-      if (changed > 0) markPendingApply(changed);
+      // 批次 B：改动要重启资源管理器才在菜单里可见，刷新生效条（净变化集合）
+      if (changed > 0) markPendingApply();
     } catch (e) {
       window.app?.toast('error', '切换失败: ' + e.message);
     }
@@ -703,57 +736,8 @@
     toggleItemsWithGuard(affected.map(item => ({ item, enabled: target })));
   }
 
-  // ==================== 行内删除（先备份后删除，不可逆） ====================
-  // 审查v4-M3：右键项删除不可逆（注册表删除无回收站语义），按规范走红色二次确认，
-  // dangerHint 明示备份目录是唯一恢复手段
-  async function removeItem(item) {
-    // CM-13：基础打开项删除时在 dangerHint 里点明额外后果
-    const openHint = item.confirmRequired
-      ? `\n注意：${item.confirmReason || '该项是基础打开动词'}。`
-      : '';
-    const ok = await window.app?.confirmDanger(
-      '删除右键菜单项',
-      `即将备份并删除「${item.name}」。\n备份文件将保存到桌面"右键菜单备份_时间戳"目录。\n\n是否继续？`,
-      '确认删除',
-      '取消',
-      '该操作不可逆（注册表删除无回收站语义），桌面备份目录是唯一恢复手段。' + openHint
-    );
-    if (!ok) return;
-    try {
-      if (window.api?.contextmenu) {
-        const backupResp = await window.api.contextmenu.backup([item]);
-        if (!backupResp?.success) throw new Error(backupResp?.message || '备份失败，已停止删除');
-        const resp = await window.api.contextmenu.remove([{
-          // 审查 CM-15：remove 同样要求 id 才能通过快照校验（否则项未删却报错）
-          id: item.id,
-          name: item.name, regPath: item.regPath, risk: item.risk, source: item.source, clsid: item.clsid, category: item.category
-        }]);
-        // 复核 N2：提权半闭环收口（同 applyToggles）
-        if (resp && resp.needAdmin) {
-          const elevated = await window.app?.requestElevation?.('删除该菜单项需要管理员权限（写入 HKLM/HKCR 注册表）。');
-          if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行删除');
-          return;
-        }
-        if (!resp.success) throw new Error(resp.message);
-        window.app?.toast('success', '已备份并删除所选菜单项');
-        markPendingApply(1);
-      } else {
-        // 预览模式（审查v4-L8：全局横幅替代逐条 [模拟] 前缀）
-        await new Promise(r => setTimeout(r, 800));
-        window.app?.showPreviewModeBanner?.();
-        window.app?.toast('success', `已备份到桌面，并删除「${item.name}」`);
-      }
-      items = items.filter(i => getItemKey(i) !== getItemKey(item));
-      if (detailItem === item) closeDetail();
-      renderList();
-      updateUI();
-    } catch (e) {
-      window.app?.toast('error', '操作失败: ' + e.message);
-    }
-  }
-
   // v3.2.1：refresh=false 优先读持久缓存（首启扫描一次落盘，之后一直读文件，init 时自动加载）；
-  // true 强制重新扫描并覆盖缓存。删除/启停后走 true 保证拿到最新状态。
+  // true 强制重新扫描并覆盖缓存。启停后走 true 保证拿到最新状态。
   async function scan(refresh = false) {
     if (isScanning) return;
     isScanning = true;
@@ -787,6 +771,9 @@
         }));
       }
       hasScanned = true;
+      // 待生效基线的兜底记录：只记首见（重扫不覆盖）——净变化集合以「重启生效前的
+      // 原始状态」为基线，若随重扫刷新，用户来回点就永远算不出「已回到原状」。
+      items.forEach(noteBaseline);
       renderList();
       updateUI();
       // 后台加载程序图标，加载完成后刷新列表
@@ -806,52 +793,6 @@
     }
   }
 
-  async function restore() {
-    // 审查 v2-M11：同一条链路上「删除」已是红色确认（本文件 removeItem），「写回」却只是
-    // 普通 confirm ⇒ 确认等级方向反了——恢复会整批导入 .reg 并覆盖文件，破坏性不低于删除。
-    // 判据不来自这里：服务端已按 v2-K1 只导 manifest 登记且键路径合法的备份、并且要求提权。
-    const ok = await window.app?.confirmDanger?.(
-      '⚠️ 从备份恢复右键菜单',
-      '将用桌面上最新的那个「右键菜单备份_*」目录整体覆盖当前右键菜单设置：\n'
-      + '· 只导入该目录内、由本应用 manifest 登记过、且键路径落在注册表 Classes 范围内的备份文件；\n'
-      + '· 「发送到」/Win+X 的文件项会被备份内容覆盖，你对这些项的手动改动会丢失；\n'
-      + '· 此操作会写入注册表并可能影响机器级项，需要管理员权限。',
-      '仍然恢复',
-      '取消',
-      '恢复是整批覆盖，不是逐项选择。如需保留现状请先另存一份当前设置。'
-    );
-    if (!ok) return;
-    try {
-      if (window.api?.contextmenu) {
-        const resp = await window.api.contextmenu.restore();
-        // v2-K1 给服务端补了提权闸门：未提权时回 needAdmin，走本页既有的提权握手
-        if (resp && resp.needAdmin) {
-          const elevated = await window.app?.requestElevation?.('恢复右键菜单备份需要管理员权限（可能写入 HKLM 注册表）。');
-          if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行恢复');
-          return;
-        }
-        if (!resp.success) throw new Error(resp.message);
-        const d = resp.data || {};
-        const n = Number(d.imported || 0) + Number(d.restored || 0);
-        window.app?.toast('success', `已从 ${d.backupDir} 恢复 ${n} 项`);
-        // CM-9：旧版本产出的备份头是 HKCR，导入会落到 HKLM，服务端一律拒收并回报 skipped。
-        // 这种情况必须如实告诉用户，不能让他以为「恢复成功了」。原因由服务端逐条给出，
-        // 这里不把某一种猜测写死成结论（拒收原因实际有五种，见 native 的 skipReasons）。
-        if (Number(d.skipped || 0) > 0) {
-          const reasons = Array.isArray(d.skipReasons) ? d.skipReasons.slice(0, 3).join('；') : '';
-          window.app?.toast('warning', `有 ${d.skipped} 个备份被拒绝导入${reasons ? '：' + reasons : ''}`, 6000);
-        }
-        if (n > 0) markPendingApply(n);
-      } else {
-        await new Promise(r => setTimeout(r, 800));
-        window.app?.showPreviewModeBanner?.();
-        window.app?.toast('info', '已恢复最新备份（预览模式，无实际操作）');
-      }
-    } catch (e) {
-      window.app?.toast('error', '恢复失败: ' + e.message);
-    }
-  }
-
   function setFilter(filter) {
     currentFilter = filter;
     document.querySelectorAll('#contextFilter .filter-tab').forEach(el => {
@@ -862,24 +803,64 @@
   }
 
   // ==================== 批次 B：延迟批量生效（重启资源管理器） ====================
-  // 右键菜单由 Explorer 在加载期解析，任何启停/删除/模式切换都要重启才看得到。
+  // 右键菜单由 Explorer 在加载期解析，任何启停都要重启才看得到。
   // 学参考实现的做法：不每改一项就打断用户，累计改动，由用户一次性重启。
-  let pendingApply = 0;
+  //
+  // 2026-10-09 用户实测（计数虚涨）：原实现是**动作计数器**（点 N 次累 N），来回点
+  // 「禁用→启用→禁用」会涨成一个巨大的数字，而真实待生效的净变化可能只有一两项。
+  // 现在按**净变化集合**记：以「上次重启生效（或本页首见）」为基线，某项目前状态
+  // 与基线相同就从集合移除、不同就加入；全回原状则生效条消失。
+  const pendingKeys = new Set();
+  const origEnabledByKey = new Map();
 
-  function markPendingApply(count) {
-    const n = Number(count) || 0;
-    if (n <= 0) return;
-    pendingApply += n;
+  /** 记录基线：只记首见（重扫/重建都不覆盖），基线只在「重启生效 / 用户点稍后」时重置。 */
+  function noteBaseline(item) {
+    const key = getItemKey(item);
+    if (!origEnabledByKey.has(key)) origEnabledByKey.set(key, item.enabled);
+  }
+
+  function markPendingApply() {
     renderApplyBar();
   }
+
+  function clearPendingApply() {
+    pendingKeys.clear();
+    origEnabledByKey.clear();
+    // 「重启生效 / 稍后」= 用户主动结束本轮：直接收起，不留 30s 尾巴
+    if (pendingResetTimer) { clearTimeout(pendingResetTimer); pendingResetTimer = 0; }
+    const bar = document.getElementById('ctxApplyBar');
+    if (bar) bar.hidden = true;
+  }
+
+  // 生效条从「有改动」到「全撤销」不立即崩塌（2026-10-09 用户实测：出现/消失都挤动
+  // 下方列表，视觉不连贯）——归零后横幅继续占位，改文案提示 30s 后自行消失；
+  // 30s 内再有改动则回到改动态（计时取消）。首屏（从未显示过）不受影响，不占位。
+  const APPLY_BAR_LINGER_MS = 30000;
+  let pendingResetTimer = 0;
 
   function renderApplyBar() {
     const bar = document.getElementById('ctxApplyBar');
     const text = document.getElementById('ctxApplyText');
     if (!bar || !text) return;
-    if (pendingApply <= 0) { bar.hidden = true; return; }
-    text.textContent = `已有 ${pendingApply} 项改动写入注册表，重启资源管理器后才会在右键菜单里生效。`;
-    bar.hidden = false;
+    const btnRestart = document.getElementById('btnCtxRestartExplorer');
+    const btnDismiss = document.getElementById('btnCtxApplyDismiss');
+    const n = pendingKeys.size;
+    if (n > 0) {
+      if (pendingResetTimer) { clearTimeout(pendingResetTimer); pendingResetTimer = 0; }
+      text.textContent = `已有 ${n} 项改动写入注册表，重启资源管理器后才会在右键菜单里生效。`;
+      if (btnRestart) btnRestart.hidden = false;
+      if (btnDismiss) btnDismiss.hidden = false;
+      bar.hidden = false;
+      return;
+    }
+    if (bar.hidden) return; // 从未显示过（首屏 / 已收起）：不占位
+    // 本轮有过改动、现在全撤销：保持占位 30s，避免下方列表上下跳
+    text.textContent = '本轮没有任何改动，本提示将在 30 秒后自行消失。';
+    if (btnRestart) btnRestart.hidden = true;
+    if (btnDismiss) btnDismiss.hidden = true;
+    if (!pendingResetTimer) {
+      pendingResetTimer = setTimeout(() => { pendingResetTimer = 0; bar.hidden = true; }, APPLY_BAR_LINGER_MS);
+    }
   }
 
   async function restartExplorer() {
@@ -907,8 +888,8 @@
       try {
         const resp = await window.api.contextmenu.restartExplorer();
         if (resp && resp.success) {
-          pendingApply = 0;
-          renderApplyBar();
+          // 改动已随重启生效：清空待生效集合与基线（当前状态成为新基线）
+          clearPendingApply();
           window.app?.toast('success', (resp.data && resp.data.message) || '已重启资源管理器');
         } else {
           window.app?.toast('error', (resp && resp.message) || '重启资源管理器失败');
@@ -926,12 +907,11 @@
   function init() {
     // 「扫描」按钮 = 强制真实扫描并覆盖缓存（v3.2.1 缓存政策）
     document.getElementById('btnScanContext')?.addEventListener('click', () => scan(true));
-    document.getElementById('btnRestoreMenu')?.addEventListener('click', restore);
     // 批次 B：生效条
     document.getElementById('btnCtxRestartExplorer')?.addEventListener('click', restartExplorer);
     document.getElementById('btnCtxApplyDismiss')?.addEventListener('click', () => {
-      pendingApply = 0;
-      renderApplyBar();
+      // 「稍后」只隐藏提示、不代表改动消失；把基线重置为当前状态，之后的改动重新计。
+      clearPendingApply();
       window.app?.toast('info', '改动已写入注册表，稍后可在资源管理器任务栏右键或重登后生效');
     });
     renderApplyBar();
@@ -945,5 +925,5 @@
     // 分组轴改成软件后，位置已经是行上看得见的标签，不需要再靠切视图才能看到全貌。
   }
 
-  window.contextmenu = { init, scan, removeItem, restore, MOCK_ITEMS, CATEGORY_ORDER, openDetail };
+  window.contextmenu = { init, scan, MOCK_ITEMS, CATEGORY_ORDER, openDetail };
 })();

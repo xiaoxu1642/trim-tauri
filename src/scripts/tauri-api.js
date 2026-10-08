@@ -117,12 +117,10 @@
     'uninstall:report-list': 'uninstall_report_list',
     'uninstall:report-get': 'uninstall_report_get',
     'uninstall:appx-logo': 'uninstall_appx_logo',
-    // contextmenu（8）
+    // contextmenu（8→5）：backup/remove/restore 2026-10-09 随「删除链整链退役」用户裁定（D3）
+    // 同撤（命令 + 原生实现 + 桥接 + 前端入口一并摘除；本页只保留启停能力）。
     'contextmenu:scan': 'contextmenu_scan',
-    'contextmenu:backup': 'contextmenu_backup',
-    'contextmenu:remove': 'contextmenu_remove',
     'contextmenu:toggle': 'contextmenu_toggle',
-    'contextmenu:restore': 'contextmenu_restore',
     'contextmenu:icons': 'contextmenu_icons',
     'contextmenu:open-in-regedit': 'contextmenu_open_in_regedit',
     'contextmenu:restart-explorer': 'contextmenu_restart_explorer',
@@ -491,10 +489,7 @@
         if (refresh === void 0) refresh = false;
         return invokeChannel('contextmenu:scan', { refresh: refresh });
       },
-      backup: function (items) { return invokeChannel('contextmenu:backup', { items: items }); },
-      remove: function (items) { return invokeChannel('contextmenu:remove', { items: items }); },
       toggle: function (items) { return invokeChannel('contextmenu:toggle', { items: items }); },
-      restore: function () { return invokeChannel('contextmenu:restore'); },
       icons: function (items) { return invokeChannel('contextmenu:icons', { items: items }); },
       openInRegedit: function (regPath) { return invokeChannel('contextmenu:open-in-regedit', { regPath: regPath }); },
       restartExplorer: function () { return invokeChannel('contextmenu:restart-explorer'); },
@@ -707,12 +702,14 @@
       powerPlanGet: function () { return invokeChannel('syspanel:power-plan-get'); },
       powerPlanApply: function (guid) { return invokeChannel('syspanel:power-plan-apply', { guid: guid }); },
       pagefileState: function () { return invokeChannel('syspanel:pagefile-state'); },
-      // 高危：前端必须显式带 confirmedHighRisk:true，后端未确认直接 Err
-      pagefileApply: function (managed, entries) {
+      // 高危：confirmedHighRisk 必须由**调用点**传入（v4-K05：此前桥接层硬编码 true，
+      // 等于任何调用点天生「已确认」，后端那道确认闸对渲染层结构性失效）。
+      // 调用点要先弹 red 档确认（syspanel.js 的 applyPagefile），再把凭据传进来。
+      pagefileApply: function (managed, entries, confirmedHighRisk) {
         return invokeChannel('syspanel:pagefile-apply', {
           managed: managed,
           entries: entries || [],
-          confirmedHighRisk: true
+          confirmedHighRisk: !!confirmedHighRisk
         });
       }
     },

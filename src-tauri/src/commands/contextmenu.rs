@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 
-use crate::engine::{delete_manifest, guard, log, native, paths, protect, shellicon, snapshot, sysinfo};
+use crate::engine::{guard, log, native, paths, shellicon, snapshot, sysinfo};
 // v3 C-1：宽字符串转换统一走 engine 唯一实现（原 to_wide16 已删）。
 use crate::engine::native::to_wide;
 
@@ -152,25 +152,6 @@ fn write_needs_admin(item: &Value) -> bool {
         || upper.starts_with("HKCR\\")
 }
 
-/// N1：文件系统类来源（不走 PS 注册表删除）
-fn is_file_source(item: &Value) -> bool {
-    matches!(
-        item.get("source").and_then(|v| v.as_str()),
-        Some("filesystem") | Some("winx")
-    )
-}
-
-/// 审查 v2-K1：恢复方向的提权闸门。抽成纯函数是为了让「提权 / 未提权」两种令牌态都能断言——
-/// 命令体里直接调 `sysinfo::is_admin()` 测到的是测试进程自己的令牌态，等于在测运行环境。
-fn restore_admin_gate(is_admin: bool) -> Option<Value> {
-    (!is_admin).then(|| {
-        json!({
-            "success": false, "needAdmin": true,
-            "message": "恢复右键菜单备份需要管理员权限（备份内可能含机器级项），请先提权再试",
-        })
-    })
-}
-
 /// CLSID → `InprocServer32` 默认值指向的 dll/exe（R1 去 PS 化，2026-10-01）。
 ///
 /// 三个视图与旧 `cm_icons.ps1` 同一批次、同一次序，差别只有一处且是放宽：旧脚本一旦读到
@@ -248,238 +229,6 @@ pub async fn contextmenu_scan<R: Runtime>(
     snapshot::set(&label, snapshot::by_id(&normalized));
     save_cache(&normalized);
     json!({ "success": true, "data": normalized })
-}
-
-/// contextmenu:backup —— 注册表 .reg 备份（整批成功才可用）
-#[tauri::command]
-pub async fn contextmenu_backup<R: Runtime>(
-    window: WebviewWindow<R>,
-    items: Option<Vec<Value>>,
-) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
-        return json!({ "success": false, "message": msg });
-    }
-    let items = items.unwrap_or_default();
-    let Some(snap) = snapshot::get(window.label()) else {
-        return json!({ "success": false, "message": "备份项不是最近一次扫描结果，已拒绝执行" });
-    };
-    let Some(safe) = validate_snapshot_items(&items, &snap) else {
-        return json!({ "success": false, "message": "备份项不是最近一次扫描结果，已拒绝执行" });
-    };
-    if safe.is_empty() {
-        return json!({ "success": false, "message": "没有可备份的右键菜单项" });
-    }
-    if safe.iter().any(|it| it.get("regPath").and_then(|v| v.as_str()).is_none()) {
-        return json!({ "success": false, "message": "备份项缺少注册表/文件路径，已停止" });
-    }
-
-    log::write_log("info", &format!("备份右键菜单: {} 项", safe.len()));
-
-    // S3：纯 Rust 原生
-    let data = match crate::engine::native::cm_backup(&safe) {
-        Ok(d) => {
-            log::write_log("info", "右键菜单备份原生完成");
-            d
-        }
-        Err(e) => return json!({ "success": false, "message": format!("原生备份失败: {e}") }),
-    };
-    let count = data.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
-    if data.get("backupDir").and_then(|v| v.as_str()).is_none() || count < 1 {
-        return json!({ "success": false, "message": "备份未生成有效文件" });
-    }
-    if failed > 0 {
-        log::write_log("error", &format!("右键菜单备份部分失败: {failed} 项未能导出"));
-        return json!({
-            "success": false,
-            "message": format!("有 {failed} 项未能生成有效备份（无法归位到真实注册表 hive），已停止删除")
-        });
-    }
-    // 审计 P1-5：`manifestOk` 由 cm_backup 产出却没人看。恢复侧（cm_restore）对
-    // 「没有 manifest 的备份目录」一律拒导，所以 manifest 写失败时这份备份就是废纸；
-    // 而删除流程的第一步正是「备份成功才允许删」——不判它就会出现
-    // 「删了，且声称备份可恢复，实际恢复不了」。备份失败即整批不许删（fail-closed）。
-    if data.get("manifestOk").and_then(|v| v.as_bool()) != Some(true) {
-        log::write_log("error", "右键菜单备份的 manifest.json 写入失败，本次不可用于恢复");
-        return json!({
-            "success": false,
-            "message": "备份清单（manifest.json）写入失败，这份备份无法用于恢复，已停止删除"
-        });
-    }
-    json!({ "success": true, "data": data })
-}
-
-/// contextmenu:remove —— 注册表项 PS 删除 + 文件系统项回收站删除
-#[tauri::command]
-pub async fn contextmenu_remove<R: Runtime>(
-    window: WebviewWindow<R>,
-    items: Option<Vec<Value>>,
-) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    let items = items.unwrap_or_default();
-    let Some(snap) = snapshot::get(window.label()) else {
-        return json!({ "success": false, "message": "删除项不是最近一次扫描结果，已拒绝执行" });
-    };
-    let Some(safe) = validate_snapshot_items(&items, &snap) else {
-        return json!({ "success": false, "message": "删除项不是最近一次扫描结果，已拒绝执行" });
-    };
-    if safe.is_empty() {
-        return json!({ "success": false, "message": "没有可删除的右键菜单项" });
-    }
-    if safe.iter().any(write_needs_admin) && !sysinfo::is_admin() {
-        return json!({
-            "success": false, "needAdmin": true,
-            "message": "涉及系统级右键菜单的操作需要管理员权限，请先提权"
-        });
-    }
-
-    let fs_items: Vec<&Value> = safe.iter().filter(|it| is_file_source(it)).collect();
-    let reg_items: Vec<Value> = safe.iter().filter(|it| !is_file_source(it)).cloned().collect();
-/// E4：把一条结果连同**本项耗时**压进 `results[]`。
-///
-/// 为什么不直接 `push(json!({...}))`：耗时字段要挂在同一处产出，四处 push 各写一遍
-/// `elapsedMs` 的话，下次改计时口径（换 Instant / 改毫秒 vs 微秒）必然漏一处。
-/// 单一入口 = 单一口径。
-///
-/// ⚠️ 本函数**只加字段，不改任何判定**：`success` / `failed` 两个计数在调用点各自
-/// 累加，不读 `elapsedMs`。E4 的「零风险」前提就是这个，改了就不是 E4 了。
-fn push_result(data: &mut Value, mut row: Value, started: &std::time::Instant) {
-    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    if let Some(o) = row.as_object_mut() {
-        o.insert("elapsedMs".into(), json!(elapsed_ms));
-    }
-    if let Some(arr) = data.get_mut("results").and_then(|v| v.as_array_mut()) {
-        arr.push(row);
-    }
-}
-
-
-    let mut data = json!({ "success": 0, "failed": 0, "results": [] });
-
-    // 注册表类
-    if !reg_items.is_empty() {
-        log::write_log("warn", &format!("删除右键菜单: {} 项", reg_items.len()));
-        // S3：纯 Rust 原生
-        data = match crate::engine::native::cm_remove(&reg_items) {
-            Ok(d) => {
-                log::write_log("info", "右键菜单删除原生完成");
-                d
-            }
-            Err(e) => return json!({ "success": false, "message": format!("原生删除失败: {e}") }),
-        };
-    }
-    if !data.get("results").map(|v| v.is_array()).unwrap_or(false) {
-        data["results"] = json!([]);
-    }
-
-    // 文件系统类：回收站删除 + 清单
-    if !fs_items.is_empty() {
-        log::flush_sync();
-        let mut manifest = Vec::new();
-        for it in &fs_items {
-            let p = it.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
-            let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            // E4：每项耗时。计时从进入循环体开始，覆盖后面的保护闸与回收站调用。
-            // ⚠️ 只加字段，`success` / `failed` 两个计数**不看**它（见 push_result 注释）。
-            let t_item = std::time::Instant::now();
-            if p.is_empty() {
-                data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
-                push_result(&mut data, json!({
-                    "id": id, "name": name, "status": "error", "message": "缺少文件路径"
-                }), &t_item);
-                continue;
-            }
-            // 审查 M12：AGENTS §3 把「删除前先过 protect」写成无条件红线，本出口此前是唯一
-            // 没落的一处。目标其实已被两道闸收住（`validate_snapshot_items` 只认扫描快照里的
-            // id/值、且 cm_scan.ps1 把来源限死在 SendTo/WinX 两个根），补 protect 是**纵深**：
-            // 万一上游扫描脚本放宽了根目录，这里仍有一道兜底。SendTo/WinX 在 `exact` 语义下
-            // 属后代路径，不会被误拦。
-            if protect::is_path_protected(p) {
-                data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
-                push_result(&mut data, json!({
-                    "id": id, "name": name, "status": "error", "message": "该路径受保护，已拒绝删除"
-                }), &t_item);
-                continue;
-            }
-            // 审查 v2-F1：走 `_os` 版。`p` 来自快照、可能含非 UTF-8 / 孤立代理项，
-            // `&str` 门面在 Windows 上虽是 WTF-8 保真，但上游任何 lossy 转换都会让
-            // 回收站去删一个名字被改写过的对象（删不到，或撞上同名的另一个文件）。
-            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
-                Ok(()) => {
-                    data["success"] = json!(data.get("success").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
-                    manifest.push(json!({
-                        "path": p.replace('/', "\\"), "name": name, "recycled": true,
-                        "deletedAt": delete_manifest::iso_now()
-                    }));
-                    push_result(&mut data, json!({
-                        "id": id, "name": name, "status": "ok", "message": "已移入回收站"
-                    }), &t_item);
-                }
-                Err(e) => {
-                    data["failed"] = json!(data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0) + 1);
-                    push_result(&mut data, json!({
-                        "id": id, "name": name, "status": "error", "message": e
-                    }), &t_item);
-                }
-            }
-        }
-        if !manifest.is_empty() {
-            let batch = format!("ctxmenu-{}", crate::engine::now_ms());
-            delete_manifest::save_delete_manifest(&batch, &manifest);
-        }
-    }
-
-    // CM-12：从快照与缓存摘除已成功项
-    let gone: std::collections::HashSet<String> = data
-        .get("results")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|r| {
-            r.get("status").and_then(|v| v.as_str()) == Some("ok")
-                || r.get("message").and_then(|v| v.as_str()) == Some("路径不存在")
-        })
-        .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .collect();
-    if !gone.is_empty() {
-        if let Some(mut s) = snapshot::get(window.label()) {
-            for id in &gone {
-                s.remove(id);
-            }
-            snapshot::set(window.label(), s);
-        }
-        if let Some(items) = load_cache() {
-            let kept: Vec<Value> = items
-                .into_iter()
-                .filter(|it| !gone.contains(it.get("id").and_then(|v| v.as_str()).unwrap_or("")))
-                .collect();
-            save_cache(&kept);
-        }
-    }
-
-    let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
-    // 审计 P1-4：以前只看 `failed == 0`，而「系统保护项 / 新建菜单禁止整键删除」这类
-    // 走的是 `skip` 分支 —— 于是一项都没删成也回 success:true，前端弹「已备份并删除」
-    // 并把行从界面上抹掉。skip 与 fail 一样都是"没删成"，必须让整次操作判负并带上原因。
-    let skipped = data.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
-    if failed > 0 || skipped > 0 {
-        let why = data
-            .get("results")
-            .and_then(|v| v.as_array())
-            .and_then(|a| {
-                a.iter()
-                    .find(|r| r.get("status").and_then(|s| s.as_str()) != Some("ok"))
-                    .and_then(|r| r.get("message").and_then(|m| m.as_str()))
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "部分项未删除".to_string());
-        log::write_log("warn", &format!("右键菜单删除未全部生效: failed={failed} skipped={skipped} ({why})"));
-        return json!({ "success": false, "data": data, "message": why });
-    }
-    json!({ "success": true, "data": data })
 }
 
 /// contextmenu:toggle —— 可逆启停（渲染层只表达目标 enabled，其余取快照）
@@ -602,7 +351,7 @@ pub async fn contextmenu_toggle<R: Runtime>(
 
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
     // skip 与 fail 一样是「没切成」：系统保护项/缺目标的 skip 若只统计 failed，
-    // 整次操作会回 success:true，UI 上那些行被当成已切换。与 cm_remove 同口径。
+    // 整次操作会回 success:true，UI 上那些行被当成已切换。
     let skipped = data.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
     if failed > 0 || skipped > 0 {
         let first_msg = data
@@ -615,61 +364,6 @@ pub async fn contextmenu_toggle<R: Runtime>(
         return json!({ "success": false, "message": first_msg, "data": data });
     }
     json!({ "success": true, "data": data })
-}
-
-/// contextmenu:restore —— 从备份目录恢复
-#[tauri::command]
-pub async fn contextmenu_restore<R: Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    // 审查 v2-K1：恢复方向没有「本项是否需要提权」的信息可用——要导哪些 .reg 是脚本自己
-    // 在备份目录里挑的，件里可能同时含 HKLM 与 HKCU 项。旧写法在非提权态直接跑，会让
-    // HKLM 那部分静默失败并被 `success` 判成「已恢复」。这里显式要提权，让整次操作要么
-    // 在管理员态完成、要么压根不开始。
-    if let Some(deny) = restore_admin_gate(sysinfo::is_admin()) {
-        return deny;
-    }
-    log::write_log("warn", "恢复右键菜单备份");
-
-    // S3：纯 Rust 原生
-    let data = match crate::engine::native::cm_restore() {
-        Ok(d) => {
-            log::write_log("info", "右键菜单恢复原生完成");
-            d
-        }
-        Err(e) => return json!({ "success": false, "message": format!("原生恢复失败: {e}") }),
-    };
-    let imported = data.get("imported").and_then(|v| v.as_i64()).unwrap_or(0)
-        + data.get("restored").and_then(|v| v.as_i64()).unwrap_or(0);
-    let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false) && imported > 0;
-    let skipped = data.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
-    if !success && skipped > 0 && imported == 0 {
-        // 审计 P2-17：这句原来把原因写死成「备份头不是真实注册表分支」，而 skipReasons 里
-        // 实际有五种（不在本次备份目录、未在 manifest 登记、备份头、键路径不合法、无法解析路径），
-        // 上面刚修的那条就是「不在备份目录内」——把一种猜测当结论报给用户，等于掩盖真因。
-        // 原因一律由 native 逐条产出，这里只报数量。
-        let reasons = data
-            .get("skipReasons")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .take(3)
-                    .filter_map(|x| x.as_str())
-                    .collect::<Vec<_>>()
-                    .join("；")
-            })
-            .unwrap_or_default();
-        return json!({
-            "success": false, "data": data,
-            "message": format!(
-                "{} 个备份被拒绝导入{}",
-                skipped,
-                if reasons.is_empty() { String::new() } else { format!("：{reasons}") }
-            )
-        });
-    }
-    json!({ "success": success, "data": data })
 }
 
 /// contextmenu:icons —— CLSID 图标提取（只接受快照内 CLSID）
@@ -1011,22 +705,6 @@ mod tests {
             "nativeRegPath": "HKEY_CURRENT_USER\\Software\\Classes\\x"
         })));
         assert!(!write_needs_admin(&json!({ "nativeRegPath": "HKCU\\X" })));
-    }
-
-    #[test]
-    fn file_sources_bypass_reg_delete() {
-        assert!(is_file_source(&json!({ "source": "filesystem" })));
-        assert!(is_file_source(&json!({ "source": "winx" })));
-        assert!(!is_file_source(&json!({ "source": "registry" })));
-    }
-
-    #[test]
-    fn restore_requires_elevation_both_ways() {
-        // v2-K1：未提权必须回 needAdmin（不是失败、更不是硬跑），提权态闸门放行
-        let deny = restore_admin_gate(false).expect("非提权态必须被闸门拦下");
-        assert_eq!(deny["success"], false);
-        assert_eq!(deny["needAdmin"], true);
-        assert!(restore_admin_gate(true).is_none());
     }
 
     #[test]

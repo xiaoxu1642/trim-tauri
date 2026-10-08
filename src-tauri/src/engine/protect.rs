@@ -440,6 +440,29 @@ pub fn is_path_protected_with(p: &str, r: &ProtectRoots) -> bool {
     false
 }
 
+/// 路径（目录或文件）是否落在**系统命名空间**：`%SystemRoot%` 本身或其一棵子树
+/// （含 System32 / SysWOW64 / WinSxS —— 它们都住在 SystemRoot 下）。
+///
+/// v4 审查两处消费方共用此判据，禁止各写一份（§5.16/N6）：
+/// - K02（残留扫描/执行）：`is_path_protected` 对 `%WINDIR%` 是 `exact` 语义、管不到
+///   子孙，`c:\windows\system32` 会被判「不受保护」——系统目录不得进删除候选；
+/// - K01（右键图标资源串 `@C:\…\x.dll,-1`）：白名单外一律不加载 DLL。
+///
+/// 前缀判定带分隔符（`C:\WindowsApps` 不是 `C:\Windows` 的子树）；不可判（空串 /
+/// 取不到系统根）按拒处理（fail-closed）。明确**不覆盖** `%ProgramFiles%` /
+/// `%ProgramData%`：那是合法程序安装位置。
+pub fn is_system_namespace(p: &str) -> bool {
+    let low = p.trim().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    if low.is_empty() {
+        return true;
+    }
+    let sysroot = env("SystemRoot").replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    if sysroot.is_empty() {
+        return true;
+    }
+    low == sysroot || low.starts_with(&format!("{sysroot}\\"))
+}
+
 /// 注入 PS / 原生删除的清单 JSON（元素已是归一化小写绝对路径，PS 只做字符串比较）。
 /// 键顺序与 JS `JSON.stringify` 一致（subtree/exact/anyDrive），便于双侧对拍逐字节比较。
 pub fn protected_roots_json() -> String {
@@ -950,5 +973,33 @@ mod tests {
         // 刻意**不**放进 matches_js_authority 的 parity 向量：JS 权威有同一缺口，
         // 塞进去会与 `!js.contains(...)` 打架；分歧与理由记在 normalize_for_compare
         // 的注释里，由本用例钉住 Rust 侧结论。
+    }
+
+    /// v4-K02/K01 共用判据：系统命名空间只覆盖 `%SystemRoot%` 子树（含 System32 /
+    /// SysWOW64 / WinSxS），前缀必须带分隔符，合法安装位置不误伤，不可判按拒。
+    /// 判红自证：把 is_system_namespace 改成恒 false ⇒ 本用例与 residue 的
+    /// `classify_residue_op_gates_run_before_any_mutation` 同时红（已实测）。
+    #[test]
+    fn system_namespace_covers_root_subtree_only() {
+        let drive = env("SystemDrive");
+        let d = if drive.is_empty() { "C:".to_string() } else { drive.trim_end_matches('\\').to_string() };
+        for hit in [
+            format!("{d}\\Windows"),
+            format!("{d}\\Windows\\System32"),
+            format!("{d}\\Windows\\SysWOW64\\x"),
+            format!("{d}/Windows/WinSxS"),
+            format!("{d}\\Windows\\System32\\shell32.dll"),
+        ] {
+            assert!(is_system_namespace(&hit), "系统命名空间未拦: {hit}");
+        }
+        for miss in [
+            format!("{d}\\WindowsApps"),
+            format!("{d}\\Program Files\\Foo"),
+            format!("{d}\\ProgramData\\Foo"),
+            format!("{d}\\Apps\\Windows\\Foo"),
+        ] {
+            assert!(!is_system_namespace(&miss), "合法位置被误拦: {miss}");
+        }
+        assert!(is_system_namespace(""), "不可判按拒（fail-closed）");
     }
 }
