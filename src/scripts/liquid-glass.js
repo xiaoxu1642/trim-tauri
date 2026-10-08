@@ -1,11 +1,13 @@
 // liquid-glass.js - 全局「液态玻璃」引擎 2.0
-// 模式（P2-13 起真源在后端 settings.json 的 `liquidMotion` 键，四档；localStorage
+// 模式（P2-13 起真源在后端 settings.json 的 `liquidMotion` 键；localStorage
 // 'trim-liquid-motion' 仅是首帧镜像/迁移来源；旧值 refract 自动迁移为 standard）。
+// 选项三档（2026-10-09 用户裁定）：full / standard / off —— frost 从选项退役
+// （太不明显），仅保留为环境自适应的内部降级档（电池/系统关透明时自动落入）。
 // 材质语义对齐 Apple Liquid Glass（docs规范/update/2026-09-14 五方案评估·B1）：
 //   full     ≈ clear+ ：完整液态玻璃——分段栏滑块 + 按钮 + 弹层 SVG 物理折射（斯涅尔定律位移贴图）
 //              + RGB 三通道边缘色散 + 高光贴图 + 指针弹性形变 + WebGL 弹层焦散高光
 //   standard ≈ regular：标准液态玻璃——覆盖面同 full，但单通道折射、无色散 / 形变 / WebGL
-//   frost    = regular 降级：磨砂玻璃，仅 backdrop blur（CSS 驱动），无折射滤镜
+//   frost    = 环境自适应内部档（不在选项里）：磨砂玻璃，仅 backdrop blur（CSS 驱动），无折射滤镜
 //   off      = 实底：隐藏滑块、恢复实底按钮，不注入任何滤镜
 // 技术来源：
 //   - 位移贴图：圆角矩形角环 + 斯涅尔折射轮廓（厚度 / 斜边宽 / 折射率），参考 liquid实现2
@@ -78,18 +80,29 @@
   // P2-13（2026-10-09）：真源迁后端 settings.json 的 `liquidMotion` 键（AGENTS §0.2）；
   // localStorage 降级为「同步初值 + 迁移来源 + 镜像」—— 玻璃档不能在 init 等 IPC，
   // 否则首帧闪实底；后端回读只做采纳/迁移，且晚于首帧也不推翻已渲染的档位。
+  // 2026-10-09 用户裁定：磨砂档从**选项**退役（太不明显，与标准几乎不可辨），选项只剩
+  // 完整/标准/关闭三档；frost 仍保留为环境自适应内部档（电池供电/系统关透明时由
+  // applyEnv 以 persist:false 落入，不写用户偏好）。存量偏好为 frost 的按 standard 归一。
+  const USER_MODES = ['full', 'standard', 'off'];
   let modePref = readLsMode();
   let modePrefDirty = false;
 
+  function normalizeUserPref(v) {
+    if (v === 'frost') return 'standard';
+    if (v && LEGACY_MODE_MAP[v]) return LEGACY_MODE_MAP[v];
+    return USER_MODES.indexOf(v) > -1 ? v : 'standard';
+  }
+
   function readLsMode() {
     try {
-      const v = localStorage.getItem(MODE_KEY);
-      if (v && LEGACY_MODE_MAP[v]) return LEGACY_MODE_MAP[v];
-      return MODES.indexOf(v) > -1 ? v : 'standard';
+      return normalizeUserPref(localStorage.getItem(MODE_KEY));
     } catch (e) { return 'standard'; }
   }
 
   function readStoredMode() { return modePref; }
+  // 用户偏好档（下拉显示用）：与 getMode 的「实际生效档」不同 —— 环境降级
+  //（电池/系统关透明 → frost）只改生效档，下拉必须仍显示用户选的那一档。
+  function getUserMode() { return modePref; }
 
   function persistMode(m) {
     modePref = m;
@@ -100,11 +113,11 @@
     } catch (e) { /* 真源写入失败按镜像工作，不打断档位切换 */ }
   }
 
-  // 设置页档位下拉与真源对齐：app.js 初始化时读 getMode()，后端采纳若晚于它，
+  // 设置页档位下拉与真源对齐：app.js 初始化时读 getUserMode()，后端采纳若晚于它，
   // 下拉会停在旧值——这里补一次同步（下拉不存在时静默跳过，本引擎五窗共用）。
   function syncModeSelect() {
     const sel = document.getElementById('liquidMotionSelect');
-    if (sel && sel.value !== mode) sel.value = mode;
+    if (sel && sel.value !== modePref) sel.value = modePref;
   }
 
   // 后端真源回读：合法档位 ⇒ 采纳并即时应用；无值/坏值 ⇒ 把本地镜像一次性迁移上去。
@@ -115,7 +128,7 @@
       if (!resp || !resp.success || modePrefDirty) return;
       const v = resp.data?.liquidMotion;
       if (typeof v === 'string' && (MODES.indexOf(v) > -1 || LEGACY_MODE_MAP[v])) {
-        const m = normalizeMode(v);
+        const m = normalizeUserPref(v);
         if (m !== modePref) {
           modePref = m;
           try { localStorage.setItem(MODE_KEY, m); } catch (e) { /* 镜像写失败不影响（真源已就位） */ }
@@ -1157,7 +1170,7 @@
   }
 
   window.liquidBar = {
-    init, mountAll, refreshAll: refreshBars, setMode, getMode,
+    init, mountAll, refreshAll: refreshBars, setMode, getMode, getUserMode,
     // 2.0 扩展：手动触发扫描（供动态渲染模块调用，可选项）
     rescan: scheduleScan,
     // 诊断：内部状态快照（ refract 计数 / 能力检测 / 滤镜桶 / 环境自适应 ）
