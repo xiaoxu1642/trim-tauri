@@ -237,17 +237,26 @@ pub fn read_json_state(path: &Path) -> JsonState {
     }
 }
 
-/// **读-改-写原语：读失败绝不落到写**（v4 组 1 / R7-M01，本仓 12 处读-改-写的唯一入口）。
+/// **读-改-写原语：读失败绝不落到写**（v4 组 1 / R7-M01，本仓读-改-写的唯一入口）。
 ///
 /// 只有 `Ok`（合法对象）与 `Absent`（首次写入）才执行 `f` 并落盘；`Corrupt` 直接返回
 /// `Err` —— 调用方负责如实回执/提示，**不得**降级成「基于空对象保存」。
 /// `f` 返回 `Err` 时不落盘（校验失败的改动不许部分写出去）。
+///
+/// **全程串行化**（v4 P2-13 补）：并发调用会在「读同一份旧值」上互相覆盖（丢更新）——
+/// P2-13 起渲染层对 settings.json 有三处 fire-and-forget 偏好写（玻璃档/鼠标拖尾/
+/// 防恢复），同一秒内可并发落到同一文件；不串行化则「刚设的偏好静默丢失」而回执是
+/// 成功。锁粒度为全局（落盘是毫秒级操作，按文件建锁表不值当）。
+/// **约束：`f` 内不得再调 update_json 系**（非重入锁会死锁）——现有调用点均为单层写入。
+static UPDATE_JSON_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn update_json<F>(path: &Path, f: F) -> Result<serde_json::Value, String>
 where
     F: FnOnce(&mut serde_json::Value) -> Result<(), String>,
 {
-    let mut cur = match read_json_state(path) {
-        JsonState::Ok(v) => v,
+    // 中毒恢复取内值：闭包 panic 是 bug，但不该让此后所有配置写入永久失败
+    let _guard = UPDATE_JSON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cur = match read_json_state(path) {        JsonState::Ok(v) => v,
         JsonState::Absent => serde_json::json!({}),
         JsonState::Corrupt => {
             return Err(format!(
@@ -665,6 +674,50 @@ mod tests {
         assert!(
             std::fs::read_to_string(&f).expect("读回").contains("\"keep\""),
             "f 失败时文件不得被改动"
+        );
+    }
+
+    /// v4 P2-13 补：`update_json` 全程串行化 —— 两线程各 +1 共 N 次，终值必须恰好 2N。
+    /// 不加锁时读-改-写交错必然丢更新（闭包内的 sleep 正是把「读→写」窗口拉宽，
+    /// 让这条用例把丢更新判红）；加锁后结果确定。
+    #[test]
+    fn update_json_serializes_concurrent_writers() {
+        let dir = std::env::temp_dir().join(format!("trim-update-json-conc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+        let f = dir.join("counter.json");
+        std::fs::write(&f, "{\"n\":0}").expect("写初值");
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let f = f.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..30 {
+                    update_json(&f, |v| {
+                        let n = v.get("n").and_then(|x| x.as_u64()).unwrap_or(0);
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+                        v["n"] = serde_json::json!(n + 1);
+                        Ok(())
+                    })
+                    .expect("并发写不应失败");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("线程不得 panic");
+        }
+        let text = std::fs::read_to_string(&f).expect("读回");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("合法 JSON");
+        assert_eq!(
+            v["n"], serde_json::json!(60),
+            "两线程各 30 次 +1，丢更新即红（终值 {text}）"
         );
     }
 }
