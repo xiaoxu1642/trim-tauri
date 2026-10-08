@@ -488,14 +488,17 @@ fn on_power_event<R: Runtime>(app: &AppHandle<R>) {
 /// 走 `reg.exe` 而非注册表 API：与 `commands::misc::detect_dwm_inject_tools`
 /// 同源姿势，且不为一个低频只读查询新增 windows crate feature。
 fn query_sys_transparency() -> bool {
-    let out = crate::engine::systembin::quiet_cmd(system_tool("reg"))
-        .args([
+    // v4 R5-M07：裸 .output() 改带超时 —— 外观查询挂在启动同步链上，挂住即锁 IPC
+    let out = crate::engine::systembin::quiet_cmd_timeout(
+        system_tool("reg"),
+        &[
             "query",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
             "/v",
             "EnableTransparency",
-        ])
-        .output();
+        ],
+        crate::engine::systembin::REG_EXPORT_TIMEOUT,
+    );
     let Ok(out) = out else { return true };
     let text = String::from_utf8_lossy(&out.stdout);
     // 形如：    EnableTransparency    REG_DWORD    0x1

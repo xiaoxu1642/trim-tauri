@@ -48,10 +48,13 @@ mod maint_reparse_tests {
 pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> Result<(), String> {
     let full = format!("{}{}", path.unwrap_or_default(), name);
     let arg = if disable { "/DISABLE" } else { "/ENABLE" };
-    let output = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-        .args(["/Change", "/TN", &full, arg])
-        .output()
-        .map_err(|e| format!("schtasks 执行失败: {e}"))?;
+    // v4 R5-M07：裸 .output() 改带超时（任务计划服务被拖住时不能永久锁 IPC）
+    let output = crate::engine::systembin::quiet_cmd_timeout(
+        system_tool("schtasks"),
+        &["/Change", "/TN", &full, arg],
+        crate::engine::systembin::SCHTASKS_TIMEOUT,
+    )
+    .map_err(|e| format!("schtasks 执行失败: {e}"))?;
     if output.status.success() {
         Ok(())
     } else {

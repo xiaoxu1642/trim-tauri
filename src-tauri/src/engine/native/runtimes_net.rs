@@ -474,10 +474,14 @@ pub fn netcheck_status() -> Result<Value, String> {
             let _ = RegCloseKey(ghk);
             g
         } else { false };
-        // WinHTTP 代理（spawn netsh）
-        let winhttp_out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
-            .args(["winhttp", "show", "proxy"])
-            .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+        // WinHTTP 代理（探测：v4 R5-M07 带超时）
+        let winhttp_out = crate::engine::systembin::quiet_cmd_timeout(
+            system_tool("netsh"),
+            &["winhttp", "show", "proxy"],
+            crate::engine::systembin::PROBE_TIMEOUT,
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
         let winhttp_has_proxy = winhttp_out.as_ref()
             .map(|o| (o.contains("proxy") || o.contains("代理服务器")) && !o.contains("直接访问") && !o.contains("DIRECT"))
             .unwrap_or(false);
@@ -681,10 +685,12 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             if name.trim().is_empty() {
                 return Ok(json!({"ok": false, "message": "缺少网卡名"}));
             }
-            let out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
-                .args(["interface", "set", "interface", &format!("name={name}"), "admin=enabled"])
-                .output()
-                .map_err(|e| format!("netsh 执行失败: {e}"))?;
+            let out = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("netsh"),
+                &["interface", "set", "interface", &format!("name={name}"), "admin=enabled"],
+                crate::engine::systembin::NETSH_TIMEOUT,
+            )
+            .map_err(|e| format!("netsh 执行失败: {e}"))?;
             if out.status.success() {
                 Ok(json!({"ok": true, "message": "网卡已启用"}))
             } else {
@@ -704,10 +710,12 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             if name.is_empty() {
                 return Ok(json!({"ok": false, "message": "缺少接口标识"}));
             }
-            let out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
-                .args(["interface", "ipv4", "set", "dnsservers", &format!("name={name}"), "source=dhcp"])
-                .output()
-                .map_err(|e| format!("netsh 执行失败: {e}"))?;
+            let out = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("netsh"),
+                &["interface", "ipv4", "set", "dnsservers", &format!("name={name}"), "source=dhcp"],
+                crate::engine::systembin::NETSH_TIMEOUT,
+            )
+            .map_err(|e| format!("netsh 执行失败: {e}"))?;
             if out.status.success() {
                 Ok(json!({"ok": true, "message": "DNS 已重置为自动获取"}))
             } else {
@@ -715,10 +723,12 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "start-dhcp" => {
-            let out = crate::engine::systembin::quiet_cmd(system_tool("sc"))
-                .args(["start", "Dhcp"])
-                .output()
-                .map_err(|e| format!("sc 执行失败: {e}"))?;
+            let out = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("sc"),
+                &["start", "Dhcp"],
+                crate::engine::systembin::SC_CMD_TIMEOUT,
+            )
+            .map_err(|e| format!("sc 执行失败: {e}"))?;
             if out.status.success() {
                 Ok(json!({"ok": true, "message": "DHCP 服务已启动"}))
             } else {
@@ -726,10 +736,12 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "start-dnscache" => {
-            let out = crate::engine::systembin::quiet_cmd(system_tool("sc"))
-                .args(["start", "Dnscache"])
-                .output()
-                .map_err(|e| format!("sc 执行失败: {e}"))?;
+            let out = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("sc"),
+                &["start", "Dnscache"],
+                crate::engine::systembin::SC_CMD_TIMEOUT,
+            )
+            .map_err(|e| format!("sc 执行失败: {e}"))?;
             if out.status.success() {
                 Ok(json!({"ok": true, "message": "DNS 缓存服务已启动"}))
             } else {
@@ -756,10 +768,12 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
             }
         }
         "reset-winhttp" => {
-            let out = crate::engine::systembin::quiet_cmd(system_tool("netsh"))
-                .args(["winhttp", "reset", "proxy"])
-                .output()
-                .map_err(|e| format!("netsh 执行失败: {e}"))?;
+            let out = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("netsh"),
+                &["winhttp", "reset", "proxy"],
+                crate::engine::systembin::NETSH_TIMEOUT,
+            )
+            .map_err(|e| format!("netsh 执行失败: {e}"))?;
             if out.status.success() {
                 Ok(json!({"ok": true, "message": "WinHTTP 代理已重置"}))
             } else {

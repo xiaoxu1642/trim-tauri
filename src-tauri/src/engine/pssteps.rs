@@ -1731,10 +1731,14 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             if !program.eq_ignore_ascii_case("powercfg.exe") {
                 return Err(format!("Spawn 算子只允许 powercfg.exe，收到 {program}"));
             }
-            let out = crate::engine::systembin::quiet_cmd(crate::engine::systembin::system_tool(program))
-                .args(args)
-                .output()
-                .map_err(|e| format!("powercfg 执行失败: {e}"))?;
+            // v4 R5-M07：裸 .output() 改带超时（优化项步骤挂在 IPC 同步链上）
+            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let out = crate::engine::systembin::quiet_cmd_timeout(
+                crate::engine::systembin::system_tool(program),
+                &args_ref,
+                crate::engine::systembin::POWERCFG_TIMEOUT,
+            )
+            .map_err(|e| format!("powercfg 执行失败: {e}"))?;
             if out.status.success() {
                 Ok(String::new())
             } else {

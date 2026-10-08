@@ -52,23 +52,24 @@ pub fn detect_dwm_inject_tools_async<R: tauri::Runtime>(app: AppHandle<R>) {
 
 fn detect_dwm_inject_tools() -> Option<String> {
     // 进程痕迹：tasklist /FI "IMAGENAME eq DWMBlurGlass.exe" /FO CSV
-    if let Ok(out) = crate::engine::systembin::quiet_cmd(system_tool("tasklist"))
-        .args(["/FI", "IMAGENAME eq DWMBlurGlass.exe", "/FO", "CSV"])
-        .output()
-    {
+    // v4 R5-M07：探测类命令带超时（10s 宽限上界；挂住即锁 IPC）
+    if let Ok(out) = crate::engine::systembin::quiet_cmd_timeout(
+        system_tool("tasklist"),
+        &["/FI", "IMAGENAME eq DWMBlurGlass.exe", "/FO", "CSV"],
+        crate::engine::systembin::PROBE_TIMEOUT,
+    ) {
         let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
         if text.contains("dwmblurglass.exe") {
             return Some("dwm-blur-tool".into());
         }
     }
     // 计划任务痕迹：schtasks /Query /TN DWMBlurGlass_Extend
-    if let Ok(status) = crate::engine::systembin::quiet_cmd(system_tool("schtasks"))
-        .args(["/Query", "/TN", "DWMBlurGlass_Extend"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        if status.success() {
+    if let Ok(out) = crate::engine::systembin::quiet_cmd_timeout(
+        system_tool("schtasks"),
+        &["/Query", "/TN", "DWMBlurGlass_Extend"],
+        crate::engine::systembin::PROBE_TIMEOUT,
+    ) {
+        if out.status.success() {
             return Some("dwm-blur-task".into());
         }
     }

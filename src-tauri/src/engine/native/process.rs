@@ -53,7 +53,15 @@ pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
         let _ = CloseHandle(h_term);
         terminated.map_err(|_| "结束进程失败".to_string())?;
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let still_alive = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).is_ok();
+        // v4 R5-M06：同 `h_term` 的纪律 —— `is_ok()` 直接丢弃句柄，反复对同名进程
+        // 点「结束」每次泄漏一个内核句柄（本判据就在结束链的收尾回读里）。
+        let still_alive = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => {
+                let _ = CloseHandle(h);
+                true
+            }
+            Err(_) => false,
+        };
         if still_alive {
             Ok(json!({"success": false, "message": format!("无法结束进程 {name_display} (PID {pid})，可能需要管理员权限")}))
         } else {

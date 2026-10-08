@@ -150,6 +150,22 @@ pub const FLTMC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// 平时毫秒级；任务计划服务被拖住时不能让它永久锁住 IPC。30s 是宽限上界。
 pub const SCHTASKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 只读探测类短命令（tasklist / netsh show / reg query 等）的统一超时（v4 R5-M07）：
+/// 正常毫秒级；这类命令挂在扫描/体检/外观查询的同步链上，挂住即锁 IPC。10s 宽限上界。
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `netsh` 设置类操作（winhttp reset / interface set / dns set）的超时（v4 R5-M07）：
+/// 正常秒级；网络栈被占用时可能拖住，30s 宽限上界（与 SCHTASKS_TIMEOUT 同档）。
+pub const NETSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `sc start` 服务操作的超时（v4 R5-M07）：服务进入 pending 时 `sc` 会一直等，
+/// 30s 宽限上界（更长的服务启动由维护链的 MAINT_CMD_TIMEOUT 单独兜）。
+pub const SC_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 优化项步骤里的 `powercfg` 超时（v4 R5-M07，pssteps 的 Spawn 算子）：
+/// 正常秒级，30s 宽限上界。
+pub const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// 带超时的静默子进程执行（v2-L4P-29 / B-7）。
 ///
 /// 为什么必须有它：6 处 `reg.exe export` 备份点此前都是裸 `.output()`——平时毫秒级，

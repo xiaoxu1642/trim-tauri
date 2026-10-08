@@ -167,9 +167,17 @@ pub fn service_exists(name: &str) -> bool {
             return false;
         };
         let name_w = to_wide(name);
-        let ok = OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS).is_ok();
+        let svc = OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS);
         let _ = CloseServiceHandle(scm);
-        ok
+        // v4 R5-M06：OpenServiceW 成功的句柄必须关 —— 旧实现 `.is_ok()` 直接丢弃句柄，
+        // 而本函数挂在巡检热路径上（每个服务一次），一轮就是几十上百个句柄泄漏。
+        match svc {
+            Ok(h) => {
+                let _ = CloseServiceHandle(h);
+                true
+            }
+            Err(_) => false,
+        }
     }
 }
 

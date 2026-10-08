@@ -343,6 +343,20 @@ const TIMEOUT_SPAWN_SITES = [
   // 1800s 对齐 MAINT_CMD_TIMEOUT（sfc/DISM/sc 同级长耗时）；到点杀的是 DISM 前端
   // 进程，CBS/TiWorker 事务自回滚，中断安全。
   { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: 'DISM_CLEANUP_TIMEOUT', reason: '清理页 DISM /StartComponentCleanup /ResetBase（审计 §4.4）', timeoutConst: 'DISM_CLEANUP_TIMEOUT', secs: 1800 },
+  // v4 R5-M07：11 处裸 quiet_cmd().output() 全量收口 —— 此前它们对三本账全不可见，
+  // 是「第四本无超时出口」：命令挂在扫描/体检/修复/优化步骤的同步链上，挂住即锁 IPC。
+  // 本次改造由本表棘轮反向抓出（改造后首跑 F 组未登记 11 处全被点名）。
+  { file: 'src-tauri/src/commands/appearance.rs', anchor: '"EnableTransparency",', reason: '外观查询：读系统透明度开关（reg query，只读低频）', timeoutConst: 'REG_EXPORT_TIMEOUT', secs: 15 },
+  { file: 'src-tauri/src/commands/misc.rs', anchor: '"IMAGENAME eq DWMBlurGlass.exe"', reason: 'DWM 注入工具探测：tasklist 进程痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
+  { file: 'src-tauri/src/commands/misc.rs', anchor: '"/TN", "DWMBlurGlass_Extend"', reason: 'DWM 注入工具探测：schtasks 计划任务痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '"/Change", "/TN", &full, arg', reason: '维护任务启停：schtasks /Change', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"winhttp", "show", "proxy"', reason: '网络体检：读 WinHTTP 代理态（只读探测）', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
+  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"interface", "set", "interface"', reason: '网络修复：启用网卡', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"interface", "ipv4", "set", "dnsservers"', reason: '网络修复：DNS 重置为自动获取', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"start", "Dhcp"', reason: '网络修复：启动 DHCP 服务（sc start）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"start", "Dnscache"', reason: '网络修复：启动 DNS 缓存服务（sc start）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"winhttp", "reset", "proxy"', reason: '网络修复：重置 WinHTTP 代理', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/pssteps.rs', anchor: 'system_tool(program)', reason: '优化项 Spawn 算子（编译期白名单仅 powercfg.exe）', timeoutConst: 'POWERCFG_TIMEOUT', secs: 30 },
 ];
 const TIMEOUT_SECS = 15;
 
