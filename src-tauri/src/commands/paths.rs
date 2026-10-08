@@ -1,7 +1,9 @@
 //! paths 域（批次 A）：paths:scan / load / save / browse / validate
 //!
-//! 白名单必须与渲染层 pathbinding.js 的 GROUPS 全集（4 组 10 项）+ scannedAt 保持同源
+//! 白名单必须与渲染层 pathbinding.js 的 GROUPS 全集（4 组 10 项）保持同源
 //! （审查 SET-1：原实现漏了 4 个「安装路径」key，导致设置页可编辑却静默保存失败）。
+//! P3 顺手修（2026-10-09）：`scannedAt` 从白名单移除 —— 前端那处冗余回写已删
+//! （后端 paths_scan 落盘时自带时间戳），写面收紧到用户真正可编辑的 10 个键。
 //!
 //! A 批落 load/save/validate/browse（纯 fs + 原生对话框）与
 //! app-icon/file-icon（Shell 图标提取）；C 批追补 `paths:scan`
@@ -71,8 +73,6 @@ const ALLOWED_KEYS: &[&str] = &[
     // 网易云音乐
     "neteaseMusicInstallPath",
     "neteaseCacheDir",
-    // 自动扫描时间戳（pathbinding.autoScan 回写）
-    "scannedAt",
 ];
 
 /// 读取路径配置（剥离历史遗留的软件清单字段）

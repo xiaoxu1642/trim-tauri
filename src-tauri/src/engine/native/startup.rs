@@ -920,7 +920,17 @@ unsafe fn set_approved_bit(hive: HKEY, subkey: &str, value_name: &str, disable: 
 ///
 /// 覆盖：注册表项（StartupApproved blob 为主，删值式为回退）、文件夹项（移动备份）、
 /// 计划任务（schtasks /Change）。disabled.json 记账维护。
+/// 启动项改写的进程级串行锁（2026-10-09）。
+///
+/// 为什么必须有：`startup_toggle` / `startup_delete` 的「读台账 → 逐项改 → 写回台账」
+/// 是读-改-写窗口，两个并发调用（用户连点两次、或两次 IPC 重叠）会各读一份旧账、
+/// 后写覆盖前写 —— 丢掉的正是「启用还原」的唯一依据（禁用项从此还原不回来）。
+/// 锁粒度取整次操作（台账与注册表一起串行；两个真机探针用例并发跑也因此确定化）。
+/// 扫描侧只读不锁：台账写入是原子的，读者看到的要么是旧账要么是新账，无撕裂。
+static STARTUP_LEDGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
+    let _guard = STARTUP_LEDGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         // v4 组 1（R5-M03）：台账损坏时不得用空集继续跑 —— 旧链在这里读空、循环照跑、
         // 最后 write 把空集写回（已禁用项整本记账永久丢失）。损坏即整批拒绝（fail-closed），
@@ -973,11 +983,21 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
     // 32 位 Run 项的批准位在 StartupApproved\Run32；写死了 Run 会既禁不掉该项，
     // 又可能误标同名 64 位项。回读校验与写入用同一个子键名，不再自证清白。
     let approved_subkey = if subkey.to_ascii_uppercase().contains("WOW6432NODE") { "Run32" } else { "Run" };
+    // RunOnce 项**完全不碰批准位**（StartupApproved 没有 RunOnce 子键，系统约定只覆盖
+    // Run/Run32/启动文件夹，2026-10-09 真机核实）：禁用走备份+删值、启用走台账恢复，
+    // 写/清 blob 都是死数据（还可能给同名 Run 项留一条 02-… 的空批准位）。
+    let is_run_once = subkey
+        .rsplit('\\')
+        .next()
+        .map(|s| s.to_ascii_lowercase().starts_with("runonce"))
+        .unwrap_or(false);
 
     if enable {
-        // 启用：优先清 StartupApproved bit0
+        // 启用：优先清 StartupApproved bit0（RunOnce 除外，见上）
         if reg_read_value_typed(hive, &subkey, value_name).is_some() {
-            set_approved_bit(hive, approved_subkey, value_name, false)?;
+            if !is_run_once {
+                set_approved_bit(hive, approved_subkey, value_name, false)?;
+            }
             records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
             return Ok("已启用".into());
         }
@@ -1024,14 +1044,22 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
         records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
         Ok("已启用".into())
     } else {
-        // 禁用：优先写 StartupApproved blob
+        // 禁用：Run/Run32 优先写 StartupApproved blob；RunOnce **一律走备份+删值** ——
+        // 批准位对 RunOnce 是死数据（判定见函数头 is_run_once）：界面显示「已禁用」
+        // 而下次登录该程序照样执行一次。删值 + 记账后，扫描的 disabled.json 合并会把
+        // 该项以「已禁用（Trim）」呈现，启用走同一本账恢复原值（与启动文件夹项同构）。
         if reg_read_value_typed(hive, &subkey, value_name).is_none() {
             return Err("注册表值不存在".into());
         }
-        match set_approved_bit(hive, approved_subkey, value_name, true) {
-            Ok(_) => Ok("已禁用（注册表值保留，可随时还原）".into()),
-            Err(e) => {
-                // 回退：删值 + 备份
+        let approve_fail: Option<String> = if is_run_once {
+            Some("RunOnce 项无系统批准位".to_string())
+        } else {
+            set_approved_bit(hive, approved_subkey, value_name, true).err()
+        };
+        match approve_fail {
+            None => Ok("已禁用（注册表值保留，可随时还原）".into()),
+            Some(why) => {
+                // 回退：删值 + 备份（RunOnce 直接走这里）
                 let (kind, data) = reg_read_value_typed(hive, &subkey, value_name)
                     .ok_or("读取注册表值失败")?;
                 let kind_str = match kind {
@@ -1055,7 +1083,7 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
                     (String::from_utf16_lossy(&wide[..end]), String::new(), Value::Array(vec![]))
                 };
                 if !reg_delete_value(hive, &subkey, value_name) {
-                    return Err(e);
+                    return Err(if is_run_once { "删除 RunOnce 值失败".into() } else { why.clone() });
                 }
                 let rec = json!({
                     "id": id, "name": item.get("name"), "command": v_data,
@@ -1068,7 +1096,11 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
                 });
                 records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
                 records.push(rec);
-                Ok(format!("已禁用（回退为删除值方式：{e}）"))
+                Ok(if is_run_once {
+                    "已禁用（RunOnce 项：备份后删除原值，可在列表中随时启用还原）".into()
+                } else {
+                    format!("已禁用（回退为删除值方式：{why}）")
+                })
             }
         }
     }
@@ -1210,6 +1242,7 @@ fn startup_deleted_dir() -> std::path::PathBuf {
 /// 文件夹：复制到 deleted/ 备份，返回 fsDelete 由主进程回收站删除
 /// 计划任务：schtasks /Query /XML 备份 + schtasks /Delete 删除
 pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
+    let _guard = STARTUP_LEDGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let deleted_dir = startup_deleted_dir();
     let stamp = crate::engine::now_ms().to_string();
 

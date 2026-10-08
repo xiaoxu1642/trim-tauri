@@ -1434,8 +1434,84 @@ fn startup_toggle_registry_probe_disable_and_enable() {
     assert!(blob2.starts_with("02"), "bit0 清零 ⇒ 首字节 02，实际 {blob2}");
 }
 
-/// v4 修复回归（快速组）：测速历史回执与**磁盘真值**自比对 ——
-/// 同一回归的另一受害者：`bench-history.json` 也是裸数组，被对象读器判损坏后
+/// RunOnce 探针的注册表路径（真机用例与清理守卫共用一份字面量）。
+const RUNONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
+
+/// RunOnce 探针项（与扫描产出的字段形状一致）。
+fn runonce_probe_item() -> serde_json::Value {
+    json!({
+        "id": format!("reg|HKEY_CURRENT_USER\\{RUNONCE_KEY}|TrimProbeRunOnceX"),
+        "name": "TrimProbeRunOnceX",
+        "source": "registry",
+        "hive": "HKCU",
+        "regPath": format!("HKEY_CURRENT_USER\\{RUNONCE_KEY}"),
+        "valueName": "TrimProbeRunOnceX",
+        "valueType": "String",
+        "valueData": r"C:\Windows\System32\notepad.exe",
+        "filePath": "",
+        "taskPath": "",
+        "taskName": "",
+    })
+}
+
+/// 真机 `#[ignore]` 探针：RunOnce 项的禁用必须走「备份 + 删值」。
+///
+/// 背景：StartupApproved 没有 RunOnce 子键（系统约定只覆盖 Run/Run32/启动文件夹），
+/// 旧实现对 RunOnce 也写批准位 —— 死数据：界面显示「已禁用」而下次登录该程序照样
+/// 执行一次。修复后禁用 = 删值 + 记台账（扫描合并仍以「已禁用（Trim）」呈现），
+/// 启用 = 从台账恢复原值。本用例自建自清；判红点：禁用后值还在 ⇒ 红。
+#[test]
+#[ignore = "真写 HKCU RunOnce 探针值（自建自清），发布前门禁跑"]
+fn startup_toggle_runonce_probe_uses_backup_delete() {
+    use trim_tauri_lib::engine::native::startup_toggle;
+
+    const NAME: &str = "TrimProbeRunOnceX";
+    let full_key = || format!(r"HKCU\{RUNONCE_KEY}");
+    let reg_query = || {
+        std::process::Command::new("reg")
+            .args(["query", &full_key(), "/v", NAME])
+            .output()
+            .expect("reg.exe 可执行")
+            .status
+            .success()
+    };
+
+    struct ProbeCleanup;
+    // Drop 守卫：尽力复原（启用回写走台账/清账），再删掉探针值，断言失败也不留痕。
+    impl Drop for ProbeCleanup {
+        fn drop(&mut self) {
+            let _ = trim_tauri_lib::engine::native::startup_toggle(&[runonce_probe_item()], true);
+            let _ = std::process::Command::new("reg")
+                .args(["delete", &format!(r"HKCU\{RUNONCE_KEY}"), "/v", NAME, "/f"])
+                .output();
+        }
+    }
+    let _cleanup = ProbeCleanup;
+
+    let _ = std::process::Command::new("reg")
+        .args(["delete", &full_key(), "/v", NAME, "/f"])
+        .output();
+    let st = std::process::Command::new("reg")
+        .args([
+            "add", &full_key(), "/v", NAME, "/t", "REG_SZ", "/d",
+            r"C:\Windows\System32\notepad.exe", "/f",
+        ])
+        .status()
+        .expect("reg.exe 可执行");
+    assert!(st.success(), "建探针 RunOnce 值失败");
+
+    let res = startup_toggle(&[runonce_probe_item()], false).expect("禁用不应整批失败");
+    assert_eq!(res["failed"], json!(0), "禁用应成功: {res}");
+    let msg = res["results"][0]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("RunOnce"), "回执应点名 RunOnce 走向备份删除: {res}");
+    assert!(!reg_query(), "禁用后 RunOnce 值必须已删除（写批准位是死数据，系统不认）");
+
+    let res2 = startup_toggle(&[runonce_probe_item()], true).expect("启用不应整批失败");
+    assert_eq!(res2["failed"], json!(0), "启用应成功（从台账恢复原值）: {res2}");
+    assert!(reg_query(), "启用后原值必须已恢复");
+}
+
+/// v4 修复回归（快速组）：测速历史回执与**磁盘真值**自比对 ——/// 同一回归的另一受害者：`bench-history.json` 也是裸数组，被对象读器判损坏后
 /// 列表恒空（文件里明明有记录）。本用例不依赖装机数据：文件不存在时只验形状，
 /// 存在时必须条数一致（采集与判定拆开：真值取自文件本身，不是硬编码期望）。
 #[test]

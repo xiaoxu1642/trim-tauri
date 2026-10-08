@@ -229,8 +229,11 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
           }
         }
         if (resp.data.scannedAt) {
+          // P3 顺手修（2026-10-09）：不再回写 scannedAt —— 后端 paths_scan 已把本次
+          // 时间戳一并落盘（paths.rs 的 SET-5），这里再发 paths.save('scannedAt', …)
+          // 恒被后端以「不是绝对路径」拒绝：Electron 时代遗留的冗余调用，
+          // 每次启动在日志里留一条 WARN。页脚显示用的本地镜像同步保留。
           pathConfig.scannedAt = resp.data.scannedAt;
-          await window.api.paths.save('scannedAt', resp.data.scannedAt);
         }
         await loadIcons();
         renderBody();
