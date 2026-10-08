@@ -3222,7 +3222,10 @@ select.field-input { cursor: pointer; appearance: auto; }
      超出 AGENTS.md §2「唯一豁免：开屏 splash 的**一次性走场**」的字面范围。
      改成只豁免 `#splash` 子树：主界面动效始终受保护，开屏自身仍是豁免的。
      选择器只用简单选择器进 `:not()`（不依赖 Selectors L4 的复杂选择器），
-     故这里用「body 直接子代中排除 #splash」+「其后代」两式覆盖整棵非开屏子树。 */
+     故这里用「body 直接子代中排除 #splash」+「其后代」两式覆盖整棵非开屏子树。
+     P3-3（F1）：选择器表**补 body 自身** —— 三子窗的 body fadeIn 过渡挂在 body 上，
+     旧表 `body > *` 只覆盖子元素，归零漏掉 body 自己（门禁 check-a11y ④ 点名）。 */
+  body,
   body > *:not(#splash),
   body > *:not(#splash) *,
   body > *:not(#splash)::before,
@@ -3237,6 +3240,12 @@ select.field-input { cursor: pointer; appearance: auto; }
        归零迭代次数后这些动画一次性跑完即停。 */
     animation-iteration-count: 1 !important;
     animation-delay: 0ms !important;
+  }
+  /* P3-3（F1）：`::-webkit-slider-thumb` 是厂商伪元素，上面两式（::before/::after）
+     覆盖不到 —— 字体管理滑块的悬停/按压缩放过渡在 RM 下必须归零
+     （ds.css 的 .ds-slider 拇指另有自己的 RM 归零段）。 */
+  input[type="range"]::-webkit-slider-thumb {
+    transition-duration: 0.01ms !important;
   }
 }
 

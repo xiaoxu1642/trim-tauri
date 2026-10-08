@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// check-a11y.mjs —— 可达性三断言（P3-1，2026-10-09）
+// check-a11y.mjs —— 可达性四断言（P3-1/P3-3，2026-10-09）
 //
-// 三条「找违规型」断言，各配**内置正向对照自检**（违例样本必须判红；只打印 ✓
+// 四条「找违规型」断言，各配**内置正向对照自检**（违例样本必须判红；只打印 ✓
 // 的恒绿断言视同没写，AGENTS §4.1）：
 //   ① 勾选框模板三属性：`class="checkbox"` 的元素必须同现
 //      `role="checkbox"` / `tabindex="0"` / `aria-checked`（自绘控件三件套，
@@ -10,6 +10,9 @@
 //      的宿主，读屏靠 aria-live 才知道内容变了 —— 没有它，提示等于静默。
 //   ③ `data-tip` 反 `title`（AGENTS §2）：禁 `title="` 属性与元素 `.title =` 赋值
 //      （原生 title 与自绘 tooltip 会双气泡；`document.title` 是窗口标题，除外）。
+//   ④ prefers-reduced-motion 归零覆盖面（v4 F1）：main.css 的 RM 归零段必须
+//      点名 **body 自身**（三子窗 body fadeIn 挂在 body 上，`body > *` 漏掉它）
+//      且覆盖 `::-webkit-slider-thumb`（厂商伪元素，::before/::after 式管不到）。
 //
 // 扫描面地板：三类命中数低于粗下界即判红（防「正则过时 ⇒ 0 命中恒绿」）。
 //
@@ -71,6 +74,23 @@ function titleViolations(text, isJs) {
   return out;
 }
 
+// ---------- ④ prefers-reduced-motion 归零覆盖面 ----------
+// v4 F1 红线：归零通配从 `body > *` 起算会漏掉 **body 自身**（三子窗 body fadeIn
+// 就挂在 body 上）；滑块拇指 `::-webkit-slider-thumb` 是厂商伪元素，归零表的
+// ::before/::after 两式覆盖不到 —— 两处各配断言，漏一处即红（点名 `body` 自身）。
+function rmViolations(css) {
+  const out = [];
+  const blocks = [...css.matchAll(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/g)]
+    .map((m) => m[1])
+    .join('\n');
+  if (!blocks) return ['没有任何 prefers-reduced-motion 归零段'];
+  // ① 归零选择器表必须含**裸 body 选择器项**（`body,` 打头的表项，不是仅 `body > *`）
+  if (!/(^|[\s{}])body\s*,/m.test(blocks)) out.push('归零选择器表未点名 body 自身（body fadeIn 过渡漏归零）');
+  // ② 滑块拇指（厂商伪元素）过渡必须被归零
+  if (!/::-webkit-slider-thumb/.test(blocks)) out.push('::-webkit-slider-thumb 过渡未归零（滑块的 scale 过渡在 RM 下仍会动）');
+  return out;
+}
+
 let fail = 0;
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
@@ -98,6 +118,13 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   check(titleViolations(badTitle, false).length === 1, '对照③a：title 属性样本必须判红');
   check(titleViolations(badTitleJs, true).length === 1, '对照③b：元素 .title 赋值样本必须判红');
   check(titleViolations(goodTitleJs, true).length === 0, '对照③c：document.title 与 data-tip 样本必须放行');
+
+  const badRmNoBody = '@media (prefers-reduced-motion: reduce) {\n  body > *:not(#splash) { animation-duration: 0.01ms !important; }\n}\n';
+  const badRmNoThumb = '@media (prefers-reduced-motion: reduce) {\n  body, body > * { transition-duration: 0.01ms !important; }\n}\n';
+  const goodRm = '@media (prefers-reduced-motion: reduce) {\n  body,\n  body > *:not(#splash) { transition-duration: 0.01ms !important; }\n  input[type="range"]::-webkit-slider-thumb { transition-duration: 0.01ms !important; }\n}\n';
+  check(rmViolations(badRmNoBody).some((v) => v.includes('body 自身')), '对照④a：归零表漏 body 自身的样本必须判红');
+  check(rmViolations(badRmNoThumb).some((v) => v.includes('slider-thumb')), '对照④b：拇指未归零的样本必须判红');
+  check(rmViolations(goodRm).length === 0, '对照④c：body 自身 + 拇指都归零的样本必须放行');
 }
 
 // ---- 真仓扫描 ----
@@ -126,6 +153,12 @@ for (const [p, text, isJs] of sources) {
 if (checkboxSites < 4) g.fail(`勾选框模板命中 ${checkboxSites} 处（< 4）⇒ 扫描面疑似失明`);
 if (liveHosts < 4) g.fail(`异步提示宿主命中 ${liveHosts} 处（< 4）⇒ 扫描面疑似失明`);
 if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描面疑似失明`);
+
+// ---- ④ 真仓扫描：main.css 的 RM 归零段（ds.css 的拇指归零自成一格，不强制耦合） ----
+{
+  const mainCss = readFileSync(join(SRC, 'styles', 'main.css'), 'utf8');
+  for (const v of rmViolations(mainCss)) g.fail(`src/styles/main.css：${v}`);
+}
 
 console.log(
   `\n扫描：${sources.length} 个源文件 · 勾选框模板 ${checkboxSites} 处 · 提示宿主 ${liveHosts} 处 · data-tip ${tipSites} 处`,
