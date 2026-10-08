@@ -989,11 +989,13 @@ use super::residue_update::*;
     }
 
     /// 快照分桶：面板现在同时展示多组候选，整槽覆盖会让先扫那组在执行时被快照闸判过期。
+    /// v4 P2-F（R2-M02）：输入**刻意不写 origin** —— 打标由 `residue_snapshot_put` 入口
+    /// 统一完成（生产侧曾 0 处赋值，分桶过滤恒不命中、重扫只累加且触顶保旧砍新）。
     #[test]
     fn residue_snapshot_buckets_replace_only_their_own_origin() {
         let label = "test-snapshot-merge";
-        residue_snapshot_put(label, "app", vec![json!({ "kind": "folder", "target": "C:\\a", "origin": "app" })]);
-        residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\X", "origin": "dead" })]);
+        residue_snapshot_put(label, "app", vec![json!({ "kind": "folder", "target": "C:\\a" })]);
+        residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\X" })]);
         let both: Vec<String> = residue_snapshots()
             .lock()
             .map(|g| g.get(label).cloned().unwrap_or_default().1)
@@ -1002,7 +1004,7 @@ use super::residue_update::*;
             .map(|f| f["target"].as_str().unwrap_or("").to_string())
             .collect();
         assert_eq!(both.len(), 2, "两组扫描的候选必须共存: {both:?}");
-        residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\Y", "origin": "dead" })]);
+        residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\Y" })]);
         let after: Vec<String> = residue_snapshots()
             .lock()
             .map(|g| g.get(label).cloned().unwrap_or_default().1)

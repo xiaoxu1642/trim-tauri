@@ -362,8 +362,29 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
             if pruned > 0 {
                 log::write_log("info", &format!("重启后删除台账：按保留窗口裁剪 {pruned} 条过期登记（撤回窗口已过）"));
             }
-            write_pfro(&pfro)?;
+            // v4 P2-F（R2-M03/M04）：**先落撤回凭据、再写系统 PFRO 队列** —— 旧顺序里
+            // `write_pfro(&pfro)?` 的 `?` 会让 `pending_save` 不跑：PFRO 已登记（重启必删）
+            // 而撤回凭据不存在 = 「已在重启队列但撤不回」。反序后最坏是「有凭据没系统项」
+            // （少删、可再登记），且 PFRO 失败时回滚本批凭据、回执如实说明。
             pending_save(&doc)?;
+            if let Err(e) = write_pfro(&pfro) {
+                // 回滚经 doc 重取（外层 entries 的 &mut 借已在上面的 prune 后结束）
+                if let Some(arr) = doc["entries"].as_array_mut() {
+                    arr.retain(|en| en["batchId"].as_str() != Some(batch.as_str()));
+                }
+                let rolled = pending_save(&doc).is_ok();
+                log::write_log(
+                    "error",
+                    &format!(
+                        "重启后删除：PFRO 写入失败（{e}），凭据回滚{}",
+                        if rolled { "成功" } else { "失败——撤回凭据仍在，本批不会删除（少了不删，比删了撤不回安全）" }
+                    ),
+                );
+                return Err(format!(
+                    "系统重启队列写入失败：{e}（{}）",
+                    if rolled { "本次登记已回滚" } else { "本批未删，可在列表中撤回后重试" }
+                ));
+            }
             log::flush_sync();
             log::write_log("warn", &format!("重启后删除：本批登记 {added} 项（永久删除，不进回收站）"));
         }
@@ -527,5 +548,20 @@ mod tests {
         let n = prune_pending_entries(&mut v, now);
         assert_eq!(n, 1);
         assert!(v.is_empty());
+    }
+
+    /// v4 P2-F（R2-M03/M04）：**撤回凭据先于系统 PFRO 队列落盘** —— 旧反序里
+    /// `write_pfro(&pfro)?` 的 `?` 会让 `pending_save` 不跑：PFRO 已登记（重启必删）
+    /// 而撤回凭据不存在 = 删了撤不回。真跑要写系统 PendingFileRenameOperations 注册表，
+    /// 这里用源码顺序形态钉住（判红：把两行换回反序即红）。
+    #[test]
+    fn pending_add_saves_credentials_before_pfro() {
+        let src = include_str!("pending_delete.rs");
+        let i_save = src.find("pending_save(&doc)?;").expect("找不到首次 pending_save");
+        let i_pfro = src.find("if let Err(e) = write_pfro(&pfro)").expect("找不到 write_pfro 调用");
+        assert!(
+            i_save < i_pfro,
+            "撤回凭据必须先落盘再写 PFRO（旧反序：PFRO 失败 ⇒ 凭据缺失、重启删了撤不回）"
+        );
     }
 }

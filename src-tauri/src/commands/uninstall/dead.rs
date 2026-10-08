@@ -16,6 +16,25 @@ use super::helpers::*;
 /// M4 的应用数据遗留链其实已经有这个坑（它覆盖掉单程序残留的快照），一并收口。
 pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Value>) {
     const SNAPSHOT_CAP: usize = 400;
+    // v4 P2-F（R2-M02）：origin 由**本函数**逐条打标 —— 生产侧此前 0 处赋值（候选对象
+    // 里根本没有该字段），而下面的分桶过滤按 `origin != Some(origin)` 判：没有字段 ⇒
+    // `None != Some(_)` 恒真 ⇒ 旧条目永不被清 ⇒ 重扫只累加（触顶 400 后 truncate 是
+    // 从头部截，等于**保旧砍新**：用户刚扫出来的候选反而被丢）。在入口统一打标后，
+    // 调用方不写 origin 也成立（「谁调谁负责每条形」这条纪律不再外漏成一个必踩的坑）。
+    let findings: Vec<Value> = findings
+        .into_iter()
+        .map(|mut f| {
+            if let Some(o) = f.as_object_mut() {
+                o.insert("origin".into(), serde_json::json!(origin));
+            }
+            f
+        })
+        .collect();
+    // v4 P2-F（R2-M02）：origin 由**本函数**逐条打标 —— 生产侧此前 0 处赋值（候选对象
+    // 里根本没有该字段），而下面的分桶过滤按 `origin != Some(origin)` 判：没有字段 ⇒
+    // `None != Some(_)` 恒真 ⇒ 旧条目永不被清 ⇒ 重扫只累加（触顶 400 后 truncate 是
+    // 从头部截，等于**保旧砍新**：用户刚扫出来的候选反而被丢）。在入口统一打标后，
+    // 调用方不写 origin 也成立（「谁调谁负责每条形」这条纪律不再外漏成一个必踩的坑）。
     let mut store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
     let mut merged: Vec<Value> = store
         .get(label)
