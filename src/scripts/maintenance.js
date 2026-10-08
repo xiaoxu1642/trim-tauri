@@ -551,9 +551,13 @@
         renderList();
         updateBatchbar();
         restorePendingBatch();
+      } else {
+        // v4 P2-E（F4a-M08）：失败不得静默停在「加载中」—— 用户要能区分
+        // 「当前分类没有任务」与「列表根本没加载出来」。
+        window.app?.toast?.('error', `维护任务列表加载失败：${(resp && resp.message) || '返回结构异常'}，可重新进入本页重试`);
       }
     } catch (e) {
-      // 静默：保留空态
+      window.app?.toast?.('error', `维护任务列表加载失败：${(e && e.message) || e}，可重新进入本页重试`);
     }
   }
 

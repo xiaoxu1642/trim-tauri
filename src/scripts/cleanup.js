@@ -937,6 +937,11 @@
             const fcResp = await window.api.fileclean.scan(item.fileCleanType, customPath);
             if (fcResp.success && fcResp.data) {
               fileCleanData.set(id, fcResp.data);
+              // v4 P2-E（R1-M05）：扫描达上限要留痕（旧实现无 truncated 字段，用户以为扫完了）
+              if (fcResp.data.truncated) {
+                console.warn(`[Trim] ${item.name} 扫描达上限，结果可能不完整`);
+                window.app?.toast?.('warning', `${item.name} 目录较大，扫描已达上限，结果可能不完整`);
+              }
               results.push({
                 id,
                 name: item.name,
@@ -947,10 +952,14 @@
                 exists: true
               });
             } else {
+              // v4 P2-E（R1-M05）：扫描失败不得伪装成「未配置」（旧实现 message 从未被读）——
+              // 有配置但扫不动时如实展示原因，用户才能区分「没配」与「查不到」。
+              const why = (fcResp && fcResp.message) || '未知原因';
+              console.warn(`[Trim] 文件清理扫描失败（${item.name}）: ${why}`);
               results.push({
                 id,
                 name: item.name,
-                path: customPath || '未配置',
+                path: customPath ? `扫描失败：${why}` : '未配置',
                 pathSource: 'configured',
                 size: 0,
                 risk: 'low',
@@ -958,10 +967,11 @@
               });
             }
           } catch (e) {
+            console.warn(`[Trim] 文件清理扫描异常（${item.name}）: ${e.message}`);
             results.push({
               id,
               name: item.name,
-              path: customPath || '未配置',
+              path: customPath ? `扫描失败：${e.message}` : '未配置',
               pathSource: 'configured',
               size: 0,
               risk: 'low',
@@ -1408,7 +1418,10 @@
               // freed 取后端回执（清空前的系统口径体积）；后端没给就用扫描时数字兜底，
               // 但**不编**：两者都没有就是 0。
               const freed = Number(rr.freed) || beforeBytes || 0;
-              detail = { id: RECYCLE_ID, name: item.name, status: 'ok', freed: freed, message: `已清空回收站（${Number(rr.count) || 0} 个条目）` };
+              // v4 P2-E（R4-M04）：count 后端查不到时回 null —— 此时不显示条目数，
+              // 不得用 `|| 0` 把「没拿到」说成「0 个条目」。
+              const countText = rr.count == null ? '' : `（${Number(rr.count) || 0} 个条目）`;
+              detail = { id: RECYCLE_ID, name: item.name, status: 'ok', freed: freed, message: `已清空回收站${countText}` };
               rcFreed += freed;
               rcSuccess += 1;
             } else {

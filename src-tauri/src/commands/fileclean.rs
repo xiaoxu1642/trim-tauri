@@ -176,15 +176,23 @@ fn classify(ext: &str) -> Option<&'static str> {
 /// 字节级拷贝）时，lossy 往返得到的是另一个路径 —— 轻则删不到，重则删掉一个恰好
 /// 用 U+FFFD 命名的无关文件。所以这类条目**根本不收录**（不进槽、不可删），
 /// 并把数量回给上层：不静默丢（v2-M4 同口径）。
-fn scan_root(root: &Path) -> (Vec<Value>, usize, usize) {
+fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
     let mut items: Vec<Value> = Vec::new();
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     queue.push_back((root.to_path_buf(), 0));
     let mut scanned = 0usize;
     let mut unhandled = 0usize;
+    let mut truncated = false;
 
     while let Some((dir, depth)) = queue.pop_front() {
-        if items.len() >= MAX_FILES || depth > MAX_DEPTH {
+        // v4 P2-E（R1-M05）：截断必须留痕 —— 旧实现静默跳过超深/超限分支，
+        // 回执与 UI 都不知道「结果可能不完整」，用户以为扫完了。
+        if items.len() >= MAX_FILES {
+            truncated = true;
+            continue;
+        }
+        if depth > MAX_DEPTH {
+            truncated = true;
             continue;
         }
         let rd = match std::fs::symlink_metadata(&dir) {
@@ -202,6 +210,7 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize) {
         let mut subdirs: Vec<PathBuf> = Vec::new();
         for ent in rd.flatten() {
             if items.len() >= MAX_FILES {
+                truncated = true;
                 break;
             }
             let full = ent.path();
@@ -266,7 +275,7 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize) {
             }
         }
     }
-    (items, scanned, unhandled)
+    (items, scanned, unhandled, truncated)
 }
 
 /// fileclean:scan
@@ -324,7 +333,7 @@ pub async fn fileclean_scan<R: Runtime>(
     let heavy = scan_path.to_string_lossy().contains("tencent")
         || resolved.to_lowercase().contains("xwechat");
     let result = tauri::async_runtime::spawn_blocking(move || scan_root(Path::new(&root2))).await;
-    let (items, scanned, unhandled) = match result {
+    let (items, scanned, unhandled, truncated) = match result {
         Ok(v) => v,
         Err(e) => {
             log::write_log("error", &format!("文件清理扫描任务异常: {e}"));
@@ -357,15 +366,19 @@ pub async fn fileclean_scan<R: Runtime>(
             } else {
                 String::new()
             },
-            if heavy { "（大目录）" } else { "" }
+            if heavy { "（大目录）" } else { "" },
         ),
     );
+    if truncated {
+        log::write_log("warn", &format!("文件清理扫描达上限（{MAX_FILES} 项 / 深度 {MAX_DEPTH}），结果可能不完整: {ty2}"));
+    }
     let _ = window.emit(
         "cleanup:scan-progress",
-        json!({ "scanType": ty2, "done": items.len(), "total": items.len() }),
+        // v4 P2-E（R1-M05）：total 旧为 items.len() 自指（进度条恒 100%）——改为真上限，进度有意义
+        json!({ "scanType": ty2, "done": items.len(), "total": MAX_FILES }),
     );
 
-    scan_response(items, total_size, resolved, unhandled)
+    scan_response(items, total_size, resolved, unhandled, truncated)
 }
 
 /// `fileclean:scan` 的成功回执形状。
@@ -373,7 +386,7 @@ pub async fn fileclean_scan<R: Runtime>(
 /// `totalSize` 必须是 JSON 数字：渲染层把它直接参与 `+` 求和，字符串会让
 /// 累加器退化成拼接（v2 的 22.7 TB / NaN undefined 根因）。抽成纯函数是为了
 /// 让这条形状约束能在不触盘的单元测试里直接判红。
-fn scan_response(items: Vec<Value>, total_size: u64, resolved: String, unhandled: usize) -> Value {
+fn scan_response(items: Vec<Value>, total_size: u64, resolved: String, unhandled: usize, truncated: bool) -> Value {
     json!({
         "success": true,
         "data": {
@@ -382,7 +395,9 @@ fn scan_response(items: Vec<Value>, total_size: u64, resolved: String, unhandled
             "scanPath": resolved,
             // 审查 v2-M5：名字无法无损表示的条目**没有**进扫描槽（不可预览也不可删），
             // 数量回给渲染层说清楚，而不是让它们静默消失
-            "unhandled": unhandled
+            "unhandled": unhandled,
+            // v4 P2-E（R1-M05）：达上限/超深度时 true —— 渲染层据此提示「结果可能不完整」
+            "truncated": truncated
         }
     })
 }
@@ -741,6 +756,7 @@ mod tests {
     }
 
     /// 回归根因：`totalSize` 必须是 JSON 数字，字符串会让前端 `+` 退化成拼接。
+    /// v4 P2-E（R1-M05）：`truncated` 也必须显式回给渲染层（截断留痕），这里顺带钉住字段存在。
     #[test]
     fn scan_response_serializes_total_size_as_number() {
         let res = scan_response(
@@ -748,12 +764,14 @@ mod tests {
             4096,
             r"\\?\C:\probe".to_string(),
             0,
+            false,
         );
         assert_eq!(res["data"]["totalSize"], json!(4096));
         assert!(
             res["data"]["totalSize"].is_u64(),
             "totalSize 必须是 JSON number，不能是 \"4096\""
         );
+        assert_eq!(res["data"]["truncated"], json!(false), "truncated 必须显式存在: {res}");
     }
 
     /// 审查 v2-M5：只有能无损往返于 `String` 的名字才允许进扫描槽（进槽=可预览、可删）。

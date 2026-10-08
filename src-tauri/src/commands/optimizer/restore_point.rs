@@ -374,6 +374,9 @@ Write-Output \"@@DONE@@\"";
     // 更糟的是 applied 项不进 staleIds（overview.rs 的判据），界面永远看不到这条失败。
 
     // 回读：数量必须增长（轮询 ≤15s，每 1.5s）
+    // v4 P2-E（R3-M05）：轮询期「读失败」与「没增长」必须分开 —— 旧实现 None 直接
+    // break 后拿最后一次成功值判 a <= b，WMI 抖动/权限异常会被说成「未检测到新还原点」。
+    let mut read_failed = false;
     let mut last = before;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
@@ -389,13 +392,21 @@ Write-Output \"@@DONE@@\"";
                     break;
                 }
             }
-            None => break,
+            None => {
+                read_failed = true;
+                break;
+            }
         }
         if std::time::Instant::now() >= deadline {
             break;
         }
     }
-    if let (Some(b), Some(a)) = (before, last) {
+    if read_failed {
+        log::write_log(
+            "warn",
+            "创建还原点：轮询期计数读取失败（WMI 抖动/权限），判 unknown 而不是「未增长」",
+        );
+    } else if let (Some(b), Some(a)) = (before, last) {
         if a <= b {
             // 回读判失败必须改账（v5 O-5）：partial 项由 optimizer_state_overview 如实呈现
             let _ = opt_state::mark_partial("tf_restore_point");
@@ -411,7 +422,11 @@ Write-Output \"@@DONE@@\"";
     let atxt = last.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
     // 结论强度 = 证据强度（v5 O-5）：基线计数取不到（WMI 抖动、本机 SR provider 坏）时
     // 没有"数量增长"这回事，只能记 unknown，不许冒充已验证的 pass。
-    let (verify, msg) = if before.is_some() {
+    let (verify, msg) = if read_failed {
+        // 读失败：不许 pass 也不许 partial —— 没有「数量增长」这回事，只有「没读到」。
+        log::write_log("warn", "创建还原点：回读统计不可得（读失败），按 unknown 记账");
+        ("unknown", "创建命令已完成，但回读统计不可得（读失败），请到「系统还原点管理」核对")
+    } else if before.is_some() {
         ("pass", "已创建系统还原点")
     } else {
         log::write_log("warn", "创建还原点：基线计数取不到，无法比对数量增长，按 unknown 记账");

@@ -145,8 +145,16 @@ pub async fn cleanup_empty_recycle_bin<R: tauri::Runtime>(window: WebviewWindow<
         if hr < 0 {
             return json!({ "success": false, "message": format!("清空回收站失败（HRESULT 0x{:08X}）", hr as u32) });
         }
-        let (count, bytes) = before.unwrap_or((0, 0));
-        json!({ "success": true, "count": count, "freed": bytes })
+        // v4 P2-E（R4-M04）：统计查不到回 **null** 而不是编造 0 ——「清空成功但没拿到
+        // 清空前的数字」与「清空前真的是 0 项」是两件事，回 0 会把两件事说成一件。
+        // 渲染层（cleanup.js）对 null 的消费口径：只报「已清空」，不显示条目数与体积。
+        match before {
+            Some((count, bytes)) => json!({ "success": true, "count": count, "freed": bytes }),
+            None => {
+                log::write_log("warn", "清空回收站成功，但清空前统计不可得（SHQueryRecycleBinW 失败），回执按 null 上报");
+                json!({ "success": true, "count": null, "freed": null })
+            }
+        }
     });
     match task.await {
         Ok(v) => v,
