@@ -102,6 +102,35 @@ check(
   keyHits.join('；'),
 );
 
+// ---- 3. 白名单坐标存在性（P3-7，2026-10-09） ----
+// AGENTS.md 反引号点名的**仓内具体坐标**（tools//src//src-tauri//native-scanner//vendor/
+// 开头的路径）必须落盘 —— 已删的双跑工具 `tools/dual-run-batchA.mjs` 此前仍被白名单
+// 点名，就是这条缺口的实例（v4 §1.3）。带 * ? { } | 的 glob/占位形态不判。
+// AGENTS.md 缺席（干净克隆）⇒ 显式 SKIP，声明本节未校验。
+if (agentsPresent) {
+  const CODE_REF_RE = /`((?:tools|src|src-tauri|native-scanner|vendor)\/[\w./\u4e00-\u9fa5-]+)`/g;
+  const named = [];
+  const ghost = [];
+  for (const m of readFileSync(AGENTS_MD, 'utf8').matchAll(CODE_REF_RE)) {
+    const p = m[1];
+    if (/[*?{}|]/.test(p)) continue;
+    named.push(p);
+    if (!existsSync(join(ROOT, p))) ghost.push(p);
+  }
+  check(
+    named.length >= 8,
+    `3. AGENTS.md 点名的仓内坐标 ${named.length} 处（≥8 地板，防解析失明）`,
+    named.length < 8 ? '命中趋零 ⇒ 语料或正则失明' : '',
+  );
+  check(
+    ghost.length === 0,
+    '3b. 点名的仓内坐标全部落盘（白名单不许指向已删除的文件）',
+    ghost.join('；'),
+  );
+} else {
+  console.log('⚠ AGENTS.md 不在本机（未跟踪）：3 白名单坐标存在性**未校验**（SKIP，不是通过）');
+}
+
 if (fail > 0) {
   console.error('check-doc-refs: 存在漂移');
   process.exit(1);

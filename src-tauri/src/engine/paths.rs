@@ -63,7 +63,7 @@ const MIGRATION_FILES: &[&str] = &[
 ///
 /// 这条注释原先还把写侧算到 PowerShell 头上（`startup_*.ps1`、`peripheral_apply.ps1`、
 /// `cleanup_execute.ps1:706`、`memory_stubborn_block.ps1:40`）——那是 S3 退役前的旧轨坐标，
-/// 现在 `src-tauri/ps/` 只剩 2 个脚本、`grep -i appdata` 零命中，写侧全在 Rust
+/// 现在 `src-tauri/ps/` 只剩 1 个脚本（optimizer_build.ps1）、`grep -i appdata` 零命中，写侧全在 Rust
 /// （`engine/native/` 的启动项与外设备份、`commands/cleanup/backup.rs` 的注册表备份）。
 /// 留着错坐标比不留更坏：下一个人会去改一个不存在的文件。
 const MIGRATION_DIRS: &[&str] = &[
