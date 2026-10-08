@@ -40,7 +40,10 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
 
         if Process32FirstW(snapshot, &mut pe).is_ok() {
             loop {
-                let name = String::from_utf16_lossy(&pe.szExeFile);
+                // v4-K(UTF-16 定长数组)：szExeFile 是 [u16;260]，整体 lossy 解码会把尾部
+                // 填充的 NUL 一并带进字符串——eq_ignore_ascii_case 恒不命中（重启资源管理器
+                // 100% 失效并谎报「没有运行中的资源管理器」）。走 common::wide_str（NUL 截断真源）。
+                let name = wide_str(pe.szExeFile.as_ptr());
                 if name.eq_ignore_ascii_case("explorer.exe") {
                     let pid = pe.th32ProcessID;
                     let mut session = 0u32;
@@ -109,7 +112,7 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
             pe2.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
             if Process32FirstW(snap2, &mut pe2).is_ok() {
                 loop {
-                    let name = String::from_utf16_lossy(&pe2.szExeFile);
+                    let name = wide_str(pe2.szExeFile.as_ptr());
                     if name.eq_ignore_ascii_case("explorer.exe") {
                         let mut session = 0u32;
                         if ProcessIdToSessionId(pe2.th32ProcessID, &mut session).is_ok() && session == my_session {

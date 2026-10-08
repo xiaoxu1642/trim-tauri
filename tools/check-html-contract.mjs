@@ -26,6 +26,7 @@ const htmlFiles = readdirSync(SRC).filter((f) => f.endsWith('.html'));
 const inlineHits = [];
 const missingDs = [];
 const orderHits = [];
+const idDups = [];
 
 for (const f of htmlFiles) {
   const text = readFileSync(join(SRC, f), 'utf8');
@@ -50,6 +51,12 @@ for (const f of htmlFiles) {
   if (posModal >= 0 && posDs >= 0 && posModal < posDs) {
     orderHits.push(`${f}: modal.js（ds 使用方）先于 ds.js 加载`);
   }
+  // 4. 同文档 id 唯一（P2-4 / F3-M05）：重复 id 会让 getElementById 恒取文档里第一个 ——
+  //    bgBlurVal×2 曾让原生滑块读数写进另一套控件的 span、自己恒停 0%（界面与真实值相反）。
+  //    判据取「前导空白 + id=」：排除 data-id 这类复合属性名（其 `id` 前是 `-` 非空白）。
+  const ids = [...clean.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+  const dup = [...new Set(ids.filter((x, i) => ids.indexOf(x) !== i))];
+  if (dup.length) idDups.push(`${f}: ${dup.join(' / ')}`);
 }
 
 check(
@@ -66,6 +73,11 @@ check(
   orderHits.length === 0,
   '3. 加载序：spotlight 在 liquid-glass 之后；ds.js 先于确证的 ds 使用方',
   orderHits.join('；'),
+);
+check(
+  idDups.length === 0,
+  `4. ${htmlFiles.length} 份 HTML 文档内 id 唯一（重复 id 会让 getElementById 指向错元素）`,
+  idDups.join('；'),
 );
 
 if (fail > 0) {

@@ -14,7 +14,10 @@ use std::os::windows::ffi::OsStrExt;
 const MAX_C_STR_UNITS: isize = 32_768;
 
 /// 从 `*const u16` 以 null 结尾宽字符串构造 String（null 指针返回空串）
-pub(super) unsafe fn wide_str(ptr: *const u16) -> String {
+/// 从 `*const u16` 以 null 结尾宽字符串构造 String（NUL 截断真源，v4 审查统一入口）。
+/// 定长 UTF-16 数组（如 `PROCESSENTRY32W.szExeFile: [u16; 260]`）也走这里传 `.as_ptr()`——
+/// 整体 `from_utf16_lossy(&array)` 会把尾部填充的 NUL 带进字符串，比较判据必然不命中。
+pub unsafe fn wide_str(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
     }
@@ -100,4 +103,25 @@ pub(super) fn collect_peripheral_backup_files(dirs: &[std::path::PathBuf]) -> Ve
         tb.cmp(&ta)
     });
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v4/P2-2（R5-M01 根因形态）：定长 UTF-16 数组必须按 NUL 截断 —— 整体
+    /// `from_utf16_lossy(&[u16; 260])` 会把尾部填充的 NUL 一起带进字符串，与
+    /// "explorer.exe" 的等值比较恒不命中（重启资源管理器 100% 失效还谎报「没有运行中的」）。
+    #[test]
+    fn wide_str_truncates_fixed_array_at_nul() {
+        let mut buf = [0u16; 260];
+        for (i, c) in "explorer.exe".encode_utf16().enumerate() {
+            buf[i] = c;
+        }
+        assert_eq!(unsafe { wide_str(buf.as_ptr()) }, "explorer.exe");
+        // 反向对照：旧写法确实带 NUL（本用例为它而立；若旧写法也相等，对照就失效了）
+        let old = String::from_utf16_lossy(&buf);
+        assert_ne!(old, "explorer.exe", "旧写法若也相等，本用例失去对照意义");
+        assert!(old.starts_with("explorer.exe\u{0}"));
+    }
 }

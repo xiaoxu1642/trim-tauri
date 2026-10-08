@@ -617,9 +617,8 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
         window.app?.toast('error', '材质开关切换失败：' + e.message);
       }
     });
-    materialMaster?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); materialMaster.click(); }
-    });
+    // P2-5（v4）：此处原有第二个同效 keydown（Enter/Space → click），与上面带审查
+    // 注释的那处重复登记 —— 同元素同事件双监听会让一次键盘激活跑两遍 click（净效果为零）。
     // 初始高亮以主进程持久化值为准（窗口实际材质），避免与 localStorage 不一致
     // 导致「选中项和窗口效果对不上」。取不到时回退 mica（与主进程默认一致）。
     (async () => {
@@ -888,9 +887,12 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
       else wpSync();
     });
     wpSync();
-    // 背景模糊度滑块（位于「背景图片」卡内，预设背景/导入图片均可叠加）
+    // 背景模糊度滑块（位于「背景图片」卡内，预设背景/导入图片均可叠加）。
+    // P2-4（v4）：本读数 span 原与自定义滑块（#bgBlurRange 的 .bbr-val）**撞 id**，
+    // getElementById 恒取文档里第一个 ⇒ 原生滑块读数写进了另一套控件的 span、自己恒 0%。
+    // 原生滑块这一侧改用专属 id `bgBlurInputVal`（勿用 bgOpacityVal——那是「雾化度」滑块的读数）。
     const blurSlider = document.getElementById('bgBlur');
-    const blurVal = document.getElementById('bgBlurVal');
+    const blurVal = document.getElementById('bgBlurInputVal');
     if (blurSlider) {
       blurSlider.value = ap.bgBlur == null ? 0 : ap.bgBlur;
       if (blurVal) blurVal.textContent = blurSlider.value + '%';

@@ -126,6 +126,23 @@ pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
         }
         collect_service_start_targets(steps, &mut targets);
     }
+    // R3-M03（v4，与 R3-M02 同批）：`tf_svc_bulk` 勾了 includeStore 时
+    // `svc_bulk_append_store` 会在**执行期**追加 5 个商店服务的 Start=4 写入 ——
+    // 那一步不在数据层 steps 里，基线必须把它们的 Start 一并纳入；否则还原按旧基线
+    // remove() + 摘灰、回 restored:N，**被改的 Start 原值永久丢失**（勾商店即中招）。
+    // 枚举复用 apply.rs 的 STORE_SERVICES（不新建第三份清单；它与
+    // optimizer-writes.json 的 storeServices 由 check-optimizer-write-contract 钉一致）。
+    if option_id == "tf_svc_bulk" {
+        for name in super::apply::STORE_SERVICES {
+            targets.push(svc_start_target(name));
+        }
+    }
+    // R3-M03（v4，与 R3-M02 同批）：`tf_svc_bulk` 勾了 includeStore 时
+    // `svc_bulk_append_store` 会在**执行期**追加 5 个商店服务的 Start=4 写入 ——
+    // 那一步不在数据层 steps 里，基线必须把它们的 Start 一并纳入；否则还原按旧基线
+    // remove() + 摘灰、回 restored:N，**被改的 Start 原值永久丢失**（勾商店即中招）。
+    // 枚举复用 apply.rs 的 STORE_SERVICES（不新建第三份清单；它与
+    // optimizer-writes.json 的 storeServices 由 check-optimizer-write-contract 钉一致）。
     // 去重（root\sub::key）
     let mut seen = std::collections::HashSet::new();
     targets.retain(|t| seen.insert(format!("{}\\{}::{}", t.root, t.sub, t.key)));

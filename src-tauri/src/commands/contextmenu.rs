@@ -570,8 +570,10 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
             if ok.is_err() {
                 break;
             }
-            let name = String::from_utf16_lossy(&entry.szExeFile);
-            if name.trim_end_matches('\0').eq_ignore_ascii_case("regedit.exe") {
+            // v4 审查：定长 UTF-16 数组统一走 native::wide_str（NUL 截断真源）——
+            // 原 lossy 整体解码靠 trim_end_matches('\0') 补救，口径不一且依赖「NUL 只在尾部」。
+            let name = native::wide_str(entry.szExeFile.as_ptr());
+            if name.eq_ignore_ascii_case("regedit.exe") {
                 pids.push(entry.th32ProcessID);
             }
         }

@@ -377,6 +377,43 @@ fn strip_js_comments(src: &str) -> String {
         assert!(svc_names_writing_start("net stop Spooler").is_empty());
     }
 
+    /// R3-M03（v4，与 R3-M02 同批）：`tf_svc_bulk` 的 5 个商店服务 Start 必须进值级备份基线 ——
+    /// 它们由 `svc_bulk_append_store` 在**执行期**追加（不在数据层 steps 里），基线不收
+    /// 就是「写了但还原不回来」：还原按旧基线 remove()+摘灰、回 restored:N，原值永久丢失。
+    #[test]
+    fn 商店服务_start_进值级备份基线() {
+        let targets: Vec<String> = option_targets("tf_svc_bulk")
+            .unwrap_or_default()
+            .iter()
+            .map(|t| format!("{}::{}\\{}", t.root, t.sub, t.key))
+            .collect();
+        for svc in super::apply::STORE_SERVICES {
+            let want = format!("HKEY_LOCAL_MACHINE::SYSTEM\\CurrentControlSet\\Services\\{svc}\\Start");
+            assert!(targets.contains(&want), "{svc} 的 Start 没进基线，实收: {targets:?}");
+        }
+    }
+
+    /// R3-M02（v4）：`tf_svc_bulk` 的**子集分支**也必须能追加商店服务 ——
+    /// 此前只有全选/非动态分支调 `svc_bulk_append_store`，子集分支把并进 picked 的
+    /// 5 个名字交给 rebuild_steps 的侧表交集静默滤掉（回执仍成功 = 确认过的写入没发生）。
+    /// 形态判据：剥掉整行注释后，append 出现次数 = 定义 1 + 三个出口 ≥ 4；被摘一处即红。
+    #[test]
+    fn 子集分支也要追加商店服务() {
+        // 行级剥注释（apply.rs 的说明注释里也复述了函数名，不剥会被语料骗）
+        let raw = include_str!("apply.rs");
+        let src: String = raw
+            .split('\n')
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let calls = src.matches("svc_bulk_append_store(").count();
+        assert!(
+            calls >= 4,
+            "svc_bulk_append_store 出现 {calls} 处（定义 1 + 子集/全选/非动态三个出口起步）——\
+             子集分支的追加臂可能被摘（R3-M02 回归：勾了商店的子集执行会静默丢写入）"
+        );
+    }
+
     /// RAINZ 对标 B4：游戏 QoS（DSCP 46）条目的形状棘轮。
     ///
     /// 8 个游戏进程 × 11 个值、**只走 reg** —— 因此还原可由推理补齐（这就是它有「立即恢复」

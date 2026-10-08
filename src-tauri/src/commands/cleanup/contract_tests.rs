@@ -402,14 +402,15 @@ fn js_num_str(n: f64) -> String {
     #[test]
     fn 契约表查询一律走_req_不许挑默认值() {
         let code = strip_rust_comments(include_str!("rules.rs"));
-        // ① 契约表查询不许直接 unwrap_or
+        // ① 契约表查询不许直接 unwrap_or（**含 unwrap_or_default**——R4-M02：原针带
+        // 尾括号 `unwrap_or(` 抓不到 `unwrap_or_default(`，差一个后缀让整条断言恒不命中）
         for line in code.lines() {
             let l = line.trim();
             if !l.contains("rule_schema::") {
                 continue;
             }
             assert!(
-                !l.contains("unwrap_or("),
+                !l.contains("unwrap_or"),
                 "契约表查询又出现了 unwrap_or（取不到就挑默认值，违反 fail-closed 声明）: {l}"
             );
         }

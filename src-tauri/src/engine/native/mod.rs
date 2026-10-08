@@ -12,6 +12,7 @@ mod cleanup;
 pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute, find_rule_by_id};
 mod common;
 pub(crate) use common::to_wide;
+pub(crate) use common::wide_str;
 mod contextmenu;
 pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle};
 mod diagnostics;

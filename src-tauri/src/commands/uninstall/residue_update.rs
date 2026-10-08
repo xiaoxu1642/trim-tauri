@@ -607,7 +607,10 @@ pub(super) fn residue_rules_hits(
             };
             let note = entry.get("note").and_then(|x| x.as_str()).unwrap_or("");
             match kind {
-                "folder" | "file" => {
+                // R2-M01（v4）：`shortcut` 此前在 `_ => continue` 里被静默丢弃 —— 规则库
+                // 209 条 residue 条目里有 35 条（16.7%）是 shortcut，等于配了却永远 0 命中。
+                // 并入本臂：展开变量 → 存在性 + 保护面判定（target 无根约束，保护面必须判）。
+                "folder" | "file" | "shortcut" => {
                     let target = cleanup_scan::expand_env_path(target_raw);
                     // A4：变量没解析出来时，展开结果里还留着 `%X%`，这个路径必然不存在。
                     // 让它落到下面的「不存在」分支，等于把「本机没这个变量」说成
@@ -649,6 +652,53 @@ pub(super) fn residue_rules_hits(
                     }
                     out.push(json!({
                         "kind": "reg_key", "target": target_raw,
+                        "reason": format!("{lib_label}命中（{id}）：{note}"),
+                        "confidence": confidence, "risk": "medium",
+                        "defaultChecked": default_checked,
+                        "ruleId": id, "ruleVer": rule_ver,
+                        "contribs": contribs(&why),
+                    }));
+                }
+                // R2-L09（v4）：`reg_value` 产出臂必须与执行侧 A1 **同批**上线 ——
+                // 此前它也只走 `_ => continue`（无产出臂 = 无暴露面），一旦补臂就会产
+                // 「父键在 HKLM\SYSTEM / Microsoft 树内」的候选；执行侧 classify 走
+                // `run_keys::reg_value_gate`（R-2），产出侧必须调**同一个函数**（§5.16/N6）：
+                //   · Denied      → 硬否决（不入候选，留 vetoed 证据）；
+                //   · Allowed     → 启动项六根形态，继续（执行侧还有现读复检兜底）；
+                //   · NotGoverned → 第三方键：并上 reg_key 分支同一道禁删面判定。
+                "reg_value" => {
+                    let Some((key_part, value_name)) = target_raw.rsplit_once("::") else {
+                        vetoed.push(format!("残留规则 {id} 的 reg_value 目标缺 `::` 值名分隔，已跳过"));
+                        continue;
+                    };
+                    if value_name.trim().is_empty() {
+                        continue;
+                    }
+                    let Some((hive, rest)) = parse_reg_target(key_part) else {
+                        continue;
+                    };
+                    match super::run_keys::reg_value_gate(target_raw) {
+                        super::run_keys::RegValueGate::Denied(reason) => {
+                            vetoed.push(format!(
+                                "残留规则 {id} 的 reg_value 目标被硬否决（不入候选）: {reason}"
+                            ));
+                            continue;
+                        }
+                        super::run_keys::RegValueGate::Allowed => {}
+                        super::run_keys::RegValueGate::NotGoverned => {
+                            if let Some(reason) = protect::reg_target_block_reason(key_part) {
+                                vetoed.push(format!(
+                                    "残留规则 {id} 的 reg_value 父键被硬否决（不入候选）: {reason}"
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    if crate::engine::native::read_reg_value_text(hive, rest.as_str(), value_name).is_none() {
+                        continue;
+                    }
+                    out.push(json!({
+                        "kind": "reg_value", "target": target_raw,
                         "reason": format!("{lib_label}命中（{id}）：{note}"),
                         "confidence": confidence, "risk": "medium",
                         "defaultChecked": default_checked,

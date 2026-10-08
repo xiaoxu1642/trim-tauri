@@ -136,6 +136,17 @@ mod tests {
                 }
             }
         }
+        // R4-M02（v4）：crossTrack 三键必须存在且为数组，live/handlers 还须非空 ——
+        // 前者是「没有活来源即拒装载」的判据输入，后者是专用分流登记；两者被掏空会让
+        // 整库装载全拒。deadSourceKeys 允许空数组（「当前没有已死键」是合法状态，
+        // 空表 = 没有任何键被误认为死键，安全方向）。
+        for k in ["liveSourceKeys", "deadSourceKeys", "specialHandlers"] {
+            let arr = cross(k).and_then(|v| v.as_array().cloned());
+            assert!(arr.is_some(), "crossTrack.{k} 缺失或非数组（装载判据的输入表不能缺失）");
+            if k != "deadSourceKeys" {
+                assert!(!arr.unwrap_or_default().is_empty(), "crossTrack.{k} 为空（装载判据的输入表不能为空）");
+            }
+        }
     }
 
     /// 2026-10-04 磁盘清理审计 §4.6：清理域**每一个**被查询的键都必须在表里存在。

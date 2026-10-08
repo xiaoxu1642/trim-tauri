@@ -206,6 +206,61 @@ pub fn read_json_or_default(path: &Path) -> serde_json::Value {
     }
 }
 
+/// JSON 文件读取的三态（v4 组 1 / R7-M01）：`Ok` 合法对象 / `Absent` 没有这个文件 /
+/// `Corrupt` 读了但拿不到（IO 失败或解析失败；解析失败的现场已 quarantine）。
+///
+/// 为什么必须把三态分开：「读失败」与「没有配置」在旧实现里同归 `json!({})`，
+/// 于是磁盘故障/权限异常的瞬间，一次看似正常的「保存」会把用户配置整表覆写成
+/// 基于空对象的合并结果（settings.json 含 DPAPI 密文密钥，覆写即永久丢失），
+/// 而且回执仍是 success:true —— 用户看不到任何异常。
+pub enum JsonState {
+    Ok(serde_json::Value),
+    Absent,
+    Corrupt,
+}
+
+pub fn read_json_state(path: &Path) -> JsonState {
+    match fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) if v.is_object() => JsonState::Ok(v),
+            Ok(_) => JsonState::Corrupt, // 结构不是对象：留现场，按损坏处理
+            Err(e) => {
+                quarantine_file(path, &e.to_string());
+                JsonState::Corrupt
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => JsonState::Absent,
+        Err(e) => {
+            crate::engine::log::write_log("warn", &format!("配置读取失败（未落盘、未隔离）: {} {e}", path.display()));
+            JsonState::Corrupt
+        }
+    }
+}
+
+/// **读-改-写原语：读失败绝不落到写**（v4 组 1 / R7-M01，本仓 12 处读-改-写的唯一入口）。
+///
+/// 只有 `Ok`（合法对象）与 `Absent`（首次写入）才执行 `f` 并落盘；`Corrupt` 直接返回
+/// `Err` —— 调用方负责如实回执/提示，**不得**降级成「基于空对象保存」。
+/// `f` 返回 `Err` 时不落盘（校验失败的改动不许部分写出去）。
+pub fn update_json<F>(path: &Path, f: F) -> Result<serde_json::Value, String>
+where
+    F: FnOnce(&mut serde_json::Value) -> Result<(), String>,
+{
+    let mut cur = match read_json_state(path) {
+        JsonState::Ok(v) => v,
+        JsonState::Absent => serde_json::json!({}),
+        JsonState::Corrupt => {
+            return Err(format!(
+                "配置读取失败（现场已保留/未隔离见日志），本次写入已拒绝: {}",
+                path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            ));
+        }
+    };
+    f(&mut cur)?;
+    atomic_write_json(path, &cur)?;
+    Ok(cur)
+}
+
 /// 配置文件损坏隔离：改名 `<file>.corrupt-<ts>` 保留现场
 pub fn quarantine_file(path: &Path, reason: &str) {
     if !path.exists() {
@@ -554,6 +609,62 @@ mod tests {
         assert!(
             got.starts_with(safestorage::DPAPI_V1_PREFIX) && got != "sk-live-abc",
             "明文密钥没有被加密（透传分支误吞了明文）：{got}",
+        );
+    }
+
+    /// v4 组 1 / R7-M01：`update_json` 的「读失败绝不落到写」契约 ——
+    /// Absent 允许首写 / Ok 读-改-写 / Corrupt 拒写且留隔离件 / f 失败不部分写。
+    /// 判红自证：把 Corrupt 分支改成「当空对象继续」⇒ 第 3 组断言全红。
+    #[test]
+    fn update_json_never_writes_on_read_failure() {
+        let dir = std::env::temp_dir().join(format!("trim-update-json-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+        let f = dir.join("conf.json");
+
+        // ① Absent ⇒ 允许首写
+        update_json(&f, |v| {
+            v["a"] = serde_json::json!(1);
+            Ok(())
+        })
+        .expect("Absent 应允许首写");
+        // ② Ok ⇒ 读-改-写（保留旧键）
+        update_json(&f, |v| {
+            v["b"] = serde_json::json!(2);
+            Ok(())
+        })
+        .expect("Ok 应读-改-写");
+        let text = std::fs::read_to_string(&f).expect("应已落盘");
+        assert!(text.contains("\"a\"") && text.contains("\"b\""), "旧键必须保留: {text}");
+
+        // ③ Corrupt（坏 JSON）⇒ 拒写 + 现场被隔离（改名 .corrupt-*，不是留在原地被覆写）
+        std::fs::write(&f, "{ not json").expect("写坏件");
+        let err = update_json(&f, |v| {
+            v["c"] = serde_json::json!(3);
+            Ok(())
+        })
+        .expect_err("损坏时必须拒写");
+        assert!(err.contains("拒绝"), "回执应说明拒绝: {err}");
+        assert!(!f.exists(), "损坏件应被隔离改名，而不是留在原地被下次写入覆写");
+        let quarantined = std::fs::read_dir(&dir)
+            .expect("读目录")
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains(".corrupt-"));
+        assert!(quarantined, "隔离件必须留下（.corrupt-*）");
+
+        // ④ 闭包返回 Err ⇒ 不落盘（校验失败的改动不许部分写出去）
+        std::fs::write(&f, "{\"keep\":1}").expect("写探针");
+        let _ = update_json(&f, |_v| Err("校验没过".to_string())).expect_err("f 失败应上抛");
+        assert!(
+            std::fs::read_to_string(&f).expect("读回").contains("\"keep\""),
+            "f 失败时文件不得被改动"
         );
     }
 }

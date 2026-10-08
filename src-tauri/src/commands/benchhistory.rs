@@ -49,13 +49,37 @@ fn bench_history_file() -> PathBuf {
 }
 
 /// `loadBenchHistory`：非数组 / 损坏一律当空数组（与 JS 的 try/catch 同语义）
+///
+/// v4 组 1：读路径改走 `read_json_state` —— 解析失败自动隔离、IO 失败自动留痕
+/// （旧实现 `read_to_string` 的 Err 静默吞，列表页把「读失败」渲染成「没有历史」）。
+/// 写路径见 [`update_bench_history`]：损坏时**拒写**，不再把整张历史静默清空。
 fn load_bench_history() -> Vec<Value> {
-    match std::fs::read_to_string(bench_history_file()) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Array(items)) => items,
-            _ => Vec::new(),
-        },
-        Err(_) => Vec::new(),
+    match security::read_json_state(&bench_history_file()) {
+        security::JsonState::Ok(Value::Array(items)) => items.iter().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 读-改-写（v4 组 1 / R7-M01「读失败绝不落到写」）：`Ok`/`Absent` 才执行 `f` 并落盘；
+/// 结构异常（非数组）与读取失败都**拒绝本次写入**并如实回报——旧实现把两者都当
+/// 「空数组」继续跑，一次 add/clear 就把用户历史整表覆写，且无日志无隔离。
+fn update_bench_history(f: impl FnOnce(&mut Vec<Value>)) -> Result<(), String> {
+    let mut records: Vec<Value> = match security::read_json_state(&bench_history_file()) {
+        security::JsonState::Ok(Value::Array(items)) => items.iter().cloned().collect(),
+        security::JsonState::Ok(_) => {
+            crate::engine::log::write_log("warn", "测速历史结构异常（非数组），本次写入已拒绝");
+            return Err("测速历史文件结构异常，本次操作已拒绝（可删除该文件后重试）".into());
+        }
+        security::JsonState::Corrupt => {
+            return Err("测速历史读取失败（现场已隔离/见日志），本次操作已拒绝".into());
+        }
+        security::JsonState::Absent => Vec::new(),
+    };
+    f(&mut records);
+    if save_bench_history(&records) {
+        Ok(())
+    } else {
+        Err("写入失败".into())
     }
 }
 
@@ -146,16 +170,14 @@ pub fn bench_history_add<R: tauri::Runtime>(window: WebviewWindow<R>, record: Op
         return Ok(json!({ "success": false, "message": "缺少测速结果数值" }));
     }
 
-    let mut records = load_bench_history();
     let mut entry = Map::new();
     entry.insert("id".into(), json!(new_record_id()));
     entry.insert("timestamp".into(), json!(super::settings::iso_utc_now()));
     for (k, v) in clean {
         entry.insert(k, v);
     }
-    records.insert(0, Value::Object(entry));
-    if !save_bench_history(&records) {
-        return Ok(json!({ "success": false, "message": "测速历史写入失败，本次结果未保存" }));
+    if let Err(msg) = update_bench_history(|records| { records.insert(0, Value::Object(entry)); }) {
+        return Ok(json!({ "success": false, "message": format!("测速历史未保存：{msg}") }));
     }
     Ok(json!({ "success": true }))
 }
@@ -172,12 +194,10 @@ pub fn bench_history_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
 pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Option<String>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
     let id = id.unwrap_or_default();
-    let records: Vec<Value> = load_bench_history()
-        .into_iter()
-        .filter(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()))
-        .collect();
-    if !save_bench_history(&records) {
-        return Ok(json!({ "success": false, "message": "测速历史写入失败，记录未删除" }));
+    if let Err(msg) = update_bench_history(|records| {
+        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+    }) {
+        return Ok(json!({ "success": false, "message": format!("记录未删除：{msg}") }));
     }
     Ok(json!({ "success": true }))
 }
@@ -186,8 +206,8 @@ pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Opt
 #[tauri::command]
 pub fn bench_history_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    if !save_bench_history(&[]) {
-        return Ok(json!({ "success": false, "message": "测速历史写入失败，记录未清空" }));
+    if let Err(msg) = update_bench_history(|records| { records.clear(); }) {
+        return Ok(json!({ "success": false, "message": format!("记录未清空：{msg}") }));
     }
     Ok(json!({ "success": true }))
 }

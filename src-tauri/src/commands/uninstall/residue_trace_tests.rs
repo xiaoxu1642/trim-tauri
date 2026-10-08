@@ -573,6 +573,57 @@ use super::residue_update::*;
         assert_eq!(signed_hits[0]["confidence"], json!("high"));
     }
 
+    /// R2-M01 + R2-L09（v4）：规则库的 `shortcut` 与 `reg_value` 产出臂（含执行侧同款 A1）——
+    /// 此前两个 kind 都落在 `_ => continue` 被静默丢弃（209 条 residue 条目里 35 条 shortcut
+    /// ＝ 16.7% 的库配了永远 0 命中；reg_value 则因无产出臂而「碰巧安全」，补臂必须同批补闸）。
+    #[test]
+    fn rules_emit_shortcut_and_reg_value_with_execution_side_gates() {
+        // 命中链要求落点真实存在（生产语义），所以造一个真 .lnk 并挂 Drop 清掉。
+        let dir = std::env::temp_dir().join(format!("trim-rules-{}", std::process::id()));
+        let lnk = dir.join("ProbeSoft.lnk");
+        std::fs::create_dir_all(&dir).expect("建临时命中目标");
+        std::fs::write(&lnk, b"x").expect("写探针 .lnk");
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+
+        let doc = |id: &str, residue: Value| json!({
+            "rulesVersion": 1.0,
+            "prov": [],
+            "rules": [{
+                "id": id,
+                "displayName": ["ProbeSoft"], "publisher": ["ProbeCorp"], "uninstallKey": ["ProbeSoft"],
+                "residue": [residue]
+            }]
+        });
+        let run = |doc: &Value| {
+            residue_rules_hits(doc, "ProbeSoft", "ProbeCorp", r"Software\X\Uninstall\ProbeSoft", false)
+        };
+
+        // ① shortcut 正例：存在 ⇒ 产出（修前恒 0 命中）
+        let (hits, _) = run(&doc("p-shortcut", json!({ "kind": "shortcut", "target": lnk.to_string_lossy(), "note": "开始菜单快捷方式" })));
+        assert_eq!(hits.len(), 1, "shortcut 产出臂断了: {hits:?}");
+        assert_eq!(hits[0]["kind"], json!("shortcut"));
+
+        // ② shortcut 不存在 ⇒ 不产
+        let (hits, _) = run(&doc("p-shortcut2", json!({ "kind": "shortcut", "target": dir.join("no-such.lnk").to_string_lossy(), "note": "缺" })));
+        assert!(hits.is_empty(), "不存在的 shortcut 不该出现: {hits:?}");
+
+        // ③ reg_value 被 A1 硬否决（Microsoft 树内、非 Run 六根）⇒ 不产 + 留 vetoed 证据
+        let (hits, vetoed) = run(&doc("p-rv-denied", json!({ "kind": "reg_value", "target": r"HKLM\SYSTEM\CurrentControlSet\Services\TrimProbe::Start", "note": "系统树内" })));
+        assert!(hits.is_empty(), "系统树内的 reg_value 不得进候选: {hits:?}");
+        assert!(vetoed.iter().any(|v| v.contains("硬否决")), "否决必须留证据: {vetoed:?}");
+
+        // ④ reg_value 第三方键但值不存在 ⇒ 不产（存在性闸）；同时不得被误 vetoed
+        let (hits, vetoed) = run(&doc("p-rv-missing", json!({ "kind": "reg_value", "target": r"HKCU\Software\TrimNoSuchProbe9f3a\X::probe", "note": "探针" })));
+        assert!(hits.is_empty(), "不存在的值不该产候选: {hits:?}");
+        assert!(vetoed.is_empty(), "第三方键不该被 protect 面误否: {vetoed:?}");
+    }
+
     /// 学不到东西的情形必须**整条不写**，而不是写一份下一轮会被校验器拒掉的文档。
     #[test]
     fn learn_skips_when_identity_or_targets_are_unusable() {

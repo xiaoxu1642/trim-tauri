@@ -51,6 +51,11 @@ mod helpers;
 mod ifeo_orphan;
 mod list_run;
 pub use list_run::{uninstall_dir_size, __cmd__uninstall_dir_size, __tauri_command_name_uninstall_dir_size, uninstall_list, __cmd__uninstall_list, __tauri_command_name_uninstall_list, uninstall_run, __cmd__uninstall_run, __tauri_command_name_uninstall_run};
+// v0.5.0 第三类孤儿（minifilter 挂载态 × 服务键失配）：v4 审查（R2-M05）发现它连 mod 声明
+// 都没有——整块（实现 + 7 条用例）不在编译面内，而 check-ps-callsites 早已把它登记成
+// 生产调用点（PS 三本账之一虚高 1）。按七个深扫器的同形处置：恢复编译 + allow(dead_code)。
+#[allow(dead_code)]
+mod minifilter_orphan;
 mod ownership;
 mod pending_delete;
 pub use pending_delete::{uninstall_pending_add, __cmd__uninstall_pending_add, __tauri_command_name_uninstall_pending_add, uninstall_pending_list, __cmd__uninstall_pending_list, __tauri_command_name_uninstall_pending_list, uninstall_pending_revoke, __cmd__uninstall_pending_revoke, __tauri_command_name_uninstall_pending_revoke};

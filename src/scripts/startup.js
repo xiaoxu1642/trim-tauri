@@ -604,9 +604,11 @@
         return;
       }
       if (resp && resp.success) {
-        window.app?.toast('success', `删除完成，成功 ${resp.success || 0} 项`);
+        // F4a-M03（v4）：顶层 `success` 是**布尔**，把计数读它只会渲染「成功 true 项」；
+        // 计数在 data 里（与 doToggle 同口径）。
+        window.app?.toast('success', `删除完成，成功 ${Number(resp.data?.success) || 0} 项`);
       } else {
-        window.app?.toast('warning', `删除部分失败：${(resp && resp.failed) || 0} 项未生效`);
+        window.app?.toast('warning', `删除部分失败：${Number(resp.data?.failed) || 0} 项未生效`);
       }
       await scan(true);
     } catch (e) {

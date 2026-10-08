@@ -808,14 +808,26 @@ mod backup_root_tests {
 }
 
 /// 读「本机被 Trim 禁用的启动项」台账（见 `startup_ledger_file` 的取本口径）。
-fn read_disabled_records() -> Vec<Value> {
-    let Some(f) = startup_ledger_file() else { return Vec::new() };
-    if let Ok(content) = std::fs::read_to_string(&f) {
-        if let Ok(Value::Array(arr)) = serde_json::from_str(&content) {
-            return arr.into_iter().filter(|v| !v.is_null()).collect();
+///
+/// v4 组 1（R5-M03）三态化：旧实现把「读失败 / 解析失败 / 结构非数组」一律归空数组，
+/// 而消费链紧接着 `write_disabled_records(&records)` 把空集写回 —— **损坏即永久丢账**
+/// （已禁用项在下次扫描被当成「未禁用」）。现在损坏返回 Err（现场已由 `read_json_state`
+/// 隔离 + 留痕），调用方必须**拒绝本次操作**、不得写回。
+fn read_disabled_records() -> Result<Vec<Value>, String> {
+    let Some(f) = startup_ledger_file() else { return Ok(Vec::new()) };
+    match crate::security::read_json_state(&f) {
+        crate::security::JsonState::Ok(Value::Array(arr)) => {
+            Ok(arr.into_iter().filter(|v| !v.is_null()).collect())
         }
+        crate::security::JsonState::Ok(_) => {
+            crate::engine::log::write_log("warn", "启动项禁用台账结构异常（非数组），已按损坏处理（不写回）");
+            Err("启动项禁用台账结构异常，已保留现场，本次未改动台账".into())
+        }
+        crate::security::JsonState::Corrupt => {
+            Err("启动项禁用台账读取失败（现场已隔离/见日志），本次未改动台账".into())
+        }
+        crate::security::JsonState::Absent => Ok(Vec::new()),
     }
-    Vec::new()
 }
 
 fn write_disabled_records(records: &[Value]) {
@@ -906,7 +918,13 @@ unsafe fn set_approved_bit(hive: HKEY, subkey: &str, value_name: &str, disable: 
 /// 计划任务（schtasks /Change）。disabled.json 记账维护。
 pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
     unsafe {
-        let mut records = read_disabled_records();
+        // v4 组 1（R5-M03）：台账损坏时不得用空集继续跑 —— 旧链在这里读空、循环照跑、
+        // 最后 write 把空集写回（已禁用项整本记账永久丢失）。损坏即整批拒绝（fail-closed），
+        // 现场已由 read_json_state 隔离 + 留痕。
+        let mut records = match read_disabled_records() {
+            Ok(r) => r,
+            Err(msg) => return Err(format!("{msg}；为避免覆盖损坏台账，本次操作已中止")),
+        };
         let mut results: Vec<Value> = Vec::new();
         let mut success = 0i64;
         let mut failed = 0i64;
@@ -1193,7 +1211,11 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
     // 取本口径必须与读取链同一份（`startup_ledger_file` → 最近修改那本）：
     // 固定读新根会在老根存有历史账时形成两个「权威账本」——删除链改的那本
     // 不是界面/还原链读的那本，清空后老根历史还会复活。
-    let mut records: Vec<Value> = read_disabled_records();
+    // v4 组 1（R5-M03）：台账损坏时整批拒绝（同 startup_toggle）——绝不用空集继续跑再写回。
+    let mut records: Vec<Value> = match read_disabled_records() {
+        Ok(r) => r,
+        Err(msg) => return Err(format!("{msg}；为避免覆盖损坏台账，本次删除已中止")),
+    };
 
     let mut results: Vec<Value> = Vec::new();
     let mut fs_delete: Vec<Value> = Vec::new();

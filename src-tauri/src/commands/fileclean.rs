@@ -655,7 +655,7 @@ pub async fn fileclean_execute<R: Runtime>(
     json!({
         "success": true,
         "data": {
-            "totalFreed": freed.to_string(),
+            "totalFreed": freed,
             "success": success_n,
             "failed": failed,
             "recycled": recycled_n,
@@ -808,5 +808,19 @@ mod tests {
 
         assert_eq!(scope_owner("attacker"), "attacker");
         assert!(scope_get(scope_owner("attacker"), "qq").is_none());
+    }
+
+    /// P2-1（v4-R1-M01）：`fileclean_execute` 回执的 totalFreed 必须是 **JSON 数字** ——
+    /// 渲染层 cleanup.js 直接 `fcFreed += resp.data.totalFreed`，字符串会变成拼接
+    /// （`0 + "1048576"`），界面上「释放空间」必现错乱（同片区的 totalSize 早是数字）。
+    /// 真跑要触盘，这里用源码形态钉住产出类型。
+    /// 字面量用 concat! 拆词：`include_str!` 会把本测试自身也当语料，整串写会自指恒真/恒假。
+    #[test]
+    fn execute_total_freed_is_json_number() {
+        let src = include_str!("fileclean.rs");
+        let want = concat!("\"totalFreed\": freed", ",");
+        let bad = concat!("\"totalFreed\": freed", ".to_string()");
+        assert!(src.contains(want), "totalFreed 必须以 JSON 数字产出（v4-R1-M01 修复锚点）");
+        assert!(!src.contains(bad), "totalFreed 退回字符串 ⇒ 渲染层「释放空间」数字拼接回归");
     }
 }

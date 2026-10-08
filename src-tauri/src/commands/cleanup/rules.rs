@@ -555,9 +555,18 @@ pub(super) fn check_cleanup_item(
     // crossTrack.liveSourceKeys）：一条来源都没有的规则等于配了却永远 0 命中——
     // 不报错比报错坏，装载侧直接拒
     {
-        let live = rule_schema::cross("liveSourceKeys").and_then(|v| v.as_array().cloned()).unwrap_or_default();
-        let dead = rule_schema::cross("deadSourceKeys").and_then(|v| v.as_array().cloned()).unwrap_or_default();
-        let handlers = rule_schema::cross("specialHandlers").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        // R4-M02（v4）：三键读取不许挑默认值 —— 契约表声明「拿不到即拒绝」，原先
+        // `unwrap_or_default()` 把「表坏了」静默当空表继续跑（针 `unwrap_or(` 抓不到
+        // `unwrap_or_default(`，差一个后缀漏了整条 fail-open 回潮）。
+        let Some(live) = rule_schema::cross("liveSourceKeys").and_then(|v| v.as_array().cloned()) else {
+            return Err("契约表 crossTrack.liveSourceKeys 缺失或非数组：装载拒绝（fail-closed）".into());
+        };
+        let Some(dead) = rule_schema::cross("deadSourceKeys").and_then(|v| v.as_array().cloned()) else {
+            return Err("契约表 crossTrack.deadSourceKeys 缺失或非数组：装载拒绝（fail-closed）".into());
+        };
+        let Some(handlers) = rule_schema::cross("specialHandlers").and_then(|v| v.as_array().cloned()) else {
+            return Err("契约表 crossTrack.specialHandlers 缺失或非数组：装载拒绝（fail-closed）".into());
+        };
         let has_live = live.iter().any(|k| {
             let k = match k.as_str() {
                 Some(s) => s,

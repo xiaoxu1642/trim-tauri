@@ -666,6 +666,14 @@ pub async fn optimizer_run<R: Runtime>(
                     "message": "一个目标都没勾选，请至少勾选一项再执行"
                 });
             }
+            Some(rebuilt) if option_id == "tf_svc_bulk" && p.include_store => {
+                // R3-M02（v4）与 R3-M03 同批：子集分支同样要追加商店服务 ——
+                // picked_targets_effective 虽已并入 5 个商店服务名，但 rebuild_steps 按侧表
+                // 做交集会把它们**静默滤掉**（侧表 65 条里没有这五个名字），于是「用户经
+                // 弹窗确认过的写入没有发生、回执仍为成功」。基线侧（option_targets）已同步
+                // 纳入这 5 个 Start，两处必须同批上线，单修一处会把危害升级为「写了但还原不回来」。
+                svc_bulk_append_store(rebuilt)
+            }
             Some(rebuilt) => rebuilt,
             // None = 全选 ⇒ 走下面原有的原脚本路径（含 includeStore 的条件追加）
             None if option_id == "tf_svc_bulk" && p.include_store => {
