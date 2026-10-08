@@ -50,11 +50,13 @@ fn bench_history_file() -> PathBuf {
 
 /// `loadBenchHistory`：非数组 / 损坏一律当空数组（与 JS 的 try/catch 同语义）
 ///
-/// v4 组 1：读路径改走 `read_json_state` —— 解析失败自动隔离、IO 失败自动留痕
+/// v4 组 1：读路径改走三态读 —— 解析失败自动隔离、IO 失败自动留痕
 /// （旧实现 `read_to_string` 的 Err 静默吞，列表页把「读失败」渲染成「没有历史」）。
+/// v4 修复（2026-10-09）：文件是**裸数组**，必须走 `read_json_array_state`（对象版把
+/// 合法数组判 Corrupt，会让本函数恒空、[`update_bench_history`] 恒拒）。
 /// 写路径见 [`update_bench_history`]：损坏时**拒写**，不再把整张历史静默清空。
 fn load_bench_history() -> Vec<Value> {
-    match security::read_json_state(&bench_history_file()) {
+    match security::read_json_array_state(&bench_history_file()) {
         security::JsonState::Ok(Value::Array(items)) => items.iter().cloned().collect(),
         _ => Vec::new(),
     }
@@ -63,8 +65,9 @@ fn load_bench_history() -> Vec<Value> {
 /// 读-改-写（v4 组 1 / R7-M01「读失败绝不落到写」）：`Ok`/`Absent` 才执行 `f` 并落盘；
 /// 结构异常（非数组）与读取失败都**拒绝本次写入**并如实回报——旧实现把两者都当
 /// 「空数组」继续跑，一次 add/clear 就把用户历史整表覆写，且无日志无隔离。
+/// v4 修复（2026-10-09）：走数组形态三态读器（同 load_bench_history 的理由）。
 fn update_bench_history(f: impl FnOnce(&mut Vec<Value>)) -> Result<(), String> {
-    let mut records: Vec<Value> = match security::read_json_state(&bench_history_file()) {
+    let mut records: Vec<Value> = match security::read_json_array_state(&bench_history_file()) {
         security::JsonState::Ok(Value::Array(items)) => items.iter().cloned().collect(),
         security::JsonState::Ok(_) => {
             crate::engine::log::write_log("warn", "测速历史结构异常（非数组），本次写入已拒绝");

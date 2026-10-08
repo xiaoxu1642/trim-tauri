@@ -32,7 +32,7 @@
     "src-tauri/src/engine/restore_pack.rs": 4,
     "src-tauri/src/engine/shellicon.rs": 3,
     "src-tauri/src/pwsh/mod.rs": 6,
-    "src-tauri/src/security/mod.rs": 6,
+    "src-tauri/src/security/mod.rs": 8,
     "native-scanner/src/cleanup_scan.rs": 10,
     "native-scanner/src/scan.rs": 13,
     "native-scanner/src/util.rs": 2

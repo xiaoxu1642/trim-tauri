@@ -811,11 +811,15 @@ mod backup_root_tests {
 ///
 /// v4 组 1（R5-M03）三态化：旧实现把「读失败 / 解析失败 / 结构非数组」一律归空数组，
 /// 而消费链紧接着 `write_disabled_records(&records)` 把空集写回 —— **损坏即永久丢账**
-/// （已禁用项在下次扫描被当成「未禁用」）。现在损坏返回 Err（现场已由 `read_json_state`
+/// （已禁用项在下次扫描被当成「未禁用」）。现在损坏返回 Err（现场已由 read_json_state
 /// 隔离 + 留痕），调用方必须**拒绝本次操作**、不得写回。
+///
+/// v4 修复（2026-10-09）：台账是**裸数组**，必须走 `read_json_array_state` —— 此前
+/// 借用对象版 `read_json_state`（对非对象一律判 Corrupt），合法数组被当损坏处理，
+/// 启用/禁用 100% 在读台账处中止（真机症状「能删除不能禁用」，删除链不读台账）。
 fn read_disabled_records() -> Result<Vec<Value>, String> {
     let Some(f) = startup_ledger_file() else { return Ok(Vec::new()) };
-    match crate::security::read_json_state(&f) {
+    match crate::security::read_json_array_state(&f) {
         crate::security::JsonState::Ok(Value::Array(arr)) => {
             Ok(arr.into_iter().filter(|v| !v.is_null()).collect())
         }

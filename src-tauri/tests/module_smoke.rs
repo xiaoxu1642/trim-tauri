@@ -1360,3 +1360,103 @@ fn quickcmds_run_is_main_only() {
         "主窗应越过档位进入白名单查询（正向特征），回执 {res}"
     );
 }
+
+// ==================== v4 修复：启动项禁用/启用整条原生链（数组台账读器回归） ====================
+
+/// 真机 `#[ignore]` 探针：注册表启动项的**禁用/启用**端到端（含批准位回读）。
+///
+/// 背景（真机症状「能删除不能禁用」的根因）：R5-M03 台账三态化借用了只认对象的
+/// `read_json_state`，而禁用台账 `disabled.json` 是**裸数组** —— 合法数组被判损坏，
+/// 每次启用/禁用都在「读台账」处整批中止；删除链不读台账所以照常可用。
+/// 本用例自建 HKCU Run 探针值 → 走 `startup_toggle` 真实注册表路径 → 断言
+/// StartupApproved 批准位 bit0 翻转 → 还原 → 清理（Drop 守卫，断言失败也会清）。
+/// 数组读器一旦退回对象版，第一条断言即红（回执 message 变为「台账读取失败」）。
+#[test]
+#[ignore = "真写 HKCU Run 探针值 + StartupApproved blob（自建自清），发布前门禁跑"]
+fn startup_toggle_registry_probe_disable_and_enable() {
+    use trim_tauri_lib::engine::native::{hive_hkcu, read_reg_binary_opt, startup_toggle};
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const SA_KEY: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    const NAME: &str = "TrimProbeToggleX";
+
+    struct ProbeCleanup;
+    impl Drop for ProbeCleanup {
+        fn drop(&mut self) {
+            for key in [SA_KEY, RUN_KEY] {
+                let _ = std::process::Command::new("reg")
+                    .args(["delete", &format!(r"HKCU\{key}"), "/v", NAME, "/f"])
+                    .output();
+            }
+        }
+    }
+    let _cleanup = ProbeCleanup;
+
+    let st = std::process::Command::new("reg")
+        .args([
+            "add",
+            &format!(r"HKCU\{RUN_KEY}"),
+            "/v",
+            NAME,
+            "/t",
+            "REG_SZ",
+            "/d",
+            r"C:\Windows\System32\notepad.exe",
+            "/f",
+        ])
+        .status()
+        .expect("reg.exe 可执行");
+    assert!(st.success(), "建探针 Run 值失败（下面两条断言无意义）");
+
+    let item = json!({
+        "id": format!("reg|HKEY_CURRENT_USER\\{RUN_KEY}|{NAME}"),
+        "name": NAME,
+        "source": "registry",
+        "hive": "HKCU",
+        "regPath": format!("HKEY_CURRENT_USER\\{RUN_KEY}"),
+        "valueName": NAME,
+        "valueType": "String",
+        "valueData": r"C:\Windows\System32\notepad.exe",
+        "filePath": "",
+        "taskPath": "",
+        "taskName": "",
+    });
+
+    let res = startup_toggle(&[item.clone()], false).expect("禁用不应整批失败（数组台账读器回归的判红点）");
+    assert_eq!(res["failed"], json!(0), "禁用应全部成功: {res}");
+    let blob = read_reg_binary_opt(hive_hkcu(), SA_KEY, NAME).expect("批准位应已写出");
+    assert!(blob.starts_with("03"), "bit0 置位 ⇒ 首字节 03，实际 {blob}");
+
+    let res2 = startup_toggle(&[item], true).expect("启用不应整批失败");
+    assert_eq!(res2["failed"], json!(0), "启用应全部成功: {res2}");
+    let blob2 = read_reg_binary_opt(hive_hkcu(), SA_KEY, NAME).expect("批准位应仍在");
+    assert!(blob2.starts_with("02"), "bit0 清零 ⇒ 首字节 02，实际 {blob2}");
+}
+
+/// v4 修复回归（快速组）：测速历史回执与**磁盘真值**自比对 ——
+/// 同一回归的另一受害者：`bench-history.json` 也是裸数组，被对象读器判损坏后
+/// 列表恒空（文件里明明有记录）。本用例不依赖装机数据：文件不存在时只验形状，
+/// 存在时必须条数一致（采集与判定拆开：真值取自文件本身，不是硬编码期望）。
+#[test]
+fn bench_history_list_matches_file_truth() {
+    let f = trim_tauri_lib::engine::paths::join_data("bench-history.json");
+    let raw = std::fs::read_to_string(&f);
+    let w = main_window();
+    let res = invoke(&w, "bench_history_list", json!({}));
+    assert_eq!(res["success"], json!(true), "列表应成功: {res}");
+    assert!(res["data"].is_array(), "data 必须是数组: {res}");
+    let n_cmd = res["data"].as_array().map(|a| a.len()).unwrap_or(usize::MAX);
+    match raw {
+        Ok(text) => {
+            let v: serde_json::Value =
+                serde_json::from_str(&text).expect("本机历史文件应为合法 JSON（否则先修数据再跑）");
+            let n_file = v.as_array().map(|a| a.len()).unwrap_or(0);
+            assert_eq!(
+                n_cmd, n_file,
+                "回执条数必须与磁盘真值一致（数组读器回归时命令恒 0）: file={n_file} cmd={n_cmd}"
+            );
+        }
+        Err(_) => { /* 本机没有历史文件：无从对拍，只验形状（回执仍是空数组） */ }
+    }
+}

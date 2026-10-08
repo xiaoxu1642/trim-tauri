@@ -219,11 +219,34 @@ pub enum JsonState {
     Corrupt,
 }
 
+/// 对象形态的文件一律走它（配置类：settings/appearance/paths/optimization-state…）。
 pub fn read_json_state(path: &Path) -> JsonState {
+    read_json_state_shape(path, false)
+}
+
+/// **数组形态**的三态读取（v4 修复 · 2026-10-09）：与 [`read_json_state`] 同判据、
+/// 同三态语义，只是期望结构换成**裸数组**。
+///
+/// 为什么必须有它：`read_json_state` 对 `Ok(_)` 非对象一律判 `Corrupt`，而仓里有裸数组
+/// 用户数据（启动项禁用台账 `disabled.json`、测速历史 `bench-history.json`）。R5-M03 的
+/// 台账三态化与 R1-M03 的测速历史收口直接借用了对象版 ⇒ **合法数组被判损坏**：台账链
+/// 每次启用/禁用都在读台账处中止（真机症状「能删除不能禁用」），测速历史的读恒空、
+/// 写恒拒。数组消费者一律走本函数，不许再借用对象版。
+pub fn read_json_array_state(path: &Path) -> JsonState {
+    read_json_state_shape(path, true)
+}
+
+fn read_json_state_shape(path: &Path, want_array: bool) -> JsonState {
     match fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) if v.is_object() => JsonState::Ok(v),
-            Ok(_) => JsonState::Corrupt, // 结构不是对象：留现场，按损坏处理
+            Ok(v) => {
+                let shape_ok = if want_array { v.is_array() } else { v.is_object() };
+                if shape_ok {
+                    JsonState::Ok(v)
+                } else {
+                    JsonState::Corrupt // 结构不符：留现场（不隔离），按损坏处理
+                }
+            }
             Err(e) => {
                 quarantine_file(path, &e.to_string());
                 JsonState::Corrupt
@@ -719,5 +742,53 @@ mod tests {
             v["n"], serde_json::json!(60),
             "两线程各 30 次 +1，丢更新即红（终值 {text}）"
         );
+    }
+
+    /// v4 修复（2026-10-09）：对象/数组两把读器各认各的形态，**交叉即 Corrupt**。
+    /// 防的正是「数组文件借用对象读器」这类回归 —— 启动项禁用台账与测速历史都是
+    /// 裸数组，被对象版判损坏后，禁用/启用 100% 中止、测速历史读恒空。
+    /// 判红自证：把 read_json_array_state 改回借 read_json_state ⇒ 前半组即红。
+    #[test]
+    fn json_state_readers_are_shape_specific() {
+        let dir = std::env::temp_dir().join(format!("trim-json-shape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+
+        // ① 裸数组：数组读器 Ok、对象读器 Corrupt（后者正是回归的成因）
+        let arr = dir.join("ledger.json");
+        std::fs::write(&arr, "[{\"id\":\"x\"}]").expect("写数组");
+        assert!(
+            matches!(read_json_array_state(&arr), JsonState::Ok(serde_json::Value::Array(_))),
+            "合法数组必须被数组读器接受"
+        );
+        assert!(
+            matches!(read_json_state(&arr), JsonState::Corrupt),
+            "对象读器对数组按损坏处理（留现场、不隔离）"
+        );
+        assert!(arr.exists(), "形态不符不得隔离原件");
+
+        // ② 对象：对象读器 Ok、数组读器 Corrupt（对称）
+        let obj = dir.join("conf.json");
+        std::fs::write(&obj, "{\"a\":1}").expect("写对象");
+        assert!(matches!(read_json_state(&obj), JsonState::Ok(_)));
+        assert!(matches!(read_json_array_state(&obj), JsonState::Corrupt));
+
+        // ③ 不存在：两把读器都 Absent（首次写入语义一致）
+        let none = dir.join("nope.json");
+        assert!(matches!(read_json_state(&none), JsonState::Absent));
+        assert!(matches!(read_json_array_state(&none), JsonState::Absent));
+
+        // ④ 坏 JSON：数组读器按损坏处理且现场被隔离（改名 .corrupt-*）
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, "[{}").expect("写坏件");
+        assert!(matches!(read_json_array_state(&bad), JsonState::Corrupt));
+        assert!(!bad.exists(), "解析失败的现场必须被隔离（改名）");
     }
 }
