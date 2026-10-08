@@ -3,6 +3,9 @@
 (function () {
   'use strict';
 
+  // P2-13（2026-10-09）：真源迁后端 settings.json 的 `mouseTrail` 键（AGENTS §0.2：
+  // 配置真源在 %APPDATA%，localStorage 只是镜像）；KEY 那套本地键降级为同步初值 +
+  // 迁移来源 + 镜像。
   const KEY = 'trim-mouse-trail';
   const THROTTLE_MS = 22;      // 生成节流
   const FADE_MS = 520;         // 与 main.css 的过渡时长保持一致
@@ -13,15 +16,40 @@
   }
 
   let enabled = false;
+  let enabledPref = readLsPref();
+  let prefDirty = false;
   let layer = null;
   let last = 0;
 
-  function readEnabled() {
+  function readLsPref() {
     try { return localStorage.getItem(KEY) === 'true'; } catch (_) { return false; }
   }
+  function readEnabled() { return enabledPref === true; }
   function writeEnabled(value) {
-    try { localStorage.setItem(KEY, String(value)); } catch (_) {}
+    enabledPref = value === true;
+    prefDirty = true;
+    try { localStorage.setItem(KEY, String(enabledPref)); } catch (_) { /* 镜像写失败不影响（真源在后端） */ }
+    try { window.api?.settings?.setPref?.('mouseTrail', enabledPref)?.catch?.(() => {}); } catch (_) { /* 真源写入失败按镜像工作 */ }
   }
+
+  // 后端真源回读：boolean ⇒ 采纳并即时应用；非 boolean（未设置/坏值）⇒ 把本地现值
+  // 一次性迁移上去。prefDirty 时跳过采纳（读回的是写入前的旧值）。
+  (async function syncPref() {
+    try {
+      const resp = await window.api?.settings?.getPrefs?.();
+      if (!resp || !resp.success || prefDirty) return;
+      const v = resp.data?.mouseTrail;
+      if (typeof v === 'boolean') {
+        if (v !== enabledPref) {
+          enabledPref = v;
+          try { localStorage.setItem(KEY, String(v)); } catch (_) { /* 镜像写失败不影响（真源已就位） */ }
+          setEnabled(v);
+        }
+      } else {
+        writeEnabled(enabledPref); // 迁移：后端没有值，把本地现值推上去
+      }
+    } catch (_) { /* 真源不可用按本地镜像工作 */ }
+  })();
   function ensureLayer() {
     if (layer && document.body.contains(layer)) return layer;
     layer = document.createElement('div');

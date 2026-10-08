@@ -152,6 +152,56 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
     assert_eq!(reached, sub_windows(), "每个子窗 label 都必须被点名走过（清单塌缩时这条红）");
 }
 
+// ==================== P2-13：UI 偏好键后端真源（get-prefs / set-pref） ====================
+
+/// 形状断言：get-prefs 必须把**四个白名单键**全部带回（值为 null 也算在场）——
+/// 缺键会让渲染层把「未设置」读成 undefined 再塌成默认值，三态语义就没了。
+/// （只读命令，读的是真实 settings.json，与 settings_load 同列的零副作用读。）
+#[test]
+fn settings_get_prefs_shape_lists_all_whitelist_keys() {
+    let w = main_window();
+    let res = invoke(&w, "settings_get_prefs", json!({}));
+    assert_eq!(res["success"], json!(true), "get-prefs 应成功: {res}");
+    let data = res["data"].as_object().expect("data 必须是对象");
+    let mut keys: Vec<&str> = data.keys().map(|s| s.as_str()).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["liquidMotion", "mouseTrail", "residueBackupPack", "startupDefend"],
+        "白名单四键必须逐个在场（值为 null 也算在场）: {res}"
+    );
+}
+
+/// 档位正向断言（§4.2 纪律①）：四个子窗 label 都能调 get-prefs（残留副窗要读备份开关、
+/// 模型/进程副窗的玻璃引擎要读档位），`reached` 逐窗点名——只断「不含校验失败」
+/// 会被子窗清单塌缩骗过。
+#[test]
+fn settings_get_prefs_reaches_every_subwindow() {
+    let mut reached: Vec<&str> = Vec::new();
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "settings_get_prefs", json!({}));
+        assert!(
+            !text.contains("IPC 来源校验失败"),
+            "{label} 窗调 get-prefs 不得被拒杀，回执 {text}"
+        );
+        assert!(text.contains("success"), "{label} 窗应越过档位进入命令体，回执 {text}");
+        reached.push(label);
+    }
+    assert_eq!(reached, sub_windows(), "每个子窗 label 都必须被点名走过（清单塌缩时这条红）");
+}
+
+/// 负例：白名单外的键必须在**落盘前**被拒（防渲染层被注入后借偏好通道往 settings.json
+/// 塞任意键）。拒在写之前 ⇒ 零副作用，可进快速组。
+#[test]
+fn settings_set_pref_rejects_unknown_key() {
+    let w = main_window();
+    let res = invoke(&w, "settings_set_pref", json!({ "key": "__trim_smoke_key__", "value": 1 }));
+    assert_eq!(res["success"], json!(false), "白名单外 key 必须被拒: {res}");
+    let msg = res["message"].as_str().unwrap_or("");
+    assert!(msg.contains("未知的偏好键"), "拒绝理由要点名白名单: {res}");
+}
+
 // ==================== 卸载残留链三道闸（M1 安全收口 2026-09-28） ====================
 //
 // 覆盖对象是**命令边界**而不是判定函数本身（判定函数的正反例在 lib 单测里由

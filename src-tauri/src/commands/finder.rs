@@ -855,15 +855,18 @@ fn empty_ignore_path() -> std::path::PathBuf {
     crate::engine::paths::app_data_dir().join(EMPTY_IGNORE_FILE)
 }
 
-fn read_empty_ignore_lines() -> Vec<String> {
-    std::fs::read_to_string(empty_ignore_path())
-        .map(|t| {
-            t.lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+/// 读忽略名单（v4 P2-D 尾）：IO 失败与「文件不存在」分开 —— 前者拒写（读空即写回
+/// 会把整份名单覆成空），后者当空名单（首次使用）。
+fn read_empty_ignore_lines() -> Result<Vec<String>, String> {
+    match std::fs::read_to_string(empty_ignore_path()) {
+        Ok(t) => Ok(t
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("忽略名单读取失败：{e}")),
+    }
 }
 
 fn write_empty_ignore_lines(lines: &[String]) -> Result<(), String> {
@@ -891,7 +894,10 @@ pub async fn finder_ignore_folder<R: tauri::Runtime>(
     if path.is_empty() || !p.is_absolute() || !p.is_dir() {
         return json!({ "success": false, "message": "只能忽略本机存在的文件夹" });
     }
-    let mut lines = read_empty_ignore_lines();
+    let mut lines = match read_empty_ignore_lines() {
+        Ok(l) => l,
+        Err(msg) => return json!({ "success": false, "message": format!("{msg}；为避免覆盖名单，本次操作已中止") }),
+    };
     let lower = path.to_lowercase();
     if lines.iter().any(|l| l.to_lowercase() == lower) {
         return json!({ "success": true, "already": true, "count": lines.len() });
@@ -913,13 +919,16 @@ pub async fn finder_ignore_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> 
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    let items: Vec<Value> = read_empty_ignore_lines()
-        .into_iter()
-        .map(|l| {
-            let exists = Path::new(&l).is_dir();
-            json!({ "path": l, "exists": exists })
-        })
-        .collect();
+    let items: Vec<Value> = match read_empty_ignore_lines() {
+        Ok(l) => l,
+        Err(msg) => return json!({ "success": false, "message": msg }),
+    }
+    .into_iter()
+    .map(|l| {
+        let exists = Path::new(&l).is_dir();
+        json!({ "path": l, "exists": exists })
+    })
+    .collect();
     json!({ "success": true, "data": items })
 }
 
@@ -937,7 +946,10 @@ pub async fn finder_ignore_remove<R: tauri::Runtime>(
         return json!({ "success": false, "message": "参数缺失" });
     }
     let lower = path.to_lowercase();
-    let lines = read_empty_ignore_lines();
+    let lines = match read_empty_ignore_lines() {
+        Ok(l) => l,
+        Err(msg) => return json!({ "success": false, "message": format!("{msg}；为避免覆盖名单，本次操作已中止") }),
+    };
     let kept: Vec<String> = lines
         .iter()
         .filter(|l| l.to_lowercase() != lower)

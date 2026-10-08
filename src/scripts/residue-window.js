@@ -17,12 +17,19 @@
   function esc(s) { return window.ds.esc(String(s == null ? '' : s)); }
   function toast(type, message) { window.subToast?.hintLine('rsGlobalHint', type, message); }
 
-  // 与主窗同一个键：同一 origin 的 localStorage 是共享的，偏好不该有两份真源
-  const BACKUP_PREF_KEY = 'trim.residue.backupPack';
+  // P2-13（2026-10-09）：真源迁后端 settings.json 的 `residueBackupPack` 键（AGENTS §0.2：
+  // 配置真源在 %APPDATA%，localStorage 只是镜像）。本窗与主窗共享同一 localStorage，
+  // 但真源本应是应用私有配置——一次存储清空就把用户打开的「删除前备份」拨回关闭
+  //（误拨到关 = 少一层保护）。localStorage 降级为同步初值 + 迁移来源 + 镜像。
   // D2（v4 审查）：读失败/坏值一律走「未开启」方向并留痕（控制台 + 应用日志，log_write
   // 五窗可调）。误拨到「开」的代价只是删除前多一次打包，方向本身安全；留痕是为了能解释
   // 「开关为什么回到关」——静默降级正是这条被记下来的原因。
-  function readBackupPref() {
+  const BACKUP_PREF_KEY = 'trim.residue.backupPack';
+  const BACKUP_PREF_BACKEND_KEY = 'residueBackupPack';
+  let backupPref = readLsBackupPref();
+  let backupPrefDirty = false;
+
+  function readLsBackupPref() {
     let raw = null;
     try { raw = localStorage.getItem(BACKUP_PREF_KEY); }
     catch (e) {
@@ -37,13 +44,39 @@
     }
     return false;
   }
+  function readBackupPref() { return backupPref === true; }
   function writeBackupPref(on) {
-    try { localStorage.setItem(BACKUP_PREF_KEY, on ? '1' : '0'); }
-    catch (e) {
-      console.warn('[Trim] 备份开关偏好写入失败:', e);
-      try { window.api?.log?.write?.('warn', '残留副窗：备份开关偏好写入失败，本次选择下次启动会丢失'); } catch (_) { /* 同上 */ }
-    }
+    backupPref = on === true;
+    backupPrefDirty = true;
+    try { localStorage.setItem(BACKUP_PREF_KEY, backupPref ? '1' : '0'); }
+    catch (e) { console.warn('[Trim] 备份开关镜像写入失败（真源仍写后端）:', e); }
+    try {
+      window.api?.settings?.setPref?.(BACKUP_PREF_BACKEND_KEY, backupPref)?.catch?.((e) => {
+        console.warn('[Trim] 备份开关偏好写入配置失败:', e);
+        try { window.api?.log?.write?.('warn', '残留副窗：备份开关偏好写入配置失败，本次选择下次启动可能丢失'); } catch (_) { /* 同上 */ }
+      });
+    } catch (e) { console.warn('[Trim] 备份开关偏好写入配置异常:', e); }
   }
+
+  // 后端真源回读：boolean ⇒ 采纳并同步勾选框；非 boolean（未设置/坏值）⇒ 把本地现值
+  // 一次性迁移上去。backupPrefDirty 时跳过采纳（读回的是写入前的旧值）。
+  (async function syncBackupPref() {
+    try {
+      const resp = await window.api?.settings?.getPrefs?.();
+      if (!resp || !resp.success || backupPrefDirty) return;
+      const v = resp.data?.[BACKUP_PREF_BACKEND_KEY];
+      if (typeof v === 'boolean') {
+        if (v !== backupPref) {
+          backupPref = v;
+          try { localStorage.setItem(BACKUP_PREF_KEY, v ? '1' : '0'); } catch (e) { /* 镜像写失败不影响（真源已就位） */ }
+          const t = el('rsBackupToggle');
+          if (t) t.checked = v;
+        }
+      } else {
+        writeBackupPref(backupPref); // 迁移：后端没有值，把本地现值推上去
+      }
+    } catch (e) { /* 真源不可用按本地镜像工作 */ }
+  })();
 
   const CONF_LABEL = { high: '高置信', medium: '中置信', low: '低置信（建议人工核对）' };
   const KIND_LABEL = { reg_key: '注册表项', reg_value: '注册表值', folder: '目录', file: '文件', shortcut: '快捷方式' };

@@ -404,7 +404,12 @@ const MUST_READONLY = [
   // 开窗只有主窗入口会调，落在 MUST_MAIN（D5 的判据：没有子窗调用点就不给放宽）
   'residue_close_window',
   'runtimes_collect',
+  // P2-13：UI 偏好键读写迁后端真源（settings.json）。两命令都只碰 PREF_KEYS 白名单键，
+  // 不含密钥面；挂 readonly 是因为消费方横跨窗口 —— 残留副窗要读写「删除前备份」开关、
+  // 模型/进程副窗的玻璃引擎要读档位偏好。写侧只改 settings.json 自身的偏好段。
+  'settings_get_prefs',
   'settings_load',
+  'settings_set_pref',
   'startup_openlocation', // 疑点：打开资源管理器目录
   'startup_scan',
   'system_disk_list',

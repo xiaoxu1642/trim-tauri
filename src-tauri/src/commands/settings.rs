@@ -39,6 +39,63 @@ use crate::security::{self, SECRET_MASK};
 pub(crate) const AI_ENGINE_ORDER: &[&str] = &["baidu", "metaso", "zhihu"];
 /// 大模型管理四个模型项（顺序即渲染层 modelList 的 order）
 pub(crate) const AI_MODEL_KEYS: &[&str] = &["baidu_pro", "zhihu", "metaso", "custom"];
+
+/// UI 偏好键白名单（v4 P2-13 渲染层真源迁移；get/set 两命令同源，防任意写）。
+/// 消费方：startup（防恢复三键合一）/ residue 副窗（备份开关）/ liquid-glass / mouse-trail。
+pub(crate) const PREF_KEYS: &[&str] = &["startupDefend", "residueBackupPack", "liquidMotion", "mouseTrail"];
+
+/// settings:get-prefs —— UI 偏好键的批量读取（五窗可调：副窗也要读）。
+/// 缺失键返回 null（前端据此区分「未设置」与「已设置」）。
+#[tauri::command]
+pub fn settings_get_prefs<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    let s = load_settings();
+    let mut data = serde_json::Map::new();
+    for k in PREF_KEYS {
+        data.insert((*k).into(), s.get(*k).cloned().unwrap_or(Value::Null));
+    }
+    json!({ "success": true, "data": data })
+}
+
+/// settings:set-pref —— UI 偏好键的后端真源写入（v4 P2-13）。
+///
+/// 为什么必须有它：这些键原先只活在渲染层 localStorage（`trim-startup-*`、
+/// `trim.residue.backupPack` 等），AGENTS §0.2 的红线是「配置真源在 `%APPDATA%`，
+/// localStorage 只是镜像」——一次存储清空就把用户关掉的开关拨回默认。
+/// 白名单键防任意写；值大小受限；走 `update_settings`（读失败拒写，绝不整表覆写含密钥配置）。
+#[tauri::command]
+pub async fn settings_set_pref<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    key: String,
+    value: Value,
+) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    if !PREF_KEYS.contains(&key.as_str()) {
+        return json!({ "success": false, "message": "未知的偏好键" });
+    }
+    // 值形状闸：上限 64KB（防把 settings.json 灌爆——它每次保存都要整体加解密）
+    if serde_json::to_string(&value).map(|s| s.len()).unwrap_or(usize::MAX) > 64 * 1024 {
+        return json!({ "success": false, "message": "偏好值过大" });
+    }
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        update_settings(|s| {
+            if let Some(o) = s.as_object_mut() {
+                o.insert(key.clone(), value.clone());
+            }
+            Ok(())
+        })
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => json!({ "success": true }),
+        Ok(Err(msg)) => json!({ "success": false, "message": format!("偏好写入失败：{msg}") }),
+        Err(e) => json!({ "success": false, "message": format!("偏好写入异常：{e}") }),
+    }
+}
 /// 各模块 AI 简介作用域
 ///
 /// v0.7.0 新增 `residue`（残留扫描副窗的「点击查看」）。加这里的同一轮**必须**同步：

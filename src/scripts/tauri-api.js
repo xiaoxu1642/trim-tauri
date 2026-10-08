@@ -129,6 +129,9 @@
     'modal:close': 'modal_close',
     'diag:dwm-conflict': 'diag_dwm_conflict',
     'settings:load': 'settings_load',
+    // v4 P2-13：UI 偏好键的后端真源（防恢复三键 / 残留备份开关 / 液态动效 / 鼠标拖尾）
+    'settings:get-prefs': 'settings_get_prefs',
+    'settings:set-pref': 'settings_set_pref',
     'intro:load': 'intro_load',
     // models 窗口 + models 配置（合计 5）
     'models:open-window': 'models_open_window',
@@ -507,7 +510,10 @@
     // 审查 v2-F4：`settings:save` 整链摘除（零调用方的死写入通道，AI 配置写入归 models 域）。
     // 只留 load；将来若真要开配置页，走 `models:save` 而不是复活这条。
     settings: {
-      load: function () { return invokeChannel('settings:load'); }
+      load: function () { return invokeChannel('settings:load'); },
+      // v4 P2-13：偏好键读写（get 返回 {success, data:{键:值|null}}；set 进白名单键）
+      getPrefs: function () { return invokeChannel('settings:get-prefs'); },
+      setPref: function (key, value) { return invokeChannel('settings:set-pref', { key: key, value: value }); }
     },
 
     intro: {

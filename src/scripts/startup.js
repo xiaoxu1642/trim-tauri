@@ -47,59 +47,126 @@
   // ==================== 防恢复机制 ====================
   // 用户禁用启动项后，若连续 3 次扫描发现该项仍被外部程序自动恢复（重新启用），
   // 则自动执行「删除 + 加入防恢复黑名单」；黑名单项再次出现时会被立即自动删除，
-  // 从源头阻止程序反复创建该启动项。状态持久化在 localStorage。
-  const DEFEND_KEY = 'trim-startup-defend';     // { 指纹: { name, strikes } }
-  const BLACKLIST_KEY = 'trim-startup-blacklist'; // [指纹...]
+  // 从源头阻止程序反复创建该启动项。
+  //
+  // P2-13（2026-10-09）：真源迁后端 settings.json 的单键 `startupDefend`（AGENTS §0.2：
+  // 配置真源在 %APPDATA%，localStorage 只是镜像）。此前三键只活在 localStorage，
+  // 一次存储清空（清缓存/隐私模式）就把用户关掉的防恢复开关拨回默认——D2 只管读侧
+  // 三态，根因在真源位置，这轮把根拔掉。后端值形如：
+  //   { enabled: 总开关, defend: {指纹:{name,strikes}}, blacklist: [指纹...] }
+  // localStorage 保留同名三键，降级为两用：① 首帧同步初值（后端读是异步的，开关条
+  // 不能等 IPC）；② 一次性迁移来源（后端没有值时把本地现值推上去）。
+  const DEFEND_KEY = 'trim-startup-defend';     // 镜像/迁移来源：{ 指纹: { name, strikes } }
+  const BLACKLIST_KEY = 'trim-startup-blacklist'; // 镜像/迁移来源：[指纹...]
+  const DEFEND_ENABLED_KEY = 'trim-startup-defend-enabled'; // 镜像/迁移来源：总开关（默认开）
+  const DEFEND_PREF_KEY = 'startupDefend';      // 后端真源键（settings.json）
   const DEFEND_STRIKES_LIMIT = 3;
   // SU-2（2026-09-15，S7）：防恢复自动删除总开关。原实现扫描到顽固恢复项即
   // 「静默删除 + 拉黑」，用户既无法关闭也无法预知；且用户经 Windows 原生 UI 主动
   // 重新启用会被误计为「外部恢复」。现改为：总开关可关 + 每次自动删除前逐条红色确认。
-  const DEFEND_ENABLED_KEY = 'trim-startup-defend-enabled'; // 总开关（默认开）
 
-  function loadStore(key, fallback) {
-    const r = loadStore3(key);
-    return r.state === 'ok' ? r.value : fallback;
-  }
-  // D2（v4 审查 · 用户裁定「先别自动删」）：三态读取 —— ok=合法值 / absent=没存过 /
-  // corrupt=读了但解析失败（含存储整体不可用）。此前 absent 与 corrupt 都走 fallback，
-  // 一次存储清空（清缓存/隐私模式/坏值）就能把用户关掉的防恢复开关拨回默认值。
-  function loadStore3(key) {
+  // 内存镜像：同步读写（调用点全同步）。初值取 localStorage 三态读——absent/corrupt
+  // 方向与 D2 一致：总开关只认显式 true（猜错方向代价不对称，误拨到开 = 一次存储
+  // 清空把自动删除能力拨回去），黑名单/计数按空处理（读不到就不自动删，方向安全）。
+  const defendStore = {
+    enabled: readLsValue(DEFEND_ENABLED_KEY, (v) => v === true, false),
+    defend: readLsValue(DEFEND_KEY, (v) => v && typeof v === 'object' && !Array.isArray(v), {}),
+    blacklist: readLsValue(BLACKLIST_KEY, Array.isArray, []),
+  };
+  let prefsDirty = false;  // 后端回读前已有本地写入 ⇒ 回读不得覆盖内存
+  let prefSyncWarned = false;
+
+  // D2（v4 审查）：读失败/坏值一律走 fallback 并留痕（此前 absent 与 corrupt 不分，
+  // 现在仍不分——但真源迁走后本地读只是「首帧镜像」，解释性留痕即可）。
+  function readLsValue(key, check, fallback) {
     let raw = null;
     try { raw = localStorage.getItem(key); }
     catch (e) {
       window.app?.log?.('warn', `本地存储「${key}」不可读，已按未设置处理: ${e.message}`);
-      return { state: 'corrupt' };
+      return fallback;
     }
-    if (raw == null || raw === '') return { state: 'absent' };
+    if (raw == null || raw === '') return fallback;
     try {
       const v = JSON.parse(raw);
-      return v == null ? { state: 'absent' } : { state: 'ok', value: v };
+      return check(v) ? v : fallback;
     } catch (e) {
       window.app?.log?.('warn', `本地存储「${key}」解析失败，已按未设置处理: ${e.message}`);
-      return { state: 'corrupt' };
+      return fallback;
     }
   }
-  let saveStoreWarned = false;
+
+  function loadStore(key, fallback) {
+    if (key === BLACKLIST_KEY) return defendStore.blacklist;
+    if (key === DEFEND_KEY) return defendStore.defend;
+    if (key === DEFEND_ENABLED_KEY) return defendStore.enabled;
+    return fallback;
+  }
   function saveStore(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); }
-    catch (e) {
-      window.app?.log?.('warn', `本地存储「${key}」写入失败: ${e.message}`);
-      if (!saveStoreWarned) {
-        saveStoreWarned = true;
-        window.app?.toast?.('warning', '设置未能保存（本地存储不可用），下次启动会回到关闭状态');
-      }
+    if (key === BLACKLIST_KEY) defendStore.blacklist = Array.isArray(value) ? value : [];
+    else if (key === DEFEND_KEY) defendStore.defend = (value && typeof value === 'object' && !Array.isArray(value)) ? value : {};
+    else if (key === DEFEND_ENABLED_KEY) defendStore.enabled = value === true;
+    persistDefendPref();
+  }
+
+  // 写路径：内存镜像 → localStorage 镜像（尽力）→ 后端真源（fire-and-forget）。
+  // 后端写失败只降级不阻塞：本次会话仍按内存值工作，重启后由本地镜像兜底。
+  function persistDefendPref() {
+    prefsDirty = true;
+    try {
+      localStorage.setItem(DEFEND_ENABLED_KEY, JSON.stringify(defendStore.enabled === true));
+      localStorage.setItem(DEFEND_KEY, JSON.stringify(defendStore.defend));
+      localStorage.setItem(BLACKLIST_KEY, JSON.stringify(defendStore.blacklist));
+    } catch (e) { /* 镜像写失败不影响主流程（真源在后端） */ }
+    try {
+      window.api?.settings?.setPref?.(DEFEND_PREF_KEY, {
+        enabled: defendStore.enabled === true,
+        defend: defendStore.defend,
+        blacklist: defendStore.blacklist,
+      })?.catch?.((e) => {
+        window.app?.log?.('warn', `防恢复偏好写入配置失败（本次仍生效，重启后以本地镜像为准）: ${e.message}`);
+        if (!prefSyncWarned) {
+          prefSyncWarned = true;
+          window.app?.toast?.('warning', '防恢复设置未能写入配置文件，清理浏览器数据后可能丢失');
+        }
+      });
+    } catch (e) {
+      window.app?.log?.('warn', `防恢复偏好写入配置异常: ${e.message}`);
     }
   }
+
+  // 后端真源回读（页面加载时一次）：有值 ⇒ 采纳并刷新开关条；无值 ⇒ 把本地镜像
+  // 一次性迁移上去。prefsDirty 时跳过采纳——读回的是写入前的旧值，会覆盖用户刚做的选择。
+  const prefsReady = (async () => {
+    try {
+      const resp = await window.api?.settings?.getPrefs?.();
+      if (!resp || !resp.success || prefsDirty) return;
+      const v = resp.data?.[DEFEND_PREF_KEY];
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        defendStore.enabled = v.enabled === true;
+        defendStore.defend = (v.defend && typeof v.defend === 'object' && !Array.isArray(v.defend)) ? v.defend : {};
+        defendStore.blacklist = Array.isArray(v.blacklist) ? v.blacklist : [];
+        try {
+          localStorage.setItem(DEFEND_ENABLED_KEY, JSON.stringify(defendStore.enabled));
+          localStorage.setItem(DEFEND_KEY, JSON.stringify(defendStore.defend));
+          localStorage.setItem(BLACKLIST_KEY, JSON.stringify(defendStore.blacklist));
+        } catch (e) { /* 镜像写失败不影响（真源已就位） */ }
+      } else {
+        persistDefendPref(); // 迁移：后端没有值，把本地现值推上去
+      }
+      updateDefendToggleUI();
+    } catch (e) {
+      window.app?.log?.('warn', `防恢复偏好同步失败，本次按本地镜像工作: ${e.message}`);
+    }
+  })();
   function fpOf(item) {
     return [item.source || '', item.name || '', item.command || ''].join('|');
   }
 
   // SU-2（S7）：防恢复总开关读写 + 开关条 UI 同步
-  // D2：只认显式 true —— absent（首次）与 corrupt（被清/损坏）都按**关**处理：
+  // D2/P2-13：只认显式 true —— absent（首次）与 corrupt（被清/损坏）都按**关**处理：
   // 猜错方向的代价不对称（默认开 = 一次存储清空就把自动删除能力拨回去）。
   function isDefendEnabled() {
-    const r = loadStore3(DEFEND_ENABLED_KEY);
-    return r.state === 'ok' && r.value === true;
+    return defendStore.enabled === true;
   }
   function setDefendEnabled(v) { saveStore(DEFEND_ENABLED_KEY, !!v); }
   function updateDefendToggleUI() {
@@ -127,6 +194,9 @@
   // 扫描完成后调用：黑名单拦截 + 顽固恢复计数升级
   async function enforceStartupDefend() {
     if (!items.length || !window.api?.startup?.remove) return;
+    // P2-13：等真源回读落地再判定——本地存储刚被清时镜像里没有黑名单，
+    // 不等读回就放行等于给「清存储绕过拦截」留窗口。
+    await prefsReady;
     // SU-2：总开关关闭 → 本次扫描只计数提示、不做任何自动删除
     if (!isDefendEnabled()) return;
     const blacklist = loadStore(BLACKLIST_KEY, []);

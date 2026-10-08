@@ -1,5 +1,6 @@
 // liquid-glass.js - 全局「液态玻璃」引擎 2.0
-// 模式（localStorage 'trim-liquid-motion'，四档；旧值 refract 自动迁移为 standard）。
+// 模式（P2-13 起真源在后端 settings.json 的 `liquidMotion` 键，四档；localStorage
+// 'trim-liquid-motion' 仅是首帧镜像/迁移来源；旧值 refract 自动迁移为 standard）。
 // 材质语义对齐 Apple Liquid Glass（docs规范/update/2026-09-14 五方案评估·B1）：
 //   full     ≈ clear+ ：完整液态玻璃——分段栏滑块 + 按钮 + 弹层 SVG 物理折射（斯涅尔定律位移贴图）
 //              + RGB 三通道边缘色散 + 高光贴图 + 指针弹性形变 + WebGL 弹层焦散高光
@@ -74,7 +75,13 @@
   const elasticEls = new Set();  // full 模式参与弹性形变的按钮
   let refractCount = 0;
 
-  function readStoredMode() {
+  // P2-13（2026-10-09）：真源迁后端 settings.json 的 `liquidMotion` 键（AGENTS §0.2）；
+  // localStorage 降级为「同步初值 + 迁移来源 + 镜像」—— 玻璃档不能在 init 等 IPC，
+  // 否则首帧闪实底；后端回读只做采纳/迁移，且晚于首帧也不推翻已渲染的档位。
+  let modePref = readLsMode();
+  let modePrefDirty = false;
+
+  function readLsMode() {
     try {
       const v = localStorage.getItem(MODE_KEY);
       if (v && LEGACY_MODE_MAP[v]) return LEGACY_MODE_MAP[v];
@@ -82,9 +89,45 @@
     } catch (e) { return 'standard'; }
   }
 
+  function readStoredMode() { return modePref; }
+
   function persistMode(m) {
-    try { localStorage.setItem(MODE_KEY, m); } catch (e) {}
+    modePref = m;
+    modePrefDirty = true;
+    try { localStorage.setItem(MODE_KEY, m); } catch (e) { /* 镜像写失败不影响（真源在后端） */ }
+    try {
+      window.api?.settings?.setPref?.('liquidMotion', m)?.catch?.(() => {});
+    } catch (e) { /* 真源写入失败按镜像工作，不打断档位切换 */ }
   }
+
+  // 设置页档位下拉与真源对齐：app.js 初始化时读 getMode()，后端采纳若晚于它，
+  // 下拉会停在旧值——这里补一次同步（下拉不存在时静默跳过，本引擎五窗共用）。
+  function syncModeSelect() {
+    const sel = document.getElementById('liquidMotionSelect');
+    if (sel && sel.value !== mode) sel.value = mode;
+  }
+
+  // 后端真源回读：合法档位 ⇒ 采纳并即时应用；无值/坏值 ⇒ 把本地镜像一次性迁移上去。
+  // modePrefDirty 时跳过采纳（读回的是写入前的旧值，会覆盖用户刚做的切换）。
+  (async function syncModePref() {
+    try {
+      const resp = await window.api?.settings?.getPrefs?.();
+      if (!resp || !resp.success || modePrefDirty) return;
+      const v = resp.data?.liquidMotion;
+      if (typeof v === 'string' && (MODES.indexOf(v) > -1 || LEGACY_MODE_MAP[v])) {
+        const m = normalizeMode(v);
+        if (m !== modePref) {
+          modePref = m;
+          try { localStorage.setItem(MODE_KEY, m); } catch (e) { /* 镜像写失败不影响（真源已就位） */ }
+          // init 未跑时 readStoredMode 会取到新值，无需重复应用；已 init 则即时换档
+          if (document.documentElement.classList.contains('lg-init')) setMode(m, { persist: false });
+        }
+        syncModeSelect();
+      } else {
+        persistMode(modePref); // 迁移：后端没有值，把本地现值推上去
+      }
+    } catch (e) { /* 真源不可用按本地镜像工作 */ }
+  })();
 
   function prefersReduceMotion() {
     return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);

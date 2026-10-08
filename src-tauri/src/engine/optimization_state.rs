@@ -72,8 +72,7 @@ pub fn touch_recent(id: &str) -> bool {
     if id.is_empty() {
         return false;
     }
-    let mut st = load();
-    let mut recent = st
+    let mut recent = load()
         .get("prefs")
         .and_then(|p| p.get("recent"))
         .and_then(Value::as_array)
@@ -82,13 +81,16 @@ pub fn touch_recent(id: &str) -> bool {
     recent.retain(|x| x != id);
     recent.insert(0, id.to_string());
     recent.truncate(RECENT_LIMIT);
-    if let Some(o) = st.as_object_mut() {
-        let prefs = o.entry("prefs").or_insert_with(|| json!({}));
-        if let Some(p) = prefs.as_object_mut() {
-            p.insert("recent".into(), json!(recent));
+    // v4 P2-D 尾：写侧走 update_state（读失败拒写）
+    update_state(|st| {
+        if let Some(o) = st.as_object_mut() {
+            let prefs = o.entry("prefs").or_insert_with(|| json!({}));
+            if let Some(p) = prefs.as_object_mut() {
+                p.insert("recent".into(), json!(recent));
+            }
         }
-    }
-    save(&st)
+        Ok(())
+    })
 }
 
 fn load() -> Value {
@@ -113,11 +115,39 @@ fn load() -> Value {
     }
 }
 
-fn save(state: &Value) -> bool {
-    match security::atomic_write_json(&state_file(), state) {
-        Ok(()) => true,
+/// 写侧骨架校验（v4 P2-D 尾）：结构与 `load()` 的接受面**同判据**，但方向是拒写。
+/// `{}` 视为「首写」（Absent 由 update_json 给空对象），从空骨架起步。
+fn ensure_skeleton(st: &mut Value) -> Result<(), String> {
+    if st.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+        *st = empty_state();
+        return Ok(());
+    }
+    let Some(o) = st.as_object_mut() else {
+        return Err("状态文件结构异常（非对象）".into());
+    };
+    if !o.get("items").map(|x| x.is_object()).unwrap_or(false) {
+        return Err("状态文件结构不符（缺 items），已拒绝写入".into());
+    }
+    if !o.get("detected").map(|x| x.is_object()).unwrap_or(false) {
+        o.insert("detected".into(), json!({}));
+    }
+    if !o.get("prefs").map(|x| x.is_object()).unwrap_or(false) {
+        o.insert("prefs".into(), json!({ "favorites": [], "recent": [] }));
+    }
+    Ok(())
+}
+
+/// 读-改-写（v4 P2-D 尾 / R7-M01 同族）：**读失败绝不落到写**。所有记账入口都走它 ——
+/// 旧链 `load()`（损坏 ⇒ 空骨架）→ 改 → `save()` 会把整本优化账（items/detected/prefs）
+/// 清成「只剩这次改的一条」，且回执仍是普通成功/失败。
+fn update_state(f: impl FnOnce(&mut Value) -> Result<(), String>) -> bool {
+    match security::update_json(&state_file(), |st| {
+        ensure_skeleton(st)?;
+        f(st)
+    }) {
+        Ok(_) => true,
         Err(e) => {
-            log::write_log("error", &format!("写入优化状态失败: {e}"));
+            log::write_log("error", &format!("优化状态读取失败（已拒绝写入）: {e}"));
             false
         }
     }
@@ -150,50 +180,56 @@ pub fn record_pending_scoped(
     if id.is_empty() {
         return false;
     }
-    let mut state = load();
     let allowed: Vec<Value> = kinds
         .iter()
         .filter(|k| matches!(k.as_str(), "reg" | "cmd" | "service"))
         .map(|k| json!(k))
         .collect();
-    if let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) {
-        let mut rec = json!({
-            "title": if title.is_empty() { id } else { title },
-            "appliedAt": iso_now(),
-            "kinds": allowed,
-            "status": "pending",
-            "lastVerify": Value::Null,
-            "verifiedAt": Value::Null
-        });
-        if let Some(list) = picked.filter(|p| !p.is_empty()) {
-            rec["picked"] = json!(list);
+    // v4 P2-D 尾：写侧走 update_state（读失败拒写）
+    update_state(|state| {
+        if let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) {
+            let mut rec = json!({
+                "title": if title.is_empty() { id } else { title },
+                "appliedAt": iso_now(),
+                "kinds": allowed,
+                "status": "pending",
+                "lastVerify": Value::Null,
+                "verifiedAt": Value::Null
+            });
+            if let Some(list) = picked.filter(|p| !p.is_empty()) {
+                rec["picked"] = json!(list);
+            }
+            items.insert(id.into(), rec);
         }
-        items.insert(id.into(), rec);
-    }
-    // 重新执行 = 状态刚变过，用户之前的「不再提醒」失效（若又落 partial 应重新提醒）
-    clear_stale_dismissed(&mut state, id);
-    save(&state)
+        // 重新执行 = 状态刚变过，用户之前的「不再提醒」失效（若又落 partial 应重新提醒）
+        clear_stale_dismissed(state, id);
+        Ok(())
+    })
 }
 
 /// 执行后转正（applied）+ 回读验证三态
 pub fn mark_applied(id: &str, verify: &str) -> bool {
     let v = normalize_verify(verify);
-    let mut state = load();
-    let Some(rec) = state
-        .get_mut("items")
-        .and_then(|i| i.as_object_mut())
-        .and_then(|m| m.get_mut(id))
-        .and_then(|r| r.as_object_mut())
-    else {
-        return false;
-    };
-    rec.insert("status".into(), json!("applied"));
-    rec.insert("lastVerify".into(), json!(v));
-    rec.insert("verifiedAt".into(), json!(iso_now()));
-    // 根治「未完成还原横幅每次都弹」（2026-10-03 用户拍板）：记账写入路径统一清忽略——
-    // 该项状态刚被本轮执行改变，忽略记录代表的是「对上一轮结果的处置」，已失效。
-    clear_stale_dismissed(&mut state, id);
-    save(&state)
+    let found = std::cell::Cell::new(false);
+    // v4 P2-D 尾：写侧走 update_state（读失败拒写；账本条目不存在时如实回 false）
+    let ok = update_state(|state| {
+        if let Some(rec) = state
+            .get_mut("items")
+            .and_then(|i| i.as_object_mut())
+            .and_then(|m| m.get_mut(id))
+            .and_then(|r| r.as_object_mut())
+        {
+            found.set(true);
+            rec.insert("status".into(), json!("applied"));
+            rec.insert("lastVerify".into(), json!(v));
+            rec.insert("verifiedAt".into(), json!(iso_now()));
+            // 根治「未完成还原横幅每次都弹」（2026-10-03 用户拍板）：记账写入路径统一清忽略——
+            // 该项状态刚被本轮执行改变，忽略记录代表的是「对上一轮结果的处置」，已失效。
+            clear_stale_dismissed(state, id);
+        }
+        Ok(())
+    });
+    ok && found.get()
 }
 
 /// 执行链整体失败（编译/启动阶段就没跑成，非「跑完但部分失败」）时落账。
@@ -213,22 +249,26 @@ pub fn mark_partial_with_reasons(id: &str, reasons: &[String]) -> bool {
     if id.is_empty() {
         return false;
     }
-    let mut state = load();
-    let Some(rec) = state
-        .get_mut("items")
-        .and_then(|i| i.as_object_mut())
-        .and_then(|m| m.get_mut(id))
-        .and_then(|r| r.as_object_mut())
-    else {
-        return false;
-    };
-    rec.insert("status".into(), json!("partial"));
-    rec.insert(
-        "partialReasons".into(),
-        json!(reasons.iter().take(8).cloned().collect::<Vec<_>>()),
-    );
-    clear_stale_dismissed(&mut state, id);
-    save(&state)
+    let found = std::cell::Cell::new(false);
+    // v4 P2-D 尾：写侧走 update_state（读失败拒写；账本条目不存在时如实回 false）
+    let ok = update_state(|state| {
+        if let Some(rec) = state
+            .get_mut("items")
+            .and_then(|i| i.as_object_mut())
+            .and_then(|m| m.get_mut(id))
+            .and_then(|r| r.as_object_mut())
+        {
+            found.set(true);
+            rec.insert("status".into(), json!("partial"));
+            rec.insert(
+                "partialReasons".into(),
+                json!(reasons.iter().take(8).cloned().collect::<Vec<_>>()),
+            );
+            clear_stale_dismissed(state, id);
+        }
+        Ok(())
+    });
+    ok && found.get()
 }
 
 /// 还原成功销账（本就不存在视为成功）
@@ -236,18 +276,16 @@ pub fn remove(id: &str) -> bool {
     if id.is_empty() {
         return false;
     }
-    let mut state = load();
-    // 销账 = 该项不再有 stale 状态，忽略记录一并清掉（留着是垃圾，还会在
-    // 「重新执行 → 又 partial」时让第一次提醒被旧忽略错误吞掉）。
-    clear_stale_dismissed(&mut state, id);
-    let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) else {
-        return save(&state);
-    };
-    if !items.contains_key(id) {
-        return save(&state);
-    }
-    items.remove(id);
-    save(&state)
+    // v4 P2-D 尾：写侧走 update_state（读失败拒写；销账不存在的 id 是 no-op）
+    update_state(|state| {
+        // 销账 = 该项不再有 stale 状态，忽略记录一并清掉（留着是垃圾，还会在
+        // 「重新执行 → 又 partial」时让第一次提醒被旧忽略错误吞掉）。
+        clear_stale_dismissed(state, id);
+        if let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) {
+            items.remove(id);
+        }
+        Ok(())
+    })
 }
 
 // ==================== 「未完成还原」横幅的 per-id 忽略（2026-10-03 根治） ====================
@@ -264,14 +302,16 @@ pub fn dismiss_stale(id: &str) -> bool {
     if id.is_empty() {
         return false;
     }
-    let mut state = load();
-    if let Some(p) = state.get_mut("prefs").and_then(|v| v.as_object_mut()) {
-        let d = p.entry("staleDismissed").or_insert_with(|| json!({}));
-        if let Some(m) = d.as_object_mut() {
-            m.insert(id.into(), json!(iso_now()));
+    // v4 P2-D 尾：写侧走 update_state（读失败拒写）
+    update_state(|state| {
+        if let Some(p) = state.get_mut("prefs").and_then(|v| v.as_object_mut()) {
+            let d = p.entry("staleDismissed").or_insert_with(|| json!({}));
+            if let Some(m) = d.as_object_mut() {
+                m.insert(id.into(), json!(iso_now()));
+            }
         }
-    }
-    save(&state)
+        Ok(())
+    })
 }
 
 /// 读取忽略名单（overview 过滤 staleIds 用）
@@ -314,14 +354,16 @@ pub fn set_detected_entry(id: &str, optimized: bool) -> bool {
     if id.is_empty() {
         return false;
     }
-    let mut state = load();
-    if let Some(d) = state.get_mut("detected").and_then(|v| v.as_object_mut()) {
-        d.insert(
-            id.into(),
-            json!({ "optimized": optimized, "at": iso_now() }),
-        );
-    }
-    save(&state)
+    // v4 P2-D 尾：写侧走 update_state（读失败拒写）
+    update_state(|state| {
+        if let Some(d) = state.get_mut("detected").and_then(|v| v.as_object_mut()) {
+            d.insert(
+                id.into(),
+                json!({ "optimized": optimized, "at": iso_now() }),
+            );
+        }
+        Ok(())
+    })
 }
 
 /// 读取全部检测结果

@@ -87,19 +87,6 @@ fn load_paths_config() -> serde_json::Value {
     }
 }
 
-fn save_paths_config(config: &serde_json::Value) -> bool {
-    match security::atomic_write_json(&paths::paths_config_file(), config) {
-        Ok(()) => {
-            log::write_log("info", "路径配置已保存");
-            true
-        }
-        Err(e) => {
-            log::write_log("error", &format!("保存路径配置失败: {e}"));
-            false
-        }
-    }
-}
-
 /// paths:load — 读取已保存的路径配置
 #[tauri::command]
 pub fn paths_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
@@ -123,14 +110,25 @@ pub fn paths_save<R: tauri::Runtime>(window: WebviewWindow<R>, key: String, valu
         );
         return Ok(serde_json::json!({ "success": false, "message": why }));
     }
-    let mut config = load_paths_config();
-    if let Some(obj) = config.as_object_mut() {
-        obj.insert(key, serde_json::json!(value));
-    }
+    // v4 P2-D 尾（R7-M01 同族）：读-改-写收口 —— 旧链 `load_paths_config()`（损坏时
+    // 已隔离但返回 `{}`）→ 插入单键 → `save_paths_config()` 把整份路径配置覆成只剩
+    // 这一次写的键（其余绑定与 scannedAt 静默丢失，回执仍是 success）。现在读失败拒写。
     let exists = !value.is_empty() && std::path::Path::new(&value).exists();
-    let saved = save_paths_config(&config);
-    Ok(serde_json::json!({ "success": saved, "exists": exists }))
-}
+    let saved = match security::update_json(&paths::paths_config_file(), |config| {
+        let Some(obj) = config.as_object_mut() else {
+            return Err("路径配置结构异常（非对象）".into());
+        };
+        obj.remove("softwareInventory"); // 软件清单不落盘（与 load_paths_config 同口径）
+        obj.insert(key.clone(), serde_json::json!(value.clone()));
+        Ok(())
+    }) {
+        Ok(_) => true,
+        Err(e) => {
+            log::write_log("error", &format!("保存路径配置失败: {e}"));
+            false
+        }
+    };
+    Ok(serde_json::json!({ "success": saved, "exists": exists }))}
 
 /// paths:browse — 原生选择文件夹对话框
 #[tauri::command]
@@ -239,9 +237,26 @@ fn scan_install_paths() -> serde_json::Value {
         map.remove("softwareInventory");
     }
     // 自动扫描结果立即落盘；设置页只展示其中的常用路径
-    let mut persisted = load_paths_config();
-    if let (Some(pmap), Some(dmap)) = (persisted.as_object_mut(), data.as_object()) {
-        for (key, value) in dmap {
+    // v4 P2-D 尾（R7-M01 同族）：改走 update_json —— 旧链 `load_paths_config()` 在
+    // 损坏/读失败时（已隔离但）拿到 `{}`，合并后整份覆写 ⇒「扫描一次把用户的
+    // 路径绑定清成只剩本次扫出的键」；R1-M04 只补了失败回执，没堵住读侧的源头。
+    // SET-5（2026-09-15）：时间戳统一写 scannedAt。原写 lastScanAt，而渲染层/
+    // paths:load 只读 scannedAt → 重启后页脚恒显「尚未扫描」（键名两侧不一致）。
+    // 2026-10-07 修：时间戳改由本层**唯一**产生（ISO-8601 UTC）并回填进回执。
+    // 此前上游 `paths_scan` 自己塞 `format!("{:?}", SystemTime::now())` 的 Debug 形态，
+    // JS `new Date()` 解析不了 → 页脚恒显 "Invalid Date"（用户反馈）。渲染层拿到的
+    // 就是可解析值，落盘与回执同源，不会再有第二份口径。
+    let scanned_at = crate::commands::settings::iso_utc_now();
+    let dmap_snapshot = data.as_object().cloned().unwrap_or_default();
+    if let Some(dmap) = data.as_object_mut() {
+        dmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at.clone()));
+    }
+    let persisted = security::update_json(&paths::paths_config_file(), |persisted| {
+        let Some(pmap) = persisted.as_object_mut() else {
+            return Err("路径配置结构异常（非对象）".into());
+        };
+        pmap.remove("softwareInventory"); // 软件清单不落盘（同 load_paths_config 口径）
+        for (key, value) in &dmap_snapshot {
             let keep = match value {
                 serde_json::Value::String(s) => !s.is_empty(),
                 serde_json::Value::Array(_) => true,
@@ -251,26 +266,15 @@ fn scan_install_paths() -> serde_json::Value {
                 pmap.insert(key.clone(), value.clone());
             }
         }
-    }
-    // SET-5（2026-09-15）：时间戳统一写 scannedAt。原写 lastScanAt，而渲染层/
-    // paths:load 只读 scannedAt → 重启后页脚恒显「尚未扫描」（键名两侧不一致）。
-    // 2026-10-07 修：时间戳改由本层**唯一**产生（ISO-8601 UTC）并回填进回执。
-    // 此前上游 `paths_scan` 自己塞 `format!("{:?}", SystemTime::now())` 的 Debug 形态，
-    // JS `new Date()` 解析不了 → 页脚恒显 "Invalid Date"（用户反馈）。渲染层拿到的
-    // 就是可解析值，落盘与回执同源，不会再有第二份口径。
-    let scanned_at = crate::commands::settings::iso_utc_now();
-    if let Some(pmap) = persisted.as_object_mut() {
         pmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at.clone()));
-    }
-    if let Some(dmap) = data.as_object_mut() {
-        dmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at));
-    }
+        Ok(())
+    });
     // v4 组 1（R1-M04）：写失败不得被吞 —— 旧实现丢返回值、无条件 success:true，
     // 于是「扫描完成」的落盘记录（scannedAt + 路径配置合并）写失败后用户完全不知情，
     // 重启后页脚又显「尚未扫描」、路径配置可能回退。
-    if !save_paths_config(&persisted) {
-        log::write_log("error", "路径扫描：扫描记录落盘失败，已如实回失败");
-        return serde_json::json!({ "success": false, "message": "扫描记录写入失败，本次结果未保存，请检查数据目录可写性" });
+    if let Err(msg) = persisted {
+        log::write_log("error", &format!("路径扫描：扫描记录落盘失败，已如实回失败（{msg}）"));
+        return serde_json::json!({ "success": false, "message": format!("扫描记录写入失败（{msg}），本次结果未保存，请检查数据目录可写性") });
     }
     log::write_log("info", "路径扫描完成");
     serde_json::json!({ "success": true, "data": data })

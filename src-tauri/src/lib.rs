@@ -397,6 +397,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         // 审查 v2-F4 彻底方案：`settings_save` 已整链摘除（零调用方的死写入通道，
         // 摘除记录见 settings.rs 头部注释）。AI 模型配置写入由 `models_save` 承载。
         commands::settings::settings_load,
+        // v4 P2-13：UI 偏好键的后端真源（渲染层 localStorage 只是镜像；见 settings.rs）
+        commands::settings::settings_get_prefs,
+        commands::settings::settings_set_pref,
         commands::models::models_save,
         commands::models::models_set_scope,
         commands::models::models_test,

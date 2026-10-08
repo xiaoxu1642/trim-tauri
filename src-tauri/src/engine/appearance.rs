@@ -23,6 +23,17 @@ pub fn save_appearance(v: &Value) {
     }
 }
 
+/// 读-改-写（v4 P2-D 尾 / R7-M01 同族）：读失败拒写（Corrupt ⇒ Err）。
+///
+/// 旧链 `load_appearance() → 改一处 → save_appearance()` 在读取损坏/失败时拿到 `{}`，
+/// 一次「切个材质」就把整份外观配置（背景图/字体/雾化/材质…）覆成只剩这一项。
+pub fn update_appearance<F>(f: F) -> Result<Value, String>
+where
+    F: FnOnce(&mut Value) -> Result<(), String>,
+{
+    crate::security::update_json(&paths::appearance_file(), f)
+}
+
 /// 读取持久化的合法材质（非法/缺失回退 mica）
 pub fn saved_material() -> String {
     let ap = load_appearance();
@@ -53,20 +64,33 @@ pub fn normalize_material(raw: Option<&str>) -> String {
 
 /// 启动时执行一次 bgOpacity 语义迁移（幂等）
 pub fn migrate_bg_opacity_fog() {
-    let mut ap = load_appearance();
-    let Some(obj) = ap.as_object_mut() else { return };
-    let Some(opacity) = obj.get("bgOpacity").and_then(|v| v.as_f64()) else {
-        return;
-    };
-    if obj.get("bgOpacityFog").and_then(|v| v.as_bool()) == Some(true) {
+    // 先只读判定：不需要迁移时**不写盘**（update_appearance 的闭包跑完必落盘，
+    // 每次启动都重写一遍文件没有意义）。需要迁移时才进原语，在最新盘上值上改。
+    let ap = load_appearance();
+    let needs = ap.get("bgOpacity").and_then(|v| v.as_f64()).is_some()
+        && ap.get("bgOpacityFog").and_then(|v| v.as_bool()) != Some(true);
+    if !needs {
         return;
     }
-    obj.insert(
-        "bgOpacity".into(),
-        serde_json::json!((100.0 - opacity).round()),
-    );
-    obj.insert("bgOpacityFog".into(), serde_json::json!(true));
-    save_appearance(&ap);
+    let res = update_appearance(|ap| {
+        let Some(obj) = ap.as_object_mut() else { return Ok(()) };
+        let Some(opacity) = obj.get("bgOpacity").and_then(|v| v.as_f64()) else {
+            return Ok(());
+        };
+        if obj.get("bgOpacityFog").and_then(|v| v.as_bool()) == Some(true) {
+            return Ok(());
+        }
+        obj.insert(
+            "bgOpacity".into(),
+            serde_json::json!((100.0 - opacity).round()),
+        );
+        obj.insert("bgOpacityFog".into(), serde_json::json!(true));
+        Ok(())
+    });
+    if let Err(e) = res {
+        log::write_log("warn", &format!("appearance 雾化度语义迁移跳过（读取失败，未写入）: {e}"));
+        return;
+    }
     log::write_log(
         "info",
         "appearance.json 雾化度语义已迁移（旧图片不透明度 → 雾化强度）",

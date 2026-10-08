@@ -159,12 +159,17 @@ pub fn appearance_set_material<R: Runtime>(
         return Ok(json!({ "success": false, "message": "未知的材质" }));
     };
     let app = window.app_handle().clone();
-    let mut ap = crate::engine::appearance::load_appearance();
+    // v4 P2-D 尾：读-改-写收口（读取失败拒写，绝不把整份外观配置覆成只剩材质一项）
+    let ap = match crate::engine::appearance::update_appearance(|ap| {
+        if let Some(obj) = ap.as_object_mut() {
+            obj.insert("material".into(), json!(material.as_str()));
+        }
+        Ok(())
+    }) {
+        Ok(v) => v,
+        Err(msg) => return Ok(json!({ "success": false, "message": format!("外观配置写入失败：{msg}") })),
+    };
     let enabled = ap.get("materialEnabled").and_then(|v| v.as_bool()) != Some(false);
-    if let Some(obj) = ap.as_object_mut() {
-        obj.insert("material".into(), json!(material));
-    }
-    crate::engine::appearance::save_appearance(&ap);
 
     let effective = effective_of(&material, enabled);
     let native_applied = apply_material_all(&app, &effective);
@@ -186,17 +191,22 @@ pub fn appearance_set_material_enabled<R: Runtime>(
     guard::guard_readonly(&window)?;
     let on = enabled.unwrap_or(false);
     let app = window.app_handle().clone();
-    let mut ap = crate::engine::appearance::load_appearance();
+    // v4 P2-D 尾：读-改-写收口（同上）；material 从更新后的回执读（该键未被本闭包改）
+    let ap = match crate::engine::appearance::update_appearance(|ap| {
+        if let Some(obj) = ap.as_object_mut() {
+            obj.insert("materialEnabled".into(), json!(on));
+        }
+        Ok(())
+    }) {
+        Ok(v) => v,
+        Err(msg) => return Ok(json!({ "success": false, "message": format!("外观配置写入失败：{msg}") })),
+    };
     let material = ap
         .get("material")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("mica")
         .to_string();
-    if let Some(obj) = ap.as_object_mut() {
-        obj.insert("materialEnabled".into(), json!(on));
-    }
-    crate::engine::appearance::save_appearance(&ap);
 
     // 此处回退 'mica'（对齐上游 4243 行），与 get-material 的 'mica-alt' 默认值不同是刻意：
     // 开关侧要的是「恢复到一个能看的材质」，展示侧要的是「设置页默认高亮项」。
