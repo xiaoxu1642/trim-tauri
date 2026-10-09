@@ -63,6 +63,7 @@ const MUST_RUN = [
   'check-doc-refs',
   'check-comment-rot',
   'check-positive-controls',
+  'check-review-units',
   'check-gate-roster',
 ];
 
