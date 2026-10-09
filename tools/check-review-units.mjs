@@ -127,17 +127,37 @@ export function detectFloor({ units, cross, anti }) {
 /** U7：从文档正文抽仓库内路径与单元 ID（只认反引号里的仓库相对形状）。 */
 export function extractRepoPaths(text) {
   const out = new Set();
-  const re = /`((?:src-tauri|native-scanner|tools|src)\/[A-Za-z0-9_.\-/]*[A-Za-z0-9_.\-])/g;
-  let m;
-  while ((m = re.exec(text))) out.add(m[1]);
+  // 历史叙述行整行豁免：陈述「曾经有过/已删」不是承诺现在存在（与注释腐烂门禁同一口径）
+  const HIST = /(已删|已退役|此前|曾经|历史|旧|原)/;
+  for (const line of text.split(/\r?\n/)) {
+    if (HIST.test(line)) continue;
+    // 必须以反引号收尾：`tools/check-*.mjs` 这类通配若不收口会被截成 `tools/check` 而误报
+    const re = /`((?:src-tauri|native-scanner|tools|src)\/[A-Za-z0-9_.\-/]*[A-Za-z0-9_.])`/g;
+    let m;
+    while ((m = re.exec(line))) {
+      // 通配/前缀形状（`tools/check-*.mjs` 会截成 `tools/check-`）不是坐标，跳过
+      if (/[-/]$/.test(m[1]) || /\*|\{\}/.test(m[1])) continue;
+      out.add(m[1]);
+    }
+  }
   return [...out];
 }
 export function extractUnitIds(text) {
   const out = new Set();
-  const re = /\b(R[1-8][ab]?|F[1-5][abc]?|N1|T1[abc]|D1|X0-\d+|A[1-6])\b/g;
+  // 形状放宽到「任何像单元 ID 的记号」：只认现存 ID 的话，R9 / F4d 这类笔误根本不会被抽出来，
+  // 也就永远不判红 —— 那正是本门禁要防的「恒绿断言」。
+  // 但 N/D/A 只收**精确 ID**：文档里 `N6`（耦合账编号）、`D4/D5/D6`（发现分级）、`A7/A9`（附录组）
+  // 与本仓的单元 ID 形状撞车，放宽就会把别套编号体系误判成单元。
+  const re = /\b(R\d[abc]?|F\d[abc]?|T1[abc]?|N1|D1|X0-\d+|A[1-6])\b/g;
   let m;
   while ((m = re.exec(text))) out.add(m[1]);
   return [...out];
+}
+/** 裸前缀算族名（`R6` 指 R6a/R6b、`F4` 指 F4a/F4b/F4c），不算未知 ID。 */
+export function isKnownUnitId(id, unitIds) {
+  if (unitIds.has(id)) return true;
+  if (/^(X0-\d+|A[1-6])$/.test(id)) return true;
+  return [...unitIds].some((u) => u.startsWith(id));
 }
 
 // ── 正向对照自检（§4.1：能判红 + 真样本不假红，两向都要）──────────────────────
@@ -197,12 +217,19 @@ const POSITIVE_CONTROLS = [
     expect: (v) => v === true,
   },
   {
-    label: 'U7 路径与 ID 抽取：腐烂样本必命中 / 真源文本不误报',
+    label: 'U7 路径与 ID 抽取：腐烂样本必命中 / 通配与历史叙述不误报',
     run: () => {
-      const paths = extractRepoPaths('见 `tools/dual-run-batchA.mjs` 与 `src-tauri/src/engine/guard.rs`');
-      const ids = extractUnitIds('单元 R2a / F4c / X0-7 / A5；正文里的 R6 是旧名');
-      return paths.includes('tools/dual-run-batchA.mjs') && paths.length === 2
-        && ids.includes('R2a') && ids.includes('X0-7') && ids.includes('A5');
+      const paths = extractRepoPaths(
+        '见 `tools/ghost.mjs` 与 `src-tauri/src/engine/guard.rs`\n' +
+        '（原 `tools/dual-run-batchA.mjs` 已删）\n' +
+        '磁盘 `tools/check-*.mjs` 排期实现');
+      const ids = extractUnitIds('单元 R2a / F4c / X0-7 / A5 / R9');
+      const known = new Set(UNITS.map((u) => u.id));
+      return paths.length === 2 && paths.includes('tools/ghost.mjs')
+        && !paths.some((p) => p.includes('dual-run') || p.includes('*'))
+        && isKnownUnitId('R2a', known) && isKnownUnitId('R6', known) === true
+        && isKnownUnitId('F4', known) === true && !isKnownUnitId('R9', known)
+        && ids.filter((i) => !isKnownUnitId(i, known)).join() === 'R9';
     },
     expect: (v) => v === true,
   },
@@ -364,9 +391,9 @@ if (!docPath) {
 } else {
   const text = readFileSync(docPath, 'utf8');
   const paths = extractRepoPaths(text);
-  const broken = paths.filter((p) => !existsSync(join(ROOT, p)));
+  const broken = paths.filter((p) => !existsSync(join(ROOT, p)) && !existsSync(join(ROOT, `${p}/`)));
   const ids = extractUnitIds(text);
-  const unknownIds = ids.filter((i) => !floor.ids.has(i) && !/^(X0-\d+|A[1-6])$/.test(i));
+  const unknownIds = ids.filter((i) => !isKnownUnitId(i, floor.ids));
   check(broken.length === 0 && unknownIds.length === 0,
     `U7 文档对拍（点名路径 ${paths.length} 条、单元 ID ${ids.length} 个）`,
     [...broken.map((b) => `路径不存在 ${b}`), ...unknownIds.map((u) => `未知单元 ${u}`)].join(' | '));
