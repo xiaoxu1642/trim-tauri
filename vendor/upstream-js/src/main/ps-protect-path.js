@@ -174,7 +174,44 @@ function buildDefaultRoots() {
     // 旧实现只按 SystemDrive 生成一份，其他盘（清理工具常见目标）等于不设防；
     // 目录名不本地化，故可用固定字符串匹配。
     anyDrive: ['system volume information'],
+    // P1-05：凭据文件名，静态、与机器无关
+    neverNames: NEVER_NAMES.slice(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// P1-05：凭据文件名清单（neverNames）——按路径**每一段**（含祖先目录名）匹配，
+// 命中即判受保护。签名链只能保证规则没被篡改，保证不了作者没写歪；善意规则/walk
+// 无意命中散落密钥（.env / id_rsa / *.pem / 云凭据）时由这一层兜底（对三端同源）。
+// 模式一律小写，'*' 匹配单段内任意字符（含空）。
+// ---------------------------------------------------------------------------
+const NEVER_NAMES = [
+  '.env', '.env.*', '*.env',
+  'id_rsa', 'id_rsa_sk', 'id_dsa', 'id_ecdsa', 'id_ed25519', 'id_ed25519_sk',
+  'id_ed448', 'id_x25519',
+  '*.pem', '*.pfx', '*.p12', '*.key', '*.keystore', '*.jks',
+  '*.pgp', '*.gpg', '*.asc',
+  '*.kdb', '*.kdbx',
+  '*.ovpn',
+  '.htpasswd', '.netrc', '.npmrc', '.pypirc',
+  'credentials', 'credentials.json', 'authorized_user.json',
+  'service_account*.json', '*azureprofile.json',
+  'terraform.tfstate', 'terraform.tfstate.*',
+];
+
+/** 段名是否命中凭据模式（逐段，'*' 为段内通配） */
+function neverNameMatches(segments, patterns) {
+  for (const seg of segments) {
+    for (const pat of patterns) {
+      if (!pat.includes('*')) {
+        if (seg === pat) return true;
+      } else {
+        const re = new RegExp('^' + pat.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+        if (re.test(seg)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 let _roots = null;
@@ -228,6 +265,9 @@ function isPathProtected(p, roots) {
   for (const r of (R.exact || [])) {
     if (low === r || r.startsWith(low + '\\')) return true;
   }
+  // P1-05：路径任一段（文件名或祖先目录名）命中凭据模式 → 拒
+  const segments = low.split(/[\\/]+/).filter(Boolean);
+  if (neverNameMatches(segments, (R.neverNames || []))) return true;
   return false;
 }
 
@@ -239,6 +279,7 @@ function protectedRootsJson() {
     subtree: R.subtree.slice(),
     exact: R.exact.slice(),
     anyDrive: (R.anyDrive || []).slice(),
+    neverNames: (R.neverNames || []).slice(),
   });
 }
 
@@ -248,8 +289,9 @@ function protectedRootsJson() {
 // ---------------------------------------------------------------------------
 const PROTECT_PATH_PS = `
 # ==== 受保护路径判定（与 src/main/ps-protect-path.js 的 JS 实现同语义）====
-# 入参 $tfProtectedRoots 由主进程注入：{ subtree = [...], exact = [...], anyDrive = [...] }，
-# 元素均为「已归一化小写绝对路径」或「小写目录名」，故这里只做字符串比较。
+# 入参 $tfProtectedRoots 由主进程注入：
+# { subtree = [...], exact = [...], anyDrive = [...], neverNames = [...] }，
+# 元素均为「已归一化小写绝对路径」或「小写（模式）名」，故这里只做字符串比较。
 function Resolve-TFPathKey {
   param([string]$Path)
   if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
@@ -289,10 +331,12 @@ function Test-PathProtected {
   $sub = @()
   $exa = @()
   $any = @()
+  $never = @()
   if ($Roots) {
     $sub = @($Roots.subtree)
     $exa = @($Roots.exact)
     $any = @($Roots.anyDrive)
+    $never = @($Roots.neverNames)
   }
   $bs = [string][char]92
   # 任意盘符下的同名目录（每个分区的系统卷信息等）整棵受保护。
@@ -312,6 +356,15 @@ function Test-PathProtected {
     if (-not $r) { continue }
     if ($low -eq $r -or $r.StartsWith($low + $bs)) { return $true }
   }
+  # P1-05：路径任一段命中凭据文件名模式（-like 支持 *）→ 受保护。
+  # 注意反斜杠层数：本字符串在 JS 模板字面量内，'\\\\' 折叠后 PS 才收到 '\\'
+  # （.NET 正则 \\ = 反斜杠）；只写 '\\' 会被折叠成 '\'，'[\\/]+' → '[\/]+' 只匹配斜杠。
+  $segments = @($low -split '[\\\\/]+' | Where-Object { $_ })
+  foreach ($seg in $segments) {
+    foreach ($pat in $never) {
+      if ($seg -like $pat) { return $true }
+    }
+  }
   return $false
 }
 `;
@@ -323,5 +376,6 @@ module.exports = {
   protectedRootsJson,
   isPathProtected,
   normalizeForCompare,
+  neverNameMatches,
   PROTECT_PATH_PS,
 };

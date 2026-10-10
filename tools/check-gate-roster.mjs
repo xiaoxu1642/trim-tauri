@@ -54,6 +54,7 @@ const MUST_RUN = [
   'check-optimizer-subitem-contract',
   'check-optimizer-groups-sidecar',
   'check-optimizer-write-contract',
+  'check-desc-vs-writes',
   'check-bugcheck-codes',
   'check-elapsed-facts',
   'check-version-sync',

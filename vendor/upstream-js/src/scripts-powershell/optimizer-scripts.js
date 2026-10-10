@@ -79,6 +79,11 @@ function qosDscpValues(exe) {
 // 在 OOSU10++ 中导出 cfg 后用 node -e "console.log(fs.readFileSync(path).toString('base64'))" 重新生成。
 const OOSU_CFG_B64 = 'IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIw0KIyBUaGlzIGZpbGUgd2FzIGNyZWF0ZWQgd2l0aCBPJk8gU2h1dFVwMTArKyBWMS45LjE0MzYNCiMgYW5kIGNhbiBiZSBpbXBvcnRlZCBvbnRvIGFub3RoZXIgY29tcHV0ZXIuIA0KIw0KIyBEb3dubG9hZCB0aGUgYXBwbGljYXRpb24gYXQgaHR0cHM6Ly93d3cub28tc29mdHdhcmUuY29tL3NodXR1cDEwDQojIFlvdSBjYW4gdGhlbiBpbXBvcnQgdGhlIGZpbGUgZnJvbSB3aXRoaW4gdGhlIHByb2dyYW0uIA0KIw0KIyBBbHRlcm5hdGl2ZWx5IHlvdSBjYW4gaW1wb3J0IGl0IGF1dG9tYXRpY2FsbHkgb3ZlciBhIGNvbW1hbmQgbGluZS4NCiMgU2ltcGx5IHVzZSB0aGUgZm9sbG93aW5nIHBhcmFtZXRlcjogDQojIE9PU1UxMC5leGUgPHBhdGggdG8gZmlsZT4NCiMgDQojIFNlbGVjdGluZyB0aGUgT3B0aW9uIC9xdWlldCBlbmRzIHRoZSBhcHAgcmlnaHQgYWZ0ZXIgdGhlIGltcG9ydCBhbmQgdGhlDQojIHVzZXIgZG9lcyBub3QgZ2V0IGFueSBmZWVkYmFjayBhYm91dCB0aGUgaW1wb3J0Lg0KIw0KIyBXZSBhcmUgYWx3YXlzIGhhcHB5IHRvIGFuc3dlciBhbnkgcXVlc3Rpb25zIHlvdSBtYXkgaGF2ZSENCiMgwqkgMjAxNS0yMDIzIE8mTyBTb2Z0d2FyZSBHbWJILCBCZXJsaW4uIEFsbCByaWdodHMgcmVzZXJ2ZWQuDQojIGh0dHBzOi8vd3d3Lm9vLXNvZnR3YXJlLmNvbS8NCiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMNCg0KUDAwMQkrDQpQMDAyCSsNClAwMDMJKw0KUDAwNAktDQpQMDA1CSsNClAwMDYJKw0KUDAwOAkrDQpQMDI2CS0NClAwMjcJKw0KUDAyOAktDQpQMDY0CSsNClAwNjUJKw0KUDA2NgkrDQpQMDY3CSsNClAwNzAJKw0KUDA2OQktDQpQMDA5CSsNClAwMTAJKw0KUDAxNQkrDQpQMDY4CSsNClAwMTYJKw0KQTAwMQkrDQpBMDAyCSsNCkEwMDMJKw0KQTAwNAktDQpBMDA2CSsNCkEwMDUJLQ0KUDAwNwktDQpQMDM2CSsNClAwMjUJKw0KUDAzMwktDQpQMDIzCSsNClAwNTYJKw0KUDA1NwkrDQpQMDEyCS0NClAwMzQJLQ0KUDAxMwktDQpQMDM1CS0NClAwNjIJKw0KUDA2MwkrDQpQMDgxCSsNClAwNDcJKw0KUDAxOQkrDQpQMDQ4CS0NClAwNDkJKw0KUDAyMAktDQpQMDM3CSsNClAwMTEJLQ0KUDAzOAkrDQpQMDUwCS0NClAwNTEJKw0KUDAxOAktDQpQMDM5CSsNClAwMjEJLQ0KUDA0MAkrDQpQMDIyCS0NClAwNDEJKw0KUDAxNAktDQpQMDQyCSsNClAwNTIJLQ0KUDA1MwkrDQpQMDU0CS0NClAwNTUJKw0KUDAyOQktDQpQMDQzCSsNClAwMzAJLQ0KUDA0NAkrDQpQMDMxCS0NClAwNDUJKw0KUDAzMgktDQpQMDQ2CSsNClAwNTgJLQ0KUDA1OQkrDQpQMDYwCS0NClAwNjEJKw0KUDAyNAkrDQpTMDAxCS0NClMwMDIJKw0KUzAwMwkrDQpTMDA4CS0NCkUxMDEJKw0KRTIwMQktDQpFMTE1CSsNCkUyMTUJLQ0KRTExOAkrDQpFMjE4CS0NCkUxMDcJKw0KRTIwNwktDQpFMTExCSsNCkUyMTEJLQ0KRTExMgkrDQpFMjEyCS0NCkUxMDkJKw0KRTIwOQktDQpFMTIxCSsNCkUyMjEJLQ0KRTEwMwkrDQpFMjAzCS0NCkUxMjMJKw0KRTIyMwktDQpFMTI0CSsNCkUyMjQJLQ0KRTEyOAkrDQpFMjI4CS0NCkUxMTkJKw0KRTIxOQktDQpFMTIwCSsNCkUyMjAJLQ0KRTEyMgkrDQpFMjIyCS0NCkUxMjUJKw0KRTIyNQktDQpFMTI2CSsNCkUyMjYJLQ0KRTEwNgkrDQpFMjA2CS0NCkUxMjcJKw0KRTIyNwktDQpFMDAxCSsNCkUwMDIJKw0KRTAwMwkrDQpFMDA4CSsNCkUwMDcJLQ0KRTAxMAkrDQpFMDExCS0NCkUwMTIJLQ0KRTAwOQkrDQpFMDA0CSsNCkUwMDUJKw0KRTAxMwkrDQpFMDE0CSsNCkUwMDYJKw0KWTAwMQkrDQpZMDAyCSsNClkwMDMJKw0KWTAwNAkrDQpZMDA1CSsNClkwMDYJKw0KWTAwNwkrDQpDMDEyCSsNCkMwMDIJKw0KQzAxMwktDQpDMDA3CSsNCkMwMDgJLQ0KQzAwOQkrDQpDMDEwCS0NCkMwMTEJKw0KQzAxNAkrDQpDMDE1CS0NCkwwMDEJKw0KTDAwMwkrDQpMMDA0CSsNCkwwMDUJKw0KVTAwMQkrDQpVMDA0CSsNClUwMDUJKw0KVTAwNgktDQpVMDA3CS0NClcwMDEJLQ0KVzAxMQktDQpXMDA0CS0NClcwMDUJKw0KVzAxMAkrDQpXMDA5CS0NClAwMTcJKw0KVzAwNgktDQpXMDA4CS0NCk0wMDYJKw0KTTAxMQkrDQpNMDEwCSsNCk8wMDMJLQ0KTzAwMQkrDQpTMDEyCSsNClMwMTMJKw0KUzAxNAkrDQpLMDAxCSsNCkswMDIJKw0KSzAwNQkrDQpNMDAzCSsNCk0wMTUJKw0KTTAxNgkrDQpNMDE3CS0NCk0wMTgJKw0KTTAxOQktDQpNMDIwCSsNCk0wMjIJKw0KTTAwMQkrDQpNMDA0CSsNCk0wMDUJKw0KTTAyNAkrDQpNMDEyCS0NCk0wMTMJLQ0KTTAxNAktDQpNMDIzCS0NCk4wMDEJLQ0K';
 
+// P1-02：tf_svc_bulk 服务名单单一来源（基础步骤与「跳过项报告」步骤共用，防漂移）。
+const SVC_BULK_NAMES = ["TapiSrv","FontCache3.0.0.0","WpcMonSvc","SEMgrSvc","PNRPsvc","LanmanWorkstation","WEPHOSTSVC","p2psvc","p2pimsvc","PhoneSvc","Wecsvc","perceptionsimulation","StiSvc","WMPNetworkSvc","autotimesvc","edgeupdatem","MicrosoftEdgeElevationService","ALG","QWAVE","IpxlatCfgSvc","icssvc","DusmSvc","MapsBroker","edgeupdate","SensorService","shpamsvc","svsvc","SysMain","MSiSCSI","Netlogon","CscService","ssh-agent","AppReadiness","tzautoupdate","NfsClnt","wisvc","defragsvc","SharedRealitySvc","RetailDemo","lltdsvc","TrkWks","CryptSvc","DiagTrack","diagsvc","DPS","WdiServiceHost","WdiSystemHost","dmwappushservice","TroubleshootingSvc","DsSvc","FrameServer","FontCache","OSRSS","sedsvc","SENS","TabletInputService","Themes","BcastDVRUserService","CaptureService","diagnosticshub.standardcollector.service","XblAuthManager","XblGameSave","XboxNetApiSvc","WpnService","lfsvc"];
+// P1-02：tf_drv_disable 驱动名单单一来源（同上）。
+const DRV_NAMES = ["acpipagr","AcpiPmi","Beep","CAD","GpuEnergyDrv","CLFS","CSC","luafv","RasAcd","Rasl2tp","RasPppoe","RasSstp","tcpipreg","dam","PEAUTH","QWAVEdrv","cdrom","fileinfo","FileCrypt"];
+
 const OPTIONS = [
   // ---------- 启动与响应 ----------
   // 第六大点-A/B（2026-09-14 重复点审查）：原「SSD 固态硬盘优化」(ssd_opt) 已下线。
@@ -439,10 +444,10 @@ const OPTIONS = [
   },
   {
     id: 'tf_svc_bulk', group: '系统服务与内存', title: '禁用 70+ 非必要服务', risk: 'high',
-    desc: '批量调整服务启动类型：Windows 应用商店与同步相关服务保持系统默认（不再修改），其余非必要服务全部禁用(Start=4)，并关闭 Edge 预启动/预加载。\n\n执行时会单独弹窗询问是否连商店相关服务一并禁用——含 ClipSVC（许可）、InstallService（安装）、PushToInstall（远程安装）、wuauserv（Windows 更新）、DoSvc（传递优化下载），选择禁用会影响 Windows 应用商店的使用、更新与下载以及系统更新。\n\n禁用(Start=4)服务清单：TapiSrv、FontCache3.0.0.0、WpcMonSvc、SEMgrSvc、PNRPsvc、LanmanWorkstation、WEPHOSTSVC、p2psvc、p2pimsvc、PhoneSvc、Wecsvc、perceptionsimulation、StiSvc、WMPNetworkSvc、autotimesvc、edgeupdatem、MicrosoftEdgeElevationService、ALG、QWAVE、IpxlatCfgSvc、icssvc、DusmSvc、MapsBroker、edgeupdate、SensorService、shpamsvc、svsvc、SysMain、MSiSCSI、Netlogon、CscService、ssh-agent、AppReadiness、tzautoupdate、NfsClnt、wisvc、defragsvc、SharedRealitySvc、RetailDemo、lltdsvc、TrkWks、CryptSvc、DiagTrack、diagsvc、DPS、WdiServiceHost、WdiSystemHost、dmwappushsvc、TroubleshootingSvc、DsSvc、FrameServer、FontCache、OSRSS、sedsvc、SENS、TabletInputService、Themes、BcastDVRUserService、CaptureService、diagnosticshub.standardcollector.service、XblAuthManager、XblGameSave、XboxNetApiSvc、WpnService、lfsvc。',
+    desc: '批量调整服务启动类型：默认把 wuauserv（Windows 更新）由「自动」改为「手动」（更新仍可手动检查），其余非必要服务全部禁用(Start=4)，并关闭 Edge 预启动/预加载；应用商店其余服务保持默认。\n\n执行时会单独弹窗询问是否连商店相关服务一并禁用——含 ClipSVC（许可）、InstallService（安装）、PushToInstall（远程安装）、wuauserv（Windows 更新）、DoSvc（传递优化下载），选择禁用会影响 Windows 应用商店的使用、更新与下载以及系统更新。\n\n禁用(Start=4)服务清单：TapiSrv、FontCache3.0.0.0、WpcMonSvc、SEMgrSvc、PNRPsvc、LanmanWorkstation、WEPHOSTSVC、p2psvc、p2pimsvc、PhoneSvc、Wecsvc、perceptionsimulation、StiSvc、WMPNetworkSvc、autotimesvc、edgeupdatem、MicrosoftEdgeElevationService、ALG、QWAVE、IpxlatCfgSvc、icssvc、DusmSvc、MapsBroker、edgeupdate、SensorService、shpamsvc、svsvc、SysMain、MSiSCSI、Netlogon、CscService、ssh-agent、AppReadiness、tzautoupdate、NfsClnt、wisvc、defragsvc、SharedRealitySvc、RetailDemo、lltdsvc、TrkWks、CryptSvc、DiagTrack、diagsvc、DPS、WdiServiceHost、WdiSystemHost、dmwappushservice、TroubleshootingSvc、DsSvc、FrameServer、FontCache、OSRSS、sedsvc、SENS、TabletInputService、Themes、BcastDVRUserService、CaptureService、diagnosticshub.standardcollector.service、XblAuthManager、XblGameSave、XboxNetApiSvc、WpnService、lfsvc。',
     steps: [
-      { label: '批量禁用非必要服务（商店/同步保持默认）', pwsh: [
-        '$disabled = @("TapiSrv","FontCache3.0.0.0","WpcMonSvc","SEMgrSvc","PNRPsvc","LanmanWorkstation","WEPHOSTSVC","p2psvc","p2pimsvc","PhoneSvc","Wecsvc","perceptionsimulation","StiSvc","WMPNetworkSvc","autotimesvc","edgeupdatem","MicrosoftEdgeElevationService","ALG","QWAVE","IpxlatCfgSvc","icssvc","DusmSvc","MapsBroker","edgeupdate","SensorService","shpamsvc","svsvc","SysMain","MSiSCSI","Netlogon","CscService","ssh-agent","AppReadiness","tzautoupdate","NfsClnt","wisvc","defragsvc","SharedRealitySvc","RetailDemo","lltdsvc","TrkWks","CryptSvc","DiagTrack","diagsvc","DPS","WdiServiceHost","WdiSystemHost","dmwappushsvc","TroubleshootingSvc","DsSvc","FrameServer","FontCache","OSRSS","sedsvc","SENS","TabletInputService","Themes","BcastDVRUserService","CaptureService","diagnosticshub.standardcollector.service","XblAuthManager","XblGameSave","XboxNetApiSvc","WpnService","lfsvc")',
+      { label: '批量禁用非必要服务（wuauserv 改手动，商店服务保持默认）', pwsh: [
+        '$disabled = @("' + SVC_BULK_NAMES.join('","') + '")',
         'foreach ($n in $disabled) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue } }',
         '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\wuauserv"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 3 -PropertyType DWord -Force | Out-Null }',
         '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\lfsvc\\Service\\Configuration"; New-Item -Path $p -Force | Out-Null; New-ItemProperty -Path $p -Name Status -Value 0 -PropertyType DWord -Force | Out-Null',
@@ -453,10 +458,10 @@ const OPTIONS = [
   },
   {
     id: 'tf_drv_disable', group: '系统服务与内存', title: '禁用高风险驱动服务', risk: 'high',
-    desc: 'Trim DisableDrivers（21 项 Start=4）：acpipagr、AcpiPmi、Beep、CAD、GpuEnergyDrv、CLFS、CSC、luafv、RasAcd/Rasl2tp/RasPppoe/RasSstp、tcpipreg、dam、PEAUTH、QWAVEdrv、cdrom、fileinfo、FileCrypt。可能影响光驱/VPN，高风险（已剔除 IPv6 相关驱动 Tcpip6/wanarpv6，遵守项目硬约束）。',
+    desc: 'Trim DisableDrivers（Start=4，名单实数见勾选区）：acpipagr、AcpiPmi、Beep、CAD、GpuEnergyDrv、CLFS、CSC、luafv、RasAcd/Rasl2tp/RasPppoe/RasSstp、tcpipreg、dam、PEAUTH、QWAVEdrv、cdrom、fileinfo、FileCrypt。可能影响光驱/VPN，高风险（已剔除 IPv6 相关驱动 Tcpip6/wanarpv6，遵守项目硬约束）。',
     steps: [
       { label: '驱动服务 Start=4', pwsh: [
-        '$drv = @("acpipagr","AcpiPmi","Beep","CAD","GpuEnergyDrv","CLFS","CSC","luafv","RasAcd","Rasl2tp","RasPppoe","RasSstp","tcpipreg","dam","PEAUTH","QWAVEdrv","cdrom","fileinfo","FileCrypt")',
+        '$drv = @("' + DRV_NAMES.join('","') + '")',
         'foreach ($n in $drv) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null } }'
       ].join('\n') }
     ]
@@ -1472,7 +1477,7 @@ const OPTIONS = [
   // Defender 更新复用，停服不是暂停更新的必要条件（实测本机 Start=3/3/2）。
   {
     id: 'perf_windows_update_off', group: '性能调优', title: 'Windows 更新：彻底禁用（高危）', risk: 'high',
-    desc: 'NoAutoUpdate=1，彻底停止自动检查与安装更新；安全更新将不再自动送达，仅建议在明确知晓风险并使用其它补丁维护方式时选择。第一版只写策略层，不直接停用 wuauserv / UsoSvc / BITS。若只是想推迟一段时间，请用「Windows 更新：暂停到日期」。',
+    desc: 'NoAutoUpdate=1，彻底停止自动检查与安装更新；安全更新将不再自动送达，仅建议在明确知晓风险并使用其它补丁维护方式时选择。第一版只写策略层，不直接停用 wuauserv / UsoSvc / BITS；若另行把 wuauserv 置为禁用，可能被 Windows Update Medic 服务（WaaSMedicSvc）自动复位，Trim 不修改该服务。若只是想推迟一段时间，请用「Windows 更新：暂停到日期」。',
     steps: [
       { label: 'WindowsUpdate NoAutoUpdate=1', reg: regBlock({
         'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU': {
@@ -2154,7 +2159,7 @@ function windowsUpdatePauseSteps(days) {
 // 用户在执行前经单独弹窗选择「是否禁用商店相关服务」：
 //   是 → main.js 用本函数在基础清单后追加商店 5 服务步骤（基础步骤在前把 wuauserv
 //        置 Start=3，本步骤在后覆盖为 4，顺序即语义）；
-//   否 → 原样执行基础清单（商店/同步保持默认，既有行为不变）。
+//   否 → 原样执行基础清单（wuauserv 改为手动，其余商店服务保持默认）。
 // 覆盖面为用户裁定（2026-09-14）：商店本体 + 更新下载通道。
 const STORE_TOGGLE_SERVICES = ['ClipSVC', 'InstallService', 'PushToInstall', 'wuauserv', 'DoSvc'];
 function svcBulkAppendStoreSteps(baseSteps) {
@@ -2279,7 +2284,7 @@ const PROS_CONS = {
   // 'prefetch_off'（关闭预读）条目已移除：该优化项已不在 OPTIONS 中，属历史孤儿映射
   'svc_mem_gb': { pros: '按内存档位调整 SVCHost 拆分阈值，减少服务进程内存碎片。', cons: '阈值与内存不匹配时反而增加进程切换开销。' },
   'tf_mmagent': { pros: '关闭内存压缩与页合并，进一步压低 CPU 后台开销。', cons: '物理内存不足时稳定性下降，可能出现更高硬盘写入。' },
-  'tf_svc_bulk': { pros: '批量禁用 70+ 非必要服务，显著释放内存并减少后台活动。', cons: '高度激进，可能破坏打印机、蓝牙、商店等功能，风险较高。' },
+  'tf_svc_bulk': { pros: '批量禁用 70+ 非必要服务，显著释放内存并减少后台活动。', cons: '高度激进，可能破坏打印机、蓝牙、商店等功能，风险较高；商店段禁用的 wuauserv 可能被 Windows Update Medic 服务（WaaSMedicSvc）自动复位，Trim 不修改该服务。' },
   'tf_drv_disable': { pros: '禁用高风险驱动服务，减少内核攻击面与运行时开销。', cons: '可能影响硬件识别或安全软件，需要谨慎选择。' },
   'spectre_off': { pros: '关闭幽灵/熔断缓解，可明显提升 CPU 密集与游戏性能。', cons: '重新暴露 Spectre/Meltdown 类漏洞，系统安全性下降。' },
   'share_off': { pros: '关闭默认管理共享与弱会话，降低局域网被入侵的风险。', cons: '无法再使用 \\\\主机\\C$ 之类管理共享，远程管理不便。' },

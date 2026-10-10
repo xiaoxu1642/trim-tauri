@@ -64,7 +64,7 @@
             "defragsvc",
             "diagnosticshub.standardcollector.service",
             "diagsvc",
-            "dmwappushsvc",
+            "dmwappushservice",
             "edgeupdate",
             "edgeupdatem",
             "icssvc",

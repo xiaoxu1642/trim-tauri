@@ -362,6 +362,14 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/commands/optimizer/apply.rs', anchor: '&cmd_line_of(cmd)', reason: '优化项 cmd 步骤（/s /c 引号形状必须逐字保留，故走 raw_arg 形态）', timeoutConst: 'CMD_STEP_TIMEOUT', secs: 60 },
   // P0-02 真机探针：sfc /verifyonly 经同一管道采集（非破坏），验证统一解码
   { file: 'src-tauri/src/engine/systembin.rs', anchor: '&["/verifyonly"],', reason: 'P0-02 探针：sfc /verifyonly 输出采集（非破坏，发布前人工跑）', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  // P1-01：性能计数器修复链（lodctr 64/SysWOW64/winmgmt/typeperf），统一 60s
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("lodctr.exe"), &["/R"], MAINT_FAST_TIMEOUT', reason: 'P1-01：lodctr /R 重建 64 位计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&wow, &["/R"], MAINT_FAST_TIMEOUT', reason: 'P1-01：SysWOW64 lodctr /R 重建 32 位计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("winmgmt.exe"), &["/resyncperf"], MAINT_FAST_TIMEOUT', reason: 'P1-01：winmgmt /resyncperf 同步 WMI 计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'r"\\Processor(_Total)\\% Processor Time", "-sc", "1"', reason: 'P1-01：typeperf 采样验证', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  // P1-04 探针：WaaSMedic PerformRemediation 的查询与触发
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：查 WaaSMedic 任务是否存在', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/run", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：触发 WaaSMedic 修复任务', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
 ];
 const TIMEOUT_SECS = 15;
 

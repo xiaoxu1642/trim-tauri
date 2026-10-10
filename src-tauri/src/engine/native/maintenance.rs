@@ -39,6 +39,78 @@ mod maint_reparse_tests {
         let r = dir_delete_blocked(Path::new(r"C:\TrimNoSuchDir-9f3a\DataStore"));
         assert!(r.is_some(), "不存在的路径必须拒绝删除，实测: {r:?}");
     }
+
+    /// P1-01 真机探针：管理员会话实跑完整计数器链，断言成功路径（rc 分档）。
+    #[test]
+    #[ignore = "真机：性能计数器三步链 + 验证（管理员，数十秒），发布前人工跑"]
+    fn live_perfcounters_real_flow() {
+        if !crate::engine::sysinfo::is_admin() {
+            eprintln!("SKIP：需管理员会话，当前非提权，未校验");
+            return;
+        }
+        let (ok, msg) = maint_run("perfcounters").expect("maint_run 应返回");
+        assert!(ok, "完整成功路径实测失败：{msg}");
+        assert!(msg.contains("验证通过"), "回执应点名验证通过：{msg}");
+    }
+
+    /// P1-04 真机探针：写 wuauserv Start=4 → 触发 WaaSMedic PerformRemediation
+    /// → 轮询回读是否被复位。原值由 Drop 守卫还原（AGENTS §1.6：判据走真实注册表必配探针）。
+    #[test]
+    #[ignore = "真机：观察 WaaSMedic 是否复位 wuauserv（管理员，约 5 分钟）"]
+    fn live_waasmedic_reset_probe() {
+        use windows::Win32::System::Registry::REG_VALUE_TYPE;
+        if !crate::engine::sysinfo::is_admin() {
+            eprintln!("SKIP：需管理员会话，当前非提权，未校验");
+            return;
+        }
+        const SVC_SUB: &str = r"SYSTEM\CurrentControlSet\Services\wuauserv";
+        let orig = crate::engine::native::read_hklm_dword(SVC_SUB, "Start");
+        // 兜底还原（含 panic 提前返回）
+        struct Restore(Option<i64>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(v) = self.0 {
+                    let bytes = (v as u32).to_le_bytes();
+                    let _ = crate::engine::native::reg_restore_write(
+                        crate::engine::native::hive_hklm(),
+                        SVC_SUB, "Start", REG_VALUE_TYPE(4), &bytes,
+                    );
+                }
+            }
+        }
+        let _restore = Restore(orig);
+
+        let task = r"\Microsoft\Windows\WaaSMedic\PerformRemediation";
+        // 探针前置：任务不存在则 skip（系统版本差异）
+        let q = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks"), &["/query", "/TN", task], MAINT_FAST_TIMEOUT);
+        if !q.as_ref().is_ok_and(|o| o.status.success()) {
+            eprintln!("SKIP：WaaSMedic PerformRemediation 任务不存在，本探针未校验");
+            return;
+        }
+
+        // 写 Start=4
+        let wrote = crate::engine::native::reg_restore_write(
+            crate::engine::native::hive_hklm(),
+            SVC_SUB, "Start", REG_VALUE_TYPE(4), &4u32.to_le_bytes(),
+        );
+        assert!(wrote, "wuauserv Start=4 写入应成功");
+
+        // 触发修复任务
+        let run = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks"), &["/run", "/TN", task], MAINT_FAST_TIMEOUT);
+        assert!(run.as_ref().is_ok_and(|o| o.status.success()),
+            "PerformRemediation 触发失败");
+
+        // 轮询 5 分钟：每 10s 回读
+        let mut final_val = 4i64;
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            final_val = crate::engine::native::read_hklm_dword(SVC_SUB, "Start").unwrap_or(-1);
+            if final_val != 4 { break; }
+        }
+        eprintln!("探针结果：wuauserv Start 最终 = {final_val}（4=未被复位；2/3=被 Medic 复位）");
+        // reached 断言：写入与触发均已执行；结论值落日志供第 3 步决策
+        assert!(final_val >= 0, "回读异常");
+    }
 }
 
 
@@ -79,6 +151,10 @@ pub const MAINT_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// 60s 是宽限上界。刻意不复用 MAINT_CMD_TIMEOUT —— 那是 sfc/DISM 的量级，
 /// 拿 30 分钟兜一个恒挂的 wsreset 等于把维护锁占死半小时。
 pub const WSRESET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// P1-01：性能计数器三步链（lodctr / winmgmt / typeperf）统一 60s 上限。
+/// 用户裁定命令与验证统一按 60 秒做；均秒级，恒挂场景不占满维护锁。
+pub const MAINT_FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn run_cmd(program: &str, args: &[&str]) -> bool {
     // 审查 v2-F7：系统工具必须解析到 System32 再执行，不能用裸进程名 ——
@@ -301,8 +377,89 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             Ok((ok, if ok { "DNS 缓存已刷新".into() } else { "DNS 刷新失败".into() }))
         }
         "perfcounters" => {
-            let ok = run_cmd("lodctr.exe", &["/r"]);
-            Ok((ok, if ok { "性能计数器已重建".into() } else { "性能计数器重建失败".into() }))
+            // P1-01：官方修复链 —— ① lodctr /R（64 位）② 存在时 SysWOW64\lodctr /R
+            // ③ winmgmt /resyncperf ④ typeperf 采样验证；60s 统一上限，回执按档如实分。
+            let r1 = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("lodctr.exe"), &["/R"], MAINT_FAST_TIMEOUT);
+            let ok64 = r1.as_ref().is_ok_and(|o| o.status.success());
+            if !ok64 {
+                let note = match &r1 {
+                    Ok(o) => crate::engine::systembin::decode_native_output(&o.stdout),
+                    Err(e) => format!("无法执行: {e}"),
+                };
+                let msg = format!(
+                    "64 位性能计数器重建失败（lodctr /R），后续步骤未执行：{}",
+                    note.trim()
+                );
+                crate::engine::log::write_log("warn", &format!("维护：{msg}"));
+                return Ok((false, msg));
+            }
+            let mut faults: Vec<String> = Vec::new();
+            // 失败原因提取（exit + 输出尾段）：三/四步对齐第一步，不回固定串（L3）
+            let brief = |r: &std::result::Result<std::process::Output, std::io::Error>| -> String {
+                match r {
+                    Ok(o) => {
+                        let raw = if !o.stdout.is_empty() { &o.stdout } else { &o.stderr };
+                        let tail: String =
+                            crate::engine::systembin::decode_native_output(raw)
+                                .trim()
+                                .chars()
+                                .take(120)
+                                .collect();
+                        let mut s = format!("exit={}", o.status.code().unwrap_or(-1));
+                        if !tail.is_empty() {
+                            s.push_str("：");
+                            s.push_str(&tail);
+                        }
+                        s
+                    }
+                    Err(e) => format!("无法执行: {e}"),
+                }
+            };
+            // ② SysWOW64（绝对路径，第三目录 system_tool 不覆盖）：存在才执行
+            let wow = std::env::var_os("SystemRoot")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+                .join(r"SysWOW64\lodctr.exe");
+            let mut has32 = false;
+            if wow.is_file() {
+                has32 = true;
+                let r2 = crate::engine::systembin::quiet_cmd_timeout(&wow, &["/R"], MAINT_FAST_TIMEOUT);
+                if !r2.as_ref().is_ok_and(|o| o.status.success()) {
+                    faults.push(format!("32 位计数器重建失败（SysWOW64 lodctr /R，{}）", brief(&r2)));
+                }
+            }
+            // ③ winmgmt /resyncperf
+            let r3 = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("winmgmt.exe"), &["/resyncperf"], MAINT_FAST_TIMEOUT);
+            if !r3.as_ref().is_ok_and(|o| o.status.success()) {
+                faults.push(format!("WMI 计数器同步未成功（winmgmt /resyncperf，{}）", brief(&r3)));
+            }
+            // ④ 验证：typeperf 采样一次，rc=0 才算通过
+            let r4 = crate::engine::systembin::quiet_cmd_timeout(
+                system_tool("typeperf.exe"),
+                &[r"\Processor(_Total)\% Processor Time", "-sc", "1"],
+                MAINT_FAST_TIMEOUT,
+            );
+            let verified = r4.as_ref().is_ok_and(|o| o.status.success());
+
+            if verified && faults.is_empty() {
+                let scope = if has32 { "64 位 + 32 位" } else { "64 位" };
+                Ok((true, format!("性能计数器已重建（{scope}），WMI 已同步，验证通过")))
+            } else if !verified {
+                // L1：只陈述「重建步骤已执行」，不谎称同步完成（faults 可能含同步失败）
+                let mut details = faults.clone();
+                details.push(format!("采样验证未通过（typeperf，{}）", brief(&r4)));
+                Ok((false, format!(
+                    "重建步骤已执行，但验证未通过；建议重启后复查，仍异常请运行 sfc/DISM。{}",
+                    details.join("；")
+                )))
+            } else {
+                // 验证已过但个别步骤失败：点名，不混成「全成」
+                Ok((false, format!(
+                    "验证通过，但部分步骤未成功：{}", faults.join("；")
+                )))
+            }
         }
         "store" => {
             // v5 S-1：旧写法 `let _ = …spawn(); Ok((true, …))` 是**恒真回执** —— wsreset 缺失、

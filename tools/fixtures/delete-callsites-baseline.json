@@ -35,6 +35,7 @@
     "src-tauri/src/engine/native/maintenance.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 5,
     "src-tauri/src/engine/paths.rs": 8,
+    "src-tauri/src/engine/protect.rs": 1,
     "src-tauri/src/engine/reg_backup.rs": 9,
     "src-tauri/src/engine/restore_pack.rs": 4,
     "src-tauri/src/engine/shellicon.rs": 3,

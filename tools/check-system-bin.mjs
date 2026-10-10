@@ -45,8 +45,8 @@ const PINNED = [
   'powercfg.cpl', 'powershell.exe', 'psr.exe', 'reg.exe', 'reg', 'regedit.exe',
   'resmon.exe', 'rstrui.exe', 'rundll32.exe', 'sc.exe', 'sc', 'schtasks.exe',
   'schtasks', 'sdclt.exe', 'services.msc', 'sfc.exe', 'snippingtool.exe', 'sysdm.cpl',
-  'tasklist.exe', 'taskmgr.exe', 'taskschd.msc', 'utilman.exe', 'where.exe',
-  'wf.msc', 'winver.exe', 'wsreset.exe',
+  'tasklist.exe', 'taskmgr.exe', 'taskschd.msc', 'typeperf.exe', 'utilman.exe', 'where.exe',
+  'wf.msc', 'winmgmt.exe', 'winver.exe', 'wsreset.exe',
 ];
 
 /**

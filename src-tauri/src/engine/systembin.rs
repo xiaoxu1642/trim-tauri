@@ -80,9 +80,11 @@ const PINNED: &[&str] = &[
     "tasklist.exe",
     "taskmgr.exe",
     "taskschd.msc",
+    "typeperf.exe", // P1-01：计数器重建后的采样验证
     "utilman.exe",
     "where.exe",
     "wf.msc",
+    "winmgmt.exe", // P1-01：/resyncperf 同步 WMI 计数器
     "winver.exe",
     "wsreset.exe",
 ];

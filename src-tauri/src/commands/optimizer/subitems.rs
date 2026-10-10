@@ -111,7 +111,7 @@ fn raw_of(option_id: &str) -> Option<&'static Value> {
 }
 
 /// 清单里登记的全部目标（顺序 = 脚本里的顺序）
-fn targets_of(option_id: &str) -> Vec<String> {
+pub(super) fn targets_of(option_id: &str) -> Vec<String> {
     raw_of(option_id)
         .and_then(|v| v.get("targets").and_then(Value::as_array).cloned())
         .unwrap_or_default()

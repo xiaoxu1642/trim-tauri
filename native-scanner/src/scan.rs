@@ -1786,6 +1786,58 @@ struct ProtectRoots {
     subtree: Vec<String>,   // 整棵不许碰：目录本身及所有子孙
     exact: Vec<String>,     // 根/祖先不许端掉；根本身之下缓存照常可清
     any_drive: Vec<String>, // 任意盘符下同名目录整棵受保护（如每个分区的 System Volume Information）
+    // P1-05：凭据文件名模式（小写、'*' 段内通配），按路径每段匹配。
+    // 与主侧 engine::protect / JS 权威 / PS 端同源；此前注入 JSON 里的 neverNames
+    // 被静默忽略（A2），此处补上，纵深防御层不再是哑的。
+    never_names: Vec<String>,
+}
+
+/// 仅 `*` 的 glob 与段名是否匹配（* = 任意字符含空）；never_names 不含 `?`。
+fn star_match(pattern: &str, seg: &str) -> bool {
+    let pb = pattern.as_bytes();
+    let sb = seg.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_pi, mut star_ti): (Option<usize>, usize) = (None, 0);
+    while ti < sb.len() {
+        if pi < pb.len() && pb[pi] == b'*' {
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1;
+        } else if pi < pb.len() && pb[pi] == sb[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < pb.len() && pb[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pb.len()
+}
+
+/// P1-05：凭据文件名默认清单，与 JS 权威 NEVER_NAMES / 主侧 engine::protect 同源。
+fn default_never_names() -> Vec<String> {
+    [
+        ".env", ".env.*", "*.env",
+        "id_rsa", "id_rsa_sk", "id_dsa", "id_ecdsa", "id_ed25519", "id_ed25519_sk",
+        "id_ed448", "id_x25519",
+        "*.pem", "*.pfx", "*.p12", "*.key", "*.keystore", "*.jks",
+        "*.pgp", "*.gpg", "*.asc",
+        "*.kdb", "*.kdbx",
+        "*.ovpn",
+        ".htpasswd", ".netrc", ".npmrc", ".pypirc",
+        "credentials", "credentials.json", "authorized_user.json",
+        "service_account*.json", "*azureprofile.json",
+        "terraform.tfstate", "terraform.tfstate.*",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
@@ -1806,6 +1858,7 @@ impl ProtectRoots {
                     ("subtree", &mut out.subtree),
                     ("exact", &mut out.exact),
                     ("anyDrive", &mut out.any_drive),
+                    ("neverNames", &mut out.never_names),
                 ] {
                     if let Some(arr) = v.get(key).and_then(Json::as_arr) {
                         for it in arr {
@@ -1850,6 +1903,8 @@ impl ProtectRoots {
                 norm(localappdata),
             ],
             any_drive: vec!["system volume information".to_string()],
+            // CLI 兜底（无注入）时仍内置默认凭据名单，与 JS NEVER_NAMES 同源
+            never_names: default_never_names(),
         }
     }
 }
@@ -1948,6 +2003,14 @@ fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
             if norm == **e || e.starts_with(&format!("{}\\", norm)) {
                 return true;
             }
+        }
+        // P1-05：路径任一段（文件名或祖先目录名）命中凭据模式即拒
+        if norm
+            .split(|c| c == '\\' || c == '/')
+            .filter(|s| !s.is_empty())
+            .any(|seg| r.never_names.iter().any(|pat| star_match(pat, seg)))
+        {
+            return true;
         }
         false
     })

@@ -714,6 +714,49 @@ pub async fn optimizer_run<R: Runtime>(
         return json!({ "success": false, "message": "选项无可执行步骤" });
     }
 
+    // P1-02（G-02）：用 SCM 核对本次涉及的服务/驱动，收集本机不存在（执行 foreach
+    // 里被 Test-Path 静默跳过）的目标。全量=侧表全名单，子集=picked∩名单（同 rebuild 口径）。
+    // 纯 Rust 判定：不依赖 PS 输出协议，全量/子集路径都覆盖；跳过不影响成功，但必须可见。
+    let mut skipped: Vec<String> = Vec::new();
+    {
+        let kind_label = match option_id.as_str() {
+            "tf_svc_bulk" => Some("服务"),
+            "tf_drv_disable" => Some("驱动"),
+            _ => None,
+        };
+        if let Some(kl) = kind_label {
+            let all = super::subitems::targets_of(&option_id);
+            let using_subset = !p.restore && super::subitems::supports_subitems(&option_id);
+            let names: Vec<String> = if using_subset {
+                match picked_targets_effective.as_deref() {
+                    Some(list) if !list.is_empty() => all
+                        .iter()
+                        .filter(|t| list.iter().any(|x| x == *t))
+                        .cloned()
+                        .collect(),
+                    _ => all,
+                }
+            } else {
+                all
+            };
+            for n in names {
+                if !crate::engine::native::service_exists(&n) {
+                    skipped.push(format!("{kl} {n}"));
+                }
+            }
+            if !skipped.is_empty() {
+                log::write_log(
+                    "info",
+                    &format!(
+                        "优化项 {option_id} 跳过 {} 个本机不存在的目标：{}",
+                        skipped.len(),
+                        skipped.join("；")
+                    ),
+                );
+            }
+        }
+    }
+
     let is_restore_run = p.restore
         && opt.get("restore").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
 
@@ -904,7 +947,18 @@ pub async fn optimizer_run<R: Runtime>(
         if verify != "unknown" {
             let _ = opt_state::set_detected_entry(&option_id, verify == "pass");
         }
-        return json!({ "success": true, "message": ok_message, "verify": verify });
+        // P1-02：成功时若有本机不存在而被跳过的目标，message 点名数量、完整名单随 skipped 下发
+        let final_message = if skipped.is_empty() {
+            ok_message
+        } else {
+            format!("{ok_message}（{} 个本机不存在，已跳过，完整名单见操作日志）", skipped.len())
+        };
+        return json!({
+            "success": true,
+            "message": final_message,
+            "verify": verify,
+            "skipped": skipped
+        });
     } else {
         // 审查 2026-09-27 M1：部分步骤失败（failed>0 但链路跑完）不再 mark_applied("unknown")
         // 转正为「已应用」——违反记账不变式②「执行成功才转正」，且纯 cmd/pwsh 项不可回读、

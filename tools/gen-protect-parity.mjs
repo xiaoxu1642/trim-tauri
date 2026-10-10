@@ -27,11 +27,60 @@
 //    必须重跑一次生成器；`check-data-parity.mjs` 的 P4 按这个口径给了显式提示。
 
 import { createRequire } from 'node:module';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
+
+/**
+ * 真实执行 PS 端 Test-PathProtected（P1-05/S1 根治）：把权威模块的 PS 函数落临时
+ * 脚本，注入含 neverNames 的 roots，对同一批向量给出布尔判定。
+ * 这是 PS 端唯一的自动化执行验证（夹具里的 psVectors），避免「PS 正则折叠/口径漂移
+ * 却无人执行」。返回布尔数组；执行失败返回 {error}（Rust 测试会据此判红，不静默）。
+ */
+function runPsVectors(PROTECT, vectors) {
+  const rootsJson = PROTECT.protectedRootsJson();
+  const pathsJson = JSON.stringify(vectors.map((v) => v.p));
+  // 用单引号 here-string 承载 JSON（JSON 全双引号、单行，无 '@ 序列，安全）
+  const wrapper = [
+    PROTECT.PROTECT_PATH_PS,
+    "$tfProtectedRoots = @'",
+    rootsJson,
+    "'@ | ConvertFrom-Json",
+    "$paths = @'",
+    pathsJson,
+    "'@ | ConvertFrom-Json",
+    'foreach ($p in $paths) {',
+    '  $hit = Test-PathProtected -Path $p -Roots $tfProtectedRoots',
+    '  Write-Output ($hit.ToString())',
+    '}',
+  ].join('\n');
+  const dir = mkdtempSync(join(tmpdir(), 'trim-psv-'));
+  const file = join(dir, 'probe.ps1');
+  // 关键：Windows PowerShell 5.1 tokenizer 在 **LF-only** 文件的 # 注释里会跨行
+  // 吞噬后续代码（实测：纯 LF 时注释把 function/if 吞并报 Unexpected '}'）。
+  // 统一用 CRLF 写出，模板语法本身正确。
+  writeFileSync(file, wrapper.replace(/\r?\n/g, '\r\n'), 'utf8');
+  try {
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file],
+      { encoding: 'utf8', timeout: 60_000 },
+    );
+    const bools = out.trim().split(/\r?\n/).map((x) => x.trim() === 'True');
+    if (bools.length !== vectors.length) {
+      return { error: `PS 输出行数 ${bools.length} ≠ 向量数 ${vectors.length}` };
+    }
+    return bools;
+  } catch (e) {
+    return { error: String((e && e.message) || e).slice(0, 200) };
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
 
 /**
  * 用 JS 权威实现算出夹具内容（不落盘）。
@@ -87,6 +136,18 @@ export function buildParityFixture() {
     'C:\\System Volume Information',
     'C:\\System Volume Information\\foo',
     'D:\\System Volume Information\\foo',
+    // P1-05：凭据文件名诱饵 —— 文件名命中（.env/id_rsa/*.pem/云凭据）
+    join(HOME, 'chillsweep-probe.env'),
+    join(HOME, '.ssh', 'id_rsa'),
+    join(HOME, 'certs', 'server.pem'),
+    join(HOME, '.aws', 'credentials'),
+    join(HOME, 'gcp', 'service_account_key.json'),
+    join(HOME, 'tf', 'terraform.tfstate'),
+    // 祖先目录名命中（.env 目录下的普通文件仍拒）
+    join(HOME, 'proj', '.env', 'lib', 'x.txt'),
+    // 必须放行的近形：段名仅包含模式而非相等/通配
+    join(HOME, 'proj', 'environment', 'config.json'),
+    join(HOME, 'proj', 'env.local.txt'),
     '\\\\?\\C:\\Windows\\Temp',
     // v2-L4P-17（B-3）：UNC 三形态向量。本机默认清单无 UNC 根 ⇒ 全部放行（与 Rust 一致）；
     // 向量锁的是「三端对同一形态判同一结果」：plain UNC（保留体）、\\?\UNC\（还原后再判）、
@@ -116,12 +177,21 @@ export function buildParityFixture() {
     process.env.TEMP || join(LOCALAPPDATA, 'Temp'),
   ];
 
+  const vectorResults = vectors.map((p) => ({ p, protected: PROTECT.isPathProtected(p) }));
+
   return {
     // 夹具生成时的输入，Rust 测试用同样输入调用 configure()
     extras,
     rootsJson,
-    roots: { subtree: roots.subtree, exact: roots.exact, anyDrive: roots.anyDrive },
-    vectors: vectors.map(p => ({ p, protected: PROTECT.isPathProtected(p) })),
+    roots: {
+      subtree: roots.subtree,
+      exact: roots.exact,
+      anyDrive: roots.anyDrive,
+      neverNames: roots.neverNames,
+    },
+    vectors: vectorResults,
+    // P1-05/S1：PS 端真实执行判定（应与 JS vectors.protected 逐项一致）
+    psVectors: runPsVectors(PROTECT, vectorResults),
   };
 }
 
@@ -135,7 +205,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   mkdirSync(join(FIXTURE_PATH, '..'), { recursive: true });
   writeFileSync(FIXTURE_PATH, JSON.stringify(result, null, 2), 'utf8');
   const denied = result.vectors.filter(v => v.protected).length;
+  const psMatch = Array.isArray(result.psVectors)
+    && result.psVectors.every((h, i) => h === result.vectors[i].protected);
   console.log(`✓ 夹具已生成: ${FIXTURE_PATH}`);
-  console.log(`  清单：subtree ${result.roots.subtree.length} / exact ${result.roots.exact.length} / anyDrive ${result.roots.anyDrive.length}`);
+  console.log(`  清单：subtree ${result.roots.subtree.length} / exact ${result.roots.exact.length} / anyDrive ${result.roots.anyDrive.length} / neverNames ${result.roots.neverNames.length}`);
   console.log(`  向量：${result.vectors.length} 条（判拒 ${denied} / 放行 ${result.vectors.length - denied}）`);
+  console.log(`  PS 真实执行：${psMatch ? '与 JS 判定逐项一致 ✓' : '与 JS 不一致 ✗ ' + JSON.stringify(result.psVectors).slice(0, 120)}`);
 }

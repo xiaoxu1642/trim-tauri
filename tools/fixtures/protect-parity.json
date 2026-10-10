@@ -9,7 +9,7 @@
       "C:\\Users\\Administrator\\Downloads"
     ]
   },
-  "rootsJson": "{\"subtree\":[\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\\\\trim\",\"c:\\\\windows\\\\system32\\\\config\"],\"exact\":[\"c:\\\\windows\",\"c:\\\\program files\",\"c:\\\\program files (x86)\",\"c:\\\\programdata\",\"c:\\\\users\\\\administrator\",\"c:\\\\users\\\\administrator\\\\desktop\",\"c:\\\\users\\\\administrator\\\\documents\",\"c:\\\\users\\\\administrator\\\\downloads\",\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\",\"c:\\\\users\\\\administrator\\\\appdata\\\\local\"],\"anyDrive\":[\"system volume information\"]}",
+  "rootsJson": "{\"subtree\":[\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\\\\trim\",\"c:\\\\windows\\\\system32\\\\config\"],\"exact\":[\"c:\\\\windows\",\"c:\\\\program files\",\"c:\\\\program files (x86)\",\"c:\\\\programdata\",\"c:\\\\users\\\\administrator\",\"c:\\\\users\\\\administrator\\\\desktop\",\"c:\\\\users\\\\administrator\\\\documents\",\"c:\\\\users\\\\administrator\\\\downloads\",\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\",\"c:\\\\users\\\\administrator\\\\appdata\\\\local\"],\"anyDrive\":[\"system volume information\"],\"neverNames\":[\".env\",\".env.*\",\"*.env\",\"id_rsa\",\"id_rsa_sk\",\"id_dsa\",\"id_ecdsa\",\"id_ed25519\",\"id_ed25519_sk\",\"id_ed448\",\"id_x25519\",\"*.pem\",\"*.pfx\",\"*.p12\",\"*.key\",\"*.keystore\",\"*.jks\",\"*.pgp\",\"*.gpg\",\"*.asc\",\"*.kdb\",\"*.kdbx\",\"*.ovpn\",\".htpasswd\",\".netrc\",\".npmrc\",\".pypirc\",\"credentials\",\"credentials.json\",\"authorized_user.json\",\"service_account*.json\",\"*azureprofile.json\",\"terraform.tfstate\",\"terraform.tfstate.*\"]}",
   "roots": {
     "subtree": [
       "c:\\users\\administrator\\appdata\\roaming\\trim",
@@ -29,6 +29,42 @@
     ],
     "anyDrive": [
       "system volume information"
+    ],
+    "neverNames": [
+      ".env",
+      ".env.*",
+      "*.env",
+      "id_rsa",
+      "id_rsa_sk",
+      "id_dsa",
+      "id_ecdsa",
+      "id_ed25519",
+      "id_ed25519_sk",
+      "id_ed448",
+      "id_x25519",
+      "*.pem",
+      "*.pfx",
+      "*.p12",
+      "*.key",
+      "*.keystore",
+      "*.jks",
+      "*.pgp",
+      "*.gpg",
+      "*.asc",
+      "*.kdb",
+      "*.kdbx",
+      "*.ovpn",
+      ".htpasswd",
+      ".netrc",
+      ".npmrc",
+      ".pypirc",
+      "credentials",
+      "credentials.json",
+      "authorized_user.json",
+      "service_account*.json",
+      "*azureprofile.json",
+      "terraform.tfstate",
+      "terraform.tfstate.*"
     ]
   },
   "vectors": [
@@ -129,6 +165,42 @@
       "protected": true
     },
     {
+      "p": "C:\\Users\\Administrator\\chillsweep-probe.env",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\.ssh\\id_rsa",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\certs\\server.pem",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\.aws\\credentials",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\gcp\\service_account_key.json",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\tf\\terraform.tfstate",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\proj\\.env\\lib\\x.txt",
+      "protected": true
+    },
+    {
+      "p": "C:\\Users\\Administrator\\proj\\environment\\config.json",
+      "protected": false
+    },
+    {
+      "p": "C:\\Users\\Administrator\\proj\\env.local.txt",
+      "protected": false
+    },
+    {
       "p": "\\\\?\\C:\\Windows\\Temp",
       "protected": false
     },
@@ -204,5 +276,59 @@
       "p": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp",
       "protected": false
     }
+  ],
+  "psVectors": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
   ]
 }

@@ -28,6 +28,68 @@ pub struct ProtectRoots {
     pub subtree: Vec<String>,
     pub exact: Vec<String>,
     pub any_drive: Vec<String>,
+    /// P1-05：凭据文件名模式（小写、'*' 段内通配），按路径每段匹配
+    pub never_names: Vec<String>,
+}
+
+/// P1-05：凭据文件名默认清单（与 JS 权威 NEVER_NAMES 同源，静态与机器无关）。
+/// 范围按用户裁定：`.env`、SSH/GPG、证书、云凭据。
+fn default_never_names() -> Vec<String> {
+    [
+        ".env", ".env.*", "*.env",
+        "id_rsa", "id_rsa_sk", "id_dsa", "id_ecdsa", "id_ed25519", "id_ed25519_sk",
+        "id_ed448", "id_x25519",
+        "*.pem", "*.pfx", "*.p12", "*.key", "*.keystore", "*.jks",
+        "*.pgp", "*.gpg", "*.asc",
+        "*.kdb", "*.kdbx",
+        "*.ovpn",
+        ".htpasswd", ".netrc", ".npmrc", ".pypirc",
+        "credentials", "credentials.json", "authorized_user.json",
+        "service_account*.json", "*azureprofile.json",
+        "terraform.tfstate", "terraform.tfstate.*",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// 仅含 `*` 的 glob 与文本是否相等（经典回溯算法，零正则依赖）。
+/// `*` = 任意字符（含空）；其余逐字。
+fn glob_match(pat: &str, text: &str) -> bool {
+    let pb = pat.as_bytes();
+    let tb = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_pi, mut star_ti): (Option<usize>, usize) = (None, 0);
+    while ti < tb.len() {
+        if pi < pb.len() && pb[pi] == b'*' {
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1;
+        } else if pi < pb.len() && pb[pi] == tb[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < pb.len() && pb[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pb.len()
+}
+
+/// P1-05：路径任一段（文件名或祖先目录名）是否命中凭据模式。
+fn never_name_blocked(low: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    low.split(|c| c == '\\' || c == '/')
+        .filter(|s| !s.is_empty())
+        .any(|seg| patterns.iter().any(|pat| glob_match(pat, seg)))
 }
 
 /// 归一化结果（对照 JS `normalizeForCompare` 的返回形状）
@@ -343,6 +405,7 @@ pub fn build_default_roots() -> ProtectRoots {
             local_appdata,
         ]),
         any_drive: vec!["system volume information".to_string()],
+        never_names: default_never_names(),
     }
 }
 
@@ -437,6 +500,10 @@ pub fn is_path_protected_with(p: &str, r: &ProtectRoots) -> bool {
             return true;
         }
     }
+    // P1-05：凭据文件名逐段兜底
+    if never_name_blocked(&low, &r.never_names) {
+        return true;
+    }
     false
 }
 
@@ -472,10 +539,11 @@ pub fn protected_roots_json() -> String {
 pub fn json_of(r: &ProtectRoots) -> String {
     let arr = |v: &Vec<String>| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string());
     format!(
-        "{{\"subtree\":{},\"exact\":{},\"anyDrive\":{}}}",
+        "{{\"subtree\":{},\"exact\":{},\"anyDrive\":{},\"neverNames\":{}}}",
         arr(&r.subtree),
         arr(&r.exact),
-        arr(&r.any_drive)
+        arr(&r.any_drive),
+        arr(&r.never_names)
     )
 }
 
@@ -891,6 +959,21 @@ mod tests {
             }
         }
         assert!(diff.is_empty(), "判定口径与 JS 不一致：\n{}", diff.join("\n"));
+
+        // ③ P1-05/S1：PS 端真实执行结果（psVectors）必须与 JS vectors.protected 逐项一致。
+        // psVectors 是生成器实际跑 Windows PowerShell 得到的布尔数组；为 {error} 或缺项即红。
+        let ps = f["psVectors"].as_array().expect(
+            "夹具缺 psVectors（PS 端未真实执行或执行报错——重跑 node tools/gen-protect-parity.mjs）",
+        );
+        assert_eq!(ps.len(), f["vectors"].as_array().unwrap().len(),
+            "psVectors 条数与 vectors 不符");
+        for (i, (pv, v)) in ps.iter().zip(f["vectors"].as_array().unwrap()).enumerate() {
+            let got = pv.as_bool().unwrap_or(false);
+            let want = v["protected"].as_bool().unwrap();
+            assert_eq!(got, want,
+                "PS 端第 {i} 项与 JS 分歧（{}）：PS={} JS={}",
+                v["p"].as_str().unwrap(), got, want);
+        }
     }
 
     /// v2-L4P-17（B-3）：UNC 三形态收敛 + 翻转向量回归。
@@ -1001,5 +1084,93 @@ mod tests {
             assert!(!is_system_namespace(&miss), "合法位置被误拦: {miss}");
         }
         assert!(is_system_namespace(""), "不可判按拒（fail-closed）");
+    }
+
+    /// P1-05：glob 匹配的边界 —— 精确、首尾/中段通配、大小写无关靠调用前小写。
+    #[test]
+    fn glob_匹配覆盖精确与通配() {
+        for (pat, text, want) in [
+            (".env", ".env", true),
+            (".env", "x.env", false),
+            ("*.env", "probe.env", true),
+            ("*.env", "env", false),
+            (".env.*", ".env.local", true),
+            (".env.*", ".env", false),
+            ("service_account*.json", "service_account_key.json", true),
+            ("service_account*.json", "service_account.json", true), // * 含空
+            ("*azureprofile.json", "azureProfile.json".to_ascii_lowercase().as_str(), true),
+            ("a*b*c", "axxbxxc", true),
+            ("a*b*c", "axxcxxb", false),
+        ] {
+            assert_eq!(glob_match(pat, text), want, "{pat} vs {text}");
+        }
+    }
+
+    /// P1-05：凭据文件名逐段命中（文件名/祖先目录），近形段不命中。
+    #[test]
+    fn 凭据文件名逐段兜底() {
+        let p = default_never_names();
+        // 文件名命中
+        assert!(never_name_blocked(r"c:\users\me\.env", &p));
+        assert!(never_name_blocked(r"c:\users\me\.ssh\id_rsa", &p));
+        assert!(never_name_blocked(r"c:\certs\server.pem", &p));
+        assert!(never_name_blocked(r"c:\gcp\service_account_1.json", &p));
+        // 祖先目录名命中
+        assert!(never_name_blocked(r"c:\proj\.env\lib\x.txt", &p));
+        // 近形不命中
+        assert!(!never_name_blocked(r"c:\proj\environment\config.json", &p));
+        assert!(!never_name_blocked(r"c:\proj\env.local.txt", &p));
+        assert!(!never_name_blocked(r"c:\normal\folder\file.txt", &p));
+        // 空模式：不拦
+        assert!(!never_name_blocked(r"c:\.env", &[]));
+    }
+
+    /// P1-05：清单非空且全部为小写（三端同源前提）。
+    #[test]
+    fn 默认凭据清单形状合法() {
+        let p = default_never_names();
+        assert!(p.len() >= 25, "清单条数异常: {}", p.len());
+        for pat in &p {
+            assert!(pat.chars().all(|c| !c.is_ascii_uppercase()), "模式必须小写: {pat}");
+            assert!(!pat.contains('?'), "首版只支持 * 通配: {pat}");
+        }
+    }
+
+    /// P1-05 真机探针：%USERPROFILE% 下造凭据诱饵，断言删除判定全部拦截（含清理/walk 入口）。
+    #[test]
+    #[ignore = "真机：%USERPROFILE% 下凭据诱饵（自建自清），发布前人工跑"]
+    fn live_credential_decoys_blocked() {
+        let home = env("USERPROFILE");
+        assert!(!home.is_empty(), "USERPROFILE 取不到");
+        let dir = std::path::PathBuf::from(format!(r"{home}\chillsweep-decoy-{}", std::process::id()));
+        // 兜底清目录（panic 提前返回时也清）
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        let files = [
+            r"probe.env",
+            r".ssh\id_rsa",
+            r"certs\server.pem",
+            r".aws\credentials",
+            r"proj\.env\lib\a.txt",
+        ];
+        for rel in files {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"decoy").unwrap();
+            assert!(is_path_protected(&p.to_string_lossy()),
+                "凭据诱饵未被拦截：{}", p.display());
+        }
+        // 近形普通文件不被拦截（防过度保护）
+        let benign = dir.join(r"normal\environment\config.json");
+        std::fs::create_dir_all(benign.parent().unwrap()).unwrap();
+        std::fs::write(&benign, b"x").unwrap();
+        assert!(!is_path_protected(&benign.to_string_lossy()),
+            "近形普通文件被过度拦截");
     }
 }

@@ -166,7 +166,7 @@ else { Write-TFDiag -Stage 'maint.audio' -Mutation 'partial' -Detail 'Audiosrv �
   },
   perfcounters: {
     title: '重建性能计数器',
-    desc: '运行 lodctr /r 重建设能计数器库，修复任务管理器/性能监视器数据异常或报错。',
+    desc: '重建性能计数器库：运行 lodctr /R（64 位与 32 位）并同步 WMI 计数器（winmgmt /resyncperf），完成后采样验证；数据仍异常时建议重启后复查。修复任务管理器/性能监视器数据异常或报错。',
     category: '系统修复',
     admin: true,
     ps: () => `
