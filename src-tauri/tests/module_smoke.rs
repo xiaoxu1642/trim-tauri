@@ -992,9 +992,9 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
     )
     .unwrap();
 
-    let e1 = reg_backup_restore_guards(&no_header, &no_header_name, true).unwrap_err();
+    let e1 = reg_backup_restore_guards(&no_header, &no_header_name, "cleanup", true).unwrap_err();
     assert!(e1.contains("合法的 .reg"), "缺版本头必须被形状闸拒，实得 {e1}");
-    let e2 = reg_backup_restore_guards(&deny_target, &deny_name, true).unwrap_err();
+    let e2 = reg_backup_restore_guards(&deny_target, &deny_name, "cleanup", true).unwrap_err();
     assert!(e2.contains("受保护"), "指向 HKLM\\SOFTWARE 必须被禁删面拒，实得 {e2}");
 
     // 判红自测口径：任一道闸被摘掉，对应的 unwrap_err 当场 panic 变红；①的 rejected 全等

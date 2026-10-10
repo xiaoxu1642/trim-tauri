@@ -481,7 +481,7 @@ pub fn netcheck_status() -> Result<Value, String> {
             crate::engine::systembin::PROBE_TIMEOUT,
         )
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+        .map(|o| crate::engine::systembin::decode_native_output(&o.stdout));
         let winhttp_has_proxy = winhttp_out.as_ref()
             .map(|o| (o.contains("proxy") || o.contains("代理服务器")) && !o.contains("直接访问") && !o.contains("DIRECT"))
             .unwrap_or(false);
@@ -665,7 +665,7 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
     if success {
         crate::engine::log::write_log("info", &format!("运行库修复完成: {action_id} ({message})"));
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).chars().take(200).collect::<String>();
+        let stderr = crate::engine::systembin::decode_native_output(&out.stderr).chars().take(200).collect::<String>();
         crate::engine::log::write_log("warn", &format!("运行库修复失败: {action_id} exit={code} {stderr}"));
     }
 

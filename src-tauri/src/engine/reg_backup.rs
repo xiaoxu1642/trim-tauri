@@ -8,9 +8,10 @@
 //! 更要紧的是 N1 之后清理域列表会**跨根**列出 Electron 轨写的 `.reg`（无封条、形状更不可信），
 //! 弱链的输入面因此同步扩大 ⇒ 闸必须先补齐。
 //!
-//! 封条的边界照 v0.2.6 的裁定不变：备份与封条同在用户可写目录，同一用户可同时改写两者，
-//! 所以封条只提升「半截写入/手工误改」的误污染检测与低权限单点篡改的可发现性，
-//! **不是防伪凭证**。真防伪要 HKLM 侧常驻提权面，那是另一次拍板。
+//! 封条有两层（P0-01，2026-10-10）：边车封条与备份同在用户可写目录，同一用户可同时
+//! 改写两者，所以它只提升「半截写入/手工误改」的误污染检测，不是防伪凭证；HKLM 备份
+//! 另有管理员摘要（存 HKLM 下非提权进程写不了的键），还原时由提权实例自行重算哈希
+//! 比对，这才是系统级备份的防伪闸门。非提权实例只允许还原 HKCU。
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -59,6 +60,95 @@ pub fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
         Ok(got) if got.eq_ignore_ascii_case(want) => ("ok", meta),
         Ok(_) => ("mismatch", meta),
         Err(_) => ("unreadable", meta),
+    }
+}
+
+// ==================== P0-01：HKLM 管理员摘要（2026-10-10） ====================
+//
+// 为什么需要它：边车封条与备份同在用户可写目录，同一用户可同时改写两者并自算哈希，
+// 形状合法的毒备份因此能在管理员还原上下文写入注册表（user→admin 提权）；删边车让
+// 状态变 `missing` 更是原样放行。闭合条件是摘要必须存放在「非提权进程写不了」的位置
+// ⇒ HKLM 下默认仅 Administrators/SYSTEM 可写的键，且只能在已提权执行窗口内补写；
+// HKLM 还原整体收进提权实例，由提权实例自行重算哈希与该摘要比对。
+// 非提权实例只允许还原 HKCU（攻击者本就持有 HKCU 写权限，不构成提权）。
+
+/// 管理员摘要存放键（HKLM）：默认 ACL 下仅 Administrators/SYSTEM 可写。
+const ADMIN_SEAL_SUBKEY: &str = r"SOFTWARE\Trim\RegBackupSeals";
+
+/// 摘要值名 = 域前缀/备份文件名：两域分开记账（cleanup / uninstall），防同名互顶。
+fn admin_seal_value_name(domain: &str, file: &Path) -> Option<String> {
+    let leaf = file.file_name()?.to_str()?;
+    Some(format!("{domain}/{leaf}"))
+}
+
+/// 在已提权执行窗口补写管理员摘要。非提权时写 HKLM 失败：只留日志、不影响删除主链，
+/// 但这份 HKLM 备份此后不能通过还原闸（fail-closed 是刻意的）。
+pub fn write_admin_seal(domain: &str, file: &Path) {
+    let Some(value_name) = admin_seal_value_name(domain, file) else { return };
+    let Ok(sum) = crate::engine::hash::sha256_file(file) else { return };
+    let ok = crate::engine::native::reg_restore_write(
+        crate::engine::native::hive_hklm(),
+        ADMIN_SEAL_SUBKEY,
+        &value_name,
+        REG_VALUE_TYPE(RK_SZ),
+        &utf16_with_nul(&sum),
+    );
+    if !ok {
+        crate::engine::log::write_log(
+            "warn",
+            &format!(
+                "管理员摘要写入失败（当前可能非管理员会话，该 HKLM 备份将不能用于还原）: {value_name}"
+            ),
+        );
+    }
+}
+
+/// 读管理员摘要；无记录返回 None（备份生成于非提权会话，或早于本安全版本）。
+pub fn read_admin_seal(domain: &str, file: &Path) -> Option<String> {
+    let value_name = admin_seal_value_name(domain, file)?;
+    crate::engine::native::read_reg_string(
+        crate::engine::native::hive_hklm(),
+        ADMIN_SEAL_SUBKEY,
+        &value_name,
+    )
+}
+
+/// 对账纯判据：现存备份文件名集合 vs HKLM 摘要值名集合，返回应删除的孤立值名。
+/// 拆成纯函数：真实 HKLM 读写归 #[ignore] 探针，此处逻辑在无窗单测覆盖。
+fn stale_admin_seal_value_names(
+    domain: &str,
+    existing_files: &std::collections::HashSet<String>,
+    value_names: &[String],
+) -> Vec<String> {
+    let prefix = format!("{domain}/");
+    value_names
+        .iter()
+        .filter_map(|vn| {
+            // 非本域值名不参与；本域但备份已不存在 ⇒ 待删
+            vn.strip_prefix(&prefix)
+                .filter(|leaf| !existing_files.contains(*leaf))
+                .map(|_| vn.clone())
+        })
+        .collect()
+}
+
+/// 备份裁剪（prune_backups）之后对账：删除 HKLM 下指向已不存在备份的摘要，避免无限累积。
+/// 必须在提权实例执行才真正删除；非提权静默跳过。
+pub fn reconcile_admin_seals(domain: &str, dir: &Path) {
+    let mut existing = std::collections::HashSet::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            if let Some(n) = ent.file_name().to_str() {
+                if n.to_lowercase().ends_with(".reg") {
+                    existing.insert(n.to_string());
+                }
+            }
+        }
+    }
+    let hklm = crate::engine::native::hive_hklm();
+    let value_names = crate::engine::native::reg_enum_value_names_pub(hklm, ADMIN_SEAL_SUBKEY);
+    for vn in stale_admin_seal_value_names(domain, &existing, &value_names) {
+        let _ = crate::engine::native::reg_restore_delete(hklm, ADMIN_SEAL_SUBKEY, &vn);
     }
 }
 
@@ -143,18 +233,22 @@ pub struct RegBackupCheck {
     pub seal: &'static str,
 }
 
-/// 还原前的**四道公共闸**，两域共用同一顺序与同一回执口径：
+/// 还原前的**公共闸**，两域共用同一顺序与同一回执口径：
 /// ① 严格 `.reg` 解析（形状不对直接拒）② 解析出的每个键都要仍在允许删除的面上
-/// ③ 封条核对（`mismatch`/`corrupt`/`unreadable` 拒；`missing` 放行 —— 封条是 v0.2.6
-/// 才加的，早期备份与 Electron 轨老备份都没有，拒它们等于把还原依据自己扔掉）
+/// ③ 边车封条核对（`mismatch`/`corrupt`/`unreadable` 拒；`missing` 放行 —— 封条是 v0.2.6
+/// 才加的，早期备份与 Electron 轨老备份都没有，拒 HKCU 老备份等于把还原依据扔掉）
 /// ④ 目标含 HKLM 时必须已提权（不提权就让 `reg.exe` 自己失败是**假绿**：用户看到的是
-/// "还原失败"，实际是权限不够，两者处置方式完全不同）。
+/// "还原失败"，实际是权限不够，两者处置方式完全不同）
+/// ⑤ P0-01：HKLM 备份还必须与 HKLM 管理员摘要核对（摘要存非提权进程写不了的位置，
+/// 由本提权实例自行重算哈希）；无摘要/摘要不符一律拒绝。HKCU 不要求管理员摘要。
 ///
-/// `is_admin` 由调用方传入而不是在这里查系统，是为了让这四道闸能拿临时目录静默测；
-/// 真机那条 `reg import` 端到端仍归 `#[ignore]` 的发布前用例。
+/// `domain`（"cleanup"/"uninstall"）决定管理员摘要值名的域前缀；`is_admin` 由调用方
+/// 传入而不是在这里查系统，是为了让这几道闸能拿临时目录静默测；真机端到端归
+/// `#[ignore]` 的发布前用例。
 pub fn reg_backup_restore_guards(
     file: &Path,
     name: &str,
+    domain: &str,
     is_admin: bool,
 ) -> Result<RegBackupCheck, String> {
     let Some(keys) = parse_reg_backup(file) else {
@@ -197,6 +291,30 @@ pub fn reg_backup_restore_guards(
             "该备份指向 HKLM 下的键，需要以管理员身份运行后再还原（HKCU 下的备份不需要）".to_string(),
         );
     }
+    if needs_admin {
+        // P0-01：HKLM 还原的信任根是 HKLM 管理员摘要（非提权进程写不了的位置），
+        // 边车封条只作第二意见；由本提权实例自行重算当前文件哈希与其比对。
+        let Some(want) = read_admin_seal(domain, file) else {
+            return Err(
+                "该系统级（HKLM）备份没有管理员摘要：它生成于非管理员会话或早于安全版本，\
+                 无法验证内容完整性，已拒绝还原（HKCU 备份不受此限）".to_string(),
+            );
+        };
+        match crate::engine::hash::sha256_file(file) {
+            Ok(got) if got.eq_ignore_ascii_case(&want) => {}
+            Ok(_) => {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("备份 {name} 与管理员摘要不一致，已拒绝还原"),
+                );
+                return Err(
+                    "备份内容与管理员摘要不符，已拒绝还原——请改用导出时间更早的一份，或重新安装该程序"
+                        .to_string(),
+                );
+            }
+            Err(e) => return Err(format!("备份不可读，已拒绝还原：{e}")),
+        }
+    }
     Ok(RegBackupCheck { keys, seal })
 }
 
@@ -223,12 +341,12 @@ mod reg_backup_common_tests {
         for (name, body) in cases {
             let p = root.join(name);
             std::fs::write(&p, body.as_bytes()).unwrap();
-            let err = reg_backup_restore_guards(&p, name, true).unwrap_err();
+            let err = reg_backup_restore_guards(&p, name, "cleanup", true).unwrap_err();
             assert!(err.contains("合法的 .reg"), "{name} 的回执应是形状问题: {err}");
         }
         let ok = root.join("good.reg");
         std::fs::write(&ok, "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Acme]\r\n\"X\"=dword:1\r\n").unwrap();
-        let passed = reg_backup_restore_guards(&ok, "good.reg", true).unwrap();
+        let passed = reg_backup_restore_guards(&ok, "good.reg", "cleanup", true).unwrap();
         assert_eq!(passed.keys, vec!["HKEY_CURRENT_USER\\Software\\Acme".to_string()]);
         assert_eq!(
             passed.seal, "missing",
@@ -249,7 +367,7 @@ mod reg_backup_common_tests {
             "Windows Registry Editor Version 5.00\r\n\r\n[-HKEY_CURRENT_USER\\Software\\Acme]\r\n",
         )
         .unwrap();
-        let err = reg_backup_restore_guards(&p, "del.reg", true).unwrap_err();
+        let err = reg_backup_restore_guards(&p, "del.reg", "cleanup", true).unwrap_err();
         assert!(
             err.contains("删除键段"),
             "删除段应点名「删除键段」而不是误报受保护容器: {err}",
@@ -268,20 +386,44 @@ mod reg_backup_common_tests {
         let root = sandbox("deny");
         let p = root.join("evil.reg");
         std::fs::write(&p, "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE]\r\n\"X\"=dword:1\r\n").unwrap();
-        let err = reg_backup_restore_guards(&p, "evil.reg", true).unwrap_err();
+        let err = reg_backup_restore_guards(&p, "evil.reg", "cleanup", true).unwrap_err();
         assert!(err.contains("受保护"), "回执应写明是禁删面拦下的: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// HKLM 目标 + 未提权 = 明确拒绝，而不是丢给 reg.exe 撞一次"还原失败"
+    /// HKLM 目标：未提权 = 明确拒绝（不丢给 reg.exe 撞"还原失败"）；
+    /// 已提权但无管理员摘要同样拒绝（P0-01：无法证明内容完整性）。
+    /// 摘要一致放行的分支写真实 HKLM，归 #[ignore] 真机探针。
     #[test]
-    fn hklm_目标未提权时拒还原() {
+    fn hklm_未提权或无管理员摘要时拒还原() {
         let root = sandbox("admin");
         let p = root.join("hklm.reg");
         std::fs::write(&p, "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\Acme\\App]\r\n\"X\"=dword:1\r\n").unwrap();
-        assert!(reg_backup_restore_guards(&p, "hklm.reg", false).unwrap_err().contains("管理员"));
-        assert!(reg_backup_restore_guards(&p, "hklm.reg", true).is_ok(), "已提权则放行");
+        assert!(reg_backup_restore_guards(&p, "hklm.reg", "cleanup", false)
+            .unwrap_err().contains("管理员"));
+        // 无副作用：独特文件名在真实 HKLM 摘要键下必然无记录
+        let err = reg_backup_restore_guards(&p, "hklm.reg", "cleanup", true).unwrap_err();
+        assert!(err.contains("管理员摘要"), "提权但无摘要必须拒绝：{err}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P0-01 对账纯判据：只清本域、且只清备份已不存在的值名
+    #[test]
+    fn 孤立管理员摘要值名识别() {
+        let files: std::collections::HashSet<String> =
+            ["a.reg".to_string()].into_iter().collect();
+        let names = [
+            "cleanup/a.reg".to_string(),   // 备份仍在 → 保留
+            "cleanup/b.reg".to_string(), // 备份已删 → 待删
+            "uninstall/a.reg".to_string(), // 他域 → 不动
+        ];
+        let stale = stale_admin_seal_value_names("cleanup", &files, &names);
+        assert_eq!(stale, vec!["cleanup/b.reg".to_string()], "{stale:?}");
+        assert!(stale_admin_seal_value_names(
+            "cleanup",
+            &["a.reg".to_string(), "b.reg".to_string()].into_iter().collect(),
+            &names,
+        ).is_empty());
     }
 
     /// 封条三种失败态都要拒；`missing` 要放行（早期与 Electron 轨备份都没有封条）
@@ -293,19 +435,19 @@ mod reg_backup_common_tests {
         std::fs::write(&p, body).unwrap();
         write_reg_backup_seal(&p, "HKCU\\Software\\Acme");
         assert_eq!(reg_backup_seal_state(&p).0, "ok");
-        assert!(reg_backup_restore_guards(&p, "1_acme.reg", true).is_ok());
+        assert!(reg_backup_restore_guards(&p, "1_acme.reg", "cleanup", true).is_ok());
         // 改写内容 ⇒ mismatch ⇒ 拒
         std::fs::write(&p, format!("{body}\r\n[HKEY_CURRENT_USER\\Software\\Other]\r\n\"Y\"=dword:2\r\n")).unwrap();
         assert_eq!(reg_backup_seal_state(&p).0, "mismatch");
-        assert!(reg_backup_restore_guards(&p, "1_acme.reg", true).unwrap_err().contains("封条"));
+        assert!(reg_backup_restore_guards(&p, "1_acme.reg", "cleanup", true).unwrap_err().contains("封条"));
         // 封条本身坏了 ⇒ corrupt ⇒ 拒
         std::fs::write(reg_seal_path_for(&p), "{不是 json").unwrap();
         assert_eq!(reg_backup_seal_state(&p).0, "corrupt");
-        assert!(reg_backup_restore_guards(&p, "1_acme.reg", true).unwrap_err().contains("封条"));
+        assert!(reg_backup_restore_guards(&p, "1_acme.reg", "cleanup", true).unwrap_err().contains("封条"));
         // 封条文件没了 ⇒ missing ⇒ 放行
         std::fs::remove_file(reg_seal_path_for(&p)).unwrap();
         assert_eq!(reg_backup_seal_state(&p).0, "missing");
-        assert!(reg_backup_restore_guards(&p, "1_acme.reg", true).is_ok());
+        assert!(reg_backup_restore_guards(&p, "1_acme.reg", "cleanup", true).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -367,13 +509,73 @@ mod reg_backup_common_tests {
         assert_eq!(reg_backup_seal_state(&bak).0, "corrupt");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// P0-01 真机探针（必须在管理员实例下跑）：HKLM 摘要写入 → 还原闸放行
+    /// → 改字节拒绝 → 对账删孤立摘要。断言逐项点名 reached 对象。
+    #[test]
+    #[ignore = "真机写 HKLM 管理员摘要键（Drop 清理），发布前人工在管理员会话跑"]
+    fn live_管理员摘要_还原闸与对账闭环() {
+        if !crate::engine::sysinfo::is_admin() {
+            eprintln!("SKIP：探针需在管理员会话运行，当前非提权，未校验");
+            return;
+        }
+        let root = sandbox("liveadmin");
+        let p = root.join("liveprobe.reg");
+        let value_name = String::from("cleanup/liveprobe.reg");
+        // 兜底清理：断言失败提前返回时也删掉 HKLM 值
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::engine::native::reg_restore_delete(
+                    crate::engine::native::hive_hklm(),
+                    ADMIN_SEAL_SUBKEY,
+                    &self.0,
+                );
+            }
+        }
+        let _cleanup = Cleanup(value_name.clone());
+
+        let body = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimProbe\\App]\r\n\"X\"=dword:1\r\n";
+        std::fs::write(&p, body).unwrap();
+        write_reg_backup_seal(&p, r"HKLM\Software\TrimProbe\App");
+        // 摘要写入前：提权也拒
+        assert!(reg_backup_restore_guards(&p, "liveprobe.reg", "cleanup", true)
+            .unwrap_err().contains("管理员摘要"));
+        write_admin_seal("cleanup", &p);
+        let sum = read_admin_seal("cleanup", &p).expect("管理员摘要应可读");
+        assert_eq!(sum.len(), 64, "SHA-256 摘要长度应为 64: {sum}");
+        // 摘要一致：放行（正向点名 reached 键）
+        let passed = reg_backup_restore_guards(&p, "liveprobe.reg", "cleanup", true)
+            .expect("摘要一致应放行");
+        assert_eq!(passed.keys, vec![r"HKEY_LOCAL_MACHINE\Software\TrimProbe\App".to_string()]);
+        // 改一字节：管理员摘要不符 ⇒ 拒
+        std::fs::write(&p, format!("{body}\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimProbe\\Other]\r\n")).unwrap();
+        assert!(reg_backup_restore_guards(&p, "liveprobe.reg", "cleanup", true)
+            .unwrap_err().contains("管理员摘要"));
+        std::fs::write(&p, body).unwrap();
+
+        // 对账：第二个备份写摘要后删文件，reconcile 只删孤立那份
+        let q = root.join("liveprobe2.reg");
+        std::fs::write(&q, body.replace("TrimProbe", "TrimProbe2")).unwrap();
+        write_admin_seal("cleanup", &q);
+        std::fs::remove_file(&q).unwrap();
+        reconcile_admin_seals("cleanup", &root);
+        let names = crate::engine::native::reg_enum_value_names_pub(
+            crate::engine::native::hive_hklm(),
+            ADMIN_SEAL_SUBKEY,
+        );
+        assert!(!names.contains(&String::from("cleanup/liveprobe2.reg")), "孤立摘要应被删：{names:?}");
+        assert!(names.contains(&String::from("cleanup/liveprobe.reg")), "现存备份摘要应保留：{names:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 // ==================== A6：.reg 值级解析 + 原生写入（v2-R4，2026-10-01） ====================
 //
 // 替换的是**执行器**：`reg.exe import <file>` → 自己解析 + 自己写。
 // 刻意不动的两样东西（v2 R4 明令）：`.reg` 文本格式、封条链
-// （`reg_backup_seal_state` / `reg_backup_restore_guards` 四道闸原样保留，
+// （`reg_backup_seal_state` / `reg_backup_restore_guards` 还原闸原样保留，
 //  本模块只在闸**之后**接手，且继续吃同一份 `parse_reg_backup` 的形状判定）。
 //
 // 为什么要值级解析而不是只校验形状：还原要字节忠实。备份是 `reg.exe export` 产的，

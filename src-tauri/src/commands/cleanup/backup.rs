@@ -102,13 +102,14 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
     let Some(path) = crate::engine::paths::resolve_backup_file(REG_BACKUP_SUB, file.trim()) else {
         return json!({ "success": false, "message": "备份文件不存在" });
     };
-    // N9：清理域此前"文件名白名单过了就直接 reg import"，而卸载域同一威胁模型下有四道闸。
+    // N9：清理域此前"文件名白名单过了就直接 reg import"，而卸载域同一威胁模型下有完整还原闸。
     // 调同一个公共件 —— 一份被手工改成 `[HKEY_LOCAL_MACHINE\SOFTWARE]` 的 .reg，
     // 不该因为"它是备份文件"就被写进注册表；老根兜底纳进来的 Electron 轨文件形状更不可信。
     let crate::engine::reg_backup::RegBackupCheck { keys, seal: _ } =
         match crate::engine::reg_backup::reg_backup_restore_guards(
             &path,
             file.trim(),
+            "cleanup",
             crate::engine::sysinfo::is_admin(),
         ) {
             Ok(c) => c,

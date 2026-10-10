@@ -717,6 +717,8 @@ fn cleanup_execute_with_backup_root(
                             // 永远只能走 missing 分支（等于没闸）。与卸载域同口径落一份，
                             // 半截写入与手工误改才有可发现性。写封条失败不阻断删除（增强而非前提）。
                             crate::engine::reg_backup::write_reg_backup_seal(&file, &export_path);
+                            // P0-01：提权执行窗口补 HKLM 管理员摘要；非提权写失败仅日志
+                            crate::engine::reg_backup::write_admin_seal("cleanup", &file);
                         }
                         _ => { backup_failed = true; break; }
                     }
@@ -730,6 +732,8 @@ fn cleanup_execute_with_backup_root(
                     &backup_dir,
                     crate::engine::paths::BACKUP_KEEP,
                 );
+                // P0-01：裁剪后同步对账 HKLM 摘要，删孤立值
+                crate::engine::reg_backup::reconcile_admin_seals("cleanup", &backup_dir);
                 let mut removed = 0i64;
                 let mut reg_failed = 0i64;
                 for (hive, rest, value) in &parsed {
@@ -826,7 +830,7 @@ fn cleanup_execute_with_backup_root(
                 Ok(o) => {
                     // 超时收口时 quiet_cmd_timeout 把原因写进 stderr，必须带给用户，
                     // 否则「失败但不知道是超时还是 DISM 自己报错」又是一层雾
-                    let note = String::from_utf8_lossy(&o.stderr);
+                    let note = crate::engine::systembin::decode_native_output(&o.stderr);
                     let note = note.trim();
                     (
                         "fail",

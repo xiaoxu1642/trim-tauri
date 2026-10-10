@@ -118,11 +118,12 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
     else {
         return json!({ "success": false, "message": "备份文件不存在" });
     };
-    // 四道闸走公共件（N9）：清理域那条链现在调的是同一个函数，两域不可能再各写一套口径
+    // 还原闸走公共件（N9/P0-01）：清理域那条链现在调的是同一个函数，两域不可能再各写一套口径
     let crate::engine::reg_backup::RegBackupCheck { keys, seal } =
         match crate::engine::reg_backup::reg_backup_restore_guards(
             &path,
             &name,
+            "uninstall",
             crate::engine::sysinfo::is_admin(),
         ) {
             Ok(c) => c,

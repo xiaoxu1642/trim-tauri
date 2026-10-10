@@ -121,6 +121,98 @@ pub fn system_tool(program: &str) -> std::path::PathBuf {    if !PINNED.iter().a
     std::path::PathBuf::from(program)
 }
 
+// ==================== 原生子进程输出统一解码（P0-02，2026-10-10） ====================
+
+/// 启发式判定无 BOM 字节是否为 UTF-16LE 文本。
+///
+/// 双向可靠性的关键门槛是「字节流中存在 NUL」：UTF-8 与 GBK 等 ANSI 文本都不会含
+/// NUL 字节，而真实控制台 UTF-16 输出必有换行/空格/ASCII（其编码含 NUL 高位）。
+/// 在含 NUL 的前提下再按 u16LE 验证可判读比例，防止把含 NUL 的二进制误判。
+fn looks_like_utf16le(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || !bytes.contains(&0) {
+        return false;
+    }
+    let pair_len = bytes.len() / 2;
+    let units: Vec<u16> = bytes[..pair_len * 2]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let sample = units.len().min(512);
+    let mut ok = 0usize;
+    let mut nul_mid = 0usize;
+    for (i, u) in units[..sample].iter().enumerate() {
+        match u {
+            0x09 | 0x0A | 0x0D => ok += 1,
+            0x20..=0x7E => ok += 1,
+            // CJK 与中文标点/全角（sfc 中文输出的真实范围）
+            0x3400..=0x9FFF | 0x3000..=0x303F | 0xFF00..=0xFFEF | 0x2000..=0x206F => ok += 1,
+            // 末尾 NUL（UTF-16 结尾）允许；中间 NUL 不允许
+            0 if i + 1 < sample => nul_mid += 1,
+            _ => {}
+        }
+    }
+    ok * 100 >= sample * 98 && nul_mid == 0
+}
+
+/// OEM 代码页解码（中文系统 CP_OEMCP=936 即 GBK）。
+#[cfg(windows)]
+fn decode_oemcp(bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{MultiByteToWideChar, CP_OEMCP};
+    unsafe {
+        // windows 0.61 直接返回 i32：0 = 失败，正数 = 长度/写入数
+        let len = MultiByteToWideChar(CP_OEMCP, Default::default(), bytes, None);
+        if len <= 0 {
+            return None;
+        }
+        let mut wide = vec![0u16; len as usize];
+        let got = MultiByteToWideChar(CP_OEMCP, Default::default(), bytes, Some(&mut wide));
+        if got <= 0 {
+            return None;
+        }
+        wide.truncate(got as usize);
+        Some(String::from_utf16_lossy(&wide))
+    }
+}
+
+#[cfg(not(windows))]
+fn decode_oemcp(_bytes: &[u8]) -> Option<String> {
+    None
+}
+
+/// 原生子进程输出的统一解码口径（P0-02，Kudu S3 + Dism++ D-04a）。
+///
+/// 为什么需要：`sfc.exe` 无视 chcp、恒写 UTF-16LE（常无 BOM），按 UTF-8 lossy 解
+/// 得到 NUL 交错串，维护任务的失败诊断失真且 NUL 会弄坏日志查看器；中文系统上部分
+/// 控制台工具按 OEM(GBK) 输出，lossy 解把中文糊成替换符。
+///
+/// 口径顺序（不允许在调用点写第二份）：
+/// ① UTF-16LE：BOM 或启发式嗅探
+/// ② 合法 UTF-8（含纯 ASCII）原样
+/// ③ 非合法 UTF-8 → OEM 代码页
+/// ④ 都失败 → UTF-8 lossy 兜底
+pub fn decode_native_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) || looks_like_utf16le(bytes) {
+        let body = if bytes.starts_with(&[0xFF, 0xFE]) { &bytes[2..] } else { bytes };
+        let pair_len = body.len() / 2;
+        let units: Vec<u16> = body[..pair_len * 2]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        // 只去尾 NUL（UTF-16 结尾），其余空白保留
+        return String::from_utf16_lossy(&units).trim_end_matches('\0').to_string();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    if let Some(text) = decode_oemcp(bytes) {
+        return text;
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
 /// 后台静默 spawn 的统一入口（真机 v0.1.6 反馈：右键/启动项扫描时 schtasks 等
 /// 控制台程序弹出可见 cmd 窗口）——GUI 进程拉起控制台程序时，不带
 /// CREATE_NO_WINDOW 会让 Windows 新建控制台并前台显示。所有**后台**系统工具
@@ -277,5 +369,78 @@ mod tests {
         let p = system_tool("explorer.exe");
         let s = p.to_string_lossy().to_lowercase();
         assert!(s.ends_with("explorer.exe"), "{s}");
+    }
+
+    /// P0-02：UTF-16LE（无 BOM，sfc 的真实形态）必须正确解码，无 NUL、中文可判读
+    #[test]
+    fn utf16le_无bom_解码无nul且中文可判读() {
+        let text = "系统检查完成\r\nSystem check complete.\r\n";
+        let bytes: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        // 前置：夹具确实含 NUL 且不是合法 UTF-8 文本（含真 NUL 字符）
+        assert!(bytes.contains(&0));
+        let got = decode_native_output(&bytes);
+        assert_eq!(got, text, "无 BOM UTF-16LE 应逐字还原");
+        assert!(!got.contains('\0'), "解码结果不得含 NUL");
+        assert!(got.contains("系统检查完成"), "中文尾行必须可判读");
+    }
+
+    /// P0-02：UTF-16LE BOM（部分工具形态）
+    #[test]
+    fn utf16le_bom_解码正确() {
+        let text = "组件存储修复完成。";
+        let mut bytes = vec![0xFF, 0xFE];
+        text.encode_utf16().for_each(|u| bytes.extend_from_slice(&u.to_le_bytes()));
+        assert_eq!(decode_native_output(&bytes), text);
+    }
+
+    /// P0-02：合法 UTF-8（含中文、无 NUL）绝不允许被嗅探成 UTF-16
+    #[test]
+    fn utf8_中文不被误判为utf16() {
+        let text = "维护任务诊断：sfc 与 DISM 的输出应可判读，换行正常。";
+        let got = decode_native_output(text.as_bytes());
+        assert_eq!(got, text, "UTF-8 中文必须原样返回，误判 UTF-16 会整句变码");
+    }
+
+    /// P0-02：非合法 UTF-8 的 GBK 字节走 OEM 分支。
+    /// 非中文代码页系统（CP_OEMCP≠936）不满足前提，skip 并说明（AGENTS §2 用例纪律）。
+    #[test]
+    #[allow(invalid_from_utf8)] // 夹具字节编译期已知非法 UTF-8，断言属文档性质
+    fn gbk_字节走oem分支() {
+        #[cfg(windows)]
+        {
+            use windows::Win32::Globalization::GetOEMCP;
+            if unsafe { GetOEMCP() } != 936 {
+                eprintln!("SKIP：本机 OEM 代码页非 936（GBK），OEM 分支中文用例未校验");
+                return;
+            }
+        }
+        // 「中文」GBK = D6 D0 CE C4，且这四字节不是合法 UTF-8（D0/C4 非续字节）
+        let bytes = [0xD6u8, 0xD0, 0xCE, 0xC4];
+        assert!(std::str::from_utf8(&bytes).is_err(), "夹具必须确定非法 UTF-8");
+        let got = decode_native_output(&bytes);
+        assert_eq!(got, "中文", "OEM(GBK) 分支应解出中文，实际 {got:?}");
+    }
+
+    /// P0-02 真机探针：sfc /verifyonly（非破坏）经同一管道采集，解码后无 NUL。
+    /// 耗时数分钟，仅发布前人工 `cargo test -- --ignored` 跑。
+    #[test]
+    #[ignore = "真机：sfc /verifyonly 非破坏但耗时数分钟，发布前人工跑"]
+    fn live_sfc_verifyonly_解码无nul() {
+        let out = crate::engine::systembin::quiet_cmd_timeout(
+            crate::engine::systembin::system_tool("sfc.exe"),
+            &["/verifyonly"],
+            crate::engine::native::MAINT_CMD_TIMEOUT,
+        )
+        .expect("sfc 应能启动");
+        let text = decode_native_output(&out.stdout);
+        if text.trim().is_empty() {
+            eprintln!("SKIP：sfc 未向重定向 stdout 写输出，本探针未取证");
+            return;
+        }
+        assert!(!text.contains('\0'), "sfc 输出解码后不得含 NUL: {text:?}");
+        assert!(
+            text.chars().any(|c| !c.is_whitespace()),
+            "应含可判读文本: {text:?}"
+        );
     }
 }

@@ -168,6 +168,8 @@ features = [
     # 依赖准入见本机资料区《依赖清单》
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
+    # P0-02：原生输出 OEM 代码页解码（MultiByteToWideChar / GetOEMCP）
+    "Win32_Globalization",
 ]
 
 [profile.dev]

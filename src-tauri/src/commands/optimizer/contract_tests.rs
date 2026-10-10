@@ -609,7 +609,7 @@ fn strip_js_comments(src: &str) -> String {
             .to_string();
         assert!(probe.contains('"'), "探针必须带内层引号，否则这条测试测不到引号形状");
         let out = run_cmd_step(&format!("echo {probe}")).expect("cmd /c echo 起不来");
-        let got = String::from_utf8_lossy(&out.stdout).replace("\r\n", "");
+        let got = crate::engine::systembin::decode_native_output(&out.stdout).replace("\r\n", "");
         assert!(got.contains(&probe), "子进程收到的命令行与原文不符: {got}");
         assert!(!got.contains("\\\""), "出现反斜杠+引号说明又退回 args() 转义: {got}");
     }

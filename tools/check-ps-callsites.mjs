@@ -360,6 +360,8 @@ const TIMEOUT_SPAWN_SITES = [
   // P3-5（R5-G-4 补收）：cmd 步骤此前是裸 .output()，与其余调用点不同形态（raw_arg）——
   // 门禁须把 raw 版一并收进池子，否则「形似不合」的新调用点天然隐身。
   { file: 'src-tauri/src/commands/optimizer/apply.rs', anchor: '&cmd_line_of(cmd)', reason: '优化项 cmd 步骤（/s /c 引号形状必须逐字保留，故走 raw_arg 形态）', timeoutConst: 'CMD_STEP_TIMEOUT', secs: 60 },
+  // P0-02 真机探针：sfc /verifyonly 经同一管道采集（非破坏），验证统一解码
+  { file: 'src-tauri/src/engine/systembin.rs', anchor: '&["/verifyonly"],', reason: 'P0-02 探针：sfc /verifyonly 输出采集（非破坏，发布前人工跑）', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
 ];
 const TIMEOUT_SECS = 15;
 

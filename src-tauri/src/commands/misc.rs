@@ -58,7 +58,7 @@ fn detect_dwm_inject_tools() -> Option<String> {
         &["/FI", "IMAGENAME eq DWMBlurGlass.exe", "/FO", "CSV"],
         crate::engine::systembin::PROBE_TIMEOUT,
     ) {
-        let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        let text = crate::engine::systembin::decode_native_output(&out.stdout).to_lowercase();
         if text.contains("dwmblurglass.exe") {
             return Some("dwm-blur-tool".into());
         }

@@ -549,9 +549,9 @@ pub fn stubborn_block() -> Result<Value, String> {
             &["/Query", "/TN", task, "/XML"],
             crate::engine::systembin::REG_EXPORT_TIMEOUT,
         ) {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Ok(o) if o.status.success() => crate::engine::systembin::decode_native_output(&o.stdout).trim().to_string(),
             Ok(o) => {
-                let err = String::from_utf8_lossy(&o.stderr).trim().chars().take(120).collect::<String>();
+                let err = crate::engine::systembin::decode_native_output(&o.stderr).trim().chars().take(120).collect::<String>();
                 crate::engine::log::write_log(
                     "warn",
                     &format!("顽固软件治理：{task} 导出失败 exit={:?}，已放弃删除。stderr={err}", o.status.code().unwrap_or(-1)),

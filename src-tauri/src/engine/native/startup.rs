@@ -1169,7 +1169,7 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String>
     if output.status.success() {
         Ok(if enable { "已启用".into() } else { "已禁用".into() })
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = crate::engine::systembin::decode_native_output(&output.stderr);
         Err(if stderr.is_empty() { "操作未生效（可能需要管理员权限）".into() } else { stderr })
     }
 }

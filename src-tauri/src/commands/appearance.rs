@@ -510,7 +510,7 @@ fn query_sys_transparency() -> bool {
         crate::engine::systembin::REG_EXPORT_TIMEOUT,
     );
     let Ok(out) = out else { return true };
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = crate::engine::systembin::decode_native_output(&out.stdout);
     // 形如：    EnableTransparency    REG_DWORD    0x1
     for line in text.lines() {
         let mut it = line.split_whitespace();

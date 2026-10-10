@@ -58,7 +58,7 @@ pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> Result<(), 
     if output.status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = crate::engine::systembin::decode_native_output(&output.stderr);
         Err(if stderr.is_empty() {
             format!("计划任务{}未生效（可能需要管理员权限）: {full}", if disable { "禁用" } else { "启用" })
         } else {
@@ -98,8 +98,8 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
                 &format!(
                     "维护命令未成功: {program} {args:?} exit={:?} stdout=「{}」stderr=「{}」",
                     out.status.code().unwrap_or(-1),
-                    clip(&String::from_utf8_lossy(&out.stdout)),
-                    clip(&String::from_utf8_lossy(&out.stderr)),
+                    clip(&crate::engine::systembin::decode_native_output(&out.stdout)),
+                    clip(&crate::engine::systembin::decode_native_output(&out.stderr)),
                 ),
             );
             false
