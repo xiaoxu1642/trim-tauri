@@ -121,6 +121,41 @@
       "id": "svc_fax_disable",
       "title": "Fax 服务使用排查",
       "note": "v5 / Q3 裁定（2026-10-02 用户裁决「退役」）：该项对 Fax 服务写 Start=4 并 Stop-Service，而 Windows 11 24H2（本机 26200）已不再随系统分发 Fax 服务——实测 SCM 判 1060「指定的服务未安装」，只剩 HKLMSYSTEMCurrentControlSetServicesFax 注册表键残留（Start 已是 4），该项在受支持的系统上没有可作用的对象。还原缺口：本项步骤为纯 pwsh（无 reg 步），按本账门口径不进值级备份，已应用过的用户没有自动还原出口——需要时把 ServicesFax 的 Start 改回 3 并删掉该服务键即可（本机实测该值一直为 4，未被本项改动过）。"
+    },
+    {
+      "id": "tf_ifeo_perf",
+      "title": "进程 CPU/IO 优先级（IFEO PerfOptions）",
+      "note": "2026-10-11 用户拍板全线退役：对 dwm/ntoskrnl/csrss/lsass 等系统关键进程写 IFEO PerfOptions，作用面大、收益无实测且路径/名称变更后静默失效，与「不乱序内存/不碰关键进程」的新口径冲突。已应用过的用户可手工删除各程序名下的 PerfOptions 子键还原。"
+    },
+    {
+      "id": "tf_ifeo_wipe",
+      "title": "清空 IFEO 调试项",
+      "note": "2026-10-11 用户拍板全线退役：枚举删除 IFEO 下 Debugger/GlobalFlag 等值可能误删系统或游戏反作弊依赖的兼容性条目；与上者同批下线。"
+    },
+    {
+      "id": "tf_dev_audio",
+      "title": "禁用高清音频控制器",
+      "note": "2026-10-11 用户拍板：并入「禁用冗余板载设备」（tf_dev_disable）的逐项选择清单，作为其中一个可勾选目标存在，独立项退役。"
+    },
+    {
+      "id": "tf_dev_printer",
+      "title": "禁用打印队列设备",
+      "note": "2026-10-11 用户拍板：并入「禁用冗余板载设备」（tf_dev_disable）的逐项选择清单，作为其中一个可勾选目标存在，独立项退役。"
+    },
+    {
+      "id": "tf_onedrive",
+      "title": "彻底卸载 OneDrive",
+      "note": "2026-10-11 用户拍板：并入「移除内置 UWP 应用」（tf_appx）逐项选择弹窗的附带操作（默认不执行）；OneDrive 不是 AppX，卸载器+同步目录回收+CLSID/策略三步以附带操作形态保留，独立项退役。"
+    },
+    {
+      "id": "perf_exploit_protection_off",
+      "title": "关闭 Exploit Protection（乱序内存）",
+      "note": "2026-10-11 用户拍板「乱序内存全线退役，不做这个」：写内核 MitigationOptions 关闭 SEHOP/强制 ASLR 等缓解显著降低漏洞利用防护，收益只有部分应用的微小内存性能。同时从永劫专项面板安全分区移除。已应用过的用户可在 Windows 安全中心「应用和浏览器控制→漏洞利用防护保护设置」里改回默认。"
+    },
+    {
+      "id": "tf_mmagent",
+      "title": "关闭内存压缩与内存页合并",
+      "note": "2026-10-11 用户拍板全线退役：现代 Windows（10 1803+）的内存压缩与页合入与虚拟内存/内存整理协同工作，关闭后物理内存吃紧时稳定性下降、换页写入更高，收益（Disable-MMAgent 两个 cmdlet 的微小 CPU 节省）不成立。该项是 PsInline 白名单里仅剩的 2 个 inbox PowerShell 步骤，退役后白名单同步移除 Disable-MMAgent/Enable-MMAgent。已应用过的用户可在管理员 PowerShell 执行 Enable-MMAgent -MemoryCompression -PageCombining 后重启恢复。"
     }
   ]
 }

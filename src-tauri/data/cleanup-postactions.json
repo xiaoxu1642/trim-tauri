@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "_comment": "清理项「后置动作」侧表（P2-06 / Dism++ D-02，2026-10-11）。为什么单独成表而不写进 cleanup-rules.json：规则库带 Ed25519 签名（check-cleanup-rule-contract），往规则项里加字段会破坏装载契约；同姿势见优化域 optimizer-scope.json —— 按 id 挂、Trim 自有、include_str! 编译进二进制。值含义：clean 完成后需要的资源刷新——explorer=资源管理器（图标/缩略图缓存被清，需重启 explorer 才能让任务栏/文件管理器重建），none=无。缺键项一律按 none（与本批之前行为一致），漏标不会误报，只有「多说一次无用重启」的 over-advice 风险。",
+  "_rule": "档位不由「为每条真跑一遍」得出（不能为标注去改系统），而由目标路径机械判定，且 tools/check-cleanup-postactions.mjs 用同一条规则重算并要求本表一致 —— 规则可复核，猜测不可。判定：目标路径落在 %LOCALAPPDATA%\\Microsoft\\Windows\\Explorer（缩略图/图标缓存）、含 IconCache.db、或 INetCache 类 ⇒ explorer；其余（注册表 MRU/历史、日志、转储、其它缓存）⇒ none。偏差方向刻意保守：该刷的不刷，用户会看到空白图标而以为清理坏了；多刷一次只是重启一次资源管理器。",
+  "postActions": {
+    "thumbnailCacheFiles": "explorer",
+    "iconCacheFiles": "explorer",
+    "winINetCache": "explorer"
+  }
+}

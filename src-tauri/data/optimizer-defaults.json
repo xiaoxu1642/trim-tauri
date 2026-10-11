@@ -36,7 +36,7 @@
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
+      "reviewedAt": "2026-10-11"
     },
     "net_qos_dscp": {
       "defaultKnown": false,
@@ -68,25 +68,7 @@
       "why": "该键由本项执行时新建（steps 有 / restore 无，共 11 个），原状态必然是「键不存在」",
       "reviewedAt": "2026-10-03"
     },
-    "tf_ifeo_perf": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_ifeo_wipe": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
-      "reviewedAt": "2026-10-03"
-    },
     "svc_mem_gb": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_mmagent": {
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
@@ -182,18 +164,6 @@
       "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
       "reviewedAt": "2026-10-03"
     },
-    "tf_dev_audio": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_dev_printer": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
-      "reviewedAt": "2026-10-03"
-    },
     "tf_appx": {
       "defaultKnown": false,
       "defaultValue": "unknown",
@@ -204,12 +174,6 @@
       "defaultKnown": true,
       "defaultValue": null,
       "why": "该键由本项执行时新建（steps 有 / restore 无，共 7 个），原状态必然是「键不存在」",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_onedrive": {
-      "defaultKnown": true,
-      "defaultValue": null,
-      "why": "该键由本项执行时新建（steps 有 / restore 无，共 6 个），原状态必然是「键不存在」",
       "reviewedAt": "2026-10-03"
     },
     "audio_disable_enhancements": {
@@ -489,12 +453,6 @@
       "reviewedAt": "2026-10-03"
     },
     "perf_crash_autoreboot": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "perf_exploit_protection_off": {
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",

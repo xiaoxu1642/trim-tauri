@@ -161,6 +161,10 @@ fn store_snapshot(
     slot.len()
 }
 
+/// P2-02：供外部扫描器（gameclean 游戏安装包扫描）把候选登记进快照槽。
+///
+/// 薄包装：直接复用 [`store_snapshot`]，槽管理/上限/去重/lossy 机制只有这一份实现
+/// （§5.16/N6）。`items` 元素形如 `{path, type:"file"}`；`raws` 可选地登记
 // ==================== 输出汇聚器（Sink） ====================
 
 /// 一次扫描的**接收端累加**（与窗口无关，所以能被 `cargo test` 直测；
@@ -525,8 +529,12 @@ pub async fn finder_scan<R: tauri::Runtime>(
 // ==================== finder:delete ====================
 
 /// finder:delete — 危险通道：快照命中 + 受保护路径 + 删除前预检三重 Rust 侧权威校验。
+///
 #[tauri::command]
-pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: Option<Vec<Value>>) -> Value {
+pub async fn finder_delete<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    items: Option<Vec<Value>>,
+) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
@@ -537,8 +545,8 @@ pub async fn finder_delete<R: tauri::Runtime>(window: WebviewWindow<R>, items: O
         .take(FINDER_DELETE_MAX)
         .collect();
 
-    let label = window.label().to_string();
     // 只认本窗口快照槽内的路径（跨窗口/跨页签互不覆盖）
+    let label = window.label().to_string();
     let known: Vec<Option<SnapEntry>> = {
         let store = snapshots().lock().unwrap_or_else(|e| e.into_inner());
         let slot = store.get(&label);

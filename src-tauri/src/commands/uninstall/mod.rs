@@ -44,8 +44,9 @@ pub use backup_report::{uninstall_reg_backup_list, __cmd__uninstall_reg_backup_l
 mod dead;
 #[allow(dead_code)]
 mod drivers_orphan;
-#[allow(dead_code)]
-mod game_platform_orphan;
+// P2-02：本模块新增第二消费方（commands::gameclean 的游戏安装包扫描），
+// 故放开 crate 内可见性（不再仅 uninstall 域内部 + 去掉整体 allow(dead_code)）。
+pub(crate) mod game_platform_orphan;
 mod helpers;
 #[allow(dead_code)]
 mod ifeo_orphan;

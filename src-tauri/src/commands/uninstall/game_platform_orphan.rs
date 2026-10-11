@@ -20,43 +20,48 @@ use super::residue::reg_enum_subkeys;
 use super::residue_update::contribs;
 
 /// 单平台清单读取失败时写进 notes 的措辞（调用方共用，避免三种说法）
-pub(super) const UNREADABLE_SUFFIX: &str = "清单读取失败，本轮不参与「在库/已卸载」判定";
+pub(crate) const UNREADABLE_SUFFIX: &str = "清单读取失败，本轮不参与「在库/已卸载」判定";
 
 /// 一台机器上游戏记录的上限（Steam 单库常见 50~200 个，留足余量防爆）
 const RECORD_CAP: usize = 600;
-/// 每个库根下 `steamapps/common` 的目录枚举上限
+/// 每个库根下 `steamapps/common` 的目录枚举上限。
+/// allow(dead_code)：仅被下方 list_game_dirs 消费，而该族是「未跟踪游戏目录发现」
+/// 预留能力（单测覆盖、生产侧尚未接线），接线后随该族一起移除 allow。
+#[allow(dead_code)]
 const COMMON_DIR_CAP: usize = 400;
 /// 一个 Steam 安装根下 `appmanifest_*.acf` 的读取上限
 const ACF_CAP: usize = 400;
 
 /// 一条「这个游戏在本机有安装记录」的证据
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LibRecord {
-    pub(super) platform: &'static str,
-    pub(super) name: String,
+pub(crate) struct LibRecord {
+    pub(crate) platform: &'static str,
+    pub(crate) name: String,
+    /// 安装目录（原始大小写，供展示与遍历；P2-02 新增第二消费方 gameclean）
+    pub(crate) dir: String,
     /// 安装目录（已归一：小写、去尾部 `\`），用于路径前缀匹配
-    pub(super) dir_lc: String,
+    pub(crate) dir_lc: String,
 }
 
 /// 平台库索引。`records` 是正向清单，`roots_lc` 是库根（用于「根还在但清单里没了」），
 /// `unreadable` 是「装着却没读到」的平台 —— 三者语义互不相同，不可合并。
 #[derive(Debug, Default)]
-pub(super) struct PlatformIndex {
-    pub(super) records: Vec<LibRecord>,
-    pub(super) roots_lc: Vec<String>,
-    pub(super) unreadable: Vec<&'static str>,
+pub(crate) struct PlatformIndex {
+    pub(crate) records: Vec<LibRecord>,
+    pub(crate) roots_lc: Vec<String>,
+    pub(crate) unreadable: Vec<&'static str>,
 }
 
 impl PlatformIndex {
     /// 路径归一（小写 + 去尾分隔符 + 统一 `\`），与 `path_key` 不同源：
     /// 这里只用于前缀比较，不碰任何文件操作路径。
-    pub(super) fn norm(p: &str) -> String {
+    pub(crate) fn norm(p: &str) -> String {
         p.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase()
     }
 
     /// 该路径是否落在某个**在库**游戏的安装目录里（含其子树）。
     /// 命中即「游戏仍在库」—— 方案 §2.2：ACE / NEAC / BattlEye / EAC 一律不进候选。
-    pub(super) fn owner_of(&self, path: &str) -> Option<&LibRecord> {
+    pub(crate) fn owner_of(&self, path: &str) -> Option<&LibRecord> {
         let pl = Self::norm(path);
         // 取最长匹配：`.../common/Game` 与 `.../common/Game/Bin` 同时在册时，
         // 短前缀会把归属指到父游戏目录上，长前缀才是真正装它的那个库条目
@@ -278,10 +283,12 @@ fn steam_records_of_library(library: &str) -> Vec<LibRecord> {
         let Some(installdir) = vdf_field(&text, "installdir") else { continue };
         let name = vdf_field(&text, "name").unwrap_or_else(|| installdir.clone());
         let dir = steam_game_dir(library, &installdir);
+        let dir_s = dir.to_string_lossy().to_string();
         out.push(LibRecord {
             platform: "Steam",
             name,
-            dir_lc: PlatformIndex::norm(&dir.to_string_lossy()),
+            dir: dir_s.trim_end_matches('\\').to_string(),
+            dir_lc: PlatformIndex::norm(&dir_s),
         });
     }
     out
@@ -382,6 +389,7 @@ fn collect_epic(index: &mut PlatformIndex, notes: &mut Vec<String>) {
         index.records.push(LibRecord {
             platform: "Epic",
             name: epic_display_name(&v),
+            dir: expanded.trim_end_matches('\\').to_string(),
             dir_lc: norm,
         });
     }
@@ -454,7 +462,12 @@ unsafe fn collect_wegame(index: &mut PlatformIndex, notes: &mut Vec<String>) {
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
-                index.records.push(LibRecord { platform: "WeGame", name: stem, dir_lc: norm.clone() });
+                index.records.push(LibRecord {
+                    platform: "WeGame",
+                    name: stem,
+                    dir: dir.trim_end_matches('\\').to_string(),
+                    dir_lc: norm.clone(),
+                });
                 if !index.roots_lc.contains(&norm) {
                     index.roots_lc.push(norm);
                 }
@@ -469,7 +482,7 @@ unsafe fn collect_wegame(index: &mut PlatformIndex, notes: &mut Vec<String>) {
 
 /// 采集三平台清单。任何一处失败都只影响该平台的判定力，不让整轮扫描失败
 /// （与残留扫描的 notes 口径一致：残缺要可见，不能装成干净）。
-pub(super) unsafe fn collect_platform_index() -> (PlatformIndex, Vec<String>) {
+pub(crate) unsafe fn collect_platform_index() -> (PlatformIndex, Vec<String>) {
     let mut index = PlatformIndex::default();
     let mut notes = Vec::new();
     collect_steam(&mut index, &mut notes);
@@ -481,16 +494,26 @@ pub(super) unsafe fn collect_platform_index() -> (PlatformIndex, Vec<String>) {
 }
 
 // ==================== 游戏目录残留（平台扫描器自身的产出） ====================
+//
+// 本节（LibraryListing / list_game_dirs / UNTRACKED_CAP / untracked_dir_findings）
+// 是「库根还在、清单已无」的未跟踪游戏目录发现能力：采集/判定已分离且有单测，
+// 生产扫描链尚未接线，故逐项 allow(dead_code)（原先靠模块级整体 allow 压住；
+// P2-02 为 gameclean 放开第二消费方后模块级 allow 移除，警告才浮出水面）。
+// 接线到残留扫描时逐项摘掉 allow，不要删实现。
 
 /// 「库根 + 该根下实际存在的游戏目录」采集结果（把只读列目录与判定分开，
 /// 判定因此可在单测里注入目录清单，不碰磁盘 —— 与本域其余扫描器的「采集/判定分离」同构）。
+#[allow(dead_code)]
 pub(super) struct LibraryListing {
+    #[allow(dead_code)]
     pub(super) root: String,
+    #[allow(dead_code)]
     pub(super) game_dirs: Vec<String>,
 }
 
 /// 只读列出一个库根下的游戏目录：优先 `steamapps\common\*`（Steam 形态），
 /// 退回库根一级目录（Epic / WeGame 形态）。
+#[allow(dead_code)]
 pub(super) fn list_game_dirs(root: &str) -> Vec<String> {
     let common = Path::new(root).join("steamapps").join("common");
     let base = if common.is_dir() { common.to_path_buf() } else { PathBuf::from(root) };
@@ -508,13 +531,16 @@ pub(super) fn list_game_dirs(root: &str) -> Vec<String> {
     out
 }
 
-/// 一个库里最多出多少条目录候选（防某台机器上 common 目录异常膨胀淹掉判断面）
+/// 一个库里最多出多少条目录候选（防某台机器上 common 目录异常膨胀淹掉判断面）。
+/// allow(dead_code)：同属本节未接线的未跟踪目录发现族。
+#[allow(dead_code)]
 const UNTRACKED_CAP: usize = 80;
 
 /// 「目录还在、清单里已没有」的游戏目录候选。
 ///
 /// 置信度封顶 medium：`unreadable` 那一档已经在调用侧排除，但「acf 被手工删过 /
 /// 库没在 Steam 里挂载 / 用第三方工具搬过目录」同样是合法解释，只有用户知道。
+#[allow(dead_code)]
 pub(super) fn untracked_dir_findings(index: &PlatformIndex, listings: &[LibraryListing]) -> Vec<Value> {
     if !index.complete() {
         return Vec::new();
@@ -553,7 +579,12 @@ mod tests {
         PlatformIndex {
             records: dirs
                 .iter()
-                .map(|(name, dir)| LibRecord { platform: "Steam", name: name.to_string(), dir_lc: PlatformIndex::norm(dir) })
+                .map(|(name, dir)| LibRecord {
+                    platform: "Steam",
+                    name: name.to_string(),
+                    dir: dir.trim_end_matches('\\').to_string(),
+                    dir_lc: PlatformIndex::norm(dir),
+                })
                 .collect(),
             roots_lc: dirs.iter().map(|(_, d)| PlatformIndex::norm(d)).collect(),
             unreadable: Vec::new(),

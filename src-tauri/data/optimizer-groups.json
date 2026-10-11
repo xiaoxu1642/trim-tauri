@@ -28,7 +28,6 @@
       },
       "itemOverride": {
         "svc_mem_gb": "内存优化",
-        "tf_mmagent": "内存优化",
         "tf_svc_bulk": "系统服务",
         "tf_drv_disable": "系统服务"
       }

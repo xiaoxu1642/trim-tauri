@@ -174,17 +174,6 @@
         }
       ]
     },
-    "perf_exploit_protection_off": {
-      "regWrites": [
-        {
-          "hive": "HKLM",
-          "subkey": "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel",
-          "value": "MitigationOptions",
-          "kind": "binary",
-          "expect": "22222200000200000002000000000000"
-        }
-      ]
-    },
     "peripheral_winkey_off": {
       "regWrites": [
         {

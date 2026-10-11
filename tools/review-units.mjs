@@ -112,8 +112,11 @@ export const UNITS = [
     id: 'R2a', owner: 'sub', name: 'uninstall 残留链（扫描→更新→待删）',
     files: [`${U}/residue.rs`, `${U}/residue_update.rs`, `${U}/pending_delete.rs`,
       `${U}/backup_report.rs`, `${U}/vendor_registry.rs`, `${U}/dead.rs`, `${U}/authenticode.rs`,
-      `${U}/helpers.rs`, `${U}/mod.rs`, `${U}/residue_trace_tests.rs`],
-    contract: '残留三链 / 重启后删除三件套 / 规则库消费侧',
+      `${U}/helpers.rs`, `${U}/mod.rs`, `${U}/residue_trace_tests.rs`,
+      // P2-02：gameclean.rs 是「游戏残留」扫描（消费 uninstall 平台索引），
+      // 显式点名优先于 R1b 的 commands 目录兜底（否则 R1b 超 8000 行单元上限）
+      `${C}/gameclean.rs`],
+    contract: '残留三链 / 重启后删除三件套 / 规则库消费侧 / 游戏残留扫描',
     boundary: '孤儿扫描族与列表执行归 R2b；窄窗口集档位以 check-guard-tiers 现算为准',
     gates: ['check-residue-rule-contract', 'check-data-parity'],
   },

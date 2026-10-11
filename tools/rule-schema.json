@@ -312,11 +312,12 @@
         "key": "special",
         "values": [
           "dism",
-          "recycleBin"
+          "recycleBin",
+          "gameRedist"
         ],
         "consumer": "native-scanner/src/cleanup_scan.rs",
         "anchor": "match rule.get(\"special\").and_then(|v| v.as_str()) {",
-        "via": "引擎分流（非路径型条目）：dism 走 DISM 组件清理；recycleBin 是渲染层驱动的 Shell 动作（G-4 选项 B，清空走 SHEmptyRecycleBinW，条目数与体积由 cleanup:recycle-stats 现查），扫描侧只发 size=0 的占位行、不枚举任何文件系统路径"
+        "via": "引擎分流（非路径型条目）：dism 走 DISM 组件清理；recycleBin 是渲染层驱动的 Shell 动作（G-4 选项 B，清空走 SHEmptyRecycleBinW，条目数与体积由 cleanup:recycle-stats 现查），扫描侧只发 size=0 的占位行、不枚举任何文件系统路径；gameRedist 是游戏运行库安装包回收，扫描侧发 size=0 占位、大小与文件清单由 Rust 主进程扫描后回填（§5.12 批次 B）"
       },
       {
         "key": "fileCleanType",

@@ -240,6 +240,10 @@ pub const REG_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// 只有一处可查（`tools/check-ps-callsites.mjs` 的 F 组就是按 systembin.rs + native/ 找定义的）。
 pub const FLTMC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// bcdedit /enum 只读枚举的超时（2026-10-11 C3）：bcdedit 本机枚举通常 <1s，给 15s 宽限防卡死。
+/// 登记在 `tools/check-ps-callsites.mjs` F 组，与源码实参一致性由门禁对拍。
+pub const BCDEDIT_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// 计划任务查询/修改/删除（schtasks）的超时。挂在启动项扫描主链与删除链上，
 /// 平时毫秒级；任务计划服务被拖住时不能让它永久锁住 IPC。30s 是宽限上界。
 pub const SCHTASKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);

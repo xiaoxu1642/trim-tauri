@@ -49,10 +49,18 @@ const THEMES = [
   {
     topic: 'MMCSS 给游戏提优先级',
     readmeAnchor: '**MMCSS 给游戏提优先级**',
-    matcher: { ids: ['mmcss_optimize'] },
+    matcher: { ids: ['mmcss_optimize', 'mmcss_games'] },
     reason: '实测无可测收益；承诺范围只指「游戏抢优先级」',
     // 音频两项由下面的 SCOPE 断言单独钉，不在此列 allow —— 它们本来就不该被这个 matcher 命中
-    allow: [],
+    // 2026-10-11 用户翻案：mmcss_games 在永劫无间专项面板内提供（readme:93 窄化承诺）
+    allow: [
+      {
+        id: 'mmcss_games',
+        scope: 'MMCSS Tasks\\Games 七值（专项面板内提供）',
+        scopeReadmeAnchor: '仅在「永劫无间优化专项」中提供 MMCSS',
+        why: '音频两项不在这条承诺范围内，且 matcher 刻意不扫它们（避免误伤）；mmcss_games 仅在永劫无间专项面板提供，readme 窄化为「在专项内提供」',
+      },
+    ],
   },
   {
     topic: '禁用全屏优化（FSO）/ 关 MPO',
@@ -75,8 +83,41 @@ const THEMES = [
     readmeAnchor: '**修改启动配置数据（BCD）类「玄学参数」**',
     matcher: { stepText: [/bcdedit/i] },
     reason: '属启动配置改动而非性能优化，收益不可测且失误影响开机',
-    hardZero: true,
-    allow: [],
+    // 2026-10-11 用户翻案：BCD 改为条件命中式——只做只读体检，命中本机已有非默认项才允许对齐
+    // readme 窄化为「不主动创建或改写系统默认的 BCD 配置」，承诺仍在
+    hardZero: false,
+    allow: [
+      {
+        id: 'nara_bcd_timer',
+        scope: '计时器条件对齐（disabledynamictick/useplatformtick，仅本机已有才写）',
+        scopeReadmeAnchor: '计时器项仅在该元素本机已存在时才允许对齐',
+        why: '条件命中式——只对已存在的非默认项对齐，不主动创建元素',
+      },
+      {
+        id: 'nara_bcd_vsm',
+        scope: 'Hyper-V/模拟器保护态跳过的虚拟化启动项（命中保护态自动 disabled）',
+        scopeReadmeAnchor: '检测到 Hyper-V/模拟器正在使用的虚拟化配置自动跳过',
+        why: '保护态自动跳过，不影响模拟器使用能力；只对已存在非默认值写回默认',
+      },
+      {
+        id: 'nara_bcd_boot',
+        scope: '启动菜单/开机画面（条件命中）',
+        scopeReadmeAnchor: '不主动创建或改写系统默认的 BCD 配置',
+        why: '条件命中式——不主动创建启动菜单，只对已存在的非默认值对齐',
+      },
+      {
+        id: 'nara_bcd_lowmem',
+        scope: '低 1MB/内存映射策略（主要作危险配置体检+还原出口）',
+        scopeReadmeAnchor: '低 1MB/内存映射、启动菜单与自救入口等不提供一键写入',
+        why: '主要作为体检告警与还原出口，常态不可执行；命中才写回默认值',
+      },
+      {
+        id: 'nara_bcd_irq',
+        scope: '中断路由策略（多为系统默认值，常态未命中）',
+        scopeReadmeAnchor: '不主动创建或改写系统默认的 BCD 配置',
+        why: '多为系统默认值，常态不可执行；条件命中式',
+      },
+    ],
   },
   {
     topic: '静默/永久禁用 UCPD 驱动',

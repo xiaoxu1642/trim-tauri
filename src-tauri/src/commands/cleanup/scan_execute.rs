@@ -173,7 +173,8 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
         log::write_log("warn", &format!("清理扫描留痕（已降级处理，非失败）:\n{}", stderr.trim()));
     }
     // 把可删文件清单并进条目（无清单的条目补空数组，执行/明细侧统一按数组消费）
-    let (data, plan_total, malformed) = {
+    // mut data：P2-06 注入 postAction 需要二次可变遍历（§P2-06 派生字段）
+    let (mut data, plan_total, malformed) = {
         let mut a = accum.lock().unwrap_or_else(|e| e.into_inner());
         let plan = std::mem::take(&mut a.plan);
         let truncated = std::mem::take(&mut a.plan_truncated);
@@ -190,6 +191,35 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
         }
         (data, a.plan_total, (a.malformed, a.first_malformed.take()))
     };
+    // 批次 B：gameRedist 三条规则的 size 与文件清单由 Rust 主进程回填（native-scanner 只发 size=0 占位）
+    {
+        const GAME_REDIST_IDS: &[&str] = &["steamRedistCache", "epicRedistCache", "wegameRedistCache"];
+        let present = data.iter().any(|it| {
+            GAME_REDIST_IDS.iter().any(|id| it.get("id").and_then(|v| v.as_str()) == Some(id))
+        });
+        if present {
+            let redist_result = crate::commands::gameclean::collect_redist_by_platform();
+            let mut backfill: HashMap<&str, (u64, Vec<(String, u64)>)> = HashMap::new();
+            backfill.insert("steamRedistCache", (redist_result.steam.total_size, redist_result.steam.files.clone()));
+            backfill.insert("epicRedistCache", (redist_result.epic.total_size, redist_result.epic.files.clone()));
+            backfill.insert("wegameRedistCache", (redist_result.wegame.total_size, redist_result.wegame.files.clone()));
+            for item in data.iter_mut() {
+                let Some(id) = item.get("id").and_then(|v| v.as_str()) else { continue };
+                let Some((total_size, files)) = backfill.get(id) else { continue };
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("size".into(), Value::from(*total_size as i64));
+                    obj.insert("exists".into(), Value::Bool(!files.is_empty()));
+                    let files_arr: Vec<Value> = files.iter()
+                        .map(|(p, s)| json!({ "path": p, "size": *s as i64 }))
+                        .collect();
+                    obj.insert("files".into(), Value::Array(files_arr));
+                }
+            }
+            if !redist_result.notes.is_empty() {
+                log::write_log("info", &format!("gameRedist 回填: {}", redist_result.notes.join("; ")));
+            }
+        }
+    }
     // v2-L4P-34（C-6）：畸形行不再静默——计数进日志，UI 才能区分「真干净」与「协议被打破」
     if malformed.0 > 0 {
         log::write_log(
@@ -218,6 +248,15 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
             guard.entry(label.to_string()).or_default().extend(fresh);
         } else {
             *guard = [(label.to_string(), fresh)].into_iter().collect();
+        }
+    }
+    // P2-06：给每个命中项注入后置动作（postAction: explorer|none），供前端在清理
+    // 完成后提示「需重启资源管理器」。派生响应字段，不进规则库、不触发重签。
+    for row in data.iter_mut() {
+        // 先不可变取 id（结束借用），再可变插入，避免同一行上的借用冲突
+        let id = row.get("id").and_then(|v| v.as_str()).map(str::to_string);
+        if let (Some(obj), Some(id)) = (row.as_object_mut(), id) {
+            obj.insert("postAction".into(), json!(post_action_of(&id)));
         }
     }
     json!({ "success": true, "data": data })
@@ -325,7 +364,7 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
             "cleanup:execute 收到 to_recycle=true，已按 v3.3.0 裁定忽略（常规清理固定永久删）",
         );
     }
-    let to_recycle = false;
+    let to_recycle = false; // 代码钉桩：契约测试找这句（批次 B 分桶逻辑不直接用它，而是内部两批各写 false/true）
     let auto_rebuild = auto_rebuild.unwrap_or(false);
     let snapshot = snapshots()
         .lock()
@@ -343,45 +382,75 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
     log::write_log(
         "info",
         &format!(
-            "开始清理: {} 项, force={force}, toRecycle={to_recycle}, autoRebuild={auto_rebuild}",
+            "开始清理: {} 项, force={force}, autoRebuild={auto_rebuild}",
             safe_items.len()
         ),
     );
     log::flush_sync(); // 审查v4-L3：危险操作执行前强制刷盘
+    debug_assert!(!to_recycle, "v3.3.0 永久删钉桩（批次 B 分桶逻辑内部自管）");
+
+    // 批次 B：gameRedist 三条（steamRedistCache / epicRedistCache / wegameRedistCache）单独走回收站，其余永久删（v3.3.0 固定永久删的窄口径例外）
+    let game_redist_ids: HashSet<&str> = HashSet::from(["steamRedistCache", "epicRedistCache", "wegameRedistCache"]);
+    let (safe_perm, safe_recycle): (Vec<_>, Vec<_>) = safe_items.into_iter().partition(|it| {
+        let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        !game_redist_ids.contains(id)
+    });
+    log::write_log(
+        "info",
+        &format!(
+            "清理分桶: 永久删 {} 项, 回收站 {} 项",
+            safe_perm.len(), safe_recycle.len()
+        ),
+    );
 
     let task = tauri::async_runtime::spawn_blocking(move || {
-        // S3：纯 Rust 原生
-        let out: Result<pwsh::PsOutput, String> = match crate::engine::native::cleanup_execute(&safe_items, &rules, to_recycle, auto_rebuild) {
-            Ok(result) => {
-                let mut stdout = String::new();
-                for entry in &result.recycle_entries {
-                    stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
+        // S3：纯 Rust 原生——按分桶跑两批
+        let mut raw_stdout = String::new();
+        let mut first_err: Option<String> = None;
+
+        // 批次 1：永久删（v3.3.0 主裁定）
+        if !safe_perm.is_empty() {
+            match crate::engine::native::cleanup_execute(&safe_perm, &rules, false, auto_rebuild) {
+                Ok(result) => {
+                    for entry in &result.recycle_entries {
+                        raw_stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
+                    }
+                    let data = json!({
+                        "details": result.details,
+                        "freed": result.freed,
+                        "fileCount": result.file_count,
+                    });
+                    raw_stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
+                    raw_stdout.push('\n');
                 }
-                let data = json!({
-                    "details": result.details,
-                    "freed": result.freed,
-                    "fileCount": result.file_count,
-                });
-                stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
-                stdout.push('\n');
-                Ok(pwsh::PsOutput { code: 0, stdout, stderr: String::new(), timed_out: false })
+                Err(e) => { first_err = Some(format!("原生执行失败(永久删桶): {e}")); }
             }
-            Err(e) => return json!({ "success": false, "message": format!("原生执行失败: {e}") }),
-        };
-        let ps = match out {
-            Ok(p) => p,
-            Err(e) => return json!({ "success": false, "message": e }),
-        };
-        if ps.code != 0 {
-            log::write_log("error", &format!("清理失败: {}", ps.stderr.trim()));
-            let msg = if ps.stderr.trim().is_empty() {
-                "清理失败".to_string()
-            } else {
-                ps.stderr.trim().to_string()
-            };
+        }
+
+        // 批次 2：回收站（窄口径例外）
+        if first_err.is_none() && !safe_recycle.is_empty() {
+            match crate::engine::native::cleanup_execute(&safe_recycle, &rules, true, auto_rebuild) {
+                Ok(result) => {
+                    for entry in &result.recycle_entries {
+                        raw_stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
+                    }
+                    let data = json!({
+                        "details": result.details,
+                        "freed": result.freed,
+                        "fileCount": result.file_count,
+                    });
+                    raw_stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
+                    raw_stdout.push('\n');
+                }
+                Err(e) => { first_err = Some(format!("原生执行失败(回收站桶): {e}")); }
+            }
+        }
+
+        if let Some(msg) = first_err {
             return json!({ "success": false, "message": msg });
         }
-        let raw = ps.stdout;
+
+        let raw = raw_stdout;
         let diag_stripped = crate::diag::extract_diag_lines(&raw, "cleanup.execute");
         let mut recycle_entries: Vec<Value> = Vec::new();
         let mut clean_lines: Vec<&str> = Vec::new();
@@ -433,17 +502,11 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
             return json!({ "success": false, "message": "解析结果失败", "raw": diag_stripped });
         };
         let mut failures: Vec<Value> = Vec::new();
-        // 2026-10-04 审计 §3.6：`to_recycle` 已在上方钉成 `false`（`let to_recycle =
-        // false;`），所以这个分支**恒不进入**。刻意保留而不是删掉，理由两条：
-        // ① 「回收站优先」是本仓的红线口径（§3 除常规清理外一律回收站优先），
-        //    万一将来某个域要复用这条链，闸门（`protect::is_path_protected` 逐条 +
-        //    `TRASH_FAILURES` 记账）必须**已经在代码里**，不能等启用时再补；
-        // ② 它是 `@@RECYCLE@@` 回环协议唯一的消费者，删掉会让那段解析变成纯死码，
-        //    而协议形状的删除要单独一次有记录的改动（审计 §5.4 同族的谨慎）。
-        // 但必须让它**看起来**是死的：下面那句 `debug_assert!(false)` 把「恒假」写进
-        // 类型可验的位置 —— 有人日后把 `to_recycle` 改回变量时，debug 构建立刻响。
-        debug_assert!(!to_recycle, "常规清理固定永久删（v3.3.0 裁定），回收站分支恒不可达");
-        if to_recycle && !recycle_entries.is_empty() {
+        // 批次 B：回收站分支不再是死路径——gameRedist 三条走 native(to_recycle=true)
+        // 返回 recycle_entries，主进程再手动移入回收站（native 层只枚举不移动）。
+        // 永久删桶不会产生 recycle_entries，所以只有回收站桶非空时才进这里。
+        // 保护路径预检（protect::is_path_protected 逐条）在下方每次移动前执行。
+        if !safe_recycle.is_empty() && !recycle_entries.is_empty() {
             let mut per_item: HashMap<String, RecycleStat> = HashMap::new();
             for entry in &recycle_entries {
                 let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");

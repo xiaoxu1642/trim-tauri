@@ -69,6 +69,10 @@ pub enum PsOp {
     ForDevKey { class: String, body: String, vars: VarMap },
     /// PINNED 系统工具直调（仅 powercfg，v3-K1）。白名单外的程序在编译期就 Err。
     Spawn { program: String, args: Vec<String> },
+    /// 设备禁用/启用（2026-10-11 tf_dev_disable 原生化）：
+    /// `Get-PnpDevice | Where { FriendlyName -eq $n -and Status -eq 'OK' } |
+    /// Disable/Enable-PnpDevice` 整段模式 → 按名字走 CM_Disable/Enable_DevNode FFI。
+    PnpSetState { names: Vec<String>, enable: bool },
     /// 收件箱 Windows PowerShell 逐字执行（v3-K1，白名单见 `PS_INLINE_ALLOW`）
     PsInline { script: String },
 }
@@ -836,14 +840,12 @@ fn resolve_concat(line: &str, vars: &VarMap) -> String {
 /// 注意：表内含原生面已支持的 cmdlet，让「原生解析失败但语义无害」的体也能走
 /// 逐字通道（例如依赖 $env 展开的路径），不会出现静默错执行。
 const PS_INLINE_ALLOW: &[&str] = &[
-    // 内存代理 / WMI / 设备 / Appx / 计划任务对象 —— 原生不表达的 Windows 面
-    "Disable-MMAgent",
-    "Enable-MMAgent",
+    // WMI / 计划任务对象 —— 原生不表达的 Windows 面
+    // （Disable/Enable-MMAgent 2026-10-11 随 tf_mmagent 退役移除；
+    //  Get/Disable/Enable-PnpDevice 同日随 tf_dev_disable 原生化为 PnpSetState 移除——
+    //  PnP 脚本编译失败现在直接 Err，不再静默退回 powershell.exe）
     "Get-CimInstance",
     "Invoke-CimMethod",
-    "Get-PnpDevice",
-    "Disable-PnpDevice",
-    "Enable-PnpDevice",
     "Get-AppxPackage",
     "Remove-AppxPackage",
     "Get-ScheduledTask",
@@ -1008,6 +1010,13 @@ fn eligible_stmt(st: &str) -> bool {
 /// （逐字交给收件箱 Windows PowerShell，语义零改写）；否则维持 fail-closed Err
 /// （`data_layer_coverage_report` 会在测试期红掉，见 v3-M4/K1）。
 pub fn compile(body: &str) -> Result<Vec<PsOp>, String> {
+    // PnP 设备禁用/启用整段模式优先识别（2026-10-11 tf_dev_disable 原生化）。
+    // 守卫四要素足够严格（Get-PnpDevice + FriendlyName + Status=OK 双条件 +
+    // Disable/Enable-PnpDevice），其他脚本不可能同时满足；识别出的名字为空则 Err，
+    // 绝不在名字解析失败时退回全量。
+    if let Some(op) = recognize_pnp(body) {
+        return Ok(vec![op]);
+    }
     let mut vars = VarMap::new();
     match parse_block(body, &mut vars) {
         Ok(ops) => Ok(ops),
@@ -1019,6 +1028,35 @@ pub fn compile(body: &str) -> Result<Vec<PsOp>, String> {
             }
         }
     }
+}
+
+/// 识别 `Get-PnpDevice … | Where-Object { FriendlyName -eq $n -and Status -eq 'OK' }
+/// | Disable/Enable-PnpDevice` 模式（foreach + @(...) 名字数组）→ [`PsOp::PnpSetState`]。
+///
+/// 必须同时含双条件（FriendlyName 精确匹配 + Status=OK），少任何一个都返回 None
+/// 交回通用解析/PsInline 兜底 fail-closed —— 没有 Status 守卫的设备操作不该被
+/// 当成 tf_dev_disable 那套"只动正常设备"的语义。
+fn recognize_pnp(body: &str) -> Option<PsOp> {
+    let low = body.to_ascii_lowercase();
+    if !low.contains("get-pnpdevice") {
+        return None;
+    }
+    let has_double_guard = low.contains("friendlyname") && low.contains("status");
+    if !has_double_guard {
+        return None;
+    }
+    let enable = if low.contains("enable-pnpdevice") {
+        true
+    } else if low.contains("disable-pnpdevice") {
+        false
+    } else {
+        return None;
+    };
+    let names = crate::engine::pnp::parse_name_array(body);
+    if names.is_empty() {
+        return None;
+    }
+    Some(PsOp::PnpSetState { names, enable })
 }
 
 /// 解析一段语句序列（可含 if/foreach 块）；`vars` 会被语句内的赋值**就地更新**
@@ -1689,6 +1727,19 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
         PsOp::TaskChange { path, name, disable } => {
             native::task_change(path.as_deref(), name, *disable)?;
             Ok(String::new())
+        }
+        PsOp::PnpSetState { names, enable } => {
+            // FFI 批量禁用/启用（tf_dev_disable 原生化）；个别设备失败不中断其余，
+            // 全部尝试完后聚合报错（foreach + SilentlyContinue 语义）。
+            let report = crate::engine::pnp::set_devices_enabled(names, *enable)
+                .map_err(|e| format!("PnP 设备枚举失败: {e}"))?;
+            let mut out = report.summary_line(*enable);
+            out.push('\n');
+            if report.errors.is_empty() {
+                Ok(out)
+            } else {
+                Err(format!("PnP 设备状态变更失败：{}", report.errors.join("；")))
+            }
         }
         PsOp::GuardedKeyExists { hive, subkey, ops } => {
             // 键不存在 = 功能没装，跳过（对齐 PS `if (Test-Path …)` 语义）

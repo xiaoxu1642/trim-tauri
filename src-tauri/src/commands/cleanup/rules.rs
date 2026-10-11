@@ -1212,3 +1212,25 @@ pub fn cleanup_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     }
 }
 
+// ==================== P2-06：清理项后置动作侧表 ====================
+
+const POSTACTIONS_JSON: &str = include_str!("../../../data/cleanup-postactions.json");
+
+/// 取某清理项的后置动作（"explorer" / "none"）。侧表是编译期内置、Trim 自有文件，
+/// 缺键按 none（与历史行为一致）。
+pub(super) fn post_action_of(id: &str) -> &'static str {
+    static CACHE: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    let table = CACHE.get_or_init(|| {
+        let v: Value = serde_json::from_str(POSTACTIONS_JSON).expect("cleanup-postactions.json 合法");
+        v.get("postActions")
+            .and_then(|m| m.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("none").to_string())).collect())
+            .unwrap_or_default()
+    });
+    match table.get(id).map(String::as_str) {
+        Some("explorer") => "explorer",
+        _ => "none",
+    }
+}
+

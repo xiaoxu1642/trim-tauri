@@ -148,6 +148,62 @@ function classify(opt) {
 }
 
 // ---------------------------------------------------------------------------
+// BCD 元素白名单（2026-10-11 C1）——数据层出现的 bcdedit 命令元素必须在登记集合内
+// ---------------------------------------------------------------------------
+// 允许的元素（5 行 BCD 面板的目标元素 + 相关联的 deletevalue 目标）
+const BCD_ALLOWED_ELEMENTS = new Set([
+  'disabledynamictick', 'useplatformtick', 'useplatformclock', // nara_bcd_timer
+  'hypervisorlaunchtype', 'vsmlaunchtype', 'isolatedcontext', // nara_bcd_vsm
+  'timeout', 'bootmenupolicy', 'bootux', 'nobootuxtext', 'nobootuxprogress', 'quietboot', // nara_bcd_boot
+  'firstmegabytepolicy', 'avoidlowmemory', 'nolowmem', 'allowedinmemorysettings', // nara_bcd_lowmem
+  'configaccesspolicy', 'msi', 'usephysicaldestination', 'usefirmwarepcisettings', // nara_bcd_irq
+  // store 标识符（bcdedit /enum {current} 里会出现，不算元素）
+  'current', 'globalsettings', 'default',
+]);
+// 禁写的无文档/危险值（出现即红）
+const BCD_FORBIDDEN_ELEMENTS = [
+  /^increaseuserva$/i,
+  /^vm$/i,
+  /^custom:\d+$/,
+  /^nx$/i,
+  /^tpmbootentropy$/i,
+  /^linearaddress\d+$/i,
+];
+
+// 从 bcdedit 命令文本里提取元素标识符
+function extractBcdElements(text) {
+  const out = new Set();
+  // /set {store} <ELEMENT> <value>  或  /deletevalue {store} <ELEMENT>
+  const setRx = /bcdedit[^\r\n]*?\/(?:set|deletevalue|enum)[^\r\n]*?(?:\{[^\}]*\}\s+)?([a-zA-Z][a-zA-Z0-9:-]*)/g;
+  let m;
+  while ((m = setRx.exec(text))) out.add(m[1].toLowerCase());
+  return [...out];
+}
+
+{
+  const catalog = JSON.parse(R(CATALOG));
+  let bcdForbidden = [];
+  let bcdUnknown = [];
+  for (const o of catalog) {
+    const steps = [...(o.steps || []), ...(o.restore || [])];
+    for (const st of steps) {
+      const blob = [st.pwsh, st.cmd].filter((x) => typeof x === 'string').join('\n');
+      if (!/bcdedit/i.test(blob)) continue;
+      const elems = extractBcdElements(blob);
+      for (const e of elems) {
+        if ([...BCD_FORBIDDEN_ELEMENTS].some((rx) => rx.test(e))) {
+          bcdForbidden.push(`${o.id} 的 bcdedit 命令出现禁写元素 ${e}`);
+        } else if (!BCD_ALLOWED_ELEMENTS.has(e) && !['bcdedit', 'export', 'import', '/?', '-enum', '-set', '-deletevalue'].includes(e)) {
+          bcdUnknown.push(`${o.id} 的 bcdedit 命令出现未登记元素 ${e}`);
+        }
+      }
+    }
+  }
+  check(bcdForbidden.length === 0, 'BCD 禁写元素（无文档/危险值）', bcdForbidden.join('；') || '');
+  check(bcdUnknown.length === 0, 'BCD 白名单元素登记', bcdUnknown.join('；') || '');
+}
+
+// ---------------------------------------------------------------------------
 // 侧表 ⇄ 重算 逐条对拍
 // ---------------------------------------------------------------------------
 const catalog = JSON.parse(R(CATALOG));

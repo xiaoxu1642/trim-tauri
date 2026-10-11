@@ -1,9 +1,9 @@
 //! A3 PnP 设备原生侧 —— **只读 spike**（v2-R5，2026-10-01）
 //!
 //! v2 R5 的次序是「枚举先行、删除最后、设备先 spike」，本模块只做第一步。
-//! 三个目标步骤（`tf_dev_disable` / `tf_dev_audio` / `tf_dev_printer`）都是
-//! `risk: high` + `restoreAvailable: False` —— 禁用设备属高代价不可逆面，
-//! 所以这里**不调用** `CM_Disable_DevNode`，只回答一个问题：
+//! 目标步骤 `tf_dev_disable`（2026-10-11 起音频控制器/打印队列并入它的逐项清单，
+//! 原 tf_dev_audio / tf_dev_printer 两项退役）是 `risk: medium`、设备可在设备管理器
+//! 重新启用，但本模块仍**不调用** `CM_Disable_DevNode`（v2-R5 只做只读 spike），只回答：
 //!
 //! > 原生能不能复现 `Get-PnpDevice | Where { FriendlyName -eq X -and Status -eq 'OK' }`
 //! > 这个**双条件**判定？
@@ -42,9 +42,10 @@
 
 use windows::core::PCWSTR;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    CM_Get_DevNode_PropertyW, CM_Get_DevNode_Status, CM_Get_Device_ID_ListW,
-    CM_Get_Device_ID_List_SizeW, CM_Locate_DevNodeW, CM_DEVNODE_STATUS_FLAGS,
-    CM_LOCATE_DEVNODE_FLAGS, CM_PROB, DN_HAS_PROBLEM, DN_STARTED,
+    CM_Disable_DevNode, CM_Enable_DevNode, CM_Get_DevNode_PropertyW, CM_Get_DevNode_Status,
+    CM_Get_Device_ID_ListW, CM_Get_Device_ID_List_SizeW, CM_Locate_DevNodeW,
+    CM_DEVNODE_STATUS_FLAGS, CM_DISABLE_PERSIST, CM_LOCATE_DEVNODE_FLAGS, CM_PROB, DN_HAS_PROBLEM,
+    DN_STARTED,
 };
 use windows::Win32::Devices::Properties::{
     DEVPKEY_Device_DeviceDesc, DEVPKEY_Device_FriendlyName, DEVPROPTYPE,
@@ -66,6 +67,8 @@ fn status_ok_of(raw_flags: u32, problem: u32) -> bool {
 /// 一个匹配到的设备实例。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevHit {
+    /// CM 设备节点句柄（CM_Locate_DevNode 产物，禁用/启用时直接用）
+    pub devinst: u32,
     /// 设备实例 ID（`PCI\VEN_8086&DEV_...` 这种），禁用时要的就是它
     pub instance: String,
     /// `DEVPKEY_Device_FriendlyName`
@@ -224,6 +227,7 @@ pub fn find_by_friendly_name(want: &str) -> Result<Vec<DevHit>, String> {
                 continue;
             }
             hits.push(DevHit {
+                devinst,
                 instance: id,
                 started: flags.0 & DN_STARTED.0 != 0,
                 has_problem: flags.0 & DN_HAS_PROBLEM.0 != 0,
@@ -257,6 +261,7 @@ pub fn enumerate_all() -> Result<Vec<DevHit>, String> {
                 continue;
             }
             out.push(DevHit {
+                devinst,
                 friendly: friendly_of(devinst).map(|s| s.trim().to_string()).unwrap_or_default(),
                 desc: desc_of(devinst).map(|s| s.trim().to_string()).unwrap_or_default(),
                 started: flags.0 & DN_STARTED.0 != 0,
@@ -269,6 +274,155 @@ pub fn enumerate_all() -> Result<Vec<DevHit>, String> {
         }
     }
     Ok(out)
+}
+
+// ==================== 写入面（2026-10-11：tf_dev_disable 原生化）====================
+
+/// 从步骤脚本的 `@("a","b")` / `@('a','b')` 字面量里抽出设备名（按出现顺序去重）。
+///
+/// 两种来源同一份解析：
+///   · 数据层原脚本（全选）：`$names = @("High Precision Event Timer",…)`，双引号
+///   · subitems 重建脚本（子集）：`$picked = @('System Speaker','Amdlog')`，单引号
+///
+/// 不做完整 PowerShell 词法：只认 `@(` 到第一个 `)` 之间成对引号里的字面量
+/// （设备名不含引号；单引号内 `''` 按 PS 规则还原成 `'`）。识别不到任何名字
+/// 返回空 Vec，由调用方按 fail-closed 处理——绝不允许"名字解析空了却去全量禁用"。
+pub fn parse_name_array(script: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let bytes = script.as_bytes();
+    let mut i = 0usize;
+    while let Some(rel) = bytes[i..].windows(2).position(|w| w == b"@(") {
+        let start = i + rel + 2;
+        let Some(rel_end) = bytes[start..].iter().position(|&b| b == b')') else { break; };
+        let seg = &script[start..start + rel_end];
+        let mut j = 0usize;
+        let segb = seg.as_bytes();
+        while j < segb.len() {
+            let q = segb[j];
+            if q != b'\'' && q != b'"' {
+                j += 1;
+                continue;
+            }
+            // 双引号串若含 $ 展开/反引号，超出字面量能力，跳过整串（设备名不会有）
+            let mut k = j + 1;
+            let mut raw = String::new();
+            let mut valid = true;
+            while k < segb.len() {
+                // 引号：单引号里的 '' 是转义（→ '），其余都算闭合
+                if segb[k] == q {
+                    if q == b'\'' && k + 1 < segb.len() && segb[k + 1] == b'\'' {
+                        raw.push('\'');
+                        k += 2;
+                        continue;
+                    }
+                    break;
+                }
+                if q == b'"' && (segb[k] == b'$' || segb[k] == b'`') {
+                    valid = false;
+                    break;
+                }
+                raw.push(seg[k..].chars().next().unwrap());
+                // 对非 ASCII 按字节推进修正
+                let ch_len = seg[k..].chars().next().map(char::len_utf8).unwrap_or(1);
+                k += ch_len;
+            }
+            if valid && k < segb.len() && !raw.trim().is_empty()
+                && !out.iter().any(|x| x == &raw)
+            {
+                out.push(raw);
+            }
+            j = k + 1;
+        }
+        i = start + rel_end + 1;
+    }
+    out
+}
+
+/// 一次设备批量状态变更的结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PnpSetReport {
+    /// 请求的名字数
+    pub requested: usize,
+    /// 命中 Status=OK 实例且 FFI 调用成功的实例数（一个名字可能对应多实例）
+    pub changed_instances: usize,
+    /// 没找到任何 Status=OK 实例的名字（跳过，不计失败；对齐 PS -ErrorAction SilentlyContinue）
+    pub not_found: Vec<String>,
+    /// FFI 返回非 CR_SUCCESS 的失败明细
+    pub errors: Vec<String>,
+}
+
+impl PnpSetReport {
+    /// 供执行层打印到 stdout 的一行摘要（无副作用机器上如实显示 0 命中）
+    pub fn summary_line(&self, enable: bool) -> String {
+        let verb = if enable { "启用" } else { "禁用" };
+        let mut s = format!(
+            "PnP {verb}：请求 {} 个名字 / {verb} {} 个实例",
+            self.requested, self.changed_instances
+        );
+        if !self.not_found.is_empty() {
+            s.push_str(&format!("（{} 个名字无 Status=OK 设备，已跳过）", self.not_found.len()));
+        }
+        s
+    }
+}
+
+/// 按 FriendlyName 精确匹配（双条件：名字相等 + Status=OK）批量禁用/启用设备。
+///
+/// 与数据层 `Get-PnpDevice | Where { FriendlyName -eq $n -and Status -eq 'OK' } |
+/// Disable-PnpDevice -Confirm:$false` 逐字同语义：已停用/有问题的同名设备不选中，
+/// 同一个名字的多个实例逐个处理。禁用带 `CM_DISABLE_PERSIST`（重启后仍禁用，
+/// 对齐 Disable-PnpDevice 的持久语义）。
+///
+/// 枚举层失败（CM_Get_Device_ID_List 等）整体返回 Err；个别设备 FFI 失败只进
+/// `errors`，不中断其余设备（foreach + SilentlyContinue 语义）。
+pub fn set_devices_enabled(names: &[String], enable: bool) -> Result<PnpSetReport, String> {
+    let mut report = PnpSetReport {
+        requested: names.len(),
+        ..Default::default()
+    };
+    for name in names {
+        // 空名字 fail-closed：find_by_friendly_name 按显示名精确匹配，空串会命中
+        // FriendlyName/DeviceDesc 都为空的设备（实测 HTREE\ROOT\0 根节点就是），
+        // 绝不能让"名字没解析出来"变成"禁用根设备"。
+        if name.trim().is_empty() {
+            report.errors.push("设备名为空（拒绝执行，请检查步骤脚本）".to_string());
+            continue;
+        }
+        let hits = find_by_friendly_name(name)?;
+        // 禁用只选 Status=OK 的（对齐 PS Where Status -eq 'OK'，不动已停用/有问题的设备）；
+        // 启用**不能**加这个过滤——目标此刻正是被禁用状态（status_ok=false），
+        // 过滤掉就永远启不回来（2026-10-11 真机往返抓到的假成功：not_found 计跳过、
+        // errors 为空，设备实际没恢复）。对已启用设备再调一次 CM_Enable 是幂等的。
+        let targets: Vec<&DevHit> = if enable {
+            hits.iter().collect()
+        } else {
+            hits.iter().filter(|h| h.status_ok).collect()
+        };
+        if targets.is_empty() {
+            report.not_found.push(name.clone());
+            continue;
+        }
+        for h in targets {
+            // SAFETY：devinst 来自同一次枚举的 CM_Locate_DevNode，系统保证句柄有效；
+            // CM_Disable/Enable 只做设备状态位变更，不接受指针参数。
+            let cr = unsafe {
+                if enable {
+                    CM_Enable_DevNode(h.devinst, 0)
+                } else {
+                    CM_Disable_DevNode(h.devinst, CM_DISABLE_PERSIST)
+                }
+            };
+            if cr.0 == 0 {
+                report.changed_instances += 1;
+            } else {
+                report.errors.push(format!(
+                    "{}（{}）CONFIGRET={}",
+                    name, h.instance, cr.0
+                ));
+            }
+        }
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -291,7 +445,6 @@ mod tests {
 
     #[test]
     fn 状态判定要求双条件() {
-        // 已启动 + 无问题 = OK
         assert!(status_ok_of(DN_STARTED.0, 0));
         // 有 DN_HAS_PROBLEM 位就不是 OK，哪怕 problem 被读成 0（防"只信 problem"）
         assert!(!status_ok_of(DN_STARTED.0 | DN_HAS_PROBLEM.0, 0));
@@ -388,5 +541,76 @@ mod tests {
             }
             None => println!("回退链：本机没有「FriendlyName 为空但有 DeviceDesc」的设备，本轮未覆盖（不算失败）"),
         }
+    }
+
+    #[test]
+    fn 名字数组解析覆盖双单引号与去重() {
+        // 数据层原脚本（全选，双引号、带 $names 赋值）
+        let full = r#"$names = @("High Precision Event Timer","Microsoft GS Wavetable Synth","System Speaker")
+foreach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq "OK" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }"#;
+        assert_eq!(
+            parse_name_array(full),
+            vec![
+                "High Precision Event Timer",
+                "Microsoft GS Wavetable Synth",
+                "System Speaker"
+            ]
+        );
+        // subitems 重建脚本（子集，单引号）
+        let picked = "$picked = @('System Speaker','Amdlog')\nforeach ($n in $picked) { Get-PnpDevice | Disable-PnpDevice }";
+        assert_eq!(parse_name_array(picked), vec!["System Speaker", "Amdlog"]);
+        // 同一名字重复出现（赋值 + 别处引用不产生重复项——这里只在一个 @() 内去重）
+        assert_eq!(
+            parse_name_array("@('a','a','b')"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // 没有 @( 数组 = 空（调用方必须 fail-closed，不能当成全量）
+        assert!(parse_name_array("Disable-PnpDevice -Confirm:$false").is_empty());
+        // 双引号里带 $ 展开的串不接受（设备名不该长这样）
+        assert!(parse_name_array(r#"@("$env:X")"#).is_empty());
+        // 单引号转义 '' → '
+        assert_eq!(parse_name_array("@('a''b')"), vec!["a'b".to_string()]);
+    }
+
+    /// 真机往返：找一台 Status=OK 的设备，禁用后立刻启用回来。
+    ///
+    /// 选「系统扬声器/System Speaker」（System 类实体设备），禁用无功能损失且可恢复；
+    /// 刻意排除 `HTREE\ROOT\0` —— legacy Beep 驱动的 DeviceDesc 也叫 "Beep"，但它挂在
+    /// 设备树根节点上，禁不掉（CR_ACCESS_DENIED），拿它做往返是假目标。机器上不存在
+    /// 目标设备时打印跳过、不算失败。发布前门禁组跑。
+    #[test]
+    #[ignore = "真实禁用/启用设备（有副作用但自恢复），发布前门禁组跑"]
+    fn live_probe_设备禁用启用往返() {
+        let mut target: Option<(String, DevHit)> = None;
+        for want in ["System Speaker", "系统扬声器"] {
+            if let Ok(hits) = find_by_friendly_name(want) {
+                if let Some(h) = hits
+                    .into_iter()
+                    .filter(|h| h.status_ok && h.instance != "HTREE\\ROOT\\0")
+                    .next()
+                {
+                    target = Some((want.to_string(), h));
+                    break;
+                }
+            }
+        }
+        let Some((want, h)) = target else {
+            println!("本机没有可用于往返的蜂鸣器设备，跳过（不算失败）");
+            return;
+        };
+        // 回查必须用查询名（want），不能用 h.friendly —— ACPI 扬声器的 FriendlyName
+        // 属性为空（命中靠 DeviceDesc），空串会匹配到显示名也为空的根设备 HTREE\ROOT\0。
+        let one = vec![want];
+        let off = set_devices_enabled(&one, false).expect("禁用枚举失败");
+        println!("禁用报告: {:?}", off);
+        // 再查一次：它应当不再 Status=OK
+        let after_off = find_by_friendly_name(&one[0]).unwrap_or_default();
+        assert!(
+            after_off.iter().all(|x| !x.status_ok || x.devinst != h.devinst),
+            "禁用后设备仍 Status=OK"
+        );
+        let on = set_devices_enabled(&one, true).expect("启用枚举失败");
+        println!("启用报告: {:?}", on);
+        assert_eq!(on.errors.len(), 0, "恢复启用失败: {:?}", on.errors);
     }
 }

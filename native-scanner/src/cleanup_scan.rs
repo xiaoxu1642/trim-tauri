@@ -2243,6 +2243,32 @@ fn emit_recycle_bin(id: &str, rule: &Json) {
     ]);
 }
 
+/// 游戏运行库安装包占位行（2026-10-11 批次 B）。
+///
+/// 三条刻意的取值：
+///   · `size` 恒 0 / `path` 恒空 —— 真实大小与文件清单由 Rust 主进程在
+///     do_cleanup_scan 中调用 gameclean 收集器扫描后回填；引擎只发占位。
+///   · `exists` 恒 true —— 条目必须始终可见（用户需要看到「有这三个入口」）。
+///   · 平台归属不在引擎侧判定 —— 平台索引（vdf/acf）扫描是 Rust 侧独立逻辑，
+///     引擎不需要知道哪个平台真的装了，统一发 true。
+fn emit_game_redist(id: &str, rule: &Json) {
+    let name = rule.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+    emit_item(&[
+        ("id", jstr(id)),
+        ("name", jstr(name)),
+        ("configuredPath", jstr("")),
+        ("path", jstr("")),
+        ("pathSource", jstr("gameRedist")),
+        ("pathCandidates", "[]".to_string()),
+        ("autoPath", jstr("")),
+        ("autoSize", "0".to_string()),
+        ("size", "0".to_string()),
+        ("risk", jopt_str(rule.get("risk").and_then(|v| v.as_str()))),
+        ("exists", "true".to_string()),
+        ("blockedBy", "[]".to_string()),
+    ]);
+}
+
 // ==================== 主入口 ====================
 
 /// 致命错误。CLI：flush stdout → stderr → exit(2)（与迁移前逐字一致）；
@@ -2365,6 +2391,11 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             }
             Some("recycleBin") => {
                 emit_recycle_bin(cat_id, rule);
+                flush_stdout();
+                continue;
+            }
+            Some("gameRedist") => {
+                emit_game_redist(cat_id, rule);
                 flush_stdout();
                 continue;
             }
