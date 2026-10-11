@@ -369,6 +369,7 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'r"\\Processor(_Total)\\% Processor Time", "-sc", "1"', reason: 'P1-01：typeperf 采样验证', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   // P1-04 探针：WaaSMedic PerformRemediation 的查询与触发
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：查 WaaSMedic 任务是否存在', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task, "/FO", "LIST"], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：查 WaaSMedic 任务是否处于禁用态（skip 前置，2026-10-11 补）', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/run", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：触发 WaaSMedic 修复任务', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   // C3 BCD 面板枚举：bcdedit /enum {current} + {globalsettings} 只读枚举（前端面板三态判定）
   { file: 'src-tauri/src/commands/optimizer/bcd.rs', anchor: 'system_tool("bcdedit.exe"),', reason: 'C3 BCD 面板枚举：跑 bcdedit /enum 读 {current} + {globalsettings}', timeoutConst: 'BCDEDIT_ENUM_TIMEOUT', secs: 15 },
