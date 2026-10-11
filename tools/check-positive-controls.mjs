@@ -27,6 +27,7 @@ const REGISTRY = [
   { file: 'check-elapsed-facts.mjs', reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
   { file: 'check-optimizer-write-contract.mjs', reason: 'M2 写入坐标侧表：7 条样本自检（含 1 条应放行的干净样本，防判据变成「永远红」）' },
   { file: 'check-subwindow-init.mjs', reason: '副窗初始化：每页两条正向对照（注入指向不存在元素的绑定 + 抽掉一个真实 id），对照失效即红' },
+  { file: 'check-subwindow-css.mjs', reason: '子窗 CSS 按需：S1 样式表序列 / S2 引用面 / S3 层叠翻转 / S4 token 真源四组各配正反样本 + 解析器形状对照（@media 内层与花括号字符串）' },
   { file: 'check-a11y.mjs', reason: '可达性四断言：勾选框三属性 / aria-live 宿主 / data-tip 反 title / RM 归零覆盖面各配正反样本自检 + 三类扫描面地板' },
   { file: 'check-contrast.mjs', reason: 'F 组玻璃面 floor 断言配正反向样本自检（P3-2）；A1/B/C 与 token 表等既有组仍缺合成样本' },
   { file: 'check-native-hygiene.mjs', reason: '五条原生卫生断言各配正反样本自检（裸 output / 定长解码 / 句柄丢弃 / .reg 读取），+ 模块可达性与扫描面地板' },

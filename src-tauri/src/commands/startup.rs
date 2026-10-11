@@ -157,14 +157,21 @@ pub async fn startup_toggle<R: Runtime>(
         });
     }
     let enable = enable.unwrap_or(true);
+    let safe_len = safe.len();
 
     // S3：纯 Rust 原生
-    let data = match crate::engine::native::startup_toggle(&safe, enable) {
-        Ok(d) => {
-            log::write_log("info", &format!("启动项{}原生完成 {} 项", if enable { "启用" } else { "禁用" }, safe.len()));
+    // 性能优化 P1：启停是对注册表 / 计划任务的同步原生调用，整段进阻塞池
+    //（对照本文件 startup_scan 的既有写法 —— 它是同类命令里唯一漏掉的一条）。
+    let toggled =
+        tauri::async_runtime::spawn_blocking(move || crate::engine::native::startup_toggle(&safe, enable))
+            .await;
+    let data = match toggled {
+        Ok(Ok(d)) => {
+            log::write_log("info", &format!("启动项{}原生完成 {} 项", if enable { "启用" } else { "禁用" }, safe_len));
             d
         }
-        Err(e) => return json!({ "success": false, "message": format!("原生执行失败: {e}") }),
+        Ok(Err(e)) => return json!({ "success": false, "message": format!("原生执行失败: {e}") }),
+        Err(e) => return json!({ "success": false, "message": format!("原生执行任务异常: {e}") }),
     };
     let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
     json!({ "success": failed == 0, "data": data })

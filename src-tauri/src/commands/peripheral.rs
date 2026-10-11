@@ -104,14 +104,23 @@ pub async fn peripheral_apply<R: tauri::Runtime>(
 
     // S3：纯 Rust 原生
     let opts_val: Value = serde_json::from_str(&payload).unwrap_or(json!({}));
-    match crate::engine::native::peripheral_apply(&opts_val) {
-        Ok(()) => {
+    // 性能优化 P1：注册表写入 + 备份目录裁剪（read_dir + 回收站）全是同步 I/O，整段进
+    // 阻塞池。「应用完成」日志保持原顺序（先记完成、再裁备份），失败文案一字未改。
+    let applied = tauri::async_runtime::spawn_blocking(move || {
+        crate::engine::native::peripheral_apply(&opts_val).map(|_| {
             log::write_log("info", "外设优化应用原生完成");
             prune_backups(10);
-            Ok(json!({ "success": true, "message": "完成" }))
+        })
+    })
+    .await;
+    match applied {
+        Ok(Ok(())) => Ok(json!({ "success": true, "message": "完成" })),
+        Ok(Err(e)) => {
+            log::write_log("warn", &format!("外设优化应用原生失败: {e}"));
+            Ok(json!({ "success": false, "message": format!("写入注册表失败: {e}") }))
         }
         Err(e) => {
-            log::write_log("warn", &format!("外设优化应用原生失败: {e}"));
+            log::write_log("warn", &format!("外设优化应用原生任务异常: {e}"));
             Ok(json!({ "success": false, "message": format!("写入注册表失败: {e}") }))
         }
     }

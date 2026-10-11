@@ -173,8 +173,17 @@ export const UNITS = [
     gates: ['check-escape-delegation', 'check-a11y'],
   },
   {
+    // P0 子窗 CSS 按需（2026-10-12）拆出的主窗专属页面样式。必须排在 F1a 之前：
+    // 目录认领只吃「此前无人认领」的文件，先点名才能把它从 F1a 的 styles 目录里摘走。
+    id: 'F1c', owner: 'sub', name: '主窗页面样式（子窗不加载）',
+    files: ['src/styles/main-pages.css'],
+    contract: '只允许出现四个子窗语料都不引用的选择器 / 不得定义 :root token',
+    boundary: '与 main.css 同特异度且共享 token 的规则必须留在 main.css（层叠顺序防线，见 check-subwindow-css）',
+    gates: ['check-subwindow-css', 'check-contrast', 'check-css-tokens'],
+  },
+  {
     id: 'F1a', owner: 'sub', name: '设计系统 token（main.css，分段审）',
-    dirs: [{ dir: 'src/styles', ext: ['.css'] }],
+    dirs: [{ dir: 'src/styles', ext: ['.css'], notPrefix: 'main-pages' }],
     segmented: true,
     segmentBy: '锚点子串分段（token 基础段 / 组件段 / 动效与材质段），禁写行号（AGENTS §5.19）',
     contract: 'token 唯一真源 / 圆角档位 / --lg-glass-floor / --ease-standard',

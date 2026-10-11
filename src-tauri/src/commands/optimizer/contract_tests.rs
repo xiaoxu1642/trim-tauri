@@ -2173,10 +2173,16 @@ let ov = include_str!("overview.rs");
         ] {
             assert!(!js.contains(needle), "行内还原入口残留：{why}（{needle}）仍在 optimizer.js");
         }
-        let css = include_str!("../../../../src/styles/main.css");
+        // P0 子窗 CSS 按需（2026-10-12）：主窗实际加载的是 main.css + main-pages.css 两份，
+        // 「死规则不许复活」与「弹窗类名必须有规则」都按**加载并集**判，只看 main.css 会
+        // 因为规则被分到另一份而假绿/假红。
+        let css = concat!(
+            include_str!("../../../../src/styles/main.css"),
+            include_str!("../../../../src/styles/main-pages.css"),
+        );
         assert!(
             !css.contains(".opt-row-restore"),
-            "行内还原按钮的 CSS 还在 main.css 里（永不显示的死规则）"
+            "行内还原按钮的 CSS 还在主窗样式里（永不显示的死规则）"
         );
         // ② 弹窗是本任务后**唯一**的还原判定点：必须消费 restorable（>0 时讲明
         //    「按本机备份逐值还原（N 个值）」），否则该字段成为零消费方死字段
@@ -2235,7 +2241,12 @@ let ov = include_str!("overview.rs");
     #[test]
     fn ui_逐项勾选弹窗的执行链不许静默失效() {
         let js = include_str!("../../../../src/scripts/optimizer.js");
-        let css = include_str!("../../../../src/styles/main.css");
+        // 主窗实际加载 main.css + main-pages.css 两份（P0 子窗 CSS 按需，2026-10-12）：
+        // 按并集判，否则 `.pick-*` 被分到另一份就假红、死规则复活在另一份就假绿。
+        let css = concat!(
+            include_str!("../../../../src/styles/main.css"),
+            include_str!("../../../../src/styles/main-pages.css"),
+        );
         // 扫源码形态前先剥注释：注释里复述调用形态（本文件就有一堆）会把判据带偏，
         // 而「注释里写了 escapeAttr(」从来不是缺陷。
         let js = strip_js_comments(js);
@@ -2302,7 +2313,7 @@ let ov = include_str!("overview.rs");
             "渲染层没有直接调 window.ds.escAttr —— 属性位转义必须显式走 escAttr"
         );
 
-        // ② 弹窗用到的每个 `pick-*` 类名都必须在 main.css 里有规则。
+        // ② 弹窗用到的每个 `pick-*` 类名都必须出现在主窗实际加载的样式里。
         //
         // 漏一条的后果不是「样式不完美」而是**整个勾选区全裸**：勾选框与行布局
         // 全靠这几条撑着，缺了它们清单会渲染成一坨没有间距、没有滚动上限的文字流。

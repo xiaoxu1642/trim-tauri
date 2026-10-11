@@ -40,6 +40,7 @@ const MUST_RUN = [
   'check-assets-used',
   'check-asset-size',
   'check-contrast',
+  'check-subwindow-css',
   'check-idle-scripts',
   'check-escape-delegation',
   'check-subwindow-init',

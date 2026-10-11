@@ -248,27 +248,50 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
         Err(e) => return Ok(json!({ "success": false, "message": format!("无效路径: {e}") })),
     };
     let src_str = src.to_string_lossy().to_string();
-    if !src.exists() {
-        return Ok(json!({ "success": false, "message": "字体文件不存在或不可访问" }));
-    }
-    let meta = match std::fs::metadata(&src) {
-        Ok(m) => m,
-        Err(_) => return Ok(json!({ "success": false, "message": "字体文件为空或不可读取" })),
+    // 性能优化 P1：存在性 / 元数据 / 魔数校验三段磁盘 I/O 整段进阻塞池。三种失败文案
+    // 是渲染层直接展示给用户的，故用 Err(String) 逐条原样回带，不压成一种消息。
+    let checked = {
+        let probe = src.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            if !probe.exists() {
+                return Err("字体文件不存在或不可访问".to_string());
+            }
+            let meta = std::fs::metadata(&probe).map_err(|_| "字体文件为空或不可读取".to_string())?;
+            if !meta.is_file() || meta.len() == 0 {
+                return Err("字体文件为空或不可读取".to_string());
+            }
+            if !is_font_file_valid(&probe) {
+                return Err(
+                    "该文件不是有效的字体文件（支持 .ttf / .otf / .woff / .woff2），请检查文件是否损坏"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        })
+        .await
     };
-    if !meta.is_file() || meta.len() == 0 {
-        return Ok(json!({ "success": false, "message": "字体文件为空或不可读取" }));
-    }
-    if !is_font_file_valid(&src) {
-        return Ok(json!({
-            "success": false,
-            "message": "该文件不是有效的字体文件（支持 .ttf / .otf / .woff / .woff2），请检查文件是否损坏"
-        }));
+    match checked {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => return Ok(json!({ "success": false, "message": message })),
+        Err(e) => return Ok(json!({ "success": false, "message": format!("字体校验任务异常: {e}") })),
     }
 
     let dir = fonts_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        log::write_log("error", &format!("导入字体失败: 创建字体目录失败 {e}"));
-        return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
+    // 性能优化 P1：建目录同样是磁盘 I/O，单独一次派发（保留「创建字体目录失败」这条日志文案）
+    let mkdir = {
+        let mkdir_dir = dir.clone();
+        tauri::async_runtime::spawn_blocking(move || std::fs::create_dir_all(&mkdir_dir)).await
+    };
+    match mkdir {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            log::write_log("error", &format!("导入字体失败: 创建字体目录失败 {e}"));
+            return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
+        }
+        Err(e) => {
+            log::write_log("error", &format!("导入字体失败: 创建字体目录任务异常: {e}"));
+            return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
+        }
     }
     let s = settings::load_settings();
     let prev = s.get("fontImported").filter(|v| v.is_object()).cloned();
@@ -292,9 +315,22 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     };
     let copy_path = dir.join(format!("{IMPORTED_BASE}{ext}"));
     let copy_str = copy_path.to_string_lossy().to_string();
-    if let Err(e) = std::fs::copy(&src, &copy_path) {
-        log::write_log("error", &format!("导入字体失败: {e}"));
-        return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
+    // 性能优化 P1：整文件复制（可达数十 MB）进阻塞池，async 体只拿回执
+    let copied = {
+        let copy_src = src.clone();
+        let copy_dst = copy_path.clone();
+        tauri::async_runtime::spawn_blocking(move || std::fs::copy(&copy_src, &copy_dst)).await
+    };
+    match copied {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            log::write_log("error", &format!("导入字体失败: {e}"));
+            return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
+        }
+        Err(e) => {
+            log::write_log("error", &format!("导入字体失败: 复制任务异常: {e}"));
+            return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
+        }
     }
     // 替换旧导入：删除旧副本（路径不同才删，相同则已被覆盖）
     if let Some(prev) = &prev {

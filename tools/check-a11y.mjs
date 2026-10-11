@@ -192,10 +192,15 @@ if (checkboxSites < 4) g.fail(`勾选框模板命中 ${checkboxSites} 处（< 4�
 if (liveHosts < 4) g.fail(`异步提示宿主命中 ${liveHosts} 处（< 4）⇒ 扫描面疑似失明`);
 if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描面疑似失明`);
 
-// ---- ④ 真仓扫描：main.css 的 RM 归零段（ds.css 的拇指归零自成一格，不强制耦合） ----
+// ---- ④ 真仓扫描：CSS 的 RM 归零段（ds.css 的拇指归零自成一格，不强制耦合） ----
+// P0 子窗 CSS 按需（2026-10-12）把主窗专属页面样式拆进 main-pages.css：RM 归零段的一部分
+// 规则随之搬家。归零覆盖面是「应用里所有会动的东西」，与文件怎么切无关 —— 只扫 main.css
+// 就会把「搬走了」读成「没归零」（与 L-28 的覆盖面失明同一族）。两份合起来判。
 {
-  const mainCss = readFileSync(join(SRC, 'styles', 'main.css'), 'utf8');
-  for (const v of rmViolations(mainCss)) g.fail(`src/styles/main.css：${v}`);
+  const cssText = ['main.css', 'main-pages.css']
+    .map((f) => readFileSync(join(SRC, 'styles', f), 'utf8'))
+    .join('\n');
+  for (const v of rmViolations(cssText)) g.fail(`src/styles/main.css + main-pages.css：${v}`);
 }
 
 // ---- ⑤⑥ 真仓扫描 ----

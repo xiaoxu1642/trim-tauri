@@ -292,13 +292,15 @@ pub async fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, d
             "message": format!("报告数据非法，未保存（{why}）"),
         }));
     }
-    let dir = ensure_report_dir()?;
     let name = format!("realtime-{}.json", crate::engine::now_ms());
-    let path = dir.join(&name);
     // 审查 v2-F13：目录清理 + `to_string_pretty` 序列化 + `sync_all` 全是磁盘 I/O，
     // 同步命令会把这段停顿留在主线程上。与同文件另两条写法对齐，丢进阻塞池。
+    // 性能优化 P1：建目录的 `create_dir_all` 同样是磁盘 I/O，一并收进同一个阻塞任务。
     let payload = data.clone();
+    let report_name = name.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
+        let dir = ensure_report_dir()?;
+        let path = dir.join(&report_name);
         prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS);
         security::atomic_write_json(&path, &payload)
     })
@@ -325,9 +327,11 @@ pub async fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, d
 #[tauri::command]
 pub async fn realtime_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    prune_reports();
     let dir = paths::realtime_report_dir();
     let out = tauri::async_runtime::spawn_blocking(move || -> Vec<Value> {
+        // 性能优化 P1：prune_reports 内含 create_dir_all + read_dir + remove_file，
+        // 留在 async 体内会占住 runtime worker，移进同一个阻塞任务的最前面。
+        prune_reports();
         let mut out: Vec<Value> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {

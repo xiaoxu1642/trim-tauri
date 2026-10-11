@@ -3098,4 +3098,94 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// 性能优化 P1 前置实测（v2 §三对 `file_deletable` 的原话是「修法须先量」）。
+    ///
+    /// 造 N 个真实小文件，分别计时 ① 只 `fs::metadata`、② 独占 open + close、
+    /// ③ open + metadata + close（现实现）、④ ③ 的 rayon 并行版。只出数，不改判据：
+    /// 数不出来「值得改」就不动手（AGENTS §4.1：没实测的收益不算收益）。
+    #[test]
+    #[ignore = "真机实测：落 3000 个磁盘文件并计时，非回归判据，取数时手动 --ignored 跑"]
+    fn file_deletable_独占打开成本实测() {
+        use std::time::Instant;
+        const N: usize = 3000;
+        let root = std::env::temp_dir().join(format!("trim-fd-probe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut paths = Vec::with_capacity(N);
+        for i in 0..N {
+            let p = root.join(format!("f{:05}.tmp", i));
+            fs::write(&p, b"x").unwrap();
+            paths.push(p);
+        }
+
+        let t0 = Instant::now();
+        let mut hit = 0usize;
+        for p in &paths {
+            if fs::metadata(p).is_ok() {
+                hit += 1;
+            }
+        }
+        let stat = t0.elapsed();
+
+        let t0 = Instant::now();
+        for p in &paths {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                if let Ok(_f) = fs::OpenOptions::new().read(true).share_mode(0).open(p) {
+                    hit += 1;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                if fs::File::open(p).is_ok() {
+                    hit += 1;
+                }
+            }
+        }
+        let open_only = t0.elapsed();
+
+        let t0 = Instant::now();
+        for p in &paths {
+            if super::file_deletable(p) {
+                hit += 1;
+            }
+        }
+        let current = t0.elapsed();
+
+        let t0 = Instant::now();
+        use rayon::prelude::*;
+        let par = paths
+            .par_iter()
+            .filter(|p| super::file_deletable(p))
+            .collect::<Vec<_>>();
+        hit += par.len();
+        let parallel = t0.elapsed();
+
+        // 参照：同一个目录树的 read_dir 枚举本身要花多久（扫描的真实大头）
+        let t0 = Instant::now();
+        let entries = fs::read_dir(&root).map(|r| r.count()).unwrap_or(0);
+        let readdir = t0.elapsed();
+
+        let per = |d: std::time::Duration| d.as_micros() as f64 / N as f64;
+        println!(
+            "file_deletable 实测 N={N} 命中={hit} 目录枚举={entries}\n\
+             ① 只 metadata      总 {:>9.1}ms  每文件 {:>6.1}µs\n\
+             ② open+close      总 {:>9.1}ms  每文件 {:>6.1}µs\n\
+             ③ 现实现(含 md)   总 {:>9.1}ms  每文件 {:>6.1}µs\n\
+             ④ ③的并行版      总 {:>9.1}ms  每文件 {:>6.1}µs\n\
+             参照 read_dir 一次 总 {:>9.1}ms\n\
+             外推 1 万文件：③ {:>7.1}ms / ④ {:>7.1}ms",
+            stat.as_secs_f64() * 1e3, per(stat),
+            open_only.as_secs_f64() * 1e3, per(open_only),
+            current.as_secs_f64() * 1e3, per(current),
+            parallel.as_secs_f64() * 1e3, per(parallel),
+            readdir.as_secs_f64() * 1e3,
+            per(current) * 10000.0 / 1000.0,
+            per(parallel) * 10000.0 / 1000.0,
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

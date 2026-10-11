@@ -1537,4 +1537,33 @@ fn bench_history_list_matches_file_truth() {
     }
 }
 
+/// 性能优化 P0-3 前置实测（v2 §九#7 被推翻后重设计为「先量再决定要不要上限」）。
+///
+/// 原方案要给 `startup_scan()` 加 `.take(500)`，被 v2 判为回归；这里出的是**真实条数**：
+/// ① 本机枚举到多少条（决定「上限」在现实机器上是否会触发）；
+/// ② 是否已超过写侧的 500 条整批上限（`commands/startup.rs` 的 `items.len() > 500` 判拒）——
+///    超了才说明「全选一键禁用」本就有问题，没超就说明加上限只是凭空引入风险。
+/// 只读数、不改判据；结论用于决定这条要不要动手。
+#[test]
+#[ignore = "真机实测：读注册表与计划任务，非回归判据，取数时手动 --ignored 跑"]
+fn startup_scan_真实条数与写侧上限关系实测() {
+    let items = trim_tauri_lib::engine::native::startup_scan().expect("本机启动项枚举应成功（失败先查环境，别改判据）");
+    let mut by_source: std::collections::BTreeMap<String, usize> = Default::default();
+    for it in &items {
+        *by_source
+            .entry(it.get("source").and_then(|v| v.as_str()).unwrap_or("?").to_string())
+            .or_default() += 1;
+    }
+    let over_write_cap = items.len() > 500;
+    println!(
+        "startup_scan 实测：总 {} 条，分来源 {:#?}；写侧整批上限 500 —— {}（enabled/disabled 计数 {} / {}）",
+        items.len(),
+        by_source,
+        if over_write_cap { "已超：全选一键操作本就会被 validate_snapshot_items 整批拒" } else { "未超：take(500) 在现实机器上永不触发，纯增风险" },
+        items.iter().filter(|i| i.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)).count(),
+        items.iter().filter(|i| i.get("enabled").and_then(|v| v.as_bool()) == Some(false)).count(),
+    );
+    assert!(!items.is_empty(), "本机启动项不应为空（真为空说明判据退化，不是「没有启动项」）");
+}
+
 

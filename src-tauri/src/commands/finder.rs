@@ -578,60 +578,23 @@ pub async fn finder_delete<R: tauri::Runtime>(
     // 审查 v2-M5：一律以 `it.target()`（原生侧交来的路径真身）为预检与删除对象，
     // 不再 `OsString::from(it.path)` —— 展示串是 lossy 后的文本，重建出来的可能是
     // 另一个真实存在的路径（删错对象），也可能谁都指不到（恒判 NotFound 却仍回 success:true）。
-    let mut preflight: Vec<SnapEntry> = Vec::new();
-    let mut unhandled = 0usize;
-    for it in &valid_safe {
-        // 文件名无法无损表示 ⇒ 保护清单判定（按字符串比对）不可靠，宁可不删也要明说
-        if it.is_lossy() {
-            unhandled += 1;
-            log::write_log("warn", &format!("finder 删除预检: 文件名无法无损处理，未删除 -> {}", it.path));
-            continue;
-        }
-        let target = it.target();
-        match std::fs::metadata(&target) {
-            Ok(md) => {
-                if it.kind == "dir" && !md.is_dir() {
-                    continue; // 类型不符：跳过
-                }
-                if it.kind == "file" && !md.is_file() {
-                    continue;
-                }
-                // TOCTOU 剩留场景：「扫描时空、删除时已非空」的目标跳过，
-                // 防止把扫描后新放入的内容整棵连进回收站
-                if it.empty && it.kind == "dir" {
-                    // 扫描侧的空目录是**折叠后**的最外层父目录：它体内恰是那些空子目录
-                    // （或扫描认作空的 0 字节文件），`read_dir().count() > 0` 必然成立 ⇒
-                    // 默认勾选的折叠父目录 100% 被跳过。判据与扫描侧同源
-                    // （`prune_tree_effectively_empty`，AGENTS §5.16），按空树复检。
-                    if !trim_finder::scan::prune_tree_effectively_empty(std::path::Path::new(&target)) {
-                        let child_count = std::fs::read_dir(&target).map(|r| r.count()).unwrap_or(0);
-                        log::write_log(
-                            "warn",
-                            &format!(
-                                "finder 删除预检: 空目录树内已有实际内容（顶层 {} 项），跳过 -> {}",
-                                child_count, it.path,
-                            ),
-                        );
-                        continue;
-                    }
-                }
-                preflight.push(it.clone());
-            }
+    let safe_total = valid_safe.len();
+    // 性能优化 P1：预检逐条 `metadata` / 空树复检 / `read_dir` 全是磁盘 I/O（条目上限
+    // 可达 FINDER_DELETE_MAX），整段搬进阻塞池，执行体见 `run_delete_preflight`。
+    let (preflight, mut unhandled) =
+        match tauri::async_runtime::spawn_blocking(move || run_delete_preflight(valid_safe)).await {
+            Ok(v) => v,
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    log::write_log("warn", &format!("finder 删除预检: 目标已不存在，跳过 -> {}", it.path));
-                } else {
-                    log::write_log("warn", &format!("finder 删除预检失败: {} -> {e}", it.path));
-                }
+                log::write_log("error", &format!("finder 删除预检任务异常: {e}"));
+                return json!({ "success": false, "message": format!("删除失败: {e}") });
             }
-        }
-    }
+        };
     if preflight.is_empty() {
         return json!({
             "success": true,
             "data": {
                 "totalFreed": 0, "success": 0, "failed": 0,
-                "skipped": valid_safe.len(), "recycled": 0, "unhandled": unhandled,
+                "skipped": safe_total, "recycled": 0, "unhandled": unhandled,
                 "details": [], "manifestPath": null
             }
         });
@@ -687,7 +650,7 @@ pub async fn finder_delete<R: tauri::Runtime>(
     }
     // skipped = 未被原生侧处理（预检剔除 + 未出结果行）的数量；unhandled 是其中说得出
     // 原因的那部分（审查 v2-M5），渲染层据此讲「N 项因文件名无法处理而未删」。
-    let skipped = valid_safe.len().saturating_sub(success + failed);
+    let skipped = safe_total.saturating_sub(success + failed);
 
     // 删除清单：成功项落盘（误删追溯的唯一凭据）
     let batch_id = delete_manifest::new_batch_id();
@@ -733,6 +696,63 @@ pub async fn finder_delete<R: tauri::Runtime>(
             "manifestPath": manifest_path
         }
     })
+}
+
+/// 删除前预检的执行体（FD-4 与审查 v2-M5 的全部判据都在这里，一条没减）。
+///
+/// 性能优化 P1：这一段逐条做 `metadata` + 空目录树递归复检 + `read_dir`，全是磁盘 I/O
+/// 且条目上限可达 `FINDER_DELETE_MAX`；抽成独立同步函数后由 `finder_delete` 整段丢进
+/// 阻塞池，async 命令体不再占住 runtime worker。
+fn run_delete_preflight(valid_safe: Vec<SnapEntry>) -> (Vec<SnapEntry>, usize) {
+    let mut preflight: Vec<SnapEntry> = Vec::new();
+    let mut unhandled = 0usize;
+    for it in &valid_safe {
+        // 文件名无法无损表示 ⇒ 保护清单判定（按字符串比对）不可靠，宁可不删也要明说
+        if it.is_lossy() {
+            unhandled += 1;
+            log::write_log("warn", &format!("finder 删除预检: 文件名无法无损处理，未删除 -> {}", it.path));
+            continue;
+        }
+        let target = it.target();
+        match std::fs::metadata(&target) {
+            Ok(md) => {
+                if it.kind == "dir" && !md.is_dir() {
+                    continue; // 类型不符：跳过
+                }
+                if it.kind == "file" && !md.is_file() {
+                    continue;
+                }
+                // TOCTOU 剩留场景：「扫描时空、删除时已非空」的目标跳过，
+                // 防止把扫描后新放入的内容整棵连进回收站
+                if it.empty && it.kind == "dir" {
+                    // 扫描侧的空目录是**折叠后**的最外层父目录：它体内恰是那些空子目录
+                    // （或扫描认作空的 0 字节文件），`read_dir().count() > 0` 必然成立 ⇒
+                    // 默认勾选的折叠父目录 100% 被跳过。判据与扫描侧同源
+                    // （`prune_tree_effectively_empty`，AGENTS §5.16），按空树复检。
+                    if !trim_finder::scan::prune_tree_effectively_empty(std::path::Path::new(&target)) {
+                        let child_count = std::fs::read_dir(&target).map(|r| r.count()).unwrap_or(0);
+                        log::write_log(
+                            "warn",
+                            &format!(
+                                "finder 删除预检: 空目录树内已有实际内容（顶层 {} 项），跳过 -> {}",
+                                child_count, it.path,
+                            ),
+                        );
+                        continue;
+                    }
+                }
+                preflight.push(it.clone());
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    log::write_log("warn", &format!("finder 删除预检: 目标已不存在，跳过 -> {}", it.path));
+                } else {
+                    log::write_log("warn", &format!("finder 删除预检失败: {} -> {e}", it.path));
+                }
+            }
+        }
+    }
+    (preflight, unhandled)
 }
 
 

@@ -99,7 +99,7 @@ pub async fn overview_hardware<R: tauri::Runtime>(
     guard::guard_readonly(&window)?;
     let refresh = refresh.unwrap_or(false);
     if !refresh {
-        if let Some(cached) = load_system_info_cache() {
+        if let Some(cached) = read_system_info_cache().await {
             return Ok(serde_json::json!({
                 "success": true, "data": cached.1, "cached": true, "cachedAt": cached.0
             }));
@@ -109,12 +109,12 @@ pub async fn overview_hardware<R: tauri::Runtime>(
         .await;
     match result {
         Ok(Ok(data)) => {
-            save_system_info_cache(&data);
+            write_system_info_cache(data.clone()).await;
             Ok(serde_json::json!({ "success": true, "data": data, "cached": false }))
         }
         Ok(Err(message)) => {
             // 扫描失败回落旧缓存（degraded），避免一次失败把页面清空
-            match load_system_info_cache() {
+            match read_system_info_cache().await {
                 Some((at, data)) => Ok(serde_json::json!({
                     "success": true, "data": data, "cached": true, "cachedAt": at, "degraded": true
                 })),
@@ -140,6 +140,25 @@ fn save_system_info_cache(data: &Value) {
     let payload = serde_json::json!({ "timestamp": crate::engine::now_ms(), "data": data });
     if let Err(e) = security::atomic_write_json(&paths::system_info_file(), &payload) {
         crate::engine::log::write_log("error", &format!("保存系统信息缓存失败: {e}"));
+    }
+}
+
+/// 性能优化 P1：硬件信息缓存的读盘 + 解析进阻塞池。join 异常按「未命中」降级并留痕，
+/// 不静默吞（吞掉就等于把「任务崩了」伪装成「没有缓存」）。
+async fn read_system_info_cache() -> Option<(i64, Value)> {
+    match tauri::async_runtime::spawn_blocking(load_system_info_cache).await {
+        Ok(v) => v,
+        Err(e) => {
+            crate::engine::log::write_log("warn", &format!("读取系统信息缓存任务异常: {e}"));
+            None
+        }
+    }
+}
+
+/// 性能优化 P1：写盘（`to_string_pretty` + `sync_all`）进阻塞池。
+async fn write_system_info_cache(data: Value) {
+    if let Err(e) = tauri::async_runtime::spawn_blocking(move || save_system_info_cache(&data)).await {
+        crate::engine::log::write_log("warn", &format!("保存系统信息缓存任务异常: {e}"));
     }
 }
 

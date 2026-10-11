@@ -15,7 +15,8 @@
 //      就静默变成「0 组全通过」的假绿（本项目有假绿前科：v1 M13 / v2-M16）。
 //      C2 逐文件地板：每份在扫描面里的 CSS 各自的组合数下限（见 SCAN_FLOOR）
 //
-// 扫描面（2026-10-03 L4 审查 L-28 收口后）：`main.css` + `ds.css` 两份。
+// 扫描面（2026-10-03 L4 审查 L-28 收口后为 main.css + ds.css 两份；2026-10-12 P0
+// 子窗 CSS 按需拆出 main-pages.css 后为三份，见下方 CSS_FILES 说明）。
 // 解析失明（K1）与**覆盖面失明**（L-28）是两回事：K1 修的是「能算的算不出来」，
 // L-28 修的是「压根没进扫描面 / 按 token 后缀整族跳过」。两者都要判红才算修完。
 //
@@ -31,7 +32,7 @@
 import { readFileSync } from 'node:fs';
 
 /**
- * 扫描面：**两份 CSS 都算**（审查 L-28，2026-10-03 L4 收口）。
+ * 扫描面：**三份 CSS 都算**（审查 L-28，2026-10-03 L4 收口；2026-10-12 P0 拆分后加 main-pages.css）。
  *
  * 原先只扫 main.css，ds.css 完全在射程外 —— 那是纯 CSS 盲区（不是 main.css 里解析
  * 不到，是根本没读那份文件）。ds.css 的 18 条 bg+fg 组合全是真实产品件：
@@ -39,18 +40,23 @@ import { readFileSync } from 'node:fs';
  * + .ds-tooltip + .ds-menu-item 四个态。任何一条将来写错 token 组合，
  * 旧门禁一律看不见。
  *
+ * main-pages.css 是「P0 子窗 CSS 按需」从 main.css 分箱出来的主窗专属页面样式：
+ * 它和 main.css 同属扫描面，**搬走不等于退出射程** —— 不纳进来，这 9 万字节里的
+ * 前景/底色组合就集体变成盲区（与 ds.css 当年同一类坑）。
+ *
  * **各自解析、不合并**（与 CSS 真实加载序无关，只为解析干净）：
- * 主题变量表（`:root` / `.theme-light`）只在 main.css 里，合并会让 ds.css 的
- * 任何选择器都参与 theme-block 扫描，多一层「ds.css 里冒出个 :root 就污染主题表」
+ * 主题变量表（`:root` / `.theme-light`）只在 main.css 里，合并会让其它文件的
+ * 任何选择器都参与 theme-block 扫描，多一层「别处冒出个 :root 就污染主题表」
  * 的隐患。行号也因此天然是**文件内行号**，不需要跨文件偏移量 —— 合并方案要手工
- * 维护偏移，ds.css 一增删行就整体漂移（已实测踩过：拼 offsets 算出的
+ * 维护偏移，任一文件一增删行就整体漂移（已实测踩过：拼 offsets 算出的
  * `ds.css:9793` 指向 main.css 第 9000 行，比不写行号更难查）。
  *
- * ds.css 必须在 main.css **之后加载**（其文件头明写），所以它的规则在级联里更晚，
- * 冲突时以它为准 —— 这与「先扫谁」无关，门禁只是把两者的组合各自算一遍。
+ * ds.css 必须在其余两份之后加载（其文件头明写），所以它的规则在级联里更晚，
+ * 冲突时以它为准 —— 这与「先扫谁」无关，门禁只是把各自的组合算一遍。
  */
 const CSS_FILES = [
   { label: 'main.css', path: new URL('../src/styles/main.css', import.meta.url) },
+  { label: 'main-pages.css', path: new URL('../src/styles/main-pages.css', import.meta.url) },
   { label: 'ds.css', path: new URL('../src/styles/ds.css', import.meta.url) },
 ];
 // 剥离注释但**保留换行与字符数**：这样按 index 算出来的行号仍然准确，
@@ -70,17 +76,20 @@ const AA_NORMAL = 4.5;
 
 // 算出来的组合数下限：低于它说明选择器/变量解析退化成了空集，而不是「真的都达标」
 //
-// 审查 L-28：这是**下限**棘轮（防退化）。收口 SOLID_SKIP 盲区 + 纳入 ds.css 后
-// 现算 454 组（原先 278）—— 下限故意留在 30 不动，因为下限只能证明「没退化」，
-// 证明不了「新收进来的那 176 组没被解析层悄悄吃掉」。那件事由下面
-// SCAN_FLOOR 单独钉住。
-const BASELINE_MIN = 30;
+// 审查 L-28：这原本只是**粗**下限（防「0 组全通过」），故意留在 30 不动，因为总量下限
+// 证明不了「新收进来的那一批没被解析层悄悄吃掉」—— 那件事由下面 SCAN_FLOOR 逐文件钉住。
+// 2026-10-12 P0 拆分后扫描面已有三份、逐文件地板齐全，总量这一档改成**实算棘轮**：
+// 现算 458 组（拆分前 main.css 408 + ds.css 32 + 正文 18 = 458，分箱无损已实测对拍），
+// 留约 6% 余量。这样「整族选择器写法变了、解析吃掉一批」会在总量上先红，而不是只靠三份地板。
+const BASELINE_MIN = 430;
 // 审查 L-28：**每一份**在扫描面里的 CSS 都必须至少产出 N 组组合。
-// 为什么需要：LOWER 是总量下限，两份文件里若有一份整体解析失败（比如 ds.css
-// 某次重构把 background 全改成 shorthand 之外的形式），总量仍可能靠 main.css
-// 撑过 30 ⇒ 假绿。逐文件设地板才能把「某一整份失明」与「组合变少」区分开。
+// 为什么需要：总量下限挡不住「两份文件里有一份整体解析失败」（比如 ds.css
+// 某次重构把 background 全改成 shorthand 之外的形式），总量仍可能靠别的文件
+// 撑过下限 ⇒ 假绿。逐文件设地板才能把「某一整份失明」与「组合变少」区分开。
 // 2026-10-03 现算：main.css 422 / ds.css 32（收口后）。
-const SCAN_FLOOR = { 'main.css': 380, 'ds.css': 24 };
+// 2026-10-12 P0 拆分后现算：main.css 330 / main-pages.css 78 / ds.css 32，
+// 三份之和 408 + 32 = 440 与拆分前 main.css(408)+ds.css(32) 逐组对拍无损。
+const SCAN_FLOOR = { 'main.css': 300, 'main-pages.css': 70, 'ds.css': 24 };
 
 // ---------- 1. 两个主题变量块 ----------
 function blockVars(startIdx) {

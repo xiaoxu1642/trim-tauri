@@ -295,9 +295,17 @@ pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Optio
         }));
     };
     // 复核 N2：渲染/GPU helper 等子进程 PID 与主进程不同，靠**同 exe 路径**一并拦住
-    let self_exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    // 性能优化 P1：本进程 exe 路径在进程生命周期内恒定，用 OnceLock 只查一次。
+    // 方案原建议 spawn_blocking —— `current_exe` 是模块路径查询不是磁盘 I/O，
+    // 搬到阻塞池只会多出一次任务派发，缓存才是根因解法。
+    static SELF_EXE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let self_exe = SELF_EXE
+        .get_or_init(|| {
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        })
+        .as_str();
     let known_exe = known.path.to_lowercase();
     if !self_exe.is_empty() && !known_exe.is_empty() && known_exe == self_exe {
         return Ok(json!({
