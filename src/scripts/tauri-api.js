@@ -79,7 +79,6 @@
     'cleanup:file-backup-restore': 'cleanup_file_backup_restore',
     'cleanup:scan': 'cleanup_scan',
     'cleanup:execute': 'cleanup_execute',
-    'cleanup:retry-failed-delete': 'cleanup_retry_failed_delete',
     'cleanup:check-locked': 'cleanup_check_locked',
     'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
     'cleanup:item-detail': 'cleanup_item_detail',
@@ -429,7 +428,6 @@
           autoRebuild: autoRebuild === true
         });
       },
-      retryFailedDelete: function () { return invokeChannel('cleanup:retry-failed-delete'); },
       checkLocked: function (ids) { return invokeChannel('cleanup:check-locked', { ids: ids }); },
       killLockedProcesses: function () { return invokeChannel('cleanup:kill-locked-processes'); },
       itemDetail: function (id, path) {

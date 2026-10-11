@@ -66,17 +66,13 @@ pub(super) fn load_paths_config() -> Value {
     }
 }
 
-// ==================== 分槽快照（对照 cleanupSnapshots / trashFailureSlots / lastLockCheckProcs） ====================
+// ==================== 分槽快照（对照 cleanupSnapshots / lastLockCheckProcs） ====================
 
 pub(super) static CLEANUP_SNAPSHOTS: OnceLock<Mutex<HashMap<String, HashMap<String, Value>>>> = OnceLock::new();
-pub(super) static TRASH_FAILURES: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
 pub(super) static LOCK_WHITELIST: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
 
 pub(super) fn snapshots() -> &'static Mutex<HashMap<String, HashMap<String, Value>>> {
     CLEANUP_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-pub(super) fn trash_failures() -> &'static Mutex<HashMap<String, Vec<Value>>> {
-    TRASH_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 pub(super) fn lock_whitelist() -> &'static Mutex<HashMap<String, Vec<Value>>> {
     LOCK_WHITELIST.get_or_init(|| Mutex::new(HashMap::new()))

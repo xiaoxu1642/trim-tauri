@@ -6,10 +6,9 @@
 //! 计划上限（PLAN_CAP_* / EXECUTE_MAX_ITEMS）是防止一键盘爆掉的保护位。
 //! 被占用的项走 check-locked / kill-locked-processes，终止进程只白名单内放行。
 
-use crate::engine::{guard, log, protect};
+use crate::engine::{guard, log};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use tauri::WebviewWindow;
@@ -318,9 +317,9 @@ pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categorie
 ///
 /// 2026-10-12 用户裁定（实测「清理一直卡死进度」后）：**移除批次 B 遗留的
 /// gameRedist 回收站窄口径例外** —— 扫描出来的项目一律直接删除，不再逐文件走
-/// `SHFileOperationW` 移入回收站。此前的例外是唯一喂给 `TRASH_FAILURES` 的路径，
-/// 移除后该槽恒空、`cleanup:retry-failed-delete` 不再被触发（链路保留未撤，
-/// 见 state.rs；整链是否退役另议）。
+/// `SHFileOperationW` 移入回收站。同日二次裁定：**回收站重试链整链退役**
+/// （`cleanup:retry-failed-delete` / `TRASH_FAILURES` / 前端 `offerTrashRetry`
+/// 一并撤除）——它的唯一喂给源就是那条回收站例外，退役后无任何消费者。
 ///
 /// 参数**保留**是为了不破坏 `CHANNEL_MAP` 的载荷键（删字段会让渲染层与
 /// `tauri-api.js` 两侧同时改，且旧版前端传了它会被静默吞掉）。收到 true 时
@@ -427,11 +426,6 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
         let Ok(mut data) = serde_json::from_str::<Value>(&body) else {
             return json!({ "success": false, "message": "解析结果失败", "raw": diag_stripped });
         };
-        if let Some(o) = data.as_object_mut() {
-            // 形状兼容保留：回收站重试链已无喂给源（2026-10-12 全量永久删裁定），
-            // TRASH_FAILURES 恒空，渲染层对空数组零行为（offerTrashRetry 不触发）。
-            o.insert("trashFailures".into(), json!([]));
-        }
         let (total_freed, success, n_partial, skipped) = summarize_details(&data);
         let n_residual = data
             .get("details")
@@ -536,94 +530,6 @@ pub(super) fn summarize_details(data: &Value) -> (i64, usize, usize, usize) {
         }
     }
     (total, success, partial, skipped)
-}
-
-// ==================== cleanup:retry-failed-delete ====================
-
-/// cleanup:retry-failed-delete — 回收站失败项的永久删除重试（白名单只来自最近一次 execute）
-///
-/// 审查 L9：这条同步 `fn` 里对**任意**失败项跑 `remove_dir_all`。同步命令跑在主线程，
-/// 一个大目录能让 UI 整段冻结（且用户此刻正盯着进度），故整体挪进 `spawn_blocking`。
-/// 渲染层本来就是 `invoke` 拿 Promise，改异步对 JS 侧零影响。
-#[tauri::command]
-pub async fn cleanup_retry_failed_delete<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    let label = window.label().to_string();
-    let targets = trash_failures()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&label)
-        .unwrap_or_default();
-    if targets.is_empty() {
-        return json!({ "success": false, "message": "没有待重试的失败项" });
-    }
-    let task = tauri::async_runtime::spawn_blocking(move || {
-        retry_failed_delete_blocking(targets)
-    });
-    match task.await {
-        Ok(v) => v,
-        Err(e) => json!({ "success": false, "message": format!("删除任务异常终止: {e}") }),
-    }
-}
-
-pub(super) fn retry_failed_delete_blocking(targets: Vec<Value>) -> Value {
-    log::write_log("warn", &format!("开始永久删除回收站失败项: {} 项", targets.len()));
-    log::flush_sync(); // 审查v4-L3：危险操作执行前强制刷盘
-    let mut freed = 0i64;
-    let mut ok = 0usize;
-    let mut failed = 0usize;
-    let mut details: Vec<Value> = Vec::new();
-    for t in targets {
-        let path = t.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let is_dir = t.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !Path::new(&path).exists() {
-            details.push(json!({ "path": path, "status": "skip", "freed": 0, "message": "文件不存在" }));
-            continue;
-        }
-        if protect::is_path_protected(&path) {
-            failed += 1;
-            log::write_log("warn", &format!("受保护路径，拒绝删除: {path}"));
-            details.push(json!({ "path": path, "status": "error", "freed": 0, "message": "受保护路径，已拒绝" }));
-            continue;
-        }
-        // §5.2：目录的释放量用失败条目里存的**扫描时累计大小**——symlink_metadata
-        // 对目录给的是目录项大小（0 或 4096），totalFreed 对唯一不可逆分支少报几个
-        // 数量级；条目没有大小（存量槽）时保持 0，不拿目录项大小充数。文件仍用
-        // 删除前实测（symlink_metadata.len 对文件是真实字节数，比扫描时更准）。
-        let size = if is_dir {
-            js_num_or_zero(t.get("size")) as i64
-        } else {
-            std::fs::symlink_metadata(&path).map(|m| m.len() as i64).unwrap_or(0)
-        };
-        let rm = if is_dir {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        match rm {
-            Ok(()) => {
-                freed += size;
-                ok += 1;
-                details.push(json!({ "path": path, "status": "ok", "freed": size }));
-                log::write_log("warn", &format!("回收站失败项经用户确认后永久删除: {path}"));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // fs.rmSync(force:true) 忽略 ENOENT
-                ok += 1;
-                details.push(json!({ "path": path, "status": "ok", "freed": 0 }));
-            }
-            Err(e) => {
-                failed += 1;
-                details.push(json!({ "path": path, "status": "error", "freed": 0, "message": e.to_string() }));
-            }
-        }
-    }
-    json!({
-        "success": failed == 0,
-        "data": { "totalFreed": freed, "ok": ok, "failed": failed, "details": details }
-    })
 }
 
 // ==================== cleanup:item-detail ====================
@@ -969,46 +875,4 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
 }
 
 
-#[cfg(test)]
-mod retry_accounting_tests {
-    use super::*;
-
-    /// 2026-10-04 审计 §5.2：重试永久删的释放量口径。目录必须用失败条目里存的
-    /// **扫描时累计大小**（symlink_metadata 对目录给的是目录项大小 0/4096）；
-    /// 条目没带大小就报 0 不编数；文件用删除前实测、拒绝条目里的陈旧值。
-    #[test]
-    fn 重试永久删_目录释放量用扫描时累计大小() {
-        let root = std::env::temp_dir().join(format!("trim-retry-drel-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("a.bin"), vec![0u8; 1000]).unwrap();
-        std::fs::write(root.join("b.bin"), vec![0u8; 2000]).unwrap();
-
-        // 目录条目带扫描时累计大小 7777（与目录项大小 0/4096 可区分）
-        let targets = vec![json!({ "path": root.to_string_lossy(), "isDir": true, "size": 7777i64 })];
-        let res = retry_failed_delete_blocking(targets);
-        assert_eq!(res["data"]["totalFreed"], json!(7777), "目录释放量必须用扫描时累计大小: {}", res["data"]);
-        assert_eq!(res["data"]["ok"], json!(1));
-        assert!(!root.exists(), "目录必须真被删掉");
-
-        // 存量形态（条目没带 size）：freed = 0，不拿目录项大小充数，但照样删
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("c.bin"), vec![0u8; 500]).unwrap();
-        let targets2 = vec![json!({ "path": root.to_string_lossy(), "isDir": true })];
-        let res2 = retry_failed_delete_blocking(targets2);
-        assert_eq!(res2["data"]["totalFreed"], json!(0), "条目没有大小就报 0: {}", res2["data"]);
-        assert_eq!(res2["data"]["ok"], json!(1));
-        assert!(!root.exists());
-
-        // 文件：用删除前实测字节数，不用条目里的陈旧值
-        let fpath = std::env::temp_dir().join(format!("trim-retry-file-{}.bin", std::process::id()));
-        let _ = std::fs::remove_file(&fpath);
-        std::fs::write(&fpath, vec![0u8; 300]).unwrap();
-        let targets3 = vec![json!({ "path": fpath.to_string_lossy(), "isDir": false, "size": 999999i64 })];
-        let res3 = retry_failed_delete_blocking(targets3);
-        assert_eq!(res3["data"]["totalFreed"], json!(300), "文件释放量必须是删除前实测: {}", res3["data"]);
-        assert!(!fpath.exists());
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_file(&fpath);
-    }
-}
+// 2026-10-12：retry_accounting_tests（重试永久删的释放量口径）随回收站重试链整链退役。

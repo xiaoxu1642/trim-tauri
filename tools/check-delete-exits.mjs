@@ -111,10 +111,9 @@ const MUST_PROTECT = [
 ];
 
 // 二跳出口的正向棘轮（审查 L-4）：protect 不在命令体内、而在本仓 helper 里。
-// cleanup_retry_failed_delete 命令体是薄包装（guard + 组装 targets），真正的
-// remove_dir_all/remove_file + is_path_protected 全在 retry_failed_delete_blocking ——
-// 命令体口径的 MUST_PROTECT 对它恒红，所以单独登记 {命令, helper}，钉住 helper 体内
-// 的 protect 调用。helper 改名/protect 被删/搬出 src 均红。
+// 登记 {命令, helper}，钉住 helper 体内的 protect 调用——helper 改名/protect 被删/
+// 搬出 src 均红。（2026-10-12：原首条 cleanup_retry_failed_delete /
+// retry_failed_delete_blocking 随回收站重试链整链退役撤除。）
 //
 // ⚠️ 第三段 `file` 是 2026-10-04 磁盘清理审计 §2.1 补的，且**不是可选的锦上添花**：
 //
@@ -136,7 +135,6 @@ const MUST_PROTECT = [
 //
 //   第三段 file 是**相对 src-tauri** 的（ROOT 就是 src-tauri，见 :28）。
 const MUST_PROTECT_VIA_HELPER = [
-  ['cleanup_retry_failed_delete', 'retry_failed_delete_blocking'],
   // 2026-10-09（v4-K09 修复）：cleanup_execute 拆出薄包装——删前备份根需要可注入
   // （三个端到端用例的备份副本原先写进用户真实数据目录），实现体搬进
   // `cleanup_execute_with_backup_root`，`cleanup_execute` 退化为一行转发。protect 闸随

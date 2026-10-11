@@ -136,8 +136,8 @@ fn js_num_str(n: f64) -> String {
     ///
     /// 原实现 `let to_recycle = to_recycle.unwrap_or(false);` —— 裁定只在渲染层
     /// （`cleanup.js` 的 `const toRecycle = false;`）强制，命令侧任何传 `true` 的
-    /// 调用方都能翻转。翻转的后果不是「换个删法」，而是给不可逆的
-    /// `cleanup:retry-failed-delete` 喂数据（`TRASH_FAILURES` 的唯一来源）。
+    /// 调用方都能翻转。翻转的后果不是「换个删法」——回收站支会重新变成活路径
+    /// （2026-10-12 起该支与回收站重试链已整链退役，钉桩继续守等价裁定）。
     ///
     /// 判据是**赋值形态**而不是运行结果：`unwrap_or(false)` 与 `= false` 在
     /// 「调用方传 false」时行为完全一样，只有读源码分得开 —— 所以这条必须断源码。

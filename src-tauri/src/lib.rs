@@ -394,7 +394,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::cleanup::cleanup_file_backup_restore,
         commands::cleanup::cleanup_scan,
         commands::cleanup::cleanup_execute,
-        commands::cleanup::cleanup_retry_failed_delete,
         commands::cleanup::cleanup_check_locked,
         commands::cleanup::cleanup_kill_locked_processes,
         commands::cleanup::cleanup_item_detail,

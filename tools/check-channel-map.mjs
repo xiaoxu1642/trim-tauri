@@ -60,6 +60,7 @@ const RETIRED = {
   'pwsh:status': 'v2-R1（2026-10-01）：右键图标改原生 ExtractIconExW 后，PS7 候选链与 pwshruntime.rs 整条退役，本应用不再启动 pwsh.exe',
   'cleanup:update-rules': '2026-10-06（用户裁定）：规则库在线更新全链路退役，规则只随包体更新；cleanup 域 rules_update.rs 整文件删除',
   'cleanup:check-rules-version': '2026-10-06（用户裁定）：同上，检测链随更新链一并退役（版本徽标 UI 同撤）',
+  'cleanup:retry-failed-delete': '2026-10-12（用户裁定）：回收站重试链整链退役——清理固定全量永久删（回收站例外移除）后唯一喂给源消失；命令 + 注册 + CHANNEL_MAP + api 包装 + 前端引导同撤',
   'uninstall:check-residue-version': '2026-10-06（用户裁定）：残留规则库在线更新全链路退役（更新源枚举与网络校验一并删除，装载侧保留）',
   'uninstall:update-residue-rules': '2026-10-06（用户裁定）：同上；防回滚水位线写侧同撤，读侧保留',
   // 2026-10-07（用户裁定）：机-wide 扫描整条退役 —— 残留副窗只展示「该应用」的服务 / 驱动 /

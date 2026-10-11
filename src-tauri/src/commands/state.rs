@@ -9,7 +9,7 @@
 //!   （check-layering），搬过来会造反向依赖。
 //! - 函数体内 `static CACHE`（如 `optimizer/catalog.rs`）：只在函数内可见，没有跨模块锁序问题。
 //! - 与所属域访问器/守卫强绑定的（域内登记，仅点名不再搬）：
-//!   `cleanup::state` 的 `CLEANUP_SNAPSHOTS` / `TRASH_FAILURES` / `LOCK_WHITELIST`、
+//!   `cleanup::state` 的 `CLEANUP_SNAPSHOTS` / `LOCK_WHITELIST`、
 //!   `cleanup::rules` 的 `RULES_CACHE` / `WATERMARK_HIGH`、
 //!   `uninstall::helpers` 的 `RESIDUE_SNAPSHOTS`（设计注释：与取它的访问器同文件）、
 //!   `optimizer::apply` 的 `OPT_RUN_INFLIGHT`、`optimizer::restore_point` 的 `RESTORE_INFLIGHT`

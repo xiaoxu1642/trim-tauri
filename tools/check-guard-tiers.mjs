@@ -94,7 +94,6 @@ const MUST_MAIN = [
   'cleanup_kill_locked_processes',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
-  'cleanup_retry_failed_delete',
   'contextmenu_open_in_regedit', // v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC
   // 2026-10-09（D3）：contextmenu_remove / contextmenu_restore 随右键删除链整链退役
   'contextmenu_restart_explorer',

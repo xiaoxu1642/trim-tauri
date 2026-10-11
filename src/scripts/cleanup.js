@@ -1516,9 +1516,6 @@
           // v3.3.4 文案纠偏：部分成功不是失败——多数文件已清理，仅少数被占用未删
           window.app?.toast('warning', `${result.partial} 项部分清理完成（仅少数文件被占用未删）`);
         }
-        // 审查 4-4：回收站失败项 → 红色确认后改永久删除（回收站被禁用/已满时的降级出口）
-        const trashFailures = Array.isArray(result.trashFailures) ? result.trashFailures : [];
-        if (trashFailures.length > 0) offerTrashRetry(trashFailures);
       }, 600);
     } catch (e) {
       clearInterval(progressTimer);
@@ -1544,31 +1541,8 @@
     } catch (_) { /* 提权提示失败不影响主流程 */ }
   }
 
-  // 审查 4-4：回收站失败项的永久删除引导——不可逆操作，必须走红色二次确认（confirmDanger）。
-  // 目标清单由主进程留存（cleanup:retry-failed-delete 只处理最近一次执行留存的失败项），
-  // 渲染层不能指定任意路径。
-  async function offerTrashRetry(failures) {
-    try {
-      const total = failures.reduce((s, f) => s + sizeNumber(f.size), 0);
-      const ok = await window.app?.confirmDanger(
-        '部分项目无法移入回收站',
-        `有 ${failures.length} 项（共 ${formatSize(total)}）无法移入回收站（回收站可能已满或已禁用）。\n是否改为永久删除？`,
-        '永久删除', '取消',
-        '永久删除不可恢复，文件不会进入回收站。'
-      );
-      if (!ok) return;
-      const resp = await window.api?.cleanup?.retryFailedDelete();
-      if (resp && resp.success) {
-        window.app?.toast('success', `已永久删除 ${resp.data.ok} 项，释放 ${formatSize(resp.data.totalFreed)} 空间`);
-      } else {
-        window.app?.toast('error', (resp && resp.message) || '永久删除失败');
-      }
-      renderCategoryList();
-      updateUI();
-    } catch (e) {
-      window.app?.toast('error', '永久删除失败: ' + e.message);
-    }
-  }
+  // 2026-10-12：回收站重试引导（原 offerTrashRetry）随回收站重试链整链退役——
+  // 清理已固定全量永久删，「移入回收站失败」这一状态不再存在。
 
   // ==================== 图片预览（独立窗口） ====================
   // 打开独立「图片预览」窗口显示某个一级分类/子分组下的全部图片；
