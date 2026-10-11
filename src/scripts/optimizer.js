@@ -41,20 +41,22 @@
   // 2026-10-11：「隐私防护」从默认分类撤下——21 条隐私项整组移入隐私自护面板
   // （入口卡+hiddenFromOptimizer）；groupMap 的旧组映射保留：侧表加载失败的降级
   // 路径仍把旧组「安全与隐私」归并到「隐私防护」，由未登记分类兜底追加到栏尾显示。
+  // 同日：「内存优化/显卡优化/系统精简」三组合并进「系统调校」（19 项）。
   // 注意：注释必须放在 GROUP_FALLBACK 字面量外（门禁的字面量解析器不剥注释）。
   const GROUP_FALLBACK = {
-    default: ['内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '系统调校', '系统精简', '显卡优化', '浏览器优化'],
+    default: ['性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '系统调校', '浏览器优化'],
     groupMap: {
       '启动与响应': '系统调校',
       '游戏与多媒体': '性能调优',
       '安全与隐私': '隐私防护',
-      '系统清理': '系统精简',
-      '显卡优化': '显卡优化',
+      '系统清理': '系统调校',
       '键鼠与外设': '外设调优',
-      '系统精简': '系统精简'
+      '内存优化': '系统调校',
+      '显卡优化': '系统调校',
+      '系统精简': '系统调校'
     },
     itemOverride: {
-      svc_mem_gb: '内存优化',
+      svc_mem_gb: '系统调校',
       tf_svc_bulk: '系统服务', tf_drv_disable: '系统服务'
     }
   };
@@ -843,14 +845,16 @@
   const OPT_CATEGORY_KEY = 'trim-optcat-active';
   // 审查 2026-09-27 L11：「游戏安全诊断」无任何数据项映射（12 个最终展示组外），常驻
   // 空分类已删除；如日后新增该分组任务，在此补回即可
-  // 2026-10-11：「隐私防护」chip 撤下（整组进隐私自护面板，与 GROUP_FALLBACK.default 同步）
-  const OPT_CATEGORIES = ['全部', '内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '系统调校', '系统精简', '显卡优化', '浏览器优化'];
+  // 2026-10-11：「隐私防护」chip 撤下（整组进隐私自护面板，与 GROUP_FALLBACK.default 同步）；
+  // 同日内存优化/显卡优化/系统精简并入系统调校，chip 从 12 → 8 个
+  const OPT_CATEGORIES = ['全部', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '系统调校', '浏览器优化'];
 
   function getSavedCategory() {
     try {
       const v = localStorage.getItem(OPT_CATEGORY_KEY);
-      // 旧版本「系统清理」已并入「系统精简」，「网络优化」已移至系统维护-网络连接
-      if (v === '系统清理') return '系统精简';
+      // 旧版本「系统清理」→「系统精简」→ 三者已并入「系统调校」（2026-10-11），
+      // 「网络优化」已移至系统维护-网络连接。localStorage 里的旧选中项直接迁到新分类。
+      if (v === '系统清理' || v === '系统精简' || v === '内存优化' || v === '显卡优化') return '系统调校';
       if (v === '网络优化') return '全部';
       return OPT_CATEGORIES.indexOf(v) > -1 ? v : '全部';
     } catch (e) { return '全部'; }
@@ -1517,8 +1521,12 @@
     // 瀑布流布局：重新渲染后立即放置；窗口 resize 由 attach 内部防抖 + FLIP 动画重排
     // 注意：布局容器是每次重渲染重建的 .opt-kanban，须用 getter 动态获取
     if (!kanbanMasonry && window.kanbanMasonry) {
+      // minCard 246 → 320（2026-10-11 用户实测「优化项堆叠」修正）：246 时列宽约 250px，
+      // 行内复选框+序号+风险徽章+（原）已优化标签吃掉约 180px，长标题（英文设备名等）
+      // 被挤成每行 5-8 字的竖排碎片、序号垂直居中插进文字中间，视觉上像文字层叠。
+      // 320 在用户窗口宽度下收敛为 3 列（列宽约 340-370px），名称列宽约 200-250px。
       kanbanMasonry = window.kanbanMasonry.attach(
-        () => root.querySelector('.opt-kanban'), '.opt-col', { gap: 14, minCard: 246 }
+        () => root.querySelector('.opt-kanban'), '.opt-col', { gap: 14, minCard: 320 }
       );
     }
     if (kanbanMasonry) kanbanMasonry.relayout(false);
@@ -1528,7 +1536,9 @@
   }
 
   // 看板条目行：复选框（固定）+ 序号（浅灰固定宽）+ 名称（自动换行，不省略）+ 风险标签（胶囊）
-  // 已优化（optimizedIds 命中）的项整行灰态 + 「已优化」标签 + 复选框禁用，点击行弹出还原确认
+  // 已优化（optimizedIds 命中）的项整行灰态 + 复选框禁用，点击行弹出详情（可否还原在弹窗里判定）。
+  // 2026-10-11 用户裁定：「已优化」文字标签从主列表整条退役（只看灰态），标识只在二级
+  // 弹窗/面板显示（弹窗的「您已完成优化…」提示与面板徽章）；灰态本身是防重复执行的护栏，保留。
   //
   // 2026-10-03 用户裁定：删除每行末尾的收藏星标（E10）。理由是它既无消费场景
   // （没有「只看收藏」筛选、没有收藏排序），又把每行最右侧的横向空间吃掉一格，
@@ -1538,14 +1548,14 @@
     const id = escapeHtml(o.id);
     const isOpt = optimizedIds.has(o.id);
     // 2026-10-06（任务二）：**可否恢复只在详情弹窗判定**（弹窗消费 restorable / restoreAvailable），
-    // 主列表只做灰显 + 「已优化」标签。行内的「立即恢复 / 无法还原」按钮已整条下线 ——
+    // 主列表只做灰显。行内的「立即恢复 / 无法还原」按钮已整条下线 ——
     // 一处判定、一处入口，避免两个地方对「能不能还原」各说各话（B4 的判据在弹窗里继续生效）。
     return `
       <div class="opt-row${isOpt ? ' optimized' : ''}" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击查看详情与还原入口' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
         <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" role="checkbox" tabindex="0" aria-checked="${selectedIds.has(o.id) ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''} data-tip="${isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项'}"></div>
         <span class="opt-row-index">${index}</span>
         <span class="opt-row-name">${escapeHtml(o.title)}</span>
-        ${riskBadge(o.risk)}${isOpt ? '<span class="opt-row-opttag">已优化</span>' : ''}
+        ${riskBadge(o.risk)}
       </div>`;
   }
 
@@ -1621,15 +1631,7 @@
       row.classList.toggle('optimized', isOpt);
       const check = row.querySelector('.checkbox');
       if (check) check.classList.toggle('disabled', isOpt);
-      let tag = row.querySelector('.opt-row-opttag');
-      if (isOpt && !tag) {
-        tag = document.createElement('span');
-        tag.className = 'opt-row-opttag';
-        tag.textContent = '已优化';
-        row.appendChild(tag);
-      } else if (!isOpt && tag) {
-        tag.remove();
-      }
+      // 2026-10-11：主列表不再打「已优化」文字标签（只留灰态），此处只同步灰态类。
     });
   }
 

@@ -245,21 +245,30 @@ fn is_uri(s: &str) -> bool {
     false
 }
 
-/// ShellExecute「open」（= Electron `shell.openExternal` / `shell.openPath`）。
-/// HINSTANCE ≤ 32 视为失败（Win32 约定）；失败必须如实回 false，
-/// 否则目标缺失的环境（如家庭版无 gpedit.msc）会弹「已打开」假成功。
-fn shell_open(target: &str, id: &str, stage: &str) -> bool {
+/// ShellExecute「open」带参数版（= 双击快捷方式语义）。
+///
+/// `params` = lpParameters 原文；控制台系命令（cmd /k xxx）必须走本通道（2026-10-11 真机修复）：
+/// `Command::spawn + CREATE_NEW_CONSOLE` 在「父进程带标准句柄」的环境（cargo/终端启动的实例）
+/// 会把**旧控制台句柄**经 STARTF_USESTDHANDLES 传给子进程，与 CREATE_NEW_CONSOLE 叠加后
+/// cmd 实际挂在旧控制台上、新控制台无人认领 —— 症状 = 窗口一闪而过（Windows Terminal 交接
+/// 闪现后即收），命令本体不可见。ShellExecute 由 shell 新建独立控制台，与父进程句柄解耦。
+///
+/// HINSTANCE ≤ 32 视为失败（Win32 约定）；失败必须如实回 false。
+fn shell_open_params(target: &str, params: Option<&str>, id: &str, stage: &str) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_NORMAL;
 
-    let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let w_target = wide(target);
+    let w_params = params.map(wide);
+    let params_ptr = w_params.as_deref().map(|v| PCWSTR(v.as_ptr()));
     let result = unsafe {
         ShellExecuteW(
             None,
             windows::core::w!("open"),
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
+            PCWSTR(w_target.as_ptr()),
+            params_ptr.unwrap_or(PCWSTR::null()),
             PCWSTR::null(),
             SW_NORMAL,
         )
@@ -274,7 +283,18 @@ fn shell_open(target: &str, id: &str, stage: &str) -> bool {
     true
 }
 
-/// 参数数组 spawn（`CREATE_NEW_CONSOLE`：控制台类工具需独立可见控制台）。
+/// ShellExecute「open」（无参数；= Electron `shell.openExternal` / `shell.openPath`）。
+/// HINSTANCE ≤ 32 视为失败；失败必须如实回 false，
+/// 否则目标缺失的环境（如家庭版无 gpedit.msc）会弹「已打开」假成功。
+fn shell_open(target: &str, id: &str, stage: &str) -> bool {
+    shell_open_params(target, None, id, stage)
+}
+
+/// 参数数组 spawn（`CREATE_NEW_CONSOLE`）。
+///
+/// ⚠️ 只用于**GUI 工具**（calc/notepad/taskmgr 等自绘窗口的程序）。控制台系
+/// （cmd/powershell/pwsh）不走这里 —— 见 [`shell_open_params`] 的修复说明
+/// （2026-10-11：该组合在父进程带标准句柄时会让窗口一闪而过）。
 ///
 /// 程序名先经 `systembin::system_tool` 解析：`CreateProcess` 的搜索顺序是
 /// 「exe 目录 → 父 CWD → System32」，便携版/提权实例的 exe 目录可写，
@@ -333,7 +353,27 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
         }
         return (false, format!("无法打开「{exe}」"));
     }
-    // 其余裸应用名 / .exe / 带参系统工具（control/explorer/cmd/powershell/perfmon 等）：spawn
+    // 控制台系首令牌（cmd / powershell / pwsh）：走 ShellExecute 带参启动（见 shell_open_params）。
+    // 参数取「首个 token 之后的原始子串」而不是重排 toks：tokenize 会剥引号，重新 join 会把
+    // `-Command "Start-Process cmd -Verb RunAs"` 的引号语义破坏。白名单内这些命令的首 token
+    // 均不带引号（有单测钉住整表形态），切分安全；环境变量（%temp% 等）按原语义展开。
+    let base = lower.strip_suffix(".exe").unwrap_or(&lower);
+    if matches!(base, "cmd" | "powershell" | "pwsh") {
+        // 加固：先解析到 System32（裸名不命中 PINNED，这里补 ".exe" 后缀让它命中），
+        // 防 exe 同目录植入同名 cmd 被 ShellExecute 的搜索顺序优先命中。
+        let resolved = crate::engine::systembin::system_tool(&format!("{base}.exe"));
+        let target = resolved.to_string_lossy().to_string();
+        let raw = cmd.trim_start();
+        let params = match raw.split_once(char::is_whitespace) {
+            Some((_, rest)) => expand_quick_env(rest.trim_start()),
+            None => String::new(),
+        };
+        if shell_open_params(&target, (!params.is_empty()).then_some(params.as_str()), id, "consoleOpen") {
+            return (true, String::new());
+        }
+        return (false, format!("无法打开「{exe}」"));
+    }
+    // 其余裸应用名 / .exe / 带参系统工具（control/explorer/perfmon 等 GUI 工具）：spawn
     if let Err(e) = spawn_detached(&exe, args) {
         log::write_log("warn", &format!("快捷指令 spawn 失败 {id}: {e}"));
         return (false, format!("启动失败：{e}"));
@@ -485,5 +525,36 @@ mod tests {
             replace_ci("explorer %userprofile%\\Documents", "%userprofile%", "C:\\U"),
             "explorer C:\\U\\Documents"
         );
+    }
+
+    /// 2026-10-11 修复的静态前提：控制台系命令（cmd/powershell/pwsh 首 token）的**首 token 无引号**
+    /// —— run_quick_cmd 的参数切分（首个空白之后的原始子串）依赖这一点。
+    /// 同时钉住覆盖面：命中数不得少于 8（cmd 系 6 + powershell 系 2），清单形态变了会在这里红。
+    #[test]
+    fn console_first_token_is_bare() {
+        let mut n = 0;
+        for (id, _, cmd) in QUICKCMDS {
+            let first = cmd.split_whitespace().next().unwrap_or("");
+            let lb = first.to_ascii_lowercase();
+            let base = lb.strip_suffix(".exe").unwrap_or(&lb).to_string();
+            if matches!(base.as_str(), "cmd" | "powershell" | "pwsh") {
+                assert!(
+                    !first.starts_with('"') && !first.starts_with('\''),
+                    "{id} 首 token 带引号，shell_open_params 的参数切分会错"
+                );
+                n += 1;
+            }
+        }
+        assert!(n >= 8, "控制台系命令数异常（{n}，预期 >=8）：切分逻辑的覆盖对象变了");
+    }
+
+    /// `#[ignore]` 真机探针（AGENTS §1.6 第二问）：ShellExecute 带参启动回执成功。
+    /// 会弹出真实 cmd 窗口 —— 人工目检「窗口保持、不闪退」后手动关闭。
+    /// 2026-10-11 闪退修复的验收探针；普通快速组不跑（有窗口副作用）。
+    #[ignore = "真机探针：弹真实 cmd 窗口，人工目检后手动关闭"]
+    #[test]
+    fn console_shell_probe() {
+        let ok = shell_open_params("cmd", Some("/k title TrimShellProbe"), "probe", "probe");
+        assert!(ok, "ShellExecute 带参启动应返回成功（HINSTANCE>32）");
     }
 }

@@ -6866,18 +6866,8 @@ img.ctx-col-icon {
   opacity: 0.65;
 }
 
-.opt-row-opttag {
-  flex: 0 0 auto;
-  align-self: flex-start;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--fg-tertiary);
-  background: var(--bg-card-hover);
-  border: 1px solid var(--border-subtle);
-  padding: 1px 8px;
-  border-radius: var(--radius-btn);
-  white-space: nowrap;
-}
+/* 2026-10-11：`.opt-row-opttag`（「已优化」文字标签）随用户裁定整条退役 ——
+   主列表只看灰态（.opt-row.optimized 的规则在上面），标识只在二级弹窗/面板显示。 */
 
 .opt-row-index,
 .ctx-row-index {
@@ -7806,10 +7796,19 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   color: var(--fg-primary);
   outline: none;
 }
+/* 快捷指令网格：默认固定三列（2026-10-11 用户拍板，原 auto-fill 列数随宽度连续乱跳）；
+   窗口拉宽到 ≥1480px 升四列；中窄窗退两列防卡片挤爆；≤760px 单列（见下方原断点）。
+   断点按视口算（主内容区还要扣掉左侧导航 ~210px），四列需内容区 ~1240px。 */
 .qc-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
+}
+@media (min-width: 1480px) {
+  .qc-grid { grid-template-columns: repeat(4, 1fr); }
+}
+@media (max-width: 1080px) {
+  .qc-grid { grid-template-columns: repeat(2, 1fr); }
 }
 .qc-card {
   display: flex;
@@ -9652,6 +9651,24 @@ body[data-preset-bg] .app-wallpaper::before {
 body[data-preset-bg] .titlebar,
 body.bg-image-on .titlebar {
   background: transparent;
+}
+
+/* ==================== 材质态标题栏贯通（2026-10-11 用户实测裁定） ====================
+   「背景没有覆盖到标题栏」的根因：材质（electron-mica）非最大化时，body 顶 `--mat-veil`
+   半透明纱、.layout/.main-content 全透明 —— 桌面经原生 Mica 透出的"背景"在内容区可见，
+   唯独标题栏还自绘不透明底（#F3F3F3 / theme-light 的 --bg-app），顶部 36px 成为一条
+   材质断层。修法：标题栏同样放行 —— 不铺自己的底色，让 body 的 veil 与内容区一样透出。
+   红线不受影响：win-maximized 被 :not() 排除（最大化仍走上方实色规则）；data-material="none"
+   时 --mat-veil 本身就是不透明 --bg-base，透出的仍是不透明底。
+   特异性 (0,3,1) 高于 electron-mica / theme-light 两个 (0,2,1) 分支，且本块同样排在
+   全部 .titlebar 底色规则之后，双保险。 */
+body.electron-mica:not(.win-maximized) .titlebar {
+  background: transparent;
+}
+/* 暗色主题下标题栏不再恒浅色，标题文字随主题前景 token 走（浅色下与既有
+   body.theme-light .titlebar-title 同值，无行为变化）。 */
+body.electron-mica:not(.win-maximized) .titlebar-title {
+  color: var(--fg-primary);
 }
 
 /* ==================== 残留扫描副窗（v0.7.0：三链候选 + 深扫只读报告同页） ====================

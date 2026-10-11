@@ -28,9 +28,21 @@ use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
 use crate::engine::{appearance, log, paths, sysinfo};
 
 const APP_NAME: &str = "Trim";
-/// 主窗口最小内容区（AGENTS.md 红线：1294×870）
-const MIN_WIDTH: f64 = 1294.0;
-const MIN_HEIGHT: f64 = 870.0;
+/// 主窗口最小内容区（2026-10-11 用户实测锁定：外框 1403×870 / 客户区 1387×861，
+/// 即"锁死当前尺寸为下限，不设最大"）。建窗与窗口状态 sanitize 用客户区读数 1387×861；
+/// 拖拽下限另按外框口径，见 MIN_TRACK_WIDTH 与建窗后 set_min_size 的注释。
+const MIN_WIDTH: f64 = 1387.0;
+const MIN_HEIGHT: f64 = 861.0;
+
+/// 拖拽钳制用的「外框口径」最小值 = 表格外框读数 1403×870。
+///
+/// 为什么必须与 MIN_WIDTH/MIN_HEIGHT 分开（tao 0.35.3 对无边框带阴影窗两条路径口径不一致）：
+/// - 建窗与 set_inner_size：会补隐藏边框 insets（本机实测 (16,9)），传入值按客户区口径解释；
+/// - WM_GETMINMAXINFO：只对 decorated 窗做非客户区换算，无边框带阴影窗把传入值直接当
+///   「外框」下限（实测 minTrack == 传入值），而拖拽钳制的正是外框。
+/// 若拖拽下限沿用客户区数值，外框会被拖到 1387×861、客户区缩到 1371×852 —— 比锁定值软 (16,9)。
+const MIN_TRACK_WIDTH: f64 = 1403.0;
+const MIN_TRACK_HEIGHT: f64 = 870.0;
 
 // ==================== 材质 / 圆角（D4 / D3） ====================
 
@@ -536,6 +548,11 @@ pub fn run() {
             let window = with_browser_args(builder)
                 .build()
                 .expect("main 窗口创建失败");
+
+            // 建窗后把最小尺寸改按「外框口径」再设一次：builder 的 min_inner_size 只覆盖
+            // 建窗/尺寸变更的换算，拖拽钳制走 WM_GETMINMAXINFO（原因见 MIN_TRACK_* 注释）。
+            // 不设 max —— 无任何上限约束，ptMaxTrackSize 实测为 0（不限制最大值）。
+            let _ = window.set_min_size(Some(LogicalSize::new(MIN_TRACK_WIDTH, MIN_TRACK_HEIGHT)));
 
             // ---------- 启动期同步任务（v3 B1：首帧前必须落地的迁移与安全边界） ----------
             // 只留「后续读写依赖它」的四项：老根迁移、名单文件迁移、配置语义迁移、
