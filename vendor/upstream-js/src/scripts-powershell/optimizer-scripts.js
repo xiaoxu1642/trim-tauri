@@ -1210,7 +1210,49 @@ const OPTIONS = [
           'POWERSHELL_TELEMETRY_OPTOUT': '"1"'
         }
       }) },
+      { label: '地图自动更新与传感器权限（对标 WinUtil 位置项补齐）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\Maps': { 'AutoUpdateEnabled': 'dword:00000000' },
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Sensor\\Overrides\\{BFA794E4-F964-4FDB-90F6-51056BFE4B44}': { 'SensorPermissionState': 'dword:00000000' }
+      }) },
       { label: '停用 SMS 路由器服务', service: 'MessagingService', disable: true }
+    ],
+    restore: [
+      { label: '还原：删除地图自动更新与传感器权限键（恢复系统默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\Maps': { 'AutoUpdateEnabled': '-' },
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Sensor\\Overrides\\{BFA794E4-F964-4FDB-90F6-51056BFE4B44}': { 'SensorPermissionState': '-' }
+      }) }
+    ]
+  },
+  // WinUtil 对标（2026-10-11，隐私自护面板新增）：WPBT 让 OEM 能在开机阶段向系统
+  // 注入持久化程序（反防盗软件/驱动/捆绑软件），独立于用户安装链。纯策略键，删值即还原。
+  {
+    id: 'privacy_wpbt_off', group: '隐私防护', title: '禁用 OEM 开机注入（WPBT）', risk: 'low',
+    desc: '关闭 Windows 平台二进制表（WPBT）：电脑厂商可借它在每次开机时执行自带程序（反防盗软件、驱动或预装软件），该动作先于用户登录、不受常规卸载影响。写入 DisableWpbtExecution=1 后启动期不再执行厂商表内容，可一键删值还原。',
+    steps: [
+      { label: 'DisableWpbtExecution=1', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager': { 'DisableWpbtExecution': 'dword:00000001' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 DisableWpbtExecution（恢复 WPBT 默认行为）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager': { 'DisableWpbtExecution': '-' }
+      }) }
+    ]
+  },
+  // WinUtil 对标（2026-10-11，隐私自护面板新增）：插入外设时阻止系统从网络拉取
+  // 厂商配套应用/推广；驱动本身仍走 Windows Update，不受影响。
+  {
+    id: 'privacy_device_metadata_off', group: '隐私防护', title: '阻止外设自动获取配套应用', risk: 'low',
+    desc: '设置 PreventDeviceMetadataFromNetwork=1：插入 U 盘、显示器、键鼠等设备时，Windows 不再自动从微软下载设备厂商的配套应用与推荐内容。驱动程序的 Windows Update 通道不受影响，可一键删值还原。',
+    steps: [
+      { label: 'PreventDeviceMetadataFromNetwork=1', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\Device Metadata': { 'PreventDeviceMetadataFromNetwork': 'dword:00000001' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 PreventDeviceMetadataFromNetwork（恢复默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\Device Metadata': { 'PreventDeviceMetadataFromNetwork': '-' }
+      }) }
     ]
   },
   // ==================== 系统服务（对齐 Trim BuildServicesModule 独立策略）====================
@@ -1293,7 +1335,8 @@ const OPTIONS = [
   // 注：「清空待机列表（StandbyList）」已移除，功能由「内存清理」覆盖。
   // ==================== 性能调优补齐（对齐 Trim BuildPerformanceModule）====================
   {
-    id: 'perf_uwp_background_off', group: '性能调优', title: 'UWP 后台运行排查', risk: 'medium',
+    // 2026-10-11：随隐私自护面板成立改派「隐私防护」（后台运行属应用数据/活动面，原归性能调优）
+    id: 'perf_uwp_background_off', group: '隐私防护', title: 'UWP 后台运行排查', risk: 'medium',
     desc: 'GlobalUserDisabled=1，请求限制通用应用后台运行；需确认通知、同步和后台刷新需求，不承诺固定资源收益。',
     steps: [
       { label: '后台应用全局禁用', reg: regBlock({
@@ -1738,7 +1781,8 @@ const OPTIONS = [
 
   // Windows AI 全组（总表 81-89，9 项）
   {
-    id: 'tf_ai_off', group: '性能调优', title: '关闭 Windows AI 组件', risk: 'low',
+    // 2026-10-11：随隐私自护面板成立改派「隐私防护」（Copilot/Recall 属遥测与隐私面）
+    id: 'tf_ai_off', group: '隐私防护', title: '关闭 Windows AI 组件', risk: 'low',
     desc: '按策略关闭 Windows AI 全家桶：Copilot（组策略+任务栏按钮+键盘键）、Recall 数据分析与快照（DisableAIDataAnalysis）、Click to Do、AI Agent 连接器/远程连接器/工作区、AI 设置代理（AgentRuntime 服务）。全部可一键还原。',
     steps: [
       { label: 'AI 策略键（Copilot/Recall/ClickToDo/Agent）', reg: regBlock({
@@ -2484,7 +2528,9 @@ const PROS_CONS = {
   'edge_rewards_hide': { pros: '隐藏 Rewards 积分入口，界面更简洁。', cons: '使用 Microsoft Rewards 攒积分的用户需要重新开启。' },
   'edge_sxs_service_off': { pros: '关闭 EdgeUpdate 的 SxsService 后台组件，减少后台活动。', cons: '依赖该组件的 Edge 并行版本功能不可用（多数用户无感知）。' },
   'edge_update_task_disable': { pros: '停止 Edge 自动更新检查，消除后台更新占用。', cons: '浏览器安全补丁不再自动安装，必须定期手动更新。' },
-  'privacy_permissions_tune': { pros: '一次精调 20+ 项应用权限与数据收集开关，输入习惯、活动历史、通讯录等不再被收集。', cons: '应用可能失去文档/日历/联系人访问权限，剪贴板历史被启用，个别权限需手动在设置中恢复。' },
+  'privacy_permissions_tune': { pros: '一次精调 20+ 项应用权限与数据收集开关，输入习惯、活动历史、通讯录、离线地图更新、传感器等不再被收集。', cons: '应用可能失去文档/日历/联系人访问权限，剪贴板历史被启用，个别权限需手动在设置中恢复。' },
+  'privacy_wpbt_off': { pros: '阻止电脑厂商借 WPBT 在开机阶段注入自带程序，砍掉一条独立于用户安装链的持久化执行通道。', cons: '极少数企业防盗/资产管理方案依赖 WPBT 投递代理，关闭后这类方案失效。' },
+  'privacy_device_metadata_off': { pros: '插入外设时不再自动下载厂商配套应用与推广内容，少一条后台联网与静默安装通道。', cons: '部分设备的厂商增强体验（定制图标、配套控制面板）不再自动出现，需要时可手动安装。' },
   'tf_ai_off': { pros: '策略级关闭 Copilot/Recall/Click to Do/AI Agent 全家桶并禁用 AgentRuntime 服务，释放后台内存与 CPU，隐私零上传。', cons: '无法使用 Windows 内置 AI 功能（Copilot、Recall 等），系统更新后部分策略可能被重置需重新执行。' },
   'tf_perf_misc': { pros: '启动延迟归零、禁用窗口摇晃与失效快捷方式全盘解析，桌面响应更跟手；前台窗口即时抢到焦点，关机不再卡在"正在关闭"。', cons: '个别依赖 Aero Shake 的使用习惯失效；禁用链接解析后指向网络位置的失效快捷方式打开更慢；未保存工作的应用与个别服务可能被更快结束，关机前请先保存。' },
   'tf_privacy_extra': { pros: '补漏关闭 Chrome/Firefox/VS 遥测、许可验证上报、新闻兴趣流与步骤记录器，第三方数据外发通道进一步收窄。', cons: '浏览器与 VS 的官方反馈/体验改进计划退出，个别企业环境可能检测策略与预期不符。' },

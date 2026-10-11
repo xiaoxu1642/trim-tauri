@@ -2488,3 +2488,78 @@ let ov = include_str!("overview.rs");
             "tf_hibern_off 应点名 Session Manager\\Power，实际 {keys:?}"
         );
     }
+
+    /// 隐私自护侧表形状（2026-10-11 WinUtil 借鉴 V3）：
+    /// ① 4 个分区、hiddenFromOptimizer 21 个；② 每个隐藏 id 必须在 runtime 目录命中
+    /// （防侧表 id 漂移 → 面板空行）；③ 分区 items 并集与隐藏集合**同集合**
+    /// （移动不是复制：进面板的必须正好是从主列表隐藏的）；④ statusLabels 的 id
+    /// 必须是分区成员，且 tf_defender 生效文案为「已禁用」。
+    #[test]
+    fn 隐私自护侧表形状与目录对拍() {
+        let panel = privacy_panel_sidecar();
+
+        let sections = panel.get("sections").and_then(Value::as_array).expect("sections 数组");
+        assert_eq!(sections.len(), 4, "隐私面板固定 4 个分区，实际 {}", sections.len());
+
+        let mut section_items: Vec<&str> = Vec::new();
+        for s in sections {
+            let items = s.get("items").and_then(Value::as_array).expect("分区 items 数组");
+            assert!(!items.is_empty(), "存在空分区");
+            for it in items {
+                section_items.push(it.as_str().expect("items 元素是字符串"));
+            }
+        }
+
+        let hidden: Vec<&str> = panel
+            .get("hiddenFromOptimizer")
+            .and_then(Value::as_array)
+            .expect("hiddenFromOptimizer 数组")
+            .iter()
+            .map(|v| v.as_str().expect("hidden 元素是字符串"))
+            .collect();
+
+        // 分区并集与隐藏集合同集合（顺序无关，各自去重比）
+        let mut a: Vec<&str> = section_items.clone();
+        a.sort_unstable();
+        a.dedup();
+        let mut b = hidden.clone();
+        b.sort_unstable();
+        b.dedup();
+        assert_eq!(a.len(), section_items.len(), "分区 items 内有重复 id");
+        assert_eq!(b.len(), hidden.len(), "hiddenFromOptimizer 内有重复 id");
+        assert_eq!(a.len(), 21, "隐私面板成员固定 21 项，实际 {}", a.len());
+        assert_eq!(a, b, "分区成员与 hiddenFromOptimizer 必须同集合（移动不是复制）");
+
+        // 每个 id 在 runtime 目录命中
+        let known: std::collections::HashSet<&str> = options()
+            .iter()
+            .filter_map(|o| o.get("id").and_then(Value::as_str))
+            .collect();
+        let missing: Vec<&&str> = a.iter().filter(|id| !known.contains(**id)).collect();
+        assert!(missing.is_empty(), "侧表 id 在 runtime 目录查无此项: {missing:?}");
+
+        // statusLabels：tf_defender 在分区内，生效文案「已禁用」
+        let labels = panel.get("statusLabels").expect("statusLabels 对象");
+        let td = labels.get("tf_defender").expect("tf_defender 有状态文案");
+        assert_eq!(
+            td.get("on").and_then(Value::as_str),
+            Some("已禁用"),
+            "tf_defender 生效态文案必须是「已禁用」"
+        );
+        assert!(
+            a.contains(&"tf_defender"),
+            "statusLabels 的 id 必须是分区成员"
+        );
+    }
+
+    /// 条目级特例白名单（2026-10-11 裁定 7）：只登记 tf_defender；未知 id 返回 None。
+    /// 真实服务状态因机而异，这里**只断白名单形态**不断定 tf_defender 的 true/false
+    /// （值由 services.rs 的 #[ignore] 真机探针核）。
+    #[test]
+    fn 特例白名单只登记tf_defender() {
+        assert_eq!(special_item_verdict("不存在的id_xyz"), None);
+        assert!(special_item_verdict("tf_defender").is_some(), "tf_defender 必须在特例白名单");
+        // 其它项不许走特例（防止白名单被顺手扩大）
+        assert_eq!(special_item_verdict("telemetry_optimize"), None);
+        assert_eq!(special_item_verdict("privacy_wpbt_off"), None);
+    }

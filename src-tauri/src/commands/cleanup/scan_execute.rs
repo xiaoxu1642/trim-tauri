@@ -6,7 +6,6 @@
 //! 计划上限（PLAN_CAP_* / EXECUTE_MAX_ITEMS）是防止一键盘爆掉的保护位。
 //! 被占用的项走 check-locked / kill-locked-processes，终止进程只白名单内放行。
 
-use crate::pwsh;
 use crate::engine::{guard, log, protect};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};

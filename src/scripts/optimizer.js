@@ -38,8 +38,12 @@
   // 兜底语义（**不许削弱**）：侧表缺席/损坏时用下面的 BUILTIN 常量，
   // 它与侧表内容一致 —— 门禁 check-optimizer-groups-sidecar 对拍两侧，
   // 改了一边忘了另一边即红。
+  // 2026-10-11：「隐私防护」从默认分类撤下——21 条隐私项整组移入隐私自护面板
+  // （入口卡+hiddenFromOptimizer）；groupMap 的旧组映射保留：侧表加载失败的降级
+  // 路径仍把旧组「安全与隐私」归并到「隐私防护」，由未登记分类兜底追加到栏尾显示。
+  // 注意：注释必须放在 GROUP_FALLBACK 字面量外（门禁的字面量解析器不剥注释）。
   const GROUP_FALLBACK = {
-    default: ['内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '隐私防护', '系统调校', '系统精简', '显卡优化', '浏览器优化'],
+    default: ['内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '系统调校', '系统精简', '显卡优化', '浏览器优化'],
     groupMap: {
       '启动与响应': '系统调校',
       '游戏与多媒体': '性能调优',
@@ -839,7 +843,8 @@
   const OPT_CATEGORY_KEY = 'trim-optcat-active';
   // 审查 2026-09-27 L11：「游戏安全诊断」无任何数据项映射（12 个最终展示组外），常驻
   // 空分类已删除；如日后新增该分组任务，在此补回即可
-  const OPT_CATEGORIES = ['全部', '内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '隐私防护', '系统调校', '系统精简', '显卡优化', '浏览器优化'];
+  // 2026-10-11：「隐私防护」chip 撤下（整组进隐私自护面板，与 GROUP_FALLBACK.default 同步）
+  const OPT_CATEGORIES = ['全部', '内存优化', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '系统调校', '系统精简', '显卡优化', '浏览器优化'];
 
   function getSavedCategory() {
     try {
@@ -1256,6 +1261,201 @@
       `维护任务完成：成功 ${okN} 项${failN ? `，失败 ${failN} 项` : ''}`);
   }
 
+  // ==================== 隐私自护面板（2026-10-11 WinUtil 借鉴 V3，永劫面板同款） ====================
+  // 由侧表 PRIVACY_PANEL（optimizer-privacy-panel.json，已签名）驱动，机制与 NARA_PANEL 同形：
+  //   · 入口卡 renderPrivacyCol 拼进 opt-kanban 顶部，整卡可点
+  //   · hiddenFromOptimizer 与永劫侧表取并集，主列表不残留任何隐私项（移动不是复制）
+  //   · 面板只有纯优化项（无 BCD/维护任务），执行直接复用 runSelected
+  //   · statusLabels：tf_defender 生效态显示「已禁用」（后端 special_item_verdict 特判
+  //     已卸载/已禁用），其余条目仍显示通用「已优化」
+  const PRIVACY_SHIELD_SVG = '<path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/>';
+
+  function renderPrivacyCol() {
+    if (!PRIVACY_PANEL) return '';
+    const sections = PRIVACY_PANEL.sections || [];
+    const count = (PRIVACY_PANEL.hiddenFromOptimizer || []).length;
+    return `
+      <section class="opt-col opt-col--nara opt-col--privacy" data-privacy-entry role="button" tabindex="0"
+               aria-label="打开隐私自护面板" data-tip="打开隐私自护面板">
+        <div class="opt-col-head">
+          <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
+          </span>
+          <span class="opt-col-title">隐私自护</span>
+          <span class="opt-col-count opt-privacy-count">${count} 项</span>
+        </div>
+        <div class="opt-nara-desc">${sections.length} 个分区 · ${count} 个隐私与遥测开关集中管理，进入面板默认勾选可执行项</div>
+        <div class="opt-col-body">
+          ${sections.map(s => `
+            <div class="opt-nara-row">
+              <span class="opt-nara-row__name"><span>${escapeHtml(s.title)}</span>${s.admin ? naraBadge('accent', '需管理员') : ''}</span>
+              <span class="opt-nara-row__meta">${(s.items || []).length} 项</span>
+            </div>`).join('')}
+        </div>
+      </section>`;
+  }
+
+  function bindPrivacyCol() {
+    document.querySelectorAll('[data-privacy-entry]').forEach(card => {
+      if (card.dataset.boundPrivacy) return;
+      card.dataset.boundPrivacy = '1';
+      card.addEventListener('click', () => openPrivacyPanel());
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPrivacyPanel(); }
+      });
+    });
+  }
+
+  // 面板运行态（独立勾选集，不碰主页面 selectedIds）
+  let privacyPanelState = null;
+
+  function openPrivacyPanel() {
+    const create = window.modal?.create;
+    if (!create) { window.app?.toast?.('error', '弹窗组件未就绪，请刷新页面重试'); return; }
+    if (!PRIVACY_PANEL) return;
+    const byId = new Map(ALL_OPTIONS.map(o => [o.id, o]));
+    const sections = (PRIVACY_PANEL.sections || []).map(s => ({
+      ...s,
+      optItems: (s.items || []).map(id => byId.get(id)).filter(Boolean),
+    }));
+    // 默认全选可执行项；已优化不预选（重跑无意义，tf_defender 卸载/禁用机也不会预选）
+    const checked = new Set();
+    sections.forEach(s => s.optItems.forEach(o => {
+      if (!optimizedIds.has(o.id)) checked.add(o.id);
+    }));
+    privacyPanelState = { sections, checked, running: false };
+    const ctrl = create({
+      id: 'privacyPanelModal',
+      title: '隐私自护',
+      width: 720,
+      bodyHtml: `<div class="nara-panel" id="privacyPanelBody">${renderPrivacyPanelBody()}</div>`,
+      footerHtml: `
+        <button type="button" class="btn btn-secondary btn-small" data-privacy-toggle-all>全选 / 全不选</button>
+        <button type="button" class="btn btn-accent" data-privacy-run>执行所选优化</button>
+        <button type="button" class="btn btn-secondary" data-privacy-close>关闭</button>`,
+      footerClass: 'nara-panel-footer privacy-panel-footer',
+    });
+    privacyPanelState.ctrl = ctrl;
+    bindPrivacyPanelEvents(ctrl);
+  }
+
+  function privacyStatusLabel(id) {
+    return PRIVACY_PANEL?.statusLabels?.[id]?.on || '已优化';
+  }
+  function privacyStatusTip(id) {
+    return PRIVACY_PANEL?.statusLabels?.[id]?.tip || '该项已生效';
+  }
+
+  function renderPrivacyOptRow(o) {
+    const st = privacyPanelState;
+    const isOpt = optimizedIds.has(o.id);
+    const on = st.checked.has(o.id);
+    const side = [riskBadge(o.risk)];
+    if (isOpt) side.push(naraBadge('ok', privacyStatusLabel(o.id), privacyStatusTip(o.id)));
+    const tip = isOpt ? privacyStatusTip(o.id) : '勾选/取消该优化项';
+    return `<div class="nara-checkrow${isOpt ? ' is-optimized' : ''}"
+            data-privacy-opt="${escapeHtml(o.id)}" data-tip="${escapeHtml(tip)}">
+      <span class="checkbox${on ? ' checked' : ''}${isOpt ? ' disabled' : ''}" role="checkbox" tabindex="0"
+            aria-checked="${on ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''}>${on ? checkSvg() : ''}</span>
+      <span class="nara-checkrow__name">${escapeHtml(o.title)}</span>
+      <span class="nara-checkrow__side">${side.join('')}</span>
+    </div>`;
+  }
+
+  function renderPrivacyPanelBody() {
+    const st = privacyPanelState;
+    if (!st) return '';
+    return st.sections.map(s => {
+      const rows = s.optItems.map(o => renderPrivacyOptRow(o)).join('');
+      if (!rows) return '';
+      return `<section class="nara-card" data-privacy-section="${escapeHtml(s.id)}">
+        <div class="nara-card__title">
+          <span>${escapeHtml(s.title)}</span>
+          ${s.admin ? naraBadge('accent', '需管理员') : ''}
+        </div>
+        <div class="nara-card__body">${rows}</div>
+      </section>`;
+    }).join('');
+  }
+
+  function refreshPrivacyPanel() {
+    const body = privacyPanelState?.ctrl?.body?.querySelector('#privacyPanelBody');
+    if (body) body.innerHTML = renderPrivacyPanelBody();
+    updatePrivacyRunCount();
+  }
+
+  function updatePrivacyRunCount() {
+    const st = privacyPanelState;
+    const btn = st?.ctrl?.footer?.querySelector('[data-privacy-run]');
+    if (!btn) return;
+    const n = st.checked.size;
+    btn.textContent = n ? `执行所选（${n} 项）` : '执行所选';
+    btn.disabled = st.running || n === 0;
+  }
+
+  function bindPrivacyPanelEvents(ctrl) {
+    const modalEl = ctrl.modal;
+    modalEl.addEventListener('click', (e) => {
+      const row = e.target.closest('[data-privacy-opt]');
+      if (row) {
+        if (row.classList.contains('is-optimized') || row.hasAttribute('aria-disabled')) return;
+        const id = row.dataset.privacyOpt;
+        const set = privacyPanelState.checked;
+        set.has(id) ? set.delete(id) : set.add(id);
+        const on = set.has(id);
+        const box = row.querySelector('.checkbox');
+        box.classList.toggle('checked', on);
+        box.innerHTML = on ? checkSvg() : '';
+        row.setAttribute('aria-checked', on ? 'true' : 'false');
+        updatePrivacyRunCount();
+        return;
+      }
+      if (e.target.closest('[data-privacy-toggle-all]')) {
+        // 只在可交互行间全选/全不选（已优化行跳过）
+        const allOpt = privacyPanelState.sections
+          .flatMap(s => s.optItems)
+          .filter(o => !optimizedIds.has(o.id));
+        const allOn = allOpt.every(o => privacyPanelState.checked.has(o.id));
+        privacyPanelState.checked = new Set(allOn ? [] : allOpt.map(o => o.id));
+        refreshPrivacyPanel();
+        return;
+      }
+      if (e.target.closest('[data-privacy-run]')) { runPrivacyPanel(); return; }
+      if (e.target.closest('[data-privacy-close]')) { ctrl.close(); }
+    });
+    modalEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const row = e.target.closest?.('[data-privacy-opt]');
+      if (row) { e.preventDefault(); row.click(); }
+    });
+    updatePrivacyRunCount();
+  }
+
+  // 面板「执行所选」：全部是优化项，直接走 runSelected（预检/高危/还原点全链路）
+  async function runPrivacyPanel() {
+    const st = privacyPanelState;
+    if (!st || st.running || batchRunning) return;
+    const order = st.sections.flatMap(s => s.optItems.map(o => o.id));
+    const entries = order.filter(id => st.checked.has(id))
+      .map(id => ALL_OPTIONS.find(o => o.id === id)).filter(Boolean);
+    if (!entries.length) {
+      window.app?.toast('warning', '请先勾选要执行的项目');
+      return;
+    }
+    st.running = true;
+    updatePrivacyRunCount();
+    try {
+      await runSelected(entries);
+    } finally {
+      st.running = false;
+      // 已执行成功的会进 optimizedIds，重建勾选态（已优化项自动移出选择）
+      st.sections.forEach(s => s.optItems.forEach(o => {
+        if (optimizedIds.has(o.id)) st.checked.delete(o.id);
+      }));
+      refreshPrivacyPanel();
+    }
+  }
+
   // ==================== 列表渲染：看板瀑布流（Masonry） ====================
   // 每个分类一列（白色圆角卡片），列内条目竖排：复选框 + 序号 + 名称（可换行不截断）+ 风险标签；
   // 列头 = 分类名 + 项数徽章；列底 = 「全选本类」；
@@ -1279,9 +1479,11 @@
     const totalItems = order.reduce((s, g) => s + byGroup[g].length, 0);
     const summary = document.getElementById('optimizerSummary');
     if (summary) summary.textContent = `共 ${totalItems} 项优化 · ${order.length} 个分类`;
-    // C3：永劫专项面板入口卡（存在则放在看板最顶部，跟 opt-col 并列）
+    // C3：永劫专项面板入口卡（存在则放在看板最顶部，跟 opt-col 并列）；
+    // 2026-10-11：隐私自护入口卡同区并列第二张。
     const naraCol = renderNaraCol();
-    root.innerHTML = `<div class="opt-kanban">${naraCol}` + order.map(group => {
+    const privacyCol = renderPrivacyCol();
+    root.innerHTML = `<div class="opt-kanban">${naraCol}${privacyCol}` + order.map(group => {
       // 审查 M20：不再按分类注入离表 hex。`--c` / `--cf` 的 CSS 兜底本身就是
       // `var(--accent)` / `var(--accent-text)`（main.css:6335、:2589），少注入一层
       // 反而让主题与自定义 accent（pathbinding.applyAccent）能正常驱动看板配色。
@@ -1321,6 +1523,7 @@
     }
     if (kanbanMasonry) kanbanMasonry.relayout(false);
     bindNaraCol(); // C3：innerHTML 重建后重新绑入口卡事件
+    bindPrivacyCol(); // 2026-10-11：隐私自护入口卡同处理
     updateSelectedButtonState();
   }
 
@@ -2123,6 +2326,8 @@
   let ALL_OPTIONS = [];
   // C3：永劫无间专项面板侧表。null=未加载/加载失败，对象=完整侧表。
   let NARA_PANEL = null;
+  // 2026-10-11 WinUtil 借鉴 V3：隐私自护面板侧表（同形机制；null=不渲染入口卡/不过滤）。
+  let PRIVACY_PANEL = null;
 
   // ==================== 生效粒度（applyScope，BoosterX §B2）====================
   // 档位序与 Rust 侧 SCOPE_RANK 同表（commands/optimizer.rs），两侧一致性由
@@ -2750,19 +2955,26 @@
       // 三条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
       // 外加 C3：永劫专项面板侧表（独立并行拉，失败不阻塞目录）。
       Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(),
-                   window.api.optimizer.naraPanel?.().catch(() => null)])
-        .then(([dt, res, gs, np]) => {
+                   window.api.optimizer.naraPanel?.().catch(() => null),
+                   window.api.optimizer.privacyPanel?.().catch(() => null)])
+        .then(([dt, res, gs, np, pp]) => {
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
         // C3：永劫专项面板侧表。失败/null 时 NARA_PANEL 保持 null → 不触发任何过滤与入口卡
         if (np && np.success && np.data) NARA_PANEL = np.data;
+        // 2026-10-11：隐私自护面板侧表（同上）
+        if (pp && pp.success && pp.data) PRIVACY_PANEL = pp.data;
         if (res && res.success && Array.isArray(res.data)) {
           const optsAll = filterByDiskType(res.data);
           ALL_OPTIONS = optsAll;
           let opts = optsAll;
-          // C3：hiddenFromOptimizer 过滤 — 面板与优化中心互斥展示
-          const hiddenIds = new Set(NARA_PANEL?.hiddenFromOptimizer || []);
+          // hiddenFromOptimizer 过滤 — 面板与优化中心互斥展示；永劫/隐私两个侧表的隐藏
+          // 集合取**并集**（两份侧表互不重复，任一份加载失败只是那份的成员回到主列表）。
+          const hiddenIds = new Set([
+            ...(NARA_PANEL?.hiddenFromOptimizer || []),
+            ...(PRIVACY_PANEL?.hiddenFromOptimizer || []),
+          ]);
           if (hiddenIds.size) opts = opts.filter(o => !hiddenIds.has(o.id));
           OPTIONS = opts;
           activeCategory = getSavedCategory();

@@ -181,6 +181,52 @@ pub fn service_exists(name: &str) -> bool {
     }
 }
 
+/// 服务「不存在（已卸载）或启动类型等于期望值」判据（2026-10-11 裁定 7：tf_defender 专用）。
+///
+/// 与 [`service_start_type_is`] 的唯一语义差别在「服务不存在」：
+/// - 通用判据把不存在一律算 false（服务没了不等于「我这项优化生效了」）；
+/// - 本判据把 **ERROR_SERVICE_DOES_NOT_EXIST(1060)** 显式算 true —— 对
+///   「关闭系统防护」这类项，防护本体（WinDefend 服务）已被卸载时，产品语义就是
+///   「防护已不在」，体检应显示已禁用，而不是 AND 链恒 false、永远报未优化。
+///
+/// fail-closed 边界：SCM 打不开、OpenService 因权限等**非 1060** 错误失败，一律 false，
+/// 绝不把「读不到」报成「已卸载」。
+pub fn service_absent_or_start_is(name: &str, expected: u32) -> bool {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
+        QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+    };
+    unsafe {
+        let Ok(scm) = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) else {
+            return false;
+        };
+        let name_w = to_wide(name);
+        let svc = OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_CONFIG);
+        let svc = match svc {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = CloseServiceHandle(scm);
+                return win32_of(&e) == SVC_NOT_INSTALLED;
+            }
+        };
+        let mut needed = 0u32;
+        let _ = QueryServiceConfigW(svc, None, 0, &mut needed);
+        let verdict = if needed == 0 {
+            false
+        } else {
+            let mut buf = vec![0u8; needed as usize];
+            let cfg = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+            match QueryServiceConfigW(svc, Some(cfg), needed, &mut needed) {
+                Ok(()) => (*cfg).dwStartType.0 == expected,
+                Err(_) => false,
+            }
+        };
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+        verdict
+    }
+}
+
 /// `SERVICE_DISABLED`（供跨 crate 比较，避免调用方 import windows crate）
 pub const SVC_START_DISABLED: u32 = windows::Win32::System::Services::SERVICE_DISABLED.0;
 
@@ -249,5 +295,43 @@ pub fn service_set_start_pub(name: &str, start: u32) -> Result<(), String> {
             Err(SVC_NOT_INSTALLED) => Ok(()),
             Err(c) => Err(format!("设置服务启动类型失败: {name} → {start} —— {}", svc_err(c))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// service_absent_or_start_is 的 1060「已卸载」分支真机探针（AGENTS §1.6 第二问：
+    /// 走真实 SCM 的新判据必须配 #[ignore] 探针，不能只靠推断）。
+    ///
+    /// 验收机即「已卸载 Defender」的机器：此时 WinDefend 打开应得 1060，
+    /// 特判必须为 true（UI 因此显示「已禁用」而不是「未优化」）。
+    /// 普通机器（Defender 在、Start=2）上此断言应为 false —— 用 ignore 让两种
+    /// 机器都按各自预期手动跑，不进快速组。
+    #[ignore = "真机探针：WinDefend 状态因机而异（卸载机期望 true，普通机期望 false）"]
+    #[test]
+    fn defender_absent_or_disabled_probe() {
+        let v = service_absent_or_start_is("WinDefend", SVC_START_DISABLED);
+        eprintln!("WinDefend absent-or-disabled = {v}（卸载/已禁用机应为 true）");
+        // 只断言调用本身不崩；true/false 的期望由验收人按机器形态核对输出。
+        let _ = v;
+    }
+
+    /// 1060 分支的正向对照（任何机器都成立）：现造一个不可能存在的服务名，
+    /// 必须落「已卸载=true」；这同时防「无论服务在不在都判 true」的假绿。
+    #[ignore = "真机探针：读真实 SCM，但只读"]
+    #[test]
+    fn absent_branch_positive_control() {
+        // ① 不存在的服务 → true（1060）
+        assert!(
+            service_absent_or_start_is("TrimNoSuchSvc_Probe_20261011", SVC_START_DISABLED),
+            "不存在的服务必须判「已卸载=true」（1060 分支）"
+        );
+        // ② RpcSs 必然存在且通常为自动(2)，问「禁用(4)」必须 false —— 防止判据恒 true
+        assert!(
+            !service_absent_or_start_is("RpcSs", SVC_START_DISABLED),
+            "RpcSs 存在且非禁用，必须判 false（防 1060 分支把所有服务都判 true）"
+        );
     }
 }

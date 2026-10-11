@@ -173,6 +173,19 @@ pub(super) fn nara_panel_sidecar() -> Value {
         .clone()
 }
 
+/// 隐私自护面板侧表（2026-10-11，WinUtil 借鉴方案 V3）。
+/// 与 NARA_PANEL_JSON 同形：驱动入口卡、面板分区、hiddenFromOptimizer 主列表隐藏；
+/// statusLabels 给 tf_defender 特判态提供「已禁用」文案。
+pub(super) const PRIVACY_PANEL_JSON: &str = include_str!("../../../data/optimizer-privacy-panel.json");
+
+/// 隐私自护面板侧表整体下发（缓存与解析失败处理同 nara）。
+pub(super) fn privacy_panel_sidecar() -> Value {
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE
+        .get_or_init(|| serde_json::from_str(PRIVACY_PANEL_JSON).expect("optimizer-privacy-panel.json 合法"))
+        .clone()
+}
+
 /// 某项的 provenance；不在表里 = None
 pub(super) fn provenance_of(option_id: &str) -> Option<Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();

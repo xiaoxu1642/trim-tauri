@@ -505,6 +505,9 @@ pub(super) enum PreflightReject {
     NeedHighRiskConfirm,
     /// 本机编译不出来的 pwsh 步骤。`String` 是 `step_exec_mode` 判出的 execMode。
     UnsupportedStep(String),
+    /// 目标状态已满足（2026-10-11 裁定 7：Defender 已卸载/已禁用时再执行只会往
+    /// 缺失的服务键写幽灵 Start、给用户假动作）。String 是给用户看的中文原因。
+    AlreadySatisfied(String),
 }
 
 impl PreflightReject {
@@ -515,6 +518,7 @@ impl PreflightReject {
             Self::NeedAdmin => "需要管理员权限".to_string(),
             Self::NeedHighRiskConfirm => "需高危确认".to_string(),
             Self::UnsupportedStep(m) => format!("本机不支持（{m}）"),
+            Self::AlreadySatisfied(m) => m.clone(),
         }
     }
 }
@@ -542,6 +546,16 @@ pub(super) fn preflight_reason(
     // 方向豁免：还原不是高危写入（审查 2026-09-27 H1）
     if !restore && needs_high_risk_confirm(opt, option_id) {
         return Some(PreflightReject::NeedHighRiskConfirm);
+    }
+    // 已满足拦截（仅正向）：tf_defender 在 Defender 已卸载/已禁用的机器上再执行，
+    // 只会给不存在的服务键写幽灵 Start、对已不存在的防护做假动作。与体检同一个
+    // special_item_verdict 钩子，判据不许在这里抄第二份（AGENTS §5.16）。
+    if !restore {
+        if let Some(true) = special_item_verdict(option_id) {
+            return Some(PreflightReject::AlreadySatisfied(
+                "Microsoft Defender 已卸载或已禁用，无需再关闭".to_string(),
+            ));
+        }
     }
     // 步骤不可执行预检：只查 restore 侧还是正向侧，按方向取对应数组。
     // 判据复用 [`step_exec_mode`]，那是 execMode 的唯一真源 —— 预检自己判一次
@@ -609,6 +623,11 @@ pub async fn optimizer_run<R: Runtime>(
         Some(PreflightReject::UnsupportedStep(reason)) => {
             log::write_log("warn", &format!("优化项步骤不可执行，已预先拒绝: {option_id} ({reason})"));
             return json!({ "success": false, "message": format!("本机不支持该优化项的某一步：{reason}") });
+        }
+        // 目标状态已满足（Defender 已卸载/已禁用）：不当失败处理，明确告知无需执行
+        Some(PreflightReject::AlreadySatisfied(reason)) => {
+            log::write_log("info", &format!("优化项目标状态已满足，跳过执行: {option_id} ({reason})"));
+            return json!({ "success": false, "alreadySatisfied": true, "message": reason });
         }
         _ => {}
     }
@@ -1004,6 +1023,12 @@ pub(super) fn verify_applied(option_id: &str, opt: &Value, p: &RunParams) -> &'s
     let checks = collect_checks(opt);
     if checks.is_empty() {
         return "unknown";
+    }
+    // 条目级特例（tf_defender 卸载/禁用判据）：与启动回读 check_optimized 走同一个钩子，
+    // 不在这里另写判据（AGENTS §5.16）。卸载机执行策略写键不会重建服务，回读仍由
+    // WinDefend 服务存在性/启动类型一锤定音。
+    if let Some(v) = special_item_verdict(option_id) {
+        return if v { "pass" } else { "partial" };
     }
     // 子集执行时**只断言真正下过写的目标**（2026-10-05 真机反馈的根因）：
     // 用户在 65 个服务里勾了 3 个，另外 62 个的启动类型当然还是原值 —— 拿全量清单

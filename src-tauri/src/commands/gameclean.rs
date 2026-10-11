@@ -13,11 +13,10 @@
 //!  2. **命令壳**（P2-02 旧视图，批次 B 拆除中）：`gameclean_scan` 与 finder 外部槽闭环
 //!     保留至 cleanup 扫描回填链完全通电。
 
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::commands::uninstall::game_platform_orphan::{self, LibRecord};
+use crate::commands::uninstall::game_platform_orphan;
 use crate::engine::protect;
 
 // ==================== 判定规则（纯函数，单测覆盖） ====================
@@ -84,8 +83,6 @@ fn excluded(path_lc: &str) -> Option<&'static str> {
 #[derive(Debug, Clone)]
 pub(crate) struct Candidate {
     pub(crate) path: String,
-    pub(crate) matched_dir: String,
-    pub(crate) matched_token: String,
     pub(crate) lossy: bool,
 }
 
@@ -151,7 +148,7 @@ pub(crate) fn scan_game_dir(
                 }
                 continue;
             }
-            if let Some((zone_path, token)) = &zone {
+            if zone.is_some() {
                 let fname = ent.file_name().to_string_lossy().to_string();
                 if file_ext_allowed(&fname) {
                     if *global_cap == 0 {
@@ -160,8 +157,6 @@ pub(crate) fn scan_game_dir(
                     }
                     sink.push(Candidate {
                         path: path.to_string_lossy().replace('\\', "/"),
-                        matched_dir: zone_path.clone(),
-                        matched_token: token.clone(),
                         lossy: trim_finder::util::has_lossy_path(&path),
                     });
                     *global_cap -= 1;
@@ -229,16 +224,7 @@ pub(crate) fn collect_redist_by_platform() -> GameRedistResult {
         }
     }
 
-    // lossy 项按平台点名
-    let mut lossy_by_platform: BTreeMap<String, usize> = BTreeMap::new();
-    for (_, cands) in &by_platform {
-        let lossy_count = cands.iter().filter(|c| c.lossy).count();
-        if lossy_count > 0 {
-            // 不点名具体游戏名，只说平台维度（简洁）
-            // 但 lossy 细节在单测里按游戏名断言——库函数这里只做平台级
-            let _ = lossy_by_platform;
-        }
-    }
+    // lossy 项在下面按平台分桶时直接计入 lossy_count（不进文件清单），无需中间表。
 
     // 每个平台：stat 路径得真实大小，组装文件清单
     let mut result = GameRedistResult {

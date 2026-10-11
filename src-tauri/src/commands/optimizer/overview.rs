@@ -614,6 +614,28 @@ pub(super) fn judge_check(c: &Check) -> bool {
             }
 }
 
+/// 条目级生效特例（2026-10-11 裁定 7）：返回 `Some(v)` 即**跳过该 id 的断言 AND 链**。
+///
+/// 白名单制——只登记特例、不开放成通用机制；新增特例必须在此表白名并写清「为什么
+/// 通用 AND 链对它不成立」。判据走真实服务管理器，新增的信号形态必须配 `#[ignore]`
+/// 真机探针（AGENTS §1.6 第二问），不能只靠 MockRuntime。
+///
+/// - `tf_defender`：该项 AND 链含 20 余条策略键 + 5 个服务断言。Defender 被卸载后
+///   服务键与策略键**一起消失**，每条断言都读不到 ⇒ 恒 false（真机症状：卸载
+///   Defender 的机器上该项永远显示「未优化」，执行还会往缺失的服务键写幽灵 Start）。
+///   产品语义只问「防护本体还在不在」：WinDefend 服务不存在（1060 已卸载）或
+///   Start=4（已禁用）都算已禁用；其它读不到的情形 fail-closed 判未生效。
+pub(super) fn special_item_verdict(id: &str) -> Option<bool> {
+    use crate::engine::native;
+    match id {
+        "tf_defender" => Some(native::service_absent_or_start_is(
+            "WinDefend",
+            native::SVC_START_DISABLED,
+        )),
+        _ => None,
+    }
+}
+
 pub(super) fn check_optimized(ids: Option<&[String]>) -> std::collections::HashMap<String, bool> {
     let mut result = std::collections::HashMap::new();
     // None = 全目录静默体检（id 顺序以目录为准，结果按 id 索引不依赖顺序）
@@ -631,6 +653,11 @@ pub(super) fn check_optimized(ids: Option<&[String]>) -> std::collections::HashM
     // id -> checks（保留请求顺序）
     let mut grouped: Vec<(String, Vec<Check>)> = Vec::new();
     for id in ids {
+        // 条目级特例优先落结果、不进 AND 链（见 special_item_verdict 白名单注释）
+        if let Some(v) = special_item_verdict(id) {
+            result.insert(id.clone(), v);
+            continue;
+        }
         let Some(opt) = find_option(id) else { continue };
         let checks = collect_checks(opt);
         if !checks.is_empty() {
@@ -856,6 +883,19 @@ pub async fn optimizer_nara_panel<R: Runtime>(window: WebviewWindow<R>) -> Value
         return json!({ "success": false, "message": msg });
     }
     json!({ "success": true, "data": nara_panel_sidecar() })
+}
+
+/// optimizer:privacy-panel —— 隐私自护面板侧表下发（2026-10-11，WinUtil 借鉴 V3）
+///
+/// 下发 `optimizer-privacy-panel.json` 整表（entryId/sections/hiddenFromOptimizer/statusLabels）。
+/// 渲染层三处消费：优化中心入口卡、hiddenFromOptimizer 过滤、面板行状态文案（tf_defender「已禁用」）。
+/// 档位 MAIN：与 optimizer_nara_panel 同判据——只读但只有主窗消费方。
+#[tauri::command]
+pub async fn optimizer_privacy_panel<R: Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    json!({ "success": true, "data": privacy_panel_sidecar() })
 }
 
 /// optimizer:svc-mem-current —— 当前 SVCHost 拆分阈值档位

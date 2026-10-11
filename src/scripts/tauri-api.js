@@ -226,6 +226,7 @@
     'optimizer:touch-recent': 'optimizer_touch_recent',
     'optimizer:bcd-enum': 'optimizer_bcd_enum',
     'optimizer:nara-panel': 'optimizer_nara_panel',
+    'optimizer:privacy-panel': 'optimizer_privacy_panel',
     // system / startup（5）
     'system:disk-type': 'system_disk_type',
     'system:disk-list': 'system_disk_list',
@@ -698,6 +699,7 @@
       touchRecent: function (optionId) { return invokeChannel('optimizer:touch-recent', { optionId: optionId }); },
       bcdEnum: function () { return invokeChannel('optimizer:bcd-enum'); },
       naraPanel: function () { return invokeChannel('optimizer:nara-panel'); },
+      privacyPanel: function () { return invokeChannel('optimizer:privacy-panel'); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }
     },
 

@@ -1,0 +1,86 @@
+{
+  "_comment": "隐私自护面板侧表（2026-10-11 用户拍板，WinUtil 借鉴方案 V3）。entryId 驱动主窗入口卡；sections 驱动面板渲染；hiddenFromOptimizer 从优化中心主列表隐藏全部 21 个 id（面板与主列表互斥展示，移动不是复制）。tf_defender 的生效态由 overview.rs::special_item_verdict 特判（WinDefend 服务不存在=已卸载/Start=4=已禁用 均算已禁用），statusLabels 让面板把该项生效标显示为「已禁用」而不是通用的「已优化」。与 optimizer-nara-panel.json 同形、同签名流程（内联 _sig）。",
+  "schemaVer": 1,
+  "entryId": "privacy_shield",
+  "sections": [
+    {
+      "id": "telemetry",
+      "title": "遥测与诊断数据",
+      "items": [
+        "telemetry_optimize",
+        "privacy_wer_off",
+        "privacy_compat_telemetry",
+        "privacy_defender_cloud",
+        "privacy_defender_sample",
+        "tf_privacy_extra"
+      ]
+    },
+    {
+      "id": "activity",
+      "title": "活动追踪与广告推荐",
+      "items": [
+        "tf_privacy",
+        "privacy_advertising_id",
+        "privacy_cloud_content",
+        "privacy_settingsync_off",
+        "privacy_permissions_tune",
+        "sys_startmenu_ads_off",
+        "sys_startmenu_tip_off",
+        "sys_settings_ads_off",
+        "sys_filesync_ads_off",
+        "privacy_device_metadata_off"
+      ]
+    },
+    {
+      "id": "supply",
+      "title": "硬件供应链与 AI",
+      "items": [
+        "privacy_wpbt_off",
+        "tf_ai_off",
+        "perf_uwp_background_off",
+        "share_off"
+      ]
+    },
+    {
+      "id": "security",
+      "title": "安全防线",
+      "admin": true,
+      "items": [
+        "tf_defender"
+      ]
+    }
+  ],
+  "hiddenFromOptimizer": [
+    "telemetry_optimize",
+    "privacy_wer_off",
+    "privacy_compat_telemetry",
+    "privacy_defender_cloud",
+    "privacy_defender_sample",
+    "tf_privacy_extra",
+    "tf_privacy",
+    "privacy_advertising_id",
+    "privacy_cloud_content",
+    "privacy_settingsync_off",
+    "privacy_permissions_tune",
+    "sys_startmenu_ads_off",
+    "sys_startmenu_tip_off",
+    "sys_settings_ads_off",
+    "sys_filesync_ads_off",
+    "privacy_device_metadata_off",
+    "privacy_wpbt_off",
+    "tf_ai_off",
+    "perf_uwp_background_off",
+    "share_off",
+    "tf_defender"
+  ],
+  "statusLabels": {
+    "tf_defender": {
+      "on": "已禁用",
+      "tip": "检测到 Defender 防护服务已禁用或已卸载"
+    }
+  },
+  "_sig": {
+    "alg": "ed25519",
+    "sig": "eWR7yv3bYxHe8UJ4F+3P8sEWvnM2ioTrsqfs9d20VerQ7qknk+IEIOOfM3YSim2sEAn+pVy309WqfvS4yC18BA=="
+  }
+}

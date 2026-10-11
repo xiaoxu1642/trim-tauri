@@ -124,6 +124,7 @@ const MUST_MAIN = [
   'optimizer_touch_recent', // E10 最近使用写：主窗档
   'optimizer_bcd_enum', // C3 BCD 面板枚举：主窗永劫专项面板消费，档位 MAIN（同 optimizer_list_groups 的 D5 判据）
   'optimizer_nara_panel', // C3 永劫专项面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同 optimizer_list_groups 的 D5 判据）
+  'optimizer_privacy_panel', // WinUtil 借鉴 V3 隐私自护面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同上）
   'optimizer_stale_dismiss', // 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗
   // 2026-10-07：外设优化由独立子窗改为**主窗应用内弹窗**（src/scripts/peripheral.js），
   // label `peripheral` 退役，三条通道的唯一调用方变成主窗，档位由 APP_WINDOWS 升到 MAIN。

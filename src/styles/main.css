@@ -6722,6 +6722,16 @@ img.ctx-col-icon {
 /* 永劫专项入口卡无「更多」按钮，项数徽章靠右 */
 .opt-col--nara .opt-nara-count { margin-left: auto; }
 
+/* ==================== 隐私自护面板入口卡（2026-10-11 WinUtil 借鉴 V3） ==================== */
+/* 弹窗内布局直接复用 .nara-panel/.nara-card/.nara-checkrow（同一种「侧表聚合面板」形态，
+   不另起一套类名造视觉分叉）；这里只补入口卡图标色与 footer 布局。 */
+.opt-privacy-icon { color: var(--accent); }
+.opt-col--privacy .opt-privacy-count { margin-left: auto; }
+.privacy-panel-footer [data-privacy-toggle-all] { margin-right: auto; }
+@media (prefers-reduced-motion: reduce) {
+  .opt-col--privacy, .nara-card, .nara-checkrow { transition: none; }
+}
+
 /* ==================== 外设优化弹窗（更多调优项） ==================== */
 /* 2026-10-07：外设优化由独立子窗改为应用内弹窗 —— 子窗外壳（.peripheral-window /
    .peri-topbar-left / .peri-back / .peri-body）随窗口一并删除，正文挂在

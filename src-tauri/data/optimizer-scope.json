@@ -15,6 +15,7 @@
     "tf_privacy": "reboot",
     "tf_keyboard": "reboot",
     "privacy_permissions_tune": "reboot",
+    "privacy_wpbt_off": "reboot",
     "storage_8dot3_off": "reboot",
     "perf_vbs_off": "reboot",
     "perf_remote_assist_off": "reboot",
