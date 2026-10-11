@@ -50,7 +50,7 @@
       '系统精简': '系统精简'
     },
     itemOverride: {
-      svc_mem_gb: '内存优化', tf_mmagent: '内存优化',
+      svc_mem_gb: '内存优化',
       tf_svc_bulk: '系统服务', tf_drv_disable: '系统服务'
     }
   };
@@ -545,7 +545,6 @@
     'disable_uac',           // 禁用 UAC
     'tf_defender',           // 关闭 Defender 与 SmartScreen
     'perf_vbs_off',          // 关闭 VBS / 内存完整性
-    'perf_exploit_protection_off', // 关闭 Exploit Protection（乱序内存）
     'tf_svc_bulk',           // 禁用 70+ 非必要服务（含安全服务）
     'tf_drv_disable',        // 禁用高风险驱动服务
     'perf_windows_update_off' // v3.7.0 P1：彻底禁用 Windows 更新（安全补丁不再送达）
@@ -876,6 +875,387 @@
     });
   }
 
+  // ==================== C3/C4：永劫无间专项（入口卡 + 可勾选执行面板） ====================
+  // 由侧表 NARA_PANEL（optimizer-nara-panel.json，已签名）驱动：
+  //   · 入口卡 renderNaraCol 拼进 opt-kanban 最顶部，整卡可点（按钮只是视觉焦点）
+  //   · 面板 openNaraPanel 渲染全部分区条目（含被主列表隐藏的成员），默认全部勾选，
+  //     优化项复用 runSelected 全套预检/高危/还原点链，网络维护任务走 maintenance.run
+  // 布局约束（2026-10-11 真机实测）：头部只放短标题，长信息放 body，不许三者挤一行。
+  const NARA_ROW_LABEL = {
+    nara_bcd_timer: '计时器与平台时钟',
+    nara_bcd_vsm: 'VSM / Hyper-V 虚拟化',
+    nara_bcd_boot: '启动菜单与开机画面',
+    nara_bcd_lowmem: '低内存预留策略',
+    nara_bcd_irq: '中断与 PCI 访问策略',
+  };
+  const naraBadge = (type, text, title) =>
+    window.ds ? window.ds.badgeHtml(type, text, title ? { small: true, title } : { small: true })
+              : `<span class="category-risk low">${escapeHtml(text)}</span>`;
+  const naraSectionMeta = (s) => [
+    s.items?.length ? s.items.length + ' 优化项' : '',
+    s.tasks?.length ? s.tasks.length + ' 维护任务' : '',
+  ].filter(Boolean).join(' · ');
+
+  function renderNaraCol() {
+    if (!NARA_PANEL) return '';
+    const sections = NARA_PANEL.sections || [];
+    const optCount = (NARA_PANEL.hiddenFromOptimizer || []).length;
+    const taskCount = sections.reduce((n, s) => n + (s.tasks?.length || 0), 0);
+    return `
+      <section class="opt-col opt-col--nara" data-nara-entry role="button" tabindex="0"
+               aria-label="打开永劫无间优化专项面板" data-tip="打开永劫无间优化专项面板">
+        <div class="opt-col-head">
+          <span class="opt-nara-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          </span>
+          <span class="opt-col-title">永劫无间专项</span>
+          <span class="opt-col-count opt-nara-count">${optCount} 项</span>
+        </div>
+        <div class="opt-nara-desc">${sections.length} 个分区 · ${optCount} 优化项${taskCount ? ' · ' + taskCount + ' 维护任务' : ''}，进入面板默认勾选可执行项</div>
+        <div class="opt-col-body">
+          ${sections.map(s => {
+            const meta = naraSectionMeta(s);
+            if (!meta) return '';
+            return `<div class="opt-nara-row">
+              <span class="opt-nara-row__name"><span>${escapeHtml(s.title)}</span>${s.admin ? naraBadge('accent', '需管理员') : ''}</span>
+              <span class="opt-nara-row__meta">${escapeHtml(meta)}</span>
+            </div>`;
+          }).join('')}
+        </div>
+      </section>`;
+  }
+
+  // innerHTML 每次重渲染后重挂；section 上一个监听器同时兜住按钮点击（事件冒泡，只触发一次）
+  function bindNaraCol() {
+    document.querySelectorAll('[data-nara-entry]').forEach(card => {
+      if (card.dataset.boundNara) return;
+      card.dataset.boundNara = '1';
+      card.addEventListener('click', () => openNaraPanel());
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openNaraPanel(); }
+      });
+    });
+  }
+
+  // 面板运行态（独立勾选集，不碰主页面 selectedIds）
+  let naraPanelState = null;
+
+  // C3/C4：打开永劫专项面板（modal.create；modal.js 不导出 open，只有 create/confirm/closeAll）
+  async function openNaraPanel() {
+    const create = window.modal?.create;
+    if (!create) { window.app?.toast?.('error', '弹窗组件未就绪，请刷新页面重试'); return; }
+    if (!NARA_PANEL) return;
+    // 完整目录（含主列表隐藏项）；缺 id 就跳过，不让一个坏 id 杀掉整块面板
+    const byId = new Map(ALL_OPTIONS.map(o => [o.id, o]));
+    const sections = (NARA_PANEL.sections || []).map(s => ({
+      ...s,
+      optItems: (s.items || []).map(id => byId.get(id)).filter(Boolean),
+    }));
+    // 默认全选（2026-10-11 用户拍板），已优化的不再预选（重跑无意义）。
+    // BCD 5 行例外：体检结果未回来前一律不预选（非提权读不到 BCD），
+    // 体检后只有 executable 的行才勾上——「已达标/未配置」不需要执行。
+    const bcdIds = new Set(Object.keys(NARA_ROW_LABEL));
+    const checked = new Set();
+    sections.forEach(s => s.optItems.forEach(o => {
+      if (optimizedIds.has(o.id) || bcdIds.has(o.id)) return;
+      checked.add(o.id);
+    }));
+    const tasksChecked = new Set();
+    (NARA_PANEL.sections || []).forEach(s => (s.tasks || []).forEach(id => tasksChecked.add(id)));
+    naraPanelState = {
+      sections, checked, tasksChecked, taskMap: new Map(),
+      // BCD 体检：null=未出结果；'failed'=读不到（多为非提权）；Map<rowId,状态行>
+      bcd: null,
+      running: false, ctrl: null,
+    };
+    const ctrl = create({
+      id: 'naraPanelModal',
+      title: '永劫无间优化专项面板',
+      width: 720,
+      bodyHtml: `<div class="nara-panel" id="naraPanelBody">${renderNaraPanelBody()}</div>`,
+      footerHtml: `
+        <button type="button" class="btn btn-secondary btn-small" data-nara-toggle-all>全选 / 全不选</button>
+        <button type="button" class="btn btn-accent" data-nara-run>执行所选优化</button>
+        <button type="button" class="btn btn-secondary" data-nara-close>关闭</button>`,
+      footerClass: 'nara-panel-footer',
+    });
+    naraPanelState.ctrl = ctrl;
+    bindNaraPanelEvents(ctrl);
+    loadNaraTasks();     // 维护任务清单（异步，不阻塞面板）
+    loadNaraBcdStates(); // BCD 三态体检（异步回填到 BCD 分区行）
+  }
+
+  function renderNaraPanelBody() {
+    const st = naraPanelState;
+    if (!st) return '';
+    return st.sections.map(s => {
+      const optRows = s.optItems.map(o => renderNaraOptRow(o)).join('');
+      const taskRows = (s.tasks || []).map(id => renderNaraTaskRow(id)).join('');
+      if (!optRows && !taskRows) return '';
+      // BCD 分区的状态横幅槽：未出结果/需提权/危险元素告警都回填这里
+      const banner = s.id === 'bcd' ? '<div class="nara-bcd-banner" data-nara-bcd-banner></div>' : '';
+      return `<section class="nara-card" data-nara-section="${escapeHtml(s.id)}">
+        <div class="nara-card__title">
+          <span>${escapeHtml(s.title)}</span>
+          ${s.admin ? naraBadge('accent', '需管理员') : ''}
+        </div>
+        ${banner}
+        <div class="nara-card__body">${optRows}${taskRows}</div>
+      </section>`;
+    }).join('');
+  }
+
+  // BCD 行的可交互判据：只有体检判「可执行」时才能勾选；
+  // 未体检/已达标/保护态都禁用点击
+  function naraRowDisabled(o) {
+    if (optimizedIds.has(o.id)) return true;
+    if (NARA_ROW_LABEL[o.id]) {
+      const st = naraPanelState?.bcd;
+      if (!(st instanceof Map)) return true; // 未体检 / 体检失败
+      const r = st.get(o.id);
+      return !r || r.kind !== 'executable';
+    }
+    return false;
+  }
+
+  function renderNaraOptRow(o) {
+    const st = naraPanelState;
+    const isOpt = optimizedIds.has(o.id);
+    const isBcd = !!NARA_ROW_LABEL[o.id];
+    const disabled = naraRowDisabled(o);
+    const on = st.checked.has(o.id);
+    const side = [];
+    if (isBcd) {
+      const bcd = st.bcd;
+      if (!(bcd instanceof Map)) {
+        side.push(naraBadge('neutral', bcd === 'failed' ? '需管理员体检' : '待体检', 'BCD 存储需要管理员权限才能读取'));
+      } else {
+        const r = bcd.get(o.id);
+        if (r?.protectionHit) side.push(naraBadge('accent', '保护态跳过', 'Hyper-V/WSL/模拟器在用'));
+        else if (r?.kind === 'executable') side.push(naraBadge('warn', '可优化'));
+        else if (r?.kind === 'unhit') side.push(naraBadge('ok', '已达标（系统默认）'));
+        else if (r?.kind === 'optimized') side.push(naraBadge('ok', '已达标'));
+      }
+    }
+    side.push(riskBadge(o.risk));
+    if (isOpt) side.push(naraBadge('ok', '已优化'));
+    const tip = isOpt ? '该项已生效，可在优化中心主列表点行查看还原'
+      : isBcd && disabled ? '当前无需执行（体检未发现需要对齐的配置）'
+        : '勾选/取消该优化项';
+    return `<div class="nara-checkrow${disabled ? ' is-optimized' : ''}"
+            data-nara-opt="${escapeHtml(o.id)}" data-tip="${tip}">
+      <span class="checkbox${on ? ' checked' : ''}${disabled ? ' disabled' : ''}" role="checkbox" tabindex="0"
+            aria-checked="${on ? 'true' : 'false'}"${disabled ? ' aria-disabled="true"' : ''}>${on ? checkSvg() : ''}</span>
+      <span class="nara-checkrow__name">${escapeHtml(o.title)}</span>
+      <span class="nara-checkrow__side">${side.join('')}</span>
+    </div>`;
+  }
+
+  function renderNaraTaskRow(id) {
+    const st = naraPanelState;
+    const t = st.taskMap.get(id);
+    const on = st.tasksChecked.has(id);
+    const side = t
+      ? `${t.admin ? naraBadge('accent', '需管理员') : ''}${naraBadge('neutral', '维护任务')}`
+      : `<span class="nara-muted" style="padding:0">任务清单加载中…</span>`;
+    return `<div class="nara-checkrow" data-nara-task="${escapeHtml(id)}">
+      <span class="checkbox${on ? ' checked' : ''}" role="checkbox" tabindex="0"
+            aria-checked="${on ? 'true' : 'false'}"${t ? '' : ' aria-disabled="true"'}>${on ? checkSvg() : ''}</span>
+      <span class="nara-checkrow__name">${escapeHtml(t?.title || id)}</span>
+      <span class="nara-checkrow__side">${side}</span>
+    </div>`;
+  }
+
+  // 复选勾的对勾 SVG（与主列表复选框同款形状）
+  function checkSvg() {
+    return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="#fff" stroke-width="2"><path d="M2 6.5l2.5 2.5L10 3"/></svg>';
+  }
+
+  function refreshNaraPanel() {
+    const body = naraPanelState?.ctrl?.body?.querySelector('#naraPanelBody');
+    if (!body) return;
+    body.innerHTML = renderNaraPanelBody();
+    updateNaraRunCount();
+  }
+
+  function updateNaraRunCount() {
+    const st = naraPanelState;
+    const btn = st?.ctrl?.footer?.querySelector('[data-nara-run]');
+    if (!btn) return;
+    const n = st.checked.size + st.tasksChecked.size;
+    btn.textContent = n ? `执行所选（${n} 项）` : '执行所选';
+    btn.disabled = st.running || n === 0;
+  }
+
+  function bindNaraPanelEvents(ctrl) {
+    const modalEl = ctrl.modal;
+    // 行勾选（事件委托；优化项/维护任务两个集合分开记）
+    modalEl.addEventListener('click', (e) => {
+      const optRow = e.target.closest('[data-nara-opt]');
+      const taskRow = e.target.closest('[data-nara-task]');
+      const row = optRow || taskRow;
+      if (row) {
+        if (row.classList.contains('is-optimized') || row.hasAttribute('aria-disabled')) return;
+        const set = optRow ? naraPanelState.checked : naraPanelState.tasksChecked;
+        const id = optRow ? row.dataset.naraOpt : row.dataset.naraTask;
+        set.has(id) ? set.delete(id) : set.add(id);
+        const box = row.querySelector('.checkbox');
+        const on = set.has(id);
+        box.classList.toggle('checked', on);
+        box.innerHTML = on ? checkSvg() : '';
+        row.setAttribute('aria-checked', on ? 'true' : 'false');
+        updateNaraRunCount();
+        return;
+      }
+      if (e.target.closest('[data-nara-toggle-all]')) {
+        // 只在可交互行间全选/全不选（已优化、BCD 未达标可执行之外的状态都跳过）
+        const allOpt = naraPanelState.sections
+          .flatMap(s => s.optItems)
+          .filter(o => !naraRowDisabled(o));
+        const allTaskIds = (NARA_PANEL.sections || []).flatMap(s => s.tasks || []);
+        const allOn = allOpt.every(o => naraPanelState.checked.has(o.id))
+          && allTaskIds.every(id => naraPanelState.tasksChecked.has(id));
+        naraPanelState.checked = new Set(allOn ? [] : allOpt.map(o => o.id));
+        naraPanelState.tasksChecked = new Set(allOn ? [] : allTaskIds);
+        refreshNaraPanel();
+        return;
+      }
+      if (e.target.closest('[data-nara-elevate]')) {
+        window.app?.requestElevation?.('BCD 体检需要管理员权限，应用将以管理员身份重启。');
+        return;
+      }
+      if (e.target.closest('[data-nara-run]')) { runNaraPanel(); return; }
+      if (e.target.closest('[data-nara-close]')) { ctrl.close(); }
+    });
+    // 键盘可达：Enter/空格切勾选
+    modalEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const row = e.target.closest?.('[data-nara-opt], [data-nara-task]');
+      if (row) { e.preventDefault(); row.click(); }
+    });
+    updateNaraRunCount();
+  }
+
+  // 维护任务清单（只取面板里引用的 id）
+  async function loadNaraTasks() {
+    try {
+      const resp = await window.api?.maintenance?.tasks?.();
+      if (!resp?.success || !Array.isArray(resp.data)) return;
+      resp.data.forEach(t => naraPanelState.taskMap.set(t.id, t));
+      refreshNaraPanel();
+    } catch (e) { /* 加载失败保留占位文案 */ }
+  }
+
+  // BCD 体检 → 回填每行徽章；只有 executable 行可勾选并默认预选。
+  // bcdedit 读 BCD 存储需管理员（非提权实测「拒绝访问」），失败时给提权入口而不是默认勾上。
+  async function loadNaraBcdStates() {
+    const st = naraPanelState;
+    if (!st?.ctrl) return;
+    let res;
+    try { res = await window.api?.optimizer?.bcdEnum?.(); } catch (e) { res = null; }
+    if (!(res?.success && res.data)) {
+      st.bcd = 'failed';
+      refreshNaraPanel();
+      paintBcdBanner('failed');
+      return;
+    }
+    const map = new Map();
+    (res.data.rowStates || []).forEach(r => map.set(r.rowId, r));
+    st.bcd = map;
+    // 只有「可执行」的行预选；已达标/系统默认/保护态都不勾
+    map.forEach((r, id) => {
+      if (r.kind === 'executable' && !r.protectionHit && !optimizedIds.has(id)) st.checked.add(id);
+    });
+    refreshNaraPanel();
+    paintBcdBanner('ok', res.data.unknownBcdValues || []);
+  }
+
+  function paintBcdBanner(kind, unknown) {
+    const slot = naraPanelState?.ctrl?.body?.querySelector('[data-nara-bcd-banner]');
+    if (!slot) return;
+    if (kind === 'failed') {
+      slot.classList.add('is-failed');
+      slot.innerHTML = `<span>BCD 体检需要管理员权限（bcdedit 对非提权进程拒绝访问），提权后自动检测；检测完成前 BCD 5 行不勾选。</span>
+        <button type="button" class="btn btn-secondary btn-small" data-nara-elevate>以管理员身份重启</button>`;
+    } else if (Array.isArray(unknown) && unknown.length) {
+      slot.classList.add('is-warn');
+      slot.textContent = `检测到 ${unknown.length} 个无文档/危险 BCD 元素（${unknown.join('、')}），专项面板不会写入这些值。`;
+    } else {
+      slot.remove();
+    }
+  }
+
+  // 面板「执行所选」：优化项先走 runSelected（预检/高危/还原点全链路），再跑维护任务
+  async function runNaraPanel() {
+    const st = naraPanelState;
+    if (!st || st.running || batchRunning) return;
+    const order = st.sections.flatMap(s => s.optItems.map(o => o.id));
+    const optEntries = order.filter(id => st.checked.has(id))
+      .map(id => ALL_OPTIONS.find(o => o.id === id)).filter(Boolean);
+    const taskEntries = (NARA_PANEL.sections || []).flatMap(s => s.tasks || [])
+      .filter(id => st.tasksChecked.has(id))
+      .map(id => st.taskMap.get(id)).filter(Boolean);
+    const tasksMissing = (NARA_PANEL.sections || []).flatMap(s => s.tasks || [])
+      .filter(id => st.tasksChecked.has(id) && !st.taskMap.has(id));
+    if (tasksMissing.length) {
+      window.app?.toast('warning', '维护任务清单还在加载，请稍后再执行');
+      return;
+    }
+    if (!optEntries.length && !taskEntries.length) {
+      window.app?.toast('warning', '请先勾选要执行的项目');
+      return;
+    }
+    st.running = true;
+    updateNaraRunCount();
+    try {
+      if (optEntries.length) await runSelected(optEntries);
+      if (taskEntries.length) await runNaraTasks(taskEntries);
+    } finally {
+      st.running = false;
+      // 已执行成功的会进 optimizedIds，重建勾选态（已优化项自动移出选择）
+      st.sections.forEach(s => s.optItems.forEach(o => {
+        if (optimizedIds.has(o.id)) st.checked.delete(o.id);
+      }));
+      refreshNaraPanel();
+      loadNaraBcdStates(); // 执行后状态可能变（尤其 BCD），重拉回填
+    }
+  }
+
+  // 网络维护任务（从优化面板跨页调用）：admin 任务一次红色确认，逐项执行
+  async function runNaraTasks(tasks) {
+    const adminTasks = tasks.filter(t => t.admin);
+    const ok = adminTasks.length
+      ? await window.app.confirmDanger(
+          `⚠️ 执行 ${tasks.length} 项网络维护任务（${adminTasks.length} 项需管理员）`,
+          tasks.map(t => '· ' + t.title).join('\n') + '\n\n这些操作会立即重置网络栈/DNS/响应性设置，期间网络可能瞬断。',
+          '仍然执行', '取消',
+          '部分修改需重启或重新联网才完全生效，请确认已了解后果。')
+      : await window.app.confirm(
+          `执行 ${tasks.length} 项网络维护任务`,
+          tasks.map(t => '· ' + t.title).join('\n') + '\n\n期间网络可能瞬断。',
+          '确认执行', '取消');
+    if (!ok) return;
+    let okN = 0, failN = 0;
+    for (const t of tasks) {
+      window.app?.toast?.('info', `正在执行「${t.title}」…`);
+      let resp;
+      try {
+        resp = await window.api.maintenance.run(t.id);
+      } catch (e) {
+        failN++;
+        continue;
+      }
+      if (resp?.needAdmin) {
+        const elevated = await window.app?.requestElevation?.('网络维护任务需要管理员权限才能执行系统级操作。');
+        if (elevated) window.app?.toast?.('info', '应用将以管理员身份重启，重启后请重新进入专项面板执行');
+        return; // 提权重启 / 拒绝都结束本批
+      }
+      if (resp?.success) okN++; else failN++;
+    }
+    window.app?.toast(failN ? 'warning' : 'success',
+      `维护任务完成：成功 ${okN} 项${failN ? `，失败 ${failN} 项` : ''}`);
+  }
+
   // ==================== 列表渲染：看板瀑布流（Masonry） ====================
   // 每个分类一列（白色圆角卡片），列内条目竖排：复选框 + 序号 + 名称（可换行不截断）+ 风险标签；
   // 列头 = 分类名 + 项数徽章；列底 = 「全选本类」；
@@ -899,7 +1279,9 @@
     const totalItems = order.reduce((s, g) => s + byGroup[g].length, 0);
     const summary = document.getElementById('optimizerSummary');
     if (summary) summary.textContent = `共 ${totalItems} 项优化 · ${order.length} 个分类`;
-    root.innerHTML = `<div class="opt-kanban">` + order.map(group => {
+    // C3：永劫专项面板入口卡（存在则放在看板最顶部，跟 opt-col 并列）
+    const naraCol = renderNaraCol();
+    root.innerHTML = `<div class="opt-kanban">${naraCol}` + order.map(group => {
       // 审查 M20：不再按分类注入离表 hex。`--c` / `--cf` 的 CSS 兜底本身就是
       // `var(--accent)` / `var(--accent-text)`（main.css:6335、:2589），少注入一层
       // 反而让主题与自定义 accent（pathbinding.applyAccent）能正常驱动看板配色。
@@ -938,6 +1320,7 @@
       );
     }
     if (kanbanMasonry) kanbanMasonry.relayout(false);
+    bindNaraCol(); // C3：innerHTML 重建后重新绑入口卡事件
     updateSelectedButtonState();
   }
 
@@ -1455,7 +1838,13 @@
         // 「还有 N 个没有单独说明」必须如实说：清单里没登记解释的目标不列出来，
         // 不说的话用户会以为「全选」就是这 M 项。
         const un = Number(o.subitems.unexplained) || 0;
-        o.subitems.items.forEach(it => { pickState.targets.add(it.value); pickState.all.push(it.value); });
+        // 默认勾选按后端下发的 defaultOff 收窄（2026-10-11 用户裁定：
+        // tf_dev_disable 的 Intel ME/MEI/SMBus 默认不勾）。extras 仍默认全不选。
+        const defaultOff = new Set(Array.isArray(o.subitems.defaultOff) ? o.subitems.defaultOff : []);
+        o.subitems.items.forEach(it => {
+          pickState.all.push(it.value);
+          if (!defaultOff.has(it.value)) pickState.targets.add(it.value);
+        });
         const openBtn = $('.opt-pick-open');
         const entryTotal = Number(o.subitems.total) || pickState.all.length;
         const paintEntry = () => {
@@ -1730,6 +2119,10 @@
 
   // ==================== 执行 & AI ====================
   let OPTIONS = [];
+  // 未做 hiddenFromOptimizer 过滤的完整目录：永劫专项面板要渲染/执行被主列表隐藏的成员项。
+  let ALL_OPTIONS = [];
+  // C3：永劫无间专项面板侧表。null=未加载/加载失败，对象=完整侧表。
+  let NARA_PANEL = null;
 
   // ==================== 生效粒度（applyScope，BoosterX §B2）====================
   // 档位序与 Rust 侧 SCOPE_RANK 同表（commands/optimizer.rs），两侧一致性由
@@ -1759,6 +2152,16 @@
   function batchParams(opt, paramsByRun) {
     if (paramsByRun && paramsByRun.has(opt.id)) return paramsByRun.get(opt.id);
     if (opt.dynamic) return null;
+    // 批量勾选整行时，subitems 项按**默认勾选集**执行（defaultOff 不预选，
+    // 2026-10-11 用户裁定：tf_dev_disable 的 Intel ME/MEI/SMBus 默认不碰），
+    // extras 默认全不选。要全选/自定义须从详情弹窗逐项表态。
+    if (hasSubitemPick(opt)) {
+      const defaultOff = new Set(Array.isArray(opt.subitems.defaultOff) ? opt.subitems.defaultOff : []);
+      const pickedTargets = (opt.subitems.items || [])
+        .map(it => it.value)
+        .filter(v => !defaultOff.has(v));
+      return { pickedTargets, pickedExtras: [] };
+    }
     return {};
   }
 
@@ -2014,9 +2417,12 @@
   }
 
   // 执行已勾选的优化项（支持跨分类；跳过当前页面分类之外的项需重新渲染时保持一致）
-  async function runSelected() {
+  async function runSelected(entriesOverride) {
     if (batchRunning) return;
-    const entries = displayList(OPTIONS).filter(o => selectedIds.has(o.id));
+    // entriesOverride：永劫专项面板用自己的勾选集调用（面板成员在主列表被隐藏，
+    // 不能从 selectedIds/OPTIONS 取）；主页面按钮不传参，走原口径。
+    const entries = entriesOverride
+      || displayList(OPTIONS).filter(o => selectedIds.has(o.id));
     if (!entries.length) {
       window.app?.toast('warning', '请先勾选要执行的优化项');
       return;
@@ -2117,7 +2523,7 @@
     progressToastSuffix = '';
     batchRunning = false;
     if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
-    clearSelection();
+    if (!entriesOverride) clearSelection();  // 面板批次用独立勾选集，不清主页面选择
     renderGroups(OPTIONS); // 刷新已优化灰态
     window.app?.toast(
       okCount === allowed.length ? 'success' : 'warning',
@@ -2341,14 +2747,24 @@
         ? window.api.system.diskType().then(r => (r && r.success ? r.data : null)).catch(() => null)
         : Promise.resolve(null);
       // E7：先取分类侧表，再取目录 —— 渲染要用分组口径决定每项归到哪个看板。
-      // 两条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
-      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups()])
-        .then(([dt, res, gs]) => {
+      // 三条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
+      // 外加 C3：永劫专项面板侧表（独立并行拉，失败不阻塞目录）。
+      Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(),
+                   window.api.optimizer.naraPanel?.().catch(() => null)])
+        .then(([dt, res, gs, np]) => {
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
+        // C3：永劫专项面板侧表。失败/null 时 NARA_PANEL 保持 null → 不触发任何过滤与入口卡
+        if (np && np.success && np.data) NARA_PANEL = np.data;
         if (res && res.success && Array.isArray(res.data)) {
-          OPTIONS = filterByDiskType(res.data);
+          const optsAll = filterByDiskType(res.data);
+          ALL_OPTIONS = optsAll;
+          let opts = optsAll;
+          // C3：hiddenFromOptimizer 过滤 — 面板与优化中心互斥展示
+          const hiddenIds = new Set(NARA_PANEL?.hiddenFromOptimizer || []);
+          if (hiddenIds.size) opts = opts.filter(o => !hiddenIds.has(o.id));
+          OPTIONS = opts;
           activeCategory = getSavedCategory();
           // 审查 v3：本地执行记录必须在渲染之前载入，否则首屏会短暂显示「未优化」，
           // 用户在这一瞬勾选并重复执行——正是本次要防的形态。

@@ -9,6 +9,10 @@
   let categories = [];          // ['系统修复','搜索与界面','网络连接']
   let activeCat = '全部';
   let running = null;           // 正在执行的 taskId（同一时刻仅一个）
+  // C3：永劫专项面板侧表（hiddenFromMaintenance 过滤用）
+  let NARA_PANEL_MAINT = null;
+  let NARA_MAINT_FILTERED_IDS = null;  // 被 hiddenFromMaintenance 过滤的 id Set（null=未过滤，Set=过滤过）
+  let NARA_MAINT_FILTERED_TITLES = []; // 被过滤任务的用户可读标题（横幅显示标题，不暴露裸 id）
   const status = new Map();     // taskId -> 'idle'|'running'|'ok'|'warn'|'error'
   const selected = new Set();   // 批量勾选的 taskId（跨分类保留）
   let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested } | null
@@ -219,14 +223,23 @@
     const el = document.getElementById('maintList');
     if (!el) return;
     const list = visibleTasks();
+    // C3：迁移横幅（网络类 3 项已收拢到永劫专项面板）。主窗不挂 ds.css 的 alert/btn 组件，
+    // 用本页 scoped 类 maint-nara-banner + 通用 btn（2026-10-11 真机实测 ds-alert/ds-btn 无样式）。
+    const migrationHint = NARA_MAINT_FILTERED_IDS && NARA_MAINT_FILTERED_IDS.size
+      ? `<div class="maint-nara-banner">
+          <strong>网络类维护任务已收拢</strong>
+          <span>${escapeHtml(NARA_MAINT_FILTERED_TITLES.join('、'))} 已移至「电脑优化中心 → 永劫无间专项」面板</span>
+          <button type="button" class="btn btn-secondary btn-small maint-nara-banner__btn" data-nara-goto>前往</button>
+        </div>` : '';
     if (!list.length) {
-      el.innerHTML = window.emptyState
+      el.innerHTML = migrationHint + (window.emptyState
         ? window.emptyState({ icon: 'search', title: '暂无维护任务', desc: '加载任务清单中，请稍后重试' })
-        : '<div class="xtable-empty">暂无任务</div>';
+        : '<div class="xtable-empty">暂无任务</div>');
+      bindNaraHintClicks(el);
       return;
     }
     const busy = !!running || !!batch;
-    el.innerHTML = list.map(t => {
+    el.innerHTML = migrationHint + list.map(t => {
       const st = status.get(t.id) || 'idle';
       const isRunning = running === t.id;
       const isSelected = selected.has(t.id);
@@ -269,6 +282,18 @@
         if (e.target.closest('button, input, label')) return;
         const task = tasks.find(t => t.id === card.dataset.id);
         if (task) openMaintDetail(task);
+      });
+    });
+    bindNaraHintClicks(el);
+  }
+
+  // C3：迁移横幅按钮 → 跳转到优化中心（由 app.js 跨页 API 提供）
+  function bindNaraHintClicks(root) {
+    if (!root) return;
+    root.querySelectorAll('[data-nara-goto]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        window.app?.switchPage?.('optimizer');
       });
     });
   }
@@ -545,7 +570,22 @@
     try {
       const resp = await window.api.maintenance.tasks();
       if (resp && resp.success && Array.isArray(resp.data)) {
-        tasks = resp.data;
+        let data = resp.data;
+        // C3：hiddenFromMaintenance 过滤 — 网络类 3 项收拢到永劫专项面板
+        if (NARA_PANEL_MAINT) {
+          const hiddenIds = new Set(NARA_PANEL_MAINT.hiddenFromMaintenance || []);
+          if (hiddenIds.size) {
+            NARA_MAINT_FILTERED_IDS = hiddenIds;
+            // 横幅展示用户可读标题（按侧表顺序），拿不到标题才回落 id
+            NARA_MAINT_FILTERED_TITLES = (NARA_PANEL_MAINT.hiddenFromMaintenance || [])
+              .map(id => data.find(t => t.id === id)?.title || id);
+            data = data.filter(t => !hiddenIds.has(t.id));
+          } else {
+            NARA_MAINT_FILTERED_IDS = null;
+            NARA_MAINT_FILTERED_TITLES = [];
+          }
+        }
+        tasks = data;
         categories = Array.isArray(resp.categories) ? resp.categories : [];
         renderTabs();
         renderList();
@@ -575,7 +615,7 @@
     window.app?.toast?.('info', `检测到上次因提权重启中断的维护批量（${valid.length} 项），已恢复勾选，可点「执行所选」继续`, 6000);
   }
 
-  function init() {
+  async function init() {
     if (!outputBound) {
       outputBound = true;
       document.getElementById('btnMaintOutputClose')?.addEventListener('click', hideOutput);
@@ -587,6 +627,12 @@
         window.api.maintenance.onOutput(onOutput);
       }
     }
+    // C3：先拉永劫专项面板侧表（fire-and-forget 但要在 loadTasks 回来之前）
+    // 让 hiddenFromMaintenance 过滤在第一次渲染时就生效——不做二次重渲染
+    try {
+      const np = await (window.api?.optimizer?.naraPanel?.() || Promise.resolve(null));
+      if (np && np.success && np.data) NARA_PANEL_MAINT = np.data;
+    } catch (e) { /* 侧表拉取失败静默降级 */ }
     renderTabs();
     renderList();
     updateBatchbar();

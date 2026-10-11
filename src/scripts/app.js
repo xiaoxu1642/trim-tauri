@@ -270,7 +270,7 @@
   // 路由
   const ACTIVE_PAGE_KEY = 'trim-active-page';
 
-  // 磁盘清理四合一：原五个独立页面收拢为 page-cleanup 内的分段视图
+  // 磁盘清理五合一：原五个独立页面收拢为 page-cleanup 内的分段视图
   const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-empty', 'cleanup-analyze'];
   const CLEANUP_VIEW_KEY = 'trim-cleanup-view';
 
@@ -325,7 +325,7 @@
     }
     // v3.7.0 议题五：先补齐本页脚本，再执行页面进入逻辑（否则 load()/onEnter() 是空操作）
     await ensurePageScripts(pageName);
-    if (cleanupView !== 'cleanup') {
+    if (cleanupView && cleanupView !== 'cleanup') {
       await ensurePageScripts('cleanup-finder');
       window.finder?.ensureInit?.();
     }

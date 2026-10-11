@@ -224,6 +224,8 @@
     'optimizer:stale-dismiss': 'optimizer_stale_dismiss',
     'optimizer:list-groups': 'optimizer_list_groups',
     'optimizer:touch-recent': 'optimizer_touch_recent',
+    'optimizer:bcd-enum': 'optimizer_bcd_enum',
+    'optimizer:nara-panel': 'optimizer_nara_panel',
     // system / startup（5）
     'system:disk-type': 'system_disk_type',
     'system:disk-list': 'system_disk_list',
@@ -459,7 +461,9 @@
         if (opts === void 0) opts = {};
         return invokeChannel('finder:scan', Object.assign({ scanType: scanType }, opts));
       },
-      delete: function (items) { return invokeChannel('finder:delete', { items: items }); },
+      delete: function (items) {
+        return invokeChannel('finder:delete', { items: items });
+      },
       onProgress: function (callback) { return onEvent('finder:progress', callback); },
       deleteManifest: function () { return invokeChannel('finder:delete-manifest'); },
       openBackupDir: function () { return invokeChannel('finder:open-backup-dir'); },
@@ -615,6 +619,7 @@
       onOutput: function (callback) { return onEvent('maintenance:output', callback); }
     },
 
+
     netcheck: {
       collect: function () { return invokeChannel('netcheck:collect'); },
       repair: function (actionId) { return invokeChannel('netcheck:repair', { actionId: actionId }); }
@@ -691,6 +696,8 @@
       staleDismiss: function (ids) { return invokeChannel('optimizer:stale-dismiss', { ids: ids }); },
       listGroups: function () { return invokeChannel('optimizer:list-groups'); },
       touchRecent: function (optionId) { return invokeChannel('optimizer:touch-recent', { optionId: optionId }); },
+      bcdEnum: function () { return invokeChannel('optimizer:bcd-enum'); },
+      naraPanel: function () { return invokeChannel('optimizer:nara-panel'); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }
     },
 

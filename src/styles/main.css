@@ -6622,6 +6622,106 @@ img.ctx-col-icon {
 .opt-col-more:hover { background: var(--accent-light); border-color: var(--accent); }
 .opt-col-more + .opt-col-count { margin-left: 0; }
 
+/* ==================== 永劫无间专项面板入口卡（2026-10-11 C3，opt-col 同族白卡） ==================== */
+/* 入口卡跟分类卡并列进瀑布流，头部沿用 opt-col-head。头部只放短标题（keep-all 不收缩，
+   长标题会与右侧按钮/徽章重叠——2026-10-11 真机实测），分区明细放 body。
+   不臆造 ds-* 类：ds.css 只有 badge/ring/menu/tooltip/skeleton，没有 card/row/alert/stack。 */
+.opt-nara-icon { display: inline-flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
+/* 整卡可点（2026-10-11 用户裁定）：卡片本体就是入口，按钮只是视觉焦点 */
+.opt-col--nara { cursor: pointer; user-select: none; }
+.opt-col--nara:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.opt-nara-desc {
+  margin: 8px 6px 2px;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-tertiary);
+}
+.opt-nara-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-small);
+  font-size: 13px;
+  color: var(--fg-primary);
+}
+.opt-nara-row__name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.opt-nara-row__name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opt-nara-row__meta { flex: 0 0 auto; font-size: 11px; color: var(--fg-tertiary); white-space: nowrap; }
+
+/* ---- 永劫专项面板弹窗（modal.create 的 body 内） ---- */
+.nara-panel { display: flex; flex-direction: column; gap: 12px; }
+.nara-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-medium);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+.nara-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg-primary);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-card-hover);
+}
+.nara-card__body { padding: 4px 8px 6px; }
+.nara-checkrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: var(--radius-small);
+  font-size: 13px;
+  cursor: pointer;
+}
+.nara-checkrow:hover,
+.nara-checkrow:focus-visible { background: var(--bg-card-hover); outline: none; }
+.nara-checkrow__name { flex: 1 1 auto; min-width: 0; color: var(--fg-primary); line-height: 1.4; }
+.nara-checkrow__side { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
+.nara-checkrow.is-optimized { cursor: default; opacity: 0.62; }
+.nara-checkrow.is-optimized:hover { background: transparent; }
+.nara-checkrow .checkbox.disabled { opacity: 0.55; }
+.nara-muted { padding: 10px 0; font-size: 12px; color: var(--fg-tertiary); }
+.nara-alert {
+  margin: 6px 6px 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: var(--radius-small);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+/* footer：全选靠左，执行/关闭靠右 */
+.nara-panel-footer [data-nara-toggle-all] { margin-right: auto; }
+/* BCD 体检横幅：空槽不占位 */
+.nara-bcd-banner:empty { display: none; }
+.nara-bcd-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-small);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.nara-bcd-banner.is-failed { background: var(--bg-card-hover); color: var(--fg-secondary); }
+.nara-bcd-banner.is-warn {
+  margin: 8px 10px 2px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  justify-content: flex-start;
+}
+/* 永劫专项入口卡无「更多」按钮，项数徽章靠右 */
+.opt-col--nara .opt-nara-count { margin-left: auto; }
+
 /* ==================== 外设优化弹窗（更多调优项） ==================== */
 /* 2026-10-07：外设优化由独立子窗改为应用内弹窗 —— 子窗外壳（.peripheral-window /
    .peri-topbar-left / .peri-back / .peri-body）随窗口一并删除，正文挂在
@@ -7566,6 +7666,24 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
 .maint-status-ok { color: var(--success); background: rgba(var(--success-rgb), 0.14); }
 .maint-status-warn { color: color-mix(in srgb, var(--warning) 80%, #000); background: rgba(var(--warning-rgb), 0.14); }
 .maint-status-error { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* 系统维护：网络类任务收拢到永劫专项面板的迁移横幅（2026-10-11 C3） */
+.maint-nara-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--accent-light);
+  border-radius: var(--radius-small);
+  background: var(--accent-soft);
+  font-size: var(--fs-meta);
+  line-height: 1.5;
+  color: var(--fg-secondary);
+}
+.maint-nara-banner strong { color: var(--accent); font-weight: 700; }
+.maint-nara-banner__btn { margin-left: auto; flex: 0 0 auto; }
 
 /* 系统维护：批量操作栏（全选 / 已选计数 / 执行选中 / 全部执行 / 取消 / 进度） */
 .maint-batchbar {
