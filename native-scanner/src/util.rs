@@ -259,8 +259,14 @@ pub fn is_reparse(_ent: &fs::DirEntry) -> bool {
 /// 路径（或其已存在前缀）在磁盘上存在 → 返回长名；目标不存在（API 返回 0）→
 /// 原样返回，由调用方保留「~数字 fail-closed」判定。
 /// 注意 std::fs::canonicalize 会追加 \\?\ 前缀，与 P3 字符串口径冲突，不能直接用。
+///
+/// `to_long_path_opt`：区分成败的版本——成功返回长名（**可能与输入相同**：输入本身
+/// 已是长名、无 8.3 组件），失败（不存在 / 无权限 / API 报错）返回 None。
+/// [`to_long_path`] 是展示口径，把失败折叠成「原样返回」，无法区分
+/// 「成功但无短名」与「失败」；短名判定的两个后果相反（前者应把波浪号当字面名
+/// 采信，后者必须 fail-closed），故 protect.rs 改用它（2026-10-12）。
 #[cfg(windows)]
-pub fn to_long_path(p: &str) -> String {
+pub fn to_long_path_opt(p: &str) -> Option<String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     let wide: Vec<u16> = OsStr::new(p).encode_wide().chain(std::iter::once(0)).collect();
@@ -268,17 +274,27 @@ pub fn to_long_path(p: &str) -> String {
     loop {
         let n = unsafe { ffi::GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
         if n == 0 {
-            return p.to_string(); // 不存在/无权限 → 原样返回（短名组件由 fail-closed 兜底）
+            return None;
         }
         if (n as usize) <= buf.len() {
             buf.truncate(n as usize);
             while buf.last() == Some(&0) {
                 buf.pop();
             }
-            return String::from_utf16_lossy(&buf);
+            return Some(String::from_utf16_lossy(&buf));
         }
         buf.resize(n as usize, 0); // 缓冲不足，按返回长度重试
     }
+}
+
+#[cfg(not(windows))]
+pub fn to_long_path_opt(p: &str) -> Option<String> {
+    Some(p.to_string())
+}
+
+#[cfg(windows)]
+pub fn to_long_path(p: &str) -> String {
+    to_long_path_opt(p).unwrap_or_else(|| p.to_string())
 }
 
 #[cfg(not(windows))]

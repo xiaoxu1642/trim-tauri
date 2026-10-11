@@ -27,4 +27,4 @@ pub mod scan;
 pub mod util;
 
 // 保持 `crate::json_escape` / `crate::is_reparse` / `crate::to_long_path` 既有引用可解析
-pub use util::{is_reparse, json_escape, to_long_path};
+pub use util::{is_reparse, json_escape, to_long_path, to_long_path_opt};

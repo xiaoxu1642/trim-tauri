@@ -98,7 +98,8 @@ pub struct Norm {
     pub ok: bool,
     pub low: String,
     pub drive_root: bool,
-    /// 归一化后仍含 8.3 短名（`~\d`）→ fail-closed
+    /// 归一化后仍含**无法证伪**的 8.3 短名（`~\d`）→ fail-closed
+    /// （整条路径被系统展开成功时不算——那时波浪号是字面文件名，2026-10-12）
     pub short_name: bool,
 }
 
@@ -218,50 +219,59 @@ fn resolve_path(s: &str) -> Option<String> {
     }
 }
 
-/// 8.3 短名展开（v3.7.2 误杀修复）：先整条触盘，末端不存在则退化为
-/// 「最深已存在祖先展开 + 保留剩余段」——与 JS `expandShortPathWin` 同策略。
-/// 任何一步失败返回空串，由调用方保持 fail-closed。
-fn expand_short_path(p: &str) -> String {
+/// 8.3 短名展开（v3.7.2 误杀修复；2026-10-12 二次修正）。返回
+/// `Some(展开后的路径)` 或 `None`（展开不掉，调用方 fail-closed）：
+///
+/// - **整条成功**（GetLongPathName 对全路径成功，结果可与输入**相同**——输入本就
+///   无 8.3 组件，`~\d` 是字面文件名）：直接采信。Windows 更新缓存
+///   `Package_for_RollupFix~~26100…` 这类合成名此前被「结果与输入相同 ⇒ 视为失败」
+///   整批误拒（实测 windowsDownloadCache 33639 个目标全灭）；
+/// - **部分成功**（只探明到「最深已存在祖先」，剩余段原样保留）：重建后若**剩余段**
+///   仍含 `~\d` 则返回 `None`（无法证明它不是短名 ⇒ fail-closed）；剩余段干净则采信
+///   （>MAX_PATH 的长路径走这条，祖先链已被系统整段转成规范名）；
+/// - **全失败**（不存在/无权限/API 报错）：`None`。
+fn expand_short_path(p: &str) -> Option<String> {
     let b = p.as_bytes();
     if !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')) {
-        return String::new(); // 仅处理本地盘符路径，UNC/相对一律不展开（宁可多拦）
+        return None; // 仅处理本地盘符路径，UNC/相对一律不展开（宁可多拦）
     }
-    let full = trim_to_long_path(p);
-    if !full.is_empty() {
-        return full;
+    if let Some(full) = long_path_or_none(p) {
+        return Some(full);
     }
     let segs: Vec<&str> = p.split(|c| c == '\\' || c == '/').filter(|c| !c.is_empty()).collect();
     if segs.len() < 2 {
-        return String::new();
+        return None;
     }
     for i in (1..=segs.len() - 1).rev() {
         let head = segs[..i].join("\\");
         let head_has_drive = head.as_bytes().get(1) == Some(&b':');
         let probe = if head_has_drive { head.clone() } else { format!("{}\\{}", segs[0], head) };
-        let long = trim_to_long_path(&probe);
-        if long.is_empty() {
-            continue;
-        }
+        let Some(long) = long_path_or_none(&probe) else { continue };
         let rest = &segs[i..];
         if rest.is_empty() {
-            return long;
+            return Some(long);
         }
-        return format!("{}\\{}", long.trim_end_matches(['\\', '/']), rest.join("\\"));
+        let rest_joined = rest.join("\\");
+        // 未展开的剩余段带波浪号数字 ⇒ 可能是短名 ⇒ 无法证伪，fail-closed
+        if is_short_name(&rest_joined) {
+            return None;
+        }
+        return Some(format!("{}\\{}", long.trim_end_matches(['\\', '/']), rest_joined));
     }
-    String::new()
+    None
 }
 
-/// GetLongPathNameW 包装：成功返回长名，失败返回空串（与 JS realpathSync 失败对称）。
+/// GetLongPathNameW 包装：成功返回长名，失败返回 None（与 JS realpathSync 失败对称）。
+///
+/// 2026-10-12：改走 `trim_finder::to_long_path_opt`——原实现把「成功但结果与输入
+/// 相同」也折叠成空串（视作失败），把「路径本来就是长名、波浪号是字面名」误判成
+/// 「展开不掉」（windowsDownloadCache 33639 个目标被误拒的直接原因，见
+/// `expand_short_path` 注释）。底层同一 API、同一缓冲重试逻辑，只是不再吞掉成败之分。
 /// 注意行为差异（已登记）：realpathSync.native 还会解析符号链接/junction，
 /// GetLongPathNameW 只展开短名。仅当路径含 `~\d` 时才会走到这里，故影响面限于
-/// 「短名 + 链接」同时出现的路径，且此种情况仍由下面的二次短名判定兜底。
-fn trim_to_long_path(p: &str) -> String {
-    let out = trim_finder::to_long_path(p);
-    if out == p {
-        String::new()
-    } else {
-        out
-    }
+/// 「短名 + 链接」同时出现的路径，且此种情况仍由剩余段二次判定兜底。
+fn long_path_or_none(p: &str) -> Option<String> {
+    trim_finder::to_long_path_opt(p)
 }
 
 /// 对照 JS `normalizeForCompare`
@@ -316,13 +326,16 @@ pub fn normalize_for_compare(p: &str) -> Norm {
         None => return fail(),
     };
     s = resolved;
-    // 8.3 短名先触盘展开；展开不掉 → fail-closed（与 PS 侧 GetFullPath 之后的判定同位）
+    // 8.3 短名先触盘展开；展开不掉 → fail-closed（与 PS 侧 GetFullPath 之后的判定同位）。
+    // 2026-10-12：成败判定收进 expand_short_path 内——整条展开成功即采信（结果可与
+    // 输入相同：波浪号是字面名）；只有「仅祖先可展开、剩余段未展开且带波浪号」
+    // 才失败。原先的「结果与输入相同即失败」把 Windows 更新缓存的 `~~26100`
+    // 合成名整批误拒（实测 33639 个目标全灭），且不再需要事后二次 check。
     if is_short_name(&s) {
-        let ex = expand_short_path(&s);
-        if ex.is_empty() {
-            return Norm { ok: false, low: String::new(), drive_root: false, short_name: true };
+        match expand_short_path(&s) {
+            Some(ex) => s = ex,
+            None => return Norm { ok: false, low: String::new(), drive_root: false, short_name: true },
         }
-        s = ex;
     }
     // 去尾部空白与点号（Win32 路径比较会忽略它们）
     let trimmed = s.trim_end_matches([' ', '.']).to_string();
@@ -334,9 +347,6 @@ pub fn normalize_for_compare(p: &str) -> Norm {
         return Norm { ok: true, low: s.to_lowercase(), drive_root: true, short_name: false };
     }
     let low = s.to_lowercase().replace('/', "\\");
-    if is_short_name(&low) {
-        return Norm { ok: false, low: String::new(), drive_root: false, short_name: true };
-    }
     Norm { ok: true, low, drive_root: false, short_name: false }
 }
 
@@ -1056,6 +1066,71 @@ mod tests {
         // 刻意**不**放进 matches_js_authority 的 parity 向量：JS 权威有同一缺口，
         // 塞进去会与 `!js.contains(...)` 打架；分歧与理由记在 normalize_for_compare
         // 的注释里，由本用例钉住 Rust 侧结论。
+    }
+
+    /// 2026-10-12：字面波浪号名（Windows 更新缓存 `Package_for_RollupFix~~26100…` 这类
+    /// 合成目录名）必须判「可判定」而不是被短名 fail-closed 误拒——修复前该形态
+    /// 整批当展开失败（真机实测 windowsDownloadCache 33639 个目标全灭）。
+    /// 判红自证：把 expand_short_path 的「整条成功即采信」改回「结果与输入相同即失败」
+    /// ⇒ 本用例红（2026-10-12 实测）。
+    #[test]
+    fn literal_tilde_names_are_not_dropped_as_short_name_failures() {
+        let dir = std::env::temp_dir().join(format!("trim-tilde-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Update~~26100.1")).unwrap();
+        std::fs::write(dir.join("Update~~26100.1").join("f.txt"), b"x").unwrap();
+        let p = dir.join("Update~~26100.1").join("f.txt");
+        let n = normalize_for_compare(&p.to_string_lossy());
+        assert!(n.ok, "字面波浪号不得被当作短名展开失败（应可判定）: ok={} short_name={}", n.ok, n.short_name);
+        assert!(n.low.contains("update~~26100.1"), "归一化结果应保留字面名: {}", n.low);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反向护栏：真实短名（8.3 别名）必须仍被展开成规范长名——修误拒不能顺手放掉
+    /// 别名展开（否则「C:\PROGRA~1」这类别名又成保护面绕过通路）。别名不存在
+    /// （卷级 8dot3name 被关）则如实 skip，不炸。判红方式：把 long_path_or_none
+    /// 退化为「恒返回输入」⇒ 别名不再展开，规范化断言红。
+    #[cfg(windows)]
+    #[test]
+    fn short_name_aliases_still_expand_to_canonical() {
+        if !std::path::Path::new(r"C:\PROGRA~1").exists() {
+            eprintln!("SKIP：本机 C: 卷未启用 8.3 短名（PROGRA~1 不存在），本用例未校验");
+            return;
+        }
+        let n = normalize_for_compare(r"C:\PROGRA~1");
+        assert!(n.ok, "真实短名必须可展开: short_name={}", n.short_name);
+        assert_eq!(n.low, r"c:\program files", "短名别名应展开为规范长名: {}", n.low);
+    }
+
+    /// 2026-10-12 真机探针（只读）：真实 Windows 更新缓存路径（`~~26100` 合成名 +
+    /// >MAX_PATH 长路径混合）必须判「可判定」且不被保护清单拦。样本缺失如实 skip。
+    #[test]
+    #[ignore = "真机读 C:\\Windows\\SoftwareDistribution\\Download 真实样本（只读，不删）"]
+    fn live_update_cache_paths_are_decidable() {
+        fn find_sample(p: &std::path::Path, depth: u32) -> Option<std::path::PathBuf> {
+            if depth > 6 { return None; }
+            for e in std::fs::read_dir(p).ok()?.flatten() {
+                let ep = e.path();
+                if ep.is_file() {
+                    if ep.to_string_lossy().contains('~') { return Some(ep); }
+                } else if ep.is_dir() {
+                    if let Some(f) = find_sample(&ep, depth + 1) { return Some(f); }
+                }
+            }
+            None
+        }
+        let Some(sample) = find_sample(
+            std::path::Path::new(r"C:\Windows\SoftwareDistribution\Download"),
+            0,
+        ) else {
+            eprintln!("SKIP：本机无 windowsDownloadCache 样本，探针未校验");
+            return;
+        };
+        let s = sample.to_string_lossy().to_string();
+        let n = normalize_for_compare(&s);
+        assert!(n.ok, "真实更新缓存路径被误拒: {s}（ok={} short_name={}）", n.ok, n.short_name);
+        assert!(!is_path_protected(&s), "更新缓存路径不应命中保护清单: {s}");
+        eprintln!("样本通过（{} 字符）：{s} -> {}", s.len(), n.low);
     }
 
     /// v4-K02/K01 共用判据：系统命名空间只覆盖 `%SystemRoot%` 子树（含 System32 /
