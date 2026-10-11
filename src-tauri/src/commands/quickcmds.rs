@@ -1,7 +1,7 @@
 //! quickcmds 域（C 批）：quickcmds:run
 //!
 //! 对照 main.js 6830-6889（QUICKCMDS 白名单 + tokenize/expand/runQuickCmd +
-//! quickcmds:run）与 `src/scripts/quickcmds-data.js`（64 条 / 8 分类）。
+//! quickcmds:run）与 `src/scripts/quickcmds-data.js`（69 条 / 8 分类）。
 //!
 //! # 安全模型（QC-1，2026-09-15）
 //!
@@ -58,6 +58,10 @@ const QUICKCMDS: &[(&str, &str, &str)] = &[
     ("sys-sdclt", "备份还原", "sdclt"),
     ("sys-eventvwr", "事件查看器", "eventvwr.msc"),
     ("sys-perfmon-rel", "可靠性蓝屏记录", "perfmon /rel"),
+    // WinUtil 借鉴 V3（2026-10-11）补齐旧版面板：计算机管理 / 控制面板 / 区域
+    ("sys-compmgmt", "计算机管理", "compmgmt.msc"),
+    ("sys-control", "控制面板", "control"),
+    ("sys-intl", "区域设置", "intl.cpl"),
     // 硬件与设备
     ("hw-devmgmt", "设备管理器(综合)", "devmgmt.msc"),
     ("hw-diskmgmt", "磁盘管理", "diskmgmt.msc"),
@@ -68,6 +72,8 @@ const QUICKCMDS: &[(&str, &str, &str)] = &[
     ("hw-printers", "设备和打印机", "control printers"),
     ("hw-mmsys", "声音设置", "mmsys.cpl"),
     ("hw-autoplay", "自动播放设置", "control /name Microsoft.AutoPlay"),
+    // WinUtil 借鉴 V3（2026-10-11）：日期和时间旧版面板
+    ("hw-timedate", "日期和时间", "timedate.cpl"),
     // 服务与进程
     ("svc-services", "系统服务", "services.msc"),
     ("svc-taskmgr", "任务管理器", "taskmgr"),
@@ -112,6 +118,8 @@ const QUICKCMDS: &[(&str, &str, &str)] = &[
     // 安全中心入口：启动项「目标文件已不存在」那条链的出口之一（用户自己去查，Trim 不代扫描、
     // 也不替用户判定是不是恶意）。URI 由微软文档给定：ms-settings:windowsdefender = Windows Security。
     ("sec-defender", "Windows 安全中心", "ms-settings:windowsdefender"),
+    // WinUtil 借鉴 V3（2026-10-11）：旧版「安全和维护」面板（与上面 Win11 设置页不同）
+    ("sec-wscui", "安全和维护", "wscui.cpl"),
     ("diag-documents", "文档目录", "explorer %userprofile%\\Documents"),
     // 休眠唤醒排查
     ("power-lastwake", "上次唤醒设备", "cmd /k powercfg -lastwake"),

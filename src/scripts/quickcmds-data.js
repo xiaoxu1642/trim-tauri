@@ -1,4 +1,4 @@
-// quickcmds-data.js - 快捷指令数据（64 条 / 8 分类）
+// quickcmds-data.js - 快捷指令数据（69 条 / 8 分类）
 // 来源：old\快捷指令\QuickLauncher-解包分析报告.md（快捷指令大全 v6.0 解包逆向）
 // 每条：{ id, name, desc, cmd, cat }
 //   id   —— 稳定标识（主进程白名单校验用，渲染层仅传 id）
@@ -32,6 +32,10 @@
     { id: 'sys-sdclt', name: '备份还原', desc: 'sdclt', cmd: 'sdclt', cat: '系统工具' },
     { id: 'sys-eventvwr', name: '事件查看器', desc: 'eventvwr.msc', cmd: 'eventvwr.msc', cat: '系统工具' },
     { id: 'sys-perfmon-rel', name: '可靠性蓝屏记录', desc: 'perfmon /rel', cmd: 'perfmon /rel', cat: '系统工具' },
+    // WinUtil 借鉴 V3（2026-10-11）补齐旧版面板：计算机管理 / 控制面板 / 区域
+    { id: 'sys-compmgmt', name: '计算机管理', desc: 'compmgmt.msc', cmd: 'compmgmt.msc', cat: '系统工具' },
+    { id: 'sys-control', name: '控制面板', desc: 'control', cmd: 'control', cat: '系统工具' },
+    { id: 'sys-intl', name: '区域设置', desc: 'intl.cpl', cmd: 'intl.cpl', cat: '系统工具' },
     // 硬件与设备
     { id: 'hw-devmgmt', name: '设备管理器(综合)', desc: 'devmgmt.msc hub', cmd: 'devmgmt.msc', cat: '硬件与设备' },
     { id: 'hw-diskmgmt', name: '磁盘管理', desc: 'diskmgmt.msc', cmd: 'diskmgmt.msc', cat: '硬件与设备' },
@@ -42,6 +46,8 @@
     { id: 'hw-printers', name: '设备和打印机', desc: 'control printers', cmd: 'control printers', cat: '硬件与设备' },
     { id: 'hw-mmsys', name: '声音设置', desc: 'mmsys.cpl', cmd: 'mmsys.cpl', cat: '硬件与设备' },
     { id: 'hw-autoplay', name: '自动播放设置', desc: 'control autoplay', cmd: 'control /name Microsoft.AutoPlay', cat: '硬件与设备' },
+    // WinUtil 借鉴 V3（2026-10-11）：日期和时间旧版面板
+    { id: 'hw-timedate', name: '日期和时间', desc: 'timedate.cpl', cmd: 'timedate.cpl', cat: '硬件与设备' },
     // 服务与进程
     { id: 'svc-services', name: '系统服务', desc: 'services.msc', cmd: 'services.msc', cat: '服务与进程' },
     { id: 'svc-taskmgr', name: '任务管理器', desc: 'taskmgr', cmd: 'taskmgr', cat: '服务与进程' },
@@ -84,6 +90,8 @@
     { id: 'diag-slmgr', name: '系统激活状态', desc: 'slmgr /xpr', cmd: 'cmd /k slmgr.vbs /xpr', cat: '维护与诊断' },
     { id: 'diag-storagesense', name: '存储感知', desc: 'ms-settings:storagesense', cmd: 'ms-settings:storagesense', cat: '维护与诊断' },
     { id: 'sec-defender', name: 'Windows 安全中心', desc: 'ms-settings:windowsdefender', cmd: 'ms-settings:windowsdefender', cat: '维护与诊断' },
+    // WinUtil 借鉴 V3（2026-10-11）：旧版「安全和维护」面板（与上面 Win11 设置页不同）
+    { id: 'sec-wscui', name: '安全和维护', desc: 'wscui.cpl', cmd: 'wscui.cpl', cat: '维护与诊断' },
     { id: 'diag-documents', name: '文档目录', desc: 'Documents', cmd: 'explorer %userprofile%\\Documents', cat: '维护与诊断' },
     // 休眠唤醒排查
     { id: 'power-lastwake', name: '上次唤醒设备', desc: 'powercfg -lastwake', cmd: 'cmd /k powercfg -lastwake', cat: '休眠唤醒排查' },
