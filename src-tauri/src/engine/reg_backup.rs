@@ -548,8 +548,10 @@ mod reg_backup_common_tests {
         let passed = reg_backup_restore_guards(&p, "liveprobe.reg", "cleanup", true)
             .expect("摘要一致应放行");
         assert_eq!(passed.keys, vec![r"HKEY_LOCAL_MACHINE\Software\TrimProbe\App".to_string()]);
-        // 改一字节：管理员摘要不符 ⇒ 拒
+        // 改一字节 + 边车封条同步重写（只留管理员摘要过期）⇒ 必须由管理员摘要拒。
+        // 边车不动时封条会先拦下（那是另一条闸），这条要专门测摘要这条信任根。
         std::fs::write(&p, format!("{body}\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimProbe\\Other]\r\n")).unwrap();
+        write_reg_backup_seal(&p, r"HKLM\Software\TrimProbe\App");
         assert!(reg_backup_restore_guards(&p, "liveprobe.reg", "cleanup", true)
             .unwrap_err().contains("管理员摘要"));
         std::fs::write(&p, body).unwrap();

@@ -87,6 +87,16 @@ mod maint_reparse_tests {
             eprintln!("SKIP：WaaSMedic PerformRemediation 任务不存在，本探针未校验");
             return;
         }
+        // 探针前置二：任务处于禁用态时 /run 必失败（优化工具禁用 WaaSMedic 是常见状态，
+        // 本机实测即如此）；如实按 skip 标注未校验，不误判成判红。
+        // 输出必须走 decode_native_output：schtasks 写管道时是 UTF-16LE，lossy 解出的
+        // NUL 交错文本匹配不上 "Disabled"（P0-02 同款坑，探针首版踩过一次）
+        let ql = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks"), &["/query", "/TN", task, "/FO", "LIST"], MAINT_FAST_TIMEOUT);
+        let list_text = ql.as_ref().map(|o| crate::engine::systembin::decode_native_output(&o.stdout)).unwrap_or_default();
+        if list_text.contains("Disabled") || list_text.contains("已禁用") {
+            eprintln!("SKIP：WaaSMedic PerformRemediation 任务在本机处于禁用状态，触发不了，本探针未校验");
+            return;
+        }
 
         // 写 Start=4
         let wrote = crate::engine::native::reg_restore_write(
