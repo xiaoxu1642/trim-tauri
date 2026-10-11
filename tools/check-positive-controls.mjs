@@ -68,6 +68,7 @@ const PENDING_CONTROLS = [
   { name: 'check-version-sync', reason: '对拍型：版本号四处一致，缺「单处漂移必须红」样本' },
   { name: 'check-updater-pubkey', reason: '对拍型：pubkey 形状（base64(minisign)），缺合成样本' },
   { name: 'check-readme-claims', reason: '对拍型：readme 数字 ⇄ 数据真源，缺合成样本' },
+  { name: 'check-cleanup-postactions', reason: '对拍型：后置动作侧表 ⇄ 路径机械重算（双向），缺「单条侧表漂移必须红」合成样本' },
   { name: 'check-readme-negative-claims', reason: '找违规型：否定式承诺漂移即红，缺违规样本自检' },
   { name: 'check-doc-refs', reason: '找违规型：文档互引路径存在性 + 私钥令牌黑名单，缺违规样本自检' },
   { name: 'check-positive-controls', reason: '本文件即管辖门禁：其对照 = REGISTRY 各条实跑检查 + 差集断言（自指，不重复登记）' },

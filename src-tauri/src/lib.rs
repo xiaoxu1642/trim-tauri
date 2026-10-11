@@ -449,6 +449,8 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::optimizer::optimizer_list_restore,
         commands::optimizer::optimizer_restore_frequency,
         commands::optimizer::optimizer_genadvice,
+        commands::optimizer::optimizer_bcd_enum,
+        commands::optimizer::optimizer_nara_panel,
         commands::peripheral::peripheral_query,
         commands::peripheral::peripheral_apply,
         commands::peripheral::peripheral_restore_backup,

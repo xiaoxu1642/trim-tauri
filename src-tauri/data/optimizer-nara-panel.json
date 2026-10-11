@@ -1,0 +1,105 @@
+{
+  "_comment": "永劫无间优化专项面板侧表（2026-10-11 用户拍板 C3）。entryId 驱动主窗入口卡；sections 驱动面板渲染；hiddenFromOptimizer 从优化中心隐藏这些 id（面板与优化中心互斥展示）；hiddenFromMaintenance 从系统维护页隐藏这 3 个维护任务（收拢进面板的网络分区）。与 optimizer-runtime.json 同属数据层但独立签名（sidecar）。BCD 分区 admin=true 表示该区执行需管理员提权。",
+  "schemaVer": 1,
+  "entryId": "nara_prio",
+  "sections": [
+    {
+      "id": "proc",
+      "title": "进程与游戏模式",
+      "items": [
+        "nara_prio",
+        "mmcss_games",
+        "net_qos_dscp",
+        "tf_gamemode",
+        "game_dvr",
+        "tf_gamebar"
+      ]
+    },
+    {
+      "id": "power",
+      "title": "电源",
+      "items": [
+        "power_off",
+        "tf_hibern_off",
+        "nara_throttle_off",
+        "nara_usb3_lpm_off"
+      ]
+    },
+    {
+      "id": "reg",
+      "title": "注册表优化",
+      "admin": true,
+      "items": [
+        "nara_kbd_indicators",
+        "nara_kbd_delay",
+        "nara_kbd_speed",
+        "nara_kbd_multi_ports",
+        "nara_kbd_queue",
+        "nara_kbd_base_name",
+        "nara_kbd_max_ports",
+        "nara_kbd_output_all",
+        "nara_kbd_wpp_ts",
+        "nara_win32prio",
+        "nara_mouse_queue"
+      ]
+    },
+    {
+      "id": "net",
+      "title": "网络（维护任务）",
+      "tasks": [
+        "net_response",
+        "dns",
+        "netstack"
+      ]
+    },
+    {
+      "id": "bcd",
+      "title": "BCD 启动配置",
+      "admin": true,
+      "items": [
+        "nara_bcd_timer",
+        "nara_bcd_vsm",
+        "nara_bcd_boot",
+        "nara_bcd_lowmem",
+        "nara_bcd_irq"
+      ]
+    }
+  ],
+  "hiddenFromOptimizer": [
+    "nara_prio",
+    "net_qos_dscp",
+    "tf_gamemode",
+    "game_dvr",
+    "tf_gamebar",
+    "power_off",
+    "tf_hibern_off",
+    "mmcss_games",
+    "nara_throttle_off",
+    "nara_usb3_lpm_off",
+    "nara_bcd_timer",
+    "nara_bcd_vsm",
+    "nara_bcd_boot",
+    "nara_bcd_lowmem",
+    "nara_bcd_irq",
+    "nara_kbd_indicators",
+    "nara_kbd_delay",
+    "nara_kbd_speed",
+    "nara_kbd_multi_ports",
+    "nara_kbd_queue",
+    "nara_kbd_base_name",
+    "nara_kbd_max_ports",
+    "nara_kbd_output_all",
+    "nara_kbd_wpp_ts",
+    "nara_win32prio",
+    "nara_mouse_queue"
+  ],
+  "hiddenFromMaintenance": [
+    "net_response",
+    "dns",
+    "netstack"
+  ],
+  "_sig": {
+    "alg": "ed25519",
+    "sig": "ANl6A11ATGMbr4mUIOouYzWFa/bdkOzqeEQjdXJ+rgRK4dAbh3p+LHzTAJjxULmcs7PUztbPne13i/MRtVMNDQ=="
+  }
+}

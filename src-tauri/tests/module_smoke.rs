@@ -1536,3 +1536,5 @@ fn bench_history_list_matches_file_truth() {
         Err(_) => { /* 本机没有历史文件：无从对拍，只验形状（回执仍是空数组） */ }
     }
 }
+
+

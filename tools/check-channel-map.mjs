@@ -143,6 +143,8 @@ const TAURI_ADDED = {
   'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',
   'optimizer:list-groups': 'E7（2026-10-03）：分类两层结构下发（default 主序列 + custom 重映射；纯只读侧表）',
   'optimizer:touch-recent': 'E10（2026-10-03）：记一次最近使用（写侧，失败不打断流程）',
+  'optimizer:bcd-enum': 'C3（2026-10-11）：BCD 面板全状态枚举（主窗永劫专项面板消费；跑 bcdedit /enum，三态判定）',
+  'optimizer:nara-panel': 'C3（2026-10-11）：永劫无间专项面板侧表下发（主窗 optimizer 页消费；entryId 入口卡 + hiddenFromOptimizer 过滤 + hiddenFromMaintenance 过滤）',
   'optimizer:stale-dismiss': '根治（2026-10-03）：「未完成还原」横幅 per-id 忽略（写记账 prefs 段；上游无启动对账横幅这一层）',
   // 2026-10-07：机-wide 扫描整条退役 —— 失效残留 / 卸载遗留 / 七个深扫器报告四条通道
   // （连同 Rust 命令、CHANNEL_MAP、window.api 包装、门禁登记）一起摘除，残留副窗只留

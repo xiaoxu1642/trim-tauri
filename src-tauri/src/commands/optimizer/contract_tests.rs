@@ -1039,19 +1039,28 @@ fn strip_js_comments(src: &str) -> String {
         }
         assert!(n_high >= 5, "数据层 high 项数异常（{n_high}）——是否被批量降级");
 
-        // v2-K3 实际漏掉的那 7 项：现在由 risk 覆盖，且刻意不进手写清单
+        // 2026-10-11 随退役/降级收窄：tf_ifeo_perf/tf_ifeo_wipe/tf_dev_audio/tf_dev_printer/
+        // tf_onedrive/perf_exploit_protection_off 已退役（find_option 应为 None），
+        // tf_appx/tf_dev_disable 降为 medium（不再走红色确认）。
         for id in [
             "tf_ifeo_perf",
             "tf_ifeo_wipe",
-            "tf_dev_disable",
             "tf_dev_audio",
             "tf_dev_printer",
-            "tf_appx",
             "tf_onedrive",
+            "perf_exploit_protection_off",
         ] {
-            let o = find_option(id).unwrap_or_else(|| panic!("{id} 应存在于数据层"));
-            assert!(needs_high_risk_confirm(o, id), "{id} 单项执行仍不弹红色确认");
-            assert!(!HAZARD_IDS.contains(&id), "{id} 应由 risk 覆盖，不必回手写清单");
+            assert!(find_option(id).is_none(), "{id} 已退役，数据层不应再出现");
+        }
+        for id in ["tf_appx", "tf_dev_disable"] {
+            let o = find_option(id).unwrap_or_else(|| panic!("{id} 应仍在数据层"));
+            assert_eq!(
+                o.get("risk").and_then(|v| v.as_str()),
+                Some("medium"),
+                "{id} 已降为中风险"
+            );
+            assert!(!HAZARD_IDS.contains(&id), "{id} 降级后不应留在手写高危清单");
+            assert!(!needs_high_risk_confirm(o, id), "{id} 中风险不应再弹红色确认");
         }
 
         // 反向：low/medium 项不得被误拦，否则等于把所有优化都锁死在红确认后面
@@ -1091,9 +1100,23 @@ fn strip_js_comments(src: &str) -> String {
             "能被原生解释器吃下的 pwsh 步骤必须报 native"
         );
         assert_eq!(
-            step_exec_mode(&json!({"pwsh": "Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue"})),
+            step_exec_mode(&json!({"pwsh": "Remove-AppxPackage -AllUsers -Name '*X*' -ErrorAction SilentlyContinue"})),
             Some("inbox-ps"),
-            "cmdlet 形态只能逐字交收件箱 PowerShell，必须如实报 inbox-ps"
+            "AppX 移除无原生投影，只能逐字交收件箱 PowerShell，必须如实报 inbox-ps"
+        );
+        // 设备禁用模式必须编译成原生 PnpSetState（2026-10-11 tf_dev_disable 原生化）
+        let pnp_script = "$picked = @('System Speaker')\n\
+foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq \"OK\" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }";
+        assert_eq!(
+            step_exec_mode(&json!({"pwsh": pnp_script})),
+            Some("native"),
+            "Get-PnpDevice|Disable-PnpDevice 双条件模式必须走原生 FFI"
+        );
+        // 白名单已收紧：MMAgent/PnpDevice cmdlet 不再被 PsInline 接受 → unsupported（compile Err）
+        assert_eq!(
+            step_exec_mode(&json!({"pwsh": "Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue"})),
+            Some("unsupported"),
+            "tf_mmagent 退役后 Disable-MMAgent 不再在 PsInline 白名单"
         );
         assert_eq!(step_exec_mode(&json!({"cmd": "taskkill /f /im x.exe"})), Some("proc"));
         assert_eq!(step_exec_mode(&json!({"reg": "Windows Registry Editor Version 5.00"})), Some("native"));
@@ -1125,16 +1148,12 @@ fn strip_js_comments(src: &str) -> String {
         assert!(bad.is_empty(), "这些 pwsh 步骤既编译不成原生、也不在 PsInline 白名单里: {bad:?}");
         assert!(native > 0 && inbox > 0, "覆盖报告形状变了（native={native} inbox-ps={inbox}），前端文案分支要跟着复核");
         // 收件箱 PowerShell 步数**只减不增**的棘轮：新增优化项若退化成整段交 PS，
-        // 这里会红，逼着写清楚「为什么不能原生」。基线 10 是 2026-10-06 收紧：
-        // 原基线 11（2026-10-02 现算）含 tf_restore_point×1，随条目摘除、能力改走
-        // 命令层内联脚本（restore_point.rs），数据层不再有此步骤 ⇒ 显式降回 10。
-        // 其余 10 步成分：tf_ifeo_wipe×1（foreach + PSObject 属性枚举，误编译等于删错
-        // IFEO 子键）、tf_mmagent×2（Disable-MMAgent cmdlet，注册表落点未在本机实测，
-        // 不猜）、tf_dev_*×3（R5 裁定：设备禁用无原生投影且无自动还原）、
-        // tf_appx/tf_cortana×2（NonRemovable 在 windows 0.61 无投影，已裁定停手）、
-        // tf_onedrive×2（Start-Process /UNINSTALL + @@RECYCLE@@ 协议行，改原生要在真卸
-        // OneDrive 的机器上验，本机不造这个副作用）。
-        const INBOX_PS_BASELINE: usize = 10;
+        // 这里会红，逼着写清楚「为什么不能原生」。基线变更轨迹：
+        // 2026-10-02 现算 11（含 tf_restore_point）；2026-10-06 随 tf_restore_point
+        // 摘除降为 10；2026-10-11 随 6 项退役降为 5；同日 tf_mmagent×2 退役（-2）、
+        // tf_dev_disable×1 原生化为 CM_Disable_DevNode（-1）⇒ 显式降为 2。
+        // 剩余 2 步：tf_appx/tf_cortana（Remove-AppxPackage，WinRT 迁移未做，已裁定停手）。
+        const INBOX_PS_BASELINE: usize = 2;
         assert!(
             inbox <= INBOX_PS_BASELINE,
             "收件箱 PowerShell 步骤从基线 {INBOX_PS_BASELINE} 涨到 {inbox}：新步骤要优先走原生解释器，\
@@ -1426,7 +1445,6 @@ fn strip_js_comments(src: &str) -> String {
     #[test]
     fn m2_a类盲区项现在能产出断言() {
         for (id, min_checks, want_kinds) in [
-            ("perf_exploit_protection_off", 1, &["regBinary"][..]),
             ("peripheral_winkey_off", 1, &["regBinary"][..]),
             ("audio_disable_comm_ducking", 3, &["reg"][..]),
             ("audio_disable_narrator_ducking", 2, &["reg"][..]),
@@ -1477,11 +1495,13 @@ fn strip_js_comments(src: &str) -> String {
         }
         // 反向护栏：binary 断言的 hive/subkey 必须真的指向侧表声明的键，
         // 否则「键名写错」会表现为「恒判未生效」而不是报错。
-        let opt = find_option("perf_exploit_protection_off").unwrap();
+        // （2026-10-11 前用 perf_exploit_protection_off 的 MitigationOptions，
+        // 该项随「乱序内存」退役后改用 peripheral_winkey_off 的 Scancode Map。）
+        let opt = find_option("peripheral_winkey_off").unwrap();
         let checks = collect_checks(opt);
         let c = checks.iter().find(|c| c.probe().0 == "regBinary").unwrap();
-        assert_eq!(c.probe_reg().0, "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel");
-        assert_eq!(c.probe_reg().1, "MitigationOptions");
+        assert_eq!(c.probe_reg().0, "SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout");
+        assert_eq!(c.probe_reg().1, "Scancode Map");
     }
 
     /// M2-B：`regAbsent` 判据的**方向**必须对（这是本批最容易被写反的一处）。
@@ -1554,7 +1574,6 @@ fn strip_js_comments(src: &str) -> String {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_BINARY};
         use crate::engine::native::{read_reg_binary_opt, reg_key_ensure, reg_restore_write};
 
-        let sub = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel";
         let value = "MitigationOptions";
         // 只在测试键下做往返（真机那个键是系统级的，写它属于改系统状态）
         let probe_sub = "Software\\Trim\\m2-binary-probe2";
@@ -1568,17 +1587,18 @@ fn strip_js_comments(src: &str) -> String {
             Some(expect),
             "写入的 6 字节应读回成 12 个 hex 字符"
         );
-        // 侧表里 perf_exploit_protection_off 用的正是同一套格式（16 字节 = 32 hex）
-        let spec = write_spec_of("perf_exploit_protection_off").unwrap();
+        // 侧表里 peripheral_winkey_off 的 Scancode Map 用的正是同一套 binary 格式。
+        // （2026-10-11 前对照 perf_exploit_protection_off 的 MitigationOptions，该项已退役。）
+        let spec = write_spec_of("peripheral_winkey_off").unwrap();
         let ra = spec
             .reg_writes
             .iter()
-            .find(|r| r.value == "MitigationOptions")
-            .expect("侧表里应有 MitigationOptions");
-        assert_eq!(ra.expect.len(), 32, "侧表期望值应是 32 个 hex 字符");
+            .find(|r| r.value == "Scancode Map")
+            .expect("侧表里应有 Scancode Map");
+        assert!(ra.expect.len() >= 32, "侧表期望值应是非空 hex 连写: {}", ra.expect);
         assert!(ra.expect.chars().all(|c| c.is_ascii_hexdigit()), "侧表期望值必须全是 hex 字符");
         // 键路径对照（防止侧表写错键名，那会表现为恒判未生效而不是报错）
-        assert_eq!(ra.subkey, sub);
+        assert_eq!(ra.subkey, "SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout");
         let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe_sub, value);
     }
 
@@ -2323,10 +2343,12 @@ let ov = include_str!("overview.rs");
         // ④ 入口条显隐与「点执行要不要弹勾选框」必须共用同一判据（hasSubitemPick）。
         //    两处各写一遍 `o.subitems && …` 时，漂移的两种症状都极难自查：
         //    一边「界面没入口但会弹空框」，另一边「有入口但点了不弹」。
+        //    2026-10-11：batchParams 成为第 4 个调用点（批量勾选整行时按 defaultOff
+        //    构造默认子集），仍是同一个函数，不允许内联条件。
         assert_eq!(
             js.matches("hasSubitemPick(").count(),
-            3,
-            "hasSubitemPick 的引用数变了（定义 1 + 入口条 1 + 执行路径 1）—— \
+            4,
+            "hasSubitemPick 的引用数变了（定义 1 + 入口条 1 + 执行路径 1 + 批量默认参数 1）—— \
              逐项选择的判据不许在别处再写一遍内联条件"
         );
         // 「items 非空」这个子句全仓只许出现在 hasSubitemPick 一处。
@@ -2423,5 +2445,46 @@ let ov = include_str!("overview.rs");
             reg_scoped.len(),
             reg_checks.len(),
             "注册表断言被勾选清单筛掉了 —— 该项会退回「恒无判据」"
+        );
+    }
+
+    /// P2-05（D-01）：reg_targets 从步骤文本现算的「改了谁」摘要必须正确。
+    ///
+    /// 点名 reached 集合：混用项 tf_core_misc 必须同时有 HKCU+HKLM；纯非 reg 项
+    /// tf_ntfs 必须为空数组；纯 HKLM 项 tf_hibern_off 只含 HKLM。
+    /// 只断「非空」会放过「hive 名错/计数恒 0」的形态。
+    #[test]
+    fn p2_reg_targets摘要正确() {
+        use super::overview::reg_targets;
+
+        // ① 混用 HKCU + HKLM
+        let core = find_option("tf_core_misc").expect("tf_core_misc 在目录里");
+        let rt = reg_targets(core);
+        let arr = rt.as_array().expect("regTargets 应是数组");
+        let hives: Vec<&str> = arr.iter().filter_map(|x| x.get("hive").and_then(Value::as_str)).collect();
+        assert!(hives.contains(&"HKLM") && hives.contains(&"HKCU"),
+            "tf_core_misc 必须同时点名 HKLM/HKCU，实际 {hives:?}");
+        for entry in arr {
+            let count = entry.get("count").and_then(Value::as_i64).unwrap_or(0);
+            assert!(count > 0, "hive {} 的 count 应 > 0", entry.get("hive").unwrap());
+            assert!(entry.get("keys").and_then(Value::as_array).is_some(), "缺 keys");
+        }
+
+        // ② 纯非 reg（cmd/pwsh/service）项 → 空数组
+        let ntfs = find_option("tf_ntfs").expect("tf_ntfs 在目录里");
+        let nt_val = reg_targets(ntfs);
+        let nt = nt_val.as_array().expect("应是数组");
+        assert!(nt.is_empty(), "tf_ntfs 无 reg 写入，regTargets 应为空，实际 {nt:?}");
+
+        // ③ 纯 HKLM 项 → 只含 HKLM
+        let hibern = find_option("tf_hibern_off").expect("tf_hibern_off 在目录里");
+        let hb_val = reg_targets(hibern);
+        let hb = hb_val.as_array().expect("应是数组");
+        let hh: Vec<&str> = hb.iter().filter_map(|x| x.get("hive").and_then(Value::as_str)).collect();
+        assert_eq!(hh, vec!["HKLM"], "tf_hibern_off 应只含 HKLM，实际 {hh:?}");
+        let keys = hb[0].get("keys").and_then(Value::as_array).unwrap();
+        assert!(
+            keys.iter().any(|k| k.as_str().map(|s| s.contains("Session Manager\\Power")).unwrap_or(false)),
+            "tf_hibern_off 应点名 Session Manager\\Power，实际 {keys:?}"
         );
     }

@@ -161,6 +161,18 @@ pub(super) const DEFAULTS_JSON: &str = include_str!("../../../data/optimizer-def
 /// E7：分类两层结构侧表。**刻意不含颜色字段**（M20 已删 GROUP_COLORS/GROUP_ACCENT）。
 pub(super) const GROUPS_JSON: &str = include_str!("../../../data/optimizer-groups.json");
 
+/// C3：永劫无间优化专项面板侧表（2026-10-11）。
+/// 下发完整 JSON 到渲染层，驱动面板分区、入口卡、优化中心隐藏、维护页隐藏四处消费。
+pub(super) const NARA_PANEL_JSON: &str = include_str!("../../../data/optimizer-nara-panel.json");
+
+/// C3：永劫无间专项面板侧表整体下发。
+pub(super) fn nara_panel_sidecar() -> Value {
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE
+        .get_or_init(|| serde_json::from_str(NARA_PANEL_JSON).expect("optimizer-nara-panel.json 合法"))
+        .clone()
+}
+
 /// 某项的 provenance；不在表里 = None
 pub(super) fn provenance_of(option_id: &str) -> Option<Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
@@ -518,17 +530,15 @@ pub(super) const HAZARD_IDS: &[&str] = &[
     "disable_uac",
     "tf_defender",
     "perf_vbs_off",
-    "perf_exploit_protection_off",
     "tf_svc_bulk",
     "tf_drv_disable",
     "perf_windows_update_off",
 ];
 
 /// 高危确认闸门：手写清单 **或** 数据层自认 high。
-/// 只认手写清单会漏掉数据层 `risk:"high"` 的 7 项——`tf_appx`（移除 25 个内置 UWP）、
-/// `tf_onedrive`（彻底卸载 OneDrive）等都是 `restoreAvailable:false` 的不可逆操作，
-/// 用户在单项执行时连红色确认都不会弹（批量路径反而有闸，因为它的判据取自 `risk`）。
-/// 抽成纯函数是为了能对「数据层每一项 high」都断言，而不是只断言清单里那几项。
+/// 通用判据是 `risk=="high"`；手写清单留给「标的是 medium 但后果不可逆」的例外
+/// （2026-10-11 收窄：tf_appx / tf_dev_disable 当批降为 medium 且不再列入手写清单）。
+/// 集合差由 `tools/check-channel-map.mjs` 的门禁 F 第三条对拍钉住（Rust ⇄ JS ⇄ 数据层 risk=high）。
 pub(super) fn needs_high_risk_confirm(opt: &Value, option_id: &str) -> bool {
     HAZARD_IDS.contains(&option_id) || opt.get("risk").and_then(|v| v.as_str()) == Some("high")
 }

@@ -413,6 +413,78 @@ pub(super) fn parse_reg_value_lines(body: &str) -> Vec<(String, String)> {
     out
 }
 
+/// P2-05（D-01）：从选项步骤文本现算「改了谁」摘要（响应侧派生字段，不进数据层）。
+///
+/// 遍历 steps/restore 中所有 `reg` 块，用 [`parse_reg_sections`] 拆段，
+/// 按 hive 汇总：`[{hive, count, keys}]`。hive 名取人类可读短名（HKLM/HKCU/HKCR/HKU），
+/// count = 该 hive 下写入的值个数（去重前按 `.reg` 行计），keys = 顶层子键集合
+/// （去重，便于详情里点名）。无 reg 写入（纯 cmd/pwsh/service）→ 空数组。
+///
+/// 只复用现有解析器，不另写第二份 .reg 语法识别（§5.16/N6）。
+pub(super) fn reg_targets(o: &Value) -> Value {
+    // hive 全名 → 短名。
+    // HKCR/HKU/HKCC 当前优化脚本里没有写入源（保留映射是让 .reg 解析器对标准
+    // 根名通用，而不是只认本目录恰好出现过的两个 hive）；新增脚本若写入这些根，
+    // 摘要无需再改代码即可正确分组。
+    let short = |root: &str| match root {
+        "HKEY_LOCAL_MACHINE" => "HKLM",
+        "HKEY_CURRENT_USER" => "HKCU",
+        "HKEY_CLASSES_ROOT" => "HKCR",
+        "HKEY_USERS" => "HKU",
+        "HKEY_CURRENT_CONFIG" => "HKCC",
+        _ => "?",
+    };
+    // 保序的 hive 桶
+    let mut order: Vec<String> = Vec::new();
+    use std::collections::BTreeMap;
+    let mut count: BTreeMap<String, i64> = BTreeMap::new();
+    let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    let mut blocks: Vec<&str> = Vec::new();
+    for key in ["steps", "restore"] {
+        if let Some(arr) = o.get(key).and_then(Value::as_array) {
+            for s in arr {
+                if let Some(reg) = s.get("reg").and_then(Value::as_str) {
+                    blocks.push(reg);
+                }
+            }
+        }
+    }
+    for block in blocks {
+        for (section, body) in parse_reg_sections(block) {
+            // section 形如 "HKEY_LOCAL_MACHINE\\SOFTWARE\\..."
+            let root = section.split('\\').next().unwrap_or("").trim();
+            let sh = short(root);
+            if sh == "?" {
+                continue;
+            }
+            if !order.iter().any(|x| x == sh) {
+                order.push(sh.to_string());
+            }
+            // 子键 = section 去掉根名 后的部分
+            let subkey = section.get(root.len()..).unwrap_or("").trim_start_matches('\\');
+            let lines = parse_reg_value_lines(&body);
+            *count.entry(sh.to_string()).or_insert(0) += lines.len() as i64;
+            let kk = keys.entry(sh.to_string()).or_default();
+            if !subkey.is_empty() && !kk.iter().any(|x| x == subkey) {
+                kk.push(subkey.to_string());
+            }
+        }
+    }
+
+    let arr: Vec<Value> = order
+        .iter()
+        .map(|sh| {
+            json!({
+                "hive": sh,
+                "count": count.get(sh).copied().unwrap_or(0),
+                "keys": keys.get(sh).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    json!(arr)
+}
+
 /// 只读检测多个选项，返回 id -> 是否全部期望生效
 ///
 /// B11：原先这里生成一段 PS（`Test-One` / `Test-Svc` 两个函数 + 每个选项一行
@@ -685,6 +757,8 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
                     "applyScope".into(),
                     json!(apply_scope(o.get("id").and_then(Value::as_str).unwrap_or(""))),
                 );
+                // P2-05（D-01）：派生「改了谁」摘要（HKLM/HKCU… 各几处）。
+                map.insert("regTargets".into(), reg_targets(o));
                 // 安全降级标签（RAINZ 对标 §4 R2）：同一条侧表注入路径。前端据此在
                 // 高危确认与详情里点名「这一项会降低安全基线」，而不是只靠 risk:high 暗示。
                 let sid = o.get("id").and_then(Value::as_str).unwrap_or("");
@@ -768,6 +842,20 @@ pub async fn optimizer_list_groups<R: Runtime>(window: WebviewWindow<R>) -> Valu
         return json!({ "success": false, "message": msg });
     }
     json!({ "success": true, "data": groups_sidecar() })
+}
+
+/// optimizer:nara-panel —— 永劫无间优化专项面板侧表下发（C3）
+///
+/// 下发 `optimizer-nara-panel.json` 整表（含 entryId/sections/hiddenFromOptimizer/hiddenFromMaintenance）。
+/// 渲染层三处消费：优化中心入口卡、hiddenFromOptimizer 过滤、维护页 hiddenFromMaintenance 过滤。
+///
+/// 档位 MAIN（同 optimizer_list_groups 的 D5 判据）：只读但只有主窗消费方。
+#[tauri::command]
+pub async fn optimizer_nara_panel<R: Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    json!({ "success": true, "data": nara_panel_sidecar() })
 }
 
 /// optimizer:svc-mem-current —— 当前 SVCHost 拆分阈值档位

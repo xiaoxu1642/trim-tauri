@@ -69,11 +69,24 @@ pub(super) fn subitems_of(option_id: &str) -> Option<Value> {
             Some(json!({ "value": t, "note": note }))
         })
         .collect();
+    let default_off: Vec<Value> = raw
+        .get("defaultOff")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| v.is_string())
+        .collect();
     Some(json!({
         "label": raw.get("label"),
         "hint": raw.get("hint"),
         "items": items,
         "extras": raw.get("extras").cloned().unwrap_or(json!([])),
+        // 默认不勾的目标（2026-10-11 用户裁定：tf_dev_disable 的 Intel ME/MEI/SMBus）。
+        // 前端两处选择入口（详情逐项选择 / 批量执行的默认参数）都按它初始化；
+        // 全选路径（picked=None）仍跑数据层原脚本的契约不变 —— 这个默认值只在
+        // 前端构造 picked 时生效，用户在选择窗里显式「全选」即可突破它。
+        "defaultOff": default_off,
         // 清单实数：界面上「共 N 个目标」由它现算，不抄标题里的数字。
         "total": total,
         // 未登记解释的目标数：界面上如实告知「还有 N 个没有单独说明」，
@@ -213,36 +226,80 @@ foreach ($n in $picked) {{ Get-PnpDevice -ErrorAction SilentlyContinue | Where-O
     };
 
     let mut steps = vec![json!({ "label": label, "pwsh": body })];
-    // 附带开关：与清单不同形状的写入，逐个独立成步（失败可归因到具体开关）
+    // 附带开关：与清单不同形状的写入，逐个独立成步（一个 extra 可产出多步，
+    // 失败可归因到具体动作；如 tf_appx 的 OneDrive 卸载 = 卸载器+回收步 + reg 步）
     for ex in extras_of(option_id) {
         if !picked_extras.is_some_and(|e| e.iter().any(|p| *p == ex)) {
             continue;
         }
-        if let Some(step) = extra_step(option_id, &ex) {
-            steps.push(step);
-        }
+        steps.extend(extra_steps(option_id, &ex));
     }
     Some(steps)
 }
 
-/// 附带开关对应的步骤。**只在 sidecar 登记过 id 时才可能命中**（`extras_of` 已过滤），
-/// 这里的 `_ => None` 是 fail-closed 兜底：数据层多写了一个 id 也不会凭空多一步写入。
-fn extra_step(option_id: &str, extra_id: &str) -> Option<Value> {
+/// 附带开关对应的步骤（可多步）。**只在 sidecar 登记过 id 时才可能命中**
+///（`extras_of` 已过滤），这里的 `_ => 空` 是 fail-closed 兜底：
+/// 数据层多写了一个 id 也不会凭空多一步写入。
+fn extra_steps(option_id: &str, extra_id: &str) -> Vec<Value> {
     match (option_id, extra_id) {
-        ("tf_svc_bulk", "wuau_manual") => Some(json!({
+        ("tf_svc_bulk", "wuau_manual") => vec![json!({
             "label": "wuauserv 改为手动启动（保持 Windows Update 可用）",
             "pwsh": "$p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\wuauserv\"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 3 -PropertyType DWord -Force | Out-Null }"
-        })),
-        ("tf_svc_bulk", "lfsvc_status") => Some(json!({
+        })],
+        ("tf_svc_bulk", "lfsvc_status") => vec![json!({
             "label": "清零位置服务状态（让 lfsvc 彻底不工作）",
             "pwsh": "$p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\lfsvc\\Service\\Configuration\"; New-Item -Path $p -Force -ErrorAction SilentlyContinue | Out-Null; New-ItemProperty -Path $p -Name Status -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null"
-        })),
-        ("tf_svc_bulk", "edge_prelaunch") => Some(json!({
+        })],
+        ("tf_svc_bulk", "edge_prelaunch") => vec![json!({
             "label": "关闭 Edge 预启动与标签预加载",
             "pwsh": "$a = \"HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\Main\"\nNew-Item -Path $a -Force -ErrorAction SilentlyContinue | Out-Null\nNew-ItemProperty -Path $a -Name AllowPrelaunch -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null\n$b = \"HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\TabPreloader\"\nNew-Item -Path $b -Force -ErrorAction SilentlyContinue | Out-Null\nNew-ItemProperty -Path $b -Name AllowTabPreloading -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null"
-        })),
-        _ => None,
+        })],
+        // OneDrive 彻底卸载（2026-10-11 从退役项 tf_onedrive 并入 tf_appx 的附带操作，
+        // 默认不勾）。OneDrive 不是 AppX，三步保持退役项原语义：
+        //   ① 官方卸载器（Start-Process -Wait，PsInline 通道）
+        //   ② 4 个数据目录只上报 @@RECYCLE@@，删除由主进程回收站出口做（id 记 tf_appx）
+        //   ③ CLSID 左栏入口 + 同步策略（reg import，走与数据层 reg 步同一通道）
+        ("tf_appx", "onedrive_full_uninstall") => {
+            let pwsh = [
+                "$setup = Join-Path $env:SystemRoot \"SYSWOW64\\ONEDRIVESETUP.EXE\"",
+                "if (Test-Path $setup) { Start-Process -FilePath $setup -ArgumentList \"/UNINSTALL\" -Wait -NoNewWindow }",
+                "$odDirs = @(\"$env:SystemDrive\\OneDriveTemp\", \"$env:USERPROFILE\\OneDrive\", \"$env:LOCALAPPDATA\\Microsoft\\OneDrive\", \"$env:PROGRAMDATA\\Microsoft OneDrive\")",
+                "foreach ($d in $odDirs) { if (Test-Path -LiteralPath $d) { Write-Output ('@@RECYCLE@@' + (@{ id = 'tf_appx'; path = $d; isDir = $true } | ConvertTo-Json -Compress)) } }",
+            ].join("\n");
+            vec![
+                json!({
+                    "label": "运行 OneDrive 卸载器并上报同步目录（移入回收站）",
+                    "pwsh": pwsh
+                }),
+                json!({
+                    "label": "清理 OneDrive 资源管理器入口与同步策略",
+                    "reg": onedrive_reg_text()
+                }),
+            ]
+        }
+        _ => Vec::new(),
     }
+}
+
+/// OneDrive 附带操作的 .reg 文本（CRLF，与 regBlock 生成口径一致）
+fn onedrive_reg_text() -> String {
+    const LINES: &[&str] = &[
+        "Windows Registry Editor Version 5.00",
+        "",
+        "[HKEY_CLASSES_ROOT\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder]",
+        "\"Attributes\"=dword:00000000",
+        "",
+        "[HKEY_CLASSES_ROOT\\Wow6432Node\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder]",
+        "\"Attributes\"=dword:00000000",
+        "",
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\OneDrive]",
+        "\"DisableFileSync\"=dword:00000001",
+        "\"DisableFileSyncNGSC\"=dword:00000001",
+        "\"DisableMeteredNetworkFileSync\"=dword:00000000",
+        "\"DisableLibrariesDefaultSaveToOneDrive\"=dword:00000000",
+        "",
+    ];
+    LINES.join("\r\n")
 }
 
 #[cfg(test)]
@@ -390,5 +447,81 @@ mod tests {
         assert_eq!(ps_single_quoted("a'b"), "'a''b'");
         // $ 与 " 在单引号内是字面量，不会被 PowerShell 展开
         assert_eq!(ps_single_quoted("$env:X\"y"), "'$env:X\"y'");
+    }
+
+    /// tf_dev_disable 的默认不勾清单（2026-10-11 用户裁定）：Intel ME/MEI/SMBus
+    /// 必须随 subitems 下发，前端按它初始化勾选态。
+    #[test]
+    fn 板载设备默认不勾清单下发() {
+        let sub = subitems_of("tf_dev_disable").expect("tf_dev_disable 应支持自选");
+        let off: Vec<String> = sub["defaultOff"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            off,
+            vec![
+                "Intel Management Engine",
+                "Intel Management Engine Interface",
+                "Intel SMBus"
+            ]
+        );
+        // 合并入列的音频控制器 / 打印队列必须在清单里（与数据层 pwsh 数组同序，
+        // 顺序由 check-optimizer-subitem-contract 对拍钉住）
+        let targets = targets_of("tf_dev_disable");
+        assert!(targets.contains(&"High Definition Audio Controller".to_string()));
+        assert!(targets.contains(&"Root Print Queue".to_string()));
+        // 新设备子集重建只禁选中目标
+        let steps = rebuild_steps(
+            "tf_dev_disable",
+            Some(&s(&["Root Print Queue", "High Definition Audio Controller"])),
+            None,
+        )
+        .expect("应重建出步骤");
+        let pwsh = steps[0]["pwsh"].as_str().unwrap();
+        assert!(pwsh.contains("'Root Print Queue'"));
+        assert!(pwsh.contains("'High Definition Audio Controller'"));
+        assert!(!pwsh.contains("Intel Management Engine"));
+    }
+
+    /// OneDrive 彻底卸载作为 tf_appx 的附带操作：选中时产出两步（卸载器+目录上报 /
+    /// reg 入口策略），不选时一步都不多；未登记 id 仍然零步（fail-closed）。
+    #[test]
+    fn appx的onedrive附带操作产出两步() {
+        // 不勾 extras：只有 AppX 清单这一步
+        let only = rebuild_steps("tf_appx", Some(&s(&["*solit*"])), None).unwrap();
+        assert_eq!(only.len(), 1, "未选附带操作时不应多出步骤");
+
+        // 勾上 OneDrive：清单步 + 卸载/回收步 + reg 步 = 3 步
+        let with = rebuild_steps(
+            "tf_appx",
+            Some(&s(&["*solit*"])),
+            Some(&s(&["onedrive_full_uninstall"])),
+        )
+        .unwrap();
+        assert_eq!(with.len(), 3, "OneDrive 附带操作应新增 2 步: {with:?}");
+        let joined: String = with
+            .iter()
+            .filter_map(|x| x["pwsh"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("ONEDRIVESETUP.EXE"), "{joined}");
+        assert!(joined.contains("/UNINSTALL"), "{joined}");
+        assert!(joined.contains("@@RECYCLE@@"), "{joined}");
+        // 回收站协议必须挂在 tf_appx 名下（退役前挂在已不存在的 tf_onedrive 上）
+        assert!(joined.contains("id = 'tf_appx'"), "{joined}");
+        let reg = with
+            .iter()
+            .find_map(|x| x["reg"].as_str())
+            .expect("应有一个 reg 步");
+        assert!(reg.contains("018D5C66-4533-4307-9B53-224DE2ED1FE6"), "{reg}");
+        assert!(reg.contains("DisableFileSyncNGSC"), "{reg}");
+        assert!(reg.starts_with("Windows Registry Editor Version 5.00"), "{reg}");
+
+        // 未登记的 extra id：零追加（不多写任何东西）
+        let ghost = rebuild_steps("tf_appx", Some(&s(&["*solit*"])), Some(&s(&["__nope__"]))).unwrap();
+        assert_eq!(ghost.len(), 1);
     }
 }
