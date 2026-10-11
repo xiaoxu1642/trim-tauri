@@ -7,16 +7,6 @@
       "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
       "reviewedAt": "2026-10-03"
     },
-    "tf_ifeo_perf": {
-      "sourceClass": "builtin",
-      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_ifeo_wipe": {
-      "sourceClass": "builtin",
-      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
-      "reviewedAt": "2026-10-03"
-    },
     "tf_svc_bulk": {
       "sourceClass": "builtin",
       "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
@@ -37,22 +27,7 @@
       "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
       "reviewedAt": "2026-10-03"
     },
-    "tf_dev_audio": {
-      "sourceClass": "builtin",
-      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_dev_printer": {
-      "sourceClass": "builtin",
-      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
-      "reviewedAt": "2026-10-03"
-    },
     "tf_appx": {
-      "sourceClass": "builtin",
-      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_onedrive": {
       "sourceClass": "builtin",
       "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
       "reviewedAt": "2026-10-03"
@@ -63,11 +38,6 @@
       "reviewedAt": "2026-10-03"
     },
     "perf_vbs_off": {
-      "sourceClass": "builtin",
-      "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
-      "reviewedAt": "2026-10-03"
-    },
-    "perf_exploit_protection_off": {
       "sourceClass": "builtin",
       "why": "破坏性系统改动（不可逆或需重启才能撤销），执行前有红色二次确认",
       "reviewedAt": "2026-10-03"
@@ -121,6 +91,21 @@
       "sourceClass": "builtin",
       "why": "浏览器优化 分组的代表项（该组 steps 最多，判据最复杂）",
       "reviewedAt": "2026-10-03"
+    },
+    "nara_bcd_vsm": {
+      "sourceClass": "builtin",
+      "why": "BCD Hyper-V/虚拟化启动项对齐，risk=high（写入 BCD 需管理员+重启生效+检测到 Hyper-V/模拟器/WSL 在用时整行自动跳过）",
+      "reviewedAt": "2026-10-11"
+    },
+    "nara_bcd_boot": {
+      "sourceClass": "builtin",
+      "why": "BCD 启动菜单/开机画面对齐，risk=high（写入 BCD 需管理员+重启生效+timeout=0 会影响双启动用户）",
+      "reviewedAt": "2026-10-11"
+    },
+    "nara_bcd_lowmem": {
+      "sourceClass": "builtin",
+      "why": "BCD 低 1MB/内存映射策略对齐，risk=high（命中为危险配置还原出口，常态不可执行）",
+      "reviewedAt": "2026-10-11"
     }
   }
 }

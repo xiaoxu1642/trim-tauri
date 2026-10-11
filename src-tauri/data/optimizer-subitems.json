@@ -267,13 +267,24 @@
         "*windowscommunicationsapps*": "旧式通信应用集合 — 可移除",
         "*zune*": "Zune 相关（Groove/Media Player）— **用媒体播放器就别移除**"
       },
-      "extras": []
+      "extras": [
+        {
+          "id": "onedrive_full_uninstall",
+          "label": "彻底卸载 OneDrive（含同步目录移入回收站）",
+          "note": "OneDrive 不是 AppX：额外运行官方卸载器、清空资源管理器左栏入口与同步策略，并把 OneDriveTemp/用户 OneDrive 等 4 个目录上报主进程移入回收站（可在回收站还原）。默认不执行，勾上才会做。"
+        }
+      ]
     },
     "tf_dev_disable": {
       "title": "禁用冗余板载设备",
       "label": "选择要禁用的板载设备",
-      "hint": "禁用 = 在设备管理器里把该设备停掉（可逆，随时可在设备管理器或本项「还原」里启用）。这些是**硬件级**开关，禁错可能让某个外设或网络功能失效；不确定的别勾。",
+      "hint": "禁用 = 在设备管理器里把该设备停掉（可逆，随时可在设备管理器或本项「还原」里启用）。这些是**硬件级**开关，禁错可能让某个外设或网络功能失效；不确定的别勾。Intel ME / MEI / SMBus 三项默认不勾。",
       "kind": "pnp-device",
+      "defaultOff": [
+        "Intel Management Engine",
+        "Intel Management Engine Interface",
+        "Intel SMBus"
+      ],
       "targets": [
         "High Precision Event Timer",
         "Microsoft GS Wavetable Synth",
@@ -297,7 +308,9 @@
         "WAN Miniport (PPPOE)",
         "WAN Miniport (PPTP)",
         "WAN Miniport (SSTP)",
-        "WAN Miniport (Network Monitor)"
+        "WAN Miniport (Network Monitor)",
+        "High Definition Audio Controller",
+        "Root Print Queue"
       ],
       "labels": {
         "High Precision Event Timer": "HPET 定时器 — 老式高精度事件定时器；现代平台多用 TSC/HPET 之外的时基，禁用通常不影响使用，个别老软件或系统对时可能受影响。",
@@ -322,7 +335,9 @@
         "WAN Miniport (PPPOE)": "WAN 小型端口 (PPPoE) — 宽带拨号组件；用 PPPoE 拨号上网的机器禁了就上不了网。",
         "WAN Miniport (PPTP)": "WAN 小型端口 (PPTP) — 老式 VPN 协议组件。",
         "WAN Miniport (SSTP)": "WAN 小型端口 (SSTP) — VPN 协议组件。",
-        "WAN Miniport (Network Monitor)": "WAN 小型端口 (网络监视) — 抓包/监控用组件。"
+        "WAN Miniport (Network Monitor)": "WAN 小型端口 (网络监视) — 抓包/监控用组件。",
+        "High Definition Audio Controller": "高清音频控制器 — HDMI/DP 声卡与板载声卡会消失，仅在使用独立 USB 声卡且想彻底禁用板载音频时勾选。",
+        "Root Print Queue": "Root 打印队列根设备 — 无打印机的机器可勾；有打印机或虚拟打印（PDF/XPS）请勿勾。"
       },
       "extras": []
     }

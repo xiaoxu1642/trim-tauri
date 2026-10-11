@@ -91,10 +91,10 @@
           "desc": "合并原「游戏高优先级」与「MMCSS 系统增强」：Games 任务高调度/高 GPU 优先级 + 低延迟标记 + 系统级 NoLazyMode/AlwaysOn，为游戏与影音提供低延迟的多媒体调度（原「启用 Games 低延迟调度标记」同值重复已并入）。"
         },
         "nara_prio": {
-          "desc": "为《永劫无间》进程设置 CPU 与 IO 优先级，减少后台抢占造成的帧率波动，对其他游戏无效。",
+          "desc": "为《永劫无间》(NarakaBladepoint.exe) 进程设置高 CPU 与 IO 优先级；只对该游戏生效，不承诺具体帧率收益。",
           "tips": {
             "normal": "不玩《永劫无间》就关；对别的游戏无效。",
-            "game": "只在该游戏运行时收益；不玩此游戏就不必开。",
+            "game": "仅对该游戏进程生效；不玩此游戏就不必开。",
             "office": "关：办公与 IFEO 无关，留着只是给注册表添噪。"
           }
         },
@@ -727,6 +727,158 @@
             "normal": "可开：普通用户不常用设备管理器，开了列表略长。",
             "game": "可开：与游戏无关。",
             "office": "推荐开：IT/运维排查残留驱动时不用再手动点「显示隐藏设备」。"
+          }
+        },
+        "nara_throttle_off": {
+          "desc": "电源方案关闭 Allow Throttle States，防止系统在温度/功耗阈值下主动降频。",
+          "tips": {
+            "normal": "发热敏感的台式机或强散热笔记本可开。",
+            "game": "推荐开：满载不降频、帧时间更稳。",
+            "office": "办公用笔记本默认不开，续航优先。"
+          }
+        },
+        "nara_usb3_lpm_off": {
+          "desc": "关闭 USB 3 Link Power Management，防止存储/集线器空闲切低功耗导致偶发断连。",
+          "tips": {
+            "normal": "USB 3 存储/外设多的可开。",
+            "game": "推荐开：游戏手柄/键鼠无线接收器 USB 供电稳。",
+            "office": "办公用笔记本默认不开，续航优先。"
+          }
+        },
+        "mmcss_games": {
+          "desc": "MMCSS Tasks\\Games 七值，提升被归类为 Games 的进程调度优先级（全机生效）。",
+          "tips": {
+            "normal": "经常玩各类游戏的可开。",
+            "game": "推荐开：帧时间更稳、音效不中断。",
+            "office": "不推荐：后台游戏进程会抢办公调度。"
+          }
+        },
+        "nara_bcd_timer": {
+          "desc": "计时器三件套条件对齐（disabledynamictick/useplatformtick/useplatformclock）。",
+          "tips": {
+            "normal": "单核/老机器可开（条件命中）。",
+            "game": "条件命中可开：减少计时器中断抖动。",
+            "office": "条件命中可开。"
+          }
+        },
+        "nara_bcd_vsm": {
+          "desc": "Hyper-V/虚拟化启动项条件对齐，检测到模拟器/WSL 在用时自动跳过（保护态）。",
+          "tips": {
+            "normal": "不跑 Hyper-V/WSL/模拟器的可开（条件命中）。",
+            "game": "条件命中可开：关 Hyper-V 减少虚拟化开销。",
+            "office": "跑 WSL/Hyper-V 的跳过。"
+          }
+        },
+        "nara_bcd_boot": {
+          "desc": "启动菜单/开机画面对齐，timeout=0、bootux=disabled。",
+          "tips": {
+            "normal": "单系统用户可开。",
+            "game": "单系统用户可开。",
+            "office": "双启动用户别开（timeout=0 会直接进默认系统）。"
+          }
+        },
+        "nara_bcd_lowmem": {
+          "desc": "低 1MB/内存映射策略对齐，命中主要作为危险配置还原出口（常态不可执行）。",
+          "tips": {
+            "normal": "常态不可执行（元素不存在）。",
+            "game": "常态不可执行。",
+            "office": "常态不可执行。"
+          }
+        },
+        "nara_bcd_irq": {
+          "desc": "中断路由策略对齐（configaccesspolicy/MSI 等），多为系统默认值，常态不可执行。",
+          "tips": {
+            "normal": "常态不可执行。",
+            "game": "常态不可执行。",
+            "office": "常态不可执行。"
+          }
+        },
+        "nara_kbd_indicators": {
+          "desc": "开机自动亮 NumLock（InitialKeyboardIndicators=2），登录时可直接输数字密码。",
+          "tips": {
+            "normal": "用数字密码或小键盘多的可开。",
+            "game": "推荐开：进桌面小键盘直接可用。",
+            "office": "经常输数字表格的建议开。"
+          }
+        },
+        "nara_kbd_delay": {
+          "desc": "键盘重复延迟调到最短（KeyboardDelay=0），按住按键更快开始重复。",
+          "tips": {
+            "normal": "想要跟手手感的可开。",
+            "game": "推荐开：技能连按响应更快。",
+            "office": "打字误触多的可不改。"
+          }
+        },
+        "nara_kbd_speed": {
+          "desc": "键盘重复速度写 999（超控制面板 0–31 档，系统按最快档处理），退格/连按最快。",
+          "tips": {
+            "normal": "喜欢极速重复的可开。",
+            "game": "玩家圈固定写法，可开。",
+            "office": "长文退格太快可能误删。"
+          }
+        },
+        "nara_kbd_multi_ports": {
+          "desc": "kbdclass 驱动 ConnectMultiplePorts=0，键盘按单端口路由，属驱动默认档对齐。",
+          "tips": {
+            "normal": "默认值，执行也无感。",
+            "game": "默认值，保持输入链路标准。",
+            "office": "默认值，执行也无感。"
+          }
+        },
+        "nara_kbd_queue": {
+          "desc": "kbdclass 键盘数据队列压到 8，减少输入排队延迟，需重启生效。",
+          "tips": {
+            "normal": "追求低输入延迟可开。",
+            "game": "推荐开：按键事件排队更少。",
+            "office": "办公场景收益不明显。"
+          }
+        },
+        "nara_kbd_base_name": {
+          "desc": "显式写 KeyboardDeviceBaseName=KeyboardClass，系统默认值对齐写法。",
+          "tips": {
+            "normal": "默认值，执行也无感。",
+            "game": "默认值，保持设备链标准。",
+            "office": "默认值，执行也无感。"
+          }
+        },
+        "nara_kbd_max_ports": {
+          "desc": "kbdclass 最大服务端口数 3（MaximumPortsServiced），驱动默认档对齐。",
+          "tips": {
+            "normal": "默认值，执行也无感。",
+            "game": "默认值，保持端口路由标准。",
+            "office": "默认值，执行也无感。"
+          }
+        },
+        "nara_kbd_output_all": {
+          "desc": "SendOutputToAllPorts=1，键盘扫描码发往全部服务端口，多端口不漏发。",
+          "tips": {
+            "normal": "默认值，执行也无感。",
+            "game": "多设备/KVM 场景更稳。",
+            "office": "默认值，执行也无感。"
+          }
+        },
+        "nara_kbd_wpp_ts": {
+          "desc": "WppRecorder_UseTimeStamp=1，WPP 跟踪记录带时间戳，日常使用无感。",
+          "tips": {
+            "normal": "排障用，平时无感。",
+            "game": "按专项清单执行即可。",
+            "office": "排障用，平时无感。"
+          }
+        },
+        "nara_win32prio": {
+          "desc": "Win32PrioritySeparation=38，Windows「程序」方案推荐档，前台拿 3 倍时间片。",
+          "tips": {
+            "normal": "微软推荐均衡档，可开。",
+            "game": "推荐开：前台游戏响应更优先。",
+            "office": "推荐开：前台办公窗口更跟手。"
+          }
+        },
+        "nara_mouse_queue": {
+          "desc": "MouseDataQueueSize=18，鼠标驱动事件缓冲降到推荐小值，低延迟且不易丢事件，需重启。",
+          "tips": {
+            "normal": "18 是均衡推荐值，可开。",
+            "game": "推荐开：瞄准移动延迟更低。",
+            "office": "移动跟手，可开。"
           }
         }
       }

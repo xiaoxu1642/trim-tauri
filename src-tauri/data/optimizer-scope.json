@@ -23,7 +23,6 @@
     "tf_disk_extra3": "reboot",
     "tf_perf_misc": "reboot",
     "mouse_optimize": "explorer",
-    "tf_onedrive": "explorer",
     "desktop_show_ext": "explorer",
     "desktop_show_hidden": "explorer",
     "desktop_thumb_delay": "explorer",
@@ -42,6 +41,15 @@
     "sys_taskbar_anim_off": "explorer",
     "sys_thumb_cache_off": "explorer",
     "net_no_active_probe": "reboot",
-    "devmgr_show_hidden_default": "reboot"
+    "devmgr_show_hidden_default": "reboot",
+    "nara_kbd_multi_ports": "reboot",
+    "nara_kbd_queue": "reboot",
+    "nara_kbd_base_name": "reboot",
+    "nara_kbd_max_ports": "reboot",
+    "nara_kbd_output_all": "reboot",
+    "nara_kbd_wpp_ts": "reboot",
+    "nara_win32prio": "reboot",
+    "nara_mouse_queue": "reboot"
   }
 }
+

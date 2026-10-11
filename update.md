@@ -1,5 +1,23 @@
 # 更新日志
 
+## 版本 0.7.6（2026-10-11 游戏残留扫描上线 + 优化项注册表摘要 + 清理项后置动作侧表 + 永劫无间专项升级）
+
+> 本版做两件事：① 新增「游戏残留」子视图——扫描 Steam/Epic/WeGame 在库游戏目录内的 DirectX、VC++ 运行库安装包与 Ren'Py 跨平台库，复用 finder 删除链（零新增删除出口）；② 优化项详情补「注册表写入目标摘要」（按 HKLM/HKCU 自动汇总）、清理项执行后按侧表提示「需重启资源管理器」。永劫无间优化项标题改为「永劫无间优化专项」并新增 IO 优先级。本版共 3 笔提交（`git log --oneline v0.7.5..HEAD` 现算）。
+
+① **新增「游戏残留」子视图——运行库安装包 + Ren'Py 跨平台库** —— 清理页新增第五个子视图「游戏残留」，扫描源复用卸载域已有的三平台在库游戏清单（`collect_platform_index`），判定规则只取具名词（`redist`/`directx`/`dxsetup`/`dotnetfx`/`prereq`/`xnafx`/`__installer`，不含 SteamCleaner 泛词 support/裸 installer），Ren'Py 段级匹配（`lib` + `darwin`/`linux` 段、段名相等不是子串）。候选先登记进 finder 外部快照槽 `gameclean`，删除走现有 `finder:delete` 的 `slot` 参数（白名单：只接受本仓登记的外部槽，外部渲染层无法认领其他窗口/域的快照），真机探针已实跑通过。**只读限制如实说**：NTFS 上文件名含系统无法以文本无损表示字符的路径，UI 上标为不可删（禁用勾选框、带原因提示），后端不登记删除快照。
+
+② **finder:delete 新增可选 slot 参数——外部扫描域可认领专属快照槽** —— 症状：删除通道此前只认调用窗口 label 作为槽标识，外部扫描器无法复用它的删除链（否则只能硬塞到某个窗口 label 里，跨页签会顶账）。修法：`finder:delete` 加 `slot:Option<String>` 参数，缺省走调用窗口 label（行为不变）；显式槽必须在 `EXTERNAL_DELETE_SLOTS` 白名单内（现只有 `gameclean`），白名单外一律拒绝。同模块新增 `register_external_scan_items`（pub，允许外部调用方登记候选）与 `reset_external_scan_slot`（白名单保护的整槽替换，防止上轮陈旧条目跨轮累积）。
+
+③ **优化项详情补「注册表写入目标摘要」（regTargets 派生字段）** —— 症状：用户点开某优化项的详情，只看到 steps 文本里的散 `.reg` 块，不知道这项到底改了哪个 hive、几处。修法：新增 `reg_targets` 函数遍历 `steps`/`restore` 中所有 `reg` 文本，按 hive 汇总为 `[{hive, count, keys}]` 数组（复用现有 `.reg` 解析器，§5.16/N6 不另写第二份），注入 `optimizer_list` 响应。纯 cmd/pwsh/service 项返回空数组。契约测试覆盖三类：混用 HKLM+HKCU、纯非 reg、纯 HKLM。
+
+④ **清理项执行后按侧表提示「需重启资源管理器」** —— 症状：缩略图/图标缓存（`thumbnailCacheFiles`/`iconCacheFiles`）与浏览器 INetCache（`winINetCache`）清理后，资源管理器图标/缩略图缓存未同步刷新，用户看到空白图标而以为清理坏了。修法：编译期内嵌 `cleanup-postactions.json` 侧表（只含本版 3 项，其余一律按 none，保守方向），清理扫描响应里给每个命中项派生 `postAction: explorer|none` 字段（不进规则库、不触发重签）。侧表正确性由 `check-cleanup-postactions.mjs` 门禁保证——机械重算全量清理项的目标路径（是否落在 Explorer 缓存目录、含 IconCache.db、或 INetCache 类），与侧表逐 id 比对，偏差即判红。
+
+⑤ **永劫无间优化项升级：标题改「优化专项」、新增 IO 优先级** —— 症状：标题「永劫无间优化转向」模糊、且注册表只改 CPU 优先级（IO 优先级在 Windows 上同样由 IFEO `PerfOptions` 键控制，漏设等于只跑了一半优化）。修法：`optimizer-scripts.js` 里 `nara_prio` 的 `PerfOptions` 块同时写入 `CpuPriorityClass=3` 和 `IoPriority=3`，标题改为「永劫无间优化专项」（全局无旧标题残留，grep 现算 0 条），`item-intro.json`/`optimizer-defaults.json`/`optimizer-runtime.json` 同步更新、重签 sidecar。
+
+⑥ **内部加固（为什么它对用户重要：下次不该靠人眼发现）** —— **dead_code 警告清零**：放开 `game_platform_orphan` 模块级 `#[allow(dead_code)]` 为 gameclean 第二消费方让位后，5 条预留未接线的「未跟踪游戏目录发现」构件（`COMMON_DIR_CAP` / `LibraryListing` / `list_game_dirs` / `UNTRACKED_CAP` / `untracked_dir_findings`）从模块级 allow 浮出成单条 warn。按 AGENTS §4.1 零警告线，逐项挂 allow 并注明「预留族、接线时摘掉不删」。**lossy 路径拦截**：复用全仓唯一 `trim_finder::util::has_lossy_path` 判据（不再自写第二份），真机探针验证孤立代理项文件名被正确标为不可删且不进删除快照。**reset_external_scan_slot 假绿自证**：测试预置一条上轮陈旧槽条目、临时摘掉 reset 调用后断言立即判红（槽变 6 条、exit 101），恢复后转绿。**HKCC 分支注释**：`reg_targets` 的 HKCR/HKU/HKCC 映射当前无脚本写入源，补注释说明保留为通用解析器兼容而非"永远没用的死分支"。
+
+⑦ **本版未做的验证（如实标注）** —— ① 禁用勾选框在真机上的视觉/读屏表现未目检（没起窗口，走的静默验证路径）；② 本版跳过所有远端推送/Release/清单（你的指令），所以本机 `latest-atomgit.json` / `latest.json` 未更新、updater 客户端检查更新时仍指向 v0.7.5 清单（本版不影响本机使用）。
+
 ## 版本 0.7.5（2026-10-09 全仓审查 v4 修复落地 + 右键菜单删除链退役 + 三处真机回归修正）
 
 > 本版做三件事：把 v4 全仓审查核出的 10 条高危逐条收口（其中一条按你 2026-10-09 的裁定整链退役）、修掉三处**只有真机上才暴露**的回归，并把批量执行与设置写入的安全护栏补严。清理 / 卸载 / 优化 / 磁盘扫描的主链路行为不变。本版共 24 笔提交（`git log --oneline 350ed51~1..HEAD` 现算）。

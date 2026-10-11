@@ -222,13 +222,13 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'nara_prio', group: '游戏与多媒体', title: '永劫无间 CPU 高优先级', risk: 'low',
-    desc: '为「永劫无间」(NarakaBladepoint.exe) 进程设置高 CPU 优先级类。',
+    id: 'nara_prio', group: '游戏与多媒体', title: '永劫无间优化专项', risk: 'low',
+    desc: '为「永劫无间」(NarakaBladepoint.exe) 进程设置高 CPU 优先级类与高 IO 优先级。',
     steps: [
       {
-        label: 'Naraka CpuPriorityClass=3', reg: regBlock({
+        label: 'Naraka CpuPriorityClass/IoPriority=3', reg: regBlock({
           'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\NarakaBladepoint.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000003'
+            'CpuPriorityClass': 'dword:00000003', 'IoPriority': 'dword:00000003'
           }
         })
       }
@@ -325,97 +325,6 @@ const OPTIONS = [
       ].join('\n') }
     ]
   },
-  {
-    id: 'tf_ifeo_perf', group: '游戏与多媒体', title: '进程 CPU/IO 优先级（IFEO PerfOptions）', risk: 'high',
-    desc: 'Trim：dwm/ntoskrnl/csrss Cpu=4/Io=3，lsass Cpu=1/Io=0/PagePriority=0，SearchIndexer/svchost/TrustedInstaller/wuauclt/audiodg Cpu=1/2，在 SOFTWARE 与 WOW6432Node 两个蜂巢写入 PerfOptions。',
-    steps: [
-      {
-        label: 'IFEO PerfOptions（双蜂巢）', reg: regBlock({
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dwm.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000004', 'IoPriority': 'dword:00000003'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\ntoskrnl.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000004', 'IoPriority': 'dword:00000003'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\csrss.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000004', 'IoPriority': 'dword:00000003'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\lsass.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000', 'PagePriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\SearchIndexer.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\svchost.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\TrustedInstaller.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\wuauclt.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\MsMpEng.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\MsMpEngCP.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001'
-          },
-          'HKEY_LOCAL_MACHINE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dwm.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000004', 'IoPriority': 'dword:00000003'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\ntoskrnl.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000004', 'IoPriority': 'dword:00000003'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\csrss.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000004', 'IoPriority': 'dword:00000003'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\lsass.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000', 'PagePriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\SearchIndexer.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\svchost.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\TrustedInstaller.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\wuauclt.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000001', 'IoPriority': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\audiodg.exe\\PerfOptions': {
-            'CpuPriorityClass': 'dword:00000002'
-          }
-        })
-      }
-    ]
-  },
-  {
-    id: 'tf_ifeo_wipe', group: '游戏与多媒体', title: '清空 IFEO 调试项', risk: 'high',
-    desc: '清除 Image File Execution Options 下的调试劫持值（Debugger/GlobalFlag/UseFilter 等）。已与「进程 CPU/IO 优先级」兼容：保留各程序的 PerfOptions 子项（IFEO 优先级设置）不被误删，仅清除杀软/病毒常用的 Debugger 劫持入口。',
-    steps: [
-      {
-        label: '清除 Debugger 劫持值（保留 PerfOptions）', pwsh: [
-          "$root = 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options'",
-          "Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {",
-          "  $sub = $_",
-          "  foreach ($v in @('Debugger','GlobalFlag','UseFilter','ModifiedImagePath')) {",
-          "    if ($null -ne (Get-ItemProperty -LiteralPath $sub.PSPath -Name $v -ErrorAction SilentlyContinue)) { Remove-ItemProperty -LiteralPath $sub.PSPath -Name $v -ErrorAction SilentlyContinue }",
-          "  }",
-          "  $hasPerf = Test-Path -LiteralPath (Join-Path $sub.PSPath 'PerfOptions')",
-          "  if (-not $hasPerf) {",
-          "    $props = Get-ItemProperty -LiteralPath $sub.PSPath -ErrorAction SilentlyContinue",
-          "    $vals = @($props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' }).Count",
-          "    $childCount = @(Get-ChildItem -LiteralPath $sub.PSPath -ErrorAction SilentlyContinue).Count",
-          "    if ($vals -eq 0 -and $childCount -eq 0) { Remove-Item -LiteralPath $sub.PSPath -Force -ErrorAction SilentlyContinue }",
-          "  }",
-          "}"
-        ].join('\n')
-      }
-    ]
-  },
 
   // ---------- 系统服务与内存 ----------
   // 第六大点-B（2026-09-14 重复点审查）：原「禁用下载地图管理器」(maps_off) 与
@@ -434,14 +343,6 @@ const OPTIONS = [
   // 第六大点-B（2026-09-14 重复点审查）：原「禁用内存压缩」(mem_compress) 已下线 ——
   // 它是「关闭内存压缩与内存页合并」(tf_mmagent) 的子集（后者 = 本项 + PageCombining），
   // 合并后只保留超集项，避免同一项 Disable-MMAgent 被两个入口各执行一次。
-  {
-    id: 'tf_mmagent', group: '系统服务与内存', title: '关闭内存压缩与内存页合并', risk: 'medium',
-    desc: '关闭 Windows 内存页合并（PageCombining）与内存压缩：Disable-MMAgent -MemoryCompression -PageCombining（比内置「禁用内存压缩」多 PageCombining）。PageCombining 是 Windows 的持续内存去重机制；「内存清理 - 即时合并物理内存页」是此刻调用 NtSetSystemInformation 整理一次，两者不是同一功能，互不影响。',
-    steps: [
-      { label: '关闭内存压缩', pwsh: 'Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue' },
-      { label: '关闭页面合并', pwsh: 'Disable-MMAgent -PageCombining -ErrorAction SilentlyContinue' }
-    ]
-  },
   {
     id: 'tf_svc_bulk', group: '系统服务与内存', title: '禁用 70+ 非必要服务', risk: 'high',
     desc: '批量调整服务启动类型：默认把 wuauserv（Windows 更新）由「自动」改为「手动」（更新仍可手动检查），其余非必要服务全部禁用(Start=4)，并关闭 Edge 预启动/预加载；应用商店其余服务保持默认。\n\n执行时会单独弹窗询问是否连商店相关服务一并禁用——含 ClipSVC（许可）、InstallService（安装）、PushToInstall（远程安装）、wuauserv（Windows 更新）、DoSvc（传递优化下载），选择禁用会影响 Windows 应用商店的使用、更新与下载以及系统更新。\n\n禁用(Start=4)服务清单：TapiSrv、FontCache3.0.0.0、WpcMonSvc、SEMgrSvc、PNRPsvc、LanmanWorkstation、WEPHOSTSVC、p2psvc、p2pimsvc、PhoneSvc、Wecsvc、perceptionsimulation、StiSvc、WMPNetworkSvc、autotimesvc、edgeupdatem、MicrosoftEdgeElevationService、ALG、QWAVE、IpxlatCfgSvc、icssvc、DusmSvc、MapsBroker、edgeupdate、SensorService、shpamsvc、svsvc、SysMain、MSiSCSI、Netlogon、CscService、ssh-agent、AppReadiness、tzautoupdate、NfsClnt、wisvc、defragsvc、SharedRealitySvc、RetailDemo、lltdsvc、TrkWks、CryptSvc、DiagTrack、diagsvc、DPS、WdiServiceHost、WdiSystemHost、dmwappushservice、TroubleshootingSvc、DsSvc、FrameServer、FontCache、OSRSS、sedsvc、SENS、TabletInputService、Themes、BcastDVRUserService、CaptureService、diagnosticshub.standardcollector.service、XblAuthManager、XblGameSave、XboxNetApiSvc、WpnService、lfsvc。',
@@ -509,6 +410,7 @@ const OPTIONS = [
         '"\\Microsoft\\Windows\\Customer Experience Improvement Program\\KernelCeipTask",',
         '"\\Microsoft\\Windows\\Customer Experience Improvement Program\\HypervisorFlightingTask",',
         '"\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector",',
+        '"\\Microsoft\\Windows\\DiskFootprint\\Diagnostics",',
         '"\\Microsoft\\Windows\\Feedback\\Siuf\\DmClient",',
         '"\\Microsoft\\Windows\\Feedback\\Siuf\\DmClientOnScenarioDownload",',
         '"\\Microsoft\\Windows\\Maps\\MapsToastTask",',
@@ -790,30 +692,12 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'tf_dev_disable', group: '键鼠与外设', title: '禁用 24 个冗余板载设备', risk: 'high',
-    desc: 'Trim DisableDevices（DevManView 已改写为 Disable-PnpDevice，按设备名匹配）：高精度事件定时器(HPET)、GS 波表合成、RRAS 根枚举、Intel ME/MEI/SMBus、SM Bus、Amdlog、AMD PSP、系统扬声器、复合总线枚举、虚拟驱动器枚举、Hyper-V 虚拟化基础结构、NDIS 虚拟网卡枚举、远程桌面重定向总线、UMBus、7 个 WAN Miniport 等（已剔除 IPv6 相关虚拟适配器，遵守项目硬约束）。禁用 HPET/ME 属高风险，可能影响设备管理或虚拟化。',
+    id: 'tf_dev_disable', group: '键鼠与外设', title: '禁用 24 个冗余板载设备', risk: 'medium',
+    desc: 'Trim DisableDevices（DevManView 已改写为 Disable-PnpDevice，按设备名匹配，可逆）：高精度事件定时器(HPET)、GS 波表合成、RRAS 根枚举、SM Bus、Amdlog、AMD PSP、系统扬声器、复合总线枚举、虚拟驱动器枚举、Hyper-V 虚拟化基础结构、NDIS 虚拟网卡枚举、远程桌面重定向总线、UMBus、7 个 WAN Miniport、高清音频控制器、Root 打印队列等（已剔除 IPv6 相关虚拟适配器，遵守项目硬约束）。逐项选择里 Intel ME / MEI / SMBus 三项默认不勾（可能影响厂商散热工具与传感器读数）；禁用 HPET/虚拟化设备可能影响设备管理或虚拟化，可在设备管理器重新启用。',
     steps: [
       { label: '按名称禁用设备', pwsh: [
-        '$names = @("High Precision Event Timer","Microsoft GS Wavetable Synth","Microsoft RRAS Root Enumerator","Intel Management Engine","Intel Management Engine Interface","Intel SMBus","SM Bus Controller","Amdlog","AMD PSP","System Speaker","Composite Bus Enumerator","Microsoft Virtual Drive Enumerator","Microsoft Hyper-V Virtualization Infrastructure Driver","NDIS Virtual Network Adapter Enumerator","Remote Desktop Device Redirector Bus","UMBus Root Bus Enumerator","WAN Miniport (IP)","WAN Miniport (IKEv2)","WAN Miniport (L2TP)","WAN Miniport (PPPOE)","WAN Miniport (PPTP)","WAN Miniport (SSTP)","WAN Miniport (Network Monitor)")',
+        '$names = @("High Precision Event Timer","Microsoft GS Wavetable Synth","Microsoft RRAS Root Enumerator","Intel Management Engine","Intel Management Engine Interface","Intel SMBus","SM Bus Controller","Amdlog","AMD PSP","System Speaker","Composite Bus Enumerator","Microsoft Virtual Drive Enumerator","Microsoft Hyper-V Virtualization Infrastructure Driver","NDIS Virtual Network Adapter Enumerator","Remote Desktop Device Redirector Bus","UMBus Root Bus Enumerator","WAN Miniport (IP)","WAN Miniport (IKEv2)","WAN Miniport (L2TP)","WAN Miniport (PPPOE)","WAN Miniport (PPTP)","WAN Miniport (SSTP)","WAN Miniport (Network Monitor)","High Definition Audio Controller","Root Print Queue")',
         'foreach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq "OK" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }'
-      ].join('\n') }
-    ]
-  },
-  {
-    id: 'tf_dev_audio', group: '键鼠与外设', title: '禁用高清音频控制器', risk: 'high',
-    desc: 'Trim 可选项：禁用 "High Definition Audio Controller"（HDMI/DP 声卡与板载声卡会消失，仅在使用独立 USB 声卡且想彻底禁用板载音频时使用）。',
-    steps: [
-      { label: '禁用 HD Audio Controller', pwsh: [
-        'Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq "High Definition Audio Controller" -and $_.Status -eq "OK" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue'
-      ].join('\n') }
-    ]
-  },
-  {
-    id: 'tf_dev_printer', group: '键鼠与外设', title: '禁用打印队列设备', risk: 'high',
-    desc: 'Trim 可选项：禁用 "Root Print Queue" 打印队列根设备（无打印机的机器可禁用；有打印机请勿使用）。',
-    steps: [
-      { label: '禁用 Root Print Queue', pwsh: [
-        'Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq "Root Print Queue" -and $_.Status -eq "OK" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue'
       ].join('\n') }
     ]
   },
@@ -828,8 +712,8 @@ const OPTIONS = [
   // 该项另用裸 Remove-Item 绕过 trashOrUnlink / 删除清单 / confirmDanger，违反项目安全红线。
   // ---------- 系统精简 ----------
   {
-    id: 'tf_appx', group: '系统精简', title: '移除 25 个内置 UWP 应用', risk: 'high',
-    desc: 'Trim Debloat：按名称通配移除所有用户下的预装 AppX——3D Builder、Bing 全家桶（资讯/财经/体育/天气）、CommsPhone、Drawboard PDF、Facebook、Getstarted、Messaging、Office Hub、OneNote、人脉、Skype、纸牌合集、Sway、Twitter、闹钟时钟、手机、地图、反馈中心、录音机、邮件日历、Zune（Groove/影视）等。移除后部分应用需从商店重装。',
+    id: 'tf_appx', group: '系统精简', title: '移除 25 个内置 UWP 应用', risk: 'medium',
+    desc: 'Trim Debloat：按名称通配移除所有用户下的预装 AppX——3D Builder、Bing 全家桶（资讯/财经/体育/天气）、CommsPhone、Drawboard PDF、Facebook、Getstarted、Messaging、Office Hub、OneNote、人脉、Skype、纸牌合集、Sway、Twitter、闹钟时钟、手机、地图、反馈中心、录音机、邮件日历、Zune（Groove/影视）等。移除后部分应用需从商店重装。OneDrive 不是 AppX，它的彻底卸载收在逐项选择弹窗的「附带操作」里（默认不执行，会把同步目录移入回收站）。',
     steps: [
       { label: '移除预装 AppX 清单', pwsh: [
         '$apps = @("*3DBuilder*","*bing*","*bingfinance*","*bingsports*","*BingWeather*","*CommsPhone*","*Drawboard PDF*","*Facebook*","*Getstarted*","*Microsoft.Messaging*","*MicrosoftOfficeHub*","*Office.OneNote*","*OneNote*","*people*","*SkypeApp*","*solit*","*Sway*","*Twitter*","*WindowsAlarms*","*WindowsPhone*","*WindowsMaps*","*WindowsFeedbackHub*","*WindowsSoundRecorder*","*windowscommunicationsapps*","*zune*")',
@@ -857,37 +741,6 @@ const OPTIONS = [
       { label: '卸载 Cortana AppX', pwsh: [
         'Get-AppxPackage -AllUsers -Name "*Microsoft.549981C3F5F10*" -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue'
       ].join('\n') }
-    ]
-  },
-  {
-    id: 'tf_onedrive', group: '系统精简', title: '彻底卸载 OneDrive', risk: 'high',
-    // 对比审查 P0/B-2（2026-09-14）：desc 改为逐条列出删除目标绝对路径；数据目录删除
-    // 不再 PS 内 Remove-Item -Recurse -Force 裸删（绕过统一删除出口、不可逆），改经
-    // @@RECYCLE@@ 协议交回主进程 shell.trashItem（回收站优先，可还原）。
-    desc: 'Trim DisableOneDrive：运行 OneDriveSetup /UNINSTALL，将 OneDrive 数据目录移入回收站（可在系统回收站还原）：C:\\OneDriveTemp、%USERPROFILE%\\OneDrive（注意：其中是您自己的文档/桌面/照片等同步内容）、%LOCALAPPDATA%\\Microsoft\\OneDrive、%PROGRAMDATA%\\Microsoft OneDrive；再清空资源管理器左栏 OneDrive 入口 CLSID 属性（HKCR 与 Wow6432Node 双 hive），并写入禁用文件同步的组策略（DisableFileSync/DisableFileSyncNGSC=1）。',
-    steps: [
-      { label: '运行 OneDrive 卸载器', pwsh: [
-        '$setup = Join-Path $env:SystemRoot "SYSWOW64\\ONEDRIVESETUP.EXE"',
-        'if (Test-Path $setup) { Start-Process -FilePath $setup -ArgumentList "/UNINSTALL" -Wait -NoNewWindow }'
-      ].join('\n') },
-      { label: '上报 OneDrive 数据目录（主进程移入回收站）', pwsh: [
-        // 只枚举存在性并上报，不执行任何删除；体积测量省略（OneDrive 目录可达数 GB，
-        // 递归统计会显著拖慢执行，回收站消息不依赖体积）。
-        '$odDirs = @("$env:SystemDrive\\OneDriveTemp", "$env:USERPROFILE\\OneDrive", "$env:LOCALAPPDATA\\Microsoft\\OneDrive", "$env:PROGRAMDATA\\Microsoft OneDrive")',
-        "foreach ($d in $odDirs) { if (Test-Path -LiteralPath $d) { Write-Output ('@@RECYCLE@@' + (@{ id = 'tf_onedrive'; path = $d; isDir = $true } | ConvertTo-Json -Compress)) } }"
-      ].join('\n') },
-      {
-        label: 'OneDrive 入口 / 策略', reg: regBlock({
-          'HKEY_CLASSES_ROOT\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder': { 'Attributes': 'dword:00000000' },
-          'HKEY_CLASSES_ROOT\\Wow6432Node\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder': { 'Attributes': 'dword:00000000' },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\OneDrive': {
-            'DisableFileSync': 'dword:00000001',
-            'DisableFileSyncNGSC': 'dword:00000001',
-            'DisableMeteredNetworkFileSync': 'dword:00000000',
-            'DisableLibrariesDefaultSaveToOneDrive': 'dword:00000000'
-          }
-        })
-      }
     ]
   },
   // ---------- 音频优化（对齐 Trim BuildAudioModule） ----------
@@ -1575,24 +1428,6 @@ const OPTIONS = [
       }
     ]
   },
-  {
-    id: 'perf_exploit_protection_off', group: '性能调优', title: '关闭 Exploit Protection（乱序内存）', risk: 'high',
-    desc: '写入内核 MitigationOptions 二进制值（22,22,22,00,00,02,00,00,00,02,00,00,00,00,00,00，与 Trim「关闭Exploit Protection（乱序内存）」一致），关闭一系列漏洞利用缓解（含 SEHOP/强制 ASLR 等），可小幅提升部分应用的内存分配性能，但显著降低漏洞利用防护（高风险，需确认后执行）。',
-    steps: [
-      {
-        label: 'MitigationOptions (Binary)', pwsh: [
-          '$k = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel"',
-          'New-ItemProperty -Path $k -Name MitigationOptions -Value ([byte[]](0x22,0x22,0x22,0x00,0x00,0x02,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00)) -PropertyType Binary -Force | Out-Null'
-        ].join('\n') }
-    ],
-    restore: [
-      {
-        label: '删除 MitigationOptions（恢复系统默认缓解策略）', pwsh: [
-          '$k = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel"',
-          'Remove-ItemProperty -Path $k -Name MitigationOptions -ErrorAction SilentlyContinue'
-        ].join('\n') }
-    ]
-  },
   // ---------- D 批 1（v0.4.9 RAINZ 对标 §3.5）：网络与更新策略 4 项 ----------
   // 4 项**全是纯 reg 步骤**，`restoreAvailable` 由 2116 那条 forEach 的推理机制自动置 true
   // （删除写入的键 = 恢复系统默认），不重复手写 restore 数组。
@@ -2111,6 +1946,332 @@ const OPTIONS = [
         }
       }) }
     ]
+  },
+
+  // ==================== 永劫无间专项面板（2026-10-11 用户拍板 C2）====================
+  {
+    id: 'nara_throttle_off', group: '系统调校', title: '关闭 CPU 节流状态', risk: 'medium',
+    desc: '电源方案关闭 Allow Throttle States（AC/DC 都写 0），防止系统在温度/功耗阈值下主动降频；代价是满载温度更高、笔记本续航略降。',
+    steps: [
+      {
+        label: 'powercfg 关 Allow Throttle States', pwsh: [
+          'powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb 0',
+          'powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb 0',
+          'powercfg /setactive SCHEME_CURRENT'
+        ].join('\n')
+      }
+    ]
+  },
+  {
+    id: 'nara_usb3_lpm_off', group: '系统调校', title: '关闭 USB 3 链路省电', risk: 'medium',
+    desc: '电源方案关闭 USB 3 Link Power Management（AC/DC 都写 0），防止 USB 3 存储/集线器在空闲时切到低功耗状态导致偶发断连或恢复延迟；代价是 USB 3 设备略增功耗。',
+    steps: [
+      {
+        label: 'powercfg 关 USB 3 LPM', pwsh: [
+          'powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 d4e98f31-5ffe-4ce1-be31-1b38b384c009 0',
+          'powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 d4e98f31-5ffe-4ce1-be31-1b38b384c009 0',
+          'powercfg /setactive SCHEME_CURRENT'
+        ].join('\n')
+      }
+    ]
+  },
+  {
+    id: 'mmcss_games', group: '游戏与多媒体', title: 'MMCSS 游戏任务调度（全机游戏类进程）', risk: 'medium',
+    desc: '设置 MMCSS Tasks\\Games 七值（Priority=6、GPU Priority=8、Scheduling Category=High、SFIO Priority=High、Clock Rate=0x2710、Affinity=0、Background Only=False），提升被 MMCSS 归类为 Games 的进程调度优先级。作用面是所有游戏类进程，不是永劫专属。',
+    steps: [
+      {
+        label: 'MMCSS Games 七值', reg: [
+          'Windows Registry Editor Version 5.00',
+          '',
+          '[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games]',
+          '"Priority"=dword:00000006',
+          '"GPU Priority"=dword:00000008',
+          '"Scheduling Category"="High"',
+          '"SFIO Priority"="High"',
+          '"Clock Rate"=dword:00002710',
+          '"Affinity"=dword:00000000',
+          '"Background Only"="False"',
+          ''
+        ].join('\r\n')
+      }
+    ],
+    restore: [
+      {
+        label: '还原：删除 Tasks\\Games 键值（恢复系统默认行为）', reg: [
+          'Windows Registry Editor Version 5.00',
+          '',
+          '[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games]',
+          '"Priority"=-',
+          '"GPU Priority"=-',
+          '"Scheduling Category"=-',
+          '"SFIO Priority"=-',
+          '"Clock Rate"=-',
+          '"Affinity"=-',
+          '"Background Only"=-',
+          ''
+        ].join('\r\n')
+      }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+
+  // ---- 永劫专项 · 注册表优化（2026-10-11 用户拍板，值与条目均按用户实测注册表截图落）----
+  // 与 tf_keyboard 的关系：tf_keyboard 是外设调优里的聚合项（KeyboardSpeed 写 31），
+  // 本批是专项面板的逐项可勾选形态，KeyboardSpeed 按用户裁定写 999（控制面板合法档 0–31，
+  // 999 属超范围值，系统按最快档处理——已在 desc 如实写明，不拿推断当实测）。
+  // 还原：HKCU 三件套写回控制面板默认（delay=1 / speed=31 / 指示灯删除回落默认）；
+  // kbdclass 六值删除即回驱动内建默认；Win32PrioritySeparation 回 2（与 peripheral.js
+  // 的 defaultValue=2 同一份口径）；MouseDataQueueSize 回 100（同 peripheral.js）。
+  {
+    id: 'nara_kbd_indicators', group: '键鼠与外设', title: '开机自动开启数字锁定（NumLock）', risk: 'low',
+    desc: 'HKCU\\Control Panel\\Keyboard 的 InitialKeyboardIndicators 写 "2"：开机进登录/桌面时 NumLock 默认亮起，可直接输数字密码。部分机型 BIOS 也管 NumLock，两处可能互相覆盖。',
+    steps: [
+      { label: 'InitialKeyboardIndicators=2', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Keyboard': { 'InitialKeyboardIndicators': '"2"' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 InitialKeyboardIndicators（回系统默认）', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Keyboard': { 'InitialKeyboardIndicators': '-' }
+      }) }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_delay', group: '键鼠与外设', title: '键盘重复延迟最短', risk: 'low',
+    desc: 'HKCU\\Control Panel\\Keyboard 的 KeyboardDelay 写 "0"：按住按键后开始重复输入的等待最短，就是控制面板里的最短重复延迟档。',
+    steps: [
+      { label: 'KeyboardDelay=0', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Keyboard': { 'KeyboardDelay': '"0"' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：KeyboardDelay=1（Windows 默认档）', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Keyboard': { 'KeyboardDelay': '"1"' }
+      }) }
+    ],
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_speed', group: '键鼠与外设', title: '键盘重复速度最快（写 999）', risk: 'low',
+    desc: 'HKCU\\Control Panel\\Keyboard 的 KeyboardSpeed 写 "999"（按用户指定）。控制面板合法档是 0–31，999 是玩家圈固定写法的超范围值，系统实际按最快重复速度处理；要稳就用控制面板最快档 31。',
+    steps: [
+      { label: 'KeyboardSpeed=999', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Keyboard': { 'KeyboardSpeed': '"999"' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：KeyboardSpeed=31（控制面板最快档）', reg: regBlock({
+        'HKEY_CURRENT_USER\\Control Panel\\Keyboard': { 'KeyboardSpeed': '"31"' }
+      }) }
+    ],
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_multi_ports', group: '键鼠与外设', title: 'kbdclass：单端口连接（ConnectMultiplePorts=0）', risk: 'low',
+    desc: 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters 的 ConnectMultiplePorts 写 0：键盘类驱动按单端口路由，是驱动默认档。',
+    steps: [
+      { label: 'ConnectMultiplePorts=0', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'ConnectMultiplePorts': 'dword:00000000' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 ConnectMultiplePorts（回驱动内建默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'ConnectMultiplePorts': '-' }
+      }) }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_queue', group: '键鼠与外设', title: 'kbdclass：键盘数据队列 8', risk: 'low',
+    desc: 'HKLM\\...\\Services\\kbdclass\\Parameters 的 KeyboardDataQueueSize 写 8（DWORD）：键盘驱动内部事件队列压到 8 个事件，减少输入排队延迟；队列过小理论上可能丢事件，8 是玩家常用稳定值。需重启生效。',
+    steps: [
+      { label: 'KeyboardDataQueueSize=8', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'KeyboardDataQueueSize': 'dword:00000008' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 KeyboardDataQueueSize（回驱动内建默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'KeyboardDataQueueSize': '-' }
+      }) }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_base_name', group: '键鼠与外设', title: 'kbdclass：设备基名 KeyboardClass', risk: 'low',
+    desc: 'HKLM\\...\\Services\\kbdclass\\Parameters 的 KeyboardDeviceBaseName 写 "KeyboardClass"（REG_SZ）：显式固定键盘设备对象基名，就是系统默认值，属于对齐写法。',
+    steps: [
+      { label: 'KeyboardDeviceBaseName=KeyboardClass', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'KeyboardDeviceBaseName': '"KeyboardClass"' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 KeyboardDeviceBaseName（回驱动内建默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'KeyboardDeviceBaseName': '-' }
+      }) }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_max_ports', group: '键鼠与外设', title: 'kbdclass：最大服务端口数 3', risk: 'low',
+    desc: 'HKLM\\...\\Services\\kbdclass\\Parameters 的 MaximumPortsServiced 写 3（DWORD，按本机注册表值名原样，含 i）：键盘类驱动最多服务 3 个端口，是驱动默认档。',
+    steps: [
+      { label: 'MaximumPortsServiced=3', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'MaximumPortsServiced': 'dword:00000003' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 MaximumPortsServiced（回驱动内建默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'MaximumPortsServiced': '-' }
+      }) }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_output_all', group: '键鼠与外设', title: 'kbdclass：输入发往全部端口', risk: 'low',
+    desc: 'HKLM\\...\\Services\\kbdclass\\Parameters 的 SendOutputToAllPorts 写 1（DWORD）：键盘扫描码发往全部服务端口，多 KVM/多端口场景输入不漏发，是驱动默认档。',
+    steps: [
+      { label: 'SendOutputToAllPorts=1', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'SendOutputToAllPorts': 'dword:00000001' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 SendOutputToAllPorts（回驱动内建默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'SendOutputToAllPorts': '-' }
+      }) }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_kbd_wpp_ts', group: '键鼠与外设', title: 'kbdclass：WPP 记录带时间戳', risk: 'low',
+    desc: 'HKLM\\...\\Services\\kbdclass\\Parameters 的 WppRecorder_UseTimeStamp 写 1（DWORD）：WPP 软件跟踪记录带时间戳，便于排查输入链路时序问题；正常使用无感，按用户指定写入。',
+    steps: [
+      { label: 'WppRecorder_UseTimeStamp=1', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'WppRecorder_UseTimeStamp': 'dword:00000001' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：删除 WppRecorder_UseTimeStamp（回默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\kbdclass\\Parameters': { 'WppRecorder_UseTimeStamp': '-' }
+      }) }
+    ],
+    restoreInferred: true,
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_win32prio', group: '键鼠与外设', title: '处理器调度优先前台（Win32PrioritySeparation=38）', risk: 'medium',
+    desc: 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\PriorityControl 的 Win32PrioritySeparation 写 38（0x26）：短时间片 + 前台 3 倍时间片，就是 Windows「程序」电源方案的均衡推荐档（外设优化弹窗的推荐值）。还原回 Windows 默认 2。',
+    steps: [
+      { label: 'Win32PrioritySeparation=38', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\PriorityControl': { 'Win32PrioritySeparation': 'dword:00000026' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：Win32PrioritySeparation=2（Windows 默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\PriorityControl': { 'Win32PrioritySeparation': 'dword:00000002' }
+      }) }
+    ],
+    restoreAvailable: true
+  },
+  {
+    id: 'nara_mouse_queue', group: '键鼠与外设', title: '鼠标队列深度 18（MouseDataQueueSize）', risk: 'medium',
+    desc: 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\mouclass\\Parameters 的 MouseDataQueueSize 写 18（DWORD）：鼠标驱动事件缓冲降到 18，延迟低且高速移动更稳，是外设优化弹窗的均衡推荐值（默认 100）。需重启生效。',
+    steps: [
+      { label: 'MouseDataQueueSize=18', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\mouclass\\Parameters': { 'MouseDataQueueSize': 'dword:00000012' }
+      }) }
+    ],
+    restore: [
+      { label: '还原：MouseDataQueueSize=100（Windows 默认）', reg: regBlock({
+        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\mouclass\\Parameters': { 'MouseDataQueueSize': 'dword:00000064' }
+      }) }
+    ],
+    restoreAvailable: true
+  },
+
+  // ---- BCD 五行：条件命中式（后端执行前先枚举 {current}/{globalsettings}，只对已存在的元素对齐）----
+  {
+    id: 'nara_bcd_timer', group: '启动与响应', title: '计时器/动态 Tick 条件对齐', risk: 'medium',
+    desc: '仅当本机已存在 useplatformtick/disabledynamictick 时，将其设为 yes；若存在 useplatformclock 则删除（deletevalue）。不主动创建元素，对齐目标是 Windows 8+ 默认值。',
+    steps: [
+      { label: 'disabledynamictick yes', cmd: 'bcdedit /set {current} disabledynamictick yes' },
+      { label: 'useplatformtick yes', cmd: 'bcdedit /set {current} useplatformtick yes' },
+      { label: 'useplatformclock 删除', cmd: 'bcdedit /deletevalue {current} useplatformclock' }
+    ],
+    restore: [
+      { label: 'disabledynamictick 删除', cmd: 'bcdedit /deletevalue {current} disabledynamictick' },
+      { label: 'useplatformtick 删除', cmd: 'bcdedit /deletevalue {current} useplatformtick' },
+      { label: 'useplatformclock 创建（无设备默认=自动选择）', cmd: 'bcdedit /set {current} useplatformclock yes' }
+    ]
+  },
+  {
+    id: 'nara_bcd_vsm', group: '启动与响应', title: 'Hyper-V/虚拟化启动项条件对齐', risk: 'high',
+    desc: '仅当 hypervisorlaunchtype/vsmlaunchtype/isolatedcontext 已存在且值非默认时，设为 off/Off/No。若检测到 Hyper-V/模拟器/WSL 在用（当前值为 Auto/On/Enable/Yes），整行自动跳过（保护态）。',
+    steps: [
+      { label: 'hypervisorlaunchtype off', cmd: 'bcdedit /set {current} hypervisorlaunchtype off' },
+      { label: 'vsmlaunchtype Off', cmd: 'bcdedit /set {current} vsmlaunchtype Off' },
+      { label: 'isolatedcontext No', cmd: 'bcdedit /set {current} isolatedcontext No' }
+    ],
+    restore: [
+      { label: 'hypervisorlaunchtype Auto', cmd: 'bcdedit /set {current} hypervisorlaunchtype Auto' },
+      { label: 'vsmlaunchtype Auto', cmd: 'bcdedit /set {current} vsmlaunchtype Auto' },
+      { label: 'isolatedcontext Yes', cmd: 'bcdedit /set {current} isolatedcontext Yes' }
+    ]
+  },
+  {
+    id: 'nara_bcd_boot', group: '启动与响应', title: '启动菜单/开机画面条件对齐', risk: 'high',
+    desc: '仅当本机已存在 timeout/bootmenupolicy/bootux/quietboot 时对齐：timeout=0, bootmenupolicy=standard, bootux=disabled（展开 nobootuxtext+nobootuxprogress）, quietboot=yes。不主动创建启动菜单元素。',
+    steps: [
+      { label: 'timeout 0', cmd: 'bcdedit /set {current} timeout 0' },
+      { label: 'bootmenupolicy standard', cmd: 'bcdedit /set {current} bootmenupolicy standard' },
+      { label: 'bootux disabled', cmd: 'bcdedit /set {current} bootux disabled' },
+      { label: 'quietboot yes', cmd: 'bcdedit /set {current} quietboot yes' }
+    ],
+    restore: [
+      { label: 'timeout 删除（默认 30）', cmd: 'bcdedit /deletevalue {current} timeout' },
+      { label: 'bootmenupolicy 删除（默认 Legacy）', cmd: 'bcdedit /deletevalue {current} bootmenupolicy' },
+      { label: 'bootux 删除', cmd: 'bcdedit /deletevalue {current} bootux' },
+      { label: 'quietboot 删除', cmd: 'bcdedit /deletevalue {current} quietboot' }
+    ]
+  },
+  {
+    id: 'nara_bcd_lowmem', group: '启动与响应', title: '低 1MB/内存映射策略条件对齐', risk: 'high',
+    desc: '仅当本机已存在 firstmegabytepolicy/avoidlowmemory/nolowmem/allowedinmemorysettings 时对齐：UseAll/0x8000000/Yes/0x0。命中主要作为危险配置体检+还原出口，常态不可执行。',
+    steps: [
+      { label: 'firstmegabytepolicy UseAll', cmd: 'bcdedit /set {current} firstmegabytepolicy UseAll' },
+      { label: 'avoidlowmemory 0x8000000', cmd: 'bcdedit /set {current} avoidlowmemory 0x8000000' },
+      { label: 'nolowmem Yes', cmd: 'bcdedit /set {current} nolowmem Yes' },
+      { label: 'allowedinmemorysettings 0x0', cmd: 'bcdedit /set {current} allowedinmemorysettings 0x0' }
+    ],
+    restore: [
+      { label: 'firstmegabytepolicy 删除', cmd: 'bcdedit /deletevalue {current} firstmegabytepolicy' },
+      { label: 'avoidlowmemory 删除', cmd: 'bcdedit /deletevalue {current} avoidlowmemory' },
+      { label: 'nolowmem 删除', cmd: 'bcdedit /deletevalue {current} nolowmem' },
+      { label: 'allowedinmemorysettings 删除', cmd: 'bcdedit /deletevalue {current} allowedinmemorysettings' }
+    ]
+  },
+  {
+    id: 'nara_bcd_irq', group: '启动与响应', title: '中断路由策略条件对齐', risk: 'medium',
+    desc: '仅当本机已存在 configaccesspolicy/MSI/usephysicaldestination/usefirmwarepcisettings 时对齐：Default/Default/No/No。多为系统默认值，常态不可执行。',
+    steps: [
+      { label: 'configaccesspolicy Default', cmd: 'bcdedit /set {current} configaccesspolicy Default' },
+      { label: 'MSI Default', cmd: 'bcdedit /set {current} MSI Default' },
+      { label: 'usephysicaldestination No', cmd: 'bcdedit /set {current} usephysicaldestination No' },
+      { label: 'usefirmwarepcisettings No', cmd: 'bcdedit /set {current} usefirmwarepcisettings No' }
+    ],
+    restore: [
+      { label: 'configaccesspolicy 删除', cmd: 'bcdedit /deletevalue {current} configaccesspolicy' },
+      { label: 'MSI 删除', cmd: 'bcdedit /deletevalue {current} MSI' },
+      { label: 'usephysicaldestination 删除', cmd: 'bcdedit /deletevalue {current} usephysicaldestination' },
+      { label: 'usefirmwarepcisettings 删除', cmd: 'bcdedit /deletevalue {current} usefirmwarepcisettings' }
+    ]
   }
 ];
 
@@ -2271,7 +2432,7 @@ const PROS_CONS = {
   'game_dvr': { pros: '关闭游戏 DVR 后台录制，减少游戏内掉帧与录制延迟。', cons: '无法再使用 Xbox 游戏录制与回放功能。' },
   'mmcss_optimize': { pros: '合并游戏高优先级与系统级增强：游戏调度优先级、GPU 优先级与低延迟标记一体化，画面更稳、输入延迟更低。', cons: '非标准调度参数在个别音频设备上可能不稳定，且可能抢占音频与后台资源。' },
   'mmcss_svc': { pros: '禁用 MMCSS 服务后多媒体调度开销减少。', cons: '音频/视频应用的 QoS 调度失效，可能引起爆音或音画不稳。' },
-  'nara_prio': { pros: '为永劫无间等游戏进程设置高 CPU 优先级，降低游戏卡顿。', cons: '仅对特定游戏进程有效，固定高优先级可能挤占其他程序。' },
+  'nara_prio': { pros: '为永劫无间游戏进程设置高 CPU 与 IO 优先级。', cons: '仅对特定游戏进程有效，固定高优先级可能挤占其他程序。' },
   'net_qos_dscp': { pros: '为本机 8 款竞技游戏的进程流量打上 DSCP 46 高优先标记，供沿途网络设备识别。', cons: '只改标记不改带宽：多数家用路由器与运营商不区分 DSCP，此时没有任何实际效果；其中 LeagueClient.exe 是英雄联盟的客户端进程而非对局进程，覆盖不到对局流量。' },
   'disable_uac': { pros: '关闭 UAC 可消除频繁弹窗，减少提权流程干扰。', cons: '显著降低系统安全性，恶意程序更易获得高权限。' },
   'tf_gamemode': { pros: '开启游戏模式，系统优先保障游戏所需的 CPU/GPU 资源。', cons: '后台任务（更新/同步）可能被推迟，影响日常使用。' },
@@ -2279,11 +2440,8 @@ const PROS_CONS = {
   'tf_fso': { pros: '关闭全屏优化破坏，可消除部分游戏全屏切换卡顿与输入延迟。', cons: '个别游戏依赖全屏优化特性，关闭后可能出现异常。' },
   'tf_gpu_latency': { pros: '下调 GPU 预渲染帧数与延迟容忍度，能降低输入到画面的延迟。', cons: '设置过低可能引起帧率波动或卡顿，需按显卡性能取舍。' },
   'tf_resource_policy': { pros: '解除系统资源策略限制，释放被节流的 CPU/内存额度。', cons: '绕开系统配额保护，失控进程可能占满系统资源。' },
-  'tf_ifeo_perf': { pros: '为进程写入 IFEO CPU/IO 优先级，常驻程序与游戏更跟手。', cons: 'IFEO 针对特定进程，路径或名称变更后失效，全局生效存在风险。' },
-  'tf_ifeo_wipe': { pros: '清空 IFEO 调试项，排除被劫持或调试器附加的隐患。', cons: '可能一并删除系统或游戏反作弊所需的兼容性条目。' },
   // 'prefetch_off'（关闭预读）条目已移除：该优化项已不在 OPTIONS 中，属历史孤儿映射
   'svc_mem_gb': { pros: '按内存档位调整 SVCHost 拆分阈值，减少服务进程内存碎片。', cons: '阈值与内存不匹配时反而增加进程切换开销。' },
-  'tf_mmagent': { pros: '关闭内存压缩与页合并，进一步压低 CPU 后台开销。', cons: '物理内存不足时稳定性下降，可能出现更高硬盘写入。' },
   'tf_svc_bulk': { pros: '批量禁用 70+ 非必要服务，显著释放内存并减少后台活动。', cons: '高度激进，可能破坏打印机、蓝牙、商店等功能，风险较高；商店段禁用的 wuauserv 可能被 Windows Update Medic 服务（WaaSMedicSvc）自动复位，Trim 不修改该服务。' },
   'tf_drv_disable': { pros: '禁用高风险驱动服务，减少内核攻击面与运行时开销。', cons: '可能影响硬件识别或安全软件，需要谨慎选择。' },
   'spectre_off': { pros: '关闭幽灵/熔断缓解，可明显提升 CPU 密集与游戏性能。', cons: '重新暴露 Spectre/Meltdown 类漏洞，系统安全性下降。' },
@@ -2304,17 +2462,13 @@ const PROS_CONS = {
   'mouse_optimize': { pros: '去加速 + 6/11 灵敏度 + 平滑曲线清零一体完成，指针移动完全线性，定位更精准一致。', cons: '习惯带加速手感的用户需要重新适应，少数驱动会重建曲线值，需重启后生效。' },
   'tf_keyboard': { pros: '键盘零延迟并把驱动队列深度与端口路由一并写为目标档，输入响应更直接。', cons: '队列深度固定写 8、端口路由固定为驱动默认档（不再提供档位选择），修改需重启电脑后生效。' },
   'tf_dev_disable': { pros: '禁用 HPET/ME 等冗余设备，减少中断与延迟。', cons: '可能影响设备管理、虚拟化或系统稳定性，风险较高。' },
-  'tf_dev_audio': { pros: '禁用板载/HDMI 声卡控制器，消除多余音频设备。', cons: '板载与 HDMI 音频将不可用，仅适用独立 USB 声卡用户。' },
-  'tf_dev_printer': { pros: '禁用打印队列根设备，无打印需求者减少后台开销。', cons: '之后无法打印，需要打印时须重新启用该设备。' },
   'tf_appx': { pros: '移除 25 个预装 UWP 应用，释放磁盘并减少后台活动。', cons: '部分应用移除后需从商店重装，个别系统集成可能异常。' },
   'tf_cortana': { pros: '禁用 Cortana 与网页搜索，减少后台联网与隐私追踪。', cons: '失去 Cortana 语音助手与任务栏网页搜索能力。' },
-  'tf_onedrive': { pros: '彻底卸载 OneDrive 并清理数据目录，释放空间、减少同步。', cons: '云端文件不再自动同步，恢复需重新安装并登录。' },
   'explorer_autorestart': { pros: 'explorer.exe 崩溃后自动拉起，桌面与任务栏无需手动重启。', cons: '崩溃发生时重启过程会有短暂桌面黑屏闪烁。' },
   'explorer_refresh_policy': { pros: '按完整信息刷新文件列表，新建/重命名后图标即时显示。', cons: '禁用简化标识列表在个别网络环境下可能略微增加刷新开销。' },
   'perf_remote_assist_off': { pros: '禁用远程协助入口，减少攻击面与后台监听。', cons: '无法再使用"请求远程协助"功能。' },
   'perf_prefetcher_fast': { pros: '启用应用与启动预读，程序启动与文件访问更快。', cons: 'SSD 上收益有限，Prefetch 被清理后需重新积累。' },
   'perf_crash_autoreboot': { pros: '蓝屏后自动重启，无人值守场景恢复更快。', cons: '排查蓝屏时看不到完整停机码，建议排查期临时关闭。' },
-  'perf_exploit_protection_off': { pros: '关闭内核缓解（乱序内存等），部分应用内存分配性能小幅提升。', cons: '显著降低漏洞利用防护，系统更容易受提权/ROP 类攻击。' },
   'edge_hide_firstrun': { pros: '跳过首次运行欢迎与导入向导，新环境开箱即用。', cons: '无法通过向导自动导入其他浏览器的收藏与设置，需手动导入。' },
   'edge_bg_mode_off': { pros: '关闭 Edge 后进程全部退出，释放内存与后台占用。', cons: '依赖 Edge 后台通知的网页推送（如网页版邮件）将不再及时送达。' },
   'edge_startup_boost_off': { pros: '开机不再预启动 Edge，减少后台进程与开机资源占用。', cons: '首次点击 Edge 启动会略微变慢。' },
@@ -2423,10 +2577,7 @@ const EFFECT_MAP = {
   tf_gamebar: '一般',
   tf_fso: '未验证',
   tf_gpu_latency: '微小',
-  tf_ifeo_perf: '未验证',
-  tf_ifeo_wipe: '一般',
   svc_mem_gb: '一般',
-  tf_mmagent: '微小',
   tf_svc_bulk: '明显',
   tf_drv_disable: '微小',
   share_off: '一般',
@@ -2442,11 +2593,8 @@ const EFFECT_MAP = {
   mouse_optimize: '一般',
   tf_keyboard: '一般',
   tf_dev_disable: '一般',
-  tf_dev_audio: '微小',
-  tf_dev_printer: '微小',
   tf_appx: '明显',
   tf_cortana: '一般',
-  tf_onedrive: '一般',
   audio_disable_enhancements: '一般',
   audio_disable_spatial_sound: '一般',
   audio_mmcss_priority: '微小',
@@ -2495,7 +2643,6 @@ const EFFECT_MAP = {
   perf_remote_assist_off: '微小',
   perf_prefetcher_fast: '微小',
   perf_crash_autoreboot: '一般',
-  perf_exploit_protection_off: '未验证',
   edge_hide_firstrun: '一般',
   edge_bg_mode_off: '一般',
   edge_startup_boost_off: '一般',
