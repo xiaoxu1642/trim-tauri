@@ -550,14 +550,19 @@ fn classify_outcome(
 ///
 /// 三类目标模型全部原生化（v0.1.6 真机修复）：fileKeys（含段级 glob 展开）、
 /// regKeys（先备份后删，fail-closed）、special=dism。to_recycle=true 时文件只
-/// 枚举不删除，返回 recycle_entries 由主进程移入回收站；注册表/DISM 不进回收站。
+/// 枚举不删除，返回 recycle_entries（当前仅测试在用；生产清理链按 2026-10-12
+/// 用户裁定固定全量永久删，见 commands/cleanup/scan_execute.rs）。
+///
+/// `progress`：逐项开工回调 `(第 k 项, 总项数, 项名)`——放在每项处理**之前**，
+/// 供渲染层把进度条按真实项数推进（清理大目录耗时长时不再假走到 90% 冻结）。
 pub fn cleanup_execute(
     items: &[Value],
     rules: &Value,
     to_recycle: bool,
     auto_rebuild: bool,
+    progress: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Result<CleanupExecuteResult, String> {
-    cleanup_execute_with_backup_root(items, rules, to_recycle, auto_rebuild, None)
+    cleanup_execute_with_backup_root(items, rules, to_recycle, auto_rebuild, None, progress)
 }
 
 /// [`cleanup_execute`] 的实现体。`backup_root` 允许把「删前备份」定向到调用方给定的根——
@@ -572,6 +577,7 @@ fn cleanup_execute_with_backup_root(
     to_recycle: bool,
     auto_rebuild: bool,
     backup_root: Option<&std::path::Path>,
+    progress: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Result<CleanupExecuteResult, String> {
     let mut details = Vec::new();
     let mut total_freed = 0i64;
@@ -591,9 +597,15 @@ fn cleanup_execute_with_backup_root(
     let mut backup_entries: Vec<Value> = Vec::new();
     let mut backup_total: u64 = 0;
 
-    for item in items {
+    let total_items = items.len();
+    for (item_idx, item) in items.iter().enumerate() {
         let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        // 逐项进度回调：放在循环顶部而非各出口——循环体内有多个 continue，
+        // 放出口必漏（2026-10-12 进度可见性修复的一部分）。
+        if let Some(cb) = progress {
+            cb(item_idx + 1, total_items, name);
+        }
         let rule = find_rule_by_id(rules, id);
         let Some(rule) = rule else {
             details.push(json!({"id": id, "name": name, "status": "skip", "freed": 0, "message": "规则不存在", "fileCount": 0}));
@@ -1518,6 +1530,35 @@ mod cleanup_engine_contract_tests {
         unsafe { let _ = CloseHandle(h); }
     }
 
+    /// 逐项进度回调：在每个条目处理**之前**发射、序列 1..N 覆盖全部条目
+    /// （2026-10-12 进度可见性修复：回调放循环顶部，多个 continue 出口不漏发）。
+    #[test]
+    fn cleanup_execute_emits_progress_for_every_item() {
+        let items = vec![
+            serde_json::json!({"id":"p1","name":"甲"}),
+            serde_json::json!({"id":"p2","name":"乙"}),
+            serde_json::json!({"id":"p3","name":"丙"}),
+        ];
+        // 规则全找不到 → 每项走 skip 出口，但进度回调必须照发（回调在循环顶部）
+        let rules = serde_json::json!({"groups":[]});
+        let calls = std::cell::RefCell::new(Vec::<(usize, usize, String)>::new());
+        let cb = |done: usize, total: usize, name: &str| {
+            calls.borrow_mut().push((done, total, name.to_string()));
+        };
+        let res = cleanup_execute(&items, &rules, false, false, Some(&cb)).unwrap();
+        assert_eq!(res.details.len(), 3, "三个条目都应产出明细");
+        let got = calls.borrow().clone();
+        assert_eq!(
+            got,
+            vec![
+                (1, 3, "甲".to_string()),
+                (2, 3, "乙".to_string()),
+                (3, 3, "丙".to_string())
+            ],
+            "进度回调序列必须是 1..N 且逐项覆盖"
+        );
+    }
+
     /// P0-M5 时效护栏：执行侧必须**自己**按修改时间拒绝太新文件，不能只信扫描结果
     /// （扫描与执行之间有时间差，太新文件可能刚被应用写入）。用回收站模式
     /// （to_recycle=true，只枚举不删除）断言清单内容，测试零删除副作用。
@@ -1542,7 +1583,7 @@ mod cleanup_engine_contract_tests {
             "minAgeDays": 3
         }]}]});
         let items = vec![serde_json::json!({"id":"m5test","name":"M5测试","path": base.to_string_lossy()})];
-        let res = cleanup_execute(&items, &rules, true, false).unwrap();
+        let res = cleanup_execute(&items, &rules, true, false, None).unwrap();
         let d = &res.details[0];
         assert_eq!(d["tooNew"], 1, "太新文件必须显式记账: {d}");
         let paths: Vec<&str> = res
@@ -1612,7 +1653,7 @@ mod cleanup_engine_contract_tests {
             names(list_deletable(&base.to_string_lossy(), "*", guard, &[], &[]).files.into_iter().map(|(p, _)| p).collect())
         };
         let exec_hits = |axis: Option<&str>| -> (Vec<String>, i64) {
-            let res = cleanup_execute(&items, &rule_json(axis), true, false).unwrap();
+            let res = cleanup_execute(&items, &rule_json(axis), true, false, None).unwrap();
             let hits = names(res.recycle_entries.iter().filter_map(|e| e["path"].as_str().map(String::from)).collect());
             (hits, res.details[0]["tooNew"].as_i64().unwrap_or(-1))
         };
@@ -1731,7 +1772,7 @@ mod cleanup_engine_contract_tests {
         let items = vec![serde_json::json!({"id":"singlefile","name":"单文件探测","path": target.to_string_lossy()})];
 
         let bk = BackupSandbox::new("singlefile");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()))
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
             .expect("执行应返回结果而不是 Err");
         let d = &res.details[0];
 
@@ -1782,7 +1823,7 @@ mod cleanup_engine_contract_tests {
         }]}]});
         let items = vec![serde_json::json!({"id":"noroot","name":"根不存在探测","path": missing.to_string_lossy()})];
 
-        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        let res = cleanup_execute(&items, &rules, false, false, None).expect("不应 Err");
         let d = &res.details[0];
         assert_eq!(
             d["status"], "skip",
@@ -1822,7 +1863,7 @@ mod cleanup_engine_contract_tests {
         let items = vec![serde_json::json!({"id":"dotdir","name":"带点目录排除探测","path": dir.to_string_lossy()})];
 
         let bk = BackupSandbox::new("dotdir");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()))
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
             .expect("不应 Err");
         assert!(
             dir.join("Vendor.Tool").join("inside.log").exists(),
@@ -1851,7 +1892,7 @@ mod cleanup_engine_contract_tests {
         }]}]});
         let items = vec![serde_json::json!({"id":"drel","name":"盘符相对探测","path": r"\trim-drel-exec-no-such-dir"})];
 
-        let res = cleanup_execute(&items, &rules, false, false).expect("不应 Err");
+        let res = cleanup_execute(&items, &rules, false, false, None).expect("不应 Err");
         let d = &res.details[0];
         assert_eq!(
             d["status"], "skip",
@@ -1873,7 +1914,7 @@ mod cleanup_engine_contract_tests {
             "fileKeys":[{"path": r"\trim-drel-exec-no-such-dir", "pattern":"*", "recurse":true}]
         }]}]});
         let items_fk = vec![serde_json::json!({"id":"drelfk","name":"盘符相对fileKey探测","path": r"\trim-drel-exec-no-such-dir"})];
-        let res_fk = cleanup_execute(&items_fk, &rules_fk, false, false).expect("不应 Err");
+        let res_fk = cleanup_execute(&items_fk, &rules_fk, false, false, None).expect("不应 Err");
         let dfk = &res_fk.details[0];
         assert_eq!(dfk["status"], "skip", "fileKey 型盘符相对目标同样必须 skip: {dfk}");
         let msg_fk = dfk["message"].as_str().unwrap_or("");
@@ -1906,7 +1947,7 @@ mod cleanup_engine_contract_tests {
         let items = vec![serde_json::json!({"id":"dedup","name":"大小写去重探测","path": lower})];
 
         let bk = BackupSandbox::new("dedup");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()))
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
             .expect("不应 Err");
         let d = &res.details[0];
         assert_eq!(d["fileCount"].as_i64(), Some(1), "同一文件必须只删/只算一次: {d}");

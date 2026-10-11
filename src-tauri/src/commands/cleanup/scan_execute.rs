@@ -307,34 +307,20 @@ pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categorie
 
 // ==================== cleanup:execute ====================
 
-/// 回收站失败项 → 本条目的统计（对照 perItem）
-#[derive(Default, Clone)]
-pub(super) struct RecycleStat {
-    ok: usize,
-    fail: usize,
-    recycled_bytes: i64,
-}
-
-/// 把一个路径移入回收站（只进回收站，可还原）
-///
-/// 审查 v2-F1：形参收 `&Path` 而非 `&str` —— Windows 文件名是 UTF-16，`&str` 往返会让含
-/// 孤立代理项的名字被 `to_string_lossy` 换成 U+FFFD，于是删不到真正那个文件。
-pub(super) fn move_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
-    trim_finder::scan::recycle::send_to_trash_os(path.as_os_str())
-}
-
-/// cleanup:execute — 执行清理（危险通道：快照校验 + 删除前刷盘 + **固定永久删**）
+/// cleanup:execute — 执行清理（危险通道：快照校验 + 删除前刷盘 + **全部直接永久删**）
 ///
 /// # `to_recycle` 为什么收下参数却恒为 false
 ///
 /// v3.3.0 用户裁定：常规清理**固定永久删**，`toRecycle` 恒 false。此前这条裁定
 /// 只在渲染层强制（`cleanup.js` 里 `const toRecycle = false;`），命令侧是
 /// `to_recycle.unwrap_or(false)` —— 也就是**任何**传 `true` 的调用方都能翻转。
-/// 审计 §3.6 把它钉到删除真正发生的地方。翻转的三个后果：
-/// ① `TRASH_FAILURES` 被填充，而它是 `cleanup:retry-failed-delete`（**不可逆**的
-///    永久删命令）的唯一来源；② 回收站模式下 `freed` 计的是「枚举到」而非
-///    「删掉」的字节；③ 代码注释里「不可达」的说法只在 JS 层成立，下次重构
-///    碰 IPC 签名就会继承一条活路径而不知情。
+/// 审计 §3.6 把它钉到删除真正发生的地方。
+///
+/// 2026-10-12 用户裁定（实测「清理一直卡死进度」后）：**移除批次 B 遗留的
+/// gameRedist 回收站窄口径例外** —— 扫描出来的项目一律直接删除，不再逐文件走
+/// `SHFileOperationW` 移入回收站。此前的例外是唯一喂给 `TRASH_FAILURES` 的路径，
+/// 移除后该槽恒空、`cleanup:retry-failed-delete` 不再被触发（链路保留未撤，
+/// 见 state.rs；整链是否退役另议）。
 ///
 /// 参数**保留**是为了不破坏 `CHANNEL_MAP` 的载荷键（删字段会让渲染层与
 /// `tauri-api.js` 两侧同时改，且旧版前端传了它会被静默吞掉）。收到 true 时
@@ -386,34 +372,33 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
         ),
     );
     log::flush_sync(); // 审查v4-L3：危险操作执行前强制刷盘
-    debug_assert!(!to_recycle, "v3.3.0 永久删钉桩（批次 B 分桶逻辑内部自管）");
+    debug_assert!(!to_recycle, "v3.3.0 永久删钉桩（本命令固定全量永久删）");
 
-    // 批次 B：gameRedist 三条（steamRedistCache / epicRedistCache / wegameRedistCache）单独走回收站，其余永久删（v3.3.0 固定永久删的窄口径例外）
-    let game_redist_ids: HashSet<&str> = HashSet::from(["steamRedistCache", "epicRedistCache", "wegameRedistCache"]);
-    let (safe_perm, safe_recycle): (Vec<_>, Vec<_>) = safe_items.into_iter().partition(|it| {
-        let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        !game_redist_ids.contains(id)
-    });
-    log::write_log(
-        "info",
-        &format!(
-            "清理分桶: 永久删 {} 项, 回收站 {} 项",
-            safe_perm.len(), safe_recycle.len()
-        ),
-    );
-
+    // 2026-10-12 用户裁定：不再分桶——扫描出来的项目一律直接永久删
+    //（gameRedist 的回收站窄口径例外已移除，见上方 `to_recycle` 注释）。
+    let win = window.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
-        // S3：纯 Rust 原生——按分桶跑两批
+        // S3：纯 Rust 原生——单批全量永久删
         let mut raw_stdout = String::new();
         let mut first_err: Option<String> = None;
 
-        // 批次 1：永久删（v3.3.0 主裁定）
-        if !safe_perm.is_empty() {
-            match crate::engine::native::cleanup_execute(&safe_perm, &rules, false, auto_rebuild) {
+        if !safe_items.is_empty() {
+            // 逐项进度：每项开工前推送（第 k/N 项 + 名称），供渲染层把进度条从
+            // 「假走到 90% 再冻结」改为按真实项数推进（2026-10-12 卡死观感修复）。
+            let progress_cb = |done: usize, total: usize, name: &str| {
+                let _ = win.emit(
+                    "cleanup:execute-progress",
+                    json!({ "done": done, "total": total, "name": name }),
+                );
+            };
+            match crate::engine::native::cleanup_execute(
+                &safe_items,
+                &rules,
+                false,
+                auto_rebuild,
+                Some(&progress_cb),
+            ) {
                 Ok(result) => {
-                    for entry in &result.recycle_entries {
-                        raw_stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
-                    }
                     let data = json!({
                         "details": result.details,
                         "freed": result.freed,
@@ -426,194 +411,26 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
             }
         }
 
-        // 批次 2：回收站（窄口径例外）
-        if first_err.is_none() && !safe_recycle.is_empty() {
-            match crate::engine::native::cleanup_execute(&safe_recycle, &rules, true, auto_rebuild) {
-                Ok(result) => {
-                    for entry in &result.recycle_entries {
-                        raw_stdout.push_str(&format!("@@RECYCLE@@{}\n", serde_json::to_string(entry).unwrap_or_default()));
-                    }
-                    let data = json!({
-                        "details": result.details,
-                        "freed": result.freed,
-                        "fileCount": result.file_count,
-                    });
-                    raw_stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
-                    raw_stdout.push('\n');
-                }
-                Err(e) => { first_err = Some(format!("原生执行失败(回收站桶): {e}")); }
-            }
-        }
-
         if let Some(msg) = first_err {
             return json!({ "success": false, "message": msg });
         }
 
         let raw = raw_stdout;
         let diag_stripped = crate::diag::extract_diag_lines(&raw, "cleanup.execute");
-        let mut recycle_entries: Vec<Value> = Vec::new();
-        let mut clean_lines: Vec<&str> = Vec::new();
-        // 审查 L-22（2026-10-03 L4）：本段是 Electron 遗留协议的回环形状——原生结果被
-        // 重新拼成 @@RECYCLE@@ 行再自己解析回来，等于「自己发的报文自己收」。畸形行若
-        // 静默丢，删除结果行凭空消失且无任何痕迹，与 L-21 / apply.rs（M-1）同基线
-        // 「必须计数或告警」。仅在 to_recycle=true（v2-M20 下死路径）被消费，所以只进
-        // 日志、不改回执形状。空体行（to_string 失败的 unwrap_or_default 产物）同样计。
-        let mut recycle_malformed = 0usize;
-        for line in raw.lines() {
-            if let Some(rest) = line.strip_prefix("@@RECYCLE@@") {
-                if rest.trim().is_empty() {
-                    recycle_malformed += 1;
-                    continue;
-                }
-                let Ok(entry) = serde_json::from_str::<Value>(rest) else {
-                    recycle_malformed += 1;
-                    continue;
-                };
-                let ok = entry
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .map(|p| !p.is_empty())
-                    .unwrap_or(false);
-                if ok {
-                    recycle_entries.push(entry);
-                } else {
-                    recycle_malformed += 1;
-                }
-                continue;
-            }
-            clean_lines.push(line);
-        }
-        if recycle_malformed > 0 {
-            log::write_log(
-                "warn",
-                &format!(
-                    "清理回执含 {recycle_malformed} 条畸形 @@RECYCLE@@ 行，已跳过（原生结果回环协议异常）"
-                ),
-            );
-        }
-        let joined = clean_lines.join("\n");
-        let body = if joined.trim().is_empty() {
+        // 2026-10-12：@@RECYCLE@@ 回环协议随回收站例外一并移除（原生永久删桶从不
+        // 产生条目），回执正文即原生输出原文，不再需要逐行分流与畸形行计数。
+        let body = if raw.trim().is_empty() {
             diag_stripped.trim().to_string()
         } else {
-            joined.trim().to_string()
+            raw.trim().to_string()
         };
         let Ok(mut data) = serde_json::from_str::<Value>(&body) else {
             return json!({ "success": false, "message": "解析结果失败", "raw": diag_stripped });
         };
-        let mut failures: Vec<Value> = Vec::new();
-        // 批次 B：回收站分支不再是死路径——gameRedist 三条走 native(to_recycle=true)
-        // 返回 recycle_entries，主进程再手动移入回收站（native 层只枚举不移动）。
-        // 永久删桶不会产生 recycle_entries，所以只有回收站桶非空时才进这里。
-        // 保护路径预检（protect::is_path_protected 逐条）在下方每次移动前执行。
-        if !safe_recycle.is_empty() && !recycle_entries.is_empty() {
-            let mut per_item: HashMap<String, RecycleStat> = HashMap::new();
-            for entry in &recycle_entries {
-                let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                // 审查 1-4：entry.path 来自脚本 stdout 解析，信任级别低于快照校验项
-                if protect::is_path_protected(path) {
-                    per_item.entry(id).or_default().fail += 1;
-                    log::write_log("warn", &format!("拒绝移入回收站（受保护路径）: {path}"));
-                    continue;
-                }
-                let st = per_item.entry(id).or_default();
-                match move_to_recycle_bin(std::path::Path::new(path)) {
-                    Ok(()) => {
-                        st.recycled_bytes += js_num_or_zero(entry.get("size")) as i64;
-                        st.ok += 1;
-                        let is_dir = entry.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false);
-                        // 审查 v2-L15：这条重建支在当前产品语义下**不可达**——v2-M20 拍板常规清理
-                        // 固定 toRecycle=false，于是清理走 `cleanup_execute.ps1`，而那条链自己会
-                        // 重建目录（`$autoRebuild` → `Remove-PathSafely -AutoRebuild`，见 ps 的 :51/:800）。
-                        // 留着它是因为「回收站优先」一旦重新启用就要在这里做同样的事，行为两边必须一致；
-                        // 别把它当"忘了接线的功能"，也别据此删掉 PS 侧的那一份。
-                        if is_dir && auto_rebuild {
-                            let _ = std::fs::create_dir_all(path);
-                        }
-                    }
-                    Err(e) => {
-                        st.fail += 1;
-                        failures.push(json!({
-                            "id": entry.get("id").cloned().unwrap_or(Value::Null),
-                            "path": path,
-                            "size": js_num_or_zero(entry.get("size")) as i64,
-                            "isDir": entry.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false),
-                        }));
-                        log::write_log("warn", &format!("移入回收站失败: {path} -> {e}"));
-                    }
-                }
-            }
-            // J-1（S3）：写入本 label 分槽（Electron 用 sender.id），多窗口并发清理互不串台
-            // v2-L4P-38（F-7）：**无条件覆盖**——只在本轮有失败时 insert 会让上一轮的
-            // 失败路径留槽，下一轮全部成功时「重试失败项」仍重放旧路径（对已成功回收的
-            // 目标二次操作）。本轮零失败即清槽，槽内永远是最近一轮的真实状态。
-            if failures.is_empty() {
-                trash_failures()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&label);
-            } else {
-                trash_failures()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(label.clone(), failures.clone());
-            }
-            let mut recycled_bytes = 0i64;
-            let mut recycled_count = 0i64;
-            let ids: Vec<String> = data
-                .get("details")
-                .and_then(|d| d.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .map(|d| d.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(details) = data.get_mut("details").and_then(|d| d.as_array_mut()) {
-                for (i, d) in details.iter_mut().enumerate() {
-                    if d.get("status").and_then(|v| v.as_str()) != Some("recycle") {
-                        continue;
-                    }
-                    let st = per_item.get(&ids[i]).cloned();
-                    let Some(st) = st else {
-                        if let Some(o) = d.as_object_mut() {
-                            o.insert("status".into(), Value::from("ok"));
-                            o.insert("freed".into(), Value::from(0));
-                            o.insert("message".into(), Value::from("无可清理目标"));
-                        }
-                        continue;
-                    };
-                    recycled_bytes += st.recycled_bytes;
-                    recycled_count += st.ok as i64;
-                    let (status, message) = if st.fail == 0 {
-                        ("ok", format!("已移入回收站（{} 项，可在系统回收站还原）", st.ok))
-                    } else if st.ok > 0 {
-                        (
-                            "partial",
-                            format!("已移入回收站 {} 项，{} 项失败（被占用）", st.ok, st.fail),
-                        )
-                    } else {
-                        ("error", "移入回收站失败（可能被占用）".to_string())
-                    };
-                    if let Some(o) = d.as_object_mut() {
-                        o.insert("freed".into(), Value::from(0)); // 审查 M-3：回收站不计入已释放空间
-                        o.insert("recycledBytes".into(), Value::from(st.recycled_bytes));
-                        o.insert("status".into(), Value::from(status));
-                        o.insert("message".into(), Value::from(message));
-                    }
-                }
-            }
-            // v5 C-2：这里只回写「回收站专属」两项。totalFreed / success / partial / skipped
-            // 曾在且只在这里写，而常规清理固定 toRecycle=false（AGENTS §3 v3.3.0 裁定）⇒
-            // 这四个字段在永久删路径上**从不出现**，前端 `result.totalFreed || 0` 于是恒显
-            // 「释放 0 B」。统一改由外层在 details 全部落定后无条件回写。
-            if let Some(o) = data.as_object_mut() {
-                o.insert("recycledBytes".into(), Value::from(recycled_bytes));
-                o.insert("recycledCount".into(), Value::from(recycled_count));
-            }
-        }
         if let Some(o) = data.as_object_mut() {
-            o.insert("trashFailures".into(), Value::Array(failures));
+            // 形状兼容保留：回收站重试链已无喂给源（2026-10-12 全量永久删裁定），
+            // TRASH_FAILURES 恒空，渲染层对空数组零行为（offerTrashRetry 不触发）。
+            o.insert("trashFailures".into(), json!([]));
         }
         let (total_freed, success, n_partial, skipped) = summarize_details(&data);
         let n_residual = data

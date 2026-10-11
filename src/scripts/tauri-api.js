@@ -445,7 +445,9 @@
       emptyRecycleBin: function () { return invokeChannel('cleanup:empty-recycle-bin'); },
       // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（幂等，无危险确认）
       openRecycleBin: function () { return invokeChannel('cleanup:open-recycle-bin'); },
-      onScanProgress: function (callback) { return onEvent('cleanup:scan-progress', callback); }
+      onScanProgress: function (callback) { return onEvent('cleanup:scan-progress', callback); },
+      // 2026-10-12：执行逐项进度（每项开工推一次：第 k/N 项 + 名称）
+      onExecuteProgress: function (callback) { return onEvent('cleanup:execute-progress', callback); }
     },
 
     runtimes: {

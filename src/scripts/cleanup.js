@@ -160,6 +160,9 @@
   let selectedIds = new Set();
   let isScanning = false;
   let isCleaning = false;
+  // 2026-10-12：执行期逐项进度的接收器。订阅一次性注册在 init()（onEvent 会累积，
+  // 不能放进 clean()）；每次执行时挂上真实处理器、结束置空，见 clean()。
+  let execProgressSink = null;
   // 文件清理扫描结果：id -> { files: [...], totalSize, scanPath }
   let fileCleanData = new Map();
 
@@ -1357,6 +1360,17 @@
       }
     }, 200);
 
+    // 2026-10-12：收到后端首个逐项进度事件即停掉上面的假进度计时器，此后进度条
+    // 按真实项数推进（第 k/N 项 + 当前项名）。旧后端没有该事件时计时器照旧兜底。
+    execProgressSink = function (p) {
+      clearInterval(progressTimer);
+      const total = Number(p && p.total) || 0;
+      const done = Number(p && p.done) || 0;
+      const pct = total > 0 ? Math.min(90, Math.round(5 + ((done - 1) / total) * 85)) : 10;
+      const name = p && p.name ? ` · ${String(p.name).slice(0, 24)}` : '';
+      setProgress(pct, total > 0 ? `清理中... ${done}/${total} 项${name}` : '清理中...');
+    };
+
     try {
       let result;
 
@@ -1512,6 +1526,7 @@
       window.app?.toast('error', '清理失败: ' + e.message);
       maybeOfferElevation('清理操作失败，可能需要管理员权限。');
     } finally {
+      execProgressSink = null;
       isCleaning = false;
       setCleaningBtn(false);
       updateUI();
@@ -1906,6 +1921,12 @@
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
     if (window.api?.cleanup?.onScanProgress) {
       window.api.cleanup.onScanProgress(onScanProgress);
+    }
+    // 2026-10-12：订阅执行逐项进度（清理大目录耗时长时进度条不再假走 90% 后冻结）
+    if (window.api?.cleanup?.onExecuteProgress) {
+      window.api.cleanup.onExecuteProgress(function (payload) {
+        if (execProgressSink) execProgressSink(payload);
+      });
     }
 
     // P1-9：Electron 运行时从 cleanup-rules.json（唯一数据源）加载分类，

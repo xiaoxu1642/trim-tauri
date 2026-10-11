@@ -18,8 +18,9 @@
 //! - **快照槽**：扫描快照 / 回收站失败项 / 占用检测 PID 白名单全部按 `window.label()` 分槽
 //!   （Electron 按 `event.sender.id`），执行与结束进程只认本槽内容。
 //! - **删除安全**：受保护路径判定统一走 `engine::protect`（三端同源）；危险操作前
-//!   `log::flush_sync()`；回收站优先（`trim_finder::scan::recycle::send_to_trash_os`），
-//!   回收站失败项留槽等渲染层红色确认后再永久删除。
+//!   `log::flush_sync()`。常规清理**一律直接永久删、不经回收站**（v3.3.0 裁定；
+//!   2026-10-12 裁定移除 gameRedist 的回收站窄口径例外——逐文件 `SHFileOperationW`
+//!   是长耗时/卡死风险最大的同步 shell 路径，本次随裁定一并移除）。
 //! 需在 `lib.rs` 的 `generate_handler!` 注册：
 //! ```text
 //! // ---- C 批：cleanup ----
