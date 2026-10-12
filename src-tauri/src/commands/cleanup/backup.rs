@@ -105,7 +105,9 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
     // N9：清理域此前"文件名白名单过了就直接 reg import"，而卸载域同一威胁模型下有完整还原闸。
     // 调同一个公共件 —— 一份被手工改成 `[HKEY_LOCAL_MACHINE\SOFTWARE]` 的 .reg，
     // 不该因为"它是备份文件"就被写进注册表；老根兜底纳进来的 Electron 轨文件形状更不可信。
-    let crate::engine::reg_backup::RegBackupCheck { keys, seal: _ } =
+    // v5-K06 批次 3：闸侧与执行臂同一份解析产物（sections 直接进执行臂，不再二次读盘解析）；
+    // R4-M03 收尾：seal 不再丢弃，回执带 sealWasRecorded（与卸载域同口径）。
+    let crate::engine::reg_backup::RegBackupCheck { keys, seal, sections } =
         match crate::engine::reg_backup::reg_backup_restore_guards(
             &path,
             file.trim(),
@@ -120,8 +122,8 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
         };
     log::flush_sync(); // 写注册表前刷盘
     // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。四道闸（严格解析 / 受保护面 /
-    // 封条核对 / HKLM 提权）原样在上游跑完，这里只换执行器；.reg 文本格式与封条链未动。
-    let imported = crate::engine::reg_backup::reg_import_apply(&path);
+    // 封条核对 / HKLM 提权）原样在上游跑完，执行臂吃闸侧同一份 sections；.reg 文本格式与封条链未动。
+    let imported = crate::engine::reg_backup::reg_import_apply_sections(&sections);
     if let Ok(stat) = &imported {
         log::write_log(
             "info",
@@ -133,7 +135,11 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
                 stat.keys_deleted
             ),
         );
-        json!({ "success": true, "data": { "restored": true, "keys": keys } })
+        json!({ "success": true, "data": {
+            "restored": true,
+            "keys": keys,
+            "sealWasRecorded": seal == "ok",
+        } })
     } else {
         let detail = imported.err().unwrap_or_default();
         log::write_log("error", &format!("cleanup 注册表备份还原失败: {file} {detail}"));

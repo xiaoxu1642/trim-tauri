@@ -182,55 +182,30 @@ pub fn decode_reg_bytes(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
-/// 读文件并按编码解码（`parse_reg_backup` 与原生 import 共用同一份，避免两套口径）。
+/// 读文件并按编码解码（闸侧与原生 import 共用同一份，避免两套口径）。
+///
+/// v5-K06 批次 3（A6-K01）：本文件此前的第二份键枚举（`parse_reg_backup` /
+/// `parse_reg_backup_text`，按**物理行**扫 `[`…`]`）已删除——它与执行侧
+/// `parse_reg_text` 对同一份 `.reg` 的键集存在续行合并差（`[-HKEY…\Cla\` +
+/// `sses]`：闸侧只看到良性行、执行侧合并出 `SOFTWARE\Classes` 删除臂，探针三样本
+/// 实测），还原四道闸因此建在键子集上。现在闸与执行臂同吃 `parse_reg_text` 一份。
 pub fn read_reg_text_file(file: &Path) -> Result<String, String> {
     let bytes = std::fs::read(file).map_err(|e| format!("读取 .reg 失败: {e}"))?;
     decode_reg_bytes(&bytes)
 }
 
-/// 严格 `.reg` 解析：要求版本头 + 至少一个顶层键段，返回去重后的键列表。
-/// `None` = 形状不对（半截写入、被截断、或根本不是 .reg），这类文件**不许** import。
-/// 刻意不做宽松兼容：还原前必须知道"这份文件会往哪些键里写"，否则等于把未知来源的内容
-/// 灌进注册表（v2 时代还原链的教训就是"校验自己解析出来的东西"）。
-pub fn parse_reg_backup(file: &Path) -> Option<Vec<String>> {
-    parse_reg_backup_text(&read_reg_text_file(file).ok()?)
-}
-
-/// 同上，输入是文本 —— 拆成纯函数是为了单测能覆盖"半截 .reg / 缺版本头 / 无键段"这三类
-/// 形状，不必往数据目录造文件。
-pub fn parse_reg_backup_text(text: &str) -> Option<Vec<String>> {    let first = text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())?
-        .trim_start_matches('\u{feff}')
-        .trim()
-        .to_string();
-    if !first.eq_ignore_ascii_case("Windows Registry Editor Version 5.00") {
-        return None;
-    }
-    let mut keys: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let l = line.trim();
-        let Some(rest) = l.strip_prefix('[') else { continue };
-        let Some(inner) = rest.strip_suffix(']') else { continue };
-        let k = inner.trim().trim_matches('"').to_string();
-        if k.is_empty() {
-            continue;
-        }
-        if !keys.iter().any(|x| x.eq_ignore_ascii_case(&k)) {
-            keys.push(k);
-        }
-    }
-    (!keys.is_empty()).then_some(keys)
-}
-
-/// 过了四道闸后带回来的信息：会写到哪些键 + 封条当时是什么状态。
+/// 过了四道闸后带回来的信息：会写到哪些键 + 封条当时是什么状态 + **闸侧解析出的
+/// 键段全量**（`sections`）。
 /// `seal` 要带出去，因为还原成功的回执会告诉用户"这份有没有封条可对"（`sealWasRecorded`），
 /// 那是用户判断"要不要再还原更早一份"的依据，不该在闸里丢掉。
+/// `sections` 要带出去，是因为 v5-K06 批次 3（A6-K01）：执行臂 `reg_import_apply_sections`
+/// 与四道闸必须吃**同一份**解析产物——此前闸侧按物理行枚举键、执行侧另读另解析，
+/// 续行折行的删除臂对闸不可见、对执行器可见，禁删面/提权/摘要全部建在键子集上。
 #[derive(Debug)]
 pub struct RegBackupCheck {
     pub keys: Vec<String>,
     pub seal: &'static str,
+    pub sections: Vec<RegSection>,
 }
 
 /// 还原前的**公共闸**，两域共用同一顺序与同一回执口径：
@@ -242,6 +217,12 @@ pub struct RegBackupCheck {
 /// ⑤ P0-01：HKLM 备份还必须与 HKLM 管理员摘要核对（摘要存非提权进程写不了的位置，
 /// 由本提权实例自行重算哈希）；无摘要/摘要不符一律拒绝。HKCU 不要求管理员摘要。
 ///
+/// v5-K06 批次 3（A6-K01）：① 与执行臂**共用同一解析器**（`parse_reg_text`，一次读盘
+/// 一次解析），闸侧键枚举 = 执行侧键枚举。此前闸侧另有一份按物理行扫的键枚举
+/// （已删），`[-HKEY_LOCAL_MACHINE\SOFTWARE\Cla\` + `sses]` 这类续行折行的删除臂
+/// 对它不可见 ⇒ 四道闸建在键子集上，执行臂却按合并后的完整键集直删（探针三样本实测）。
+/// 回执 `sections` 即执行臂要写的那一份，调用方直接传给 `reg_import_apply_sections`。
+///
 /// `domain`（"cleanup"/"uninstall"）决定管理员摘要值名的域前缀；`is_admin` 由调用方
 /// 传入而不是在这里查系统，是为了让这几道闸能拿临时目录静默测；真机端到端归
 /// `#[ignore]` 的发布前用例。
@@ -251,21 +232,32 @@ pub fn reg_backup_restore_guards(
     domain: &str,
     is_admin: bool,
 ) -> Result<RegBackupCheck, String> {
-    let Some(keys) = parse_reg_backup(file) else {
-        return Err("备份文件不是合法的 .reg（缺版本头或没有任何键段），已拒绝还原".to_string());
-    };
-    for k in &keys {
-        // `[-HKEY...]` 是「删除键段」，解析器保留前导 `-`；它既不是 Trim 的导出形态，
-        // 也没有对应的保护面判定。单独报「不支持删除段」，别让用户从
+    let text = read_reg_text_file(file).map_err(|_| {
+        "备份文件不是合法的 .reg（读不到或编码不可识别），已拒绝还原".to_string()
+    })?;
+    let sections = parse_reg_text(&text).map_err(|_| {
+        "备份文件不是合法的 .reg（缺版本头或没有任何键段），已拒绝还原".to_string()
+    })?;
+    // 键枚举（回执/日志用）从 sections 推导——与执行臂同一份解析产物，不可能再分叉
+    let mut keys: Vec<String> = Vec::new();
+    for sec in &sections {
+        let full = sec.full_key();
+        if !keys.iter().any(|x| x.eq_ignore_ascii_case(&full)) {
+            keys.push(full);
+        }
+    }
+    for sec in &sections {
+        // `[-HKEY...]` 是「删除键段」（parse_reg_text 的 delete_key 标记）。它既不是
+        // Trim 的导出形态，也没有对应的保护面判定。单独报「不支持删除段」，别让用户从
         // 「含受保护的注册表容器」这句误以为是自己导错了键。
-        if k.trim_start().starts_with('-') {
+        if sec.delete_key {
             crate::engine::log::write_log(
                 "warn",
-                &format!("备份 {name} 含删除键段（{k}），已拒绝还原"),
+                &format!("备份 {name} 含删除键段（[-{}]），已拒绝还原", sec.full_key()),
             );
             return Err("备份内含删除键段（[-HKEY…]），本工具不支持导入该形态，已拒绝还原".to_string());
         }
-        if let Some(reason) = crate::engine::protect::reg_target_block_reason(k) {
+        if let Some(reason) = crate::engine::protect::reg_target_block_reason(&sec.full_key()) {
             crate::engine::log::write_log(
                 "warn",
                 &format!("备份 {name} 含受保护目标，已拒绝还原: {reason}"),
@@ -282,10 +274,7 @@ pub fn reg_backup_restore_guards(
             "备份内容与封条不符或不可读（{seal}），已拒绝还原——请改用导出时间的更早一份，或重新安装该程序"
         ));
     }
-    let needs_admin = keys.iter().any(|k| {
-        let u = k.to_uppercase();
-        u.starts_with("HKEY_LOCAL_MACHINE") || u.starts_with("HKLM")
-    });
+    let needs_admin = sections.iter().any(|s| s.hive == "HKEY_LOCAL_MACHINE");
     if needs_admin && !is_admin {
         return Err(
             "该备份指向 HKLM 下的键，需要以管理员身份运行后再还原（HKCU 下的备份不需要）".to_string(),
@@ -315,7 +304,7 @@ pub fn reg_backup_restore_guards(
             Err(e) => return Err(format!("备份不可读，已拒绝还原：{e}")),
         }
     }
-    Ok(RegBackupCheck { keys, seal })
+    Ok(RegBackupCheck { keys, seal, sections })
 }
 
 #[cfg(test)]
@@ -453,13 +442,15 @@ mod reg_backup_common_tests {
 
     /// D2：严格 `.reg` 解析。还原前必须知道"这份文件会往哪些键里写"，
     /// 所以宁可拒也不能宽松 —— 半截写入的备份尤其要拦。
+    /// v5-K06 批次 3：闸与执行臂同吃 `parse_reg_text`（原物理行键枚举 `parse_reg_backup_text`
+    /// 已删，它与本解析器存在续行合并差 = A6-K01），本用例改断同一解析器的键枚举语义。
     #[test]
     fn reg_backup_parser_requires_header_and_keys() {
         let ok = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET]\r\n\"a\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\ESET\\b]\r\n";
-        let keys = parse_reg_backup_text(ok).expect("合法 .reg 必须解析通过");
-        assert_eq!(keys.len(), 2, "键段去重后应有两条: {keys:?}");
+        let sections = parse_reg_text(ok).expect("合法 .reg 必须解析通过");
+        assert_eq!(sections.len(), 2, "键段应有两条: {:?}", sections.iter().map(|s| s.full_key()).collect::<Vec<_>>());
         // BOM 与前后空白是 reg.exe export 的实际形态，不能被当成非法
-        assert!(parse_reg_backup_text(&format!("\u{feff} {ok}")).is_some());
+        assert!(parse_reg_text(&format!("\u{feff} {ok}")).is_ok());
         for bad in [
             "",
             "Windows Registry Editor Version 5.00\r\n",              // 有头无键
@@ -467,8 +458,43 @@ mod reg_backup_common_tests {
             "Windows Registry Editor Version 5.00\r\n[HKEY_",        // 半截写入
             "Windows Registry Editor Version 5.00\r\n[]\r\n",         // 空键名
         ] {
-            assert!(parse_reg_backup_text(bad).is_none(), "这类 .reg 不该通过解析: {bad:?}");
+            assert!(parse_reg_text(bad).is_err(), "这类 .reg 不该通过解析: {bad:?}");
         }
+    }
+
+    /// v5-K06 批次 3（A6-K01）：续行折行的删除臂对闸必须可见。样本
+    /// `[-HKEY_LOCAL_MACHINE\SOFTWARE\Cla\` + `sses]`——修前闸侧按物理行枚举键，
+    /// 两行都不完整 ⇒ 键集为空 ⇒ 闸拒「不是合法的 .reg」（良性 HKCU 形态同样被误拒）；
+    /// 对含 HKLM 的同类样本，闸侧若只看到良性键就会放行、执行侧却按合并后的
+    /// `SOFTWARE\Classes` 删除臂直删（探针三样本实测）。判红自证：闸侧换回
+    /// 物理行枚举 ⇒ 本用例与下一条同源断言红。
+    #[test]
+    fn 续行删除臂对闸可见且两侧键集全等() {
+        // ① 删除臂样本：合并后续行 ⇒ 闸点「删除键段」拒（fail-closed）
+        let del = "Windows Registry Editor Version 5.00\r\n\r\n[-HKEY_LOCAL_MACHINE\\SOFTWARE\\Cla\\\r\nsses]\r\n";
+        let sections = parse_reg_text(del).expect("执行侧解析器应合并出删除段");
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].delete_key, "续行合并后必须识别为删除臂");
+        assert_eq!(sections[0].full_key(), r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes");
+        let root = sandbox("k06-del");
+        let p = root.join("folded-del.reg");
+        std::fs::write(&p, del).unwrap();
+        // is_admin=true：让删除段检查（在提权闸之前）先触发，回执必须点名删除键段
+        let err = reg_backup_restore_guards(&p, "folded-del.reg", "cleanup", true).unwrap_err();
+        assert!(err.contains("删除键段"), "续行删除臂必须被闸拒: {err}");
+        // ② 良性 HKCU 续行样本（与恶意样本同形：行尾 `\` 被合并吃掉，两半拼出键名）：
+        // `Software\Tri` + `mProbe` ⇒ `Software\TrimProbe`。修前物理行枚举两行都不完整
+        // ⇒ 键集空 ⇒ 闸误拒；修后合并 ⇒ 闸放行且与执行侧同源。
+        let ok = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Tri\\\r\nmProbe]\r\n\"a\"=dword:1\r\n";
+        let p2 = root.join("folded-ok.reg");
+        std::fs::write(&p2, ok).unwrap();
+        let chk = reg_backup_restore_guards(&p2, "folded-ok.reg", "cleanup", false)
+            .expect("良性续行样本（修前被物理行枚举误拒）应过闸");
+        assert_eq!(chk.keys, vec![r"HKEY_CURRENT_USER\Software\TrimProbe".to_string()]);
+        assert_eq!(chk.sections.len(), 1);
+        assert_eq!(chk.sections[0].full_key(), chk.keys[0], "闸回执的键枚举必须与执行臂 sections 同源");
+        assert!(!chk.sections[0].delete_key);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// D2 封条状态机：列表按状态决定给不给还原入口、还原按状态硬拒，所以这四态必须可区分。
@@ -578,7 +604,13 @@ mod reg_backup_common_tests {
 // 替换的是**执行器**：`reg.exe import <file>` → 自己解析 + 自己写。
 // 刻意不动的两样东西（v2 R4 明令）：`.reg` 文本格式、封条链
 // （`reg_backup_seal_state` / `reg_backup_restore_guards` 还原闸原样保留，
-//  本模块只在闸**之后**接手，且继续吃同一份 `parse_reg_backup` 的形状判定）。
+//  本模块只在闸**之后**接手）。
+//
+// v5-K06 批次 3（A6-K01，2026-10-12）：此处原注释写「继续吃同一份 parse_reg_backup
+// 的形状判定」——**与执行代码不符**（实际吃的是 `parse_reg_text`，与闸侧的物理行
+// 键枚举是两份）。现已名副实归：闸侧改吃 `parse_reg_text`，`parse_reg_backup`
+// （物理行键枚举）整份删除，闸⇄执行臂同一解析产物（见 reg_backup_restore_guards
+// 与 reg_import_apply_sections 的注释）。
 //
 // 为什么要值级解析而不是只校验形状：还原要字节忠实。备份是 `reg.exe export` 产的，
 // 里面非 DWORD 一律写成 `hex(2):...` / `hex(7):...` 的 UTF-16 形态，
@@ -643,7 +675,8 @@ pub fn parse_reg_text(text: &str) -> Result<Vec<RegSection>, String> {
 
     // 2) 折行合并：行尾单个 `\` 表示续行（reg.exe 的长 hex 就是这么折的）。
     // 版本头在这里一并跳过 —— 它上面已经严格校验过了，留在这条循环里会被当成
-    // 「键段之前的值行」而把整份合法备份判死。
+    // 「键段之前的值行」而把整份合法备份判死。trim 链与上方头判定同口径：
+    // BOM 与头之间夹空白（手工编辑过的备份实测形态）也要能识别成头行。
     const HEADER: &str = "Windows Registry Editor Version 5.00";
     let mut logical: Vec<String> = Vec::new();
     let mut pending = String::new();
@@ -652,7 +685,7 @@ pub fn parse_reg_text(text: &str) -> Result<Vec<RegSection>, String> {
         if t.is_empty() || t.starts_with(';') {
             continue;
         }
-        if t.trim_start_matches('\u{feff}').eq_ignore_ascii_case(HEADER) {
+        if t.trim_start_matches('\u{feff}').trim().eq_ignore_ascii_case(HEADER) {
             continue;
         }
         if let Some(cont) = t.strip_suffix('\\') {
@@ -840,17 +873,17 @@ pub struct RegImportStat {
     pub keys_created: usize,
 }
 
-/// 把一份已通过四道闸的 `.reg` 原生写进注册表。
+/// 把一份已通过四道闸的 `.reg` 原生写进注册表（**执行臂本体，不做任何 IO**）。
 ///
+/// v5-K06 批次 3（A6-K01）：入参就是 `reg_backup_restore_guards` 回执里的
+/// `sections`——四道闸与执行臂吃同一份解析产物。此前本函数自己二次读盘+二次解析
+/// （执行侧解析器与闸侧按物理行的键枚举存在续行合并差），闸看不见的 `[-HKEY…]`
+/// 段会被直接执行；现在那种「校验一套、执行另一套」的形态在类型上就不存在了。
 /// 失败即停并带着「第几段/哪个值」的原因返回 —— 不做"跳过坏行继续写"，
 /// 那会把一次还原变成半截状态而回执仍然像成功。
-pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, String> {
-    // 编码感知：备份是 reg.exe export 产的（UTF-16LE），数据层步骤体是本应用写的（UTF-8），
-    // 两种都要能读 —— 用 read_to_string 会在第一种上直接失败。
-    let text = read_reg_text_file(path)?;
-    let sections = parse_reg_text(&text)?;
+pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportStat, String> {
     let mut stat = RegImportStat::default();
-    for sec in &sections {
+    for sec in sections {
         let hive = hive_of(&sec.hive)?;
         let full = sec.full_key();
         if sec.delete_key {
@@ -900,6 +933,18 @@ pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, String>
         }
     }
     Ok(stat)
+}
+
+/// 非闸链域的 `.reg` 导入便捷件：自己读盘 + 自己解析 + 执行。
+///
+/// **只有不经四道闸的域用它**（外设备份还原、优化器步骤体还原——两者按 R5-W-1/W-2
+/// 白名单不套公共四道闸，也没有第二份判据可对拍）。还原闸链（cleanup/uninstall 的
+/// 备份还原）**不要**走本函数：那会退回「闸侧一套键枚举、执行侧另一套」的旧形态，
+/// 应改用 `reg_backup_restore_guards` 回执的 `sections` + [`reg_import_apply_sections`]。
+pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, String> {
+    let text = read_reg_text_file(path)?;
+    let sections = parse_reg_text(&text)?;
+    reg_import_apply_sections(&sections)
 }
 
 fn hive_of(name: &str) -> Result<windows::Win32::System::Registry::HKEY, String> {

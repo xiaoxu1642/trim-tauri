@@ -118,8 +118,9 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
     else {
         return json!({ "success": false, "message": "备份文件不存在" });
     };
-    // 还原闸走公共件（N9/P0-01）：清理域那条链现在调的是同一个函数，两域不可能再各写一套口径
-    let crate::engine::reg_backup::RegBackupCheck { keys, seal } =
+    // 还原闸走公共件（N9/P0-01）：清理域那条链现在调的是同一个函数，两域不可能再各写一套口径。
+    // v5-K06 批次 3（A6-K01）：闸侧与执行臂同一份解析产物（sections 直接进执行臂）。
+    let crate::engine::reg_backup::RegBackupCheck { keys, seal, sections } =
         match crate::engine::reg_backup::reg_backup_restore_guards(
             &path,
             &name,
@@ -131,9 +132,9 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
         };
     log::flush_sync(); // 写注册表前刷盘
     // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。上面四道闸原样跑，
-    // .reg 文本格式与封条链未动；原先「成功 / 非零退出 / 调用失败」三分支
-    // 在原生侧塌成 Ok/Err 两分支（外部进程的退出码这一层信息本身已不存在）。
-    match crate::engine::reg_backup::reg_import_apply(&path) {
+    // 执行臂吃闸侧同一份 sections；.reg 文本格式与封条链未动；原先「成功 / 非零退出 /
+    // 调用失败」三分支在原生侧塌成 Ok/Err 两分支（外部进程的退出码这一层信息本身已不存在）。
+    match crate::engine::reg_backup::reg_import_apply_sections(&sections) {
         Ok(stat) => {
             log::write_log(
                 "info",
