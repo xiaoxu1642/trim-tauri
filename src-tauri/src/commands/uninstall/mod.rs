@@ -31,7 +31,8 @@ pub use appx::{uninstall_appx_logo, __cmd__uninstall_appx_logo, __tauri_command_
 // v0.7.0 机-wide 扫描整条退役后，七个深扫器与它们的判据/签名助手**保留为内部代码**（不再有
 // 界面、也不再有可直接调用的命令）。`services_orphan` / `drivers_orphan` 仍被 residue 的四类扫描
 // 部分复用，其余模块当前没有生产调用方 —— 逐模块 `allow(dead_code)` 是为了不让「刻意保留」
-// 撞上 AGENTS §4 的零警告线（先例：engine/pnp.rs、engine/native/bsod.rs 的同类标注）。
+// 撞上 AGENTS §4 的零警告线（先例：engine/pnp.rs 的同类标注；engine/native/bsod.rs
+// 同款先例已于 2026-10-12 随体检结论退役整体拆除）。
 #[allow(dead_code)]
 mod authenticode;
 #[allow(dead_code)]

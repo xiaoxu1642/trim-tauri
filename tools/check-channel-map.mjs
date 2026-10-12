@@ -55,6 +55,7 @@ const PROBES = ['debug_data_dirs'];
  * 每条必须写明退役理由与日期，否则这条豁免会变成随意删通道的后门。
  */
 const RETIRED = {
+  'overview:checkup': '2026-10-12（用户裁定）：首页「体检结论」区块全链路退役——命令 overview_checkup + lib.rs 注册 + CHANNEL_MAP + api 包装 + 前端区块与样式同撤；引擎侧 overview_checkup() 与蓝屏码库子系统（bsod.rs / bugcheck-codes.source.mjs / gen / data json / check-bugcheck-codes 三门禁）一并拆除',
   'settings:save': 'v2-F4（2026-09-26）：零调用方 + 无 UI 面 + 写入面在 models:save，整链摘除',
   'pwsh:prepare': 'v2-M15/B11（2026-09-26）：D4 孤儿，且 Tauri 轨无内置运行时可准备，与 pwsh:status 完全重复',
   'pwsh:status': 'v2-R1（2026-10-01）：右键图标改原生 ExtractIconExW 后，PS7 候选链与 pwshruntime.rs 整条退役，本应用不再启动 pwsh.exe',
@@ -449,7 +450,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'optimizer_list_restore',
   'optimizer_state_overview',
   'optimizer_svc_mem_current',
-  'overview_checkup',
   'overview_hardware',
   'overview_metrics',
   'paths_app_icon',

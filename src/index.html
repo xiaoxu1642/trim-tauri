@@ -74,11 +74,11 @@
       <!-- v2.0 信息架构分组：清理 / 优化 / 工具 / 记录（底部为设置） -->
       <div class="nav-section">
         <div class="nav-section-title">清理</div>
-        <button class="nav-item active" data-page="overview" data-tip="系统体检">
+        <button class="nav-item active" data-page="overview" data-tip="系统概览">
           <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
             <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>
           </svg>
-          <span>系统体检</span>
+          <span>系统概览</span>
         </button>
         <button class="nav-item" data-page="cleanup" data-tip="磁盘清理">
           <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
@@ -192,11 +192,11 @@
 
     <!-- 主内容区 -->
     <main class="main-content" id="mainContent">
-      <!-- 系统体检页面（v2.6.0 P1-6：原「系统概览」升级，新增只读诊断） -->
+      <!-- 系统概览页面（2026-10-12 用户裁定：由「系统体检」改名回「系统概览」，体检结论区块全链路退役） -->
       <div class="page active" id="page-overview">
         <div class="page-header">
           <div>
-            <h1 class="page-title">系统体检</h1>
+            <h1 class="page-title">系统概览</h1>
           </div>
         </div>
 
@@ -240,21 +240,6 @@
             <div class="ov-res-value" id="ovDiskValue">--</div>
             <div class="progress-bar overview-bar"><div class="progress-fill" id="ovDiskBar"></div></div>
             <div class="ov-res-sub" id="ovDiskSub"></div>
-          </div>
-        </div>
-
-        <!-- 系统体检（v2.6.0 P1-6）：只读诊断清单，每条带 正常/注意/异常 状态与证据等级 -->
-        <div class="overview-section">
-          <div class="overview-section-head">
-            <h2 class="overview-section-title">体检结论</h2>
-            <span class="checkup-evidence-legend" data-tip="证据等级：本机实测=直接读取本机状态；机制明确=依据系统公开机制推断；未验证=当前环境无法判定">证据等级说明</span>
-            <button class="btn btn-secondary btn-small" id="btnCheckupRerun" data-tip="重新执行一次只读体检（不改任何系统设置）" aria-label="重新体检">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
-              <span id="btnCheckupRerunText">重新体检</span>
-            </button>
-          </div>
-          <div class="checkup-list" id="ovCheckupList" aria-live="polite">
-            <div class="empty-state"><p>体检中…</p></div>
           </div>
         </div>
 
@@ -1488,7 +1473,7 @@
   </div>
 
   <!-- v3.7.0 议题五：渲染脚本按需加载。
-       此前 38 个 <script> 全部同步加载并在启动时 init()，而用户默认只落在「系统体检」页。
+       此前 38 个 <script> 全部同步加载并在启动时 init()，而用户默认只落在「系统概览」页。
        现在 index.html 只保留首屏必需的脚本，其余改由 app.js 的 PAGE_SCRIPTS / IDLE_SCRIPTS
        在进页或首帧空闲时动态注入（首屏标签数与字节数由门禁现算，别在这里手抄数字）。
        两条硬约束不变：splash.js 必须是 body 末尾脚本的第一个；
@@ -1509,7 +1494,7 @@
   <script src="scripts/icon-fallback.js"></script>
   <script src="scripts/liquid-glass.js"></script>
   <script src="scripts/overview.js"></script>
-  <!-- deviceinfo.js：系统体检（默认首页）用它归一化硬件信息，留在首屏避免首屏降级为空 -->
+  <!-- deviceinfo.js：系统概览（默认首页）用它归一化硬件信息，留在首屏避免首屏降级为空 -->
   <script src="scripts/deviceinfo.js"></script>
   <!-- fontmanager.js：启动时就要恢复已保存的字体/字重/字号（app.js init 里 restore），
        放到按需里会出现"先默认字体后跳变"，故留在首屏（14 KB） -->

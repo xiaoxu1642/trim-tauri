@@ -7,7 +7,6 @@
 //! 状态：纯原生（方案 S3）。各域 `.ps1` 已删除，本模块是唯一实现，**不存在 PS 回退**；
 //! 调用失败一律如实返回错误，权限拒绝、参数非法等不回退，由调用方按错误类型判断。
 
-mod bsod;
 mod cleanup;
 pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute, find_rule_by_id};
 mod common;
@@ -16,7 +15,7 @@ pub(crate) use common::wide_str;
 mod contextmenu;
 pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle};
 mod diagnostics;
-pub use diagnostics::{sysdisk, overview_checkup, device_info};
+pub use diagnostics::{sysdisk, device_info};
 mod maintenance;
 pub use maintenance::{task_change, MAINT_CMD_TIMEOUT, maint_run};
 pub(crate) use maintenance::{dir_delete_blocked};

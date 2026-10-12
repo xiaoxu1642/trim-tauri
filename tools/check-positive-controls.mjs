@@ -65,7 +65,6 @@ const PENDING_CONTROLS = [
   { name: 'check-optimizer-security', reason: '找违规型：扩库夹带关闭安全组件即红，缺违规样本自检' },
   { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
   { name: 'check-optimizer-groups-sidecar', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量，缺合成样本' },
-  { name: 'check-bugcheck-codes', reason: '对拍型：蓝屏码库结构/唯一性/枚举合法性，缺合成样本' },
   { name: 'check-version-sync', reason: '对拍型：版本号四处一致，缺「单处漂移必须红」样本' },
   { name: 'check-updater-pubkey', reason: '对拍型：pubkey 形状（base64(minisign)），缺合成样本' },
   { name: 'check-readme-claims', reason: '对拍型：readme 数字 ⇄ 数据真源，缺合成样本' },

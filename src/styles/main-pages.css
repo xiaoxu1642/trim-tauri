@@ -2798,78 +2798,11 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 
 
 /* ==================== v2.6.0 批次样式 ==================== */
-
-/* 系统体检（P1-6）：只读诊断清单——状态徽章 + 标题 + 取值 + 证据等级，复用既有语义 token */
-.checkup-evidence-legend {
-  flex: 1;
-  text-align: right;
-  font-size: var(--fs-meta);
-  color: var(--fg-tertiary);
-  cursor: help;
-}
-.checkup-row-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.checkup-row-main { flex: 1 1 auto; min-width: 0; }
-/* v3.2.1：证据胶囊移入右侧操作列——每行右侧统一为「证据 + 按钮」一行垂直居中，
-   修复 head 内 evidence 换行导致的行间高度不一（图六） */
-.checkup-row-actions {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: nowrap;
-  margin-left: auto;
-  align-self: center;
-}
-.checkup-row-title {
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  font-size: var(--fs-secondary);
-  color: var(--fg-primary);
-}
-.checkup-row-value {
-  font-size: var(--fs-secondary);
-  color: var(--fg-secondary);
-  overflow-wrap: anywhere;
-}
-.checkup-row-evidence {
-  /* v3.2.1：evidence 移入右侧操作列，不再吃 head 的 margin-left:auto */
-  flex: 0 0 auto;
-  font-size: var(--fs-meta);
-  color: var(--fg-tertiary);
-  border: 1px solid var(--border-default);
-  border-radius: 999px; /* 胶囊徽章例外（AGENTS §5 允许） */
-  padding: 1px 8px;
-  white-space: nowrap;
-}
-.checkup-row-detail {
-  margin: 6px 0 0;
-  font-size: var(--fs-meta);
-  line-height: 1.6;
-  color: var(--fg-tertiary);
-  overflow-wrap: anywhere;
-  /* v0.4.9 RAINZ 对标 §3.1：蓝屏记录条目要展示「含义 / 常见成因 / 建议」三段，
-     check_item 结构不动（保持零新增 IPC），换行靠 detail 字符串里的 \n 呈现。
-     pre-line 只把 \n 变换行、多余空白仍折叠，不影响其它 checkup 条目的单段展示。 */
-  white-space: pre-line;
-}
+/* 系统体检只读诊断清单样式（.checkup-*）已于 2026-10-12 随首页「体检结论」区块全链路退役 */
 
 /* ==================== v2.7.0 批次样式 ==================== */
+/* 去处理/忽略 行内按钮与忽略恢复链接样式同批退役 */
 
-/* 系统体检：去处理/忽略 行内按钮（复用语义 token，无新颜色） */
-.checkup-row-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-.checkup-restore-link {
-  font-size: var(--fs-meta);
-  flex: none;
-}
 .splash-stage {
   position: relative;
   height: 100%;

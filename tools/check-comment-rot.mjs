@@ -445,7 +445,6 @@ const KB_SPEC_ALLOW = [
   { file: 'src-tauri/src/commands/log.rs', needle: '512KB', reason: '同上（log:read 语义对齐注释）' },
   { file: 'src-tauri/src/commands/settings.rs', needle: '64KB', reason: '偏好值上限闸（代码常量）' },
   { file: 'src-tauri/src/engine/winhttp.rs', needle: '64KB', reason: '流式读取缓冲尺寸（代码常量）' },
-  { file: 'src-tauri/src/engine/native/bsod.rs', needle: '256 KB', reason: 'Windows 小内存转储规格（系统定义）' },
   { file: 'src/scripts/netspeed.js', needle: '256 KB/s', reason: '活动判定阈值（SPIKE_BPS 常量）' },
 ];
 

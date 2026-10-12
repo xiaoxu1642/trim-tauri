@@ -1,13 +1,12 @@
-//! overview 域（批次 A）：overview:metrics / overview:hardware / overview:checkup
+//! overview 域（批次 A）：overview:metrics / overview:hardware
 //!
 //! 缓存与在途去重语义（对照 main.js 5195-5379 段）：
 //! - metrics：内存缓存 2.5s；采集为**纯原生进程内调用**（无 pwsh；用 std 互斥锁在阻塞线程上
 //!   串行化，等价 JS 侧的 overviewMetricsInflight 去重，避免轮询打满进程）——
 //!   旧注释「同一时刻最多一个 pwsh 进程」为 Electron 时代遗物（2026-09-25 审计修正）；
 //! - hardware：磁盘缓存 system-info.json（首扫落盘，之后读缓存，refresh=true 强扫）；
-//!   扫描失败时回落旧缓存并标 degraded:true（不让一次失败把页面清空）；
-//! - checkup：磁盘缓存 checkup.json + TTL 30 分钟（F1：原实现永不过期的旧"正常"结论
-//!   会在系统恶化时误报，故加 TTL 到期自动重扫）。
+//!   扫描失败时回落旧缓存并标 degraded:true（不让一次失败把页面清空）。
+//! - checkup：2026-10-12 随首页「体检结论」区块全链路退役（命令、引擎、缓存一并拆除）。
 
 use serde_json::Value;
 use tauri::WebviewWindow;
@@ -18,8 +17,6 @@ use crate::security;
 use crate::commands::state::{CPU_PREV, METRICS_CACHE, METRICS_LOCK};
 
 const METRICS_CACHE_TTL_MS: i64 = 2500;
-
-const CHECKUP_CACHE_TTL_MS: i64 = 30 * 60 * 1000;
 
 /// 由原始计数差分出 CPU 百分比（对照 main.js cpuPercentFromRaw）
 fn cpu_percent_from_raw(raw: Option<&Value>) -> Option<f64> {
@@ -159,50 +156,5 @@ async fn read_system_info_cache() -> Option<(i64, Value)> {
 async fn write_system_info_cache(data: Value) {
     if let Err(e) = tauri::async_runtime::spawn_blocking(move || save_system_info_cache(&data)).await {
         crate::engine::log::write_log("warn", &format!("保存系统信息缓存任务异常: {e}"));
-    }
-}
-
-/// overview:checkup — 系统体检（磁盘缓存 + 30 分钟 TTL）
-#[tauri::command]
-pub async fn overview_checkup<R: tauri::Runtime>(
-    window: WebviewWindow<R>,
-    refresh: Option<bool>,
-) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
-    let refresh = refresh.unwrap_or(false);
-    if !refresh {
-        if let Some((ts, data)) = crate::engine::load_scan_cache("checkup.json") {
-            if crate::engine::now_ms() - ts < CHECKUP_CACHE_TTL_MS {
-                return Ok(serde_json::json!({
-                    "success": true,
-                    "data": { "checks": data, "at": ts },
-                    "cached": true
-                }));
-            }
-        }
-    }
-    let result = tauri::async_runtime::spawn_blocking(|| {
-        match crate::engine::native::overview_checkup() {
-            Ok(data) => Ok(data),
-            Err(e) => Err(format!("原生体检失败: {e}")),
-        }
-    })
-    .await;
-    match result {
-        Ok(Ok(parsed)) => {
-            // 脚本返回 { checks: [...] }；兼容直接返回数组的历史形态
-            let checks = if parsed.is_array() {
-                parsed.clone()
-            } else {
-                parsed.get("checks").cloned().unwrap_or_else(|| serde_json::json!([]))
-            };
-            crate::engine::save_scan_cache("checkup.json", &checks);
-            Ok(serde_json::json!({
-                "success": true,
-                "data": { "checks": checks, "at": crate::engine::now_ms() }
-            }))
-        }
-        Ok(Err(message)) => Ok(serde_json::json!({ "success": false, "message": message })),
-        Err(e) => Ok(serde_json::json!({ "success": false, "message": format!("体检任务异常: {e}") })),
     }
 }

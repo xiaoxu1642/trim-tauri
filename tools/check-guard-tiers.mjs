@@ -382,7 +382,6 @@ const MUST_READONLY = [
   'optimizer_list_restore',
   'optimizer_state_overview',
   'optimizer_svc_mem_current',
-  'overview_checkup',
   'overview_hardware',
   'overview_metrics',
   'paths_app_icon',

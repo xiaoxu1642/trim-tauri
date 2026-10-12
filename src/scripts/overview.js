@@ -1,6 +1,7 @@
-// overview.js - 系统体检模块（v2.6.0 P1-6，原「系统概览」升级）
-// 实时采集 CPU/内存/磁盘/开机时长，融合硬件信息；新增只读体检诊断
-// （借鉴 Pavise SystemAudit：全部只读、每条结论自带证据等级、检测不出如实标「未验证」）
+// overview.js - 系统概览模块
+// 实时采集 CPU/内存/磁盘/开机时长，融合硬件信息。
+// 历史：v2.6.0 曾在此挂「体检结论」只读诊断清单，2026-10-12 用户裁定全链路退役，
+// 本文件回归纯实时指标 + 硬件信息展示。
 (function () {
   'use strict';
 
@@ -11,9 +12,7 @@
     running: false,
     timer: null,
     hardwareLoaded: false,
-    lastErrAt: 0,
-    checkupLoaded: false,
-    checkupBusy: false
+    lastErrAt: 0
   };
 
   // ===== 格式化工具 =====
@@ -134,155 +133,6 @@
     return primary;
   }
 
-  // ===== 系统体检（v2.6.0 P1-6，只读诊断） =====
-  // 状态徽章复用 ds-badge（ok/warn/bad/neutral），证据等级以文字标签展示。
-  // v2.7.0：bad/warn 行加「去处理 / 忽略」——去处理跳对应功能页，忽略持久隐藏（可恢复）。
-  const CHECKUP_STATUS_BADGE = { ok: 'ok', warn: 'warn', bad: 'bad', unknown: 'neutral' };
-  const CHECKUP_STATUS_TEXT = { ok: '正常', warn: '注意', bad: '异常', unknown: '无法判定' };
-  // 去处理跳转映射（跳目标必须是 index.html 导航里的 data-page 键；无应用内处理手段的项不提供）
-  const CHECKUP_JUMP = {
-    nonessential_services: { page: 'optimizer', tip: '前往电脑优化中心，按需禁用可精简服务' },
-    startup_count: { page: 'startup', tip: '前往启动项管理，精简开机自启' },
-    sys_drive_free: { page: 'cleanup', tip: '前往磁盘清理，释放系统盘空间' },
-    power_plan: { page: 'quickcmds', tip: '前往快捷指令，打开「电源选项」调整计划' }
-  };
-  const CHECKUP_IGNORE_KEY = 'trim-checkup-ignored';
-
-  function loadIgnoredChecks() {
-    try {
-      const v = JSON.parse(localStorage.getItem(CHECKUP_IGNORE_KEY) || '[]');
-      return Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
-    } catch (e) { return []; }
-  }
-
-  function saveIgnoredChecks(list) {
-    try { localStorage.setItem(CHECKUP_IGNORE_KEY, JSON.stringify(list)); } catch (e) {}
-  }
-
-  function checkupStatusBadge(status) {
-    const type = CHECKUP_STATUS_BADGE[status] || 'neutral';
-    const label = CHECKUP_STATUS_TEXT[status] || status;
-    return window.ds && window.ds.badgeHtml
-      ? window.ds.badgeHtml(type, label, { small: true })
-      : `<span class="ds-badge ${type} sm">${escapeHtml(label)}</span>`;
-  }
-
-  function renderCheckup(checks) {
-    const root = $('ovCheckupList');
-    if (!root) return;
-    if (!Array.isArray(checks) || !checks.length) {
-      root.innerHTML = '<div class="empty-state"><p>本次体检未返回结论。</p></div>';
-      return;
-    }
-    const ignored = new Set(loadIgnoredChecks());
-    // 已忽略恢复入口（标题行右侧，仅当存在忽略项时显示）
-    const legend = document.querySelector('.checkup-evidence-legend');
-    if (legend) {
-      const old = document.getElementById('checkupIgnoredRestore');
-      if (old) old.remove();
-      if (ignored.size > 0) {
-        const restore = document.createElement('button');
-        restore.type = 'button';
-        restore.id = 'checkupIgnoredRestore';
-        restore.className = 'btn-link checkup-restore-link';
-        restore.dataset.tip = '恢复显示全部已忽略的体检条目';
-        restore.textContent = `已忽略 ${ignored.size} 项，点击恢复`;
-        restore.addEventListener('click', () => {
-          saveIgnoredChecks([]);
-          if (lastCheckupChecks) renderCheckup(lastCheckupChecks);
-        });
-        legend.insertAdjacentElement('afterend', restore);
-      }
-    }
-    // 过滤已忽略；异常 > 注意 > 无法判定 > 正常 排序（问题项优先露出），同档保持主进程返回顺序
-    const rank = { bad: 0, warn: 1, unknown: 2, ok: 3 };
-    const sorted = checks
-      .filter(c => c && c.id && !ignored.has(c.id))
-      .sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3));
-    if (!sorted.length) {
-      root.innerHTML = '<div class="empty-state"><p>全部条目均正常或已被忽略。</p></div>';
-      return;
-    }
-    root.innerHTML = sorted.map(c => {
-      const actionable = c.status === 'bad' || c.status === 'warn';
-      const jump = CHECKUP_JUMP[c.id];
-      const actions = `
-          <span class="checkup-row-actions">
-            <span class="checkup-row-evidence">${escapeHtml(c.evidence || '未验证')}</span>
-            ${jump ? `<button type="button" class="checkup-btn" data-checkup-jump="${escapeHtml(jump.page)}" data-tip="${escapeHtml(jump.tip)}">去处理</button>` : ''}
-            <button type="button" class="checkup-btn checkup-btn-ignore" data-checkup-ignore="${escapeHtml(c.id)}" data-tip="不再显示该条目（可随时在标题旁恢复）">忽略</button>
-          </span>`;
-      return `
-      <div class="checkup-row row-card row-card-top" data-status="${escapeHtml(c.status || 'unknown')}">
-        <div class="checkup-row-main">
-          <div class="checkup-row-head">
-            ${checkupStatusBadge(c.status)}
-            <span class="checkup-row-title">${escapeHtml(c.title || '')}</span>
-            <span class="checkup-row-value">${escapeHtml(c.value || '')}</span>
-          </div>
-          <p class="checkup-row-detail">${escapeHtml(c.detail || '')}</p>
-        </div>
-        ${actions}
-      </div>`;
-    }).join('');
-    // 事件绑定：去处理 / 忽略（忽略持久化到 localStorage，重装/清缓存前一直生效）
-    root.querySelectorAll('[data-checkup-jump]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const page = btn.dataset.checkupJump;
-        if (page && window.app?.switchPage) window.app.switchPage(page);
-      });
-    });
-    root.querySelectorAll('[data-checkup-ignore]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const id = btn.dataset.checkupIgnore;
-        if (!id) return;
-        const list = loadIgnoredChecks();
-        if (!list.includes(id)) { list.push(id); saveIgnoredChecks(list); }
-        renderCheckup(lastCheckupChecks || checks);
-      });
-    });
-  }
-
-  // 最近一次体检原始结果（忽略/恢复后免重扫重渲染）
-  let lastCheckupChecks = null;
-
-  async function loadCheckup(force) {
-    if (state.checkupBusy) return;
-    const root = $('ovCheckupList');
-    if (!root) return;
-    if (!window.api?.overview?.checkup) {
-      // 浏览器预览模式：静态示例，保持布局一致。
-      // v2-L4P-45（F-10）：evidence 必须如实——示例数据不是「本机实测」，
-      // 假标注会顺着 UI 一路撒谎到用户眼前。
-      lastCheckupChecks = [
-        { id: 'cpu_topology', title: 'CPU 拓扑', status: 'ok', value: '8 核 16 线程', detail: '浏览器预览示例数据', evidence: '未验证' },
-        { id: 'memory_channels', title: '内存通道', status: 'warn', value: '1 条 / 16 GB', detail: '单通道运行，建议组双通道（预览示例）', evidence: '未验证' },
-        { id: 'sys_drive_free', title: '系统盘空间', status: 'bad', value: '剩余 8 GB（4%）', detail: '系统盘空间严重不足（预览示例）', evidence: '未验证' },
-        { id: 'disk_health', title: '磁盘健康', status: 'unknown', value: '无法读取', detail: '预览模式下不执行体检', evidence: '未验证' }
-      ];
-      renderCheckup(lastCheckupChecks);
-      return;
-    }
-    state.checkupBusy = true;
-    const btn = $('btnCheckupRerunText');
-    if (btn) btn.textContent = '体检中…';
-    if (force) root.innerHTML = '<div class="empty-state"><p>体检中…</p></div>';
-    try {
-      const resp = await window.api.overview.checkup({ refresh: !!force });
-      if (!resp || !resp.success) throw new Error((resp && resp.message) || '体检失败');
-      lastCheckupChecks = (resp.data && resp.data.checks) || [];
-      renderCheckup(lastCheckupChecks);
-      state.checkupLoaded = true;
-    } catch (e) {
-      root.innerHTML = `<div class="empty-state"><p>体检失败：${escapeHtml(e.message)}</p></div>`;
-    } finally {
-      state.checkupBusy = false;
-      if (btn) btn.textContent = '重新体检';
-    }
-  }
-
   // ===== 硬件信息（首次扫描缓存，后期手动刷新才更新） =====
   async function loadHardware(force) {
     if (state.hardwareLoaded && !force) return;
@@ -362,22 +212,19 @@
     tick();
     // 硬件信息走主进程缓存（毫秒级），立即渲染，避免等首轮指标采集完成才加载
     loadHardware();
-    // 系统体检：进页面自动执行一次（主进程 5 分钟缓存，重复进出不重复拉起 PowerShell）
-    loadCheckup(false);
     state.timer = setInterval(tick, POLL_INTERVAL);
-    window.app?.log('info', '系统体检实时监控启动');
+    window.app?.log('info', '系统概览实时监控启动');
   }
 
   function stop() {
     if (!state.running) return;
     state.running = false;
     if (state.timer) { clearInterval(state.timer); state.timer = null; }
-    window.app?.log('info', '系统体检实时监控停止');
+    window.app?.log('info', '系统概览实时监控停止');
   }
 
   function refresh() {
     loadHardware(true);
-    loadCheckup(true); // 手动刷新强制重新体检
     tick();
   }
 
@@ -418,7 +265,6 @@
 
   function init() {
     $('btnOverviewRefresh')?.addEventListener('click', refresh);
-    $('btnCheckupRerun')?.addEventListener('click', () => loadCheckup(true));
     // 概览卡片整卡跳转：内存卡 → 内存清理，磁盘卡 → 磁盘清理（data-jump 指定目标页）
     document.querySelectorAll('.overview-jump-card').forEach(card => {
       const go = () => {

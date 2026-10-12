@@ -57,7 +57,6 @@ const MUST_RUN = [
   'check-optimizer-write-contract',
   'check-cleanup-postactions',
   'check-desc-vs-writes',
-  'check-bugcheck-codes',
   'check-elapsed-facts',
   'check-version-sync',
   'check-updater-pubkey',

@@ -63,10 +63,10 @@
     // updater:set-mirror / updater:get-mirror 2026-10-06 随更新线路 UI 整链退役
     // （顺序固化国内源优先，无需用户选择）。
     // device / overview
+    // overview:checkup 2026-10-12 随首页「体检结论」区块全链路退役
     'device:scan': 'device_scan',
     'overview:metrics': 'overview_metrics',
     'overview:hardware': 'overview_hardware',
-    'overview:checkup': 'overview_checkup',
     // log
     'log:write': 'log_write',
     'log:read': 'log_read',
@@ -388,10 +388,6 @@
       hardware: function (options) {
         if (options === void 0) options = {};
         return invokeChannel('overview:hardware', options);
-      },
-      checkup: function (options) {
-        if (options === void 0) options = {};
-        return invokeChannel('overview:checkup', options);
       }
     },
 

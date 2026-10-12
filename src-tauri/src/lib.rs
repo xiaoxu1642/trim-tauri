@@ -318,7 +318,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::syspanel::syspanel_pagefile_apply,
         commands::overview::overview_metrics,
         commands::overview::overview_hardware,
-        commands::overview::overview_checkup,
         // ---- A 批：paths ----
         commands::paths::paths_load,
         commands::paths::paths_save,
