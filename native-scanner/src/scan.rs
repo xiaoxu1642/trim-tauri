@@ -133,6 +133,17 @@ fn progress(sink: &dyn Sink, n: u64) {
 /// 另外 `Sink` 回调（`scanned`/`warn`）原本留在 `files` 临界区里 ——
 /// Tauri 侧的实现要拿窗口锁再 `emit`，等于把 rayon 并行重新串起来，且 emit 内任何
 /// panic 会把 `files` 判中毒（M3）。这里把「入桶」收成单一函数，锁内只搬运、回调在锁外。
+/// v5-K02 批次 2（N1-M05）：analyze 家族四函数（dir_size / child_dir_sizes / analyze_dir_deep /
+/// analyze，均无 ScanCtx 句柄）的 reparse 跳过留痕，进程级计数器；只留痕、不进判定，同进程交替跑不同域时数字会混、仅作参考。
+static REPARSE_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn note_reparse_skip() {
+    REPARSE_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn take_reparse_skips() -> u64 {
+    REPARSE_SKIPS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct ScanCtx {
     files: Mutex<Vec<(PathBuf, u64)>>,
     counter: AtomicU64,
@@ -267,19 +278,22 @@ fn walk_level(
     let mut subdirs: Vec<PathBuf> = Vec::new();
     let mut batch: Vec<(PathBuf, u64)> = Vec::new();
     for ent in rd.flatten() {
+        // v5-K02 批次 2（N1-M05）：reparse 拦在 file_type 分支**之前**——条目级全形状
+        // （挂载卷根/云占位符/指向文件的链接，属性位 0x400；此前只挂 is_dir 分支内，
+        // is_symlink=false 的 file 型 reparse 被当普通文件收进扫描结果）。
+        // ent.metadata() 报链接本相属性（不跟随，2026-10-12 探针实测）⇒ 分支前拦有效。
+        if is_reparse(&ent) {
+            ctx.note_reparse_skip();
+            continue;
+        }
         let ft = match ent.file_type() {
             Ok(t) => t,
             Err(_) => continue,
         };
         if ft.is_symlink() {
-            continue;
+            continue; // 非 Windows 兜底：那里 is_reparse 恒 false，symlink 由本分支拦
         }
         if ft.is_dir() {
-            // 审查v4-M6：联接点/挂载点不深入
-            if is_reparse(&ent) {
-                ctx.note_reparse_skip(); // R1-2：留痕，不参与判定
-                continue;
-            }
             subdirs.push(ent.path());
         } else if ft.is_file() {
             // P0：DirEntry 自带大小，不额外 syscall
@@ -290,8 +304,7 @@ fn walk_level(
                 }
             }
         }
-    }
-    if !batch.is_empty() {
+    }    if !batch.is_empty() {
         // 审查 M7：条目上限在此收口。放不下的部分丢弃并置位 truncated，
         // 让调用方知道「结果不完整」而不是「就这么些重复」。
         ctx.add_batch(batch, sink);
@@ -317,14 +330,20 @@ fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>) {
         Ok(r) => r,
         Err(_) => return,
     };
-    // 审查v4-M6：只统计真实目录——Path::is_dir 会跟随联接点/符号链接，
-    // 指向其他卷的联接点会把扫描范围外的内容重复计入
+    // 审查v4-M6：只统计真实目录——Path::is_dir 会跟随联接点/符号链接，指向其他卷的
+    // 联接点会把扫描范围外的内容重复计入。v5-K02 批次 2（N1-M05）：reparse 拦提到
+    // 类型分支**之前**（与五处 walk 同形），留痕走进程级计数器（见 REPARSE_SKIPS 注释）。
     let children: Vec<PathBuf> = rd
         .flatten()
-        .filter(|ent| match ent.file_type() {
-            Ok(t) => t.is_dir() && !is_reparse(ent),
-            Err(_) => false,
+        .filter(|ent| {
+            if is_reparse(ent) {
+                note_reparse_skip();
+                false
+            } else {
+                true
+            }
         })
+        .filter(|ent| matches!(ent.file_type(), Ok(t) if t.is_dir()))
         .map(|ent| ent.path())
         .collect();
     let sizes: Vec<(PathBuf, u64)> = children
@@ -344,11 +363,16 @@ fn dir_size(dir: &Path) -> u64 {
             Err(_) => continue,
         };
         for ent in rd.flatten() {
+            // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
+            if is_reparse(&ent) {
+                note_reparse_skip();
+                continue;
+            }
             let fp = ent.path();
             match ent.file_type() {
                 Ok(t) if t.is_symlink() => continue,
                 // 审查v4-M6：联接点/挂载点不深入（同 walk）
-                Ok(t) if t.is_dir() && !is_reparse(&ent) => stack.push(fp),
+                Ok(t) if t.is_dir() => stack.push(fp),
                 Ok(t) if t.is_file() => {
                     // M-17（审查 2026-10-07）：DirEntry 已带元数据，复用 `ent.metadata()`
                     // 省掉每文件一次 `fs::metadata` 的额外 syscall（整盘扫描不可忽略）。
@@ -434,9 +458,14 @@ fn analyze_dir_deep(
             Err(_) => continue,
         };
         for ent in rd.flatten() {
+            // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
+            if is_reparse(&ent) {
+                note_reparse_skip();
+                continue;
+            }
             match ent.file_type() {
                 Ok(t) if t.is_symlink() => continue,
-                Ok(t) if t.is_dir() && !is_reparse(&ent) => {
+                Ok(t) if t.is_dir() => {
                     dirs += 1;
                     stack.push(ent.path());
                 }
@@ -535,9 +564,14 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
         let mut old_all: BinaryHeap<std::cmp::Reverse<OldFile>> = BinaryHeap::new();
         let now = now_millis();
         for ent in rd.flatten() {
+            // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
+            if is_reparse(&ent) {
+                note_reparse_skip();
+                continue;
+            }
             match ent.file_type() {
                 Ok(t) if t.is_symlink() => continue,
-                Ok(t) if t.is_dir() && !is_reparse(&ent) => subdirs.push(ent.path()),
+                Ok(t) if t.is_dir() => subdirs.push(ent.path()),
                 Ok(t) if t.is_file() => {
                     let meta = ent.metadata();
                     let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -618,6 +652,7 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
             ("fileCount", file_count.to_string()),
             ("elapsedMs", t0.elapsed().as_millis().to_string()),
             ("childrenTruncated", if children_truncated { "true" } else { "false" }.to_string()),
+            ("skippedReparse", take_reparse_skips().to_string()), // v5-K02 批次2：本根 reparse 跳过量（只呈现）
         ]);
         for (cp, sz) in &children {
             item(sink, "analyzer", cp, *sz, &[("kind", "dir".to_string())]);
@@ -1602,6 +1637,9 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
     for (label, root) in roots {
         let mut cur: Vec<(PathBuf, u64)> = Vec::new();
         child_dir_sizes(&root, &mut cur);
+        // v5-K02 批次2（N1-M05）：本根 reparse 跳过量一次性 warn（同 ScanCtx::finish 姿势，只呈现）
+        let skipped = take_reparse_skips();
+        if skipped > 0 { sink.warn(&format!("应用数据扫描（{label}）：已跳过 {skipped} 个重解析点目录（不深入以避免重复计数）")); }
         for (p, sz) in cur {
             if sz >= minb {
                 out.push((label.clone(), p, sz));
@@ -1632,7 +1670,7 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
         } else if p.is_dir() {
             let sz = dir_size(p);
             total_dirs += 1;
-            item(sink, "size", p, sz, &[("exists", "true".to_string())]);
+            item(sink, "size", p, sz, &[("exists", "true".to_string()), ("skippedReparse", take_reparse_skips().to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
         }
     }
     let _ = (total_files, total_dirs);
@@ -2198,6 +2236,88 @@ mod tests {
 
     use super::*;
     use std::sync::Arc;
+
+    #[derive(Default)]
+    struct CapSink(Mutex<Vec<String>>);
+    impl Sink for CapSink {
+        fn item(&self, _p: &Path, line: &str) { self.0.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string()); }
+        fn progress(&self, _n: u64) {}
+        fn scanned(&self, _n: u64) {}
+        fn warn(&self, _m: &str) {}
+    }
+
+    fn walk_names(root: &Path) -> (Vec<String>, u64) {
+        let ctx = ScanCtx::new();
+        walk_level(root, &ctx, 0, 0, &CapSink::default());
+        let names = ctx.finish(&CapSink::default()).iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        (names, ctx.skipped_reparse())
+    }
+
+    fn seed_samples(root: &Path) {
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::write(root.join("real/keep.txt"), b"12345").unwrap();
+        fs::write(root.join("plain.txt"), b"12345").unwrap();
+    }
+
+    /// v5-K02 批次 2（N1-M05）：条目级 reparse 全形状拦截——非目录 reparse 假样本
+    /// （文件符号链接 + symlink_dir 目录链接）进扫描结果前必须被跳过**并计数**。
+    /// 判红自证：拦撤回 is_dir 分支内 ⇒ 计数断言红（两链接改走 is_symlink 静默 skip）。
+    #[test]
+    fn walk_level_跳过非目录reparse条目并计数() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        let root = std::env::temp_dir().join(format!("trim-reparse-walk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        seed_samples(&root);
+        symlink_file(root.join("plain.txt"), root.join("file-link.txt")).unwrap();
+        symlink_dir(root.join("real"), root.join("dir-link")).unwrap();
+        let (names, skipped) = walk_names(&root);
+        assert_eq!(names.len(), 2, "只应收 plain.txt 与 real/keep.txt: {names:?}");
+        assert!(names.iter().any(|n| n == "plain.txt") && names.iter().any(|n| n == "keep.txt"), "普通文件/真实子目录文件被漏收: {names:?}");
+        for bad in ["file-link.txt", "dir-link"] { assert!(!names.iter().any(|n| n == bad), "reparse 链接 {bad} 进了扫描结果"); }
+        assert_eq!(skipped, 2, "两个 reparse 链接都应计数留痕");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// v5-K02 批次 2 真机探针（N1-M05）：mklink /J 真 junction + mklink 文件符号链接
+    /// + OneDrive 云占位符（is_symlink=false 的 file 型 reparse——核心漏口）进 walk_level
+    /// 前必须被跳过并计数；样本不可构造时 skip 声明，不假绿。自建自清、只读判定。
+    #[test]    #[ignore = "真机：mklink /J junction 与文件链接穿越 walk_level（自建自清，发布前人工跑）"]
+    fn live_non_dir_reparse_entries_are_skipped_with_trace() {
+        let root = std::env::temp_dir().join(format!("trim-reparse-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        seed_samples(&root);
+        let mut expect = 0u64;
+        for (flag, link, target) in [("/J", "junc-link", "real"), ("", "mklink-file.txt", "plain.txt")] {
+            let ok = std::process::Command::new("cmd")
+                .args(["/C", &format!(r#"mklink {flag} "{}" "{}""#, root.join(link).display(), root.join(target).display())])
+                .output().map(|o| o.status.success()).unwrap_or(false);
+            if ok { expect += 1; } else { eprintln!("SKIP：mklink {flag:?} {link} 失败（权限/开发者模式），样本未校验"); }
+        }        let (names, skipped) = walk_names(&root);
+        assert_eq!(names.len(), 2, "只应收 plain.txt 与 real/keep.txt: {names:?}");
+        assert!(!names.iter().any(|n| ["junc-link", "mklink-file.txt"].contains(&n.as_str())), "链接进了扫描结果: {names:?}");
+        if expect == 0 { eprintln!("SKIP：本机无可构造 reparse 样本，本段未校验"); }
+        else { assert_eq!(skipped, expect, "可构造 reparse 链接必须计数留痕"); }
+        // OneDrive 云占位符（is_symlink=false 的 file 型 reparse——核心漏口）有则验、无则 skip
+        if let Some(od) = std::env::var_os("USERPROFILE").map(|h| std::path::PathBuf::from(h).join("OneDrive")).filter(|p| p.is_dir()) {
+            fn find_ph(p: &Path, d: u32) -> Option<std::path::PathBuf> {
+                if d > 3 { return None; }
+                for e in fs::read_dir(p).ok()?.flatten() {
+                    let Ok(ft) = e.file_type() else { continue };
+                    let ep = e.path();
+                    // is_reparse_target（symlink_metadata 口径，不跟随）：找「链接本相即 reparse」的
+                    // file 型样本，且不占用扫描器跳过站点口径（R1-2a 按 is_reparse( 站点判）
+                    if ft.is_dir() { if let Some(f) = find_ph(&ep, d + 1) { return Some(f); } }
+                    else if ft.is_file() && !ft.is_symlink() && is_reparse_target(&ep) { return Some(ep); }
+                }                None
+            }
+            if let Some(ph) = find_ph(&od, 0) {
+                let (n2, s2) = walk_names(ph.parent().unwrap());
+                assert!(!n2.contains(&ph.file_name().unwrap().to_string_lossy().to_string()), "云占位符进了扫描结果: {}", ph.display());
+                assert!(s2 >= 1, "云占位符未计数留痕: {}", ph.display());
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 
     /// M6 验收①：一层分析的**总量守恒**。四个口径必须对得上同一个数：
     /// summary 的总量 = 各时间桶之和 = 各扩展名之和 = 顶层文件 + 各一级子目录递归之和。

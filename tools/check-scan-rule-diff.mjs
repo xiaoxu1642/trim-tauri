@@ -155,16 +155,19 @@ check(
  * 已知未留痕的**条件过滤**站点（枚举口径的一部分，不是「丢弃」）。
  * 每条登记是为了让「没留痕」这件事在门禁输出里可见，而不是靠判据失明蒙混。
  *
+ * v5-K02 批次 2（N1-M05，2026-10-12）：原表里 analyze 的两条
+ * （`t.is_dir() && !is_reparse(ent)` / `is_reparse(&ent) => subdirs.push`）已移出——
+ * 那两处随 reparse 全形状化改成了「跳过 + note_reparse_skip()」形态，留痕在位，
+ * 归 R1-2a（跳过站点必须有计数）管，不再是「未留痕缺口」。
+ *
  * ⚠️ **匹配用「内容 needle + 唯一性」，不用行号**：行号会因任意一次插删而漂移，
  * 判红信息会变成「8 条全过期」这种没法用的噪音（实测踩过：删掉 scan.rs:275 的一行计数
  * 后，本组把其余 8 条全报成过期，而真正的问题在上一组已经点名了）。
  * 现在口径是「needle 在该文件里**恰好出现一次**」，出现多次说明登记表写糊了，也判红。
  */
 const EXPECTED_UNTRACED = [
-  ['scan.rs', 't.is_dir() && !is_reparse(ent)', 'analyze 的子目录枚举：只要真目录'],
   ['scan.rs', 'stack.push(fp)', 'dir_size：只要真目录，防跨卷联接点重复计入'],
   ['scan.rs', 'dirs += 1;\n                    stack.push', 'analyze_dir_deep：只要真目录'],
-  ['scan.rs', 'is_reparse(&ent) => subdirs.push', 'analyze：只要真目录'],
   ['scan.rs', 'ft.is_dir() && !is_reparse(&ent)', 'expand_tasks：只要真目录'],
   ['scan.rs', 'if rec && !is_reparse(&ent)', 'topk_in：非递归档或非真目录不下钻'],
   ['scan.rs', '|| is_reparse(&ent)', 'empty 根下候选筛选：reparse 不作候选'],
