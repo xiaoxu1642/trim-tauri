@@ -727,6 +727,21 @@ use super::residue_update::*;
             matches!(classify_residue_op("folder", &sys32), OpVerdict::Skip(_)),
             "系统目录必须被拒（v4-K02）: {sys32}"
         );
+        // v5-K02 批次 1（R2a-K01）：同一目录的非规范写法在执行侧同样必须 Skip。
+        // bypass-probe 修前实测这三种形态 is_system_namespace=false（判据入口不归一），
+        // 曾以 Ready 进删除链；入口过 normalize_for_compare 后三形态与规范形态同结论。
+        // 判红自证：把 is_system_namespace 的归一删掉 ⇒ 本组三条全红。
+        let d = drive.trim_end_matches('\\');
+        for form in [
+            format!(r"\\?\{sys32}"),
+            format!("{d}\\Program Files\\..\\Windows\\System32"),
+            r"\Windows\System32".to_string(),
+        ] {
+            assert!(
+                matches!(classify_residue_op("folder", &form), OpVerdict::Skip(_)),
+                "非规范系统目录形态必须被拒: {form}"
+            );
+        }
         // ⑧ 反例：合法安装位置（%ProgramFiles% 子孙）不许被系统命名空间判据误伤。
         // 用 Windows 自带的 Common Files（几乎必然存在）；不存在时显式跳过并说明。
         let pf = format!("{}\\Program Files\\Common Files", drive.trim_end_matches('\\'));

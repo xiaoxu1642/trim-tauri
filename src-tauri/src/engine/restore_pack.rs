@@ -295,6 +295,13 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
 /// 并不在册。删除侧不碰它靠的是「规则库根本不会产出那种目标」，而还原侧的路径来自磁盘上
 /// 一份可被改写的 manifest，不能拿「没人会那么写」当防线。
 ///
+/// v5-K02 批次 1（R6b-01）：本函数此前私有一份「replace+lowercase」的 %WINDIR% 判据
+/// ——仓内第三份同语义实现（N6 禁的正是这个形状），protect 侧「`\\?\` 必须剥掉」的
+/// 收紧不会自动传到副本，`\\?\C:\Windows\System32\drivers\x.sys` 因此直接穿过
+/// （rustc 探针实测：windir 字符串 guard 不触发、protect subtree 又不含
+/// `System32\drivers`）。现删私有副本，入口统一过 `normalize_for_compare`，
+/// %WINDIR% 判据改调 `protect::is_system_namespace`（内部已归一）。
+///
 /// 返回 `None` = 放行；`Some(原因)` = 拒绝该条（逐项拒，不整批失败——一坏行不该夺走其余可还原项）。
 pub fn restore_path_verdict(path: &str) -> Option<String> {
     if path.is_empty() {
@@ -313,20 +320,27 @@ pub fn restore_path_verdict(path: &str) -> Option<String> {
     {
         return Some("路径含 ..".into());
     }
-    if protect::is_path_protected(path) {
+    // 归一（与删除侧同一入口）：剥 `\\?\` / 还原 `\\?\UNC\`、设备路径 fail-closed、
+    // 折叠 `.`/`..`、盘符相对按盘根拼、尾点尾空格与 8.3 一并无收口。
+    let n = protect::normalize_for_compare(path);
+    if !n.ok {
+        return Some("路径形态无法判定（设备路径等无法判定的形态），已拒绝".into());
+    }
+    let low = n.low;
+    let np = Path::new(&low);
+    // 盘根复核：`\\?\C:\` 的 components() 是 2（verbatim 前缀 + 根），绕过上面那道
+    // 判据；归一后是 `c:`（单 component）⇒ 在本步一并收口
+    if np.components().count() < 2 {
+        return Some("盘根目录不可作为还原目标".into());
+    }
+    if protect::is_path_protected(&low) {
         return Some("受保护路径".into());
     }
-    // %WINDIR% 整棵补上：这是删除侧清单覆盖不到、但还原写进去就是改系统的那部分
-    let windir = std::env::var("SystemRoot")
-        .or_else(|_| std::env::var("windir"))
-        .unwrap_or_else(|_| r"C:\Windows".to_string());
-    let low = path.replace('/', "\\").to_lowercase();
-    let wlow = windir.replace('/', "\\").to_lowercase();
-    if low == wlow || low.starts_with(&format!("{wlow}\\")) {
+    if protect::is_system_namespace(&low) {
         return Some("位于系统目录（%WINDIR%）内，还原不提供写入系统目录的入口".into());
     }
     // 父目录是 reparse point 时，写进去会落到链接指向的另一处，等于绕过上面的路径判定
-    if let Some(parent) = p.parent() {
+    if let Some(parent) = np.parent() {
         if let Ok(md) = parent.symlink_metadata() {
             if md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return Some("父目录是 reparse point，写入会落到链接目标外".into());
@@ -648,6 +662,19 @@ mod tests {
         assert!(
             restore_path_verdict(&legacy).is_some(),
             "is_path_protected 在册的老根必须拒，实得放行: {legacy}"
+        );
+        // v5-K02 批次 1（R6b-01）：verbatim 前缀不得穿过 %WINDIR% 判据。
+        // 修前 rustc 探针实测：`\\?\C:\Windows\System32\drivers\x.sys` 的 windir
+        // 字符串 guard 不触发、protect subtree 又不含 `System32\drivers` ⇒ 放行。
+        assert!(
+            restore_path_verdict(r"\\?\C:\Windows\System32\drivers\x.sys").is_some(),
+            "verbatim 形态必须被系统目录判据拒（修前实测放行）"
+        );
+        // 同一根因：`\\?\C:\` 的 components() 是 2（verbatim 前缀 + 根），盘根判据
+        // 对它整体失效；归一后是 `c:`（单 component）⇒ 归一后的盘根复核收口
+        assert!(
+            restore_path_verdict(r"\\?\C:\").is_some(),
+            "verbatim 盘根必须拒（components()=2 绕过了原始盘根判据）"
         );
         assert!(
             restore_path_verdict(&std::env::temp_dir().join("trim-rp-case").join("a.txt").to_string_lossy())

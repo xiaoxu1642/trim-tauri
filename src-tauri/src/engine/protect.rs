@@ -191,21 +191,30 @@ fn fold_components(body: &str) -> String {
     out.join("\\")
 }
 
-/// 解析为绝对路径：相对路径按当前工作目录拼接（对照 JS path.resolve 的 CWD 基准）。
+/// 解析为绝对路径：相对路径按进程 CWD 拼接（对照 JS path.resolve 的 CWD 基准）。
 ///
-/// ⚠️ 盘符相对形态（`\Foo`，2026-10-04 审计 §4.10）：Rust `Path::is_absolute` 对它
-/// 判 false ⇒ 这里拼 CWD；而 Windows 枚举/删除语义按「当前盘的根」解析——同一
-/// 字符串两侧会算出不同目标。这条分叉**不在本函数修**（本函数的消费输入是各域
-/// 已枚举/已展开的路径，把 CWD 拼接改成盘根拼接会波及五个域的比较口径）；
-/// 删除链的闭合在共用展开口 `trim_finder::cleanup_scan::expand_glob_dirs` 与
-/// `cleanup_execute` 的 fileKey/目录型守卫：盘符相对形态在枚举前就被拒绝并
-/// 留痕，永远到不了删除步骤。
+/// ⚠️ 盘符相对形态（`\Foo`，2026-10-04 审计 §4.10 曾裁定「不在本函数修」，v5-K02
+/// 批次 1 修掉）：Rust `Path::is_absolute` 对它判 false ⇒ 旧实现拼 CWD，而 Win32
+/// 枚举/删除语义按「当前盘的根」解析——同一字符串在判定侧与执行侧算出不同目标
+/// （实测 `\Windows\System32` 的 `is_dir` = true，JS 权威 `path.win32.resolve`
+/// 同样按盘根拼）。R2a 用注册表 `InstallLocation` 原串证伪了「消费输入都是已展开
+/// 路径」这一前提：`\Windows\System32` 同时穿过 `is_path_protected` 与
+/// `is_system_namespace` 两道闸。改为盘根拼接后三端（判定/执行/JS 权威）同口径。
 fn resolve_path(s: &str) -> Option<String> {
     let p = std::path::Path::new(s);
     let abs = if p.is_absolute() {
         p.to_path_buf()
+    } else if s.starts_with('\\') || s.starts_with('/') {
+        // 盘符相对：拼当前盘根（SystemDrive 缺失按 C:），与 Win32/JS 权威对齐
+        let d = env("SystemDrive");
+        let drive = if d.is_empty() { "C:".to_string() } else { d.trim_end_matches('\\').to_string() };
+        std::path::PathBuf::from(format!("{drive}{s}"))
     } else {
-        std::env::current_dir().ok()?.join(p)
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            // 取不到 CWD 时不拼（旧 path_key 同口径：原串继续参与折叠）
+            Err(_) => return Some(s.to_string()),
+        }
     };
     let text = abs.to_string_lossy().to_string();
     let (prefix, body) = split_prefix(&text);
@@ -217,6 +226,53 @@ fn resolve_path(s: &str) -> Option<String> {
     } else {
         Some(format!("{}\\{}", prefix, folded))
     }
+}
+
+/// 去尾部空白与点号（Win32 路径比较忽略它们）+ 尾分隔符（`C:\` → `C:`，
+/// 但 `C:` 本身不被削成空串）。
+fn trim_tail(s: &str) -> String {
+    let mut t = s.trim_end_matches([' ', '.']).to_string();
+    while t.len() > 1 && (t.ends_with('\\') || t.ends_with('/')) {
+        t.pop();
+    }
+    t
+}
+
+/// 词法归一的**唯一实现**（v5-K02 批次 1 并轨，R6a-M02）。
+///
+/// 此前仓内有两份词法归一：判据层 [`normalize_for_compare`]（protect）与比较键层
+/// [`crate::engine::paths::path_key`]（paths），两者差在「设备路径是否拒 / 尾点尾
+/// 空格是否去 / `//` 是否还原 / 盘符相对是否按盘根拼」——同一路径在两个域会算成
+/// 两个键（P2-1 收敛掉的病换个位置复发）。本函数收敛为一份，两域共用。
+///
+/// 口径：剥 `\\?\UNC\` / `\\?\` verbatim 前缀 → `//` 还原为 UNC → 裸盘符按字面键 →
+/// 盘符相对按当前盘根、其余相对路径拼 CWD → 拆不可折叠的根前缀（盘符 `X:` 或
+/// UNC `\\server\share`）→ 折叠 `.` / `..` → 统一 `\` → 去尾点尾空格与尾分隔符 →
+/// 小写。
+///
+/// 刻意**不做**的两件事（由调用方按各自域的策略决定，不在这里）：
+/// - 设备路径 `\\.\` / `\??\` 的 fail-closed——那是 protect 判据层的安全策略
+///   （见 [`normalize_for_compare`]），比较键层不需要；
+/// - 8.3 短名展开——触盘，只有安全判据需要。
+pub fn normalize_lexical(p: &str) -> String {
+    let s = p.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if is_bare_drive(s) {
+        return s.to_lowercase();
+    }
+    let mut text = s.to_string();
+    if text.starts_with("\\\\?\\UNC\\") {
+        text = format!("\\\\{}", &text[8..]);
+    } else if text.starts_with("\\\\?\\") {
+        text = text[4..].to_string();
+    }
+    if text.starts_with("//") {
+        text = format!("\\\\{}", &text[2..]);
+    }
+    let resolved = resolve_path(&text).unwrap_or_else(|| text.clone());
+    trim_tail(&resolved).to_lowercase().replace('/', "\\")
 }
 
 /// 8.3 短名展开（v3.7.2 误杀修复；2026-10-12 二次修正）。返回
@@ -275,22 +331,15 @@ fn long_path_or_none(p: &str) -> Option<String> {
 }
 
 /// 对照 JS `normalizeForCompare`
+///
+/// v5-K02 批次 1：词法部分收敛到 [`normalize_lexical`]（与 `paths::path_key` 共用），
+/// 本函数只保留 protect 域特有的两层——设备路径 fail-closed（判据层安全策略）与
+/// 8.3 短名触盘展开，再把结果包成 [`Norm`]。
 pub fn normalize_for_compare(p: &str) -> Norm {
-    let mut s = p.trim().to_string();
+    let s0 = p.trim();
     let fail = || Norm { ok: false, low: String::new(), drive_root: false, short_name: false };
-    if s.is_empty() {
+    if s0.is_empty() {
         return fail();
-    }
-    // `\\?\` 前缀让 Win32 跳过路径解析，必须剥掉再比较，否则可绕过全部判定。
-    // v2-L4P-17（B-3）：`\\?\UNC\` 是设备名形态的 UNC，先还原成 `\\server\share\…`
-    // 再走 UNC 分支——无条件剥 4 字符会把 `\\?\UNC\srv\pub\x` 变成相对路径 `UNC\srv\pub\x`
-    // 拼上 CWD，受保护根本身是 UNC 时（企业文件夹重定向）即 protected→unprotected。
-    // 该形态是三端共有的口径缺口（JS 权威同样如此，vendor 只读不回改）；Tauri 侧
-    // 判定统一走本函数，先在执行端收紧，向量进 parity 夹具钉住结论。
-    if s.starts_with("\\\\?\\UNC\\") {
-        s = format!("\\\\{}", &s[8..]);
-    } else if s.starts_with("\\\\?\\") {
-        s = s[4..].to_string();
     }
     // 2026-10-04（磁盘清理审计 §3.1）：`\\.\` 与 `\??\` 是**设备路径**，Win32 直接
     // 交给对象管理器、跳过常规路径解析。`\\.\C:\Users\<me>\Documents` 与
@@ -302,30 +351,20 @@ pub fn normalize_for_compare(p: &str) -> Norm {
     // 选**拒绝**而不是归一化：设备路径里还有 `\\.\PIPE\…`、`\\.\PhysicalDrive0`
     // 这类根本不按路径语义解释的形态，我们没有能力枚举它们是否安全。
     // 「无法判定 ⇒ 按受保护处理」正是本函数的 fail-closed 契约（`!n.ok` 即拦）。
+    // 必须在归一之前判：剥掉 verbatim 前缀后就再也看不出设备路径原形。
     //
     // ⚠️ 与 JS 权威（vendor/upstream-js/src/main/ps-protect-path.js）**刻意分歧**：
     // 那侧同样漏了这两个前缀，但 vendor 只读不回改。沿用本段上一条的既定处置——
     // 「Tauri 侧判定统一走本函数，先在执行端收紧」，向量由本文件下方用例钉住，
     // 不塞进 JS 生成的 parity 夹具（塞进去会与 `matches_js_authority` 打架）。
-    if s.starts_with("\\\\.\\") || s.starts_with("\\??\\") {
+    if s0.starts_with("\\\\.\\") || s0.starts_with("\\??\\") {
         return fail();
     }
-    // v2-L4P-17（B-3）续：前导 `//`（正斜杠 UNC）。Node `path.win32.resolve` 把两个
-    // 前导分隔符（不分方向）都认作 UNC 起点（实测 `//srv/pub/x` → `\\srv\pub\x`），
-    // 而 Rust `Path::is_absolute` 只认反斜杠 ⇒ `//srv/...` 会被当相对路径拼 CWD，
-    // 与 JS 权威发散。前置还原对齐三端。
-    if s.starts_with("//") {
-        s = format!("\\\\{}", &s[2..]);
+    let low0 = normalize_lexical(s0);
+    if low0.is_empty() {
+        return fail();
     }
-    // 裸盘符必须在 resolve 之前拦下：Node 会把 "C:" 当驱动器相对路径拼上 CWD。
-    if is_bare_drive(&s) {
-        return Norm { ok: true, low: s.to_lowercase(), drive_root: true, short_name: false };
-    }
-    let resolved = match resolve_path(&s) {
-        Some(v) => v,
-        None => return fail(),
-    };
-    s = resolved;
+    let mut s = low0;
     // 8.3 短名先触盘展开；展开不掉 → fail-closed（与 PS 侧 GetFullPath 之后的判定同位）。
     // 2026-10-12：成败判定收进 expand_short_path 内——整条展开成功即采信（结果可与
     // 输入相同：波浪号是字面名）；只有「仅祖先可展开、剩余段未展开且带波浪号」
@@ -333,21 +372,14 @@ pub fn normalize_for_compare(p: &str) -> Norm {
     // 合成名整批误拒（实测 33639 个目标全灭），且不再需要事后二次 check。
     if is_short_name(&s) {
         match expand_short_path(&s) {
-            Some(ex) => s = ex,
+            Some(ex) => s = trim_tail(&ex).to_lowercase().replace('/', "\\"),
             None => return Norm { ok: false, low: String::new(), drive_root: false, short_name: true },
         }
-    }
-    // 去尾部空白与点号（Win32 路径比较会忽略它们）
-    let trimmed = s.trim_end_matches([' ', '.']).to_string();
-    s = trimmed;
-    while s.len() > 1 && (s.ends_with('\\') || s.ends_with('/')) {
-        s.pop();
     }
     if is_bare_drive(&s) {
         return Norm { ok: true, low: s.to_lowercase(), drive_root: true, short_name: false };
     }
-    let low = s.to_lowercase().replace('/', "\\");
-    Norm { ok: true, low, drive_root: false, short_name: false }
+    Norm { ok: true, low: s, drive_root: false, short_name: false }
 }
 
 /// 对照 JS `buildDefaultRoots`（只依赖环境变量，任何进程都能算出同一结果）
@@ -528,16 +560,32 @@ pub fn is_path_protected_with(p: &str, r: &ProtectRoots) -> bool {
 /// 前缀判定带分隔符（`C:\WindowsApps` 不是 `C:\Windows` 的子树）；不可判（空串 /
 /// 取不到系统根）按拒处理（fail-closed）。明确**不覆盖** `%ProgramFiles%` /
 /// `%ProgramData%`：那是合法程序安装位置。
+///
+/// v5-K02 批次 1（R2a-K01 / R6a-M01）：入参先过 [`normalize_for_compare`]——此前本
+/// 函数只做 trim+小写，`\\?\C:\Windows\System32`（verbatim）、
+/// `C:\Program Files\..\Windows\System32`（可折叠 `..`）、`\Windows\System32`
+/// （盘符相对）三种同一目录的写法（`GetFileAttributesW` 实测 OS 全部认是目录）
+/// 直接穿过本闸，与 `is_path_protected` 之间形成缝。归一失败（设备路径 / 展不掉
+/// 的 8.3 短名）按拒处理，与 `is_path_protected` 的 fail-closed 同契约。
+/// 系统根本身也过同一归一：env 值可能带尾杠 / 大小写 / verbatim 差异。
 pub fn is_system_namespace(p: &str) -> bool {
-    let low = p.trim().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    let n = normalize_for_compare(p);
+    if !n.ok {
+        return true;
+    }
+    let low = n.low;
     if low.is_empty() {
         return true;
     }
-    let sysroot = env("SystemRoot").replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
-    if sysroot.is_empty() {
+    let raw_root = env("SystemRoot");
+    if raw_root.is_empty() {
         return true;
     }
-    low == sysroot || low.starts_with(&format!("{sysroot}\\"))
+    let rn = normalize_for_compare(&raw_root);
+    if !rn.ok || rn.low.is_empty() {
+        return true;
+    }
+    low == rn.low || low.starts_with(&format!("{}\\", rn.low))
 }
 
 /// 注入 PS / 原生删除的清单 JSON（元素已是归一化小写绝对路径，PS 只做字符串比较）。
@@ -1158,7 +1206,95 @@ mod tests {
         ] {
             assert!(!is_system_namespace(&miss), "合法位置被误拦: {miss}");
         }
+        // v5-K02 批次 1（R2a-K01 / R6a-M01）：同一目录的非规范写法必须同样命中。
+        // bypass-probe 修前实测：verbatim / 可折叠 `..` / 盘符相对三种形态
+        // （`GetFileAttributesW` 实测 OS 全部认是同一目录）本判据全返 false，
+        // 与 `is_path_protected` 之间形成缝 ⇒ System32 整棵能进残留删除清单。
+        // 判据入口过 `normalize_for_compare` 后闭合。判红自证：把
+        // `is_system_namespace` 里的归一调用删掉 ⇒ 本组三条全红。
+        for hit in [
+            format!(r"\\?\{d}\Windows\System32"),
+            format!("{d}\\Program Files\\..\\Windows\\System32"),
+            format!("{d}\\Windows\\..\\Windows\\System32"),
+            r"\Windows\System32".to_string(), // 盘符相对：按当前盘根解析
+            format!(r"\\?\{d}\Windows\System32\drivers\x.sys"),
+            format!("{d}\\Windows\\System32\\"),   // 尾分隔符
+            format!("{d}\\WINDOWS\\SYSTEM32"),     // 大小写
+        ] {
+            assert!(is_system_namespace(&hit), "非规范形态逃过系统命名空间判据: {hit}");
+        }
+        // 设备路径 fail-closed：判不出来 ⇒ 按拒（与 is_path_protected 同契约）
+        for form in [r"\\.\C:\Windows", r"\??\C:\Windows"] {
+            assert!(is_system_namespace(form), "设备路径必须 fail-closed: {form}");
+        }
         assert!(is_system_namespace(""), "不可判按拒（fail-closed）");
+    }
+
+    /// v5-K02 批次 1（R6a-M02）：判据层与比较键层共用同一词法归一。
+    /// `paths::path_key(p)` 必须等于 `normalize_for_compare(p).low`（非设备路径时）——
+    /// 此前两份实现差在设备路径/尾点尾空格/`//`/盘符相对，同一路径算成两个键。
+    /// 判红自证：把 path_key 改回独立折叠实现 ⇒ 尾点尾空格或 `//` 用例红。
+    #[test]
+    fn lexical_normalization_shared_between_judge_and_key() {
+        for p in [
+            r"C:\Windows\System32",
+            r"\\?\C:\Windows\System32",
+            r"\\?\UNC\srv\pub\x",
+            r"//srv/pub/x",
+            r"\\srv\pub\x",
+            r"C:\A\B\..\C",
+            r"C:/A/B/",
+            r"c:\a\b. ",   // 尾点尾空格：Win32 比较时忽略
+            r"C:\a\b\",
+            r"C:",
+        ] {
+            let n = normalize_for_compare(p);
+            assert!(n.ok, "{p} 应可判定");
+            assert_eq!(
+                crate::engine::paths::path_key(p),
+                n.low,
+                "{p} 在判据层与比较键层归一不一致"
+            );
+        }
+        // 两域分工钉住：比较键永不失败（设备路径照旧折叠），判据层 fail-closed
+        assert!(
+            !normalize_for_compare(r"\\.\C:\x").ok,
+            "判据层必须对设备路径 fail-closed"
+        );
+        assert!(
+            !normalize_for_compare(r"\??\C:\x").ok,
+            "判据层必须对 \\??\\ 设备路径 fail-closed"
+        );
+    }
+
+    /// v5-K02 批次 1 真机探针（只读）：真实盘上同一系统目录的四种写法
+    /// （规范 / verbatim / 可折叠 `..` / 盘符相对）必须全部判「在系统命名空间」，
+    /// 合法安装位置不误伤。`%SystemRoot%\System32` 真机必有；不写盘、不改系统。
+    /// 判红自证：把 is_system_namespace 的归一删掉 ⇒ verbatim/dotdot/driverel 三条红。
+    #[test]
+    #[ignore = "真机：真实盘非规范形态穿越 is_system_namespace（只读，发布前人工跑）"]
+    fn live_noncanonical_system_paths_are_judged_in_namespace() {
+        let root = env("SystemRoot");
+        assert!(!root.is_empty(), "SystemRoot 取不到");
+        let sys32 = format!("{root}\\System32");
+        assert!(
+            std::path::Path::new(&sys32).is_dir(),
+            "样本缺失：{sys32} 不是目录（探针未校验）"
+        );
+        for form in [
+            sys32.clone(),
+            format!(r"\\?\{sys32}"),
+            format!(r"{root}\..\Windows\System32"),
+            r"\Windows\System32".to_string(),
+        ] {
+            assert!(is_system_namespace(&form), "形态逃过系统命名空间判据: {form}");
+        }
+        // 反向：合法安装位置不误拦（Program Files 本身不是系统命名空间）
+        let pf = env("ProgramFiles");
+        if !pf.is_empty() {
+            assert!(!is_system_namespace(&pf), "合法安装位置被误拦: {pf}");
+        }
+        eprintln!("样本通过（SystemRoot={root}，四形态同结论 + Program Files 不误拦）");
     }
 
     /// P1-05：glob 匹配的边界 —— 精确、首尾/中段通配、大小写无关靠调用前小写。

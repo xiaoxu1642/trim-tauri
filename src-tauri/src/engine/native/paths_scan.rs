@@ -87,6 +87,35 @@ fn resolve_rule_path(expr: &str) -> Option<String> {
     Some(val)
 }
 
+/// 路径出口（v5-K02 批次 1，R5b-M09）：本域所有「把路径交给下游 / 落盘」的值都过这里。
+///
+/// `canonicalize` 成功时返回 verbatim 形态（实测 `C:\Windows\System32 →
+/// \\?\C:\Windows\System32`、`C:\Program Files → \\?\C:\Program Files`），而 glob 分支
+/// 的值来自 `read_dir` 的 `entry.path()`（无前缀）⇒ 同一份 `paths-config.json` 两种形状，
+/// UI 输入框也会把未剥前缀的路径直接显示给用户（placeholder 写的是 `C:\Program Files\…`）。
+/// 盘符根更糟：`C:\` canonicalize 成 `\\?\C:`，旧代码无差别 `trim_end_matches('\\')`
+/// 会把根削成驱动器相对形态。
+///
+/// 口径：剥 `\\?\UNC\`（还原成 `\\server\share`）与 `\\?\`；盘符根（`C:`）补回尾杠
+/// 保持根语义，其余去尾杠。删除/还原侧的判定归一口径在 `protect::normalize_for_compare`
+/// （verbatim 在那里被剥掉后比较），此处管的是**落盘与展示形状**，两边同源不同层。
+fn emit_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().to_string();
+    let stripped = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    };
+    let b = stripped.as_bytes();
+    if b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        // 盘符根：`C:` 是驱动器相对、`C:\` 才是根——补回尾杠，不削
+        return format!("{stripped}\\");
+    }
+    stripped.trim_end_matches('\\').to_string()
+}
+
 /// 路径标准化（对应 PS 的 Normalize-Path）
 fn normalize_path(value: &str) -> String {
     let v = value.trim().trim_matches('"');
@@ -102,7 +131,8 @@ fn normalize_path(value: &str) -> String {
         } else { expanded }
     } else { expanded };
     match std::path::Path::new(&v).canonicalize() {
-        Ok(p) => p.to_string_lossy().trim_end_matches('\\').to_string(),
+        // v5-K02 批次 1（R5b-M09）：过统一出口剥 verbatim，与 glob 分支同形状
+        Ok(p) => emit_path(&p),
         Err(_) => v.trim_end_matches('\\').to_string(),
     }
 }
@@ -270,7 +300,12 @@ fn glob_first_dir(pattern: &str) -> String {
             // 继续
         }
     }
-    if std::path::Path::new(&current).is_dir() { current } else { String::new() }
+    if std::path::Path::new(&current).is_dir() {
+        // v5-K02 批次 1（R5b-M09）：与 canonicalize 分支走同一出口，保证一函数一形状
+        emit_path(std::path::Path::new(&current))
+    } else {
+        String::new()
+    }
 }
 
 /// 安装路径扫描（对应 paths_scan.ps1，S3 简化版）
