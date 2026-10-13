@@ -787,41 +787,13 @@
   background: var(--bg-card-hover);
   overflow: hidden;
 }
-.toast-title { margin-bottom: 5px; color: var(--fg-primary); font-size: var(--fs-body); font-weight: calc(600 * var(--font-weight-scale, 1)); }@media (max-width: 800px) {
+.toast-title { margin-bottom: 5px; color: var(--fg-primary); font-size: var(--fs-body); font-weight: calc(600 * var(--font-weight-scale, 1)); }
+@media (max-width: 800px) {
 
   .speed-dashboard { grid-template-columns: 1fr; }
   .page-header { flex-direction: column; align-items: stretch; }
   .benchmark-layout, .benchmark-results { grid-template-columns: 1fr; }
   .benchmark-fields { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
-}
-@media (prefers-reduced-motion: reduce) {
-
-  /* v3.6.2 产品决策：开屏（#splash）忽略系统「减少动效」，完整播放一次性走场
-     —— WebGL 背景、splash 入场、FLIP 落位都不受归零影响。 */
-  /* 审查 v2-F11：豁免范围收窄过。原先写成 `body:not(.splash-live) *`，
-     等于开屏期间**整棵 DOM**（含主界面尚未上屏的 shimmer / pulse / spin）都恢复全速，
-     超出 AGENTS.md §2「唯一豁免：开屏 splash 的**一次性走场**」的字面范围。
-     改成只豁免 `#splash` 子树：主界面动效始终受保护，开屏自身仍是豁免的。
-     选择器只用简单选择器进 `:not()`（不依赖 Selectors L4 的复杂选择器），
-     故这里用「body 直接子代中排除 #splash」+「其后代」两式覆盖整棵非开屏子树。
-     P3-3（F1）：选择器表**补 body 自身** —— 三子窗的 body fadeIn 过渡挂在 body 上，
-     旧表 `body > *` 只覆盖子元素，归零漏掉 body 自己（门禁 check-a11y ④ 点名）。 */
-  body,
-  body > *:not(#splash),
-  body > *:not(#splash) *,
-  body > *:not(#splash)::before,
-  body > *:not(#splash)::after,
-  body > *:not(#splash) *::before,
-  body > *:not(#splash) *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-    /* v3.5.1 动效审查 H1：原先只归零 duration，未归零 iteration-count，
-       于是所有 infinite 关键帧（shimmer / pulse / spin / 骨架波 / 旋转扫描）
-       变成「0.01ms 时长 × 无限次」的极高速重启，为想少看动画的用户点满 CPU。
-       归零迭代次数后这些动画一次性跑完即停。 */
-    animation-iteration-count: 1 !important;
-    animation-delay: 0ms !important;
-  }
 }
 
 

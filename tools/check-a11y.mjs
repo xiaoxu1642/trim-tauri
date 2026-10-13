@@ -157,6 +157,10 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   check(rmViolations(badRmNoBody).some((v) => v.includes('body 自身')), '对照④a：归零表漏 body 自身的样本必须判红');
   check(rmViolations(badRmNoThumb).some((v) => v.includes('slider-thumb')), '对照④b：拇指未归零的样本必须判红');
   check(rmViolations(goodRm).length === 0, '对照④c：body 自身 + 拇指都归零的样本必须放行');
+  // 焦点环（v5-K05 批次 8 补，门禁候选「6 条断言 0 处管焦点环」）：判据 = 该窗加载的
+  // CSS 合并集存在 :focus-visible 规则（A3 裁决：ds.css:181 规则以 bg+color 作替代
+  // 指示，存在性判据即可，不规定实现形态）。
+  check(!/:focus-visible/.test('body { color: red; }'), '对照④d：无 :focus-visible 规则的样本必须判红');
 
   const badDup = "a?.addEventListener('click', f1);\na?.addEventListener('click', f2);";
   const goodDup = "a?.addEventListener('click', f1);\nb.addEventListener('click', f2);\nrows.forEach(el => el.addEventListener('click', f3));";
@@ -192,15 +196,37 @@ if (checkboxSites < 4) g.fail(`勾选框模板命中 ${checkboxSites} 处（< 4�
 if (liveHosts < 4) g.fail(`异步提示宿主命中 ${liveHosts} 处（< 4）⇒ 扫描面疑似失明`);
 if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描面疑似失明`);
 
-// ---- ④ 真仓扫描：CSS 的 RM 归零段（ds.css 的拇指归零自成一格，不强制耦合） ----
-// P0 子窗 CSS 按需（2026-10-12）把主窗专属页面样式拆进 main-pages.css：RM 归零段的一部分
-// 规则随之搬家。归零覆盖面是「应用里所有会动的东西」，与文件怎么切无关 —— 只扫 main.css
-// 就会把「搬走了」读成「没归零」（与 L-28 的覆盖面失明同一族）。两份合起来判。
+// ---- ④ 真仓扫描：**逐窗** RM 归零覆盖 + 焦点环（v5-K05 批次 8 改回能判红） ----
+// P0 子窗 CSS 按需（6a8f02b）曾把全窗 RM 归零段搬进只主窗加载的 main-pages.css，
+// 四子窗动效归零整段失效（可达动效 32/19/14/16 条照播），而旧判据「main+pages 合并判」
+// 照绿——合并集把「搬错文件」读成「已覆盖」。归零覆盖面是**每扇窗**的属性：
+// 逐窗解析各自 <link> 的 CSS 合并集判，「归零段搬错文件 / 子窗漏挂 CSS」都会红。
 {
-  const cssText = ['main.css', 'main-pages.css']
-    .map((f) => readFileSync(join(SRC, 'styles', f), 'utf8'))
-    .join('\n');
-  for (const v of rmViolations(cssText)) g.fail(`src/styles/main.css + main-pages.css：${v}`);
+  const cssCache = new Map();
+  const loadCss = (f) => {
+    if (!cssCache.has(f)) cssCache.set(f, readFileSync(join(SRC, 'styles', f), 'utf8'));
+    return cssCache.get(f);
+  };
+  let windowCount = 0;
+  for (const p of htmlFiles) {
+    const html = read(p);
+    const links = [...html.matchAll(/<link[^>]+href="([^"]+\.css)"/g)].map((m) =>
+      m[1].split('/').pop(),
+    );
+    if (links.length === 0) {
+      g.fail(`${rel(p)}：没有解析到任何 stylesheet link（窗体 CSS 覆盖判定失明）`);
+      continue;
+    }
+    windowCount++;
+    const merged = links.map(loadCss).join('\n');
+    for (const v of rmViolations(merged)) {
+      g.fail(`${rel(p)}：${v}（该窗加载 ${links.join(', ')}）`);
+    }
+    if (!/:focus-visible/.test(merged)) {
+      g.fail(`${rel(p)}：该窗加载的 CSS（${links.join(', ')}）无 :focus-visible 规则（键盘焦点不可见）`);
+    }
+  }
+  if (windowCount < 5) g.fail(`逐窗 RM 判定只覆盖 ${windowCount} 份 HTML（< 5）⇒ 语料失明`);
 }
 
 // ---- ⑤⑥ 真仓扫描 ----
