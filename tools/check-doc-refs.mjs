@@ -85,21 +85,70 @@ if (agentsPresent && docsPresent) {
 }
 
 // 2. 源码注释禁止第二真源私钥路径（签发流程唯一真源 = AGENTS §7.4）
-const KEY_TOKENS = ['trim-updater.key', '~/.tauri-signer', 'TAURI_SIGNING_PRIVATE_KEY'];
+//
+// v5-K04 批次 7（2026-10-13）修补「三重失明」（T1c 实测）：
+//   ① 令牌黑名单收编 `~/.trim-signing` 变体（`trim-signing` 单词覆盖全部含它的写法）；
+//   ② 语料扩面：tools/ 与 vendor/ 也扫，且 **全行扫**（Rust 的 panic!/assert 文案是
+//      字符串字面量不是注释行，contract_tests.rs:2011 型漏报就在这）；
+//   ③ 受控例外按 {file, anchor} 白名单（§5.19 键形，禁行号），且每条必须真的命中
+//      ≥1 次（白名单不命中 = 腐烂，判红——正向对照）。
+// 受控例外的位置/理由/范围登记在发版手册 §7.3「受控例外」小节。
+const KEY_TOKENS = [
+  'trim-updater.key',
+  '~/.tauri-signer',
+  'TAURI_SIGNING_PRIVATE_KEY',
+  'trim-signing', // v5-K04：私钥目录名（~/.trim-signing 及一切变体）
+];
+const KEY_SCAN_ROOTS = [SRC, FRONTEND, join(ROOT, 'tools'), join(ROOT, 'vendor')];
+const KEY_PATH_WHITELIST = [
+  {
+    file: 'tools/sign-cleanup-rules.mjs',
+    anchor: "path.join(os.homedir(), '.trim-signing'",
+    why: '签名工具自身必须知道钥匙在哪（功能必需）',
+  },
+  {
+    file: 'vendor/upstream-js/src/main/rules-signature.js',
+    anchor: '默认 ~/.trim-signing/',
+    why: 'vendor 只读基线禁改',
+  },
+  {
+    file: 'vendor/upstream-js/src/main/update-signature.js',
+    anchor: '默认 ~/.trim-signing/',
+    why: 'vendor 只读基线禁改',
+  },
+];
 const keyHits = [];
-for (const fAbs of walkFiles(SRC)) {
-  const lines = readFileSync(fAbs, 'utf8').split(/\r?\n/);
-  lines.forEach((line, i) => {
-    if (!line.trimStart().startsWith('//') && !line.trimStart().startsWith('//!')) return;
-    for (const t of KEY_TOKENS) {
-      if (line.includes(t)) keyHits.push(`${relative(SRC, fAbs).replace(/\\/g, '/')}:${i + 1} 含 ${t}`);
-    }
-  });
+const whitelistHits = new Set();
+for (const base of KEY_SCAN_ROOTS) {
+  for (const fAbs of walkFiles(base)) {
+    const rel = relative(ROOT, fAbs).replace(/\\/g, '/');
+    // 判据定义文件自身必须排除：KEY_TOKENS/白名单的字面量写在这里，扫它会自举命中。
+    // 它不是泄漏面（令牌是判据，不是私钥落点）；真正要盯的是**其他任何文件**。
+    if (rel === 'tools/check-doc-refs.mjs') continue;
+    const lines = readFileSync(fAbs, 'utf8').split(/\r?\n/);
+    lines.forEach((line, i) => {
+      for (const t of KEY_TOKENS) {
+        if (!line.includes(t)) continue;
+        const wl = KEY_PATH_WHITELIST.find((w) => w.file === rel && line.includes(w.anchor));
+        if (wl) {
+          whitelistHits.add(wl.file);
+          continue;
+        }
+        keyHits.push(`${rel}:${i + 1} 含 ${t}`);
+      }
+    });
+  }
 }
 check(
   keyHits.length === 0,
-  '2. 源码注释零第二真源私钥路径（A-7：签发流程只看 AGENTS §7.4）',
+  '2. 私钥第二真源路径零暴露（注释与字符串字面量全行扫：src/src 前端/tools/vendor）',
   keyHits.join('；'),
+);
+const missingWhitelist = KEY_PATH_WHITELIST.filter((w) => !whitelistHits.has(w.file));
+check(
+  missingWhitelist.length === 0,
+  `2b. 受控例外白名单 ${KEY_PATH_WHITELIST.length} 条全部真实命中（不命中 = 白名单腐烂）`,
+  missingWhitelist.map((w) => `${w.file}（${w.why}）`).join('；'),
 );
 
 // ---- 3. 白名单坐标存在性（P3-7，2026-10-09） ----

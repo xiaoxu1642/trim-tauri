@@ -11,7 +11,8 @@
 //   node tools/sign-cleanup-rules.mjs sign --file <相对路径>    签名其他规则文件（同款密钥/规范化），
 //                                                              如 --file src-tauri/data/uninstall-residue-rules.json
 //
-// 签名私钥固定在 ~/.trim-signing/rules-ed25519-private.pem（发布机私有，绝不入仓库）。
+// 签名私钥是仓库外的本机密钥材料（发布机私有，绝不入仓库），落点以发版手册 §7.4 为准；
+// 受控例外登记见发版手册 §7.3（本工具是「签名工具自身必须知道钥匙在哪」的功能必需方）。
 // 签名对象 = 根对象去掉 _sig 后的紧凑 JSON（键序 = 原解析插入序），与
 // src-tauri/src/engine/rules_signature.rs::canonical_body_text 完全一致。
 // 用法顺序：改规则 JSON → sign → gen-fallback → node tools/check-data-parity.mjs。

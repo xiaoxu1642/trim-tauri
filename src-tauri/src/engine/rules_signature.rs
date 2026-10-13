@@ -351,7 +351,7 @@ mod tests {
 
         // ① 正常：验签通过
         verify_array_text(MAIN, SIDECAR)
-            .unwrap_or_else(|e| panic!("本机签名的优化目录必须验签通过（私钥在~/.trim-signing）：{e}"));
+            .unwrap_or_else(|e| panic!("本机签名的优化目录必须验签通过（密钥材料是仓库外的本机受控文件，以发版手册 §7.4 为准）：{e}"));
 
         // ② 正文被篡改 → 必须失败
         let tampered = MAIN.replace("\"risk\": \"low\"", "\"risk\": \"high\"");

@@ -2008,7 +2008,7 @@ let ov = include_str!("overview.rs");
         // 侧表可读且覆盖到位
         assert!(
             verify_optimizer_signature().is_ok(),
-            "优化目录签名必须在本机验签通过（私钥在 ~/.trim-signing）"
+            "优化目录签名必须在本机验签通过（密钥材料是仓库外的本机受控文件，以发版手册 §7.4 为准）"
         );
         let high = options().iter().filter(|o| o.get("risk").and_then(|v| v.as_str()) == Some("high"));
         let high_ids: Vec<String> = high
