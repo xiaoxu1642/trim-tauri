@@ -268,13 +268,29 @@ pub fn reg_backup_restore_guards(
         }
     }
     let (seal, _) = reg_backup_seal_state(file);
+    // v5-S1 批次 6（①）：目标含 HKLM 时边车封条 **missing 也拒**——只有 ok 放行。
+    // HKLM 备份的两份锚里，管理员摘要（HKLM 受限键）本就不可被同用户改写（⑤ 兜底），
+    // 但「边车缺失」若放行，内容核验就只剩摘要一路；拍板裁定 HKLM 目标必须两份交叉
+    // 都在且都过（深度防御 + 简化推理），边车被删/损坏一律拒并说明。HKCU 目标维持
+    // 现状：攻击者本就持有 HKCU 写权限，边车不构成提权边界，missing 放行保住
+    // Electron 轨老备份的还原依据。
+    let needs_admin = sections.iter().any(|s| s.hive == "HKEY_LOCAL_MACHINE");
     if matches!(seal, "mismatch" | "corrupt" | "unreadable") {
         crate::engine::log::write_log("warn", &format!("备份 {name} 封条核对未通过（{seal}），已拒绝还原"));
         return Err(format!(
             "备份内容与封条不符或不可读（{seal}），已拒绝还原——请改用导出时间的更早一份，或重新安装该程序"
         ));
     }
-    let needs_admin = sections.iter().any(|s| s.hive == "HKEY_LOCAL_MACHINE");
+    if needs_admin && seal == "missing" {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("备份 {name} 为系统级（HKLM）目标但缺少边车封条，已拒绝还原"),
+        );
+        return Err(
+            "该系统级（HKLM）备份缺少边车封条，无法交叉核验内容，已拒绝还原——请改用带封条的更早一份，或重新安装该程序"
+                .to_string(),
+        );
+    }
     if needs_admin && !is_admin {
         return Err(
             "该备份指向 HKLM 下的键，需要以管理员身份运行后再还原（HKCU 下的备份不需要）".to_string(),
@@ -368,6 +384,94 @@ mod reg_backup_common_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// v5-S1 批次 6（①）：目标含 HKLM 时边车封条 missing 也拒（只有 ok 放行）；
+    /// HKCU 目标 missing 维持放行（Electron 轨老备份的还原依据）。
+    /// 判红自证：把闸里「needs_admin && missing 拒」分支删掉 ⇒ ② 红。
+    #[test]
+    fn hklm缺边车封条拒还原_hkcu维持放行() {
+        let root = sandbox("s1a");
+        let body = |hive: &str| {
+            format!("Windows Registry Editor Version 5.00\r\n\r\n[{hive}\\Software\\TrimS1Probe]\r\n\"a\"=dword:1\r\n")
+        };
+        let hklm = root.join("hklm.reg");
+        std::fs::write(&hklm, body("HKEY_LOCAL_MACHINE")).unwrap();
+        // is_admin=true：让封条检查（在提权闸之前）先触发，沙箱不触真实 HKLM
+        let err = reg_backup_restore_guards(&hklm, "hklm.reg", "cleanup", true).unwrap_err();
+        assert!(err.contains("缺少边车封条"), "HKLM + missing 边车必须拒: {err}");
+        let hkcu = root.join("hkcu.reg");
+        std::fs::write(&hkcu, body("HKEY_CURRENT_USER")).unwrap();
+        assert!(
+            reg_backup_restore_guards(&hkcu, "hkcu.reg", "cleanup", true).is_ok(),
+            "HKCU + missing 边车维持放行（老备份还原依据）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// v5-S1 批次 6 真机探针（需提权窗口写 HKLM 管理员摘要，发布前人工跑）。
+    /// 篡改矩阵：两份都在 ⇒ 放行；非提权进程删边车 ⇒ 拒（①）；非提权进程改边车 ⇒
+    /// mismatch 拒；改备份内容重签边车 ⇒ 与 HKLM 管理员摘要不符 ⇒ 拒。
+    /// 全程自建自清（HKLM 摘要值用后即删）。判红自证：删掉闸 ① 的 missing 拒分支 ⇒
+    /// 删边车场景红；删掉闸 ⑤ 摘要比对 ⇒ 内容篡改场景红。
+    #[test]
+    #[ignore = "真机：需提权窗口写 HKLM 管理员摘要（发布前人工跑）"]
+    fn live_hklm双封条篡改矩阵() {
+        let root = sandbox("s1-live");
+        let f = root.join("live-s1.reg");
+        std::fs::write(
+            &f,
+            "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimS1LiveProbe]\r\n\"a\"=dword:1\r\n",
+        )
+        .unwrap();
+        write_reg_backup_seal(&f, r"HKLM\Software\TrimS1LiveProbe");
+        write_admin_seal("cleanup", &f);
+        // 基线：两份都在且匹配 ⇒ 放行（摘要写入失败时这里先红，探针前置条件不满足）
+        assert!(
+            reg_backup_restore_guards(&f, "live-s1.reg", "cleanup", true).is_ok(),
+            "两份封条都在且匹配必须放行（先确认 HKLM 管理员摘要写入成功）"
+        );
+        // ① 非提权进程删边车 ⇒ missing ⇒ 拒
+        let seal = reg_seal_path_for(&f);
+        std::fs::remove_file(&seal).unwrap();
+        assert!(
+            reg_backup_restore_guards(&f, "live-s1.reg", "cleanup", true)
+                .unwrap_err()
+                .contains("缺少边车封条"),
+            "HKLM + missing 边车必须拒"
+        );
+        // ② 非提权进程改边车（写假哈希）⇒ mismatch ⇒ 拒
+        std::fs::write(&seal, r#"{"sha256":"deadbeefdeadbeef"}"#).unwrap();
+        assert!(
+            reg_backup_restore_guards(&f, "live-s1.reg", "cleanup", true)
+                .unwrap_err()
+                .contains("封条"),
+            "篡改边车必须拒"
+        );
+        // ③ 改备份内容 + 重签一致边车 ⇒ 与 HKLM 管理员摘要不符 ⇒ 拒（⑤ 兜底）
+        std::fs::write(
+            &f,
+            "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimS1LiveProbe]\r\n\"a\"=dword:2\r\n",
+        )
+        .unwrap();
+        std::fs::remove_file(&seal).unwrap();
+        write_reg_backup_seal(&f, r"HKLM\Software\TrimS1LiveProbe");
+        assert!(
+            reg_backup_restore_guards(&f, "live-s1.reg", "cleanup", true)
+                .unwrap_err()
+                .contains("管理员摘要"),
+            "内容改后与 HKLM 管理员摘要不符必须拒"
+        );
+        // 清理：HKLM 摘要值 + 沙箱
+        assert!(
+            crate::engine::native::reg_restore_delete(
+                crate::engine::native::hive_hklm(),
+                ADMIN_SEAL_SUBKEY,
+                &admin_seal_value_name("cleanup", &f).unwrap(),
+            ),
+            "清理 HKLM 摘要失败（确认在提权窗口跑）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 手工改成受保护容器（整棵 SOFTWARE）必须被禁删面挡住 —— 这是"是备份文件就能 import"
     /// 这个错误假设的正解，两域同一口径
     #[test]
@@ -383,11 +487,14 @@ mod reg_backup_common_tests {
     /// HKLM 目标：未提权 = 明确拒绝（不丢给 reg.exe 撞"还原失败"）；
     /// 已提权但无管理员摘要同样拒绝（P0-01：无法证明内容完整性）。
     /// 摘要一致放行的分支写真实 HKLM，归 #[ignore] 真机探针。
+    /// v5-S1 批次 6：样本补写边车封条——闸 ①（HKLM + missing 拒）在本闸之前，
+    /// 无封条样本现在会先撞 ① 而到不了这里（变红原因，2026-10-13）。
     #[test]
     fn hklm_未提权或无管理员摘要时拒还原() {
         let root = sandbox("admin");
         let p = root.join("hklm.reg");
         std::fs::write(&p, "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\Acme\\App]\r\n\"X\"=dword:1\r\n").unwrap();
+        write_reg_backup_seal(&p, r"HKLM\Software\Acme\App");
         assert!(reg_backup_restore_guards(&p, "hklm.reg", "cleanup", false)
             .unwrap_err().contains("管理员"));
         // 无副作用：独特文件名在真实 HKLM 摘要键下必然无记录
@@ -440,8 +547,7 @@ mod reg_backup_common_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// D2：严格 `.reg` 解析。还原前必须知道"这份文件会往哪些键里写"，
-    /// 所以宁可拒也不能宽松 —— 半截写入的备份尤其要拦。
+    /// D2：严格 `.reg` 解析。还原前必须知道"这份文件会往哪些键里写"，    /// 所以宁可拒也不能宽松 —— 半截写入的备份尤其要拦。
     /// v5-K06 批次 3：闸与执行臂同吃 `parse_reg_text`（原物理行键枚举 `parse_reg_backup_text`
     /// 已删，它与本解析器存在续行合并差 = A6-K01），本用例改断同一解析器的键枚举语义。
     #[test]
