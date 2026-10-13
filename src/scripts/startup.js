@@ -692,6 +692,12 @@
       const resp = await window.api.startup.openLocation(targetPath);
       if (!resp || !resp.success) {
         window.app?.toast('warning', (resp && resp.message) || '打开位置失败');
+        return;
+      }
+      // 目标文件已不在（卸载残留常见）：后端退开到最深的现存上级目录，这里如实说明，
+      // 免得用户以为打开的就是目标所在位置。
+      if (resp.fellBack && resp.opened) {
+        window.app?.toast('info', `目标文件已不在原处，已打开它上层的文件夹：${resp.opened}`);
       }
     } catch (e) {
       window.app?.toast('error', `打开位置失败: ${e.message}`);

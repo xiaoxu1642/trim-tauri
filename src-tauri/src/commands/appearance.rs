@@ -450,9 +450,13 @@ pub fn appearance_bg_open_dir<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
 }
 
 /// 用 Explorer 打开目录（不经 shell 拼接命令，避免命令注入）
+///
+/// 2026-10-13：原实现 `quiet_cmd(...).arg("/select,…")` 踩的是与启动项「位置」
+/// 同一个坑——`Command::arg` 给含空格的参数套引号，explorer 解析失败后静默回退
+/// 到默认目录（用户名或路径带空格即中招）。改走 `shell_select_in_explorer`
+/// （ShellExecuteW 原样传参），与 `startup_openlocation` 共用同一份原语。
 fn open_folder(dir: &Path) {
-    let arg = format!("/select,{}", dir.to_string_lossy().replace('/', "\\"));
-    let _ = crate::engine::systembin::quiet_cmd(system_tool("explorer.exe")).arg(&arg).spawn();
+    let _ = crate::engine::systembin::shell_select_in_explorer(&dir.to_string_lossy());
 }
 
 // ==================== 启动期环境自适应接线 ====================

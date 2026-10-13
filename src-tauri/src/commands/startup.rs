@@ -18,8 +18,6 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::engine::paths::path_key;
 use crate::engine::{delete_manifest, guard, log, native, paths, snapshot, sysinfo};
-// 审查 v2-F7：系统工具走绝对路径，不用裸进程名
-use crate::engine::systembin::system_tool;
 
 fn cache_file() -> std::path::PathBuf {
     paths::scan_cache_file("startup-scan.json")
@@ -338,7 +336,38 @@ fn set_result_entry(
     }
 }
 
-/// startup:openlocation —— 在资源管理器中定位并选中文件
+/// 「打开位置」的落点锚（纯函数，可测）。
+///
+/// ① 目标本身在 → 选它；② 目标不在（卸载残留 / 目标已被换掉）→ 退到**最深的
+/// 现存上级目录**，用户至少能开到它原来躺着的那层；③ 连一层都不在 → `None`，
+/// 由调用方如实报失败，绝不静默交给系统默认目录。
+fn location_anchor(target: &str) -> Option<(std::path::PathBuf, bool)> {
+    let t = target.trim().trim_matches('"').replace('/', "\\");
+    if t.is_empty() {
+        return None;
+    }
+    let p = std::path::PathBuf::from(&t);
+    if p.exists() {
+        return Some((p, false));
+    }
+    let mut cur = p.parent()?.to_path_buf();
+    loop {
+        if cur.is_dir() {
+            return Some((cur, true));
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+/// startup:openlocation —— 在资源管理器中定位并选中目标
+///
+/// 2026-10-13 修复（目检 B-6）：此前用 `Command::arg("/select,…")`，Rust 会给含
+/// 空格的参数套一对引号，explorer 解析不了就**静默回退到默认目录**（实测开在
+/// Documents）。现在三处一起改：① 落点先过 [`location_anchor`]；② 走
+/// `shell_select_in_explorer`（ShellExecuteW 原样传参，无引号坑，也不经 shell）；
+/// ③ 回执带 `opened` / `fellBack`，失败有明确文案，不再「spawn 成功即 success」。
 #[tauri::command]
 pub async fn startup_openlocation<R: Runtime>(
     window: WebviewWindow<R>,
@@ -351,13 +380,18 @@ pub async fn startup_openlocation<R: Runtime>(
     if target.is_empty() || target.contains('\0') {
         return json!({ "success": false, "message": "缺少路径" });
     }
-    // explorer /select,<path>：参数独立传递（不走 shell），无命令注入面
-    let arg = format!("/select,{}", target.replace('/', "\\"));
-    match crate::engine::systembin::quiet_cmd(system_tool("explorer.exe")).arg(&arg).spawn() {
-        Ok(_) => json!({ "success": true }),
+    let Some((anchor, fell_back)) = location_anchor(&target) else {
+        return json!({
+            "success": false,
+            "message": "这个路径连同它的上级目录都不存在了，没法定位到文件夹"
+        });
+    };
+    let opened = anchor.to_string_lossy().replace('/', "\\");
+    match crate::engine::systembin::shell_select_in_explorer(&opened) {
+        Ok(()) => json!({ "success": true, "opened": opened, "fellBack": fell_back }),
         Err(e) => {
             log::write_log("error", &format!("打开所在位置异常: {e}"));
-            json!({ "success": false, "message": e.to_string() })
+            json!({ "success": false, "message": e })
         }
     }
 }
@@ -433,5 +467,52 @@ mod tests {
             &snap
         )
         .is_none());
+    }
+
+    /// B-6：落点锚的三种结局。刻意**不写盘**——用肯定存在的临时目录本身当「目标在」
+    /// 的样本，用其下不存在的子孙当「目标没了」的样本，测试无副作用也不留垃圾。
+    #[test]
+    fn 定位锚_目标在选目标_不在退最深现存目录_全无则拒() {
+        let root = std::env::temp_dir();
+        // ① 目标在：原样返回，不算回退
+        let (anchor, fell) = location_anchor(&root.to_string_lossy()).expect("临时目录应存在");
+        assert_eq!(anchor, root);
+        assert!(!fell, "目录本身存在不该判成回退");
+
+        // ② 目标没了：退到最深的现存上级（这里就是临时目录本身）
+        let gone = root.join("trim-b6-absent").join("deep").join("a.exe");
+        let (anchor, fell) = location_anchor(&gone.to_string_lossy()).expect("上级应存在");
+        assert_eq!(anchor, root, "应退到最深的现存上级目录");
+        assert!(fell, "目标不在必须标记回退，供前端如实提示");
+
+        // ③ 连一层都不在（裸文件名，parent 为空）：不下结论，交调用方报错
+        assert!(location_anchor("trim-b6-bare-name.exe").is_none());
+        assert!(location_anchor("").is_none());
+    }
+
+    /// B-6 的根因：参数串**必须不加引号**，否则 explorer 静默回退到默认目录。
+    #[test]
+    fn select参数_含空格也不加引号() {
+        let with_space = crate::engine::systembin::explorer_select_arg(
+            r"C:\Program Files (x86)\Steam\steam.exe",
+        );
+        assert_eq!(with_space, r"/select,C:\Program Files (x86)\Steam\steam.exe");
+        assert!(!with_space.contains('"'), "一旦出现引号，explorer 就会开到默认目录");
+        // 正斜杠统一成反斜杠（IPC 侧两种形态都可能进来）
+        assert_eq!(
+            crate::engine::systembin::explorer_select_arg("C:/KaiFa/a.exe"),
+            r"/select,C:\KaiFa\a.exe"
+        );
+    }
+
+    /// 正向对照：若有人把 `explorer_select_arg` 改回「给整参加引号」的写法，
+    /// 上面的用例必须红（防恒绿）。
+    #[test]
+    fn select参数不是恒等拼接() {
+        assert!(crate::engine::systembin::explorer_select_arg("C:\\A B\\c.exe").contains("A B"));
+        assert_ne!(
+            crate::engine::systembin::explorer_select_arg("C:\\A B\\c.exe"),
+            format!("\"/select,{}\"", "C:\\A B\\c.exe")
+        );
     }
 }

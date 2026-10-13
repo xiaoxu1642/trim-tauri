@@ -231,6 +231,76 @@ pub fn quiet_cmd(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command 
     c
 }
 
+/// 资源管理器「打开并选中」的参数串（纯函数，可测）。
+///
+/// ⚠️ 刻意**不加引号** —— 理由见 [`shell_select_in_explorer`] 的根因注释。
+pub fn explorer_select_arg(target: &str) -> String {
+    format!("/select,{}", target.replace('/', "\\"))
+}
+
+/// 在资源管理器里定位（打开并选中）一个已存在的文件或目录。
+///
+/// ## 为什么不用 `Command::arg`
+///
+/// `std::process::Command` 在 Windows 上会把**含空格**的参数用一对 `"` 包起来再
+/// 拼进命令行，实际执行的是：
+///
+/// ```text
+/// explorer.exe "/select,C:\Program Files (x86)\Steam\steam.exe"
+/// ```
+///
+/// explorer 自己解析命令行时吃不下这对引号，于是**静默回退到默认目录**。
+/// 本机实测（2026-10-13，启动项「位置」按钮）：9 项里路径含空格的 3 项
+/// （Steam / TranslucentTB / WPS Office）一律开在 Documents，不含空格的 6 项正常；
+/// 同一条路径改用 ShellExecuteW 传参则正确落在目标目录。
+///
+/// `ShellExecuteW` 的 `lpParameters` 原样透传、不做二次转义，所以没有这个坑；
+/// 它同样不经 shell 拼接命令行，因此也没有命令注入面。
+///
+/// 返回值 >32 为成功（ShellExecute 约定），≤32 是错误码。
+pub fn shell_select_in_explorer(target: &str) -> Result<(), String> {
+    if target.is_empty() || target.contains('\0') || target.contains('"') {
+        return Err("路径不可用于定位".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let exe = system_tool("explorer.exe");
+        let exe_w: Vec<u16> = std::ffi::OsStr::new(&exe)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let params = explorer_select_arg(target);
+        let params_w = std::ffi::OsStr::new(&params)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let r = unsafe {
+            ShellExecuteW(
+                None,
+                windows::core::w!("open"),
+                windows::core::PCWSTR(exe_w.as_ptr()),
+                windows::core::PCWSTR(params_w.as_ptr()),
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if r.0 as usize > 32 {
+            Ok(())
+        } else {
+            Err(format!("资源管理器返回 {}", r.0 as isize))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Err("仅 Windows 支持资源管理器定位".into())
+    }
+}
+
 /// reg.exe export 备份类调用的统一超时（v2-L4P-29）：正常毫秒级，15s 已是宽限上界。
 /// 登记在 `tools/check-ps-callsites.mjs` 的 REG_EXPORT 表，与源码实参一致性由门禁对拍。
 pub const REG_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
