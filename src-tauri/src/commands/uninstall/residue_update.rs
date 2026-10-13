@@ -1,4 +1,5 @@
-//! 残留规则库：装载、语义校验（A2）、在线更新与版本检查（A3）+ uninstall_modify。
+//! 残留规则库：装载、语义校验（A2）、验签回退 + uninstall_modify。
+//! （在线更新已随 2026-10-06 裁定退役，见下方「签名残留规则库」段的 v5-K08 说明。）
 //!
 //! 字段表/上限/允许 token 集的单一真源是 `tools/rule-schema.json`，不是本文件；
 //! 更新侧必须复用装载侧的同一个校验器（validate_residue_package）与同一个
@@ -18,12 +19,13 @@ use super::residue::*;
 // 已知程序知识库：规则文件与 cleanup-rules.json 同款签名链（Ed25519 + 去掉 _sig 的
 // 紧凑 JSON 规范化，rules_signature::verify_rules_text 验签）。数据目录规则优先于内置，
 // 验签失败 / 版本低于防回滚下限一律 fail-closed 回退内置。
-// 在线更新（A3，M3 批次）：cleanup 域的 HTTP 传输层（`engine::winhttp` + 验签 +
-// 原子落盘 + 水位线）与残留库的在线更新通道均已落地——本文件下方实现
-// `uninstall:update-residue-rules` / `uninstall:check-residue-version`（MAIN 档、
-// 原子写 + 验签 + 防回滚），`lib.rs` 已注册、`module_smoke.rs` 有档位用例。
-// 早期「尚未接入、未拍板前不得新增 `residue:update`」的说法只描述当时状态，
-// 通道名也不是字面 `residue:update`；A1/A2 两道闸与验签前置条件不变。
+// v5-K08 批次 9（A4-R01，2026-10-13）改回如实描述：**在线更新未接入**——
+// `uninstall:update-residue-rules` / `uninstall:check-residue-version` 两通道随
+// 2026-10-06 用户裁定全链路退役（check-channel-map 的 RETIRED 台账在册），本文件
+// 没有、也不得再声称「已注册/已落地」；真实加载路径只有 load_residue_rules()
+// （:451 附近，无 HTTP 取数入口）。此前注释写「均已落地」且四处对账全空，
+// 还把「尚未接入」的旧说法标注为「只描述当时状态」——主动否认缺口，比漏说更坏。
+// A1/A2 两道闸与验签前置条件不变。
 
 /// 内置残留规则库（编译期嵌入，与 data/uninstall-residue-rules.json 逐字节一致）
 pub(super) const BUILTIN_RESIDUE_RULES_JSON: &str = include_str!("../../../data/uninstall-residue-rules.json");

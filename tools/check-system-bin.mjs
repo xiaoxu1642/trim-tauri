@@ -147,7 +147,10 @@ const fileTexts = new Map();
  * 全文扫描：定位每个 token，跳过空白/换行后再判实参形态；行号由偏移量反推。
  * 注释里出现的是在讲原理，不是调用点。
  */
-const CALL_TOKENS = ['quiet_cmd(', 'Command::new('];
+// v5 批次 9 门禁候选 1：CALL_TOKENS 补 `quiet_cmd_timeout(`——它是超时 spawn 的
+// 实际入口（39 处调用点，check-ps-callsites 登记表同源），缺它则这批调用点的
+// 实参形态完全失明（T1a 实测 39 处 0 对象）。
+const CALL_TOKENS = ['quiet_cmd(', 'quiet_cmd_timeout(', 'Command::new('];
 
 /** @type {{file:string,line:number,raw:string,name:string|null,wrapped:boolean,ident:string|null,kind:string}[]} */
 const hits = [];

@@ -79,7 +79,9 @@ function balanced(text, openIdx) {
 }
 
 // ---------- 判定器（合成样本可直接对拍） ----------
-const HANDLE_APIS = /(?:FindFirstFileW|FindFirstVolumeW|CreateFileW|OpenProcess|CreateToolhelp32Snapshot|CreateEventW|CreateMutexW|CreateProcessW)\s*\(/g;
+// v5 批次 9 门禁候选 2：N3 名单补 OpenServiceW / OpenSCManagerW / CreateJobObjectW
+// （服务/SCM/作业对象同属「返回句柄、is_ok 判定即泄漏」的家族；服务残留域在用）。
+const HANDLE_APIS = /(?:FindFirstFileW|FindFirstVolumeW|CreateFileW|OpenProcess|CreateToolhelp32Snapshot|CreateEventW|CreateMutexW|CreateProcessW|OpenServiceW|OpenSCManagerW|CreateJobObjectW)\s*\(/g;
 
 /** @returns {string[]} 违规描述 */
 function hygieneViolations(clean) {
@@ -232,16 +234,20 @@ const unreachable = files.filter((f) => !declared.has(f) && !f.endsWith('lib.rs'
 for (const f of unreachable) g.fail(`${relative(ROOT, f).replace(/\\/g, '/')}：没有任何 mod 声明链可达（不在编译面/不在可达面）`);
 
 // ---- N6/N7（P3-5，R5-G-9/G-5）：登记式棘轮（防回退，不是全覆盖） ----
-// N6：两条已收口的递归遍历（现算的 MAX_WALK_DEPTH 使用点）必须保留深度常量 ——
+// N6：两条已收口的递归遍历必须保留深度常量 ——
 // 这是「DFS 必须有深度上限或登记豁免」的登记面；新增递归遍历时把文件登记进来。
+// v5-K07 批次 9：断言改**真名**——旧断言 includes('MAX_WALK_DEPTH') 对 cleanup.rs
+// 的命中完全来自两条注释（代码真名 ENGINE_WALK_MAX_DEPTH 不含该子串：MAX 与 WALK
+// 顺序相反），删掉真护栏它照绿（probe-n6-n3 三态实测的假绿新形态）；对
+// cleanup_scan.rs 则是真命中（crate::scan::MAX_WALK_DEPTH）。按登记点分别钉真名。
 const WALK_DEPTH_SITES = [
-  { file: 'src-tauri/src/engine/native/cleanup.rs', name: '执行侧删除遍历' },
-  { file: 'native-scanner/src/cleanup_scan.rs', name: '清理扫描遍历（两处递归共用）' },
+  { file: 'src-tauri/src/engine/native/cleanup.rs', name: '执行侧删除遍历', token: 'ENGINE_WALK_MAX_DEPTH' },
+  { file: 'native-scanner/src/cleanup_scan.rs', name: '清理扫描遍历（两处递归共用）', token: 'MAX_WALK_DEPTH' },
 ];
 for (const s of WALK_DEPTH_SITES) {
   const f = join(ROOT, s.file);
   const text = existsSync(f) ? readFileSync(f, 'utf8') : '';
-  if (!text.includes('MAX_WALK_DEPTH')) g.fail(`N6：${s.file}（${s.name}）不再引用 MAX_WALK_DEPTH —— 深度护栏被移除？`);
+  if (!text.includes(s.token)) g.fail(`N6：${s.file}（${s.name}）不再引用 ${s.token} —— 深度护栏被移除？`);
 }
 // N7：按 mtime 取最新的实现唯一化 —— 现算唯一实现是 startup::pick_newest_file；
 // 新出现同名职责函数（fn *newest*/*latest*）即红，须复用或在登记表加一条理由。

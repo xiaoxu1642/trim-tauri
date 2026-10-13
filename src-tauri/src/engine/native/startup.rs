@@ -1486,6 +1486,10 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
     // 老根那本迁移过来。
     write_disabled_records(&records);
 
+    // v5 批次 9（D1-M05）：deleted 目录此前零 prune 无界涨——本批补上（按 13 位
+    // 时间戳前缀计数，见 paths::prune_stamped_files；BACKUP_KEEP 同口径不新造数字）。
+    crate::engine::paths::prune_stamped_files(&startup_deleted_dir(), crate::engine::paths::BACKUP_KEEP);
+
     Ok(json!({"success": success, "failed": failed, "results": results, "fsDelete": fs_delete}))
 }
 // ==================== B5 startup_add：新增启动项 ====================

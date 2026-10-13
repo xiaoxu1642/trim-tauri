@@ -138,6 +138,14 @@ if (process.argv.includes('--write')) {
     }
     process.exit(1);
   }
+  // v5 批次 9（门禁候选 3，6a8f02b 先例）：收紧也是棘轮操作——一次 --write 抹掉
+  // 大量基线条目，会把「无关批次顺手放宽」伪装成「本批收敛」。收紧 > 3 条时必须
+  // 显式加 --confirm-shrink 重新落盘，且逐条点名（下方 removed 列表即点名）。
+  if (removed.length > 3 && !process.argv.includes('--confirm-shrink')) {
+    console.error(`✗ --write 将收紧 ${removed.length} 条基线（> 3）——若确属本批收敛，重跑加 --confirm-shrink：`);
+    for (const r of removed) console.error(`    · ${r}`);
+    process.exit(1);
+  }
   writeFileSync(BASELINE_PATH, JSON.stringify(current, null, 2) + '\n', 'utf8');
   console.log(`✓ 基线已重算落盘：${BASELINE_PATH}（删除 API 调用点共 ${total} 处，文件 ${scanned} 个）`);
   if (removed.length) {

@@ -220,11 +220,25 @@ pub fn resolve_backup_file(sub: &str, name: &str) -> Option<PathBuf> {
 /// `x.reg.meta.json`，不以 `.reg` 结尾，所以不会被当主文件计数；反过来若只删封条，主文件
 /// 就变成"无据可查"，还原侧会按 `missing` 拒 —— 那比留下孤儿更糟。
 pub fn prune_backups(dir: &Path, keep: usize) {
+    prune_backups_ext(dir, keep, &["reg"])
+}
+
+/// [`prune_backups`] 的形状泛化版（v5 批次 9，D1-M04）：按扩展名清单计数。
+/// 原 `prune_backups` 只数 `.reg`——pagefile-backups 全是 `.json`，`prune_backups(50)`
+/// 对它恒空转（上限从未生效，盘上 9 个 .json 无界涨）。封条名 `x.reg.meta.json`
+/// 以 .reg 开头**不以 .reg 结尾** ⇒ 泛化后同样不参与计数，孤儿封条语义不变。
+pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut names: Vec<String> = rd
         .flatten()
         .filter_map(|e| e.file_name().to_str().map(String::from))
-        .filter(|n| n.ends_with(".reg") && !n.starts_with('.'))
+        .filter(|n| {
+            !n.starts_with('.') && extensions.iter().any(|e| {
+                n.ends_with(&format!(".{e}"))
+                    // 值级还原封条与主文件同生同死：主文件被裁时封条一起走（见下方 seal）
+                    && !n.ends_with(".meta.json")
+            })
+        })
         .collect();
     names.sort();
     while names.len() > keep {
@@ -246,6 +260,37 @@ pub fn prune_backups(dir: &Path, keep: usize) {
         }
         if !reparse(&seal_path) {
             let _ = trim_finder::scan::recycle::send_to_trash_os(seal_path.as_os_str());
+        }
+    }
+}
+
+/// 按「Trim 写入的备份名都以 13 位毫秒时间戳开头」形状计数裁剪（v5 批次 9，D1-M05）。
+///
+/// `startup-backup/deleted`（reg/lnk/xml/任意原扩展名）与 `pagefile-backups`（`<ts>.json`）
+/// 的写入形状都是 `{13位ms}[_]…`，扩展名开放 ⇒ 按 stamp 前缀过滤，只裁自己写的文件；
+/// `disabled.json` 这类不带 stamp 的文件永不参与计数。回收站优先与 reparse 拒同
+/// [`prune_backups`]。
+pub fn prune_stamped_files(dir: &Path, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let stamp_re = |n: &str| {
+        n.len() >= 13
+            && n.as_bytes()[..13].iter().all(|b| b.is_ascii_digit())
+            && n.as_bytes().get(13).map(|b| *b == b'_' || *b == b'.').unwrap_or(false)
+    };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .filter(|n| !n.starts_with('.') && stamp_re(n))
+        .collect();
+    names.sort();
+    while names.len() > keep {
+        let oldest = names.remove(0);
+        let p = dir.join(&oldest);
+        let reparse = std::fs::symlink_metadata(&p)
+            .map(|m| crate::engine::protect::is_reparse(&m))
+            .unwrap_or(true);
+        if !reparse {
+            let _ = trim_finder::scan::recycle::send_to_trash_os(p.as_os_str());
         }
     }
 }

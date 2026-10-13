@@ -343,7 +343,7 @@ fn build_paging_files(entries: &[PagefileEntry]) -> Vec<String> {
 /// （+ 手动时写 `PagingFiles`）→ 回读比对 → 返回 `requiresReboot: true`。
 ///
 /// 备份走 `atomic_write_json`（AGENTS §3 写 JSON 唯一姿势）、落在
-/// `paths::backup_write_dir()/pagefile-backups/<timestamp>.json`；`prune_backups` 保留 50 份。
+/// `paths::backup_write_dir()/pagefile-backups/<timestamp>.json`；`prune_stamped_files` 保留 50 份。
 /// 一键还原命令留下一轮（AGENTS §3「危险能力默认关，猜错方向的代价不对称」），
 /// 用户可先通过备份 JSON 手动 reg import 恢复。
 pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value, String> {
@@ -432,7 +432,7 @@ pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value,
 }
 
 /// 把当前 `pagefile_state()` 落进 `backup_write_dir("pagefile-backups")/<ts>.json`。
-/// 走 `atomic_write_json`（AGENTS §3），写完 `prune_backups` 保留 50 份。
+/// 走 `atomic_write_json`（AGENTS §3），写完 `prune_stamped_files` 保留 50 份。
 fn write_pagefile_backup(snapshot: &Value) -> Result<String, String> {
     use crate::engine::paths;
     use crate::security::atomic_write_json;
@@ -441,8 +441,10 @@ fn write_pagefile_backup(snapshot: &Value) -> Result<String, String> {
     let ts = crate::engine::now_ms();
     let file = root.join(format!("{ts}.json"));
     atomic_write_json(&file, snapshot)?;
-    // 保留 50 份；prune 失败不阻断主流程（备份本身已落盘，最坏情况下一份份堆积由下次调用回收）
-    paths::prune_backups(&root, 50);
+    // 保留 50 份；prune 失败不阻断主流程（备份本身已落盘，最坏情况下一份份堆积由下次调用回收）。
+    // v5 批次 9（D1-M04）：本根全是 `<ts>.json`，旧 `prune_backups` 只数 `.reg` ⇒ 上限恒空转
+    // （盘上 9 个 .json 无界涨）——改按 13 位时间戳前缀计数裁剪。
+    paths::prune_stamped_files(&root, 50);
     Ok(file.display().to_string())
 }
 

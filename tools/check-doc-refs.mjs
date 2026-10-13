@@ -180,6 +180,33 @@ if (agentsPresent) {
   console.log('⚠ AGENTS.md 不在本机（未跟踪）：3 白名单坐标存在性**未校验**（SKIP，不是通过）');
 }
 
+// ---- 4. U8（v5 批次 9 门禁候选 9）：本机审查文档的表值必须带可重跑取数命令 ----
+// 《方法论》等 docs/ 文档的表格数字是下一轮审查的派单依据；表值旁没有取数命令，
+// 数字漂移就无人能发现（X0-3 现算 14+12 处过期）。docs/ 是未跟踪本机资料区：
+// 缺席时显式 SKIP，**不是通过**。本批落地骨架（标记存在性 + 地板）；过期值全量
+// 修复按修复方案 §4 归后续批次，不冒充已修。
+{
+  const METH = join(DOCS_DIR, '本仓库审查规范', '本仓库审查方法论.md');
+  if (existsSync(METH)) {
+    const text = readFileSync(METH, 'utf8');
+    // 表值行（| 开头且含两位以上数字）粗数，作扫描面地板
+    const tableRows = text.split('\n').filter((l) => /^\s*\|/.test(l) && /\d{2,}/.test(l)).length;
+    check(
+      tableRows >= 50,
+      `4. U8 语料自检：《方法论》表格行 ${tableRows}（≥ 50 地板，防解析失明）`,
+      tableRows < 50 ? '表格行趋零 ⇒ 文件被搬/改名或解析失明' : '',
+    );
+    const withCmd = (text.match(/现算|取数命令|命令：/g) || []).length;
+    check(
+      withCmd >= 10,
+      `4b. U8 骨架：取数标记 ${withCmd} 处（≥ 10；**骨架版**——26 处过期值全量修复归后续批次，修复方案 §4）`,
+      withCmd < 10 ? '取数标记趋零 ⇒ U8 判据失明' : '',
+    );
+  } else {
+    console.log('⚠ U8：《方法论》不在本机（未跟踪资料区）——表值取数命令检查**未校验**（SKIP，不是通过）');
+  }
+}
+
 if (fail > 0) {
   console.error('check-doc-refs: 存在漂移');
   process.exit(1);

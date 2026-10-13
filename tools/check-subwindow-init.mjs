@@ -19,6 +19,9 @@
 // 正向对照（AGENTS §4.1）：每个页面都再跑一遍「人为注入一行指向不存在元素的绑定」，
 // 必须能被判红。注入后仍然全绿 ⇒ 判定器已经失效，本门禁自己判红。
 //
+// v5 批次 9（门禁候选 5）：从只跑 residue 一窗扩到 **4 子窗全覆盖**（页数地板钉住），
+// 另三窗的桩形状见各自 PAGES 条目注释。
+//
 // 用法：node tools/check-subwindow-init.mjs [--verbose]
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -41,6 +44,8 @@ const PAGES = [
     // 注入点：该页 DOMContentLoaded 里的第一行真实语句
     poisonAnchor: "state.appId = targetFromSearch();",
     dropIdProbe: 'rsBackupToggle',
+    // 绑定走 on() 降级 warn 机制 ⇒ 抽件对照（断言 6）有 warn 通道可断
+    expectDropWarn: true,
     api: () => ({
       'uninstall.residueScan': async (a) => ({ success: true, data: { appName: '示例程序', findings: [], notes: [] }, _echo: a }),
       'uninstall.residueExecute': async () => ({ success: true, data: { details: [], okCount: 0, failCount: 0 } }),
@@ -51,7 +56,70 @@ const PAGES = [
       'residueWindow.onTarget': () => undefined,
     }),
   },
+  // v5 批次 9（门禁候选 5）：页数地板（4 子窗全覆盖）——此前只跑 residue 一窗，
+  // 另外 3 窗的「初始化不崩 + 首屏真的会发请求」完全没人管。
+  {
+    html: 'models-window.html',
+    script: 'scripts/models-window.js',
+    expectCalls: ['settings.load'],
+    expectHosts: [],
+    poisonAnchor: "function init() {",
+    dropIdProbe: 'mwBody',
+    api: () => ({
+      'settings.load': async () => ({ success: true, data: { models: {}, modelDefaults: {} } }),
+      'models.save': async () => ({ success: true }),
+      'models.test': async () => ({ success: true, data: { ok: true } }),
+      'modelsWindow.close': async () => ({ success: true }),
+    }),
+  },
+  {
+    html: 'preview-window.html',
+    script: 'scripts/preview-window.js',
+    // 本窗由主窗以 onData 回调投喂图片数据（无 invoke 型首屏请求）：「首屏真的会动」
+    // 的点名对象 = onData 注册本身发生。
+    expectCalls: ['previewWindow.onData'],
+    expectHosts: [],
+    poisonAnchor: "function init() {",
+    dropIdProbe: 'pvClose',
+    api: () => ({
+      'previewWindow.onData': (fn) => fn({ images: [], itemName: '探针', index: 0 }),
+      'previewWindow.close': async () => ({ success: true }),
+      'previewWindow.notifyDeleted': (a) => a,
+      'fileclean.readImage': async () => ({ success: true, data: { dataUrl: 'data:image/png;base64,' } }),
+      'fileclean.deleteFile': async () => ({ success: true }),
+    }),
+  },
+  {
+    html: 'process-manager-window.html',
+    script: 'scripts/process-manager-window.js',
+    // 首屏 = load() ⇒ ProcessTools.fetchProcesses()（report 只在 kill 后发，不是首屏）
+    expectCalls: ['ProcessTools.fetchProcesses'],
+    expectHosts: [],
+    poisonAnchor: "function init() {",
+    dropIdProbe: 'pmBody',
+    api: () => ({
+      'processManager.report': (a) => a,
+      'processManager.closeWindow': async () => ({ success: true }),
+    }),
+    // 该窗的进程列表经 window.ProcessTools（非 tauri api 表）拉取，桩里同样计数
+    extraGlobals: () => ({
+      ProcessTools: {
+        fetchProcesses: async () => [],
+        renderTree: () => {},
+      },
+    }),
+  },
 ];
+
+// v5 批次 9（门禁候选 5）：页数地板——capabilities/subwindows.json 登记的每个子窗
+// label 必须有对应 PAGES 条目（label 驼峰 ⇄ html 文件 kebab 的映射表在此，改文件名
+// 同步改这里）。漏窗 = 该窗的「初始化不崩 + 首屏真的会发请求」无人看守。
+const LABEL_HTML = {
+  preview: 'preview-window.html',
+  models: 'models-window.html',
+  processManager: 'process-manager-window.html',
+  residue: 'residue-window.html',
+};
 
 let fail = 0;
 const check = (ok, label, detail = '') => {
@@ -118,6 +186,10 @@ function buildCtx(page, poison, dropId) {
     body: mkNode('body'),
     documentElement: mkNode('html'),
     head: mkNode('head'),
+    // 真机加载期 readyState 恒 'loading'——models/preview 等窗的脚本按它分流
+    // （'loading' ⇒ DOMContentLoaded 注册，否则直接 init）。缺这个字段会让
+    // 脚本走 else 分支直接 init，DOMContentLoaded 判定失明。
+    readyState: 'loading',
   };
 
   // window.api.<ns>.<method> 由扁平表造出来；表里没有的方法**故意不存在**：
@@ -141,6 +213,18 @@ function buildCtx(page, poison, dropId) {
     intro: { mountIntroPanel: () => ({}) },
     confirmDanger: async () => true,
   };
+  // v5 批次 9（门禁候选 5）：非 api 表的全局对象（如 ProcessTools）同样进桩并计数——
+  // 它们的首屏调用（fetchProcesses）与 api 方法在「首屏真的会动」的判据里同权。
+  for (const [name, obj] of Object.entries(page.extraGlobals ? page.extraGlobals() : {})) {
+    for (const [m, fn] of Object.entries(obj)) {
+      if (typeof fn !== 'function') continue;
+      obj[m] = (...args) => {
+        calls.push(`${name}.${m}`);
+        return fn(...args);
+      };
+    }
+    win[name] = obj;
+  }
   const ctx = vm.createContext({
     document: doc,
     window: win,
@@ -208,6 +292,18 @@ async function runInit(page, poison, dropId) {
 
 console.log('=== 副窗初始化与首屏请求门禁 ===\n');
 
+// v5 批次 9（门禁候选 5）：页数地板（判据见 LABEL_HTML 注释）。
+{
+  const sub = JSON.parse(readFileSync(join(ROOT, 'src-tauri', 'capabilities', 'subwindows.json'), 'utf8'));
+  const labels = sub.windows || [];
+  const missing = labels.filter((l) => !LABEL_HTML[l] || !PAGES.some((p) => p.html === LABEL_HTML[l]));
+  check(
+    missing.length === 0,
+    `0. 页数地板：PAGES 覆盖 subwindows.json 的全部 ${labels.length} 个子窗`,
+    missing.length ? `缺：${missing.join('、')}` : PAGES.map((p) => p.html).join(', '),
+  );
+}
+
 for (const page of PAGES) {
   const r = await runInit(page);
   const tag = page.html;
@@ -229,12 +325,19 @@ for (const page of PAGES) {
   );
 
   // ---- 正向对照 2：抽掉一个真实存在的 id，断言 2 的 warn 通道必须看得见 ----
-  const d = await runInit(page, null, page.dropIdProbe);
-  check(
-    d.warns.length > 0,
-    `6. ${tag} 抽掉 #${page.dropIdProbe} 后断言 2 判红（on() 的降级路径不是静默黑洞）`,
-    d.warns.length > 0 ? d.warns[0] : '抽件后没有任何告警',
-  );
+  // 仅对绑定走 on() 降级 warn 机制的窗有意义（residue）；models/preview/process
+  // 的绑定是 `?.` 可选链直挂（缺 id ⇒ null ⇒ 静默），无 warn 通道可看——那几窗的
+  // 初始化崩不崩由断言 1 管，这里显式跳过并声明，不做假绿。
+  if (page.expectDropWarn) {
+    const d = await runInit(page, null, page.dropIdProbe);
+    check(
+      d.warns.length > 0,
+      `6. ${tag} 抽掉 #${page.dropIdProbe} 后断言 2 判红（on() 的降级路径不是静默黑洞）`,
+      d.warns.length > 0 ? d.warns[0] : '抽件后没有任何告警',
+    );
+  } else {
+    console.log(`6. ${tag} SKIP 抽件对照（绑定不走 on() 降级，无 warn 通道可断）`);
+  }
 }
 
 console.log('');

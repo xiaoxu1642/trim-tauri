@@ -224,4 +224,78 @@ for (const rel of [join('src-tauri', 'data', 'reg-ownership.json'), join('src-ta
 }
 
 console.log(`\n${fail === 0 ? '✓ 四组数据对拍全部一致' : `${fail} 项未通过`}`);
+
+// ==================== 第 5 组：_comment 点名的仓内坐标必须存活 ====================
+// v5 批次 9（门禁候选 8；v4 D1-M03 + 本轮真死 1 条）：数据 JSON 的 _comment 是
+// 下一任维护者的导航——retired-optimizations.json 曾把真实读取方写成已删除的
+// optimizer.rs（真死，2026-10-13 修真）、reg-ownership.json 曾引用不存在的
+// check-reg-ownership.js（v2-L4P-42 勘误）。判据：_comment 中 `*.rs|.mjs|.json|
+// .js|.ps1` 形态的文件名按 basename 与全仓索引对拍，无任何盘上命中即红。
+{
+  const { readdirSync, statSync } = await import('node:fs');
+  const pathMod = await import('node:path');
+  const nameIndex = new Map();
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'target' || e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const p = pathMod.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else {
+        const arr = nameIndex.get(e.name) || [];
+        arr.push(p);
+        nameIndex.set(e.name, arr);
+      }
+    }
+  };
+  walk(REPO_ROOT);
+  // 运行期生成文件（%APPDATA%，不落仓）：_comment 提及它们是讲数据来源，不是仓内坐标
+  const RUNTIME_GENERATED = new Set(['optimizer-backups.json', 'optimizer-runtime.json.sig.json']);
+  const dataDir = join(REPO_ROOT, 'src-tauri', 'data');
+  const extRe = /\b([\w-]+(?:\.[\w-]+)*\.(?:rs|mjs|json|js|ps1))\b/g;
+  const dead = [];
+  let checkedNames = 0;
+  for (const f of readdirSync(dataDir)) {
+    if (!f.endsWith('.json')) continue;
+    const v = JSON.parse(readFileSync(pathMod.join(dataDir, f), 'utf8'));
+    const comment = v && typeof v === 'object' && !Array.isArray(v) ? v._comment : null;
+    if (typeof comment !== 'string') continue;
+    for (const m of comment.matchAll(extRe)) {
+      const base = pathMod.basename(m[1]);
+      if (RUNTIME_GENERATED.has(base)) continue;
+      checkedNames++;
+      if (!nameIndex.has(base)) dead.push(`${f}: ${m[1]}`);
+    }
+  }
+  if (checkedNames < 20) fail++, console.error(`✗ 5. _comment 坐标存活：只解析到 ${checkedNames} 个点名（< 20）⇒ 语料失明`);
+  else if (dead.length > 0) fail++, console.error(`✗ 5. _comment 点名的仓内坐标不存在（判据见上）：${dead.join('；')}`);
+  else console.log(`✓ 5. _comment 坐标存活：${checkedNames} 个点名全部落盘`);
+}
+
+// ==================== 第 6 组：备份根 ⇄ prune 过滤器形状覆盖 ====================
+// v5 批次 9（门禁候选 7 = D1-M04/M05 门禁化）：「备份保留上限覆盖全部备份类目录」
+// 不是描述句——每个有写入的备份根都必须有对应 prune 出口且过滤器形状能命中根的
+// 实际内容。D1-M04（pagefile 全 .json 而 prune_backups 只数 .reg ⇒ 上限恒空转）
+// 与 D1-M05（startup-backup/deleted 零 prune 无界）就是缺口实例；修复后按
+// {what, file, token} 登记钉住（登记式棘轮，check-native-hygiene N6 同款）。
+{
+  const PRUNE_COVERAGE = [
+    { what: 'cleanup-reg-backup（.reg+封条）', file: 'src-tauri/src/engine/native/cleanup.rs', token: 'prune_backups(' },
+    { what: 'uninstall-reg-backup（.reg+封条）', file: 'src-tauri/src/commands/uninstall/residue.rs', token: 'prune_backups(' },
+    { what: 'peripheral-backup', file: 'src-tauri/src/commands/peripheral.rs', token: 'prune_backups(' },
+    { what: 'cleanup-files-backup（目录树）', file: 'src-tauri/src/engine/native/cleanup.rs', token: 'prune_file_backups' },
+    { what: 'fileclean-backup（manifest 台账）', file: 'src-tauri/src/engine/native/cleanup.rs', token: 'prune_file_backups' },
+    { what: 'pagefile-backups（<ts>.json）', file: 'src-tauri/src/engine/native/syspanel.rs', token: 'prune_stamped_files' },
+    { what: 'startup-backup/deleted（{ts}_*）', file: 'src-tauri/src/engine/native/startup.rs', token: 'prune_stamped_files' },
+  ];
+  const gaps = [];
+  for (const c of PRUNE_COVERAGE) {
+    const p = join(REPO_ROOT, c.file);
+    if (!existsSync(p) || !readFileSync(p, 'utf8').includes(c.token)) {
+      gaps.push(`${c.what} ⇒ ${c.file} 缺 ${c.token}`);
+    }
+  }
+  if (gaps.length > 0) fail++, console.error(`✗ 6. 备份根 prune 覆盖面缺口：${gaps.join('；')}`);
+  else console.log(`✓ 6. 备份根 prune 覆盖面：${PRUNE_COVERAGE.length} 个备份根都有对应裁剪出口`);
+}
+
 process.exit(fail === 0 ? 0 : 1);

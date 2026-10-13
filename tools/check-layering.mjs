@@ -44,6 +44,13 @@ if (hits.length === 0) {
   g.fail(`分层方向违规：下层不得引用 crate::commands:: —— ${hits.join(', ')}`);
 }
 
+// v5 批次 9（门禁候选 6）：扫描面地板——目录塌缩（改名/搬走/被清空）时 scanned 趋零，
+// 「0 文件 0 命中」与「真合规」在旧判据里长得一模一样（恒绿）。地板：三层的 .rs 合计
+// 必须达到粗下界（现算 39，取 30：塌缩任一层 ≈ −15 即红；改前先现算）。
+if (scanned < 30) {
+  g.fail(`扫描面地板：下层只扫到 ${scanned} 个 .rs（< 30）⇒ 目录塌缩/扫描根失明（engine/security/pwsh 任一被搬走都会这样）`);
+}
+
 // 正向对照（防恒绿）：commands 层自身必须仍存在 crate::commands:: 引用（同层互调是合法的），
 // 若连它都搜不到，说明符号改名/扫描前提失效，本门禁要跟着改而不是静默变绿。
 const cmdHits = walkRs(join(SRC, 'commands')).filter((f) =>

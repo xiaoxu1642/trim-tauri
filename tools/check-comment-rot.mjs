@@ -526,6 +526,35 @@ if (fail > 0) {
   console.error(`\ncheck-comment-rot: ${fail} 组断言未通过（注释已腐烂，见上）`);
   process.exit(1);
 }
+
+// ────────────────────────────────────────────────────────────────────
+// K08 对账门禁（v5 批次 9，A4-R01 / X0-K01 家族）：模块注释若声称某通道
+// 「已注册 / 已落地」，该通道名必须能在盘上对上（lib.rs 注册或 CHANNEL_MAP）。
+// 守的是「主动否认缺口」复发：residue_update.rs 曾写「均已落地」而四处对账
+// 全空、还把「尚未接入」的旧说法标注为「只描述当时状态」——注释改为如实
+// 描述「未接入」后本断言恒绿；它只在有人再把缺口写成成就时变红。
+// ────────────────────────────────────────────────────────────────────
+{
+  const rupd = join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall', 'residue_update.rs');
+  if (existsSync(rupd)) {
+    const text = readFileSync(rupd, 'utf8');
+    const claimed = [
+      ...text.matchAll(/(?:已注册|已落地|均已落地)[^\n]*?(uninstall:[\w-]+)/g),
+    ].map((m) => m[1]);
+    for (const ch of claimed) {
+      const lib = readFileSync(join(ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf8');
+      const cmap = readFileSync(join(ROOT, 'src-tauri', 'src', 'scripts', 'tauri-api.js'), 'utf8');
+      if (!lib.includes(ch) && !cmap.includes(ch)) {
+        console.error(`✗ K08 对账：residue_update.rs 声称 ${ch} 已注册/已落地，但 lib.rs 与 CHANNEL_MAP 都找不到（注释写成了成就）`);
+        fail++;
+      }
+    }
+    if (claimed.length === 0) {
+      console.log('✓ K08 对账：residue_update.rs 无「已注册/已落地」声称（在线更新退役口径如实）');
+    }
+  }
+}
+
 if (toleratedHits.length) {
   console.log(`\n⚠ 待修：${toleratedHits.length} 处已确认腐烂，暂缓豁免使门禁可绿，**应改注释后从豁免表移除**`);
   for (const h of toleratedHits) console.log(`    · ${h}`);

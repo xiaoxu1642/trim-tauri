@@ -24,16 +24,16 @@ const REGISTRY = [
   { file: 'check-html-contract.mjs', reason: 'HTML 合同：内联 script 样本自检' },
   { file: 'check-cleanup-rule-contract.mjs', reason: '规则契约：37 条反例自检（既有范本）' },
   { file: 'check-rule-schema-sync.mjs', reason: '契约表⇄Rust 装载侧：5 条判定器自检（干净样本 / token 注入 / 缺键查询 / 路径漂移 / 剥离失败）' },
-  { file: 'check-elapsed-facts.mjs', reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
-  { file: 'check-optimizer-write-contract.mjs', reason: 'M2 写入坐标侧表：7 条样本自检（含 1 条应放行的干净样本，防判据变成「永远红」）' },
+  { file: 'check-elapsed-facts.mjs', manual: true, reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
+  { file: 'check-optimizer-write-contract.mjs', manual: true, reason: 'M2 写入坐标侧表：7 条样本自检（含 1 条应放行的干净样本，防判据变成「永远红」）' },
   { file: 'check-subwindow-init.mjs', reason: '副窗初始化：每页两条正向对照（注入指向不存在元素的绑定 + 抽掉一个真实 id），对照失效即红' },
   { file: 'check-subwindow-css.mjs', reason: '子窗 CSS 按需：S1 样式表序列 / S2 引用面 / S3 层叠翻转 / S4 token 真源四组各配正反样本 + 解析器形状对照（@media 内层与花括号字符串）' },
   { file: 'check-a11y.mjs', reason: '可达性四断言：勾选框三属性 / aria-live 宿主 / data-tip 反 title / RM 归零覆盖面各配正反样本自检 + 三类扫描面地板' },
   { file: 'check-contrast.mjs', reason: 'F 组玻璃面 floor 断言配正反向样本自检（P3-2）；A1/B/C 与 token 表等既有组仍缺合成样本' },
   { file: 'check-native-hygiene.mjs', reason: '五条原生卫生断言各配正反样本自检（裸 output / 定长解码 / 句柄丢弃 / .reg 读取），+ 模块可达性与扫描面地板' },
   { file: 'check-confirm-danger.mjs', reason: 'confirmedHighRisk 字面量判定器配正反样本自检（P3-5）；调用形态两组仍靠扫描面塌陷地板兜底' },
-  { file: 'check-idle-scripts.mjs', reason: 'loadScript 三态断言配「违例 3 条全命中 / 合规放行」样本自检（P3-4）；守卫与启动名单两组仍靠扫描面地板兜底' },
-  { file: 'check-comment-rot.mjs', reason: '注释腐烂：三条断言各配正反向对照（不存在路径/章节号/数字必判红 + 真实样本不假红）；另经真破坏验证——关掉待修豁免表后 8 处真实腐烂全被抓到，exit 1' },
+  { file: 'check-idle-scripts.mjs', manual: true, reason: 'loadScript 三态断言配「违例 3 条全命中 / 合规放行」样本自检（P3-4）；守卫与启动名单两组仍靠扫描面地板兜底' },
+  { file: 'check-comment-rot.mjs', manual: true, reason: '注释腐烂：三条断言各配正反向对照（不存在路径/章节号/数字必判红 + 真实样本不假红）；另经真破坏验证——关掉待修豁免表后 8 处真实腐烂全被抓到，exit 1' },
   { file: 'check-review-units.mjs', reason: '审查单元台账：U1–U5 五条断言各配合成正反向样本（超上限/重复点名/未认领/台账塌缩必判红，干净表不假红）；另经真破坏验证——改名+降上限+抬地板三处同时判红，exit 1' },
   { file: 'check-desc-vs-writes.mjs', reason: 'P1-03 文案⇄写入：原缺陷形态判红 /「其余」精确限定与无声称放行，3 条判定器自检' },
 ];
@@ -82,9 +82,20 @@ const check = (ok, label, detail = '') => {
 };
 
 console.log('=== 正向对照管辖门禁 ===\n');
+// v5 批次 9（门禁候选 4）：第 1 组从「文本关键词」改结构化对拍——旧判据只查文件里
+// 含不含「正向对照」四个字，注释里写一句就过（被注释满足 = K07 同族的假绿）。
+// 结构化判据：剥注释后必须存在**真实的对照断言行**（check(/fail( 调用且 label 含
+// 「对照」）——写得出这行 = 判定器真有可判红的对照样本。
 const missingSelfTest = [];
 const brokenRun = [];
+// v5 批次 9（门禁候选 4）：manual: true = 该门禁的对照形态是「人工/真破坏验证」
+// （自检形态不在机检识别集内），显式登记而非静默漏判；机检条目数收口见第 1 组断言。
+const manualEntries = [];
 for (const e of REGISTRY) {
+  if (e.manual) {
+    manualEntries.push(e.file);
+    continue;
+  }
   const p = join(ROOT, 'tools', e.file);
   let text;
   try {
@@ -93,8 +104,18 @@ for (const e of REGISTRY) {
     brokenRun.push(`${e.file} 文件不存在`);
     continue;
   }
-  if (!text.includes('POSITIVE_CONTROLS') && !text.includes('反例') && !text.includes('正向对照') && !text.includes('判定器自检')) {
-    missingSelfTest.push(`${e.file}（${e.reason}）`);
+  const clean = text.replace(/^\s*\/\/.*$/gm, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ');
+  // 两种真实对照形态都要认：
+  // ① check(/g.fail( 调用窗口内含「对照/正向/判红」（check 常跨行 ⇒ 起点后 400 字符窗口）；
+  // ② fail-closed 对照串（`正向对照失败` 等 console.error+exit 形态，如
+  //    check-escape-delegation / check-html-contract——字符串字面量在代码里，剥注释后仍在）。
+  const hasRealControl =
+    /正向对照失败|本门禁失效|必须判红|必须放行|永远不会被测坏|坏成永远放行|判定器没抓住|判定器误红/.test(clean) ||
+    [...clean.matchAll(/(?:^|\n)\s*(?:check|g\.fail)\s*\(/g)].some(
+      (m) => /对照|正向|判红/.test(clean.slice(m.index, m.index + 400)),
+    );
+  if (!hasRealControl) {
+    missingSelfTest.push(`${e.file}（${e.reason}）—— 剥注释后无任何 check/fail 型对照断言行`);
     continue;
   }
   const r = spawnSync(process.execPath, [p], { cwd: ROOT, encoding: 'utf8' });
@@ -102,7 +123,7 @@ for (const e of REGISTRY) {
 }
 check(
   missingSelfTest.length === 0,
-  `1. ${REGISTRY.length} 个找违规型门禁均内置正向对照自检`,
+  `1. ${REGISTRY.length - manualEntries.length} 个机检型门禁均内置真实对照断言（剥注释后可判）+ ${manualEntries.length} 个显式登记人工/真破坏验证`,
   missingSelfTest.join('；'),
 );
 check(
