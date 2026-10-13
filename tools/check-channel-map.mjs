@@ -127,7 +127,7 @@ const RETIRED = {
  * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
  */
 const TAURI_ADDED = {
-  'cleanup:allow-preview-assets': '2026-10-13：图片预览改主窗内嵌 LiteBox 后的 asset 按需放行命令（把本次预览的那组图加进 asset scope，替代退役的 fileclean:read-image dataURL 通道）',  'updater:completion': 'S3（2026-10-05）：新版本实例首领取一次「更新已完成」标记（读后即删，主窗档）。上游 Electron 的 ready-to-install 提示由主进程弹，没有渲染层查询接口',
+  'startup:open-source': '2026-10-13：B-6 增强——点「位置」同时打开软件所在文件夹与登记来源（注册表项写 regedit LastKey 后拉起；计划任务项定位 System32\Tasks 落盘文件）',  'cleanup:allow-preview-assets': '2026-10-13：图片预览改主窗内嵌 LiteBox 后的 asset 按需放行命令（把本次预览的那组图加进 asset scope，替代退役的 fileclean:read-image dataURL 通道）',  'updater:completion': 'S3（2026-10-05）：新版本实例首领取一次「更新已完成」标记（读后即删，主窗档）。上游 Electron 的 ready-to-install 提示由主进程弹，没有渲染层查询接口',
   'uninstall:modify': 'P1-D6（2026-10-01）：修改/修复入口，执行 ModifyPath（主窗档）',
   'uninstall:pending-add': 'P1-B3（2026-10-01）：回收站失败项登记重启后删（主窗档）',
   'uninstall:pending-list': 'P1-B3（2026-10-01）：重启后删待删清单（主窗档，只读）',

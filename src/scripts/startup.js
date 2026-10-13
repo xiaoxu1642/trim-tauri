@@ -502,8 +502,19 @@
         ? `<div class="startup-item-cmd" data-tip="这个文件已经不存在（原样来自注册表/任务定义，Trim 未改动）">${escapeHtml(missing)}</div>`
         : '';
       const locPath = i.resolvedPath || i.filePath || '';
+      // B-6 增强：按钮携带「登记来源」坐标，点击时同时打开软件位置与来源位置
+      // （注册表项 → regedit 定位键；计划任务项 → 任务 XML 落盘位置）。
+      const locAttrs = [
+        `data-path="${escapeHtml(locPath)}"`,
+        `data-source="${escapeHtml(i.source || '')}"`,
+      ];
+      if (i.source === 'registry') locAttrs.push(`data-regpath="${escapeHtml(i.regPath || '')}"`);
+      if (i.source === 'task') {
+        locAttrs.push(`data-taskpath="${escapeHtml(i.taskPath || '')}"`);
+        locAttrs.push(`data-taskname="${escapeHtml(i.taskName || '')}"`);
+      }
       const locBtn = locPath
-        ? `<button class="btn btn-small btn-opt-loc" data-id="${escapeHtml(i.id)}" data-path="${escapeHtml(locPath)}" data-tip="打开文件所在位置">位置</button>`
+        ? `<button class="btn btn-small btn-opt-loc" data-id="${escapeHtml(i.id)}" ${locAttrs.join(' ')} data-tip="打开文件位置与登记位置">位置</button>`
         : '';
       const secBtn = missing
         ? `<button class="btn btn-small btn-opt-sec" data-id="${escapeHtml(i.id)}" data-tip="打开系统自带的 Windows 安全中心，由你决定要不要扫描">安全中心</button>`
@@ -704,6 +715,43 @@
     }
   }
 
+  // B-6 增强：一次动作同时打开「软件所在文件夹」与「登记来源」（注册表键 / 任务文件）。
+  // 两个动作在后端互相独立，回执分字段，提示按实际发生的组合如实说。
+  async function openSource(ds) {
+    if (!ds || (!ds.path && !ds.source)) return;
+    try {
+      const resp = await window.api.startup.openSource({
+        path: ds.path || '',
+        source: ds.source || '',
+        regPath: ds.regpath || '',
+        taskPath: ds.taskpath || '',
+        taskName: ds.taskname || ''
+      });
+      if (!resp || !resp.success) {
+        window.app?.toast('warning', (resp && resp.message) || '打开位置失败');
+        return;
+      }
+      const folder = resp.folder || {};
+      const src = resp.source || {};
+      if (src.kind === 'folder') {
+        // 启动文件夹项没有独立来源位置，只开了软件位置
+        if (folder.fellBack && folder.opened) {
+          window.app?.toast('info', `目标文件已不在原处，已打开它上层的文件夹：${folder.opened}`);
+        }
+        return;
+      }
+      const srcOk = src.success === true;
+      const where = src.kind === 'registry' ? '注册表编辑器' : '资源管理器（任务定义文件）';
+      if (srcOk) {
+        window.app?.toast('success', `已打开软件所在文件夹，并已在${where}中定位登记位置`);
+      } else {
+        window.app?.toast('warning', `软件位置已打开；登记位置定位失败：${src.message || '未知原因'}`);
+      }
+    } catch (e) {
+      window.app?.toast('error', `打开位置失败: ${e.message}`);
+    }
+  }
+
   /**
    * 「目标文件已不存在」那条链的第三个出口：请系统打开 Windows 安全中心。
    *
@@ -817,7 +865,7 @@
       }
       const locBtn = e.target.closest('.btn-opt-loc');
       if (locBtn) {
-        openLocation(locBtn.dataset.path);
+        openSource(locBtn.dataset);
         return;
       }
       const delBtn = e.target.closest('.btn-opt-del');

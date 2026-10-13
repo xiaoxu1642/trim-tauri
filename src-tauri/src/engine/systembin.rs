@@ -238,6 +238,57 @@ pub fn explorer_select_arg(target: &str) -> String {
     format!("/select,{}", target.replace('/', "\\"))
 }
 
+/// ShellExecuteW 拉起的共用底座：lpFile/lpParameters 原样透传（不经 shell 拼接、
+/// 无 Rust `Command::arg` 的引号坑，见上）。返回值 >32 为成功（ShellExecute 约定）。
+fn shell_execute(file: &str, params: Option<&str>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let exe_w: Vec<u16> = std::ffi::OsStr::new(file)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let params_w: Option<Vec<u16>> = params.map(|p| {
+            std::ffi::OsStr::new(p).encode_wide().chain(std::iter::once(0)).collect()
+        });
+        let r = unsafe {
+            ShellExecuteW(
+                None,
+                windows::core::w!("open"),
+                windows::core::PCWSTR(exe_w.as_ptr()),
+                params_w
+                    .as_ref()
+                    .map(|p| windows::core::PCWSTR(p.as_ptr()))
+                    .unwrap_or(windows::core::PCWSTR::null()),
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if r.0 as usize > 32 {
+            Ok(())
+        } else {
+            Err(format!("ShellExecute 返回 {}", r.0 as isize))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (file, params);
+        Err("仅 Windows 支持该操作".into())
+    }
+}
+
+/// 启动一个白名单内的可执行程序（无参数形态）。典型用例：写好 regedit 的 LastKey
+/// 记忆位后拉起 regedit，让它直接定位到启动项的登记键。
+pub fn shell_execute_open(program: &str) -> Result<(), String> {
+    if program.is_empty() || program.contains('\0') || program.contains('"') {
+        return Err("程序路径不可用".into());
+    }
+    shell_execute(program, None)
+}
+
 /// 在资源管理器里定位（打开并选中）一个已存在的文件或目录。
 ///
 /// ## 为什么不用 `Command::arg`
@@ -259,41 +310,13 @@ pub fn explorer_select_arg(target: &str) -> String {
 ///
 /// 返回值 >32 为成功（ShellExecute 约定），≤32 是错误码。
 pub fn shell_select_in_explorer(target: &str) -> Result<(), String> {
-    if target.is_empty() || target.contains('\0') || target.contains('"') {
+    if target.is_empty() || target.contains('\u{0000}') || target.contains('"') {
         return Err("路径不可用于定位".into());
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::UI::Shell::ShellExecuteW;
-
-        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
         let exe = system_tool("explorer.exe");
-        let exe_w: Vec<u16> = std::ffi::OsStr::new(&exe)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let params = explorer_select_arg(target);
-        let params_w = std::ffi::OsStr::new(&params)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<u16>>();
-        let r = unsafe {
-            ShellExecuteW(
-                None,
-                windows::core::w!("open"),
-                windows::core::PCWSTR(exe_w.as_ptr()),
-                windows::core::PCWSTR(params_w.as_ptr()),
-                None,
-                SW_SHOWNORMAL,
-            )
-        };
-        if r.0 as usize > 32 {
-            Ok(())
-        } else {
-            Err(format!("资源管理器返回 {}", r.0 as isize))
-        }
+        shell_execute(exe.to_string_lossy().as_ref(), Some(&explorer_select_arg(target)))
     }
     #[cfg(not(windows))]
     {

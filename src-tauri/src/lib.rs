@@ -441,6 +441,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::startup::startup_toggle,
         commands::startup::startup_delete,
         commands::startup::startup_openlocation,
+        commands::startup::startup_open_source,
         commands::startup::startup_add,
         commands::optimizer::optimizer_run,
         commands::optimizer::optimizer_list,

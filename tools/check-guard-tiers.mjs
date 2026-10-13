@@ -139,6 +139,7 @@ const MUST_MAIN = [
   // 'settings_save' 已于 v2-F4 整链摘除（2026-09-26），不再是一条命令
   'startup_add',
   'startup_delete',
+  'startup_open_source', // B-6 增强：定位登记来源（写 HKCU regedit LastKey + 拉起 regedit/explorer；主窗档）
   'startup_toggle',
   'updater_cancel_download',
   'updater_check',

@@ -396,6 +396,143 @@ pub async fn startup_openlocation<R: Runtime>(
     }
 }
 
+/// 计划任务 XML 文件的落盘位置（任务计划程序库的物理形态）。
+const TASKS_DIR: &str = r"C:\Windows\System32\Tasks";
+
+/// 「打开来源位置」的坐标白名单：任务路径/任务名来自 IPC 参数，不能拿来拼文件路径。
+/// 只放行文件名合法字符；`..` 段单独拒（防穿越出 Tasks 目录）。
+fn task_coordinate_problem(s: &str) -> Option<&'static str> {
+    if s.is_empty() {
+        return Some("为空");
+    }
+    if s.split(['\\', '/']).any(|seg| seg == "..") {
+        return Some("含 .. 段（路径穿越）");
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-' | '(' | ')' | '\\' | '/'))
+    {
+        return Some("含白名单外字符");
+    }
+    None
+}
+
+/// regedit 的 LastKey 期望「计算机\HKEY_…」全形态；只认四个 hive 根，防拼任意串。
+fn regedit_last_key(reg_path: &str) -> Option<String> {
+    let p = reg_path.trim().replace('/', "\\");
+    let roots = ["HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE", "HKEY_CLASSES_ROOT", "HKEY_USERS"];
+    let hit = roots.iter().any(|r| {
+        p.len() > r.len() + 1 && p[..r.len()].eq_ignore_ascii_case(r) && p.as_bytes()[r.len()] == b'\\'
+    });
+    if !hit {
+        return None;
+    }
+    Some(format!("计算机\\{p}"))
+}
+
+/// 把 LastKey 写进 HKCU 的 regedit 记忆位，再拉起 regedit —— Windows 没有「打开注册
+/// 表并跳到某键」的命令行参数，业界通用做法就是先写 Applets\Regedit\LastKey 再启动。
+fn open_regedit_at(last_key: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ};
+    use std::os::windows::ffi::OsStrExt;
+
+    const SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit";
+    unsafe {
+        let sub_w: Vec<u16> = std::ffi::OsStr::new(SUBKEY).encode_wide().chain(std::iter::once(0)).collect();
+        let mut hk = HKEY::default();
+        // windows 0.61：RegOpenKeyExW 返回 WIN32_ERROR（非 Result），0 = ERROR_SUCCESS
+        let opened = RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sub_w.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
+        if opened.is_err() {
+            return Err(format!("打开 regedit 记忆键失败（win32 {}）", opened.0));
+        }
+        let val_w: Vec<u16> = std::ffi::OsStr::new("LastKey").encode_wide().chain(std::iter::once(0)).collect();
+        // REG_SZ 载荷按字节传（含收尾 NUL 的 u16 序列），与 contextmenu/uninstall 域同款
+        let mut bytes: Vec<u8> = Vec::with_capacity(last_key.len() * 2 + 2);
+        for w in std::ffi::OsStr::new(last_key).encode_wide().chain(std::iter::once(0)) {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        let r = RegSetValueExW(hk, PCWSTR(val_w.as_ptr()), Some(0), REG_SZ, Some(&bytes));
+        let _ = RegCloseKey(hk);
+        if r.is_err() {
+            return Err(format!("写入 regedit 记忆键失败（win32 {}）", r.0));
+        }
+    }
+    // regedit 启动时读 LastKey；先写后启，顺序不能反
+    let exe = crate::engine::systembin::system_tool("regedit.exe");
+    crate::engine::systembin::shell_execute_open(exe.to_string_lossy().as_ref())
+}
+
+/// startup:open-source —— 打开启动项的「来源位置」（B-6 增强，2026-10-13 用户裁定）
+///
+/// 点「位置」除了打开目标软件所在文件夹，还要把它登记在哪一并露出来：
+/// · 注册表项 → 先写 regedit 的 LastKey 再拉起 regedit（定位到登记键）；
+/// · 计划任务项 → explorer /select 任务 XML 的落盘文件（System32\Tasks 下）；
+/// · 启动文件夹项 → 没有独立来源位置，folder 字段如实说明。
+/// 两个动作互相独立：软件位置失败不阻断来源定位，反之亦然，回执分字段如实报。
+#[tauri::command]
+pub async fn startup_open_source<R: Runtime>(
+    window: WebviewWindow<R>,
+    path: Option<String>,
+    source: Option<String>,
+    reg_path: Option<String>,
+    task_path: Option<String>,
+    task_name: Option<String>,
+) -> Value {
+    // 主窗档：位置按钮只在主窗启动项页（guard-tiers D5 禁「只读档无子窗消费方」的白给放宽）
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let target = path.unwrap_or_default();
+
+    // ① 软件所在文件夹（与 startup:openlocation 同一份锚定与拉起逻辑）
+    let folder = match location_anchor(&target) {
+        Some((anchor, fell_back)) => {
+            let opened = anchor.to_string_lossy().replace('/', "\\");
+            match crate::engine::systembin::shell_select_in_explorer(&opened) {
+                Ok(()) => json!({ "success": true, "opened": opened, "fellBack": fell_back }),
+                Err(e) => json!({ "success": false, "message": e }),
+            }
+        }
+        None => json!({ "success": false, "message": "目标路径连同上级目录都不存在" }),
+    };
+
+    // ② 来源位置
+    let src = match source.as_deref() {
+        Some("registry") => match reg_path.as_deref().and_then(regedit_last_key) {
+            Some(lk) => match open_regedit_at(&lk) {
+                Ok(()) => json!({ "success": true, "kind": "registry", "opened": lk }),
+                Err(e) => json!({ "success": false, "kind": "registry", "message": e }),
+            },
+            None => json!({ "success": false, "kind": "registry", "message": "注册表路径不是四个根键之一的子键" }),
+        },
+        Some("task") => {
+            let tp = task_path.unwrap_or_default();
+            let tn = task_name.unwrap_or_default();
+            if let Some(why) = task_coordinate_problem(&tp).or_else(|| task_coordinate_problem(&tn)) {
+                json!({ "success": false, "kind": "task", "message": format!("任务坐标不合法（{why}），已拒绝定位") })
+            } else {
+                let file = format!(
+                    "{}{}\\{}",
+                    TASKS_DIR,
+                    tp.replace('/', "\\").trim_end_matches('\\'),
+                    tn.replace('/', "\\")
+                );
+                match crate::engine::systembin::shell_select_in_explorer(&file) {
+                    Ok(()) => json!({ "success": true, "kind": "task", "opened": file }),
+                    Err(e) => json!({ "success": false, "kind": "task", "message": e }),
+                }
+            }
+        }
+        Some("folder") => json!({ "success": true, "kind": "folder", "note": "启动文件夹项没有独立的来源位置（它本身就是登记）" }),
+        _ => json!({ "success": false, "kind": "unknown", "message": "未知的启动项来源" }),
+    };
+
+    let ok = folder.get("success").and_then(|v| v.as_bool()).unwrap_or(false)
+        || src.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    json!({ "success": ok, "folder": folder, "source": src })
+}
+
 /// startup:add —— 原生对话框选程序 → 写当前用户 Run 键（同名冲突不覆盖）
 #[tauri::command]
 pub async fn startup_add<R: Runtime>(window: WebviewWindow<R>) -> Value {
@@ -514,5 +651,43 @@ mod tests {
             crate::engine::systembin::explorer_select_arg("C:\\A B\\c.exe"),
             format!("\"/select,{}\"", "C:\\A B\\c.exe")
         );
+    }
+
+    /// B-6 增强：任务坐标白名单。`..` 段单独拒（穿越出 Tasks 目录就是任意文件定位），
+    /// 白名单外字符（引号/分号/环境变量展开等）同样拒。
+    #[test]
+    fn 任务坐标_穿越与非法字符必须拒() {
+        assert!(task_coordinate_problem("Microsoft\\Windows\\..\\evil").is_some(), ".. 段必须拒");
+        assert!(task_coordinate_problem("..\\evil").is_some());
+        assert!(task_coordinate_problem("Microsoft\\Windows\\System32\\...").is_none(), "三个点不是 .. 段");
+        assert!(task_coordinate_problem("Micro\"soft").is_some(), "引号必须拒");
+        assert!(task_coordinate_problem("微软任务").is_some(), "非 ASCII 任务名不在白名单（现网任务名均为 ASCII）");
+        assert!(task_coordinate_problem("").is_some());
+        assert!(task_coordinate_problem("\\Microsoft\\Windows\\Maps").is_none());
+        assert!(task_coordinate_problem("OneDrive Startup Task-1 (x64)").is_none());
+    }
+
+    /// B-6 增强：regedit LastKey 只认四个 hive 根的子键（防拼任意串写进记忆位）。
+    #[test]
+    fn lastkey_只认四根的子键() {
+        assert_eq!(
+            regedit_last_key(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run").as_deref(),
+            Some(r"计算机\HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run")
+        );
+        assert_eq!(
+            regedit_last_key(r"hkey_local_machine\SOFTWARE\X").as_deref(),
+            Some(r"计算机\hkey_local_machine\SOFTWARE\X"),
+            "hive 根大小写不敏感，大小写原样保留"
+        );
+        assert!(regedit_last_key("Software\\Foo").is_none(), "缺 hive 根必须拒");
+        assert!(regedit_last_key("HKEY_CURRENT_USER").is_none(), "裸根键（无子键）拒：regedit 打开根没有定位意义");
+        assert!(regedit_last_key("HKEY_CURRENT_USERX\\A").is_none(), "前缀相同的根名不算命中");
+    }
+
+    /// 正向对照：把白名单里的 `..` 段判定删掉，上面的穿越用例必须红（防恒绿）。
+    #[test]
+    fn 任务坐标不是恒放行() {
+        let probes = ["..\\evil", "a\\..\\b", "Micro\"soft"];
+        assert!(probes.iter().all(|p| task_coordinate_problem(p).is_some()));
     }
 }

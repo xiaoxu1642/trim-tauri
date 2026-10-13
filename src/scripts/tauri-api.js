@@ -230,6 +230,7 @@
     'startup:toggle': 'startup_toggle',
     'startup:delete': 'startup_delete',
     'startup:openlocation': 'startup_openlocation',
+    'startup:open-source': 'startup_open_source',
     'startup:add': 'startup_add',
     // syspanel（P2 §3.6：电源计划 + 虚拟内存面板，只在主窗 settings 页调用）
     'syspanel:power-plan-get': 'syspanel_power_plan_get',
@@ -721,6 +722,8 @@
       toggle: function (items, enable) { return invokeChannel('startup:toggle', { items: items, enable: enable }); },
       remove: function (items) { return invokeChannel('startup:delete', { items: items }); },
       openLocation: function (targetPath) { return invokeChannel('startup:openlocation', { path: targetPath }); },
+      // B-6 增强：同时打开软件位置与其登记来源（注册表键 / 计划任务落盘文件）
+      openSource: function (coords) { return invokeChannel('startup:open-source', coords); },
       add: function () { return invokeChannel('startup:add', {}); }
     }
   };
