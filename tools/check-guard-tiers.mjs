@@ -432,12 +432,17 @@ const wantReadonly = [...MUST_READONLY].sort();
 //   E2 表里声明的成员标签 ⇄ engine/guard.rs 常量实体的成员**逐字相等**（顺序无关）；
 //   E3 常量成员必须 ⊆ APP_WINDOWS（往常量里塞一个没在 capabilities 登记过的 label 即红）。
 const MUST_WINDOWSET = {
+  // 2026-10-13：清理域失败引导给主窗开了「登记重启后删除」的入口（写 PFRO 是永久删
+  // 出口，窗口集从纯 residue 扩成 main+residue；models/processManager 无调用场景不放）。
+  PENDING_DELETE_WINDOWS: {
+    labels: ['main', 'residue'],
+    cmds: ['uninstall_pending_add'],
+  },
   RESIDUE_WINDOWS: {
     labels: ['residue'],
     // v0.7.0 机-wide 扫描整条退役：dead-scan / orphan-scan / orphan-ignore / residue-deep-scan
     // 四条命令已删除，本集只剩「该应用四类残留扫描 + 执行 + 重启后删三件套」。
     cmds: [
-      'uninstall_pending_add',
       'uninstall_pending_list',
       'uninstall_pending_revoke',
       'uninstall_residue_execute',

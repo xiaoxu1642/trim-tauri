@@ -1504,14 +1504,15 @@
           toastMsg += `；另有 ${recycledCount} 项（${formatSize(recycledBytes)}）已移入回收站，清空回收站后才会真正释放`;
         }
         window.app?.toast('success', toastMsg);
-        // P3 残留复查提示：清理后仍有文件/注册表残留的项
-        const residualItems = (result.details || []).filter(d => (Number(d.residual) || 0) > 0);
-        if (residualItems.length > 0) {
-          window.app?.toast('warning', `${residualItems.length} 项仍有残留（文件可能被占用，可关闭相关程序或重启后再试）`);
-        }
-        if (result.failed > 0) {
-          window.app?.toast('warning', `${result.failed} 项清理失败（可能文件被占用）`);
-          maybeOfferElevation(`${result.failed} 项清理失败，可能需要管理员权限才能删除这些文件。`);
+        // P3 残留复查提示 + 2026-10-13 失败引导：explorer 等进程占着句柄的文件在
+        // 内核层就删不掉，光提示「关闭相关程序」是把难题丢回给用户（真机裁定：
+        // 「每次都提示我结束 explorer，真结束了资源管理器不就没了吗」）。现在给
+        // 两条可执行出路：① 重启资源管理器并重试（explorer 无损重启，几秒恢复）；
+        // ② 登记到重启后删除（PendingFileRenameOperations，复用卸载域现成链）。
+        const failedItems = (result.details || []).filter(d => d.status !== 'ok' || (Number(d.residual) || 0) > 0);
+        if (failedItems.length > 0) {
+          offerCleanupRetryPanel(failedItems);
+          maybeOfferElevation(`${failedItems.length} 项未完全清理，部分文件可能需要管理员权限。`);
         } else if (result.partial > 0) {
           // v3.3.4 文案纠偏：部分成功不是失败——多数文件已清理，仅少数被占用未删
           window.app?.toast('warning', `${result.partial} 项部分清理完成（仅少数文件被占用未删）`);
@@ -1702,6 +1703,120 @@
       const first = range.querySelector('img');
       if (first) window.liteBox.click({ target: first });
     })();
+  }
+
+  // ==================== 清理失败引导（2026-10-13 用户裁定） ====================
+  // 背景：explorer 等进程占着句柄的文件在内核层删不掉，旧文案「可关闭相关程序或
+  // 重启后再试」在占用者就是 explorer 时无解（真机裁定原话：「真结束了资源管理器
+  // 不就没了吗」）。两条出路都接现成原语：
+  //   ① 重启资源管理器（contextmenu:restart-explorer，无损重启，桌面/任务栏几秒
+  //      恢复）→ 自动对失败项重新执行（复用 clean() 的整条确认链）；
+  //   ② 登记重启后删除（uninstall:pending-add → PendingFileRenameOperations，
+  //      下次开机由系统删除；目录会被后端如实 skip，回执汇总展示）。
+
+  // 收集失败项的待登记文件路径：常规项取条目目标路径，文件清理项取逐文件清单
+  function collectFailedPaths(items) {
+    const paths = [];
+    for (const d of items) {
+      const sr = scanResults.get(d.id);
+      if (sr && sr.path) paths.push(sr.path);
+      const fc = fileCleanData.get(d.id);
+      if (fc && Array.isArray(fc.files)) for (const f of fc.files) if (f.path) paths.push(f.path);
+    }
+    return [...new Set(paths)].filter(Boolean);
+  }
+
+  function offerCleanupRetryPanel(items) {
+    if (!window.modal?.create) {
+      // modal 缺席（理论不可达）：退回旧文案，至少不失声
+      window.app?.toast('warning', `${items.length} 项未完全清理（文件可能被占用，可关闭相关程序或重启后再试）`);
+      return;
+    }
+    const listed = items.slice(0, 8);
+    const overflow = items.length - listed.length;
+    const rows = listed.map(d => {
+      const sr = scanResults.get(d.id) || {};
+      const label = sr.name || d.name || d.id;
+      const note = (Number(d.residual) || 0) > 0 ? '部分残留' : '清理失败';
+      return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(sr.path || label)}">${escapeHtml(label)}</span><span class="lock-app-count">${note}</span></div>`;
+    }).join('');
+    const ctrl = window.modal.create({
+      id: 'cleanupRetryModal-' + Date.now(),
+      title: `${items.length} 项未完全清理`,
+      bodyHtml: `
+        <div class="confirm-message">这些文件正被资源管理器（explorer.exe）等程序占用，系统不允许删除正在使用的文件。下面两个动作都不需要你手动结束任何程序：</div>
+        <div class="lock-app-list">${rows}${overflow > 0 ? `<div class="lock-app-row"><span class="lock-app-name">…另有 ${overflow} 项</span></div>` : ''}</div>
+        <div class="lock-critical-note">重启资源管理器是无损操作：桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。</div>`,
+      footerHtml: `
+        <span class="model-picker-spacer"></span>
+        <button class="btn btn-secondary" data-retry="pending" type="button">登记到重启后删除</button>
+        <button class="btn btn-primary" data-retry="explorer" type="button">重启资源管理器并重试</button>`,
+      onClose() { /* 面板可随时关，不做强制 */ }
+    });
+    const explorerBtn = ctrl.footer.querySelector('[data-retry="explorer"]');
+    const pendingBtn = ctrl.footer.querySelector('[data-retry="pending"]');
+    const failedIds = items.map(d => d.id);
+
+    explorerBtn.addEventListener('click', async () => {
+      const ok = await window.app?.confirmWarning(
+        '重启资源管理器确认',
+        '将结束并重新打开资源管理器（explorer.exe）：桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。随后自动重试刚失败的清理项。',
+        '重启并重试',
+        '取消'
+      );
+      if (!ok) return;
+      explorerBtn.disabled = true;
+      explorerBtn.textContent = '正在重启...';
+      try {
+        await window.api.contextmenu.restartExplorer();
+      } catch (e) {
+        window.app?.toast('error', '重启资源管理器失败：' + ((e && e.message) || e));
+        explorerBtn.disabled = false;
+        explorerBtn.textContent = '重启资源管理器并重试';
+        return;
+      }
+      // explorer 退出到重新拉起、句柄释放需要几秒；太早重试会再撞一次占用
+      await new Promise(r => setTimeout(r, 3500));
+      ctrl.close();
+      selectedIds = new Set(failedIds.filter(id => scanResults.has(id)));
+      updateUI();
+      await clean();
+    });
+
+    pendingBtn.addEventListener('click', async () => {
+      pendingBtn.disabled = true;
+      pendingBtn.textContent = '正在登记...';
+      const paths = collectFailedPaths(items);
+      if (!paths.length) {
+        window.app?.toast('warning', '没有可登记的文件路径（目录不支持重启后删除）');
+        pendingBtn.disabled = false;
+        pendingBtn.textContent = '登记到重启后删除';
+        return;
+      }
+      try {
+        const resp = await window.api.uninstall.pendingAdd(paths);
+        // 回执形状（pending_delete.rs）：{ success, data: { added, details: [{target,status,message}] } }
+        const data = (resp && resp.data) || {};
+        const rows = data.details || [];
+        const added = Number(data.added) || 0;
+        const skipped = rows.filter(r => r.status === 'skip').length;
+        const failedRows = rows.filter(r => r.status === 'fail');
+        if (resp && resp.success) {
+          window.app?.toast('success', `已登记 ${added} 个文件到重启后删除${skipped ? `；${skipped} 个跳过（目录/重复登记）` : ''}${failedRows.length ? `；${failedRows.length} 个登记失败` : ''}`);
+          pendingBtn.textContent = added > 0 ? '已登记' : '无可登记项';
+          pendingBtn.setAttribute('data-tip', '已登记的文件将在下次重启时由系统删除');
+          if (added === 0) pendingBtn.disabled = true;
+        } else {
+          window.app?.toast('warning', '登记失败：' + ((resp && resp.message) || '未知原因'));
+          pendingBtn.disabled = false;
+          pendingBtn.textContent = '登记到重启后删除';
+        }
+      } catch (e) {
+        window.app?.toast('error', '登记失败：' + ((e && e.message) || e));
+        pendingBtn.disabled = false;
+        pendingBtn.textContent = '登记到重启后删除';
+      }
+    });
   }
 
   // ==================== P3 条目明细弹窗 ====================

@@ -42,6 +42,13 @@ pub const MAIN: &[&str] = &["main"];
 /// `capabilities/subwindows.json`，否则窗口建得出来、IPC 判越权。
 pub const RESIDUE_WINDOWS: &[&str] = &["residue"];
 
+/// 「登记重启后删除」（PendingFileRenameOperations 写侧）的调用窗集。
+/// 两个消费方：残留副窗（原有入口）+ 主窗清理域的失败引导（2026-10-13 用户裁定：
+/// 清理失败不再只提示「关闭相关程序」，给一键重启 explorer 重试 + 兜底登记开机删）。
+/// 刻意不给 APP_WINDOWS 全集——写 PFRO 是**永久删**出口，models/processManager
+/// 没有调用场景。
+pub const PENDING_DELETE_WINDOWS: &[&str] = &["main", "residue"];
+
 /// 校验调用来源窗口；返回 label 或错误消息（错误消息直接回给渲染层）。
 /// 校验失败同时写日志——静默拒绝会掩盖注入尝试。
 pub fn guard<R: Runtime>(window: &WebviewWindow<R>, allowed: &[&str]) -> Result<String, String> {

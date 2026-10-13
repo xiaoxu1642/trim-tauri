@@ -278,7 +278,9 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
     targets: Vec<String>,
 ) -> Value {
     // v0.7.0 「重启后删除失败项」的入口随残留面板一起搬进 residue 副窗
-    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
+    // 消费方两个：残留副窗（原有入口）+ 主窗清理域的失败引导（2026-10-13 裁定，
+    // 见 guard::PENDING_DELETE_WINDOWS）。list/revoke 仍限残留副窗。
+    if let Err(msg) = guard::guard(&window, guard::PENDING_DELETE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     if targets.is_empty() {
