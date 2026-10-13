@@ -5852,6 +5852,53 @@
                   "weight": 0
                 }
               ]
+            },
+            {
+              "id": "googleChromeDrmData",
+              "name": "Google Chrome DRM Data 缓存",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Google Chrome DRM Data *」登记的缓存目标（2 个路径）",
+              "recommended": false,
+              "domain": "browser",
+              "group": "webpage",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Google Chrome DRM Data *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome DRM Data *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\MediaFoundationCdmStore",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\WidevineCdm",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
+                }
+              ]
             }
           ]
         },
@@ -6141,6 +6188,110 @@
                 {
                   "type": "file",
                   "path": "%LOCALAPPDATA%\\Yandex\\YandexBrowser\\User Data"
+                }
+              ]
+            },
+            {
+              "id": "googleChromeProgressiveWebApps",
+              "name": "Google Chrome Progressive 缓存",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Google Chrome Progressive Web Apps *」登记的缓存目标（1 个路径）",
+              "recommended": false,
+              "domain": "browser",
+              "group": "codecache",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Google Chrome Progressive Web Apps *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Progressive Web Apps *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Web Applications",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
+                }
+              ]
+            },
+            {
+              "id": "googleChromeShoppingInsights",
+              "name": "Google Chrome Shopping Insights 缓存",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Google Chrome Shopping Insights *」登记的缓存目标（5 个路径）",
+              "recommended": false,
+              "domain": "browser",
+              "group": "codecache",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Google Chrome Shopping Insights *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Shopping Insights *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\chrome_cart_db",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\commerce_subscription_db",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\coupon_db",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\discount*_db",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\parcel_tracking_db",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
                 }
               ]
             }
@@ -7825,6 +7976,224 @@
                   "path": "%LOCALAPPDATA%\\Yandex\\YandexBrowser\\User Data"
                 }
               ]
+            },
+            {
+              "id": "googleChromeSyncData",
+              "name": "Google Chrome Sync Data 缓存",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Google Chrome Sync Data *」登记的缓存目标（1 个路径）",
+              "recommended": false,
+              "domain": "browser",
+              "group": "sync",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Google Chrome Sync Data *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Sync Data *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Sync Data",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
+                }
+              ]
+            },
+            {
+              "id": "googleChromeWebBrowsingSession",
+              "name": "Google Chrome Web Browsing 会话",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Google Chrome Web Browsing Session *」登记的缓存目标（2 个路径）",
+              "recommended": false,
+              "domain": "browser",
+              "group": "sync",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Google Chrome Web Browsing Session *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Web Browsing Session *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Extension State",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Sessions",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
+                }
+              ]
+            },
+            {
+              "id": "googleChromeAutofillDataSearchEnginePreferences",
+              "name": "Google Chrome 表单自动填充",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Google Chrome Autofill Data & Search Engine Preferences *」登记的缓存目标（3 个路径）",
+              "recommended": false,
+              "domain": "browser",
+              "group": "sync",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Google Chrome Autofill Data & Search Engine Preferences *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Autofill Data & Search Engine Preferences *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*",
+                  "pattern": "*Web Data",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\AutoFill*",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\AutoFill*",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
+                }
+              ]
+            },
+            {
+              "id": "googleChromeWebStorage",
+              "name": "Google Chrome Web Storage 缓存",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Google Chrome Web Storage *」登记的缓存目标（8 个路径）",
+              "recommended": false,
+              "domain": "browser",
+              "group": "sync",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Google Chrome Web Storage *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Web Storage *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\IndexedDB",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\IndexedDB\\https*",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\Session Storage",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\Storage\\ext\\*\\def\\Session Storage",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\WebStorage",
+                  "pattern": "*",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\leveldb",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Session Storage",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\WebStorage",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
+                }
+              ]
             }
           ]
         },
@@ -8646,6 +9015,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "ycypk0ZC7vS5pPAiu1lMHBQzdOCpvvy41+MFLFryqbgrq8Yt8ri9MJk2xAkgSUjNGZSTN0rG4V+iTA3uveqTCA=="
+    "sig": "g77xY1NJ6zalQA9kIIC/xKTcV2xNttFO9XM7G98StgRyiEoAzaPFSB436QkJg7G0x4/ht056TKPoPQTPJPlGDw=="
   }
 }

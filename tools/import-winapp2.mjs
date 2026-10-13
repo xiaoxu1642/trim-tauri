@@ -294,10 +294,25 @@ function hasWord(hay, word) {
 }
 
 function tierOf(c) {
-  const hay = norm(`${c.section} ${c.owner} ${c.detectFile} ${c.detects.join(' ')}`);
+  // Detect 指向 \Microsoft\Windows\ 之下的一律是**系统登记位置**（Uninstall/Installer/
+  // Applets…），对「装了什么」零信息量，却带着 'windows' 字样——本机装着 Windows SDK
+  // 系列开发组件，两词匹配（windows+software / windows+app）会把 GEAR DIFx、
+  // Active@ File Recovery 这类特征只有系统键的软件整批误判成 Tier A（三轮实测踩坑）。
+  // 组 hay 前先剔除；软件专属键（HKCU\Software\Steam 这类）保留。
+  const informative = (c.detects || []).filter(d => !/Microsoft\\Windows\\/i.test(String(d)));
+  const hay = norm(`${c.section} ${c.owner} ${c.detectFile} ${informative.join(' ')}`);
+  // 系统泛词开头的已装名（Windows SDK / Microsoft ... 运行库等）不做特征：
+  // 「Windows Software Development Kit」的两词 windows+software 会命中任何
+  // 名字里恰好带 'for windows' 或 '... software' 的第三方软件（SeaTools 实测）。
+  // Windows 自身的清理已由内置 82 条覆盖，不因跳过而损失。
+  const GENERIC_HEADS = new Set(['windows', 'microsoft']);
   for (const n of INSTALLED) {
-    const key = norm(n).split(' ')[0];
-    if (key.length >= 3 && hasWord(hay, key)) return 'A';
+    // 取已装名的前两个词做**全命中**：单词名（Trim / QQ）一个词即判；两词名
+    // （Microsoft Edge / Windows App Certification Kit）必须都出现——单词匹配
+    // 会让「本机有 Windows SDK」覆盖一切名字带 windows 的软件（上一轮踩的坑）。
+    const words = norm(n).split(' ').filter(w => w.length >= 2).slice(0, 2);
+    if (!words.length || GENERIC_HEADS.has(words[0])) continue;
+    if (words.every(w => hasWord(hay, w))) return 'A';
   }
   for (const k of TIER_B) {
     if (/\s/.test(k) ? hay.includes(k) : hasWord(hay, k)) return 'B';
@@ -324,11 +339,13 @@ const SYSTEMISH = RX('(windows|microsoft|\\.net|visual c\\+\\+|directx|windows i
 const SYSTEM_HEAD = /^(windows|microsoft|\.net|directx|visual c\+\+|msi|internet explorer|windows defender|media player)/i;
 function classify(c) {
   const hay = `${c.section} ${c.owner}`;
-  if (c.lang === '3025' || SYSTEM_HEAD.test(c.section.trim())) {
-    return { domain: 'system', group: systemGroup(c) };
-  }
+  // 浏览器判定必须在系统之前：'Microsoft Edge …' 以 Microsoft 开头，会被
+  // SYSTEM_HEAD 抢进「系统清理」（实测 Edge Sync/PDF 系列整批错落 system/stale）。
   if (BROWSER.test(hay) || BROWSER.test(c.detectFile)) {
     return { domain: 'browser', group: browserGroup(c) };
+  }
+  if (c.lang === '3025' || SYSTEM_HEAD.test(c.section.trim())) {
+    return { domain: 'system', group: systemGroup(c) };
   }
   if (GFX.test(hay)) return { domain: 'gfx', group: gfxGroup(c) };
   if (NETDISK.test(hay)) return { domain: 'app', group: 'netdisk' };
@@ -595,7 +612,9 @@ function sortKey(c, nature) {
   ];
 }
 
-const PER_APP_CAP = 3;
+// 每软件条数上限按层分档：Tier A 是**本机确认已装**的软件（用户明确要多收），
+// Tier B 是主流白名单（保持精选密度）。
+const PER_APP_CAP = { A: 10, B: 3 };
 
 function build() {
   const { out } = candidates();
@@ -611,7 +630,12 @@ function build() {
     if (isStrayGame(c)) { bumpR('单游戏条目（detect 分辨不出装没装）'); continue; }
     const tier = tierOf(c);
     if (!tier) { bumpR('不在 Tier A（本机已装）/ Tier B（主流白名单）'); continue; }
-    const cls = classify(c);
+    let cls = classify(c);
+    if (!cls && tier === 'A') {
+      // 本机确认已装但特征词没命中的：落「其他已装软件」兜底，而不是直接扔。
+      // Tier B 不兜底——白名单的意义就是精选，塞进杂项等于稀释。
+      cls = { domain: 'app', group: 'other' };
+    }
     if (!cls) { bumpR('映射不到现有类目（宁可不收，不硬塞）'); continue; }
     if (riskOf(c) === 'high') { bumpR('high 风险（会丢密码/凭据，不进默认库）'); continue; }
     if (c.fileKeys.length > 32) { bumpR('fileKeys 超 32 条上限'); continue; }
@@ -641,6 +665,19 @@ function build() {
     g.push(p);
     groups.set(p.key, g);
   }
+  // cap 计数要把**库里已有**的同组条目算进去：扩库是第二轮动作，第一轮已收的
+  // 软件（Chrome/Edge 各 4 条）若不计入，A=6 的上限会被再灌 6 条成 10+。
+  const existingByGroup = new Map();
+  for (const g of rules.groups) {
+    for (const sg of g.subGroups || []) {
+      for (const it of sg.items || []) {
+        const det = (it.detect || [])[0];
+        if (!det || !det.path) continue;
+        const k = groupKeyOf({ detectFile: det.path, section: it.name || '', owner: '' });
+        existingByGroup.set(k, (existingByGroup.get(k) || 0) + 1);
+      }
+    }
+  }
   const picked = [];
   const overCap = { n: 0 };
   for (const g of groups.values()) {
@@ -650,13 +687,15 @@ function build() {
       return ka[0] - kb[0] || ka[1] - kb[1] || ka[2] - kb[2];
     });
     for (const p of g) {
-      if (picked.filter((x) => x._key === p.key).length >= PER_APP_CAP) { overCap.n++; continue; }
+      const cap = PER_APP_CAP[p.tier] ?? 3;
+      const already = (existingByGroup.get(p.key) || 0) + picked.filter((x) => x._key === p.key).length;
+      if (already >= cap) { overCap.n++; continue; }
       const built = buildItem(p.c, p.cls, rulesVersion, seen);
       if (built.skip) { bumpR(built.skip); continue; }
       picked.push({ ...built.item, _tier: p.tier, _key: p.key });
     }
   }
-  if (overCap.n) rejected.set(`超出每软件 ${PER_APP_CAP} 条上限`, overCap.n);
+  if (overCap.n) rejected.set('超出每软件条数上限（A=10/B=3）', overCap.n);
   return { picked, rejected, total: out.length, rulesVersion, apps: groups.size };
 }
 
