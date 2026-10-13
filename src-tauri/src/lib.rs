@@ -494,11 +494,11 @@ pub fn run() {
     // 建窗前杀掉。改为先走文件握手（见 commands::elevate）。
     // 旧实例确认让位后 mutex 已空闲，此时仍可正常注册以恢复单实例保护。
     let elevated_relaunch = commands::elevate::elevation_takeover_pending();
-    let takeover_released = if elevated_relaunch {
-        commands::elevate::take_over_as_elevated_instance()
-    } else {
-        true
-    };
+    if elevated_relaunch {
+        // v5-K03：接管握手照跑（旧实例让位、旗标清理），但返回值不再决定单实例
+        // 注册——提权重启一律不装单实例（见下方 builder 分支的注释）。
+        let _ = commands::elevate::take_over_as_elevated_instance();
+    }
 
     let builder = build_app(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
@@ -509,7 +509,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     #[cfg(desktop)]
-    let builder = if elevated_relaunch && !takeover_released {
+    let builder = if elevated_relaunch {
+        // v5-K03（2026-10-12 拍板）：提权重启路径**一律不注册**单实例插件——不再区分
+        // 握手是否已 released。released 信号一到旧实例就 exit(0)，与新实例建窗存在
+        // 双活窗口；此时注册的话，插件发现 mutex 仍被旧实例占着会把新实例在建窗前
+        // 杀掉 ⇒ 新旧双亡、应用消失（R8-K01 实测机制）。与 commands::elevate 的超时
+        // 分支取向统一：**宁可短暂双开，不让应用消失**——单实例保护在提权会话期间
+        // 缺席是可接受的代价；用户下次正常启动（非提权）时恢复注册。
         builder
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {

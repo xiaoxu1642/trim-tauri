@@ -297,6 +297,88 @@ fn scan_task_files() -> Vec<Value> {
 /// 启动项扫描（对应 startup_scan.ps1）
 ///
 /// 注册表 Run/RunOnce + 启动文件夹 + StartupApproved + disabled.json 合并。
+/// 8 条 Run/RunOnce 根（扫描枚举与台账启用恢复**共用同一份**）。
+///
+/// v5-K09 批次 5：启用链的恢复写回只允许落在这 8 个容器内，hive tag 必须与根
+/// 成对匹配——此前扫描侧各自持有这份清单、启用臂没有任何容器校验，同用户篡改
+/// `disabled.json`（%APPDATA% 可写）后，提权态可按台账凭据写任意 Run 值
+/// （medium→admin 持久化原语）。fsDelete 侧本有 containment（commands/startup.rs
+/// 的 backup-file 校验），台账链补上同源的一道。
+const RUN_PATHS: &[(&str, HKEY, &str, &str, &str)] = &[
+    ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户\\Run", "HKCU"),
+    ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户\\RunOnce", "HKCU"),
+    ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户(32位)\\Run", "HKCU32"),
+    ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户(32位)\\RunOnce", "HKCU32"),
+    ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户\\Run", "HKLM"),
+    ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户\\RunOnce", "HKLM"),
+    ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户(32位)\\Run", "HKLM32"),
+    ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户(32位)\\RunOnce", "HKLM32"),
+];
+
+/// 两个启动文件夹根（扫描枚举与台账启用恢复**共用同一份**）。
+///
+/// v5-K09 批次 5：folder 启用的恢复目标（台账 `valueData`）必须落在其一之下——
+/// fsDelete 侧同源 containment 的台账链补齐。
+fn startup_folders() -> Vec<(String, &'static str, &'static str)> {
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    let programdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+    vec![
+        (appdata, r"Microsoft\Windows\Start Menu\Programs\Startup", "启动文件夹 · 当前用户"),
+        (programdata, r"Microsoft\Windows\Start Menu\Programs\StartUp", "启动文件夹 · 所有用户"),
+    ]
+}
+
+/// v5-K09 批次 5：folder 启用的台账坐标准入（纯函数，可测）。
+///
+/// 两道：① containment——备份文件必须落在本域备份根（`startup-backup`，跨两根读
+/// 候选与 fsDelete 同口径）内、恢复目标必须落在两个启动文件夹之一内（path_key
+/// 归一后按组件边界比前缀，verbatim/盘符相对/`..` 形态统一折叠）；② 保护面——
+/// 恢复目标不得命中 `is_path_protected`。任一不过即拒，**在 rename 之前**。
+fn folder_restore_verdict(backup_path: &str, orig_path: &str) -> Result<(), String> {
+    // ①a 备份文件必须在备份根内
+    let backup_key = crate::engine::paths::path_key(backup_path);
+    let in_backup_root = crate::engine::paths::backup_read_dirs("startup-backup")
+        .iter()
+        .any(|d| {
+            let dk = crate::engine::paths::path_key(&d.to_string_lossy());
+            backup_key == dk || backup_key.starts_with(&format!("{dk}\\"))
+        });
+    if !in_backup_root {
+        return Err("备份文件不在本域启动备份根内，已拒绝移回".into());
+    }
+    // ①b 恢复目标必须在两个启动文件夹之一内
+    let orig_key = crate::engine::paths::path_key(orig_path);
+    let in_folder = startup_folders().iter().any(|(base, sub, _)| {
+        let dk = crate::engine::paths::path_key(&format!("{base}\\{sub}"));
+        orig_key == dk || orig_key.starts_with(&format!("{dk}\\"))
+    });
+    if !in_folder {
+        return Err("恢复目标不在本域启动文件夹内，已拒绝移回".into());
+    }
+    // ② 保护面
+    if crate::engine::protect::is_path_protected(orig_path) {
+        return Err("恢复目标命中受保护路径，已拒绝移回".into());
+    }
+    Ok(())
+}
+
+/// v5-K09 批次 5：registry 启用的台账坐标准入（纯函数，可测）。
+/// 两道：hive tag 必须是本域四视图之一；子键必须命中四条 Run/RunOnce 根形态之一
+/// （大小写不敏感）。tag 与根的「成对」在句柄层面无安全意义——HKLM32 与 HKLM
+/// 解析同一个句柄、视图由 subkey 里的 WOW6432Node 决定——本判定锚定的是
+/// 「恢复写回只落在 8 容器之一」，tag 撒谎（HKCU32 配 64 位根）不越权、不拒。
+fn registry_restore_verdict(hive_tag: &str, subkey: &str) -> Result<(), String> {
+    const TAGS: [&str; 4] = ["HKCU", "HKCU32", "HKLM", "HKLM32"];
+    if !TAGS.iter().any(|t| hive_tag.eq_ignore_ascii_case(t)) {
+        return Err("注册表项不在本域 Run/RunOnce 容器内，已拒绝恢复".into());
+    }
+    if RUN_PATHS.iter().any(|(_, _, sk, _, _)| subkey.eq_ignore_ascii_case(sk)) {
+        Ok(())
+    } else {
+        Err("注册表项不在本域 Run/RunOnce 容器内，已拒绝恢复".into())
+    }
+}
+
 /// 计划任务直接解析 Tasks 目录 XML（schtasks /v 逐任务深查实测 60s+，2026-10-06 已替换）。
 /// .lnk 目标解析和文件发布者留空（S2 完善）。
 pub fn startup_scan() -> Result<Vec<Value>, String> {
@@ -304,18 +386,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
 
     unsafe {
         // ---------- 注册表 Run/RunOnce（8 路径） ----------
-        let run_paths: &[(&str, HKEY, &str, &str, &str)] = &[
-            ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户\\Run", "HKCU"),
-            ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户\\RunOnce", "HKCU"),
-            ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 当前用户(32位)\\Run", "HKCU32"),
-            ("HKCU32", HKEY_CURRENT_USER, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 当前用户(32位)\\RunOnce", "HKCU32"),
-            ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户\\Run", "HKLM"),
-            ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户\\RunOnce", "HKLM"),
-            ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "注册表 · 所有用户(32位)\\Run", "HKLM32"),
-            ("HKLM32", HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "注册表 · 所有用户(32位)\\RunOnce", "HKLM32"),
-        ];
-
-        for (hive_tag, hive, subkey, label, scope) in run_paths {
+        for (hive_tag, hive, subkey, label, scope) in RUN_PATHS {
             let sk = to_wide(&subkey);
             let mut hk = HKEY::default();
             if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
@@ -415,18 +486,12 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
             let _ = RegCloseKey(hk);
         }
 
-        // ---------- 启动文件夹 ----------
+        // ---------- 启动文件夹（清单与台账启用恢复共用 startup_folders()，v5-K09） ----------
         let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let programdata = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
-        let folders: &[(&str, &str, &str)] = &[
-            (&appdata, r"Microsoft\Windows\Start Menu\Programs\Startup", "启动文件夹 · 当前用户"),
-            (&programdata, r"Microsoft\Windows\Start Menu\Programs\StartUp", "启动文件夹 · 所有用户"),
-        ];
-
-        for (base, sub, label) in folders {
-            let dir = std::path::Path::new(base).join(sub);
+        for (base, sub, label) in startup_folders() {
+            let dir = std::path::Path::new(&base).join(sub);
             let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
-            let scope = if base == &appdata { "HKCU" } else { "HKLM" };
+            let scope = if base == appdata { "HKCU" } else { "HKLM" };
             let sa_hive = if scope == "HKLM" { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
             for entry in entries.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
@@ -1001,7 +1066,11 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
             records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
             return Ok("已启用".into());
         }
-        // 值已被删除：从 disabled.json 恢复
+        // 值已被删除：从 disabled.json 恢复。
+        // v5-K09 批次 5：台账凭据只对本域 8 条 Run/RunOnce 容器生效——快照条目的
+        // hive/子键必须与 RUN_PATHS 成对命中，否则拒绝恢复（fsDelete 侧 containment
+        // 同口径；此前启用臂无任何容器校验，提权态可按篡改台账写任意 Run 值）。
+        registry_restore_verdict(hive_str, &subkey)?;
         let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id))
             .cloned().ok_or("缺少启用记录，且注册表中已无该项")?;
         let kind_str = rec.get("valueType").and_then(|v| v.as_str()).unwrap_or("String");
@@ -1118,6 +1187,9 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
         if backup_path.is_empty() || !std::path::Path::new(backup_path).exists() {
             return Err("备份文件不存在".into());
         }
+        // v5-K09 批次 5：台账坐标过准入（containment + 保护面），在 rename 之前拦——
+        // 同用户篡改 disabled.json（%APPDATA% 可写）注入任意 move 坐标时，这里 fail-closed。
+        folder_restore_verdict(backup_path, orig_path)?;
         if let Some(parent) = std::path::Path::new(orig_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1451,5 +1523,143 @@ pub fn startup_add(path: &str, name: &str) -> Result<Option<String>, String> {
         }
         let _ = RegCloseKey(hk);
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod k09_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// v5-K09 批次 5：folder 启用的台账坐标准入（containment + 保护面）。
+    /// containment 是纯词法判定（path_key 归一 + 组件边界前缀），不需要文件存在；
+    /// 判红自证：把 folder_restore_verdict 的备份根校验删掉 ⇒ ①③ 红；把启动文件夹
+    /// 校验删掉 ⇒ ②④ 红。
+    #[test]
+    fn folder启用坐标准入_两道confinement加保护面() {
+        let backup_root = crate::engine::paths::backup_read_dirs("startup-backup")[0]
+            .to_string_lossy()
+            .to_string();
+        let folder_root = startup_folders()[0].clone();
+        let ok_orig = format!("{}\\{}", folder_root.0, format!("{}\\probe.lnk", folder_root.1));
+        // ① 合法形态：备份在根内 + 目标在启动文件夹内 ⇒ 放行
+        assert!(folder_restore_verdict(&format!("{backup_root}\\1_probe.reg"), &ok_orig).is_ok());
+        // ② verbatim 备份路径同样要命中（归一后同一实体不得靠前缀绕过）
+        assert!(folder_restore_verdict(&format!(r"\\?\{backup_root}\1_probe.reg"), &ok_orig).is_ok());
+        // ③ 越界备份：不在本域备份根内 ⇒ 拒
+        let err = folder_restore_verdict(r"C:\Windows\Temp\evil.reg", &ok_orig).unwrap_err();
+        assert!(err.contains("备份根"), "越界备份必须点名备份根: {err}");
+        // ④ 越界恢复目标：不在两个启动文件夹内 ⇒ 拒（medium→admin move 原语的锚）
+        let err = folder_restore_verdict(&format!("{backup_root}\\1_probe.reg"), r"C:\Windows\System32\evil.dll")
+            .unwrap_err();
+        assert!(err.contains("启动文件夹"), "越界恢复目标必须点名列表: {err}");
+        // ⑤ 相邻前缀不得误放：StartupFoo 不是 Startup 的子树（组件边界）
+        let evil = format!("{}\\{}", folder_root.0, format!("{}Foo\\evil.lnk", folder_root.1));
+        assert!(folder_restore_verdict(&format!("{backup_root}\\1_probe.reg"), &evil).is_err());
+    }
+
+    /// v5-K09 批次 5：registry 启用的台账坐标准入——tag 限四视图、子键限四根形态。
+    /// 判红自证：把 registry_restore_verdict 改成恒 Ok ⇒ 全组红。
+    #[test]
+    fn registry启用坐标必须命中8根且tag限四视图() {
+        assert!(registry_restore_verdict("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_restore_verdict("HKCU", r"Software\Microsoft\Windows\CurrentVersion\RunOnce").is_ok());
+        assert!(registry_restore_verdict("HKCU32", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_restore_verdict("HKLM32", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce").is_ok());
+        // 大小写不敏感（扫描产出与手改台账的形态都要按同一容器判）
+        assert!(registry_restore_verdict("hklm", r"software\MICROSOFT\Windows\CurrentVersion\Run").is_ok());
+        // tag 撒谎（HKCU32 配 64 位根）不越权：句柄层 HKCU32≡HKCU，视图由 subkey 决定 ⇒ 放行
+        assert!(registry_restore_verdict("HKCU32", r"Software\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        // 相邻名字：RunX / RunOnceEx / RunServices 不是容器
+        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunX").is_err());
+        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunServices").is_err());
+        // 完全越界：任何非 Run 容器、非法 tag 一律拒
+        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer").is_err());
+        assert!(registry_restore_verdict("HKLMX", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_err());
+        assert!(registry_restore_verdict("HKEY_LOCAL_MACHINE", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_err());
+    }
+
+    /// v5-K09 批次 5 集成：越界台账（备份不在本域备份根内）投喂启用 ⇒ 拒绝且原文件不动。
+    /// 判红自证：去掉 toggle_folder_item 里的 folder_restore_verdict 调用 ⇒ 本用例红
+    /// （evil.reg 会被 rename 到 System32 的伪造目标或以「移回失败」报错）。
+    #[test]
+    fn 越界台账启用被拒且原文件不动() {
+        let root = std::env::temp_dir().join(format!("trim-k09-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bf = root.join("evil.reg");
+        std::fs::write(&bf, b"x").unwrap(); // 「存在」但不在本域备份根内
+        let item = json!({ "id": "k09-probe", "name": "probe" });
+        let rec = json!({
+            "id": "k09-probe",
+            "filePath": bf.to_string_lossy(),
+            "valueData": r"C:\Windows\System32\evil.dll",
+        });
+        let mut records = vec![rec];
+        let r = unsafe { toggle_folder_item(&item, true, &mut records) };
+        let err = r.unwrap_err();
+        assert!(err.contains("备份根"), "越界台账启用必须被拒: {err}");
+        assert!(bf.is_file(), "拒后原备份文件不得被动过");
+        assert!(!std::path::Path::new(r"C:\Windows\System32\evil.dll").exists(), "不得越界写入");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// v5-K09 批次 5 真机探针（只写自家台账、自建自清）：同用户篡改 disabled.json
+    /// 注入越界 folder 坐标 ⇒ 启用必须被拒、System32 无残留、台账原样恢复。
+    /// 台账为空（本机没有禁用记录）时 skip 声明，不假绿。
+    #[test]
+    #[ignore = "真机：篡改禁用台账后启用被拒（写自家台账，发布前人工跑）"]
+    fn live_tampered_ledger_enable_is_rejected() {
+        let ledger = crate::engine::paths::backup_read_dirs("startup-backup");
+        let _ = ledger; // 台账位置经 startup_ledger_file()（read_disabled_records 内部判定）
+        let original = read_disabled_records().ok();
+        let Some(recs) = &original else {
+            eprintln!("SKIP：台账不可读（本机无禁用记录或损坏），探针未校验");
+            return;
+        };
+        let _ = recs;
+        let probe_id = "trim-k09-live-probe";
+        let forged = json!({
+            "id": probe_id,
+            "name": "k09-probe",
+            "source": "folder",
+            // 备份「存在」但不在本域备份根内（用 %TEMP% 造，自建自清）
+            "filePath": std::env::temp_dir().join("trim-k09-live-forged.reg").to_string_lossy(),
+            "valueData": r"C:\Windows\System32\trim-k09-should-not-exist.dll",
+        });
+        std::fs::write(
+            std::env::temp_dir().join("trim-k09-live-forged.reg"),
+            b"x",
+        )
+        .unwrap();
+        let mut tampered = recs.clone();
+        tampered.push(forged);
+        write_disabled_records(&tampered);
+        let items = json!([{ "id": probe_id, "name": "k09-probe", "source": "folder" }]);
+        let r = startup_toggle(items.as_array().unwrap(), true);
+        // 恢复台账（无论断言成败都要恢复——finally 语义）
+        let restore = |recs: &Option<Vec<Value>>| {
+            match recs {
+                Some(v) => write_disabled_records(v),
+                // 原本没有台账：写回空集（write_disabled_records 的正常形状）
+                None => write_disabled_records(&[]),
+            }
+        };
+        let msg = match &r {
+            Ok(v) => v["results"][0]["message"].clone(),
+            Err(e) => json!(e),
+        };
+        restore(&original);
+        let _ = std::fs::remove_file(std::env::temp_dir().join("trim-k09-live-forged.reg"));
+        assert!(
+            msg.as_str().unwrap_or_default().contains("备份根") || msg.as_str().unwrap_or_default().contains("拒绝"),
+            "篡改台账的启用必须被拒，实得: {msg}"
+        );
+        assert!(
+            !std::path::Path::new(r"C:\Windows\System32\trim-k09-should-not-exist.dll").exists(),
+            "越界恢复目标不得被创建"
+        );
+        eprintln!("探针通过：篡改台账启用被拒且台账已恢复（{msg}）");
     }
 }
