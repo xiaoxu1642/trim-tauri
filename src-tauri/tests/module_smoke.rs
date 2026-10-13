@@ -40,15 +40,16 @@ fn sub_windows_derives_from_guard_list() {
 ///
 /// 上面那条老元断言在清单塌成 `["main"]` 时全部仍成立（`0 == 1-1`、空集不含 main、
 /// 循环 0 次），于是依赖 `sub_windows()` 的档位用例 100% 空转而测试全绿。这里加两条硬钉：
-/// ① 双方长度下界（按现算值取粗下界：APP_WINDOWS 5 含主窗 / 子窗 4；新增子窗自动满足，
-///    塌缩即红）；② `sub_windows()` 与 `capabilities/subwindows.json` 的 windows 数组
+/// ① 双方长度下界（按现算值取粗下界：APP_WINDOWS 4 含主窗 / 子窗 3；2026-10-13 preview
+///    子窗随图片预览改主窗内嵌 LiteBox 退役，5/4 → 4/3；新增子窗自动满足，塌缩即红）；
+///    ② `sub_windows()` 与 `capabilities/subwindows.json` 的 windows 数组
 ///    逐条相等 —— 这是 AGENTS §2「新增子窗 label 四处同步」里前两处的机检（漏同步的症状：
 ///    窗口建得出来、每次 IPC 都判越权）。
 #[test]
 fn sub_windows_matches_capabilities_manifest() {
     let subs = sub_windows();
-    assert!(APP_WINDOWS.len() >= 5, "APP_WINDOWS 塌缩（现算 5 含主窗）: {APP_WINDOWS:?}");
-    assert!(subs.len() >= 4, "sub_windows() 塌缩（现算 4）: {subs:?}");
+    assert!(APP_WINDOWS.len() >= 4, "APP_WINDOWS 塌缩（现算 4 含主窗）: {APP_WINDOWS:?}");
+    assert!(subs.len() >= 3, "sub_windows() 塌缩（现算 3）: {subs:?}");
 
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/subwindows.json");
     let text = std::fs::read_to_string(&p).expect("读得到 capabilities/subwindows.json");

@@ -21,7 +21,6 @@ pub mod uninstall;
 pub mod memory;
 pub mod netcheck;
 pub mod diskbench;
-pub mod preview;
 pub mod residue;
 pub mod processmanager;
 pub mod runtimes;

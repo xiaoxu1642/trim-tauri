@@ -102,6 +102,8 @@ const MUST_MAIN = [
   'uninstall_report_list', // U-6：同上
   'diskbench_run',
   'elevate_request', // AGENTS §3：提权入口只认主窗口 label
+  'cleanup_allow_preview_assets', // 图片预览 asset 按需放行（主窗内嵌 LiteBox 的承接命令）
+  'fileclean_delete_file', // 预览子窗退役后删除入口只剩主窗，档位 APP_WINDOWS → MAIN
   'fileclean_execute',
   'finder_delete',
   'finder_ignore_folder', // 2026-10-06 任务四：空目录忽略名单写侧（app_data 名单文件，只从主窗空目录页/名单弹窗触发）
@@ -349,7 +351,6 @@ const MUST_READONLY = [
   'debug_data_dirs',
   'device_scan',
   'diag_dwm_conflict',
-  'fileclean_read_image',
   'fileclean_scan',
   'finder_delete_manifest',
   'finder_open_backup_dir',
@@ -390,9 +391,6 @@ const MUST_READONLY = [
   'paths_load',
   'paths_save', // 疑点：写路径配置
   'paths_scan',
-  'preview_close_window',
-  'preview_image_deleted',
-  'preview_open_window',
   'process_manager_close_window',
   'process_manager_open_window',
   'process_manager_report',

@@ -17,7 +17,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use base64::Engine;
 use serde_json::{json, Value};
 use tauri::{Emitter, Runtime, WebviewWindow};
 
@@ -30,7 +29,8 @@ use crate::security;
 const MAX_FILES: usize = 2000;
 const MAX_DEPTH: usize = 4;
 const MAX_PATH_LEN: usize = 400;
-const IMAGE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+// IMAGE_MAX_BYTES 随 fileclean:read-image（base64 dataURL 通道）退役删除：
+// 图片改走 asset 协议磁盘直连（cleanup/preview_assets.rs 按需放行），不再整文件进内存。
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"];
 const VIDEO_EXTS: &[&str] = &["mp4", "avi", "mov", "mkv", "flv"];
@@ -62,17 +62,11 @@ fn scope_get(label: &str, ty: &str) -> Option<Scope> {
         .and_then(|m| m.get(&slot_key(label, ty)).cloned())
 }
 
-/// 审查 M1：扫描槽按「发起扫描的窗口 label」存，因此预览子窗按自己的 label 永远查不到
-/// 主窗扫出来的结果 —— 读图恒返回「路径不在扫描范围内」。这里把「谁能读谁的槽」显式列成
-/// 静态映射，而不是给子窗复制一份快照：复制会带两个新问题（主窗重扫后副本失真、
-/// 删完后两份槽不一致）。子窗可见的集合**仍然严格等于主窗当前那次扫描的集合**，
-/// 与上游 Electron 按 `file://` 来源放开的语义一致（`in_scope` 才是真闸门）。
-/// 新增只读子窗时必须在这里登记，别靠 `guard_readonly` 顺带放开。
+/// 删图槽归属：槽按「发起扫描的窗口 label」存，删除请求只认自己 label 的槽。
+/// （曾有的「preview 子窗 → main」映射随预览子窗退役删除——图片预览已改主窗内嵌
+/// LiteBox，不再有子窗跨槽读图的场景；`in_scope` 才是真闸门。）
 fn scope_owner(label: &str) -> &str {
-    match label {
-        "preview" => "main",
-        other => other,
-    }
+    label
 }
 
 fn config_key(ty: &str) -> &'static str {
@@ -413,63 +407,6 @@ fn in_scope(scope: &Scope, file_path: &str) -> bool {
     k.starts_with(&scope.root) && scope.files.contains(&k)
 }
 
-fn image_mime(ext: &str) -> Option<&'static str> {
-    Some(match ext {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        _ => return None,
-    })
-}
-
-/// fileclean:read-image —— 仅扫描范围内的图片，≤10MB，返回 dataURL
-///
-/// 为什么**不**改走 asset 协议（与 backgrounds/fonts 不同处置）：本通道的图源是用户在
-/// paths.json 里自选的 QQ / 微信目录，位置任意且运行时才知道；asset 协议的 scope 只能是
-/// `tauri.conf.json` 里的静态 glob，要覆盖它们就得放开整个用户目录 —— 那是把「webview 可读
-/// 全盘」当成省一次 base64 的代价，不划算。dataURL 路径本就可用，且有 ≤10MB 上界兜着。
-#[tauri::command]
-pub async fn fileclean_read_image<R: Runtime>(
-    window: WebviewWindow<R>,
-    file_path: String,
-) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
-        return json!({ "success": false, "message": msg });
-    }
-    if file_path.is_empty() || file_path.len() > MAX_PATH_LEN {
-        return json!({ "success": false, "message": "文件不存在" });
-    }
-    // 找到包含该文件的槽（qq/wechat 任一）
-    let scope = ["qq", "wechat"].iter().find_map(|t| {
-        scope_get(scope_owner(window.label()), t).filter(|s| in_scope(s, &file_path))
-    });
-    let Some(scope) = scope else {
-        return json!({ "success": false, "message": "路径不在扫描范围内，已拒绝访问" });
-    };
-    let _ = scope;
-
-    let md = match std::fs::metadata(&file_path) {
-        Ok(m) if m.is_file() => m,
-        _ => return json!({ "success": false, "message": "文件不存在" }),
-    };
-    if md.len() > IMAGE_MAX_BYTES {
-        return json!({ "success": false, "message": "文件过大，不支持预览" });
-    }
-    let ext = ext_of(&file_path);
-    let Some(mime) = image_mime(&ext) else {
-        return json!({ "success": false, "message": "仅支持预览图片文件（jpg/png/gif/bmp/webp/svg）" });
-    };
-    let bytes = match std::fs::read(&file_path) {
-        Ok(b) => b,
-        Err(_) => return json!({ "success": false, "message": "文件不存在" }),
-    };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    json!({ "success": true, "data": format!("data:{mime};base64,{b64}"), "size": md.len() })
-}
-
 /// 回收站删除单个文件（供 delete-file / execute 共用），返回 (ok, recycled, message)
 fn recycle_one(file_path: &str) -> (bool, bool, String) {
     // 审查 v2-F1：走 `_os` 版。`has_lossy_path` 是第二道闸，这里不重复做名称转换。
@@ -487,17 +424,18 @@ fn recycle_one(file_path: &str) -> (bool, bool, String) {
 /// fileclean:delete-file —— 预览窗删除当前图片
 ///
 /// 审查 M2：档位从 `MAIN` 改为 `APP_WINDOWS`。这不是把删除放开成「任意窗口可删任意路径」，
-/// 四道闸门一条没少：① 只能删**主窗那次扫描结果内**的路径（`in_scope` + `scope_owner`）；
+/// 四道闸门一条没少：① 只能删**发起扫描那次结果内**的路径（`in_scope` + `scope_owner`）；
 /// ② 只进回收站（`recycle_one` 失败即报错，无永久删除兜底）；③ 渲染层红色二次确认
-/// （`preview-window.js` 的 `modal.confirm({danger:true})`）；④ 删除前 `flush_sync()` +
-/// 落 delete-manifest。上游 Electron 按 `file://` 来源判定，子窗本就可达此通道
-/// （通道名也在契约基线里），按 MAIN 校验等于把这条链整个锁死。
+/// （`cleanup.js` 的 `modal.confirm({danger:true})`）；④ 删除前 `flush_sync()` +
+/// 落 delete-manifest。（预览子窗退役后删除入口回到主窗，按 MAIN 校验不再锁死链路，
+/// 档位维持 `APP_WINDOWS` 不变——多窗应用不给任何窗口隐式豁免。）
 #[tauri::command]
 pub async fn fileclean_delete_file<R: Runtime>(
     window: WebviewWindow<R>,
     file_path: String,
 ) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::APP_WINDOWS) {
+    // 预览子窗退役后删除入口只剩主窗（内嵌 LiteBox），档位从 APP_WINDOWS 收紧到 MAIN。
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
     if file_path.is_empty() || file_path.len() > MAX_PATH_LEN {
@@ -540,7 +478,7 @@ pub async fn fileclean_delete_file<R: Runtime>(
             "recycled": recycled
         });
         delete_manifest::save_delete_manifest(&batch, &[entry]);
-        // 从槽中移除（槽归发起扫描的主窗所有，见 `scope_owner`：预览窗删完必须让主窗的
+        // 从槽中移除（槽归发起扫描的窗口所有，见 `scope_owner`：删完必须让
         // in_scope 集合同步收缩，否则同一次扫描里可以再「删」一次不存在的路径）
         let owner = scope_owner(window.label());
         if let Some(mut s) = scope_get(owner, ty) {
@@ -809,18 +747,16 @@ mod tests {
         }
     }
 
-    /// 审查 M1：预览窗读图/删图必须命中**主窗那次扫描**的槽。
-    /// 旧实现按调用窗 label 取槽 → `preview:*` 恒为空 → 读图永远返回「不在扫描范围内」。
-    /// 一并钉住两点：① 授权是显式映射（不是「任意窗口都能读任意槽」）；
-    /// ② 未登记的 label 不会因映射缺失而误拿到主窗的集合。
+    /// 槽归属是恒等映射（预览子窗退役后无跨窗读槽场景），但「未登记的 label 拿不到
+    /// 主窗集合」这条底线要钉住：范围外路径不得因映射缺失而误放行。
     #[test]
-    fn preview_reads_main_slot_and_unknown_label_gets_nothing() {
+    fn unknown_label_gets_no_slot() {
         let root = path_key(r"C:\FakeQqRoot");
         let file = path_key(r"C:\FakeQqRoot\photo.jpg");
         scope_store("main", "qq", root, [file].into_iter().collect());
 
-        assert_eq!(scope_owner("preview"), "main");
-        let shared = scope_get(scope_owner("preview"), "qq").expect("预览窗应读到主窗那次扫描的槽");
+        assert_eq!(scope_owner("main"), "main");
+        let shared = scope_get(scope_owner("main"), "qq").expect("主窗应读到自己的槽");
         assert!(
             in_scope(&shared, r"C:\FakeQqRoot\photo.jpg"),
             "大小写/分隔符归一后仍须在范围内"

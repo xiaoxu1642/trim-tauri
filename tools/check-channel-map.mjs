@@ -55,6 +55,13 @@ const PROBES = ['debug_data_dirs'];
  * 每条必须写明退役理由与日期，否则这条豁免会变成随意删通道的后门。
  */
 const RETIRED = {
+  // 2026-10-13（用户裁定）：图片预览从「独立子窗 + base64 dataURL」改「主窗内嵌 LiteBox +
+  // asset 协议磁盘直连」，preview 子窗整链退役（根因：on_page_load(Finished) 立即 emit
+  // preview:data，前端异步 listen 几乎必然晚于 emit → 事件丢失，子窗恒停「正在加载图片…」）。
+  'fileclean:read-image': '2026-10-13：preview 子窗退役后 dataURL 读图通道失去唯一消费方，图片改 asset 协议（cleanup:allow-preview-assets 按需放行）',
+  'preview:open-window': '2026-10-13：preview 子窗整链退役，图片预览改主窗内嵌 LiteBox',
+  'preview:close-window': '2026-10-13：同上（灯箱关闭走 dialog.close()，无需关窗命令）',
+  'preview:image-deleted': '2026-10-13：同上（删除同步改主窗内联完成，不再跨窗发事件）',
   'overview:checkup': '2026-10-12（用户裁定）：首页「体检结论」区块全链路退役——命令 overview_checkup + lib.rs 注册 + CHANNEL_MAP + api 包装 + 前端区块与样式同撤；引擎侧 overview_checkup() 与蓝屏码库子系统（bsod.rs / bugcheck-codes.source.mjs / gen / data json / check-bugcheck-codes 三门禁）一并拆除',
   'settings:save': 'v2-F4（2026-09-26）：零调用方 + 无 UI 面 + 写入面在 models:save，整链摘除',
   'pwsh:prepare': 'v2-M15/B11（2026-09-26）：D4 孤儿，且 Tauri 轨无内置运行时可准备，与 pwsh:status 完全重复',
@@ -120,7 +127,7 @@ const RETIRED = {
  * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
  */
 const TAURI_ADDED = {
-  'updater:completion': 'S3（2026-10-05）：新版本实例首领取一次「更新已完成」标记（读后即删，主窗档）。上游 Electron 的 ready-to-install 提示由主进程弹，没有渲染层查询接口',
+  'cleanup:allow-preview-assets': '2026-10-13：图片预览改主窗内嵌 LiteBox 后的 asset 按需放行命令（把本次预览的那组图加进 asset scope，替代退役的 fileclean:read-image dataURL 通道）',  'updater:completion': 'S3（2026-10-05）：新版本实例首领取一次「更新已完成」标记（读后即删，主窗档）。上游 Electron 的 ready-to-install 提示由主进程弹，没有渲染层查询接口',
   'uninstall:modify': 'P1-D6（2026-10-01）：修改/修复入口，执行 ModifyPath（主窗档）',
   'uninstall:pending-add': 'P1-B3（2026-10-01）：回收站失败项登记重启后删（主窗档）',
   'uninstall:pending-list': 'P1-B3（2026-10-01）：重启后删待删清单（主窗档，只读）',
@@ -457,7 +464,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'paths_load',
   'paths_save',
   'paths_scan',
-  'preview_open_window',
   'process_manager_open_window',
   'realtime_adapters',
   'realtime_loss',

@@ -154,10 +154,10 @@
     // （fallback 与 cleanup 是首屏最重的两块，不进清理页就不该解析）。
     // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 会读
     // window.CLEANUP_RULES_FALLBACK 构建分类，先注入才拿得到兜底数据。
-    cleanup: ['scripts/cleanup-fallback.generated.js', 'scripts/cleanup.js'],
+    cleanup: ['scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
     // backups（一级「备份还原」页）是独立路由，不是 cleanup 的别名：它的进页钩子
     // onBackupsEnter 就住在 cleanup.js 里，所以必须先补齐同一份依赖再执行钩子。
-    backups: ['scripts/cleanup-fallback.generated.js', 'scripts/cleanup.js'],
+    backups: ['scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
     // 查找器子视图（重复文件/空文件/磁盘分析）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）

@@ -1544,9 +1544,122 @@
   // 2026-10-12：回收站重试引导（原 offerTrashRetry）随回收站重试链整链退役——
   // 清理已固定全量永久删，「移入回收站失败」这一状态不再存在。
 
-  // ==================== 图片预览（独立窗口） ====================
-  // 打开独立「图片预览」窗口显示某个一级分类/子分组下的全部图片；
-  // 删除图片后由主进程 preview:image-deleted 通知本页刷新列表。
+  // ==================== 图片预览（主窗内嵌 LiteBox） ====================
+  // 旧「独立预览子窗」已退役（2026-10-13 用户裁定：去掉自写查看器、接入 LiteBox）。
+  // 退役的直接动因是那个窗口的加载竞态：Rust 在 on_page_load(Finished) 里立即 emit
+  // preview:data，而前端 listen 要经一次异步 IPC 才挂上，emit 几乎必然早于监听器就绪
+  // ——事件丢失后 loadImage 永远不被调用，子窗停在 HTML 初始文案「正在加载图片…」。
+  // 内嵌后数据不出窗口，竞态失去存在前提。
+  //
+  // 现实现：LiteBox（vendor/litebox.js，纯原生零依赖）+ asset 协议磁盘直连。
+  // 图片不再整文件 base64 过 IPC；打开前先用 cleanup:allow-preview-assets 把**这一组**
+  // 路径动态放行进 asset scope，暴露面不常开（详见 preview_assets.rs 模块注释）。
+  let liteboxRange = null;
+
+  function ensureLiteboxRange() {
+    if (liteboxRange && document.body.contains(liteboxRange)) return liteboxRange;
+    liteboxRange = document.createElement('div');
+    liteboxRange.id = 'liteboxRange';
+    liteboxRange.style.display = 'none';
+    document.body.appendChild(liteboxRange);
+    // 把 LiteBox 的点击监听从整个 document 收窄到本容器：主窗其它页有自己的
+    // <img>（壁纸预览 bgThumb、应用图标回退等），不收窄会把它们也劫持成灯箱。
+    if (window.liteBox?.setRange) window.liteBox.setRange(liteboxRange);
+    return liteboxRange;
+  }
+
+  // 删除按钮是**运行时注入**进灯箱控制条的——上游 LiteBox 没有删除概念，
+  // 不改它的源码（vendored 文件除已登记的两处受控适配外与上游一致，便于同步）。
+  function liteboxInjectDeleteButton() {
+    const dialog = window.liteBox?.dialog;
+    if (!dialog || dialog.querySelector('#liteboxDeleteBtn')) return;
+    const controls = dialog.querySelector('.lightbox-controls');
+    if (!controls) return;
+    const btn = document.createElement('button');
+    btn.id = 'liteboxDeleteBtn';
+    btn.type = 'button';
+    btn.setAttribute('data-tip', '删除当前图片（进回收站）');
+    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5z"/><path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v.5h-3V2a1 1 0 0 0-1-1h-3zm1 3h9v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4z"/></svg>';
+    btn.addEventListener('click', () => { liteboxDeleteCurrent(); });
+    controls.appendChild(btn);
+  }
+
+  // 灯箱当前显示图的原始路径：LiteBox 只存 URL，靠 data-src 反查容器里的源 img。
+  function liteboxCurrentPath() {
+    const img = window.liteBox?.getElem?.('.lightbox-image');
+    const url = img && img.getAttribute('src');
+    if (!url) return '';
+    const hit = Array.from((liteboxRange || document).querySelectorAll('img[data-fullpath]'))
+      .find(el => el.getAttribute('data-src') === url);
+    return hit ? hit.getAttribute('data-fullpath') : '';
+  }
+
+  async function liteboxDeleteCurrent() {
+    const filePath = liteboxCurrentPath();
+    if (!filePath) {
+      window.app?.toast('warning', '定位不到当前图片的原始路径，未执行删除');
+      return;
+    }
+    const fileName = String(filePath).split('\\').pop() || filePath;
+    // 删除类操作红色二次确认（与退役前的 preview-window.js 同文案同 danger 档）
+    let confirmed = false;
+    if (window.modal?.confirm) {
+      confirmed = await window.modal.confirm({
+        title: '删除图片',
+        message: `将删除「${fileName}」。\n文件将进入回收站，可在回收站还原。`,
+        confirmText: '删除',
+        cancelText: '取消',
+        danger: true,
+        dangerHint: '删除后本页文件列表与容量统计将实时同步刷新。'
+      });
+    } else {
+      confirmed = window.confirm(`将删除「${fileName}」（进回收站，可在回收站还原）。\n是否继续？`);
+    }
+    if (!confirmed) return;
+
+    let resp = null;
+    try {
+      resp = await window.api.fileclean.deleteFile(filePath);
+    } catch (e) {
+      window.app?.toast('error', '删除失败：' + ((e && e.message) || e));
+      return;
+    }
+    if (!resp || !resp.success) {
+      // 后端已回 message（来源校验/不在扫描范围/回收站拒绝），照实说，不猜权限
+      window.app?.toast('warning', '删除失败' + (resp && resp.message ? '：' + resp.message : ''));
+      return;
+    }
+
+    // 同步本页数据（沿用原 initPreviewSync 的收缩口径）
+    for (const [id, data] of fileCleanData.entries()) {
+      if (!data || !Array.isArray(data.files)) continue;
+      const idx = data.files.findIndex(f => f.path === filePath);
+      if (idx !== -1) {
+        const removed = data.files[idx];
+        data.files.splice(idx, 1);
+        data.totalSize = Math.max(0, (data.totalSize || 0) - (removed.size || 0));
+        const sr = scanResults.get(id);
+        if (sr) sr.size = Math.max(0, (sr.size || 0) - (removed.size || 0));
+        break;
+      }
+    }
+    renderCategoryList();
+    updateUI();
+
+    // 容器移除该图，跳到邻近一张；删空则关灯箱
+    const before = Array.from(liteboxRange.querySelectorAll('img'));
+    const idx = before.findIndex(el => el.getAttribute('data-fullpath') === filePath);
+    if (idx >= 0) before[idx].remove();
+    const rest = Array.from(liteboxRange.querySelectorAll('img'));
+    if (rest.length) {
+      const next = rest[Math.min(Math.max(idx, 0), rest.length - 1)];
+      window.liteBox.click({ target: next });
+    } else {
+      window.liteBox.close();
+    }
+    window.app?.toast('success', '已删除（可在回收站还原）');
+  }
+
   function openPreview(id) {
     const data = fileCleanData.get(id);
     if (!data || !data.files) return;
@@ -1555,47 +1668,40 @@
       window.app?.toast('info', '没有可预览的图片文件');
       return;
     }
-    const item = getItemById(id);
-    const payload = {
-      images: images.map(f => ({ path: f.path, name: f.name, size: f.size, category: f.category })),
-      index: 0,
-      itemName: item ? item.name : id
-    };
-    if (window.api?.previewWindow?.open) {
-      window.api.previewWindow.open(payload).catch(function (e) { window.app?.toast?.('error', '预览窗口打开失败：' + ((e && e.message) || e)); });
-    } else {
-      window.app?.toast('warning', '当前环境不支持打开图片预览窗口');
+    if (!window.liteBox) {
+      window.app?.toast('warning', '图片灯箱组件未加载，无法预览');
+      return;
     }
-  }
-
-  // 图片预览窗口删除图片后，同步清理本页数据与扫描结果并刷新
-  function initPreviewSync() {
-    window.api?.previewWindow?.onImageDeleted?.((filePath) => {
-      // F17 闭环（L3 2026-10-01）：同步链最后一环显性化 —— 事件送达但本页刷新自身
-      // 失败（渲染异常）时必须可见，否则「实时同步」承诺在这一环静默失效。
-      // 交付侧回执由 preview_image_deleted fail-loud 承担（主窗缺席/emit 失败 → Err
-      // → 预览窗 toast），这里兜住渲染侧；失败可见，用户可手动重扫兜底。
+    (async () => {
+      // ① 先放行 asset 读取（只放本次这组图；失败就不开灯箱，不能拿白图糊弄）
       try {
-        if (!filePath) return;
-        for (const [id, data] of fileCleanData.entries()) {
-          if (!data || !Array.isArray(data.files)) continue;
-          const idx = data.files.findIndex(f => f.path === filePath);
-          if (idx !== -1) {
-            const removed = data.files[idx];
-            data.files.splice(idx, 1);
-            data.totalSize = Math.max(0, (data.totalSize || 0) - (removed.size || 0));
-            const sr = scanResults.get(id);
-            if (sr) sr.size = Math.max(0, (sr.size || 0) - (removed.size || 0));
-            break;
-          }
+        const resp = await window.api.cleanup.allowPreviewAssets(images.map(f => f.path));
+        if (!resp || !resp.success) {
+          window.app?.toast('warning', '无法读取这些图片：' + ((resp && resp.message) || '未知原因'));
+          return;
         }
-        renderCategoryList();
-        updateUI();
       } catch (e) {
-        window.app?.log?.('error', '预览窗删除同步刷新失败: ' + ((e && e.message) || e));
-        window.app?.toast('error', '主窗口列表同步失败，请手动重新扫描');
+        window.app?.toast('error', '无法读取这些图片：' + ((e && e.message) || e));
+        return;
       }
-    });
+      // ② 组 range 容器：src 直接走 asset 协议（convertFileSrc），浏览器自己管解码与缓存
+      const range = ensureLiteboxRange();
+      range.textContent = '';
+      for (const f of images) {
+        const img = document.createElement('img');
+        const url = window.api.paths.pathToUrl(f.path);
+        img.setAttribute('data-src', url);
+        img.setAttribute('data-fullpath', f.path);
+        img.setAttribute('data-caption', `${f.name || ''} · ${formatSize(f.size)}`);
+        img.alt = f.name || '图片';
+        img.src = url;
+        range.appendChild(img);
+      }
+      // ③ 注入删除按钮并打开第一张
+      liteboxInjectDeleteButton();
+      const first = range.querySelector('img');
+      if (first) window.liteBox.click({ target: first });
+    })();
   }
 
   // ==================== P3 条目明细弹窗 ====================
@@ -1885,7 +1991,6 @@
   function init() {
     renderCategoryList();
     updateUI();
-    initPreviewSync();
 
     document.getElementById('btnScan')?.addEventListener('click', scan);
     document.getElementById('btnClean')?.addEventListener('click', clean);

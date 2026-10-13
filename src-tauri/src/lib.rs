@@ -155,7 +155,7 @@ fn sanitize_window_state<R: Runtime>(
 
 /// 开发期「不激活前台」开关（与 `show_main_window_when_ready` 用同一环境变量）。
 ///
-/// 存在意义：弹窗类通道（preview / processManager / models）若在 CDP 后台回归时按生产语义
+/// 存在意义：弹窗类通道（processManager / models）若在 CDP 后台回归时按生产语义
 /// `show()+set_focus()`，会把窗口弹到用户前台——这与「调试期不打扰用户」的硬性约束冲突。
 /// 故开发期改用 `SW_SHOWNOACTIVATE`（显示但不抢焦点），生产环境行为完全不变。
 pub fn dev_noactivate() -> bool {
@@ -360,7 +360,9 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_report_list,
         commands::uninstall::uninstall_report_get,
         commands::uninstall::uninstall_appx_logo,
-        // ---- B 批：memory（6）+ processManager 窗口（2+send）+ preview 窗口（2+send）----
+        // ---- B 批：memory（6）+ processManager 窗口（2+send）----
+        // preview 窗口（2+send）已整链退役：图片预览改主窗内嵌 LiteBox（见 cleanup/preview_assets.rs），
+        // 跨窗传 preview:data 的监听竞态根因随之消失。
         commands::memory::memory_info,
         commands::memory::memory_clean,
         commands::memory::memory_processes,
@@ -370,9 +372,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::processmanager::process_manager_open_window,
         commands::processmanager::process_manager_close_window,
         commands::processmanager::process_manager_report,
-        commands::preview::preview_open_window,
-        commands::preview::preview_close_window,
-        commands::preview::preview_image_deleted,
+        commands::cleanup::cleanup_allow_preview_assets,
         // v0.5.0 残留扫描副窗（label `residue`，与 guard::APP_WINDOWS / capabilities 同步）
         commands::residue::residue_open_window,
         commands::residue::residue_close_window,
@@ -428,7 +428,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::paths::paths_scan,
         // ---- D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设，37 条）----
         commands::fileclean::fileclean_scan,
-        commands::fileclean::fileclean_read_image,
         commands::fileclean::fileclean_delete_file,
         commands::fileclean::fileclean_execute,
         commands::maintenance::maintenance_tasks,

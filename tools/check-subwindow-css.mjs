@@ -33,12 +33,14 @@ const g = gate(import.meta.url);
 
 const MAIN_HTML = 'src/index.html';
 const SUB_HTML = [
-  'src/preview-window.html',
   'src/models-window.html',
   'src/residue-window.html',
   'src/process-manager-window.html',
 ];
-const EXPECT_MAIN = ['styles/main.css', 'styles/main-pages.css', 'styles/ds.css'];
+// 2026-10-13：尾接 styles/litebox.css —— vendor 图片灯箱样式（preview 子窗退役后主窗内嵌）。
+// 放最后是有意的：它只带 .litebox/.lightbox- 前缀的独立规则与缺省变量，不参与前三者的
+// token 层叠；登记进序列是防止未来有人在中间乱插改变前三者的相对顺序。
+const EXPECT_MAIN = ['styles/main.css', 'styles/main-pages.css', 'styles/ds.css', 'styles/litebox.css'];
 const EXPECT_SUB = ['styles/main.css', 'styles/ds.css'];
 
 // ---------- CSS 解析：只到「规则块 + 其 at-rule 上下文」，与拆分时的口径一致 ----------
@@ -189,8 +191,8 @@ function linksOf(htmlRel) {
     }
   }
   const subCount = SUB_HTML.filter(h => linksOf(h).join(' → ') === EXPECT_SUB.join(' → ')).length;
-  g.ok(`S1b. 四个子窗样式表序列均为 main.css → ds.css（${subCount}/4 达标）`);
-  if (subCount !== SUB_HTML.length) g.fail(`S1b. 达标子窗 ${subCount}/4，存在缺挂或多挂`);
+  g.ok(`S1b. 子窗样式表序列均为 main.css → ds.css（${subCount}/${SUB_HTML.length} 达标）`);
+  if (subCount !== SUB_HTML.length) g.fail(`S1b. 达标子窗 ${subCount}/${SUB_HTML.length}，存在缺挂或多挂`);
 }
 
 // ---------- 载入两份 CSS ----------

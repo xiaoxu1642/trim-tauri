@@ -73,6 +73,7 @@
     'log:export': 'log_export',
     // cleanup（21）
     'cleanup:rules': 'cleanup_rules',
+    'cleanup:allow-preview-assets': 'cleanup_allow_preview_assets',
     'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
     'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
     'cleanup:file-backup-list': 'cleanup_file_backup_list',
@@ -179,7 +180,6 @@
     'paths:file-icon': 'paths_file_icon',
     // fileclean（4）
     'fileclean:scan': 'fileclean_scan',
-    'fileclean:read-image': 'fileclean_read_image',
     'fileclean:execute': 'fileclean_execute',
     'fileclean:delete-file': 'fileclean_delete_file',
     // maintenance（2）/ netcheck（2）
@@ -187,9 +187,6 @@
     'maintenance:run': 'maintenance_run',
     'netcheck:collect': 'netcheck_collect',
     'netcheck:repair': 'netcheck_repair',
-    // preview 窗口（2）
-    'preview:open-window': 'preview_open_window',
-    'preview:close-window': 'preview_close_window',
     // memory（6）/ processManager 窗口（2）/ peripheral（3）
     'memory:info': 'memory_info',
     'memory:clean': 'memory_clean',
@@ -265,7 +262,6 @@
    *   驼峰域（processManager）隐式转换会拼错 Rust snake_case 命令（Phase 0 发现）。
    */
   var SEND_MAP = {
-    'preview:image-deleted': 'preview_image_deleted',
     'processManager:report': 'process_manager_report'
   };
 
@@ -410,6 +406,8 @@
 
     cleanup: {
       rules: function () { return invokeChannel('cleanup:rules'); },
+      // 图片预览前按需放行 asset 协议（只放本次点开的那组图，暴露面不常开）
+      allowPreviewAssets: function (paths) { return invokeChannel('cleanup:allow-preview-assets', { paths: paths }); },
       regBackupList: function () { return invokeChannel('cleanup:reg-backup-list'); },
       regBackupRestore: function (file) { return invokeChannel('cleanup:reg-backup-restore', { file: file }); },
       fileBackupList: function () { return invokeChannel('cleanup:file-backup-list'); },
@@ -605,7 +603,6 @@
           scanType: scanType, customPath: customPath
         });
       },
-      readImage: function (filePath) { return invokeChannel('fileclean:read-image', { filePath: filePath }); },
       execute: function (files) { return invokeChannel('fileclean:execute', { files: files }); },
       deleteFile: function (filePath) { return invokeChannel('fileclean:delete-file', { filePath: filePath }); }
     },
@@ -620,15 +617,6 @@
     netcheck: {
       collect: function () { return invokeChannel('netcheck:collect'); },
       repair: function (actionId) { return invokeChannel('netcheck:repair', { actionId: actionId }); }
-    },
-
-    previewWindow: {
-      open: function (payload) { return invokeChannel('preview:open-window', { payload: payload }); },
-      close: function () { return invokeChannel('preview:close-window'); },
-      onData: function (callback) { return onEvent('preview:data', callback); },
-      // 审查 v2-F17：回传 promise 供调用方判断是否同步成功（sendChannel 内部仍落基线日志）
-      notifyDeleted: function (filePath) { return sendChannel('preview:image-deleted', { path: filePath }); },
-      onImageDeleted: function (callback) { return onEvent('preview:image-deleted', callback); }
     },
 
     memory: {
@@ -846,7 +834,7 @@
 
   function injectCaption() {
     if (document.querySelector('.tauri-caption')) return;
-    // 审查 M4：自绘 caption 只给主窗装。三个子窗（preview / models / processManager）
+    // 审查 M4：自绘 caption 只给主窗装。两个子窗（models / processManager）
     // 建窗时没关原生装饰，标题栏本来就由系统提供，这层叠加件在它们身上只是
     // 一套「点了会去要 close/drag/resize 权限」的空壳 —— 正是它逼着 capabilities 给所有
     // 窗口发 allow-close。去掉叠加件，权限就能收回主窗一处（见 capabilities/default.json

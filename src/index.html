@@ -11,6 +11,11 @@
        （层叠顺序与拆分前一致）；四个子窗不链接本文件，各自少解析 91,480 B。 -->
   <link rel="stylesheet" href="styles/main-pages.css" />
   <link rel="stylesheet" href="styles/ds.css" />
+  <!-- LiteBox 图片灯箱（vendor 自 OblivionOcean/LiteBox v1.0.8，MIT，纯原生零依赖）。
+       只在磁盘清理的图片预览用到，但它是 <dialog> 惰性挂载（首次点击才进 DOM），
+       CSS 常驻没有运行时开销；独立 preview 子窗退役后由主窗直接承载（跨窗传数据的
+       监听竞态根因随之消失）。类名前缀 .litebox/.lightbox- 全仓唯一，已核对无冲突。 -->
+  <link rel="stylesheet" href="styles/litebox.css" />
 </head>
 <body class="theme-light">
   <!-- 全窗壁纸层（背景贯通标题栏批次）：fixed 铺满整窗含标题栏，z-index:-1

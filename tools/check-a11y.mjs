@@ -226,7 +226,8 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
       g.fail(`${rel(p)}：该窗加载的 CSS（${links.join(', ')}）无 :focus-visible 规则（键盘焦点不可见）`);
     }
   }
-  if (windowCount < 5) g.fail(`逐窗 RM 判定只覆盖 ${windowCount} 份 HTML（< 5）⇒ 语料失明`);
+  // preview 子窗退役后主窗+3 子窗 = 4 份（2026-10-13）
+  if (windowCount < 4) g.fail(`逐窗 RM 判定只覆盖 ${windowCount} 份 HTML（< 4）⇒ 语料失明`);
 }
 
 // ---- ⑤⑥ 真仓扫描 ----

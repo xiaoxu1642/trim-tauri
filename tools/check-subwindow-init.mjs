@@ -73,23 +73,6 @@ const PAGES = [
     }),
   },
   {
-    html: 'preview-window.html',
-    script: 'scripts/preview-window.js',
-    // 本窗由主窗以 onData 回调投喂图片数据（无 invoke 型首屏请求）：「首屏真的会动」
-    // 的点名对象 = onData 注册本身发生。
-    expectCalls: ['previewWindow.onData'],
-    expectHosts: [],
-    poisonAnchor: "function init() {",
-    dropIdProbe: 'pvClose',
-    api: () => ({
-      'previewWindow.onData': (fn) => fn({ images: [], itemName: '探针', index: 0 }),
-      'previewWindow.close': async () => ({ success: true }),
-      'previewWindow.notifyDeleted': (a) => a,
-      'fileclean.readImage': async () => ({ success: true, data: { dataUrl: 'data:image/png;base64,' } }),
-      'fileclean.deleteFile': async () => ({ success: true }),
-    }),
-  },
-  {
     html: 'process-manager-window.html',
     script: 'scripts/process-manager-window.js',
     // 首屏 = load() ⇒ ProcessTools.fetchProcesses()（report 只在 kill 后发，不是首屏）
@@ -115,7 +98,6 @@ const PAGES = [
 // label 必须有对应 PAGES 条目（label 驼峰 ⇄ html 文件 kebab 的映射表在此，改文件名
 // 同步改这里）。漏窗 = 该窗的「初始化不崩 + 首屏真的会发请求」无人看守。
 const LABEL_HTML = {
-  preview: 'preview-window.html',
   models: 'models-window.html',
   processManager: 'process-manager-window.html',
   residue: 'residue-window.html',
@@ -186,7 +168,7 @@ function buildCtx(page, poison, dropId) {
     body: mkNode('body'),
     documentElement: mkNode('html'),
     head: mkNode('head'),
-    // 真机加载期 readyState 恒 'loading'——models/preview 等窗的脚本按它分流
+    // 真机加载期 readyState 恒 'loading'——models/residue 等窗的脚本按它分流
     // （'loading' ⇒ DOMContentLoaded 注册，否则直接 init）。缺这个字段会让
     // 脚本走 else 分支直接 init，DOMContentLoaded 判定失明。
     readyState: 'loading',
@@ -325,7 +307,7 @@ for (const page of PAGES) {
   );
 
   // ---- 正向对照 2：抽掉一个真实存在的 id，断言 2 的 warn 通道必须看得见 ----
-  // 仅对绑定走 on() 降级 warn 机制的窗有意义（residue）；models/preview/process
+  // 仅对绑定走 on() 降级 warn 机制的窗有意义（residue）；models/process
   // 的绑定是 `?.` 可选链直挂（缺 id ⇒ null ⇒ 静默），无 warn 通道可看——那几窗的
   // 初始化崩不崩由断言 1 管，这里显式跳过并声明，不做假绿。
   if (page.expectDropWarn) {

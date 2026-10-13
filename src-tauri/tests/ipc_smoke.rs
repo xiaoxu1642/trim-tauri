@@ -327,21 +327,19 @@ fn main_window_reaches_stubborn_commands() {
     }
 }
 
-/// 预览窗调 `fileclean_delete_file` 不得被档位拒杀（M2）：
-/// 没有扫描槽时在 `in_scope` 处返回「不在扫描范围内」，这一层才是真闸门。
+/// 图片预览退役（改主窗内嵌 LiteBox）后 fileclean_delete_file 收紧为主窗档：
+/// 任何子窗调用都必须在来源校验处被拒（原来「preview 子窗可达、由 in_scope 收口」
+/// 的窄口径随预览窗一起退役）。
 #[test]
-fn preview_subwindow_reaches_fileclean_delete() {
-    let w = window_with_label("preview");
-    let text = invoke_text(&w, "fileclean_delete_file", json!({ "filePath": "C:\\nope\\a.jpg" }));
-    assert_guard_passed(
-        &text,
-        "fileclean_delete_file 应允许预览窗调用（由 in_scope 收口）",
-        &["不在扫描范围"],
-    );
-    assert!(
-        text.contains("不在扫描范围"),
-        "预览窗删除必须由 in_scope 拦下，而不是放行任意路径，回执 {text}"
-    );
+fn subwindow_cannot_delete_fileclean_image() {
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "fileclean_delete_file", json!({ "filePath": "C:\\nope\\a.jpg" }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调 fileclean_delete_file 必须被拒（主窗档），回执 {text}"
+        );
+    }
 }
 
 /// G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（主窗档）。

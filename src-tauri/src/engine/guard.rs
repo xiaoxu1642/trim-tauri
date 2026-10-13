@@ -2,10 +2,10 @@
 //!
 //! Electron：`handleSafe/onSafe` 统一注册 + 来源校验（只读白名单外全校验来源）。
 //! Tauri：capabilities/default.json 权限白名单 + **每个命令显式校验 Window label**。
-//! 多窗口应用不能裸注册 command——子窗口（preview/processManager…）一旦被注入脚本，
+//! 多窗口应用不能裸注册 command——子窗口（processManager/residue…）一旦被注入脚本，
 //! 裸注册会使其能调用主窗口专属的高危通道。故此包装是 Phase 1 起的强制入口。
 //!
-//! 注：Phase 0/1 只有主窗口 main；B/C 批起子窗口（models / preview / processManager /
+//! 注：Phase 0/1 只有主窗口 main；B/C 批起子窗口（models / processManager /
 //! residue / actions）也要读自己的配置并写日志——Electron 侧只读通道本就对所有窗口开放
 //! （handleSafe 的只读白名单），故这里把子窗口 label 一并纳入。
 //! 原 `peripheral` 子窗已退役（外设优化改为主窗应用内弹窗，见 `commands/peripheral.rs`）。
@@ -19,7 +19,7 @@ use crate::engine::log;
 /// `residue` 是 v0.5.0 新增的残留扫描副窗（`commands/residue.rs`）；
 /// 加这里的同一轮必须同步 `capabilities/subwindows.json`，否则窗口建得出来、
 /// 权限却拿不到 IPC。
-pub const APP_WINDOWS: &[&str] = &["main", "models", "preview", "processManager", "residue"];
+pub const APP_WINDOWS: &[&str] = &["main", "models", "processManager", "residue"];
 
 /// 主窗口 label（多数高危及「主窗专属」通道只允许它调用）
 pub const MAIN: &[&str] = &["main"];
@@ -34,7 +34,7 @@ pub const MAIN: &[&str] = &["main"];
 /// `uninstall_residue_deep_scan` 已随「机-wide 扫描整条退役」删除，不再属于本集。
 /// 这里刻意**不**用 `MAIN`、也刻意**不**放宽到 `APP_WINDOWS` 全集：
 /// - 用 `MAIN`：副窗一调就判越权，功能 100% 不可用（§3 M1~M3 的老坑）；
-/// - 用 `APP_WINDOWS`：注入 `preview` 任一子窗就能拿到「自己扫一遍再删一遍」
+/// - 用 `APP_WINDOWS`：注入任一子窗就能拿到「自己扫一遍再删一遍」
 ///   的完整能力 —— 按 label 分槽的快照只保证「只能执行自己扫出来的东西」，不保证
 ///   「别的窗口不能自己扫」。
 ///

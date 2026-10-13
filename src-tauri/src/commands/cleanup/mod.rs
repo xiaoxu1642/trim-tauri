@@ -59,6 +59,9 @@ mod backup;
 pub use backup::{cleanup_reg_backup_list, __cmd__cleanup_reg_backup_list, __tauri_command_name_cleanup_reg_backup_list, cleanup_reg_backup_restore, __cmd__cleanup_reg_backup_restore, __tauri_command_name_cleanup_reg_backup_restore, cleanup_file_backup_list, __cmd__cleanup_file_backup_list, __tauri_command_name_cleanup_file_backup_list, cleanup_file_backup_restore, __cmd__cleanup_file_backup_restore, __tauri_command_name_cleanup_file_backup_restore};
 mod policy;
 pub use policy::{cleanup_age_policy, __cmd__cleanup_age_policy, __tauri_command_name_cleanup_age_policy, cleanup_set_age_policy, __cmd__cleanup_set_age_policy, __tauri_command_name_cleanup_set_age_policy};
+// 图片预览的 asset 按需放行（preview 子窗退役后主窗内嵌 LiteBox 的承接件，见模块注释）
+mod preview_assets;
+pub use preview_assets::{cleanup_allow_preview_assets, __cmd__cleanup_allow_preview_assets, __tauri_command_name_cleanup_allow_preview_assets};
 // G-4（2026-10-07）：回收站清空改 Shell API（选项 B）。两条命令都是主窗档：
 // 只有主窗的清理页有消费方，且清空是不可逆动作，不给子窗放行。
 mod recycle_bin;

@@ -310,7 +310,8 @@ const unitsWithClaims = UNITS.map((u) => {
     }
     for (const f of files) {
       if (d.onlyPrefix && !f.split('/').pop().startsWith(d.onlyPrefix)) continue;
-      if (d.notPrefix && f.split('/').pop().startsWith(d.notPrefix)) continue;
+      const nps = Array.isArray(d.notPrefix) ? d.notPrefix : (d.notPrefix ? [d.notPrefix] : []);
+      if (nps.some((np) => f.split('/').pop().startsWith(np))) continue;
       if (ownerOf.has(f)) continue;
       ownerOf.set(f, u.id);
       claimed.push(f);

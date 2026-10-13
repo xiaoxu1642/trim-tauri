@@ -40,6 +40,7 @@ export const AUDIT_ROOTS = [
   { dir: 'src-tauri/src/security', ext: ['.rs'] },
   { dir: 'src-tauri/src/diag', ext: ['.rs'] },
   { dir: 'src/scripts', ext: ['.js'], depth: 1 },
+  { dir: 'src/vendor', ext: ['.js'], depth: 1 },
   { dir: 'src/styles', ext: ['.css'], depth: 1 },
   { dir: 'src', ext: ['.html'], depth: 1 },
   { dir: 'native-scanner/src', ext: ['.rs'] },
@@ -103,7 +104,7 @@ export const UNITS = [
     files: [`${C}/settings.rs`, `${C}/updater.rs`, `${C}/elevate.rs`, `${C}/appearance.rs`,
       `${C}/state.rs`, `${C}/log.rs`, `${C}/misc.rs`, `${C}/system.rs`, `${C}/syspanel.rs`,
       `${C}/app.rs`, `${C}/paths.rs`, `${C}/benchhistory.rs`, `${C}/residue.rs`, `${C}/overview.rs`,
-      `${C}/maintenance.rs`, `${C}/preview.rs`, `${C}/device.rs`, `${C}/mod.rs`],
+      `${C}/maintenance.rs`, `${C}/device.rs`, `${C}/mod.rs`], // preview.rs 随预览子窗退役删除（2026-10-13）
     contract: 'settings 读写 / updater 验签 / 提权入口 / 状态真源',
     boundary: '提权与高危确认字段是本单元红线；扫描与查询类命令归 R1b',
     gates: ['check-guard-tiers', 'check-confirm-danger', 'check-updater-pubkey'],
@@ -183,7 +184,8 @@ export const UNITS = [
   },
   {
     id: 'F1a', owner: 'sub', name: '设计系统 token（main.css，分段审）',
-    dirs: [{ dir: 'src/styles', ext: ['.css'], notPrefix: 'main-pages' }],
+    // litebox.css 是 vendored 第三方灯箱样式（除登记适配外与上游一致），不进 token 精读单元
+    dirs: [{ dir: 'src/styles', ext: ['.css'], notPrefix: ['main-pages', 'litebox'] }],
     segmented: true,
     segmentBy: '锚点子串分段（token 基础段 / 组件段 / 动效与材质段），禁写行号（AGENTS §5.19）',
     contract: 'token 唯一真源 / 圆角档位 / --lg-glass-floor / --ease-standard',
@@ -210,8 +212,10 @@ export const UNITS = [
     id: 'F4a', owner: 'sub', name: '清理与卸载链脚本',
     files: [`${S}/cleanup.js`, `${S}/uninstall.js`, `${S}/residue-window.js`, `${S}/memoryclean.js`,
       `${S}/peripheral.js`, `${S}/quickcmds.js`, `${S}/quickcmds-data.js`, `${S}/maintenance.js`,
-      `${S}/startup.js`, `${S}/contextmenu.js`, `${S}/pathbinding.js`],
-    contract: '各域页面渲染 ⇄ 命令回执消费口径',
+      `${S}/startup.js`, `${S}/contextmenu.js`, `${S}/pathbinding.js`,
+      // LiteBox 灯箱（vendored，MIT）：图片预览的唯一 UI 承载件，随 cleanup 链消费
+      'src/vendor/litebox.js', 'src/styles/litebox.css'],
+    contract: '各域页面渲染 ⇄ 命令回执消费口径；vendored 灯箱的受控适配以文件头注登记为准',
     boundary: '状态真源分裂（localStorage 镜像 vs 后端真源）是本单元红线',
     gates: ['check-channel-map', 'check-a11y'],
   },
@@ -228,7 +232,7 @@ export const UNITS = [
     id: 'F4c', owner: 'sub', name: '系统面板与更新脚本（新增前端脚本自动落入）',
     dirs: [{ dir: S, ext: ['.js'], depth: 1 }],
     generated: [`${S}/cleanup-fallback.generated.js`, `${S}/icon-fallback.js`],
-    contract: 'syspanel / sysrestore / runtimes / fontmanager / deviceinfo / updater-ui / preview-window 等',
+    contract: 'syspanel / sysrestore / runtimes / fontmanager / deviceinfo / updater-ui 等（preview-window 已退役）',
     boundary: '本单元是前端脚本的兜底认领位，U4 会点名靠兜底进来的文件',
     gates: ['check-channel-map', 'check-subwindow-init'],
   },
