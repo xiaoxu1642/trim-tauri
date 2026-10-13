@@ -267,7 +267,10 @@ pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categorie
         return json!({ "success": false, "message": msg, "data": [] });
     }
     let cats: Option<Vec<String>> = categories.as_ref().and_then(|c| c.as_array()).and_then(|a| {
-        if a.is_empty() || a.len() > 200 {
+        // 上限 512 与契约 maxItems(400) 对齐并留余量：全量扫描把全部条目 id 传上来，
+        // 规则库扩到 205 条时旧上限 200 直接把全量扫描拒成「清理分类参数无效」
+        // （2026-10-13 真机复检实测引爆）。上限的本意是防滥用，不该比库容量还小。
+        if a.is_empty() || a.len() > 512 {
             return None;
         }
         let mut out = Vec::with_capacity(a.len());
