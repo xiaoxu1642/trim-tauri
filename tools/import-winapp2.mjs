@@ -215,6 +215,12 @@ function candidates() {
   const bump = (k) => drop.set(k, (drop.get(k) || 0) + 1);
   for (const sec of sections) {
     const d = directivesOf(sec);
+    // 2026-10-13 用户裁定（永久红线）：Cookies / 会话 / 站点存储类条目**一律不收**——
+    // 清这些会登出所有网站（用户不想每次扫码重新登录）。判据看 section 名与
+    // FileKey 目标双方向，WinApp2 的 Cookie/Session 类条目无论换什么壳都进不来。
+    const KILL_RE = /cookie|login data|\bsessions?\b|session storage|local storage|indexeddb|web storage|web data|autofill|\bpasswords?\b/i;
+    const killHay = `${sec.name} ${(d.FileKey || []).join(' ')} ${(d.RegKey || []).join(' ')}`;
+    if (KILL_RE.test(killHay)) { bump('Cookies/会话/站点存储类（用户裁定永不收录）'); continue; }
     if (d.ExcludeKey) { bump('带 ExcludeKey（执行侧无排除能力）'); continue; }
     if (d.Warning) { bump('带 Warning（WinApp2 自标风险）'); continue; }
     if (d.SpecialDetect) { bump('带 SpecialDetect（需专用判定）'); continue; }
