@@ -2933,533 +2933,6 @@
               ]
             },
             {
-              "id": "adobeAcrobatDistiller",
-              "name": "Adobe Acrobat Distiller 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Acrobat Distiller *」登记的日志目标（3 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Acrobat Distiller *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Acrobat Distiller *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\Acrobat\\Distiller*",
-                  "pattern": "*.log",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\Acrobat\\Distiller*\\Cache",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Adobe\\Acrobat\\Distiller*\\Cache",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "reg",
-                  "path": "HKCU\\Software\\Adobe\\Acrobat Distiller"
-                }
-              ]
-            },
-            {
-              "id": "adobeAir",
-              "name": "Adobe Air 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Air *」登记的日志目标（2 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Air *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Air *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%WINDIR%\\System32\\config\\systemprofile\\AppData\\Local\\Adobe\\AIR\\logs",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%WINDIR%\\SysWOW64\\config\\systemprofile\\AppData\\Local\\Adobe\\AIR\\logs",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Adobe\\Air"
-                }
-              ]
-            },
-            {
-              "id": "adobeBridge",
-              "name": "Adobe Bridge 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Bridge *」登记的日志目标（4 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Bridge *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Bridge *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\Bridge*",
-                  "pattern": "*.log",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\Bridge*\\*\\Logs",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\Bridge*\\CT Font Cache",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\Bridge*\\Logs",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\Bridge*"
-                }
-              ]
-            },
-            {
-              "id": "adobeCameraRaw",
-              "name": "Adobe Camera Raw 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Camera Raw *」登记的日志目标（2 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Camera Raw *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Camera Raw *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\CameraRaw\\Logs",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Adobe\\CameraRaw\\Cache*",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\CameraRaw"
-                }
-              ]
-            },
-            {
-              "id": "adobeCharacterAnimator",
-              "name": "Adobe Character Animator 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Character Animator *」登记的日志目标（4 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Character Animator *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Character Animator *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\Character Animator\\*\\logs",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\dynamiclinkmanager\\*\\logs",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\dynamiclinkmediaserver\\*",
-                  "pattern": "*.log",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\dynamiclinkmediaserver\\*\\logs",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\Character Animator"
-                }
-              ]
-            },
-            {
-              "id": "adobeCrashReporter",
-              "name": "Adobe 崩溃转储",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Crash Reporter *」登记的崩溃转储目标（2 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "dump",
-              "regenerable": false,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Crash Reporter *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Crash Reporter *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "删除后该记录不可恢复，仅在你不再需要它时清理",
-                  "weight": 0
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\CRLogs",
-                  "pattern": "*",
-                  "recurse": true
-                },
-                {
-                  "path": "%USERPROFILE%\\AppData\\LocalLow\\Adobe\\CRLogs",
-                  "pattern": "*",
-                  "recurse": true
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\CRLogs"
-                }
-              ]
-            },
-            {
-              "id": "adobeExperiencePlatformSdk",
-              "name": "Adobe Experience Platform SDK 临时文件",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Experience Platform SDK *」登记的临时文件目标（1 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "temp",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Experience Platform SDK *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Experience Platform SDK *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%USERPROFILE%\\AppData\\LocalLow\\Temp\\Adobe\\GrowthSDK\\Production",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%USERPROFILE%\\AppData\\LocalLow\\Adobe\\GrowthSDK"
-                }
-              ]
-            },
-            {
-              "id": "adobeIllustrator",
-              "name": "Adobe Illustrator 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Illustrator *」登记的日志目标（2 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Illustrator *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Illustrator *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\GUDE",
-                  "pattern": "*.log",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\Logs\\Adobe Illustrator\\*\\Adobe Illustrator",
-                  "pattern": "*",
-                  "recurse": true
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\Adobe Illustrator *"
-                }
-              ]
-            },
-            {
-              "id": "adobeIndesign",
-              "name": "Adobe InDesign 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe InDesign *」登记的日志目标（1 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe InDesign *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe InDesign *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\InDesign*\\Logs",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\InDesign"
-                }
-              ]
-            },
-            {
-              "id": "adobeLightroom",
-              "name": "Adobe Lightroom 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Lightroom *」登记的日志目标（1 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Lightroom *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Lightroom *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\Lightroom",
-                  "pattern": "*.log",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\Lightroom"
-                }
-              ]
-            },
-            {
-              "id": "adobePremiereRush",
-              "name": "Adobe Premiere Rush 日志",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Adobe Premiere Rush *」登记的日志目标（2 个路径）",
-              "recommended": true,
-              "domain": "app",
-              "group": "media",
-              "nature": "log",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Adobe Premiere Rush *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Adobe Premiere Rush *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Adobe\\Premiere Rush\\*",
-                  "pattern": "*.log",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Adobe\\Premiere Rush\\*\\logs",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Adobe\\Premiere Rush"
-                }
-              ]
-            },
-            {
               "id": "aimp",
               "name": "AIMP 旧备份",
               "risk": "medium",
@@ -3705,6 +3178,540 @@
                 {
                   "type": "file",
                   "path": "%APPDATA%\\Spotify"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "adobe",
+          "name": "Adobe 系列",
+          "icon": "🅰️",
+          "items": [
+            {
+              "id": "adobeAcrobatDistiller",
+              "name": "Adobe Acrobat Distiller 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Acrobat Distiller *」登记的日志目标（3 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Acrobat Distiller *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Acrobat Distiller *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\Acrobat\\Distiller*",
+                  "pattern": "*.log",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\Acrobat\\Distiller*\\Cache",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Adobe\\Acrobat\\Distiller*\\Cache",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "reg",
+                  "path": "HKCU\\Software\\Adobe\\Acrobat Distiller"
+                }
+              ]
+            },
+            {
+              "id": "adobeAir",
+              "name": "Adobe Air 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Air *」登记的日志目标（2 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Air *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Air *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%WINDIR%\\System32\\config\\systemprofile\\AppData\\Local\\Adobe\\AIR\\logs",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%WINDIR%\\SysWOW64\\config\\systemprofile\\AppData\\Local\\Adobe\\AIR\\logs",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Adobe\\Air"
+                }
+              ]
+            },
+            {
+              "id": "adobeBridge",
+              "name": "Adobe Bridge 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Bridge *」登记的日志目标（4 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Bridge *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Bridge *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\Bridge*",
+                  "pattern": "*.log",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\Bridge*\\*\\Logs",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\Bridge*\\CT Font Cache",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\Bridge*\\Logs",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\Bridge*"
+                }
+              ]
+            },
+            {
+              "id": "adobeCameraRaw",
+              "name": "Adobe Camera Raw 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Camera Raw *」登记的日志目标（2 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Camera Raw *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Camera Raw *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\CameraRaw\\Logs",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Adobe\\CameraRaw\\Cache*",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\CameraRaw"
+                }
+              ]
+            },
+            {
+              "id": "adobeCharacterAnimator",
+              "name": "Adobe Character Animator 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Character Animator *」登记的日志目标（4 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Character Animator *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Character Animator *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\Character Animator\\*\\logs",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\dynamiclinkmanager\\*\\logs",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\dynamiclinkmediaserver\\*",
+                  "pattern": "*.log",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\dynamiclinkmediaserver\\*\\logs",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\Character Animator"
+                }
+              ]
+            },
+            {
+              "id": "adobeCrashReporter",
+              "name": "Adobe 崩溃转储",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Crash Reporter *」登记的崩溃转储目标（2 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "dump",
+              "regenerable": false,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Crash Reporter *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Crash Reporter *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "删除后该记录不可恢复，仅在你不再需要它时清理",
+                  "weight": 0
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\CRLogs",
+                  "pattern": "*",
+                  "recurse": true
+                },
+                {
+                  "path": "%USERPROFILE%\\AppData\\LocalLow\\Adobe\\CRLogs",
+                  "pattern": "*",
+                  "recurse": true
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\CRLogs"
+                }
+              ]
+            },
+            {
+              "id": "adobeExperiencePlatformSdk",
+              "name": "Adobe Experience Platform SDK 临时文件",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Experience Platform SDK *」登记的临时文件目标（1 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "temp",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Experience Platform SDK *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Experience Platform SDK *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%USERPROFILE%\\AppData\\LocalLow\\Temp\\Adobe\\GrowthSDK\\Production",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%USERPROFILE%\\AppData\\LocalLow\\Adobe\\GrowthSDK"
+                }
+              ]
+            },
+            {
+              "id": "adobeIllustrator",
+              "name": "Adobe Illustrator 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Illustrator *」登记的日志目标（2 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Illustrator *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Illustrator *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\GUDE",
+                  "pattern": "*.log",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\Logs\\Adobe Illustrator\\*\\Adobe Illustrator",
+                  "pattern": "*",
+                  "recurse": true
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\Adobe Illustrator *"
+                }
+              ]
+            },
+            {
+              "id": "adobeIndesign",
+              "name": "Adobe InDesign 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe InDesign *」登记的日志目标（1 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe InDesign *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe InDesign *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\InDesign*\\Logs",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\InDesign"
+                }
+              ]
+            },
+            {
+              "id": "adobeLightroom",
+              "name": "Adobe Lightroom 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Lightroom *」登记的日志目标（1 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Lightroom *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Lightroom *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\Lightroom",
+                  "pattern": "*.log",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\Lightroom"
+                }
+              ]
+            },
+            {
+              "id": "adobePremiereRush",
+              "name": "Adobe Premiere Rush 日志",
+              "risk": "low",
+              "evidence": "WinApp2 规则库「Adobe Premiere Rush *」登记的日志目标（2 个路径）",
+              "recommended": true,
+              "domain": "app",
+              "group": "adobe",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Adobe Premiere Rush *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261013,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Adobe Premiere Rush *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%APPDATA%\\Adobe\\Premiere Rush\\*",
+                  "pattern": "*.log",
+                  "recurse": false
+                },
+                {
+                  "path": "%APPDATA%\\Adobe\\Premiere Rush\\*\\logs",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ],
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%APPDATA%\\Adobe\\Premiere Rush"
                 }
               ]
             }
@@ -8639,6 +8646,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "uu21Qi+sEa7ABcPk8fRrdfR8lAAlsq7p6CrL5qKXsLC9l0+Xc7RKnlOyAorrQBea27cQiSP5D9hS1+VQKLo2BA=="
+    "sig": "ycypk0ZC7vS5pPAiu1lMHBQzdOCpvvy41+MFLFryqbgrq8Yt8ri9MJk2xAkgSUjNGZSTN0rG4V+iTA3uveqTCA=="
   }
 }
