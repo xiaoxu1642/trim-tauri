@@ -1488,24 +1488,36 @@
   <!-- Tauri 适配层（迁移方案 D1，Phase 0 起）：脚本链最前加载，完整复刻 window.api；
        Electron 下自动 no-op（由 preload.js 接管），不影响双轨。不使用 window.ds，
        不打破 ds.js 先于其使用方的约束。 -->
-  <script src="scripts/tauri-api.js"></script>
+  <!-- 性能批次①（2026-10-14）：body 末尾这批标签统一加 defer —— 下载与 HTML 解析并行，
+       执行序仍按文档序，所以「ds.js 先于 window.ds 使用方」「splash.js 是 body 末尾第一
+       个执行」两条硬约束不破；defer 脚本必在 DOMContentLoaded 之前执行完，黑闪握手
+       （tauri-api.js 的 notifyFirstPaint 等的就是 DCL）不受影响。
+       动态注入的 PAGE_SCRIPTS / IDLE_SCRIPTS 永远晚于 defer，方向安全。
+       body 最顶上的 theme-boot.js 刻意不加 defer：它要在首次绘制前把主题类挂上，
+       加 defer 会让它晚于首帧，出现「先白后暗」闪。 -->
+  <script src="scripts/tauri-api.js" defer></script>
   <!-- 启动页（v2.7.0）：独立无依赖，最先执行，盖住整窗直到 FLIP 落位完成 -->
-  <script src="scripts/splash.js"></script>
+  <script src="scripts/splash.js" defer></script>
   <!-- 硬约束（审查 2-6）：ds.js（window.ds 设计系统运行时）必须先于一切 window.ds 使用方加载（theme/modal/xtable 等） -->
-  <script src="scripts/ds.js"></script>
-  <script src="scripts/theme.js"></script>
-  <script src="scripts/modal.js"></script>
-  <script src="scripts/xtable.js"></script>
-  <script src="scripts/icon-fallback.js"></script>
-  <script src="scripts/liquid-glass.js"></script>
-  <script src="scripts/overview.js"></script>
+  <script src="scripts/ds.js" defer></script>
+  <script src="scripts/theme.js" defer></script>
+  <script src="scripts/modal.js" defer></script>
+  <!-- 性能批次①(a)：xtable.js 与 icon-fallback.js 摘出首屏。两个都是纯库文件
+       （只挂 window.xtable / window.iconFallback，不自动 init），现算首屏其余脚本里
+       对二者的引用为 0：xtable 的 API 调用点只有 cleanup.js（PAGE_SCRIPTS.cleanup /
+       .backups 前置），icon-fallback 的调用点只有 contextmenu.js 与 startup.js
+       （各自 PAGE_SCRIPTS 前置）。子窗（process-manager-window.html）自带这两个标签，
+       与本文件无关；residue-window.js 只用 xtable-* 类名、不调 API，所以它不挂 xtable.js
+       不是缺失依赖，别补。 -->
+  <script src="scripts/liquid-glass.js" defer></script>
+  <script src="scripts/overview.js" defer></script>
   <!-- deviceinfo.js：系统概览（默认首页）用它归一化硬件信息，留在首屏避免首屏降级为空 -->
-  <script src="scripts/deviceinfo.js"></script>
+  <script src="scripts/deviceinfo.js" defer></script>
   <!-- fontmanager.js：启动时就要恢复已保存的字体/字重/字号（app.js init 里 restore），
        放到按需里会出现"先默认字体后跳变"，故留在首屏（14 KB） -->
-  <script src="scripts/fontmanager.js"></script>
+  <script src="scripts/fontmanager.js" defer></script>
   <!-- logger.js：window.app.log 是全局日志出口（3 KB），留在首屏避免启动日志静默丢失 -->
-  <script src="scripts/logger.js"></script>
-  <script src="scripts/app.js"></script>
+  <script src="scripts/logger.js" defer></script>
+  <script src="scripts/app.js" defer></script>
 </body>
 </html>

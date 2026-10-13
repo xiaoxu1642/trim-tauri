@@ -801,8 +801,20 @@ pub async fn optimizer_run<R: Runtime>(
         &format!("优化电脑执行: {title}{}", if p.restore { " (还原)" } else { "" }),
     );
     // S3：纯 Rust 原生
-    let (run, failed_reasons): (Result<pwsh::PsOutput, String>, Vec<String>) =
-        match native_execute_steps(&window, &steps, &option_id) {
+    // 性能优化 P1-A（v3 §4.3）：整条步骤链是同步原生调用——PsInline 步骤登记 300s、
+    // cmd 步骤登记 60s，过去直接跑在 async 命令体里 ⇒ 占住 runtime worker，
+    // 批量执行时一条慢优化项就能把共享池的 worker 按住几分钟。
+    // 本文件此前只有 `restore_point.rs:211` 一处进了阻塞池，这条是那批修复的漏网。
+    // join 异常并入下面的失败分支（措辞点名「阻塞池任务异常」），不静默吞成成功。
+    let win_blk = window.clone();
+    let steps_blk = steps.clone();
+    let oid_blk = option_id.clone();
+    let native = tauri::async_runtime::spawn_blocking(move || {
+        native_execute_steps(&win_blk, &steps_blk, &oid_blk)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("阻塞池任务异常（执行未起跑或未跑完）: {e}")));
+    let (run, failed_reasons): (Result<pwsh::PsOutput, String>, Vec<String>) = match native {
             Ok((failed_steps, inline_stdout, reasons)) => {
                 let code = if failed_steps == 0 { 0 } else { 1 };
                 let mut stdout = String::new();

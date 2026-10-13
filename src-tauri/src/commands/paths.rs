@@ -210,8 +210,8 @@ fn scan_install_paths() -> serde_json::Value {
     // 任务3：注入当前生效规则库（数据目录覆盖 / 自定义合并 / 验签后的版本）——
     // 规则库在线更新后，路径绑定扫描的应用候选目录自动同步；规则不可用时
     // pathscan 内部的候选逻辑自行兜底（规则串传空）。
-    let rules_json = match crate::commands::cleanup::rules_value() {
-        Ok(v) => serde_json::to_string(&v).unwrap_or_default(),
+    let rules_json = match crate::commands::cleanup::rules_value_arc() {
+        Ok(v) => serde_json::to_string(&*v).unwrap_or_default(),
         Err(e) => {
             log::write_log("warn", &format!("规则库不可用，路径扫描按内置候选兜底: {e}"));
             String::new()

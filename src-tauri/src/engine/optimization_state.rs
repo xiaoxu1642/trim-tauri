@@ -72,20 +72,25 @@ pub fn touch_recent(id: &str) -> bool {
     if id.is_empty() {
         return false;
     }
-    let mut recent = load()
-        .get("prefs")
-        .and_then(|p| p.get("recent"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
-        .unwrap_or_default();
-    recent.retain(|x| x != id);
-    recent.insert(0, id.to_string());
-    recent.truncate(RECENT_LIMIT);
     // v4 P2-D 尾：写侧走 update_state（读失败拒写）
+    //
+    // 性能修复（P1 批次）：旧写法先 `load()` 预读一次算 LRU，再由 `update_state` 内部
+    // 读第二次 = **2 读 1 写**；更糟的是两次读之间没有锁，并发 touch 各自按旧快照算表、
+    // 后写的把先写的整段 `recent` 覆盖掉（AGENTS §5.28「读-改-写要问谁可能并行写它」）。
+    // 现在「读旧表」挪进闭包：读与写同在 `security::update_json` 的串行化里 ⇒ 1 读 1 写，
+    // 且不丢更新。
     update_state(|st| {
         if let Some(o) = st.as_object_mut() {
             let prefs = o.entry("prefs").or_insert_with(|| json!({}));
             if let Some(p) = prefs.as_object_mut() {
+                let mut recent: Vec<String> = p
+                    .get("recent")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                recent.retain(|x| x != id);
+                recent.insert(0, id.to_string());
+                recent.truncate(RECENT_LIMIT);
                 p.insert("recent".into(), json!(recent));
             }
         }
@@ -119,6 +124,68 @@ fn load() -> Value {
         }
         _ => empty_state(),
     }
+}
+
+/// 三视图的**唯一提取口径**：一次 `load()` 的结果 → 各段的引用。
+/// [`all`] / [`detected_all`] / [`dismissed_map`] 与 [`Snapshot`] 的三个访问器都走这里
+/// （AGENTS §5.16：同一个判定不许有两份实现，否则合并读之后段名改名/挪层会出现
+/// 「快照读到、旧函数读不到」的分叉）。
+fn items_of(st: &Value) -> Option<&Map<String, Value>> {
+    st.get("items").and_then(Value::as_object)
+}
+
+fn detected_of(st: &Value) -> Option<&Map<String, Value>> {
+    st.get("detected").and_then(Value::as_object)
+}
+
+fn dismissed_of(st: &Value) -> Option<&Map<String, Value>> {
+    st.get("prefs").and_then(|p| p.get("staleDismissed")).and_then(Value::as_object)
+}
+
+/// 段缺失时的**共享空表**：视图访问器返回引用，不为「这一层没有」再分配一份 Map。
+fn empty_map() -> &'static Map<String, Value> {
+    static EMPTY: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Map::new)
+}
+
+/// `optimization-state.json` 的**一次读盘快照**（三视图共用同一份解析结果）。
+///
+/// ## 为什么要有它
+///
+/// `optimizer:state-overview` 同时要 `items` / `staleDismissed` / `detected` 三段，
+/// 而三个视图函数各自 `load()` ⇒ 同一个文件**全量读盘 + 解析三遍**。快照把「读」收成
+/// 一次，视图只借引用（顺带省掉三段各自的深克隆）。
+///
+/// ## 约束
+///
+/// 快照**只读**：它不接任何写路径。写侧一律走 `update_state`，由
+/// `security::update_json` 在自己的锁内**重新读**再改 —— 所以不存在「拿着旧快照写、
+/// 覆盖别人的改动」这种形态，`Snapshot` 也就没暴露 `&mut`。
+pub struct Snapshot {
+    st: Value,
+}
+
+impl Snapshot {
+    /// 记账段（`items`）；缺段按空表（与 [`all`] 的降级口径一致）
+    pub fn items(&self) -> &Map<String, Value> {
+        items_of(&self.st).unwrap_or(empty_map())
+    }
+
+    /// 检测结果段（`detected`）；缺段按空表（与 [`detected_all`] 一致）
+    pub fn detected(&self) -> &Map<String, Value> {
+        detected_of(&self.st).unwrap_or(empty_map())
+    }
+
+    /// 「不再提醒」名单（`prefs.staleDismissed`）；缺段按空表（与 [`dismissed_map`] 一致）
+    pub fn dismissed(&self) -> &Map<String, Value> {
+        dismissed_of(&self.st).unwrap_or(empty_map())
+    }
+}
+
+/// 读一次状态文件并派生快照（走的是同一个 `load()`：三态读器 + 骨架补齐 + 损坏降级
+/// 空骨架的口径与三个视图函数逐字相同）。
+pub fn snapshot() -> Snapshot {
+    Snapshot { st: load() }
 }
 
 /// 写侧骨架校验（v4 P2-D 尾）：结构与 `load()` 的接受面**同判据**，但方向是拒写。
@@ -282,16 +349,47 @@ pub fn remove(id: &str) -> bool {
     if id.is_empty() {
         return false;
     }
+    let one = [id.to_string()];
+    // 委托给批量实现：单条 = 长度为 1 的批次，判据只有一份（§5.16）
+    remove_many(&one)
+}
+
+/// 批量销账：**一次**读-改-写删掉多个 id（连同各自的 stale 忽略记录）。
+/// 空批次不落盘并返回 `true`（没有要删的东西 ≠ 写失败）。
+///
+/// 为什么要有它：`optimizer:state-overview` 在 `for (id, rec) in raw` 里对「动态项遗留
+/// pending」逐条调 [`remove`] ⇒ 每条一次 `update_json` 全量重写（读 + 序列化 + fsync +
+/// rename + 目录 flush），账本里这类条目数不定，最坏情况是启动一次把整本文件重写若干遍。
+///
+/// ⚠️ **行为变更（这里与逐条 remove 不等价）**：落盘次数 N → 1，语义由「逐条独立、
+/// 中途 IO 失败会留下已删一半的状态」变成「**要么全删要么全不删**」。可接受的理由：
+/// ① 待删的只是动态项的**遗留 pending 垃圾账**，本轮概览已在循环里把它们从响应里排除
+/// （`continue`），删与不删都不改变用户看到的任何判定；② 写失败时 `update_state` 照旧
+/// 如实返回 false 并 error 留痕，**不**降级成「基于空骨架写」（fail-closed 未放宽），
+/// 垃圾账原样留着、下次概览再清；③ 单批走 `security::atomic_write_json`，
+/// 撕裂态本来就不存在，而「前 k 条已落盘、第 k+1 条失败」恰恰是旧实现**唯一**会产生的
+/// 中间态 —— 合并后反而消失了。
+pub fn remove_many(ids: &[String]) -> bool {
+    if ids.is_empty() {
+        return true;
+    }
     // v4 P2-D 尾：写侧走 update_state（读失败拒写；销账不存在的 id 是 no-op）
     update_state(|state| {
-        // 销账 = 该项不再有 stale 状态，忽略记录一并清掉（留着是垃圾，还会在
-        // 「重新执行 → 又 partial」时让第一次提醒被旧忽略错误吞掉）。
-        clear_stale_dismissed(state, id);
-        if let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) {
-            items.remove(id);
+        for id in ids {
+            remove_one_from_state(state, id);
         }
         Ok(())
     })
+}
+
+/// 销账的**单条动作**（[`remove`] 与 [`remove_many`] 共用，判据只有一份）
+fn remove_one_from_state(state: &mut Value, id: &str) {
+    // 销账 = 该项不再有 stale 状态，忽略记录一并清掉（留着是垃圾，还会在
+    // 「重新执行 → 又 partial」时让第一次提醒被旧忽略错误吞掉）。
+    clear_stale_dismissed(state, id);
+    if let Some(items) = state.get_mut("items").and_then(|v| v.as_object_mut()) {
+        items.remove(id);
+    }
 }
 
 // ==================== 「未完成还原」横幅的 per-id 忽略（2026-10-03 根治） ====================
@@ -321,13 +419,11 @@ pub fn dismiss_stale(id: &str) -> bool {
 }
 
 /// 读取忽略名单（overview 过滤 staleIds 用）
+///
+/// 单独调用仍是「一次读盘 + 一次深克隆」。同一个命令里还要读 items/detected 时，
+/// 请用 [`snapshot`] —— 三个视图各自调本函数 = 同一个文件读三遍。
 pub fn dismissed_map() -> Map<String, Value> {
-    load()
-        .get("prefs")
-        .and_then(|p| p.get("staleDismissed"))
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default()
+    dismissed_of(&load()).cloned().unwrap_or_default()
 }
 
 /// 从忽略名单移除单项（无则静默成功）
@@ -342,17 +438,16 @@ fn clear_stale_dismissed(state: &mut Value, id: &str) {
 }
 
 /// 全部记账条目
+///
+/// 单独调用仍是「一次读盘 + 一次深克隆」。同一个命令里还要读 detected / 忽略名单时，
+/// 请用 [`snapshot`]（三视图共用一次读取）。
 pub fn all() -> Map<String, Value> {
-    load()
-        .get("items")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default()
+    items_of(&load()).cloned().unwrap_or_default()
 }
 
 /// 单条记账（无则 null）
 pub fn get(id: &str) -> Option<Value> {
-    load().get("items")?.get(id).cloned()
+    items_of(&load()).and_then(|m| m.get(id)).cloned()
 }
 
 /// 回写单条检测结果
@@ -373,12 +468,11 @@ pub fn set_detected_entry(id: &str, optimized: bool) -> bool {
 }
 
 /// 读取全部检测结果
+///
+/// 单独调用仍是「一次读盘 + 一次深克隆」。同一个命令里还要读 items / 忽略名单时，
+/// 请用 [`snapshot`]。
 pub fn detected_all() -> Map<String, Value> {
-    load()
-        .get("detected")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default()
+    detected_of(&load()).cloned().unwrap_or_default()
 }
 
 fn normalize_verify(v: &str) -> &'static str {
@@ -567,5 +661,52 @@ mod tests {
 
         // 边界：空 id 拒绝
         assert!(!st::dismiss_stale(""), "空 id 必须被拒");
+    }
+
+    /// 合并读的**正向对照**（性能修复 P1）：`snapshot()` 的三个视图必须与三个独立视图
+    /// 函数**同内容** —— 断的是「把三遍读收成一遍，没有另起一套段提取判据」。
+    ///
+    /// 判红实验（已实跑）：把 `Snapshot::dismissed()` 改读 `items_of`，本条立刻红；
+    /// 把 `dismissed_of` 的段名 `staleDismissed` 改一个字母，本条与
+    /// `stale忽略与失败原因记账契约` 一起红（两侧共用同一份提取，不分叉）。
+    ///
+    /// 为什么在本文件而不在 `tests/module_smoke.rs`：判据对象是模块私有的
+    /// `items_of/detected_of/dismissed_of`，冒烟网够不着这一层。
+    #[test]
+    fn snapshot三视图与三个视图函数同内容() {
+        let _guard = _state_guard();
+        use crate::engine::optimization_state as st;
+        let snap = st::snapshot();
+        assert_eq!(*snap.items(), st::all(), "items 视图与 all() 分叉 —— 段提取出现两套判据");
+        assert_eq!(*snap.detected(), st::detected_all(), "detected 视图与 detected_all() 分叉");
+        assert_eq!(*snap.dismissed(), st::dismissed_map(), "dismissed 视图与 dismissed_map() 分叉");
+    }
+
+    /// 批量销账的行为契约（性能修复 P1 的**语义变更面**）：一批里每条都要删净，
+    /// 且条目与忽略记录同删（与逐条 `remove` 同口径）；空批次不落盘但算成功。
+    ///
+    /// 判红实验（已实跑）：把 `remove_many` 的循环改成只删 `ids[0]`，本条因
+    /// 「第 2、3 条销账后条目仍在」判红 —— 证明「要么全删」这条新语义真在守东西。
+    /// 夹具自产自清：三条 id 的条目与忽略记录都由本条删掉。
+    #[test]
+    fn remove_many单批删净且连忽略记录一起清() {
+        let _guard = _state_guard();
+        use crate::engine::optimization_state as st;
+        let ids: Vec<String> = ["__batch_a__", "__batch_b__", "__batch_c__"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for id in &ids {
+            let kinds = vec!["cmd".to_string()];
+            assert!(st::record_pending(id, "批量夹具", &kinds), "{id} 写 pending 失败");
+            assert!(st::dismiss_stale(id), "{id} 写忽略失败");
+        }
+        assert!(st::remove_many(&ids), "批量销账失败");
+        for id in &ids {
+            assert!(st::get(id).is_none(), "{id} 销账后条目仍在 —— 批量删除漏条目");
+            assert!(!st::dismissed_map().contains_key(id), "{id} 销账后忽略记录仍在");
+        }
+        // 空批次：不写盘也算成功（「没有要删的」≠「写失败」）
+        assert!(st::remove_many(&[]), "空批次必须视为成功");
     }
 }

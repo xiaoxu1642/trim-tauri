@@ -1,8 +1,9 @@
 // fontmanager.js - 设置 → 字体选择 应用内弹窗
 // 复用「安装路径绑定」的 usage-backdrop > usage-modal 弹窗样式。
-// 能力：5 款系统字体识别（缺失置灰）+ 内嵌 MiSans 可变字体（选项，出厂默认已改系统字体
-// 微软雅黑——2026-09-28 八轮拍板：MiSans 20MB 异步加载导致卡片高度漂移/看板重叠）+ 导入 1 款外部字体；
-// 字重滑块（100-1000，MiSans 无级连续调节）与字号滑块（12-24px）全局生效，
+// 能力：5 款系统字体识别（缺失置灰）+ 导入 1 款外部字体；出厂默认系统字体微软雅黑
+// （2026-09-28 八轮拍板改默认。内嵌 MiSans 已于 2026-10-14 整链移除：单文件 20,093,424 B、
+// 占 src/assets 的 92.94% 与安装包约六成，而它那时起就只是设置页的一个可选项）；
+// 字重滑块（100-1000）与字号滑块（12-24px）全局生效，
 // 经 --app-font-family / --font-weight-scale / --font-size-scale 三个 CSS 变量驱动全部界面文本。
 // 配置持久化到 settings.json 的 font 字段，应用重启后自动恢复。
 (function () {
@@ -74,14 +75,13 @@
     modal.sizeVal.textContent = `${settings.size}px`;
     const meta = fontList.find(f => f.family === settings.family);
     modal.tip.textContent = meta
-      ? `当前：${meta.family}${meta.imported ? '（已导入）' : meta.builtin ? '（内嵌可变字体，字重 100-1000 无级调节）' : ''} · 字重 ${settings.weight}（${weightPercent(settings.weight)}）· 字号 ${settings.size}px`
+      ? `当前：${meta.family}${meta.imported ? '（已导入）' : ''} · 字重 ${settings.weight}（${weightPercent(settings.weight)}）· 字号 ${settings.size}px`
       : `当前：${settings.family}`;
-    const isMisans = settings.family === 'MiSans';
     // M-9（2026-10-03 L3）：原生 title 延迟约 1s、样式不受 ds.css 控制、键盘不可达。
     // data-tip 由 ds.js 委托在 pointerover/focusin 时即时显示，键盘聚焦也看得到。
-    modal.weightInput.setAttribute('data-tip', isMisans
-      ? 'MiSans 可变字体：100-1000 无级连续调节'
-      : '系统字体受自身字重限制，滑块按最接近的可用字重渲染');
+    // 原先这里按 settings.family === 'MiSans' 分岔给「无级连续调节」文案，随 MiSans 一并删除；
+    // 导入的可变字体一直走的是下面这条提示，所以语义不变、不留死分支。
+    modal.weightInput.setAttribute('data-tip', '系统字体受自身字重限制，滑块按最接近的可用字重渲染');
   }
 
   function refreshDeleteBtn() {
@@ -160,7 +160,7 @@
       // **不是**对象 + onOk —— 按对象写法会把对象当成 title 且回调永不执行。
       const ok = await window.app?.confirmDanger?.(
         '删除已导入字体',
-        `确定删除已导入字体「${importedFamily}」吗？本地副本将一并删除（不影响原始文件），界面将回退到 MiSans。`,
+        `确定删除已导入字体「${importedFamily}」吗？本地副本将一并删除（不影响原始文件），界面将回退到默认系统字体（微软雅黑）。`,
         '删除',
         '取消',
         '删除后无法从应用内恢复该字体副本。'
@@ -252,7 +252,7 @@
       modalClass: 'font-modal',
       bodyClass: 'fm-body',
       bodyHtml: `
-          <p class="model-picker-tip">选择应用界面显示字体，支持系统字体、内嵌 MiSans 与自定义导入字体。字重滑块调节字体粗细（100-1000，MiSans 可变字体支持无级连续调节），字号滑块（12-24px）在所有字体通用。调整仅实时预览于下方「字体预览」，点击右下角「应用」后才会应用到整体界面。</p>
+          <p class="model-picker-tip">选择应用界面显示字体，支持系统字体与自定义导入字体。字重滑块调节字体粗细（100-1000，可变字体支持无级连续调节），字号滑块（12-24px）在所有字体通用。调整仅实时预览于下方「字体预览」，点击右下角「应用」后才会应用到整体界面。</p>
           <div class="fm-field">
             <span class="fm-field-label">界面字体</span>
             <div class="fm-field-main">

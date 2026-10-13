@@ -390,6 +390,42 @@ pub fn quiet_cmd_timeout_raw(
     spawn_and_wait_with_timeout(quiet_cmd(program).raw_arg(raw_arg), timeout)
 }
 
+/// 子进程退出后收口两条读线程的宽限期。
+///
+/// 为什么必须有它：管道写端可能被**子孙**继续握持（见 AGENTS §5.13 记过的同一形状），
+/// 此时 EOF 不会到来。旧写法在 `Some(status)` 分支直接 `wait_with_output()`，而它会读到
+/// EOF 才返回 —— 于是**已经跳出 deadline 检查之后照样无限挂住，不受登记超时保护**
+/// （`pwsh` 层记录过实测：进程已 `code=0` 退出，函数仍挂 19.7s，被一个 20s 的 ping 拖住）。
+const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 起一条线程读尽管道，结果送进 channel。
+///
+/// 刻意不用 `join()`：`join` 不可中断，只要还有子孙握着写端就无限期挂住；
+/// 只有 channel 能做到「等一段，等不到就放弃」。与 `pwsh` 层同一姿势（审查 v3 P0-1）。
+fn spawn_pipe_reader<R>(pipe: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let Some(mut pipe) = pipe else {
+        let _ = tx.send(Vec::new());
+        return rx;
+    };
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+/// 收一条管道的读结果。宽限内没读完就交**空串**，不交「半条」：
+/// 上层有按前缀判成功的判据（如 `engine::native::process` 对 `schtasks /Query /XML` 的
+/// `<?xml` 检查），交出截断内容会把「备份不完整」伪装成「备份成功」，比空串更危险。
+fn drain_pipe(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    rx.recv_timeout(PIPE_DRAIN_GRACE).unwrap_or_default()
+}
+
 fn spawn_and_wait_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
@@ -402,12 +438,23 @@ fn spawn_and_wait_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    // 必须在等退出**之前**把两条管道 take 走并立刻起线程读尽（审查 v3 P0-1）。
+    // 旧实现只轮询 `try_wait()`、一条都不读，于是子进程写满匿名管道缓冲（Windows 默认
+    // 4 KB 量级）就阻塞在 write、永不退出，`try_wait()` 恒 None，一路走到登记超时，
+    // 最后交出「status=1 + 空 stdout + 一句执行超时」。`schtasks /Query /TN x /XML`
+    // （XML 常 >4 KB）、`sfc /scannow`、`dism /StartComponentCleanup` 都落在这个形状上，
+    // 最坏被放大成登记的 1800s，还把大输出工具统一伪装成「超时」。
+    let rx_out = spawn_pipe_reader(child.stdout.take());
+    let rx_err = spawn_pipe_reader(child.stderr.take());
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait()? {
-            Some(_status) => {
-                // 进程已退出，管道缓冲（reg.exe stdout 仅数行）不会死锁，正常收尾
-                return child.wait_with_output();
+            Some(status) => {
+                return Ok(Output {
+                    status,
+                    stdout: drain_pipe(rx_out),
+                    stderr: drain_pipe(rx_err),
+                });
             }
             None => {
                 if Instant::now() > deadline {
@@ -425,6 +472,8 @@ fn spawn_and_wait_with_timeout(
                                 std::process::ExitStatus::default()
                             }
                         },
+                        // 超时按失败处理，刻意交空 stdout（fail-closed）：调用方据此判
+                        // 「没拿到结果」，不许拿部分输出去过后缀/前缀判据。
                         stdout: Vec::new(),
                         stderr: format!("执行超时（>{}ms），已终止", timeout.as_millis()).into_bytes(),
                     });
@@ -520,6 +569,35 @@ mod tests {
         assert_eq!(got, "中文", "OEM(GBK) 分支应解出中文，实际 {got:?}");
     }
 
+    /// 审查 v3 P0-1：子进程输出远超匿名管道缓冲（4 KB 量级）时，**必须边跑边读**。
+    ///
+    /// 旧实现只轮询 `try_wait()`、一条管道都不读，于是写满缓冲的子进程永远阻塞在 write、
+    /// 永不退出 → 走到登记超时 → 交出「status=1 + 空 stdout」。`schtasks /Query /XML`、
+    /// `sfc`、`dism` 全在这个形状上。本用例让 `cmd.exe` 打到 stdout 的输出**远超管道缓冲量级**，
+    /// **零副作用**（不写盘、不起子进程树、不碰注册表），所以进常规组而不 `#[ignore]`：
+    /// 判红条件是「拿不到全部字节」——旧实现在此处必然是 0 字节 + 非 0 退出码。
+    /// 反向验证已做过：逐字退回旧实现后本用例 FAILED，现象是跑满登记超时并拿到 0 字节。
+    #[test]
+    fn 大输出子进程的管道必须边跑边读() {
+        let line = "0123456789012345678901234567890123456789"; // 单行 40 字节
+        let n = 2_000usize; // 累计约百 KB 量级，两个数量级地超出管道缓冲
+        // 走 raw_arg 版：cmd.exe 的 `/c "…"` 引号形状必须逐字保留（见 quiet_cmd_timeout_raw 注释）
+        let raw = format!("/c \"for /L %n in (1,1,{n}) do @echo {line}\"");
+        let out = quiet_cmd_timeout_raw(system_tool("cmd.exe"), &raw, PROBE_TIMEOUT)
+            .expect("cmd.exe 应能启动");
+        let got = out.stdout.len();
+        assert!(
+            got >= 60_000,
+            "应读尽大输出，实际拿到 {got} 字节 —— 若为 0 说明又回到「不读管道、等子进程自己退出」的旧形状"
+        );
+        assert!(out.status.success(), "退出码应成功，实际 {:?}", out.status);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !err.contains("执行超时"),
+            "不该走超时分支（超时即说明管道没被读）：{err}"
+        );
+    }
+
     /// P0-02 真机探针：sfc /verifyonly（非破坏）经同一管道采集，解码后无 NUL。
     /// 耗时数分钟，仅发布前人工 `cargo test -- --ignored` 跑。
     #[test]
@@ -533,13 +611,104 @@ mod tests {
         .expect("sfc 应能启动");
         let text = decode_native_output(&out.stdout);
         if text.trim().is_empty() {
-            eprintln!("SKIP：sfc 未向重定向 stdout 写输出，本探针未取证");
+            // 审查 v3 P0-1：旧写法在这里**无条件**打 SKIP 并返回，于是「超时交出空 stdout」
+            // 也被念成「本机未取证」——探针的 SKIP 分支恰好盖住了「不读管道」这个缺陷本身，
+            // 等于一条永不判红的断言。现在只有「进程确实成功退出却没写东西」才算未取证，
+            // 非 0 退出（含超时）一律判红。
+            assert!(
+                out.status.success(),
+                "sfc 退出码非 0 且 stdout 为空：先排除「管道未被读尽」，不许当未取证放行。stderr={:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            eprintln!("SKIP：sfc 已向重定向 stdout 写空内容（本机未取证，非缺陷）");
             return;
         }
         assert!(!text.contains('\0'), "sfc 输出解码后不得含 NUL: {text:?}");
         assert!(
             text.chars().any(|c| !c.is_whitespace()),
             "应含可判读文本: {text:?}"
+        );
+    }
+
+    /// 审查 v3 P0-1 的正向对照：确证**真实调用路径的输出确实超过匿名管道缓冲（4 KB 量级）**，
+    /// 即旧形状在本机可触发，不是理论推演。`schtasks /Query` 只读、不改任务。
+    ///
+    /// 取样纪律（AGENTS §2：用例不得依赖本机恰好有的数据）：**遍历**若干任务取最大者，
+    /// 而不是取第一个——首版就踩了这坑，第一个任务只有 1151 字节，判据被误判成红。
+    /// 本机全部样本都不到 4 KB 时显式 SKIP 并声明「本节未校验」，不 expect 炸。
+    /// 但「查询成功却拿到空串」始终判红——那正是 P0-1 的症状本身。
+    #[test]
+    #[ignore = "真机：依赖本机计划任务样本，发布前人工 cargo test -- --ignored 跑"]
+    fn live_schtasks_xml_输出确实超过管道缓冲() {
+        const SAMPLE_TASKS: usize = 60;
+        let listed = quiet_cmd_timeout(
+            system_tool("schtasks.exe"),
+            &["/Query", "/FO", "CSV", "/NH"],
+            SCHTASKS_TIMEOUT,
+        )
+        .expect("schtasks 应能启动");
+        let names = decode_native_output(&listed.stdout);
+        let mut tasks: Vec<String> = Vec::new();
+        for line in names.lines() {
+            let head = line
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            if head.starts_with('\\') {
+                tasks.push(head);
+                if tasks.len() >= SAMPLE_TASKS {
+                    break;
+                }
+            }
+        }
+        if tasks.is_empty() {
+            eprintln!("SKIP：本机未取到形如 \\… 的计划任务名，本探针未取证");
+            return;
+        }
+        let mut queried = 0usize;
+        let mut biggest_len = 0usize;
+        let mut biggest = String::new();
+        for t in &tasks {
+            let Ok(out) = quiet_cmd_timeout(
+                system_tool("schtasks.exe"),
+                &["/Query", "/TN", t, "/XML"],
+                SCHTASKS_TIMEOUT,
+            ) else {
+                continue;
+            };
+            if !out.status.success() {
+                continue;
+            }
+            queried += 1;
+            let xml = decode_native_output(&out.stdout);
+            assert!(
+                !xml.trim().is_empty(),
+                "{t} 查询成功却拿到空 stdout——即「管道未被读尽」的旧症状"
+            );
+            assert!(
+                xml.contains("<?xml"),
+                "{t} 应拿到 XML 主体，实际前 80 字：{:?}",
+                xml.chars().take(80).collect::<String>()
+            );
+            if xml.len() > biggest_len {
+                biggest_len = xml.len();
+                biggest = t.clone();
+            }
+        }
+        assert!(queried > 0, "本机 {SAMPLE_TASKS} 个任务样本全部查询失败，探针未取证");
+        if biggest_len <= 4096 {
+            eprintln!(
+                "SKIP：本机 {queried} 个任务的 /XML 最大只有 {biggest_len} 字节（{biggest}），\
+                 未覆盖「超过 4 KB 管道缓冲」这一形状 ⇒ 该形状的确证由常规用例\
+                 「大输出子进程的管道必须边跑边读」承担，本探针只补真实工具侧"
+            );
+            return;
+        }
+        println!(
+            "确证：{biggest} 的 /XML 输出 {biggest_len} 字节 > 4096 ⇒ 旧形状（运行期不读管道）在该尺寸上必假超时"
         );
     }
 }

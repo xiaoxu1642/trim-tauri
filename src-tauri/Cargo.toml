@@ -1,6 +1,6 @@
 [package]
 name = "trim-tauri"
-version = "0.8.0"
+version = "0.8.1"
 description = "Trim"
 authors = ["xiaoxu"]
 edition = "2021"
@@ -30,9 +30,12 @@ tauri = { version = "2", features = ["protocol-asset"] }
 # 原因：仓库外的相对路径让干净 clone 根本拿不到它，cargo 直接 os error 3 断构建
 # —— 即方案登记的 R24。2026-09-24 用「克隆到别处 vs 克隆到 Trim 旁」两组实跑坐实为真缺陷。
 #
-# 为什么不并成 workspace 成员：cargo 在合并工作区里只认根节点的 [profile.*]，
-# 而 native-scanner 自带 opt-level=3 / lto=true / codegen-units=1，并进来会被静默降级
-# —— 那几个参数直接决定扫描性能。故让它独立成包、仅作 path 依赖。
+# 为什么不并成 workspace 成员（2026-10-14 校正过理由，别按旧注释理解）：
+#   ✅ 成立的理由：它自带 bin/target 目录、测试与主 crate 各自独立跑，非成员形态互不牵连。
+#   ❌ **不成立**的理由（此前这里是这么写的）：「cargo 只认根节点 profile，独立成包才保得住
+#      opt-level/lto/codegen-units」。这句推理方向是反的 —— Cargo 对**依赖**的 `[profile.*]`
+#      一律忽略（与是否成员无关），独立成包同样保不住。真正保住扫描性能优化的唯一落点，
+#      就是本文件末尾那段 `[profile.release]`（见那里的注释）。
 #
 # ⚠️ 双份维护：这份 vendor 副本与 Electron 轨的原版从此各自演化，改扫描器要说清改的是哪一份。
 # 原版位于**本仓库之外**，此处刻意不写它的路径：那是本机绑定的绝对路径，写进跟踪文件后
@@ -173,5 +176,23 @@ features = [
 ]
 
 [profile.dev]
-# Spike 调试期增量优化，保持默认；不动 release 配置（产物新鲜度门禁见方案 Phase 4 第 6 条）
+# Spike 调试期增量优化，保持默认
 incremental = true
+
+# ---------- release 配置（审查 v3 P0-2）----------
+# 为什么必须写在**这里**：Cargo 的 profile 只取「被构建的那个 workspace root」的 manifest，
+# **依赖的 `[profile.*]` 一律忽略 —— 与它是不是 workspace 成员无关**。本 crate 就是它自己的 root
+# （仓内既无根 Cargo.toml、也无任何 `[workspace]` 声明），所以 `trim_finder` 随主 crate 编译时，
+# 优化面**只由下面这几行决定**；`../native-scanner/Cargo.toml` 里那份 `[profile.release]` 在这条
+# 产品链路上是死配置（只在有人单独进那个目录构建它自己时才生效）。
+# ⚠️ 本文件此前有一段主张「cargo 只认根节点 profile，所以让扫描器独立成包才能保住
+# opt-level/lto/codegen-units」的注释 —— 那个推理方向是反的（独立成包同样保不住），
+# 2026-10-14 现算证伪后已改写，别再照旧结论把这段挪走或删掉。
+[profile.release]
+# 先上 thin LTO：fat LTO 是全图 LLVM 合并，编译时长代价未实测（发版要的是可复现的构建窗口）
+lto = "thin"
+codegen-units = 1
+# 符号表不进产物。panic 刻意**不**改 abort ——
+# `../native-scanner/src/cleanup_scan.rs` 有真实的 `catch_unwind(AssertUnwindSafe(…))`，
+# abort 下不可捕获，会把「fatal 回收成错误回执」变成宿主进程当场死（那段代码就住在内联的 trim_finder 里）
+strip = true

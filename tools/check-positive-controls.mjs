@@ -35,6 +35,10 @@ const REGISTRY = [
   { file: 'check-idle-scripts.mjs', manual: true, reason: 'loadScript 三态断言配「违例 3 条全命中 / 合规放行」样本自检（P3-4）；守卫与启动名单两组仍靠扫描面地板兜底' },
   { file: 'check-comment-rot.mjs', manual: true, reason: '注释腐烂：三条断言各配正反向对照（不存在路径/章节号/数字必判红 + 真实样本不假红）；另经真破坏验证——关掉待修豁免表后 8 处真实腐烂全被抓到，exit 1' },
   { file: 'check-review-units.mjs', reason: '审查单元台账：U1–U5 五条断言各配合成正反向样本（超上限/重复点名/未认领/台账塌缩必判红，干净表不假红）；另经真破坏验证——改名+降上限+抬地板三处同时判红，exit 1' },
+  // v3 P2-I 新增三条：判据抽出成纯函数后与自检共用同一实现（不在别处抄第二套判据）
+  { file: 'check-artifact-size.mjs', reason: '产物体积棘轮：4 组合成样本自检（超 cap 必红 / 等值放行 / 缩小只提示 / 未登记角色必红）；产物缺失走 SKIP 不冒充通过，另经真破坏验证——压低基线 cap 后 exit 1 并点名差值' },
+  { file: 'check-first-paint.mjs', reason: '首屏关键路径：F1 预算双向 + F2 defer 不变量 + F4 首屏∩按需，7 组合成样本自检；豁免表与对照双向咬合——清空豁免表会让对照②立即判红（真破坏 exit 1），不是只松真样本' },
+  { file: 'check-asset-size.mjs', reason: '资源体积三段判据抽出为单一 judgeAssets，5 组合成样本与之共用同一实现（塞未登记大文件 / 条目失踪 / 超 cap 必红，等值与干净样本放行）；从 PENDING_CONTROLS 迁入本表' },
   { file: 'check-desc-vs-writes.mjs', reason: 'P1-03 文案⇄写入：原缺陷形态判红 /「其余」精确限定与无声称放行，3 条判定器自检' },
 ];
 
@@ -56,7 +60,7 @@ const PENDING_CONTROLS = [
   { name: 'check-csp-consistency', reason: '对拍型：meta CSP ⇄ 三子窗副本逐字一致，缺合成样本' },
   { name: 'check-css-tokens', reason: '找违规型：未定义 token 引用 / 圆角离档即红，缺违规样本自检' },
   { name: 'check-assets-used', reason: '找违规型：src/assets 零引用文件即红，缺违规样本自检' },
-  { name: 'check-asset-size', reason: '棘轮型：资源体积超基线即红，缺「人为塞大文件必须红」样本' },
+  // check-asset-size 已于 2026-10-14 v3 P2-I 配好内置正向对照并迁入 REGISTRY（本表只减不增）。
   { name: 'check-treemap-layout', reason: '性质型：squarified 布局数学性质（面积和/包含关系），缺「人为破坏性质必须红」样本' },
   { name: 'check-item-intro', reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径，缺合成样本' },
   { name: 'check-desktop-entry', reason: '对拍型：桌面入口 ⇄ 发布暂存目录合并状态，缺合成样本' },

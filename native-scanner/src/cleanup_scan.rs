@@ -42,11 +42,21 @@ struct Cap {
     out: String,
     err: String,
     active: bool,
+    /// P2-④：逐行回调在场时为 true —— 此时**不再**往 `out` 里追加。
+    ///
+    /// 为什么可以丢：`out_line` 每行都已经同步交给调用方的 `on_line` 回调（生产路径 =
+    /// `run_json(…, Some(hook))`，`scan_execute.rs` 逐行 `ingest_and_emit` 进结果槽），
+    /// `out` 那份整程全量副本没有任何消费方 —— 调用点是 `let (code, _stdout, stderr)`，
+    /// 全扫程驻留后被丢弃（按行协议每行约百字节量级线性放大，十万行级就是十 MB 量级、
+    /// 百万行级到百 MB 量级）。无回调的 CLI 形态（`run` / `run_checklocked` /
+    /// `checklocked_json`，以及 `tests/cleanup_scan_rule_diff.rs` 的对拍）必须照旧全量
+    /// 攒进 `out` 并 `write_back` ⇒ 由这个开关区分，**逐字节行为不变**。
+    discard_out: bool,
 }
 
 thread_local! {
     static CAP: std::cell::RefCell<Cap> =
-        std::cell::RefCell::new(Cap { out: String::new(), err: String::new(), active: false });
+        std::cell::RefCell::new(Cap { out: String::new(), err: String::new(), active: false, discard_out: false });
     /// 逐行回调（数据返回式入口的可选参数；捕获模式下 out_line 顺带回调此行）
     static HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> = std::cell::RefCell::new(None);
 }
@@ -74,12 +84,19 @@ fn capturing() -> bool {
 }
 
 /// 输出一行到 stdout（捕获模式下进内存；两种情况都触发逐行回调）
+///
+/// ⚠️ **捕获模式 + 有逐行回调时 `cap.out` 是空的**（P2-④，见 [`Cap::discard_out`]）：
+/// 那一行的去处只有回调一个，整程再攒一份全量副本从头到尾没人读。
+/// 任何将来想消费 `run_json` 返回值里 stdout 的调用点，都必须先改掉这个开关 ——
+/// 现在这么做会在生产环境（带回调）静默拿到空串。
 fn out_line(line: &str) {
     CAP.with(|c| {
         let mut cap = c.borrow_mut();
         if cap.active {
-            cap.out.push_str(line);
-            cap.out.push('\n');
+            if !cap.discard_out {
+                cap.out.push_str(line);
+                cap.out.push('\n');
+            }
         } else {
             println!("{}", line);
         }
@@ -112,13 +129,24 @@ fn err_line(line: &str) {
 }
 
 /// 在捕获模式下执行 body → (exit_code, stdout, stderr)
+///
+/// ⚠️ `hook` 为 `Some` 时返回的 stdout 是**空串**（行只经回调交付，见
+/// [`Cap::discard_out`]）；`hook` 为 `None`（CLI 与对拍入口）时 stdout 照旧全量。
 fn capture(
     hook: Option<Box<dyn FnMut(&str)>>,
     body: impl FnMut() -> i32,
 ) -> (i32, String, String) {
     let _serial = CAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_panic_hook();
-    CAP.with(|c| c.borrow_mut().active = true);
+    let discard_out = hook.is_some();
+    CAP.with(|c| {
+        let mut cap = c.borrow_mut();
+        cap.active = true;
+        // P2-④ 的开关落位：带逐行回调 ⇒ 这一程不再往 `out` 里攒全量副本（见 [`Cap::discard_out`]）。
+        // 这里写成 `false` 会让 `discard_out` 变成未用变量、并让
+        // `捕获带回调时不攒stdout副本而无回调逐字节照旧` 判红（2026-10-14 实测过一次）。
+        cap.discard_out = discard_out;
+    });
     HOOK.with(|h| *h.borrow_mut() = hook);
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     HOOK.with(|h| h.borrow_mut().take());
@@ -129,6 +157,8 @@ fn capture(
     let (out, err) = CAP.with(|c| {
         let mut cap = c.borrow_mut();
         cap.active = false;
+        // 复位：CAP 是 thread_local，下一次不带回调的捕获必须照旧全量攒 stdout
+        cap.discard_out = false;
         (std::mem::take(&mut cap.out), std::mem::take(&mut cap.err))
     });
     (code, out, err)
@@ -2094,7 +2124,22 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
     let files = acc
         .files
         .into_iter()
-        .map(|(p, sz)| (crate::to_long_path(&p), sz))
+        // 性能优化 P1-A（v3 §5.2）：`to_long_path` 对**每个可删文件**都要付一次
+        // GetLongPathNameW + ≥2 KB 零初始化缓冲 + 一次 from_utf16 分配
+        //（PLAN_CAP_TOTAL=1e6 ⇒ 上限百万次、累计 2 GB 缓冲分配）。而现算规则库
+        // 314 条根声明里 **0 条含 `~数字`**，read_dir 出来的已是长名 ⇒ 绝大多数调用恒等却贵。
+        // 这里用同一份短名判据做前置短路（`util::contains_short_name`，与 scan 的
+        // fail-closed 同源，不许另抄）。
+        // 保守性两道：① 字面名真含 `~1` 时判据为 true ⇒ 照常展开，只会少省性能、不会漏展开；
+        // ② 只对绝对路径跳过——GetLongPathNameW 会把相对输入**解析成绝对路径**，
+        //   扫描出口虽然恒为绝对（walk 的 root 已展开），但把前提写进判据比依赖它更稳。
+        .map(|(p, sz)| {
+            if Path::new(&p).is_absolute() && !crate::contains_short_name(&p) {
+                (p, sz)
+            } else {
+                (crate::to_long_path(&p), sz)
+            }
+        })
         .collect();
     FkResult {
         total_size: acc.total_size,
@@ -2288,6 +2333,11 @@ fn fatal(msg: &str) -> ! {
 /// 数据返回式入口（Tauri 进程内直调）：输出收集进内存，绝不写 stdout、绝不 exit。
 /// `on_line` 为逐行回调（不含换行），供调用方边扫边推进度事件。
 /// 返回 (exit_code, stdout, stderr)。
+///
+/// ⚠️ **`on_line` 为 `Some` 时返回的 stdout 是空串**（P2-④）：每行已经逐条交给回调，
+/// 再整程攒一份全量副本纯属死重（十万行级就是十 MB 量级驻留）。所以
+/// **带回调的调用点不得消费 stdout** —— 现有唯一调用点 `commands/cleanup/scan_execute.rs`
+/// 绑的是 `_stdout`。要读 stdout 就别传回调（CLI 形态 `run` 与对拍入口都是这样）。
 pub fn run_json(
     argv: &[String],
     stdin_text: &str,
@@ -3099,6 +3149,83 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// 性能优化 P1-A（v3 §5.2）的**等价前提证明**：枚举出口的短名前置短路要成立，
+    /// 必须 `to_long_path`（=`GetLongPathNameW`）对「已是长名的绝对路径」是**恒等**——
+    /// 该出口产出的 PLANFILE 喂给 PS 执行侧的保护闸，两侧字符串必须同口径
+    ///（v3.7.2 P3 双引擎对拍结论），出口字符串漂一点就是保护面判漂移。
+    ///
+    /// 覆盖形状：大小写混写、中文、空格、含 `~` 但不跟数字（字面名）、多级深、超长名。
+    /// 另附一条**取证而非断言**：相对输入 `.` 会不会被展开成绝对路径——
+    /// 答案是会（打印出来），所以短路条件里加了 `is_absolute()`，不是可有可无的保险。
+    #[test]
+    #[ignore = "真机：需要落盘样本并触盘，非回归判据，复核该短路时手动 --ignored 跑"]
+    fn to_long_path_对真实_planfile_形状恒等() {
+        #[cfg(windows)]
+        {
+            // 夹具基目录必须先取长名。本机实测：`std::env::temp_dir()` 返回
+            // `C:\Users\ADMINI~1\AppData\Local\Temp`——用户目录名本身就是 8.3 短名，
+            // 直接拿它拼样本会让**每个**路径都被短名判据命中、全部走展开分支，
+            // 恒等断言一次也跑不到（本探针第一版就是这样 checked=0 而判红的）。
+            // 反过来这也证明短路条件没选错：含短名的路径确实存在于真实机器上，而它们照常被展开。
+            let base = crate::to_long_path(&std::env::temp_dir().to_string_lossy());
+            if crate::contains_short_name(&base) {
+                println!("SKIP：本机临时目录展开后仍含短名（{base}），无法取恒等样本，本节未校验");
+                return;
+            }
+            let dir = Path::new(&base).join(format!("trim-longpath-{}", std::process::id()));
+            // 刻意不做「建之前先删」：目录名含进程 id、天然唯一，多余的一次删除原语调用
+            // 只会让 check-delete-callsites 的棘轮白涨（那条门禁的方向就是删除出口只减不增）。
+            fs::create_dir_all(&dir).expect("建沙箱目录");
+            let deep = format!("深层目录{}", "层".repeat(24));
+            let names = [
+                "Plain.txt",
+                "MIXEDcase.txt",
+                "中文文件.txt",
+                "With Space.txt",
+                "tilde~name.txt",
+                "a.b.c.d.txt",
+                &deep,
+            ];
+            let mut checked = 0usize;
+            let mut skipped_by_pred = 0usize;
+            for n in names {
+                let p = dir.join(n);
+                fs::write(&p, b"x").expect("写样本");
+                let s = p.to_string_lossy().to_string();
+                assert!(Path::new(&s).is_absolute(), "夹具必须是绝对路径: {s}");
+                if crate::contains_short_name(&s) {
+                    // 判据说"该展开" ⇒ 走原分支，不属恒等断言范围
+                    skipped_by_pred += 1;
+                    continue;
+                }
+                let got = crate::to_long_path(&s);
+                assert_eq!(
+                    got, s,
+                    "to_long_path 必须对该长名绝对路径恒等；出口字符串一改就动了 PS 侧保护闸的输入"
+                );
+                checked += 1;
+            }
+            assert!(checked >= 5, "恒等样本不足（checked={checked}），本探针未覆盖该形状");
+
+            // 取证：相对输入是否被改写（这决定短路条件里的 is_absolute 是否多余）
+            let rel = ".".to_string();
+            let got_rel = crate::to_long_path(&rel);
+            println!(
+                "相对输入 {rel:?} 经 to_long_path = {got_rel:?} —— 恒等? {}",
+                got_rel == rel
+            );
+            println!("恒等断言通过 {checked} 例，判据命中而走展开分支 {skipped_by_pred} 例");
+            let _ = fs::remove_dir_all(&dir);
+        }
+        #[cfg(not(windows))]
+        {
+            // 刻意用 println! 而非 eprintln!：本文件的 `诊断只走_err_line_不许有第二出口`
+            // 判据剥注释后按行数 eprintln!，生产侧只许 err_line 那一个 fallback。
+            // cfg 分支不删源码文本，写 eprintln! 会被算成第二出口而判红（实测过）。
+            println!("SKIP：本探针只在 Windows 上有意义（GetLongPathNameW 是 Win 侧 API）");
+        }
+    }
+
     /// 性能优化 P1 前置实测（v2 §三对 `file_deletable` 的原话是「修法须先量」）。
     ///
     /// 造 N 个真实小文件，分别计时 ① 只 `fs::metadata`、② 独占 open + close、
@@ -3187,5 +3314,74 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// P2-④ 的两态对照（可复跑）：捕获模式下 stdout 那份副本只按「有没有逐行回调」分岔。
+    ///   · 无回调（CLI 的 `run` / `run_checklocked` / `checklocked_json`，以及对拍集成测试
+    ///     `tests/cleanup_scan_rule_diff.rs` 走的 `run_json(.., None)`）：`out` 必须
+    ///     **逐字节**等于「每行 + 换行」的拼接 —— `write_back` 吐出的字节因此一字未改；
+    ///   · 有回调（生产路径 = `scan_execute.rs` 带 `Some(hook)`）：行逐条交付回调，
+    ///     `out` 为空串，整程不再驻留一份没人读的全量副本。
+    /// 三次捕获分别点名「全量」「逐条到达回调」「复位后照旧全量」，不靠「没报错」。
+    #[test]
+    fn 捕获带回调时不攒stdout副本而无回调逐字节照旧() {
+        let lines = [
+            "@@ITEM@@{\"id\":\"a\",\"files\":[]}",
+            "@@PLANFILE@@{\"id\":\"a\",\"path\":\"C:\\\\tmp\",\"size\":1}",
+            "@@LOCKED_DONE@@{\"scanned\":2,\"locked\":0}",
+        ];
+        let want: String = lines.iter().fold(String::new(), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        });
+
+        // ① 无回调：out 全量，且与逐行拼接逐字节相同
+        let (code, out, err) = capture(None, || {
+            for l in lines.iter() {
+                out_line(l);
+            }
+            0
+        });
+        assert_eq!(code, 0, "body 正常返回时退出码照旧");
+        assert!(err.is_empty(), "本用例不写诊断，err 应为空：{err}");
+        assert_eq!(out, want, "无回调形态的 stdout 必须逐字节照旧（CLI 的 write_back 依赖它）");
+
+        // ② 有回调：每一行逐条到达回调，out 不再驻留副本
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = std::sync::Arc::clone(&got);
+        let (code2, out2, _err2) = capture(
+            Some(Box::new(move |l: &str| {
+                sink.lock().unwrap_or_else(|e| e.into_inner()).push(l.to_string());
+            })),
+            || {
+                for l in lines.iter() {
+                    out_line(l);
+                }
+                0
+            },
+        );
+        assert_eq!(code2, 0);
+        assert_eq!(
+            got.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            lines.iter().map(|l| l.to_string()).collect::<Vec<String>>(),
+            "回调必须逐条收到每一行（少一行就是丢了输出）"
+        );
+        assert!(
+            out2.is_empty(),
+            "带回调时 out 必须是空串（P2-④），实得长度 {}",
+            out2.len()
+        );
+
+        // ③ 复位对照：紧接着一次无回调捕获必须照旧全量（thread_local 状态没被污染）
+        let (code3, out3, _err3) = capture(None, || {
+            out_line(lines[0]);
+            0
+        });
+        assert_eq!(
+            (code3, out3),
+            (0, format!("{}\n", lines[0])),
+            "capture 结束后必须复位，否则 CLI 路径会被连带改成不攒副本"
+        );
     }
 }

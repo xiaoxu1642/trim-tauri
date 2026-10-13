@@ -74,6 +74,18 @@
 
   const states = new Map();      // bar -> { thumb, filterId, mapW, mapH }（分段栏滑块）
   const glassStates = new Map(); // el  -> { kind, w, h, radius, blur, refract }
+  // 容量上限（性能 v3 ①，写法对齐 MAP_CACHE_MAX / FILTER_BUCKETS_MAX）：glassStates 此前
+  // 没有上限——MAX_REFRACT 28 只管折射名额、FILTER_BUCKETS_MAX 48 只管滤镜桶，纯磨砂元素
+  // 照样逐个进 Map 并被 glassRo.observe（观察集与 Map 同尺寸）。
+  // 现算挂载面：index.html 静态命中 84 个候选（btn-primary 13 + btn-accent 6 +
+  // btn-secondary 56 + field-input 8 + usage-modal 1），但零尺寸（未激活页 / 未显示弹窗）
+  // 在 measureGlass 就被挡下；卸载页每应用 3 个 .btn-secondary，百应用即 300+ 同时在场。
+  // 512 给到静态面的 6 倍余量，只在「DOM 里同时存在上千克个玻璃候选」时才生效——
+  // 那种量级继续 observe 才是本条要兜的风险。
+  // 超限的降级是「不再挂新元素」（不 observe、不挂弹性、不写行内 backdropFilter），
+  // **不回改已挂元素**：已挂元素的视觉终值一个都不动；未挂元素走 main.css 的 CSS floor，
+  // 名额腾出后由 scheduleScan 下一轮补挂（与零尺寸元素延迟入场同一条路径）。
+  const GLASS_STATES_MAX = 512;
   const elasticEls = new Set();  // full 模式参与弹性形变的按钮
   let refractCount = 0;
 
@@ -421,45 +433,79 @@
   }
 
   // ============ 元素玻璃挂载（按钮 / 弹层） ============
-  function attachGlass(el) {
-    if (glassStates.has(el) || !el.isConnected) return;
+  // 性能 v3 ①：拆成「读趟 measureGlass / 写趟 commitGlass」两趟。
+  // 原 attachGlass 逐元素做 matches → getBoundingClientRect → getComputedStyle(半径) →
+  // 写两条行内 backdropFilter → classList.add('lg-elastic') → glassRo.observe，
+  // 而 scheduleScan 对 N 个候选逐个跑它 ⇒ 同帧读写交错，每次读都被上一元素的写判脏，
+  // 强制样式重算 + 回流 N 次。两趟化后读全部发生在写之前，整趟只脏一次布局。
+  // 等价性前提（改任一写法都要复核这条）：本引擎的写不改布局终值——
+  //   · .lg-elastic 的 transform 变量默认恒等（--lg-tx/ty 0px、--lg-sx/sy 1、--lg-press 1），
+  //     加 class 前后的 getBoundingClientRect 同一个盒子；
+  //   · shimmer 画布是 position:absolute/inset:0、sharedDefs 的 <svg> 是 position:absolute
+  //     零尺寸，都不入流、不改宿主尺寸；
+  //   · backdrop-filter 不参与布局。
+  // 读趟：只做几何/样式读取（rect + computed 圆角），一律不碰 DOM
+  function measureGlass(el) {
+    if (glassStates.has(el) || !el.isConnected) return null;
     const kind = el.matches(FLOATING_SELECTOR) ? 'floating' : (el.matches(BUTTON_SELECTOR) ? 'button' : 'control');
     const rect = el.getBoundingClientRect();
     const w = Math.round(rect.width), h = Math.round(rect.height);
-    if (!w || !h) return; // 隐藏中（未激活页 / 未显示弹窗），后续扫描再挂
+    if (!w || !h) return null; // 隐藏中（未激活页 / 未显示弹窗），后续扫描再挂
     const radius = readRadius(el);
-    const overBudget = !withinRefractBudget(w, h, radius);
+    return { el, kind, w, h, radius, blur: kind === 'floating' ? 9 : 2 };
+  }
+
+  // 写趟：折射名额（refractCount）与滤镜桶按元素逐个结算。遍历顺序与旧版 forEach 一致，
+  // 所以 MAX_REFRACT / FILTER_BUCKETS_MAX 下「谁抢到名额」的归属结果不变。
+  function commitGlass(m) {
+    if (glassStates.size >= GLASS_STATES_MAX) return; // 容量闸门（见 GLASS_STATES_MAX 注释）
+    const el = m.el;
+    const overBudget = !withinRefractBudget(m.w, m.h, m.radius);
     const wantRefract = mode !== 'frost' && mode !== 'off' && refractionSupported && !overBudget && refractCount < MAX_REFRACT;
-    const blur = kind === 'floating' ? 9 : 2;
-    const st = { kind, w, h, radius, blur, refract: false };
+    const st = { kind: m.kind, w: m.w, h: m.h, radius: m.radius, blur: m.blur, refract: false };
     if (wantRefract) {
-      const id = getFilterId(mode, w, h, st.radius);
+      const id = getFilterId(mode, m.w, m.h, st.radius);
       if (id) {
         st.refract = true;
         st.filterId = id;
         useFilter(id);
         refractCount++;
-        setBackdrop(el, `url(#${id}) blur(${blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
+        setBackdrop(el, `url(#${id}) blur(${m.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
       } else {
         // 滤镜桶满（上限护栏）：退化为磨砂，scheduleScan 会在容量腾出后升级
-        setBackdrop(el, `blur(${kind === 'floating' ? 18 : blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
+        setBackdrop(el, `blur(${m.kind === 'floating' ? 18 : m.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
       }
     } else {
       // 超预算 / 不支持折射：纯磨砂（弹层面积大，磨砂力度比按钮更高）
-      setBackdrop(el, `blur(${kind === 'floating' ? 18 : blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
+      setBackdrop(el, `blur(${m.kind === 'floating' ? 18 : m.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
     }
     glassStates.set(el, st);
     // 全量观察（含磨砂元素）：尺寸变化后可重新评估折射资格（实锤6 资格回升）
     glassRo.observe(el);
-    if (kind === 'button') {
+    if (m.kind === 'button') {
       if (mode === 'full' && !reduceMotion) {
         el.classList.add('lg-elastic');
         elasticEls.add(el);
       }
-    } else if (kind === 'floating' && mode === 'full') {
+    } else if (m.kind === 'floating' && mode === 'full') {
       // control（输入控件）不挂 shimmer：弹层点睛属于浮层，输入区不做焦散
       shimmer.attach(el);
     }
+  }
+
+  function attachGlass(el) {
+    const m = measureGlass(el);
+    if (m) commitGlass(m);
+  }
+
+  // 一趟读几何、再一趟写样式（供批量挂载用：单个元素走 attachGlass 即可）
+  function attachGlassAll(els) {
+    const measured = [];
+    for (const el of els) {
+      const m = measureGlass(el);
+      if (m) measured.push(m);
+    }
+    for (const m of measured) commitGlass(m);
   }
 
   // 折射资格回升（修复实锤6）：元素缩小回预算内 / 折射名额或滤镜桶腾出后，
@@ -506,11 +552,14 @@
 
   function attachIfNew(el) {
     if (!el || !el.matches) return;
-    if (el.matches(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR)) attachGlass(el);
+    const sel = REFRACT_SELECTOR + ',' + FLOATING_SELECTOR;
+    const found = [];
+    if (el.matches(sel)) found.push(el);
     // 容器节点：扫描其内部（弹窗整体插入 body 时一次带出全部按钮）
     if (el.querySelectorAll) {
-      el.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR).forEach(attachGlass);
+      for (const inner of el.querySelectorAll(sel)) found.push(inner);
     }
+    attachGlassAll(found);
   }
 
   // 清理已脱离文档的元素，防止 states 泄漏
@@ -564,9 +613,7 @@
       scanTimer = 0;
       if (mode !== 'full' && mode !== 'standard') return;
       sweepDetached();
-      document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR).forEach((el) => {
-        if (!glassStates.has(el)) attachGlass(el);
-      });
+      attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
       // 修复实锤6：折射名额/滤镜桶腾出后，回收此前降级为磨砂的元素
       glassStates.forEach((st, el) => {
         if (el.isConnected) tryUpgradeGlass(el, st);
@@ -1027,7 +1074,7 @@
       // full↔standard 滤镜链不同（色散差异），先清后挂
       if (attachedMode && attachedMode !== mode) detachAllGlass();
       // 不支持折射时滑块/按钮自动退化为磨砂（placeThumb / attachGlass 内处理）
-      document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR).forEach(attachGlass);
+      attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
       attachedMode = mode;
     }
     refreshBars(false);
@@ -1156,7 +1203,7 @@
 
     mountAll();
     if (mode === 'full' || mode === 'standard') {
-      document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR).forEach(attachGlass);
+      attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
       attachedMode = mode;
     }
     states.forEach((state) => {

@@ -85,11 +85,14 @@ const PS_CALL_SITES = [
  * 「还剩几个 PS 点」由本门禁打印，文档不再允许手写数字。
  */
 const RUN_INLINE_PS_SITES = [
-  { anchor: 'fn optimizer_check_restore | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:check-restore 最近还原点', timeout: 30 },
-  { anchor: 'fn count_restore_points | let out = run_inline_ps(ps, 30, None)?;', reason: '创建前后计数（含回读轮询）', timeout: 30 },
-  { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(pre, 20, None) else', reason: '创建前系统保护预检（fail-closed 扩展版：全局开关 / 组件存在性 / 受保护卷一次探完）', timeout: 20 },
+  // 2026-10-14 v3 §4.3：check-restore / list-restore 的执行体被抽成独立同步 fn 以整体进
+  // spawn_blocking，调用点的宿主函数名随之变——anchor 带函数名正是为了让这种搬动**必须留痕**，
+  // 登记跟着代码走，不是放宽判据。
+  { anchor: 'fn restore_check_body | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:check-restore 最近还原点（执行体见 restore_check_body）', timeout: 30 },
+  { anchor: 'fn count_restore_points | let out = run_inline_ps(ps, 30, None)?;', reason: '创建前后计数（含回读轮询）。「创建前」那一次已于 v3 §3.2 并入预检，此处只剩回读轮询', timeout: 30 },
+  { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(pre, 50, None) else', reason: '创建前系统保护预检（fail-closed 扩展版：全局开关 / 组件存在性 / 受保护卷一次探完）。2026-10-14 v3 §3.2 合批：本调用同时承担「创建前还原点计数」（原为单独一次 run_inline_ps），超时取 20+30 两段原登记值之和 ⇒ 只放宽不收紧', timeout: 50 },
   { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(create_ps, 120', reason: '创建还原点脚本本体（2026-10-06 摘条目后内联；原经 build_script 生成）', timeout: 120 },
-  { anchor: 'fn optimizer_list_restore | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:list-restore 列表', timeout: 30 },
+  { anchor: 'fn restore_list_body | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:list-restore 列表（执行体见 restore_list_body）', timeout: 30 },
 ];
 
 /// 白名单条数的真源：只从这里读，别抄进文档
@@ -362,6 +365,11 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/commands/optimizer/apply.rs', anchor: '&cmd_line_of(cmd)', reason: '优化项 cmd 步骤（/s /c 引号形状必须逐字保留，故走 raw_arg 形态）', timeoutConst: 'CMD_STEP_TIMEOUT', secs: 60 },
   // P0-02 真机探针：sfc /verifyonly 经同一管道采集（非破坏），验证统一解码
   { file: 'src-tauri/src/engine/systembin.rs', anchor: '&["/verifyonly"],', reason: 'P0-02 探针：sfc /verifyonly 输出采集（非破坏，发布前人工跑）', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  // 审查 v3 P0-1：`quiet_cmd_timeout` 改成「先 take 管道、边跑边读」后，守住该机制的三条用例调用点。
+  // 与上面 sfc 探针同理——它们同在 systembin.rs，只是前者在常规组、后两条是发布前人工跑的只读探针。
+  { file: 'src-tauri/src/engine/systembin.rs', anchor: '&raw, PROBE_TIMEOUT', reason: 'v3 P0-1 常规用例：cmd.exe 大输出验证「运行期读尽管道」（零副作用，不写盘不建窗）', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
+  { file: 'src-tauri/src/engine/systembin.rs', anchor: '&["/Query", "/FO", "CSV", "/NH"],', reason: 'v3 P0-1 探针：取本机计划任务名单（只读，不改任务）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/systembin.rs', anchor: '&["/Query", "/TN", t, "/XML"],', reason: 'v3 P0-1 探针：单任务 /XML 输出体积确证（只读，正是会撑满管道缓冲的形状）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
   // P1-01：性能计数器修复链（lodctr 64/SysWOW64/winmgmt/typeperf），统一 60s
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("lodctr.exe"), &["/R"], MAINT_FAST_TIMEOUT', reason: 'P1-01：lodctr /R 重建 64 位计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&wow, &["/R"], MAINT_FAST_TIMEOUT', reason: 'P1-01：SysWOW64 lodctr /R 重建 32 位计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },

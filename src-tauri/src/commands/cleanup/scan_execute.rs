@@ -125,7 +125,7 @@ pub(super) fn ingest_and_emit<R: tauri::Runtime>(accum: &Arc<Mutex<ScanAccum>>, 
 /// 扫描主体（纯原生引擎；PS 回退已随 S3 删除，见 :11）
 pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>, partial: bool) -> Value {
     let configured = load_paths_config();
-    let rules = match rules_value() {
+    let rules = match rules_value_arc() {
         Ok(r) => r,
         Err(e) => {
             log::write_log("error", &format!("扫描异常: {e}"));
@@ -362,7 +362,7 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
     let Some(safe_items) = validate_snapshot_items(items.as_ref(), &snapshot) else {
         return json!({ "success": false, "message": "清理项不是最近一次扫描结果，已拒绝执行" });
     };
-    let rules = match rules_value() {
+    let rules = match rules_value_arc() {
         Ok(r) => r,
         Err(e) => return json!({ "success": false, "message": e }),
     };
@@ -547,7 +547,7 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
         Some(s) if !s.is_empty() && s.chars().count() <= 160 => s,
         _ => return json!({ "success": false, "message": "参数无效" }),
     };
-    let rules = rules_value().unwrap_or_else(|_| json!({}));
+    let rules = rules_value_arc().unwrap_or_else(|_| Arc::new(json!({})));
     // v2.2 第3批（D13）：fileKeys 条目明细直接读扫描快照里的可删文件清单——明细与执行同源
     let (known_files, has_known) = {
         let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());

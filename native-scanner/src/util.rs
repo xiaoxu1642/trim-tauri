@@ -302,6 +302,31 @@ pub fn to_long_path(p: &str) -> String {
     p.to_string()
 }
 
+/// 8.3 短名判定：任一组件出现 `~` 紧跟数字即真。与 JS `normalizeForCompare` 的
+/// fail-closed 口径同源，故**判据只有这一份**（AGENTS §5.16：同判定不许两套实现）。
+///
+/// 原先它是 `scan.rs` 里的私有 fn。2026-10-14 提到 util 并 pub，是为了让
+/// `cleanup_scan.rs` 的枚举出口能用它给 [`to_long_path`] 做前置短路
+/// （每个可删文件都付一次 `GetLongPathNameW` + ≥2 KB 缓冲分配，而规则库里
+/// 现算 0 条根声明含短名 ⇒ 绝大多数调用是恒等却贵）。
+///
+/// 保守方向：字面量真含 `~1` 的普通文件名会被判 true ⇒ 多做一次展开，
+/// 只损失性能、不损失正确性。
+pub fn contains_short_name(norm: &str) -> bool {
+    let mut pending_tilde = false;
+    for c in norm.chars() {
+        if c == '~' {
+            pending_tilde = true;
+        } else if pending_tilde {
+            if c.is_ascii_digit() {
+                return true;
+            }
+            pending_tilde = false;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

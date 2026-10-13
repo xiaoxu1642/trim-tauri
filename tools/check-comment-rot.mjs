@@ -446,6 +446,9 @@ const KB_SPEC_ALLOW = [
   { file: 'src-tauri/src/commands/settings.rs', needle: '64KB', reason: '偏好值上限闸（代码常量）' },
   { file: 'src-tauri/src/engine/winhttp.rs', needle: '64KB', reason: '流式读取缓冲尺寸（代码常量）' },
   { file: 'src/scripts/netspeed.js', needle: '256 KB/s', reason: '活动判定阈值（SPIKE_BPS 常量）' },
+  { file: 'src-tauri/src/engine/systembin.rs', needle: '4 KB', reason: 'Windows 匿名管道默认缓冲量级——系统约定值而非测量结果，且它是 v3 P0-1「边跑边读」判据的核心临界点' },
+  { file: 'native-scanner/src/cleanup_scan.rs', needle: '2 KB', reason: 'to_long_path 的缓冲下限由代码常量 max(1024) 个 u16 推得（=2048 B），是约定值非测量；v3 P1-8 用它论证出口短路值得做' },
+  { file: 'native-scanner/src/util.rs', needle: '2 KB', reason: '同上——同一常量的出处侧' },
 ];
 
 const rotNumbers = [];

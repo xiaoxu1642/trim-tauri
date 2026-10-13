@@ -9,13 +9,24 @@
 
   // 审查v4-M1：reduced-motion 实时求值——原实现模块加载时固化并提前 return，
   // 运行中切换系统「减少动态效果」偏好永不生效
+  // 性能 v3 ②：缓存 MediaQueryList **对象**本身、每次仍读它的 .matches（照样实时），
+  // 省掉的只是每个 pointermove 一次 matchMedia() 分配。
+  var rmQuery = null;
   function isReducedMotion() {
-    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    if (!rmQuery && window.matchMedia) rmQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    return !!(rmQuery && rmQuery.matches);
   }
 
   var HOST_SELECTOR = '.btn, .filter-tab, .maint-tab, .material-card, .radio-row';
   var LAYER_CLASS = 'spot-layer';
   var current = null;
+  // 性能 v3 ②：原实现每个 pointermove 都做「closest → getBoundingClientRect → 写两个
+  // CSS 变量 → querySelector(':scope > .spot-layer')」，即每事件一次强制回流。
+  // 现在几何快照与光斑层都按宿主缓存（换宿主才重量/重取），坐标写入走 rAF 合帧。
+  var currentLayer = null;  // 当前宿主的光斑层（换宿主即作废，重进时再取）
+  var currentRect = null;   // 进入宿主时量一次的几何快照
+  var spotRaf = 0;
+  var pendingX = 0, pendingY = 0;
 
   function hostFromEvent(e) {
     var t = e.target;
@@ -40,7 +51,25 @@
     if (current === host) return;
     if (current) current.classList.remove('spot-active');
     current = host;
+    // 换宿主（含置空）即作废按宿主缓存的几何与光斑层，重进时重新量/重新取
+    currentLayer = null;
+    currentRect = null;
     if (current) current.classList.add('spot-active');
+  }
+
+  function applySpot() {
+    spotRaf = 0;
+    var host = current;
+    if (!host) return;
+    if (!currentRect) {
+      var r = host.getBoundingClientRect();
+      currentRect = { left: r.left, top: r.top };
+    }
+    host.style.setProperty('--spot-x', (pendingX - currentRect.left).toFixed(1) + 'px');
+    host.style.setProperty('--spot-y', (pendingY - currentRect.top).toFixed(1) + 'px');
+    // 光斑层只需存在一次（原实现每事件 querySelector 一趟）。parentNode 校验兜住
+    // 「同一宿主节点被清空子节点」这类不换节点的重渲染，避免层丢了以后不再补。
+    if (!currentLayer || currentLayer.parentNode !== host) currentLayer = ensureLayer(host);
   }
 
   document.addEventListener('pointermove', function (e) {
@@ -48,13 +77,15 @@
     var host = hostFromEvent(e);
     setCurrent(host);
     if (!host) return;
-    var r = host.getBoundingClientRect();
-    host.style.setProperty('--spot-x', (e.clientX - r.left).toFixed(1) + 'px');
-    host.style.setProperty('--spot-y', (e.clientY - r.top).toFixed(1) + 'px');
-    ensureLayer(host);
+    pendingX = e.clientX;
+    pendingY = e.clientY;
+    if (!spotRaf) spotRaf = requestAnimationFrame(applySpot);
   }, { passive: true });
 
-  // 鼠标离开窗口 / 窗口失焦时熄灭光斑（滚动后元素位移由下一次 move 自动校正）
+  // 鼠标离开窗口 / 窗口失焦时熄灭光斑
   document.addEventListener('pointerleave', function () { setCurrent(null); });
   window.addEventListener('blur', function () { setCurrent(null); });
+  // 滚动只作废几何快照（不灭光斑）：滚动后宿主的视口坐标变了，缓存的 rect 会失准，
+  // 下一次 move 重量一次即可（原实现靠每事件重量自动校正，这里改成按需重量）。
+  window.addEventListener('scroll', function () { currentRect = null; }, { passive: true, capture: true });
 })();

@@ -25,13 +25,6 @@
   min-width: 0;
   overflow: hidden;
 }
-/* 分类树分组分隔线（保留原下拉的竖线分组语义，不可交互） */
-.nav-sub-separator {
-  height: 1px;
-  margin: 6px 8px 6px 38px;
-  background: var(--border-default);
-  pointer-events: none;
-}
 
 .page-header {
   display: flex;
@@ -46,15 +39,6 @@
   flex-wrap: wrap;
   margin-bottom: 24px;
   gap: 12px;
-}
-
-/* 磁盘清理页头动作区前的分隔线（区分清理动作与子窗口入口） */
-.clean-header-sep {
-  width: 1px;
-  align-self: stretch;
-  background: var(--border-default);
-  margin: 3px 2px;
-  flex-shrink: 0;
 }
 
 /* v3.3.4 占用检测弹窗：占用应用进程列表（应用名 + 占用文件数） */
@@ -136,45 +120,6 @@
   color: var(--fg-primary);
 }
 
-.category-name {
-  font-size: var(--fs-secondary);
-  font-weight: calc(500 * var(--font-weight-scale, 1));
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  line-height: 1.45;
-  min-width: 0;
-}
-
-.category-path {
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: 2px;
-  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
-}
-
-.category-size {
-  font-size: var(--fs-secondary);
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  color: var(--fg-primary);
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-  text-align: right;
-  min-width: 70px;
-}
-.cleanup-view-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
 /* ================================================================
    右键菜单列表
    ================================================================ */
@@ -183,124 +128,6 @@
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
   overflow: hidden;
-}
-
-.context-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.context-name {
-  font-size: var(--fs-body);
-  font-weight: calc(500 * var(--font-weight-scale, 1));
-  margin-bottom: 2px;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
-/* 列表条目概要信息（公司 · 注册表路径缩略，超出省略） */
-.ctx-item-summary {
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-.ctx-cat-icon {
-  font-size: calc(15px * var(--font-size-scale, 1));
-  flex-shrink: 0;
-  line-height: 1;
-}
-
-.ctx-cat-name {
-  color: var(--fg-primary);
-  flex-shrink: 0;
-}
-
-.ctx-cat-meta {
-  margin-left: auto;
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-  font-weight: calc(400 * var(--font-weight-scale, 1));
-}
-.ctx-cat-empty {
-  grid-column: 1 / -1;
-  padding: 14px 40px;
-  color: var(--fg-tertiary);
-  font-size: var(--fs-meta);
-  border-bottom: 1px solid var(--border-default);
-}
-
-/* ================================================================
-   测速仪表盘
-   ================================================================ */
-.speed-dashboard {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) 2fr;
-  gap: 20px;
-  margin-bottom: 20px;
-}
-.ring-bg {
-  fill: none;
-  stroke: var(--border-default);
-  stroke-width: 12;
-}
-.ring-content {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-}
-.ring-value {
-  font-size: calc(48px * var(--font-size-scale, 1));
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-}
-.ring-unit {
-  font-size: var(--fs-secondary);
-  color: var(--fg-tertiary);
-  margin-top: -4px;
-}
-.speed-label {
-  font-size: var(--fs-secondary);
-  color: var(--fg-secondary);
-  font-weight: calc(500 * var(--font-weight-scale, 1));
-}
-
-.speed-metrics {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-.metric-icon {
-  font-size: calc(24px * var(--font-size-scale, 1));
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-elevated);
-  border-radius: var(--radius-small);
-}
-.metric-info {
-  flex: 1;
-}
-.metric-value {
-  font-size: calc(22px * var(--font-size-scale, 1));
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  font-variant-numeric: tabular-nums;
-}
-.metric-label {
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-  margin-top: 2px;
 }
 
 #speedChart {
@@ -337,16 +164,6 @@
   .settings-grid {
     grid-template-columns: 1fr;
   }
-}
-
-
-/* 系统面板（P2 §3.6 RAINZ 对标）：电源计划三档 + 虚拟内存只读。
-   颜色一律走既有 token（AGENTS §2「分组不得用离表色」），圆角按 medium/btn 档位。 */
-.settings-syspanel-hint {
-  margin: 0 0 12px;
-  color: var(--fg-tertiary);
-  font-size: var(--fs-meta);
-  line-height: 1.6;
 }
 .syspanel-card {
   border: 1px solid var(--border-default);
@@ -403,27 +220,8 @@
   font-size: calc(11px * var(--font-size-scale, 1));
   word-break: break-all;
 }
-
-/* AI 配置弹窗表单 */
-.ai-config-form {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.ai-config-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.ai-config-label {
-  font-size: var(--fs-meta);
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  color: var(--fg-secondary);
-}
 /* 一行多个操作按钮（如检查更新行） */
 .about-row-actions { display: flex; gap: 8px; flex: none; }
-.settings-helper { margin: 0 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); }
-.settings-section-actions { display: flex; align-items: center; gap: 10px; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); white-space: nowrap; }
 /* v3.2.0：device-info-table 旧外壳声明与 device-info-row 旧版 grid 行声明已删除
    （现样式见 4974 行起的卡片化版本：行自持边框圆角、容器只管栅格间距） */
 .device-info-label { color: var(--fg-tertiary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
@@ -440,13 +238,6 @@
 .external-site-picker { display: flex; justify-content: flex-end; margin: -10px 0 16px; }
 .benchmark-results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .external-test-source { margin: -8px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); }
-/* v3.2.1：规则库版本显示（更新规则库右侧选项区内） */
-.rules-version-info {
-  font-size: var(--fs-meta);
-  color: var(--fg-tertiary);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
 /* v3.2.1：设置页「系统信息」容器隐藏——入口改为首页「系统健康度」卡连点 7 次彩蛋弹窗
    （信息 DOM 数据仍由 app.js 填充，弹窗打开时整块移入、关闭时移回，专家模式开关可用） */
 #systemInfoSection { display: none; }
@@ -456,60 +247,6 @@
   flex-direction: column;
   gap: 22px;
 }
-.optimizer-group-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-small);
-  color: var(--accent-text); /* 审查 E3-1 同族：accent 实底白字在暗色仅 2.99:1；--accent-text 是设计系统规定的实底 accent 前景 */
-  flex: 0 0 auto;
-  background: var(--accent);
-}
-
-.optimizer-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 12px;
-}
-
-.optimizer-card-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-.optimizer-card-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-btn);
-  color: var(--fg-secondary);
-  background: var(--bg-card-hover);
-  flex: 0 0 auto;
-}
-.optimizer-card-info {
-  min-width: 0;
-  flex: 1;
-}
-.optimizer-card-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 4px;
-  font-size: var(--fs-body);
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  color: var(--fg-primary);
-}
-.optimizer-card-desc {
-  margin: 0;
-  font-size: var(--fs-meta);
-  line-height: 1.5;
-  color: var(--fg-tertiary);
-}
 /* 审查 v2-M10：dynamic 项的档位下拉不再只有内存一档（新增了「暂停更新天数」），
    共用 .opt-dyn-select 这一个布局类；.optimizer-mem-select 保留给历史引用。 */
 .optimizer-mem-select,
@@ -518,30 +255,10 @@
   min-width: 120px;
   flex: 0 0 auto;
 }
-.btn-opt-run, .btn-opt-restore {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
 
 /* ========== 优化电脑：胶囊卡片 + 弹窗 ========== */
 .opt-group {
   margin-bottom: 22px;
-}
-.opt-group-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-btn);
-  /* 审查 v2-L6 + M20：--group-bg / --group-fg 是「按分类注入离表色」时代的钩子，
-     注入侧（GROUP_ACCENT/CAT_META.color）已删，全仓再无人写这两个变量 ⇒ 恒吃 fallback。
-     死间接层去掉，直接落 token 兜底（分类靠标题与图标区分，不靠彩虹）。 */
-  background: var(--bg-card-hover);
-  color: var(--fg-primary);
-  flex: 0 0 auto;
 }
 .opt-group-count {
   margin-left: auto;
@@ -551,39 +268,6 @@
   border-radius: 999px;
   background: color-mix(in srgb, var(--c, var(--accent)) 6%, transparent);
   color: var(--c, var(--accent));
-}
-
-/* 网格：自动填充列数，随窗口宽度自适应（拖动边缘缩放时每列保持最小宽度、条目完整显示，不限制每行数目） */
-.opt-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 10px;
-}
-.opt-card-dot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-.opt-card-icon {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-btn);
-  background: var(--bg-card-hover);
-  color: var(--fg-secondary);
-}
-.opt-card-title {
-  flex: 1;
-  min-width: 0;
-  font-size: calc(12.5px * var(--font-size-scale, 1));
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  line-height: 1.35;
-  color: var(--fg-primary);
 }
 
 /* ========== 优化中心详情弹窗内容样式（v3.2.0 弹窗统一批次） ==========
@@ -789,93 +473,9 @@
 }
 .toast-title { margin-bottom: 5px; color: var(--fg-primary); font-size: var(--fs-body); font-weight: calc(600 * var(--font-weight-scale, 1)); }
 @media (max-width: 800px) {
-
-  .speed-dashboard { grid-template-columns: 1fr; }
   .page-header { flex-direction: column; align-items: stretch; }
   .benchmark-layout, .benchmark-results { grid-template-columns: 1fr; }
   .benchmark-fields { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
-}
-
-
-/* ================================================================
-   安装路径绑定
-   ================================================================ */
-.settings-paths-section {
-  grid-column: 1 / -1;
-}
-
-.path-binding-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 16px;
-}
-
-.path-binding-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.path-binding-label {
-  font-size: var(--fs-meta);
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  color: var(--fg-secondary);
-}
-
-.path-binding-input-row {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.path-binding-input-row .path-binding-input {
-  flex: 1;
-  min-width: 0;
-}
-
-.path-binding-input-row .path-binding-browse {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.path-binding-hint {
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--danger);
-  min-height: 0;
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 180ms var(--ease-standard), opacity 180ms var(--ease-standard);
-  opacity: 0;
-}
-
-.path-binding-hint.valid {
-  color: var(--success);
-}
-
-.installed-software-section {
-  margin-top: 24px;
-  border-top: 1px solid var(--border-subtle);
-  padding-top: 18px;
-}
-
-.installed-software-list {
-  display: grid;
-  gap: 6px;
-  max-height: 280px;
-  overflow: auto;
-}
-
-.installed-software-meta {
-  margin-left: 8px;
-  color: var(--fg-tertiary);
-  font-size: calc(11px * var(--font-size-scale, 1));
-}
-
-.fileclean-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
 }
 
 /* 图片预览弹窗 */
@@ -915,77 +515,6 @@
   font-size: calc(11px * var(--font-size-scale, 1));
   color: var(--fg-tertiary);
 }
-
-.preview-body {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  overflow: hidden;
-  background: var(--bg-card);
-  min-height: 0;
-}
-
-.preview-image-container {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  padding: 16px;
-  position: relative;
-}
-
-.preview-image {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  border-radius: var(--radius-small);
-  transition: transform 200ms var(--ease-standard);
-  user-select: none;
-  -webkit-user-drag: none;
-  pointer-events: none;
-}
-
-.preview-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 20px;
-  border-top: 1px solid var(--border-default);
-  flex-shrink: 0;
-  gap: 12px;
-}
-
-.preview-zoom-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.preview-zoom-label {
-  font-size: var(--fs-meta);
-  color: var(--fg-secondary);
-  min-width: 48px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.preview-file-info {
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-  font-family: "Consolas", "Cascadia Code", monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 400px;
-}@media (max-width: 600px) {
-
-  .preview-file-info {
-    max-width: 200px;
-  }
-}
-
 
 /* ================================================================
    磁盘测速 - 历史测试记录弹窗
@@ -1059,34 +588,6 @@
   animation: fadeIn var(--duration-base) var(--ease-standard);
 }
 
-.ctx-detail-header {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 18px 20px 14px;
-  border-bottom: 1px solid var(--border-default);
-}
-
-.ctx-detail-title-wrap {
-  flex: 1;
-  min-width: 0;
-}
-
-.ctx-detail-name {
-  font-size: var(--fs-section);
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  color: var(--fg-primary);
-  word-break: break-word;
-}
-
-.ctx-detail-badges {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-  flex-wrap: wrap;
-}
-
 .ctx-detail-grid {
   display: flex;
   flex-direction: column;
@@ -1113,33 +614,11 @@
   border-top: 1px solid var(--border-default);
 }
 
-.ctx-desc-content {
-  font-size: calc(12.5px * var(--font-size-scale, 1));
-  color: var(--fg-primary);
-  line-height: 1.7;
-}
-.ctx-desc-retry-inline {
-  margin-top: 0;
-  padding: 2px 8px;
-}
-
 /* 大小单元格「· N 个条目」追加段（2026-10-07 目检缺陷 1）：体积与条目数两段并排时，
    .xtable-td[data-align="end"] 的 flex-end + overflow:hidden 会把不可缩溢出段
    整段左裁——体积数值先被裁掉（坏形态：只剩「GB · 555 个条目」）。min-width:0
    让它成为唯一的收缩方，空间不足时收缩出省略号，体积数值恒完整。 */
 .xtable-size-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.nav-submenu-select {
-  padding: 2px;
-}
-.settings-engine-label {
-  font-size: var(--fs-secondary);
-  color: var(--fg-secondary);
-  flex-shrink: 0;
-}
-/* 分类树子项复用 nav-subitem（缩进/圆点/高亮），字号微调适配较长文本 */
-.nav-cat-item {
-  font-size: var(--fs-secondary);
-}
 .realtime-legend {
   display: flex;
   align-items: center;
@@ -1199,44 +678,6 @@
   gap: 6px;
   line-height: 1.7;
   font-variant-numeric: tabular-nums;
-}
-.ai-model-drag-handle {
-  cursor: grab;
-  user-select: none;
-}
-.ai-model-drag-handle:active {
-  cursor: grabbing;
-}
-/* 多行 Prompt */
-.ai-model-prompt {
-  resize: vertical;
-  min-height: 84px;
-  line-height: 1.5;
-  font-family: inherit;
-}
-.ai-model-prompt-reset {
-  align-self: flex-start;
-}
-.ai-model-key-toggle {
-  flex-shrink: 0;
-  min-height: 34px;
-}
-
-/* ================================================================
-   联网 AI 简介配置弹窗（三处入口共用）
-   ================================================================ */
-.ai-config-enable-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-small);
-  background: var(--bg-card-hover);
-}
-.ai-config-enable-row .ai-config-label {
-  margin: 0;
 }
 
 /* ================================================================
@@ -1346,35 +787,6 @@
 /* F3（2026-09-15）：健康度按等级着色，如实反馈状态（不再恒绿） */
 .health-card.health-warn .health-status { color: var(--warning); }
 .health-card.health-bad .health-status { color: var(--danger); }
-.health-ring {
-  width: 108px;
-  height: 108px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  background: var(--bg-input);
-  transition: background var(--duration-base) var(--ease-standard);
-}
-.health-ring-inner {
-  width: 82px;
-  height: 82px;
-  border-radius: 50%;
-  background: var(--bg-card);
-  display: grid;
-  place-items: center;
-}
-.health-score {
-  font-size: calc(30px * var(--font-size-scale, 1));
-  font-weight: calc(700 * var(--font-weight-scale, 1));
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-  color: var(--fg-primary);
-}
-.health-ring[data-level="good"] .health-score { color: var(--success); }
-.health-ring[data-level="warn"] .health-score { color: var(--warning); }
-.health-ring[data-level="bad"] .health-score { color: var(--danger); }
 .health-meta { min-width: 0; flex: 1; }
 
 /* 概览分节 */
@@ -1405,7 +817,6 @@
 
   .device-info-table { grid-template-columns: minmax(0, 1fr); }
 }
-
 
 /* ================================================================
    启动项管理
@@ -1580,8 +991,6 @@
   .fm-field-label { padding-top: 0; }
 }
 
-.intro-tag-warn { color: var(--warning); }
-
 /* ================================================================
    模型选择弹窗（各模块独立选择 AI 简介模型）
    ================================================================ */
@@ -1614,7 +1023,6 @@
 .pw-item-input { flex: 1 1 auto; min-width: 0; }
 .pw-last-scan { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
 .startup-intro-meta { margin-bottom: 12px; font-size: var(--fs-meta); color: var(--fg-tertiary); }
-.models-modal-body { max-height: calc(100vh - 230px); overflow-y: auto; }
 
 /* ================================================================
    弹窗视觉统一层
@@ -1626,7 +1034,6 @@
 .ctx-detail-backdrop {
   background: color-mix(in srgb, var(--bg-app) 60%, rgba(0, 0, 0, 0.4));
 }
-.ctx-detail-header { padding: 16px 20px 12px; }
 
 /* ================================================================
    实时网速：记录报告弹窗（与「大模型管理」同款白色圆角卡片）
@@ -1696,7 +1103,6 @@
   .rt-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-
 /* ================================================================
    系统还原点弹窗（电脑优化中心 → 系统还原点）
    ================================================================ */
@@ -1720,7 +1126,6 @@
   align-items: center;
   gap: 10px;
 }
-.mem-process-search { width: 220px; min-height: 30px; }
 
 /* 内存清理区域列表（v3.2.0 卡片统一）：去掉 xtable 表格外壳与四列表头，
    每个清理区域 = 一张白卡（.row-card 同构：勾选 + 图标块 + 标题/风险徽章/描述 + 操作） */
@@ -1745,21 +1150,7 @@
   color: var(--fg-tertiary);
   word-break: break-word;
 }@media (max-width: 900px) {
-
-  .mem-process-search { width: 140px; }
   .mem-panel-actions { gap: 6px; }
-}
-
-
-/* ================================================================
-   内存清理：区域表格提示 / 进程树 / 轮询状态菜单
-   ================================================================ */
-.xtable-cell-hint {
-  display: inline-block;
-  margin-left: 8px;
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-  opacity: 0.85;
 }
 
 /* 进程轮询状态按钮 + 弹出菜单（轮询 UI 已移除，进程列表迁至独立「应用进程管理」窗口） */
@@ -1848,15 +1239,6 @@
 .nara-checkrow__name { flex: 1 1 auto; min-width: 0; color: var(--fg-primary); line-height: 1.4; }
 .nara-checkrow__side { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
 .nara-muted { padding: 10px 0; font-size: 12px; color: var(--fg-tertiary); }
-.nara-alert {
-  margin: 6px 6px 4px;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.5;
-  border-radius: var(--radius-small);
-  background: var(--warning-soft);
-  color: var(--warning);
-}
 /* footer：全选靠左，执行/关闭靠右 */
 .nara-panel-footer [data-nara-toggle-all] { margin-right: auto; }
 /* BCD 体检横幅：空槽不占位 */
@@ -1898,9 +1280,6 @@
 .peri-section-head { margin-bottom: 9px; }
 .peri-section-sub { margin: 0; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.45; }
 .peri-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-/* 端口组只有 3 个档，但每档描述较长（要写清三值分别是什么）——
-   给两列让描述有地方放行，避免又被压成三四行的碎字。 */
-.peri-cards-wide { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .peri-rec {
   position: absolute; top: -10px; right: 12px;
   padding: 2px 10px; border-radius: 999px;
@@ -1931,9 +1310,8 @@
 
 .peri-note { margin: 2px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; }@media (max-width: 720px) {
 
-  .peri-cards, .peri-cards-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .peri-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-
 
 .opt-col-body,
 .ctx-col-body {
@@ -1998,22 +1376,6 @@
   max-width: 50%;
 }
 
-/* ================================================================
-   设置页外观容器 + 磁盘清理行内选项 + 背景水印
-   ================================================================ */
-
-/* 磁盘清理页：行内清理选项（全选按钮旁） */
-.clean-inline-opts {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 4px 10px;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-small);
-  background: var(--bg-card);
-}
-
 /* v3.2.1 类目重构 S2：性质标签（缓存/日志/临时/转储/隐私/更新残留/过时备份/动作）
    只用既有语义 token 着色（AGENTS §5 禁硬编码字面色）；中性灰为主，动作/隐私用警示色 */
 .nature-tag {
@@ -2027,8 +1389,6 @@
   border: 1px solid var(--border-subtle);
   white-space: nowrap;
 }
-.nature-tag.nature-action { color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
-.nature-tag.nature-history { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, transparent); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
 .special-inline-note {
   font-size: 11px;
   line-height: 1.5;
@@ -2248,10 +1608,6 @@
   padding: 0 7px;
   border-radius: var(--radius-btn);
 }
-.maint-status-running { color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
-.maint-status-ok { color: var(--success); background: rgba(var(--success-rgb), 0.14); }
-.maint-status-warn { color: color-mix(in srgb, var(--warning) 80%, #000); background: rgba(var(--warning-rgb), 0.14); }
-.maint-status-error { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .maint-nara-banner__btn { margin-left: auto; flex: 0 0 auto; }
 
 /* 系统维护：批量操作栏（全选 / 已选计数 / 执行选中 / 全部执行 / 取消 / 进度） */
@@ -2484,7 +1840,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   .mouse-trail-layer { display: none !important; }
 }
 
-
 /* ================================================================
    磁盘清理 · 查找器（重复/大文件/空/AppData）通用样式
    完全沿用 .card / .table-card / .opt-* 主题语义
@@ -2517,7 +1872,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   font-weight: 400;
   color: var(--fg-tertiary);
 }
-.finder-size-end { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* M6 Treemap 格子（磁盘分析器）：面积 = 体积占比，点格子或回车即下钻。
    刻意不写 transition/animation —— prefers-reduced-motion 是硬约束（AGENTS §2），
@@ -2530,7 +1884,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 }
 .an-tm-cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .an-tm-cell-size { font-size: calc(11px * var(--font-size-scale, 1)); opacity: .75; }
-.finder-childcount { color: var(--fg-tertiary); font-size: 12px; }
 .finder-role { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
 
 /* 空文件/空目录结果分页（2026-09-28）：数万条结果一次性渲染会卡死渲染层，每页只挂 1000 条 */
@@ -2590,17 +1943,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   margin-bottom: 16px;
 }
 .cleanup-toolbar .cleanup-tabs { margin-bottom: 0; }
-.clean-filter-hint {
-  font-size: 11px;
-  color: var(--fg-tertiary);
-  white-space: nowrap;
-}
-.clean-filter-empty {
-  padding: 32px 16px;
-  text-align: center;
-  font-size: 13px;
-  color: var(--fg-tertiary);
-}
 
 /* ---------- 2) 内存卡数值：最多两行 ---------- */
 #memUseValue {
@@ -2767,7 +2109,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 
   .upd-spinner { animation: none; border-top-color: var(--border-default); }
 }
-
 
 /* ==================== v2.6.0 批次样式 ==================== */
 /* 系统体检只读诊断清单样式（.checkup-*）已于 2026-10-12 随首页「体检结论」区块全链路退役 */

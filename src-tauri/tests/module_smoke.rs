@@ -215,24 +215,28 @@ fn settings_set_pref_rejects_unknown_key() {
 
 const GHOST_APP_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TrimNoSuch-9f3a";
 
-// ==================== v0.7.0 残留链窄窗口集的统一断言 ====================
+// ==================== 残留链窄窗口集的统一断言 ====================
 //
 // 面板整块搬进 `residue` 副窗后，残留链命令的档位从 `guard::MAIN` 换成
 // `guard::RESIDUE_WINDOWS`（= 只有 "residue"）。断言形状随之翻转，但**判据要点名「做到了什么」**
 // （AGENTS §4.1 纪律①）：
-// - `residue` 窗必须越过档位，并且必须读得到命令体自己的早退特征 `needle`
+// - 允许集里的窗口必须越过档位，并且必须读得到命令体自己的早退特征 `needle`
 //   —— 只断「不含拒杀」会被「命令整条消失」假绿穿透（v2-M16② 的前车）；
-// - 其余四个子窗**和主窗**都必须被拒杀。主窗被拒是本轮的**新事实**：留在主窗能调，
-//   就等于面板搬走了却还留着第二条入口，注入主窗渲染层仍是同一份能力。
-// - `reached` 集合显式断言「越过的窗口恰好一个」，不是「至少一个」。
+// - 允许集外的窗口（含主窗）**全部**必须被拒杀。
+// - `reached` 集合显式断言「越过的窗口恰好等于允许集」，不是「至少一个」。
+//
+// 允许集是**参数**而不是写死的 `residue`：2026-10-13 裁定把 `uninstall_pending_add`
+// 的入口放宽到 `guard::PENDING_DELETE_WINDOWS`（= 主窗失败引导 + 残留副窗两个消费方），
+// 当时这条断言还按「residue 独占」写，于是提交里就留了一条恒红用例。档位以「谁真的需要调它」
+// 为准（AGENTS §3），测试必须跟着允许集走，而不是反过来。
 const RESIDUE_LABEL: &str = "residue";
 
-fn assert_residue_window_only(cmd: &str, args: serde_json::Value, needle: &str) {
+fn assert_window_tier(cmd: &str, args: serde_json::Value, needle: &str, allowed: &[&str]) {
     let mut reached: Vec<&str> = Vec::new();
-    for label in sub_windows() {
-        let w = window_with_label(label);
+    for label in trim_tauri_lib::engine::guard::APP_WINDOWS {
+        let w = if *label == "main" { main_window() } else { window_with_label(label) };
         let text = invoke_text(&w, cmd, args.clone());
-        if label == RESIDUE_LABEL {
+        if allowed.contains(label) {
             assert!(
                 !text.contains("IPC 来源校验失败"),
                 "{label} 窗调 {cmd} 不该被档位拒杀，回执 {text}"
@@ -251,14 +255,14 @@ fn assert_residue_window_only(cmd: &str, args: serde_json::Value, needle: &str) 
     }
     assert_eq!(
         reached,
-        vec![RESIDUE_LABEL],
-        "越过档位的窗口必须恰好是 residue 一个（其余窗口被拒杀了）"
+        allowed.to_vec(),
+        "越过档位的窗口必须恰好等于允许集 {allowed:?}（实到 {reached:?}）"
     );
-    let m = invoke_text(&main_window(), cmd, args.clone());
-    assert!(
-        m.contains("IPC 来源校验失败"),
-        "主窗调 {cmd} 现在必须被拒杀：残留面板已不在主窗，留入口就是第二条调用路径，回执 {m}"
-    );
+}
+
+/// 残留链命令的「只有 residue 能调」写法（`RESIDUE_WINDOWS` 档）。
+fn assert_residue_window_only(cmd: &str, args: serde_json::Value, needle: &str) {
+    assert_window_tier(cmd, args, needle, &[RESIDUE_LABEL]);
 }
 
 #[test]
@@ -366,20 +370,24 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
     );
 }
 
-/// P1-B3 三条重启后删命令随面板一起迁到 `residue` 副窗专属档（v0.7.0）。
-/// add 用「空目标早退」做正向特征（零副作用）；list 只断「不是档位拒杀」（读 PFRO，
-/// 返回值随环境变，不做形状断言）；revoke 会写 PFRO ⇒ **只断被拒的一侧**，
-/// 正例留给发布前 `#[ignore]` 组，符合 §4.2 纪律②「触盘/改系统的不进快速组」。
+/// 重启后删三条命令的档位（2026-10-13 裁定后 split）：
+/// - `add` 走 `PENDING_DELETE_WINDOWS`（= 主窗清理域失败引导 + residue 副窗两个消费方），
+///   主窗必须**越过**档位；用「空目标早退」做正向特征（零副作用，不写 PFRO）。
+/// - `list` / `revoke` 仍限 residue 独占档（`RESIDUE_WINDOWS`）：主窗调这两条要被判越权。
+///   list 用数据形状里的键名 `entries` 作正向特征（档位拒杀只回 {success:false,message}）；
+///   revoke 会写 PFRO ⇒ **只断被拒的一侧**，正例留给发布前 `#[ignore]` 组（§4.2 纪律②）。
 #[test]
-fn pending_delete_channels_are_residue_window_only() {
-    assert_residue_window_only(
+fn pending_delete_channels_window_tier() {
+    // add：主窗 + residue 两个都越过；models/processManager 拒杀
+    assert_window_tier(
         "uninstall_pending_add",
         json!({ "targets": [] }),
         "没有要登记的目标",
+        &["main", RESIDUE_LABEL],
     );
-    // needle 用数据形状里的键名：档位拒杀的回执只有 {success:false,message}，读不到 entries
+    // list：residue 独占
     assert_residue_window_only("uninstall_pending_list", json!({}), "entries");
-    // revoke：只验拒杀侧（residue 正例留给发布前 #[ignore] 组）
+    // revoke：residue 独占，只验拒杀侧（正例留给发布前 #[ignore] 组）
     let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         if label == RESIDUE_LABEL {
@@ -398,7 +406,7 @@ fn pending_delete_channels_are_residue_window_only() {
     let m = invoke_text(&main_window(), "uninstall_pending_revoke", json!({ "batchId": "no-such-batch" }));
     assert!(
         m.contains("IPC 来源校验失败"),
-        "主窗调重启后删撤销现在必须被拒杀（面板已搬走），回执 {m}"
+        "主窗调重启后删撤销必须被拒杀（revoke 仍限 residue），回执 {m}"
     );
 }
 

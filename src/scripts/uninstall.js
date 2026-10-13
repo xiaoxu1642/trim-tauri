@@ -46,6 +46,9 @@
   const ICON_CACHE_MAX = 1 << 20;   // 落盘总量上限（dataURL 粗算与原图 1:1.37）
   const ICON_CACHE_ENTRY_MAX = 32 * 1024; // 单条超限不落盘（大图实时取）
   const ICON_CONCURRENCY = 4;       // 并发提取上限（shellicon 提取有进程外开销，4 路已打满）
+  // 体积补全同口径：uninstall:dir-size 在 Rust 侧是 async + spawn_blocking（每次一趟
+  // 有界递归读盘），并发只吃 IO 等待；数值刻意跟着图标走，不留两个各调各的并发旋钮。
+  const SIZE_CONCURRENCY = ICON_CONCURRENCY;
 
   const iconCache = loadIconCache(); // key=id|version -> dataUrl | ''（失败也缓存，避免重扫重试）
 
@@ -91,29 +94,70 @@
     return tip;
   }
 
+  // ==================== 渲染页节点索引 ====================
+  // 重绘时一次性 querySelectorAll 建 id→单元格 索引，补图标 / 补体积只查表。
+  // 为什么不许留着循环里的 document.querySelector：每个单元格回填都是 cell.innerHTML=
+  // / textContent=，每次都失效 Chromium 的选择器结果缓存，「在 apps 循环里查 [data-un-*]」
+  // 于是每轮都退化成一次全文档遍历 ⇒ 行数一多就是 O(n²) 的样式失效 + 重排。
+  // data-un-icon / data-un-size 的属性语义不变：它仍是行定位依据，也是本索引的键源
+  //（getAttribute 拿的是解码后的原值，与 a.id 逐字符相等，因此不再需要 CSS.escape）。
+  let renderGen = 0;            // 每次整表重绘 +1：在途回写按世代号判「列表已经换了一版」
+  let iconCells = new Map();    // id -> 图标格（只属于当前这一版渲染）
+  let sizeCells = new Map();    // id -> 体积格（只属于当前这一版渲染）
+
+  function indexRenderedCells() {
+    renderGen += 1;
+    iconCells = new Map();
+    sizeCells = new Map();
+    const listEl = document.getElementById('uninstallList');
+    if (!listEl) return;
+    // 同名只认第一个：querySelectorAll 是文档序，first-wins 与原先 querySelector 取到的
+    // 是同一个节点（id 理论唯一，重复登记时不改变回写目标）
+    for (const el of listEl.querySelectorAll('[data-un-icon]')) {
+      const id = el.getAttribute('data-un-icon');
+      if (!iconCells.has(id)) iconCells.set(id, el);
+    }
+    for (const el of listEl.querySelectorAll('[data-un-size]')) {
+      const id = el.getAttribute('data-un-size');
+      if (!sizeCells.has(id)) sizeCells.set(id, el);
+    }
+  }
+
   // B6：EstimatedSize 是厂商自愿写的字段，缺失就不是 0。缺的地方按安装目录估一次，
   // 标「估算」并在截断时说明不精确；后台懒取，不拖慢首屏（与图标同一套路）。
+  // 并发口径照搬同文件 hydrateIcons：串行时每轮 await 一整趟目录树读盘，n 个缺失项就是
+  // n 段首尾相接的 IO；并发后总时长≈最慢的一批。完成顺序因此变成「谁先读完整棵树谁先落」，
+  // 但每个应用只写自己那一格、写的又是同一次 dirSize 的返回值 ⇒ 终值与串行完全一致。
   async function fillMissingSizes() {
-    const need = apps.filter((a) => !a.estimatedSizeKb && a.installLocation);
-    for (const a of need) {
-      const cell = document.querySelector(`[data-un-size="${CSS.escape(a.id)}"]`);
-      if (!cell) continue;
-      try {
-        const r = await window.api.uninstall.dirSize(a.installLocation);
-        if (!r || !r.success || !r.data) continue;
-        if (!r.data.sizeKb) continue;
-        const stillThere = document.querySelector(`[data-un-size="${CSS.escape(a.id)}"]`);
-        if (!stillThere) return; // 列表已重绘，旧结果不再回写
-        stillThere.textContent = '≈' + fmtSizeKb(r.data.sizeKb);
-        // HiBit §H5：命名数据流（ADS）不计入本体体积，单独在提示里交代。
-        // 它解释的是「为什么删完释放的比显示的多」——下载来源标记 Zone.Identifier 就住在这里
-        stillThere.setAttribute('data-tip', '厂商未写 EstimatedSize，按安装目录大小估算'
-          + (r.data.partial ? '（文件数或层级触顶，实际可能更大）' : '')
-          + (Number(r.data.adsStreams) > 0
-            ? `；另含 ${r.data.adsStreams} 条备用数据流约 ${fmtSizeKb(Math.ceil(Number(r.data.adsBytes) / 1024))}（不计入上面的数）`
-            : ''));
-      } catch (e) { /* 估不出来就留空位，不编一个数 */ }
-    }
+    const gen = renderGen;
+    const cells = sizeCells;
+    // 只补「当前这一版渲染里真有空格子」的缺失项：未渲染的页没有节点，翻页时再补
+    //（与 hydrateIcons 同口径，顺带给 need 一个页大小上界——原先只按缺字段筛，无上限）。
+    const need = apps.filter((a) => !a.estimatedSizeKb && a.installLocation && cells.has(a.id));
+    let idx = 0;
+    const worker = async () => {
+      while (idx < need.length) {
+        if (gen !== renderGen) return; // 列表已重绘，旧结果不再回写
+        const a = need[idx++];
+        const cell = cells.get(a.id);
+        if (!cell) continue;
+        try {
+          const r = await window.api.uninstall.dirSize(a.installLocation);
+          if (gen !== renderGen) return; // 列表已重绘，旧结果不再回写
+          if (!r || !r.success || !r.data) continue;
+          if (!r.data.sizeKb) continue;
+          cell.textContent = '≈' + fmtSizeKb(r.data.sizeKb);
+          // HiBit §H5：命名数据流（ADS）不计入本体体积，单独在提示里交代。
+          // 它解释的是「为什么删完释放的比显示的多」——下载来源标记 Zone.Identifier 就住在这里
+          cell.setAttribute('data-tip', '厂商未写 EstimatedSize，按安装目录大小估算'
+            + (r.data.partial ? '（文件数或层级触顶，实际可能更大）' : '')
+            + (Number(r.data.adsStreams) > 0
+              ? `；另含 ${r.data.adsStreams} 条备用数据流约 ${fmtSizeKb(Math.ceil(Number(r.data.adsBytes) / 1024))}（不计入上面的数）`
+              : ''));
+        } catch (e) { /* 估不出来就留空位，不编一个数 */ }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(SIZE_CONCURRENCY, need.length) }, worker));
   }
 
   const iconCacheKey = (a) => `${a.id}|${a.displayVersion || ''}`;
@@ -158,19 +202,25 @@
 
   // 渲染完成后并发补图标（U-3：4 路并发池，shellicon/读图都是进程外或 IO 开销，
   // 串行 83 个约秒级 → 并发后亚秒；并发太高会打爆 shell 提取，不设更高）。
-  // 用 dataset 定位单元格：渲染期间用户翻页/重扫时旧节点已 detached，直接跳过。
+  // 节点引用取自渲染时建好的索引（见 indexRenderedCells）：渲染期间用户翻页/重扫时
+  // 旧世代的索引整体作废，回写按世代号判掉——等价于原先「旧节点已 detached 就跳过」，
+  // 但不再每行做一次全文档选择器扫描（每次 cell.innerHTML= 都会失效 Chromium 的缓存）。
   async function hydrateIcons() {
+    const gen = renderGen;
+    const cells = iconCells;
     const pending = apps.filter((a) => {
-      const cell = document.querySelector(`[data-un-icon="${CSS.escape(a.id)}"]`);
+      const cell = cells.get(a.id);
       return cell && cell.dataset.loaded !== '1';
     });
     let idx = 0;
     const worker = async () => {
       while (idx < pending.length) {
+        if (gen !== renderGen) return; // 列表已重绘，旧结果不再回写
         const app = pending[idx++];
-        const cell = document.querySelector(`[data-un-icon="${CSS.escape(app.id)}"]`);
+        const cell = cells.get(app.id);
         if (!cell || cell.dataset.loaded === '1') continue;
         const url = await fetchIcon(app);
+        if (gen !== renderGen) return; // 取图期间列表换版，同样不回写
         cell.dataset.loaded = '1';
         cell.innerHTML = url
           ? `<img src="${window.ds.escAttr(url)}" alt="" draggable="false">`
@@ -182,6 +232,37 @@
   }
 
   // ==================== 程序列表 ====================
+  // 分页渲染（照 finder 的 EMPTY_PAGE_SIZE + pagerHtml 口径）：此前这里是全量
+  // innerHTML 重建、apps.map() 无上限，是全仓唯一没做分页/虚拟列表的长列表
+  //（finder 有分页、cleanup/processes 走 xtable.createVirtualList）。
+  // 上界取 200：卸载页典型量级是百级（HiBit 口径 83 项），绝大多数机器看不到翻页控件，
+  // 但单次 innerHTML 拼接与 DOM 解析有了硬上界。
+  // 不接虚拟滚动的理由（上一轮同类改动已裁定）：固定行高 + 容器自身是滚动源两条硬前提
+  // 都不成立，且 hydrateIcons / fillMissingSizes 按 data-un-* 定位节点，窗口外节点不存在。
+  // 截断一律可见：表头仍报全量「共 N 个应用」，未显示的条数写在表尾一行里并给出翻页按钮
+  //（AGENTS §3：界面看不到的行也就没有按钮，静默少一批会造「点得动的与扫到的不是一回事」）。
+  const APPS_PAGE_SIZE = 200;
+  let appsPage = 1;
+
+  function appsPagerHtml(cur, pages) {
+    return `<div class="finder-pager">
+      <button type="button" class="btn btn-secondary btn-small" data-un-pg="prev" ${cur <= 1 ? 'disabled' : ''}>上一页</button>
+      <span class="finder-pager-info">第 ${cur} / ${pages} 页 · 每页 ${APPS_PAGE_SIZE} 项</span>
+      <button type="button" class="btn btn-secondary btn-small" data-un-pg="next" ${cur >= pages ? 'disabled' : ''}>下一页</button>
+    </div>`;
+  }
+
+  // 渲染 + 建节点索引 + 起两条后台补全（图标与体积都是逐节点/逐目录的活，
+  // 放首屏之后跑，不阻塞列表出现）。翻页也走这里，因此每一页都会补上自己的图标与体积。
+  function renderAppList() {
+    const listEl = document.getElementById('uninstallList');
+    if (!listEl) return;
+    listEl.innerHTML = currentScope === 'windows' ? renderWindowsApps() : renderWin32Apps();
+    indexRenderedCells();
+    hydrateIcons();
+    if (currentScope !== 'windows') fillMissingSizes();
+  }
+
   async function loadApps() {
     const listEl = document.getElementById('uninstallList');
     if (enumerating) return;
@@ -197,10 +278,9 @@
         listEl.innerHTML = '<div class="finder-empty">没有枚举到已安装程序</div>';
         return;
       }
-      listEl.innerHTML = currentScope === 'windows' ? renderWindowsApps() : renderWin32Apps();
-      hydrateIcons();
-      // 体积补全要逐目录读盘，放首屏之后跑，不阻塞列表出现。
-      if (currentScope !== 'windows') fillMissingSizes();
+      // 新一轮枚举 = 新的「最近一次扫描结果」，回到首页（同 finder 重扫复位）
+      appsPage = 1;
+      renderAppList();
     } catch (e) {
       listEl.innerHTML = `<div class="finder-empty">枚举失败：${esc(String(e.message || e))}</div>`;
       window.app?.toast?.('error', '枚举失败: ' + (e.message || e));
@@ -233,7 +313,13 @@
 
   // 用户应用（传统 Win32）：三个卸载注册表根合并，HiBit「程序名」83 项的口径
   function renderWin32Apps() {
-    const rows = apps.map((a) => `
+    const total = apps.length;
+    const pages = Math.max(1, Math.ceil(total / APPS_PAGE_SIZE));
+    // 页码越界校正（卸载后集合变小，同 finder 的越界口径）
+    appsPage = Math.min(Math.max(1, appsPage), pages);
+    const from = (appsPage - 1) * APPS_PAGE_SIZE;
+    const view = apps.slice(from, from + APPS_PAGE_SIZE);
+    const rows = view.map((a) => `
       <tr>
         <td><div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div></td>
         <td class="finder-col-size" style="width:180px"><span class="finder-name-text" style="opacity:.7">${esc(a.publisher || '—')}</span></td>
@@ -246,11 +332,17 @@
           <button class="btn btn-secondary btn-small" data-un-repair="${esc(a.id)}"${modifyBtnAttr(a)}${noRepairAttr(a)}>修复</button>
         </td>
       </tr>`).join('');
+    // 未显示的部分必须写在脸上：措辞按「本页」而非「剩余」，末页也要成立
+    const hidden = total - view.length;
+    const more = hidden > 0
+      ? `<tr><td colspan="6" class="finder-empty">本页显示第 ${from + 1}–${from + view.length} 项，共 ${total} 项；`
+        + `另有 ${hidden} 项未在本页显示，翻页查看后才会为它们补图标与体积</td></tr>`
+      : '';
     return `
       <table class="finder-table">
-        <thead><tr><th>程序<span class="page-summary">共 ${apps.length} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:290px">操作</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
+        <thead><tr><th>程序<span class="page-summary">共 ${total} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:290px">操作</th></tr></thead>
+        <tbody>${rows}${more}</tbody>
+      </table>${pages > 1 ? appsPagerHtml(appsPage, pages) : ''}`;
   }
 
   // Windows 应用（Appx）：按 HiBit 口径分「第三方应用 / Windows 应用」两组
@@ -623,6 +715,16 @@
       });
     }
     document.getElementById('uninstallList')?.addEventListener('click', (e) => {
+      // 翻页：整表重绘 → 索引换代（renderGen+1），在途的旧世代回写全部作废，
+      // 新页的图标与体积由 renderAppList 重新起一轮补全。
+      const pg = e.target.closest('[data-un-pg]');
+      if (pg) {
+        if (pg.disabled) return;
+        const pages = Math.max(1, Math.ceil(apps.length / APPS_PAGE_SIZE));
+        appsPage = Math.min(Math.max(1, appsPage + (pg.dataset.unPg === 'prev' ? -1 : 1)), pages);
+        renderAppList();
+        return;
+      }
       const btn = e.target.closest('[data-un-app]');
       if (btn && !btn.disabled) runUninstall(btn.dataset.unApp);
       const mod = e.target.closest('[data-un-modify]');

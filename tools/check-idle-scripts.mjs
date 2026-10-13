@@ -104,9 +104,14 @@ check(
 // 把脚本加载完，台账已经占用，init 永不重跑。磁盘清理页就是这么变成「按钮全没绑事件、
 // IPC 订阅缺失」的（v2 方案的 P0，本轮把 cleanup 两份摘出首屏时必须钉死）。
 const html = readFileSync(join(REPO_ROOT, 'src', 'index.html'), 'utf8');
+// 正则必须容忍 `<script>` 上的其它属性：2026-10-14 v3 P1-C 给 body 末尾的静态脚本加了
+// `defer`，旧写法 `<script src="X"></script>` 当场一个都匹配不上，`staticNames` 退化成空集，
+// 断言 2 于是报「1 个标签 + 3 项提前 init」。这属**判据失明**（扫不到语料），不是语义放宽：
+// 用 `(?:^|[\s"])` 级的 `\s` 约束保证仍只认真实的 src 属性（`data-src` 之类不算）。
 const staticNames = new Set(
-  [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1].split('/').pop()),
+  [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"[^>]*><\/script>/g)].map((m) => m[1].split('/').pop()),
 );
+check(staticNames.size >= 10, 'index.html 静态脚本清单解析非空（过少 = 正则不认标签写法）', `解析得 ${staticNames.size} 个标签`);
 const startupBlock = appJs.match(/\/\/ 初始化各模块\n([\s\S]*?)\n\n/);
 if (!startupBlock) throw new Error('app.js 里找不到「// 初始化各模块」启动名单——锚点变了，请同步本门禁');
 const startupInits = [...startupBlock[1].matchAll(/initModuleByName\('([^']+)'\);/g)].map((m) => m[1]);

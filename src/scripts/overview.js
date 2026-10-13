@@ -11,6 +11,7 @@
   const state = {
     running: false,
     timer: null,
+    busy: false,            // 在途闸门（见 tick 的性能 v3 ④ 注释）
     hardwareLoaded: false,
     lastErrAt: 0
   };
@@ -172,34 +173,44 @@
 
   // ===== 采集 =====
   async function tick() {
-    if (window.api?.overview) {
-      try {
-        const resp = await window.api.overview.metrics();
-        if (!resp || !resp.success) throw new Error(resp?.message || '指标采集失败');
-        renderMetrics(resp.data);
-        if (!state.hardwareLoaded) loadHardware();
-      } catch (e) {
-        const now = Date.now();
-        // 节流：10 秒内只提示一次，避免刷屏
-        if (now - state.lastErrAt > 10000) {
-          state.lastErrAt = now;
-          window.app?.toast('error', '系统指标采集失败：' + (e?.message || e));
+    // 性能 v3 ④：in-flight 闸门。后端 overview_metrics 一旦慢于 POLL_INTERVAL(2000ms)，
+    // setInterval 会把未完成的 async 调用一层层叠上去，每叠一份就多一次后端采集 +
+    // 多一次 DOM 写（renderMetrics 全量重写卡片）。state 原先只有 running/timer，
+    // 没有在途位；busy 由 try/finally 复位，抛错路径也不会把闸门焊死。
+    if (state.busy) return;
+    state.busy = true;
+    try {
+      if (window.api?.overview) {
+        try {
+          const resp = await window.api.overview.metrics();
+          if (!resp || !resp.success) throw new Error(resp?.message || '指标采集失败');
+          renderMetrics(resp.data);
+          if (!state.hardwareLoaded) loadHardware();
+        } catch (e) {
+          const now = Date.now();
+          // 节流：10 秒内只提示一次，避免刷屏
+          if (now - state.lastErrAt > 10000) {
+            state.lastErrAt = now;
+            window.app?.toast('error', '系统指标采集失败：' + (e?.message || e));
+          }
         }
+      } else {
+        // 浏览器预览模式模拟数据
+        renderMetrics({
+          cpu: Math.round(20 + Math.random() * 40),
+          memory: { total: 16 * 1073741824, free: 6 * 1073741824, used: 10 * 1073741824, percent: 62 },
+          disks: [
+            { name: 'C:', label: '', total: 476 * 1073741824, free: 210 * 1073741824, used: 266 * 1073741824, percent: 56 },
+            { name: 'D:', label: '数据', total: 931 * 1073741824, free: 620 * 1073741824, used: 311 * 1073741824, percent: 33 }
+          ],
+          uptime: '2 天 5 小时 30 分钟',
+          processes: 260,
+          system: { caption: 'Microsoft Windows 11 专业工作站版', version: '10.0.28000', build: '2525', computerName: 'DESKTOP-XIAOXU', userName: 'xiaoxu' }
+        });
+        loadHardware();
       }
-    } else {
-      // 浏览器预览模式模拟数据
-      renderMetrics({
-        cpu: Math.round(20 + Math.random() * 40),
-        memory: { total: 16 * 1073741824, free: 6 * 1073741824, used: 10 * 1073741824, percent: 62 },
-        disks: [
-          { name: 'C:', label: '', total: 476 * 1073741824, free: 210 * 1073741824, used: 266 * 1073741824, percent: 56 },
-          { name: 'D:', label: '数据', total: 931 * 1073741824, free: 620 * 1073741824, used: 311 * 1073741824, percent: 33 }
-        ],
-        uptime: '2 天 5 小时 30 分钟',
-        processes: 260,
-        system: { caption: 'Microsoft Windows 11 专业工作站版', version: '10.0.28000', build: '2525', computerName: 'DESKTOP-XIAOXU', userName: 'xiaoxu' }
-      });
-      loadHardware();
+    } finally {
+      state.busy = false;
     }
   }
 

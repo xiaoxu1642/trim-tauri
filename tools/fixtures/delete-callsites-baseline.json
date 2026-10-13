@@ -15,9 +15,10 @@
     "src-tauri/src/engine/shellicon.rs": 3,
     "src-tauri/src/pwsh/mod.rs": 6,
     "src-tauri/src/security/mod.rs": 9,
-    "native-scanner/src/cleanup_scan.rs": 12,
-    "native-scanner/src/scan.rs": 17,
-    "native-scanner/src/util.rs": 2
+    "native-scanner/src/cleanup_scan.rs": 13,
+    "native-scanner/src/scan.rs": 27,
+    "native-scanner/src/util.rs": 2,
+    "src-tauri/src/commands/fileclean.rs": 4
   },
   "remove_file": {
     "src-tauri/src/commands/elevate.rs": 1,

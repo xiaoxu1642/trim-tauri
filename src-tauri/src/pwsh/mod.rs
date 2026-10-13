@@ -124,13 +124,32 @@ impl Drop for ProcessJob {
 /// 落行的情况下跑（审查纪律：测试不得具备改动系统状态的能力）。
 const READ_GRACE: Duration = Duration::from_secs(5);
 
+/// 某一条读本次该给多长宽限期（v3 §4.4 纯函数，拆出来的理由与 `await_reader` 相同：
+/// 不碰句柄、不写日志，才能在没有 pwsh 的情况下被单测钉住）。
+///
+/// - **正常退出**：两条读共用同一个总预算，stderr 拿的是余额而不是又一个 READ_GRACE。
+///   旧写法是两次 `take_reader` 各等 5s，子孙同时占住 stdout 与 stderr 两条写端时，
+///   成功路径也要串行等满 10s 才返回（触发面即本文件 `:49-53` 点名的三条脚本：
+///   重启被清应用 / `cm_restart_explorer` / `wsreset`）。
+/// - **真超时**：不共享，仍各给满 READ_GRACE。`await_reader` 在 `terminate` 之后还要再等
+///   一轮 grace 才能拿到读线程的完整串（实测过 5s 配 24.4s 实挂的那条路径），
+///   把预算压到这里等于丢输出——比多等 5s 更糟。
+fn grace_for(timed_out: bool, budget: Instant, now: Instant) -> Duration {
+    if timed_out {
+        return READ_GRACE;
+    }
+    budget.saturating_duration_since(now)
+}
+
 fn take_reader(
     rx: &std::sync::mpsc::Receiver<String>,
     snapshot: &Snapshot,
     timed_out: bool,
     job: &Option<ProcessJob>,
+    budget: Instant,
 ) -> String {
-    match await_reader(rx, snapshot, timed_out, READ_GRACE, &|| {
+    let grace = grace_for(timed_out, budget, Instant::now());
+    match await_reader(rx, snapshot, timed_out, grace, &|| {
         if let Some(j) = job {
             j.terminate();
         }
@@ -432,8 +451,11 @@ fn run_with_exe(
     // 本体已退出（或被终止），剩下的只是某个子孙还占着管道写端：给一段宽限期冲刷正常输出。
     // **只有真超时**才在这之后收树（v2-M8：判据在 `await_reader` 里，别在这里再加一次）；
     // 正常退出时宁可只交出已读到的部分，也不去杀脚本故意留下的长命进程。
-    let stdout = take_reader(&rx_out, &snap_out, timed_out, &job);
-    let mut stderr = take_reader(&rx_err, &snap_err, timed_out, &job);
+    // 两条读共用**同一个**宽限预算（v3 §4.4）：旧写法各给 READ_GRACE，正常路径上会被
+    // 串行累加成 10s；共享后总上界回到 5s。超时路径不受此预算影响，理由见 `grace_for`。
+    let grace_budget = Instant::now() + READ_GRACE;
+    let stdout = take_reader(&rx_out, &snap_out, timed_out, &job, grace_budget);
+    let mut stderr = take_reader(&rx_err, &snap_err, timed_out, &job, grace_budget);
     if timed_out {
         stderr.push_str(&format!("\n{label} 执行超时"));
         code = -1;
@@ -631,6 +653,34 @@ mod tests {
             ReadOutcome::Complete(s) => assert_eq!(s, "完整输出", "优先要完整串，不是快照"),
             ReadOutcome::Stalled(_, _) => panic!("收树后应拿到 EOF 的完整串"),
         }
+    }
+
+    /// v3 §4.4：两条读共用宽限预算的**分配规则**（纯函数判据，不碰句柄也不写日志）。
+    /// 正向点名三件事：未超时时只能拿「余额」（不再各等一个 READ_GRACE）；预算用完即 0；
+    /// 真超时两条读都必须拿满额——压它等于丢掉 `terminate` 之后本该收尾的完整串。
+    #[test]
+    fn 宽限预算只约束正常退出路径() {
+        let base = Instant::now();
+        // ① 未超时、预算还剩一半 ⇒ 给余额，且严格小于满额
+        let half = base + READ_GRACE / 2;
+        let g = grace_for(false, half, base);
+        assert!(
+            g > Duration::ZERO && g < READ_GRACE,
+            "未超时应给余额（<READ_GRACE 且 >0），实际 {g:?}"
+        );
+        // ② 未超时、预算已耗尽 ⇒ 归零，直接交快照；否则两条读又会串成 10s
+        assert_eq!(
+            grace_for(false, base, base + READ_GRACE),
+            Duration::ZERO,
+            "预算耗尽必须归零，否则共享预算等于没共享"
+        );
+        // ③ 真超时 ⇒ 不吃共享预算，两条读各拿满额
+        assert_eq!(
+            grace_for(true, base, base + READ_GRACE),
+            READ_GRACE,
+            "超时路径的宽限不许被预算压短——await_reader 收树后还要靠它等读线程收尾"
+        );
+        assert_eq!(grace_for(true, base, base), READ_GRACE, "超时路径同样给满额");
     }
 
     #[test]

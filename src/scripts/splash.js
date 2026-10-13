@@ -339,15 +339,25 @@
   if (!isFirstVisit && splash.classList) splash.classList.add('compact'); // 后续启动：仅 Trim + 进度
 
   var PROGRESS_MS = isFirstVisit ? PROGRESS_MS_FIRST : PROGRESS_MS_COMPACT;
+  // 上一次已经写进 DOM 的百分比：pct 每约 5 帧才变一次（round 到整数），
+  // 原先每帧无条件写 width / textContent / aria-valuenow 就是在做同一份样式的重算+重排，
+  // 而这些写入与 WebGL 的 rAF 绘制挤在同一条帧里。pct 没变就跳过写入。
+  // 刻意不用「pct === lastPct 就 return」：那会连下面的续帧调度与 t>=1 的终态分支
+  //（state='done' → showEnterButton / scheduleEnter）一起跳过——预 bootReady 阶段 pct
+  // 会停在 92 一整段（PROGRESS_CAP），早退等于把 tick 的推进链掐断在等事件的那段里。
+  var lastPct = -1;
 
   function tick(now) {
     if (finished || state !== 'loading') return;
     var raw = Math.min(1, ((now || nowMs()) - start) / PROGRESS_MS);
     var t = Math.min(bootReady ? 1 : PROGRESS_CAP, raw);
     var pct = Math.round(t * 100);
-    if (progressFill) progressFill.style.width = pct + '%';
-    if (progressText) progressText.textContent = '正在加载 ' + pct + '%';
-    if (progressEl) progressEl.setAttribute('aria-valuenow', String(pct));
+    if (pct !== lastPct) {
+      lastPct = pct;
+      if (progressFill) progressFill.style.width = pct + '%';
+      if (progressText) progressText.textContent = '正在加载 ' + pct + '%';
+      if (progressEl) progressEl.setAttribute('aria-valuenow', String(pct));
+    }
     if (t < 1) {
       requestAnimationFrame(tick);
       return;

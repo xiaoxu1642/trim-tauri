@@ -154,10 +154,13 @@
     // （fallback 与 cleanup 是首屏最重的两块，不进清理页就不该解析）。
     // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 会读
     // window.CLEANUP_RULES_FALLBACK 构建分类，先注入才拿得到兜底数据。
-    cleanup: ['scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
-    // backups（一级「备份还原」页）是独立路由，不是 cleanup 的别名：它的进页钩子
-    // onBackupsEnter 就住在 cleanup.js 里，所以必须先补齐同一份依赖再执行钩子。
-    backups: ['scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
+    // 性能批次①(a)：xtable.js 也摘出首屏（纯库，只挂 window.xtable、不自动 init），
+    // 前置到本清单最前 —— cleanup.js 调 xtable.sortItems / renderHeader / buildLayout /
+    // bindHeader / createVirtualList / middleEllipsis，摘出首屏后不在 cleanup.js 之前
+    // 就位就会当场 ReferenceError。backups 是独立路由但钩子住在 cleanup.js 里，
+    // 所以依赖清单与 cleanup 逐字一致，改一边必须改另一边。
+    cleanup: ['scripts/xtable.js', 'scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
+    backups: ['scripts/xtable.js', 'scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
     // 查找器子视图（重复文件/空文件/磁盘分析）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
@@ -165,8 +168,12 @@
     // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载；
     // peripheral.js 提供「更多调优项」的应用内弹窗（window.peripheral.open），也随本页注入
     optimizer: ['scripts/optimizer.js', 'scripts/peripheral.js', 'scripts/sysrestore.js'],
-    contextmenu: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/contextmenu.js'],
-    startup: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/startup.js'],
+    // 性能批次①(a)：icon-fallback.js 从首屏摘出，前置到这里和 startup ——
+    // contextmenu.js 的 openDetail() 与 startup.js 的 applyStartupIcons() 都在运行时读
+    // window.iconFallback，且读不到时是静默 return（不抛错），症状为「图标兜底失效、
+    // 整页只剩 SVG 色块」，比崩更难查 ⇒ 必须前置才不留坑。
+    contextmenu: ['scripts/icon-fallback.js', 'scripts/modelpicker.js', 'scripts/intro.js', 'scripts/contextmenu.js'],
+    startup: ['scripts/icon-fallback.js', 'scripts/modelpicker.js', 'scripts/intro.js', 'scripts/startup.js'],
     maintenance: ['scripts/maintenance.js'],
     memoryclean: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/memoryclean.js'],
     diskbench: ['scripts/diskbench.js'],

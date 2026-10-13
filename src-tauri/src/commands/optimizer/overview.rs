@@ -987,7 +987,15 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let raw = opt_state::all();
+    // 性能修复（P1 批次）：items / 忽略名单 / detected 三段**一次读盘**派生
+    // （旧写法 opt_state::all() + dismissed_map() + detected_all() 各调一次 load() ⇒
+    // 同一个 optimization-state.json 全量读盘 + 解析三遍，还把三段各深克隆一次）。
+    // 三段对外语义与返回形状没变：snapshot() 走的就是那三个函数用的同一个 load()。
+    let snap = opt_state::snapshot();
+    let raw = snap.items();
+    // 动态项遗留 pending 的待删清单：循环内逐条 remove = 每条一次 update_json
+    // 全量重写（读 + 序列化 + fsync + rename + 目录 flush），改成攒齐后**单批落盘**。
+    let mut drop_pending_ids: Vec<String> = Vec::new();
     // B4：备份表与可还原清单各读一次（原来同一份备份表 JSON 要解三次）
     let backups_mig = load_opt_backups();
     let restorable_mig = restorable_items(&backups_mig);
@@ -995,15 +1003,16 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
     let mut pending_ids: Vec<String> = Vec::new();
     let mut check_ids: Vec<String> = Vec::new();
 
-    for (id, rec) in &raw {
+    for (id, rec) in raw {
         let opt = find_option(id);
         // 变量名刻意区别于 optimizer_run 里的同名变量：check-optimizer-dynamic A2
         // 靠字面前缀定位 4000 字符窗口，本处同名声明会抢走第一个命中
         let is_dyn_record = opt.and_then(|o| o.get("dynamic")).and_then(|v| v.as_bool()).unwrap_or(false);
         if is_dyn_record {
-            // 动态项遗留 pending 无法可靠核对，直接清理
+            // 动态项遗留 pending 无法可靠核对，直接清理（记账语义见
+            // [`optimization_state::remove_many`]：合并写后是「要么全删要么全不删」）
             if rec.get("status").and_then(|v| v.as_str()) == Some("pending") {
-                opt_state::remove(id);
+                drop_pending_ids.push(id.clone());
             }
             continue;
         }
@@ -1040,6 +1049,14 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         }
     }
 
+    // 单批落盘：上面攒下的动态项遗留 pending 一次删完（1 次读-改-写，替代逐条 remove）。
+    // **必须先于 check_optimized**：回读检测要跑注册表/服务查询（秒级），把删除窗口拖到
+    // 它之后会让「窗口内刚写入的动态项 pending」被这批陈旧清单误删。放在这里，窗口只剩
+    // 「快照读 → 本条纯内存循环」，与旧实现逐条删除时的窗口同量级。
+    if !drop_pending_ids.is_empty() {
+        opt_state::remove_many(&drop_pending_ids);
+    }
+
     let mut stale_ids = pending_ids;
     if !check_ids.is_empty() {
         let results = check_optimized(Some(&check_ids));
@@ -1052,7 +1069,7 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
     // 根治（2026-10-03 用户拍板）：用户点过「不再提醒」的 id 不再进 staleIds。
     // 忽略记录在该项重新执行（record_pending / mark_applied / mark_partial）或
     // 还原销账时自动清除——状态刚变过，若又 partial 应重新提醒。
-    let dismissed = opt_state::dismissed_map();
+    let dismissed = snap.dismissed();
     stale_ids.retain(|id| !dismissed.contains_key(id));
 
     json!({
@@ -1070,7 +1087,7 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
             "restorableActive": restorable_mig.0,
             "restorableRetired": restorable_mig.1,
         },
-        "detected": Value::Object(opt_state::detected_all())
+        "detected": Value::Object(snap.detected().clone())
     })
 }
 

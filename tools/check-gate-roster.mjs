@@ -39,6 +39,8 @@ const MUST_RUN = [
   'check-css-tokens',
   'check-assets-used',
   'check-asset-size',
+  'check-artifact-size',
+  'check-first-paint',
   'check-contrast',
   'check-subwindow-css',
   'check-idle-scripts',

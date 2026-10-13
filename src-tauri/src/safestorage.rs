@@ -161,16 +161,41 @@ fn aes_gcm_open(key: &[u8], body: &[u8]) -> Result<Vec<u8>, StorageError> {
         .map_err(|e| StorageError::Aes(e.to_string()))
 }
 
+/// 主密钥的进程内缓存（审查 v3 裁定①，2026-10-14）。
+///
+/// 为什么要缓存：本函数的两个调用点（`security/mod.rs` 的
+/// `encrypt_settings_with_oscrypt` / `decrypt_settings_with_oscrypt`）都落在
+/// `security::update_json` **持全局 `UPDATE_JSON_LOCK` 的闭包内**
+/// （见 `commands/settings.rs` 的 `update_settings`），于是每一次配置写都要
+/// 「解密一遍取一次 + 加密一遍再取一次」= 两遍 `Local State` 读盘 + JSON 解析 + `CryptUnprotectData`，
+/// 而这些都发生在**跨文件串行**的那把锁里面。
+///
+/// ⚠️ 本缓存**刻意覆盖 M-19「主密钥用完即擦」的语义**：2026-10-14 由小旭裁定「可以缓存」，
+/// 理由是密钥所有者就是本机登录用户、主密钥本身仍以 DPAPI 形态保护。
+/// **别把它当性能回归改回逐次解密** —— 要改回需要先重新拍板。
+///
+/// 只缓存**成功**结果，失败不缓存：失败多为瞬态（老目录还没迁完、文件正被写），
+/// 把 `None` 固化进 `OnceLock` 会把「暂时取不到」变成「永世未配置」，那是语义破坏。
+static OSCRYPT_KEY_CACHE: std::sync::OnceLock<Zeroizing<Vec<u8>>> = std::sync::OnceLock::new();
+
 /// 定位并解密本机 OSCrypt 主密钥：按 `engine::paths::local_state_candidates()`
 /// 依次尝试（新数据目录搬迁副本 → 旧 Electron 目录），取第一个成功的。
 /// 供 settings 域解密遗留 `dpapi:v1:` 密钥；全部失败时调用方按「未配置」处理（D5 语义）。
-/// 返回 `Zeroizing<Vec<u8>>`（M-19）：主密钥用完即擦。
+/// 返回 `Zeroizing<Vec<u8>>`：调用方拿到的**副本**离开作用域即擦；
+/// 进程内那份常驻形态见上面 `OSCRYPT_KEY_CACHE` 的裁定注释（v3 裁定①）。
 pub fn load_oscrypt_key() -> Result<Zeroizing<Vec<u8>>, StorageError> {
+    if let Some(cached) = OSCRYPT_KEY_CACHE.get() {
+        return Ok(cached.clone());
+    }
     let mut last_err = StorageError::KeyFormat("未找到 Local State".into());
     for path in crate::engine::paths::local_state_candidates() {
         match std::fs::read_to_string(&path) {
             Ok(text) => match load_oscrypt_key_from_local_state(&text) {
-                Ok(key) => return Ok(key),
+                Ok(key) => {
+                    // 并发下 set 失败只是 loser 丢弃自己的副本（照常 Zeroize），语义不变
+                    let _ = OSCRYPT_KEY_CACHE.set(key.clone());
+                    return Ok(key);
+                }
                 Err(e) => last_err = e,
             },
             Err(e) => last_err = StorageError::KeyFormat(format!("{}: {e}", path.display())),

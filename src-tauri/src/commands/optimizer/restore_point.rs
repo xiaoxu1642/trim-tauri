@@ -114,6 +114,21 @@ pub async fn optimizer_check_restore<R: Runtime>(window: WebviewWindow<R>) -> Va
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "exists": false, "message": msg });
     }
+    // 性能优化 P1-A（v3 §4.3）：这条查询要起一个 powershell.exe 跑 WMI（登记超时 30s），
+    // 过去直接跑在 async 命令体里 ⇒ 占住 runtime worker。来源校验已在本层做完、
+    // 执行体不再碰 window，所以整段可原样搬进阻塞池（对照本文件 :211 create_restore_inner）。
+    match tauri::async_runtime::spawn_blocking(restore_check_body).await {
+        Ok(v) => v,
+        Err(e) => {
+            log::write_log("warn", &format!("还原点查询任务异常（阻塞池 join 失败）: {e}"));
+            json!({ "success": false, "exists": false, "message": "查询失败" })
+        }
+    }
+}
+
+/// `optimizer_check_restore` 的执行体：抽出来只为能整体进阻塞池，逻辑与文案一字未改
+/// （含 2026-09-30 那条「每个失败出口都必须在这里落一行」的约束）。
+fn restore_check_body() -> Value {
     let ps = "$ErrorActionPreference = \"Stop\"\n\
 try {\n\
   $rp = Get-ComputerRestorePoint | Sort-Object CreationTime -Descending | Select-Object -First 1\n\
@@ -281,11 +296,27 @@ $out.protectedVolumes = @(Get-CimInstance Win32_ShadowStorage).Count\n\
 $out.srDriver = Test-Path \"$env:SystemRoot\\System32\\drivers\\sr.sys\"\n\
 $out.srService = ($null -ne (Get-Service -Name SRService -ErrorAction SilentlyContinue))\n\
 try { $null = Get-CimInstance -Namespace 'root/default' -ClassName SystemRestore -ErrorAction Stop; $out.providerOk = $true } catch { $out.providerOk = $false }\n\
-Write-Output ('@@SRPRE@@' + ($out | ConvertTo-Json -Compress))";
-    let Some(out) = run_inline_ps(pre, 20, None) else {
+Write-Output ('@@SRPRE@@' + ($out | ConvertTo-Json -Compress))\n\
+try { $rpPre = @(Get-ComputerRestorePoint -ErrorAction Stop); Write-Output ('RPCOUNT|' + $rpPre.Count) } catch { Write-Output ('RPERROR|' + $_.Exception.Message) }";
+    // 性能优化 P1-A（v3 §3.2 合批之一）：前计数原先单独起一个 powershell.exe 跑
+    // Get-ComputerRestorePoint（`count_restore_points()` 每次调用一个新进程，登记 30s），
+    // 纯为拿「创建前有几个还原点」。预检本来就要跑一次 CIM，把计数搭进同一进程同一批输出，
+    // 省掉一次冷启动——本仓注释记录 PS 冷启动在 2~9s 之间飘（pwsh/mod.rs:942-944）。
+    // ⚠️ 计数那行必须带 `-ErrorAction Stop`：预检脚本头是 SilentlyContinue，不加的话
+    //   WMI 失败会变成「拿到 0 个」而不是「读失败」，直接破坏 v4 P2-E / R3-M05 立的
+    //   「轮询期读失败 ≠ 没增长」三态区分。失败时只出 RPERROR|、不出 RPCOUNT| ⇒ before=None。
+    // 超时 20s→50s 是**只放宽不收紧**：本调用现在承担预检 + 计数两段工作，取两段原登记值
+    //   （20 + 30）之和；绝不借合批把等待调小，否则 WMI 慢时会把「没跑完」伪装成「预检失败」。
+    let Some(out) = run_inline_ps(pre, 50, None) else {
         log::write_log("warn", "还原点预检未能完成：预检脚本未跑成");
         return json!({ "success": false, "message": "预检未能完成（查询脚本未执行），已中止创建；可稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点" });
     };
+    // 与原 count_restore_points() 逐字同口径：只认 RPCOUNT| 行，拿不到即 None（读失败）。
+    let before = out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("RPCOUNT|")?.trim().parse::<i64>().ok());
     let Some(line) = out.stdout.lines().map(str::trim).find(|l| l.starts_with("@@SRPRE@@")) else {
         log::write_log("warn", "还原点预检未能完成：无 @@SRPRE@@ 输出");
         return json!({ "success": false, "message": "预检未能完成（无有效输出），已中止创建；可稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点" });
@@ -363,7 +394,9 @@ Write-Output ('@@SRPRE@@' + ($out | ConvertTo-Json -Compress))";
 New-ItemProperty -Path \"HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore\" -Name \"SystemRestorePointCreationFrequency\" -Value 0 -PropertyType DWord -Force | Out-Null\n\
 $null = Invoke-CimMethod -Namespace 'root/default' -ClassName 'SystemRestore' -MethodName 'CreateRestorePoint' -Arguments @{ Description = 'Trim 优化前还原点'; EventType = [uint32]100; RestorePointType = [uint32]0 }\n\
 Write-Output \"@@DONE@@\"";
-    let before = count_restore_points();
+    // `before` 已并入上面预检那一次调用（v3 §3.2 合批），不再为它单独起一个 powershell.exe。
+    // 轮询侧仍走 count_restore_points()：把「等待还原点可见」改成脚本内 while 需要重定超时预算，
+    // 属需小旭裁定的那一半，本轮不动。
     let Some(out) = run_inline_ps(create_ps, 120, Some("optimizer.create-restore")) else {
         let _ = opt_state::remove("tf_restore_point");
         let rec = recycle_freq_override();
@@ -458,6 +491,19 @@ pub async fn optimizer_list_restore<R: Runtime>(window: WebviewWindow<R>) -> Val
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    // 性能优化 P1-A（v3 §4.3）：本条同样要起 powershell.exe 跑 WMI/CIM（登记超时 30s），
+    // 搬进阻塞池的理由与上面 optimizer_check_restore 相同；体内除来源校验外不碰 window。
+    match tauri::async_runtime::spawn_blocking(restore_list_body).await {
+        Ok(v) => v,
+        Err(e) => {
+            log::write_log("warn", &format!("还原点列表任务异常（阻塞池 join 失败）: {e}"));
+            json!({ "success": false, "message": "还原点列表读取失败" })
+        }
+    }
+}
+
+/// `optimizer_list_restore` 的执行体：抽出来只为能整体进阻塞池，逻辑与文案一字未改。
+fn restore_list_body() -> Value {
     let ps = "$ErrorActionPreference = \"Stop\"\n\
 $out = @{}\n\
 try {\n\

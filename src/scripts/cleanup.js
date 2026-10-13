@@ -66,6 +66,38 @@
   // 运行时生效的分类定义：默认用 FALLBACK，Electron 下由 init() 经 IPC 从 JSON 覆盖。
   let CATEGORIES = CATEGORIES_FALLBACK;
 
+  // 性能 v3 ③：id -> 归属索引。原 getItemById / groupKeyForItem 每次线性扫全库
+  // （规则库现算 5 组 / 22 子组 / 187 条 ⇒ 一次扫描约 7 万次比较），且 groupKeyForItem
+  // 每组都调 getGroupItems ⇒ 每次分配约 10 个临时数组。
+  // 铁律：索引**只存原始条目**（item 直接引用 CATEGORIES 里的对象，不复制、不裁剪），
+  // 「是否可见」的判定留在调用侧走 hiddenIds —— 在索引里烘焙可见性会把 detect 未命中项
+  // 从分组计数口径里静默改掉（updateGroupSummary 的 totalItems 口径就变了）。
+  // 命中顺序与旧的 Object.values(CATEGORIES) 遍历一致：同一 id 重复出现时**先到先得**
+  // （原 getItemById 的 .find() / groupKeyForItem 的 .some() 都是取第一个命中组）。
+  let itemIndex = new Map();
+  function rebuildItemIndex() {
+    const next = new Map();
+    for (const [groupKey, group] of Object.entries(CATEGORIES)) {
+      if (group.subGroups) {
+        for (const sg of group.subGroups) {
+          for (const item of sg.items) {
+            if (!next.has(item.id)) {
+              next.set(item.id, { groupKey, group: group.title, subGroup: sg.name, subGrouped: true, item });
+            }
+          }
+        }
+      } else if (group.items) {
+        for (const item of group.items) {
+          if (!next.has(item.id)) {
+            next.set(item.id, { groupKey, group: group.title, subGrouped: false, item });
+          }
+        }
+      }
+    }
+    itemIndex = next;
+  }
+  rebuildItemIndex(); // CATEGORIES 的每个赋值点都要跟着重建（另一处见 loadRulesFromMain）
+
   // 展平所有分类的 id（用于一键扫描 / 全选）
   function getAllIds() {
     const ids = [];
@@ -178,18 +210,13 @@
   function formatSize(bytes) { return window.ds.fmtBytes(bytes); }
 
   function getItemById(id) {
-    for (const group of Object.values(CATEGORIES)) {
-      if (group.subGroups) {
-        for (const sg of group.subGroups) {
-          const item = sg.items.find(i => i.id === id);
-          if (item) return { ...item, group: group.title, subGroup: sg.name };
-        }
-      } else if (group.items) {
-        const item = group.items.find(i => i.id === id);
-        if (item) return { ...item, group: group.title };
-      }
-    }
-    return null;
+    const hit = itemIndex.get(id);
+    if (!hit) return null;
+    // 键集合与旧实现逐一对应：只有走 subGroups 分支命中的条目才带 subGroup 键
+    // （旧实现 flat 分支返回的是 `{ ...item, group }`，没有 subGroup 这个键）
+    return hit.subGrouped
+      ? { ...hit.item, group: hit.group, subGroup: hit.subGroup }
+      : { ...hit.item, group: hit.group };
   }
 
   // 取某个 subGroup 的全部子项 id（已移除项不参与）
@@ -799,10 +826,12 @@
 
   // 条目 id -> 顶层分组 key（getItemById 返回的 group 是标题，不能直接用于 data-group-count）
   function groupKeyForItem(id) {
-    for (const [gk, group] of Object.entries(CATEGORIES)) {
-      if (getGroupItems(group).some(it => it.id === id)) return gk;
-    }
-    return null;
+    // 索引命中 + **调用侧**补可见性判定：旧实现走 getGroupItems()（已按 hiddenIds 过滤），
+    // 因此 detect 未命中（隐藏）的条目算不出分组 ⇒ 不计入 streamTotals / 分组汇总。
+    // 这条口径必须原样保住，所以 hiddenIds 不进索引（见 rebuildItemIndex 的铁律注释）。
+    const hit = itemIndex.get(id);
+    if (!hit) return null;
+    return hiddenIds.has(id) ? null : hit.groupKey;
   }
 
   function onScanProgress(payload) {
@@ -2206,6 +2235,7 @@
       if (resp && resp.success && resp.data && Array.isArray(resp.data.groups)) {
         const groups = filterRulesByDiskType(resp.data.groups, dt);
         CATEGORIES = buildCategoriesFromRules(Object.assign({}, resp.data, { groups }));
+        rebuildItemIndex(); // CATEGORIES 换血 ⇒ id 索引必须同步重建（性能 v3 ③ 的另一处赋值点）
         ALL_IDS = getAllIds();
         renderCategoryList();
         updateUI();

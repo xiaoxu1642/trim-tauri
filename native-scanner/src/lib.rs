@@ -27,4 +27,6 @@ pub mod scan;
 pub mod util;
 
 // 保持 `crate::json_escape` / `crate::is_reparse` / `crate::to_long_path` 既有引用可解析
-pub use util::{is_reparse, json_escape, to_long_path, to_long_path_opt};
+// `contains_short_name` 于 2026-10-14 从 scan.rs 私有 fn 提到 util 并加入重导出：
+// 短名判定同时被 scan 的 fail-closed 与 cleanup_scan 的出口短路使用，判据必须只有一份。
+pub use util::{contains_short_name, is_reparse, json_escape, to_long_path, to_long_path_opt};

@@ -56,7 +56,21 @@ pub trait Sink: Send + Sync {
 /// 个人场景足够；超出即截断并显式告知，而不是静默 OOM。
 /// 口径（审查 v2-M2）：这是**一次扫描**的全局上限，不是每个根的上限 ——
 /// 多根时若各算各的，内存预算就变成「根数 × 上限」。
+/// P1-① 起条目多带一个枚举期 mtime（见 [`ScannedFile`]），驻留量同量级、上限与
+/// 内存预算不变 —— 换来的是出口不再按重复组成员数补 stat。
 pub const MAX_SCAN_ENTRIES: usize = 200_000;
+
+/// 一次条目枚举带出的三件套：路径 + 大小 + **枚举期顺带拿到的修改时间**（P1-①）。
+///
+/// 为什么必须是枚举期那一份而不是出口补 stat：`DirEntry::metadata()` 读的是
+/// `FindNextFileW` 填好的 `WIN32_FIND_DATAW` 结构（纯内存拷贝，不是 syscall），
+/// 而 `std::fs::metadata()` 要对整条路径再走一次 `FindFirstFileW`（一次 syscall）。
+/// 旧实现在重复组排序时按「stat 廉价」的假设逐成员补 stat，调用次数 = 重复组成员
+/// 总数（上限 20 万），量级差一个数量级 ⇒ 见 [`order_by_mtime_keys`] 的等价前提。
+///
+/// `Option`：`modified()` 读不到（时钟异常等）按「最旧、排最后」处理，与旧实现的
+/// `fs::metadata(p).and_then(|m| m.modified()).ok()` 同一个取值口径。
+pub type ScannedFile = (PathBuf, u64, Option<std::time::SystemTime>);
 
 // ---- 扫描并行参数（P0 批次）----
 /// 目录级分治展开层数。再深单目录已很小，调度开销大于收益。
@@ -83,17 +97,62 @@ fn init_scan_threads() {
     let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
 }
 
-/// 更新已枚举计数；跨越 8192 整数倍时输出一行心跳，供前端实时反馈。
+/// 更新已枚举计数；跨越 `every` 整数倍时输出一行心跳，供前端实时反馈。
 /// 注意：`n == 0` 早退是既有行为（收尾调用因此不产出任何行），此处原样保留。
-fn bump_scanned(counter: &AtomicU64, n: u64, sink: &dyn Sink) {
+///
+/// 阈值判据只此一份（§5.16）：`ScanCtx` 与 [`ScanBeat`] 都走这个函数，
+/// 「多少条发一行」不许在两边各写一遍。
+fn bump_scanned(counter: &AtomicU64, n: u64, every: u64, sink: &dyn Sink) {
     if n == 0 {
         return;
     }
+    let every = every.max(1); // 阈值 0 会让下面的整点除法直接 panic
     let prev = counter.fetch_add(n, Ordering::Relaxed);
     let next = prev + n;
-    // 只在「越过了 8192 的整数倍」时输出，避免每个目录都刷屏
-    if prev / HEARTBEAT_EVERY != next / HEARTBEAT_EVERY {
+    // 只在「越过了 every 的整数倍」时输出，避免每个目录都刷屏
+    if prev / every != next / every {
         sink.scanned(next);
+    }
+}
+
+/// 一条扫描任务的枚举心跳源（P2-J）。
+///
+/// 为什么要有它：`analyze` / `appdata` 的逐层 du 是分钟级长任务，旧形态**全程零中间
+/// 进度**（只在末尾发一次 `progress(100)`），界面停在「正在准备」直到结束；`bigfiles`
+/// 的 `bump_scanned` 只在整任务收尾调一次，一次 `fetch_add` 无论跨多少个阈值也只发
+/// 得出 1 行。三者本该用 `duplicates`/`empty` 已经在用的同一套阈值口径，这里把
+/// 「计数 + 输出通道」收成一个可跨并行任务共享的对象（`AtomicU64` + `&dyn Sink`，
+/// `Sink: Send + Sync` 已在 trait 上声明）。
+///
+/// `every` 是阈值注入位，**生产构造恒为 [`HEARTBEAT_EVERY`]**。注入的唯一理由是让
+/// 「心跳真的发出去了」这条断言能判红：真实阈值下要发出 ≥2 行得先枚举 1.6 万条真实
+/// 文件，用例跑不动；用例把阈值调成几条一事，就能点名「第 N 次心跳确实到达 sink」。
+pub(crate) struct ScanBeat<'a> {
+    counter: AtomicU64,
+    sink: &'a dyn Sink,
+    every: u64,
+}
+
+impl<'a> ScanBeat<'a> {
+    fn new(sink: &'a dyn Sink) -> Self {
+        Self { counter: AtomicU64::new(0), sink, every: HEARTBEAT_EVERY }
+    }
+
+    /// 用例构造：只换阈值，其余与生产完全一致（生产代码不许调这里）。
+    #[cfg(test)]
+    fn with_every(sink: &'a dyn Sink, every: u64) -> Self {
+        Self { counter: AtomicU64::new(0), sink, every }
+    }
+
+    /// 结算一批枚举到的条目数：跨阈值才发一行，与 [`bump_scanned`] 同一判据。
+    fn beat(&self, n: u64) {
+        bump_scanned(&self.counter, n, self.every, self.sink);
+    }
+
+    /// 累计已枚举条目数（只给用例与留痕读，**不进任何判定字段**）。
+    #[cfg(test)]
+    fn total(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
     }
 }
 
@@ -145,7 +204,7 @@ fn take_reparse_skips() -> u64 {
 }
 
 pub struct ScanCtx {
-    files: Mutex<Vec<(PathBuf, u64)>>,
+    files: Mutex<Vec<ScannedFile>>,
     counter: AtomicU64,
     truncated: AtomicBool,
     /// 因`FILE_ATTRIBUTE_REPARSE_POINT` 跳过（不深入）的目录数（R1-2 留痕）。
@@ -188,7 +247,7 @@ impl ScanCtx {
     }
 
     /// 条目入桶，返回**实际收下**的条数（供心跳计数）。上限满时置 truncated 并告警一次。
-    pub fn add_batch(&self, batch: Vec<(PathBuf, u64)>, sink: &dyn Sink) -> usize {
+    pub fn add_batch(&self, batch: Vec<ScannedFile>, sink: &dyn Sink) -> usize {
         let got = batch.len();
         let mut accepted = got;
         let mut first_hit_cap = false;
@@ -208,7 +267,7 @@ impl ScanCtx {
         if first_hit_cap {
             sink.warn(&format!("扫描条目已达上限 {}，结果被截断", self.cap));
         }
-        bump_scanned(&self.counter, accepted as u64, sink);
+        bump_scanned(&self.counter, accepted as u64, HEARTBEAT_EVERY, sink);
         accepted
     }
 
@@ -228,8 +287,8 @@ impl ScanCtx {
     ///
     /// R1-2：重解析点跳过数在此**一次性告警**。放finish 而不是每跳一次就warn，
     /// 是因为一次扫描可能撞上几十个 junction，逐条刷屏会淹掉真正的错误告警。
-    pub fn finish(&self, sink: &dyn Sink) -> Vec<(PathBuf, u64)> {
-        bump_scanned(&self.counter, 0, sink);
+    pub fn finish(&self, sink: &dyn Sink) -> Vec<ScannedFile> {
+        bump_scanned(&self.counter, 0, HEARTBEAT_EVERY, sink);
         let files = std::mem::take(&mut *self.files.lock().unwrap_or_else(|e| e.into_inner()));
         if self.stopped() {
             sink.truncated();
@@ -276,7 +335,7 @@ fn walk_level(
         }
     };
     let mut subdirs: Vec<PathBuf> = Vec::new();
-    let mut batch: Vec<(PathBuf, u64)> = Vec::new();
+    let mut batch: Vec<ScannedFile> = Vec::new();
     for ent in rd.flatten() {
         // v5-K02 批次 2（N1-M05）：reparse 拦在 file_type 分支**之前**——条目级全形状
         // （挂载卷根/云占位符/指向文件的链接，属性位 0x400；此前只挂 is_dir 分支内，
@@ -297,10 +356,12 @@ fn walk_level(
             subdirs.push(ent.path());
         } else if ft.is_file() {
             // P0：DirEntry 自带大小，不额外 syscall
+            // P1-①：同一次 `ent.metadata()` 顺带把 mtime 也带出来（还是零 syscall，
+            // 读的是同一份缓存 find data），出口按它排序、不再逐条目补 stat。
             if let Ok(md) = ent.metadata() {
                 let sz = md.len();
                 if sz >= min_size {
-                    batch.push((ent.path(), sz));
+                    batch.push((ent.path(), sz, md.modified().ok()));
                 }
             }
         }
@@ -325,7 +386,7 @@ fn walk_level(
 }
 
 /// 快速返回某个顶层目录下的一级子目录大小（用于 AppData 迁移挑选）。
-fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>) {
+fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>, beat: &ScanBeat) {
     let rd = match fs::read_dir(root) {
         Ok(r) => r,
         Err(_) => return,
@@ -348,13 +409,13 @@ fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>) {
         .collect();
     let sizes: Vec<(PathBuf, u64)> = children
         .par_iter()
-        .map(|path| (path.clone(), dir_size(path)))
+        .map(|path| (path.clone(), dir_size(path, Some(beat))))
         .filter(|(_, size)| *size >= 1)
         .collect();
     out.extend(sizes);
 }
 
-fn dir_size(dir: &Path) -> u64 {
+fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
     let mut total: u64 = 0;
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -362,6 +423,8 @@ fn dir_size(dir: &Path) -> u64 {
             Ok(r) => r,
             Err(_) => continue,
         };
+        // 本目录直属文件数（P2-J：心跳按「访问完一个目录」结算一次）
+        let mut files: u64 = 0;
         for ent in rd.flatten() {
             // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
             if is_reparse(&ent) {
@@ -378,10 +441,19 @@ fn dir_size(dir: &Path) -> u64 {
                     // 省掉每文件一次 `fs::metadata` 的额外 syscall（整盘扫描不可忽略）。
                     if let Ok(md) = ent.metadata() {
                         total += md.len();
+                        files += 1;
                     }
                 }
                 _ => {}
             }
+        }
+        // P2-J：`appdata` 的 du 全程零中间进度（旧形态只在末尾 `progress(100)`），
+        // 逐层 du 能跑几分钟而界面一动不动。按目录结算 = 计数照旧跨阈值才发一行
+        // （[`bump_scanned`] 同一判据），既不刷屏（2e5 条 ≈ 25 事件）又让进度真的在走。
+        // `None` 的两个调用点（`sizes` / `delete`）一个不在本轮射程、一个在删除阶段
+        // ——删除时发「已枚举 N 个文件」是把心跳语义用在错误的时刻，刻意不接。
+        if let Some(b) = beat {
+            b.beat(files);
         }
     }
     total
@@ -448,6 +520,7 @@ fn analyze_dir_deep(
     exts: &mut std::collections::HashMap<String, u64>,
     times: &mut [u64; TIME_BUCKETS],
     old: &mut BinaryHeap<std::cmp::Reverse<OldFile>>,
+    beat: &ScanBeat,
 ) -> (u64, u64, u64) {
     let (mut total, mut dirs, mut files) = (0u64, 0u64, 0u64);
     let now = now_millis();
@@ -457,6 +530,7 @@ fn analyze_dir_deep(
             Ok(r) => r,
             Err(_) => continue,
         };
+        let files_before = files; // 本目录新增文件数的心跳基准
         for ent in rd.flatten() {
             // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
             if is_reparse(&ent) {
@@ -501,6 +575,10 @@ fn analyze_dir_deep(
                 _ => {}
             }
         }
+        // P2-J：磁盘分析器的逐层 du 可以跑几分钟，旧形态全程零中间进度、只在末尾
+        // `progress(100)`。按目录结算新增条目数，跨阈值才发一行（同 duplicates/empty
+        // 的既有判据），把「没反馈」换成「已枚举 N 个文件」在动。
+        beat.beat(files - files_before);
     }
     (total, dirs, files)
 }
@@ -547,6 +625,18 @@ fn now_millis() -> u64 {
 ///   kind=time   ：按最后修改时间的 6 桶聚合，bucket/label 见 `TIME_BUCKET_LABELS`（M6）
 ///   kind=oldfile：老旧大文件（mtime > 180 天按大小 Top-20，file 粒度；快照槽已放行供删除）
 pub fn analyze(paths: &[String], sink: &dyn Sink) {
+    // P2-J（v3 §5.6）：接上枚举心跳。旧形态全程零中间进度、只在末尾发一次
+    // `progress(100)`，而逐层 du 可以跑几分钟——界面因此一动不动，用户只能靠
+    // 「没报错」猜它还在干活（同 `empty` 当年被用户报「准备慢」补心跳的那条）。
+    // 阈值注入位只对用例开放，生产构造恒为 HEARTBEAT_EVERY（见 [`ScanBeat`]）。
+    analyze_beating(paths, sink, &ScanBeat::new(sink))
+}
+
+fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
+    // 性能优化 P1-A（v3 §5.7）：本函数用 par_iter，但过去没初始化线程池 ⇒ 落到 rayon 默认池
+    //（= 逻辑核数），`MAX_IO_THREADS=8` 这个 I/O 上限对它失效；而且 GUI 长驻进程里结果取决于
+    // 用户先点哪个功能（先点 duplicates 就会被别人初始化过）。补初始化，行为面只有线程数上限。
+    init_scan_threads();
     for p in paths {
         let root = Path::new(p);
         if !root.is_dir() {
@@ -603,6 +693,11 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
                 _ => {}
             }
         }
+        // 根层直属条目也是一个「目录」的枚举量：结算一次，与下面各子树的按目录结算
+        // 共用同一计数器 ⇒ 三部分相加正好等于本次分析枚举到的文件总数（用例钉这一点）。
+        // 根层直属条目也是一个「目录」的枚举量：结算一次，与下面各子树的按目录结算
+        // 共用同一计数器 ⇒ 三部分相加正好等于本次分析枚举到的文件总数（用例钉这一点）。
+        beat.beat(top_files);
         // 每个子目录整树 du + 子树 ext / 时间聚合（rayon 并行，child_dir_sizes 同款通道）
         let results: Vec<(PathBuf, u64, u64, u64, Vec<(String, u64)>, [u64; TIME_BUCKETS], Vec<OldFile>)> = subdirs
             .par_iter()
@@ -610,7 +705,7 @@ pub fn analyze(paths: &[String], sink: &dyn Sink) {
                 let mut m: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
                 let mut t = [0u64; TIME_BUCKETS];
                 let mut o: BinaryHeap<std::cmp::Reverse<OldFile>> = BinaryHeap::new();
-                let (sz, dc, fc) = analyze_dir_deep(d, &mut m, &mut t, &mut o);
+                let (sz, dc, fc) = analyze_dir_deep(d, &mut m, &mut t, &mut o, beat);
                 (d.clone(), sz, dc, fc, m.into_iter().collect(), t, o.into_iter().map(|std::cmp::Reverse(x)| x).collect())
             })
             .collect();
@@ -746,8 +841,8 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     }
     progress(sink, 15);
     // ---------- 1) 同名同大小组（文件名优先；不受 min_size 约束——同名小文件也是重复） ----------
-    let mut nmap: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
-    for (p, sz) in &files {
+    let mut nmap: HashMap<String, Vec<ScannedFile>> = HashMap::new();
+    for (p, sz, mt) in &files {
         if *sz == 0 {
             continue; // 0 字节文件已作为 emptyfile 输出，不再参与同名分组
         }
@@ -758,40 +853,42 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
         if name.is_empty() {
             continue;
         }
-        nmap.entry(name).or_default().push((p.clone(), *sz));
+        nmap.entry(name).or_default().push((p.clone(), *sz, *mt));
     }
     // 组内按大小二次聚合：同名同大小才是重复候选
-    let mut name_groups: Vec<(u64, Vec<(PathBuf, u64)>)> = Vec::new();
+    let mut name_groups: Vec<(u64, Vec<ScannedFile>)> = Vec::new();
     for v in nmap.into_values() {
-        let mut by_size: HashMap<u64, Vec<(PathBuf, u64)>> = HashMap::new();
-        for (p, sz) in v {
-            by_size.entry(sz).or_default().push((p, sz));
+        let mut by_size: HashMap<u64, Vec<ScannedFile>> = HashMap::new();
+        for (p, sz, mt) in v {
+            by_size.entry(sz).or_default().push((p, sz, mt));
         }
         for (_, group) in by_size.into_iter().filter(|(_, g)| g.len() >= 2) {
-            let sum: u64 = group.iter().map(|(_, s)| s).sum();
+            let sum: u64 = group.iter().map(|(_, s, _)| s).sum();
             name_groups.push((sum, group));
         }
     }
     name_groups.sort_by_key(|(sum, _)| std::cmp::Reverse(*sum));
     let mut taken: HashSet<PathBuf> = HashSet::new();
     for (_, v) in &name_groups {
-        for (p, _) in v {
+        for (p, _, _) in v {
             taken.insert(p.clone());
         }
     }
     progress(sink, 55);
     // ---------- 2) 内容指纹组：仅同体积文件计算 Blake3（未被同名组占用的） ----------
-    let hashed: Vec<(u64, PathBuf, [u8; 32])> = files
+    // P1-①：指纹分组同样把枚举期的 mtime 一路带到输出（组内排序不再补 stat）。
+    let hashed: Vec<(u64, PathBuf, [u8; 32], Option<std::time::SystemTime>)> = files
         .par_iter()
-        .filter(|(p, sz)| *sz > 0 && *sz >= min_size && !taken.contains(p))
-        .filter_map(|(p, sz)| file_fp(p).map(|fp| (*sz, p.clone(), fp)))
+        .filter(|(p, sz, _)| *sz > 0 && *sz >= min_size && !taken.contains(p))
+        .filter_map(|(p, sz, mt)| file_fp(p).map(|fp| (*sz, p.clone(), fp, *mt)))
         .collect();
     progress(sink, 80);
-    let mut cmap: HashMap<(u64, [u8; 32]), Vec<PathBuf>> = HashMap::new();
-    for (size, path, fp) in hashed {
-        cmap.entry((size, fp)).or_default().push(path);
+    let mut cmap: HashMap<(u64, [u8; 32]), Vec<(PathBuf, Option<std::time::SystemTime>)>> =
+        HashMap::new();
+    for (size, path, fp, mt) in hashed {
+        cmap.entry((size, fp)).or_default().push((path, mt));
     }
-    let mut content_groups: Vec<(u64, Vec<PathBuf>)> = cmap
+    let mut content_groups: Vec<(u64, Vec<(PathBuf, Option<std::time::SystemTime>)>)> = cmap
         .into_iter()
         .filter(|(_, v)| v.len() >= 2)
         .map(|(k, v)| (k.0, v))
@@ -813,18 +910,18 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
         // 小于阈值的副本识别不到。
         let first = v
             .first()
-            .and_then(|p| p.file_name())
+            .and_then(|(p, _)| p.file_name())
             .map(|n| normalize_artifact_name(&n.to_string_lossy()))
             .unwrap_or_default();
         let all_artifact = !first.is_empty()
-            && v.iter().all(|p| {
+            && v.iter().all(|(p, _)| {
                 p.file_name()
                     .map(|n| normalize_artifact_name(&n.to_string_lossy()) == first)
                     .unwrap_or(false)
             });
         emit_dup_group(
             sink,
-            &v.iter().map(|p| (p.clone(), *sz)).collect::<Vec<_>>(),
+            &v.iter().map(|(p, mt)| (p.clone(), *sz, *mt)).collect::<Vec<_>>(),
             &format!("dupc{:04}", gid),
             if all_artifact { "artifact" } else { "content" },
             None,
@@ -836,9 +933,10 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     progress(sink, 100);
 }
 
-fn emit_dup_group(sink: &dyn Sink, v: &[(PathBuf, u64)], gid: &str, match_kind: &str, sim: Option<u64>) {
-    for (rank, idx) in order_group_by_mtime(v).into_iter().enumerate() {
-        let (p, sz) = &v[idx];
+fn emit_dup_group(sink: &dyn Sink, v: &[ScannedFile], gid: &str, match_kind: &str, sim: Option<u64>) {
+    let keys: Vec<Option<std::time::SystemTime>> = v.iter().map(|(_, _, m)| *m).collect();
+    for (rank, idx) in order_by_mtime_keys(&keys).into_iter().enumerate() {
+        let (p, sz, _) = &v[idx];
         let mut extra: Vec<(&str, String)> = vec![
             ("group", gid.to_string()),
             ("role", if rank == 0 { "kept".to_string() } else { "candidate".to_string() }),
@@ -851,20 +949,43 @@ fn emit_dup_group(sink: &dyn Sink, v: &[(PathBuf, u64)], gid: &str, match_kind: 
     }
 }
 
-/// 组内「保留谁」的排序：**mtime 最新者第一**（= kept），其余按新→旧为候选（2026-10-06 任务四）。
+/// 组内「保留谁」的排序内核：**mtime 最新者第一**（= kept），其余按新→旧为候选（2026-10-06 任务四）。
 ///
-/// 为什么不在 walk 时带出 mtime：`files` 集合只累积 (path, size)，重复组规模有限而
-/// stat 廉价，组内补读即可；read 不到的（文件消失等）按最旧处理、排在最后。
-/// `sort_by_key` 是**稳定排序**：同 mtime 并列时保持原顺序，不会因排序把哪一份随机变成 kept。
+/// 键由调用方供给（生产路径 = 枚举期 `DirEntry::metadata()` 的缓存 mtime，P1-①），
+/// 本函数只做排序 ⇒ 与「出口逐成员补 stat」的旧形态共用同一个键域
+/// （`Option<SystemTime>`：`None` 排最后 = 按最旧处理）。
+///
+/// **等价前提**（旧注释「重复组规模有限而 stat 廉价」的前提是错的 —— 调用次数是
+/// 重复组成员总数、上限 20 万，而且 `fs::metadata` 比缓存取值贵一个量级）：
+/// Windows 上 `DirEntry::metadata()` 返回的是 `FindNextFileW` 填好的那份
+/// `WIN32_FIND_DATAW`（纯内存拷贝、不是 syscall）里的 `ftLastWriteTime`；
+/// `std::fs::metadata()` 走 `FindFirstFileW` 后取的是**同一个结构体的同一个字段**。
+/// 两者都是「目录项存的属性快照」，都不经句柄查询、不做单位换算 ⇒ 对同一份未变动的
+/// 文件给出**同一个 SystemTime 值**，排序键域与比较结果逐位一致
+/// （对拍：tests 的 `枚举mtime与stat同值且重复组输出逐字节一致`）。
+/// 唯一可能的分歧是枚举之后文件被改动或删除：旧实现读到的是那一刻之后的值（或 None），
+/// 新实现固定用枚举那一刻的快照 —— 与同条目 `size` 的取值口径一致，反而更自洽。
+///
+/// `sort_by_key` 是**稳定排序**：同 mtime 并列时保持入参顺序，不会因排序把哪一份随机变成 kept。
 /// 返回排序后的下标序列（不动入参，调用方按序取）。
+fn order_by_mtime_keys(keys: &[Option<std::time::SystemTime>]) -> Vec<usize> {
+    let mut ordered: Vec<usize> = (0..keys.len()).collect();
+    ordered.sort_by_key(|&i| std::cmp::Reverse(keys[i]));
+    ordered
+}
+
+/// [`order_by_mtime_keys`] 的**补 stat 形态**：调用方手上只有路径与大小（没有枚举期
+/// mtime）时才用 —— 例如结果已跨进程/离线、或测试直接从磁盘构造分组。
+///
+/// 生产路径（`duplicates` → `emit_dup_group`）**不走这里**：那里每条 mtime 在枚举期
+/// 就随条目一起带出（P1-①），逐成员 `fs::metadata` 会让 syscall 次数等于重复组成员
+/// 总数。read 不到的（文件消失等）按最旧处理、排在最后，与缓存形态同口径。
 pub fn order_group_by_mtime(v: &[(PathBuf, u64)]) -> Vec<usize> {
-    let mut ordered: Vec<usize> = (0..v.len()).collect();
     let mtimes: Vec<Option<std::time::SystemTime>> = v
         .iter()
         .map(|(p, _)| std::fs::metadata(p).and_then(|m| m.modified()).ok())
         .collect();
-    ordered.sort_by_key(|&i| std::cmp::Reverse(mtimes[i]));
-    ordered
+    order_by_mtime_keys(&mtimes)
 }
 
 /// 「下载副本」归一化：把浏览器连点下载 / 资源管理器复制产生的副本后缀还原成「宿主名」。
@@ -978,15 +1099,16 @@ fn merge_topk_into(a: &mut TopHeap, b: TopHeap, cap: usize) {
 }
 
 /// 单个任务内串行递归，只用容量 cap 的堆保留最大项；顺带累计计数并输出心跳。
-fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, counter: &AtomicU64, sink: &dyn Sink) -> TopHeap {
+fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBeat) -> TopHeap {
     let mut heap: TopHeap = BinaryHeap::new();
     let mut stack: Vec<(PathBuf, bool)> = vec![(dir.to_path_buf(), recursive)];
-    let mut local: u64 = 0;
     while let Some((d, rec)) = stack.pop() {
         let rd = match fs::read_dir(&d) {
             Ok(r) => r,
             Err(_) => continue,
         };
+        // 本目录直属文件数（P2-J：心跳按目录结算，见下方收尾注释）
+        let mut local: u64 = 0;
         for ent in rd.flatten() {
             let ft = match ent.file_type() {
                 Ok(t) => t,
@@ -1015,9 +1137,12 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, counter: &Ato
                 }
             }
         }
+        // P2-J（v3 §5.6 确证缺陷）：结算点从「整任务收尾一次」挪到「每个目录收尾一次」。
+        // 旧形态一个任务只 `fetch_add` 一次，而一次 fetch_add 无论跨多少个阈值都只发得出
+        // 1 行 ⇒ 单任务 5e5 文件整段只反馈 1 次，界面等于没反馈。按目录结算后事件数
+        // 回到「枚举量 / 阈值」这个既有口径（2e5 条 ≈ 25 事件），不会造成事件风暴。
+        beat.beat(local);
     }
-    // 每个任务收尾统一累计一次，心跳按累计阈值输出，避免逐文件加锁开销
-    bump_scanned(counter, local, sink);
     heap
 }
 
@@ -1028,7 +1153,7 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, counter: &Ato
 pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) {
     init_scan_threads();
     let cap = count.max(1);
-    let counter = AtomicU64::new(0);
+    let beat = ScanBeat::new(sink);
     let mut tasks: Vec<(PathBuf, bool)> = Vec::new();
     for r in roots {
         if let Some(p) = canonical(r) {
@@ -1040,7 +1165,7 @@ pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) 
     }
     let heap: TopHeap = tasks
         .par_iter()
-        .map(|(d, rec)| topk_in(d, *rec, cap, min_size, &counter, sink))
+        .map(|(d, rec)| topk_in(d, *rec, cap, min_size, &beat))
         .reduce(|| BinaryHeap::new(), |mut a, b| {
             merge_topk_into(&mut a, b, cap);
             a
@@ -1053,7 +1178,8 @@ pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) 
     for (i, (sz, p)) in all.iter().enumerate() {
         item(sink, "bigfile", p, *sz, &[("rank", (i + 1).to_string())]);
     }
-    bump_scanned(&counter, 0, sink); // 收尾精确计数（n=0 早退，见 bump_scanned）
+    // P2-J：心跳已在每个目录结算完毕，计数器到这儿就是终值，不再有「收尾补一次
+    // bump_scanned(0)」的余地（那本来就是 n=0 早退的空操作，不产出任何行）。
     progress(sink, 100);
 }
 
@@ -1151,9 +1277,22 @@ fn is_dot_dir(p: &Path) -> bool {
 /// 条目创建时间的 Unix 秒（真机目检 2026-09-28：列表要显示创建日期）。
 /// 读不到（元数据失败/时钟早于 epoch）返回 None，序列化成空串由前端显示「—」。
 fn created_epoch(p: &Path) -> Option<u64> {
-    fs::metadata(p)
-        .ok()?
-        .created()
+    fs::metadata(p).ok().and_then(|m| created_epoch_of(&m))
+}
+
+/// [`created_epoch`] 的「元数据已在手」形态（P1-②）：取值口径一字未动
+/// （`created()` → `duration_since(UNIX_EPOCH)` → `as_secs`，任一步失败即 None），
+/// 只是不再为此单独 stat 一次。
+///
+/// 为什么能直接用枚举期那份：`DirEntry::metadata()` 与 `fs::metadata()` 在 Windows 上
+/// 取的都是目录项的 `WIN32_FIND_DATAW` 快照（前者是 `FindNextFileW` 顺手填好的缓存、
+/// 后者是 `FindFirstFileW` 现填的同一结构体），`ftCreationTime` 是同一个字段的同一个
+/// FILETIME ⇒ 同一数值（对拍见 tests 的
+/// `空扫描输出的created字段与stat口径逐字节一致`）。
+/// 唯一分歧：枚举之后文件被删除 —— 旧实现此刻读不到、输出空串，新实现输出枚举那一刻
+/// 读到的秒值（字段名与格式不变；该条目随后会被删除侧复检按实况处理）。
+fn created_epoch_of(m: &fs::Metadata) -> Option<u64> {
+    m.created()
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -1162,7 +1301,12 @@ fn created_epoch(p: &Path) -> Option<u64> {
 
 /// created 字段的序列化形态（空串 = 未知）。
 fn created_tag(p: &Path) -> (&'static str, String) {
-    ("created", created_epoch(p).map(|s| s.to_string()).unwrap_or_default())
+    created_tag_of(created_epoch(p))
+}
+
+/// [`created_tag`] 的「时间戳已在手」形态：序列化逐字相同，只是不 stat。
+fn created_tag_of(epoch: Option<u64>) -> (&'static str, String) {
+    ("created", epoch.map(|s| s.to_string()).unwrap_or_default())
 }
 
 /// 用户拍板 2026-09-28 六轮：空扫描默认全盘（盘符点选），但**排除用户目录子树**
@@ -1198,13 +1342,20 @@ fn under_userprofile(p: &Path, up_canon: Option<&Path>) -> bool {
     }
 }
 
+/// `empty()` 的空文件条目：路径 + **枚举期读到的创建时间 Unix 秒**（P1-②）。
+/// 旧形态只存 `PathBuf`，把枚举时已经握在手里的时间戳丢掉、出口再 stat 一次
+/// （`created_tag` → `created_epoch` → `fs::metadata`），于是同一个文件被 stat 两次，
+/// 次数上限 = 结果集大小（20 万）。`None` = 当时就读不到，序列化空串（口径同旧）。
+type EmptyFile = (PathBuf, Option<u64>);
+
 /// `empty()` 的跨根条目累积器（审查 v2-M2）。
 ///
 /// 为什么单列：上限必须是**一次扫描**的全局语义。`empty()` 逐根循环，
 /// 各根各算一份上限就等于「根数 × 20 万」的驻留量；而且这条链原本**完全不接**
 /// `Sink::truncated` —— 超限后残缺集合看起来和完整结果一模一样。
 struct EmptyAccum {
-    files: Mutex<Vec<PathBuf>>,
+    /// 空文件候选：路径 + 枚举期的创建时间秒值（P1-②，出口不再为此补 stat）。
+    files: Mutex<Vec<EmptyFile>>,
     dirs: Mutex<Vec<PathBuf>>,
     kept: AtomicUsize,
     truncated: AtomicBool,
@@ -1280,7 +1431,7 @@ impl EmptyAccum {
         self.truncated.load(Ordering::Relaxed)
     }
 
-    fn flush(&self, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
+    fn flush(&self, files: &mut Vec<EmptyFile>, dirs: &mut Vec<PathBuf>) {
         if !files.is_empty() {
             self.files
                 .lock()
@@ -1295,14 +1446,15 @@ impl EmptyAccum {
         }
     }
 
-    fn full(&self, files: &[PathBuf], dirs: &[PathBuf]) -> bool {
+    fn full(&self, files: &[EmptyFile], dirs: &[PathBuf]) -> bool {
         files.len() + dirs.len() >= EMPTY_FLUSH
     }
 }
 
 /// 并行空目录/空文件扫描（性能升级 P1-4）：
 ///   · 根下的一级子目录交给 rayon 各自串行递归（根只作容器，避免误删根）
-///   · `ent.metadata()` 取大小，不额外 syscall
+///   · `ent.metadata()` 取大小，不额外 syscall（P1-②：同一份元数据顺带带出 created，
+///     出口不为该字段再 stat 一次）
 ///   · 用户忽略名单 empty-ignore.txt 生效，视为非空且不下钻
 ///   · 输出 emptyfolder 附带 nested=「删它可连带删掉的子空目录数」，供前端提示
 ///   · 按条目发 scanned 心跳（用户实测 2026-09-28：全程无反馈被当成「准备慢」）
@@ -1318,7 +1470,7 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
         let Some(p) = canonical(r) else { continue };
         // 根自身只作容器：一级子目录交并行，过滤忽略名单
         let mut tops: Vec<PathBuf> = Vec::new();
-        let mut root_files: Vec<PathBuf> = Vec::new();
+        let mut root_files: Vec<EmptyFile> = Vec::new();
         match fs::read_dir(&p) {
             Ok(rd) => {
                 for ent in rd.flatten() {
@@ -1349,12 +1501,18 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
                             if under_userprofile(&ent.path(), up.as_deref()) {
                                 continue;
                             }
-                            let keep = ent
-                                .metadata()
-                                .map(|m| m.len() == 0 && !created_too_new(&m))
-                                .unwrap_or(false);
-                            if keep && acc.room(sink) {
-                                root_files.push(ent.path());
+                            // P1-②：这一份 `ent.metadata()` 同时供「大小/时效」判定与
+                            // created 字段取值 —— 旧形态只留路径，出口再 stat 一次拿创建时间。
+                            let keep = match ent.metadata() {
+                                Ok(m) if m.len() == 0 && !created_too_new(&m) => {
+                                    Some(created_epoch_of(&m))
+                                }
+                                _ => None,
+                            };
+                            if let Some(epoch) = keep {
+                                if acc.room(sink) {
+                                    root_files.push((ent.path(), epoch));
+                                }
                             }
                         }
                         _ => {}
@@ -1366,7 +1524,7 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
         }
         acc.flush(&mut root_files, &mut Vec::new());
         tops.par_iter().for_each(|d| {
-            let mut f: Vec<PathBuf> = Vec::new();
+            let mut f: Vec<EmptyFile> = Vec::new();
             let mut dd: Vec<PathBuf> = Vec::new();
             collect_empty_fast(d, &ignore, &mut f, &mut dd, &acc, sink, 0, up.as_deref());
             acc.flush(&mut f, &mut dd);
@@ -1378,12 +1536,7 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
 
     // 父目录折叠：若某空目录的父目录同为待删空目录，只保留父（删父连带删内层，Czkawka 思路）
     let out = fold_empty_dirs(&dirs);
-    for f in &files {
-        item(sink, "emptyfile", f, 0, &[created_tag(f)]);
-    }
-    for (d, n) in &out {
-        item(sink, "emptyfolder", d, 0, &[("nested", n.to_string()), created_tag(d)]);
-    }
+    emit_empty_items(sink, &files, &out);
     if acc.stopped() {
         sink.truncated();
     }
@@ -1395,6 +1548,26 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
         ));
     }
     progress(sink, 100);
+}
+
+/// `empty()` 的收尾输出：先全部 emptyfile、再全部 emptyfolder（行序口径一字未动）。
+///
+/// 拆成独立函数的两个理由：
+///   · P1-②：emptyfile 的 `created` 字段取枚举期那份时间戳（`created_tag_of`），
+///     不再对同一个文件二次 stat；emptyfolder 仍走 `created_tag`（父目录折叠后
+///     手上没有那份元数据，且它本来就在 `collect_empty_fast` 里 stat 过一次）。
+///     两条路径序列化出来的字段名/顺序/格式完全相同（同一个 `item()`、同一个
+///     `created_tag_of`），对拍见 tests 的
+///     `空扫描输出的created字段与stat口径逐字节一致`。
+///   · 上限/截断/条目集合都不在这里变：`acc.truncated()` 与 `sink.truncated()`
+///     仍由调用方在**本函数之后**判定，本函数只按集合顺序逐条吐。
+fn emit_empty_items(sink: &dyn Sink, files: &[EmptyFile], out: &[(PathBuf, usize)]) {
+    for (f, epoch) in files {
+        item(sink, "emptyfile", f, 0, &[created_tag_of(*epoch)]);
+    }
+    for (d, n) in out {
+        item(sink, "emptyfolder", d, 0, &[("nested", n.to_string()), created_tag(d)]);
+    }
 }
 
 /// 折叠：去掉「父目录也在待删集合里」的条目，nested = 该条目下被连带删掉的空目录数。
@@ -1442,7 +1615,7 @@ fn fold_empty_dirs(dirs: &[PathBuf]) -> Vec<(PathBuf, usize)> {
 fn collect_empty_fast(
     dir: &Path,
     ignore: &HashSet<String>,
-    files: &mut Vec<PathBuf>,
+    files: &mut Vec<EmptyFile>,
     dirs: &mut Vec<PathBuf>,
     acc: &EmptyAccum,
     sink: &dyn Sink,
@@ -1509,7 +1682,9 @@ fn collect_empty_fast(
                     if m.len() == 0 {
                         if !created_too_new(&m) && created_in_current_year(&m) {
                             if acc.room(sink) {
-                                files.push(fp);
+                                // P1-②：创建时间随条目一起入桶（就是判定用的这同一个 `m`），
+                                // 出口直接取，不再为 created 字段对该文件二次 stat。
+                                files.push((fp, created_epoch_of(&m)));
                             }
                         } else {
                             empty = false;
@@ -1611,6 +1786,14 @@ fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize, up: O
 }
 
 pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
+    // 性能优化 P1-A（v3 §5.7）：与 analyze 同一条漏网——用了 par_iter 却没初始化线程池。
+    init_scan_threads();
+    // P2-J（v3 §5.6）：应用数据迁移是「逐个一级子目录整树 du」，两个根加起来可达数十
+    // 万文件，旧形态全程零中间进度、只在末尾发一次 `progress(100)`。心跳按目录结算，
+    // 跨阈值才发一行（同 duplicates/empty 口径）。`child_dir_sizes` 只收 `&ScanBeat`
+    // （不给 Option）——这条链是 appdata 专用通道，把开关留在类型里就等于再留一条
+    // 「忘了接」的路径。
+    let beat = ScanBeat::new(sink);
     let minb = min_size_mb * 1024 * 1024;
     let mut roots: Vec<(String, PathBuf)> = Vec::new();
     // 审查 M-08：原先 `if let Ok(..)` 把「环境变量缺失」和「值为空」一起吞掉，
@@ -1636,7 +1819,7 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
     let mut out: Vec<(String, PathBuf, u64)> = Vec::new();
     for (label, root) in roots {
         let mut cur: Vec<(PathBuf, u64)> = Vec::new();
-        child_dir_sizes(&root, &mut cur);
+        child_dir_sizes(&root, &mut cur, &beat);
         // v5-K02 批次2（N1-M05）：本根 reparse 跳过量一次性 warn（同 ScanCtx::finish 姿势，只呈现）
         let skipped = take_reparse_skips();
         if skipped > 0 { sink.warn(&format!("应用数据扫描（{label}）：已跳过 {skipped} 个重解析点目录（不深入以避免重复计数）")); }
@@ -1668,7 +1851,9 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
             total_files += 1;
             item(sink, "size", p, sz, &[("exists", "true".to_string())]);
         } else if p.is_dir() {
-            let sz = dir_size(p);
+            // `None`：v3 §5.6 的零反馈清单只有 analyze/appdata/bigfiles 三条，sizes 不在
+            // 其中；接心跳等于给它新增一类输出行（CLI 侧 stdout 会变），属另行拍板的改动面。
+            let sz = dir_size(p, None);
             total_dirs += 1;
             item(sink, "size", p, sz, &[("exists", "true".to_string()), ("skippedReparse", take_reparse_skips().to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
         }
@@ -1974,23 +2159,10 @@ fn with_protect_roots<T>(protect_json: Option<&str>, f: impl FnOnce(&ProtectRoot
     f(&g.as_ref().unwrap().roots)
 }
 
-// 与 JS normalizeForCompare 对齐的短名 fail-closed：组件含 `~\d`（8.3 短名）即拒。
-// v3.7.2：调用方（is_protected_path）已先用 to_long_path 触盘展开，能走到这里的
-// 残留短名 = 磁盘上不存在（或非本地盘符路径），fail-closed 判拒与 JS/PS 同口径。
-fn contains_short_name(norm: &str) -> bool {
-    let mut pending_tilde = false;
-    for c in norm.chars() {
-        if c == '~' {
-            pending_tilde = true;
-        } else if pending_tilde {
-            if c.is_ascii_digit() {
-                return true;
-            }
-            pending_tilde = false;
-        }
-    }
-    false
-}
+// 短名判定（`~` 紧跟数字）已于 2026-10-14 提到 `util::contains_short_name` 并 pub ——
+// scan 的 fail-closed 与 cleanup_scan 枚举出口的短路共用同一份判据（AGENTS §5.16）。
+// 历史口径说明保留在原处：调用方 is_protected_path 已先用 to_long_path 触盘展开，
+// 能走到这里的残留短名 = 磁盘上不存在（或非本地盘符路径），fail-closed 判拒与 JS/PS 同口径。
 
 /// v3.7.2 受保护路径误杀修复：8.3 短名展开为磁盘上的长名（GetLongPathNameW），
 /// 已上移至 lib.rs 的 util 模块（cleanup_scan 也需用），此处经 `to_long_path` 引入。
@@ -2009,8 +2181,8 @@ fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
     if bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'\\' {
         return true; // 盘符根，例如 C:\
     }
-    // FD-2：短名 fail-closed（与 JS/PS 同位置）
-    if contains_short_name(&norm) {
+    // FD-2：短名 fail-closed（与 JS/PS 同位置），判据见 util::contains_short_name
+    if crate::contains_short_name(&norm) {
         return true;
     }
     with_protect_roots(protect_json, |r| {
@@ -2129,7 +2301,9 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
             continue;
         }
         let sz = if kind == "dir" {
-            dir_size(p)
+            // `None`：这里是**删除阶段**在算释放空间，发「已枚举 N 个文件」的心跳是把
+            // 扫描语义用在错误的时刻（渲染层会把它当成新一轮扫描的进度），刻意不接。
+            dir_size(p, None)
         } else {
             fs::metadata(p).map(|m| m.len()).unwrap_or(0)
         };
@@ -2249,7 +2423,7 @@ mod tests {
     fn walk_names(root: &Path) -> (Vec<String>, u64) {
         let ctx = ScanCtx::new();
         walk_level(root, &ctx, 0, 0, &CapSink::default());
-        let names = ctx.finish(&CapSink::default()).iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        let names = ctx.finish(&CapSink::default()).iter().map(|(p, _, _)| p.file_name().unwrap().to_string_lossy().to_string()).collect();
         (names, ctx.skipped_reparse())
     }
 
@@ -2408,6 +2582,263 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// 心跳用例的记录型 sink：把每一行 `scanned` 的**数值**留档（断言要点名到达的值与
+    /// 条数，只数调用次数不算正向对照），`item` 行一并留着与分析器自报的 `fileCount` 对账。
+    #[derive(Default)]
+    struct BeatSink {
+        scanned: Mutex<Vec<u64>>,
+        items: Mutex<Vec<String>>,
+    }
+
+    impl BeatSink {
+        fn values(&self) -> Vec<u64> {
+            self.scanned.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+        fn lines(&self) -> Vec<String> {
+            self.items.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+        /// `@@ITEM@@{"kind":"summary",…,"fileCount":"12"}` 里取一个**字符串形态**的 extra 字段
+        /// （`item()` 的 extra 一律带引号，见文件顶部那个拼装函数）。
+        fn summary_extra(&self, key: &str) -> Option<String> {
+            let pat_kind = "\"kind\":\"summary\"".to_string();
+            let pat = format!("\"{key}\":\"");
+            self.lines()
+                .iter()
+                .find(|l| l.contains(&pat_kind))
+                .and_then(|l| {
+                    let i = l.find(&pat)? + pat.len();
+                    let j = i + l[i..].find('"')?;
+                    Some(l[i..j].to_string())
+                })
+        }
+    }
+
+    impl Sink for BeatSink {
+        fn item(&self, _path: &Path, line: &str) {
+            self.items.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
+        }
+        fn progress(&self, _n: u64) {}
+        fn scanned(&self, n: u64) {
+            self.scanned.lock().unwrap_or_else(|e| e.into_inner()).push(n);
+        }
+        fn warn(&self, _msg: &str) {}
+    }
+
+    /// 沙箱造文件：`(相对目录, 个数)`，返回**造出的文件总数**（心跳计数的对账基准）。
+    fn seed_beat_tree(root: &Path, plan: &[(&str, usize)]) -> u64 {
+        let mut made = 0u64;
+        for (dir, n) in plan {
+            let d = if dir.is_empty() { root.to_path_buf() } else { root.join(dir) };
+            fs::create_dir_all(&d).expect("建沙箱目录");
+            for i in 0..*n {
+                fs::write(d.join(format!("f{i}.bin")), b"x").expect("写沙箱文件");
+                made += 1;
+            }
+        }
+        made
+    }
+
+    /// P2-J（v3 §5.6 确证缺陷）的正向对照：磁盘分析器必须**按目录**把「已枚举 N」送到
+    /// `scanned`，而不是全程零中间进度、只在末尾 `progress(100)`。
+    ///
+    /// 判红的对象是「结算点在哪 + 数值对不对」，不是「没报错」：
+    ///   · 旧形态 analyze 一次都不发 scanned ⇒ 第一条断言直接红（0 < 3）；
+    ///   · 结算点若退化成「整任务一次」，一次 fetch_add 只跨一个阈值 ⇒ 只发得出 1 行，仍红；
+    ///   · 阈值口径的另一半（没跨阈值一行都不许发）单独一段钉住，防「每个文件发一行」的事件风暴。
+    /// 阈值注入见 [`ScanBeat::with_every`]（生产构造恒为 `HEARTBEAT_EVERY`）。
+    #[test]
+    fn 心跳_磁盘分析器按目录结算且数值逐条递增() {
+        let root = std::env::temp_dir().join(format!("trim-beat-analyze-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // 12 个文件分 4 个目录（根层 2 + s1 3 + s1/n1 4 + s2 3）；阈值 2 ⇒ 逐目录结算必跨 ≥4 次
+        let made = seed_beat_tree(
+            &root,
+            &[("", 2), ("s1", 3), ("s1/n1", 4), ("s2", 3)],
+        );
+        assert_eq!(made, 12);
+
+        let sink = BeatSink::default();
+        let beat = ScanBeat::with_every(&sink, 2);
+        analyze_beating(&[root.to_string_lossy().to_string()], &sink, &beat);
+
+        let got = sink.values();
+        assert!(
+            got.len() >= 3,
+            "磁盘分析器只发出 {} 行心跳（结算点没按目录走；旧形态是 0 行）: {got:?}",
+            got.len()
+        );
+        // 各子树的 du 在 rayon 里并行，fetch_add 的**到达顺序**由调度决定 ⇒ 不断言递增，
+        // 但每一行报的都是「那一刻的累计量」⇒ 数值必须互不相同、且落在 (0, 总数] 内。
+        assert!(
+            got.iter().all(|v| *v > 0 && *v <= made),
+            "心跳数值越界（0 < N ≤ 枚举总数）: {got:?}"
+        );
+        let mut uniq = got.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), got.len(), "同一累计数被报了两次（计数与结算不同源）: {got:?}");
+        assert_eq!(beat.total(), made, "心跳累计必须等于枚举到的文件数（不多计、不漏计）");
+        assert_eq!(
+            got.iter().max().copied(),
+            Some(made),
+            "最后一次结算必须把总数结清（收尾留零头就是漏计）: {got:?}"
+        );
+        // 两套账合一账：心跳那个数必须就是分析器自报的 fileCount（渲染层吃的就是这个）
+        assert_eq!(
+            sink.summary_extra("fileCount").and_then(|v| v.parse::<u64>().ok()),
+            Some(made),
+            "心跳计数与 summary 的 fileCount 不是同一个数"
+        );
+
+        // 反面对照：阈值大到够不着 ⇒ 一行都不许发（结算点搬家不许变成事件风暴）
+        let sink2 = BeatSink::default();
+        let beat2 = ScanBeat::with_every(&sink2, u64::MAX / 2);
+        analyze_beating(&[root.to_string_lossy().to_string()], &sink2, &beat2);
+        assert!(sink2.values().is_empty(), "未跨阈值却发出了心跳: {:?}", sink2.values());
+        assert_eq!(beat2.total(), made, "不发心跳不等于不计数（上限/留痕仍要用这个数）");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// P2-J：`appdata` 的 du 通道（`child_dir_sizes` → `dir_size`）按目录结算心跳。
+    /// 这条链在类型上就只收 `&ScanBeat`（不是 Option）—— appdata 是唯一用户，
+    /// 留 Option 等于再留一条「忘了接」的路径（§5.6 的确证缺陷就是这么来的）。
+    #[test]
+    fn 心跳_应用数据du通道按目录结算() {
+        let root = std::env::temp_dir().join(format!("trim-beat-appdata-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // 3 个一级子目录各 3 个文件（du 只走子目录，根层文件不归 child_dir_sizes 计）
+        let made = seed_beat_tree(&root, &[("c1", 3), ("c2", 3), ("c3", 3)]);
+        assert_eq!(made, 9);
+
+        let sink = BeatSink::default();
+        let beat = ScanBeat::with_every(&sink, 2);
+        let mut out: Vec<(PathBuf, u64)> = Vec::new();
+        child_dir_sizes(&root, &mut out, &beat);
+
+        let got = sink.values();
+        assert!(
+            got.len() >= 2,
+            "appdata 的 du 通道只发出 {} 行心跳（旧形态全程 0 行）: {got:?}",
+            got.len()
+        );
+        assert_eq!(beat.total(), made, "du 通道的心跳计数必须等于枚举到的文件数");
+        assert_eq!(got.iter().max().copied(), Some(made), "总数必须结清: {got:?}");
+        assert_eq!(out.len(), 3, "三个一级子目录都要有体积结果: {out:?}");
+
+        // `dir_size(.., None)` 的两个调用点（sizes / delete）必须一字不发：
+        // 删除阶段发「已枚举 N 个文件」是把扫描语义用在错误的时刻。
+        let sink2 = BeatSink::default();
+        let beat2 = ScanBeat::with_every(&sink2, 1);
+        assert_eq!(dir_size(&root, None), 9, "None 形态的体积结果与接心跳时同值");
+        assert!(sink2.values().is_empty(), "None 调用点却发出了心跳");
+        assert_eq!(dir_size(&root, Some(&beat2)), 9);
+        // 串行单线程 ⇒ 顺序确定；阈值 1、三个有文件的目录各结算一次（根层零文件不发）
+        assert_eq!(sink2.values(), vec![3u64, 6, 9], "按目录结算的行数与数值都由阈值决定");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// P2-J（v3 §5.6）：`bigfiles` 的结算点从「整任务一次」搬到「每目录一次」。
+    /// 旧形态一个任务只 `fetch_add` 一次，而一次 fetch_add 无论跨多少个阈值只发得出
+    /// 1 行 ⇒ 单任务 5e5 文件整段只反馈 1 次。本用例阈值 2、五个目录：
+    /// 新形态 ≥4 行，旧形态恒 1 行 —— 判红面是行数，不是「有没有报错」。
+    #[test]
+    fn 心跳_大文件按目录结算而非整任务一次() {
+        let root = std::env::temp_dir().join(format!("trim-beat-bigfiles-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // 根层 1 + 四个子目录各 2 = 9 个文件；min_size=0 ⇒ 全部计入（心跳不看体积门槛）
+        let made = seed_beat_tree(&root, &[("", 1), ("d1", 2), ("d2", 2), ("d3", 2), ("d4", 2)]);
+        assert_eq!(made, 9);
+
+        let sink = BeatSink::default();
+        let beat = ScanBeat::with_every(&sink, 2);
+        let heap = topk_in(&root, true, 200, 0, &beat);
+
+        let got = sink.values();
+        assert!(
+            got.len() >= 4,
+            "大文件扫描只发出 {} 行心跳（结算点又回到整任务一次了：旧形态恒 1 行）: {got:?}",
+            got.len()
+        );
+        for w in got.windows(2) {
+            assert!(w[1] > w[0], "心跳数值必须逐条严格递增: {got:?}");
+        }
+        assert_eq!(beat.total(), made, "按目录结算的总数必须等于枚举文件数（不重不漏）");
+        // 刻意不断言堆非空：Top-K 的入选面还过 `created_in_current_year` 这道门槛
+        //（取不到创建时间的文件系统上一律不入选，与本机相关）；本用例只钉结算点搬家，
+        // 搬家没动候选判定 —— 堆里至多也就是少收，行数才是这条的判据。
+        assert!(heap.len() <= made as usize, "Top-K 收进了比枚举总数更多的条目");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// P2-J 的真机探针（§1.6②：判据走真实磁盘 ⇒ 不能只靠沙箱/注入阈值）。
+    ///
+    /// 沙箱用例证明「结算点接上了」，这一条证明的是**生产阈值 HEARTBEAT_EVERY 下真的喂得到
+    /// UI**：对真实目录跑 `analyze` / `appdata` / `bigfiles`，旧形态分别是 0 行 / 0 行 /
+    /// 每任务 1 行。缺样本（本机目录不足一个阈值）就 SKIP 并明说，不假绿。
+    #[test]
+    #[ignore = "真机：对真实 AppData 全量 du，分钟级耗时且产物随机器变化，发布前人工 --ignored 跑"]
+    fn 真机_生产阈值下分析与appdata发出心跳() {
+        let Some(local) = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+        else {
+            println!("SKIP：本机没有 LOCALAPPDATA，本节未校验");
+            return;
+        };
+        let local_str = local.to_string_lossy().to_string();
+
+        // ① analyze：枚举量从它自报的 fileCount 取（渲染层吃的就是这个数）
+        let sink = BeatSink::default();
+        analyze(&[local_str.clone()], &sink);
+        let counted = sink
+            .summary_extra("fileCount")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let events = sink.values();
+        println!(
+            "现算：analyze({local_str}) 枚举 {counted} 个文件 ⇒ 发出 {} 行心跳，末行 N={:?}",
+            events.len(),
+            events.last()
+        );
+        if counted >= HEARTBEAT_EVERY {
+            assert!(!events.is_empty(), "枚举量已过一个阈值却一行心跳都没有（§5.6 确证缺陷复发）");
+            if counted >= HEARTBEAT_EVERY * 2 {
+                assert!(events.len() >= 2, "枚举量过了两个阈值却只发 1 行: {events:?}");
+            }
+        } else {
+            println!("SKIP：本机目录不足一个阈值（{counted}），analyze 本节未校验");
+        }
+
+        // ② appdata：child_dir_sizes → dir_size 那条 du 链（旧形态全程 0 行）
+        let sink2 = BeatSink::default();
+        appdata(0, &sink2);
+        let events2 = sink2.values();
+        println!(
+            "现算：appdata(0) 发出 {} 行心跳，末行 N={:?}",
+            events2.len(),
+            events2.last()
+        );
+        assert!(
+            !events2.is_empty(),
+            "appdata 全程零心跳（§5.6 确证缺陷复发）—— 真实 AppData 不可能不足 8192 个文件"
+        );
+        assert!(
+            events2.last().copied().unwrap_or(0) >= HEARTBEAT_EVERY,
+            "首/末心跳的计数口径异常: {events2:?}"
+        );
+
+        // ③ bigfiles：留证对比「事件数 vs 任务数」（旧形态事件数恒 ≤ 任务数）
+        let tasks = canonical(&local_str).map(|p| expand_tasks(&p, 2).len()).unwrap_or(0);
+        let sink3 = BeatSink::default();
+        bigfiles(&[local_str], 200, 300 * 1024 * 1024, &sink3);
+        let events3 = sink3.values();
+        println!("现算：bigfiles 任务数 {tasks} ⇒ 发出 {} 行心跳（按目录结算后应可远超任务数）", events3.len());
+        assert!(!events3.is_empty(), "bigfiles 一行心跳都没发出（ScanBeat 没接进 topk_in）");
+    }
+
     /// C-5 分析器：扩展名聚合键口径。大写归小写、无扩展名/超长归「(其他)」。
     #[test]
     fn analyze_ext_key_normalizes() {
@@ -2492,8 +2923,10 @@ mod tests {
         }
     }
 
-    fn f(p: &str, sz: u64) -> (PathBuf, u64) {
-        (PathBuf::from(p), sz)
+    fn f(p: &str, sz: u64) -> ScannedFile {
+        // mtime 固定 None：这几个用例只钉「入桶/上限/回调位置」，不钉排序（排序见
+        // `枚举mtime与stat同值且重复组输出逐字节一致`）
+        (PathBuf::from(p), sz, None)
     }
 
     /// 审查 v2-M1：多根必须**累积**。原实现在 `walk()` 里各建一个 Vec 并整体赋值交回，
@@ -2510,7 +2943,7 @@ mod tests {
         assert_eq!(all.len(), 4, "四个根都要留下结果");
         for root in ["a/1.txt", "b/2.txt", "c/3.txt", "d/4.txt"] {
             assert!(
-                all.iter().any(|(p, _)| p == Path::new(root)),
+                all.iter().any(|(p, _, _)| p == Path::new(root)),
                 "根 {root} 的结果被后续根覆盖了"
             );
         }
@@ -2567,7 +3000,7 @@ mod tests {
         // 报告点名的正是这条 —— 它在锁内被调用过。
         let ctx2 = Arc::new(ScanCtx::with_cap(HEARTBEAT_EVERY as usize * 4));
         let sink2 = RecSink::new(Arc::clone(&ctx2));
-        let batch: Vec<(PathBuf, u64)> =
+        let batch: Vec<ScannedFile> =
             (0..HEARTBEAT_EVERY as usize).map(|i| f(&format!("x{i}"), 1)).collect();
         ctx2.add_batch(batch, &sink2);
         assert_eq!(sink2.scanned.load(Ordering::Relaxed), 1, "跨过心跳阈值要 emit 一次");
@@ -2785,6 +3218,352 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+
+    /// 测试沙箱里写一个文件并把 mtime 钉到 `UNIX_EPOCH + secs`（可选亚秒）。
+    /// 用 `File::set_modified`（std 自带，不引测试依赖），与 `duplicates_artifact.rs` 同姿势。
+    fn mk_mtime(dir: &Path, name: &str, size: u64, secs: u64, nanos: u32) {
+        use std::io::Write;
+        let p = dir.join(name);
+        let mut f = fs::File::create(&p).expect("建样本失败");
+        f.write_all(&vec![b'x'; size as usize]).expect("写样本失败");
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos))
+            .expect("设 mtime 失败");
+    }
+
+    /// 从 `@@ITEM@@` 行里取一个**短 ASCII 字段**（group/role/match/type 都是），
+    /// 路径一律用 `Sink::item` 交出的原生真身，不解析行内 lossy 串（审查 v2-M5 口径）。
+    fn row_field(line: &str, key: &str) -> String {
+        let pat = format!("\"{key}\":\"");
+        match line.find(&pat) {
+            Some(i) => line[i + pat.len()..]
+                .split('"')
+                .next()
+                .unwrap_or("")
+                .to_string(),
+            None => String::new(),
+        }
+    }
+
+    /// 性能修复 P1-①（重复组的 mtime 从「出口逐成员补 stat」换成「枚举期随条目带出」）
+    /// 的等价性对拍。**沙箱**：`std::env::temp_dir()` + 进程 id 唯一命名，跑完自删，
+    /// 含子目录（sub1/sub2）与 14 个文件，刻意覆盖三种形态：
+    ///   · 跨目录、mtime 各不相同的组（排序与入参无关 ⇒ 能和旧判据逐条对拍）；
+    ///   · 同目录、mtime **精确并列**的组（并列靠稳定排序 ⇒ 必须仍按入参序）；
+    ///   · 同目录、**同一秒内差 100ns** 的组（若键被截断到秒就会翻序 ⇒ 钉住精度）。
+    ///
+    /// 判据四层，缺一层都算没证到：
+    ///   ① 同值前提：同一条目 `ent.metadata().modified()` == `fs::metadata(p).modified()`；
+    ///   ② 整表键序：对**同一入参序列**，缓存键序 == 旧的补 stat 键序
+    ///      （整表一致 ⇒ 任意子集（= 每个重复组）的相对序也一致）；
+    ///   ③ 端到端：`duplicates()` 实跑出来的每个组，其行序 == 用**旧判据**
+    ///      `order_group_by_mtime`（补 stat）重放的行序，逐条路径比对；
+    ///   ④ 跨次稳定：同一棵树连跑两遍，`@@ITEM@@` 行序列**逐字节**相同
+    ///      （并行枚举 + HashMap 分组不得把随机性带进输出）。
+    /// 另加正向对照：②的入参里必须真有「同秒不同亚秒」与「精确并列」两对，
+    /// 否则 ①② 在只有一种形态时也能绿（本机文件系统把亚秒抹平则如实打印未判定）。
+    #[test]
+    fn 枚举mtime与stat同值且重复组输出逐字节一致() {
+        let base = std::env::temp_dir().join(format!("trim-perf-mtime-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("sub1")).expect("建 sub1 失败");
+        fs::create_dir_all(base.join("sub2")).expect("建 sub2 失败");
+        // 根层：同名不同名都要有，且每个 size 桶恰好只含一对（内容全 'x' ⇒ 同 size 即同内容）
+        mk_mtime(&base, "c.dat", 5, 9_000, 0); // 内容组（artifact）
+        mk_mtime(&base, "c (1).dat", 5, 10_000, 0);
+        mk_mtime(&base, "sub1/a.bin", 8, 1_000, 0); // 同名组
+        mk_mtime(&base, "sub2/a.bin", 8, 2_000, 0);
+        mk_mtime(&base, "sub1/b.bin", 6, 3_000, 0);
+        mk_mtime(&base, "sub2/b.bin", 6, 4_000, 0);
+        mk_mtime(&base, "sub1/same.dat", 3, 5_000, 0);
+        mk_mtime(&base, "sub2/same.dat", 3, 6_000, 0);
+        mk_mtime(&base, "sub1/e.bin", 2, 7_000, 0);
+        mk_mtime(&base, "sub2/e.bin", 2, 8_000, 0);
+        // 同目录、同一秒、差 100ns（亚秒精度对照）
+        mk_mtime(&base, "sub1/p.bin", 4, 11_000, 200);
+        mk_mtime(&base, "sub1/p (1).bin", 4, 11_000, 100);
+        // 同目录、mtime 精确并列（稳定排序对照）
+        mk_mtime(&base, "sub1/tie_a.bin", 9, 12_000, 0);
+        mk_mtime(&base, "sub1/tie_b.bin", 9, 12_000, 0);
+        // 8.3 短名环境下 temp_dir() 给 ADMINI~1，而扫描器枚举的是长名 ⇒ 拉齐到 canonical 形态。
+        // `duplicates` 的入口自己会过 `scan::canonical(根)`（Windows 上得到 `\\?\` 逐字路径），
+        // 所以这里对 walk_level 直接用同一个 canonical 值，两侧条目路径才逐字节可比。
+        let canon = fs::canonicalize(&base).expect("canonicalize 失败");
+        let mut root_arg = canon.to_string_lossy().into_owned();
+        if let Some(s) = root_arg.strip_prefix(r"\\?\") {
+            root_arg = s.to_string();
+        }
+        let root = PathBuf::from(&root_arg);
+
+        // ---------- ① 枚举期缓存值与 stat 同值（换来源的全部前提） ----------
+        let ctx = ScanCtx::new();
+        let null = CapSink::default();
+        walk_level(&canon, &ctx, 0, 0, &null);
+        let files = ctx.finish(&null);
+        assert_eq!(files.len(), 14, "沙箱应有 14 个条目：{files:?}");
+        for (p, _sz, mt) in &files {
+            let cached = mt.expect("枚举期 mtime 读不到：P1-① 的来源断了");
+            let stat = std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            assert_eq!(
+                Some(cached),
+                stat,
+                "枚举期缓存 mtime 与出口 stat 不同值：{}",
+                p.display()
+            );
+        }
+
+        // ---------- ② 同一入参序列下，缓存键序 == 旧「补 stat」键序 ----------
+        let keys: Vec<Option<std::time::SystemTime>> = files.iter().map(|(_, _, m)| *m).collect();
+        let stat_in: Vec<(PathBuf, u64)> =
+            files.iter().map(|(p, sz, _)| (p.clone(), *sz)).collect();
+        assert_eq!(
+            order_by_mtime_keys(&keys),
+            order_group_by_mtime(&stat_in),
+            "整表键序与旧实现不一致（任意重复组的相对序都会跟着翻）"
+        );
+        // 手工组：把「mtime 读不到的条目（None）」也塞进去，钉住 None 排最后 + 稳定并列
+        let mut hand: Vec<(PathBuf, u64)> = stat_in[..4].to_vec();
+        hand.push((canon.join("不存在的文件.bin"), 1));
+        let hand_keys: Vec<Option<std::time::SystemTime>> = hand
+            .iter()
+            .map(|(p, _)| files.iter().find(|(fp, _, _)| fp == p).map(|(_, _, m)| *m).unwrap_or(None))
+            .collect();
+        let ord_stat = order_group_by_mtime(&hand);
+        assert_eq!(order_by_mtime_keys(&hand_keys), ord_stat, "手工组（含 None 条目）键序不一致");
+        assert_eq!(
+            *ord_stat.last().unwrap(),
+            4,
+            "读不到 mtime 的条目必须排在最后（旧实现同口径）"
+        );
+
+        // 正向对照：沙箱里必须真有「同秒不同亚秒」与「mtime 精确并列」两种形态，
+        // 否则上面的键序对拍在只有一种形态时也会绿。
+        let m_of = |name: &str| -> Option<std::time::SystemTime> {
+            files
+                .iter()
+                .find(|(p, _, _)| p.file_name().map(|x| x.to_string_lossy() == name).unwrap_or(false))
+                .and_then(|(_, _, m)| *m)
+        };
+        let (p_late, p_early) = (m_of("p.bin"), m_of("p (1).bin"));
+        let (tie_a, tie_b) = (m_of("tie_a.bin"), m_of("tie_b.bin"));
+        assert!(
+            tie_a.is_some() && tie_a == tie_b,
+            "并列对照失效：tie_a/tie_b 的 mtime 必须精确相等（稳定排序分支没被走到就说明沙箱白造）"
+        );
+        match (p_late, p_early) {
+            (Some(late), Some(early)) if late != early => {
+                // late = 11_000s+200ns、early = 11_000s+100ns ⇒ 同一秒、亚秒不同
+                let secs = |t: std::time::SystemTime| {
+                    t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+                };
+                assert_eq!(secs(late), secs(early), "亚秒对照必须落在同一秒内");
+                // 入参刻意「较早者在前」：精确键把较晚者翻到第 0 位；键若只到秒则两者并列、
+                // 稳定排序保持入参序。两个结果必须不同 ⇒ 证明键里真的带着亚秒精度，
+                // 而不是靠「碰巧同序」蒙过对拍。
+                let exact = vec![Some(early), Some(late)];
+                let trunc = vec![
+                    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs(early))),
+                    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs(late))),
+                ];
+                assert_eq!(order_by_mtime_keys(&exact), vec![1, 0], "精确键：较晚者必须在前");
+                assert_eq!(order_by_mtime_keys(&trunc), vec![0, 1], "只到秒则并列 ⇒ 保持入参序");
+            }
+            _ => println!("ℹ 本机文件系统把亚秒抹平或样本缺失 ⇒ 亚秒维度**未判定**（其余判据不受影响）"),
+        }
+
+        // ---------- ③ 端到端：实跑输出序列 == 旧判据重放 ----------
+        #[derive(Default)]
+        struct RowSink(std::sync::Mutex<Vec<(PathBuf, String)>>);
+        impl Sink for RowSink {
+            fn item(&self, path: &Path, line: &str) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push((path.to_path_buf(), line.to_string()));
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        let s1 = RowSink::default();
+        duplicates(&[root.to_string_lossy().to_string()], 1, &s1);
+        let rows1 = s1.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let dup: Vec<&(PathBuf, String)> =
+            rows1.iter().filter(|(_, l)| row_field(l, "type") == "duplicate").collect();
+        assert_eq!(dup.len(), 14, "7 组各 2 条：{dup:?}");
+
+        let mut groups: Vec<(String, Vec<(PathBuf, u64)>)> = Vec::new();
+        for (p, l) in &dup {
+            let g = row_field(l, "group");
+            let sz: u64 = files
+                .iter()
+                .find(|(fp, _, _)| fp == p)
+                .map(|(_, s, _)| *s)
+                .unwrap_or_default();
+            match groups.iter_mut().find(|(name, _)| *name == g) {
+                Some((_, v)) => v.push((p.clone(), sz)),
+                None => groups.push((g, vec![(p.clone(), sz)])),
+            }
+        }
+        assert_eq!(groups.len(), 7, "分组数不对：{groups:?}");
+        // 旧判据 = `order_group_by_mtime`（出口逐成员补 stat）。组内 mtime 各不相同时
+        // 它的结果与入参顺序无关 ⇒ 可以和**实跑行序**逐条对拍：把实跑序当入参喂给旧判据，
+        // 返回的置换必须是恒等置换（= 实跑序已经是旧判据要的那条序）。
+        // mtime 精确并列的那组靠稳定排序（入参序决定），由 ② 的整表置换对拍覆盖。
+        let mut replayed = 0usize;
+        for (g, members) in &groups {
+            let mts: Vec<Option<std::time::SystemTime>> = members
+                .iter()
+                .map(|(p, _)| files.iter().find(|(fp, _, _)| fp == p).and_then(|(_, _, m)| *m))
+                .collect();
+            let distinct = {
+                let mut v = mts.iter().flatten().collect::<Vec<_>>();
+                v.sort();
+                v.dedup();
+                v.len() == members.len()
+            };
+            if !distinct {
+                continue;
+            }
+            assert_eq!(
+                order_group_by_mtime(members),
+                (0..members.len()).collect::<Vec<_>>(),
+                "组 {g} 的实跑行序与旧判据（补 stat）不一致：{members:?}"
+            );
+            replayed += 1;
+        }
+        assert!(replayed >= 5, "只有 {replayed} 个组参与了旧判据对拍，覆盖面不足");
+        // 行协议字段没多也没少：每组第 0 行 role=kept、第 1 行 role=candidate
+        for (g, _) in &groups {
+            let roles: Vec<String> = dup
+                .iter()
+                .filter(|(_, l)| &row_field(l, "group") == g)
+                .map(|(_, l)| row_field(l, "role"))
+                .collect();
+            assert_eq!(
+                roles,
+                vec!["kept".to_string(), "candidate".to_string()],
+                "组 {g} 的 role 序列与行协议不符：{roles:?}"
+            );
+        }
+
+        // ---------- ④ 跨次运行逐字节相同 ----------
+        let s2 = RowSink::default();
+        duplicates(&[root.to_string_lossy().to_string()], 1, &s2);
+        let rows2 = s2.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let l1: Vec<&String> = rows1.iter().map(|(_, l)| l).collect();
+        let l2: Vec<&String> = rows2.iter().map(|(_, l)| l).collect();
+        assert_eq!(l1, l2, "同一棵树连跑两遍的 @@ITEM@@ 行序列不逐字节相同");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 性能修复 P1-②（emptyfile 的 `created` 字段从「出口再 stat 一次」换成「枚举期
+    /// 随条目带出」）的逐字节对拍。
+    ///
+    /// 沙箱落在 `CARGO_MANIFEST_DIR\target` 下而不是 `%TEMP%`：`empty()` 六轮拍板把
+    /// `%USERPROFILE%` 整棵子树排除在候选之外，而 `%TEMP%` 正在里面
+    /// （与 `empty_scan_only_reports_items_created_before_min_age` 同一处理）。
+    /// 一棵含子目录/多文件的树，**两处被改动的采集口都走到**：
+    ///   · 根层 0 字节文件 `loose.log`（`empty()` 根循环那处：只过 14 天时效）；
+    ///   · 子目录内 0 字节文件 `pack\stale.bin` + 空目录 `pack\old_empty`
+    ///     （`collect_empty_fast` 那处：还要过「本年内」）。
+    ///
+    /// 判据三条，缺一层都算没证到：
+    ///   ① 逐字节：对每一行 emptyfile，用**旧表达式**（`created_tag(p)` = 出口 stat）重放
+    ///      一整行，必须与 `empty()` 实跑的那行一字不差（字段名/顺序/取值/结尾）；
+    ///   ② 正向对照：实跑行的 created 必须**真有值**且等于该文件此刻的 stat 秒值 ——
+    ///      两边都空也算「逐字节相同」，那样等于只证到 None 分支；
+    ///   ③ 跨次稳定：同一棵树连跑两遍，行序列逐字节相同（并行采集不得把随机性带进输出）。
+    #[cfg(windows)]
+    #[test]
+    fn 空扫描created字段与stat口径逐字节一致() {
+        #[derive(Default)]
+        struct PairSink(std::sync::Mutex<Vec<(PathBuf, String)>>);
+        impl Sink for PairSink {
+            fn item(&self, path: &Path, line: &str) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((path.to_path_buf(), line.to_string()));
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        // 只留一行的一次性 sink：把「旧表达式」的产出按原样字节接住，供逐字比对
+        #[derive(Default)]
+        struct OneLine(std::sync::Mutex<String>);
+        impl Sink for OneLine {
+            fn item(&self, _path: &Path, line: &str) {
+                *self.0.lock().unwrap_or_else(|e| e.into_inner()) = line.to_string();
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("test-empty-created-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("pack").join("old_empty")).expect("建沙箱失败");
+        fs::write(base.join("loose.log"), b"").expect("写根层 0 字节样本失败");
+        fs::write(base.join("pack").join("stale.bin"), b"").expect("写子目录 0 字节样本失败");
+        // 锚点 15 天前（> EMPTY_MIN_AGE）。八轮「本年内」在一月上旬会把子目录样本滤掉，
+        // 而根层样本不受该约束 ⇒ 任何日期跑都至少有一行 emptyfile 可对拍。
+        set_creation_time_days_ago(&base, 15);
+        for rel in ["loose.log", "pack", "pack\\stale.bin", "pack\\old_empty"] {
+            set_creation_time_days_ago(&base.join(rel), 15);
+        }
+
+        let sink = PairSink::default();
+        empty(&[base.to_string_lossy().to_string()], &sink);
+        let got = sink.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+        let files_rows: Vec<&(PathBuf, String)> = got
+            .iter()
+            .filter(|(_, l)| l.contains("\"type\":\"emptyfile\""))
+            .collect();
+        assert!(
+            !files_rows.is_empty(),
+            "没有任何 emptyfile 行可对拍（采集面断了）：{got:?}"
+        );
+        assert!(
+            files_rows
+                .iter()
+                .any(|(p, _)| p.file_name().map(|n| n == "loose.log").unwrap_or(false)),
+            "根层满龄 0 字节文件必须进候选，否则 ① 没覆盖 `empty()` 根循环那处：{got:?}"
+        );
+
+        // ①② 逐字节重放 + created 字段真的有值
+        let key = "\"created\":\"";
+        for (p, line) in &files_rows {
+            let one = OneLine::default();
+            // 旧表达式：created 由出口的 `created_tag(p)` 现 stat 取
+            item(&one, "emptyfile", p, 0, &[created_tag(p)]);
+            let legacy = one.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            assert_eq!(&legacy, line, "emptyfile 行与旧口径不逐字节相同：{}", p.display());
+            let at = line.find(key).expect("行里必须有 created 字段");
+            let rest = &line[at + key.len()..];
+            let val = &rest[..rest.find('"').unwrap_or(rest.len())];
+            assert!(!val.is_empty(), "created 是空串 ⇒ 只证到「读不到」分支：{line}");
+            let secs = val.parse::<u64>().expect("created 必须是 Unix 秒");
+            assert!(
+                (fs::metadata(p).and_then(|m| m.created())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(u64::MAX))
+                    == secs,
+                "created 与该文件此刻的 stat 秒值不同：{line}"
+            );
+        }
+
+        // ③ 跨次逐字节相同（含 emptyfolder 行）
+        let sink2 = PairSink::default();
+        empty(&[base.to_string_lossy().to_string()], &sink2);
+        let got2 = sink2.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let a: Vec<&String> = got.iter().map(|(_, l)| l).collect();
+        let b: Vec<&String> = got2.iter().map(|(_, l)| l).collect();
+        assert_eq!(a, b, "同一棵树连跑两遍的行序列不逐字节相同");
+        let _ = fs::remove_dir_all(&base);
+    }
 }
 #[cfg(test)]
 mod depth_cap_tests {
@@ -2918,7 +3697,7 @@ mod depth_cap_tests {
         let expect_results = civil_year(now_days) == civil_year(now_days - 15);
 
         let acc = EmptyAccum::new();
-        let mut files: Vec<PathBuf> = Vec::new();
+        let mut files: Vec<EmptyFile> = Vec::new();
         let mut dirs: Vec<PathBuf> = Vec::new();
         let sink = CollectSink(std::sync::Mutex::new(Vec::new()));
         // 从 <base>\Users 这一层进去（它不在合成前缀内 ⇒ 会被下钻，正是缺口发生的位置）

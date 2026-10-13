@@ -29,6 +29,12 @@ path = "src/lib.rs"
 name = "finder"
 path = "src/main.rs"
 
+# ⚠️ 作用域提醒（2026-10-14 现算澄清，别再当成产品链路的保险）：Cargo 的 profile 只取
+# 「被构建的那个 workspace root」的 manifest。这一段**只在本目录内独立构建时生效**
+# （例如 `cd native-scanner && cargo build --release` 出 finder.exe、或跑它的 #[ignore] 探针）；
+# 被 src-tauri 作为 path 依赖参与构建时，它和所有「依赖的 profile 段」一样被忽略，
+# 那时决定优化面的是 `src-tauri/Cargo.toml` 末尾的 `[profile.release]`。
+# 因此这一段**不许删**（删了独立构建会掉到默认值），但也别指望它在安装包链路里起作用。
 [profile.release]
 opt-level = 3
 lto = true

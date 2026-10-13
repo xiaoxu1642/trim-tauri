@@ -51,6 +51,11 @@
     running: false,
     sampleTimer: null,
     lossTimer: null,
+    // 性能 v3 ④：两条轮询各自的在途位。realtime_sample / realtime_loss 是**两个不同**
+    // 的后端请求（1500ms / 5000ms），必须分别设位——共用一个 busy 会让丢包检测在
+    // 采样在途时整拍被吞掉（反之亦然），那是把两条独立的链强行串成一条。
+    sampleBusy: false,
+    lossBusy: false,
     mockT: 0,
     lastErrAt: 0,         // 采集失败节流时间戳
     elevationAsked: false, // 是否已提示过提权
@@ -196,7 +201,21 @@
   }
 
   // ===== 采样 =====
+  // 性能 v3 ④：在途闸门。realtime_sample 一旦慢于 POLL_INTERVAL(1500ms)，setInterval 会把
+  // 未完成的调用一层层叠上去，每叠一份多一次后端采样 + 多一次 DOM 写（renderMetrics
+  // 与整张 canvas 的 draw）。busy 由 try/finally 复位——catch 里的 return 与「基线窗口
+  // 无差值数据」的提前 return 都会走到 finally，抛错路径不会把闸门焊死。
   async function tick() {
+    if (state.paused || state.sampleBusy) return;
+    state.sampleBusy = true;
+    try {
+      await sampleOnce();
+    } finally {
+      state.sampleBusy = false;
+    }
+  }
+
+  async function sampleOnce() {
     if (state.paused) return;
     let up = 0, down = 0;
     if (window.api?.realtime) {
@@ -257,7 +276,19 @@
   }
 
   // ===== 丢包检测 =====
+  // 性能 v3 ④：同上，但用的是**独立的** lossBusy（LOSS_INTERVAL 5000ms，与采样是两条
+  // 不同请求）；共用一个 busy 会让慢的那条把另一条整拍吞掉。
   async function tickLoss() {
+    if (state.paused || state.lossBusy) return;
+    state.lossBusy = true;
+    try {
+      await lossOnce();
+    } finally {
+      state.lossBusy = false;
+    }
+  }
+
+  async function lossOnce() {
     if (state.paused) return;
     if (window.api?.realtime) {
       try {

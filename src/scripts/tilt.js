@@ -30,6 +30,14 @@
   var MOVE_TRANSITION = 'transform .12s ease-out';
 
   var current = null;
+  // 性能 v3 ②：原实现每个 mousemove 都做「matchMedia → closest → 全子树 querySelector →
+  // getBoundingClientRect → 写 transform/transition」，即每事件一次强制回流。
+  // 现在改成：rect 与排除判定都只在**换元素**时算一次（后者结果进 dataset），
+  // 样式写入走 requestAnimationFrame 合帧（照本仓在库先例 liquid-glass.js 的 onPointerMove）。
+  var currentRect = null;   // 进入元素时的一次几何快照
+  var pendingEl = null;     // 待提交帧的目标（提交时要求它仍是 current）
+  var pendingX = 0, pendingY = 0;
+  var tiltRaf = 0;
 
   // M3（v3.6.5）N-4：剔除 base 中「旧的 transform 过渡片段」，而不是整条替换。
   // 原实现：base 只要含 'transform' 就把整个 base 丢掉 → 连带丢弃容器自带的
@@ -55,8 +63,15 @@
     if (base === undefined) {
       base = el.style.transition || '';
       el.dataset.tiltBase = base;
+      delete el.dataset.tiltRest; // base 新建/变更 → 合并结果作废（下一句重算）
     }
-    var rest = stripTransformTransition(base);
+    // stripTransformTransition 一次要付 4 趟数组（split/map/filter/filter/join），
+    // 原先每次写样式都重算一遍；base 既已按元素缓存，合并结果同样按元素缓存（性能 v3 ②）
+    var rest = el.dataset.tiltRest;
+    if (rest === undefined) {
+      rest = stripTransformTransition(base);
+      el.dataset.tiltRest = rest;
+    }
     var merged = rest ? transition + ', ' + rest : transition;
     el.style.transform = transform;
     el.style.transition = merged;
@@ -71,38 +86,77 @@
 
   // 审查v4-M1：reduced-motion 改为事件回调内实时求值——原实现模块加载时求值一次，
   // reduce 时监听器根本不挂载（关闭偏好后永不生效），运行中开启偏好同样不生效
+  // 性能 v3 ②：缓存的是 MediaQueryList **对象**本身，每次仍读它的 .matches（照样实时，
+  // 系统偏好一改立刻跟着变），省掉的只是每事件一次 matchMedia() 分配。
+  var rmQuery = null;
   function isReducedMotion() {
-    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    if (!rmQuery && window.matchMedia) rmQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    return !!(rmQuery && rmQuery.matches);
+  }
+
+  // 排除判定（面板内含「启动项列表 / 扫描结果表格」则整块不倾斜，需求指定）：
+  // 原实现每个 mousemove 都做一次全子树 querySelector。这里按元素缓存结论，只在
+  // 缓存缺失、或该元素**直接子节点数**变化时重查——两种表格/列表都由宿主卡片
+  // innerHTML 整体注入（#dupTable / #anTable / #uninstallList / 启动项面板），注入即改
+  // 直接子节点数；#startupList 是 index.html 静态节点，首查即得终值。
+  function isExcludedCard(el) {
+    var sig = String(el.childElementCount);
+    if (el.dataset.tiltExcluded !== undefined && el.dataset.tiltExcludeSig === sig) {
+      return el.dataset.tiltExcluded === '1';
+    }
+    var hit = !!(el.querySelector && el.querySelector(EXCLUDE_CONTAINS));
+    el.dataset.tiltExcluded = hit ? '1' : '0';
+    el.dataset.tiltExcludeSig = sig;
+    return hit;
+  }
+
+  function clearTilt() {
+    reset(current);
+    current = null;
+    currentRect = null;
+    pendingEl = null;
+  }
+
+  function applyTilt() {
+    tiltRaf = 0;
+    var el = pendingEl;
+    // 待提交帧与当前悬停脱节（换了元素 / 已复位 / 已离开窗口）时不写旧元素
+    if (!el || el !== current) return;
+    el.style.willChange = 'transform';
+    setTransform(
+      el,
+      'perspective(' + PERSPECTIVE + 'px) rotateY(' + (pendingX * MAX_ANGLE * 2).toFixed(2) + 'deg) rotateX(' +
+        (-pendingY * MAX_ANGLE * 2).toFixed(2) + 'deg)',
+      MOVE_TRANSITION
+    );
   }
 
   document.addEventListener('mousemove', function (e) {
-    if (isReducedMotion()) { reset(current); current = null; return; }
+    if (isReducedMotion()) { clearTilt(); return; }
     var el = e.target && e.target.closest ? e.target.closest(SELECTOR) : null;
-    // 命中「启动项列表」所在面板时取消倾斜
-    if (el && el.querySelector && el.querySelector(EXCLUDE_CONTAINS)) el = null;
+    // 命中「启动项列表」/扫描结果表格所在面板时取消倾斜
+    if (el && isExcludedCard(el)) el = null;
     if (el !== current) {
+      // 先读后写：换元素时才量一次 rect，避免被紧随的 reset() 写脏而再触发回流
+      var fresh = el ? el.getBoundingClientRect() : null;
       reset(current);
       current = el;
+      currentRect = fresh ? { left: fresh.left, top: fresh.top, width: fresh.width, height: fresh.height } : null;
     }
     if (!el) return;
 
-    var r = el.getBoundingClientRect();
-    if (!r.width || !r.height) return;
+    var r = currentRect;
+    if (!r || !r.width || !r.height) return;
     var x = (e.clientX - r.left) / r.width - 0.5;
     var y = (e.clientY - r.top) / r.height - 0.5;
     // 光标越出容器边界时不再倾斜（保持最后一次姿态由 CSS 回弹）
     if (x < -0.5 || x > 0.5 || y < -0.5 || y > 0.5) return;
 
-    el.style.willChange = 'transform';
-    setTransform(
-      el,
-      'perspective(' + PERSPECTIVE + 'px) rotateY(' + (x * MAX_ANGLE * 2).toFixed(2) + 'deg) rotateX(' +
-        (-y * MAX_ANGLE * 2).toFixed(2) + 'deg)',
-      MOVE_TRANSITION
-    );
+    pendingEl = el; pendingX = x; pendingY = y;
+    if (!tiltRaf) tiltRaf = requestAnimationFrame(applyTilt);
   }, { passive: true });
 
-  // 滚动/离开窗口时复位，避免残留倾斜姿态
-  window.addEventListener('scroll', function () { reset(current); current = null; }, { passive: true, capture: true });
-  document.documentElement.addEventListener('mouseleave', function () { reset(current); current = null; });
+  // 滚动/离开窗口时复位，避免残留倾斜姿态（同时作废几何快照，下次进入重新量）
+  window.addEventListener('scroll', clearTilt, { passive: true, capture: true });
+  document.documentElement.addEventListener('mouseleave', clearTilt);
 })();

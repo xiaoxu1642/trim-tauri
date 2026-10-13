@@ -37,7 +37,11 @@ fn cache_file() -> std::path::PathBuf {
 /// 同一条判据再加 `ownerSource`（2026-10-05 按软件分组）：升级前留下的缓存里没有这个键，
 /// 直接拿来用会让整页 172 项全落进「未识别」组 —— 那不是"缓存能用"，那是把新功能显示成坏了。
 /// 判据缺失就当没有缓存、走一次真实扫描，代价是首次进页面慢几秒，比静默错分组划算。
-fn load_cache() -> Option<Vec<Value>> {
+///
+/// 返回 `(data, timestamp)`（性能 v3 ⑤，形状照 `startup.rs::load_cache`）：此前只回 `Vec<Value>`
+/// 而把 timestamp 丢掉，调用方为取这一个字段又整读第二遍约百 KB 量级的缓存。时间戳缺失与
+/// 判据缺失同义（都当没有缓存、走真实扫描），所以用 `?` 把 timestamp 也并进 None 路径，语义不变。
+fn load_cache() -> Option<(Vec<Value>, i64)> {
     let v = crate::security::read_json_or_default(&cache_file());
     let obj = v.as_object()?;
     let data = obj.get("data")?;
@@ -45,14 +49,14 @@ fn load_cache() -> Option<Vec<Value>> {
     if arr.is_empty() {
         return None;
     }
-    if arr.iter().all(|it| {
+    if !arr.iter().all(|it| {
         it.get("nativeRegPath").and_then(|v| v.as_str()).is_some()
             && it.get("ownerSource").and_then(|v| v.as_str()).is_some()
     }) {
-        Some(arr.clone())
-    } else {
-        None
+        return None;
     }
+    let ts = obj.get("timestamp")?.as_i64()?;
+    Some((arr.clone(), ts))
 }
 
 fn save_cache(items: &[Value]) {
@@ -201,15 +205,11 @@ pub async fn contextmenu_scan<R: Runtime>(
     let label = window.label().to_string();
 
     if refresh != Some(true) {
-        if let Some(cached) = load_cache() {
+        // 一次读盘到底（性能 v3 ⑤）：timestamp 随 load_cache 一并带回，不再为它整读第二遍缓存
+        if let Some((cached, ts)) = load_cache() {
             let map = snapshot::by_id(&cached);
             snapshot::set(&snapshot::domain_key(&label, "contextmenu"), map);
-            if let Some(ts) = crate::security::read_json_or_default(&cache_file())
-                .get("timestamp")
-                .and_then(|v| v.as_i64())
-            {
-                return json!({ "success": true, "data": cached, "cached": true, "cachedAt": ts });
-            }
+            return json!({ "success": true, "data": cached, "cached": true, "cachedAt": ts });
         }
     }
 

@@ -73,11 +73,12 @@ const FONT_SYSTEM_FAMILIES: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-/// 内嵌 MiSans 可变字体（随应用分发，恒可用）
-const FONT_MISANS_FAMILY: &str = "MiSans";
-const FONT_MISANS_CSS: &str = "'MiSans', '微软雅黑', 'Microsoft YaHei', sans-serif";
-/// 出厂默认改系统字体（2026-09-28 八轮拍板：MiSans 20MB 异步加载是看板卡片高度
-/// 漂移/重叠的根因源，改为仅作选项；已保存过 MiSans 的用户不受影响——stored 优先）
+// MiSans 内嵌字体已于 2026-10-14 整链移除（小旭裁定）：`MiSansVF.ttf` 单文件
+// 20,093,424 B，占 `src/assets` 的 92.94%、安装包约六成，而它自 2026-09-28 八轮拍板起
+// 就只是设置页的一个可选项、**不在默认字体栈里**。原 `FONT_MISANS_FAMILY` / `FONT_MISANS_CSS`
+// 两个常量与 `fonts:list` 里那项 `builtin` 一并删除；老用户已存的 `'MiSans'` 值在
+// `load_font_state` 侧做**只读归一化**（不改写盘上设置，理由见该函数注释）。
+/// 出厂默认字体（2026-09-28 八轮拍板：MiSans 20MB 异步加载是看板卡片高度漂移/重叠的根因源）
 const FONT_DEFAULT_FAMILY: &str = "微软雅黑";
 const FONT_DEFAULT_WEIGHT: i64 = 400;
 const FONT_DEFAULT_SIZE: i64 = 16;
@@ -103,6 +104,14 @@ fn load_font_state() -> (Value, Option<Value>) {
     if let (Some(base), Some(stored)) = (font.as_object_mut(), s.get("font").and_then(|v| v.as_object())) {
         for (k, v) in stored {
             base.insert(k.clone(), v.clone());
+        }
+    }
+    // 老用户可能存着已移除的 'MiSans'：只在**读出时**归一化到默认字体，不写回盘。
+    // 不写盘的理由：悄悄改写用户设置不是本工具的权利，而 CSS 落到不存在的族名本来就会
+    // 自然 fallback 到栈里下一项；这里归一化只为设置页不再出现「当前值不在选项列表里」的坏状态。
+    if font.get("family").and_then(|v| v.as_str()) == Some("MiSans") {
+        if let Some(obj) = font.as_object_mut() {
+            obj.insert("family".into(), json!(FONT_DEFAULT_FAMILY));
         }
     }
     let imported = s
@@ -163,7 +172,7 @@ fn ext_name_of(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// fonts:list — 系统字体可用性 + MiSans + 导入字体
+/// fonts:list — 系统字体可用性 + 导入字体（内嵌 MiSans 已于 2026-10-14 整链移除）
 #[tauri::command]
 pub fn fonts_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
@@ -180,13 +189,6 @@ pub fn fonts_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, 
             })
         })
         .collect();
-    list.push(json!({
-        "family": FONT_MISANS_FAMILY,
-        "cssStack": FONT_MISANS_CSS,
-        "available": true,
-        "builtin": true,
-        "imported": false,
-    }));
     let imported_summary = match &imported {
         Some(record) => {
             let family = truthy_string(record.get("family")).unwrap_or_default();
@@ -444,7 +446,9 @@ pub fn fonts_remove_imported<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
             return Err("设置结构异常".into());
         };
         map.remove("fontImported");
-        // 若当前选中字体正是被删除的导入字体，回退默认 MiSans
+        // 若当前选中字体正是被删除的导入字体，回退默认系统字体
+        // （注：这里原本写「回退默认 MiSans」，但代码实际早就用 FONT_DEFAULT_FAMILY=微软雅黑，
+        //  属注释腐烂；2026-10-14 随 MiSans 移除一并对齐）
         let current_family = map
             .get("font")
             .and_then(|f| f.get("family"))

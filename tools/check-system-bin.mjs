@@ -80,6 +80,11 @@ const RAW_EXEMPT = [
     anchor: 'Command::new("cmd")',
     reason: '2026-10-04 审计 §4.5 测试夹具：mklink /J 造 junction 验证备份裁剪包含性核验（cfg(test) 专用，native-scanner/tests 同款；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
+  {
+    file: 'src-tauri/src/commands/fileclean.rs',
+    anchor: 'std::process::Command::new("cmd")',
+    reason: '2026-10-14 P2-E §5.3 第三条的真机 #[ignore] 探针：mklink /J 造 junction（与上面 cleanup.rs 夹具同口径，cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
+  },
 ];
 
 /**

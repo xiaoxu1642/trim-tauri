@@ -26,6 +26,16 @@ use crate::engine::paths::path_key;
 use crate::engine::{delete_manifest, guard, log, paths, protect};
 use crate::security;
 
+/// 结果集上限（**输出**口径）：`scan_root` 只往 `items` 里收这么多条。
+///
+/// P1-③ 的裁定：这里刻意**不**再加一条「遍历预算」（`MAX_SCAN_ENTRIES` 那种同思路常量）。
+/// 本函数的真实成本不是「条目多」而是「每个条目多付一次 `symlink_metadata`」——
+/// 不匹配后缀的条目 `continue` 不入 `items`，于是 20 万文件的信箱目录会整棵走完、
+/// 把上限的语义从「输出封到 2000」变成「遍历也封在 2000」。加遍历预算会把截断点
+/// 从「攒满 2000 条命中」挪到「看过 N 个条目」，落在预算之后才出现的合法命中因此
+/// 消失 —— 那是改命中集，属最高风险面（AGENTS §5.1 的同一根因）。
+/// 改法换成把逐条 syscall 去掉（见 `scan_root` 里的 reparse 复核），
+/// 遍历面与判定面一字未动：命中集、先到先得的行序、截断点全部照旧。
 const MAX_FILES: usize = 2000;
 const MAX_DEPTH: usize = 4;
 const MAX_PATH_LEN: usize = 400;
@@ -220,15 +230,27 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
             }
             let name = ent.file_name().to_string_lossy().to_string();
             let md = match ent.metadata() {
-                // DirEntry::metadata 不跟随符号链接（Windows 上跟随；用 symlink_metadata 复核）
+                // P1-③：Windows 上 `DirEntry::metadata()` 取的是枚举时 `FindNextFileW`
+                // 填好的那份 `WIN32_FIND_DATAW`（内存拷贝、不跟随链接、不是 syscall）；
+                // 旧注释写的「Windows 上跟随」不成立（native-scanner 2026-10-12 探针实测
+                // 报的是链接本相属性位），所以 reparse 复核不必再另付一次 syscall。
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let sym = std::fs::symlink_metadata(&full)
-                // 审查 L12：判 reparse 属性位而非 is_symlink —— 云占位符/NFS/LX 这类
-                // is_symlink=false 的 reparse 否则会被当成普通目录深入
-                .map(|m| crate::engine::protect::is_reparse(&m))
-                .unwrap_or(true);
+            // 审查 L12：判 reparse 属性位而非 is_symlink —— 云占位符/NFS/LX 这类
+            // is_symlink=false 的 reparse 否则会被当成普通目录深入。判据仍用主侧唯一真源
+            // `engine::protect::is_reparse`（属性位 0x400），只是来源换成上面那份快照：
+            // `symlink_metadata(整条路径)` 走 `FindFirstFileW`，读的是同一个结构体的同一个
+            // 字段 ⇒ 对未变动的条目逐位同值（native-scanner 的 `util::is_reparse(&ent)` 就是
+            // 这个形态，且它已被与 PS 侧逐字节对拍的命中集检验覆盖）。
+            // 非 Windows 例外：那里 `DirEntry::metadata()` 会跟随链接，属性位判据判不出，
+            // 补一条不跟随的 `file_type()`（Windows 上 is_symlink 为真者必带 0x400，
+            // 并集不额外命中任何条目 ⇒ 两平台都不放宽「哪些条目进结果集」）。
+            let sym = if crate::engine::protect::is_reparse(&md) {
+                true
+            } else {
+                ent.file_type().map(|t| t.is_symlink()).unwrap_or(true)
+            };
             if sym {
                 continue;
             }
@@ -782,5 +804,220 @@ mod tests {
         let bad = concat!("\"totalFreed\": freed", ".to_string()");
         assert!(src.contains(want), "totalFreed 必须以 JSON 数字产出（v4-R1-M01 修复锚点）");
         assert!(!src.contains(bad), "totalFreed 退回字符串 ⇒ 渲染层「释放空间」数字拼接回归");
+    }
+
+    /// §5.3 第三条（P2-E/P1-③）的**等价性对拍 + 命中集对照**：reparse 复核从「每访问一个
+    /// 条目按路径名再 `symlink_metadata` 一次」改成「吃枚举期那份 `ent.metadata()`」，两个前提都要钉：
+    ///   ① 同一份 `FILE_ATTRIBUTE_REPARSE_POINT` 属性位 ⇒ 两形态**逐条目同值**（否则命中集会变）；
+    ///   ② 命中集不变。**样本形状是选过的**：文件链接放在 `imgs\` 里（depth=1），
+    ///      因为根层文件本就 `depth==0 continue` 不收，拦在它前面的是那条而不是条目级复核 ——
+    ///      撤掉条目级复核时，只有 depth≥1 的 file 型 reparse（云占位符就是这个形状）会漏进表。
+    ///      目录链接（`linked\`）则由出队时的逐目录复核兜住，两条闸各司其职、都在这儿留着。
+    /// 符号链接造不出来（无权限/未开开发者模式）时**明说 SKIP**，不许拿「没报错」当对拍过。
+    #[test]
+    fn 条目reparse复核与按路径stat同值且命中集不变() {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::{symlink_dir, symlink_file};
+            let root = std::env::temp_dir()
+                .join(format!("trim-fileclean-reparse-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("imgs")).expect("建沙箱目录");
+            std::fs::write(root.join("imgs/a.jpg"), b"x").expect("写样本");
+            // 根层文件按 FC 口径本就不收（depth==0 continue），它只是等价性对拍的一个条目
+            std::fs::write(root.join("plain.png"), b"x").expect("写根层样本");
+
+            let mut links_made = 0usize;
+            // depth=1 的 file 型 reparse：条目级复核是唯一拦它进表的闸
+            if symlink_file(root.join("imgs/a.jpg"), root.join("imgs/link.dat")).is_ok() {
+                links_made += 1;
+            }
+            // depth=0 的 dir 型 reparse：拦在条目级，也拦在出队级（两道闸都要成立）
+            if symlink_dir(root.join("imgs"), root.join("linked")).is_ok() {
+                links_made += 1;
+            }
+
+            // ① 逐条目等价：枚举快照口径 == 按路径名口径（`.ok()` 后比 Option：
+            //    io::Error 没有 PartialEq，而「两边都读不到」也是等价的一种，必须同判）
+            let mut checked = 0usize;
+            for ent in std::fs::read_dir(&root).expect("read_dir 沙箱根").flatten() {
+                let p = ent.path();
+                let cached = ent.metadata().map(|m| protect::is_reparse(&m)).ok();
+                let bypath = std::fs::symlink_metadata(&p).map(|m| protect::is_reparse(&m)).ok();
+                assert_eq!(
+                    cached, bypath,
+                    "reparse 判定必须与按路径名 stat 同值: {}",
+                    p.display()
+                );
+                checked += 1;
+            }
+            // 条目级对拍也要覆盖 depth=1 那个文件链接本体（它才是本轮换数据源的那个形状）
+            for ent in std::fs::read_dir(root.join("imgs")).expect("read_dir imgs").flatten() {
+                let p = ent.path();
+                assert_eq!(
+                    ent.metadata().map(|m| protect::is_reparse(&m)).ok(),
+                    std::fs::symlink_metadata(&p).map(|m| protect::is_reparse(&m)).ok(),
+                    "depth=1 条目的两口径必须同值: {}",
+                    p.display()
+                );
+                checked += 1;
+            }
+            // 对拍条数点名到「真的跑过」：根层恒有 `imgs` + `plain.png`，`imgs` 里恒有 `a.jpg`
+            // ⇒ 下限 3；每成一个符号链接多一个条目（根层 `linked` / `imgs\link.dat`）。
+            // 断成等式而不是 `>=`：任一轮 `read_dir` 空转或提前 break 都要能判红。
+            assert_eq!(
+                checked,
+                3 + links_made,
+                "等价性对拍的条目数与沙箱形状不符（少跑一轮即红）: 实跑 {checked}，期望 {}",
+                3 + links_made
+            );
+
+            // ② 命中集：只收真实目录里的普通文件
+            let (items, scanned, unhandled, truncated) = scan_root(&root);
+            let mut names: Vec<String> = items
+                .iter()
+                .map(|v| v["name"].as_str().unwrap_or_default().to_string())
+                .collect();
+            names.sort();
+            assert_eq!(names, vec!["a.jpg".to_string()], "命中集只应是 imgs/a.jpg: {names:?}");
+            assert_eq!(scanned, 1, "归类计数只算 depth>0 的真实文件");
+            assert_eq!(unhandled, 0, "沙箱名字都可无损表示");
+            assert!(!truncated, "五个条目远不到 MAX_FILES");
+            if links_made < 2 {
+                println!(
+                    "SKIP：本机只能构造 {links_made}/2 个符号链接（权限/开发者模式），\
+                     「链接不进表、不深入」这一面未校验（等价性对拍已跑 {checked} 条）"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        #[cfg(not(windows))]
+        {
+            // 本域的 reparse 判据与符号链接构造都是 Windows 口径，非目标平台如实说没校验
+            println!("SKIP：本用例只在 Windows 上有意义（FILE_ATTRIBUTE_REPARSE_POINT + symlink_*）");
+        }
+    }
+
+    /// §5.3 第三条的**性能面**源码形态判据：真机 syscall 次数在单测里测不出来，
+    /// 但「条目循环里再按路径名解析一次」这个形状必须能被判红 —— 它是这次改动的本体。
+    /// 锚点按 §5.19 取 `file + 判别性锚点子串`（不写行号），字面量用 `concat!` 拆词防自指
+    /// （`include_str!` 会把本测试自己也算成语料）。
+    #[test]
+    fn 条目循环内不得再按路径名复核reparse() {
+        let src = include_str!("fileclean.rs");
+        let count = |needle: &str| src.matches(needle).count();
+        let bad = concat!("symlink_metadata(&", "full)");
+        assert_eq!(
+            count(bad),
+            0,
+            "scan_root 的条目循环又出现逐条按路径名 stat（§5.3 第三条锚点，每访问条目一次 syscall）"
+        );
+        let good = concat!("let sym = if crate::engine::protect::is_reparse(&", "md)");
+        assert_eq!(
+            count(good),
+            1,
+            "reparse 复核必须以枚举期那份 `md` 为源、判据仍走主侧唯一真源 `protect::is_reparse`（命中数≠1 即形状变了）"
+        );
+    }
+
+    /// §5.3 第三条的真机探针（§1.6②：判据走真实磁盘 ⇒ 不能只靠沙箱里那种「一造就成功」的样本）。
+    ///
+    /// 覆盖两个沙箱拿不到的形状，各自如实声明覆盖到没有：
+    ///   ① junction（`is_symlink()==false` 却带 0x400）：两口径**同值**这条等价前提对它成立。
+    ///      注意深不深入这件事在 junction 上由**出队级**复核（`symlink_metadata(&dir)`）兜住，
+    ///      条目级复核撤掉也照样拦得住 —— 所以这条只钉等价性，不冒充「命中集对照」。
+    ///   ② **file 型 reparse**（OneDrive 云占位符那一类，`mklink` 造不出来、is_symlink 也是 false）：
+    ///      这才是条目级复核唯一的靶面。本机存在这样的文件就拿它的父目录当扫描根，
+    ///      断言它不进命中集（进了就是把占位符的逻辑大小当普通文件报给用户删）；
+    ///      不存在就 SKIP 并明说未校验 —— 沙箱里的 `symlink_file` 是 is_symlink()==true 那一类，
+    ///      顶不了这个位置。
+    /// 造不出 junction（权限）同样如实 SKIP，不假绿。
+    #[test]
+    #[ignore = "真机：需要 mklink /J 造 junction 与本机真实云占位符样本（权限/环境相关），复核该判据时手动跑"]
+    fn 真机_junction与文件型reparse条目按枚举快照判reparse() {
+        let root = std::env::temp_dir().join(format!("trim-fileclean-junction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("imgs")).expect("建沙箱目录");
+        std::fs::write(root.join("imgs/a.jpg"), b"x").expect("写样本");
+
+        let made = |flag: &str, link: &str, target: &str| -> bool {
+            std::process::Command::new("cmd")
+                .args(["/C", &format!(r#"mklink {flag} "{}" "{}""#, root.join(link).display(), root.join(target).display())])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        let mut expect = 0usize;
+        if made("/J", "junc", "imgs") { expect += 1; }
+        if made("/J", "self-junc", ".") { expect += 1; }
+        if expect > 0 {
+            // ① 等价性：对每个条目两口径同值（junction 是 is_symlink()==false 的那一类）
+            for ent in std::fs::read_dir(&root).expect("read_dir").flatten() {
+                let p = ent.path();
+                assert_eq!(
+                    ent.metadata().map(|m| protect::is_reparse(&m)).ok(),
+                    std::fs::symlink_metadata(&p).map(|m| protect::is_reparse(&m)).ok(),
+                    "junction 条目的两口径必须同值: {}",
+                    p.display()
+                );
+                // 留一条自证：属性位判据确实抓到了这个 is_symlink 抓不到的形状
+                if p.file_name().map(|n| n == "junc").unwrap_or(false) {
+                    let ft = ent.file_type().expect("file_type");
+                    assert!(protect::is_reparse(&ent.metadata().expect("metadata")), "junction 必须被属性位判据拦住");
+                    assert!(!ft.is_symlink(), "本机 junction 的 is_symlink() 形态与假设不符（std 版本变了就要重审这条判据）");
+                }
+            }
+        } else {
+            println!("SKIP：本机 mklink /J 全部失败（权限/策略），junction 等价性一面未校验");
+        }
+
+        // ①' 命中集：自引用 junction 让「深度上限」也拦不住重复计数，只剩这两道 reparse 闸
+        //（条目级 + 出队级）在拦 —— 两道都撤掉时这里必红；只撤条目级时由出队级兜住，
+        // 所以这条**不**充当条目级复核的靶面（靶面见下面的 ②）。
+        let (items, scanned, _unhandled, truncated) = scan_root(&root);
+        let names: Vec<String> = items
+            .iter()
+            .map(|v| v["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(names, vec!["a.jpg".to_string()], "junction 不得把同一文件再贡献一份: {names:?}");
+        assert_eq!(scanned, 1, "只应统计真实 imgs 目录里的那一个文件");
+        assert!(!truncated, "沙箱远不到 MAX_FILES");
+        let _ = std::fs::remove_dir_all(&root);
+
+        // ② 条目级复核唯一的靶面：file 型 reparse（is_symlink()==false 的云占位符那一类）。
+        // 样本只能到真实机上找（`mklink` 造不出这个形状）；找不到就如实说未校验。
+        fn find_file_reparse(p: &Path, depth: u32) -> Option<std::path::PathBuf> {
+            if depth > 3 { return None; }
+            for ent in std::fs::read_dir(p).ok()?.flatten() {
+                let ep = ent.path();
+                let Ok(ft) = ent.file_type() else { continue };
+                if ft.is_dir() {
+                    if let Some(f) = find_file_reparse(&ep, depth + 1) { return Some(f); }
+                } else if !ft.is_symlink() {
+                    // 只看属性位（跟随链接的 fs::metadata 会把这个形状读没）
+                    let reparse = ent.metadata().map(|m| protect::is_reparse(&m)).unwrap_or(false);
+                    if reparse { return Some(ep); }
+                }
+            }
+            None
+        }
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+        let sample = home.as_deref().and_then(|h| find_file_reparse(h, 0));
+        match sample {
+            Some(ph) => {
+                let parent = ph.parent().expect("样本必有父目录");
+                let (items2, _scanned, _unhandled, _truncated) = scan_root(parent);
+                let bad = ph.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                assert!(
+                    !items2.iter().any(|v| v["name"].as_str() == Some(bad.as_str())),
+                    "file 型 reparse（{}）被当普通文件收进命中集 = 报的是逻辑大小而非占盘大小",
+                    ph.display()
+                );
+                println!("现算：已用真实 file 型 reparse 样本判过一次（{}）", ph.display());
+            }
+            None => println!(
+                "SKIP：本机用户目录浅层没有 file 型 reparse 样本（云占位符一类），条目级复核的靶面未校验"
+            ),
+        }
     }
 }

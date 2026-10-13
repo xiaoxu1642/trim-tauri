@@ -411,6 +411,24 @@ pub fn transform_secrets(
     }
 }
 
+/// 树里是否存在任何 `SECRET_FIELDS` 键（审查 v3 裁定①的前置判据）。
+///
+/// 为什么要它：`transform_secrets` 是**整树重建**（每个对象新建 Map、每个值 clone），
+/// 而它被夹在持全局 `UPDATE_JSON_LOCK` 的闭包里跑（`commands/settings.rs` 的
+/// `update_settings`：解密一遍 + 加密一遍）。绝大多数 `settings.json` 根本没有密钥字段
+/// （本机现算 696 B、零 secret 键），却照样付两遍全树克隆加一次主密钥读取。
+/// 无该键时整棵变换按定义是恒等的 ⇒ 直接返回原值，既不遍历也不取密钥。
+/// 判据只写这一份，加/解密两侧共用（AGENTS §5.16：同判定不许两套实现）。
+fn has_secret_field(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| {
+            SECRET_FIELDS.contains(&k.as_str()) || has_secret_field(v)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(has_secret_field),
+        _ => false,
+    }
+}
+
 /// 发往渲染层前的统一脱敏出口（掩码即未修改语义；空值保持空串）
 pub fn mask_settings(settings: &serde_json::Value) -> serde_json::Value {
     transform_secrets(settings, &|v| {
@@ -431,6 +449,10 @@ pub fn mask_settings(settings: &serde_json::Value) -> serde_json::Value {
 /// 加密失败（CryptProtectData 不可用）时返回 Err，调用方按 Electron 的
 /// 「safeStorage 不可用 → 拒绝保存」同语义回 `success:false`。
 pub fn encrypt_settings_with_oscrypt(settings: &serde_json::Value) -> Result<serde_json::Value, String> {
+    // 无密钥字段 ⇒ 整棵变换恒等，跳过全树重建与主密钥读取（v3 裁定①，判据见 has_secret_field）
+    if !has_secret_field(settings) {
+        return Ok(settings.clone());
+    }
     let key = safestorage::load_oscrypt_key().ok();
     // M-19：主密钥现在是 Zeroizing<Vec<u8>>，显式取切片传入。
     encrypt_secrets(settings, key.as_deref().map(|v| v.as_slice()))
@@ -486,6 +508,10 @@ fn encrypt_secrets(
 /// （见 `encrypt_secrets`）让读-改-写对密钥字段是无损的，等主密钥恢复后仍可解。
 /// 旧格式 `v10 + 裸 DPAPI` 即便没有主密钥也能解开，所以恒带 `key.as_deref()` 尝试。
 pub fn decrypt_settings_with_oscrypt(settings: &serde_json::Value) -> serde_json::Value {
+    // 同 encrypt 侧：树里没有任何密钥字段时整棵变换恒等，直接返回（v3 裁定①）
+    if !has_secret_field(settings) {
+        return settings.clone();
+    }
     let key = safestorage::load_oscrypt_key().ok();
     transform_secrets(settings, &|v| {
         if !v.starts_with(safestorage::DPAPI_V1_PREFIX) {
@@ -831,5 +857,48 @@ mod tests {
         std::fs::write(&bad, "[{}").expect("写坏件");
         assert!(matches!(read_json_array_state(&bad), JsonState::Corrupt));
         assert!(!bad.exists(), "解析失败的现场必须被隔离（改名）");
+    }
+
+    /// 审查 v3 裁定①的前置判据：**逐个点名**六个密钥键（与 JS 侧 `SECRET_FIELDS` 同源）
+    /// 都必须被检出。这不是性能断言，是**安全断言**——`has_secret_field` 漏判任一键，
+    /// 早退路径就会让该字段**明文落盘**，等于绕过「密钥不明文回渲染层/不落盘」这条红线。
+    /// 末条反向对照（非登记名不得命中）保证判据不是「一律返回 true」蒙绿。
+    #[test]
+    fn has_secret_field_逐个点名密钥键() {
+        assert_eq!(SECRET_FIELDS.len(), 6, "密钥键表条数变动要同步本用例与 JS 侧");
+        // 用显式 Map 构造：`json!({ k: … })` 里裸 ident 会被当**字面量键名**而不是变量值，
+        // 且 `&&str` 不满足 `String: From<_>`，用宏反而会写出恒真的好测试。
+        for k in SECRET_FIELDS {
+            let mut leaf = serde_json::Map::new();
+            leaf.insert((*k).to_string(), serde_json::json!("sk-test"));
+            let top = serde_json::Value::Object(leaf.clone());
+            assert!(has_secret_field(&top), "顶层的 {k} 必须被检出");
+            let mut wrap = serde_json::Map::new();
+            wrap.insert("settings".to_string(), serde_json::Value::Object(leaf));
+            let nested = serde_json::Value::Object(wrap);
+            assert!(has_secret_field(&nested), "嵌套的 {k} 必须被检出，否则明文落盘");
+        }
+        // transform_secrets 会递归数组，判据也必须递归进去
+        assert!(has_secret_field(&serde_json::json!([{ "apiKey": "x" }])));
+        // 反向对照：形近但不在登记表里的名字不得命中（否则判据退化成“一律 true”也会绿）
+        assert!(!has_secret_field(&serde_json::json!({ "api_key": "x", "keys": [] })));
+    }
+
+    /// 审查 v3 裁定①：树里没有密钥字段时，加/解密入口必须**恒等返回**且不触碰主密钥。
+    /// 这条正是把「持全局 `UPDATE_JSON_LOCK` 期间读盘取密钥 + 全树重建」省掉的那一半
+    /// （本机 `settings.json` 现算 696 B、零 secret 键，属绝大多数情形）。
+    #[test]
+    fn 无密钥字段时加解密入口恒等返回() {
+        let plain = serde_json::json!({
+            "theme": "light",
+            "nested": { "liquidMotion": "standard", "list": [{ "path": "C:/x" }] }
+        });
+        assert!(!has_secret_field(&plain), "夹具里不该有密钥键");
+        assert_eq!(decrypt_settings_with_oscrypt(&plain), plain, "无密钥字段时解密必须恒等");
+        assert_eq!(
+            encrypt_settings_with_oscrypt(&plain).expect("无密钥字段时加密不该失败"),
+            plain,
+            "无密钥字段时加密必须恒等"
+        );
     }
 }

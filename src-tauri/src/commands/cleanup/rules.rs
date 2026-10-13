@@ -11,7 +11,7 @@ use crate::engine::{guard, log, paths, rule_schema, rules_signature};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::WebviewWindow;
 use super::state::*;
@@ -67,7 +67,10 @@ pub(super) fn watermark_file() -> PathBuf {
 }
 
 /// 规则缓存（键 = 数据 mtime|size|custom 数量|各 custom mtime；对照 RULES_CACHE_SIG）
-pub(super) static RULES_CACHE: Mutex<Option<(String, Value)>> = Mutex::new(None);
+///
+/// 值存 `Arc<Value>`：缓存命中时只让引用计数 +1，不再深克隆整棵 JSON 树
+/// （见 [`rules_value_arc`]）。
+pub(super) static RULES_CACHE: Mutex<Option<(String, Arc<Value>)>> = Mutex::new(None);
 
 /// `safeReadJson`：只接受「能解析且 `groups` 是数组」的 JSON 对象
 pub(super) fn safe_read_json(file: &Path) -> Option<Value> {
@@ -1097,8 +1100,60 @@ pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label
 
 /// 清理规则原始数据（对照 `CLEANUP_SCRIPT.rules()`）：
 /// 数据目录（验签 + 防回滚）> 内置；再套 custom 开关。任何异常都不会抛——恒有结果。
+///
+/// 这是**兼容入口**：返回 owned `Value`，调用点语义与改造前逐字一致。代价是缓存命中时
+/// 仍有一次整树深克隆（缓存自己持有一份强引用，`Arc` 拆不开）。只读消费点
+/// （`json_text(&rules)` / `serde_json::to_string(&v)` 这类只要 `&Value` 的）请改走
+/// [`rules_value_arc`]，那条路命中时只加一次引用计数。
 pub fn rules_value() -> Result<Value, String> {
-    // 缓存签名：数据文件 mtime|size + custom 文件数|各 mtime（size 一并入键，防「保留 mtime 的篡改」）
+    rules_value_arc().map(|v| (*v).clone())
+}
+
+/// [`rules_value`] 的 **Arc 形态**：缓存命中时只克隆 `Arc`（引用计数 +1），不重建 JSON 树。
+///
+/// ## 为什么要另开一个入口
+///
+/// 规则库是约三百 KB 级、六千余节点的 JSON。旧 `rules_value()` 的命中路径
+/// `Ok(value.clone())` 把整棵树复制一遍，而扫描 / 执行 / 明细 / 路径扫描每条链都调它
+/// —— 这些消费点**只读**（拿 `&Value` 去 `to_string`），克隆纯属白付。
+///
+/// ## 与验签口径的关系（不许放宽）
+///
+/// 装载实现只有这一份：数据目录验签（`rules_signature::verify_rules_text`）+ 防回滚地板 +
+/// 语义校验任一不过 ⇒ 回退内置副本；两条路都不通 ⇒ 空规则集 + 日志，**不**沿用上一版
+/// 缓存。fail-closed 与内置 `include_str!` 副本的字节基线都没动（check-data-parity /
+/// check-cleanup-rule-contract 的对拍对象是数据文件，不是本函数）。
+///
+/// ## `apply_custom_toggles` 需要 `&mut` 的落点
+///
+/// custom 开关合并在**尚未共享的 owned `Value`** 上做（`load_merged_rules_uncached` 的返回
+/// 值只有它自己一个持有者），套完才 `Arc::new` ⇒ 全程不需要 `Arc::make_mut`，
+/// 也就不会因为「先共享再改」把省下的深克隆还回去、或把开关**重复应用**到缓存内容上。
+/// 若将来要改成「取缓存 Arc 再合并」，必须走 `Arc::make_mut` 且只在确有必要时走。
+pub fn rules_value_arc() -> Result<Arc<Value>, String> {
+    let (sig, custom) = rules_cache_sig();
+    {
+        let cache = RULES_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_sig, value)) = cache.as_ref() {
+            if *cached_sig == sig {
+                // 命中：只加引用计数。签名本身仍要现算（read_dir + metadata），
+                // 因为「文件被换掉但内容长度相同」必须判红，不能靠 TTL 放过。
+                return Ok(value.clone());
+            }
+        }
+    }
+    let rules = Arc::new(load_merged_rules_uncached(custom));
+    *RULES_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((sig, rules.clone()));
+    Ok(rules)
+}
+
+/// 缓存签名 + 本次目录快照里的 custom 文件清单。
+///
+/// 签名与清单**必须出自同一次 read_dir**（旧实现就是一次快照两用）：分两次读的话，
+/// 「签名里没算到、第二次读却出现」的 custom 文件会带着新开关落进缓存，而下一次
+/// 签名没变 ⇒ 那份合并结果被当成合法缓存一直用。返回清单而不是让装载侧再读一次目录，
+/// 既保住这个口径也少触一次盘。
+fn rules_cache_sig() -> (String, Vec<PathBuf>) {
     let mut custom: Vec<(PathBuf, f64)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(custom_rules_dir()) {
         for e in rd.flatten() {
@@ -1132,15 +1187,13 @@ pub fn rules_value() -> Result<Value, String> {
         custom.len(),
         custom.iter().map(|(_, m)| m.to_string()).collect::<Vec<_>>().join(",")
     );
-    {
-        let cache = RULES_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_sig, value)) = cache.as_ref() {
-            if *cached_sig == sig {
-                return Ok(value.clone());
-            }
-        }
-    }
+    (sig, custom.into_iter().map(|(p, _)| p).collect())
+}
 
+/// 未命中时的装载：验签数据目录 > 内置副本 > 空集，再逐个套 custom 开关。
+/// 只在 `rules_value_arc` 判定签名变化后才被调用（每轮装载各打一条日志）。
+/// `custom` 来自 [`rules_cache_sig`] 的那一次目录快照（见其注释）。
+fn load_merged_rules_uncached(custom: Vec<PathBuf>) -> Value {
     // 来源要记进日志（V2 P2-A1）：用户反馈"上次报了这次没报"时，第一句要能回答
     // 「当时吃的是哪一版、是数据目录那份还是内置那份」—— 整库 rulesVersion 相同但来源不同，
     // 结论完全不同
@@ -1152,7 +1205,7 @@ pub fn rules_value() -> Result<Value, String> {
             None => (json!({ "version": 0, "rulesVersion": 0, "groups": [] }), "无可用规则"),
         },
     };
-    for (path, _) in &custom {
+    for path in &custom {
         let Some(parsed) = safe_read_json(path) else {
             continue;
         };
@@ -1179,8 +1232,7 @@ pub fn rules_value() -> Result<Value, String> {
             "清理规则库已装载: 来源={rules_source} rulesVersion={rules_version} 条目={rule_items}"
         ),
     );
-    *RULES_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((sig, rules.clone()));
-    Ok(rules)
+    rules
 }
 
 /// 按 id 定位规则条目（groups→subGroups→items 与 groups→items 并存，需通用遍历）
@@ -1231,6 +1283,36 @@ pub(super) fn post_action_of(id: &str) -> &'static str {
     match table.get(id).map(String::as_str) {
         Some("explorer") => "explorer",
         _ => "none",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缓存命中路径的**正向对照**（AGENTS §4.1：恒绿断言不算验收）：第二次取必须拿到
+    /// **同一个 `Arc` 对象**（指针相等），而不是「内容相同但重建的一棵树」——
+    /// 命中分支若退回深克隆（写成 `Arc::new((*value).clone())`）本条立刻判红。
+    ///
+    /// 为什么在本文件而不在 `tests/module_smoke.rs`：判据对象是 `RULES_CACHE` 的
+    /// **内部表示**（模块私有 static），冒烟网够不着这一层。
+    #[test]
+    fn 规则库缓存命中返回同一个_arc() {
+        let first = rules_value_arc().expect("规则库装载恒有结果（两条来源都不通时回空规则集，不抛）");
+        let second = rules_value_arc().expect("同上");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "两次装载不是同一个 Arc —— 缓存没生效，或命中路径仍在重建整棵 JSON 树"
+        );
+        // 两条入口必须给同一份内容：兼容入口不许自成第二套判据
+        let owned = rules_value().expect("同上");
+        assert_eq!(owned, (*second).clone(), "rules_value 与 rules_value_arc 返回内容不一致");
+        // 点名命中对象：`groups` 必须是数组（内置副本恒有；验签链全断时是空数组，
+        // 那是 fail-closed 的既定形态，不是形状坏了）
+        assert!(
+            second.get("groups").map(|g| g.is_array()).unwrap_or(false),
+            "命中的规则树缺 groups 数组 —— 装载链或缓存被改坏"
+        );
     }
 }
 

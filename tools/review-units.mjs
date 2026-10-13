@@ -122,11 +122,26 @@ export const UNITS = [
     gates: ['check-residue-rule-contract', 'check-data-parity'],
   },
   {
-    id: 'R1b', owner: 'sub', name: 'commands 顶层·扫描与系统工具链（含新增命令文件自动落入）',
+    id: 'R1d', owner: 'sub', name: 'commands 顶层·扫描与度量链',
+    // 2026-10-14 从 R1b 切出：R1b 的目录兜底把新增命令文件全接住，本轮 fileclean 落了
+    // 真机对拍用例后整包 8172 行撞 U2 上限 8000。切法按执行链（两条都是「重 IO 采集 +
+    // 结果分槽」），不按目录对半切——对半切会让 finder/fileclean 两条删除链各剩一半上下文。
+    // **必须排在 R1b 之前**：认领 precedence 是「先点名的显式 files 赢过后出现的目录兜底」
+    // （R1a/R2a 同理），排后面会被判 U3「点名成了装饰」。
+    files: [`${C}/finder.rs`, `${C}/fileclean.rs`, `${C}/diskbench.rs`, `${C}/netcheck.rs`,
+      `${C}/realtime.rs`, `${C}/memory.rs`, `${C}/aidesc.rs`],
+    contract: '磁盘分析器逐层 du / 文件清理扫描与执行 / 磁盘测速 / 网络检测 / 实时与内存度量 / AI 描述生成',
+    boundary: '清理规则引擎与 PLANFILE 行协议归 R4/N1a；native 执行层归 R5a/R5b；本单元只审命令体与分槽',
+    gates: ['check-guard-tiers', 'check-channel-map', 'check-scan-rule-diff', 'check-delete-exits'],
+  },
+  {
+    id: 'R1b', owner: 'sub', name: 'commands 顶层·系统与运行环境链（新增命令文件自动落入）',
     dirs: [{ dir: C, ext: ['.rs'], depth: 1 }],
-    contract: 'finder / fileclean / contextmenu / startup / models / runtimes / quickcmds 等命令面',
-    boundary: '不含三个子目录域；native 执行层归 R5a/R5b',
-    gates: ['check-guard-tiers', 'check-channel-map', 'check-scan-rule-diff'],
+    files: [`${C}/contextmenu.rs`, `${C}/startup.rs`, `${C}/fonts.rs`, `${C}/quickcmds.rs`,
+      `${C}/runtimes.rs`, `${C}/models.rs`, `${C}/peripheral.rs`, `${C}/processmanager.rs`],
+    contract: '右键菜单 / 启动项与 RunOnce 批准位 / 字体 / 快捷命令 / 运行时与网络重置 / GPU 模型 / 外设 / 进程面板',
+    boundary: '不含三个子目录域；native 执行层归 R5a/R5b；扫描与度量链归 R1d',
+    gates: ['check-guard-tiers', 'check-channel-map', 'check-ps-callsites'],
   },
   {
     id: 'R2b', owner: 'sub', name: 'uninstall 孤儿与执行（列表/运行/七类孤儿）',
@@ -239,10 +254,23 @@ export const UNITS = [
 
   // ── 外围 ──
   {
-    id: 'N1', owner: 'sub', name: '原生扫描器',
-    dirs: [{ dir: 'native-scanner/src' }, { dir: 'native-scanner/tests' }],
-    contract: 'scan.rs / cleanup_scan.rs / 行协议 / recycle',
-    boundary: 'path 依赖、非 workspace 成员；测试唯一自动入口是 check-scan-rule-diff',
+    // N1 于 2026-10-14 拆成两半：合并形态 8109 非空行已越 U2 的 8000 上限
+    //（触发点是 v3 P1-A 给 cleanup_scan.rs 加的出口短路注释与 #[ignore] 探针）。
+    // 按「两条执行链」切而不是按目录平均切：v1 那份方案曾把 scan.rs 的 rayon 并行证据
+    // 挂到 cleanup_scan.rs 的「跨规则并发」结论上（v2 §P-5 判为跨链路误植），
+    // 拆成两条链各一个单元，正是为了让下一轮没法再串台。
+    // N1a 必须排在 N1b 之前：目录认领只吃此前无人认领的文件。
+    id: 'N1a', owner: 'sub', name: '原生扫描器·清理规则引擎',
+    files: ['native-scanner/src/cleanup_scan.rs'],
+    contract: 'cleanup_scan.rs / @@ITEM@@ 与 @@PLANFILE@@ 行协议 / recycle / 与 PS 逐字节对拍的命中集',
+    boundary: '规则间串行执行（scan_body），改并行要先过 check-scan-rule-diff；path 依赖、非 workspace 成员',
+    gates: ['check-scan-rule-diff'],
+  },
+  {
+    id: 'N1b', owner: 'sub', name: '原生扫描器·目录体积扫描与系统度量',
+    dirs: [{ dir: 'native-scanner/src', notPrefix: 'cleanup_scan' }, { dir: 'native-scanner/tests' }],
+    contract: 'scan.rs（dir_size/walk/bigfiles/duplicates/empty + rayon 线程池）/ perf.rs 四子命令 / util.rs 的 FFI 集中处',
+    boundary: 'perf.rs 的 ov-metrics、net-sample、mem-clean 由 src-tauri 直调，与清理链路无关；测试唯一自动入口仍是 check-scan-rule-diff',
     gates: ['check-scan-rule-diff'],
   },
   {
