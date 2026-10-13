@@ -1798,36 +1798,6 @@
               ]
             },
             {
-              "id": "winINetCookies",
-              "name": "WinINet Cookies",
-              "risk": "low",
-              "pathPs": "$env:LOCALAPPDATA + '\\Microsoft\\Windows\\INetCookies'",
-              "evidence": "系统级 Cookie",
-              "recommended": false,
-              "domain": "system",
-              "group": "history",
-              "nature": "history",
-              "regenerable": false,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "系统级 Cookie",
-                  "weight": 2
-                },
-                {
-                  "text": "内容不可再生（历史记录），删除后无法由系统重建，请确认后再勾选",
-                  "weight": 1
-                }
-              ]
-            },
-            {
               "id": "recentFiles",
               "name": "最近文档快捷方式",
               "risk": "low",
@@ -1933,48 +1903,6 @@
                 {
                   "type": "file",
                   "path": "%ProgramFiles%\\Microsoft Deployment Toolkit"
-                }
-              ]
-            },
-            {
-              "id": "microsoftEdgeWebBrowsingCookies",
-              "name": "Microsoft Edge Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Microsoft Edge Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "system",
-              "group": "stale",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Microsoft Edge Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Microsoft Edge Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge*\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Microsoft\\Edge*"
                 }
               ]
             },
@@ -6394,48 +6322,6 @@
               ]
             },
             {
-              "id": "360SecureBrowserWebBrowsingCookies",
-              "name": "360 Secure Browser 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「360 Secure Browser Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/360 Secure Browser Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「360 Secure Browser Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\360se6\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\360se6\\User Data"
-                }
-              ]
-            },
-            {
               "id": "360SecureBrowserAutoplayPreferences",
               "name": "360 Secure Browser Autoplay 缓存",
               "risk": "medium",
@@ -6509,48 +6395,6 @@
                 {
                   "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser*\\User Data\\*",
                   "pattern": "favicons*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser*"
-                }
-              ]
-            },
-            {
-              "id": "braveWebBrowsingCookies",
-              "name": "Brave Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Brave Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Brave Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Brave Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser*\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
                   "recurse": false
                 }
               ],
@@ -6646,48 +6490,6 @@
               ]
             },
             {
-              "id": "braveOriginWebBrowsingCookies",
-              "name": "Brave Origin Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Brave Origin Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Brave Origin Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Brave Origin Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Origin\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Origin\\User Data"
-                }
-              ]
-            },
-            {
               "id": "braveOriginAutoplayPreferences",
               "name": "Brave Origin Autoplay 缓存",
               "risk": "medium",
@@ -6761,48 +6563,6 @@
                 {
                   "path": "%LOCALAPPDATA%\\Chromium\\User Data\\*",
                   "pattern": "favicons*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Chromium\\User Data"
-                }
-              ]
-            },
-            {
-              "id": "chromiumWebBrowsingCookies",
-              "name": "Chromium Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Chromium Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Chromium Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Chromium Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Chromium\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
                   "recurse": false
                 }
               ],
@@ -6898,48 +6658,6 @@
               ]
             },
             {
-              "id": "googleChromeWebBrowsingCookies",
-              "name": "Google Chrome Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Google Chrome Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Google Chrome Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
-                }
-              ]
-            },
-            {
               "id": "googleChromeAutoplayPreferences",
               "name": "Google Chrome Autoplay 缓存",
               "risk": "medium",
@@ -7013,48 +6731,6 @@
                 {
                   "path": "%LOCALAPPDATA%\\Maxthon\\User Data\\*",
                   "pattern": "favicons*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Maxthon\\User Data"
-                }
-              ]
-            },
-            {
-              "id": "maxthonWebBrowsingCookies",
-              "name": "Maxthon Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Maxthon Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Maxthon Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Maxthon Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Maxthon\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
                   "recurse": false
                 }
               ],
@@ -7202,53 +6878,6 @@
               ]
             },
             {
-              "id": "mozillaFirefoxWebBrowsingCookies",
-              "name": "Mozilla Firefox Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Mozilla Firefox Web Browsing Cookies *」登记的缓存目标（2 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Mozilla Firefox Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Mozilla Firefox Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Mozilla\\Firefox\\Profiles\\*",
-                  "pattern": "cookies*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Packages\\Mozilla.Firefox_n80bbvh6b1yt2\\LocalCache\\Roaming\\Mozilla\\Firefox\\Profiles\\*",
-                  "pattern": "cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Mozilla\\Firefox\\Profiles"
-                }
-              ]
-            },
-            {
               "id": "operaBookmarkFavicons",
               "name": "Opera 书签",
               "risk": "medium",
@@ -7280,48 +6909,6 @@
                 {
                   "path": "%APPDATA%\\Opera Software\\Opera*\\*",
                   "pattern": "favicons*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Opera Software\\Opera*"
-                }
-              ]
-            },
-            {
-              "id": "operaWebBrowsingCookies",
-              "name": "Opera Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Opera Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Opera Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Opera Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Opera Software\\Opera*\\*\\Network",
-                  "pattern": "Cookies*",
                   "recurse": false
                 }
               ],
@@ -7422,53 +7009,6 @@
               ]
             },
             {
-              "id": "operaGxWebBrowsingCookies",
-              "name": "Opera GX Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Opera GX Web Browsing Cookies *」登记的缓存目标（2 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Opera GX Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Opera GX Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%APPDATA%\\Opera Software\\Opera GX*\\_side_profiles\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                },
-                {
-                  "path": "%APPDATA%\\Opera Software\\Opera GX*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%APPDATA%\\Opera Software\\Opera GX*"
-                }
-              ]
-            },
-            {
               "id": "operaGxSyncData",
               "name": "Opera GX Sync Data 缓存",
               "risk": "medium",
@@ -7512,48 +7052,6 @@
                 {
                   "type": "file",
                   "path": "%APPDATA%\\Opera Software\\Opera GX*"
-                }
-              ]
-            },
-            {
-              "id": "qqbrowserWebBrowsingCookies",
-              "name": "QQBrowser Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「QQBrowser Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/QQBrowser Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「QQBrowser Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Tencent\\QQBrowser\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Tencent\\QQBrowser\\User Data"
                 }
               ]
             },
@@ -7684,48 +7182,6 @@
               ]
             },
             {
-              "id": "thoriumWebBrowsingCookies",
-              "name": "Thorium Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Thorium Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Thorium Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Thorium Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Thorium\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Thorium\\User Data"
-                }
-              ]
-            },
-            {
               "id": "thoriumAutoplayPreferences",
               "name": "Thorium Autoplay 缓存",
               "risk": "medium",
@@ -7799,48 +7255,6 @@
                 {
                   "path": "%LOCALAPPDATA%\\Vivaldi\\User Data\\*",
                   "pattern": "favicons*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Vivaldi\\User Data"
-                }
-              ]
-            },
-            {
-              "id": "vivaldiWebBrowsingCookies",
-              "name": "Vivaldi Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Vivaldi Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Vivaldi Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Vivaldi Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Vivaldi\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
                   "recurse": false
                 }
               ],
@@ -7936,48 +7350,6 @@
               ]
             },
             {
-              "id": "yandexWebBrowsingCookies",
-              "name": "Yandex Web Browsing 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Yandex Web Browsing Cookies *」登记的缓存目标（1 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Yandex Web Browsing Cookies *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Yandex Web Browsing Cookies *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Yandex\\YandexBrowser\\User Data\\*\\Network",
-                  "pattern": "Cookies*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Yandex\\YandexBrowser\\User Data"
-                }
-              ]
-            },
-            {
               "id": "googleChromeSyncData",
               "name": "Google Chrome Sync Data 缓存",
               "risk": "medium",
@@ -8008,182 +7380,6 @@
               "fileKeys": [
                 {
                   "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Sync Data",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
-                }
-              ]
-            },
-            {
-              "id": "googleChromeWebBrowsingSession",
-              "name": "Google Chrome Web Browsing 会话",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Google Chrome Web Browsing Session *」登记的缓存目标（2 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Google Chrome Web Browsing Session *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Web Browsing Session *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Extension State",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Sessions",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
-                }
-              ]
-            },
-            {
-              "id": "googleChromeAutofillDataSearchEnginePreferences",
-              "name": "Google Chrome 表单自动填充",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Google Chrome Autofill Data & Search Engine Preferences *」登记的缓存目标（3 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Google Chrome Autofill Data & Search Engine Preferences *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Autofill Data & Search Engine Preferences *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*",
-                  "pattern": "*Web Data",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\AutoFill*",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\AutoFill*",
-                  "pattern": "*",
-                  "recurse": false
-                }
-              ],
-              "detect": [
-                {
-                  "type": "file",
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*"
-                }
-              ]
-            },
-            {
-              "id": "googleChromeWebStorage",
-              "name": "Google Chrome Web Storage 缓存",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Google Chrome Web Storage *」登记的缓存目标（8 个路径）",
-              "recommended": false,
-              "domain": "browser",
-              "group": "sync",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Google Chrome Web Storage *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261013,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Google Chrome Web Storage *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\IndexedDB",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\IndexedDB\\https*",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\Session Storage",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\Storage\\ext\\*\\def\\Session Storage",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\*\\WebStorage",
-                  "pattern": "*",
-                  "recurse": true
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Local Storage\\leveldb",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\Session Storage",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%LOCALAPPDATA%\\Google\\Chrome*\\User Data\\*\\WebStorage",
                   "pattern": "*",
                   "recurse": false
                 }
@@ -9015,6 +8211,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "g77xY1NJ6zalQA9kIIC/xKTcV2xNttFO9XM7G98StgRyiEoAzaPFSB436QkJg7G0x4/ht056TKPoPQTPJPlGDw=="
+    "sig": "2vgKDfOkJjdkL8KzFwY7mdDAn70YsLiKLOk/3Ek9U7Avip3j02/56Guyys9+csb95XlvVUQrRp9uj34j0XDSBA=="
   }
 }
