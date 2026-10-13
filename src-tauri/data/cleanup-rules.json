@@ -8602,7 +8602,7 @@
               "name": "组件存储清理 (DISM /ResetBase)",
               "risk": "high",
               "special": "dism",
-              "evidence": "压缩组件存储，更新将不可卸载",
+              "evidence": "压缩组件存储，更新将不可卸载（由 Windows 官方 DISM 执行，通常需要 10-40 分钟）",
               "recommended": false,
               "domain": "special",
               "group": "actions",
@@ -8624,6 +8624,10 @@
                 {
                   "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
                   "weight": 1
+                },
+                {
+                  "text": "耗时预期：该操作由 Windows 官方 DISM 执行，通常需要 10-40 分钟，期间 CPU/磁盘占用高属正常，不是卡死",
+                  "weight": 1
                 }
               ]
             }
@@ -8635,6 +8639,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "Xaf5byV4fGX8JsZE9OhEh7lMi8XW1WB3vypFvdpgzpBDOTBO36KFUyjoFRonHxfyS5b4KUhmW8RZC6lW3gWFDw=="
+    "sig": "uu21Qi+sEa7ABcPk8fRrdfR8lAAlsq7p6CrL5qKXsLC9l0+Xc7RKnlOyAorrQBea27cQiSP5D9hS1+VQKLo2BA=="
   }
 }
