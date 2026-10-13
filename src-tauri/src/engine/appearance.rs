@@ -13,15 +13,19 @@ use crate::security;
 /// 材质合法值（非法值回退 mica，与设置页默认一致）
 const MATERIALS: &[&str] = &["mica", "mica-alt", "acrylic", "thin-acrylic", "none"];
 
+/// 外观配置只读展示（写侧唯一入口是 [`update_appearance`]）。
+///
+/// v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt）已在 read_json_state 内
+/// warn 留痕，这里只做展示降级；写侧拒 Corrupt，不会把空对象整表写出去。
 pub fn load_appearance() -> Value {
-    security::read_json_or_quarantine(&paths::appearance_file())
-}
-
-pub fn save_appearance(v: &Value) {
-    if let Err(e) = security::atomic_write_json(&paths::appearance_file(), v) {
-        log::write_log("error", &format!("保存外观配置失败: {e}"));
+    match security::read_json_state(&paths::appearance_file()) {
+        security::JsonState::Ok(v) => v,
+        _ => serde_json::json!({}),
     }
 }
+
+// v5-K01 批次 4：`save_appearance`（死 pub，现算零生产调用者）随本批删除——
+// 它是「load 空对象 → 整表覆写」旧链的另一半；外观写唯一入口是 update_appearance。
 
 /// 读-改-写（v4 P2-D 尾 / R7-M01 同族）：读失败拒写（Corrupt ⇒ Err）。
 ///

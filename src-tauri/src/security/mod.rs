@@ -179,20 +179,14 @@ pub fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), S
     atomic_write_file(path, text.as_bytes())
 }
 
-/// 读取 JSON 配置；损坏时先隔离再返回默认空对象（审查 4-1）
-pub fn read_json_or_quarantine(path: &Path) -> serde_json::Value {
-    match fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) if v.is_object() => v,
-            Ok(_) => serde_json::json!({}),
-            Err(e) => {
-                quarantine_file(path, &e.to_string());
-                serde_json::json!({})
-            }
-        },
-        Err(_) => serde_json::json!({}),
-    }
-}
+// v5-K01 批次 4（R7-M05，2026-10-13）：`read_json_or_quarantine` 整函数退役。
+// 它的 IO 失败分支把「读不到」折叠成「空配置」（`Err(_) => json!({})`），读-改-写
+// 链据此把基于空对象的合并结果整表覆写回盘且回执 success——用户唯一还原依据
+// （optimizer-backups.json）与含 DPAPI 密文密钥的 settings.json 都在这条缝上。
+// 消费方全部改走三态读器 [`read_json_state`]（对象形态）：`Absent` = 没有文件、
+// `Corrupt` = 读了拿不到（解析失败已隔离、IO 失败只留痕不隔离——文件可能还在，
+// 搬运会误伤），写侧一律 [`update_json`]（读失败绝不落到写）。
+// 「只读缓存损坏静默降级」的 [`read_json_or_default`] 按 R7-W-5 裁定维持不变。
 
 /// 读**只读缓存**（扫描结果、体检结果这类可重扫的产物）：损坏时静默返回空对象，不隔离。
 ///
@@ -523,6 +517,53 @@ mod tests {
     }
 
     // ==================== 审查 v2-U3：永久删除出口的匹配面 ====================
+
+    /// v5-K01 批次 4（R7-M05）：IO 失败（非 NotFound）≠ 空数据——update_json 拒写、
+    /// 不隔离（文件可能还在，只是暂时读不到，搬运会误伤）、原路径不动。
+    /// 用「同路径目录」模拟非 NotFound 的 IO 失败（read_to_string 对目录返回错误，
+    /// 纯 std 可构造，不需要句柄控制）。判红自证：把 read_json_state_shape 的
+    /// 非 NotFound 分支临时改成 Absent（模拟旧「IO 失败=没有配置」）⇒ update_json
+    /// 会走 f + atomic_write（对目录失败）⇒ Err 消息不再是「本次写入已拒绝」⇒ 本用例红。
+    #[test]
+    fn update_json对io失败拒写且原路径不动() {
+        let root = sandbox("io-fail");
+        // ① 目录占位 = 非 NotFound IO 失败：拒写、不隔离、原路径不动
+        let p = root.join("blocked.json");
+        fs::create_dir(&p).unwrap();
+        let err = update_json(&p, |v| {
+            *v = serde_json::json!({ "x": 1 });
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.contains("本次写入已拒绝"), "IO 失败必须以「拒写」回执: {err}");
+        assert!(p.is_dir(), "原路径不得被动过（不隔离/不改名/不删）");
+        // ② 反向钉：NotFound = 真没有 ⇒ 首写放行（Absent ≠ Corrupt）
+        let q = root.join("fresh.json");
+        let out = update_json(&q, |v| {
+            *v = serde_json::json!({ "ok": true });
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out["ok"], serde_json::json!(true), "NotFound 必须按首写放行");
+        // ③ Corrupt（读到但解析失败）= 隔离保留现场 + 拒写；隔离件内容 = 原内容逐字节
+        let c = root.join("corrupt.json");
+        fs::write(&c, "{不是 json").unwrap();
+        let err2 = update_json(&c, |_| Ok(())).unwrap_err();
+        assert!(err2.contains("本次写入已拒绝"), "解析失败必须拒写: {err2}");
+        let quarantined: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("corrupt.json.corrupt-"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "解析失败现场必须隔离保留: {quarantined:?}");
+        assert_eq!(
+            fs::read(root.join(&quarantined[0])).unwrap(),
+            b"{\xe4\xb8\x8d\xe6\x98\xaf json".to_vec(),
+            "隔离件必须保留原字节（现场可回看）"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 
     /// 审查 M-02：临时文件名后缀改走 CSPRNG 后，形状必须是**定长 hex**——
     /// 旧的纳秒+序号+pid 是变长十进制/十六进制混排，且字符集含 pid 形态。

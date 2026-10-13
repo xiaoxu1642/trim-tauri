@@ -16,23 +16,28 @@ pub(super) fn opt_backup_file() -> std::path::PathBuf {
     crate::engine::paths::app_data_dir().join("optimizer-backups.json")
 }
 
+/// 备份台账只读消费（列表 / 详情 / 迁移提示）。
+///
+/// v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt，含 IO 失败）已在
+/// read_json_state 内 warn 留痕，不再与「没有配置」同归静默空；只读展示降级空表。
+/// **写链一律走 [`update_opt_backups`]**（读失败绝不落到写），不许 load→改→save。
 pub(super) fn load_opt_backups() -> Value {
-    let v = crate::security::read_json_or_quarantine(&opt_backup_file());
-    if v.is_object() {
-        v
-    } else {
-        json!({})
+    match crate::security::read_json_state(&opt_backup_file()) {
+        crate::security::JsonState::Ok(v) => v,
+        _ => json!({}),
     }
 }
 
-pub(super) fn save_opt_backups(map: &Value) -> bool {
-    match crate::security::atomic_write_json(&opt_backup_file(), map) {
-        Ok(()) => true,
-        Err(e) => {
-            log::write_log("error", &format!("写入优化备份失败: {e}"));
-            false
-        }
-    }
+/// v5-K01 批次 4（R7-M05 / R3-M07 同链收口）：optimizer-backups.json 的**读-改-写
+/// 唯一入口**。这份台账是用户值级注册表备份的唯一还原依据——旧链 load（IO 失败 ⇒
+/// 空表）→ 改 → save（`atomic_write_json` 直调）会在读失败瞬间把整本台账覆写成
+/// 只剩本次改动，回执仍是 success。走 `security::update_json`：Corrupt 拒写、
+/// `UPDATE_JSON_LOCK` 全局串行（此前三条写链各自 load/save 手工配对、无域锁）。
+pub(super) fn update_opt_backups<F>(f: F) -> Result<Value, String>
+where
+    F: FnOnce(&mut Value) -> Result<(), String>,
+{
+    crate::security::update_json(&opt_backup_file(), f)
 }
 
 /// .reg 根键 → [Microsoft.Win32.Registry] 静态属性名（Read-One 用）
@@ -355,17 +360,26 @@ pub async fn optimizer_backup_reg<R: Runtime>(
         log::write_log("error", "优化项注册表备份异常: 读取/解析失败");
         return json!({ "success": false, "message": "读取当前注册表值失败" });
     };
-    let mut map = load_opt_backups();
-    let (count, kept) = match insert_backup_baseline(&mut map, &option_id, values.clone()) {
-        BackupInsert::Inserted => (values.len(), false),
-        // 已有基线：返回**首份**的项数并如实标注，且不重新落盘（内容没变）
-        BackupInsert::KeptExisting(n) => (n, true),
-        BackupInsert::MapNotObject => {
-            return json!({ "success": false, "message": "注册表备份文件结构异常" });
+    // v5-K01 批次 4（R7-M05）：读-改-写收进 update_opt_backups——读失败（Corrupt）
+    // 拒写并如实回执，不再把基于空表的「新基线」覆写出去。KeptExisting 时内容不变，
+    // update_json 落盘的是等价内容（旧链此分支刻意不落盘，语义等价）。
+    let mut count = 0usize;
+    let mut kept = false;
+    let res = update_opt_backups(|map| match insert_backup_baseline(map, &option_id, values.clone()) {
+        BackupInsert::Inserted => {
+            count = values.len();
+            Ok(())
         }
-    };
-    if !kept && !save_opt_backups(&map) {
-        return json!({ "success": false, "message": "注册表备份文件写入失败" });
+        BackupInsert::KeptExisting(n) => {
+            count = n;
+            kept = true;
+            Ok(())
+        }
+        BackupInsert::MapNotObject => Err("注册表备份文件结构异常".into()),
+    });
+    if let Err(e) = res {
+        log::write_log("error", &format!("优化项注册表备份失败: {option_id} {e}"));
+        return json!({ "success": false, "message": format!("注册表备份写入失败: {e}") });
     }
     log::write_log(
         "info",
@@ -396,7 +410,9 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     if !sysinfo::is_admin() {
         return json!({ "success": false, "needAdmin": true, "message": "还原优化需要管理员权限，请先提权" });
     }
-    let mut map = load_opt_backups();
+    // v5-K01 批次 4：只读查 entry（Corrupt 时 load 降级空表 + 已有 warn 留痕；
+    // 记账清理走 update_opt_backups，见还原成功后的收口）
+    let map = load_opt_backups();
     let entry = map.get(&option_id).cloned();
     let Some(entry) = entry else {
         return json!({ "success": false, "missing": true, "message": "无备份记录" });
@@ -433,11 +449,16 @@ pub async fn optimizer_restore_reg<R: Runtime>(
             "message": format!("还原后回读校验不一致（{mismatched}/{checked} 条），已保留备份记录，可重试或查看日志"),
         });
     }
-    if let Some(o) = map.as_object_mut() {
-        o.remove(&option_id);
-    }
-    if !save_opt_backups(&map) {
-        return json!({ "success": false, "message": "还原完成但备份记录清理失败" });
+    // v5-K01 批次 4（R7-M05）：清理备份记录走 update_opt_backups——回读校验已通过，
+    // 台账清理失败必须如实回执（记录留下可重试），不许静默。
+    if let Err(e) = update_opt_backups(|m| {
+        if let Some(o) = m.as_object_mut() {
+            o.remove(&option_id);
+        }
+        Ok(())
+    }) {
+        log::write_log("error", &format!("优化项还原后清理备份记录失败: {option_id} {e}"));
+        return json!({ "success": false, "message": format!("还原完成但备份记录清理失败: {e}") });
     }
     let _ = opt_state::remove(&option_id);
     let _ = opt_state::set_detected_entry(&option_id, false);

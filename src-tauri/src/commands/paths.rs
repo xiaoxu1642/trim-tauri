@@ -75,9 +75,15 @@ const ALLOWED_KEYS: &[&str] = &[
     "neteaseCacheDir",
 ];
 
-/// 读取路径配置（剥离历史遗留的软件清单字段）
+/// 读取路径配置（剥离历史遗留的软件清单字段）。
+///
+/// v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt）已在 read_json_state 内
+/// warn 留痕，不再与「没有配置」同归静默空；只读展示降级空对象，写侧 update_json 拒写。
 fn load_paths_config() -> serde_json::Value {
-    let v = security::read_json_or_quarantine(&paths::paths_config_file());
+    let v = match security::read_json_state(&paths::paths_config_file()) {
+        security::JsonState::Ok(v) => v,
+        _ => serde_json::json!({}),
+    };
     match v {
         serde_json::Value::Object(mut m) => {
             m.remove("softwareInventory");

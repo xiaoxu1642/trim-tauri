@@ -96,8 +96,14 @@ fn default_dirs(ty: &str) -> Vec<PathBuf> {
 }
 
 /// 读已保存的路径配置。读不到 / 解析失败 / 空串都返回 None，调用方 fail-closed。
+///
+/// v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt）已在 read_json_state 内
+/// warn 留痕；fail-closed 语义不变（None ⇒ 默认目录），写侧 update_json 拒写。
 fn saved_dir(ty: &str) -> Option<String> {
-    let cfg = security::read_json_or_quarantine(&paths::paths_config_file());
+    let cfg = match security::read_json_state(&paths::paths_config_file()) {
+        security::JsonState::Ok(v) => v,
+        _ => serde_json::json!({}),
+    };
     cfg.get(config_key(ty))
         .and_then(|v| v.as_str())
         .map(str::trim)

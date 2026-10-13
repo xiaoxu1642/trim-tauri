@@ -323,15 +323,22 @@ Write-Output ('@@SRPRE@@' + ($out | ConvertTo-Json -Compress))";
         return json!({ "success": false, "message": "频率覆写值备份失败，已中止创建（不留无法回收的中间状态）" });
     };
     {
-        let mut map = load_opt_backups();
+        // v5-K01 批次 4（R7-M05）：读-改-写收进 update_opt_backups——读失败（Corrupt）
+        // 拒写并中止创建（旧链 load 空表 → save 会把台账覆写成只剩本条，回执还是成功）。
         // v2-M9：这条也走「首份不覆盖」——同一项重复创建时不得把基线刷成已覆写值。
         // 不覆盖是安全的：新逻辑下每次创建结束都回收，当前值必等于原值，旧基线依然正确。
-        let inserted =
-            matches!(insert_backup_baseline(&mut map, "tf_restore_point", values), BackupInsert::Inserted);
-        if !inserted {
-            log::write_log("warn", "还原点频率覆写值级备份未写入（基线已存在或结构异常）");
-        } else if !save_opt_backups(&map) {
-            log::write_log("warn", "还原点频率覆写值级备份保存失败，已中止创建");
+        let res = update_opt_backups(|map| {
+            if matches!(
+                insert_backup_baseline(map, "tf_restore_point", values.clone()),
+                BackupInsert::KeptExisting(_)
+            ) {
+                // 基线已存在：内容不变，落盘等价；只在日志说明（与旧行为同口径）
+                log::write_log("warn", "还原点频率覆写值级备份未写入（基线已存在）");
+            }
+            Ok(())
+        });
+        if let Err(e) = res {
+            log::write_log("warn", &format!("还原点频率覆写值级备份保存失败，已中止创建: {e}"));
             return json!({ "success": false, "message": "频率覆写值备份保存失败，已中止创建（不留无法回收的中间状态）" });
         }
     }

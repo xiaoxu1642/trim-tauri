@@ -95,7 +95,13 @@ pub fn touch_recent(id: &str) -> bool {
 
 fn load() -> Value {
     let f = state_file();
-    let v = security::read_json_or_quarantine(&f);
+    // v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt，含 IO 失败）已在
+    // read_json_state 内 warn 留痕，不再与「没有配置」同归静默空；这里降级空骨架
+    // 只影响读侧预读，写侧 update_state 拒 Corrupt，不会把空骨架写出去。
+    let v = match security::read_json_state(&f) {
+        security::JsonState::Ok(v) => v,
+        _ => return empty_state(),
+    };
     match v {
         Value::Object(m) if m.get("items").map(|x| x.is_object()).unwrap_or(false) => {
             let mut o = m;

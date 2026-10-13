@@ -8,8 +8,8 @@
 //!
 //! # 密钥存储链（D5 / 审查 1-5）
 //!
-//! - 读：`settings.json` → `security::read_json_or_quarantine`（损坏隔离）→
-//!   `security::decrypt_settings_with_oscrypt`（`dpapi:v1:` → 明文；主密钥取不到时按
+//! - 读：`settings.json` → `security::read_json_state`（三态；Corrupt 只读降级、写侧拒写）
+//!   → `security::decrypt_settings_with_oscrypt`（`dpapi:v1:` → 明文；主密钥取不到时按
 //!   「未配置」回落空串，不阻塞其余字段）；
 //! - 写：`security::encrypt_settings_with_oscrypt`（**绝不明文落盘**；无主密钥时回落
 //!   旧版「v10 + 裸 DPAPI」密文，Electron 与本项目两侧都能读）；
@@ -644,9 +644,16 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
 
 // ==================== 配置读写（settings.json） ====================
 
-/// `loadAiSettings`：读 + 损坏隔离 + 密钥解密
+/// `loadAiSettings`：三态读 + 密钥解密。
+///
+/// v5-K01 批次 4（R7-M05）：读失败（Corrupt，含 IO 失败）已在 read_json_state 内
+/// warn 留痕，不再与「没有配置」同归静默空；只读消费降级空对象展示，写侧
+/// `update_settings` 拒 Corrupt——含 DPAPI 密文密钥的 settings.json 不会被空表覆写。
 pub(crate) fn load_settings() -> Value {
-    let v = security::read_json_or_quarantine(&settings_file());
+    let v = match security::read_json_state(&settings_file()) {
+        security::JsonState::Ok(v) => v,
+        _ => json!({}),
+    };
     if !v.is_object() {
         return json!({});
     }
