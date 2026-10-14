@@ -973,8 +973,11 @@
     (NARA_PANEL.sections || []).forEach(s => (s.tasks || []).forEach(id => tasksChecked.add(id)));
     naraPanelState = {
       sections, checked, tasksChecked, taskMap: new Map(),
-      // BCD 体检：null=未出结果；'failed'=读不到（多为非提权）；Map<rowId,状态行>
+      // BCD 体检：null=未出结果；'failed'=读不到（原因见 bcdMsg，权限只是其中一种）；
+      // Map<rowId,状态行>。失败文案不得写死成「需要管理员」——中文 Windows 上曾把
+      // bcdedit 的 GBK 输出误判成解码失败，却报成权限不足。
       bcd: null,
+      bcdMsg: '',
       running: false, ctrl: null,
     };
     const ctrl = create({
@@ -1037,7 +1040,10 @@
     if (isBcd) {
       const bcd = st.bcd;
       if (!(bcd instanceof Map)) {
-        side.push(naraBadge('neutral', bcd === 'failed' ? '需管理员体检' : '待体检', 'BCD 存储需要管理员权限才能读取'));
+        // 徽章不再断言「需管理员」：读不到的原因由后端 message 给，权限只是其中一种可能
+        side.push(bcd === 'failed'
+          ? naraBadge('warn', '体检失败', st.bcdMsg || '未取到 BCD 体检结果')
+          : naraBadge('neutral', '待体检', 'BCD 体检完成后判定'));
       } else {
         const r = bcd.get(o.id);
         if (r?.protectionHit) side.push(naraBadge('accent', '保护态跳过', 'Hyper-V/WSL/模拟器在用'));
@@ -1133,6 +1139,13 @@
         window.app?.requestElevation?.('BCD 体检需要管理员权限，应用将以管理员身份重启。');
         return;
       }
+      if (e.target.closest('[data-nara-bcd-retry]')) {
+        naraPanelState.bcd = null;
+        naraPanelState.bcdMsg = '';
+        refreshNaraPanel();
+        loadNaraBcdStates();
+        return;
+      }
       if (e.target.closest('[data-nara-run]')) { runNaraPanel(); return; }
       if (e.target.closest('[data-nara-close]')) { ctrl.close(); }
     });
@@ -1164,6 +1177,7 @@
     try { res = await window.api?.optimizer?.bcdEnum?.(); } catch (e) { res = null; }
     if (!(res?.success && res.data)) {
       st.bcd = 'failed';
+      st.bcdMsg = (res && res.message) || '未取到 BCD 体检结果';
       refreshNaraPanel();
       paintBcdBanner('failed');
       return;
@@ -1176,19 +1190,28 @@
       if (r.kind === 'executable' && !r.protectionHit && !optimizedIds.has(id)) st.checked.add(id);
     });
     refreshNaraPanel();
-    paintBcdBanner('ok', res.data.unknownBcdValues || []);
+    paintBcdBanner('ok', res.data.undocumentedBcdValues || []);
   }
 
-  function paintBcdBanner(kind, unknown) {
+  function paintBcdBanner(kind, undocumented) {
     const slot = naraPanelState?.ctrl?.body?.querySelector('[data-nara-bcd-banner]');
     if (!slot) return;
     if (kind === 'failed') {
       slot.classList.add('is-failed');
-      slot.innerHTML = `<span>BCD 体检需要管理员权限（bcdedit 对非提权进程拒绝访问），提权后自动检测；检测完成前 BCD 5 行不勾选。</span>
-        <button type="button" class="btn btn-secondary btn-small" data-nara-elevate>以管理员身份重启</button>`;
-    } else if (Array.isArray(unknown) && unknown.length) {
+      // 失败原因由后端带回（退出码 / 解码 / 权限都可能是原因），横幅只陈述实测到的那一条；
+      // 「以管理员身份重启」仅在**确实不是**管理员时才给，已是管理员却摆提权入口是误导。
+      const why = escapeHtml(naraPanelState.bcdMsg || '未取到 BCD 体检结果');
+      const needAdmin = window.app?.getState?.().isAdmin === false;
+      slot.innerHTML = `<span>BCD 体检未完成：${why}。检测完成前 BCD 5 行不勾选。</span>`
+        + `<button type="button" class="btn btn-secondary btn-small" data-nara-bcd-retry>重新体检</button>`
+        + (needAdmin
+          ? `<button type="button" class="btn btn-secondary btn-small" data-nara-elevate>以管理员身份重启</button>`
+          : '');
+    } else if (Array.isArray(undocumented) && undocumented.length) {
+      // 只报真·无文档的 custom:* 自定义项。面板不托管的其它既有元素（linearaddress57、vm…）
+      // 是用户机器本来就有的启动配置，2026-10-14 裁定：照常禁写，但不再作为告警内容展示。
       slot.classList.add('is-warn');
-      slot.textContent = `检测到 ${unknown.length} 个无文档/危险 BCD 元素（${unknown.join('、')}），专项面板不会写入这些值。`;
+      slot.textContent = `检测到 ${undocumented.length} 个无文档自定义项（${undocumented.join('、')}），面板不托管、不会写入这些值。`;
     } else {
       slot.remove();
     }
@@ -1465,6 +1488,7 @@
   // 列头 = 分类名 + 项数徽章；列底 = 「全选本类」；
   // 瀑布流：按升序顺序依次放入「最矮列」底部，列数按容器宽度自适应，1 看板占满整行，无横向滚动。
   let kanbanMasonry = null;
+  let kanbanEngineWarned = false; // 引擎缺失只报第一次，见下方 attach 守卫
   function renderGroups(options) {
     const root = document.getElementById('optimizerGroups');
     if (!root) return;
@@ -1520,14 +1544,21 @@
     // （2026-09-27）：网络栈优化迁移已跨多个版本，新用户无从知晓旧位置，横幅失去指引价值。
     // 瀑布流布局：重新渲染后立即放置；窗口 resize 由 attach 内部防抖 + FLIP 动画重排
     // 注意：布局容器是每次重渲染重建的 .opt-kanban，须用 getter 动态获取
-    if (!kanbanMasonry && window.kanbanMasonry) {
-      // minCard 246 → 320（2026-10-11 用户实测「优化项堆叠」修正）：246 时列宽约 250px，
-      // 行内复选框+序号+风险徽章+（原）已优化标签吃掉约 180px，长标题（英文设备名等）
-      // 被挤成每行 5-8 字的竖排碎片、序号垂直居中插进文字中间，视觉上像文字层叠。
-      // 320 在用户窗口宽度下收敛为 3 列（列宽约 340-370px），名称列宽约 200-250px。
-      kanbanMasonry = window.kanbanMasonry.attach(
-        () => root.querySelector('.opt-kanban'), '.opt-col', { gap: 14, minCard: 320 }
-      );
+    if (!kanbanMasonry) {
+      if (window.kanbanMasonry) {
+        // minCard 246 → 320（2026-10-11 用户实测）：246 时列宽约 250px，行内复选框+序号+风险徽章
+        // +（原）已优化标签吃掉约 180px，长标题（英文设备名等）被挤成每行 5-8 字的竖排碎片。
+        // ⚠️ 同日那条「优化项堆叠」当时被归因到 minCard，**归错了**：真因是 window.kanbanMasonry
+        // 根本没就位（见 app.js PAGE_SCRIPTS.optimizer 里的 scripts/xtable.js），2026-10-14 才查实。
+        // 调列宽治不了叠放，别再往这个数上找。
+        kanbanMasonry = window.kanbanMasonry.attach(
+          () => root.querySelector('.opt-kanban'), '.opt-col', { gap: 14, minCard: 320 }
+        );
+      } else if (!kanbanEngineWarned) {
+        // 静默跳过 = .opt-col 全叠在原点，症状看着像 GPU 花屏（2026-10-14 就是这么绕了一大圈）
+        kanbanEngineWarned = true;
+        window.app?.log('error', '看板布局引擎未就位：xtable.js 未随「电脑优化中心」页注入，列会全部叠在一起');
+      }
     }
     if (kanbanMasonry) kanbanMasonry.relayout(false);
     bindNaraCol(); // C3：innerHTML 重建后重新绑入口卡事件

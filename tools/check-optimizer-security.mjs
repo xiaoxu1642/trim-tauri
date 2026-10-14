@@ -160,7 +160,9 @@ const BCD_ALLOWED_ELEMENTS = new Set([
   // store 标识符（bcdedit /enum {current} 里会出现，不算元素）
   'current', 'globalsettings', 'default',
 ]);
-// 禁写的无文档/危险值（出现即红）
+// 禁写元素（面板不托管：既有缓解开关 + 无文档自定义项，数据层出现即红）
+// 注：这里的「禁写」是安全口径，不等于这些元素在用户机器上是「危险配置」——
+// linearaddress57 / vm 等是本机既有的启动项，渲染层只对 custom:* 提示（见 commands/optimizer/bcd.rs）。
 const BCD_FORBIDDEN_ELEMENTS = [
   /^increaseuserva$/i,
   /^vm$/i,
@@ -199,7 +201,7 @@ function extractBcdElements(text) {
       }
     }
   }
-  check(bcdForbidden.length === 0, 'BCD 禁写元素（无文档/危险值）', bcdForbidden.join('；') || '');
+  check(bcdForbidden.length === 0, 'BCD 禁写元素（面板不托管）', bcdForbidden.join('；') || '');
   check(bcdUnknown.length === 0, 'BCD 白名单元素登记', bcdUnknown.join('；') || '');
 }
 

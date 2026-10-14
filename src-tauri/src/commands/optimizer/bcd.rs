@@ -187,7 +187,11 @@ fn run_bcd_enum(identifier: &str) -> Result<String, String> {
             out.status.code().unwrap_or(-1)
         ));
     }
-    String::from_utf8(out.stdout).map_err(|e| format!("bcdedit stdout 非 UTF-8: {e}"))
+    // bcdedit 跟随系统 ANSI 代码页出字（本机 ACP=936），stdout 根本不是 UTF-8。
+    // 这里原先写 `String::from_utf8(out.stdout)`，于是在任何中文 Windows 上恒判解码失败
+    // → 命令回 success:false → 前端把「体检失败」渲染成「权限不够」（灰态 + 提权按钮）。
+    // 解码一律走 systembin 的三级口径：UTF-16LE → UTF-8 → OEMCP。
+    Ok(systembin::decode_native_output(&out.stdout))
 }
 
 // ==================== 2. 条件命中判定 ====================
@@ -329,13 +333,13 @@ pub const ALL_ROW_IDS: &[&str] = &[
     "nara_bcd_irq",
 ];
 
-/// 检测到的**危险/无文档元素**名单（前端告警条）。
+/// 面板**不托管**的既有 BCD 元素：一律不写、原样保留。
 ///
 /// 白名单外还有大量系统常态元素（identifier/device/path/description/locale/osdevice/
 /// systemroot/resumeobject/inherit/nx/flightsigning 等），全报等于噪音；口径与
 /// check-optimizer-security 的 BCD 禁写名单一致，唯独不含 `nx`（OptIn 是系统默认态，
-/// 禁写但不必告警）。
-fn dangerous_elements(current: &BcdMap) -> Vec<String> {
+/// 禁写但不必提示）。
+fn unmanaged_elements(current: &BcdMap) -> Vec<String> {
     current
         .keys()
         .filter(|k| {
@@ -347,6 +351,19 @@ fn dangerous_elements(current: &BcdMap) -> Vec<String> {
                 || n.starts_with("custom:")
         })
         .cloned()
+        .collect()
+}
+
+/// 不托管元素里**值得提示**的部分：只有 `custom:*` 这种真·无文档的自定义编号项。
+///
+/// 2026-10-14 用户真机报出：`linearaddress57`（LASM 线性地址空间掩蔽缓解开关，本机
+/// `bcdedit /enum all` 实测值 `optout`）与 `vm`（实测值 `No`）就是他这台 Windows 11
+/// 本来就有的启动配置。把它们写进「无文档/危险」告警条，等于对用户的正常配置下一条
+/// 没有证据的安全断言。禁写口径不变，只是不再拿它吓用户。
+fn undocumented_elements(current: &BcdMap) -> Vec<String> {
+    unmanaged_elements(current)
+        .into_iter()
+        .filter(|k| k.to_ascii_lowercase().starts_with("custom:"))
         .collect()
 }
 
@@ -363,12 +380,14 @@ fn dangerous_elements(current: &BcdMap) -> Vec<String> {
 ///       { "rowId": "nara_bcd_timer", "kind": "unhit", "protectionHit": false, "elements": [...] },
 ///       ...
 ///     ],
-///     "unknownBcdValues": ["linearaddress57", "custom:16000067"]
+///     "undocumentedBcdValues": ["custom:16000067"]
 ///   }
 /// }
 /// ```
 ///
-/// unknownBcdValues = 检测到但不在白名单元素集合里的元素名（前端可做告警条）
+/// undocumentedBcdValues = 检测到、且属于**无文档自定义项**（`custom:*`）的元素名。
+/// 面板不托管的其它既有元素（linearaddress57 / vm / …）不在此列——它们照常禁写，
+/// 但那是用户机器本来的配置，不再作为告警内容回给渲染层（见 `undocumented_elements`）。
 #[tauri::command]
 pub async fn optimizer_bcd_enum<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
@@ -399,14 +418,14 @@ pub async fn optimizer_bcd_enum<R: Runtime>(window: WebviewWindow<R>) -> Value {
         })
         .collect();
 
-    let mut unknown = dangerous_elements(&current);
+    let mut unknown = undocumented_elements(&current);
     unknown.sort();
 
     json!({
         "success": true,
         "data": {
             "rowStates": rows,
-            "unknownBcdValues": unknown,
+            "undocumentedBcdValues": unknown,
         }
     })
 }
@@ -534,16 +553,100 @@ custom:16000067         Yes
     }
 
     #[test]
-    fn 危险元素只报无文档名单() {
+    fn 不托管名单与无文档提示分层() {
         let map = parse_bcd_enum(SAMPLE_CURRENT);
-        // 样本含 linearaddress57 / vm / custom:16000067（危险），
-        // 以及 nx=OptIn / configaccesspolicy / inherit 等常态元素（不得报）
-        let danger = dangerous_elements(&map);
+        // 样本含 linearaddress57 / vm / custom:16000067（三者都禁写、原样保留），
+        // 以及 nx=OptIn / configaccesspolicy / inherit 等常态元素（不得进名单）
+        let unmanaged = unmanaged_elements(&map);
         for must in ["custom:16000067", "linearaddress57", "vm"] {
-            assert!(danger.contains(&must.to_string()), "应报 {must}: {danger:?}");
+            assert!(unmanaged.contains(&must.to_string()), "应不托管 {must}: {unmanaged:?}");
         }
         for quiet in ["nx", "configaccesspolicy", "inherit", "flightsigning"] {
-            assert!(!danger.contains(&quiet.to_string()), "常态元素 {quiet} 不该告警");
+            assert!(!unmanaged.contains(&quiet.to_string()), "常态元素 {quiet} 不该进名单");
         }
+        // 提示分层（2026-10-14 用户裁定）：只有真·无文档的 custom:* 回给渲染层，
+        // linearaddress57 / vm 是本机既有启动配置，禁写但不报警。
+        let notice = undocumented_elements(&map);
+        assert_eq!(notice, vec!["custom:16000067".to_string()], "提示名单只应收 custom:*: {notice:?}");
+    }
+
+    /// 变异灵敏度扫描（正向对照，AGENTS §4.1）：5 行面板里**每一个**登记元素都必须能单独把
+    /// 该行从「已达标」打成「待优化」，整行元素缺失则必须落「未命中」。
+    ///
+    /// 为什么要有这条：`evaluate_row` 的 needs_change 判据是 `exists && 值 ≠ 目标`，于是
+    /// ① 元素名拼错、② 目标值写成与本机实际值恒等、③ 新增一行忘了往 `row_targets` 里填——
+    /// 三种失误的症状都是「这一行永远显示已达标」，面板照常渲染、复选框永远灰，
+    /// 属于只会打印 ✓ 的那类缺陷，逐行手写的夹具挡不住（写夹具的人以为目标值就是那个）。
+    /// 基线夹具从 `row_targets` **现推**（不另抄一份值表，AGENTS §5.16），所以表一改夹具跟着改。
+    #[test]
+    fn 每行单元素偏离必须打成待优化() {
+        for row_id in ALL_ROW_IDS {
+            let targets = row_targets(row_id);
+            assert!(!targets.is_empty(), "{row_id} 在 row_targets 里没有登记元素");
+
+            // 基线：全部登记元素处于目标态（`__DELETE__` 元素刻意不存在）
+            let base: BcdMap = targets
+                .iter()
+                .filter(|(_, t)| *t != "__DELETE__")
+                .map(|(n, t)| (n.to_string(), t.to_string()))
+                .collect();
+            assert_eq!(
+                evaluate_row(row_id, &base, &BcdMap::new()).kind,
+                BcdRowKind::Optimized,
+                "{row_id} 连基线都没判成达标，夹具与 row_targets 已不同步"
+            );
+
+            for (name, target) in &targets {
+                let mut mutated = base.clone();
+                mutated.insert(
+                    name.to_string(),
+                    if *target == "__DELETE__" { "Yes".to_string() } else { format!("{target}-偏离") },
+                );
+                let st = evaluate_row(row_id, &mutated, &BcdMap::new());
+                assert_eq!(st.kind, BcdRowKind::Executable, "{row_id} 的 {name} 偏离目标值却没判待优化: {st:?}");
+                assert!(
+                    st.elements.iter().any(|e| e.name == *name && e.needs_change),
+                    "{row_id} 的 {name} 偏离后 needs_change 没置起来: {st:?}",
+                );
+            }
+
+            let mut missing = base.clone();
+            for (name, _) in &targets {
+                missing.remove(*name);
+            }
+            assert_eq!(
+                evaluate_row(row_id, &missing, &BcdMap::new()).kind,
+                BcdRowKind::Unhit,
+                "{row_id} 登记元素全缺失却没判未命中（等于把没配过当成配好了）"
+            );
+        }
+    }
+
+    /// 真机探针：本机的 `bcdedit /enum` 必须真的能枚举出元素。
+    ///
+    /// 这条存在的理由就是 2026-10-14 那个缺陷：`bcdedit` 跟随系统 ANSI 代码页出字（本机
+    /// ACP=936），而 `run_bcd_enum` 用 `String::from_utf8` 收口 ⇒ 中文 Windows 上恒判解码失败
+    /// ⇒ 命令回 `success:false` ⇒ 专项面板把「体检失败」渲染成「需管理员体检」+ 灰态 +
+    /// 「以管理员身份重启」，用户已经是管理员却被告知权限不够。
+    /// 快速组里的夹具是英文样本（纯 ASCII），**结构上不可能**碰到这条路径，所以必须有一条
+    /// 走真实 bcdedit 的 `#[ignore]` 探针（AGENTS §1.6 问②）。
+    #[test]
+    #[ignore = "真机探针：调用真实 bcdedit /enum"]
+    fn 本机bcd枚举必须真出元素() {
+        let (current, globals) = enum_bcd_maps()
+            .expect("bcdedit /enum 失败：解码或退出码有问题，不许把它当权限问题报给用户");
+        assert!(!current.is_empty(), "{{current}} 解析出 0 个元素，解析或解码断了");
+        assert!(!globals.is_empty(), "{{globalsettings}} 解析出 0 个元素，解析或解码断了");
+        // 点名命中对象：引导加载器条目必然带 device / osdevice / path 之一
+        let hit = ["device", "osdevice", "path"]
+            .iter()
+            .filter(|k| current.contains_key(**k))
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(
+            !hit.is_empty(),
+            "{{current}} 里没有引导元素，实测键={:?}",
+            { let mut k: Vec<&String> = current.keys().collect(); k.sort(); k }
+        );
     }
 }
