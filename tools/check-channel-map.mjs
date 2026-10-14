@@ -147,6 +147,15 @@ const TAURI_ADDED = {
   'uninstall:reg-backup-restore': 'D1/M5（2026-09-28）：单个备份 reg import 还原（主窗档 + 危险确认）',
   'syspanel:power-plan-get': 'P2 §3.6（2026-10-03）：电源方案读侧（RAINZ 对标系统面板）',
   'syspanel:power-plan-apply': 'P2 §3.6（2026-10-03）：电源方案三档切换 + 400ms 回读校验（主窗档，白名单 GUID）',
+  'syspanel:power-settings-dump': 'v5 P0（2026-10-15）：逐设置 dump（子组/设置/AC-DC/范围/可见性；主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-plan-duplicate': 'v5 P0（2026-10-15）：克隆电源计划（主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-plan-rename': 'v5 P0（2026-10-15）：重命名电源计划 + 回读（主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-plan-delete': 'v5 P0（2026-10-15）：删除电源计划 + 三道闸 + 回读（主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-plan-import': 'v5 P0（2026-10-15）：导入 .powrplan 后重新枚举校验（主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-plan-export': 'v5 P0（2026-10-15）：导出 .powrplan，唯一破例走 powercfg.exe（主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-settings-unlock': 'v5 P0（2026-10-15）：编辑会话解锁属性并保存原始快照（主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-settings-apply': 'v5 P0（2026-10-15）：批次写入 AC/DC 值 + 回读（主窗档，编辑器 UI 在 P1 接线）',
+  'syspanel:power-settings-revert': 'v5 P0（2026-10-15）：按后端会话快照恢复属性（主窗档，编辑器 UI 在 P1 接线）',
   'syspanel:pagefile-state': 'P2 §3.6（2026-10-03）：虚拟内存只读展示（写侧同批落地）',
   'syspanel:pagefile-apply': 'P2 §3.6（2026-10-03）：虚拟内存写侧（AutomaticManagedPagefile + PagingFiles；主窗档 + 高危确认 + 需重启）',
   'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',
@@ -301,6 +310,8 @@ const D4_ORPHANS = new Map([
   // 整链摘除并登记 RETIRED。它们不是「扩展点」而是两个真实风险面：begin 是空函数，
   // complete 会 app.exit(0) 且档位是 guard_readonly（五个窗都能强制退出应用），
   // 而关闭编排早已全在主进程（RunEvent::Exit → on_app_exit），这条 IPC 入口纯属重复。
+  // v5 P0→P1（2026-10-15）：编辑器 UI 接线后，9 条 syspanel 电源通道的
+  // 「有计划基线孤儿」已逐条删除（本次），表继续清零。
 ]);
 
 /** 递归取 src/ 下的渲染层源码（适配层自身除外：它定义包装器，不是调用点） */

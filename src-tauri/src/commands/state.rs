@@ -56,6 +56,23 @@ pub(crate) static FILECLEAN_SCOPES: Mutex<Option<HashMap<String, Scope>>> = Mute
 pub(crate) static ELEVATE_INFLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 提权重启后、建窗前面消费到的待编辑意图；只在首帧后交给渲染层一次。
+pub(crate) struct PendingEditState {
+    value: Mutex<Option<Value>>,
+}
+
+impl PendingEditState {
+    pub(crate) fn new(value: Option<Value>) -> Self {
+        Self {
+            value: Mutex::new(value),
+        }
+    }
+
+    pub(crate) fn take(&self) -> Option<Value> {
+        self.value.lock().ok()?.take()
+    }
+}
+
 // ---- overview.rs ----
 
 /// metrics 结果缓存与串行锁。锁序：先 `METRICS_LOCK` 后 `METRICS_CACHE`（不得反向）。

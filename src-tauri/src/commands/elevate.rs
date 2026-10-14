@@ -36,6 +36,8 @@ pub const RELAUNCH_FLAG: &str = "--elevated-relaunch";
 
 /// 握手文件名（落在应用私有数据目录）
 const HANDSHAKE_FILE: &str = "elevate-handshake.json";
+/// 待编辑意图文件名：与握手分文件，避免「提权交接」和「编辑意图」互相代表。
+const PENDING_EDIT_INTENT_FILE: &str = "elevate-pending-intent.json";
 
 /// 握手阶段
 const PHASE_REQUESTED: &str = "requested";
@@ -49,9 +51,16 @@ const TAKEOVER_TIMEOUT_MS: u64 = 15_000;
 /// 轮询间隔（对照 main.js 的 500ms / 250ms）
 const OLD_POLL_MS: u64 = 500;
 const NEW_POLL_MS: u64 = 250;
+/// 新实例等旧实例**进程真的消失**的上界（2026-10-14 提权花屏修复，见 `wait_predecessor_exit`）
+const OLD_EXIT_WAIT_MS: u64 = 3_000;
+const PENDING_EDIT_TTL_MS: u64 = 60_000;
 
 fn handshake_path() -> PathBuf {
     paths::app_data_dir().join(HANDSHAKE_FILE)
+}
+
+fn pending_edit_intent_path() -> PathBuf {
+    paths::app_data_dir().join(PENDING_EDIT_INTENT_FILE)
 }
 
 /// 一次性交接标记（nonce）。
@@ -76,6 +85,15 @@ fn new_nonce() -> String {
     b.write_u64(std::process::id() as u64);
     b.write_u64(a.finish());
     format!("{:016x}", b.finish())
+}
+
+/// 供 syspanel 生成「编辑意图」与 `elevate_request(launchToken)` 共用的 nonce。
+pub(crate) fn new_launch_token() -> String {
+    new_nonce()
+}
+
+fn valid_launch_token(s: &str) -> bool {
+    s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 use crate::commands::state::ELEVATE_INFLIGHT;
@@ -174,6 +192,99 @@ fn clear_handshake() {
     }
 }
 
+/// 写一次性待编辑意图。token 由调用方随后逐字传给 `elevate_request(launchToken)`。
+pub(crate) fn write_pending_edit_intent(scheme_guid: &str) -> Result<String, String> {
+    let token = new_launch_token();
+    let now = crate::engine::now_ms();
+    let payload = json!({
+        "token": token,
+        "schemeGuid": scheme_guid,
+        "action": "edit",
+        "at": now,
+        "expiresAt": now + PENDING_EDIT_TTL_MS as i64,
+    });
+    security::atomic_write_json(&pending_edit_intent_path(), &payload)
+        .map_err(|e| format!("无法写入待编辑意图：{e}"))?;
+    Ok(token)
+}
+
+fn clear_pending_edit_intent_for(token: &str) {
+    let path = pending_edit_intent_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    if value
+        .get("token")
+        .and_then(|v| v.as_str())
+        .is_some_and(|got| got == token)
+    {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+fn clear_pending_edit_intent() {
+    let path = pending_edit_intent_path();
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// 新实例在建窗前消费意图：token 必须与本次提权旗标逐字相等，TTL 内才交给渲染层。
+pub(crate) fn take_pending_edit_intent() -> Option<Value> {
+    let expected = relaunch_nonce()?;
+    let path = pending_edit_intent_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let token = value.get("token")?.as_str()?;
+    if token != expected {
+        return None;
+    }
+    if value.get("action").and_then(|v| v.as_str()) != Some("edit") {
+        return None;
+    }
+    let expires_at = value.get("expiresAt")?.as_i64()?;
+    if crate::engine::now_ms() > expires_at {
+        return None;
+    }
+    Some(value)
+}
+
+/// 握手走到 `released` 之后，再等旧实例**进程消失**才允许建窗。
+///
+/// 为什么要这一等（2026-10-14 真机报出）：提权重启后主窗合成层整片坏掉——入场动画停在半路
+/// （右键页只剩一条紫色边框细条）、同一行文字留下错位副本、带 `backdrop-filter` 的按钮涂成
+/// 纯黑，而 IPC 与页面逻辑全正常（同一会话日志里规则库照常装载）。
+/// 根因是交接重叠：旧实例写完 `released` 才 `app.exit(0)`，新实例一看到标记就立刻建窗，
+/// 两者共用同一个 WebView2 user-data-folder ⇒ 新 client 绑到旧实例那个正在拆除的
+/// browser/GPU process 上，合成器随它一起没了，Chromium 退到软件路径，
+/// 而液态玻璃的 `backdrop-filter: url(#feDisplacementMap…)` 在软件路径下画不出内容。
+/// 所以 `released` 只代表「旧实例打算让位」，不代表「旧实例已经让完」。
+///
+/// 上界之外一律照常建窗：多等是纯收益，白等满上界也只是回到修复前的行为；
+/// 反过来若在这里死等，提权实例可能永远起不来。
+fn wait_predecessor_exit(pid: u32) {
+    // 非 Windows 侧 `takeover_writer_gone` 恒给不出「已消失」的证据，白等满上界没有意义
+    if !cfg!(windows) || takeover_writer_gone(pid) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while !takeover_writer_gone(pid) {
+        if started.elapsed().as_millis() as u64 > OLD_EXIT_WAIT_MS {
+            log::write_log(
+                "warn",
+                &format!("等待旧实例 (pid {pid}) 退出超过 {}ms，仍继续建窗", OLD_EXIT_WAIT_MS),
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(NEW_POLL_MS));
+    }
+}
+
 /// 审查 M5：是否真的有一次提权交接在进行 —— lib.rs 用它决定是否跳过单实例插件。
 ///
 /// 旧判据是「命令行带 `--elevated-relaunch` 旗标」（`is_relaunch_from_elevation`，已删：
@@ -226,12 +337,14 @@ pub fn take_over_as_elevated_instance() -> bool {
     }
     let started = std::time::Instant::now();
     loop {
-        // 这里**不**做 pid 存活判定：`released` 由旧实例写完后立刻 `app.exit(0)`，
-        // 写记录的那个进程按设计就是要消失。存活判定只用在旧实例等 `ready` 的一侧。
-        if let Some((n, phase, _pid)) = read_handshake() {
+        // 对 `released` 一侧的 pid 存活判定是 2026-10-14 补上的（见 `wait_predecessor_exit`）：
+        // 旧实例写完标记才退出，只认标记会让两个实例的 WebView2 环境重叠一瞬，代价是提权后
+        // 整窗合成层花屏。等 `ready` 一侧的判定仍是 fail-open，两处判据不要互相代表。
+        if let Some((n, phase, pid)) = read_handshake() {
             if handshake_matches(&n, &phase, &nonce, PHASE_RELEASED) {
                 clear_handshake();
-                log::write_log("info", "旧实例已让位，提权实例继续启动");
+                wait_predecessor_exit(pid);
+                log::write_log("info", "旧实例已让位并退出，提权实例继续启动");
                 return true;
             }
         }
@@ -283,6 +396,7 @@ fn arm_handshake<R: Runtime>(app: AppHandle<R>, nonce: String) {
             if started.elapsed().as_millis() as u64 > HANDSHAKE_TIMEOUT_MS {
                 log::write_log("warn", "未检测到提权后的新实例启动，保持当前实例运行");
                 clear_handshake();
+                clear_pending_edit_intent_for(&nonce);
                 // v2-L4P-13（A-1）：超时分支刻意让旧实例活着，但监视线程在此 return——
                 // 若不复位 ELEVATE_INFLIGHT，本进程再点「提权」永远回「正在处理中」
                 //（文案还谎称有请求在途），只能重启应用。成功让位路径不复位是有意的
@@ -306,24 +420,49 @@ fn arm_handshake<R: Runtime>(app: AppHandle<R>, nonce: String) {
 
 /// elevate:request — 以 runas 直拉自身带提权旗标，随后挂 20s 交接握手
 #[tauri::command]
-pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
+pub fn elevate_request<R: Runtime>(
+    window: WebviewWindow<R>,
+    launch_token: Option<String>,
+) -> Result<Value, String> {
     // 审查 1-3 同款：UAC 提权是最高价值 IPC 目标，只认主窗口
     guard::guard(&window, guard::MAIN)?;
+    let has_intent_token = launch_token.is_some();
+    let nonce = match launch_token {
+        Some(t) if valid_launch_token(&t) => t,
+        Some(_) => {
+            clear_pending_edit_intent();
+            return Ok(json!({ "success": false, "message": "launchToken 形状非法，已拒绝提权" }));
+        }
+        None => new_nonce(),
+    };
+    // 「已是管理员就直接回执」的短路：2026-10-14 用户裁定，推翻原「对齐上游、不做短路」的
+    // 刻意偏离。上游那条分支缺失的代价在本机被实测出来——以内置 Administrator 账户登录时进程
+    // 本来就是全权令牌，`is_admin()` 恒真，短路前点一次提权 = 白跑一次重启，而那次重启正是
+    // 提权后主窗合成层花屏的入口（见 `wait_predecessor_exit`）。渲染层据此不再承诺「即将重启」。
+    if crate::engine::sysinfo::is_admin() {
+        if has_intent_token {
+            clear_pending_edit_intent_for(&nonce);
+        }
+        log::write_log("info", "当前进程已是管理员权限，跳过 UAC 提权重启");
+        return Ok(json!({ "success": true, "alreadyAdmin": true }));
+    }
     // 审查 2026-09-27 M9：防重入——已有提权握手在进行时直接拒绝第二次请求
     use std::sync::atomic::Ordering;
     if ELEVATE_INFLIGHT.swap(true, Ordering::SeqCst) {
+        if has_intent_token {
+            clear_pending_edit_intent_for(&nonce);
+        }
         log::write_log("warn", "提权请求重复触发，已拒绝（上一次握手仍在进行）");
         return Ok(json!({ "success": false, "message": "提权请求正在处理中，请勿重复点击" }));
     }
     let app = window.app_handle().clone();
-    // 不做「已是管理员就直接返回」的短路：上游没有这个分支，且渲染层拿到 success 后
-    // 承诺「应用即将以管理员身份重启」——早退会让这句话落空、用户以为卡住。
-    // 已提权进程再 runas 一次是即刻完成的，握手照常走完，行为与上游一致。
     log::write_log("info", "请求管理员权限提升 (UAC)");
 
-    let nonce = new_nonce();
     if !write_phase(&nonce, PHASE_REQUESTED) {
         ELEVATE_INFLIGHT.store(false, Ordering::SeqCst);
+        if has_intent_token {
+            clear_pending_edit_intent_for(&nonce);
+        }
         return Ok(json!({ "success": false, "message": "无法写入提权握手状态，已拒绝提权" }));
     }
     let exe = match std::env::current_exe() {
@@ -331,6 +470,9 @@ pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
         Err(e) => {
             clear_handshake();
             ELEVATE_INFLIGHT.store(false, Ordering::SeqCst);
+            if has_intent_token {
+                clear_pending_edit_intent_for(&nonce);
+            }
             return Ok(json!({ "success": false, "message": e.to_string() }));
         }
     };
@@ -346,6 +488,9 @@ pub fn elevate_request<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
         Err(e) => {
             clear_handshake();
             ELEVATE_INFLIGHT.store(false, Ordering::SeqCst);
+            if has_intent_token {
+                clear_pending_edit_intent_for(&nonce);
+            }
             log::write_log("warn", &format!("UAC 提权被用户取消或失败: {e}"));
             Ok(json!({ "success": false, "message": "提权请求被取消或失败" }))
         }
@@ -432,6 +577,17 @@ mod tests {
     }
 
     #[test]
+    fn launch_token_只认十六位十六进制() {
+        assert!(valid_launch_token("0123456789abcdef"));
+        assert!(valid_launch_token("ABCDEF0123456789"));
+        assert!(!valid_launch_token(""), "空 token 不能代替新 nonce");
+        assert!(!valid_launch_token("0123456789abcde"), "短一位即拒");
+        assert!(!valid_launch_token("0123456789abcdef0"), "长一位即拒");
+        assert!(!valid_launch_token("0123456789abcdeg"), "非十六进制即拒");
+        assert!(!valid_launch_token("01234567 9abcdef"), "含空白即拒");
+    }
+
+    #[test]
     fn 旗标解析覆盖裸旗标与带值两种形式() {
         // relaunch_nonce 走 std::env::args，
         // 这里只能断言前缀常量的契约不被写错
@@ -463,5 +619,35 @@ mod tests {
     fn 超时窗口与上游一致() {
         assert_eq!(HANDSHAKE_TIMEOUT_MS, 20_000);
         assert_eq!(TAKEOVER_TIMEOUT_MS, 15_000);
+    }
+
+    /// 2026-10-14 提权花屏修复的正向对照：`wait_predecessor_exit` 必须**真的等**到进程消失，
+    /// 而不是看到 `released` 就放行。判据走真实进程 ⇒ 按 §1.6 问② 进 `#[ignore]` 真机组。
+    /// 三条点名：① 活着时判据给得出「还在」（反向就当场红）；② 等待消耗了子进程剩余寿命；
+    /// ③ 函数返回时进程确实没了。上界分支不在此断言——它要的是「等满」，与本用例互斥。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机探针：会拉起一个真实子进程"]
+    fn 交接必须等旧实例进程真消失才放行() {
+        // ping -n 3 ≈ 2s：明显短于 3s 上界（不会撞超时分支），又长到能被「有没有等」区分出来
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 3 127.0.0.1 >nul"])
+            .spawn()
+            .expect("探针子进程必须起得来");
+        let pid = child.id();
+        assert!(!takeover_writer_gone(pid), "刚拉起的子进程被判成已消失：判据方向反了");
+        let started = std::time::Instant::now();
+        wait_predecessor_exit(pid);
+        let waited_ms = started.elapsed().as_millis() as u64;
+        assert!(
+            waited_ms >= 500,
+            "只等了 {waited_ms}ms：没等进程消失就放行，提权后 WebView2 环境重叠的花屏会复发"
+        );
+        assert!(
+            waited_ms < OLD_EXIT_WAIT_MS + 1500,
+            "等了 {waited_ms}ms：超过上界 + 宽限，说明走的是超时分支而不是等到位"
+        );
+        assert!(takeover_writer_gone(pid), "函数返回时子进程还在，等于没等");
+        let _ = child.wait();
     }
 }

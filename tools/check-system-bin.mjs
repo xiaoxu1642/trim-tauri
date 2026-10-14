@@ -85,6 +85,11 @@ const RAW_EXEMPT = [
     anchor: 'std::process::Command::new("cmd")',
     reason: '2026-10-14 P2-E §5.3 第三条的真机 #[ignore] 探针：mklink /J 造 junction（与上面 cleanup.rs 夹具同口径，cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
+  {
+    file: 'src-tauri/src/commands/elevate.rs',
+    anchor: 'std::process::Command::new("cmd")',
+    reason: '提权交接 #[ignore] 真机探针：ping 起一个有寿命的真实子进程，用来证明 wait_predecessor_exit 真的等（cfg(test) 专用、非生产执行面）',
+  },
 ];
 
 /**

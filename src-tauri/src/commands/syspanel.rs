@@ -1,11 +1,10 @@
 //! syspanel 域（P2 §3.6）：电源计划三档读写 + 虚拟内存只读
 //!
-//! 三条通道都走 `guard(window, MAIN)`（AGENTS §3 三层）：写侧、系统级、只在主窗触发；
-//! 虚拟内存本轮只读但同域，一并 MAIN —— 下一批加写侧时不用再改档位。
+//! 本域电源相关通道都走 `guard(window, MAIN)`（AGENTS §3 三层）：写侧、系统级、只在主窗触发；
+//! 虚拟内存与电源计划同域，一并 MAIN。
 //! 前端只在 `settings` 页底部"系统面板"卡里调用，其他窗口拿不到入口。
 //!
-//! 命令命名与 CHANNEL_MAP 键一一对应：`syspanel:power-plan-get` / `-apply` / `pagefile-state` / `pagefile-apply`。
-//! （审查 L-20：pagefile-apply 此前漏登本清单——CHANNEL_MAP 四条齐全，纯注释漂移。）
+//! 命令命名与 CHANNEL_MAP 键一一对应；v5 P0 后电源计划与逐设置编辑共 13 条。
 //!
 //! # 返回体必须是 `{ success, data }`（不是裸对象）
 //!
@@ -20,17 +19,40 @@
 //! 自己而恒红。本仓已因此踩过多次，substring 判据必须与被禁写法逐字错开。）
 
 use serde_json::{Value, json};
-use tauri::{Runtime, WebviewWindow};
+use tauri::{AppHandle, Runtime, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::engine::guard;
-use crate::engine::native::{PagefileEntry, pagefile_apply, pagefile_state, power_plan_apply, power_plan_state};
+use crate::engine::native::{
+    PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_plan_apply,
+    power_plan_delete, power_plan_duplicate, power_plan_export, power_plan_import,
+    power_plan_rename, power_plan_state, power_settings_apply, power_settings_dump,
+    power_settings_revert, power_settings_unlock,
+};
+
+fn syspanel_ok(data: Value) -> Result<Value, String> {
+    Ok(json!({ "success": true, "data": data }))
+}
+
+fn syspanel_result_from_data(data: Value) -> Result<Value, String> {
+    let success = data.get("ok").and_then(Value::as_bool).unwrap_or(true);
+    Ok(json!({ "success": success, "data": data }))
+}
+
+fn require_admin_for_power_edit() -> Result<(), String> {
+    if crate::engine::sysinfo::is_admin() {
+        Ok(())
+    } else {
+        Err("编辑电源计划需要管理员权限，请先通过编辑入口提权重启 Trim".to_string())
+    }
+}
 
 #[tauri::command]
 pub fn syspanel_power_plan_get<R: Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
-    Ok(json!({ "success": true, "data": power_plan_state() }))
+    syspanel_ok(power_plan_state())
 }
 
 #[tauri::command]
@@ -40,6 +62,135 @@ pub fn syspanel_power_plan_apply<R: Runtime>(
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
     power_plan_apply(&guid).map(|state| json!({ "success": true, "data": state }))
+}
+
+#[tauri::command]
+pub fn syspanel_power_settings_dump<R: Runtime>(
+    window: WebviewWindow<R>,
+    scheme_guid: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    power_settings_dump(&scheme_guid).and_then(syspanel_ok)
+}
+
+#[tauri::command]
+pub fn syspanel_power_plan_duplicate<R: Runtime>(
+    window: WebviewWindow<R>,
+    source_guid: String,
+    name: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    power_plan_duplicate(&source_guid, &name).and_then(syspanel_ok)
+}
+
+#[tauri::command]
+pub fn syspanel_power_plan_rename<R: Runtime>(
+    window: WebviewWindow<R>,
+    guid: String,
+    name: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    power_plan_rename(&guid, &name).and_then(syspanel_ok)
+}
+
+#[tauri::command]
+pub fn syspanel_power_plan_delete<R: Runtime>(
+    window: WebviewWindow<R>,
+    guid: String,
+    confirmed_high_risk: bool,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    if !confirmed_high_risk {
+        return Err("删除电源方案需要二次确认后重试".to_string());
+    }
+    power_plan_delete(&guid).and_then(syspanel_ok)
+}
+
+#[tauri::command]
+pub async fn syspanel_power_plan_import<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("导入电源计划")
+        .add_filter("电源计划文件", &["powrplan"])
+        .blocking_pick_file();
+    let Some(path) = picked else {
+        return syspanel_ok(json!({ "canceled": true }));
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| format!("无效的导入路径：{e}"))?;
+    power_plan_import(&path).and_then(syspanel_ok)
+}
+
+#[tauri::command]
+pub async fn syspanel_power_plan_export<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+    guid: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("导出电源计划")
+        .set_file_name("电源计划.powrplan")
+        .add_filter("电源计划文件", &["powrplan"])
+        .blocking_save_file();
+    let Some(path) = picked else {
+        return syspanel_ok(json!({ "canceled": true }));
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| format!("无效的导出路径：{e}"))?;
+    power_plan_export(&guid, &path).and_then(syspanel_ok)
+}
+
+#[tauri::command]
+pub fn syspanel_power_settings_unlock<R: Runtime>(
+    window: WebviewWindow<R>,
+    scheme_guid: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    // 非管理员只写一次性意图并把 token 交回渲染层；真正的 restart 由 elevate_request(launchToken)
+    // 负责，新实例消费到同一 token 后才允许进入编辑会话。
+    let _ = power_settings_dump(&scheme_guid)?;
+    if !crate::engine::sysinfo::is_admin() {
+        let launch_token = crate::commands::elevate::write_pending_edit_intent(&scheme_guid)?;
+        return syspanel_ok(json!({
+            "needsElevation": true,
+            "launchToken": launch_token,
+            "schemeGuid": scheme_guid,
+        }));
+    }
+    power_settings_unlock(&scheme_guid).and_then(syspanel_result_from_data)
+}
+
+#[tauri::command]
+pub fn syspanel_power_settings_apply<R: Runtime>(
+    window: WebviewWindow<R>,
+    scheme_guid: String,
+    changes: Vec<PowerSettingChange>,
+    apply_active: bool,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    require_admin_for_power_edit()?;
+    power_settings_apply(&scheme_guid, &changes, apply_active).and_then(syspanel_result_from_data)
+}
+
+#[tauri::command]
+pub fn syspanel_power_settings_revert<R: Runtime>(
+    window: WebviewWindow<R>,
+    scheme_guid: String,
+    session_id: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    require_admin_for_power_edit()?;
+    power_settings_revert(&scheme_guid, &session_id).and_then(syspanel_result_from_data)
 }
 
 #[tauri::command]

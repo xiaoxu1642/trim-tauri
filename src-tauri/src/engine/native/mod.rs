@@ -41,6 +41,11 @@ pub use services::{
 mod startup;
 pub use startup::{startup_scan, startup_toggle, startup_delete, startup_add};
 mod syspanel;
-pub use syspanel::{PagefileEntry, pagefile_apply, pagefile_state, power_plan_apply, power_plan_state};
+pub use syspanel::{
+    PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_plan_apply,
+    power_plan_delete, power_plan_duplicate, power_plan_export, power_plan_import,
+    power_plan_rename, power_plan_state, power_settings_apply, power_settings_dump,
+    power_settings_revert, power_settings_unlock,
+};
 
 

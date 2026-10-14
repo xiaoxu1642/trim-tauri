@@ -19,7 +19,7 @@ pub mod security;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewWindow};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
@@ -235,6 +235,14 @@ pub fn show_main_window_when_ready<R: Runtime>(app: &AppHandle<R>, cause: &str) 
         }
     }
     log::write_log("info", &format!("主窗口显示（触发: {cause}）"));
+    // R16：提权后消费到的待编辑意图只在首帧显示之后交给渲染层；页面脚本此时才已挂载。
+    if let Some(state) = app.try_state::<commands::state::PendingEditState>() {
+        if let Some(intent) = state.take() {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.emit("syspanel:edit-intent", intent);
+            }
+        }
+    }
     // v3 B3：显示动作落地之后才排队 housekeeping。真实首帧握手与 3s / 8s 两级兜底都经过
     // 这个函数，所以渲染脚本白屏时清理照样会跑；下面的闩锁保证三条路径最多排队一次。
     schedule_startup_housekeeping_once(app);
@@ -314,6 +322,15 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::system::system_disk_list,
         commands::syspanel::syspanel_power_plan_get,
         commands::syspanel::syspanel_power_plan_apply,
+        commands::syspanel::syspanel_power_settings_dump,
+        commands::syspanel::syspanel_power_plan_duplicate,
+        commands::syspanel::syspanel_power_plan_rename,
+        commands::syspanel::syspanel_power_plan_delete,
+        commands::syspanel::syspanel_power_plan_import,
+        commands::syspanel::syspanel_power_plan_export,
+        commands::syspanel::syspanel_power_settings_unlock,
+        commands::syspanel::syspanel_power_settings_apply,
+        commands::syspanel::syspanel_power_settings_revert,
         commands::syspanel::syspanel_pagefile_state,
         commands::syspanel::syspanel_pagefile_apply,
         commands::overview::overview_metrics,
@@ -494,11 +511,14 @@ pub fn run() {
     // 建窗前杀掉。改为先走文件握手（见 commands::elevate）。
     // 旧实例确认让位后 mutex 已空闲，此时仍可正常注册以恢复单实例保护。
     let elevated_relaunch = commands::elevate::elevation_takeover_pending();
-    if elevated_relaunch {
+    let pending_edit_intent = if elevated_relaunch {
         // v5-K03：接管握手照跑（旧实例让位、旗标清理），但返回值不再决定单实例
         // 注册——提权重启一律不装单实例（见下方 builder 分支的注释）。
         let _ = commands::elevate::take_over_as_elevated_instance();
-    }
+        commands::elevate::take_pending_edit_intent()
+    } else {
+        None
+    };
 
     let builder = build_app(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
@@ -530,7 +550,8 @@ pub fn run() {
     };
 
     builder
-        .setup(|app| {
+        .setup(move |app| {
+            app.manage(commands::state::PendingEditState::new(pending_edit_intent));
             // 窗口在代码中创建（而非 tauri.conf.json 声明），唯一原因：需要
             // additional_browser_args 显式透传 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
             // ——实测 Tauri/wry 2.11 自带默认浏览器参数时，WebView2 加载器会忽略该环境变量，
@@ -741,7 +762,10 @@ mod startup_housekeeping_tests {
     /// setup 闭包体（`.setup(|app| {` 到第一个 `Ok(())` 之前）。
     fn setup_body() -> &'static str {
         let src = prod();
-        let start = src.find(".setup(|app| {").expect("没找到 setup 闭包——lib.rs 结构变了");
+        let start = src
+            .find(".setup(move |app| {")
+            .or_else(|| src.find(".setup(|app| {"))
+            .expect("没找到 setup 闭包——lib.rs 结构变了");
         let end = src[start..].find("Ok(())").expect("没找到 setup 闭包结尾");
         &src[start..start + end]
     }

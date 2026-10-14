@@ -468,6 +468,14 @@
       toast('warning', '当前环境不支持权限提升');
       return false;
     }
+    // 已是管理员就别走「确认 → UAC → 重启」：那次重启什么权限也没换来，还会把主窗
+    // 交接进两个实例重叠建窗的路径（2026-10-14 提权后合成层花屏）。后端有同一判据兜底，
+    // 这里只是提前把那句「应用会以管理员身份重启」的误导文案省掉。
+    const ADMIN_ALREADY_TIP = '当前已是管理员权限，无需重启应用';
+    if (appState.isAdmin === true) {
+      toast('info', ADMIN_ALREADY_TIP);
+      return true;
+    }
     const ok = await confirm(
       '提升管理员权限',
       (reason || '部分操作需要管理员权限才能完成。') + '\n\n点击"提升权限"将弹出系统 UAC 确认框，应用会以管理员身份重启。',
@@ -478,7 +486,8 @@
     try {
       const resp = await window.api.elevate.request();
       if (resp.success) {
-        toast('info', '提权成功，应用即将以管理员身份重启');
+        // alreadyAdmin：启动信息还没读回来时走到这里，回执是「本来就有权限」，不是「即将重启」
+        toast('info', resp.alreadyAdmin ? ADMIN_ALREADY_TIP : '提权成功，应用即将以管理员身份重启');
         return true;
       }
       toast('warning', resp.message || '提权请求已取消');
@@ -1027,6 +1036,18 @@
     if (window.api?.elevate?.onNotice) {
       window.api.elevate.onNotice(data => {
         toast('warning', (data && data.message) || '未检测到新实例启动，已保持当前运行状态');
+      });
+    }
+
+    // v5 P1 电源计划编辑接回：订阅必须在首屏脚本层——syspanel.js 进 settings 页才注入，
+    // 等它订阅时主进程发的 intent（首帧后仅一次）早已发完，接不回来（V13）。
+    // 收到后转交 syspanel；未加载则切页触发注入，其 init 时从 appState 自取。
+    if (window.api?.syspanel?.onEditIntent) {
+      window.api.syspanel.onEditIntent((intent) => {
+        if (!intent || !intent.schemeGuid) return;
+        appState.pendingPowerEditIntent = intent;
+        if (window.syspanel?.onEditIntent) window.syspanel.onEditIntent(intent);
+        else switchPage('settings');
       });
     }
 

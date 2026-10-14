@@ -173,6 +173,17 @@ const MUST_MAIN = [
   // 免得下一批加写侧时又要改档位（AGENTS §3 M1~M3 教训的"反向"：判档要看**下一批**会不会翻）。
   'syspanel_power_plan_get',
   'syspanel_power_plan_apply',
+  // v5 P0：电源计划新建/导入/导出/删除与逐设置编辑会话；入口只在主窗 settings 页，
+  // 写侧全部系统级，按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
+  'syspanel_power_settings_dump',
+  'syspanel_power_plan_duplicate',
+  'syspanel_power_plan_rename',
+  'syspanel_power_plan_delete',
+  'syspanel_power_plan_import',
+  'syspanel_power_plan_export',
+  'syspanel_power_settings_unlock',
+  'syspanel_power_settings_apply',
+  'syspanel_power_settings_revert',
   'syspanel_pagefile_state',
   'syspanel_pagefile_apply',
   // v4-K04（2026-10-09）：quickcmds_run 从 readonly 升 MAIN —— 白名单里含

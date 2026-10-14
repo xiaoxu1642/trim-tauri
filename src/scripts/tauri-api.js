@@ -235,6 +235,15 @@
     // syspanel（P2 §3.6：电源计划 + 虚拟内存面板，只在主窗 settings 页调用）
     'syspanel:power-plan-get': 'syspanel_power_plan_get',
     'syspanel:power-plan-apply': 'syspanel_power_plan_apply',
+    'syspanel:power-settings-dump': 'syspanel_power_settings_dump',
+    'syspanel:power-plan-duplicate': 'syspanel_power_plan_duplicate',
+    'syspanel:power-plan-rename': 'syspanel_power_plan_rename',
+    'syspanel:power-plan-delete': 'syspanel_power_plan_delete',
+    'syspanel:power-plan-import': 'syspanel_power_plan_import',
+    'syspanel:power-plan-export': 'syspanel_power_plan_export',
+    'syspanel:power-settings-unlock': 'syspanel_power_settings_unlock',
+    'syspanel:power-settings-apply': 'syspanel_power_settings_apply',
+    'syspanel:power-settings-revert': 'syspanel_power_settings_revert',
     'syspanel:pagefile-state': 'syspanel_pagefile_state',
     'syspanel:pagefile-apply': 'syspanel_pagefile_apply'
   };
@@ -582,7 +591,7 @@
     },
 
     elevate: {
-      request: function () { return invokeChannel('elevate:request'); },
+      request: function (launchToken) { return launchToken == null ? invokeChannel('elevate:request') : invokeChannel('elevate:request', { launchToken: launchToken }); },
       onNotice: function (callback) { return onEvent('elevate:notice', callback); }
     },
 
@@ -701,6 +710,17 @@
     syspanel: {
       powerPlanGet: function () { return invokeChannel('syspanel:power-plan-get'); },
       powerPlanApply: function (guid) { return invokeChannel('syspanel:power-plan-apply', { guid: guid }); },
+      powerSettingsDump: function (schemeGuid) { return invokeChannel('syspanel:power-settings-dump', { schemeGuid: schemeGuid }); },
+      powerPlanDuplicate: function (sourceGuid, name) { return invokeChannel('syspanel:power-plan-duplicate', { sourceGuid: sourceGuid, name: name }); },
+      powerPlanRename: function (guid, name) { return invokeChannel('syspanel:power-plan-rename', { guid: guid, name: name }); },
+      powerPlanDelete: function (guid, confirmedHighRisk) { return invokeChannel('syspanel:power-plan-delete', { guid: guid, confirmedHighRisk: !!confirmedHighRisk }); },
+      powerPlanImport: function () { return invokeChannel('syspanel:power-plan-import'); },
+      powerPlanExport: function (guid) { return invokeChannel('syspanel:power-plan-export', { guid: guid }); },
+      powerSettingsUnlock: function (schemeGuid) { return invokeChannel('syspanel:power-settings-unlock', { schemeGuid: schemeGuid }); },
+      powerSettingsApply: function (schemeGuid, changes, applyActive) { return invokeChannel('syspanel:power-settings-apply', { schemeGuid: schemeGuid, changes: changes || [], applyActive: !!applyActive }); },
+      powerSettingsRevert: function (schemeGuid, sessionId) { return invokeChannel('syspanel:power-settings-revert', { schemeGuid: schemeGuid, sessionId: sessionId }); },
+      // 提权重启接回编辑态：新实例首帧后主进程发一次（lib.rs），消费者在 app.js。
+      onEditIntent: function (callback) { return onEvent('syspanel:edit-intent', callback); },
       pagefileState: function () { return invokeChannel('syspanel:pagefile-state'); },
       // 高危：confirmedHighRisk 必须由**调用点**传入（v4-K05：此前桥接层硬编码 true，
       // 等于任何调用点天生「已确认」，后端那道确认闸对渲染层结构性失效）。

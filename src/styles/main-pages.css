@@ -174,10 +174,17 @@
 }
 .syspanel-card-body { font-size: var(--fs-meta); color: var(--fg-secondary); }
 .syspanel-power-current { margin-bottom: 8px; color: var(--fg-primary); }
-.syspanel-radios { display: flex; flex-direction: column; gap: 8px; }
-.syspanel-radio-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.syspanel-radio-label { color: var(--fg-primary); font-weight: calc(500 * var(--font-weight-scale, 1)); }
-.syspanel-radio-tip { color: var(--fg-tertiary); font-size: calc(12px * var(--font-size-scale, 1)); }
+.syspanel-power-tile-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.syspanel-power-tile-name {
+  color: var(--fg-primary);
+  font-weight: calc(500 * var(--font-weight-scale, 1));
+  /* 自定义方案名可能很长（如 X3D_Gaming_7800X3D_RTX5060）：换行完整展示，不截断不省略 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+.syspanel-power-tile-tip { color: var(--fg-tertiary); font-size: calc(12px * var(--font-size-scale, 1)); }
 .syspanel-badge {
   display: inline-block;
   margin-left: 6px;
@@ -189,15 +196,6 @@
   font-weight: 400;
 }
 .syspanel-actions { margin-top: 12px; }
-.syspanel-note {
-  margin: 12px 0 0;
-  padding: 8px 10px;
-  background: var(--bg-hover);
-  border-radius: var(--radius-btn);
-  color: var(--fg-tertiary);
-  font-size: calc(12px * var(--font-size-scale, 1));
-  line-height: 1.6;
-}
 .syspanel-pf-mode { margin: 0 0 8px; color: var(--fg-primary); }
 .syspanel-pf-hint {
   margin: 10px 0 0;
@@ -220,6 +218,203 @@
   font-size: calc(11px * var(--font-size-scale, 1));
   word-break: break-all;
 }
+/* ===== v5 P1 电源计划编辑器：卡片区域内嵌替换（不新开子窗、不叠卡片） =====
+   伪类/元素级选择器统一加 `#syspanelPowerBody` 前缀：① 语义上这些态只在此面板内成立；
+   ② 层叠防线（check-subwindow-css S3）：main.css 的 :hover / :focus-visible / ::after /
+   [type] 规则全在 0-* 特异度档，裸类伪类规则（0-2-0 等）会与之构成「同特异度 + 共享
+   token + 属性相交」对；ID 前缀把特异度抬进 1-* 档即可逐条证明不相冲（S3 逐对必查，
+   假阳性同样不能留）。纯类规则不加前缀（token 不与 main.css 共享，本就无对）。 */
+.syspanel-pwr-act-danger { color: var(--danger); }
+.syspanel-pwr-editor { display: flex; flex-direction: column; gap: 10px; }
+.syspanel-pwr-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.syspanel-pwr-editor-title { color: var(--fg-primary); min-width: 0; overflow-wrap: anywhere; }
+.syspanel-pwr-dc-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--fg-secondary);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  cursor: pointer;
+  /* accent-color 可继承：挂 label 上即可，不写 input[type=…] 选择器（避 check-subwindow-css S3 层叠对） */
+  accent-color: var(--accent);
+}
+.syspanel-pwr-unlock-note {
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: var(--radius-btn);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  line-height: 1.6;
+}
+/* 净变化计数条：0 条也保留占位（等高），撤销后不挤动下方内容（AGENTS §2 两态等高） */
+.syspanel-pwr-count {
+  padding: 6px 10px;
+  border-radius: var(--radius-btn);
+  background: var(--bg-hover);
+  color: var(--fg-secondary);
+  font-size: calc(12px * var(--font-size-scale, 1));
+}
+.syspanel-pwr-count.is-dirty { color: var(--accent); }
+.syspanel-pwr-editor-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 880px) {
+  .syspanel-pwr-editor-body { grid-template-columns: minmax(0, 1fr); }
+}
+.syspanel-pwr-tree,
+.syspanel-pwr-detail {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-btn);
+  background: var(--bg-card-hover);
+}
+.syspanel-pwr-tree {
+  max-height: 420px;
+  overflow: auto;
+  padding: 6px;
+}
+.syspanel-pwr-tree.is-busy,
+.syspanel-pwr-detail.is-busy { pointer-events: none; opacity: 0.7; }
+.syspanel-pwr-group + .syspanel-pwr-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-default);
+}
+/* 树内两种按钮（分组头 / 设置项）共享骨架，差异只在字号字重与槽位 */
+.syspanel-pwr-group-head,
+.syspanel-pwr-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--fs-meta);
+  text-align: left;
+  cursor: pointer;
+}
+.syspanel-pwr-group-head {
+  gap: 6px;
+  padding: 6px 8px;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
+}
+#syspanelPowerBody .syspanel-pwr-group-head:hover { background: var(--bg-hover); color: var(--fg-primary); }
+#syspanelPowerBody .syspanel-pwr-group-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.syspanel-pwr-caret { flex: none; width: 12px; color: var(--fg-tertiary); }
+.syspanel-pwr-group-name { min-width: 0; overflow-wrap: anywhere; }
+.syspanel-pwr-group-meta {
+  margin-left: auto;
+  flex: none;
+  color: var(--fg-tertiary);
+  font-size: calc(11px * var(--font-size-scale, 1));
+  font-weight: 400;
+}
+.syspanel-pwr-group-items { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 6px 18px; }
+.syspanel-pwr-item {
+  gap: 8px;
+  padding: 5px 8px;
+}
+#syspanelPowerBody .syspanel-pwr-item:hover { background: var(--bg-hover); color: var(--fg-primary); }
+.syspanel-pwr-item.is-active { background: var(--accent-soft); color: var(--fg-primary); }
+#syspanelPowerBody .syspanel-pwr-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.syspanel-pwr-item-name { min-width: 0; overflow-wrap: anywhere; }
+#syspanelPowerBody .syspanel-pwr-item.is-changed .syspanel-pwr-item-name::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  vertical-align: middle;
+}
+.syspanel-pwr-item-sum {
+  margin-left: auto;
+  flex: none;
+  color: var(--fg-tertiary);
+  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-size: calc(11px * var(--font-size-scale, 1));
+}
+.syspanel-pwr-item.is-locked { opacity: 0.65; }
+.syspanel-pwr-detail {
+  min-height: 260px;
+  padding: 12px 14px;
+}
+.syspanel-pwr-detail-name {
+  margin-bottom: 4px;
+  color: var(--fg-primary);
+  font-weight: calc(600 * var(--font-weight-scale, 1));
+  overflow-wrap: anywhere;
+}
+.syspanel-pwr-detail-desc {
+  margin-bottom: 12px;
+  color: var(--fg-tertiary);
+  font-size: var(--fs-meta);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.syspanel-pwr-detail-rows { display: flex; flex-direction: column; gap: 10px; }
+.syspanel-pwr-field { display: flex; align-items: center; gap: 10px; }
+.syspanel-pwr-field-label { flex: none; width: 110px; color: var(--fg-secondary); font-size: var(--fs-meta); }
+.syspanel-pwr-field-control { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.syspanel-pwr-input {
+  width: 130px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-btn);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font-size: var(--fs-meta);
+}
+#syspanelPowerBody .syspanel-pwr-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.syspanel-pwr-input.is-invalid { border-color: var(--danger); }
+.syspanel-pwr-unit { color: var(--fg-tertiary); font-size: var(--fs-meta); }
+.syspanel-pwr-detail-meta {
+  margin-top: 12px;
+  color: var(--fg-tertiary);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+/* 调优参考块（社区经验口径；只在本地化表里带 rec 的设置上出现） */
+.syspanel-pwr-rec { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border-default); }
+.syspanel-pwr-rec-title { color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); font-size: var(--fs-meta); }
+.syspanel-pwr-rec-sub { display: block; margin-top: 2px; color: var(--fg-tertiary); font-weight: 400; font-size: calc(11px * var(--font-size-scale, 1)); }
+.syspanel-pwr-rec-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px 16px; margin-top: 8px; }
+.syspanel-pwr-rec-k { display: block; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); }
+.syspanel-pwr-rec-v { display: block; margin-top: 2px; color: var(--accent); font-weight: calc(600 * var(--font-weight-scale, 1)); font-size: var(--fs-meta); }
+.syspanel-pwr-rec-why { margin: 4px 0 0; color: var(--fg-secondary); font-size: calc(12px * var(--font-size-scale, 1)); line-height: 1.6; overflow-wrap: anywhere; }
+.syspanel-pwr-muted { color: var(--fg-tertiary); }
+.syspanel-pwr-editor-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 0 2px;
+  background: var(--bg-card-hover);
+}
+.syspanel-pwr-modal-hint { margin: 0 0 6px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.6; }
+.syspanel-pwr-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  color: var(--fg-secondary);
+  font-size: var(--fs-meta);
+}
+.syspanel-pwr-modal-select, #syspanelPwrNameInput, #syspanelPwrNewName { width: 100%; }
 /* 一行多个操作按钮（如检查更新行） */
 .about-row-actions { display: flex; gap: 8px; flex: none; }
 /* v3.2.0：device-info-table 旧外壳声明与 device-info-row 旧版 grid 行声明已删除

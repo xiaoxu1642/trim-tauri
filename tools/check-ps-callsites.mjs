@@ -349,6 +349,8 @@ const TIMEOUT_SPAWN_SITES = [
   // v4 R5-M07：11 处裸 quiet_cmd().output() 全量收口 —— 此前它们对三本账全不可见，
   // 是「第四本无超时出口」：命令挂在扫描/体检/修复/优化步骤的同步链上，挂住即锁 IPC。
   // 本次改造由本表棘轮反向抓出（改造后首跑 F 组未登记 11 处全被点名）。
+  // v5 P0：电源计划导出是唯一破例子进程；读取/枚举/写值仍走 powrprof。
+  { file: 'src-tauri/src/engine/native/syspanel.rs', anchor: '&["/export", tmp_str.as_str(), guid]', reason: '电源计划导出：powercfg /export 到应用私有 tmp，再复制到用户目标', timeoutConst: 'POWERCFG_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/commands/appearance.rs', anchor: '"EnableTransparency",', reason: '外观查询：读系统透明度开关（reg query，只读低频）', timeoutConst: 'REG_EXPORT_TIMEOUT', secs: 15 },
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"IMAGENAME eq DWMBlurGlass.exe"', reason: 'DWM 注入工具探测：tasklist 进程痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"/TN", "DWMBlurGlass_Extend"', reason: 'DWM 注入工具探测：schtasks 计划任务痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },

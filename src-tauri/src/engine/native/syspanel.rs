@@ -11,29 +11,122 @@
 //! **不做**一键还原 —— 危险能力默认关、猜错方向的代价不对称（AGENTS §3 口径），
 //! 用户可通过备份 JSON 手动 reg import 恢复。
 //!
-//! 四条命令都走 `guard(window, MAIN)`（AGENTS §3 三层）：写侧、系统级、只在主窗触发。
+//! 本域命令都走 `guard(window, MAIN)`（AGENTS §3 三层）：写侧、系统级、只在主窗触发。
 //! 电源方案**不再拉 `powercfg` 子进程**：改走 `powrprof.dll` 的 Power API（UTF-16 直出），
 //! 中文系统不再出现方案名乱码，也不引入 `check-system-bin` 之外的进程。
+//! **仅导出**破例用子进程：`powercfg /export` 直走 `systembin::quiet_cmd_timeout`；
+//! 读取/枚举/切换/写值仍走 powrprof。
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use windows::core::GUID;
-use windows::Win32::Foundation::{HLOCAL, LocalFree};
+use windows::core::{GUID, PCWSTR};
+use windows::Win32::Foundation::{HLOCAL, LocalFree, WIN32_ERROR};
+use windows::Win32::System::Registry::{REG_DWORD, REG_QWORD};
 use windows::Win32::System::Power::{
-    ACCESS_SCHEME, PowerEnumerate, PowerGetActiveScheme, PowerReadFriendlyName,
-    PowerSetActiveScheme,
+    ACCESS_INDIVIDUAL_SETTING, ACCESS_SCHEME, ACCESS_SUBGROUP, POWER_DATA_ACCESSOR,
+    PlatformRoleDesktop, PlatformRoleMobile, PlatformRoleSlate, PowerDeleteScheme,
+    PowerDeterminePlatformRole, PowerDuplicateScheme, PowerEnumerate, PowerGetActiveScheme,
+    PowerImportPowerScheme, PowerReadACValueIndex, PowerReadDCValueIndex, PowerReadDescription,
+    PowerReadFriendlyName, PowerReadPossibleValue, PowerReadSettingAttributes,
+    PowerReadValueIncrement, PowerReadValueMax, PowerReadValueMin, PowerReadValueUnitsSpecifier,
+    PowerSetActiveScheme, PowerWriteACValueIndex, PowerWriteDCValueIndex, PowerWriteFriendlyName,
+    PowerWriteSettingAttributes,
 };
 
-/// Windows 保留方案 GUID（微软公开文档，随系统分发）。三档在**每台机器上**都可通过
-/// `powercfg /duplicate` 或原生存在；用户自定义方案 GUID 不在白名单，读到就展示、
-/// 写请求一律拒绝（避免面板成为"任意 GUID 都能写"的通道）。
-pub const KNOWN_PLANS: &[(&str, &str)] = &[
-    ("381b4222-f694-41f0-9685-ff5bb260df2e", "平衡"),
-    ("a1841308-3541-4fab-bc81-f71556f20b4a", "节能"),
-    ("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "高性能"),
+/// Windows 保留方案 GUID（微软公开文档，随系统分发）+ 中文名称与一句话说明。
+///
+/// 这三档只是「面板能给哪句说明」的表，**不是可写白名单**：用户自己 `powercfg /duplicate`
+/// 出来的方案同样是本机方案，面板可选（2026-10-14 用户裁定）。写侧的 fail-closed 判据
+/// 见 `power_plan_apply`——「必须在本机枚举结果内」。
+pub const KNOWN_PLANS: &[(&str, &str, &str)] = &[
+    ("381b4222-f694-41f0-9685-ff5bb260df2e", "平衡", "系统默认；日常与办公最稳"),
+    ("a1841308-3541-4fab-bc81-f71556f20b4a", "节能", "笔记本续航优先；性能受限"),
+    ("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "高性能", "台式机与游戏优先；功耗上升"),
 ];
+
+/// 本机存在、但不在这三档里的方案（`powercfg /duplicate` 克隆或第三方注册）的统一说明。
+/// 它们**同样可选**——见 `power_plan_apply` 的安全口径。
+const CUSTOM_PLAN_TIP: &str = "本机自定义方案（克隆或第三方注册），按方案原名显示";
+
+/// 无子组设置用的全零 GUID；读显隐属性时不带方案参数，必须原样传它。
+const NO_SUBGROUP_GUID: GUID = GUID {
+    data1: 0,
+    data2: 0,
+    data3: 0,
+    data4: [0, 0, 0, 0, 0, 0, 0, 0],
+};
+const ERROR_MORE_DATA_CODE: u32 = 234;
+const MAX_POWER_PLAN_NAME_CHARS: usize = 200;
+const POWER_SETTING_ATTR_HIDDEN: u32 = 0b0000_0001;
+const POWER_SETTING_ATTR_VISIBLE: u32 = 0b0000_0010;
+
+static POWER_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
+static POWER_SESSIONS: OnceLock<Mutex<HashMap<String, PowerSettingsSession>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct PowerSettingRef {
+    subgroup: GUID,
+    setting: GUID,
+}
+
+#[derive(Clone)]
+struct PowerSettingsSession {
+    scheme_guid: String,
+    snapshots: Vec<PowerSettingSnapshot>,
+}
+
+#[derive(Clone)]
+struct PowerSettingSnapshot {
+    subgroup: GUID,
+    setting: GUID,
+    attributes: u32,
+    changed: bool,
+}
+
+struct LocalGuidPtr(*mut GUID);
+
+impl LocalGuidPtr {
+    fn take(&mut self) -> Option<GUID> {
+        if self.0.is_null() {
+            return None;
+        }
+        let g = unsafe { *self.0 };
+        self.0 = std::ptr::null_mut();
+        Some(g)
+    }
+}
+
+impl Drop for LocalGuidPtr {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.0 as *mut core::ffi::c_void)));
+            }
+        }
+    }
+}
+
+struct RemoveOnDrop(Option<PathBuf>);
+
+impl RemoveOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 /// 36 字符 GUID 文本 → [`GUID`]。长度/分段/hex 任一不合即 `None`，不做模糊匹配。
 fn parse_guid_str(s: &str) -> Option<GUID> {
@@ -109,6 +202,427 @@ fn guid_from_le_bytes(b: &[u8]) -> GUID {
     }
 }
 
+fn guid_ptr(g: Option<&GUID>) -> Option<*const GUID> {
+    g.map(|x| x as *const GUID)
+}
+
+fn guid_is_zero(g: &GUID) -> bool {
+    guid_string(g) == "00000000-0000-0000-0000-000000000000"
+}
+
+fn win32_ok(rc: WIN32_ERROR) -> bool {
+    rc.0 == 0
+}
+
+fn decode_utf16_bytes(buf: &[u8]) -> String {
+    let units: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
+}
+
+fn power_text(
+    kind: PowerTextKind,
+    scheme: Option<&GUID>,
+    subgroup: Option<&GUID>,
+    setting: Option<&GUID>,
+) -> Option<String> {
+    let mut size: u32 = 0;
+    let first = unsafe {
+        match kind {
+            PowerTextKind::Friendly => PowerReadFriendlyName(
+                None,
+                guid_ptr(scheme),
+                guid_ptr(subgroup),
+                guid_ptr(setting),
+                None,
+                &mut size,
+            ),
+            PowerTextKind::Description => PowerReadDescription(
+                None,
+                guid_ptr(scheme),
+                guid_ptr(subgroup),
+                guid_ptr(setting),
+                None,
+                &mut size,
+            ),
+        }
+    };
+    if first.0 != 0 && first.0 != ERROR_MORE_DATA_CODE {
+        return None;
+    }
+    if size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let second = unsafe {
+        match kind {
+            PowerTextKind::Friendly => PowerReadFriendlyName(
+                None,
+                guid_ptr(scheme),
+                guid_ptr(subgroup),
+                guid_ptr(setting),
+                Some(buf.as_mut_ptr()),
+                &mut size,
+            ),
+            PowerTextKind::Description => PowerReadDescription(
+                None,
+                guid_ptr(scheme),
+                guid_ptr(subgroup),
+                guid_ptr(setting),
+                Some(buf.as_mut_ptr()),
+                &mut size,
+            ),
+        }
+    };
+    if second.0 != 0 {
+        return None;
+    }
+    let text = decode_utf16_bytes(&buf);
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[derive(Clone, Copy)]
+enum PowerTextKind {
+    Friendly,
+    Description,
+}
+
+fn enumerate_guids(
+    scheme: Option<&GUID>,
+    subgroup: Option<&GUID>,
+    access: POWER_DATA_ACCESSOR,
+) -> Vec<GUID> {
+    let mut out = Vec::new();
+    let scheme_ptr = guid_ptr(scheme);
+    let subgroup_ptr = guid_ptr(subgroup);
+    let mut idx: u32 = 0;
+    loop {
+        let mut buf = [0u8; std::mem::size_of::<GUID>()];
+        let mut size: u32 = buf.len() as u32;
+        let rc = unsafe {
+            PowerEnumerate(
+                None,
+                scheme_ptr,
+                subgroup_ptr,
+                access,
+                idx,
+                Some(buf.as_mut_ptr()),
+                &mut size,
+            )
+        };
+        if rc.0 != 0 {
+            break;
+        }
+        out.push(guid_from_le_bytes(&buf));
+        idx += 1;
+        if idx >= 4096 {
+            break;
+        }
+    }
+    out
+}
+
+fn listed_scheme(guid: &str) -> bool {
+    scheme_guids()
+        .iter()
+        .any(|g| guid_string(g).eq_ignore_ascii_case(guid))
+}
+
+fn require_listed_scheme(guid: &str) -> Result<GUID, String> {
+    let parsed = parse_guid_str(guid).ok_or_else(|| format!("GUID 形状非法：{guid}"))?;
+    if !listed_scheme(guid) {
+        return Err(format!("方案 {guid} 不在本机方案列表内，已拒绝"));
+    }
+    Ok(parsed)
+}
+
+fn require_reserved_plans_untouched(guid: &str) -> Result<(), String> {
+    if KNOWN_PLANS
+        .iter()
+        .any(|(known, _, _)| known.eq_ignore_ascii_case(guid))
+    {
+        return Err(format!("{guid} 是 Windows 保留电源方案，已拒绝删除"));
+    }
+    Ok(())
+}
+
+fn name_bytes(name: &str) -> Result<(String, Vec<u8>), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("方案名不能为空".to_string());
+    }
+    if trimmed.contains('\0') {
+        return Err("方案名不能包含 NUL 字符".to_string());
+    }
+    if trimmed.chars().count() > MAX_POWER_PLAN_NAME_CHARS {
+        return Err(format!("方案名过长（最多 {MAX_POWER_PLAN_NAME_CHARS} 个字符）"));
+    }
+    let bytes = trimmed
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(|u| u.to_le_bytes())
+        .collect::<Vec<u8>>();
+    Ok((trimmed.to_string(), bytes))
+}
+
+fn setting_refs_for_scheme(scheme: &GUID) -> Vec<PowerSettingRef> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::<String>::new();
+
+    let mut subgroups = vec![NO_SUBGROUP_GUID];
+    for sub in enumerate_guids(Some(scheme), None, ACCESS_SUBGROUP) {
+        if !subgroups.iter().any(|g| guid_string(g) == guid_string(&sub)) {
+            subgroups.push(sub);
+        }
+    }
+
+    for sub in subgroups {
+        let mut settings = enumerate_guids(Some(scheme), Some(&sub), ACCESS_INDIVIDUAL_SETTING);
+        if guid_is_zero(&sub) {
+            // 部分系统/方案形状下，无子组设置用 NULL 子组枚举才返回；两条都试并去重。
+            settings.extend(enumerate_guids(
+                Some(scheme),
+                None,
+                ACCESS_INDIVIDUAL_SETTING,
+            ));
+        }
+        for setting in settings {
+            let key = format!("{}|{}", guid_string(&sub), guid_string(&setting));
+            if seen.insert(key) {
+                out.push(PowerSettingRef { subgroup: sub, setting });
+            }
+        }
+    }
+    out
+}
+
+fn read_setting_value(scheme: &GUID, subgroup: &GUID, setting: &GUID, dc: bool) -> Option<u32> {
+    let mut value: u32 = 0;
+    let rc = unsafe {
+        if dc {
+            PowerReadDCValueIndex(
+                None,
+                Some(scheme as *const GUID),
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                &mut value,
+            )
+        } else {
+            PowerReadACValueIndex(
+                None,
+                Some(scheme as *const GUID),
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                &mut value,
+            )
+            .0
+        }
+    };
+    (rc == 0).then_some(value)
+}
+
+fn read_value_range(scheme: &GUID, subgroup: &GUID, setting: &GUID) -> Option<(u32, u32, u32)> {
+    let mut min = 0u32;
+    let mut max = 0u32;
+    let mut step = 0u32;
+    let rc_min = unsafe {
+        PowerReadValueMin(
+            None,
+            Some(subgroup as *const GUID),
+            Some(setting as *const GUID),
+            &mut min,
+        )
+    };
+    let rc_max = unsafe {
+        PowerReadValueMax(
+            None,
+            Some(subgroup as *const GUID),
+            Some(setting as *const GUID),
+            &mut max,
+        )
+    };
+    let rc_step = unsafe {
+        PowerReadValueIncrement(
+            None,
+            Some(subgroup as *const GUID),
+            Some(setting as *const GUID),
+            &mut step,
+        )
+    };
+    let _ = scheme;
+    if win32_ok(rc_min) && win32_ok(rc_max) && win32_ok(rc_step) {
+        Some((min, max, step))
+    } else {
+        None
+    }
+}
+
+fn read_value_unit(scheme: &GUID, subgroup: &GUID, setting: &GUID) -> Option<String> {
+    let mut size: u32 = 0;
+    let rc = unsafe {
+        PowerReadValueUnitsSpecifier(
+            None,
+            Some(subgroup as *const GUID),
+            Some(setting as *const GUID),
+            None,
+            &mut size,
+        )
+    };
+    if (rc.0 != 0 && rc.0 != ERROR_MORE_DATA_CODE) || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let rc = unsafe {
+        PowerReadValueUnitsSpecifier(
+            None,
+            Some(subgroup as *const GUID),
+            Some(setting as *const GUID),
+            Some(buf.as_mut_ptr()),
+            &mut size,
+        )
+    };
+    if rc.0 != 0 {
+        return None;
+    }
+    let unit = decode_utf16_bytes(&buf);
+    let _ = scheme;
+    if unit.is_empty() { None } else { Some(unit) }
+}
+
+fn read_possible_values(scheme: &GUID, subgroup: &GUID, setting: &GUID) -> Vec<u32> {
+    let mut out = Vec::new();
+    for idx in 0..256u32 {
+        let mut ty = 0u32;
+        let mut size = 0u32;
+        let rc = unsafe {
+            PowerReadPossibleValue(
+                None,
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                Some(&mut ty),
+                idx,
+                None,
+                &mut size,
+            )
+        };
+        if rc.0 != 0 && rc.0 != ERROR_MORE_DATA_CODE {
+            break;
+        }
+        if size == 0 {
+            break;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let rc = unsafe {
+            PowerReadPossibleValue(
+                None,
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                Some(&mut ty),
+                idx,
+                Some(buf.as_mut_ptr()),
+                &mut size,
+            )
+        };
+        if rc.0 != 0 {
+            break;
+        }
+        let value = match ty {
+            t if t == REG_DWORD.0 => {
+                if buf.len() < 4 {
+                    break;
+                }
+                u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+            }
+            t if t == REG_QWORD.0 => {
+                if buf.len() < 8 {
+                    break;
+                }
+                let v = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                if v > u32::MAX as u64 {
+                    break;
+                }
+                v as u32
+            }
+            _ => break,
+        };
+        out.push(value);
+    }
+    let _ = scheme;
+    out
+}
+
+fn validate_value_against_meta(
+    value: u32,
+    range: Option<(u32, u32, u32)>,
+    possible: &[u32],
+    setting_label: &str,
+) -> Result<(), String> {
+    if let Some((min, max, step)) = range {
+        if value < min || value > max {
+            return Err(format!(
+                "{setting_label}: 值 {value} 超出范围 {min}..={max}"
+            ));
+        }
+        if step > 0 && value.checked_sub(min).map(|v| v % step).unwrap_or(1) != 0 {
+            return Err(format!("{setting_label}: 值 {value} 未按步长 {step} 对齐"));
+        }
+        return Ok(());
+    }
+    if !possible.is_empty() {
+        if !possible.contains(&value) {
+            return Err(format!(
+                "{setting_label}: 值 {value} 不在可选值 {} 内",
+                possible
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        return Ok(());
+    }
+    Err(format!("{setting_label}: 无法读取范围或可选值，按 fail-closed 拒绝写入"))
+}
+
+fn power_sessions() -> &'static Mutex<HashMap<String, PowerSettingsSession>> {
+    POWER_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn new_power_session_id() -> String {
+    let seq = POWER_SESSION_SEQ.fetch_add(1, Ordering::SeqCst);
+    format!("{}-{}-{seq}", crate::engine::now_ms(), std::process::id())
+}
+
+fn restore_attribute_snapshots(snapshots: &[PowerSettingSnapshot]) {
+    for snap in snapshots {
+        let rc = unsafe {
+            PowerWriteSettingAttributes(
+                Some(&snap.subgroup as *const GUID),
+                Some(&snap.setting as *const GUID),
+                snap.attributes,
+            )
+        };
+        if !win32_ok(rc) {
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "解锁失败回滚属性也失败：{} / {}（Win32 错误码 {}）",
+                    guid_string(&snap.subgroup),
+                    guid_string(&snap.setting),
+                    rc.0
+                ),
+            );
+        }
+    }
+}
+
 /// 读方案友好名（`PowerReadFriendlyName`，UTF-16 直出，与系统语言无关）。
 ///
 /// 本模块**不再解析 powercfg 文本**的原因就在这里：中文版 powercfg 的 stdout 是 OEM 代码页
@@ -166,28 +680,35 @@ fn active_scheme() -> Option<GUID> {
     if rc.0 != 0 || p.is_null() {
         return None;
     }
-    let g = unsafe { *p };
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(p as *mut core::ffi::c_void)));
-    }
-    Some(g)
+    LocalGuidPtr(p).take()
 }
 
 /// 读电源方案状态：当前 GUID + 名字 + 列表。
 ///
-/// 枚举本机所有可用方案（含用户克隆的自定义 GUID）—— 自定义方案**只展示**、不列入白名单，
-/// 面板下拉里带"自定义"标签，点击会被 apply 拒。
+/// 枚举本机**全部**可用方案（含用户克隆的自定义 GUID），每条都带 `known` 与 `tip`，
+/// 由面板一视同仁地渲染成可选小块（2026-10-14 用户裁定：自定义方案不再降级成
+/// 「白名单外，仅展示不可选」）。内置三档的名称与说明取自 `KNOWN_PLANS`（与系统语言无关），
+/// 自定义方案取 `PowerReadFriendlyName` 的原名。
 pub fn power_plan_state() -> Value {
     let active = active_scheme();
     let active_guid = active.as_ref().map(guid_string).unwrap_or_default();
-    let active_name = active.as_ref().and_then(scheme_friendly_name).unwrap_or_default();
+    let active_name = active
+        .as_ref()
+        .and_then(scheme_friendly_name)
+        .unwrap_or_else(|| active_guid.clone());
     let options = scheme_guids()
         .iter()
         .map(|g| {
             let guid = guid_string(g);
-            let name = scheme_friendly_name(g).unwrap_or_else(|| guid.clone());
-            let known = KNOWN_PLANS.iter().any(|(kg, _)| kg.eq_ignore_ascii_case(&guid));
-            json!({ "guid": guid, "name": name, "known": known })
+            match KNOWN_PLANS.iter().find(|(kg, _, _)| kg.eq_ignore_ascii_case(&guid)) {
+                Some((_, cn, tip)) => json!({ "guid": guid, "name": cn, "known": true, "tip": tip }),
+                None => json!({
+                    "guid": guid,
+                    "name": scheme_friendly_name(g).unwrap_or_else(|| guid.clone()),
+                    "known": false,
+                    "tip": CUSTOM_PLAN_TIP,
+                }),
+            }
         })
         .collect::<Vec<Value>>();
     json!({
@@ -197,18 +718,22 @@ pub fn power_plan_state() -> Value {
     })
 }
 
-/// 切换电源方案：白名单外拒绝 + 400ms 回读校验。
+/// 切换电源方案：**只接受本机枚举得到的方案 GUID** + 400ms 回读校验。
+///
+/// 安全口径 2026-10-14 从「固定三档白名单」改成「本机方案表内」：三档白名单会把用户
+/// 自己克隆的方案（他日常真正在用的那一档）挡在选择之外，而渲染层传进来的任意 GUID
+/// 该拒的仍然要拒——所以判据换成「这台机器上确实存在这个方案」，比固定表更宽也更准。
+/// 形状非法的输入在枚举**之前**就被拒（快速组单测因此不触系统）。
 ///
 /// **回读校验不能省**：`PowerSetActiveScheme` 在组策略锁定或休眠状态冲突时会"返回成功"
 /// 但当前方案没变。RAINZ 用同样判据（`Test-Scheme` 里也是切完再查）；
 /// 我们把它做成**错误回执**而不是"成功但状态没变"的静默。
 pub fn power_plan_apply(guid: &str) -> Result<Value, String> {
-    let target = KNOWN_PLANS
-        .iter()
-        .find(|(g, _)| g.eq_ignore_ascii_case(guid))
-        .ok_or_else(|| "GUID 不在允许的方案内（白名单：平衡 / 节能 / 高性能）".to_string())?;
-    let want = parse_guid_str(target.0)
-        .ok_or_else(|| format!("内置方案 GUID 形状非法：{}", target.0))?;
+    let want = parse_guid_str(guid).ok_or_else(|| format!("GUID 形状非法：{guid}"))?;
+    let listed = scheme_guids().iter().map(guid_string).collect::<Vec<String>>();
+    if !listed.iter().any(|g| g.eq_ignore_ascii_case(guid)) {
+        return Err("该方案不在本机方案列表内，已拒绝切换".to_string());
+    }
     let rc = unsafe { PowerSetActiveScheme(None, Some(&want as *const GUID)) };
     if rc.0 != 0 {
         return Err(format!("切换电源方案失败（Win32 错误码 {}）", rc.0));
@@ -219,10 +744,675 @@ pub fn power_plan_apply(guid: &str) -> Result<Value, String> {
         .get("activeGuid")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if !got.eq_ignore_ascii_case(target.0) {
-        return Err(format!("切换后回读为 {got}，与目标 {} 不符", target.0));
+    if !got.eq_ignore_ascii_case(guid) {
+        return Err(format!("切换后回读为 {got}，与目标 {guid} 不符"));
     }
     Ok(state)
+}
+
+/// 单个电源设置的目标值。嵌套结构体必须显式 rename 到 camelCase，见 AGENTS §5.4。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PowerSettingChange {
+    pub subgroup_guid: String,
+    pub setting_guid: String,
+    pub ac: Option<u32>,
+    pub dc: Option<u32>,
+}
+
+fn validate_existing_powrplan(path: &Path) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if !ext.eq_ignore_ascii_case("powrplan") {
+        return Err("导入路径必须是 .powrplan 文件".to_string());
+    }
+    let md = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("读取导入文件失败：{e}"))?;
+    if crate::engine::protect::is_reparse(&md) {
+        return Err("导入文件是 reparse 点，已拒绝".to_string());
+    }
+    if !md.is_file() {
+        return Err("导入路径不是普通文件".to_string());
+    }
+    if md.len() == 0 {
+        return Err("导入文件为空".to_string());
+    }
+    Ok(())
+}
+
+fn validate_export_destination(path: &Path) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if !ext.eq_ignore_ascii_case("powrplan") {
+        return Err("导出路径必须以 .powrplan 结尾".to_string());
+    }
+    if let Ok(md) = std::fs::symlink_metadata(path) {
+        if crate::engine::protect::is_reparse(&md) {
+            return Err("导出目标是 reparse 点，已拒绝覆盖".to_string());
+        }
+        if !md.is_file() {
+            return Err("导出目标已存在但不是普通文件".to_string());
+        }
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "导出目标缺少父目录".to_string())?;
+    if !parent.is_dir() {
+        return Err("导出目标父目录不存在".to_string());
+    }
+    Ok(())
+}
+
+/// 克隆电源方案并改名；失败时删除刚克隆出的方案，避免留下半截条目。
+pub fn power_plan_duplicate(source_guid: &str, name: &str) -> Result<Value, String> {
+    let source = require_listed_scheme(source_guid)?;
+    let (new_name, new_name_bytes) = name_bytes(name)?;
+    let mut dest: *mut GUID = std::ptr::null_mut();
+    let rc = unsafe { PowerDuplicateScheme(None, &source as *const GUID, &mut dest) };
+    if !win32_ok(rc) {
+        return Err(format!("克隆电源方案失败（Win32 错误码 {}）", rc.0));
+    }
+    let created = LocalGuidPtr(dest)
+        .take()
+        .ok_or_else(|| "克隆电源方案成功但系统未返回新 GUID".to_string())?;
+    let result = (|| {
+        let rc = unsafe {
+            PowerWriteFriendlyName(
+                None,
+                &created as *const GUID,
+                None,
+                None,
+                &new_name_bytes,
+            )
+        };
+        if !win32_ok(rc) {
+            return Err(format!("克隆后改名失败（Win32 错误码 {}）", rc.0));
+        }
+        let got = scheme_friendly_name(&created).unwrap_or_else(|| guid_string(&created));
+        if got != new_name {
+            return Err(format!("克隆后回读名称 {got}，与目标 {new_name} 不符"));
+        }
+        Ok(json!({
+            "guid": guid_string(&created),
+            "name": got,
+            "state": power_plan_state(),
+        }))
+    })();
+    if result.is_err() {
+        let _ = unsafe { PowerDeleteScheme(None, &created as *const GUID) };
+    }
+    result
+}
+
+/// 重命名电源方案；写完必须回读比对，不把「调用返回成功」当完成。
+pub fn power_plan_rename(guid: &str, name: &str) -> Result<Value, String> {
+    let target = require_listed_scheme(guid)?;
+    let (new_name, new_name_bytes) = name_bytes(name)?;
+    let old_name = scheme_friendly_name(&target).unwrap_or_else(|| guid_string(&target));
+    let rc = unsafe {
+        PowerWriteFriendlyName(
+            None,
+            &target as *const GUID,
+            None,
+            None,
+            &new_name_bytes,
+        )
+    };
+    if !win32_ok(rc) {
+        return Err(format!("重命名 {old_name} 失败（Win32 错误码 {}）", rc.0));
+    }
+    let got = scheme_friendly_name(&target).unwrap_or_else(|| guid_string(&target));
+    if got != new_name {
+        return Err(format!("重命名后回读名称 {got}，与目标 {new_name} 不符"));
+    }
+    Ok(json!({
+        "guid": guid_string(&target),
+        "name": got,
+        "state": power_plan_state(),
+    }))
+}
+
+/// 删除电源方案：本机枚举内、非当前方案、非微软保留三档三道闸全部通过才删。
+pub fn power_plan_delete(guid: &str) -> Result<Value, String> {
+    let target = require_listed_scheme(guid)?;
+    if active_scheme().is_some_and(|active| guid_string(&active).eq_ignore_ascii_case(guid)) {
+        return Err("当前正在使用的电源方案不能删除".to_string());
+    }
+    require_reserved_plans_untouched(guid)?;
+    let rc = unsafe { PowerDeleteScheme(None, &target as *const GUID) };
+    if !win32_ok(rc) {
+        return Err(format!("删除电源方案失败（Win32 错误码 {}）", rc.0));
+    }
+    if listed_scheme(guid) {
+        return Err(format!("删除后回读仍能枚举到 {guid}，已按失败上报"));
+    }
+    Ok(json!({
+        "guid": guid.to_ascii_lowercase(),
+        "state": power_plan_state(),
+    }))
+}
+
+/// 导入 `.powrplan`；成功后必须重新枚举并读得到名称，否则清理刚导入的方案。
+pub fn power_plan_import(path: &Path) -> Result<Value, String> {
+    validate_existing_powrplan(path)?;
+    let wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut dest: *mut GUID = std::ptr::null_mut();
+    let rc = unsafe {
+        PowerImportPowerScheme(
+            None,
+            PCWSTR(wide.as_ptr()),
+            &mut dest as *mut *mut GUID,
+        )
+    };
+    if !win32_ok(rc) {
+        return Err(format!("导入电源方案失败（Win32 错误码 {}）", rc.0));
+    }
+    let imported = LocalGuidPtr(dest)
+        .take()
+        .ok_or_else(|| "导入电源方案成功但系统未返回新 GUID".to_string())?;
+    let imported_guid = guid_string(&imported);
+    let name = scheme_friendly_name(&imported);
+    let confirmed = listed_scheme(&imported_guid) && name.is_some();
+    if !confirmed {
+        let _ = unsafe { PowerDeleteScheme(None, &imported as *const GUID) };
+        return Err(format!(
+            "导入 {imported_guid} 后重新枚举或名称回读失败，已清理半截方案"
+        ));
+    }
+    Ok(json!({
+        "guid": imported_guid,
+        "name": name.unwrap_or_default(),
+        "state": power_plan_state(),
+    }))
+}
+
+/// 导出 A′：只在这一条路径破例起 `powercfg.exe`，先落应用私有 tmp，再复制到用户目标。
+pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String> {
+    let _ = require_listed_scheme(guid)?;
+    validate_export_destination(destination)?;
+    let tmp_dir = crate::engine::paths::temp_script_dir()?;
+    let tmp_path = tmp_dir.join(format!(
+        "power-export-{}-{}.powrplan",
+        crate::engine::now_ms(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp_path);
+    let mut cleanup = RemoveOnDrop(Some(tmp_path.clone()));
+    let tmp_str = tmp_path.to_string_lossy().to_string();
+    let out = crate::engine::systembin::quiet_cmd_timeout(
+        crate::engine::systembin::system_tool("powercfg.exe"),
+        &["/export", tmp_str.as_str(), guid],
+        crate::engine::systembin::POWERCFG_TIMEOUT,
+    )
+    .map_err(|e| format!("启动 powercfg.exe 失败：{e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "powercfg /export 失败（退出码 {}）",
+            out.status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "未知".to_string())
+        ));
+    }
+    let md = std::fs::symlink_metadata(&tmp_path)
+        .map_err(|e| format!("导出后读取中转文件失败：{e}"))?;
+    if crate::engine::protect::is_reparse(&md) || !md.is_file() || md.len() == 0 {
+        return Err("powercfg /export 未产出有效的非空普通文件".to_string());
+    }
+    if !listed_scheme(guid) {
+        return Err(format!("导出后回读不到方案 {guid}，已按失败上报"));
+    }
+    let bytes = md.len();
+    std::fs::copy(&tmp_path, destination)
+        .map_err(|e| format!("复制导出文件到目标路径失败：{e}"))?;
+    let _ = std::fs::remove_file(&tmp_path);
+    cleanup.disarm();
+    crate::engine::log::write_log(
+        "info",
+        &format!("电源方案导出完成：{bytes} 字节"),
+    );
+    Ok(json!({
+        "guid": guid.to_ascii_lowercase(),
+        "bytes": bytes,
+        "path": destination.to_string_lossy(),
+    }))
+}
+
+fn setting_value_json(
+    scheme: &GUID,
+    item: &PowerSettingRef,
+) -> Result<Value, String> {
+    let subgroup_guid = guid_string(&item.subgroup);
+    let setting_guid = guid_string(&item.setting);
+    let attrs = unsafe {
+        PowerReadSettingAttributes(
+            Some(&item.subgroup as *const GUID),
+            Some(&item.setting as *const GUID),
+        )
+    };
+    let range = read_value_range(scheme, &item.subgroup, &item.setting);
+    let possible = read_possible_values(scheme, &item.subgroup, &item.setting);
+    let unit = read_value_unit(scheme, &item.subgroup, &item.setting);
+    let ac = read_setting_value(scheme, &item.subgroup, &item.setting, false);
+    let dc = read_setting_value(scheme, &item.subgroup, &item.setting, true);
+    let name = power_text(
+        PowerTextKind::Friendly,
+        Some(scheme),
+        Some(&item.subgroup),
+        Some(&item.setting),
+    )
+    .unwrap_or_else(|| setting_guid.clone());
+    let description = power_text(
+        PowerTextKind::Description,
+        Some(scheme),
+        Some(&item.subgroup),
+        Some(&item.setting),
+    )
+    .unwrap_or_default();
+    // 这里**不**对当前值做 validate_value_against_meta：真机探针证明存在
+    // 「当前值不在读到的枚举/范围内」的合法既成事实（如「合上盖子操作」当前值 1、
+    // possible 读得 0/2/3/6），对当前值报错会把整个 dump 打不开、编辑器被锁死。
+    // 严格校验只留给写侧 apply 对**目标值**执行（那才是要防的输入面）。原样如实返回。
+    Ok(json!({
+        "guid": setting_guid,
+        "subgroupGuid": subgroup_guid,
+        "name": name,
+        "description": description,
+        "unit": unit,
+        "isRange": range.is_some(),
+        "range": range.map(|(min, max, step)| json!({ "min": min, "max": max, "step": step })),
+        "possibleValues": possible,
+        "valueAc": ac,
+        "valueDc": dc,
+        "visible": (attrs & POWER_SETTING_ATTR_HIDDEN) == 0,
+        "attributes": attrs,
+    }))
+}
+
+/// 平台角色：只供渲染层决定 DC（电池）列的默认显隐，不是任何写入门禁。
+/// 台式机没有电池档，默认收起 DC 列；笔记本（mobile）与平板（slate）默认展开。
+fn platform_role_str() -> &'static str {
+    let role = unsafe { PowerDeterminePlatformRole() };
+    if role == PlatformRoleMobile {
+        "mobile"
+    } else if role == PlatformRoleSlate {
+        "slate"
+    } else if role == PlatformRoleDesktop {
+        "desktop"
+    } else {
+        "unknown"
+    }
+}
+
+/// 逐设置 dump：子组 + 设置、AC/DC 当前值、范围/可选值、显隐属性。
+pub fn power_settings_dump(scheme_guid: &str) -> Result<Value, String> {
+    let scheme = require_listed_scheme(scheme_guid)?;
+    let refs = setting_refs_for_scheme(&scheme);
+    let mut groups: Vec<Value> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for item in refs {
+        let subgroup_guid = guid_string(&item.subgroup);
+        let group_name = if guid_is_zero(&item.subgroup) {
+            "未分组".to_string()
+        } else {
+            power_text(
+                PowerTextKind::Friendly,
+                Some(&scheme),
+                Some(&item.subgroup),
+                None,
+            )
+            .unwrap_or_else(|| subgroup_guid.clone())
+        };
+        let setting = setting_value_json(&scheme, &item)?;
+        let group_idx = match index.get(&subgroup_guid) {
+            Some(i) => *i,
+            None => {
+                let i = groups.len();
+                index.insert(subgroup_guid.clone(), i);
+                groups.push(json!({
+                    "guid": subgroup_guid,
+                    "name": group_name,
+                    "settings": [],
+                }));
+                i
+            }
+        };
+        if let Some(settings) = groups[group_idx]
+            .get_mut("settings")
+            .and_then(Value::as_array_mut)
+        {
+            settings.push(setting);
+        }
+    }
+    Ok(json!({
+        "schemeGuid": scheme_guid.to_ascii_lowercase(),
+        "enumeratedAt": crate::engine::now_ms(),
+        "platformRole": platform_role_str(),
+        "subgroups": groups,
+    }))
+}
+
+/// 进入编辑会话：解全部设置显隐属性，并保存「本会话真正动过」的完整原始属性字。
+pub fn power_settings_unlock(scheme_guid: &str) -> Result<Value, String> {
+    let scheme = require_listed_scheme(scheme_guid)?;
+    let refs = setting_refs_for_scheme(&scheme);
+    let mut snapshots: Vec<PowerSettingSnapshot> = Vec::new();
+    let mut changed = Vec::<Value>::new();
+    let mut failed = Vec::<Value>::new();
+    for item in refs {
+        let old = unsafe {
+            PowerReadSettingAttributes(
+                Some(&item.subgroup as *const GUID),
+                Some(&item.setting as *const GUID),
+            )
+        };
+        let next = (old & !POWER_SETTING_ATTR_HIDDEN) | POWER_SETTING_ATTR_VISIBLE;
+        if next == old {
+            continue;
+        }
+        let snapshot = PowerSettingSnapshot {
+            subgroup: item.subgroup,
+            setting: item.setting,
+            attributes: old,
+            changed: true,
+        };
+        let rc = unsafe {
+            PowerWriteSettingAttributes(
+                Some(&item.subgroup as *const GUID),
+                Some(&item.setting as *const GUID),
+                next,
+            )
+        };
+        if !win32_ok(rc) {
+            failed.push(json!({
+                "subgroupGuid": guid_string(&item.subgroup),
+                "settingGuid": guid_string(&item.setting),
+                "message": format!("写入属性失败（Win32 错误码 {}）", rc.0),
+            }));
+            continue;
+        }
+        let got = unsafe {
+            PowerReadSettingAttributes(
+                Some(&item.subgroup as *const GUID),
+                Some(&item.setting as *const GUID),
+            )
+        };
+        if got != next {
+            restore_attribute_snapshots(&[snapshot]);
+            failed.push(json!({
+                "subgroupGuid": guid_string(&item.subgroup),
+                "settingGuid": guid_string(&item.setting),
+                "message": format!("回读为 {got}，与目标 {next} 不符；已尝试恢复原属性"),
+            }));
+            continue;
+        }
+        snapshots.push(snapshot);
+        changed.push(json!({
+            "subgroupGuid": guid_string(&item.subgroup),
+            "settingGuid": guid_string(&item.setting),
+            "oldAttributes": old,
+            "newAttributes": got,
+        }));
+    }
+    let session_id = new_power_session_id();
+    power_sessions()
+        .lock()
+        .map_err(|_| "电源设置会话锁不可用".to_string())?
+        .insert(
+            session_id.clone(),
+            PowerSettingsSession {
+                scheme_guid: scheme_guid.to_ascii_lowercase(),
+                snapshots: snapshots.clone(),
+            },
+        );
+    let snapshot = snapshots
+        .into_iter()
+        .map(|s| {
+            json!({
+                "subgroupGuid": guid_string(&s.subgroup),
+                "settingGuid": guid_string(&s.setting),
+                "attributes": s.attributes,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "ok": failed.is_empty(),
+        "sessionId": session_id,
+        "changed": changed,
+        "failed": failed,
+        "snapshot": snapshot,
+    }))
+}
+
+fn write_setting_value(
+    scheme: &GUID,
+    subgroup: &GUID,
+    setting: &GUID,
+    dc: bool,
+    value: u32,
+) -> Result<(), String> {
+    let rc = unsafe {
+        if dc {
+            PowerWriteDCValueIndex(
+                None,
+                scheme as *const GUID,
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                value,
+            )
+        } else {
+            PowerWriteACValueIndex(
+                None,
+                scheme as *const GUID,
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                value,
+            )
+            .0
+        }
+    };
+    if rc != 0 {
+        return Err(format!("Win32 错误码 {rc}"));
+    }
+    let got = read_setting_value(scheme, subgroup, setting, dc);
+    if got != Some(value) {
+        return Err(format!("回读为 {got:?}，与目标 {value} 不符"));
+    }
+    Ok(())
+}
+
+/// 批次写入逐设置值。前置校验整体失败时直接 Err；运行期任一条失败则 stopped 返回。
+pub fn power_settings_apply(
+    scheme_guid: &str,
+    changes: &[PowerSettingChange],
+    apply_active: bool,
+) -> Result<Value, String> {
+    let scheme = require_listed_scheme(scheme_guid)?;
+    let refs = setting_refs_for_scheme(&scheme);
+    let valid_refs = refs
+        .iter()
+        .map(|r| format!("{}|{}", guid_string(&r.subgroup), guid_string(&r.setting)))
+        .collect::<HashSet<_>>();
+
+    let mut planned = Vec::new();
+    for change in changes {
+        if change.ac.is_none() && change.dc.is_none() {
+            return Err(format!(
+                "设置 {} 未提供 AC 或 DC 目标值",
+                change.setting_guid
+            ));
+        }
+        let subgroup = parse_guid_str(&change.subgroup_guid)
+            .ok_or_else(|| format!("子组 GUID 形状非法：{}", change.subgroup_guid))?;
+        let setting = parse_guid_str(&change.setting_guid)
+            .ok_or_else(|| format!("设置 GUID 形状非法：{}", change.setting_guid))?;
+        let key = format!(
+            "{}|{}",
+            guid_string(&subgroup),
+            guid_string(&setting)
+        );
+        if !valid_refs.contains(&key) {
+            return Err(format!(
+                "设置 {} 不属于方案 {scheme_guid} 的本机枚举结果，已整体拒绝",
+                change.setting_guid
+            ));
+        }
+        let name = power_text(
+            PowerTextKind::Friendly,
+            Some(&scheme),
+            Some(&subgroup),
+            Some(&setting),
+        )
+        .unwrap_or_else(|| change.setting_guid.clone());
+        let range = read_value_range(&scheme, &subgroup, &setting);
+        let possible = read_possible_values(&scheme, &subgroup, &setting);
+        for value in [change.ac, change.dc].into_iter().flatten() {
+            validate_value_against_meta(value, range, &possible, &name)?;
+        }
+        planned.push((subgroup, setting, change.ac, change.dc));
+    }
+
+    let mut written = Vec::<Value>::new();
+    let mut failed = Vec::<Value>::new();
+    for (subgroup, setting, ac, dc) in planned {
+        let subgroup_guid = guid_string(&subgroup);
+        let setting_guid = guid_string(&setting);
+        let mut item_fail: Option<String> = None;
+        if let Some(value) = ac {
+            if let Err(e) = write_setting_value(&scheme, &subgroup, &setting, false, value) {
+                item_fail = Some(format!("AC 写入 {value} 失败：{e}"));
+            }
+        }
+        if item_fail.is_none() {
+            if let Some(value) = dc {
+                if let Err(e) = write_setting_value(&scheme, &subgroup, &setting, true, value) {
+                    item_fail = Some(format!("DC 写入 {value} 失败：{e}"));
+                }
+            }
+        }
+        if let Some(message) = item_fail {
+            failed.push(json!({
+                "subgroupGuid": subgroup_guid,
+                "settingGuid": setting_guid,
+                "message": message,
+            }));
+            break;
+        }
+        written.push(json!({
+            "subgroupGuid": subgroup_guid,
+            "settingGuid": setting_guid,
+            "ac": ac,
+            "dc": dc,
+        }));
+    }
+
+    let mut active_guid = active_scheme().map(|g| guid_string(&g)).unwrap_or_default();
+    if failed.is_empty() && apply_active {
+        let rc = unsafe { PowerSetActiveScheme(None, Some(&scheme as *const GUID)) };
+        if !win32_ok(rc) {
+            failed.push(json!({
+                "subgroupGuid": "",
+                "settingGuid": "",
+                "message": format!("设置活动方案失败（Win32 错误码 {}）", rc.0),
+            }));
+        } else {
+            std::thread::sleep(Duration::from_millis(400));
+            active_guid = active_scheme().map(|g| guid_string(&g)).unwrap_or_default();
+            if !active_guid.eq_ignore_ascii_case(scheme_guid) {
+                failed.push(json!({
+                    "subgroupGuid": "",
+                    "settingGuid": "",
+                    "message": format!("活动方案回读为 {active_guid}，与目标 {scheme_guid} 不符"),
+                }));
+            }
+        }
+    }
+    let ok = failed.is_empty();
+    Ok(json!({
+        "ok": ok,
+        "schemeGuid": scheme_guid.to_ascii_lowercase(),
+        "written": written,
+        "failed": failed,
+        "stopped": !ok,
+        "activeGuid": active_guid,
+    }))
+}
+
+/// 取消编辑：只接受后端 unlock 返回的 session id，按会话快照恢复本会话动过的完整属性字。
+pub fn power_settings_revert(scheme_guid: &str, session_id: &str) -> Result<Value, String> {
+    let _ = require_listed_scheme(scheme_guid)?;
+    let session = power_sessions()
+        .lock()
+        .map_err(|_| "电源设置会话锁不可用".to_string())?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "电源设置会话不存在或已消费，拒绝按伪造快照回写".to_string())?;
+    if !session
+        .scheme_guid
+        .eq_ignore_ascii_case(scheme_guid)
+    {
+        return Err("电源设置会话与目标方案不匹配，已拒绝回写".to_string());
+    }
+    let mut restored = Vec::<Value>::new();
+    let mut failed = Vec::<Value>::new();
+    for snap in session.snapshots.iter().filter(|s| s.changed) {
+        let rc = unsafe {
+            PowerWriteSettingAttributes(
+                Some(&snap.subgroup as *const GUID),
+                Some(&snap.setting as *const GUID),
+                snap.attributes,
+            )
+        };
+        let subgroup_guid = guid_string(&snap.subgroup);
+        let setting_guid = guid_string(&snap.setting);
+        if !win32_ok(rc) {
+            failed.push(json!({
+                "subgroupGuid": subgroup_guid,
+                "settingGuid": setting_guid,
+                "message": format!("恢复属性失败（Win32 错误码 {}）", rc.0),
+            }));
+            continue;
+        }
+        let got = unsafe {
+            PowerReadSettingAttributes(
+                Some(&snap.subgroup as *const GUID),
+                Some(&snap.setting as *const GUID),
+            )
+        };
+        if got != snap.attributes {
+            failed.push(json!({
+                "subgroupGuid": subgroup_guid,
+                "settingGuid": setting_guid,
+                "message": format!("恢复后回读 {got}，与快照 {} 不符", snap.attributes),
+            }));
+            continue;
+        }
+        restored.push(json!({
+            "subgroupGuid": subgroup_guid,
+            "settingGuid": setting_guid,
+            "attributes": got,
+        }));
+    }
+    let ok = failed.is_empty();
+    if ok {
+        let _ = power_sessions()
+            .lock()
+            .map_err(|_| "电源设置会话锁不可用".to_string())?
+            .remove(session_id);
+    }
+    Ok(json!({
+        "ok": ok,
+        "restored": restored,
+        "failed": failed,
+    }))
 }
 
 /// 只读虚拟内存状态。
@@ -488,11 +1678,49 @@ mod tests {
     }
 
     #[test]
-    fn 白名单外的_guid_一定被拒() {
-        // 白名单外走 apply 早退分支，不真改用户方案
-        let e = power_plan_apply("00000000-0000-0000-0000-000000000000")
-            .expect_err("白名单外应被拒");
-        assert!(e.contains("GUID 不在允许"), "错因文案漂了：{e}");
+    fn 设置值校验按范围步长与枚举逐条判红() {
+        let range = Some((0, 100, 10));
+        validate_value_against_meta(0, range, &[], "测试设置").expect("下界应过");
+        validate_value_against_meta(100, range, &[], "测试设置").expect("上界应过");
+        let e = validate_value_against_meta(101, range, &[], "测试设置").unwrap_err();
+        assert!(e.contains("超出范围"), "越界错因漂了：{e}");
+        let e = validate_value_against_meta(15, range, &[], "测试设置").unwrap_err();
+        assert!(e.contains("步长"), "步长错因漂了：{e}");
+        validate_value_against_meta(2, None, &[1, 2, 3], "测试设置").expect("枚举值应过");
+        let e = validate_value_against_meta(4, None, &[1, 2, 3], "测试设置").unwrap_err();
+        assert!(e.contains("可选值"), "枚举错因漂了：{e}");
+        let e = validate_value_against_meta(1, None, &[], "测试设置").unwrap_err();
+        assert!(e.contains("fail-closed"), "无元数据应 fail-closed：{e}");
+    }
+
+    #[test]
+    fn 电源方案名按_utf16_nul_编码且拒空拒nul() {
+        let (name, bytes) = name_bytes("  Trim 测试  ").expect("合法名应过");
+        assert_eq!(name, "Trim 测试");
+        assert_eq!(bytes.len(), ("Trim 测试".encode_utf16().count() + 1) * 2);
+        assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
+        assert!(name_bytes("").is_err());
+        assert!(name_bytes("a\0b").is_err());
+        assert!(name_bytes(&"x".repeat(MAX_POWER_PLAN_NAME_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn 解锁属性掩码保留其它位只动显隐两位() {
+        let old = 0b1011u32;
+        let next = (old & !POWER_SETTING_ATTR_HIDDEN) | POWER_SETTING_ATTR_VISIBLE;
+        assert_eq!(next, 0b1010u32);
+        assert_eq!(next & POWER_SETTING_ATTR_HIDDEN, 0);
+        assert_ne!(next & POWER_SETTING_ATTR_VISIBLE, 0);
+    }
+
+    #[test]
+    fn 形状非法的_guid_在枚举前就被拒() {
+        // 只走纯函数校验分支：不触 Power API（AGENTS §4.2 快速组零副作用纪律）。
+        // 原测试用「全零 GUID」当反例，那时判据是固定三档表（纯比较）；换成
+        // 「本机枚举结果内」之后，合法形状的 GUID 必须枚举才知道存不存在 ⇒ 挪到 #[ignore] 探针。
+        let e = power_plan_apply("not-a-guid")
+            .expect_err("形状非法应被拒");
+        assert!(e.contains("形状非法"), "错因文案漂了：{e}");
     }
 
     /// 真调 Power API 读系统方案表；机器语言 / 自定义方案都可能让结果差异，
@@ -503,9 +1731,167 @@ mod tests {
         let s = power_plan_state();
         assert!(s["activeGuid"].is_string(), "activeGuid 应为字符串");
         assert!(s["options"].is_array(), "options 应为数组");
+        // 面板改版后的结构契约：每条方案都要能单独渲染成一块可选小区块
+        // （名称 + 一句话说明 + GUID），且**当前生效方案必须在列表里**——
+        // 不在就等于面板显示不出「当前」，用户看不到自己现在用哪一档。
+        let opts = s["options"].as_array().expect("options 应为数组");
+        assert!(!opts.is_empty(), "本机一个电源方案都没枚举到（PowerEnumerate 异常）");
+        for o in opts.iter() {
+            for k in ["guid", "name", "tip"] {
+                assert!(o[k].is_string(), "方案缺少 {k}: {o}");
+            }
+            assert!(o["known"].is_boolean(), "方案缺少 known: {o}");
+        }
+        let active = s["activeGuid"].as_str().expect("activeGuid 应为字符串");
+        assert!(
+            opts.iter().any(|o| o["guid"].as_str().unwrap_or_default().eq_ignore_ascii_case(active)),
+            "当前方案 {active} 不在枚举结果里，面板标不出「当前」"
+        );
+        // 形状合法但本机不存在的 GUID：必须被「本机方案表」这道闸拒掉（写侧 fail-closed）
+        let e = power_plan_apply("00000000-0000-0000-0000-000000000000")
+            .expect_err("本机不存在的方案应被拒");
+        assert!(e.contains("不在本机方案列表"), "错因文案漂了：{e}");
         let pf = pagefile_state();
         assert!(pf["managed"].is_boolean(), "managed 应为布尔");
         assert!(pf["entries"].is_array(), "entries 应为数组");
+    }
+
+    /// v5 P0 真机探针：克隆 → 改名 → 导出 → 导入 → 删除，自建自清。
+    /// 真机用例默认不跑；它点名覆盖新引擎链路里最容易被 MockRuntime 漏掉的系统副作用。
+    #[test]
+    #[ignore = "真机探针：会新建、导出、导入并删除临时电源方案"]
+    fn 真机电源方案新建导出导入删除探针() {
+        let source = KNOWN_PLANS[0].0;
+        let name = format!("Trim P0 Probe {}", crate::engine::now_ms());
+        let dup = power_plan_duplicate(source, &name).expect("克隆应成功");
+        let dup_guid = dup["guid"].as_str().expect("克隆 GUID").to_string();
+        let export_dir = crate::engine::paths::temp_script_dir().expect("tmp 目录");
+        let export_file = export_dir.join(format!(
+            "trim-p0-export-{}-{}.powrplan",
+            crate::engine::now_ms(),
+            std::process::id()
+        ));
+        let result = (|| {
+            let exported = power_plan_export(&dup_guid, &export_file).expect("导出应成功");
+            assert!(
+                exported["bytes"].as_u64().unwrap_or(0) > 0,
+                "导出字节数应为正：{exported}"
+            );
+            let imported = power_plan_import(&export_file).expect("导入应成功");
+            let imported_guid = imported["guid"].as_str().expect("导入 GUID").to_string();
+            assert!(
+                scheme_guids()
+                    .iter()
+                    .any(|g| guid_string(g).eq_ignore_ascii_case(&imported_guid)),
+                "导入后重新枚举必须能看到新 GUID"
+            );
+            power_plan_delete(&imported_guid).expect("导入方案清理应成功");
+            Ok::<(), String>(())
+        })();
+        let cleanup_dup = power_plan_delete(&dup_guid);
+        let _ = std::fs::remove_file(&export_file);
+        result.expect("新建导出导入链路应成功");
+        cleanup_dup.expect("克隆方案清理应成功");
+    }
+
+    /// v5 P0 真机探针：解锁属性 → 回读 → 按 session 快照回滚。
+    /// Drop 再做一次同值回滚，确保断言失败时也不把本机属性留在解锁态。
+    #[test]
+    #[ignore = "真机探针：会临时解锁并回滚本机电源设置属性"]
+    fn 真机电源设置解锁与取消回滚探针() {
+        struct AttributeRollback(Vec<(GUID, GUID, u32)>);
+        impl Drop for AttributeRollback {
+            fn drop(&mut self) {
+                for (subgroup, setting, attrs) in &self.0 {
+                    let _ = unsafe {
+                        PowerWriteSettingAttributes(
+                            Some(subgroup as *const GUID),
+                            Some(setting as *const GUID),
+                            *attrs,
+                        )
+                    };
+                }
+            }
+        }
+
+        let scheme_guid = KNOWN_PLANS[0].0;
+        let unlocked = power_settings_unlock(scheme_guid).expect("解锁应成功");
+        if unlocked["ok"] == json!(false) {
+            let failed = unlocked["failed"].as_array().expect("failed 应为数组");
+            assert!(!failed.is_empty(), "解锁失败态必须点名失败设置：{unlocked}");
+            eprintln!("部分设置未能解锁（如实回执）：{}", unlocked["failed"]);
+        }
+        let session_id = unlocked["sessionId"].as_str().expect("sessionId").to_string();
+        let changed = unlocked["changed"].as_array().cloned().unwrap_or_default();
+        let mut rollback = AttributeRollback(Vec::new());
+        for row in &changed {
+            let subgroup = parse_guid_str(row["subgroupGuid"].as_str().expect("subgroupGuid"))
+                .expect("subgroup guid");
+            let setting = parse_guid_str(row["settingGuid"].as_str().expect("settingGuid"))
+                .expect("setting guid");
+            let old = row["oldAttributes"].as_u64().expect("oldAttributes") as u32;
+            let next = row["newAttributes"].as_u64().expect("newAttributes") as u32;
+            rollback.0.push((subgroup, setting, old));
+            let got = unsafe {
+                PowerReadSettingAttributes(
+                    Some(&subgroup as *const GUID),
+                    Some(&setting as *const GUID),
+                )
+            };
+            assert_eq!(got, next, "解锁后属性回读应与 newAttributes 一致");
+            assert_eq!(got & POWER_SETTING_ATTR_HIDDEN, 0, "bit0 必须清零");
+            assert_ne!(got & POWER_SETTING_ATTR_VISIBLE, 0, "bit1 必须置位");
+        }
+        if changed.is_empty() {
+            eprintln!("SKIP：本机当前没有需要解锁的隐藏设置，只验证 session/revert 闭环");
+        }
+        let reverted = power_settings_revert(scheme_guid, &session_id).expect("回滚应成功");
+        assert_eq!(reverted["ok"], json!(true), "回滚失败回执：{reverted}");
+        for (subgroup, setting, old) in &rollback.0 {
+            let got = unsafe {
+                PowerReadSettingAttributes(
+                    Some(subgroup as *const GUID),
+                    Some(setting as *const GUID),
+                )
+            };
+            assert_eq!(got, *old, "取消后属性必须与 unlock 前快照逐字相等");
+        }
+    }
+
+    /// v5 P1 真机探针：dump 全链（真实枚举子组/设置 + 平台角色）。
+    /// 为什么必须真机：编辑器 UI 全靠这份形状；MockRuntime 给不了真实子组/取值元数据，
+    /// `platform_role_str` 也只是 powrprof 转发，只有真跑才证明字段真的落进回执。
+    #[test]
+    #[ignore = "真机探针：真实枚举本机电源设置的子组与取值元数据"]
+    fn 真机电源设置dump探针() {
+        let v = power_settings_dump(KNOWN_PLANS[0].0).expect("dump 应成功");
+        let role = v["platformRole"].as_str().expect("platformRole 应为字符串");
+        assert!(
+            ["mobile", "slate", "desktop", "unknown"].contains(&role),
+            "platformRole 超出允许集：{role}"
+        );
+        let groups = v["subgroups"].as_array().expect("subgroups 应为数组");
+        assert!(!groups.is_empty(), "子组列表不应为空");
+        let mut total = 0usize;
+        for g in groups {
+            assert!(g["guid"].is_string() && g["name"].is_string(), "子组缺 guid/name：{g}");
+            for s in g["settings"].as_array().expect("settings 应为数组") {
+                total += 1;
+                assert!(s["guid"].is_string() && s["name"].is_string(), "设置缺 guid/name：{s}");
+                assert!(s["isRange"].is_boolean(), "设置缺 isRange：{s}");
+                assert!(s["possibleValues"].is_array(), "possibleValues 应为数组：{s}");
+                assert!(
+                    s["valueAc"].is_u64() || s["valueAc"].is_null(),
+                    "valueAc 形状异常：{s}"
+                );
+                assert!(
+                    s["visible"].is_boolean() && s["attributes"].is_u64(),
+                    "显隐属性形状异常：{s}"
+                );
+            }
+        }
+        assert!(total > 0, "设置总数为 0 说明枚举没拿到任何东西");
+        eprintln!("dump 探针：{total} 个设置 / platformRole={role} / 子组 {} 个", groups.len());
     }
 
     // ===== v0.4.9 §3.6 写侧：pagefile_apply 参数校验（纯函数、无 IO、无 admin 需求）=====

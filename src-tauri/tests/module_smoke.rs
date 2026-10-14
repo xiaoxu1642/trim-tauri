@@ -1168,32 +1168,57 @@ fn elapsed_ms_是每项必有的非负整数() {
 
 // ==================== syspanel 回执形状（2026-10-03 读取失败根因） ====================
 
-/// syspanel 四条命令的回执必须是 `{ success, data }`，**不是裸对象**。
+/// syspanel 全域命令的回执必须是 `{ success, data }`，**不是裸对象**。
 ///
 /// 根因（真实缺陷）：`syspanel_power_plan_get` / `pagefile_state` 早期直接
 /// `Ok(power_plan_state())` 返回裸 state，裸对象没有 `success` 字段 ⇒ 渲染层
 /// `syspanel.js` 的 `resp.success` 恒为 undefined ⇒ 两块面板永远显示
 /// 「读取电源方案失败 / 读取虚拟内存失败」，而后端其实读到了数据。
 ///
-/// 为什么用静态口径而不是 `invoke`：这两条命令只在**主窗**放行（`guard(MAIN)`），
-/// 且电源方案读侧会拉起 `powercfg` 子进程 —— 不属快速组零副作用命令。断言改为
-/// 「源码里回执字面量必须带 success 包装」，锁的正是那次漂移本身。
+/// 为什么用静态口径而不是 `invoke`：命令只在**主窗**放行（`guard(MAIN)`），
+/// 且读值/写值会触真实 Power API；导出还会拉起 `powercfg.exe` —— 不属快速组零副作用命令。
+/// 断言改为「命令体必须走统一 success/data 包装」，锁的正是那次漂移本身。
 #[test]
 fn syspanel_回执必须是_success_data_包装() {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/commands/syspanel.rs");
     let src = std::fs::read_to_string(&p).expect("读得到 src-tauri/src/commands/syspanel.rs");
-    for needle in [
-        r#"Ok(json!({ "success": true, "data": power_plan_state() }))"#,
-        r#"Ok(json!({ "success": true, "data": pagefile_state() }))"#,
-    ] {
-        assert!(src.contains(needle), "syspanel 回执缺 success/data 包装（needle={needle}）");
-    }
-    // apply 侧走 map(...) 包装（power_plan_apply / pagefile_apply 返回 Result）
     assert!(
-        src.contains(r#"map(|state| json!({ "success": true, "data": state }))"#),
-        "apply 侧回执缺 success/data 包装"
+        src.contains(r#"Ok(json!({ "success": true, "data": data }))"#),
+        "syspanel_ok 必须保持 success/data 包装"
     );
+    let commands = [
+        "syspanel_power_plan_get",
+        "syspanel_power_plan_apply",
+        "syspanel_power_settings_dump",
+        "syspanel_power_plan_duplicate",
+        "syspanel_power_plan_rename",
+        "syspanel_power_plan_delete",
+        "syspanel_power_plan_import",
+        "syspanel_power_plan_export",
+        "syspanel_power_settings_unlock",
+        "syspanel_power_settings_apply",
+        "syspanel_power_settings_revert",
+        "syspanel_pagefile_state",
+        "syspanel_pagefile_apply",
+    ];
+    for name in commands {
+        let needle = format!("fn {name}<R: Runtime>");
+        let start = src
+            .find(&needle)
+            .or_else(|| src.find(&format!("fn {name}<R: tauri::Runtime>")))
+            .unwrap_or_else(|| panic!("找不到命令 {name}"));
+        let body = &src[start..];
+        let end = body.find("\n}\n").unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("syspanel_ok")
+                || body.contains("syspanel_result_from_data")
+                || body.contains(r#"json!({ "success": true, "data":"#)
+                || body.contains(r#"json!({ "success": true, "data": state })"#),
+            "{name} 回执未走统一 success/data 包装：{body}"
+        );
+    }
     // 反向：Ok( 直接返回裸值的形态必须已经不存在。
     // 判据**精确到带右括号的形态**（`Ok(power_plan_state())`）：写成 `Ok(power_plan_state`
     // 会连 `Ok(json!({ "success": true, "data": power_plan_state() }))` 一起命中 ⇒ 恒红。
@@ -1201,6 +1226,40 @@ fn syspanel_回执必须是_success_data_包装() {
     assert!(
         !src.contains("Ok(power_plan_state())") && !src.contains("Ok(pagefile_state())"),
         "仍有命令裸返回 state ⇒ 渲染层恒判读取失败"
+    );
+}
+
+/// v5 P0：新增 9 条 syspanel 命令全部是主窗档；子窗调用必须在 guard 处被拒杀，
+/// 不得进入真实 Power API 或文件对话框。
+#[test]
+fn syspanel_power_编辑命令_is_main_only() {
+    let cases: &[(&str, serde_json::Value)] = &[
+        ("syspanel_power_settings_dump", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e" })),
+        ("syspanel_power_plan_duplicate", json!({ "sourceGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "name": "x" })),
+        ("syspanel_power_plan_rename", json!({ "guid": "381b4222-f694-41f0-9685-ff5bb260df2e", "name": "x" })),
+        ("syspanel_power_plan_delete", json!({ "guid": "381b4222-f694-41f0-9685-ff5bb260df2e", "confirmedHighRisk": true })),
+        ("syspanel_power_plan_import", json!({})),
+        ("syspanel_power_plan_export", json!({ "guid": "381b4222-f694-41f0-9685-ff5bb260df2e" })),
+        ("syspanel_power_settings_unlock", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e" })),
+        ("syspanel_power_settings_apply", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "changes": [], "applyActive": false })),
+        ("syspanel_power_settings_revert", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "sessionId": "x" })),
+    ];
+    let mut rejected = Vec::<String>::new();
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        for (cmd, args) in cases {
+            let text = invoke_text(&w, cmd, args.clone());
+            assert!(
+                text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
+            );
+            rejected.push(format!("{label}:{cmd}"));
+        }
+    }
+    assert_eq!(
+        rejected.len(),
+        sub_windows().len() * cases.len(),
+        "每个子窗 label 都必须逐命令被拒杀（清单塌缩时这条红）"
     );
 }
 
