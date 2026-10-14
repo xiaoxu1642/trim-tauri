@@ -147,7 +147,11 @@ input[type="range"].ds-slider:focus-visible {
   z-index: 1200;
   min-width: 168px;
   padding: 4px;
-  background: var(--bg-card);
+  /* 口径 v2·B 类（宿主承载面）：菜单不是按钮，逐项给 .ds-menu-item 加 floor 解决不了
+     「整张菜单透出壁纸」——底必须由菜单容器自己成立。原先只有 body.electron-mica 那条
+     带 floor，无材质态就只剩 --bg-card（alpha 0）。这里按同一 floor + elevated 口径补齐，
+     使两种材质路径各自都成立（main.css 的 electron-mica 段只额外提供磨砂）。 */
+  background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-btn);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);

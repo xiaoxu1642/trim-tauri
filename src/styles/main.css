@@ -873,25 +873,36 @@ body {
   padding: 0 14px;
   border: 1px solid transparent;
   border-radius: var(--radius-small);
-  background: var(--bg-card);
+  /* 口径 v2·R1（《按钮底与玻璃兜底统一口径 v2》）：操作面的常态底必须**自身可读**，
+     不得依赖 liquid-glass.js 有没有轮到它进 28 个折射名额。--bg-card 的 alpha 是 0
+     （语义是「容器透出原生材质」），拿它当独立按钮底就是用户报的「同一按钮在不同页面
+     颜色不一样」的根因。floor 托底 + 中性玻璃 tint，与 hover 同一套栈、只差一档浓度。 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   color: var(--fg-primary);
   font-family: inherit;
   font-size: var(--fs-secondary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   cursor: pointer;
-  /* 批次②判定：本条**保留** transition: all，不动它。理由（现算）：命中 .btn 的规则块
-     有 40 余个（.btn-primary / .btn-accent / .btn-secondary / .btn-ghost 等变体各自的
-     background、border-color、color；.lg-elastic 靠 --lg-tx/--lg-sx/--lg-press 改 transform；
+  /* 批次②判定：本条**保留** transition: all，不动它。理由：命中 .btn 的规则块很多
+     （.btn-primary / .btn-accent / .btn-secondary / .btn-opt-* 各变体的 background、
+     border-color、color；.lg-elastic 靠 --lg-tx/--lg-sx/--lg-press 改 transform；
      高对比度段改 border-width；窄窗段改 flex；通用 :focus-visible 改 outline / outline-offset；
-     :disabled 改 opacity），而 scripts/liquid-glass.js 还对按钮写内联 backdrop-filter——
-     白名单要么漏列某个既有过渡（观感退化成瞬跳），要么把 backdrop-filter 收进来（等于没改）。
+     :disabled 改 opacity；按钮/滑块/聚光三层还各有 background-image 与 opacity）——条数不写死，
+     现算看 `node tools/check-contrast.mjs` 的 F1 逐类点名。白名单要么漏列某个既有过渡
+     （观感退化成瞬跳），要么把 backdrop-filter 收进来（等于没改）。
      要摘掉折射值那 160ms 的离散过渡，需要单独裁定，不在本批保守范围内。 */
   transition: all var(--duration-fast) var(--ease-standard);
   white-space: nowrap;
   user-select: none;
 }
 .btn:hover:not(:disabled) {
-  background: var(--bg-card-hover);
+  /* R2：hover 只把 tint 加深一档，floor 不变——常态/hover 走同一套栈，
+     不再出现「hover 有 floor、常态没有」这种两截口径（v1 §3.3 的结论）。 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));
   border-color: var(--border-strong);
 }
 .btn:disabled {
@@ -936,12 +947,13 @@ body {
   to { transform: rotate(360deg); }
 }
 
+/* 口径 v2·M2：`.btn-secondary` 只是**描边与文字**的层级差异，底色真源收敛到 `.btn` 一处。
+   它原本在中段 / 亮色段 / 材质段各写一份常态底（三份互相覆盖、净结果取决于源码顺序），
+   任何一处增删行都会翻转结论——这就是「每次遇到就开新分支」的结构性原因。 */
 .btn-secondary {
-  background: var(--bg-card);
   border-color: var(--border-default);
 }
 .btn-secondary:hover:not(:disabled) {
-  background: var(--bg-card-hover);
   border-color: var(--border-strong);
 }
 
@@ -1328,7 +1340,15 @@ body {
   display: flex;
   gap: 4px;
   margin-bottom: 16px;
-  background: var(--bg-card);
+  /* 口径 v2·B 类（宿主承载面，2026-10-14 与用户确认的落法）：轨道尺寸贴合内容、自带
+     padding 与描边，floor 打在**轨道**上、子项常态保持 transparent —— 若给每个 .filter-tab
+     都铺 floor，.lg-thumb 玻璃滑块（z-index:0，子项 z-index:1）会被自己身后那层底盖掉，
+     分段选中指示就没了。
+     写法照抄仓内既有的宿主先例（.ds-menu / .ds-tooltip = floor + --bg-elevated），不新造一档：
+     只写 floor 单层是不成立的——floor 0.45 单层对 --fg-secondary 的标签文字在身后近黑时
+     只有 1.46:1，比改之前（alpha 0、透出深色壁纸，3.04:1）还差；叠上 elevated 这一档才有
+     正文档的 AA。滑块那侧用的是 floor + 双 tint（总覆盖 ≈83% vs 轨道 ≈66%），浓度差保留。 */
+  background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), var(--bg-elevated);
   padding: 4px;
   border-radius: var(--radius-small);
   border: 1px solid var(--border-default);
@@ -1350,15 +1370,19 @@ body {
               border-color var(--duration-fast) var(--ease-standard), transform var(--duration-fast) var(--ease-emphasized);
 }
 .filter-tab:hover {
-  background: var(--bg-card-hover);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));
 }
 .filter-tab:active {
   transform: scale(0.98);
 }
 .filter-tab.active {
   /* v3 方案 A：选中分段实底转中性胶囊（Apple 分段控件语言：轨道灰、选中白胶囊）；
-     lg 三档由 1471 段强制透明、滑块上色，本规则只在 off 档生效 */
-  background: var(--bg-card-hover);
+     lg 三档由滑块 .lg-thumb 承担选中视觉，本条的 floor 栈只是无滑块/关透明度时的兜底 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));
   color: var(--fg-primary);
 }
 
@@ -1983,14 +2007,15 @@ select.field-input { cursor: pointer; appearance: auto; }
   height: 34px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-btn);
-  background: var(--bg-card);
+  /* 口径 v2·A 类：本类与 hover 原先各写一份 --bg-card / --bg-card-hover（元素同时挂 .btn），
+     现在只留布局与描边，常态底由 .btn 的 floor 栈单点供给。 */
   color: var(--fg-secondary);
   cursor: pointer;
   font-size: calc(12.5px * var(--font-size-scale, 1));
   font-weight: calc(550 * var(--font-weight-scale, 1));
   transition: border-color 160ms var(--ease-standard), color 160ms var(--ease-standard), background 160ms;
 }
-.btn-opt-ai:hover { color: var(--fg-primary); border-color: var(--accent); background: var(--bg-card-hover); }
+.btn-opt-ai:hover { color: var(--fg-primary); border-color: var(--accent); }
 .btn-opt-ai:disabled { opacity: 0.55; cursor: default; }
 .toast-progress-fill {
   height: 100%;
@@ -2330,7 +2355,11 @@ input[type="radio"]:focus-visible {
   padding: 3px 8px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-small);
-  background: var(--bg-elevated);
+  /* 口径 v2·A 类：原先吃 --bg-elevated（alpha 0.38），是「名单里低 alpha 族」的一种——
+     与其余按钮不同源但同一类问题：底浓度由容器阶梯供给，观感随身后内容变。收敛到 floor 栈。 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   color: var(--fg-secondary);
   font-size: calc(11px * var(--font-size-scale, 1));
   font-weight: calc(500 * var(--font-weight-scale, 1));
@@ -2351,7 +2380,9 @@ input[type="radio"]:focus-visible {
   white-space: nowrap;
 }
 .fileclean-preview-btn:hover {
-  background: var(--bg-card-hover);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));
   color: var(--accent);
   border-color: var(--accent);
 }
@@ -3325,13 +3356,20 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 /* 幽灵项：缓存里还在、系统里已消失（本次重扫后不再出现） */
 .startup-item.ghost { opacity: 0.62; }
 .startup-item.ghost .startup-item-title { color: var(--fg-tertiary); }
+/* 口径 v2·R3（语义色状态按钮）：语义染层保留浓度，但底下必须垫 floor——
+   裸 color-mix(... , transparent) 叠在 alpha=0 的容器上等于「透出身后内容」，
+   用户看到的「禁用/启用/删除」小按钮颜色就随身后是卡片还是壁纸变。 */
 .btn-opt-toggle.on {
-  background: color-mix(in srgb, var(--success) 14%, transparent);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    color-mix(in srgb, var(--success) 14%, transparent);
   color: var(--success);
   border-color: transparent;
 }
 .btn-opt-toggle.off {
-  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    color-mix(in srgb, var(--warning) 14%, transparent);
   color: var(--warning);
   border-color: transparent;
 }
@@ -3339,7 +3377,9 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   filter: brightness(1.1);
 }
 .btn-opt-del {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
   border-color: transparent;
 }
@@ -3347,7 +3387,9 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   filter: brightness(1.1);
 }
 .btn-opt-loc {
-  background: color-mix(in srgb, var(--accent, var(--info)) 6%, transparent);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    color-mix(in srgb, var(--accent, var(--info)) 6%, transparent);
   color: var(--accent, var(--info));
   border-color: transparent;
 }
@@ -4143,13 +4185,21 @@ img.ctx-col-icon {
   /* 审查 M-13（2026-10-03 L4）：--accent-text 是 accent 实底专用墨色，配 -soft 染底
      合成后暗 1.13/亮 1.17:1 两主题不可见；--accent 在同底上暗 5.14/亮 4.60:1 达标 */
   color: var(--accent);
-  background: var(--accent-soft);
+  /* 口径 v2·A 类 + R3：染底 token 保留（浓度是两主题各自调好的），但底下要垫 floor——
+     裸 --accent-soft（6% alpha）贴在 alpha=0 的分组标题底上，等于没有底。 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    var(--accent-soft);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-btn);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-standard);
 }
-.peri-explain-btn:hover { background: var(--accent-light); }
+.peri-explain-btn:hover {
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    var(--accent-light);
+}
 
 .opt-row,
 .ctx-kanban-row {
@@ -4227,7 +4277,11 @@ img.ctx-col-icon {
   padding: 3px 12px;
   border-radius: var(--radius-btn);
   border: 1px solid var(--border-strong);
-  background: transparent;
+  /* 口径 v2·A 类：看板列头的「全选」是独立命中区，原先常态 transparent、hover 也只到 4%
+     染底，两态都直接透出列卡片背后那层（列卡片本身又是 alpha=0） */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   color: var(--fg-secondary);
   cursor: pointer;
   transition: color 0.3s ease, border-color 0.3s ease, background-color 0.3s ease;
@@ -4236,7 +4290,9 @@ img.ctx-col-icon {
 .ctx-col-selectall:hover {
   color: var(--c, var(--accent));
   border-color: var(--c, var(--accent));
-  background: color-mix(in srgb, var(--c, var(--accent)) 4%, transparent);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    color-mix(in srgb, var(--c, var(--accent)) 4%, transparent);
 }
 .ctx-kanban-row.disabled-row { opacity: 0.55; }
 .ctx-row-detail {
@@ -4492,14 +4548,20 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   padding: 12px 10px;
   border: 1.5px solid var(--border-default);
   border-radius: var(--radius-medium);
-  background: var(--bg-card);
+  /* 口径 v2·A 类：材质预览卡是「可点选项」而不是容器，常态底必须自带 floor（原 --bg-card
+     alpha=0，卡内文字直接压在身后的卡片/壁纸上） */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   cursor: pointer;
   transition: border-color 0.3s ease, background-color 0.3s ease;
 }
 .material-card:hover { border-color: var(--border-strong); }
 .material-card.selected {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    color-mix(in srgb, var(--accent) 5%, transparent);
 }
 .material-swatch {
   width: 44px;
@@ -4578,7 +4640,12 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   padding: 6px 14px;
   font-size: 13px;
   color: var(--fg-secondary);
-  background: var(--bg-card);
+  /* 口径 v2·A 类（与 .filter-tab 的落法刻意不同，理由写在这儿）：.maint-tabs 是无 padding、
+     无描边、宽度铺满一行的换行 pill 列表，floor 打在轨道上会画出一整块白底；
+     这里每个 tab 自带描边与圆角、本来就是独立胶囊，所以 floor 只能打在 pill 本体上。 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   border: 1px solid var(--border-default);
   border-radius: var(--radius-btn);
   cursor: pointer;
@@ -4588,7 +4655,9 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
 .maint-tab.active {
   color: var(--accent);
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    color-mix(in srgb, var(--accent) 5%, transparent);
 }
 .maint-tab-count {
   font-size: 11px;
@@ -4806,9 +4875,11 @@ body.theme-light .nav-section-title { color: var(--fg-tertiary); }
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 /* 审查 v3-L3：本组字面值（#171b24/#202631/#a8afbd/#1c1e24/#f0f1f4/#4b505b）映射到
-   既有 token，向雾屿 V1 对齐（细微色差属有意收敛，主题调整不再漏同步） */
-.btn-secondary { background: var(--surface-solid); border-color: rgba(255, 255, 255, 0.11); }
-.btn-secondary:hover:not(:disabled) { background: var(--bg-hover); border-color: rgba(255, 255, 255, 0.19); }
+   既有 token，向雾屿 V1 对齐（细微色差属有意收敛，主题调整不再漏同步）
+   口径 v2·M2：这两条原有的**底色**覆写（--surface-solid / --bg-hover）已删除——
+   常态底由 `.btn` 单点供给，本组只留暗色下的描边浓度。 */
+.btn-secondary { border-color: rgba(255, 255, 255, 0.11); }
+.btn-secondary:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.19); }
 .btn:focus-visible,
 .nav-item:focus-visible,
 .nav-subitem:focus-visible,
@@ -4839,10 +4910,11 @@ body.theme-light .nav-section-title { color: var(--fg-tertiary); }
 }
 
 /* Light mode controls and content keep WCAG-friendly contrast. */
-body.theme-light .btn-secondary { background: var(--bg-card); border-color: rgba(20, 24, 40, 0.14); color: var(--fg-primary); }
-body.theme-light .btn-secondary:hover:not(:disabled) { background: var(--bg-hover); }
-/* 卡片底色走 token：材质激活时由「材质 2.0」段的 rgba token 接管（半透明玻璃化），
-   无材质 / 不支持 DWM 时 token 本身就是不透明色，观感与原 #ffffff 一致（窗口界面升级3）。 */
+body.theme-light .btn-secondary { border-color: rgba(20, 24, 40, 0.14); color: var(--fg-primary); }
+/* 口径 v2·M8（旧注释写的「无材质时 token 本身就是不透明色」自 v3.0 起已不成立，换成
+   「操作面与容器分账」）：--bg-card 的 alpha 恒为 0，它**只对容器成立**——容器身后可见的是
+   原生材质或窗口底，透过去是设计意图。操作面（按钮 / 分段标签 / 可选卡片）不吃这条口径，
+   常态底必须自带 --lg-glass-floor，否则读的是身后那层随机内容。下列容器类继续走 --bg-card。 */
 body.theme-light .summary-card,
 body.theme-light .card,
 body.theme-light .table-card,
@@ -4950,7 +5022,11 @@ body.bg-image-on .main-content {
   padding: 4px 12px;
   font-size: 12px;
   color: var(--fg-secondary);
-  background: var(--bg-card-hover);
+  /* 口径 v2·A 类：磁盘芯片是工具条上的独立胶囊，原先常态吃 --bg-card-hover（0.48 白）、
+     选中态吃 --accent-light（0.06），两档浓度都来自「容器阶梯」而不是操作面护栏 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   border: 1px solid var(--border-default);
   border-radius: 999px;
   cursor: pointer;
@@ -4961,7 +5037,9 @@ body.bg-image-on .main-content {
 .drive-picker .drive-chip.active {
   /* 审查 M-13（2026-10-03 L4）：选中态同 .peri-explain-btn 的染底×墨色误配，改 accent */
   color: var(--accent);
-  background: var(--accent-light);
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    var(--accent-light);
   border-color: var(--accent);
   font-weight: 600;
 }
@@ -5023,13 +5101,22 @@ body.bg-image-on .main-content {
   cursor: pointer;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-small);
-  background: var(--accent-soft);
+  /* 口径 v2·A 类：树图格子是**绝对定位**在图上的独立命中区，身后是 treemap 容器而不是
+     卡片——裸 --accent-soft 直接透出那块透明底（v1 §3.1 漏登的一条，v2 P1「清单一漏」） */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    var(--accent-soft);
   color: var(--fg-primary);
   font-size: calc(12px * var(--font-size-scale, 1));
   line-height: 1.25;
   text-align: left;
 }
-.an-tm-cell:hover { background: var(--accent-light); border-color: var(--border-accent); }
+.an-tm-cell:hover {
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    var(--accent-light);
+  border-color: var(--border-accent);
+}
 .an-tm-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .finder-cell {
   display: inline-flex;
@@ -5125,23 +5212,29 @@ body.bg-image-on .main-content {
    ================================================================ */
 
 /* ---------- 液态玻璃 tint token（不依赖材质开关，lg 四档都可能用到） ----------
-   v2.8.0：清理死代码——原 :root 暗色玻璃 token（alpha 0.22 一套）因应用恒挂 theme-light
-   而永不生效（「固定浅色」是产品决策，见 readme），删除后只留通用的 --lg-glass-fg。 */
+   v2.8.0：清理死代码——原 :root 的**暗色**玻璃 token（alpha 0.22 那一套）因应用恒挂
+   theme-light 而永不生效（「固定浅色」是产品决策，见 readme），删除后只留 --lg-glass-fg。
+   口径 v2·R7（2026-10-14）把 :root 重新填上基准值是**中性白玻璃那一套**（下面四行），
+   与当年被删的暗色 alpha 不是同一份东西：它现在被 .btn 等常态操作面直接消费。 */
 :root {
-  --lg-glass-fg: var(--fg-primary);
-}
-.theme-light {
+  /* 口径 v2·R7：tint 与 floor 的基准值上移 :root。操作面的常态底现在直接消费它们
+     （.btn 基类在 :root 层就写死 floor + tint），把它们留在 .theme-light 里等于让按钮
+     底「依赖脚本必须及时挂上 class」——子窗首帧与 window-material.js 的时序差就是这条
+     的根因（v2 §2.3）。var() 取空值会让整条 background 失效回落 transparent，比暗色实底更糟。 */
   /* v3.0 修复批次（Apple 消色玻璃，docs规范/update/2026-09-14 评估方案 A1）：
      三档 tint 全部中性化（原冰蓝/薰衣草/浅粉属「彩色糖果玻璃」），Apple 的玻璃
      是消色中性材质，靠环境光与原生材质染色，不做彩色 tint */
   --lg-tint-primary: rgba(255, 255, 255, 0.55);
   --lg-tint-secondary: rgba(250, 250, 252, 0.48);
   --lg-tint-tertiary: rgba(255, 255, 255, 0.42);
-  --lg-glass-border: rgba(255, 255, 255, 0.75);
-  --lg-glass-highlight: rgba(255, 255, 255, 0.85);
   /* 对比度护栏（方案 A5）：玻璃浮层的最小白底——与 --bg-elevated 叠加复合后
      保证 ≥0.45 alpha，任意壁纸上正文（--fg-primary 深色）维持 WCAG AA 对比 */
   --lg-glass-floor: rgba(255, 255, 255, 0.45);
+  --lg-glass-fg: var(--fg-primary);
+}
+.theme-light {
+  --lg-glass-border: rgba(255, 255, 255, 0.75);
+  --lg-glass-highlight: rgba(255, 255, 255, 0.85);
   --lg-glass-fg: var(--fg-primary);
   /* v2.8.0：玻璃质感参数化（原 5 处饱和度/亮度硬编码收敛至此；
      liquid-glass.js 的 SVG 滤镜链与内联 backdrop 同读这两个变量）
@@ -5215,10 +5308,8 @@ body.electron-mica .pw-topbar {
   /* v3.0 批次：saturate 从 1.5 收敛到 1.35，与全局白容器统一规则一致——
      消除 electron-mica 异步挂载时的磨砂饱和度跳变（原 1.35→1.5 视觉上像"过一会才嵌套"） */
 }
-/* 二级按钮材质下玻璃化（主按钮保留强调色实底，非液态模式不动） */
-body.electron-mica .btn-secondary {
-  background: var(--bg-card);
-}
+/* 口径 v2·M2：材质态原先在这里把二级按钮底再顶回一次 --bg-card（第三份常态底）。
+   现在 .btn 的 floor 栈与材质开关无关，本段不再需要按钮专属覆写——材质只影响容器分账。 */
 /* 浮层：更强磨砂保证可读 */
 body.electron-mica .usage-modal,
 body.electron-mica .ctx-detail-modal {
@@ -5235,16 +5326,16 @@ body.electron-mica .ds-tooltip {
   backdrop-filter: blur(var(--glass-blur-mid)) saturate(var(--glass-satur));
   -webkit-backdrop-filter: blur(var(--glass-blur-mid)) saturate(var(--glass-satur));
 }
-/* hover：轻度提亮 + 描边增亮，保持玻璃透明感（不做实底加深） */
+/* hover：轻度提亮 + 描边增亮，保持玻璃透明感（不做实底加深）
+   口径 v2·M3：原先并列的 `.btn-secondary:hover` 三条已摘掉——中性按钮的 hover 现在
+   由 `.btn:hover` 单点承担（同一 floor、tint 加深一档），lg 档不再与常态分叉。
+   本组只剩语义实底（primary/accent）在液态档的玻璃化覆写。 */
 body.lg-mode-full .btn-primary:hover:not(:disabled),
 body.lg-mode-standard .btn-primary:hover:not(:disabled),
 body.lg-mode-frost .btn-primary:hover:not(:disabled),
 body.lg-mode-full .btn-accent:hover:not(:disabled),
 body.lg-mode-standard .btn-accent:hover:not(:disabled),
-body.lg-mode-frost .btn-accent:hover:not(:disabled),
-body.lg-mode-full .btn-secondary:hover:not(:disabled),
-body.lg-mode-standard .btn-secondary:hover:not(:disabled),
-body.lg-mode-frost .btn-secondary:hover:not(:disabled) {
+body.lg-mode-frost .btn-accent:hover:not(:disabled) {
   background:
     linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
     linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-tertiary));
@@ -5418,6 +5509,17 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
   body.electron-mica .card,
   body.electron-mica .usage-modal,
   body.electron-mica .sidebar {
+    background: var(--surface-solid);
+  }
+  /* 口径 v2·R5：降级名单只登记**中性操作面**。`.btn` 系用 :not() 显式排除四个语义实底——
+     无差别降级会把 .btn-danger / .btn-warning 刷成白底、丢掉危险语义（v2 §1 的 P0 判定）。
+     .filter-tab 不在名单里：它常态透明，系统关透明度时由轨道 .filter-tabs 回实底托住。
+     .maint-tabs 也不在名单里：它本来不写底（无 padding/描边的换行 pill 行），列进来等于
+     在降级时画出一整条白色横幅。
+     机检 = check-contrast F2（点名语义实底、或漏掉任一条 :not() 排除，都判红）。 */
+  :is(.btn, .maint-tab, .material-card, .opt-col-selectall, .ctx-col-selectall,
+      .fileclean-preview-btn, .peri-explain-btn, .an-tm-cell, .drive-chip,
+      .syspanel-power-tile, .filter-tabs, .ds-menu):not(.btn-primary):not(.btn-accent):not(.btn-danger):not(.btn-warning) {
     background: var(--surface-solid);
   }
 }

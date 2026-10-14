@@ -28,7 +28,11 @@
   // 点击导航时选中玻璃块从旧项纵向平滑滑到新项（弹簧回弹 + 轻微挤压），替换硬切背景
   const BAR_SELECTOR = '.filter-tabs, .maint-tabs, #sidebar';
   const TAB_SELECTOR = '.filter-tab, .maint-tab, .nav-item';
-  // 折射玻璃按钮：主题色实底在液态模式下由 CSS 换成浅色玻璃底（main.css 液态玻璃段），JS 负责折射滤镜
+  // 按钮语义名单：决定「谁是按钮」= full 档的指针弹性形变（.lg-elastic）。
+  // 2026-10-14 真机像素实测后，**按钮一律不再写 backdrop-filter**（见 commitGlass 的注释）：
+  // 卸载页同类 .btn-secondary 抢到折射名额的行是 #EEEDED、没抢到的行是 #FDFCFC，差 14 个单位，
+  // 位移贴图会把行分隔线与相邻文字拽进按钮里，而 28 个名额先到先得 ⇒ 同页两个颜色。
+  // 底色从此只由 CSS 的 --lg-glass-floor 自证（机检 check-contrast F1/F6），滤镜不参与可读性。
   const BUTTON_SELECTOR = '.btn-primary, .btn-accent, .btn-secondary';
   // v3 评估 C/L3：输入框与下拉纳入折射体系（field-input 同时挂在 input 与 select 上）。
   // 归类为 control：有折射、无弹性形变（输入中形变会干扰打字）、无 shimmer
@@ -461,9 +465,13 @@
     if (glassStates.size >= GLASS_STATES_MAX) return; // 容量闸门（见 GLASS_STATES_MAX 注释）
     const el = m.el;
     const overBudget = !withinRefractBudget(m.w, m.h, m.radius);
-    const wantRefract = mode !== 'frost' && mode !== 'off' && refractionSupported && !overBudget && refractCount < MAX_REFRACT;
+    // kind==='button' 永远不进折射/磨砂：见 BUTTON_SELECTOR 的 2026-10-14 像素实测。
+    // 省下的名额全部给浮层与输入框（它们才是「要看穿身后内容」的那一层）。
+    const wantRefract = m.kind !== 'button' && mode !== 'frost' && mode !== 'off' && refractionSupported && !overBudget && refractCount < MAX_REFRACT;
     const st = { kind: m.kind, w: m.w, h: m.h, radius: m.radius, blur: m.blur, refract: false };
-    if (wantRefract) {
+    if (m.kind === 'button') {
+      st.noFilter = true;
+    } else if (wantRefract) {
       const id = getFilterId(mode, m.w, m.h, st.radius);
       if (id) {
         st.refract = true;
@@ -511,7 +519,7 @@
   // 折射资格回升（修复实锤6）：元素缩小回预算内 / 折射名额或滤镜桶腾出后，
   // 把停在纯 blur 的元素升回折射。只升不降，降级路径在 glassRo 与 attachGlass
   function tryUpgradeGlass(el, st) {
-    if (st.refract || el.isConnected === false) return;
+    if (st.refract || st.noFilter || el.isConnected === false) return;
     if (mode !== 'full' && mode !== 'standard') return;
     if (!refractionSupported || refractCount >= MAX_REFRACT) return;
     if (st.w * st.h > MAX_REFRACT_AREA) return;

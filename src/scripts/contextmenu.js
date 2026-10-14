@@ -12,6 +12,7 @@
   let detailItem = null;   // 当前详情弹窗展示的条目
   let ctxModalCtrl = null; // v3.2.0：详情弹窗工厂 ctrl（焦点陷阱/Esc 由工厂统一管理）
   let kanbanMasonry = null; // 瀑布流布局引擎（resize 防抖 + FLIP）
+  let kanbanEngineWarned = false; // 引擎缺失只报第一次（见 renderKanban 里的 window.kanbanMasonry 守卫）
   let checkboxKeysBound = false; // P3-1：容器级键盘激活委托（一次性，看板每次重建）
 
   // 分类定义（顺序固定）。批次 C 起补齐三个原本「有 tab 无数据源」的分类：
@@ -334,10 +335,17 @@
     // 注意：布局容器是每次重渲染重建的 .ctx-kanban，须用 getter 动态获取
     // maxCols:2 —— 用户裁定「默认一行两列，最大限度展示信息」：软件组要放得下
     // 「挂在哪些位置」这一列信息，列数一多就被挤回原来的窄条样子。
-    if (!kanbanMasonry && window.kanbanMasonry) {
-      kanbanMasonry = window.kanbanMasonry.attach(
-        () => container.querySelector('.ctx-kanban'), '.ctx-col', { gap: 14, minCard: 380, maxCols: 2 }
-      );
+    if (!kanbanMasonry) {
+      if (window.kanbanMasonry) {
+        kanbanMasonry = window.kanbanMasonry.attach(
+          () => container.querySelector('.ctx-kanban'), '.ctx-col', { gap: 14, minCard: 380, maxCols: 2 }
+        );
+      } else if (!kanbanEngineWarned) {
+        // 静默跳过 = .ctx-col 全叠在原点，症状看起来像 GPU 花屏（2026-10-14 就是这么绕了一大圈）。
+        // 引擎没就位必须落日志，不许再靠人目检发现。
+        kanbanEngineWarned = true;
+        window.app?.log('error', '看板布局引擎未就位：xtable.js 未随「右键菜单管理」页注入，列会全部叠在一起');
+      }
     }
     if (kanbanMasonry) kanbanMasonry.relayout(false);
 

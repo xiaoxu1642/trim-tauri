@@ -167,12 +167,17 @@
     uninstall: ['scripts/uninstall.js'],
     // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载；
     // peripheral.js 提供「更多调优项」的应用内弹窗（window.peripheral.open），也随本页注入
-    optimizer: ['scripts/optimizer.js', 'scripts/peripheral.js', 'scripts/sysrestore.js'],
+    // 性能批次①(a) 的漏项补票（2026-10-14 用户报「看板列叠在一起」）：xtable.js 摘出首屏时
+    // 只按「读不到会抛 ReferenceError」的消费方补了 cleanup/backups，漏了 optimizer/contextmenu
+    // —— 这两页读的是 window.kanbanMasonry，且 `if (window.kanbanMasonry)` 读不到就静默跳过，
+    // 于是 .opt-col / .ctx-col 保持 position:absolute 却没有行内 left/top，全部叠在原点。
+    // 症状是「整页文字两层错位重影」，看起来像 GPU 花屏，实际是布局引擎根本没跑。
+    optimizer: ['scripts/xtable.js', 'scripts/optimizer.js', 'scripts/peripheral.js', 'scripts/sysrestore.js'],
     // 性能批次①(a)：icon-fallback.js 从首屏摘出，前置到这里和 startup ——
     // contextmenu.js 的 openDetail() 与 startup.js 的 applyStartupIcons() 都在运行时读
     // window.iconFallback，且读不到时是静默 return（不抛错），症状为「图标兜底失效、
     // 整页只剩 SVG 色块」，比崩更难查 ⇒ 必须前置才不留坑。
-    contextmenu: ['scripts/icon-fallback.js', 'scripts/modelpicker.js', 'scripts/intro.js', 'scripts/contextmenu.js'],
+    contextmenu: ['scripts/xtable.js', 'scripts/icon-fallback.js', 'scripts/modelpicker.js', 'scripts/intro.js', 'scripts/contextmenu.js'],
     startup: ['scripts/icon-fallback.js', 'scripts/modelpicker.js', 'scripts/intro.js', 'scripts/startup.js'],
     maintenance: ['scripts/maintenance.js'],
     memoryclean: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/memoryclean.js'],

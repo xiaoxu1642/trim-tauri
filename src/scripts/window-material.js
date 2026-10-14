@@ -20,6 +20,9 @@
   function applyTheme() {
     // v2.8.0：清理死代码——应用恒挂 theme-light（「固定浅色」产品决策），
     // 不再执行无效的 theme-dark 移除语句（main.css 暗色玻璃 token 已同步删除）
+    // 口径 v2·M6：三个子窗的 <body> 现在**静态**挂 theme-light（本行退成兜底，幂等）。
+    // 原先只靠这里挂，首帧落的是 :root 暗色 token，子窗按钮会闪一帧深灰再变透明——
+    // 「脚本必须及时执行才有的底」正是本次要消掉的时序依赖。
     document.body.classList.add('theme-light');
   }
 
