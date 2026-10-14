@@ -178,7 +178,13 @@
     }
 
     modalEl.querySelector('.usage-close').addEventListener('click', () => requestClose('btn'));
-    escHandler = e => { if (e.key === 'Escape') requestClose('esc'); };
+    // Esc 只关最顶层（2026-10-15：面板内再开详情时原先 Esc 双触发把两层全关、勾选态丢失）
+    escHandler = e => {
+      if (e.key !== 'Escape') return;
+      const all = document.querySelectorAll('.usage-backdrop');
+      if (all.length && all[all.length - 1] !== backdrop) return;
+      requestClose('esc');
+    };
     document.addEventListener('keydown', escHandler);
     backdrop.addEventListener('click', e => { if (e.target === backdrop) requestClose('backdrop'); });
 

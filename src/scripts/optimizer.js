@@ -1061,7 +1061,7 @@
             data-nara-opt="${escapeHtml(o.id)}" data-tip="${tip}">
       <span class="checkbox${on ? ' checked' : ''}${disabled ? ' disabled' : ''}" role="checkbox" tabindex="0"
             aria-checked="${on ? 'true' : 'false'}"${disabled ? ' aria-disabled="true"' : ''}>${on ? checkSvg() : ''}</span>
-      <span class="nara-checkrow__name">${escapeHtml(o.title)}</span>
+      <span class="nara-checkrow__name" data-tip="点击查看该优化项详情">${escapeHtml(o.title)}</span>
       <span class="nara-checkrow__side">${side.join('')}</span>
     </div>`;
   }
@@ -1076,7 +1076,7 @@
     return `<div class="nara-checkrow" data-nara-task="${escapeHtml(id)}">
       <span class="checkbox${on ? ' checked' : ''}" role="checkbox" tabindex="0"
             aria-checked="${on ? 'true' : 'false'}"${t ? '' : ' aria-disabled="true"'}>${on ? checkSvg() : ''}</span>
-      <span class="nara-checkrow__name">${escapeHtml(t?.title || id)}</span>
+      <span class="nara-checkrow__name" data-tip="点击查看该优化项详情">${escapeHtml(t?.title || id)}</span>
       <span class="nara-checkrow__side">${side}</span>
     </div>`;
   }
@@ -1106,6 +1106,15 @@
     const modalEl = ctrl.modal;
     // 行勾选（事件委托；优化项/维护任务两个集合分开记）
     modalEl.addEventListener('click', (e) => {
+      // 2026-10-15 用户裁定：点名称可进详情——勾选仍走复选框/行内空白，二者互不干扰；
+      // 详情复用主列表的 openModal（同一份说明/预期效果/优缺点/还原入口）。
+      const nameEl = e.target.closest('.nara-checkrow__name');
+      if (nameEl) {
+        const row = nameEl.closest('[data-nara-opt], [data-nara-task]');
+        const id = row ? (row.dataset.naraOpt || row.dataset.naraTask) : '';
+        const o = id ? ALL_OPTIONS.find(x => x.id === id) : null;
+        if (o) { openModal(o); return; }
+      }
       const optRow = e.target.closest('[data-nara-opt]');
       const taskRow = e.target.closest('[data-nara-task]');
       const row = optRow || taskRow;
@@ -1384,7 +1393,7 @@
             data-privacy-opt="${escapeHtml(o.id)}" data-tip="${escapeHtml(tip)}">
       <span class="checkbox${on ? ' checked' : ''}${isOpt ? ' disabled' : ''}" role="checkbox" tabindex="0"
             aria-checked="${on ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''}>${on ? checkSvg() : ''}</span>
-      <span class="nara-checkrow__name">${escapeHtml(o.title)}</span>
+      <span class="nara-checkrow__name" data-tip="点击查看该优化项详情">${escapeHtml(o.title)}</span>
       <span class="nara-checkrow__side">${side.join('')}</span>
     </div>`;
   }
@@ -1423,6 +1432,14 @@
   function bindPrivacyPanelEvents(ctrl) {
     const modalEl = ctrl.modal;
     modalEl.addEventListener('click', (e) => {
+      // 2026-10-15 用户裁定：点名称进详情（勾选仍走复选框/行内空白；复用主列表 openModal）
+      const nameEl = e.target.closest('.nara-checkrow__name');
+      if (nameEl) {
+        const row = nameEl.closest('[data-privacy-opt]');
+        const id = row ? row.dataset.privacyOpt : '';
+        const o = id ? ALL_OPTIONS.find(x => x.id === id) : null;
+        if (o) { openModal(o); return; }
+      }
       const row = e.target.closest('[data-privacy-opt]');
       if (row) {
         if (row.classList.contains('is-optimized') || row.hasAttribute('aria-disabled')) return;
@@ -1633,6 +1650,17 @@
     optimizedIds.clear();
     for (const s of [appliedLocal, appliedDetected, appliedChecked]) for (const id of s) optimizedIds.add(id);
     applyOptimizedStyles();
+    // 2026-10-15：面板开着时（state 非空）经详情执行/还原 → 徽章与计数同步刷新，
+    // 并把已优化项从勾选集摘掉（勾选数不虚高）；未开面板时 state 为 null，直接跳过。
+    if (naraPanelState) {
+      naraPanelState.checked = new Set([...naraPanelState.checked].filter(id => !optimizedIds.has(id)));
+      naraPanelState.tasksChecked = new Set([...naraPanelState.tasksChecked].filter(id => !optimizedIds.has(id)));
+      refreshNaraPanel();
+    }
+    if (privacyPanelState) {
+      privacyPanelState.checked = new Set([...privacyPanelState.checked].filter(id => !optimizedIds.has(id)));
+      refreshPrivacyPanel();
+    }
   }
 
   /** 执行成功落地：写本地数据并置灰（双保险的第一层） */
