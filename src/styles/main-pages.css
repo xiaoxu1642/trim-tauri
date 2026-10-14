@@ -218,12 +218,9 @@
   font-size: calc(11px * var(--font-size-scale, 1));
   word-break: break-all;
 }
-/* ===== v5 P1 电源计划编辑器：卡片区域内嵌替换（不新开子窗、不叠卡片） =====
-   伪类/元素级选择器统一加 `#syspanelPowerBody` 前缀：① 语义上这些态只在此面板内成立；
-   ② 层叠防线（check-subwindow-css S3）：main.css 的 :hover / :focus-visible / ::after /
-   [type] 规则全在 0-* 特异度档，裸类伪类规则（0-2-0 等）会与之构成「同特异度 + 共享
-   token + 属性相交」对；ID 前缀把特异度抬进 1-* 档即可逐条证明不相冲（S3 逐对必查，
-   假阳性同样不能留）。纯类规则不加前缀（token 不与 main.css 共享，本就无对）。 */
+/* ===== v5 P1/P2 电源计划编辑器（独立弹窗承载；2026-10-15 用户裁定） =====
+   伪类/元素级选择器统一加 #syspanelPowerBody 前缀：把特异度抬进 1-* 档避开
+   check-subwindow-css S3（main.css 的 :hover/::after/[type] 全在 0-* 档）；纯类规则不加。 */
 .syspanel-pwr-act-danger { color: var(--danger); }
 .syspanel-pwr-editor { display: flex; flex-direction: column; gap: 10px; }
 .syspanel-pwr-editor-head {
@@ -265,7 +262,7 @@
 .syspanel-pwr-count.is-dirty { color: var(--accent); }
 .syspanel-pwr-editor-body {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
   gap: 12px;
   align-items: start;
 }
@@ -278,8 +275,13 @@
   border-radius: var(--radius-btn);
   background: var(--bg-card-hover);
 }
+.syspanel-pwr-tree-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+/* hidden 兜底：作者样式的 display 会覆盖 UA 的 [hidden]{display:none}（折叠/搜索都靠它） */
+.syspanel-pwr-group[hidden],
+.syspanel-pwr-group-items[hidden],
+.syspanel-pwr-item[hidden] { display: none; }
 .syspanel-pwr-tree {
-  max-height: 420px;
+  max-height: min(56vh, 560px);
   overflow: auto;
   padding: 6px;
 }
@@ -357,11 +359,15 @@
   font-weight: calc(600 * var(--font-weight-scale, 1));
   overflow-wrap: anywhere;
 }
+/* 设置说明：底块 + 正文字号——「简介要引人注意、说人话」（2026-10-15 用户反馈） */
 .syspanel-pwr-detail-desc {
   margin-bottom: 12px;
-  color: var(--fg-tertiary);
-  font-size: var(--fs-meta);
-  line-height: 1.6;
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+  font-size: calc(13px * var(--font-size-scale, 1));
+  line-height: 1.7;
   overflow-wrap: anywhere;
 }
 .syspanel-pwr-detail-rows { display: flex; flex-direction: column; gap: 10px; }
@@ -396,14 +402,20 @@
 .syspanel-pwr-rec-v { display: block; margin-top: 2px; color: var(--accent); font-weight: calc(600 * var(--font-weight-scale, 1)); font-size: var(--fs-meta); }
 .syspanel-pwr-rec-why { margin: 4px 0 0; color: var(--fg-secondary); font-size: calc(12px * var(--font-size-scale, 1)); line-height: 1.6; overflow-wrap: anywhere; }
 .syspanel-pwr-muted { color: var(--fg-tertiary); }
-.syspanel-pwr-editor-actions {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 8px 0 2px;
-  background: var(--bg-card-hover);
+.syspanel-pwr-detail-actions { margin-top: 12px; }
+/* v5 P2 各方案对照块 */
+.syspanel-pwr-compare { margin-top: 12px; border-top: 1px solid var(--border-default); padding-top: 8px; }
+.syspanel-pwr-compare-title { margin-bottom: 4px; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); }
+.syspanel-pwr-compare-rows { display: grid; gap: 2px; }
+.syspanel-pwr-compare-row { display: flex; align-items: baseline; gap: 8px; color: var(--fg-secondary); font-size: var(--fs-meta); }
+.syspanel-pwr-compare-row.is-active .syspanel-pwr-compare-k { color: var(--accent); }
+.syspanel-pwr-compare-k { min-width: 0; overflow-wrap: anywhere; }
+.syspanel-pwr-compare-v {
+  margin-left: auto;
+  flex: none;
+  color: var(--fg-primary);
+  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-size: calc(11px * var(--font-size-scale, 1));
 }
 .syspanel-pwr-modal-hint { margin: 0 0 6px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.6; }
 .syspanel-pwr-modal-field {
@@ -414,7 +426,7 @@
   color: var(--fg-secondary);
   font-size: var(--fs-meta);
 }
-.syspanel-pwr-modal-select, #syspanelPwrNameInput, #syspanelPwrNewName { width: 100%; }
+.syspanel-pwr-search, .syspanel-pwr-modal-select, #syspanelPwrNameInput, #syspanelPwrNewName { width: 100%; }
 /* 一行多个操作按钮（如检查更新行） */
 .about-row-actions { display: flex; gap: 8px; flex: none; }
 /* v3.2.0：device-info-table 旧外壳声明与 device-info-row 旧版 grid 行声明已删除
@@ -1431,7 +1443,10 @@
   background: var(--bg-card-hover);
 }
 .nara-card__body { padding: 4px 8px 6px; }
-.nara-checkrow__name { flex: 1 1 auto; min-width: 0; color: var(--fg-primary); line-height: 1.4; }
+.nara-checkrow__name { flex: 1 1 auto; min-width: 0; color: var(--fg-primary); line-height: 1.4; cursor: pointer; }
+/* 2026-10-15 用户裁定：点名称进详情——可点暗示（ID 前缀把特异度抬进 1-* 档，守 S3） */
+#naraPanelBody .nara-checkrow__name:hover,
+#privacyPanelBody .nara-checkrow__name:hover { color: var(--accent); }
 .nara-checkrow__side { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
 .nara-muted { padding: 10px 0; font-size: 12px; color: var(--fg-tertiary); }
 /* footer：全选靠左，执行/关闭靠右 */

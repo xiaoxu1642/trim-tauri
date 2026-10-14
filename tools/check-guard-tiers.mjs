@@ -184,6 +184,8 @@ const MUST_MAIN = [
   'syspanel_power_settings_unlock',
   'syspanel_power_settings_apply',
   'syspanel_power_settings_revert',
+  'syspanel_power_settings_compare',      // v5 P2：跨方案对照读（只在主窗编辑器里触发）
+  'syspanel_power_settings_open_regedit', // v5 P2：拉起 regedit 只从主窗编辑器触发
   'syspanel_pagefile_state',
   'syspanel_pagefile_apply',
   // v4-K04（2026-10-09）：quickcmds_run 从 readonly 升 MAIN —— 白名单里含

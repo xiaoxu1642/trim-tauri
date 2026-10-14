@@ -12,6 +12,8 @@
   let lastPowerState = null;
   /** 编辑会话；null = 列表态。字段见 buildEditor */
   let editor = null;
+  /** 编辑器弹窗 ctrl（会话期间非 null；关闭即销毁） */
+  let editorModal = null;
   /** 编辑流程防重入（unlock → dump 往返期间） */
   let editorBusy = false;
   /** 提权意图暂存：app.js 交付时本模块可能还没 init，先收着等 init 消费 */
@@ -40,29 +42,29 @@
     // ---- 存储（0012ee47）----
     'd639518a-e56d-4345-8af2-b9f32fb26109': {
       name: '主 NVMe 空闲超时',
-      desc: 'NVMe 设备进入「主非运行电源状态」前必须保持空闲的时长（毫秒）；0 表示不进入该省电态。',
+      desc: '硬盘空闲多久后允许进入省电模式（毫秒）。值越大越不容易进省电、响应越快；设 0 = 一直保持全速。',
       rec: {
-        desktopAmd: { v: '0', why: '盘保持全速，消除进出省电态的唤醒延迟尖峰（游戏加载、随机读写更稳）；锐龙平台的深层链路低功耗态兼容性偶有报告，禁用可顺带规避。代价是待机功耗略升。' },
-        desktopIntel: { v: '0', why: '延迟优先，理由同左；若在意盘温/功耗，保留默认值也可以。' },
-        laptopAmd: { v: '保持默认', why: '续航优先；若出现与盘唤醒相关的卡顿迹象，可试 0 对比。' },
+        desktopAmd: { v: '0 或 2000', why: '0 = 一直全速、延迟最优；2000 是「保留少量省电」的折中（视频作者口径）。锐龙平台上深层链路低功耗态的兼容性偶有报告，禁用可顺带规避。' },
+        desktopIntel: { v: '0 或 2000', why: '同左；想兼顾一点点省电就选 2000。' },
+        laptopAmd: { v: '保持默认', why: '续航优先；若出现与盘唤醒相关的卡顿，可试 0 对比。' },
         laptopIntel: { v: '保持默认', why: '续航优先，同左。' },
       },
     },
     'd3d55efd-c1ff-424e-9dc3-441be7833010': {
       name: '次 NVMe 空闲超时',
-      desc: 'NVMe 设备进入「次非运行电源状态」前，需要在主非运行电源状态中停留的时长（毫秒）。',
+      desc: '硬盘在主省电状态里再待多久后，允许继续进入更深的省电状态（毫秒）。',
       rec: {
-        desktopAmd: { v: '0', why: '不让盘再进入更深的省电态（空闲 → 主非运行 → 次非运行）；理由同上一条。' },
-        desktopIntel: { v: '0', why: '同左。' },
+        desktopAmd: { v: '0 或 200', why: '不让硬盘进入更深的省电态（视频口径给 200）；理由同上一条。' },
+        desktopIntel: { v: '0 或 200', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '保持默认即可。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
     },
     'fc95af4d-40e7-4b6d-835a-56d131dbc80e': {
       name: '主 NVMe 电源状态切换延迟容限',
-      desc: 'NVMe 设备空闲一段时间后，切换到「进出延迟之和（ENLAT+EXLAT）不超过本设定值」的最低非运行电源状态（微秒）。',
+      desc: '允许硬盘进入多深的省电模式：只有「进出延迟之和（ENLAT+EXLAT）」不超过本设定值（微秒）的省电档位才会被使用；值越小越保守。',
       rec: {
-        desktopAmd: { v: '0', why: '只允许进入没有额外进出延迟代价的状态：省电深度与响应速度之间取响应优先。数值越大允许进越深的省电态。' },
+        desktopAmd: { v: '0', why: '只允许进入没有额外进出延迟代价的档位：省电深度与响应速度之间取响应优先。' },
         desktopIntel: { v: '0', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '允许系统按续航策略进入浅省电态。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -70,9 +72,9 @@
     },
     'dbc9e238-6de9-49e3-92cd-8c2b4946b472': {
       name: '次 NVMe 电源状态切换延迟容限',
-      desc: 'NVMe 设备在主非运行电源状态停留一段时间后，切换到「进出延迟之和（ENLAT+EXLAT）不超过本设定值」的最低非运行电源状态（微秒）。',
+      desc: '硬盘在主省电状态停留一段时间后，允许进入多深的省电模式：只有「进出延迟之和（ENLAT+EXLAT）」不超过本设定值（微秒）的档位才会被使用。',
       rec: {
-        desktopAmd: { v: '0', why: '与上一条配套：不让盘进入更深省电态。' },
+        desktopAmd: { v: '0', why: '与上一条配套：不让硬盘进入更深的省电态。' },
         desktopIntel: { v: '0', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '保持默认。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -80,9 +82,9 @@
     },
     '0b2d69d7-a2a1-449c-9680-f91c70521c60': {
       name: 'AHCI 链路电源管理 — HIPM/DIPM',
-      desc: '配置 SATA 链路的链路电源管理（LPM）状态。',
+      desc: 'SATA 硬盘链路的省电档位：Active = 不省电（最稳）；HIPM / DIPM / HIPM+DIPM = 逐级允许链路省电。',
       rec: {
-        desktopAmd: { v: 'Active', why: '禁用 SATA 链路省电：消除链路唤醒延迟与偶发掉盘——较老的 AMD 芯片组上 SATA 链路低功耗兼容性问题更常被报告。' },
+        desktopAmd: { v: 'Active', why: '禁用 SATA 链路省电：消除链路唤醒延迟与偶发掉盘（视频口径：选择 active）。较老的 AMD 芯片组上 SATA 链路低功耗的兼容性问题更常被报告。' },
         desktopIntel: { v: 'Active', why: '同左；Intel 平台问题相对少见，遇到 SATA 链路类卡顿再改也可以。' },
         laptopAmd: { v: '保持默认', why: '续航优先；出现掉盘/卡顿再改 Active。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -90,7 +92,7 @@
     },
     'dab60367-53fe-4fbc-825e-521d069d2456': {
       name: 'AHCI 链路电源管理 — 自适应',
-      desc: '自动从 Partial 状态过渡到 Slumber 状态。',
+      desc: '让硬盘链路自动从 Partial（浅睡）过渡到 Slumber（深睡）。',
       rec: {
         desktopAmd: { v: '禁用', why: '配合上一条统一关闭 SATA 链路省电。' },
         desktopIntel: { v: '禁用', why: '同左。' },
@@ -100,34 +102,34 @@
     },
     '5e8c011f-01bc-4821-b947-deffa95af8d2': {
       name: '任意 NVMe 盘 · 非运行态 APST 空闲转换时间（毫秒）',
-      desc: '适用于任意 NVMe 盘：处于非运行电源状态时的 APST（自主电源状态转换）空闲等待时间。',
+      desc: '任意 NVMe 盘在省电状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
     },
     '7f68c523-7536-4a79-b339-0ba0998f5dc4': {
       name: '任意 NVMe 盘 · 运行态 APST 空闲转换时间（毫秒）',
-      desc: '适用于任意 NVMe 盘：处于运行电源状态时的 APST（自主电源状态转换）空闲等待时间。',
+      desc: '任意 NVMe 盘在工作状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
     },
     '54bbd65b-b333-4808-ae71-461b696bf60e': {
       name: '混合 NAND 盘 · 非运行态 APST 空闲转换时间（毫秒）',
-      desc: '适用于混合 NAND 盘：处于非运行电源状态时的 APST 空闲等待时间。',
+      desc: '混合 NAND 盘在省电状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
     },
     'b6c43707-23d2-46d4-bd1a-ac91685c76bb': {
       name: '混合 NAND 盘 · 运行态 APST 空闲转换时间（毫秒）',
-      desc: '适用于混合 NAND 盘：处于运行电源状态时的 APST 空闲等待时间。',
+      desc: '混合 NAND 盘在工作状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
     },
     '4016abef-65af-42a2-9939-45cb45e92634': {
       name: '混合 Optane 盘 · 非运行态 APST 空闲转换时间（毫秒）',
-      desc: '适用于混合 Optane 盘：处于非运行电源状态时的 APST 空闲等待时间。',
+      desc: '混合 Optane 盘在省电状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
     },
     'bb50ccc4-ef9f-4008-a470-e6ea6737f152': {
       name: '混合 Optane 盘 · 运行态 APST 空闲转换时间（毫秒）',
-      desc: '适用于混合 Optane 盘：处于运行电源状态时的 APST 空闲等待时间。',
+      desc: '混合 Optane 盘在工作状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
     },
     // ---- USB（2a737441）----
     'd4e98f31-5ffe-4ce1-be31-1b38b384c009': {
       name: 'USB 3 链路电源管理',
-      desc: '指定 USB 3 链路空闲时采用的电源管理策略。',
+      desc: 'USB 3 接口空闲时的省电策略。',
       rec: {
-        desktopAmd: { v: '关闭', why: 'USB 3 链路低功耗态（U1/U2 等）是外设偶发断连、无线接收器失联、外置硬盘掉盘的常见根因；台式没有续航压力，直接关最稳。' },
+        desktopAmd: { v: '关闭', why: 'USB 3 链路低功耗态（U1/U2 等）是外设偶发断连、无线接收器失联、外置硬盘掉盘的常见根因（视频口径：选择 Off）；台式没有续航压力，直接关最稳。' },
         desktopIntel: { v: '关闭', why: '同左；外设一切正常且在意省电的话，保留默认也可以。' },
         laptopAmd: { v: '保持默认', why: '续航优先；出现外设掉线再关。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -135,19 +137,111 @@
     },
     '0853a681-27c8-4100-a2fd-82013e970683': {
       name: 'USB 集线器选择性挂起超时',
-      desc: '该值用作所有 USB 集线器的空闲挂起超时（毫秒）。',
+      desc: 'USB 集线器空闲多久后被允许挂起（毫秒）。',
       rec: {
-        desktopAmd: { v: '0', why: '禁用集线器空闲挂起，避免键鼠/接收器被挂起后唤醒迟滞或失联。' },
-        desktopIntel: { v: '0', why: '同左。' },
+        desktopAmd: { v: '100000', why: '把挂起超时拉到约 100 秒、几乎不触发（视频口径「10 万」），避免键鼠/接收器被挂起后唤醒迟滞或失联。' },
+        desktopIntel: { v: '100000', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '续航优先；键鼠迟滞再调。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
     },
     '498c044a-201b-4631-a522-5c744ed4e678': {
       name: '对所有传输描述符设置 IOC',
-      desc: '是否对全部传输描述符（TD）设置 IOC（传输完成中断）。',
+      desc: '给每个 USB 传输描述符都发完成中断（调试/特殊用途，日常不用动）。',
+    },
+    // ---- 只带调优参考、不需要翻译的设置（名称与描述系统已出中文）----
+    'ee12f906-d277-404b-b6da-e5fa1a576df5': { // PCI Express 链接状态电源管理（ASPM）
+      rec: {
+        desktopAmd: { v: '关闭', why: 'PCIe 链路省电（ASPM）是延迟与兼容性问题的常见来源（掉盘、USB 断连、卡顿）；台式没有续航压力，直接关最稳（视频口径：选择关闭）。' },
+        desktopIntel: { v: '关闭', why: '同左；Intel 平台的 ASPM 实现较稳，外设一切正常也可保留默认。' },
+        laptopAmd: { v: '保持默认', why: '续航优先；出现 PCIe/USB 类异常再关。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    'be337238-0d82-4146-a960-4f3749d470c7': { // 处理器性能提升模式（Boost mode）
+      rec: {
+        desktopAmd: { v: '高效积极且有保障', why: '保留加速但不长时间超功耗跑，护硬件寿命；不要选「激进/高性能」（视频口径：AMD、Intel 都选它）。' },
+        desktopIntel: { v: '高效积极且有保障', why: '同左。' },
+        laptopAmd: { v: '保持默认（通常为「启用」）', why: '笔记本散热余量小，激进档容易拉高温度与风扇噪音。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb': { // 允许节流状态
+      rec: {
+        desktopAmd: { v: '禁用', why: '不让 CPU 用节流降频兜底，减少游戏里的频率抖动（视频口径：AMD 关闭）。' },
+        desktopIntel: { v: '启用', why: 'Intel 平台保留节流更稳（视频口径：Intel 启用）。' },
+        laptopAmd: { v: '保持默认（启用）', why: '笔记本靠它压温度与功耗，不建议关。' },
+        laptopIntel: { v: '保持默认（启用）', why: '同左。' },
+      },
+    },
+    '36687f9e-e3a5-4dbf-b1dc-15eb381c6863': { // 处理器能源性能首选策略（EPP）
+      rec: {
+        desktopAmd: { v: '5', why: '偏性能侧的小幅让步（视频口径：AMD 给 5）。数值越接近 0 越偏性能、越接近 100 越偏省电。' },
+        desktopIntel: { v: '0', why: '纯性能优先（视频口径：Intel 给 0）。' },
+        laptopAmd: { v: '保持默认', why: '默认值随电源模式自动协商，续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '12a0ab44-fe28-4fa9-b3bd-4b64f44960a6': { // 处理器性能降低阈值
+      rec: {
+        desktopAmd: { v: '10', why: '降频更迟钝、频率保持更久（视频口径：AMD 10）。' },
+        desktopIntel: { v: '5', why: '同左（视频口径：Intel 5）。' },
+        laptopAmd: { v: '保持默认', why: '续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '7d24baa7-0b84-480f-840c-1b0743c00f5f': { // 处理器性能历史计数
+      rec: {
+        desktopAmd: { v: '1', why: '采样窗口更短、对负载变化反应更快（视频口径：AMD 1）。' },
+        desktopIntel: { v: '3', why: '同左（视频口径：Intel 3）。' },
+        laptopAmd: { v: '保持默认', why: '续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '4b70f900-cdd9-4e66-aa26-ae8417f98173': { // 延迟敏感度提示处理器能源性能首选项
+      rec: {
+        desktopAmd: { v: '50', why: '延迟敏感负载下给性能留一半余量（视频口径：AMD 50）。' },
+        desktopIntel: { v: '100', why: '完全按性能响应（视频口径：Intel 100）。' },
+        laptopAmd: { v: '保持默认', why: '续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '94d3a615-a899-4ac5-ae2b-e4d8f634367f': { // 系统散热方式
+      rec: {
+        desktopAmd: { v: '主动', why: '优先用风扇散热、少用降频（视频口径：主动）；台式散热余量足，性能更稳。' },
+        desktopIntel: { v: '主动', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '笔记本默认往往是「被动」优先，静音；想更凉快再改主动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '2430ab6f-a520-44a2-9601-f7f23b5134b1': { // 处理器性能内核休止并发阈值
+      rec: {
+        desktopAmd: { v: '95–98', why: '别给 100：给满会让核心停放进退来回震荡；95–98 区间任选、可自行对比（视频口径）。' },
+        desktopIntel: { v: '95–98', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '笔记本核心停放省电更重要，不建议收紧。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
     },
   };
+
+  // 枚举设置的「编号 → 人话」表（v5 P2）：取值名取微软公开枚举（视频口径的「高效积极且有保障」即此）。
+  // 值域随机型/系统版本变化——表里没有的编号照常显示原数字，不隐藏、不猜测。
+  const PWR_ENUM_ZH = {
+    // 处理器性能提升模式（Boost mode）0–5 档；6 档各平台命名不一，暂不登记
+    'be337238-0d82-4146-a960-4f3749d470c7': {
+      0: '禁用', 1: '启用', 2: '激进', 3: '高效启用', 4: '高效激进', 5: '高效积极且有保障',
+    },
+    // 允许节流状态
+    '3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb': { 0: '禁用', 1: '启用' },
+    // 系统散热方式
+    '94d3a615-a899-4ac5-ae2b-e4d8f634367f': { 0: '被动（只降频）', 1: '主动（先转风扇）' },
+  };
+
+  function pwrEnumZh(settingGuid, value) {
+    const map = PWR_ENUM_ZH[String(settingGuid || '').toLowerCase()];
+    if (!map) return '';
+    return map[value] || '';
+  }
 
   function pwrZh(settingGuid) {
     return PWR_ZH[String(settingGuid || '').toLowerCase()] || null;
@@ -196,8 +290,6 @@
     editor = null;
     const rf = powerRefreshBtn();
     if (rf) rf.style.display = '';
-    const nw = document.getElementById('btnSyspanelPowerNew');
-    if (nw) nw.style.display = '';
     const st = lastPowerState || {};
     const active = String(st.activeGuid || '').toLowerCase();
     const activeName = String(st.activeName || '');
@@ -539,8 +631,10 @@
   }
 
   function buildEditor(guid, unlockData, dump) {
-    const el = mountPower();
-    if (!el) return;
+    if (!window.modal?.create) {
+      pwrToast('warning', '当前环境不支持编辑弹窗');
+      return;
+    }
     const opt = (lastPowerState?.options || []).find(
       (o) => String(o.guid || '').toLowerCase() === String(guid || '').toLowerCase(),
     );
@@ -556,6 +650,8 @@
       changes: new Map(),  // key → {subgroupGuid, settingGuid, ac, dc}；只有净变化才在表里
       invalidKeys: new Set(), // 输入形状不合法（非整数/超 u32）的 key，不提交
       failedKeys,          // 系统拒绝解锁的设置，列表里禁用
+      searchText: new Map(), // v5 P2 搜索索引：key → 拼接后的可搜文本（小写）
+      compareCache: new Map(), // v5 P2 对照缓存：key → { loading, rows }
       dcVisible: dump.platformRole === 'mobile' || dump.platformRole === 'slate',
       collapsed: new Set(), // 默认全部折叠：初始先塞全部组名，点开再删
       selectedKey: '',
@@ -564,27 +660,43 @@
     for (const g of dump.subgroups || []) {
       editor.collapsed.add(String(g.guid || ''));
       for (const s of g.settings || []) {
-        editor.origin.set(pwrKey(s.subgroupGuid, s.guid), { ac: s.valueAc, dc: s.valueDc });
+        const key = pwrKey(s.subgroupGuid, s.guid);
+        editor.origin.set(key, { ac: s.valueAc, dc: s.valueDc });
+        const zhEntryForSearch = pwrZh(s.guid);
+        editor.searchText.set(key, [
+          s.name, zhEntryForSearch?.name, s.description, zhEntryForSearch?.desc,
+        ].filter(Boolean).join(' ').toLowerCase());
       }
     }
-    // 编辑态下头部「刷新 / 新建」会整块重绘列表、丢掉会话；隐藏它们，退出编辑时恢复
-    const rf = powerRefreshBtn();
-    if (rf) rf.style.display = 'none';
-    const nw = document.getElementById('btnSyspanelPowerNew');
-    if (nw) nw.style.display = 'none';
+    // 独立弹窗承载编辑器（2026-10-15 用户裁定：不再内嵌卡片区）。模态遮罩天然挡住卡片
+    // 头部按钮，不必再做显隐；Esc/遮罩/× 一律转「取消」流程（先确认、再回滚、成功才关）。
+    editorModal = window.modal.create({
+      id: 'syspanelPwrEditorModal',
+      title: '编辑电源计划',
+      bodyHtml: '<div id="syspanelPwrEditorMount"></div>',
+      footerHtml: `
+        <span class="model-picker-spacer"></span>
+        <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrCancel">取消</button>
+        <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrSave">确定并保存</button>
+        <button type="button" class="btn btn-primary btn-small" id="btnSyspanelPwrSaveApply">保存并应用</button>
+      `,
+      modalClass: 'syspanel-pwr-modal',
+      width: 'min(1180px, 94vw)',
+      onRequestClose: () => { editorCancel(); return false; },
+    });
     renderEditor();
   }
 
   function exitEditor() {
     editor = null;
-    const rf = powerRefreshBtn();
-    if (rf) rf.style.display = '';
-    const nw = document.getElementById('btnSyspanelPowerNew');
-    if (nw) nw.style.display = '';
+    if (editorModal) {
+      editorModal.close();
+      editorModal = null;
+    }
   }
 
   function renderEditor() {
-    const el = mountPower();
+    const el = document.getElementById('syspanelPwrEditorMount');
     if (!el || !editor) return;
     const ed = editor;
     const groupsHtml = (ed.dump.subgroups || []).map((g) => {
@@ -632,15 +744,14 @@
         ${failNote}
         <div class="syspanel-pwr-count" id="syspanelPwrCount" role="status"></div>
         <div class="syspanel-pwr-editor-body">
-          <div class="syspanel-pwr-tree" id="syspanelPwrTree">${groupsHtml || '<p class="empty-state"><span>本方案没有枚举到可编辑的设置</span></p>'}</div>
+          <div class="syspanel-pwr-tree-col">
+            <input type="search" class="syspanel-pwr-input syspanel-pwr-search" id="syspanelPwrSearch"
+                   placeholder="搜索设置（名称/说明关键字）" autocomplete="off">
+            <div class="syspanel-pwr-tree" id="syspanelPwrTree">${groupsHtml || '<p class="empty-state"><span>本方案没有枚举到可编辑的设置</span></p>'}</div>
+          </div>
           <div class="syspanel-pwr-detail" id="syspanelPwrDetail">
             <p class="empty-state"><span>从左侧选一项设置查看并修改取值</span></p>
           </div>
-        </div>
-        <div class="syspanel-pwr-editor-actions">
-          <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrCancel">取消</button>
-          <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrSave">确定并保存</button>
-          <button type="button" class="btn btn-primary btn-small" id="btnSyspanelPwrSaveApply">保存并应用</button>
         </div>
       </div>`;
     document.getElementById('syspanelPwrTree')?.addEventListener('click', onTreeClick);
@@ -648,6 +759,7 @@
     // select 在 WebView2 里 input 与 change 都会来；两个都绑，applyLocalChange 幂等
     detailBox?.addEventListener('input', onDetailInput);
     detailBox?.addEventListener('change', onDetailInput);
+    detailBox?.addEventListener('click', onDetailClick);
     document.getElementById('syspanelPwrDcToggle')?.addEventListener('change', (e) => {
       if (!editor) return;
       editor.dcVisible = !!e.target.checked;
@@ -661,8 +773,40 @@
     document.getElementById('btnSyspanelPwrCancel')?.addEventListener('click', editorCancel);
     document.getElementById('btnSyspanelPwrSave')?.addEventListener('click', () => editorSave(false));
     document.getElementById('btnSyspanelPwrSaveApply')?.addEventListener('click', () => editorSave(true));
+    document.getElementById('syspanelPwrSearch')?.addEventListener('input', applySearchFilter);
     refreshGroupMeta();
     refreshCount();
+  }
+
+  /** v5 P2 搜索过滤：命中项显示、组按需显隐；清空后恢复原有折叠状态（不改 editor.collapsed）。 */
+  function applySearchFilter() {
+    if (!editor) return;
+    const q = String(document.getElementById('syspanelPwrSearch')?.value || '').trim().toLowerCase();
+    document.querySelectorAll('.syspanel-pwr-group').forEach((gNode) => {
+      const gGuid = gNode.dataset.group || '';
+      let visible = 0;
+      gNode.querySelectorAll('.syspanel-pwr-item').forEach((node) => {
+        const hit = !q || String(editor.searchText.get(node.dataset.key || '') || '').includes(q);
+        node.hidden = !hit;
+        if (hit) visible += 1;
+      });
+      const list = gNode.querySelector('.syspanel-pwr-group-items');
+      const head = gNode.querySelector('.syspanel-pwr-group-head');
+      const caret = head?.querySelector('.syspanel-pwr-caret');
+      if (q) {
+        // 搜索态：有命中的组强制展开（不回写折叠状态，清空即还原）
+        gNode.hidden = visible === 0;
+        list?.removeAttribute('hidden');
+        head?.setAttribute('aria-expanded', 'true');
+        if (caret) caret.textContent = '▾';
+      } else {
+        const collapsed = editor.collapsed.has(gGuid);
+        gNode.hidden = false;
+        list?.toggleAttribute('hidden', collapsed);
+        head?.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        if (caret) caret.textContent = collapsed ? '▸' : '▾';
+      }
+    });
   }
 
   function onTreeClick(ev) {
@@ -736,23 +880,37 @@
     const controlHtml = (side, label) => {
       const val = currentValueOf(key, side);
       const inputId = 'syspanelPwrVal-' + side;
+      const possible = Array.isArray(s.possibleValues) ? s.possibleValues : [];
+      // 宽值域（枚举项很多，如 APST 的 0–255）本质是数值输入：用输入框而不是长下拉
+      // （2026-10-15 用户反馈）。后端 apply 的校验以 range 为准（range 存在时 possible
+      // 不再参与），所以输入框的 min/max/step 直接取 range；range 缺失的宽枚举取
+      // possible 的 min/max 作界（与后端「possible 兜底校验」一致）。
+      const useSelect = possible.length > 0 && possible.length <= 32;
       let control;
-      if (Array.isArray(s.possibleValues) && s.possibleValues.length) {
+      if (useSelect) {
         // 当前值可能不在系统给出的枚举内（真机实测存在这种合法既成事实，如
         // 「合上盖子操作」当前 1 / 枚举 0,2,3,6）：补一个选中项如实显示，绝不静默落到第一项。
-        const inEnum = val !== null && val !== undefined && s.possibleValues.some((v) => Number(v) === Number(val));
+        const inEnum = val !== null && val !== undefined && possible.some((v) => Number(v) === Number(val));
+        const curName = val !== null && val !== undefined ? pwrEnumZh(s.guid, val) : '';
         const curOpt = (!inEnum && val !== null && val !== undefined)
-          ? `<option value="${escAttr(String(val))}" selected>${esc(String(val))}（当前值）</option>`
+          ? `<option value="${escAttr(String(val))}" selected>${esc(curName ? `${val}（${curName}）` : String(val))}（当前值）</option>`
           : '';
-        const opts = s.possibleValues
-          .map((v) => `<option value="${escAttr(String(v))}"${Number(val) === Number(v) ? ' selected' : ''}>${esc(String(v))}</option>`)
+        const opts = possible
+          .map((v) => {
+            const zhName = pwrEnumZh(s.guid, v);
+            return `<option value="${escAttr(String(v))}"${Number(val) === Number(v) ? ' selected' : ''}>${esc(zhName ? `${v}（${zhName}）` : String(v))}</option>`;
+          })
           .join('');
         control = `<select class="syspanel-pwr-input" id="${inputId}" data-side="${side}"${dis}>${curOpt}${opts}</select>`;
       } else {
         const r = s.range || {};
-        const minAttr = Number.isFinite(Number(r.min)) ? ` min="${Number(r.min)}"` : '';
-        const maxAttr = Number.isFinite(Number(r.max)) ? ` max="${Number(r.max)}"` : '';
-        const stepAttr = Number.isFinite(Number(r.step)) && Number(r.step) > 0 ? ` step="${Number(r.step)}"` : '';
+        let minNum = Number.isFinite(Number(r.min)) ? Number(r.min) : null;
+        let maxNum = Number.isFinite(Number(r.max)) ? Number(r.max) : null;
+        let stepNum = Number.isFinite(Number(r.step)) && Number(r.step) > 0 ? Number(r.step) : null;
+        if (minNum === null && possible.length) { minNum = Math.min(...possible); maxNum = Math.max(...possible); stepNum = null; }
+        const minAttr = minNum !== null ? ` min="${minNum}"` : '';
+        const maxAttr = maxNum !== null ? ` max="${maxNum}"` : '';
+        const stepAttr = stepNum !== null ? ` step="${stepNum}"` : '';
         control = `<input type="number" class="syspanel-pwr-input" id="${inputId}" data-side="${side}" value="${val === null || val === undefined ? '' : Number(val)}"${minAttr}${maxAttr}${stepAttr}${dis}>`;
       }
       const unitSpan = unit ? ` <span class="syspanel-pwr-unit">${esc(unit)}</span>` : '';
@@ -766,9 +924,12 @@
     if (range && Number.isFinite(Number(range.min)) && Number.isFinite(Number(range.max))) {
       metaParts.push(`取值范围 ${Number(range.min)} – ${Number(range.max)}${Number(range.step) > 0 ? `（步长 ${Number(range.step)}）` : ''}`);
     }
-    if (Array.isArray(s.possibleValues) && s.possibleValues.length && !editor.rawPossible) {
-      // P2 才接 possible values 的友好名（PowerReadPossibleValue）；P1 如实显示系统原始值
-      metaParts.push(`可选值 ${s.possibleValues.join(' / ')}`);
+    if (Array.isArray(s.possibleValues) && s.possibleValues.length && s.possibleValues.length <= 32) {
+      // 只有窄枚举在元信息里列出（宽值域本质是数值输入，界已由「取值范围」承担）
+      metaParts.push(`可选值 ${s.possibleValues.map((v) => {
+        const zhName = pwrEnumZh(s.guid, v);
+        return zhName ? `${v}=${zhName}` : String(v);
+      }).join(' / ')}`);
     }
     const metaHtml = metaParts.length ? `<div class="syspanel-pwr-detail-meta">${esc(metaParts.join('；'))}</div>` : '';
     // 调优参考（社区经验口径）：只在表里有 rec 的设置上出现，四象限各一格
@@ -790,6 +951,9 @@
         </div>
       </div>` : '';
     const desc = pwrDisplayDesc(s);
+    const regeditBtn = `<div class="syspanel-pwr-detail-actions">
+        <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrRegedit" data-tip="打开注册表编辑器并定位到该设置">在注册表中查看</button>
+      </div>`;
     box.innerHTML = `
       <div class="syspanel-pwr-detail-name">${esc(pwrDisplayName(s))}</div>
       <div class="syspanel-pwr-detail-desc">${desc ? esc(desc) : '<span class="syspanel-pwr-muted">（该系统设置没有提供说明）</span>'}</div>
@@ -798,9 +962,51 @@
         ${editor.dcVisible ? controlHtml('dc', '使用电池（DC）') : ''}
       </div>
       ${metaHtml}
+      <div id="syspanelPwrCompare"></div>
+      ${regeditBtn}
       ${recHtml}
       ${failed ? '<div class="syspanel-pwr-unlock-note">系统拒绝解锁此设置（受保护项），当前不可编辑。</div>' : ''}
     `;
+    ensureCompare(key, s);
+  }
+
+  /** v5 P2 各方案数值对照：懒加载 + 会话内缓存（同一 key 只拉一次）。 */
+  function ensureCompare(key, s) {
+    const mount = document.getElementById('syspanelPwrCompare');
+    if (!mount || !editor) return;
+    const cached = editor.compareCache.get(key);
+    if (cached && !cached.loading) { renderCompare(mount, key, cached.rows); return; }
+    if (cached && cached.loading) return;
+    editor.compareCache.set(key, { loading: true, rows: [] });
+    window.api.syspanel.powerSettingsCompare(s.subgroupGuid, s.guid)
+      .then((resp) => {
+        const rows = resp && resp.success ? (resp.data?.rows || []) : [];
+        editor?.compareCache.set(key, { loading: false, rows });
+        if (editor && editor.selectedKey === key) {
+          const m2 = document.getElementById('syspanelPwrCompare');
+          if (m2) renderCompare(m2, key, rows);
+        }
+      })
+      .catch(() => editor?.compareCache.set(key, { loading: false, rows: [] }));
+  }
+
+  function renderCompare(mount, key, rows) {
+    if (!editor || !rows.length) { mount.innerHTML = ''; return; }
+    const fmt = (v) => (v === null || v === undefined ? '—' : String(v));
+    const items = rows.map((r) => {
+      const editing = String(r.schemeGuid || '').toLowerCase() === editor.schemeGuid;
+      const suffix = editing ? '（正在编辑）' : (r.active ? '（当前使用）' : '');
+      const value = editor.dcVisible ? `${fmt(r.ac)} / ${fmt(r.dc)}` : fmt(r.ac);
+      return `<div class="syspanel-pwr-compare-row${editing ? ' is-active' : ''}">
+        <span class="syspanel-pwr-compare-k">${esc(String(r.schemeName || r.schemeGuid) + suffix)}</span>
+        <span class="syspanel-pwr-compare-v">${esc(value)}</span>
+      </div>`;
+    }).join('');
+    mount.innerHTML = `
+      <div class="syspanel-pwr-compare">
+        <div class="syspanel-pwr-compare-title">各方案对照${editor.dcVisible ? '（AC / DC）' : '（AC）'}</div>
+        <div class="syspanel-pwr-compare-rows">${items}</div>
+      </div>`;
   }
 
   /** 输入形状闸（本地只拦「连传都传不过去」的形态：非整数/越 u32）。
@@ -850,8 +1056,94 @@
     else editor.changes.set(key, cur);
   }
 
-  function refreshItemMark(key) {
-    const s = findSetting(key);
+  // ==================== v5 P2 外部改动自动同步 ====================
+  // 口径：用「窗口重新激活时自动重读」覆盖「用户切到别的工具改了设置、再切回来」的真实场景。
+  // 未用 PowerSettingRegisterNotification —— 该系统 API 只支持按特定 GUID 注册（不提供
+  // 「任意设置变化」的通配通知），拿它做「别的工具改了自动刷新」是假承诺。
+
+  let lastAutoRefreshAt = 0;
+
+  function scheduleAutoRefresh() {
+    if (document.visibilityState !== 'visible') return;
+    const now = Date.now();
+    if (now - lastAutoRefreshAt < 5000) return; // 5s 节流：来回切窗口不反复重读
+    lastAutoRefreshAt = now;
+    if (editor) void refreshEditorAfterExternalChange();
+    else if (inited) void loadPower();
+  }
+
+  /** 编辑态：无未保存改动才静默重读；与旧值逐项比对，有差异才重绘并提示（避免每次聚焦都闪绘）。 */
+  async function refreshEditorAfterExternalChange() {
+    const ed = editor;
+    if (!ed || ed.saving || ed.changes.size > 0) return;
+    const guid = ed.schemeGuid;
+    let dumpResp = null;
+    try {
+      dumpResp = await window.api.syspanel.powerSettingsDump(guid);
+    } catch (e) {
+      return;
+    }
+    // 等待期间会话可能已被保存/取消；选中方案也可能已变——不一致就放弃本次刷新
+    if (!editor || editor !== ed || !dumpResp || !dumpResp.success) return;
+    const dump = dumpResp.data || {};
+    const newOrigin = new Map();
+    for (const g of dump.subgroups || []) {
+      for (const s of g.settings || []) {
+        newOrigin.set(pwrKey(s.subgroupGuid, s.guid), { ac: s.valueAc, dc: s.valueDc });
+      }
+    }
+    let changed = newOrigin.size !== ed.origin.size;
+    if (!changed) {
+      for (const [k, v] of newOrigin) {
+        const o = ed.origin.get(k);
+        if (!o || o.ac !== v.ac || o.dc !== v.dc) { changed = true; break; }
+      }
+    }
+    if (!changed) return; // 外部没有改动：静默（不重绘、不提示）
+    ed.dump = dump;
+    ed.origin = newOrigin;
+    ed.searchText = new Map();
+    ed.compareCache.clear();
+    for (const s of (dump.subgroups || []).flatMap((g) => g.settings || [])) {
+      const zw = pwrZh(s.guid);
+      ed.searchText.set(pwrKey(s.subgroupGuid, s.guid), [
+        s.name, zw?.name, s.description, zw?.desc,
+      ].filter(Boolean).join(' ').toLowerCase());
+    }
+    const keepSelected = ed.selectedKey;
+    renderEditor();
+    // 重绘后恢复选中态（DOM 重建，class 与详情区都要补回）
+    if (keepSelected) {
+      const node = Array.from(document.querySelectorAll('.syspanel-pwr-item'))
+        .find((n) => n.dataset.key === keepSelected);
+      if (node) {
+        node.classList.add('is-active');
+        renderDetail();
+      }
+    }
+    applySearchFilter();
+    pwrToast('info', '检测到外部改动，已自动重新读取本方案设置');
+  }
+
+  /** 详情区按钮委托（「在注册表中查看」）。 */  async function onDetailClick(ev) {
+    const btn = ev.target.closest('#btnSyspanelPwrRegedit');
+    if (!btn || !editor) return;
+    const s = findSetting(editor.selectedKey);
+    if (!s) return;
+    btn.disabled = true;
+    btn.textContent = '正在打开…';
+    try {
+      const resp = await window.api.syspanel.powerSettingsOpenRegedit(s.subgroupGuid, s.guid);
+      if (resp && resp.success) pwrToast('info', '已打开注册表编辑器并定位到该设置');
+      else pwrToast('error', (resp && resp.message) || '打开注册表失败');
+    } catch (e) {
+      pwrToast('error', '打开注册表异常：' + (e && e.message ? e.message : String(e)));
+    } finally {
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = '在注册表中查看'; }
+    }
+  }
+
+  function refreshItemMark(key) {    const s = findSetting(key);
     if (!s) return;
     document.querySelectorAll('.syspanel-pwr-item').forEach((node) => {
       if (node.dataset.key !== key) return;
@@ -1204,6 +1496,9 @@
       loadPower();
     });
     document.getElementById('btnSyspanelPowerNew')?.addEventListener('click', onNewPowerPlan);
+    // v5 P2：窗口重新激活 = 用户可能刚在别的工具里改过设置，节流地自动重读
+    window.addEventListener('focus', scheduleAutoRefresh);
+    document.addEventListener('visibilitychange', scheduleAutoRefresh);
     // 首帧进 settings 页时拉一次；后续靠"刷新"按钮再拉。
     if (!powerLoaded) {
       loadPower();

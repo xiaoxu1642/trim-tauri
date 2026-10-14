@@ -331,6 +331,8 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::syspanel::syspanel_power_settings_unlock,
         commands::syspanel::syspanel_power_settings_apply,
         commands::syspanel::syspanel_power_settings_revert,
+        commands::syspanel::syspanel_power_settings_compare,
+        commands::syspanel::syspanel_power_settings_open_regedit,
         commands::syspanel::syspanel_pagefile_state,
         commands::syspanel::syspanel_pagefile_apply,
         commands::overview::overview_metrics,

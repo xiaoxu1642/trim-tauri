@@ -430,37 +430,10 @@ fn regedit_last_key(reg_path: &str) -> Option<String> {
     Some(format!("计算机\\{p}"))
 }
 
-/// 把 LastKey 写进 HKCU 的 regedit 记忆位，再拉起 regedit —— Windows 没有「打开注册
-/// 表并跳到某键」的命令行参数，业界通用做法就是先写 Applets\Regedit\LastKey 再启动。
+/// 把 LastKey 写进 HKCU 的 regedit 记忆位，再拉起 regedit（2026-10-15 起公用实现在
+/// `engine::systembin::open_regedit_at`，本域不再自带一份）。
 fn open_regedit_at(last_key: &str) -> Result<(), String> {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ};
-    use std::os::windows::ffi::OsStrExt;
-
-    const SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit";
-    unsafe {
-        let sub_w: Vec<u16> = std::ffi::OsStr::new(SUBKEY).encode_wide().chain(std::iter::once(0)).collect();
-        let mut hk = HKEY::default();
-        // windows 0.61：RegOpenKeyExW 返回 WIN32_ERROR（非 Result），0 = ERROR_SUCCESS
-        let opened = RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sub_w.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
-        if opened.is_err() {
-            return Err(format!("打开 regedit 记忆键失败（win32 {}）", opened.0));
-        }
-        let val_w: Vec<u16> = std::ffi::OsStr::new("LastKey").encode_wide().chain(std::iter::once(0)).collect();
-        // REG_SZ 载荷按字节传（含收尾 NUL 的 u16 序列），与 contextmenu/uninstall 域同款
-        let mut bytes: Vec<u8> = Vec::with_capacity(last_key.len() * 2 + 2);
-        for w in std::ffi::OsStr::new(last_key).encode_wide().chain(std::iter::once(0)) {
-            bytes.extend_from_slice(&w.to_le_bytes());
-        }
-        let r = RegSetValueExW(hk, PCWSTR(val_w.as_ptr()), Some(0), REG_SZ, Some(&bytes));
-        let _ = RegCloseKey(hk);
-        if r.is_err() {
-            return Err(format!("写入 regedit 记忆键失败（win32 {}）", r.0));
-        }
-    }
-    // regedit 启动时读 LastKey；先写后启，顺序不能反
-    let exe = crate::engine::systembin::system_tool("regedit.exe");
-    crate::engine::systembin::shell_execute_open(exe.to_string_lossy().as_ref())
+    crate::engine::systembin::open_regedit_at(last_key)
 }
 
 /// startup:open-source —— 打开启动项的「来源位置」（B-6 增强，2026-10-13 用户裁定）

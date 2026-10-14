@@ -26,8 +26,8 @@ use crate::engine::guard;
 use crate::engine::native::{
     PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_plan_apply,
     power_plan_delete, power_plan_duplicate, power_plan_export, power_plan_import,
-    power_plan_rename, power_plan_state, power_settings_apply, power_settings_dump,
-    power_settings_revert, power_settings_unlock,
+    power_plan_rename, power_plan_state, power_setting_compare, power_setting_open_regedit,
+    power_settings_apply, power_settings_dump, power_settings_revert, power_settings_unlock,
 };
 
 fn syspanel_ok(data: Value) -> Result<Value, String> {
@@ -191,6 +191,26 @@ pub fn syspanel_power_settings_revert<R: Runtime>(
     guard::guard(&window, guard::MAIN)?;
     require_admin_for_power_edit()?;
     power_settings_revert(&scheme_guid, &session_id).and_then(syspanel_result_from_data)
+}
+
+#[tauri::command]
+pub fn syspanel_power_settings_compare<R: Runtime>(
+    window: WebviewWindow<R>,
+    subgroup_guid: String,
+    setting_guid: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    power_setting_compare(&subgroup_guid, &setting_guid).and_then(syspanel_ok)
+}
+
+#[tauri::command]
+pub fn syspanel_power_settings_open_regedit<R: Runtime>(
+    window: WebviewWindow<R>,
+    subgroup_guid: String,
+    setting_guid: String,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    power_setting_open_regedit(&subgroup_guid, &setting_guid).and_then(syspanel_ok)
 }
 
 #[tauri::command]

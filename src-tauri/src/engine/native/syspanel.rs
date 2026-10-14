@@ -1037,6 +1037,48 @@ fn setting_value_json(
     }))
 }
 
+/// 单设置跨方案对照：读该设置在本机**全部方案**里的 AC/DC 值（v5 P2）。
+/// 只读；供编辑器详情区「其它方案里是多少」的对照块，不触写侧、不需管理员。
+pub fn power_setting_compare(subgroup_guid: &str, setting_guid: &str) -> Result<Value, String> {
+    let subgroup = parse_guid_str(subgroup_guid)
+        .ok_or_else(|| format!("子组 GUID 形状非法：{subgroup_guid}"))?;
+    let setting = parse_guid_str(setting_guid)
+        .ok_or_else(|| format!("设置 GUID 形状非法：{setting_guid}"))?;
+    let active = active_scheme().map(|g| guid_string(&g)).unwrap_or_default();
+    let rows = scheme_guids()
+        .iter()
+        .map(|g| {
+            let guid = guid_string(g);
+            let name = scheme_friendly_name(g).unwrap_or_else(|| guid.clone());
+            json!({
+                "schemeGuid": guid,
+                "schemeName": name,
+                "active": guid.eq_ignore_ascii_case(&active),
+                "ac": read_setting_value(g, &subgroup, &setting, false),
+                "dc": read_setting_value(g, &subgroup, &setting, true),
+            })
+        })
+        .collect::<Vec<Value>>();
+    Ok(json!({ "rows": rows }))
+}
+
+/// 「在注册表中查看」：把编辑器定位到该设置的 PowerSettings 键（复用系统工具层
+/// `open_regedit_at` 的「写 LastKey + 拉起 regedit」链路，不新造第二套实现）。
+/// 只接形状合法的 GUID，路径整体由本函数拼出、不接任意字符串。
+pub fn power_setting_open_regedit(subgroup_guid: &str, setting_guid: &str) -> Result<Value, String> {
+    let subgroup = parse_guid_str(subgroup_guid)
+        .ok_or_else(|| format!("子组 GUID 形状非法：{subgroup_guid}"))?;
+    let setting = parse_guid_str(setting_guid)
+        .ok_or_else(|| format!("设置 GUID 形状非法：{setting_guid}"))?;
+    let last_key = format!(
+        "计算机\\HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\{}\\{}",
+        guid_string(&subgroup),
+        guid_string(&setting)
+    );
+    crate::engine::systembin::open_regedit_at(&last_key)?;
+    Ok(json!({ "ok": true }))
+}
+
 /// 平台角色：只供渲染层决定 DC（电池）列的默认显隐，不是任何写入门禁。
 /// 台式机没有电池档，默认收起 DC 列；笔记本（mobile）与平板（slate）默认展开。
 fn platform_role_str() -> &'static str {

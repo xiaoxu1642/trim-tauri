@@ -244,6 +244,8 @@
     'syspanel:power-settings-unlock': 'syspanel_power_settings_unlock',
     'syspanel:power-settings-apply': 'syspanel_power_settings_apply',
     'syspanel:power-settings-revert': 'syspanel_power_settings_revert',
+    'syspanel:power-settings-compare': 'syspanel_power_settings_compare',
+    'syspanel:power-settings-open-regedit': 'syspanel_power_settings_open_regedit',
     'syspanel:pagefile-state': 'syspanel_pagefile_state',
     'syspanel:pagefile-apply': 'syspanel_pagefile_apply'
   };
@@ -719,6 +721,8 @@
       powerSettingsUnlock: function (schemeGuid) { return invokeChannel('syspanel:power-settings-unlock', { schemeGuid: schemeGuid }); },
       powerSettingsApply: function (schemeGuid, changes, applyActive) { return invokeChannel('syspanel:power-settings-apply', { schemeGuid: schemeGuid, changes: changes || [], applyActive: !!applyActive }); },
       powerSettingsRevert: function (schemeGuid, sessionId) { return invokeChannel('syspanel:power-settings-revert', { schemeGuid: schemeGuid, sessionId: sessionId }); },
+      powerSettingsCompare: function (subgroupGuid, settingGuid) { return invokeChannel('syspanel:power-settings-compare', { subgroupGuid: subgroupGuid, settingGuid: settingGuid }); },
+      powerSettingsOpenRegedit: function (subgroupGuid, settingGuid) { return invokeChannel('syspanel:power-settings-open-regedit', { subgroupGuid: subgroupGuid, settingGuid: settingGuid }); },
       // 提权重启接回编辑态：新实例首帧后主进程发一次（lib.rs），消费者在 app.js。
       onEditIntent: function (callback) { return onEvent('syspanel:edit-intent', callback); },
       pagefileState: function () { return invokeChannel('syspanel:pagefile-state'); },

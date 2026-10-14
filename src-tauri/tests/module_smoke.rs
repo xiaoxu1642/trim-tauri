@@ -1199,6 +1199,8 @@ fn syspanel_回执必须是_success_data_包装() {
         "syspanel_power_settings_unlock",
         "syspanel_power_settings_apply",
         "syspanel_power_settings_revert",
+        "syspanel_power_settings_compare",
+        "syspanel_power_settings_open_regedit",
         "syspanel_pagefile_state",
         "syspanel_pagefile_apply",
     ];
@@ -1243,6 +1245,8 @@ fn syspanel_power_编辑命令_is_main_only() {
         ("syspanel_power_settings_unlock", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e" })),
         ("syspanel_power_settings_apply", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "changes": [], "applyActive": false })),
         ("syspanel_power_settings_revert", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "sessionId": "x" })),
+        ("syspanel_power_settings_compare", json!({ "subgroupGuid": "0012ee47-9041-4b5d-9b77-535fba8b1442", "settingGuid": "d639518a-e56d-4345-8af2-b9f32fb26109" })),
+        ("syspanel_power_settings_open_regedit", json!({ "subgroupGuid": "0012ee47-9041-4b5d-9b77-535fba8b1442", "settingGuid": "d639518a-e56d-4345-8af2-b9f32fb26109" })),
     ];
     let mut rejected = Vec::<String>::new();
     for label in sub_windows() {
