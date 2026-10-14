@@ -28,6 +28,8 @@ mod backup_restore;
 pub use backup_restore::{optimizer_backup_reg, __cmd__optimizer_backup_reg, __tauri_command_name_optimizer_backup_reg, optimizer_restore_reg, __cmd__optimizer_restore_reg, __tauri_command_name_optimizer_restore_reg};
 mod bcd;
 pub use bcd::{optimizer_bcd_enum, __cmd__optimizer_bcd_enum, __tauri_command_name_optimizer_bcd_enum};
+mod external_scan;
+pub use external_scan::{optimizer_external_scan, __cmd__optimizer_external_scan, __tauri_command_name_optimizer_external_scan};
 mod subitems;
 mod catalog;
 #[cfg(test)]

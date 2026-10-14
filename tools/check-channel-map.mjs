@@ -158,6 +158,7 @@ const TAURI_ADDED = {
   'syspanel:power-settings-revert': 'v5 P0（2026-10-15）：按后端会话快照恢复属性（主窗档，编辑器 UI 在 P1 接线）',
   'syspanel:power-settings-open-regedit': 'v5 P2（2026-10-15）：在注册表中查看该设置（写 regedit LastKey 后拉起，复用 systembin::open_regedit_at；主窗档）',
   'syspanel:power-settings-compare': 'v5 P2（2026-10-15）：单设置跨方案数值对照（只读，详情区对照块；主窗档）',
+  'optimizer:external-scan': '账外核对（2026-10-15 拍板）：只读扫描社区常见但不在优化目录里的手动 tweak 键（主窗档）',
   'syspanel:pagefile-state': 'P2 §3.6（2026-10-03）：虚拟内存只读展示（写侧同批落地）',
   'syspanel:pagefile-apply': 'P2 §3.6（2026-10-03）：虚拟内存写侧（AutomaticManagedPagefile + PagingFiles；主窗档 + 高危确认 + 需重启）',
   'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',

@@ -223,6 +223,7 @@
     'optimizer:bcd-enum': 'optimizer_bcd_enum',
     'optimizer:nara-panel': 'optimizer_nara_panel',
     'optimizer:privacy-panel': 'optimizer_privacy_panel',
+    'optimizer:external-scan': 'optimizer_external_scan',
     // system / startup（5）
     'system:disk-type': 'system_disk_type',
     'system:disk-list': 'system_disk_list',
@@ -232,7 +233,7 @@
     'startup:openlocation': 'startup_openlocation',
     'startup:open-source': 'startup_open_source',
     'startup:add': 'startup_add',
-    // syspanel（P2 §3.6：电源计划 + 虚拟内存面板，只在主窗 settings 页调用）
+    // syspanel（P2 §3.6：电源计划 + 虚拟内存面板，只在主窗 Windows设置 页调用）
     'syspanel:power-plan-get': 'syspanel_power_plan_get',
     'syspanel:power-plan-apply': 'syspanel_power_plan_apply',
     'syspanel:power-settings-dump': 'syspanel_power_settings_dump',
@@ -696,6 +697,7 @@
       bcdEnum: function () { return invokeChannel('optimizer:bcd-enum'); },
       naraPanel: function () { return invokeChannel('optimizer:nara-panel'); },
       privacyPanel: function () { return invokeChannel('optimizer:privacy-panel'); },
+      externalScan: function () { return invokeChannel('optimizer:external-scan'); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }
     },
 
@@ -708,7 +710,7 @@
       diskList: function () { return invokeChannel('system:disk-list'); }
     },
 
-    // syspanel（P2 §3.6）：电源计划读写 + 虚拟内存读写；主窗 settings 页专用
+    // syspanel（P2 §3.6）：电源计划读写 + 虚拟内存读写；主窗 Windows设置 页专用
     syspanel: {
       powerPlanGet: function () { return invokeChannel('syspanel:power-plan-get'); },
       powerPlanApply: function (guid) { return invokeChannel('syspanel:power-plan-apply', { guid: guid }); },

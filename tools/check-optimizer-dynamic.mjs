@@ -14,8 +14,9 @@
 //   A5 前端不得再按 `dynamic` 一刀切：`.opt-mem-select` 必须归零、执行参数走 dynamicParams、
 //      批量入口不得再发裸 `{}`（那正是 v2-M10 的第二条失法路径）
 //   A6 生效粒度侧表 optimizer-scope.json ⇄ 按步骤机械重算（详见块内注释）
-//   A7 虚拟合集卡（optimizer.js 的 VIRTUAL_GROUPS）⇄ 数据层：runId 必须真存在、
-//      一卡至少两态、同一真实项不得被两卡抢、整卡档位不得低于成员最高档
+//   A7 Windows 更新三态迁出接线（2026-10-15）：数据层三 id 仍在、optimizer.js 的
+//      迁出集合恰为三项且聚合层不残留、syspanel.js 三卡与执行/日期锚点齐全、
+//      optimizer.js 已导出 executeOption（详见块内注释）
 //   A8 D0 三侧覆盖契约：数据层 steps 的每个字段必须被「执行 / 检测 / 备份」三侧
 //      同时消费（详见下方块内注释）
 //   A9 服务启动类型修复入口（R0-c）：四项 svc_*_manual 的显式修复入口不许被静默删掉
@@ -259,46 +260,65 @@ check(
 }
 
 // ---------------------------------------------------------------------------
-// A7 虚拟合集卡（2026-09-30 聚合层）—— 卡上的每个 runId 都是**真实执行目标**，
-//   数据层一退役/改名，卡片就会「点开看得见、执行必失败」，与 v2-M10 同一失法形态。
-//   四件事必须成立：① runId 真在目录里；② 一张卡至少两态（否则不叫聚合）；
-//   ③ 同一真实项不被两张卡抢（展开会重复执行）；④ 整卡标注的档位不得低于任何成员的
-//   最高档 —— 否则「整卡标 low、选中态是高危禁用」会绕过红色确认（AGENTS §3）。
+// A7 Windows 更新三态的迁出接线（2026-10-15 用户裁定：优化中心的虚拟合集卡退役，
+//   三态展开到「Windows设置」页三张小卡，执行走 optimizer.js 的 executeOption）。
+//   旧失法形态是「聚合卡点开看得见、执行必失败」；执行入口挪到另一个文件后同类漂移
+//   仍然可能发生（改 id、删入口、执行绕过确认链），所以接替断言盯四件事：
+//     ① 数据层三项仍在 —— 迁出不是删除，检测 / 备份 / 还原还都指着它们；
+//     ② optimizer.js 的迁出集合**恰为**这三项（多一个 = 有项被静默藏起；少一个 =
+//        某项会双入口展示）；聚合层 const VIRTUAL_GROUPS 不得残留（防双轨）；
+//     ③ syspanel.js 的接线逐条在场：三卡数据表、三个 runId 点名、执行出口调用、
+//        暂停日期换算（走 optimizer 导出的 pauseDaysFrom，上限单一真源）；
+//     ④ optimizer.js 导出面含 executeOption 与 pauseDaysFrom。
 // ---------------------------------------------------------------------------
 {
-  const lit = objectLiteral(jsOpt, /const VIRTUAL_GROUPS\s*=/);
-  if (!lit) {
-    check(false, 'A7. 虚拟合集卡 ⇄ 数据层', 'optimizer.js 里找不到 const VIRTUAL_GROUPS（聚合层被删了？那列表过滤与批量前置闸也该一并清）');
-  } else if (!Array.isArray(options)) {
-    check(false, 'A7. 虚拟合集卡 ⇄ 数据层', '数据层读不到，无法对拍');
-  } else {
-    const RISK_ORDER = { low: 0, medium: 1, high: 2 };
-    const byId = new Map(options.map((o) => [o.id, o]));
-    const cards = [...lit.matchAll(/^ {4}([A-Za-z0-9_]+): \{([\s\S]*?)^ {4}\}/gm)];
-    const seenRun = new Map();
-    const bad = [];
-    for (const [, cardId, body] of cards) {
-      const rm = /risk: '([a-z]+)'/.exec(body);
-      const cardRank = rm ? RISK_ORDER[rm[1]] : undefined;
-      if (cardRank === undefined) bad.push(`${cardId}: 缺 risk 或档位非法`);
-      const runs = [...body.matchAll(/runId: '([^']+)'/g)].map((x) => x[1]);
-      if (runs.length < 2) bad.push(`${cardId}: 只有 ${runs.length} 个选项，聚合至少两态`);
-      let maxRank = -1;
-      for (const r of runs) {
-        const real = byId.get(r);
-        if (!real) { bad.push(`${cardId}: runId=${r} 不在数据层目录里（点开必失败）`); continue; }
-        if (seenRun.has(r)) bad.push(`${r}: 被 ${seenRun.get(r)} 与 ${cardId} 两张卡同时聚合`);
-        seenRun.set(r, cardId);
-        maxRank = Math.max(maxRank, RISK_ORDER[real.risk] ?? 0);
-      }
-      if (cardRank !== undefined && cardRank < maxRank) {
-        bad.push(`${cardId}: 整卡标 ${rm[1]}，低于选中态最高档（会降档绕过红色确认）`);
-      }
-    }
-    check(cards.length > 0 && bad.length === 0,
-      `A7. 虚拟合集卡 ⇄ 数据层（${cards.length} 张卡 / 聚合 ${seenRun.size} 个真实项）`,
-      bad.join(' / '));
+  const MOVED = ['perf_windows_update_off', 'perf_wu_enable', 'perf_wu_pause'];
+  const sysJs = R('src/scripts/syspanel.js');
+
+  // ① 数据层
+  const missingData = Array.isArray(options)
+    ? MOVED.filter((id) => !options.some((o) => o && o.id === id))
+    : MOVED.slice();
+
+  // ② optimizer.js：迁出集合恰为三项 + 聚合层不残留
+  const movedBlk = jsOpt.match(/const MOVED_TO_WIN_SETTINGS = new Set\(\[([\s\S]*?)\]\)/);
+  const movedIds = movedBlk
+    ? [...movedBlk[1].matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]).sort()
+    : [];
+  const movedOk = movedIds.length > 0 && JSON.stringify(movedIds) === JSON.stringify([...MOVED].sort());
+  const virtualLeft = /const VIRTUAL_GROUPS/.test(jsOpt);
+
+  // ③ syspanel.js 接线
+  const missSysIds = MOVED.filter((id) => !sysJs.includes(`'${id}'`));
+  const sysWires = [
+    ['三卡数据表', /const WU_CARDS = \[/, sysJs],
+    ['执行出口调用', /window\.optimizer\.executeOption\(/, sysJs],
+    ['暂停日期换算', /pauseDaysFrom\(/, sysJs],
+    ['暂停卡入口', /'perf_wu_pause'/, sysJs],
+  ].filter(([, re, src]) => !re.test(src)).map(([n]) => n);
+
+  // ④ optimizer.js 导出面
+  const exportMissing = [
+    ['executeOption', /window\.optimizer = \{[^}]*executeOption/],
+    ['pauseDaysFrom', /window\.optimizer = \{[^}]*pauseDaysFrom/],
+    ['WU_PAUSE_MAX_DAYS', /window\.optimizer = \{[^}]*WU_PAUSE_MAX_DAYS/],
+  ].filter(([, re]) => !re.test(jsOpt)).map(([n]) => n);
+
+  const a7Bad = [];
+  if (missingData.length) a7Bad.push(`数据层缺 ${missingData.join(',')}（迁出不是删除）`);
+  if (!movedOk) {
+    a7Bad.push(movedBlk
+      ? `迁出集合与三项不符：得 [${movedIds.join(',')}] —— 多/少一项都会造成「藏项」或「双入口」`
+      : 'optimizer.js 里找不到 const MOVED_TO_WIN_SETTINGS（结构变了要同步本门禁）');
   }
+  if (virtualLeft) a7Bad.push('const VIRTUAL_GROUPS 仍残留——聚合层已退役，防双轨');
+  if (missSysIds.length) a7Bad.push(`syspanel.js 缺 runId 点名：${missSysIds.join(',')}`);
+  if (sysWires.length) a7Bad.push(`syspanel.js 缺接线：${sysWires.join(' / ')}`);
+  if (exportMissing.length) a7Bad.push(`optimizer.js 导出面缺：${exportMissing.join(' / ')}`);
+
+  check(a7Bad.length === 0,
+    `A7 Windows 更新三态迁出接线（数据层 ${MOVED.length} 项 / 迁出集合 ${movedIds.length} 项 / syspanel 锚点 ${sysWires.length === 0 ? '齐' : '缺'}）`,
+    a7Bad.join(' | '));
 }
 
 // ==================== A8. D0 三侧覆盖契约（R0-b 新增） ====================

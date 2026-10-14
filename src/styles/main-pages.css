@@ -561,6 +561,25 @@
   border: 1px solid var(--border-default);
   padding: 4px 10px;
 }
+/* P2-05（D-01）「改了谁」摘要行（消费后端注入的 regTargets） */
+/* 账外核对弹窗（2026-10-15 拍板：只读清单；纯列表、无卡片底，省首屏字节） */
+.opt-ext-lead, .opt-ext-foot { margin: 0 0 10px; color: var(--fg-tertiary); font-size: calc(12px * var(--font-size-scale, 1)); }
+.opt-ext-item { margin-bottom: 10px; }
+.opt-ext-title { color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
+.opt-ext-meta { margin-top: 2px; color: var(--fg-secondary); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.opt-ext-shape { margin-left: 8px; color: var(--accent); }
+.opt-ext-path { margin-top: 2px; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); overflow-wrap: anywhere; }
+.opt-ext-note { margin: 4px 0 0; color: var(--fg-secondary); font-size: calc(12px * var(--font-size-scale, 1)); line-height: 1.6; }
+.opt-reg-targets {
+  margin: 8px 0 2px;
+  padding: 6px 8px;
+  border-radius: var(--radius-small);
+  background: var(--bg-hover);
+  color: var(--fg-secondary);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
 .opt-detail-steps {
   margin: 6px 0;
   padding-left: 22px;

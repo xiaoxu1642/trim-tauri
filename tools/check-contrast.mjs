@@ -920,10 +920,11 @@ check(
 // 差 14 个单位——位移贴图把行分隔线与相邻文字拽进按钮里，而 28 个名额先到先得，
 // 于是「同一页一部分灰一部分白」。底色已经由 CSS 的 floor 自证，滤镜再参与就是第二次
 // 把可读性交给运行时预算。判据是 commitGlass 里那三条锚点（禁行号，AGENTS §5.19）：
-// wantRefract 必须显式排除 kind==='button'、按钮分支必须置 noFilter、回升路径必须挡住 noFilter。
+// wantRefract 必须仅放行浮层（按钮 2026-10-14、输入框 2026-10-15 两次真机实测退出）、
+// 排除分支必须置 noFilter、回升路径必须挡住 noFilter。
 const GLASS_ANCHORS = [
-  { name: "wantRefract 排除按钮", re: /const wantRefract = m\.kind !== 'button'/ },
-  { name: "按钮分支置 noFilter", re: /st\.noFilter = true;/ },
+  { name: "wantRefract 仅浮层（按钮/输入框均排除）", re: /const wantRefract = m\.kind === 'floating'/ },
+  { name: "按钮/输入框分支置 noFilter", re: /st\.noFilter = true;/ },
   { name: "资格回升挡住 noFilter", re: /if \(st\.refract \|\| st\.noFilter/ },
 ];
 function judgeGlassAnchors(src, anchors) {
@@ -932,16 +933,16 @@ function judgeGlassAnchors(src, anchors) {
 const glassBad = judgeGlassAnchors(LG_JS, GLASS_ANCHORS);
 check(
   glassBad.length === 0,
-  `F3b. liquid-glass 不给按钮写滤镜（三条锚点齐备：${GLASS_ANCHORS.map((a) => a.name).join(' / ')}）`,
+  `F3b. liquid-glass 只给浮层写折射滤镜（三条锚点齐备：${GLASS_ANCHORS.map((a) => a.name).join(' / ')}）`,
   glassBad.join('；'),
 );
 {
   // 正向对照：把排除条件抹掉，锚点判定必须立刻判红（否则这条门禁只是装饰）。
-  const stripped = LG_JS.replace(/const wantRefract = m\.kind !== 'button'/, 'const wantRefract = true');
+  const stripped = LG_JS.replace(/const wantRefract = m\.kind === 'floating'/, 'const wantRefract = true');
   const ctrl = judgeGlassAnchors(stripped, GLASS_ANCHORS);
   check(
     ctrl.length === 1 && ctrl[0].includes('wantRefract'),
-    'F3b 对照：抹掉 wantRefract 的按钮排除后必须判红',
+    'F3b 对照：抹掉 wantRefract 的浮层限定后必须判红',
     ctrl.length === 1 ? '' : `实算 ${ctrl.length} 条：${ctrl.join('；')}`,
   );
 }

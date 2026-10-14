@@ -1271,14 +1271,30 @@ fn syspanel_power_编辑命令_is_main_only() {
 /// 优化页只在主窗 ⇒ 档位必须 MAIN，子窗被拒。正向特征（主窗能通过来源校验）
 /// 由 pending 侧同名模板核对过的同族形态覆盖；这里按模板纪律只点子窗拒绝侧。
 #[test]
-fn optimizer_stale_dismiss_is_main_only() {
-    let mut rejected: Vec<&str> = Vec::new();
+fn optimizer_stale_dismiss_is_main_only() {    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_stale_dismiss", json!({ "ids": ["x"] }));
         assert!(
             text.contains("IPC 来源校验失败"),
             "{label} 窗调 optimizer_stale_dismiss 必须被来源校验拒杀，回执 {text}"
+        );
+        rejected.push(label);
+    }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+}
+
+/// 账外核对（2026-10-15 拍板）：只读但只被主窗优化页消费 ⇒ 按 D5 判据取 MAIN，子窗被拒杀。
+/// 只点子窗拒绝侧；命中判定由 `external_scan.rs` 的单测与真机探针覆盖。
+#[test]
+fn optimizer_external_scan_is_main_only() {
+    let mut rejected: Vec<&str> = Vec::new();
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "optimizer_external_scan", json!({}));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调 optimizer_external_scan 必须被来源校验拒杀，回执 {text}"
         );
         rejected.push(label);
     }

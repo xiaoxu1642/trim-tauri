@@ -1,5 +1,6 @@
 // syspanel.js — 电源计划读写 + 逐设置编辑 + 虚拟内存读写（P2 §3.6 RAINZ 对标；v5 P1 编辑器）
-// 挂在 settings 页底部；由 app.js 的 PAGE_SCRIPTS.settings 按需注入、MODULES_NEEDING_INIT 显式调 init。
+// 挂在「Windows设置」页（2026-10-15 从设置页迁出、独立成侧边栏入口）；由 app.js 的
+// PAGE_SCRIPTS['windows-settings'] 按需注入、MODULES_NEEDING_INIT 显式调 init。
 // 十三条通道都走 window.api.syspanel.*（对应 CHANNEL_MAP 十三个键）；后端一律 `guard(MAIN)`。
 // 转义与字节格式化一律走 window.ds（AGENTS §2 硬红线，本地 escape 不许新增）。
 (function () {
@@ -1472,6 +1473,134 @@
     }
   }
 
+  // ==================== Windows 更新三态（2026-10-15 从优化中心迁入）====================
+  // 「彻底禁用 / 恢复 / 暂停到日期」三项互斥做法各成一张小卡（快捷指令页同款视觉：
+  // 三列网格 + qc-card）。执行链**不另起一套**——点击经 window.optimizer.executeOption
+  // 走优化模块的高危红色确认 → 系统还原点 → 备份/记账/读回校验（与优化中心详情弹窗
+  // 「立即执行」完全同一条）；本模块只负责入口 UI 与暂停日期选择。
+  // 卡片 DOM 由本文件进页时挂进 #page-windows-settings：首屏预算贴着上限，静态 HTML
+  // 一个字节都加不起（syspanel.js 是按需加载件，字符串字节不计首屏）。
+  const WU_CARDS = [
+    {
+      id: 'perf_windows_update_off',
+      name: '彻底禁用自动更新',
+      desc: '高危：安全补丁不再自动送达',
+      btn: '禁用',
+      icon: '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8 0-1.85.63-3.55 1.69-4.9L16.9 18.31C15.55 19.37 13.85 20 12 20zm6.31-3.1L7.1 5.69C8.45 4.63 10.15 4 12 4c4.41 0 8 3.59 8 8 0 1.85-.63 3.55-1.69 4.9z"/>',
+      tip: '写 NoAutoUpdate=1，彻底停止自动检查与安装更新，安全更新将不再自动送达。仅建议在明确知晓风险时使用；只想推迟一段时间请用「暂停」。',
+    },
+    {
+      id: 'perf_wu_enable',
+      name: '恢复自动更新',
+      desc: '恢复系统默认更新行为',
+      btn: '恢复',
+      icon: '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>',
+      tip: '清除 Trim 写入的暂停键与 NoAutoUpdate 策略，让 Windows 恢复默认的自动检查与安装。只删 Trim 写过的键，没让 Trim 动过的设置一概不碰。',
+    },
+    {
+      id: 'perf_wu_pause',
+      name: '暂停更新到指定日期',
+      desc: '官方暂停键，到期自动恢复',
+      btn: '选日期',
+      icon: '<path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/>',
+      tip: '写入 Windows 官方暂停键（1~35 天档位），服务照常运行、到期系统自动恢复更新，不停用任何组件。',
+    },
+  ];
+
+  function initWuSection() {
+    const page = document.getElementById('page-windows-settings');
+    if (!page || document.getElementById('syspanelWu')) return;
+    const sec = document.createElement('div');
+    sec.className = 'syspanel-card';
+    sec.id = 'syspanelWu';
+    sec.innerHTML = `
+      <div class="syspanel-card-head">
+        <h4>Windows 更新</h4>
+        <span class="syspanel-tag">三选一 · 改前自动备份</span>
+      </div>
+      <div class="qc-grid">
+        ${WU_CARDS.map(w => `
+        <div class="qc-card" data-tip="${escAttr(w.tip)}">
+          <div class="qc-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">${w.icon}</svg></div>
+          <div class="qc-body">
+            <div class="qc-name">${esc(w.name)}</div>
+            <div class="qc-desc">${esc(w.desc)}</div>
+          </div>
+          <div class="qc-actions">
+            <button type="button" class="btn btn-secondary btn-small" data-wu-run="${escAttr(w.id)}">${esc(w.btn)}</button>
+          </div>
+        </div>`).join('')}
+      </div>`;
+    page.appendChild(sec);
+    // 主窗最小宽 1387px（lib.rs MIN_WIDTH），三列在任何可达宽度下都放得下；
+    // 固定三列而非走 .qc-grid 的 4 列断点 —— 三项就该一行三列（对齐 2026-10-11
+    // 用户对 qc 网格「列数不许随宽度乱跳」的裁定）。行内样式压过媒体查询，不新增 CSS。
+    const grid = sec.querySelector('.qc-grid');
+    if (grid) grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+    sec.querySelectorAll('[data-wu-run]').forEach((btn) => {
+      // guard：onWuRun 是 async，其内的确认框/日期弹窗任一环 reject 都会变成浮动
+      // Promise（v2-M22 同族，用户侧表现为「点击后毫无反应」），统一在此收口。
+      btn.addEventListener('click', () => {
+        Promise.resolve(onWuRun(btn.dataset.wuRun)).catch((e) => {
+          pwrToast('error', 'Windows 更新调整异常：' + ((e && e.message) || e));
+        });
+      });
+    });
+  }
+
+  async function onWuRun(id) {
+    if (!window.optimizer?.executeOption) {
+      pwrToast('warning', '优化组件未加载，请稍后重试');
+      return;
+    }
+    if (id === 'perf_wu_pause') { openWuPausePicker(); return; }
+    await window.optimizer.executeOption(id);
+  }
+
+  /** 暂停到指定日期：明天起、最长 WU_PAUSE_MAX_DAYS 天（上限与换算取自优化模块导出，不另抄一份） */
+  function openWuPausePicker() {
+    const O = window.optimizer;
+    if (!window.modal?.create || !O) { pwrToast('warning', '当前环境不支持暂停设置'); return; }
+    const maxDays = O.WU_PAUSE_MAX_DAYS;
+    const ctrl = window.modal.create({
+      id: 'syspanelWuPauseModal',
+      title: '暂停 Windows 更新',
+      bodyHtml: `
+        <p class="syspanel-pwr-modal-hint">选择暂停截止日期（明天起、最长 ${maxDays} 天）：到期系统自动恢复更新，期间更新服务照常运行。</p>
+        <label class="opt-inline">暂停到
+          <input type="date" class="field-input opt-choice-date" id="syspanelWuPauseDate"
+            min="${escAttr(O.dateInputValue(1))}" max="${escAttr(O.dateInputValue(maxDays))}" />
+        </label>
+        <p class="opt-choice-days" id="syspanelWuPauseDays">请选择日期</p>`,
+      footerHtml: `
+        <button type="button" class="btn btn-secondary" data-modal-cancel>取消</button>
+        <button type="button" class="btn btn-primary" data-modal-ok disabled>确认暂停</button>`,
+      width: 420,
+      initialFocus: '#syspanelWuPauseDate',
+    });
+    const dateEl = ctrl.body.querySelector('#syspanelWuPauseDate');
+    const daysEl = ctrl.body.querySelector('#syspanelWuPauseDays');
+    const okBtn = ctrl.footer.querySelector('[data-modal-ok]');
+    const sync = () => {
+      const days = O.pauseDaysFrom(dateEl?.value);
+      okBtn.disabled = days == null;
+      daysEl.textContent = days == null
+        ? `请选择一个明天以后的日期（最长 ${maxDays} 天）`
+        : `共暂停 ${days} 天，到期系统自动恢复更新`;
+    };
+    dateEl?.addEventListener('input', sync);
+    ctrl.footer.querySelector('[data-modal-cancel]').addEventListener('click', () => ctrl.close());
+    okBtn.addEventListener('click', () => {
+      const days = O.pauseDaysFrom(dateEl?.value);
+      if (days == null) return;
+      ctrl.close();
+      Promise.resolve(O.executeOption('perf_wu_pause', String(days))).catch((e) => {
+        pwrToast('error', '暂停更新执行异常：' + ((e && e.message) || e));
+      });
+    });
+    sync();
+  }
+
   /** app.js 交付的提权意图（新实例首帧后事件）。未 init 时先收着，init 后消费。 */
   function onEditIntent(intent) {
     pendingEditIntent = intent || null;
@@ -1499,11 +1628,14 @@
     // v5 P2：窗口重新激活 = 用户可能刚在别的工具里改过设置，节流地自动重读
     window.addEventListener('focus', scheduleAutoRefresh);
     document.addEventListener('visibilitychange', scheduleAutoRefresh);
-    // 首帧进 settings 页时拉一次；后续靠"刷新"按钮再拉。
+    // 首帧进 Windows设置 页时拉一次；后续靠"刷新"按钮再拉。
     if (!powerLoaded) {
       loadPower();
     }
     loadPagefile();
+    // 「Windows 更新」三态卡（2026-10-15 从优化中心迁入；点击时读 window.optimizer，
+    // 由 PAGE_SCRIPTS['windows-settings'] 的加载序保证就位）
+    initWuSection();
     // 提权重启接回：事件可能先于本模块 init 到达（app.js 存了 appState），也可能由 onEditIntent 暂存
     consumePendingEditIntent();
   }

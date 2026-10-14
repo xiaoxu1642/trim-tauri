@@ -1718,7 +1718,6 @@ body.lg-reduce-motion .lg-thumb {
 .settings-bgtheme-section,
 .settings-appearance-section,
 .settings-system-section,
-.settings-syspanel,
 .settings-about-section {
   grid-column: 1 / -1;
 }
@@ -2067,13 +2066,16 @@ select.field-input { cursor: pointer; appearance: auto; }
 /* ================================================================
    通知 Toast
    ================================================================ */
+/* 2026-10-15 用户裁定：顶部居中、从上往下弹出（原右上角会遮住页面右上角按钮）。 */
 .toast-container {
   position: fixed;
   top: 60px;
-  right: 24px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 10001;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 8px;
   pointer-events: none;
   /* v3.7.0 议题一：条数异常时（渲染层 FIFO 护栏之外的极端情况）不得溢出视口下沿 */
@@ -2143,14 +2145,15 @@ select.field-input { cursor: pointer; appearance: auto; }
 .toast-close:hover { background: var(--bg-card-hover); color: var(--fg-primary); }
 
 @keyframes toastSlideIn {
-  from { transform: translateX(120%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+  from { transform: translateY(-120%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
 }
 @keyframes toastSlideOut {
   /* v3.5.1 动效审查 H4：原先只有 to 帧，隐式 from 取「未动画的计算态」——
-     入场途中被关闭时动画被整体替换，元素会先瞬跳回 translateX(0) 再滑出。 */
-  from { transform: translateX(0); opacity: 1; }
-  to { transform: translateX(120%); opacity: 0; }
+     入场途中被关闭时动画被整体替换，元素会先瞬跳回 translateY(0) 再滑出。
+     2026-10-15：方向随容器改顶部居中——从上滑入、往上收回。 */
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(-120%); opacity: 0; }
 }
 
 /* ================================================================

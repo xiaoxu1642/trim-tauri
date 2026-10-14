@@ -1366,6 +1366,12 @@
     const regularItems = allItems.filter(i => !FILECLEAN_IDS.includes(i.id) && i.id !== RECYCLE_ID);
     const fileCleanItems = allItems.filter(i => FILECLEAN_IDS.includes(i.id));
     const recycleItems = allItems.filter(i => i.id === RECYCLE_ID);
+    // P2-06/D-02：记录本批「清了之后需要后置动作」的项——档位来自后端按目标路径机械判定
+    // 注入的 postAction（cleanup-postactions.json + check-cleanup-postactions 重算核对）。
+    // 执行回执不带该字段，所以在执行前从扫描缓存收集、完成后与成功项求交再提示。
+    const explorerPickIds = new Set(
+      allItems.filter(i => i.postAction === 'explorer').map(i => i.id)
+    );
     // 回收站是单独的不可逆动作：只要它在场，force 就为真（沿用既有「有确认过就带 force」口径）
     const force = (highRisk.length > 0 || mediumRisk.length > 0 || recycleItems.length > 0);
     // v3.3.0（用户裁定）：执行选项 UI 已移除，固定语义——常规清理**不进回收站、直接永久删**。
@@ -1531,6 +1537,12 @@
         let toastMsg = `清理完成！释放 ${formatSize(freed)} 空间`;
         if (recycledCount > 0) {
           toastMsg += `；另有 ${recycledCount} 项（${formatSize(recycledBytes)}）已移入回收站，清空回收站后才会真正释放`;
+        }
+        // P2-06/D-02：本批含 explorer 后置动作且该项确有成功——在完成提示里声明
+        // 「重启资源管理器后才重建」（图标/缩略图缓存由资源管理器持有，不重启会看到空白图标）。
+        const explorerDone = (result.details || []).some(d => d.status === 'ok' && explorerPickIds.has(d.id));
+        if (explorerDone) {
+          toastMsg += '；图标与缩略图缓存将在重启资源管理器后重建';
         }
         window.app?.toast('success', toastMsg);
         // P3 残留复查提示 + 2026-10-13 失败引导：explorer 等进程占着句柄的文件在

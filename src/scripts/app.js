@@ -186,7 +186,9 @@
     netcheck: ['scripts/netcheck.js'],
     runtimes: ['scripts/runtimes.js'],
     quickcmds: ['scripts/quickcmds-data.js', 'scripts/quickcmds.js'],
-    settings: ['scripts/pathbinding.js', 'scripts/syspanel.js']
+    settings: ['scripts/pathbinding.js'],
+    // Windows设置 页：syspanel.js + 「Windows 更新」三态（走 optimizer.js 的 executeOption；看板渲染依赖 xtable，须前置同注入）。
+    'windows-settings': ['scripts/xtable.js', 'scripts/optimizer.js', 'scripts/syspanel.js']
   };
   // 需要显式调用 init() 的模块：这些文件加载时不会自执行 init。
   // 未列入的是自初始化件（DOMContentLoaded 自执行或纯数据/工具）——再调一次会重复绑定监听器。
@@ -943,20 +945,23 @@
     document.getElementById('btnClearLog')?.addEventListener('click', () => window.logger?.clear?.());
     document.getElementById('btnUsageGuide')?.addEventListener('click', showUsageGuide);
     document.getElementById('btnUsageClose')?.addEventListener('click', closeUsageGuide);
-    // 批次：外部链接（GitHub 主页）—— 走受控 IPC，主进程校验 https
+    // 批次：外部链接（GitHub / AtomGit）—— 走受控 IPC，主进程只放行 https
     // 审查 v2-L8：`openExternal` 返回 Promise，原 `try { ... } catch (_) {}` 只抓同步异常，
     // reject 会静默落到全局 unhandledrejection（只记日志不弹 toast），用户点了没反应。
     // 改成 await + 显式失败反馈，通道缺席也要说清。
-    document.getElementById('btnGitHub')?.addEventListener('click', async () => {
-      if (typeof window.api?.app?.openExternal !== 'function') {
-        window.app?.toast?.('warning', '当前环境不支持打开外部链接');
-        return;
-      }
-      try {
-        await window.api.app.openExternal('https://github.com/xiaoxu1642/Trim');
-      } catch (e) {
-        window.app?.toast?.('error', '打开链接失败：' + (e && e.message ? e.message : e));
-      }
+    [['btnGitHub', 'https://github.com/xiaoxu1642/trim-tauri/issues'],
+     ['btnAtomGit', 'https://atomgit.com/xiaoxiaoxu1642/trim-tauri/issues']].forEach(([id, url]) => {
+      document.getElementById(id)?.addEventListener('click', async () => {
+        if (typeof window.api?.app?.openExternal !== 'function') {
+          window.app?.toast?.('warning', '当前环境不支持打开外部链接');
+          return;
+        }
+        try {
+          await window.api.app.openExternal(url);
+        } catch (e) {
+          window.app?.toast?.('error', '打开链接失败：' + (e && e.message ? e.message : e));
+        }
+      });
     });
     // 123 云盘备用下载渠道 2026-10-06 整链退役（按钮与链接一并删除）。
     const usageBackdrop = document.getElementById('usageBackdrop');
@@ -1039,7 +1044,7 @@
       });
     }
 
-    // v5 P1 电源计划编辑接回：订阅必须在首屏脚本层——syspanel.js 进 settings 页才注入，
+    // v5 P1 电源计划编辑接回：订阅必须在首屏脚本层——syspanel.js 进 Windows 设置页才注入，
     // 等它订阅时主进程发的 intent（首帧后仅一次）早已发完，接不回来（V13）。
     // 收到后转交 syspanel；未加载则切页触发注入，其 init 时从 appState 自取。
     if (window.api?.syspanel?.onEditIntent) {
@@ -1047,7 +1052,7 @@
         if (!intent || !intent.schemeGuid) return;
         appState.pendingPowerEditIntent = intent;
         if (window.syspanel?.onEditIntent) window.syspanel.onEditIntent(intent);
-        else switchPage('settings');
+        else switchPage('windows-settings');
       });
     }
 

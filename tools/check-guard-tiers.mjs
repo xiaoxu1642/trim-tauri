@@ -124,6 +124,7 @@ const MUST_MAIN = [
   'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
   'optimizer_touch_recent', // E10 最近使用写：主窗档
   'optimizer_bcd_enum', // C3 BCD 面板枚举：主窗永劫专项面板消费，档位 MAIN（同 optimizer_list_groups 的 D5 判据）
+  'optimizer_external_scan', // 账外核对（2026-10-15）：只读但只被主窗优化页消费，判 MAIN（同 D5 判据）
   'optimizer_nara_panel', // C3 永劫专项面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同 optimizer_list_groups 的 D5 判据）
   'optimizer_privacy_panel', // WinUtil 借鉴 V3 隐私自护面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同上）
   'optimizer_stale_dismiss', // 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗

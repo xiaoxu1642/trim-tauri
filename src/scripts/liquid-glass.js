@@ -29,13 +29,13 @@
   const BAR_SELECTOR = '.filter-tabs, .maint-tabs, #sidebar';
   const TAB_SELECTOR = '.filter-tab, .maint-tab, .nav-item';
   // 按钮语义名单：决定「谁是按钮」= full 档的指针弹性形变（.lg-elastic）。
-  // 2026-10-14 真机像素实测后，**按钮一律不再写 backdrop-filter**（见 commitGlass 的注释）：
-  // 卸载页同类 .btn-secondary 抢到折射名额的行是 #EEEDED、没抢到的行是 #FDFCFC，差 14 个单位，
-  // 位移贴图会把行分隔线与相邻文字拽进按钮里，而 28 个名额先到先得 ⇒ 同页两个颜色。
-  // 底色从此只由 CSS 的 --lg-glass-floor 自证（机检 check-contrast F1/F6），滤镜不参与可读性。
+  // 2026-10-14 像素实测：位移贴图会把相邻行分隔线与文字拽进元素（同页两个色差 14 个单位）；
+  // 按钮与输入框（2026-10-15 快捷指令搜索框整块发黑，同族）都已退出折射——底色只由 CSS
+  // 的 --lg-glass-floor 自证（机检 check-contrast F1/F6）。
   const BUTTON_SELECTOR = '.btn-primary, .btn-accent, .btn-secondary';
-  // v3 评估 C/L3：输入框与下拉纳入折射体系（field-input 同时挂在 input 与 select 上）。
-  // 归类为 control：有折射、无弹性形变（输入中形变会干扰打字）、无 shimmer
+  // v3 评估 C/L3：输入框与下拉纳入玻璃体系（field-input 同时挂在 input 与 select 上）。
+  // 归类为 control：无折射（2026-10-15 退出，与按钮同族的 backdrop 渲染缺陷）、
+  // 无弹性形变（输入中形变会干扰打字）、无 shimmer
   const INPUT_SELECTOR = '.field-input';
   // 折射池全量扫描目标（按钮 + 输入控件 + 浮层）
   const REFRACT_SELECTOR = BUTTON_SELECTOR + ', ' + INPUT_SELECTOR;
@@ -465,11 +465,11 @@
     if (glassStates.size >= GLASS_STATES_MAX) return; // 容量闸门（见 GLASS_STATES_MAX 注释）
     const el = m.el;
     const overBudget = !withinRefractBudget(m.w, m.h, m.radius);
-    // kind==='button' 永远不进折射/磨砂：见 BUTTON_SELECTOR 的 2026-10-14 像素实测。
-    // 省下的名额全部给浮层与输入框（它们才是「要看穿身后内容」的那一层）。
-    const wantRefract = m.kind !== 'button' && mode !== 'frost' && mode !== 'off' && refractionSupported && !overBudget && refractCount < MAX_REFRACT;
+    // kind==='button'/'control' 永远不进折射（两次真机实测见 BUTTON_SELECTOR 注释）；
+    // 折射名额全留给浮层——只有它们「要看穿身后内容」，其余走纯磨砂。
+    const wantRefract = m.kind === 'floating' && mode !== 'frost' && mode !== 'off' && refractionSupported && !overBudget && refractCount < MAX_REFRACT;
     const st = { kind: m.kind, w: m.w, h: m.h, radius: m.radius, blur: m.blur, refract: false };
-    if (m.kind === 'button') {
+    if (m.kind === 'button' || m.kind === 'control') {
       st.noFilter = true;
     } else if (wantRefract) {
       const id = getFilterId(mode, m.w, m.h, st.radius);
@@ -860,6 +860,7 @@
     const mount = isSidebarBar(bar) ? (bar.querySelector('.nav-scroll') || bar) : bar;
     mount.appendChild(thumb);
     state.thumb = thumb;
+    state.mount = mount; // placeThumb 判「active 是否在本包含块内」用
     return thumb;
   }
 
@@ -886,9 +887,18 @@
 
   function placeThumb(bar, state, animate) {
     const thumb = state.thumb;
+    if (!thumb) return;
     const tab = findActiveTab(bar);
-    if (!thumb || !tab) return;
     const vertical = isSidebarBar(bar);
+    // 2026-10-15（目检：「设置」页底部多出游离玻璃块）：「设置」在 footer、不在滑块
+    // 包含块 .nav-scroll 内，offsetTop 按 .sidebar 口径算出的越界坐标会把滑块摆到列表
+    // 底部并撑出可滚动溢出。目标不在包含块里 = 无位可贴：隐藏；回到普通项时恢复。
+    if (vertical && (!tab || !(state.mount || bar).contains(tab))) {
+      thumb.style.display = 'none';
+      return;
+    }
+    if (!tab) return;
+    thumb.style.display = '';
     const x = tab.offsetLeft;
     const y = tab.offsetTop;
     const w = tab.offsetWidth;
