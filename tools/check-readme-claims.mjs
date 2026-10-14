@@ -69,16 +69,17 @@ const groupOrder = optJs.match(/const GROUP_FALLBACK = \{[\s\S]*?default:\s*\[([
 const groupCount = groupOrder ? groupOrder[1].split(',').filter((s) => s.trim()).length : NaN;
 const hideOnSsd = optJs.match(/const HIDE_ON_SSD = \[([^\]]*)\]/);
 const hideOnSsdCount = hideOnSsd ? hideOnSsd[1].split(',').filter((s) => s.trim()).length : NaN;
-const virtualBlk = optJs.match(/const VIRTUAL_GROUPS = \{([\s\S]*?)\n  \};/);
-const virtualCards = virtualBlk ? (virtualBlk[1].match(/^    [a-zA-Z_]+: \{/gm) ?? []).length : NaN;
-const virtualRunIds = virtualBlk ? (virtualBlk[1].match(/runId: '/g) ?? []).length : NaN;
-// 前端列表可见数：被聚合的 runId 摘掉、虚拟卡插回，再减 SSD 隐藏项
-const visibleSsd = optTotal - virtualRunIds + virtualCards - hideOnSsdCount;
+// 2026-10-15：原 VIRTUAL_GROUPS 聚合层退役，三项 Windows 更新迁往「Windows设置」页
+// （syspanel.js 三卡）——可见口径从「- runId + 卡数」改为「- 迁出项数」。
+const movedBlk = optJs.match(/const MOVED_TO_WIN_SETTINGS = new Set\(\[([\s\S]*?)\]\)/);
+const movedCount = movedBlk ? (movedBlk[1].match(/'[a-z0-9_]+'/g) ?? []).length : NaN;
+// 前端列表可见数：迁出项与 SSD 隐藏项都不在优化中心列表里
+const visibleSsd = optTotal - movedCount - hideOnSsdCount;
 
 check(Number.isFinite(groupCount), 'optimizer.js GROUP_FALLBACK.default 可解析', `展示分组 ${groupCount}`);
-check(Number.isFinite(hideOnSsdCount) && Number.isFinite(virtualCards) && Number.isFinite(virtualRunIds),
-  'optimizer.js HIDE_ON_SSD / VIRTUAL_GROUPS 可解析',
-  `HIDE_ON_SSD=${hideOnSsdCount} 虚拟卡=${virtualCards} 聚合runId=${virtualRunIds}`);
+check(Number.isFinite(hideOnSsdCount) && Number.isFinite(movedCount),
+  'optimizer.js HIDE_ON_SSD / MOVED_TO_WIN_SETTINGS 可解析',
+  `HIDE_ON_SSD=${hideOnSsdCount} 迁出项=${movedCount}`);
 
 console.log(`真源读数：清理项=${cleanupTotal} 优化项=${optTotal} 高风险=${optHigh} 高风险无还原=${optHighNoRestore} 展示分组=${groupCount} SSD可见=${visibleSsd}\n`);
 
