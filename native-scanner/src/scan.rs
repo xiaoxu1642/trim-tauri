@@ -2270,6 +2270,16 @@ fn is_reparse_target(_p: &Path) -> bool {
     false
 }
 
+/// 删除结果行的 `mode` 字面量（R4，2026-10-15）——语义见各 `del_item` 调用点。
+/// **变更必须同步** `tools/fixtures/finder-delete-modes.json`（由
+/// `tools/gen-finder-delete-modes.mjs` 生成）与消费侧 `src-tauri/src/commands/finder.rs`
+/// （`classify_delete_result_mode`）——跨 crate 不能共享代码，靠夹具字节对齐；
+/// 本文件 `mod tests` 的夹具对拍会在改名不同步时当场判红。
+const MODE_RECYCLED: &str = "recycled";
+const MODE_REJECTED: &str = "rejected";
+const MODE_UNRECOVERABLE_NAME: &str = "unrecoverable-name";
+const MODE_TRASH_FAILED: &str = "trash-failed";
+
 /// 批量删除（文件或目录）：默认移入回收站，替代原 PowerShell Remove-Item 硬删除。
 /// 审查v4-L4：路径保留原始 OsString，保护判定与输出展示用 lossy 字符串即可。
 /// `protect_json` = `--protect` 的 JSON 文本；`None` = 用 default_from_env 兜底。
@@ -2287,17 +2297,17 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
         // 由上层数出「N 项因文件名无法处理而未删」。
         if has_lossy_path(p) {
             fail += 1;
-            del_item(sink, "delresult", p, kind, "fail", 0, "文件名含无法无损解码的字符，保护清单判定不可靠，已拒绝删除", "unrecoverable-name");
+            del_item(sink, "delresult", p, kind, "fail", 0, "文件名含无法无损解码的字符，保护清单判定不可靠，已拒绝删除", MODE_UNRECOVERABLE_NAME);
             continue;
         }
         if is_protected_path(&sp.to_string_lossy(), protect_json) {
             fail += 1;
-            del_item(sink, "delresult", p, kind, "fail", 0, "受保护的系统路径，已拒绝", "rejected");
+            del_item(sink, "delresult", p, kind, "fail", 0, "受保护的系统路径，已拒绝", MODE_REJECTED);
             continue;
         }
         if is_reparse_target(p) {
             fail += 1;
-            del_item(sink, "delresult", p, kind, "fail", 0, "目标是链接/junction（reparse point），已拒绝", "rejected");
+            del_item(sink, "delresult", p, kind, "fail", 0, "目标是链接/junction（reparse point），已拒绝", MODE_REJECTED);
             continue;
         }
         let sz = if kind == "dir" {
@@ -2311,13 +2321,13 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
             Ok(()) => {
                 ok += 1;
                 freed += sz;
-                del_item(sink, "delresult", p, kind, "ok", sz, "已移入回收站", "recycled");
+                del_item(sink, "delresult", p, kind, "ok", sz, "已移入回收站", MODE_RECYCLED);
             }
             // M3（v3.6.5）N-5：回收站失败即视为删除失败——文件仍在原位，freed 计 0，
             // 真实原因随结果行回传，绝不静默转为永久删除。
             Err(e) => {
                 fail += 1;
-                del_item(sink, "delresult", p, kind, "fail", 0, &e, "trash-failed");
+                del_item(sink, "delresult", p, kind, "fail", 0, &e, MODE_TRASH_FAILED);
             }
         }
     }
@@ -2406,6 +2416,26 @@ mod tests {
         );
         // 非尾部组件的点不得受影响（逐组件裁剪是另一个语义，刻意不做）
         assert_eq!(lexically_normalize(r"C:\Foo.\Bar"), r"c:\foo.\bar");
+    }
+
+    /// R4（2026-10-15）：删除结果行的 mode 字面量与共享夹具一致——本文件 ↔ src-tauri 的
+    /// `commands/finder.rs` 分属两个 crate，不共享判定代码，靠夹具**字节**对齐
+    /// （§4.1「形似不合」）：改 mode 字面量而不同步夹具，在这里当场判红。
+    #[test]
+    fn 删除结果分档字面量与共享夹具一致() {
+        let fx = include_str!("../../tools/fixtures/finder-delete-modes.json");
+        for m in [MODE_RECYCLED, MODE_REJECTED, MODE_UNRECOVERABLE_NAME, MODE_TRASH_FAILED] {
+            assert!(
+                fx.contains(&format!("\"{m}\"")),
+                "共享夹具缺 mode 字面量「{m}」——产出侧与消费侧已经漂了"
+            );
+        }
+        // 反向：夹具登记的档位值必须恰好四个（多/少一个都说明夹具被改过而本侧没跟上）
+        let buckets = fx.matches("\"ok\"").count()
+            + fx.matches("\"busy\"").count()
+            + fx.matches("\"refused\"").count()
+            + fx.matches("\"name\"").count();
+        assert_eq!(buckets, 4, "夹具档位值数量异常（{buckets} ≠ 4）——夹具改动没同步到本文件");
     }
 
     use super::*;

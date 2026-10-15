@@ -444,6 +444,8 @@ pub fn realtime_report_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
     guard::guard_readonly(&window)?;
     let dir = ensure_report_dir()?;
     let mut removed = 0usize;
+    let mut gone = 0usize;
+    let mut denied = 0usize;
     let mut failed = 0usize;
     // 审查 v2-F9：同上 —— 清空是「全部删完」的强断言，有一条失败就不能报成功。
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -455,16 +457,33 @@ pub fn realtime_report_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Res
             match std::fs::remove_file(entry.path()) {
                 Ok(()) => removed += 1,
                 Err(e) => {
-                    failed += 1;
+                    // R4（2026-10-15）：失败按因分档（共享判据 classify_delete_error）。
+                    // 不分档的话权限不足会被笼统说成「（可能被占用）」——提权对后者没用、
+                    // 对前者有用，用户拿到的下一步动作是错的。
+                    match crate::engine::native::classify_delete_error(&e) {
+                        crate::engine::native::DeleteFailureKind::Denied => denied += 1,
+                        crate::engine::native::DeleteFailureKind::Gone => gone += 1,
+                        _ => failed += 1,
+                    }
                     log::write_log("warn", &format!("清空网速报告失败: {name} -> {e}"));
                 }
             }
         }
     }
-    if failed > 0 {
+    if failed > 0 || denied > 0 {
+        let mut parts = vec![format!("已删除 {removed} 条")];
+        if gone > 0 {
+            parts.push(format!("{gone} 条在删除时已不存在"));
+        }
+        if failed > 0 {
+            parts.push(format!("{failed} 条被占用未删"));
+        }
+        if denied > 0 {
+            parts.push(format!("{denied} 条因权限不足未删（需管理员）"));
+        }
         return Ok(serde_json::json!({
-            "success": false, "removed": removed, "failed": failed,
-            "message": format!("已删除 {removed} 条，{failed} 条失败（可能被占用）"),
+            "success": false, "removed": removed, "failed": failed + denied,
+            "message": parts.join("，"),
         }));
     }
     Ok(serde_json::json!({ "success": true, "removed": removed, "failed": 0 }))

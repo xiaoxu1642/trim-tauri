@@ -1120,7 +1120,15 @@
           ? `删除完成！${recycledCount} 项已移入回收站（共 ${freedText}，清空回收站后释放）`
           : `删除完成！共 ${freedText}`);
       }
-      if (Number(data.failed) > 0) window.app?.toast?.('warning', `${data.failed} 项删除失败（可能被占用）`);
+      // R4（2026-10-15）：失败按因分档——受保护/链接拒绝与文件名异常此前被并进
+      // 「（可能被占用）」一句里，用户去关程序而真因在保护清单。data.failed 是总失败数
+      // （= 三档之和，后端保证），不单独报，避免同一批弹两遍。
+      const busyCount = Number(data.failedBusy) || 0;
+      const refusedCount = Number(data.failedRefused) || 0;
+      const nameCount = Number(data.failedName) || 0;
+      if (busyCount > 0) window.app?.toast?.('warning', `${busyCount} 项删除失败（可能被占用）`);
+      if (refusedCount > 0) window.app?.toast?.('warning', `${refusedCount} 项未删除：位于受保护路径或为链接/junction，已按安全清单拒绝`);
+      if (nameCount > 0) window.app?.toast?.('warning', `${nameCount} 项未删除：文件名无法无损处理，安全判定不可靠`);
       // 预检剔除的项此前不上屏：纯目录批次（默认勾选的折叠父目录若被误跳）会
       // 「全程无声」，用户以为删完了。skipped / unhandled 必须显式说出来。
       const skippedCount = Number(data.skipped) || 0;

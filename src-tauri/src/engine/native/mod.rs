@@ -12,6 +12,7 @@ pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute, find_ru
 mod common;
 pub(crate) use common::to_wide;
 pub(crate) use common::wide_str;
+pub(crate) use common::{classify_delete_error, DeleteFailureKind};
 mod contextmenu;
 pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle};
 mod diagnostics;

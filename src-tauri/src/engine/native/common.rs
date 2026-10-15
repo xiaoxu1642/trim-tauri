@@ -105,6 +105,40 @@ pub(super) fn collect_peripheral_backup_files(dirs: &[std::path::PathBuf]) -> Ve
     files
 }
 
+/// 删除失败原因分档（R4，2026-10-15）——把 io::Error 折成四档，供清理执行链与网速报告
+/// 清空链共用（§5.16/N6：判据只此一份，调用点各写一遍 match 就是第二份实现）。
+///
+/// 分码口径与 `pending_delete.rs::classify_pending_delete_error` 同源（那边的注释写明
+/// 「ACCESS_DENIED 与 SHARING_VIOLATION 必须分开说：前者提权重试有意义，后者提权没用」）。
+/// 注意**不能只看 `ErrorKind`**：Windows 上 SHARING_VIOLATION(32) 与 ACCESS_DENIED(5)
+/// 都被 std 折成 `PermissionDenied`，只按 kind 判会把两者混回去——必须读 raw code。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteFailureKind {
+    /// ERROR_ACCESS_DENIED(5)：权限不足（提权重试可能有效）
+    Denied,
+    /// ERROR_SHARING_VIOLATION(32)/ERROR_LOCK_VIOLATION(33)：被占用（关程序后重试）
+    Busy,
+    /// ERROR_FILE_NOT_FOUND(2)/ERROR_PATH_NOT_FOUND(3)：删除时已消失（无需重试）
+    Gone,
+    /// 其余：不猜（计数进「失败」总账）
+    Other,
+}
+
+pub(crate) fn classify_delete_error(e: &std::io::Error) -> DeleteFailureKind {
+    match e.raw_os_error() {
+        Some(5) => DeleteFailureKind::Denied,
+        Some(32) | Some(33) => DeleteFailureKind::Busy,
+        Some(2) | Some(3) => DeleteFailureKind::Gone,
+        // Windows 文件操作错误恒带 raw code，这里只是拿不到 code 时的近似：
+        // 宁可把权限/不存在分开，也别再混回「被占用」。
+        _ => match e.kind() {
+            std::io::ErrorKind::PermissionDenied => DeleteFailureKind::Denied,
+            std::io::ErrorKind::NotFound => DeleteFailureKind::Gone,
+            _ => DeleteFailureKind::Other,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +157,31 @@ mod tests {
         let old = String::from_utf16_lossy(&buf);
         assert_ne!(old, "explorer.exe", "旧写法若也相等，本用例失去对照意义");
         assert!(old.starts_with("explorer.exe\u{0}"));
+    }
+
+    /// R4（2026-10-15）：删除失败分档把「权限 / 占用 / 已消失」分开 —— 关键是 5 与 32
+    /// 必须分开（提权对前者有用、对后者没用）；而 std 把两者的 kind 都折成 PermissionDenied，
+    /// 所以先钉「只看 kind 判不出差异」这个前提，再钉 raw code 分档。
+    #[test]
+    fn delete_error_classification_splits_denied_from_busy() {
+        use super::DeleteFailureKind::*;
+        let w = |code: i32| classify_delete_error(&std::io::Error::from_raw_os_error(code));
+        // 前提（采集）：32 与 5 的 kind 相同 —— 只看 kind 的实现必然把两者混回去
+        assert_eq!(
+            std::io::Error::from_raw_os_error(32).kind(),
+            std::io::Error::from_raw_os_error(5).kind(),
+            "前提变了：32 的 kind 不再等于 5，本判据的存在理由需要复核"
+        );
+        // 判定：四个码各归各档
+        assert_eq!(w(5), Denied, "ACCESS_DENIED 是权限不足");
+        assert_eq!(w(32), Busy, "SHARING_VIOLATION 是占用（不是权限）");
+        assert_eq!(w(33), Busy, "LOCK_VIOLATION 与共享冲突同族");
+        assert_eq!(w(2), Gone, "FILE_NOT_FOUND：删除时已消失");
+        assert_eq!(w(3), Gone, "PATH_NOT_FOUND：删除时已消失");
+        assert_eq!(w(145), Other, "未映射码不猜");
+        // 兜底近似（raw code 拿不到时；Windows 上实际不可达）
+        assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::PermissionDenied, "x")), Denied);
+        assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::NotFound, "x")), Gone);
+        assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::TimedOut, "x")), Other);
     }
 }

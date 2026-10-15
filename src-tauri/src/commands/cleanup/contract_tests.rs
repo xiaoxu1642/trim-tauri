@@ -355,7 +355,7 @@ fn js_num_str(n: f64) -> String {
         assert!(
             !br.contains("failed += 1"),
             "protect 分支又给 failed 计数了 —— 那就是「被占用」，\
-             渲染层会弹「关闭相关程序后重试」的误导提示（cleanup.js:1274）: {br}"
+             渲染层会弹「关闭相关程序后重试」的误导提示（`cleanup.js` 的 `offerCleanupRetryPanel`）: {br}"
         );
 
         // ② 必须留痕。这是全仓唯一永久删除链的安全闸门在动作，不是用户的操作问题。
@@ -380,6 +380,33 @@ fn js_num_str(n: f64) -> String {
             code.contains("classify_outcome(\n            &outcome,"),
             "classify_outcome 的调用点不见了 —— 判定与接线脱钩"
         );
+    }
+
+    /// R3/R4（2026-10-15）：失败分档与只读位重试的**接线**钉桩。
+    ///
+    /// 与上一条同理由：分档正确性由纯函数用例钉住、只读位行为由端到端用例钉住，
+    /// 但「循环里的 Err 分支把错误往哪个计数器放」「清位重试还在不在」这两件接线
+    /// 的事，行为测试够不到（protect 全局态污染 + 真实共享冲突难以稳定复现）。
+    #[test]
+    fn 删除失败分档与只读重试的接线在位() {
+        let code = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+        // ① Err 分支必须经共享判据分档（并回 failed 独吞 = 权限问题又被说成「被占用」）
+        assert!(
+            code.contains("classify_delete_error(&e)"),
+            "删除失败的 Err 分支没走共享分档判据（denied/gone 会被并回 failed）"
+        );
+        // ② 只读位重试：清位 + 二次删除必须同在（缺任一 = 只读文件重回「被占用」形态）
+        assert!(code.contains("perm.set_readonly(false)"), "清只读位不见了（R3 回归）");
+        assert_eq!(
+            code.matches("std::fs::remove_file(path)").count(),
+            2,
+            "删除循环里必须恰好两次 remove_file(path)：一次原删、一次清位后重试；\
+             次数漂移说明重试语义被改动"
+        );
+        // ③ 两个新档必须以独立字段外发（渲染层按字段分档提示）
+        for field in ["\"denied\": denied", "\"gone\": gone"] {
+            assert!(code.contains(field), "details 缺独立字段 {field}");
+        }
     }
 
     /// 2026-10-04 磁盘清理审计 §4.6：契约表查询不许有「取不到就挑个默认值」的形态。

@@ -632,19 +632,31 @@ pub async fn finder_delete<R: tauri::Runtime>(
     let mut success = 0usize;
     let mut failed = 0usize;
     let mut recycled = 0usize;
+    // R4（2026-10-15）：失败按因分档——受保护/链接拒绝（rejected）与文件名异常
+    // （unrecoverable-name）不许再冒充「可能被占用」。子集计数：failed 仍是总失败数，
+    // skipped 的口径（safe_total - success - failed）依赖它。
+    let mut failed_busy = 0usize;
+    let mut failed_refused = 0usize;
+    let mut failed_name = 0usize;
     for d in &details {
         total_freed += js_uint(d.get("freed"));
+        let mode = d.get("mode").and_then(|m| m.as_str()).unwrap_or("");
         if d.get("status").and_then(|s| s.as_str()) == Some("ok") {
             success += 1;
-            if d.get("mode").and_then(|m| m.as_str()) == Some("recycled") {
+            if classify_delete_result_mode(mode) == "ok" {
                 recycled += 1;
             }
         } else {
             failed += 1;
-            // 原生删除侧也有一道同名闸门（文件名无法无损表示 ⇒ 保护清单判定不可靠）；
-            // 走到这里说明主侧漏判，仍要计进 unhandled 而不是只算「失败」
-            if d.get("mode").and_then(|m| m.as_str()) == Some("unrecoverable-name") {
-                unhandled += 1;
+            match classify_delete_result_mode(mode) {
+                "refused" => failed_refused += 1,
+                "name" => {
+                    // 原生删除侧也有一道同名闸门（文件名无法无损表示 ⇒ 保护清单判定不可靠）；
+                    // 走到这里说明主侧漏判，仍要计进 unhandled 而不是只算「失败」
+                    failed_name += 1;
+                    unhandled += 1;
+                }
+                _ => failed_busy += 1,
             }
         }
     }
@@ -689,6 +701,10 @@ pub async fn finder_delete<R: tauri::Runtime>(
             "totalFreed": total_freed,
             "success": success,
             "failed": failed,
+            // R4（2026-10-15）：失败分档子集（三者之和 = failed）；渲染层按档提示
+            "failedBusy": failed_busy,
+            "failedRefused": failed_refused,
+            "failedName": failed_name,
             "skipped": skipped,
             "unhandled": unhandled,
             "recycled": recycled,
@@ -755,6 +771,21 @@ fn run_delete_preflight(valid_safe: Vec<SnapEntry>) -> (Vec<SnapEntry>, usize) {
     (preflight, unhandled)
 }
 
+/// 原生删除结果行的 `mode` → 分档（R4，2026-10-15）。
+/// 产出侧在 `native-scanner/src/scan.rs`（跨 crate，不能共享代码）——两级各读同一份
+/// 夹具字节（`tools/fixtures/finder-delete-modes.json`），由两侧各自的测试独立对拍：
+/// 产出侧断「delete() 写的字面量就是夹具登记的 mode」，消费侧断「本函数的档位与夹具
+/// 一致」。判定实现不共享、样本共享（§4.1「形似不合」）。
+fn classify_delete_result_mode(mode: &str) -> &'static str {
+    match mode {
+        "recycled" => "ok",
+        "rejected" => "refused",
+        "unrecoverable-name" => "name",
+        // "trash-failed" 及未来未知值：按回收站失败处理（最保守的叙述——不冒领
+        // 「受保护拒绝」或「文件名问题」这两个有专门出路的档）
+        _ => "busy",
+    }
+}
 
 // ==================== 删除清单（共享存储见 engine::delete_manifest） ====================
 
@@ -1099,5 +1130,34 @@ mod tests {
         assert_eq!(path_key(r"C:\A\B\..\C"), path_key("C:/A/C"));
         assert_eq!(path_key("C:/A/B/"), path_key(r"c:\a\b"));
         assert_ne!(path_key(r"C:\AB"), path_key(r"C:\A\B"));
+    }
+
+    /// R4（2026-10-15）：失败分档必须与共享夹具一致（跨 crate 共享的是夹具**字节**，
+    /// 判定两级各自独立实现），且三个分档字段真的被渲染层消费——字段名写错 =
+    /// 「分档了但没人用」，静默回到「只报总失败数」。
+    #[test]
+    fn 删除失败分档_与共享夹具及渲染层消费面一致() {
+        let fx = include_str!("../../../tools/fixtures/finder-delete-modes.json");
+        let v: Value = serde_json::from_str(fx).expect("共享夹具解析失败");
+        let modes = v.get("modes").and_then(|m| m.as_object()).expect("夹具缺 modes 表");
+        assert_eq!(modes.len(), 4, "夹具登记的 mode 数与产出侧字面量数不符（改一侧必须两侧同改）");
+        let mut ok_buckets = 0usize;
+        for (mode, bucket) in modes {
+            let expect = bucket.as_str().unwrap_or("");
+            assert_eq!(
+                classify_delete_result_mode(mode),
+                expect,
+                "mode「{mode}」的分档与共享夹具不一致"
+            );
+            if expect == "ok" {
+                ok_buckets += 1;
+            }
+        }
+        assert_eq!(ok_buckets, 1, "夹具必须恰好一个 ok 档（已移入回收站）");
+        // 渲染层消费面：分档字段名必须与 finder.js 的取数一致（否则分档白做）
+        let js = include_str!("../../../src/scripts/finder.js");
+        for field in ["data.failedBusy", "data.failedRefused", "data.failedName"] {
+            assert!(js.contains(field), "finder.js 没有消费分档字段 {field}");
+        }
     }
 }

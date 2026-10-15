@@ -473,6 +473,10 @@ struct OutcomeCounters {
     deleted: i64,
     /// 文件被占用（真·用户侧问题：关掉占用程序后可重试）
     failed: i64,
+    /// 权限不足（ACCESS_DENIED）——R4（2026-10-15）从 `failed` 拆出：提权重试有意义的方向
+    denied: i64,
+    /// 删除时已不存在（NOT_FOUND）——R4（2026-10-15）从 `failed` 拆出：无需重试的方向
+    gone: i64,
     /// 被保护清单拒绝（安全闸门正常工作；关任何程序都不会变可删）
     protected_blocked: i64,
     too_new: i64,
@@ -485,14 +489,16 @@ struct OutcomeCounters {
 
 /// 由计数与三段后缀推出 `(status, message)`。
 ///
-/// 判据的历史包袱都在这里，两条不可省：
+/// 判据的历史包袱都在这里，逐条不可省：
 /// - **P0 fail-closed（2026-09-27）**：存在未解析变量且一无所删时不得报「成功 0 删」——
 ///   那正是「扫描命中、执行 0 删」静默失效的形态。
 /// - **P0-M5**：`too_new` 同理，「全都是太新文件」必须显式说成 skip。
 /// - **§4.1（2026-10-04）**：`protected_blocked` 必须与 `failed` 分开。
 ///   两者混在一起会让这次拦截在界面上长得跟「文件被占用」一模一样，而渲染层的
-///   toast（cleanup.js:1274）会据此提示「可关闭相关程序或重启后再试」——真因是
-///   这些目标本来就在保护清单里，那个建议永远无效。
+///   清理失败引导（`cleanup.js` 的 `offerCleanupRetryPanel`）会据此提示
+///   「可关闭相关程序或重启后再试」——真因是这些目标本来就在保护清单里，那个建议永远无效。
+/// - **R4（2026-10-15）**：`denied` / `gone` 同理拆出——权限不足的出路是提权、
+///   「已不存在」根本无需处理，两者都不该被说成「被占用」。
 fn classify_outcome(
     c: &OutcomeCounters,
     too_new_suffix: &str,
@@ -518,6 +524,14 @@ fn classify_outcome(
     if nothing_done && c.lossy > 0 {
         return ("skip", format!("{} 个文件名无法无损解码，保护判定不可靠，已拒绝删除", c.lossy));
     }
+    // R4（2026-10-15）：权限不足与「已不存在」是两档独立的残留结局，都按 skip 出口
+    // 说清自己的下一步（前者提权重试、后者无需处理），不许落回「N 个被占用」。
+    if nothing_done && c.denied > 0 {
+        return ("skip", format!("{} 个文件因权限不足（拒绝访问）未删，提权重试可能有效", c.denied));
+    }
+    if nothing_done && c.gone > 0 {
+        return ("skip", format!("{} 个文件在删除时已不存在（无需处理）", c.gone));
+    }
     let mut suffix = too_new_suffix.to_string();
     if !excl_suffix.is_empty() {
         suffix.push_str(excl_suffix);
@@ -535,12 +549,21 @@ fn classify_outcome(
     if c.lossy > 0 {
         suffix = format!("{suffix}；{} 个文件名无法无损解码已跳过", c.lossy);
     }
+    // R4（2026-10-15）：两个新档的 partial 后缀（与 protected_blocked 同一姿势：
+    // 独立出现、不许被「被占用」那个数吞掉）。
+    if c.denied > 0 {
+        suffix = format!("{suffix}；{} 个因权限不足未删（需管理员）", c.denied);
+    }
+    if c.gone > 0 {
+        suffix = format!("{suffix}；{} 个在删除时已不存在", c.gone);
+    }
     if c.to_recycle {
         ("recycle", format!("待移入回收站（{} 个文件）{suffix}", c.deleted))
-    } else if c.failed == 0 {
+    } else if c.failed == 0 && c.denied == 0 {
         ("ok", format!("已清理 {} 个文件{suffix}", c.deleted))
     } else if c.deleted > 0 {
-        ("partial", format!("已清理 {} 个文件，{} 个被占用{suffix}", c.deleted, c.failed))
+        let busy = if c.failed > 0 { format!("，{} 个被占用", c.failed) } else { String::new() };
+        ("partial", format!("已清理 {} 个文件{busy}{suffix}", c.deleted))
     } else {
         ("fail", format!("已清理 0 个文件，{} 个被占用{suffix}", c.failed))
     }
@@ -1041,6 +1064,11 @@ fn cleanup_execute_with_backup_root(
 let mut freed = 0i64;
     let mut deleted = 0i64;
     let mut failed = 0i64;
+    // R4（2026-10-15）：失败按因分档 —— 权限不足与「删除时已不存在」不再并进 `failed`
+    // （并进去会以「N 个被占用」报给用户：前者该提权、后者无需处理，两个下一步动作全错）。
+    // 判据走共享函数 `classify_delete_error`（engine/native/common.rs，网速报告清空链同款）。
+    let mut denied = 0i64;
+    let mut gone = 0i64;
     // 受保护路径的拒绝**单独计数**（2026-10-04 审计 §4.1）。
     //
     // 原先它与「文件被占用」共用 `failed`，后果全部是用户可见的错误信息：
@@ -1102,14 +1130,37 @@ let mut freed = 0i64;
                 } else {
                     backup_skipped += 1;
                 }
-                // 永久删除
-                match std::fs::remove_file(path) {
+                // 永久删除。R3（2026-10-15）：只读文件撞 PermissionDenied 时清一次只读位、
+                // 重试一次 —— 扫描侧 `file_deletable` 只做独占探测不查属性位，只读文件照样
+                // 进可删集；不清位的话失败会被归成「被占用」，用户去关程序永远关不掉
+                // （PS 轨 `Remove-Item -Force` 本就清只读位，是迁移时丢的语义）。
+                // 只对已过 is_path_protected 的目标动属性，且不做第二次兜底。
+                let mut result = std::fs::remove_file(path);
+                if let Err(e) = &result {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        if let Ok(meta) = std::fs::metadata(path) {
+                            let mut perm = meta.permissions();
+                            if perm.readonly() {
+                                perm.set_readonly(false);
+                                if std::fs::set_permissions(path, perm).is_ok() {
+                                    result = std::fs::remove_file(path);
+                                }
+                            }
+                        }
+                    }
+                }
+                match result {
                     Ok(()) => {
                         freed += *size as i64;
                         deleted += 1;
                     }
-                    Err(_) => {
-                        failed += 1;
+                    Err(e) => {
+                        // R4（2026-10-15）：失败按因分档（清位后仍失败的真权限问题归 denied）。
+                        match classify_delete_error(&e) {
+                            DeleteFailureKind::Denied => denied += 1,
+                            DeleteFailureKind::Gone => gone += 1,
+                            _ => failed += 1,
+                        }
                     }
                 }
             }
@@ -1120,6 +1171,8 @@ let mut freed = 0i64;
         let outcome = OutcomeCounters {
             deleted,
             failed,
+            denied,
+            gone,
             protected_blocked,
             too_new,
             excluded,
@@ -1174,6 +1227,10 @@ let mut freed = 0i64;
             // 「关闭相关程序后重试」的误导提示（审计 §4.1）。渲染层目前不消费这个
             // 字段，它先在数据层备着，等前端要单独呈现时不必再改引擎。
             "protectedBlocked": protected_blocked,
+            // R4（2026-10-15）：两个新档同样独立外发、不进 residual（denied 的出路是
+            // 提权、gone 无需处理，都不是「重试」）；渲染层按字段分档提示。
+            "denied": denied,
+            "gone": gone,
             "lossySkipped": lossy,
             "tooNew": too_new, "ruleVer": rule_ver,
         }));
@@ -1682,7 +1739,8 @@ mod cleanup_engine_contract_tests {
     /// 2026-10-04 审计 §4.1：受保护路径的拒绝必须**独立记账、独立措辞、不进 residual**。
     ///
     /// 修前它与「文件被占用」共用 `failed`，于是界面上是「N 个被占用」、
-    /// `residual > 0` 触发渲染层 toast「可关闭相关程序或重启后再试」（cleanup.js:1274）
+    /// `residual > 0` 触发渲染层清理失败引导（`cleanup.js` 的 `offerCleanupRetryPanel`，
+    /// 兜底 toast 写「可关闭相关程序或重启后再试」）
     /// ——而真因是这些目标本来就在保护清单里，**关任何程序都不会让它们变成可删**。
     ///
     /// 为什么测的是 `classify_outcome` 而不是 `cleanup_execute`：后者内部调
@@ -1694,6 +1752,8 @@ mod cleanup_engine_contract_tests {
         let base = |deleted, failed, protected| OutcomeCounters {
             deleted,
             failed,
+            denied: 0,
+            gone: 0,
             protected_blocked: protected,
             too_new: 0,
             excluded: 0,
@@ -1743,6 +1803,47 @@ mod cleanup_engine_contract_tests {
         let (st, msg) = classify_outcome(&base(9, 0, 0), "", "", "");
         assert_eq!(st, "ok");
         assert!(!msg.contains("受保护") && !msg.contains("被占用"), "成功时不得出现拒绝字样: {msg}");
+    }
+
+    /// R4（2026-10-15）：权限不足与「已不存在」不许再并回「被占用」——三者的下一步动作
+    /// 都不同（权限→提权、占用→关程序、已消失→无需处理），混档会让界面给错建议。
+    #[test]
+    fn 权限与已不存在不与被占用混档() {
+        let c = |deleted: i64, failed: i64, denied: i64, gone: i64| OutcomeCounters {
+            deleted,
+            failed,
+            denied,
+            gone,
+            protected_blocked: 0,
+            too_new: 0,
+            excluded: 0,
+            lossy: 0,
+            unresolved: Vec::new(),
+            to_recycle: false,
+        };
+        // ① 全被权限拒绝 ⇒ skip，措辞指向权限（关程序没有出路，提权才有）
+        let (st, msg) = classify_outcome(&c(0, 0, 3, 0), "", "", "");
+        assert_eq!(st, "skip");
+        assert!(msg.contains("权限不足"), "措辞必须指向权限问题: {msg}");
+        assert!(!msg.contains("被占用"), "权限问题不得说成被占用: {msg}");
+        // ② 全部已不存在 ⇒ skip 且明说无需处理
+        let (st, msg) = classify_outcome(&c(0, 0, 0, 2), "", "", "");
+        assert_eq!(st, "skip");
+        assert!(msg.contains("已不存在"), "{msg}");
+        assert!(!msg.contains("被占用"), "已消失不得说成被占用: {msg}");
+        // ③ 部分成功 + 权限拒绝 ⇒ partial（有未删项就不许报 ok），权限数独立出现
+        let (st, msg) = classify_outcome(&c(5, 0, 2, 0), "", "", "");
+        assert_eq!(st, "partial", "有未删项时 ok 会把条目从列表里静默摘走: {msg}");
+        assert!(msg.contains("2 个因权限不足未删"), "{msg}");
+        // ④ 三因同现：三个数各自出现，谁也不吞谁
+        let (st, msg) = classify_outcome(&c(5, 2, 1, 1), "", "", "");
+        assert_eq!(st, "partial");
+        assert!(msg.contains("2 个被占用"), "{msg}");
+        assert!(msg.contains("1 个因权限不足未删"), "{msg}");
+        assert!(msg.contains("1 个在删除时已不存在"), "{msg}");
+        // ⑤ 已不存在不阻成功：gone 没有失败语义
+        let (st, _) = classify_outcome(&c(7, 0, 0, 1), "", "", "");
+        assert_eq!(st, "ok", "已不存在的项不是失败");
     }
 
     /// 2026-10-04 审计 §4.2：`fileKeys` 直指**单个文件**时必须真能删掉。
@@ -1804,6 +1905,131 @@ mod cleanup_engine_contract_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3（2026-10-15）：只读文件必须靠「清只读位 + 重试一次」真删掉——PS 轨
+    /// `Remove-Item -Force` 清只读位的语义迁移时丢了，只读文件会以「被占用」的形状
+    /// 留在盘上（用户关任何程序都无效）。
+    ///
+    /// 采集与判定拆开：先用原始 `remove_file` 实证**只读位确实拦得住**（否则本机
+    /// 文件系统上碰巧能删，断言退化成「什么都没发生也算过」），再跑完整链断言真删。
+    #[cfg(windows)]
+    #[test]
+    fn 只读文件清位重试后能删且计数正确() {
+        let dir = std::env::temp_dir().join(format!("trim-readonly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let _clean = Clean(dir.clone());
+
+        let target = dir.join("readonly.log");
+        std::fs::write(&target, b"0123456789").unwrap();
+        let mut perm = std::fs::metadata(&target).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&target, perm).unwrap();
+
+        // 前提（采集）：只读位此刻真的拦得住原始删除
+        assert!(
+            std::fs::metadata(&target).unwrap().permissions().readonly(),
+            "只读位在这台机器上没设上，用例前提不成立"
+        );
+        let raw = std::fs::remove_file(&target);
+        assert!(raw.is_err(), "前提不成立：只读文件被直接删掉了，本用例失去对照意义");
+        assert!(target.exists(), "拦是拦住了，文件不该消失");
+
+        // 判定：跑完整链（fileKey 直指单文件，同 §4.2 用例形状）
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"ro1","name":"只读探测",
+            "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"ro1","name":"只读探测","path": target.to_string_lossy()})];
+        let bk = BackupSandbox::new("readonly");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("执行应返回结果而不是 Err");
+        let d = &res.details[0];
+
+        assert!(
+            !target.exists(),
+            "只读文件必须被清位后删掉（R3 回归形态：它会被归成「被占用」而留下）"
+        );
+        assert_eq!(d["fileCount"].as_i64(), Some(1), "fileCount 必须是 1: {d}");
+        assert_eq!(d["residual"].as_i64(), Some(0), "不得计入残留（被占用）: {d}");
+        assert_eq!(d["denied"].as_i64(), Some(0), "清位重试成功后不该进 denied: {d}");
+        assert_eq!(d["gone"].as_i64(), Some(0), "不该进 gone: {d}");
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(msg.contains("已清理 1 个文件"), "消息必须如实报删了 1 个: {msg}");
+    }
+
+    /// R3/R4 的真机探针（`#[ignore]`，发版前实跑）：真实 Win32 错误码在这台机器上
+    /// 各归各档。快速组管的是合成码（common.rs 单测）与只读链；这里补的是
+    /// 「真实文件属性 / 真实共享冲突 → 分档与计数」这段端到端。
+    ///
+    /// denied 的真实码路径（ACL 拒绝）探针不造——造它要动 ACL，代价与风险都不对等；
+    /// denied 的分档实现由 common.rs 单测钉住，链路上的计数由本探针的 busy 支代言。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机探针：真实只读属性与文件句柄共享冲突"]
+    fn 删除链_只读与共享冲突分档_真机探针() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = std::env::temp_dir().join(format!("trim-delprobe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let _clean = Clean(dir.clone());
+
+        // A：只读文件 —— 原始删除必须先失败、链上必须清位后删掉
+        let a = dir.join("ro-probe.log");
+        std::fs::write(&a, b"readonly-0123456789").unwrap();
+        let mut perm = std::fs::metadata(&a).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&a, perm).unwrap();
+        assert!(
+            std::fs::metadata(&a).unwrap().permissions().readonly(),
+            "只读位在这台机器上没设上"
+        );
+        let raw_a = std::fs::remove_file(&a);
+        assert!(raw_a.is_err(), "前提不成立：只读文件被直接删掉了");
+
+        // B：共享冲突文件（share_mode(0) 持句柄）—— 原始删除的真实 Win32 码必须落在
+        // 占用族（32/33）；若这台机器给出的码变了，分档前提就该复核
+        let b = dir.join("busy-probe.log");
+        std::fs::write(&b, b"busy-0123456789").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&b).unwrap();
+        let raw_b = std::fs::remove_file(&b);
+        let raw_code = raw_b.as_ref().err().and_then(|e| e.raw_os_error());
+        assert!(
+            matches!(raw_code, Some(32) | Some(33)),
+            "占用形态在这台机器上不是 32/33（实际 {raw_code:?}）——分档前提变了"
+        );
+
+        // 链上：A 应真删、B 应进 residual（被占用档）且不污染 denied/gone
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"probe","name":"删除链探针",
+            "fileKeys":[
+                {"path": a.to_string_lossy(), "pattern":"*", "recurse":true},
+                {"path": b.to_string_lossy(), "pattern":"*", "recurse":true}
+            ]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"probe","name":"删除链探针","path": dir.to_string_lossy()})];
+        let bk = BackupSandbox::new("delprobe");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("执行应返回结果而不是 Err");
+        let d = &res.details[0];
+        drop(held); // 句柄保活到链跑完
+
+        assert!(!a.exists(), "只读探针文件必须被清位后删掉");
+        assert!(b.exists(), "被占用的探针文件不该消失（句柄仍持有）");
+        assert_eq!(d["fileCount"].as_i64(), Some(1), "只读那个应被计数: {d}");
+        assert_eq!(d["residual"].as_i64(), Some(1), "占用那个应进被占用：{d}");
+        assert_eq!(d["denied"].as_i64(), Some(0), "真实占用不得被归进 denied: {d}");
+        assert_eq!(d["gone"].as_i64(), Some(0), "不得进 gone: {d}");
     }
 
     /// 2026-10-04 审计 §4.2 配套：根目标不可用时必须**留痕并降为 skip**，

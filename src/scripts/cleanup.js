@@ -1566,13 +1566,20 @@
         // 「每次都提示我结束 explorer，真结束了资源管理器不就没了吗」）。现在给
         // 两条可执行出路：① 重启资源管理器并重试（explorer 无损重启，几秒恢复）；
         // ② 登记到重启后删除（PendingFileRenameOperations，复用卸载域现成链）。
-        const failedItems = (result.details || []).filter(d => d.status !== 'ok' || (Number(d.residual) || 0) > 0);
+        // R4（2026-10-15）：失败按因分档后，重试面板只收「重试有意义」的项——
+        // 删除时已不存在的（gone）与纯 skip 档（太新/排除/未解析/lossy）不再冒充
+        // 「被占用」；权限不足（denied）保留（登记重启后删除对它仍有效）。
+        const failedItems = (result.details || []).filter(d => {
+          if (d.status === 'ok' && (Number(d.residual) || 0) === 0) return false;
+          if (d.status === 'skip') return (Number(d.denied) || 0) > 0;
+          return true;
+        });
         if (failedItems.length > 0) {
           offerCleanupRetryPanel(failedItems);
           maybeOfferElevation(`${failedItems.length} 项未完全清理，部分文件可能需要管理员权限。`);
         } else if (result.partial > 0) {
-          // v3.3.4 文案纠偏：部分成功不是失败——多数文件已清理，仅少数被占用未删
-          window.app?.toast('warning', `${result.partial} 项部分清理完成（仅少数文件被占用未删）`);
+          // v3.3.4 文案纠偏：部分成功不是失败——多数文件已清理，仅少数未删（占用或权限）
+          window.app?.toast('warning', `${result.partial} 项部分清理完成（部分文件未删，可在下方引导中处理）`);
         }
       }, 600);
     } catch (e) {
@@ -1783,7 +1790,7 @@
   function offerCleanupRetryPanel(items) {
     if (!window.modal?.create) {
       // modal 缺席（理论不可达）：退回旧文案，至少不失声
-      window.app?.toast('warning', `${items.length} 项未完全清理（文件可能被占用，可关闭相关程序或重启后再试）`);
+      window.app?.toast('warning', `${items.length} 项未完全清理（部分文件可能被占用或需管理员权限，可重启后再试）`);
       return;
     }
     const listed = items.slice(0, 8);
@@ -1791,14 +1798,16 @@
     const rows = listed.map(d => {
       const sr = scanResults.get(d.id) || {};
       const label = sr.name || d.name || d.id;
-      const note = (Number(d.residual) || 0) > 0 ? '部分残留' : '清理失败';
+      // R4（2026-10-15）：按因标注——权限不足与被占用分开（下一步动作不同）
+      const note = (Number(d.residual) || 0) > 0 ? '部分残留（被占用）'
+        : (Number(d.denied) || 0) > 0 ? '权限不足' : '清理失败';
       return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(sr.path || label)}">${escapeHtml(label)}</span><span class="lock-app-count">${note}</span></div>`;
     }).join('');
     const ctrl = window.modal.create({
       id: 'cleanupRetryModal-' + Date.now(),
       title: `${items.length} 项未完全清理`,
       bodyHtml: `
-        <div class="confirm-message">这些文件正被资源管理器（explorer.exe）等程序占用，系统不允许删除正在使用的文件。下面两个动作都不需要你手动结束任何程序：</div>
+        <div class="confirm-message">以下项目未能完全删除（原因见各行标注；多为文件正被程序占用，部分是权限不足）。下面两个动作都不需要你手动结束任何程序：</div>
         <div class="lock-app-list">${rows}${overflow > 0 ? `<div class="lock-app-row"><span class="lock-app-name">…另有 ${overflow} 项</span></div>` : ''}</div>
         <div class="lock-critical-note">重启资源管理器是无损操作：桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。</div>`,
       footerHtml: `

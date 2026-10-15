@@ -1,0 +1,9 @@
+{
+  "_comment": "原生删除结果行分档对拍夹具（R4 2026-10-15）。产出侧 native-scanner/src/scan.rs 的 MODE 常量；消费侧 src-tauri/src/commands/finder.rs 的分档函数。跨 crate 只共享本夹具字节，两侧各自独立对拍；本文件由 tools/gen-finder-delete-modes.mjs 生成，不手改。",
+  "modes": {
+    "recycled": "ok",
+    "rejected": "refused",
+    "unrecoverable-name": "name",
+    "trash-failed": "busy"
+  }
+}
