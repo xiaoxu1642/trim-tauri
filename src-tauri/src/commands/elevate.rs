@@ -498,7 +498,11 @@ pub fn elevate_request<R: Runtime>(
 }
 
 /// `ShellExecuteW(verb="runas")`：弹 UAC 并以管理员身份拉起自身。
-/// 返回值 <=32 是 SE_ERR_* 错误码，其中 1223 = 用户在 UAC 里点了「否」。
+///
+/// 返回值的判读（E1，2026-10-16 可注入桩实测）：≤32 是 SE_ERR_* 错误码；
+/// **1223 = ERROR_CANCELLED（用户在 UAC 里点了「否」）且 > 32**——只看 `>32` 的旧判据
+/// 会把「用户拒了」误判成「提权成功」，随后 `arm_handshake` 照挂、只在 20 秒超时里
+/// 回「未检测到新实例启动」。1223 必须单独判败并给「用户拒绝」文案。
 #[cfg(windows)]
 fn runas_launch(exe: &std::path::Path, params: &str) -> Result<(), String> {
     use windows::core::PCWSTR;
@@ -521,10 +525,15 @@ fn runas_launch(exe: &std::path::Path, params: &str) -> Result<(), String> {
             SW_SHOWNORMAL,
         )
     };
-    if code.0 as usize > 32 {
-        Ok(())
-    } else {
-        Err(format!("ShellExecuteW 返回 {}", code.0 as isize))
+    runas_launch_verdict(code.0 as isize)
+}
+
+/// 判据本体（纯函数，E1 的可注入桩落点：壳的返回值直接喂进来，不弹 UAC）。
+fn runas_launch_verdict(code: isize) -> Result<(), String> {
+    match code {
+        1223 => Err("用户在 UAC 中拒绝了提权请求（ERROR_CANCELLED）".to_string()),
+        c if c > 32 => Ok(()),
+        c => Err(format!("ShellExecuteW 返回 {c}")),
     }
 }
 
@@ -547,6 +556,20 @@ mod tests {
         // 阶段不符：requested 阶段是新实例还没报到，不能提前退出
         assert!(!handshake_matches("a1b2", "requested", "a1b2", "ready"));
         assert!(!handshake_matches("a1b2", "released", "a1b2", "ready"));
+    }
+
+    /// E1（2026-10-16）：拒 UAC 的 1223 必须判失败——它 **> 32**，旧判据 `>32 ⇒ Ok`
+    /// 会把「用户拒了」误判成「提权成功」（随后握手照挂、只在 20 秒超时里报
+    /// 「未检测到新实例启动」）。桩直接把壳的返回值喂给判据本体（不弹 UAC）。
+    #[test]
+    fn 提权拒绝码_1223_必须判失败() {
+        // 前提钉：1223 确实大于 32（旧判据把它放行的原因）
+        assert!(1223 > 32, "前提变了：1223 不再大于 32，本判据的存在理由需要复核");
+        let e = runas_launch_verdict(1223).unwrap_err();
+        assert!(e.contains("拒绝"), "1223 应给「用户拒绝」文案: {e}");
+        assert!(runas_launch_verdict(5).is_err(), "SE_ERR_ACCESSDENIED 判失败");
+        assert!(runas_launch_verdict(0).is_err(), "0 也是失败");
+        assert!(runas_launch_verdict(42).is_ok(), "正常发起（>32 且 ≠1223）判成功");
     }
 
     /// 审查 L2：ready 记录里的 pid 判据。

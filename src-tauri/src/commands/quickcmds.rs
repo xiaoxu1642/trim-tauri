@@ -253,7 +253,9 @@ fn is_uri(s: &str) -> bool {
 /// cmd 实际挂在旧控制台上、新控制台无人认领 —— 症状 = 窗口一闪而过（Windows Terminal 交接
 /// 闪现后即收），命令本体不可见。ShellExecute 由 shell 新建独立控制台，与父进程句柄解耦。
 ///
-/// HINSTANCE ≤ 32 视为失败（Win32 约定）；失败必须如实回 false。
+/// HINSTANCE ≤ 32 视为失败（Win32 约定）；**1223（ERROR_CANCELLED，用户取消
+/// 安全/UAC 提示）同样判失败**——它 > 32，只看 ≤32 会把「用户拒了」播成「已打开」
+/// （E1，2026-10-16）。失败必须如实回 false。
 fn shell_open_params(target: &str, params: Option<&str>, id: &str, stage: &str) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
@@ -273,7 +275,7 @@ fn shell_open_params(target: &str, params: Option<&str>, id: &str, stage: &str) 
             SW_NORMAL,
         )
     };
-    if result.0 as isize <= 32 {
+    if !shell_open_verdict(result.0 as isize) {
         log::write_log(
             "warn",
             &format!("快捷指令 {stage} 失败 {id}: ShellExecute 返回 {}", result.0 as isize),
@@ -281,6 +283,13 @@ fn shell_open_params(target: &str, params: Option<&str>, id: &str, stage: &str) 
         return false;
     }
     true
+}
+
+/// ShellExecute 返回值判读（纯函数，E1 的可注入桩落点）：≤32 是 SE_ERR_* 错误码；
+/// 1223（ERROR_CANCELLED，用户取消安全/UAC 提示）同样判失败——只看 ≤32 会把
+/// 「用户拒了」播成「已打开」。
+fn shell_open_verdict(code: isize) -> bool {
+    code > 32 && code != 1223
 }
 
 /// ShellExecute「open」（无参数；= Electron `shell.openExternal` / `shell.openPath`）。
@@ -418,6 +427,17 @@ pub fn quickcmds_run<R: tauri::Runtime>(window: WebviewWindow<R>, id: Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E1（2026-10-16）：1223（用户取消安全/UAC 提示）必须判失败——它 **>32**，
+    /// 旧判据 `>32 ⇒ 已打开` 会把它播成假成功。桩直接把壳的返回值喂给判据本体。
+    #[test]
+    fn shell_open_拒绝码_1223_必须判失败() {
+        assert!(1223 > 32, "前提钉：1223 大于 32（旧判据放行它的原因）");
+        assert!(!shell_open_verdict(1223), "1223 判失败");
+        assert!(!shell_open_verdict(5), "SE_ERR_ACCESSDENIED 判失败");
+        assert!(!shell_open_verdict(0), "0 判失败");
+        assert!(shell_open_verdict(42), "正常发起（>32 且 ≠1223）判成功");
+    }
 
     #[test]
     fn tokenize_matches_js_regex() {
