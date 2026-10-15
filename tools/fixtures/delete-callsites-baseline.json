@@ -5,7 +5,7 @@
     "src-tauri/src/commands/gameclean.rs": 4,
     "src-tauri/src/commands/realtime.rs": 2,
     "src-tauri/src/commands/uninstall/backup_report.rs": 3,
-    "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 4,
+    "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 8,
     "src-tauri/src/engine/native/cleanup.rs": 32,
     "src-tauri/src/engine/native/maintenance.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 7,
@@ -17,7 +17,7 @@
     "src-tauri/src/pwsh/mod.rs": 6,
     "src-tauri/src/security/mod.rs": 9,
     "native-scanner/src/cleanup_scan.rs": 17,
-    "native-scanner/src/scan.rs": 27,
+    "native-scanner/src/scan.rs": 30,
     "native-scanner/src/util.rs": 2
   },
   "remove_file": {
@@ -47,6 +47,7 @@
     "src-tauri/src/engine/reg_backup.rs": 2
   },
   "remove_dir": {
+    "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 2
   },
   "RegDeleteValueW": {

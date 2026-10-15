@@ -90,6 +90,11 @@ const RAW_EXEMPT = [
     anchor: 'std::process::Command::new("cmd")',
     reason: '提权交接 #[ignore] 真机探针：ping 起一个有寿命的真实子进程，用来证明 wait_predecessor_exit 真的等（cfg(test) 专用、非生产执行面）',
   },
+  {
+    file: 'src-tauri/src/commands/uninstall/residue_trace_tests.rs',
+    anchor: 'let st = Command::new("cmd")',
+    reason: 'J12（2026-10-16）双向咬合用例：mklink /J 造（活/断）junction 验证「断链放行、活链仍拒」（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
+  },
 ];
 
 /**
