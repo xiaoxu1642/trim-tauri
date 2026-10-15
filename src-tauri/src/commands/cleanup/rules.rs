@@ -267,8 +267,8 @@ pub(super) fn path_prefix_problem(path: &str) -> Option<String> {
     None
 }
 
-/// 路径形态：执行侧 `expand_glob_dirs` 只认 `*`、`glob_match` 只支持单星、分隔符只认 `\`；
-/// 扫描侧支持 `?` 与 `/` —— 规则里出现这些形态就是「扫描命中、执行漏删」。
+/// 路径形态：执行侧 `expand_glob_dirs` 只认 `*`、分隔符只认 `\`；扫描侧支持 `?` 与 `/`
+/// —— 规则里出现这些形态就是「扫描命中、执行漏删」。
 ///
 /// 2026-10-04 磁盘清理审计 §3.1 增 verbatim 前缀一节（判定本体在 [`path_prefix_problem`]，
 /// §4.11 把同一道闸扩到 `detect[].path` 与 `excludePaths[]`）。`\\.\` / `\??\` 之所以要在

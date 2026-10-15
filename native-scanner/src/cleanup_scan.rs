@@ -848,8 +848,11 @@ fn try_file_length(p: &Path) -> Option<u64> {
 }
 
 /// 文件名通配（对齐 .NET FileSystemName.MatchesSimpleExpression ignoreCase=true）：
-/// '*' 任意串（含空）、'?' 恰一字符；仅 P1 fileKeys 的 pattern 会用到非 '*' 模式
-fn wildcard_match(name: &str, pattern: &str) -> bool {
+/// '*' 任意串（含空）、'?' 恰一字符；仅 P1 fileKeys 的 pattern 会用到非 '*' 模式。
+/// P0-A2（2026-10-16）起提 pub：执行侧 `engine/native/cleanup.rs` 的 `glob_match`
+/// 改为薄包装委托本函数——匹配器归一后这是全仓唯一实现（两侧曾各写一份且语义
+/// 分叉：执行侧大小写敏感、只认第一个 `*`，见交接 §2.4）。
+pub fn wildcard_match(name: &str, pattern: &str) -> bool {
     let n: Vec<char> = name.to_lowercase().chars().collect();
     let p: Vec<char> = pattern.to_lowercase().chars().collect();
     let (mut i, mut j) = (0usize, 0usize);
@@ -1174,8 +1177,10 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
     let mut skipped_reparse = 0u64;
     let expanded = expand_env_path(pattern);
     // §4.10：盘符相对形态（`\Foo`）按「当前盘根」解析，与保护侧 CWD 口径分叉——
-    // 扫描/执行共用的单一展开口在这里统一拒绝（本函数是两侧 fileKey 枚举的
-    // 唯一咽喉，见 is_drive_relative 注释），留痕后返回空集。
+    // 本函数是扫描侧展开口，与执行侧 `engine/native/cleanup.rs` 的 `expand_glob_dirs`
+    // 各自拒绝。匹配器已统一（执行侧 glob_match 委托本 crate 的 wildcard_match）；
+    // 两侧各保留一份展开实现，分隔符与根处理仍有差异（A2 装载端靠契约兜住），
+    // 留痕后返回空集。
     if is_drive_relative(&expanded) {
         err_line(&format!(
             "[cleanup-scan] 盘符相对路径（{expanded}）无盘符语义（未定义环境变量拼接？），已拒绝展开（§4.10）"

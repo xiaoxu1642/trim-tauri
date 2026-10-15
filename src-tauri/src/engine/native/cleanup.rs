@@ -171,15 +171,19 @@ fn enumerate_files_at(
     }
 }
 
+/// 文件名 / 路径段通配判定（P0-A2 修法 A，2026-10-16）：薄包装，**委托**扫描侧
+/// `trim_finder::cleanup_scan::wildcard_match`——匹配器归一后全仓只有一份实现。
+///
+/// 根因（交接 §2.4）：旧实现是执行侧自己的简单匹配——大小写敏感，且
+/// `pattern.find('*')` 只认**第一个** `*`（`*Cache*` 的 suffix 变成字面量
+/// `Cache*` ⇒ 段内多星恒不匹配）。后果是「扫描计体积、执行恒 0 展开」，
+/// 恰好从 A2 装载校验不查路径段多星的那条缝漏过。
+///
+/// 参数顺序钉死（总方案 v2 §0 第 2 条）：扫描侧签名是 `wildcard_match(name,
+/// pattern)`，与本侧三处调用点的 `glob_match(pattern, name)` **相反**——写反
+/// 照样编译通过，会在要修的这条静默路径上再造同类缺陷。
 fn glob_match(pattern: &str, name: &str) -> bool {
-    if pattern == "*" { return true; }
-    // 简单 * 匹配
-    if let Some(idx) = pattern.find('*') {
-        let prefix = &pattern[..idx];
-        let suffix = &pattern[idx+1..];
-        return name.starts_with(prefix) && name.ends_with(suffix) && name.len() >= prefix.len() + suffix.len();
-    }
-    pattern == name
+    trim_finder::cleanup_scan::wildcard_match(name, pattern)
 }
 
 unsafe fn reg_count_key(hive: HKEY, path: &str, has_value: bool) -> usize {
@@ -1012,7 +1016,23 @@ fn cleanup_execute_with_backup_root(
                     }
                     // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）；
                     // 展开后的每个实际目录仍过 reparse 判拒（双保险）
-                    for base in expand_glob_dirs(&expanded) {
+                    let bases = expand_glob_dirs(&expanded);
+                    // P0-A2（2026-10-16）假绿记账：通配展开为空（段无匹配 / 父目录
+                    // 不存在）时，旧路径 files 与 failed 全零 ⇒ 条目落 classify_outcome
+                    // 最后出口 ("ok","已清理 0 个文件")，UI 弹「清理完成！释放 0 B」。
+                    // 与目录型分支（下文 else 支）同款记账：归 unresolved 显式 skip、
+                    // 把原因带给前端——语义是「没找到可删的东西」，不是「成功 0 删」。
+                    if bases.is_empty() {
+                        unresolved.push(format!("{expanded}（通配段无匹配目录）"));
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!(
+                                "cleanup_execute 规则 {id}：fileKey 通配展开为空，已跳过 —— {expanded}"
+                            ),
+                        );
+                        continue;
+                    }
+                    for base in bases {
                         // 单文件目标要**先**分派、再判 reparse（2026-10-04 审计 §4.2）。
                         //
                         // 原顺序是「先 cleanup_root_ok（要求 is_dir）→ 再判 is_file」，
@@ -1614,6 +1634,129 @@ mod cleanup_engine_contract_tests {
         assert_eq!(first_unexpanded_token(""), None);
         // 单个 % 不构成 token，不算残留
         assert_eq!(first_unexpanded_token(r"C:\100%done"), None);
+    }
+
+    /// P0-A2（2026-10-16 总方案 v2 §3）：执行侧 glob_match 委托扫描侧
+    /// wildcard_match（修法 A）。这条钉两件事：① 委托接线（同输入同结果）；
+    /// ② 具体样本的期望值（多星、大小写不敏感、?）——只写「两侧同结果」是
+    /// 构造性恒绿（归一后本就是同一函数），必须配可手算的期望。
+    ///
+    /// 样本取自真实规则：slack `…\Service Worker\*Cache*`、intelGraphicsSoftware
+    /// `…\EBWebView\*cache*`（段内多星），remoRepairPowerpoint `*.LOG`、
+    /// oracleJava `*PATCH.ERR`（大小写形态，交接 §2.4 点名）。
+    #[test]
+    fn glob_match_委托扫描侧_多星与大小写不敏感() {
+        let cases: [(&str, &str, bool); 10] = [
+            // 段内多星：旧实现 suffix 变字面量 "Cache*" ⇒ 恒 false；归一后必须命中
+            ("*Cache*", "CacheStorage", true),
+            ("*Cache*", "Code Cache", true),
+            ("*cache*", "Cache", true),
+            ("*cache*", "GPUCache", true),
+            // 大小写形态（pattern 大写、盘上小写）
+            ("*.LOG", "app.log", true),
+            ("*PATCH.ERR", "x.patch.err", true),
+            // ? 恰一字符
+            ("a?c", "abc", true),
+            // 负样本：无 cache 子串不命中、? 不匹配空、后缀不合不命中
+            ("*Cache*", "Logs", false),
+            ("a?c", "ac", false),
+            ("*.txt", "a.log", false),
+        ];
+        for (pattern, name, expected) in cases {
+            assert_eq!(
+                glob_match(pattern, name),
+                expected,
+                "glob_match({pattern:?}, {name:?}) 应为 {expected}"
+            );
+            assert_eq!(
+                glob_match(pattern, name),
+                trim_finder::cleanup_scan::wildcard_match(name, pattern),
+                "glob_match 必须与 wildcard_match 同结果（委托接线）: {pattern:?} vs {name:?}"
+            );
+        }
+    }
+
+    /// P0-A2 验收（总方案 v2 §3）：执行侧段内多星能展开——以两条真实规则的
+    /// fileKeys 形态造沙箱（slack `…\Service Worker\*Cache*`、intelGraphicsSoftware
+    /// `…\EBWebView\*cache*`，pattern 均为 `*`），端到端跑删除链。
+    /// 修前执行侧只认第一个 `*` ⇒ 展不开 ⇒ ok/0 文件假绿；归一后必须真删到文件。
+    #[test]
+    fn filekeys_段内多星在执行侧能展开并删除() {
+        let base = std::env::temp_dir().join(format!("trim-a2-multistar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // 形态一：*Cache* 段命中混合大小写、名字中间还有内容的目录
+        let sw = base.join("Service Worker");
+        std::fs::create_dir_all(sw.join("CacheStorage")).expect("建 CacheStorage");
+        std::fs::create_dir_all(sw.join("Code Cache")).expect("建 Code Cache");
+        std::fs::write(sw.join("CacheStorage").join("a.bin"), b"xxxx").expect("写 a.bin");
+        std::fs::write(sw.join("Code Cache").join("b.bin"), b"xxxx").expect("写 b.bin");
+        // 形态二：小写 pattern *cache* 命中大写开头目录（大小写不敏感）
+        let eb = base.join("EBWebView");
+        std::fs::create_dir_all(eb.join("Cache")).expect("建 Cache");
+        std::fs::write(eb.join("Cache").join("c.bin"), b"xxxx").expect("写 c.bin");
+
+        let rules = serde_json::json!({"groups":[{"items":[
+            {"id":"a2slack","name":"段内多星探测","fileKeys":[
+                {"path": sw.join("*Cache*").to_string_lossy(), "pattern":"*", "recurse":true}]},
+            {"id":"a2intel","name":"小写多星段探测","fileKeys":[
+                {"path": eb.join("*cache*").to_string_lossy(), "pattern":"*", "recurse":true}]}
+        ]}]});
+        let items = vec![
+            serde_json::json!({"id":"a2slack","name":"段内多星探测","path":""}),
+            serde_json::json!({"id":"a2intel","name":"小写多星段探测","path":""}),
+        ];
+
+        let bk = BackupSandbox::new("a2multistar");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("不应 Err");
+        let expect: [(usize, i64); 2] = [(0, 2), (1, 1)];
+        for (idx, n) in expect {
+            let d = &res.details[idx];
+            assert_eq!(
+                d["fileCount"].as_i64(),
+                Some(n),
+                "多星段必须展开并删到文件（修前恒 0 ⇒ ok/0 假绿）: {d}"
+            );
+            assert_ne!(d["status"], "skip", "删到文件不该降为 skip: {d}");
+        }
+        // 磁盘实证：三个目录里的文件都必须已经不在
+        assert!(!sw.join("CacheStorage").join("a.bin").exists(), "CacheStorage\\a.bin 应已删");
+        assert!(!sw.join("Code Cache").join("b.bin").exists(), "Code Cache\\b.bin 应已删");
+        assert!(!eb.join("Cache").join("c.bin").exists(), "Cache\\c.bin 应已删");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// P0-A2（总方案 v2 §3）假绿记账：fileKeys 通配展开为空必须记 unresolved
+    /// 显式 skip——堵 ("ok","已清理 0 个文件") 出口。目录型分支的同款记账见
+    /// `根目标不可用时降为_skip_而不是报成功零删`，本条是 fileKeys 型对偶。
+    #[test]
+    fn filekeys_通配展开为空时降为_skip_而不是报成功零删() {
+        // 通配段指向一个任何机器上都匹配不到的名字（pid 保证不撞真实目录）
+        let nomatch = std::env::temp_dir()
+            .join(format!("trim-a2-fkempty-{}", std::process::id()))
+            .join("*NoSuchSegment*");
+        let rules = serde_json::json!({"groups":[{"items":[
+            {"id":"fkempty","name":"fileKeys 展开为空探测","fileKeys":[
+                {"path": nomatch.to_string_lossy(), "pattern":"*", "recurse":true}]}
+        ]}]});
+        let items = vec![serde_json::json!({"id":"fkempty","name":"fileKeys 展开为空探测","path":""})];
+
+        let res = cleanup_execute(&items, &rules, false, false, None).expect("不应 Err");
+        let d = &res.details[0];
+        assert_eq!(
+            d["status"], "skip",
+            "展开为空必须降为 skip，不是 ok: {d}"
+        );
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(
+            !msg.contains("已清理 0 个文件"),
+            "消息宣称「已清理 0 个文件」= 假绿成功: {msg}"
+        );
+        assert!(
+            msg.contains("无匹配") || msg.contains("展开"),
+            "消息必须说清为什么没删，否则用户无从判断: {msg}"
+        );
     }
 
     /// v2-L4P-11（C-1）：执行侧遍历对 reparse 子项的判定必须用 0x400 属性位口径。

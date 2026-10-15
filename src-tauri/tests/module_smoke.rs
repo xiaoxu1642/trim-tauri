@@ -1659,4 +1659,26 @@ fn startup_scan_真实条数与写侧上限关系实测() {
     assert!(!items.is_empty(), "本机启动项不应为空（真为空说明判据退化，不是「没有启动项」）");
 }
 
+/// P0-A2（2026-10-16 总方案 v2 §3）：匹配器归一后，扫描侧 `wildcard_match` 是
+/// 两侧唯一真源（执行侧 glob_match 委托它，委托接线由 cleanup.rs 内单测钉）。
+/// 本仓 `cargo test` 跑不到 native-scanner 自己的测试（那边唯一自动入口是
+/// check-scan-rule-diff 门禁），故在这里补钉它的语义：大小写不敏感、支持 `?`
+/// 与多星回溯——`*Cache*` 必须命中 "Code Cache" 这类中间还有内容的形态
+/// （修前执行侧只认第一个 `*`，恒不匹配）。
+#[test]
+fn wildcard_match_多星与大小写不敏感() {
+    use trim_finder::cleanup_scan::wildcard_match;
+    // 样本与 cleanup.rs 内委托用例同源：真实规则段形态 + 大小写形态 + ? + 负样本
+    assert!(wildcard_match("CacheStorage", "*Cache*"), "*Cache* 应命中 CacheStorage");
+    assert!(wildcard_match("Code Cache", "*Cache*"), "*Cache* 应命中 Code Cache（中间有内容）");
+    assert!(wildcard_match("Cache", "*cache*"), "*cache* 应命中 Cache（大小写不敏感）");
+    assert!(wildcard_match("GPUCache", "*cache*"), "*cache* 应命中 GPUCache");
+    assert!(wildcard_match("app.log", "*.LOG"), "*.LOG 应命中 app.log（大小写不敏感）");
+    assert!(wildcard_match("x.patch.err", "*PATCH.ERR"), "*PATCH.ERR 应命中 x.patch.err");
+    assert!(wildcard_match("abc", "a?c"), "a?c 应命中 abc（? 恰一字符）");
+    assert!(!wildcard_match("Logs", "*Cache*"), "无 cache 子串不得命中");
+    assert!(!wildcard_match("ac", "a?c"), "? 不匹配空");
+    assert!(!wildcard_match("a.log", "*.txt"), "后缀不合不得命中");
+}
+
 

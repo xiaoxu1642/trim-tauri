@@ -296,6 +296,26 @@
           "douyinCache",
           "wechatCache"
         ]
+      },
+      {
+        "id": "glob-matcher-unified-p0a2",
+        "key": "fileKeys.path 段级通配 / fileKeys.pattern 文件名通配",
+        "consumer": "src-tauri/src/engine/native/cleanup.rs",
+        "anchor": "trim_finder::cleanup_scan::wildcard_match(name, pattern)",
+        "fact": "匹配器已统一（P0-A2 修法 A，2026-10-16）：执行侧 glob_match 是薄包装，委托扫描侧 wildcard_match（大小写不敏感、支持 ? 与多星回溯）。修前执行侧自持简单匹配：大小写敏感且只认第一个 *，段内多星（*Cache* 的 suffix 变成字面量）恒不匹配，后果是扫描计体积、执行恒 0 展开",
+        "impact": "段内多星的 2 条规则（slack 的 *Cache*、intelGraphicsSoftware 的 *cache*）执行侧恢复展开；三处调用点（expand_glob_dirs 路径段 / enumerate_files_at 与 collect_files_at 文件名 pattern）不动",
+        "status": "fixed-2026-10-16",
+        "note": "参数顺序钉死：扫描侧签名 (name, pattern) 与执行侧调用点 (pattern, name) 相反，写反照样编译通过（总方案 v2 §0 第 2 条）。范围声明：engine/protect.rs 的 glob_match（凭据 never_names 专用，自带 a*b*c 多星用例）形似不合，不在本批"
+      },
+      {
+        "id": "glob-expand-still-two-implementations",
+        "key": "fileKeys.path 段级 glob 展开",
+        "consumer": "native-scanner/src/cleanup_scan.rs",
+        "anchor": "pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String>",
+        "fact": "匹配器归一后两侧各保留一份 expand_glob_dirs 实现：本文件（扫描侧）按 split(['\\\\', '/']) 切分、根处理含盘符/UNC 分支；执行侧 engine/native/cleanup.rs 只按反斜杠切分、无根分支。分隔符与根处理仍有差异",
+        "impact": "含正斜杠的路径扫描侧可展开、执行侧展不开；A2 装载端（file_path_form_problem）继续拒 / 与 ? 形态，两侧差异由契约兜住而非靠实现相同",
+        "status": "live-divergence",
+        "note": "执行侧展开为空时记 unresolved 显式 skip（P0-A2 同批补的假绿记账），不落 ok/0 文件"
       }
     ],
     "deadSourceKeys": [],
