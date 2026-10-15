@@ -130,7 +130,8 @@
       "windows-doc",
       "vendor-doc",
       "independent",
-      "winapp2-clue"
+      "winapp2-clue",
+      "dismpp-clue"
     ],
     "nonEmptyArrayFields": [
       "restartProcesses",

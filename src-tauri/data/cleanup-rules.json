@@ -25,10 +25,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/system",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Windows更新安装记录",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -59,10 +59,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Windows下载缓存",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -93,10 +93,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/传递优化缓存",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -232,10 +232,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/system",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Windows报告",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -472,10 +472,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/app",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Windows Defender保护历史记录",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -502,10 +502,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Windows日志（by chenyu、YukiSakura）",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -978,10 +978,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Terminal Server Client缓存",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -1008,10 +1008,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/NET程序集缓存（by 大胖子技术员）",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -1038,10 +1038,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Windows预读取文件（by 辰g.）",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "minAgeDays": 7,
               "ver": 20261016,
@@ -1086,10 +1086,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/缩略图缓存",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -1166,10 +1166,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/WinINet网页缓存",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -1404,10 +1404,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/WinSxS临时文件",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "minAgeHours": 24,
               "ver": 20261016,
@@ -1439,10 +1439,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/WinSxS临时文件",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "minAgeHours": 24,
               "ver": 20261016,
@@ -1474,10 +1474,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/临时文件",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "minAgeHours": 24,
               "ver": 20261016,
@@ -1509,10 +1509,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/常见的驱动临时解压目录",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -1616,10 +1616,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/系统以及程序崩溃dmp文件（by YukiSakura）",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "minAgeDays": 2,
               "ver": 20261016,
@@ -1800,10 +1800,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/outdated",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/以前的Dism++组件",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -2454,10 +2454,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "independent",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/QQ临时数据",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -2534,10 +2534,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "independent",
-                "ref": "apps",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/QQ临时数据",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -3759,10 +3759,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "independent",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/百度网盘日志",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -3837,10 +3837,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "independent",
-                "ref": "windows/outdated",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/WPS老版本备份（by Rambin）",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -3884,10 +3884,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "independent",
-                "ref": "apps",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Office安装源",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -5772,10 +5772,10 @@
               "regenerable": true,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "vendor-doc",
-                "ref": "browser",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Chrome浏览器老版本备份（by Honry）",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -7367,10 +7367,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "vendor-doc",
-                "ref": "windows/outdated",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Chrome浏览器老版本备份（by Honry）",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -8075,10 +8075,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/app",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/Installer目录",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -8105,10 +8105,10 @@
               "regenerable": false,
               "prov": {
                 "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
+                "sourceClass": "dismpp-clue",
+                "ref": "dismpp/回收站",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-10-07"
+                "reviewedAt": "2026-10-16"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -8216,6 +8216,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "GNBiRq9uvUboWd1ZB8IC4/W8CrB7ctxWjZwhsn40ui2kZJoZAHNy+YSFr6IZMNz2KFIkhlGlNfckJunre5F8Bg=="
+    "sig": "ECvLcDHg1E4pH+5fwLZRrwGErmUfHDK57sLl462VI7vTHoW5X85YdpORn6aJTE+FVT2xxQWEp5O5pDPQ23tzDg=="
   }
 }
