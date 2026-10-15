@@ -224,13 +224,22 @@ export const UNITS = [
     gates: ['check-contrast', 'check-css-tokens'],
   },
   {
-    id: 'F4a', owner: 'sub', name: '清理与卸载链脚本',
-    files: [`${S}/cleanup.js`, `${S}/uninstall.js`, `${S}/residue-window.js`, `${S}/memoryclean.js`,
-      `${S}/peripheral.js`, `${S}/quickcmds.js`, `${S}/quickcmds-data.js`, `${S}/maintenance.js`,
-      `${S}/startup.js`, `${S}/contextmenu.js`, `${S}/pathbinding.js`,
+    // 2026-10-16 拆成两半：C1-1（占用查询页）落地后合并形态 8089 非空行已越 U2 的
+    // 8000 上限（触发点是 cleanup.js 的 C1-1 接线 +135 行）。按「清理/卸载 vs 系统页
+    // 杂项」两条链切，保留原「清理与卸载链」名字给前半，归属关系不挪文件。
+    id: 'F4a1', owner: 'sub', name: '清理与卸载链脚本',
+    files: [`${S}/cleanup.js`, `${S}/memoryclean.js`, `${S}/uninstall.js`, `${S}/residue-window.js`,
       // LiteBox 灯箱（vendored，MIT）：图片预览的唯一 UI 承载件，随 cleanup 链消费
       'src/vendor/litebox.js', 'src/styles/litebox.css'],
-    contract: '各域页面渲染 ⇄ 命令回执消费口径；vendored 灯箱的受控适配以文件头注登记为准',
+    contract: '清理/内存/卸载链各页面渲染 ⇄ 命令回执消费口径；vendored 灯箱的受控适配以文件头注登记为准',
+    boundary: '状态真源分裂（localStorage 镜像 vs 后端真源）是本单元红线',
+    gates: ['check-channel-map', 'check-a11y'],
+  },
+  {
+    id: 'F4a2', owner: 'sub', name: '维护·启动与系统页链脚本',
+    files: [`${S}/peripheral.js`, `${S}/quickcmds.js`, `${S}/quickcmds-data.js`,
+      `${S}/maintenance.js`, `${S}/startup.js`, `${S}/contextmenu.js`, `${S}/pathbinding.js`],
+    contract: '维护/启动项/右键菜单/路径绑定等系统页渲染 ⇄ 命令回执消费口径',
     boundary: '状态真源分裂（localStorage 镜像 vs 后端真源）是本单元红线',
     gates: ['check-channel-map', 'check-a11y'],
   },

@@ -51,7 +51,10 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 // api 包装落在 tauri-api.js（首屏静态，+635 B）—— 715,000 → 716,000（贴值留余 ~400 B）。
 // 功能面 UI（syspanel.js 三个处理器与按钮）走 PAGE_SCRIPTS['windows-settings'] 按需注入，
 // 不在本预算内。
-const CAP_MAX = 716_000;
+// C1-1（2026-10-16 晚）：占用查询页（index.html 第 5 tab + 面板，+2109 B；app.js +121 B）
+// —— 716,000 → 718,500（贴值留余 ~300 B）。该增量为拍板过的功能面（主窗内嵌占用查询），
+// 由 P1-7 批次补跑全量门禁时抓出（C1-1 当时只跑了受触面，属「批间不跑全量」的又一笔账）。
+const CAP_MAX = 718_500;
 const CAP_MIN = 400_000;
 // 豁免清单：允许不带 defer 的脚本（必须尽早执行，加 defer 反而破坏语义）
 const EXEMPT_NOT_DEFER = ['scripts/theme-boot.js'];
