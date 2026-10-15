@@ -354,6 +354,7 @@
   padding: 12px 14px;
 }
 .syspanel-pwr-detail-name {
+  flex: 1; min-width: 0;
   margin-bottom: 4px;
   color: var(--fg-primary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
@@ -402,7 +403,6 @@
 .syspanel-pwr-rec-v { display: block; margin-top: 2px; color: var(--accent); font-weight: calc(600 * var(--font-weight-scale, 1)); font-size: var(--fs-meta); }
 .syspanel-pwr-rec-why { margin: 4px 0 0; color: var(--fg-secondary); font-size: calc(12px * var(--font-size-scale, 1)); line-height: 1.6; overflow-wrap: anywhere; }
 .syspanel-pwr-muted { color: var(--fg-tertiary); }
-.syspanel-pwr-detail-actions { margin-top: 12px; }
 /* v5 P2 各方案对照块 */
 .syspanel-pwr-compare { margin-top: 12px; border-top: 1px solid var(--border-default); padding-top: 8px; }
 .syspanel-pwr-compare-title { margin-bottom: 4px; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); }

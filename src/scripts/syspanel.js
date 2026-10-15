@@ -1601,11 +1601,12 @@
         </div>
       </div>` : '';
     const desc = pwrDisplayDesc(s);
-    const regeditBtn = `<div class="syspanel-pwr-detail-actions">
-        <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrRegedit" data-tip="打开注册表编辑器并定位到该设置">在注册表中查看</button>
-      </div>`;
+    const regeditBtn = `<button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrRegedit" data-tip="打开注册表编辑器并定位到该设置">在注册表中查看</button>`;
     box.innerHTML = `
-      <div class="syspanel-pwr-detail-name">${esc(pwrDisplayName(s))}</div>
+      <div class="syspanel-pwr-field">
+        <div class="syspanel-pwr-detail-name">${esc(pwrDisplayName(s))}</div>
+        ${regeditBtn}
+      </div>
       <div class="syspanel-pwr-detail-desc">${desc ? esc(desc) : '<span class="syspanel-pwr-muted">（该系统设置没有提供说明）</span>'}</div>
       <div class="syspanel-pwr-detail-rows">
         ${controlHtml('ac', '接通电源（AC）')}
@@ -1613,7 +1614,6 @@
       </div>
       ${metaHtml}
       <div id="syspanelPwrCompare"></div>
-      ${regeditBtn}
       ${recHtml}
       ${failed ? '<div class="syspanel-pwr-unlock-note">系统拒绝解锁此设置（受保护项），当前不可编辑。</div>' : ''}
     `;
