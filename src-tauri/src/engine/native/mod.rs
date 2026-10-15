@@ -47,7 +47,9 @@ mod syspanel;
 pub use syspanel::{
     PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_plan_apply,
     power_plan_delete, power_plan_duplicate, power_plan_export, power_plan_import,
-    power_plan_rename, power_plan_state, power_setting_compare, power_setting_open_regedit,
+    power_plan_rename, power_plan_state, power_high_performance_hide,
+    power_high_performance_restore, power_ultimate_enable, power_setting_compare,
+    power_setting_open_regedit,
     power_settings_apply, power_settings_dump, power_settings_revert, power_settings_unlock,
 };
 

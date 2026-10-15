@@ -1101,7 +1101,7 @@ fn find_scheme_named(name: &str) -> Option<String> {
 /// 本函数克隆出的方案在激活/回读失败时清掉（不留半截状态）。
 /// 原激活 GUID 记进 power-ops.json（仅审计记录；回切随时可在面板点其它方案）。
 pub fn power_ultimate_enable() -> Result<Value, String> {
-    let active_before = active_scheme().map(guid_string).unwrap_or_default();
+    let active_before = active_scheme().map(|g| guid_string(&g)).unwrap_or_default();
     let mut created_guid: Option<GUID> = None;
     let target_s = if listed_scheme(ULTIMATE_PERFORMANCE_GUID) {
         ULTIMATE_PERFORMANCE_GUID.to_string()

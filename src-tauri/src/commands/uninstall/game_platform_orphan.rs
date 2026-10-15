@@ -572,17 +572,21 @@ enum KeyState {
 }
 
 unsafe fn open_state(hive: windows::Win32::System::Registry::HKEY, sub: &str) -> KeyState {
+    use windows::Win32::Foundation::WIN32_ERROR;
     use windows::Win32::System::Registry::{KEY_READ, RegCloseKey, RegOpenKeyExW};
     let sk = to_wide(sub);
     let mut hk = windows::Win32::System::Registry::HKEY::default();
-    match RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk) {
-        Ok(()) => {
-            let _ = RegCloseKey(hk);
-            KeyState::Ok
-        }
+    // RegOpenKeyExW 返回 WIN32_ERROR 而非 Result（本仓锁存的 windows crate 口径，
+    // 其余 90 处调用点都用 .is_ok()/.is_err()；P1-1 落笔时写成 match Ok/Err 从未编过）
+    let rc = RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk);
+    if rc.is_ok() {
+        let _ = RegCloseKey(hk);
+        KeyState::Ok
+    } else if rc == WIN32_ERROR(2) {
         // ERROR_FILE_NOT_FOUND(2) = 键不存在；其余（ACCESS_DENIED 等）= 读失败
-        Err(e) if e.code() == windows::Win32::Foundation::WIN32_ERROR(2).to_hresult() => KeyState::Missing,
-        Err(_) => KeyState::Denied,
+        KeyState::Missing
+    } else {
+        KeyState::Denied
     }
 }
 
