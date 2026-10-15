@@ -307,10 +307,25 @@ export const UNITS = [
     gates: ['check-ps-extraction', 'check-data-parity'],
   },
   {
-    id: 'T1b', owner: 'sub', name: '门禁·数据产物与样式（新增门禁自动落入）',
+    // 顺序约束（同 N1 先例）：显式点名必须排在兜底 dirs 之前——目录认领只吃此前
+    // 无人认领的文件，T1d 若排在 T1b 之后，点名会成装饰（U3 判红实测过）。
+    id: 'T1d', owner: 'sub', name: '门禁·样式与前端面',
+    files: ['tools/check-contrast.mjs', 'tools/check-css-tokens.mjs',
+      'tools/check-a11y.mjs', 'tools/check-subwindow-css.mjs',
+      'tools/check-html-contract.mjs', 'tools/check-first-paint.mjs',
+      'tools/check-treemap-layout.mjs', 'tools/check-assets-used.mjs',
+      'tools/check-asset-size.mjs'],
+    contract: '样式 token / 对比度 / 可达性 / 首屏预算 / HTML 与资产契约',
+    boundary: '审的是「界面面」的自动判据；真机观感不属本单元（目检走 §1.5 纪律）',
+    gates: ['check-css-tokens', 'check-contrast', 'check-first-paint'],
+  },
+  {
+    // 2026-10-16 拆分（P2-B）：新增 check-headless-cli 后兜底形态达 8005 行越 8000 上限，
+    // 按主题把「样式与前端面」9 件点名进 T1d；本单元保留为新增门禁的兜底认领位。
+    id: 'T1b', owner: 'sub', name: '门禁·数据产物与其余（新增门禁自动落入）',
     dirs: [{ dir: 'tools', ext: ['.mjs'], depth: 1, onlyPrefix: 'check-' }],
-    contract: '数据对拍 / 版本同步 / readme 承诺 / 注释腐烂 / 样式与可达性',
-    boundary: '未点名进 T1a 的 check-*.mjs 一律落本单元（兜底认领位）',
+    contract: '数据对拍 / 版本同步 / readme 承诺 / 注释腐烂 / 规则与优化域契约',
+    boundary: '未点名进 T1a/T1d 的 check-*.mjs 一律落本单元（兜底认领位）',
     gates: ['check-data-parity', 'check-version-sync', 'check-comment-rot'],
   },
   {

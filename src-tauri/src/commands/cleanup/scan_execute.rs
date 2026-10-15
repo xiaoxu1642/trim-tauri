@@ -110,31 +110,19 @@ impl ScanAccum {
     }
 }
 
-/// 记账一行并按需推 `cleanup:scan-progress`（对照 sender.send('cleanup:scan-progress', …)）
-pub(super) fn ingest_and_emit<R: tauri::Runtime>(accum: &Arc<Mutex<ScanAccum>>, window: &WebviewWindow<R>, line: &str) {
-    let (item, done, total) = {
-        let mut a = accum.lock().unwrap_or_else(|e| e.into_inner());
-        let item = a.ingest_line(line);
-        (item, a.data.len(), a.total)
-    };
-    if let Some(item) = item {
-        let _ = window.emit(
-            "cleanup:scan-progress",
-            json!({ "done": done, "total": total, "item": item }),
-        );
-    }
-}
-
-/// 扫描主体（纯原生引擎；PS 回退已随 S3 删除，见 :11）
-pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>, partial: bool) -> Value {
+/// 扫描核心（P2-B 抽取，2026-10-16）：与窗口/快照解耦——读规则 → 原生扫描 → 组装条目数据。
+///
+/// `emit` 是进度出口（本轮新增条目 + done/total）：窗口版（`do_cleanup_scan`）注入 emit 闭包
+/// （原 `ingest_and_emit` 的 emit 负载 `{done,total,item}` 逐字保留在其闭包里）；无头版
+/// （`cleanup_scan_headless`）传 no-op。**无窗口、无快照**——快照登记与 partial 语义留在
+/// `do_cleanup_scan`（窗口态概念）。返回 `Ok((data, malformed_lines))` / `Err(message)`，
+/// 两处错误消息与原实现逐字一致。
+fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(cats: Vec<String>, mut emit: E) -> Result<(Vec<Value>, usize), String> {
     let configured = load_paths_config();
-    let rules = match rules_value_arc() {
-        Ok(r) => r,
-        Err(e) => {
-            log::write_log("error", &format!("扫描异常: {e}"));
-            return json!({ "success": false, "message": e, "data": [] });
-        }
-    };
+    let rules = rules_value_arc().map_err(|e| {
+        log::write_log("error", &format!("扫描异常: {e}"));
+        e
+    })?;
     let cats_json = json_text(&Value::from(cats.clone()));
     let cfg_json = json_text(&configured);
     let rules_json = json_text(&rules);
@@ -146,11 +134,18 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
         total: cats.len(),
         ..Default::default()
     }));
-    // 原生引擎：进程内直调 + 逐行回调推进度（不再 spawn finder.exe；B 批 sink 化后的数据入口）
+    // 原生引擎：进程内直调 + 逐行回调推进度（不再 spawn finder.exe；B 批 sink 化后的数据入口）。
+    // 行 → ingest_line → 新增条目经 emit 出口（窗口版 emit 事件 / 无头版 no-op）。
     let hook_accum = accum.clone();
-    let hook_window = window.clone();
     let hook: Option<Box<dyn FnMut(&str)>> = Some(Box::new(move |line: &str| {
-        ingest_and_emit(&hook_accum, &hook_window, line);
+        let (item, done, total) = {
+            let mut a = hook_accum.lock().unwrap_or_else(|e| e.into_inner());
+            let item = a.ingest_line(line);
+            (item, a.data.len(), a.total)
+        };
+        if let Some(item) = item {
+            emit(&item, done, total);
+        }
     }));
     // S3：纯 Rust 原生
     //
@@ -162,7 +157,7 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
         if code != 0 {
             let msg = if stderr.trim().is_empty() { format!("退出码 {code}") } else { stderr.trim().to_string() };
             log::write_log("error", &format!("Rust 清理扫描失败: {msg}"));
-            return json!({ "success": false, "message": format!("原生扫描失败: {msg}"), "data": [] });
+            return Err(format!("原生扫描失败: {msg}"));
         }
         stderr
     };
@@ -244,6 +239,21 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
             plan_total
         ),
     );
+    Ok((data, malformed.0))
+}
+
+/// 扫描主体（纯原生引擎；PS 回退已随 S3 删除，见 :11）——窗口版：核心 + 进度 emit + 快照登记。
+pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>, partial: bool) -> Value {
+    let win = window.clone();
+    let (mut data, _malformed) = match run_cleanup_scan_core(cats, move |item, done, total| {
+        let _ = win.emit(
+            "cleanup:scan-progress",
+            json!({ "done": done, "total": total, "item": item }),
+        );
+    }) {
+        Ok(v) => v,
+        Err(msg) => return json!({ "success": false, "message": msg, "data": [] }),
+    };
     {
         let fresh = snapshot_by_id(&data);
         let mut guard = snapshots().lock().unwrap_or_else(|e| e.into_inner());
@@ -260,8 +270,15 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
             guard.insert(label.to_string(), fresh);
         }
     }
-    // P2-06：给每个命中项注入后置动作（postAction: explorer|none），供前端在清理
-    // 完成后提示「需重启资源管理器」。派生响应字段，不进规则库、不触发重签。
+    inject_post_actions(&mut data);
+    json!({ "success": true, "data": data })
+}
+
+/// P2-06：给每个命中项注入后置动作（postAction: explorer|none），供前端在清理
+/// 完成后提示「需重启资源管理器」。派生响应字段，不进规则库、不触发重签。
+/// （P2-B 起抽为独立函数：窗口版在**快照登记之后**调用、与重构前顺序一致——快照
+/// 不携带 postAction；无头版在输出前调用。）
+fn inject_post_actions(data: &mut [Value]) {
     for row in data.iter_mut() {
         // 先不可变取 id（结束借用），再可变插入，避免同一行上的借用冲突
         let id = row.get("id").and_then(|v| v.as_str()).map(str::to_string);
@@ -269,7 +286,95 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
             obj.insert("postAction".into(), json!(post_action_of(&id)));
         }
     }
-    json!({ "success": true, "data": data })
+}
+
+/// 把规则库某层的 items 数组里的 id 收进 out（headless 全量用）。
+fn collect_rule_ids(items: Option<&Value>, out: &mut Vec<String>) {
+    if let Some(arr) = items.and_then(|v| v.as_array()) {
+        for it in arr {
+            if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
+                out.push(id.to_string());
+            }
+        }
+    }
+}
+
+/// 规则库全部条目 id（headless 缺省全量 = UI「全量扫描把全部条目 id 传上来」的等价物）。
+fn all_rule_ids() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rules) = rules_value_arc() {
+        if let Some(groups) = rules.get("groups").and_then(|v| v.as_array()) {
+            for g in groups {
+                collect_rule_ids(g.get("items"), &mut out);
+                if let Some(sgs) = g.get("subGroups").and_then(|v| v.as_array()) {
+                    for sg in sgs {
+                        collect_rule_ids(sg.get("items"), &mut out);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// P2-B（2026-10-16）：无头清理扫描入口（**只读**）——供 `examples/scan.rs` 与会话内脚本复用。
+///
+/// - 与 `cleanup:scan` **同一条核心**（`run_cleanup_scan_core`）；不绑定窗口、不登记快照、零写入；
+/// - `cats` 为空 = 全量（现取规则库全部条目 id，与 UI「全量扫描」口径一致）；
+/// - 返回 `{ success, data, counts }`。counts 口径：`lockedFiles/lockedEntries` 是扫描侧
+///   **不可删**的口径（保护清单排除 + 独占探测失败**两类合并**，native 行协议单一口径
+///   `lockedCount`——v3 规格里的 protected/locked 两词在数据面即是它，如实透传不虚拆）；
+///   `filesTotal` 是可删文件清单条数；`malformedLines` 是行协议畸形行数（>0 即协议异常，
+///   fail-loud 透传，与 `@@PLANFILE@@` 超长/坏行记账同源）。
+pub fn cleanup_scan_headless(cats: Vec<String>) -> Value {
+    let cats = if cats.is_empty() { all_rule_ids() } else { cats };
+    let (mut data, malformed) = match run_cleanup_scan_core(cats, |_, _, _| {}) {
+        Ok(v) => v,
+        Err(msg) => return json!({ "success": false, "message": msg, "data": [], "counts": Value::Null }),
+    };
+    inject_post_actions(&mut data);
+    let num = |v: Option<&Value>| -> u64 {
+        // extra 字段（lockedCount/skippedReparse）走字符串形态（前端 Number() 转换），容错数字形态
+        match v {
+            Some(Value::String(s)) => s.parse().unwrap_or(0),
+            Some(Value::Number(n)) => n.as_i64().unwrap_or(0).max(0) as u64,
+            _ => 0,
+        }
+    };
+    let mut entries: u64 = 0;
+    let mut files_total: u64 = 0;
+    let mut locked_files: u64 = 0;
+    let mut locked_entries: u64 = 0;
+    let mut truncated_entries: u64 = 0;
+    let mut skipped_reparse_total: u64 = 0;
+    for it in &data {
+        entries += 1;
+        if let Some(files) = it.get("files").and_then(|v| v.as_array()) {
+            files_total += files.len() as u64;
+        }
+        let lc = num(it.get("lockedCount"));
+        if lc > 0 {
+            locked_files += lc;
+            locked_entries += 1;
+        }
+        if it.get("filesTruncated").and_then(|v| v.as_bool()).unwrap_or(false) {
+            truncated_entries += 1;
+        }
+        skipped_reparse_total += num(it.get("skippedReparse"));
+    }
+    json!({
+        "success": true,
+        "data": data,
+        "counts": {
+            "entries": entries,
+            "filesTotal": files_total,
+            "lockedFiles": locked_files,
+            "lockedEntries": locked_entries,
+            "truncatedEntries": truncated_entries,
+            "skippedReparseTotal": skipped_reparse_total,
+            "malformedLines": malformed,
+        }
+    })
 }
 
 /// cleanup:scan — 扫描可清理项（纯原生引擎；进度走 `cleanup:scan-progress`）

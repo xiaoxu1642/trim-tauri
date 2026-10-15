@@ -85,6 +85,9 @@ const OPTIONAL = [
   // 产物新鲜度：改完代码还没到发版时刻是流程的正常中间态，进必跑等于天天红。
   // 只在①发版前人工触发 ②审查复核线上产物这两个时刻跑；无产物时脚本自己 SKIP（不判红）。
   { name: 'check-release-freshness', reason: '可选：发版前 / 审查复核产物时人工触发（日常迭代产物本就该旧）' },
+  // P2-B 无头扫描 CLI 冒烟：构建依赖 cargo（重）、执行扫真实系统（机器状态相关），
+  // 不适合日常必跑；发版前 / examples/scan.rs 或 scan_execute.rs 改动时人工触发。
+  { name: 'check-headless-cli', reason: '可选：发版前 / 无头 CLI 链路改动时跑（依赖 cargo 构建与真实系统扫描）' },
 ];
 const RETIRED = [
   // D-2 裁定退役：PS 替换管线随外部 PS7 通道整条删除（见 AGENTS.md §4.1 与 §5.12）。

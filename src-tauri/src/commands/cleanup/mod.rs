@@ -69,7 +69,7 @@ pub use recycle_bin::{cleanup_recycle_stats, __cmd__cleanup_recycle_stats, __tau
 mod rules;
 pub use rules::{data_rules_dir, rules_watermark, rules_value, rules_value_arc, cleanup_rules, __cmd__cleanup_rules, __tauri_command_name_cleanup_rules};
 mod scan_execute;
-pub use scan_execute::{cleanup_scan, __cmd__cleanup_scan, __tauri_command_name_cleanup_scan, cleanup_execute, __cmd__cleanup_execute, __tauri_command_name_cleanup_execute, cleanup_item_detail, __cmd__cleanup_item_detail, __tauri_command_name_cleanup_item_detail, cleanup_check_locked, __cmd__cleanup_check_locked, __tauri_command_name_cleanup_check_locked, cleanup_query_locked, __cmd__cleanup_query_locked, __tauri_command_name_cleanup_query_locked, cleanup_kill_locked_processes, __cmd__cleanup_kill_locked_processes, __tauri_command_name_cleanup_kill_locked_processes};
+pub use scan_execute::{cleanup_scan, cleanup_scan_headless, __cmd__cleanup_scan, __tauri_command_name_cleanup_scan, cleanup_execute, __cmd__cleanup_execute, __tauri_command_name_cleanup_execute, cleanup_item_detail, __cmd__cleanup_item_detail, __tauri_command_name_cleanup_item_detail, cleanup_check_locked, __cmd__cleanup_check_locked, __tauri_command_name_cleanup_check_locked, cleanup_query_locked, __cmd__cleanup_query_locked, __tauri_command_name_cleanup_query_locked, cleanup_kill_locked_processes, __cmd__cleanup_kill_locked_processes, __tauri_command_name_cleanup_kill_locked_processes};
 mod state;
 
 #[cfg(test)]
