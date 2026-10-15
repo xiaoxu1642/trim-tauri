@@ -417,6 +417,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::cleanup::cleanup_execute,
         commands::cleanup::cleanup_check_locked,
         commands::cleanup::cleanup_kill_locked_processes,
+        commands::cleanup::cleanup_query_locked,
         commands::cleanup::cleanup_item_detail,
         commands::cleanup::cleanup_age_policy,
         commands::cleanup::cleanup_set_age_policy,

@@ -1246,6 +1246,135 @@
     });
   }
 
+  // ==================== C1-1：占用查询（主窗内嵌卡片，2026-10-16） ====================
+  // 给用户一个「拿一个文件/目录来问谁占着我」的入口（对齐清浊 UnlockFilePage 的功能定位，
+  // 形态拍板走主窗内嵌页签）。与清理前占用检测（offerCloseLocked）的关系：后端同一条 RM
+  // 管线（checklocked_json + parse_locked_lines），写同一份按窗一次性 PID 白名单。
+  // 清浊四坑对应（实现侧逐条注释见 scan_execute.rs `cleanup_query_locked`）：
+  // ① 目录整树由后端收集（上限截断如实标注）；② RM 会话句柄生命周期不跨函数（Rust RAII）；
+  // ③ 检测（查询，只读）与结束（一次性白名单）两步式不合并；④ 承载于现成分段视图，不新开窗。
+  // 结束进程不可逆：走 confirmDanger 确认（焦点落主按钮），系统关键进程只展示、无结束入口。
+  let lockQueryBusy = false;
+  let lockQueryPath = '';       // 最近一次成功查询的路径（后端展开后的实际值；结束进程后重查用）
+  let lockQueryProcs = [];      // 最近一次结果的进程清单（结束按钮的可用性与确认文案都读它）
+
+  function renderLockQueryResult(resp) {
+    const box = document.getElementById('lockQueryResult');
+    const killBtn = document.getElementById('lockKillBtn');
+    const killText = document.getElementById('lockKillBtnText');
+    if (!box) return;
+    const procs = Array.isArray(resp.procs) ? resp.procs : [];
+    const killable = procs.filter(p => p && !p.critical);
+    lockQueryPath = typeof resp.path === 'string' ? resp.path : '';
+    lockQueryProcs = procs;
+    if (killBtn) killBtn.disabled = killable.length === 0;
+    if (killText) killText.textContent = killable.length ? `结束进程（${killable.length}）` : '结束进程';
+    const scanned = Number(resp.scanned) || 0;
+    const truncNote = resp.truncated ? '；目录文件数超过 2 万上限，结果已截断' : '';
+    if (!procs.length) {
+      box.innerHTML = `<div class="empty-state"><p>没有发现占用${scanned > 0 ? `（已检查 ${scanned} 个文件${truncNote}）` : '（目录内没有可查询的文件）'}。</p></div>`;
+      return;
+    }
+    // 进程行复用清理前占用检测弹窗的既有样式（lock-app-*，零新增视觉 token）
+    const rows = procs.map(p => {
+      const name = String((p && p.app) || '未知应用');
+      const right = p && p.critical
+        ? '<span class="lock-app-count" data-tip="系统关键进程，不提供结束入口">系统关键 · 不可结束</span>'
+        : `<span class="lock-app-count">PID ${Number(p && p.pid) || 0}</span>`;
+      return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(name)}">${escapeHtml(name)}</span>${right}</div>`;
+    }).join('');
+    const criticalCount = procs.filter(p => p && p.critical).length;
+    const note = criticalCount
+      ? `<div class="lock-critical-note">${criticalCount} 个系统关键进程只展示、不提供结束入口，结束进程时会被跳过。</div>`
+      : '';
+    box.innerHTML = `<p class="opt-hint">共 ${procs.length} 个占用进程（已检查 ${scanned} 个文件${truncNote}）：</p>`
+      + `<div class="lock-app-list">${rows}</div>${note}`;
+  }
+
+  async function runLockQuery(presetPath) {
+    if (lockQueryBusy) return;
+    const input = document.getElementById('lockQueryPath');
+    const btn = document.getElementById('lockQueryBtn');
+    const box = document.getElementById('lockQueryResult');
+    if (!box) return;
+    const path = String(typeof presetPath === 'string' ? presetPath : (input ? input.value : '') || '').trim();
+    if (!path) {
+      window.app?.toast?.('warning', '请先输入要查询的文件或目录路径');
+      if (input && input.focus) input.focus();
+      return;
+    }
+    if (!window.api?.cleanup?.queryLocked) {
+      window.app?.toast?.('error', '占用查询不可用（适配层未加载）');
+      return;
+    }
+    lockQueryBusy = true;
+    if (btn) { btn.classList.add('busy'); btn.disabled = true; }
+    // 查询期间先禁用「结束进程」：白名单每次查询覆盖，防在途查询改写名单后被误用
+    const killBtn = document.getElementById('lockKillBtn');
+    if (killBtn) killBtn.disabled = true;
+    box.innerHTML = '<div class="empty-state"><p>正在查询占用…</p></div>';
+    let resp = null;
+    try {
+      resp = await window.api.cleanup.queryLocked(path);
+    } catch (e) {
+      resp = null;
+    }
+    lockQueryBusy = false;
+    if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
+    if (!resp || !resp.success) {
+      lockQueryPath = '';
+      lockQueryProcs = [];
+      if (killBtn) killBtn.disabled = true;
+      const msg = (resp && resp.message) || '占用查询失败';
+      window.app?.toast?.('error', msg);
+      box.innerHTML = `<div class="empty-state"><p>${escapeHtml(msg)}</p></div>`;
+      return;
+    }
+    renderLockQueryResult(resp);
+  }
+
+  async function killLockedFromQuery() {
+    if (lockQueryBusy) return;
+    const killable = lockQueryProcs.filter(p => p && !p.critical);
+    if (!killable.length) return;
+    if (!window.api?.cleanup?.killLockedProcesses) {
+      window.app?.toast?.('error', '结束进程不可用（适配层未加载）');
+      return;
+    }
+    // 不可逆操作：确认后再执行（与进程管理子窗同口径；焦点落主按钮由 confirmDanger 承担）
+    const detail = killable.map(p => `• ${p.app}（PID ${p.pid}）`).join('\n');
+    const ok = await window.app?.confirmDanger?.(
+      '结束进程确认',
+      `即将强制结束 ${killable.length} 个占用进程：\n${detail}\n\n未保存的数据可能丢失，是否继续？`,
+      '结束进程',
+      '取消',
+      '进程结束后请重新查询，确认占用已解除。'
+    );
+    if (!ok) return;
+    lockQueryBusy = true;
+    const killBtn = document.getElementById('lockKillBtn');
+    const killText = document.getElementById('lockKillBtnText');
+    if (killBtn) killBtn.disabled = true;
+    if (killText) killText.textContent = '正在结束…';
+    let resp = null;
+    try {
+      resp = await window.api.cleanup.killLockedProcesses();
+    } catch (e) {
+      resp = null;
+    }
+    lockQueryBusy = false;
+    const killed = resp && Array.isArray(resp.killed) ? resp.killed.length : 0;
+    const failed = resp && Array.isArray(resp.failed) ? resp.failed.length : 0;
+    if (resp && resp.success) {
+      window.app?.toast?.(failed ? 'warning' : 'success', `已结束 ${killed} 个进程${failed ? `，${failed} 个未成功（可能已退出或缺权限）` : ''}`);
+    } else {
+      window.app?.toast?.('error', (resp && resp.message) || '结束进程失败');
+    }
+    // 等一拍让句柄释放后再重查（与清理前占用检测的 1200ms 同口径）
+    await new Promise(r => setTimeout(r, 1200));
+    if (lockQueryPath) await runLockQuery(lockQueryPath);
+  }
+
   // 清理
   async function clean() {
     if (isCleaning || selectedIds.size === 0) return;
@@ -2181,6 +2310,12 @@
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);
+    // C1-1 占用查询：查询 / 回车提交 / 结束进程（结束为不可逆操作，内部走 confirmDanger）
+    document.getElementById('lockQueryBtn')?.addEventListener('click', () => runLockQuery());
+    document.getElementById('lockQueryPath')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); runLockQuery(); }
+    });
+    document.getElementById('lockKillBtn')?.addEventListener('click', () => killLockedFromQuery());
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
     if (window.api?.cleanup?.onScanProgress) {

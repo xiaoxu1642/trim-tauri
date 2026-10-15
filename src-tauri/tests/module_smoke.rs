@@ -1681,4 +1681,148 @@ fn wildcard_match_多星与大小写不敏感() {
     assert!(!wildcard_match("a.log", "*.txt"), "后缀不合不得命中");
 }
 
+// ==================== C1-1：占用查询（P1-D，主窗内嵌卡片） ====================
+
+/// C1-1 主窗档反向钉：`cleanup_query_locked` 比 check-locked 的 readonly 更紧——
+/// 未知 label（模拟被注入页）与全部子窗调它都必须被来源校验拒杀。
+/// 档位按「谁真的需要调它」判：占用查询入口只在主窗磁盘清理页（内嵌卡片），
+/// 下放给子窗就是白给放宽（AGENTS §3）。
+#[test]
+fn cleanup_query_locked_is_main_only() {
+    let w = window_with_label("__trim_injected__");
+    let text = invoke_text(&w, "cleanup_query_locked", json!({ "path": r"C:\Windows" }));
+    assert!(
+        text.contains("IPC 来源校验失败"),
+        "未知 label 调占用查询必须被拒（主窗档），回执 {text}"
+    );
+    let mut rejected: Vec<&str> = Vec::new();
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "cleanup_query_locked", json!({ "path": r"C:\Windows" }));
+        assert!(
+            text.contains("IPC 来源校验失败"),
+            "{label} 窗调占用查询必须被来源校验拒杀（主窗档），回执 {text}"
+        );
+        rejected.push(label);
+    }
+    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+}
+
+/// C1-1 占用查询：主窗 + 不存在的路径必须「明说路径不存在」，不许装「无占用」——
+/// 假空结果会让用户以为文件没被占（与「解占用」的功能定位直接冲突）。
+/// 早退发生在任何 RM 注册之前 ⇒ 零副作用，可做 MockRuntime 快测。
+#[test]
+fn cleanup_query_locked_reports_missing_path_honestly() {
+    let mut missing = std::env::temp_dir().join(format!(
+        "__trim_smoke_no_such_query_{}__",
+        std::process::id()
+    ));
+    // 「不存在」是断言前提：极端残留（同名历史产物）时加后缀再探测
+    while missing.exists() {
+        missing.push("_");
+    }
+    let w = main_window();
+    let res = invoke(&w, "cleanup_query_locked", json!({ "path": missing.to_string_lossy() }));
+    assert_eq!(res["success"], json!(false), "不存在的路径不得装「无占用」: {res}");
+    assert!(
+        common::message_of(&res).contains("路径不存在"),
+        "必须以「路径不存在」明说，回执 {res}"
+    );
+}
+
+/// 真机 `#[ignore]` 探针：占用查询端到端（RM 管线真跑）。
+///
+/// 形态修正（2026-10-16 本机实测，诊断数据在 `target/probe-c1-1-rm/`）：交接文档原
+/// 设计「用记事本占住文件」在 Win11 26H2 的 Store 版记事本上**不成立**——实测记事本
+/// 打开文件后不持句柄（独占探测 8 次全成功、可重命名、RM 零报告），构造不出「被占用」。
+/// 改用确定性形态：独立 powershell 子进程以 `FileShare.None` 独占打开探针文件并保持
+/// ——这正是产品面「文件被某进程占用」的等价物（`file_deletable` 探测失败 → 进 RM 查询）。
+/// 为什么必须用外部进程而不能用测试进程自己的句柄：解析器会剔除**调用方自身 PID**
+/// （RM 总会把调用方列入占用者名单，v3.7.3 修复①）——测试进程自己占文件会被这条
+/// 剔除逻辑吃掉，验不出真东西。断言以 holder 的 **PID** 为准（不依赖 app 名字符串形态）。
+/// 清场：Drop 守卫 kill holder + 删临时目录（powershell 是本次 spawn 的子进程，
+/// 不存在「误杀用户进程」面）。
+#[test]
+#[ignore = "真机探针：起 powershell 持文件句柄（自建自清），发布前门禁跑"]
+#[cfg(windows)]
+fn cleanup_query_locked_probe_names_locking_process() {
+    let dir = std::env::temp_dir().join(format!("__trim_lock_probe_{}__", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("建探针目录失败");
+    let file = dir.join("probe.txt");
+    std::fs::write(&file, b"trim lock probe").expect("写探针文件失败");
+
+    struct ProbeCleanup {
+        child: Option<std::process::Child>,
+        dir: std::path::PathBuf,
+    }
+    impl Drop for ProbeCleanup {
+        fn drop(&mut self) {
+            if let Some(mut c) = self.child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    // holder：Windows PowerShell（系统必带，-WindowStyle Hidden 不弹窗）独占持有 120 秒。
+    // 路径单引号转义成 ''（PS 单引号字符串规则）——temp 路径理论上可不含单引号，但别赌。
+    let ps_path = file.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$fs=[IO.File]::Open('{ps_path}',[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None); Start-Sleep -Seconds 120"
+    );
+    let child = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .spawn()
+        .expect("启动 holder powershell 失败");
+    let holder_pid = child.id() as i64;
+    let _cleanup = ProbeCleanup { child: Some(child), dir: dir.clone() };
+
+    // 独占探测（与 file_deletable 同口径）：失败 = 文件已被持有
+    fn file_held(p: &std::path::Path) -> bool {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).share_mode(0).open(p).is_err()
+    }
+
+    // 前提轮询：holder 起效（powershell 冷启动 + 脚本执行可达数秒）
+    let mut held = false;
+    for _ in 0..15 {
+        if file_held(&file) {
+            held = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(held, "holder 未成功持有文件（环境问题：powershell 未能持句柄），先排查环境再判产品");
+
+    let named = |res: &serde_json::Value| {
+        res["procs"]
+            .as_array()
+            .map(|a| a.iter().any(|p| p.get("pid").and_then(|v| v.as_i64()) == Some(holder_pid)))
+            .unwrap_or(false)
+    };
+
+    let w = main_window();
+    // ① 文件形态：查询必须点名 holder（最多 20 次 × 500ms，容忍 RM 会话建立延迟）
+    let mut hit_file = false;
+    for _ in 0..20 {
+        let res = invoke(&w, "cleanup_query_locked", json!({ "path": file.to_string_lossy() }));
+        assert_eq!(res["success"], json!(true), "真机占用查询应成功: {res}");
+        if named(&res) {
+            hit_file = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(hit_file, "独占持有探针文件的 holder（pid={holder_pid}）必须被点名");
+
+    // ② 目录形态：整树分支（collect_query_tree）对同一占用也必须点名
+    let res_dir = invoke(&w, "cleanup_query_locked", json!({ "path": dir.to_string_lossy() }));
+    assert_eq!(res_dir["success"], json!(true), "目录查询应成功: {res_dir}");
+    assert!(
+        named(&res_dir),
+        "目录整树查询必须点名 holder pid={holder_pid}（collect_query_tree 分支）: {res_dir}"
+    );
+}
+
 

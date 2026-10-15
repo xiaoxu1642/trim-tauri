@@ -285,7 +285,8 @@
   const ACTIVE_PAGE_KEY = 'trim-active-page';
 
   // 磁盘清理五合一：原五个独立页面收拢为 page-cleanup 内的分段视图
-  const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-empty', 'cleanup-analyze'];
+  // C1-1（2026-10-16）：第 5 个子视图 'cleanup-locked'（占用查询，主窗内嵌卡片）
+  const CLEANUP_VIEWS = ['cleanup', 'cleanup-dups', 'cleanup-empty', 'cleanup-analyze', 'cleanup-locked'];
   const CLEANUP_VIEW_KEY = 'trim-cleanup-view';
 
   function getCleanupView() {

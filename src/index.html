@@ -283,6 +283,7 @@
           <button class="filter-tab" data-cleanup-view="cleanup-dups" role="tab" aria-selected="false">重复文件查找</button>
           <button class="filter-tab" data-cleanup-view="cleanup-empty" role="tab" aria-selected="false">空文件与空目录</button>
           <button class="filter-tab" data-cleanup-view="cleanup-analyze" role="tab" aria-selected="false">磁盘分析</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-locked" role="tab" aria-selected="false">占用查询</button>
         </div>
 
         <!-- 各子视图操作行：随分段切换显示；「主要」视图的操作与分段栏同行、恒右对齐（2026-10-06 用户裁定：
@@ -505,7 +506,32 @@
         </div>
         <div class="table-card" id="anTable"></div>
       </div>
-      </div><!-- /#page-cleanup（磁盘清理五合一：四个子视图收拢于此） -->
+
+      <!-- ============================ 磁盘清理 · 占用查询（子视图，C1-1） ============================ -->
+      <div class="cleanup-view" data-cleanup-panel="cleanup-locked">
+        <div class="finder-toolbar card">
+          <!-- C1-1（2026-10-16 拍板）：主窗内嵌卡片；查询与结束进程两步式——
+               查询只读，结束只认本次查询写下的白名单；系统关键进程只展示、不出现在白名单 -->
+          <span class="opt-inline">查询路径
+            <input type="text" class="field-input finder-path" id="lockQueryPath" placeholder="文件或目录，如 %TEMP%（支持环境变量）" spellcheck="false" />
+          </span>
+          <button class="btn btn-primary" id="lockQueryBtn">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <span>查询占用</span>
+          </button>
+          <button class="btn btn-accent" id="lockKillBtn" disabled data-tip="结束本次查询确认占用的非关键进程；系统关键进程不在其中">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="6.5" y="6.5" width="11" height="11" rx="2.2"/></svg>
+            <span id="lockKillBtnText">结束进程</span>
+          </button>
+          <span class="opt-hint">查询某个文件或目录正被哪些应用占用；系统关键进程只展示，不提供结束入口。</span>
+        </div>
+        <div id="lockQueryResult">
+          <div class="empty-state">
+            <p>输入文件或目录路径后点击「查询占用」。目录按整树检查（上限 2 万个文件，超出会注明「已截断」）。</p>
+          </div>
+        </div>
+      </div>
+      </div><!-- /#page-cleanup（磁盘清理五合一：五个子视图收拢于此） -->
 
       <!-- 软件卸载页（卸载域 MVP：列表 → 原厂卸载；残留扫描整块在卸载完成后自动弹出的 residue 副窗内） -->
       <div class="page" id="page-uninstall">

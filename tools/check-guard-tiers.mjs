@@ -92,6 +92,10 @@ const MUST_MAIN = [
   // 消费方只有主窗清理页——同 cleanup_recycle_stats 口径判 MAIN。
   'cleanup_open_recycle_bin',
   'cleanup_kill_locked_processes',
+  // C1-1（2026-10-16）：占用查询入口只在主窗磁盘清理页（内嵌卡片），按「谁真的需要
+  // 调它」判 MAIN——比 readonly 紧；与 check-locked 的 readonly 不冲突（那条的候选
+  // 来自扫描快照，子窗确认链也要用）。
+  'cleanup_query_locked',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
   'contextmenu_open_in_regedit', // v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC

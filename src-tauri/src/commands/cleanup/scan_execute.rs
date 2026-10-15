@@ -643,6 +643,85 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
 
 // ==================== cleanup:check-locked / kill-locked-processes ====================
 
+/// `@@LOCKED@@` 行协议解析结果（占用检测与占用查询共用，判定不重写）。
+pub(super) struct LockedParse {
+    pub(super) locked: Vec<Value>,
+    pub(super) by_app: Map<String, Value>,
+    pub(super) procs: Vec<Value>,
+    pub(super) locked_by_item: Map<String, Value>,
+    pub(super) whitelist: Vec<Value>,
+    pub(super) malformed: usize,
+}
+
+/// 解析 checklocked_json 的 `@@LOCKED@@` 行协议（check-locked / query-locked 共用）。
+///
+/// 两条判据必须原样保留（v3.7.3 修复①②，抽成共用函数时逐条搬迁）：
+/// ① RM 总会把调用方列入占用者名单 ⇒ 剔除自身 PID；
+/// ② explorer 命中即 critical（只展示、无结束入口），并上扫描侧按 RM ApplicationType
+///    判出的 critical（RmCritical=1000）——此前这个字段整条被丢掉，「系统关键进程」
+///    实际只认 explorer 一个名字，lsass/csrss 这类真关键进程会被列进可结束名单。
+///    名字规则仍要保留：实测 RM 对 explorer 报的是 Application 不是 RmCritical。
+/// 畸形行不许静默丢（审查 L-21）：计数返回给调用方 warn 留痕。
+pub(super) fn parse_locked_lines(stdout: &str, self_pid: i64) -> LockedParse {
+    let mut locked: Vec<Value> = Vec::new();
+    let mut locked_by_item: Map<String, Value> = Map::new();
+    let mut by_app: Map<String, Value> = Map::new();
+    let mut procs: Vec<Value> = Vec::new();
+    let mut seen_pids: HashSet<i64> = HashSet::new();
+    let mut malformed = 0usize;
+    for line in stdout.lines() {
+        // 前缀 '@@LOCKED@@' 恰 10 字符（勿与 '@@PLANFILE@@' 的 12 混淆）
+        let Some(rest) = line.strip_prefix("@@LOCKED@@") else {
+            continue;
+        };
+        let Ok(pf) = serde_json::from_str::<Value>(rest) else {
+            malformed += 1;
+            continue;
+        };
+        let Some(path) = pf.get("path").and_then(|v| v.as_str()) else {
+            malformed += 1;
+            continue;
+        };
+        if path.is_empty() {
+            malformed += 1;
+            continue;
+        }
+        let id = pf.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        locked.push(pf.clone());
+        if !id.is_empty() {
+            let n = locked_by_item.get(id).map(js_number).unwrap_or(0.0) + 1.0;
+            locked_by_item.insert(id.to_string(), Value::from(n as i64));
+        }
+        for p in pf.get("procs").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+            let pid = match p.get("pid").and_then(|v| v.as_i64()) {
+                Some(v) => v,
+                None => continue,
+            };
+            let app = p.get("app").and_then(|v| v.as_str()).unwrap_or("");
+            if app.is_empty() {
+                continue;
+            }
+            if pid == self_pid {
+                continue;
+            }
+            let critical = p.get("critical").and_then(|v| v.as_bool()).unwrap_or(false)
+                || app.to_lowercase().contains("explorer")
+                || app.contains("资源管理器");
+            let n = by_app.get(app).map(js_number).unwrap_or(0.0) + 1.0;
+            by_app.insert(app.to_string(), Value::from(n as i64));
+            if seen_pids.insert(pid) {
+                procs.push(json!({ "pid": pid, "app": app, "critical": critical }));
+            }
+        }
+    }
+    let whitelist: Vec<Value> = procs
+        .iter()
+        .filter(|p| p.get("critical").and_then(|v| v.as_bool()) == Some(false))
+        .cloned()
+        .collect();
+    LockedParse { locked, by_app, procs, locked_by_item, whitelist, malformed }
+}
+
 /// cleanup:check-locked — 清理前占用检测（只读；PID 白名单仅供紧随其后的结束进程使用）
 #[tauri::command]
 pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, ids: Option<Value>) -> Value {
@@ -696,80 +775,19 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
             };
             return (None, msg);
         }
-        let mut locked: Vec<Value> = Vec::new();
-        let mut locked_by_item: Map<String, Value> = Map::new();
-        let mut by_app: Map<String, Value> = Map::new();
-        let mut procs: Vec<Value> = Vec::new();
-        let mut seen_pids: HashSet<i64> = HashSet::new();
-        let self_pid = std::process::id() as i64;
-        // 审查 L-21（2026-10-03 L4）：畸形行不许静默丢——与 ScanAccum（v2-L4P-34）、
-        // apply.rs（M-1）同基线（「必须计数或告警」）。来源是进程内 native-scanner 自产
-        // （checklocked_body 已走 jstr 转义），畸形仅可能意味着扫描器自身 bug，warn 留痕
-        // 即可让审计可见，不必改回执形状。
-        let mut malformed = 0usize;
-        for line in stdout.lines() {
-            // 前缀 '@@LOCKED@@' 恰 10 字符（勿与 '@@PLANFILE@@' 的 12 混淆）
-            let Some(rest) = line.strip_prefix("@@LOCKED@@") else {
-                continue;
-            };
-            let Ok(pf) = serde_json::from_str::<Value>(rest) else {
-                malformed += 1;
-                continue;
-            };
-            let Some(path) = pf.get("path").and_then(|v| v.as_str()) else {
-                malformed += 1;
-                continue;
-            };
-            if path.is_empty() {
-                malformed += 1;
-                continue;
-            }
-            let id = pf.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            locked.push(pf.clone());
-            if !id.is_empty() {
-                let n = locked_by_item.get(id).map(js_number).unwrap_or(0.0) + 1.0;
-                locked_by_item.insert(id.to_string(), Value::from(n as i64));
-            }
-            for p in pf.get("procs").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-                let pid = match p.get("pid").and_then(|v| v.as_i64()) {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let app = p.get("app").and_then(|v| v.as_str()).unwrap_or("");
-                if app.is_empty() {
-                    continue;
-                }
-                // v3.7.3 修复①：RM 总会把调用方列入占用者名单——剔除自身 PID
-                if pid == self_pid {
-                    continue;
-                }
-                // v3.7.3 修复②：explorer 命中即 critical（只展示、无结束入口）。
-                // 2026-09-30 补：再并上扫描器按 RM ApplicationType 判出的 critical
-                // （RmCritical=1000）——此前这个字段整条被丢掉，「系统关键进程」实际只认
-                // explorer 一个名字，lsass/csrss 这类真关键进程会被列进可结束名单。
-                // 名字规则仍要保留：实测 RM 对 explorer 报的是 Application 不是 RmCritical。
-                let critical = p.get("critical").and_then(|v| v.as_bool()).unwrap_or(false)
-                    || app.to_lowercase().contains("explorer")
-                    || app.contains("资源管理器");
-                let n = by_app.get(app).map(js_number).unwrap_or(0.0) + 1.0;
-                by_app.insert(app.to_string(), Value::from(n as i64));
-                if seen_pids.insert(pid) {
-                    procs.push(json!({ "pid": pid, "app": app, "critical": critical }));
-                }
-            }
-        }
-        let whitelist: Vec<Value> = procs
-            .iter()
-            .filter(|p| p.get("critical").and_then(|v| v.as_bool()) == Some(false))
-            .cloned()
-            .collect();
-        if malformed > 0 {
+        // 行协议解析抽成 parse_locked_lines（与 cleanup:query-locked 共用，判定不重写）；
+        // 自身 PID 剔除 / critical 判定 / 畸形行计数的判据见该函数注释。
+        let parsed = parse_locked_lines(&stdout, std::process::id() as i64);
+        if parsed.malformed > 0 {
             log::write_log(
                 "warn",
-                &format!("占用检测输出含 {malformed} 条畸形 @@LOCKED@@ 行，已跳过（扫描器协议异常）"),
+                &format!("占用检测输出含 {} 条畸形 @@LOCKED@@ 行，已跳过（扫描器协议异常）", parsed.malformed),
             );
         }
-        (Some((locked, by_app, procs, locked_by_item, whitelist)), String::new())
+        (
+            Some((parsed.locked, parsed.by_app, parsed.procs, parsed.locked_by_item, parsed.whitelist)),
+            String::new(),
+        )
     });
     let (payload, err) = match task.await {
         Ok(v) => v,
@@ -789,6 +807,161 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
         "byApp": Value::Object(by_app),
         "procs": procs,
         "lockedByItem": Value::Object(locked_by_item),
+        "scanned": scanned,
+        "truncated": truncated
+    })
+}
+
+/// 占用查询的目录整树收集上限（与 PLAN_LOCK_CAP 同数量级：RM 单次会话注册 2 万个
+/// 文件足够覆盖任何真实目录，超限截断并如实标注，不许静默少查）。
+pub(super) const QUERY_LOCK_CAP: usize = 20_000;
+
+/// 占用查询的目录整树收集（清浊坑①：RM 只对**注册进去的文件**报告占用者，只注册
+/// 目录本身不会覆盖树内文件 ⇒ 目录查询必须整树下钻）。跳过 reparse 点（与扫描/执行
+/// 两侧同一判据 `protect::is_reparse`）、深度上限与 native-scanner `MAX_WALK_DEPTH`
+/// 同口径；触上限即截断并由调用方标注「已截断」。
+fn collect_query_tree(root: &str, out: &mut Vec<String>, truncated: &mut bool) {
+    // 深度口径同 native-scanner MAX_WALK_DEPTH=64（v2-L4P-11/C-1）：超深目录树会把
+    // 查询清单撑爆，而环状结构经普通目录绕不开 reparse 判定也构造不出来。
+    const QUERY_WALK_MAX_DEPTH: usize = 64;
+    fn walk(dir: &str, depth: usize, out: &mut Vec<String>, truncated: &mut bool) {
+        if depth >= QUERY_WALK_MAX_DEPTH {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for entry in rd.filter_map(|e| e.ok()) {
+            if out.len() >= QUERY_LOCK_CAP {
+                *truncated = true;
+                return;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if crate::engine::protect::is_reparse(&meta) {
+                continue;
+            }
+            let p = entry.path().to_string_lossy().to_string();
+            if meta.is_dir() {
+                walk(&p, depth + 1, out, truncated);
+            } else if meta.is_file() {
+                out.push(p);
+            }
+        }
+    }
+    walk(root, 0, out, truncated);
+}
+
+/// 占用查询的 `checklocked_json` 输入装配：files 元素必须是「对象」形态
+/// （`{"path","id"}`）——native-scanner `checklocked_body` 按 `f.get("path")` 取值。
+/// **C1-1 真机探针抓出的坑**：原实现直接下发字符串数组，native 侧对每个元素
+/// `get("path")` 恒为 None 而静默 `continue` ⇒ 输出恒空（假阴性「无占用」）；
+/// MockRuntime 只覆盖到「路径不存在」早退、到不了 RM 分支，门禁网全部漏过——
+/// 只有真机探针能咬住（判据：`cleanup_query_locked_probe_names_locking_process`）。
+/// id 留空串：query 域不参与 lockedByItem 记账（那是 check-locked 的快照语义）。
+pub(super) fn query_files_entries(files: &[String]) -> Vec<Value> {
+    files.iter().map(|p| json!({ "path": p, "id": "" })).collect()
+}
+
+/// cleanup:query-locked — 占用查询（主窗内嵌卡片；给定任意路径，问「谁占着它」）
+///
+/// 清浊 C1-1（2026-10-16 拍板：主窗内嵌卡片/页签，复用 `guard::MAIN`，不开新子窗）。
+/// 与 `cleanup:check-locked` 的分工：后者查「已扫描清理项里哪些被占」（候选来自扫描
+/// 快照），本命令查「用户给的任意路径被谁占」——两条走同一条 RM 管线
+/// （`checklocked_json` + `parse_locked_lines`），判定不重写。
+///
+/// 四个实现坑逐条对应（清浊 C1-1 判据）：
+/// ① 目录查询必须**整树**注册 RM（collect_query_tree）——只注册目录本身，RM 不会
+///    报告占用树内文件的进程；
+/// ② RM 会话句柄只在 `checklocked_json`（native-scanner）内开合，本函数不持句柄
+///    跨函数（Rust RAII；探测失败整体返回错误，不放半截结果出去）；
+/// ③ 检测（本命令）与结束（`kill-locked-processes`）两步式不合并——结束只认本次
+///    查询写下的一次性白名单；
+/// ④ 入口复用磁盘清理页现成分段视图（占用查询 tab），不新开裸窗。
+#[tauri::command]
+pub async fn cleanup_query_locked<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    path: Option<String>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let raw = match path {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => return json!({ "success": false, "message": "缺少要查询的路径" }),
+    };
+    // 与规则链同口径的路径展开：%VAR% 先展开；盘符相对形态拒查（§4.10：保护侧按
+    // CWD 折叠、RM 按当前盘根解析，两侧比对对象不同）；展开后不存在就明说，不装「无占用」。
+    let expanded = cleanup_scan::expand_env_path(&raw);
+    if cleanup_scan::is_drive_relative(&expanded) {
+        return json!({ "success": false, "message": format!("盘符相对路径无法查询：{raw}") });
+    }
+    let meta = match std::fs::symlink_metadata(&expanded) {
+        Ok(m) => m,
+        Err(_) => {
+            return json!({ "success": false, "message": format!("路径不存在或不可访问：{expanded}") })
+        }
+    };
+    // 坑①：目录 ⇒ 整树文件（上限 QUERY_LOCK_CAP，截断如实标注）；文件 ⇒ 单条。
+    let mut files: Vec<String> = Vec::new();
+    let mut truncated = false;
+    if meta.is_dir() {
+        collect_query_tree(&expanded, &mut files, &mut truncated);
+    } else {
+        files.push(expanded.clone());
+    }
+    let scanned = files.len();
+    if files.is_empty() {
+        // 空目录 / 全是 reparse 点：没有可注册的文件 ⇒ 无占用可言（明说，不放空结果充数）
+        return json!({
+            "success": true, "path": expanded, "locked": [], "byApp": {},
+            "procs": [], "lockedByItem": {}, "scanned": 0, "truncated": truncated
+        });
+    }
+    // R10（2026-10-15）同口径：保护清单随候选一起注入（可删判定与扫描/执行侧同源）。
+    // C1-1：files 必须经 query_files_entries 装配成对象数组——直接下发字符串数组会让
+    // native 侧静默全跳过（恒空输出），见该函数注释。
+    let payload = json_text(&json!({
+        "files": query_files_entries(&files),
+        "protect": crate::engine::protect::protected_roots_json()
+    }));
+    let win = window.clone();
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let (code, stdout, stderr) = cleanup_scan::checklocked_json(&payload);
+        if code != 0 {
+            let msg = if stderr.trim().is_empty() {
+                format!("占用查询退出码 {code}")
+            } else {
+                stderr.trim().to_string()
+            };
+            return (None, msg);
+        }
+        let parsed = parse_locked_lines(&stdout, std::process::id() as i64);
+        if parsed.malformed > 0 {
+            log::write_log(
+                "warn",
+                &format!("占用查询输出含 {} 条畸形 @@LOCKED@@ 行，已跳过（扫描器协议异常）", parsed.malformed),
+            );
+        }
+        (Some(parsed), String::new())
+    });
+    let (parsed, err) = match task.await {
+        Ok(v) => v,
+        Err(e) => return json!({ "success": false, "message": e.to_string() }),
+    };
+    let Some(parsed) = parsed else {
+        return json!({ "success": false, "message": err });
+    };
+    // 白名单每次查询覆盖（与 check-locked 同键同语义：紧随其后的结束进程只认这份名单，
+    // 防「查询 A 路径后延时结束 B 进程」的窗口）
+    lock_whitelist()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(win.label().to_string(), parsed.whitelist);
+    json!({
+        "success": true,
+        "path": expanded,
+        "locked": Value::Array(parsed.locked),
+        "byApp": Value::Object(parsed.by_app),
+        "procs": Value::Array(parsed.procs),
+        "lockedByItem": Value::Object(parsed.locked_by_item),
         "scanned": scanned,
         "truncated": truncated
     })
@@ -896,3 +1069,30 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
 
 
 // 2026-10-12：retry_accounting_tests（重试永久删的释放量口径）随回收站重试链整链退役。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `checklocked_json` 输入契约：files 元素必须是 `{"path","id"}` 对象——
+    /// **真机抓出的回归面**：曾以字符串数组直接下发，native 侧 `f.get("path")`
+    /// 恒 None 而静默跳过（输出恒空、假阴性「无占用」）。这条钉「与 native 侧
+    /// 行协议的装配形态」，改动 payload 构造时它先红；完整行为由真机探针守。
+    #[test]
+    fn query_files_entries_matches_native_contract() {
+        let files = vec![r"C:\a\x.txt".to_string(), r"C:\b\y.txt".to_string()];
+        let entries = query_files_entries(&files);
+        assert_eq!(entries.len(), files.len(), "条目数必须与文件数一致");
+        for (i, e) in entries.iter().enumerate() {
+            let obj = e
+                .as_object()
+                .unwrap_or_else(|| panic!("元素必须是对象（字符串元素会被 native 侧静默跳过）: {e}"));
+            let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            assert_eq!(path, files[i], "path 必须原样带上（native 侧按它注册 RM）: {e}");
+            assert!(
+                obj.contains_key("id"),
+                "id 键必须在场（空串占位，lockedByItem 记账靠它）: {e}"
+            );
+        }
+    }
+}

@@ -187,6 +187,7 @@ const TAURI_ADDED = {
   'cleanup:open-recycle-bin': 'G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（ShellExecuteW shell:RecycleBinFolder；主窗档。上游 Electron 无此面，旧「明细」对回收站是恒空清单）',
   'settings:get-prefs': 'P2-13（2026-10-09）：UI 偏好键批量读（上游偏好只活渲染层 localStorage，无后端真源；消费方横跨窗口见只读档登记）',
   'settings:set-pref': 'P2-13（2026-10-09）：UI 偏好键写（PREF_KEYS 白名单写 settings.json 偏好段；上游无此面）',
+  'cleanup:query-locked': 'P1-D C1-1（2026-10-16）：占用查询——任意文件/目录问「谁占着它」（复用 check-locked 同一条 RM 管线；主窗内嵌卡片；上游无此能力）',
 };
 
 function collect(set, re, text) {

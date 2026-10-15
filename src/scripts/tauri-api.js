@@ -82,6 +82,7 @@
     'cleanup:execute': 'cleanup_execute',
     'cleanup:check-locked': 'cleanup_check_locked',
     'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
+    'cleanup:query-locked': 'cleanup_query_locked',
     'cleanup:item-detail': 'cleanup_item_detail',
     'cleanup:age-policy': 'cleanup_age_policy',
     'cleanup:set-age-policy': 'cleanup_set_age_policy',
@@ -440,6 +441,9 @@
       },
       checkLocked: function (ids) { return invokeChannel('cleanup:check-locked', { ids: ids }); },
       killLockedProcesses: function () { return invokeChannel('cleanup:kill-locked-processes'); },
+      // C1-1（2026-10-16）：占用查询——用户任意路径 ⇒ 谁占着它（主窗内嵌卡片；
+      // 只读，与 check-locked 走同一条 RM 管线；结束进程仍走 killLockedProcesses）
+      queryLocked: function (path) { return invokeChannel('cleanup:query-locked', { path: path }); },
       itemDetail: function (id, path) {
         if (path === void 0) path = '';
         return invokeChannel('cleanup:item-detail', { id: id, path: path });
