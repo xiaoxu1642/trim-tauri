@@ -5,6 +5,11 @@
   "postActions": {
     "thumbnailCacheFiles": "explorer",
     "iconCacheFiles": "explorer",
-    "winINetCache": "explorer"
+    "winINetCache": "explorer",
+    "setupapiDevLog": "none",
+    "catroot2DberrLog": "none",
+    "wdiTraceLogs": "none",
+    "sleepStudyScreenOnTraces": "none",
+    "dotnetNgenLogs": "none"
   }
 }

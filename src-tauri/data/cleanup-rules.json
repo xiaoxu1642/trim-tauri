@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "rulesVersion": 20261015,
+  "rulesVersion": 20261016,
   "groups": [
     {
       "key": "system",
@@ -30,7 +30,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Windows Update 安装日志",
@@ -64,7 +64,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Windows Update 下载缓存",
@@ -98,7 +98,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "更新分发缓存",
@@ -128,7 +128,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinSAT 磁盘/图形评估缓存（HiBit 逆向新增）",
@@ -158,7 +158,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Windows Update 会话日志（HiBit 逆向新增）",
@@ -187,7 +187,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Web Platform Installer *」登记了这条目标",
@@ -237,7 +237,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Windows 错误报告存档",
@@ -267,7 +267,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "系统诊断预取数据",
@@ -297,7 +297,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "系统/HTTPERR 等日志文件（HiBit 逆向新增，主要清理 HTTPERR 与 W3SVC 站点日志）",
@@ -327,7 +327,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Windows 组件安装与修复日志（CBS.log；原「电脑优化中心 - PCCleaner 深度清理」携带项，C1 整合，2026-09-14）",
@@ -357,7 +357,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "DISM 组件维护日志（dism.log；原「电脑优化中心 - PCCleaner 深度清理」携带项，C1 整合，2026-09-14）",
@@ -387,7 +387,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Windows 调试输出目录（HiBit 逆向新增）",
@@ -417,7 +417,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "setupact/setuperr 安装日志与镜像部署残留（HiBit 逆向新增）",
@@ -447,7 +447,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "待上报的 WER 错误报告队列（与 ReportArchive 配套，HiBit 逆向新增）",
@@ -477,7 +477,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Defender 扫描历史",
@@ -507,7 +507,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "事件日志目录",
@@ -536,7 +536,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Expression Encoder *」登记了这条目标",
@@ -578,7 +578,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Garage Mouse Without Borders *」登记了这条目标",
@@ -620,7 +620,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Message Analyzer *」登记了这条目标",
@@ -667,7 +667,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft PowerToys Hosts File Editor *」登记了这条目标",
@@ -709,7 +709,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft PowerToys ZoomIt *」登记了这条目标",
@@ -751,7 +751,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft PowerToys Workspaces *」登记了这条目标",
@@ -793,7 +793,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Robocopy GUI *」登记了这条目标",
@@ -840,7 +840,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft SQL Server *」登记了这条目标",
@@ -886,7 +886,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Support and Recovery Assistant *」登记了这条目标",
@@ -933,7 +933,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Windows Photo Viewer *」登记了这条目标",
@@ -983,7 +983,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "远程桌面位图缓存",
@@ -1013,7 +1013,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "CLR 使用日志",
@@ -1044,7 +1044,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeDays": 7,
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Prefetch 预读",
@@ -1091,7 +1091,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "资源管理器缩略图缓存数据库。清理时会临时重启资源管理器",
@@ -1137,7 +1137,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "资源管理器图标缓存数据库（与缩略图缓存同目录，按模式区分）。清理时会临时重启资源管理器 —— M2 起该项承接原「系统维护 - 重建图标与缩略图缓存」的能力",
@@ -1171,7 +1171,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "系统级网页缓存",
@@ -1201,7 +1201,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "内核实时崩溃报告（HiBit 逆向新增）",
@@ -1230,7 +1230,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft DirectX Shader Cache *」登记了这条目标",
@@ -1277,7 +1277,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Edge Bookmark Favicons *」登记了这条目标",
@@ -1319,7 +1319,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft NuGet Package Cache *」登记了这条目标",
@@ -1361,7 +1361,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Windows Cryptographic Services *」登记了这条目标",
@@ -1457,7 +1457,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "组件服务临时",
@@ -1492,7 +1492,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "挂起重命名临时",
@@ -1527,7 +1527,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "用户 TEMP",
@@ -1561,7 +1561,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "驱动安装解压残留",
@@ -1592,7 +1592,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeHours": 24,
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "系统级 TEMP（区别于用户 TEMP，HiBit 逆向新增）",
@@ -1634,7 +1634,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeDays": 2,
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "应用崩溃 .dmp",
@@ -1669,7 +1669,7 @@
                 "reviewedAt": "2026-09-27"
               },
               "minAgeDays": 2,
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "蓝屏 minidump",
@@ -1715,7 +1715,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "资源管理器最近打开文档的注册表记录（隐私清理）",
@@ -1750,7 +1750,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Win+R「运行」历史记录（隐私清理）",
@@ -1785,7 +1785,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "MuiCache 显示名缓存，仅清键值不删键，系统自动重建",
@@ -1815,7 +1815,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "最近使用文件的 .lnk 快捷方式（隐私清理，执行后自动重建目录）",
@@ -1852,7 +1852,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Dism++ 组件操作历史备份",
@@ -1881,7 +1881,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Deployment Toolkit *」登记了这条目标",
@@ -1923,7 +1923,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Edge Autoplay Preferences *」登记了这条目标",
@@ -1965,7 +1965,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Management Console *」登记了这条目标",
@@ -2007,7 +2007,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Small Basic *」登记了这条目标",
@@ -2049,7 +2049,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Microsoft Visual Studio Backups *」登记了这条目标",
@@ -2091,7 +2091,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Windows 7 Manager *」登记了这条目标",
@@ -2133,7 +2133,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Windows CD Burning Queue *」登记了这条目标",
@@ -2164,48 +2164,6 @@
               ]
             },
             {
-              "id": "windowsRecycleBin",
-              "name": "Windows Recycle Bin 缓存",
-              "risk": "low",
-              "evidence": "WinApp2 规则库「Windows Recycle Bin *」登记的缓存目标（1 个路径）",
-              "recommended": true,
-              "domain": "system",
-              "group": "stale",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Windows Recycle Bin *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261015,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Windows Recycle Bin *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%SystemDrive%\\$Recycle.Bin",
-                  "pattern": "*",
-                  "recurse": true
-                }
-              ],
-              "detect": [
-                {
-                  "type": "reg",
-                  "path": "HKCU\\Software\\Microsoft\\Windows"
-                }
-              ]
-            },
-            {
               "id": "windowsRetailDemo",
               "name": "Windows Retail Demo 缓存",
               "risk": "medium",
@@ -2222,7 +2180,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Windows Retail Demo *」登记了这条目标",
@@ -2248,6 +2206,191 @@
               ]
             },
             {
+              "id": "setupapiDevLog",
+              "name": "Windows 设备安装日志（setupapi.dev.log）",
+              "risk": "low",
+              "evidence": "设备安装 API 的运行日志（微软文档记录的位置）",
+              "recommended": false,
+              "domain": "system",
+              "group": "stale",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "hibit/06 §2.3 A档 + 本机存在性复核（747,577 B）",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "minAgeDays": 14,
+              "evidenceItems": [
+                {
+                  "text": "HiBit 对照清单 A 档目标；本机 %WINDIR%\\inf 下确有产物",
+                  "weight": 2
+                },
+                {
+                  "text": "日志类：系统持续追加写入，删除后由后续设备安装事件再生成",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%WINDIR%\\inf\\setupapi.dev.log",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ]
+            },
+            {
+              "id": "catroot2DberrLog",
+              "name": "CatRoot2 目录错误日志（dberr.txt）",
+              "risk": "low",
+              "evidence": "加密目录数据库（cert.rdb）工作目录的运行错误日志",
+              "recommended": false,
+              "domain": "system",
+              "group": "stale",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "hibit/06 §2.3 A档 + 本机存在性复核（130,295 B）",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "minAgeDays": 14,
+              "evidenceItems": [
+                {
+                  "text": "HiBit 对照清单 A 档目标；本机 %WINDIR%\\System32\\CatRoot2 下确有该文件",
+                  "weight": 2
+                },
+                {
+                  "text": "只指这一个名字：同目录 .jrs/.log 是 ESENT 事务日志，拆了会砍日志序列（刻意不进）",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%WINDIR%\\System32\\CatRoot2\\dberr.txt",
+                  "pattern": "*",
+                  "recurse": false
+                }
+              ]
+            },
+            {
+              "id": "wdiTraceLogs",
+              "name": "Windows 诊断跟踪日志（WDI *.etl）",
+              "risk": "low",
+              "evidence": "WDI（Windows 诊断基础架构）跟踪会话的 ETL 文件",
+              "recommended": false,
+              "domain": "system",
+              "group": "stale",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "hibit/06 §2.3 A档（路径改写：大文件在 LogFiles 一层）+ 本机复核（BootPerfDiagLogger.etl ≈200 MB 等）",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "minAgeDays": 14,
+              "evidenceItems": [
+                {
+                  "text": "HiBit 对照清单 A 档目标；本机 WDI\\LogFiles 有 BootPerfDiagLogger.etl 等产物",
+                  "weight": 2
+                },
+                {
+                  "text": "诊断跟踪类：需重现问题时重新录制即可，删除不影响系统功能",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%WINDIR%\\System32\\WDI",
+                  "pattern": "*.etl",
+                  "recurse": true
+                }
+              ]
+            },
+            {
+              "id": "sleepStudyScreenOnTraces",
+              "name": "睡眠研究跟踪（SleepStudy ScreenOn *.etl）",
+              "risk": "low",
+              "evidence": "睡眠研究（SleepStudy）在亮屏期间录制的跟踪文件",
+              "recommended": false,
+              "domain": "system",
+              "group": "stale",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "hibit/06 §2.3 A档 + 本机存在性复核（2 个 .etl ≈590 KB）",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "minAgeDays": 14,
+              "evidenceItems": [
+                {
+                  "text": "HiBit 对照清单 A 档目标；本机 %WINDIR%\\System32\\SleepStudy\\ScreenOn 下确有产物",
+                  "weight": 2
+                },
+                {
+                  "text": "睡眠诊断产物：需要时可用 powercfg /systemsleepdiagnostics 再生成",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%WINDIR%\\System32\\SleepStudy\\ScreenOn",
+                  "pattern": "*.etl",
+                  "recurse": true
+                }
+              ]
+            },
+            {
+              "id": "dotnetNgenLogs",
+              "name": ".NET 本机映像生成日志（ngen.log）",
+              "risk": "low",
+              "evidence": ".NET Framework NGEN（本机映像生成器）的运行日志",
+              "recommended": false,
+              "domain": "system",
+              "group": "stale",
+              "nature": "log",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "hibit/06 §2.3 A档（改写到版本目录）+ 本机复核（Framework 121,347 B / Framework64 892,820 B）",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "minAgeDays": 14,
+              "evidenceItems": [
+                {
+                  "text": "HiBit 对照清单 A 档目标；本机 v4.0.30319 版本目录两侧各 1 个",
+                  "weight": 2
+                },
+                {
+                  "text": "NGEN 日志：本机映像已固化在 GAC，删日志不回退原生化结果",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%WINDIR%\\Microsoft.NET\\Framework*\\v4.0.30319",
+                  "pattern": "ngen*.log",
+                  "recurse": false
+                }
+              ]
+            },
+            {
               "id": "windowsSystemAssessmentTool",
               "name": "Windows System Assessment Tool 缓存",
               "risk": "medium",
@@ -2264,7 +2407,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Windows System Assessment Tool *」登记了这条目标",
@@ -2306,7 +2449,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Windows Task Scheduler *」登记了这条目标",
@@ -2363,7 +2506,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "QQ 临时",
@@ -2400,7 +2543,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "微信文件缓存",
@@ -2443,7 +2586,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "QQ 缓存",
@@ -2477,7 +2620,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "QQ 图片/视频/文件分类清理",
@@ -2507,7 +2650,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "微信图片/视频/文件分类清理",
@@ -2536,7 +2679,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Ashampoo ZOOM *」登记了这条目标",
@@ -2578,7 +2721,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「LINE Messenger Plugin *」登记了这条目标",
@@ -2625,7 +2768,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Slack *」登记了这条目标",
@@ -2677,7 +2820,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Tencent QQ *」登记了这条目标",
@@ -2724,7 +2867,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Tencent WeChat *」登记了这条目标",
@@ -2807,7 +2950,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "网易云音乐缓存",
@@ -2844,7 +2987,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "抖音缓存",
@@ -2877,7 +3020,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「AIMP *」登记了这条目标",
@@ -2929,7 +3072,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Ford Sync My iTunes *」登记了这条目标",
@@ -2971,7 +3114,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「HandBrake *」登记了这条目标",
@@ -3023,7 +3166,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「PotPlayer *」登记了这条目标",
@@ -3079,7 +3222,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Spotify - Downloaded Songs *」登记了这条目标",
@@ -3133,7 +3276,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Acrobat Distiller *」登记了这条目标",
@@ -3185,7 +3328,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Air *」登记了这条目标",
@@ -3232,7 +3375,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Bridge *」登记了这条目标",
@@ -3289,7 +3432,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Camera Raw *」登记了这条目标",
@@ -3336,7 +3479,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Character Animator *」登记了这条目标",
@@ -3393,7 +3536,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Crash Reporter *」登记了这条目标",
@@ -3440,7 +3583,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Experience Platform SDK *」登记了这条目标",
@@ -3482,7 +3625,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Illustrator *」登记了这条目标",
@@ -3529,7 +3672,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe InDesign *」登记了这条目标",
@@ -3571,7 +3714,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Lightroom *」登记了这条目标",
@@ -3613,7 +3756,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Adobe Premiere Rush *」登记了这条目标",
@@ -3668,7 +3811,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "百度网盘日志",
@@ -3709,7 +3852,7 @@
                 "importedAt": "2026-10-06",
                 "reviewedAt": "2026-10-06"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "OneDrive 同步日志（SyncEngine 等诊断日志，滚动生成）",
@@ -3746,7 +3889,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WPS 版本升级备份",
@@ -3793,7 +3936,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Office 上传中心文件缓存（通配 15.0/16.0 版本目录）",
@@ -3826,7 +3969,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Evernote *」登记了这条目标",
@@ -3878,7 +4021,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Box For Office *」登记了这条目标",
@@ -3920,7 +4063,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Hancom Office *」登记了这条目标",
@@ -3962,7 +4105,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Kingsoft Office *」登记了这条目标",
@@ -4039,7 +4182,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「PDF Editor 4 *」登记了这条目标",
@@ -4081,7 +4224,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Recovery Toolbox for Word *」登记了这条目标",
@@ -4123,7 +4266,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Remo Repair PowerPoint *」登记了这条目标",
@@ -4165,7 +4308,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Winsome Technologies Find And Replace Tool For Excel *」登记了这条目标",
@@ -4212,7 +4355,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Winsome Technologies Find And Replace Tool For Word *」登记了这条目标",
@@ -4270,7 +4413,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Steam 下载缓存",
@@ -4318,7 +4461,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Steam 客户端内置浏览器（CEF）缓存",
@@ -4366,7 +4509,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Epic Games Launcher 内置浏览器缓存",
@@ -4400,7 +4543,7 @@
                 "importedAt": "2026-10-11",
                 "reviewedAt": "2026-10-11"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Steam 在库游戏目录内 DirectX/VC++/XNA/.NET 运行库安装包",
@@ -4430,7 +4573,7 @@
                 "importedAt": "2026-10-11",
                 "reviewedAt": "2026-10-11"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Epic 在库游戏目录内 DirectX/VC++/XNA/.NET 运行库安装包",
@@ -4460,7 +4603,7 @@
                 "importedAt": "2026-10-11",
                 "reviewedAt": "2026-10-11"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WeGame 在库游戏目录内 DirectX/VC++/XNA/.NET 运行库安装包",
@@ -4489,7 +4632,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「TikiOne Steam Cleaner *」登记了这条目标",
@@ -4565,7 +4708,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "VS Code 渲染/程序/GPU 缓存",
@@ -4614,7 +4757,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "JetBrains 系列 IDE 的索引缓存与日志（通配各产品版本目录）",
@@ -4655,7 +4798,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "npm 下载缓存（内容寻址校验，可安全清除）",
@@ -4696,7 +4839,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "pip 下载/构建缓存",
@@ -4737,7 +4880,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "NuGet 全局包目录（删除后首次构建将自动重新还原）",
@@ -4778,7 +4921,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "pnpm v6 及更早版本的下载缓存目录（v7 起迁移到 %LOCALAPPDATA%\\pnpm\\store）。内容可安全清除，下次安装依赖时重新下载。本机实测 87 MB。",
@@ -4819,7 +4962,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "NuGet 的 HTTP 响应缓存（v3-cache），与全局包目录（.nuget\\packages，另条规则）相互独立。清除后还原包时重新下载，不影响已安装包。本机实测 300 MB。",
@@ -4864,7 +5007,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "cargo 的 registry 下载缓存（.crate 压缩包）与解压源码缓存。src 可由本机 cache 离线重建，cache 清除后重编译需重新下载。CARGO_HOME 自定义迁移的机器（如本机）不命中，detect 未命中时自动隐藏。删除代价与重建耗时相关，故定 medium。",
@@ -4905,7 +5048,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "uv（Astral 的 Python 包管理器）默认缓存目录，官方提供 uv cache clean 同语义清理。清除后安装依赖时重新下载。本机实测存在（体积小，随使用增长）。",
@@ -4946,7 +5089,7 @@
                 "importedAt": "2026-09-27",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "OpenAI Codex CLI 存放在用户 .cache 下的运行时文件缓存。清除后下次启动 CLI 重新下载（可能达 GB 级），本机实测 1.3 GB。代价为重新下载流量与时间，故定 medium。",
@@ -4975,7 +5118,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Android SDK Tools *」登记了这条目标",
@@ -5022,7 +5165,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Android Studio *」登记了这条目标",
@@ -5074,7 +5217,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Composer Dependency Manager for PHP *」登记了这条目标",
@@ -5131,7 +5274,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Deep Java Library *」登记了这条目标",
@@ -5173,7 +5316,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Jetbrains IntelliJ IDEA *」登记了这条目标",
@@ -5254,7 +5397,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Jetbrains Pycharm *」登记了这条目标",
@@ -5301,7 +5444,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Jetbrains WebStorm *」登记了这条目标",
@@ -5358,7 +5501,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「LeiaSR SDK *」登记了这条目标",
@@ -5410,7 +5553,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Notepad++ - Backups & Unsaved Files *」登记了这条目标",
@@ -5452,7 +5595,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Oracle Java *」登记了这条目标",
@@ -5574,7 +5717,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Sublime Text Backups *」登记了这条目标",
@@ -5661,7 +5804,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Chrome 各 Profile 网页缓存（新版 Network\\Cache + 旧版 Cache + GPU/Dawn 着色器缓存，通配所有 Profile）",
@@ -5717,7 +5860,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Edge 各 Profile 网页缓存（新版 Network\\Cache + 旧版 Cache + GPUCache，通配所有 Profile）",
@@ -5765,7 +5908,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "QQ浏览器各 Profile 网页缓存",
@@ -5798,7 +5941,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Google Chrome DRM Data *」登记了这条目标",
@@ -5867,7 +6010,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Chrome 各 Profile JS/WASM 缓存",
@@ -5915,7 +6058,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Chrome 各 Profile 媒体缓存",
@@ -5963,7 +6106,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Edge 各 Profile 媒体缓存",
@@ -6019,7 +6162,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Firefox 各 Profile 网页/启动/着色器缓存",
@@ -6052,7 +6195,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Chromium Embedded Framework *」登记了这条目标",
@@ -6094,7 +6237,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Yandex NeuroEdit *」登记了这条目标",
@@ -6136,7 +6279,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Google Chrome Progressive Web Apps *」登记了这条目标",
@@ -6178,7 +6321,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Google Chrome Shopping Insights *」登记了这条目标",
@@ -6267,7 +6410,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "由 Winapp2 云端浏览器同步缓存规则转换（Chrome/Edge Sync Data），仅清空目录内容，浏览器自动重建",
@@ -6296,7 +6439,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「360 Secure Browser Bookmark Favicons *」登记了这条目标",
@@ -6338,7 +6481,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「360 Secure Browser Autoplay Preferences *」登记了这条目标",
@@ -6380,7 +6523,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Brave Bookmark Favicons *」登记了这条目标",
@@ -6422,7 +6565,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Brave Autoplay Preferences *」登记了这条目标",
@@ -6464,7 +6607,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Brave Origin Bookmark Favicons *」登记了这条目标",
@@ -6506,7 +6649,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Brave Origin Autoplay Preferences *」登记了这条目标",
@@ -6548,7 +6691,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Chromium Bookmark Favicons *」登记了这条目标",
@@ -6590,7 +6733,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Chromium Autoplay Preferences *」登记了这条目标",
@@ -6632,7 +6775,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Google Chrome Bookmark Favicons *」登记了这条目标",
@@ -6674,7 +6817,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Google Chrome Autoplay Preferences *」登记了这条目标",
@@ -6716,7 +6859,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Maxthon Bookmark Favicons *」登记了这条目标",
@@ -6758,7 +6901,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Maxthon Autoplay Preferences *」登记了这条目标",
@@ -6800,7 +6943,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Mozilla Firefox Bookmark Favicons *」登记了这条目标",
@@ -6847,7 +6990,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Mozilla Firefox Synced Tabs *」登记了这条目标",
@@ -6894,7 +7037,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Opera Bookmark Favicons *」登记了这条目标",
@@ -6936,7 +7079,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Opera Autoplay Preferences *」登记了这条目标",
@@ -6978,7 +7121,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Opera GX Bookmark Favicons *」登记了这条目标",
@@ -7025,7 +7168,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Opera GX Sync Data *」登记了这条目标",
@@ -7072,7 +7215,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「QQBrowser Autoplay Preferences *」登记了这条目标",
@@ -7114,7 +7257,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「QQBrowser Sync Data *」登记了这条目标",
@@ -7156,7 +7299,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Thorium Bookmark Favicons *」登记了这条目标",
@@ -7198,7 +7341,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Thorium Autoplay Preferences *」登记了这条目标",
@@ -7240,7 +7383,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Vivaldi Bookmark Favicons *」登记了这条目标",
@@ -7282,7 +7425,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Vivaldi Autoplay Preferences *」登记了这条目标",
@@ -7324,7 +7467,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Yandex Bookmark Favicons *」登记了这条目标",
@@ -7366,7 +7509,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Google Chrome Sync Data *」登记了这条目标",
@@ -7416,7 +7559,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Chrome 升级残留旧版本备份",
@@ -7460,7 +7603,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "NVIDIA 编译着色器缓存",
@@ -7490,7 +7633,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "NVIDIA 全局安装缓存",
@@ -7520,7 +7663,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "AMD 着色器缓存",
@@ -7550,7 +7693,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "Intel 核显着色器缓存",
@@ -7579,7 +7722,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Intel Shader Cache *」登记了这条目标",
@@ -7631,7 +7774,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「NVIDIA Shader Cache *」登记了这条目标",
@@ -7741,7 +7884,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "DX 着色器缓存",
@@ -7770,7 +7913,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「Intel Graphics Software *」登记了这条目标",
@@ -7822,7 +7965,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「NVIDIA ForceWare *」登记了这条目标",
@@ -7864,7 +8007,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「NVIDIA Update Files *」登记了这条目标",
@@ -7906,7 +8049,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「NVIDIA G-Assist *」登记了这条目标",
@@ -7948,7 +8091,7 @@
                 "importedAt": "2026-10-13",
                 "reviewedAt": "2026-10-13"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "WinApp2 规则库（本机源 260915）「NVIDIA Omniverse *」登记了这条目标",
@@ -8002,7 +8145,7 @@
                 "importedAt": "2026-10-06",
                 "reviewedAt": "2026-10-06"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "NVIDIA 驱动安装包缓存（安装程序下载的完整驱动包）",
@@ -8032,7 +8175,7 @@
                 "importedAt": "2026-10-06",
                 "reviewedAt": "2026-10-06"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "AMD 驱动安装器解压产物（安装完成后不再被引用）",
@@ -8076,7 +8219,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
@@ -8106,7 +8249,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-10-07"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "回收站内容",
@@ -8153,7 +8296,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "打印假脱机文件（卡住的打印任务）。原「系统维护 - 清理打印队列」与「电脑优化中心 - PCCleaner 深度清理」整合项（2026-09-14）；旧实现写的 C:\\Windows\\spool\\printers 在现代 Windows 上并不存在。清理时会临时停止并重启 Print Spooler 服务（M3 承接原「系统维护 - 清理打印队列」的能力）",
@@ -8187,7 +8330,7 @@
                 "importedAt": "2026-09-14",
                 "reviewedAt": "2026-09-27"
               },
-              "ver": 20261015,
+              "ver": 20261016,
               "evidenceItems": [
                 {
                   "text": "压缩组件存储，更新将不可卸载",
@@ -8211,6 +8354,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "AVRTq4BKkj4o9mA5uKJ/8DgyjSbPsf0etzwN4TDY9a1e+ZR++RIHU4nQGIvROFyAcyY0BgmMXwupdNp0gxCdAQ=="
+    "sig": "tWyZKz5JgQnfVAXbMZhUwz0Sh59IWcZnRiglFX9BwATl9b0Tvk/14ICKqBpCt6DKsbDakVLthkbXGBXU67FoAQ=="
   }
 }
