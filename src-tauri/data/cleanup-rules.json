@@ -5786,12 +5786,32 @@
                 {
                   "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\DawnWebGPUCache",
                   "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\GrShaderCache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\ShaderCache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\GraphiteDawnCache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\GPUPersistentCache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Storage\\ext\\*\\*\\GPUCache",
+                  "recurse": true
                 }
               ],
               "requiredStoppedProcesses": [
                 "chrome"
               ],
-              "evidence": "Chrome 各 Profile 网页缓存（新版 Network\\Cache + 旧版 Cache + GPU/Dawn 着色器缓存，通配所有 Profile）",
+              "evidence": "Chrome 各 Profile 网页/着色器缓存（Network\\Cache、Cache、GPU/Dawn 系缓存 + 根级 GrShaderCache/ShaderCache/GraphiteDawnCache/GPUPersistentCache + 扩展 GPUCache，通配所有 Profile）",
               "recommended": true,
               "domain": "browser",
               "group": "webpage",
@@ -5807,7 +5827,7 @@
               "ver": 20261016,
               "evidenceItems": [
                 {
-                  "text": "Chrome 各 Profile 网页缓存（新版 Network\\Cache + 旧版 Cache + GPU/Dawn 着色器缓存，通配所有 Profile）",
+                  "text": "Chrome 各 Profile 网页/着色器缓存（Network\\Cache、Cache、GPU/Dawn 系缓存 + 根级 GrShaderCache/ShaderCache/GraphiteDawnCache/GPUPersistentCache + 扩展 GPUCache，通配所有 Profile）",
                   "weight": 2
                 },
                 {
@@ -5816,6 +5836,174 @@
                 },
                 {
                   "text": "清理前会先请求关闭：chrome",
+                  "weight": 0
+                }
+              ]
+            },
+            {
+              "id": "vivaldiCache",
+              "name": "Vivaldi 浏览器缓存",
+              "risk": "low",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Vivaldi\\User Data"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Vivaldi\\User Data\\*\\Cache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Vivaldi\\User Data\\*\\Code Cache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Vivaldi\\User Data\\*\\GPUCache",
+                  "recurse": true
+                }
+              ],
+              "requiredStoppedProcesses": [
+                "vivaldi"
+              ],
+              "evidence": "Vivaldi 各 Profile 网页/代码/GPU 缓存（Chromium 系目录布局，通配所有 Profile）",
+              "recommended": true,
+              "domain": "browser",
+              "group": "webpage",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "browser",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "evidenceItems": [
+                {
+                  "text": "Vivaldi 各 Profile 网页/代码/GPU 缓存（Chromium 系目录布局，通配所有 Profile）",
+                  "weight": 2
+                },
+                {
+                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "weight": 1
+                },
+                {
+                  "text": "清理前会先请求关闭：vivaldi",
+                  "weight": 0
+                }
+              ]
+            },
+            {
+              "id": "braveCache",
+              "name": "Brave 浏览器缓存",
+              "risk": "low",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data\\*\\Cache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data\\*\\Code Cache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data\\*\\GPUCache",
+                  "recurse": true
+                }
+              ],
+              "requiredStoppedProcesses": [
+                "brave"
+              ],
+              "evidence": "Brave 各 Profile 网页/代码/GPU 缓存（Chromium 系目录布局，通配所有 Profile）",
+              "recommended": true,
+              "domain": "browser",
+              "group": "webpage",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "browser",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "evidenceItems": [
+                {
+                  "text": "Brave 各 Profile 网页/代码/GPU 缓存（Chromium 系目录布局，通配所有 Profile）",
+                  "weight": 2
+                },
+                {
+                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "weight": 1
+                },
+                {
+                  "text": "清理前会先请求关闭：brave",
+                  "weight": 0
+                }
+              ]
+            },
+            {
+              "id": "chromiumCache",
+              "name": "Chromium 浏览器缓存",
+              "risk": "low",
+              "detect": [
+                {
+                  "type": "file",
+                  "path": "%LOCALAPPDATA%\\Chromium\\User Data"
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\Chromium\\User Data\\*\\Cache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Chromium\\User Data\\*\\Code Cache",
+                  "recurse": true
+                },
+                {
+                  "path": "%LOCALAPPDATA%\\Chromium\\User Data\\*\\GPUCache",
+                  "recurse": true
+                }
+              ],
+              "requiredStoppedProcesses": [
+                "chromium"
+              ],
+              "evidence": "Chromium 各 Profile 网页/代码/GPU 缓存（Chromium 系目录布局，通配所有 Profile）",
+              "recommended": true,
+              "domain": "browser",
+              "group": "webpage",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "vendor-doc",
+                "ref": "browser",
+                "importedAt": "2026-10-16",
+                "reviewedAt": "2026-10-16"
+              },
+              "ver": 20261016,
+              "evidenceItems": [
+                {
+                  "text": "Chromium 各 Profile 网页/代码/GPU 缓存（Chromium 系目录布局，通配所有 Profile）",
+                  "weight": 2
+                },
+                {
+                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "weight": 1
+                },
+                {
+                  "text": "清理前会先请求关闭：chromium",
                   "weight": 0
                 }
               ]
@@ -8026,6 +8214,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "ldW3ULAsYsIatgxLC4AuP0HtzKT/lDnDEyTq+I8yAwoWYusaFSNUnWWJa1Ghw3Ih4RBiogE1mvJAbIBleM6PBw=="
+    "sig": "HSokxOuLJ+OXJj4u4IFF5LXONZHCyvKhkZvUQJJOOUPNnZFU3Wuwa47ByDpPuJjhUHktrl8WZk6Us9Gr15PyCw=="
   }
 }
