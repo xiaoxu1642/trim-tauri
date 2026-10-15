@@ -1108,8 +1108,19 @@ pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
             // C1（方案 §5·C1）：目录送删前过「自身→盘符根」逐层重解析点校验，与维护任务
             // (`native::maint_run`)、diskbench 同口径。上级被换成 junction 时回收站会顺着链接
             // 把链接目标整棵搬走。file / shortcut 不查：单文件删除只删链接本身，不递归。
+            //
+            // J12（2026-10-16）：**自身是断链**的重解析点改判可删——目标已不存在，删链接
+            // 本体不波及任何真实内容（回收站原语实测可处理断链 junction）；但上级链仍是
+            // 重解析点 ⇒ 照旧拒（借目录树删别处的形态没变）。判据本体在
+            // `trim_finder::scan::broken_reparse_link`（与 finder 删除链同一份，§5.16/N6）。
             if kind == "folder" {
-                if let Some(reason) = crate::engine::native::dir_delete_blocked(Path::new(target)) {
+                let p = Path::new(target);
+                if trim_finder::scan::broken_reparse_link(p) {
+                    if let Some(reason) = crate::engine::native::ancestor_reparse_blocked(p) {
+                        log::write_log("warn", &format!("uninstall_residue_execute 跳过目录 {shown}: {reason}"));
+                        return OpVerdict::Skip(format!("已拒绝删除：{reason}"));
+                    }
+                } else if let Some(reason) = crate::engine::native::dir_delete_blocked(p) {
                     log::write_log("warn", &format!("uninstall_residue_execute 跳过目录 {shown}: {reason}"));
                     return OpVerdict::Skip(format!("已拒绝删除：{reason}"));
                 }

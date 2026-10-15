@@ -2272,6 +2272,24 @@ fn is_reparse_target(_p: &Path) -> bool {
     false
 }
 
+/// 断链重解析点（J12，2026-10-16）：属性位 0x400 命中 **且** 跟随目标返回「不存在」。
+/// 这是 J12 允许进删除链的唯一新对象——删除动作仍是各链现有原语（回收站），
+/// 语义上只移除链接本体、不触碰目标（Windows 删除链接不跟随；实测
+/// `send_to_trash_os(断链 junction) => Ok`，2026-10-16 真机探针，见本文件 tests）。
+/// 判据只此一份：finder 删除链（本文件 delete）与残留执行链（src-tauri → trim_finder）
+/// 共用（§5.16/N6）——两处各写一份就是「链接是不是该删」出现两套口径。
+/// 「目标不存在」只认 raw 2/3（ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND）：
+/// 其它 Err（如拒绝访问）不证明目标消失，按现有形态继续拒（fail-closed）。
+pub fn broken_reparse_link(p: &Path) -> bool {
+    if !is_reparse_target(p) {
+        return false;
+    }
+    match fs::metadata(p) {
+        Err(e) => matches!(e.raw_os_error(), Some(2) | Some(3)),
+        Ok(_) => false, // 目标可达 ⇒ 活链，不属于本对象
+    }
+}
+
 /// 删除结果行的 `mode` 字面量（R4，2026-10-15）——语义见各 `del_item` 调用点。
 /// **变更必须同步** `tools/fixtures/finder-delete-modes.json`（由
 /// `tools/gen-finder-delete-modes.mjs` 生成）与消费侧 `src-tauri/src/commands/finder.rs`
@@ -2307,7 +2325,9 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
             del_item(sink, "delresult", p, kind, "fail", 0, "受保护的系统路径，已拒绝", MODE_REJECTED);
             continue;
         }
-        if is_reparse_target(p) {
+        if is_reparse_target(p) && !broken_reparse_link(p) {
+            // J12（2026-10-16）：只有**断链**的重解析点放行（目标已不存在，删链接不波及
+            // 任何真实内容）；活链与不可判一律照拒（`broken_reparse_link` 的 fail-closed 口径）。
             fail += 1;
             del_item(sink, "delresult", p, kind, "fail", 0, "目标是链接/junction（reparse point），已拒绝", MODE_REJECTED);
             continue;
@@ -2438,6 +2458,81 @@ mod tests {
             + fx.matches("\"refused\"").count()
             + fx.matches("\"name\"").count();
         assert_eq!(buckets, 4, "夹具档位值数量异常（{buckets} ≠ 4）——夹具改动没同步到本文件");
+    }
+
+    /// J12（2026-10-16）双向咬合（建链需管理员/开发者模式；无权限 skip 并说明）：
+    /// ① 活链（目标在）→ 仍拒（mode=rejected），目标内容分毫未动；
+    /// ② 断链（目标被删）→ `broken_reparse_link` 判真、`delete()` 放行——走**回收站
+    ///    原语**只移除链接本体（真机实测 `send_to_trash_os(断链 junction) => Ok`），
+    ///    原目标位置不受牵连、上级目录完好。
+    #[cfg(windows)]
+    #[test]
+    fn j12_断链放行活链仍拒() {
+        use std::process::Command;
+
+        // 收集 delresult 行的 sink（断言对象=逐行 JSON：status/mode）
+        #[derive(Default)]
+        struct CollectSink(std::sync::Mutex<Vec<String>>);
+        impl Sink for CollectSink {
+            fn item(&self, _p: &Path, line: &str) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        fn run_delete(link: &Path) -> Vec<String> {
+            let sink = CollectSink::default();
+            let items = vec![("dir".to_string(), link.as_os_str().to_os_string())];
+            super::delete(&items, None, &sink);
+            let all = sink.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            all.into_iter().filter(|l| l.contains("delresult")).collect()
+        }
+
+        let dir = std::env::temp_dir().join(format!("trim-j12-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let _clean = Clean(dir.clone());
+
+        let target = dir.join("target");
+        let link = dir.join("link");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"x").unwrap();
+        let st = Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&link).arg(&target).output();
+        match st {
+            Ok(o) if o.status.success() => {}
+            _ => {
+                eprintln!("[J12] 建 junction 失败（需管理员/开发者模式），本用例跳过（未校验）");
+                return;
+            }
+        }
+
+        // ① 活链仍拒：链接与目标都原样
+        assert!(!super::broken_reparse_link(&link), "活链不得被判断链");
+        let lines = run_delete(&link);
+        assert_eq!(lines.len(), 1, "应恰有一条 delresult：{lines:?}");
+        assert!(lines[0].contains("\"status\":\"fail\""), "活链必须被拒：{lines:?}");
+        assert!(lines[0].contains("\"mode\":\"rejected\""), "拒绝档应为 rejected：{lines:?}");
+        assert!(target.join("keep.txt").exists(), "活链被拒时目标内容不得被动到");
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "活链被拒时链接本体必须还在");
+
+        // ② 断链放行：删掉目标 → 链接自动断开 → 删除只移除链接本体
+        std::fs::remove_dir_all(&target).unwrap();
+        assert!(super::broken_reparse_link(&link), "目标消失后必须判断链（raw 2/3 口径）");
+        let lines = run_delete(&link);
+        assert_eq!(lines.len(), 1, "应恰有一条 delresult：{lines:?}");
+        assert!(lines[0].contains("\"status\":\"ok\""), "断链必须放行：{lines:?}");
+        assert!(lines[0].contains("\"mode\":\"recycled\""), "走的仍是回收站原语：{lines:?}");
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "链接条目必须被移除（删的是链接本体）"
+        );
+        assert!(!target.exists(), "原目标位置不得被牵连（它本就是断的，且不能复活出空目录）");
+        assert!(dir.exists(), "上级目录必须完好");
     }
 
     use super::*;

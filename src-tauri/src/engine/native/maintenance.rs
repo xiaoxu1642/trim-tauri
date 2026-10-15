@@ -351,17 +351,35 @@ fn reg_import(reg_content: &str) -> bool {
 ///
 /// 返回 `Some(原因)` = 拒绝删除（含属性读不到：fail-closed，不许「查不到就当安全」）。
 pub(crate) fn dir_delete_blocked(path: &std::path::Path) -> Option<String> {
+    if let Some(r) = level_reparse_reason(path) {
+        return Some(r);
+    }
+    ancestor_reparse_blocked(path)
+}
+
+/// 单级重解析点判定（属性读不到按拒：fail-closed，不许「查不到就当安全」）。
+fn level_reparse_reason(level: &std::path::Path) -> Option<String> {
     use windows::Win32::Storage::FileSystem::{GetFileAttributesW, FILE_ATTRIBUTE_REPARSE_POINT};
     const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
-    // Path::ancestors() 自带「自身 → 逐级父目录 → 根」，正是要逐层查的链
-    for level in path.ancestors() {
-        let wide = to_wide(&level.to_string_lossy());
-        let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
-        if attrs == INVALID_FILE_ATTRIBUTES {
-            return Some(format!("无法读取目录属性（{}），按拒绝处理", level.display()));
-        }
-        if attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-            return Some(format!("{} 是重解析点（junction/符号链接），删除会波及链接目标", level.display()));
+    let wide = to_wide(&level.to_string_lossy());
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        return Some(format!("无法读取目录属性（{}），按拒绝处理", level.display()));
+    }
+    if attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Some(format!("{} 是重解析点（junction/符号链接），删除会波及链接目标", level.display()));
+    }
+    None
+}
+
+/// J12（2026-10-16）：只查**自身以外**的上级链——自身是断链重解析点的形态由调用方
+/// 先过 `trim_finder::scan::broken_reparse_link` 放行（删链接本体不波及目标），
+/// 但「上级是链接」这条必须照旧拒（借目录树删别处的形态没变）。
+pub(crate) fn ancestor_reparse_blocked(path: &std::path::Path) -> Option<String> {
+    // Path::ancestors() 自带「自身 → 逐级父目录 → 根」，skip(1) 跳过自身
+    for level in path.ancestors().skip(1) {
+        if let Some(r) = level_reparse_reason(level) {
+            return Some(r);
         }
     }
     None

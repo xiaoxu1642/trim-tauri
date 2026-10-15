@@ -20,6 +20,7 @@ pub use diagnostics::{sysdisk, device_info};
 mod maintenance;
 pub use maintenance::{task_change, MAINT_CMD_TIMEOUT, maint_run};
 pub(crate) use maintenance::{dir_delete_blocked};
+pub(crate) use maintenance::ancestor_reparse_blocked;
 mod memory;
 pub use memory::{memory_info, NativeProcess, memory_processes};
 mod paths_scan;

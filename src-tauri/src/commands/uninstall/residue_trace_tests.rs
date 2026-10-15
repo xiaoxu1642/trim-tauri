@@ -767,6 +767,63 @@ use super::residue_update::*;
         assert!(!is_system_component_exe("msiexec.exe"), "裸名不进判据（由空父目录闸挡）");
     }
 
+    /// J12（2026-10-16）：残留 folder 候选的**断链 junction** 改判可删（删链接本体，
+    /// 实际删除仍走 trim_finder 回收站原语）；活链仍拒；上级是链接的目标仍拒。
+    /// 建链需管理员/开发者模式；失败显式跳过并说明（§2 纪律）。
+    #[cfg(windows)]
+    #[test]
+    fn 断链_junction_的_folder_候选放行_活链仍拒() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("trim-res-j12-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        let link = dir.join("link");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"x").unwrap();
+        let st = Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&target)
+            .output();
+        if !matches!(st, Ok(o) if o.status.success()) {
+            eprintln!("[J12] 建 junction 失败（需管理员/开发者模式），本用例跳过（未校验）");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let link_s = link.to_string_lossy().to_string();
+
+        // ① 活链仍拒（目标在 → 不属于「断链」对象）
+        assert!(
+            matches!(classify_residue_op("folder", &link_s), OpVerdict::Skip(_)),
+            "活链必须仍拒: {link_s}"
+        );
+
+        // ② 断链放行（分类层 Ready；删除时 trim_finder::scan::delete 走回收站原语）
+        std::fs::remove_dir_all(&target).unwrap();
+        assert!(
+            matches!(classify_residue_op("folder", &link_s), OpVerdict::Ready(_)),
+            "断链 junction 必须放行（J12）: {link_s}"
+        );
+
+        // ③ 上级是链接的目标仍拒：link 复活为活链，候选取 link\inner（自身不是链接，
+        //    但上级 link 是）——借目录树删别处的形态必须原样拦住
+        std::fs::create_dir_all(&target).unwrap();
+        let inner = link.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let inner_s = inner.to_string_lossy().to_string();
+        assert!(
+            matches!(classify_residue_op("folder", &inner_s), OpVerdict::Skip(_)),
+            "上级是链接的目标必须仍拒: {inner_s}"
+        );
+
+        // 收尾：先拆 junction 再清目录（remove_dir_all 对 junction 子项的行为不作依赖）
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ==================== M2 静默知识（B1 构造闸 / B2 分档 / B4 第二证据） ====================
 
     fn exists_all(_: &Path) -> bool {
