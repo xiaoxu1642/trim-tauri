@@ -228,6 +228,23 @@ const netItems = metaBlk ? (metaBlk[1].match(/^\s{4}\w+: \{ name:/gm) ?? []).len
 check(Number.isFinite(netItems), 'netcheck.js ITEM_META 可解析', `诊断项 ${netItems}`);
 assertAllEqual('12. 网络检测诊断项数 = ITEM_META 实算', /(\d+)\s*项只读诊断/g, netItems);
 
+// 13. WinApp2 溯源条数：readme「N 条精选自 WinApp2 规则库（源 260915），溯源标
+//     `winapp2-clue`」⇄ cleanup-rules.json 里 prov.sourceClass === 'winapp2-clue'
+//     的条数实算。P2-E（2026-10-16 拍板「加门禁」）：该数字历史已漂移过
+//     116→105→99 且全靠人眼发现；「99」不是常量——真源永远是数据层实算值
+//     （同口径覆盖顶层 items 与 subGroups.items 两层）。
+let winapp2Count = 0;
+const countClue = (items) => {
+  for (const it of (items ?? [])) {
+    if (it.prov && it.prov.sourceClass === 'winapp2-clue') winapp2Count++;
+  }
+};
+for (const g of cleanup.groups ?? []) {
+  countClue(g.items);
+  for (const sg of g.subGroups ?? []) countClue(sg.items);
+}
+assertAllEqual('13. WinApp2 溯源条数 = sourceClass=winapp2-clue 实算', /(\d+)\s*条精选自\s*WinApp2/g, winapp2Count);
+
 console.log('');
 if (fail > 0) {
   console.error('门禁失败：readme 承诺数字与数据真源不一致（或声明措辞变更导致对拍落空）');
