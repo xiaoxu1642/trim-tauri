@@ -75,7 +75,8 @@
    * 自绘确认弹窗（2026-10-03 用户裁定「本窗弹窗改自绘」）。
    *
    * 为什么不走 window.app.confirm：本窗是子窗口，**不加载 app.js**，`window.app` 不存在。
-   * 之前唯一的路径是 window.modal.confirm，而 modal.js 在本窗压根没挂载 ——
+   * 之前唯一的路径是 window.modal.confirm，而当时 modal.js 在本窗压根没挂载（此句是历史
+   * 成因不是现状——2026-10-03 起 models-window.html 已挂上 modal.js）——
    * 结果是本窗**一个弹窗骨架都没有**，覆盖已有密钥这类破坏性动作连二次确认都没有，
    * 用户点一下就直接落盘。本函数是本窗唯一的确认出口。
    *

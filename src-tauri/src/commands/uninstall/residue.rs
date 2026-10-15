@@ -1016,8 +1016,9 @@ pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
             if let Some(reason) = protect::reg_target_block_reason(target) {
                 // 唯一的例外：服务键窄口子（方案 §5）。三条同时成立才放行 ——
                 // 形状合格、**此刻**现读八道排除式判据全过、且已提权（HKLM 写不进去的
-                // 话删了也是假成功）。判据本体在 `services_orphan::service_key_delete_block_reason`，
-                // 装载侧调的是同一个函数，所以「UI 说能删」与「执行侧肯删」不可能各判一次。
+                // 话删了也是假成功）。判据本体在 `services_orphan::service_key_delete_block_reason`；
+                // 执行侧现读是唯一判据，实现只此一份（§5.16/N6 收窄为「只许有一份实现」——
+                // 装载侧与 UI 不再判可删性，`deleteCapable` 已随 2026-10-15 方案 B 摘除）。
                 let narrow = services_orphan::looks_like_service_key(target)
                     && sysinfo::is_admin()
                     && unsafe { services_orphan::service_key_delete_block_reason(target) }.is_none();

@@ -405,8 +405,12 @@
   function confirm(title, message, confirmText = '确认', cancelText = '取消', options = {}) {
     const opts = options || {};
     if (!window.modal?.confirm) {
-      // 兜底：modal.js 未加载时退回原生确认框，保证确认链路不因脚本加载顺序中断
-      return Promise.resolve(window.confirm(`${title || ''}\n\n${String(message || '')}`));
+      // fail-closed（2026-10-15 裁定 / 方案 J3）：modal.js 缺席时不再退原生确认框——本函数
+      // 覆盖面含提权、服务启停、电源方案、更新暂停，退原生框等于绕过统一确认件；宁可报错不执行。
+      // 返回 false 而非 throw：调用点全部 await + 按假值早退，throw 会冒到全局
+      // unhandledrejection（只记日志不弹提示 = 用户点了没反应，本仓已有两次同类教训）。
+      toast('error', '确认组件未加载，本次不执行任何改动');
+      return Promise.resolve(false);
     }
     return window.modal.confirm({
       title,

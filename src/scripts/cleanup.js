@@ -1163,6 +1163,9 @@
   //   'cancel'        —— 用户关闭弹窗（×/ESC/背景），放弃本次清理
   //   'kill'          —— 用户选择「立即结束进程」，占用进程已结束，照常清理全部
   //   { skipIds }     —— 用户选择「不结束并放弃清理它们」，返回应跳过的条目 id 集合
+  //   'aborted'       —— 确认件（modal.js）缺席：独立信号，fail-closed 中止本次清理
+  //                      （2026-10-15 裁定 / 方案 J4；刻意不复用 null——null 的既有语义是
+  //                      「照常清理」，混用会静默丢掉占用告知与「放弃清理它们」的选择权）
   async function offerCloseLocked(ids) {
     if (!ids.length || !window.api?.cleanup?.checkLocked) return null;
     let info = null;
@@ -1180,7 +1183,13 @@
     const critical = procs.filter(p => p.critical);
     if (!killable.length && !critical.length) return null;
     const skipIds = new Set(Object.keys(info.lockedByItem || {}));
-    if (!window.modal?.create) return null; // ds/modal 未加载时优雅降级为直接清理
+    if (!window.modal?.create) {
+      // fail-closed（2026-10-15 裁定 / 方案 J4）：组件缺席时中止而非照常清理。代价：modal.js
+      // 真缺席时常规清理链整批不可用——那本就是不该发生的状态（index.html 恒挂 modal.js），
+      // 而「照常清理」会把占用告知与用户的处置选择权一起吞掉。
+      window.app?.toast?.('error', '确认组件未加载，本次清理已中止');
+      return 'aborted';
+    }
 
     return new Promise(resolve => {
       let settled = false;
@@ -1350,6 +1359,13 @@
     const lockIds = Array.from(selectedIds).filter(id => scanResults.has(id) && !FILECLEAN_IDS.includes(id) && id !== RECYCLE_ID);
     let abandonIds = new Set();
     const lockDecision = await offerCloseLocked(lockIds);
+    if (lockDecision === 'aborted') {
+      // 确认件缺席（信号与提示都在 offerCloseLocked 内），与用户取消同姿势收尾
+      isCleaning = false;
+      setCleaningBtn(false);
+      updateUI();
+      return;
+    }
     if (lockDecision === 'cancel') {
       isCleaning = false;
       setCleaningBtn(false);
@@ -1643,20 +1659,17 @@
       return;
     }
     const fileName = String(filePath).split('\\').pop() || filePath;
-    // 删除类操作红色二次确认（与退役前的 preview-window.js 同文案同 danger 档）
-    let confirmed = false;
-    if (window.modal?.confirm) {
-      confirmed = await window.modal.confirm({
-        title: '删除图片',
-        message: `将删除「${fileName}」。\n文件将进入回收站，可在回收站还原。`,
-        confirmText: '删除',
-        cancelText: '取消',
-        danger: true,
-        dangerHint: '删除后本页文件列表与容量统计将实时同步刷新。'
-      });
-    } else {
-      confirmed = window.confirm(`将删除「${fileName}」（进回收站，可在回收站还原）。\n是否继续？`);
-    }
+    // 删除类操作红色二次确认（与退役前的 preview-window.js 同文案同 danger 档）。
+    // 2026-10-15 裁定（方案 J3）：整段自写 modal 分支 + 原生兜底删除，改走
+    // window.app?.confirmDanger 位置参数——统一确认出口；app 缺席时表达式为 undefined
+    // ⇒ 下面按未确认早退（fail-closed），且从此落进 check-confirm-danger.mjs 的形态扫描面。
+    const confirmed = await window.app?.confirmDanger(
+      '删除图片',
+      `将删除「${fileName}」。\n文件将进入回收站，可在回收站还原。`,
+      '删除',
+      '取消',
+      '删除后本页文件列表与容量统计将实时同步刷新。'
+    );
     if (!confirmed) return;
 
     let resp = null;

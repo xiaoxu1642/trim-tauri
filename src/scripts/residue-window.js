@@ -151,15 +151,15 @@
     state.rows = (res.data && res.data.findings) || [];
     state.notes = (res.data && res.data.notes) || [];
     state.scanned = true;
-    // 勾选初值在渲染前定好：只展示不给删的行永远不该被勾上。
-    // 2026-10-06 用户裁定：进残留列表后可直接执行删除 ⇒ 后端判可删的候选一律默认勾上
-    // （原口径「除规则库高置信项外不自动勾选」废止）；删除仍走逐批确认，保护项不给勾。
-    state.rows.forEach(function (f) { f._checked = f.deleteCapable !== false; });
+    // 勾选初值 = 后端每条候选的 `defaultChecked`（生产者只在 residue.rs / residue_update.rs）。
+    // 2026-10-15 裁定（方案 J2）：废止 2026-10-06 的「后端判可删一律默认勾上」——低置信启发式、
+    // 侧痕、服务/驱动键、学习库命中这几类后端刻意给 false，交人工逐项勾选；删除仍走逐批确认。
+    state.rows.forEach(function (f) { f._checked = f.defaultChecked === true; });
     renderChains();
     updateActionButtons();
     const n = state.rows.length;
     toast(n ? 'info' : 'success', n
-      ? `该应用共 ${n} 项残留候选，可删项已默认勾选，确认后即可执行删除`
+      ? `该应用共 ${n} 项残留候选，已按默认状态预勾选，未勾上的需手动勾选才会删`
       : (state.notes[0] || '四类扫描都没有发现残留'));
   }
 
@@ -167,9 +167,7 @@
     let h = '<table class="finder-table"><thead><tr><th style="width:34px"></th><th>目标</th><th style="width:110px">置信度</th><th style="width:96px">详情</th></tr></thead><tbody>';
     for (const f of rows) {
       const i = state.rows.indexOf(f);
-      const cell = f.deleteCapable === false
-        ? '<span class="finder-name-text" style="opacity:.5" data-tip="本链只登记、不删除">—</span>'
-        : '<span class="checkbox' + (f._checked ? ' checked' : '') + '" data-rcheck="' + i + '" tabindex="0" role="checkbox" aria-checked="' + (f._checked ? 'true' : 'false') + '"></span>';
+      const cell = '<span class="checkbox' + (f._checked ? ' checked' : '') + '" data-rcheck="' + i + '" tabindex="0" role="checkbox" aria-checked="' + (f._checked ? 'true' : 'false') + '"></span>';
       h += '<tr class="' + (f._checked ? 'finder-row-selected' : '') + '">'
         + '<td>' + cell + '</td>'
         + '<td><div class="finder-cell"><span class="finder-path-text">' + esc(f.target) + '</span></div>'
@@ -232,17 +230,15 @@
     }).join('') + '</tbody></table>';
   }
 
-  // 可否删：只看后端回带的 deleteCapable（判据在扫描/执行侧，前端不再自己判一遍，§5.16）。
-  // 服务与驱动类候选会被执行侧 `service_key_delete_block_reason` 的现读判据挡住（不给删），
-  // 这里只负责把「为什么不给删」说清楚，判据不在这一层。
+  // 能不能删由执行侧现读判定（`classify_residue_op`），前端不判、也不展示后端可删结论
+  // （deleteCapable 契约已按 2026-10-15 裁定摘除）；这里只负责说清「删的时候会发生什么」。
   function deletableText(item) {
-    if (item.deleteCapable === false) return '不允许删除：' + (item.reason || '本链只登记、不删除');
     if (item.bucket === 'service' || item.bucket === 'driver') {
-      return '可以删除：服务/驱动键删除由八道现读判据把住（落点已失踪、不在系统目录、非内核驱动、'
+      return '能不能删要执行时现读判定：服务/驱动键删除由八道现读判据把住（落点已失踪、不在系统目录、非内核驱动、'
         + '非 boot/system 启动、无依赖声明、不在反作弊名单）；驱动类通常会被挡下（本类候选仍列出供你判断）。'
         + '删除前会先整键导出 .reg 备份；还原是把键加回去，不恢复运行状态，可能需重启才生效。已提权才允许执行。';
     }
-    return '可以删除：勾上之后仍要逐项确认；文件与目录进回收站，注册表项删前先导出 .reg 备份。';
+    return '勾上之后仍要逐项确认；文件与目录进回收站，注册表项删前先导出 .reg 备份。能不能删以执行时现读判定为准。';
   }
 
   function openDetail(item) {
@@ -314,8 +310,16 @@
   }
 
   async function cleanSelected() {
-    const picked = state.rows.filter(function (f) { return f._checked; });
-    if (!picked.length || state.running) return;
+    // X-4（方案 J14）：取数面 = 当前**可见**的勾选项（过 passes 过滤）。_checked 语义不动——
+    // 被搜索隐藏的行勾选态保留，清空搜索后回来仍在；未搜索时 passes 恒 true，与旧行为等价。
+    const picked = state.rows.filter(passes).filter(function (f) { return f._checked; });
+    if (state.running) return;
+    if (!picked.length) {
+      // 按钮按全窗勾选判（updateActionButtons 不改），搜索把勾选项全藏起来时按钮仍可点；
+      // 早退前给一句可见反馈，防「点了没反应」（其余场景按钮本就是禁用的）
+      if (state.filter.trim()) toast('info', '当前搜索结果内没有勾选项');
+      return;
+    }
     const backup = readBackupPref();
     const ok = await confirmViaModal({
       title: '确认清理残留',
@@ -450,7 +454,7 @@
     const t = e.target.closest('[data-rcheck]');
     if (t) {
       const f = state.rows[Number(t.dataset.rcheck)];
-      if (!f || f.deleteCapable === false) return;
+      if (!f) return;
       f._checked = !f._checked;
       t.classList.toggle('checked', f._checked);
       t.setAttribute('aria-checked', f._checked ? 'true' : 'false');

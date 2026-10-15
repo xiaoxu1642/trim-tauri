@@ -131,8 +131,11 @@ pub fn looks_like_service_key(target: &str) -> bool {
     service_key_name(target).is_some()
 }
 
-/// **服务键删除的唯一判据**：装载侧（深扫标记 deleteCapable）与执行侧
-/// （`classify_residue_op` 的 A1 窄口子）必须调这同一个函数（AGENTS §5.16/N6）。
+/// **服务键删除的唯一判据**。执行侧现读是唯一判据：生产调用点只有 `residue.rs` 的
+/// `classify_residue_op`（A1 窄口子）；装载侧不判、UI 也不展示后端可删结论
+/// （`deleteCapable` 已随 2026-10-15 方案 B 摘除）。**约束因此变严不是变松**——
+/// 本函数一旦放宽就是净扩删除面，没有第二道闸能兜（AGENTS §5.16/N6 在这里的含义
+/// 从「两侧同一函数」变成「只许有一份实现」）。
 /// 返回 `None` = 允许进删除链；`Some(reason)` = 拒，reason 直接进报告与日志。
 ///
 /// 这是本仓唯一一处「A1 禁删面 `HKLM\SYSTEM` 让路」的口子，所以每条都是**排除式**的：

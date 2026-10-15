@@ -176,8 +176,9 @@
       item && item.target ? `落点为 ${compact(item.target, 140)}` : '',
       item && item.kind ? `形状为 ${compact(KIND_TEXT[item.kind] || item.kind, 24)}` : '',
       item && item.reason ? `本轮判定：${compact(item.reason, 90)}` : '',
-      item && item.deleteCapable === false ? '本链只登记、不提供删除' : '',
-      item && item.readonly === true ? '深扫区只出报告，未进执行快照' : ''
+      // 勾选初值自 2026-10-15 起读后端 `defaultChecked`（生产者只在 residue.rs / residue_update.rs，
+      // 不是规则库里的字段）——「默认不勾」这个事实要在简介里说清，否则用户以为整表都会删
+      item && item.defaultChecked === false ? '该项默认不勾选，需手动勾上才会删' : ''
     ];
     return {
       text: appendFacts(base, facts),
