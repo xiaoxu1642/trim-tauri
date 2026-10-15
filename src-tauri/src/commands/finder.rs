@@ -1164,7 +1164,10 @@ mod tests {
         let fx = include_str!("../../../tools/fixtures/finder-delete-modes.json");
         let v: Value = serde_json::from_str(fx).expect("共享夹具解析失败");
         let modes = v.get("modes").and_then(|m| m.as_object()).expect("夹具缺 modes 表");
-        assert_eq!(modes.len(), 4, "夹具登记的 mode 数与产出侧字面量数不符（改一侧必须两侧同改）");
+        // 5 = recycled / rejected / reparse-ancestor / unrecoverable-name / trash-failed
+        // （Kudu S2 即 5073673 新增 reparse-ancestor，夹具已由 gen-finder-delete-modes 重生成为
+        // 5 项，本计数当时没跟上——P0-B 全量跑首测暴露。改 modes 表必须同步改这里）
+        assert_eq!(modes.len(), 5, "夹具登记的 mode 数与产出侧字面量数不符（改一侧必须两侧同改）");
         let mut ok_buckets = 0usize;
         for (mode, bucket) in modes {
             let expect = bucket.as_str().unwrap_or("");

@@ -95,6 +95,16 @@ const RAW_EXEMPT = [
     anchor: 'let st = Command::new("cmd")',
     reason: 'J12（2026-10-16）双向咬合用例：mklink /J 造（活/断）junction 验证「断链放行、活链仍拒」（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
+  {
+    file: 'src-tauri/src/engine/protect.rs',
+    anchor: 'let ok = std::process::Command::new("cmd")',
+    reason: 'Kudu S2（5073673）别名解析真机用例①：mklink /J 造指向受保护子树的 junction，验证解析后命中保护（cfg(test) 专用、非生产执行面；与 cleanup.rs/fileclean.rs 夹具同口径，P0-B 全量跑时补登记）',
+  },
+  {
+    file: 'src-tauri/src/engine/protect.rs',
+    anchor: 'let ok2 = std::process::Command::new("cmd")',
+    reason: '同上用例③对照组：mklink /J 造指向普通目录的 junction，验证不得误判受保护（锚点带 ok2 前缀与上一条区分，避免 0/2 歧义判红）',
+  },
 ];
 
 /**
