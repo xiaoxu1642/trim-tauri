@@ -388,7 +388,8 @@ pub const NETSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 /// 30s 宽限上界（更长的服务启动由维护链的 MAINT_CMD_TIMEOUT 单独兜）。
 pub const SC_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// 优化项步骤里的 `powercfg` 超时（v4 R5-M07，pssteps 的 Spawn 算子）：
+/// 电源计划编辑器导出用的 `powercfg` 子进程超时（v5 P0 起为唯一调用点；
+/// 原 pssteps 的 Spawn 算子已随 P0-1 电源写面收敛移除）：
 /// 正常秒级，30s 宽限上界。
 pub const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 

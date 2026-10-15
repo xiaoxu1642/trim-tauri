@@ -361,7 +361,6 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"start", "Dhcp"', reason: '网络修复：启动 DHCP 服务（sc start）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"start", "Dnscache"', reason: '网络修复：启动 DNS 缓存服务（sc start）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"winhttp", "reset", "proxy"', reason: '网络修复：重置 WinHTTP 代理', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
-  { file: 'src-tauri/src/engine/pssteps.rs', anchor: 'system_tool(program)', reason: '优化项 Spawn 算子（编译期白名单仅 powercfg.exe）', timeoutConst: 'POWERCFG_TIMEOUT', secs: 30 },
   // P3-5（R5-G-4 补收）：cmd 步骤此前是裸 .output()，与其余调用点不同形态（raw_arg）——
   // 门禁须把 raw 版一并收进池子，否则「形似不合」的新调用点天然隐身。
   { file: 'src-tauri/src/commands/optimizer/apply.rs', anchor: '&cmd_line_of(cmd)', reason: '优化项 cmd 步骤（/s /c 引号形状必须逐字保留，故走 raw_arg 形态）', timeoutConst: 'CMD_STEP_TIMEOUT', secs: 60 },

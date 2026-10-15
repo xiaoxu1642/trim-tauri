@@ -16,16 +16,6 @@
       ]
     },
     {
-      "id": "power",
-      "title": "电源",
-      "items": [
-        "power_off",
-        "tf_hibern_off",
-        "nara_throttle_off",
-        "nara_usb3_lpm_off"
-      ]
-    },
-    {
       "id": "reg",
       "title": "注册表优化",
       "admin": true,
@@ -71,11 +61,7 @@
     "tf_gamemode",
     "game_dvr",
     "tf_gamebar",
-    "power_off",
-    "tf_hibern_off",
     "mmcss_games",
-    "nara_throttle_off",
-    "nara_usb3_lpm_off",
     "nara_bcd_timer",
     "nara_bcd_vsm",
     "nara_bcd_boot",
@@ -100,6 +86,6 @@
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "ANl6A11ATGMbr4mUIOouYzWFa/bdkOzqeEQjdXJ+rgRK4dAbh3p+LHzTAJjxULmcs7PUztbPne13i/MRtVMNDQ=="
+    "sig": "sY5miW66BSKpIKcEScFJr3arIcmmKtFuZJYSaX2rhQWdXtKx/jKyPsXRsUyQ8puzZHxrU+9CS1U8O+5NFgfoCA=="
   }
 }

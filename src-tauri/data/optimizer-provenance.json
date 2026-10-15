@@ -82,10 +82,10 @@
       "why": "系统服务 分组的代表项（该组 steps 最多，判据最复杂）",
       "reviewedAt": "2026-10-03"
     },
-    "power_aspm_off": {
+    "tf_disk_extra3": {
       "sourceClass": "builtin",
-      "why": "系统调校 分组的代表项（该组 steps 最多，判据最复杂）",
-      "reviewedAt": "2026-10-03"
+      "why": "系统调校 分组的代表项（该组 steps 最多，判据最复杂）；power_aspm_off 退役后接替（P0-1，2026-10-16）",
+      "reviewedAt": "2026-10-16"
     },
     "edge_hide_firstrun": {
       "sourceClass": "builtin",

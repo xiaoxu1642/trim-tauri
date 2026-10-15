@@ -40,6 +40,7 @@ const REGISTRY = [
   { file: 'check-first-paint.mjs', reason: '首屏关键路径：F1 预算双向 + F2 defer 不变量 + F4 首屏∩按需，7 组合成样本自检；豁免表与对照双向咬合——清空豁免表会让对照②立即判红（真破坏 exit 1），不是只松真样本' },
   { file: 'check-asset-size.mjs', reason: '资源体积三段判据抽出为单一 judgeAssets，5 组合成样本与之共用同一实现（塞未登记大文件 / 条目失踪 / 超 cap 必红，等值与干净样本放行）；从 PENDING_CONTROLS 迁入本表' },
   { file: 'check-desc-vs-writes.mjs', reason: 'P1-03 文案⇄写入：原缺陷形态判红 /「其余」精确限定与无声称放行，3 条判定器自检' },
+  { file: 'check-power-write-surface.mjs', reason: 'P0-1 电源写面：9 条正反样本自检（powercfg 写命令/电源命名空间必判红，只读查询与页面文件步骤必须放行）+ ALLOW 双棘轮（登记不命中必红）' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。

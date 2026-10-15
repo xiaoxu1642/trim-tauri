@@ -684,7 +684,7 @@ const uncoveredGroups = allGroups.filter(
 if (uncoveredGroups.length) {
   a5Problems.push(`这 ${uncoveredGroups.length} 个分组一项 provenance 都没有 → ${uncoveredGroups.join(', ')}`);
 }
-const PROV_BASELINE = 21; // 2026-10-03 首版 24；2026-10-11 随 6 项退役（IFEO×2/板载音频+打印/OneDrive/乱序内存）显式降为 21
+const PROV_BASELINE = 21; // 2026-10-03 首版 24；2026-10-11 随 6 项退役（IFEO×2/板载音频+打印/OneDrive/乱序内存）显式降为 21；2026-10-16 P0-1：power_aspm_off 退役、tf_disk_extra3 接替「系统调校」代表，总数不变
 if (Object.keys(provItems).length < PROV_BASELINE) {
   a5Problems.push(
     `provenance 覆盖缩水：${Object.keys(provItems).length} < 基线 ${PROV_BASELINE} —— 若确有项退役，显式下调 PROV_BASELINE 并在提交信息里说明`,
@@ -782,8 +782,8 @@ for (const [id, d] of Object.entries(defItems)) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d.reviewedAt || '')) a7Problems.push(`${id}: reviewedAt 不是 YYYY-MM-DD`);
 }
 // 覆盖率棘轮：登记项数只增不减（确有项退役时显式下调并注明）
-const DEF_BASELINE = 118; // 2026-10-03 首版 126；tf_restore_point 降 125；2026-10-11 6 项退役降 119；
-// tf_mmagent（内存压缩/页合并）退役降 118
+const DEF_BASELINE = 115; // 2026-10-03 首版 126；tf_restore_point 降 125；2026-10-11 6 项退役降 119；
+// tf_mmagent（内存压缩/页合并）退役降 118；2026-10-16 P0-1 电源写面收敛 3 项退役（tf_hibern_off/power_off/power_aspm_off）降 115
 if (Object.keys(defItems).length < DEF_BASELINE) {
   a7Problems.push(
     `defaults 覆盖缩水：${Object.keys(defItems).length} < 基线 ${DEF_BASELINE} —— `
@@ -793,7 +793,8 @@ if (Object.keys(defItems).length < DEF_BASELINE) {
 // known 项数棘轮：**只增不减**。判红实验 2 抓到的缺口：把一个 `defaultKnown=true`
 // 改成 `false` + `"unknown"` 完全合规（每条规则都过），于是「机械可复核的项」可以
 // 被静默降级成 unknown —— 覆盖率只登记不升级，几个月后这张表就全是 unknown 而没人察觉。
-const DEF_KNOWN_BASELINE = 9; // 2026-10-03 首版 10；2026-10-11 tf_onedrive（随 OneDrive 并入 tf_appx 退役）显式降为 9
+const DEF_KNOWN_BASELINE = 7; // 2026-10-03 首版 10；2026-10-11 tf_onedrive（随 OneDrive 并入 tf_appx 退役）显式降为 9；
+// 2026-10-16 P0-1：tf_hibern_off 退役、tf_gpu_latency 收窄为纯 reg 项后「键本应不存在」不再可机械复核，降为 7
 const knownCount = Object.values(defItems).filter((x) => x.defaultKnown).length;
 if (knownCount < DEF_KNOWN_BASELINE) {
   a7Problems.push(

@@ -8,12 +8,6 @@
       "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
       "reviewedAt": "2026-10-03"
     },
-    "tf_hibern_off": {
-      "defaultKnown": true,
-      "defaultValue": null,
-      "why": "该键由本项执行时新建（steps 有 / restore 无，共 4 个），原状态必然是「键不存在」",
-      "reviewedAt": "2026-10-03"
-    },
     "tf_core_misc": {
       "defaultKnown": false,
       "defaultValue": "unknown",
@@ -63,10 +57,10 @@
       "reviewedAt": "2026-10-03"
     },
     "tf_gpu_latency": {
-      "defaultKnown": true,
-      "defaultValue": null,
-      "why": "该键由本项执行时新建（steps 有 / restore 无，共 11 个），原状态必然是「键不存在」",
-      "reviewedAt": "2026-10-03"
+      "defaultKnown": false,
+      "defaultValue": "unknown",
+      "why": "P0-1 收窄为纯 reg 项（仅 DXGKrnl 监视器延迟键）后 restore 推理覆盖全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（驱动/固件差异），不能当出厂值",
+      "reviewedAt": "2026-10-16"
     },
     "svc_mem_gb": {
       "defaultKnown": false,
@@ -96,12 +90,6 @@
       "defaultKnown": true,
       "defaultValue": null,
       "why": "该键由本项执行时新建（steps 有 / restore 无，共 8 个），原状态必然是「键不存在」",
-      "reviewedAt": "2026-10-03"
-    },
-    "power_off": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
       "reviewedAt": "2026-10-03"
     },
     "tf_defender": {
@@ -381,12 +369,6 @@
       "reviewedAt": "2026-10-03"
     },
     "svc_bluetooth_disable": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
-      "reviewedAt": "2026-10-03"
-    },
-    "power_aspm_off": {
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "无可机械判定的原值来源（无 restore 段、非新建键）",

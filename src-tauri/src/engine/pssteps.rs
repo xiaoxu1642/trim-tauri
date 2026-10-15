@@ -19,7 +19,6 @@
 //! - `[byte[]](0x..,…)` 赋值与内联 `-Value`；`@{ K = v; … }` 哈希表与 `$map[$k]` 取值
 //! - `Join-Path <var|literal> <literal>`；`Test-Path -LiteralPath`
 //! - `schtasks /change /tn <name> /disable|/enable`（位置式，映射 TaskChange）
-//! - `powercfg <args>`（Spawn 算子，仅放行 PINNED 的 powercfg.exe）
 //! - `Get-ChildItem <注册表键> | ForEach-Object { … }` → ForSubKey 原生子键枚举，
 //!   `$_` 绑定为子键完整 PS 路径（`$_.PSPath` 即取该值）
 //! - `Get-CimInstance Win32_VideoController|Win32_USBController | Where-Object { … "PCI*" }
@@ -67,8 +66,6 @@ pub enum PsOp {
     /// 在 `HKLM\SYSTEM\CurrentControlSet\Enum\PCI` 按实例 `Class` 值过滤；
     /// `$_` 绑定为 PNPDeviceID（`PCI\VEN_x…\实例串`）。
     ForDevKey { class: String, body: String, vars: VarMap },
-    /// PINNED 系统工具直调（仅 powercfg，v3-K1）。白名单外的程序在编译期就 Err。
-    Spawn { program: String, args: Vec<String> },
     /// 设备禁用/启用（2026-10-11 tf_dev_disable 原生化）：
     /// `Get-PnpDevice | Where { FriendlyName -eq $n -and Status -eq 'OK' } |
     /// Disable/Enable-PnpDevice` 整段模式 → 按名字走 CM_Disable/Enable_DevNode FFI。
@@ -1455,17 +1452,6 @@ fn parse_statement(
             };
             Ok(vec![PsOp::TaskChange { path: None, name, disable }])
         }
-        "powercfg" => {
-            // v3-K1：ASPM 关闭链。只放行 powercfg（PINNED，system_tool 解析到
-            // System32）；其它可执行程序不进本通道（编译与执行两侧双重把守）。
-            if cmd.positional.is_empty() {
-                return Err("powercfg 缺参数".into());
-            }
-            Ok(vec![PsOp::Spawn {
-                program: "powercfg.exe".into(),
-                args: cmd.positional.clone(),
-            }])
-        }
         other => Err(format!("不支持的 cmdlet: {other}")),
     }
 }
@@ -1777,28 +1763,6 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             }
             finish(out, errs)
         }
-        PsOp::Spawn { program, args } => {
-            // 编译期只从 "powercfg" 臂产生本算子；执行侧再核一次白名单（双保险）
-            if !program.eq_ignore_ascii_case("powercfg.exe") {
-                return Err(format!("Spawn 算子只允许 powercfg.exe，收到 {program}"));
-            }
-            // v4 R5-M07：裸 .output() 改带超时（优化项步骤挂在 IPC 同步链上）
-            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let out = crate::engine::systembin::quiet_cmd_timeout(
-                crate::engine::systembin::system_tool(program),
-                &args_ref,
-                crate::engine::systembin::POWERCFG_TIMEOUT,
-            )
-            .map_err(|e| format!("powercfg 执行失败: {e}"))?;
-            if out.status.success() {
-                Ok(String::new())
-            } else {
-                Err(format!(
-                    "powercfg 退出码 {}",
-                    out.status.code().unwrap_or(-1)
-                ))
-            }
-        }
         PsOp::PsInline { script } => {
             // 逐字交给收件箱 Windows PowerShell（System32 自带，无需用户装 pwsh7）。
             // stdout 交回调用方解析 `@@RECYCLE@@` 协议（tf_onedrive 的目录回收走这里）。
@@ -2096,7 +2060,7 @@ mod tests {
     }
 
     /// v3-K1：新原生构造的解析行为（foreach 变量列表 / 插值 / 拼接 / byte[] /
-    /// 哈希表 / schtasks / powercfg / 枚举管道）
+    /// 哈希表 / schtasks / 枚举管道）
     #[test]
     fn parses_v3k1_constructs() {
         // foreach 变量列表 + 双引号插值
@@ -2114,10 +2078,6 @@ mod tests {
         .unwrap();
         assert!(matches!(&ops[0], PsOp::TaskChange { name, disable: true, .. } if name == "T1_{B2FE1952}"));
         assert_eq!(ops.len(), 2);
-
-        // powercfg
-        let ops = compile("powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ASPM 0").unwrap();
-        assert!(matches!(&ops[0], PsOp::Spawn { program, .. } if program == "powercfg.exe"));
 
         // [byte[]] 字面量 → Binary 值
         let ops = compile(

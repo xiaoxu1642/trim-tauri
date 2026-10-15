@@ -2101,7 +2101,7 @@ let ov = include_str!("overview.rs");
             ]},
             // 三种「不该列」的形态
             "tf_ntfs": { "at": "x", "values": [] },                       // values 空数组
-            "tf_hibern_off": { "at": "x" },                              // 压根没有 values 字段
+            "tf_core_misc": { "at": "x" },                               // 压根没有 values 字段
             "根本不存在的id": { "at": "x", "values": [{ "k": 1 }] },        // 目录里没有此项
         });
 
@@ -2111,7 +2111,7 @@ let ov = include_str!("overview.rs");
         let a_ids: Vec<&str> = active.iter().filter_map(|v| v["id"].as_str()).collect();
         assert!(a_ids.contains(&"perf_wu_pause"), "有备份的在用项必须被列出：{a_ids:?}");
         assert!(!a_ids.contains(&"tf_ntfs"), "values 为空数组的项不该被列出：{a_ids:?}");
-        assert!(!a_ids.contains(&"tf_hibern_off"), "没有 values 字段的项不该被列出：{a_ids:?}");
+        assert!(!a_ids.contains(&"tf_core_misc"), "没有 values 字段的项不该被列出：{a_ids:?}");
         assert!(!a_ids.contains(&"根本不存在的id"), "目录里没有的 id 不该出现在 active：{a_ids:?}");
 
         // active 项必须带 values 数与备份时间（前端要显示「N 个值 · 何时备份的」）
@@ -2130,7 +2130,7 @@ let ov = include_str!("overview.rs");
         // ③ is_restorable 与清单口径一致
         assert_eq!(is_restorable(&map, "perf_wu_pause"), Some(1));
         assert_eq!(is_restorable(&map, "tf_ntfs"), None, "values 空的项不可还原");
-        assert_eq!(is_restorable(&map, "tf_hibern_off"), None, "没有 values 字段的项不可还原");
+        assert_eq!(is_restorable(&map, "tf_core_misc"), None, "没有 values 字段的项不可还原");
         assert_eq!(is_restorable(&map, "不存在的id"), None);
     }
 
@@ -2448,9 +2448,9 @@ let ov = include_str!("overview.rs");
         assert_eq!(scope_checks(&checks, Some(&[])).len(), checks.len());
 
         // 注册表类断言不参与收窄：拿一个纯 reg 项的断言验
-        let reg = find_option("tf_hibern_off").expect("tf_hibern_off 在目录里");
+        let reg = find_option("tf_timer_coal").expect("tf_timer_coal 在目录里");
         let reg_checks = collect_checks(reg);
-        assert!(!reg_checks.is_empty(), "tf_hibern_off 应产出注册表断言");
+        assert!(!reg_checks.is_empty(), "tf_timer_coal 应产出注册表断言");
         let reg_scoped = scope_checks(&reg_checks, Some(&picked));
         assert_eq!(
             reg_scoped.len(),
@@ -2462,7 +2462,7 @@ let ov = include_str!("overview.rs");
     /// P2-05（D-01）：reg_targets 从步骤文本现算的「改了谁」摘要必须正确。
     ///
     /// 点名 reached 集合：混用项 tf_core_misc 必须同时有 HKCU+HKLM；纯非 reg 项
-    /// tf_ntfs 必须为空数组；纯 HKLM 项 tf_hibern_off 只含 HKLM。
+    /// tf_ntfs 必须为空数组；纯 HKLM 项 tf_timer_coal 只含 HKLM。
     /// 只断「非空」会放过「hive 名错/计数恒 0」的形态。
     #[test]
     fn p2_reg_targets摘要正确() {
@@ -2488,15 +2488,15 @@ let ov = include_str!("overview.rs");
         assert!(nt.is_empty(), "tf_ntfs 无 reg 写入，regTargets 应为空，实际 {nt:?}");
 
         // ③ 纯 HKLM 项 → 只含 HKLM
-        let hibern = find_option("tf_hibern_off").expect("tf_hibern_off 在目录里");
-        let hb_val = reg_targets(hibern);
+        let coal = find_option("tf_timer_coal").expect("tf_timer_coal 在目录里");
+        let hb_val = reg_targets(coal);
         let hb = hb_val.as_array().expect("应是数组");
         let hh: Vec<&str> = hb.iter().filter_map(|x| x.get("hive").and_then(Value::as_str)).collect();
-        assert_eq!(hh, vec!["HKLM"], "tf_hibern_off 应只含 HKLM，实际 {hh:?}");
+        assert_eq!(hh, vec!["HKLM"], "tf_timer_coal 应只含 HKLM，实际 {hh:?}");
         let keys = hb[0].get("keys").and_then(Value::as_array).unwrap();
         assert!(
-            keys.iter().any(|k| k.as_str().map(|s| s.contains("Session Manager\\Power")).unwrap_or(false)),
-            "tf_hibern_off 应点名 Session Manager\\Power，实际 {keys:?}"
+            keys.iter().any(|k| k.as_str().map(|s| s.contains("Session Manager")).unwrap_or(false)),
+            "tf_timer_coal 应点名 Session Manager 子键，实际 {keys:?}"
         );
     }
 

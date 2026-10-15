@@ -4,13 +4,11 @@
   "_rule": "档位不是逐条实测出来的（本机不能为了标注去真跑 114 项优化），而是由步骤触碰的位置机械判定，且 tools/check-optimizer-dynamic.mjs 用同一条规则重算并要求本表与之一致 —— 规则可复核，猜测不可。判定顺序：命中命令面 fsutil/powercfg/DISM/schtasks 或 sc config|stop|net stop，或写入 HKLM\\SYSTEM\\CurrentControlSet\\{Services|Control|FileSystem} ⇒ reboot；否则命中 HKCU\\...\\Explorer、Policies\\Explorer、Winlogon、ContextMenuHandlers、Control Panel\\Mouse、HKCR ⇒ explorer；其余 none。偏差方向刻意保守：把该重启的说成不用重启，用户会以为设置没生效而反复重做；把不用重启的说成要重启，只是多一次无用重启。",
   "scope": {
     "tf_ntfs": "reboot",
-    "tf_hibern_off": "reboot",
     "tf_core_misc": "reboot",
     "tf_timer_coal": "reboot",
     "tf_gamebar": "reboot",
     "tf_gpu_latency": "reboot",
     "share_off": "reboot",
-    "power_off": "reboot",
     "tf_defender": "reboot",
     "tf_privacy": "reboot",
     "tf_keyboard": "reboot",

@@ -103,27 +103,7 @@ const OPTIONS = [
       { label: '页面文件不加密', cmd: 'fsutil behavior set encryptpagingfile 0' }
     ]
   },
-  {
-    id: 'tf_hibern_off', group: '启动与响应', title: '关闭休眠与快速启动', risk: 'medium',
-    desc: 'Trim：powercfg /h off、HiberbootEnabled=0、HibernateEnabled=0、关闭睡眠可靠性诊断与 SleepStudy，彻底关闭休眠文件与快速启动。',
-    steps: [
-      { label: '关闭休眠', cmd: 'powercfg /h off' },
-      {
-        label: '快速启动 / 休眠 / 睡眠诊断注册表', reg: regBlock({
-          'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power': {
-            'HiberbootEnabled': 'dword:00000000',
-            'HibernateEnabled': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SleepReliability': {
-            'SleepReliabilityDetailedDiagnostics': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SleepStudy': {
-            'SleepStudyDisabled': 'dword:00000001'
-          }
-        })
-      }
-    ]
-  },
+  
   {
     id: 'tf_core_misc', group: '启动与响应', title: '核心响应性杂项', risk: 'medium',
     desc: 'Trim 核心键集合：Win32PrioritySeparation=38、LargeSystemCache=1、菜单延迟 0、HwSchMode=2（硬件调度）、DistributeTimers=1、禁用 FTH、MoveImages=0、DisablePagingExecutive=1、DpiMapIommuContiguous=1、关闭自动维护、IE DEP 关闭。',
@@ -162,32 +142,18 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'tf_timer_coal', group: '启动与响应', title: '合并计时器与现代待机', risk: 'medium',
-    desc: 'Trim：7 条路径 CoalescingTimerInterval=0，关闭 PlatformAoAc/ModernSleep/CsEnabled，EnergyEstimation/EventProcessor 关闭，PowerThrottlingOff=1，降低定时器合并带来的延迟。',
+    id: 'tf_timer_coal', group: '启动与响应', title: '关闭计时器合并', risk: 'medium',
+    desc: 'Trim：4 条路径 CoalescingTimerInterval=0（Session Manager kernel / Memory Management / Executive、Multimedia SystemProfile），关闭计时器合并以降低定时器排队带来的延迟。',
     steps: [
       {
-        label: 'CoalescingTimerInterval / ModernSleep / PowerThrottling', reg: regBlock({
+        label: '4 条路径 CoalescingTimerInterval=0', reg: regBlock({
           'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel': {
             'CoalescingTimerInterval': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power': {
-            'CoalescingTimerInterval': 'dword:00000000',
-            'PlatformAoAcOverride': 'dword:00000000'
           },
           'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management': {
             'CoalescingTimerInterval': 'dword:00000000'
           },
           'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Executive': {
-            'CoalescingTimerInterval': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power': {
-            'CoalescingTimerInterval': 'dword:00000000',
-            'EnergyEstimationEnabled': 'dword:00000000',
-            'EventProcessorEnabled': 'dword:00000000',
-            'CsEnabled': 'dword:00000000',
-            'PowerThrottlingOff': 'dword:00000001'
-          },
-          'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\ModernSleep': {
             'CoalescingTimerInterval': 'dword:00000000'
           },
           'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile': {
@@ -295,34 +261,17 @@ const OPTIONS = [
   },
   
   {
-    id: 'tf_gpu_latency', group: '游戏与多媒体', title: 'GPU 延迟容忍度调优', risk: 'medium',
-    desc: 'Trim Latency Tolerance：DXGKrnl MonitorLatencyTolerance/MonitorRefreshLatencyTolerance=1，Control\\Power 9 键=1，GraphicsDrivers\\Power 24 键=1（含 DefaultD3TransitionLatency*、DefaultLatencyTolerance*、Miracast 等）。',
+    id: 'tf_gpu_latency', group: '游戏与多媒体', title: '显示器延迟容忍度调优', risk: 'medium',
+    desc: 'Trim Latency Tolerance：DXGKrnl MonitorLatencyTolerance/MonitorRefreshLatencyTolerance=1，下调显示管线的延迟容忍度。',
     steps: [
       {
-        label: 'DXGKrnl / Control Power 延迟键', reg: regBlock({
+        label: 'DXGKrnl 监视器延迟键', reg: regBlock({
           'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\DXGKrnl': {
             'MonitorLatencyTolerance': 'dword:00000001',
             'MonitorRefreshLatencyTolerance': 'dword:00000001'
-          },
-          'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power': {
-            'ExitLatency': 'dword:00000001',
-            'ExitLatencyCheckEnabled': 'dword:00000001',
-            'Latency': 'dword:00000001',
-            'LatencyToleranceDefault': 'dword:00000001',
-            'LatencyToleranceFSVP': 'dword:00000001',
-            'LatencyTolerancePerfOverride': 'dword:00000001',
-            'LatencyToleranceScreenOffIR': 'dword:00000001',
-            'LatencyToleranceVSyncEnabled': 'dword:00000001',
-            'RtlCapabilityCheckLatency': 'dword:00000001'
           }
         })
-      },
-      { label: 'GraphicsDrivers\\Power 24 键', pwsh: [
-        '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\\Power"',
-        'New-Item -Path $p -Force | Out-Null',
-        '$names = @("ExitLatency","ExitLatencyCheckEnabled","Latency","LatencyToleranceDefault","LatencyToleranceFSVP","LatencyTolerancePerfOverride","LatencyToleranceScreenOffIR","LatencyToleranceVSyncEnabled","RtlCapabilityCheckLatency","DefaultD3TransitionLatency","DefaultD3TransitionLatencyEnabled","DefaultD3TransitionLatencyHMD","DefaultD3TransitionLatencyHMDEnabled","DefaultD3TransitionLatencyMedia","DefaultD3TransitionLatencyMediaEnabled","DefaultLatencyTolerance","DefaultLatencyToleranceEnabled","DefaultLatencyToleranceHMD","DefaultLatencyToleranceHMDEndabled","DefaultMemoryRefreshLatency","DefaultMemoryRefreshLatencyEnabled","MaxIAverageGraphicsLatencyInOneBucket","MiracastPerfTrackGraphicsLatency","MonitorLatencyTolerance","MonitorRefreshLatencyTolerance","TransitionLatency")',
-        'foreach ($n in $names) { New-ItemProperty -Path $p -Name $n -Value 1 -PropertyType DWord -Force | Out-Null }'
-      ].join('\n') }
+      }
     ]
   },
 
@@ -448,20 +397,7 @@ const OPTIONS = [
       ].join('\n') }
     ]
   },
-  {
-    id: 'power_off', group: '安全与隐私', title: '禁用电源节能', risk: 'medium',
-    desc: '关闭 USB/PCIe 省电、核心停放与节流、电源节流与驱动搜索（台式机推荐，笔记本会增加耗电）。快速启动（HiberbootEnabled）由「关闭休眠与快速启动」负责，本项不再重复写入。',
-    steps: [
-      { label: '关闭节能与休眠默认值', reg: regBlock({
-        // 第六大点-B（2026-09-14）：HiberbootEnabled（快速启动）归「关闭休眠与快速启动」(tf_hibern_off)，
-        // 本项不再重复写入同一键。
-        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power': { 'HibernateEnabledDefault': 'dword:00000000' },
-        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerThrottling': { 'PowerThrottlingOff': 'dword:00000001' },
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\DriverSearching': { 'SearchOrderConfig': 'dword:00000000' },
-        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\54533251-82be-4824-96c1-47b60b740d00\\943c8cb6-6f93-4227-ad87-e9a3feec08d1': { 'Attributes': 'dword:00000002' }
-      }) }
-    ]
-  },
+  
   {
     id: 'tf_defender', group: '安全与隐私', title: '关闭 Defender 与 SmartScreen', risk: 'high',
     desc: 'Trim：禁用 Microsoft Defender 反间谍/实时保护/云上报/SmartScreen/Edge 钓鱼过滤，并停用 Sense、WinDefend、WdNisSvc、SecurityHealthService、wscsvc（高风险，系统将无杀毒防护）。',
@@ -1303,25 +1239,7 @@ const OPTIONS = [
     ]
   },
   // ==================== 系统调校补齐（对齐 Trim BuildSystemModule）====================
-  {
-    id: 'power_aspm_off', group: '系统调校', title: '禁用 PCI-E ASPM 节能', risk: 'medium',
-    desc: '电源方案与设备级关闭 PCIe 链路节能(ASPM)，可能减少显卡、硬盘或网卡从低功耗状态唤醒时的卡顿。',
-    steps: [
-      {
-        label: '电源方案关闭 ASPM', pwsh: [
-          'powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ASPM 0',
-          'powercfg /setdcvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ASPM 0',
-          'powercfg /setactive SCHEME_CURRENT'
-        ].join('\n')
-      },
-      {
-        label: '设备级 ASPM 关闭', pwsh: [
-          '$root = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}"',
-          'if (Test-Path $root) { Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object { New-ItemProperty -Path $_.PSPath -Name "EnableASPM" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null } }'
-        ].join('\n')
-      }
-    ]
-  },
+  
   {
     id: 'storage_8dot3_off', group: '系统调校', title: '禁用 NTFS 8.3 短文件名', risk: 'medium',
     desc: '关闭 8.3 短文件名生成（fsutil 8dot3name set 1），减少短文件名维护开销；旧安装器、脚本或驱动兼容性需确认。',
@@ -1993,32 +1911,7 @@ const OPTIONS = [
   },
 
   // ==================== 永劫无间专项面板（2026-10-11 用户拍板 C2）====================
-  {
-    id: 'nara_throttle_off', group: '系统调校', title: '关闭 CPU 节流状态', risk: 'medium',
-    desc: '电源方案关闭 Allow Throttle States（AC/DC 都写 0），防止系统在温度/功耗阈值下主动降频；代价是满载温度更高、笔记本续航略降。',
-    steps: [
-      {
-        label: 'powercfg 关 Allow Throttle States', pwsh: [
-          'powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb 0',
-          'powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb 0',
-          'powercfg /setactive SCHEME_CURRENT'
-        ].join('\n')
-      }
-    ]
-  },
-  {
-    id: 'nara_usb3_lpm_off', group: '系统调校', title: '关闭 USB 3 链路省电', risk: 'medium',
-    desc: '电源方案关闭 USB 3 Link Power Management（AC/DC 都写 0），防止 USB 3 存储/集线器在空闲时切到低功耗状态导致偶发断连或恢复延迟；代价是 USB 3 设备略增功耗。',
-    steps: [
-      {
-        label: 'powercfg 关 USB 3 LPM', pwsh: [
-          'powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 d4e98f31-5ffe-4ce1-be31-1b38b384c009 0',
-          'powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 d4e98f31-5ffe-4ce1-be31-1b38b384c009 0',
-          'powercfg /setactive SCHEME_CURRENT'
-        ].join('\n')
-      }
-    ]
-  },
+  
   {
     id: 'mmcss_games', group: '游戏与多媒体', title: 'MMCSS 游戏任务调度（全机游戏类进程）', risk: 'medium',
     desc: '设置 MMCSS Tasks\\Games 七值（Priority=6、GPU Priority=8、Scheduling Category=High、SFIO Priority=High、Clock Rate=0x2710、Affinity=0、Background Only=False），提升被 MMCSS 归类为 Games 的进程调度优先级。作用面是所有游戏类进程，不是永劫专属。',
@@ -2471,7 +2364,7 @@ const PROS_CONS = {
   'tf_ntfs': { pros: '关闭 8.3 短名与末次访问时间戳、增大内存使用，可提升文件系统吞吐。', cons: '8.3 名称关闭会让个别老软件找不到文件，NTFS 改动一般不可逆。' },
   'tf_hibern_off': { pros: '彻底关闭休眠与快速启动，可释放磁盘空间并减少关机/启动异常。', cons: '失去快速启动带来的开机加速，且无法再使用休眠功能。' },
   'tf_core_misc': { pros: '调整系统响应与前台优先级等杂项，桌面操作整体更跟手。', cons: '多个小改动叠加，个别后台任务的响应优先级可能被削弱。' },
-  'tf_timer_coal': { pros: '关闭计时器合并与部分现代待机，可降低输入与网络延迟噪声。', cons: '增加 CPU 唤醒次数与功耗，笔记本续航可能下降。' },
+  'tf_timer_coal': { pros: '关闭计时器合并，可降低输入与网络延迟噪声。', cons: '增加 CPU 唤醒次数与功耗，笔记本续航可能下降。' },
   'tf_restore_point': { pros: '创建系统还原点，为后续高风险优化提供回退保障。', cons: '占用少量磁盘空间，本身不带来性能收益。' },
   'game_dvr': { pros: '关闭游戏 DVR 后台录制，减少游戏内掉帧与录制延迟。', cons: '无法再使用 Xbox 游戏录制与回放功能。' },
   'mmcss_optimize': { pros: '合并游戏高优先级与系统级增强：游戏调度优先级、GPU 优先级与低延迟标记一体化，画面更稳、输入延迟更低。', cons: '非标准调度参数在个别音频设备上可能不稳定，且可能抢占音频与后台资源。' },
@@ -2482,7 +2375,7 @@ const PROS_CONS = {
   'tf_gamemode': { pros: '开启游戏模式，系统优先保障游戏所需的 CPU/GPU 资源。', cons: '后台任务（更新/同步）可能被推迟，影响日常使用。' },
   'tf_gamebar': { pros: '关闭游戏栏后台捕获与 PresenceWriter，减少叠加层与遥测开销。', cons: '无法使用 Win+G 游戏栏的录屏与性能面板。' },
   'tf_fso': { pros: '关闭全屏优化破坏，可消除部分游戏全屏切换卡顿与输入延迟。', cons: '个别游戏依赖全屏优化特性，关闭后可能出现异常。' },
-  'tf_gpu_latency': { pros: '下调 GPU 预渲染帧数与延迟容忍度，能降低输入到画面的延迟。', cons: '设置过低可能引起帧率波动或卡顿，需按显卡性能取舍。' },
+  'tf_gpu_latency': { pros: '下调显示管线延迟容忍度（DXGKrnl 监视器延迟键），可能降低显示链路的延迟响应。', cons: '设置过低可能引起帧率波动或卡顿，需按显卡性能取舍。' },
   'tf_resource_policy': { pros: '解除系统资源策略限制，释放被节流的 CPU/内存额度。', cons: '绕开系统配额保护，失控进程可能占满系统资源。' },
   // 'prefetch_off'（关闭预读）条目已移除：该优化项已不在 OPTIONS 中，属历史孤儿映射
   'svc_mem_gb': { pros: '按内存档位调整 SVCHost 拆分阈值，减少服务进程内存碎片。', cons: '阈值与内存不匹配时反而增加进程切换开销。' },

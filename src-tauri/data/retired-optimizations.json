@@ -156,6 +156,31 @@
       "id": "tf_mmagent",
       "title": "关闭内存压缩与内存页合并",
       "note": "2026-10-11 用户拍板全线退役：现代 Windows（10 1803+）的内存压缩与页合入与虚拟内存/内存整理协同工作，关闭后物理内存吃紧时稳定性下降、换页写入更高，收益（Disable-MMAgent 两个 cmdlet 的微小 CPU 节省）不成立。该项是 PsInline 白名单里仅剩的 2 个 inbox PowerShell 步骤，退役后白名单同步移除 Disable-MMAgent/Enable-MMAgent。已应用过的用户可在管理员 PowerShell 执行 Enable-MMAgent -MemoryCompression -PageCombining 后重启恢复。"
+    },
+    {
+      "id": "tf_hibern_off",
+      "title": "关闭休眠与快速启动",
+      "note": "P0-1 电源写面总收敛（2026-10-16 落地，按 2026-10-10 裁定「整个产品只保留唯一的开启卓越性能写入口」+ 2026-10-16 用户裁定「电源计划编辑器为已授权写面」）：休眠与快速启动属用户电源配置，不再由 Trim 改，整项退役。还原缺口：注册表步骤进 optimizer-backups（有值级备份，启动概览会列成「待还原」按原值写回）；`powercfg /h off` 为 cmd 步骤不进值级备份，已应用用户可自行 `powercfg /h on` 恢复休眠。"
+    },
+    {
+      "id": "power_off",
+      "title": "禁用电源节能",
+      "note": "P0-1 电源写面总收敛（2026-10-16）：HibernateEnabledDefault / PowerThrottlingOff / PowerSettings Attributes 均属用户电源配置写入，整项退役；同项里的「驱动搜索」（SearchOrderConfig）一步随项撤除。还原缺口：纯 reg 步骤，有值级备份，启动概览会列成「待还原」按原值写回。"
+    },
+    {
+      "id": "power_aspm_off",
+      "title": "禁用 PCI-E ASPM 节能",
+      "note": "P0-1 电源写面总收敛（2026-10-16）：电源方案 ASPM（AC/DC）与设备级 EnableASPM 均属用户电源/设备功耗配置，整项退役。还原缺口：两步均为 pwsh 型、按账门口径不进值级备份 —— 已应用用户需手工还原：电源面板把「PCI Express 链接状态电源管理」改回所需档位，设备级 EnableASPM 值手工删除或改回。"
+    },
+    {
+      "id": "nara_throttle_off",
+      "title": "关闭 CPU 节流状态",
+      "note": "P0-1 电源写面总收敛（2026-10-16）：powercfg 写 SCHEME_CURRENT 的 Allow Throttle States 属用户电源配置；永劫专项自身不再写电源配置，面板「电源」分区一并撤除。还原缺口：pwsh 型不进值级备份 —— 已应用用户可在电源编辑器（或 powercfg）把该项改回默认（默认值因机型而异）。"
+    },
+    {
+      "id": "nara_usb3_lpm_off",
+      "title": "关闭 USB 3 链路省电",
+      "note": "P0-1 电源写面总收敛（2026-10-16）：powercfg 写 SCHEME_CURRENT 的 USB 3 Link Power Management（AC/DC）属用户电源配置；随面板「电源」分区一并撤除。还原缺口：pwsh 型不进值级备份 —— 已应用用户可在电源编辑器把「USB 3 链路电源管理」改回默认。"
     }
   ]
 }
