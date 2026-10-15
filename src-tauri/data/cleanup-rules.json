@@ -1214,53 +1214,6 @@
               ]
             },
             {
-              "id": "microsoftDirectxShaderCache",
-              "name": "Microsoft DirectX Shader 着色器",
-              "risk": "medium",
-              "evidence": "WinApp2 规则库「Microsoft DirectX Shader Cache *」登记的缓存目标（2 个路径）",
-              "recommended": false,
-              "domain": "system",
-              "group": "caches",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "winapp2-clue",
-                "ref": "winapp2/Microsoft DirectX Shader Cache *",
-                "importedAt": "2026-10-13",
-                "reviewedAt": "2026-10-13"
-              },
-              "ver": 20261016,
-              "evidenceItems": [
-                {
-                  "text": "WinApp2 规则库（本机源 260915）「Microsoft DirectX Shader Cache *」登记了这条目标",
-                  "weight": 2
-                },
-                {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
-                  "weight": 1
-                }
-              ],
-              "fileKeys": [
-                {
-                  "path": "%LOCALAPPDATA%\\D3DSCache",
-                  "pattern": "*",
-                  "recurse": false
-                },
-                {
-                  "path": "%WINDIR%\\System32\\config\\systemprofile\\AppData\\Local\\D3DSCache",
-                  "pattern": "*",
-                  "recurse": true
-                }
-              ],
-              "detect": [
-                {
-                  "type": "reg",
-                  "path": "HKCU\\Software\\Microsoft\\Windows"
-                }
-              ]
-            },
-            {
               "id": "microsoftEdgeBookmarkFavicons",
               "name": "Microsoft Edge 书签",
               "risk": "medium",
@@ -7442,16 +7395,16 @@
       "subGroups": [
         {
           "id": "shader",
-          "name": "显卡着色器缓存",
+          "name": "着色器缓存（删除后下次启动可能变慢）",
           "icon": "🎮",
           "items": [
             {
               "id": "nvidiaCache",
               "name": "NVIDIA 显卡缓存 (GLCache/DXCache)",
-              "risk": "low",
+              "risk": "medium",
               "pathPs": "$env:LOCALAPPDATA + '\\NVIDIA'",
               "evidence": "NVIDIA 编译着色器缓存",
-              "recommended": true,
+              "recommended": false,
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
@@ -7470,7 +7423,7 @@
                   "weight": 2
                 },
                 {
-                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
                   "weight": 1
                 }
               ]
@@ -7478,10 +7431,10 @@
             {
               "id": "nvidiaNvCache",
               "name": "NVIDIA 全局缓存 (NV_Cache)",
-              "risk": "low",
+              "risk": "medium",
               "pathPs": "$env:PROGRAMDATA + '\\NVIDIA Corporation\\NV_Cache'",
               "evidence": "NVIDIA 全局安装缓存",
-              "recommended": true,
+              "recommended": false,
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
@@ -7500,7 +7453,7 @@
                   "weight": 2
                 },
                 {
-                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
                   "weight": 1
                 }
               ]
@@ -7508,10 +7461,10 @@
             {
               "id": "amdCache",
               "name": "AMD 显卡缓存 (DxCache/Cache)",
-              "risk": "low",
+              "risk": "medium",
               "pathPs": "$env:LOCALAPPDATA + '\\AMD'",
               "evidence": "AMD 着色器缓存",
-              "recommended": true,
+              "recommended": false,
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
@@ -7530,7 +7483,7 @@
                   "weight": 2
                 },
                 {
-                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
                   "weight": 1
                 }
               ]
@@ -7538,10 +7491,10 @@
             {
               "id": "intelShaderCache",
               "name": "Intel 着色器缓存",
-              "risk": "low",
+              "risk": "medium",
               "pathPs": "$env:LOCALAPPDATA + '\\Intel\\ShaderCache'",
               "evidence": "Intel 核显着色器缓存",
-              "recommended": true,
+              "recommended": false,
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
@@ -7560,7 +7513,7 @@
                   "weight": 2
                 },
                 {
-                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
                   "weight": 1
                 }
               ]
@@ -7568,9 +7521,9 @@
             {
               "id": "intelShaderCache2",
               "name": "Intel Shader 着色器",
-              "risk": "low",
+              "risk": "medium",
               "evidence": "WinApp2 规则库「Intel Shader Cache *」登记的缓存目标（3 个路径）",
-              "recommended": true,
+              "recommended": false,
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
@@ -7589,7 +7542,7 @@
                   "weight": 2
                 },
                 {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
                   "weight": 1
                 }
               ],
@@ -7620,9 +7573,9 @@
             {
               "id": "nvidiaShaderCache",
               "name": "NVIDIA Shader 着色器",
-              "risk": "low",
+              "risk": "medium",
               "evidence": "WinApp2 规则库「NVIDIA Shader Cache *」登记的缓存目标（13 个路径）",
-              "recommended": true,
+              "recommended": false,
               "domain": "gfx",
               "group": "shader",
               "nature": "cache",
@@ -7641,7 +7594,7 @@
                   "weight": 2
                 },
                 {
-                  "text": "目标是应用或系统可自行重建的产物，删除后不影响功能",
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
                   "weight": 1
                 }
               ],
@@ -7718,23 +7671,63 @@
                   "path": "HKLM\\Software\\NVIDIA Corporation"
                 }
               ]
-            }
-          ]
-        },
-        {
-          "id": "sysgfx",
-          "name": "系统图形缓存",
-          "icon": "⚡",
-          "items": [
+            },
+            {
+              "id": "microsoftDirectxShaderCache",
+              "name": "Microsoft DirectX Shader 着色器",
+              "risk": "medium",
+              "evidence": "WinApp2 规则库「Microsoft DirectX Shader Cache *」登记的缓存目标（2 个路径）",
+              "recommended": false,
+              "domain": "gfx",
+              "group": "shader",
+              "nature": "cache",
+              "regenerable": true,
+              "prov": {
+                "source": "builtin",
+                "sourceClass": "winapp2-clue",
+                "ref": "winapp2/Microsoft DirectX Shader Cache *",
+                "importedAt": "2026-10-13",
+                "reviewedAt": "2026-10-13"
+              },
+              "ver": 20261016,
+              "evidenceItems": [
+                {
+                  "text": "WinApp2 规则库（本机源 260915）「Microsoft DirectX Shader Cache *」登记了这条目标",
+                  "weight": 2
+                },
+                {
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
+                  "weight": 1
+                }
+              ],
+              "fileKeys": [
+                {
+                  "path": "%LOCALAPPDATA%\\D3DSCache",
+                  "pattern": "*",
+                  "recurse": false
+                },
+                {
+                  "path": "%WINDIR%\\System32\\config\\systemprofile\\AppData\\Local\\D3DSCache",
+                  "pattern": "*",
+                  "recurse": true
+                }
+              ],
+              "detect": [
+                {
+                  "type": "reg",
+                  "path": "HKCU\\Software\\Microsoft\\Windows"
+                }
+              ]
+            },
             {
               "id": "directXShaderCache",
               "name": "DirectX 着色器缓存",
-              "risk": "low",
+              "risk": "medium",
               "pathPs": "$env:LOCALAPPDATA + '\\D3DSCache'",
               "evidence": "DX 着色器缓存",
-              "recommended": true,
+              "recommended": false,
               "domain": "gfx",
-              "group": "sysgfx",
+              "group": "shader",
               "nature": "cache",
               "regenerable": true,
               "prov": {
@@ -7751,11 +7744,18 @@
                   "weight": 2
                 },
                 {
-                  "text": "内容可按需重建（缓存），删除后系统或应用会再生成",
+                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
                   "weight": 1
                 }
               ]
-            },
+            }
+          ]
+        },
+        {
+          "id": "sysgfx",
+          "name": "系统图形缓存",
+          "icon": "⚡",
+          "items": [
             {
               "id": "intelGraphicsSoftware",
               "name": "Intel Graphics Software 崩溃转储",
@@ -8214,6 +8214,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "HSokxOuLJ+OXJj4u4IFF5LXONZHCyvKhkZvUQJJOOUPNnZFU3Wuwa47ByDpPuJjhUHktrl8WZk6Us9Gr15PyCw=="
+    "sig": "VCxhdSNNl4QZyEwXWzR0cNe6I+t9jyUhjRJmwA6escFOMaIu+LV15gNl77LQBo8tduXe2zNoW+BpqOB+4LpuCg=="
   }
 }
