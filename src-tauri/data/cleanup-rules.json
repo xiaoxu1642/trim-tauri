@@ -8065,6 +8065,7 @@
               "id": "packageCache",
               "name": "Windows Installer 补丁缓存",
               "risk": "high",
+              "ifDeleted": "删除后，卸载或修复对应 Windows 更新时可能需要重新提供更新安装源（原版安装介质或重新下载）；已装软件的正常使用不受影响，但也别指望删掉能省出可观空间。",
               "pathPs": "$env:WINDIR + '\\Installer\\$PatchCache$'",
               "evidence": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
               "recommended": false,
@@ -8176,6 +8177,7 @@
               "id": "dismComponentCleanup",
               "name": "组件存储清理 (DISM /ResetBase)",
               "risk": "high",
+              "ifDeleted": "删除后，已安装的 Windows 更新将无法卸载（不能回滚到更新前状态），系统重置功能也可能受影响；仅在确定不需要卸载任何更新时使用。",
               "special": "dism",
               "evidence": "压缩组件存储，更新将不可卸载（由 Windows 官方 DISM 执行，通常需要 10-40 分钟）",
               "recommended": false,
@@ -8214,6 +8216,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "VCxhdSNNl4QZyEwXWzR0cNe6I+t9jyUhjRJmwA6escFOMaIu+LV15gNl77LQBo8tduXe2zNoW+BpqOB+4LpuCg=="
+    "sig": "GNBiRq9uvUboWd1ZB8IC4/W8CrB7ctxWjZwhsn40ui2kZJoZAHNy+YSFr6IZMNz2KFIkhlGlNfckJunre5F8Bg=="
   }
 }

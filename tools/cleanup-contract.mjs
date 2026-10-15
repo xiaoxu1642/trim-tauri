@@ -32,6 +32,7 @@ export const ASSERTIONS = {
   A12: '条目级版本戳 ver 必须存在且等于顶层 rulesVersion（V2 P2-A1：报告要能回答"这条是哪一版规则判的"）',
   A13: '条目必须有**当前引擎真会读**的路径来源（活键清单见契约表 crossTrack.liveSourceKeys；D19 修复后 candidatesPs/globCandidatesPs 已是活键，一条来源都没有的条目仍必须拒）',
   A14: '可选贡献项 evidenceItems 必须是非空对象数组：text 非空、weight 为 0..契约上限的数字，且至少一项 weight>0（V2 P1-A3：0 分解释项只解释、不进求和）',
+  A15: 'ifDeleted 删除后果（P2-1，2026-10-16）：high 必填非空字符串；任何档位写了就必须是非空字符串且不超 maxTextLen（medium 可选、low 不强制——高危动作执行前必须告知后果）',
 };
 
 const itemLabel = (it, fallback) => {
@@ -202,6 +203,18 @@ export function validateCleanupPackage(pkg) {
       if (f in it && (!Array.isArray(it[f]) || it[f].length === 0)) {
         say('A7', `规则 ${id}: ${f} 存在但不是非空数组（有约束却写空 = 静默失效）`);
       }
+    }
+    // A15 ifDeleted 删除后果（P2-1，2026-10-16）：「high」= 契约表 cleanup.riskLevels 的
+    // 最高档（枚举升序排列，high 为末值；与 Rust 装载侧 rules.rs、前端高危确认三处同口径）。
+    // high 必填——高危动作执行前用户必须被告知「删了会怎样」，缺字段 = 知情权静默降级；
+    // medium 可选、low 不强制；任何档位写了就必须是非空字符串且不超 maxText。
+    if (it.ifDeleted !== undefined) {
+      if (typeof it.ifDeleted !== 'string' || !it.ifDeleted.trim() || [...it.ifDeleted].length > maxText) {
+        say('A15', `规则 ${id}: ifDeleted 必须是非空字符串且不超 ${maxText} 字`);
+      }
+    }
+    if (it.risk === 'high' && (typeof it.ifDeleted !== 'string' || !it.ifDeleted.trim())) {
+      say('A15', `规则 ${id}: risk=high 必须提供非空 ifDeleted（删除后果，高危确认前必须告知）`);
     }
     // A9 时效互斥 + 正整数
     const declaredExclusive = exclusive.filter((f) => f in it);

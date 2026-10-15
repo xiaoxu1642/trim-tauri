@@ -23,7 +23,8 @@
     "A11",
     "A12",
     "A13",
-    "A14"
+    "A14",
+    "A15"
   ],
   "packages": [
     {
@@ -59,6 +60,33 @@
                 "fileKeys": [
                   {
                     "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              },
+              {
+                "id": "selftest-high-ifdeleted",
+                "name": "高危带后果",
+                "risk": "high",
+                "evidence": "只作用于测试目录",
+                "recommended": false,
+                "domain": "system",
+                "group": "g1",
+                "nature": "action",
+                "regenerable": false,
+                "ifDeleted": "删除后测试目标不可恢复（自检正向样本：high 必须带 ifDeleted）",
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "tests/selftest",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest\\high",
                     "pattern": "*",
                     "recurse": true
                   }
@@ -2704,6 +2732,146 @@
                     "ver": 20260928
                   }
                 ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A15 high 缺 ifDeleted（P2-1：高危必须写明删除后果）",
+      "ok": false,
+      "mustTrigger": [
+        "A15"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "c-a15-high-missing",
+                "name": "高危无后果",
+                "risk": "high",
+                "evidence": "e",
+                "recommended": false,
+                "domain": "system",
+                "group": "g1",
+                "nature": "action",
+                "regenerable": false,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A15 high ifDeleted 空串（写了就必须有内容）",
+      "ok": false,
+      "mustTrigger": [
+        "A15"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "c-a15-high-empty",
+                "name": "高危空后果",
+                "risk": "high",
+                "evidence": "e",
+                "recommended": false,
+                "domain": "system",
+                "group": "g1",
+                "nature": "action",
+                "regenerable": false,
+                "ifDeleted": "   ",
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A15 ifDeleted 非字符串（数字形态）",
+      "ok": false,
+      "mustTrigger": [
+        "A15"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "c-a15-nonstr",
+                "name": "后果非字符串",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "ifDeleted": 42,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
               }
             ]
           }

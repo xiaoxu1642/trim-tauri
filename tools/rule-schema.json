@@ -72,7 +72,8 @@
       "minAgeDays",
       "minAgeHours",
       "requiredStoppedProcesses",
-      "restartProcesses"
+      "restartProcesses",
+      "ifDeleted"
     ],
     "itemRequired": [
       "id",

@@ -390,6 +390,13 @@
               tipLines.push((ev.weight > 0 ? '＋ ' : '· ') + (ev.text || ''));
             }
           }
+          // P2-1（2026-10-16）：删除后果（ifDeleted）进同一枚 tooltip——high 必填、
+          // medium 可选、low 不强制；高危条目悬停即见「删了会怎样」。复用既有详情面，
+          // 不新增视觉 token；文本随整串经 escapeHtml（= ds.esc）转义。
+          if (item.ifDeleted) {
+            tipLines.push('删除后果：');
+            tipLines.push(item.ifDeleted);
+          }
           inner = `<span class="xtable-cell-text" data-tip="${escapeHtml(tipLines.join('\n'))}">${escapeHtml(xtable.middleEllipsis(item.name, 40))}</span>`;
           break;
         }

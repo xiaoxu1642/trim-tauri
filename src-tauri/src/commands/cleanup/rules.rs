@@ -669,6 +669,25 @@ pub(super) fn check_cleanup_item(
     if !c.risk_levels.iter().any(|r| r == risk) {
         return Err(format!("规则 {id}: risk「{risk}」不在 {:?} 之内", c.risk_levels));
     }
+    // A15 / P2-1（2026-10-16）：ifDeleted（删除后果人话）——high 必填、medium 可选、
+    // low 不强制；写了就必须是非空字符串且不超 max_text。与 Node 门禁
+    // cleanup-contract.mjs 的 A15 同口径（共享夹具双向核对，任一侧放宽另一侧红）。
+    // 「high」= 契约表 cleanup.riskLevels 的最高档（枚举升序，high 为末值）；
+    // 高危动作执行前用户必须被告知「删了会怎样」，缺字段 = 知情权静默降级，拒载。
+    if let Some(v) = it.get("ifDeleted") {
+        let ok = v
+            .as_str()
+            .map(|s| !s.trim().is_empty() && s.chars().count() <= c.max_text)
+            .unwrap_or(false);
+        if !ok {
+            return Err(format!("规则 {id}: ifDeleted 必须是非空字符串且不超过 {} 字", c.max_text));
+        }
+    }
+    if risk == "high" && it.get("ifDeleted").is_none() {
+        return Err(format!(
+            "规则 {id}: risk=high 必须提供 ifDeleted（删除后果，高危确认前必须告知）"
+        ));
+    }
     for f in ["evidence", "domain", "group", "nature", "name"] {
         if let Some(why) = require_rule_str(it, f, c.max_text) {
             return Err(format!("规则 {id}: {why}"));

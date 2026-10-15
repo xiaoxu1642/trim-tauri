@@ -683,6 +683,21 @@ fn js_num_str(n: f64) -> String {
         it["prov"]["sourceClass"] = json!("imported");
         expect_reject(it, "prov.sourceClass「imported」");
 
+        // A15 ifDeleted（P2-1，2026-10-16）：high 必填；写了就必须是非空字符串
+        let mut it = ok_item();
+        it["risk"] = json!("high");
+        expect_reject(it, "ifDeleted");
+        let mut it = ok_item();
+        it["risk"] = json!("high");
+        it["ifDeleted"] = json!("删除后测试目标不可恢复（自检）");
+        validate_cleanup_package(&ok_pkg(it)).expect("high 带 ifDeleted 必须放行");
+        let mut it = ok_item();
+        it["ifDeleted"] = json!("   ");
+        expect_reject(it, "ifDeleted");
+        let mut it = ok_item();
+        it["ifDeleted"] = json!(42);
+        expect_reject(it, "ifDeleted");
+
         // 未知字段与已裁决移除的字段
         let mut it = ok_item();
         it.as_object_mut().unwrap().insert("sizeHint".to_string(), json!(1));
