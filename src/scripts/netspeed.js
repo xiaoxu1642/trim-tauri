@@ -287,7 +287,11 @@
       modalClass: 'rt-report-modal',
       width: 680
     }) : null;
-    if (!ctrl) return;
+    if (!ctrl) {
+      // P2-4（2026-10-16）：静默失声统一给提示（报告弹窗是展示件，不改方向）
+      window.app?.toast?.('error', '弹窗组件未就绪，请稍后重试');
+      return;
+    }
     const canvas = document.getElementById('nsReportCanvas');
     if (canvas && r.samples.length > 1) drawReportChart(canvas, r.samples);
   }

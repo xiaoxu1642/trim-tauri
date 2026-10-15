@@ -180,7 +180,12 @@
   // ==================== 数值解释子弹窗 ====================
   function openExplain(groupKey) {
     const data = EXPLAIN[groupKey];
-    if (!data || !window.modal?.create) return;
+    if (!data) return;
+    if (!window.modal?.create) {
+      // P2-4（2026-10-16）：静默失声统一给提示（说明弹窗是展示件，不改方向）
+      toast('error', '弹窗组件未就绪，请稍后重试');
+      return;
+    }
     if (explainCtrl) { explainCtrl.close(); explainCtrl = null; }
     const esc = (t) => window.ds.esc(String(t));
     explainCtrl = window.modal.create({

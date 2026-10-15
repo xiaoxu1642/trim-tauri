@@ -395,7 +395,11 @@
 
   async function openIgnoreList() {
     if (!window.api?.finder?.ignoreList) return;
-    if (!window.modal?.create) return;
+    if (!window.modal?.create) {
+      // P2-4（2026-10-16）：静默失声统一给提示——展示件不改变执行结果，但「点了没反应」不可接受
+      window.app?.toast?.('error', '弹窗组件未就绪，请稍后重试');
+      return;
+    }
     if (ignoreModal) { ignoreModal.close(); ignoreModal = null; }
     const ctrl = window.modal.create({
       id: 'finderIgnoreBackdrop',
@@ -1189,7 +1193,12 @@
         <button class="btn btn-secondary" data-manifest-dir type="button">打开清单目录</button>
         <button class="btn btn-primary" data-manifest-close type="button">关闭</button>`
     });
-    if (!ctrl) return;
+    if (!ctrl) {
+      // P2-4（2026-10-16）：modal 缺席时 create?.() 返回 undefined——静默 return 会让
+      // 「查看删除清单」点了没反应；统一给提示（不改方向：清单本身是展示件）
+      window.app?.toast?.('error', '弹窗组件未就绪，请稍后重试');
+      return;
+    }
     ctrl.footer.querySelector('[data-manifest-dir]').addEventListener('click', async () => {
       // 审查 v2-L8：原先 `catch (e) {}` 整条吞掉 —— 通道缺席或后端失败时用户点了
       // 「打开清单目录」毫无反应，也不知该去哪找。失败必须显式反馈。

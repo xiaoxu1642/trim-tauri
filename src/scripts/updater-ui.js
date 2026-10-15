@@ -325,7 +325,11 @@
   }
 
   function openModal(kind) {
-    if (!window.modal || !window.modal.create) return false;
+    if (!window.modal || !window.modal.create) {
+      // P2-4（2026-10-16）：静默失声统一给提示（更新弹窗是展示件，不改方向）
+      window.app?.toast?.('error', '弹窗组件未就绪，请稍后重试');
+      return false;
+    }
     if (ctrl && modalKind === kind) { fillModal(kind); return true; }
     closeModal();
     ctrl = window.modal.create({
@@ -593,7 +597,11 @@
   }
 
   function showCompletion(info) {
-    if (!window.modal || !window.modal.create) return;
+    if (!window.modal || !window.modal.create) {
+      // P2-4（2026-10-16）：静默失声统一给提示（完成提示是展示件，不改方向）
+      window.app?.toast?.('warning', '弹窗组件未就绪，本次不显示更新完成详情');
+      return;
+    }
     const from = String((info && info.fromVersion) || '');
     const to = String((info && info.toVersion) || '');
     const sha = String((info && info.sha256) || '');

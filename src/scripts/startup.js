@@ -179,7 +179,12 @@
   // SU-2（S7）：不可逆删除前逐条红色二次确认（modal 对 message 统一转义，可安全内插项名）。
   // 确认/取消、或确认助手缺失均返回 false（视为不删除），保证绝不静默删。
   async function confirmDefendDelete(itemName, reason) {
-    if (typeof window.app?.confirmDanger !== 'function') return false;
+    if (typeof window.app?.confirmDanger !== 'function') {
+      // P2-4（2026-10-16）：方向不动（缺位一律返回 false = 宁可不删），但静默失声补提示——
+      // 用户点了「立即删除」却什么都没发生，必须有可见反馈
+      window.app?.toast?.('error', '确认组件未就绪，本次删除未执行');
+      return false;
+    }
     try {
       return await window.app.confirmDanger(
         '删除被拦截的启动项',
