@@ -2166,7 +2166,9 @@ fn with_protect_roots<T>(protect_json: Option<&str>, f: impl FnOnce(&ProtectRoot
 
 /// v3.7.2 受保护路径误杀修复：8.3 短名展开为磁盘上的长名（GetLongPathNameW），
 /// 已上移至 lib.rs 的 util 模块（cleanup_scan 也需用），此处经 `to_long_path` 引入。
-fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
+/// R10（2026-10-15）：`pub(crate)` 放开给 `cleanup_scan` 的扫描侧过滤——
+/// 判据只此一份，不许在扫描侧另写一套路径保护比对（§5.16/N6）。
+pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
     // v3.7.2：先触盘展开短名再归一化——磁盘上存在的短名（运行时环境喂进来的
     // %TEMP% 类路径）展开后正常参与 subtree/exact/anyDrive 判定；展开不掉
     // （目标不存在）原样返回，contains_short_name 仍 fail-closed。

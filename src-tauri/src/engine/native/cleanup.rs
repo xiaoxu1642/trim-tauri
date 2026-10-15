@@ -1707,7 +1707,7 @@ mod cleanup_engine_contract_tests {
         // 测的是共享判定本身（字段抽取另有 native-scanner 的 `rule_age_guard_of_识别年龄轴三字段`）。
         let scan_hits = |axis: Option<&str>| -> Vec<String> {
             let guard = rule_age_guard(None, Some(3.0), axis);
-            names(list_deletable(&base.to_string_lossy(), "*", guard, &[], &[]).files.into_iter().map(|(p, _)| p).collect())
+            names(list_deletable(&base.to_string_lossy(), "*", guard, &[], &[], None).files.into_iter().map(|(p, _)| p).collect())
         };
         let exec_hits = |axis: Option<&str>| -> (Vec<String>, i64) {
             let res = cleanup_execute(&items, &rule_json(axis), true, false, None).unwrap();

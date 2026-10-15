@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // check-native-hygiene.mjs —— 原生层卫生门禁（P3-5，2026-10-09）
 //
-// 五条「找违规型」断言，各配**内置正向对照自检**（违例样本必须判红、合规样本必须放行，
+// N1–N9「找违规型」断言族，各配**内置正向对照自检**（违例样本必须判红、合规样本必须放行，
 // AGENTS §4.1）：
 //   N1 裸 `quiet_cmd(...).output()` ⇒ 红：无超时的子进程是无界等待，挂住即锁 IPC。
 //      （R5-G-4；11+1 个调用点已收口到 quiet_cmd_timeout / _raw，新写裸形态即红。）
@@ -16,8 +16,14 @@
 //   N5 模块可达性：`src-tauri/src` 与 `native-scanner/src` 下每个 `.rs` 都必须被
 //      某个 `mod` 声明链覆盖 ⇒ 不在编译面/不在可达面的文件即红（R2-M05 派生，
 //      `minifilter_orphan.rs` 就是漏网的活样本）。
+//   N6 递归遍历必须保留深度常量（登记式棘轮，见 WALK_DEPTH_SITES）。
+//   N7 「取最新」实现唯一化（现算唯一实现是 startup::pick_newest_file）。
+//   N8 快照槽必须域限定：所有 `snapshot::{set,get,clear}` 的键参数必须经 domain_key。
+//   N9（X-1 同批，2026-10-15）快照表跨窗顶账的三种可机检形态：A origin 字面量闸 /
+//      B CLEANUP 快照取用点登记闸 / C 两表 static 声明反合并声明（见段内详注）。
 //
 // 判据全部先剥 Rust 注释与字符串字面量（文本提及不算数，与 check-delete-callsites 同口径）。
+// 例外：N9-A 刻意跑**原文字节**——字符串被剥后只剩 `""`，字面量与变量的区分就在引号本身。
 //
 // 用法：node tools/check-native-hygiene.mjs
 'use strict';
@@ -142,13 +148,103 @@ function regReaderViolations(clean, original = clean) {
   return out;
 }
 
+// ---------- N9：快照表跨窗顶账的三种可机检形态（X-1 同批，2026-10-15） ----------
+// 背景（X-1，§5.25 同族）：cleanup 的扫描快照表是全局 HashMap<label, …>，而
+// cleanup_scan 档位 guard_readonly（APP_WINDOWS 四个 label 都能调）——任何「整表替换」
+// 都会把其它窗口的槽清空，对方已扫条目执行时全报「不是最近一次扫描结果」。
+// 三条判据各有各守的形态：
+//   A（origin 字面量闸）：`residue_snapshot_put` 第二实参（origin）必须是**字符串字面量**
+//     ——dead.rs 按 `origin != Some(origin)` 分桶替换，origin 非编译期字面量时替换语义
+//     退化成累加（v4 P2-F 事故形态）。判据跑**原文**：剥字符串后只剩 `""`，
+//     字面量与变量的区分就在引号本身；空字面量 `""` 同样判红（空 origin 等于无分桶）。
+//   B（取用点登记闸）：CLEANUP 快照表的每个取用点（`snapshots()…lock()`）必须登记在
+//     下方表内——表外新增即红（新取用点必须有人确认它只动本槽）。登记键
+//     `{file, anchor}`（§5.19 禁行号）：锚点命中 0 处（被改/被移）或 ≥2 处
+//     （锚点不够判别性）都判红。
+//   C（反合并声明）：两张表的 static 声明必须仍在各自文件（RESIDUE 在
+//     uninstall/helpers.rs、CLEANUP 在 cleanup/state.rs）——任一消失即红并追问
+//     「被合进 engine::snapshot 了吗？槽键现在带域（domain_key）吗？」
+//     （§5.25 那类「合并丢维度」唯一可机检的形态）。
+//
+// 三个已知失明/假阳性形态（写判据时踩过，勿放宽）：
+//   ① `snapshots(` 不加前缀守卫会命中 `residue_snapshots()` / `fn snapshots()` 定义
+//      ——本组用「域前缀限定 + 取用点必须带 .lock()」两个条件排除；
+//   ② 取用点扫描必须跑在 stripRust() 之后（本脚本已立该纪律），否则 command/state.rs
+//      里「只提及不使用」的注释会自撞；
+//   ③ `commands/finder.rs` 也有同名 `fn snapshots()`（它自己的 FINDER_SNAPSHOTS 表）
+//      ——B 组**按 `commands/cleanup/` 前缀限定**，别卷进 finder 的表；这条限定是
+//      刻意写死的有意排除，不是正则 bug，勿放宽。
+
+/** N9-A：residue_snapshot_put 第二实参必须是字符串字面量（跑原文，见段注释） */
+function n9OriginLiteralIssues(raw) {
+  const out = [];
+  for (const m of raw.matchAll(/residue_snapshot_put\s*\(/g)) {
+    const lineStart = raw.lastIndexOf('\n', m.index - 1) + 1;
+    if (raw.slice(lineStart, m.index).includes('//')) continue; // 行注释里的提及不算数
+    const pre = raw.slice(Math.max(0, m.index - 24), m.index);
+    if (/fn\s+$/.test(pre)) continue; // 函数定义不是调用点
+    // 锚定到**本次调用的实参表**（^ 起于调用自己的 `(`）——不锚定的话窗口会滑到后续
+    // 代码里别的 `(…, "…")`，把变量实参放行（本门禁首跑自犯：改走变量仍判绿）。
+    const open = m.index + m[0].length - 1; // 本次调用的 `(`
+    const after = raw.slice(open + 1, open + 160);
+    if (!/^\s*[^,]{1,120},\s*"(?!")/.test(after)) {
+      out.push(`residue_snapshot_put 第二实参不是字符串字面量（origin 须为编译期字面量，否则分桶替换退化成累加）@字节 ${m.index}`);
+    }
+  }
+  return out;
+}
+
+/** N9-B：登记锚点必须恰好命中 1 处（0=被改/被移，≥2=锚点不够判别性） */
+function n9AnchorIssue(raw, anchor) {
+  const n = raw.split(anchor).length - 1;
+  if (n === 0) return `登记锚点未命中（0 处）——被改/被移？锚点：${anchor.slice(0, 60)}…`;
+  if (n > 1) return `登记锚点命中 ${n} 处（应恰 1）——扩长锚点或改计数判据：${anchor.slice(0, 60)}…`;
+  return null;
+}
+
+/** N9-C：跨窗快照表的 static 声明必须仍在各自文件（readFile 可注入，供对照样本） */
+function n9TableDeclIssues(readFile, entries) {
+  const out = [];
+  for (const e of entries) {
+    const text = readFile(e.file);
+    if (text === null || text === undefined) {
+      out.push(`${e.file} 读不到 —— 文件被搬走了？`);
+      continue;
+    }
+    if (!stripRust(text).includes(`static ${e.token}`)) {
+      out.push(`${e.file} 的 ${e.token}（${e.name}）声明不见了 —— 被合进 engine::snapshot 了吗？槽键现在带域（domain_key）吗？`);
+    }
+  }
+  return out;
+}
+
+/** N9-B 登记表：CLEANUP 快照表的六个取用点（{file, anchor}，§5.19 禁行号）。
+ *  锚点选择：两处 `let snapshot = snapshots()` 与两处 `let buckets = …` 同形，
+ *  用**前一行上下文**或**精确缩进（含前导换行）**扩到唯一——裸缩进子串会被
+ *  更深的缩进版吞掉。 */
+const CLEANUP_SNAPSHOT_SITES = [
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'let mut guard = snapshots().lock()' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'let auto_rebuild = auto_rebuild.unwrap_or(false);\n    let snapshot = snapshots()' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '.insert(label.clone(), HashMap::new());' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '\n        let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '\n            let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'let label = window.label().to_string();\n    let snapshot = snapshots()' },
+];
+/** N9-C 登记表：两张跨窗快照表（与取它的访问器同文件，注释见 helpers.rs 头） */
+const SNAPSHOT_TABLES = [
+  { file: 'src-tauri/src/commands/uninstall/helpers.rs', token: 'RESIDUE_SNAPSHOTS', name: '残留执行快照表' },
+  { file: 'src-tauri/src/commands/cleanup/state.rs', token: 'CLEANUP_SNAPSHOTS', name: '清理执行快照表' },
+];
+/** N9-B 取用点形态：`snapshots()` 之后 60 字符窗口内出现 `.lock()` */
+const SNAPSHOT_LOCK_CALL = /snapshots\(\)[\s\S]{0,60}?\.lock\(\)/g;
+
 let fail = 0;
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
   if (!ok) fail++;
 };
 
-console.log('=== 原生层卫生门禁（N1 裸 output / N2 定长解码 / N3 句柄丢弃 / N4 .reg 读取 / N5 模块可达性）===\n');
+console.log('=== 原生层卫生门禁（N1 裸 output / N2 定长解码 / N3 句柄丢弃 / N4 .reg 读取 / N5 模块可达性 / N6 深度护栏 / N7 取最新唯一 / N8 快照域 / N9 快照表顶账）===\n');
 
 // ---- 正向对照自检 ----
 {
@@ -186,6 +282,27 @@ console.log('=== 原生层卫生门禁（N1 裸 output / N2 定长解码 / N3 �
     regReaderViolations(stripRust('let Ok(text) = std::fs::read_to_string(&manifest_path) else { continue };\nlet Ok(v) = serde_json::from_str::<Value>(&text) else { continue };')) .length === 0,
     '对照N4b：JSON 清单读取不假红',
   );
+  // N9 判定器：A（origin 字面量）/ B（锚点唯一性）/ C（表声明在位）
+  check(
+    n9OriginLiteralIssues('residue_snapshot_put(&label, origin_var, findings);').length === 1,
+    '对照N9a：origin 第二实参传变量必须判红',
+  );
+  check(
+    n9OriginLiteralIssues('residue_snapshot_put(&label, "app", findings);').length === 0
+      && n9OriginLiteralIssues('residue_snapshot_put(&label, "", findings);').length === 1,
+    '对照N9b：字面量放行、空字面量判红（空 origin 等于无分桶）',
+  );
+  check(
+    n9AnchorIssue('a a b', 'a') !== null && n9AnchorIssue('a b', 'a') === null && n9AnchorIssue('x', 'a') !== null,
+    '对照N9c：锚点 0 处 / ≥2 处判红、恰 1 处放行',
+  );
+  check(
+    n9TableDeclIssues(
+      (f) => (f === 'ok.rs' ? 'pub(super) static RESIDUE_SNAPSHOTS: X = Y;' : null),
+      [{ file: 'ok.rs', token: 'RESIDUE_SNAPSHOTS' }, { file: 'gone.rs', token: 'RESIDUE_SNAPSHOTS' }],
+    ).length === 1,
+    '对照N9d：表声明在位放行；缺失/文件读不到判红',
+  );
 }
 
 const g = gate(import.meta.url);
@@ -198,7 +315,9 @@ let n1 = 0;
 let n2 = 0;
 let n3 = 0;
 let n4 = 0;
+let n8viol = 0;
 let n8sites = 0;
+let n9locks = 0;
 for (const f of files) {
   const rel = relative(ROOT, f).replace(/\\/g, '/');
   const original = readFileSync(f, 'utf8');
@@ -207,7 +326,7 @@ for (const f of files) {
   for (const v of hygieneViolations(clean)) {
     if (v.startsWith('裸 quiet_cmd')) n1++;
     else if (v.startsWith('定长 UTF-16')) n2++;
-    else if (v.startsWith('snapshot 调用')) n8sites += 0;
+    else if (v.startsWith('snapshot 调用')) n8viol++;
     else n3++;
     g.fail(`${rel}: ${v}`);
   }
@@ -252,6 +371,7 @@ for (const s of WALK_DEPTH_SITES) {
 // N7：按 mtime 取最新的实现唯一化 —— 现算唯一实现是 startup::pick_newest_file；
 // 新出现同名职责函数（fn *newest*/*latest*）即红，须复用或在登记表加一条理由。
 const NEWEST_FN = /fn\s+\w*(?:newest|latest)\w*\s*\(/g;
+let n7sites = 0;
 {
   const found = [];
   for (const f of files) {
@@ -261,17 +381,64 @@ const NEWEST_FN = /fn\s+\w*(?:newest|latest)\w*\s*\(/g;
       found.push(`${rel}: ${m[0].trim()}`);
     }
   }
+  n7sites = found.length;
   const unexpected = found.filter((x) => !x.includes('native/startup.rs: fn pick_newest_file'));
   if (unexpected.length) g.fail(`N7：出现新的「取最新」实现（应复用 pick_newest_file 或在此登记理由）：${unexpected.join('；')}`);
   if (!found.some((x) => x.includes('pick_newest_file'))) g.fail('N7：pick_newest_file 没找到（扫描面或改名漂移）');
 }
 
-// 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明
+// ---- N9（X-1 同批，2026-10-15）：快照表跨窗顶账的三种形态 ----
+// A：origin 字面量闸（uninstall 域；跑原文——字符串剥后只剩空壳，判据字节级见段注释）
+{
+  const uninstallDomain = files.filter((f) =>
+    relative(ROOT, f).replace(/\\/g, '/').startsWith('src-tauri/src/commands/uninstall/'),
+  );
+  for (const f of uninstallDomain) {
+    for (const v of n9OriginLiteralIssues(readFileSync(f, 'utf8'))) {
+      g.fail(`${relative(ROOT, f).replace(/\\/g, '/')}: ${v}`);
+    }
+  }
+}
+// B：CLEANUP 快照取用点登记闸（**按 commands/cleanup/ 前缀限定**——finder.rs 有同名
+//    访问器 fn snapshots()，它是自己的表，刻意不卷进来，见段注释 ③）
+{
+  const cleanupDomain = files.filter((f) =>
+    relative(ROOT, f).replace(/\\/g, '/').startsWith('src-tauri/src/commands/cleanup/'),
+  );
+  for (const f of cleanupDomain) {
+    n9locks += [...stripRust(readFileSync(f, 'utf8')).matchAll(SNAPSHOT_LOCK_CALL)].length;
+  }
+  if (n9locks !== CLEANUP_SNAPSHOT_SITES.length) {
+    g.fail(
+      `N9-B：CLEANUP 快照取用点现算 ${n9locks} 处 ≠ 登记 ${CLEANUP_SNAPSHOT_SITES.length} 条 —— ` +
+        '表外新增/删除必须同步登记并确认「只动本槽」（X-1：整表替换会清掉其它窗口的槽）',
+    );
+  }
+  for (const s of CLEANUP_SNAPSHOT_SITES) {
+    const raw = readFileSync(join(ROOT, s.file), 'utf8');
+    const issue = n9AnchorIssue(raw, s.anchor);
+    if (issue) g.fail(`N9-B：${s.file} —— ${issue}`);
+  }
+}
+// C：两表 static 声明反合并声明（消失即追问：被合进 engine::snapshot 了吗？槽键带域吗？）
+{
+  const readRel = (rel) => {
+    const abs = join(ROOT, rel);
+    return existsSync(abs) ? readFileSync(abs, 'utf8') : null;
+  };
+  for (const v of n9TableDeclIssues(readRel, SNAPSHOT_TABLES)) {
+    g.fail(`N9-C：${v}`);
+  }
+}
+
+// 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明；
+// CLEANUP 取用点命中过少 ⇒ N9-B 语料失明（N9 取用点本应 ≥6，命中 0~5 即正则/域前缀出事）
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);
 if (n8sites < 10) g.fail(`snapshot 调用点命中 ${n8sites} 处（< 10）⇒ N8 语料/正则失明`);
+if (n9locks < 6) g.fail(`CLEANUP 快照取用点命中 ${n9locks} 处（< 6）⇒ N9-B 语料/正则失明`);
 
 console.log(
-  `\n扫描：${files.length} 个 .rs · 违例 N1=${n1} / N2=${n2} / N3=${n3} / N4=${n4} / N5=${unreachable.length} · snapshot 槽位 ${n8sites}`,
+  `\n扫描：${files.length} 个 .rs · 违例 N1=${n1} / N2=${n2} / N3=${n3} / N4=${n4} / N5=${unreachable.length} / N8=${n8viol} · N8 语料 ${n8sites} 处 · N9 取用点 ${n9locks} 处（登记 ${CLEANUP_SNAPSHOT_SITES.length}）· 登记点 N6=${WALK_DEPTH_SITES.length} / N7=${n7sites}`,
 );
 if (fail > 0) {
   console.error(`check-native-hygiene: 正向对照自检 ${fail} 处失败（判定器失效）`);

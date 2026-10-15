@@ -825,6 +825,20 @@ fn file_deletable(p: &Path) -> bool {
     }
 }
 
+/// 扫描侧的可删资格（R10，2026-10-15）= 独占探测（`file_deletable`）+ **执行侧同一份
+/// 保护清单**（`crate::scan::is_protected_path`，判据只此一份、六个枚举出口全走它，
+/// §5.16/N6）。此前扫描侧零过滤：`System32\config\systemprofile\**` 这类目标
+/// 「规则命中、执行侧恒拒、体积照报」。保护清单与执行侧同源注入（主进程
+/// `protect::protected_roots_json()` → argv → `scan.rs` 的 `from_protect_json`，
+/// 回收站链已在用同一份）；未注入时走 `default_from_env` 保守根集（CLI 手测兜底），
+/// **不是「不过滤」**。
+fn scan_deletable(p: &Path, protect: Option<&str>) -> bool {
+    if crate::scan::is_protected_path(&p.to_string_lossy(), protect) {
+        return false;
+    }
+    file_deletable(p)
+}
+
 /// FileInfo.Length 语义：存在且为文件返回长度（元数据读失败按不存在）
 fn try_file_length(p: &Path) -> Option<u64> {
     match fs::metadata(p) {
@@ -895,6 +909,7 @@ pub struct DeletableResult {
 /// minAge 时效护栏：够老判定的唯一入口是 [`AgeGuard`]（G-1），太新的文件不计入 total
 /// （对齐 pattern 未命中的口径）。
 /// 全局排除名单：命中前缀/全路径的文件不计入 total。
+/// 保护清单（R10）：命中执行侧同源保护根的文件不计入**可删**（total 仍计）。
 fn walk_deletable(
     dir: &Path,
     all: bool,
@@ -902,6 +917,7 @@ fn walk_deletable(
     guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
+    protect: Option<&str>,
     res: &mut DeletableResult,
     depth: usize,
     collect_files: bool,
@@ -924,7 +940,7 @@ fn walk_deletable(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            walk_deletable(&ent.path(), all, pattern, guard, excl_dirs, excl_files, res, depth + 1, collect_files);
+            walk_deletable(&ent.path(), all, pattern, guard, excl_dirs, excl_files, protect, res, depth + 1, collect_files);
             continue;
         }
         if !ft.is_file() {
@@ -949,7 +965,7 @@ fn walk_deletable(
         }
         res.total += 1;
         let size = md.map(|m| m.len()).unwrap_or(0);
-        if file_deletable(&full) {
+        if scan_deletable(&full, protect) {
             // 计数与字节和**两种模式都记**（统计口径的唯一数据源）；
             // 路径字符串只在真要交给调用方时才留（审计 §3.3）。
             res.deletable_count += 1;
@@ -967,8 +983,9 @@ pub fn list_deletable(
     guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
+    protect: Option<&str>,
 ) -> DeletableResult {
-    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, true)
+    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, protect, true)
 }
 
 /// 只算计数与字节和，**不持有每文件路径**（审计 §3.3）。
@@ -983,8 +1000,9 @@ pub fn list_deletable_stats(
     guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
+    protect: Option<&str>,
 ) -> DeletableResult {
-    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, false)
+    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, protect, false)
 }
 
 fn list_deletable_inner(
@@ -993,6 +1011,7 @@ fn list_deletable_inner(
     guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
+    protect: Option<&str>,
     collect_files: bool,
 ) -> DeletableResult {
     let all = pattern.is_empty() || pattern == "*";
@@ -1008,7 +1027,7 @@ fn list_deletable_inner(
             let mut files = Vec::new();
             let mut deletable_count = 0u64;
             let mut deletable_bytes = 0u64;
-            if old_enough && !excluded && file_deletable(root) {
+            if old_enough && !excluded && scan_deletable(root, protect) {
                 deletable_count = 1;
                 deletable_bytes = fl;
                 if collect_files {
@@ -1032,7 +1051,7 @@ fn list_deletable_inner(
         skipped_reparse: 0,
     };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
-    walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, &mut res, 0, collect_files);
+    walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, protect, &mut res, 0, collect_files);
     res
 }
 
@@ -1055,7 +1074,7 @@ pub struct PathStats {
     pub skipped_reparse: u64,
 }
 
-fn get_path_deletable_stats(path: &str, guard: AgeGuard) -> PathStats {
+fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>) -> PathStats {
     if path.is_empty() {
         return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
     }
@@ -1064,7 +1083,7 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard) -> PathStats {
     let is_dir = fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false);
     if !is_dir {
         if fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
-            if !file_deletable(p) {
+            if !scan_deletable(p, protect) {
                 return PathStats { ok: true, missing: false, size: 0, nfiles: 0, locked: 1, skipped_reparse: 0 };
             }
             return match fs::metadata(p) {
@@ -1086,7 +1105,7 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard) -> PathStats {
     // nfiles / size 从 deletable_count / deletable_bytes 取，那是唯一数据源；
     // 两者口径必须恒等（下面有断言钉住），否则「列表说 N 个、统计说 M 个」会被
     // 用户读成扫描漏项。
-    let res = list_deletable_stats(path, "*", guard, &[], &[]);
+    let res = list_deletable_stats(path, "*", guard, &[], &[], protect);
     let nfiles = res.deletable_count;
     let size = res.deletable_bytes;
     PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles, skipped_reparse: res.skipped_reparse }
@@ -1342,6 +1361,8 @@ fn checklocked_body(input: &str) -> i32 {
     let Some(files) = parsed.get("files").and_then(|v| v.as_arr()) else {
         fatal("占用检测输入缺少 files 结构");
     };
+    // R10（2026-10-15）：保护清单（可选）——占用检测的可删判定与扫描/执行侧同源
+    let protect = parsed.get("protect").and_then(|v| v.as_str());
     let mut scanned: u64 = 0;
     let mut locked: u64 = 0;
     for f in files {
@@ -1358,7 +1379,7 @@ fn checklocked_body(input: &str) -> i32 {
         if Path::new(path).metadata().is_err() {
             continue; // 不存在 → 执行阶段自然跳过，不算占用
         }
-        if file_deletable(Path::new(path)) {
+        if scan_deletable(Path::new(path), protect) {
             continue;
         }
         let procs = rstrtmgr::query_lockers(path);
@@ -1847,6 +1868,7 @@ fn walk_fk_dll(
     guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
+    protect: Option<&str>,
     acc: &mut FkAcc,
     depth: usize,
 ) {
@@ -1884,7 +1906,7 @@ fn walk_fk_dll(
         };
         if ft.is_dir() {
             if recurse {
-                walk_fk_dll(&ent.path(), all, pattern, recurse, guard, excl_dirs, excl_files, acc, depth + 1);
+                walk_fk_dll(&ent.path(), all, pattern, recurse, guard, excl_dirs, excl_files, protect, acc, depth + 1);
             }
             continue;
         }
@@ -1912,7 +1934,7 @@ fn walk_fk_dll(
         }
         acc.total_count += 1;
         let size = md.len();
-        if file_deletable(Path::new(&full_s)) {
+        if scan_deletable(Path::new(&full_s), protect) {
             acc.deletable_count += 1; // 去重前累加（对齐 PS DLL 分支）
             if acc.seen.insert(low) {
                 let before = acc.truncated;
@@ -1940,6 +1962,7 @@ fn walk_fk_snapshot(
     guard: AgeGuard,
     excl_dirs: &[String],
     excl_files: &[String],
+    protect: Option<&str>,
     skip_lock: bool,
     acc: &mut FkAcc,
 ) {
@@ -1969,7 +1992,7 @@ fn walk_fk_snapshot(
                 // 超限都 eprintln，这里静默 `continue` ⇒ 「深处的文件没进清单」和
                 // 「文件本来就不存在」在日志里长得一模一样。补齐 eprintln 与三处同格式。
                 if depth < FK_SNAPSHOT_MAX_DEPTH {
-                    walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, guard, excl_dirs, excl_files, skip_lock, acc);
+                    walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, guard, excl_dirs, excl_files, protect, skip_lock, acc);
                 } else {
                     err_line(&format!(
                         "[trim-scanner] depth cap {FK_SNAPSHOT_MAX_DEPTH} reached at {}",
@@ -2008,7 +2031,7 @@ fn walk_fk_snapshot(
         }
         acc.total_count += 1;
         let size = md.len();
-        if skip_lock || file_deletable(Path::new(&full_s)) {
+        if skip_lock || scan_deletable(Path::new(&full_s), protect) {
             acc.deletable_count += 1;
             let before = acc.truncated;
             acc.push_budget(full_s, size);
@@ -2023,7 +2046,7 @@ fn walk_fk_snapshot(
     }
 }
 
-fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_days: Option<u64>) -> FkResult {
+fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_days: Option<u64>, protect: Option<&str>) -> FkResult {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let skip_lock = rule.get("restartProcesses").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let has_excl = rule.get("excludeKeys").map(|v| v.ps_count()).unwrap_or(0) > 0;
@@ -2106,10 +2129,10 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
                 if snapshot_mode {
                     walk_fk_snapshot(
                         Path::new(&dir), all, pattern, recurse, 0, guard,
-                        &excl_dirs, &excl_files, skip_lock, &mut acc,
+                        &excl_dirs, &excl_files, protect, skip_lock, &mut acc,
                     );
                 } else {
-                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, guard, &excl_dirs, &excl_files, &mut acc, 0);
+                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, guard, &excl_dirs, &excl_files, protect, &mut acc, 0);
                 }
             }
         }
@@ -2361,7 +2384,7 @@ pub fn run(argv: &[String]) -> i32 {
     code
 }
 
-/// argv = [categories_json, configured_paths_json]；规则 JSON 由调用方读入
+/// argv = [categories_json, configured_paths_json, (可选) protect_json]；规则 JSON 由调用方读入
 fn scan_body(argv: &[String], input: &str) -> i32 {
     if input.trim().is_empty() {
         fatal("规则库解析失败：stdin 规则 JSON 为空");
@@ -2401,6 +2424,10 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
         Ok(Json::Arr(a)) => a,
         _ => fatal("扫描分类参数解析失败"),
     };
+    // R10（2026-10-15）：argv[2] = 注入的保护清单（主进程 `protect::protected_roots_json()`，
+    // 与执行侧/回收站链同一份）。缺省（CLI 手测）由 `scan.rs` 走 default_from_env
+    // 保守根集兜底——是「过滤面收窄」不是「不过滤」。
+    let protect = argv.get(2).map(|s| s.as_str()).filter(|s| !s.is_empty());
     // G-2 全局年龄策略：**一次扫描读一次**，逐层传给年龄护栏构造（见 rule_age_guard_of 注释）
     let global_min_age_days = load_global_min_age_days();
     if categories.is_empty() {
@@ -2465,7 +2492,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
 
         // ---- 文件模式条目（fileKeys）：扫描即产「可删文件清单」（P1，D7/D13）----
         if rule.get("fileKeys").map(|f| f.ps_count()).unwrap_or(0) > 0 {
-            let st = get_file_key_deletable(rule, &mut plan_global_rows, global_min_age_days);
+            let st = get_file_key_deletable(rule, &mut plan_global_rows, global_min_age_days, protect);
             let fk_arr = rule.get("fileKeys").and_then(|v| v.as_arr());
             let keys = fk_arr.map(|a| a.len()).unwrap_or(0);
             let display0 = fk_arr
@@ -2656,7 +2683,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
 
         // 目录型统计走可删口径：被占用文件不计入 size，locked 只进协议不进 UI。
         // minAge 时效护栏（P0-M5）：目录型规则的统计与执行侧同口径过滤太新文件。
-        let stats = get_path_deletable_stats(&path, rule_age_guard_of(rule, global_min_age_days));
+        let stats = get_path_deletable_stats(&path, rule_age_guard_of(rule, global_min_age_days), protect);
         // 统计失败上报 size=null——渲染层对 null 走「—」分支，不用 0 B 冒充可清理
         let size_json = if stats.ok { stats.size.to_string() } else { "null".to_string() };
         // autoPath 命中时 size 即 autoPath 的大小，不再二次枚举
@@ -2962,7 +2989,7 @@ mod tests {
             deletable_bytes: 0,
             skipped_reparse: 0,
         };
-        walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], &mut res, 0, true);
+        walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], None, &mut res, 0, true);
         assert_eq!(res.files.len(), 1, "浅层文件必须收到：{:?}", res.files);
         assert!(
             res.files.iter().all(|(p, _)| !p.contains("d69")),
@@ -2992,8 +3019,8 @@ mod tests {
         }
 
         // pattern='*' 覆盖全部（统计口径固定用这个）
-        let with_files = list_deletable(root.to_str().unwrap(), "*", AgeGuard::Off, &[], &[]);
-        let stats_only = list_deletable_stats(root.to_str().unwrap(), "*", AgeGuard::Off, &[], &[]);
+        let with_files = list_deletable(root.to_str().unwrap(), "*", AgeGuard::Off, &[], &[], None);
+        let stats_only = list_deletable_stats(root.to_str().unwrap(), "*", AgeGuard::Off, &[], &[], None);
 
         assert_eq!(
             stats_only.deletable_count, with_files.files.len() as u64,
@@ -3037,7 +3064,7 @@ mod tests {
         fs::write(root.join("shallow.dll"), b"x").unwrap();
 
         let mut acc = FkAcc::new(0);
-        walk_fk_dll(&root, true, "*.dll", true, AgeGuard::Off, &[], &[], &mut acc, 0);
+        walk_fk_dll(&root, true, "*.dll", true, AgeGuard::Off, &[], &[], None, &mut acc, 0);
         assert_eq!(acc.files.len(), 1, "浅层文件必须收到：{:?}", acc.files);
         assert!(
             acc.files.iter().all(|(p, _)| !p.contains("d69")),
@@ -3086,7 +3113,7 @@ mod tests {
         let mut acc = FkAcc::new(0);
         acc.item_cap = 3;
         acc.global_cap = 3;
-        walk_fk_dll(&root, true, "*.tmp", true, AgeGuard::Off, &[], &[], &mut acc, 0);
+        walk_fk_dll(&root, true, "*.tmp", true, AgeGuard::Off, &[], &[], None, &mut acc, 0);
         assert!(acc.truncated, "撞上限必须标 truncated（否则界面不显示「已截断」）");
         assert_eq!(acc.files.len(), 3, "输出必须停在上限");
         assert!(
@@ -3100,7 +3127,7 @@ mod tests {
         let mut acc2 = FkAcc::new(0);
         acc2.item_cap = 3;
         acc2.global_cap = 3;
-        walk_fk_snapshot(&root, true, "*.tmp", true, 0, AgeGuard::Off, &[], &[], true, &mut acc2);
+        walk_fk_snapshot(&root, true, "*.tmp", true, 0, AgeGuard::Off, &[], &[], None, true, &mut acc2);
         assert!(acc2.truncated, "快照分支撞上限必须标 truncated");
         assert_eq!(acc2.files.len(), 3, "快照分支输出必须停在上限");
         assert!(
@@ -3314,6 +3341,61 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// R10（2026-10-15）：保护清单按注入生效——把文件自身声明为 subtree 根，扫描侧必须
+    /// 判不可删；同一文件不注入时必须可删（反向对照，防「过滤恒拒」假绿）。
+    ///
+    /// 注入根用 `crate::to_long_path` 展开后的小写形态：`%TEMP%` 可能是 8.3 短名
+    /// （ADMINI~1），而判据侧先 `to_long_path` 再比对——两侧必须同一形态，否则这条
+    /// 用例自己就会假红。
+    #[test]
+    fn 扫描侧保护过滤按注入清单生效() {
+        let tmp = std::env::temp_dir().join(format!("trim-r10-inject-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let f = tmp.join("probe.log");
+        fs::write(&f, b"x").unwrap();
+
+        let f_long = crate::to_long_path(&f.to_string_lossy()).to_lowercase();
+        let injected = format!(
+            "{{\"subtree\":[\"{}\"],\"exact\":[],\"anyDrive\":[],\"neverNames\":[]}}",
+            f_long.replace('\\', "\\\\")
+        );
+        assert!(
+            !scan_deletable(&f, Some(&injected)),
+            "文件自身被注入为 subtree 根，扫描侧仍判可删 = 注入没生效"
+        );
+        assert!(
+            scan_deletable(&f, None),
+            "未注入时普通临时文件必须判可删（反向对照：防判据恒拒假绿）"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// R10 真机探针（`#[ignore]`，发版前实跑）：D2 受害面在**真实系统根**上的双向咬合——
+    /// `System32\config` 是 protect 的 subtree 根，其下 `systemprofile\**` 必须被判不可删；
+    /// 同一判据对普通临时文件必须放行（防「过滤过宽把一切都拒了」）。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机探针：读真实 System32\\config 子树与真实临时文件"]
+    fn 扫描侧保护过滤_真机探针() {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let victim = format!("{windir}\\System32\\config\\systemprofile\\AppData\\Local\\D3DSCache");
+        assert!(
+            !scan_deletable(Path::new(&victim), None),
+            "System32\\config 子树必须被扫描侧判不可删（R10：此前零过滤、体积照报）: {victim}"
+        );
+        let tmp = std::env::temp_dir().join(format!("trim-r10-probe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let f = tmp.join("probe.log");
+        fs::write(&f, b"x").unwrap();
+        assert!(
+            scan_deletable(&f, None),
+            "普通临时文件被保护过滤误拒 —— 判据过宽"
+        );
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// P2-④ 的两态对照（可复跑）：捕获模式下 stdout 那份副本只按「有没有逐行回调」分岔。

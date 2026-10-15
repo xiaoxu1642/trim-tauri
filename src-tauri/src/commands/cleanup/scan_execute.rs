@@ -135,6 +135,10 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
     let cats_json = json_text(&Value::from(cats.clone()));
     let cfg_json = json_text(&configured);
     let rules_json = json_text(&rules);
+    // R10（2026-10-15）：保护清单与执行侧同源注入（`protected_roots_json()`，
+    // 与 finder 回收站链同一份）——扫描侧据此把受保护目标排除在**可删集**之外，
+    // 不再出现「规则命中、执行侧恒拒、体积照报」。缺省时扫描侧走 default_from_env 兜底。
+    let protect_json = crate::engine::protect::protected_roots_json();
     let accum = Arc::new(Mutex::new(ScanAccum {
         total: cats.len(),
         ..Default::default()
@@ -151,7 +155,7 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
     // 在块外又判了一次 `code != 0`，而块内已经 return 了，那句恒假、且让 `code`
     // 在块外留一个看似有意义的绑定。2026-10-04 审计 §3.2 顺手删掉。
     let stderr = {
-        let (code, _stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json], &rules_json, hook);
+        let (code, _stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json, protect_json], &rules_json, hook);
         if code != 0 {
             let msg = if stderr.trim().is_empty() { format!("退出码 {code}") } else { stderr.trim().to_string() };
             log::write_log("error", &format!("Rust 清理扫描失败: {msg}"));
@@ -245,7 +249,12 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
             // 之后，未重扫条目的执行校验（validate_snapshot_items 缺快照即整批拒绝）会全部失败。
             guard.entry(label.to_string()).or_default().extend(fresh);
         } else {
-            *guard = [(label.to_string(), fresh)].into_iter().collect();
+            // X-1（2026-10-15）：只替换**本窗自己的槽**。`guard` 是全局
+            // HashMap<label, …>，而 cleanup_scan 的档位是 guard_readonly（APP_WINDOWS
+            // 四个 label 都能调）——整表替换会把其它窗口的槽全部清空，对方已扫条目
+            // 执行时全报「不是最近一次扫描结果」。旧的「整表替换副作用式清空」经现算
+            // 无任何调用方依赖（清桶只走命令侧本槽 insert-empty），可直接收窄。
+            guard.insert(label.to_string(), fresh);
         }
     }
     // P2-06：给每个命中项注入后置动作（postAction: explorer|none），供前端在清理
@@ -292,6 +301,10 @@ pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categorie
     // 2026-10-07 用户裁定「扫描范围 = 勾选项」：partial 扫描必须**保桶**并合并——其余
     // 条目的旧快照要供 cleanup:execute 校验（validate_snapshot_items 对缺快照的条目
     // 整批拒绝，清桶会让「只刷新回收站」之后清理其他项全部报快照失败）。
+    //
+    // 谁还能并行写这张表（X-1，2026-10-15）：另一窗口的 cleanup_scan——本表按 label
+    // 分槽，四个 APP_WINDOWS 都能调（档位 guard_readonly）。因此本处与 do_cleanup_scan
+    // 的落盘**都只许动本槽**：整表替换会把别人已扫的槽顶掉（§5.25 同族事故形态）。
     if !partial {
         snapshots()
             .lock()
@@ -667,7 +680,8 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
     }
     let list: Vec<Value> = files;
     let scanned = list.len();
-    let payload = json_text(&json!({ "files": list }));
+    // R10（2026-10-15）：占用检测的可删判定与扫描/执行侧同源——保护清单随候选一起注入
+    let payload = json_text(&json!({ "files": list, "protect": crate::engine::protect::protected_roots_json() }));
     let win = window.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         let (code, stdout, stderr) = cleanup_scan::checklocked_json(&payload);
