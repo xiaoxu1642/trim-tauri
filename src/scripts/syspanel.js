@@ -893,6 +893,15 @@
     return map[value] || '';
   }
 
+  /** 枚举值显示名：精选表（带口径说明）→ 系统本地化名（possibleValueNames，与
+   *  possibleValues 同索引）→ 空串（调用方回落原数字，不猜测）。 */
+  function pwrEnumDisplayName(s, value, index) {
+    const curated = pwrEnumZh(s.guid, value);
+    if (curated) return curated;
+    const names = Array.isArray(s.possibleValueNames) ? s.possibleValueNames : [];
+    return index >= 0 ? String(names[index] || '') : '';
+  }
+
   function pwrZh(settingGuid) {
     return PWR_ZH[String(settingGuid || '').toLowerCase()] || null;
   }
@@ -1541,13 +1550,14 @@
         // 当前值可能不在系统给出的枚举内（真机实测存在这种合法既成事实，如
         // 「合上盖子操作」当前 1 / 枚举 0,2,3,6）：补一个选中项如实显示，绝不静默落到第一项。
         const inEnum = val !== null && val !== undefined && possible.some((v) => Number(v) === Number(val));
-        const curName = val !== null && val !== undefined ? pwrEnumZh(s.guid, val) : '';
+        const curIdx = inEnum ? possible.findIndex((v) => Number(v) === Number(val)) : -1;
+        const curName = val !== null && val !== undefined ? pwrEnumDisplayName(s, val, curIdx) : '';
         const curOpt = (!inEnum && val !== null && val !== undefined)
           ? `<option value="${escAttr(String(val))}" selected>${esc(curName ? `${val}（${curName}）` : String(val))}（当前值）</option>`
           : '';
         const opts = possible
-          .map((v) => {
-            const zhName = pwrEnumZh(s.guid, v);
+          .map((v, i) => {
+            const zhName = pwrEnumDisplayName(s, v, i);
             return `<option value="${escAttr(String(v))}"${Number(val) === Number(v) ? ' selected' : ''}>${esc(zhName ? `${v}（${zhName}）` : String(v))}</option>`;
           })
           .join('');
@@ -1576,8 +1586,8 @@
     }
     if (Array.isArray(s.possibleValues) && s.possibleValues.length && s.possibleValues.length <= 32) {
       // 只有窄枚举在元信息里列出（宽值域本质是数值输入，界已由「取值范围」承担）
-      metaParts.push(`可选值 ${s.possibleValues.map((v) => {
-        const zhName = pwrEnumZh(s.guid, v);
+      metaParts.push(`可选值 ${s.possibleValues.map((v, i) => {
+        const zhName = pwrEnumDisplayName(s, v, i);
         return zhName ? `${v}=${zhName}` : String(v);
       }).join(' / ')}`);
     }

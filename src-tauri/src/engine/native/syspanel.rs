@@ -33,7 +33,8 @@ use windows::Win32::System::Power::{
     PlatformRoleDesktop, PlatformRoleMobile, PlatformRoleSlate, PowerDeleteScheme,
     PowerDeterminePlatformRole, PowerDuplicateScheme, PowerEnumerate, PowerGetActiveScheme,
     PowerImportPowerScheme, PowerReadACValueIndex, PowerReadDCValueIndex, PowerReadDescription,
-    PowerReadFriendlyName, PowerReadPossibleValue, PowerReadSettingAttributes,
+    PowerReadFriendlyName, PowerReadPossibleFriendlyName, PowerReadPossibleValue,
+    PowerReadSettingAttributes,
     PowerReadValueIncrement, PowerReadValueMax, PowerReadValueMin, PowerReadValueUnitsSpecifier,
     PowerSetActiveScheme, PowerWriteACValueIndex, PowerWriteDCValueIndex, PowerWriteFriendlyName,
     PowerWriteSettingAttributes,
@@ -558,6 +559,51 @@ fn read_possible_values(scheme: &GUID, subgroup: &GUID, setting: &GUID) -> Vec<u
     out
 }
 
+/// 枚举设置每个可选值的系统本地化名称（`PowerReadPossibleFriendlyName`，与
+/// `read_possible_values` 同索引、同序）。个别读不到的名给空串占位——前端按
+/// 「精选表 → 本表 → 原数字」降级显示，缺名不丢位、不猜测。
+fn read_possible_value_names(subgroup: &GUID, setting: &GUID, count: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(count);
+    for idx in 0..count as u32 {
+        let mut size = 0u32;
+        let first = unsafe {
+            PowerReadPossibleFriendlyName(
+                None,
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                idx,
+                None,
+                &mut size,
+            )
+        };
+        if first.0 != 0 && first.0 != ERROR_MORE_DATA_CODE {
+            out.push(String::new());
+            continue;
+        }
+        if size == 0 {
+            out.push(String::new());
+            continue;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let second = unsafe {
+            PowerReadPossibleFriendlyName(
+                None,
+                Some(subgroup as *const GUID),
+                Some(setting as *const GUID),
+                idx,
+                Some(buf.as_mut_ptr()),
+                &mut size,
+            )
+        };
+        if second.0 != 0 {
+            out.push(String::new());
+            continue;
+        }
+        out.push(decode_utf16_bytes(&buf));
+    }
+    out
+}
+
 fn validate_value_against_meta(
     value: u32,
     range: Option<(u32, u32, u32)>,
@@ -1000,6 +1046,7 @@ fn setting_value_json(
     };
     let range = read_value_range(scheme, &item.subgroup, &item.setting);
     let possible = read_possible_values(scheme, &item.subgroup, &item.setting);
+    let possible_names = read_possible_value_names(&item.subgroup, &item.setting, possible.len());
     let unit = read_value_unit(scheme, &item.subgroup, &item.setting);
     let ac = read_setting_value(scheme, &item.subgroup, &item.setting, false);
     let dc = read_setting_value(scheme, &item.subgroup, &item.setting, true);
@@ -1030,6 +1077,7 @@ fn setting_value_json(
         "isRange": range.is_some(),
         "range": range.map(|(min, max, step)| json!({ "min": min, "max": max, "step": step })),
         "possibleValues": possible,
+        "possibleValueNames": possible_names,
         "valueAc": ac,
         "valueDc": dc,
         "visible": (attrs & POWER_SETTING_ATTR_HIDDEN) == 0,
@@ -1915,6 +1963,7 @@ mod tests {
         let groups = v["subgroups"].as_array().expect("subgroups 应为数组");
         assert!(!groups.is_empty(), "子组列表不应为空");
         let mut total = 0usize;
+        let mut named = 0usize;
         for g in groups {
             assert!(g["guid"].is_string() && g["name"].is_string(), "子组缺 guid/name：{g}");
             for s in g["settings"].as_array().expect("settings 应为数组") {
@@ -1922,6 +1971,15 @@ mod tests {
                 assert!(s["guid"].is_string() && s["name"].is_string(), "设置缺 guid/name：{s}");
                 assert!(s["isRange"].is_boolean(), "设置缺 isRange：{s}");
                 assert!(s["possibleValues"].is_array(), "possibleValues 应为数组：{s}");
+                let names = s["possibleValueNames"].as_array().expect("possibleValueNames 应为数组");
+                assert_eq!(
+                    names.len(),
+                    s["possibleValues"].as_array().unwrap().len(),
+                    "枚举名应与枚举值同长（同索引对齐）：{s}"
+                );
+                if names.iter().any(|n| n.as_str().map(|x| !x.is_empty()).unwrap_or(false)) {
+                    named += 1;
+                }
                 assert!(
                     s["valueAc"].is_u64() || s["valueAc"].is_null(),
                     "valueAc 形状异常：{s}"
@@ -1933,7 +1991,11 @@ mod tests {
             }
         }
         assert!(total > 0, "设置总数为 0 说明枚举没拿到任何东西");
-        eprintln!("dump 探针：{total} 个设置 / platformRole={role} / 子组 {} 个", groups.len());
+        assert!(named > 0, "系统枚举名全部为空——PowerReadPossibleFriendlyName 链路没接上");
+        eprintln!(
+            "dump 探针：{total} 个设置 / 带系统枚举名 {named} 个 / platformRole={role} / 子组 {} 个",
+            groups.len()
+        );
     }
 
     // ===== v0.4.9 §3.6 写侧：pagefile_apply 参数校验（纯函数、无 IO、无 admin 需求）=====
