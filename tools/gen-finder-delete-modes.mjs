@@ -24,6 +24,9 @@ const OUT = join(ROOT, 'tools', 'fixtures', 'finder-delete-modes.json');
 const MODES = [
   ['recycled', 'ok'],
   ['rejected', 'refused'],
+  // Kudu S2（2026-10-16）：目标祖先在执行前被换成链接/junction —— 与 rejected 同族
+  //（受保护/链接类安全拒绝，不是「被占用」）。
+  ['reparse-ancestor', 'refused'],
   ['unrecoverable-name', 'name'],
   ['trash-failed', 'busy'],
 ];

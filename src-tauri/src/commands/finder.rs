@@ -780,6 +780,9 @@ fn classify_delete_result_mode(mode: &str) -> &'static str {
     match mode {
         "recycled" => "ok",
         "rejected" => "refused",
+        // Kudu S2（2026-10-16）：路径祖先在执行前被换成链接/junction —— 与 rejected
+        // 同族（安全拒绝，关程序没有出路；渲染层按「受保护/链接拒绝」提示）。
+        "reparse-ancestor" => "refused",
         "unrecoverable-name" => "name",
         // "trash-failed" 及未来未知值：按回收站失败处理（最保守的叙述——不冒领
         // 「受保护拒绝」或「文件名问题」这两个有专门出路的档）

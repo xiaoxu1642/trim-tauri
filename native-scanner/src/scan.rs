@@ -2290,6 +2290,39 @@ pub fn broken_reparse_link(p: &Path) -> bool {
     }
 }
 
+/// 删除瞬间的**父链**重解析复检（Kudu S2，2026-10-16）：返回目标路径上第一个为
+/// 重解析点（属性位 0x400）的祖先目录；全链干净返回 None。
+///
+/// 威胁模型：扫描（遍历侧已跳过 reparse）→ 用户预览/勾选 → 执行删除之间存在长窗口，
+/// 外部程序可把某一级祖先目录换成 junction/symlink —— 删除会穿过它命中真实目标
+/// （例如系统目录）。扫描期能进清单的路径，其祖先链在扫描时必然是普通目录；执行时
+/// 再次命中 reparse 即「与扫描时状态不符」⇒ 一律拒绝（fail-closed，不改为跟随链接删）。
+///
+/// 判据只此一份：finder 删除链（本文件 `delete`）与常规清理链
+/// （src-tauri → `trim_finder::scan::reparse_ancestor`）共用（先例：`broken_reparse_link`）。
+/// **只查祖先**——目标自身的 reparse 判定由 `is_reparse_target` 承担（两处都不许省）。
+///
+/// 边界（刻意 fail-closed）：若扫描根本身就是 junction（walker 只跳子项、不校验根），
+/// 其下路径的祖先链含该 junction，删除同样会拒——拒绝是安全方向，提示已点名祖先路径，
+/// 用户改用真实路径重扫即可；不给「跟随链接删」的旁路。
+pub fn reparse_ancestor(p: &Path) -> Option<String> {
+    let mut cur = p.parent();
+    let mut depth = 0;
+    while let Some(dir) = cur {
+        // 防御病态深度：NTFS 路径上限约 512 层，32 层足以覆盖真实目录树且防死循环
+        if depth >= 32 {
+            break;
+        }
+        if is_reparse_target(dir) {
+            return Some(dir.to_string_lossy().to_string());
+        }
+        // 到达盘根（`C:\` 的 parent 为 None；UNC 共享根同理）即停
+        cur = dir.parent();
+        depth += 1;
+    }
+    None
+}
+
 /// 删除结果行的 `mode` 字面量（R4，2026-10-15）——语义见各 `del_item` 调用点。
 /// **变更必须同步** `tools/fixtures/finder-delete-modes.json`（由
 /// `tools/gen-finder-delete-modes.mjs` 生成）与消费侧 `src-tauri/src/commands/finder.rs`
@@ -2299,6 +2332,9 @@ const MODE_RECYCLED: &str = "recycled";
 const MODE_REJECTED: &str = "rejected";
 const MODE_UNRECOVERABLE_NAME: &str = "unrecoverable-name";
 const MODE_TRASH_FAILED: &str = "trash-failed";
+/// Kudu S2（2026-10-16）：目标**祖先目录**在执行前被换成链接/junction（扫描期遍历侧
+/// 跳 reparse ⇒ 进清单的路径祖先必为普通目录；此刻命中即「与扫描时状态不符」）。
+const MODE_REPARSE_ANCESTOR: &str = "reparse-ancestor";
 
 /// 批量删除（文件或目录）：默认移入回收站，替代原 PowerShell Remove-Item 硬删除。
 /// 审查v4-L4：路径保留原始 OsString，保护判定与输出展示用 lossy 字符串即可。
@@ -2330,6 +2366,18 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
             // 任何真实内容）；活链与不可判一律照拒（`broken_reparse_link` 的 fail-closed 口径）。
             fail += 1;
             del_item(sink, "delresult", p, kind, "fail", 0, "目标是链接/junction（reparse point），已拒绝", MODE_REJECTED);
+            continue;
+        }
+        if let Some(anc) = reparse_ancestor(p) {
+            // Kudu S2（2026-10-16）：目标自身不是链接，但**祖先目录**在扫描之后被换成了
+            // 重解析点——删除会穿过它命中真实目标。扫描期能进清单的路径其祖先链必然是
+            // 普通目录（遍历侧跳 reparse），此刻命中即「与扫描时状态不符」，fail-closed 拒。
+            fail += 1;
+            del_item(
+                sink, "delresult", p, kind, "fail", 0,
+                &format!("路径祖先 {anc} 是链接/junction（reparse point），删除目标与扫描时状态不符，已拒绝"),
+                MODE_REPARSE_ANCESTOR,
+            );
             continue;
         }
         let sz = if kind == "dir" {
@@ -2446,18 +2494,18 @@ mod tests {
     #[test]
     fn 删除结果分档字面量与共享夹具一致() {
         let fx = include_str!("../../tools/fixtures/finder-delete-modes.json");
-        for m in [MODE_RECYCLED, MODE_REJECTED, MODE_UNRECOVERABLE_NAME, MODE_TRASH_FAILED] {
+        for m in [MODE_RECYCLED, MODE_REJECTED, MODE_UNRECOVERABLE_NAME, MODE_TRASH_FAILED, MODE_REPARSE_ANCESTOR] {
             assert!(
                 fx.contains(&format!("\"{m}\"")),
                 "共享夹具缺 mode 字面量「{m}」——产出侧与消费侧已经漂了"
             );
         }
-        // 反向：夹具登记的档位值必须恰好四个（多/少一个都说明夹具被改过而本侧没跟上）
+        // 反向：夹具登记的档位值必须恰好五个（多/少一个都说明夹具被改过而本侧没跟上）
         let buckets = fx.matches("\"ok\"").count()
             + fx.matches("\"busy\"").count()
             + fx.matches("\"refused\"").count()
             + fx.matches("\"name\"").count();
-        assert_eq!(buckets, 4, "夹具档位值数量异常（{buckets} ≠ 4）——夹具改动没同步到本文件");
+        assert_eq!(buckets, 5, "夹具档位值数量异常（{buckets} ≠ 5）——夹具改动没同步到本文件");
     }
 
     /// J12（2026-10-16）双向咬合（建链需管理员/开发者模式；无权限 skip 并说明）：
@@ -2533,6 +2581,78 @@ mod tests {
         );
         assert!(!target.exists(), "原目标位置不得被牵连（它本就是断的，且不能复活出空目录）");
         assert!(dir.exists(), "上级目录必须完好");
+    }
+
+    /// Kudu S2（2026-10-16）：删除瞬间父链复检——祖先目录被换成 junction 后删除必须拒。
+    /// 非忽略快速组：`mklink /J` 建 junction 不需要管理员；受限环境建不出来就显式
+    /// SKIP 不假绿（与 J12 用例同姿势）。
+    #[test]
+    fn kudu_s2_祖先被换成junction后删除必须拒() {
+        use std::process::Command;
+
+        #[derive(Default)]
+        struct CollectSink(std::sync::Mutex<Vec<String>>);
+        impl Sink for CollectSink {
+            fn item(&self, _p: &Path, line: &str) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        fn run_delete(target: &Path, kind: &str) -> Vec<String> {
+            let sink = CollectSink::default();
+            let items = vec![(kind.to_string(), target.as_os_str().to_os_string())];
+            super::delete(&items, None, &sink);
+            let all = sink.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            all.into_iter().filter(|l| l.contains("delresult")).collect()
+        }
+
+        let dir = std::env::temp_dir().join(format!("trim-s2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let _clean = Clean(dir.clone());
+
+        // 真目标目录 + 其中的文件；junction 指向它（模拟「目标目录被换成链接」）
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep.txt"), b"x").unwrap();
+        let link = dir.join("jlink");
+        let st = Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&link).arg(&real).output();
+        match st {
+            Ok(o) if o.status.success() => {}
+            _ => {
+                eprintln!("[S2] 建 junction 失败（受限环境），本用例跳过（未校验）");
+                return;
+            }
+        }
+
+        // ① 纯函数：祖先链里第一个 reparse 必须被点名；普通目录链不得误报
+        let deep = link.join("keep.txt");
+        let hit = super::reparse_ancestor(&deep).expect("必须命中 junction 祖先");
+        assert!(hit.ends_with("jlink"), "命中的应是 jlink 本身：{hit}");
+        assert!(super::reparse_ancestor(&real.join("keep.txt")).is_none(), "普通目录链不得误报");
+
+        // ② 删除链：穿过 junction 的删除必须被拒、mode 为新档，且真实内容完好
+        let lines = run_delete(&deep, "file");
+        assert_eq!(lines.len(), 1, "应恰有一条 delresult：{lines:?}");
+        assert!(lines[0].contains("\"status\":\"fail\""), "穿过 junction 的删除必须被拒：{lines:?}");
+        assert!(
+            lines[0].contains("\"mode\":\"reparse-ancestor\""),
+            "拒绝档应为 reparse-ancestor：{lines:?}"
+        );
+        assert!(real.join("keep.txt").exists(), "被拒时真实目标内容不得被动到");
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "junction 本体也不得被动到");
+
+        // ③ 对照：同一文件走真实路径删除应放行（证明拒的是「祖先换链」不是「文件本身」）
+        std::fs::write(real.join("kill.txt"), b"y").unwrap();
+        let lines = run_delete(&real.join("kill.txt"), "file");
+        assert_eq!(lines.len(), 1, "应恰有一条 delresult：{lines:?}");
+        assert!(lines[0].contains("\"status\":\"ok\""), "真实路径的普通删除必须放行：{lines:?}");
     }
 
     use super::*;

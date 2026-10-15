@@ -3,6 +3,7 @@
   "modes": {
     "recycled": "ok",
     "rejected": "refused",
+    "reparse-ancestor": "refused",
     "unrecoverable-name": "name",
     "trash-failed": "busy"
   }

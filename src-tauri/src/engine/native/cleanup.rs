@@ -479,6 +479,9 @@ struct OutcomeCounters {
     gone: i64,
     /// 被保护清单拒绝（安全闸门正常工作；关任何程序都不会变可删）
     protected_blocked: i64,
+    /// Kudu S2（2026-10-16）：路径祖先在执行前变成链接/junction 而拒
+    /// （同 protected_blocked：安全闸门动作，不是用户侧问题）
+    reparse_blocked: i64,
     too_new: i64,
     excluded: i64,
     /// 文件名含孤立代理项/无法无损解码（保护清单按 lossy 串比对不可靠）而拒删的数量
@@ -515,6 +518,15 @@ fn classify_outcome(
             format!("{} 个文件位于受保护路径，已按保护清单拒绝删除", c.protected_blocked),
         );
     }
+    if nothing_done && c.reparse_blocked > 0 {
+        return (
+            "skip",
+            format!(
+                "{} 个目标的路径祖先在执行前变成链接/junction（疑似被替换），已拒绝删除",
+                c.reparse_blocked
+            ),
+        );
+    }
     if nothing_done && c.too_new > 0 {
         return ("skip", format!("{} 个文件未达 minAge 年龄门槛（时效护栏），未执行清理", c.too_new));
     }
@@ -545,6 +557,10 @@ fn classify_outcome(
     if c.protected_blocked > 0 {
         // 部分被拒时要单独说一句，且**不许混进「被占用」那个数**。
         suffix = format!("{suffix}；{} 个位于受保护路径已拒绝", c.protected_blocked);
+    }
+    if c.reparse_blocked > 0 {
+        // Kudu S2：同 protected_blocked 的姿势——独立出现、不许被「被占用」吞掉。
+        suffix = format!("{suffix}；{} 个目标的路径祖先在执行前变成链接已拒绝", c.reparse_blocked);
     }
     if c.lossy > 0 {
         suffix = format!("{suffix}；{} 个文件名无法无损解码已跳过", c.lossy);
@@ -1082,6 +1098,12 @@ let mut freed = 0i64;
     // 一次正常拦截伪装成用户的操作问题。
     let mut protected_blocked = 0i64;
     let mut protected_samples: Vec<String> = Vec::new();
+    // Kudu S2（2026-10-16）：删除瞬间父链变成链接的拒绝，独立计数（与 protected_blocked
+    // 同口径：安全闸门动作要留痕、不许混进「被占用」）；按父目录 memo 避免逐文件重走链。
+    let mut reparse_blocked = 0i64;
+    let mut reparse_samples: Vec<String> = Vec::new();
+    let mut ancestor_memo: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
         let mut backup_skipped = 0usize;
 
         for (path, size) in &files {
@@ -1102,6 +1124,15 @@ let mut freed = 0i64;
                 // 逐条打会把真留痕淹掉（与扫描侧「首次翻转才留痕」同一取舍）。
                 if protected_samples.len() < 5 {
                     protected_samples.push(path.clone());
+                }
+            } else if let Some(anc) = reparse_ancestor_memoized(path, &mut ancestor_memo) {
+                // Kudu S2（2026-10-16）：删除瞬间父链复检——扫描 → 预览 → 执行的长窗口里，
+                // 某一级祖先目录可能被外部程序换成 junction/symlink，删除会穿过它命中
+                // 真实目标。进清单的路径其祖先链在扫描时必然是普通目录（遍历侧跳 reparse），
+                // 此刻命中即「与扫描时状态不符」⇒ fail-closed 拒绝；不进 residual（非「被占用」）。
+                reparse_blocked += 1;
+                if reparse_samples.len() < 5 {
+                    reparse_samples.push(format!("{path}（祖先 {anc}）"));
                 }
             } else {
                 // C-4：删前备份（只对将真正删除的文件；复制失败不阻塞删除）
@@ -1161,6 +1192,7 @@ let mut freed = 0i64;
             denied,
             gone,
             protected_blocked,
+            reparse_blocked,
             too_new,
             excluded,
             lossy,
@@ -1205,6 +1237,15 @@ let mut freed = 0i64;
                 ),
             );
         }
+        if reparse_blocked > 0 {
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "规则 {id}：{reparse_blocked} 个目标的路径祖先在执行前变成链接/junction，已按状态不符拒绝删除。样本：{}",
+                    reparse_samples.join("；")
+                ),
+            );
+        }
 
         details.push(json!({
             "id": id, "name": name, "status": status,
@@ -1214,6 +1255,9 @@ let mut freed = 0i64;
             // 「关闭相关程序后重试」的误导提示（审计 §4.1）。渲染层目前不消费这个
             // 字段，它先在数据层备着，等前端要单独呈现时不必再改引擎。
             "protectedBlocked": protected_blocked,
+            // Kudu S2（2026-10-16）：父链变成链接的拒绝同理独立外发、不进 residual
+            //（不是「被占用」；渲染层要单独呈现时直接消费该字段）。
+            "reparseBlocked": reparse_blocked,
             // R4（2026-10-15）：两个新档同样独立外发、不进 residual（denied 的出路是
             // 提权、gone 无需处理，都不是「重试」）；渲染层按字段分档提示。
             "denied": denied,
@@ -1325,6 +1369,25 @@ fn cleanup_root_ok(dir: &str) -> bool {
         Ok(md) => md.is_dir() && !crate::engine::protect::is_reparse(&md),
         Err(_) => false,
     }
+}
+
+/// Kudu S2（2026-10-16）：删除瞬间父链复检的 memo 包装——判据本体在
+/// `trim_finder::scan::reparse_ancestor`（finder 删除链与常规清理链共用，§5.16/N6 一份实现）。
+/// 按**父目录**记忆：同一目录下成千上万个文件只走一次祖先链。
+fn reparse_ancestor_memoized(
+    path: &str,
+    memo: &mut std::collections::HashMap<String, Option<String>>,
+) -> Option<String> {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .map(|d| d.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if let Some(cached) = memo.get(&parent) {
+        return cached.clone();
+    }
+    let hit = trim_finder::scan::reparse_ancestor(std::path::Path::new(path));
+    memo.insert(parent, hit.clone());
+    hit
 }
 
 fn collect_files(
@@ -1742,6 +1805,7 @@ mod cleanup_engine_contract_tests {
             denied: 0,
             gone: 0,
             protected_blocked: protected,
+            reparse_blocked: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
@@ -1802,6 +1866,7 @@ mod cleanup_engine_contract_tests {
             denied,
             gone,
             protected_blocked: 0,
+            reparse_blocked: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
@@ -1831,6 +1896,34 @@ mod cleanup_engine_contract_tests {
         // ⑤ 已不存在不阻成功：gone 没有失败语义
         let (st, _) = classify_outcome(&c(7, 0, 0, 1), "", "", "");
         assert_eq!(st, "ok", "已不存在的项不是失败");
+    }
+
+    /// Kudu S2（2026-10-16）：父链变成链接的拒绝单独成档——不许混进「被占用」，
+    /// 全部被拒时状态是 skip 而不是「失败」（安全闸门正常工作）。
+    #[test]
+    fn kudu_s2_父链链接拒绝单独成档() {
+        let c = |deleted: i64, reparse: i64| OutcomeCounters {
+            deleted,
+            failed: 0,
+            denied: 0,
+            gone: 0,
+            protected_blocked: 0,
+            reparse_blocked: reparse,
+            too_new: 0,
+            excluded: 0,
+            lossy: 0,
+            unresolved: Vec::new(),
+            to_recycle: false,
+        };
+        // ① 全部因父链换链被拒 ⇒ skip + 措辞指向链接替换，不许出现「被占用」
+        let (st, msg) = classify_outcome(&c(0, 3), "", "", "");
+        assert_eq!(st, "skip", "全被拒应是 skip（安全闸门动作，不是失败）");
+        assert!(msg.contains("链接/junction"), "措辞必须指向链接替换: {msg}");
+        assert!(!msg.contains("被占用"), "不得混进被占用: {msg}");
+        // ② 部分被拒且有成功清理 ⇒ 单独说一句
+        let (st, msg) = classify_outcome(&c(5, 2), "", "", "");
+        assert_eq!(st, "ok");
+        assert!(msg.contains("2 个目标的路径祖先在执行前变成链接已拒绝"), "部分被拒必须单独留痕: {msg}");
     }
 
     /// 2026-10-04 审计 §4.2：`fileKeys` 直指**单个文件**时必须真能删掉。
