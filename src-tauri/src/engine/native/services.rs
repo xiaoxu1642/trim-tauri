@@ -74,8 +74,9 @@ pub(super) unsafe fn service_stop(name: &str) -> Result<(), u32> {
 
 /// HRESULT → win32 码。`HRESULT_FROM_WIN32(x)` = `0x8007xxxx`，低位段就是原码。
 /// R9（2026-10-15）：卸载启动把 `ERROR_CANCELLED` 从 HRESULT 里折出来的口径也引这里
-/// （`mod.rs` 已 re-export）——判「用户拒了 UAC」不许再写第二份折叠。
-pub(super) fn win32_of(e: &windows::core::Error) -> u32 {
+/// （`pub(crate)` + `mod.rs` re-export，与 to_wide 同姿势）——判「用户拒了 UAC」不许再写
+/// 第二份折叠。
+pub(crate) fn win32_of(e: &windows::core::Error) -> u32 {
     e.code().0 as u32 & 0x0000_FFFF
 }
 

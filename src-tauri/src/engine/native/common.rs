@@ -110,8 +110,9 @@ pub(super) fn collect_peripheral_backup_files(dirs: &[std::path::PathBuf]) -> Ve
 ///
 /// 分码口径与 `pending_delete.rs::classify_pending_delete_error` 同源（那边的注释写明
 /// 「ACCESS_DENIED 与 SHARING_VIOLATION 必须分开说：前者提权重试有意义，后者提权没用」）。
-/// 注意**不能只看 `ErrorKind`**：Windows 上 SHARING_VIOLATION(32) 与 ACCESS_DENIED(5)
-/// 都被 std 折成 `PermissionDenied`，只按 kind 判会把两者混回去——必须读 raw code。
+/// 注意**不能只看 `ErrorKind`**（1.99 实测）：ACCESS_DENIED(5) 的 kind 是
+/// `PermissionDenied`，而 SHARING_VIOLATION(32) 的 kind 是 `Uncategorized`——
+/// 只看 kind 的实现在这条链上会漏掉占用族，必须读 raw code。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeleteFailureKind {
     /// ERROR_ACCESS_DENIED(5)：权限不足（提权重试可能有效）
@@ -166,11 +167,17 @@ mod tests {
     fn delete_error_classification_splits_denied_from_busy() {
         use super::DeleteFailureKind::*;
         let w = |code: i32| classify_delete_error(&std::io::Error::from_raw_os_error(code));
-        // 前提（采集）：32 与 5 的 kind 相同 —— 只看 kind 的实现必然把两者混回去
+        // 前提（采集，1.99 实测）：5 → PermissionDenied；32 → 不是它（Uncategorized）。
+        // 只看 kind 的实现在这条链上会漏掉占用族——raw code 判读的存在理由就在这里。
         assert_eq!(
-            std::io::Error::from_raw_os_error(32).kind(),
             std::io::Error::from_raw_os_error(5).kind(),
-            "前提变了：32 的 kind 不再等于 5，本判据的存在理由需要复核"
+            std::io::ErrorKind::PermissionDenied,
+            "前提变了：5 的 kind 不再是 PermissionDenied"
+        );
+        assert_ne!(
+            std::io::Error::from_raw_os_error(32).kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "前提变了：32 的 kind 与 5 相同——本判据的存在理由需要复核"
         );
         // 判定：四个码各归各档
         assert_eq!(w(5), Denied, "ACCESS_DENIED 是权限不足");

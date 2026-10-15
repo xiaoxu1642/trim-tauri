@@ -1130,32 +1130,19 @@ let mut freed = 0i64;
                 } else {
                     backup_skipped += 1;
                 }
-                // 永久删除。R3（2026-10-15）：只读文件撞 PermissionDenied 时清一次只读位、
-                // 重试一次 —— 扫描侧 `file_deletable` 只做独占探测不查属性位，只读文件照样
-                // 进可删集；不清位的话失败会被归成「被占用」，用户去关程序永远关不掉
-                // （PS 轨 `Remove-Item -Force` 本就清只读位，是迁移时丢的语义）。
-                // 只对已过 is_path_protected 的目标动属性，且不做第二次兜底。
-                let mut result = std::fs::remove_file(path);
-                if let Err(e) = &result {
-                    if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        if let Ok(meta) = std::fs::metadata(path) {
-                            let mut perm = meta.permissions();
-                            if perm.readonly() {
-                                perm.set_readonly(false);
-                                if std::fs::set_permissions(path, perm).is_ok() {
-                                    result = std::fs::remove_file(path);
-                                }
-                            }
-                        }
-                    }
-                }
-                match result {
+                // 永久删除。R3（2026-10-15）原方案「清只读位 + 重试」经**实测证伪**后退役：
+                // 前提是「只读文件撞 PermissionDenied」，但 Rust std 的 remove_file 在
+                // Windows 上自身会对 FILE_ATTRIBUTE_READONLY 清位重试（对齐 rm -f 语义；
+                // 本机 1.99 实测：只读文件 remove_file ⇒ Ok，而 cmd del / DeleteFileW
+                // 层对同一文件「拒绝访问」）——执行链从不产生「只读导致 PermissionDenied」，
+                // 应用层清位是死代码，不留兜底。留痕见方案 v4 附录 C。
+                match std::fs::remove_file(path) {
                     Ok(()) => {
                         freed += *size as i64;
                         deleted += 1;
                     }
                     Err(e) => {
-                        // R4（2026-10-15）：失败按因分档（清位后仍失败的真权限问题归 denied）。
+                        // R4（2026-10-15）：失败按因分档（共享判据，5/32 分开说）。
                         match classify_delete_error(&e) {
                             DeleteFailureKind::Denied => denied += 1,
                             DeleteFailureKind::Gone => gone += 1,
@@ -1907,15 +1894,14 @@ mod cleanup_engine_contract_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// R3（2026-10-15）：只读文件必须靠「清只读位 + 重试一次」真删掉——PS 轨
-    /// `Remove-Item -Force` 清只读位的语义迁移时丢了，只读文件会以「被占用」的形状
-    /// 留在盘上（用户关任何程序都无效）。
-    ///
-    /// 采集与判定拆开：先用原始 `remove_file` 实证**只读位确实拦得住**（否则本机
-    /// 文件系统上碰巧能删，断言退化成「什么都没发生也算过」），再跑完整链断言真删。
+    /// R3 前提复核（2026-10-15，实测证伪后重写）：原方案「清只读位 + 重试」的前提是
+    /// 「只读文件撞 PermissionDenied」——**实测不成立**：Rust std 的 remove_file 在
+    /// Windows 上自会清 FILE_ATTRIBUTE_READONLY 并重试（对齐 rm -f；对照实验：cmd del
+    /// 对同一文件「拒绝访问」）。本用例把这条实证钉死：只读文件在链上直接可删且计数正确。
+    /// 日后 std 行为回摆（只读重新变拒），这条会红，届时再评估应用层清位。
     #[cfg(windows)]
     #[test]
-    fn 只读文件清位重试后能删且计数正确() {
+    fn 只读文件删除由std清位且链上计数正确() {
         let dir = std::env::temp_dir().join(format!("trim-readonly-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1925,22 +1911,25 @@ mod cleanup_engine_contract_tests {
         }
         let _clean = Clean(dir.clone());
 
+        // 前提（采集）：只读位真的设上了，且 std 的原始删除直接成功（证伪「只读⇒拒删」）
         let target = dir.join("readonly.log");
         std::fs::write(&target, b"0123456789").unwrap();
         let mut perm = std::fs::metadata(&target).unwrap().permissions();
         perm.set_readonly(true);
         std::fs::set_permissions(&target, perm).unwrap();
-
-        // 前提（采集）：只读位此刻真的拦得住原始删除
         assert!(
             std::fs::metadata(&target).unwrap().permissions().readonly(),
             "只读位在这台机器上没设上，用例前提不成立"
         );
-        let raw = std::fs::remove_file(&target);
-        assert!(raw.is_err(), "前提不成立：只读文件被直接删掉了，本用例失去对照意义");
-        assert!(target.exists(), "拦是拦住了，文件不该消失");
+        if let Err(e) = std::fs::remove_file(&target) {
+            panic!("前提变了：本工具链 remove_file 对只读文件失败（{e:?}）——R3 应用层清位退役的依据消失，需重新评估");
+        }
 
-        // 判定：跑完整链（fileKey 直指单文件，同 §4.2 用例形状）
+        // 判定：重建只读文件，跑完整链（fileKey 直指单文件，同 §4.2 用例形状）
+        std::fs::write(&target, b"0123456789").unwrap();
+        let mut perm = std::fs::metadata(&target).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&target, perm).unwrap();
         let rules = serde_json::json!({"groups":[{"items":[{
             "id":"ro1","name":"只读探测",
             "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
@@ -1951,28 +1940,26 @@ mod cleanup_engine_contract_tests {
             .expect("执行应返回结果而不是 Err");
         let d = &res.details[0];
 
-        assert!(
-            !target.exists(),
-            "只读文件必须被清位后删掉（R3 回归形态：它会被归成「被占用」而留下）"
-        );
+        assert!(!target.exists(), "只读文件必须被删掉（std 清位行为变化会让它留下）");
         assert_eq!(d["fileCount"].as_i64(), Some(1), "fileCount 必须是 1: {d}");
         assert_eq!(d["residual"].as_i64(), Some(0), "不得计入残留（被占用）: {d}");
-        assert_eq!(d["denied"].as_i64(), Some(0), "清位重试成功后不该进 denied: {d}");
+        assert_eq!(d["denied"].as_i64(), Some(0), "不该进 denied: {d}");
         assert_eq!(d["gone"].as_i64(), Some(0), "不该进 gone: {d}");
         let msg = d["message"].as_str().unwrap_or("");
         assert!(msg.contains("已清理 1 个文件"), "消息必须如实报删了 1 个: {msg}");
     }
 
-    /// R3/R4 的真机探针（`#[ignore]`，发版前实跑）：真实 Win32 错误码在这台机器上
-    /// 各归各档。快速组管的是合成码（common.rs 单测）与只读链；这里补的是
-    /// 「真实文件属性 / 真实共享冲突 → 分档与计数」这段端到端。
-    ///
-    /// denied 的真实码路径（ACL 拒绝）探针不造——造它要动 ACL，代价与风险都不对等；
-    /// denied 的分档实现由 common.rs 单测钉住，链路上的计数由本探针的 busy 支代言。
+    /// R3/R4 的真机探针（`#[ignore]`，发版前实跑）：真实 Win32 码与真实文件属性的
+    /// 端到端结论。快速组管合成码（common.rs 单测）；这里补：
+    /// ① 只读文件在链上直接可删（std 自清位——R3 前提的现场复证）；
+    /// ② share_mode(0) 持句柄 → 真实共享冲突码（32/33）→ 归 residual（被占用档）
+    ///    且不污染 denied/gone。
+    /// denied 的真实码路径（ACL 拒绝）探针不造——造它要动 ACL，代价与风险不对等；
+    /// denied 的分档实现由 common.rs 单测钉住。
     #[cfg(windows)]
     #[test]
     #[ignore = "真机探针：真实只读属性与文件句柄共享冲突"]
-    fn 删除链_只读与共享冲突分档_真机探针() {
+    fn 删除链_std清位与共享冲突分档_真机探针() {
         use std::os::windows::fs::OpenOptionsExt;
 
         let dir = std::env::temp_dir().join(format!("trim-delprobe-{}", std::process::id()));
@@ -1984,7 +1971,7 @@ mod cleanup_engine_contract_tests {
         }
         let _clean = Clean(dir.clone());
 
-        // A：只读文件 —— 原始删除必须先失败、链上必须清位后删掉
+        // A：只读文件（属性在）—— 链上直接可删（std 清位，R3 前提的现场复证）
         let a = dir.join("ro-probe.log");
         std::fs::write(&a, b"readonly-0123456789").unwrap();
         let mut perm = std::fs::metadata(&a).unwrap().permissions();
@@ -1994,8 +1981,6 @@ mod cleanup_engine_contract_tests {
             std::fs::metadata(&a).unwrap().permissions().readonly(),
             "只读位在这台机器上没设上"
         );
-        let raw_a = std::fs::remove_file(&a);
-        assert!(raw_a.is_err(), "前提不成立：只读文件被直接删掉了");
 
         // B：共享冲突文件（share_mode(0) 持句柄）—— 原始删除的真实 Win32 码必须落在
         // 占用族（32/33）；若这台机器给出的码变了，分档前提就该复核
