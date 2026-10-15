@@ -63,7 +63,7 @@ fn main() {
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     let args: Vec<String> = raw.iter().map(|a| a.to_string_lossy().to_string()).collect();
     if args.is_empty() {
-        println!("finder <duplicates|bigfiles|empty|appdata|sizes|delete|cleanup> [args...]");
+        println!("finder <duplicates|bigfiles|empty|appdata|sizes|analyze|delete|cleanup> [args...]");
         return;
     }
     let sink = StdoutSink;
@@ -130,6 +130,22 @@ fn main() {
                 }
             }
             scan::appdata(min_mb, &sink);
+        }
+        "analyze" => {
+            // C1-2（2026-10-16）：磁盘分析一层的 CLI 入口。应用内通道（finder.rs
+            // scan_type="analyze" → scan::analyze）无 UI 自动化路径，release 性能
+            // 实测需要无头入口；语义与应用内完全同源（同一个 scan::analyze）。
+            let mut roots: Vec<String> = Vec::new();
+            for r in args.iter().skip(1) {
+                if !r.starts_with('-') {
+                    roots.push(r.clone());
+                }
+            }
+            if roots.is_empty() {
+                println!("analyze 需要至少一个分析目录");
+                return;
+            }
+            scan::analyze(&roots, &sink);
         }
         "sizes" => {
             let mut paths: Vec<String> = Vec::new();
