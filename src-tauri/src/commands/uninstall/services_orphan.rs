@@ -237,7 +237,7 @@ pub(super) struct ServiceSignals {
     pub(super) under_library_root: bool,
     /// 命中反作弊名单
     pub(super) anticheat: bool,
-    /// 三处平台清单本轮都读到了
+    /// 各平台清单本轮都读到了
     pub(super) index_complete: bool,
     /// 反作弊归属的游戏名在清单里查得到
     pub(super) game_named_present: bool,
@@ -500,7 +500,7 @@ pub(super) unsafe fn service_findings(
                     "kind": "reg_key", "target": target,
                     "class": class_label(cls),
                     "reason": if stale {
-                        "服务键与二进制都还在，但对应游戏/程序在 Steam / Epic / WeGame 清单里都查不到（已卸载程序的常驻服务或驱动）"
+                        "服务键与二进制都还在，但对应游戏/程序在当前各平台清单里都查不到（已卸载程序的常驻服务或驱动）"
                     } else {
                         "服务键还在，但 ImagePath 指向的二进制已不存在"
                     },
@@ -511,7 +511,7 @@ pub(super) unsafe fn service_findings(
                     "contribs": contribs(&[
                         ("serviceKeyAlive", format!("{SERVICES_ROOT}\\{} 仍可打开", e.name)),
                         ("landingState", if landing_exists { format!("落点存在：{landing}") } else { format!("落点不存在：{landing}") }),
-                        ("platformIndex", if index.complete() { "三处平台清单均读到".to_string() } else { format!("清单不完整：{}", index.unreadable.join("、")) }),
+                        ("platformIndex", if index.complete() { "各平台清单均读到".to_string() } else { format!("清单不完整：{}", index.unreadable.join("、")) }),
                         ("antiCheat", ac.map(|a| format!("命中反作弊名单：{a}")).unwrap_or_else(|| "未命中反作弊名单".to_string())),
                     ]),
                 }));

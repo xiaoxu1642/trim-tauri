@@ -1,5 +1,6 @@
-//! 游戏平台库清单（Steam / Epic / WeGame）与「目录还在、清单里已没有」的游戏残留
-//! （v0.5.0 只读扫描器之一，方案 §3 `game_platform_orphan`）。
+//! 游戏平台库清单（Steam / Epic / WeGame / Origin(EA) / Battle.net / Uplay / GOG）与
+//! 「目录还在、清单里已没有」的游戏残留（v0.5.0 只读扫描器之一，方案 §3
+//! `game_platform_orphan`；C 类二期 2026-10-16 扩四平台，机制源 = cankao/5 §3.2）。
 //!
 //! 这份索引同时是**反作弊条件保护**（方案 §2.2）的唯一判据来源：
 //! 「游戏仍在库」= 平台清单里查得到它的安装目录。
@@ -22,8 +23,13 @@ use super::residue_update::contribs;
 /// 单平台清单读取失败时写进 notes 的措辞（调用方共用，避免三种说法）
 pub(crate) const UNREADABLE_SUFFIX: &str = "清单读取失败，本轮不参与「在库/已卸载」判定";
 
-/// 一台机器上游戏记录的上限（Steam 单库常见 50~200 个，留足余量防爆）
+/// 一台机器上游戏记录的上限（Steam 单库常见 50~200 个，留足余量防爆）。
+/// C 类二期起这是**全局公平配额**的额度：超限由 `fair_trim` 从最多平台逐条扣，
+/// 不按 collector 顺序让后跑的平台饿死（截断计数逐平台外发 notes）。
 const RECORD_CAP: usize = 600;
+/// 采集期噪声护栏（C 类二期）：单平台读到这个量级即停读，防病态机器把采集拖死；
+/// 它只管安全上界，对外可见的截断注记由 `fair_trim` 按全局配额给出。
+const COLLECT_HARD_CAP: usize = 2400;
 /// 每个库根下 `steamapps/common` 的目录枚举上限。
 /// allow(dead_code)：仅被下方 list_game_dirs 消费，而该族是「未跟踪游戏目录发现」
 /// 预留能力（单测覆盖、生产侧尚未接线），接线后随该族一起移除 allow。
@@ -90,7 +96,30 @@ impl PlatformIndex {
         })
     }
 
-    /// 三个平台是否都读到了清单。false = 有平台装着却没读到，
+    /// 追加一条「目录候选」记录（目录名作展示名；登记库根；同路径去重、忽略大小写）。
+    /// 供 C 类二期各 collector 共用（Steam 走 acf 结构化解析，不用它）。
+    fn try_add_dir(&mut self, platform: &'static str, dir: &str) -> bool {
+        let norm = Self::norm(dir);
+        if norm.is_empty() || self.records.iter().any(|r| r.dir_lc == norm) {
+            return false;
+        }
+        let stem = Path::new(&norm)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !self.roots_lc.contains(&norm) {
+            self.roots_lc.push(norm.clone());
+        }
+        self.records.push(LibRecord {
+            platform,
+            name: stem,
+            dir: dir.trim_end_matches(['\\', '/']).to_string(),
+            dir_lc: norm,
+        });
+        true
+    }
+
+    /// 各平台是否都读到了清单。false = 有平台装着却没读到，
     /// 此时「不在库」这个结论本身不成立，调用方只能报告不能判定。
     pub(super) fn complete(&self) -> bool {
         self.unreadable.is_empty()
@@ -213,6 +242,39 @@ pub(super) fn wegame_dirs_from_ini(text: &str) -> Vec<String> {
             || v.starts_with(r"\\");
         if abs && !out.iter().any(|o| o == v) {
             out.push(v.to_string());
+        }
+    }
+    out
+}
+
+/// 「安装目录」注册表值的清洗（Origin `Install Dir` / Uplay `InstallDir` / GOG `PATH` 共用）：
+/// 去空白与包裹引号、去尾部路径分隔符；只接受绝对路径形态（盘符 `X:\`/`X:/` 或 UNC `\\`），
+/// 其余返回 None（脏值不静默变成一条记录）。
+pub(super) fn clean_install_dir_value(raw: &str) -> Option<String> {
+    let v = raw.trim().trim_matches('"').trim().trim_end_matches(['\\', '/']);
+    let b = v.as_bytes();
+    let drive_abs = b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    if v.is_empty() || !(drive_abs || v.starts_with(r"\\")) {
+        return None;
+    }
+    Some(v.to_string())
+}
+
+/// Battle.net `Agent\product.db` 文本 → 安装目录候选。
+/// 该文件是文本非 sqlite（上游实现事实，cankao/5 §3.2）：以控制字符为分隔切段，
+/// 取形如绝对路径的段（`X:/…` 或 UNC），去重保序、忽略大小写。
+/// 刻意**不**按「非 ASCII 全切」（上游写法）：中文安装目录是合法路径，切碎会把它一起丢掉。
+pub(super) fn battlenet_dirs_from_db(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for seg in text.split(|c: char| (c as u32) < 0x20 || c as u32 == 0x7F) {
+        let t = seg.trim().trim_matches('"').trim();
+        let b = t.as_bytes();
+        let drive_abs = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/';
+        if !(drive_abs || t.starts_with(r"\\")) {
+            continue;
+        }
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+            out.push(t.to_string());
         }
     }
     out
@@ -374,7 +436,7 @@ fn collect_epic(index: &mut PlatformIndex, notes: &mut Vec<String>) {
     files.sort();
     let mut parsed_any = false;
     for p in &files {
-        if index.records.len() >= RECORD_CAP {
+        if index.records.len() >= COLLECT_HARD_CAP {
             break;
         }
         let Ok(text) = std::fs::read_to_string(p) else { continue };
@@ -454,7 +516,7 @@ unsafe fn collect_wegame(index: &mut PlatformIndex, notes: &mut Vec<String>) {
             let Ok(text) = std::fs::read_to_string(&cand) else { continue };
             found_ini = true;
             for dir in wegame_dirs_from_ini(&text) {
-                if index.records.len() >= RECORD_CAP {
+                if index.records.len() >= COLLECT_HARD_CAP {
                     break;
                 }
                 let norm = PlatformIndex::norm(&dir);
@@ -480,7 +542,255 @@ unsafe fn collect_wegame(index: &mut PlatformIndex, notes: &mut Vec<String>) {
     }
 }
 
-/// 采集三平台清单。任何一处失败都只影响该平台的判定力，不让整轮扫描失败
+// ==================== C 类二期采集（Origin / Battle.net / Uplay / GOG，2026-10-16） ====================
+//
+// 机制源 = cankao/5 §3.2 平台发现表（事实层），按本仓纪律重写：不逐平台装软件验证
+// （缺平台即 skip），真机覆盖以 `live_new_platform_collectors_readable` 探针为准。
+// 注册表侧统一探「两份视图」：32 位视图（Wow6432Node）与 64 位视图都看
+// （与 steam_root / WeGame 既有多视图姿势一致）。
+
+/// 打开 `<hive>\<sub>` 并读一个字符串值；键/值不存在或读失败 → None。
+unsafe fn read_key_value(hive: windows::Win32::System::Registry::HKEY, sub: &str, name: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{KEY_READ, RegCloseKey, RegOpenKeyExW};
+    let sk = to_wide(sub);
+    let mut hk = windows::Win32::System::Registry::HKEY::default();
+    if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+        return None;
+    }
+    let v = reg_sz(hk, name);
+    let _ = RegCloseKey(hk);
+    v
+}
+
+/// 打开键的三态（硬规矩①「读不到 ≠ 不在库」在注册表侧的可区分形态）：
+/// `Missing` = 键不存在（合法的「该平台没有游戏」）；`Denied` = 存在但打不开（读失败，进 unreadable）。
+#[derive(Debug, PartialEq, Eq)]
+enum KeyState {
+    Ok,
+    Missing,
+    Denied,
+}
+
+unsafe fn open_state(hive: windows::Win32::System::Registry::HKEY, sub: &str) -> KeyState {
+    use windows::Win32::System::Registry::{KEY_READ, RegCloseKey, RegOpenKeyExW};
+    let sk = to_wide(sub);
+    let mut hk = windows::Win32::System::Registry::HKEY::default();
+    match RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk) {
+        Ok(()) => {
+            let _ = RegCloseKey(hk);
+            KeyState::Ok
+        }
+        // ERROR_FILE_NOT_FOUND(2) = 键不存在；其余（ACCESS_DENIED 等）= 读失败
+        Err(e) if e.code() == windows::Win32::Foundation::WIN32_ERROR(2).to_hresult() => KeyState::Missing,
+        Err(_) => KeyState::Denied,
+    }
+}
+
+/// 枚举 `<root>` 子键、读每键 `value_name` 字符串值 → 清洗后的目录候选（去重保序）。
+/// 返回 `hit_guard` = 子键数触到采集护栏（截断注记由调用方给）。
+unsafe fn subkey_dir_values(
+    hive: windows::Win32::System::Registry::HKEY,
+    root: &str,
+    value_name: &str,
+) -> (Vec<String>, bool) {
+    let subs = reg_enum_subkeys(hive, root, COLLECT_HARD_CAP + 1);
+    let hit_guard = subs.len() > COLLECT_HARD_CAP;
+    let mut out: Vec<String> = Vec::new();
+    for key in subs.into_iter().take(COLLECT_HARD_CAP) {
+        let Some(raw) = read_key_value(hive, &format!("{root}\\{key}"), value_name) else {
+            continue;
+        };
+        let Some(d) = clean_install_dir_value(&raw) else { continue };
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&d)) {
+            out.push(d);
+        }
+    }
+    (out, hit_guard)
+}
+
+/// Origin / EA App：存在性 = `Software\[WOW6432Node\]Origin` 的 `ClientPath`；
+/// 安装目录 = `SOFTWARE\[WOW6432Node\]{Electronic Arts, EA Games}\*\Install Dir`（两视图都探）。
+unsafe fn collect_origin(index: &mut PlatformIndex, notes: &mut Vec<String>) {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE as HKLM;
+    const BASES: [&str; 2] = [r"SOFTWARE\WOW6432Node", r"SOFTWARE"];
+    let installed = BASES
+        .iter()
+        .any(|b| read_key_value(HKLM, &format!(r"{b}\Origin"), "ClientPath").is_some());
+    if !installed {
+        return; // 没装 Origin / EA App 是合法的「该平台没有游戏」
+    }
+    let mut unreadable = false;
+    for base in BASES {
+        for rel in ["Electronic Arts", "EA Games"] {
+            let root = format!(r"{base}\{rel}");
+            match open_state(HKLM, &root) {
+                KeyState::Missing => continue, // 该视图没写过游戏记录：合法的空
+                KeyState::Denied => {
+                    unreadable = true;
+                    continue;
+                }
+                KeyState::Ok => {}
+            }
+            let (dirs, hit_guard) = subkey_dir_values(HKLM, &root, "Install Dir");
+            for d in dirs {
+                index.try_add_dir("Origin", &d);
+            }
+            if hit_guard {
+                notes.push(format!("Origin 安装记录超过采集护栏 {COLLECT_HARD_CAP} 条，已截断"));
+            }
+        }
+    }
+    if unreadable {
+        index.unreadable.push("Origin");
+        notes.push(format!("Origin {UNREADABLE_SUFFIX}（已装 Origin/EA，游戏键部分不可读）"));
+    }
+}
+
+/// Uplay / Ubisoft Connect：存在性 = `Software\[WOW6432Node\]Ubisoft\Launcher` 的 `InstallDir`；
+/// 安装目录 = `…\Launcher\Installs\*\InstallDir`。
+unsafe fn collect_uplay(index: &mut PlatformIndex, notes: &mut Vec<String>) {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE as HKLM;
+    const BASES: [&str; 2] = [r"Software\WOW6432Node\Ubisoft\Launcher", r"Software\Ubisoft\Launcher"];
+    let installed = BASES.iter().any(|b| read_key_value(HKLM, b, "InstallDir").is_some());
+    if !installed {
+        return;
+    }
+    let mut unreadable = false;
+    for base in BASES {
+        let root = format!(r"{base}\Installs");
+        match open_state(HKLM, &root) {
+            KeyState::Missing => continue,
+            KeyState::Denied => {
+                unreadable = true;
+                continue;
+            }
+            KeyState::Ok => {}
+        }
+        let (dirs, hit_guard) = subkey_dir_values(HKLM, &root, "InstallDir");
+        for d in dirs {
+            index.try_add_dir("Uplay", &d);
+        }
+        if hit_guard {
+            notes.push(format!("Uplay 安装记录超过采集护栏 {COLLECT_HARD_CAP} 条，已截断"));
+        }
+    }
+    if unreadable {
+        index.unreadable.push("Uplay");
+        notes.push(format!("Uplay {UNREADABLE_SUFFIX}（已装 Ubisoft Connect，Installs 键不可读）"));
+    }
+}
+
+/// GOG Galaxy：存在性 = `SOFTWARE\[WOW6432Node\]GOG.com\Games` 键存在；
+/// 安装目录 = `Games\*\PATH`。
+unsafe fn collect_gog(index: &mut PlatformIndex, notes: &mut Vec<String>) {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE as HKLM;
+    const BASES: [&str; 2] = [r"SOFTWARE\WOW6432Node\GOG.com\Games", r"SOFTWARE\GOG.com\Games"];
+    let mut unreadable = false;
+    for root in BASES {
+        match open_state(HKLM, root) {
+            KeyState::Missing => continue, // 没装 GOG 或不在此视图
+            KeyState::Denied => {
+                unreadable = true;
+                continue;
+            }
+            KeyState::Ok => {}
+        }
+        let (dirs, hit_guard) = subkey_dir_values(HKLM, root, "PATH");
+        for d in dirs {
+            index.try_add_dir("GOG", &d);
+        }
+        if hit_guard {
+            notes.push(format!("GOG 安装记录超过采集护栏 {COLLECT_HARD_CAP} 条，已截断"));
+        }
+    }
+    if unreadable {
+        index.unreadable.push("GOG");
+        notes.push(format!("GOG {UNREADABLE_SUFFIX}（Games 键存在但不可读）"));
+    }
+}
+
+/// Battle.net：`%ProgramData%\Battle.net` 目录判存在；目录候选来自 `Agent\product.db` 文本行。
+/// 「目录在但 product.db 缺/不可读」= 装了却读不到清单 → unreadable（硬规矩①，与 WeGame
+/// 找不到 config.ini 同口径）。
+fn collect_battlenet(index: &mut PlatformIndex, notes: &mut Vec<String>) {
+    let Some(pd) = std::env::var_os("PROGRAMDATA") else {
+        index.unreadable.push("Battle.net");
+        notes.push(format!("Battle.net 环境变量 PROGRAMDATA 读不到，{UNREADABLE_SUFFIX}"));
+        return;
+    };
+    let root = Path::new(&pd).join("Battle.net");
+    if !root.is_dir() {
+        return;
+    }
+    let db = root.join(r"Agent\product.db");
+    let Ok(bytes) = std::fs::read(&db) else {
+        index.unreadable.push("Battle.net");
+        notes.push(format!("Battle.net {UNREADABLE_SUFFIX}（已装 Battle.net，product.db 缺失或不可读）"));
+        return;
+    };
+    let dirs = battlenet_dirs_from_db(&String::from_utf8_lossy(&bytes));
+    if dirs.len() > COLLECT_HARD_CAP {
+        notes.push(format!("Battle.net 安装记录超过采集护栏 {COLLECT_HARD_CAP} 条，已截断"));
+    }
+    for d in dirs.into_iter().take(COLLECT_HARD_CAP) {
+        index.try_add_dir("Battle.net", &d);
+    }
+}
+
+/// 全局上限的**公平配额**截断（C 类二期）：从当前记录最多的平台逐条扣到总量 ≤ RECORD_CAP。
+/// 效果 = 后跑的平台不再被 collector 顺序饿死（极端输入下各平台尽量保到均等份额），
+/// 且逐平台外发截断计数（notes 可见，不静默）。
+fn fair_trim(records: &mut Vec<LibRecord>, notes: &mut Vec<String>) {
+    if records.len() <= RECORD_CAP {
+        return;
+    }
+    let mut order: Vec<&'static str> = Vec::new();
+    for r in records.iter() {
+        if !order.contains(&r.platform) {
+            order.push(r.platform);
+        }
+    }
+    let mut counts: Vec<usize> = order
+        .iter()
+        .map(|p| records.iter().filter(|r| r.platform == *p).count())
+        .collect();
+    let mut dropped = vec![0usize; order.len()];
+    let mut total: usize = counts.iter().sum();
+    while total > RECORD_CAP {
+        // 扣当前条数最多的平台；并列取首现序靠前者（确定性——同级分数时 max_by_key 取最后一个，
+        // 故用 Reverse(i) 把「更小的序」抬成更大）
+        let i = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, c)| (**c, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i)
+            .expect("counts 非空");
+        counts[i] -= 1;
+        dropped[i] += 1;
+        total -= 1;
+    }
+    let mut taken = vec![0usize; order.len()];
+    let mut kept: Vec<LibRecord> = Vec::with_capacity(RECORD_CAP);
+    for r in records.drain(..) {
+        let i = order.iter().position(|p| *p == r.platform).expect("平台来自 order");
+        if taken[i] < counts[i] {
+            taken[i] += 1;
+            kept.push(r);
+        }
+    }
+    *records = kept;
+    for (i, p) in order.iter().enumerate() {
+        if dropped[i] > 0 {
+            notes.push(format!(
+                "{p} 安装记录超出全局上限 {RECORD_CAP}，按公平配额截断 {} 条（仅影响残留判定覆盖面）",
+                dropped[i]
+            ));
+        }
+    }
+}
+
+/// 采集各平台清单（Steam / Epic / WeGame + C 类二期 Origin / Battle.net / Uplay / GOG）。
+/// 任何一处失败都只影响该平台的判定力，不让整轮扫描失败
 /// （与残留扫描的 notes 口径一致：残缺要可见，不能装成干净）。
 pub(crate) unsafe fn collect_platform_index() -> (PlatformIndex, Vec<String>) {
     let mut index = PlatformIndex::default();
@@ -488,6 +798,11 @@ pub(crate) unsafe fn collect_platform_index() -> (PlatformIndex, Vec<String>) {
     collect_steam(&mut index, &mut notes);
     collect_epic(&mut index, &mut notes);
     collect_wegame(&mut index, &mut notes);
+    collect_origin(&mut index, &mut notes);
+    collect_battlenet(&mut index, &mut notes);
+    collect_uplay(&mut index, &mut notes);
+    collect_gog(&mut index, &mut notes);
+    fair_trim(&mut index.records, &mut notes);
     index.records.sort_by(|a, b| a.dir_lc.cmp(&b.dir_lc));
     index.records.dedup_by(|a, b| a.dir_lc == b.dir_lc);
     (index, notes)
@@ -557,12 +872,12 @@ pub(super) fn untracked_dir_findings(index: &PlatformIndex, listings: &[LibraryL
             out.push(json!({
                 "kind": "folder", "target": dir,
                 "class": "untracked_game_dir",
-                "reason": "游戏库目录还在，但 Steam / Epic / WeGame 清单里查不到对应安装记录",
+                "reason": "游戏库目录还在，但当前各平台清单里查不到对应安装记录",
                 "confidence": "medium", "risk": "high",
                 "readonly": true, "defaultChecked": false,
                 "contribs": contribs(&[
                     ("platformIndexMissing", format!("库根 {} 下的一级目录，未匹配到任何安装记录", listing.root)),
-                    ("indexComplete", "三处平台清单本轮都读到了，不是读不到清单造成的缺口".to_string()),
+                    ("indexComplete", "各平台清单本轮都读到了，不是读不到清单造成的缺口".to_string()),
                 ]),
             }));
         }
@@ -689,5 +1004,86 @@ mod tests {
     fn list_game_dirs_on_missing_root_is_empty_not_a_guess() {
         // 读不到就是空（调用方不得据此判「库里没有游戏」）
         assert!(list_game_dirs(r"Z:\definitely\not\here\9f3a").is_empty());
+    }
+
+    #[test]
+    fn clean_install_dir_value_only_accepts_absolute_paths() {
+        assert_eq!(clean_install_dir_value("\"D:\\Games\\A\"").as_deref(), Some("D:\\Games\\A"));
+        assert_eq!(clean_install_dir_value("  C:/Games/B  ").as_deref(), Some("C:/Games/B"));
+        assert_eq!(clean_install_dir_value("D:\\Games\\A\\\\\\  ").as_deref(), Some("D:\\Games\\A"));
+        assert_eq!(clean_install_dir_value(r"\\NAS\share\games").as_deref(), Some(r"\\NAS\share\games"));
+        assert_eq!(clean_install_dir_value(""), None);
+        assert_eq!(clean_install_dir_value("relative\\path"), None);
+        assert_eq!(clean_install_dir_value("C:/"), None); // 尾部裁剪后只剩盘符 = 非法路径值
+        assert_eq!(clean_install_dir_value("\"\" "), None);
+    }
+
+    #[test]
+    fn battlenet_product_db_keeps_only_absolute_slash_paths() {
+        // 控制字符分段 + 引号包裹 + 各式噪声（URL / 相对路径 / 反斜杠路径 / 重复）
+        let db = "\u{0}C:/Program Files (x86)/Overwatch\u{0}\"D:/Games/暗黑破坏神 IV\"\u{1}https://example.com/x\u{2}relative/y\u{3}C:\\Backslash\\No\u{0}c:/program files (x86)/overwatch\u{4}\\\\NAS\\share\\games\u{5}";
+        assert_eq!(
+            battlenet_dirs_from_db(db),
+            vec!["C:/Program Files (x86)/Overwatch", "D:/Games/暗黑破坏神 IV", r"\\NAS\share\games"]
+        );
+        assert!(battlenet_dirs_from_db("").is_empty());
+    }
+
+    #[test]
+    fn fair_trim_protects_late_platforms() {
+        let rec = |p: &'static str, i: usize| LibRecord {
+            platform: p,
+            name: format!("g{i}"),
+            dir: format!("D:\\{p}\\{i}"),
+            dir_lc: PlatformIndex::norm(&format!("D:\\{p}\\{i}")),
+        };
+        let mut records: Vec<LibRecord> = Vec::new();
+        for i in 0..600 {
+            records.push(rec("Steam", i));
+        }
+        for i in 0..80 {
+            records.push(rec("Epic", i));
+        }
+        for i in 0..20 {
+            records.push(rec("WeGame", i));
+        }
+        let mut notes = Vec::new();
+        fair_trim(&mut records, &mut notes);
+        assert_eq!(records.len(), RECORD_CAP, "超限后必须压回全局上限");
+        let count = |p: &str| records.iter().filter(|r| r.platform == p).count();
+        // 公平配额：小平台不再被先跑的大平台挤掉（旧实现会让 Steam 先吃满 600）
+        assert_eq!(count("WeGame"), 20);
+        assert_eq!(count("Epic"), 80);
+        assert_eq!(count("Steam"), 500);
+        assert!(
+            notes.iter().any(|n| n.contains("Steam") && n.contains("截断 100 条")),
+            "截断计数须逐平台外发：{notes:?}"
+        );
+        // 未超限则一字不动、零注记
+        let mut small: Vec<LibRecord> = (0..10).map(|i| rec("Steam", i)).collect();
+        let mut n2 = Vec::new();
+        fair_trim(&mut small, &mut n2);
+        assert_eq!(small.len(), 10);
+        assert!(n2.is_empty());
+    }
+
+    /// 真机探针（发布前实跑，只读）：七个平台的注册表/文件读取在本机的实际覆盖。
+    /// 缺平台的每一项显式 SKIP 说明，不静默；unreadable 与 notes 逐项列出。
+    #[test]
+    #[ignore]
+    fn live_new_platform_collectors_readable() {
+        let (index, notes) = unsafe { collect_platform_index() };
+        for p in ["Steam", "Epic", "WeGame", "Origin", "Battle.net", "Uplay", "GOG"] {
+            let n = index.records.iter().filter(|r| r.platform == p).count();
+            if n == 0 {
+                println!("[SKIP] {p}: 本机 0 条安装记录（未装该平台 / 没有游戏）");
+            } else {
+                println!("[OK] {p}: {n} 条安装记录");
+            }
+        }
+        println!("unreadable = {:?}", index.unreadable);
+        for n in &notes {
+            println!("note: {n}");
+        }
     }
 }

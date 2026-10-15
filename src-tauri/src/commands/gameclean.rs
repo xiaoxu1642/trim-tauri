@@ -3,8 +3,9 @@
 //! 清的不是启动器缓存（`steamCache` 已覆盖），而是游戏目录里的 DirectX/VC++/XNA/.NET
 //! 运行库安装包（`.exe/.msi/.cab`）。
 //!
-//! 数据源只走 `uninstall::game_platform_orphan::collect_platform_index()`（Steam/Epic/WeGame
-//! 在库游戏），本文件不重写 vdf/acf 解析（§5.16/N6）。
+//! 数据源只走 `uninstall::game_platform_orphan::collect_platform_index()`（各平台在库游戏，
+//! C 类二期后含 Origin/Battle.net/Uplay/GOG；redist 输出仍按 Steam/Epic/WeGame 三家分桶，
+//! 新平台只进平台索引），本文件不重写 vdf/acf 解析（§5.16/N6）。
 //!
 //! 本文件同时扮演两个角色：
 //!  1. **库模块**（批次 B 新主路径）：`collect_redist_by_platform` 供 `scan_execute.rs`
@@ -177,7 +178,8 @@ pub(crate) fn scan_game_dir(
 
 // ==================== 库模块（批次 B 新主路径） ====================
 
-/// 三平台各自的 redist 候选收集结果
+/// Steam / Epic / WeGame 各自的 redist 候选收集结果
+/// （C 类二期只扩平台发现面，不新增 redist 分桶）
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PlatformRedist {
     pub(crate) total_size: u64,
@@ -194,15 +196,16 @@ pub(crate) struct GameRedistResult {
     pub(crate) notes: Vec<String>,
 }
 
-/// 扫描三平台在库游戏的 redist 候选，按平台分桶返回。
+/// 扫描在库游戏的 redist 候选，按 Steam / Epic / WeGame 三家分桶返回
+/// （C 类二期新增的平台只进平台索引，不在此分桶）。
 ///
 /// 本函数是批次 B 新增的**主路径**：`scan_execute.rs` 在常规清理扫描完成后
 /// 调用它，把结果回填到 `steamRedistCache/epicRedistCache/wegameRedistCache`
 /// 三条 gameRedist 规则的 size 与 files 清单。扫描全程只读、纯内存，不写盘、
 /// 不注册 finder 快照槽（旧路径由命令壳 gameclean_scan 保留，批次 B 末尾拆除）。
 ///
-/// 数据源：`game_platform_orphan::collect_platform_index()`（Steam/Epic/WeGame
-/// 平台索引，vdf/acf 解析由 uninstall 域负责）。
+/// 数据源：`game_platform_orphan::collect_platform_index()`（各平台公共索引，
+/// C 类二期后含 Origin/Battle.net/Uplay/GOG；vdf/acf 等解析由 uninstall 域负责）。
 pub(crate) fn collect_redist_by_platform() -> GameRedistResult {
     let (index, mut notes) = unsafe { game_platform_orphan::collect_platform_index() };
 
