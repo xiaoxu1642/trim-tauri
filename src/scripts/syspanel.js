@@ -39,6 +39,14 @@
   // 全部集中在「存储」与「USB」两个子组——这里逐条补中文。
   // key 用 setting GUID：名字随系统语言变（英文系统上「合上盖子操作」也会变英文），不能作键。
   // rec = 调优参考（社区经验口径，非微软官方值）：desktopAmd / desktopIntel / laptopAmd / laptopIntel。
+  // 全量覆盖规格：「电源计划调优参考-全量规格-v1-2026-10-16」（本机资料区）——182 条逐 GUID 落表。
+  // keepDefaultRec：保持默认族的四象限同值形态（渲染契约固定四格，一格不落）。
+  const keepDefaultRec = (why) => ({
+    desktopAmd: { v: '保持默认', why },
+    desktopIntel: { v: '保持默认', why: '同左。' },
+    laptopAmd: { v: '保持默认', why: '同左。' },
+    laptopIntel: { v: '保持默认', why: '同左。' },
+  });
   const PWR_ZH = {
     // ---- 存储（0012ee47）----
     'd639518a-e56d-4345-8af2-b9f32fb26109': {
@@ -104,26 +112,42 @@
     '5e8c011f-01bc-4821-b947-deffa95af8d2': {
       name: '任意 NVMe 盘 · 非运行态 APST 空闲转换时间（毫秒）',
       desc: '任意 NVMe 盘在省电状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
+      rec: {
+        desktopAmd: { v: '0', why: '0=不主动进省电档，桌面延迟优先（与主/次 NVMe 空闲超时同口径）。' },
+        desktopIntel: { v: '0', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '续航优先，交给计划默认。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
     },
     '7f68c523-7536-4a79-b339-0ba0998f5dc4': {
       name: '任意 NVMe 盘 · 运行态 APST 空闲转换时间（毫秒）',
       desc: '任意 NVMe 盘在工作状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
+      rec: {
+        desktopAmd: { v: '0', why: '与上一条（非运行态）配套，桌面统一不进 APST 省电档。' },
+        desktopIntel: { v: '0', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '续航优先。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
     },
     '54bbd65b-b333-4808-ae71-461b696bf60e': {
       name: '混合 NAND 盘 · 非运行态 APST 空闲转换时间（毫秒）',
       desc: '混合 NAND 盘在省电状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
+      rec: keepDefaultRec('混合 NAND 盘专属 APST 参数；本机无该硬件，非目标硬件上的值不动（避免给别的机器传错建议）。'),
     },
     'b6c43707-23d2-46d4-bd1a-ac91685c76bb': {
       name: '混合 NAND 盘 · 运行态 APST 空闲转换时间（毫秒）',
       desc: '混合 NAND 盘在工作状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
+      rec: keepDefaultRec('混合 NAND 盘专属 APST 参数；本机无该硬件，非目标硬件上的值不动。'),
     },
     '4016abef-65af-42a2-9939-45cb45e92634': {
       name: '混合 Optane 盘 · 非运行态 APST 空闲转换时间（毫秒）',
       desc: '混合 Optane 盘在省电状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
+      rec: keepDefaultRec('混合 Optane 盘专属 APST 参数；本机无该硬件，非目标硬件上的值不动。'),
     },
     'bb50ccc4-ef9f-4008-a470-e6ea6737f152': {
       name: '混合 Optane 盘 · 运行态 APST 空闲转换时间（毫秒）',
       desc: '混合 Optane 盘在工作状态下：空闲多久后允许切换省电档位。硬盘固件自己管省电用的，日常不用动。',
+      rec: keepDefaultRec('混合 Optane 盘专属 APST 参数；本机无该硬件，非目标硬件上的值不动。'),
     },
     // ---- USB（2a737441）----
     'd4e98f31-5ffe-4ce1-be31-1b38b384c009': {
@@ -149,6 +173,7 @@
     '498c044a-201b-4631-a522-5c744ed4e678': {
       name: '对所有传输描述符设置 IOC',
       desc: '给每个 USB 传输描述符都发完成中断（调试/特殊用途，日常不用动）。',
+      rec: keepDefaultRec('USB 完成中断时机（调试/特殊用途）；无问题不动。'),
     },
     // ---- 只带调优参考、不需要翻译的设置（名称与描述系统已出中文）----
     'ee12f906-d277-404b-b6da-e5fa1a576df5': { // PCI Express 链接状态电源管理（ASPM）
@@ -191,10 +216,26 @@
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
     },
+    '12a0ab44-fe28-4fa9-b3bd-4b64f44960a7': { // 类 1 · 处理器性能降低阈值
+      rec: {
+        desktopAmd: { v: '10', why: '类 1 分档，与类 0 同口径（10）。' },
+        desktopIntel: { v: '5', why: '同左（5）。' },
+        laptopAmd: { v: '保持默认', why: '续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
     '7d24baa7-0b84-480f-840c-1b0743c00f5f': { // 处理器性能历史计数
       rec: {
         desktopAmd: { v: '1', why: '采样窗口更短、对负载变化反应更快（视频口径：AMD 1）。' },
         desktopIntel: { v: '3', why: '同左（视频口径：Intel 3）。' },
+        laptopAmd: { v: '保持默认', why: '续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '7d24baa7-0b84-480f-840c-1b0743c00f60': { // 类 1 · 处理器性能历史记录计数
+      rec: {
+        desktopAmd: { v: '1', why: '类 1 分档，与类 0 同口径（1）。' },
+        desktopIntel: { v: '3', why: '同左（3）。' },
         laptopAmd: { v: '保持默认', why: '续航优先不动。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
@@ -222,6 +263,614 @@
         laptopAmd: { v: '保持默认', why: '笔记本核心停放省电更重要，不建议收紧。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
+    },
+    // ==================== 全量规格 v1 追加（2026-10-16）：以下条目按「电源计划调优参考-全量规格-v1」逐 GUID 落表 ====================
+    // ---- 不属于任何子组的设置 ----
+    '0e796bdb-100d-47d6-a2d5-f7d2daa51f51': { // 唤醒时需要密码
+      rec: {
+        desktopAmd: { v: '是', why: '锁屏恢复需二次认证；关掉等于锁屏形同虚设（私人机器想省事可关，但要意识到那等于取消锁屏保护）。' },
+        desktopIntel: { v: '是', why: '同左。' },
+        laptopAmd: { v: '是', why: '同左。' },
+        laptopIntel: { v: '是', why: '同左。' },
+      },
+    },
+    '245d8541-3943-4422-b025-13a784f679b7': { // 电源计划类型
+      rec: keepDefaultRec('只影响系统对该计划的「类别识别」（部分组件按类别套默认策略），不直接改行为；无收益不改。'),
+    },
+    '4faab71a-92e5-4726-b531-224559672d19': { // 设备空闲策略
+      rec: {
+        desktopAmd: { v: '性能', why: '设备自行管理省电；「节能」会激进切断空闲设备（省电但唤醒延迟增大），桌面响应优先。' },
+        desktopIntel: { v: '性能', why: '同左。' },
+        laptopAmd: { v: '节能', why: '续航优先，与各计划默认取向一致。' },
+        laptopIntel: { v: '节能', why: '同左。' },
+      },
+    },
+    '68afb2d9-ee95-47a8-8f50-4115088073b1': { // 断开连接待机模式
+      rec: keepDefaultRec('Modern Standby 主动维护相关参数；桌面无连接待机语义，不动。'),
+    },
+    'f15576e8-98b7-4186-b944-eafa664402d9': { // 待机状态下的网络连接性
+      rec: keepDefaultRec('只影响 Modern Standby 期间的网络；桌面睡眠整机断电，无对象。'),
+    },
+    // ---- 硬盘（另见上方的 NVMe 一族）----
+    '51dea550-bb38-4bc4-991b-eacf37be5ec8': { // 最大电量水平
+      rec: keepDefaultRec('调低只对机械盘有意义（降噪/省电），SSD 无效且拖性能；桌面不需要。'),
+    },
+    '6738e2c4-e8a5-4a42-b16a-e040e769756e': { // 在此时间后关闭硬盘
+      rec: {
+        desktopAmd: { v: '0（从不）', why: '机械盘频繁起停伤寿命、SSD 无意义；桌面推荐从不关盘（或按需给长值）。' },
+        desktopIntel: { v: '0（从不）', why: '同左。' },
+        laptopAmd: { v: '600', why: '保留约 10 分钟省电。' },
+        laptopIntel: { v: '600', why: '同左。' },
+      },
+    },
+    '80e3c60e-bb94-4ad8-bbe0-0d3195efc663': { // 硬盘脉冲忽略时间
+      rec: keepDefaultRec('脉冲检测窗口，平时无对象。'),
+    },
+    'fc7372b6-ab2d-43ee-8797-15e9841f2cca': { // NVMe NOPPME
+      rec: keepDefaultRec('NVM Express 电源管理事件通知，由固件/驱动协商；无公开调优收益。'),
+    },
+    // ---- Internet Explorer / 桌面背景 / 无线 ----
+    '4c793e7d-a264-42e1-87d3-7a0d2f523ccd': { // JavaScript 计时器频率
+      rec: {
+        desktopAmd: { v: '最高性能', why: '允许 1ms 级定时器：老式网页计时/轮询类页面更跟手；空闲略耗电，桌面无压力。' },
+        desktopIntel: { v: '最高性能', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '笔记本不插电时保持默认以省电。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '309dce9b-bef4-4119-9921-a851fb12f0f4': { // 幻灯片放映
+      rec: keepDefaultRec('壁纸幻灯片是否参与节能暂停，无性能含义；保持现值。'),
+    },
+    '12bbebe6-58d6-4636-95bb-3217ef867c1a': { // 无线适配器 节能模式
+      rec: {
+        desktopAmd: { v: '最高性能', why: '无线网卡省电档会拉高 ping 抖动与偶发丢包（游戏/串流不友好）；桌面优先延迟。' },
+        desktopIntel: { v: '最高性能', why: '同左。' },
+        laptopAmd: { v: '中等节能', why: '折中省电。' },
+        laptopIntel: { v: '中等节能', why: '同左。' },
+      },
+    },
+    // ---- 睡眠 ----
+    '29f6c1db-86da-48c5-9fdb-f2b67b1f44da': { // 在此时间后睡眠
+      rec: {
+        desktopAmd: { v: '0（从不）', why: '睡眠会冻结后台任务（下载/渲染/挂机）；桌面推荐不自动睡，由用户主动关机/睡。' },
+        desktopIntel: { v: '0（从不）', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '续航交给计划默认；需要再调。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '9d7815a6-7ee4-497e-8888-515a05f02364': { // 在此时间后休眠
+      rec: {
+        desktopAmd: { v: '0（从不）', why: '同理：桌面不自动休眠。' },
+        desktopIntel: { v: '0（从不）', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '续航交给计划默认。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '94ac6d29-73ce-41a6-809f-6363ba21b47e': { // 允许混合睡眠
+      rec: {
+        desktopAmd: { v: '启用', why: '睡眠同时落一份休眠文件：断电不丢会话；白拿的保险。' },
+        desktopIntel: { v: '启用', why: '同左。' },
+        laptopAmd: { v: '启用', why: '同左。' },
+        laptopIntel: { v: '启用', why: '同左。' },
+      },
+    },
+    'bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d': { // 允许使用唤醒定时器
+      rec: {
+        desktopAmd: { v: '禁用', why: '防深夜被定时任务唤醒（维护任务会改为唤醒时才跑）；确需夜间维护可设「仅限重要的唤醒计算器」。' },
+        desktopIntel: { v: '禁用', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '笔记本按计划默认（保留必要维护唤醒）。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '25dfa149-5dd1-4736-b5ab-e8a37b5b8187': { // 允许离开模式策略
+      rec: {
+        desktopAmd: { v: '否', why: 'Away Mode 会让「睡眠」退化成静默工作态；桌面无媒体中心场景，关掉避免误触。' },
+        desktopIntel: { v: '否', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '笔记本按需。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    'd4c1d4c8-d5cc-43d3-b83e-fc51215cb04d': { // 允许在远程打开的情况下进入睡眠状态
+      rec: {
+        desktopAmd: { v: '关闭', why: '远程共享/串流场景不希望一挂机就睡；关闭更稳。' },
+        desktopIntel: { v: '关闭', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '笔记本按需。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    'abfc2519-3608-4c2a-94ea-171b0ed546ab': { // 允许待机状态
+      rec: keepDefaultRec('总开关，没有关它的理由（本机现值=启用）。'),
+    },
+    'a4b195f5-8225-47d8-8012-9d41369786e2': { // 允许使用系统所需的策略
+      rec: keepDefaultRec('允许内核在关键场景短暂覆盖电源策略；关它只会让行为更不可预测。'),
+    },
+    '1a34bdc3-7e6b-442e-a9d0-64b6ef378e84': { // 旧 RTC 迁移
+      rec: keepDefaultRec('兼容老主板的 RTC 迁移开关；现代平台无对象。'),
+    },
+    '7bc4a2f9-d8fc-4469-b07b-33eb785aaca0': { // 无人参与系统睡眠超时
+      rec: keepDefaultRec('Modern Standby 场景参数；桌面睡眠会断电，无对象。'),
+    },
+    // ---- USB（另见上方三条）----
+    '48e6b7a6-50f5-4782-a5d4-53bb8f07e226': { // USB 选择性暂停设置
+      rec: {
+        desktopAmd: { v: '已禁用', why: 'USB 端口级选择性挂起总开关；桌面外设稳定优先（与 USB3 链路、集线器挂起同族）。' },
+        desktopIntel: { v: '已禁用', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '外设掉线再改。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    // ---- 空闲复原 / 中断路由（整组：现代待机/Server 取向框架参数，桌面无对象）----
+    '3166bc41-7e98-4e03-b34e-ec0f5f2b218e': { // 执行要求的电源请求的超时时间
+      rec: keepDefaultRec('空闲复原框架参数；桌面睡眠=整机断电，无对象。'),
+    },
+    'c36f0eb4-2988-4a70-8eee-0884fc2c2433': { // IO 合并超时时间
+      rec: keepDefaultRec('同上（该子组整体由新式待机框架消费）。'),
+    },
+    'c42b79aa-aa3a-484b-a98f-2cf32aa90a28': { // 处理器空闲复原定时器精度
+      rec: keepDefaultRec('同上。'),
+    },
+    'd502f7ee-1dc7-4efd-a55d-f04b6f5c0545': { // 已启用/禁用深度睡眠
+      rec: keepDefaultRec('同上（待机预算框架下的「深度睡眠」档，不是 S3）。'),
+    },
+    '2bfc24f9-5ea2-4801-8213-3dbae01aa39d': { // 中断路由控制模式
+      rec: keepDefaultRec('中断路由是 Server 取向功能；桌面默认「默认」即不接管。'),
+    },
+    '73cde64d-d720-4bb2-a860-c755afe77ef2': { // 中断路由 目标负载
+      rec: keepDefaultRec('仅模式≠默认时生效；桌面不动。'),
+    },
+    'd6ba4903-386f-4c2c-8adb-5c21b3328d25': { // 中断路由 已启动时间触发器
+      rec: keepDefaultRec('同上。'),
+    },
+    // ---- 电源按钮和盖子 ----
+    '7648efa3-dd9c-4e3e-b566-50f929386280': { // 电源按钮操作
+      rec: {
+        desktopAmd: { v: '睡眠（或关机）', why: '纯按键语义：推荐语义明确的「睡眠」，其次「关机」；「关闭显示器」把硬件电源键降级成显示器开关，不推荐。' },
+        desktopIntel: { v: '睡眠（或关机）', why: '同左。' },
+        laptopAmd: { v: '按习惯', why: '笔记本按个人习惯（睡眠/休眠）。' },
+        laptopIntel: { v: '按习惯', why: '同左。' },
+      },
+    },
+    '96996bc0-ad50-47ec-923b-6f41874dd9eb': { // 睡眠按钮操作
+      rec: keepDefaultRec('多数机箱无此键；按习惯。'),
+    },
+    'a7066653-8d6c-40a8-910e-a1f54b84c7e5': { // 「开始」菜单电源按钮
+      rec: keepDefaultRec('按习惯。'),
+    },
+    '833a6b62-dfa4-46d1-82f8-e09e34d029d6': { // 启用按钮/盖子强制关机
+      rec: keepDefaultRec('「启用」=长按电源键直接关机（丢掉优雅关机）；除特殊场景别开。'),
+    },
+    '5ca83367-6e45-459f-a27b-476b1d01c936': { // 合上盖子操作
+      rec: keepDefaultRec('笔记本行为项；桌面无盖子，按习惯即可。'),
+    },
+    '99ff10e7-23b1-4c07-a9d1-5c3206d741b4': { // 打开盖子操作
+      rec: keepDefaultRec('同上。'),
+    },
+    // ---- 图形 ----
+    'dd848b2a-8a5d-4451-9ae2-39cd41658f6c': { // GPU 首选项策略
+      rec: keepDefaultRec('「低功耗」=优先集显；独显台式机上无差异，保持。'),
+    },
+    // ---- 显示 ----
+    '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e': { // 在此时间后关闭显示
+      rec: {
+        desktopAmd: { v: '600（或从不）', why: '关屏不打断后台任务、省电最直接；给 10 分钟或按习惯「从不」。游戏前台有声画请求，不会误触发。' },
+        desktopIntel: { v: '600（或从不）', why: '同左。' },
+        laptopAmd: { v: '180', why: '与计划默认一致（3 分钟级可自行调）。' },
+        laptopIntel: { v: '180', why: '同左。' },
+      },
+    },
+    '17aaa29b-8b43-4b94-aafe-35f64daaf1ee': { // 以此时间后显示器变暗
+      rec: keepDefaultRec('比关屏更早的省电半档；按个人观感调（与关屏值保持先后关系）。'),
+    },
+    '8ec4b3a5-6868-48c2-be75-4f3044be88a7': { // 控制台锁定显示关闭超时
+      rec: keepDefaultRec('锁屏后关屏超时；60 秒是合理默认。'),
+    },
+    '684c3e69-a4f7-4014-8754-d45179a56167': { // 高级色彩质量偏好
+      rec: {
+        desktopAmd: { v: '高级色彩视觉偏好', why: '桌面要色彩保真。' },
+        desktopIntel: { v: '高级色彩视觉偏好', why: '同左。' },
+        laptopAmd: { v: '高级色彩节电偏好', why: '省电。' },
+        laptopIntel: { v: '高级色彩节电偏好', why: '同左。' },
+      },
+    },
+    'aded5e82-b909-4619-9949-f5d71dac0bcb': { // 显示器亮度
+      rec: keepDefaultRec('桌面外接屏亮度由显示器自己控制，此项多数无对象；笔记本按环境调。'),
+    },
+    'f1fbfde2-a960-4165-9f88-50667911ce96': { // 显示器亮度变暗
+      rec: keepDefaultRec('同上（变暗档的亮度权重）。'),
+    },
+    '90959d22-d6a1-49b9-af93-bce885ad335b': { // 自适应显示
+      rec: keepDefaultRec('依赖环境光传感器；无传感器机器开了也无效果。'),
+    },
+    'fbd9aa66-9553-4097-ba44-ed6e9d65eab8': { // 启用自适应亮度
+      rec: keepDefaultRec('同上。'),
+    },
+    'a9ceb8da-cd46-44fb-a98b-02af69de4623': { // 允许使用显示器所需的策略
+      rec: keepDefaultRec('允许播放器等在需要时阻止息屏；关掉会导致看视频被息屏。'),
+    },
+    // ---- 状态感知电源操作（HPD/待机预算框架；无传感器/桌面无对象）----
+    '82011705-fb95-4d46-8d35-4042b1d20def': { // 用户状态预测模式
+      rec: {
+        desktopAmd: { v: '保持默认（禁用）', why: '需要 HPD 传感器预测用户离开；桌面无传感器。' },
+        desktopIntel: { v: '保持默认（禁用）', why: '同左。' },
+        laptopAmd: { v: '已启用', why: '有传感器的笔记本可按需启用。' },
+        laptopIntel: { v: '已启用', why: '同左。' },
+      },
+    },
+    '0a7d6ab6-ac83-4ad1-8282-eca5b58308f3': { // 人存在传感器自适应离开显示超时
+      rec: keepDefaultRec('HPD 超时族；无传感器无对象，有传感器的笔记本按个人习惯微调。'),
+    },
+    'a79c8e0e-f271-482d-8f8a-5db9a18312de': { // 人存在传感器自适应离开变暗超时
+      rec: keepDefaultRec('同上。'),
+    },
+    'ee16691e-6ab3-4619-bb48-1c77c9357e5a': { // 人存在传感器自适应无人显示超时
+      rec: keepDefaultRec('同上。'),
+    },
+    'cf8c6097-12b8-4279-bbdd-44601ee5209d': { // 人存在传感器自适应无人变暗超时
+      rec: keepDefaultRec('同上。'),
+    },
+    '5adbbfbc-074e-4da1-ba38-db8b36b2c8f3': { // 非传感器输入状态超时
+      rec: keepDefaultRec('待机预算框架内部参数；桌面睡眠整机断电，无对象。'),
+    },
+    '468fe7e5-1158-46ec-88bc-5b96c9e44fd0': { // 待机保留时间
+      rec: keepDefaultRec('同上。'),
+    },
+    'c763ee92-71e8-4127-84eb-f6ed043a3e3d': { // 待机保留宽限期
+      rec: keepDefaultRec('同上。'),
+    },
+    '49cb11a5-56e2-4afb-9d38-3df47872e21b': { // 待机重置百分比
+      rec: keepDefaultRec('同上。'),
+    },
+    '60c07fe1-0556-45cf-9903-d56e32210242': { // 待机预算宽限期
+      rec: keepDefaultRec('同上。'),
+    },
+    '61f45dfe-1919-4180-bb46-8cc70e0b38f1': { // 备用预算刷新计间隔
+      rec: keepDefaultRec('同上。'),
+    },
+    'aca8648e-c4b1-4baa-8cce-9390ad647f8c': { // 备用预算刷新计数
+      rec: keepDefaultRec('同上。'),
+    },
+    '9fe527be-1b70-48da-930d-7bcf17b44990': { // 待机预算百分比
+      rec: keepDefaultRec('同上。'),
+    },
+    '10778347-1370-4ee0-8bbd-33bdacaade49': { // 视频播放质量补偿
+      rec: {
+        desktopAmd: { v: '视频播放性能补偿', why: '播放视频时的画质/功耗权衡：桌面要画质。' },
+        desktopIntel: { v: '视频播放性能补偿', why: '同左。' },
+        laptopAmd: { v: '视频播放节能偏向', why: '省电。' },
+        laptopIntel: { v: '视频播放节能偏向', why: '同左。' },
+      },
+    },
+    '34c7b99f-9a6d-4b3c-8dc7-b6693b78cef4': { // 播放视频时
+      rec: {
+        desktopAmd: { v: '优化视频质量', why: '同上（播放期间的策略）。' },
+        desktopIntel: { v: '优化视频质量', why: '同左。' },
+        laptopAmd: { v: '平衡', why: '折中省电。' },
+        laptopIntel: { v: '平衡', why: '同左。' },
+      },
+    },
+    // ---- 节能模式设置（Energy Saver；桌面无省电压力）----
+    '5c5bb349-ad29-4ee2-9d0b-2b25270f7a81': { // 节能模式策略
+      rec: {
+        desktopAmd: { v: '保持默认（用户）', why: '「主动」=系统自行降功耗（降亮度/限后台）；桌面无省电压力，别让系统擅自降。' },
+        desktopIntel: { v: '保持默认（用户）', why: '同左。' },
+        laptopAmd: { v: '主动', why: '省电优先时可主动。' },
+        laptopIntel: { v: '主动', why: '同左。' },
+      },
+    },
+    'e69653ca-cf7f-4f05-aa73-cb833fa90ad4': { // 电池电量（节能模式触发阈值）
+      rec: keepDefaultRec('电池设备项；桌面无对象，笔记本按默认。'),
+    },
+    '13d09884-f74e-474a-a852-b6bde8ad03a8': { // 显示器亮度权重
+      rec: keepDefaultRec('节能模式下亮度折让权重；同上。'),
+    },
+    // ---- 电池（桌面无电池：值随方案携带，切到笔记本才生效）----
+    '5dbb7c9f-38e9-40d2-9749-4f8a0e9f640f': { // 低电池电量通知
+      rec: keepDefaultRec('桌面无电池；笔记本按默认（通知开）。'),
+    },
+    'bcded951-187b-4d05-bccc-f7e51960c258': { // 低电量通知
+      rec: keepDefaultRec('同上。'),
+    },
+    '637ea02f-bbcb-4015-8e2c-a1c7b9c0b546': { // 关键级别电池操作
+      rec: keepDefaultRec('桌面无电池；笔记本按默认（严重低电量按计划动作）。'),
+    },
+    'd8742dcb-3e6a-4b3c-b3fe-374623cdcf06': { // 低电量操作
+      rec: keepDefaultRec('桌面无电池；笔记本可把「低电量操作」设为「睡眠」。'),
+    },
+    '8183ba9a-e910-48da-8769-14ae6dc1170a': { // 电池电量水平低
+      rec: keepDefaultRec('桌面无电池；笔记本按默认（10%）。'),
+    },
+    '9a66d8d7-4ff7-4ef9-b5a2-5a326ca2a469': { // 关键电池电量水平
+      rec: keepDefaultRec('桌面无电池；笔记本按默认（5%）。'),
+    },
+    'f3c5027d-cd16-4930-aa6b-90db844a8f00': { // 保留电池电量
+      rec: keepDefaultRec('桌面无电池；笔记本按默认（7%）。'),
+    },
+    // ---- 处理器电源管理 · 有实质推荐的剩余 ----
+    '36687f9e-e3a5-4dbf-b1dc-15eb381c6864': { // 类 1 EPP
+      rec: {
+        desktopAmd: { v: '5', why: '与主 EPP 同值（类 1 分档；AMD 桌面通常无操作）。' },
+        desktopIntel: { v: '0', why: '同左（与主 EPP 的 Intel 档一致）。' },
+        laptopAmd: { v: '保持默认', why: '续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '36687f9e-e3a5-4dbf-b1dc-15eb381c6865': { // 类 2 EPP
+      rec: {
+        desktopAmd: { v: '5', why: '与主 EPP 同值（类 2 分档）。' },
+        desktopIntel: { v: '0', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '续航优先不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '45bcc044-d885-43e2-8605-ee0ec6e96b59': { // 处理器性能增强策略
+      rec: {
+        desktopAmd: { v: '100', why: '允许的性能增强预算（%）：满额交给固件决定何时用；调低=主动削弱短时爆发。' },
+        desktopIntel: { v: '100', why: '同左。' },
+        laptopAmd: { v: '保持默认', why: '笔记本散热余量小，不动。' },
+        laptopIntel: { v: '保持默认', why: '同左。' },
+      },
+    },
+    '893dee8e-2bef-41e0-89c6-b55d0929964c': { // 最小处理器状态
+      rec: {
+        desktopAmd: { v: '0 或 5', why: '空闲允许深度降频（省电降温）；锁 100=失去变频收益（手动锁频党另说）。' },
+        desktopIntel: { v: '0 或 5', why: '同左。' },
+        laptopAmd: { v: '5', why: '计划默认附近保持。' },
+        laptopIntel: { v: '5', why: '同左。' },
+      },
+    },
+    '893dee8e-2bef-41e0-89c6-b55d0929964d': { // 类 1 最小处理器状态
+      rec: keepDefaultRec('大小核分档（类 1）；AMD 桌面通常无操作，保持。'),
+    },
+    '893dee8e-2bef-41e0-89c6-b55d0929964e': { // 类 2 最小处理器状态
+      rec: keepDefaultRec('大小核分档（类 2）；同上。'),
+    },
+    'bc5038f7-23e0-4960-96da-33abaf5935ec': { // 最大处理器状态
+      rec: {
+        desktopAmd: { v: '100', why: '调低=人为降频；「99 关睿频」是旧时代技巧，现代平台只损性能不增稳。' },
+        desktopIntel: { v: '100', why: '同左。' },
+        laptopAmd: { v: '100', why: '同左。' },
+        laptopIntel: { v: '100', why: '同左。' },
+      },
+    },
+    'bc5038f7-23e0-4960-96da-33abaf5935ed': { // 类 1 最大处理器状态
+      rec: keepDefaultRec('分档项，与上限同口径保持 100。'),
+    },
+    'bc5038f7-23e0-4960-96da-33abaf5935ee': { // 类 2 最大处理器状态
+      rec: keepDefaultRec('同上。'),
+    },
+    '75b0ae3f-bce0-45a7-8c89-c9611c25e100': { // 处理器最大频率
+      rec: {
+        desktopAmd: { v: '0（不限）', why: '只在需要限频降温（散热拉满）时用；平时不限。' },
+        desktopIntel: { v: '0（不限）', why: '同左。' },
+        laptopAmd: { v: '0（不限）', why: '同左。' },
+        laptopIntel: { v: '0（不限）', why: '同左。' },
+      },
+    },
+    '75b0ae3f-bce0-45a7-8c89-c9611c25e101': { // 类 1 最大频率
+      rec: keepDefaultRec('分档项，同上（0=不限）。'),
+    },
+    '75b0ae3f-bce0-45a7-8c89-c9611c25e102': { // 类 2 最大频率
+      rec: keepDefaultRec('同上。'),
+    },
+    '465e1f50-b610-473a-ab58-00d1077dc418': { // 处理器性能提升策略
+      rec: keepDefaultRec('由 AMD CPPC/固件与 Windows 协商的提升族策略；手改无稳定收益。'),
+    },
+    '465e1f50-b610-473a-ab58-00d1077dc419': { // 类 1 性能提升策略
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    '5d76a2ca-e8c0-402f-a133-2158492d58ad': { // 处理器闲置禁用
+      rec: keepDefaultRec('禁用闲置=不让核进 C 态（老 tweak）：待机温度功耗上升，收益不可复现，不建议。'),
+    },
+    '9943e905-9a30-4ec1-9b99-44dd3b76f7a2': { // 处理器空闲状态最大值
+      rec: keepDefaultRec('0=由固件决定最深 C 态；手工锁浅会增耗。'),
+    },
+    '0cc5b647-c1df-4637-891a-dec35c318583': { // 处理器性能核心放置最小核心数量
+      rec: keepDefaultRec('手动停放核心对游戏无收益、反增调度不确定性；100=不限制最小驻留核心数。'),
+    },
+    '0cc5b647-c1df-4637-891a-dec35c318584': { // 类 1 · 核心放置最小核心数量
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    'ea062031-0e34-4ff1-9b6d-eb1059334028': { // 处理器性能核心放置最大核心数量
+      rec: keepDefaultRec('核心放置上限；100=不人为限制参与调度的核心数。'),
+    },
+    'ea062031-0e34-4ff1-9b6d-eb1059334029': { // 类 1 · 核心放置最大核心数量
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    // ---- 处理器电源管理 · 微结构旋钮族（一律保持默认；理由=族口径 + 平台说明）----
+    '93b8b6dc-0698-4d1c-9ee4-0644e900c85d': { // 异类线程调度策略
+      rec: keepDefaultRec('大小核调度策略；AMD 平台通常无操作，手改可能让调度偏科。'),
+    },
+    'bae08b81-2d5e-4688-ad6a-13243356654b': { // 异类短运行线程调度策略
+      rec: keepDefaultRec('同上（短运行线程版）。'),
+    },
+    '7f2f5cfa-f10c-4823-b5e1-e93ae85f46b5': { // 生效的异类策略
+      rec: keepDefaultRec('大小核遏制/包含算法内部参数；非异构平台无对象。'),
+    },
+    '60fbe21b-efd9-49f2-b066-8674d8e9f423': { // 异构遏制策略
+      rec: keepDefaultRec('同上。'),
+    },
+    '6788488b-1b90-4d11-8fa7-973e470dff47': { // 混合包含并发阈值
+      rec: keepDefaultRec('同上。'),
+    },
+    '69439b22-221b-4830-bd34-f7bcece24583': { // 效率包含并发阈值
+      rec: keepDefaultRec('同上。'),
+    },
+    '6ece9e1f-b6dd-42bf-b1b7-5a512b10c092': { // 效率包含 IMP 工具百分比
+      rec: keepDefaultRec('同上。'),
+    },
+    '12fd031f-53d2-4bf4-ac6d-c699fc9538c7': { // 混合包含 IMP 工具百分比
+      rec: keepDefaultRec('同上。'),
+    },
+    '6ff13aeb-7897-4356-9999-dd9930af065f': { // 包含区域性能降低时间
+      rec: keepDefaultRec('包含区域的增/降时间；调度器振荡周期参数，无实验数据不动。'),
+    },
+    '64fcee6b-5b1f-45a4-a76a-19b2c36ee290': { // 包含区域性能增加时间
+      rec: keepDefaultRec('同上。'),
+    },
+    '1a98ad09-af22-42ca-8e61-f0a5802c270a': { // 处理器限制计数
+      rec: keepDefaultRec('微结构旋钮：改动需要针对具体 CPU/固件的实验数据，收益不可预测、副作用跨场景。'),
+    },
+    '1facfc65-a930-4bc5-9f38-504ec097bbc0': { // 类 1 初始性能
+      rec: keepDefaultRec('同上。'),
+    },
+    '2ddd5a84-5a71-437e-912a-db0b8c788732': { // 核心放置增加时间
+      rec: keepDefaultRec('核心停放/解停状态机参数；停放收益在桌面已微乎其微。'),
+    },
+    '4009efa7-e72d-4cba-9edf-91084ea8cbc3': { // 类 1 性能提升时间
+      rec: keepDefaultRec('调度器振荡周期参数；改它们等于重调控制回路，无实验数据不动。'),
+    },
+    '40fbefc7-2e9d-4d25-a185-0cfd8574bac6': { // 处理器性能降低策略
+      rec: keepDefaultRec('降频策略枚举；保持固件给的组合。'),
+    },
+    '40fbefc7-2e9d-4d25-a185-0cfd8574bac7': { // 类 1 性能降低策略
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    '43f278bc-0f8a-46d0-8b31-9a23e615d713': { // 长时间运行线程体系结构下限
+      rec: keepDefaultRec('线程→核心类映射边界；255/0=不限，改动无公开收益。'),
+    },
+    '53824d46-87bd-4739-aa1b-aa793fac36d6': { // 短时间运行线程体系结构下限
+      rec: keepDefaultRec('同上。'),
+    },
+    '828423eb-8662-4344-90f7-52bf15870f5a': { // 短时间运行线程体系结构上限
+      rec: keepDefaultRec('同上。'),
+    },
+    'bf903d33-9d24-49d3-a468-e65e0325046a': { // 长时间运行线程体系结构上限
+      rec: keepDefaultRec('同上。'),
+    },
+    'd92998c2-6a48-49ca-85d4-8cceec294570': { // 短与长时间运行线程阈值
+      rec: keepDefaultRec('短/长线程阈值边界；同族，保持。'),
+    },
+    '447235c7-6a8d-4cc0-8e24-9eaf70b96e2b': { // 停用已停用性能状态的核心
+      rec: keepDefaultRec('停放核心性能首选项；微结构旋钮，保持。'),
+    },
+    '447235c7-6a8d-4cc0-8e24-9eaf70b96e2c': { // 类 1 同上
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    '4b92d758-5a24-4851-a470-815d78aee119': { // 处理器闲置降级阈值
+      rec: keepDefaultRec('内核级停放逻辑；只在专项工具代管时改。'),
+    },
+    '4bdaf4e9-d103-46d7-a5f0-6280121616ef': { // 内核休止分配阈值
+      rec: keepDefaultRec('停放族，保持。'),
+    },
+    '4d2b0152-7d5c-498b-88e2-34345392a2c5': { // 性能时间检查间隔
+      rec: keepDefaultRec('调度器振荡周期参数；无实验数据不动。'),
+    },
+    '4e4450b3-6179-4e91-b8f1-5bb9938f81a1': { // 处理器忙闲度
+      rec: keepDefaultRec('Server 取向功能；桌面无对象。'),
+    },
+    '5ba7419a-295c-4b02-841b-66799388d6da': { // 小核心 WPS 最低效率分数
+      rec: keepDefaultRec('非异构平台无对象。'),
+    },
+    '603fe9ce-8d01-4b48-a968-1d706c28fd5c': { // 处理器资源优先级
+      rec: keepDefaultRec('微结构旋钮，保持。'),
+    },
+    '603fe9ce-8d01-4b48-a968-1d706c28fd5d': { // 类 1 资源优先级
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    '603fe9ce-8d01-4b48-a968-1d706c28fd5e': { // 类 2 资源优先级
+      rec: keepDefaultRec('同上。'),
+    },
+    '616cdaa5-695e-4545-97ad-97dc2d1bdd88': { // 延迟提示已离开核心最小数量
+      rec: keepDefaultRec('延迟提示的细分旋钮；主表两条覆盖常见调法，细分交给平台固件。'),
+    },
+    '616cdaa5-695e-4545-97ad-97dc2d1bdd89': { // 类 1 同上
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    '619b7505-003b-4e82-b7a6-4dd29c300971': { // 延迟提示处理器性能
+      rec: keepDefaultRec('同上。'),
+    },
+    '619b7505-003b-4e82-b7a6-4dd29c300972': { // 类 1 同上
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    '619b7505-003b-4e82-b7a6-4dd29c300973': { // 类 2 同上
+      rec: keepDefaultRec('同上。'),
+    },
+    '4b70f900-cdd9-4e66-aa26-ae8417f98174': { // 类 1 延迟提示 EPP
+      rec: keepDefaultRec('延迟提示的细分旋钮；主表两条覆盖常见调法，细分交给平台固件。'),
+    },
+    '4b70f900-cdd9-4e66-aa26-ae8417f98175': { // 类 2 延迟提示 EPP
+      rec: keepDefaultRec('同上。'),
+    },
+    '6c2993b0-8f48-481f-bcc6-00dd2742aa06': { // 处理器闲置阈值调整
+      rec: keepDefaultRec('微结构旋钮，保持。'),
+    },
+    '71021b41-c749-4d21-be74-a00f335d582b': { // 核心放置减小策略
+      rec: keepDefaultRec('停放族，保持。'),
+    },
+    '7b224883-b3cc-4d79-819f-8374152cbe7c': { // 处理器闲置升级阈值
+      rec: keepDefaultRec('内核级停放逻辑，保持。'),
+    },
+    '7f2492b6-60b1-45e5-ae55-773f8cd5caec': { // 类 1 性能下降时间
+      rec: keepDefaultRec('调度器振荡周期参数；无实验数据不动。'),
+    },
+    '8baa4a8a-14c6-4451-8e8b-14bdbd197537': { // 处理器性能自主模式
+      rec: keepDefaultRec('OS 主导 vs 固件自治；AMD 平台不同固件表现不一，不乱动。'),
+    },
+    '943c8cb6-6f93-4227-ad87-e9a3feec08d1': { // 核心放置过度利用阈值
+      rec: keepDefaultRec('停放族，保持。'),
+    },
+    '97cfac41-2217-47eb-992d-618b1977c907': { // 内核休止软停止延迟
+      rec: keepDefaultRec('内核级停放/解停逻辑；只在专项工具代管时改。'),
+    },
+    '984cf492-3bed-4488-a8f9-4286c97bf5aa': { // 处理器性能提升时间
+      rec: keepDefaultRec('调度器振荡周期参数；无实验数据不动。'),
+    },
+    '984cf492-3bed-4488-a8f9-4286c97bf5ab': { // 类 1 提升时间
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    'b000397d-9b0b-483d-98c9-692a6060cfbf': { // 类 1 提升阈值
+      rec: keepDefaultRec('体系结构类阈值；同族，保持。'),
+    },
+    'b000397d-9b0b-483d-98c9-692a6060cfc0': { // 类 2 提升阈值
+      rec: keepDefaultRec('同上。'),
+    },
+    'b0deaf6b-59c0-4523-8a45-ca7f40244114': { // 模块启动策略
+      rec: keepDefaultRec('内核级停放逻辑，保持。'),
+    },
+    'b28a6829-c5f7-444e-8f61-10e24e85c532': { // SMT 线程启动策略
+      rec: keepDefaultRec('同上。'),
+    },
+    'b669a5e9-7b1d-4132-baaa-49190abcfeb6': { // 复杂启动策略
+      rec: keepDefaultRec('同上。'),
+    },
+    'c4581c31-89ab-4597-8e2b-9c9cab440e6b': { // 处理器闲置时间检查
+      rec: keepDefaultRec('微结构旋钮，保持。'),
+    },
+    'c7be0679-2817-4d69-9d02-519a537ed0c6': { // 核心放置增加策略
+      rec: keepDefaultRec('停放族，保持。'),
+    },
+    'cfeda3d0-7697-4566-a922-a9086cd49dfa': { // 处理器自主活动时段
+      rec: keepDefaultRec('微结构旋钮，保持。'),
+    },
+    'd8edeb9b-95cf-4f95-a73c-b061973693c8': { // 处理器性能下降时间
+      rec: keepDefaultRec('调度器振荡周期参数；无实验数据不动。'),
+    },
+    'd8edeb9b-95cf-4f95-a73c-b061973693c9': { // 类 1 下降时间
+      rec: keepDefaultRec('类 1 分档，同上。'),
+    },
+    'dfd10d17-d5eb-45dd-877a-9a34ddd15c82': { // 核心放置减少时间
+      rec: keepDefaultRec('停放族，保持。'),
+    },
+    'e0007330-f589-42ed-a401-5ddb10e785d3': { // 内核休止实用工具分配
+      rec: keepDefaultRec('内核级停放逻辑，保持。'),
+    },
+    'f735a673-2066-4f80-a0c5-ddee0cf1bf5d': { // 内核休止并发空间阈值
+      rec: keepDefaultRec('停放族，保持。'),
+    },
+    'f8861c27-95e7-475c-865b-13c0cb3f9d6b': { // 类 1 降低阈值
+      rec: keepDefaultRec('体系结构类阈值；同族，保持。'),
+    },
+    'f8861c27-95e7-475c-865b-13c0cb3f9d6c': { // 类 2 降低阈值
+      rec: keepDefaultRec('同上。'),
+    },
+    'fddc842b-8364-4edc-94cf-c17f60de1c80': { // 类 0 底限性能
+      rec: keepDefaultRec('微结构旋钮，保持。'),
+    },
+    '06cadf0e-64ed-448a-8927-ce7bf90eb35d': { // 处理器性能提高阈值
+      rec: keepDefaultRec('调度器内部评分耦合；无实验数据不动。'),
+    },
+    '06cadf0e-64ed-448a-8927-ce7bf90eb35e': { // 类 1 提高阈值
+      rec: keepDefaultRec('类 1 分档，同上。'),
     },
   };
 
