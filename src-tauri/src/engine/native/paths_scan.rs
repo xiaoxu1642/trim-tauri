@@ -1,91 +1,20 @@
 //! B7 paths_scan：按规则表达式扫描已安装软件路径。
 //!
-//! `resolve_rule_path` / `normalize_path` / InventoryEntry 只服务本域的扫描语义，
-//! 不与 `engine::paths`（应用数据目录与迁移）混为一谈 —— 两者同名易混，故独立成文件。
+//! `normalize_path` / InventoryEntry 只服务本域的扫描语义，不与 `engine::paths`（应用数据
+//! 目录与迁移）混为一谈 —— 两者同名易混，故独立成文件。
+//!
+//! 规则表达式求值（`resolve_rule_path`）自 2026-10-16（E5）起**委托唯一实现**
+//! `trim_finder::cleanup_scan::resolve_rule_path`：此前本文件另有一份字节级手写解析器，
+//! 与 native-scanner 的字符级实现语义相同、两侧又都无直测——同一判定两份实现正是
+//! §5.16/N6 禁止的形态（形似而实异迟早分叉），收敛掉。
 
-
+use trim_finder::cleanup_scan::resolve_rule_path;
 use serde_json::{Value, json};
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW};
 use super::common::*;
 use super::registry::*;
 // ==================== B7 paths_scan：安装路径自动扫描 ====================
-
-/// 受限规则路径表达式解析器（对应 PS 的 Resolve-RulePath）
-///
-/// 语法：'字面量' + $env:VARNAME + (拼接组)，空白可穿插，单引号内 '' 转义为 '。
-/// 解析失败返回 None（fail-closed，不猜测）。
-fn resolve_rule_path(expr: &str) -> Option<String> {
-    struct Parser<'a> { s: &'a [u8], i: usize, depth: u32 }
-    impl<'a> Parser<'a> {
-        fn skip_ws(&mut self) {
-            while self.i < self.s.len() && (self.s[self.i] == b' ' || self.s[self.i] == b'\t') {
-                self.i += 1;
-            }
-        }
-        fn parse_prim(&mut self) -> Option<String> {
-            self.depth += 1;
-            if self.depth > 32 { return None; }
-            self.skip_ws();
-            if self.i >= self.s.len() { return None; }
-            let c = self.s[self.i];
-            if c == b'(' {
-                self.i += 1;
-                let v = self.parse_concat()?;
-                self.skip_ws();
-                if self.i >= self.s.len() || self.s[self.i] != b')' { return None; }
-                self.i += 1;
-                Some(v)
-            } else if c == b'\'' {
-                self.i += 1;
-                let mut out = String::new();
-                loop {
-                    if self.i >= self.s.len() { return None; }
-                    let ch = self.s[self.i];
-                    if ch == b'\'' {
-                        if self.i + 1 < self.s.len() && self.s[self.i + 1] == b'\'' {
-                            out.push('\''); self.i += 2; continue;
-                        }
-                        self.i += 1; break;
-                    }
-                    out.push(ch as char);
-                    self.i += 1;
-                }
-                Some(out)
-            } else if c == b'$' {
-                if self.i + 5 >= self.s.len() { return None; }
-                if &self.s[self.i..self.i+5] != b"$env:" { return None; }
-                self.i += 5;
-                let start = self.i;
-                while self.i < self.s.len() && self.s[self.i].is_ascii_alphanumeric() || (self.i < self.s.len() && self.s[self.i] == b'_') {
-                    self.i += 1;
-                }
-                if self.i == start { return None; }
-                let name = std::str::from_utf8(&self.s[start..self.i]).ok()?;
-                Some(std::env::var(name).unwrap_or_default())
-            } else {
-                None
-            }
-        }
-        fn parse_concat(&mut self) -> Option<String> {
-            let mut acc = self.parse_prim()?;
-            loop {
-                let j = { let mut j = self.i; while j < self.s.len() && (self.s[j] == b' ' || self.s[j] == b'\t') { j += 1; } j };
-                if j < self.s.len() && self.s[j] == b'+' {
-                    self.i = j + 1;
-                    acc.push_str(&self.parse_prim()?);
-                } else { break; }
-            }
-            Some(acc)
-        }
-    }
-    if expr.is_empty() { return None; }
-    let mut p = Parser { s: expr.as_bytes(), i: 0, depth: 0 };
-    let val = p.parse_concat()?;
-    p.skip_ws();
-    if p.i != p.s.len() { return None; }
-    Some(val)
-}
 
 /// 路径出口（v5-K02 批次 1，R5b-M09）：本域所有「把路径交给下游 / 落盘」的值都过这里。
 ///

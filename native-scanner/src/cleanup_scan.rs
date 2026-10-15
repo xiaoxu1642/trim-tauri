@@ -2735,6 +2735,37 @@ fn flush_stdout() {
 #[cfg(test)]
 mod tests {
 
+    /// E5（2026-10-16）：规则表达式求值器的语义钉桩——src-tauri 的 `paths_scan` 已从自写
+    /// 解析器改为委托本函数（同一判定两份实现正是 §5.16/N6 禁止的形态），这里是**唯一
+    /// 实现**的规格；两侧此前均无直测，本用例把边界一次钉齐。
+    #[test]
+    fn resolve_rule_path_语义钉桩() {
+        use super::resolve_rule_path;
+        // 单引号字面量 + '' 转义
+        assert_eq!(resolve_rule_path(r"'C:\Foo'").as_deref(), Some(r"C:\Foo"));
+        assert_eq!(resolve_rule_path("'C:\\O''Brien'").as_deref(), Some("C:\\O'Brien"));
+        // $env: 前缀大小写敏感（PS StartsWith 语义）；变量名可含字母数字与下划线
+        assert_eq!(resolve_rule_path("$ENV:WINDIR"), None, "$ENV: 前缀必须拒");
+        assert_eq!(resolve_rule_path("'a' + 'b'").as_deref(), Some("ab"));
+        let w = std::env::var("WINDIR").unwrap_or_default();
+        assert_eq!(
+            resolve_rule_path("('a' + 'b') + $env:WINDIR").as_deref(),
+            Some(format!("ab{w}").as_str()),
+            "括号组 + 变量拼接"
+        );
+        // 未定义变量取空串（与 PowerShell 原生一致）：单独成表达式是 Some("")，
+        // 由调用方按「空串不采（!resolved.is_empty()）」处理
+        assert_eq!(resolve_rule_path("$env:TRIM_E5_NOT_SET_9f3a").as_deref(), Some(""));
+        // 语法垃圾一律 None（fail-closed，不猜测）
+        assert_eq!(resolve_rule_path("'a' 'b'"), None, "尾随残留必须拒");
+        assert_eq!(resolve_rule_path("foo"), None);
+        assert_eq!(resolve_rule_path(""), None);
+        assert_eq!(resolve_rule_path("'unclosed"), None);
+        // 深度上限 32：40 层必拒、5 层必放行（边界两侧各钉一条，不赌 off-by-one）
+        assert_eq!(resolve_rule_path(&format!("{}'x'{}", "(".repeat(40), ")".repeat(40))), None, "深度超限应拒");
+        assert_eq!(resolve_rule_path(&format!("{}'x'{}", "(".repeat(5), ")".repeat(5))).as_deref(), Some("x"), "常规嵌套应放行");
+    }
+
     /// 2026-10-04 审计 §5.1：minAge 天文数字（minAgeDays > 20729 时 f64 as u64
     /// 饱和到 u64::MAX）不得 panic——改为饱和到 UNIX_EPOCH。panic 会从
     /// cleanup_execute 展开、发生在清单写盘之前，把可恢复删除变成不可恢复。
