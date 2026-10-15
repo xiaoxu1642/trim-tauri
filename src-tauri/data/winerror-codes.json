@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "_comment": "由 tools/gen-winerror-codes.mjs 从 tools/winerror-codes.source.mjs 生成，勿手改——改源后重跑生成器。维护错误码人话表（P1-A / Dism++ D-04b）。",
+  "codes": [
+    {
+      "code": "0x800f081f",
+      "title": "找不到修复所需的源文件",
+      "detail": "DISM 联机修复拿不到修复文件（Windows Update 不可达或 /Source 指定的路径无效）。可挂载与当前版本匹配的 Windows 安装镜像，用 /Source:wim:<镜像>\\sources\\install.wim 指定本地源后重试；或先执行 /StartComponentCleanup 再 /RestoreHealth。"
+    },
+    {
+      "code": "0x800f0805",
+      "title": "程序包不适用（架构或版本不匹配）",
+      "detail": "要安装或修复的程序包与当前系统架构/版本不匹配。换用匹配当前版本的修复源或更新包；先跑 DISM /CheckHealth 确认组件存储状态。"
+    },
+    {
+      "code": "0x80073712",
+      "title": "组件存储损坏",
+      "detail": "组件存储（WinSxS）已损坏，常规清理修不动。按顺序执行 DISM /RestoreHealth → sfc /scannow，两者都完成后再重试清理；反复失败可能需要就地修复安装。"
+    },
+    {
+      "code": "0x800f0831",
+      "title": "组件存储损坏（CBS 判定）",
+      "detail": "CBS 报告组件存储损坏。与 0x80073712 同族：先 DISM /RestoreHealth 再 sfc /scannow，别手工删 WinSxS 里的文件。"
+    },
+    {
+      "code": "0x800f0922",
+      "title": "安装阶段失败（高级安装程序出错）",
+      "detail": " servicing 的安装阶段没有走完。先重启（可能只是挂起的操作占着），确认系统保留分区有可用空间，暂时退出 VPN/代理类软件后重试。"
+    },
+    {
+      "code": "0x800705b9",
+      "title": "服务堆栈或元数据解析失败",
+      "detail": "Windows 更新相关 XML/元数据解析失败，通常意味着服务堆栈损坏。重置 Windows 更新组件（停服务、清 SoftwareDistribution、重启服务）后重试。"
+    },
+    {
+      "code": "0x80070005",
+      "title": "拒绝访问（权限不足）",
+      "detail": "执行上下文权限不够。确认以管理员身份运行（本工具内该任务会先要求提权）；若已提权仍报，检查组策略或安全软件是否拦截。"
+    },
+    {
+      "code": "0x80070002",
+      "title": "系统找不到指定的文件",
+      "detail": "目标文件缺失——更新缓存损坏或修复源不完整。重置 Windows 更新组件或换修复源后重试。"
+    },
+    {
+      "code": "0x80070003",
+      "title": "系统找不到指定的路径",
+      "detail": "目标路径缺失——常见于缓存目录被清空或修复源结构不完整。核对路径后重试，必要时重置更新组件。"
+    },
+    {
+      "code": "0x80070490",
+      "title": "找不到元素（目标组件/文件不存在）",
+      "detail": "请求的组件或文件在系统里不存在。确认任务与当前系统版本相符；组件存储异常时先做健康检查。"
+    }
+  ]
+}

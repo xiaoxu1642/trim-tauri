@@ -28,6 +28,15 @@ import { buildParityFixture, FIXTURE_PATH } from './gen-protect-parity.mjs';
 const VERBOSE = process.argv.includes('--verbose');
 const require = createRequire(import.meta.url);
 
+// P4b 的源表（ESM）：动态导入，导入失败记下来由该组判红，不让整个门禁崩栈
+let WINERROR_CODES = null;
+let winerrorImportWhy = '';
+try {
+  ({ WINERROR_CODES } = await import('./winerror-codes.source.mjs'));
+} catch (e) {
+  winerrorImportWhy = `源导入失败：${e.message.slice(0, 120)}`;
+}
+
 let fail = 0;
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
@@ -207,6 +216,28 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
 // P5 蓝屏码库对拍组已于 2026-10-12 随「体检结论」全链路退役移除
 // （bsod.rs / bugcheck-codes.source.mjs / gen / data json / check-bugcheck-codes 一并拆除）。
 
+// ---------------------------------------------------------------------------
+// P4b `tools/winerror-codes.source.mjs` ⇄ `data/winerror-codes.json`
+// 维护错误码人话表（P1-A / Dism++ D-04b，2026-10-16）：源是人工策展表（含 curator
+// 专用的 tasks 元数据），JSON 是 Rust 编译期 include_str! 嵌入的运行期数据。
+// 抓两件事：改了源忘重生成、手改生成物。投影口径与 gen-winerror-codes.mjs 一致——
+// tasks 无运行期消费者故不落 JSON；顺序敏感（注解按表序输出）。
+// ---------------------------------------------------------------------------
+{
+  const json = readJson(join('src-tauri', 'data', 'winerror-codes.json'));
+  const projected = Array.isArray(WINERROR_CODES)
+    ? WINERROR_CODES.map((c) => ({ code: c.code, title: c.title, detail: c.detail }))
+    : null;
+  if (!projected || !json || !Array.isArray(json.codes)) {
+    check(false, 'P4b winerror source ⇄ winerror-codes.json', winerrorImportWhy || '源或生成物不可读');
+  } else {
+    const drift = diffArrays(projected, json.codes, 'source', 'JSON');
+    check(drift.length === 0,
+      `P4b 维护错误码表 source ⇄ JSON（${json.codes.length} 码，逐字段）`,
+      show(drift));
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // 报告项（不参与判定）：附录 G 里「本仓无再生成路径 / 无消费者」的两个数据文件。
@@ -223,7 +254,7 @@ for (const rel of [join('src-tauri', 'data', 'reg-ownership.json'), join('src-ta
   console.log(`  · ${rel.replace(/\\/g, '/')} ${existsSync(abs) ? extra : '缺失'}`);
 }
 
-console.log(`\n${fail === 0 ? '✓ 四组数据对拍全部一致' : `${fail} 项未通过`}`);
+console.log(`\n${fail === 0 ? '✓ 数据对拍各组全部一致' : `${fail} 项未通过`}`);
 
 // ==================== 第 5 组：_comment 点名的仓内坐标必须存活 ====================
 // v5 批次 9（门禁候选 8；v4 D1-M03 + 本轮真死 1 条）：数据 JSON 的 _comment 是
