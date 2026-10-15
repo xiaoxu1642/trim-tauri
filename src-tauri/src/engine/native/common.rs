@@ -140,6 +140,17 @@ pub(crate) fn classify_delete_error(e: &std::io::Error) -> DeleteFailureKind {
     }
 }
 
+/// Kudu S2（2026-10-16）：文件「身份证」的出生时间分量（UNIX 纪元起纳秒）。
+/// 与扫描器侧 `cleanup_scan.rs::birthtime_ns` 同口径（跨 crate 不能共享代码，共识写在注释）：
+/// 读不到/早于纪元 → 0（= 无基线，删除侧对 0 不拦；父链重解析复检仍兜底）。
+pub(crate) fn birthtime_ns_of(md: &std::fs::Metadata) -> u64 {
+    md.created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

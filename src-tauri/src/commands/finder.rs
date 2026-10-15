@@ -573,6 +573,27 @@ pub async fn finder_delete<R: tauri::Runtime>(
             "message": format!("包含受保护的系统路径，已拒绝：{}", hit.path)
         });
     }
+    // Kudu S2（2026-10-16）：字面比对漏掉的**别名指向**（junction / 短名父目录解析后
+    // 落在受保护路径）——同判整批拒绝；按父目录 memo（一批通常只跨少数几个目录）。
+    {
+        let mut memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let alias_hit = valid_safe.iter().find(|it| {
+            let key = std::path::Path::new(&it.path)
+                .parent()
+                .map(|d| d.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            *memo
+                .entry(key)
+                .or_insert_with(|| protect::final_path_protected(&it.path))
+        });
+        if let Some(hit) = alias_hit {
+            log::write_log("warn", &format!("finder 删除拒绝（别名解析后指向受保护路径）: {}", hit.path));
+            return json!({
+                "success": false,
+                "message": format!("包含解析后指向受保护路径的目标，已拒绝：{}", hit.path)
+            });
+        }
+    }
 
     // 删除前预检（FD-4）：目标不存在/类型不符/空目录已非空 → 跳过
     // 审查 v2-M5：一律以 `it.target()`（原生侧交来的路径真身）为预检与删除对象，

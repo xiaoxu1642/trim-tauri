@@ -549,6 +549,30 @@ pub fn is_path_protected_with(p: &str, r: &ProtectRoots) -> bool {
     false
 }
 
+/// Kudu S2（2026-10-16）：删除侧的「解析后最终路径」比较 —— 别名（junction / symlink /
+/// 短名目录）指向受保护根时，纯字面比较拦不住。语义 = 在既有字面判定**之上**再加一条：
+/// 把路径的**父目录**解析成最终真实路径（`canonicalize` 跟随链接），对解析结果重跑
+/// 同一套字面判据；命中即视为受保护。调用点先跑字面版，本函数只做「加拦」，不放宽
+/// 任何既有拒绝。
+///
+/// 为什么解析父目录：① 子树保护语义下，目标落在受保护子树 ⇔ 其父链命中；② 目标自身
+/// 是链接的情形已由删除链的 reparse 闸拒绝（本函数不重复承担）；③ 可在外层按父目录 memo。
+/// 解析失败（不存在/无权限）→ false：该路径随后必然在删除原语处撞 NotFound/AccessDenied
+/// 的真实档，不构成绕过面。
+pub fn final_path_protected(p: &str) -> bool {
+    let Some(parent) = std::path::Path::new(p).parent() else {
+        return false;
+    };
+    let Ok(resolved) = std::fs::canonicalize(parent) else {
+        return false;
+    };
+    let mut s = resolved.to_string_lossy().replace('/', "\\");
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        s = rest.to_string();
+    }
+    is_path_protected(&s)
+}
+
 /// 路径（目录或文件）是否落在**系统命名空间**：`%SystemRoot%` 本身或其一棵子树
 /// （含 System32 / SysWOW64 / WinSxS —— 它们都住在 SystemRoot 下）。
 ///
@@ -1383,5 +1407,68 @@ mod tests {
         std::fs::write(&benign, b"x").unwrap();
         assert!(!is_path_protected(&benign.to_string_lossy()),
             "近形普通文件被过度拦截");
+    }
+
+    /// Kudu S2（2026-10-16）：别名解析复检——junction / 短名父目录解析后指向受保护路径
+    /// 时必须判拒；指向普通目录不得误报。mklink /J 免管理员；受限环境建不出来就显式 SKIP。
+    #[test]
+    fn kudu_s2_别名解析后指向受保护路径() {
+        // ① 8.3 短名（若可用）：PROGRA~1 的父目录解析后落回 Program Files（exact 根）
+        let pf = env("ProgramFiles");
+        let pf = if pf.is_empty() { r"C:\Program Files".to_string() } else { pf };
+        let drive = &pf[..2];
+        if std::fs::symlink_metadata(format!(r"{drive}\PROGRA~1")).is_ok() {
+            let probe = format!(r"{drive}\PROGRA~1\x.txt");
+            assert!(final_path_protected(&probe), "短名父目录解析后应命中受保护路径: {probe}");
+        } else {
+            eprintln!("SKIP：本机无 PROGRA~1 短名，短名分支未校验");
+        }
+
+        // ② junction 指向受保护子树（%windir%\System32\config = subtree 根）
+        let windir = env("WINDIR");
+        let target = format!(r"{}\System32\config", if windir.is_empty() { r"C:\Windows".to_string() } else { windir });
+        let dir = std::env::temp_dir().join(format!("trim-s2-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        let link = dir.join("jlink");
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", &format!(r#"mklink /J "{}" "{}""#, link.display(), target)])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("SKIP：建 junction 失败（受限环境），junction 分支未校验");
+            return;
+        }
+        let probe = link.join("probe.txt");
+        assert!(
+            final_path_protected(&probe.to_string_lossy()),
+            "junction 指向受保护子树时其下路径必须判受保护"
+        );
+        // ③ 对照：指向普通目录（temp 自身）的 junction 不得误报
+        let link2 = dir.join("jlink2");
+        let ok2 = std::process::Command::new("cmd")
+            .args(["/C", &format!(r#"mklink /J "{}" "{}""#, link2.display(), dir.display())])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok2 {
+            let probe2 = link2.join("sub").join("probe.txt");
+            assert!(
+                !final_path_protected(&probe2.to_string_lossy()),
+                "指向普通目录的 junction 不得被误判受保护"
+            );
+        }
+        // ④ 父目录不存在的路径不误报（解析失败 fail-open 到删除原语的真实档）
+        let ghost = dir.join("no-such-dir").join("probe.txt");
+        assert!(!final_path_protected(&ghost.to_string_lossy()), "不存在路径不得误报");
     }
 }

@@ -62,7 +62,10 @@ impl ScanAccum {
                         let arr = self.plan.entry(id.to_string()).or_default();
                         if arr.len() < PLAN_CAP_PER_ITEM {
                             let size = js_num_or_zero(pf.get("size"));
-                            arr.push(json!({ "path": path, "size": size as i64 }));
+                            // Kudu S2（2026-10-16）：身份证基线随快照落地（0/缺 = 无基线，
+                            // 删除侧不拦；父链重解析复检仍兜底）。
+                            let bt = js_num_or_zero(pf.get("birthtimeNs"));
+                            arr.push(json!({ "path": path, "size": size as i64, "birthtimeNs": bt as i64 }));
                             self.plan_total += 1;
                         } else if self.plan_truncated.insert(id.to_string()) {
                             log::write_log(

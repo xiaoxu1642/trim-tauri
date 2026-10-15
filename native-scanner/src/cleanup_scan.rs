@@ -1793,7 +1793,9 @@ struct FkResult {
     total_size: i64,
     count: i64,
     locked: i64,
-    files: Vec<(String, u64)>,
+    /// (路径, 大小, birthtimeNs)。第三位 = Kudu S2（2026-10-16）的「文件身份证」：
+    /// 扫描时的出生时间纳秒（0 = 读不到 ⇒ 删除侧无基线不拦，父链复检仍兜底）。
+    files: Vec<(String, u64, u64)>,
     truncated: bool,
     /// 因重解析点跳过的目录数（R1-2 留痕）。只透出呈现，**不进上面三个判定字段**。
     skipped_reparse: u64,
@@ -1801,7 +1803,8 @@ struct FkResult {
 
 struct FkAcc {
     seen: HashSet<String>,
-    files: Vec<(String, u64)>,
+    /// 同 FkResult.files（含 birthtimeNs）
+    files: Vec<(String, u64, u64)>,
     total_count: i64,
     total_size: i64,
     deletable_count: i64,
@@ -1840,16 +1843,27 @@ impl FkAcc {
     }
 
     /// 推入可删清单：受 PLAN_CAP 约束（推入即计数，超限标截断）
-    fn push_budget(&mut self, full: String, size: u64) {
+    fn push_budget(&mut self, full: String, size: u64, birthtime_ns: u64) {
         if self.item_rows >= self.item_cap || self.global_rows >= self.global_cap {
             self.truncated = true;
             return;
         }
         self.total_size += size as i64;
-        self.files.push((full, size));
+        self.files.push((full, size, birthtime_ns));
         self.item_rows += 1;
         self.global_rows += 1;
     }
+}
+
+/// Kudu S2（2026-10-16）：文件「身份证」的出生时间分量（UNIX 纪元起纳秒）。
+/// 取自与 size 同一份 metadata（零额外 IO）；读不到/早于纪元 → 0（= 无基线，
+/// 删除侧对 0 不拦；父链重解析复检仍兜底）。
+fn birthtime_ns(md: &fs::Metadata) -> u64 {
+    md.created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// 快照模式递归深度上限，**对齐 PS `Get-FileKeySnapshot -Depth 24`**。
@@ -1934,11 +1948,12 @@ fn walk_fk_dll(
         }
         acc.total_count += 1;
         let size = md.len();
+        let bt = birthtime_ns(&md);
         if scan_deletable(Path::new(&full_s), protect) {
             acc.deletable_count += 1; // 去重前累加（对齐 PS DLL 分支）
             if acc.seen.insert(low) {
                 let before = acc.truncated;
-                acc.push_budget(full_s, size);
+                acc.push_budget(full_s, size, bt);
                 if !before && acc.truncated {
                     // 只在**首次**翻转到截断时留一次痕：后续每层都打的话，
                     // 一次扫描能刷出上千行同样的日志，把真留痕淹掉。
@@ -2031,10 +2046,11 @@ fn walk_fk_snapshot(
         }
         acc.total_count += 1;
         let size = md.len();
+        let bt = birthtime_ns(&md);
         if skip_lock || scan_deletable(Path::new(&full_s), protect) {
             acc.deletable_count += 1;
             let before = acc.truncated;
-            acc.push_budget(full_s, size);
+            acc.push_budget(full_s, size, bt);
             if !before && acc.truncated {
                 // 首次翻转才留痕（理由同 walk_fk_dll 那处）
                 err_line(&format!(
@@ -2156,11 +2172,11 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
         // 保守性两道：① 字面名真含 `~1` 时判据为 true ⇒ 照常展开，只会少省性能、不会漏展开；
         // ② 只对绝对路径跳过——GetLongPathNameW 会把相对输入**解析成绝对路径**，
         //   扫描出口虽然恒为绝对（walk 的 root 已展开），但把前提写进判据比依赖它更稳。
-        .map(|(p, sz)| {
+        .map(|(p, sz, bt)| {
             if Path::new(&p).is_absolute() && !crate::contains_short_name(&p) {
-                (p, sz)
+                (p, sz, bt)
             } else {
-                (crate::to_long_path(&p), sz)
+                (crate::to_long_path(&p), sz, bt)
             }
         })
         .collect();
@@ -2528,12 +2544,13 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
                 fields.push(("filesTruncated", "true".to_string()));
             }
             emit_item(&fields);
-            for (fp, size) in &st.files {
+            for (fp, size, bt) in &st.files {
                 out_line(&format!(
-                    "@@PLANFILE@@{{\"id\":{},\"path\":{},\"size\":{}}}",
+                    "@@PLANFILE@@{{\"id\":{},\"path\":{},\"size\":{},\"birthtimeNs\":{}}}",
                     jstr(cat_id),
                     jstr(fp),
-                    size
+                    size,
+                    bt
                 ));
             }
             flush_stdout();
@@ -3098,7 +3115,7 @@ mod tests {
         walk_fk_dll(&root, true, "*.dll", true, AgeGuard::Off, &[], &[], None, &mut acc, 0);
         assert_eq!(acc.files.len(), 1, "浅层文件必须收到：{:?}", acc.files);
         assert!(
-            acc.files.iter().all(|(p, _)| !p.contains("d69")),
+            acc.files.iter().all(|(p, _, _)| !p.contains("d69")),
             "超限深处的文件不得出现：{:?}", acc.files
         );
         let _ = fs::remove_dir_all(&root);

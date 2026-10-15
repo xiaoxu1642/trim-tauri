@@ -482,6 +482,8 @@ struct OutcomeCounters {
     /// Kudu S2（2026-10-16）：路径祖先在执行前变成链接/junction 而拒
     /// （同 protected_blocked：安全闸门动作，不是用户侧问题）
     reparse_blocked: i64,
+    /// Kudu S2（2026-10-16）：文件身份证与扫描时不符（被替换/改写）而拒（同族）
+    identity_blocked: i64,
     too_new: i64,
     excluded: i64,
     /// 文件名含孤立代理项/无法无损解码（保护清单按 lossy 串比对不可靠）而拒删的数量
@@ -527,6 +529,12 @@ fn classify_outcome(
             ),
         );
     }
+    if nothing_done && c.identity_blocked > 0 {
+        return (
+            "skip",
+            format!("{} 个文件与扫描时不一致（已被替换/改写），已拒绝删除", c.identity_blocked),
+        );
+    }
     if nothing_done && c.too_new > 0 {
         return ("skip", format!("{} 个文件未达 minAge 年龄门槛（时效护栏），未执行清理", c.too_new));
     }
@@ -561,6 +569,9 @@ fn classify_outcome(
     if c.reparse_blocked > 0 {
         // Kudu S2：同 protected_blocked 的姿势——独立出现、不许被「被占用」吞掉。
         suffix = format!("{suffix}；{} 个目标的路径祖先在执行前变成链接已拒绝", c.reparse_blocked);
+    }
+    if c.identity_blocked > 0 {
+        suffix = format!("{suffix}；{} 个文件与扫描时不一致已拒绝", c.identity_blocked);
     }
     if c.lossy > 0 {
         suffix = format!("{suffix}；{} 个文件名无法无损解码已跳过", c.lossy);
@@ -635,6 +646,31 @@ fn cleanup_execute_with_backup_root(
     let backup_batch_ts = crate::engine::now_ms();
     let mut backup_entries: Vec<Value> = Vec::new();
     let mut backup_total: u64 = 0;
+
+    // Kudu S2（2026-10-16）：扫描时记的「文件身份证」基线（路径小写 → (大小, birthtimeNs)）。
+    // 执行侧重新遍历删文件，但比对基线只此一份：快照 items 的 files 条目（由扫描器
+    // @@PLANFILE@@ 的 birthtimeNs 落地）。缺字段/0 = 无基线不拦（父链重解析复检仍兜底）。
+    // 快照槽按 label 即可：本表（commands/cleanup/state.rs）是 cleanup 域私表、无双域共用
+    // （§5.25 的槽键事故前提不成立），identity 存进该表内层，不引入第二套分桶。
+    let mut identity: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+    for it in items {
+        let Some(files) = it.get("files").and_then(Value::as_array) else {
+            continue;
+        };
+        for f in files {
+            let (Some(p), Some(sz), Some(bt)) = (
+                f.get("path").and_then(Value::as_str),
+                f.get("size").and_then(Value::as_i64),
+                f.get("birthtimeNs").and_then(Value::as_i64),
+            ) else {
+                continue;
+            };
+            if p.is_empty() || bt <= 0 {
+                continue;
+            }
+            identity.entry(p.to_lowercase()).or_insert((sz.max(0) as u64, bt as u64));
+        }
+    }
 
     let total_items = items.len();
     for (item_idx, item) in items.iter().enumerate() {
@@ -1104,6 +1140,11 @@ let mut freed = 0i64;
     let mut reparse_samples: Vec<String> = Vec::new();
     let mut ancestor_memo: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
+    // Kudu S2（2026-10-16）：身份证比对不通过的拒绝（同 protected/reparse 口径：独立计数、留痕）
+    let mut identity_blocked = 0i64;
+    let mut identity_samples: Vec<String> = Vec::new();
+    // Kudu S2：别名解析（父目录 canonicalize）按父目录 memo——同目录下成千上万个文件只解析一次
+    let mut final_memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         let mut backup_skipped = 0usize;
 
         for (path, size) in &files {
@@ -1125,6 +1166,13 @@ let mut freed = 0i64;
                 if protected_samples.len() < 5 {
                     protected_samples.push(path.clone());
                 }
+            } else if final_path_protected_memoized(path, &mut final_memo) {
+                // Kudu S2（2026-10-16）：字面判定过了、但父目录解析后指向受保护路径
+                //（junction / 短名别名）——同受保护拒绝族（独立于字面命中，样本标注别名）。
+                protected_blocked += 1;
+                if protected_samples.len() < 5 {
+                    protected_samples.push(format!("{path}（别名/解析后指向受保护路径）"));
+                }
             } else if let Some(anc) = reparse_ancestor_memoized(path, &mut ancestor_memo) {
                 // Kudu S2（2026-10-16）：删除瞬间父链复检——扫描 → 预览 → 执行的长窗口里，
                 // 某一级祖先目录可能被外部程序换成 junction/symlink，删除会穿过它命中
@@ -1135,6 +1183,25 @@ let mut freed = 0i64;
                     reparse_samples.push(format!("{path}（祖先 {anc}）"));
                 }
             } else {
+                // Kudu S2（2026-10-16）：身份证比对守卫——路径在扫描后指向了**另一个**文件
+                //（被替换/重定向）时拒绝；size 一并对照（内容长大同样算不一致，fail-closed，
+                // 用户看到的是明确计数而非不明所以的删除）。birthtimeNs=0 = 无基线不拦。
+                if let Some((base_size, base_bt)) = identity.get(&path.to_lowercase()) {
+                    if let Ok(md) = std::fs::symlink_metadata(path) {
+                        let now_bt = birthtime_ns_of(&md);
+                        let now_size = md.len();
+                        if now_bt != 0 && (now_bt != *base_bt || now_size != *base_size) {
+                            identity_blocked += 1;
+                            if identity_samples.len() < 5 {
+                                identity_samples.push(format!(
+                                    "{path}（扫描时 {base_size} 字节/出生 {base_bt}，现状 {now_size} 字节/出生 {now_bt}）"
+                                ));
+                            }
+                            continue;
+                        }
+                    }
+                    // 元数据读不到（已不存在等）：交给删除原语的 gone/失败档，不在守卫里吞
+                }
                 // C-4：删前备份（只对将真正删除的文件；复制失败不阻塞删除）
                 if *size <= FILE_BACKUP_MAX_FILE
                     && backup_total + *size <= FILE_BACKUP_MAX_BATCH
@@ -1193,6 +1260,7 @@ let mut freed = 0i64;
             gone,
             protected_blocked,
             reparse_blocked,
+            identity_blocked,
             too_new,
             excluded,
             lossy,
@@ -1246,6 +1314,15 @@ let mut freed = 0i64;
                 ),
             );
         }
+        if identity_blocked > 0 {
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "规则 {id}：{identity_blocked} 个文件与扫描时不一致（被替换/改写），已按状态不符拒绝删除。样本：{}",
+                    identity_samples.join("；")
+                ),
+            );
+        }
 
         details.push(json!({
             "id": id, "name": name, "status": status,
@@ -1258,6 +1335,8 @@ let mut freed = 0i64;
             // Kudu S2（2026-10-16）：父链变成链接的拒绝同理独立外发、不进 residual
             //（不是「被占用」；渲染层要单独呈现时直接消费该字段）。
             "reparseBlocked": reparse_blocked,
+            // Kudu S2：身份证不符的拒绝，同样独立外发。
+            "identityChanged": identity_blocked,
             // R4（2026-10-15）：两个新档同样独立外发、不进 residual（denied 的出路是
             // 提权、gone 无需处理，都不是「重试」）；渲染层按字段分档提示。
             "denied": denied,
@@ -1387,6 +1466,24 @@ fn reparse_ancestor_memoized(
     }
     let hit = trim_finder::scan::reparse_ancestor(std::path::Path::new(path));
     memo.insert(parent, hit.clone());
+    hit
+}
+
+/// Kudu S2（2026-10-16）：别名解析复检的 memo 包装（判据本体
+/// `protect::final_path_protected`，解析的是父目录 ⇒ 按父目录 memo 恰好在正确的粒度上）。
+fn final_path_protected_memoized(
+    path: &str,
+    memo: &mut std::collections::HashMap<String, bool>,
+) -> bool {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .map(|d| d.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if let Some(hit) = memo.get(&parent) {
+        return *hit;
+    }
+    let hit = crate::engine::protect::final_path_protected(path);
+    memo.insert(parent, hit);
     hit
 }
 
@@ -1806,6 +1903,7 @@ mod cleanup_engine_contract_tests {
             gone: 0,
             protected_blocked: protected,
             reparse_blocked: 0,
+            identity_blocked: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
@@ -1867,6 +1965,7 @@ mod cleanup_engine_contract_tests {
             gone,
             protected_blocked: 0,
             reparse_blocked: 0,
+            identity_blocked: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
@@ -1898,17 +1997,18 @@ mod cleanup_engine_contract_tests {
         assert_eq!(st, "ok", "已不存在的项不是失败");
     }
 
-    /// Kudu S2（2026-10-16）：父链变成链接的拒绝单独成档——不许混进「被占用」，
-    /// 全部被拒时状态是 skip 而不是「失败」（安全闸门正常工作）。
+    /// Kudu S2（2026-10-16）：父链变成链接 / 身份证不符两类拒绝各自单独成档——不许混进
+    /// 「被占用」，全部被拒时状态是 skip 而不是「失败」（安全闸门正常工作）。
     #[test]
-    fn kudu_s2_父链链接拒绝单独成档() {
-        let c = |deleted: i64, reparse: i64| OutcomeCounters {
+    fn kudu_s2_父链链接与身份证拒绝单独成档() {
+        let c = |deleted: i64, reparse: i64, identity: i64| OutcomeCounters {
             deleted,
             failed: 0,
             denied: 0,
             gone: 0,
             protected_blocked: 0,
             reparse_blocked: reparse,
+            identity_blocked: identity,
             too_new: 0,
             excluded: 0,
             lossy: 0,
@@ -1916,14 +2016,72 @@ mod cleanup_engine_contract_tests {
             to_recycle: false,
         };
         // ① 全部因父链换链被拒 ⇒ skip + 措辞指向链接替换，不许出现「被占用」
-        let (st, msg) = classify_outcome(&c(0, 3), "", "", "");
+        let (st, msg) = classify_outcome(&c(0, 3, 0), "", "", "");
         assert_eq!(st, "skip", "全被拒应是 skip（安全闸门动作，不是失败）");
         assert!(msg.contains("链接/junction"), "措辞必须指向链接替换: {msg}");
         assert!(!msg.contains("被占用"), "不得混进被占用: {msg}");
         // ② 部分被拒且有成功清理 ⇒ 单独说一句
-        let (st, msg) = classify_outcome(&c(5, 2), "", "", "");
+        let (st, msg) = classify_outcome(&c(5, 2, 0), "", "", "");
         assert_eq!(st, "ok");
         assert!(msg.contains("2 个目标的路径祖先在执行前变成链接已拒绝"), "部分被拒必须单独留痕: {msg}");
+        // ③ 身份证不符：全拒 ⇒ skip 且措辞指向「与扫描时不一致」
+        let (st, msg) = classify_outcome(&c(0, 0, 4), "", "", "");
+        assert_eq!(st, "skip");
+        assert!(msg.contains("与扫描时不一致"), "措辞必须指向身份证口径: {msg}");
+        assert!(!msg.contains("被占用"), "不得混进被占用: {msg}");
+        // ④ 部分不符 ⇒ 独立留痕
+        let (st, msg) = classify_outcome(&c(6, 0, 2), "", "", "");
+        assert_eq!(st, "ok");
+        assert!(msg.contains("2 个文件与扫描时不一致已拒绝"), "{msg}");
+    }
+
+    /// Kudu S2（2026-10-16）端到端：扫描后文件被换掉（birthtime 变）⇒ 执行跳过并计入
+    /// identityChanged、目标不被删；未换的文件照常删除。
+    #[test]
+    fn kudu_s2_文件被换后删除被拒且计数() {
+        let dir = std::env::temp_dir().join(format!("trim-s2-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let swapped = dir.join("swapped.log");
+        let normal = dir.join("normal.log");
+        std::fs::write(&swapped, b"original-content-1234").unwrap();
+        std::fs::write(&normal, b"normal-content-5678").unwrap();
+
+        // 基线身份证：被换文件用「旧出生时间」（比现状早一天）模拟「扫描时的旧文件」；
+        // 正常文件用真实值（扫后未动）。
+        let now_ns = |p: &std::path::Path| -> u64 {
+            std::fs::symlink_metadata(p)
+                .unwrap()
+                .created()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64
+        };
+        let normal_size = std::fs::symlink_metadata(&normal).unwrap().len();
+        let stale_bt = now_ns(&swapped).saturating_sub(86_400_000_000_000);
+
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"s2identity","name":"身份证探测",
+            "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*.log", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({
+            "id":"s2identity","name":"身份证探测","path": dir.to_string_lossy(),
+            "files":[
+                {"path": swapped.to_string_lossy(), "size": 21, "birthtimeNs": stale_bt as i64},
+                {"path": normal.to_string_lossy(), "size": normal_size as i64, "birthtimeNs": now_ns(&normal) as i64},
+            ],
+        })];
+
+        let bk = BackupSandbox::new("s2identity");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("执行应返回结果而不是 Err");
+        let d = &res.details[0];
+        assert_eq!(d["identityChanged"].as_i64(), Some(1), "被换文件必须计入身份证不符: {d}");
+        assert!(swapped.exists(), "被换掉的文件必须原样保留（拒绝删除）");
+        assert!(!normal.exists(), "未变的文件照常删除");
+        assert_eq!(d["freed"].as_i64(), Some(normal_size as i64), "释放量只算真删掉的: {d}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 2026-10-04 审计 §4.2：`fileKeys` 直指**单个文件**时必须真能删掉。
