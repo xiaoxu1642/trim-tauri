@@ -667,17 +667,30 @@ pub(super) fn second_evidence_kind(install_location: &str, file_exists: &dyn Fn(
 /// `watch_uninstaller` 要等本函数返回才启动（调用点顺序），INFINITE 等于让监视永不开始。
 pub(super) const UNINSTALLER_WAIT_TIMEOUT_MS: u32 = 10 * 60 * 1000;
 
-/// `shell_run_wait` 的两种正常结局。
+/// `shell_run_wait` 的三种正常结局。
 ///
 /// 为什么不用 `Err` 表达超时：调用点的 `Err(e) if used_silent` 分支语义是
 /// 「静默卸载**启动失败** → 回退原厂卸载界面」。超时若也走 `Err`，会在卸载器其实
 /// 还在跑的时候**重拉一遍界面**（对 NSIS/Inno 等于把用户刚点的取消/等待无视掉），
 /// 比阻塞更糟。所以超时必须是独立信号，由上层转入 `watch_uninstaller` 轮询口径。
+///
+/// R9（2026-10-15）：`ElevationDeclined`（用户拒了 UAC）同理独立——它既不是
+/// 「启动失败」（重拉界面 = 无视用户的拒绝），也不落「可能还在跑」的超时口径，
+/// 而是「卸载器**从未启动**」。
 pub(super) enum UninstallerWait {
     /// 拿到退出码。
     Exited(u32),
     /// 硬等待超时，**进程未被终止**——退出码未知，卸载是否完成未知。
     TimedOut,
+    /// 用户在 UAC 上拒绝了提权（`ERROR_CANCELLED`）：卸载器从未启动（R9，2026-10-15）。
+    ElevationDeclined,
+}
+
+/// 该启动错误是不是「用户拒了 UAC」（`ERROR_CANCELLED` = 1223）——R9（2026-10-15）。
+/// 单独成函数是为了可被合成 HRESULT 直测（真弹 UAC 无法自动化）。
+/// HRESULT→win32 的折叠引 `engine::native::win32_of` 为口径真源（`0x800704C7` → 1223）。
+fn is_elevation_declined(e: &windows::core::Error) -> bool {
+    crate::engine::native::win32_of(e) == windows::Win32::Foundation::ERROR_CANCELLED.0
 }
 
 /// ShellExecuteEx 启动卸载器并等待退出，最长等 `UNINSTALLER_WAIT_TIMEOUT_MS`。
@@ -694,6 +707,16 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<Uninstaller
 
     let file = to_wide(exe);
     let params = if args.is_empty() { None } else { Some(to_wide(args)) };
+    // R5（2026-10-15）：工作目录钉到一个恒定存在的根。本仓从不设 CWD（全仓 0 处
+    // set_current_dir），子进程继承的工作目录由启动方式决定、不可枚举（双击 exe /
+    // NSIS 快捷方式的「起始位置」/ 桌面符号链接…）。取数据目录而不是盘根：lpDirectory
+    // **同时是相对 lpFile 的解析基准**，而 msi 那条把 exe 拼成裸 "msiexec.exe"，
+    // 传一个恰好含同名 exe 的目录会启动错的东西；便携/标准两态由 app_data_dir() 兜住。
+    // 它只算路径不建目录，而 lpDirectory 指向不存在的目录会让 ShellExecuteEx 当场失败
+    // （ERROR_DIRECTORY）⇒ 先建后用（建失败不拦，交给下面如实报错）。
+    let workdir = crate::engine::paths::app_data_dir();
+    let _ = std::fs::create_dir_all(&workdir);
+    let dir_w = to_wide(&workdir.to_string_lossy());
     let mut sei: SHELLEXECUTEINFOW = core::mem::zeroed();
     sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -701,8 +724,18 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<Uninstaller
     if let Some(p) = &params {
         sei.lpParameters = PCWSTR(p.as_ptr());
     }
+    sei.lpDirectory = PCWSTR(dir_w.as_ptr());
     sei.nShow = 1; // SW_SHOWNORMAL
-    ShellExecuteExW(&mut sei).map_err(|e| format!("启动卸载器失败: {e}"))?;
+    if let Err(e) = ShellExecuteExW(&mut sei) {
+        // R9（2026-10-15）：用户在 UAC 上点「否」时 ShellExecuteExW 以
+        // ERROR_CANCELLED（1223，折成 0x800704C7）失败。这是**独立结局**不是启动失败：
+        // 走 Err 会被上层 `Err(e) if used_silent` 接去重拉原厂界面（用户拒一次又被弹一次）。
+        // 判据必须落在任何 map_err 之前（之后只剩格式化文本）。
+        if is_elevation_declined(&e) {
+            return Ok(UninstallerWait::ElevationDeclined);
+        }
+        return Err(format!("启动卸载器失败: {e}"));
+    }
     let h = sei.hProcess;
     if h.is_invalid() {
         // 拿不到句柄（目标拒绝 NOCLOSEPROCESS 等）：无法等待，如实上报
@@ -1054,10 +1087,19 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                     log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂卸载界面启动失败: {e}"));
                     e
                 })
-                .map(|w| match w {
-                    UninstallerWait::Exited(code) => Some(code),
+                .and_then(|w| match w {
+                    UninstallerWait::Exited(code) => Ok(Some(code)),
                     // 回退界面同样等不到：退出码未知，不能伪造成 0（会被当成卸载成功）
-                    UninstallerWait::TimedOut => None,
+                    UninstallerWait::TimedOut => Ok(None),
+                    // R9（2026-10-15）：用户在回退界面的 UAC 上拒绝 = 卸载器从未启动。
+                    // **绝不能映成 None**（None 的下游是「超时 / 可能还在跑」）。用 Err
+                    // 让整条命令如实判失败——与「超时不用 Err」的裁定不冲突：那条的理由
+                    // 是 Err 会被主 match 接去重拉界面，而这里已经在界面路径上、无界面可再拉。
+                    UninstallerWait::ElevationDeclined => {
+                        let msg = format!("uninstall_run {display_name}: 用户取消了权限请求（原厂卸载界面未启动）");
+                        log::write_log("warn", &msg);
+                        Err(msg)
+                    }
                 })
         };
         // 原「卸载前写所有权档案 / 厂商键足迹基线」已随「机-wide 扫描整条退役」删除：
@@ -1078,6 +1120,28 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                     ),
                 );
                 None
+            }
+            // R9（2026-10-15）：用户在 UAC 上拒绝了权限请求——卸载器**从未启动**。
+            // 独立回执（exitCode 与超时同为 null，靠 `elevationDeclined` 区分，前端必须
+            // 在该 null 分支之前认领它——J6）。三条硬约束：① 早退，不得走到
+            // watch_uninstaller（「用户自己拒了」会被说成「卸载器还在跑」）；② 不落回
+            // 超时口径；③ fellBack 保持 false（前端会据此播「已回退原厂卸载界面并执行完毕」）。
+            Ok(UninstallerWait::ElevationDeclined) => {
+                log::write_log(
+                    "warn",
+                    &format!("uninstall_run {display_name}: 用户取消了权限请求（卸载器未启动）"),
+                );
+                return Ok(json!({
+                    "exitCode": null,
+                    "exitMeaning": "用户取消了权限请求",
+                    "silentSource": silent_source,
+                    "stillListed": true,
+                    "installerKind": kind,
+                    "usedSilent": used_silent,
+                    "fellBack": false,
+                    "elevationDeclined": true,
+                    "message": "卸载已取消：系统权限请求被拒绝，卸载器没有启动。",
+                }));
             }
             Err(e) if used_silent => {
                 log::write_log(
@@ -1211,5 +1275,83 @@ pub(super) mod install_date_tier_tests {
         // 真机两档差异要看的证据是列表里同一程序「安装日期」与注册表键时间不一致时取前者。
         assert_eq!(install_date_from_epoch(1_609_459_200).as_deref(), Some("2021-01-01"));
         assert_eq!(install_date_from_epoch(0), None, "0 必须退回兜底档，否则 exact 标志会撒谎");
+    }
+}
+
+#[cfg(test)]
+mod wait_outcome_tests {
+    use super::*;
+
+    /// R9（2026-10-15）：`ERROR_CANCELLED` 的折叠判据 —— `HRESULT_FROM_WIN32(1223)` =
+    /// `0x800704C7`，低位段必须还原成 1223。合成 HRESULT 直测，不需要真弹 UAC（无法自动化）。
+    #[test]
+    fn 拒权判据_合成_hresult_低位折叠正确() {
+        let declined = windows::core::Error::from_hresult(windows::core::HRESULT(0x8007_04C7_u32 as i32));
+        assert!(is_elevation_declined(&declined), "0x800704C7（ERROR_CANCELLED=1223）必须判成用户取消");
+        // 反向：别的启动失败码不许误判（0x80070005 = ERROR_ACCESS_DENIED）
+        let denied = windows::core::Error::from_hresult(windows::core::HRESULT(0x8007_0005_u32 as i32));
+        assert!(!is_elevation_declined(&denied), "ACCESS_DENIED 不是用户取消——它仍要走原有的启动失败路径");
+    }
+
+    /// R9/J6（2026-10-15）接线钉桩：拒权必须在**三个 match 臂**与**前端认领顺序**里
+    /// 同时落地——臂缺一个 = 编译器红（枚举非穷尽）；顺序错一个 = 「用户拒了」被播成
+    /// 「还在跑」或「已回退并执行完毕」。真机 UAC 交互无法自动化，这里断源码形态。
+    #[test]
+    fn 拒权回执的三个臂与前端认领顺序() {
+        let code = include_str!("list_run.rs");
+        // ① 主 match：declined 臂必须早退（return Ok）且回执带独立标记
+        let at = code
+            .find("Ok(UninstallerWait::ElevationDeclined) => {")
+            .expect("主 match 缺 declined 臂（枚举非穷尽本会编译红，这里防「补了臂却让它往下走」）");
+        let arm = &code[at..];
+        let end = arm.find("Err(e) if used_silent").expect("declined 臂后面找不到 used_silent 臂");
+        let body = &arm[..end];
+        assert!(body.contains("return Ok(json!"), "declined 臂必须早退（不得落到 watch_uninstaller）");
+        assert!(body.contains("\"elevationDeclined\": true"), "回执缺 elevationDeclined 标记（前端无从认领）");
+        assert!(!body.contains("fell_back = true"), "declined 臂不得置 fell_back");
+        // ② 回退闭包：declined 必须映成 Err —— 映成 None 会把「用户拒了」播成「超时了」
+        assert!(
+            code.contains("UninstallerWait::ElevationDeclined => {")
+                && code.contains("用户取消了权限请求（原厂卸载界面未启动）"),
+            "回退闭包的 declined 臂不见了（或没映成 Err）"
+        );
+        // ③ uninstall_modify 第三臂
+        let ru = include_str!("residue_update.rs");
+        assert!(
+            ru.contains("用户取消了权限请求（{label}未启动）"),
+            "uninstall_modify 缺 declined 臂（跑进 TimedOut 口径会报「状态未知」）"
+        );
+        // ④ 前端：认领分支必须排在 exitCode==null 分支之前（新回执 exitCode 同为 null）
+        let js = include_str!("../../../../src/scripts/uninstall.js");
+        let decl = js.find("d.elevationDeclined").expect("uninstall.js 没认领 elevationDeclined");
+        let nullb = js.find("d.exitCode == null").expect("找不到 null 分支");
+        assert!(decl < nullb, "拒权分支必须排在 null 分支之前，否则被「等待卸载器超时」吞掉");
+    }
+
+    /// R5（2026-10-15）真机探针（`#[ignore]`，发版前实跑）：`shell_run_wait` 设的
+    /// `lpDirectory` 必须真的生效——用 cmd 把自身工作目录打到临时文件里读回。
+    /// 反向对照：若结果恰好等于测试进程的 cwd，说明钉根没生效（继承的就是调用者 cwd）。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机探针：真实启动一个子进程观察工作目录"]
+    fn lpdirectory_钉根_真机探针() {
+        let probe = std::env::temp_dir().join(format!("trim-cwd-probe-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&probe);
+        let args = format!("/c cd > \"{}\"", probe.display());
+        let w = unsafe { shell_run_wait("cmd.exe", &args) }.expect("cmd 必须能启动");
+        assert!(matches!(w, UninstallerWait::Exited(0)), "cmd /c 应正常退出");
+        let got = std::fs::read_to_string(&probe).expect("cmd 没写出 cwd —— lpDirectory 可能没生效");
+        let _ = std::fs::remove_file(&probe);
+        let got = got.trim().trim_end_matches('\\').to_lowercase();
+        let want = crate::engine::paths::app_data_dir();
+        let want = want.to_string_lossy().trim_end_matches('\\').to_lowercase();
+        assert_eq!(got, want, "子进程工作目录必须等于数据目录（R5：CWD 不可枚举，必须显式钉根）");
+        // 反向对照：若没设 lpDirectory，子进程会继承本测试进程的 cwd——两者不同才有对照意义
+        let here = std::env::current_dir().unwrap_or_default();
+        assert_ne!(
+            want,
+            here.to_string_lossy().trim_end_matches('\\').to_lowercase(),
+            "数据目录与测试进程 cwd 恰好相同，本探针失去对照意义（换一台机器复核）"
+        );
     }
 }

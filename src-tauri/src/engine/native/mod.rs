@@ -39,6 +39,7 @@ pub use services::{
     service_exists, service_start_type_is, service_absent_or_start_is, start_type_from_label,
     SVC_START_AUTO, SVC_START_DISABLED, SVC_START_MANUAL, service_stop_pub, service_set_start_pub,
 };
+pub(crate) use services::win32_of;
 mod startup;
 pub use startup::{startup_scan, startup_toggle, startup_delete, startup_add};
 mod syspanel;

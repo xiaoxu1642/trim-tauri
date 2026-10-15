@@ -790,6 +790,12 @@ pub async fn uninstall_modify<R: tauri::Runtime>(
                 log::write_log("warn", &msg);
                 return Err(msg);
             }
+            Ok(UninstallerWait::ElevationDeclined) => {
+                // R9（2026-10-15）：用户拒了 UAC —— 修改/修复器从未启动（本路径无界面可回退）
+                let msg = format!("uninstall_modify {display_name}: 用户取消了权限请求（{label}未启动）");
+                log::write_log("warn", &msg);
+                return Err(msg);
+            }
             Err(e) => {
                 let msg = format!("uninstall_modify {display_name}: {label}启动失败: {e}");
                 log::write_log("error", &msg);

@@ -464,6 +464,10 @@
       const meaning = d.exitMeaning ? `（退出码 ${d.exitCode}：${d.exitMeaning}）` : '';
       if (isAppx) {
         window.app?.toast?.('success', `「${app.displayName}」已移除`);
+      } else if (d.elevationDeclined) {
+        // R9/J6（2026-10-15）：用户拒绝了 UAC —— 卸载器从未启动。本分支必须排在
+        // null 分支之前：新回执的 exitCode 同为 null，晚一步就会被「等待卸载器超时」吞掉。
+        window.app?.toast?.('info', d.message || '已取消：系统权限请求被拒绝，卸载器没有启动');
       } else if (d.exitCode == null) {
         // 审查 M-07 订正：后端硬等待超时（UninstallerWait::TimedOut）时 exitCode 为 null，
         // 而 watch_uninstaller 只要卸载键消失就立刻返回 stillListed=false——**不代表
@@ -487,6 +491,9 @@
       // 此时扫描到的「残留」是卸载中途的半成品，照着删会和安装器抢文件。
       // 用户等卸载真正结束（或重启后）再手动点扫描即可，入口在残留副窗自己那里。
       if (d.exitCode == null && !isAppx) {
+        // R9/J6：拒权回执的 exitCode 同为 null，但它不是超时——卸载器从未启动，
+        // 「请等卸载器自行结束」对它不成立；同样不自动开残留副窗（J6）。
+        if (d.elevationDeclined) return;
         window.app?.toast?.('info', '请等卸载器自行结束后再扫描残留；也可重启系统后重试');
         return;
       }

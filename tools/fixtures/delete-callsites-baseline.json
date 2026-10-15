@@ -26,6 +26,7 @@
     "src-tauri/src/commands/optimizer/apply.rs": 1,
     "src-tauri/src/commands/realtime.rs": 3,
     "src-tauri/src/commands/runtimes.rs": 10,
+    "src-tauri/src/commands/uninstall/list_run.rs": 2,
     "src-tauri/src/commands/updater.rs": 3,
     "src-tauri/src/engine/hash.rs": 2,
     "src-tauri/src/engine/log.rs": 1,
