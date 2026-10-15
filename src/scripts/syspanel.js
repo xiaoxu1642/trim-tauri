@@ -986,14 +986,29 @@
           </span>
         </div>`;
     }).join('');
+    const tools = st.tools || {};
+    const hpListed = !!tools.highPerformanceListed;
+    const hpBackup = tools.hiddenBackup && tools.hiddenBackup.backupPath ? tools.hiddenBackup : null;
+    // G-04 专用能力（2026-10-16 裁定）：开启卓越性能常显；隐藏/还原按当前状态二选一
+    // （内置高性能在列 → 可隐藏；不在列且有备份记录 → 可还原）。
+    const hpToolBtn = hpListed
+      ? '<button type="button" class="btn btn-secondary btn-small syspanel-pwr-act-danger" id="btnSyspanelPowerHideHp" data-tip="导出备份后从系统移除内置「高性能」">隐藏高性能</button>'
+      : (hpBackup
+        ? '<button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerRestoreHp" data-tip="把备份的「高性能」导回系统（同名等效方案）">还原高性能</button>'
+        : '');
     el.innerHTML = `
       <div class="syspanel-power-current">当前方案：<strong>${esc(activeName || '未知')}</strong></div>
       <div class="syspanel-power-grid">${cards}</div>
       <div class="syspanel-actions">
+        <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerUltimate" data-tip="不存在时自动创建；激活后立即生效">开启卓越性能</button>
+        ${hpToolBtn}
         <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerImport">导入方案文件…</button>
       </div>
     `;
     el.querySelector('.syspanel-power-grid')?.addEventListener('click', onPowerTileClick);
+    document.getElementById('btnSyspanelPowerUltimate')?.addEventListener('click', (ev) => onUltimateEnable(ev.currentTarget));
+    document.getElementById('btnSyspanelPowerHideHp')?.addEventListener('click', (ev) => onHideHighPerformance(ev.currentTarget));
+    document.getElementById('btnSyspanelPowerRestoreHp')?.addEventListener('click', (ev) => onRestoreHighPerformance(ev.currentTarget));
     document.getElementById('btnSyspanelPowerImport')?.addEventListener('click', onImportPower);
   }
 
@@ -1237,6 +1252,110 @@
     } catch (e) {
       pwrToast('error', '导入异常：' + (e && e.message ? e.message : String(e)));
     }
+  }
+
+  // ==================== G-04 专用能力（2026-10-16 裁定：开启卓越性能 / 隐藏高性能） ====================
+
+  /** 按钮防连点包装：执行期间禁用并改文案，完成后恢复。 */
+  async function withPowerBusy(btn, label, fn) {
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = label;
+    try {
+      await fn();
+    } finally {
+      if (btn.isConnected) {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+    }
+  }
+
+  async function onUltimateEnable(btn) {
+    // 激活类操作：立即影响功耗/温度、可随时切回 ⇒ confirmWarning（与「应用」同档，非破坏性）
+    const ok = await window.app?.confirmWarning?.(
+      '开启卓越性能',
+      '确认开启「卓越性能」？将立即把当前电源方案切换到卓越性能（性能优先，功耗与温度上升）。随时可以在本页切回其它方案。',
+      '开启',
+      '取消',
+    );
+    if (!ok) return;
+    await withPowerBusy(btn, '开启中…', async () => {
+      try {
+        const resp = await window.api.syspanel.powerUltimateEnable();
+        if (resp && resp.success) {
+          renderPower(resp.data);
+          pwrToast('info', '已开启「卓越性能」（激活并回读校验通过）');
+        } else {
+          pwrToast('error', (resp && resp.message) || '开启失败');
+          await loadPower(); // 失败后重读，把实际状态摆回面板
+        }
+      } catch (e) {
+        pwrToast('error', '开启异常：' + (e && e.message ? e.message : String(e)));
+        await loadPower();
+      }
+    });
+  }
+
+  async function onHideHighPerformance(btn) {
+    // P0 真机实测（与导出同源）：标准权限下导出与删除都会被系统拒绝 ⇒ 非管理员先给提权提示
+    const st = window.app?.getState?.();
+    if (st && st.isAdmin === false) {
+      pwrToast('warning', '隐藏高性能需要管理员权限（要先导出备份）：请用管理员身份运行 Trim 后重试。');
+      return;
+    }
+    // 删除类高危：red 档确认（与「删除电源方案」同口径，默认焦点落主按钮）
+    const ok = await window.app?.confirmDanger?.(
+      '隐藏高性能',
+      '即将从系统移除内置「高性能」方案；移除前会自动把它导出为备份文件（之后可用「还原高性能」导回）。\n\n必须知道：\n'
+        + '· 还原时系统会重新分配方案 GUID（同名等效方案，设置一致）；\n'
+        + '· 若其它工具引用高性能方案，隐藏后那些工具可能读取失败。',
+      '仍然隐藏',
+      '取消',
+      '删除后该方案将从系统移除（备份保留在 Trim 数据目录）。',
+    );
+    if (!ok) return;
+    await withPowerBusy(btn, '处理中…', async () => {
+      try {
+        const resp = await window.api.syspanel.powerHideHighPerformance(!!ok);
+        if (!resp || !resp.success) {
+          pwrToast('error', (resp && resp.message) || '隐藏失败');
+          await loadPower();
+          return;
+        }
+        renderPower(resp.data?.state);
+        pwrToast('info', '已隐藏「高性能」（备份已保留）');
+      } catch (e) {
+        pwrToast('error', '隐藏异常：' + (e && e.message ? e.message : String(e)));
+        await loadPower();
+      }
+    });
+  }
+
+  async function onRestoreHighPerformance(btn) {
+    const ok = await window.app?.confirmWarning?.(
+      '还原高性能',
+      '将把备份的「高性能」方案导回系统（与原方案同名、设置一致；方案的 GUID 由系统重新分配）。',
+      '还原',
+      '取消',
+    );
+    if (!ok) return;
+    await withPowerBusy(btn, '还原中…', async () => {
+      try {
+        const resp = await window.api.syspanel.powerRestoreHighPerformance();
+        if (!resp || !resp.success) {
+          pwrToast('error', (resp && resp.message) || '还原失败');
+          await loadPower();
+          return;
+        }
+        renderPower(resp.data?.state);
+        pwrToast('info', `已还原「${resp.data?.name || '高性能'}」`);
+      } catch (e) {
+        pwrToast('error', '还原异常：' + (e && e.message ? e.message : String(e)));
+        await loadPower();
+      }
+    });
   }
 
   // ==================== 编辑层（unlock → dump → 编辑 → 三按钮） ====================

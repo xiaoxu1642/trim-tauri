@@ -1247,6 +1247,11 @@ fn syspanel_power_编辑命令_is_main_only() {
         ("syspanel_power_settings_revert", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "sessionId": "x" })),
         ("syspanel_power_settings_compare", json!({ "subgroupGuid": "0012ee47-9041-4b5d-9b77-535fba8b1442", "settingGuid": "d639518a-e56d-4345-8af2-b9f32fb26109" })),
         ("syspanel_power_settings_open_regedit", json!({ "subgroupGuid": "0012ee47-9041-4b5d-9b77-535fba8b1442", "settingGuid": "d639518a-e56d-4345-8af2-b9f32fb26109" })),
+        // G-04 专用能力（2026-10-16）：三命令同为写侧、系统级、只在主窗电源卡触发。
+        // 子窗调用必须在 guard 处拒杀，不得进入真实 Power API / 文件系统。
+        ("syspanel_power_ultimate_enable", json!({})),
+        ("syspanel_power_hide_high_performance", json!({ "confirmedHighRisk": true })),
+        ("syspanel_power_restore_high_performance", json!({})),
     ];
     let mut rejected = Vec::<String>::new();
     for label in sub_windows() {

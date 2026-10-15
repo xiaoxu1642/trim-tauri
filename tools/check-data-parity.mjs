@@ -285,6 +285,7 @@ console.log(`\n${fail === 0 ? '✓ 四组数据对拍全部一致' : `${fail} �
     { what: 'cleanup-files-backup（目录树）', file: 'src-tauri/src/engine/native/cleanup.rs', token: 'prune_file_backups' },
     { what: 'fileclean-backup（manifest 台账）', file: 'src-tauri/src/engine/native/cleanup.rs', token: 'prune_file_backups' },
     { what: 'pagefile-backups（<ts>.json）', file: 'src-tauri/src/engine/native/syspanel.rs', token: 'prune_stamped_files' },
+    { what: 'power-plan-backups（G-04 隐藏高性能备份 <ts>.powrplan）', file: 'src-tauri/src/engine/native/syspanel.rs', token: 'prune_stamped_files' },
     { what: 'startup-backup/deleted（{ts}_*）', file: 'src-tauri/src/engine/native/startup.rs', token: 'prune_stamped_files' },
   ];
   const gaps = [];

@@ -47,7 +47,11 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 // 是「按需页样式全量随首屏加载」；继续追加时优先考虑把按需页样式按页拆分、进按需清单，
 // 而非反复重审本预算。下限按 CAP_MIN 走：CSS 侧还会因死规则清理继续合法收缩，这里只防
 // 「首屏大面积塌陷」。
-const CAP_MAX = 715_000;
+// G-04（2026-10-16）：开启卓越性能 / 隐藏高性能 / 还原 三条能力的 CHANNEL_MAP 条目与
+// api 包装落在 tauri-api.js（首屏静态，+635 B）—— 715,000 → 716,000（贴值留余 ~400 B）。
+// 功能面 UI（syspanel.js 三个处理器与按钮）走 PAGE_SCRIPTS['windows-settings'] 按需注入，
+// 不在本预算内。
+const CAP_MAX = 716_000;
 const CAP_MIN = 400_000;
 // 豁免清单：允许不带 defer 的脚本（必须尽早执行，加 defer 反而破坏语义）
 const EXEMPT_NOT_DEFER = ['scripts/theme-boot.js'];

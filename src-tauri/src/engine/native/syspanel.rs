@@ -51,6 +51,11 @@ pub const KNOWN_PLANS: &[(&str, &str, &str)] = &[
     ("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "高性能", "台式机与游戏优先；功耗上升"),
 ];
 
+/// G-04（2026-10-16 裁定）两个专用能力只认的微软标准 GUID（微软公开文档）。
+/// 它们只是「专用操作的目标标识」，**不是**写面白名单——通用编辑器一视同仁。
+pub const HIGH_PERFORMANCE_GUID: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+pub const ULTIMATE_PERFORMANCE_GUID: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
+
 /// 本机存在、但不在这三档里的方案（`powercfg /duplicate` 克隆或第三方注册）的统一说明。
 /// 它们**同样可选**——见 `power_plan_apply` 的安全口径。
 const CUSTOM_PLAN_TIP: &str = "本机自定义方案（克隆或第三方注册），按方案原名显示";
@@ -761,6 +766,13 @@ pub fn power_plan_state() -> Value {
         "activeGuid": active_guid,
         "activeName": active_name,
         "options": options,
+        "tools": {
+            "highPerformanceGuid": HIGH_PERFORMANCE_GUID,
+            "highPerformanceListed": listed_scheme(HIGH_PERFORMANCE_GUID),
+            "ultimateGuid": ULTIMATE_PERFORMANCE_GUID,
+            "ultimateListed": listed_scheme(ULTIMATE_PERFORMANCE_GUID),
+            "hiddenBackup": read_power_ops().get("hiddenHighPerformance").cloned().unwrap_or(Value::Null),
+        },
     })
 }
 
@@ -1030,6 +1042,207 @@ pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String
         "bytes": bytes,
         "path": destination.to_string_lossy(),
     }))
+}
+
+// ==================== G-04 专用能力（2026-10-16 裁定：开启卓越性能 / 隐藏高性能） ====================
+//
+// 形态：两个能力并入「Windows设置 → 电源计划」卡片，**不进优化项目录**——P0-1 已把
+// 优化域的电源写入全量清零并立了 `check-power-write-surface` 门禁，专用入口是唯一
+// 的合法新增写面（用户 2026-10-16 裁定「编辑器为已授权写面」的延伸）。
+// 前置实测（P0-3，v3 附录 C）两条关键行为：`powercfg /import` **每次重新分配 GUID**
+// （还原按「名称 + 设置」验收，不以 GUID 相等为条件）；PowerSchemes 子树对管理员
+// 只读、规范 GUID 写回不可行（产品侧不尝试）。
+
+/// power-ops 状态侧表（用户数据目录内）：记录上次开启卓越性能的原激活 GUID、
+/// 隐藏高性能的备份路径与原方案名（还原入口的唯一依据）。
+const POWER_OPS_FILE: &str = "power-ops.json";
+
+fn power_ops_path() -> Result<PathBuf, String> {
+    Ok(crate::engine::paths::app_data_dir().join(POWER_OPS_FILE))
+}
+
+/// 读侧表：不存在/损坏 → 空对象（两个操作在无记录时都能安全地如实拒绝）。
+fn read_power_ops() -> Value {
+    let Ok(p) = power_ops_path() else {
+        return json!({});
+    };
+    match crate::security::read_json_state(&p) {
+        crate::security::JsonState::Ok(v) => v,
+        _ => json!({}),
+    }
+}
+
+/// Win32 错误文案：权限不足（ERROR_ACCESS_DENIED=5）显式给提权提示，
+/// 不把它说成「不支持」（v3 P1-2 口径）；其余如实带错误码。
+fn power_win32_err(action: &str, code: u32) -> String {
+    if code == 5 {
+        format!("{action}被系统拒绝：需要管理员权限（Win32 错误码 5），请用管理员身份运行 Trim 后重试")
+    } else {
+        format!("{action}失败（Win32 错误码 {code}）")
+    }
+}
+
+/// 方案列表里按友好名查找（忽略大小写）→ 命中的 GUID。
+/// 用途：P0-3 实测 import 必换 GUID，「还原是否重复」只能按名称判。
+fn find_scheme_named(name: &str) -> Option<String> {
+    let want = name.trim();
+    if want.is_empty() {
+        return None;
+    }
+    scheme_guids().iter().find_map(|g| {
+        scheme_friendly_name(g)
+            .filter(|n| n.eq_ignore_ascii_case(want))
+            .map(|_| guid_string(g))
+    })
+}
+
+/// G-04「开启卓越性能」：已存在则直接激活；不存在则先克隆内置模板再激活。
+/// 激活判据与 `power_plan_apply` 相同（PowerSetActiveScheme + 400ms 回读）；
+/// 本函数克隆出的方案在激活/回读失败时清掉（不留半截状态）。
+/// 原激活 GUID 记进 power-ops.json（仅审计记录；回切随时可在面板点其它方案）。
+pub fn power_ultimate_enable() -> Result<Value, String> {
+    let active_before = active_scheme().map(guid_string).unwrap_or_default();
+    let mut created_guid: Option<GUID> = None;
+    let target_s = if listed_scheme(ULTIMATE_PERFORMANCE_GUID) {
+        ULTIMATE_PERFORMANCE_GUID.to_string()
+    } else {
+        let template = parse_guid_str(ULTIMATE_PERFORMANCE_GUID)
+            .ok_or_else(|| "卓越性能模板 GUID 非法（程序错误）".to_string())?;
+        let mut dest: *mut GUID = std::ptr::null_mut();
+        let rc = unsafe { PowerDuplicateScheme(None, &template as *const GUID, &mut dest) };
+        if !win32_ok(rc) {
+            return Err(power_win32_err("创建卓越性能方案", rc.0));
+        }
+        let created = LocalGuidPtr(dest)
+            .take()
+            .ok_or_else(|| "创建卓越性能成功但系统未返回新 GUID".to_string())?;
+        let s = guid_string(&created);
+        if !listed_scheme(&s) {
+            let _ = unsafe { PowerDeleteScheme(None, &created as *const GUID) };
+            return Err("创建卓越性能后重新枚举失败，已清理未保留".to_string());
+        }
+        created_guid = Some(created);
+        s
+    };
+    let want = parse_guid_str(&target_s).ok_or_else(|| "卓越性能 GUID 非法".to_string())?;
+    let rc = unsafe { PowerSetActiveScheme(None, Some(&want as *const GUID)) };
+    if rc.0 != 0 {
+        if let Some(created) = created_guid {
+            let _ = unsafe { PowerDeleteScheme(None, &created as *const GUID) };
+        }
+        return Err(power_win32_err("切换卓越性能", rc.0));
+    }
+    std::thread::sleep(Duration::from_millis(400));
+    let state = power_plan_state();
+    let got = state
+        .get("activeGuid")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !got.eq_ignore_ascii_case(&target_s) {
+        if let Some(created) = created_guid {
+            let _ = unsafe { PowerDeleteScheme(None, &created as *const GUID) };
+        }
+        return Err(format!("切换后回读为 {got}，与目标 {target_s} 不符"));
+    }
+    let _ = crate::security::update_json(&power_ops_path()?, |v| {
+        v["lastUltimateEnable"] = json!({
+            "at": crate::engine::now_ms(),
+            "previousActiveGuid": active_before,
+            "ultimateGuid": target_s,
+        });
+        Ok(())
+    });
+    Ok(state)
+}
+
+/// G-04「隐藏高性能」（终态 = 导出 + 删除）：**只认内置 `8c5e7fda`**。
+/// 顺序 = 枚举/非激活检查 → 导出 .powrplan 到应用备份目录（prune 50） → 专用删除 → 回读确认。
+/// 删除被拒 / 回读仍在 = 「未更改」（方案还在，无需回滚），如实上报并保留备份路径；
+/// 与通用 `power_plan_delete` 的区别：那是「本机任意非保留方案」，本函数只认一个 GUID，
+/// 通用保留拒绝（`require_reserved_plans_untouched`）原样不动。
+pub fn power_high_performance_hide() -> Result<Value, String> {
+    let target = require_listed_scheme(HIGH_PERFORMANCE_GUID)
+        .map_err(|_| "本机方案列表里没有内置「高性能」（可能已隐藏）".to_string())?;
+    if active_scheme().is_some_and(|a| guid_string(&a).eq_ignore_ascii_case(HIGH_PERFORMANCE_GUID)) {
+        return Err("「高性能」正在使用中，不能隐藏；请先切换到其它方案".to_string());
+    }
+    let original_name = scheme_friendly_name(&target).unwrap_or_default();
+    let root = crate::engine::paths::backup_write_dir("power-plan-backups");
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建备份目录失败：{e}"))?;
+    let backup = root.join(format!("high-performance-{}.powrplan", crate::engine::now_ms()));
+    let backup_s = backup.to_string_lossy().to_string();
+    let export = power_plan_export(HIGH_PERFORMANCE_GUID, &backup)
+        .map_err(|e| format!("导出备份失败，未执行删除：{e}"))?;
+    let bytes = export.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+    crate::engine::paths::prune_stamped_files(&root, 50);
+    let rc = unsafe { PowerDeleteScheme(None, &target as *const GUID) };
+    if !win32_ok(rc) {
+        return Err(format!(
+            "{}，已保持未更改；备份文件保留在 {backup_s}",
+            power_win32_err("删除「高性能」", rc.0)
+        ));
+    }
+    if listed_scheme(HIGH_PERFORMANCE_GUID) {
+        return Err(format!(
+            "删除后回读仍能枚举到「高性能」，已按失败上报（未谎报更改）；备份文件保留在 {backup_s}"
+        ));
+    }
+    crate::security::update_json(&power_ops_path()?, |v| {
+        v["hiddenHighPerformance"] = json!({
+            "backupPath": backup_s,
+            "bytes": bytes,
+            "originalName": original_name,
+            "at": crate::engine::now_ms(),
+        });
+        Ok(())
+    })?;
+    Ok(json!({
+        "backupPath": backup_s,
+        "bytes": bytes,
+        "state": power_plan_state(),
+    }))
+}
+
+/// G-04「还原高性能」：按 power-ops.json 记录的备份导入回来。
+/// 已存在（标准 GUID 在列，或任一方案名等于记录的原名）时不重复导入 ——
+/// P0-3 实测 import 会分配新 GUID，重复导入 = 制造双份同名方案。
+/// 回读按「名称 + 枚举可见」判（GUID 由系统重新分配，v3 附录 C）。
+pub fn power_high_performance_restore() -> Result<Value, String> {
+    let ops = read_power_ops();
+    let rec = ops.get("hiddenHighPerformance").cloned().unwrap_or(Value::Null);
+    let backup = rec
+        .get("backupPath")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            "没有「隐藏高性能」的备份记录，无法从 Trim 内还原（可用「导入方案文件…」手工导入）"
+                .to_string()
+        })?;
+    if listed_scheme(HIGH_PERFORMANCE_GUID) {
+        return Err("本机方案列表里已有内置「高性能」，无需还原".to_string());
+    }
+    let original_name = rec
+        .get("originalName")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if let Some(hit) = find_scheme_named(&original_name) {
+        return Err(format!("方案列表里已有「{original_name}」（GUID {hit}），未重复导入"));
+    }
+    let imported = power_plan_import(Path::new(&backup))?;
+    let _ = crate::security::update_json(&power_ops_path()?, |v| {
+        if let Some(item) = v.get_mut("hiddenHighPerformance") {
+            item["restoredAt"] = json!(crate::engine::now_ms());
+        }
+        Ok(())
+    });
+    let mut out = imported;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("originalName".into(), json!(original_name));
+        obj.insert("backupPath".into(), json!(backup));
+    }
+    Ok(out)
 }
 
 fn setting_value_json(
@@ -1754,6 +1967,41 @@ mod tests {
         assert!(parse_guid_str("X381b4222-f694-41f0-9685-ff5bb260df2e").is_none(), "前有字母");
         assert!(parse_guid_str("381b4222-f694-41f0-9685-ff5bb260df2eX").is_none(), "后有字母");
         assert!(parse_guid_str("381b4222f694-41f0-9685-ff5bb260df2e").is_none(), "少一个连字符");
+    }
+
+    /// 通用删除闸「微软保留三档拒删」原样钉住（G-04 专用口只对单一 GUID 开口，
+    /// 本闸不许被任何改造放宽 —— v3 P1-2 验收：通用保留方案测试仍拒绝删除）。
+    #[test]
+    fn 保留三档一律拒删其余放行() {
+        for (guid, _, _) in KNOWN_PLANS {
+            let e = require_reserved_plans_untouched(guid).expect_err("保留三档必须拒");
+            assert!(e.contains("保留电源方案"), "错因文案漂了：{e}");
+        }
+        assert!(
+            require_reserved_plans_untouched("8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C").is_err(),
+            "保留判定必须大小写不敏感"
+        );
+        assert!(
+            require_reserved_plans_untouched("f95fc65d-a872-4c9a-9fe7-a7a507a6f019").is_ok(),
+            "自定义方案不属保留面"
+        );
+    }
+
+    /// G-04：空/空白方案名不得参与「还原是否重复」判定（防该闸门空转放行重复导入）。
+    #[test]
+    fn g04_空方案名不参与重复判定() {
+        assert!(find_scheme_named("").is_none());
+        assert!(find_scheme_named("   ").is_none());
+    }
+
+    /// G-04：错误码 5（权限不足）必须给提权提示、不许说成「不支持」（v3 P1-2 口径）。
+    #[test]
+    fn g04_权限错误给提权提示不谎报不支持() {
+        let e = power_win32_err("删除「高性能」", 5);
+        assert!(e.contains("需要管理员权限"), "码 5 应给提权提示：{e}");
+        assert!(!e.contains("不支持"), "不得把权限失败说成不支持：{e}");
+        let e2 = power_win32_err("切换卓越性能", 87);
+        assert!(e2.contains("87"), "其它错误码应如实带码：{e2}");
     }
 
     /// power API 回填的是内存布局（小端），与字符串形态的**字节序不同**：

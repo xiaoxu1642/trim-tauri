@@ -5,7 +5,8 @@
 //! 前端只在主窗「Windows设置」页（2026-10-15 从设置页迁出）的电源计划与虚拟内存
 //! 卡片里调用，其他窗口拿不到入口。
 //!
-//! 命令命名与 CHANNEL_MAP 键一一对应；v5 P0 后电源计划与逐设置编辑共 13 条。
+//! 命令命名与 CHANNEL_MAP 键一一对应；v5 P0 后电源计划与逐设置编辑 13 条，
+//! G-04 专用能力（开启卓越性能 / 隐藏高性能 / 还原高性能，2026-10-16）新增 3 条共 16 条。
 //!
 //! # 返回体必须是 `{ success, data }`（不是裸对象）
 //!
@@ -25,10 +26,11 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::engine::guard;
 use crate::engine::native::{
-    PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_plan_apply,
-    power_plan_delete, power_plan_duplicate, power_plan_export, power_plan_import,
-    power_plan_rename, power_plan_state, power_setting_compare, power_setting_open_regedit,
-    power_settings_apply, power_settings_dump, power_settings_revert, power_settings_unlock,
+    PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_high_performance_hide,
+    power_high_performance_restore, power_plan_apply, power_plan_delete, power_plan_duplicate,
+    power_plan_export, power_plan_import, power_plan_rename, power_plan_state,
+    power_setting_compare, power_setting_open_regedit, power_settings_apply, power_settings_dump,
+    power_settings_revert, power_settings_unlock, power_ultimate_enable,
 };
 
 fn syspanel_ok(data: Value) -> Result<Value, String> {
@@ -149,6 +151,40 @@ pub async fn syspanel_power_plan_export<R: Runtime>(
         .into_path()
         .map_err(|e| format!("无效的导出路径：{e}"))?;
     power_plan_export(&guid, &path).and_then(syspanel_ok)
+}
+
+/// G-04「开启卓越性能」（2026-10-16 裁定）：已存在则直接激活，不存在则先克隆再激活。
+/// 全部走 `guard(MAIN)`（写侧、系统级、只在主窗触发）；系统级失败按 Win32 错误如实报，
+/// 权限不足（错误码 5）由引擎层给显式提权提示，不谎报「不支持」。
+#[tauri::command]
+pub fn syspanel_power_ultimate_enable<R: Runtime>(
+    window: WebviewWindow<R>,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    power_ultimate_enable().and_then(syspanel_ok)
+}
+
+/// G-04「隐藏高性能」（2026-10-16 裁定，终态 = 导出 + 删除）：高危删除类操作，
+/// 与通用删除同口径走 `confirmedHighRisk` 二次确认；引擎层只认内置高性能 GUID。
+#[tauri::command]
+pub fn syspanel_power_hide_high_performance<R: Runtime>(
+    window: WebviewWindow<R>,
+    confirmed_high_risk: bool,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    if !confirmed_high_risk {
+        return Err("隐藏「高性能」会从系统移除该方案，需要二次确认后重试".to_string());
+    }
+    power_high_performance_hide().and_then(syspanel_ok)
+}
+
+/// G-04「还原高性能」：用隐藏时记录的备份导入回来（已存在同名方案时不重复导入）。
+#[tauri::command]
+pub fn syspanel_power_restore_high_performance<R: Runtime>(
+    window: WebviewWindow<R>,
+) -> Result<Value, String> {
+    guard::guard(&window, guard::MAIN)?;
+    power_high_performance_restore().and_then(syspanel_ok)
 }
 
 #[tauri::command]

@@ -187,6 +187,11 @@ const MUST_MAIN = [
   'syspanel_power_settings_revert',
   'syspanel_power_settings_compare',      // v5 P2：跨方案对照读（只在主窗编辑器里触发）
   'syspanel_power_settings_open_regedit', // v5 P2：拉起 regedit 只从主窗编辑器触发
+  // G-04（2026-10-16 裁定）：开启卓越性能 / 隐藏高性能 / 还原高性能 —— 写侧、系统级、
+  // 只在主窗「Windows设置 → 电源计划」卡触发，无子窗调用点 ⇒ MAIN。
+  'syspanel_power_ultimate_enable',
+  'syspanel_power_hide_high_performance',
+  'syspanel_power_restore_high_performance',
   'syspanel_pagefile_state',
   'syspanel_pagefile_apply',
   // v4-K04（2026-10-09）：quickcmds_run 从 readonly 升 MAIN —— 白名单里含
