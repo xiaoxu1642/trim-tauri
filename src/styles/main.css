@@ -1711,9 +1711,9 @@ body.lg-reduce-motion .lg-thumb {
   border-bottom: 1px solid var(--border-default);
 }
 
-/* 设置页所有区块通栏：功能入口 / 背景与主题（拆分批次独立卡）/ 显示 / 系统信息 /
-   关于我们 均为整行容器，宽度保持一致（「显示」内含双列 appearance-grid，自身
-   不再与已删除的清理选项区块并排，否则右列整列留白）。 */
+/* 设置页所有区块通栏：软件功能设置项 / 背景与主题（拆分批次独立卡）/ 动效设置（独立卡，
+   2026-10-16 拆分批次续：删除「显示」外层容器）/ 系统信息 / 关于我们 均为整行容器，
+   宽度保持一致。 */
 .settings-entry-section,
 .settings-bgtheme-section,
 .settings-appearance-section,
@@ -1745,6 +1745,27 @@ body.lg-reduce-motion .lg-thumb {
 .syspanel-card-head .syspanel-tag + .btn { margin-left: 8px; }
 /* 头部相邻按钮只让首个吃 auto 靠右，后一个跟 8px（两个 auto 会均分空间撑出空隙） */
 .syspanel-card-head .btn + .btn { margin-left: 8px; }
+/* 电源计划头部：G-04 工具组（开启卓越性能 / 隐藏(还原)高性能 / 导入方案文件）——
+   2026-10-16 用户点名从卡片体移到「新建电源计划」与「刷新」之间（同一水平排）。
+   组内按钮重置头部的 auto/相邻 margin（间距走 gap；与外层按钮对的 gap+margin 同构，
+   视觉与「新建 ↔ 刷新」的间距一致）。 */
+/* 电源计划头部：G-04 工具组（开启卓越性能 / 隐藏(还原)高性能 / 导入方案文件）——
+   2026-10-16 用户点名从卡片体移到「新建电源计划」与「刷新」之间（同一水平排）。
+   间距全组统一走 head 的 gap（10px、小且一致），全组右对齐：
+   · 组内按钮重置头部的 auto/相邻 margin（否则首按钮被 auto 推开、间距不齐）；
+   · span 之后的「刷新」同样抑制 auto（否则被推到最右、与组内断出大空隙）。 */
+.syspanel-card-head span.syspanel-power-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+.syspanel-card-head span.syspanel-power-tools .btn {
+  margin-left: 0;
+}
+.syspanel-card-head .syspanel-power-tools + .btn {
+  margin-left: 0;
+}
 /* 电源计划：一页展示完毕的小区块（网格语言同快捷指令）
    口径 v2·A 类：tile 自身就是可点击命中区，常态底自带 floor（与 .btn 同一套栈），
    选中/当前态在同一 floor 上叠 accent 染层；已登记进 check-contrast 的 SURFACE_LEDGER。 */
@@ -4393,18 +4414,6 @@ img.ctx-col-icon {
    改回更高浓度会被 tools/check-contrast.mjs 判红。 */
 .rt-badge.scanning { color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 
-/* 设置页：显示容器三项卡片 */
-.appearance-grid {
-  display: grid;
-  /* 两列等宽；行内卡片等高（stretch），避免短卡片下方留出大片空白 */
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 14px;
-  align-items: stretch;
-}
-/* 背景图片卡片横跨整行，消除末行空格 */
-.appearance-grid > .appearance-card:last-child {
-  grid-column: 1 / -1;
-}
 /* 批次（v3.0）：「背景与主题」合并卡 —— 预设背景与导入背景合二为一，横跨整行，
    内部双列：左列背景（预设/导入/模糊度），右列壁纸轮换与主题颜色 */
 .appearance-card.appearance-card-wide {

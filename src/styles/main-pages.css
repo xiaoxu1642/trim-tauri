@@ -195,7 +195,6 @@
   border-radius: 999px;
   font-weight: 400;
 }
-.syspanel-actions { margin-top: 12px; }
 .syspanel-pf-mode { margin: 0 0 8px; color: var(--fg-primary); }
 .syspanel-pf-hint {
   margin: 10px 0 0;

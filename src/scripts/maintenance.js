@@ -172,7 +172,7 @@
             <div class="intro-ai-text">${escapeHtml(resp.data.desc)}</div>
             <div class="intro-ai-meta">来源：${escapeHtml(resp.data.source || 'AI 大模型')}${resp.data.cached ? ' · 缓存' : ''}</div>`;
         } else if (resp && resp.message === 'disabled') {
-          aiBox.innerHTML = '<div class="intro-ai-fail">所选大模型尚未启用，请到「设置 → 功能入口 → 大模型管理」启用后重试。</div>';
+          aiBox.innerHTML = '<div class="intro-ai-fail">所选大模型尚未启用，请到「设置 → 软件功能设置项 → 大模型管理」启用后重试。</div>';
         } else {
           aiBox.innerHTML = `<div class="intro-ai-fail">${escapeHtml((resp && resp.message) || '暂时无法获取解释，请稍后重试')}</div>`;
         }

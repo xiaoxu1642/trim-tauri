@@ -999,12 +999,17 @@
     el.innerHTML = `
       <div class="syspanel-power-current">当前方案：<strong>${esc(activeName || '未知')}</strong></div>
       <div class="syspanel-power-grid">${cards}</div>
-      <div class="syspanel-actions">
+    `;
+    // G-04 工具组（2026-10-16 用户点名）：移到卡片头部「新建电源计划」与「刷新」之间——
+    // 宿主是 index.html 里的 #syspanelPowerTools 占位（span）；每次渲染重建（幂等，无累积）。
+    const toolsHost = document.getElementById('syspanelPowerTools');
+    if (toolsHost) {
+      toolsHost.innerHTML = `
         <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerUltimate" data-tip="不存在时自动创建；激活后立即生效">开启卓越性能</button>
         ${hpToolBtn}
         <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerImport">导入方案文件…</button>
-      </div>
-    `;
+      `;
+    }
     el.querySelector('.syspanel-power-grid')?.addEventListener('click', onPowerTileClick);
     document.getElementById('btnSyspanelPowerUltimate')?.addEventListener('click', (ev) => onUltimateEnable(ev.currentTarget));
     document.getElementById('btnSyspanelPowerHideHp')?.addEventListener('click', (ev) => onHideHighPerformance(ev.currentTarget));

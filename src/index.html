@@ -1170,7 +1170,7 @@
         </div>
         <div class="settings-grid" id="settingsGrid">
           <div class="settings-section settings-entry-section">
-            <h3>功能入口</h3>
+            <h3>软件功能设置项</h3>
             <div class="settings-entry-cards">
               <!-- 安装路径绑定 / 大模型管理 / 字体选择：三卡片横向排列，仅图标 + 标题 + 操作按钮，简介移入各弹窗内 -->
               <div class="settings-entry-card">
@@ -1326,11 +1326,14 @@
                 </div>
           </div>
           </div>
-          <!-- 「显示」section：拆分批次后仅保留「动效设置」卡（背景与主题已剥离为上方独立卡）；
-               材质卡（v3.0 起隐藏）恢复为 appearance-grid 直接子，动效卡保持末位以命中通栏规则 -->
+          <!-- 动效设置独立卡（拆分批次续，2026-10-16 用户点名）：删除「显示」外层白容器与
+               appearance-grid 包裹，动效设置升为与「背景与主题」同级的顶层独立卡；
+               材质卡（v3.0 起隐藏）原位随迁（display:none，零布局影响） -->
           <div class="settings-section settings-appearance-section">
-            <h3>显示</h3>
-            <div class="appearance-grid">
+            <div class="appearance-card-head">
+              <h4>动效设置</h4>
+              <p>指针轨迹与界面切换动效</p>
+            </div>
               <!-- 窗口材质与背景模糊度合并卡（v3.0）：横跨整行，display:none 不参与布局 -->
               <div class="appearance-card appearance-card-wide" id="materialBlurCard">
                 <div class="appearance-card-head">
@@ -1385,35 +1388,28 @@
               </div>
               <!-- 背景图片卡已并入上方「背景与主题」合并卡（v3.0） -->
               <!-- 动效设置（设置页整合4）：合并原「鼠标拖尾」与「切换动效」两张卡 -->
-              <div class="appearance-card">
-                <div class="appearance-card-head">
-                  <h4>动效设置</h4>
-                  <p>指针轨迹与界面切换动效</p>
+              <div class="appearance-sub">
+                <div class="appearance-sub-head">鼠标拖尾</div>
+                <div class="mouse-trail-row">
+                  <span class="mouse-trail-label">启用鼠标拖尾</span>
+                  <label class="toggle-switch" for="mouseTrailToggle" data-tip="开启后指针移动会留下淡紫色光点轨迹">
+                    <input type="checkbox" id="mouseTrailToggle" />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  </label>
                 </div>
-                <div class="appearance-sub">
-                  <div class="appearance-sub-head">鼠标拖尾</div>
-                  <div class="mouse-trail-row">
-                    <span class="mouse-trail-label">启用鼠标拖尾</span>
-                    <label class="toggle-switch" for="mouseTrailToggle" data-tip="开启后指针移动会留下淡紫色光点轨迹">
-                      <input type="checkbox" id="mouseTrailToggle" />
-                      <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                    </label>
-                  </div>
-                  <p class="appearance-hint">在软件范围内显示轻量指针轨迹，仅作用于当前窗口，可随时关闭</p>
-                </div>
-                <div class="appearance-sub">
-                  <div class="appearance-sub-head">动效选择</div>
-                  <div class="skin-row">
-                    <span class="skin-row-label">效果</span>
-                    <select id="liquidMotionSelect" data-tip="切换全局液态玻璃效果强度">
-                      <option value="full">完整液态玻璃</option>
-                      <option value="standard">标准液态玻璃</option>
-                      <option value="off">关闭</option>
-                    </select>
-                  </div>
+                <p class="appearance-hint">在软件范围内显示轻量指针轨迹，仅作用于当前窗口，可随时关闭</p>
+              </div>
+              <div class="appearance-sub">
+                <div class="appearance-sub-head">动效选择</div>
+                <div class="skin-row">
+                  <span class="skin-row-label">效果</span>
+                  <select id="liquidMotionSelect" data-tip="切换全局液态玻璃效果强度">
+                    <option value="full">完整液态玻璃</option>
+                    <option value="standard">标准液态玻璃</option>
+                    <option value="off">关闭</option>
+                  </select>
                 </div>
               </div>
-            </div>
           </div>
           <div class="settings-section settings-about-section">
             <h3>关于我们</h3>
@@ -1485,6 +1481,8 @@
           <div class="syspanel-card-head">
             <h4>电源计划</h4>
             <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerNew" data-tip="选一个模板克隆为新的自定义方案">新建电源计划</button>
+            <!-- G-04 工具组宿主：syspanel.js 按状态渲染 开启卓越性能 / 隐藏（还原）高性能 / 导入方案文件 -->
+            <span class="syspanel-power-tools" id="syspanelPowerTools"></span>
             <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerRefresh" data-tip="重新读取当前方案">刷新</button>
           </div>
           <div id="syspanelPowerBody" class="syspanel-card-body">
