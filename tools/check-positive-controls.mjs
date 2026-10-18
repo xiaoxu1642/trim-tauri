@@ -43,6 +43,9 @@ const REGISTRY = [
   { file: 'check-power-write-surface.mjs', reason: 'P0-1 电源写面：9 条正反样本自检（powercfg 写命令/电源命名空间必判红，只读查询与页面文件步骤必须放行）+ ALLOW 双棘轮（登记不命中必红）' },
   { file: 'check-tools-doc-paths.mjs', reason: 'v6-K23：tools/ 仓外路径形态——path.join 的 docs 段 / 写死 docs 路径字面量四形态合成样本必须判红 + 注释与日志提及必须放行（剥注释、保留字符串的判定器）；另经真破坏验证——给 import-winapp2 塞回 docs 段后 exit 1' },
   { file: 'check-system-bin.mjs', reason: 'v6-K01/P0-2：判定器抽成 extractHitsFromText 后与 H 组 5 个合成样本共用同一实现（裸字面量/raw 版裸字面量/安装包路径误塞系统工具入口必判红，PINNED 解析与变量形态放行）+ F 组生产实参地板（12 个生产在用名掉表即红，与 systembin 单测两道防线）+ quiet 组扩到 timeout/raw 三个 spawn 门面（39+ 处超时调用点不再对 A/B 失明）+ G 组路径形态实参必红' },
+  { file: 'check-layering.mjs', reason: 'v6-P2：判定器抽 layeringHit 纯函数，三样本自检（代码行必中 / **注释行也必中**——「注释不豁免」口径被悄悄改掉必须红 / 干净行放行）+ 既有扫描面地板与 commands 层正向对照' },
+  { file: 'check-fail-closed.mjs', reason: 'v6-P2：A/B 判定器抽纯函数（tempScriptDowngrades / toStrUnwraps），四样本自检（A 违例必红、A 干净放行、B 违例必红、B 注释行放行）与真仓扫描共用同一实现' },
+  { file: 'check-css-tokens.mjs', reason: 'v6-P2：三组判据抽纯函数（radiusViolations / undeclaredTokenRefs / curveOffenders），合成样本自检（违档 5px/2px 必红、档位与胶囊放行；未定义引用必红、已定义与 ALLOW 放行；曲线越集必红、值集内放行）' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
@@ -52,16 +55,15 @@ const REGISTRY = [
 const PENDING_CONTROLS = [
   { name: 'check-channel-map', reason: '对拍型：桥接表 ⇄ Rust 通道集合双向比对，缺「删/添一侧必须红」的合成样本' },
   { name: 'check-guard-tiers', reason: '对拍型：档位表 ⇄ 命令体 guard 调用逐条核对，缺合成样本' },
-  { name: 'check-layering', reason: '找违规型：下层反向引用上层即红，缺违规样本自检' },
+  // check-layering 已于 2026-10-18 v6 P2 配好判定器自检并迁入 REGISTRY（本表只减不增）。
   { name: 'check-delete-callsites', reason: '棘轮+地板：超基线/扫描面归零即红；缺「人为加一行 remove_file 必须红」的合成样本' },
-  { name: 'check-fail-closed', reason: '找违规型：降级回退形态即红，缺违规样本自检' },
-  // check-system-bin 已于 2026-10-18 v6 P0-2 配齐正向对照并迁入 REGISTRY（本表只减不增）。
+  // check-fail-closed 已于 2026-10-18 v6 P2 配好 A/B 判定器自检并迁入 REGISTRY（本表只减不增）。
   { name: 'check-residue-rule-contract', reason: '对拍型：卸载残留规则库 ⇄ 执行侧契约，缺合成样本' },
   { name: 'check-scan-rule-diff', reason: '差分型：规则改动 → 命中集差分（按设计 spawn cargo test，重编译成本高），对照方案待定' },
   { name: 'check-ps-callsites', reason: '对拍型：PS 调用点 ⇄ 三张登记表（含超时秒数逐点核对），缺合成样本' },
   { name: 'check-ps-extraction', reason: '对拍型：JS 源 ⇄ .ps1 正文逐字（文本层 + --run 行为层双档），缺「单字节漂移必须红」样本' },
   { name: 'check-csp-consistency', reason: '对拍型：meta CSP ⇄ 三子窗副本逐字一致，缺合成样本' },
-  { name: 'check-css-tokens', reason: '找违规型：未定义 token 引用 / 圆角离档即红，缺违规样本自检' },
+  // check-css-tokens 已于 2026-10-18 v6 P2 配好三组判定器自检并迁入 REGISTRY（本表只减不增）。
   { name: 'check-assets-used', reason: '找违规型：src/assets 零引用文件即红，缺违规样本自检' },
   // check-asset-size 已于 2026-10-14 v3 P2-I 配好内置正向对照并迁入 REGISTRY（本表只减不增）。
   { name: 'check-treemap-layout', reason: '性质型：squarified 布局数学性质（面积和/包含关系），缺「人为破坏性质必须红」样本' },

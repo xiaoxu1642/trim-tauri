@@ -83,10 +83,10 @@ const check = (ok, label, detail = '') => {
 console.log('=== fail-closed 口径门禁 ===\n');
 
 // ---- A. temp_script_dir() 的结果不得在同语句回退到 env::temp_dir() ----
-const aHits = [];
-for (const f of files) {
-  const text = readFileSync(f, 'utf8');
-  const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
+// v6-P2（T1 假绿扫尾）：A/B 判定器抽成纯函数（喂 text+rel+exempt），合成样本自检
+// 与真仓扫描共用同一实现——此前判据只有真仓扫描，判定器失灵即恒绿。
+function tempScriptDowngrades(text, rel, exempt = new Set()) {
+  const hits = [];
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
   const lineOf = (off) => {
@@ -108,21 +108,14 @@ for (const f of files) {
     const stmt = statementFrom(text, m.index);
     if (!/env::temp_dir\(\)/.test(stmt)) continue;
     const ln = lnIdx + 1;
-    if (EXEMPT[`${rel}:${ln}`]) continue;
-    aHits.push(`${rel}:${ln}`);
+    if (exempt.has(`${rel}:${ln}`)) continue;
+    hits.push(`${rel}:${ln}`);
   }
+  return hits;
 }
-check(
-  aHits.length === 0,
-  'A. temp_script_dir() 的结果不得在同语句回退到 env::temp_dir()',
-  aHits.length ? `违规 ${JSON.stringify(aHits)}（私有 tmp 被替换时必须 Err 传播，不得降级到全局可写 %TEMP%）` : '',
-);
-
-// ---- B. 生产代码禁 to_str().unwrap()（非 UTF-8 路径 panic） ----
-const bHits = [];
-for (const f of files) {
-  const text = readFileSync(f, 'utf8');
-  const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
+/** B 组判定（纯函数）：路径转字符串禁 unwrap */
+function toStrUnwraps(text, rel, exempt = new Set()) {
+  const hits = [];
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
   const lineOf = (off) => {
@@ -141,9 +134,47 @@ for (const f of files) {
     const lineEnd = text.indexOf('\n', lineStart);
     if (text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd).trimStart().startsWith('//')) continue;
     const ln = lnIdx + 1;
-    if (EXEMPT[`${rel}:${ln}`]) continue;
-    bHits.push(`${rel}:${ln}`);
+    if (exempt.has(`${rel}:${ln}`)) continue;
+    hits.push(`${rel}:${ln}`);
   }
+  return hits;
+}
+{
+  // 正向对照四件：A 违例样本必中 / A 干净样本放行 / B 违例样本必中 / B 注释行放行
+  const aBad = tempScriptDowngrades(
+    'fn x() { let t = paths::temp_script_dir().unwrap_or_else(|_| std::env::temp_dir()); }',
+    'fake.rs',
+  );
+  const aOk = tempScriptDowngrades('fn x(p: &Path) -> Result<(), E> { let t = paths::temp_script_dir()?; Ok(()) }', 'fake.rs');
+  const bBad = toStrUnwraps('fn y(p: &Path) { let s = p.to_str().unwrap(); }', 'fake.rs');
+  const bOk = toStrUnwraps('// 迁移说明：旧写法 p.to_str().unwrap() 已由 ok()? 替代\nfn z(p: &Path) -> Option<&str> { p.to_str() }', 'fake.rs');
+  if (aBad.length !== 1 || aOk.length !== 0 || bBad.length !== 1 || bOk.length !== 0) {
+    g.fail(
+      `fail-closed 判定器自检失败：A 违例=${aBad.length}（应 1） A 干净=${aOk.length}（应 0） ` +
+        `B 违例=${bBad.length}（应 1） B 注释/干净=${bOk.length}（应 0）`,
+    );
+  } else {
+    console.log('✓ 判定器自检：A/B 违例样本必中、干净与注释样本放行（四样本）');
+  }
+}
+const aHits = [];
+for (const f of files) {
+  const text = readFileSync(f, 'utf8');
+  const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
+  aHits.push(...tempScriptDowngrades(text, rel, new Set(Object.keys(EXEMPT).map((k) => k))));
+}
+check(
+  aHits.length === 0,
+  'A. temp_script_dir() 的结果不得在同语句回退到 env::temp_dir()',
+  aHits.length ? `违规 ${JSON.stringify(aHits)}（私有 tmp 被替换时必须 Err 传播，不得降级到全局可写 %TEMP%）` : '',
+);
+
+// ---- B. 生产代码禁 to_str().unwrap()（非 UTF-8 路径 panic） ----
+const bHits = [];
+for (const f of files) {
+  const text = readFileSync(f, 'utf8');
+  const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
+  bHits.push(...toStrUnwraps(text, rel, new Set(Object.keys(EXEMPT).map((k) => k))));
 }
 check(
   bHits.length === 0,

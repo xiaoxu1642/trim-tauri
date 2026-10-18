@@ -24,6 +24,23 @@ const LOWER_LAYERS = [
 ];
 
 const g = gate(import.meta.url);
+// v6-P2：判定器抽成纯函数 + 合成样本自检（T1 假绿扫尾）——「下层不得引用
+// crate::commands::」此前只有真仓扫描，判据本身恒绿无对照。
+function layeringHit(line) {
+  return line.includes('crate::commands::');
+}
+{
+  // 正向对照三件：代码行必中；**注释行也必中**（口径明写「注释里的字样不豁免」——
+  // 注释写 API 全名同样误导 grep 式检索，这条口径若被悄悄改掉必须红）；干净行放行。
+  const code = layeringHit('use crate::commands::contextmenu;');
+  const comment = layeringHit('// 对照 crate::commands::foo 的旧写法');
+  const clean = layeringHit('use crate::engine::paths;');
+  if (!code || !comment || clean) {
+    g.fail(`layering 判定器自检失败：代码行=${code} 注释行=${comment}（应 true） 干净行=${clean}（应 false）`);
+  } else {
+    console.log('✓ 判定器自检：代码行/注释行必中、干净行放行（三样本）');
+  }
+}
 const hits = [];
 let scanned = 0;
 for (const { dir, label } of LOWER_LAYERS) {
@@ -32,7 +49,7 @@ for (const { dir, label } of LOWER_LAYERS) {
     const rel = relative(SRC, f).replace(/\\/g, '/');
     const lines = readFileSync(f, 'utf8').split(/\r?\n/);
     lines.forEach((line, i) => {
-      if (line.includes('crate::commands::')) {
+      if (layeringHit(line)) {
         hits.push(`${rel}:${i + 1}`);
       }
     });

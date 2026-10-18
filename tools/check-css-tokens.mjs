@@ -82,6 +82,53 @@ function lineOf(text, index) {
   return line;
 }
 
+// ==================== 纯判据（v6-P2，T1 假绿扫尾） ====================
+// 三组判定抽成纯函数，合成样本自检与真仓扫描共用同一实现。
+// 圆角：字面值必须落档位 4/6/8/10/14（<4 禁字面值、≥90 胶囊放行）。
+function radiusViolations(text, rel) {
+  const out = [];
+  for (const m of text.matchAll(/border(?:-(?:top|bottom)-(?:left|right))?-radius:\s*(\d+)px/g)) {
+    const px = Number(m[1]);
+    const label = m[0].split(':')[0].trim();
+    if (px >= 90) continue;
+    if (px < 4) out.push(`${rel} ${label}: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
+    else if (![4, 6, 8, 10, 14].includes(px)) out.push(`${rel} ${label}: ${px}px（不在档位 4/6/8/10/14）`);
+  }
+  return out;
+}
+// 未定义引用：refs（名字 → 引用位）∧ ¬defined ∧ ¬allow ⇒ 红。
+function undeclaredTokenRefs(refs, defined, allow) {
+  return [...refs.keys()].filter((n) => !defined.has(n) && !allow.has(n)).sort();
+}
+// 动效曲线：JS 内 cubic-bezier 数值序列必须 ∈ token 值集（返回违例 + 位置供行号）。
+function curveOffenders(text, easeTokens) {
+  const out = [];
+  for (const m of text.matchAll(/cubic-bezier\(([^)]+)\)/g)) {
+    const norm = m[1].split(',').map((x) => Number(x.trim())).join(',');
+    if (!easeTokens.has(norm)) out.push({ index: m.index, norm, raw: m[1].trim() });
+  }
+  return out;
+}
+{
+  // 正向对照：违档必红 / 档位与胶囊放行 / 未定义引用必红 / 已定义与 ALLOW 放行 /
+  // 曲线越集必红、值集内放行。
+  const r = (px) => radiusViolations(`.x { border-radius: ${px}px; }`, 'fake.css').length;
+  const radiusOk = r(5) === 1 && r(2) === 1 && r(8) === 0 && r(999) === 0 && r(10) === 0;
+  const u = (refs, defined, allow = new Set()) => undeclaredTokenRefs(refs, defined, allow);
+  const undefOk =
+    u(new Map([['--ghost', []]]), new Set(), new Set()).length === 1 &&
+    u(new Map([['--real', []]]), new Set(['--real']), new Set()).length === 0 &&
+    u(new Map([['--allowed', []]]), new Set(), new Set(['--allowed'])).length === 0;
+  const ease = new Set(['0.23,1,0.32,1']);
+  const cBad = curveOffenders('.x { a: cubic-bezier(0.4,0,0.2,1); }', ease).length;
+  const cOk = curveOffenders('.x { a: cubic-bezier(0.23, 1, 0.32, 1); }', ease).length;
+  if (!radiusOk || !undefOk || cBad !== 1 || cOk !== 0) {
+    console.error(`✗ 正向对照失败：圆角=${radiusOk} 未定义引用=${undefOk} 曲线越集=${cBad}（应 1） 曲线放行=${cOk}（应 0）——三组判定器至少一组失灵`);
+    process.exit(1);
+  }
+  console.log('✓ 判定器自检：圆角档位 / 未定义引用 / 动效曲线 三组合成样本全对');
+}
+
 const defined = new Set();     // 定义面
 const declaredIn = new Map();  // 名字 -> 首个定义位置（报错时给读者一个去处）
 const refs = new Map();        // 名字 -> [{ at, hasFallback }]
@@ -168,10 +215,8 @@ for (const file of [...cssFiles, ...htmlFiles, ...jsFiles]) {
   }
 }
 
-// ---- 判红 ----
-const bad = [...refs.keys()]
-  .filter((n) => !defined.has(n) && !ALLOW_UNDECLARED.has(n))
-  .sort();
+// ---- 判红（v6-P2：判据本体是 undeclaredTokenRefs，与自检共用同一实现） ----
+const bad = undeclaredTokenRefs(refs, defined, ALLOW_UNDECLARED);
 
 // ---- 圆角 token 纪律（v2 批次 D4，2026-10-01）----
 // 为什么跟 token 门禁放一起：都是「CSS 字面值绕过设计系统」的同类纪律。
@@ -185,17 +230,8 @@ for (const file of cssFiles) {
   const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
   // v2-L4P-44（E-14）：扩到四角写法 border-top-right-radius 等——只盯简写会漏掉
   // 单角字面值（同一档位纪律，四角写法是同一约束的逃逸口）。
-  for (const m of text.matchAll(/border(?:-(?:top|bottom)-(?:left|right))?-radius:\s*(\d+)px/g)) {
-    const px = Number(m[1]);
-    const label = m[0].split(':')[0].trim();
-    // AGENTS：胶囊与徽章不在档位约束内——>=90px 是全仓既定的胶囊写法（999/99px），放行
-    if (px >= 90) continue;
-    if (px < 4) {
-      radiusBad.push(`${rel}:${lineOf(text, m.index)} ${label}: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
-    } else if (![4, 6, 8, 10, 14].includes(px)) {
-      radiusBad.push(`${rel}:${lineOf(text, m.index)} ${label}: ${px}px（不在档位 4/6/8/10/14）`);
-    }
-  }
+  // v6-P2：判据本体是 radiusViolations（与自检共用同一实现）。
+  radiusBad.push(...radiusViolations(text, rel));
 }
 
 console.log(`引用面 ${refs.size} 个自定义属性；定义面 ${defined.size} 个（CSS 声明 + JS/HTML 运行时写入）`);
@@ -226,11 +262,11 @@ let curveSites = 0;
       .replace(/(^|[^:\w])\/\/.*$/gm, '$1');
     for (const m of text.matchAll(/cubic-bezier\(([^)]+)\)/g)) {
       curveSites++;
+    }
+    // v6-P2：违例判定走 curveOffenders（与自检共用同一实现）；行号在这里补
+    for (const off of curveOffenders(text, EASE_TOKENS)) {
       if (CURVE_EXEMPT.has(f)) continue;
-      const norm = m[1].split(',').map((x) => Number(x.trim())).join(',');
-      if (!EASE_TOKENS.has(norm)) {
-        curveBad.push(`${f}:${text.slice(0, m.index).split('\n').length} cubic-bezier(${m[1].trim()}) 不在 token 值集（${[...EASE_TOKENS].join(' | ')}）`);
-      }
+      curveBad.push(`${f}:${text.slice(0, off.index).split('\n').length} cubic-bezier(${off.raw}) 不在 token 值集（${[...EASE_TOKENS].join(' | ')}）`);
     }
   }
 }
