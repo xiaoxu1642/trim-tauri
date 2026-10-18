@@ -14,13 +14,21 @@ use super::common::*;
 /// 查询服务状态（Running/Stopped 等）
 pub(super) unsafe fn service_status(name: &str) -> Option<(u32, u32)> {
     // 返回 (currentState, startType)；startType 需要 QueryServiceConfig，简化为 0
-    let scm = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT);
-    if scm.is_err() { return None; }
-    let scm = scm.unwrap();
+    // v6-P2（R5/A5 panic 族）：旧写法 `if is_err { return }` + 紧跟 `.unwrap()`——
+    // 不变量靠约定不靠类型。改结构化 match：句柄失败路径显式关上游句柄，unwrap 从
+    // 生产面消失（与同文件 service_stop 的 map_err 口径一致）。
+    let scm = match OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) {
+        Ok(h) => h,
+        Err(_) => return None,
+    };
     let name_w = to_wide(name);
-    let svc = OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS);
-    if svc.is_err() { let _ = CloseServiceHandle(scm); return None; }
-    let svc = svc.unwrap();
+    let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = CloseServiceHandle(scm);
+            return None;
+        }
+    };
     let mut status = SERVICE_STATUS::default();
     let ok = QueryServiceStatus(svc, &mut status as *mut _);
     let _ = CloseServiceHandle(svc);

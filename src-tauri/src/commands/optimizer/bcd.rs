@@ -267,9 +267,14 @@ fn vsm_protection_hit(current: &BcdMap) -> bool {
 }
 
 /// 对一行面板做三态判定
-pub fn evaluate_row(row_id: &str, current: &BcdMap, _globals: &BcdMap) -> BcdRowState {
+///
+/// v6-P2（R5/A5 panic 族）：`row_id` 收紧为 `&'static str`——生产调用点只迭代
+/// `ALL_ROW_IDS`（全 &'static）、测试传字面量，同样满足。旧实现里
+/// `ALL_ROW_IDS.iter().find(...).expect(...)` 对非成员 id 会 panic 掉 IPC 线程；
+/// 现在非成员 id 走 `row_targets` 的空表兜底 ⇒ elements 空 ⇒ 判 Unhit，fail-closed。
+pub fn evaluate_row(row_id: &'static str, current: &BcdMap, _globals: &BcdMap) -> BcdRowState {
     let targets = row_targets(row_id);
-    let static_id = ALL_ROW_IDS.iter().find(|&&id| id == row_id).copied().expect("evaluate_row: row_id must be in ALL_ROW_IDS");
+    let static_id = row_id;
     let mut elements = Vec::with_capacity(targets.len());
     let mut any_exists = false;
     let mut any_needs = false;

@@ -310,8 +310,11 @@ pub async fn fileclean_scan<R: Runtime>(
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "data": [], "message": msg });
     }
+    // v6-P2（R5/A5 panic 族）：`Some("qq") | Some("wechat") => scan_type.unwrap()`
+    // 的 unwrap 是「匹配臂保证 Some」的约定式不变量；改成绑定臂内值，unwrap 从
+    // 生产面消失（语义不变）。
     let ty = match scan_type.as_deref() {
-        Some("qq") | Some("wechat") => scan_type.unwrap(),
+        Some(t @ ("qq" | "wechat")) => t.to_string(),
         _ => return json!({ "success": false, "data": [], "message": "未知类型" }),
     };
 

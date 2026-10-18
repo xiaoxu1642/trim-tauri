@@ -763,12 +763,17 @@ fn fair_trim(records: &mut Vec<LibRecord>, notes: &mut Vec<String>) {
     while total > RECORD_CAP {
         // 扣当前条数最多的平台；并列取首现序靠前者（确定性——同级分数时 max_by_key 取最后一个，
         // 故用 Reverse(i) 把「更小的序」抬成更大）
-        let i = counts
+        // v6-P2（R5/A5 panic 族）：counts 非空在「total > CAP」下恒成立（total 由 counts
+        // 求和、CAP ≥ 1），但这是三步推理出来的约定式不变量；改 let-else 走结构化兜底，
+        // 推理链断了也不 panic（扫描线程panic = 整轮残留判定报废）。
+        let Some(i) = counts
             .iter()
             .enumerate()
             .max_by_key(|(i, c)| (**c, std::cmp::Reverse(*i)))
             .map(|(i, _)| i)
-            .expect("counts 非空");
+        else {
+            break;
+        };
         counts[i] -= 1;
         dropped[i] += 1;
         total -= 1;
@@ -776,7 +781,11 @@ fn fair_trim(records: &mut Vec<LibRecord>, notes: &mut Vec<String>) {
     let mut taken = vec![0usize; order.len()];
     let mut kept: Vec<LibRecord> = Vec::with_capacity(RECORD_CAP);
     for r in records.drain(..) {
-        let i = order.iter().position(|p| *p == r.platform).expect("平台来自 order");
+        // 平台名全部来自上方 order 的构建遍历（同一数据源），position 恒命中；
+        // let-else 是把这条推理断掉时的兜底（跳过该条而不是炸掉整轮扫描）。
+        let Some(i) = order.iter().position(|p| *p == r.platform) else {
+            continue;
+        };
         if taken[i] < counts[i] {
             taken[i] += 1;
             kept.push(r);

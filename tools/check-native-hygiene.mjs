@@ -56,6 +56,26 @@ function stripRust(src) {
       out += ' ';
       continue;
     }
+    // v6-P2：Rust **原始串** `r"..."` / `r#"..."#`——不处理转义，`r"\\?\"` 的尾部 `\`
+    // 不是转义引号。旧实现把它当普通串的 \" 消费，一个 raw 串就把后面整段吃进
+    // "字符串"（N1-N4/N8/N10 对路径密集文件集体失明——diskbench.rs 实测全文件
+    // 只剩一个 ""）。`r` 前面必须是非标识符字符（防把 `for`/变量名 `r` 当串前缀）。
+    if (c === 'r' && (d === '"' || d === '#')) {
+      const prev = i > 0 ? src[i - 1] : '';
+      if (!/[A-Za-z0-9_]/.test(prev)) {
+        const m = /^r(#*)"/.exec(src.slice(i, i + 16));
+        if (m) {
+          // 终止符 = 哈希 + **单个**引号（r"…" → '"'；r#"…"# → '"#"'）。曾错写成
+          // `"${m[1]}"`（两侧都包引号）⇒ 单哈希串找的是连续两个引号，一个 raw 串
+          // 就把后面整段吃进"字符串"。
+          const close = `${m[1]}"`;
+          const end = src.indexOf(close, i + m[0].length);
+          i = end === -1 ? n : end + close.length;
+          out += '""';
+          continue;
+        }
+      }
+    }
     if (c === '"') {
       i++;
       while (i < n && src[i] !== '"') { if (src[i] === '\\') i++; i++; }
@@ -402,13 +422,20 @@ for (const s of WALK_DEPTH_SITES) {
 }
 // N7：按 mtime 取最新的实现唯一化 —— 现算唯一实现是 startup::pick_newest_file；
 // 新出现同名职责函数（fn *newest*/*latest*）即红，须复用或在登记表加一条理由。
+// v6-P2：stripRust 修好 raw-string 吞段后，测试区里的用例名（如
+// ledger_takes_the_newest_copy_not_the_new_root）也会被看见——N7 守的是**生产**
+// 实现唯一性，测试区与 N10 同口径在首个 #[cfg(test)] 处切割。
 const NEWEST_FN = /fn\s+\w*(?:newest|latest)\w*\s*\(/g;
+function stripRustProduction(src) {
+  const cut = src.search(/^\s*#\s*\[cfg\(test\)\]/m);
+  return stripRust(cut === -1 ? src : src.slice(0, cut));
+}
 let n7sites = 0;
 {
   const found = [];
   for (const f of files) {
     const rel = relative(ROOT, f).replace(/\\/g, '/');
-    const clean = stripRust(readFileSync(f, 'utf8'));
+    const clean = stripRustProduction(readFileSync(f, 'utf8'));
     for (const m of clean.matchAll(NEWEST_FN)) {
       found.push(`${rel}: ${m[0].trim()}`);
     }
@@ -460,6 +487,80 @@ let n7sites = 0;
   };
   for (const v of n9TableDeclIssues(readRel, SNAPSHOT_TABLES)) {
     g.fail(`N9-C：${v}`);
+  }
+}
+
+// ---- N10（v6-P2，R5/A5 panic 族）：生产面 panic/unwrap 登记棘轮 ----
+// 口径：src-tauri/src + native-scanner/src 的**生产代码**（首个 #[cfg(test)] 之后不算、
+// 注释不算——stripRust 已剥）出现 `.unwrap()/.expect(/panic!(/unreachable!(/todo!(
+// /unimplemented!(` ⇒ 必须逐文件登记（{file, count, reason}），计数对不上即红——
+// 「登记后偷偷加一处」与「登记后偷偷删一处（登记失效信号）」都拦。
+// 现存 7 处全部是登记例外：util.rs 的 panic 是**编译期** const 布局断言（只在编译错
+// 时触发）；lib.rs 的 expect 是启动期窗口/运行时创建（无 UI 可落，fail-fast 唯一选择）；
+// 三份生成器产物 JSON 的 expect 由 contract_tests 钉住合法性（对 build 产物 fail-fast 正确）。
+// 其余生产 unwrap 已在 P2 批全部结构化消灭（services/fileclean/contextmenu/bcd/
+// game_platform_orphan 五处：match/filter_map/let-else/&'static str 收紧）。
+const PANIC_RE = /\.unwrap\(\)|\.expect\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(/;
+function panicViolations(src) {
+  const out = [];
+  const lines = src.split('\n');
+  let inTest = false;
+  lines.forEach((l, i) => {
+    if (/^\s*#\s*\[cfg\(test\)\]/.test(l)) inTest = true;
+    if (inTest) return;
+    if (PANIC_RE.test(l)) out.push({ line: i + 1, snippet: l.trim().slice(0, 80) });
+  });
+  return out;
+}
+{
+  // 正向对照：合成样本——生产区命中、注释与测试区不算、干净样本零误报
+  const sample = [
+    'fn a(x: Option<u8>) -> u8 { x.unwrap() }',
+    '/// 注释里的 unwrap() 与 expect( 不算',
+    '#[cfg(test)]',
+    'mod t { fn b() { let y = v.expect("x"); } }',
+  ].join('\n');
+  const vs = panicViolations(sample);
+  if (vs.length !== 1) g.fail(`N10 对照a：合成样本必须恰好命中 1 处（实得 ${vs.length}）`);
+  if (!/unwrap/.test(vs[0]?.snippet || '')) g.fail(`N10 对照a：命中的应是生产区那行（实得 ${JSON.stringify(vs[0])}）`);
+  if (panicViolations('fn c(r: Result<u8, E>) -> Option<u8> { r.ok() }').length !== 0) {
+    g.fail('N10 对照b：干净样本不得误报');
+  }
+}
+const PANIC_ALLOW = [
+  { file: 'native-scanner/src/util.rs', count: 3, reason: '编译期 const 布局断言（RM_PROCESS_INFO 668/12/652），panic 只可能发生在编译错' },
+  { file: 'src-tauri/src/lib.rs', count: 2, reason: '启动期 main 窗口创建 / Tauri 运行时构建失败——无 UI 可落，fail-fast 是唯一选择' },
+  { file: 'src-tauri/src/commands/cleanup/rules.rs', count: 1, reason: '生成器产物 cleanup-postactions.json 的 expect，合法性由 contract_tests 钉住（对 build 产物 fail-fast 正确）' },
+  { file: 'src-tauri/src/commands/maintenance.rs', count: 1, reason: '生成器产物 maintenance-tasks.json 的 expect，同上' },
+  { file: 'src-tauri/src/commands/optimizer/subitems.rs', count: 1, reason: '生成器产物 optimizer-subitems.json 的 expect，同上' },
+];
+{
+  const counts = new Map();
+  for (const f of files) {
+    const rel = relative(ROOT, f).replace(/\\/g, '/');
+    // 整文件测试模块的豁免：`#[cfg(test)] mod contract_tests;` 的 cfg 属性挂在
+    // mod.rs 的声明上、不在文件内，行级切割看不见——按命名约定（*_tests.rs）
+    // 识别。新形态出现（不叫 *_tests.rs 的整文件测试模块）会被 N10 当生产面
+    // 未登记点名，届时改命名或在这里补规则——两个方向都必须被看见。
+    if (/_tests\.rs$/.test(rel)) continue;
+    const vs = panicViolations(stripRust(readFileSync(f, 'utf8')));
+    if (vs.length) counts.set(rel, vs);
+  }
+  for (const [rel, vs] of counts) {
+    const allow = PANIC_ALLOW.find((a) => a.file === rel);
+    if (!allow) {
+      g.fail(
+        `N10：${rel} 生产面出现 ${vs.length} 处 panic/unwrap（未登记）——改为 fail-closed ` +
+          `（match/filter_map/let-else）或在 PANIC_ALLOW 登记理由；首处 L${vs[0].line} ${vs[0].snippet}`,
+      );
+    } else if (allow.count !== vs.length) {
+      g.fail(`N10：${rel} panic/unwrap 现算 ${vs.length} ≠ 登记 ${allow.count}（增删都必须同步本表）——${allow.reason}`);
+    }
+  }
+  for (const a of PANIC_ALLOW) {
+    if (!counts.has(a.file)) {
+      g.fail(`N10：${a.file} 登记了 ${a.count} 处但现算为 0 —— 判据失明或代码已改（同步本表）：${a.reason}`);
+    }
   }
 }
 

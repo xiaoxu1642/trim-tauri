@@ -317,15 +317,17 @@ pub async fn contextmenu_toggle<R: Runtime>(
     if let Some(results) = data.get("results").and_then(|v| v.as_array()) {
         let mut touched = false;
         let mut snap2 = snapshot::get(&snapshot::domain_key(window.label(), "contextmenu")).unwrap_or_default();
-        let updates: Vec<&Value> = results
+        // v6-P2（R5/A5 panic 族）：旧写法先 filter「id 是字符串」再在十行后 `.unwrap()`
+        // ——不变量隔着一个循环体，改一处忘另一处就 panic。改 filter_map 把「id 一定
+        // 是字符串」做进类型（元组第二位），unwrap 从生产面消失。
+        let updates: Vec<(&Value, &str)> = results
             .iter()
-            .filter(|r| {
-                r.get("status").and_then(|v| v.as_str()) == Some("ok")
-                    && r.get("id").and_then(|v| v.as_str()).is_some()
+            .filter_map(|r| {
+                let id = r.get("id").and_then(|v| v.as_str())?;
+                (r.get("status").and_then(|v| v.as_str()) == Some("ok")).then_some((r, id))
             })
             .collect();
-        for r in updates {
-            let id = r.get("id").and_then(|v| v.as_str()).unwrap();
+        for (r, id) in updates {
             if let Some(t) = snap2.get_mut(id) {
                 if let Some(en) = wanted.get(id) {
                     t.as_object_mut().map(|o| o.insert("enabled".into(), json!(en)));
