@@ -269,9 +269,21 @@
     ctrl.footer.querySelector('#btnPeriRestore')?.addEventListener('click', async (e) => {
       if (!window.api?.peripheralWindow?.restoreBackup) { toast('info', '请在 Trim 应用内使用该功能'); return; }
       const btn = e.currentTarget;
+      // v6-K11：导入备份是**往回写**的高危动作——.reg 文本可以携带「删除段」
+      // （[-HKEY…] 整键删除）或覆盖任意键值，旧流程点一下就导入、零确认。
+      // 确认三要素：标题点明是导入备份、正文明确可能含删除段/只接受可验证备份、
+      // 主按钮文案「仍然还原」；确认结果以 confirmedHighRisk 显式字段传给后端。
+      const ok = await window.app?.confirmDanger?.(
+        '还原外设备份（导入 .reg）',
+        '将从最近一批备份导入注册表键值。备份是 .reg 文本：若被替换或改动，导入可能包含「删除段」（整键删除）或覆盖其他键值。\nTrim 只接受带封条且哈希匹配的自产备份——旧版本备份没有封条，将无法还原。',
+        '仍然还原',
+        '取消',
+        '导入后受影响键的值会被备份内容覆盖；还原前请确认这份备份是 Trim 在你改动前生成的。'
+      );
+      if (!ok) return;
       btn.disabled = true;
       try {
-        const resp = await window.api.peripheralWindow.restoreBackup();
+        const resp = await window.api.peripheralWindow.restoreBackup(true);
         if (resp && resp.needAdmin) {
           await elevateFor('还原修改前的值（导入备份 .reg）');
           return;

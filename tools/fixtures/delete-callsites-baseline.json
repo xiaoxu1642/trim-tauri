@@ -10,6 +10,7 @@
     "src-tauri/src/engine/native/cleanup.rs": 38,
     "src-tauri/src/engine/native/contextmenu.rs": 2,
     "src-tauri/src/engine/native/maintenance.rs": 2,
+    "src-tauri/src/engine/native/peripheral.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 11,
     "src-tauri/src/engine/paths.rs": 8,
     "src-tauri/src/engine/protect.rs": 5,
@@ -46,7 +47,6 @@
   },
   "reg_import_apply": {
     "src-tauri/src/commands/optimizer/apply.rs": 1,
-    "src-tauri/src/engine/native/peripheral.rs": 1,
     "src-tauri/src/engine/reg_backup.rs": 2
   },
   "remove_dir": {

@@ -194,11 +194,24 @@ fn backup_batch_of(name: &str) -> Option<&str> {
 /// 档位同 `peripheral_apply`（2026-10-07）：唯一调用方是主窗弹窗，真正的闸门是 `is_admin()`
 /// 与「文件名必须是 `backup_<15 位时间戳>[_<数字分片号>].reg` 且只在本应用备份目录内取件」
 /// 的自产文件约束，不含任意路径入参。
+///
+/// v6-K11：导入备份是「往回写」的破坏性出口（备份内容可覆盖/整键删除），
+/// **必须收显式的 `confirmedHighRisk=true`**——渲染层的裸调用（或任何不带该字段的
+/// IPC 注入）一律拒绝。确认文案由渲染层承担「导入备份可能含删除段」的结构化警示；
+/// 这里只认字段，不认字符串理由（字符串可被伪造，字段语义由本命令定义）。
 #[tauri::command]
 pub async fn peripheral_restore_backup<R: tauri::Runtime>(
     window: WebviewWindow<R>,
+    confirmed_high_risk: Option<bool>,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
+    if confirmed_high_risk != Some(true) {
+        log::write_log("warn", "外设还原被拒：缺少 confirmedHighRisk 显式确认");
+        return Ok(json!({
+            "success": false,
+            "message": "还原备份需要显式高危确认（confirmedHighRisk），请从「还原修改前的值」入口操作"
+        }));
+    }
     if !crate::engine::sysinfo::is_admin() {
         return Ok(json!({
             "success": false, "needAdmin": true,
@@ -222,8 +235,18 @@ pub async fn peripheral_restore_backup<R: tauri::Runtime>(
         let reason = v.get("reason").and_then(|x| x.as_str()).unwrap_or("");
         // v2-M12：`partial` 是本条的关键新分支——一批里有分片没导进去时，旧回执会把它
         // 算成 ok（或干脆只导一个分片就报成功），用户拿到绿色提示却仍有键没还原。
+        // v6-K11：`unverifiable` = 全部被准入闸拒绝（无封条/哈希不符/含删除段）——
+        // 与「导入失败/文件损坏」分开说：前者该去找 Trim 生成的备份，后者才该重试。
         let msg = match reason {
             "no-backup" => "还没有可用的备份（先应用一次优化后会自动备份）".to_string(),
+            "unverifiable" => {
+                let first = v["rejected"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|r| r["reason"].as_str())
+                    .unwrap_or("该备份不是 Trim 可验证备份");
+                format!("无法还原：{first}")
+            }
             "import-failed" => "导入备份失败，备份文件可能已损坏".to_string(),
             "partial" => format!(
                 "只导入了 {restored}/{total} 个备份分片，未导入的键仍停留在优化后的值；可重试一次"

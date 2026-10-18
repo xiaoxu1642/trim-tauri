@@ -658,7 +658,7 @@
     peripheralWindow: {
       query: function () { return invokeChannel('peripheral:query'); },
       apply: function (options) { return invokeChannel('peripheral:apply', { options: options }); },
-      restoreBackup: function () { return invokeChannel('peripheral:restore-backup'); }
+      restoreBackup: function (ok) { return invokeChannel('peripheral:restore-backup', { confirmedHighRisk: ok === true }); }
     },
 
     residueWindow: {

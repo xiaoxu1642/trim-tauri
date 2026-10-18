@@ -439,6 +439,27 @@ fn pending_add_rejects_protected_paths_and_over_limit() {
     );
 }
 
+/// v6-K11：外设备份还原必须带**显式高危确认字段** `confirmedHighRisk=true`。
+///
+/// 拒杀顺序：窗口档位 → 确认字段 → 提权检查。确认闸在 is_admin 之前，所以本用例
+/// 在任何提权态下都零副作用（不读备份目录、不碰注册表）。缺字段/false 都必须拒——
+/// 「裸调用」正是渲染层漏传或 IPC 注入的形态。
+/// 破坏自证：把命令签名里的 `confirmed_high_risk` 闸删掉 ⇒ 本用例红（裸调用落到
+/// needAdmin 或真实导入）。
+#[test]
+fn peripheral_restore_requires_explicit_high_risk_field() {
+    let w = main_window();
+    let bare = invoke(&w, "peripheral_restore_backup", json!({}));
+    assert_eq!(bare["success"], json!(false), "缺 confirmedHighRisk 必须拒: {bare}");
+    assert!(
+        common::message_of(&bare).contains("confirmedHighRisk"),
+        "拒因应点名字段: {bare}"
+    );
+    // 显式 false 同样拒（只有 === true 放行，见渲染层封装）
+    let falsy = invoke(&w, "peripheral_restore_backup", json!({ "confirmedHighRisk": false }));
+    assert_eq!(falsy["success"], json!(false), "false 必须拒: {falsy}");
+}
+
 /// M5 D1：卸载域注册表备份的列表/还原两条通道都是 MAIN 档。
 ///
 /// 还原会经 `reg import` 写注册表，所以档位是它的第一道闸，子窗一律拒杀。
