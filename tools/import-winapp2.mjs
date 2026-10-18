@@ -2,12 +2,17 @@
 // import-winapp2.mjs —— WinApp2.ini → Trim 清理规则库的**精选导入器**
 //
 // 用法：
-//   node tools/import-winapp2.mjs stats --src <winapp2.ini>        只看源库画像，不写任何文件
-//   node tools/import-winapp2.mjs plan  --src <winapp2.ini>        输出精选结果（不落盘）
-//   node tools/import-winapp2.mjs apply --src <winapp2.ini>        写入 src-tauri/data/cleanup-rules.json
+//   node tools/import-winapp2.mjs stats [--src <winapp2.ini>]        只看源库画像，不写任何文件
+//   node tools/import-winapp2.mjs plan  [--src <winapp2.ini>]        输出精选结果（不落盘）
+//   node tools/import-winapp2.mjs apply [--src <winapp2.ini>]        写入 src-tauri/data/cleanup-rules.json
 //
-// 为什么单独一个工具而不是一次性脚本：WinApp2 每月都在涨（本机这份 260915 / 4068 条），
-// 「再次精选」是重复动作。把口径写成代码，下次换版本只换 --src，口径不变。
+// 源库路径**必须显式给**：`--src <path>` 或环境变量 `WINAPP2_INI`（二者 --src 优先）。
+// 刻意不做任何「默认指向 docs/…」的兜底（v6-K23）：docs/ 是本机未跟踪资料区，干净
+// 克隆里不存在——猜一个仓外路径要么一跑就是 ENOENT 堆栈，要么有人照着本机补一份
+// 口径不明的源库。缺参就打印用法并 exit 2，不猜。
+//
+// 为什么单独一个工具而不是一次性脚本：WinApp2 每月都在涨，「再次精选」是重复动作。
+// 把口径写成代码，下次换版本只换 --src，口径不变。
 //
 // 口径（每条都对得上清理规则库契约 tools/rule-schema.json 与 A1-A14 断言）：
 //   · 只收 Windows 桌面可达的目标：路径 token 必须落在契约表 cleanup.tokens 内（大小写敏感）；
@@ -26,7 +31,20 @@ const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
 const argv = process.argv.slice(2);
 const mode = argv[0] || 'stats';
 const srcArg = argv.includes('--src') ? argv[argv.indexOf('--src') + 1] : null;
-const SRC = srcArg ? path.resolve(srcArg) : path.join(ROOT, 'docs', '本仓库竞品参考', 'cankao', '8', 'src-tauri', 'resources', 'Winapp2.ini');
+// v6-K23：只认 --src / WINAPP2_INI；两者都没有就打印用法退出，绝不指向仓外默认路径
+const SRC_INPUT = srcArg || process.env.WINAPP2_INI || '';
+if (!SRC_INPUT) {
+  console.error('✗ 缺少源库路径：用 --src <winapp2.ini> 或环境变量 WINAPP2_INI 指定');
+  console.error('  例：node tools/import-winapp2.mjs stats --src D:\\refs\\Winapp2.ini');
+  console.error('  源库不在仓内（docs/ 属本机未跟踪资料区，干净克隆没有它），因此不提供默认路径。');
+  process.exit(2);
+}
+const SRC = path.resolve(SRC_INPUT);
+if (!fs.existsSync(SRC)) {
+  console.error(`✗ 源库不存在：${SRC}`);
+  console.error('  换一个 --src 指向真实的 Winapp2.ini（本工具不猜路径）。');
+  process.exit(2);
+}
 
 // ---------------------------------------------------------------- 解析
 
@@ -736,6 +754,15 @@ function plan() {
 
 function apply() {
   const { picked, rulesVersion } = build();
+  // v6-K22：两条**写盘前**地板，任一不满足即 exit 1 且不落盘——
+  //   ① picked 为空 = 源库解析塌陷（版本换代/编码变化），此时写盘会把 rulesVersion
+  //      推进而一条新规则都没有，等于「用一次空导入给整库盖章」；
+  //   ② 有规则找不到目标子类目 = 生成的库少了条目，旧实现只打一行 error 照常写盘，
+  //      回执「已写入」把残缺库说成成功（K22 本体）。
+  if (picked.length === 0) {
+    console.error('✗ 精选结果为空（源库解析塌陷或口径不匹配）——拒绝写盘，rulesVersion 未推进');
+    process.exit(1);
+  }
   const rules = loadRules();
   const before = rules.groups.reduce((n, g) => n + (g.subGroups || []).reduce((m, s) => m + (s.items || []).length, 0), 0);
   rules.rulesVersion = rulesVersion;
@@ -759,7 +786,11 @@ function apply() {
     delete p._key;
     placed++;
   }
-  if (missing.size) console.error('✗ 找不到目标子类目:', [...missing].join(', '));
+  if (missing.size) {
+    console.error('✗ 找不到目标子类目:', [...missing].join(', '));
+    console.error('  未写盘——先在 cleanup-rules.json 里建好这些子类目再重跑（写一半的库比没写更糟）');
+    process.exit(1);
+  }
   const out = path.join(ROOT, RULES_REL);
   fs.writeFileSync(out, `${JSON.stringify(rules, null, 2)}\n`, 'utf8');
   const after = rules.groups.reduce((n, g) => n + (g.subGroups || []).reduce((m, s) => m + (s.items || []).length, 0), 0);

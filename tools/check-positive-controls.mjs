@@ -41,6 +41,7 @@ const REGISTRY = [
   { file: 'check-asset-size.mjs', reason: '资源体积三段判据抽出为单一 judgeAssets，5 组合成样本与之共用同一实现（塞未登记大文件 / 条目失踪 / 超 cap 必红，等值与干净样本放行）；从 PENDING_CONTROLS 迁入本表' },
   { file: 'check-desc-vs-writes.mjs', reason: 'P1-03 文案⇄写入：原缺陷形态判红 /「其余」精确限定与无声称放行，3 条判定器自检' },
   { file: 'check-power-write-surface.mjs', reason: 'P0-1 电源写面：9 条正反样本自检（powercfg 写命令/电源命名空间必判红，只读查询与页面文件步骤必须放行）+ ALLOW 双棘轮（登记不命中必红）' },
+  { file: 'check-tools-doc-paths.mjs', reason: 'v6-K23：tools/ 仓外路径形态——path.join 的 docs 段 / 写死 docs 路径字面量四形态合成样本必须判红 + 注释与日志提及必须放行（剥注释、保留字符串的判定器）；另经真破坏验证——给 import-winapp2 塞回 docs 段后 exit 1' },
   { file: 'check-system-bin.mjs', reason: 'v6-K01/P0-2：判定器抽成 extractHitsFromText 后与 H 组 5 个合成样本共用同一实现（裸字面量/raw 版裸字面量/安装包路径误塞系统工具入口必判红，PINNED 解析与变量形态放行）+ F 组生产实参地板（12 个生产在用名掉表即红，与 systembin 单测两道防线）+ quiet 组扩到 timeout/raw 三个 spawn 门面（39+ 处超时调用点不再对 A/B 失明）+ G 组路径形态实参必红' },
 ];
 

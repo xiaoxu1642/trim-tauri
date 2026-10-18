@@ -66,6 +66,7 @@ const MUST_RUN = [
   'check-readme-claims',
   'check-readme-negative-claims',
   'check-doc-refs',
+  'check-tools-doc-paths',
   'check-comment-rot',
   'check-positive-controls',
   'check-review-units',
