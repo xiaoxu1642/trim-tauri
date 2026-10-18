@@ -161,7 +161,6 @@ pub fn looks_like_service_key(target: &str) -> bool {
 /// 本函数**现读注册表**，不读快照里缓存的结论：扫描与执行之间用户可能重装了游戏、
 /// 也可能把服务重新起来了 —— 拿那一刻的事实去删这一刻的键，正是「按过期证据动系统」那类缺陷。
 pub(super) unsafe fn service_key_delete_block_reason(target: &str) -> Option<String> {
-    use std::path::Path;
     let name = match service_key_name(target) {
         Some(n) => n,
         None => return service_key_shape_reject(target),
@@ -179,8 +178,17 @@ pub(super) unsafe fn service_key_delete_block_reason(target: &str) -> Option<Str
     let Some(landing) = landing else {
         return Some(format!("ImagePath 解析不出落点（原串 {image_raw}），对「它是什么」没有事实"));
     };
-    if Path::new(&landing).exists() {
-        return Some(format!("落点仍然存在（{landing}），本口子只处理文件已失踪的键"));
+    // K07：存在性三态——`Path::exists()` 把权限/IO 失败也返回 false，等于把
+    // 「读不到」当成「文件已失踪」放行（删掉一个落点其实还在的服务键）。
+    // Only NotFound 才是「不存在」；其它 Err 按「无法判断」拒绝。
+    match classify_landing(std::fs::symlink_metadata(&landing)) {
+        LandingState::Exists => {
+            return Some(format!("落点仍然存在（{landing}），本口子只处理文件已失踪的键"));
+        }
+        LandingState::Missing => {}
+        LandingState::Unknown(e) => {
+            return Some(format!("读不到落点元数据（{landing}: {e}），按「无法判断」拒绝"));
+        }
     }
     // %windir% 取不到 ⇒ 第 5 道闸无法判 ⇒ 按不确定处理，拒
     let windir = std::env::var("SystemRoot").or_else(|_| std::env::var("WINDIR")).unwrap_or_default();
@@ -190,17 +198,70 @@ pub(super) unsafe fn service_key_delete_block_reason(target: &str) -> Option<Str
     if landing.to_lowercase().starts_with(&windir.to_lowercase()) {
         return Some(format!("落点在系统目录内（{landing}），按 Windows 自身组件对待，不删"));
     }
-    if matches!(svc_type, Some(0x1) | Some(0x2)) {
-        return Some("服务类型是内核/文件系统驱动，删键的失败模式是启动期故障，不可接受".to_string());
+    // K07：值面四道闸（Type/Start/依赖/反作弊）收进纯函数——唯一实现，可测
+    service_key_value_block_reason(&name, &landing, svc_type, start, &depends)
+}
+
+/// 落点存在性三态（K07，纯函数可测）：`Ok` = 存在；`NotFound` = 失踪；
+/// 其余 `Err`（权限不足 / IO 错） = **不可判**（按拒处理，不许当成「不存在」）。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum LandingState {
+    Exists,
+    Missing,
+    Unknown(String),
+}
+
+pub(super) fn classify_landing(md: Result<std::fs::Metadata, std::io::Error>) -> LandingState {
+    match md {
+        Ok(_) => LandingState::Exists,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LandingState::Missing,
+        Err(e) => LandingState::Unknown(e.to_string()),
     }
-    if matches!(start, Some(0) | Some(1)) {
-        return Some("启动类型是 boot/system，由会话早期加载，删键可能导致系统起不来".to_string());
+}
+
+/// 服务键**值面**四道闸（K07：从 `service_key_delete_block_reason` 抽出，纯函数）：
+/// Type（驱动位）→ Start（加载阶段）→ 依赖 → 反作弊。返回 Some(拒因) = 不许删。
+///
+/// Type 口径（v6-K07 修复）：`Type` 是**位标志**，不是枚举——
+///   · 任一驱动位（0x1 内核 / 0x2 文件系统 / 0x4 适配器 / 0x8 识别器）即拒：
+///     旧实现只精确匹配 0x1/0x2，`0x3`（内核+文件系统）、`0x101`（驱动+可交互）
+///     这类复合值全部漏过，而删驱动键的失败模式是启动期故障；
+///   · 读不到（None）即拒：无法证明它是用户态服务 = 无法证明删了安全；
+///   · 0x10/0x20（Win32 独立/共享进程）与 0x40/0x80（用户服务）放行。
+/// Start 同理：`None` 与未知取值一律拒（不知道加载阶段就不动）。
+pub(super) fn service_key_value_block_reason(
+    name: &str,
+    landing: &str,
+    svc_type: Option<u32>,
+    start: Option<u32>,
+    depends: &[String],
+) -> Option<String> {
+    use std::path::Path;
+    match type_kind(svc_type) {
+        ServiceTypeKind::Win32 | ServiceTypeKind::UserService => {}
+        ServiceTypeKind::Driver => {
+            return Some("服务类型含驱动位（内核/文件系统/适配器/识别器），删键的失败模式是启动期故障，不可接受".to_string());
+        }
+        ServiceTypeKind::Unknown => {
+            return Some(format!(
+                "Type 读不到或不能识别（{svc_type:?}），无法证明它是用户态服务，按拒绝处理"
+            ));
+        }
+    }
+    match start {
+        Some(2) | Some(3) | Some(4) => {}
+        Some(v) => {
+            return Some(format!("启动类型是 boot/system 或未知值（{v}），由会话早期加载，删键可能导致系统起不来"));
+        }
+        None => {
+            return Some("Start 读不到，无法判断加载阶段，按拒绝处理".to_string());
+        }
     }
     if !depends.is_empty() {
         return Some(format!("仍有 {} 项依赖声明指向它，「没人用」不成立", depends.len()));
     }
-    let stem = Path::new(&landing).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    if let Some(marker) = anticheat_marker(&name, &stem) {
+    let stem = Path::new(landing).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    if let Some(marker) = anticheat_marker(name, &stem) {
         return Some(format!("命中反作弊名单（{marker}），无条件不删"));
     }
     None
@@ -301,16 +362,55 @@ pub(super) fn start_label(start: Option<u32>) -> Option<&'static str> {
     })
 }
 
+/// `Type` 位标志的语义分类（K07 唯一映射：删除判据与展示标签共用这一份）。
+///
+/// Windows 的 `SERVICE_*` Type 位：
+///   · 驱动族 0x1 内核 / 0x2 文件系统 / 0x4 适配器（保留）/ 0x8 识别器（保留）
+///   · Win32 进程族 0x10 独立 / 0x20 共享
+///   · 用户服务族 0x40 / 0x80（Windows 10 起）
+///   · 0x100 可交互修饰位（与上面的族可叠加）
+/// 旧实现把 Type 当枚举精确比 1/2（判据）与 1/2/4/16/32（标签）——两套口径互相矛盾，
+/// 且 `0x3`、`0x101` 这类复合值在判据里全漏。本枚举是唯一真源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServiceTypeKind {
+    Driver,
+    Win32,
+    UserService,
+    /// 读不到（None）或认不出的取值——**删除侧按拒处理**（无法证明是用户态服务）
+    Unknown,
+}
+
+pub(super) fn type_kind(ty: Option<u32>) -> ServiceTypeKind {
+    let Some(v) = ty else { return ServiceTypeKind::Unknown };
+    if v & 0xF != 0 {
+        ServiceTypeKind::Driver
+    } else if v & 0x30 != 0 {
+        ServiceTypeKind::Win32
+    } else if v & 0xC0 != 0 {
+        ServiceTypeKind::UserService
+    } else {
+        ServiceTypeKind::Unknown
+    }
+}
+
+/// `Type` 的中文标签（K07：与删除判据共用 [`type_kind`]，不再有第二套映射）。
+/// 读不到留 `None`（不拿 0 冒充已知）；复合位如实说「复合标志」，不折成单一类型。
 pub(super) fn type_label(ty: Option<u32>) -> Option<&'static str> {
-    // Type 是位标志与类型的混合体，常见取值就是下面五个；猜不出来如实写「其他」而不是
-    // 拿 `& 0x03` 把 16/32（Win32 独立/共享进程）折成内核驱动。
-    ty.map(|v| match v {
-        1 => "内核驱动",
-        2 => "自动加载驱动",
-        4 => "文件系统驱动",
-        16 => "独立进程服务",
-        32 => "共享进程服务",
-        _ => "其他类型",
+    ty.map(|v| match type_kind(Some(v)) {
+        ServiceTypeKind::Driver => match v & 0xF {
+            0x1 => "内核驱动",
+            0x2 => "文件系统驱动",
+            0x4 => "适配器驱动（保留位）",
+            0x8 => "识别器驱动（保留位）",
+            _ => "驱动（复合标志）",
+        },
+        ServiceTypeKind::Win32 => match v & 0x30 {
+            0x10 => "独立进程服务",
+            0x20 => "共享进程服务",
+            _ => "进程服务（复合标志）",
+        },
+        ServiceTypeKind::UserService => "用户服务",
+        ServiceTypeKind::Unknown => "其他类型",
     })
 }
 
@@ -691,12 +791,78 @@ mod tests {
         assert_eq!(type_label(None), None);
         assert_eq!(start_label(Some(4)), Some("DISABLED（已禁用）"));
         assert_eq!(type_label(Some(1)), Some("内核驱动"));
-        assert_eq!(type_label(Some(4)), Some("文件系统驱动"));
+        // K07：0x2 = 文件系统驱动，0x4 = 适配器（保留位）——旧映射把两者串成了
+        // 「自动加载驱动 / 文件系统驱动」，与删除判据口径矛盾（自动加载是 Start=2）
+        assert_eq!(type_label(Some(2)), Some("文件系统驱动"));
+        assert_eq!(type_label(Some(4)), Some("适配器驱动（保留位）"));
         assert_eq!(type_label(Some(16)), Some("独立进程服务"));
-        // 复合位标志（16|32=48）不该被折成某个单一类型冒充已知
-        assert_eq!(type_label(Some(48)), Some("其他类型"));
+        // 复合位标志（16|32=48）如实说「复合」，不折成某个单一类型冒充已知
+        assert_eq!(type_label(Some(48)), Some("进程服务（复合标志）"));
+        // 驱动 + 可交互修饰（0x101）：修饰位不改族，仍如实报内核驱动；
+        // 真正复合的是 0x3（内核+文件系统）这类
+        assert_eq!(type_label(Some(0x101)), Some("内核驱动"));
+        assert_eq!(type_label(Some(0x3)), Some("驱动（复合标志）"));
         assert_eq!(state_label(None), "状态读不到（未提权或服务已不可打开）");
         assert_eq!(state_label(Some(4)), "运行中");
+    }
+
+    /// K07：`Type` 按位标志判——复合驱动值必拒、读不到必拒、用户态族放行。
+    /// 判红自证：把 `type_kind` 退回「精确等于 0x1/0x2」⇒ ①② 红。
+    #[test]
+    fn type_bitmask_gate_rejects_composites_and_unreadable() {
+        let allow = |t: Option<u32>| {
+            service_key_value_block_reason("svc", r"C:\Games\x\svc.exe", t, Some(3), &[]).is_none()
+        };
+        // ① 复合驱动值：0x3 = 内核+文件系统、0x101 = 内核+可交互、0x8 识别器 —— 全拒；
+        //    尤其 0x11/0x21/0x41（驱动位 + 用户态位）——**只有位与判定拦得住**：
+        //    精确匹配版会把它们当成 Win32/用户服务放行（破坏自证用的分水岭样本）
+        for t in [0x1u32, 0x2, 0x3, 0x4, 0x8, 0x101, 0x103, 0x11, 0x21, 0x41] {
+            assert!(!allow(Some(t)), "驱动族复合值 0x{t:X} 必须拒");
+        }
+        // ② Type 读不到 ⇒ 拒（无法证明是用户态服务）
+        assert!(!allow(None), "Type 读不到必须拒");
+        // ③ 用户态族放行：0x10 / 0x20 / 0x110（独立+可交互）/ 0x120 / 0x40 用户服务
+        for t in [0x10u32, 0x20, 0x110, 0x120, 0x40] {
+            assert!(allow(Some(t)), "用户态类型 0x{t:X} 必须放行");
+        }
+        // ④ 认不出的取值（0、0x100 孤立修饰位）⇒ 拒
+        for t in [0u32, 0x100] {
+            assert!(!allow(Some(t)), "认不出的 Type 0x{t:X} 必须拒");
+        }
+    }
+
+    /// K07：`Start` 读不到即拒；未知取值同样拒（不知道加载阶段就不动）。
+    /// 判红自证：把 None 分支改回放行 ⇒ ① 红。
+    #[test]
+    fn start_gate_rejects_unreadable_and_unknown() {
+        let allow = |s: Option<u32>| {
+            service_key_value_block_reason("svc", r"C:\Games\x\svc.exe", Some(0x10), s, &[]).is_none()
+        };
+        assert!(!allow(None), "Start 读不到必须拒");
+        assert!(!allow(Some(0)), "boot 必须拒");
+        assert!(!allow(Some(1)), "system 必须拒");
+        assert!(!allow(Some(9)), "未知 Start 取值必须拒");
+        for s in [2u32, 3, 4] {
+            assert!(allow(Some(s)), "auto/manual/disabled 必须放行");
+        }
+    }
+
+    /// K07：落点存在性三态——权限/IO 错误**不等于**不存在（旧 `Path::exists()`
+    /// 把两者都返回 false，等于把「读不到」当「已失踪」放行）。
+    /// 判红自证：把 `classify_landing` 的 Err 分支改成 Missing ⇒ ③ 红。
+    #[test]
+    fn landing_state_three_way() {
+        // ① 真实存在：用测试进程自己的 exe
+        let exe = std::env::current_exe().expect("current_exe");
+        assert_eq!(classify_landing(std::fs::symlink_metadata(&exe)), LandingState::Exists);
+        // ② 真不存在
+        let ghost = std::env::temp_dir().join("trim-k07-ghost-9f3a.exe");
+        assert_eq!(classify_landing(std::fs::symlink_metadata(&ghost)), LandingState::Missing);
+        // ③ 权限不足/IO 错 = Unknown（不是 Missing）
+        let denied = Err::<std::fs::Metadata, _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(matches!(classify_landing(denied), LandingState::Unknown(_)));
+        let other = Err::<std::fs::Metadata, _>(std::io::Error::other("boom"));
+        assert!(matches!(classify_landing(other), LandingState::Unknown(_)));
     }
 
     #[test]

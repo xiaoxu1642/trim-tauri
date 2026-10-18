@@ -124,6 +124,26 @@ function hygieneViolations(clean) {
       out.push(`snapshot 调用未用 domain_key 限定域（跨域顶账）@${m.index}`);
     }
   }
+  // N8c（v6-K09）：自建快照表（commands/finder.rs 的 FINDER_SNAPSHOTS）的槽键也必须
+  // 带域——它不归 engine::snapshot 管，N8 主判据看不见。5 种扫描类型共用一个 label 槽
+  // 会把 emptyfolder 条目的 `empty` 标记顶掉（空树复检闸整块失效，§5.25 同族）。
+  // 判据：`store.entry(` 的实参必须直接含 `domain_key(`，或是同文件里由 `domain_key(`
+  // 赋值的变量（两跳，形态与 check-system-bin 的 C 组同思路）。
+  for (const m of clean.matchAll(/store\.entry\s*\(/g)) {
+    const open = m.index + m[0].length - 1;
+    const bal = balanced(clean, open);
+    const arg = bal ? bal[0].trim() : '';
+    let ok = arg.includes('domain_key');
+    if (!ok) {
+      const ident = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(arg);
+      if (ident) {
+        ok = new RegExp(`let\\s+${ident[1]}\\s*=\\s*[^;]*domain_key\\s*\\(`).test(clean);
+      }
+    }
+    if (!ok) {
+      out.push(`自建快照表 store.entry 的槽键未带域（domain_key）@${m.index}`);
+    }
+  }
   return out;
 }
 
@@ -269,6 +289,18 @@ console.log('=== 原生层卫生门禁（N1 裸 output / N2 定长解码 / N3 �
   check(
     hygieneViolations('snapshot::set(&snapshot::domain_key(&label, "startup"), map);').length === 0,
     '对照N8b：domain_key 限定的调用必须放行',
+  );
+  // N8c（K09）：自建快照表裸 label 槽必须判红；domain_key 直接实参 / 两跳变量放行
+  check(
+    hygieneViolations('let slot = store.entry(label.to_string()).or_default();').some((v) => v.includes('自建快照表')),
+    '对照N8c：自建快照表裸 label 槽必须判红',
+  );
+  check(
+    hygieneViolations('let slot = store.entry(crate::engine::snapshot::domain_key(label, ty)).or_default();').length === 0
+      && hygieneViolations(
+        'let slot_key = crate::engine::snapshot::domain_key(label, ty);\nlet slot = store.entry(slot_key.clone()).or_default();',
+      ).length === 0,
+    '对照N8d：domain_key 直接实参 / 两跳变量都放行',
   );
   // N4 判定器：同窗口代码出现 .reg 的读取必须判红；JSON 清单读取不得假红
   check(

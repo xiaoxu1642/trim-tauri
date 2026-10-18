@@ -1049,10 +1049,13 @@ fn recognize_pnp(body: &str) -> Option<PsOp> {
     } else {
         return None;
     };
-    let names = crate::engine::pnp::parse_name_array(body);
-    if names.is_empty() {
-        return None;
-    }
+    // K08（v6）：带对账的解析——任何名字被丢弃（截断/展开串/未闭合）即 Err，
+    // 交回通用解析/PsInline 兜底（脚本原文照跑，名单不会缺项）；绝不按部分名单执行
+    // 还回执「全做了」（旧实现在名字含 `)` 时只解析出前 16/25 个，剩下 9 个静默没做）。
+    let names = match crate::engine::pnp::parse_name_array_checked(body) {
+        Ok(n) if !n.is_empty() => n,
+        _ => return None,
+    };
     Some(PsOp::PnpSetState { names, enable })
 }
 

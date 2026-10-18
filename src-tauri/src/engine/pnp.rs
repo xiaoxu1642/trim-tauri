@@ -278,64 +278,188 @@ pub fn enumerate_all() -> Result<Vec<DevHit>, String> {
 
 // ==================== 写入面（2026-10-11：tf_dev_disable 原生化）====================
 
-/// 从步骤脚本的 `@("a","b")` / `@('a','b')` 字面量里抽出设备名（按出现顺序去重）。
+/// 一次 `@(` 区间的扫描结果（K08）。
+struct NameArrayScan {
+    /// 有效字面量（**未去重**，按出现顺序）
+    raw: Vec<String>,
+    /// 被丢弃的引号串数（含 `$` 展开/反引号/未闭合引号）——任何丢弃都让对账失败
+    dropped: usize,
+    /// 有 `@(` 找不到配对的闭合 `)`
+    unterminated: bool,
+}
+
+/// 找 `@(` 区间的终点：**引号外、括号深度回到 0** 的那个 `)`（K08）。
 ///
-/// 两种来源同一份解析：
-///   · 数据层原脚本（全选）：`$names = @("High Precision Event Timer",…)`，双引号
-///   · subitems 重建脚本（子集）：`$picked = @('System Speaker','Amdlog')`，单引号
-///
-/// 不做完整 PowerShell 词法：只认 `@(` 到第一个 `)` 之间成对引号里的字面量
-/// （设备名不含引号；单引号内 `''` 按 PS 规则还原成 `'`）。识别不到任何名字
-/// 返回空 Vec，由调用方按 fail-closed 处理——绝不允许"名字解析空了却去全量禁用"。
-pub fn parse_name_array(script: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let bytes = script.as_bytes();
-    let mut i = 0usize;
-    while let Some(rel) = bytes[i..].windows(2).position(|w| w == b"@(") {
-        let start = i + rel + 2;
-        let Some(rel_end) = bytes[start..].iter().position(|&b| b == b')') else { break; };
-        let seg = &script[start..start + rel_end];
-        let mut j = 0usize;
-        let segb = seg.as_bytes();
-        while j < segb.len() {
-            let q = segb[j];
-            if q != b'\'' && q != b'"' {
+/// 旧实现（v6-K08 病灶）在首个 `)` 处截断——设备名本身含 `)`（真实数据里 7 条
+/// `WAN Miniport (IP)` 一类），`@("…(IP)", …)` 会被切成半截串并在那里结束，
+/// 后面 9 条名字整批丢失，而调用方仍按「全做了」回执。
+fn find_array_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut j = start;
+    while j < chars.len() {
+        match chars[j] {
+            '\'' | '"' => {
+                // 跳过整段引号串：单引号里 `''` 是转义（不闭合），双引号里 `""` 同理
+                let q = chars[j];
                 j += 1;
-                continue;
-            }
-            // 双引号串若含 $ 展开/反引号，超出字面量能力，跳过整串（设备名不会有）
-            let mut k = j + 1;
-            let mut raw = String::new();
-            let mut valid = true;
-            while k < segb.len() {
-                // 引号：单引号里的 '' 是转义（→ '），其余都算闭合
-                if segb[k] == q {
-                    if q == b'\'' && k + 1 < segb.len() && segb[k + 1] == b'\'' {
-                        raw.push('\'');
-                        k += 2;
-                        continue;
+                while j < chars.len() {
+                    if chars[j] == q {
+                        if j + 1 < chars.len() && chars[j + 1] == q {
+                            j += 2;
+                            continue;
+                        }
+                        break;
                     }
-                    break;
+                    j += 1;
                 }
-                if q == b'"' && (segb[k] == b'$' || segb[k] == b'`') {
-                    valid = false;
-                    break;
+                j += 1; // 越过闭合引号（越界时循环自然结束）
+            }
+            '(' => {
+                depth += 1;
+                j += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
                 }
-                raw.push(seg[k..].chars().next().unwrap());
-                // 对非 ASCII 按字节推进修正
-                let ch_len = seg[k..].chars().next().map(char::len_utf8).unwrap_or(1);
-                k += ch_len;
+                j += 1;
             }
-            if valid && k < segb.len() && !raw.trim().is_empty()
-                && !out.iter().any(|x| x == &raw)
-            {
-                out.push(raw);
-            }
-            j = k + 1;
+            _ => j += 1,
         }
-        i = start + rel_end + 1;
     }
-    out
+    None
+}
+
+/// 区间内引号字面量抽取（K08）：按 PS 规则处理 `''`/`""` 转义；
+/// 双引号里出现 `$` / 反引号 = 展开串，按「丢弃」计（设备名不会是展开串）。
+fn extract_literals(seg: &[char], scan: &mut NameArrayScan) {
+    let mut j = 0usize;
+    while j < seg.len() {
+        let q = seg[j];
+        if q != '\'' && q != '"' {
+            j += 1;
+            continue;
+        }
+        j += 1;
+        let mut raw = String::new();
+        let mut valid = true;
+        let mut closed = false;
+        while j < seg.len() {
+            if seg[j] == q {
+                if j + 1 < seg.len() && seg[j + 1] == q {
+                    raw.push(q);
+                    j += 2;
+                    continue;
+                }
+                closed = true;
+                break;
+            }
+            if q == '"' && (seg[j] == '$' || seg[j] == '`') {
+                valid = false;
+            }
+            raw.push(seg[j]);
+            j += 1;
+        }
+        if valid && closed && !raw.trim().is_empty() {
+            scan.raw.push(raw);
+        } else {
+            scan.dropped += 1;
+        }
+        j += 1;
+    }
+}
+
+/// 扫描全部 `@(` 区间（K08）。
+fn scan_name_arrays(script: &str) -> NameArrayScan {
+    let chars: Vec<char> = script.chars().collect();
+    let mut scan = NameArrayScan { raw: Vec::new(), dropped: 0, unterminated: false };
+    let mut i = 0usize;
+    while i + 1 < chars.len() {
+        if chars[i] != '@' || chars[i + 1] != '(' {
+            i += 1;
+            continue;
+        }
+        let Some(end) = find_array_end(&chars, i + 2) else {
+            scan.unterminated = true;
+            break;
+        };
+        extract_literals(&chars[i + 2..end], &mut scan);
+        i = end + 1;
+    }
+    scan
+}
+
+/// K08 对账用的**独立计数**：所有 `@(` 区间内成对引号字面量的原始条数（含重复）。
+/// 与 [`scan_name_arrays`] 是两套遍历实现（这套只数「进入引号串」的次数），
+/// 供 [`parse_name_array_checked`] 交叉核对——两套数不一致 = 解析器漏了名字。
+pub fn count_name_array_literals(script: &str) -> usize {
+    let chars: Vec<char> = script.chars().collect();
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i + 1 < chars.len() {
+        if chars[i] != '@' || chars[i + 1] != '(' {
+            i += 1;
+            continue;
+        }
+        let Some(end) = find_array_end(&chars, i + 2) else { break };
+        // 区间内逐字符走：进入引号串计一次，`''`/`""` 视为串内转义不另计
+        let mut j = i + 2;
+        while j < end {
+            let q = chars[j];
+            if q == '\'' || q == '"' {
+                count += 1;
+                j += 1;
+                while j < end {
+                    if chars[j] == q {
+                        if j + 1 < end && chars[j + 1] == q {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+            }
+            j += 1;
+        }
+        i = end + 1;
+    }
+    count
+}
+
+/// 从步骤脚本的 `@("a","b")` / `@('a','b')` 字面量里抽出设备名（K08：带对账）。
+///
+/// 对账三条（任一不满足即 `Err`，调用方必须 fail-closed，不得按「全做了」回执）：
+///   ① 每个 `@(` 都必须有配对的闭合 `)`（按引号配对 + 括号深度，见 [`find_array_end`]）；
+///   ② 不得有被丢弃的引号串（`$` 展开/反引号/未闭合）；
+///   ③ 解析出的原始条数（去重前）必须等于 [`count_name_array_literals`] 的独立计数。
+pub fn parse_name_array_checked(script: &str) -> Result<Vec<String>, String> {
+    let scan = scan_name_arrays(script);
+    if scan.unterminated {
+        return Err("名字数组的 @( 没有配对的闭合括号（截断或畸形脚本），无法安全解析".to_string());
+    }
+    let literals = count_name_array_literals(script);
+    if scan.dropped > 0 || scan.raw.len() != literals {
+        return Err(format!(
+            "名字数组对账失败：区间内引号字面量 {literals} 个，解析出 {} 个、丢弃 {} 个（含 $ 展开/未闭合）——拒绝按部分名单执行",
+            scan.raw.len(),
+            scan.dropped
+        ));
+    }
+    // 去重保序（同一名字重复出现只禁一次）
+    let mut out: Vec<String> = Vec::new();
+    for n in scan.raw {
+        if !out.iter().any(|x| *x == n) {
+            out.push(n);
+        }
+    }
+    Ok(out)
+}
+
+/// 兼容入口：解析不出来按空表返回（调用方的 fail-closed 判据仍是「空表不许全量」）。
+pub fn parse_name_array(script: &str) -> Vec<String> {
+    parse_name_array_checked(script).unwrap_or_default()
 }
 
 /// 一次设备批量状态变更的结果。
@@ -570,6 +694,66 @@ foreach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Obj
         assert!(parse_name_array(r#"@("$env:X")"#).is_empty());
         // 单引号转义 '' → '
         assert_eq!(parse_name_array("@('a''b')"), vec!["a'b".to_string()]);
+    }
+
+    /// K08：名字里带 `)` 不得截断——旧实现在首个 `)` 处切段，`WAN Miniport (IP)`
+    /// 一类名字会把后面的条目整批丢掉（真实数据 16/25）。
+    /// 判红自证：把 `find_array_end` 改回「首个 `)` 即终点」⇒ 本用例红。
+    #[test]
+    fn 名字数组括号深度解析不吃名字里的右括号() {
+        let script = r#"$names = @("WAN Miniport (IP)","WAN Miniport (IKEv2)","System Speaker")
+foreach ($n in $names) { Get-PnpDevice | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq "OK" } | Disable-PnpDevice -Confirm:$false }"#;
+        assert_eq!(
+            parse_name_array_checked(script).expect("括号深度解析必须成功"),
+            vec!["WAN Miniport (IP)", "WAN Miniport (IKEv2)", "System Speaker"]
+        );
+        // 对账的独立计数与解析条数一致（3 个引号字面量）
+        assert_eq!(count_name_array_literals(script), 3);
+        // 括号深度：名字里嵌套两层括号也不截断
+        let nested = r#"@("A (B (C))","D")"#;
+        assert_eq!(parse_name_array_checked(nested).unwrap(), vec!["A (B (C))", "D"]);
+        // 截断形态（没有配对闭括号）⇒ Err，不得按空表继续
+        assert!(parse_name_array_checked(r#"@("a","b""#).is_err(), "未闭合数组必须 Err");
+        // 展开串 ⇒ Err（对账失败），parse_name_array 兼容入口回空表
+        assert!(parse_name_array_checked(r#"@("$env:X")"#).is_err());
+        assert!(parse_name_array(r#"@("$env:X")"#).is_empty());
+    }
+
+    /// K08 验收：**真实数据 25/25**（v6-A6 现算：旧实现 16/25，丢 9 条含 7 个带
+    /// `)` 的 WAN Miniport）。数据文件本身是签名数据，本批只读不改（D5 拍板：
+    /// 结构化 names 留技术债）。
+    /// 判红自证：解析退回首个 `)` 截断 ⇒ 条数 16 ≠ 25 红。
+    #[test]
+    fn 真实设备名单数据解析二十五条() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/optimizer-runtime.json");
+        let raw = std::fs::read_to_string(&path).expect("读得到 data/optimizer-runtime.json");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("数据文件是合法 JSON");
+        let entry = v
+            .as_array()
+            .expect("顶层是数组")
+            .iter()
+            .find(|e| e.get("id").and_then(|x| x.as_str()) == Some("tf_dev_disable"))
+            .expect("找得到 tf_dev_disable 条目");
+        let script = entry["steps"][0]["pwsh"].as_str().expect("步骤里有 pwsh 脚本");
+        let names = parse_name_array_checked(script).expect("真实数据必须通过对账");
+        assert_eq!(names.len(), 25, "真实数据 25 条名字，解析出 {}: {names:?}", names.len());
+        assert_eq!(count_name_array_literals(script), 25, "独立计数也必须是 25");
+        // A6 现算丢失的 9 条：7 个带 `)` 的 WAN Miniport + 两条排在截断点之后的
+        for lost in [
+            "WAN Miniport (IP)",
+            "WAN Miniport (IKEv2)",
+            "WAN Miniport (L2TP)",
+            "WAN Miniport (PPPOE)",
+            "WAN Miniport (PPTP)",
+            "WAN Miniport (SSTP)",
+            "WAN Miniport (Network Monitor)",
+            "High Definition Audio Controller",
+            "Root Print Queue",
+        ] {
+            assert!(names.iter().any(|n| n == lost), "丢名字了：{lost}");
+        }
+        // 首条与去重保序
+        assert_eq!(names[0], "High Precision Event Timer");
     }
 
     /// 真机往返：找一台 Status=OK 的设备，禁用后立刻启用回来。

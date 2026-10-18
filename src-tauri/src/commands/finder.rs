@@ -103,68 +103,98 @@ fn snapshots() -> &'static Mutex<HashMap<String, HashMap<String, SnapEntry>>> {
     FINDER_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 结果写入本窗口快照槽（累积合并，不整体重置——对齐 FD-7）。
+/// 结果写入本窗口**本扫描类型**的快照槽（累积合并，不整体重置——对齐 FD-7）。
 /// `raws` = 原生侧登记的「展示串键 → 路径真身」，只装 lossy 的那批（见 `ScanTally::raws`）。
-/// 返回槽内条目数。
+/// 槽键 = `domain_key(label, scan_type)`（v6-K09）：5 种扫描类型共用一张路径表时，
+/// 后扫的类型会把先扫条目的 `empty` 标记顶掉——空目录的「删除前空树复检」闸整块失效
+/// （AGENTS §5.25 同族：槽必须带域维）。返回本类型槽内条目数。
 fn store_snapshot(
     label: &str,
+    scan_type: &str,
     items: &[Value],
     raws: &HashMap<String, OsString>,
     ts: i64,
 ) -> usize {
+    let slot_key = crate::engine::snapshot::domain_key(label, scan_type);
     let mut store = snapshots().lock().unwrap_or_else(|e| e.into_inner());
-    let slot = store.entry(label.to_string()).or_default();
-    for item in items {
-        let Some(p) = item.get("path").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记。
-        // analyzer（C-5）：kind=dir 有删除语义；2026-10-06 任务四起 kind=oldfile（老旧大文件）
-        // 也有（file 粒度）；summary/ext/time 不入快照槽。
-        let t = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let akind = item.get("kind").and_then(|v| v.as_str());
-        if t == "analyzer" && !matches!(akind, Some("dir") | Some("oldfile")) {
-            continue;
-        }
-        let key = path_key(p);
-        // 审查 v2-M5：两条**不同**的原生路径 lossy 后可能塌成同一个展示串（不同的孤立
-        // 代理项都被换成同一个 U+FFFD，或一条真名里就带 U+FFFD、另一条是被替换出来的）。
-        // 展示串相同但真身不同就是无从区分 —— 保留先到的一条、不覆盖（覆盖等于把另一次
-        // 删除的目标悄悄换掉），计数已在 `ScanTally::ingest` 里做过。
-        let raw = raws.get(&key).cloned();
-        if let Some(exist) = slot.get(&key) {
-            if exist.raw != raw {
+    {
+        let slot = store.entry(slot_key.clone()).or_default();
+        for item in items {
+            let Some(p) = item.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记。
+            // analyzer（C-5）：kind=dir 有删除语义；2026-10-06 任务四起 kind=oldfile（老旧大文件）
+            // 也有（file 粒度）；summary/ext/time 不入快照槽。
+            let t = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let akind = item.get("kind").and_then(|v| v.as_str());
+            if t == "analyzer" && !matches!(akind, Some("dir") | Some("oldfile")) {
                 continue;
             }
+            let key = path_key(p);
+            // 审查 v2-M5：两条**不同**的原生路径 lossy 后可能塌成同一个展示串（不同的孤立
+            // 代理项都被换成同一个 U+FFFD，或一条真名里就带 U+FFFD、另一条是被替换出来的）。
+            // 展示串相同但真身不同就是无从区分 —— 保留先到的一条、不覆盖（覆盖等于把另一次
+            // 删除的目标悄悄换掉），计数已在 `ScanTally::ingest` 里做过。
+            let raw = raws.get(&key).cloned();
+            if let Some(exist) = slot.get(&key) {
+                if exist.raw != raw {
+                    continue;
+                }
+            }
+            let kind_dir = t == "emptyfolder"
+                || t == "appdata"
+                || (t == "analyzer" && akind == Some("dir"));
+            slot.insert(
+                key,
+                SnapEntry {
+                    path: p.to_string(),
+                    kind: if kind_dir { "dir".to_string() } else { "file".to_string() },
+                    empty: t == "emptyfolder",
+                    ts,
+                    raw,
+                },
+            );
         }
-        let kind_dir = t == "emptyfolder"
-            || t == "appdata"
-            || (t == "analyzer" && akind == Some("dir"));
-        slot.insert(
-            key,
-            SnapEntry {
-                path: p.to_string(),
-                kind: if kind_dir { "dir".to_string() } else { "file".to_string() },
-                empty: t == "emptyfolder",
-                ts,
-                raw,
-            },
-        );
-    }
-    if slot.len() > FINDER_SNAPSHOT_SLOT_MAX {
-        let mut entries: Vec<(String, i64)> = slot.iter().map(|(k, v)| (k.clone(), v.ts)).collect();
-        entries.sort_by_key(|(_, ts)| *ts);
-        for (key, _) in entries.iter().take(entries.len() / 2) {
-            slot.remove(key);
+        if slot.len() > FINDER_SNAPSHOT_SLOT_MAX {
+            let mut entries: Vec<(String, i64)> = slot.iter().map(|(k, v)| (k.clone(), v.ts)).collect();
+            entries.sort_by_key(|(_, ts)| *ts);
+            for (key, _) in entries.iter().take(entries.len() / 2) {
+                slot.remove(key);
+            }
         }
     }
-    slot.len()
+    store.get(&slot_key).map(|s| s.len()).unwrap_or(0)
 }
 
-/// P2-02：供外部扫描器（gameclean 游戏安装包扫描）把候选登记进快照槽。
+/// K09：按路径在本窗口**所有扫描类型槽**里找条目（读侧唯一的跨类型查法）。
 ///
-/// 薄包装：直接复用 [`store_snapshot`]，槽管理/上限/去重/lossy 机制只有这一份实现
-/// （§5.16/N6）。`items` 元素形如 `{path, type:"file"}`；`raws` 可选地登记
+/// 同一路径可能同时出现在多个类型槽（如 emptyfolder 与 appdata 都扫到同一目录）：
+/// 优先返回带 `empty` 标记的那条——空树复检闸的凭据不能被后扫类型顶掉；
+/// 都没有标记时返回先命中的一条（kind/path 同源，取哪条语义相同）。
+fn find_label_entry(
+    store: &HashMap<String, HashMap<String, SnapEntry>>,
+    label: &str,
+    key: &str,
+) -> Option<SnapEntry> {
+    let prefix = format!("{label}|");
+    let mut fallback: Option<SnapEntry> = None;
+    for (slot_key, slot) in store.iter() {
+        if !slot_key.starts_with(&prefix) {
+            continue;
+        }
+        if let Some(e) = slot.get(key) {
+            if e.empty {
+                return Some(e.clone());
+            }
+            if fallback.is_none() {
+                fallback = Some(e.clone());
+            }
+        }
+    }
+    fallback
+}
+
 // ==================== 输出汇聚器（Sink） ====================
 
 /// 一次扫描的**接收端累加**（与窗口无关，所以能被 `cargo test` 直测；
@@ -487,7 +517,7 @@ pub async fn finder_scan<R: tauri::Runtime>(
         }
     };
 
-    let slot_size = store_snapshot(&label, &items, &raws, crate::engine::now_ms());
+    let slot_size = store_snapshot(&label, &scan_type, &items, &raws, crate::engine::now_ms());
     let unhandled = report.unhandled;
     // 畸形行要在日志里单说一句：`errors` 同时装着「读不到的目录」和「解析不了的行」，
     // 这两类问题的处置方式完全不同（审查 v2-M4）
@@ -545,16 +575,16 @@ pub async fn finder_delete<R: tauri::Runtime>(
         .take(FINDER_DELETE_MAX)
         .collect();
 
-    // 只认本窗口快照槽内的路径（跨窗口/跨页签互不覆盖）
+    // 只认本窗口快照槽内的路径（跨窗口互不覆盖；同一窗口内任一扫描类型扫到即可删——
+    // 槽键带类型后由 `find_label_entry` 跨类型查，优先带 empty 标记的那条）
     let label = window.label().to_string();
     let known: Vec<Option<SnapEntry>> = {
         let store = snapshots().lock().unwrap_or_else(|e| e.into_inner());
-        let slot = store.get(&label);
         requested
             .iter()
             .map(|it| {
                 let p = it.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                slot.and_then(|m| m.get(&path_key(p))).cloned()
+                find_label_entry(&store, &label, &path_key(p))
             })
             .collect()
     };
@@ -1134,12 +1164,38 @@ mod tests {
             serde_json::from_str::<Value>(&item_body(&disp_b)).unwrap(),
         ];
         let label = "test-lossy-collision";
-        let slot_size = store_snapshot(label, &items, &raws, 1);
+        let slot_size = store_snapshot(label, "duplicates", &items, &raws, 1);
         assert_eq!(slot_size, 1, "同一键位只留一条");
         let stored = snapshots().lock().unwrap_or_else(|e| e.into_inner());
-        let entry = stored.get(label).and_then(|m| m.get(&path_key(&disp_a))).expect("条目应在槽内");
+        let entry = find_label_entry(&stored, label, &path_key(&disp_a)).expect("条目应在槽内");
         assert_eq!(entry.target(), a.as_os_str().to_os_string(), "预检/删除必须打到原生真身上");
         assert!(entry.is_lossy());
+    }
+
+    /// K09：快照槽必须带扫描类型第二维——先扫 emptyfolder、再扫 appdata（同一路径
+    /// 两个类型都会报到），后扫的不得把 `empty` 标记顶掉（否则删除前的空树复检闸
+    /// 整块失效）。判红自证：把 `store_snapshot` 的槽键改回裸 label ⇒ ② 红
+    /// （同一槽里 appdata 条目直接覆盖 emptyfolder 条目）。
+    #[test]
+    fn 快照槽带类型第二维_empty标记不被后扫类型顶掉() {
+        let label = format!("test-k09-{}", std::process::id());
+        let dir = r"C:\Users\me\AppData\Local\Temp\trim-empty-probe";
+        let empty_item = json!({ "path": dir, "type": "emptyfolder" });
+        let appdata_item = json!({ "path": dir, "type": "appdata" });
+        let raws = HashMap::new();
+        // ① 先扫 emptyfolder：槽里是带 empty 标记的目录条目
+        store_snapshot(&label, "empty", &[empty_item], &raws, 1);
+        // ② 再扫 appdata（同路径）：两个类型各进各的槽
+        store_snapshot(&label, "appdata", &[appdata_item], &raws, 2);
+        let stored = snapshots().lock().unwrap_or_else(|e| e.into_inner());
+        // 读侧跨类型查：必须拿到带 empty 标记的那条
+        let hit = find_label_entry(&stored, &label, &path_key(dir)).expect("跨类型查找必须命中");
+        assert!(hit.empty, "empty 标记被后扫类型顶掉了（K09 病灶）");
+        assert_eq!(hit.kind, "dir");
+        // 两个类型槽都在（第二维真的生效）
+        let prefix = format!("{label}|");
+        let slots: Vec<&String> = stored.keys().filter(|k| k.starts_with(&prefix)).collect();
+        assert_eq!(slots.len(), 2, "emptyfolder 与 appdata 必须各占一槽: {slots:?}");
     }
 
     /// 快照命中判据（`path_key`）：分隔符、大小写、`\?\` 前缀、`.`/`..` 都要折叠掉，
