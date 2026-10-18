@@ -1587,9 +1587,13 @@
               fcFreed += fcResp.data.totalFreed || 0;
               fcSuccess += fcResp.data.success || 0;
               fcFailed += fcResp.data.failed || 0;
+              // K12（v6）：path 必须保留——「登记到重启后删除」的登记面只认逐文件
+              // 失败明细（fileclean 回执的 details 逐文件带 path/status），旧映射把
+              // path 丢掉，前端只能退回扫描数据全量顶替（= 把成功项也送去永久删）。
               fcDetails.push(...(fcResp.data.details || []).map(d => ({
                 id: item.id,
                 name: item.name,
+                path: d.path || '',
                 status: d.status,
                 freed: d.freed,
                 message: d.message || ''
@@ -1682,6 +1686,8 @@
         hideProgress();
         renderCategoryList();
         updateUI();
+        // K13：清理后刷新「重启后删除」入口——本批可能刚登记了失败项
+        refreshPendingBadge();
         const freed = result.totalFreed || 0;
         // 审查 M-3：回收站模式下移入回收站的体积不计入 totalFreed，单独展示
         const recycledBytes = Number(result.recycledBytes) || 0;
@@ -1711,7 +1717,7 @@
           return true;
         });
         if (failedItems.length > 0) {
-          offerCleanupRetryPanel(failedItems);
+          offerCleanupRetryPanel(failedItems, result.details || []);
           maybeOfferElevation(`${failedItems.length} 项未完全清理，部分文件可能需要管理员权限。`);
         } else if (result.partial > 0) {
           // v3.3.4 文案纠偏：部分成功不是失败——多数文件已清理，仅少数未删（占用或权限）
@@ -1911,19 +1917,37 @@
   //   ② 登记重启后删除（uninstall:pending-add → PendingFileRenameOperations，
   //      下次开机由系统删除；目录会被后端如实 skip，回执汇总展示）。
 
-  // 收集失败项的待登记文件路径：常规项取条目目标路径，文件清理项取逐文件清单
-  function collectFailedPaths(items) {
+  // 收集待登记文件路径：**只认逐文件失败回执**（K12，2026-10-18）——
+  //   · 常规清理项：回执 details 的 failedFiles（{path, reason}；后端只外发可延期的
+  //     两档——被占用/权限不足，安全闸门拒绝的与已消失的不在其中）；
+  //   · 文件清理项：回执明细里 status==='error' 且带 path 的行。
+  // 拿不到逐文件明细的项（缺字段/旧回执）**不计入**：登记面不再拿条目目标路径或
+  // 扫描清单全量顶替——那会把成功项也送去「重启后永久删」（K12 病灶本体）。
+  function collectFailedPaths(items, details) {
+    const byId = new Map();
+    for (const d of details || []) {
+      if (!d || !d.id) continue;
+      if (!byId.has(d.id)) byId.set(d.id, []);
+      byId.get(d.id).push(d);
+    }
     const paths = [];
     for (const d of items) {
-      const sr = scanResults.get(d.id);
-      if (sr && sr.path) paths.push(sr.path);
-      const fc = fileCleanData.get(d.id);
-      if (fc && Array.isArray(fc.files)) for (const f of fc.files) if (f.path) paths.push(f.path);
+      for (const r of byId.get(d.id) || []) {
+        if (Array.isArray(r.failedFiles)) {
+          for (const f of r.failedFiles) if (f && f.path) paths.push(f.path);
+        }
+        // 文件清理项：error 行自带 path（fcDetails 映射保留，见 clean()）
+        if (r.status === 'error' && r.path) paths.push(r.path);
+      }
     }
     return [...new Set(paths)].filter(Boolean);
   }
 
-  function offerCleanupRetryPanel(items) {
+  // K12：单批登记上限（与后端 PENDING_ADD_MAX_ITEMS 一致）——失败文件动辄上百，
+  // 旧流程一次性全送，>32 必被后端整批拒「请分批登记」。前端按 32 切片顺序登记。
+  const PENDING_ADD_BATCH = 32;
+
+  function offerCleanupRetryPanel(items, execDetails) {
     if (!window.modal?.create) {
       // modal 缺席（理论不可达）：退回旧文案，至少不失声
       window.app?.toast('warning', `${items.length} 项未完全清理（部分文件可能被占用或需管理员权限，可重启后再试）`);
@@ -1983,37 +2007,146 @@
     });
 
     pendingBtn.addEventListener('click', async () => {
-      pendingBtn.disabled = true;
-      pendingBtn.textContent = '正在登记...';
-      const paths = collectFailedPaths(items);
+      // K12：登记面只认逐文件失败回执（execDetails = 本次 clean() 的合并明细）
+      const paths = collectFailedPaths(items, execDetails);
       if (!paths.length) {
-        window.app?.toast('warning', '没有可登记的文件路径（目录不支持重启后删除）');
-        pendingBtn.disabled = false;
-        pendingBtn.textContent = '登记到重启后删除';
+        window.app?.toast('warning', '没有可登记的文件：本批没有逐文件失败明细（目录、已删除与受保护项不支持重启后删）');
         return;
       }
+      // K12：PFRO 是**永久删**出口，登记前必须独立高危险确认（旧流程点了就登记，
+      // 用户不知道是永久删）。文案三要素：重启后删除 / 不进回收站 / 重启前可撤回。
+      const ok = await window.app?.confirmDanger(
+        '登记重启后删除',
+        `将把 ${paths.length} 个删除失败的文件登记为「下次重启时删除」。\n这是永久删除：不进回收站、无法还原；重启前可在本页「重启后删除」入口查看并撤回。`,
+        '仍然登记',
+        '取消',
+        '删除动作由系统在重启的会话管理器阶段执行，Trim 不参与那一步；目录不支持该机制，登记时会被跳过。'
+      );
+      if (!ok) return;
+      pendingBtn.disabled = true;
+      pendingBtn.textContent = '正在登记...';
+      // K12：按 32/批切片顺序登记，聚合回执（单批超限会被后端整批拒）
+      let added = 0;
+      let skipped = 0;
+      const failedRows = [];
       try {
-        const resp = await window.api.uninstall.pendingAdd(paths);
-        // 回执形状（pending_delete.rs）：{ success, data: { added, details: [{target,status,message}] } }
-        const data = (resp && resp.data) || {};
-        const rows = data.details || [];
-        const added = Number(data.added) || 0;
-        const skipped = rows.filter(r => r.status === 'skip').length;
-        const failedRows = rows.filter(r => r.status === 'fail');
-        if (resp && resp.success) {
-          window.app?.toast('success', `已登记 ${added} 个文件到重启后删除${skipped ? `；${skipped} 个跳过（目录/重复登记）` : ''}${failedRows.length ? `；${failedRows.length} 个登记失败` : ''}`);
-          pendingBtn.textContent = added > 0 ? '已登记' : '无可登记项';
-          pendingBtn.setAttribute('data-tip', '已登记的文件将在下次重启时由系统删除');
-          if (added === 0) pendingBtn.disabled = true;
-        } else {
-          window.app?.toast('warning', '登记失败：' + ((resp && resp.message) || '未知原因'));
-          pendingBtn.disabled = false;
-          pendingBtn.textContent = '登记到重启后删除';
+        for (let i = 0; i < paths.length; i += PENDING_ADD_BATCH) {
+          const resp = await window.api.uninstall.pendingAdd(paths.slice(i, i + PENDING_ADD_BATCH));
+          if (!resp || !resp.success) throw new Error((resp && resp.message) || '登记失败');
+          const data = resp.data || {};
+          const rows = data.details || [];
+          added += Number(data.added) || 0;
+          skipped += rows.filter(r => r.status === 'skip').length;
+          failedRows.push(...rows.filter(r => r.status === 'fail'));
         }
+        window.app?.toast('success', `已登记 ${added} 个文件到重启后删除${skipped ? `；${skipped} 个跳过（目录/重复登记）` : ''}${failedRows.length ? `；${failedRows.length} 个登记失败` : ''}`);
+        pendingBtn.textContent = added > 0 ? '已登记' : '无可登记项';
+        pendingBtn.setAttribute('data-tip', '已登记的文件将在下次重启时由系统删除（重启前可撤回）');
+        if (added === 0) pendingBtn.disabled = true;
+        refreshPendingBadge();
       } catch (e) {
         window.app?.toast('error', '登记失败：' + ((e && e.message) || e));
         pendingBtn.disabled = false;
         pendingBtn.textContent = '登记到重启后删除';
+      }
+    });
+  }
+
+  // ==================== K13：重启后删除清单（主窗查看/撤回入口） ====================
+  // 背景：登记项（PFRO + 待删台账）此前只在残留副窗可见可撤回——主窗清理域登记的
+  // 条目在主窗没有任何入口（K13 缺口本体：看得见才算「可撤回」）。档位侧
+  // uninstall:pending-list/revoke 已同 add 放到 PENDING_DELETE_WINDOWS（main+residue），
+  // 这里补主窗侧的按钮 + 清单弹窗。
+  const PENDING_STATUS_LABELS = {
+    pending: '待重启删除',
+    consumed: '已被重启消费',
+    missing: '文件已不在'
+  };
+
+  /// 刷新「重启后删除」入口按钮：有待删条目才显示；台账损坏时置灰并明示（M-6 同口径）。
+  function refreshPendingBadge() {
+    const btn = document.getElementById('btnPendingList');
+    if (!btn || !window.api?.uninstall?.pendingList) return;
+    window.api.uninstall.pendingList().then(function (resp) {
+      const data = (resp && resp.success && resp.data) || {};
+      const entries = data.entries || [];
+      const n = entries.filter(e => e.status === 'pending').length;
+      const text = document.getElementById('btnPendingListText');
+      if (data.degraded) {
+        // 台账损坏 = 撤回凭据不可信：不隐藏按钮（用户该知道 PFRO 里可能还挂着），
+        // 置灰 + data-tip 说明，与「真的没有待删项」区分开（残留副窗同口径）。
+        btn.hidden = false;
+        btn.disabled = true;
+        if (text) text.textContent = '重启后删除（台账损坏）';
+        btn.setAttribute('data-tip', '待删清单文件损坏，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
+        return;
+      }
+      btn.disabled = false;
+      btn.hidden = entries.length === 0;
+      if (text) text.textContent = n > 0 ? `重启后删除（${n}）` : '重启后删除';
+    }).catch(function () {
+      // 读失败不显示入口：没有可确认的清单就不给「查看/撤回」的幻觉
+      btn.hidden = true;
+    });
+  }
+
+  /// 打开待删清单弹窗：三态分明（pending/consumed/missing）+ 撤回全部。
+  async function openPendingListModal() {
+    let resp;
+    try {
+      resp = await window.api.uninstall.pendingList();
+    } catch (e) {
+      window.app?.toast('error', '待删清单读取失败：' + ((e && e.message) || e));
+      return;
+    }
+    const data = (resp && resp.success && resp.data) || {};
+    if (data.degraded) {
+      window.app?.toast('warning', '待删清单文件已损坏，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
+      return;
+    }
+    const entries = data.entries || [];
+    if (!entries.length) {
+      window.app?.toast('info', '当前没有登记「重启后删除」的文件');
+      refreshPendingBadge();
+      return;
+    }
+    const rows = entries.map(e => {
+      const label = PENDING_STATUS_LABELS[e.status] || e.status || '未知';
+      const tip = e.target || '';
+      return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(tip)}">${escapeHtml(tip)}</span><span class="lock-app-count">${escapeHtml(label)}</span></div>`;
+    }).join('');
+    const pendingN = entries.filter(e => e.status === 'pending').length;
+    const ctrl = window.modal.create({
+      id: 'pendingListModal-' + Date.now(),
+      title: `重启后删除（${entries.length} 项登记）`,
+      bodyHtml: `
+        <div class="confirm-message">以下文件已登记为「下次重启时删除」。这是永久删除：不进回收站；<strong>重启前</strong>可撤回，撤回后文件保持原样。</div>
+        <div class="lock-app-list">${rows}</div>`,
+      footerHtml: `
+        <span class="model-picker-spacer"></span>
+        <button class="btn btn-secondary" data-role="close" type="button">关闭</button>
+        <button class="btn btn-primary" data-role="revoke" type="button"${pendingN ? '' : ' disabled'}>撤回全部（${pendingN}）</button>`,
+      onClose() { /* 面板可随时关，不做强制 */ }
+    });
+    ctrl.footer.querySelector('[data-role="close"]').addEventListener('click', () => ctrl.close());
+    ctrl.footer.querySelector('[data-role="revoke"]').addEventListener('click', async () => {
+      // 撤回是**安全方向**（阻止删除、文件保留），走黄色确认即可；红色留给登记（永久删）。
+      const ok = await window.app?.confirmWarning(
+        '撤回重启后删除',
+        `将把 ${pendingN} 个仍挂起的登记从系统中摘除：这些文件不会被删除，保持原样。已被重启消费或文件已不在的条目会一并从清单清除。`,
+        '撤回全部',
+        '取消',
+        '撤回需要管理员权限（系统重启队列只允许管理员修改）；未提权时会失败且不动清单。'
+      );
+      if (!ok) return;
+      try {
+        const rr = await window.api.uninstall.pendingRevoke();
+        if (!rr || !rr.success) throw new Error((rr && rr.message) || '撤回失败');
+        window.app?.toast('success', `已撤回 ${(rr.data && rr.data.revoked) || 0} 项登记，相关文件不会被删除`);
+        ctrl.close();
+        refreshPendingBadge();
+      } catch (e) {
+        window.app?.toast('error', '撤回失败：' + ((e && e.message) || e));
       }
     });
   }
@@ -2309,6 +2442,9 @@
     document.getElementById('btnScan')?.addEventListener('click', scan);
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
+    // K13：重启后删除清单入口（有待删条目才显示；登记/撤回后刷新）
+    document.getElementById('btnPendingList')?.addEventListener('click', openPendingListModal);
+    refreshPendingBadge();
     document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);
     // C1-1 占用查询：查询 / 回车提交 / 结束进程（结束为不可逆操作，内部走 confirmDanger）
     document.getElementById('lockQueryBtn')?.addEventListener('click', () => runLockQuery());

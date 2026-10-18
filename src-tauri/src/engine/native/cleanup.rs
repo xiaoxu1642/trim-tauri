@@ -645,6 +645,11 @@ fn cleanup_execute_with_backup_root(
     // 复制失败/超限都不阻塞删除，否则清理主链被备份故障绑架）。
     const FILE_BACKUP_MAX_FILE: u64 = 64 * 1024 * 1024;
     const FILE_BACKUP_MAX_BATCH: u64 = 256 * 1024 * 1024;
+    // K12（v6）：逐文件失败明细的上限。登记面（PFRO 重启后永久删）从「条目目标
+    // 路径全量」改为消费这个清单；一条规则可命中上万个文件，全量外发会把回执
+    // 撑爆（前端还要按 32/批切）。超出部分只计数（failedFilesTotal），不静默——
+    // 前端 toast 照实说登记了几个。
+    const FAILED_FILES_CAP: usize = 500;
     let files_backup_root = backup_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| crate::engine::paths::backup_write_dir("cleanup-files-backup"));
@@ -1174,6 +1179,12 @@ let mut freed = 0i64;
     // Kudu S2（2026-10-16）：身份证比对不通过的拒绝（同 protected/reparse 口径：独立计数、留痕）
     let mut identity_blocked = 0i64;
     let mut identity_samples: Vec<String> = Vec::new();
+    // K12（v6）：本规则逐文件失败明细（{path, reason}，reason = occupied/denied）——
+    // 「登记到重启后删除」的登记面只认这个清单，不再拿条目目标路径全量顶替
+    // （全量 = 把成功项也送去永久删）。只收可延期两档：被占用与权限不足；
+    // gone（删时已不存在）无可删，protected/reparse/identity 是安全闸门的拒绝，
+    // 都不进永久删出口。上限 FAILED_FILES_CAP，总数另计（failedFilesTotal）。
+    let mut failed_files: Vec<Value> = Vec::new();
     // Kudu S2：别名解析（父目录 canonicalize）按父目录 memo——同目录下成千上万个文件只解析一次
     let mut final_memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         let mut backup_skipped = 0usize;
@@ -1273,9 +1284,22 @@ let mut freed = 0i64;
                     Err(e) => {
                         // R4（2026-10-15）：失败按因分档（共享判据，5/32 分开说）。
                         match classify_delete_error(&e) {
-                            DeleteFailureKind::Denied => denied += 1,
+                            DeleteFailureKind::Denied => {
+                                denied += 1;
+                                // K12：逐文件失败明细——只收**可延期**的两档（提权
+                                // 在重启后由系统代劳）；gone 无可删、安全闸门的三档
+                                // 不进永久删出口（理由见 failed_files 声明处）。
+                                if failed_files.len() < FAILED_FILES_CAP {
+                                    failed_files.push(json!({ "path": path, "reason": "denied" }));
+                                }
+                            }
                             DeleteFailureKind::Gone => gone += 1,
-                            _ => failed += 1,
+                            _ => {
+                                failed += 1;
+                                if failed_files.len() < FAILED_FILES_CAP {
+                                    failed_files.push(json!({ "path": path, "reason": "occupied" }));
+                                }
+                            }
                         }
                     }
                 }
@@ -1358,6 +1382,11 @@ let mut freed = 0i64;
         details.push(json!({
             "id": id, "name": name, "status": status,
             "freed": freed, "message": message, "fileCount": deleted, "residual": failed,
+            // K12：逐文件失败明细（登记「重启后删除」的唯一合法来源；拿不到明细的
+            // 条目前端不得登记）。total = residual + denied（两档都可延期）；
+            // 超出 CAP 的部分只进 total，清单本身截断——前端照实展示登记了几个。
+            "failedFiles": failed_files,
+            "failedFilesTotal": failed + denied,
             // 受保护路径的拒绝**不进 residual**：residual 的语义是「文件被占用、
             // 清理后重试」，而这一类是「按保护清单拒绝」——混进去会让渲染层弹出
             // 「关闭相关程序后重试」的误导提示（审计 §4.1）。渲染层目前不消费这个
@@ -2297,6 +2326,74 @@ mod cleanup_engine_contract_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// K12（v6，P0-4）：逐文件失败明细的**行为级**端到端用例——真文件、真跑
+    /// cleanup_execute：一个正常文件、一个被独占句柄占着的文件（`share_mode(0)`
+    /// ⇒ 删除撞 ERROR_SHARING_VIOLATION(32)）。断言失败明细里恰好是那个被占文件
+    /// （reason=occupied），成功文件不进明细。
+    ///
+    /// 为什么必须是行为级：源码形态断言（include_str! + contains）抓不到
+    /// 「代码在、但被 if false 包住」这类禁用；而这条明细是「登记到重启后删除」
+    /// 登记面的唯一来源——假绿一次的后果是用户点登记时什么都没有。
+    /// 判红自证：把 Err 分支的 failed_files.push 禁用/删掉 ⇒ 本用例红。
+    #[cfg(windows)]
+    #[test]
+    fn 逐文件失败明细收占用项_真文件端到端() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("trim-k12-failedfiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+
+        let ok_file = dir.join("ok.log");
+        let busy_file = dir.join("busy.log");
+        std::fs::write(&ok_file, b"0123456789").unwrap();
+        std::fs::write(&busy_file, b"0123456789").unwrap();
+        // share_mode(0) = 不向其他句柄开放读写/删除 ⇒ DeleteFile 撞共享冲突
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&busy_file)
+            .expect("打开占用样本");
+
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"k12ff","name":"K12 明细探测",
+            "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*.log", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"k12ff","name":"K12 明细探测","path": dir.to_string_lossy()})];
+
+        let bk = BackupSandbox::new("k12ff");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("执行应返回结果而不是 Err");
+        let d = &res.details[0].clone();
+        drop(hold);
+
+        assert!(!ok_file.exists(), "未被占用的文件必须真删掉");
+        assert!(busy_file.exists(), "被占用文件必须保留");
+        let ff = d["failedFiles"].as_array().expect("failedFiles 必须是数组");
+        let has_busy = ff.iter().any(|f| {
+            f["reason"] == "occupied"
+                && f["path"]
+                    .as_str()
+                    .map(|p| p.to_lowercase().ends_with("busy.log"))
+                    .unwrap_or(false)
+        });
+        assert!(has_busy, "占用失败必须进 failedFiles（reason=occupied）: {d}");
+        assert!(
+            !ff.iter().any(|f| f["path"]
+                .as_str()
+                .map(|p| p.to_lowercase().ends_with("ok.log"))
+                .unwrap_or(false)),
+            "成功文件不得进 failedFiles: {d}"
+        );
+        assert_eq!(d["failedFilesTotal"].as_i64(), Some(1), "总数应与明细一致: {d}");
     }
 
     /// R3 前提复核（2026-10-15，实测证伪后重写）：原方案「清只读位 + 重试」的前提是

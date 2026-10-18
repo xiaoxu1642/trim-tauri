@@ -408,6 +408,39 @@ fn js_num_str(n: f64) -> String {
         }
     }
 
+    /// K12（v6）：逐文件失败明细的接线钉桩——「登记到重启后删除」的登记面只认
+    /// `failedFiles`（{path, reason}），拿不到明细不得登记（前端 collectFailedPaths
+    /// 的兜底就是「不计入」）。判据同 ④：分档正确性由纯函数钉，这里钉「明细真的
+    /// 在收集、真的随 details 外发」这层接线。
+    /// 判红自证：把 failed_files 的收集或外发删掉 ⇒ ①② 红。
+    #[test]
+    fn 逐文件失败明细接线在位() {
+        let code = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+        // ① Err 分支的两个可延期档必须进明细（occupied/denied）；gone 不进（无可删）
+        assert!(
+            code.contains("failed_files.push(json!({ \"path\": path, \"reason\": \"denied\" })"),
+            "denied 档没进 failed_files 明细"
+        );
+        assert!(
+            code.contains("failed_files.push(json!({ \"path\": path, \"reason\": \"occupied\" })"),
+            "occupied 档没进 failed_files 明细"
+        );
+        // ② 明细与总数必须随 details 外发（渲染层消费的就是这两个字段）
+        for field in ["\"failedFiles\": failed_files", "\"failedFilesTotal\": failed + denied"] {
+            assert!(code.contains(field), "details 缺字段 {field}");
+        }
+        // ③ 安全闸门的三档（protected/reparse/identity）不许进明细——它们的出路不是
+        //    永久删出口（前端也不该把它们送去登记）
+        let seg = &code[code.find("failed_files.push").unwrap_or(0)..];
+        let seg = &seg[..seg.find("details.push").unwrap_or(seg.len())];
+        for gate in ["protected_blocked +=", "reparse_blocked +=", "identity_blocked +="] {
+            assert!(
+                !seg.contains(&format!("{gate} 1;\n                                failed_files.push")),
+                "安全闸门档 {gate} 疑似进了 failed_files 明细"
+            );
+        }
+    }
+
     /// 2026-10-04 磁盘清理审计 §4.6：契约表查询不许有「取不到就挑个默认值」的形态。
     ///
     /// 契约表 `engine/rule_schema.rs` 头上声明的是 fail-closed：「所有校验器拿到

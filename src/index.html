@@ -301,6 +301,10 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4zM6 7v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6z"/></svg>
             <span>开始清理</span>
           </button>
+          <button class="btn btn-secondary" id="btnPendingList" type="button" hidden data-tip="查看/撤回「重启后删除」登记项（重启前可撤回）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 4a8 8 0 108 8h-2a6 6 0 11-6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35A7.96 7.96 0 0012 4z"/></svg>
+            <span id="btnPendingListText">重启后删除</span>
+          </button>
         </div>
         <div class="cleanup-toolbar-actions" data-actions-for="cleanup-dups">
           <button class="btn btn-secondary" id="dupBtnSelect">

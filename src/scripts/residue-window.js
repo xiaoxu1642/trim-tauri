@@ -408,12 +408,25 @@
       dangerHint: '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
     });
     if (!ok) return;
+    // K12（v6）：后端单批上限 32（PENDING_ADD_MAX_ITEMS）——残留执行一批最多 200 个
+    // 目标，失败文件可能超 32，旧流程一次性全送必被整批拒「请分批登记」。按 32 切片
+    // 顺序登记、聚合回执。
+    const PENDING_BATCH = 32;
     try {
-      const resp = await window.api.uninstall.pendingAdd(state.pendingFailed);
-      if (!resp.success) throw new Error(resp.message || '登记失败');
-      const d = resp.data || {};
-      toast(d.added ? 'success' : 'info', d.added
-        ? `已登记 ${d.added} 项，将在下次重启时永久删除（重启前可撤回）`
+      let added = 0;
+      let skipped = 0;
+      let failedN = 0;
+      for (let i = 0; i < state.pendingFailed.length; i += PENDING_BATCH) {
+        const resp = await window.api.uninstall.pendingAdd(state.pendingFailed.slice(i, i + PENDING_BATCH));
+        if (!resp.success) throw new Error(resp.message || '登记失败');
+        const d = resp.data || {};
+        const rows = d.details || [];
+        added += Number(d.added) || 0;
+        skipped += rows.filter(r => r.status === 'skip').length;
+        failedN += rows.filter(r => r.status === 'fail').length;
+      }
+      toast(added ? 'success' : 'info', added
+        ? `已登记 ${added} 项，将在下次重启时永久删除（重启前可撤回）${skipped ? `；${skipped} 个跳过` : ''}${failedN ? `；${failedN} 个登记失败` : ''}`
         : '没有新登记项（可能都已登记过或目标已不在）');
       state.pendingFailed = [];
       updatePendingButtons([]);

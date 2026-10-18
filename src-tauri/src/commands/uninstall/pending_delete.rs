@@ -2,6 +2,17 @@
 //!
 //! pending.xml 的形状与 PendingFileRenameOperations 的写法是重启后语义的一部分，
 //! 改动等于改系统行为；本域只登记、不立即删文件。
+//!
+//! v6-K06（P0-4）：本域的并发口径。PFRO 是**系统级全局队列**（HKLM，安装器与 OS
+//! 自己也往里写——本机实测 4 对第三方 `*1\??\` 形态条目），因此：
+//!   · 整次命令（PFRO 读-改-写 + 台账写）在 `PENDING_DELETE_LOCK` 域锁内，Trim 自身
+//!     的 add/revoke 不再交错读-改-写窗口；
+//!   · 对系统队列的任何改写都**写前重读**（`pfro_remove_deletes`），只摘本账目标的
+//!     整对，第三方条目原样保留——旧 `write_pfro` 整值覆写会抹掉读入之后他人追加的
+//!     条目（重启照删却撤不回）；
+//!   · add 的批次级整值写已删：MoveFileExW 本身就是登记机制（且未提权可用），那次
+//!     RegSetValueExW 只有管理员能过——未提权 Trim 上它必败并回滚凭据，而
+//!     MoveFileExW 早已把删除登记进系统队列 ⇒「删了撤不回」，正是 K06 要堵的形态。
 
 use crate::engine::{guard, log, protect};
 use crate::security;
@@ -26,6 +37,14 @@ use super::helpers::*;
 pub(super) const PENDING_DELETE_FILE: &str = "pending-delete.json";
 pub(super) const PFRO_SUBKEY: &str = "SYSTEM\\CurrentControlSet\\Control\\Session Manager";
 pub(super) const PFRO_VALUE: &str = "PendingFileRenameOperations";
+
+/// K06：本域（待删台账 + 系统 PFRO 队列）的进程级域锁。
+///
+/// 为什么 `security::update_json` 的全局锁不够：它只串行化 JSON 文件的读-改-写，
+/// 管不到「读 PFRO → 改 → 写 PFRO」与「读台账 → 改 → 写台账」组成的整次命令——
+/// 两个并发 add/revoke 仍可各拿一份旧 PFRO、后写覆盖前写。锁粒度为整次命令
+/// （毫秒~百毫秒级；PFRO 写入要管理员，未提权时在 MoveFileExW 之后无第二段写）。
+static PENDING_DELETE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 登记 state 文件路径（数据目录下，含 legacy 迁移口径由 paths 统一管）
 pub(super) fn pending_delete_path() -> std::path::PathBuf {
@@ -57,8 +76,33 @@ pub(super) fn pending_load() -> Value {
     }
 }
 
-pub(super) fn pending_save(doc: &Value) -> Result<(), String> {
-    crate::security::atomic_write_json(&pending_delete_path(), doc)
+/// K06：pending-delete.json 的读-改-写**唯一入口**——收进 `security::update_json`
+/// （本仓 RMW 原语：全局串行 + 读失败绝不落到写 + 原子落盘）。
+///
+/// 与旧 `pending_load`+`pending_save` 成对路径的差别：损坏/版本不符时**拒绝写入**
+/// （不再「隔离后拿空表继续跑」——那会把用户已确认的永久删清单静默换掉），
+/// 首次使用（Absent）由本函数补 version/entries 形状。只读方（list）仍走
+/// `pending_load` 的 degraded 口径。
+fn pending_update<F>(f: F) -> Result<Value, String>
+where
+    F: FnOnce(&mut Vec<Value>) -> Result<(), String>,
+{
+    security::update_json(&pending_delete_path(), |doc| {
+        // 形状不变式：version 1 + entries 数组。Absent（首次）补形状；
+        // 版本不符按拒——不静默升级/降级一个永久删凭据文件的形状。
+        if doc.get("version").is_none() && doc.get("entries").is_none() {
+            doc["version"] = json!(1);
+            doc["entries"] = json!([]);
+        }
+        if doc.get("version").and_then(Value::as_u64) != Some(1) {
+            return Err("待删台账版本不符（version != 1），拒绝写入".into());
+        }
+        let entries = doc
+            .get_mut("entries")
+            .and_then(Value::as_array_mut)
+            .ok_or("待删台账形状损坏（缺 entries 数组）")?;
+        f(entries)
+    })
 }
 
 /// MOVEFILE 失败错误码 → 中文分档（纯函数，可测）。ACCESS_DENIED 与 SHARING_VIOLATION
@@ -149,8 +193,94 @@ pub(super) fn read_pfro() -> Result<Vec<String>, String> {
     }
 }
 
-/// 写回 PFRO（REG_MULTI_SZ）。需要管理员（Session Manager 键的 DACL 只给管理员写）。
-pub(super) fn write_pfro(entries: &[String]) -> Result<(), String> {
+/// PFRO 条目 → 可比对的目标路径（纯函数，可测）。
+///
+/// 为什么要归一：同一个文件在 PFRO 里有三种字面形态——普通/verbatim Win32 路径
+/// （Trim 台账与直接注册表写）、`\??\` 设备路径、以及**会话前缀** `*<会话号>\??\`
+/// （未提权进程 MoveFileExW 登记时系统写的就是这一形态；本机现存 4 对第三方条目
+/// 全是它）。不剥这三层，MoveFileExW 登记的条目在「已登记过」检查、list 三态、
+/// 撤回摘除里全部失配——用户看着「未登记」再登记一次，或撤不回（K06 同族病）。
+/// 只做**同实体归并**（三种前缀是同一路径的三种写法），不与任何保护判据耦合。
+fn pfro_norm(entry: &str) -> String {
+    let mut s = entry.trim();
+    // `*<数字>\` 会话前缀：未提权 MoveFileExW 登记时系统写的形态
+    if let Some(rest) = s.strip_prefix('*') {
+        if let Some(idx) = rest.find('\\') {
+            if !rest.is_empty() && rest[..idx].chars().all(|c| c.is_ascii_digit()) {
+                // 注意：`*N\??\path` 里 N 后面那个 `\` 正是 `\??\` 的第一个字符——
+                // 从 idx 处切（不是 idx+1），否则设备路径前缀被啃掉一口、永远剥不掉
+                s = &rest[idx..];
+            }
+        }
+    }
+    // `\\?\` / `\??\` 两种设备/verbatim 前缀（长的在前，避免 `\\?\` 被 `\??\` 分支吃掉）
+    for pre in [r"\\?\", r"\??\"] {
+        if let Some(rest) = s.strip_prefix(pre) {
+            s = rest;
+            break;
+        }
+    }
+    // 会话前缀 + 普通盘符（`*N\C:\...`）：前导分隔符去掉，`C:` 与 `\C:` 同一实体
+    let b = s.as_bytes();
+    if b.len() > 2 && b[0] == b'\\' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        s = &s[1..];
+    }
+    s.trim_end_matches(['\\', '/']).to_lowercase()
+}
+
+/// PFRO 里"删除 target"的登记形态：src=target、紧随其后的 dst 为空串。
+/// 匹配走 [`pfro_norm`]（会话前缀/设备路径/verbatim 三形态同实体）。
+pub(super) fn pfro_has_delete(entries: &[String], target: &str) -> bool {
+    let t = pfro_norm(target);
+    if t.is_empty() {
+        return false;
+    }
+    entries
+        .windows(2)
+        .any(|w| w[1].is_empty() && pfro_norm(&w[0]) == t)
+}
+
+/// 从 PFRO 里摘掉"删除 targets 中任一路径"的整对（src+dst 一起删）。
+/// targets 与条目都过 [`pfro_norm`]；第三方条目（含 `*N\??\` 形态）路径不匹配
+/// 即原样保留——这是 K06「只摘本账对」的判据本体。
+pub(super) fn pfro_strip_deletes(entries: Vec<String>, targets: &HashSet<String>) -> Vec<String> {
+    let norm: HashSet<String> = targets.iter().map(|s| pfro_norm(s)).filter(|s| !s.is_empty()).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < entries.len() {
+        let is_ours = i + 1 < entries.len()
+            && entries[i + 1].is_empty()
+            && norm.contains(&pfro_norm(&entries[i]));
+        if is_ours {
+            i += 2; // 整对摘除
+        } else {
+            out.push(entries[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// K06：把本批 targets 的 delete 对合并进 PFRO 现值（纯函数，可测）。
+/// 只追加**尚不存在**的对（重复 target 不双登：重启时第二对必然失败，白拉长消费
+/// 阶段）；现值里的一切——第三方条目、非 delete 对、别的形状——原样保留。
+/// 与旧「整值覆写」的差别就在这句：覆写会抹掉读入之后他人追加的条目。
+pub(super) fn pfro_merge_pairs(current: Vec<String>, targets: &[String]) -> Vec<String> {
+    let mut out = current;
+    for t in targets {
+        if pfro_norm(t).is_empty() || pfro_has_delete(&out, t) {
+            continue;
+        }
+        out.push(t.clone());
+        out.push(String::new());
+    }
+    out
+}
+
+/// 写回 PFRO（REG_MULTI_SZ）。需要管理员（Session Manager 键的 DACL 只给管理员写）——
+/// 本函数只被**撤回**路径调用（摘除第三方之外的条目）；登记走 MoveFileExW，
+/// 不需要这个权限（v6-K06：见文件头）。
+fn pfro_write_all(entries: &[String]) -> Result<(), String> {
     use windows::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_SET_VALUE,
         REG_MULTI_SZ,
@@ -176,7 +306,7 @@ pub(super) fn write_pfro(entries: &[String]) -> Result<(), String> {
         if opened.is_err() {
             // 5 = ERROR_ACCESS_DENIED：Session Manager 键的 DACL 只给管理员写
             let hint = if opened.0 == 5 {
-                "（权限不足：登记/撤回重启后删除需要管理员权限，请以管理员身份运行 Trim）"
+                "（权限不足：撤回重启后删除需要管理员权限，请以管理员身份运行 Trim）"
             } else {
                 ""
             };
@@ -198,31 +328,24 @@ pub(super) fn write_pfro(entries: &[String]) -> Result<(), String> {
     }
 }
 
-/// PFRO 里"删除 target"的登记形态：src=target、紧随其后的 dst 为空串。
-pub(super) fn pfro_has_delete(entries: &[String], target: &str) -> bool {
-    let t = target.trim_end_matches(['\\', '/']).to_lowercase();
-    entries
-        .windows(2)
-        .any(|w| w[1].is_empty() && w[0].trim_end_matches(['\\', '/']).to_lowercase() == t)
+/// K06：把本批 targets 的 delete 对合并进 PFRO **现值**（写前重读）。
+/// 只追加缺失的对；第三方条目原样保留（判据本体 [`pfro_merge_pairs`] 是纯函数）。
+/// 需要管理员；只被 add 的「登记对账补写」安全网调用（正常路径不需要它——
+/// MoveFileExW 已登记，且未提权可用）。
+pub(super) fn pfro_merge_deletes(targets: &[String]) -> Result<(), String> {
+    let current = read_pfro()?;
+    let merged = pfro_merge_pairs(current, targets);
+    pfro_write_all(&merged)
 }
 
-/// 从 PFRO 里摘掉"删除 targets 中任一路径"的整对（src+dst 一起删）。
-pub(super) fn pfro_strip_deletes(entries: Vec<String>, targets: &HashSet<String>) -> Vec<String> {
-    let norm = |s: &str| s.trim_end_matches(['\\', '/']).to_lowercase();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    while i < entries.len() {
-        let is_ours = i + 1 < entries.len()
-            && entries[i + 1].is_empty()
-            && targets.contains(&norm(&entries[i]));
-        if is_ours {
-            i += 2; // 整对摘除
-        } else {
-            out.push(entries[i].clone());
-            i += 1;
-        }
-    }
-    out
+/// K06：撤回的写入口——**写前重读**当前 PFRO，只摘 targets 的整对，第三方条目
+/// （读入之后他人追加的也一样）原样写回。旧口径「读→剥离→整值覆写」会把读入
+/// 之后新增的条目抹掉（重启照删却撤不回），本函数把那个窗口关掉。
+/// 需要管理员；失败时调用方不得动台账（两边必须一致）。
+pub(super) fn pfro_remove_deletes(targets: &HashSet<String>) -> Result<(), String> {
+    let current = read_pfro()?;
+    let stripped = pfro_strip_deletes(current, targets);
+    pfro_write_all(&stripped)
 }
 
 /// 单批登记上限：口径对齐残留执行侧的 200 项目标上限（`residue.rs` 的 execute 闸）。PFRO 是系统级全局队列，
@@ -294,14 +417,24 @@ pub(super) fn pending_delete_sysns_alias_reason(target: &str) -> Option<&'static
 /// uninstall:pending-add — 把回收站失败的文件项登记为重启后删除（主窗档）。
 /// 只接受**文件**路径（PFRO 对非空目录的延迟删除并不可靠，登记了也删不掉，
 /// 与其制造"已登记=会删掉"的错觉，不如入口就拒）。
+///
+/// v6-K06 执行序（域锁 `PENDING_DELETE_LOCK` 内）：
+/// ① 读 PFRO 现值（类型异常在这里暴露，不进半登记状态）+ 读台账快照（只读）；
+/// ② 纯判定得出本批计划（闸 + 去重），零写入；
+/// ③ **先落撤回凭据**（`pending_update`）——v4 P2-F：反序会让「系统已登记、凭据
+///    不存在」= 删了撤不回；
+/// ④ 再逐条 `MoveFileExW` 登记（DELAY_UNTIL_REBOOT 只登记、立即返回；这就是
+///    系统队列的写入机制，未提权可用——批次级 RegSetValueExW 已删，见文件头）；
+/// ⑤ 单条失败的目标当场从账上摘掉，不留「凭据在、系统没登记」的幽灵条目。
 #[tauri::command]
 pub async fn uninstall_pending_add<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     targets: Vec<String>,
 ) -> Value {
     // v0.7.0 「重启后删除失败项」的入口随残留面板一起搬进 residue 副窗
-    // 消费方两个：残留副窗（原有入口）+ 主窗清理域的失败引导（2026-10-13 裁定，
-    // 见 guard::PENDING_DELETE_WINDOWS）。list/revoke 仍限残留副窗。
+    // 消费方：残留副窗（原有入口）+ 主窗清理域的失败引导（2026-10-13 裁定，
+    // 见 guard::PENDING_DELETE_WINDOWS）。v6-K13 起 list/revoke 同集放行
+    // （待删清单对主窗可见可撤回），models/processManager 无消费场景不放。
     if let Err(msg) = guard::guard(&window, guard::PENDING_DELETE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
@@ -317,10 +450,13 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
         });
     }
     let res = tauri::async_runtime::spawn_blocking(move || {
-        // 先读 PFRO：登记前必须确认能写（权限不足在这里就暴露，不要等到"登记完才发现撤不回"）
-        let mut pfro = read_pfro()?;
-        let mut doc = pending_load();
-        let entries = doc["entries"].as_array_mut().ok_or("登记文件损坏")?;
+        // K06：整次命令在域锁内——add/revoke 彼此并发不再交错读-改-写窗口
+        let _lock = PENDING_DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // ① PFRO 现值：类型异常（非 REG_MULTI_SZ）在这里就失败，不进半登记状态
+        let pfro = read_pfro()?;
+        // 台账快照（只读）：判「已登记过」用；写路径走 pending_update
+        let doc = pending_load();
+        let known = doc["entries"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
         let batch = format!(
             "p{}",
             std::time::SystemTime::now()
@@ -328,8 +464,11 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         );
+
+        // ② 纯判定：闸 + 去重（PFRO 现值 / 本批重复 / 台账在册），得出计划
         let mut rows: Vec<Value> = Vec::new();
-        let mut added = 0usize;
+        let mut plan: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         for t in &targets {
             // v2-B1（2026-10-01 复核）：PFRO 登记是**永久删**出口（不进回收站，重启后由
             // 会话管理器执行），受保护路径判定必须在命令体内前置——渲染层 confirmDanger
@@ -341,8 +480,7 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
                 rows.push(json!({ "target": t, "status": "skip", "message": "目标位于受保护路径（或无法归一化），拒绝登记重启后删除" }));
                 continue;
             }
-            // v6-K05：系统命名空间 + 别名复检（与 residue 执行侧同口径）——既有那道
-            // is_path_protected 是 exact 语义，管不到 System32 子孙与链接别名。
+            // v6-K05：系统命名空间 + 别名复检（与 residue 执行侧同口径）
             if let Some(reason) = pending_delete_sysns_alias_reason(t) {
                 rows.push(json!({ "target": t, "status": "skip", "message": reason }));
                 continue;
@@ -352,39 +490,33 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
                 rows.push(json!({ "target": t, "status": "skip", "message": "目标不是存在的文件（目录不支持重启后删）" }));
                 continue;
             }
+            let key = pfro_norm(t);
+            if !seen.insert(key) {
+                rows.push(json!({ "target": t, "status": "skip", "message": "本批内重复，不重复登记" }));
+                continue;
+            }
             let already = pfro_has_delete(&pfro, t)
-                || entries.iter().any(|e| {
-                    e["target"].as_str().map(|s| s.eq_ignore_ascii_case(t)).unwrap_or(false)
+                || known.iter().any(|e| {
+                    e["target"].as_str().map(|s| pfro_norm(s) == pfro_norm(t)).unwrap_or(false)
                 });
             if already {
                 rows.push(json!({ "target": t, "status": "skip", "message": "已登记过，不重复登记" }));
                 continue;
             }
-            use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
-            // DELAY_UNTIL_REBOOT 只登记、立即返回；删除动作发生在下次重启的会话管理器阶段
-            let moved = unsafe {
-                MoveFileExW(
-                    windows::core::PCWSTR(to_wide(t).as_ptr()),
-                    None,
-                    MOVEFILE_DELAY_UNTIL_REBOOT,
-                )
-            };
-            match moved {
-                Ok(()) => {
-                    pfro.push(t.clone());
-                    pfro.push(String::new());
-                    entries.push(json!({ "target": t, "batchId": batch, "addedAt": batch.trim_start_matches('p') }));
-                    rows.push(json!({ "target": t, "status": "ok", "message": "已登记，下次重启时删除" }));
-                    added += 1;
-                }
-                Err(e) => {
-                    let code = e.code().0 as u32 & 0xFFFF;
-                    rows.push(json!({ "target": t, "status": "fail", "message": format!("{}（错误码 {code}）", classify_pending_delete_error(code)) }));
-                }
-            }
+            plan.push(t.clone());
         }
-        if added > 0 {
-            // 审查 L-10：写回前按保留窗口裁剪（最近 20 批 / 30 天），台账不再只增不减。
+        if plan.is_empty() {
+            // 全 skip / 全失败：零写入（不碰账、不碰系统队列）
+            return Ok::<Vec<Value>, String>(rows);
+        }
+
+        // ③ 先落撤回凭据（v4 P2-F：凭据先于系统队列；K06：收进 update_json 的
+        // 全局串行 RMW，Corrupt/版本不符拒绝落盘——不再「隔离后拿空表继续跑」）
+        pending_update(|entries| {
+            for t in &plan {
+                entries.push(json!({ "target": t, "batchId": batch, "addedAt": batch.trim_start_matches('p') }));
+            }
+            // 审查 L-10：写回前按保留窗口裁剪（最近 20 批 / 30 天），台账不再只增不减
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -393,31 +525,100 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
             if pruned > 0 {
                 log::write_log("info", &format!("重启后删除台账：按保留窗口裁剪 {pruned} 条过期登记（撤回窗口已过）"));
             }
-            // v4 P2-F（R2-M03/M04）：**先落撤回凭据、再写系统 PFRO 队列** —— 旧顺序里
-            // `write_pfro(&pfro)?` 的 `?` 会让 `pending_save` 不跑：PFRO 已登记（重启必删）
-            // 而撤回凭据不存在 = 「已在重启队列但撤不回」。反序后最坏是「有凭据没系统项」
-            // （少删、可再登记），且 PFRO 失败时回滚本批凭据、回执如实说明。
-            pending_save(&doc)?;
-            if let Err(e) = write_pfro(&pfro) {
-                // 回滚经 doc 重取（外层 entries 的 &mut 借已在上面的 prune 后结束）
-                if let Some(arr) = doc["entries"].as_array_mut() {
-                    arr.retain(|en| en["batchId"].as_str() != Some(batch.as_str()));
+            Ok(())
+        })?;
+
+        // ④ 系统队列：MoveFileExW 逐条登记（DELAY_UNTIL_REBOOT 只登记、立即返回；
+        // 这就是 PFRO 的写入机制，未提权可用）
+        let mut registered: Vec<String> = Vec::new();
+        let mut failed: Vec<(String, String)> = Vec::new();
+        for t in &plan {
+            use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+            let moved = unsafe {
+                MoveFileExW(
+                    windows::core::PCWSTR(to_wide(t).as_ptr()),
+                    None,
+                    MOVEFILE_DELAY_UNTIL_REBOOT,
+                )
+            };
+            match moved {
+                Ok(()) => registered.push(t.clone()),
+                Err(e) => {
+                    let code = e.code().0 as u32 & 0xFFFF;
+                    failed.push((t.clone(), format!("{}（错误码 {code}）", classify_pending_delete_error(code))));
                 }
-                let rolled = pending_save(&doc).is_ok();
+            }
+        }
+
+        // ④b 登记对账（K06）：MoveFileExW 返回 Ok ≠ 系统队列里一定有**可匹配**的
+        // 条目——第三方条目在本机是 `*1\??\` 会话前缀形态，匹配虽走 pfro_norm 三形态
+        // 归一，真出现未知形态时这里补写一对普通形态（会话管理器两种都消费）。
+        // 补写要管理员；补写也失败 ⇒ 该目标的「已登记」不可信，改判 fail 并摘账，
+        // 不拿「已登记」糊弄（永久删出口的回执必须诚实）。
+        if !registered.is_empty() {
+            let unconfirmed: Vec<String> = match read_pfro() {
+                Ok(after) => registered
+                    .iter()
+                    .filter(|t| !pfro_has_delete(&after, t))
+                    .cloned()
+                    .collect(),
+                Err(e) => {
+                    log::write_log("warn", &format!("重启后删除：登记后重读 PFRO 失败（{e}），跳过对账"));
+                    Vec::new()
+                }
+            };
+            if !unconfirmed.is_empty() {
+                match pfro_merge_deletes(&unconfirmed) {
+                    Ok(()) => {
+                        log::write_log(
+                            "warn",
+                            &format!("重启后删除：{} 个目标的登记形态不在已知三形态内，已补写普通形态对", unconfirmed.len()),
+                        );
+                    }
+                    Err(e) => {
+                        let msg = format!("系统未确认登记生效且无法补写（{e}），未登记；请以管理员身份运行 Trim 后重试");
+                        for t in &unconfirmed {
+                            failed.push((t.clone(), msg.clone()));
+                        }
+                        registered.retain(|r| !unconfirmed.iter().any(|u| u == r));
+                    }
+                }
+            }
+        }
+
+        // 回执（计划序：ok 行 → fail 行；skip 行已在规划阶段按序入列）
+        for t in &registered {
+            rows.push(json!({ "target": t, "status": "ok", "message": "已登记，下次重启时删除" }));
+        }
+        for (t, msg) in &failed {
+            rows.push(json!({ "target": t, "status": "fail", "message": msg }));
+        }
+
+        // ⑤ 失败（含对账补写失败）的目标当场从账上摘掉（同一把域锁内的第二次 RMW），
+        // 不留「凭据在、系统没登记」的幽灵条目（list 会把它显示成 consumed）
+        if !failed.is_empty() {
+            let failed_norm: Vec<String> = failed.iter().map(|(t, _)| pfro_norm(t)).collect();
+            if let Err(e) = pending_update(|entries| {
+                entries.retain(|en| {
+                    let hit = en["target"]
+                        .as_str()
+                        .map(|s| failed_norm.contains(&pfro_norm(s)))
+                        .unwrap_or(false);
+                    en["batchId"].as_str() != Some(batch.as_str()) || !hit
+                });
+                Ok(())
+            }) {
+                // 摘账失败：凭据留着并如实留痕——list 会把它们显示成「已消费/文件不在」，
+                // 用户能看见并手动撤回；比静默丢账诚实。
                 log::write_log(
                     "error",
-                    &format!(
-                        "重启后删除：PFRO 写入失败（{e}），凭据回滚{}",
-                        if rolled { "成功" } else { "失败——撤回凭据仍在，本批不会删除（少了不删，比删了撤不回安全）" }
-                    ),
+                    &format!("重启后删除：{} 个失败目标的摘账未生效（{e}），幽灵凭据保留待用户撤回", failed.len()),
                 );
-                return Err(format!(
-                    "系统重启队列写入失败：{e}（{}）",
-                    if rolled { "本次登记已回滚" } else { "本批未删，可在列表中撤回后重试" }
-                ));
             }
+        }
+        if !registered.is_empty() {
             log::flush_sync();
-            log::write_log("warn", &format!("重启后删除：本批登记 {added} 项（永久删除，不进回收站）"));
+            log::write_log("warn", &format!("重启后删除：本批登记 {} 项（永久删除，不进回收站）", registered.len()));
         }
         Ok::<Vec<Value>, String>(rows)
     })
@@ -432,12 +633,15 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
     }
 }
 
-/// uninstall:pending-list — 待删清单（主窗档，只读）。
+/// uninstall:pending-list — 待删清单（只读）。
 /// 三个状态分开：pending（PFRO 还挂着）/ consumed（重启已消费）/ missing（文件已不在）。
+///
+/// v6-K13：档位从 `RESIDUE_WINDOWS`（残留独占）移到 `PENDING_DELETE_WINDOWS`
+/// （main+residue）——登记项对主窗清理域也要「可见可撤回」，否则主窗登记的条目
+/// 在残留窗以外的路径上看不见、撤不回（K13 缺口本体）。只读不改任何状态。
 #[tauri::command]
 pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
-    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
+    if let Err(msg) = guard::guard(&window, guard::PENDING_DELETE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
@@ -482,47 +686,46 @@ pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>)
     }
 }
 
-/// uninstall:pending-revoke — 撤回（主窗档）。不传 batchId = 撤回本机全部登记项。
-/// 撤回动作本身要写 PFRO（管理员权限），失败时明确报错且不动 state —— 两边必须一致。
+/// uninstall:pending-revoke — 撤回。不传 batchId = 撤回本机全部登记项。
+///
+/// v6-K06/K13：档位同 add/list（`PENDING_DELETE_WINDOWS`，主窗 + 残留副窗）。
+/// 执行序（域锁内）：**先摘系统队列、后动台账**——摘除失败（未提权：Session
+/// Manager 键只有管理员可写）时明确报错且**不动台账**，两边必须一致；反向
+/// （账没了、系统还在删）才是不可逆的。系统队列侧走 `pfro_remove_deletes`
+/// （写前重读、只摘本账对、第三方条目原样保留）。
 #[tauri::command]
 pub async fn uninstall_pending_revoke<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     batch_id: Option<String>,
 ) -> Value {
-    // v0.7.0 面板整体搬进 residue 副窗 ⇒ 档位从 MAIN 改为窄窗口集（见 guard::RESIDUE_WINDOWS）
-    if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
+    if let Err(msg) = guard::guard(&window, guard::PENDING_DELETE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
-        let mut doc = pending_load();
+        // K06：域锁内做完整 RMW（与 add 互斥）
+        let _lock = PENDING_DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let doc = pending_load();
         let scoped: HashSet<String> = doc["entries"]
             .as_array()
             .unwrap_or(&Vec::new())
             .iter()
             .filter(|e| batch_id.as_deref().map(|b| e["batchId"].as_str() == Some(b)).unwrap_or(true))
-            .filter_map(|e| e["target"].as_str().map(|s| s.trim_end_matches(['\\', '/']).to_lowercase()))
+            .filter_map(|e| e["target"].as_str().map(|s| pfro_norm(s)))
+            .filter(|s| !s.is_empty())
             .collect();
         if scoped.is_empty() {
             return Ok(0usize);
         }
-        let pfro = read_pfro()?;
-        let stripped = pfro_strip_deletes(pfro, &scoped);
-        write_pfro(&stripped)?;
-        let remaining: Vec<Value> = doc["entries"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter(|e| {
-                let t = e["target"]
-                    .as_str()
-                    .map(|s| s.trim_end_matches(['\\', '/']).to_lowercase())
-                    .unwrap_or_default();
+        // 先断系统队列（写前重读 + 只摘本账对）；失败即整体失败，台账不动
+        pfro_remove_deletes(&scoped)?;
+        // 再摘台账（update_json 串行 RMW）
+        pending_update(|entries| {
+            entries.retain(|e| {
+                let t = e["target"].as_str().map(pfro_norm).unwrap_or_default();
                 !scoped.contains(&t)
-            })
-            .cloned()
-            .collect();
-        doc["entries"] = Value::Array(remaining);
-        pending_save(&doc)?;
+            });
+            Ok(())
+        })?;
         log::flush_sync();
         log::write_log("info", &format!("重启后删除：撤回 {} 项登记", scoped.len()));
         Ok(scoped.len())
@@ -581,19 +784,166 @@ mod tests {
         assert!(v.is_empty());
     }
 
-    /// v4 P2-F（R2-M03/M04）：**撤回凭据先于系统 PFRO 队列落盘** —— 旧反序里
-    /// `write_pfro(&pfro)?` 的 `?` 会让 `pending_save` 不跑：PFRO 已登记（重启必删）
-    /// 而撤回凭据不存在 = 删了撤不回。真跑要写系统 PendingFileRenameOperations 注册表，
-    /// 这里用源码顺序形态钉住（判红：把两行换回反序即红）。
+    /// v4 P2-F（R2-M03/M04）+ v6-K06：**撤回凭据先于系统队列**——旧反序里系统已登记
+    /// （重启必删）而凭据不存在 = 删了撤不回。真跑要写系统 PendingFileRenameOperations，
+    /// 这里用源码顺序形态钉住（判红：把凭据落账挪到 MoveFileExW 循环之后即红）。
     #[test]
-    fn pending_add_saves_credentials_before_pfro() {
+    fn pending_add_saves_credentials_before_system_queue() {
         let src = include_str!("pending_delete.rs");
-        let i_save = src.find("pending_save(&doc)?;").expect("找不到首次 pending_save");
-        let i_pfro = src.find("if let Err(e) = write_pfro(&pfro)").expect("找不到 write_pfro 调用");
+        let i_save = src.find("pending_update(|entries|").expect("找不到凭据落账调用");
+        let i_pfro = src.find("let moved = unsafe {").expect("找不到 MoveFileExW 登记调用");
         assert!(
             i_save < i_pfro,
-            "撤回凭据必须先落盘再写 PFRO（旧反序：PFRO 失败 ⇒ 凭据缺失、重启删了撤不回）"
+            "撤回凭据必须先落账再动系统 PFRO 队列（旧反序：系统已登记、凭据缺失 ⇒ 删了撤不回）"
         );
+    }
+
+    /// K06：域锁必须同时罩住 add 与 revoke 两条 RMW 路径（漏一条 = 并发批次可互抹）。
+    /// 源码形态断言（判红：删掉任一处 lock 即红）。只数生产段（`#[cfg(test)]` 之前），
+    /// 否则本测试自己的锚点字面量会被数进去。
+    #[test]
+    fn pending_domain_lock_covers_both_rmw_paths() {
+        let src = include_str!("pending_delete.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let n = prod.matches("PENDING_DELETE_LOCK.lock()").count();
+        assert_eq!(n, 2, "add 与 revoke 都必须在 PENDING_DELETE_LOCK 内做 RMW，实得上锁点 {n} 处");
+    }
+
+    /// K06：PFRO 条目三形态归一——普通/verbatim Win32、`\??\` 设备路径、以及
+    /// `*<会话号>\??\` 会话前缀（未提权 MoveFileExW 登记时系统写的正是这一形态，
+    /// 本机现存 4 对第三方条目全是它）。不归一 = MoveFileExW 登记的条目在
+    /// 「已登记过」/ list 三态 / 撤回摘除里全部失配（撤不回）。
+    /// 判红自证：把 pfro_norm 的前缀剥离线删掉 ⇒ ②③④ 红。
+    #[test]
+    fn pfro_norm_folds_session_prefix_and_device_forms() {
+        let plain = r"C:\Users\me\AppData\Local\Temp\x.tmp";
+        assert_eq!(pfro_norm(plain), r"c:\users\me\appdata\local\temp\x.tmp");
+        // ① verbatim 与普通路径同一实体
+        assert_eq!(pfro_norm(r"\\?\C:\Users\me\x.tmp"), pfro_norm(r"C:\Users\me\x.tmp"));
+        // ② 设备路径形态
+        assert_eq!(pfro_norm(r"\??\C:\Users\me\x.tmp"), pfro_norm(r"C:\Users\me\x.tmp"));
+        // ③ 会话前缀 + 设备路径（第三方/未提权登记的真实形态）
+        assert_eq!(
+            pfro_norm(r"*1\??\C:\Users\me\x.tmp"),
+            pfro_norm(r"C:\Users\me\x.tmp"),
+            "会话前缀形态必须归并到同一目标"
+        );
+        // ④ 尾分隔符不敏感；非数字会话号不误剥
+        assert_eq!(pfro_norm(r"*1\??\C:\Users\me\x.tmp\"), pfro_norm(r"C:\Users\me\x.tmp"));
+        assert_ne!(pfro_norm(r"*x\C:\a"), pfro_norm(r"C:\a"), "会话号必须是数字，*x\\ 不是会话前缀");
+        // 空串归一后为空 ⇒ 匹配侧必须拒（pfro_has_delete 的空串闸）
+        assert!(pfro_norm("").is_empty());
+    }
+
+    /// K06：撤回只摘本账目标的整对，第三方条目（含 `*N\??\` 形态）原样保留。
+    /// 样本取本机 PFRO 实测形状（第三方 tbus/nsu 对 + Trim 三种形态的台账对）。
+    /// 判红自证：把 pfro_strip_deletes 的成对判定改成「按 src 单摘」⇒ 空串 dst
+    /// 残留、后续对错位，本用例红。
+    #[test]
+    fn pfro_strip_keeps_third_party_pairs_intact() {
+        let entries: Vec<String> = [
+            r"*1\??\C:\Windows\tbus_1400064837", "",
+            r"*1\??\C:\Users\me\AppData\Local\Temp\nsu1FB7.tmp", "",
+            r"C:\Users\me\a.tmp", "",       // Trim 台账对（普通形态）
+            r"\\?\C:\Users\me\b.tmp", "",   // Trim 台账对（verbatim 形态）
+            r"*1\??\C:\Users\me\c.tmp", "", // Trim 台账对（会话前缀形态）
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let targets: HashSet<String> = [r"C:\Users\me\a.tmp", r"\\?\C:\Users\me\b.tmp", r"C:\Users\me\c.tmp"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = pfro_strip_deletes(entries, &targets);
+        // 三条 Trim 对整对消失；两条第三方对逐字保留
+        assert_eq!(
+            out,
+            vec![
+                r"*1\??\C:\Windows\tbus_1400064837".to_string(),
+                String::new(),
+                r"*1\??\C:\Users\me\AppData\Local\Temp\nsu1FB7.tmp".to_string(),
+                String::new(),
+            ],
+            "只许摘本账对，第三方条目必须逐字保留"
+        );
+    }
+
+    /// K06：合并只追加缺失的本账对，不双登、不碰现值任何条目。
+    /// 判红自证：把 pfro_merge_pairs 的去重删掉 ⇒ 长度断言红。
+    #[test]
+    fn pfro_merge_appends_only_missing_pairs() {
+        let current: Vec<String> = [
+            r"*1\??\C:\Windows\tbus_1400064837", "",
+            r"C:\Users\me\a.tmp", "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // a.tmp 已在对里（普通形态）⇒ 不双登；b.tmp 新 ⇒ 追加一对
+        let out = pfro_merge_pairs(
+            current,
+            &[r"C:\Users\me\a.tmp".to_string(), r"C:\Users\me\b.tmp".to_string()],
+        );
+        assert_eq!(out.len(), 6, "只应新增一对: {out:?}");
+        assert_eq!(out[4], r"C:\Users\me\b.tmp");
+        assert_eq!(out[5], "");
+        // 第三方对仍在原位
+        assert_eq!(out[0], r"*1\??\C:\Windows\tbus_1400064837");
+    }
+
+    /// K06 判据①：RMW 收进 `security::update_json` 后，两个并发写不再互抹——
+    /// 各线程读到同一份旧值、各改各的，落盘结果必须同时含所有线程的条目。
+    /// （域锁罩住整次命令；update_json 的全局串行是文件侧的第二道。）
+    #[test]
+    fn concurrent_rmw_on_pending_json_does_not_clobber() {
+        use std::sync::Arc;
+        use std::thread;
+        let dir = std::env::temp_dir().join(format!("trim-k06-rmw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pending-delete.json");
+        // 初值：version 1 + 一条既有条目（模拟别人的登记）
+        std::fs::write(
+            &file,
+            br#"{"version":1,"entries":[{"target":"C:\\base.tmp","batchId":"p1","addedAt":"1"}]}"#,
+        )
+        .unwrap();
+        let file = Arc::new(file);
+        let mut handles = Vec::new();
+        for k in 0..4u8 {
+            let f = Arc::clone(&file);
+            handles.push(thread::spawn(move || {
+                for r in 0..4u8 {
+                    security::update_json(&f, |doc| {
+                        let entries = doc["entries"].as_array_mut().expect("entries 数组");
+                        entries.push(json!({ "target": format!(r"C:\t{k}-{r}.tmp"), "batchId": format!("p{k}"), "addedAt": "2" }));
+                        Ok(())
+                    })
+                    .expect("update_json 失败");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("线程不得 panic");
+        }
+        let doc: Value = serde_json::from_slice(&std::fs::read(&*file).unwrap()).unwrap();
+        let targets: Vec<&str> = doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["target"].as_str())
+            .collect();
+        // 既有条目 + 4 线程 × 4 轮 = 17 条，一条都不许被互抹掉
+        assert_eq!(targets.len(), 17, "并发 RMW 互抹了条目: {targets:?}");
+        assert!(targets.contains(&r"C:\base.tmp"), "既有条目被抹: {targets:?}");
+        for k in 0..4u8 {
+            for r in 0..4u8 {
+                let want = format!(r"C:\t{k}-{r}.tmp");
+                assert!(targets.contains(&want.as_str()), "缺 {want}: {targets:?}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// v6-K05：PFRO 登记闸三层——① is_path_protected（v2-B1 既有，门禁 MUST_PROTECT

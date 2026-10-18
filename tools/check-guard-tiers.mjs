@@ -457,17 +457,23 @@ const wantReadonly = [...MUST_READONLY].sort();
 const MUST_WINDOWSET = {
   // 2026-10-13：清理域失败引导给主窗开了「登记重启后删除」的入口（写 PFRO 是永久删
   // 出口，窗口集从纯 residue 扩成 main+residue；models/processManager 无调用场景不放）。
+  // 2026-10-18（v6-K13）：list/revoke 从 RESIDUE_WINDOWS 移入本集——待删清单对主窗
+  // 清理域也要「可见可撤回」（主窗登记的条目在残留窗以外的路径上看不见 = 撤不回）。
+  // add/list/revoke 三条同集；residue 的 scan/execute 仍独占 RESIDUE_WINDOWS。
   PENDING_DELETE_WINDOWS: {
     labels: ['main', 'residue'],
-    cmds: ['uninstall_pending_add'],
+    cmds: [
+      'uninstall_pending_add',
+      'uninstall_pending_list',
+      'uninstall_pending_revoke',
+    ],
   },
   RESIDUE_WINDOWS: {
     labels: ['residue'],
     // v0.7.0 机-wide 扫描整条退役：dead-scan / orphan-scan / orphan-ignore / residue-deep-scan
-    // 四条命令已删除，本集只剩「该应用四类残留扫描 + 执行 + 重启后删三件套」。
+    // 四条命令已删除；v6-K13 起 pending 三件套整体移入 PENDING_DELETE_WINDOWS，
+    // 本集只剩「该应用四类残留扫描 + 执行」。
     cmds: [
-      'uninstall_pending_list',
-      'uninstall_pending_revoke',
       'uninstall_residue_execute',
       'uninstall_residue_scan',
     ],

@@ -227,7 +227,8 @@ const GHOST_APP_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Unin
 //
 // 允许集是**参数**而不是写死的 `residue`：2026-10-13 裁定把 `uninstall_pending_add`
 // 的入口放宽到 `guard::PENDING_DELETE_WINDOWS`（= 主窗失败引导 + 残留副窗两个消费方），
-// 当时这条断言还按「residue 独占」写，于是提交里就留了一条恒红用例。档位以「谁真的需要调它」
+// 当时这条断言还按「residue 独占」写，于是提交里就留了一条恒红用例。2026-10-18（v6-K13）
+// list/revoke 同集放宽（待删清单对主窗可见可撤回）。档位以「谁真的需要调它」
 // 为准（AGENTS §3），测试必须跟着允许集走，而不是反过来。
 const RESIDUE_LABEL: &str = "residue";
 
@@ -370,12 +371,14 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
     );
 }
 
-/// 重启后删三条命令的档位（2026-10-13 裁定后 split）：
-/// - `add` 走 `PENDING_DELETE_WINDOWS`（= 主窗清理域失败引导 + residue 副窗两个消费方），
-///   主窗必须**越过**档位；用「空目标早退」做正向特征（零副作用，不写 PFRO）。
-/// - `list` / `revoke` 仍限 residue 独占档（`RESIDUE_WINDOWS`）：主窗调这两条要被判越权。
-///   list 用数据形状里的键名 `entries` 作正向特征（档位拒杀只回 {success:false,message}）；
-///   revoke 会写 PFRO ⇒ **只断被拒的一侧**，正例留给发布前 `#[ignore]` 组（§4.2 纪律②）。
+/// 重启后删三条命令的档位（2026-10-13 裁定 split；2026-10-18 v6-K13 起三條同集）：
+/// - `add` / `list` / `revoke` 都走 `PENDING_DELETE_WINDOWS`（= 主窗清理域失败引导
+///   + 残留副窗两个消费方），主窗必须**越过**档位；models/processManager 拒杀。
+///   add 用「空目标早退」做正向特征（零副作用，不写 PFRO）；list 用数据形状里的键名
+///   `entries`（档位拒杀只回 {success:false,message}）；revoke 会写 PFRO ⇒ 正例只用
+///   「不存在的 batchId」——命令体在写任何东西之前因 scoped 为空早退（零副作用），
+///   正向特征取回执里的 `revoked`；提权态下的真机正例留给发布前 #[ignore] 组（§4.2 ②）。
+/// - residue 的 scan/execute 仍只给 `residue`（见上面的 assert_residue_window_only）。
 #[test]
 fn pending_delete_channels_window_tier() {
     // add：主窗 + residue 两个都越过；models/processManager 拒杀
@@ -385,28 +388,14 @@ fn pending_delete_channels_window_tier() {
         "没有要登记的目标",
         &["main", RESIDUE_LABEL],
     );
-    // list：residue 独占
-    assert_residue_window_only("uninstall_pending_list", json!({}), "entries");
-    // revoke：residue 独占，只验拒杀侧（正例留给发布前 #[ignore] 组）
-    let mut rejected: Vec<&str> = Vec::new();
-    for label in sub_windows() {
-        if label == RESIDUE_LABEL {
-            continue;
-        }
-        let w = window_with_label(label);
-        let text = invoke_text(&w, "uninstall_pending_revoke", json!({ "batchId": "no-such-batch" }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调重启后删撤销必须被拒杀，回执 {text}"
-        );
-        rejected.push(label);
-    }
-    let expected: Vec<&str> = sub_windows().into_iter().filter(|l| *l != RESIDUE_LABEL).collect();
-    assert_eq!(rejected, expected, "residue 以外的每个子窗都必须被点名拒杀（清单塌缩时这条红）");
-    let m = invoke_text(&main_window(), "uninstall_pending_revoke", json!({ "batchId": "no-such-batch" }));
-    assert!(
-        m.contains("IPC 来源校验失败"),
-        "主窗调重启后删撤销必须被拒杀（revoke 仍限 residue），回执 {m}"
+    // list：主窗 + residue 都越过（K13：待删清单对主窗可见）
+    assert_window_tier("uninstall_pending_list", json!({}), "entries", &["main", RESIDUE_LABEL]);
+    // revoke：主窗 + residue 都越过；不存在的 batchId ⇒ scoped 空 ⇒ 早退零写
+    assert_window_tier(
+        "uninstall_pending_revoke",
+        json!({ "batchId": "no-such-batch" }),
+        "revoked",
+        &["main", RESIDUE_LABEL],
     );
 }
 
