@@ -572,6 +572,30 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                     .count()
             })
             .unwrap_or(0);
+        // v6-K10：「全 skip / 0 删除」时把原因逐条透出（太新/排除/未解析变量/
+        // 受保护拒绝……引擎侧 details.message 里都有）——渲染层要呈现时有据可查，
+        // 不再是干巴巴的「释放 0 B」。上限 20 条防回执膨胀。
+        let nothing_done = !cleanup_receipt_success(failed, success, n_partial);
+        let skipped_reasons: Vec<Value> = if nothing_done {
+            let empty: Vec<Value> = Vec::new();
+            data.get("details")
+                .and_then(|d| d.as_array())
+                .unwrap_or(&empty)
+                .iter()
+                .take(20)
+                .map(|d| {
+                    json!({
+                        "id": d.get("id"),
+                        "name": d.get("name"),
+                        "status": d.get("status"),
+                        "message": d.get("message"),
+                        "protectedBlocked": js_num_or_zero(d.get("protectedBlocked")) as i64,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Some(o) = data.as_object_mut() {
             o.insert("failed".into(), Value::from(failed as i64));
             o.insert("partial".into(), Value::from(n_partial as i64));
@@ -580,6 +604,9 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
             o.insert("totalFreed".into(), Value::from(total_freed));
             o.insert("success".into(), Value::from(success));
             o.insert("skipped".into(), Value::from(skipped));
+            if nothing_done {
+                o.insert("skippedReasons".into(), Value::Array(skipped_reasons));
+            }
         }
         log::write_log(
             "info",
@@ -623,14 +650,27 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                 log::write_log("warn", &w);
             }
         }
-        // 成功判据：硬失败（error ∪ fail，见上面 v5 C-3）为 0 才算成功；
+        // 成功判据（v6-K10 收口）：硬失败（error ∪ fail，见上面 v5 C-3）为 0
+        // **且确实删了东西**——failed==0 但 success/partial 全 0 = 全 skip（太新/
+        // 排除/未解析/受保护）或空跑，按「未达成」处理而不是 success:true；
         // partial 属「部分成功」，由渲染层另行提示
-        json!({ "success": failed == 0, "data": data })
+        json!({ "success": cleanup_receipt_success(failed, success, n_partial), "data": data })
     });
     match task.await {
         Ok(v) => v,
         Err(e) => json!({ "success": false, "message": e.to_string() }),
     }
+}
+
+/// v6-K10：清理回执的外层 success 判据（纯函数）。
+///
+/// 旧判据 `failed == 0` 有一个假绿方向：全部条目被 skip（太新 / 排除名单 /
+/// 未解析变量 / 受保护拒绝）或根本没传条目时，failed 恒为 0 ⇒ 回 success:true，
+/// 渲染层弹「清理完成！释放 0 B 空间」——「什么都没删」被说成「成功」。
+/// 新口径：硬失败为 0 **且** success/partial 至少有一项（确实动过文件）。
+/// 判红自证：把本函数改回 `failed == 0` ⇒ `全跳过回执必须 success_false` 红。
+pub(super) fn cleanup_receipt_success(failed: usize, success: usize, partial: usize) -> bool {
+    failed == 0 && (success > 0 || partial > 0)
 }
 
 /// 按 details 汇总 (totalFreed, success, partial, skipped)（对照 main.js 1416-1423）

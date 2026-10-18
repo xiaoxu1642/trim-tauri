@@ -1017,3 +1017,23 @@ fn 规则查找单点真源_双形态组两侧同结果() {
         "命令侧必须是薄委托，不是自写遍历"
     );
 }
+
+/// v6-K10：清理回执外层 success 判据——「什么都没删」不是成功。
+/// 旧判据 `failed == 0` 在全 skip（太新/排除/未解析/受保护）或空跑时照样回
+/// success:true，渲染层弹「清理完成！释放 0 B」。
+/// 判红自证：把 `cleanup_receipt_success` 改回 `failed == 0` ⇒ ①② 红。
+#[test]
+fn 全跳过回执必须_success_false() {
+    use crate::commands::cleanup::scan_execute::cleanup_receipt_success;
+    // ① 全 skip（0 失败 0 成功 0 部分成功）⇒ 不得报成功
+    assert!(
+        !cleanup_receipt_success(0, 0, 0),
+        "全 skip / 空跑不得报 success:true（K10）"
+    );
+    // ② 真「全被受保护拒绝」的形态：details 全是 skip/protected ⇒ 同上
+    assert!(!cleanup_receipt_success(0, 0, 0), "受保护全拒不得报成功");
+    // ③ 正常成功 / 部分成功 / 硬失败三态不回退
+    assert!(cleanup_receipt_success(0, 3, 0), "正常成功必须仍是 true");
+    assert!(cleanup_receipt_success(0, 1, 2), "部分成功必须仍是 true");
+    assert!(!cleanup_receipt_success(2, 1, 0), "有硬失败必须 false（v5 C-3 既有口径）");
+}

@@ -1243,22 +1243,34 @@ fn syspanel_回执必须是_success_data_包装() {
 
 /// v5 P0：新增 9 条 syspanel 命令全部是主窗档；子窗调用必须在 guard 处被拒杀，
 /// 不得进入真实 Power API 或文件对话框。
+///
+/// v6 X1-M01：入参**一律畸形/不存在**——本用例此前带着真实写侧合法入参
+/// （`381b4222-…` = 标准 Balanced 方案的真实 GUID + `confirmedHighRisk:true`）。
+/// 档位是第一道闸没错，但若将来有人把档位回退（历史上发生过 readonly 静默放宽），
+/// 这些调用就会**真的删掉 Balanced / 真的写电源设置**。改成畸形入参后，即使档位
+/// 被回退，命令体自身也会因「方案不存在」拒绝——快速组靠两道防线而不是一道。
+/// （`ultimate_enable` / `restore_high_performance` 无入参可畸形，保持 `{}`；
+/// 它们的命令体行为由 native 层真机探针与发版手册覆盖。）
 #[test]
 fn syspanel_power_编辑命令_is_main_only() {
+    // 伪造 GUID：命令体按「方案不存在」拒绝（powercfg 对不存在 GUID 必报错），
+    // 不指向任何真实电源方案。
+    const NO_SUCH_GUID: &str = "00000000-0000-0000-0000-trimnosuchplan";
     let cases: &[(&str, serde_json::Value)] = &[
-        ("syspanel_power_settings_dump", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e" })),
-        ("syspanel_power_plan_duplicate", json!({ "sourceGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "name": "x" })),
-        ("syspanel_power_plan_rename", json!({ "guid": "381b4222-f694-41f0-9685-ff5bb260df2e", "name": "x" })),
-        ("syspanel_power_plan_delete", json!({ "guid": "381b4222-f694-41f0-9685-ff5bb260df2e", "confirmedHighRisk": true })),
+        ("syspanel_power_settings_dump", json!({ "schemeGuid": NO_SUCH_GUID })),
+        ("syspanel_power_plan_duplicate", json!({ "sourceGuid": NO_SUCH_GUID, "name": "x" })),
+        ("syspanel_power_plan_rename", json!({ "guid": NO_SUCH_GUID, "name": "x" })),
+        ("syspanel_power_plan_delete", json!({ "guid": NO_SUCH_GUID, "confirmedHighRisk": true })),
         ("syspanel_power_plan_import", json!({})),
-        ("syspanel_power_plan_export", json!({ "guid": "381b4222-f694-41f0-9685-ff5bb260df2e" })),
-        ("syspanel_power_settings_unlock", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e" })),
-        ("syspanel_power_settings_apply", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "changes": [], "applyActive": false })),
-        ("syspanel_power_settings_revert", json!({ "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "sessionId": "x" })),
-        ("syspanel_power_settings_compare", json!({ "subgroupGuid": "0012ee47-9041-4b5d-9b77-535fba8b1442", "settingGuid": "d639518a-e56d-4345-8af2-b9f32fb26109" })),
-        ("syspanel_power_settings_open_regedit", json!({ "subgroupGuid": "0012ee47-9041-4b5d-9b77-535fba8b1442", "settingGuid": "d639518a-e56d-4345-8af2-b9f32fb26109" })),
+        ("syspanel_power_plan_export", json!({ "guid": NO_SUCH_GUID })),
+        ("syspanel_power_settings_unlock", json!({ "schemeGuid": NO_SUCH_GUID })),
+        ("syspanel_power_settings_apply", json!({ "schemeGuid": NO_SUCH_GUID, "changes": [], "applyActive": false })),
+        ("syspanel_power_settings_revert", json!({ "schemeGuid": NO_SUCH_GUID, "sessionId": "x" })),
+        ("syspanel_power_settings_compare", json!({ "subgroupGuid": NO_SUCH_GUID, "settingGuid": NO_SUCH_GUID })),
+        ("syspanel_power_settings_open_regedit", json!({ "subgroupGuid": NO_SUCH_GUID, "settingGuid": NO_SUCH_GUID })),
         // G-04 专用能力（2026-10-16）：三命令同为写侧、系统级、只在主窗电源卡触发。
         // 子窗调用必须在 guard 处拒杀，不得进入真实 Power API / 文件系统。
+        // （前两条无入参可畸形——见上方 X1-M01 注。）
         ("syspanel_power_ultimate_enable", json!({})),
         ("syspanel_power_hide_high_performance", json!({ "confirmedHighRisk": true })),
         ("syspanel_power_restore_high_performance", json!({})),

@@ -2039,11 +2039,10 @@
   display: block;
   margin-left: 0;
   border-radius: 50%;
-  background: radial-gradient(circle at 50% 50%,
-    rgba(178, 168, 255, 0.95) 0%,
-    rgba(139, 142, 224, 0.55) 55%,
-    rgba(139, 142, 224, 0) 100%);
-  box-shadow: 0 0 6px rgba(139, 142, 224, 0.55);
+  /* v6-K18：走主题 accent token——旧实现用三字面 rgba 写死暗色档的 #8B8EE0
+     （= --accent 的暗色值），亮色主题下拖尾色与强调色脱节；径向渐变与
+     box-shadow 的离表发光一并摘除，光点语义由 opacity/scale 过渡承担。 */
+  background: var(--accent);
   opacity: 0.9;
   transform: translate(-50%, -50%) scale(1);
   will-change: transform, opacity;

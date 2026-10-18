@@ -1400,8 +1400,24 @@
       }
       const dumpResp = await window.api.syspanel.powerSettingsDump(guid);
       if (!dumpResp || !dumpResp.success) {
-        // dump 失败不能把设置解锁状态半留着：按会话快照回滚属性后退出
-        try { await window.api.syspanel.powerSettingsRevert(guid, data.sessionId); } catch (e2) {}
+        // dump 失败不能把设置解锁状态半留着：按会话快照回滚属性后退出。
+        // v6-K15：回滚**必须读回执**——旧写法 `try{await revert}catch{}` 把回滚失败
+        // 吞掉后照样说「已退出编辑」，而属性可能还停在解锁态（编辑器没进、会话没回滚）。
+        // 回滚失败要把 failed[] 逐条亮出来，并让用户重试退出（与 editorCancel 同口径）。
+        let revertErr = '';
+        try {
+          const rv = await window.api.syspanel.powerSettingsRevert(guid, data.sessionId);
+          if (!rv || !rv.success) {
+            const items = (((rv || {}).data || {}).failed || []).map((f) => f.message).filter(Boolean).join('；');
+            revertErr = items || (rv && rv.message) || '未知原因';
+          }
+        } catch (e2) {
+          revertErr = (e2 && e2.message) || String(e2);
+        }
+        if (revertErr) {
+          pwrToast('error', `读取设置列表失败，且回滚未完全成功：${revertErr}；设置仍处于解锁态，请重试「退出编辑」。`);
+          return;
+        }
         pwrToast('error', (dumpResp && dumpResp.message) || '读取设置列表失败，已退出编辑');
         return;
       }
