@@ -455,7 +455,7 @@
         ? fmtBytes(state.transferred) + ' / ' + fmtBytes(state.total)
         : '';
     }
-    if (speedEl) speedEl.textContent = state.speed ? fmtBytes(state.speed) + '/s' : '';
+    if (speedEl) speedEl.textContent = state.speed ? window.ds.fmtRate(state.speed) : '';
   }
 
   // ---------------- 设置页行状态 ----------------

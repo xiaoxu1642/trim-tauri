@@ -131,10 +131,9 @@
     }
   }
 
-  function formatBlock(size) {
-    if (size >= 1048576) return (size / 1048576) + ' MB';
-    return (size / 1024) + ' KB';
-  }
+  // v6-K14：块大小走 ds.fmtBytes 唯一真源（原实现 MB 档用裸浮点：1.5 MB 能出
+  // "1.549805 MB" 这种半成品精度）
+  function formatBlock(size) { return window.ds.fmtBytes(size); }
 
   function formatTime(iso) {
     try {

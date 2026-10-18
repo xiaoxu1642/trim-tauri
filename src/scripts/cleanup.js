@@ -1893,7 +1893,12 @@
       range.textContent = '';
       for (const f of images) {
         const img = document.createElement('img');
-        const url = window.api.paths.pathToUrl(f.path);
+        // v6-K16：pathToUrl 在 api **顶层**（paths 命名空间没有该成员——旧调用
+        // `window.api.paths.pathToUrl(...)` 必抛 TypeError，灯箱整块不亮）；
+        // typeof 守卫与 fontmanager/pathbinding 两个既有消费点同口径。
+        const url = (window.api && typeof window.api.pathToUrl === 'function')
+          ? window.api.pathToUrl(f.path)
+          : '';
         img.setAttribute('data-src', url);
         img.setAttribute('data-fullpath', f.path);
         img.setAttribute('data-caption', `${f.name || ''} · ${formatSize(f.size)}`);

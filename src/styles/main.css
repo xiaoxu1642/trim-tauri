@@ -5375,6 +5375,13 @@ body.electron-mica .ds-tooltip {
   backdrop-filter: blur(var(--glass-blur-mid)) saturate(var(--glass-satur));
   -webkit-backdrop-filter: blur(var(--glass-blur-mid)) saturate(var(--glass-satur));
 }
+/* v6-K17：材质无档（mica 不可用或手动关）时浮层没有 floor 可依——上一条 floor 挂在
+   body.electron-mica 前件下，无档时 .ds-tooltip 退回半透明 --bg-elevated，压在任意
+   内容上都可能看不清（对比度随背景漂移）。这里补不透明 floor，与 win-maximized 的
+   实色护栏同一口径（AGENTS §2：材质无档必须不透明）。 */
+body[data-material="none"] .ds-tooltip {
+  background: var(--bg-base);
+}
 /* hover：轻度提亮 + 描边增亮，保持玻璃透明感（不做实底加深）
    口径 v2·M3：原先并列的 `.btn-secondary:hover` 三条已摘掉——中性按钮的 hover 现在
    由 `.btn:hover` 单点承担（同一 floor、tint 加深一档），lg 档不再与常态分叉。

@@ -27,14 +27,8 @@
   // 删前备份偏好（HiBit §H1 还原包）。取「显式关过才算关」以外的最保守解：
   // 读不到 / 读失败一律按关，因为开备份会带来几百 MB 落盘，猜错方向的代价不对称。
   function esc(s) { return window.ds.esc(s); }
-  function fmtSizeKb(kb) {
-    kb = Number(kb) || 0;
-    if (kb <= 0) return '—';
-    const units = ['KB', 'MB', 'GB'];
-    let v = kb, i = 0;
-    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
-  }
+  // v6-K14：KB 制入参 → ds.fmtBytes 唯一真源（opts.zero 保住「读不到显示 —」的既有语义）
+  function fmtSizeKb(kb) { return window.ds.fmtBytes((Number(kb) || 0) * 1024, { zero: '—' }); }
 
   // ==================== 应用图标（用户要求 2026-09-28：名称前显示真实图标） ====================
   // 复用 paths:file-icon / paths:app-icon（shellicon 提取）。两层缓存：

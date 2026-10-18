@@ -947,6 +947,25 @@ check(
   );
 }
 
+// F3c（v6-K17）：材质无档时 .ds-tooltip 必须有不透明 floor。
+// 浮层 floor 此前只挂在 body.electron-mica 前件下（见 main.css 该段注释），
+// mica 不可用/手动关（body[data-material="none"]）时 .ds-tooltip 退回半透明
+// --bg-elevated，压在任意内容上对比度随背景漂移。判据：main.css 必须存在
+// `body[data-material="none"] .ds-tooltip { … background: … }`。
+const TOOLTIP_FLOOR = /body\[data-material="none"\]\s+\.ds-tooltip\s*\{[^}]*background\s*:/;
+check(
+  TOOLTIP_FLOOR.test(MAIN.text),
+  'F3c. 材质无档 .ds-tooltip 必须有不透明 floor（data-material="none" 分支）',
+);
+{
+  // 正向对照：把该规则整块删掉，判定必须立刻判红（否则这条门禁只是装饰）。
+  const stripped = MAIN.text.replace(/body\[data-material="none"\]\s+\.ds-tooltip\s*\{[^}]*\}/, '');
+  check(
+    !TOOLTIP_FLOOR.test(stripped),
+    'F3c 对照：删掉 tooltip floor 的变异样本必须判红',
+  );
+}
+
 // F4. 新增类必须进四类登记之一：扫全部规则选择器里的 `.btn*` 命名域（不用 *-card/*-tab
 // 通配，那会把容器类误抓进来 —— v2 §6.2 第 6 条）。
 const btnTokensInCss = new Set();

@@ -55,13 +55,8 @@
     }
   }
 
-  // 单位换算：bytes/s -> 可读字符串
-  function fmtSpeed(bps) {
-    const v = Number(bps) || 0;
-    if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(2) + ' MB/s';
-    if (v >= 1024) return (v / 1024).toFixed(1) + ' KB/s';
-    return Math.round(v) + ' B/s';
-  }
+  // 单位换算：bytes/s -> 可读字符串（v6-K14：薄封装到 ds.fmtRate 唯一真源）
+  function fmtSpeed(bps) { return window.ds.fmtRate(bps); }
   function toMbps(bps) { return ((Number(bps) || 0) * 8 / 1e6).toFixed(1); }
 
   function setStatus(text) {

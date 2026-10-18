@@ -59,7 +59,11 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 // 718,500 → 719,500（贴值留余 ~520 B）。
 // 结构性建议（沿革旧注延续）：main.css / main-pages.css 的「按需页样式全量随首屏」问题仍在——
 // 继续追加时优先考虑按页拆样式进按需清单，而非反复上调本预算。
-const CAP_MAX = 719_500;
+// P0-7（2026-10-18，v6-K14/K17）：速率真源 ds.fmtRate + fmtBytes opts（ds.js 首屏静态）
+// 与材质无档 tooltip floor（main.css 首屏静态）——719,500 → 720,500（贴值留余 ~520 B）。
+// 两者都是审过的方案项（P0-7），且 ds.js 旧注释已按事实重写（cleanup/finder 早已是薄封装，
+// 此前注释称其「保留独立实现」是陈述过时），净增仍 ~490 B。
+const CAP_MAX = 720_500;
 const CAP_MIN = 400_000;
 // 豁免清单：允许不带 defer 的脚本（必须尽早执行，加 defer 反而破坏语义）
 const EXEMPT_NOT_DEFER = ['scripts/theme-boot.js'];

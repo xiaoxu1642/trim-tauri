@@ -460,26 +460,28 @@
   function escAttr(s) {
     return esc(s);
   }
-  // 1024 进制、B/KB/MB/GB/TB；非有限值与 ≤0 一律 0 B。
-  // 取的是四份本地实现（overview / memoryclean / processes / preview-window）**逐字相同**
-  // 的那一套口径：B/KB 取整、MB 起保留 1 位。
-  // 唯一被刻意统一的差异：四份里三份用裸 `isFinite`（会强转），preview 用
-  // `Number.isFinite`（不强转，字符串一律 0 B）—— 这里选强转，数字字符串也该出数字。
-  // 另有两派刻意不同、不并进来：
-  //   · cleanup.js / finder.js 的 formatSize —— 小于 10 保留 2 位（磁盘容量要看清零头）
-  //   · updater-ui.js —— 单位上限只到 GB（下载进度条位窄）
-  // 这两派要不要统一属产品口径，不是重复实现，故保留各自实现。
-  function fmtBytes(bytes) {
+  // 字节数唯一真源（v6-K14）：1024 进制 B/KB/MB/GB/TB；B/KB 取整、MB 起 1 位；
+  // 非有限值与 ≤0 走 opts.zero（缺省 '0 B'，卸载域用 '—'）。
+  // 各页只许薄封装（`fmtBytes = ds.fmtBytes`）或带 opts 的调用——cleanup/finder 的
+  // formatSize、overview/memoryclean/processes/updater-ui 的本地同名函数都已是薄封装。
+  function fmtBytes(bytes, opts) {
     const n = Number(bytes);
-    if (!Number.isFinite(n) || n <= 0) return '0 B';
+    const zero = (opts && opts.zero !== undefined) ? opts.zero : '0 B';
+    if (!Number.isFinite(n) || n <= 0) return zero;
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let i = 0, v = n;
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
     return (i <= 1 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
   }
+  // 速率（v6-K14）：与 fmtBytes 同真源同精度，只加 '/s'。realtime/netspeed/updater 的
+  // 本地速率实现已收编到这里——此前三份各自定义小数位与单位上限，同一数字三处不同样子。
+  function fmtRate(bytesPerSec) {
+    return fmtBytes(bytesPerSec) + '/s';
+  }
   ds.esc = esc;
   ds.escAttr = escAttr;
   ds.fmtBytes = fmtBytes;
+  ds.fmtRate = fmtRate;
 
   // ---------- ⑪ 全局未处理 rejection 兜底（审查 v2-M22）----------
   // 为什么真源在 ds 而不是 app.js：兜底此前只在 app.js 里有一份，而 **app.js + logger.js

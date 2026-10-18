@@ -84,13 +84,9 @@
   }
 
   // ===== 工具 =====
-  function formatSpeed(bps) {
-    if (!isFinite(bps) || bps < 0) bps = 0;
-    if (bps >= 1073741824) return (bps / 1073741824).toFixed(2) + ' GB/s';
-    if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
-    if (bps >= 1024) return (bps / 1024).toFixed(1) + ' KB/s';
-    return Math.round(bps) + ' B/s';
-  }
+  // v6-K14：速率显示走 ds.fmtRate（唯一真源）——此前本地四档实现与 netspeed 的
+  // 三档、updater 的 fmtBytes+'/s' 三份口径并存，同一网速在不同页面显示位数不同。
+  function formatSpeed(bps) { return window.ds.fmtRate(bps); }
 
   // 丢包风险等级（复用 绿/黄/红 三色规范）
   function lossRisk(rate) {
