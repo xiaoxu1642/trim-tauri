@@ -946,6 +946,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// K06 真机探针（#[ignore]，发布前人工跑）：真写系统 PFRO——本机 Session Manager
+    /// 的 DACL 只给 Administrators/SYSTEM 写，**必须以管理员身份运行**。验证三件事：
+    /// ① `pfro_merge_deletes` 登记后能被 `read_pfro` + `pfro_has_delete` 读回
+    ///    （形态归一在真实注册表值上成立）；
+    /// ② 合并写是**纯追加**：结果 == 进入快照 + 本对（既有条目逐字逐序保留）；
+    /// ③ `pfro_remove_deletes` 只摘本对：结果 == 进入快照（第三方条目原样）。
+    /// 自建自清：探针结束 PFRO 恢复到进入时的形态；中途 panic 最多留一条指向
+    /// %TEMP% 探针文件的删除对（下次重启删一个临时文件，无副作用）。
+    #[test]
+    #[ignore = "真机写 PFRO（需管理员）：登记→读回→摘除 闭环 + 既有条目原样保留"]
+    fn live_pfro_merge_and_remove_roundtrip() {
+        let before = read_pfro().expect("读 PFRO 失败（本探针需管理员身份）");
+        let target = std::env::temp_dir().join(format!("trim-k06-live-{}.tmp", std::process::id()));
+        std::fs::write(&target, b"x").expect("写探针文件");
+        let t = target.to_string_lossy().to_string();
+        // ① 登记（写前重读合并）
+        pfro_merge_deletes(std::slice::from_ref(&t)).expect("merge 失败（需管理员）");
+        let after_merge = read_pfro().expect("读回 PFRO");
+        assert!(
+            pfro_has_delete(&after_merge, &t),
+            "登记后必须能按三形态归一读回: {t}\nPFRO={after_merge:?}"
+        );
+        // ② 纯追加：进入快照是本值的前缀，尾部恰好多出 [t, ""]
+        let mut want_merge = before.clone();
+        want_merge.push(t.clone());
+        want_merge.push(String::new());
+        assert_eq!(after_merge, want_merge, "合并写不是纯追加（既有条目被改动）");
+        // ③ 摘除本对 ⇒ 精确回到进入快照
+        let mut scoped = HashSet::new();
+        scoped.insert(t.clone());
+        pfro_remove_deletes(&scoped).expect("strip 失败（需管理员）");
+        let after_strip = read_pfro().expect("读回 PFRO");
+        assert!(
+            !pfro_has_delete(&after_strip, &t),
+            "摘除后不得再命中: {after_strip:?}"
+        );
+        assert_eq!(after_strip, before, "摘除写破坏了第三方/既有条目");
+        let _ = std::fs::remove_file(&target);
+        eprintln!("探针通过：PFRO 登记→读回→摘除闭环，进入/退出快照逐字一致（{} 项）", before.len());
+    }
+
     /// v6-K05：PFRO 登记闸三层——① is_path_protected（v2-B1 既有，门禁 MUST_PROTECT
     /// 钉在命令体内）② is_system_namespace ③ final_path_protected，普通文件放行。
     /// 判红自证：把 pending_delete_sysns_alias_reason 改成恒 None ⇒ ② 红（System32
