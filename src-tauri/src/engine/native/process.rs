@@ -5,7 +5,8 @@
 //! 与选择器测试同在本文件，避免「实现搬走、测试留在原地变死码」。
 
 
-use crate::engine::systembin::system_tool;
+// v6-K01（P0-2）后本文件只以全路径形式调 system_tool，顶部短导入已死——删掉
+// （留着就是每编一次报一次 unused）。
 use serde_json::{Value, json};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::CloseHandle;

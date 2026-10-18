@@ -21,47 +21,116 @@ use super::registry::*;
 // ==================== B6：右键菜单 ====================
 
 
+/// K03：explorer 进程镜像的落点白名单（纯函数，可测）——只放行
+/// `%SystemRoot%\explorer.exe` **本体**。
+///
+/// 为什么不能按名杀：`cm_restart_explorer` 旧实现只比名字 + 同会话，取到的
+/// image path 只用于重启、从不用于筛选——同用户在 `%TEMP%` 放一个 `explorer.exe`
+/// 并启动，Trim（提权态即管理员 token）就会把它 TerminateProcess 掉、再用它
+/// 自己的路径 spawn 回来。同文件 `resource_dll_allowed`（v4-K01）对同一威胁模型
+/// （medium 写注册表 → Trim 进程加载任意 DLL）已落落点白名单，本臂是漏建的那一份。
+///
+/// 判据三条任一不过即拒：
+/// ① 归一后与系统 explorer **逐字节相等**——`..` 折叠、verbatim 盘符折回由
+///    [`crate::engine::protect::normalize_for_compare`] 统一处置，设备路径与
+///    不可折回形态（`\\?\Volume{...}` / `\\?\GLOBALROOT\...`）按 v6-K02/P0-1
+///    的 fail-closed 契约直接拒（OS 承认 ≠ 可比较）；
+/// ② 元数据读不到即拒（不拿「查不到」当安全）；
+/// ③ 自身是重解析点即拒（junction/符号链接可把终止与重启导向别处）。
+fn is_system_explorer_image(p: &str) -> bool {
+    let n = p.trim();
+    if n.is_empty() {
+        return false;
+    }
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let expected = format!("{}\\explorer.exe", windir.trim_end_matches(['\\', '/']));
+    let want = crate::engine::protect::normalize_for_compare(&expected);
+    let got = crate::engine::protect::normalize_for_compare(n);
+    if !want.ok || !got.ok {
+        return false;
+    }
+    if got.low.is_empty() || got.low != want.low {
+        return false;
+    }
+    match std::fs::symlink_metadata(n) {
+        Ok(md) => !crate::engine::protect::is_reparse(&md),
+        Err(_) => false,
+    }
+}
+
+/// K03：枚举**当前会话**的 explorer.exe 候选，按镜像白名单筛出可终止目标。
+/// 返回 `(已过白名单的 (pid, image), 被跳过的候选数, 候选总数)`。
+///
+/// 纯读：不终止任何进程——杀与重启都在 [`cm_restart_explorer`] 里做，真机探针
+/// （`live_explorer_candidates_pass_image_whitelist`）也只读调用本函数，
+/// 枚举与判定因此是同一条代码路径。
+unsafe fn explorer_session_candidates() -> Result<(Vec<(u32, String)>, usize, usize), String> {
+    // 当前会话 ID
+    let mut my_session = 0u32;
+    let _ = ProcessIdToSessionId(std::process::id(), &mut my_session);
+
+    let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        .map_err(|e| format!("创建进程快照失败: {e}"))?;
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err("创建进程快照失败".into());
+    }
+    let mut pe = PROCESSENTRY32W::default();
+    pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut targets: Vec<(u32, String)> = Vec::new();
+    let mut candidates = 0usize;
+    let mut skipped = 0usize;
+
+    if Process32FirstW(snapshot, &mut pe).is_ok() {
+        loop {
+            // v4-K(UTF-16 定长数组)：szExeFile 是 [u16;260]，整体 lossy 解码会把尾部
+            // 填充的 NUL 一并带进字符串——eq_ignore_ascii_case 恒不命中（重启资源管理器
+            // 100% 失效并谎报「没有运行中的资源管理器」）。走 common::wide_str（NUL 截断真源）。
+            let name = wide_str(pe.szExeFile.as_ptr());
+            if name.eq_ignore_ascii_case("explorer.exe") {
+                let pid = pe.th32ProcessID;
+                let mut session = 0u32;
+                if ProcessIdToSessionId(pid, &mut session).is_ok() && session == my_session {
+                    candidates += 1;
+                    // K03：镜像路径过白名单才算目标。读不到元数据 / 非系统根镜像
+                    // 一律跳过并计数——回执里要点名跳过了几个，不静默。
+                    match get_process_path(pid) {
+                        Some(path) if is_system_explorer_image(&path) => targets.push((pid, path)),
+                        _ => skipped += 1,
+                    }
+                }
+            }
+            if Process32NextW(snapshot, &mut pe).is_err() { break; }
+        }
+    }
+    let _ = CloseHandle(snapshot);
+    Ok((targets, skipped, candidates))
+}
+
 /// 重启资源管理器（对应 cm_restart_explorer.ps1）
+///
+/// v6-K03（2026-10-18）：目标从「名字叫 explorer.exe 且同会话」收紧为「同会话且
+/// 镜像路径归一后等于 `%SystemRoot%\explorer.exe`」（[`is_system_explorer_image`]）；
+/// 重启固定取系统镜像的硬钉解析结果，不再使用被杀进程自己的 image path——旧写法
+/// 把「Trim 以管理员 token 重新 spawn 任意路径」的入口留给同用户的 %TEMP% 同名件。
 pub fn cm_restart_explorer() -> Result<Value, String> {
     unsafe {
-        // 当前会话 ID
         let mut my_session = 0u32;
         let _ = ProcessIdToSessionId(std::process::id(), &mut my_session);
 
-        // 枚举所有 explorer.exe 进程，匹配当前会话
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-            .map_err(|e| format!("创建进程快照失败: {e}"))?;
-        if snapshot == INVALID_HANDLE_VALUE {
-            return Err("创建进程快照失败".into());
-        }
-        let mut pe = PROCESSENTRY32W::default();
-        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        let mut targets: Vec<(u32, String)> = Vec::new();
-
-        if Process32FirstW(snapshot, &mut pe).is_ok() {
-            loop {
-                // v4-K(UTF-16 定长数组)：szExeFile 是 [u16;260]，整体 lossy 解码会把尾部
-                // 填充的 NUL 一并带进字符串——eq_ignore_ascii_case 恒不命中（重启资源管理器
-                // 100% 失效并谎报「没有运行中的资源管理器」）。走 common::wide_str（NUL 截断真源）。
-                let name = wide_str(pe.szExeFile.as_ptr());
-                if name.eq_ignore_ascii_case("explorer.exe") {
-                    let pid = pe.th32ProcessID;
-                    let mut session = 0u32;
-                    if ProcessIdToSessionId(pid, &mut session).is_ok() && session == my_session {
-                        // 取进程路径
-                        let path = get_process_path(pid).unwrap_or_default();
-                        targets.push((pid, path));
-                    }
-                }
-                if Process32NextW(snapshot, &mut pe).is_err() { break; }
-            }
-        }
-        let _ = CloseHandle(snapshot);
+        let (targets, skipped, candidates) = explorer_session_candidates()?;
 
         if targets.is_empty() {
+            // 两种「没有目标」必须分开说：真没跑 explorer，与跑了但一个都不是系统镜像
+            // （后者恰是 K03 要堵的攻击形态，报成前者会让用户以为功能坏了）。
+            let message = if candidates == 0 {
+                "当前会话没有运行中的资源管理器"
+            } else {
+                "当前会话的 explorer.exe 均不是系统镜像（%SystemRoot%\\explorer.exe），已拒绝重启"
+            };
             return Ok(json!({
                 "success": false, "killed": 0, "restarted": 0, "alive": 0,
-                "message": "当前会话没有运行中的资源管理器"
+                "candidates": candidates, "skipped": skipped,
+                "message": message
             }));
         }
 
@@ -69,11 +138,6 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
         // OpenProcess/TerminateProcess 失败原先被 `let _ =` 吞掉，界面照样报「已结束 N 个资源管理器」
         // （AGENTS §4.1 纪律①：断言要点名做到了什么）。
         let mut killed = 0usize;
-        // 记录唯一路径
-        let paths: Vec<String> = targets.iter().map(|(_, p)| p.clone())
-            .filter(|p| !p.is_empty()).collect::<std::collections::HashSet<_>>()
-            .into_iter().collect();
-
         for (pid, _) in &targets {
             if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
                 if TerminateProcess(h, 1).is_ok() { killed += 1; }
@@ -86,25 +150,23 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
         if killed == 0 {
             return Ok(json!({
                 "success": false, "killed": 0, "restarted": 0, "alive": targets.len(),
+                "candidates": candidates, "skipped": skipped,
                 "message": "未能结束现有资源管理器进程（权限不足或被占用），未执行重启"
             }));
         }
 
-        // 重新启动
+        // 重新启动：固定取系统 explorer 的硬钉解析结果（P0-2 的 system_tool 入口）。
+        // 解析不到即如实不重启——不回退裸名、也不用被杀进程自己的 image path。
         let mut started = 0;
-        for p in &paths {
-            if std::path::Path::new(p).exists() {
-                if crate::engine::systembin::quiet_cmd(p).spawn().is_ok() { started += 1; }
+        if let Ok(exe) = crate::engine::systembin::system_tool("explorer.exe") {
+            if exe.is_file() && crate::engine::systembin::quiet_cmd(&exe).spawn().is_ok() {
+                started = 1;
             }
-        }
-        if started == 0 {
-            let fallback = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-            let fp = format!("{fallback}\\explorer.exe");
-            if crate::engine::systembin::quiet_cmd(&fp).spawn().is_ok() { started = 1; }
         }
         std::thread::sleep(std::time::Duration::from_millis(900));
 
-        // 检查存活
+        // 检查存活：同样只数镜像过白名单的进程——同会话的 %TEMP% 同名件不算
+        // 「资源管理器已重启」，否则杀不掉它也能谎报成功。
         let mut alive = 0;
         let snap2 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if let Ok(snap2) = snap2 {
@@ -116,7 +178,11 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
                     if name.eq_ignore_ascii_case("explorer.exe") {
                         let mut session = 0u32;
                         if ProcessIdToSessionId(pe2.th32ProcessID, &mut session).is_ok() && session == my_session {
-                            alive += 1;
+                            if get_process_path(pe2.th32ProcessID)
+                                .is_some_and(|p| is_system_explorer_image(&p))
+                            {
+                                alive += 1;
+                            }
                         }
                     }
                     if Process32NextW(snap2, &mut pe2).is_err() { break; }
@@ -130,6 +196,8 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
             "killed": killed,
             "restarted": started,
             "alive": alive,
+            "candidates": candidates,
+            "skipped": skipped,
             "message": if alive > 0 { "已重启资源管理器" } else { "资源管理器未能自动拉起，请手动启动 explorer.exe" },
         }))
     }
@@ -1747,6 +1815,91 @@ mod resource_dll_tests {
         // 元数据读不到（文件不存在）⇒ 拒（后面还有 exists 闸，早退不损失功能面）
         let ghost = format!("{windir}\\System32\\trim-no-such-dll-9f3a.dll");
         assert!(!resource_dll_allowed(&ghost), "不存在的文件必须拒: {ghost}");
+    }
+}
+
+#[cfg(test)]
+mod explorer_restart_tests {
+    use super::*;
+
+    /// v6-K03：镜像白名单只放行 `%SystemRoot%\explorer.exe` 本体。
+    /// 判红自证：把 is_system_explorer_image 的相等判定改成恒 true ⇒ 第 2~6 条断言全红；
+    /// 把 symlink_metadata / reparse 两道删掉 ⇒ 上面的合法样本与链接样本相关断言红。
+    #[test]
+    fn explorer_image_whitelist_gates_system_root_only() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let real = format!("{windir}\\explorer.exe");
+        assert!(is_system_explorer_image(&real), "系统 explorer 本体必须放行: {real}");
+        // verbatim 盘符形态折回后是同一实体（P0-1 口径），必须放行
+        assert!(is_system_explorer_image(&format!(r"\\?\{real}")), "verbatim 盘符形态必须放行");
+        // 大小写不敏感（镜像路径的大小写由启动方决定，不代表另一个实体）
+        assert!(is_system_explorer_image(&real.to_uppercase()), "大小写差异必须放行");
+        // 同目录同名件：系统根下的 Temp 是用户可写位置——旧实现「按名杀 + 按它重启」的入口
+        let temp = format!("{windir}\\Temp\\explorer.exe");
+        assert!(!is_system_explorer_image(&temp), "%TEMP% 同名件必须拒: {temp}");
+        // `..` 折叠后逃出系统根
+        let escape = format!("{windir}\\..\\Temp\\explorer.exe");
+        assert!(!is_system_explorer_image(&escape), "折叠穿越必须拒: {escape}");
+        // 设备路径 / 不可折回 verbatim 形态：OS 承认但不可比较 ⇒ fail-closed（P0-1 契约）
+        assert!(!is_system_explorer_image(&format!(r"\\.\{real}")), "设备路径必须拒");
+        let vol = r"\\?\Volume{61aed058-0000-0000-0000-000000000000}\Windows\explorer.exe";
+        assert!(!is_system_explorer_image(vol), "Volume GUID 形态必须拒: {vol}");
+        assert!(!is_system_explorer_image(""), "空串必须拒");
+        // 元数据读不到即拒（与 resource_dll_allowed 同口径：查不到不当安全）
+        let ghost = format!("{windir}\\trim-no-such-explorer-9f3a.exe");
+        assert!(!is_system_explorer_image(&ghost), "元数据读不到必须拒: {ghost}");
+    }
+
+    /// 自身是重解析点的 explorer.exe（符号链接）必须拒——终止与重启都会导向别处。
+    /// 建不了符号链接（受限环境/无 SeCreateSymbolicLinkPrivilege）显式 SKIP，不假绿。
+    #[test]
+    fn explorer_image_reparse_self_is_rejected() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let real = format!("{windir}\\explorer.exe");
+        let dir = std::env::temp_dir().join(format!("trim-k03-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            eprintln!("SKIP：临时目录建不出来，重解析样本未校验");
+            return;
+        }
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let link = dir.join("explorer.exe");
+        match std::os::windows::fs::symlink_file(&real, &link) {
+            Ok(()) => assert!(
+                !is_system_explorer_image(&link.to_string_lossy()),
+                "符号链接形态必须拒: {}",
+                link.display()
+            ),
+            Err(e) => eprintln!("SKIP：建符号链接失败（{e}），重解析样本未校验"),
+        }
+    }
+
+    /// 真机只读探针：枚举本会话 explorer 候选与系统路径，**不杀进程**。
+    /// 交互会话里必有系统 explorer：候选 ≥1 且系统镜像必须过白名单；没过白名单的
+    /// 候选逐个打印，供人工核对是不是 %TEMP% 同名件（K03 的攻击形态）。
+    #[test]
+    #[ignore = "真机：只读枚举 explorer 候选并核对镜像白名单（不杀进程，发布前人工跑）"]
+    fn live_explorer_candidates_pass_image_whitelist() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let real = format!("{windir}\\explorer.exe");
+        assert!(
+            is_system_explorer_image(&real),
+            "本机系统 explorer 不过白名单，重启功能必坏: {real}"
+        );
+        let (targets, skipped, candidates) =
+            unsafe { explorer_session_candidates() }.expect("枚举本会话进程");
+        eprintln!("候选 {candidates} 个：过白名单 {}、跳过 {skipped}", targets.len());
+        assert!(candidates >= 1, "交互会话里没有 explorer.exe 候选，枚举本身坏了");
+        assert!(!targets.is_empty(), "有候选但系统镜像一个都没过白名单: {real}");
+        for (pid, path) in &targets {
+            eprintln!("  pid {pid}: {path}");
+        }
     }
 }
 

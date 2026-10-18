@@ -641,7 +641,7 @@ mod tests {
             "powershell.exe", // pwsh 执行层唯一入口
             "reg.exe",       // cleanup/peripheral/startup/process/residue
             "regedit.exe",   // systembin::open_regedit_at
-            "explorer.exe",  // systembin::shell_select_in_explorer
+            "explorer.exe",  // systembin::shell_select_in_explorer + contextmenu 重启臂（v6-K03）
             "schtasks.exe",  // maintenance/startup/process/misc
             "netsh.exe",     // runtimes_net
             "tasklist.exe",  // misc

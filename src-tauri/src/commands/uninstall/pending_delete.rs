@@ -269,6 +269,28 @@ pub(super) fn prune_pending_entries(entries: &mut Vec<Value>, now_secs: u64) -> 
     before - entries.len()
 }
 
+/// v6-K05：PFRO 登记前的**新增两道**只读闸（纯函数，可测）——系统命名空间 + 别名复检。
+///
+/// PFRO 是**永久删**出口（不进回收站、重启后由会话管理器执行），登记面此前只有
+/// `is_path_protected` 一道（v2-B1，`check-delete-exits` 的 MUST_PROTECT 正向棘轮钉在
+/// 命令体内，不并进来）：
+/// ① `is_system_namespace`——`%WINDIR%` 在 protect 里是 exact 语义、管不到 System32
+///    子孙，residue 执行侧（`classify_residue_op` 的 file 分支）同位置已有这道；
+/// ② `final_path_protected`（别名复检）——字面判定拦不住「父目录被换成 junction /
+///    短名指向受保护根」（同一实体两条路径，literal 比对只认其中一条），
+///    canonicalize 父目录后重跑同一套判据（Kudu S2，清理删除链与 finder 同函数）。
+///
+/// 返回 `Some(原因)` = 拒绝登记。存在性不在这里判（调用方按 is_file 判，PFRO 只收文件）。
+pub(super) fn pending_delete_sysns_alias_reason(target: &str) -> Option<&'static str> {
+    if protect::is_system_namespace(target) {
+        return Some("目标位于系统目录（Windows/System32 等），拒绝登记重启后删除");
+    }
+    if protect::final_path_protected(target) {
+        return Some("目标经别名解析后位于受保护路径，拒绝登记重启后删除");
+    }
+    None
+}
+
 /// uninstall:pending-add — 把回收站失败的文件项登记为重启后删除（主窗档）。
 /// 只接受**文件**路径（PFRO 对非空目录的延迟删除并不可靠，登记了也删不掉，
 /// 与其制造"已登记=会删掉"的错觉，不如入口就拒）。
@@ -314,8 +336,15 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
             // 只是第一层，命令体内再判一次才与其余删除链同口径。刻意放在 is_file 之前：
             // 空串 / 盘符根 / 受保护根下的路径无论当前存在与否都拒，不给「登记窗口期
             // 路径状态变化」留缝，也与 protect 判定的 fail-closed 语义一致。
+            // 这行同时是 check-delete-exits MUST_PROTECT 正向棘轮的钉住点，不许挪进 helper。
             if protect::is_path_protected(t) {
                 rows.push(json!({ "target": t, "status": "skip", "message": "目标位于受保护路径（或无法归一化），拒绝登记重启后删除" }));
+                continue;
+            }
+            // v6-K05：系统命名空间 + 别名复检（与 residue 执行侧同口径）——既有那道
+            // is_path_protected 是 exact 语义，管不到 System32 子孙与链接别名。
+            if let Some(reason) = pending_delete_sysns_alias_reason(t) {
+                rows.push(json!({ "target": t, "status": "skip", "message": reason }));
                 continue;
             }
             let path = Path::new(t);
@@ -564,6 +593,91 @@ mod tests {
         assert!(
             i_save < i_pfro,
             "撤回凭据必须先落盘再写 PFRO（旧反序：PFRO 失败 ⇒ 凭据缺失、重启删了撤不回）"
+        );
+    }
+
+    /// v6-K05：PFRO 登记闸三层——① is_path_protected（v2-B1 既有，门禁 MUST_PROTECT
+    /// 钉在命令体内）② is_system_namespace ③ final_path_protected，普通文件放行。
+    /// 判红自证：把 pending_delete_sysns_alias_reason 改成恒 None ⇒ ② 红（System32
+    /// 子孙不在 protect 的 exact 语义内，只有这道拦得住）。
+    #[test]
+    fn pfro登记闸_三拒一放() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        // ① 受保护路径：System32\config 是 protect 的 subtree 根（命令体内那道）
+        let protected = format!(r"{windir}\System32\config\SAM");
+        assert!(
+            protect::is_path_protected(&protected),
+            "受保护路径必须由命令体内那道拦下: {protected}"
+        );
+        // ② 系统命名空间：System32 子孙不在 protect 的 exact 语义内，靠新闸拦
+        let sysns = format!(r"{windir}\System32\drivers\etc\hosts");
+        assert!(
+            !protect::is_path_protected(&sysns),
+            "前置断言：hosts 不在 protect 判据内（否则测的不是新闸）: {sysns}"
+        );
+        assert!(
+            pending_delete_sysns_alias_reason(&sysns).is_some(),
+            "系统命名空间必须拒: {sysns}"
+        );
+        // ③ 不可折回 verbatim 形态：第一道就 fail-closed（P0-1 契约），新闸同样拒
+        let vol = r"\\?\Volume{61aed058-0000-0000-0000-000000000000}\Windows\System32\x.dll";
+        assert!(
+            protect::is_path_protected(vol),
+            "Volume GUID 形态必须由第一道 fail-closed 拦下: {vol}"
+        );
+        assert!(
+            pending_delete_sysns_alias_reason(vol).is_some(),
+            "新闸对不可折回形态同样 fail-closed: {vol}"
+        );
+        // 放行：普通临时文件（不在任何保护根、不在系统命名空间、父目录可解析）
+        let legit = std::env::temp_dir().join(format!("trim-k05-{}.tmp", std::process::id()));
+        assert!(
+            pending_delete_sysns_alias_reason(&legit.to_string_lossy()).is_none(),
+            "普通临时文件必须放行: {}",
+            legit.display()
+        );
+    }
+
+    /// v6-K05：别名复检——父目录被换成指向受保护子树的链接（junction/符号链接）时，
+    /// 字面路径不在任何保护根下，必须靠 final_path_protected 拦在登记闸外（PFRO 是
+    /// 永久删出口，字面判据放过它 = 重启后删掉受保护目录里的文件）。
+    /// 样本双通道：符号链接（开发者模式/提权态免 cmd 依赖）优先，junction
+    /// （mklink /J 免管理员）回退；两者都建不出来（受限环境）显式 SKIP，不假绿。
+    #[test]
+    fn pfro登记闸_别名解析后受保护必须拒() {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let target = format!(r"{windir}\System32\config");
+        let dir = std::env::temp_dir().join(format!("trim-k05-jlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let alias = dir.join("alias");
+        // 通道①：目录符号链接（canonicalize 同样跟随，判据等价的别名样本）
+        let made = std::os::windows::fs::symlink_dir(&target, &alias).is_ok();
+        // 通道②：junction 回退（mklink /J 免管理员；symlink_dir 需开发者模式/提权）
+        let made = made || {
+            std::process::Command::new("cmd")
+                .args(["/C", &format!(r#"mklink /J "{}" "{}""#, alias.display(), target)])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !made {
+            eprintln!("SKIP：符号链接与 junction 都建不出来（受限环境），别名样本未校验");
+            return;
+        }
+        // 字面路径在 %TEMP% 下（不在任何保护根），父目录是指向 System32\config 的链接
+        let probe = alias.join("trim-k05-probe.txt");
+        assert!(
+            pending_delete_sysns_alias_reason(&probe.to_string_lossy()).is_some(),
+            "链接别名穿透登记闸: {}",
+            probe.display()
         );
     }
 }

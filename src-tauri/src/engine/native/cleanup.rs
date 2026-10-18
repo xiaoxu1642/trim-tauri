@@ -7,7 +7,8 @@
 //! 规则库契约测试（P0）与文件备份保留测试随本实现放在同一文件。
 
 
-use crate::engine::systembin::system_tool;
+// v6-K01（P0-2）后本文件只以全路径形式调 system_tool，顶部短导入已死——删掉
+// （留着就是每编一次报一次 unused）。
 use serde_json::{Value, json};
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW};

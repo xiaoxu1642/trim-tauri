@@ -61,7 +61,7 @@ const PRODUCTION_PINNED_FLOOR = [
   'powershell.exe', // pwsh 执行层唯一入口
   'reg.exe',        // cleanup/peripheral/startup/process/residue
   'regedit.exe',    // systembin::open_regedit_at
-  'explorer.exe',   // systembin::shell_select_in_explorer
+  'explorer.exe',   // systembin::shell_select_in_explorer + contextmenu 重启臂（v6-K03）
   'schtasks.exe',   // maintenance/startup/process/misc
   'netsh.exe',      // runtimes_net
   'tasklist.exe',   // misc
@@ -125,6 +125,11 @@ const RAW_EXEMPT = [
     anchor: 'let ok2 = std::process::Command::new("cmd")',
     reason: '同上用例③对照组：mklink /J 造指向普通目录的 junction，验证不得误判受保护（锚点带 ok2 前缀与上一条区分，避免 0/2 歧义判红）',
   },
+  {
+    file: 'src-tauri/src/commands/uninstall/pending_delete.rs',
+    anchor: 'std::process::Command::new("cmd")',
+    reason: 'v6-K05（P0-3）别名复检用例：mklink /J 造指向受保护子树（System32\\config）的 junction，验证 PFRO 登记闸的 final_path_protected 分支（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
+  },
 ];
 
 /**
@@ -162,16 +167,10 @@ const SITE_EXEMPT = [
     anchor: 'quiet_cmd_timeout(&wow',
     reason: 'P1-01 计数器链②：SysWOW64\\lodctr.exe 由 SystemRoot 拼接的绝对路径（32 位计数器重建需要 32 位 lodctr，system_tool 只在 System32/root 两目录找，第三目录不覆盖——绝对路径不经搜索顺序，非裸名）',
   },
-  {
-    file: 'src-tauri/src/engine/native/contextmenu.rs',
-    anchor: 'quiet_cmd(p).spawn()',
-    reason: 'p 来自注册表 Run 键回读的绝对路径列表，非 PINNED 裸名',
-  },
-  {
-    file: 'src-tauri/src/engine/native/contextmenu.rs',
-    anchor: 'quiet_cmd(&fp).spawn()',
-    reason: 'fp 由 SystemRoot 拼接的 explorer.exe 绝对路径兜底，非裸名',
-  },
+  // v6-K03（P0-3）：contextmenu.rs 原两条登记（quiet_cmd(p).spawn() 按被杀进程
+  // 自己的 image path 重启、quiet_cmd(&fp).spawn() SystemRoot 兜底）随重启臂重写
+  // 一起消失——新调用点是 `if let Ok(exe) = system_tool("explorer.exe")` 后
+  // quiet_cmd(&exe)，由 C 组两跳别名判定解析，无需登记。
 ];
 
 /**

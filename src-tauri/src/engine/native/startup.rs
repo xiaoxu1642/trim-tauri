@@ -336,16 +336,7 @@ fn startup_folders() -> Vec<(String, &'static str, &'static str)> {
 /// 恢复目标不得命中 `is_path_protected`。任一不过即拒，**在 rename 之前**。
 fn folder_restore_verdict(backup_path: &str, orig_path: &str) -> Result<(), String> {
     // ①a 备份文件必须在备份根内
-    let backup_key = crate::engine::paths::path_key(backup_path);
-    let in_backup_root = crate::engine::paths::backup_read_dirs("startup-backup")
-        .iter()
-        .any(|d| {
-            let dk = crate::engine::paths::path_key(&d.to_string_lossy());
-            backup_key == dk || backup_key.starts_with(&format!("{dk}\\"))
-        });
-    if !in_backup_root {
-        return Err("备份文件不在本域启动备份根内，已拒绝移回".into());
-    }
+    backup_in_root_verdict(backup_path)?;
     // ①b 恢复目标必须在两个启动文件夹之一内
     let orig_key = crate::engine::paths::path_key(orig_path);
     let in_folder = startup_folders().iter().any(|(base, sub, _)| {
@@ -362,20 +353,83 @@ fn folder_restore_verdict(backup_path: &str, orig_path: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// v5-K09 批次 5：registry 启用的台账坐标准入（纯函数，可测）。
+/// K04：备份路径必须落在本域备份根内（`backup_read_dirs("startup-backup")`，
+/// 新根在前、老根兜底——与 fsDelete 白名单、台账读取同一份候选）。
+///
+/// 抽成公共判据是为了让启用臂（恢复移回）与删除臂（回收站删备份）认同一道：
+/// 备份路径来自 `disabled.json`（%APPDATA% 可写），台账行被篡改时两道都必须拦。
+///
+/// 刻意**不跑** `is_path_protected`：备份根住在 `app_data_dir()` 下，而应用自身
+/// 数据目录是 `configure_from_app` 登记的受保护子树（整棵不许碰）——对备份路径跑
+/// 保护判定恒为 true，合法备份会被全拦（同 `appearance.rs:390` 踩过的坑）。
+/// 备份区的「可动」由本 containment（只认本域备份根）单独授权。
+fn backup_in_root_verdict(backup_path: &str) -> Result<(), String> {
+    let backup_key = crate::engine::paths::path_key(backup_path);
+    let in_backup_root = crate::engine::paths::backup_read_dirs("startup-backup")
+        .iter()
+        .any(|d| {
+            let dk = crate::engine::paths::path_key(&d.to_string_lossy());
+            backup_key == dk || backup_key.starts_with(&format!("{dk}\\"))
+        });
+    if !in_backup_root {
+        return Err("备份文件不在本域启动备份根内，已拒绝".into());
+    }
+    Ok(())
+}
+
+/// K04：folder **禁用/删除臂**的源路径准入（纯函数，可测）。
+///
+/// 与启用臂的 [`folder_restore_verdict`] 同源：源路径必须落在两个启动文件夹之一内
+/// （path_key 归一后按组件边界比前缀），且不得命中 `is_path_protected`。
+///
+/// 为什么禁用/删除臂也要这道：`disabled.json` 的记录会被 `startup_scan` 原样合并进
+/// 扫描结果，命令层的快照校验只证明「id 来自上次扫描」——注入行自证一致；提权态下
+/// 无 containment 即可把任意文件搬进备份目录（禁用臂 rename）或投回收站（删除臂
+/// fsDelete），违 AGENTS §3「回收站链须先过 is_path_protected」。
+fn folder_source_verdict(file_path: &str) -> Result<(), String> {
+    let key = crate::engine::paths::path_key(file_path);
+    if key.is_empty() {
+        return Err("启动文件夹项路径为空，已拒绝".into());
+    }
+    let in_folder = startup_folders().iter().any(|(base, sub, _)| {
+        let dk = crate::engine::paths::path_key(&format!("{base}\\{sub}"));
+        key == dk || key.starts_with(&format!("{dk}\\"))
+    });
+    if !in_folder {
+        return Err("源路径不在本域启动文件夹内，已拒绝".into());
+    }
+    if crate::engine::protect::is_path_protected(file_path) {
+        return Err("源路径命中受保护路径，已拒绝".into());
+    }
+    Ok(())
+}
+
+/// v5-K09 批次 5：registry 臂的台账坐标准入（纯函数，可测）——**启用/禁用/删除
+/// 三臂共用同一道**（v6-K04：此前只有启用臂过它，禁用/删除臂裸吃 regPath）。
 /// 两道：hive tag 必须是本域四视图之一；子键必须命中四条 Run/RunOnce 根形态之一
 /// （大小写不敏感）。tag 与根的「成对」在句柄层面无安全意义——HKLM32 与 HKLM
 /// 解析同一个句柄、视图由 subkey 里的 WOW6432Node 决定——本判定锚定的是
-/// 「恢复写回只落在 8 容器之一」，tag 撒谎（HKCU32 配 64 位根）不越权、不拒。
-fn registry_restore_verdict(hive_tag: &str, subkey: &str) -> Result<(), String> {
+/// 「改写只落在 8 容器之一」，tag 撒谎（HKCU32 配 64 位根）不越权、不拒。
+fn registry_container_verdict(hive_tag: &str, subkey: &str) -> Result<(), String> {
     const TAGS: [&str; 4] = ["HKCU", "HKCU32", "HKLM", "HKLM32"];
     if !TAGS.iter().any(|t| hive_tag.eq_ignore_ascii_case(t)) {
-        return Err("注册表项不在本域 Run/RunOnce 容器内，已拒绝恢复".into());
+        return Err("注册表项不在本域 Run/RunOnce 容器内，已拒绝".into());
     }
     if RUN_PATHS.iter().any(|(_, _, sk, _, _)| subkey.eq_ignore_ascii_case(sk)) {
         Ok(())
     } else {
-        Err("注册表项不在本域 Run/RunOnce 容器内，已拒绝恢复".into())
+        Err("注册表项不在本域 Run/RunOnce 容器内，已拒绝".into())
+    }
+}
+
+/// K04：由**真实 hive**（regPath 解析结果）推导台账对账用的 tag。
+/// 台账行自带的 hive/scope 只作对账、不作为授权（v6-K04：HKLM 前置门与真正
+/// 写入的 hive 必须同源，否则台账行谎报 HKCU 即可骗过提权门）。
+fn hive_tag_of(hive: HKEY, subkey: &str) -> &'static str {
+    let is_wow32 = subkey.to_ascii_uppercase().contains("WOW6432NODE");
+    match hive {
+        h if h == HKEY_CURRENT_USER => if is_wow32 { "HKCU32" } else { "HKCU" },
+        _ => if is_wow32 { "HKLM32" } else { "HKLM" },
     }
 }
 
@@ -1041,10 +1095,11 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
     let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
     let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
-    let hive_str = item.get("hive").and_then(|v| v.as_str()).unwrap_or("HKCU");
-    let hive = if hive_str.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
-
-    let (_, subkey) = parse_reg_path(reg_path).ok_or("注册表路径格式错误")?;
+    // K04：真实 hive 以 regPath 解析结果为准——台账行/快照自带的 hive 字段只作对账，
+    // 不作为授权。旧写法按 item.hive 选句柄：台账谎报 HKCU 即可让 HKLM 路径的读写
+    // 落进用户 hive（或反向骗过命令层按 item.hive 判的 HKLM 提权前置门）。
+    let (hive, subkey) = parse_reg_path(reg_path).ok_or("注册表路径格式错误")?;
+    let hive_tag = hive_tag_of(hive, &subkey);
     // 32 位 Run 项的批准位在 StartupApproved\Run32；写死了 Run 会既禁不掉该项，
     // 又可能误标同名 64 位项。回读校验与写入用同一个子键名，不再自证清白。
     let approved_subkey = if subkey.to_ascii_uppercase().contains("WOW6432NODE") { "Run32" } else { "Run" };
@@ -1070,7 +1125,9 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
         // v5-K09 批次 5：台账凭据只对本域 8 条 Run/RunOnce 容器生效——快照条目的
         // hive/子键必须与 RUN_PATHS 成对命中，否则拒绝恢复（fsDelete 侧 containment
         // 同口径；此前启用臂无任何容器校验，提权态可按篡改台账写任意 Run 值）。
-        registry_restore_verdict(hive_str, &subkey)?;
+        // v6-K04：tag 改用 regPath 解析出的真实 hive（hive_tag_of），台账行自带的
+        // hive 只作对账。
+        registry_container_verdict(hive_tag, &subkey)?;
         let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id))
             .cloned().ok_or("缺少启用记录，且注册表中已无该项")?;
         let kind_str = rec.get("valueType").and_then(|v| v.as_str()).unwrap_or("String");
@@ -1117,6 +1174,10 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
         // 批准位对 RunOnce 是死数据（判定见函数头 is_run_once）：界面显示「已禁用」
         // 而下次登录该程序照样执行一次。删值 + 记账后，扫描的 disabled.json 合并会把
         // 该项以「已禁用（Trim）」呈现，启用走同一本账恢复原值（与启动文件夹项同构）。
+        //
+        // v6-K04：禁用臂同样过容器准入（此前只有启用臂有）——提权态下台账/快照注入行
+        // 可指向任意 Run 容器外的值，删值+备份即「任意注册表值删除」。
+        registry_container_verdict(hive_tag, &subkey)?;
         if reg_read_value_typed(hive, &subkey, value_name).is_none() {
             return Err("注册表值不存在".into());
         }
@@ -1156,11 +1217,17 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
                 }
                 let rec = json!({
                     "id": id, "name": item.get("name"), "command": v_data,
-                    "source": "registry", "hive": item.get("hive"), "regPath": reg_path,
+                    "source": "registry",
+                    // K04：台账行的 hive/scope 写**解析出的真实值**（对账用）。
+                    // 旧写法原样抄 item 的字段——台账被篡改时账上记的 hive 与真正
+                    // 写入的 hive 不一致，后续对账（needs_hklm 等）会按假值判。
+                    "hive": hive_tag,
+                    "regPath": reg_path,
                     "valueName": value_name, "valueType": kind_str,
                     "valueData": v_data, "valueDataB64": v_b64, "valueDataArray": v_arr,
                     "filePath": "", "taskPath": "", "taskName": "",
-                    "location": item.get("location"), "scope": item.get("scope"),
+                    "location": item.get("location"),
+                    "scope": if hive == HKEY_LOCAL_MACHINE { "HKLM" } else { "HKCU" },
                     "publisher": item.get("publisher"), "resolvedPath": item.get("resolvedPath"),
                 });
                 records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
@@ -1204,6 +1271,10 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
         if !std::path::Path::new(file_path).exists() {
             return Err("文件不存在".into());
         }
+        // K04：源路径 containment + 保护面，在 rename 之前——disabled.json 的记录会被
+        // startup_scan 原样合并进扫描结果（%APPDATA% 可写），命令层快照校验只证明
+        // 「id 来自上次扫描」；无这道闸，提权态可把任意存在文件 rename 进备份目录。
+        folder_source_verdict(file_path)?;
         let files_dir = startup_files_dir();
         let _ = std::fs::create_dir_all(&files_dir);
         let stamp = backup_stamp();
@@ -1307,6 +1378,47 @@ fn startup_deleted_dir() -> std::path::PathBuf {
     dir
 }
 
+/// K04：folder 删除臂的两种结局（纯枚举，供测试断言用）。
+#[derive(Debug)]
+enum FolderDeletePlan {
+    /// 台账登记过的备份文件本体（源文件已被禁用搬走）⇒ 回收站删备份。
+    BackupFile(String),
+    /// 还在的源文件 ⇒ 调用方先复制到 deleted/ 再回收站删源文件。
+    StartupFile(String),
+}
+
+/// K04：folder 删除臂的逐项计划（纯函数，可测——不碰台账、不写盘）。
+///
+/// 与旧内联版的差别只有 containment：源路径限两个启动文件夹、备份路径限本域备份根，
+/// 两个落点之外一律拒（逐条计数，不再静默 copy + 投回收站）。合法形态有两种：
+/// ① 台账登记过的备份（源文件不在启动文件夹了）⇒ BackupFile；
+/// ② 源文件还在 ⇒ StartupFile——它要么是启动文件夹里的活文件，要么是禁用后
+///    不重扫直接删的形状（快照项 filePath 就是备份落点，住在本域备份根内）。
+fn plan_folder_delete(item: &Value, records: &[Value]) -> Result<FolderDeletePlan, String> {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let file_path = item.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
+    let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id));
+    let backup_path = rec.and_then(|r| r.get("filePath").and_then(|v| v.as_str())).unwrap_or("");
+
+    // ① 台账登记过的备份（源文件已被禁用搬走、此刻不在启动文件夹里）
+    if !backup_path.is_empty()
+        && std::path::Path::new(backup_path).exists()
+        && !std::path::Path::new(file_path).exists()
+    {
+        // 备份路径来自台账（%APPDATA% 可写），必须限在本域备份根内
+        backup_in_root_verdict(backup_path)?;
+        return Ok(FolderDeletePlan::BackupFile(backup_path.to_string()));
+    }
+    if !std::path::Path::new(file_path).exists() {
+        return Err("文件不存在".into());
+    }
+    // ② 源文件还在：两个合法落点（启动文件夹 / 本域备份根）之外一律拒
+    if folder_source_verdict(file_path).is_ok() || backup_in_root_verdict(file_path).is_ok() {
+        return Ok(FolderDeletePlan::StartupFile(file_path.to_string()));
+    }
+    Err("源路径不在本域启动文件夹或备份根内，已拒绝".into())
+}
+
 
 
 /// 启动项删除（对应 startup_remove.ps1，S3）
@@ -1351,6 +1463,14 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     Some(v) => v,
                     None => { failed += 1; results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表路径格式错误"})); continue; }
                 };
+                // K04：删除臂同样过容器准入（此前只有启用臂有）——快照/台账行可指向
+                // 任意 Run 容器外的值，export 备份 + RegDeleteValueW 即「任意注册表
+                // 值删除」。真实 hive/scope 以 regPath 解析结果为准。
+                if let Err(e) = registry_container_verdict(hive_tag_of(hive, &subkey), &subkey) {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": e}));
+                    continue;
+                }
                 // 备份整个键到 .reg
                 let safe = safe_name(&name);
                 let reg_file = deleted_dir.join(format!("{stamp}_reg_{safe}.reg"));
@@ -1413,30 +1533,31 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 }
             }
             "folder" => {
-                let file_path = item.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
-                // 检查是否为已禁用记录（在备份目录）
-                let rec = records.iter().find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
-                let backup_path = rec.and_then(|r| r.get("filePath").and_then(|v| v.as_str())).unwrap_or("");
-                if !backup_path.is_empty() && std::path::Path::new(backup_path).exists() && !std::path::Path::new(file_path).exists() {
-                    // 从备份目录删除
-                    fs_delete.push(json!({"id": id, "name": name, "path": backup_path, "kind": "backup-file"}));
-                    records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
-                    results.push(json!({"id": id, "name": name, "status": "deferred", "message": "备份文件待主进程回收站删除"}));
-                } else if std::path::Path::new(file_path).exists() {
-                    // 备份到 deleted 目录
-                    let safe = safe_name(&name);
-                    let ext = std::path::Path::new(file_path).extension().and_then(|e| e.to_str()).unwrap_or("");
-                    let dest = deleted_dir.join(format!("{stamp}_folder_{safe}.{ext}"));
-                    if std::fs::copy(file_path, &dest).is_err() {
-                        failed += 1;
-                        results.push(json!({"id": id, "name": name, "status": "error", "message": "文件备份失败"}));
-                        continue;
+                // K04：逐项计划（纯函数，可测）——containment 在计划里判，失败逐条计数。
+                match plan_folder_delete(item, &records) {
+                    Ok(FolderDeletePlan::BackupFile(backup_path)) => {
+                        // 台账登记过的备份文件（源文件已被禁用搬走过）：回收站删备份本体
+                        fs_delete.push(json!({"id": id, "name": name, "path": backup_path, "kind": "backup-file"}));
+                        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+                        results.push(json!({"id": id, "name": name, "status": "deferred", "message": "备份文件待主进程回收站删除"}));
                     }
-                    fs_delete.push(json!({"id": id, "name": name, "path": file_path, "kind": "startup-file"}));
-                    results.push(json!({"id": id, "name": name, "status": "deferred", "message": "已备份，待主进程回收站删除"}));
-                } else {
-                    failed += 1;
-                    results.push(json!({"id": id, "name": name, "status": "error", "message": "文件不存在"}));
+                    Ok(FolderDeletePlan::StartupFile(src)) => {
+                        // 备份到 deleted 目录（复制失败即失败，不送回收站）
+                        let safe = safe_name(&name);
+                        let ext = std::path::Path::new(&src).extension().and_then(|e| e.to_str()).unwrap_or("");
+                        let dest = deleted_dir.join(format!("{stamp}_folder_{safe}.{ext}"));
+                        if std::fs::copy(&src, &dest).is_err() {
+                            failed += 1;
+                            results.push(json!({"id": id, "name": name, "status": "error", "message": "文件备份失败"}));
+                            continue;
+                        }
+                        fs_delete.push(json!({"id": id, "name": name, "path": src, "kind": "startup-file"}));
+                        results.push(json!({"id": id, "name": name, "status": "deferred", "message": "已备份，待主进程回收站删除"}));
+                    }
+                    Err(msg) => {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": msg}));
+                    }
                 }
             }
             "task" => {
@@ -1577,26 +1698,136 @@ mod k09_tests {
         assert!(folder_restore_verdict(&format!("{backup_root}\\1_probe.reg"), &evil).is_err());
     }
 
-    /// v5-K09 批次 5：registry 启用的台账坐标准入——tag 限四视图、子键限四根形态。
-    /// 判红自证：把 registry_restore_verdict 改成恒 Ok ⇒ 全组红。
+    /// v5-K09 批次 5：registry 臂的台账坐标准入——tag 限四视图、子键限四根形态。
+    /// v6-K04：启用/禁用/删除三臂共用（改名 registry_container_verdict）。
+    /// 判红自证：把 registry_container_verdict 改成恒 Ok ⇒ 全组红。
     #[test]
-    fn registry启用坐标必须命中8根且tag限四视图() {
-        assert!(registry_restore_verdict("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run").is_ok());
-        assert!(registry_restore_verdict("HKCU", r"Software\Microsoft\Windows\CurrentVersion\RunOnce").is_ok());
-        assert!(registry_restore_verdict("HKCU32", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run").is_ok());
-        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_ok());
-        assert!(registry_restore_verdict("HKLM32", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce").is_ok());
+    fn registry坐标必须命中8根且tag限四视图() {
+        assert!(registry_container_verdict("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_container_verdict("HKCU", r"Software\Microsoft\Windows\CurrentVersion\RunOnce").is_ok());
+        assert!(registry_container_verdict("HKCU32", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_container_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_container_verdict("HKLM32", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce").is_ok());
         // 大小写不敏感（扫描产出与手改台账的形态都要按同一容器判）
-        assert!(registry_restore_verdict("hklm", r"software\MICROSOFT\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_container_verdict("hklm", r"software\MICROSOFT\Windows\CurrentVersion\Run").is_ok());
         // tag 撒谎（HKCU32 配 64 位根）不越权：句柄层 HKCU32≡HKCU，视图由 subkey 决定 ⇒ 放行
-        assert!(registry_restore_verdict("HKCU32", r"Software\Microsoft\Windows\CurrentVersion\Run").is_ok());
+        assert!(registry_container_verdict("HKCU32", r"Software\Microsoft\Windows\CurrentVersion\Run").is_ok());
         // 相邻名字：RunX / RunOnceEx / RunServices 不是容器
-        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunX").is_err());
-        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunServices").is_err());
+        assert!(registry_container_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunX").is_err());
+        assert!(registry_container_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunServices").is_err());
         // 完全越界：任何非 Run 容器、非法 tag 一律拒
-        assert!(registry_restore_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer").is_err());
-        assert!(registry_restore_verdict("HKLMX", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_err());
-        assert!(registry_restore_verdict("HKEY_LOCAL_MACHINE", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_err());
+        assert!(registry_container_verdict("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer").is_err());
+        assert!(registry_container_verdict("HKLMX", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_err());
+        assert!(registry_container_verdict("HKEY_LOCAL_MACHINE", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run").is_err());
+    }
+
+    /// K04：folder 禁用/删除臂的源路径准入——只放行两个启动文件夹之内的路径。
+    /// 判红自证：把 folder_source_verdict 的 in_folder 判定改成恒 true ⇒ ②③④ 全红。
+    #[test]
+    fn folder源路径准入只放行启动文件夹内() {
+        let (base, sub, _) = startup_folders()[0].clone();
+        let root = format!("{base}\\{sub}");
+        // ① 合法形态：启动文件夹内的文件放行
+        assert!(folder_source_verdict(&format!(r"{root}\probe.lnk")).is_ok());
+        // verbatim 形态归一后同一实体，不得靠前缀绕过
+        assert!(folder_source_verdict(&format!(r"\\?\{root}\probe.lnk")).is_ok());
+        // ② 越界源路径：任意存在文件都不在启动文件夹内 ⇒ 拒
+        let err = folder_source_verdict(r"C:\Windows\System32\evil.dll").unwrap_err();
+        assert!(err.contains("启动文件夹"), "越界源路径必须点名启动文件夹: {err}");
+        // ③ 相邻前缀不得误放：StartupFoo 不是 Startup 的子树（组件边界）
+        let evil = format!(r"{rootFoo}\evil.lnk", rootFoo = format!("{root}Foo"));
+        assert!(folder_source_verdict(&evil).is_err(), "相邻前缀必须拒: {evil}");
+        // ④ 空路径拒
+        assert!(folder_source_verdict("").is_err());
+    }
+
+    /// K04 集成：越界台账投喂**禁用臂** ⇒ 拒绝且原文件不动（与启用臂同构）。
+    /// 判红自证：去掉 toggle_folder_item 禁用臂里的 folder_source_verdict 调用 ⇒ 本用例红
+    /// （evil 文件会被 rename 进备份目录）。
+    #[test]
+    fn 越界台账禁用被拒且原文件不动() {
+        let root = std::env::temp_dir().join(format!("trim-k04-disable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = root.join("evil.lnk");
+        std::fs::write(&victim, b"x").unwrap(); // 「存在」但不在任何启动文件夹内
+        let item = json!({ "id": "k04-probe", "name": "probe", "filePath": victim.to_string_lossy() });
+        let mut records: Vec<Value> = Vec::new();
+        let r = unsafe { toggle_folder_item(&item, false, &mut records) };
+        let err = r.unwrap_err();
+        assert!(err.contains("启动文件夹"), "越界源路径禁用必须被拒: {err}");
+        assert!(victim.is_file(), "拒后原文件不得被动过");
+        assert!(records.is_empty(), "拒后不得写台账");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// K04：folder 删除臂逐项计划——合法两形态与越界两拒绝。
+    /// 判红自证：把 plan_folder_delete 里的 backup_in_root_verdict 调用删掉 ⇒ ② 红；
+    /// 把 folder_source_verdict 调用删掉 ⇒ ③④ 的拒绝语义仍由 ④ 兜住，但 ② 的放行
+    /// 语义（备份根内文件必须能删）会红——两道各有一个能判红的用例。
+    #[test]
+    fn folder删除计划_合法两形态与越界两拒绝() {
+        let (base, sub, _) = startup_folders()[0].clone();
+        let folder_root = format!("{base}\\{sub}");
+        let backup_root = crate::engine::paths::backup_read_dirs("startup-backup")[0]
+            .to_string_lossy()
+            .to_string();
+        let tmp = std::env::temp_dir().join(format!("trim-k04-delplan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        struct Cleanup(Vec<std::path::PathBuf>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for p in &self.0 {
+                    if p.is_dir() {
+                        let _ = std::fs::remove_dir_all(p);
+                    } else {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+            }
+        }
+        // 备份根里的样本文件自建自清（判据是纯词汇的，但计划的存在性分支要真文件）
+        let probe = format!(r"{backup_root}\files\trim-k04-probe-{}.lnk", std::process::id());
+        std::fs::create_dir_all(std::path::Path::new(&probe).parent().unwrap()).ok();
+        std::fs::write(&probe, b"x").ok();
+        let _cleanup = Cleanup(vec![tmp.clone(), std::path::PathBuf::from(&probe)]);
+
+        // ① BackupFile：源文件已被禁用搬走（不在启动文件夹了），台账记着备份落点
+        let item_gone = json!({ "id": "p1", "filePath": format!(r"{folder_root}\gone.lnk") });
+        let rec = json!({ "id": "p1", "filePath": probe });
+        match plan_folder_delete(&item_gone, std::slice::from_ref(&rec)) {
+            Ok(FolderDeletePlan::BackupFile(p)) => assert_eq!(p, probe, "必须回收台账记的备份本体"),
+            other => panic!("禁用后删除必须走 BackupFile，实得: {other:?}"),
+        }
+
+        // ② StartupFile（备份落点形态）：禁用后不重扫直接删——快照项 filePath 就是
+        // 备份落点（真实存在、在本域备份根内），原样送回收站。
+        let item_backup = json!({ "id": "p2", "filePath": probe });
+        match plan_folder_delete(&item_backup, &[]) {
+            Ok(FolderDeletePlan::StartupFile(p)) => assert_eq!(p, probe, "备份落点必须原样送回收站"),
+            other => panic!("备份根内的备份文件必须按 StartupFile 放行，实得: {other:?}"),
+        }
+
+        // ③ 台账备份越界（不在本域备份根内）⇒ 拒（源文件不在时走 BackupFile 分支）
+        let outside = tmp.join("outside-backup.lnk");
+        std::fs::write(&outside, b"x").unwrap();
+        let item3 = json!({ "id": "p3", "filePath": format!(r"{folder_root}\gone2.lnk") });
+        let rec3 = json!({ "id": "p3", "filePath": outside.to_string_lossy() });
+        let err = plan_folder_delete(&item3, std::slice::from_ref(&rec3)).unwrap_err();
+        assert!(err.contains("备份根"), "越界备份必须拒: {err}");
+
+        // ④ 源文件在、但既不在启动文件夹也不在备份根 ⇒ 拒（K04 主靶：投回收站）
+        let victim = tmp.join("evil.lnk");
+        std::fs::write(&victim, b"x").unwrap();
+        let item4 = json!({ "id": "p4", "filePath": victim.to_string_lossy() });
+        let err = plan_folder_delete(&item4, &[]).unwrap_err();
+        assert!(err.contains("启动文件夹或备份根"), "越界源路径必须拒: {err}");
+
+        // ⑤ 哪都不在且没有台账记录 ⇒ 按不存在拒
+        let item5 = json!({ "id": "p5", "filePath": format!(r"{folder_root}\nope.lnk") });
+        let err = plan_folder_delete(&item5, &[]).unwrap_err();
+        assert_eq!(err, "文件不存在", "源与备份都不存在必须按不存在拒");
     }
 
     /// v5-K09 批次 5 集成：越界台账（备份不在本域备份根内）投喂启用 ⇒ 拒绝且原文件不动。

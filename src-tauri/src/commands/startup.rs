@@ -4,10 +4,12 @@
 //!
 //! 安全/语义要点（SU-1/N1/SU-4 复核全部保留）：
 //! - 扫描结果按「窗口 label」分槽；toggle/delete 只接受快照内 id，副作用参数取快照值。
-//! - hive=HKLM/HKLM32 或 scope=HKLM（所有用户）写操作需管理员。
+//! - v6-K04：HKLM 提权前置门按 **regPath 解析出的真实 hive** 判（registry 项）——
+//!   台账行自带的 hive/scope 只作对账，同用户篡改 disabled.json 谎报 HKCU 骗不过这道门。
 //! - delete：注册表/计划任务由 PS 备份后处理；PS 回传的 fsDelete 文件改由主进程
 //!   回收站删除——startup-file 必须与快照 filePath 一致，backup-file 必须位于应用
-//!   备份目录内（路径包含校验，防脚本输出被利用），并落删除清单。
+//!   备份根内（含 files/ 与 deleted/：禁用臂的备份落 files/，v6-K04 修正旧白名单
+//!   只认 deleted/ 导致「禁用后不重扫直接删」必拒的问题；路径包含校验防注入）。
 //! - add：原生对话框选程序（白名单扩展名），写 HKCU Run 键；同名项 EXISTS 冲突不覆盖。
 
 use std::collections::HashMap;
@@ -85,6 +87,17 @@ fn validate_snapshot_items(items: &[Value], snap: &HashMap<String, Value>) -> Op
 }
 
 fn needs_hklm(item: &Value) -> bool {
+    // v6-K04：registry 项以 regPath 解析出的真实 hive 为准——台账行自带的 hive/scope
+    // 只作对账、不作为授权。同用户篡改 disabled.json 把 HKLM 项标成 HKCU，即可骗过
+    // 这道提权前置门（真正写入的 hive 由 regPath 决定，见 native::toggle_registry_item）。
+    // 前缀口径与 parse_reg_path 一致（它认什么，这里就判什么）。
+    // task 项无 regPath，仍按 scope 判（Tasks 目录恒机器级，禁用要提权）。
+    if item.get("source").and_then(|v| v.as_str()) == Some("registry") {
+        if let Some(rp) = item.get("regPath").and_then(|v| v.as_str()) {
+            let up = rp.trim().to_ascii_uppercase();
+            return up.starts_with("HKEY_LOCAL_MACHINE") || up.starts_with("HKLM");
+        }
+    }
     matches!(
         item.get("hive").and_then(|v| v.as_str()),
         Some("HKLM") | Some("HKLM32")
@@ -224,13 +237,15 @@ pub async fn startup_delete<R: Runtime>(
 
     if !fs_delete.is_empty() {
         log::flush_sync();
-        // 备份目录候选：新根 `app_data_dir()/startup-backup/deleted` 与收口前的老根同名路径
+        // 备份目录候选：新根 `app_data_dir()/startup-backup` 与收口前的老根同名路径
         // （v2-M19 起两根都只从 `paths::backup_read_dirs` 出，不再各处自己拼 `%APPDATA%\Trim`）。
         // 这里是「删除范围白名单」而非写入目标，两根都要在册，否则历史备份删不掉。
-        let candidates: Vec<std::path::PathBuf> = paths::backup_read_dirs("startup-backup")
-            .into_iter()
-            .map(|d| d.join("deleted"))
-            .collect();
+        //
+        // v6-K04：候选从 `<根>/deleted` 放宽到**备份根本体**——禁用臂把备份放在
+        // `<根>/files`（startup_files_dir），从来不在 deleted/；旧白名单下「禁用后
+        // 不重扫直接删」的合法备份文件被判「删除路径与快照不符」而拒删（真机 bug）。
+        // 放宽后仍限应用自家备份根，native 侧 backup_in_root_verdict 同一判据。
+        let candidates: Vec<std::path::PathBuf> = paths::backup_read_dirs("startup-backup");
 
         let mut manifest: Vec<Value> = Vec::new();
         for fd in &fs_delete {
@@ -564,6 +579,32 @@ mod tests {
         assert!(needs_hklm(&json!({ "scope": "HKLM" })));
         assert!(!needs_hklm(&json!({ "hive": "HKCU" })));
         assert!(!needs_hklm(&json!({ "scope": "HKCU" })));
+    }
+
+    /// v6-K04：提权前置门按 regPath 解析出的真实 hive 判——台账行自带的 hive/scope
+    /// 只作对账。同用户篡改 disabled.json 把 HKLM 项谎报成 HKCU，旧判法会跳过提权
+    /// 门（真正写入的 hive 由 regPath 决定，见 native::toggle_registry_item）。
+    /// 判红自证：把 needs_hklm 里的 regPath 分支删掉 ⇒ 第 1、3 条红。
+    #[test]
+    fn hklm前置门按regpath判而非台账hive字段() {
+        assert!(needs_hklm(&json!({
+            "source": "registry",
+            "hive": "HKCU",
+            "scope": "HKCU",
+            "regPath": r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        })), "台账谎报 HKCU 但 regPath 在 HKLM 下必须判需提权");
+        assert!(!needs_hklm(&json!({
+            "source": "registry",
+            "hive": "HKCU",
+            "regPath": r"HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        })), "真实 HKCU 项不得误判提权");
+        // HKLM 缩写形态同样认（与 parse_reg_path 的前缀口径一致）
+        assert!(needs_hklm(&json!({
+            "source": "registry",
+            "regPath": r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+        })), "HKLM 缩写形态必须判需提权");
+        // folder/task 项无 regPath，仍按 hive/scope 判（ Tasks 目录恒机器级）
+        assert!(needs_hklm(&json!({ "source": "folder", "hive": "HKLM", "filePath": r"C:\x.lnk" })));
     }
 
     #[test]
