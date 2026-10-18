@@ -238,22 +238,63 @@ fn trim_tail(s: &str) -> String {
     t
 }
 
-/// 词法归一的**唯一实现**（v5-K02 批次 1 并轨，R6a-M02）。
+/// Windows 命名空间形态分类（v6-K02 / P0-1）：归一口径的前置辨识，判据层与比较键层共用。
+///
+/// 为什么必须先分类再归一：`\\?\` verbatim 前缀下的形态**不全是盘符路径**——
+/// `\\?\Volume{GUID}\...` 指向任意卷、`\\?\GLOBALROOT\...` 是内核命名空间别名，
+/// 我们没有能力枚举它们折叠成普通盘符串后的真实指向。旧实现无脑剥前缀，剥完
+/// `Volume{guid}\dir` 被当相对路径拼 CWD，同一字符串随进程工作目录漂移出不同结果。
+enum WinForm {
+    /// `\\?\X:\...` verbatim 盘符：OS 承认的同一目录，可折回普通盘符路径。
+    VerbatimDrive,
+    /// `\\?\UNC\server\share\...` verbatim UNC：可折回 `\\server\share\...`。
+    VerbatimUnc,
+    /// `\\?\` 下其余形态（Volume{GUID} / GLOBALROOT 等）：不可折回、不可比较。
+    VerbatimOther,
+    /// `\\.\` / `\??\` 设备路径：跳过常规路径解析，不可比较（2026-10-04 审计 §3.1 既定）。
+    Device,
+    /// 其余（普通盘符 / 普通 UNC / 相对路径）。
+    Plain,
+}
+
+fn classify_form(s: &str) -> WinForm {
+    if s.starts_with(r"\\?\") {
+        let rest = &s[4..];
+        // `\\?\UNC\server\share` 才是合法 verbatim UNC；`\\?\UNC` 截断形态按不可折回处理
+        if rest.starts_with("UNC\\") && rest.len() > 4 {
+            WinForm::VerbatimUnc
+        } else if rest.as_bytes().get(1) == Some(&b':') {
+            WinForm::VerbatimDrive
+        } else {
+            WinForm::VerbatimOther
+        }
+    } else if s.starts_with(r"\\.\") || s.starts_with(r"\??\") {
+        WinForm::Device
+    } else {
+        WinForm::Plain
+    }
+}
+
+/// 词法归一的**唯一实现**（v5-K02 批次 1 并轨，R6a-M02；v6-K02 / P0-1 拆可辨识形态）。
 ///
 /// 此前仓内有两份词法归一：判据层 [`normalize_for_compare`]（protect）与比较键层
 /// [`crate::engine::paths::path_key`]（paths），两者差在「设备路径是否拒 / 尾点尾
 /// 空格是否去 / `//` 是否还原 / 盘符相对是否按盘根拼」——同一路径在两个域会算成
 /// 两个键（P2-1 收敛掉的病换个位置复发）。本函数收敛为一份，两域共用。
 ///
-/// 口径：剥 `\\?\UNC\` / `\\?\` verbatim 前缀 → `//` 还原为 UNC → 裸盘符按字面键 →
-/// 盘符相对按当前盘根、其余相对路径拼 CWD → 拆不可折叠的根前缀（盘符 `X:` 或
-/// UNC `\\server\share`）→ 折叠 `.` / `..` → 统一 `\` → 去尾点尾空格与尾分隔符 →
-/// 小写。
+/// 口径：
+/// - verbatim 盘符 `\\?\C:\...` 折回 `C:\...`；verbatim UNC `\\?\UNC\srv\share\...`
+///   折回 `\\srv\share\...`——两者 OS 语义与折回后完全一致，照旧参与折叠；
+/// - **不可折回形态**（`\\?\Volume{...}` / `\\?\GLOBALROOT\...` / `\\.\` / `\??\`）
+///   只做大小写归并、保留前缀字面直接返回：verbatim 路径 OS 不做任何规范化
+///   （`..` 不折叠、`/` 不转换、尾点尾空格保留），键也必须逐字稳定——同形态归并、
+///   绝不与普通盘符键塌并（塌并即 K02 穿闸）。是否 fail-closed 由调用方按域定
+///   （判据层 [`normalize_for_compare`] 拒，比较键层保留字面键）；
+/// - 普通路径：裸盘符按字面键 → 盘符相对按当前盘根、其余相对路径拼 CWD → 拆不可
+///   折叠的根前缀（盘符 `X:` 或 UNC `\\server\share`）→ 折叠 `.` / `..` → 统一 `\`
+///   → 去尾点尾空格与尾分隔符 → 小写。
 ///
-/// 刻意**不做**的两件事（由调用方按各自域的策略决定，不在这里）：
-/// - 设备路径 `\\.\` / `\??\` 的 fail-closed——那是 protect 判据层的安全策略
-///   （见 [`normalize_for_compare`]），比较键层不需要；
-/// - 8.3 短名展开——触盘，只有安全判据需要。
+/// 刻意**不做**的一件事：8.3 短名展开——触盘，只有安全判据需要。
 pub fn normalize_lexical(p: &str) -> String {
     let s = p.trim();
     if s.is_empty() {
@@ -262,17 +303,31 @@ pub fn normalize_lexical(p: &str) -> String {
     if is_bare_drive(s) {
         return s.to_lowercase();
     }
-    let mut text = s.to_string();
-    if text.starts_with("\\\\?\\UNC\\") {
-        text = format!("\\\\{}", &text[8..]);
-    } else if text.starts_with("\\\\?\\") {
-        text = text[4..].to_string();
+    match classify_form(s) {
+        // v6-K02（P0-1）：不可折回形态——见上方口径，字面键，不做任何组件折叠
+        WinForm::VerbatimOther | WinForm::Device => s.to_lowercase(),
+        WinForm::Plain => {
+            let mut text = s.to_string();
+            // 正斜杠 UNC 还原（//srv/pub/x），后续 resolve_path 只认 \ 开头的 UNC
+            if text.starts_with("//") {
+                text = format!("\\\\{}", &text[2..]);
+            }
+            let resolved = resolve_path(&text).unwrap_or_else(|| text.clone());
+            trim_tail(&resolved).to_lowercase().replace('/', "\\")
+        }
+        WinForm::VerbatimUnc => {
+            // \\?\UNC\srv\share\... → \\srv\share\...（OS 折回语义），其余走普通流程
+            let text = format!("\\\\{}", &s[8..]);
+            let resolved = resolve_path(&text).unwrap_or_else(|| text.clone());
+            trim_tail(&resolved).to_lowercase().replace('/', "\\")
+        }
+        WinForm::VerbatimDrive => {
+            // \\?\C:\... → C:\...（OS 折回语义），其余走普通流程
+            let text = s[4..].to_string();
+            let resolved = resolve_path(&text).unwrap_or_else(|| text.clone());
+            trim_tail(&resolved).to_lowercase().replace('/', "\\")
+        }
     }
-    if text.starts_with("//") {
-        text = format!("\\\\{}", &text[2..]);
-    }
-    let resolved = resolve_path(&text).unwrap_or_else(|| text.clone());
-    trim_tail(&resolved).to_lowercase().replace('/', "\\")
 }
 
 /// 8.3 短名展开（v3.7.2 误杀修复；2026-10-12 二次修正）。返回
@@ -353,11 +408,21 @@ pub fn normalize_for_compare(p: &str) -> Norm {
     // 「无法判定 ⇒ 按受保护处理」正是本函数的 fail-closed 契约（`!n.ok` 即拦）。
     // 必须在归一之前判：剥掉 verbatim 前缀后就再也看不出设备路径原形。
     //
+    // v6-K02（P0-1）：同一契约扩到全部不可折回形态——`\\?\Volume{GUID}\...` 指向
+    // 任意卷、`\\?\GLOBALROOT\...` 是内核命名空间别名，折叠成普通串等于瞎猜指向。
+    // 实锤：旧实现把 `\\?\Volume{...}\dir` 剥成相对路径拼 CWD，随进程工作目录
+    // 漂移；真实卷 GUID 在 OS 侧完全合法（`Test-Path` 为真），漏判即放行删除。
+    // 分类统一收口在 [`classify_form`]，与比较键层同一辨识、两种处置
+    // （本层拒，键层保字面键）。
+    //
     // ⚠️ 与 JS 权威（vendor/upstream-js/src/main/ps-protect-path.js）**刻意分歧**：
-    // 那侧同样漏了这两个前缀，但 vendor 只读不回改。沿用本段上一条的既定处置——
+    // 那侧同样漏了这些前缀，但 vendor 只读不回改。沿用本段上一条的既定处置——
     // 「Tauri 侧判定统一走本函数，先在执行端收紧」，向量由本文件下方用例钉住，
     // 不塞进 JS 生成的 parity 夹具（塞进去会与 `matches_js_authority` 打架）。
-    if s0.starts_with("\\\\.\\") || s0.starts_with("\\??\\") {
+    if !matches!(
+        classify_form(s0),
+        WinForm::Plain | WinForm::VerbatimDrive | WinForm::VerbatimUnc
+    ) {
         return fail();
     }
     let low0 = normalize_lexical(s0);
@@ -559,6 +624,11 @@ pub fn is_path_protected_with(p: &str, r: &ProtectRoots) -> bool {
 /// 是链接的情形已由删除链的 reparse 闸拒绝（本函数不重复承担）；③ 可在外层按父目录 memo。
 /// 解析失败（不存在/无权限）→ false：该路径随后必然在删除原语处撞 NotFound/AccessDenied
 /// 的真实档，不构成绕过面。
+///
+/// v6-K02（P0-1）：canonicalize 返回的 verbatim 形态直接交给 [`is_path_protected`]，
+/// 由 [`normalize_for_compare`] 统一折回——此处不再私有 strip_prefix。旧写法只剥
+/// `\\?\` 不认 `\\?\UNC\`，把 `\\?\UNC\srv\share` 剥成 `UNC\srv\share` 相对串，
+/// UNC 备份/共享场景的父目录保护判定整个失明。
 pub fn final_path_protected(p: &str) -> bool {
     let Some(parent) = std::path::Path::new(p).parent() else {
         return false;
@@ -566,11 +636,7 @@ pub fn final_path_protected(p: &str) -> bool {
     let Ok(resolved) = std::fs::canonicalize(parent) else {
         return false;
     };
-    let mut s = resolved.to_string_lossy().replace('/', "\\");
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        s = rest.to_string();
-    }
-    is_path_protected(&s)
+    is_path_protected(&resolved.to_string_lossy())
 }
 
 /// 路径（目录或文件）是否落在**系统命名空间**：`%SystemRoot%` 本身或其一棵子树
@@ -1289,6 +1355,132 @@ mod tests {
             !normalize_for_compare(r"\??\C:\x").ok,
             "判据层必须对 \\??\\ 设备路径 fail-closed"
         );
+    }
+
+    /// v6-K02（P0-1）：不可折回形态三向断言——判据层 fail-closed、比较键层字面稳定、
+    /// 键空间不塌并。判红自证：把 normalize_lexical 的 VerbatimOther/Device 分支改回
+    /// 「剥前缀放行」，本用例判据层三条与键塌并两条同时红。
+    #[test]
+    fn unverbatim_device_forms_fail_closed_and_keep_literal_keys() {
+        let volume = r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\Windows\System32";
+        let globalroot = r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\System32";
+        for form in [volume, globalroot] {
+            // 判据层：不可比较 ⇒ fail-closed ⇒ 三道闸全拦
+            let n = normalize_for_compare(form);
+            assert!(!n.ok, "不可折回形态必须判不可比较: {form}");
+            assert!(is_path_protected(form), "不可折回形态必须按受保护处理: {form}");
+            assert!(is_system_namespace(form), "不可折回形态必须 fail-closed: {form}");
+        }
+        // 比较键层：保留前缀字面，同形态只做大小写归并
+        assert_eq!(
+            crate::engine::paths::path_key(volume),
+            volume.to_lowercase(),
+            "verbatim 键必须逐字稳定"
+        );
+        assert_eq!(
+            crate::engine::paths::path_key(
+                r"\\?\VOLUME{12345678-1234-1234-1234-123456789ABC}\WINDOWS\SYSTEM32"
+            ),
+            crate::engine::paths::path_key(volume),
+            "同形态归并必须稳定"
+        );
+        // 绝不与普通盘符键塌并（K02 穿闸的最终防线）
+        assert_ne!(
+            crate::engine::paths::path_key(volume),
+            crate::engine::paths::path_key(r"C:\Windows\System32"),
+            "Volume 键不得塌并到普通盘符键"
+        );
+        assert_ne!(
+            crate::engine::paths::path_key(r"\\?\GLOBALROOT\ArcName\C:"),
+            crate::engine::paths::path_key(r"C:\"),
+            "GLOBALROOT 不得折成普通盘符键"
+        );
+        // verbatim 语义：.. 不折叠——字面不同的两串就是两个键
+        assert_ne!(
+            crate::engine::paths::path_key(
+                r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\a\..\b"
+            ),
+            crate::engine::paths::path_key(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\b"),
+        );
+        // 设备路径维持既定 fail-closed；比较键字面保留（不再拼出随 CWD 漂移的荒谬键）
+        assert!(!normalize_for_compare(r"\\.\C:\x").ok);
+        assert!(!normalize_for_compare(r"\??\C:\x").ok);
+        assert_eq!(crate::engine::paths::path_key(r"\\.\C:\x"), r"\\.\c:\x");
+    }
+
+    /// v6-K02（P0-1）：verbatim 盘符与 verbatim UNC 保持「可折回」——OS 同一目录、
+    /// 判据同结论、键与折回形态一致（fileclean/finder 既有槽键口径不漂移）。
+    /// 判红自证：把 VerbatimDrive/VerbatimUnc 分支改成不可折回，本用例全红。
+    #[test]
+    fn verbatim_drive_and_unc_still_fold_back() {
+        for (verbatim, plain) in [
+            (r"\\?\C:\Windows\System32", r"C:\Windows\System32"),
+            (r"\\?\C:\Windows\..\Windows\System32", r"C:\Windows\System32"),
+            (r"\\?\UNC\srv\pub\x", r"\\srv\pub\x"),
+        ] {
+            let nv = normalize_for_compare(verbatim);
+            assert!(nv.ok, "可折回形态必须可判定: {verbatim}");
+            assert_eq!(
+                nv.low,
+                normalize_for_compare(plain).low,
+                "{verbatim} 折回后与普通形态不一致"
+            );
+            assert_eq!(
+                crate::engine::paths::path_key(verbatim),
+                crate::engine::paths::path_key(plain),
+                "{verbatim} 键折回不一致"
+            );
+        }
+        assert!(is_path_protected(r"\\?\C:\Windows"), "verbatim 盘符仍受保护");
+    }
+
+    /// v6-K02（P0-1）真机只读探针：真实卷 GUID 形态 OS 完全承认（is_dir 为真），
+    /// 判定侧必须仍判不可比较——「OS 认得、我们比不了」正是 fail-closed 的存在理由。
+    /// 需要 C: 卷 GUID（GetVolumeNameForVolumeMountPointW）；取不到显式 SKIP 并声明，
+    /// 不假绿。判红自证：把 normalize_lexical 的 VerbatimOther 分支改回剥前缀，
+    /// 归一拼出随 CWD 漂移的荒谬路径，fail-closed 与键不塌并两条断言双红。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机：真实卷 GUID 形态穿越保护判定（只读，发布前人工跑）"]
+    fn live_volume_guid_path_is_os_valid_but_uncomparable() {
+        use windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+        let mount_w: Vec<u16> = "C:\\".encode_utf16().chain(std::iter::once(0)).collect();
+        let mut buf = [0u16; 64];
+        let got = unsafe {
+            GetVolumeNameForVolumeMountPointW(
+                windows::core::PCWSTR(mount_w.as_ptr()),
+                &mut buf,
+            )
+        };
+        if got.is_err() {
+            eprintln!("SKIP：本机取不到 C: 卷 GUID（GetVolumeNameForVolumeMountPointW 失败），本节未校验");
+            return;
+        }
+        let end = buf.iter().position(|&w| w == 0).expect("卷 GUID 路径缺 NUL 终止");
+        let vol_root = String::from_utf16(&buf[..end]).expect("卷 GUID 路径非合法 UTF-16");
+        assert!(
+            vol_root.starts_with(r"\\?\Volume{") && vol_root.ends_with('\\'),
+            "卷 GUID 形态异常: {vol_root}"
+        );
+        // OS 承认：卷根下的 Windows 目录真实存在（C 盘卷必有）
+        let win_dir = format!("{}Windows", vol_root);
+        assert!(
+            std::path::Path::new(&win_dir).is_dir(),
+            "样本缺失：{win_dir} 不是目录（探针未校验）"
+        );
+        // 判定 fail-closed：OS 认得 ≠ 我们比得了
+        let n = normalize_for_compare(&win_dir);
+        assert!(!n.ok, "真实卷 GUID 形态必须判不可比较: {win_dir}");
+        assert!(
+            is_path_protected(&win_dir),
+            "真实卷 GUID 形态必须按受保护处理: {win_dir}"
+        );
+        assert_ne!(
+            crate::engine::paths::path_key(&win_dir),
+            crate::engine::paths::path_key(r"C:\Windows"),
+            "真实卷 GUID 键塌并到普通盘符键"
+        );
+        eprintln!("样本通过（{vol_root}）：OS is_dir=true，判定 fail-closed，键不塌并");
     }
 
     /// v5-K02 批次 1 真机探针（只读）：真实盘上同一系统目录的四种写法

@@ -1946,18 +1946,44 @@ fn del_item(sink: &dyn Sink, t: &str, path: &Path, kind: &str, status: &str, fre
 /// 折叠 `.` 与 `..` 组件、合并重复分隔符并小写。仅做字符串层折叠——不触盘、不展开 8.3
 /// 短名（短名/裸盘符 fail-closed 判定由 JS 侧 isProtectedDeletePath 在解析前拦截，
 /// 本函数为纵深防御第二层）。
+///
+/// v6-K02（P0-1，与主仓 `engine/protect.rs` 同口径对拍）：verbatim 前缀**先分类再剥**——
+/// `\\?\X:\...`（盘符）与 `\\?\UNC\server\share\...` 折回普通形态照常折叠；
+/// `\\?\Volume{...}` / `\\?\GLOBALROOT\...` / `\\.\` / `\??\` 不可折回，保留前缀字面
+/// 只做小写（verbatim 路径 OS 不做组件折叠，键必须逐字稳定），由调用方
+/// [`is_protected_path`] 对这类残留形态 fail-closed。旧实现无脑剥前缀，把
+/// `\\?\Volume{...}\dir` 剥成相对串，保护前缀比对必然不命中 ⇒ 放行删除（穿闸实锤）。
 fn lexically_normalize(p: &str) -> String {
     let s = p.trim();
-    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{}", rest)
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        rest.to_string()
-    } else {
-        s.to_string()
-    };
+    if s.is_empty() {
+        return String::new();
+    }
+    // v6-K02：不可折回形态——保留前缀字面，不拆根、不折组件（verbatim 语义下 OS
+    // 不做任何规范化，此处折叠反而制造假等价）。与主仓 normalize_lexical 同口径。
+    if s.starts_with(r"\\?\") {
+        let rest = &s[4..];
+        let is_unc = rest.starts_with("UNC\\") && rest.len() > 4;
+        let is_drive = rest.as_bytes().get(1) == Some(&b':');
+        if !is_unc && !is_drive {
+            return s.to_lowercase();
+        }
+        if is_unc {
+            return normalize_plain(&format!(r"\\{}", &rest[4..]));
+        }
+        return normalize_plain(&rest.to_string());
+    }
+    if s.starts_with(r"\\.\") || s.starts_with(r"\??\") {
+        return s.to_lowercase();
+    }
+    normalize_plain(s)
+}
+
+/// 普通形态的词法折叠（v6-K02 从 lexically_normalize 拆出，口径不变）：
+/// 拆不可折叠根（盘符/UNC）→ 折 `.` / `..` → 统一 `\` → 去尾部点号/空白 → 小写。
+fn normalize_plain(s: &str) -> String {
     // 拆出不可折叠的根：盘符（X:）或 UNC（\\server\share）
     let mut prefix = String::new();
-    let mut body = s.as_str();
+    let mut body = s;
     let b = body.as_bytes();
     if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
         prefix = body[..2].to_string();
@@ -2182,6 +2208,14 @@ pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
     }
     if bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'\\' {
         return true; // 盘符根，例如 C:\
+    }
+    // v6-K02（P0-1，与主仓 normalize_for_compare 的 fail-closed 契约对拍）：归一后
+    // 仍带 `\\?\` / `\\.\` / `\??\` 前缀 = 不可折回形态（Volume{GUID}/GLOBALROOT/
+    // 设备路径）。没有能力枚举其折叠后的真实指向 ⇒ 按受保护处理，与主仓
+    // 「无法判定 ⇒ 拦」同口径。verbatim 盘符/UNC 已在 lexically_normalize 折回，
+    // 走不到这里。
+    if norm.starts_with(r"\\?\") || norm.starts_with(r"\\.\") || norm.starts_with(r"\??\") {
+        return true;
     }
     // FD-2：短名 fail-closed（与 JS/PS 同位置），判据见 util::contains_short_name
     if crate::contains_short_name(&norm) {
@@ -2464,6 +2498,49 @@ fn set_creation_time_days_ago(p: &Path, days: u64) {
 
 #[cfg(test)]
 mod tests {
+
+    /// v6-K02（P0-1，与主仓 normalize_lexical 同口径对拍）：不可折回形态保留前缀字面
+    /// 只做小写；verbatim 盘符/UNC 照常折回。判红自证：把 lexically_normalize 的
+    /// 不可折回分支改回「无脑剥前缀」，Volume 键会折叠成随 CWD 漂移的相对串，
+    /// 三条断言全红。
+    #[test]
+    fn lexically_normalize_不可折回形态保留字面键() {
+        let volume = r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\Windows\System32";
+        // 字面稳定：同串归一 = 自身小写（不折组件、不剥前缀）
+        assert_eq!(lexically_normalize(volume), volume.to_lowercase());
+        // 大小写归并
+        assert_eq!(
+            lexically_normalize(r"\\?\VOLUME{12345678-1234-1234-1234-123456789ABC}\X"),
+            lexically_normalize(r"\\?\volume{12345678-1234-1234-1234-123456789abc}\x"),
+        );
+        // 与普通盘符键不塌并
+        assert_ne!(lexically_normalize(volume), lexically_normalize(r"C:\Windows\System32"));
+        // 设备路径同口径
+        assert_eq!(lexically_normalize(r"\\.\C:\x"), r"\\.\c:\x");
+        assert_eq!(lexically_normalize(r"\??\C:\x"), r"\??\c:\x");
+        // 可折回形态行为不变
+        assert_eq!(lexically_normalize(r"\\?\C:\A\B"), lexically_normalize(r"C:\A\B"));
+        assert_eq!(lexically_normalize(r"\\?\UNC\srv\share\x"), lexically_normalize(r"\\srv\share\x"));
+    }
+
+    /// v6-K02（P0-1）：is_protected_path 对不可折回形态 fail-closed（判受保护），
+    /// 与主仓 normalize_for_compare 的「无法判定 ⇒ 拦」同口径。
+    /// 判红自证：删掉 is_protected_path 里的残留前缀拦截，Volume 形态比对根清单
+    /// 不命中 ⇒ 返回 false（放行删除），本用例红。
+    #[test]
+    fn is_protected_path_不可折回形态判受保护() {
+        for form in [
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\some\target",
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\some\target",
+            r"\\.\C:\some\target",
+            r"\??\C:\some\target",
+        ] {
+            assert!(
+                is_protected_path(form, None),
+                "不可折回形态必须 fail-closed 判受保护: {form}"
+            );
+        }
+    }
 
     /// 2026-10-04 审计 §5.7：尾部点号/空白裁剪对齐 protect.rs::normalize ——
     /// Win32 忽略路径尾部的点与空格，不裁的话前缀比对漏判（纵深层分叉）。

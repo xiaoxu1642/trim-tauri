@@ -558,8 +558,13 @@ fn copy_dir_missing_only(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// v5-K02 批次 1（R6a-M02）：该「唯一实现」与 protect 判据层的词法归一仍是两份，
 /// 差在「设备路径是否拒 / 尾点尾空格是否去 / `//` 是否还原 / 盘符相对是否按盘根拼」。
 /// 现并轨为 [`crate::engine::protect::normalize_lexical`] 一份，本函数只做转接。
-/// 两域分工保持：本函数是比较键，**永不失败、不触盘**（无 8.3 展开）；设备路径
-/// `\\.\` / `\??\` 的 fail-closed 是 protect 判据层的安全策略，不适用于比较键。
+///
+/// v6-K02（P0-1）：本函数是比较键，**永不失败、不触盘**（无 8.3 展开）；fail-closed
+/// 是 protect 判据层的安全策略（[`crate::engine::protect::normalize_for_compare`]），
+/// 不适用于比较键。对**不可折回形态**（`\\?\Volume{...}` / `\\?\GLOBALROOT\...` /
+/// `\\.\` / `\??\`）返回**保留前缀的字面键**（只小写）：verbatim 路径 OS 不做组件
+/// 折叠，键也逐字稳定——同形态归并、绝不与普通盘符键塌并（塌并即穿闸；本机
+/// pending-delete.json 真实条目即 verbatim 形态，撤回按键匹配，归一变键 = 撤不回）。
 pub fn path_key(p: &str) -> String {
     crate::engine::protect::normalize_lexical(p)
 }
