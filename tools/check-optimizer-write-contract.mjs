@@ -98,6 +98,115 @@ function writesServiceStart(o) {
   return /Services\\[A-Za-z0-9_.\-$]+/.test(blob);
 }
 
+// ==================== 共用纯判据（v6-K20） ====================
+// 本文件此前有一处结构性缺陷：生产 B/D/A4/A5/A7 组各写一份判定，末尾 G 组正向
+// 对照又抄了第二套简化版（hit/a4Check/a5Check/a7Judge）——对照组和生产判据一旦
+// 分叉，G 组全绿只证明「抄来的简化版能抓样本」，证明不了生产判据本身。
+// 现在五组判据收成下面这些纯函数：生产侧与 G 组喂同一份实现（G 只造样本）。
+
+/** B 组：侧表 want（服务→期望值）⇄ 侧表 groups 的服务集/期望值差异。返回问题数组。 */
+function judgeSideTableDiff({ want, gotGroups, storeSet = new Set(), regWriteKeys = new Set() }) {
+  const problems = [];
+  const allWant = new Set([...want.values()].flatMap((s) => [...s]));
+  const allGot = new Set(gotGroups.flatMap((g) => [...g.set]));
+  const extra = [...allGot].filter((n) => !allWant.has(n) && !storeSet.has(n)).sort();
+  const missing = [...allWant].filter((n) => !allGot.has(n) && !regWriteKeys.has(n)).sort();
+  if (missing.length) problems.push(`侧表少列 ${missing.length} 个服务（漏判，危险）→ ${missing.slice(0, 5).join(', ')}`);
+  if (extra.length) problems.push(`侧表多列 ${extra.length} 个服务（恒判未生效）→ ${extra.slice(0, 5).join(', ')}`);
+  // 期望值对拍：pwsh 文本里 (服务, 期望) 对，侧表**至少有一组**给出同一期望即算对。
+  for (const [v, set] of want) {
+    for (const nm of set) {
+      const gots = gotGroups.filter((g) => g.set.has(nm)).map((g) => g.expect);
+      if (gots.length && !gots.includes(v)) {
+        problems.push(`服务 ${nm} 的期望 Start 侧表=${gots.join('/')} / pwsh 文本=${v}`);
+      }
+    }
+  }
+  return problems;
+}
+
+/** D 组：storeServices ⇄ apply.rs 常量 + 与 groups 的重叠语义。返回问题数组。 */
+function judgeStoreSeparation({ got, rustStore, groupServices, comment }) {
+  const problems = [];
+  if (JSON.stringify([...got].sort()) !== JSON.stringify([...rustStore].sort())) {
+    problems.push(`storeServices ≠ STORE_SERVICES：侧表 ${JSON.stringify([...got].sort())} / Rust ${JSON.stringify([...rustStore].sort())}`);
+  }
+  const onlyInStore = got.filter((n) => !groupServices.includes(n));
+  if (onlyInStore.length) {
+    problems.push(`这 ${onlyInStore.length} 个服务只在 storeServices 里、groups 里没有 ⇒ 勾/不勾商店两种路径都漏判：${onlyInStore.join(', ')}`);
+  }
+  const overlap = got.filter((n) => groupServices.includes(n));
+  if (overlap.length && !/wuauserv/.test(comment || '')) {
+    problems.push(`有 ${overlap.length} 个服务同时在 groups 与 storeServices（${overlap.join(', ')}），两处期望值可能不同 —— _comment 必须写明「按执行顺序取值」`);
+  }
+  return problems;
+}
+
+/** A4 组：单个优化项的键集判据（未知键 / 缺必填 / step 缺 label）。 */
+function judgeOptionKeys(opt, { optKeys, stepKeys, required }) {
+  const bad = [];
+  const id = opt.id || '(无 id)';
+  for (const k of Object.keys(opt)) if (!optKeys.has(k)) bad.push(`优化项 ${id}: 未知顶层键「${k}」`);
+  for (const k of required) if (opt[k] === undefined) bad.push(`优化项 ${id}: 缺必填键「${k}」`);
+  for (const [where, arr] of [['steps', opt.steps], ['restore', opt.restore]]) {
+    for (const [i, s] of (arr || []).entries()) {
+      for (const k of Object.keys(s)) if (!stepKeys.has(k)) bad.push(`${id}.${where}[${i}]: 未知 step 键「${k}」`);
+      if (s.label === undefined) bad.push(`${id}.${where}[${i}]: 缺 label（渲染层要显示它）`);
+    }
+  }
+  return bad;
+}
+
+/** A5 组：provenance 覆盖（high 全覆盖 / 每分组至少一项）。 */
+function judgeProvenanceCoverage({ opts, provItems }) {
+  const bad = [];
+  const highIds = opts.filter((o) => o.risk === 'high').map((o) => o.id);
+  const uncoveredHigh = highIds.filter((id) => !provItems[id]);
+  if (uncoveredHigh.length) {
+    bad.push(`这 ${uncoveredHigh.length} 个 high risk 项没有 provenance（高危项必须可解释）→ ${uncoveredHigh.join(', ')}`);
+  }
+  const allGroups = [...new Set(opts.map((o) => o.group))];
+  const uncoveredGroups = allGroups.filter((g) => !opts.some((o) => o.group === g && provItems[o.id]));
+  if (uncoveredGroups.length) {
+    bad.push(`这 ${uncoveredGroups.length} 个分组一项 provenance 都没有 → ${uncoveredGroups.join(', ')}`);
+  }
+  return bad;
+}
+
+/** 从 step/restore 的 reg 文本里抽键名（`"Key"=...` 的行首形态）。 */
+function regKeyNames(steps) {
+  const out = new Set();
+  for (const s of steps || []) {
+    if (typeof s.reg !== 'string') continue;
+    for (const m of s.reg.matchAll(/^"([^"]+)"=/gm)) out.add(m[1]);
+  }
+  return out;
+}
+
+/** A7 组：单个出厂默认值条目的判据（known 形态 / unknown 诚实 / 机械复核）。 */
+function judgeDefaultItem({ id, d, stepsKeys, restoreKeys }) {
+  const bad = [];
+  if (d.defaultKnown === true) {
+    // 唯一允许的 known 形态是 `null`（键本应不存在）；具体值无可复核来源，出现即红。
+    if (d.defaultValue !== null) {
+      bad.push(`${id}: defaultKnown=true 但 defaultValue=${JSON.stringify(d.defaultValue)} —— 本仓唯一可机械复核的 known 形态是 null（键本应不存在）`);
+    } else {
+      const created = [...stepsKeys].filter((k) => !restoreKeys.has(k));
+      if (!created.length) {
+        bad.push(`${id}: 标成 defaultKnown=true（键本应不存在）但机械复核不成立 —— steps 的键全部出现在 restore 里`);
+      }
+    }
+  } else if (d.defaultKnown === false) {
+    if (d.defaultValue !== 'unknown') {
+      bad.push(`${id}: defaultKnown=false 但 defaultValue=${JSON.stringify(d.defaultValue)} —— 未知的必须写字符串 "unknown"`);
+    }
+  } else {
+    bad.push(`${id}: defaultKnown 必须是 true/false，实际 ${JSON.stringify(d.defaultKnown)}`);
+  }
+  return bad;
+}
+
+
 // ---- A. 键 ⊆ 白名单 + 必填键齐全 ----
 const ALLOWED = new Set(['groups', 'storeServices', 'regWrites']);
 // 必填键**按域**：`groups` 与 `regWrites` 至少有一个非空（B 类项只有 groups，
@@ -428,46 +537,21 @@ for (const [id, spec] of Object.entries(items)) {
   const o = opts.find((x) => x.id === id);
   if (!o) { drift.push(`${id}: 侧表有此项但数据层没有（退役了？）`); continue; }
   const want = parseGroups(o); // Map<number, Set<string>>
-  // 「条件追加」的那批不在 pwsh 文本里（由 apply.rs 在运行时生成），
-  // 它们的对拍归 D 组（storeServices == STORE_SERVICES）。这里要把它们单列，
-  // 否则会判成「侧表多列」。
+  // 「条件追加」的那批不在 pwsh 文本里（由 apply.rs 在运行时生成）——
+  // 它们的对拍归 D 组（storeServices == STORE_SERVICES）。这里单列，否则判成「多列」。
   const storeSet = new Set(spec.storeServices || []);
-  // 已在 regWrites[] 里登记的服务名不再要求进 groups：`audio_disable_service_restart`
-  // 写的是 `Services\Audiosrv` 的 `DelayedAutoStart`（不是 Start），B 类的
-  // `service_start_type_is` 对它无意义 —— 它归 A 类。两个域对同一个服务键可以并存。
-  // 排除口径按**子键末段**（不是 `value` 名）：`audio_disable_service_restart` 的
-  // regWrites 写的是 `Services\Audiosrv` 这个**键**下的 `DelayedAutoStart` 值，
-  // 而 groups 要的是「把 Audiosrv 这个**服务**的 Start 改成 X」。两者键相同、值不同，
-  // 所以比对基准是键（子键末段），不是值名。
+  // 已在 regWrites[] 里登记的服务名不再要求进 groups（写 DelayedAutoStart 的那类归 A 类）。
+  // 排除口径按**子键末段**（不是 `value` 名）：
   const inRegWrites = new Set(
     (spec.regWrites || []).map((r) => String(r.subkey).split(String.fromCharCode(92)).pop()),
   );
   // ⚠️ 用**数组**而不是 Map：侧表可能有多个 `expectStart` 相同的组
   // （tf_svc_bulk 的基础 65 个 Start=4 + 商店 5 个 Start=4），
   // 用 Map.set 会让后者**覆盖**前者 ⇒ 基础组整段判成「少列」（踩过一次）。
-  const gotGroups = [];
-  for (const g of spec.groups || []) {
-    gotGroups.push({ expect: g.expectStart, set: new Set(g.services || []) });
-  }
-  const got = new Set(gotGroups.flatMap((g) => [...g.set]));
-  // 商店那 5 项在侧表里也出现在 groups 里（值是 4）—— 它们不参与「多列」判定，
-  // 也不参与「期望值错位」判定（真正的对拍在 D 组）。
-  const allWant = new Set([...want.values()].flatMap((s) => [...s]));
-  const allGot = got;
-  const extra = [...allGot].filter((n) => !allWant.has(n) && !storeSet.has(n)).sort();
-  // 少列 ⇒ 漏判（危险）。已在 regWrites 里登记的排除掉（它走 A 类判据，不靠 groups）。
-  const missing = [...allWant].filter((n) => !allGot.has(n) && !inRegWrites.has(n)).sort();
-  if (missing.length) drift.push(`${id}: 侧表少列 ${missing.length} 个服务（漏判，危险）→ ${missing.slice(0, 5).join(', ')}`);
-  if (extra.length) drift.push(`${id}: 侧表多列 ${extra.length} 个服务（恒判未生效）→ ${extra.slice(0, 5).join(', ')}`);
-  // 期望值对拍：pwsh 文本里 (服务, 期望) 对，**侧表里至少有一组**给出同一个期望即算对。
-  // wuauserv 在侧表有两组（3 与 4）、pwsh 文本只有 3 ⇒ 取「任一组匹配」而非「唯一匹配」。
-  for (const [v, set] of want) {
-    for (const nm of set) {
-      const gots = gotGroups.filter((g) => g.set.has(nm)).map((g) => g.expect);
-      if (gots.length && !gots.includes(v)) {
-        drift.push(`${id}: 服务 ${nm} 的期望 Start 侧表=${gots.join('/')} / pwsh 文本=${v}`);
-      }
-    }
+  const gotGroups = (spec.groups || []).map((g) => ({ expect: g.expectStart, set: new Set(g.services || []) }));
+  // v6-K20：判据本体是 judgeSideTableDiff（与 G 组共用同一实现）
+  for (const p of judgeSideTableDiff({ want, gotGroups, storeSet, regWriteKeys: inRegWrites })) {
+    drift.push(`${id}: ${p}`);
   }
 }
 // 反向：数据层里所有「pwsh 写服务 Start 值」的项都该在表里
@@ -512,36 +596,12 @@ if (!storeRust) {
 } else if (!specBulk) {
   storeProblems.push('侧表没有 tf_svc_bulk');
 } else {
-  const got = [...(specBulk.storeServices || [])].sort();
-  if (JSON.stringify(got) !== JSON.stringify(storeRust)) {
-    storeProblems.push(`storeServices ≠ STORE_SERVICES：侧表 ${JSON.stringify(got)} / Rust ${JSON.stringify(storeRust)}`);
-  }
-  // 「混进 groups」的判定要**排除条件追加语义下的合法重叠**。
-  //
-  // `wuauserv` 真的同时出现在两处，这是**数据层的既有语义**不是缺陷：
-  //   · 基础段（Start=3，手动）—— 让 Windows Update 在禁用 70+ 服务后仍能工作
-  //   · 商店段（Start=4，禁用）—— 用户勾了「连商店服务一起禁」才追加执行
-  // 执行顺序是「基础段先、商店段后」（`svc_bulk_append_store` push 到末尾），
-  // 所以勾了商店 ⇒ 最终 4；没勾 ⇒ 最终 3。
-  //
-  // 因此正确判据不是「不許重叠」，而是「**重叠项在 groups 里的期望值必须与
-  // 「未追加商店段时」的最终值一致**」—— 即基础段的期望值就是检测该用的那个。
-  // 反过来若某项只在 storeServices 里、groups 里完全没有，那才是漏判。
+  // v6-K20：判据本体是 judgeStoreSeparation（与 G 组共用同一实现）。
+  // 「重叠不判红」的语义见 v6 前注：wuauserv 同时出现在基础段(3)与商店段(4)是既有语义，
+  // 正确判据是「重叠必须记进 _comment 说明按执行顺序取值」。
+  const got = [...(specBulk.storeServices || [])];
   const allGroups = (specBulk.groups || []).flatMap((g) => g.services || []);
-  const onlyInStore = got.filter((n) => !allGroups.includes(n));
-  if (onlyInStore.length) {
-    storeProblems.push(
-      `这 ${onlyInStore.length} 个服务只在 storeServices 里、groups 里没有 ⇒ 勾/不勾商店两种路径都漏判：${onlyInStore.join(', ')}`,
-    );
-  }
-  // 重叠项必须记进 _comment 说明「两处期望值不同，按执行顺序取值」
-  const overlap = got.filter((n) => allGroups.includes(n));
-  if (overlap.length && !/wuauserv/.test(comment)) {
-    storeProblems.push(
-      `有 ${overlap.length} 个服务同时在 groups 与 storeServices（${overlap.join(', ')}），` +
-      `两处期望值可能不同 —— _comment 必须写明「按执行顺序取值」这件事`,
-    );
-  }
+  storeProblems.push(...judgeStoreSeparation({ got, rustStore: storeRust, groupServices: allGroups, comment }));
 }
 check(
   storeProblems.length === 0,
@@ -620,22 +680,11 @@ const OPT_REQUIRED = ['id', 'group', 'title', 'risk'];
 const a4Problems = [];
 let optKeyCount = 0;
 for (const o of opts) {
-  const id = o.id || '(无 id)';
-  for (const k of Object.keys(o)) {
-    optKeyCount++;
-    if (!OPT_KEYS.has(k)) a4Problems.push(`优化项 ${id}: 未知顶层键「${k}」`);
-  }
-  for (const k of OPT_REQUIRED) {
-    if (o[k] === undefined) a4Problems.push(`优化项 ${id}: 缺必填键「${k}」`);
-  }
-  for (const [where, arr] of [['steps', o.steps], ['restore', o.restore]]) {
-    for (const [i, s] of (arr || []).entries()) {
-      for (const k of Object.keys(s)) {
-        optKeyCount++;
-        if (!STEP_KEYS.has(k)) a4Problems.push(`${id}.${where}[${i}]: 未知 step 键「${k}」`);
-      }
-      if (s.label === undefined) a4Problems.push(`${id}.${where}[${i}]: 缺 label（渲染层要显示它）`);
-    }
+  // v6-K20：判据本体是 judgeOptionKeys（与 G 组共用同一实现）
+  a4Problems.push(...judgeOptionKeys(o, { optKeys: OPT_KEYS, stepKeys: STEP_KEYS, required: OPT_REQUIRED }));
+  optKeyCount += Object.keys(o).length;
+  for (const arr of [o.steps, o.restore]) {
+    for (const s of arr || []) optKeyCount += Object.keys(s).length;
   }
 }
 // 反向：白名单里的键是否**都**真的在用 —— 一个从没出现过的白名单项说明它已失效
@@ -671,19 +720,9 @@ for (const [id, p] of Object.entries(provItems)) {
   if (!p.why || String(p.why).length < 8) a5Problems.push(`${id}: why 太短（判据不可解释）`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(p.reviewedAt || '')) a5Problems.push(`${id}: reviewedAt 不是 YYYY-MM-DD`);
 }
-// 必覆盖：全部 high risk + 每个分组至少一项
+// 必覆盖：全部 high risk + 每个分组至少一项（v6-K20：判据本体是 judgeProvenanceCoverage）
 const highIds = opts.filter((o) => o.risk === 'high').map((o) => o.id);
-const uncoveredHigh = highIds.filter((id) => !provItems[id]);
-if (uncoveredHigh.length) {
-  a5Problems.push(`这 ${uncoveredHigh.length} 个 high risk 项没有 provenance（高危项必须可解释）→ ${uncoveredHigh.join(', ')}`);
-}
-const allGroups = [...new Set(opts.map((o) => o.group))];
-const uncoveredGroups = allGroups.filter(
-  (g) => !opts.some((o) => o.group === g && provItems[o.id]),
-);
-if (uncoveredGroups.length) {
-  a5Problems.push(`这 ${uncoveredGroups.length} 个分组一项 provenance 都没有 → ${uncoveredGroups.join(', ')}`);
-}
+a5Problems.push(...judgeProvenanceCoverage({ opts, provItems }));
 const PROV_BASELINE = 21; // 2026-10-03 首版 24；2026-10-11 随 6 项退役（IFEO×2/板载音频+打印/OneDrive/乱序内存）显式降为 21；2026-10-16 P0-1：power_aspm_off 退役、tf_disk_extra3 接替「系统调校」代表，总数不变
 if (Object.keys(provItems).length < PROV_BASELINE) {
   a5Problems.push(
@@ -692,7 +731,7 @@ if (Object.keys(provItems).length < PROV_BASELINE) {
 }
 check(
   a5Problems.length === 0,
-  `A5. provenance 覆盖：${Object.keys(provItems).length} 项（high ${highIds.length} 全覆盖 / ${allGroups.length} 分组全覆盖 / 基线 ${PROV_BASELINE} 只增不减）`,
+  `A5. provenance 覆盖：${Object.keys(provItems).length} 项（high ${highIds.length} 全覆盖 / ${[...new Set(opts.map((o) => o.group))].length} 分组全覆盖 / 基线 ${PROV_BASELINE} 只增不减）`,
   a5Problems.join('; '),
 );
 
@@ -735,49 +774,15 @@ for (const [id, d] of Object.entries(defItems)) {
   for (const k of Object.keys(d)) {
     if (!DEF_KEYS.has(k)) a7Problems.push(`${id}: 未知 defaults 键「${k}」`);
   }
-  if (d.defaultKnown === true) {
-    // 唯一允许的 known 形态是 `null`（键本应不存在）。任何具体值都需要
-    // 「可机械复核的来源」，而本仓目前**没有**这样的来源（出厂默认值无权威出处、
-    // 实测原值因机而异）—— 出现即红。
-    if (d.defaultValue !== null) {
-      a7Problems.push(
-        `${id}: defaultKnown=true 但 defaultValue=${JSON.stringify(d.defaultValue)} —— `
-        + `本仓目前唯一可机械复核的 known 形态是 null（键本应不存在）。`
-        + `填具体值需要「可复核的来源」，而 Windows 出厂默认值无权威出处、`
-        + `实测原值因机而异 —— 写了就是编造依据（C1 的价值恰在「依据可判定」）`,
-      );
-    } else {
-      // 反向复核：真的是「steps 有 / restore 无」吗
-      const o = opts.find((x) => x.id === id);
-      const sk = new Set();
-      for (const s of (o.steps || [])) {
-        if (typeof s.reg !== 'string') continue;
-        for (const m of s.reg.matchAll(/^"([^"]+)"=/gm)) sk.add(m[1]);
-      }
-      const rk = new Set();
-      for (const s of (o.restore || [])) {
-        if (typeof s.reg !== 'string') continue;
-        for (const m of s.reg.matchAll(/^"([^"]+)"=/gm)) rk.add(m[1]);
-      }
-      const created = [...sk].filter((k) => !rk.has(k));
-      if (!created.length) {
-        a7Problems.push(
-          `${id}: 标成 defaultKnown=true（键本应不存在）但机械复核不成立 —— `
-          + `steps 的键全部出现在 restore 里，没有「执行时新建」的键`,
-        );
-      }
-    }
-  } else if (d.defaultKnown === false) {
-    if (d.defaultValue !== 'unknown') {
-      a7Problems.push(
-        `${id}: defaultKnown=false 但 defaultValue=${JSON.stringify(d.defaultValue)} —— `
-        + `未知的必须写字符串 "unknown"。写具体值等于把猜测冒充成依据，`
-        + `而 C1 的门禁只能验「与数据一致」、验不了「与 Windows 真实出厂一致」`,
-      );
-    }
-  } else {
-    a7Problems.push(`${id}: defaultKnown 必须是 true/false，实际 ${JSON.stringify(d.defaultKnown)}`);
-  }
+  // v6-K20：判据本体是 judgeDefaultItem（与 G 组共用同一实现）。
+  // 「机械复核」需要的 steps/restore 键集在这里现算后喂进去。
+  const o = opts.find((x) => x.id === id);
+  a7Problems.push(...judgeDefaultItem({
+    id,
+    d,
+    stepsKeys: regKeyNames(o && o.steps),
+    restoreKeys: regKeyNames(o && o.restore),
+  }));
   if (!d.why || String(d.why).length < 8) a7Problems.push(`${id}: why 太短（依据不可复核）`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d.reviewedAt || '')) a7Problems.push(`${id}: reviewedAt 不是 YYYY-MM-DD`);
 }
@@ -809,181 +814,138 @@ check(
   a7Problems.join('; '),
 );
 
+// ==================== G. 判据正向自检（v6-K20：与生产同一份判据） ====================
+// 本门禁是「找违规型」的：若判据失灵，上面的 ✓ 只是因为没扫到东西。
+// 关键变化（v6-K20）：G 组不再抄一套简化版判据——下面每个样本都喂**生产同一个**
+// judgeSideTableDiff / judgeStoreSeparation / judgeOptionKeys /
+// judgeProvenanceCoverage / judgeDefaultItem。对照与生产分叉曾是本文件的真实缺陷：
+// G 全绿只证明「抄来的版本能抓样本」，证明不了生产判据本身。
+(function positiveControls() {
+  const findings = [];
+
+  // 第一批：B/D 组（侧表 ⇄ pwsh 对拍 / 商店分离）
+  const bdCases = [
+    {
+      name: 'B 少列服务（漏判方向，最危险）',
+      fn: () => judgeSideTableDiff({
+        want: new Map([[4, new Set(['SvcA', 'SvcB', 'SvcC'])]]),
+        gotGroups: [{ expect: 4, set: new Set(['SvcA', 'SvcB']) }],
+      }),
+      expectHit: true,
+    },
+    {
+      name: 'B 多列服务',
+      fn: () => judgeSideTableDiff({
+        want: new Map([[4, new Set(['SvcA'])]]),
+        gotGroups: [{ expect: 4, set: new Set(['SvcA', 'SvcZ']) }],
+      }),
+      expectHit: true,
+    },
+    {
+      name: 'B 期望 Start 值错位',
+      fn: () => judgeSideTableDiff({
+        want: new Map([[4, new Set(['SvcA'])]]),
+        gotGroups: [{ expect: 3, set: new Set(['SvcA']) }],
+      }),
+      expectHit: true,
+    },
+    {
+      name: 'D storeServices 与 Rust 常量漂移',
+      fn: () => judgeStoreSeparation({
+        got: ['ClipSVC'],
+        rustStore: ['ClipSVC', 'InstallService'],
+        groupServices: ['ClipSVC'],
+        comment: 'wuauserv',
+      }),
+      expectHit: true,
+    },
+    {
+      name: 'D 商店服务只在 storeServices、groups 里没有（漏判）',
+      fn: () => judgeStoreSeparation({
+        got: ['ClipSVC', 'InstallService'],
+        rustStore: ['ClipSVC', 'InstallService'],
+        groupServices: [],
+        comment: 'wuauserv',
+      }),
+      expectHit: true,
+    },
+    {
+      name: 'C 非法启动类型',
+      fn: () => (LEGAL_START.has(7) ? [] : ['非法']),
+      expectHit: true,
+    },
+    {
+      name: 'B 干净样本（期望**不**报红，防判据变成「永远红」）',
+      fn: () => judgeSideTableDiff({
+        want: new Map([[4, new Set(['SvcA', 'SvcB'])]]),
+        gotGroups: [{ expect: 4, set: new Set(['SvcA', 'SvcB']) }],
+      }),
+      expectHit: false,
+    },
+    {
+      name: 'D 干净样本（重叠已注明执行顺序）',
+      fn: () => judgeStoreSeparation({
+        got: ['wuauserv'],
+        rustStore: ['wuauserv'],
+        groupServices: ['wuauserv'],
+        comment: 'wuauserv 在基础段与商店段各有一组，按执行顺序取值',
+      }),
+      expectHit: false,
+    },
+  ];
+  for (const c of bdCases) {
+    const hit = c.fn().length > 0;
+    if (hit !== c.expectHit) findings.push(`${c.name}（期望${c.expectHit ? '报红' : '放行'}，实际${hit ? '红' : '绿'}）`);
+  }
+
+  // 第二批：A4 / A5（键集白名单 / provenance 覆盖）——同样喂生产判据
+  const a4Ctx = { optKeys: OPT_KEYS, stepKeys: STEP_KEYS, required: OPT_REQUIRED };
+  const m4Cases = [
+    ['A4 未知顶层键', judgeOptionKeys({ id: 'x', group: 'g', title: 't', risk: 'low', bogusField: 1 }, a4Ctx).length > 0, true],
+    ['A4 缺必填键', judgeOptionKeys({ id: 'x', group: 'g', title: 't' }, a4Ctx).length > 0, true],
+    ['A4 未知 step 键', judgeOptionKeys({ id: 'x', group: 'g', title: 't', risk: 'low', steps: [{ label: 'a', bogus: 1 }] }, a4Ctx).length > 0, true],
+    ['A4 干净样本应放行', judgeOptionKeys({ id: 'x', group: 'g', title: 't', risk: 'low', steps: [{ label: 'a' }] }, a4Ctx).length === 0, true],
+    [
+      'A5 high 项无 provenance',
+      judgeProvenanceCoverage({ opts: [{ id: 'x', risk: 'high', group: 'g' }], provItems: {} }).length > 0,
+      true,
+    ],
+    [
+      'A5 high 项有 provenance 应放行',
+      judgeProvenanceCoverage({ opts: [{ id: 'x', risk: 'high', group: 'g' }], provItems: { x: { sourceClass: 'builtin' } } }).length === 0,
+      true,
+    ],
+    [
+      'A6 sidecar 非对象',
+      (() => { try { const s = JSON.parse('{bad'); return s.alg !== 'ed25519'; } catch { return true; } })(),
+      true,
+    ],
+  ];
+  for (const [name, got, want] of m4Cases) {
+    if (got !== want) findings.push(`M4 自检「${name}」判据行为不符预期`);
+  }
+
+  // 第三批：A7（出厂默认值的诚实标注）——第 4 条是分水岭：
+  // defaultKnown=true 但机械复核不成立（steps 的键全在 restore 里）。
+  const a7Cases = [
+    ['known + null + 机械复核成立', judgeDefaultItem({ id: 'x', d: { defaultKnown: true, defaultValue: null }, stepsKeys: new Set(['A', 'B']), restoreKeys: new Set(['A']) }).length === 0, true],
+    ['known + 填了具体值', judgeDefaultItem({ id: 'x', d: { defaultKnown: true, defaultValue: 'dword:00000000' }, stepsKeys: new Set(['A']), restoreKeys: new Set([]) }).length > 0, true],
+    ['unknown 但填了具体值（开始猜了）', judgeDefaultItem({ id: 'x', d: { defaultKnown: false, defaultValue: '0' }, stepsKeys: new Set([]), restoreKeys: new Set([]) }).length > 0, true],
+    ['unknown + "unknown" 应放行', judgeDefaultItem({ id: 'x', d: { defaultKnown: false, defaultValue: 'unknown' }, stepsKeys: new Set([]), restoreKeys: new Set([]) }).length === 0, true],
+    ['known + null 但机械复核不成立', judgeDefaultItem({ id: 'x', d: { defaultKnown: true, defaultValue: null }, stepsKeys: new Set(['A']), restoreKeys: new Set(['A']) }).length > 0, true],
+  ];
+  for (const [name, got, want] of a7Cases) {
+    if (got !== want) findings.push(`A7 自检「${name}」判据行为不符预期`);
+  }
+
+  const total = bdCases.length + m4Cases.length + a7Cases.length;
+  check(findings.length === 0, `G. 正向对照：${total} 条样本喂生产同一份判据（违规必须判红 / 干净样本必须放行）`, findings.join('; '));
+})();
+
+// ---- 收口：G 组通过后才允许打「全通过」（v6-K20：日志移到自检之后） ----
 console.log('');
 if (fail > 0) {
   console.error(`写入坐标侧表门禁失败 ${fail} 项。`);
   process.exit(1);
 }
-console.log('✓ 写入坐标侧表：键集 / 双向对拍 / 启动类型 / 商店分离 / 棘轮 / 单源声明 全通过');
-
-// ==================== G. 判据正向自检 ====================
-// 本门禁是「找违规型」的：若判据失灵，上面的 ✓ 只是因为没扫到东西。
-// 逐条对**已知违规样本**跑同一份判据函数，必须报红。
-(function positiveControls() {
-  const findings = [];
-  const cases = [
-    // ① 侧表少列服务（漏判方向，最危险）
-    {
-      name: '少列服务',
-      want: new Map([[4, new Set(['SvcA', 'SvcB', 'SvcC'])]]),
-      got: new Map([[4, new Set(['SvcA', 'SvcB'])]]),
-      store: null,
-      expectHit: true,
-    },
-    // ② 侧表多列服务
-    {
-      name: '多列服务',
-      want: new Map([[4, new Set(['SvcA'])]]),
-      got: new Map([[4, new Set(['SvcA', 'SvcZ'])]]),
-      store: null,
-      expectHit: true,
-    },
-    // ③ 期望 Start 值错位（同一个服务两侧期望不同）
-    {
-      name: '期望值错位',
-      want: new Map([[4, new Set(['SvcA'])]]),
-      got: new Map([[3, new Set(['SvcA'])]]),
-      store: null,
-      expectHit: true,
-    },
-    // ④ 商店服务混进 groups
-    {
-      name: '商店混入 groups',
-      want: new Map([[4, new Set(['SvcA'])]]),
-      got: new Map([[4, new Set(['SvcA', 'ClipSVC'])]]),
-      store: ['ClipSVC', 'InstallService'],
-      storeInGroups: ['ClipSVC'],
-      expectHit: true,
-    },
-    // ⑤ storeServices 与 Rust 常量不一致
-    {
-      name: 'storeServices 漂移',
-      want: new Map([[4, new Set(['SvcA'])]]),
-      got: new Map([[4, new Set(['SvcA'])]]),
-      store: ['ClipSVC', 'InstallService'],
-      sideStore: ['ClipSVC'],
-      expectHit: true,
-    },
-    // ⑥ 非法启动类型
-    {
-      name: '非法启动类型',
-      startProblem: 7,
-      expectHit: true,
-    },
-    // ⑦ 干净样本（期望**不**报红，防止判据变成「永远红」）
-    {
-      name: '干净样本',
-      want: new Map([[4, new Set(['SvcA', 'SvcB'])]]),
-      got: new Map([[4, new Set(['SvcA', 'SvcB'])]]),
-      store: null,
-      expectHit: false,
-    },
-  ];
-
-  for (const c of cases) {
-    let hit = false;
-    if (c.startProblem !== undefined) {
-      hit = !LEGAL_START.has(c.startProblem);
-    } else {
-      const allWant = new Set([...c.want.values()].flatMap((s) => [...s]));
-      const allGot = new Set([...c.got.values()].flatMap((s) => [...s]));
-      if ([...allWant].some((x) => !allGot.has(x))) hit = true;
-      if ([...allGot].some((x) => !allWant.has(x))) hit = true;
-      for (const [v, set] of c.want) {
-        for (const nm of set) {
-          for (const [gv, gset] of c.got) {
-            if (gset.has(nm) && gv !== v) hit = true;
-          }
-        }
-      }
-      if (c.store && c.sideStore && JSON.stringify([...c.sideStore].sort()) !== JSON.stringify([...c.store].sort())) hit = true;
-      if (c.storeInGroups) {
-        const allIn = [...c.got.values()].flatMap((s) => [...s]);
-        if (c.storeInGroups.some((x) => allIn.includes(x))) hit = true;
-      }
-    }
-    if (hit !== c.expectHit) findings.push(`${c.name}（期望${c.expectHit ? '报红' : '放行'}，实际${hit ? '红' : '绿'}）`);
-  }
-
-  // 第二批（M4 新增 A4/A5/A6 三组）：对**同一份**判据跑违规样本。
-  // 与上面分开是因为这三组的判据形态不同（键集/覆盖/文件存在），共用一个
-  // 「找出问题」的小函数即可，但样本要能独立表达「哪些字段是坏的」。
-  const a4OptKeys = new Set(OPT_KEYS);
-  const a4StepKeys = new Set(STEP_KEYS);
-  const a4Check = (opt) => {
-    const bad = [];
-    for (const k of Object.keys(opt)) if (!a4OptKeys.has(k)) bad.push(k);
-    for (const k of OPT_REQUIRED) if (opt[k] === undefined) bad.push(`缺${k}`);
-    for (const arr of [opt.steps, opt.restore]) {
-      for (const s of arr || []) {
-        for (const k of Object.keys(s)) if (!a4StepKeys.has(k)) bad.push(`step.${k}`);
-        if (s.label === undefined) bad.push('step.缺label');
-      }
-    }
-    return bad;
-  };
-  const a5Check = (opt, provMap) => {
-    const bad = [];
-    if (opt.risk === 'high' && !provMap[opt.id]) bad.push('high 项无 provenance');
-    return bad;
-  };
-  const m4Cases = [
-    ['A4 未知顶层键',
-      a4Check({ id: 'x', group: 'g', title: 't', risk: 'low', bogusField: 1 }).length > 0,
-      true],
-    ['A4 缺必填键',
-      a4Check({ id: 'x', group: 'g', title: 't' }).length > 0,
-      true],
-    ['A4 未知 step 键',
-      a4Check({ id: 'x', group: 'g', title: 't', risk: 'low', steps: [{ label: 'a', bogus: 1 }] }).length > 0,
-      true],
-    ['A4 干净样本应放行',
-      a4Check({ id: 'x', group: 'g', title: 't', risk: 'low', steps: [{ label: 'a' }] }).length === 0,
-      true],
-    ['A5 high 项无 provenance',
-      a5Check({ id: 'x', risk: 'high' }, {}).length > 0,
-      true],
-    ['A5 high 项有 provenance 应放行',
-      a5Check({ id: 'x', risk: 'high' }, { x: { sourceClass: 'builtin' } }).length === 0,
-      true],
-    ['A6 sidecar 非对象',
-      (() => { try { const s = JSON.parse('{bad'); return s.alg !== 'ed25519'; } catch { return true; } })(),
-      true],
-  ];
-  for (const [name, got, want] of m4Cases) {
-    if (got !== want) findings.push(`M4 自检「${name}」判据行为不符预期`);
-  }
-  // 第三批（C1 / A7）：「诚实标 unknown」这条判据的正向对照。
-  // 关键样本是第4 条 —— defaultKnown=true 但机械复核不成立（steps 的键全在 restore 里）。
-  // 那条是本组最容易写成「只看 defaultValue 是不是 null」的形态，而那样它就恒绿。
-  const a7Judge = (d, createdKeysInSteps, createdKeysInRestore) => {
-    const bad = [];
-    if (d.defaultKnown === true) {
-      if (d.defaultValue !== null) bad.push('known 但填了具体值');
-      const created = createdKeysInSteps.filter((k) => !createdKeysInRestore.includes(k));
-      if (!created.length) bad.push('标 known 但机械复核不成立');
-    } else if (d.defaultKnown === false) {
-      if (d.defaultValue !== 'unknown') bad.push('unknown 但填了具体值');
-    } else {
-      bad.push('defaultKnown 非法');
-    }
-    return bad;
-  };
-  const a7Cases = [
-    ['known + null + 机械复核成立', a7Judge({ defaultKnown: true, defaultValue: null }, ['A', 'B'], ['A']).length === 0, true],
-    ['known + 填了具体值', a7Judge({ defaultKnown: true, defaultValue: 'dword:00000000' }, ['A'], []).length > 0, true],
-    ['unknown 但填了具体值（开始猜了）', a7Judge({ defaultKnown: false, defaultValue: '0' }, [], []).length > 0, true],
-    ['unknown + "unknown" 应放行', a7Judge({ defaultKnown: false, defaultValue: 'unknown' }, [], []).length === 0, true],
-    ['known + null 但机械复核不成立', a7Judge({ defaultKnown: true, defaultValue: null }, ['A'], ['A']).length > 0, true],
-  ];
-  for (const [name, got, want] of a7Cases) {
-    if (got !== want) findings.push(`A7 自检「${name}」判据行为不符预期`);
-  }
-  const total = cases.length + m4Cases.length + a7Cases.length;
-  const ok = findings.length === 0;
-  console.log(`${ok ? '✓' : '✗'} 自检：${total} 条已知样本（含 1 条**应当放行**的干净样本），判据行为全对 ${total - findings.length} 条`);
-  if (!ok) {
-    console.error(`  ✗ 判据失灵：${JSON.stringify(findings)}`);
-    process.exit(1);
-  }
-})();
+console.log('✓ 写入坐标侧表：键集 / 双向对拍 / 启动类型 / 商店分离 / 棘轮 / 单源声明 / 正向对照 全通过');

@@ -562,6 +562,51 @@ check(
   );
 }
 
+// ---- G. 全集档与其它 guard 形态的双向棘轮（v6-K19） ----
+// 为什么必须补：A1 只看「有没有 guard」，A2 只管 HANDWRITTEN，B/C 只管 MAIN，D 管
+// READONLY，E 管 `guard::<窗口集常量>` —— 剩下两档**此前没有任何一组在管**：
+//   · `guard(&window, guard::APP_WINDOWS)`（五窗全集）：把一条 MAIN 命令改成它、
+//     并顺手删掉 MUST_MAIN 登记 ⇒ A1 仍绿、A2 不适用、B 因已删登记而不红、
+//     C/E 不适用 —— 来源校验从「只认主窗」静默放宽到「五窗全放行」；
+//   · `guard(&window, <任意内联数组>)`（GUARD_OTHER）：新出口可以完全绕开三张清单。
+// 口径（K19 原文「要么有登记表，要么出现即红」）：两张表都必须与实况**完全一致**，
+// 空表即「出现即红」。当前两档实况均为 0 条，所以两张表是空的——这是有意的，
+// 不是漏登记。
+const MUST_APP_WINDOWS = [];
+/** 其它 guard 形态的登记表：元素 { name, reason }；空表 = 出现即红 */
+const GUARD_OTHER = [];
+{
+  const actualAW = [...tiers.entries()].filter(([, v]) => v.tier === 'APP_WINDOWS').map(([k]) => k).sort();
+  const wantAW = [...MUST_APP_WINDOWS].sort();
+  const awMissing = wantAW.filter((n) => !actualAW.includes(n));
+  const awExtra = actualAW.filter((n) => !wantAW.includes(n));
+  const awUnknown = wantAW.filter((n) => !tiers.has(n));
+  check(
+    awMissing.length === 0 && awExtra.length === 0 && awUnknown.length === 0,
+    `G1. APP_WINDOWS 全集档清单与实际完全一致（登记 ${wantAW.length} / 实际 ${actualAW.length}；空表=出现即红）`,
+    awUnknown.length
+      ? `清单里有不存在的命令 ${JSON.stringify(awUnknown)}`
+      : awMissing.length
+        ? `登记为全集但代码不是 ${JSON.stringify(awMissing)}`
+        : awExtra.length
+          ? `代码放行全集但清单未登记 ${JSON.stringify(awExtra.map((n) => `${tiers.get(n)?.file}:${tiers.get(n)?.line} ${n}`))}`
+          : '',
+  );
+  const actualOther = [...tiers.entries()].filter(([, v]) => v.tier === 'GUARD_OTHER').map(([k]) => k).sort();
+  const wantOther = GUARD_OTHER.map((e) => e.name).sort();
+  const otherMissing = wantOther.filter((n) => !actualOther.includes(n));
+  const otherExtra = actualOther.filter((n) => !wantOther.includes(n));
+  check(
+    otherMissing.length === 0 && otherExtra.length === 0,
+    `G2. GUARD_OTHER 形态逐条登记（登记 ${wantOther.length} / 实际 ${actualOther.length}；空表=出现即红）`,
+    otherMissing.length
+      ? `登记了但代码已不是该形态 ${JSON.stringify(otherMissing)}`
+      : otherExtra.length
+        ? `未登记的其它 guard 形态 ${JSON.stringify(otherExtra.map((n) => `${tiers.get(n)?.file}:${tiers.get(n)?.line} ${n}`))}`
+        : '',
+  );
+}
+
 // ---- 统计报告（不判红） ----
 const byTier = {};
 for (const [, v] of tiers) byTier[v.tier ?? 'NONE'] = (byTier[v.tier ?? 'NONE'] ?? 0) + 1;

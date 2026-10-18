@@ -81,24 +81,51 @@ check(
 );
 console.log(`  cargo test  （cwd=${CRATE}）\n`);
 
+// v6-K21：主断言必须**点名**唯一的集成用例文件。`cargo test` 跑全 crate，
+// 把 tests/cleanup_scan_rule_diff.rs 改名/删掉它照样绿（src/ 单测还在）⇒ 行为差分
+// 静默摘网而门禁输出仍是「✓ 差分断言通过」。这里显式点名：文件必须在，
+// 且里面至少 3 条 #[test]（现算，不抄数字）。
+const DIFF_TEST = join(CRATE, 'tests', 'cleanup_scan_rule_diff.rs');
+{
+  let cnt = 0;
+  let readable = false;
+  try {
+    const t = readFileSync(DIFF_TEST, 'utf8');
+    readable = true;
+    cnt = (t.match(/^[ \t]*#\[test\][ \t]*$/gm) || []).length;
+  } catch {
+    readable = false;
+  }
+  check(
+    readable && cnt >= 3,
+    `0b. 行为差分集成用例点名在位（tests/cleanup_scan_rule_diff.rs：${readable ? `${cnt} 条 #[test]` : '文件不存在/不可读'}）`,
+    !readable
+      ? '集成用例文件缺失——cargo test 仍会绿（其余用例还在），行为差分已静默摘网'
+      : cnt < 3
+        ? `只有 ${cnt} 条 #[test]（< 3）：用例被裁剪或挪走`
+        : '',
+  );
+}
+
 const r = spawnSync('cargo', ['test'], {
   cwd: CRATE,
   stdio: 'inherit',
 });
 
-// fail-closed：拿不到 cargo 不算通过（断网/环境坏掉时不许打绿）
+// v6-K21：cargo 失败**不再提前 exit**——静态留痕断言（R1-2/E9/E10/E11）照样跑完，
+// 最后统一聚合退出。旧形态「cargo 一红就 return」会把静态结论整批吞掉，
+// 修一处代码要跑两轮门禁才知道全貌。
 if (r.error) {
-  console.error(`\n✗ 无法启动 cargo：${r.error.message}`);
-  console.error('  本门禁 fail-closed：cargo 不可用即判红，不许把"跑不起来"当"没发现问题"。');
-  process.exit(1);
-}
-if (r.status !== 0) {
-  console.error(`\n✗ 行为差分未通过（退出码 ${r.status}）—— 规则逻辑改动改变了命中集，或钉桩失效。`);
+  check(false, '1. cargo test 可执行（fail-closed：cargo 不可用即判红，不把「跑不起来」当「没发现问题」）', r.error.message);
+} else if (r.status !== 0) {
+  check(false, `1. 行为差分用例通过（cargo test 退出码 ${r.status}）—— 规则逻辑改动改变了命中集，或钉桩失效`, '');
   console.error('  ↳ 若是有意改扫描行为：先确认用例断言该不该同步改，再核对契约表');
   console.error('    `tools/rule-schema.json` 的 crossTrack 登记表与 `tools/fixtures/rule-coverage-baseline.json`。');
-  process.exit(1);
+  console.error('  ↳ 静态留痕断言仍会继续跑完并在末尾聚合退出（v6-K21）。');
+} else {
+  check(true, '1. 行为差分用例通过（cargo test 全 crate：tests/ 集成用例 + src/ 单测）');
+  console.log('  ✓ 差分断言 / D19 死键双向桩 / 扫描只读前提');
 }
-console.log('\n✓ 通过：差分断言 / D19 死键双向桩 / 扫描只读前提');
 
 // ==================== R1-2 重解析点留痕的静态断言 ====================
 // 为什么静态面也要钉：上面的行为用例只在 `cleanup_scan_rule_diff` 这一个入口跑，
@@ -302,7 +329,7 @@ check(
 
 console.log('');
 if (fail > 0) {
-  console.error(`静态留痕断言失败 ${fail} 项。`);
+  console.error(`扫描器差分门禁失败 ${fail} 项（行为面与静态面已合并统计，v6-K21）。`);
   process.exit(1);
 }
 console.log('✓ 静态留痕断言全部通过');
