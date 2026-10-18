@@ -475,13 +475,18 @@ pub fn netcheck_status() -> Result<Value, String> {
             g
         } else { false };
         // WinHTTP 代理（探测：v4 R5-M07 带超时）
-        let winhttp_out = crate::engine::systembin::quiet_cmd_timeout(
-            system_tool("netsh"),
-            &["winhttp", "show", "proxy"],
-            crate::engine::systembin::PROBE_TIMEOUT,
-        )
-        .ok()
-        .map(|o| crate::engine::systembin::decode_native_output(&o.stdout));
+        // v6-K01（P0-2）：解析失败与执行失败同语义（.ok() 的 None 分支）
+        let winhttp_out = crate::engine::systembin::system_tool("netsh")
+            .map_err(std::io::Error::other)
+            .and_then(|exe| {
+                crate::engine::systembin::quiet_cmd_timeout(
+                    exe,
+                    &["winhttp", "show", "proxy"],
+                    crate::engine::systembin::PROBE_TIMEOUT,
+                )
+            })
+            .ok()
+            .map(|o| crate::engine::systembin::decode_native_output(&o.stdout));
         let winhttp_has_proxy = winhttp_out.as_ref()
             .map(|o| (o.contains("proxy") || o.contains("代理服务器")) && !o.contains("直接访问") && !o.contains("DIRECT"))
             .unwrap_or(false);
@@ -643,12 +648,18 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
     };
 
     crate::engine::log::write_log("info", &format!("运行库修复开始: {action_id}"));
-    // 审查 v3-M1：dism.exe 是 PINNED 裸名，必须经 system_tool 解析到 System32 ——
-    // 便携版/提权实例场景下，CreateProcessW 的搜索顺序里 exe 所在目录与 CWD 都排在
-    // System32 之前，裸名会以管理员权限执行植入的同名工具。安装包路径不在 PINNED，
-    // system_tool 原样放行，不受影响。
+    // v6-K01（P0-2）：系统工具与外部安装包**拆两个入口**——dism.exe 走 system_tool
+    // 硬钉（解析到 System32，防搜索顺序劫持）；安装包绝对路径走 explicit_tool_path
+    // （裸名会落 CreateProcess 搜索顺序：exe 目录 → 父 CWD → System32，便携版/提权
+    // 实例的前两位可写）。旧写法两者共用 system_tool，靠「安装包不在 PINNED 原样
+    // 放行」侥幸正确——拆开后类型系统保证安装包不再可能裸名穿透。
+    let exe = if action_id == "netfx35" {
+        crate::engine::systembin::system_tool(program)?
+    } else {
+        crate::engine::systembin::explicit_tool_path(program)?
+    };
     let out = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool(program),
+        exe,
         &args,
         REDIST_INSTALL_TIMEOUT,
     )
@@ -686,7 +697,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
                 return Ok(json!({"ok": false, "message": "缺少网卡名"}));
             }
             let out = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("netsh"),
+                system_tool("netsh")?,
                 &["interface", "set", "interface", &format!("name={name}"), "admin=enabled"],
                 crate::engine::systembin::NETSH_TIMEOUT,
             )
@@ -711,7 +722,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
                 return Ok(json!({"ok": false, "message": "缺少接口标识"}));
             }
             let out = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("netsh"),
+                system_tool("netsh")?,
                 &["interface", "ipv4", "set", "dnsservers", &format!("name={name}"), "source=dhcp"],
                 crate::engine::systembin::NETSH_TIMEOUT,
             )
@@ -724,7 +735,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
         }
         "start-dhcp" => {
             let out = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("sc"),
+                system_tool("sc")?,
                 &["start", "Dhcp"],
                 crate::engine::systembin::SC_CMD_TIMEOUT,
             )
@@ -737,7 +748,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
         }
         "start-dnscache" => {
             let out = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("sc"),
+                system_tool("sc")?,
                 &["start", "Dnscache"],
                 crate::engine::systembin::SC_CMD_TIMEOUT,
             )
@@ -769,7 +780,7 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
         }
         "reset-winhttp" => {
             let out = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("netsh"),
+                system_tool("netsh")?,
                 &["winhttp", "reset", "proxy"],
                 crate::engine::systembin::NETSH_TIMEOUT,
             )

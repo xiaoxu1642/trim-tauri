@@ -503,8 +503,10 @@ fn on_power_event<R: Runtime>(app: &AppHandle<R>) {
 /// 同源姿势，且不为一个低频只读查询新增 windows crate feature。
 fn query_sys_transparency() -> bool {
     // v4 R5-M07：裸 .output() 改带超时 —— 外观查询挂在启动同步链上，挂住即锁 IPC
+    // v6-K01（P0-2）：reg 解析失败与执行失败同语义（读不到按开启处理）
+    let Ok(exe) = system_tool("reg") else { return true };
     let out = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool("reg"),
+        exe,
         &[
             "query",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",

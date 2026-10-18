@@ -1222,13 +1222,18 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             };
             let export_path = format!("{}\\{rest}", target.split('\\').next().unwrap_or(""));
             // v2-L4P-29（B-7）：备份类子进程统一走带超时入口，reg.exe 被拖住不再永久挂死
-            let backup_ok = crate::engine::systembin::quiet_cmd_timeout(
-                crate::engine::systembin::system_tool("reg.exe"),
-                &["export", &export_path, file_str, "/y"],
-                crate::engine::systembin::REG_EXPORT_TIMEOUT,
-            )
-            .map(|o| o.status.success() && file.exists())
-            .unwrap_or(false);
+            // v6-K01（P0-2）：解析失败并进 backup_ok=false（备份不完整绝不删，fail-closed 不变）
+            let backup_ok = crate::engine::systembin::system_tool("reg.exe")
+                .map_err(std::io::Error::other)
+                .and_then(|exe| {
+                    crate::engine::systembin::quiet_cmd_timeout(
+                        exe,
+                        &["export", &export_path, file_str, "/y"],
+                        crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                    )
+                })
+                .map(|o| o.status.success() && file.exists())
+                .unwrap_or(false);
             if !backup_ok {
                 details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
                 continue;
@@ -1268,13 +1273,18 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 continue;
             };
             // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
-            let backup_ok = crate::engine::systembin::quiet_cmd_timeout(
-                crate::engine::systembin::system_tool("reg.exe"),
-                &["export", key_part, file_str, "/y"],
-                crate::engine::systembin::REG_EXPORT_TIMEOUT,
-            )
-            .map(|o| o.status.success() && file.exists())
-            .unwrap_or(false);
+            // v6-K01（P0-2）：解析失败并进 backup_ok=false（同上 fail-closed）
+            let backup_ok = crate::engine::systembin::system_tool("reg.exe")
+                .map_err(std::io::Error::other)
+                .and_then(|exe| {
+                    crate::engine::systembin::quiet_cmd_timeout(
+                        exe,
+                        &["export", key_part, file_str, "/y"],
+                        crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                    )
+                })
+                .map(|o| o.status.success() && file.exists())
+                .unwrap_or(false);
             if !backup_ok {
                 details.push(detail(kind, target, "fail", "注册表备份失败，未执行删除（fail-closed）"));
                 continue;

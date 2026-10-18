@@ -36,17 +36,37 @@ const ALLOW_BARE = {
 
 /** 与 `engine/systembin.rs` 的 PINNED 保持一致（顺序无关） */
 const PINNED = [
-  'appwiz.cpl', 'calc.exe', 'charmap.exe', 'cleanmgr.exe', 'cmd.exe', 'control.exe',
-  'desk.cpl', 'devmgmt.msc', 'dfrgui.exe', 'dism.exe', 'diskmgmt.msc', 'dxdiag.exe',
-  'eventvwr.msc', 'explorer.exe', 'fltmc.exe', 'ipconfig.exe', 'lodctr.exe',
-  'main.cpl', 'mmsys.cpl', 'msconfig.exe', 'msinfo32.exe', 'mspaint.exe', 'msra.exe',
-  'mstsc.exe', 'narrator.exe', 'ncpa.cpl', 'netsh.exe', 'netsh', 'notepad.exe',
-  'optionalfeatures.exe', 'osk.exe', 'perfmon.exe', 'perfmon.msc', 'powercfg.exe',
-  'powercfg.cpl', 'powershell.exe', 'psr.exe', 'reg.exe', 'reg', 'regedit.exe',
-  'resmon.exe', 'rstrui.exe', 'rundll32.exe', 'sc.exe', 'sc', 'schtasks.exe',
-  'schtasks', 'sdclt.exe', 'services.msc', 'sfc.exe', 'snippingtool.exe', 'sysdm.cpl',
-  'tasklist.exe', 'taskmgr.exe', 'taskschd.msc', 'typeperf.exe', 'utilman.exe', 'where.exe',
-  'wf.msc', 'winmgmt.exe', 'winver.exe', 'wsreset.exe',
+  'appwiz.cpl', 'bcdedit.exe', 'calc.exe', 'charmap.exe', 'cleanmgr.exe', 'cmd.exe',
+  'compmgmt.msc', 'control.exe', 'desk.cpl', 'devmgmt.msc', 'dfrgui.exe', 'dism.exe',
+  'diskmgmt.msc', 'dxdiag.exe', 'eventvwr.msc', 'explorer.exe', 'fltmc.exe',
+  'intl.cpl', 'ipconfig.exe', 'lodctr.exe', 'main.cpl', 'mmsys.cpl', 'msconfig.exe',
+  'msinfo32.exe', 'mspaint.exe', 'msra.exe', 'mstsc.exe', 'narrator.exe', 'ncpa.cpl',
+  'netsh.exe', 'netsh', 'notepad.exe', 'optionalfeatures.exe', 'osk.exe', 'perfmon.exe',
+  'perfmon.msc', 'powercfg.exe', 'powercfg.cpl', 'powershell.exe', 'psr.exe', 'reg.exe',
+  'reg', 'regedit.exe', 'resmon.exe', 'rstrui.exe', 'rundll32.exe', 'sc.exe', 'sc',
+  'schtasks.exe', 'schtasks', 'sdclt.exe', 'services.msc', 'sfc.exe', 'snippingtool.exe',
+  'sysdm.cpl', 'tasklist.exe', 'taskmgr.exe', 'taskschd.msc', 'timedate.cpl', 'typeperf.exe',
+  'utilman.exe', 'where.exe', 'wf.msc', 'winmgmt.exe', 'winver.exe', 'wscui.cpl', 'wsreset.exe',
+];
+
+/**
+ * v6-K01（P0-2）生产实参地板：生产代码实际传入 system_tool 的关键名单（与
+ * systembin.rs 的 `pinned_covers_production_callers` 单测同名单、互为两道防线——
+ * Rust 运行时 + Node 静态）。任何一个从 PINNED 掉表（人为删项/整理漏项）即红。
+ */
+const PRODUCTION_PINNED_FLOOR = [
+  'cmd.exe',        // optimizer/apply.rs（quiet_cmd_timeout_raw）
+  'bcdedit.exe',    // optimizer/bcd.rs
+  'dism.exe',       // cleanup.rs / runtimes_net.rs / maintenance.rs
+  'powershell.exe', // pwsh 执行层唯一入口
+  'reg.exe',        // cleanup/peripheral/startup/process/residue
+  'regedit.exe',    // systembin::open_regedit_at
+  'explorer.exe',   // systembin::shell_select_in_explorer
+  'schtasks.exe',   // maintenance/startup/process/misc
+  'netsh.exe',      // runtimes_net
+  'tasklist.exe',   // misc
+  'fltmc.exe',      // minifilter_orphan
+  'powercfg.exe',   // syspanel
 ];
 
 /**
@@ -128,6 +148,21 @@ const SITE_EXEMPT = [
     reason: 'quiet_cmd_timeout_raw（P3-5）：同 args 版的透传形态，raw_arg 逐字保留命令行走同一等待实现',
   },
   {
+    file: 'src-tauri/src/engine/systembin.rs',
+    anchor: 'pub fn quiet_cmd_timeout(',
+    reason: 'quiet_cmd_timeout 函数定义本身（v6-K01 补 CALL_TOKENS 后 raw/args 版定义体被 token 命中，非调用点）',
+  },
+  {
+    file: 'src-tauri/src/engine/systembin.rs',
+    anchor: 'pub fn quiet_cmd_timeout_raw(',
+    reason: 'quiet_cmd_timeout_raw 函数定义本身（同上，v6-K01 补 token 后被命中，非调用点）',
+  },
+  {
+    file: 'src-tauri/src/engine/native/maintenance.rs',
+    anchor: 'quiet_cmd_timeout(&wow',
+    reason: 'P1-01 计数器链②：SysWOW64\\lodctr.exe 由 SystemRoot 拼接的绝对路径（32 位计数器重建需要 32 位 lodctr，system_tool 只在 System32/root 两目录找，第三目录不覆盖——绝对路径不经搜索顺序，非裸名）',
+  },
+  {
     file: 'src-tauri/src/engine/native/contextmenu.rs',
     anchor: 'quiet_cmd(p).spawn()',
     reason: 'p 来自注册表 Run 键回读的绝对路径列表，非 PINNED 裸名',
@@ -175,13 +210,17 @@ const fileTexts = new Map();
 // v5 批次 9 门禁候选 1：CALL_TOKENS 补 `quiet_cmd_timeout(`——它是超时 spawn 的
 // 实际入口（39 处调用点，check-ps-callsites 登记表同源），缺它则这批调用点的
 // 实参形态完全失明（T1a 实测 39 处 0 对象）。
-const CALL_TOKENS = ['quiet_cmd(', 'quiet_cmd_timeout(', 'Command::new('];
+// v6-K01（P0-2）：补 `quiet_cmd_timeout_raw(`——apply.rs 的 cmd 步骤走 raw 版，
+// 缺它则该调用点对 A/B 组失明（实为 K01 病灶之一）。
+const CALL_TOKENS = ['quiet_cmd(', 'quiet_cmd_timeout(', 'quiet_cmd_timeout_raw(', 'Command::new('];
 
-/** @type {{file:string,line:number,raw:string,name:string|null,wrapped:boolean,ident:string|null,kind:string}[]} */
-const hits = [];
-for (const f of files) {
-  const text = readFileSync(f, 'utf8');
-  fileTexts.set(relative(REPO_ROOT, f).replace(/\\/g, '/'), text);
+/**
+ * 从一段 Rust 源码文本提取 spawn 实参命中（v6-K01 / P0-2 抽出）：
+ * 主扫描（真实源码）与 H 组正向对照自检（合成样本）共用同一实现——
+ * 判据真源唯一，改判定器时自检样本当场红，不再有「机检失明」的静默漂移。
+ * 返回条目带行号（函数内自算，不依赖调用方环境）。
+ */
+function extractHitsFromText(text) {
   // 每行起始偏移，用于反推行号
   const starts = [0];
   for (let i = 0; i < text.length; i++) {
@@ -195,6 +234,8 @@ for (const f of files) {
     }
     return lo;
   };
+  /** @type {{line:number,raw:string,name:string|null,wrapped:boolean,ident:string|null,kind:string,argHead:string}[]} */
+  const out = [];
   for (const token of CALL_TOKENS) {
     let idx = text.indexOf(token);
     while (idx >= 0) {
@@ -208,7 +249,11 @@ for (const f of files) {
         while (p < text.length && /\s/.test(text[p])) p++;
         const rest = text.slice(p);
         const lit = rest.match(/^"((?:[^"\\]|\\.)*)"/);
-        const wrapped = /^system_tool\(/.test(rest) || /^crate::engine::systembin::system_tool\(/.test(rest);
+        // wrapped 判定覆盖三种调用前缀：全路径 / systembin 短前缀（bcd.rs 风格）/ 裸名
+        const wrapped =
+          /^system_tool\(/.test(rest)
+          || /^crate::engine::systembin::system_tool\(/.test(rest)
+          || /^systembin::system_tool\(/.test(rest);
         // 变量实参：捕获标识符（剥掉 & 与空白），交由断言 C 做两跳别名判定
         let ident = null;
         if (!lit && !wrapped) {
@@ -216,19 +261,34 @@ for (const f of files) {
           if (idm) ident = idm[1];
         }
         if (lit || wrapped || ident) {
-          hits.push({
-            file: relative(REPO_ROOT, f).replace(/\\/g, '/'),
+          out.push({
             line: ln + 1,
             raw: lineText.trim(),
             name: lit ? lit[1] : null,
             wrapped,
             ident,
             kind: token,
+            // G 组用：wrapped 实参的头部形态（截前 120 字符压平换行），路径形态检测用
+            argHead: rest.slice(0, 120).replace(/\s+/g, ' '),
           });
         }
       }
       idx = text.indexOf(token, idx + token.length);
     }
+  }
+  return out;
+}
+
+/** @type {{file:string,line:number,raw:string,name:string|null,wrapped:boolean,ident:string|null,kind:string,argHead:string}[]} */
+const hits = [];
+for (const f of files) {
+  const text = readFileSync(f, 'utf8');
+  fileTexts.set(relative(REPO_ROOT, f).replace(/\\/g, '/'), text);
+  for (const h of extractHitsFromText(text)) {
+    hits.push({
+      file: relative(REPO_ROOT, f).replace(/\\/g, '/'),
+      ...h,
+    });
   }
 }
 
@@ -240,7 +300,11 @@ const check = (ok, label, detail = '') => {
 
 console.log('=== 系统工具裸进程名门禁 ===\n');
 
-const quiet = hits.filter((h) => h.kind === 'quiet_cmd(');
+// v6-K01（P0-2）：quiet 组从「仅 quiet_cmd(」扩到全部三个 spawn 入口——
+// quiet_cmd_timeout / quiet_cmd_timeout_raw 与 quiet_cmd 是同一实参判定语义的三个
+// 门面（超时版/raw 版只是等待与命令行形状差异），旧过滤让 39+ 处超时调用点对
+// A/B 组失明（裸字面量与误塞实参都看不见），正是 K01 想堵的缝。
+const quiet = hits.filter((h) => h.kind !== 'Command::new(');
 const raw = hits.filter((h) => h.kind === 'Command::new(');
 
 // ---- A. 字面量必须经 system_tool 包裹或登记豁免 ----
@@ -292,6 +356,23 @@ function resolveBinding(file, ident) {
   return verdict;
 }
 
+/**
+ * 闭包参数链判定（v6-K01 / P0-2 新增）：`system_tool("x").map_err(...).and_then(|exe| …exe…)`
+ * 是拆 API 后的标准形态——exe 是闭包参数不是 let 绑定，resolveBinding 找不到；
+ * 判据 = 该 ident 是某个 `.and_then(|ident|` 的参数，且链头上游 400 字符内含 system_tool(。
+ */
+function resolveClosureBinding(file, ident) {
+  const text = fileTexts.get(file);
+  if (!text) return false;
+  const re = new RegExp(`\\.and_then\\(\\s*\\|&?\\s*${ident}\\b`);
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const head = text.slice(Math.max(0, m.index - 400), m.index);
+    if (/system_tool\(/.test(head)) return true;
+  }
+  return false;
+}
+
 const identSites = quiet.filter((h) => !h.wrapped && h.ident);
 // 先把锚点解析成"覆盖了哪个调用点"，再做双向核对：
 //   登记侧失效/歧义 → 红；调用点侧没被任何登记覆盖 → 红
@@ -305,7 +386,7 @@ for (const h of identSites) {
   const verdict = resolveBinding(h.file, h.ident);
   if (verdict === 'literal-unwrapped') {
     cFailures.push(`${key} 绑定到 PINNED 字面量且未经 system_tool 解析（ident=${h.ident}）`);
-  } else if (verdict === 'unknown' && !siteCovered.has(key)) {
+  } else if (verdict === 'unknown' && !resolveClosureBinding(h.file, h.ident) && !siteCovered.has(key)) {
     cFailures.push(`${key} 变量形态无法静态收敛（ident=${h.ident}），必须在 SITE_EXEMPT 用唯一锚文本登记理由`);
   }
 }
@@ -354,6 +435,96 @@ check(
   pinnedSame
     ? ''
     : `Rust=[${rustPinned.join(', ')}] / 门禁=[${jsPinned.join(', ')}]`,
+);
+
+// ---- F. PINNED 生产实参地板（v6-K01 / P0-2） ----
+// 「从 PINNED 删掉 cmd.exe 后 system_tool("cmd") 必须判红」的静态机械化之一：
+// 生产在用的工具名从白名单掉表（删项/整理漏项）即红，不等运行时 Err 才暴露。
+// 另一道防线在 systembin.rs 单测 pinned_covers_production_callers（Rust 运行时侧）。
+const floorMissing = PRODUCTION_PINNED_FLOOR.filter((n) => !jsPinned.includes(n));
+check(
+  floorMissing.length === 0,
+  `F. PINNED 生产实参地板（${PRODUCTION_PINNED_FLOOR.length} 个生产在用名全在表）`,
+  floorMissing.length ? `掉表 ${JSON.stringify(floorMissing)}——恢复表项或同步调用方` : '',
+);
+
+// ---- G. system_tool 实参不得是路径形态（v6-K01 / P0-2） ----
+// 「把合法安装包路径误塞系统工具入口也必须判红」的静态机械化：system_tool 的
+// 辖域是 PINNED **工具名**；含盘符/UNC 的实参是外部工具，必须走 explicit_tool_path
+// （旧实现原样返回侥幸可用，拆 API 后它直接 Err，运行时才暴露 → 这里前移到门禁）。
+// raw 字符串 r"D:\..." 形态 lit 正则提不到 name，用 argHead 判路径特征。
+const gOffenders = hits.filter((h) => {
+  if (!h.wrapped) return false;
+  // 抠出 system_tool( 的第一个实参字面量（含 r"..." raw 形态）
+  const m = h.argHead.match(/^crate::engine::systembin::system_tool\(\s*(r?)"((?:[^"\\]|\\.)*)"/)
+    ?? h.argHead.match(/^system_tool\(\s*(r?)"((?:[^"\\]|\\.)*)"/);
+  if (!m) return false;
+  const arg = m[2];
+  // 盘符（X:\）或 UNC（\\开头）= 路径形态，不属于系统工具名
+  return /^[A-Za-z]:[\\/]/.test(arg) || arg.startsWith('\\\\');
+});
+check(
+  gOffenders.length === 0,
+  `G. ${hits.filter((h) => h.wrapped).length} 个 system_tool 实参均无路径形态（安装包走 explicit_tool_path）`,
+  gOffenders.length
+    ? `路径形态实参 ${JSON.stringify(gOffenders.map((h) => `${h.file}:${h.line} ${h.argHead.slice(0, 60)}`))}`
+    : '',
+);
+
+// ---- H. 判定器正向对照自检（v6-K01 / P0-2，PENDING_CONTROLS 缺口收口） ----
+// 合成样本走与主扫描同一 extractHitsFromText 实现 + A/G 组同源判据：
+// 违规样本必须被判红、合规样本必须放行——判定器改动导致失明时这里当场红。
+const SELF_SAMPLES = [
+  {
+    code: 'let out = quiet_cmd("schtasks");',
+    expect: 'fail', why: '裸字面量直接 spawn（A 组违规形态）',
+  },
+  {
+    code: 'let out = quiet_cmd_timeout_raw("schtasks", &raw, T);',
+    expect: 'fail', why: 'raw 版裸字面量（CALL_TOKENS 补 token 前的盲区形态）',
+  },
+  {
+    code: 'let out = quiet_cmd_timeout(system_tool(r"D:\\dl\\vc_redist.x64.exe"), &args, T);',
+    expect: 'fail', why: '安装包路径误塞系统工具入口（G 组违规形态）',
+  },
+  {
+    code: 'let out = quiet_cmd_timeout(system_tool("schtasks.exe"), &args, T);',
+    expect: 'ok', why: '标准形态：PINNED 名经 system_tool 解析（放行）',
+  },
+  {
+    code: 'let out = quiet_cmd_timeout(exe, &args, T);',
+    expect: 'ok', why: '变量形态（ident 提取，交 C 组两跳别名判定——本样本自身不判红）',
+  },
+];
+const selfFailures = [];
+for (const s of SELF_SAMPLES) {
+  const found = extractHitsFromText(s.code);
+  if (found.length === 0) {
+    selfFailures.push(`自检样本提取为空（token 未命中）: ${s.why}`);
+    continue;
+  }
+  const h = found[0];
+  if (s.expect === 'fail') {
+    // 违规判定：裸字面量（非 wrapped、非豁免名单）或 wrapped 路径形态
+    const isBareLit = h.name !== null && !h.wrapped;
+    const isPathShaped = h.wrapped
+      && (() => {
+        const m = h.argHead.match(/^system_tool\(\s*(r?)"((?:[^"\\]|\\.)*)"/);
+        if (!m) return false;
+        return /^[A-Za-z]:[\\/]/.test(m[2]) || m[2].startsWith('\\\\');
+      })();
+    if (!isBareLit && !isPathShaped) {
+      selfFailures.push(`违规样本未被判定为违规: ${s.why}（argHead=${h.argHead.slice(0, 60)}）`);
+    }
+  } else if (h.name !== null && !h.wrapped && !ALLOW_BARE[h.name]) {
+    // 合规样本被误判红 = 判定器过紧（会制造假红）
+    selfFailures.push(`合规样本被误判违规: ${s.why}`);
+  }
+}
+check(
+  selfFailures.length === 0,
+  `H. 判定器正向对照自检（${SELF_SAMPLES.length} 个合成样本同源判定）`,
+  selfFailures.length ? selfFailures.join('；') : '',
 );
 
 console.log('');

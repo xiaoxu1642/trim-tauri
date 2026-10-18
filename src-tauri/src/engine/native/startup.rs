@@ -1233,8 +1233,9 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String>
     if task_name.is_empty() { return Err("缺少任务名".into()); }
     let full_name = format!("{task_path}{task_name}");
     let arg = if enable { "/ENABLE" } else { "/DISABLE" };
+    // v6-K01（P0-2）：解析失败与 spawn 失败同报错口径
     let output = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool("schtasks"),
+        system_tool("schtasks")?,
         &["/Change", "/TN", &full_name, arg],
         crate::engine::systembin::SCHTASKS_TIMEOUT,
     ).map_err(|e| format!("schtasks 执行失败: {e}"))?;
@@ -1362,11 +1363,16 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     continue;
                 };
                 // v2-L4P-29（B-7）：备份类子进程统一走带超时入口，reg.exe 被拖住不再永久挂死
-                let export_out = crate::engine::systembin::quiet_cmd_timeout(
-                    system_tool("reg.exe"),
-                    &["export", &export_path, reg_file_str, "/y"],
-                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
-                );
+                // v6-K01（P0-2）：解析失败并进 is_err 分支（备份不完整绝不删值）
+                let export_out = crate::engine::systembin::system_tool("reg.exe")
+                    .map_err(std::io::Error::other)
+                    .and_then(|exe| {
+                        crate::engine::systembin::quiet_cmd_timeout(
+                            exe,
+                            &["export", &export_path, reg_file_str, "/y"],
+                            crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                        )
+                    });
                 if export_out.is_err() || !reg_file.exists() {
                     failed += 1;
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表备份失败，未执行删除"}));
@@ -1445,11 +1451,15 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 // 导出 XML 备份
                 let safe = safe_name(&task_name);
                 let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
-                let query_out = crate::engine::systembin::quiet_cmd_timeout(
-                    system_tool("schtasks"),
-                    &["/Query", "/TN", &tn, "/XML"],
-                    crate::engine::systembin::SCHTASKS_TIMEOUT,
-                );
+                let query_out = crate::engine::systembin::system_tool("schtasks")
+                    .map_err(std::io::Error::other)
+                    .and_then(|exe| {
+                        crate::engine::systembin::quiet_cmd_timeout(
+                            exe,
+                            &["/Query", "/TN", &tn, "/XML"],
+                            crate::engine::systembin::SCHTASKS_TIMEOUT,
+                        )
+                    });
                 if let Ok(out) = query_out {
                     if out.status.success() {
                         let _ = std::fs::write(&xml_file, &out.stdout);
@@ -1461,11 +1471,16 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     continue;
                 }
                 // 删除
-                let del_out = crate::engine::systembin::quiet_cmd_timeout(
-                    system_tool("schtasks"),
-                    &["/Delete", "/TN", &tn, "/F"],
-                    crate::engine::systembin::SCHTASKS_TIMEOUT,
-                );
+                // v6-K01（P0-2）：解析失败并进 is_err 分支（与备份缺失同口径，未生效回执）
+                let del_out = crate::engine::systembin::system_tool("schtasks")
+                    .map_err(std::io::Error::other)
+                    .and_then(|exe| {
+                        crate::engine::systembin::quiet_cmd_timeout(
+                            exe,
+                            &["/Delete", "/TN", &tn, "/F"],
+                            crate::engine::systembin::SCHTASKS_TIMEOUT,
+                        )
+                    });
                 if del_out.is_err() || !del_out.unwrap().status.success() {
                     failed += 1;
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));

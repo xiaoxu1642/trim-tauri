@@ -1005,8 +1005,9 @@ pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String
     let _ = std::fs::remove_file(&tmp_path);
     let mut cleanup = RemoveOnDrop(Some(tmp_path.clone()));
     let tmp_str = tmp_path.to_string_lossy().to_string();
+    // v6-K01（P0-2）：解析失败与 spawn 失败同报错口径
     let out = crate::engine::systembin::quiet_cmd_timeout(
-        crate::engine::systembin::system_tool("powercfg.exe"),
+        crate::engine::systembin::system_tool("powercfg.exe")?,
         &["/export", tmp_str.as_str(), guid],
         crate::engine::systembin::POWERCFG_TIMEOUT,
     )

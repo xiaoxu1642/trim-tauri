@@ -798,11 +798,16 @@ fn cleanup_execute_with_backup_root(
                         else { "HKCC" };
                     let export_path = format!("{hive_short}\\{rest}");
                     // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
-                    match crate::engine::systembin::quiet_cmd_timeout(
-                        system_tool("reg.exe"),
-                        &["export", &export_path, file_str, "/y"],
-                        crate::engine::systembin::REG_EXPORT_TIMEOUT,
-                    ) {
+                    // v6-K01（P0-2）：解析失败并进 backup_failed 分支（备份不完整绝不删）
+                    match crate::engine::systembin::system_tool("reg.exe")
+                        .map_err(std::io::Error::other)
+                        .and_then(|exe| {
+                            crate::engine::systembin::quiet_cmd_timeout(
+                                exe,
+                                &["export", &export_path, file_str, "/y"],
+                                crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                            )
+                        }) {
                         Ok(o) if o.status.success() && file.exists() => {
                             // N9：清理域此前**根本不产封条**，于是还原链那道"封条核对"对本域
                             // 永远只能走 missing 分支（等于没闸）。与卸载域同口径落一份，
@@ -908,11 +913,16 @@ fn cleanup_execute_with_backup_root(
         // 到点 kill 的是 DISM 前端进程本身：CBS/TiWorker 的事务由组件栈自行回滚
         // 或续跑，中断是安全的，最坏结果是本条报失败、用户可重跑。
         if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
-            let dism = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("dism.exe"),
-                &["/Online", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase"],
-                DISM_CLEANUP_TIMEOUT,
-            );
+            // v6-K01（P0-2）：解析失败并进 Err 臂（既有「DISM 执行失败」回执口径）
+            let dism = crate::engine::systembin::system_tool("dism.exe")
+                .map_err(std::io::Error::other)
+                .and_then(|exe| {
+                    crate::engine::systembin::quiet_cmd_timeout(
+                        exe,
+                        &["/Online", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase"],
+                        DISM_CLEANUP_TIMEOUT,
+                    )
+                });
             let (status, message) = match &dism {
                 Ok(o) if o.status.success() => (
                     "ok",

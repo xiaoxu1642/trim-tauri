@@ -319,7 +319,8 @@ pub(crate) fn random_token() -> String {
 /// 「自己拼路径写 .ps1 + 直接执行」这条旁路（R0，2026-10-01），统一走
 /// [`run_inbox_script`]，否则 BOM、私有 tmp、脚本清理三件纪律又会各自长出一份。
 fn run_inbox_ps(script_path: &Path, timeout: Duration, diag_op: Option<&str>) -> Result<PsOutput, String> {
-    let exe = crate::engine::systembin::system_tool("powershell.exe");
+    // v6-K01（P0-2）：powershell.exe 硬钉解析失败（系统异常）直接 Err，回执如实上报
+    let exe = crate::engine::systembin::system_tool("powershell.exe")?;
     run_with_exe(&exe, script_path, timeout, diag_op, "Windows PowerShell")
 }
 

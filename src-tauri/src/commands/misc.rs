@@ -53,8 +53,10 @@ pub fn detect_dwm_inject_tools_async<R: tauri::Runtime>(app: AppHandle<R>) {
 fn detect_dwm_inject_tools() -> Option<String> {
     // 进程痕迹：tasklist /FI "IMAGENAME eq DWMBlurGlass.exe" /FO CSV
     // v4 R5-M07：探测类命令带超时（10s 宽限上界；挂住即锁 IPC）
+    // v6-K01（P0-2）：解析失败与执行失败同语义（探测不到按 None 处理）
+    let Ok(exe) = system_tool("tasklist") else { return None };
     if let Ok(out) = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool("tasklist"),
+        exe,
         &["/FI", "IMAGENAME eq DWMBlurGlass.exe", "/FO", "CSV"],
         crate::engine::systembin::PROBE_TIMEOUT,
     ) {
@@ -64,8 +66,9 @@ fn detect_dwm_inject_tools() -> Option<String> {
         }
     }
     // 计划任务痕迹：schtasks /Query /TN DWMBlurGlass_Extend
+    let Ok(exe) = system_tool("schtasks") else { return None };
     if let Ok(out) = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool("schtasks"),
+        exe,
         &["/Query", "/TN", "DWMBlurGlass_Extend"],
         crate::engine::systembin::PROBE_TIMEOUT,
     ) {

@@ -18,18 +18,26 @@
 //! 白名单内的工具强制解析到 `%SystemRoot%\System32\`（其次 `%SystemRoot%\`）；
 //! 两个目录都不存在时退回裸名 —— 极端环境（系统目录被改名）不至于直接不可用，
 //! 但也**不要**为「退回」加更多分支，退回即意味着本函数在这台机器上没起作用。
-//! 白名单外的程序（安装包路径、`git` 等可选工具）原样返回，不由本模块处理。
+//! 白名单外的程序（安装包路径、`git` 等可选工具）走 [`explicit_tool_path`] 显式入口，
+//! 不由本表处理（v6-K01 / P0-2：旧「原样返回」口径已拆掉）。
 
 /// 固定到系统目录的工具白名单（大小写不敏感）
 ///
 /// 只收**随 Windows 分发、位于 System32（或系统根）**的工具。用户可自行安装的
 /// 工具（如 `git`）不进这张表 —— 它们的真实位置不在系统目录，硬解析反而会把它弄坏。
+///
+/// v6-K01（P0-2）：补 `bcdedit.exe`（bcd 域生产在用却一直裸名 PATH 命中）与
+/// `compmgmt.msc` / `intl.cpl` / `timedate.cpl` / `wscui.cpl`（quickcmds 面板白名单
+/// 在用，此前 ShellExecute 搜索顺序可被 exe 同目录同名件抢先）。`git` 与安装包
+/// 路径**不进**本表，走 [`explicit_tool_path`]。
 const PINNED: &[&str] = &[
     "appwiz.cpl",
+    "bcdedit.exe",
     "calc.exe",
     "charmap.exe",
     "cleanmgr.exe",
     "cmd.exe",
+    "compmgmt.msc",
     "control.exe",
     "desk.cpl",
     "devmgmt.msc",
@@ -40,6 +48,7 @@ const PINNED: &[&str] = &[
     "eventvwr.msc",
     "explorer.exe", // 注意：在系统根而非 System32，靠第二个候选目录命中
     "fltmc.exe", // v0.5.0 残留扫描：过滤管理器实时状态（minifilter 挂载判定）
+    "intl.cpl",
     "ipconfig.exe",
     "lodctr.exe",
     "main.cpl",
@@ -80,20 +89,41 @@ const PINNED: &[&str] = &[
     "tasklist.exe",
     "taskmgr.exe",
     "taskschd.msc",
+    "timedate.cpl",
     "typeperf.exe", // P1-01：计数器重建后的采样验证
     "utilman.exe",
     "where.exe",
     "wf.msc",
     "winmgmt.exe", // P1-01：/resyncperf 同步 WMI 计数器
     "winver.exe",
+    "wscui.cpl",
     "wsreset.exe",
 ];
 
-/// 进程名 → 可交给 `Command::new` 的路径。
+/// 进程名 → 可交给 `Command::new` 的路径（**系统工具硬钉**，v6-K01 / P0-2）。
 ///
-/// 白名单外的名字原样返回（用 `PathBuf` 包一层只是为了统一类型）。
-pub fn system_tool(program: &str) -> std::path::PathBuf {    if !PINNED.iter().any(|p| p.eq_ignore_ascii_case(program)) {
-        return std::path::PathBuf::from(program);
+/// 只服务 PINNED 白名单内的随系统分发工具：
+/// - 白名单外的名字（`git`、安装包路径等用户自装物）一律 `Err`——旧实现「原样返回」
+///   会把外部工具静默放进 CreateProcessW 的搜索顺序（exe 目录 → 父 CWD → System32），
+///   便携版/提权实例的前两位都可写，等于白送劫持面；外部工具请走 [`explicit_tool_path`]；
+/// - 白名单内但 `%SystemRoot%` 下找不到也 `Err`——裸名回退同样落进搜索顺序，
+///   且「System32 里没有 reg.exe」本身就是系统异常，如实报失败而不是装作能跑。
+///
+/// 大小写不敏感；调用点写法不统一（有带 `.exe` 的也有不带的），两种都试。
+pub fn system_tool(program: &str) -> Result<std::path::PathBuf, String> {
+    // 裸名/.exe 双试检查（方案 P0-2 第 1 条）：调用点写法不统一——optimizer 传
+    // "cmd"、quickcmds 传 "regedit"、misc 传 "tasklist"，表里登记的是全名
+    // "cmd.exe"/"regedit.exe"/"tasklist.exe"。判定与解析都要双试，缺判定侧双试
+    // 就是「硬钉一刀切死合法裸名调用点」。
+    let pinned_hit = PINNED.iter().any(|p| {
+        p.eq_ignore_ascii_case(program)
+            || (!program.to_ascii_lowercase().ends_with(".exe")
+                && p.eq_ignore_ascii_case(&format!("{program}.exe")))
+    });
+    if !pinned_hit {
+        return Err(format!(
+            "「{program}」不在系统工具白名单：请改走 explicit_tool_path（外部工具显式入口），或检查调用方拼写"
+        ));
     }
     let root = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
@@ -116,11 +146,34 @@ pub fn system_tool(program: &str) -> std::path::PathBuf {    if !PINNED.iter().a
         for n in &names {
             let p = dir.join(n);
             if p.is_file() {
-                return p;
+                return Ok(p);
             }
         }
     }
-    std::path::PathBuf::from(program)
+    Err(format!(
+        "系统工具「{program}」在白名单内但 %SystemRoot% 下未找到（系统安装异常），拒绝裸名回退"
+    ))
+}
+
+/// **外部工具显式入口**（v6-K01 / P0-2）：只服务用户安装包绝对路径与未来可选工具
+/// （`git` 类）。入口名刻意与 system_tool 相对——审查者一眼可辨「这不是系统工具硬钉」。
+///
+/// 校验语义：必须给**绝对路径**（盘符或 UNC）。裸名直接拒——裸名会落进
+/// CreateProcessW 的搜索顺序（exe 所在目录 → 父 CWD → System32），便携版/提权实例
+/// 的前两位可写，同名植入会被优先执行；绝对路径由内核按路径直接定位，不经过搜索。
+/// 存在性不做词法预检：待装安装包的落盘检查由调用方职责承担，执行失败按退出码
+/// 如实回执（本函数只负责「不给搜索顺序留缝」这一件事）。
+pub fn explicit_tool_path(program: &str) -> Result<std::path::PathBuf, String> {
+    let s = program.trim();
+    if s.is_empty() {
+        return Err("外部工具路径为空".to_string());
+    }
+    if !std::path::Path::new(s).is_absolute() {
+        return Err(format!(
+            "外部工具必须给绝对路径（裸名「{s}」会走 CreateProcess 搜索顺序，exe 同目录植入的同名件会被优先执行）"
+        ));
+    }
+    Ok(std::path::PathBuf::from(s))
 }
 
 // ==================== 原生子进程输出统一解码（P0-02，2026-10-10） ====================
@@ -320,7 +373,7 @@ pub fn open_regedit_at(last_key: &str) -> Result<(), String> {
         }
     }
     // regedit 启动时读 LastKey；先写后启，顺序不能反
-    let exe = system_tool("regedit.exe");
+    let exe = system_tool("regedit.exe")?;
     shell_execute_open(exe.to_string_lossy().as_ref())
 }
 
@@ -350,7 +403,7 @@ pub fn shell_select_in_explorer(target: &str) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        let exe = system_tool("explorer.exe");
+        let exe = system_tool("explorer.exe")?;
         shell_execute(exe.to_string_lossy().as_ref(), Some(&explorer_select_arg(target)))
     }
     #[cfg(not(windows))]
@@ -527,7 +580,7 @@ mod tests {
     #[test]
     fn pinned_tools_resolve_under_system_root() {
         for name in ["reg.exe", "sc", "netsh.exe", "schtasks", "sfc.exe"] {
-            let p = system_tool(name);
+            let p = system_tool(name).expect("PINNED 内工具必须解析成功");
             let s = p.to_string_lossy().to_lowercase();
             assert!(
                 s.contains("system32") || s.contains("windows"),
@@ -537,22 +590,79 @@ mod tests {
         }
     }
 
+    /// v6-K01（P0-2）：白名单外一律拒——旧实现「原样返回」把外部工具静默放进
+    /// CreateProcessW 搜索顺序（exe 目录 → 父 CWD → System32）。翻转自旧
+    /// `unpinned_names_pass_through`（其断言方向在拆 API 后正好相反）。
+    /// 判红自证：把 system_tool 白名单外分支改回裸名返回，本用例红。
     #[test]
-    fn unpinned_names_pass_through() {
-        // 安装包路径与可选工具不能被改写
-        assert_eq!(system_tool("git").to_str(), Some("git"));
-        assert_eq!(
-            system_tool(r"D:\dl\vc_redist.x64.exe").to_str(),
-            Some(r"D:\dl\vc_redist.x64.exe")
+    fn unpinned_names_are_rejected() {
+        // 可选工具（git 类）不进系统表：硬钉入口必须拒
+        assert!(system_tool("git").is_err(), "git 不是系统工具，必须 Err");
+        // 安装包绝对路径同样必须拒——它属于 explicit_tool_path 的辖域
+        assert!(
+            system_tool(r"D:\dl\vc_redist.x64.exe").is_err(),
+            "安装包路径不属于系统工具入口"
         );
+        // 拒绝时给出可读原因（调用方按回执口径透传）
+        let e = system_tool("git").unwrap_err();
+        assert!(e.contains("explicit_tool_path"), "错误提示必须指路外部工具入口：{e}");
+    }
+
+    /// v6-K01（P0-2）：外部工具显式入口——绝对路径原样放行；裸名/空串拒
+    /// （裸名落搜索顺序 = 劫持面）。判红自证：把 is_absolute 校验删掉，
+    /// 裸名用例红。
+    #[test]
+    fn explicit_tool_path_only_takes_absolute_paths() {
+        assert_eq!(
+            explicit_tool_path(r"D:\dl\vc_redist.x64.exe").unwrap().to_str(),
+            Some(r"D:\dl\vc_redist.x64.exe"),
+            "绝对路径原样放行、不改写"
+        );
+        assert_eq!(
+            explicit_tool_path(r"\\server\share\installer.msi").unwrap().to_str(),
+            Some(r"\\server\share\installer.msi"),
+            "UNC 绝对路径放行"
+        );
+        assert!(explicit_tool_path("git").is_err(), "裸名拒（搜索顺序劫持面）");
+        assert!(explicit_tool_path("").is_err(), "空串拒");
+        assert!(explicit_tool_path("  ").is_err(), "纯空白拒");
+    }
+
+    /// v6-K01（P0-2）生产实参地板：静态登记「生产代码实际传入 system_tool 的关键
+    /// 名单」，任何一个从 PINNED 掉表（人为删项/合并整理时漏项）都在这里当场红——
+    /// 与 tools/check-system-bin.mjs 的 PINNED 地板断言互为两道防线（Rust 运行时 +
+    /// Node 静态）。判红自证：从 PINNED 删掉 "cmd.exe"，本用例红，退出码非 0。
+    #[test]
+    fn pinned_covers_production_callers() {
+        const PRODUCTION_NAMES: &[&str] = &[
+            "cmd.exe",       // optimizer/apply.rs（quiet_cmd_timeout_raw）
+            "bcdedit.exe",   // optimizer/bcd.rs
+            "dism.exe",      // cleanup.rs / runtimes_net.rs / maintenance.rs
+            "powershell.exe", // pwsh 执行层唯一入口
+            "reg.exe",       // cleanup/peripheral/startup/process/residue
+            "regedit.exe",   // systembin::open_regedit_at
+            "explorer.exe",  // systembin::shell_select_in_explorer
+            "schtasks.exe",  // maintenance/startup/process/misc
+            "netsh.exe",     // runtimes_net
+            "tasklist.exe",  // misc
+            "fltmc.exe",     // minifilter_orphan
+            "powercfg.exe",  // syspanel
+        ];
+        for n in PRODUCTION_NAMES {
+            assert!(
+                PINNED.iter().any(|p| p.eq_ignore_ascii_case(n)),
+                "生产在用的系统工具「{n}」从 PINNED 掉表了——调用点会当场 Err，恢复表项或同步调用方"
+            );
+        }
     }
 
     #[test]
     fn explorer_resolves_to_system_root() {
-        // explorer.exe 在系统根，不在 System32 —— 命中不了时应退回裸名而非拼错路径
-        let p = system_tool("explorer.exe");
+        // explorer.exe 在系统根，不在 System32 —— 解析必须落在根下，且不回退裸名
+        let p = system_tool("explorer.exe").expect("explorer.exe 必须解析成功");
         let s = p.to_string_lossy().to_lowercase();
         assert!(s.ends_with("explorer.exe"), "{s}");
+        assert!(s.contains("windows"), "explorer.exe 必须解析到系统根：{s}");
     }
 
     /// P0-02：UTF-16LE（无 BOM，sfc 的真实形态）必须正确解码，无 NUL、中文可判读
@@ -619,7 +729,7 @@ mod tests {
         let n = 2_000usize; // 累计约百 KB 量级，两个数量级地超出管道缓冲
         // 走 raw_arg 版：cmd.exe 的 `/c "…"` 引号形状必须逐字保留（见 quiet_cmd_timeout_raw 注释）
         let raw = format!("/c \"for /L %n in (1,1,{n}) do @echo {line}\"");
-        let out = quiet_cmd_timeout_raw(system_tool("cmd.exe"), &raw, PROBE_TIMEOUT)
+        let out = quiet_cmd_timeout_raw(system_tool("cmd.exe").expect("cmd.exe 必须解析成功"), &raw, PROBE_TIMEOUT)
             .expect("cmd.exe 应能启动");
         let got = out.stdout.len();
         assert!(
@@ -640,7 +750,7 @@ mod tests {
     #[ignore = "真机：sfc /verifyonly 非破坏但耗时数分钟，发布前人工跑"]
     fn live_sfc_verifyonly_解码无nul() {
         let out = crate::engine::systembin::quiet_cmd_timeout(
-            crate::engine::systembin::system_tool("sfc.exe"),
+            crate::engine::systembin::system_tool("sfc.exe").expect("sfc.exe 必须解析成功"),
             &["/verifyonly"],
             crate::engine::native::MAINT_CMD_TIMEOUT,
         )
@@ -678,7 +788,7 @@ mod tests {
     fn live_schtasks_xml_输出确实超过管道缓冲() {
         const SAMPLE_TASKS: usize = 60;
         let listed = quiet_cmd_timeout(
-            system_tool("schtasks.exe"),
+            system_tool("schtasks.exe").expect("schtasks.exe 必须解析成功"),
             &["/Query", "/FO", "CSV", "/NH"],
             SCHTASKS_TIMEOUT,
         )
@@ -709,7 +819,7 @@ mod tests {
         let mut biggest = String::new();
         for t in &tasks {
             let Ok(out) = quiet_cmd_timeout(
-                system_tool("schtasks.exe"),
+                system_tool("schtasks.exe").expect("schtasks.exe 必须解析成功"),
                 &["/Query", "/TN", t, "/XML"],
                 SCHTASKS_TIMEOUT,
             ) else {

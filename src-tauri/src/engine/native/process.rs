@@ -524,14 +524,18 @@ pub fn stubborn_block() -> Result<Value, String> {
     let block_tasks = stubborn_enum_tasks();
     for task in &block_tasks {
         // 检查任务是否存在
-        let exists = match crate::engine::systembin::quiet_cmd_timeout(
-            system_tool("schtasks"),
-            &["/Query", "/TN", task, "/NH"],
-            crate::engine::systembin::REG_EXPORT_TIMEOUT,
-        ) {
-            Ok(o) => o.status.success(),
-            Err(_) => false,
-        };
+        // v6-K01（P0-2）：解析失败与执行失败同语义（按「任务不存在」跳过）
+        let exists = crate::engine::systembin::system_tool("schtasks")
+            .map_err(std::io::Error::other)
+            .and_then(|exe| {
+                crate::engine::systembin::quiet_cmd_timeout(
+                    exe,
+                    &["/Query", "/TN", task, "/NH"],
+                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                )
+            })
+            .map(|o| o.status.success())
+            .unwrap_or(false);
         if !exists { continue; }
 
         // 备份：导出件是「当时任务长什么样」的唯一凭据 —— 拿不到 / 空 / 不像 XML /
@@ -544,11 +548,16 @@ pub fn stubborn_block() -> Result<Value, String> {
             continue;
         }
         let xml_path = backup_dir.join(format!("{}.xml", stubborn_task_backup_name(task)));
-        let xml = match crate::engine::systembin::quiet_cmd_timeout(
-            system_tool("schtasks"),
-            &["/Query", "/TN", task, "/XML"],
-            crate::engine::systembin::REG_EXPORT_TIMEOUT,
-        ) {
+        // v6-K01（P0-2）：解析失败并进既有 Err 臂（「schtasks 无法执行」口径）
+        let xml = match crate::engine::systembin::system_tool("schtasks")
+            .map_err(std::io::Error::other)
+            .and_then(|exe| {
+                crate::engine::systembin::quiet_cmd_timeout(
+                    exe,
+                    &["/Query", "/TN", task, "/XML"],
+                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                )
+            }) {
             Ok(o) if o.status.success() => crate::engine::systembin::decode_native_output(&o.stdout).trim().to_string(),
             Ok(o) => {
                 let err = crate::engine::systembin::decode_native_output(&o.stderr).trim().chars().take(120).collect::<String>();
@@ -588,14 +597,18 @@ pub fn stubborn_block() -> Result<Value, String> {
         }
 
         // 删除（只有备份已确认落盘才会走到这一行）
-        let deleted = match crate::engine::systembin::quiet_cmd_timeout(
-            system_tool("schtasks"),
-            &["/Delete", "/TN", task, "/F"],
-            crate::engine::systembin::REG_EXPORT_TIMEOUT,
-        ) {
-            Ok(o) => o.status.success(),
-            Err(_) => false,
-        };
+        // v6-K01（P0-2）：解析失败与执行失败同语义（按「删除失败」记账）
+        let deleted = crate::engine::systembin::system_tool("schtasks")
+            .map_err(std::io::Error::other)
+            .and_then(|exe| {
+                crate::engine::systembin::quiet_cmd_timeout(
+                    exe,
+                    &["/Delete", "/TN", task, "/F"],
+                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                )
+            })
+            .map(|o| o.status.success())
+            .unwrap_or(false);
         if deleted {
             changed_tasks.push(task.to_string());
         } else {
@@ -648,12 +661,17 @@ pub fn stubborn_block() -> Result<Value, String> {
             let mut exported = false;
             if let Some(reg_file_str) = reg_file.to_str() {
                 let run_reg_path = format!("HKCU\\{RUN_KEY}");
-                exported = crate::engine::systembin::quiet_cmd_timeout(
-                    system_tool("reg.exe"),
-                    &["export", &run_reg_path, reg_file_str, "/y"],
-                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
-                )
-                .is_ok() && reg_file.exists();
+                // v6-K01（P0-2）：解析失败并进 exported=false（备份不完整不删值）
+                exported = crate::engine::systembin::system_tool("reg.exe")
+                    .map_err(std::io::Error::other)
+                    .and_then(|exe| {
+                        crate::engine::systembin::quiet_cmd_timeout(
+                            exe,
+                            &["export", &run_reg_path, reg_file_str, "/y"],
+                            crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                        )
+                    })
+                    .is_ok() && reg_file.exists();
             }
             if !exported {
                 fail_run.push(format!("{RUN_VALUE}（注册表备份失败，未删除）"));

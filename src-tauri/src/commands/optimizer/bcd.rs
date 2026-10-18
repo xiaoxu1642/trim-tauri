@@ -175,8 +175,9 @@ pub fn enum_bcd_maps() -> Result<(BcdMap, BcdMap), String> {
 
 fn run_bcd_enum(identifier: &str) -> Result<String, String> {
     let args = vec!["/enum".to_string(), identifier.to_string()];
+    // v6-K01（P0-2）：bcdedit 补进 PINNED 后走硬钉，解析失败与 spawn 失败同报错口径
     let out = systembin::quiet_cmd_timeout(
-        systembin::system_tool("bcdedit.exe"),
+        systembin::system_tool("bcdedit.exe")?,
         &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         BCDEDIT_ENUM_TIMEOUT,
     )

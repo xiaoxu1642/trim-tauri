@@ -329,13 +329,14 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'stop_service_wait 的 sc stop（restart_service / search / wu 三条链共用）', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
   // v5 S-1：store 任务从「spawn 不管结果」改成等退出码，于是它进入超时登记表
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("wsreset.exe"),', reason: '维护：wsreset 清 Store 缓存（等退出码，非 fire-and-forget）', timeoutConst: 'WSRESET_TIMEOUT', secs: 60 },
+  // v6-K01（P0-2）：调用点改 system_tool 硬钉解析后 exe 经 and_then 闭包传入，锚点随行文更新
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, &[], WSRESET_TIMEOUT', reason: '维护：wsreset 清 Store 缓存（等退出码，非 fire-and-forget）', timeoutConst: 'WSRESET_TIMEOUT', secs: 60 },
   // v5 R-3：运行库装包/DISM 从裸 .output() 改成带超时 —— 挂住时这条 IPC 永不返回，
   // 前端按钮卡在「安装中…」。上游 Electron 轨本来就带 600s，迁移时丢了。
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: 'REDIST_INSTALL_TIMEOUT', reason: '运行库修复：vc_redist / netfx48 静默安装与 DISM 启用 NetFx3', timeoutConst: 'REDIST_INSTALL_TIMEOUT', secs: 600 },
   // v0.5.0 残留扫描（只读）：fltmc 是 minifilter 挂载态的唯一权威来源。它挂在扫描线程的
   // 同步链上，一旦被杀软钩住不退出，整轮报告就永远不返回 —— 与 reg export 同族，必须带超时。
-  { file: 'src-tauri/src/commands/uninstall/minifilter_orphan.rs', anchor: 'system_tool("fltmc.exe"), &["filters"], FLTMC_TIMEOUT', reason: '残留扫描：读过滤管理器挂载清单（只读，失败即整组不产候选）', timeoutConst: 'FLTMC_TIMEOUT', secs: 10 },
+  { file: 'src-tauri/src/commands/uninstall/minifilter_orphan.rs', anchor: 'exe, &["filters"], FLTMC_TIMEOUT', reason: '残留扫描：读过滤管理器挂载清单（只读，失败即整组不产候选；v6-K01 锚点随 system_tool 硬钉改形）', timeoutConst: 'FLTMC_TIMEOUT', secs: 10 },
   // 2026-10-05 复核：启动项域的 4 处 schtasks（扫描主链 + 计划任务启停/备份/删除）
   // 此前是裸 quiet_cmd().output()，被任务计划服务拖住即永久锁住 IPC。
   { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["/Change", "/TN", &full_name, arg]', reason: '启动项启停：schtasks /Change 计划任务状态', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
@@ -372,16 +373,18 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/systembin.rs', anchor: '&["/Query", "/FO", "CSV", "/NH"],', reason: 'v3 P0-1 探针：取本机计划任务名单（只读，不改任务）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/systembin.rs', anchor: '&["/Query", "/TN", t, "/XML"],', reason: 'v3 P0-1 探针：单任务 /XML 输出体积确证（只读，正是会撑满管道缓冲的形状）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
   // P1-01：性能计数器修复链（lodctr 64/SysWOW64/winmgmt/typeperf），统一 60s
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("lodctr.exe"), &["/R"], MAINT_FAST_TIMEOUT', reason: 'P1-01：lodctr /R 重建 64 位计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  // v6-K01（P0-2）：三处 system_tool 硬钉解析后 exe 经 match/and_then 传入，锚点随行文更新
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, &["/R"], MAINT_FAST_TIMEOUT', reason: 'P1-01：lodctr /R 重建 64 位计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&wow, &["/R"], MAINT_FAST_TIMEOUT', reason: 'P1-01：SysWOW64 lodctr /R 重建 32 位计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'system_tool("winmgmt.exe"), &["/resyncperf"], MAINT_FAST_TIMEOUT', reason: 'P1-01：winmgmt /resyncperf 同步 WMI 计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, &["/resyncperf"], MAINT_FAST_TIMEOUT', reason: 'P1-01：winmgmt /resyncperf 同步 WMI 计数器', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'r"\\Processor(_Total)\\% Processor Time", "-sc", "1"', reason: 'P1-01：typeperf 采样验证', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   // P1-04 探针：WaaSMedic PerformRemediation 的查询与触发
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：查 WaaSMedic 任务是否存在', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task, "/FO", "LIST"], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：查 WaaSMedic 任务是否处于禁用态（skip 前置，2026-10-11 补）', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/run", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：触发 WaaSMedic 修复任务', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   // C3 BCD 面板枚举：bcdedit /enum {current} + {globalsettings} 只读枚举（前端面板三态判定）
-  { file: 'src-tauri/src/commands/optimizer/bcd.rs', anchor: 'system_tool("bcdedit.exe"),', reason: 'C3 BCD 面板枚举：跑 bcdedit /enum 读 {current} + {globalsettings}', timeoutConst: 'BCDEDIT_ENUM_TIMEOUT', secs: 15 },
+  // v6-K01（P0-2）：bcdedit 补进 PINNED 走硬钉，实参带 `?` 透传，锚点随行文更新
+  { file: 'src-tauri/src/commands/optimizer/bcd.rs', anchor: '"bcdedit.exe")?,', reason: 'C3 BCD 面板枚举：跑 bcdedit /enum 读 {current} + {globalsettings}', timeoutConst: 'BCDEDIT_ENUM_TIMEOUT', secs: 15 },
 ];
 const TIMEOUT_SECS = 15;
 

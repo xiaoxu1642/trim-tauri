@@ -174,8 +174,11 @@ pub(super) fn run_cmd_step(cmd: &str) -> std::io::Result<std::process::Output> {
     // 会永久锁住整批执行（optimizer_run 在 async 链上等它 = 界面假死）。
     // 走 raw 版超时入口：`/s /c` 引号形状由 cmd_line_of 逐字保留、等待/终止语义
     // 与其余 quiet_cmd_timeout 调用点共用同一实现（超时常量登记见 check-ps-callsites F 组）。
+    // v6-K01（P0-2）：解析失败映射成 io::Error，与 spawn 失败同走「失败计数继续」语义。
+    let exe = system_tool("cmd")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
     crate::engine::systembin::quiet_cmd_timeout_raw(
-        system_tool("cmd"),
+        exe,
         &cmd_line_of(cmd),
         crate::engine::systembin::CMD_STEP_TIMEOUT,
     )

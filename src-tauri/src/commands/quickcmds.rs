@@ -311,7 +311,10 @@ fn shell_open(target: &str, id: &str, stage: &str) -> bool {
 fn spawn_detached(exe: &str, args: &[String]) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    let program = crate::engine::systembin::system_tool(exe);
+    // v6-K01（P0-2）：解析失败（白名单外/系统异常）映射 io::Error，
+    // 与 spawn 失败同走调用方既有的「无法打开」回执，不再裸名回退。
+    let program = crate::engine::systembin::system_tool(exe)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
     Command::new(program)
         .args(args)
         .creation_flags(CREATE_NEW_CONSOLE)
@@ -350,7 +353,11 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
     let lower = exe.to_ascii_lowercase();
     if lower.ends_with(".msc") || lower.ends_with(".cpl") {
         // 先落到 System32 的绝对路径，避免 ShellExecute 先命中 exe 同目录的同名件。
-        let resolved = crate::engine::systembin::system_tool(&exe);
+        // v6-K01（P0-2）：解析失败（面板不在 PINNED/系统缺失）如实回执，不裸名回退
+        let resolved = match crate::engine::systembin::system_tool(&exe) {
+            Ok(p) => p,
+            Err(e) => return (false, format!("无法解析系统面板「{exe}」：{e}")),
+        };
         let first = resolved.to_string_lossy().to_string();
         let target = if args.is_empty() {
             first
@@ -362,15 +369,21 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
         }
         return (false, format!("无法打开「{exe}」"));
     }
-    // 控制台系首令牌（cmd / powershell / pwsh）：走 ShellExecute 带参启动（见 shell_open_params）。
+    // 控制台系首令牌（cmd / powershell）：走 ShellExecute 带参启动（见 shell_open_params）。
     // 参数取「首个 token 之后的原始子串」而不是重排 toks：tokenize 会剥引号，重新 join 会把
     // `-Command "Start-Process cmd -Verb RunAs"` 的引号语义破坏。白名单内这些命令的首 token
     // 均不带引号（有单测钉住整表形态），切分安全；环境变量（%temp% 等）按原语义展开。
+    // v6-K01（P0-2）：pwsh 从本分支移除（用户拍板）——pwsh.exe 不随 Windows 分发、
+    // 不在 PINNED，白名单未来也不得加回 pwsh 条目走这里；用户自装 PowerShell 7
+    // 的打开需求应经显式外部工具入口，不属于快捷指令系统面板域。
     let base = lower.strip_suffix(".exe").unwrap_or(&lower);
-    if matches!(base, "cmd" | "powershell" | "pwsh") {
-        // 加固：先解析到 System32（裸名不命中 PINNED，这里补 ".exe" 后缀让它命中），
-        // 防 exe 同目录植入同名 cmd 被 ShellExecute 的搜索顺序优先命中。
-        let resolved = crate::engine::systembin::system_tool(&format!("{base}.exe"));
+    if matches!(base, "cmd" | "powershell") {
+        // 加固：先解析到 System32（防 exe 同目录植入同名 cmd 被 ShellExecute 的
+        // 搜索顺序优先命中）；解析失败（系统异常）如实回执，不裸名回退。
+        let resolved = match crate::engine::systembin::system_tool(&format!("{base}.exe")) {
+            Ok(p) => p,
+            Err(e) => return (false, format!("无法解析「{exe}」：{e}")),
+        };
         let target = resolved.to_string_lossy().to_string();
         let raw = cmd.trim_start();
         let params = match raw.split_once(char::is_whitespace) {
@@ -547,9 +560,12 @@ mod tests {
         );
     }
 
-    /// 2026-10-11 修复的静态前提：控制台系命令（cmd/powershell/pwsh 首 token）的**首 token 无引号**
+    /// 2026-10-11 修复的静态前提：控制台系命令（cmd/powershell 首 token）的**首 token 无引号**
     /// —— run_quick_cmd 的参数切分（首个空白之后的原始子串）依赖这一点。
     /// 同时钉住覆盖面：命中数不得少于 8（cmd 系 6 + powershell 系 2），清单形态变了会在这里红。
+    /// v6-K01（P0-2）：pwsh 已从控制台分支移除（不在 PINNED，用户自装物不走系统面板域），
+    /// 本测试同步不再把 pwsh 视作覆盖对象——白名单加回 pwsh 条目会因 n 计数与分支脱钩
+    /// 而在 run_quick_cmd 落到 spawn_detached（GUI 路径），形态漂移在这里可见。
     #[test]
     fn console_first_token_is_bare() {
         let mut n = 0;
@@ -557,7 +573,7 @@ mod tests {
             let first = cmd.split_whitespace().next().unwrap_or("");
             let lb = first.to_ascii_lowercase();
             let base = lb.strip_suffix(".exe").unwrap_or(&lb).to_string();
-            if matches!(base.as_str(), "cmd" | "powershell" | "pwsh") {
+            if matches!(base.as_str(), "cmd" | "powershell") {
                 assert!(
                     !first.starts_with('"') && !first.starts_with('\''),
                     "{id} 首 token 带引号，shell_open_params 的参数切分会错"

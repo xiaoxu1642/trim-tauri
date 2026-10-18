@@ -82,7 +82,7 @@ mod maint_reparse_tests {
 
         let task = r"\Microsoft\Windows\WaaSMedic\PerformRemediation";
         // 探针前置：任务不存在则 skip（系统版本差异）
-        let q = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks"), &["/query", "/TN", task], MAINT_FAST_TIMEOUT);
+        let q = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks").expect("schtasks 必须解析成功"), &["/query", "/TN", task], MAINT_FAST_TIMEOUT);
         if !q.as_ref().is_ok_and(|o| o.status.success()) {
             eprintln!("SKIP：WaaSMedic PerformRemediation 任务不存在，本探针未校验");
             return;
@@ -91,7 +91,7 @@ mod maint_reparse_tests {
         // 本机实测即如此）；如实按 skip 标注未校验，不误判成判红。
         // 输出必须走 decode_native_output：schtasks 写管道时是 UTF-16LE，lossy 解出的
         // NUL 交错文本匹配不上 "Disabled"（P0-02 同款坑，探针首版踩过一次）
-        let ql = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks"), &["/query", "/TN", task, "/FO", "LIST"], MAINT_FAST_TIMEOUT);
+        let ql = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks").expect("schtasks 必须解析成功"), &["/query", "/TN", task, "/FO", "LIST"], MAINT_FAST_TIMEOUT);
         let list_text = ql.as_ref().map(|o| crate::engine::systembin::decode_native_output(&o.stdout)).unwrap_or_default();
         if list_text.contains("Disabled") || list_text.contains("已禁用") {
             eprintln!("SKIP：WaaSMedic PerformRemediation 任务在本机处于禁用状态，触发不了，本探针未校验");
@@ -106,7 +106,7 @@ mod maint_reparse_tests {
         assert!(wrote, "wuauserv Start=4 写入应成功");
 
         // 触发修复任务
-        let run = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks"), &["/run", "/TN", task], MAINT_FAST_TIMEOUT);
+        let run = crate::engine::systembin::quiet_cmd_timeout(crate::engine::systembin::system_tool("schtasks").expect("schtasks 必须解析成功"), &["/run", "/TN", task], MAINT_FAST_TIMEOUT);
         assert!(run.as_ref().is_ok_and(|o| o.status.success()),
             "PerformRemediation 触发失败");
 
@@ -131,8 +131,9 @@ pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> Result<(), 
     let full = format!("{}{}", path.unwrap_or_default(), name);
     let arg = if disable { "/DISABLE" } else { "/ENABLE" };
     // v4 R5-M07：裸 .output() 改带超时（任务计划服务被拖住时不能永久锁 IPC）
+    // v6-K01（P0-2）：解析失败与 spawn 失败同报错口径
     let output = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool("schtasks"),
+        system_tool("schtasks")?,
         &["/Change", "/TN", &full, arg],
         crate::engine::systembin::SCHTASKS_TIMEOUT,
     )
@@ -169,7 +170,14 @@ pub const MAINT_FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 fn run_cmd(program: &str, args: &[&str]) -> bool {
     // 审查 v2-F7：系统工具必须解析到 System32 再执行，不能用裸进程名 ——
     // 搜索顺序里「exe 所在目录」与「父进程 CWD」都排在 System32 之前。
-    let exe = crate::engine::systembin::system_tool(program);
+    // v6-K01（P0-2）：解析失败留痕并按失败回（白名单内解析不到 = 系统异常，不裸名回退）
+    let exe = match crate::engine::systembin::system_tool(program) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::engine::log::write_log("error", &format!("维护命令系统工具解析失败: {program} — {e}"));
+            return false;
+        }
+    };
     match crate::engine::systembin::quiet_cmd_timeout(exe, args, MAINT_CMD_TIMEOUT) {
         Ok(out) if out.status.success() => true,
         // v5 S-4：失败必须留痕。旧写法把 stdout/stderr 全丢，于是 sfc /scannow 的三态结论
@@ -208,7 +216,8 @@ fn service_state(name: &str) -> Option<u32> {
 /// （restart_service）就当停稳，于是索引库文件仍被占用时 `remove_dir_all` 必然失败，
 /// 而结果又被 `let _ =` 吞掉。
 fn stop_service_wait(name: &str, budget: std::time::Duration) -> bool {
-    let sc = crate::engine::systembin::system_tool("sc");
+    // v6-K01（P0-2）：解析失败按「停服务失败」处理（返回 false 由调用方如实回执）
+    let Ok(sc) = crate::engine::systembin::system_tool("sc") else { return false };
     let _ = crate::engine::systembin::quiet_cmd_timeout(&sc, &["stop", name], MAINT_CMD_TIMEOUT);
     let deadline = std::time::Instant::now() + budget;
     loop {
@@ -407,8 +416,11 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
         "perfcounters" => {
             // P1-01：官方修复链 —— ① lodctr /R（64 位）② 存在时 SysWOW64\lodctr /R
             // ③ winmgmt /resyncperf ④ typeperf 采样验证；60s 统一上限，回执按档如实分。
-            let r1 = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("lodctr.exe"), &["/R"], MAINT_FAST_TIMEOUT);
+            // v6-K01（P0-2）：解析失败并进既有 Err 消费（「无法执行」口径）
+            let r1 = match system_tool("lodctr.exe") {
+                Ok(exe) => crate::engine::systembin::quiet_cmd_timeout(exe, &["/R"], MAINT_FAST_TIMEOUT),
+                Err(e) => Err(std::io::Error::other(e)),
+            };
             let ok64 = r1.as_ref().is_ok_and(|o| o.status.success());
             if !ok64 {
                 let note = match &r1 {
@@ -458,17 +470,22 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
                 }
             }
             // ③ winmgmt /resyncperf
-            let r3 = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("winmgmt.exe"), &["/resyncperf"], MAINT_FAST_TIMEOUT);
+            let r3 = match system_tool("winmgmt.exe") {
+                Ok(exe) => crate::engine::systembin::quiet_cmd_timeout(exe, &["/resyncperf"], MAINT_FAST_TIMEOUT),
+                Err(e) => Err(std::io::Error::other(e)),
+            };
             if !r3.as_ref().is_ok_and(|o| o.status.success()) {
                 faults.push(format!("WMI 计数器同步未成功（winmgmt /resyncperf，{}）", brief(&r3)));
             }
             // ④ 验证：typeperf 采样一次，rc=0 才算通过
-            let r4 = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("typeperf.exe"),
-                &[r"\Processor(_Total)\% Processor Time", "-sc", "1"],
-                MAINT_FAST_TIMEOUT,
-            );
+            let r4 = match system_tool("typeperf.exe") {
+                Ok(exe) => crate::engine::systembin::quiet_cmd_timeout(
+                    exe,
+                    &[r"\Processor(_Total)\% Processor Time", "-sc", "1"],
+                    MAINT_FAST_TIMEOUT,
+                ),
+                Err(e) => Err(std::io::Error::other(e)),
+            };
             let verified = r4.as_ref().is_ok_and(|o| o.status.success());
 
             if verified && faults.is_empty() {
@@ -493,11 +510,11 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             // v5 S-1：旧写法 `let _ = …spawn(); Ok((true, …))` 是**恒真回执** —— wsreset 缺失、
             // 被组策略拦、启动即崩，都照样报「已完成」；且 spawn 不 wait：子进程无人收、无超时、
             // 不在任何登记表。改成等退出码（wsreset 正常几秒内自退，60s 是宽限上界）。
-            match crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("wsreset.exe"),
-                &[],
-                WSRESET_TIMEOUT,
-            ) {
+            // v6-K01（P0-2）：解析失败并进既有 Err 臂（「wsreset 无法执行」口径）
+            match system_tool("wsreset.exe")
+                .map_err(std::io::Error::other)
+                .and_then(|exe| crate::engine::systembin::quiet_cmd_timeout(exe, &[], WSRESET_TIMEOUT))
+            {
                 Ok(o) if o.status.success() => Ok((true, "Store 缓存已清理".into())),
                 Ok(o) => Ok((false, format!(
                     "wsreset 未成功（exit={}）",

@@ -71,8 +71,10 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
         // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，整批中止（备份不完整绝不能继续写入）
         let Some(backup_file_str) = backup_file.to_str() else { return Err("备份路径无法编码".into()); };
         // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
+        // v6-K01（P0-2）：解析失败走既有 Err 回执（备份不完整绝不写入）
+        let exe = system_tool("reg.exe")?;
         let out = crate::engine::systembin::quiet_cmd_timeout(
-            system_tool("reg.exe"),
+            exe,
             &["export", &reg_path, backup_file_str, "/y"],
             crate::engine::systembin::REG_EXPORT_TIMEOUT,
         );

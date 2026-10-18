@@ -41,6 +41,7 @@ const REGISTRY = [
   { file: 'check-asset-size.mjs', reason: '资源体积三段判据抽出为单一 judgeAssets，5 组合成样本与之共用同一实现（塞未登记大文件 / 条目失踪 / 超 cap 必红，等值与干净样本放行）；从 PENDING_CONTROLS 迁入本表' },
   { file: 'check-desc-vs-writes.mjs', reason: 'P1-03 文案⇄写入：原缺陷形态判红 /「其余」精确限定与无声称放行，3 条判定器自检' },
   { file: 'check-power-write-surface.mjs', reason: 'P0-1 电源写面：9 条正反样本自检（powercfg 写命令/电源命名空间必判红，只读查询与页面文件步骤必须放行）+ ALLOW 双棘轮（登记不命中必红）' },
+  { file: 'check-system-bin.mjs', reason: 'v6-K01/P0-2：判定器抽成 extractHitsFromText 后与 H 组 5 个合成样本共用同一实现（裸字面量/raw 版裸字面量/安装包路径误塞系统工具入口必判红，PINNED 解析与变量形态放行）+ F 组生产实参地板（12 个生产在用名掉表即红，与 systembin 单测两道防线）+ quiet 组扩到 timeout/raw 三个 spawn 门面（39+ 处超时调用点不再对 A/B 失明）+ G 组路径形态实参必红' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
@@ -53,7 +54,7 @@ const PENDING_CONTROLS = [
   { name: 'check-layering', reason: '找违规型：下层反向引用上层即红，缺违规样本自检' },
   { name: 'check-delete-callsites', reason: '棘轮+地板：超基线/扫描面归零即红；缺「人为加一行 remove_file 必须红」的合成样本' },
   { name: 'check-fail-closed', reason: '找违规型：降级回退形态即红，缺违规样本自检' },
-  { name: 'check-system-bin', reason: '找违规型：裸 exe 名启动即红，缺合规/违规双向样本' },
+  // check-system-bin 已于 2026-10-18 v6 P0-2 配齐正向对照并迁入 REGISTRY（本表只减不增）。
   { name: 'check-residue-rule-contract', reason: '对拍型：卸载残留规则库 ⇄ 执行侧契约，缺合成样本' },
   { name: 'check-scan-rule-diff', reason: '差分型：规则改动 → 命中集差分（按设计 spawn cargo test，重编译成本高），对照方案待定' },
   { name: 'check-ps-callsites', reason: '对拍型：PS 调用点 ⇄ 三张登记表（含超时秒数逐点核对），缺合成样本' },

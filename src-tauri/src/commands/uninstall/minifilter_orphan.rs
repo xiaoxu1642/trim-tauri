@@ -93,7 +93,9 @@ pub(super) fn minifilter_findings(
 /// 真实读取 `fltmc filters`。返回 (滤镜清单, 失败原因)：
 /// `Err` 时调用方必须整组不产候选并把这个原因写进 notes。
 pub(super) fn collect_mounted_filters() -> Result<Vec<MountedFilter>, String> {
-    let out = quiet_cmd_timeout(system_tool("fltmc.exe"), &["filters"], FLTMC_TIMEOUT)
+    // v6-K01（P0-2）：解析失败与 spawn 失败同报错口径
+    let exe = system_tool("fltmc.exe").map_err(|e| format!("fltmc 启动失败：{e}"))?;
+    let out = quiet_cmd_timeout(exe, &["filters"], FLTMC_TIMEOUT)
         .map_err(|e| format!("fltmc 启动失败：{e}"))?;
     if !out.status.success() {
         return Err("fltmc 退出码非 0（通常需要管理员权限，或过滤管理器不可达）".to_string());
