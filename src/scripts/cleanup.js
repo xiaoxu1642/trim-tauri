@@ -2178,14 +2178,15 @@
   async function renderRegBackupList(ctrl) {
     const body = ctrl.body;
     let resp, respF, respU, respP;
+    const failedSources = [];
     try {
       [resp, respF, respU, respP] = await Promise.all([
         window.api.cleanup.regBackupList(),
-        window.api.cleanup.fileBackupList().catch(() => null),
+        window.api.cleanup.fileBackupList().catch(() => { failedSources.push('永久删文件备份'); return null; }),
         // D1（M5）：卸载域注册表备份此前只写不读，删错了没有任何还原入口
-        window.api.uninstall.regBackupList().catch(() => null),
+        window.api.uninstall.regBackupList().catch(() => { failedSources.push('卸载注册表备份'); return null; }),
         // HiBit §H1：卸载残留的自包含还原包（内容本体在 zip 里，能整批写回原位置）
-        window.api.uninstall.batchList().catch(() => null)
+        window.api.uninstall.batchList().catch(() => { failedSources.push('卸载还原包'); return null; })
       ]);
     } catch (e) {
       if (document.body.contains(body)) body.innerHTML = `<div class="empty-state"><p>备份列表读取失败: ${escapeHtml(e.message)}</p></div>`;
@@ -2198,7 +2199,10 @@
     const packData = (respP && respP.success && respP.data) || {};
     const packs = packData.packs || [];
     if (!backups.length && !manifests.length && !uninst.length && !packs.length) {
-      body.innerHTML = '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。卸载残留可在清理前勾选「先备份内容再删」生成本机还原包。</p></div>';
+      // A1-L01：整段来源失败不能被渲染成「还没有备份」。
+      body.innerHTML = failedSources.length
+        ? `<div class="empty-state"><p>部分备份读取失败：${escapeHtml(failedSources.join('、'))}；其余来源也没有记录。</p></div>`
+        : '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。卸载残留可在清理前勾选「先备份内容再删」生成本机还原包。</p></div>';
       return;
     }
     // 「旧版」徽章：这份躺在升级前的老数据目录里（N1 跨根兜底才看得见）。

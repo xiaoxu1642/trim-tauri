@@ -954,6 +954,8 @@ fn resolve_existing_dirs(list: &[String]) -> (Vec<String>, Vec<String>) {
 
 const EMPTY_IGNORE_FILE: &str = "empty-ignore.txt";
 const EMPTY_IGNORE_MAX: usize = 200;
+// R1d-M04：忽略名单的 read→push→write 跨两次触盘，无锁会互相丢更新。
+static EMPTY_IGNORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn empty_ignore_path() -> std::path::PathBuf {
     crate::engine::paths::app_data_dir().join(EMPTY_IGNORE_FILE)
@@ -991,6 +993,7 @@ pub async fn finder_ignore_folder<R: tauri::Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let _guard = EMPTY_IGNORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = path.unwrap_or_default();
     // 只收存在的绝对目录：忽略一个不存在/非目录的路径没有意义，且会把名单污染成
     // 无法复核的条目（list 的 exists 列与重扫的路径比对都依赖它是真实路径）。
@@ -1045,6 +1048,7 @@ pub async fn finder_ignore_remove<R: tauri::Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let _guard = EMPTY_IGNORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = path.unwrap_or_default();
     if path.is_empty() {
         return json!({ "success": false, "message": "参数缺失" });

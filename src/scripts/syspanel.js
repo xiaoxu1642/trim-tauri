@@ -1780,18 +1780,24 @@
     editor.compareCache.set(key, { loading: true, rows: [] });
     window.api.syspanel.powerSettingsCompare(s.subgroupGuid, s.guid)
       .then((resp) => {
-        const rows = resp && resp.success ? (resp.data?.rows || []) : [];
+        // A1-L03：失败态不能与「对照为空」同形（rows:[] 会清空容器）。
+        const rows = resp && resp.success && Array.isArray(resp.data?.rows) ? resp.data.rows : null;
         editor?.compareCache.set(key, { loading: false, rows });
         if (editor && editor.selectedKey === key) {
           const m2 = document.getElementById('syspanelPwrCompare');
           if (m2) renderCompare(m2, key, rows);
         }
       })
-      .catch(() => editor?.compareCache.set(key, { loading: false, rows: [] }));
+      .catch(() => editor?.compareCache.set(key, { loading: false, rows: null }));
   }
 
   function renderCompare(mount, key, rows) {
-    if (!editor || !rows.length) { mount.innerHTML = ''; return; }
+    if (!editor) return;
+    if (rows === null) {
+      mount.innerHTML = '<div class="empty-state"><p>电源方案对照读取失败</p></div>';
+      return;
+    }
+    if (!rows.length) { mount.innerHTML = ''; return; }
     const fmt = (v) => (v === null || v === undefined ? '—' : String(v));
     const items = rows.map((r) => {
       const editing = String(r.schemeGuid || '').toLowerCase() === editor.schemeGuid;

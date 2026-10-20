@@ -519,11 +519,13 @@ pub async fn fileclean_delete_file<R: Runtime>(
         // 从槽中移除（槽归发起扫描的窗口所有，见 `scope_owner`：删完必须让
         // in_scope 集合同步收缩，否则同一次扫描里可以再「删」一次不存在的路径）
         let owner = scope_owner(window.label());
-        if let Some(mut s) = scope_get(owner, ty) {
-            s.files.remove(&path_key(&file_path));
+        {
+            // R1d-M04：同一次加锁内 get_mut 就地改，避免 get→clone→insert 丢并发写入。
             let mut g = FILECLEAN_SCOPES.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = g.as_mut() {
-                m.insert(slot_key(owner, ty), s);
+                if let Some(s) = m.get_mut(&slot_key(owner, ty)) {
+                    s.files.remove(&path_key(&file_path));
+                }
             }
         }
         log::write_log("info", &format!("删除预览图片（回收站）: {file_path}"));
@@ -611,7 +613,8 @@ pub async fn fileclean_execute<R: Runtime>(
             manifest_entries.push(json!({
                 "path": p.replace('/', "\\"),
                 "kind": "file",
-                "freed": size,
+                // R1d-M03：清单读侧只认 size；旧实现写 freed ⇒ 该批每条体积恒 0。
+                "size": size,
                 "recycled": recycled
             }));
             removed_keys.insert(path_key(&p));
@@ -632,13 +635,12 @@ pub async fn fileclean_execute<R: Runtime>(
     }
     // 更新槽
     if !removed_keys.is_empty() {
-        if let Some(mut s) = scope_get(window.label(), ty) {
-            for k in &removed_keys {
-                s.files.remove(k);
-            }
-            let mut g = FILECLEAN_SCOPES.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(m) = g.as_mut() {
-                m.insert(slot_key(window.label(), ty), s);
+        let mut g = FILECLEAN_SCOPES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = g.as_mut() {
+            if let Some(s) = m.get_mut(&slot_key(window.label(), ty)) {
+                for k in &removed_keys {
+                    s.files.remove(k);
+                }
             }
         }
     }

@@ -248,7 +248,17 @@ fn read_json_state_shape(path: &Path, want_array: bool) -> JsonState {
                 if shape_ok {
                     JsonState::Ok(v)
                 } else {
-                    JsonState::Corrupt // 结构不符：留现场（不隔离），按损坏处理
+                    // R7-M04：结构不符按损坏处理但**留现场**（不隔离），必须留痕；
+                    // update_json 的回执措辞依赖这条日志可查。
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!(
+                            "配置结构不符（期望{}）: {}",
+                            if want_array { "数组" } else { "对象" },
+                            path.display()
+                        ),
+                    );
+                    JsonState::Corrupt
                 }
             }
             Err(e) => {
@@ -341,6 +351,13 @@ pub fn quarantine_file(path: &Path, reason: &str) {
         crate::engine::log::write_log(
             "error",
             &format!("配置文件损坏已隔离: {name} -> {} ({reason})", bak.file_name().unwrap_or_default().to_string_lossy()),
+        );
+    } else {
+        // R7-M04：改名失败也是「没保住现场」，不能静默；update_json 会按 Corrupt 拒写，
+        // 用户回执里的「见日志」必须真能查到这条。
+        crate::engine::log::write_log(
+            "error",
+            &format!("配置文件损坏但隔离改名失败: {name}（{reason}）"),
         );
     }
 }

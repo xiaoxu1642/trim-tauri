@@ -454,7 +454,14 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
     const thumb = document.getElementById('bgThumb');
     if (!listEl || !bodyEl) return;
     window.api?.appearance?.listBg?.().then(resp => {
-      const files = (resp && resp.success && resp.data) || [];
+      // A1-L02：success:false 不能与「没导入过图片」同形（否则整块 display:none）。
+      if (!resp || resp.success === false) {
+        listEl.style.display = 'block';
+        bodyEl.innerHTML = '<div class="empty-state"><p>背景图列表读取失败</p></div>';
+        window.app?.toast?.('error', '背景图列表读取失败');
+        return;
+      }
+      const files = resp.data || [];
       const head = listEl.querySelector('.bg-list-head');
       if (head) head.firstChild && (head.firstChild.textContent = `已导入的图片（${files.length}）`);
       if (!files.length) {

@@ -1299,6 +1299,41 @@ mod tests {
         );
     }
 
+    /// C12/C13（P1-W2）：并发写者图与读侧三态/形状的源码契约。
+    #[test]
+    fn c12_c13_concurrency_and_shape_contracts() {
+        let fileclean = include_str!("commands/fileclean.rs");
+        assert!(
+            fileclean.contains("\"size\": size,") && !fileclean.contains("\"freed\": size,"),
+            "R1d-M03：删除清单写侧必须用读侧认的 size 键"
+        );
+        assert!(
+            fileclean.contains("m.get_mut(&slot_key(owner, ty))"),
+            "R1d-M04：文件槽必须一次加锁内就改，不能 get→clone→insert"
+        );
+        assert!(
+            include_str!("commands/finder.rs").contains("static EMPTY_IGNORE_LOCK"),
+            "R1d-M04：空目录忽略名单的 RMW 必须有域内锁"
+        );
+        let aidesc = include_str!("commands/aidesc.rs");
+        assert!(
+            aidesc.contains("static BAIDU_USAGE_LOCK") && aidesc.contains("static AI_CACHE_LOCK")
+                && aidesc.contains("fn save_ai_cache_entry"),
+            "R1d-M04：百度日计数与简介缓存必须各自串行化"
+        );
+        let security = include_str!("security/mod.rs");
+        assert!(
+            security.contains("配置结构不符") && security.contains("隔离改名失败"),
+            "R7-M04：结构不符/隔离失败必须留痕"
+        );
+        assert!(
+            include_str!("../../src/scripts/cleanup.js").contains("failedSources")
+                && include_str!("../../src/scripts/pathbinding.js").contains("背景图列表读取失败")
+                && include_str!("../../src/scripts/syspanel.js").contains("rows: null"),
+            "A1-L01/L02/L03：读取失败不得与「没有数据」同形"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

@@ -46,6 +46,9 @@ use super::settings::{
 const AI_CACHE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// 百度千帆日调用上限（超过即拒绝，不降级到别的模型）
 const BAIDU_DAILY_LIMIT: i64 = 100;
+// R1d-M04：两份域内台账的读-改-写各自串行（与 STARTUP_LEDGER_LOCK 同口径）。
+static BAIDU_USAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static AI_CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 百度千帆连通性/简介调用的固定人设指令（callModelText 侧）
 const BAIDU_TEXT_INSTRUCTION: &str = "请严格按用户要求回答，不要输出思考过程。";
 /// 响应体读取上限（防异常端点）
@@ -790,6 +793,16 @@ fn save_ai_cache(cache: &Value) {
     }
 }
 
+/// 单条缓存写入：重新读盘后合并，再落盘（R1d-M04：避免拿调用开始时的旧快照覆盖并发写入）。
+fn save_ai_cache_entry(key: String, entry: Value) {
+    let _guard = AI_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cur = load_ai_cache();
+    if let Some(map) = cur.as_object_mut() {
+        map.insert(key, entry);
+    }
+    save_ai_cache(&cur);
+}
+
 /// 缓存淘汰（纯函数，便于断言）：交出剔掉过期与畸形条目后的表，以及剔掉了几条。
 /// 畸形（非对象条目、`timestamp` 非数）一并清掉 —— 这类件本就不该存在，
 /// 留着只会一直长，且读取分支永远把它们当 miss（等于纯垃圾）。
@@ -840,36 +853,27 @@ fn save_baidu_usage(u: &Value) -> Result<(), String> {
         .map_err(|e| format!("百度日限额写入失败: {e}"))
 }
 
-/// `getBaiduDailyCount`：当日次数（跨日自动清零）
-fn get_baidu_daily_count() -> Result<i64, String> {
-    let u = load_baidu_usage()?;
-    if u.get("date").and_then(|v| v.as_str()) == Some(today_key().as_str()) {
-        Ok(u.get("count")
-            .map(settings::js_number)
-            .filter(|n| n.is_finite())
-            .unwrap_or(0.0) as i64)
-    } else {
-        Ok(0)
-    }
-}
-
-/// `incrementBaiduDailyCount`
-fn increment_baidu_daily_count() -> Result<i64, String> {
+/// 读限额 → 判上限 → 自增 → 落盘，全程同一把锁（R1d-M04：旧实现分两次调用，
+/// 两个并发请求可能都读到 99 而各写 100）。
+fn try_increment_baidu_daily_count() -> Result<bool, String> {
+    let _guard = BAIDU_USAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut u = load_baidu_usage()?;
     let today = today_key();
     if u.get("date").and_then(|v| v.as_str()) != Some(today.as_str()) {
         u["date"] = json!(today);
         u["count"] = json!(0);
     }
-    let next = u
+    let count = u
         .get("count")
         .map(settings::js_number)
         .filter(|n| n.is_finite())
-        .unwrap_or(0.0) as i64
-        + 1;
-    u["count"] = json!(next);
+        .unwrap_or(0.0) as i64;
+    if count >= BAIDU_DAILY_LIMIT {
+        return Ok(false);
+    }
+    u["count"] = json!(count + 1);
     save_baidu_usage(&u)?;
-    Ok(next)
+    Ok(true)
 }
 
 // ==================== 命令 ====================
@@ -972,20 +976,16 @@ pub async fn aidesc_get<R: tauri::Runtime>(
         // 百度千帆超当日限额时直接返回提示，不降级到其他模型（避免简介来源与选择不一致）
         // A1-M10：限额文件读不到/写不进时也拒绝外呼——不能让「读失败」变成额度重置。
         if is_baidu {
-            let count = match get_baidu_daily_count() {
-                Ok(n) => n,
-                Err(e) => {
-                    log::write_log("warn", &format!("百度千帆日限额状态不可读，拒绝外呼: {e}"));
-                    return json!({ "success": false, "message": format!("百度千帆日限额状态无法读取，已拒绝调用：{e}") });
+            match try_increment_baidu_daily_count() {
+                Ok(true) => {}
+                Ok(false) => {
+                    log::write_log("warn", &format!("百度千帆今日调用已达 {BAIDU_DAILY_LIMIT} 次上限"));
+                    return json!({ "success": false, "message": "百度千帆今日调用已达上限，请更换模型或明日再试" });
                 }
-            };
-            if count >= BAIDU_DAILY_LIMIT {
-                log::write_log("warn", &format!("百度千帆今日调用已达 {BAIDU_DAILY_LIMIT} 次上限"));
-                return json!({ "success": false, "message": "百度千帆今日调用已达上限，请更换模型或明日再试" });
-            }
-            if let Err(e) = increment_baidu_daily_count() {
-                log::write_log("warn", &format!("百度千帆日限额写入失败，拒绝外呼: {e}"));
-                return json!({ "success": false, "message": format!("百度千帆日限额无法登记，已拒绝调用：{e}") });
+                Err(e) => {
+                    log::write_log("warn", &format!("百度千帆日限额状态不可读/不可写，拒绝外呼: {e}"));
+                    return json!({ "success": false, "message": format!("百度千帆日限额无法登记，已拒绝调用：{e}") });
+                }
             }
         }
 
@@ -1002,14 +1002,10 @@ pub async fn aidesc_get<R: tauri::Runtime>(
         };
 
         let source = model_display_name(&engine_key, Some(&cfg));
-        let mut cache = cache;
-        if let Some(map) = cache.as_object_mut() {
-            map.insert(
-                cache_key,
-                json!({ "desc": desc, "source": source, "timestamp": crate::engine::now_ms() }),
-            );
-        }
-        save_ai_cache(&cache);
+        save_ai_cache_entry(
+            cache_key,
+            json!({ "desc": desc, "source": source, "timestamp": crate::engine::now_ms() }),
+        );
         log::write_log("info", &format!("AI 简介获取成功 [{scope_label}/{source}]: {menu_name}"));
         json!({ "success": true, "data": { "desc": desc, "source": source, "cached": false } })
     })
