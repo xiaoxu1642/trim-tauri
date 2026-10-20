@@ -389,6 +389,33 @@ const NO_PARITY_REGISTRY = [
   else console.log(`✓ 6. 备份根 prune 覆盖面：${PRUNE_COVERAGE.length} 个备份根都有对应裁剪出口`);
 }
 
+// ---- P7（R1a-L06）：paths:save 的 Rust 白名单 ⇄ 渲染层 GROUPS 键集 ----
+{
+  const rustSrc = readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'paths.rs'), 'utf8');
+  const rustBlock = rustSrc.match(/const ALLOWED_KEYS: &\[&str\] = &\[([\s\S]*?)\];/);
+  const rustKeys = rustBlock ? [...rustBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort() : [];
+  const jsSrc = readFileSync(join(REPO_ROOT, 'src', 'scripts', 'pathbinding.js'), 'utf8');
+  const start = jsSrc.indexOf('const GROUPS = [');
+  let i = start >= 0 ? jsSrc.indexOf('[', start) : -1;
+  let depth = 0;
+  let end = -1;
+  for (; i >= 0 && i < jsSrc.length; i++) {
+    if (jsSrc[i] === '[') depth++;
+    else if (jsSrc[i] === ']') {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  const jsKeys = end > start ? [...jsSrc.slice(start, end).matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1]).sort() : [];
+  check(
+    rustKeys.length >= 5 && jsKeys.length >= 5 && JSON.stringify(rustKeys) === JSON.stringify(jsKeys),
+    `P7. paths:save 键白名单 ⇄ 渲染层 GROUPS（${rustKeys.length} / ${jsKeys.length}）`,
+    rustKeys.length < 5 || jsKeys.length < 5
+      ? '一侧键集趋零 ⇒ 解析失明'
+      : `差集：Rust 独有 ${rustKeys.filter((k) => !jsKeys.includes(k)).join(',') || '无'}；JS 独有 ${jsKeys.filter((k) => !rustKeys.includes(k)).join(',') || '无'}`,
+  );
+}
+
 // T1b-M01：汇总行必须在**全部判定组之后**（旧实现在第 5/6 组之前就打「全部一致」，
 // 实跑输出顺序可见）。这是末尾唯一的汇总出口。
 console.log(`\n${fail === 0 ? '✓ 数据对拍各组全部一致' : `${fail} 项未通过`}`);

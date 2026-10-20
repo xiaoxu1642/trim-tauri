@@ -22,7 +22,7 @@ const ITEM_INTRO_JSON: &str = include_str!("../../data/item-intro.json");
 /// diag:dwm-conflict — 第三方窗口美化工具痕迹（只读）
 #[tauri::command]
 pub fn diag_dwm_conflict<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let hint = DWM_TOOL_HINT.lock().unwrap_or_else(|e| e.into_inner()).clone();
     Ok(serde_json::json!({
         "detected": hint.is_some(),

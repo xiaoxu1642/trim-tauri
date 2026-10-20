@@ -9,7 +9,7 @@ use crate::engine::guard;
 
 #[tauri::command]
 pub async fn device_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let result = tauri::async_runtime::spawn_blocking(|| collect_device_info()).await;
     match result {
         Ok(Ok(data)) => Ok(serde_json::json!({ "success": true, "data": data })),

@@ -61,7 +61,7 @@ fn collect_metrics_native() -> Result<Value, String> {
 /// S3：纯 Rust 原生，无 PS 回退。
 #[tauri::command]
 pub async fn overview_metrics<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     if let Some((at, data)) = METRICS_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         if crate::engine::now_ms() - at < METRICS_CACHE_TTL_MS {
             return Ok(serde_json::json!({ "success": true, "data": data, "cached": true }));
@@ -99,7 +99,7 @@ pub async fn overview_hardware<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     refresh: Option<bool>,
 ) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let refresh = refresh.unwrap_or(false);
     if !refresh {
         if let Some(cached) = read_system_info_cache().await {

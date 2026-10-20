@@ -146,7 +146,7 @@ impl Drop for RunningGuard {
 /// maintenance:tasks —— 返回任务清单与分类顺序（纯数据，不跑脚本）
 #[tauri::command]
 pub async fn maintenance_tasks<R: Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
     let f = load_tasks();

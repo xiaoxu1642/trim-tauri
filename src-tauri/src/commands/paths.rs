@@ -98,7 +98,7 @@ fn load_paths_config_state() -> (serde_json::Value, bool) {
 /// paths:load — 读取已保存的路径配置
 #[tauri::command]
 pub fn paths_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     // A1-M12：Corrupt 与 Absent 不再同归空对象——回执带 degraded，渲染层可区分。
     let (data, degraded) = load_paths_config_state();
     Ok(serde_json::json!({ "success": true, "data": data, "degraded": degraded }))
@@ -148,7 +148,7 @@ pub async fn paths_browse<R: tauri::Runtime>(
     title: Option<String>,
     default_path: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let mut builder = window
         .dialog()
         .file()
@@ -173,7 +173,7 @@ pub async fn paths_app_icon<R: tauri::Runtime>(
     install_path: Option<String>,
     exe_candidates: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let install = install_path.unwrap_or_default();
     let candidates = exe_candidates.unwrap_or_default();
     if install.is_empty() || !std::path::Path::new(&install).exists() {
@@ -199,7 +199,7 @@ pub async fn paths_app_icon<R: tauri::Runtime>(
 /// paths:scan — 自动扫描安装路径（注入当前生效规则库）
 #[tauri::command]
 pub async fn paths_scan<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     match tauri::async_runtime::spawn_blocking(scan_install_paths).await {
         Ok(v) => Ok(v),
         Err(e) => Ok(serde_json::json!({

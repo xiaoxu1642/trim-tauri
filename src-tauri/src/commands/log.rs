@@ -103,14 +103,14 @@ mod log_ipc_sanitizer_tests {
 /// log:read — 默认当天；日期格式白名单防路径穿越；只取末尾 512KB 并丢弃半行
 #[tauri::command]
 pub fn log_read<R: tauri::Runtime>(window: WebviewWindow<R>, date: Option<String>) -> Result<String, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     Ok(log::read_log(date.as_deref()))
 }
 
 /// log:export — 原生保存对话框选目标文件后复制当天日志
 #[tauri::command]
 pub async fn log_export<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let file = app
         .dialog()
         .file()

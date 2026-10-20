@@ -48,7 +48,7 @@ pub fn app_get_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde
 /// app:read-usage — 返回使用说明 Markdown 全文
 #[tauri::command]
 pub fn app_read_usage<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     if README_MD.trim().is_empty() {
         return Ok(serde_json::json!({ "success": false, "message": "使用说明文件不存在" }));
     }
@@ -59,7 +59,7 @@ pub fn app_read_usage<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<ser
 /// 防 file: / javascript: / data: 等注入（渲染层导航已被 CSP 与窗口策略禁止）
 #[tauri::command]
 pub fn app_open_external<R: tauri::Runtime>(window: WebviewWindow<R>, url: String) -> serde_json::Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return serde_json::json!({ "ok": false, "reason": "forbidden", "message": msg });
     }
     let trimmed = url.trim();

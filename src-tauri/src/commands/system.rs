@@ -16,7 +16,7 @@ pub async fn system_disk_type<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     refresh: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let refresh = refresh.unwrap_or(false);
     if !refresh {
         if let Some(cached) = SYSTEM_DISK_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
@@ -49,7 +49,7 @@ pub async fn system_disk_type<R: tauri::Runtime>(
 pub fn system_disk_list<R: tauri::Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDriveStringsW};
     // DRIVE_FIXED = 3（winnt.h 宏；windows 0.61 把它收在 WindowsProgramming 小模块，
     // 为不引入 Win32_System_WindowsProgramming feature 就地按 SDK 原值声明）

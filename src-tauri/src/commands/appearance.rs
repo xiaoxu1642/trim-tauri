@@ -152,7 +152,7 @@ pub fn appearance_set_material<R: Runtime>(
     window: WebviewWindow<R>,
     material: Option<String>,
 ) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let Some(material) = material.filter(|m| MATERIALS.contains(&m.as_str())) else {
         return Ok(json!({ "success": false, "message": "未知的材质" }));
     };
@@ -186,7 +186,7 @@ pub fn appearance_set_material_enabled<R: Runtime>(
     window: WebviewWindow<R>,
     enabled: Option<bool>,
 ) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let on = enabled.unwrap_or(false);
     let app = window.app_handle().clone();
     // v4 P2-D 尾：读-改-写收口（同上）；material 从更新后的回执读（该键未被本闭包改）

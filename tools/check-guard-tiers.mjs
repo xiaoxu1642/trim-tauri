@@ -203,9 +203,30 @@ const MUST_MAIN = [
   // 渲染层失陷即可弹 UAC、拿到管理员 CMD，等效提权出口按 §3「不得下放」。
   // 子窗消费面实测为 0（四份子窗 HTML 均未挂 quickcmds.js），改档零功能代价。
   'quickcmds_run',
-  // R1a-M01（P1-W2）：paths:save 是唯一把「任意绝对路径」写进清理配置的渲染面，
-  // 下游会按配置永久删除；子窗无消费方 ⇒ 按 AGENTS §3 判 MAIN（先移最重的一条）。
+  // R1a-M01（P1-W2）：以下通道实测只有主窗消费方，按 AGENTS §3「没有子窗调用点
+  // 就不给放宽」迁 MAIN；paths_save 最重（配置路径会进入永久删链）。
   'paths_save',
+  'app_open_external',
+  'app_read_usage',
+  'appearance_set_material',
+  'appearance_set_material_enabled',
+  'bench_history_add',
+  'bench_history_list',
+  'bench_history_delete',
+  'bench_history_clear',
+  'device_scan',
+  'diag_dwm_conflict',
+  'log_read',
+  'log_export',
+  'maintenance_tasks',
+  'overview_metrics',
+  'overview_hardware',
+  'paths_load',
+  'paths_browse',
+  'paths_app_icon',
+  'paths_scan',
+  'system_disk_list',
+  'system_disk_type',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----
@@ -371,16 +392,8 @@ const MUST_READONLY = [
   // 为准」的 M1~M3 教训单独评审。
   'aidesc_get',
   'app_get_info',
-  'app_open_external', // 疑点：起浏览器/协议处理器
-  'app_read_usage',
   'appearance_get_env',
   'appearance_get_material',
-  'appearance_set_material', // 疑点：改窗口材质（写系统设置）
-  'appearance_set_material_enabled', // 疑点：改窗口材质开关
-  'bench_history_add', // 疑点：写测速历史
-  'bench_history_clear', // 疑点：删测速历史
-  'bench_history_delete', // 疑点：删测速历史
-  'bench_history_list',
   'cleanup_check_locked',
   'cleanup_file_backup_list',
   'cleanup_item_detail',
@@ -390,8 +403,6 @@ const MUST_READONLY = [
   'contextmenu_icons',
   'contextmenu_scan',
   'debug_data_dirs',
-  'device_scan',
-  'diag_dwm_conflict',
   'fileclean_scan',
   'finder_delete_manifest',
   'finder_open_backup_dir',
@@ -401,10 +412,7 @@ const MUST_READONLY = [
   'fonts_remove_imported', // 疑点：删已导入字体
   'fonts_save_config', // 疑点：写字体配置
   'intro_load',
-  'log_export', // 疑点：导出日志到磁盘
-  'log_read',
   'log_write', // 疑点：写日志文件
-  'maintenance_tasks',
   'memory_info',
   'memory_kill', // 疑点：按 PID 结束进程
   'memory_processes',
@@ -424,14 +432,8 @@ const MUST_READONLY = [
   'optimizer_list_restore',
   'optimizer_state_overview',
   'optimizer_svc_mem_current',
-  'overview_hardware',
-  'overview_metrics',
-  'paths_app_icon',
-  'paths_browse', // 疑点：起系统文件对话框
   'paths_file_icon',
-  'paths_load',
   // 'paths_save' 已按 R1a-M01 迁 MAIN（写路径配置会进入永久删链）。
-  'paths_scan',
   'process_manager_close_window',
   'process_manager_open_window',
   'process_manager_report',
@@ -455,8 +457,6 @@ const MUST_READONLY = [
   'settings_set_pref',
   'startup_openlocation', // 疑点：打开资源管理器目录
   'startup_scan',
-  'system_disk_list',
-  'system_disk_type',
   'uninstall_appx_logo', // 疑点：写 logo 缓存文件
 ];
 const actualReadonly = [...tiers.entries()].filter(([, v]) => v.tier === 'READONLY').map(([k]) => k).sort();

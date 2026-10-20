@@ -110,7 +110,7 @@ fn new_record_id() -> String {
 /// bench-history:add — 追加一条测速记录（schema 校验不通过整条拒绝）
 #[tauri::command]
 pub fn bench_history_add<R: tauri::Runtime>(window: WebviewWindow<R>, record: Option<Value>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let record = match record {
         Some(Value::Object(m)) => Value::Object(m),
         _ => return Ok(json!({ "success": false, "message": "记录格式不合法" })),
@@ -174,7 +174,7 @@ pub fn bench_history_add<R: tauri::Runtime>(window: WebviewWindow<R>, record: Op
 /// bench-history:list — 读取全部历史（最多 50 条，最新在前）
 #[tauri::command]
 pub fn bench_history_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     match load_bench_history_state() {
         Ok(data) => Ok(json!({ "success": true, "data": data })),
         // A1-M06：读失败必须回 success:false；空数组只代表「确实没有历史」。
@@ -185,7 +185,7 @@ pub fn bench_history_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
 /// bench-history:delete — 按 id 删除单条
 #[tauri::command]
 pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Option<String>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let id = id.unwrap_or_default();
     if let Err(msg) = update_bench_history(|records| {
         records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
@@ -198,7 +198,7 @@ pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Opt
 /// bench-history:clear — 清空全部
 #[tauri::command]
 pub fn bench_history_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     if let Err(msg) = update_bench_history(|records| { records.clear(); }) {
         return Ok(json!({ "success": false, "message": format!("记录未清空：{msg}") }));
     }

@@ -435,14 +435,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   // v0.7.0 摘掉三条：残留副窗挂上了 intro.js（点击查看里的本地简介 + 联网 AI 简介），
   // 于是 aidesc_get / intro_load / models_open_window（「去设置」开大模型管理窗）
   // 真的有了子窗调用点。本表是只许变短的棘轮 —— 有了消费方还留在表里即红。
-  'app_open_external',
-  'app_read_usage',
-  'appearance_set_material',
-  'appearance_set_material_enabled',
-  'bench_history_add',
-  'bench_history_clear',
-  'bench_history_delete',
-  'bench_history_list',
   'cleanup_check_locked',
   'cleanup_file_backup_list',
   'cleanup_item_detail',
@@ -451,8 +443,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'cleanup_scan',
   'contextmenu_icons',
   'contextmenu_scan',
-  'device_scan',
-  'diag_dwm_conflict',
   'fileclean_scan',
   'finder_delete_manifest',
   'finder_open_backup_dir',
@@ -461,9 +451,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'fonts_list',
   'fonts_remove_imported',
   'fonts_save_config',
-  'log_export',
-  'log_read',
-  'maintenance_tasks',
   'memory_info',
   'models_set_scope',
   'netcheck_collect',
@@ -475,13 +462,7 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'optimizer_list_restore',
   'optimizer_state_overview',
   'optimizer_svc_mem_current',
-  'overview_hardware',
-  'overview_metrics',
-  'paths_app_icon',
-  'paths_browse',
-  'paths_load',
   // 'paths_save' 已按 R1a-M01 迁 MAIN，不再属于只读档豁免。
-  'paths_scan',
   'process_manager_open_window',
   'realtime_adapters',
   'realtime_loss',
@@ -494,8 +475,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'runtimes_collect',
   'startup_openlocation',
   'startup_scan',
-  'system_disk_list',
-  'system_disk_type',
   'uninstall_appx_logo',
 ]);
 
