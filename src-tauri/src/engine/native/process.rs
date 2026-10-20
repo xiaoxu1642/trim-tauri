@@ -209,7 +209,7 @@ pub fn stubborn_kill() -> Result<Value, String> {
         let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..std::mem::zeroed() };
         let mut first = true;
         while (if first { first = false; Process32FirstW(snap, &mut entry) } else { Process32NextW(snap, &mut entry) }).is_ok() {
-            let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
             let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
             let stem = exe.to_lowercase();
             let stem = stem.strip_suffix(".exe").unwrap_or(&stem).to_string();
@@ -250,7 +250,7 @@ pub fn stubborn_kill() -> Result<Value, String> {
         let mut first = true;
         let mut seen = std::collections::HashSet::new();
         while (if first { first = false; Process32FirstW(snap, &mut entry) } else { Process32NextW(snap, &mut entry) }).is_ok() {
-            let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
             let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
             let stem = exe.to_lowercase();
             let stem = stem.strip_suffix(".exe").unwrap_or(&stem).to_string();
@@ -655,17 +655,43 @@ pub fn stubborn_block() -> Result<Value, String> {
     }
 
     // 4. 设置 WPS 更新注册表
-    unsafe {
+    {
         use windows::Win32::System::Registry::{
-            RegOpenKeyExW, RegSetValueExW, RegCloseKey, HKEY_CURRENT_USER, KEY_WRITE, REG_SZ,
+            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY_CURRENT_USER,
+            KEY_WRITE, REG_SZ, REG_VALUE_TYPE,
         };
         let key_path = to_wide(r"Software\Kingsoft\Office\6.0\Common\updateinfo");
+        let value_name = to_wide("UpdateMode");
         let mut hkey = HKEY_CURRENT_USER;
-        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()), Some(0), KEY_WRITE, &mut hkey).is_ok() {
-            let val = to_wide("close");
-            let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
-            let _ = RegSetValueExW(hkey, PCWSTR(to_wide("UpdateMode").as_ptr()), Some(0), REG_SZ, Some(&bytes));
-            let _ = RegCloseKey(hkey);
+        let mut wrote = false;
+        unsafe {
+            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()), Some(0), KEY_WRITE, &mut hkey).is_ok() {
+                let val = to_wide("close");
+                let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
+                // U-A5-L01：写值结果不再 `let _ =` 吞掉，且写完回读确认（同函数第 3/5 步口径）。
+                if RegSetValueExW(hkey, PCWSTR(value_name.as_ptr()), Some(0), REG_SZ, Some(&bytes)).is_ok() {
+                    let mut ty = REG_VALUE_TYPE::default();
+                    let mut size = 0u32;
+                    wrote = RegQueryValueExW(
+                        hkey,
+                        PCWSTR(value_name.as_ptr()),
+                        None,
+                        Some(&mut ty),
+                        None,
+                        Some(&mut size),
+                    )
+                    .is_ok();
+                }
+                let _ = RegCloseKey(hkey);
+            }
+        }
+        if !wrote {
+            crate::engine::log::write_log(
+                "warn",
+                "顽固软件治理：WPS 更新注册表 UpdateMode 写入或回读失败",
+            );
+            fail_tasks.push("WPS 更新注册表（UpdateMode 写入失败）".to_string());
+            failed += 1;
         }
     }
 

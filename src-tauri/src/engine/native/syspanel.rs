@@ -221,6 +221,13 @@ fn win32_ok(rc: WIN32_ERROR) -> bool {
 }
 
 fn decode_utf16_bytes(buf: &[u8]) -> String {
+    // U-A5-L05：奇数字节说明值被截断，末尾 1 字节不能静默消失。
+    if buf.len() % 2 != 0 {
+        crate::engine::log::write_log(
+            "warn",
+            "电源设置名称字节数为奇数，末尾 1 字节已丢弃（值可能被截断）",
+        );
+    }
     let units: Vec<u16> = buf
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))

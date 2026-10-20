@@ -157,10 +157,26 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
 
         // 重新启动：固定取系统 explorer 的硬钉解析结果（P0-2 的 system_tool 入口）。
         // 解析不到即如实不重启——不回退裸名、也不用被杀进程自己的 image path。
+        // U-A5-L04：explorer 是长命 GUI，不能等它退出（这也是本条不走 timeout 底座的原因）；
+        // 但不再用 `is_ok()` 把错误折成「没重启」——留 PID 与失败原因。
         let mut started = 0;
         if let Ok(exe) = crate::engine::systembin::system_tool("explorer.exe") {
-            if exe.is_file() && crate::engine::systembin::quiet_cmd(&exe).spawn().is_ok() {
-                started = 1;
+            if exe.is_file() {
+                match crate::engine::systembin::quiet_cmd(&exe).spawn() {
+                    Ok(child) => {
+                        started = 1;
+                        crate::engine::log::write_log(
+                            "info",
+                            &format!("资源管理器重启：已拉起 PID {}（fire-and-forget，不等待退出）", child.id()),
+                        );
+                    }
+                    Err(e) => {
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!("资源管理器重启：拉起 explorer.exe 失败: {e}"),
+                        );
+                    }
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(900));

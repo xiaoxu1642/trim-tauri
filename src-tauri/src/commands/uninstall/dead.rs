@@ -91,13 +91,15 @@ pub(super) fn dead_landing(raw: &str) -> Option<String> {
     let head = match expanded.strip_prefix('"') {
         Some(q) => q.split('"').next().unwrap_or("").to_string(),
         None => {
-            let low = expanded.to_lowercase();
+            // U-A5-M07：切成两半的偏移必须同源。to_lowercase 是 full mapping（İ→i̇ 会变长），
+            // 拿它的字节下标去切原串会错位；这里只做 ASCII 小写，长度/边界与原串一致。
+            let low = expanded.to_ascii_lowercase();
             let cut = [".exe", ".dll", ".sys"]
                 .iter()
                 .filter_map(|e| low.find(e).map(|i| i + e.len()))
                 .min();
             match cut {
-                Some(end) => expanded.chars().take(end).collect(),
+                Some(end) => expanded[..end].to_string(),
                 None => expanded.clone(),
             }
         }

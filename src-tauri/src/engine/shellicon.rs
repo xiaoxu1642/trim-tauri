@@ -51,6 +51,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
+/// DestroyIcon 失败不致命，但必须留痕（U-A5-L02：旧实现三处把返回值全丢）。
+unsafe fn destroy_icon_logged(hicon: HICON) {
+    if let Err(e) = DestroyIcon(hicon) {
+        crate::engine::log::write_log("warn", &format!("DestroyIcon 失败: {e}"));
+    }
+}
+
 /// 提取文件/目录图标并编码为 PNG dataURL（外壳视角：文件类型图标）。
 /// 失败返回 Err（调用方按 `{success:false, dataUrl:null}` 回落，与 Electron 版一致）。
 pub fn file_icon_data_url(path: &Path) -> Result<String, String> {
@@ -121,7 +128,7 @@ fn shell_icon_png(path: &Path) -> Result<Vec<u8>, String> {
         }
         let hicon = shfi.hIcon;
         let result = hicon_to_png(hicon);
-        let _ = DestroyIcon(hicon);
+        destroy_icon_logged(hicon);
         result
     }
 }
@@ -134,12 +141,12 @@ fn first_icon_png(path: &Path) -> Result<Vec<u8>, String> {
         let got = ExtractIconExW(PCWSTR(wide.as_ptr()), 0, Some(&mut hicon), None, 1);
         if got == 0 || hicon.is_invalid() {
             if !hicon.is_invalid() {
-                let _ = DestroyIcon(hicon);
+                destroy_icon_logged(hicon);
             }
             return Err("文件没有内嵌图标资源".into());
         }
         let result = hicon_to_png(hicon);
-        let _ = DestroyIcon(hicon);
+        destroy_icon_logged(hicon);
         result
     }
 }

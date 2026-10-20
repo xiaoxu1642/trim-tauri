@@ -26,7 +26,7 @@ use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::engine::{log, paths};
+use crate::engine::{job::ProcessJob, log, paths};
 
 pub struct PsOutput {
     pub stdout: String,
@@ -55,64 +55,7 @@ pub struct PsOutput {
 // cleanup_execute.ps1、cm_restart_explorer.ps1、maint_store.ps1——这三个都已是退役脚本）。
 // 那些进程同样是 job 成员，若「关句柄即杀全树」，正常跑完时反而会把用户的 explorer /
 // 应用一起杀掉。所以只在**超时**这一条路径上显式 Terminate，成功路径只 CloseHandle。
-/// 一次性 Job Object 句柄；Drop 只关句柄（**不**杀成员，理由见上）。
-pub struct ProcessJob(windows::Win32::Foundation::HANDLE);
-
-impl ProcessJob {
-    /// 建 job 并把**已 spawn 的子进程**放进去。任一步失败都返回 `Err`，调用方降级为
-    /// 「只杀 pwsh」的旧行为 —— 建不了 job 不该让整条 PS 执行链失败。
-    fn create_for(child_pid: u32) -> Result<Self, String> {
-        use windows::core::PCWSTR;
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW,
-        };
-        use windows::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-        };
-        unsafe {
-            let job = CreateJobObjectW(None, PCWSTR::null())
-                .map_err(|e| format!("建 Job 失败: {e}"))?;
-            // AssignProcessToJobObject 要求进程句柄带 PROCESS_SET_QUOTA | PROCESS_TERMINATE，
-            // std::process::Child 自带的那个权限位不足，故按 PID 另开一个。
-            // PID 复用窗口极小：就在 spawn 之后的这几微秒内，且子进程尚未退出。
-            let proc = match OpenProcess(
-                PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
-                false,
-                child_pid,
-            ) {
-                Ok(h) => h,
-                Err(e) => {
-                    let _ = CloseHandle(job);
-                    return Err(format!("打开子进程句柄失败: {e}"));
-                }
-            };
-            let assigned = AssignProcessToJobObject(job, proc);
-            let _ = CloseHandle(proc);
-            if let Err(e) = assigned {
-                let _ = CloseHandle(job);
-                return Err(format!("子进程入 Job 失败: {e}"));
-            }
-            Ok(Self(job))
-        }
-    }
-
-    /// 终止 job 内**全部**进程（含子孙）。超时专用。
-    /// R7-M05：失败必须让调用方看见——旧实现 `let _ =` 把 HRESULT 丢掉，
-    /// 「收树失败」与「收树成功」在回执上完全同形。
-    fn terminate(&self) -> Result<(), String> {
-        use windows::Win32::System::JobObjects::TerminateJobObject;
-        unsafe { TerminateJobObject(self.0, 1).map_err(|e| format!("TerminateJobObject 失败: {e}")) }
-    }
-}
-
-impl Drop for ProcessJob {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(self.0);
-        }
-    }
-}
+/// 一次性 Job Object 句柄；实现已下沉 `engine/job.rs`（v7.2 P1 U-A5，与 systembin 共用）。
 
 /// 读管道宽限期：pwsh 本体已不在跑，但子孙可能还占着 stdout/stderr 写端。
 /// 等 `READ_GRACE` 让正常输出冲刷完；**只有真超时**才终止子进程树，等不到就交回已读到的快照。

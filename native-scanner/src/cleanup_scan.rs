@@ -282,7 +282,7 @@ mod ffi {
                 pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
                 if Process32FirstW(snap, &mut pe) != 0 {
                     loop {
-                        let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+                        let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(pe.szExeFile.len());
                         let exe = String::from_utf16_lossy(&pe.szExeFile[..len]).to_lowercase();
                         let name = exe.strip_suffix(".exe").unwrap_or(&exe).to_string();
                         if !name.is_empty() {
@@ -1336,7 +1336,7 @@ mod rstrtmgr {
                     if rc2 == 0 {
                         buf.truncate(count as usize);
                         for pi in &buf {
-                            let len = pi.strAppName.iter().position(|&c| c == 0).unwrap_or(0);
+                            let len = pi.strAppName.iter().position(|&c| c == 0).unwrap_or(pi.strAppName.len());
                             let app = String::from_utf16_lossy(&pi.strAppName[..len]);
                             if app.is_empty() {
                                 continue;

@@ -811,6 +811,13 @@ pub async fn uninstall_modify<R: tauri::Runtime>(
                     log::write_log("warn", &msg);
                     return Err(msg);
                 }
+                UninstallerWait::ExitCodeUnknown => {
+                    let msg = format!(
+                        "uninstall_modify {display_name}: {label}退出码读取失败，状态未知（未按成功处理）"
+                    );
+                    log::write_log("warn", &msg);
+                    return Err(msg);
+                }
             },
             Err(e) => {
                 let msg = format!("uninstall_modify {display_name}: {label}启动失败: {e}");

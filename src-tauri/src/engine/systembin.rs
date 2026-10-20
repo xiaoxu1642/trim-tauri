@@ -461,10 +461,10 @@ pub const CMD_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 ///
 /// 为什么必须有它：6 处 `reg.exe export` 备份点此前都是裸 `.output()`——平时毫秒级，
 /// 但被杀软钩住/句柄异常时 reg.exe 会永远不退出，删除链就在「备份这一步」整条挂死
-/// 且没有任何超时收口。轮询 `try_wait` 到点 `kill()+wait()`；刻意不上 Job Object：
-/// reg.exe 是单进程工具、不再 spawn 子孙（需要收整棵树的执行链走 pwsh 层的
-/// ProcessJob），裸 kill 已覆盖其威胁模型。超时按失败返回（status 非 0 + stderr 注记），
-/// 调用方的 fail-closed 逻辑原样生效。
+/// 且没有任何超时收口。轮询 `try_wait` 到点收树；**同一底座也服务 cmd 步骤链**
+/// （`quiet_cmd_timeout_raw`），cmd 必带子孙，故与 pwsh 层共用 `engine::job::ProcessJob`
+/// 收整棵树（U-A5-M02：旧注释「reg.exe 单进程、刻意不上 Job」只对 reg 成立，对 cmd 不成立）。
+/// 超时按失败返回（status 非 0 + stderr 注记），调用方的 fail-closed 逻辑原样生效。
 pub fn quiet_cmd_timeout(
     program: impl AsRef<std::ffi::OsStr>,
     args: &[&str],
@@ -534,6 +534,23 @@ fn spawn_and_wait_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    // U-A5-M02：同一底座也服务 cmd.exe /s /c 步骤链，cmd 必带子孙；与 pwsh 层共用
+    // engine::job::ProcessJob。建 job 失败只降级为「杀直接子进程」并留痕，不让命令失败。
+    let job = match crate::engine::job::ProcessJob::create_for(child.id()) {
+        Ok(j) => Some(j),
+        Err(e) => {
+            // 极短命的命令（sc query 之类）可能在 OpenProcess 前已退出：这不需要 Job，
+            // 也不该按失败刷日志。只有仍存活的子进程才记降级。
+            let already_exited = matches!(child.try_wait(), Ok(Some(_)));
+            if !already_exited {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("systembin 子进程入 Job 失败，超时降级为只杀直接子进程: {e}"),
+                );
+            }
+            None
+        }
+    };
     // 必须在等退出**之前**把两条管道 take 走并立刻起线程读尽（审查 v3 P0-1）。
     // 旧实现只轮询 `try_wait()`、一条都不读，于是子进程写满匿名管道缓冲（Windows 默认
     // 4 KB 量级）就阻塞在 write、永不退出，`try_wait()` 恒 None，一路走到登记超时，
@@ -544,18 +561,42 @@ fn spawn_and_wait_with_timeout(
     let rx_err = spawn_pipe_reader(child.stderr.take());
     let deadline = Instant::now() + timeout;
     loop {
-        match child.try_wait()? {
-            Some(status) => {
+        match child.try_wait() {
+            Ok(Some(status)) => {
                 return Ok(Output {
                     status,
                     stdout: drain_pipe(rx_out),
                     stderr: drain_pipe(rx_err),
                 });
             }
-            None => {
+            Ok(None) => {
                 if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // U-A5-M01：终止/等待的结果必须进回执证据，不能无条件写「已终止」。
+                    let mut term_errors: Vec<String> = Vec::new();
+                    match &job {
+                        Some(j) => {
+                            if let Err(e) = j.terminate() {
+                                term_errors.push(e);
+                            }
+                        }
+                        None => {
+                            if let Err(e) = child.kill() {
+                                term_errors.push(format!("kill 失败: {e}"));
+                            }
+                        }
+                    }
+                    if let Err(e) = child.wait() {
+                        term_errors.push(format!("wait 失败: {e}"));
+                    }
+                    // 收掉读线程的残余结果（最多各等一个宽限期），避免超时路径净漏线程。
+                    let _ = drain_pipe(rx_out);
+                    let _ = drain_pipe(rx_err);
+                    let base = format!("执行超时（>{}ms）", timeout.as_millis());
+                    let stderr = if term_errors.is_empty() {
+                        format!("{base}，已终止")
+                    } else {
+                        format!("{base}，终止未确认：{}", term_errors.join("；"))
+                    };
                     return Ok(Output {
                         status: {
                             #[cfg(windows)]
@@ -571,10 +612,28 @@ fn spawn_and_wait_with_timeout(
                         // 超时按失败处理，刻意交空 stdout（fail-closed）：调用方据此判
                         // 「没拿到结果」，不许拿部分输出去过后缀/前缀判据。
                         stdout: Vec::new(),
-                        stderr: format!("执行超时（>{}ms），已终止", timeout.as_millis()).into_bytes(),
+                        stderr: stderr.into_bytes(),
                     });
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => {
+                // 本函数唯一「交出 Err 时子进程可能仍在跑」的路径：先收树再返回。
+                match &job {
+                    Some(j) => {
+                        if let Err(te) = j.terminate() {
+                            crate::engine::log::write_log(
+                                "warn",
+                                &format!("systembin try_wait 失败后收树失败: {te}"),
+                            );
+                        }
+                    }
+                    None => {
+                        let _ = child.kill();
+                    }
+                }
+                let _ = child.wait();
+                return Err(e);
             }
         }
     }
@@ -749,6 +808,27 @@ mod tests {
         assert!(
             !err.contains("执行超时"),
             "不该走超时分支（超时即说明管道没被读）：{err}"
+        );
+    }
+
+    /// U-A5-M02：超时必须收回 cmd 的子孙进程（同一底座服务 cmd 步骤链）。
+    /// cmd /c 起 ping 作为孙进程，超时后若只杀 cmd 本体，ping 仍握着管道，读线程会漏。
+    #[test]
+    fn 超时必须收回cmd子孙进程() {
+        use std::os::windows::process::CommandExt;
+        let started = std::time::Instant::now();
+        let mut cmd = quiet_cmd(system_tool("cmd.exe").expect("cmd.exe 必须解析成功"));
+        cmd.raw_arg("/c \"ping -n 20 127.0.0.1 >nul\"");
+        let out = spawn_and_wait_with_timeout(&mut cmd, std::time::Duration::from_millis(800))
+            .expect("cmd.exe 应能启动");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "超时必须按失败回执");
+        assert!(err.contains("执行超时"), "必须是超时结局：{err}");
+        assert!(err.contains("已终止"), "收树未确认时必须如实写未确认，不能谎报已终止：{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "超时后必须及时返回，实际 {:?}（子孙仍握着管道）",
+            started.elapsed()
         );
     }
 

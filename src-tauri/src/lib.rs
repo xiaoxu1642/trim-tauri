@@ -1200,6 +1200,67 @@ mod tests {
         );
     }
 
+    /// U-A5（P1-W1）：进程/句柄卫生的源码形状契约。真机句柄计数不可在快速组做，
+    /// 这里钉住「改回旧形状就红」的判据。
+    #[test]
+    fn u_a5_process_handle_contracts() {
+        let systembin = include_str!("engine/systembin.rs");
+        assert!(
+            systembin.contains("engine::job::ProcessJob::create_for") && systembin.contains("终止未确认"),
+            "A5-M01/M02：超时底座必须共用 ProcessJob 收树，且终止证据要进回执"
+        );
+        assert!(
+            include_str!("engine/job.rs").contains("pub(crate) fn terminate"),
+            "A5-M02：ProcessJob 必须是 pwsh/systembin 共用实现"
+        );
+
+        let list_run = include_str!("commands/uninstall/list_run.rs");
+        assert!(
+            list_run.contains("UninstallerWait::ExitCodeUnknown")
+                && list_run.contains("let read = GetExitCodeProcess")
+                && list_run.contains("h.0.is_null()"),
+            "A5-M04：等待/读码失败必须独立结局，NULL 句柄也要拦"
+        );
+        assert!(
+            list_run.contains("unwrap_or(pe.szExeFile.len())"),
+            "A5-M06：定长 UTF-16 无 NUL 时必须取整段，不能折成空串"
+        );
+
+        assert!(
+            include_str!("commands/uninstall/dead.rs").contains("expanded.to_ascii_lowercase()")
+                && list_run.contains("let low = s.to_ascii_lowercase();"),
+            "A5-M07：字节偏移必须与小写化副本同源（禁 full to_lowercase 后再切原串）"
+        );
+
+        assert!(
+            include_str!("engine/native/startup.rs").contains("let backup_ok = export_out")
+                && include_str!("engine/native/startup.rs").contains("m.len() > 0"),
+            "A5-M03：reg export 备份必须同时判退出码与文件非空"
+        );
+        assert!(
+            include_str!("engine/native/process.rs").contains("unwrap_or(entry.szExeFile.len())"),
+            "A5-M06：顽固软件进程名同样按整段解码"
+        );
+        assert!(
+            include_str!("../../native-scanner/src/cleanup_scan.rs").contains("unwrap_or(pi.strAppName.len())"),
+            "A5-M06：Restart Manager 应用名同样按整段解码"
+        );
+
+        assert!(
+            include_str!("engine/shellicon.rs").contains("destroy_icon_logged")
+                && include_str!("engine/native/syspanel.rs").contains("字节数为奇数"),
+            "A5-L02/L05：句柄关闭与截断字节必须留痕"
+        );
+        assert!(
+            include_str!("engine/native/contextmenu.rs").contains("已拉起 PID"),
+            "A5-L04：fire-and-forget 的 explorer 重启必须留 PID/失败日志"
+        );
+        assert!(
+            include_str!("engine/native/process.rs").contains("WPS 更新注册表（UpdateMode 写入失败）"),
+            "A5-L01：注册表写值失败必须进失败台账"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

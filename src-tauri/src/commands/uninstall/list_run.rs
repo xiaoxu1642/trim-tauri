@@ -744,6 +744,8 @@ pub(super) enum UninstallerWait {
     Exited(u32),
     /// 硬等待超时，**进程未被终止**——退出码未知，卸载是否完成未知。
     TimedOut,
+    /// 等待或读取退出码失败：退出码未知。绝不能折成 0（0 = 卸载成功）。
+    ExitCodeUnknown,
     /// 用户在 UAC 上拒绝了提权（`ERROR_CANCELLED`）：卸载器从未启动（R9，2026-10-15）。
     ElevationDeclined,
 }
@@ -771,7 +773,7 @@ fn is_elevation_declined(e: &windows::core::Error) -> bool {
 /// 文件没删干净），比「如实报未知」更难恢复。此时只关句柄放行，上层继续走
 /// `watch_uninstaller` 轮询卸载键与卸载器进程家族，由它给出真实结论。
 pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<ShellRunResult, String> {
-    use windows::Win32::Foundation::WAIT_TIMEOUT;
+    use windows::Win32::Foundation::{WAIT_FAILED, WAIT_TIMEOUT};
     use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     use windows::core::PCWSTR;
@@ -815,7 +817,8 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<ShellRunRes
         return Err(format!("启动卸载器失败: {e}"));
     }
     let h = sei.hProcess;
-    if h.is_invalid() {
+    // U-A5-M04：NULL 与 INVALID_HANDLE_VALUE 都算拿不到句柄；is_invalid() 只判后者。
+    if h.is_invalid() || h.0.is_null() {
         // 拿不到句柄（目标拒绝 NOCLOSEPROCESS 等）：无法等待，如实上报
         return Err("卸载器已启动但无法等待其完成（未返回进程句柄）".to_string());
     }
@@ -826,9 +829,25 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<ShellRunRes
         let _ = windows::Win32::Foundation::CloseHandle(h);
         return Ok(ShellRunResult { pid, outcome: UninstallerWait::TimedOut });
     }
+    if r == WAIT_FAILED {
+        // 等待本身失败：进程状态未知，不能继续读一个初始化为 0 的退出码。
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+        log::write_log(
+            "warn",
+            &format!("uninstall_run: WaitForSingleObject 失败（PID {pid}），退出码未知，转入进程监视"),
+        );
+        return Ok(ShellRunResult { pid, outcome: UninstallerWait::ExitCodeUnknown });
+    }
     let mut code: u32 = 0;
-    let _ = GetExitCodeProcess(h, &mut code);
+    let read = GetExitCodeProcess(h, &mut code);
     let _ = windows::Win32::Foundation::CloseHandle(h);
+    if read.is_err() {
+        log::write_log(
+            "warn",
+            &format!("uninstall_run: GetExitCodeProcess 失败（PID {pid}），退出码未知，转入进程监视"),
+        );
+        return Ok(ShellRunResult { pid, outcome: UninstallerWait::ExitCodeUnknown });
+    }
     Ok(ShellRunResult { pid, outcome: UninstallerWait::Exited(code) })
 }
 
@@ -866,7 +885,7 @@ pub(super) fn process_snapshot() -> Vec<ProcEntry> {
         pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         if Process32FirstW(snap, &mut pe).is_ok() {
             loop {
-                let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+                let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(pe.szExeFile.len());
                 out.push(ProcEntry {
                     pid: pe.th32ProcessID,
                     ppid: pe.th32ParentProcessID,
@@ -1242,7 +1261,7 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 .and_then(|r| match r.outcome {
                     UninstallerWait::Exited(code) => Ok((Some(code), r.pid)),
                     // 回退界面同样等不到：退出码未知，不能伪造成 0（会被当成卸载成功）
-                    UninstallerWait::TimedOut => Ok((None, r.pid)),
+                    UninstallerWait::TimedOut | UninstallerWait::ExitCodeUnknown => Ok((None, r.pid)),
                     // R9（2026-10-15）：用户在回退界面的 UAC 上拒绝 = 卸载器从未启动。
                     // **绝不能映成 None**（None 的下游是「超时 / 可能还在跑」）。用 Err
                     // 让整条命令如实判失败——与「超时不用 Err」的裁定不冲突：那条的理由
@@ -1286,6 +1305,14 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                             &format!(
                                 "uninstall_run {display_name}: 等待卸载器 {UNINSTALLER_WAIT_TIMEOUT_MS} ms 仍未退出（未强杀），退出码未知，转入进程监视"
                             ),
+                        );
+                        None
+                    }
+                    UninstallerWait::ExitCodeUnknown => {
+                        // U-A5-M04：等待/读码失败，状态未知；与超时同走监视，绝不按 0 报成功。
+                        log::write_log(
+                            "warn",
+                            &format!("uninstall_run {display_name}: 卸载器退出码读取失败，状态未知，转入进程监视"),
                         );
                         None
                     }

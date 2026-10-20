@@ -1519,7 +1519,13 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                             crate::engine::systembin::REG_EXPORT_TIMEOUT,
                         )
                     });
-                if export_out.is_err() || !reg_file.exists() {
+                // U-A5-M03：与 process.rs 同一三判口径——quiet_cmd_timeout 的 Ok 只代表
+                // 进程跑完，超时也构造成 Ok；必须退出码成功 + 文件在 + 内容非空，缺一不删值。
+                let backup_ok = export_out
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                    && reg_file.metadata().map(|m| m.len() > 0).unwrap_or(false);
+                if !backup_ok {
                     failed += 1;
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表备份失败，未执行删除"}));
                     continue;
