@@ -1,6 +1,6 @@
 //! netcheck 域（B 批）：netcheck:collect / netcheck:repair
 //!
-//! 需在 lib.rs 的 invoke_handler 中注册（本任务不改 lib.rs，请统一登记）：
+//! 注册清单（与 lib.rs 的 `generate_handler!` 逐条对齐，同 U-R1d 的 `R1d-L03` 口径）：
 //!   commands::netcheck::netcheck_collect,
 //!   commands::netcheck::netcheck_repair,
 //!
@@ -15,6 +15,8 @@
 //! - 需管理员的动作：enable-adapter / start-dhcp / start-dnscache / reset-dns / reset-winhttp
 //!   （disable-user-proxy 不改系统配置，不判管理员）。
 //! - 修复后自动重跑一次 collect，把最新 items 一并回传（整页快照刷新）。
+//!   重跑**失败或回执缺 items 时本窗快照直接作废**（v7.2 `R1d-M07`）：留着旧账等于
+//!   下一次修复按修复前的网卡索引/适配器名执行，打错对象；作废后 repair 判「不在快照内」。
 
 use std::collections::HashMap;
 

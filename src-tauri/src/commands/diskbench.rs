@@ -1,6 +1,6 @@
 //! diskbench 域（B 批）：diskbench:run（+ `diskbench:progress` 事件）
 //!
-//! 需在 lib.rs 的 invoke_handler 中注册（本任务不改 lib.rs，请统一登记）：
+//! 注册清单（与 lib.rs 的 `generate_handler!` 逐条对齐，同 U-R1d 的 `R1d-L03` 口径）：
 //!   commands::diskbench::diskbench_run,
 //!
 //! 实现体来源：main.js 5381-5551（含 isDiskBenchAllowedPath / getPathFreeBytes /
