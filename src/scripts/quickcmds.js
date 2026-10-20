@@ -1,4 +1,7 @@
-// quickcmds.js - 快捷指令页（64 条系统快捷入口 / 8 分类）
+// quickcmds.js - 快捷指令页（系统快捷入口若干条 / 8 分类）
+// F4a2-L01（v7.2 C07）：头注的「64 条」与真源不符（quickcmds.rs QUICKCMDS 现算更多）
+// 且写死必腐——条数以 commands/quickcmds.rs 的 QUICKCMDS 白名单与 quickcmds-data.js
+// 对拍为准，本注释不再钉数字。
 // 数据：quickcmds-data.js（来自 old\快捷指令 解包分析）
 // 执行：通过 IPC quickcmds:run 由主进程按白名单 spawn，渲染层不接触命令原文
 (function () {
