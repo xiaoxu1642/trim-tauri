@@ -91,13 +91,19 @@ if (unused) {
 // ---- v2-L4P-45（F-11）：src-tauri/icons 只读枚举台账 ----
 // 此前门禁只扫 frontendDist（src/），看不见 src-tauri/icons：那里 13 个
 // Square*/StoreLogo 等 Windows 打包位图不在 bundle.icon 清单里、语料也零引用，
-// 但它们由 Tauri bundler 按 targets 隐式消费，**不可删**。这里只做台账打印
-// （数字供报告现抄），不判红——删图标的行为由 check-asset-size 的基线棘轮兜底。
+// 但它们由 Tauri bundler 按 targets 隐式消费，**不可删**。这里做双向台账：
+// 盘上→清单（orphan 打印）、清单→盘上（missing 判红）——bundle.icon 指向缺失文件时，
+// 打包会失败/缺图标，不能让 check-asset-size 那个只扫 src/ 的门禁背锅。
 const ICONS_DIR = join(REPO_ROOT, 'src-tauri', 'icons');
 if (existsSync(ICONS_DIR)) {
   const conf = JSON.parse(readFileSync(join(REPO_ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'));
   const bundled = new Set((conf.bundle?.icon ?? []).map((s) => s.replace(/^icons\//, '')));
   const icons = walkFiles(ICONS_DIR);
+  const missingBundle = [...bundled].filter((n) => !icons.some((f) => basename(f) === n));
+  if (missingBundle.length) {
+    console.error(`✗ bundle.icon 指向不存在的文件：${missingBundle.join('、')}`);
+    process.exit(1);
+  }
   const orphan = [];
   for (const f of icons) {
     const name = basename(f);

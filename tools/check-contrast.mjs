@@ -32,7 +32,7 @@
 //
 // 用法：node tools/check-contrast.mjs
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 /**
  * 扫描面：**三份 CSS 都算**（审查 L-28，2026-10-03 L4 收口；2026-10-12 P0 拆分后加 main-pages.css）。
@@ -61,6 +61,8 @@ const CSS_FILES = [
   { label: 'main.css', path: new URL('../src/styles/main.css', import.meta.url) },
   { label: 'main-pages.css', path: new URL('../src/styles/main-pages.css', import.meta.url) },
   { label: 'ds.css', path: new URL('../src/styles/ds.css', import.meta.url) },
+  // T1d-M02：看图层也是真实底×前景组合，不能只扫 3 份。
+  { label: 'litebox.css', path: new URL('../src/styles/litebox.css', import.meta.url) },
 ];
 // 剥离注释但**保留换行与字符数**：这样按 index 算出来的行号仍然准确，
 // 且选择器不会被块前注释污染 —— 否则棘轮键「选择器|前景」会随注释文字改动而漂移
@@ -115,7 +117,16 @@ const BASELINE_MIN = 310;
 // 消失的**只有** `.syspanel-note` 一条（两主题各 1 组）——它是被删掉的死规则
 // （唯一消费方「自定义方案仅展示不可选」那行提示随面板改版一起退役），
 // 其余 28 条选择器产出一字未变 ⇒ 属真实减少，不是解析退化。地板按 ≈7% 余量落到 52。
-const SCAN_FLOOR = { 'main.css': 208, 'main-pages.css': 52, 'ds.css': 24 };
+const SCAN_FLOOR = { 'main.css': 208, 'main-pages.css': 52, 'ds.css': 24, 'litebox.css': 1 };
+// T1d-M02：扫描面 = src/styles 全量（漏登记/多登记都红），不再只靠人手加三份清单。
+{
+  const disk = readdirSync(new URL('../src/styles', import.meta.url)).filter((f) => f.endsWith('.css')).sort();
+  const registered = CSS_FILES.map((f) => f.label).sort();
+  if (JSON.stringify(disk) !== JSON.stringify(registered)) {
+    console.error(`✗ 对比度扫描面与 src/styles 不一致：盘上 ${JSON.stringify(disk)} / 登记 ${JSON.stringify(registered)}`);
+    process.exit(1);
+  }
+}
 
 // ---------- 1. 两个主题变量块 ----------
 function blockVars(startIdx) {
@@ -243,8 +254,23 @@ function parseColor(raw, vars) {
   }
   let m = s.match(/^#([0-9a-f]{3})$/i);
   if (m) return { r: parseInt(m[1][0] + m[1][0], 16), g: parseInt(m[1][1] + m[1][1], 16), b: parseInt(m[1][2] + m[1][2], 16), a: 1 };
+  // T1d-M02：litebox.css 使用 4/8 位 hex（#0006 / #ffffff26）；扩展解析面才能算出看图层组合。
+  m = s.match(/^#([0-9a-f]{4})$/i);
+  if (m) return {
+    r: parseInt(m[1][0] + m[1][0], 16),
+    g: parseInt(m[1][1] + m[1][1], 16),
+    b: parseInt(m[1][2] + m[1][2], 16),
+    a: parseInt(m[1][3] + m[1][3], 16) / 255,
+  };
   m = s.match(/^#([0-9a-f]{6})$/i);
   if (m) return { r: parseInt(m[1].slice(0, 2), 16), g: parseInt(m[1].slice(2, 4), 16), b: parseInt(m[1].slice(4, 6), 16), a: 1 };
+  m = s.match(/^#([0-9a-f]{8})$/i);
+  if (m) return {
+    r: parseInt(m[1].slice(0, 2), 16),
+    g: parseInt(m[1].slice(2, 4), 16),
+    b: parseInt(m[1].slice(4, 6), 16),
+    a: parseInt(m[1].slice(6, 8), 16) / 255,
+  };
   m = s.match(/^rgba?\(\s*var\(([\s\S]*?)\)\s*,\s*([\d.]+)\s*\)$/);
   if (m) {
     const [namePart, fallback] = splitVarArgs(m[1].trim());
@@ -294,6 +320,8 @@ const PREVIEW_WINDOW_BASE = '#000000';
  *
  * 2026-10-03（K1 修复连带）逐条理由：
  *   - `.pv-*` 全族：窗内白色半透明控件，底是**预览窗固定纯黑底**（AGENTS §2 刻意设计）。
+ *     preview 子窗已于 2026-10 退役，同一黑底语义现由主窗 LiteBox 承担；`.pv-*` 两条
+ *     常量保留为历史对照（现算 0 条规则），别再按现役护栏引用。
  *     这类不登记 —— 已由 PREVIEW_BASE_SELECTORS 按正确底重算，见 flattenBg。
  *   - `--lg-glass-fg` 族（body.lg-mode-* 的 .maint-tab-count / .filter-tab.active）：
  *     液态玻璃三档下标签底色由宿主材质 + backdrop 决定，静态不可知；
@@ -308,13 +336,10 @@ const PREVIEW_WINDOW_BASE = '#000000';
  *     主题相关结果，实际两主题取值相同。
  */
 const UNKNOWN_BASE_ALLOW = [
-  'body.lg-mode-full .maint-tab.active .maint-tab-count, body.lg-mode-standard .maint-tab.active .maint-tab-count, body.lg-mode-frost .maint-tab.active .maint-tab-count',
-  'body.lg-mode-full .filter-tab.active .maint-tab-count, body.lg-mode-standard .filter-tab.active .maint-tab-count, body.lg-mode-frost .filter-tab.active .maint-tab-count',
   '.btn > .btn-ripple',
   '.splash-badge',
   '.splash-enter',
   '.maint-admin-tag',
-  '.maint-status-warn',
   '.ctx-apply-bar',
   'body.theme-light .nav-subdot',
   // 审查 L-28 连带：--splash-* 是开屏覆盖层的独立局部调色板（刻意固定、不随主题
@@ -323,8 +348,9 @@ const UNKNOWN_BASE_ALLOW = [
   // 按「未登记 = 失明 = 红」的规矩必须显式登记理由（与 .splash-enter 同一个理由）。
   '.splash-enter:hover',
 ];
-// 这些选择器的半透明底一律按 PREVIEW_WINDOW_BASE 合成（窗内白控件的真实底）
-const PREVIEW_BASE_SELECTORS = /^\.pv-/;
+// 这些选择器的半透明底一律按 PREVIEW_WINDOW_BASE 合成（窗内白控件的真实底）。
+// T1d-M02：preview 子窗退役后，同一纯黑底语义由主窗内嵌 LiteBox 承担（AGENTS §2）。
+const PREVIEW_BASE_SELECTORS = /^(?:\.pv-|\.litebox\b)/;
 const TINT_WEAK_ALLOW = [];
 // ---------- 3. A 组：实底背景 × 前景 ----------
 // 实底 = background 直接是 var(--x)，且不是 -soft/-light/-glow 这类染底 token
@@ -363,9 +389,9 @@ function readValue(body, from) {
     else if (ch === ')') {
       depth--;
       if (depth === 0) return body.slice(start, i + 1);
-    } else if (depth === 0 && ch === ';') return null;
+    } else if (depth === 0 && ch === ';') return body.slice(start, i);
   }
-  return null;
+  return body.slice(start).trim() || null;
 }
 function readValues(body, prop) {
   const out = [];
@@ -566,10 +592,15 @@ check(
   `D. 主题 token 表完整（${THEMES.length} 个主题：${THEMES.map((t) => `${t.name} ${t.vars.size} token`).join(" / ")}）`,
   THEME_INCOMPLETE.join("；"),
 );
+const unknownStale = UNKNOWN_BASE_ALLOW.filter((s) => !rules.some((r) => r.selector === s));
 check(
-  SKIPPED.length <= SKIPPED_MAX,
+  SKIPPED.length <= SKIPPED_MAX && unknownStale.length === 0,
   `E. 解析跳过数不超棘轮（实算 ${SKIPPED.length} / 上限 ${SKIPPED_MAX}）`,
-  SKIPPED.length ? `新增失明组合：${[...new Set(SKIPPED)].slice(0, 6).join("；")}` : "",
+  unknownStale.length
+    ? `登记已失效（这些选择器已不存在）：${JSON.stringify(unknownStale)}`
+    : SKIPPED.length
+      ? `新增失明组合：${[...new Set(SKIPPED)].slice(0, 6).join("；")}`
+      : "",
 );
 const weak = solidRows.filter((r) => r.ratio < AA_NORMAL);
 // 审查 L-28：纯图标/图形控件走 WCAG **1.4.11 非文本对比度 = 3:1**，不是 1.4.3 的 4.5:1。
@@ -633,6 +664,30 @@ check(
   textBad.length === 0,
   `B. 正文前景 × 页面底色 ${textRows.length} 组全部 ≥ ${AA_NORMAL}:1`,
   textBad.length ? textBad.map((r) => `${r.ratio.toFixed(2)}:1 ${r.theme} ${r.fg} on ${r.bg}`).join('；') : '',
+);
+
+// T1d-M04：AGENTS §2 点名的默认 accent 对比度红线，必须有自己的断言对象。
+const accentProblems = [];
+for (const t of THEMES) {
+  const bg = parseColor('var(--accent)', t.vars);
+  const ink = parseColor('var(--accent-text)', t.vars);
+  if (!bg || !ink) {
+    accentProblems.push(`${t.name} 的 --accent / --accent-text 解析失败`);
+    continue;
+  }
+  const r = contrast(bg, ink);
+  if (r < AA_NORMAL) accentProblems.push(`${t.name} --accent-text on --accent = ${r.toFixed(2)}:1 < 4.5`);
+  if (t.name.includes('亮色')) {
+    const white = parseColor('#FFFFFF', t.vars);
+    const rw = white ? contrast(bg, white) : 0;
+    // 红线原文「默认 accent #6A59C9（白字对比度 5.4:1）」；阈值取 5.4，不另造数字。
+    if (rw < 5.4) accentProblems.push(`${t.name} 白字 on --accent = ${rw.toFixed(2)}:1 < 5.4（AGENTS §2 红线）`);
+  }
+}
+check(
+  accentProblems.length === 0,
+  `B2. accent 底 × 前景（${THEMES.length} 主题，含 AGENTS §2 白字 5.4 红线）`,
+  accentProblems.join('；'),
 );
 
 const total = solidRows.length + textRows.length;

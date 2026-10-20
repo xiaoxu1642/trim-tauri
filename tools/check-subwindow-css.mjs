@@ -25,6 +25,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { gate } from './lib/gate.mjs';
+import { styleLinks } from './lib/html-tags.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const S = 'src/styles';
@@ -170,11 +171,15 @@ function corpusOf(htmlRel) {
 }
 function linksOf(htmlRel) {
   const html = readFileSync(join(ROOT, htmlRel), 'utf8');
-  return [...html.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*>/g)]
-    .map(m => (m[0].match(/href="([^"]+)"/) || [])[1])
-    .filter(Boolean)
-    .map(h => h.replace(/^\.\//, ''));
+  return styleLinks(html).map((h) => h.replace(/^\.\//, ''));
 }
+// T1d-M08：三条判据的唯一实现（真仓扫描与 selfTest 共用）。
+const subLinksOk = (links) => links.join(' → ') === EXPECT_SUB.join(' → ');
+const tokenInCorpus = (t, tokens, blob) => {
+  const name = t.slice(2);
+  return tokens.has(t) || new RegExp('[^\\w-]' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[^\\w-]').test(blob);
+};
+const hasTokenBlock = (css) => [...css.matchAll(/^(:root|\.theme-light)\s*\{/gm)].length > 0;
 
 // ---------- S1 链接面 ----------
 {
@@ -184,13 +189,13 @@ function linksOf(htmlRel) {
   if (!ok) g.fail(`S1a. ${MAIN_HTML} 必须恰为 ${EXPECT_MAIN.join(' → ')}（实为 ${main.join(' → ')}）—— 顺序变了层叠就变了`);
   for (const h of SUB_HTML) {
     const l = linksOf(h);
-    if (l.join(' → ') !== EXPECT_SUB.join(' → ')) {
+    if (!subLinksOk(l)) {
       g.fail(`S1b. ${h} 样式表必须恰为 ${EXPECT_SUB.join(' → ')}（实为 ${l.join(' → ')}）` +
         (l.includes('styles/main-pages.css') ? ' —— 子窗链上 main-pages.css，P0 拆分等于白做' : '') +
         (!l.includes('styles/ds.css') ? ' —— 少挂 ds.css 撞 AGENTS §2 红线' : ''));
     }
   }
-  const subCount = SUB_HTML.filter(h => linksOf(h).join(' → ') === EXPECT_SUB.join(' → ')).length;
+  const subCount = SUB_HTML.filter(h => subLinksOk(linksOf(h))).length;
   g.ok(`S1b. 子窗样式表序列均为 main.css → ds.css（${subCount}/${SUB_HTML.length} 达标）`);
   if (subCount !== SUB_HTML.length) g.fail(`S1b. 达标子窗 ${subCount}/${SUB_HTML.length}，存在缺挂或多挂`);
 }
@@ -198,11 +203,13 @@ function linksOf(htmlRel) {
 // ---------- 载入两份 CSS ----------
 const mainCss = readFileSync(join(ROOT, S, 'main.css'), 'utf8');
 const pagesCss = readFileSync(join(ROOT, S, 'main-pages.css'), 'utf8');
+const dsCss = readFileSync(join(ROOT, S, 'ds.css'), 'utf8');
 if (!pagesCss.trim()) g.fail('src/styles/main-pages.css 是空的：S2/S3 会集体空转（断言对象 0 的绿不算通过）');
 const mainRules = parseRules(mainCss);
 const pagesRules = parseRules(pagesCss);
-if (mainRules.length < 500 || pagesRules.length < 100) {
-  g.fail(`解析块数骤降（main.css ${mainRules.length} / main-pages.css ${pagesRules.length}）⇒ 解析失明，不是仓库变小`);
+const dsRules = parseRules(dsCss);
+if (mainRules.length < 500 || pagesRules.length < 100 || dsRules.length < 20) {
+  g.fail(`解析块数骤降（main.css ${mainRules.length} / main-pages.css ${pagesRules.length} / ds.css ${dsRules.length}）⇒ 解析失明，不是仓库变小`);
 }
 
 // ---------- S2 分箱不变量 ----------
@@ -217,10 +224,8 @@ if (mainRules.length < 500 || pagesRules.length < 100) {
     const { tokens, blob } = corpusOf(h);
     const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     for (const t of pagesTok.keys()) {
-      if (!t.startsWith('c:')) continue;
       const name = t.slice(2);
-      const inCorpus = tokens.has(t) || new RegExp('[^\\w-]' + esc(name) + '[^\\w-]').test(blob);
-      if (inCorpus) hits.push(`${name}（${h}）→ main-pages.css:${pagesTok.get(t).line}`);
+      if (tokenInCorpus(t, tokens, blob)) hits.push(`${name}（${h}）→ main-pages.css:${pagesTok.get(t).line}`);
     }
   }
   if (hits.length) g.fail(`S2. main-pages.css 里有被子窗引用的选择器 ${hits.length} 处：${hits.slice(0, 8).join('、')}`);
@@ -255,10 +260,31 @@ if (mainRules.length < 500 || pagesRules.length < 100) {
   else g.ok(`S3. main-pages.css 与 main.css 之间无「同特异度 + 共享 token + 属性相交」对（${pagesRules.length} 条逐条比对）`);
 }
 
+// T1d-M06：ds.css 是**后置覆盖层**（S1b 已钉加载序），同特异度覆盖是设计而非冲突；
+// 这里仍按同一判据计数，让「覆盖面有多大」可见（不判红，避免把设计当回归）。
+{
+  const mainIdx = new Map();
+  for (const r of mainRules) {
+    const s = selInfo(r.prelude);
+    for (const t of s.tok) { if (!mainIdx.has(t)) mainIdx.set(t, []); mainIdx.get(t).push({ r, s, props: declProps(r.body) }); }
+  }
+  let pairs = 0;
+  for (const r of dsRules) {
+    const s = selInfo(r.prelude);
+    if (!s.cls.length && !s.ids.length) continue;
+    const props = declProps(r.body);
+    for (const t of s.tok) {
+      for (const m of mainIdx.get(t) || []) {
+        if (m.s.spec === s.spec && [...props].some((p) => m.props.has(p))) { pairs++; break; }
+      }
+    }
+  }
+  g.ok(`S3b. ds.css 后置覆盖 main.css 的同特异度对 ${pairs} 处（S1b 已钉加载序，按设计不判红）`);
+}
+
 // ---------- S4 token 真源 ----------
 {
-  const bad = [...pagesCss.matchAll(/^(:root|\.theme-light)\s*\{/gm)].map(m => m[1]);
-  if (bad.length) g.fail(`S4. main-pages.css 里出现 token 定义块：${bad.join('、')}（AGENTS §2：main.css 是 token 唯一真源）`);
+  if (hasTokenBlock(pagesCss)) g.fail('S4. main-pages.css 里出现 :root / .theme-light token 定义块（AGENTS §2：main.css 是唯一真源）');
   else g.ok('S4. main-pages.css 不定义 :root / .theme-light');
 }
 
@@ -273,14 +299,14 @@ function selfTest() {
     [['styles/main.css'], true],
     [EXPECT_SUB, false],
   ]) {
-    const red = broken.join(' → ') !== EXPECT_SUB.join(' → ');
+    const red = !subLinksOk(broken);
     if (red !== shouldRed) problems.push(`S1 对照错位：${broken.join('+')} 期望${shouldRed ? '红' : '绿'}`);
   }
   // ② S2：子窗语料引用 main-pages 才有的类 ⇒ 必须命中；没引用 ⇒ 不得命中
   {
     const probe = 'zz-split-probe';
-    const hit = new RegExp('[^\\w-]' + probe + '[^\\w-]').test(`x class="${probe}" y`);
-    const miss = new RegExp('[^\\w-]' + probe + '[^\\w-]').test('x class="other-thing" y');
+    const hit = tokenInCorpus('c:' + probe, new Set(), `x class="${probe}" y`);
+    const miss = tokenInCorpus('c:' + probe, new Set(), 'x class="other-thing" y');
     if (!hit) problems.push('S2 对照：子窗引用了却没命中 ⇒ 该断言恒绿');
     if (miss) problems.push('S2 对照：未引用的类也被判命中 ⇒ 假阳性洪水');
   }
@@ -295,8 +321,8 @@ function selfTest() {
   }
   // ④ S4：main-pages 里出现 :root 必须判红
   {
-    const red = [...'.x{}\n:root { --zz: 1; }'.matchAll(/^(:root|\.theme-light)\s*\{/gm)].length > 0;
-    const green = [...'.x{}\n.card-y { --zz: 1; }'.matchAll(/^(:root|\.theme-light)\s*\{/gm)].length > 0;
+    const red = hasTokenBlock('.x{}\n:root { --zz: 1; }');
+    const green = hasTokenBlock('.x{}\n.card-y { --zz: 1; }');
     if (!red) problems.push('S4 对照：:root 没被抓到');
     if (green) problems.push('S4 对照：普通块被误判成 token 块');
   }

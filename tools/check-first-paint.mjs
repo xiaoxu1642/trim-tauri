@@ -23,10 +23,11 @@
 //
 // 用法：node tools/check-first-paint.mjs
 'use strict';
-import { readFileSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, statSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from './ps-origin.mjs';
 import { gate } from './lib/gate.mjs';
+import { scriptSrcs, styleLinks } from './lib/html-tags.mjs';
 
 const SRC = join(REPO_ROOT, 'src');
 const HTML = join(SRC, 'index.html');
@@ -97,18 +98,17 @@ export function judgeOverlap(staticRels, onDemand) {
 function parseHtml() {
   const html = readFileSync(HTML, 'utf8');
   const scripts = [];
-  const re = /<script([^>]*)\ssrc="([^"]+)"([^>]*)><\/script>/g;
-  for (const m of html.matchAll(re)) {
-    const rel = m[2].replace(/^(\.\.\/|\.\/|\/)+/, '').replace(/^src\//, '');
+  for (const s of scriptSrcs(html)) {
+    const rel = s.src.replace(/^(\.\.\/|\.\/|\/)+/, '').replace(/^src\//, '');
     scripts.push({
       rel,
-      defer: /\bdefer\b/.test(`${m[1]} ${m[3]}`),
+      defer: s.defer,
       size: existsSync(join(SRC, rel)) ? statSync(join(SRC, rel)).size : -1,
     });
   }
   const css = [];
-  for (const m of html.matchAll(/<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>/g)) {
-    const rel = m[1].replace(/^(\.\.\/|\.\/|\/)+/, '').replace(/^src\//, '');
+  for (const href of styleLinks(html)) {
+    const rel = href.replace(/^(\.\.\/|\.\/|\/)+/, '').replace(/^src\//, '');
     css.push({ rel, size: existsSync(join(SRC, rel)) ? statSync(join(SRC, rel)).size : -1 });
   }
   return { scripts, css, htmlSize: statSync(HTML).size };
@@ -206,6 +206,17 @@ else g.ok(`F1 首屏关键路径 ${total} B ≤ 上限 ${CAP_MAX} B（index.html
 const notDef = judgeNotDeferred(scripts, EXEMPT_NOT_DEFER);
 if (notDef.length) g.fail(`F2 有 ${notDef.length} 条静态脚本未加 defer（parser-blocking，全部落在「双击→窗口出现」路径上）：${JSON.stringify(notDef)}`);
 else g.ok(`F2 静态脚本除豁免的 ${EXEMPT_NOT_DEFER.join(', ')} 外全部带 defer（豁免理由：必须早于首次绘制挂主题类）`);
+
+// T1d-L01：子窗 HTML 的 head 内脚本同样不许 parser-blocking（body 末尾脚本不受此限）。
+for (const f of readdirSync(SRC).filter((n) => n.endsWith('.html'))) {
+  const html = readFileSync(join(SRC, f), 'utf8');
+  const head = html.split(/<\/head>/i)[0] || '';
+  const bad = scriptSrcs(head)
+    .map((s) => ({ rel: s.src.split('/').pop(), defer: s.defer }))
+    .filter((s) => !s.defer && !EXEMPT_NOT_DEFER.includes(`scripts/${s.rel}`))
+    .map((s) => s.rel);
+  if (bad.length) g.fail(`F2b ${f} 的 head 内脚本未加 defer：${JSON.stringify(bad)}`);
+}
 
 // F4 首屏 ∩ 按需
 const od = parseOnDemand();

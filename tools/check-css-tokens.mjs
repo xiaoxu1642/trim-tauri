@@ -62,7 +62,6 @@ const RE_NAME_LITERAL = /['"`](--[A-Za-z0-9_-]+)['"`]/g;
  */
 const ALLOW_UNDECLARED = new Map([
   ['--c', 'M20 分组色 token 兜底钩子（AGENTS §2），无写入方是预期'],
-  ['--cf', '同上（前景色一档）']
 ]);
 
 function listFiles(dir, filter) {
@@ -89,12 +88,16 @@ function lineOf(text, index) {
 // 圆角：字面值必须落档位 4/6/8/10/14（<4 禁字面值、≥90 胶囊放行）。
 function radiusViolations(text, rel) {
   const out = [];
-  for (const m of text.matchAll(/border(?:-(?:top|bottom)-(?:left|right))?-radius:\s*(\d+)px/g)) {
-    const px = Number(m[1]);
+  // T1d-M11：按整条声明取值，逐个 px 判档；var()/%/calc/inherit 不含字面 px，自然放行。
+  // 旧实现只认「单值 Npx」，`0 2px 2px 0` 这类多值写法整条从判据消失。
+  for (const m of text.matchAll(/border[a-z-]*radius\s*:\s*([^;}]+)/gi)) {
     const label = m[0].split(':')[0].trim();
-    if (px >= 90) continue;
-    if (px < 4) out.push(`${rel} ${label}: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
-    else if (![4, 6, 8, 10, 14].includes(px)) out.push(`${rel} ${label}: ${px}px（不在档位 4/6/8/10/14）`);
+    for (const pxm of m[1].matchAll(/(\d+(?:\.\d+)?)px/g)) {
+      const px = Number(pxm[1]);
+      if (px >= 90) continue;
+      if (px < 4) out.push(`${rel} ${label}: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
+      else if (![4, 6, 8, 10, 14].includes(px)) out.push(`${rel} ${label}: ${px}px（不在档位 4/6/8/10/14）`);
+    }
   }
   return out;
 }
@@ -115,15 +118,16 @@ function curveOffenders(text, easeTokens) {
   // 正向对照：违档必红 / 档位与胶囊放行 / 未定义引用必红 / 已定义与 ALLOW 放行 /
   // 曲线越集必红、值集内放行。
   const r = (px) => radiusViolations(`.x { border-radius: ${px}px; }`, 'fake.css').length;
-  const radiusOk = r(5) === 1 && r(2) === 1 && r(8) === 0 && r(999) === 0 && r(10) === 0;
+  const rMulti = radiusViolations('.x { border-radius: 0 2px 2px 0; }', 'fake.css').length;
+  const radiusOk = r(5) === 1 && r(2) === 1 && r(8) === 0 && r(999) === 0 && r(10) === 0 && rMulti === 2;
   const u = (refs, defined, allow = new Set()) => undeclaredTokenRefs(refs, defined, allow);
   const undefOk =
     u(new Map([['--ghost', []]]), new Set(), new Set()).length === 1 &&
     u(new Map([['--real', []]]), new Set(['--real']), new Set()).length === 0 &&
     u(new Map([['--allowed', []]]), new Set(), new Set(['--allowed'])).length === 0;
-  const ease = new Set(['0.23,1,0.32,1']);
+  const ease = new Set(['0.111,0.222,0.333,1']);
   const cBad = curveOffenders('.x { a: cubic-bezier(0.4,0,0.2,1); }', ease).length;
-  const cOk = curveOffenders('.x { a: cubic-bezier(0.23, 1, 0.32, 1); }', ease).length;
+  const cOk = curveOffenders('.x { a: cubic-bezier(0.111, 0.222, 0.333, 1); }', ease).length;
   if (!radiusOk || !undefOk || cBad !== 1 || cOk !== 0) {
     console.error(`✗ 正向对照失败：圆角=${radiusOk} 未定义引用=${undefOk} 曲线越集=${cBad}（应 1） 曲线放行=${cOk}（应 0）——三组判定器至少一组失灵`);
     process.exit(1);
@@ -219,6 +223,13 @@ for (const file of [...cssFiles, ...htmlFiles, ...jsFiles]) {
 
 // ---- 判红（v6-P2：判据本体是 undeclaredTokenRefs，与自检共用同一实现） ----
 const bad = undeclaredTokenRefs(refs, defined, ALLOW_UNDECLARED);
+// T1d-M01：豁免不是免检通道——条目必须仍有引用，且每处都带 fallback。
+const allowBad = [...ALLOW_UNDECLARED.keys()].filter((n) =>
+  !refs.has(n) || refs.get(n).some((s) => !s.hasFallback));
+if (allowBad.length) {
+  for (const n of allowBad) console.log(`✗ ALLOW_UNDECLARED 条目 ${n} 已失效（零引用或存在无 fallback 引用）`);
+  process.exit(1);
+}
 
 // ---- 圆角 token 纪律（v2 批次 D4，2026-10-01）----
 // 为什么跟 token 门禁放一起：都是「CSS 字面值绕过设计系统」的同类纪律。
@@ -252,7 +263,10 @@ for (const file of cssFiles) {
     EASE_TOKENS.add(m[1].split(',').map((x) => Number(x.trim())).join(','));
   }
 }
-const CURVE_EXEMPT = new Map([['splash.js', '开屏一次性走场（AGENTS §2 唯一豁免）']]);
+// T1d-L04：豁免按「文件 + 锚点子串」登记（§5.19 禁行号），同文件新增曲线不再整文件免检。
+const CURVE_EXEMPT = [
+  { file: 'splash.js', anchor: 'MORPH_MS / 1000', why: '开屏一次性走场（AGENTS §2 唯一豁免）' },
+];
 const curveBad = [];
 let curveSites = 0;
 {
@@ -267,17 +281,18 @@ let curveSites = 0;
     }
     // v6-P2：违例判定走 curveOffenders（与自检共用同一实现）；行号在这里补
     for (const off of curveOffenders(text, EASE_TOKENS)) {
-      if (CURVE_EXEMPT.has(f)) continue;
+      const near = text.slice(Math.max(0, off.index - 160), off.index + 160);
+      if (CURVE_EXEMPT.some((e) => e.file === f && near.includes(e.anchor))) continue;
       curveBad.push(`${f}:${text.slice(0, off.index).split('\n').length} cubic-bezier(${off.raw}) 不在 token 值集（${[...EASE_TOKENS].join(' | ')}）`);
     }
   }
 }
-console.log(`动效曲线纪律：${curveBad.length ? `${curveBad.length} 处越集` : `✓ JS 内 ${curveSites - CURVE_EXEMPT.size} 处曲线全在 token 值集`}`);
+console.log(`动效曲线纪律：${curveBad.length ? `${curveBad.length} 处越集` : `✓ JS 内 ${curveSites - CURVE_EXEMPT.length} 处曲线全在 token 值集`}`);
 for (const c of curveBad) console.log(`✗ ${c}`);
 // 正向对照：值集外样本必须判红、值集内样本必须放行（判定器自检）
 {
-  const inSet = EASE_TOKENS.size > 0 && EASE_TOKENS.has('0.23,1,0.32,1');
-  const outSet = !EASE_TOKENS.has('0.4,0,0.2,1');
+  const inSet = EASE_TOKENS.size > 0;
+  const outSet = !EASE_TOKENS.has('0.123,0.456,0.789,1');
   if (!inSet || !outSet) {
     console.log('✗ 动效曲线判定器失效（token 值集解析异常）');
     curveBad.push('判定器自检失败');
@@ -306,7 +321,112 @@ if (curveSites === 0) {
   }
 }
 
-if (!bad.length && !radiusBad.length && !curveBad.length) {
+// ---- 反向棘轮（T1d-M01）：定义但全仓零消费的 token 必须逐条登记理由 ----
+// 与 ALLOW_UNDECLARED（引用无定义）方向相反；新增死 token 不在表内即红。
+const DEAD_TOKEN_ALLOW = new Map([
+  // spacing：布局档位表（保留栅格档，当前页面未消费；新增布局优先走它）
+  ['--spacing-1', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-2', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-3', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-4', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-5', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-6', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-8', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-10', '布局间距档位（当前未消费，保留栅格表）'],
+  ['--spacing-12', '布局间距档位（当前未消费，保留栅格表）'],
+  // 材质/玻璃：保留的语义档，当前只消费主档
+  ['--bg-acrylic', '材质层语义档（当前未消费，保留给亚克力面）'],
+  ['--bg-mica', '材质层语义档（当前未消费，保留给 Mica 面）'],
+  ['--bg-overlay', '浮层底色档（当前未消费，保留给覆盖层）'],
+  ['--bg-surface-1', '表面层级档（当前未消费，保留给分层卡片）'],
+  ['--bg-surface-3', '表面层级档（当前未消费，保留给分层卡片）'],
+  ['--glass-blur-faint', '液态玻璃模糊三档之一（当前只消费 --glass-blur 主档，保留弱/中档）'],
+  ['--glass-blur-soft', '液态玻璃模糊三档之一（当前只消费 --glass-blur 主档，保留弱/中档）'],
+  ['--glass-blur-strong', '液态玻璃模糊三档之一（当前只消费 --glass-blur 主档，保留强档）'],
+  ['--lg-glass-fg', '液态玻璃前景状态槽（当前未消费，保留给运行时材质调试）'],
+  ['--lg-mx', '液态玻璃指针位置状态槽（JS 写入、样式当前未消费）'],
+  ['--lg-my', '液态玻璃指针位置状态槽（JS 写入、样式当前未消费）'],
+  // 语义色/交互态：保留档
+  ['--accent-glow', 'accent 发光态（当前未接入，保留交互态档）'],
+  ['--accent-press', 'accent 按下态（当前未接入，保留交互态档）'],
+  ['--protected-rgb', '受保护色 RGB 档（当前 UI 未使用；与 --protected 同值）'],
+  ['--protected-soft', '受保护色浅染档（当前 UI 未使用；与 --protected 同值）'],
+  // 尺寸/阴影：兼容或预留档
+  ['--radius-xl', '圆角兼容别名（14px，全仓零引用；保留旧样式兼容）'],
+  ['--fs-page-title', '页面标题字号档（当前未消费，保留字号表档位）'],
+  ['--shadow-island-flyout', '浮岛浮层阴影档（当前未消费，保留浮层阴影）'],
+  ['--shadow-tooltip', '提示气泡阴影档（当前未消费，保留提示阴影）'],
+]);
+
+const deadTokens = [...defined].filter((n) => !refs.has(n) && !DEAD_TOKEN_ALLOW.has(n)).sort();
+const staleDead = [...DEAD_TOKEN_ALLOW.keys()].filter((n) => !defined.has(n) || refs.has(n));
+if (deadTokens.length || staleDead.length) {
+  for (const n of deadTokens) console.log(`✗ 未登记的零消费 token：${n}（定义于 ${declaredIn.get(n)}）`);
+  for (const n of staleDead) console.log(`✗ 死 token 登记已失效（已有消费方或定义被删）：${n}`);
+  console.log(`\n反向棘轮缺口：${deadTokens.length} 个未登记 + ${staleDead.length} 个失效登记`);
+  process.exit(1);
+}
+console.log(`✓ 反向棘轮：${defined.size} 个定义中零消费 ${DEAD_TOKEN_ALLOW.size} 条均有理由`);
+
+// ---- 三值同步（T1d-M05）：--x ⇄ --x-rgb ⇄ --x-soft 的三通道必须同源 ----
+const TRIPLET_BASES = ['--warning', '--success', '--danger', '--info', '--protected'];
+function judgeTriplets(defs) {
+  const bad = [];
+  for (const base of TRIPLET_BASES) {
+    const hex = defs[base];
+    const rgb = defs[`${base}-rgb`];
+    const soft = defs[`${base}-soft`];
+    if (!hex || !rgb || !soft) {
+      bad.push(`${base} 缺 hex/-rgb/-soft 之一`);
+      continue;
+    }
+    const hm = hex.match(/^#([0-9a-f]{6})$/i);
+    if (!hm) {
+      bad.push(`${base} 不是 6 位 hex：${hex}`);
+      continue;
+    }
+    const want = [0, 2, 4].map((i) => parseInt(hm[1].slice(i, i + 2), 16)).join(',');
+    const gotRgb = rgb.split(',').map((x) => x.trim()).join(',');
+    if (want !== gotRgb) bad.push(`${base}-rgb=${rgb} 与 ${hex} 不同源`);
+    const sm = soft.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (!sm) bad.push(`${base}-soft 不是 rgba()：${soft}`);
+    else if ([sm[1], sm[2], sm[3]].join(',') !== want) bad.push(`${base}-soft=${soft} 与 ${hex} 不同源`);
+  }
+  return bad;
+}
+const tripletProblems = [];
+{
+  const defsOf = (block) => {
+    const out = {};
+    for (const m of block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) out[m[1]] = m[2].trim();
+    return out;
+  };
+  const mainCssText = blankComments(readFileSync(join(REPO_ROOT, 'src', 'styles', 'main.css'), 'utf8'));
+  const rootM = mainCssText.match(/:root\s*\{([\s\S]*?)\}/);
+  const lightM = mainCssText.match(/\.theme-light\s*\{([\s\S]*?)\}/);
+  if (!rootM || !lightM) {
+    tripletProblems.push('theme token 块解析失败（:root / .theme-light 未找到）');
+  } else {
+    tripletProblems.push(...judgeTriplets(defsOf(rootM[1])));
+    tripletProblems.push(...judgeTriplets(defsOf(lightM[1])));
+  }
+  // 对照：一个错三元组必须判红、干净样本必须放行。
+  const good = {
+    '--warning': '#F0B24D', '--warning-rgb': '240, 178, 77', '--warning-soft': 'rgba(240, 178, 77, 0.14)',
+    '--success': '#3DBE7B', '--success-rgb': '61, 190, 123', '--success-soft': 'rgba(61, 190, 123, 0.14)',
+    '--danger': '#F0524D', '--danger-rgb': '240, 82, 77', '--danger-soft': 'rgba(240, 82, 77, 0.14)',
+    '--info': '#4DA3F0', '--info-rgb': '77, 163, 240', '--info-soft': 'rgba(77, 163, 240, 0.14)',
+    '--protected': '#6A45D6', '--protected-rgb': '106, 69, 214', '--protected-soft': 'rgba(106, 69, 214, 0.1)',
+  };
+  const bad = { ...good, '--danger-rgb': '240, 82, 78' };
+  if (judgeTriplets(good).length !== 0 || judgeTriplets(bad).length !== 1) {
+    console.error('✗ 三值同步判定器自检失败（干净样本误报 / 错三元组未判红）');
+    process.exit(1);
+  }
+}
+if (tripletProblems.length) for (const p of tripletProblems) console.log(`✗ 三值同步：${p}`);
+
+if (!bad.length && !radiusBad.length && !curveBad.length && !tripletProblems.length) {
   console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）');
   process.exit(0);
 }
@@ -317,5 +437,5 @@ for (const name of bad) {
   console.log(`✗ ${name} 无定义 —— ${sites.length} 处引用：${sites.map((s) => s.at).join(', ')}`);
   console.log(`  ${noFallback ? `其中 ${noFallback} 处连 fallback 都没有 ⇒ 整条声明被解析器丢弃（功能静默消失）` : '全部恒吃 fallback ⇒ token 被架空'}`);
 }
-console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）${radiusBad.length ? `；${radiusBad.length} 处圆角违档（v2 批次 D4）` : ''}${curveBad.length ? `；${curveBad.length} 处动效曲线越集（F5-G-5）` : ''}`);
+console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）${radiusBad.length ? `；${radiusBad.length} 处圆角违档（v2 批次 D4）` : ''}${curveBad.length ? `；${curveBad.length} 处动效曲线越集（F5-G-5）` : ''}${tripletProblems.length ? `；${tripletProblems.length} 处三值不同步（T1d-M05）` : ''}`);
 process.exit(1);

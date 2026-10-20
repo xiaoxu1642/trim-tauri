@@ -35,6 +35,30 @@ const check = (ok, label, detail = '') => {
 console.log('=== Treemap 布局门禁 ===\n');
 
 const EPS = 1e-6;
+function judgeCells(cells, w, h, sizes) {
+  let inside = true, noOverlap = true, fill = true, proportional = true;
+  let worstAspect = 0, area = 0;
+  for (const c of cells) {
+    area += c.w * c.h;
+    if (c.x < -EPS || c.y < -EPS || c.x + c.w > w + 1e-6 || c.y + c.h > h + 1e-6) inside = false;
+    worstAspect = Math.max(worstAspect, Math.max(c.w / c.h, c.h / c.w));
+  }
+  for (let i = 0; i < cells.length; i++) {
+    for (let j = i + 1; j < cells.length; j++) {
+      const a = cells[i], b = cells[j];
+      const ix = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+      const iy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+      if (ix > 1e-6 && iy > 1e-6) noOverlap = false;
+    }
+  }
+  if (Math.abs((area / (w * h)) * 100 - 100) > 0.5) fill = false;
+  const total = sizes.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < cells.length; i++) {
+    const share = (cells[i].w * cells[i].h) / (w * h);
+    if (Math.abs(share - sizes[i] / total) > 0.01) proportional = false;
+  }
+  return { inside, noOverlap, fill, proportional, worstAspect };
+}
 const sizes = [500, 300, 120, 80, 40, 20, 7, 3, 1, 1];
 const items = sizes.map((v, i) => ({ size: v, path: `C:/x${i}` }));
 const boxes = [[100, 46], [100, 10], [10, 200], [1000, 300], [3, 3]];
@@ -44,26 +68,12 @@ let worstAspect = 0;
 for (const [w, h] of boxes) {
   const cells = layout(items, w, h);
   if (cells.length !== items.length) allCount = false;
-  let area = 0;
-  for (const c of cells) {
-    area += c.w * c.h;
-    if (c.x < -EPS || c.y < -EPS || c.x + c.w > w + 1e-6 || c.y + c.h > h + 1e-6) allInside = false;
-    worstAspect = Math.max(worstAspect, Math.max(c.w / c.h, c.h / c.w));
-  }
-  for (let i = 0; i < cells.length; i++) {
-    for (let j = i + 1; j < cells.length; j++) {
-      const a = cells[i], b = cells[j];
-      const ix = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
-      const iy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
-      if (ix > 1e-6 && iy > 1e-6) allNoOverlap = false;
-    }
-  }
-  if (Math.abs((area / (w * h)) * 100 - 100) > 0.5) allFill = false;
-  const total = sizes.reduce((a, b) => a + b, 0);
-  for (let i = 0; i < cells.length; i++) {
-    const share = (cells[i].w * cells[i].h) / (w * h);
-    if (Math.abs(share - sizes[i] / total) > 0.01) allProportional = false;
-  }
+  const j = judgeCells(cells, w, h, sizes);
+  if (!j.inside) allInside = false;
+  if (!j.noOverlap) allNoOverlap = false;
+  if (!j.fill) allFill = false;
+  if (!j.proportional) allProportional = false;
+  worstAspect = Math.max(worstAspect, j.worstAspect);
 }
 
 check(allCount, '项数守恒：每个非零体积项都拿到一个格子');
@@ -71,6 +81,20 @@ check(allInside, '格子不越出容器（越界会被 overflow 裁成"目录变
 check(allNoOverlap, '格子互不重叠（重叠 = 点 A 跳到 B）');
 check(allFill, '铺满容器：面积和 = 100%（±0.5%）');
 check(allProportional, '面积占比 = 体积占比（±1%）');
+
+// T1d-L03：性质判据必须能被合成违例打红（此前只喂真实 layout 结果）。
+{
+  const bad = judgeCells(
+    [{ x: -1, y: 0, w: 60, h: 60 }, { x: 0, y: 0, w: 60, h: 60 }],
+    100, 100, [1, 1],
+  );
+  const good = judgeCells(layout([{ size: 1, path: 'a' }, { size: 1, path: 'b' }], 100, 100), 100, 100, [1, 1]);
+  check(
+    !bad.inside && !bad.noOverlap && !bad.fill && good.inside && good.noOverlap,
+    '正向对照：越界/重叠/漏铺的合成样本必判红，真实 layout 样本放行',
+    `坏样本 inside=${bad.inside} overlap=${bad.noOverlap} fill=${bad.fill}`,
+  );
+}
 
 // 退化输入：空 / 全 0 / 单项 / 非正尺寸
 const empty = layout([], 100, 46);

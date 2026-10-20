@@ -100,6 +100,11 @@ console.log('=== 前端产物体积门禁 ===\n');
 
 const r = judgeAssets(files, BASELINE, PER_FILE_LIMIT, TOTAL_LIMIT);
 
+// T1d-M10：扫描面为空不能三段全绿（walkFiles 对不存在目录返回 []）。
+if (files.length === 0) {
+  g.fail('扫描面 0 个文件 ⇒ src/ 目录配置失效（不是体积合规）');
+}
+
 // ---- A. 未登记的超大单文件 ----
 check(
   r.unlisted.length === 0,
@@ -110,18 +115,23 @@ check(
 );
 
 // ---- B. 登记项棘轮（超 cap / 失踪条目）----
-check(
-  r.missing.length === 0 && r.grown.length === 0,
-  `B. ${Object.keys(BASELINE).length} 项基线资源均未超登记体积`,
-  [
-    r.missing.length ? `条目指向的文件已不存在 ${JSON.stringify(r.missing)}（请从 BASELINE 移除）` : '',
-    r.grown.length
-      ? `超过登记体积 ${JSON.stringify(r.grown.map((f) => `${f.rel} ${fmt(f.size)} > cap ${fmt(BASELINE[f.rel])}`))}（确需变大请带理由调 cap）`
-      : '',
-  ]
-    .filter(Boolean)
-    .join('；'),
-);
+if (Object.keys(BASELINE).length === 0) {
+  // T1d-M10：空基线时 B 段没有断言对象——显式 SKIP，不拿 ✓ 冒充判过。
+  console.log('– SKIP B. 0 项基线资源，本节未校验（新增重资源时先登记进 BASELINE）');
+} else {
+  check(
+    r.missing.length === 0 && r.grown.length === 0,
+    `B. ${Object.keys(BASELINE).length} 项基线资源均未超登记体积`,
+    [
+      r.missing.length ? `条目指向的文件已不存在 ${JSON.stringify(r.missing)}（请从 BASELINE 移除）` : '',
+      r.grown.length
+        ? `超过登记体积 ${JSON.stringify(r.grown.map((f) => `${f.rel} ${fmt(f.size)} > cap ${fmt(BASELINE[f.rel])}`))}（确需变大请带理由调 cap）`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('；'),
+  );
+}
 
 // ---- C. 全量兜底 ----
 check(

@@ -23,6 +23,19 @@ const check = (ok, label, detail = '') => {
 };
 
 const htmlFiles = readdirSync(SRC).filter((f) => f.endsWith('.html'));
+// T1d-M08：内联 script 判据的唯一实现（真仓扫描与对照共用）。
+const stripHtmlComments = (text) => text.replace(/<!--[\s\S]*?-->/g, ' ');
+const hasInlineScript = (text) => /<script(?![^>]*\bsrc=)[^>]*>/i.test(stripHtmlComments(text));
+// T1d-M12：ds 使用方集合现算（剥注释后逐文件），不是手抄一个 modal.js。
+const jsFiles = readdirSync(join(SRC, 'scripts')).filter((f) => f.endsWith('.js'));
+const dsUsers = new Set();
+for (const f of jsFiles) {
+  if (f === 'ds.js') continue;
+  const code = readFileSync(join(SRC, 'scripts', f), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+  if (/\bwindow\.ds\b|\bds\.[A-Za-z_$]/.test(code)) dsUsers.add(f);
+}
 const inlineHits = [];
 const missingDs = [];
 const orderHits = [];
@@ -32,24 +45,27 @@ for (const f of htmlFiles) {
   const text = readFileSync(join(SRC, f), 'utf8');
   // 1. 内联 script（无 src 的 <script> 或 <script>…</script> 带体）。注释里的字样
   //    先剥掉再判——HTML 注释里引用「禁内联 script」属文档，不是违规。
-  const clean = text.replace(/<!--[\s\S]*?-->/g, ' ');
-  if (/<script(?![^>]*\bsrc=)[^>]*>/i.test(clean)) {
+  const clean = stripHtmlComments(text);
+  if (hasInlineScript(text)) {
     inlineHits.push(f);
   }
   // 2. ds.css + ds.js 挂载
   if (!/href="[^"]*styles\/ds\.css"/.test(clean)) missingDs.push(`${f}: ds.css`);
   if (!/src="[^"]*scripts\/ds\.js"/.test(clean)) missingDs.push(`${f}: ds.js`);
   // 3. 加载序（AGENTS §2 实口径）：spotlight.js 在 liquid-glass.js 之后；
-  //    ds.js 先于确证的 window.ds 使用方（modal.js；liquid-glass 已核实零 ds 依赖，不在此列）
-  const posDs = clean.search(/src="[^"]*scripts\/ds\.js"/);
+  //    ds.js 先于**全部**现算出的 window.ds 使用方（T1d-M12）。
+  const srcs = [...clean.matchAll(/<script[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1]);
+  const dsIdx = srcs.findIndex((s) => /scripts\/ds\.js$/.test(s));
   const posGlass = clean.search(/src="[^"]*scripts\/liquid-glass\.js"/);
   const posSpot = clean.search(/src="[^"]*scripts\/spotlight\.js"/);
   if (posGlass >= 0 && posSpot >= 0 && posSpot < posGlass) {
     orderHits.push(`${f}: spotlight.js 未在 liquid-glass.js 之后`);
   }
-  const posModal = clean.search(/src="[^"]*scripts\/modal\.js"/);
-  if (posModal >= 0 && posDs >= 0 && posModal < posDs) {
-    orderHits.push(`${f}: modal.js（ds 使用方）先于 ds.js 加载`);
+  for (const [i, s] of srcs.entries()) {
+    const name = s.split('/').pop();
+    if (dsUsers.has(name) && dsIdx >= 0 && i < dsIdx) {
+      orderHits.push(`${f}: ${name}（ds 使用方）先于 ds.js 加载`);
+    }
   }
   // 4. 同文档 id 唯一（P2-4 / F3-M05）：重复 id 会让 getElementById 恒取文档里第一个 ——
   //    bgBlurVal×2 曾让原生滑块读数写进另一套控件的 span、自己恒停 0%（界面与真实值相反）。
@@ -71,7 +87,7 @@ check(
 );
 check(
   orderHits.length === 0,
-  '3. 加载序：spotlight 在 liquid-glass 之后；ds.js 先于确证的 ds 使用方',
+  '3. 加载序：spotlight 在 liquid-glass 之后；ds.js 先于全部现算 ds 使用方',
   orderHits.join('；'),
 );
 check(
@@ -147,8 +163,7 @@ if (fail > 0) {
 const POSITIVE_CONTROLS = (() => {
   const dirty = '<body><script>alert(1)</script></body>';
   const clean = '<script src="scripts/app.js"></script>';
-  const re = /<script(?![^>]*\bsrc=)[^>]*>/i;
-  if (!re.test(dirty.replace(/<!--[\s\S]*?-->/g, ' ')) || re.test(clean)) {
+  if (!hasInlineScript(dirty) || hasInlineScript(clean)) {
     console.error('✗ 正向对照失败：内联 script 判定失效');
     process.exit(1);
   }

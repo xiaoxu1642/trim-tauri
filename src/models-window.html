@@ -48,11 +48,11 @@
   <script src="scripts/tauri-api.js"></script>
   <!-- 子窗口材质/主题同步：electron-mica + data-material + 主题类（预览窗不加载） -->
   <script src="scripts/window-material.js"></script>
+  <!-- 审查 M17：本窗的删除确认与 data-tip 都走 window.ds；liquid-glass 的
+       reducedMotion 求值也走 window.ds（U-A3），必须排在它之前。 -->
+  <script src="scripts/ds.js"></script>
   <!-- 液态玻璃引擎：子窗口与主窗共用四档效果（按钮折射/弹性形动），分段栏等选择器在子窗无命中自动跳过 -->
   <script src="scripts/liquid-glass.js"></script>
-  <!-- 审查 M17：本窗的删除确认与 data-tip 都走 window.ds，此前整条链里没有 ds.js
-       ⇒ ds.css 白挂、tooltip 退回原生 title、modal 的焦点陷阱按缺席降级。 -->
-  <script src="scripts/ds.js"></script>
   <!-- 2026-10-03 用户裁定「本窗弹窗改自绘」：本窗原先**只加载了 ds.js**，
        modal.js 从未在此挂载 ⇒ 本窗根本没有弹窗骨架（ds.focusTrap 也只能按缺席降级）。
        覆盖已有密钥/删除配置这类破坏性动作此前连二次确认都没有。

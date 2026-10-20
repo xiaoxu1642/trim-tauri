@@ -23,6 +23,7 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { gate } from './lib/gate.mjs';
+import { styleLinks } from './lib/html-tags.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
@@ -96,8 +97,9 @@ function titleViolations(text, isJs) {
 // v4 F1 红线：归零通配从 `body > *` 起算会漏掉 **body 自身**（三子窗 body fadeIn
 // 就挂在 body 上）；滑块拇指 `::-webkit-slider-thumb` 是厂商伪元素，归零表的
 // ::before/::after 两式覆盖不到 —— 两处各配断言，漏一处即红（点名 `body` 自身）。
-function rmViolations(css) {
-  const out = [];
+// T1d-M08：焦点环判据的唯一实现（自检与真仓扫描共用，不许各写一份正则）。
+const focusVisibleMissing = (css) => !/:focus-visible/.test(css);
+function rmViolations(css) {  const out = [];
   const blocks = [...css.matchAll(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/g)]
     .map((m) => m[1])
     .join('\n');
@@ -178,7 +180,8 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   // 焦点环（v5-K05 批次 8 补，门禁候选「6 条断言 0 处管焦点环」）：判据 = 该窗加载的
   // CSS 合并集存在 :focus-visible 规则（A3 裁决：ds.css:181 规则以 bg+color 作替代
   // 指示，存在性判据即可，不规定实现形态）。
-  check(!/:focus-visible/.test('body { color: red; }'), '对照④d：无 :focus-visible 规则的样本必须判红');
+  check(focusVisibleMissing('body { color: red; }'), '对照④d：无 :focus-visible 规则的样本必须判红');
+  check(!focusVisibleMissing(':focus-visible { outline: 2px solid; }'), '对照④e：有焦点环的样本必须放行');
 
   const badDup = "a?.addEventListener('click', f1);\na?.addEventListener('click', f2);";
   const goodDup = "a?.addEventListener('click', f1);\nb.addEventListener('click', f2);\nrows.forEach(el => el.addEventListener('click', f3));";
@@ -228,9 +231,7 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
   let windowCount = 0;
   for (const p of htmlFiles) {
     const html = read(p);
-    const links = [...html.matchAll(/<link[^>]+href="([^"]+\.css)"/g)].map((m) =>
-      m[1].split('/').pop(),
-    );
+    const links = styleLinks(html).map((h) => h.split('/').pop());
     if (links.length === 0) {
       g.fail(`${rel(p)}：没有解析到任何 stylesheet link（窗体 CSS 覆盖判定失明）`);
       continue;
@@ -240,7 +241,7 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
     for (const v of rmViolations(merged)) {
       g.fail(`${rel(p)}：${v}（该窗加载 ${links.join(', ')}）`);
     }
-    if (!/:focus-visible/.test(merged)) {
+    if (focusVisibleMissing(merged)) {
       g.fail(`${rel(p)}：该窗加载的 CSS（${links.join(', ')}）无 :focus-visible 规则（键盘焦点不可见）`);
     }
   }
