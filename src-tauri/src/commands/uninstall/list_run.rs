@@ -1343,8 +1343,12 @@ mod wait_outcome_tests {
         let got = std::fs::read_to_string(&probe).expect("cmd 没写出 cwd —— lpDirectory 可能没生效");
         let _ = std::fs::remove_file(&probe);
         let got = got.trim().trim_end_matches('\\').to_lowercase();
+        // C08 双轨后 app_data_dir() 在 lib 单测态是 `/` 分隔的构造路径，而子进程报回的
+        // cwd 恒为 `\` 形态——两边都归一到 `\` 再比（真实数据根天然就是 `\`，不受影响）
+        let got = got.replace('/', "\\");
         let want = crate::engine::paths::app_data_dir();
-        let want = want.to_string_lossy().trim_end_matches('\\').to_lowercase();
+        let want = want.to_string_lossy().replace('/', "\\");
+        let want = want.trim_end_matches('\\').to_lowercase();
         assert_eq!(got, want, "子进程工作目录必须等于数据目录（R5：CWD 不可枚举，必须显式钉根）");
         // 反向对照：若没设 lpDirectory，子进程会继承本测试进程的 cwd——两者不同才有对照意义
         let here = std::env::current_dir().unwrap_or_default();
@@ -1353,5 +1357,105 @@ mod wait_outcome_tests {
             here.to_string_lossy().trim_end_matches('\\').to_lowercase(),
             "数据目录与测试进程 cwd 恰好相同，本探针失去对照意义（换一台机器复核）"
         );
+    }
+
+    /// R2b-U01（2026-10-20，v7.2 C05 前置取证）真机探针（`#[ignore]`）：裸名 exe +
+    /// `lpDirectory=数据目录` 时 Windows 的真实解析顺序——`R2b-K01` 🔴 的危害成立条件。
+    /// 两段：① 独名替身（System32 无同名、PATH 无同名）⇒ 判「lpDirectory 是否在裸名
+    /// 解析路径内」；② msiexec.exe 同名替身（System32 必有真身）⇒ 判「谁优先」。
+    /// ② 的实参给 `/x {全零 GUID} /qn`：若真身被启动会静默退出 1605、不写标记。
+    /// 2026-10-20 首轮实测已定口径：lpDirectory **只钉工作目录、不参与裸名文件解析**
+    /// （① 独名替身必然不被启动——找不到解析目标时 ShellExecute 走 OpenWith/取消，
+    /// 表现为 ERROR_CANCELLED；② 真身被解析并触发自动提权决策）。因此两段的判据：
+    /// **标记文件命中 ⇒ lpDirectory 优先（危害成立）；未命中 ⇒ System32 优先（危害不成立）**，
+    /// 未命中时的 Err/ElevationDeclined/1605 都是「真身被解析」的不同环境表现，均计入。
+    /// 替身落点走 `app_data_dir()`——lib 单测态被 C08 双轨隔离进 `target/test-data-root/lib`，
+    /// 不碰真实数据根。C05 修复（msiexec 走 PINNED 绝对路径）后复跑：② 必须仍是
+    /// 「System32 优先」——探针从「观测危害」转为「回归哨兵」，届时在断言里钉死方向。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机探针：rustc 编译替身 exe 并真实启动一次"]
+    fn r2b_u01_裸名解析序_真机探针() {
+        use std::process::Command;
+
+        // rustc 不可用就显式 skip（不 ENOENT 崩、不打假 ✓）
+        if let Err(e) = Command::new("rustc").arg("--version").output() {
+            println!("SKIP：rustc 不可用（{e}），本探针未执行——lpDirectory 解析序仍未取证");
+            return;
+        }
+        let workdir = crate::engine::paths::app_data_dir();
+        std::fs::create_dir_all(&workdir).expect("建测试数据根失败");
+        let marker = workdir.join("r2b-u01-marker.txt");
+        // 替身本体：无窗口子系统，起来就往自己的工作目录（= lpDirectory）写标记后退出
+        let standin_src = "#![windows_subsystem = \"windows\"]\nfn main() { let _ = std::fs::write(\"r2b-u01-marker.txt\", b\"standin-ran\"); }\n";
+        let src_path = std::env::temp_dir().join("trim-r2b-u01-standin.rs");
+        std::fs::write(&src_path, standin_src).expect("写替身源码失败");
+
+        let launch = |bare: &str, args: &str| {
+            let _ = std::fs::remove_file(&marker);
+            let w = unsafe { shell_run_wait(bare, args) };
+            let ran_standin = marker.exists();
+            (w, ran_standin)
+        };
+        // UninstallerWait 未实现 Debug：结局统一手写渲染（探针只读，不动生产类型）
+        let show = |w: &Result<UninstallerWait, String>| match w {
+            Ok(UninstallerWait::Exited(c)) => format!("Exited({c})"),
+            Ok(UninstallerWait::TimedOut) => "TimedOut(退出码未知)".to_string(),
+            Ok(UninstallerWait::ElevationDeclined) => "ElevationDeclined".to_string(),
+            Err(e) => format!("Err({e})"),
+        };
+        // 装置自证：替身在测试外是可执行体（编译产物存在且非空）。若标记命中，证据才可信
+        let compile = |exe: &std::path::Path, what: &str| {
+            let out = Command::new("rustc")
+                .args(["-O", &src_path.to_string_lossy(), "-o", &exe.to_string_lossy()])
+                .output()
+                .expect("rustc 编译替身失败");
+            assert!(out.status.success(), "rustc 编译{what}失败: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(exe.metadata().map(|m| m.len() > 0).unwrap_or(false), "{what}编译产物为空——装置失效");
+        };
+
+        // ---- 第①段：独名替身（System32/PATH 无同名）——lpDirectory 在不在裸名解析路径内 ----
+        let unique_exe = workdir.join("trim-r2b-u01-standin.exe");
+        compile(&unique_exe, "独名替身");
+        let (w1, s1) = launch("trim-r2b-u01-standin.exe", "");
+        println!("① 独名替身: 结果={} 替身被启动={s1}", show(&w1));
+        let v1 = if s1 {
+            "lpDirectory 参与裸名文件解析（标记命中）——K01 前提获得支持，C05 必须按 PINNED 绝对路径修"
+        } else {
+            "lpDirectory 不参与裸名文件解析（独名也解析不到 ⇒ 标记未命中；ShellExecute 相对路径搜索序只有 当前目录/Windows/System32/PATH）"
+        };
+        println!("① 裁决：{v1}");
+
+        // ---- 第②段：msiexec.exe 同名替身——与 System32 真身谁优先 ----
+        let msi_standin = workdir.join("msiexec.exe");
+        compile(&msi_standin, "msiexec 替身");
+        let (w2, s2) = launch("msiexec.exe", "/x {{00000000-0000-0000-0000-000000000000}} /qn");
+        println!("② msiexec 同名: 结果={} 替身被启动={s2}", show(&w2));
+        let v2 = if s2 {
+            "lpDirectory 优先于 System32 —— R2b-K01 危害成立（C05 按 PINNED 绝对路径修）".to_string()
+        } else {
+            format!(
+                "System32 优先 —— R2b-K01 的「lpDirectory 优先」前提不成立（真身被解析；{} 为该环境下真身触发的提权决策/静默退出的表现）",
+                show(&w2)
+            )
+        };
+        println!("② 裁决：{v2}");
+
+        // 取证纪律：两段结局必须可判决——标记命中即危害成立；未命中必须落在「解析失败/
+        // 真身被启动」的已知表现集内，不许出现 TimedOut 这类无法归因的悬置态
+        assert!(
+            !matches!(&w1, Ok(UninstallerWait::TimedOut)) && !matches!(&w2, Ok(UninstallerWait::TimedOut)),
+            "出现 TimedOut 悬置态——替身或真身没退出，探针无法归因，人工复核"
+        );
+        assert_eq!(
+            s1, s2,
+            "①②裁决矛盾（独名命中而同名未命中，或反之）——解析序观测异常，人工复核"
+        );
+
+        // 清场（尽力而为；lib 测试根在 target/ 内，漏网也会随 cargo clean 消失）
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(&unique_exe);
+        let _ = std::fs::remove_file(&msi_standin);
+        let _ = std::fs::remove_file(&src_path);
     }
 }
