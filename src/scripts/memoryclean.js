@@ -284,7 +284,12 @@
       return;
     }
     memBusy = true;
-    Promise.resolve().then(fn).finally(() => { memBusy = false; });
+    Promise.resolve().then(fn).finally(() => { memBusy = false; }).catch((e) => {
+      // A2-M04：finally 只负责解锁；reject 必须有自己的可见出口，不能落全局静默日志。
+      const msg = (e && e.message) || String(e);
+      window.app?.toast?.('error', '操作未完成：' + msg);
+      window.app?.log?.('warn', '内存页操作未完成：' + msg);
+    });
   }
 
   async function runClean(items) {
@@ -305,7 +310,7 @@
     // 危险区域二次确认（修改列表 / 备用列表全部）
     const dangerous = regions.filter(r => r.risk === 'high');
     if (dangerous.length) {
-      const ok = await window.app.confirmDanger(
+      const ok = await window.app?.confirmDanger?.(
         '高危内存清理确认',
         `以下区域属于高危操作，可能导致系统短暂卡顿或需要重新读取数据：\n\n` +
         dangerous.map(r => `· ${r.name}`).join('\n'),

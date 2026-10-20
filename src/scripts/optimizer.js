@@ -1836,14 +1836,16 @@
           const resp = await window.api.optimizer.staleDismiss(ids);
           if (resp && resp.success) {
             window.app?.toast('info', `已忽略这 ${ids.length} 项的启动提醒；重新执行或还原后忽略会自动失效`, 5000);
+            // A2-M05：只有记账真的落盘才收起横幅；写失败时保持可见，用户还能重试。
+            banner.style.display = 'none';
           } else {
             window.app?.toast('error', '忽略失败：' + ((resp && resp.message) || '未知原因'));
           }
         } catch (e) {
           window.app?.toast('error', '忽略失败：' + ((e && e.message) || e));
+        } finally {
+          dismissBtn.disabled = false;
         }
-        banner.style.display = 'none';
-        dismissBtn.disabled = false;
       };
     }
   }

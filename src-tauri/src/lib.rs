@@ -1052,6 +1052,45 @@ mod tests {
         assert!(include_str!("commands/fileclean.rs").contains("o.insert(\"degraded\".into(), json!(degraded))"));
     }
 
+    /// U-A2（v7.2 P1）：Promise 出口与软锁的源码契约（A2-L02 报告后已修，附反向确认）。
+    #[test]
+    fn u_a2_promise_exit_contracts() {
+        assert!(
+            include_str!("../../src/scripts/residue-window.js")
+                .contains("if (hint) hint.textContent = '正在清理残留…';"),
+            "A2-M01：置锁后的 DOM 写必须进 try 且守卫"
+        );
+        assert!(
+            include_str!("../../src/scripts/uninstall.js").contains("running = true;\n    try {"),
+            "A2-M02：await 必须移进 try"
+        );
+        assert!(
+            include_str!("../../src/scripts/finder.js").contains("s.scanning = false; // A2-M03"),
+            "A2-M03：早退分支必须复位 mutex"
+        );
+        assert!(
+            include_str!("../../src/scripts/memoryclean.js")
+                .contains(".finally(() => { memBusy = false; }).catch"),
+            "A2-M04：finally 后必须有 catch"
+        );
+        assert!(
+            include_str!("../../src/scripts/optimizer.js").contains("A2-M05"),
+            "A2-M05：横幅收起必须受写成功门控"
+        );
+        assert!(
+            include_str!("../../src/scripts/app.js").contains("await window.api?.app?.openExternal?.(url)"),
+            "A2-L01：openExternal 必须 await"
+        );
+        assert!(
+            include_str!("../../src/scripts/tauri-api.js").contains("pluginInvoke('minimize').catch"),
+            "A2-L03：minimize 必须接 catch"
+        );
+        assert!(
+            include_str!("../../src/scripts/pathbinding.js").contains("背景图列表加载失败"),
+            "A2-L02：listBg 链必须有 catch（报告后已修，防回退）"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

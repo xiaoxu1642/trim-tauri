@@ -951,22 +951,30 @@
     if (key === 'empty') { s.pageF = 1; s.pageD = 1; }
     if (key === 'dups') { s.pageDup = 1; }
     const scanBtn = document.getElementById(cfg.scanBtn);
-    if (scanBtn) { scanBtn.disabled = true; scanBtn.querySelector('span').textContent = '扫描中...'; }
+    if (scanBtn) {
+      scanBtn.disabled = true;
+      const span = scanBtn.querySelector('span');
+      if (span) span.textContent = '扫描中...';
+    }
     updateAllButtons();
     // 盘符点选页：一个盘都没选就直接拦下（空结果会被当成「盘很干净」误导）
     if (cfg.drivesEl && readPaths(key).length === 0) {
       window.app?.toast?.('warning', '请至少选择一个要扫描的磁盘');
-      scanBtn.disabled = false;
-      scanBtn.querySelector('span').textContent = '开始扫描';
+      s.scanning = false; // A2-M03：早退必须复位，否则下一次扫描被 `if (s.scanning) return` 静默吞掉
+      if (scanBtn) {
+        scanBtn.disabled = false;
+        const span = scanBtn.querySelector('span');
+        if (span) span.textContent = '开始扫描';
+      }
       updateAllButtons();
       return;
     }
-    // 自我安慰式进度：爬升封顶 99%，扫描完成才跳 100%（startFakeProgress 口径）
-    setProgress(cfg, 4, '扫描中...');
-    startFakeProgress(cfg);
-    const opts = { paths: readPaths(key) };
-    if (cfg.minSizeSel) opts.minSize = Number(document.getElementById(cfg.minSizeSel).value) || 0;
     try {
+      // 自我安慰式进度：爬升封顶 99%，扫描完成才跳 100%（startFakeProgress 口径）
+      setProgress(cfg, 4, '扫描中...');
+      startFakeProgress(cfg);
+      const opts = { paths: readPaths(key) };
+      if (cfg.minSizeSel) opts.minSize = Number(document.getElementById(cfg.minSizeSel).value) || 0;
       const resp = await window.api.finder.scan(cfg.scanType, opts);
       if (!resp.success) throw new Error(resp.message || '扫描失败');
       s.results = resp.data || [];

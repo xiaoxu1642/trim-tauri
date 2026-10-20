@@ -443,12 +443,12 @@
     );
     if (!ok) return;
     running = true;
-    // §2.3：确认通过后、卸载器启动前建还原点（开关关时直进卸载，行为与现状一致）
-    if (readRestorePref()) {
-      await createRestorePointIfEnabled();
-    }
-    startFakeProgress(isAppx ? '正在移除 Windows 应用…' : '卸载器运行中…等待卸载完成');
     try {
+      // §2.3：确认通过后、卸载器启动前建还原点（开关关时直进卸载，行为与现状一致）
+      if (readRestorePref()) {
+        await createRestorePointIfEnabled();
+      }
+      startFakeProgress(isAppx ? '正在移除 Windows 应用…' : '卸载器运行中…等待卸载完成');
       const resp = await window.api.uninstall.run(appId);
       if (!resp.success) throw new Error(resp.message || '卸载失败');
       const d = resp.data || {};

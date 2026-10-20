@@ -905,7 +905,10 @@
       var btn = e.target.closest && e.target.closest('.tauri-caption-btn');
       if (!btn) return;
       var act = btn.getAttribute('data-act');
-      if (act === 'minimize') pluginInvoke('minimize');
+      if (act === 'minimize') pluginInvoke('minimize').catch(function (e) {
+        // A2-L03：同文件 maximize/drag/resize 都留痕，只有 minimize 漏接 reject。
+        if (window.app && window.app.log) window.app.log('warn', '窗口最小化失败: ' + ((e && e.message) || e));
+      });
       else if (act === 'maximize') pluginInvoke('toggle_maximize').then(refreshMaximizeVisual).catch(function (e) {
         // NEW-4（L3 2026-10-01）：最大化切换失败必须留痕（与下方拖拽失败同一口径），不能无声
         if (window.app && window.app.log) window.app.log('warn', '窗口最大化切换失败: ' + ((e && e.message) || e));

@@ -334,9 +334,10 @@
       return;
     }
     state.running = true;
-    updateActionButtons();
-    el('rsFootHint').textContent = '正在清理残留…';
     try {
+      updateActionButtons();
+      const hint = el('rsFootHint');
+      if (hint) hint.textContent = '正在清理残留…';
       const resp = await window.api.uninstall.residueExecute(
         state.appId,
         picked.map(function (f) { return { kind: f.kind, target: f.target }; }),
@@ -361,7 +362,8 @@
     } finally {
       state.running = false;
       updateActionButtons();
-      el('rsFootHint').textContent = '勾选后删除一律回收站优先、逐项确认；能勾的只有后端放进执行快照的四类候选。';
+      const hint = el('rsFootHint');
+      if (hint) hint.textContent = '勾选后删除一律回收站优先、逐项确认；能勾的只有后端放进执行快照的四类候选。';
     }
   }
 

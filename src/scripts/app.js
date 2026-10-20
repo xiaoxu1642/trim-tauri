@@ -714,11 +714,16 @@
         // 外链一律走受控出口（`app:open-external` 只放行 https）：直接交给 webview 导航
         // 会把整个应用页面顶掉，且渲染层导航本就被 CSP 与窗口策略禁止。
         body.querySelectorAll('a[href]').forEach((a) => {
-          a.addEventListener('click', (ev) => {
+          a.addEventListener('click', async (ev) => {
             ev.preventDefault();
             const url = a.getAttribute('href') || '';
             if (/^https?:\/\//i.test(url)) {
-              try { window.api?.app?.openExternal?.(url); } catch (e) {}
+              // A2-L01：openExternal 返回 Promise，同步 try/catch 抓不到 reject。
+              try {
+                await window.api?.app?.openExternal?.(url);
+              } catch (e) {
+                window.app?.toast?.('error', '打开链接失败：' + ((e && e.message) || e));
+              }
             }
           });
         });
