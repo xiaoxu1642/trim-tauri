@@ -19,11 +19,11 @@
 //! - ③ 的参数仍是数组传递，但创建标志用 `CREATE_NEW_CONSOLE`：Electron 走
 //!   Node `spawn(...,{detached:true})`（stdio 管道），控制台类工具（`cmd /k ipconfig`）
 //!   需要独立可见控制台才能看到输出——这是该功能的产品意图；
-//! - JS 的 `spawn` 错误经 `'error'` 事件**异步**上报，同步回执仍是 `{ok:true}`；
-//!   本实现同样把 spawn 失败只记 warn 日志、回执保持 `{success:true}`（契约逐字段一致）。
+//! - JS 的 `spawn` 错误经 `'error'` 事件**异步**上报；本实现 spawn 失败会记 warn 并
+//!   返回 `{success:false, "启动失败…"}`，不再保持 `{success:true}`（R1b-L02）。
 //!
 //! 本域无 PowerShell 脚本（Electron 侧即 JS 的 spawn/ShellExecute 逻辑），
-//! 故 `tools/ps-map/quickcmds*.mjs` 无需条目。
+//! ps-mapping 无需条目。
 //!
 //! 需要加入 lib.rs `generate_handler!` 的完整行：
 //!   commands::quickcmds::quickcmds_run,
@@ -307,19 +307,19 @@ fn has_rejected_metachar(s: &str) -> bool {
 
 /// `runQuickCmd`：返回 (ok, message)
 fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
-    let toks: Vec<String> = tokenize_quick_cmd(cmd)
-        .into_iter()
-        .map(|t| expand_quick_env(&t))
-        .collect();
+    let raw_toks = tokenize_quick_cmd(cmd);
+    // R1b-L05：元字符闸必须在展开**之前**——用户目录名含 Windows 合法字符 ( ) $ 时，
+    // 展开后的路径不应被误判成指令注入。
+    if raw_toks.iter().any(|t| has_rejected_metachar(t)) {
+        log::write_log("error", &format!("快捷指令含被拒元字符，拒绝执行: {id}"));
+        return (false, "指令包含不允许的字符".into());
+    }
+    let toks: Vec<String> = raw_toks.into_iter().map(|t| expand_quick_env(&t)).collect();
     let Some(exe) = toks.first().cloned() else {
         return (false, "空指令".into());
     };
     if exe.is_empty() {
         return (false, "空指令".into());
-    }
-    if toks.iter().any(|t| has_rejected_metachar(t)) {
-        log::write_log("error", &format!("快捷指令含被拒元字符，拒绝执行: {id}"));
-        return (false, "指令包含不允许的字符".into());
     }
     let args = &toks[1..];
     // URI（ms-settings: 等）：仅无参数时识别

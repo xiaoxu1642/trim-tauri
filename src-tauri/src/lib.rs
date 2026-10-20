@@ -1453,6 +1453,52 @@ mod tests {
         );
     }
 
+    /// U-R1b（P1-W2）：启动项/快捷指令/模型作用域的 11 项收口。
+    #[test]
+    fn u_r1b_command_contracts() {
+        let startup = include_str!("commands/startup.rs");
+        assert!(
+            startup.contains("\"degraded\": true") && startup.contains("启动项扫描失败"),
+            "R1b-M01：扫描失败不得写成空表 success:true"
+        );
+        assert!(
+            startup.contains("spawn_blocking(move ||") && startup.contains("blocking_pick_file"),
+            "R1b-M03：文件对话框必须离开 async 线程"
+        );
+        assert!(
+            startup.contains(".join(\"System32\").join(\"Tasks\")") && startup.contains("计划任务 XML 不存在"),
+            "R1b-M05：任务定位必须按 SystemRoot 现算并判存在"
+        );
+        assert!(
+            startup.contains("let kp = path_key(p);") && startup.contains("kp.starts_with(&format!(\"{kd}"),
+            "R1b-L04：备份 containment 必须走 path_key 归一"
+        );
+        let quick = include_str!("commands/quickcmds.rs");
+        assert!(
+            quick.contains("let raw_toks = tokenize_quick_cmd(cmd);")
+                && quick.contains("raw_toks.iter().any(|t| has_rejected_metachar(t))"),
+            "R1b-L05：元字符闸必须在展开之前"
+        );
+        assert!(
+            include_str!("commands/models.rs").contains("let slot = scope")
+                && include_str!("commands/models.rs").contains("slot.to_string()"),
+            "R1b-M06：模块 scope 必须写对应槽位"
+        );
+        assert!(
+            include_str!("commands/fonts.rs").contains("reparse_ancestor")
+                && include_str!("commands/fonts.rs").contains("log::flush_sync"),
+            "R1b-L03/L07：字体删除必须刷盘并拒绝 reparse 祖先"
+        );
+        assert!(
+            include_str!("commands/peripheral.rs").contains("log::flush_sync();"),
+            "R1b-L03：外设备份回收前必须刷盘"
+        );
+        let runtimes = include_str!("commands/runtimes.rs");
+        let g = runtimes.find("guard::guard(&window, guard::MAIN)?").unwrap_or(usize::MAX);
+        let a = runtimes.find("is_allowed_action(&action_id)").unwrap_or(0);
+        assert!(g < a, "R1b-L08：来源校验必须先于参数语义判定");
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

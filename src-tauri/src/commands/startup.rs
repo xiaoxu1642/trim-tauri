@@ -1,4 +1,4 @@
-//! startup 域（D 批）：启动项管理 5 条通道
+//! startup 域（D 批）：通道数以 `tauri-api.js` 的 CHANNEL_MAP 与 `check-channel-map` 现算为准
 //!
 //! 对照 Electron main.js 3883-4060 + src/scripts-powershell/startup-scripts.js。
 //!
@@ -124,15 +124,21 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
     snapshot::set(&snapshot::domain_key(&label, "startup"), HashMap::new());
 
     // S3：纯 Rust 原生
-    let data: Vec<Value> = match tauri::async_runtime::spawn_blocking(native::startup_scan).await {
-        Ok(Ok(items)) => items,
-        Ok(Err(e)) => {
-            log::write_log("warn", &format!("startup:scan 原生失败: {e}"));
-            Vec::new()
-        }
+    let scan = match tauri::async_runtime::spawn_blocking(native::startup_scan).await {
+        Ok(Ok(items)) => Ok(items),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("任务异常: {e}")),
+    };
+    let data: Vec<Value> = match scan {
+        Ok(items) => items,
         Err(e) => {
-            log::write_log("warn", &format!("startup:scan 任务异常: {e}"));
-            Vec::new()
+            // R1b-M01：一次抖动不能把空表写进缓存/快照（否则该页长期显示为空、启停全被拒）。
+            log::write_log("warn", &format!("startup:scan 原生失败: {e}"));
+            if let Some((data, ts)) = load_cache() {
+                snapshot::set(&snapshot::domain_key(&label, "startup"), snapshot::by_id(&data));
+                return json!({ "success": true, "data": data, "cached": true, "cachedAt": ts, "degraded": true });
+            }
+            return json!({ "success": false, "message": format!("启动项扫描失败：{e}") });
         }
     };
 
@@ -270,8 +276,10 @@ pub async fn startup_delete<R: Runtime>(
                         .map(|fp| path_key(p) == path_key(fp))
                         .unwrap_or(false),
                     "backup-file" => candidates.iter().any(|dir| {
-                        let rel = std::path::Path::new(p).strip_prefix(dir);
-                        matches!(rel, Ok(r) if !r.as_os_str().is_empty())
+                        // R1b-L04：与引擎同一归一口径（裸 strip_prefix 不折叠 ../verbatim）。
+                        let kp = path_key(p);
+                        let kd = path_key(&dir.to_string_lossy());
+                        kp != kd && kp.starts_with(&format!("{kd}\\"))
                     }),
                     _ => false,
                 }
@@ -424,7 +432,6 @@ pub async fn startup_openlocation<R: Runtime>(
 }
 
 /// 计划任务 XML 文件的落盘位置（任务计划程序库的物理形态）。
-const TASKS_DIR: &str = r"C:\Windows\System32\Tasks";
 
 /// 「打开来源位置」的坐标白名单：任务路径/任务名来自 IPC 参数，不能拿来拼文件路径。
 /// 只放行文件名合法字符；`..` 段单独拒（防穿越出 Tasks 目录）。
@@ -512,15 +519,21 @@ pub async fn startup_open_source<R: Runtime>(
             if let Some(why) = task_coordinate_problem(&tp).or_else(|| task_coordinate_problem(&tn)) {
                 json!({ "success": false, "kind": "task", "message": format!("任务坐标不合法（{why}），已拒绝定位") })
             } else {
-                let file = format!(
-                    "{}{}\\{}",
-                    TASKS_DIR,
-                    tp.replace('/', "\\").trim_end_matches('\\'),
-                    tn.replace('/', "\\")
-                );
-                match crate::engine::systembin::shell_select_in_explorer(&file) {
-                    Ok(()) => json!({ "success": true, "kind": "task", "opened": file }),
-                    Err(e) => json!({ "success": false, "kind": "task", "message": e }),
+                // R1b-M05：任务目录按 SystemRoot 现算（系统不在 C: 时不能整块失明），且先判存在。
+                let tasks_dir = std::env::var_os("SystemRoot")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+                    .join("System32").join("Tasks");
+                let file = tasks_dir
+                    .join(tp.replace('/', "\\").trim_end_matches('\\'))
+                    .join(tn.replace('/', "\\"));
+                if !file.is_file() {
+                    json!({ "success": false, "kind": "task", "message": "计划任务 XML 不存在（任务可能已删除）" })
+                } else {
+                    match crate::engine::systembin::shell_select_in_explorer(&file.to_string_lossy()) {
+                        Ok(()) => json!({ "success": true, "kind": "task", "opened": file.to_string_lossy() }),
+                        Err(e) => json!({ "success": false, "kind": "task", "message": e }),
+                    }
                 }
             }
         }
@@ -539,13 +552,22 @@ pub async fn startup_add<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    let picked = window
-        .dialog()
-        .file()
-        .set_title("选择要添加为开机启动的程序")
-        .add_filter("程序文件", &["exe", "lnk", "bat", "cmd", "com"])
-        .add_filter("所有文件", &["*"])
-        .blocking_pick_file();
+    let picked = {
+        let win = window.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            win.dialog()
+                .file()
+                .set_title("选择要添加为开机启动的程序")
+                .add_filter("程序文件", &["exe", "lnk", "bat", "cmd", "com"])
+                .add_filter("所有文件", &["*"])
+                .blocking_pick_file()
+        })
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => return json!({ "success": false, "message": format!("文件对话框异常: {e}") }),
+        }
+    };
 
     let Some(file_path) = picked else {
         return json!({ "success": false, "canceled": true });

@@ -400,6 +400,12 @@ fn remove_owned_font_copy(raw: &str) -> bool {
         Err(_) => return true, // 不存在 = 幂等成功
         Ok(_) => {}
     }
+    if let Some(anc) = trim_finder::scan::reparse_ancestor(&p) {
+        log::write_log("warn", &format!("拒绝删除位于 reparse 祖先下的字体副本: {raw}（{anc}）"));
+        return false;
+    }
+    // R1b-L03：删除前刷盘（与 startup/runtimes 同口径）。
+    log::flush_sync();
     match trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()) {
         Ok(()) => true,
         Err(e) => {

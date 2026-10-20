@@ -1,4 +1,4 @@
-//! contextmenu 域（D 批）：右键菜单 10 条通道
+//! contextmenu 域（D 批）：通道数以 `tauri-api.js` 的 CHANNEL_MAP 与 `check-channel-map` 现算为准
 //!
 //! 对照 Electron main.js 2381-2823 + src/scripts-powershell/contextmenu-scripts.js。
 //!

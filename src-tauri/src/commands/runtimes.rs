@@ -402,13 +402,14 @@ fn do_install<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str, lab
 /// runtimes:install — 白名单化一键安装（快照校验 + 管理员判定 + 三闸门）
 #[tauri::command]
 pub async fn runtimes_install<R: tauri::Runtime>(window: WebviewWindow<R>, action_id: String) -> Result<Value, String> {
+    // R1b-L08：来源校验必须是第一判据，不能先给非主窗来源返回「未知动作」这类语义差。
+    let label = guard::guard(&window, guard::MAIN)?;
     if action_id.is_empty() || action_id.len() > 40 {
         return Ok(json!({ "success": false, "message": "参数不合法" }));
     }
     if !is_allowed_action(&action_id) {
         return Ok(json!({ "success": false, "message": "未知的修复动作" }));
     }
-    let label = guard::guard(&window, guard::MAIN)?;
 
     // 快照校验：动作必须属于本窗口最近一次检测出的待修复项（分槽，对齐 RT-4）
     if !snapshot_has_repair(&label, &action_id) {

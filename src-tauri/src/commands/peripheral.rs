@@ -160,6 +160,8 @@ fn prune_backups(keep: usize) {
         }
         batches.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, names) in batches.into_iter().skip(keep) {
+            // R1b-L03：删除前刷盘（与 startup/runtimes 同口径）。
+            log::flush_sync();
             for name in names {
                 // R1b-M02（v7.2 C01）：① reparse 拒——链接件进回收站等于把它指向的
                 // 实体卷进来，照 paths.rs::prune_backups_ext 的「读不到元数据也按

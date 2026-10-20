@@ -250,7 +250,6 @@ pub fn models_set_scope<R: tauri::Runtime>(
     scope: Option<String>,
 ) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    let _ = scope; // 与 Electron 同语义：忽略模块参数，统一写全局槽位
     let key = key.unwrap_or_default();
     if !AI_MODEL_KEYS.contains(&key.as_str()) {
         return Ok(json!({ "success": false, "message": "未知的模型项" }));
@@ -260,9 +259,14 @@ pub fn models_set_scope<R: tauri::Runtime>(
     if !js_truthy(selected.get("enabled")) || !js_truthy(selected.get("verified")) {
         return Ok(json!({ "success": false, "message": "只能选择已验证且已启用的模型" }));
     }
+    // R1b-M06：scope 是模块槽位（AI_SCOPES 六项）时写该槽；global/缺省才写全局槽。
+    let slot = scope
+        .as_deref()
+        .filter(|s| AI_SCOPES.contains(s))
+        .unwrap_or(GLOBAL_ENGINE_KEY);
     let mut scopes = scope_engines();
     if let Some(map) = scopes.as_object_mut() {
-        map.insert(GLOBAL_ENGINE_KEY.into(), json!(key));
+        map.insert(slot.to_string(), json!(key));
     }
     // v4 组 1：读-改-写收口（同上）
     let ok = settings::update_settings(|next| {
