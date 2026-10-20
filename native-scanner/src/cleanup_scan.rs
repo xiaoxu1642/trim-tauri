@@ -901,6 +901,10 @@ pub struct DeletableResult {
     ///
     /// ⚠️ **只留痕、不参与任何判定**：`total` / `files` / 被占用数一律不看它。
     pub skipped_reparse: u64,
+    /// 因权限/IO 失败读不到的目录数（A1-M02，v7.2 C06）。
+    /// 与 `skipped_reparse` 并列呈现：候选比 Explorer 少时，除了 junction，
+    /// 「有目录读不到」也必须有解释出口。
+    pub unreadable_dirs: u64,
 }
 
 /// 单遍递归枚举 + 探测。口径：跳 ReparsePoint（不深入）、目录不计数、
@@ -934,6 +938,7 @@ fn walk_deletable(
         // v7.2-C03（N1a-M04）：「扫失败」与「确无结果」在输出上必须可分辨——
         // IgnoreInaccessible 语义保留（跳过继续），但 stderr 留痕。
         Err(e) => {
+            res.unreadable_dirs += 1;
             err_line(&format!(
                 "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
                 dir.display()
@@ -1051,6 +1056,7 @@ fn list_deletable_inner(
                 deletable_count,
                 deletable_bytes,
                 skipped_reparse: 0, // 单文件路径不枚举子项，无重解析点可跳
+                unreadable_dirs: 0,
             };
         }
     }
@@ -1060,6 +1066,7 @@ fn list_deletable_inner(
         deletable_count: 0,
         deletable_bytes: 0,
         skipped_reparse: 0,
+        unreadable_dirs: 0,
     };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
     walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, protect, &mut res, 0, collect_files);
@@ -1083,11 +1090,13 @@ pub struct PathStats {
     /// 这类 junction被跳过后，size 天然小于 Explorer 显示的值 —— 界面必须自己说出来，
     /// 否则用户会以为扫描漏了。这里的值只做**呈现**，不进size/nfiles/locked 任何判定。
     pub skipped_reparse: u64,
+    /// 因权限/IO 失败读不到的目录数（A1-M02，v7.2 C06）。
+    pub unreadable_dirs: u64,
 }
 
 fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>) -> PathStats {
     if path.is_empty() {
-        return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
+        return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 0 };
     }
     let p = Path::new(path);
     // 存在性用同一套 API 判定（metadata 跟随链接，与 .NET Exists 同源）
@@ -1095,20 +1104,20 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>) 
     if !is_dir {
         if fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
             if !scan_deletable(p, protect) {
-                return PathStats { ok: true, missing: false, size: 0, nfiles: 0, locked: 1, skipped_reparse: 0 };
+                return PathStats { ok: true, missing: false, size: 0, nfiles: 0, locked: 1, skipped_reparse: 0, unreadable_dirs: 0 };
             }
             return match fs::metadata(p) {
-                Ok(m) => PathStats { ok: true, missing: false, size: m.len(), nfiles: 1, locked: 0, skipped_reparse: 0 },
-                Err(_) => PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 },
+                Ok(m) => PathStats { ok: true, missing: false, size: m.len(), nfiles: 1, locked: 0, skipped_reparse: 0, unreadable_dirs: 0 },
+                Err(_) => PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 1 },
             };
         }
         // 既非目录也非文件 = 不存在
-        return PathStats { ok: true, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
+        return PathStats { ok: true, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 0 };
     }
     // 枚举探针：连一个子项都列不出 = 无法统计（ACL 拒绝 / 重解析目标异常），绝不报 0
     let probe_ok = fs::read_dir(p).and_then(|mut rd| rd.next().transpose()).is_ok();
     if !probe_ok {
-        return PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0 };
+        return PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 1 };
     }
     // U1-b（2026-10-01）：全局排除名单整链下线。本探针历史上也只吃全局名单（规则级
     // excludePaths 到这层已经丢了规则上下文），传空集即等价于「名单为空」。
@@ -1119,7 +1128,7 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>) 
     let res = list_deletable_stats(path, "*", guard, &[], &[], protect);
     let nfiles = res.deletable_count;
     let size = res.deletable_bytes;
-    PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles, skipped_reparse: res.skipped_reparse }
+    PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles, skipped_reparse: res.skipped_reparse, unreadable_dirs: res.unreadable_dirs }
 }
 
 // ==================== Resolve-GlobDirs 口径（目录通配逐段展开） ====================
@@ -1135,7 +1144,7 @@ fn join_path(r: &str, seg: &str) -> String {
 }
 
 /// 列出 parent 下匹配通配段的目录（GCI -Directory [-Force]：跳 ReparsePoint；无 Force 时跳隐藏）
-fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mut u64) -> Vec<String> {
+fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mut u64, unreadable: &mut u64) -> Vec<String> {
     let pd = Path::new(parent);
     let mut out = Vec::new();
     let rd = match fs::read_dir(pd) {
@@ -1143,6 +1152,7 @@ fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mu
         // v7.2-C03（N1a-M04）：glob 段级列目录失败原先静默返回空 ⇒ 「展开为空」
         // 与「目录不可读」同形。留痕后按空返回（不改变展开语义）。
         Err(e) => {
+            *unreadable += 1;
             err_line(&format!(
                 "[trim-scanner] read_dir {} 失败: {e}（glob 段展开按空处理）",
                 pd.display()
@@ -1191,6 +1201,7 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
     // 那是渲染层的事（当前由 list_deletable / walk_fk_dll 那两条路径的
     // `skippedReparse` 字段承担呈现，本处只保证**不许静默**这件事在代码里可查）。
     let mut skipped_reparse = 0u64;
+    let mut unreadable = 0u64;
     let expanded = expand_env_path(pattern);
     // §4.10：盘符相对形态（`\Foo`）按「当前盘根」解析，与保护侧 CWD 口径分叉——
     // 本函数是扫描侧展开口，与执行侧 `engine/native/cleanup.rs` 的 `expand_glob_dirs`
@@ -1238,7 +1249,7 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
         let mut next: Vec<String> = Vec::new();
         for r in &roots {
             if wild {
-                for d in list_matching_dirs(r, seg, force, &mut skipped_reparse) {
+                for d in list_matching_dirs(r, seg, force, &mut skipped_reparse, &mut unreadable) {
                     next.push(d);
                 }
             } else {
@@ -1266,6 +1277,9 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
     }
     if skipped_reparse > 0 {
         err_line(&format!("[trim-scanner] glob 展开跳过 {skipped_reparse} 个重解析点目录（不深入以避免重复枚举）"));
+    }
+    if unreadable > 0 {
+        err_line(&format!("[trim-scanner] glob 展开有 {unreadable} 个目录不可读（展开结果可能不完整）"));
     }
     roots
 }
@@ -1834,6 +1848,10 @@ struct FkResult {
     truncated: bool,
     /// 因重解析点跳过的目录数（R1-2 留痕）。只透出呈现，**不进上面三个判定字段**。
     skipped_reparse: u64,
+    /// A1-M01/M02（v7.2 C06）：`ok=false` = 所有候选根都读不到（size/exists 必须给 null，
+    /// 不能拿 0/false 冒充「确无结果」）；`unreadable_dirs` = 子目录读失败计数。
+    ok: bool,
+    unreadable_dirs: u64,
 }
 
 struct FkAcc {
@@ -1857,6 +1875,11 @@ struct FkAcc {
     truncated: bool,
     /// 因重解析点跳过的目录数（R1-2 留痕，与 ScanCtx / DeletableResult 同语义）。
     skipped_reparse: u64,
+    /// 根级枚举尝试数 / 是否至少有一个根成功（A1-M01）。
+    root_attempted: u64,
+    root_ok: bool,
+    /// 权限/IO 失败读不到的目录数（A1-M02）。
+    unreadable_dirs: u64,
 }
 
 impl FkAcc {
@@ -1874,6 +1897,9 @@ impl FkAcc {
             global_cap: PLAN_CAP_TOTAL,
             truncated: false,
             skipped_reparse: 0,
+            root_attempted: 0,
+            root_ok: false,
+            unreadable_dirs: 0,
         }
     }
 
@@ -1946,6 +1972,7 @@ fn walk_fk_dll(
         // 根级失败原先零探针 ⇒「扫失败」与「确无结果」在输出上长得一模一样，
         // 此行即根级 missing 探针。
         Err(e) => {
+            acc.unreadable_dirs += 1;
             if depth == 0 {
                 err_line(&format!(
                     "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
@@ -1960,6 +1987,9 @@ fn walk_fk_dll(
             return;
         }
     };
+    if depth == 0 {
+        acc.root_ok = true;
+    }
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
             acc.skipped_reparse += 1; // R1-2：留痕，不进 total_size/count/locked 判定
@@ -2042,6 +2072,7 @@ fn walk_fk_snapshot(
         // v7.2-C03（N1a-M04）：与 walk_fk_dll 同口径——根级（depth==0）失败给
         // 根级 missing 探针，子目录失败按不可达留痕。
         Err(e) => {
+            acc.unreadable_dirs += 1;
             if depth == 0 {
                 err_line(&format!(
                     "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
@@ -2056,6 +2087,9 @@ fn walk_fk_snapshot(
             return;
         }
     };
+    if depth == 0 {
+        acc.root_ok = true;
+    }
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
             acc.skipped_reparse += 1; // R1-2：留痕，不进 total_size/count/locked 判定
@@ -2195,6 +2229,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
             let all = pattern.is_empty() || pattern == "*";
             let recurse = fk.get("recurse") != Some(&Json::Bool(false));
             for dir in expand_glob_dirs(fp, true) {
+                acc.root_attempted += 1;
                 if snapshot_mode {
                     walk_fk_snapshot(
                         Path::new(&dir), all, pattern, recurse, 0, guard,
@@ -2240,6 +2275,8 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
         files,
         truncated: acc.truncated,
         skipped_reparse: acc.skipped_reparse,
+        ok: acc.root_attempted == 0 || acc.root_ok,
+        unreadable_dirs: acc.unreadable_dirs,
     }
 }
 
@@ -2581,17 +2618,24 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
                 ("pathCandidates", "[]".to_string()),
                 ("autoPath", jstr("")),
                 ("autoSize", "0".to_string()),
-                ("size", st.total_size.to_string()),
+                ("size", if st.ok { st.total_size.to_string() } else { "null".to_string() }),
                 ("fileCount", st.count.to_string()),
                 ("lockedCount", st.locked.to_string()),
                 // R1-2 留痕：跳过的重解析点目录数。**只呈现不进判定**——
                 // size/fileCount/lockedCount 三者都不看它（见 walk_fk_dll 内注释）。
                 // 缺了它，用户看到清理候选比 Explorer 算的少，却无从判断少在哪。
                 ("skippedReparse", st.skipped_reparse.to_string()),
+                // A1-M02：读不到的目录数，与 skippedReparse 并列呈现。
+                ("skippedUnreadable", st.unreadable_dirs.to_string()),
                 ("risk", jopt_str(rule.get("risk").and_then(|v| v.as_str()))),
-                ("exists", if st.count > 0 { "true" } else { "false" }.to_string()),
+                // A1-M01：所有候选根都读不到时，size 必须是 null（渲染层走「—」），
+                // exists 也给 null；拿 0/false 冒充「确无结果」正是本条要修的缺口。
+                ("exists", if !st.ok { "null".to_string() } else if st.count > 0 { "true".to_string() } else { "false".to_string() }),
                 ("blockedBy", blocked_json),
             ];
+            if !st.ok {
+                fields.push(("sizeUnreadable", "true".to_string()));
+            }
             if st.truncated {
                 // 方案 v1.1：引擎侧 PLAN_CAP 截断标记（main.js 收集侧「只增不清」，字段兼容）
                 fields.push(("filesTruncated", "true".to_string()));
@@ -2762,7 +2806,13 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
         } else {
             "0".to_string()
         };
-        let exists_json = if path_exists(&path) { "true" } else { "false" }.to_string();
+        let exists_json = if !stats.ok {
+            "null".to_string()
+        } else if path_exists(&path) {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        };
         let name = rule.get("name").and_then(|v| v.as_str());
         let candidates_json = format!(
             "[{}]",
@@ -2785,6 +2835,8 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             // 深入会重复计数甚至成环，跳过是对的，但对用户不可见就成了「少了」）。
             // **只呈现不进判定**：size/nfiles/locked 都不看它。
             ("skippedReparse", stats.skipped_reparse.to_string()),
+            // A1-M02：读不到的目录数（与 fileKeys 分支同名同义）。
+            ("skippedUnreadable", stats.unreadable_dirs.to_string()),
             ("risk", jopt_str(rule.get("risk").and_then(|v| v.as_str()))),
             ("exists", exists_json),
             ("blockedBy", blocked_json),
@@ -2804,6 +2856,26 @@ fn flush_stdout() {
 
 #[cfg(test)]
 mod tests {
+
+    /// A1-M01/M02（v7.2 C06）：fileKeys 的 size/exists 三态出口与不可读计数必须保留。
+    /// 源码形态断言：删掉任一出口，本条即红（最终数值由真机探针复核）。
+    #[test]
+    fn filekeys_unreadable_contract() {
+        let src = include_str!("cleanup_scan.rs");
+        assert!(
+            src.contains("(\"skippedUnreadable\", st.unreadable_dirs.to_string())"),
+            "fileKeys 少了不可读目录计数出口"
+        );
+        assert!(
+            src.contains("if st.ok { st.total_size.to_string() } else { \"null\".to_string() }"),
+            "fileKeys 的 size 在读失败时必须给 null"
+        );
+        assert!(src.contains("(\"exists\", if !st.ok"), "fileKeys 的 exists 在读失败时必须给 null");
+        assert!(
+            src.contains("(\"skippedUnreadable\", stats.unreadable_dirs.to_string())"),
+            "pathPs 少了不可读目录计数出口"
+        );
+    }
 
     /// E5（2026-10-16）：规则表达式求值器的语义钉桩——src-tauri 的 `paths_scan` 已从自写
     /// 解析器改为委托本函数（同一判定两份实现正是 §5.16/N6 禁止的形态），这里是**唯一
@@ -3089,6 +3161,7 @@ mod tests {
             deletable_count: 0,
             deletable_bytes: 0,
             skipped_reparse: 0,
+            unreadable_dirs: 0,
         };
         walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], None, &mut res, 0, true);
         assert_eq!(res.files.len(), 1, "浅层文件必须收到：{:?}", res.files);

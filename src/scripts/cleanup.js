@@ -25,23 +25,18 @@
 
   // 从 cleanup-rules.json 的分组项提取渲染层所需字段（id/name/risk/fileCleanType/domain/nature）
   // v3.2.1 类目重构：domain/group 为唯一分类主轴元数据，nature 为性质标签（文档 §3.1）
-  // P2 规模化浏览：补充搜索/筛选所需字段（路径模板、文件名模式、进程约束）。
-  // 只挑展示与检索需要的字段，不把整个规则对象带进渲染层。
+  // F4a1-M01（v7.2 C06）：后端对 risk=high 强制的两个告知字段必须原样带进渲染层——
+  // `ifDeleted`（删除后果，rules.rs 对高危装载即拒空）与 `evidenceItems`（依据逐条）。
+  // 旧实现把两者裁掉，导致「高危必须告知」的后端硬闸在界面上永不可见。
   function pickRuleItem(it) {
     const o = { id: it.id, name: it.name, risk: it.risk };
     if (it.fileCleanType) o.fileCleanType = it.fileCleanType;
     if (it.domain) o.domain = it.domain;
     if (it.nature) o.nature = it.nature;
-    if (it.recommended !== undefined) o.recommended = it.recommended;
-    // P2 搜索/筛选字段
-    const paths = [];
-    if (it.pathPs) paths.push(it.pathPs);
-    for (const fk of it.fileKeys || []) if (fk.path) paths.push(fk.path);
-    for (const rk of it.regKeys || []) if (rk.path) paths.push(rk.path);
-    if (paths.length) o.paths = paths;
-    const patterns = (it.fileKeys || []).map(fk => fk.pattern).filter(Boolean);
-    if (patterns.length) o.patterns = patterns;
-    if (((it.restartProcesses || []).length + (it.requiredStoppedProcesses || []).length) > 0) o.needsExit = true;
+    if (it.ifDeleted) o.ifDeleted = it.ifDeleted;
+    if (Array.isArray(it.evidenceItems) && it.evidenceItems.length) {
+      o.evidenceItems = it.evidenceItems.map(e => ({ weight: e.weight, text: e.text }));
+    }
     return o;
   }
 
@@ -412,11 +407,14 @@
             // 用户会去手工核对目录、怀疑扫描漏了。复用 path-auto-tag（既有 token，零新增样式）。
             const reparseTag = Number(result.skippedReparse) > 0
               ? ` <span class="path-auto-tag" data-tip="扫描时跳过了 ${escapeHtml(String(result.skippedReparse))} 个联接点/挂载点目录（它们指向别的子树，深入会重复计数）">已跳过 ${escapeHtml(String(result.skippedReparse))} 个联接点</span>` : '';
+            // A1-M02：读不到的目录同样必须可见——否则「扫描失败」会被读成「没有可清理项」。
+            const unreadableTag = Number(result.skippedUnreadable) > 0
+              ? ` <span class="path-auto-tag" data-tip="扫描时有 ${escapeHtml(String(result.skippedUnreadable))} 个目录读不到（权限或 IO 失败），候选清单可能不完整">${escapeHtml(String(result.skippedUnreadable))} 个目录不可读</span>` : '';
             // 2026-10-04 审计 §4.3：filesTruncated 此前标记了但渲染层零消费 —— 清单被
             // 截断意味着确认时看到的文件数 < 实际将清理的文件数，必须在行上可见。
             const truncTag = result.filesTruncated
               ? ' <span class="path-auto-tag" data-tip="文件清单超出单次上限被截断，实际清理范围可能大于所列">清单已截断</span>' : '';
-            inner = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(result.path)}">${escapeHtml(xtable.middleEllipsis(result.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${truncTag}${blockedTag}</span>`;
+            inner = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(result.path)}">${escapeHtml(xtable.middleEllipsis(result.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${unreadableTag}${truncTag}${blockedTag}</span>`;
           } else {
             inner = '<span class="xtable-cell-muted">—</span>';
           }
@@ -886,10 +884,13 @@
       // 否则行会在流式更新到最终值时把标签丢掉）
       const reparseTag = Number(r.skippedReparse) > 0
         ? ` <span class="path-auto-tag" data-tip="扫描时跳过了 ${escapeHtml(String(r.skippedReparse))} 个联接点/挂载点目录（它们指向别的子树，深入会重复计数）">已跳过 ${escapeHtml(String(r.skippedReparse))} 个联接点</span>` : '';
+      // A1-M02：与全量渲染同口径（流式补丁不得把「不可读」标签丢掉）
+      const unreadableTag = Number(r.skippedUnreadable) > 0
+        ? ` <span class="path-auto-tag" data-tip="扫描时有 ${escapeHtml(String(r.skippedUnreadable))} 个目录读不到（权限或 IO 失败），候选清单可能不完整">${escapeHtml(String(r.skippedUnreadable))} 个目录不可读</span>` : '';
       // 2026-10-04 审计 §4.3：同口径的截断标签（流式/补丁路径）
       const truncTag = r.filesTruncated
         ? ' <span class="path-auto-tag" data-tip="文件清单超出单次上限被截断，实际清理范围可能大于所列">清单已截断</span>' : '';
-      pathCell.innerHTML = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(r.path)}">${escapeHtml(xtable.middleEllipsis(r.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${truncTag}${blockedTag}</span>`;
+      pathCell.innerHTML = `<span class="xtable-cell-text xtable-cell-path" data-tip="${escapeHtml(r.path)}">${escapeHtml(xtable.middleEllipsis(r.path, 72))}${autoTag}${fileTag}${regTag}${reparseTag}${unreadableTag}${truncTag}${blockedTag}</span>`;
     }
   }
 

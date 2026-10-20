@@ -988,6 +988,40 @@ mod tests {
         assert!(src.contains("show().map_err"), "show 的失败必须进 Result，不许 let _ = 吞掉");
     }
 
+    /// C06 渲染层回执契约（源码形态）：三条「后端给了、前端裁掉/写错」的修法必须留在线上代码里。
+    /// 这些字段的最终观感由真机目检确认，但「代码里是否还有这条承诺」可以机械判红。
+    #[test]
+    fn c06_renderer_receipt_contracts() {
+        let cleanup = include_str!("../../src/scripts/cleanup.js");
+        assert!(
+            cleanup.contains("if (it.ifDeleted) o.ifDeleted = it.ifDeleted;"),
+            "F4a1-M01：高危删除后果字段被 pickRuleItem 裁掉了"
+        );
+        assert!(
+            cleanup.contains("o.evidenceItems = it.evidenceItems.map"),
+            "F4a1-M01：依据逐条字段被 pickRuleItem 裁掉了"
+        );
+        let optimizer = include_str!("../../src/scripts/optimizer.js");
+        assert!(
+            optimizer.contains("'设置已生效 — ' + t.label"),
+            "F4b-M01：Toast 副标题必须读 entry.label"
+        );
+        assert!(
+            !optimizer.contains("'设置已生效 — ' + t.title"),
+            "F4b-M01：entry 没有 title 字段，读它必然渲染 undefined"
+        );
+        let ctx = include_str!("../../src/scripts/contextmenu.js");
+        assert!(ctx.contains("当前为演示数据，未读写系统"), "F4a2-M05：预览链必须明示演示数据");
+        assert!(
+            ctx.contains("演示数据：勾选只改本地状态，未写入系统"),
+            "F4a2-M05：演示模式的勾选必须提示不写系统"
+        );
+        assert!(
+            ctx.contains("演示数据（未读写系统） · "),
+            "F4a2-M05：看板汇总必须带演示标识"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

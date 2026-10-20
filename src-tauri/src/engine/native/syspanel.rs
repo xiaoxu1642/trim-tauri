@@ -1176,10 +1176,26 @@ pub fn power_high_performance_hide() -> Result<Value, String> {
         .map_err(|e| format!("导出备份失败，未执行删除：{e}"))?;
     let bytes = export.get("bytes").and_then(Value::as_u64).unwrap_or(0);
     crate::engine::paths::prune_stamped_files(&root, 50);
+    // R5b-M11（v7.2 C06）：先落还原台账，再删方案。旧顺序是「先删、后记账」——
+    // 记账失败即通过 `?` 返回 Err，回执说「未更改」，但方案已经删掉、power-ops.json
+    // 里没有 hiddenHighPerformance，还原入口从此找不到唯一凭据。
+    // 提前落账的代价只是「删除失败时多一条记录」：还原侧本来就有「GUID 在列即拒」的
+    // 幂等判据，多余记录无害。
+    let ops_record = json!({
+        "backupPath": backup_s.clone(),
+        "bytes": bytes,
+        "originalName": original_name,
+        "at": crate::engine::now_ms(),
+    });
+    crate::security::update_json(&power_ops_path()?, |v| {
+        v["hiddenHighPerformance"] = ops_record.clone();
+        Ok(())
+    })
+    .map_err(|e| format!("备份已导出（{backup_s}），但写入还原记录失败，未执行删除：{e}"))?;
     let rc = unsafe { PowerDeleteScheme(None, &target as *const GUID) };
     if !win32_ok(rc) {
         return Err(format!(
-            "{}，已保持未更改；备份文件保留在 {backup_s}",
+            "{}，已保持未更改；备份文件保留在 {backup_s}（还原记录也已登记）",
             power_win32_err("删除「高性能」", rc.0)
         ));
     }
@@ -1188,15 +1204,6 @@ pub fn power_high_performance_hide() -> Result<Value, String> {
             "删除后回读仍能枚举到「高性能」，已按失败上报（未谎报更改）；备份文件保留在 {backup_s}"
         ));
     }
-    crate::security::update_json(&power_ops_path()?, |v| {
-        v["hiddenHighPerformance"] = json!({
-            "backupPath": backup_s,
-            "bytes": bytes,
-            "originalName": original_name,
-            "at": crate::engine::now_ms(),
-        });
-        Ok(())
-    })?;
     Ok(json!({
         "backupPath": backup_s,
         "bytes": bytes,

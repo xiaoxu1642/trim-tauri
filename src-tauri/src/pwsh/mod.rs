@@ -33,6 +33,9 @@ pub struct PsOutput {
     pub stderr: String,
     pub code: i32,
     pub timed_out: bool,
+    /// R7-M05（v7.2 C06）：超时后 `TerminateJobObject` 失败 = 子进程树没收回。
+    /// 此时「超时、可重试」是假承诺——重试可能与残留进程并发（DISM /ResetBase 那类）。
+    pub tree_terminate_failed: bool,
 }
 
 // ==================== 子进程树兜底（审查 M6） ====================
@@ -95,11 +98,11 @@ impl ProcessJob {
     }
 
     /// 终止 job 内**全部**进程（含子孙）。超时专用。
-    fn terminate(&self) {
+    /// R7-M05：失败必须让调用方看见——旧实现 `let _ =` 把 HRESULT 丢掉，
+    /// 「收树失败」与「收树成功」在回执上完全同形。
+    fn terminate(&self) -> Result<(), String> {
         use windows::Win32::System::JobObjects::TerminateJobObject;
-        unsafe {
-            let _ = TerminateJobObject(self.0, 1);
-        }
+        unsafe { TerminateJobObject(self.0, 1).map_err(|e| format!("TerminateJobObject 失败: {e}")) }
     }
 }
 
@@ -152,7 +155,9 @@ fn take_reader(
     let grace = grace_for(timed_out, budget, Instant::now());
     match await_reader(rx, snapshot, timed_out, grace, &|| {
         if let Some(j) = job {
-            j.terminate();
+            if let Err(e) = j.terminate() {
+                log::write_log("warn", &format!("终止 PowerShell 子进程树失败（读线程宽限路径）: {e}"));
+            }
         }
     }) {
         ReadOutcome::Complete(s) => s,
@@ -415,6 +420,7 @@ fn run_with_exe(
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
+    let mut tree_terminate_failed = false;
     let mut code = -1i32;
     loop {
         match child.try_wait() {
@@ -428,7 +434,10 @@ fn run_with_exe(
                     // 本体。只 kill 本体的话，读线程还在等 dism/sfc/安装器退出，
                     // 循环之后的 join() 会把「超时」拖成「等子孙自己跑完」（实测 5s→24.4s）。
                     if let Some(j) = &job {
-                        j.terminate();
+                        if let Err(e) = j.terminate() {
+                            tree_terminate_failed = true;
+                            log::write_log("warn", &format!("{label} 超时后终止子进程树失败: {e}"));
+                        }
                     }
                     let _ = child.kill();
                     let _ = child.wait();
@@ -440,12 +449,17 @@ fn run_with_exe(
             Err(e) => {
                 // v2-L4P-28（B-6）：try_wait 出错不能裸返回——子进程还活着、job 也无人收，
                 // 直接 return 会把孤儿进程（及其管道写端）留给调用方。先收树再报错。
+                // R7-M05：收树失败要写进错误文案（这一支直接返回，不经过 PsOutput）。
+                let mut tree_err = String::new();
                 if let Some(j) = &job {
-                    j.terminate();
+                    if let Err(e2) = j.terminate() {
+                        log::write_log("warn", &format!("{label} 等待失败后终止子进程树失败: {e2}"));
+                        tree_err = format!("；终止子进程树也失败: {e2}");
+                    }
                 }
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("等待 {label} 失败: {e}"));
+                return Err(format!("等待 {label} 失败: {e}{tree_err}"));
             }
         }
     }
@@ -475,6 +489,7 @@ fn run_with_exe(
         stderr,
         code,
         timed_out,
+        tree_terminate_failed,
     })
 }
 

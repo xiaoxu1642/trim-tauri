@@ -414,7 +414,7 @@
     const icon = t.el.querySelector('.toast-icon');
     const tune = t.el.querySelector('.toast-tune');
     if (icon) icon.innerHTML = ok ? iconFor('success') : iconFor('error');
-    if (tune) tune.textContent = ok ? '设置已生效 — ' + t.title : (message || '执行失败');
+    if (tune) tune.textContent = ok ? '设置已生效 — ' + t.label : (message || '执行失败');
     const fill = t.el.querySelector('.toast-progress-fill');
     if (fill) { fill.style.width = '100%'; fill.classList.add(ok ? 'done' : 'failed'); }
     t.el.classList.remove('info');

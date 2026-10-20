@@ -84,7 +84,11 @@ catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
     let text = out.stdout.trim().to_string();
     if out.code != 0 {
         return Err(if out.timed_out {
-            format!("Get-AppxPackage 超时（{}s）", APPX_ENUM_TIMEOUT.as_secs())
+            if out.tree_terminate_failed {
+                format!("Get-AppxPackage 超时（{}s），且子进程树未能收回，请先确认无残留 PowerShell 进程", APPX_ENUM_TIMEOUT.as_secs())
+            } else {
+                format!("Get-AppxPackage 超时（{}s）", APPX_ENUM_TIMEOUT.as_secs())
+            }
         } else if text.starts_with("ERR:") {
             text[4..].trim().to_string()
         } else {
@@ -255,10 +259,17 @@ catch {{ Write-Output ('ERR:' + $_.Exception.Message); exit 1 }}",
     } else {
         let text = out.stdout.trim().to_string();
         Err(if out.timed_out {
-            format!(
-                "Remove-AppxPackage 超时（{}s），子进程树已终止，可在卸载界面重试",
-                APPX_REMOVE_TIMEOUT.as_secs()
-            )
+            if out.tree_terminate_failed {
+                format!(
+                    "Remove-AppxPackage 超时（{}s），且子进程树未能收回：请先确认无残留安装进程再重试（重试可能与残留进程并发）",
+                    APPX_REMOVE_TIMEOUT.as_secs()
+                )
+            } else {
+                format!(
+                    "Remove-AppxPackage 超时（{}s），子进程树已终止，可在卸载界面重试",
+                    APPX_REMOVE_TIMEOUT.as_secs()
+                )
+            }
         } else if text.starts_with("ERR:") {
             text[4..].trim().to_string()
         } else {

@@ -155,9 +155,16 @@ fn peripheral_restore_admit(
 /// `backup_<stamp>_*.reg`，按时间戳分组整组导入（v2-M12：一次 apply 留下多个分片，必须整组还原）。
 /// 返回 ok/reason/restored/total/file；K11 起另带 `rejected`（逐份拒绝原因）。
 pub fn peripheral_restore() -> Result<Value, String> {
-    let files = collect_peripheral_backup_files(&crate::engine::paths::backup_read_dirs("peripheral-backup"));
+    let (files, unreadable_dirs) =
+        collect_peripheral_backup_files(&crate::engine::paths::backup_read_dirs("peripheral-backup"));
     if files.is_empty() {
-        return Ok(json!({"ok": false, "reason": "no-backup", "restored": 0, "total": 0, "file": "", "rejected": []}));
+        // A1-M05：「备份目录读不动」≠「还没有备份」——前者要用户去查权限/IO，
+        // 后者是正常首用状态。旧实现把两者一起报成 no-backup。
+        let reason = if unreadable_dirs > 0 { "unreadable" } else { "no-backup" };
+        return Ok(json!({
+            "ok": false, "reason": reason, "restored": 0, "total": 0,
+            "file": "", "rejected": [], "unreadableDirs": unreadable_dirs,
+        }));
     }
 
     // 按时间戳分组

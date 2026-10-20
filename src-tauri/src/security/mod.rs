@@ -287,6 +287,32 @@ where
     Ok(cur)
 }
 
+/// 数组形态的读-改-写原语（R7-M07，v7.2 C06）。
+///
+/// 为什么必须有：`update_json` 内部硬编对象读器，`disabled.json` / `bench-history.json`
+/// 这类裸数组台账的 RMW 只能由调用方自拼「三态闸 + 拒写 + 原子落盘 + 串行化」四件事
+/// （`benchhistory.rs` 已复制过一遍，且没有锁）。这里复用**同一把** `UPDATE_JSON_LOCK`，
+/// 选**数组**读器；`Corrupt` 一律拒写，别把「读失败」写成「空数组」。
+pub fn update_json_array<F>(path: &Path, f: F) -> Result<Vec<serde_json::Value>, String>
+where
+    F: FnOnce(&mut Vec<serde_json::Value>) -> Result<(), String>,
+{
+    let _guard = UPDATE_JSON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cur = match read_json_array_state(path) {
+        JsonState::Ok(serde_json::Value::Array(v)) => v,
+        JsonState::Absent => Vec::new(),
+        _ => {
+            return Err(format!(
+                "配置读取失败（现场已保留/未隔离见日志），本次写入已拒绝: {}",
+                path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            ));
+        }
+    };
+    f(&mut cur)?;
+    atomic_write_json(path, &serde_json::Value::Array(cur.clone()))?;
+    Ok(cur)
+}
+
 /// 配置文件损坏隔离：改名 `<file>.corrupt-<ts>` 保留现场
 pub fn quarantine_file(path: &Path, reason: &str) {
     if !path.exists() {
@@ -903,6 +929,31 @@ mod tests {
         assert!(has_secret_field(&serde_json::json!([{ "apiKey": "x" }])));
         // 反向对照：形近但不在登记表里的名字不得命中（否则判据退化成“一律 true”也会绿）
         assert!(!has_secret_field(&serde_json::json!({ "api_key": "x", "keys": [] })));
+    }
+
+    /// R7-M07：数组形态的读-改-写原语——形状不符必须拒写且原文件不动，合法数组走同一把锁。
+    #[test]
+    fn update_json_array_形状安全且不改写损坏件() {
+        let root = sandbox("array-rmw");
+        let p = root.join("bench.json");
+        fs::write(&p, "[{\"id\":1}]").unwrap();
+        let out = update_json_array(&p, |a| {
+            a.push(serde_json::json!({ "id": 2 }));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out.len(), 2, "闭包内的追加必须生效");
+        let disk: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(disk.is_array(), "落盘必须仍是裸数组（不许被对象化）: {disk}");
+        assert_eq!(disk.as_array().unwrap().len(), 2);
+
+        // 形状不符（对象借数组读器）⇒ 三态闸判 Corrupt ⇒ 拒写，原文件逐字节不动
+        let q = root.join("object.json");
+        fs::write(&q, "{\"a\":1}").unwrap();
+        let err = update_json_array(&q, |_| Ok(())).unwrap_err();
+        assert!(err.contains("本次写入已拒绝"), "形状不符必须拒写: {err}");
+        assert_eq!(fs::read_to_string(&q).unwrap(), "{\"a\":1}", "拒写时原文件不得被改");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// 审查 v3 裁定①：树里没有密钥字段时，加/解密入口必须**恒等返回**且不触碰主密钥。

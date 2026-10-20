@@ -210,6 +210,17 @@ fn take_reparse_skips() -> u64 {
     REPARSE_SKIPS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 不可读目录的进程级计数（A1-M02，v7.2 C06）：与 reparse 跳过并列的留痕出口。
+/// 只呈现、不进判定；`ScanCtx` 另有一份按扫描实例计数的副本用于收尾告警。
+static UNREADABLE_DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn note_unreadable_dir() {
+    UNREADABLE_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn take_unreadable_dirs() -> u64 {
+    UNREADABLE_DIRS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct ScanCtx {
     files: Mutex<Vec<ScannedFile>>,
     counter: AtomicU64,
@@ -224,6 +235,8 @@ pub struct ScanCtx {
     /// ⚠️ **只留痕、不参与任何判定**：`files.len()` / `total` / `truncated` 一律不看它。
     /// 让它进判定就是行为变更（扫描结果数字会变），混进留痕批次里没人审得出。
     skipped_reparse: AtomicU64,
+    /// 不可读目录计数（A1-M02）：与 skipped_reparse 并列，只留痕不进判定。
+    unreadable_dirs: AtomicU64,
     cap: usize,
 }
 
@@ -238,6 +251,7 @@ impl ScanCtx {
             counter: AtomicU64::new(0),
             truncated: AtomicBool::new(false),
             skipped_reparse: AtomicU64::new(0),
+            unreadable_dirs: AtomicU64::new(0),
             cap,
         }
     }
@@ -251,6 +265,17 @@ impl ScanCtx {
     /// 本次扫描因重解析点跳过的目录数（供留痕与测试；**不进任何判定字段**）。
     pub fn skipped_reparse(&self) -> u64 {
         self.skipped_reparse.load(Ordering::Relaxed)
+    }
+
+    /// 记一次「目录读不到」（A1-M02：只留痕不进判定，同时累加进程级计数）。
+    fn note_unreadable(&self) {
+        self.unreadable_dirs.fetch_add(1, Ordering::Relaxed);
+        note_unreadable_dir();
+    }
+
+    /// 本次扫描因权限/IO 读不到的目录数（供收尾告警；**不进任何判定字段**）。
+    pub fn unreadable_dirs(&self) -> u64 {
+        self.unreadable_dirs.load(Ordering::Relaxed)
     }
 
     /// 条目入桶，返回**实际收下**的条数（供心跳计数）。上限满时置 truncated 并告警一次。
@@ -306,6 +331,12 @@ impl ScanCtx {
                 "已跳过 {skipped} 个重解析点目录（junction/挂载点，不深入以避免重复计数）"
             ));
         }
+        let unreadable = self.unreadable_dirs();
+        if unreadable > 0 {
+            sink.warn(&format!(
+                "有 {unreadable} 个目录读不到（权限或 IO 失败），扫描结果可能不完整"
+            ));
+        }
         files
     }
 }
@@ -337,6 +368,7 @@ fn walk_level(
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) => {
+            ctx.note_unreadable();
             eprint_err(&e, &format!("read_dir {}", dir.display()), sink);
             return;
         }
@@ -396,7 +428,10 @@ fn walk_level(
 fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>, beat: &ScanBeat) {
     let rd = match fs::read_dir(root) {
         Ok(r) => r,
-        Err(_) => return,
+        Err(_) => {
+            note_unreadable_dir();
+            return;
+        }
     };
     // 审查v4-M6：只统计真实目录——Path::is_dir 会跟随联接点/符号链接，指向其他卷的
     // 联接点会把扫描范围外的内容重复计入。v5-K02 批次 2（N1-M05）：reparse 拦提到
@@ -432,6 +467,7 @@ fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
             // dir_size 的返回值直接进体积排行，读不到 = 少报，stderr 必须留痕
             // 让少报发生在哪可对账（留痕不改变统计口径）。
             Err(e) => {
+                note_unreadable_dir();
                 match beat {
                     Some(b) => b.warn(&format!("read_dir {} 失败: {e}", d.display())),
                     None => eprintln!("[finder-warn] read_dir {} 失败: {e}", d.display()),
@@ -544,7 +580,10 @@ fn analyze_dir_deep(
     while let Some(d) = stack.pop() {
         let rd = match fs::read_dir(&d) {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => {
+                note_unreadable_dir();
+                continue;
+            }
         };
         let files_before = files; // 本目录新增文件数的心跳基准
         for ent in rd.flatten() {
@@ -665,6 +704,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
             // 「该目录没有内容」一模一样（N1b-M01 的 analyze 侧）。留痕后继续，
             // 不改变其余根的处理。
             Err(e) => {
+                note_unreadable_dir();
                 eprint_err(&e, &format!("read_dir {}", root.display()), sink);
                 continue;
             }
@@ -770,6 +810,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
             ("elapsedMs", t0.elapsed().as_millis().to_string()),
             ("childrenTruncated", if children_truncated { "true" } else { "false" }.to_string()),
             ("skippedReparse", take_reparse_skips().to_string()), // v5-K02 批次2：本根 reparse 跳过量（只呈现）
+            ("unreadableDirs", take_unreadable_dirs().to_string()), // A1-M02：本根不可读目录数（只呈现）
         ]);
         for (cp, sz) in &children {
             item(sink, "analyzer", cp, *sz, &[("kind", "dir".to_string())]);
@@ -1096,7 +1137,10 @@ fn expand_tasks(root: &Path, task_depth: usize) -> Vec<(PathBuf, bool)> {
         for d in &level {
             let rd = match fs::read_dir(d) {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(_) => {
+                    note_unreadable_dir();
+                    continue;
+                }
             };
             for ent in rd.flatten() {
                 if let Ok(ft) = ent.file_type() {
@@ -1148,7 +1192,10 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBe
     while let Some((d, rec)) = stack.pop() {
         let rd = match fs::read_dir(&d) {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => {
+                note_unreadable_dir();
+                continue;
+            }
         };
         // 本目录直属文件数（P2-J：心跳按目录结算，见下方收尾注释）
         let mut local: u64 = 0;
@@ -1575,7 +1622,10 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
                 }
             }
             // 审查 v2-M4：根读不了要说话。静默 continue 会让「没权限看」长成「这个目录真干净」
-            Err(e) => eprint_err(&e, &format!("read_dir {}", p.display()), sink),
+            Err(e) => {
+                note_unreadable_dir();
+                eprint_err(&e, &format!("read_dir {}", p.display()), sink)
+            }
         }
         acc.flush(&mut root_files, &mut Vec::new());
         tops.par_iter().for_each(|d| {
@@ -1705,6 +1755,7 @@ fn collect_empty_fast(
         Ok(r) => r,
         // 不可读目录保守视为非空；审查 v2-M4：但要计数告警，不能静默吞掉
         Err(e) => {
+            note_unreadable_dir();
             eprint_err(&e, &format!("read_dir {}", dir.display()), sink);
             return false;
         }
@@ -1809,6 +1860,7 @@ fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize, up: O
         return false;
     }
     let Ok(rd) = fs::read_dir(dir) else {
+        note_unreadable_dir();
         return false;
     };
     for ent in rd.flatten() {
@@ -1878,6 +1930,8 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
         // v5-K02 批次2（N1-M05）：本根 reparse 跳过量一次性 warn（同 ScanCtx::finish 姿势，只呈现）
         let skipped = take_reparse_skips();
         if skipped > 0 { sink.warn(&format!("应用数据扫描（{label}）：已跳过 {skipped} 个重解析点目录（不深入以避免重复计数）")); }
+        let unreadable = take_unreadable_dirs();
+        if unreadable > 0 { sink.warn(&format!("应用数据扫描（{label}）：有 {unreadable} 个目录读不到（权限或 IO 失败），结果可能不完整")); }
         for (p, sz) in cur {
             if sz >= minb {
                 out.push((label.clone(), p, sz));
@@ -2616,6 +2670,18 @@ fn set_creation_time_days_ago(p: &Path, days: u64) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A1-M02（v7.2 C06）：不可读目录的计数出口必须接线（计数 + 输出字段 + 主 walk 记录）。
+    #[test]
+    fn unreadable_dir_counter_contract() {
+        let src = include_str!("scan.rs");
+        assert!(src.contains("static UNREADABLE_DIRS"), "进程级不可读计数不见了");
+        assert!(
+            src.contains("(\"unreadableDirs\", take_unreadable_dirs().to_string())"),
+            "analyzer 输出缺 unreadableDirs 字段"
+        );
+        assert!(src.contains("ctx.note_unreadable();"), "主 walk 的 read_dir 失败没进计数");
+    }
 
     /// v6-K02（P0-1，与主仓 normalize_lexical 同口径对拍）：不可折回形态保留前缀字面
     /// 只做小写；verbatim 盘符/UNC 照常折回。判红自证：把 lexically_normalize 的

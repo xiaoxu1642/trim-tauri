@@ -308,11 +308,28 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
         .collect();
     // §4.5③ 的真源：**现存全部清单**引用的 rel 集合。孤儿副本（清单写失败的那批）
     // 不在任何清单里，这是它们唯一可判定的「无人认领」口径。
+    //
+    // A1-M03（v7.2 C06）：任一份清单读不动就**整轮放弃裁剪**。旧实现把读失败当
+    // 「这份清单没有条目」，于是它引用的副本全部落进「无人认领」→ 送回收站。
     let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unreadable_manifests = 0usize;
     for m in &manifests {
-        for rel in manifest_rels(&root.join(m)) {
+        let Some(rels) = manifest_rels(&root.join(m)) else {
+            unreadable_manifests += 1;
+            continue;
+        };
+        for rel in rels {
             referenced.insert(rel.to_lowercase());
         }
+    }
+    if unreadable_manifests > 0 {
+        crate::engine::log::write_log(
+            "warn",
+            &format!(
+                "备份裁剪：{unreadable_manifests} 份清单读不动，引用集合不完整；本轮放弃裁剪与孤儿回收（避免误删仍被引用的副本）"
+            ),
+        );
+        return;
     }
     // 裁剪失败计数（§4.5②）：回收站满/禁用时旧实现 `let _ =` 静默停摆，
     // BACKUP_KEEP 上限形同虚设且无人知晓——现在逐条 warn + 汇总。
@@ -340,13 +357,21 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
         // 或干脆"备份文件已不存在"）。
         let mut kept_rels: std::collections::HashSet<String> = std::collections::HashSet::new();
         for m in &survivors {
-            for rel in manifest_rels(&root.join(m)) {
+            let Some(rels) = manifest_rels(&root.join(m)) else {
+                crate::engine::log::write_log("warn", "备份裁剪：幸存清单在二次读取时读不动，本轮放弃裁剪");
+                return;
+            };
+            for rel in rels {
                 kept_rels.insert(rel.to_lowercase());
             }
         }
         for oldest in &manifests {
             let mpath = root.join(oldest);
-            for rel in manifest_rels(&mpath) {
+            let Some(rels) = manifest_rels(&mpath) else {
+                crate::engine::log::write_log("warn", "备份裁剪：清单在二次读取时读不动，本轮放弃裁剪");
+                return;
+            };
+            for rel in rels {
                 // 与还原通道同一道准入：不含 .. / 不是绝对路径 / 不带盘符
                 if rel.is_empty()
                     || rel.contains("..")
@@ -498,17 +523,22 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
     }
 }
 
-/// 读一份文件备份清单里所有 `entries[].file`（相对名）。读不动就当没有条目。
-fn manifest_rels(manifest: &std::path::Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(manifest) else { return Vec::new() };
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|v| {
-            v.get("entries")
-                .and_then(|e| e.as_array())
-                .map(|a| a.iter().filter_map(|x| x.get("file").and_then(|s| s.as_str()).map(String::from)).collect())
-        })
-        .unwrap_or_default()
+/// 读一份文件备份清单里所有 `entries[].file`（相对名）。
+/// 读/解析失败返回 `None`（A1-M03：不得把「读不动」当成「没有条目」）；合法但无条目
+/// 返回 `Some(空)`。
+fn manifest_rels(manifest: &std::path::Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(
+        v.get("entries")
+            .and_then(|e| e.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.get("file").and_then(|s| s.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// 单条规则的执行结果计数（判定 status/message 的全部输入）。
@@ -3001,6 +3031,26 @@ mod file_backup_retention_tests {
             orphan_dir.join("1_fresh.log").is_file(),
             "冷静期内的副本不得被回收（在途批次保护）"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A1-M03（v7.2 C06）：任一份清单读不动 ⇒ 引用集合不完整 ⇒ 本轮不得回收任何孤儿。
+    /// 旧实现把读失败当「该清单没有条目」，其引用副本全部变成「无人认领」送回收站。
+    #[test]
+    fn 清单读不动时放弃孤儿回收() {
+        let root = sandbox("manifest-unreadable");
+        make_batch(&root, 1_700_000_000_020, &["keep_rule\\0_a.log"]);
+        let orphan_dir = root.join("orphan_rule");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("0_lost.log"), b"payload").unwrap();
+        // 一份清单变成非法 JSON（读/解析失败）
+        std::fs::write(root.join("manifest-1700000000021.json"), b"{bad").unwrap();
+        prune_file_backups_with(&root, 5, 0);
+        assert!(
+            orphan_dir.join("0_lost.log").is_file(),
+            "引用集合不完整时不得回收任何孤儿（否则误删仍被引用的副本）"
+        );
+        assert!(root.join("keep_rule\\0_a.log").is_file(), "清单引用的副本必须保留");
         let _ = std::fs::remove_dir_all(&root);
     }
 

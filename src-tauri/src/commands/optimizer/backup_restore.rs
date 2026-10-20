@@ -28,6 +28,19 @@ pub(super) fn load_opt_backups() -> Value {
     }
 }
 
+/// 还原入口专用的三态读取（A1-M04，v7.2 C06）：台账读不动时不能回「无备份记录」——
+/// 那会让用户以为从来没备份过，而真相是「不知道有没有」。`Absent` 才是确无台账。
+fn load_opt_backups_state() -> Result<Value, String> {
+    match crate::security::read_json_state(&opt_backup_file()) {
+        crate::security::JsonState::Ok(v) => Ok(v),
+        crate::security::JsonState::Absent => Ok(json!({})),
+        crate::security::JsonState::Corrupt => Err(
+            "优化项备份台账读取失败（现场已保留/见日志），无法确认是否存在备份记录；请先修复该文件或从其它批次还原"
+                .to_string(),
+        ),
+    }
+}
+
 /// v5-K01 批次 4（R7-M05 / R3-M07 同链收口）：optimizer-backups.json 的**读-改-写
 /// 唯一入口**。这份台账是用户值级注册表备份的唯一还原依据——旧链 load（IO 失败 ⇒
 /// 空表）→ 改 → save（`atomic_write_json` 直调）会在读失败瞬间把整本台账覆写成
@@ -410,16 +423,31 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     if !sysinfo::is_admin() {
         return json!({ "success": false, "needAdmin": true, "message": "还原优化需要管理员权限，请先提权" });
     }
-    // v5-K01 批次 4：只读查 entry（Corrupt 时 load 降级空表 + 已有 warn 留痕；
-    // 记账清理走 update_opt_backups，见还原成功后的收口）
-    let map = load_opt_backups();
+    // v5-K01 批次 4：只读查 entry。A1-M04：台账读不动必须与「无备份记录」分开。
+    let map = match load_opt_backups_state() {
+        Ok(m) => m,
+        Err(e) => {
+            return json!({
+                "success": false,
+                "missing": false,
+                "ledgerUnreadable": true,
+                "reason": "unreadable",
+                "message": e,
+            });
+        }
+    };
     let entry = map.get(&option_id).cloned();
     let Some(entry) = entry else {
-        return json!({ "success": false, "missing": true, "message": "无备份记录" });
+        return json!({ "success": false, "missing": true, "reason": "absent", "message": "无备份记录" });
     };
     let values = entry.get("values").and_then(|v| v.as_array()).cloned();
     let Some(values) = values.filter(|a| !a.is_empty()) else {
-        return json!({ "success": false, "missing": true, "message": "无备份记录" });
+        return json!({
+            "success": false,
+            "missing": true,
+            "reason": "empty",
+            "message": "备份记录为空（可能上次备份未写入完整），无法还原"
+        });
     };
     let restored = values.len();
 

@@ -262,6 +262,8 @@ pub async fn peripheral_restore_backup<R: tauri::Runtime>(
         // 与「导入失败/文件损坏」分开说：前者该去找 Trim 生成的备份，后者才该重试。
         let msg = match reason {
             "no-backup" => "还没有可用的备份（先应用一次优化后会自动备份）".to_string(),
+            // A1-M05：读失败必须给可操作原因，不许说成「没有备份」。
+            "unreadable" => "备份目录读取失败（权限或 IO 错误），不是「没有备份」；请检查数据目录权限后重试".to_string(),
             "unverifiable" => {
                 let first = v["rejected"]
                     .as_array()

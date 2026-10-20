@@ -679,15 +679,24 @@ pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> Vec<String> {
 /// 语义对齐原 PS `reg delete … ; if ($LASTEXITCODE -ne 0) { reg query …; if (0) { failed++ } }`
 /// —— reg.exe 删不存在的值会报错，但随后 query 不到，于是不计失败。原生等价是
 /// `RegDeleteValueW` 返回 `ERROR_FILE_NOT_FOUND`(2) 视为幂等成功。
+/// R5b-M01（v7.2 C06）：打开键失败时，只有「键/路径不存在」算幂等成功；
+/// ACCESS_DENIED(5)、1008 等其余失败必须判失败——旧实现一律 true，回执说删了、值还在。
+fn open_key_missing_is_idempotent(code: u32) -> bool {
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
+    matches!(code, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+}
+
 pub fn reg_restore_delete(hive: HKEY, subkey: &str, value_name: &str) -> bool {
     use windows::Win32::Foundation::WIN32_ERROR;
     const ERROR_FILE_NOT_FOUND: WIN32_ERROR = WIN32_ERROR(2);
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
     unsafe {
-        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
-            // 键都不存在 → 值必然不存在 → 幂等成功
-            return true;
+        let opened = RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
+        if opened.is_err() {
+            // R5b-M01（v7.2 C06）：只有「键不存在」才是幂等成功。
+            return open_key_missing_is_idempotent(opened.0);
         }
         let nm = to_wide(value_name);
         let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
@@ -774,4 +783,18 @@ pub(super) unsafe fn reg_count_values(hk: HKEY) -> usize {
         index += 1;
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_key_missing_is_idempotent;
+
+    /// R5b-M01：删值入口的「键不存在」判定必须只认 2/3，其余失败码一律判失败。
+    #[test]
+    fn 删值_只把键不存在当幂等成功() {
+        assert!(open_key_missing_is_idempotent(2), "ERROR_FILE_NOT_FOUND = 键不存在");
+        assert!(open_key_missing_is_idempotent(3), "ERROR_PATH_NOT_FOUND = 路径不存在");
+        assert!(!open_key_missing_is_idempotent(5), "ACCESS_DENIED 必须判失败（旧实现报成功）");
+        assert!(!open_key_missing_is_idempotent(1008), "其它失败码必须判失败");
+    }
 }

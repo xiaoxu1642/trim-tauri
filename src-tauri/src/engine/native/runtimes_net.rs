@@ -233,6 +233,40 @@ pub fn runtimes_status() -> Result<Value, String> {
     }
 }
 
+/// `IP_ADAPTER_ADDRESSES.OperStatus` 的文案映射（R5b-M03）：数值必须来自 crate 常量，
+/// 不抄 RFC 数字——旧实现把 2 写成 Connecting、3 写成 Disconnecting、7 写成
+/// MediaDisconnected，三档全错。
+fn oper_status_text(oper: windows::Win32::NetworkManagement::Ndis::IF_OPER_STATUS) -> &'static str {
+    use windows::Win32::NetworkManagement::Ndis::{
+        IfOperStatusDormant, IfOperStatusDown, IfOperStatusLowerLayerDown, IfOperStatusNotPresent,
+        IfOperStatusTesting, IfOperStatusUp,
+    };
+    if oper == IfOperStatusUp { "Up" }
+    else if oper == IfOperStatusDown { "Down" }
+    else if oper == IfOperStatusTesting { "Testing" }
+    else if oper == IfOperStatusDormant { "Dormant" }
+    else if oper == IfOperStatusNotPresent { "NotPresent" }
+    else if oper == IfOperStatusLowerLayerDown { "LowerLayerDown" }
+    else { "Unknown" }
+}
+
+/// WinHTTP 代理键行（英文 `Proxy Server(s) :` / 中文 `代理服务器 :`）。
+/// 只认键行，`Direct access (no proxy server).` 不是键行（R5b-M04）。
+fn winhttp_proxy_line(out: &str) -> Option<&str> {
+    out.lines().find(|l| {
+        let t = l.trim_start();
+        t.to_ascii_lowercase().starts_with("proxy server") || t.starts_with("代理服务器")
+    })
+}
+
+/// WinHTTP 是否配置了代理：键行冒号后必须有实际值（`(none)` 视为未配置）。
+fn winhttp_proxy_configured(out: &str) -> bool {
+    winhttp_proxy_line(out)
+        .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
+        .map(|v| !v.is_empty() && !v.eq_ignore_ascii_case("(none)"))
+        .unwrap_or(false)
+}
+
 /// 网络连通性检测（原 PS 时代脚本 netcheck_status.ps1，已退役；S3 简化版）
 ///
 /// 覆盖：网卡枚举、IP 配置、DHCP 服务、DNS 配置、代理设置、连通性探测。
@@ -240,9 +274,10 @@ pub fn runtimes_status() -> Result<Value, String> {
 pub fn netcheck_status() -> Result<Value, String> {
     unsafe {
         use windows::Win32::NetworkManagement::IpHelper::{
-            GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH as IP_ADAPTER_ADDRESSES,
+            GetAdaptersAddresses, GetIfEntry2, IP_ADAPTER_ADDRESSES_LH as IP_ADAPTER_ADDRESSES, MIB_IF_ROW2,
             GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
         };
+        use windows::Win32::NetworkManagement::Ndis::NET_IF_ADMIN_STATUS_DOWN;
         use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
         use std::net::ToSocketAddrs;
 
@@ -262,7 +297,7 @@ pub fn netcheck_status() -> Result<Value, String> {
 
         #[derive(Clone)]
         struct NicInfo {
-            name: String, status: String, speed: String, is_virtual: bool,
+            name: String, status: String, speed: String, is_virtual: bool, disabled: bool,
             ipv4: Vec<String>, gateway: Option<String>, dns: Vec<String>,
             dhcp_enabled: bool, if_index: u32,
         }
@@ -274,10 +309,14 @@ pub fn netcheck_status() -> Result<Value, String> {
             // 过滤回环和隧道
             if a.IfType == 24 || a.IfType == 131 { p = a.Next; continue; }
             let name = wide_str(a.FriendlyName.0);
-            let status = match a.OperStatus.0 {
-                1 => "Up", 2 => "Connecting", 0 => "Down", 3 => "Disconnecting",
-                7 => "MediaDisconnected", _ => "Unknown",
-            }.to_string();
+            // R5b-M03（v7.2 C06）：OperStatus 用 crate 常量对照（旧实现抄数字且抄错档），
+            // 管理态另查 GetIfEntry2.AdminStatus ——「被禁用」不是 OperStatus 的取值，
+            // 旧实现的 status=="Disabled" 恒空，enable-adapter 整条死路径。
+            let oper = a.OperStatus;
+            let status = oper_status_text(oper).to_string();
+            let mut row: MIB_IF_ROW2 = std::mem::zeroed();
+            row.InterfaceIndex = a.Anonymous1.Anonymous.IfIndex;
+            let disabled = GetIfEntry2(&mut row).0 == 0 && row.AdminStatus == NET_IF_ADMIN_STATUS_DOWN;
             let speed_mbps = a.TransmitLinkSpeed / 1_000_000;
             let speed = if speed_mbps >= 1000 {
                 format!("{:.0} Gbps", speed_mbps as f64 / 1000.0)
@@ -325,7 +364,7 @@ pub fn netcheck_status() -> Result<Value, String> {
                 dp = d.Next;
             }
             nics.push(NicInfo {
-                name, status, speed, is_virtual, ipv4, gateway, dns,
+                name, status, speed, is_virtual, disabled, ipv4, gateway, dns,
                 dhcp_enabled: a.Anonymous2.Flags & 0x04 != 0, // IP_ADAPTER_DHCP_ENABLED
                 if_index: a.Anonymous1.Anonymous.IfIndex,
             });
@@ -334,7 +373,7 @@ pub fn netcheck_status() -> Result<Value, String> {
 
         let physical: Vec<&NicInfo> = nics.iter().filter(|n| !n.is_virtual).collect();
         let up_list: Vec<&&NicInfo> = physical.iter().filter(|n| n.status == "Up").collect();
-        let disabled_list: Vec<&&NicInfo> = physical.iter().filter(|n| n.status == "Disabled").collect();
+        let disabled_list: Vec<&&NicInfo> = physical.iter().filter(|n| n.disabled).collect();
         let bad_list: Vec<&&NicInfo> = physical.iter().filter(|n| n.status != "Up").collect();
 
         let mut items: Vec<Value> = Vec::new();
@@ -348,7 +387,11 @@ pub fn netcheck_status() -> Result<Value, String> {
             if !disabled_list.is_empty() {
                 let names: Vec<&str> = disabled_list.iter().map(|n| n.name.as_str()).collect();
                 for n in &bad_list { adapter_evidence.push(format!("网卡 {}：{}", n.name, n.status)); }
-                ("warn", "存在被禁用的网卡".to_string(), json!({"id": "enable-adapter", "name": names.join(",")}))
+                ("warn", "存在被禁用的网卡".to_string(), json!({
+                    "id": "enable-adapter",
+                    "name": names.first().copied().unwrap_or(""),
+                    "names": names,
+                }))
             } else {
                 ("ok", String::new(), Value::Null)
             }
@@ -356,7 +399,11 @@ pub fn netcheck_status() -> Result<Value, String> {
             for n in &bad_list { adapter_evidence.push(format!("网卡 {}：{}", n.name, n.status)); }
             if !disabled_list.is_empty() {
                 let names: Vec<&str> = disabled_list.iter().map(|n| n.name.as_str()).collect();
-                ("fail", "没有可用网卡".to_string(), json!({"id": "enable-adapter", "name": names.join(",")}))
+                ("fail", "没有可用网卡".to_string(), json!({
+                    "id": "enable-adapter",
+                    "name": names.first().copied().unwrap_or(""),
+                    "names": names,
+                }))
             } else {
                 ("fail", "没有可用网卡".to_string(), Value::Null)
             }
@@ -487,9 +534,11 @@ pub fn netcheck_status() -> Result<Value, String> {
             })
             .ok()
             .map(|o| crate::engine::systembin::decode_native_output(&o.stdout));
-        let winhttp_has_proxy = winhttp_out.as_ref()
-            .map(|o| (o.contains("proxy") || o.contains("代理服务器")) && !o.contains("直接访问") && !o.contains("DIRECT"))
-            .unwrap_or(false);
+        // R5b-M04（v7.2 C06）：旧判据把 en-US 的 "Direct access (no proxy server)."
+        // 里的 "proxy" 当成已配置代理（`DIRECT` 大小写还不命中），无代理的英文机因此
+        // 被推荐一条会改系统 WinHTTP 配置的修复。判据改成「Current setting 段里
+        // 存在以 Proxy server(s)/代理服务器 开头且冒号后有值的行」。
+        let winhttp_has_proxy = winhttp_out.as_ref().map(|o| winhttp_proxy_configured(o)).unwrap_or(false);
         fn mask_proxy(s: &str) -> String {
             let body = s;
             // 去掉 scheme
@@ -530,9 +579,9 @@ pub fn netcheck_status() -> Result<Value, String> {
         }
         if winhttp_has_proxy {
             if let Some(o) = &winhttp_out {
-                // 提取代理服务器
-                if let Some(line) = o.lines().find(|l| l.contains("代理服务器") || l.contains("Proxy Server")) {
-                    let server = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                // 提取代理服务器：只认键行（大小写不敏感），值取首个冒号之后。
+                if let Some(line) = winhttp_proxy_line(o) {
+                    let server = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("").to_string();
                     if !server.is_empty() {
                         proxy_evidence.push(format!("系统代理（WinHTTP）：{}", mask_proxy(&server)));
                     }
@@ -692,20 +741,38 @@ pub fn runtimes_repair(action_id: &str, installer_path: Option<&str>) -> Result<
 pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String> {
     match action_id {
         "enable-adapter" => {
-            let name = repair.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if name.trim().is_empty() {
+            // R5b-M03：逐张下发。旧实现把多张网卡名 join(",") 塞进单个 name 参数，
+            // `netsh interface set interface name=a,b` 必失败。
+            let mut names: Vec<String> = repair
+                .get("names")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            if names.is_empty() {
+                if let Some(s) = repair.get("name").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+                    names.push(s.to_string());
+                }
+            }
+            if names.is_empty() {
                 return Ok(json!({"ok": false, "message": "缺少网卡名"}));
             }
-            let out = crate::engine::systembin::quiet_cmd_timeout(
-                system_tool("netsh")?,
-                &["interface", "set", "interface", &format!("name={name}"), "admin=enabled"],
-                crate::engine::systembin::NETSH_TIMEOUT,
-            )
-            .map_err(|e| format!("netsh 执行失败: {e}"))?;
-            if out.status.success() {
-                Ok(json!({"ok": true, "message": "网卡已启用"}))
+            let exe = system_tool("netsh")?;
+            let mut failed: Vec<String> = Vec::new();
+            for name in &names {
+                let out = crate::engine::systembin::quiet_cmd_timeout(
+                    &exe,
+                    &["interface", "set", "interface", &format!("name={name}"), "admin=enabled"],
+                    crate::engine::systembin::NETSH_TIMEOUT,
+                )
+                .map_err(|e| format!("netsh 执行失败（{name}）: {e}"))?;
+                if !out.status.success() {
+                    failed.push(name.clone());
+                }
+            }
+            if failed.is_empty() {
+                Ok(json!({"ok": true, "message": format!("已启用 {} 张网卡", names.len())}))
             } else {
-                Ok(json!({"ok": false, "message": "网卡启用失败"}))
+                Ok(json!({"ok": false, "message": format!("以下网卡启用失败：{}", failed.join("、"))}))
             }
         }
         "reset-dns" => {
@@ -800,6 +867,40 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R5b-M03：网卡状态文案按 crate 常量映射（旧数字表三档全错）。
+    #[test]
+    fn oper_status_映射按_crate_常量() {
+        use windows::Win32::NetworkManagement::Ndis::{
+            IfOperStatusDown, IfOperStatusLowerLayerDown, IfOperStatusTesting, IfOperStatusUp,
+        };
+        assert_eq!(oper_status_text(IfOperStatusUp), "Up");
+        assert_eq!(oper_status_text(IfOperStatusDown), "Down");
+        assert_eq!(oper_status_text(IfOperStatusTesting), "Testing");
+        assert_eq!(oper_status_text(IfOperStatusLowerLayerDown), "LowerLayerDown");
+    }
+
+    /// R5b-M04：WinHTTP 判据必须按「键行 + 冒号后有值」判，不能被本地化文案里的
+    /// "proxy" 字样骗到（en-US 无代理时输出 `Direct access (no proxy server).`）。
+    #[test]
+    fn winhttp_代理判据不随语言假阳() {
+        let en_direct = "Current WinHTTP proxy settings:\n\n    Direct access (no proxy server).\n";
+        assert!(!winhttp_proxy_configured(en_direct), "英文无代理输出不得判成已配置");
+        let en_proxy = "Current WinHTTP proxy settings:\n\n    Proxy Server(s) :  http://127.0.0.1:7890\n    Bypass List     :  (none)\n";
+        assert!(winhttp_proxy_configured(en_proxy), "英文有代理必须命中");
+        let zh_direct = "当前的 WinHTTP 代理服务器设置:\n\n    直接访问(没有代理服务器)。\n";
+        assert!(!winhttp_proxy_configured(zh_direct));
+        let zh_proxy = "当前的 WinHTTP 代理服务器设置:\n\n    代理服务器:  http://127.0.0.1:7890\n";
+        assert!(winhttp_proxy_configured(zh_proxy), "中文有代理必须命中");
+        assert!(!winhttp_proxy_configured("Proxy Server(s) :  (none)"), "(none) 视为未配置");
+        // 判据自测通过不等于接线正确：netcheck_status 必须调用同一个函数。
+        // 用 concat! 拼锚点，避免本测试源码里的字面量自命中。
+        let needle = concat!("winhttp_proxy_configured", "(o)");
+        assert!(
+            include_str!("runtimes_net.rs").contains(needle),
+            "netcheck_status 没有走 winhttp_proxy_configured（判据与调用点分叉）"
+        );
+    }
 
     /// v5 R-1：x86 名单里不得出现 `vcruntime140_1.dll`。
     ///

@@ -17,7 +17,7 @@
 //      某个 `mod` 声明链覆盖 ⇒ 不在编译面/不在可达面的文件即红（R2-M05 派生，
 //      `minifilter_orphan.rs` 就是漏网的活样本）。
 //   N6 递归遍历必须保留深度常量（登记式棘轮，见 WALK_DEPTH_SITES）。
-//   N7 「取最新」实现唯一化（现算唯一实现是 startup::pick_newest_file）。
+//   N7 「取最新」实现唯一化（现算唯一实现是 common::pick_newest_file）。
 //   N8 快照槽必须域限定：所有 `snapshot::{set,get,clear}` 的键参数必须经 domain_key。
 //   N9（X-1 同批，2026-10-15）快照表跨窗顶账的三种可机检形态：A origin 字面量闸 /
 //      B CLEANUP 快照取用点登记闸 / C 两表 static 声明反合并声明（见段内详注）。
@@ -417,6 +417,8 @@ const WALK_DEPTH_SITES = [
   // v7.2-C03（N1a-L04）：第三个深度上限入棘轮——fileKeys 快照遍历对齐 PS -Depth 24，
   // 与工程护栏 MAX_WALK_DEPTH 目的不同、数值不同，但同样是「删掉判据门禁照绿」的假绿面。
   { file: 'native-scanner/src/cleanup_scan.rs', name: 'fileKeys 快照遍历（对齐 PS -Depth 24）', token: 'FK_SNAPSHOT_MAX_DEPTH' },
+  // v7.2-C06（R5b-M13）：顽固软件治理的计划任务 DFS 此前无上限、不查重解析点，且不在 N6 面。
+  { file: 'src-tauri/src/engine/native/process.rs', name: '顽固软件计划任务 DFS', token: 'STUBBORN_TASKS_MAX_DEPTH' },
 ];
 for (const s of WALK_DEPTH_SITES) {
   const f = join(ROOT, s.file);
@@ -444,7 +446,7 @@ let n7sites = 0;
     }
   }
   n7sites = found.length;
-  const unexpected = found.filter((x) => !x.includes('native/startup.rs: fn pick_newest_file'));
+  const unexpected = found.filter((x) => !x.includes('native/common.rs: fn pick_newest_file'));
   if (unexpected.length) g.fail(`N7：出现新的「取最新」实现（应复用 pick_newest_file 或在此登记理由）：${unexpected.join('；')}`);
   if (!found.some((x) => x.includes('pick_newest_file'))) g.fail('N7：pick_newest_file 没找到（扫描面或改名漂移）');
 }

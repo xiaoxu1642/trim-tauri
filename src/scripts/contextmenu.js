@@ -8,6 +8,10 @@
   let currentFilter = 'all';
   let isScanning = false;
   let hasScanned = false;
+  // F4a2-M05（v7.2 C06）：桥缺失时的预览链用 31 条虚构数据，必须让用户知道
+  // 「看到的是演示数据、勾选不写系统」——旧实现照常播「扫描完成」，勾选静默改本地状态。
+  let demoMode = false;
+  let demoToggleWarned = false;
   let iconMap = {};        // clsid -> dataUrl
   let detailItem = null;   // 当前详情弹窗展示的条目
   let ctxModalCtrl = null; // v3.2.0：详情弹窗工厂 ctrl（焦点陷阱/Esc 由工厂统一管理）
@@ -293,7 +297,10 @@
     // 页头汇总：总条目数 + 软件数（原来是「N 个分类」）
     const totalShown = groups.reduce((s, g) => s + g.items.length, 0);
     const summary = document.getElementById('contextSummary');
-    if (summary) summary.textContent = `共 ${totalShown} 项 · ${groups.length} 个软件`;
+    if (summary) {
+      const prefix = demoMode ? '演示数据（未读写系统） · ' : '';
+      summary.textContent = `${prefix}共 ${totalShown} 项 · ${groups.length} 个软件`;
+    }
 
     // 看板：一列 = 一个软件。原来「空分类也占一列」是为了让扫描范围可见，
     // 按软件分组后空组根本不存在，扫描范围改由页头与详情弹窗交代。
@@ -610,8 +617,12 @@
   async function applyToggles(payloads) {
     if (!payloads.length) return;
     if (!window.api?.contextmenu?.toggle) {
-      // 浏览器预览模式：直接翻转本地状态
+      // 浏览器预览模式：只翻转本地状态（不写系统），首次操作时明确告知
       payloads.forEach(p => { p.item.enabled = p.enabled; });
+      if (demoMode && !demoToggleWarned) {
+        demoToggleWarned = true;
+        window.app?.toast('warning', '演示数据：勾选只改本地状态，未写入系统');
+      }
       renderList();
       updateUI();
       return;
@@ -795,7 +806,8 @@
         if (!resp.success) throw new Error(resp.message);
         items = resp.data;
       } else {
-        // 预览模式
+        // 预览模式：数据是虚构的，必须显式标出来（F4a2-M05）
+        demoMode = true;
         await new Promise(r => setTimeout(r, 1200));
         items = MOCK_ITEMS.map(m => ({
           ...m,
@@ -817,7 +829,11 @@
 
       // 提示语跟着分组轴走：用户现在看到的是「几个软件」，报「几个分类」会对不上界面
       const ownerCount = groupOwnerBy(items).length;
-      window.app?.toast('success', `扫描完成，共发现 ${items.length} 项，属于 ${ownerCount} 个软件（含未识别组）`);
+      if (demoMode) {
+        window.app?.toast('warning', `当前为演示数据，未读写系统（${items.length} 项，属于 ${ownerCount} 个软件）`);
+      } else {
+        window.app?.toast('success', `扫描完成，共发现 ${items.length} 项，属于 ${ownerCount} 个软件（含未识别组）`);
+      }
     } catch (e) {
       window.app?.toast('error', '扫描失败: ' + e.message);
       if (container) {

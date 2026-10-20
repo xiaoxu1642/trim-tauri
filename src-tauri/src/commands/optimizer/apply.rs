@@ -902,7 +902,7 @@ pub async fn optimizer_run<R: Runtime>(
                     }
                 }
                 stdout.push_str(&format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n"));
-                (Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false }), reasons)
+                (Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false, tree_terminate_failed: false }), reasons)
             }
             Err(e) => (Err(format!("原生执行失败: {e}")), Vec::new()),
         };

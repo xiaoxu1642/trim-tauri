@@ -209,12 +209,7 @@ fn glob_first_dir(pattern: &str) -> String {
                     matched.push(entry.path());
                 }
             }
-            matched.sort_by(|a, b| {
-                let ta = a.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-                let tb = b.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-                tb.cmp(&ta)
-            });
-            if let Some(first) = matched.first() {
+            if let Some(first) = pick_newest_file(&matched) {
                 current = first.to_string_lossy().to_string();
             } else { return String::new(); }
         } else {

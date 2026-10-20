@@ -1774,7 +1774,11 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             // 失败）和早退路径的脚本清理。改走统一入口后两者由 pwsh 层保证。
             let out = crate::pwsh::run_inbox_script(script, std::time::Duration::from_secs(300), None)?;
             if out.timed_out {
-                return Err("内联 PS 步骤执行超时（300s）".into());
+                return Err(if out.tree_terminate_failed {
+                    "内联 PS 步骤执行超时（300s），且子进程树未能收回（重试可能与残留进程并发）".into()
+                } else {
+                    "内联 PS 步骤执行超时（300s）".into()
+                });
             }
             if out.code != 0 {
                 return Err(format!("内联 PS 步骤退出码 {}", out.code));

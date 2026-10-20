@@ -645,21 +645,6 @@ fn startup_disabled_file_candidates() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// 在同名台账的多份候选里取**最近修改**的那本（同刻并列时偏向列表第一位=写入根）。
-fn pick_newest_file(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
-    for p in paths {
-        let Ok(md) = p.metadata() else { continue };
-        let Ok(t) = md.modified() else { continue };
-        match &best {
-            // 严格大于才替换：第一位（写入根）在并列时保住优先权
-            Some((bt, _)) if *bt >= t => {}
-            _ => best = Some((t, p.clone())),
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
 /// 当前生效的那本禁用台账。
 ///
 /// 为什么按修改时间而不是"新根优先"：收口前所有写入都落老根，而启动迁移只是**按名复制一次**，
@@ -927,15 +912,22 @@ mod backup_root_tests {
         let older = put(&current, "backup_20260101_000000_1.reg", 1_700_000_000);
         let newer = put(&legacy, "backup_20260901_000000_1.reg", 1_730_000_000);
         put(&current, "notes.txt", 1_800_000_000);
-        let got = collect_peripheral_backup_files(&[current.clone(), legacy.clone()]);
+        let got = collect_peripheral_backup_files(&[current.clone(), legacy.clone()]).0;
         assert_eq!(got.len(), 2, "两个根都要收且只认 backup_*.reg: {got:?}");
         assert_eq!(got[0], newer, "跨根必须一起排时间，否则还原挑到旧批次: {got:?}");
         assert_eq!(got[1], older);
         assert_eq!(
-            collect_peripheral_backup_files(&[current]).len(),
+            collect_peripheral_backup_files(&[current]).0.len(),
             1,
             "少给一个根就少一批可还原的备份"
         );
+        // A1-M05：非 NotFound 的 read_dir 失败必须计数（目录位置放了一个文件），
+        // 让上层能把「读不动」与「没备份过」分开。
+        let bogus = root.join("not-a-dir.reg");
+        std::fs::write(&bogus, b"x").expect("写占位文件");
+        let (files, unreadable) = collect_peripheral_backup_files(&[bogus]);
+        assert!(files.is_empty());
+        assert_eq!(unreadable, 1, "目录读失败必须计数: {unreadable}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

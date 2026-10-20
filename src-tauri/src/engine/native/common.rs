@@ -77,32 +77,62 @@ pub(super) fn safe_name(name: &str) -> String {
     name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
+/// 在多份同名候选文件里取**最近修改**的那份（同刻并列时偏向列表第一位）。
+///
+/// R5b-M12（v7.2 C06）：这是「按 mtime 取最新」的唯一实现——启动项台账
+/// （`startup.rs`）与路径 glob（`paths_scan.rs`）都走它。并列语义是判据的一部分：
+/// **严格大于才替换**，所以调用方把「优先根」放在列表第一位即可（启动项写入根
+/// 在 `backup_read_dirs` 的第一位）。
+pub(super) fn pick_newest_file(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for p in paths {
+        let Ok(md) = p.metadata() else { continue };
+        let Ok(t) = md.modified() else { continue };
+        match &best {
+            Some((bt, _)) if *bt >= t => {}
+            _ => best = Some((t, p.clone())),
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 /// 跨候选根收集外设备份分片（`backup_<stamp>_*.reg`），按修改时间倒序。
 ///
 /// 单独成函数只为让「新老两根都要收、且一起排时间」这条能被单测钉住：真正的还原要跑
 /// `reg.exe import`，快速组碰不得。只认一根会出现「老根有三月那批、新根有今天那批，
 /// 还原挑错一批」的错账（v2-M19 收口后两根都可能有条目）。
-pub(super) fn collect_peripheral_backup_files(dirs: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
-    let mut files: Vec<std::path::PathBuf> = dirs
-        .iter()
-        .filter_map(|d| std::fs::read_dir(d).ok())
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("backup_") && n.ends_with(".reg"))
-                    .unwrap_or(false)
-        })
-        .collect();
+pub(super) fn collect_peripheral_backup_files(dirs: &[std::path::PathBuf]) -> (Vec<std::path::PathBuf>, usize) {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut unreadable = 0usize;
+    for d in dirs {
+        match std::fs::read_dir(d) {
+            Ok(rd) => {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    let hit = p.is_file()
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.starts_with("backup_") && n.ends_with(".reg"))
+                            .unwrap_or(false);
+                    if hit {
+                        files.push(p);
+                    }
+                }
+            }
+            // 根本不存在 = 「没备份过」，不是读失败；其它错误（权限/IO）必须计数
+            // （A1-M05，v7.2 C06）。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => unreadable += 1,
+        }
+    }
     files.sort_by(|a, b| {
         let ta = a.metadata().and_then(|m| m.modified()).ok();
         let tb = b.metadata().and_then(|m| m.modified()).ok();
         tb.cmp(&ta)
     });
-    files
+    // sort_by 是稳定排序：mtime 并列时保持候选顺序（`backup_read_dirs` 写入根在前），
+    // 与 pick_newest_file 的「严格大于才替换」同一条并列裁决（R5b-M12）。
+    (files, unreadable)
 }
 
 /// 删除失败原因分档（R4，2026-10-15）——把 io::Error 折成四档，供清理执行链与网速报告

@@ -65,37 +65,18 @@ fn load_bench_history() -> Vec<Value> {
 /// 读-改-写（v4 组 1 / R7-M01「读失败绝不落到写」）：`Ok`/`Absent` 才执行 `f` 并落盘；
 /// 结构异常（非数组）与读取失败都**拒绝本次写入**并如实回报——旧实现把两者都当
 /// 「空数组」继续跑，一次 add/clear 就把用户历史整表覆写，且无日志无隔离。
-/// v4 修复（2026-10-09）：走数组形态三态读器（同 load_bench_history 的理由）。
+/// R7-M07（v7.2 C06）：改用数组形态的 RMW 原语，三态闸/原子落盘/进程内锁不再在本文件复制。
 fn update_bench_history(f: impl FnOnce(&mut Vec<Value>)) -> Result<(), String> {
-    let mut records: Vec<Value> = match security::read_json_array_state(&bench_history_file()) {
-        security::JsonState::Ok(Value::Array(items)) => items.iter().cloned().collect(),
-        security::JsonState::Ok(_) => {
-            crate::engine::log::write_log("warn", "测速历史结构异常（非数组），本次写入已拒绝");
-            return Err("测速历史文件结构异常，本次操作已拒绝（可删除该文件后重试）".into());
-        }
-        security::JsonState::Corrupt => {
-            return Err("测速历史读取失败（现场已隔离/见日志），本次操作已拒绝".into());
-        }
-        security::JsonState::Absent => Vec::new(),
-    };
-    f(&mut records);
-    if save_bench_history(&records) {
+    security::update_json_array(&bench_history_file(), |records| {
+        f(records);
+        records.truncate(MAX_HISTORY);
         Ok(())
-    } else {
-        Err("写入失败".into())
-    }
-}
-
-/// `saveBenchHistory`：截断到 50 条后原子落盘
-fn save_bench_history(records: &[Value]) -> bool {
-    let trimmed: Vec<Value> = records.iter().take(MAX_HISTORY).cloned().collect();
-    match security::atomic_write_json(&bench_history_file(), &Value::Array(trimmed)) {
-        Ok(()) => true,
-        Err(e) => {
-            log::write_log("error", &format!("保存测速历史失败: {e}"));
-            false
-        }
-    }
+    })
+    .map(|_| ())
+    .map_err(|e| {
+        log::write_log("error", &format!("保存测速历史失败: {e}"));
+        e
+    })
 }
 
 /// `Date.now() + '_' + Math.random().toString(36).slice(2, 8)` 等价物

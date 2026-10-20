@@ -159,23 +159,6 @@ pub fn device_info() -> Result<Value, String> {
             }
         }
 
-        // 辅助：从注册表读 DWORD
-        fn reg_read_dword(hive: windows::Win32::System::Registry::HKEY, path: &str, name: &str) -> Option<u32> {
-            unsafe {
-                use windows::Win32::System::Registry::{RegOpenKeyExW, RegQueryValueExW, RegCloseKey, KEY_READ, REG_VALUE_TYPE};
-                let sk = to_wide(path);
-                let mut hk = windows::Win32::System::Registry::HKEY::default();
-                if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { return None; }
-                let nm = to_wide(name);
-                let mut ty = REG_VALUE_TYPE::default();
-                let mut val = 0u32;
-                let mut size = std::mem::size_of::<u32>() as u32;
-                let ok = RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(&mut val as *mut u32 as *mut u8), Some(&mut size)).is_ok();
-                let _ = RegCloseKey(hk);
-                if ok && ty.0 == 4 { Some(val) } else { None }
-            }
-        }
-
         // 1. 系统信息
         let system = {
             let caption = reg_read_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName").unwrap_or_default();
@@ -201,8 +184,15 @@ pub fn device_info() -> Result<Value, String> {
             if let Some(n) = name {
                 if n.is_empty() || n.contains("Basic Display") || n.contains("Remote Display") { continue; }
                 let driver = reg_read_string(HKEY_LOCAL_MACHINE, &path, "DriverVersion").unwrap_or_default();
-                // 显存：HardwareInformation.qwMemorySize（QWORD）
-                let vram = reg_read_dword(HKEY_LOCAL_MACHINE, &path, "HardwareInformation.qwMemorySize").unwrap_or(0) as u64;
+                // 显存：HardwareInformation.qwMemorySize 是 QWORD（R5b-M06）——
+                // 旧实现用只认 REG_DWORD 的读器，恒 None ⇒ 显存恒空。
+                let vram = super::registry::read_reg_qword_opt(
+                    HKEY_LOCAL_MACHINE,
+                    &path,
+                    "HardwareInformation.qwMemorySize",
+                )
+                .unwrap_or(0)
+                .max(0) as u64;
                 let vram_gb = if vram > 0 { format!("{:.1} GB", vram as f64 / (1024.0 * 1024.0 * 1024.0)) } else { String::new() };
                 graphics.push(json!({ "name": n, "memory": vram_gb, "driver": driver }));
             }

@@ -396,41 +396,77 @@ fn stubborn_task_backup_name(task: &str) -> String {
     task.trim_start_matches('\\').replace('\\', "_")
 }
 
+/// 计划任务库遍历的深度上限（R5b-M13）：与 `cleanup::ENGINE_WALK_MAX_DEPTH` /
+/// native-scanner `MAX_WALK_DEPTH` 同档。这里之前是唯一没有上限的 `stack` 递归。
+const STUBBORN_TASKS_MAX_DEPTH: usize = 64;
+
 /// 从磁盘任务库现算目标任务（返回任务全名：根下任务 `\Name`，文件夹任务 `\Folder\Name`）。
 ///
 /// 直读 `C:\Windows\System32\Tasks`（启动项域同款做法，毫秒级）；跳过 `Microsoft\`
 /// 子树（系统任务区）。根目录读不到时记 warn 并返回空——「这些软件一个都没装」
 /// 与「目录根本读不了」在日志上可区分。
+///
+/// R5b-M13（v7.2 C06）：补深度上限、重解析点拒绝与非根目录读失败计数。
 fn stubborn_enum_tasks() -> Vec<String> {
     let root = std::path::Path::new(r"C:\Windows\System32\Tasks");
     let mut out: Vec<String> = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            if dir.as_path() == root {
-                crate::engine::log::write_log(
-                    "warn",
-                    &format!("顽固软件治理：计划任务目录读取失败（{}），本轮跳过任务清理", dir.display()),
-                );
-            }
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut unreadable = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        if depth >= STUBBORN_TASKS_MAX_DEPTH {
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "顽固软件治理：计划任务目录超过深度上限 {STUBBORN_TASKS_MAX_DEPTH}，已跳过 {}",
+                    dir.display()
+                ),
+            );
             continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => {
+                if dir.as_path() == root {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("顽固软件治理：计划任务目录读取失败（{}），本轮跳过任务清理", dir.display()),
+                    );
+                } else {
+                    unreadable += 1;
+                }
+                continue;
+            }
         };
         for entry in entries.flatten() {
             let p = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                unreadable += 1;
+                continue;
+            };
+            // 跟随 junction 会把别的子树算进来（甚至成环）；与清理域同一口径拒绝。
+            if crate::engine::protect::is_reparse(&meta) {
+                continue;
+            }
             let Ok(rel) = p.strip_prefix(root) else { continue };
             let rel_str = rel.to_string_lossy().replace('/', "\\");
             let lower = rel_str.to_ascii_lowercase();
             if lower == "microsoft" || lower.starts_with("microsoft\\") {
                 continue;
             }
-            if p.is_dir() {
-                stack.push(p);
+            if meta.is_dir() {
+                stack.push((p, depth + 1));
                 continue;
             }
-            if stubborn_task_rel_matches(&rel_str) {
+            if meta.is_file() && stubborn_task_rel_matches(&rel_str) {
                 out.push(format!("\\{rel_str}"));
             }
         }
+    }
+    if unreadable > 0 {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("顽固软件治理：计划任务目录有 {unreadable} 个子项不可读，任务清单可能不完整"),
+        );
     }
     out.sort();
     out
@@ -662,7 +698,9 @@ pub fn stubborn_block() -> Result<Value, String> {
             let mut exported = false;
             if let Some(reg_file_str) = reg_file.to_str() {
                 let run_reg_path = format!("HKCU\\{RUN_KEY}");
-                // v6-K01（P0-2）：解析失败并进 exported=false（备份不完整不删值）
+                // R5b-M08（v7.2 C06）：`quiet_cmd_timeout` 的 Ok 只代表「进程跑完」，
+                // 不代表 reg.exe 成功；同名旧文件还会让 exists() 恒真。三判：退出码成功
+                // + 文件在 + 内容非空，缺一不删值。
                 exported = crate::engine::systembin::system_tool("reg.exe")
                     .map_err(std::io::Error::other)
                     .and_then(|exe| {
@@ -672,7 +710,9 @@ pub fn stubborn_block() -> Result<Value, String> {
                             crate::engine::systembin::REG_EXPORT_TIMEOUT,
                         )
                     })
-                    .is_ok() && reg_file.exists();
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                    && reg_file.metadata().map(|m| m.len() > 0).unwrap_or(false);
             }
             if !exported {
                 fail_run.push(format!("{RUN_VALUE}（注册表备份失败，未删除）"));
