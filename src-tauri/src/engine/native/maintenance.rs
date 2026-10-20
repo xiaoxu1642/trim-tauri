@@ -219,7 +219,12 @@ fn service_state(name: &str) -> Option<u32> {
 fn stop_service_wait(name: &str, budget: std::time::Duration) -> bool {
     // v6-K01（P0-2）：解析失败按「停服务失败」处理（返回 false 由调用方如实回执）
     let Ok(sc) = crate::engine::systembin::system_tool("sc") else { return false };
-    let _ = crate::engine::systembin::quiet_cmd_timeout(&sc, &["stop", name], MAINT_CMD_TIMEOUT);
+    // R5b-M09：sc stop 是短命令（30s 档），不能用维护链的 1800s 总超时。
+    let _ = crate::engine::systembin::quiet_cmd_timeout(
+        &sc,
+        &["stop", name],
+        crate::engine::systembin::SC_CMD_TIMEOUT,
+    );
     let deadline = std::time::Instant::now() + budget;
     loop {
         if service_state(name) == Some(1) {
@@ -234,8 +239,15 @@ fn stop_service_wait(name: &str, budget: std::time::Duration) -> bool {
 
 /// 请求启动服务并轮询到 RUNNING（同上：`sc start` 返回 0 时服务可能还在 START_PENDING）
 fn start_service_wait(name: &str) -> bool {
-    if !run_cmd("sc", &["start", name]) {
-        return false;
+    // R5b-M09：sc start 同样是短命令（30s 档）；run_cmd 用的是 1800s 维护总超时。
+    let Ok(sc) = crate::engine::systembin::system_tool("sc") else { return false };
+    match crate::engine::systembin::quiet_cmd_timeout(
+        &sc,
+        &["start", name],
+        crate::engine::systembin::SC_CMD_TIMEOUT,
+    ) {
+        Ok(out) if out.status.success() => {}
+        _ => return false,
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {

@@ -329,11 +329,15 @@ fn enumerate_guids(
             )
         };
         if rc.0 != 0 {
+            if rc.0 != 259 {
+                crate::engine::log::write_log("warn", &format!("电源 GUID 枚举失败（PowerEnumerate rc={}）", rc.0));
+            }
             break;
         }
         out.push(guid_from_le_bytes(&buf));
         idx += 1;
         if idx >= 4096 {
+            crate::engine::log::write_log("warn", "电源 GUID 枚举达到上限 4096，结果可能被截断");
             break;
         }
     }
@@ -720,11 +724,15 @@ fn scheme_guids() -> Vec<GUID> {
             PowerEnumerate(None, None, None, ACCESS_SCHEME, idx, Some(buf.as_mut_ptr()), &mut size)
         };
         if rc.0 != 0 {
+            if rc.0 != 259 {
+                crate::engine::log::write_log("warn", &format!("电源方案枚举失败（PowerEnumerate rc={}）", rc.0));
+            }
             break; // ERROR_NO_MORE_ITEMS(259) 或其它失败 → 收工
         }
         out.push(guid_from_le_bytes(&buf));
         idx += 1;
         if idx >= 512 {
+            crate::engine::log::write_log("warn", "电源方案枚举达到上限 512，结果可能被截断");
             break; // 防御：正常机器方案数远小于此
         }
     }

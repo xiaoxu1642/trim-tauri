@@ -1357,6 +1357,39 @@ mod tests {
         );
     }
 
+    /// U-R5b（P1-W2）：native 杂项七条。
+    #[test]
+    fn u_r5b_native_contracts() {
+        assert!(
+            include_str!("engine/native/paths_scan.rs").contains("fn strip_icon_suffix"),
+            "R5b-M02：图标索引后缀必须按末尾逗号剥，不能按首个空格"
+        );
+        assert!(
+            include_str!("engine/native/runtimes_net.rs").contains("delete_manifest::iso_now()"),
+            "R5b-M05：collectedAt 必须是 ISO 形态"
+        );
+        assert!(
+            include_str!("commands/peripheral.rs").contains("rest.get(15..)"),
+            "R5b-M07：批次名切片必须走 get，避免非字符边界 panic"
+        );
+        assert!(
+            include_str!("engine/native/maintenance.rs").matches("SC_CMD_TIMEOUT").count() >= 2,
+            "R5b-M09：sc stop/start 必须用 30s 档而非维护总超时"
+        );
+        assert!(
+            include_str!("engine/native/memory.rs").contains("PROCESS_QUERY_INFORMATION | PROCESS_VM_READ"),
+            "R5b-M10：32 位进程内存计数需要更高权限的句柄"
+        );
+        assert!(
+            include_str!("engine/native/syspanel.rs").contains("枚举达到上限"),
+            "R5b-M14：电源枚举触顶/失败必须留痕"
+        );
+        assert!(
+            include_str!("engine/sysrestore.rs").contains("《依赖清单》"),
+            "R5b-L11：依赖登记指代必须改成现行文档名"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

@@ -46,19 +46,26 @@ fn emit_path(p: &std::path::Path) -> String {
 }
 
 /// 路径标准化（对应 PS 的 Normalize-Path）
+fn strip_icon_suffix(s: &str) -> String {
+    let Some(pos) = s.rfind(',') else { return s.to_string() };
+    let (prefix, suffix) = s.split_at(pos);
+    let idx = suffix[1..].trim();
+    let lower = prefix.trim().to_lowercase();
+    let exe_like = [".exe", ".dll", ".msi", ".cmd", ".bat"].iter().any(|e| lower.ends_with(e));
+    if exe_like && !idx.is_empty() && idx.parse::<i32>().is_ok() {
+        prefix.trim().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 fn normalize_path(value: &str) -> String {
     let v = value.trim().trim_matches('"');
     if v.is_empty() { return String::new(); }
     let expanded = expand_env(v);
-    // 兼容 "path.exe,0" 图标索引后缀
-    let v = if let Some(pos) = expanded.find(|c: char| c == ',' || c == ' ') {
-        let prefix = &expanded[..pos];
-        if prefix.to_lowercase().ends_with(".exe") || prefix.to_lowercase().ends_with(".dll")
-            || prefix.to_lowercase().ends_with(".msi") || prefix.to_lowercase().ends_with(".cmd")
-            || prefix.to_lowercase().ends_with(".bat") {
-            prefix.to_string()
-        } else { expanded }
-    } else { expanded };
+    // R5b-M02：先剥末尾 `,<数字>` 图标索引（`C:\Program Files\App\app.exe,0` 的首个空格
+    // 在 Program Files 里，旧「首个逗号或空格」判法永远剥不掉）。
+    let v = strip_icon_suffix(&expanded);
     match std::path::Path::new(&v).canonicalize() {
         // v5-K02 批次 1（R5b-M09）：过统一出口剥 verbatim，与 glob 分支同形状
         Ok(p) => emit_path(&p),

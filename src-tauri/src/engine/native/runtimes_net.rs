@@ -678,7 +678,8 @@ pub fn netcheck_status() -> Result<Value, String> {
         Ok(json!({
             "items": items,
             "nicProps": nic_props,
-            "collectedAt": format!("{:?}", std::time::SystemTime::now()),
+            // R5b-M05：与同域其它时间戳同口径（SystemTime Debug 形态不是 ISO，前端无法可靠展示）。
+            "collectedAt": crate::engine::delete_manifest::iso_now(),
         }))
     }
 }

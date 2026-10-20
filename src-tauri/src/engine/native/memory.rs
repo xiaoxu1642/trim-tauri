@@ -77,8 +77,8 @@ pub fn memory_processes() -> Result<Vec<NativeProcess>, String> {
         };
         use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
         use windows::Win32::System::Threading::{
-            OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-            QueryFullProcessImageNameW,
+            OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, QueryFullProcessImageNameW,
         };
 
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -96,7 +96,15 @@ pub fn memory_processes() -> Result<Vec<NativeProcess>, String> {
                 let mut working_set = 0u64;
                 let mut path = String::new();
 
-                if let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                // R5b-M10：32 位进程在 LIMITED 权限下可能拿不到内存计数；
+                // 先用 QUERY_INFORMATION|VM_READ，失败再退回 LIMITED（权限不足的进程仍可读路径）。
+                let proc = OpenProcess(
+                    PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                    false,
+                    pid,
+                )
+                .or_else(|_| OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid));
+                if let Ok(proc) = proc {
                     let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
                     pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
                     if GetProcessMemoryInfo(proc, &mut pmc, pmc.cb).is_ok() {

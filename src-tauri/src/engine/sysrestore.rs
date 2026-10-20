@@ -27,7 +27,7 @@
 //! 1. `IWbemLocator` **只有 `ConnectServer`，没有 `CreateService`**；
 //! 2. 全 crate **不导出 `CLSID_WbemLocator`**，只能手写 GUID 常量；
 //! 3. 属性读取要 `VARIANT`，连带需要 `Win32_System_Variant` feature（两个 feature 都是新开的，
-//!    已登记进方案依赖清单）。
+//!    已登记进《依赖清单》）。
 //!
 //! ## 刻意不做的事
 //! - **不创建还原点**（`SRSetRestorePointW` 的静态可用性另见 `pwsh` 侧记录：本机

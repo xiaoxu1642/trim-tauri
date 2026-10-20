@@ -205,9 +205,11 @@ fn backup_batch_of(name: &str) -> Option<&str> {
     if b.len() < 15 || b[8] != b'_' || !b[..8].iter().all(|c| c.is_ascii_digit()) || !b[9..15].iter().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    match rest[15..].strip_prefix('_') {
-        None if rest.len() == 15 => Some(&rest[..15]),
-        Some(shard) if !shard.is_empty() && shard.as_bytes().iter().all(|c| c.is_ascii_digit()) => Some(&rest[..15]),
+    // R5b-M07：用 get 代替裸下标，文件名在边界处含多字节字符时返回 None 而不是 panic。
+    let tail = rest.get(15..)?;
+    match tail.strip_prefix('_') {
+        None if rest.len() == 15 => rest.get(..15),
+        Some(shard) if !shard.is_empty() && shard.as_bytes().iter().all(|c| c.is_ascii_digit()) => rest.get(..15),
         _ => None,
     }
 }
