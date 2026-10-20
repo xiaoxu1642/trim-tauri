@@ -783,25 +783,34 @@ pub async fn uninstall_modify<R: tauri::Runtime>(
         }
         let (exe, args) = split_uninstall_cmd(&modify_path)
             .ok_or_else(|| "ModifyPath 无法解析出可执行文件".to_string())?;
+        // R2b-M02 同族：ModifyPath 与 UninstallString 一样来自可写的注册表原文，走同一
+        // 准入闸（R2b-K01 的咽喉）。漏掉这条的症状是「卸载修好了、修改/修复当场断」。
+        let admitted = admit_uninstaller_exec(&exe, &args).map_err(|e| {
+            let msg = format!("uninstall_modify {display_name}: {label}命令被准入闸拒绝（{e}），未执行");
+            log::write_log("warn", &msg);
+            msg
+        })?;
         log::flush_sync();
-        let code = match shell_run_wait(&exe, &args) {
-            Ok(UninstallerWait::Exited(code)) => code,
-            Ok(UninstallerWait::TimedOut) => {
-                // 审查 M-03：硬等待有上界了，但本路径没有 watch_uninstaller 轮询兜底，
-                // 超时即「状态未知」。如实报错、不杀进程（强杀会留半卸载/半修复状态）。
-                let msg = format!(
-                    "uninstall_modify {display_name}: {label}等待超过 {} ms 仍未退出（未强制终止），状态未知",
-                    UNINSTALLER_WAIT_TIMEOUT_MS
-                );
-                log::write_log("warn", &msg);
-                return Err(msg);
-            }
-            Ok(UninstallerWait::ElevationDeclined) => {
-                // R9（2026-10-15）：用户拒了 UAC —— 修改/修复器从未启动（本路径无界面可回退）
-                let msg = format!("uninstall_modify {display_name}: 用户取消了权限请求（{label}未启动）");
-                log::write_log("warn", &msg);
-                return Err(msg);
-            }
+        let code = match shell_run_wait(&admitted, &args) {
+            Ok(r) => match r.outcome {
+                UninstallerWait::Exited(code) => code,
+                UninstallerWait::TimedOut => {
+                    // 审查 M-03：硬等待有上界了，但本路径没有 watch_uninstaller 轮询兜底，
+                    // 超时即「状态未知」。如实报错、不杀进程（强杀会留半卸载/半修复状态）。
+                    let msg = format!(
+                        "uninstall_modify {display_name}: {label}等待超过 {} ms 仍未退出（未强制终止），状态未知",
+                        UNINSTALLER_WAIT_TIMEOUT_MS
+                    );
+                    log::write_log("warn", &msg);
+                    return Err(msg);
+                }
+                UninstallerWait::ElevationDeclined => {
+                    // R9（2026-10-15）：用户拒了 UAC —— 修改/修复器从未启动（本路径无界面可回退）
+                    let msg = format!("uninstall_modify {display_name}: 用户取消了权限请求（{label}未启动）");
+                    log::write_log("warn", &msg);
+                    return Err(msg);
+                }
+            },
             Err(e) => {
                 let msg = format!("uninstall_modify {display_name}: {label}启动失败: {e}");
                 log::write_log("error", &msg);

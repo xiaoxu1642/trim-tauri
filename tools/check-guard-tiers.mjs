@@ -46,7 +46,7 @@ const UPDATE = process.argv.includes('--update')
   ? (process.argv[process.argv.indexOf('--update') + 1] === 'readonly' ? 'readonly' : true)
   : false;
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
@@ -510,6 +510,31 @@ for (const [konst, spec] of Object.entries(MUST_WINDOWSET)) {
   check(eq, `E2b. ${konst} 成员与登记完全相等`, `登记 ${JSON.stringify(want)} ⇄ 代码 ${JSON.stringify(members)}`);
   const alien = members.filter((lbl) => !appWindowsSet.includes(lbl));
   check(alien.length === 0, `E3. ${konst} 的每个 label 都在 APP_WINDOWS 内`, alien.length ? `多出来 ${JSON.stringify(alien)}（capabilities/subwindows.json 里没有它，IPC 必判越权）` : '');
+}
+
+// ==================== H 组：APP_WINDOWS ⇄ capabilities/*.json 并集（R8-L03） ====================
+// 为什么必须双向：`APP_WINDOWS` 多一个 capabilities 里没有的 label ⇒ 窗口建得出来、
+// 每次 IPC 判越权；capabilities 多一个 `APP_WINDOWS` 里没有的 label ⇒ 权限清单给了一个
+// 不在册的窗口（或被删窗口的残留权限）。此前三个在册脚本都只做单向/子集判定，
+// 「新增子窗只同步了两处（guard.rs / capabilities）」这类漏项没有一道门禁能抓到。
+{
+  const capDir = join(REPO_ROOT, 'src-tauri', 'capabilities');
+  const capLabels = new Set();
+  for (const f of readdirSync(capDir).filter((n) => n.endsWith('.json'))) {
+    const j = JSON.parse(readFileSync(join(capDir, f), 'utf8'));
+    for (const w of j.windows ?? []) capLabels.add(String(w));
+  }
+  const onlyGuard = appWindowsSet.filter((l) => !capLabels.has(l));
+  const onlyCap = [...capLabels].filter((l) => !appWindowsSet.includes(l)).sort();
+  check(
+    onlyGuard.length === 0 && onlyCap.length === 0,
+    `H. APP_WINDOWS ⇄ capabilities windows 并集双向一致（${appWindowsSet.length} / ${capLabels.size}）`,
+    onlyGuard.length
+      ? `只在 APP_WINDOWS 里 ${JSON.stringify(onlyGuard)}（窗口建得出来但每次 IPC 判越权）`
+      : onlyCap.length
+        ? `只在 capabilities 里 ${JSON.stringify(onlyCap)}（权限清单给了不在册/已退役的窗口）`
+        : '',
+  );
 }
 const roMissing = wantReadonly.filter((n) => !actualReadonly.includes(n));
 const roExtra = actualReadonly.filter((n) => !wantReadonly.includes(n));

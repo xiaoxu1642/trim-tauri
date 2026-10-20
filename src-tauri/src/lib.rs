@@ -28,6 +28,15 @@ use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
 use crate::engine::{appearance, log, paths, sysinfo};
 
 const APP_NAME: &str = "Trim";
+
+/// 主窗口 label（R8-L03）：建窗、单实例唤回、首帧显示、事件判定共用这一个常量。
+/// 四处字面量各自漂移时没有任何机械核对，症状是窗口建得出来但 IPC/唤回找错对象。
+pub const MAIN_LABEL: &str = "main";
+
+/// appearance.json 里窗口状态的键（R8-M01 读写唯一真源）。
+/// 改名 = 所有用户的窗口位置恢复静默失效，所以读写两侧都只许引用这个常量。
+const WINDOW_STATE_KEY: &str = "windowState";
+
 /// 主窗口最小内容区（2026-10-11 用户实测锁定：外框 1403×870 / 客户区 1387×861，
 /// 即"锁死当前尺寸为下限，不设最大"）。建窗与窗口状态 sanitize 用客户区读数 1387×861；
 /// 拖拽下限另按外框口径，见 MIN_TRACK_WIDTH 与建窗后 set_min_size 的注释。
@@ -101,8 +110,8 @@ fn force_round_corners<R: Runtime>(window: &WebviewWindow<R>) {
 // ==================== 窗口状态恢复（sanitize 逻辑对照 main.js 866 段） ====================
 
 pub(crate) struct ShowState {
-    /// `pub(crate)` 是为了让首帧看门狗（commands::app）能读到它——
-    /// 看门狗不另建一份状态，避免「两个真相判断界面是否画出来了」。
+    /// 显示成功闩锁（R8-M02）：CAS 占位防并发重复显示；显示动作失败会复位，
+    /// 让 3s/8s 兜底与后续首帧还能重试。看门狗读它 = 「主窗已成功显示」。
     pub(crate) shown: AtomicBool,
     maximized: bool,
 }
@@ -151,6 +160,48 @@ fn sanitize_window_state<R: Runtime>(
     }
 }
 
+/// 保存窗口位置 / 尺寸 / 最大化状态（R8-M01）。
+///
+/// 为什么原来恢复分支不可达：Tauri 轨从没有任何写点——Electron 基线的读写在
+/// `vendor/upstream-js/main.js`，那份是只读上游快照、不参与运行时。没有写侧时
+/// `sanitize_window_state` 的恢复整条链路是死的。
+///
+/// 必须在窗口还活着时读几何：`CloseRequested` 回调里窗口仍在；`RunEvent::Exit`
+/// 只做 best-effort（那时窗口可能已销毁，读不到就跳过，不写半份状态）。
+/// 写侧走 `appearance::update_appearance`（读-改-写原语，进程内锁），不许自拼
+/// load→改→atomic_write_json。
+///
+/// 已知差别：最大化时记的是最大化几何（Tauri 没有 Electron `getNormalBounds` 的等价物），
+/// 下次启动会先按这份几何摆好再最大化；用户点还原时由系统决定还原位。
+fn save_window_state<R: Runtime>(window: &WebviewWindow<R>) {
+    let (Ok(pos), Ok(size), Ok(scale)) =
+        (window.outer_position(), window.inner_size(), window.scale_factor())
+    else {
+        return;
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    // 读侧按逻辑坐标（DIP）sanitize 与 set_position/set_size，这里同口径折回。
+    let state = serde_json::json!({
+        "x": pos.x as f64 / scale,
+        "y": pos.y as f64 / scale,
+        "width": size.width as f64 / scale,
+        "height": size.height as f64 / scale,
+        "maximized": window.is_maximized().unwrap_or(false),
+    });
+    let res = appearance::update_appearance(|ap| {
+        let Some(obj) = ap.as_object_mut() else {
+            return Err("外观配置不是对象，拒绝写入窗口状态".to_string());
+        };
+        obj.insert(WINDOW_STATE_KEY.to_string(), state.clone());
+        Ok(())
+    });
+    if let Err(e) = res {
+        log::write_log("warn", &format!("窗口状态保存失败（不影响退出）: {e}"));
+    }
+}
+
 // ==================== 子窗口显示 / 聚焦（开发期后台回归开关） ====================
 
 /// 开发期「不激活前台」开关（与 `show_main_window_when_ready` 用同一环境变量）。
@@ -162,7 +213,16 @@ pub fn dev_noactivate() -> bool {
     std::env::var("TRIM_DEV_NOACTIVATE").as_deref() == Ok("1")
 }
 
-/// 把 `WEBVIEW2_ADDITIONAL_BROWSER_ARGS` 环境变量透传给 builder（审查 K4 复盘）。
+/// wry 0.55.1 WebView2 的默认浏览器参数（R8-L02）。
+///
+/// 上游 `webview2/mod.rs` 是 `additional_browser_args(...).unwrap_or_else(|| 默认串)`——
+/// **传参即整串替换**。只传自己的调试参数会把三个关闭项丢掉（msWebOOUI / msPdfOOUI /
+/// msSmartScreenProtection），所以这里显式拼回默认值。升级 wry 时必须重核这条字面量：
+/// 它没有编译期校验，漂移了只会表现为行为差异。
+const WRY_DEFAULT_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+
+/// 把 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 环境变量透传给 builder（审查 K4 复盘）。
 ///
 /// 实测陷阱：主窗在 `lib.rs` 里透传了这份参数（Phase 0 为了让 CDP 端口生效），而四个子窗
 /// **没有**透传 —— 同一个 WebView2 user-data-folder 下浏览器参数不一致时，第二个 core 创建
@@ -179,7 +239,8 @@ pub fn with_browser_args<R: tauri::Runtime, M: tauri::Manager<R>>(
     if let Ok(extra) = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
         let extra = extra.trim();
         if !extra.is_empty() {
-            builder = builder.additional_browser_args(extra);
+            // R8-L02：additional_browser_args 是替换不是追加，必须把 wry 默认串拼回来
+            builder = builder.additional_browser_args(&format!("{WRY_DEFAULT_BROWSER_ARGS} {extra}"));
         }
     }
     builder
@@ -194,6 +255,11 @@ pub fn activate_window<R: Runtime>(window: &WebviewWindow<R>) {
             }
             return;
         }
+        // R8-L01：拿不到 hwnd 时也要把窗口显示出来。旧实现会落回生产分支的
+        // show()+set_focus()，等于在 dev 档抢前台；而单纯退回隐藏又会让窗口永不显示。
+        // dev 档的统一语义：只显示、不聚焦。
+        let _ = window.show();
+        return;
     }
     let _ = window.show();
     let _ = window.set_focus();
@@ -211,41 +277,71 @@ pub fn focus_window<R: Runtime>(window: &WebviewWindow<R>) {
 
 /// 首帧握手显示窗口。3s / 8s 两级兜底与 Electron 版一致
 /// （渲染异常或脚本失败时仍照常显示，不让窗口永久隐藏）。
+///
+/// R8-M02：闩锁语义 = **显示成功**，不是「抢到名额」。抢名额用 CAS 防并发重复显示，
+/// 显示动作返回 Err 时立即复位并写 warn——3s/8s 兜底与后续首帧因此还能重试；
+/// 旧实现的 `swap(true)` 先占位、`let _ =` 吞掉全部失败，窗口没显示也照样写
+/// 「主窗口显示」并让看门狗以为界面已画出来。
 pub fn show_main_window_when_ready<R: Runtime>(app: &AppHandle<R>, cause: &str) {
     let state = app.state::<ShowState>();
-    if state.shown.swap(true, Ordering::SeqCst) {
+    if !claim_show_slot(&state.shown) {
         return;
     }
-    if let Some(window) = app.get_webview_window("main") {
-        if state.maximized {
-            // 最大化前移到 show 之前，避免 show 后可见的尺寸跳变/边框重绘
-            let _ = window.maximize();
-        }
-        force_round_corners(&window);
-        // 开发期 CDP 后台调试开关：TRIM_DEV_NOACTIVATE=1 时窗口显示但不激活前台，
-        // 避免真机调试抢占用户桌面（仅调试构建使用，发布链路不带此变量）。
-        if std::env::var("TRIM_DEV_NOACTIVATE").as_deref() == Ok("1") {
-            // SW_SHOWNOACTIVATE(4)：显示窗口但不抢输入焦点/不置顶前台
-            if let Ok(hwnd) = window.hwnd() {
-                let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    let result = match app.get_webview_window(MAIN_LABEL) {
+        Some(window) => show_main_window(&window, state.maximized),
+        None => Err("主窗口不存在（get_webview_window 返回 None）".to_string()),
+    };
+    match result {
+        Ok(()) => {
+            log::write_log("info", &format!("主窗口显示（触发: {cause}）"));
+            // R16：提权后消费到的待编辑意图只在首帧显示之后交给渲染层；页面脚本此时才已挂载。
+            if let Some(state) = app.try_state::<commands::state::PendingEditState>() {
+                if let Some(intent) = state.take() {
+                    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+                        let _ = window.emit("syspanel:edit-intent", intent);
+                    }
+                }
             }
-        } else {
-            let _ = window.show();
-            let _ = window.set_focus();
+            // v3 B3：显示动作落地之后才排队 housekeeping。真实首帧握手与 3s / 8s 两级兜底都经过
+            // 这个函数，所以渲染脚本白屏时清理照样会跑；下面的闩锁保证三条路径最多排队一次。
+            schedule_startup_housekeeping_once(app);
+        }
+        Err(e) => {
+            // 复位 = 允许后续兜底重试；日志必须带拒因，否则「没显示」又成了无证据状态。
+            state.shown.store(false, Ordering::SeqCst);
+            log::write_log("warn", &format!("主窗口显示失败（触发: {cause}）：{e}"));
         }
     }
-    log::write_log("info", &format!("主窗口显示（触发: {cause}）"));
-    // R16：提权后消费到的待编辑意图只在首帧显示之后交给渲染层；页面脚本此时才已挂载。
-    if let Some(state) = app.try_state::<commands::state::PendingEditState>() {
-        if let Some(intent) = state.take() {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.emit("syspanel:edit-intent", intent);
-            }
-        }
+}
+
+/// 抢「本次显示尝试」的唯一名额（CAS）；失败方直接返回，避免三条触发路径重复显示。
+fn claim_show_slot(flag: &AtomicBool) -> bool {
+    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// 把「显示」这件事收成可返回成败的一处（R8-L01/M02 的共同落点）：
+/// dev 档只显示不聚焦；生产档 show 成功即算显示成功（聚焦失败不影响闩锁）。
+fn show_main_window<R: Runtime>(window: &WebviewWindow<R>, maximized: bool) -> Result<(), String> {
+    if maximized {
+        // 最大化前移到 show 之前，避免 show 后可见的尺寸跳变/边框重绘；
+        // 最大化失败不阻断显示，成败由 show 决定。
+        let _ = window.maximize();
     }
-    // v3 B3：显示动作落地之后才排队 housekeeping。真实首帧握手与 3s / 8s 两级兜底都经过
-    // 这个函数，所以渲染脚本白屏时清理照样会跑；下面的闩锁保证三条路径最多排队一次。
-    schedule_startup_housekeeping_once(app);
+    force_round_corners(window);
+    // 开发期 CDP 后台调试开关：TRIM_DEV_NOACTIVATE=1 时窗口显示但不激活前台，
+    // 避免真机调试抢占用户桌面（仅调试构建使用，发布链路不带此变量）。
+    if dev_noactivate() {
+        // SW_SHOWNOACTIVATE(4)：显示窗口但不抢输入焦点/不置顶前台
+        let hwnd = window.hwnd().map_err(|e| format!("拿不到窗口句柄: {e}"))?;
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        return Ok(());
+    }
+    window.show().map_err(|e| format!("show 失败: {e}"))?;
+    let _ = window.set_focus();
+    Ok(())
 }
 
 // ==================== 显示后一次性 housekeeping（v3 B2 / B3） ====================
@@ -518,10 +614,11 @@ pub fn run() {
     // 建窗前杀掉。改为先走文件握手（见 commands::elevate）。
     // 旧实例确认让位后 mutex 已空闲，此时仍可正常注册以恢复单实例保护。
     let elevated_relaunch = commands::elevate::elevation_takeover_pending();
+    let mut takeover_released = false;
     let pending_edit_intent = if elevated_relaunch {
-        // v5-K03：接管握手照跑（旧实例让位、旗标清理），但返回值不再决定单实例
-        // 注册——提权重启一律不装单实例（见下方 builder 分支的注释）。
-        let _ = commands::elevate::take_over_as_elevated_instance();
+        // R8-M04：握手返回值 = 旧实例是否**确认让位**（mutex 已空闲）。只有这一档才敢
+        // 补注册单实例插件；超时档仍不注册（插件会把新实例在建窗前 exit(0)，v5-K03 的双亡）。
+        takeover_released = commands::elevate::take_over_as_elevated_instance();
         commands::elevate::take_pending_edit_intent()
     } else {
         None
@@ -536,24 +633,27 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     #[cfg(desktop)]
-    let builder = if elevated_relaunch {
-        // v5-K03（2026-10-12 拍板）：提权重启路径**一律不注册**单实例插件——不再区分
-        // 握手是否已 released。released 信号一到旧实例就 exit(0)，与新实例建窗存在
-        // 双活窗口；此时注册的话，插件发现 mutex 仍被旧实例占着会把新实例在建窗前
-        // 杀掉 ⇒ 新旧双亡、应用消失（R8-K01 实测机制）。与 commands::elevate 的超时
-        // 分支取向统一：**宁可短暂双开，不让应用消失**——单实例保护在提权会话期间
-        // 缺席是可接受的代价；用户下次正常启动（非提权）时恢复注册。
-        builder
-    } else {
+    let builder = if !elevated_relaunch || takeover_released {
+        // 普通启动恒注册；提权重启只在「旧实例已确认让位、mutex 已空闲」时补注册
+        // （R8-M04）。take_over_as_elevated_instance 返回 true 前已经等旧实例进程退出，
+        // 所以这里不会重演 v5-K03 的「新旧双亡」。
         builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 对照 main.js 57-62：再次启动应用 = 把已有主窗口唤回前台，而不是开第二个
-            if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window(MAIN_LABEL) {
                 if w.is_minimized().unwrap_or(false) {
                     let _ = w.unminimize();
                 }
                 focus_window(&w);
             }
         }))
+    } else {
+        // 超时档（takeover_released == false）：旧实例可能仍持有 mutex，注册会让插件
+        // 在建窗前 exit(0)。宁可本会话没有单实例约束，也不让提权后的应用消失。
+        log::write_log(
+            "warn",
+            "提权实例未确认旧实例让位：本会话不注册单实例插件（避免插件在建窗前 exit(0)）",
+        );
+        builder
     };
 
     builder
@@ -564,7 +664,7 @@ pub fn run() {
             // ——实测 Tauri/wry 2.11 自带默认浏览器参数时，WebView2 加载器会忽略该环境变量，
             // 导致 CDP 远程调试端口起不来（Phase 0 结论，B2 已记录）。
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let builder = WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App("index.html".into()))
                 .title(APP_NAME)
                 .inner_size(MIN_WIDTH, MIN_HEIGHT)
                 .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
@@ -585,6 +685,15 @@ pub fn run() {
             // 建窗/尺寸变更的换算，拖拽钳制走 WM_GETMINMAXINFO（原因见 MIN_TRACK_* 注释）。
             // 不设 max —— 无任何上限约束，ptMaxTrackSize 实测为 0（不限制最大值）。
             let _ = window.set_min_size(Some(LogicalSize::new(MIN_TRACK_WIDTH, MIN_TRACK_HEIGHT)));
+
+            // R8-M01 写侧：窗口关闭请求时还在，几何读得到（RunEvent::Exit 时可能已销毁）。
+            // `WebviewWindow` 要 clone 进闭包（回调是 'static）。
+            let state_window = window.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                    save_window_state(&state_window);
+                }
+            });
 
             // ---------- 启动期同步任务（v3 B1：首帧前必须落地的迁移与安全边界） ----------
             // 只留「后续读写依赖它」的四项：老根迁移、名单文件迁移、配置语义迁移、
@@ -635,7 +744,7 @@ pub fn run() {
             let ap = appearance::load_appearance();
             let mut maximized = false;
             if let Some(ws) = ap
-                .get("windowState")
+                .get(WINDOW_STATE_KEY)
                 .and_then(|v| serde_json::from_value::<WindowState>(v.clone()).ok())
             {
                 if let Some((x, y, w, h)) = sanitize_window_state(app.handle(), &ws) {
@@ -656,8 +765,8 @@ pub fn run() {
                 maximized,
             });
             // v3 B3：housekeeping 的排队闩锁与 ShowState.shown 分开两份状态。
-            // shown 表示「显示调用抢到了名额」，不代表窗口真的画出来了；把它当业务状态
-            // 复用，白屏路径与兜底路径的清理会绑成同一个真相，很难判「到底排队了几次」。
+            // shown 在 R8-M02 后的语义 = 「主窗已成功显示」（失败会复位）；它不再承载
+            // 「抢到名额」这层意义，排队次数由 StartupHousekeeping 自己的闩锁回答。
             app.manage(StartupHousekeeping::default());
 
             // 首帧看门狗：必须排在 manage(ShowState) 之后 —— 它读的就是这个状态。
@@ -690,9 +799,14 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("Tauri 运行时构建失败")
-        .run(|_app, event| {
+        .run(|app, event| {
             // 唯一退出钩子：覆盖窗口关闭、shutdown:complete、异常退出三条路径
             if let tauri::RunEvent::Exit = event {
+                // R8-M01 兜底：正常关闭已由 CloseRequested 写过；这里补 shutdown:complete /
+                // 异常退出路径。窗口可能已销毁，读不到几何就静默跳过（不写半份状态）。
+                if let Some(w) = app.get_webview_window(MAIN_LABEL) {
+                    save_window_state(&w);
+                }
                 on_app_exit();
             }
         });
@@ -712,6 +826,15 @@ pub fn on_app_exit() {
 
 #[cfg(test)]
 mod tests {
+    const SELF: &str = include_str!("lib.rs");
+
+    /// 只取生产段：所有 `#[cfg(test)]` 模块以下不参与计数，避免断言里的字符串字面量
+    /// 把测试自己算进接线数（旧版用「两处 token 互相抵消」，扫描面其实是瞎的）。
+    fn prod() -> &'static str {
+        let cut = SELF.find("#[cfg(test)]").expect("找不到 #[cfg(test)]——断言的截断锚点变了");
+        &SELF[..cut]
+    }
+
     fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
@@ -726,25 +849,160 @@ mod tests {
     }
 
     /// 审查 v2-L4 的常驻断言：**每个建窗点都必须过一次 `with_browser_args`**。
-    /// 这条约束是 K4 用一次误判换来的——不透传浏览器参数时同一 WebView2 user-data-folder 下
-    /// 第二个 core 建不出来，而 `build()` 照样返回 Ok、`get_webview_window` 照样查得到，
-    /// 只有 `hwnd=0x0`；靠人在每个新窗口记得它是必漏的，所以这里直接数源码。
-    /// 只读文本、不建窗口、不依赖运行时；定义行写成 `with_browser_args<R>(` 故不计入调用数。
+    /// R8-M03：旧实现全局数两个 token 再比相等——一处漏透传 + 一处重复包裹 = 5/5 恒绿，
+    /// 且 `read_to_string` 失败静默跳过。现改为**逐文件点名**：凡文件内出现建窗 token，
+    /// 就必须同文件出现透传 token，并把命中的文件清单打进 `reached`。
+    /// token 用 concat! 拼，避免测试源码里的字面量被自己数进去。
     #[test]
     fn every_window_builder_goes_through_browser_args() {
+        let builder_token = concat!("WebviewWindowBuilder", "::new(");
+        let wrap_token = concat!("with_browser_args", "(");
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         rs_files(&root, &mut files);
-        let (mut builders, mut guarded) = (0usize, 0usize);
+        let mut builders = 0usize;
+        let mut reached: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
         for f in &files {
-            let Ok(t) = std::fs::read_to_string(f) else { continue };
-            builders += t.matches("WebviewWindowBuilder::new(").count();
-            guarded += t.matches("with_browser_args(").count();
+            let t = std::fs::read_to_string(f).unwrap_or_else(|e| {
+                panic!("读不了源文件 {}：{e}（仓内源码不该读不到，静默跳过会让本断言瞎）", f.display())
+            });
+            let n = t.matches(builder_token).count();
+            if n == 0 {
+                continue;
+            }
+            builders += n;
+            if !t.contains(wrap_token) {
+                failures.push(format!("{}：{n} 个建窗点但 0 处 with_browser_args", f.display()));
+            }
+            reached.push(f.strip_prefix(&root).unwrap_or(f).display().to_string());
         }
         assert!(builders > 0, "一个建窗点都没扫到——扫描根目录是否变了");
+        assert!(
+            failures.is_empty(),
+            "以下文件有建窗点但没透传浏览器参数（K4 的静默 hwnd=0x0）：{failures:#?}；本次命中的建窗文件：{reached:?}"
+        );
+        println!("reached 建窗文件（{}）：{reached:?}", reached.len());
+    }
+
+    /// R8-L01：`TRIM_DEV_NOACTIVATE` 的判定只许有一处定义；dev 档两条路径都不能落回
+    /// 生产分支的 set_focus（旧实现 hwnd 失败时直接抢前台）。
+    #[test]
+    fn l01_dev_noactivate_has_single_source() {
+        let src = prod();
+        let needle = concat!("std::env::var(", "\"TRIM_DEV_NOACTIVATE\")");
         assert_eq!(
-            builders, guarded,
-            "建窗点数 {builders} ≠ with_browser_args 调用数 {guarded}：有窗口没透传浏览器参数（K4 的静默 hwnd=0x0）"
+            src.matches(needle).count(),
+            1,
+            "环境变量判定只许留在 dev_noactivate 定义处（内联复制品会让两条兜底方向再次分叉）"
+        );
+        assert!(src.contains("if dev_noactivate() {"), "显示路径必须调用 dev_noactivate()");
+        let at = src.find("fn activate_window").expect("activate_window 不见了");
+        let tail = &src[at..];
+        let end = tail.find("\n}\n").map(|e| at + e).unwrap_or(src.len());
+        let body = &src[at..end];
+        let dev = &body[body.find("if dev_noactivate()").expect("dev 分支不见了")..];
+        assert_eq!(
+            dev.matches("return;").count(),
+            2,
+            "dev 档有 hwnd / 无 hwnd 两条路径都必须返回（不得落回生产分支抢前台）"
+        );
+    }
+
+    /// R8-L02：`additional_browser_args` 传参即替换，必须把 wry 默认串拼回来。
+    #[test]
+    fn l02_browser_args_append_wry_defaults() {
+        assert_eq!(
+            super::WRY_DEFAULT_BROWSER_ARGS,
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+            "默认串必须与 wry 0.55.1 的 WebView2 默认值一致（升级 wry 时重核）"
+        );
+        let src = prod();
+        assert!(
+            src.contains("format!(\"{WRY_DEFAULT_BROWSER_ARGS} {extra}\")"),
+            "必须拼接 wry 默认串；裸传 extra 会把 msWebOOUI/msPdfOOUI/msSmartScreenProtection 丢掉"
+        );
+        assert!(!src.contains("additional_browser_args(extra)"), "裸传 extra 的旧形态不得回来");
+    }
+
+    /// R8-L03：主窗 label 单一真源，且与 guard::MAIN 同源。
+    #[test]
+    fn l03_main_label_has_single_source() {
+        assert_eq!(super::MAIN_LABEL, "main");
+        let src = prod();
+        assert_eq!(
+            src.matches("\"main\"").count(),
+            1,
+            "主窗 label 只许在 MAIN_LABEL 定义处出现字面量（建窗/查窗/唤回点必须引用常量）"
+        );
+        assert_eq!(
+            crate::engine::guard::MAIN,
+            [super::MAIN_LABEL].as_slice(),
+            "guard::MAIN 必须与 MAIN_LABEL 同源"
+        );
+        assert!(
+            crate::engine::guard::APP_WINDOWS.contains(&super::MAIN_LABEL),
+            "APP_WINDOWS 必须包含主窗 label"
+        );
+    }
+
+    /// R8-M01：窗口状态读写必须引用同一常量，且关闭请求上有主写点。
+    #[test]
+    fn m01_window_state_read_write_single_source() {
+        assert_eq!(
+            super::WINDOW_STATE_KEY, "windowState",
+            "改名会让所有用户的窗口位置恢复静默失效（存量数据键）"
+        );
+        let src = prod();
+        assert_eq!(
+            src.matches("\"windowState\"").count(),
+            1,
+            "键名只许在常量定义处出现一次；读写两侧必须引用常量"
+        );
+        assert!(src.contains(".get(WINDOW_STATE_KEY)"), "读侧必须引用同一常量");
+        assert!(
+            src.contains("insert(WINDOW_STATE_KEY.to_string()"),
+            "写侧必须引用同一常量"
+        );
+        assert!(src.contains("CloseRequested"), "CloseRequested 是主写点（窗口还活着，几何可读）");
+        assert!(src.contains("save_window_state(&state_window)"), "写侧没挂到窗口事件上");
+        assert!(src.contains("save_window_state(&w)"), "RunEvent::Exit 的 best-effort 兜底不见了");
+    }
+
+    /// R8-M02：闩锁语义 = 显示成功；失败必须复位并留 warn，不许先占位后吞错。
+    #[test]
+    fn m02_show_latch_releases_on_failure() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = AtomicBool::new(false);
+        assert!(super::claim_show_slot(&flag), "第一条触发路径必须抢到名额");
+        assert!(!super::claim_show_slot(&flag), "并发的第二条触发路径不得重复显示");
+        flag.store(false, Ordering::SeqCst);
+        assert!(
+            super::claim_show_slot(&flag),
+            "显示失败复位后必须允许 3s/8s 兜底重试（不得永久放弃）"
+        );
+        let src = prod();
+        assert!(src.contains("主窗口显示失败（触发:"), "失败必须留 warn 日志（带拒因）");
+        assert!(src.contains("state.shown.store(false"), "失败必须复位闩锁");
+        assert!(!src.contains("shown.swap(true"), "旧语义「先占位后做」不得回来");
+        assert!(src.contains("show().map_err"), "show 的失败必须进 Result，不许 let _ = 吞掉");
+    }
+
+    /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
+    #[test]
+    fn m04_elevated_takeover_result_is_consumed() {
+        let src = prod();
+        assert!(
+            !src.contains("let _ = commands::elevate::take_over_as_elevated_instance();"),
+            "握手返回值被丢弃 = 提权实例永不补注册单实例（R8-M04）"
+        );
+        assert!(
+            src.contains("takeover_released = commands::elevate::take_over_as_elevated_instance()"),
+            "返回值必须落到 takeover_released"
+        );
+        assert!(
+            src.contains("if !elevated_relaunch || takeover_released"),
+            "builder 分支必须消费 takeover_released（确认让位后才补注册）"
         );
     }
 }
@@ -757,12 +1015,12 @@ mod startup_housekeeping_tests {
     /// 混进首帧前才暴露出问题的。
     const SELF: &str = include_str!("lib.rs");
 
-    /// 只取生产段（本测试模块以下不参与计数）：断言里写的字符串字面量本身含有被数的
-    /// 模式，整份文件一起扫会把自己算进接线数，红得莫名其妙。
+    /// 只取生产段：所有 `#[cfg(test)]` 模块以下不参与计数，避免断言里写的字符串字面量
+    /// 本身含有被数的模式（整份文件一起扫会把自己算进接线数，红得莫名其妙）。
     fn prod() -> &'static str {
         let cut = SELF
-            .find("mod startup_housekeeping_tests")
-            .expect("找不到本测试模块——断言的截断锚点变了");
+            .find("#[cfg(test)]")
+            .expect("找不到 #[cfg(test)]——断言的截断锚点变了");
         &SELF[..cut]
     }
 

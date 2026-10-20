@@ -40,7 +40,7 @@ const PINNED = [
   'compmgmt.msc', 'control.exe', 'desk.cpl', 'devmgmt.msc', 'dfrgui.exe', 'dism.exe',
   'diskmgmt.msc', 'dxdiag.exe', 'eventvwr.msc', 'explorer.exe', 'fltmc.exe',
   'intl.cpl', 'ipconfig.exe', 'lodctr.exe', 'main.cpl', 'mmsys.cpl', 'msconfig.exe',
-  'msinfo32.exe', 'mspaint.exe', 'msra.exe', 'mstsc.exe', 'narrator.exe', 'ncpa.cpl',
+  'msiexec.exe', 'msinfo32.exe', 'mspaint.exe', 'msra.exe', 'mstsc.exe', 'narrator.exe', 'ncpa.cpl',
   'netsh.exe', 'netsh', 'notepad.exe', 'optionalfeatures.exe', 'osk.exe', 'perfmon.exe',
   'perfmon.msc', 'powercfg.exe', 'powercfg.cpl', 'powershell.exe', 'psr.exe', 'reg.exe',
   'reg', 'regedit.exe', 'resmon.exe', 'rstrui.exe', 'rundll32.exe', 'sc.exe', 'sc',
@@ -67,6 +67,7 @@ const PRODUCTION_PINNED_FLOOR = [
   'tasklist.exe',   // misc
   'fltmc.exe',      // minifilter_orphan
   'powercfg.exe',   // syspanel
+  'msiexec.exe',    // uninstall/list_run.rs（卸载执行面的裸名准入解析）
 ];
 
 /**
@@ -129,16 +130,6 @@ const RAW_EXEMPT = [
     file: 'src-tauri/src/commands/uninstall/pending_delete.rs',
     anchor: 'std::process::Command::new("cmd")',
     reason: 'v6-K05（P0-3）别名复检用例：mklink /J 造指向受保护子树（System32\\config）的 junction，验证 PFRO 登记闸的 final_path_protected 分支（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
-  },
-  {
-    file: 'src-tauri/src/commands/uninstall/list_run.rs',
-    anchor: 'if let Err(e) = Command::new("rustc")',
-    reason: 'R2b-U01（v7.2 C05 前置取证）真机探针可用性预检：rustc --version 探测，不可用显式 SKIP（cfg(test) 专用 #[ignore] 探针、非生产执行面）',
-  },
-  {
-    file: 'src-tauri/src/commands/uninstall/list_run.rs',
-    anchor: 'let out = Command::new("rustc")',
-    reason: 'R2b-U01 同探针的替身编译：rustc -O 现编无窗口替身 exe（写标记即退），落点 C08 隔离测试根（cfg(test) 专用、非生产执行面；与上一条锚点前缀区分避免 0/2 歧义）',
   },
 ];
 
@@ -478,6 +469,53 @@ check(
   gOffenders.length
     ? `路径形态实参 ${JSON.stringify(gOffenders.map((h) => `${h.file}:${h.line} ${h.argHead.slice(0, 60)}`))}`
     : '',
+);
+
+// ---- I. shell_run_wait 生产调用点必须消费准入函数的返回值（R2b-K01/M02，v7.2 C05） ----
+// 卸载器路径必须先过 `admit_uninstaller_exec`（解析绝对路径 + 宿主/注入闸）再进
+// ShellExecuteEx 咽喉。判据：生产段首个实参必须是 `&admitted` —— 字面量（重新产裸名）
+// 与 `&exe`/`&original.0`（直接吃注册表原文）都判红。探针/负向样本在 `#[cfg(test)]`
+// 段内，不参与生产判定。判定器抽成纯函数，与 I2 合成样本共用同一实现。
+function shellWaitViolations(text) {
+  const prod = text.split('#[cfg(test)]')[0];
+  const out = [];
+  for (const line of prod.split('\n')) {
+    if (line.trimStart().startsWith('//')) continue;
+    if (line.includes('fn shell_run_wait(')) continue; // 函数定义不是调用点
+    const m = line.match(/shell_run_wait\(\s*([^,)]*)/);
+    if (!m) continue;
+    if (m[1].trim() !== '&admitted') out.push(line.trim());
+  }
+  return out;
+}
+
+const shellViolations = [];
+for (const f of files) {
+  const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
+  for (const line of shellWaitViolations(readFileSync(f, 'utf8'))) {
+    shellViolations.push(`${rel}: ${line.slice(0, 80)}`);
+  }
+}
+check(
+  shellViolations.length === 0,
+  'I. shell_run_wait 生产调用点均消费准入函数返回值（首参 &admitted）',
+  shellViolations.length ? JSON.stringify(shellViolations) : '',
+);
+
+const SHELL_SELF_SAMPLES = [
+  { code: 'let w = unsafe { shell_run_wait("msiexec.exe", &args) };', expect: 'fail', why: '字面量绕过准入（K01 回归形态）' },
+  { code: 'let w = unsafe { shell_run_wait(&exe, &args) };', expect: 'fail', why: '直接吃注册表原文变量（未过准入）' },
+  { code: 'let w = unsafe { shell_run_wait(&admitted, &args) };', expect: 'ok', why: '准入函数返回值（标准形态）' },
+  { code: '// 注释里提到 shell_run_wait("x") 不是调用点', expect: 'ok', why: '注释不参与判定' },
+  { code: 'pub(super) unsafe fn shell_run_wait(exe: &str, args: &str)', expect: 'ok', why: '函数定义不是调用点' },
+];
+const shellSelfFailures = SHELL_SELF_SAMPLES.filter(
+  (s) => (shellWaitViolations(s.code).length > 0) !== (s.expect === 'fail'),
+);
+check(
+  shellSelfFailures.length === 0,
+  `I2. shell_run_wait 判定器正向对照（${SHELL_SELF_SAMPLES.length} 个合成样本）`,
+  shellSelfFailures.length ? shellSelfFailures.map((s) => s.why).join('；') : '',
 );
 
 // ---- H. 判定器正向对照自检（v6-K01 / P0-2，PENDING_CONTROLS 缺口收口） ----

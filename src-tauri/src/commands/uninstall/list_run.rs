@@ -449,6 +449,9 @@ pub async fn uninstall_list<R: tauri::Runtime>(
 /// 把原厂卸载命令行拆成 (exe, args)。
 /// 带引号取首段引号；msiexec 直接归一；其余在「首个 .exe」处切开（卸载串的 exe
 /// 路径几乎总以 .exe 结尾，比按首个空格切更稳），都失败再退回首空格。
+///
+/// R2b-M01：折叠大小写只用 `to_ascii_lowercase`——`to_lowercase` 是 full mapping，
+/// 会改变字节长度（`İ` U+0130 → `i`+U+0307，2→3 字节），它的索引拿去切原串会越界 panic。
 pub(super) fn split_uninstall_cmd(s: &str) -> Option<(String, String)> {
     let s = s.trim();
     if s.is_empty() {
@@ -458,9 +461,12 @@ pub(super) fn split_uninstall_cmd(s: &str) -> Option<(String, String)> {
         let end = rest.find('"')?;
         return Some((rest[..end].to_string(), rest[end + 1..].trim().to_string()));
     }
-    let low = s.to_lowercase();
+    let low = s.to_ascii_lowercase();
     if low.starts_with("msiexec") {
-        let rest = s.get(7..).unwrap_or_default().trim().to_string();
+        // 前缀长度必须按实际命中的形态取：`MsiExec.exe /X{GUID}` 的 ".exe" 属于
+        // 可执行文件名，不能漏进参数（旧实现固定切 7 字节，msiexec 会收到 ".exe /X…"）。
+        let consumed = if low.starts_with("msiexec.exe") { "msiexec.exe".len() } else { "msiexec".len() };
+        let rest = s.get(consumed..).unwrap_or_default().trim().to_string();
         return Some(("msiexec.exe".to_string(), rest));
     }
     if let Some(idx) = low.find(".exe") {
@@ -509,6 +515,49 @@ pub(super) const QUIET_DENY_HOSTS: &[&str] = &[
     "sc.exe",
     "conhost.exe",
 ];
+
+/// 卸载/修改执行面的统一准入（R2b-K01 + R2b-M02，v7.2 C05）。
+///
+/// 返回**解析后的绝对路径**，把「注册表原文 → ShellExecuteEx」之间的三种错误形态
+/// 挡在执行之前（三条支路共用：正常静默 / 回退原厂界面 / 候选为 None 的原厂路径）：
+/// 1. 宿主拒绝：cmd/powershell/mshta 等会把参数再解释一遍（复用 `QUIET_DENY_HOSTS`）；
+/// 2. 路径形态：绝对路径原样放行；裸名只允许 `system_tool` 解析成功（msiexec → System32
+///    真身）；相对路径/带目录名的裸名一律拒 —— 它们会落进 ShellExecute 的搜索序
+///    （R2b-U01 真机探针裁决：**调用方 CWD 参与搜索序**，lpDirectory 只钉子进程 cwd）；
+/// 3. 参数注入字符：`| & ; $ \` < >` 与换行在 ShellExecuteEx 下仍可能被目标二次解释。
+///
+/// 刻意**不**把 vendor 静默档的 `%VAR%` 成对规则平移过来：原厂串不做 shell 展开，
+/// 且 `100%` 这类目录名会被误伤（R2b-M02 方案边界）。
+pub(super) fn admit_uninstaller_exec(exe: &str, args: &str) -> Result<String, String> {
+    let exe = exe.trim();
+    if exe.is_empty() {
+        return Err("卸载器路径为空".to_string());
+    }
+    let name = exe.rsplit(['\\', '/']).next().unwrap_or("").to_ascii_lowercase();
+    if QUIET_DENY_HOSTS.contains(&name.as_str()) {
+        return Err(format!("{name} 是 shell/脚本宿主，参数会被二次解释，拒绝执行注册表原文"));
+    }
+    // 单引号是合法路径字符（Assassin's Creed 这类目录名），对 ShellExecuteEx 没有
+    // 语法含义，不跟着 vendor 静默档一起拒——那一档的 `'` 检查保持原样。
+    if exe.contains('"') || exe.contains('\0') {
+        return Err("卸载器路径含引号或 NUL".to_string());
+    }
+    for c in ['<', '>', '|', '&', ';', '$', '`', '\n', '\r', '\0'] {
+        if args.contains(c) {
+            return Err(format!("参数含 {:?} 形态（重定向/管道/复合命令/变量替换）", c));
+        }
+    }
+    let path = Path::new(exe);
+    if path.is_absolute() {
+        return Ok(exe.to_string());
+    }
+    if exe.contains('\\') || exe.contains('/') {
+        return Err(format!("卸载器路径「{exe}」不是绝对路径，拒绝执行"));
+    }
+    crate::engine::systembin::system_tool(&name)
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| format!("卸载器「{name}」无法解析为系统工具：{e}"))
+}
 
 /// 静默命令候选（方案 §6.4）：执行层只接受这个结构，**不接受未解析的注册表原文**。
 pub(super) struct SilentCandidate {
@@ -667,6 +716,19 @@ pub(super) fn second_evidence_kind(install_location: &str, file_exists: &dyn Fn(
 /// `watch_uninstaller` 要等本函数返回才启动（调用点顺序），INFINITE 等于让监视永不开始。
 pub(super) const UNINSTALLER_WAIT_TIMEOUT_MS: u32 = 10 * 60 * 1000;
 
+/// 一次卸载从开始执行到监视结束的**总预算**（硬等待 + 监视 = 25 分钟）。
+///
+/// R2b-M04：两条上界各自正确不等于总上界被说出来——硬等待用满 10 分钟后若监视再给
+/// 15 分钟，用户看到的是 25 分钟遮挡。监视 deadline 取「总预算 − 已耗时」，用尽立即
+/// 返回并把真实耗时写进日志，不再让两个独立上界相乘成不可见的长尾。
+pub(super) const UNINSTALL_TOTAL_BUDGET: std::time::Duration =
+    std::time::Duration::from_millis(UNINSTALLER_WAIT_TIMEOUT_MS as u64 + 15 * 60 * 1000);
+
+/// 监视剩余额度：总预算扣掉已耗时（> 总预算时为 0）。抽成纯函数便于直接断言。
+fn watch_budget_remaining(waited: std::time::Duration) -> std::time::Duration {
+    UNINSTALL_TOTAL_BUDGET.saturating_sub(waited)
+}
+
 /// `shell_run_wait` 的三种正常结局。
 ///
 /// 为什么不用 `Err` 表达超时：调用点的 `Err(e) if used_silent` 分支语义是
@@ -686,6 +748,15 @@ pub(super) enum UninstallerWait {
     ElevationDeclined,
 }
 
+/// 一次 `shell_run_wait` 的落地信息：启动到的进程 pid + 结局。
+///
+/// pid 是 R2b-M04 家族判定的输入——监视循环只把「本次启动的进程或其子孙」算作
+/// 自己的卸载器，系统里别的 msiexec.exe 不算。
+pub(super) struct ShellRunResult {
+    pub(super) pid: u32,
+    pub(super) outcome: UninstallerWait,
+}
+
 /// 该启动错误是不是「用户拒了 UAC」（`ERROR_CANCELLED` = 1223）——R9（2026-10-15）。
 /// 单独成函数是为了可被合成 HRESULT 直测（真弹 UAC 无法自动化）。
 /// HRESULT→win32 的折叠引 `engine::native::win32_of` 为口径真源（`0x800704C7` → 1223）。
@@ -699,23 +770,30 @@ fn is_elevation_declined(e: &windows::core::Error) -> bool {
 /// 超时后**不** `TerminateProcess`：厂商卸载器被强杀会留下半卸载状态（注册表键已删、
 /// 文件没删干净），比「如实报未知」更难恢复。此时只关句柄放行，上层继续走
 /// `watch_uninstaller` 轮询卸载键与卸载器进程家族，由它给出真实结论。
-pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<UninstallerWait, String> {
+pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<ShellRunResult, String> {
     use windows::Win32::Foundation::WAIT_TIMEOUT;
     use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     use windows::core::PCWSTR;
 
+    // R2b-K01 第二道（fail-closed 单一咽喉）：只接受绝对路径。裸名会落进 ShellExecute
+    // 的「调用方 CWD → Windows → System32 → PATH」搜索序，而便携档 exe 同级目录可写、
+    // 且常是调用方 CWD。生产调用点必须先把 exe 过 `admit_uninstaller_exec`；这里再拦一道，
+    // 防未来新增调用点直接传注册表原文。
+    if !Path::new(exe).is_absolute() {
+        return Err(format!("拒绝以非绝对路径启动卸载器：{exe}"));
+    }
     let file = to_wide(exe);
     let params = if args.is_empty() { None } else { Some(to_wide(args)) };
-    // R5（2026-10-15）：工作目录钉到一个恒定存在的根。本仓从不设 CWD（全仓 0 处
-    // set_current_dir），子进程继承的工作目录由启动方式决定、不可枚举（双击 exe /
-    // NSIS 快捷方式的「起始位置」/ 桌面符号链接…）。取数据目录而不是盘根：lpDirectory
-    // **同时是相对 lpFile 的解析基准**，而 msi 那条把 exe 拼成裸 "msiexec.exe"，
-    // 传一个恰好含同名 exe 的目录会启动错的东西；便携/标准两态由 app_data_dir() 兜住。
-    // 它只算路径不建目录，而 lpDirectory 指向不存在的目录会让 ShellExecuteEx 当场失败
-    // （ERROR_DIRECTORY）⇒ 先建后用（建失败不拦，交给下面如实报错）。
-    let workdir = crate::engine::paths::app_data_dir();
-    let _ = std::fs::create_dir_all(&workdir);
+    // R5（2026-10-15）→ R2b-K01（v7.2 C05）修正：工作目录钉到系统目录。
+    // R2b-U01 真机探针裁决：lpDirectory **不参与裸名文件解析**（只钉子进程 cwd），
+    // 旧注释「同时是相对 lpFile 的解析基准」与实测矛盾，已删。真正要防的是：
+    // ① 子进程以可写目录为 cwd（相对路径读写会落进用户可写区）；
+    // ② 便携档 exe 同级目录常是调用方 CWD，而 CWD 参与 ShellExecute 的裸名搜索序。
+    // 钉到 SystemRoot 同时收口这两条；裸名本身由上面的 fail-closed 闸拒绝。
+    let workdir = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
     let dir_w = to_wide(&workdir.to_string_lossy());
     let mut sei: SHELLEXECUTEINFOW = core::mem::zeroed();
     sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -732,7 +810,7 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<Uninstaller
         // 走 Err 会被上层 `Err(e) if used_silent` 接去重拉原厂界面（用户拒一次又被弹一次）。
         // 判据必须落在任何 map_err 之前（之后只剩格式化文本）。
         if is_elevation_declined(&e) {
-            return Ok(UninstallerWait::ElevationDeclined);
+            return Ok(ShellRunResult { pid: 0, outcome: UninstallerWait::ElevationDeclined });
         }
         return Err(format!("启动卸载器失败: {e}"));
     }
@@ -741,16 +819,17 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<Uninstaller
         // 拿不到句柄（目标拒绝 NOCLOSEPROCESS 等）：无法等待，如实上报
         return Err("卸载器已启动但无法等待其完成（未返回进程句柄）".to_string());
     }
+    let pid = windows::Win32::System::Threading::GetProcessId(h);
     let r = WaitForSingleObject(h, UNINSTALLER_WAIT_TIMEOUT_MS);
     if r == WAIT_TIMEOUT {
         // 只关句柄，不杀进程（见函数注释「超时后不 TerminateProcess」的理由）
         let _ = windows::Win32::Foundation::CloseHandle(h);
-        return Ok(UninstallerWait::TimedOut);
+        return Ok(ShellRunResult { pid, outcome: UninstallerWait::TimedOut });
     }
     let mut code: u32 = 0;
     let _ = GetExitCodeProcess(h, &mut code);
     let _ = windows::Win32::Foundation::CloseHandle(h);
-    Ok(UninstallerWait::Exited(code))
+    Ok(ShellRunResult { pid, outcome: UninstallerWait::Exited(code) })
 }
 
 // ==================== 卸载进程监视（2026-09-28 用户拍板） ====================
@@ -762,13 +841,22 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<Uninstaller
 //   · 卸载器家族进程全部退出且连续 3 轮稳定 → 结束（用户取消 / 静默完成）；
 //   · 超时 → 如实返回键的现状。
 
-/// 当前全系统进程名快照（小写；Toolhelp32，与 native-scanner ffi 同口径）
-pub(super) fn process_names_snapshot() -> std::collections::HashSet<String> {
+/// 全系统进程快照（名称小写 + 父子 pid；Toolhelp32，与 native-scanner ffi 同口径）。
+///
+/// 补 `th32ParentProcessID` 是 R2b-M04 的家族判定输入：`msiexec.exe` 之类通用引擎
+/// 只有能沿父链走到本次启动的 pid 才算「自己的卸载器」。
+pub(super) struct ProcEntry {
+    pub(super) pid: u32,
+    pub(super) ppid: u32,
+    pub(super) name: String,
+}
+
+pub(super) fn process_snapshot() -> Vec<ProcEntry> {
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    let mut out = std::collections::HashSet::new();
+    let mut out = Vec::new();
     unsafe {
         // windows 0.61 返回 Result<HANDLE>；失败按空快照处理（调用方走 3 轮稳定判定）
         let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
@@ -779,7 +867,11 @@ pub(super) fn process_names_snapshot() -> std::collections::HashSet<String> {
         if Process32FirstW(snap, &mut pe).is_ok() {
             loop {
                 let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
-                out.insert(String::from_utf16_lossy(&pe.szExeFile[..len]).to_lowercase());
+                out.push(ProcEntry {
+                    pid: pe.th32ProcessID,
+                    ppid: pe.th32ParentProcessID,
+                    name: String::from_utf16_lossy(&pe.szExeFile[..len]).to_ascii_lowercase(),
+                });
                 if Process32NextW(snap, &mut pe).is_err() {
                     break;
                 }
@@ -790,12 +882,40 @@ pub(super) fn process_names_snapshot() -> std::collections::HashSet<String> {
     out
 }
 
-/// 卸载器家族进程判定：启动的 exe 本名 + Inno/NSIS 临时副本/提权副本/MSI 引擎
-pub(super) fn is_uninstaller_process(name: &str, launched: &str) -> bool {
-    if name == launched {
+/// 该 pid 是否属于本次卸载器家族：等于 launched pid，或沿父链能走到它。
+/// 上界 32 层 + 自环/零父兜底，防止异常快照把监视循环拖死。
+fn in_uninstaller_family(pid: u32, launched_pid: u32, parents: &std::collections::HashMap<u32, u32>) -> bool {
+    if launched_pid == 0 {
+        return false;
+    }
+    if pid == launched_pid {
         return true;
     }
-    name == "msiexec.exe"
+    let mut cur = pid;
+    for _ in 0..32 {
+        let Some(&ppid) = parents.get(&cur) else { return false };
+        if ppid == launched_pid {
+            return true;
+        }
+        if ppid == 0 || ppid == cur {
+            return false;
+        }
+        cur = ppid;
+    }
+    false
+}
+
+/// 卸载器家族进程判定：启动的 exe 本名 + Inno/NSIS 临时副本；MSI 引擎只在同家族时算。
+///
+/// R2b-M04：旧实现把系统里**任何** `msiexec.exe` 都当成自己的卸载器——Windows 更新
+/// 之类同时跑着的另一个 msiexec 会让监视永不结束（假「仍在运行」）。家族关系由调用方
+/// 从 Toolhelp 父链算好注入，本函数保持纯函数（可直接单测，不读系统状态）。
+pub(super) fn is_uninstaller_process(name: &str, launched: &str, in_family: bool) -> bool {
+    if name == launched {
+        // 同名进程也要有家族关系：另一款程序恰好也叫 unins000.exe 不算我们这条链
+        return in_family;
+    }
+    (name == "msiexec.exe" && in_family)
         || name == "au_.exe"
         || name == "un_a.exe"
         || name.starts_with("unins")
@@ -950,17 +1070,36 @@ pub(super) fn occupancy_note(target: &Path) -> String {
 }
 
 /// 句柄退出后继续监视：返回 (stillListed, 是否超时放弃)。
+///
+/// `launched_pid` = 本次真正启动的卸载器 pid（`ShellRunResult` 回传）；家族进程必须
+/// 能从它（或它已退出的子孙）沿父链走到，才认作「自己的卸载器」（R2b-M04）。
+/// `waited` = 从开始执行到此刻的已耗时，用于把总预算显式化。
 pub(super) fn watch_uninstaller(
     hive: windows::Win32::System::Registry::HKEY,
     key_path: &str,
     launched_exe: &str,
+    launched_pid: u32,
+    waited: std::time::Duration,
 ) -> (bool, bool) {
     let launched = launched_exe
         .rsplit(['\\', '/'])
         .next()
         .unwrap_or("")
-        .to_lowercase();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+        .to_ascii_lowercase();
+    let remaining = watch_budget_remaining(waited);
+    if remaining.is_zero() {
+        // 总预算已在硬等待（含回退）里用尽：不再进入轮询，如实报「超时」。
+        log::write_log(
+            "warn",
+            &format!(
+                "卸载监视未启动：已耗时 {} ms，超出总预算 {} ms",
+                waited.as_millis(),
+                UNINSTALL_TOTAL_BUDGET.as_millis()
+            ),
+        );
+        return (crate::engine::native::reg_key_exists(hive, key_path), true);
+    }
+    let deadline = std::time::Instant::now() + remaining;
     let mut stable = 0u32;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -968,9 +1107,12 @@ pub(super) fn watch_uninstaller(
         if !crate::engine::native::reg_key_exists(hive, key_path) {
             return (false, false);
         }
-        let any = process_names_snapshot()
-            .iter()
-            .any(|n| is_uninstaller_process(n, &launched));
+        let snap = process_snapshot();
+        let parents: std::collections::HashMap<u32, u32> =
+            snap.iter().map(|e| (e.pid, e.ppid)).collect();
+        let any = snap.iter().any(|e| {
+            is_uninstaller_process(&e.name, &launched, in_uninstaller_family(e.pid, launched_pid, &parents))
+        });
         if any {
             stable = 0;
         } else {
@@ -1080,17 +1222,27 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 &format!("uninstall_run {display_name}: 厂商 QuietUninstallString 被构造闸拒绝（{reason}），改用白名单派生"),
             );
         }
-        let run_original_ui = || -> Result<Option<u32>, String> {
+        let run_started = std::time::Instant::now();
+        let run_original_ui = || -> Result<(Option<u32>, u32), String> {
             log::flush_sync();
-            shell_run_wait(&original.0, &original.1)
+            // R2b-M02：原厂界面支路同样执行注册表原文，必须与静默支路共用同一准入函数。
+            // 被拒时不执行、如实报错并指路系统「已安装的应用」，不静默跳过当成功。
+            let admitted = admit_uninstaller_exec(&original.0, &original.1).map_err(|e| {
+                let msg = format!(
+                    "uninstall_run {display_name}: 原厂卸载命令被准入闸拒绝（{e}），未执行；请改用系统「已安装的应用」卸载"
+                );
+                log::write_log("warn", &msg);
+                msg
+            })?;
+            shell_run_wait(&admitted, &original.1)
                 .map_err(|e| {
                     log::write_log("error", &format!("uninstall_run {display_name}: 回退原厂卸载界面启动失败: {e}"));
                     e
                 })
-                .and_then(|w| match w {
-                    UninstallerWait::Exited(code) => Ok(Some(code)),
+                .and_then(|r| match r.outcome {
+                    UninstallerWait::Exited(code) => Ok((Some(code), r.pid)),
                     // 回退界面同样等不到：退出码未知，不能伪造成 0（会被当成卸载成功）
-                    UninstallerWait::TimedOut => Ok(None),
+                    UninstallerWait::TimedOut => Ok((None, r.pid)),
                     // R9（2026-10-15）：用户在回退界面的 UAC 上拒绝 = 卸载器从未启动。
                     // **绝不能映成 None**（None 的下游是「超时 / 可能还在跑」）。用 Err
                     // 让整条命令如实判失败——与「超时不用 Err」的裁定不冲突：那条的理由
@@ -1106,42 +1258,61 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         // 那是应用数据遗留链（uninstall:orphan-scan）的唯一写入点，档案已无读者。
         log::flush_sync(); // 危险操作前刷盘
         let mut fell_back = false;
+        // 三条支路（正常静默 / 回退原厂界面 / 候选=None 的原厂路径）共用
+        // `admit_uninstaller_exec`：注册表原文一律先解析/过闸，再进 ShellExecuteEx 咽喉。
+        let primary_exe = exe.clone();
+        let primary_args = args.clone();
+        let run_primary = || -> Result<ShellRunResult, String> {
+            let admitted = admit_uninstaller_exec(&primary_exe, &primary_args).map_err(|e| {
+                let msg = format!("卸载命令被准入闸拒绝（{e}），未执行");
+                log::write_log("warn", &format!("uninstall_run {display_name}: {msg}"));
+                msg
+            })?;
+            // 本闭包整体位于 spawn_blocking 的 unsafe 块内，无需再包一层
+            shell_run_wait(&admitted, &primary_args)
+        };
         // `exit_code` 是 Option：硬等待超时时退出码未知（UninstallerWait::TimedOut），
         // 此时不套 classify_exit 码表、也不触发按码回退——直接转入 watch_uninstaller
         // 如实判定。前端 `uninstall.js` 已能安全消费 null（`?? '未知'`）。
-        let mut exit_code: Option<u32> = match shell_run_wait(&exe, &args) {
-            Ok(UninstallerWait::Exited(code)) => Some(code),
-            Ok(UninstallerWait::TimedOut) => {
-                // 超时不是「启动失败」：绝不重拉原厂界面，交给下面的进程监视收尾。
-                log::write_log(
-                    "warn",
-                    &format!(
-                        "uninstall_run {display_name}: 等待卸载器 {UNINSTALLER_WAIT_TIMEOUT_MS} ms 仍未退出（未强杀），退出码未知，转入进程监视"
-                    ),
-                );
-                None
-            }
-            // R9（2026-10-15）：用户在 UAC 上拒绝了权限请求——卸载器**从未启动**。
-            // 独立回执（exitCode 与超时同为 null，靠 `elevationDeclined` 区分，前端必须
-            // 在该 null 分支之前认领它——J6）。三条硬约束：① 早退，不得走到
-            // watch_uninstaller（「用户自己拒了」会被说成「卸载器还在跑」）；② 不落回
-            // 超时口径；③ fellBack 保持 false（前端会据此播「已回退原厂卸载界面并执行完毕」）。
-            Ok(UninstallerWait::ElevationDeclined) => {
-                log::write_log(
-                    "warn",
-                    &format!("uninstall_run {display_name}: 用户取消了权限请求（卸载器未启动）"),
-                );
-                return Ok(json!({
-                    "exitCode": null,
-                    "exitMeaning": "用户取消了权限请求",
-                    "silentSource": silent_source,
-                    "stillListed": true,
-                    "installerKind": kind,
-                    "usedSilent": used_silent,
-                    "fellBack": false,
-                    "elevationDeclined": true,
-                    "message": "卸载已取消：系统权限请求被拒绝，卸载器没有启动。",
-                }));
+        // launched_pid = 本次真正启动的 pid（家族判定与总预算都要用它）。
+        let (mut exit_code, mut launched_pid): (Option<u32>, u32) = match run_primary() {
+            Ok(r) => {
+                let code = match r.outcome {
+                    UninstallerWait::Exited(code) => Some(code),
+                    UninstallerWait::TimedOut => {
+                        // 超时不是「启动失败」：绝不重拉原厂界面，交给下面的进程监视收尾。
+                        log::write_log(
+                            "warn",
+                            &format!(
+                                "uninstall_run {display_name}: 等待卸载器 {UNINSTALLER_WAIT_TIMEOUT_MS} ms 仍未退出（未强杀），退出码未知，转入进程监视"
+                            ),
+                        );
+                        None
+                    }
+                    // R9（2026-10-15）：用户在 UAC 上拒绝了权限请求——卸载器**从未启动**。
+                    // 独立回执（exitCode 与超时同为 null，靠 `elevationDeclined` 区分，前端必须
+                    // 在该 null 分支之前认领它——J6）。三条硬约束：① 早退，不得走到
+                    // watch_uninstaller（「用户自己拒了」会被说成「卸载器还在跑」）；② 不落回
+                    // 超时口径；③ fellBack 保持 false（前端会据此播「已回退原厂卸载界面并执行完毕」）。
+                    UninstallerWait::ElevationDeclined => {
+                        log::write_log(
+                            "warn",
+                            &format!("uninstall_run {display_name}: 用户取消了权限请求（卸载器未启动）"),
+                        );
+                        return Ok(json!({
+                            "exitCode": null,
+                            "exitMeaning": "用户取消了权限请求",
+                            "silentSource": silent_source,
+                            "stillListed": true,
+                            "installerKind": kind,
+                            "usedSilent": used_silent,
+                            "fellBack": false,
+                            "elevationDeclined": true,
+                            "message": "卸载已取消：系统权限请求被拒绝，卸载器没有启动。",
+                        }));
+                    }
+                };
+                (code, r.pid)
             }
             Err(e) if used_silent => {
                 log::write_log(
@@ -1153,9 +1324,11 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 run_original_ui()?
             }
             Err(e) => {
-                // 非白名单且厂商串不可用时本来就走原厂界面，启动失败即如实报错（原行为）
-                log::write_log("error", &format!("uninstall_run {display_name}: {e}"));
-                return Err(e);
+                // 非白名单且厂商串不可用时本来就走原厂界面，启动失败即如实报错；
+                // 准入拒绝也落这里（不执行），并指路系统卸载入口。
+                let msg = format!("{e}；可改用系统「已安装的应用」卸载");
+                log::write_log("error", &format!("uninstall_run {display_name}: {msg}"));
+                return Err(msg);
             }
         };
         if used_silent && !fell_back {
@@ -1170,7 +1343,9 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 );
                 fell_back = true;
                 exe = original.0.clone();
-                exit_code = run_original_ui()?;
+                let (fallback_code, pid) = run_original_ui()?;
+                launched_pid = pid;
+                exit_code = fallback_code;
             } else {
                 log::write_log(
                     "info",
@@ -1185,8 +1360,20 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         let (exit_meaning, _) = exit_code.map(classify_exit).unwrap_or(("", false));
 
         // 进程监视（2026-09-28 用户拍板）：句柄退出 ≠ 卸载结束——继续轮询卸载键与
-        // 卸载器家族进程，直到键消失或进程绝迹（上限 15 分钟）
-        let (still_listed, timed_out) = watch_uninstaller(hive, &key_path, &exe);
+        // 卸载器家族进程，直到键消失或进程绝迹（总预算扣除已耗时后剩余部分）
+        let waited = run_started.elapsed();
+        let watch_started = std::time::Instant::now();
+        let (still_listed, timed_out) = watch_uninstaller(hive, &key_path, &exe, launched_pid, waited);
+        let watch_ms = watch_started.elapsed().as_millis();
+        let total_ms = run_started.elapsed().as_millis();
+        log::write_log(
+            "info",
+            &format!(
+                "uninstall_run {display_name}: 进程监视{}（监视 {watch_ms} ms / 本次卸载总计 {total_ms} ms，总预算 {} ms）",
+                if timed_out { "超时结束" } else { "结束" },
+                UNINSTALL_TOTAL_BUDGET.as_millis()
+            ),
+        );
         let code_txt = exit_code
             .map(|c| c.to_string())
             .unwrap_or_else(|| "未知".to_string());
@@ -1299,20 +1486,26 @@ mod wait_outcome_tests {
     #[test]
     fn 拒权回执的三个臂与前端认领顺序() {
         let code = include_str!("list_run.rs");
-        // ① 主 match：declined 臂必须早退（return Ok）且回执带独立标记
+        // ① 主 match：declined 臂必须早退（return Ok）且回执带独立标记。
+        // 锚点用 concat! 拼：本测试源码也会被 include_str! 扫进去，整串字面量会自命中。
+        let decl_anchor = concat!("UninstallerWait", "::ElevationDeclined => {");
+        let used_silent_anchor = concat!("Err(e) if ", "used_silent");
+        let marker = concat!("\"elevationDeclined\"", ": true");
+        // 主 match 的 declined 臂在回退闭包之后（rfind 取到它）；两处同名臂因此可区分
         let at = code
-            .find("Ok(UninstallerWait::ElevationDeclined) => {")
+            .rfind(decl_anchor)
             .expect("主 match 缺 declined 臂（枚举非穷尽本会编译红，这里防「补了臂却让它往下走」）");
-        let arm = &code[at..];
-        let end = arm.find("Err(e) if used_silent").expect("declined 臂后面找不到 used_silent 臂");
-        let body = &arm[..end];
+        let marker_at = code[at..].find(marker).expect("回执缺 elevationDeclined 标记（前端无从认领）");
+        let body = &code[at..at + marker_at + marker.len()];
         assert!(body.contains("return Ok(json!"), "declined 臂必须早退（不得落到 watch_uninstaller）");
-        assert!(body.contains("\"elevationDeclined\": true"), "回执缺 elevationDeclined 标记（前端无从认领）");
         assert!(!body.contains("fell_back = true"), "declined 臂不得置 fell_back");
+        assert!(
+            code[at..].find(used_silent_anchor).map(|i| i > marker_at).unwrap_or(false),
+            "declined 臂必须排在 used_silent 臂之前（早退，不许被「启动失败→回退界面」接走）"
+        );
         // ② 回退闭包：declined 必须映成 Err —— 映成 None 会把「用户拒了」播成「超时了」
         assert!(
-            code.contains("UninstallerWait::ElevationDeclined => {")
-                && code.contains("用户取消了权限请求（原厂卸载界面未启动）"),
+            code.contains(decl_anchor) && code.contains("用户取消了权限请求（原厂卸载界面未启动）"),
             "回退闭包的 declined 臂不见了（或没映成 Err）"
         );
         // ③ uninstall_modify 第三臂
@@ -1330,6 +1523,7 @@ mod wait_outcome_tests {
 
     /// R5（2026-10-15）真机探针（`#[ignore]`，发版前实跑）：`shell_run_wait` 设的
     /// `lpDirectory` 必须真的生效——用 cmd 把自身工作目录打到临时文件里读回。
+    /// C05 起 `shell_run_wait` 只收绝对路径（fail-closed），探针按生产形态经 system_tool。
     /// 反向对照：若结果恰好等于测试进程的 cwd，说明钉根没生效（继承的就是调用者 cwd）。
     #[cfg(windows)]
     #[test]
@@ -1338,124 +1532,201 @@ mod wait_outcome_tests {
         let probe = std::env::temp_dir().join(format!("trim-cwd-probe-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&probe);
         let args = format!("/c cd > \"{}\"", probe.display());
-        let w = unsafe { shell_run_wait("cmd.exe", &args) }.expect("cmd 必须能启动");
-        assert!(matches!(w, UninstallerWait::Exited(0)), "cmd /c 应正常退出");
+        let cmd = crate::engine::systembin::system_tool("cmd.exe").expect("cmd.exe 必须解析成功");
+        let r = unsafe { shell_run_wait(cmd.to_string_lossy().as_ref(), &args) }.expect("cmd 必须能启动");
+        assert!(matches!(r.outcome, UninstallerWait::Exited(0)), "cmd /c 应正常退出");
         let got = std::fs::read_to_string(&probe).expect("cmd 没写出 cwd —— lpDirectory 可能没生效");
         let _ = std::fs::remove_file(&probe);
         let got = got.trim().trim_end_matches('\\').to_lowercase();
         // C08 双轨后 app_data_dir() 在 lib 单测态是 `/` 分隔的构造路径，而子进程报回的
         // cwd 恒为 `\` 形态——两边都归一到 `\` 再比（真实数据根天然就是 `\`，不受影响）
         let got = got.replace('/', "\\");
-        let want = crate::engine::paths::app_data_dir();
-        let want = want.to_string_lossy().replace('/', "\\");
+        // C05/R2b-K01：工作目录已从数据目录改钉 %SystemRoot%（可写目录不得成为 cwd）
+        let want = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let want = want.replace('/', "\\");
         let want = want.trim_end_matches('\\').to_lowercase();
-        assert_eq!(got, want, "子进程工作目录必须等于数据目录（R5：CWD 不可枚举，必须显式钉根）");
+        assert_eq!(got, want, "子进程工作目录必须等于 %SystemRoot%（C05：可写目录不得成为 cwd）");
         // 反向对照：若没设 lpDirectory，子进程会继承本测试进程的 cwd——两者不同才有对照意义
         let here = std::env::current_dir().unwrap_or_default();
         assert_ne!(
             want,
             here.to_string_lossy().trim_end_matches('\\').to_lowercase(),
-            "数据目录与测试进程 cwd 恰好相同，本探针失去对照意义（换一台机器复核）"
+            "%SystemRoot% 与测试进程 cwd 恰好相同，本探针失去对照意义（换一台机器复核）"
         );
     }
 
-    /// R2b-U01（2026-10-20，v7.2 C05 前置取证）真机探针（`#[ignore]`）：裸名 exe +
-    /// `lpDirectory=数据目录` 时 Windows 的真实解析顺序——`R2b-K01` 🔴 的危害成立条件。
-    /// 两段：① 独名替身（System32 无同名、PATH 无同名）⇒ 判「lpDirectory 是否在裸名
-    /// 解析路径内」；② msiexec.exe 同名替身（System32 必有真身）⇒ 判「谁优先」。
-    /// ② 的实参给 `/x {全零 GUID} /qn`：若真身被启动会静默退出 1605、不写标记。
-    /// 2026-10-20 首轮实测已定口径：lpDirectory **只钉工作目录、不参与裸名文件解析**
-    /// （① 独名替身必然不被启动——找不到解析目标时 ShellExecute 走 OpenWith/取消，
-    /// 表现为 ERROR_CANCELLED；② 真身被解析并触发自动提权决策）。因此两段的判据：
-    /// **标记文件命中 ⇒ lpDirectory 优先（危害成立）；未命中 ⇒ System32 优先（危害不成立）**，
-    /// 未命中时的 Err/ElevationDeclined/1605 都是「真身被解析」的不同环境表现，均计入。
-    /// 替身落点走 `app_data_dir()`——lib 单测态被 C08 双轨隔离进 `target/test-data-root/lib`，
-    /// 不碰真实数据根。C05 修复（msiexec 走 PINNED 绝对路径）后复跑：② 必须仍是
-    /// 「System32 优先」——探针从「观测危害」转为「回归哨兵」，届时在断言里钉死方向。
+    /// R2b-U01（2026-10-20 取证；2026-10-21 C05 修复后降格为**回归哨兵**）真机探针：
+    /// 产品层不再产裸名之后，本探针只钉两件事：
+    /// 1. 绕开准入直接给咽喉裸名 ⇒ fail-closed 拒绝（新增调用点若传注册表原文会当场失败）；
+    /// 2. 准入把 `msiexec.exe` 解析到 `%SystemRoot%\System32` 真身，数据根里的同名替身
+    ///    **不得被选中**（R2b-K01 的危害通道已被绝对路径收口）。
+    /// 2026-10-20 首轮实测已裁决：lpDirectory 只钉工作目录、不参与裸名文件解析，
+    /// ShellExecute 的裸名搜索序里**调用方 CWD 参与**——这正是 K01 改走 PINNED 的理由。
+    /// 不真实启动 msiexec：真身会触发提权决策，探针不该在人工执行时弹 UAC。
     #[cfg(windows)]
     #[test]
-    #[ignore = "真机探针：rustc 编译替身 exe 并真实启动一次"]
+    #[ignore = "真机探针：检查准入解析结果与数据根同名替身的相对位置"]
     fn r2b_u01_裸名解析序_真机探针() {
-        use std::process::Command;
-
-        // rustc 不可用就显式 skip（不 ENOENT 崩、不打假 ✓）
-        if let Err(e) = Command::new("rustc").arg("--version").output() {
-            println!("SKIP：rustc 不可用（{e}），本探针未执行——lpDirectory 解析序仍未取证");
-            return;
-        }
         let workdir = crate::engine::paths::app_data_dir();
         std::fs::create_dir_all(&workdir).expect("建测试数据根失败");
-        let marker = workdir.join("r2b-u01-marker.txt");
-        // 替身本体：无窗口子系统，起来就往自己的工作目录（= lpDirectory）写标记后退出
-        let standin_src = "#![windows_subsystem = \"windows\"]\nfn main() { let _ = std::fs::write(\"r2b-u01-marker.txt\", b\"standin-ran\"); }\n";
-        let src_path = std::env::temp_dir().join("trim-r2b-u01-standin.rs");
-        std::fs::write(&src_path, standin_src).expect("写替身源码失败");
+        let standin = workdir.join("msiexec.exe");
+        std::fs::write(&standin, b"r2b-u01-standin").expect("写数据根替身失败");
+        let args = "/x {00000000-0000-0000-0000-000000000000} /qn";
 
-        let launch = |bare: &str, args: &str| {
-            let _ = std::fs::remove_file(&marker);
-            let w = unsafe { shell_run_wait(bare, args) };
-            let ran_standin = marker.exists();
-            (w, ran_standin)
-        };
-        // UninstallerWait 未实现 Debug：结局统一手写渲染（探针只读，不动生产类型）
-        let show = |w: &Result<UninstallerWait, String>| match w {
-            Ok(UninstallerWait::Exited(c)) => format!("Exited({c})"),
-            Ok(UninstallerWait::TimedOut) => "TimedOut(退出码未知)".to_string(),
-            Ok(UninstallerWait::ElevationDeclined) => "ElevationDeclined".to_string(),
-            Err(e) => format!("Err({e})"),
-        };
-        // 装置自证：替身在测试外是可执行体（编译产物存在且非空）。若标记命中，证据才可信
-        let compile = |exe: &std::path::Path, what: &str| {
-            let out = Command::new("rustc")
-                .args(["-O", &src_path.to_string_lossy(), "-o", &exe.to_string_lossy()])
-                .output()
-                .expect("rustc 编译替身失败");
-            assert!(out.status.success(), "rustc 编译{what}失败: {}", String::from_utf8_lossy(&out.stderr));
-            assert!(exe.metadata().map(|m| m.len() > 0).unwrap_or(false), "{what}编译产物为空——装置失效");
-        };
-
-        // ---- 第①段：独名替身（System32/PATH 无同名）——lpDirectory 在不在裸名解析路径内 ----
-        let unique_exe = workdir.join("trim-r2b-u01-standin.exe");
-        compile(&unique_exe, "独名替身");
-        let (w1, s1) = launch("trim-r2b-u01-standin.exe", "");
-        println!("① 独名替身: 结果={} 替身被启动={s1}", show(&w1));
-        let v1 = if s1 {
-            "lpDirectory 参与裸名文件解析（标记命中）——K01 前提获得支持，C05 必须按 PINNED 绝对路径修"
-        } else {
-            "lpDirectory 不参与裸名文件解析（独名也解析不到 ⇒ 标记未命中；ShellExecute 相对路径搜索序只有 当前目录/Windows/System32/PATH）"
-        };
-        println!("① 裁决：{v1}");
-
-        // ---- 第②段：msiexec.exe 同名替身——与 System32 真身谁优先 ----
-        let msi_standin = workdir.join("msiexec.exe");
-        compile(&msi_standin, "msiexec 替身");
-        let (w2, s2) = launch("msiexec.exe", "/x {{00000000-0000-0000-0000-000000000000}} /qn");
-        println!("② msiexec 同名: 结果={} 替身被启动={s2}", show(&w2));
-        let v2 = if s2 {
-            "lpDirectory 优先于 System32 —— R2b-K01 危害成立（C05 按 PINNED 绝对路径修）".to_string()
-        } else {
-            format!(
-                "System32 优先 —— R2b-K01 的「lpDirectory 优先」前提不成立（真身被解析；{} 为该环境下真身触发的提权决策/静默退出的表现）",
-                show(&w2)
-            )
-        };
-        println!("② 裁决：{v2}");
-
-        // 取证纪律：两段结局必须可判决——标记命中即危害成立；未命中必须落在「解析失败/
-        // 真身被启动」的已知表现集内，不许出现 TimedOut 这类无法归因的悬置态
+        // 负向样本走变量绑定：I 组门禁禁的是「直接拿字面量进咽喉」，这里要证明的正是
+        // 裸名（即使只经变量绕一圈）也必须在 fail-closed 闸前被拒。
+        let bare_name = "msiexec.exe";
+        let bare = unsafe { shell_run_wait(bare_name, args) };
         assert!(
-            !matches!(&w1, Ok(UninstallerWait::TimedOut)) && !matches!(&w2, Ok(UninstallerWait::TimedOut)),
-            "出现 TimedOut 悬置态——替身或真身没退出，探针无法归因，人工复核"
+            bare.is_err(),
+            "裸名必须被 fail-closed 咽喉拒绝（产品层不得再产裸名；数据根替身更不许有机会被解析）"
         );
-        assert_eq!(
-            s1, s2,
-            "①②裁决矛盾（独名命中而同名未命中，或反之）——解析序观测异常，人工复核"
+
+        let resolved = admit_uninstaller_exec("msiexec.exe", args).expect("PINNED 内的 msiexec 必须解析成功");
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let sys32 = std::path::Path::new(&sysroot).join("System32");
+        assert!(
+            std::path::Path::new(&resolved).starts_with(&sys32),
+            "msiexec 必须解析到 %SystemRoot%\\System32 真身，实得 {resolved}"
         );
+        assert_ne!(
+            std::path::Path::new(&resolved),
+            standin.as_path(),
+            "数据根同名替身不得被选中（R2b-K01 回归）"
+        );
+        println!("裁决：裸名被拒；msiexec 解析到 {resolved}（数据根替身未被选中）");
 
         // 清场（尽力而为；lib 测试根在 target/ 内，漏网也会随 cargo clean 消失）
-        let _ = std::fs::remove_file(&marker);
-        let _ = std::fs::remove_file(&unique_exe);
-        let _ = std::fs::remove_file(&msi_standin);
-        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&standin);
+    }
+}
+
+#[cfg(test)]
+mod exec_surface_tests {
+    use super::*;
+
+    /// R2b-M01：`to_lowercase` 是 full mapping（`İ` U+0130 → i+U+0307，2→3 字节），
+    /// 它的索引拿去切原串会越界。ASCII-only 折叠保持字节长度，索引与 `s` 同源。
+    #[test]
+    fn m01_大小写折叠不改变字节下标() {
+        assert_eq!(
+            split_uninstall_cmd("İ.exe /S"),
+            Some(("İ.exe".to_string(), "/S".to_string())),
+            "全大写映射改变长度时不得 panic，且 exe 段必须切对"
+        );
+        assert_eq!(
+            split_uninstall_cmd(r"C:\İ\myapp.exe /S"),
+            Some((r"C:\İ\myapp.exe".to_string(), "/S".to_string())),
+            "非 ASCII 字符出现在 .exe 之前同样不得错位"
+        );
+    }
+
+    /// K01 坐标之一：msi 分支的 ".exe" 属于可执行文件名，不能漏进参数。
+    #[test]
+    fn k01_msiexec_exe_不得漏进参数() {
+        assert_eq!(
+            split_uninstall_cmd("MsiExec.exe /X{1D180B6A-C6AE-4D6E-A2A8-000000001001}"),
+            Some(("msiexec.exe".to_string(), "/X{1D180B6A-C6AE-4D6E-A2A8-000000001001}".to_string()))
+        );
+        assert_eq!(
+            split_uninstall_cmd("msiexec /I{Foo}"),
+            Some(("msiexec.exe".to_string(), "/I{Foo}".to_string())),
+            "不带 .exe 的写法也应只剥掉工具名"
+        );
+    }
+
+    /// K01：裸名只允许落在 PINNED 白名单里（msiexec → System32 真身），返回绝对路径。
+    #[test]
+    fn k01_准入把_msiexec_解析到_system32() {
+        let p = admit_uninstaller_exec("msiexec.exe", "/x {00000000-0000-0000-0000-000000000000} /qn")
+            .expect("PINNED 内的 msiexec 必须能解析");
+        assert!(Path::new(&p).is_absolute(), "准入必须返回绝对路径：{p}");
+        let low = p.to_ascii_lowercase();
+        assert!(low.contains("system32") && low.ends_with("msiexec.exe"), "必须落到 System32 真身：{p}");
+    }
+
+    /// K01：绝对路径原样放行；裸名未登记 / 带目录名的相对路径一律拒。
+    #[test]
+    fn k01_裸名与相对路径一律拒绝() {
+        assert_eq!(
+            admit_uninstaller_exec(r"C:\Program Files\App\unins000.exe", "/S").unwrap(),
+            r"C:\Program Files\App\unins000.exe",
+            "绝对路径原样放行（存在性由执行失败如实回执，准入不越权预检）"
+        );
+        assert!(admit_uninstaller_exec("evil-uninstaller.exe", "").is_err(), "未登记者不得解析");
+        assert!(admit_uninstaller_exec(r"subdir\unins000.exe", "").is_err(), "带目录名的相对路径会落进搜索序");
+        assert!(admit_uninstaller_exec(r".\unins000.exe", "").is_err(), ".\\ 形态同样不是绝对路径");
+    }
+
+    /// M02：原厂/厂商串来自可写注册表，宿主机与注入字符必须在执行前拒。
+    #[test]
+    fn m02_宿主与注入字符一律拒绝() {
+        let e = admit_uninstaller_exec("cmd.exe", "/c calc.exe").unwrap_err();
+        assert!(e.contains("宿主"), "拒因要点名宿主风险：{e}");
+        assert!(
+            admit_uninstaller_exec(r"C:\Windows\System32\cmd.exe", "/c calc.exe").is_err(),
+            "绝对路径形态的宿主机同样拒（判据看基名）"
+        );
+        for args in ["/S & calc.exe", "/S | calc", "/S > out.txt", "/S ; calc", "/S $x", "/S `calc`"] {
+            assert!(admit_uninstaller_exec(r"C:\Apps\unins000.exe", args).is_err(), "注入形态必须拒：{args}");
+        }
+        // 反向对照：普通参数不得被误伤（这是原厂界面支路的主要流量）
+        assert!(admit_uninstaller_exec(r"C:\Apps\unins000.exe", "/SILENT /LANG=zh /NOICONS").is_ok());
+        // 单引号路径是合法文件名，不得跟着 vendor 静默档一起误伤
+        assert!(admit_uninstaller_exec(r"C:\Program Files\Assassin's Creed\uninstall.exe", "/S").is_ok());
+    }
+
+    /// M04：系统里别的 msiexec.exe 不算自己的卸载器；Inno/NSIS 临时副本保留。
+    #[test]
+    fn m04_微软安装引擎只认本家族() {
+        assert!(
+            !is_uninstaller_process("msiexec.exe", "unins000.exe", false),
+            "系统里任何 msiexec 都算自己的卸载器 = 监视永不结束（R2b-M04）"
+        );
+        assert!(is_uninstaller_process("msiexec.exe", "unins000.exe", true));
+        assert!(is_uninstaller_process("unins000.exe", "unins000.exe", true), "本次启动的进程自己算");
+        assert!(!is_uninstaller_process("unins000.exe", "unins000.exe", false), "同名但无家族关系不算");
+        assert!(is_uninstaller_process("au_.exe", "unins000.exe", false), "Inno 临时副本保留无条件");
+    }
+
+    /// M04：父链遍历识别子孙、对环/自环/零父有界收敛。
+    #[test]
+    fn m04_父链遍历识别子孙且有界() {
+        use std::collections::HashMap;
+        let mut p: HashMap<u32, u32> = HashMap::new();
+        p.insert(100, 1); // launched → explorer
+        p.insert(200, 100); // 子
+        p.insert(300, 200); // 孙
+        p.insert(400, 1); // 无关进程
+        assert!(in_uninstaller_family(100, 100, &p));
+        assert!(in_uninstaller_family(200, 100, &p));
+        assert!(in_uninstaller_family(300, 100, &p));
+        assert!(!in_uninstaller_family(400, 100, &p));
+        assert!(!in_uninstaller_family(999, 100, &p), "快照里没有的 pid 直接 false");
+        assert!(!in_uninstaller_family(7, 0, &p), "launched_pid=0（未启动成功）不得把任何进程算进家族");
+
+        let mut cyc: HashMap<u32, u32> = HashMap::new();
+        cyc.insert(1, 2);
+        cyc.insert(2, 1);
+        cyc.insert(3, 3);
+        assert!(!in_uninstaller_family(1, 99, &cyc), "父链成环不得死循环");
+        assert!(!in_uninstaller_family(3, 99, &cyc), "自环不得死循环");
+    }
+
+    /// M04：总预算 = 硬等待 + 监视；监视额度 = 总预算 − 已耗时，用尽为 0。
+    #[test]
+    fn m04_总预算等于两段上界之和且扣减已耗时() {
+        assert_eq!(
+            UNINSTALL_TOTAL_BUDGET.as_millis(),
+            UNINSTALLER_WAIT_TIMEOUT_MS as u128 + 15 * 60 * 1000,
+            "总预算必须显式等于两段上界之和（25 分钟），不得只存在于注释里"
+        );
+        assert_eq!(
+            watch_budget_remaining(std::time::Duration::from_secs(600)),
+            std::time::Duration::from_secs(900),
+            "硬等待用满 10 分钟后，监视只剩 15 分钟"
+        );
+        assert!(watch_budget_remaining(std::time::Duration::from_secs(1500)).is_zero());
+        assert!(watch_budget_remaining(std::time::Duration::from_secs(1600)).is_zero(), "超预算饱和为 0");
     }
 }

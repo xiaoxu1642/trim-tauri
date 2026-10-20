@@ -132,25 +132,21 @@ pub(super) fn extract_run_target(raw: Option<&str>) -> RunTarget {
 
 /// 未加引号时的目标截取。
 ///
-/// 先找**第一个可执行类扩展名**并切到它之后（真机常见：路径含空格且没加引号）；
-/// 找不到就退回第一个空白分隔的 token（纯命令形态）。
+/// R2b-M05：只在**最后一段路径**（末个 `\` 或 `/` 之后）里认扩展名。旧实现取全文首个
+/// 扩展名命中，`C:\Program Files\netscape.com\mozilla.exe` 会被切成 `…\netscape.com`
+/// （目录）⇒ `is_file()` 判 false ⇒ 把仍在用的启动项判成残留。目录名里的 `.com`/`.bat`
+/// 不是可执行目标。找不到可执行扩展名时退回第一个空白分隔的 token（纯命令形态）。
 fn unquoted_head(s: &str) -> &str {
     const EXE_EXTS: [&str; 6] = [".exe", ".com", ".bat", ".cmd", ".scr", ".pif"];
-    let lower = s.to_ascii_lowercase();
-    let mut best: Option<usize> = None;
-    for ext in EXE_EXTS {
-        if let Some(i) = lower.find(ext) {
-            let end = i + ext.len();
-            best = Some(match best {
-                Some(b) => b.min(end),
-                None => end,
-            });
-        }
+    let seg_start = s.rfind(['\\', '/']).map(|i| i + 1).unwrap_or(0);
+    let seg = &s[seg_start..];
+    let token = seg.split_whitespace().next().unwrap_or("");
+    let token_low = token.to_ascii_lowercase();
+    // 文件名 token 的扩展名必须在末尾（`.com` 出现在目录段或 token 中间都不算目标）
+    if EXE_EXTS.iter().any(|ext| token_low.ends_with(ext)) {
+        return s[..seg_start + token.len()].trim();
     }
-    match best {
-        Some(end) => s[..end].trim(),
-        None => s.split_whitespace().next().unwrap_or("").trim(),
-    }
+    s.split_whitespace().next().unwrap_or("").trim()
 }
 
 /// 目标是否"在本机可用"。
@@ -423,6 +419,25 @@ mod tests {
         );
         // 不含路径分隔符的名字不得被凭空补后缀（那是造路径）
         assert_eq!(extract_run_target(Some(r"C:\Tools\util")), RunTarget::Target(r"C:\Tools\util".to_string()));
+    }
+
+    /// R2b-M05：目录名里的 `.com`/`.bat` 不是可执行目标——只在末段路径里认扩展名。
+    /// 旧实现取全文首个扩展名命中，会把 `netscape.com` 目录当成 exe 切出来，
+    /// 再被 `is_file()` 判不存在 ⇒ 仍在用的启动项被报成残留。
+    #[test]
+    fn unquoted_head_ignores_extension_in_directory_names() {
+        for (input, want) in [
+            (r"C:\Program Files\netscape.com\mozilla.exe --flag", r"C:\Program Files\netscape.com\mozilla.exe"),
+            (r"C:\Program Files\mycompany.com\app.exe", r"C:\Program Files\mycompany.com\app.exe"),
+            (r"D:\Games\acme.bat\launcher.exe /run", r"D:\Games\acme.bat\launcher.exe"),
+        ] {
+            assert_eq!(extract_run_target(Some(input)), RunTarget::Target(want.to_string()), "input={input}");
+        }
+        // 反向对照：末段本身是带可执行扩展名的文件时仍要切对（别把功能收紧没了）
+        assert_eq!(
+            extract_run_target(Some(r"C:\Program Files\App\app.exe --flag")),
+            RunTarget::Target(r"C:\Program Files\App\app.exe".to_string())
+        );
     }
 
     /// 环境变量要先展开；展开不了按「解析不出」处理（不猜）。

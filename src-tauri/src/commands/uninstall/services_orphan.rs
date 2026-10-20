@@ -100,7 +100,15 @@ const SERVICE_KEY_PFX: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\";
 /// 只认 `CurrentControlSet`：改 `ControlSet001` 那份不生效，等于假还原。
 fn service_key_name(target: &str) -> Option<&str> {
     let t = target.trim();
-    if t.len() <= SERVICE_KEY_PFX.len() || !t[..SERVICE_KEY_PFX.len()].eq_ignore_ascii_case(SERVICE_KEY_PFX) {
+    // R2b-M01：定长字节切片先过 `get`——目标第 39 字节可能落在多字节字符中间，
+    // `t[..39]` 会 panic（HKCU\Software\ + 数个 CJK 字符即可命中）。
+    // `get` 成功则前 39 字节必为完整 ASCII 前缀，后面的 `&t[39..]` 边界成立。
+    if t.len() <= SERVICE_KEY_PFX.len()
+        || !t
+            .get(..SERVICE_KEY_PFX.len())
+            .map(|p| p.eq_ignore_ascii_case(SERVICE_KEY_PFX))
+            .unwrap_or(false)
+    {
         return None;
     }
     let name = &t[SERVICE_KEY_PFX.len()..];
@@ -113,7 +121,12 @@ fn service_key_name(target: &str) -> Option<&str> {
 /// 形状不合格时的拒因（与 `service_key_name` 同一套前缀常量，不重复判据）。
 fn service_key_shape_reject(target: &str) -> Option<String> {
     let t = target.trim();
-    if t.len() > SERVICE_KEY_PFX.len() && t[..SERVICE_KEY_PFX.len()].eq_ignore_ascii_case(SERVICE_KEY_PFX) {
+    if t.len() > SERVICE_KEY_PFX.len()
+        && t
+            .get(..SERVICE_KEY_PFX.len())
+            .map(|p| p.eq_ignore_ascii_case(SERVICE_KEY_PFX))
+            .unwrap_or(false)
+    {
         let name = &t[SERVICE_KEY_PFX.len()..];
         if name.contains('\\') {
             return Some("服务键下面还有子键，本口子不递归删".to_string());
@@ -947,6 +960,20 @@ mod tests {
             let main_passes_shape = service_key_name(t).is_some();
             assert_eq!(pre, main_passes_shape, "预筛与主判据对 {t:?} 判得不一致: 预筛 {pre} / 主判据 {main_passes_shape}");
         }
+    }
+
+    /// R2b-M01：定长字节切片必须落在字符边界外时返回 None 而不是 panic。
+    /// 前缀 39 字节 + 一个 CJK 字符（3 字节）⇒ 第 39 字节落在「测」中间。
+    #[test]
+    fn service_key_prefix_cjk_边界不得panic() {
+        let t = format!("{}{}", "HKLM\\SYSTEM\\CurrentControlSet\\Services", "测");
+        assert_eq!(service_key_name(&t), None, "形状不合格必须拒（旧实现 t[..39] 在此 panic）");
+        assert!(service_key_shape_reject(&t).is_some(), "拒因同样不得因边界 panic 而丢失");
+        // 正向对照：合法形状仍按同一前缀命中
+        assert_eq!(
+            service_key_name(r"HKLM\SYSTEM\CurrentControlSet\Services\Foo"),
+            Some("Foo")
+        );
     }
 
     /// **真机、只读**：Windows 自身的几条服务必须一律被拒（八道判据里至少命中一条）。

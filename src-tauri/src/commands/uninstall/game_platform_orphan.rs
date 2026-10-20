@@ -319,12 +319,21 @@ unsafe fn steam_root() -> Option<String> {
     None
 }
 
-/// 一个库根下的 `appmanifest_*.acf` → 游戏记录（acf 里 `installdir` 是 common 下的目录名）。
-fn steam_records_of_library(library: &str) -> Vec<LibRecord> {
-    let mut out = Vec::new();
+/// 读文本文件：IO 失败返回 None；字节不是合法 UTF-8 时 lossy 解码（与 `collect_battlenet`
+/// 的 `read + from_utf8_lossy` 同姿势）。「读不到」与「编码坏」必须分开：前者要计数，
+/// 后者仍能拿到字段。
+fn read_text_lossy(p: &Path) -> Option<String> {
+    std::fs::read(p).ok().map(|b| String::from_utf8_lossy(&b).to_string())
+}
+
+/// 一个库根下的 `appmanifest_*.acf` → (游戏记录, 读失败个数)。
+///
+/// R2b-M03：文件级读失败必须**计数外发**——旧实现 `let Ok(text) = ... else { continue }`
+/// 把「读不到」折叠成「该平台没有游戏」，与文件头硬规矩①（读不到 ≠ 不存在）相反。
+fn steam_records_of_library(library: &str) -> (Vec<LibRecord>, usize) {
     let apps = Path::new(library).join("steamapps");
     let Ok(rd) = std::fs::read_dir(&apps) else {
-        return out;
+        return (Vec::new(), 1);
     };
     let mut acfs: Vec<PathBuf> = Vec::new();
     for ent in rd.flatten() {
@@ -340,8 +349,22 @@ fn steam_records_of_library(library: &str) -> Vec<LibRecord> {
     }
     // 稳定序：候选顺序随文件系统枚举抖动会让两次扫描结果难以对拍
     acfs.sort();
-    for p in acfs.into_iter().take(ACF_CAP) {
-        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+    steam_records_from_acfs(library, &acfs, &|p| read_text_lossy(p))
+}
+
+/// acf 列表 → 记录；读取器注入化（单测不触盘、不造临时目录）。
+fn steam_records_from_acfs(
+    library: &str,
+    acfs: &[PathBuf],
+    read: &dyn Fn(&Path) -> Option<String>,
+) -> (Vec<LibRecord>, usize) {
+    let mut out = Vec::new();
+    let mut failed = 0usize;
+    for p in acfs.iter().take(ACF_CAP) {
+        let Some(text) = read(p) else {
+            failed += 1;
+            continue;
+        };
         let Some(installdir) = vdf_field(&text, "installdir") else { continue };
         let name = vdf_field(&text, "name").unwrap_or_else(|| installdir.clone());
         let dir = steam_game_dir(library, &installdir);
@@ -353,7 +376,19 @@ fn steam_records_of_library(library: &str) -> Vec<LibRecord> {
             dir_lc: PlatformIndex::norm(&dir_s),
         });
     }
-    out
+    (out, failed)
+}
+
+/// Steam 采集失败的唯一出口（R2b-M03）：把「vdf 读到几份 / acf 读失败 / 库根读失败 /
+/// 库根列到几个」拼成一条可见 note。三类失败任一非零都必须进 unreadable —— 文件头
+/// 硬规矩①「读不到 ≠ 不存在」在实现里的落点。
+fn steam_unreadable_note(vdf_read: usize, acf_failed: usize, lib_failed: usize, listed: usize) -> Option<String> {
+    if vdf_read > 0 && acf_failed == 0 && lib_failed == 0 && listed > 0 {
+        return None;
+    }
+    Some(format!(
+        "Steam {UNREADABLE_SUFFIX}（vdf {vdf_read} 份读到 / {acf_failed} 个 acf 读失败 / 库根 {lib_failed} 个读失败 / {listed} 个读到）"
+    ))
 }
 
 /// Steam：库根来自 `libraryfolders.vdf`（新路径优先，退回 `config/`），
@@ -369,11 +404,12 @@ unsafe fn collect_steam(index: &mut PlatformIndex, notes: &mut Vec<String>) {
         PathBuf::from("steamapps").join("libraryfolders.vdf"),
         PathBuf::from("config").join("libraryfolders.vdf"),
     ] {
-        if let Ok(t) = std::fs::read_to_string(Path::new(&root).join(rel)) {
+        if let Some(t) = read_text_lossy(&Path::new(&root).join(rel)) {
             vdf_text = Some(t);
             break;
         }
     }
+    let vdf_read = usize::from(vdf_text.is_some());
     let mut libs: Vec<String> = Vec::new();
     if let Some(t) = vdf_text.as_deref() {
         libs = steam_library_paths(t);
@@ -384,6 +420,7 @@ unsafe fn collect_steam(index: &mut PlatformIndex, notes: &mut Vec<String>) {
     }
     let mut listed = 0usize;
     let mut failed = 0usize;
+    let mut acf_failed = 0usize;
     for lib in libs {
         let norm = PlatformIndex::norm(&lib);
         if !index.roots_lc.contains(&norm) {
@@ -396,16 +433,18 @@ unsafe fn collect_steam(index: &mut PlatformIndex, notes: &mut Vec<String>) {
         match std::fs::read_dir(&apps_dir) {
             Ok(_) => {
                 listed += 1;
-                index.records.extend(steam_records_of_library(&lib));
+                let (records, f) = steam_records_of_library(&lib);
+                acf_failed += f;
+                index.records.extend(records);
             }
             Err(_) => failed += 1,
         }
     }
-    // 「一个库根都没列成」与「列到了但都没有安装记录」是两回事：前者是读失败，
-    // 后者是这台机器确实没装游戏。只有前者进 unreadable。
-    if failed > 0 || listed == 0 {
+    // 「一个库根都没列成」与「列到了但都没有安装记录」是两回事；acf / vdf 的文件级
+    // 读失败同样不能折叠成「没有游戏」（R2b-M03，硬规矩①）。
+    if let Some(note) = steam_unreadable_note(vdf_read, acf_failed, failed, listed) {
         index.unreadable.push("Steam");
-        notes.push(format!("Steam {UNREADABLE_SUFFIX}（库根 {failed} 个读失败 / {listed} 个读到）"));
+        notes.push(note);
     }
 }
 
@@ -1078,6 +1117,37 @@ mod tests {
         fair_trim(&mut small, &mut n2);
         assert_eq!(small.len(), 10);
         assert!(n2.is_empty());
+    }
+
+    /// R2b-M03：acf 文件级读失败必须计数，不得静默折叠成「该平台没有游戏」。
+    /// 读取器注入化：合成两本 acf（一本可读、一本返回 None），不触盘、不造临时目录。
+    #[test]
+    fn steam_acf_read_failure_is_counted_not_silent() {
+        let acfs = vec![PathBuf::from("appmanifest_1.acf"), PathBuf::from("appmanifest_bad.acf")];
+        let (records, failed) = steam_records_from_acfs(r"D:\SteamLibrary", &acfs, &|p| {
+            if p.file_name().and_then(|n| n.to_str()) == Some("appmanifest_1.acf") {
+                Some("\"AppState\"\n{\n\t\"installdir\"\t\t\"GameA\"\n\t\"name\"\t\t\"Game A\"\n}\n".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(records.len(), 1, "可读 acf 必须照常产出记录: {records:?}");
+        assert_eq!(failed, 1, "读失败的 acf 必须计数（旧实现静默 continue）");
+        assert_eq!(records[0].dir, r"D:\SteamLibrary\steamapps\common\GameA");
+    }
+
+    /// R2b-M03：vdf 读不到 / acf 读失败 / 库根读失败三类都必须让 Steam 进 unreadable。
+    #[test]
+    fn steam_note_reports_vdf_and_acf_failures() {
+        assert!(steam_unreadable_note(1, 0, 0, 1).is_none(), "全部读到且列到库根时不得报 unreadable");
+        for (vdf, acf, lib, listed) in [(0, 0, 0, 1), (1, 2, 0, 1), (1, 0, 1, 1), (1, 0, 0, 0)] {
+            let note = steam_unreadable_note(vdf, acf, lib, listed).expect("任一失败都必须产出 note");
+            assert!(note.contains("Steam") && note.contains("vdf") && note.contains("acf"), "{note}");
+        }
+        assert!(
+            steam_unreadable_note(1, 2, 0, 1).unwrap().contains("2 个 acf 读失败"),
+            "acf 失败数必须点名"
+        );
     }
 
     /// 真机探针（发布前实跑，只读）：七个平台的注册表/文件读取在本机的实际覆盖。

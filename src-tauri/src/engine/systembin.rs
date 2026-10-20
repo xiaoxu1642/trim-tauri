@@ -54,6 +54,9 @@ const PINNED: &[&str] = &[
     "main.cpl",
     "mmsys.cpl",
     "msconfig.exe",
+    // 卸载域执行面：UninstallString 的 MSI 分支是裸名 msiexec.exe，运行前由
+    // `admit_uninstaller_exec` 解析到 System32 真身（R2b-K01；CWD/PATH 搜索序不参与）
+    "msiexec.exe",
     "msinfo32.exe",
     "mspaint.exe",
     "msra.exe",
@@ -647,6 +650,7 @@ mod tests {
             "tasklist.exe",  // misc
             "fltmc.exe",     // minifilter_orphan
             "powercfg.exe",  // syspanel
+            "msiexec.exe",   // uninstall/list_run.rs（卸载执行面的裸名准入解析）
         ];
         for n in PRODUCTION_NAMES {
             assert!(
