@@ -9,7 +9,10 @@
 //!   `{ success:false, needAdmin:true }`（M-3），静默 no-op 会误导用户；
 //! - `memory:stubborn-block` 单项失败（failedCount>0）不再无条件报绿，如实降级
 //!   `{ success:false, partial:true, data }`（M-1）；
-//! - 进程列表走 `@@PROC@@` 前缀协议解析（PM-7：裸 JSON.parse 会被脚本额外输出污染）。
+//! - `memory:clean` 的入参只收字符串项，**被丢掉的条数进回执**（v7.2 `R1d-M05`：
+//!   静默丢输入等于偷偷缩小清理范围）；
+//! - 进程列表来自原生 `Vec<NativeProcess>`（v7.2 `R1d-L01` 校正：旧注释写的
+//!   `@@PROC@@` 前缀协议是 S3 之前的 PowerShell 遗物，本文件已无该解析）。
 //!
 //! `memory:clean` 不走 PowerShell：Electron 侧本就「原生引擎优先」，Tauri 直调
 //! `trim_finder::perf::mem_clean_json`（等价 finder.exe mem-clean），**无 PS 回落路径**。
@@ -30,6 +33,13 @@ use tauri::WebviewWindow;
 use crate::engine::{guard, log, native, sysinfo};
 
 use crate::commands::state::PROCESS_SNAPSHOTS;
+
+/// 本域快照槽的域名（v7.2 `R1d-L06`：域内四张槽表统一走 `snapshot::domain_key`）
+const PROCESS_DOMAIN: &str = "process";
+
+fn proc_slot_key(label: &str) -> String {
+    crate::engine::snapshot::domain_key(label, PROCESS_DOMAIN)
+}
 
 #[derive(Clone)]
 pub(crate) struct ProcInfo {
@@ -142,13 +152,28 @@ pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Op
     // `guard_readonly` 放行全部五窗是历史命名造成的错位，不是它该有的档位。
     guard::guard(&window, guard::MAIN)?;
     // `Array.isArray(items) ? items.filter(i => typeof i === 'string') : []`
-    let list: Vec<String> = items
-        .unwrap_or_default()
+    // v7.2 `R1d-M05`：被丢掉的**条数**要能看见。旧写法 `filter_map` 静默丢非字符串项，
+    // 于是「传了 5 个区域、实际清了 2 个」与「传了 2 个」在回执上同形——用户以为
+    // 清的是自己勾的那几项。丢弃语义不变（非字符串照旧不收，不放宽命中集），只补记账。
+    let raw_items = items.unwrap_or_default();
+    let dropped_items = raw_items
+        .iter()
+        .filter(|v| v.as_str().is_none())
+        .count();
+    let list: Vec<String> = raw_items
         .into_iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
         .collect();
     if list.is_empty() {
-        return Ok(json!({ "success": false, "message": "未选择要清理的内存区域" }));
+        return Ok(json!({
+            "success": false,
+            "droppedItems": dropped_items,
+            "message": if dropped_items > 0 {
+                "清理项全部无效（应传区域名字符串）"
+            } else {
+                "未选择要清理的内存区域"
+            },
+        }));
     }
     // M-3：NtSetSystemInformation 需 SeProfileSingleProcess / SeIncreaseQuota 特权，
     // 非管理员必失败 —— 统一走 elevate 握手，避免「点了没反应」
@@ -156,9 +181,17 @@ pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Op
         return Ok(json!({
             "success": false,
             "needAdmin": true,
+            // R1d-M05：这条出口也要带上被丢弃的条数（提权回来再点时用户仍能看到少了哪些）
+            "droppedItems": dropped_items,
             "message": "内存清理需要管理员权限，请先提权"
         }));
     }
+    // R1d-M05：归一阶段丢掉的条数进日志（`list` 要被闭包移动，先取长度与计数）
+    let accepted = list.len();
+    log::write_log(
+        "info",
+        &format!("内存清理入参归一：受理 {accepted} 项，形状不合丢弃 {dropped_items} 项"),
+    );
     // 原生引擎优先（v3.7.1 R3）：双特权 + 5 区域逐字平移 PS 语义，含 82/84 黑名单
     let result = tauri::async_runtime::spawn_blocking(move || {
         let text = trim_finder::perf::mem_clean_json(&list);
@@ -188,7 +221,14 @@ pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Op
                 log::write_log("info", &format!(
                     "内存清理：释放 {freed_txt}，成功 {ok_count} 项，失败 {failed} 项"
                 ));
-                json!({ "success": ok_count > 0, "data": data, "engine": "rust" })
+                json!({
+                    "success": ok_count > 0,
+                    "data": data,
+                    "engine": "rust",
+                    // R1d-M05：受理数与丢弃数（渲染层据此讲「N 项未参与清理」）
+                    "acceptedItems": accepted,
+                    "droppedItems": dropped_items,
+                })
             }
             // 原生引擎的失败也用可解析 JSON 回执（`{"error":"…"}`，如区域 id 非法）：如实报出
             None => {
@@ -212,10 +252,18 @@ pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Op
 
 // ==================== memory:processes ====================
 
-/// 从脚本输出里取 `@@PROC@@` 前缀行（PM-7：裸 JSON.parse 会被额外输出污染）
+/// 从原生进程列表取 `Id`（`Number.isInteger` 口径）并落槽
+/// （v7.2 `R1d-L01`：这里原来写「取 `@@PROC@@` 前缀行」，那是 PowerShell 时代防
+/// 额外输出污染的协议，S3 改原生 `Vec<NativeProcess>` 后本文件已无该解析。）
 /// `Array.isArray(data) ? data : (data ? [data] : [])`（含 JS 假值口径）
 /// 落槽：仅收 `Number.isInteger(Number(Id)) && Id > 0` 的项
+///
+/// 槽键走 `snapshot::domain_key(label, PROCESS_DOMAIN)`（v7.2 `R1d-L06`，与 finder /
+/// fileclean / netcheck 同一口径）：本表按 label 存今天不顶账（一个域一张表），
+/// 改它是为了让槽键构造只剩一处实现。N8 机检只吃 `snapshot::{set,get,clear}`，
+/// 这张自建表不在它射程内 —— 键在位由 `u_r1d_command_contracts` 断言钉住。
 fn save_snapshot(label: &str, processes: &[Value]) {
+    let key = proc_slot_key(label);
     let mut slot: HashMap<i64, ProcInfo> = HashMap::new();
     for p in processes {
         let Some(id) = p.get("Id").and_then(js_int) else {
@@ -233,17 +281,18 @@ fn save_snapshot(label: &str, processes: &[Value]) {
         );
     }
     let mut snapshots = PROCESS_SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-    match snapshots.iter_mut().find(|(l, _)| l == label) {
+    match snapshots.iter_mut().find(|(l, _)| l == &key) {
         Some(entry) => entry.1 = slot,
-        None => snapshots.push((label.to_string(), slot)),
+        None => snapshots.push((key, slot)),
     }
 }
 
 fn lookup_snapshot(label: &str, pid: i64) -> Option<ProcInfo> {
+    let key = proc_slot_key(label);
     let snapshots = PROCESS_SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
     snapshots
         .iter()
-        .find(|(l, _)| l == label)
+        .find(|(l, _)| l == &key)
         .and_then(|(_, slot)| slot.get(&pid))
         .cloned()
 }
@@ -318,6 +367,21 @@ pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Optio
         return Ok(json!({
             "success": false,
             "message": format!("系统关键进程 {} 已受保护，不能结束", known.process_name)
+        }));
+    }
+    // v7.2 `R1d-L10`：期望镜像名为空即拒（fail-closed），不依赖被调方复核。
+    // `native::kill_process` 的比对写成 `if !expected_name.is_empty()`（process.rs 的
+    // v2-L4P-55 只覆盖「给了期望名却读不到镜像名」）⇒ 快照里 `process_name` 为空时
+    // 整道复核被跳过，剩下的 PID 复用窗口只剩「自我防护 + 黑名单」两道，而黑名单
+    // 同样按名字判、空名命中不了任何保护项。名字在落槽时就该有，缺了是快照形状问题。
+    if known.process_name.trim().is_empty() {
+        log::write_log(
+            "warn",
+            &format!("结束进程被拒：快照内 PID {n} 的镜像名为空，无法复核目标身份"),
+        );
+        return Ok(json!({
+            "success": false,
+            "message": "快照缺少进程名，无法复核目标身份，已拒绝结束"
         }));
     }
     // S3：纯 Rust 原生

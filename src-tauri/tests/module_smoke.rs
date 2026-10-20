@@ -2063,3 +2063,82 @@ fn cleanup_query_locked_probe_names_locking_process() {
 }
 
 
+
+// ==================== U-R1d（v7.2 P1-W2）：度量链出口收口 ====================
+
+/// `finder_delete_manifest` / `realtime_report_delete` 由同步 `pub fn` 改成
+/// `async` + `spawn_blocking`（R1d-L11）。改档位的判据不是「有没有返回值」，而是
+/// **命令是否还在 generate_handler! 里、还能被 invoke 打穿**——签名换了但注册漏改、
+/// 或 async 化后 `window` 生命周期写坏，症状都是「命令不存在/回执为空」。
+/// 负例（非法报告名）在触盘之前就被拒，因此属零副作用快速组。
+#[test]
+fn u_r1d_同步命令转阻塞池后出口仍可达() {
+    let w = main_window();
+    // ① 清单读取：回执形状（items 必须是数组、dir 是字符串）——渲染层直接 .map
+    let res = invoke(&w, "finder_delete_manifest", json!({}));
+    common::assert_guard_passed(&res.to_string(), "主窗调 finder_delete_manifest", &["success"]);
+    assert!(
+        res["data"]["items"].is_array(),
+        "async 化后 items 仍必须是数组（渲染层直接 .map）: {res}"
+    );
+    assert!(
+        res["data"]["dir"].is_string(),
+        "清单目录字段必须是字符串: {res}"
+    );
+    // ② 报告名非法：必须在动盘之前拒绝，且拒因点名
+    let res = invoke(
+        &w,
+        "realtime_report_delete",
+        json!({ "name": "not-a-report.txt" }),
+    );
+    assert_eq!(res["success"], json!(false), "非 .json 报告名必须拒: {res}");
+    assert!(
+        common::message_of(&res).contains("报告名称非法"),
+        "拒因必须点名名称闸（否则分不清是闸拦的还是 remove_file 自己失败）: {res}"
+    );
+    assert_eq!(res["removed"], json!(0), "拒绝路径不得声称删过东西: {res}");
+}
+
+/// `netcheck_repair` 的 R1d-M07 出口：快照作废之后，修复必须被快照闸整条拒掉。
+///
+/// 为什么这条能当机检用：`netcheck_collect` 需要管理员（`guard::MAIN` + 只读档在
+/// MockRuntime 里能过，但 `is_admin()` 取决于跑测试的进程），非管理员态下 collect
+/// 会走 needAdmin 分支、**根本不写快照** ⇒ 恰好是「槽为空」这个待验形态。
+/// 提权态跑则先 collect 再 repair，两种形态都要求 repair 的回执非绿（判「不在快照内」
+/// 或 needAdmin），不许出现 success:true。
+#[test]
+fn u_r1d_netcheck_快照作废后修复不绿() {
+    let w = main_window();
+    // 先做一次采集：成功则本窗槽有账，失败/需提权则槽为空——两种都继续往下判
+    let _ = invoke(&w, "netcheck_collect", json!({}));
+    // 再判一个**不在本窗快照里**的动作 id：必须拒，且拒因点名快照闸
+    let res = invoke(&w, "netcheck_repair", json!({ "actionId": "__trim_probe_absent__" }));
+    assert_eq!(res["success"], json!(false), "白名单外的动作 id 必须拒: {res}");
+    assert!(
+        common::message_of(&res).contains("不在当前检测快照内"),
+        "拒因必须点名快照闸（M07 的作废语义就是靠这条闸生效）: {res}"
+    );
+}
+
+/// `diskbench_run` 的 R1d-M09 单飞闸：白名单外路径的拒绝必须在**占位之前**。
+/// 否则一条越界请求把 `DISKBENCH_RUNNING` 置 true 后又从早退分支返回，
+/// 后续所有测速都被误判「进行中」（RAII guard 恰好防住这个形态，故点名顺序）。
+#[test]
+fn u_r1d_diskbench_越界路径拒绝后单飞位不放脏() {
+    let w = main_window();
+    let bad = json!({ "options": { "path": "C:\\__trim_probe_outside_whitelist__" } });
+    let first = invoke(&w, "diskbench_run", bad.clone());
+    assert_eq!(first["success"], json!(false), "白名单外路径必须拒: {first}");
+    assert_ne!(
+        first["busy"],
+        json!(true),
+        "越界拒因必须是路径白名单，不能是「单飞位被占」: {first}"
+    );
+    // 同一条再来一次：若上一条把位占住没放，这条会回 busy:true
+    let second = invoke(&w, "diskbench_run", bad);
+    assert_ne!(
+        second["busy"],
+        json!(true),
+        "早退路径必须释放单飞位（RAII Drop），否则第二次请求被误判进行中: {second}"
+    );
+}

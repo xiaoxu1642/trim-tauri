@@ -9,11 +9,13 @@
 //!   customPath 必须与解析后的配置一致——防止借扫描读任意目录。
 //! - BFS 跳过符号链接/junction；depth 0 根层不收文件；depth<2 不深入
 //!   recv*/msg* 目录（FC-2：根层 .dat 是账号数据库，.db 永不归 data，FC-3）。
-//! - 扫描结果按「窗口 label + type」分槽；读图/删文件/批量删全部过本槽白名单。
+//! - 扫描结果按「窗口 label + 清理类型」分槽（槽键走 `snapshot::domain_key`，与
+//!   finder/netcheck/memory 同口径）；删文件/批量删全部过本槽白名单。
 //! - data 类只收 `.dat`（排除 .db/.adb/.aes 等数据库/密钥文件）。
 //! - 读图通道 `fileclean:read-image` 已随预览链退役（`IMAGE_MAX_BYTES` 同批删除），
 //!   现注册面只有 scan / delete-file / execute 三条。
 //! - 危险操作前 flush_sync；success 语义=通道执行成功（失败明细随 data 返回）。
+//!   删除**只进回收站**：回收站失败即如实报错，不做永久删除兜底（AGENTS §3）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -23,8 +25,8 @@ use tauri::{Emitter, Runtime, WebviewWindow};
 
 // P2-1（审查 2026-10-07）：路径键统一走 engine 唯一实现（原先本文件另有一份
 // strip_verbatim + Path::components 折叠版，与 finder/startup/appearance 口径不一）
-use crate::engine::paths::path_key;
-use crate::engine::{delete_manifest, guard, log, paths, protect};
+use crate::engine::paths::{exceeds_char_len, path_key};
+use crate::engine::{delete_manifest, guard, log, paths, protect, snapshot};
 use crate::security;
 
 /// 结果集上限（**输出**口径）：`scan_root` 只往 `items` 里收这么多条。
@@ -40,6 +42,11 @@ use crate::security;
 const MAX_FILES: usize = 2000;
 const MAX_DEPTH: usize = 4;
 const MAX_PATH_LEN: usize = 400;
+/// 批量删除的单批上限（v7.2 `R1d-L04`）：与 `MAX_FILES` 同值是**现状**，但必须是
+/// 一个有名有姓的闸——旧实现只在扫描侧有上限、删除侧「隐式等于扫描槽大小」，
+/// 于是删除批量口径只能靠读两处代码反推。`finder` 侧同类闸叫 `FINDER_DELETE_MAX`，
+/// 两边都显式命名才谈得上对账（跨域批量上限口径不一是本条的根因）。
+const FILECLEAN_DELETE_MAX: usize = 2000;
 // IMAGE_MAX_BYTES 随 fileclean:read-image（base64 dataURL 通道）退役删除：
 // 图片改走 asset 协议磁盘直连（cleanup/preview_assets.rs 按需放行），不再整文件进内存。
 
@@ -56,7 +63,12 @@ pub(crate) struct Scope {
 use crate::commands::state::FILECLEAN_SCOPES;
 
 fn slot_key(label: &str, ty: &str) -> String {
-    format!("{label}:{ty}")
+    // v7.2 `R1d-L06`：域内四张槽表原先两种分隔（本表 `:`、finder `|`）、两种容器。
+    // 分隔符不同不影响正确性（各表基数都成立、没有跨窗顶账），改它是为了让**槽键构造
+    // 只剩一处实现**；本域的键在位与否由 `u_r1d_command_contracts` 断言钉住。
+    // 注意：`check-native-hygiene` 的 N8 只吃 `snapshot::{set,get,clear}` 调用点，
+    // 本表这类自建容器仍在它射程外（要覆盖得扩 N8c，属门禁候选，别以为已覆盖）。
+    snapshot::domain_key(label, ty)
 }
 
 fn scope_store(label: &str, ty: &str, root: String, files: HashSet<String>) {
@@ -202,10 +214,10 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
             truncated = true;
             continue;
         }
-        if depth > MAX_DEPTH {
-            truncated = true;
-            continue;
-        }
+        // v7.2 `R1d-M02`：这里原先写「出队 depth 大于 MAX_DEPTH 才记 truncated」，但入队
+        // 只发生在 `depth < MAX_DEPTH`（见函数尾），出队的 depth 最大恰为 MAX_DEPTH ⇒ 条件
+        // 恒假、深度截断**从来没被记过账**，回执与日志照报「结果完整」。真正的截断点在
+        // 出队处「还想再深入却没有入队」的那一刻，已挪到函数尾。
         let rd = match std::fs::symlink_metadata(&dir) {
             Ok(m) => {
                 if crate::engine::protect::is_reparse(&m) {
@@ -296,6 +308,10 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
             for d in subdirs {
                 queue.push_back((d, depth + 1));
             }
+        } else if !subdirs.is_empty() {
+            // v7.2 `R1d-M02`：深度闸真正生效的地方——本层还有一堆子目录，但已达 MAX_DEPTH、
+            // 不再入队。必须记入 truncated，否则「扫到 30 项就停」与「扫全了」在回执上同形。
+            truncated = true;
         }
     }
     (items, scanned, unhandled, truncated)
@@ -349,15 +365,18 @@ pub async fn fileclean_scan<R: Runtime>(
     if !md.is_dir() || crate::engine::protect::is_reparse(&md) {
         return json!({ "success": false, "data": [], "message": "扫描路径必须是普通目录" });
     }
+    // v7.2 `R1d-L05`：长度闸量在**规范化之前**的那个串上，并按字符数计。
+    // 旧写法 `resolved.len() > MAX_PATH_LEN` 有两个偏差：① `len()` 数 UTF-8 字节，
+    // 中文目录名一个字占 3 字节，用户数不出「超长」却被告知路径过长；② canonicalize
+    // 补上的 `\\?\` 前缀是内部形态，白占 4 个字符预算（同一目录加不加前缀结论不同）。
+    if exceeds_char_len(&scan_path.to_string_lossy(), MAX_PATH_LEN) {
+        return json!({ "success": false, "data": [], "message": "扫描路径过长" });
+    }
     let resolved = scan_path
         .canonicalize()
         .unwrap_or_else(|_| scan_path.clone())
         .to_string_lossy()
         .replace('/', "\\");
-
-    if resolved.len() > MAX_PATH_LEN {
-        return json!({ "success": false, "data": [], "message": "扫描路径过长" });
-    }
 
     let label = window.label().to_string();
     let ty2 = ty.clone();
@@ -406,8 +425,18 @@ pub async fn fileclean_scan<R: Runtime>(
     }
     let _ = window.emit(
         "cleanup:scan-progress",
-        // v4 P2-E（R1-M05）：total 旧为 items.len() 自指（进度条恒 100%）——改为真上限，进度有意义
-        json!({ "scanType": ty2, "done": items.len(), "total": MAX_FILES }),
+        // v4 P2-E（R1-M05）：total 旧为 items.len() 自指（进度条恒 100%）——那次改成
+        // 恒 `MAX_FILES`，于是「正常扫完 30 项」也报 `done=30/total=2000`（v7.2 `R1d-M08`）。
+        // `scan_root` 没有逐条 sink，本场扫描确实只有这一帧，那就把它如实说清：
+        // done==total==条目数、`progressComplete` 标收尾、被截断时 `truncated` 才是
+        // 「结果可能不完整」的唯一凭据（不再用 total 冒充「还有多少没扫」）。
+        json!({
+            "scanType": ty2,
+            "done": items.len(),
+            "total": items.len(),
+            "progressComplete": true,
+            "truncated": truncated,
+        }),
     );
 
     let mut resp = scan_response(items, total_size, resolved, unhandled, truncated);
@@ -450,31 +479,33 @@ fn recycle_one(file_path: &str) -> (bool, bool, String) {
     {
         Ok(()) => (true, true, String::new()),
         Err(e1) => {
-            // 回收站失败仅在明确失败时才永久删除（与 Electron trashOrUnlink 不同：
-            // D 批统一安全口径，回收站失败直接报错，不做永久删除兜底）
+            // 回收站失败**如实报错**，不回退成永久删除（v7.2 `R1d-L02`：旧注释声称回退会
+            // 兜底删除，与本函数实际行为相反——失败时它什么都不删）。
+            // 口径来自 AGENTS §3：除常规清理项外一律回收站优先、不做永久删除兜底。
             (false, false, e1)
         }
     }
 }
 
-/// fileclean:delete-file —— 预览窗删除当前图片
+/// fileclean:delete-file —— 主窗内嵌 LiteBox 删除当前图片
 ///
-/// 审查 M2：档位从 `MAIN` 改为 `APP_WINDOWS`。这不是把删除放开成「任意窗口可删任意路径」，
-/// 四道闸门一条没少：① 只能删**发起扫描那次结果内**的路径（`in_scope` + `scope_owner`）；
-/// ② 只进回收站（`recycle_one` 失败即报错，无永久删除兜底）；③ 渲染层红色二次确认
-/// （`cleanup.js` 的 `modal.confirm({danger:true})`）；④ 删除前 `flush_sync()` +
-/// 落 delete-manifest。（预览子窗退役后删除入口回到主窗，按 MAIN 校验不再锁死链路，
-/// 档位维持 `APP_WINDOWS` 不变——多窗应用不给任何窗口隐式豁免。）
+/// 档位 = **`guard::MAIN`**（v7.2 `R1d-L02` 校正此前两处互相矛盾的注释：预览子窗已退役、
+/// 删除入口只剩主窗，档位随之收紧；「维持 APP_WINDOWS」那句是自然语言状态腐烂，别再信）。
+/// 收紧档位不等于放宽删除面，出口上的闸门一条没少：
+/// ① 只能删**发起扫描那次结果内**的路径（`in_scope` + `scope_owner`）；
+/// ② `protect::validate_mutation_target` 四道组合闸（受保护面/别名面/系统面/reparse，C01）；
+/// ③ 只进回收站（`recycle_one` 失败即报错，无永久删除兜底）；④ 渲染层红色二次确认
+/// （`cleanup.js` 的 `modal.confirm({danger:true})`）；⑤ 删除前 `flush_sync()` + 落 delete-manifest。
 #[tauri::command]
 pub async fn fileclean_delete_file<R: Runtime>(
     window: WebviewWindow<R>,
     file_path: String,
 ) -> Value {
-    // 预览子窗退役后删除入口只剩主窗（内嵌 LiteBox），档位从 APP_WINDOWS 收紧到 MAIN。
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    if file_path.is_empty() || file_path.len() > MAX_PATH_LEN {
+    // v7.2 `R1d-L05`：与扫描根同一口径（字符数），别再用 UTF-8 字节数当长度。
+    if file_path.is_empty() || exceeds_char_len(&file_path, MAX_PATH_LEN) {
         return json!({ "success": false, "message": "文件不存在" });
     }
     let ty = ["qq", "wechat"].iter().find_map(|t| {
@@ -549,6 +580,19 @@ pub async fn fileclean_execute<R: Runtime>(
     if files.is_empty() {
         return json!({ "success": false, "message": "没有选中文件" });
     }
+    // v7.2 `R1d-L04`：单批上限显式化。今天扫槽本身封在 MAX_FILES，这条拒不了任何东西；
+    // 写出来是为了让「删除批的口径」是个有名有姓的常量，而不是要从扫描侧反推。
+    // 判红方向选**整批拒**而不是截断：静默少删与 M05（输入被静默丢弃）同罪。
+    if files.len() > FILECLEAN_DELETE_MAX {
+        log::write_log(
+            "warn",
+            &format!("文件清理单批 {} 项超上限（{FILECLEAN_DELETE_MAX}），已整批拒绝", files.len()),
+        );
+        return json!({
+            "success": false,
+            "message": format!("单批最多删除 {FILECLEAN_DELETE_MAX} 项，请减少选择后分批执行")
+        });
+    }
 
     // 确定槽：用第一项反查（一次 execute 只扫一个 type 的结果）
     let first_path = files
@@ -564,7 +608,7 @@ pub async fn fileclean_execute<R: Runtime>(
         return json!({ "success": false, "message": "至少一个文件不在扫描范围内，已拒绝整批" });
     };
     let Some(scope) = scope_get(window.label(), ty) else {
-        // 反查（:538-540）命中与这里取槽之间无 await，但 FILECLEAN_SCOPES 是全局槽，可能被并发
+        // 反查（上面 `find_map` 那轮）命中与这里取槽之间无 await，但 FILECLEAN_SCOPES 是全局槽，可能被并发
         // 重扫清空。旧实现直接 unwrap：理论 panic 会被 Tauri command 包装兜住，但与其
         // 让渲染层吃一个未分类错误，不如显式报「会话已过期」（审查 L1）。
         return json!({ "success": false, "message": "扫描会话已过期，请重新扫描后再删除" });
@@ -793,12 +837,14 @@ mod tests {
     /// 主窗集合」这条底线要钉住：范围外路径不得因映射缺失而误放行。
     #[test]
     fn unknown_label_gets_no_slot() {
+        // 唯一 label：槽是全局表，固定 "main" 会与别的用例（含本文件新加的那条）互相顶
+        let label = &format!("unknown-label-{}", std::process::id());
         let root = path_key(r"C:\FakeQqRoot");
         let file = path_key(r"C:\FakeQqRoot\photo.jpg");
-        scope_store("main", "qq", root, [file].into_iter().collect());
+        scope_store(label, "qq", root, [file].into_iter().collect());
 
-        assert_eq!(scope_owner("main"), "main");
-        let shared = scope_get(scope_owner("main"), "qq").expect("主窗应读到自己的槽");
+        assert_eq!(scope_owner(label.as_str()), label.as_str());
+        let shared = scope_get(scope_owner(label), "qq").expect("主窗应读到自己的槽");
         assert!(
             in_scope(&shared, r"C:\FakeQqRoot\photo.jpg"),
             "大小写/分隔符归一后仍须在范围内"
@@ -808,8 +854,83 @@ mod tests {
             "范围外路径不得放行"
         );
 
-        assert_eq!(scope_owner("attacker"), "attacker");
-        assert!(scope_get(scope_owner("attacker"), "qq").is_none());
+        let attacker = format!("attacker-{}", std::process::id());
+        assert_eq!(scope_owner(attacker.as_str()), attacker.as_str());
+        assert!(scope_get(scope_owner(attacker.as_str()), "qq").is_none());
+    }
+
+    /// v7.2 `R1d-M02`：深度截断必须记入 `truncated`。
+    /// 旧实现把账记在「出队 depth 大于 MAX_DEPTH」上，而入队只发生在 `depth < MAX_DEPTH`
+    /// ⇒ 出队 depth 最大恰为 MAX_DEPTH、条件恒假 ⇒ 超深的子树整片消失却回 `truncated:false`。
+    /// 正向样本（深到 MAX_DEPTH+1 层）判 true、反向对照（浅沙箱）判 false：
+    /// 两条一起才证明这个位是**扫出来的**，不是碰巧没置上。
+    #[test]
+    fn 深度截断必须记入truncated() {
+        let base = std::env::temp_dir().join(format!(
+            "trim-fileclean-depth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // 正向：root\l1\l2\l3\l4\l5，每层一个 .jpg
+        let deep = base.join("deep");
+        let mut cur = deep.clone();
+        for i in 1..=(MAX_DEPTH + 1) {
+            cur = cur.join(format!("l{i}"));
+            std::fs::create_dir_all(&cur).expect("建深层目录");
+            std::fs::write(cur.join("a.jpg"), b"x").expect("写样本");
+        }
+        let (items, _scanned, _unhandled, truncated) = scan_root(&deep);
+        assert!(truncated, "MAX_DEPTH 之外的子树被丢弃时必须记入 truncated");
+        // 命中集口径不变：depth 1..=MAX_DEPTH 各一个文件（depth 0 是根、不收）
+        assert_eq!(
+            items.len(),
+            MAX_DEPTH,
+            "命中集只应是 depth 1..={MAX_DEPTH} 的 {MAX_DEPTH} 个文件（多收/少收都算命中集变了）"
+        );
+
+        // 反向对照：浅沙箱（depth 2、无更深层）必须 truncated=false
+        let shallow = base.join("shallow");
+        std::fs::create_dir_all(shallow.join("l1/l2")).expect("建浅层目录");
+        std::fs::write(shallow.join("l1/a.jpg"), b"x").expect("写样本");
+        std::fs::write(shallow.join("l1/l2/a.jpg"), b"x").expect("写样本");
+        let (s_items, _s_scanned, _s_unhandled, s_truncated) = scan_root(&shallow);
+        assert_eq!(s_items.len(), 2, "浅沙箱两个 depth>0 文件都应入表");
+        assert!(
+            !s_truncated,
+            "没触到深度/条目上限的沙箱必须回 false（否则这条断言恒真、不算验收）"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// v7.2 `R1d-L06`：本域槽键的唯一真源是 `snapshot::domain_key`。
+    /// 判据取源码形态（`concat!` 拆词防自指）+ 功能面「同窗不同类型不塌并」。
+    /// 为什么两条都要：只断源码形态防不住换成另一串拼接；只断功能防不住分隔符漂移。
+    /// （N8 机检看不见自建表，所以这条契约测试就是本域键构造的唯一防线。）
+    #[test]
+    fn 槽键走domain_key且同窗两类型不塌并() {
+        let src = include_str!("fileclean.rs");
+        let want = concat!("snapshot::", "domain_key(label, ty)");
+        assert!(
+            src.contains(want),
+            "slot_key 必须走 snapshot::domain_key（域内四张槽表统一口径）"
+        );
+        let old = concat!("format!(\"{label}", ":{ty}\")");
+        assert!(!src.contains(old), "槽键拼接不得退回本域私有分隔符（两套口径必然漂移）");
+
+        // 用例之间共用同一张全局槽表 ⇒ label 必须每条用例唯一（同测试底座的快照纪律）
+        let main = format!("slot-main-{}", std::process::id());
+        let root_qq = path_key(r"C:\FakeQqRoot");
+        let root_wc = path_key(r"C:\FakeWechatRoot");
+        scope_store(&main, "qq", root_qq.clone(), [path_key(r"C:\FakeQqRoot\a.jpg")].into_iter().collect());
+        scope_store(&main, "wechat", root_wc, [path_key(r"C:\FakeWechatRoot\b.dat")].into_iter().collect());
+        let qq = scope_get(&main, "qq").expect("qq 槽必须在");
+        assert!(
+            in_scope(&qq, r"C:\FakeQqRoot\a.jpg") && !in_scope(&qq, r"C:\FakeWechatRoot\b.dat"),
+            "同窗两类型的槽必须各自独立（塌并即后写顶掉前写）"
+        );
+        assert_eq!(qq.root, root_qq, "qq 槽的 root 不得被 wechat 槽顶掉");
     }
 
     /// P2-1（v4-R1-M01）：`fileclean_execute` 回执的 totalFreed 必须是 **JSON 数字** ——

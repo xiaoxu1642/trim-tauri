@@ -626,6 +626,16 @@ pub fn path_key(p: &str) -> String {
     crate::engine::protect::normalize_lexical(p)
 }
 
+/// 入参长度闸的唯一口径：**字符数**，不是字节数（v7.2 `R1d-L05`）。
+///
+/// 为什么要有它：本仓长度闸原先两种写法并存 —— `s.len()` 数 UTF-8 字节，中文目录名
+/// 一个字占 3 字节，同一条路径在两种口径下结论不同（字节口径更严 ⇒ 静默拒掉合法路径，
+/// 用户看到的是「路径过长」但他数的长度没超）；`chars().count()` 才是用户能数的长度。
+/// 新增长度闸一律走这里，别再直接写 `len()`。
+pub fn exceeds_char_len(s: &str, max_chars: usize) -> bool {
+    s.chars().count() > max_chars
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

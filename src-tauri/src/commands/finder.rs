@@ -1,4 +1,5 @@
-//! finder 域（B 批）：finder:scan / finder:delete / finder:delete-manifest / finder:open-backup-dir
+//! finder 域（B 批）：finder:scan / delete / delete-manifest / open-backup-dir
+//! + ignore-folder / ignore-list / ignore-remove（空目录忽略名单写侧）
 //!
 //! 对照 Electron `main.js` 2044-2352（含 helper 1792-1919 / 2160-2218）。
 //! 迁移要点：
@@ -14,12 +15,18 @@
 //! - 删除清单落 `engine::paths::app_data_dir()/fileclean-backup/deleted-<batchId>.json`
 //!   （D5 后数据目录为 Tauri identifier 目录；原子写 + 只留最近 50 个批次）。
 //!
-//! 需在 `lib.rs` 的 `generate_handler!` 注册：
+//! 需在 `lib.rs` 的 `generate_handler!` 注册（下面这份清单就是本文件的全部实现，
+//! v7.2 `R1d-L03`：原先只列 scan/delete/manifest/open-backup 四行、漏掉 ignore 三行。
+//! 少列的症状不是编译失败，而是实现建在库里却没人注册 ⇒ 渲染层 invoke 报「命令不存在」，
+//! 所以清单长度以本文件的 `#[tauri::command]` 现算为准、不手抄）：
 //! ```text
 //! commands::finder::finder_scan,
 //! commands::finder::finder_delete,
 //! commands::finder::finder_delete_manifest,
 //! commands::finder::finder_open_backup_dir,
+//! commands::finder::finder_ignore_folder,
+//! commands::finder::finder_ignore_list,
+//! commands::finder::finder_ignore_remove,
 //! ```
 //!
 //! 与 Electron 的差异（已在迁移方案登记）：
@@ -44,7 +51,7 @@ use trim_finder::cleanup_scan::expand_env_path;
 
 use crate::engine::delete_manifest;
 // P2-1（审查 2026-10-07）：路径键统一走 engine 唯一实现，本文件不再自持一份
-use crate::engine::paths::path_key;
+use crate::engine::paths::{exceeds_char_len, path_key};
 use crate::engine::{guard, log, protect};
 
 /// 合法扫描类型（对照 FINDER_SCAN_TYPES）。analyze = C-5 磁盘分析器（逐层下钻）
@@ -396,7 +403,7 @@ pub async fn finder_scan<R: tauri::Runtime>(
             continue;
         }
         let expanded = expand_env_path(s);
-        if expanded.chars().count() > FINDER_PATH_MAX_LEN {
+        if exceeds_char_len(&expanded, FINDER_PATH_MAX_LEN) {
             // 长度在展开后量：`%LOCALAPPDATA%\…` 展开前看着短、展开后可能超限
             dropped_roots += 1;
             log::write_log("warn", &format!("finder 扫描根超长丢弃（展开后 > {FINDER_PATH_MAX_LEN} 字符）：{s}"));
@@ -568,12 +575,31 @@ pub async fn finder_delete<R: tauri::Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    let requested: Vec<Value> = items
-        .unwrap_or_default()
+    // v7.2 `R1d-M05`：入参归一的两处静默丢弃都要计数并回执（同文件扫描根侧已有
+    // `droppedRoots`/`rootsTruncated`，删除侧却是「悄悄少删」）：
+    // ① `path` 非字符串/缺失的项被 filter 掉；② 超出 FINDER_DELETE_MAX 的尾部被 take 掉。
+    // 丢弃不改变放行集的语义（快照闸仍逐条判），但用户必须能看见「你以为给了 600 条、
+    // 实际只处理了 500 条」，否则这是一条会吃掉删除范围的静默路径。
+    let requested_raw: Vec<Value> = items.unwrap_or_default();
+    let requested_raw_len = requested_raw.len();
+    let dropped_typed = requested_raw
+        .iter()
+        .filter(|it| !it.get("path").map(|p| p.is_string()).unwrap_or(false))
+        .count();
+    let requested: Vec<Value> = requested_raw
         .into_iter()
         .filter(|it| it.get("path").map(|p| p.is_string()).unwrap_or(false))
         .take(FINDER_DELETE_MAX)
         .collect();
+    let dropped_truncated = requested_raw_len.saturating_sub(requested.len() + dropped_typed);
+    if dropped_typed > 0 || dropped_truncated > 0 {
+        log::write_log(
+            "warn",
+            &format!(
+                "finder 删除入参归一：收到 {requested_raw_len} 项，形状不合 {dropped_typed} 项、超单批上限 {FINDER_DELETE_MAX} 被丢弃 {dropped_truncated} 项"
+            ),
+        );
+    }
 
     // 只认本窗口快照槽内的路径（跨窗口互不覆盖；同一窗口内任一扫描类型扫到即可删——
     // 槽键带类型后由 `find_label_entry` 跨类型查，优先带 empty 标记的那条）
@@ -637,6 +663,8 @@ pub async fn finder_delete<R: tauri::Runtime>(
             "data": {
                 "totalFreed": 0, "success": 0, "failed": 0,
                 "skipped": safe_total, "recycled": 0, "unhandled": unhandled,
+                // R1d-M05：入参归一的丢弃数即使在这条早退路径上也要如实回传
+                "requestedTotal": requested_raw_len, "droppedItems": dropped_typed + dropped_truncated,
                 "details": [], "manifestPath": null
             }
         });
@@ -725,6 +753,14 @@ pub async fn finder_delete<R: tauri::Runtime>(
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
+    // v7.2 `R1d-L12`：`manifestPath` 只允许一种「没有清单」的写法。
+    // 旧形态是同字段两态：清单落盘失败给 `""`、空批早退给 `null` ⇒ 渲染层要么判
+    // `if (p)` 要么判 `p !== null`，两处消费口径必然分叉。空串统一归一成 null。
+    let manifest_path_json = if manifest_path.is_empty() {
+        Value::Null
+    } else {
+        json!(manifest_path)
+    };
     let manifest_note = if manifest_path.is_empty() {
         String::new()
     } else {
@@ -750,8 +786,11 @@ pub async fn finder_delete<R: tauri::Runtime>(
             "skipped": skipped,
             "unhandled": unhandled,
             "recycled": recycled,
+            // R1d-M05：入参归一计数（收到多少 / 因形状或单批上限丢了多少）
+            "requestedTotal": requested_raw_len,
+            "droppedItems": dropped_typed + dropped_truncated,
             "details": details,
-            "manifestPath": manifest_path
+            "manifestPath": manifest_path_json
         }
     })
 }
@@ -835,29 +874,53 @@ fn classify_delete_result_mode(mode: &str) -> &'static str {
 // ==================== 删除清单（共享存储见 engine::delete_manifest） ====================
 
 /// finder:delete-manifest — 读最近批次清单（最多 200 条，最近批次在前）。
+///
+/// v7.2 `R1d-L11`：同步 `pub fn` 命令体里做 `read_dir` + 逐份清单整文件读，
+/// 与本文件自己的 v2-F13 约定（同步=占主线程）不一致 ⇒ 改 async + `spawn_blocking`。
+/// 返回类型保持 `Value`（渲染层口径不变），档位判定仍留在 async 体的最前面。
 #[tauri::command]
-pub fn finder_delete_manifest<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+pub async fn finder_delete_manifest<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    let (items, dir_text) = delete_manifest::list_manifest_items(FINDER_MANIFEST_READ_MAX);
-    json!({ "success": true, "data": { "items": items, "dir": dir_text } })
+    let read = tauri::async_runtime::spawn_blocking(|| {
+        delete_manifest::list_manifest_items(FINDER_MANIFEST_READ_MAX)
+    })
+    .await;
+    match read {
+        Ok((items, dir_text)) => json!({ "success": true, "data": { "items": items, "dir": dir_text } }),
+        Err(e) => {
+            log::write_log("error", &format!("finder 删除清单读取任务异常: {e}"));
+            json!({ "success": false, "message": format!("读取删除清单失败: {e}") })
+        }
+    }
 }
 
 /// finder:open-backup-dir — mkdir -p 后用系统 Shell 打开清单目录
 /// （已进回收站的文件可在系统回收站中还原）
+///
+/// v7.2 `R1d-L11`：建目录是磁盘 I/O、`ShellExecuteW` 是会阻塞的 Shell 调用，
+/// 都不该留在同步命令体里（同 `delete-manifest` 的 v2-F13 口径）。
 #[tauri::command]
-pub fn finder_open_backup_dir<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+pub async fn finder_open_backup_dir<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    if let Err(e) = delete_manifest::ensure_backup_dir() {
-        return json!({ "success": false, "message": e.to_string() });
-    }
-    let dir = delete_manifest::backup_dir();
-    match open_folder(&dir) {
-        Ok(()) => json!({ "success": true, "message": "" }),
-        Err(msg) => json!({ "success": false, "message": msg }),
+    let opened = tauri::async_runtime::spawn_blocking(|| {
+        delete_manifest::ensure_backup_dir().map(|_| {
+            let dir = delete_manifest::backup_dir();
+            open_folder(&dir)
+        })
+    })
+    .await;
+    match opened {
+        Ok(Ok(Ok(()))) => json!({ "success": true, "message": "" }),
+        Ok(Ok(Err(msg))) => json!({ "success": false, "message": msg }),
+        Ok(Err(e)) => json!({ "success": false, "message": e.to_string() }),
+        Err(e) => {
+            log::write_log("error", &format!("finder 打开清单目录任务异常: {e}"));
+            json!({ "success": false, "message": format!("打开目录失败: {e}") })
+        }
     }
 }
 

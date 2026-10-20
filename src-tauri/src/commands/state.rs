@@ -43,7 +43,7 @@ pub(crate) static FINDER_SNAPSHOTS: OnceLock<Mutex<HashMap<String, HashMap<Strin
 
 // ---- fileclean.rs ----
 
-/// fileclean:scan 结果快照（`label:type` -> Scope）
+/// fileclean:scan 结果快照（槽键 = `snapshot::domain_key(label, 清理类型)`）
 pub(crate) static FILECLEAN_SCOPES: Mutex<Option<HashMap<String, Scope>>> = Mutex::new(None);
 
 // ---- elevate.rs ----
@@ -109,13 +109,13 @@ pub(crate) static SILENT_CHECK_THREAD: OnceLock<Mutex<Option<std::thread::JoinHa
 
 // ---- memory.rs ----
 
-/// 进程快照分槽（key = 调用窗口 label）。`Vec` 代替 `HashMap` 以支持 const 初始化。
+/// 进程快照分槽（槽键 = `snapshot::domain_key(label, "process")`）。`Vec` 代替 `HashMap` 以支持 const 初始化。
 pub(crate) static PROCESS_SNAPSHOTS: Mutex<Vec<(String, HashMap<i64, ProcInfo>)>> =
     Mutex::new(Vec::new());
 
 // ---- netcheck.rs ----
 
-/// netcheck 快照（按窗口 label 分槽）
+/// netcheck 快照（槽键 = `snapshot::domain_key(label, "netcheck")`）
 pub(crate) static NETCHECK_SNAPSHOTS: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
 
 // ---- appearance.rs ----
@@ -152,3 +152,14 @@ pub(crate) static SYSTEM_DISK_CACHE: Mutex<Option<serde_json::Value>> = Mutex::n
 
 /// 快照（按窗口 label 分槽，对齐 Electron runtimesSnapshots 的 sender.id 分槽）
 pub(crate) static RUNTIMES_SNAPSHOTS: Mutex<Option<HashMap<String, Value>>> = Mutex::new(None);
+
+// ---- diskbench.rs ----
+
+/// 磁盘测速单飞位（v7.2 `R1d-M09`）：原生测速是独占读盘的长任务，并发两场时两份结果
+/// 都不可信、进度事件互相插；超时后工作线程又不会中断（本域文件头记录的限制），
+/// 所以第二场必须直接拒，不能靠「后跑的覆盖先跑的」。
+pub(crate) static DISKBENCH_RUNNING: AtomicBool = AtomicBool::new(false);
+/// 残留测试目录的世代号：让「超时后仍在写盘的那一场」与「本场的清理动作」不再共用
+/// 一个固定目录名（清理只针对自己那一代，不去动别人正在写的目录）。
+pub(crate) static DISKBENCH_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);

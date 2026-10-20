@@ -1499,6 +1499,162 @@ mod tests {
         assert!(g < a, "R1b-L08：来源校验必须先于参数语义判定");
     }
 
+    /// U-R1d（P1-W2）：扫描与度量链 20 条收口。
+    /// 前 3 条断言钉的是**由 P0/A1 前修、本单元只追认**的条目（M01/M10/L09），
+    /// 它们防的是「下一轮把已修的当没修再改一遍」；其余逐条点名本单元的修复对象。
+    #[test]
+    fn u_r1d_command_contracts() {
+        let fileclean = include_str!("commands/fileclean.rs");
+        let finder = include_str!("commands/finder.rs");
+        let netcheck = include_str!("commands/netcheck.rs");
+        let memory = include_str!("commands/memory.rs");
+        let realtime = include_str!("commands/realtime.rs");
+        let aidesc = include_str!("commands/aidesc.rs");
+        let diskbench = include_str!("commands/diskbench.rs");
+
+        // —— 追认（已由 C01 / A1 落地）——
+        assert_eq!(
+            fileclean.matches("protect::validate_mutation_target(").count(),
+            2,
+            "R1d-M01：fileclean 两条删除出口（delete-file / execute）都必须走 C01 共同判据"
+        );
+        assert!(
+            memory.contains("required_count(&data, \"failedCount\")"),
+            "R1d-M10：failedCount 缺失必须判失败（A1-M07 口径，不许退回 unwrap_or(0)）"
+        );
+        assert!(
+            aidesc.contains("save_baidu_usage(&u)?"),
+            "R1d-L09：日限额写失败必须向上冒泡（A1-M10），不能 `let _ =` 吞掉"
+        );
+
+        // —— 本单元改动 ——
+        assert!(
+            fileclean.contains("} else if !subdirs.is_empty() {")
+                && !fileclean.contains("if depth > MAX_DEPTH"),
+            "R1d-M02：深度截断的账必须记在入队处（旧那条 `depth > MAX_DEPTH` 恒假）"
+        );
+        assert!(
+            fileclean.contains("FILECLEAN_DELETE_MAX") && fileclean.contains("progressComplete"),
+            "R1d-L04/M08：删除批上限要显式命名；进度事件不许再用 MAX_FILES 冒充 total"
+        );
+        assert!(
+            finder.contains("\"droppedItems\"") && memory.contains("\"acceptedItems\""),
+            "R1d-M05：入参丢弃必须计数并回执，不能静默少处理"
+        );
+        assert!(
+            realtime.contains("REPORT_READ_MAX_BYTES"),
+            "R1d-M06：report-get 读之前必须过尺寸闸"
+        );
+        assert!(
+            netcheck.contains("snapshot_remove(label);") && netcheck.matches("snapshot_remove(label);").count() >= 2,
+            "R1d-M07：检测失败与 items 形状不合两条出口都要作废本窗快照（fail-closed）"
+        );
+        assert!(
+            diskbench.contains("DISKBENCH_RUNNING")
+                && diskbench.contains("compare_exchange(false, true")
+                && diskbench.contains("impl Drop for RunGuard"),
+            "R1d-M09：测速必须单飞，且释放走 RAII（早退路径也要放位）"
+        );
+        assert!(
+            diskbench.contains("Trim-DiskBench-{generation}"),
+            "R1d-M09：残留目录必须带世代号，超时后的野线程不许和本场清理共用一个名字"
+        );
+
+        // L05：长度闸统一走字符数唯一实现（只点名本单元文件，runtimes.rs 那处属 R1b 面）
+        for (name, src) in [("fileclean.rs", fileclean), ("netcheck.rs", netcheck), ("finder.rs", finder), ("aidesc.rs", aidesc)] {
+            assert!(
+                src.contains("exceeds_char_len("),
+                "R1d-L05：{name} 的长度闸必须走 engine::paths::exceeds_char_len（字符数唯一口径）"
+            );
+        }
+        assert!(
+            !fileclean.contains("file_path.len() > MAX_PATH_LEN")
+                && !netcheck.contains("action_id.len() > 40"),
+            "R1d-L05：UTF-8 字节数当长度用 ⇒ 非 ASCII 路径/id 被静默拒（两种口径不许并存）"
+        );
+        // L05 的第二半：扫描根长度闸量在规范化之前（`\\?\` 前缀白占 4 字符）
+        assert!(
+            fileclean.contains("exceeds_char_len(&scan_path.to_string_lossy(), MAX_PATH_LEN)"),
+            "R1d-L05：扫描根长度必须在 canonicalize **之前**判，verbatim 前缀不该吃预算"
+        );
+
+        // L06：域内四张槽表统一 domain_key（finder 今天已是 domain_key）
+        assert!(
+            fileclean.contains("snapshot::domain_key(label, ty)")
+                && netcheck.contains("snapshot::domain_key(label, NETCHECK_DOMAIN)")
+                && memory.contains("snapshot::domain_key(label, PROCESS_DOMAIN)")
+                && finder.contains("snapshot::domain_key(label, scan_type)"),
+            "R1d-L06：四张槽表的键构造只剩 snapshot::domain_key 一处实现（自建表仍在 N8 射程外，本条断言即该域唯一防线）"
+        );
+
+        // L07：过期报告回收条数进回执（save / list 两个触发点）
+        assert!(
+            realtime.matches("\"prunedReports\"").count() == 2
+                && realtime.contains("pub fn prune_reports() -> usize"),
+            "R1d-L07：prune 的回收条数不许消失在 `()` 里，两个调用点都要回执"
+        );
+
+        // L08：拼头前的控制字符闸（判据抽纯函数，post_json 是唯一拼头出口）
+        assert!(
+            aidesc.contains("fn header_value_blocked(s: &str)")
+                && aidesc.contains("header_value_blocked(k) || header_value_blocked(v)"),
+            "R1d-L08：header 名与值都要过 CR/LF/NUL 闸，且判据只能在拼头出口这一处"
+        );
+
+        // L10：空镜像名即拒，不依赖被调方复核
+        assert!(
+            memory.contains("known.process_name.trim().is_empty()"),
+            "R1d-L10：快照缺镜像名必须 fail-closed（native 侧那道比对对空名整体跳过）"
+        );
+
+        // L11：同步命令体里的磁盘 I/O / ShellExecuteW 迁进阻塞池
+        assert!(
+            !realtime.contains("pub fn realtime_report_delete")
+                && !realtime.contains("pub fn realtime_report_clear")
+                && !finder.contains("pub fn finder_delete_manifest")
+                && !finder.contains("pub fn finder_open_backup_dir"),
+            "R1d-L11：这四条曾以同步 fn 形态跑 read_dir/remove_file/ShellExecuteW，必须已改 async"
+        );
+        assert!(
+            realtime.contains("crate::engine::log::flush_sync();")
+                && finder.contains("delete_manifest::list_manifest_items(FINDER_MANIFEST_READ_MAX)"),
+            "R1d-L11：删除前刷盘 + 清单读取整段进阻塞池"
+        );
+
+        // L12：报告名不再只用毫秒（同刻撞名相互覆盖）；manifestPath 只有一种「没有」的写法
+        assert!(
+            realtime.contains("static REPORT_SEQ") && realtime.contains("fn report_name()"),
+            "R1d-L12：报告名必须带进程内序号，同毫秒两次 save 不能回同一个 name"
+        );
+        assert!(
+            finder.contains("let manifest_path_json = if manifest_path.is_empty()")
+                && finder.contains("\"manifestPath\": manifest_path_json"),
+            "R1d-L12：空清单要显式归一成 null（旧形态一处 `\"\"`、一处 null，消费口径两态）"
+        );
+
+        // L01/L02/L03：自然语言状态腐烂（同 M1-K01 家族）
+        assert!(
+            !memory.contains("进程列表走 `@@PROC@@` 前缀协议")
+                && !memory.contains("从脚本输出里取 `@@PROC@@` 前缀行"),
+            "R1d-L01：`@@PROC@@` 是 PowerShell 时代遗物，注释不许再把它写成现行解析口径"
+        );
+        assert!(
+            !fileclean.contains("档位维持 `APP_WINDOWS` 不变")
+                && !fileclean.contains("才永久删除"),
+            "R1d-L02：档位句与「回收站失败才永久删除」都与代码相反，不许留在注释里"
+        );
+        for cmd in [
+            "finder_ignore_folder",
+            "finder_ignore_list",
+            "finder_ignore_remove",
+        ] {
+            assert!(
+                finder.contains(&format!("commands::finder::{cmd}")),
+                "R1d-L03：文件头「需在 lib.rs 注册」清单必须覆盖本文件全部 {cmd}"
+            );
+        }
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

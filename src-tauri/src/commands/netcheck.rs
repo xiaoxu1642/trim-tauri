@@ -10,8 +10,8 @@
 //! - 只读采集单脚本单 JSON；修复动作是**白名单映射的固定命令模板**，
 //!   唯一可变的两个参数（网卡名 / 接口索引）**全部来自主进程自己的检测快照**，
 //!   渲染层只传 actionId（不接受渲染层拼接任何字符串）。
-//! - 快照按**窗口 label 分槽**（Electron 用模块级全局 `netcheckSnapshot`，多窗口会互相覆盖；
-//!   Tauri 侧按窗口隔离，行为更严格）。
+//! - 快照按**窗口 label + 域**分槽（Electron 用模块级全局 `netcheckSnapshot`，多窗口会互相覆盖；
+//!   Tauri 侧按窗口隔离，行为更严格；槽键唯一真源 `snapshot::domain_key`）。
 //! - 需管理员的动作：enable-adapter / start-dhcp / start-dnscache / reset-dns / reset-winhttp
 //!   （disable-user-proxy 不改系统配置，不判管理员）。
 //! - 修复后自动重跑一次 collect，把最新 items 一并回传（整页快照刷新）。
@@ -32,12 +32,24 @@ const NETCHECK_ADMIN_ACTIONS: &[&str] = &[
     "reset-winhttp",
 ];
 
-// ==================== 快照（按窗口 label 分槽） ====================
+// ==================== 快照（按窗口 label + 域分槽） ====================
 use crate::commands::state::NETCHECK_SNAPSHOTS;
+
+/// 本域槽键的唯一真源（v7.2 `R1d-L06`）：域内四张槽表原先两种分隔（本表裸 label、
+/// fileclean 自拼 `label:type`），统一走 `snapshot::domain_key` 后槽键构造只剩一处实现。
+/// 本域每窗只有一个域，裸 label 的基数今天是对的（无跨域顶账），改它是为了口径统一、
+/// 不是为了修 bug；`check-native-hygiene` 的 N8 只吃 `snapshot::{set,get,clear}` 调用点，
+/// 这张自建表仍在它射程外，键在位由 `u_r1d_command_contracts` 断言钉住。
+const NETCHECK_DOMAIN: &str = "netcheck";
+
+fn slot_key(label: &str) -> String {
+    crate::engine::snapshot::domain_key(label, NETCHECK_DOMAIN)
+}
 
 fn snapshot_store(label: &str, items: Value) {
     let mut g = NETCHECK_SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(HashMap::new).insert(label.to_string(), items);
+    g.get_or_insert_with(HashMap::new)
+        .insert(slot_key(label), items);
 }
 
 fn snapshot_get(label: &str) -> Option<Value> {
@@ -45,7 +57,19 @@ fn snapshot_get(label: &str) -> Option<Value> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .and_then(|m| m.get(label).cloned())
+        .and_then(|m| m.get(&slot_key(label)).cloned())
+}
+
+/// 让本窗快照失效（v7.2 `R1d-M07`）：清不掉旧账，下一次修复就按修复前那次检测的
+/// 网卡索引/适配器名执行——打错对象。
+fn snapshot_remove(label: &str) {
+    if let Some(g) = NETCHECK_SNAPSHOTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        g.remove(&slot_key(label));
+    }
 }
 
 /// 在本窗口快照中查找 actionId 对应的 repair 对象。
@@ -78,16 +102,28 @@ fn find_repair(label: &str, action_id: &str) -> Option<Value> {
 // ==================== 采集 / 修复 ====================
 /// 跑一次网络检测，并落到本窗口快照槽。
 /// S3：纯 Rust 原生，无 PS 回退。
+///
+/// v7.2 `R1d-M07`：旧写法只在 `items` 是数组时写槽，其它情况**原样留着旧槽** ⇒
+/// 采集失败/形状不对时，快照仍是「上一次成功检测」的账，而修复按快照取网卡索引与
+/// 适配器名——等于对着可能已经消失的网卡下命令。现在采不到就把本窗槽清掉（fail-closed），
+/// 下一次修复会被 `find_repair` 判「不在快照内」并要求重检，而不是静默用旧目标。
 fn run_netcheck_collect(label: &str) -> Result<Value, String> {
     match crate::engine::native::netcheck_status() {
         Ok(data) => {
-            if let Some(items) = data.get("items").filter(|v| v.is_array()).cloned() {
-                snapshot_store(label, items);
+            match data.get("items").filter(|v| v.is_array()).cloned() {
+                Some(items) => snapshot_store(label, items),
+                None => {
+                    snapshot_remove(label);
+                    log::write_log("warn", "网络检测回执缺 items 数组，本窗快照已作废");
+                }
             }
             log::write_log("info", "网络检测原生完成");
             Ok(data)
         }
-        Err(e) => Err(format!("原生检测失败: {e}")),
+        Err(e) => {
+            snapshot_remove(label);
+            Err(format!("原生检测失败: {e}"))
+        }
     }
 }
 
@@ -154,7 +190,8 @@ pub async fn netcheck_repair<R: tauri::Runtime>(window: WebviewWindow<R>, action
     // 先闸后参：来源校验必须在参数校验之前（与本域其它命令同口径）。
     // 先校验参数会把「谁在调」这层挡在门外，越权调用者先拿到参数是否合法的信号。
     let label = guard::guard(&window, guard::MAIN)?;
-    if action_id.is_empty() || action_id.len() > 40 {
+    // v7.2 `R1d-L05`：长度闸按字符数计（`len()` 数 UTF-8 字节，非 ASCII 动作 id 会更早被拒）。
+    if action_id.is_empty() || crate::engine::paths::exceeds_char_len(&action_id, 40) {
         return Ok(json!({ "success": false, "message": "参数不合法" }));
     }
 

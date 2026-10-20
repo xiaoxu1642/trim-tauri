@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
 use crate::engine::native::to_wide;
+use crate::engine::paths::exceeds_char_len;
 use crate::engine::{guard, log};
 use crate::security;
 
@@ -157,6 +158,13 @@ impl Drop for WinHttpHandle {
     }
 }
 
+/// v7.2 `R1d-L08`：header 名/值的控制字符判据（CR / LF / NUL 任一命中即拦）。
+/// 抽成纯函数是为了能在不建 WinHTTP 会话的单测里判红——`post_json` 那条出口本身
+/// 要联网，「没报错」证明不了闸在位。
+fn header_value_blocked(s: &str) -> bool {
+    s.contains(['\r', '\n', '\0'])
+}
+
 /// POST JSON（同步阻塞；调用方负责放到 spawn_blocking 里跑）
 ///
 /// 重定向由本函数**逐跳自己走**（审查 v2-M7，理由见下面 `WINHTTP_OPTION_REDIRECT_POLICY_NEVER`）：
@@ -191,6 +199,16 @@ fn post_json(
     let origin_host = target.host.clone();
     // 版本号取编译期常量：写死字面量就成了第 4 处需要手工同步的版本源
     let agent = to_wide(&format!("Trim/{}", env!("CARGO_PKG_VERSION")));
+    // v7.2 `R1d-L08`：拼头之前逐条过控制字符闸。
+    // 下面用 `\r\n` 把 header 段串成 WinHTTP 的 `WinHttpAddRequestHeaders` 文本，
+    // 值里只要含 CR/LF（或 NUL）就能凭空多出一条头、或截断头部把后续内容当请求体——
+    // 那些值来自设置页存的模型名/密钥（`models:save` 落配才可达，可达性低，但不是零）。
+    // 闸放在 `post_json` 这个**唯一拼头出口**，两条调用链（OpenAI 兼容 / 百度）共用一份判据。
+    for (k, v) in headers {
+        if header_value_blocked(k) || header_value_blocked(v) {
+            return Err(format!("请求头 {k} 含换行或空字符，已拒绝发送"));
+        }
+    }
     let header_text: String = headers
         .iter()
         .map(|(k, v)| format!("{k}: {v}\r\n"))
@@ -692,9 +710,10 @@ fn residue_detail_line(v: &Value) -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    // 单条上限：注册表路径再长也不该把整段预算吃光（超限截断，不留半截键名误导模型）
+    // 单条上限：注册表路径再长也不该把整段预算吃光（超限截断，不留半截键名误导模型）。
+    // v7.2 `R1d-L05`：长度按字符数计，走 `engine::paths::exceeds_char_len` 唯一口径。
     let line = bits.join(" · ");
-    if line.chars().count() > 400 {
+    if exceeds_char_len(&line, 400) {
         let cut: String = line.chars().take(400).collect();
         format!("{cut}…")
     } else {
@@ -1230,6 +1249,21 @@ mod tests {
         let line = residue_detail_line(&json!({ "target": long }));
         assert!(line.chars().count() <= 401, "超限没截断: {} 字", line.chars().count());
         assert!(!line.contains("TAIL-MARKER"), "截断后不该留半截内容");
+    }
+
+    /// v7.2 `R1d-L08`：拼头前的控制字符闸必须是**双向**判据（名字与值都过），
+    /// 且合法头不受影响。反向样本用「值里藏一条伪头」这个真实利用形态：
+    /// 攻击面是设置页存的模型名/密钥，含 CR/LF 就能多投一条 `X-Injected` 头。
+    /// 判据抽成 `header_value_blocked` 纯函数 ⇒ CR/LF/NUL 三条都判红、普通值放行，
+    /// 不必开网络连接也能证伪（把闸摘掉则第二条断言立刻红）。
+    #[test]
+    fn header_values_with_line_breaks_are_rejected() {
+        assert!(!header_value_blocked("sk-Abc123"), "普通密钥不该被闸拦下");
+        assert!(!header_value_blocked("Bearer sk-1"), "含空格合法");
+        assert!(header_value_blocked("a\r\nX-Injected: 1"), "CRLF 注入必须判红");
+        assert!(header_value_blocked("a\nX-Injected: 1"), "裸 LF 同样判红");
+        assert!(header_value_blocked("a\rX-Injected: 1"), "裸 CR 同样判红");
+        assert!(header_value_blocked("a\0b"), "NUL 截断同样判红");
     }
 
     /// 每个 AI_SCOPES 成员都必须有 `scope_meta` 的**具名分支**。
