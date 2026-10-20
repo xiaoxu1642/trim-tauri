@@ -21,6 +21,8 @@ const LOWER_LAYERS = [
   { dir: 'engine', label: 'engine/**' },
   { dir: 'security', label: 'security/**' },
   { dir: 'pwsh', label: 'pwsh/**' },
+  // T1a-L04：diag 也是下层模块（不依赖 commands），此前不在射程。
+  { dir: 'diag', label: 'diag/**' },
 ];
 
 const g = gate(import.meta.url);

@@ -104,6 +104,11 @@ const LABEL_HTML = {
 };
 
 let fail = 0;
+let skipped = 0;
+const skip = (label, detail = '') => {
+  console.log(`– SKIP ${label}${detail ? ' — ' + detail : ''}`);
+  skipped++;
+};
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
   if (!ok) fail++;
@@ -293,8 +298,13 @@ for (const page of PAGES) {
   check(r.warns.length === 0, `2. ${tag} 初始化期间没有「缺少元素/异常」告警`, r.warns.join(' | '));
   const missing = page.expectCalls.filter((c) => !r.calls.includes(c));
   check(missing.length === 0, `3. ${tag} 首屏确实发出了 ${page.expectCalls.length} 个请求`, missing.length ? `未发出：${missing.join('、')}` : r.calls.join(','));
-  const noHost = page.expectHosts.filter((h) => !r.bound.includes(h));
-  check(noHost.length === 0, `4. ${tag} 的委托宿主确实绑上了`, noHost.length ? `缺：${noHost.join('、')}` : page.expectHosts.join(','));
+  if (page.expectHosts.length === 0) {
+    // T1a-M03：0 对象不是「通过」——与抽件对照同形显式 SKIP 并计入汇总。
+    skip(`4. ${tag} 的委托宿主对照`, '本页无委托宿主对象（?. 直挂、无 on() 绑定），本节未校验');
+  } else {
+    const noHost = page.expectHosts.filter((h) => !r.bound.includes(h));
+    check(noHost.length === 0, `4. ${tag} 的委托宿主确实绑上了`, noHost.length ? `缺：${noHost.join('、')}` : page.expectHosts.join(','));
+  }
   if (VERBOSE) console.log(`     · calls=${JSON.stringify(r.calls)}\n     · bound=${JSON.stringify(r.bound)}`);
 
   // ---- 正向对照：注入一行指向不存在元素的绑定，必须被 1/3 判红 ----
@@ -318,7 +328,7 @@ for (const page of PAGES) {
       d.warns.length > 0 ? d.warns[0] : '抽件后没有任何告警',
     );
   } else {
-    console.log(`6. ${tag} SKIP 抽件对照（绑定不走 on() 降级，无 warn 通道可断）`);
+    skip(`6. ${tag} 抽件对照`, '绑定不走 on() 降级，无 warn 通道可断');
   }
 }
 
@@ -327,4 +337,4 @@ if (fail > 0) {
   console.error(`门禁失败：${fail} 项`);
   process.exit(1);
 }
-console.log('副窗初始化与首屏请求门禁全部通过');
+console.log(`副窗初始化与首屏请求门禁全部通过${skipped ? `（SKIP ${skipped} 节，未校验）` : ''}`);

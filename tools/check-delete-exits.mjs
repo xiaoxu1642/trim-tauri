@@ -26,6 +26,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { walkRs } from './lib/fs-walk.mjs';
+import { DELETE_APIS as DELETE_MARKERS } from './lib/delete-apis.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri');
 let fail = 0;
@@ -34,29 +35,9 @@ const check = (ok, label, detail = '') => {
   if (!ok) fail++;
 };
 
-// ---- 删除标记：Win32/std 删除 API + 引擎删除函数（新增引擎删除函数须同步此处） ----
-const DELETE_MARKERS = [
-  'MoveFileExW',          // PFRO 延迟删（pending-add）
-  'remove_dir_all',       // 递归删树
-  'remove_file',          // 单文件删
-  'DeleteFileW',
-  'SHFileOperation',
-  // G-4（2026-10-07）：回收站清空改 Shell API。清空回收站没有「一个具体路径」可判，
-  // 闸门形状与文件型出口不同（见 EXEMPTS 的登记理由），但**它必须出现在这张发现网里**
-  // —— 否则「新增破坏性出口默认红」对本次改动就是失明的。
-  'SHEmptyRecycleBinW',
-  'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW', 'RegDeleteKeyExW',
-  'remove_dir',          // 单目录删（B-9：此前漏登，只盯了递归删）
-  // 引擎删除函数（二跳委托的发现网）
-  'send_to_trash',        // trim_finder 回收站
-  'send_to_trash_os',     // trim_finder 回收站（OsStr 直传形态）
-  'remove_owned_font_copy', // fonts 自有副本删除 helper（v2-L4P-27：三道闸内聚于此）
-  'reg_key_remove',       // native::RegDeleteTree 封装
-  'reg_restore_delete',   // native::reg_value 恢复语义的删值
-  'startup_delete',       // native::启动项删除
-  // 2026-10-09（D3）：cm_remove 随右键删除链整链退役，marker 摘除（再新增同名删除函数
-  // 会被 check-delete-callsites 的基线棘轮接住）。
-];
+// ---- 删除标记：唯一真源 tools/lib/delete-apis.mjs（T1a-M07，与 callsites 共用） ----
+// 本门禁按**命令体**扫描（generate_handler! 派生），native-scanner 没有命令体；
+// 其 Shell 级删除出口由 check-delete-callsites 的同一名单覆盖，不在这里重复造网。
 
 // ---- 豁免注册制：命中删除标记但**不该**走 is_path_protected 的出口，逐条带理由 ----
 // 新增条目必须回答「为什么文件面 protect 不适用」；没有理由的豁免等于拆门禁。
@@ -93,6 +74,11 @@ const EXEMPTS = new Map([
   //      （cleanup:recycle-stats 现查，不是扫描占位行的 0）；
   //   ③ 条目 `domain == "special"` ⇒ 永不默认勾选（cleanup.js 的默认勾选分支显式跳过）。
   ['cleanup_empty_recycle_bin', '清空回收站（SHEmptyRecycleBinW）作用于系统回收站整体、无路径参数，protect 不适用；闸门=主窗档 + 渲染层红色高危确认（含条目数/体积）+ special 域默认不勾选'],
+  // T1a-M07：`reg_import_apply` 并入统一名单后暴露的两条还原命令——它们写回的是
+  // 已过四道闸的注册表 sections（严格解析 / 受保护面 / 封条核对 / HKLM 提权），
+  // 文件面 is_path_protected 对注册表键没有判定语义。
+  ['uninstall_reg_backup_restore', '注册表备份还原：reg_backup_restore_guards 四道闸，执行臂吃同一份 sections；文件面 protect 不适用'],
+  ['cleanup_reg_backup_restore', '同上——清理域与卸载域共用同一 reg_backup_restore_guards 公共件'],
 ]);
 
 // ---- 正向清单：审查矩阵逐列核过的文件型删除出口，protect 判定不许掉 ----
@@ -446,6 +432,9 @@ const POSITIVE_CONTROLS = (() => {
   // ② 真实调用仍然命中
   const sample2 = stripRustComments('fn y() { let _ = remove_file(p); }');
   checks.push(['真实调用仍命中', sample2.includes('remove_file')]);
+  // ②b T1a-L07：核心判据 bodyHasProtect 的两向样本（此前只有 tokenizer 对照）
+  checks.push(['删除体无 protect 判红', !bodyHasProtect('fn z() { remove_file(p); }')]);
+  checks.push(['删除体有 protect 放行', bodyHasProtect('fn z() { is_path_protected(p); remove_file(p); }')]);
   // ③ C01-a：四闸俱全的组合闸放行
   const goodValidator =
     'fn validate_mutation_target(p: &str) -> Result<(), String> { if is_path_protected(p) { return Err("x".into()); } if final_path_protected(p) { return Err("x".into()); } if is_system_namespace(p) { return Err("x".into()); } if is_reparse(&md) { return Err("x".into()); } Ok(()) }';

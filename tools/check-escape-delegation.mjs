@@ -19,10 +19,11 @@
 //
 // 用法：node tools/check-escape-delegation.mjs
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkFiles } from './lib/fs-walk.mjs';
 
 // 基线 = 2026-10-02 v2-L4P-16（E-2）重算：`function` 定义 29 + 箭头定义 1
 // （runtimes.js:9 `const escapeHtml = (s) => window.ds.esc(s)`，旧正则看不见）
@@ -30,7 +31,9 @@ import { REPO_ROOT } from './ps-origin.mjs';
 const BASELINE = 30;
 
 const dir = join(REPO_ROOT, 'src', 'scripts');
-const files = readdirSync(dir).filter((f) => f.endsWith('.js')).sort();
+// T1a-L04：递归（子目录里的本地 escape 重实现同样要管）。
+const files = walkFiles(dir, (f) => f.endsWith('.js'))
+  .map((p) => relative(dir, p).replace(/\\/g, '/')).sort();
 
 function stripBlockComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
@@ -46,6 +49,7 @@ const RE_DEF_FNEXPR = /(?:const|let|var)\s+(escapeHtml|escapeAttr)\s*=\s*functio
 let fail = 0;
 let count = 0;
 const badForm = [];
+const formCounts = { def: 0, arrow: 0, fnexpr: 0 };
 
 const delegated = (kind, body) =>
   new RegExp(`window\\.ds\\.${kind === 'escapeHtml' ? 'esc' : 'escAttr'}\\s*\\(`).test(body);
@@ -56,6 +60,7 @@ for (const f of files) {
   RE_DEF.lastIndex = 0;
   while ((m = RE_DEF.exec(text)) !== null) {
     count++;
+    formCounts.def++;
     if (!delegated(m[1], m[2].trim())) {
       const line = text.slice(0, m.index).split('\n').length;
       badForm.push(`${f}:${line} ${m[1]}`);
@@ -64,6 +69,7 @@ for (const f of files) {
   RE_DEF_ARROW.lastIndex = 0;
   while ((m = RE_DEF_ARROW.exec(text)) !== null) {
     count++;
+    formCounts.arrow++;
     if (!delegated(m[1], m[2])) {
       const line = text.slice(0, m.index).split('\n').length;
       badForm.push(`${f}:${line} ${m[1]}(箭头形)`);
@@ -72,6 +78,7 @@ for (const f of files) {
   RE_DEF_FNEXPR.lastIndex = 0;
   while ((m = RE_DEF_FNEXPR.exec(text)) !== null) {
     count++;
+    formCounts.fnexpr++;
     if (!delegated(m[1], m[2].trim())) {
       const line = text.slice(0, m.index).split('\n').length;
       badForm.push(`${f}:${line} ${m[1]}(函数表达式)`);
@@ -89,6 +96,18 @@ if (files.length === 0) {
 if (BASELINE > 0 && count === 0) {
   console.error(`✗ escape* 定义排查结果 0 条（基线 ${BASELINE}）⇒ 判定正则或语料失效，不允许判绿`);
   fail++;
+}
+// T1a-M04：每条形态各自的地板（旧判据只有总数 >0，主形态掉光仍能绿）。
+if (formCounts.def === 0) {
+  console.error('✗ RE_DEF 主形态 0 条 ⇒ 函数声明判定失明');
+  fail++;
+}
+if (formCounts.arrow === 0) {
+  console.error('✗ RE_DEF_ARROW 形态 0 条 ⇒ 箭头定义判定失明');
+  fail++;
+}
+if (formCounts.fnexpr === 0) {
+  console.log('– RE_DEF_FNEXPR 现算 0 条（刻意保留的形态位；新增函数表达式定义会立即被计数/判定）');
 }
 for (const b of badForm) {
   console.error(`✗ ${b} — 定义体不是 window.ds.esc/escAttr 纯委托（重实现会与真源字符集分叉）`);
@@ -159,7 +178,27 @@ const POSITIVE_CONTROLS = (() => {
     console.error('✗ 正向对照失败：非委托箭头定义未被识别——判定器已失效');
     process.exit(1);
   }
-  console.log('✓ 正向对照自检通过（非委托箭头定义可被抓到）');
+  // T1a-M04：主形态（RE_DEF）与函数表达式形态（RE_DEF_FNEXPR）各配两向样本。
+  const cases = [
+    { re: RE_DEF, code: 'function escapeHtml(s) { return s; }', bad: true, why: 'RE_DEF 重实现未判红' },
+    { re: RE_DEF, code: 'function escapeHtml(s) { return window.ds.esc(s); }', bad: false, why: 'RE_DEF 委托被误判' },
+    { re: RE_DEF_FNEXPR, code: 'const escapeAttr = function(s) { return s; };', bad: true, why: 'RE_DEF_FNEXPR 重实现未判红' },
+    { re: RE_DEF_FNEXPR, code: 'const escapeAttr = function(s) { return window.ds.escAttr(s); };', bad: false, why: 'RE_DEF_FNEXPR 委托被误判' },
+  ];
+  for (const c of cases) {
+    const re = new RegExp(c.re.source, 'g');
+    const m = re.exec(c.code);
+    if (!m) {
+      console.error(`✗ 正向对照失败：${c.why}（正则未命中合成样本）`);
+      process.exit(1);
+    }
+    const gotBad = !delegated(m[1], (m[2] || '').trim());
+    if (gotBad !== c.bad) {
+      console.error(`✗ 正向对照失败：${c.why}`);
+      process.exit(1);
+    }
+  }
+  console.log('✓ 正向对照自检通过（箭头 / 函数声明 / 函数表达式三形态，各两向）');
   return true;
 })();
 

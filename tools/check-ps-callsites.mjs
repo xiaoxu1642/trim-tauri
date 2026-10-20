@@ -205,16 +205,30 @@ function resolve(entries, pool) {
   return { problems, uncovered: pool.filter((h) => !used.has(h)) };
 }
 
+/** 秒数表达式：纯数字或 `a*b*c`（T1a-L05：C/F 两组共用这一份，禁止各写一套）。 */
+function parseSecsExpr(expr) {
+  const s = String(expr).replace(/\s/g, '');
+  if (/^\d+$/.test(s)) return Number(s);
+  if (/^\d+(?:\*\d+)+$/.test(s)) return s.split('*').reduce((a, b) => a * Number(b), 1);
+  return null;
+}
+
 /** 从实参文本解析秒数：`from_secs(N)` 直接命中；`from_secs(ID)` / 裸 `ID` 回同文件查 const */
 function resolveSecs(entry, argsText) {
-  const direct = argsText.match(/from_secs\(\s*(\d+)\s*\)/);
-  if (direct) return Number(direct[1]);
+  const direct = argsText.match(/from_secs\(\s*([^)]*)\)/);
+  if (direct) {
+    const n = parseSecsExpr(direct[1]);
+    if (n !== null) return n;
+  }
   const fileText = texts.get(entry.file) ?? '';
   for (const a of splitArgs(argsText)) {
     const id = a.match(/^([A-Z][A-Z0-9_]+)$/) ?? a.match(/^std::time::Duration::from_secs\(\s*([A-Z][A-Z0-9_]+)\s*\)$/);
     if (!id) continue;
-    const def = fileText.match(new RegExp(`const\\s+${id[1]}\\s*:[^=;]*?=\\s*std::time::Duration::from_secs\\(\\s*(\\d+)\\s*\\)`));
-    if (def) return Number(def[1]);
+    const def = fileText.match(new RegExp(`const\\s+${id[1]}\\s*:[^=;]*?=\\s*std::time::Duration::from_secs\\(([^)]*)\\)`));
+    if (def) {
+      const n = parseSecsExpr(def[1]);
+      if (n !== null) return n;
+    }
   }
   return null;
 }
@@ -356,7 +370,6 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"IMAGENAME eq DWMBlurGlass.exe"', reason: 'DWM 注入工具探测：tasklist 进程痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"/TN", "DWMBlurGlass_Extend"', reason: 'DWM 注入工具探测：schtasks 计划任务痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '"/Change", "/TN", &full, arg', reason: '维护任务启停：schtasks /Change', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
-  { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"winhttp", "show", "proxy"', reason: '网络体检：读 WinHTTP 代理态（只读探测）', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"interface", "set", "interface"', reason: '网络修复：启用网卡', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"interface", "ipv4", "set", "dnsservers"', reason: '网络修复：DNS 重置为自动获取', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"start", "Dhcp"', reason: '网络修复：启动 DHCP 服务（sc start）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
@@ -380,7 +393,7 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'r"\\Processor(_Total)\\% Processor Time", "-sc", "1"', reason: 'P1-01：typeperf 采样验证', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   // P1-04 探针：WaaSMedic PerformRemediation 的查询与触发
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：查 WaaSMedic 任务是否存在', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task, "/FO", "LIST"], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：查 WaaSMedic 任务是否处于禁用态（skip 前置，2026-10-11 补）', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/query", "/TN", task, "/XML"], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：读任务 XML 判是否禁用（语言无关，T1a/A6-L04）', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["/run", "/TN", task], MAINT_FAST_TIMEOUT', reason: 'P1-04 探针：触发 WaaSMedic 修复任务', timeoutConst: 'MAINT_FAST_TIMEOUT', secs: 60 },
   // C3 BCD 面板枚举：bcdedit /enum {current} + {globalsettings} 只读枚举（前端面板三态判定）
   // v6-K01（P0-2）：bcdedit 补进 PINNED 走硬钉，实参带 `?` 透传，锚点随行文更新
@@ -446,9 +459,9 @@ for (const e of TIMEOUT_SPAWN_SITES) {
       const def = allSrc.match(defRe);
       if (!def) tProblems.push(`${tc} 常量定义找不到（native.rs / systembin.rs）`);
       else {
-        const expr = def[1].replace(/\s/g, '');
-        const val = /^\d+$/.test(expr) ? Number(expr) : expr.split('*').reduce((a, b) => a * Number(b), 1);
-        if (val !== secs) tProblems.push(`${tc} 漂移：登记 ${secs}s，代码 ${val}s`);
+        const val = parseSecsExpr(def[1]);
+        if (val === null) tProblems.push(`${tc} 的秒数表达式无法解析：${def[1]}`);
+        else if (val !== secs) tProblems.push(`${tc} 漂移：登记 ${secs}s，代码 ${val}s`);
       }
     }
   }

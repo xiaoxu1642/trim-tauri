@@ -29,13 +29,16 @@
 //
 // 用法：node tools/check-confirm-danger.mjs
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkFiles } from './lib/fs-walk.mjs';
 
 const dir = join(REPO_ROOT, 'src', 'scripts');
-const files = readdirSync(dir).filter((f) => f.endsWith('.js')).sort();
+// T1a-L04：递归（scripts 子目录里的 JS 也纳入确认框判据）。
+const files = walkFiles(dir, (f) => f.endsWith('.js'))
+  .map((p) => relative(dir, p).replace(/\\/g, '/')).sort();
 
 // 扫描面地板（P0-4）：目录塌陷/改名 ⇒ files=[]，末尾「✓ 0 个脚本无对象形态调用」是空集假绿。
 // 下限 10 是现算值（48 个 .js）的明显下界——只拦整目录消失/几近塌陷，不拦正常增删。

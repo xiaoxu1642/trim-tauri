@@ -38,13 +38,20 @@ const DOCS_DIR = join(ROOT, 'docs');
 const AGENTS_MD = join(ROOT, 'AGENTS.md');
 const docsPresent = existsSync(DOCS_DIR);
 const agentsPresent = existsSync(AGENTS_MD);
+let skipped = 0;
 const docsFiles = new Set(
   docsPresent
     ? walkFiles(DOCS_DIR).map((p) => relative(ROOT, p).replace(/\\/g, '/').toLowerCase())
     : [],
 );
-if (!docsPresent) console.log('⚠ docs/ 不在本机（未跟踪的本机资料区）：docs 引用存在性**未校验**');
-if (!agentsPresent) console.log('⚠ AGENTS.md 不在本机（未跟踪）：1b 未执行');
+if (!docsPresent) {
+  skipped++;
+  console.log('⚠ docs/ 不在本机（未跟踪的本机资料区）：docs 引用存在性**未校验**');
+}
+if (!agentsPresent) {
+  skipped++;
+  console.log('⚠ AGENTS.md 不在本机（未跟踪）：1b 未执行');
+}
 
 // 引用形态：`docs/xxx.md` / `docs\xxx.md`（词边界内，排除 https:// 等 URL）
 const REF_RE = /(?<![:\w/\\])(docs[\\/][A-Za-z0-9\u4e00-\u9fa5._\-\\/\s]+?\.(?:md|json|mjs|js|ps1))(?![\w\\/])/g;
@@ -247,6 +254,7 @@ if (agentsPresent) {
     ghost.join('；'),
   );
 } else {
+  skipped++;
   console.log('⚠ AGENTS.md 不在本机（未跟踪）：3 白名单坐标存在性**未校验**（SKIP，不是通过）');
 }
 
@@ -273,6 +281,7 @@ if (agentsPresent) {
       withCmd < 10 ? '取数标记趋零 ⇒ U8 判据失明' : '',
     );
   } else {
+    skipped++;
     console.log('⚠ U8：《方法论》不在本机（未跟踪资料区）——表值取数命令检查**未校验**（SKIP，不是通过）');
   }
 }
@@ -281,4 +290,4 @@ if (fail > 0) {
   console.error('check-doc-refs: 存在漂移');
   process.exit(1);
 }
-console.log('check-doc-refs: 全部通过');
+console.log(`check-doc-refs: 全部通过${skipped ? `（SKIP ${skipped} 节，未校验）` : ''}`);

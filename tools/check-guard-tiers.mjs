@@ -125,11 +125,11 @@ const MUST_MAIN = [
   'optimizer_restore_frequency', // 2026-10-06：还原点弹窗「恢复默认创建频率」——写 HKLM，只从主窗弹窗触发
   'optimizer_restore_reg',
   'optimizer_run',
-  'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
+  'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（check-channel-map D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
   'optimizer_touch_recent', // E10 最近使用写：主窗档
-  'optimizer_bcd_enum', // C3 BCD 面板枚举：主窗永劫专项面板消费，档位 MAIN（同 optimizer_list_groups 的 D5 判据）
-  'optimizer_external_scan', // 账外核对（2026-10-15）：只读但只被主窗优化页消费，判 MAIN（同 D5 判据）
-  'optimizer_nara_panel', // C3 永劫专项面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同 optimizer_list_groups 的 D5 判据）
+  'optimizer_bcd_enum', // C3 BCD 面板枚举：主窗永劫专项面板消费，档位 MAIN（同 optimizer_list_groups 的 check-channel-map D5 判据）
+  'optimizer_external_scan', // 账外核对（2026-10-15）：只读但只被主窗优化页消费，判 MAIN（同 check-channel-map D5 判据）
+  'optimizer_nara_panel', // C3 永劫专项面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同 optimizer_list_groups 的 check-channel-map D5 判据）
   'optimizer_privacy_panel', // WinUtil 借鉴 V3 隐私自护面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同上）
   'optimizer_stale_dismiss', // 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗
   // 2026-10-07：外设优化由独立子窗改为**主窗应用内弹窗**（src/scripts/peripheral.js），
@@ -285,6 +285,20 @@ check(
   noGuard.length ? `缺校验 ${JSON.stringify(noGuard.map(([n, v]) => `${v.file}:${v.line} ${n}`))}` : '',
 );
 
+// T1a-L03：tiers 是从「#[tauri::command] 后 8 行内找 fn」抽出来的；抽不到会静默 continue。
+// 这里用 generate_handler! 的实数钉住 tiers.size（登记网不能比注册网小）。
+const handlerNames = (() => {
+  const src = readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf8');
+  const m = src.match(/generate_handler!\[([\s\S]*?)\]/);
+  if (!m) return new Set();
+  return new Set(m[1].split(',').map((s) => s.trim().split('::').pop()).filter(Boolean));
+})();
+check(
+  handlerNames.size > 0 && tiers.size === handlerNames.size,
+  `A1b. 档位台账条数 ⇄ generate_handler! 注册条数（${tiers.size} / ${handlerNames.size}）`,
+  tiers.size === handlerNames.size ? '' : `差 ${tiers.size - handlerNames.size} 条——名字抽取窗口失明或命令漏注册`,
+);
+
 // ---- A2. 手写判定豁免双向棘轮 ----
 // 统一 guard 会在拒绝时写日志（`engine/guard.rs` 的 `guard()` 注释），手写 `label() != "main"` 不会 ——
 // 静默拒绝会掩盖注入尝试，所以「不走统一 guard」必须是有意为之且被登记。
@@ -427,7 +441,7 @@ const MUST_READONLY = [
   'realtime_report_save', // 疑点：写实时报告
   'realtime_sample',
   // v0.5.0 残留扫描副窗（label `residue`）：关窗由副窗自己调，属放行全窗的只读档；
-  // 开窗只有主窗入口会调，落在 MUST_MAIN（D5 的判据：没有子窗调用点就不给放宽）
+  // 开窗只有主窗入口会调，落在 MUST_MAIN（check-channel-map D5 的判据：没有子窗调用点就不给放宽）
   'residue_close_window',
   'runtimes_collect',
   // P2-13：UI 偏好键读写迁后端真源（settings.json）。两命令都只碰 PREF_KEYS 白名单键，

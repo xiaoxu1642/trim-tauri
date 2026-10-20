@@ -32,13 +32,14 @@ const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 const SCANNER = join(REPO_ROOT, 'native-scanner', 'src');
 
 /**
- * 豁免清单（file:line → 理由）。line 以门禁自己的行号计算为准。
+ * 豁免清单（{file, anchor, why} → 理由）。A6/T1a-M09：禁用 file:行号键——
+ * 行号漂移后会把真实违例静默豁免。anchor 必须在本文件命中恰好 1 行。
  * 目标是保持为空；新增豁免必须写明为什么不违反 fail-closed。
  */
-const EXEMPT = {
-  // 空集：pwsh/mod.rs:452 的 `unwrap_or_else(|_| PathBuf::from("."))` 不含
+const EXEMPT = [
+  // 空集：pwsh/mod.rs 的 `unwrap_or_else(|_| PathBuf::from("."))` 不含
   // env::temp_dir，天然不触发断言 A（清扫槽只删不写）。
-};
+];
 
 /** 取 occurrence 起所在「语句」文本（只向后扫）。
  * 规则：括号深度计数（字符串字面量内容不计），停在深度 0 的 `;`；
@@ -85,7 +86,7 @@ console.log('=== fail-closed 口径门禁 ===\n');
 // ---- A. temp_script_dir() 的结果不得在同语句回退到 env::temp_dir() ----
 // v6-P2（T1 假绿扫尾）：A/B 判定器抽成纯函数（喂 text+rel+exempt），合成样本自检
 // 与真仓扫描共用同一实现——此前判据只有真仓扫描，判定器失灵即恒绿。
-function tempScriptDowngrades(text, rel, exempt = new Set()) {
+function tempScriptDowngrades(text, rel, exempt = []) {
   const hits = [];
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
@@ -108,13 +109,14 @@ function tempScriptDowngrades(text, rel, exempt = new Set()) {
     const stmt = statementFrom(text, m.index);
     if (!/env::temp_dir\(\)/.test(stmt)) continue;
     const ln = lnIdx + 1;
-    if (exempt.has(`${rel}:${ln}`)) continue;
+    const lineText = text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd);
+    if (exempt.some((e) => e.file === rel && lineText.includes(e.anchor))) continue;
     hits.push(`${rel}:${ln}`);
   }
   return hits;
 }
 /** B 组判定（纯函数）：路径转字符串禁 unwrap */
-function toStrUnwraps(text, rel, exempt = new Set()) {
+function toStrUnwraps(text, rel, exempt = []) {
   const hits = [];
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
@@ -134,7 +136,8 @@ function toStrUnwraps(text, rel, exempt = new Set()) {
     const lineEnd = text.indexOf('\n', lineStart);
     if (text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd).trimStart().startsWith('//')) continue;
     const ln = lnIdx + 1;
-    if (exempt.has(`${rel}:${ln}`)) continue;
+    const lineText = text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd);
+    if (exempt.some((e) => e.file === rel && lineText.includes(e.anchor))) continue;
     hits.push(`${rel}:${ln}`);
   }
   return hits;
@@ -158,10 +161,16 @@ function toStrUnwraps(text, rel, exempt = new Set()) {
   }
 }
 const aHits = [];
+// T1a-M09：anchor 型豁免必须真命中恰好 1 行，否则是死条目/歧义条目。
+for (const e of EXEMPT) {
+  const text = readFileSync(join(REPO_ROOT, e.file), 'utf8');
+  const n = text.split(/\r?\n/).filter((l) => l.includes(e.anchor)).length;
+  if (n !== 1) g.fail(`EXEMPT 条目 ${e.file} 的 anchor 命中 ${n} 行（应恰好 1）：${e.anchor}`);
+}
 for (const f of files) {
   const text = readFileSync(f, 'utf8');
   const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
-  aHits.push(...tempScriptDowngrades(text, rel, new Set(Object.keys(EXEMPT).map((k) => k))));
+  aHits.push(...tempScriptDowngrades(text, rel, EXEMPT));
 }
 check(
   aHits.length === 0,
@@ -174,7 +183,7 @@ const bHits = [];
 for (const f of files) {
   const text = readFileSync(f, 'utf8');
   const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
-  bHits.push(...toStrUnwraps(text, rel, new Set(Object.keys(EXEMPT).map((k) => k))));
+  bHits.push(...toStrUnwraps(text, rel, EXEMPT));
 }
 check(
   bHits.length === 0,

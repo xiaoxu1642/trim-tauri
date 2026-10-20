@@ -26,7 +26,7 @@ const REGISTRY = [
   { file: 'check-rule-schema-sync.mjs', reason: '契约表⇄Rust 装载侧：5 条判定器自检（干净样本 / token 注入 / 缺键查询 / 路径漂移 / 剥离失败）' },
   { file: 'check-elapsed-facts.mjs', manual: true, reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
   { file: 'check-optimizer-write-contract.mjs', reason: 'v6-K20：G 组 20 条样本喂**生产同一份**判据（judgeSideTableDiff / judgeStoreSeparation / judgeOptionKeys / judgeProvenanceCoverage / judgeDefaultItem；含 2 条干净样本防判据永远红）——生产与对照不再有两套实现，「全通过」日志已移到 G 组之后' },
-  { file: 'check-subwindow-init.mjs', reason: '副窗初始化：每页两条正向对照（注入指向不存在元素的绑定 + 抽掉一个真实 id），对照失效即红' },
+  { file: 'check-subwindow-init.mjs', reason: '副窗初始化：residue 页两条正向对照（注入坏绑定 + 抽掉真实 id）；models/process 页一条坏绑定对照，抽件对照因无 warn 通道显式 SKIP 并计入汇总' },
   { file: 'check-subwindow-css.mjs', reason: '子窗 CSS 按需：S1 样式表序列 / S2 引用面 / S3 层叠翻转 / S4 token 真源四组各配正反样本 + 解析器形状对照（@media 内层与花括号字符串）' },
   { file: 'check-a11y.mjs', reason: '可达性四断言：勾选框三属性 / aria-live 宿主 / data-tip 反 title / RM 归零覆盖面各配正反样本自检 + 三类扫描面地板' },
   { file: 'check-contrast.mjs', reason: 'F 组玻璃面 floor 断言配正反向样本自检（P3-2）；F1a~F6b 操作面登记台账七类反例（裸 --bg-card / 后级覆写 / 修饰类另写底 / 台账过期 / background-image 绕开 floor / 语义实底被中性降级 / 折射白名单含未登记类）+ F3b 锚点对照（抹掉 wantRefract 的按钮排除必判红）+ floor 栈合成对照（空栈与只垫 floor 必红、完整栈放行）；A1/B/C 与 token 表等既有组仍缺合成样本' },
@@ -34,7 +34,7 @@ const REGISTRY = [
   { file: 'check-confirm-danger.mjs', reason: 'confirmedHighRisk 字面量判定器配正反样本自检（P3-5）；调用形态两组仍靠扫描面塌陷地板兜底' },
   { file: 'check-idle-scripts.mjs', manual: true, reason: 'loadScript 三态断言配「违例 3 条全命中 / 合规放行」样本自检（P3-4）；守卫与启动名单两组仍靠扫描面地板兜底' },
   { file: 'check-comment-rot.mjs', manual: true, reason: '注释腐烂：三条断言各配正反向对照（不存在路径/章节号/数字必判红 + 真实样本不假红）；另经真破坏验证——关掉待修豁免表后 8 处真实腐烂全被抓到，exit 1' },
-  { file: 'check-review-units.mjs', reason: '审查单元台账：U1–U5 五条断言各配合成正反向样本（超上限/重复点名/未认领/台账塌缩必判红，干净表不假红）；另经真破坏验证——改名+降上限+抬地板三处同时判红，exit 1' },
+  { file: 'check-review-units.mjs', selfTestArgs: ['--self-test'], reason: '审查单元台账：U1–U5 五条断言各配合成正反向样本（超上限/重复点名/未认领/台账塌缩必判红，干净表不假红）；另经真破坏验证——改名+降上限+抬地板三处同时判红，exit 1' },
   // v3 P2-I 新增三条：判据抽出成纯函数后与自检共用同一实现（不在别处抄第二套判据）
   { file: 'check-artifact-size.mjs', reason: '产物体积棘轮：4 组合成样本自检（超 cap 必红 / 等值放行 / 缩小只提示 / 未登记角色必红）；产物缺失走 SKIP 不冒充通过，另经真破坏验证——压低基线 cap 后 exit 1 并点名差值' },
   { file: 'check-first-paint.mjs', reason: '首屏关键路径：F1 预算双向 + F2 defer 不变量 + F4 首屏∩按需，7 组合成样本自检；豁免表与对照双向咬合——清空豁免表会让对照②立即判红（真破坏 exit 1），不是只松真样本' },
@@ -136,8 +136,13 @@ for (const e of REGISTRY) {
     missingSelfTest.push(`${e.file}（${e.reason}）—— 剥注释后无任何 check/fail 型对照断言行`);
     continue;
   }
-  const r = spawnSync(process.execPath, [p], { cwd: ROOT, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [p, ...(e.selfTestArgs || [])], { cwd: ROOT, encoding: 'utf8' });
   if (r.status !== 0) brokenRun.push(`${e.file} 执行 exit ${r.status}`);
+  // T1a-M02：flag-gated 门禁必须按登记参数跑，并真的打印对照组行；
+  // 只 spawn 无参版本等于把「自检存在」当成「自检执行过」。
+  if (e.selfTestArgs && !/对照|自检|正向/.test(r.stdout || '')) {
+    brokenRun.push(`${e.file} 带 ${e.selfTestArgs.join(' ')} 执行后无对照/自检输出`);
+  }
 }
 check(
   missingSelfTest.length === 0,

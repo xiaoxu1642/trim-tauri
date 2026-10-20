@@ -63,7 +63,11 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 // 与材质无档 tooltip floor（main.css 首屏静态）——719,500 → 720,500（贴值留余 ~520 B）。
 // 两者都是审过的方案项（P0-7），且 ds.js 旧注释已按事实重写（cleanup/finder 早已是薄封装，
 // 此前注释称其「保留独立实现」是陈述过时），净增仍 ~490 B。
-const CAP_MAX = 720_500;
+// v7.2 P0/P1（2026-10-21）：错误态/降级回执 UI（.empty-state--error 等，P0-C06）约 2.1 KB，
+// U-A3 可达性（aria-live 宿主 / 焦点环 / 灯箱 alt+caption）约 1.5 KB——合计 724,117 B。
+// 720,500 → 725,000（贴值留余 ~880 B）。两项都经过 review；结构性建议不变：
+// main-pages.css 仍全量随首屏，后续新增应优先按页拆进按需清单，而非反复上调。
+const CAP_MAX = 725_000;
 const CAP_MIN = 400_000;
 // 豁免清单：允许不带 defer 的脚本（必须尽早执行，加 defer 反而破坏语义）
 const EXEMPT_NOT_DEFER = ['scripts/theme-boot.js'];

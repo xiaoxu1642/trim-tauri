@@ -499,6 +499,40 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'uninstall_appx_logo',
 ]);
 
+/** T1a-M08：D5 每条豁免必须有理由（按域归并；不属于任何域的条目会判红）。 */
+function d5Why(cmd) {
+  const rules = [
+    [/^app_/, '更新/使用说明入口只在主窗，子窗不发起外链或用量查询'],
+    [/^appearance_/, '外观设置只在主窗设置页，子窗不写外观'],
+    [/^bench_history_/, '磁盘测速历史只在主窗测速页展示与清理'],
+    [/^cleanup_/, '清理页面及其扫描/规则查询只在主窗，子窗无清理入口'],
+    [/^contextmenu_/, '右键菜单管理只在主窗'],
+    [/^finder_/, '文件查找只在主窗'],
+    [/^fonts_/, '字体管理只在主窗设置页'],
+    [/^log_/, '日志查看/导出只在主窗'],
+    [/^maintenance_/, '维护任务只在主窗维护页'],
+    [/^models_/, '模型范围设置只在主窗设置页'],
+    [/^optimizer_/, '优化中心只在主窗'],
+    [/^overview_/, '首页概览只在主窗'],
+    [/^paths_/, '路径配置只在主窗设置页'],
+    [/^realtime_/, '实时监控只在主窗'],
+    [/^startup_/, '启动项页只在主窗'],
+    [/^system_disk_/, '磁盘信息只在主窗'],
+  ];
+  for (const [re, why] of rules) if (re.test(cmd)) return why;
+  return {
+    device_scan: '设备扫描只在主窗设备页',
+    diag_dwm_conflict: 'DWM 诊断卡片只在主窗',
+    fileclean_scan: '文件清理扫描只在主窗',
+    memory_info: '内存信息只在主窗内存页',
+    netcheck_collect: '网络体检只在主窗',
+    process_manager_open_window: '主窗打开进程管理子窗的入口，子窗自身不调用',
+    runtimes_collect: '运行库检测只在主窗',
+    uninstall_appx_logo: 'Appx 图标只在主窗卸载列表消费',
+  }[cmd] || '';
+}
+const d5MissingWhy = [...D5_READONLY_WITHOUT_SUB_CONSUMER].filter((c) => d5Why(c).trim().length < 8);
+
   // ---- D5. 只读档必须真有子窗消费方（R1-1.2b 补，独立真源） ----
   //
   // 为什么需要这一组（判红实验实测出来的缺陷，不是我预想的）：
@@ -604,8 +638,13 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
           ? `MAIN 档却有子窗调用点（档位写松了，应下放）${JSON.stringify(mainWithSubConsumer)}`
           : '',
   );
+  check(
+    d5MissingWhy.length === 0,
+    `D5b. 豁免条目逐条有理由（${D5_READONLY_WITHOUT_SUB_CONSUMER.size} 条，理由 ≥8 字）`,
+    d5MissingWhy.length ? `缺理由：${JSON.stringify(d5MissingWhy)}` : '',
+  );
   if (readonlyGrantsNoOne.length) {
-    console.log(`  · D5 只读档「放宽给子窗但只有主窗在用」${readonlyGrantsNoOne.length} 条（已登记豁免，逐条理由见 D5_READONLY_WITHOUT_SUB_CONSUMER）`);
+    console.log(`  · D5 只读档「放宽给子窗但只有主窗在用」${readonlyGrantsNoOne.length} 条（已登记豁免，理由见 d5Why）`);
   }
   if (readonlyNoSubConsumer.length > readonlyGrantsNoOne.length) {
     console.log(`  · D5 另有 ${readonlyNoSubConsumer.length - readonlyGrantsNoOne.length} 条只读命令主窗也没调用点（纯孤儿，归 D4 组管）`);
@@ -779,6 +818,12 @@ for (const { rel, abs } of cmdFiles) {
   }
 }
 
+// T1a-L02：扫描面地板——JS_METHOD_RE 失效时 jsParams=0，旧断言会「✓ D6 0 条」。
+check(
+  jsParams.size >= 40,
+  `D6a. 带参通道扫描面地板（${jsParams.size} ≥ 40）`,
+  jsParams.size >= 40 ? '' : '带参通道解析塌缩——JS_METHOD_RE 或前端写法已漂移',
+);
 check(
   d6Bad.length === 0 && d6RustOnly.length === 0,
   `D6. 前端 invoke 参数名与 Rust 形参对拍（camel→snake 归一，带参通道 ${jsParams.size}）`,

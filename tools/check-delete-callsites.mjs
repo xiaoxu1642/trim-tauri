@@ -20,14 +20,13 @@ import { fileURLToPath } from 'node:url';
 
 import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
+import { DELETE_APIS } from './lib/delete-apis.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE_PATH = join(ROOT, 'tools', 'fixtures', 'delete-callsites-baseline.json');
 const SCAN_ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner', 'src')];
-const APIS = ['remove_file', 'remove_dir_all', 'remove_dir', 'DeleteFileW', 'RegDeleteTreeW', 'RegDeleteValueW', 'RegDeleteKeyW', 'RegDeleteKeyExW',
-  // P3-5（组 3，G-7）：reg 导入 = 「往回写」的破坏性出口（reg import 整键覆写），
-  // 调用点必须 review 后进基线 —— 与删除原语同一条棘轮。
-  'reg_import_apply'];
+// T1a-M07：名单唯一真源见 tools/lib/delete-apis.mjs（与 check-delete-exits 共用）。
+const APIS = DELETE_APIS;
 
 /** 剥 Rust 注释与字符串字面量（与 check-delete-exits 的 stripRustComments 同口径） */
 function stripRustComments(src) {

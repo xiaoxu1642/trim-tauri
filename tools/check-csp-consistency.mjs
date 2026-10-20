@@ -17,12 +17,15 @@
 // 用法：node tools/check-csp-consistency.mjs
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { walkFiles } from './lib/fs-walk.mjs';
 
 const SRC = join(REPO_ROOT, 'src');
-const htmls = readdirSync(SRC).filter((f) => f.endsWith('.html'));
+// T1a-L04：递归（子目录里的 HTML 也必须有 CSP）。
+const htmls = walkFiles(SRC, (n) => n.endsWith('.html'))
+  .map((p) => relative(SRC, p).replace(/\\/g, '/'));
 
 // frame-src 基线：唯一豁免是 index.html（网速页测速 iframe）。新子窗默认 0，
 // 想加 frame-src 必须先改这份登记 —— 让「放宽 iframe 来源」变成显式动作。

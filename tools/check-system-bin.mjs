@@ -260,11 +260,17 @@ function extractHitsFromText(text) {
           const idm = rest.match(/^&?\s*(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)/);
           if (idm) ident = idm[1];
         }
+        // T1a-M01：wrapped 实参的内层名也要抠出来，否则 B 组对象恒为 0。
+        let name = lit ? lit[1] : null;
+        if (wrapped) {
+          const inner = rest.match(/^[\w:]*system_tool\(\s*r?"([^"]+)"/);
+          if (inner) name = inner[1];
+        }
         if (lit || wrapped || ident) {
           out.push({
             line: ln + 1,
             raw: lineText.trim(),
-            name: lit ? lit[1] : null,
+            name,
             wrapped,
             ident,
             kind: token,
@@ -539,6 +545,10 @@ const SELF_SAMPLES = [
     expect: 'ok', why: '标准形态：PINNED 名经 system_tool 解析（放行）',
   },
   {
+    code: 'let out = quiet_cmd_timeout(system_tool("evil.exe"), &args, T);',
+    expect: 'fail', why: 'B 组回归：wrapped 内层名不在 PINNED 必须判红（旧实现对象恒为 0）',
+  },
+  {
     code: 'let out = quiet_cmd_timeout(exe, &args, T);',
     expect: 'ok', why: '变量形态（ident 提取，交 C 组两跳别名判定——本样本自身不判红）',
   },
@@ -552,15 +562,17 @@ for (const s of SELF_SAMPLES) {
   }
   const h = found[0];
   if (s.expect === 'fail') {
-    // 违规判定：裸字面量（非 wrapped、非豁免名单）或 wrapped 路径形态
+    // 违规判定：裸字面量（非 wrapped、非豁免名单）、wrapped 路径形态，
+    // 或 wrapped 内层名不在 PINNED（B 组同源判据）。
     const isBareLit = h.name !== null && !h.wrapped;
+    const isBadPinned = h.wrapped && h.name !== null && !PINNED.includes(h.name);
     const isPathShaped = h.wrapped
       && (() => {
         const m = h.argHead.match(/^system_tool\(\s*(r?)"((?:[^"\\]|\\.)*)"/);
         if (!m) return false;
         return /^[A-Za-z]:[\\/]/.test(m[2]) || m[2].startsWith('\\\\');
       })();
-    if (!isBareLit && !isPathShaped) {
+    if (!isBareLit && !isPathShaped && !isBadPinned) {
       selfFailures.push(`违规样本未被判定为违规: ${s.why}（argHead=${h.argHead.slice(0, 60)}）`);
     }
   } else if (h.name !== null && !h.wrapped && !ALLOW_BARE[h.name]) {

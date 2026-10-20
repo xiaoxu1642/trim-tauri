@@ -160,6 +160,27 @@ export function isKnownUnitId(id, unitIds) {
   return [...unitIds].some((u) => u.startsWith(id));
 }
 
+// ── U6：coverage 台账判定器（纯函数，喂 POSITIVE_CONTROLS 同一实现）──────────────
+function judgeCoverageLedger(ledger, knownIds, unitsWithClaims) {
+  const unknown = Object.keys(ledger).filter((k) => !knownIds.has(k));
+  const gaps = [];
+  const overclaims = [];
+  const noCommands = [];
+  for (const [id, rec] of Object.entries(ledger)) {
+    if (!knownIds.has(id)) continue;
+    const unit = unitsWithClaims.find((u) => u.id === id);
+    if (!unit) continue;
+    const covered = new Set(rec.covered ?? []);
+    const claimed = new Set(unit.claimed || []);
+    const missed = [...claimed].filter((f) => !covered.has(f));
+    if (missed.length) gaps.push(`${id} 漏 ${missed.length}：${missed.slice(0, 3).join(',')}`);
+    const extra = [...covered].filter((f) => !claimed.has(f));
+    if (extra.length) overclaims.push(`${id} over-claim ${extra.length}：${extra.slice(0, 3).join(',')}`);
+    if (!Array.isArray(rec.commandsRun) || rec.commandsRun.length === 0) noCommands.push(id);
+  }
+  return { unknown, gaps, overclaims, noCommands };
+}
+
 // ── 正向对照自检（§4.1：能判红 + 真样本不假红，两向都要）──────────────────────
 const POSITIVE_CONTROLS = [
   {
@@ -213,6 +234,30 @@ const POSITIVE_CONTROLS = [
       });
       return collapsed.out.length >= 3 && noBoundary.out.length === FLOOR.longitudinal
         && real.out.length === 0 && real.dupIds.length === 0;
+    },
+    expect: (v) => v === true,
+  },
+  {
+    label: 'U6 coverage：未知单元 / 漏读 / over-claim / 空命令必判红，干净台账放行',
+    run: () => {
+      const known = new Set(['T1a']);
+      const unitsWithClaims = [{ id: 'T1a', claimed: ['a.mjs', 'b.mjs'] }];
+      const bad = judgeCoverageLedger(
+        { T1a: { covered: ['a.mjs'], commandsRun: ['x'] }, R99: { covered: [], commandsRun: ['x'] } },
+        known, unitsWithClaims,
+      );
+      const over = judgeCoverageLedger(
+        { T1a: { covered: ['a.mjs', 'b.mjs', 'ghost.mjs'], commandsRun: [] } },
+        known, unitsWithClaims,
+      );
+      const clean = judgeCoverageLedger(
+        { T1a: { covered: ['a.mjs', 'b.mjs'], commandsRun: ['x'] } },
+        known, unitsWithClaims,
+      );
+      return bad.unknown.length === 1 && bad.gaps.length === 1
+        && over.overclaims.length === 1 && over.noCommands.length === 1
+        && clean.unknown.length === 0 && clean.gaps.length === 0
+        && clean.overclaims.length === 0 && clean.noCommands.length === 0;
     },
     expect: (v) => v === true,
   },
@@ -370,18 +415,18 @@ if (!covPath) {
   skip('U6 分报告 coverage 对账', `--coverage 指向的文件不存在：${covPath}，本节未校验`);
 } else {
   const ledger = JSON.parse(readFileSync(covPath, 'utf8'));
-  const unknown = Object.keys(ledger).filter((k) => !floor.ids.has(k));
-  const gaps = [];
-  for (const [id, rec] of Object.entries(ledger)) {
-    if (!floor.ids.has(id)) continue;
-    const unit = unitsWithClaims.find((u) => u.id === id);
-    const covered = new Set(rec.covered ?? []);
-    const missed = unit.claimed.filter((f) => !covered.has(f));
-    if (missed.length) gaps.push(`${id} 漏 ${missed.length}：${missed.slice(0, 3).join(',')}`);
-  }
-  check(unknown.length === 0 && gaps.length === 0,
+  const { unknown, gaps, overclaims, noCommands } =
+    judgeCoverageLedger(ledger, floor.ids, unitsWithClaims);
+  check(
+    unknown.length === 0 && gaps.length === 0 && overclaims.length === 0 && noCommands.length === 0,
     `U6 coverage 台账对拍（${Object.keys(ledger).length} 份）`,
-    [...unknown.map((u) => `台账里出现未知单元 ${u}`), ...gaps].join(' | '));
+    [
+      ...unknown.map((u) => `台账里出现未知单元 ${u}`),
+      ...gaps,
+      ...overclaims.map((o) => `台账 covered 超出本单元认领面：${o}`),
+      ...noCommands.map((id) => `${id} 的 commandsRun 为空（没跑命令的台账不算取证）`),
+    ].join(' | '),
+  );
 }
 
 const docPath = argOf('--doc');

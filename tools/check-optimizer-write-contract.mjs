@@ -569,6 +569,12 @@ check(
 // ---- C. expectStart 必须是合法 win32 启动类型 ----
 // R0-a踩过凭记忆写错（把 SERVICE_DEMAND_START 记成 2，真值 3），所以这里列全枚举。
 const LEGAL_START = new Set([2, 3, 4]);
+// 判据抽成纯函数：C 组与 G 组样本喂同一份实现（T1a-M05）。
+function judgeExpectStart(expectStart) {
+  return LEGAL_START.has(expectStart)
+    ? []
+    : [`expectStart=${expectStart} 不是合法启动类型（AUTO=2/DEMAND=3/DISABLED=4）`];
+}
 const startProblems = [];
 let nGroups = 0;
 let nAsserts = 0;
@@ -576,9 +582,7 @@ for (const [id, spec] of Object.entries(items)) {
   for (const g of spec.groups || []) {
     nGroups++;
     nAsserts += (g.services || []).length;
-    if (!LEGAL_START.has(g.expectStart)) {
-      startProblems.push(`${id}: expectStart=${g.expectStart} 不是合法启动类型（AUTO=2/DEMAND=3/DISABLED=4）`);
-    }
+    for (const p of judgeExpectStart(g.expectStart)) startProblems.push(`${id}: ${p}`);
   }
 }
 check(
@@ -736,17 +740,22 @@ check(
 );
 
 // ---- A6. 签名 sidecar 存在且 alg 正确 ----
-const a6Problems = [];
+// 判据抽成纯函数：A6 组与 G 组样本喂同一份实现（T1a-M05）。
+function judgeSidecar(sidecar) {
+  if (!sidecar || typeof sidecar !== 'object') return ['签名 sidecar 缺失或不是对象'];
+  const problems = [];
+  if (sidecar.alg !== 'ed25519') problems.push(`sidecar alg=${sidecar.alg}，应为 ed25519`);
+  if (!sidecar.sig || String(sidecar.sig).length < 80) problems.push('sidecar 的 sig 字段缺失或过短');
+  return problems;
+}
 let sidecar = null;
+let sidecarReadError = null;
 try {
   sidecar = JSON.parse(read('src-tauri', 'data', 'optimizer-runtime.json.sig.json'));
 } catch (e) {
-  a6Problems.push(`读不到 optimizer-runtime.json.sig.json（${e.message}）—— 优化目录必须带签名（M4）`);
+  sidecarReadError = `读不到 optimizer-runtime.json.sig.json（${e.message}）—— 优化目录必须带签名（M4）`;
 }
-if (sidecar) {
-  if (sidecar.alg !== 'ed25519') a6Problems.push(`sidecar alg=${sidecar.alg}，应为 ed25519`);
-  if (!sidecar.sig || String(sidecar.sig).length < 80) a6Problems.push('sidecar 的 sig 字段缺失或过短');
-}
+const a6Problems = sidecarReadError ? [sidecarReadError] : judgeSidecar(sidecar);
 check(
   a6Problems.length === 0,
   'A6. 优化目录签名 sidecar 在位且 alg=ed25519',
@@ -871,7 +880,7 @@ check(
     },
     {
       name: 'C 非法启动类型',
-      fn: () => (LEGAL_START.has(7) ? [] : ['非法']),
+      fn: () => judgeExpectStart(7),
       expectHit: true,
     },
     {
@@ -917,7 +926,19 @@ check(
     ],
     [
       'A6 sidecar 非对象',
-      (() => { try { const s = JSON.parse('{bad'); return s.alg !== 'ed25519'; } catch { return true; } })(),
+      judgeSidecar(null).length > 0,
+      true,
+    ],
+    [
+      'A6 sidecar 合法应放行',
+      judgeSidecar({ alg: 'ed25519', sig: 'x'.repeat(80) }).length === 0,
+      true,
+    ],
+    // A2 的两个提取器（生产判据的另一半）此前完全没有样本（T1a-M05）。
+    ['A2 字节字面量提取', binaryLiterals('[byte[]](0x01,0x0A)')[0] === '010a', true],
+    [
+      'A2 注册表根提取',
+      rootsIn('$p = "HKLM:\\SYSTEM\\X"').has('HKLM\\SYSTEM\\X'),
       true,
     ],
   ];
