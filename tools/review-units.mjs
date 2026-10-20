@@ -151,11 +151,33 @@ export const UNITS = [
     gates: ['check-delete-exits', 'check-guard-tiers'],
   },
   {
-    id: 'R3', owner: 'sub', name: 'commands/optimizer',
-    dirs: [{ dir: `${C}/optimizer` }],
-    contract: 'apply / overview / backup_restore / 写入契约测试',
-    boundary: '灰态三源并集与写入坐标侧表是本单元专属红线',
+    // v7.2-C04 重切：optimizer 整目录 8148 行被新增的方向分流/契约测试顶破 U2 上限
+    //（8000），按本门禁自述的口径「优先按页面/执行链」拆成执行链与目录面板两单元。
+    id: 'R3', owner: 'sub', name: 'commands/optimizer 执行链（组装/回读/值级还原）',
+    files: [
+      'src-tauri/src/commands/optimizer/apply.rs',
+      'src-tauri/src/commands/optimizer/backup_restore.rs',
+      'src-tauri/src/commands/optimizer/subitems.rs',
+      'src-tauri/src/commands/optimizer/restore_point.rs',
+    ],
+    contract: 'assemble_steps 方向分流 / preflight 三态 / verify_applied 与值级还原回写回读',
+    boundary: '灰态三源并集与写入坐标侧表是本单元专属红线；restore 方向分流必须在组装链最前（R3-K01）',
     gates: ['check-optimizer-write-contract', 'check-optimizer-dynamic'],
+  },
+  {
+    id: 'R3b', owner: 'sub', name: 'commands/optimizer 目录与面板（枚举/聚合/契约测试）',
+    files: [
+      'src-tauri/src/commands/optimizer/overview.rs',
+      'src-tauri/src/commands/optimizer/catalog.rs',
+      'src-tauri/src/commands/optimizer/advice.rs',
+      'src-tauri/src/commands/optimizer/bcd.rs',
+      'src-tauri/src/commands/optimizer/external_scan.rs',
+      'src-tauri/src/commands/optimizer/contract_tests.rs',
+      'src-tauri/src/commands/optimizer/mod.rs',
+    ],
+    contract: '目录装载与验签 / 面板聚合 / 批量预检出口 / 跨面契约回归网',
+    boundary: '批量预检 rejected[].reason 与单条执行同源（preflight_reason 单点，R3-K01 后含 NoRestorePath）',
+    gates: ['check-optimizer-write-contract'],
   },
   {
     id: 'R4', owner: 'sub', name: 'commands/cleanup',

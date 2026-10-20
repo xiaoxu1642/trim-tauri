@@ -270,7 +270,27 @@ pub fn record_pending_scoped(
                 "verifiedAt": Value::Null
             });
             if let Some(list) = picked.filter(|p| !p.is_empty()) {
-                rec["picked"] = json!(list);
+                // R3-M06（v7.2 C04）：picked 记「净变化并集」而非「最后一次选择」。
+                // 批量项先勾子集 A 再勾子集 B，两批写入都真实发生；旧实现整条 rec
+                // 重建把 picked 覆盖成 B ⇒ A 的目标从此退出回读断言面（scope_checks
+                // 只按 picked 收窄）。与 2026-10-09 用户裁定的「计数按净变化集合」
+                // 同一口径。全选（None/空）仍删键 = 作用域回到全量（旧注释语义不变）。
+                let mut union: Vec<String> = items
+                    .get(id)
+                    .and_then(|old| old.get("picked"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for x in list {
+                    if !union.iter().any(|u| u == x) {
+                        union.push(x.clone());
+                    }
+                }
+                rec["picked"] = json!(union);
             }
             items.insert(id.into(), rec);
         }
@@ -708,5 +728,44 @@ mod tests {
         }
         // 空批次：不写盘也算成功（「没有要删的」≠「写失败」）
         assert!(st::remove_many(&[]), "空批次必须视为成功");
+    }
+
+    /// R3-M06（v7.2 C04）判红点：picked 记「净变化并集」——先勾 A 再勾 B，账本
+    /// 必须同时罩住两批目标（旧实现整条 rec 重建覆盖成 B ⇒ A 退出回读断言面）；
+    /// 全选（None/空）仍删键回全量作用域。破坏形态 = 恢复「picked = 本次选择」
+    /// 直写 ⇒ 中段的并集断言红。
+    #[test]
+    fn m06_picked_净变化并集() {
+        let _guard = _state_guard();
+        use crate::engine::optimization_state as st;
+        let id = "__m06_probe";
+        // 清场 + 只看自己造的条目（本组用例跑真实状态文件，见 mod 头注释）
+        let _ = st::remove(id);
+        let a: Vec<String> = ["svcA", "svcB"].iter().map(|s| s.to_string()).collect();
+        let b: Vec<String> = ["svcB", "svcC"].iter().map(|s| s.to_string()).collect();
+        assert!(st::record_pending_scoped(id, "m06", &["service".into()], Some(&a)));
+        assert!(st::record_pending_scoped(id, "m06", &["service".into()], Some(&b)));
+        let picked: Vec<String> = st::get(id)
+            .and_then(|r| r.get("picked").and_then(|v| v.as_array()).cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        for name in ["svcA", "svcB", "svcC"] {
+            assert!(
+                picked.iter().any(|x| x == name),
+                "picked 必须是两批的并集，缺 {name}：{picked:?}"
+            );
+        }
+        assert_eq!(picked.len(), 3, "并集不得产生重复项：{picked:?}");
+        // 全选重置：picked 键删除，作用域回全量
+        assert!(st::record_pending_scoped(id, "m06", &["service".into()], None));
+        let rec = st::get(id).expect("条目应存在");
+        assert!(
+            rec.get("picked").is_none(),
+            "全选必须删掉 picked 键（残留会把全选判定收窄）：{:?}",
+            rec.get("picked")
+        );
+        let _ = st::remove(id);
     }
 }

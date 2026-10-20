@@ -511,6 +511,10 @@ pub(super) enum PreflightReject {
     /// 目标状态已满足（2026-10-11 裁定 7：Defender 已卸载/已禁用时再执行只会往
     /// 缺失的服务键写幽灵 Start、给用户假动作）。String 是给用户看的中文原因。
     AlreadySatisfied(String),
+    /// R3-K01（v7.2 C04）：restore 请求但目录项没有可执行的 restore 段。旧实现
+    /// 对这类项在批量预检里全回 runnable（`if let Some(arr)` 跳过缺失键），
+    /// 用户点了才拿到失败。
+    NoRestorePath,
 }
 
 impl PreflightReject {
@@ -522,6 +526,7 @@ impl PreflightReject {
             Self::NeedHighRiskConfirm => "需高危确认".to_string(),
             Self::UnsupportedStep(m) => format!("本机不支持（{m}）"),
             Self::AlreadySatisfied(m) => m.clone(),
+            Self::NoRestorePath => "该优化项暂不支持一键还原，请手动恢复或使用系统还原点".to_string(),
         }
     }
 }
@@ -563,6 +568,19 @@ pub(super) fn preflight_reason(
     // 步骤不可执行预检：只查 restore 侧还是正向侧，按方向取对应数组。
     // 判据复用 [`step_exec_mode`]，那是 execMode 的唯一真源 —— 预检自己判一次
     // 「这一步能不能编译」就是第二份口径。
+    // R3-K01（v7.2 C04）：还原方向必须先有可还原步骤——旧实现 restore=true 时
+    // 对无 restore 段的项直接放行（缺失键被 `if let` 跳过），批量还原预检对
+    // 23 个 restoreAvailable=false 的项全回 runnable。
+    if restore {
+        let has_restore = opt
+            .get("restore")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if !has_restore {
+            return Some(PreflightReject::NoRestorePath);
+        }
+    }
     let steps_key = if restore { "restore" } else { "steps" };
     if let Some(arr) = opt.get(steps_key).and_then(|v| v.as_array()) {
         if !arr.is_empty() {
@@ -576,6 +594,136 @@ pub(super) fn preflight_reason(
         }
     }
     None
+}
+
+/// 组装执行步骤链 + 生效子集（R3-K01，v7.2 C04）。
+///
+/// **方向单次分流**：`restore` 判据放在组装链**最前**。旧链里 `is_dynamic` 分支
+/// 无条件走 `memory_steps` / `wu_pause_steps`（`{restore:true}` 还原请求会写 HKLM /
+/// 改服务）、`include_store` 分支不看 `p.restore`（`{restore:true, includeStore:true}`
+/// 取正向 65 服务步再追加商店 5 项）——还原请求可以执行正向写入，还免掉红色确认
+///（preflight 对 restore 方向豁免高危确认，审查 2026-09-27 H1 的善意被参数组合借道）。
+/// 修复后 restore 请求只认 `restore` 数组：`includeStore` / `pickedTargets` /
+/// 动态参数在还原方向一概不生效；无可还原步骤的项由 preflight（NoRestorePath）
+/// 与本函数双处同拒，判据同一份。
+///
+/// 抽成纯函数是给**方向串台契约测试**留判据面（R3-U01 取证结论：「apply/restore
+/// 方向串台」在旧形态下无法判红——不抽出目录级枚举判据，契约测试无从谈起）。
+///
+/// `Err(message)` = 组装即拒（无可还原步骤 / 动态参数缺失或越界），调用方直接回执。
+pub(super) fn assemble_steps(
+    opt: &Value,
+    option_id: &str,
+    p: &RunParams,
+) -> Result<(Vec<Value>, Option<Vec<String>>), String> {
+    let is_dynamic = opt.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // includeStore 与子集选择是**正交**参数：早期实现里子集分支优先，把 includeStore
+    // 整个吞掉（勾了商店段却不写、回执仍成功）。把商店服务并进子集清单，让
+    // `rebuild_steps` 一并重建；全选路径保持原样（append 在后面的分支里）。
+    let picked_targets_effective: Option<Vec<String>> =
+        match (p.picked_targets.as_ref(), option_id, p.include_store) {
+            (Some(list), "tf_svc_bulk", true) if !list.is_empty() => {
+                let mut v = list.clone();
+                for s in STORE_SERVICES {
+                    if !v.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                        v.push((*s).to_string());
+                    }
+                }
+                Some(v)
+            }
+            _ => p.picked_targets.clone(),
+        };
+
+    // 组装步骤。restore 在最前：还原请求不接受任何正向参数的改道。
+    let steps: Vec<Value> = if p.restore {
+        let Some(restore) = opt.get("restore").and_then(|v| v.as_array()) else {
+            log::write_log("warn", &format!("优化项 {option_id} 无还原步骤定义，已拒绝还原请求"));
+            return Err("该优化项暂不支持一键还原，请手动恢复或使用系统还原点".into());
+        };
+        if restore.is_empty() {
+            return Err("该优化项暂不支持一键还原，请手动恢复或使用系统还原点".into());
+        }
+        restore.clone()
+    } else if is_dynamic {
+        if option_id == "svc_mem_gb" {
+            memory_steps(&p.gb.clone().unwrap_or(Value::Null))
+        } else if option_id == "perf_wu_pause" {
+            let Some(d) = p.days else {
+                return Err("缺少暂停天数参数".into());
+            };
+            if !d.is_finite() {
+                return Err("缺少暂停天数参数".into());
+            }
+            let days = d.trunc() as i64;
+            if !(1..=WU_PAUSE_MAX_DAYS).contains(&days) {
+                return Err(format!("暂停天数需在 1~{WU_PAUSE_MAX_DAYS} 天之间"));
+            }
+            wu_pause_steps(days)
+        } else {
+            Vec::new()
+        }
+    } else if super::subitems::supports_subitems(option_id) {
+        // 批量项的子集执行（2026-10-03）。优先级高于 includeStore 分支：
+        // 勾了子集就是「我只要这几个」，此时再自动追加商店 5 项是越权。
+        // 勾了商店（include_store）却被子集分支吃掉的话，用户会拿到一份
+        // 「没禁成商店服务却报了成功」的假回执。
+        // （restore 已在最前分流，本分支只会被正向请求走到。）
+        match super::subitems::rebuild_steps(
+            option_id,
+            picked_targets_effective.as_deref(),
+            p.picked_extras.as_deref(),
+        ) {
+            Some(rebuilt) if rebuilt.is_empty() => {
+                return Err("一个目标都没勾选，请至少勾选一项再执行".into());
+            }
+            Some(rebuilt) if option_id == "tf_svc_bulk" && p.include_store => {
+                // R3-M02（v4）与 R3-M03 同批：子集分支同样要追加商店服务 ——
+                // picked_targets_effective 虽已并入 5 个商店服务名，但 rebuild_steps 按侧表
+                // 做交集会把它们**静默滤掉**（侧表 65 条里没有这五个名字），于是「用户经
+                // 弹窗确认过的写入没有发生、回执仍为成功」。基线侧（option_targets）已同步
+                // 纳入这 5 个 Start，两处必须同批上线，单修一处会把危害升级为「写了但还原不回来」。
+                svc_bulk_append_store(rebuilt)
+            }
+            Some(rebuilt) => rebuilt,
+            // None = 全选 ⇒ 走下面原有的原脚本路径（含 includeStore 的条件追加）
+            None if option_id == "tf_svc_bulk" && p.include_store => {
+                let base = opt
+                    .get("steps")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                svc_bulk_append_store(base)
+            }
+            None => opt.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+        }
+    } else if option_id == "tf_svc_bulk" && p.include_store {
+        let base = opt
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        svc_bulk_append_store(base)
+    } else {
+        opt.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+    };
+    Ok((steps, picked_targets_effective))
+}
+
+/// R3-M04（v7.2 C04）：@@RECYCLE@@ 计数的回执/记账摘要。`None` = 本轮没有回收站
+/// 动作，不附加任何文案。抽成纯函数是给「失败时计数不消失」留判据面。
+pub(super) fn recycle_summary(rec_ok: i64, rec_fail: i64, rec_malformed: i64) -> Option<String> {
+    if rec_ok == 0 && rec_fail == 0 && rec_malformed == 0 {
+        return None;
+    }
+    let mut s = format!("另有 {rec_ok} 个目录已移入回收站");
+    if rec_fail > 0 {
+        s.push_str(&format!("，{rec_fail} 个移入失败"));
+    }
+    if rec_malformed > 0 {
+        s.push_str(&format!("，{rec_malformed} 条协议畸形行已跳过"));
+    }
+    Some(s)
 }
 
 #[tauri::command]
@@ -632,105 +780,27 @@ pub async fn optimizer_run<R: Runtime>(
             log::write_log("info", &format!("优化项目标状态已满足，跳过执行: {option_id} ({reason})"));
             return json!({ "success": false, "alreadySatisfied": true, "message": reason });
         }
+        // R3-K01（v7.2 C04）：无可还原步骤的还原请求点名拒因（与批量预检同一份判据）
+        Some(r @ PreflightReject::NoRestorePath) => {
+            log::write_log("warn", &format!("优化项无可还原步骤，已拒绝还原请求: {option_id}"));
+            return json!({ "success": false, "message": r.message() });
+        }
         _ => {}
     }
 
-    let is_dynamic = opt.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false);
+    // （is_dynamic 已收进 assemble_steps——组装链单次分流后命令体不再需要它）
     let title = super::subitems::display_title(
         &option_id,
         opt.get("title").and_then(|v| v.as_str()).unwrap_or(&option_id),
     );
 
-    // includeStore 与子集选择是**正交**参数：早期实现里子集分支优先，把 includeStore
-    // 整个吞掉（勾了商店段却不写、回执仍成功）。把商店服务并进子集清单，让
-    // `rebuild_steps` 一并重建；全选路径保持原样（append 在后面的分支里）。
-    let picked_targets_effective: Option<Vec<String>> =
-        match (p.picked_targets.as_ref(), option_id.as_str(), p.include_store) {
-            (Some(list), "tf_svc_bulk", true) if !list.is_empty() => {
-                let mut v = list.clone();
-                for s in STORE_SERVICES {
-                    if !v.iter().any(|x| x.eq_ignore_ascii_case(s)) {
-                        v.push((*s).to_string());
-                    }
-                }
-                Some(v)
-            }
-            _ => p.picked_targets.clone(),
-        };
-
-    // 组装步骤
-    let steps: Vec<Value> = if is_dynamic {
-        if option_id == "svc_mem_gb" {
-            memory_steps(&p.gb.clone().unwrap_or(Value::Null))
-        } else if option_id == "perf_wu_pause" {
-            let Some(d) = p.days else {
-                return json!({ "success": false, "message": "缺少暂停天数参数" });
-            };
-            if !d.is_finite() {
-                return json!({ "success": false, "message": "缺少暂停天数参数" });
-            }
-            let days = d.trunc() as i64;
-            if !(1..=WU_PAUSE_MAX_DAYS).contains(&days) {
-                return json!({ "success": false, "message": format!("暂停天数需在 1~{WU_PAUSE_MAX_DAYS} 天之间") });
-            }
-            wu_pause_steps(days)
-        } else {
-            Vec::new()
+    // 组装步骤 + 生效子集（R3-K01：restore 方向在 assemble_steps 内单次分流）
+    let (steps, picked_targets_effective) = match assemble_steps(&opt, &option_id, &p) {
+        Ok(v) => v,
+        Err(message) => {
+            log::write_log("warn", &format!("优化项组装即拒: {option_id}（{message}）"));
+            return json!({ "success": false, "message": message });
         }
-    } else if !p.restore && super::subitems::supports_subitems(&option_id) {
-        // 批量项的子集执行（2026-10-03）。优先级高于 includeStore 分支：
-        // 勾了子集就是「我只要这几个」，此时再自动追加商店 5 项是越权。
-        // 勾了商店（include_store）却被子集分支吃掉的话，用户会拿到一份
-        // 「没禁成商店服务却报了成功」的假回执。
-        match super::subitems::rebuild_steps(
-            &option_id,
-            picked_targets_effective.as_deref(),
-            p.picked_extras.as_deref(),
-        ) {
-            Some(rebuilt) if rebuilt.is_empty() => {
-                return json!({
-                    "success": false,
-                    "message": "一个目标都没勾选，请至少勾选一项再执行"
-                });
-            }
-            Some(rebuilt) if option_id == "tf_svc_bulk" && p.include_store => {
-                // R3-M02（v4）与 R3-M03 同批：子集分支同样要追加商店服务 ——
-                // picked_targets_effective 虽已并入 5 个商店服务名，但 rebuild_steps 按侧表
-                // 做交集会把它们**静默滤掉**（侧表 65 条里没有这五个名字），于是「用户经
-                // 弹窗确认过的写入没有发生、回执仍为成功」。基线侧（option_targets）已同步
-                // 纳入这 5 个 Start，两处必须同批上线，单修一处会把危害升级为「写了但还原不回来」。
-                svc_bulk_append_store(rebuilt)
-            }
-            Some(rebuilt) => rebuilt,
-            // None = 全选 ⇒ 走下面原有的原脚本路径（含 includeStore 的条件追加）
-            None if option_id == "tf_svc_bulk" && p.include_store => {
-                let base = opt
-                    .get("steps")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                svc_bulk_append_store(base)
-            }
-            None => opt.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
-        }
-    } else if option_id == "tf_svc_bulk" && p.include_store {
-        let base = opt
-            .get("steps")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        svc_bulk_append_store(base)
-    } else if p.restore {
-        let Some(restore) = opt.get("restore").and_then(|v| v.as_array()) else {
-            log::write_log("warn", &format!("优化项 {option_id} 无还原步骤定义，已拒绝还原请求"));
-            return json!({ "success": false, "message": "该优化项暂不支持一键还原，请手动恢复或使用系统还原点" });
-        };
-        if restore.is_empty() {
-            return json!({ "success": false, "message": "该优化项暂不支持一键还原，请手动恢复或使用系统还原点" });
-        }
-        restore.clone()
-    } else {
-        opt.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default()
     };
     if steps.is_empty() {
         return json!({ "success": false, "message": "选项无可执行步骤" });
@@ -803,6 +873,9 @@ pub async fn optimizer_run<R: Runtime>(
         "info",
         &format!("优化电脑执行: {title}{}", if p.restore { " (还原)" } else { "" }),
     );
+    // R3-M02（v7.2 C04，AGENTS §3）：危险操作前置刷盘——本链接下来写注册表/服务/
+    // 电源（正向与还原两个方向都是），动手前先把执行日志强制落盘，防尾部日志丢失。
+    log::flush_sync();
     // S3：纯 Rust 原生
     // 性能优化 P1-A（v3 §4.3）：整条步骤链是同步原生调用——PsInline 步骤登记 300s、
     // cmd 步骤登记 60s，过去直接跑在 async 命令体里 ⇒ 占住 runtime worker，
@@ -920,13 +993,21 @@ pub async fn optimizer_run<R: Runtime>(
         }
     }
     // 审查 2026-09-27 M4：失败不再只报「部分步骤可能失败」——携带逐步原因（label +
-    // 失败方式），前端 toast 与日志按此呈现，排障不再两眼一抹黑
+    // 失败方式），前端 toast 与日志按此呈现，排障不再两眼一抹黑。
+    // R3-M04（v7.2 C04）：步骤链判失败时，「已移入回收站的 N 个目录」不得从回执
+    // 与记账双双消失——那些目录**真的已经离开原位**，只报失败会让用户以为什么
+    // 都没发生而去做别的操作。
+    let rec_summary = recycle_summary(rec_ok, rec_fail, rec_malformed);
     let ok_message = if !ok {
-        if failed_reasons.is_empty() {
+        let mut m = if failed_reasons.is_empty() {
             "部分步骤可能失败".to_string()
         } else {
             format!("{} 项步骤失败：{}", failed_reasons.len(), failed_reasons.join("；"))
+        };
+        if let Some(s) = &rec_summary {
+            m.push_str(&format!("；{s}"));
         }
+        m
     } else if rec_ok > 0 || rec_fail > 0 || rec_malformed > 0 {
         let mut suffix = String::new();
         if rec_fail > 0 {
@@ -1013,7 +1094,13 @@ pub async fn optimizer_run<R: Runtime>(
         // 错误状态永无纠正机会。改落 partial，由 optimizer_state_overview 如实呈现（可重试）。
         // 根治（2026-10-03）：失败子步原因随记账落盘——此前只在日志里，用户看到
         // 「状态不明」却无从判断该还原还是该重跑。
-        let _ = opt_state::mark_partial_with_reasons(&option_id, &failed_reasons);
+        // R3-M04（v7.2 C04）：已移入回收站的目录数一并记账——只记失败原因会把
+        // 「部分目标已经离开原位」这个事实从账本上抹掉。
+        let mut ledger_reasons = failed_reasons.clone();
+        if let Some(s) = &rec_summary {
+            ledger_reasons.push(s.clone());
+        }
+        let _ = opt_state::mark_partial_with_reasons(&option_id, &ledger_reasons);
         log::write_log(
             "warn",
             &format!("优化项部分步骤失败（{} 项），已记账为 partial: {title}", failed_reasons.len()),

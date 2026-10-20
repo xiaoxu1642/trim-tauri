@@ -427,6 +427,9 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     let Ok(ops) = build_restore_ops(&values) else {
         return json!({ "success": false, "message": "备份数据无法解析成还原操作" });
     };
+    // R3-M02（v7.2 C04，AGENTS §3）：值级还原马上要写回 HKLM/HKCU 备份值——
+    // 动手前把日志强制落盘，防尾部日志丢失（与 optimizer_run 执行链同口径）。
+    log::flush_sync();
     if !restore_backup_values(&ops) {
         return json!({ "success": false, "message": "还原脚本执行失败" });
     }
@@ -680,8 +683,13 @@ fn canonical_type_label(kind: windows::Win32::System::Registry::REG_VALUE_TYPE) 
     } else if kind == REG_MULTI_SZ {
         "REG_MULTI_SZ"
     } else if kind == REG_EXPAND_SZ {
-        // 备份里存的是 REG_SZ（老数据的记法）⇒ 归到 REG_SZ 才与读侧标签一致
-        "REG_SZ"
+        // R3-M01（v7.2 C04）：faithful 读侧（decode_reg_value_bytes flatten=false）
+        // 对真 EXPAND_SZ 值回的标签就是 "REG_EXPAND_SZ" —— 旧实现把它归成
+        // "REG_SZ"，新式备份（faithful 读、typ=REG_EXPAND_SZ）的值级还原**恒判
+        // 不一致**：明明还原成功却永久报失败、备份记录永远清不掉（fail-closed
+        // 保留重试 = 永远重试）。老备份（typ=REG_SZ 记法）走 REG_SZ 分支，
+        // 写侧本就按 REG_SZ 写回、读侧标签也回 REG_SZ，不受影响。
+        "REG_EXPAND_SZ"
     } else {
         "REG_SZ"
     }
@@ -783,3 +791,51 @@ mod svc_names_tests {
     }
 }
 
+
+#[cfg(test)]
+mod m01_type_label_tests {
+    use super::*;
+
+    /// R3-M01（v7.2 C04）判红点：备份 typ=REG_EXPAND_SZ ⇒ want_kind=REG_EXPAND_SZ
+    /// ⇒ canonical 标签必须等于 faithful 读侧的 "REG_EXPAND_SZ"。旧实现归成
+    /// "REG_SZ" ⇒ 值级还原恒判不一致（还原成功却永久报失败、备份清不掉）。
+    #[test]
+    fn expand_sz_回读标签不再恒判不一致() {
+        assert_eq!(
+            canonical_type_label(restore_reg_kind("REG_EXPAND_SZ")),
+            "REG_EXPAND_SZ"
+        );
+        // 其余标签口径不变（回归护栏）
+        assert_eq!(canonical_type_label(restore_reg_kind("REG_SZ")), "REG_SZ");
+        assert_eq!(canonical_type_label(restore_reg_kind("REG_DWORD")), "REG_DWORD");
+        assert_eq!(canonical_type_label(restore_reg_kind("REG_BINARY")), "REG_BINARY");
+    }
+
+    /// R3-U02 配套真机探针：真实 HKCU 探针键上做 EXPAND_SZ 值级还原往返 ——
+    /// 写入（restore_backup_values）→ 独立回读（verify_restore_ops）必须判一致。
+    /// 旧实现在这条链上恒 mismatched=1（标签口径分叉），本探针一发就红。
+    #[test]
+    #[ignore = "真机探针：写真实 HKCU 探针键并回读（复核 R3-M01 读写同链），发布前人工 --ignored 跑"]
+    fn expand_sz_真机往返回读一致() {
+        use crate::engine::native;
+        const SUB: &str = "SOFTWARE\\TrimProbeM01";
+        const NAME: &str = "probe_expand";
+        let ops = vec![RestoreOp::Write {
+            hive: "CurrentUser".into(),
+            sub: SUB.into(),
+            key: NAME.into(),
+            typ: "REG_EXPAND_SZ".into(),
+            bytes: restore_write_bytes("REG_EXPAND_SZ", "%SystemRoot%\\Temp").unwrap(),
+        }];
+        // 起手先清一次（上轮残留会让首写撞非预期旧值）
+        let _ = native::reg_key_remove(native::hive_hkcu(), SUB, true);
+        assert!(restore_backup_values(&ops), "EXPAND_SZ 值写回必须成功");
+        let (checked, mismatched) = verify_restore_ops(&ops);
+        let _ = native::reg_key_remove(native::hive_hkcu(), SUB, true);
+        assert_eq!(
+            (checked, mismatched),
+            (1, 0),
+            "EXPAND_SZ 值级还原回读必须判一致（mismatched>0 = M01 病灶复发）"
+        );
+    }
+}

@@ -260,6 +260,8 @@ pub(super) fn recycle_freq_override() -> Result<String, String> {
     let Ok(ops) = build_restore_ops(&values) else {
         return Err("备份数据无法解析成还原操作".to_string());
     };
+    // R3-M02（v7.2 C04，AGENTS §3）：马上要写 HKLM 注册表，日志先强制落盘。
+    log::flush_sync();
     if !restore_backup_values(&ops) {
         return Err("写回注册表失败".to_string());
     }
@@ -285,6 +287,9 @@ fn fail_with_recycle(base: &str, rec: Result<String, String>) -> Value {
 }
 
 pub(super) fn create_restore_inner() -> Value {
+    // R3-M02（v7.2 C04，AGENTS §3）：创建还原点是系统级动作（还可能先写频率覆写值），
+    // 动手前把日志强制落盘，防尾部日志丢失。
+    log::flush_sync();
     // 预检：fail-closed（**拿不到确定结论 ⇒ 中止**，绝不往下写覆写值）+ 分级报因。
     // 旧实现是三层 fail-open（脚本没跑成 / 标记缺失 / JSON 坏 —— 任一层落空都跳过预检
     // 继续创建）；本机日志里「protectedVolumes=0 却仍走到 Invoke-CimMethod」与它一致。

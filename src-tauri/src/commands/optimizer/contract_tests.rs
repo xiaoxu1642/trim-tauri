@@ -2574,3 +2574,79 @@ let ov = include_str!("overview.rs");
         assert_eq!(special_item_verdict("telemetry_optimize"), None);
         assert_eq!(special_item_verdict("privacy_wpbt_off"), None);
     }
+
+// ==================== R3-K01 / R3-M04（v7.2 C04）方向串台与回执诚实度 ====================
+
+/// R3-K01（v7.2 C04）方向串台契约（R3-U01 取证结论的落地形态）：
+/// restore 请求无论带什么参数组合（includeStore / pickedTargets / 动态参数），
+/// 只能产出目录项的 restore 段或组装即拒；正向请求永不产出 restore 段。
+/// 破坏形态 = 把 restore 分流从组装链最前挪回原位（is_dynamic / include_store
+/// 分支可被 restore 请求命中）⇒ 本用例红。
+#[test]
+fn r3k01_restore方向与正向步骤集互斥() {
+    for opt in options() {
+        let Some(id) = opt.get("id").and_then(|v| v.as_str()) else { continue };
+        let restore_empty = opt
+            .get("restore")
+            .and_then(|v| v.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        for include_store in [false, true] {
+            let p: RunParams = serde_json::from_value(json!({
+                "restore": true,
+                "includeStore": include_store,
+                "pickedTargets": ["RetailDemo"],
+                "gb": "balanced",
+                "days": 7
+            }))
+            .expect("RunParams 反序列化");
+            match assemble_steps(opt, id, &p) {
+                Ok((steps, _)) => {
+                    let want = opt
+                        .get("restore")
+                        .and_then(|v| v.as_array())
+                        .expect("有 restore 段才应组装成功");
+                    assert_eq!(
+                        &steps, want,
+                        "restore 请求被参数组合改道（{id}, includeStore={include_store}）——R3-K01 串台"
+                    );
+                }
+                Err(_) => assert!(
+                    restore_empty,
+                    "有 restore 段的项不得组装即拒（{id}, includeStore={include_store}）"
+                ),
+            }
+            // 正向侧：正向请求永不产出 restore 段的步骤集
+            let p2: RunParams = serde_json::from_value(json!({
+                "restore": false,
+                "includeStore": include_store
+            }))
+            .expect("RunParams 反序列化");
+            if let Ok((steps, _)) = assemble_steps(opt, id, &p2) {
+                if let Some(want_restore) = opt.get("restore").and_then(|v| v.as_array()) {
+                    if !want_restore.is_empty() {
+                        assert_ne!(
+                            &steps, want_restore,
+                            "正向请求产出了 restore 步骤集（{id}）——反向串台"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// R3-M04（v7.2 C04）：回收站计数摘要——失败路径也不得让「已移入回收站的 N 个
+/// 目录」从回执与记账消失。破坏形态 = 恢复旧「失败分支只报失败原因」⇒ rec_summary
+/// 不再拼接 ⇒ 本用例红。
+#[test]
+fn r3m04_回收站计数失败路径不消失() {
+    assert_eq!(recycle_summary(0, 0, 0), None, "无回收站动作不得附加文案");
+    let s = recycle_summary(3, 0, 0).expect("纯成功计数必须产出摘要");
+    assert!(s.contains("3 个目录已移入回收站"), "实得：{s}");
+    assert!(!s.contains("失败") && !s.contains("畸形"), "无失败时不得掺入失败文案：{s}");
+    let s = recycle_summary(3, 1, 2).expect("混合计数必须产出摘要");
+    assert!(s.contains("3 个目录已移入回收站"), "实得：{s}");
+    assert!(s.contains("1 个移入失败"), "移入失败数必须可见：{s}");
+    assert!(s.contains("2 条协议畸形行已跳过"), "畸形行数必须可见：{s}");
+}
