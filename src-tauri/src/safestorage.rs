@@ -294,7 +294,7 @@ pub fn encrypt_dpapi_v1(plain: &str, aes_key: Option<&[u8]>) -> Result<String, S
 ///
 /// - 新格式（Chromium OSCrypt GCM）必须传 `aes_key`（来自 Local State）；
 /// - 旧格式（v10 + 裸 DPAPI）不需要密钥。
-pub fn decrypt_dpapi_v1(value: &str, aes_key: Option<&[u8]>) -> Result<Vec<u8>, StorageError> {
+pub fn decrypt_dpapi_v1(value: &str, aes_key: Option<&[u8]>) -> Result<Zeroizing<Vec<u8>>, StorageError> {
     let b64 = value
         .strip_prefix(DPAPI_V1_PREFIX)
         .ok_or(StorageError::BadPrefix)?;
@@ -307,7 +307,7 @@ pub fn decrypt_dpapi_v1(value: &str, aes_key: Option<&[u8]>) -> Result<Vec<u8>, 
 
     if body.starts_with(&DPAPI_BLOB_MAGIC) {
         // 旧 Electron：v10 后即裸 DPAPI BLOB
-        return crypt_unprotect(body);
+        return crypt_unprotect(body).map(Zeroizing::new);
     }
 
     // 新 Electron（44 实测）：v10 + nonce + GCM
@@ -318,5 +318,5 @@ pub fn decrypt_dpapi_v1(value: &str, aes_key: Option<&[u8]>) -> Result<Vec<u8>, 
             key.len()
         )));
     }
-    aes_gcm_open(key, body)
+    aes_gcm_open(key, body).map(Zeroizing::new)
 }

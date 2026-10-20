@@ -346,6 +346,14 @@ pub fn quarantine_file(path: &Path, reason: &str) {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
+    // R7-L09：prune_quarantined 只回收 `<*.json>.corrupt-*`；非 .json 的隔离件会永久留存，
+    // 至少留一条 warn（今日生产者全是 .json，属形状防线）。
+    if !name.ends_with(".json") {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("非 .json 文件被隔离（{name}）：不会被隔离件回收器清理"),
+        );
+    }
     let bak: PathBuf = path.with_file_name(quarantine_name_for(&name, ts));
     if fs::rename(path, &bak).is_ok() {
         crate::engine::log::write_log(
@@ -385,8 +393,42 @@ fn quarantine_name_for(original: &str, ts_ms: u128) -> String {
 /// 只认「**原文件名以 `.json` 结尾** + `.corrupt-<纯数字>`」，即本模块 `quarantine_file`
 /// 唯一可能产出的形状。旧口径只要求 `*.corrupt-<数字>`，会把用户自己的
 /// `notes.corrupt-123`（例如别的软件的坏件、或用户手工改名的备份）当垃圾永久删掉。
-pub fn prune_quarantined(dir: &Path) -> usize {
-    let removed = prune_quarantined_in(dir, SystemTime::now());
+/// R7-L05：回收原子写遗留的 `.<name>.<hex>.tmp`（panic/断电/被杀时不会走失败分支）。
+/// 只删 24h 前的普通文件，不跟随 reparse，限深 4 层。
+pub fn prune_stale_atomic_temps(dir: &Path) -> usize {
+    let now = SystemTime::now();
+    let removed = prune_stale_temps_depth(dir, now, 0);
+    if removed > 0 {
+        crate::engine::log::write_log("info", &format!("已清理过期原子写临时件 {removed} 个"));
+    }
+    removed
+}
+
+fn prune_stale_temps_depth(dir: &Path, now: SystemTime, depth: usize) -> usize {
+    if depth > 4 { return 0; }
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Ok(md) = fs::symlink_metadata(&p) else { continue };
+        if md.is_dir() {
+            if !crate::engine::protect::is_reparse(&md) {
+                removed += prune_stale_temps_depth(&p, now, depth + 1);
+            }
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.starts_with('.') && name.ends_with(".tmp")) { continue; }
+        let old = md.modified().ok().and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > Duration::from_secs(24 * 60 * 60));
+        if old && !crate::engine::protect::is_reparse(&md) && fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+pub fn prune_quarantined(dir: &Path) -> usize {    let removed = prune_quarantined_in(dir, SystemTime::now());
     if removed > 0 {
         crate::engine::log::write_log("info", &format!("已清理过期隔离件 {removed} 个"));
     }
@@ -455,6 +497,17 @@ fn quarantine_stamp(name: &str) -> Option<u128> {
     ts.parse::<u128>().ok()
 }
 
+fn json_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 /// 递归把 SECRET_FIELDS 字段做变换（对齐 transformSecrets）
 pub fn transform_secrets(
     value: &serde_json::Value,
@@ -469,7 +522,15 @@ pub fn transform_secrets(
                         serde_json::Value::String(s) => {
                             serde_json::Value::String(transform(s))
                         }
-                        other => transform_secrets(other, transform),
+                        other => {
+                            // R7-L07：密钥字段不是字符串时既不能加密也不能掩码；
+                            // 形状不能被静默洗白，至少留一条 warn。
+                            crate::engine::log::write_log(
+                                "warn",
+                                &format!("密钥字段 {k} 不是字符串（实际 {}），按原形状递归处理", json_kind(other)),
+                            );
+                            transform_secrets(other, transform)
+                        }
                     }
                 } else {
                     transform_secrets(v, transform)
@@ -592,8 +653,14 @@ pub fn decrypt_settings_with_oscrypt(settings: &serde_json::Value) -> serde_json
             return v.to_string();
         }
         safestorage::decrypt_dpapi_v1(v, key.as_deref().map(|k| k.as_slice()))
+            .map_err(|e| {
+                // R7-L06：保留密文是刻意（主密钥可能暂不可读），但失败原因必须留痕，
+                // 否则用户只见「AI 不工作」。
+                crate::engine::log::write_log("warn", &format!("密钥解密失败（保留原密文）: {e}"));
+                e
+            })
             .ok()
-            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|b| String::from_utf8(b.to_vec()).ok())
             .unwrap_or_else(|| v.to_string())
     })
 }

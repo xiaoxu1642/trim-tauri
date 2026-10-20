@@ -384,6 +384,7 @@ fn run_startup_housekeeping() {
     log::prune_old_logs();
     // 审查 M15/G4：隔离件（*.corrupt-*）此前没有任何回收路径
     crate::security::prune_quarantined(&paths::app_data_dir());
+    crate::security::prune_stale_atomic_temps(&paths::app_data_dir());
     // 审查 v3-L3：网速报告的 7 天 TTL 此前只在 save/list 两个入口被动触发，用户不再打开
     // 网速页就永远回收不掉；与退出端（`on_app_exit` → `realtime::shutdown_sampler`）合成
     // 完整生命周期。
@@ -1387,6 +1388,37 @@ mod tests {
         assert!(
             include_str!("engine/sysrestore.rs").contains("《依赖清单》"),
             "R5b-L11：依赖登记指代必须改成现行文档名"
+        );
+    }
+
+    /// U-R7（P1-W2）：pwsh/security/diag 的十项收口。
+    #[test]
+    fn u_r7_protocol_and_secret_contracts() {
+        let pwsh = include_str!("pwsh/mod.rs");
+        assert!(
+            pwsh.contains("PowerShell 管道读取错误") && pwsh.contains("fn write_temp_script"),
+            "R7-L01/L03：读错误留痕 + 临时脚本写入口收为私有"
+        );
+        assert!(
+            !pwsh.contains("`:45-49`") && !pwsh.contains("`:381-387`"),
+            "R7-M06：内部行号引用必须改成稳定锚点"
+        );
+        let security = include_str!("security/mod.rs");
+        assert!(
+            security.contains("prune_stale_atomic_temps")
+                && security.contains("密钥解密失败")
+                && security.contains("非 .json 文件被隔离")
+                && security.contains("密钥字段"),
+            "R7-L05/L06/L07/L09：临时件回收与密钥形状/失败留痕"
+        );
+        assert!(
+            include_str!("diag/mod.rs").contains("had_crlf"),
+            "R7-L10：DIAG 清洗必须保持原文行尾形态"
+        );
+        assert!(
+            include_str!("safestorage.rs")
+                .contains("decrypt_dpapi_v1(value: &str, aes_key: Option<&[u8]>) -> Result<Zeroizing<Vec<u8>>"),
+            "R7-L08：解密出的明文必须由 Zeroizing 持有"
         );
     }
 

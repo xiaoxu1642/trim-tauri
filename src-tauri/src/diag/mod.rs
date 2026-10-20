@@ -53,6 +53,7 @@ pub fn extract_diag_lines(stdout: &str, op: &str) -> String {
 /// 交给上层协议判据。畸形行即使 op 未登记也告警。
 pub fn strip_diag_lines(stdout: &str, op: Option<&str>) -> String {
     let split = split_diag_lines(stdout);
+    let had_crlf = stdout.contains("\r\n");
     if let Some(op) = op {
         for d in &split.diagnostics {
             crate::engine::log::write_log("error", &format_diag(op, d));
@@ -68,7 +69,12 @@ pub fn strip_diag_lines(stdout: &str, op: Option<&str>) -> String {
             ),
         );
     }
-    split.clean
+    // R7-L10：有 DIAG 行时 split 用 LF join；原文是 CRLF 的调用点必须保持同一行尾形态。
+    if had_crlf && !split.clean.contains("\r\n") {
+        split.clean.replace('\n', "\r\n")
+    } else {
+        split.clean
+    }
 }
 
 fn parse_diag_line(line: &str) -> Option<serde_json::Value> {

@@ -341,7 +341,8 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["export", &run_reg_path, reg_file_str, "/y"]', reason: '顽固软件治理：删抖音托盘 Run 值前整键备份（2026-10-06 扩链）' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
-  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&sc, &["stop", name], MAINT_CMD_TIMEOUT', reason: 'stop_service_wait 的 sc stop（restart_service / search / wu 三条链共用）', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["stop", name],', reason: 'stop_service_wait 的 sc stop（R5b-M09 收 30s 档）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["start", name],', reason: 'start_service_wait 的 sc start（R5b-M09 收 30s 档）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
   // v5 S-1：store 任务从「spawn 不管结果」改成等退出码，于是它进入超时登记表
   // v6-K01（P0-2）：调用点改 system_tool 硬钉解析后 exe 经 and_then 闭包传入，锚点随行文更新
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, &[], WSRESET_TIMEOUT', reason: '维护：wsreset 清 Store 缓存（等退出码，非 fire-and-forget）', timeoutConst: 'WSRESET_TIMEOUT', secs: 60 },

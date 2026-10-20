@@ -21,7 +21,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -60,7 +59,7 @@ pub struct PsOutput {
 /// 读管道宽限期：pwsh 本体已不在跑，但子孙可能还占着 stdout/stderr 写端。
 /// 等 `READ_GRACE` 让正常输出冲刷完；**只有真超时**才终止子进程树，等不到就交回已读到的快照。
 ///
-/// 审查 v2-M8：判据必须与 `:45-49` 那段注释和 AGENTS §5.13 同口径。原实现在宽限期一到
+/// 审查 v2-M8：判据必须与上方「刻意不用 KILL_ON_JOB_CLOSE」那段注释和 AGENTS §5.13 同口径。原实现在宽限期一到
 /// 就无条件 `terminate()`，而调用点（`run_with_exe` 尾部）在**正常退出**路径上同样会走到这里
 /// —— 于是此前 `cleanup_execute.ps1`（已退役）重启的被清理应用、`cm_restart_explorer.ps1`（已退役）拉起的
 /// explorer、`maint_store.ps1`（已退役）的 wsreset 只要有一个占着 stdout，宽限期一到整棵树被杀，
@@ -76,7 +75,7 @@ const READ_GRACE: Duration = Duration::from_secs(5);
 ///
 /// - **正常退出**：两条读共用同一个总预算，stderr 拿的是余额而不是又一个 READ_GRACE。
 ///   旧写法是两次 `take_reader` 各等 5s，子孙同时占住 stdout 与 stderr 两条写端时，
-///   成功路径也要串行等满 10s 才返回（触发面即本文件 `:49-53` 点名的三条脚本：
+///   成功路径也要串行等满 10s 才返回（触发面即本文件「子进程树兜底」注释点名的三条脚本：
 ///   重启被清应用 / `cm_restart_explorer` / `wsreset`）。
 /// - **真超时**：不共享，仍各给满 READ_GRACE。`await_reader` 在 `terminate` 之后还要再等
 ///   一轮 grace 才能拿到读线程的完整串（实测过 5s 配 24.4s 实挂的那条路径），
@@ -213,7 +212,7 @@ impl Drop for TempScript {
 }
 
 /// 写临时 PowerShell 脚本：返回**守卫**，脚本随作用域结束自动删除（审查 v2-L2）。
-pub fn write_temp_script(content: &str, suffix: &str) -> Result<TempScript, String> {
+fn write_temp_script(content: &str, suffix: &str) -> Result<TempScript, String> {
     let dir = paths::temp_script_dir()?;
     // .ps1 写入带 BOM 的 UTF-8：PS 5.1 默认按系统 ANSI 读取无 BOM 脚本，
     // 中文注释会乱码导致解析失败；PS7 亦兼容 BOM。
@@ -346,7 +345,7 @@ fn run_with_exe(
     let (tx_out, rx_out) = std::sync::mpsc::channel();
     let (tx_err, rx_err) = std::sync::mpsc::channel();
     // 快照（审查 v2-M8）：正常路径靠 EOF 投递的完整串，降级路径靠这里。
-    // 少了它，Job 建不起来时（`job = None`，`:381-387` 的显式降级）terminate 无事可做，
+    // 少了它，Job 建不起来时（`job = None`，即 `ProcessJob::create_for` 的失败降级）terminate 无事可做，
     // 宽限期到点只能 `unwrap_or_default()` 交出**空 stdout** —— 上层按「code!=0 + 空 stdout」
     // 判成「脚本根本没跑」，`@@RESULT@@` 型判定（`commands/optimizer.rs` 的解析链）全线误判。
     // 用 Arc 而非借用：读线程要 `'static`，而快照必须活到调用方取完结果为止。
@@ -479,7 +478,11 @@ fn read_all_capped(mut pipe: Option<impl Read>, snapshot: Option<&Snapshot>, cap
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+                // R7-L01：读错误与 EOF 必须分开留痕（旧实现静默 break，截断无告警）。
+                Err(e) => {
+                    log::write_log("warn", &format!("PowerShell 管道读取错误，输出可能不完整: {e}"));
+                    break;
+                }
             }
         }
     }
@@ -574,7 +577,7 @@ mod tests {
         // 场景：pwsh 已 code=0 退出，但脚本用不带 -Wait 的 Start-Process **故意**留下了
         // 长命进程（重启被清理的应用 / 拉 explorer），它占着 stdout 写端 ⇒ EOF 永不到来。
         // 此时收树 = 在批次正常结束时杀掉用户刚打开的程序，正是 AGENTS §5.13 与
-        // 本文件 `:45-49` 声明要避开的事 —— 旧实现却无条件 terminate。
+        // 本文件「子进程树兜底」注释声明要避开的事 —— 旧实现却无条件 terminate。
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         drop(tx); // 没有任何投递，等价「读线程卡在管道上」
         let snap = Snapshot::default();
@@ -939,7 +942,7 @@ mod tests {
     /// 标准输出，本体立刻 `exit 0`，但读线程要等这个子孙关掉写端才能返回。
     /// 旧实现是 `join()`（不可中断）→ 实测本体早已 code=0 退出，函数仍挂 19.7s。
     ///
-    /// 审查 v2-M8 改了这条的**手段**（也改了上面 `:45-49` 的口径）：本体正常退出时不再收树，
+    /// 审查 v2-M8 改了这条的**手段**（也改了上方「刻意不用 KILL_ON_JOB_CLOSE」的口径）：本体正常退出时不再收树，
     /// 宽限期到点直接交出快照。所以这里断言的是「按时返回 + 输出不丢 + 不误判超时」，
     /// **不再**断言 ping 被杀掉。
     /// 注：`-NoNewWindow` 在 `.ps1` 里是 AGENTS §5.13 明令避免的写法（子孙会在宽限期后被
