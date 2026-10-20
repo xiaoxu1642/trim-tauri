@@ -159,6 +159,14 @@
     }
   })();
   function fpOf(item) {
+    // F4a2-K01（v7.2 C07）：键改回**后端稳定 id**（`reg|{容器}|{值名}` / `folder|{全路径}` /
+    // `task|{路径}{任务名}`，扫描合并台账本就用 id 去重）。此前的
+    // `[source|name|command]` 组合有两处键不稳定：① `command` 对非字符串注册表值
+    // 恒空串且不含容器维 ⇒ 两根同名同类型即同键，引导删除用户没选的启动项；
+    // ② `command` 是 `expand_env()` 展开结果，提权换进程后 `%APPDATA%` 等指向
+    // 另一套目录 ⇒ 同一项提权前后两个键，防恢复台账静默失配（AGENTS §5.27）。
+    // 旧数据/防御兜底：id 缺失才回退旧组合。
+    if (item && item.id) return item.id;
     return [item.source || '', item.name || '', item.command || ''].join('|');
   }
 
