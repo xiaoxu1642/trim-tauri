@@ -1334,6 +1334,29 @@ mod tests {
         );
     }
 
+    /// U-R5a（P1-W2）：native 执行层的四个收口坐标。
+    #[test]
+    fn u_r5a_native_contracts() {
+        let startup = include_str!("engine/native/startup.rs");
+        assert!(
+            startup.contains("format!(\"{task_path}{task_name}\")"),
+            "R5a-M02：/TN 拼接必须与启用臂同源（task_path 已带尾分隔符）"
+        );
+        assert!(
+            startup.contains("match read_disabled_records()"),
+            "R5a-L06：扫描侧必须复用三态读器，不能内联 read_to_string+from_str"
+        );
+        let cm = include_str!("engine/native/contextmenu.rs");
+        assert!(
+            cm.contains("item.native_reg_path, enabled_text"),
+            "R5a-M09：CLSID 去重键必须带坐标"
+        );
+        assert!(
+            cm.contains("still_explorer"),
+            "R5a-L07：终止前必须按句柄重查镜像"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

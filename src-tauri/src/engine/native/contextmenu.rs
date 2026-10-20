@@ -140,6 +140,15 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
         let mut killed = 0usize;
         for (pid, _) in &targets {
             if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
+                // R5a-L07：PID 在枚举与终止之间可能被复用——拿到句柄后按句柄重查镜像，
+                // 仍是系统 explorer 才终止（K03 的按名收紧不能留复用窗口）。
+                let still_explorer = get_process_path(*pid)
+                    .is_some_and(|p| is_system_explorer_image(&p));
+                if !still_explorer {
+                    crate::engine::log::write_log("warn", &format!("资源管理器重启：PID {pid} 镜像已变化，未终止"));
+                    let _ = CloseHandle(h);
+                    continue;
+                }
                 if TerminateProcess(h, 1).is_ok() { killed += 1; }
                 let _ = CloseHandle(h);
             }
@@ -1098,7 +1107,9 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
             let key = if item.clsid.is_empty() {
                 format!("{}|{}|{}|{}|{}", item.category, item.name, item.source, item.native_reg_path, enabled_text)
             } else {
-                format!("{}|{}|{}|{}", item.category, item.name, item.clsid, enabled_text)
+                // R5a-M09：CLSID 分支必须带坐标——同一 CLSID 在 HKCU/HKLM 双注册时，
+                // 旧键会把两条压成一条，写侧只切一处，Explorer 合并视图里菜单项仍在。
+                format!("{}|{}|{}|{}|{}", item.category, item.name, item.clsid, item.native_reg_path, enabled_text)
             };
             if !dedup.insert(key) { continue; }
 

@@ -609,22 +609,23 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     results.extend(scan_task_files());
 
     // ---------- 合并 disabled.json ----------
-    // 与 read_disabled_records 同一取本口径（`startup_ledger_file`）：两处读同一本账，
-    // 一处认新根一处认老根就会出现「列表里有、恢复按钮说没有」
-    if let Some(disabled_file) = startup_ledger_file() {
-        if let Ok(text) = std::fs::read_to_string(&disabled_file) {
-            if let Ok(records) = serde_json::from_str::<Vec<Value>>(&text) {
-                for r in records {
-                    let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
-                    if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
-                    let mut item = r.clone();
-                    if let Some(o) = item.as_object_mut() {
-                        o.insert("enabled".into(), json!(false));
-                        o.insert("disabledBy".into(), json!("trim"));
-                    }
-                    results.push(item);
+    // R5a-L06：与 read_disabled_records 共用同一三态读器；读失败只告警、按无附加项处理
+    //（扫描不能因台账损坏整页失败，但也不能再静默当「没有」）。
+    match read_disabled_records() {
+        Ok(records) => {
+            for r in records {
+                let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
+                if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
+                let mut item = r.clone();
+                if let Some(o) = item.as_object_mut() {
+                    o.insert("enabled".into(), json!(false));
+                    o.insert("disabledBy".into(), json!("trim"));
                 }
+                results.push(item);
             }
+        }
+        Err(e) => {
+            crate::engine::log::write_log("warn", &format!("启动项禁用台账不可读，本次按无附加项处理: {e}"));
         }
     }
 
@@ -1600,7 +1601,10 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "缺少任务名"}));
                     continue;
                 }
-                let tn = if task_path.is_empty() || task_path == "\\" { task_name.to_string() } else { format!("{}\\\\{}", task_path, task_name) };
+                // R5a-M02：task_path 已带尾分隔符（见 `task_path_of` 的生成），
+                // 旧实现又补一个 `\\` ⇒ 嵌套任务 /TN 双分隔符，导出恒失败。
+                // 与启用臂（`format!("{task_path}{task_name}")`）保持同一拼法。
+                let tn = if task_path.is_empty() || task_path == "\\" { task_name.to_string() } else { format!("{task_path}{task_name}") };
                 // 导出 XML 备份
                 let safe = safe_name(&task_name);
                 let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
