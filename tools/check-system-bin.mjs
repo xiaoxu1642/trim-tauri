@@ -130,6 +130,16 @@ const RAW_EXEMPT = [
     anchor: 'std::process::Command::new("cmd")',
     reason: 'v6-K05（P0-3）别名复检用例：mklink /J 造指向受保护子树（System32\\config）的 junction，验证 PFRO 登记闸的 final_path_protected 分支（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
+  {
+    file: 'src-tauri/src/commands/uninstall/list_run.rs',
+    anchor: 'if let Err(e) = Command::new("rustc")',
+    reason: 'R2b-U01（v7.2 C05 前置取证）真机探针可用性预检：rustc --version 探测，不可用显式 SKIP（cfg(test) 专用 #[ignore] 探针、非生产执行面）',
+  },
+  {
+    file: 'src-tauri/src/commands/uninstall/list_run.rs',
+    anchor: 'let out = Command::new("rustc")',
+    reason: 'R2b-U01 同探针的替身编译：rustc -O 现编无窗口替身 exe（写标记即退），落点 C08 隔离测试根（cfg(test) 专用、非生产执行面；与上一条锚点前缀区分避免 0/2 歧义）',
+  },
 ];
 
 /**

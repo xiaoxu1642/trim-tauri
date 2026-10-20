@@ -452,6 +452,23 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
                 if !age_ok {
                     continue; // 冷静期内可能是「清单还没落盘」的在途副本
                 }
+                // R5a-M04：孤儿出口补齐祖先/根内核验——与上面清单裁剪出口同一道
+                // backup_victim_within_root（真实落点 canonicalize 后必须仍在根内）。
+                // 旧写法只 reparse 判文件本体，规则目录段是 junction 时 lexical 的
+                // strip_prefix 照样产出「根内 rel」，根外文件被当孤儿回收。
+                // 根不可解析时核验前提不成立，本轮孤儿回收整体放弃（与裁剪出口同 fail-closed）。
+                match &root_canon {
+                    Some(rc) => {
+                        if !backup_victim_within_root(rc, &fp) {
+                            crate::engine::log::write_log(
+                                "warn",
+                                &format!("孤儿回收：副本 {rel} 的真实落点不在备份根内（根内含重解析段？），已拒删"),
+                            );
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
                 if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(fp.as_os_str()) {
                     crate::engine::log::write_log(
                         "warn",
@@ -1218,7 +1235,12 @@ let mut freed = 0i64;
     // gone（删时已不存在）无可删，protected/reparse/identity 是安全闸门的拒绝，
     // 都不进永久删出口。上限 FAILED_FILES_CAP，总数另计（failedFilesTotal）。
     let mut failed_files: Vec<Value> = Vec::new();
-    // Kudu S2：别名解析（父目录 canonicalize）按父目录 memo——同目录下成千上万个文件只解析一次
+    // Kudu S2（2026-10-16）：别名解析（父目录 canonicalize）按父目录 memo——同目录下成千上万个文件只解析一次
+    // R5a-L01 取舍声明：两条 memo（final_memo / ancestor_memo）按**父目录**缓存某一时刻的
+    // 判定，同目录后续文件复用首个结果 ⇒「删除瞬间父链复检」对批内第 2..N 个文件退化为
+    // 「批内一次」而非逐文件。这是性能换实时性的刻意取舍（逐文件 canonicalize 是批量
+    // 清理的大头），接受的前提：① 批内时间窗极短；② identity 基线缺项（identity_unbaselined）
+    // 没有第二道兜底，靠 C07 的计数外发保证失守可见——改并发/跨进程写同目录时必须重估。
     let mut final_memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         let mut backup_skipped = 0usize;
 

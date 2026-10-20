@@ -232,21 +232,31 @@ fn xml_first(text: &str, tag: &str) -> String {
     rest[..b].trim().to_string()
 }
 
-/// 递归枚举 `C:\Windows\System32\Tasks`，把「登录/开机触发」的任务收成启动项候选。
+/// 递归枚举 `%SystemRoot%\System32\Tasks`，把「登录/开机触发」的任务收成启动项候选。
 /// 跳过 `\Microsoft\` 子树（系统任务，与旧 schtasks 口径一致）。
+/// R5a-L04 三修：根现读 `%SystemRoot%`（系统不在 C: 时旧写死根整块看不见）、
+/// 目录判改 symlink_metadata + is_reparse（跟随链接会把枚举引出 Tasks 树）、
+/// 深度上限 64（与 cleanup.rs ENGINE_WALK_MAX_DEPTH 同档，防环挂死）。
 fn scan_task_files() -> Vec<Value> {
-    let root = std::path::Path::new(r"C:\Windows\System32\Tasks");
+    const TASK_WALK_MAX_DEPTH: usize = 64;
+    let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let root = std::path::Path::new(&sysroot).join(r"System32\Tasks");
     let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_dir() {
-                stack.push(p);
+            // 只信元数据形态：is_dir() 跟随重解析点，junction 段会把枚举引出任务树
+            let is_dir = std::fs::symlink_metadata(&p)
+                .map(|m| m.is_dir() && !crate::engine::protect::is_reparse(&m))
+                .unwrap_or(false);
+            if is_dir {
+                if depth >= TASK_WALK_MAX_DEPTH { continue; }
+                stack.push((p, depth + 1));
                 continue;
             }
-            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let Ok(rel) = p.strip_prefix(&root) else { continue };
             let rel_str = rel.to_string_lossy().replace('/', "\\");
             if rel_str.starts_with("Microsoft\\") { continue; }
             let Ok(bytes) = std::fs::read(&p) else { continue };
@@ -502,7 +512,11 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                 // 回读自校验因为读的也是错键而恒过。
                 let sa_hive = if hive_tag.starts_with("HKLM") { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
                 let sa_subkey = if subkey.to_ascii_uppercase().contains("WOW6432NODE") { "Run32" } else { "Run" };
-                let sa_disabled = read_startup_approved(sa_hive, sa_subkey, &vp);
+                // R5a-M01：RunOnce 与写侧 is_run_once 同判据——StartupApproved 没有
+                // RunOnce 子键，读 `Run`/`Run32` 会撞上同名 Run 项的批准位，把
+                // RunOnce 项的启用态显示成别人的。批准位对 RunOnce 是死数据，不采信。
+                let is_run_once = subkey.to_ascii_uppercase().contains("RUNONCE");
+                let sa_disabled = if is_run_once { None } else { read_startup_approved(sa_hive, sa_subkey, &vp) };
                 let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
                 let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
 
@@ -1204,6 +1218,17 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
                         .map(|s| String::from_utf16_lossy(s)).collect();
                     (String::new(), String::new(), Value::Array(parts.into_iter().map(|s| json!(s)).collect()))
                 } else if kind == REG_DWORD || kind == REG_QWORD {
+                    // R5a-M08：畸形短值（REG_DWORD < 4 字节 / REG_QWORD < 8 字节）在旧
+                    // 固定下标下越界 panic，整批启停中止、台账不落盘。备份必须忠实——
+                    // 记不下的值不删（fail-closed 逐条报错，批内其余项继续）。
+                    let need = if kind == REG_DWORD { 4usize } else { 8usize };
+                    if data.len() < need {
+                        return Err(format!(
+                            "注册表值长度畸形（{} 仅 {} 字节），拒绝备份删除",
+                            if kind == REG_DWORD { "REG_DWORD" } else { "REG_QWORD" },
+                            data.len()
+                        ));
+                    }
                     let val = if kind == REG_DWORD { u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64 }
                         else { i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]) };
                     (val.to_string(), String::new(), Value::Array(vec![]))
@@ -1282,7 +1307,16 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
             .chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let ext = std::path::Path::new(file_path).extension()
             .and_then(|e| e.to_str()).unwrap_or("");
-        let dest = files_dir.join(format!("{stamp}_{safe_name}.{ext}"));
+        // R5a-M03：备份名 = 批次时间戳 + 清洗显示名，同批次同名的两次禁用会解析出
+        // 同一落点，而 Windows 的 rename 语义是覆盖——前一份还原凭据被静默毁掉。
+        // 追加进程内单调序号：同一毫秒内也不重名（名字不被任何解析链消费，见 backup_stamp）。
+        static BACKUP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut dest = files_dir.join(format!("{stamp}_{seq:04}_{safe_name}.{ext}"));
+        while dest.exists() {
+            let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            dest = files_dir.join(format!("{stamp}_{seq:04}_{safe_name}.{ext}"));
+        }
         std::fs::rename(file_path, &dest).map_err(|e| format!("移动备份失败: {e}"))?;
         let rec = json!({
             "id": id, "name": item.get("name"), "command": file_path,
@@ -1583,7 +1617,12 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     });
                 if let Ok(out) = query_out {
                     if out.status.success() {
-                        let _ = std::fs::write(&xml_file, &out.stdout);
+                        // R5a-L05：任务 XML 是删除后唯一还原依据——裸 std::fs::write 半截
+                        // 落盘也被 exists() 判「备份成功」，随后 schtasks /Delete 照删。
+                        // 原子写 + 判 Result（与 manifest 同口径），失败走「备份失败，未执行删除」。
+                        if let Err(e) = crate::security::atomic_write_file(&xml_file, &out.stdout) {
+                            crate::engine::log::write_log("warn", &format!("任务 XML 备份写入失败（{tn}）: {e}"));
+                        }
                     }
                 }
                 if !xml_file.exists() {

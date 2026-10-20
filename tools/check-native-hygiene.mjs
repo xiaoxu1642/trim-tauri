@@ -564,6 +564,72 @@ const PANIC_ALLOW = [
   }
 }
 
+// ---- N11（v7.2 C02，R5a-K02）：右键/启动域 Reg*/rename 写点必须过容器准入 ----
+// 口径：contextmenu.rs / startup.rs（C02 文件面）里，凡函数体含 Reg 写系调用
+// （RegSetValueExW/RegDeleteValueW/RegRenameKey/RegCreateKeyExW）或 std::fs::rename，
+// 函数体必须同时出现一个容器准入 verdict 调用，或在 N11_ALLOW 逐条登记（含理由）。
+// 这是「写侧准入」的点名棘轮：新增写点函数不带闸即红；把闸从函数里删掉也红。
+const N11_WRITE_RE = /RegSetValueExW\(|RegDeleteValueW\(|RegRenameKey\(|RegCreateKeyExW\(|fs::rename\(/;
+const N11_VERDICT_RE = /cm_registry_container_ok\(|cm_winx_root_ok\(|cm_sendto_root_ok\(|registry_container_verdict\(|folder_source_verdict\(|folder_restore_verdict\(|backup_in_root_verdict\(|backup_victim_within_root\(/;
+const N11_FILES = [
+  'src-tauri/src/engine/native/contextmenu.rs',
+  'src-tauri/src/engine/native/startup.rs',
+];
+/** 例外登记：{file, fn, reason}。只收「天然 contained」的形状（固定键/常量落点）。 */
+const N11_ALLOW = [
+  { file: 'src-tauri/src/engine/native/contextmenu.rs', fn: 'toggle_cm_item', reason: '屏蔽表臂写固定键 Shell Extensions\\Blocked 且值名过 is_guid——天然 contained（winx/filesystem/registry 各臂已有 verdict）' },
+  { file: 'src-tauri/src/engine/native/startup.rs', fn: 'set_approved_bit', reason: '写 StartupApproved 固定子键（approved_subkey 白名单产出），值名来自台账但键面固定' },
+  { file: 'src-tauri/src/engine/native/startup.rs', fn: 'startup_add', reason: '新增启动项写固定键 HKCU\\...\\CurrentVersion\\Run（key 为常量字面量），值名/值数据是用户显式输入的产品功能面' },
+];
+/** 把 Rust 源按 fn 边界粗切成 {name, body}（含 fn 头行到下一个 fn 头之前）。 */
+function rustFns(src) {
+  const lines = src.split('\n');
+  const fns = [];
+  let cur = null;
+  for (const l of lines) {
+    const m = /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)/.exec(l);
+    if (m) {
+      if (cur) fns.push(cur);
+      cur = { name: m[1], body: l };
+    } else if (cur) {
+      cur.body += '\n' + l;
+    }
+  }
+  if (cur) fns.push(cur);
+  return fns;
+}
+{
+  // 正向对照（判定器自证）：
+  const guarded = 'fn a() { registry_container_verdict("HKCU", "x")?; RegSetValueExW(h, p, Some(0), REG_SZ, Some(&b)); }';
+  const naked = 'fn b() { RegSetValueExW(h, p, Some(0), REG_SZ, Some(&b)); }';
+  const ok1 = rustFns(guarded).every((f) => !N11_WRITE_RE.test(f.body) || N11_VERDICT_RE.test(f.body));
+  const ok2 = rustFns(naked).every((f) => !N11_WRITE_RE.test(f.body) || N11_VERDICT_RE.test(f.body));
+  if (!ok1) g.fail('N11 对照a：带闸样本必须放行');
+  if (ok2) g.fail('N11 对照b：裸写样本必须判红');
+  if (!N11_WRITE_RE.test('let _ = std::fs::rename(a, b);')) g.fail('N11 对照c：rename 写点必须被识别');
+  // 真仓扫描
+  for (const rel of N11_FILES) {
+    const f = join(ROOT, rel);
+    if (!existsSync(f)) { g.fail(`N11：${rel} 读不到（文件面漂移，同步 N11_FILES）`); continue; }
+    const src = stripRust(readFileSync(f, 'utf8'));
+    for (const fn of rustFns(src)) {
+      if (!N11_WRITE_RE.test(fn.body) || N11_VERDICT_RE.test(fn.body)) continue;
+      const allow = N11_ALLOW.find((a) => a.file === rel && a.fn === fn.name);
+      if (!allow) {
+        g.fail(`N11：${rel}::${fn.name} 含 Reg*/rename 写点但没有容器准入闸（cm_registry_container_ok/` +
+          `cm_winx_root_ok/cm_sendto_root_ok/registry_container_verdict/folder_*_verdict/backup_*）——` +
+          `补闸或在 N11_ALLOW 登记理由`);
+      }
+    }
+    for (const a of N11_ALLOW.filter((x) => x.file === rel)) {
+      const fns = rustFns(src);
+      if (!fns.some((f) => f.name === a.fn && N11_WRITE_RE.test(f.body))) {
+        g.fail(`N11：${rel}::${a.fn} 登记了例外但现算无写点（代码已改或判据失明）——${a.reason}`);
+      }
+    }
+  }
+}
+
 // 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明；
 // CLEANUP 取用点命中过少 ⇒ N9-B 语料失明（N9 取用点本应 ≥6，命中 0~5 即正则/域前缀出事）
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);

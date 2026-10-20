@@ -273,18 +273,25 @@ fn dll_path_needs_system(dll: &str) -> bool {
 /// 路径不含 `..` 组件（防 `System32\..\Temp\x.dll` 折叠穿越）、目标非重解析点；
 /// 元数据读不到也拒（回退 = 用键名当标签，不损失功能面）。
 fn resource_dll_allowed(p: &str) -> bool {
-    let n = p.trim().replace('/', "\\");
-    if n.is_empty() || n.contains("..") {
-        return false;
-    }
-    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    let windir = windir.trim_end_matches('\\').replace('/', "\\").to_ascii_lowercase();
-    if windir.is_empty() {
+    // R5a-L02：归一复用 protect 判据层的 normalize_lexical（判据层共用一份）——
+    // 自制 trim+/→\+小写 会把 verbatim `\\?\` 一律拒（方向安全的误杀），
+    // `..` 用子串判会误拒合法键名；归一后组件折叠语义与保护面同源。
+    let n = crate::engine::protect::normalize_lexical(p);
+    if n.is_empty() {
         return false;
     }
     let low = n.to_ascii_lowercase();
+    // 组件级 `..` 判（归一后仍残留 = 折叠不了的越界形态）
+    if low.split('\\').any(|seg| seg == "..") {
+        return false;
+    }
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let windir = crate::engine::protect::normalize_lexical(&windir).to_ascii_lowercase();
+    if windir.is_empty() {
+        return false;
+    }
     let allowed = [format!("{windir}\\system32\\"), format!("{windir}\\syswow64\\")];
-    if !allowed.iter().any(|r| low.starts_with(r)) {
+    if !allowed.iter().any(|r| low.starts_with(r.as_str())) {
         return false;
     }
     match std::fs::symlink_metadata(&n) {
@@ -1387,7 +1394,9 @@ unsafe fn is_system_com_server(guid: &str) -> bool {
             let _ = RegCloseKey(hk);
             if raw.is_empty() { continue; }
             let expanded = expand_env(raw.trim().trim_matches('"')).to_lowercase();
-            if expanded.starts_with(&sysroot) { return true; }
+            // R5a-M07：前缀必须带分隔符边界——`c:\windows.old\…` 也以 `c:\windows`
+            // 开头，旧写法把系统根外的 Windows.old 判成系统内置、合法扩展被拒
+            if expanded == sysroot || expanded.starts_with(&format!("{sysroot}\\")) { return true; }
         }
     }
     false
@@ -1399,6 +1408,92 @@ unsafe fn is_system_com_server(guid: &str) -> bool {
 /// winx（.lnk.disabled 重命名）、filesystem（Hidden 属性）、
 /// shellnew（Classes MULTI_SZ）、openwith（NoOpenWith）、
 /// packagedcom/uwp-contract/blockedBy（Shell Extensions\Blocked 屏蔽表）。
+
+// ==================== C02（R5a-K02）：写侧准入三判 ====================
+// 本域威胁模型与 startup.rs 相同：快照/持久缓存住在用户态可写数据根（R5a-U02），
+// 命令层的快照白名单只证明「id 来自上次扫描」，native 写侧必须自带 containment——
+// 否则注入行可把重命名/属性写/注册表写指到任意目标。判据全部纯词法、可直测；
+// 键归一（分隔符/大小写/verbatim 折回）在判据内完成，fail-closed。
+
+/// 词法归一：小写、`/`→`\`、折回 verbatim `\\?\` 前缀。路径键比对只走这里，
+/// 不再造第二份（R5a-L02 同因）。
+fn cm_path_key(p: &str) -> String {
+    let n = p.trim().replace('/', "\\");
+    let n = n.strip_prefix(r"\\?\").unwrap_or(&n);
+    n.trim_end_matches('\\').to_ascii_lowercase()
+}
+
+/// 组件边界前缀判：`a\b` 是 `a\bc` 的前缀不算命中。
+fn cm_under(path_key: &str, root_key: &str) -> bool {
+    if root_key.is_empty() {
+        return false;
+    }
+    path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
+}
+
+/// Win+X 三组的容器（与扫描面同源：`%LOCALAPPDATA%\Microsoft\Windows\WinX\Group{1,2,3}`）。
+fn cm_winx_root_ok(target: &str) -> bool {
+    let la = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    if la.is_empty() {
+        return false;
+    }
+    let la = cm_path_key(&la);
+    [1, 2, 3].iter().any(|g| cm_under(&cm_path_key(target), &format!("{la}\\microsoft\\windows\\winx\\group{g}")))
+}
+
+/// 发送到双根的容器（与扫描面同源：HKDM 的 `%APPDATA%` 与 `%ProgramData%` 各一份）。
+fn cm_sendto_root_ok(target: &str) -> bool {
+    let tk = cm_path_key(target);
+    let appdata = cm_path_key(&std::env::var("APPDATA").unwrap_or_default());
+    let programdata = cm_path_key(&std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into()));
+    [appdata, programdata]
+        .iter()
+        .any(|root| !root.is_empty() && cm_under(&tk, &format!("{root}\\microsoft\\windows\\sendto")))
+}
+
+/// 场景后缀（与扫描面 `scenes` 同一张表；新增场景必须两处同步）。
+const CM_SCENES: &[&str] = &[
+    "*", "allfilesystemobjects", "exefile", r"systemfileassociations\.exe", "lnkfile",
+    r"systemfileassociations\.lnk", "directory", "folder", "drive",
+    r"directory\background", "desktopbackground",
+    r"clsid\{645ff040-5081-101b-9f08-00aa002f954e}",
+    r"clsid\{20d04fe0-3aea-1069-a2d8-08002b30309d}",
+    "recyclebinfolder", "libraryfolder", r"libraryfolder\background", "userlibraryfolder",
+];
+
+/// 注册表臂容器：hive 必须是 HKCU/HKLM 全称形态，子键必须落在本域扫描面产出的
+/// Classes 容器形状内。Wow6432Node 视图按原生形态折回后同判（句柄层 32 位视图由
+/// resolve_native_reg_path 决定，containment 只认键形）。
+fn cm_registry_container_ok(native_path: &str) -> bool {
+    let key = cm_path_key(native_path);
+    let (hive_ok, rest) = if let Some(r) = key.strip_prefix("hkey_current_user\\") {
+        (true, r)
+    } else if let Some(r) = key.strip_prefix("hkey_local_machine\\") {
+        (true, r)
+    } else {
+        (false, "")
+    };
+    if !hive_ok {
+        return false;
+    }
+    // 32 位视图折回：Wow6432Node 段剥掉后与 64 位形态同判（两种前缀按序试剥）
+    let classes = rest
+        .strip_prefix("software\\classes\\wow6432node\\")
+        .or_else(|| rest.strip_prefix("software\\classes\\"));
+    let Some(classes) = classes else {
+        // 唯一 Classes 之外的合法落点：屏蔽表固定键
+        let blocked = "software\\microsoft\\windows\\currentversion\\shell extensions\\blocked";
+        return cm_under(&rest, blocked);
+    };
+    // 屏蔽表也可能以 Classes 外形态出现（上面已判），这里只收扫描面四形状
+    CM_SCENES.iter().any(|scene| {
+        cm_under(classes, &format!("{scene}\\shell"))
+            || cm_under(classes, &format!("{scene}\\shellex\\contextmenuhandlers"))
+            || cm_under(classes, &format!("{scene}\\shellex\\-contextmenuhandlers"))
+    }) || classes.ends_with("\\shellnew")
+        || cm_under(classes, "applications")
+}
+
 pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
     unsafe {
         let mut results: Vec<Value> = Vec::new();
@@ -1508,6 +1603,11 @@ unsafe fn toggle_cm_item(
 
     // ---- Win+X：.lnk ⇄ .lnk.disabled ----
     if source == "winx" {
+        // C02（R5a-K02）：目标 containment——Win+X 臂只认本域扫描根，注入行指向
+        // 任意文件时 rename 会把别人家的 .lnk 改名
+        if !cm_winx_root_ok(target) {
+            return Err("Win+X 目标不在本域扫描根内，已拒绝".into());
+        }
         if !std::path::Path::new(target).exists() {
             return Err("文件不存在".into());
         }
@@ -1544,6 +1644,11 @@ unsafe fn toggle_cm_item(
 
     // ---- 发送到：Hidden 属性切换 ----
     if source == "filesystem" {
+        // C02（R5a-K02）：目标 containment——发送到臂只认双根，注入行可借
+        // SetFileAttributesW 隐藏任意文件
+        if !cm_sendto_root_ok(target) {
+            return Err("发送到目标不在本域扫描根内，已拒绝".into());
+        }
         if !std::path::Path::new(target).exists() {
             return Err("文件不存在".into());
         }
@@ -1566,6 +1671,12 @@ unsafe fn toggle_cm_item(
 
     // 解析注册表路径
     let (hive, subkey) = parse_reg_path(target).ok_or("注册表路径格式错误")?;
+    // C02（R5a-K02）：registry 共臂 containment——shell/shellex/shellnew/openwith 四臂
+    // 全部经此；容器形状之外的键（Run/服务/策略等）一律拒。屏蔽表臂在更早的分支里
+    // 写固定键 + is_guid 值名，天然 contained，不走此判。
+    if !cm_registry_container_ok(target) {
+        return Err("注册表目标不在本域扫描面容器内，已拒绝".into());
+    }
 
     // ---- 新建菜单：Classes MULTI_SZ ----
     if source == "shellnew" {
@@ -1624,7 +1735,9 @@ unsafe fn toggle_cm_item(
             }
             bytes.extend_from_slice(&[0, 0]);
             let nm = to_wide("Classes");
+            // R5a-L03：失败早退必须先关 hk2——键句柄泄漏到进程退出，N3 抓不到早退未关
             if RegSetValueExW(hk2, PCWSTR(nm.as_ptr()), Some(0), REG_MULTI_SZ, Some(&bytes)).is_err() {
+                let _ = RegCloseKey(hk2);
                 return Err("写 Classes 失败".into());
             }
         }
@@ -1702,9 +1815,14 @@ unsafe fn toggle_cm_item(
                 }
             }
             // 删除四值
+            // R5a-M06：键打不开（不存在/权限不足）不得静默跳过后报「已启用」——
+            // 回读读不到隐藏值会恒判已启用，还把不存在的新路径回写快照（P1-1 同源）
             let sk = to_wide(&reg_path);
             let mut hk = HKEY::default();
-            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_ok() {
+            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_err() {
+                return Err("注册表路径不存在或无法写入，无法启用".into());
+            }
+            {
                 for vn in ["LegacyDisable", "Blocked", "ProgrammaticAccessOnly", "HideBasedOnVelocityId"] {
                     let nm = to_wide(vn);
                     let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
@@ -1765,6 +1883,42 @@ unsafe fn toggle_cm_item(
     if source == "shellex" {
         let leaf = subkey.rsplit('\\').next().unwrap_or(&subkey).to_string();
         let parent = if let Some(pos) = subkey.rfind('\\') { &subkey[..pos] } else { "" };
+        // R5a-M05：整组禁用形态——条目扫自 `-ContextMenuHandlers` 组键时叶子名不带
+        // '-'，旧判据把组禁用误报「已处于启用状态」、切换实为空操作。组形态的启停
+        // = 组键改名（组内全部条目随之切换；快照只回写本条，其余条目下次扫描归位）。
+        let parent_leaf = parent.rsplit('\\').next().unwrap_or("");
+        if parent_leaf.eq_ignore_ascii_case("-ContextMenuHandlers") {
+            let segs_fix = |path: &str| -> String {
+                let mut segs: Vec<&str> = path.split('\\').collect();
+                if segs.len() >= 2 {
+                    let n = segs.len();
+                    segs[n - 2] = "ContextMenuHandlers";
+                }
+                segs.join("\\")
+            };
+            if !want_enabled {
+                return Ok(json!({"status": "ok", "message": "已处于禁用状态（整组禁用形态）"}));
+            }
+            let grandparent = if let Some(pos) = parent.rfind('\\') { &parent[..pos] } else { "" };
+            let gp_sk = to_wide(grandparent);
+            let mut gp_hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(gp_sk.as_ptr()), Some(0), KEY_WRITE, &mut gp_hk).is_err() {
+                return Err("无法打开组父键（权限不足或键被占用）".into());
+            }
+            let old_nm = to_wide(parent_leaf);
+            let new_nm = to_wide("ContextMenuHandlers");
+            let r = RegRenameKey(gp_hk, PCWSTR(old_nm.as_ptr()), PCWSTR(new_nm.as_ptr()));
+            let _ = RegCloseKey(gp_hk);
+            if r.is_err() {
+                return Err("整组重命名未生效（可能需要管理员权限）".into());
+            }
+            return Ok(json!({
+                "status": "ok",
+                "newRegPath": json!(segs_fix(display_path)),
+                "newNativeRegPath": json!(segs_fix(target)),
+                "message": "已启用（整组还原 ContextMenuHandlers）"
+            }));
+        }
         if want_enabled && !leaf.starts_with('-') {
             return Ok(json!({"status": "ok", "message": "已处于启用状态"}));
         }
@@ -2111,5 +2265,44 @@ mod path_edit_tests {
             r"HKEY_USERS\.DEFAULT\Software\Classes\A"
         );
         assert_eq!(swap_last_segment("NoBackslashHere", "Leaf"), "Leaf");
+    }
+}
+
+#[cfg(test)]
+mod c02_write_gate_tests {
+    use super::*;
+
+    /// C02（R5a-K02）写侧准入三判。判红自证：把 `cm_under` 的组件边界判改成裸
+    /// `starts_with` ⇒ ② 类相邻前缀样本红；把 `cm_registry_container_ok` 的
+    /// Classes 前缀判删掉 ⇒ ⑤ 类越界容器样本红；把 `cm_path_key` 的 verbatim
+    /// 折回删掉 ⇒ ③ 类 verbatim 样本红。
+    #[test]
+    fn cm写侧准入_容器合法放行_越界拒() {
+        // ---- 键归一（③）：verbatim 折回 / 正斜杠 / 大小写 / 尾反斜杠 ----
+        assert_eq!(cm_path_key(r"\\?\C:\X\Y\"), r"c:\x\y");
+        assert_eq!(cm_path_key("C:/X/Y"), cm_path_key(r"C:\X\y"));
+        // ---- WinX：① 合法（混形态）② 相邻前缀 ③ 越界 ----
+        let la = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        assert!(cm_winx_root_ok(&format!("{la}/Microsoft/windows/WINX/Group2/工具.lnk")), "WinX 组内必须放行");
+        assert!(cm_winx_root_ok(&format!("{la}\\Microsoft\\Windows\\WinX\\Group3\\A.lnk.disabled")));
+        assert!(!cm_winx_root_ok(&format!("{la}\\Microsoft\\Windows\\WinX\\Group2Foo\\evil.lnk")), "相邻前缀必须拒");
+        assert!(!cm_winx_root_ok(r"C:\Windows\System32\evil.lnk"), "越界必须拒");
+        assert!(!cm_winx_root_ok(""), "空串必须拒");
+        // ---- 发送到：双根合法 + 越界 ----
+        let ad = std::env::var("APPDATA").unwrap_or_default();
+        assert!(cm_sendto_root_ok(&format!("{ad}\\Microsoft\\Windows\\SendTo\\x.desklink")));
+        assert!(cm_sendto_root_ok(r"C:\ProgramData\Microsoft\Windows\SendTo\y.zfsendtotarget"));
+        assert!(!cm_sendto_root_ok(r"D:\evil\x.desklink"), "越界必须拒");
+        // ---- registry：⑤ 场景形状合法 ⑥ 越界容器拒 ----
+        assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Classes\*\shell\Foo\command"));
+        assert!(cm_registry_container_ok(r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Wow6432Node\Directory\shellex\ContextMenuHandlers\X"));
+        assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Classes\.txt\ShellNew"), "shellnew 形状必须放行");
+        assert!(cm_registry_container_ok(r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Applications\notepad.exe"), "openwith 形状必须放行");
+        assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked"), "屏蔽表固定键必须放行");
+        assert!(!cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run"), "Run 容器不在本域扫描面，必须拒");
+        assert!(!cm_registry_container_ok(r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\evil"), "服务键必须拒");
+        assert!(!cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\ClassesX\*\shell\Evil"), "Classes 相邻前缀必须拒");
+        assert!(!cm_registry_container_ok(r"HKEY_USERS\.DEFAULT\Software\Classes\*\shell\Evil"), "hive 越界必须拒");
+        assert!(!cm_registry_container_ok(""), "空串必须拒");
     }
 }
