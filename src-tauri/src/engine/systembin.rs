@@ -138,10 +138,14 @@ pub fn system_tool(program: &str) -> Result<std::path::PathBuf, String> {
         names.push(format!("{program}.exe"));
     }
     // powershell.exe（inbox 5.1，v3-K1 的 PsInline 执行器用）不在 System32 根，
-    // 而在 WindowsPowerShell\v1.0 子目录 —— 该工具专属候选排在最前。
+    // 而在 WindowsPowerShell\v1.0 子目录；winmgmt.exe（P1-01 的 /resyncperf）
+    // 同理在 System32\wbem —— 两者各自有专属候选目录，排在最前。
     let ps_dir = root.join(r"System32\WindowsPowerShell\v1.0");
+    let wbem_dir = root.join(r"System32\wbem");
     let dirs: Vec<std::path::PathBuf> = if program.eq_ignore_ascii_case("powershell.exe") {
         vec![ps_dir, root.join("System32"), root.clone()]
+    } else if program.eq_ignore_ascii_case("winmgmt.exe") {
+        vec![wbem_dir, root.join("System32"), root.clone()]
     } else {
         vec![root.join("System32"), root.clone()]
     };
@@ -582,7 +586,7 @@ mod tests {
 
     #[test]
     fn pinned_tools_resolve_under_system_root() {
-        for name in ["reg.exe", "sc", "netsh.exe", "schtasks", "sfc.exe"] {
+        for name in ["reg.exe", "sc", "netsh.exe", "schtasks", "sfc.exe", "winmgmt.exe"] {
             let p = system_tool(name).expect("PINNED 内工具必须解析成功");
             let s = p.to_string_lossy().to_lowercase();
             assert!(
