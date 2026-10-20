@@ -650,14 +650,20 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
 /// warn 留痕，不再与「没有配置」同归静默空；只读消费降级空对象展示，写侧
 /// `update_settings` 拒 Corrupt——含 DPAPI 密文密钥的 settings.json 不会被空表覆写。
 pub(crate) fn load_settings() -> Value {
-    let v = match security::read_json_state(&settings_file()) {
-        security::JsonState::Ok(v) => v,
-        _ => json!({}),
+    load_settings_state().0
+}
+
+/// A1-M12：保留 Corrupt 位，供命令回执带 degraded（读失败与「没有配置」分开）。
+pub(crate) fn load_settings_state() -> (Value, bool) {
+    let (v, degraded) = match security::read_json_state(&settings_file()) {
+        security::JsonState::Ok(v) => (v, false),
+        security::JsonState::Absent => (json!({}), false),
+        security::JsonState::Corrupt => (json!({}), true),
     };
     if !v.is_object() {
-        return json!({});
+        return (json!({}), degraded);
     }
-    security::decrypt_settings_with_oscrypt(&v)
+    (security::decrypt_settings_with_oscrypt(&v), degraded)
 }
 
 /// **settings.json 的读-改-写唯一入口**（v4 组 1 / R1-M02）：在 `security::update_json`
@@ -932,7 +938,7 @@ fn model_meta(key: &str) -> (String, String, bool) {
 #[tauri::command]
 pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    let s = load_settings();
+    let (s, degraded) = load_settings_state();
     let engine = s
         .get("aiEngine")
         .and_then(|v| v.as_str())
@@ -1046,7 +1052,8 @@ pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Valu
 
     // 出口统一脱敏兜底（幂等：已是掩码的值不变）
     let data = security::mask_settings(&Value::Object(data));
-    Ok(json!({ "success": true, "data": data }))
+    // A1-M12：Corrupt 读失败与「没有配置」分开；degraded 只陈述读取健康度。
+    Ok(json!({ "success": true, "data": data, "degraded": degraded }))
 }
 
 // 审查 v2-F4（彻底方案 · 整链摘除）：`settings:save` 已于 2026-09-26 摘除。

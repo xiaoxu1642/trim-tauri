@@ -191,18 +191,27 @@ pub fn runtimes_status() -> Result<Value, String> {
 
         // ---- 旧版 VC++ 2005-2013（信息级） ----
         let mut old_vc: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // A1-M11（v7.2 P1）：注册表打不开不能写「未发现」——那是把「读不到」当成
+        // 「不存在」的断言。逐处计数，证据行如实说明无法确认。
+        let mut uninst_unreadable = 0usize;
         for uninst_path in [
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
             r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
         ] {
             let sk = to_wide(uninst_path);
             let mut hk = HKEY::default();
-            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                uninst_unreadable += 1;
+                continue;
+            }
             for sub in reg_enum_subkeys(hk) {
                 let sub_path = format!("{uninst_path}\\{sub}");
                 let ssk = to_wide(&sub_path);
                 let mut shk = HKEY::default();
-                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(ssk.as_ptr()), Some(0), KEY_READ, &mut shk).is_err() { continue; }
+                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(ssk.as_ptr()), Some(0), KEY_READ, &mut shk).is_err() {
+                    uninst_unreadable += 1;
+                    continue;
+                }
                 if let Some(dn) = reg_read_string(shk, "DisplayName") {
                     if dn.starts_with("Microsoft Visual C++ 2005") || dn.starts_with("Microsoft Visual C++ 2008")
                         || dn.starts_with("Microsoft Visual C++ 2010") || dn.starts_with("Microsoft Visual C++ 2012")
@@ -215,8 +224,20 @@ pub fn runtimes_status() -> Result<Value, String> {
             let _ = RegCloseKey(hk);
         }
         let old_evidence: Vec<String> = if old_vc.is_empty() {
-            vec!["未发现旧版 VC++（2005-2013）".to_string()]
-        } else { old_vc.into_iter().collect() };
+            if uninst_unreadable > 0 {
+                vec![format!(
+                    "有 {uninst_unreadable} 处卸载键无法读取，无法确认是否装有旧版 VC++（2005-2013）"
+                )]
+            } else {
+                vec!["未发现旧版 VC++（2005-2013）".to_string()]
+            }
+        } else {
+            let mut v: Vec<String> = old_vc.into_iter().collect();
+            if uninst_unreadable > 0 {
+                v.push(format!("另有 {uninst_unreadable} 处卸载键无法读取，清单可能不完整"));
+            }
+            v
+        };
         items.push(json!({
             "id": "vc-old", "status": "info", "evidence": old_evidence,
             "detail": "信息级：仅列出已装版本，不判定异常", "repair": null,

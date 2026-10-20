@@ -98,16 +98,18 @@ pub fn touch_recent(id: &str) -> bool {
     })
 }
 
-fn load() -> Value {
+fn load_state() -> (Value, bool) {
     let f = state_file();
     // v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt，含 IO 失败）已在
     // read_json_state 内 warn 留痕，不再与「没有配置」同归静默空；这里降级空骨架
     // 只影响读侧预读，写侧 update_state 拒 Corrupt，不会把空骨架写出去。
-    let v = match security::read_json_state(&f) {
-        security::JsonState::Ok(v) => v,
-        _ => return empty_state(),
+    // A1-M12：把 Corrupt 位带回给回执，读失败与「确实没有状态」分开。
+    let (v, degraded) = match security::read_json_state(&f) {
+        security::JsonState::Ok(v) => (v, false),
+        security::JsonState::Absent => (empty_state(), false),
+        security::JsonState::Corrupt => (empty_state(), true),
     };
-    match v {
+    let v = match v {
         Value::Object(m) if m.get("items").map(|x| x.is_object()).unwrap_or(false) => {
             let mut o = m;
             if !o.get("detected").map(|x| x.is_object()).unwrap_or(false) {
@@ -123,7 +125,12 @@ fn load() -> Value {
             Value::Object(o)
         }
         _ => empty_state(),
-    }
+    };
+    (v, degraded)
+}
+
+fn load() -> Value {
+    load_state().0
 }
 
 /// 三视图的**唯一提取口径**：一次 `load()` 的结果 → 各段的引用。
@@ -185,7 +192,13 @@ impl Snapshot {
 /// 读一次状态文件并派生快照（走的是同一个 `load()`：三态读器 + 骨架补齐 + 损坏降级
 /// 空骨架的口径与三个视图函数逐字相同）。
 pub fn snapshot() -> Snapshot {
-    Snapshot { st: load() }
+    snapshot_with_health().0
+}
+
+/// A1-M12：与 [`snapshot`] 同一份读盘，额外返回「本次读是否降级（Corrupt）」。
+pub fn snapshot_with_health() -> (Snapshot, bool) {
+    let (st, degraded) = load_state();
+    (Snapshot { st }, degraded)
 }
 
 /// 写侧骨架校验（v4 P2-D 尾）：结构与 `load()` 的接受面**同判据**，但方向是拒写。

@@ -1022,6 +1022,36 @@ mod tests {
         );
     }
 
+    /// U-A1（v7.2 P1）：前端三态与共享失败态的源码契约。
+    #[test]
+    fn u_a1_renderer_receipt_contracts() {
+        let font = include_str!("../../src/scripts/fontmanager.js");
+        assert!(font.contains("resp.success === false"), "A1-L04：字体配置 success:false 未被认领");
+        assert!(font.contains("读取字体配置失败"), "A1-L04：失败提示文案不见了");
+        let net = include_str!("../../src/scripts/netspeed.js");
+        assert!(net.contains("return { up: null, down: null }"), "A1-L05：采样失败必须回 null");
+        assert!(net.contains("sampleErrorShown"), "A1-L05：失败状态必须可见且不刷屏");
+        let mem = include_str!("../../src/scripts/memoryclean.js");
+        assert!(mem.contains("回执字段不完整"), "A1-L06：缺字段不得报成功");
+        assert!(mem.contains("resp.success === false"), "A1-L06：命令层判负必须被认领");
+        let modal = include_str!("../../src/scripts/modal.js");
+        assert!(modal.contains("function errorState"), "A1-L07：共享失败态件不见了");
+        assert!(modal.contains("window.errorState = errorState"), "A1-L07：失败态件未导出");
+        let ctx = include_str!("../../src/scripts/contextmenu.js");
+        assert!(ctx.contains("window.errorState({ title: '扫描失败'"), "A1-L07：失败态件没有消费方");
+    }
+
+    /// A1-M12（v7.2 P1）：六个读侧 loader 的 degraded 位必须出现在回执里。
+    #[test]
+    fn u_a1_degraded_receipts_contract() {
+        assert!(include_str!("commands/paths.rs").contains("\"degraded\": degraded"));
+        assert!(include_str!("commands/settings.rs").contains("\"degraded\": degraded"));
+        assert!(include_str!("commands/appearance.rs").contains("\"degraded\": degraded"));
+        assert!(include_str!("commands/optimizer/overview.rs").contains("\"degraded\": degraded"));
+        assert!(include_str!("engine/native/syspanel.rs").contains("\"degraded\": degraded"));
+        assert!(include_str!("commands/fileclean.rs").contains("o.insert(\"degraded\".into(), json!(degraded))"));
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

@@ -25,21 +25,24 @@
   const POLL_MS = 800;            // 流量采样间隔
   const LATENCY_MS = 2000;        // 延迟采样间隔（recording 阶段）
   let tickInFlight = false;
+  let sampleErrorShown = false;
 
   function sum(list, key) {
     return (list || []).reduce((acc, a) => acc + (Number(a[key]) || 0), 0);
   }
 
   // 聚合所有活动网卡的实时速率（与「实时网速」共用同一采样通道，避免重复常驻监控）
+  // A1-L05：失败必须回 null 而不是 0——0 B/s 是合法的「当前没流量」，
+  // 两者混在一起会让图表与报告把「读不到」画成「很安静」。
   async function sampleAgg() {
-    if (!window.api?.realtime) return { up: 0, down: 0 };
+    if (!window.api?.realtime) return { up: null, down: null };
     try {
       const resp = await window.api.realtime.sample();
-      if (!resp || !resp.success) return { up: 0, down: 0 };
+      if (!resp || !resp.success) return { up: null, down: null };
       const list = resp.adapters || [];
       return { up: sum(list, 'up'), down: sum(list, 'down') };
     } catch (e) {
-      return { up: 0, down: 0 };
+      return { up: null, down: null };
     }
   }
 
@@ -128,6 +131,16 @@
     tickInFlight = true;
     const currentRec = rec;
     const { up, down } = await sampleAgg();
+    if (up === null || down === null) {
+      tickInFlight = false;
+      if (!sampleErrorShown) {
+        sampleErrorShown = true;
+        setStatus('流量采样失败，正在重试…');
+        window.app?.log?.('warn', '测速流量采样失败（本轮不把失败记成 0 B/s）');
+      }
+      return;
+    }
+    sampleErrorShown = false;
     if (!rec || rec !== currentRec) {
       tickInFlight = false;
       return;

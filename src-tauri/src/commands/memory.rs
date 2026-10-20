@@ -392,10 +392,15 @@ pub async fn memory_stubborn_block<R: tauri::Runtime>(window: WebviewWindow<R>) 
     }
     // S3：纯 Rust 原生
     match tauri::async_runtime::spawn_blocking(native::stubborn_block).await {
-        Ok(Ok(data)) => {
-            let failed = data.get("failedCount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            Ok(json!({ "success": failed == 0.0, "partial": failed > 0.0, "data": data }))
-        }
+        Ok(Ok(data)) => match super::required_count(&data, "failedCount") {
+            Some(failed) => Ok(json!({ "success": failed == 0.0, "partial": failed > 0.0, "data": data })),
+            None => Ok(json!({
+                "success": false,
+                "partial": false,
+                "data": data,
+                "message": "原生回执缺少 failedCount，无法判定是否全部成功"
+            })),
+        },
         Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生执行失败: {e}") })),
         Err(e) => Ok(json!({ "success": false, "message": format!("原生任务异常: {e}") })),
     }

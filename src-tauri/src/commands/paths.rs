@@ -79,25 +79,29 @@ const ALLOWED_KEYS: &[&str] = &[
 ///
 /// v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt）已在 read_json_state 内
 /// warn 留痕，不再与「没有配置」同归静默空；只读展示降级空对象，写侧 update_json 拒写。
-fn load_paths_config() -> serde_json::Value {
-    let v = match security::read_json_state(&paths::paths_config_file()) {
-        security::JsonState::Ok(v) => v,
-        _ => serde_json::json!({}),
+fn load_paths_config_state() -> (serde_json::Value, bool) {
+    let (v, degraded) = match security::read_json_state(&paths::paths_config_file()) {
+        security::JsonState::Ok(v) => (v, false),
+        security::JsonState::Absent => (serde_json::json!({}), false),
+        security::JsonState::Corrupt => (serde_json::json!({}), true),
     };
-    match v {
+    let v = match v {
         serde_json::Value::Object(mut m) => {
             m.remove("softwareInventory");
             serde_json::Value::Object(m)
         }
         other => other,
-    }
+    };
+    (v, degraded)
 }
 
 /// paths:load — 读取已保存的路径配置
 #[tauri::command]
 pub fn paths_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
     guard::guard_readonly(&window)?;
-    Ok(serde_json::json!({ "success": true, "data": load_paths_config() }))
+    // A1-M12：Corrupt 与 Absent 不再同归空对象——回执带 degraded，渲染层可区分。
+    let (data, degraded) = load_paths_config_state();
+    Ok(serde_json::json!({ "success": true, "data": data, "degraded": degraded }))
 }
 
 /// paths:save — 保存单个路径（key 白名单 + 长度/空字节校验 + 存在性回执）

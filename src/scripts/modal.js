@@ -35,6 +35,23 @@
     ].join('');
   }
 
+  // A1-L07（v7.2 P1）：读取失败与「确实为空」必须外观可分。
+  // 旧实现全仓只有空态件，失败只能用空态表达；这里补一个共享的失败态件，
+  // 由各域复用（role=alert 让读屏也能认领）。
+  const ERROR_ICON = '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>';
+  function errorState({ title = '读取失败', desc = '', cta = null } = {}) {
+    return [
+      '<div class="empty-state empty-state--error" role="alert">',
+      `<div class="empty-state-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">${ERROR_ICON}</svg></div>`,
+      title ? `<div class="empty-state-title">${escapeHtml(title)}</div>` : '',
+      desc ? `<div class="empty-state-desc">${escapeHtml(desc)}</div>` : '',
+      (cta && cta.text)
+        ? `<div class="empty-state-cta"><button class="btn btn-primary" type="button" data-empty-cta="${escapeHtml(cta.target || '')}">${escapeHtml(cta.text)}</button></div>`
+        : '',
+      '</div>'
+    ].join('');
+  }
+
   function report(method, info) {
     try { window.api?.modal?.[method]?.(info || {}); } catch (e) { /* 日志失败不阻塞弹窗 */ }
   }
@@ -253,4 +270,5 @@
   // M2（v3.6.5）M2-6：统一销毁契约（destroy 解绑 MutationObserver + DOMContentLoaded）
   window.modal = { create, confirm, closeAll, destroy: stopObserver };
   window.emptyState = emptyState;
+  window.errorState = errorState;
 })();

@@ -837,7 +837,10 @@
     } catch (e) {
       window.app?.toast('error', '扫描失败: ' + e.message);
       if (container) {
-        container.innerHTML = `<div class="empty-state"><p>扫描失败: ${escapeHtml(e.message)}</p></div>`;
+        // A1-L07：读取失败走共享失败态件，不再与空态混用。
+        container.innerHTML = window.errorState
+          ? window.errorState({ title: '扫描失败', desc: e.message })
+          : `<div class="empty-state"><p>扫描失败: ${escapeHtml(e.message)}</p></div>`;
       }
     } finally {
       isScanning = false;

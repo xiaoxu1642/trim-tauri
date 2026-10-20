@@ -139,12 +139,14 @@ fn apply_battery_material_swap<R: Runtime>(app: &AppHandle<R>, on_battery: bool)
 #[tauri::command]
 pub fn appearance_get_material<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    let ap = crate::engine::appearance::load_appearance();
+    let (ap, degraded) = crate::engine::appearance::load_appearance_state();
     Ok(json!({
         "material": ap.get("material").and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .unwrap_or("mica-alt"),
         "materialEnabled": ap.get("materialEnabled").and_then(|v| v.as_bool()) != Some(false),
+        // A1-M12：外观配置读失败与「没有配置」分开。
+        "degraded": degraded,
     }))
 }
 

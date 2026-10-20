@@ -762,16 +762,19 @@ pub fn power_plan_state() -> Value {
             }
         })
         .collect::<Vec<Value>>();
+    let (power_ops, degraded) = read_power_ops_state();
     json!({
         "activeGuid": active_guid,
         "activeName": active_name,
+        // A1-M12：电源操作侧表读失败与「没有记录」分开。
+        "degraded": degraded,
         "options": options,
         "tools": {
             "highPerformanceGuid": HIGH_PERFORMANCE_GUID,
             "highPerformanceListed": listed_scheme(HIGH_PERFORMANCE_GUID),
             "ultimateGuid": ULTIMATE_PERFORMANCE_GUID,
             "ultimateListed": listed_scheme(ULTIMATE_PERFORMANCE_GUID),
-            "hiddenBackup": read_power_ops().get("hiddenHighPerformance").cloned().unwrap_or(Value::Null),
+            "hiddenBackup": power_ops.get("hiddenHighPerformance").cloned().unwrap_or(Value::Null),
         },
     })
 }
@@ -1064,12 +1067,18 @@ fn power_ops_path() -> Result<PathBuf, String> {
 
 /// 读侧表：不存在/损坏 → 空对象（两个操作在无记录时都能安全地如实拒绝）。
 fn read_power_ops() -> Value {
+    read_power_ops_state().0
+}
+
+/// A1-M12：保留 Corrupt 位（不存在 ≠ 读失败），供电源面板回执带 degraded。
+fn read_power_ops_state() -> (Value, bool) {
     let Ok(p) = power_ops_path() else {
-        return json!({});
+        return (json!({}), true);
     };
     match crate::security::read_json_state(&p) {
-        crate::security::JsonState::Ok(v) => v,
-        _ => json!({}),
+        crate::security::JsonState::Ok(v) => (v, false),
+        crate::security::JsonState::Absent => (json!({}), false),
+        crate::security::JsonState::Corrupt => (json!({}), true),
     }
 }
 

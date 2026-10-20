@@ -1987,6 +1987,12 @@ select.field-input { cursor: pointer; appearance: auto; }
   line-height: 1.6;
 }
 .empty-state-cta { margin-top: 16px; }
+/* A1-L07：读取失败态与「确实为空」共用结构件，但用危险色区分，避免各域自建。 */
+.empty-state--error .empty-state-icon {
+  background: color-mix(in srgb, var(--danger-text) 8%, transparent);
+  color: var(--danger-text);
+}
+.empty-state--error .empty-state-title { color: var(--danger-text); }
 
 /* ================================================================
    优化电脑（Optimizer）页面

@@ -55,10 +55,15 @@ fn bench_history_file() -> PathBuf {
 /// v4 修复（2026-10-09）：文件是**裸数组**，必须走 `read_json_array_state`（对象版把
 /// 合法数组判 Corrupt，会让本函数恒空、[`update_bench_history`] 恒拒）。
 /// 写路径见 [`update_bench_history`]：损坏时**拒写**，不再把整张历史静默清空。
-fn load_bench_history() -> Vec<Value> {
+/// 测速历史的三态读取（A1-M06，v7.2 P1）：`Corrupt` 不再与「确实没有历史」同归空数组。
+fn load_bench_history_state() -> Result<Vec<Value>, String> {
     match security::read_json_array_state(&bench_history_file()) {
-        security::JsonState::Ok(Value::Array(items)) => items.iter().cloned().collect(),
-        _ => Vec::new(),
+        security::JsonState::Ok(Value::Array(items)) => Ok(items),
+        security::JsonState::Ok(_) => Err("测速历史文件结构异常（不是数组）".into()),
+        security::JsonState::Corrupt => {
+            Err("测速历史读取失败（现场已隔离/见日志），本次未把它当成空历史".into())
+        }
+        security::JsonState::Absent => Ok(Vec::new()),
     }
 }
 
@@ -170,7 +175,11 @@ pub fn bench_history_add<R: tauri::Runtime>(window: WebviewWindow<R>, record: Op
 #[tauri::command]
 pub fn bench_history_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
-    Ok(json!({ "success": true, "data": load_bench_history() }))
+    match load_bench_history_state() {
+        Ok(data) => Ok(json!({ "success": true, "data": data })),
+        // A1-M06：读失败必须回 success:false；空数组只代表「确实没有历史」。
+        Err(msg) => Ok(json!({ "success": false, "message": msg })),
+    }
 }
 
 /// bench-history:delete — 按 id 删除单条

@@ -351,11 +351,25 @@ pub async fn contextmenu_toggle<R: Runtime>(
         }
     }
 
-    let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
+    // A1-M07：failed/skipped 缺任一键都不能判成功——旧实现 `unwrap_or(0)` 会把
+    // 「回执少写了键」静默翻成 success:true。
+    let Some(failed) = crate::commands::required_count(&data, "failed") else {
+        return json!({
+            "success": false,
+            "data": data,
+            "message": "右键菜单回执缺少 failed 计数，无法判定是否全部成功"
+        });
+    };
+    let Some(skipped) = crate::commands::required_count(&data, "skipped") else {
+        return json!({
+            "success": false,
+            "data": data,
+            "message": "右键菜单回执缺少 skipped 计数，无法判定是否全部成功"
+        });
+    };
     // skip 与 fail 一样是「没切成」：系统保护项/缺目标的 skip 若只统计 failed，
     // 整次操作会回 success:true，UI 上那些行被当成已切换。
-    let skipped = data.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
-    if failed > 0 || skipped > 0 {
+    if failed > 0.0 || skipped > 0.0 {
         let first_msg = data
             .get("results")
             .and_then(|v| v.as_array())

@@ -991,7 +991,7 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
     // （旧写法 opt_state::all() + dismissed_map() + detected_all() 各调一次 load() ⇒
     // 同一个 optimization-state.json 全量读盘 + 解析三遍，还把三段各深克隆一次）。
     // 三段对外语义与返回形状没变：snapshot() 走的就是那三个函数用的同一个 load()。
-    let snap = opt_state::snapshot();
+    let (snap, degraded) = opt_state::snapshot_with_health();
     let raw = snap.items();
     // 动态项遗留 pending 的待删清单：循环内逐条 remove = 每条一次 update_json
     // 全量重写（读 + 序列化 + fsync + rename + 目录 flush），改成攒齐后**单批落盘**。
@@ -1074,6 +1074,8 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
 
     json!({
         "success": true,
+        // A1-M12：状态文件读失败（Corrupt）时仍给空骨架，但回执必须带降级位。
+        "degraded": degraded,
         "items": items,
         "staleIds": stale_ids,
         // v2-M14：这里原先是 `{ "restored": [], "failed": [] }` 的字面空桩，渲染层据此弹

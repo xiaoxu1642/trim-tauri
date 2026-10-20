@@ -153,7 +153,12 @@
     let records = [];
     try {
       const resp = await window.api.benchHistory.list();
-      records = resp.success ? (resp.data || []) : [];
+      // A1-M06：读失败与「确实没有记录」必须分开；旧实现把 success:false 折成空数组。
+      if (!resp || !resp.success) {
+        window.app?.toast('error', '读取历史记录失败：' + ((resp && resp.message) || '无回执'));
+        return;
+      }
+      records = resp.data || [];
     } catch (e) {
       window.app?.toast('error', '读取历史记录失败: ' + e.message);
       return;

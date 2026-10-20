@@ -184,8 +184,14 @@ pub async fn startup_toggle<R: Runtime>(
         Ok(Err(e)) => return json!({ "success": false, "message": format!("原生执行失败: {e}") }),
         Err(e) => return json!({ "success": false, "message": format!("原生执行任务异常: {e}") }),
     };
-    let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
-    json!({ "success": failed == 0, "data": data })
+    let Some(failed) = crate::commands::required_count(&data, "failed") else {
+        return json!({
+            "success": false,
+            "data": data,
+            "message": "启动项回执缺少 failed 计数，无法判定是否全部成功"
+        });
+    };
+    json!({ "success": failed == 0.0, "data": data })
 }
 
 /// startup:delete（PS 备份 + 注册表/计划任务删除；文件类由主进程回收站删除）
@@ -312,8 +318,14 @@ pub async fn startup_delete<R: Runtime>(
         }
     }
 
-    let failed = data.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
-    json!({ "success": failed == 0, "data": data })
+    let Some(failed) = crate::commands::required_count(&data, "failed") else {
+        return json!({
+            "success": false,
+            "data": data,
+            "message": "启动项回执缺少 failed 计数，无法判定是否全部成功"
+        });
+    };
+    json!({ "success": failed == 0.0, "data": data })
 }
 
 fn bump_counter(data: &mut Value, key: &str) {

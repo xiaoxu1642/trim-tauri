@@ -820,36 +820,42 @@ fn today_key() -> String {
     log::local_date_str(std::time::SystemTime::now())
 }
 
-fn load_baidu_usage() -> Value {
+/// 读百度日限额文件（A1-M10，v7.2 P1）：读失败/损坏必须 `Err`，不能回 `count:0`——
+/// 那等于把当日额度静默重置，随后继续外呼。
+fn load_baidu_usage() -> Result<Value, String> {
     match std::fs::read_to_string(baidu_usage_file()) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(v) if v.is_object() => v,
-            _ => json!({ "date": today_key(), "count": 0 }),
+            Ok(v) if v.is_object() => Ok(v),
+            _ => Err("百度日限额文件损坏（不是对象），本次不重置额度".to_string()),
         },
-        Err(_) => json!({ "date": today_key(), "count": 0 }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(json!({ "date": today_key(), "count": 0 }))
+        }
+        Err(e) => Err(format!("百度日限额文件读取失败（{e}），本次不重置额度")),
     }
 }
 
-fn save_baidu_usage(u: &Value) {
-    let _ = security::atomic_write_json(&baidu_usage_file(), u);
+fn save_baidu_usage(u: &Value) -> Result<(), String> {
+    security::atomic_write_json(&baidu_usage_file(), u)
+        .map_err(|e| format!("百度日限额写入失败: {e}"))
 }
 
 /// `getBaiduDailyCount`：当日次数（跨日自动清零）
-fn get_baidu_daily_count() -> i64 {
-    let u = load_baidu_usage();
+fn get_baidu_daily_count() -> Result<i64, String> {
+    let u = load_baidu_usage()?;
     if u.get("date").and_then(|v| v.as_str()) == Some(today_key().as_str()) {
-        u.get("count")
+        Ok(u.get("count")
             .map(settings::js_number)
             .filter(|n| n.is_finite())
-            .unwrap_or(0.0) as i64
+            .unwrap_or(0.0) as i64)
     } else {
-        0
+        Ok(0)
     }
 }
 
 /// `incrementBaiduDailyCount`
-fn increment_baidu_daily_count() -> i64 {
-    let mut u = load_baidu_usage();
+fn increment_baidu_daily_count() -> Result<i64, String> {
+    let mut u = load_baidu_usage()?;
     let today = today_key();
     if u.get("date").and_then(|v| v.as_str()) != Some(today.as_str()) {
         u["date"] = json!(today);
@@ -862,8 +868,8 @@ fn increment_baidu_daily_count() -> i64 {
         .unwrap_or(0.0) as i64
         + 1;
     u["count"] = json!(next);
-    save_baidu_usage(&u);
-    next
+    save_baidu_usage(&u)?;
+    Ok(next)
 }
 
 // ==================== 命令 ====================
@@ -964,12 +970,23 @@ pub async fn aidesc_get<R: tauri::Runtime>(
             });
         }
         // 百度千帆超当日限额时直接返回提示，不降级到其他模型（避免简介来源与选择不一致）
-        if is_baidu && get_baidu_daily_count() >= BAIDU_DAILY_LIMIT {
-            log::write_log("warn", &format!("百度千帆今日调用已达 {BAIDU_DAILY_LIMIT} 次上限"));
-            return json!({ "success": false, "message": "百度千帆今日调用已达上限，请更换模型或明日再试" });
-        }
+        // A1-M10：限额文件读不到/写不进时也拒绝外呼——不能让「读失败」变成额度重置。
         if is_baidu {
-            increment_baidu_daily_count();
+            let count = match get_baidu_daily_count() {
+                Ok(n) => n,
+                Err(e) => {
+                    log::write_log("warn", &format!("百度千帆日限额状态不可读，拒绝外呼: {e}"));
+                    return json!({ "success": false, "message": format!("百度千帆日限额状态无法读取，已拒绝调用：{e}") });
+                }
+            };
+            if count >= BAIDU_DAILY_LIMIT {
+                log::write_log("warn", &format!("百度千帆今日调用已达 {BAIDU_DAILY_LIMIT} 次上限"));
+                return json!({ "success": false, "message": "百度千帆今日调用已达上限，请更换模型或明日再试" });
+            }
+            if let Err(e) = increment_baidu_daily_count() {
+                log::write_log("warn", &format!("百度千帆日限额写入失败，拒绝外呼: {e}"));
+                return json!({ "success": false, "message": format!("百度千帆日限额无法登记，已拒绝调用：{e}") });
+            }
         }
 
         let desc = call_model_description(&engine_key, &cfg, &menu_name, &vendor, &detail_line, scope_prompt);

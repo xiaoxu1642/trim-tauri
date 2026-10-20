@@ -18,9 +18,15 @@ const MATERIALS: &[&str] = &["mica", "mica-alt", "acrylic", "thin-acrylic", "non
 /// v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt）已在 read_json_state 内
 /// warn 留痕，这里只做展示降级；写侧拒 Corrupt，不会把空对象整表写出去。
 pub fn load_appearance() -> Value {
+    load_appearance_state().0
+}
+
+/// A1-M12：保留 Corrupt 位，供命令回执带 degraded。
+pub fn load_appearance_state() -> (Value, bool) {
     match security::read_json_state(&paths::appearance_file()) {
-        security::JsonState::Ok(v) => v,
-        _ => serde_json::json!({}),
+        security::JsonState::Ok(v) => (v, false),
+        security::JsonState::Absent => (serde_json::json!({}), false),
+        security::JsonState::Corrupt => (serde_json::json!({}), true),
     }
 }
 

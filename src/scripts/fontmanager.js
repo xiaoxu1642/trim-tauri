@@ -201,7 +201,18 @@
   async function load(silent) {
     try {
       const resp = await window.api.fonts.list();
-      if (resp && resp.success && resp.data) {
+      // A1-L04：success:false 既不是空列表也不是异常——旧实现直接跳过 if，
+      // 界面沿用旧/空列表且无提示。这里显式失败并说明原因。
+      if (!resp || resp.success === false) {
+        const msg = (resp && resp.message) || '读取字体配置失败';
+        window.app?.log?.('warn', `字体配置读取失败：${msg}`);
+        if (!silent) {
+          window.app?.toast('error', msg);
+          if (modal?.tip) modal.tip.textContent = msg;
+        }
+        return;
+      }
+      if (resp.data) {
         fontList = resp.data.list || [];
         settings = { ...settings, ...resp.data.settings };
         const imported = resp.data.imported;

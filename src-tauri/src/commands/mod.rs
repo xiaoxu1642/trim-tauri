@@ -6,6 +6,26 @@
 // v3 C-2：命令层全局状态集中登记 + 锁序文档（唯一清单，新状态先登记再落点）
 pub(crate) mod state;
 
+/// 回执里的失败计数必须**存在**才能判成功（A1-M07，v7.2 P1）。
+/// `unwrap_or(0)` 会把「生产侧少写/改名了该键」静默翻成 success:true——
+/// 这正是「成功位由可选计数派生」的同族缺口。
+pub(crate) fn required_count(data: &serde_json::Value, key: &str) -> Option<f64> {
+    data.get(key).and_then(|v| v.as_f64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::required_count;
+
+    /// A1-M07：键缺失必须返回 None（调用方据此判失败），不能退成 0。
+    #[test]
+    fn required_count_缺键为_none() {
+        assert_eq!(required_count(&serde_json::json!({ "failed": 0 }), "failed"), Some(0.0));
+        assert_eq!(required_count(&serde_json::json!({ "failed": 2 }), "failed"), Some(2.0));
+        assert_eq!(required_count(&serde_json::json!({}), "failed"), None);
+    }
+}
+
 pub mod app;
 pub mod device;
 pub mod log;

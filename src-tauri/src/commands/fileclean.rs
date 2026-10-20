@@ -317,6 +317,12 @@ pub async fn fileclean_scan<R: Runtime>(
         Some(t @ ("qq" | "wechat")) => t.to_string(),
         _ => return json!({ "success": false, "data": [], "message": "未知类型" }),
     };
+    // A1-M12：先记录路径配置读取健康度（Corrupt 与 Absent 分开），
+    // 再进入 configured_dir（那里仍按 fail-closed 决定默认目录）。
+    let degraded = matches!(
+        crate::security::read_json_state(&crate::engine::paths::paths_config_file()),
+        crate::security::JsonState::Corrupt
+    );
 
     let scan_path = match configured_dir(&ty, &custom_path) {
         Ok(path) => path,
@@ -403,7 +409,11 @@ pub async fn fileclean_scan<R: Runtime>(
         json!({ "scanType": ty2, "done": items.len(), "total": MAX_FILES }),
     );
 
-    scan_response(items, total_size, resolved, unhandled, truncated)
+    let mut resp = scan_response(items, total_size, resolved, unhandled, truncated);
+    if let Some(o) = resp.as_object_mut() {
+        o.insert("degraded".into(), json!(degraded));
+    }
+    resp
 }
 
 /// `fileclean:scan` 的成功回执形状。

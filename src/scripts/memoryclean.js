@@ -397,16 +397,26 @@
       // 「专杀失败」。改成按 data 对象判存在，逐字段读。
       if (resp && resp.data) {
         const d = resp.data;
-        const killed = Number(d.killed) || 0;
-        const failed = Number(d.failed) || 0;
-        const skipped = Number(d.skipped) || 0;
-        const leftover = Array.isArray(d.leftover) ? d.leftover : [];
-        const skippedDetail = Array.isArray(d.skippedDetail) ? d.skippedDetail : [];
+        // A1-L06：缺字段不能折成 0 再报成功——回执形状不对就明确失败。
+        const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+        const killed = num(d.killed);
+        const failed = num(d.failed);
+        const skipped = num(d.skipped);
+        if (killed === null || failed === null || skipped === null
+            || !Array.isArray(d.leftover) || !Array.isArray(d.skippedDetail)) {
+          window.app?.toast('error', '顽固软件专杀回执字段不完整，未报告成功');
+          window.app?.log('warn', '顽固软件专杀回执缺字段：' + JSON.stringify(d));
+          return;
+        }
+        const leftover = d.leftover;
+        const skippedDetail = d.skippedDetail;
         const summary = `顽固软件专杀完成：已结束 ${killed} 个进程`
           + (failed ? `，${failed} 个失败` : '')
           + (leftover.length ? `，仍有残留 ${leftover.join('、')}` : '');
         // 审查 v2-M1：被路径判定跳过的进程必须被看见，不能表现为「静默成功 0 个」
-        if (skipped > 0) {
+        if (resp.success === false) {
+          window.app?.toast('error', (resp && resp.message) || `${summary}；${failed} 个失败`);
+        } else if (skipped > 0) {
           window.app?.toast('warning', `${summary}；${skipped} 个同名进程不在预期安装目录已跳过`);
           window.app?.log('warn', `顽固软件专杀跳过 ${skipped} 个同名进程：${skippedDetail.join('；')}`);
         } else {
@@ -453,17 +463,27 @@
       // 2026-10-06 扩链：新增 runValues（Run 自启项）一组，三组成败都要收。
       if (resp && resp.data) {
         const d = resp.data;
-        const svcs = Array.isArray(d.services) ? d.services : [];
-        const tasks = Array.isArray(d.tasks) ? d.tasks : [];
-        const runVals = Array.isArray(d.runValues) ? d.runValues : [];
-        const failS = Array.isArray(d.failedServices) ? d.failedServices : [];
-        const failT = Array.isArray(d.failedTasks) ? d.failedTasks : [];
-        const failR = Array.isArray(d.failedRunValues) ? d.failedRunValues : [];
+        // A1-L06：三组成败都必须是数组；缺一组也不能用 [] 冒充「全成功」。
+        const arrays = ['services', 'tasks', 'runValues', 'failedServices', 'failedTasks', 'failedRunValues'];
+        if (!arrays.every(k => Array.isArray(d[k]))) {
+          window.app?.toast('error', '阻止开机自启回执字段不完整，未报告成功');
+          window.app?.log('warn', '阻止开机自启回执缺数组字段：' + JSON.stringify(d));
+          return;
+        }
+        const svcs = d.services;
+        const tasks = d.tasks;
+        const runVals = d.runValues;
+        const failS = d.failedServices;
+        const failT = d.failedTasks;
+        const failR = d.failedRunValues;
         const failAll = [...failS, ...failT, ...failR];
         const summary = `已处理 ${svcs.length} 个服务`
           + (tasks.length ? `，删除 ${tasks.length} 个任务` : '')
           + (runVals.length ? `，清理 ${runVals.length} 个启动项` : '');
-        if (failAll.length) {
+        if (resp.success === false) {
+          window.app?.toast('error', (resp && resp.message) || `${summary}；${failAll.length} 项失败`);
+          window.app?.log('warn', `顽固软件自启阻断命令层判负：${resp.message || '无原因'}；服务失败 ${failS.join('、') || '无'}；任务失败 ${failT.join('、') || '无'}；启动项失败 ${failR.join('、') || '无'}`);
+        } else if (failAll.length) {
           // M-1（2026-09-15）：部分失败如实告知，不吞
           window.app?.toast('warning', summary + `，但 ${failAll.length} 项失败：` +
             failAll.join('、'));
