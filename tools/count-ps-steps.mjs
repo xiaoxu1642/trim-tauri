@@ -16,7 +16,11 @@
 // 用法：node tools/count-ps-steps.mjs
 
 import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+// T1c-L05：仓根钉死，不依赖调用方 CWD（从 src-tauri/ 跑也能用）。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 数据层 pwsh 步骤分账。口径：`steps[]` 与 `restore[]` 各自数「含 pwsh 的项」与「pwsh 步」。 */
 export function countPsSteps(items) {
@@ -37,7 +41,7 @@ export function countPsSteps(items) {
 
 // 只在被直接执行时打印；被 import 时不产出噪声
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const d = JSON.parse(readFileSync('src-tauri/data/optimizer-runtime.json', 'utf8'));
+  const d = JSON.parse(readFileSync(join(ROOT, 'src-tauri', 'data', 'optimizer-runtime.json'), 'utf8'));
   const c = countPsSteps(d);
   console.log(`优化项总数（optimizer-runtime.json 顶层数组）: ${c.total}`);
   console.log(`正向 steps[]：含 pwsh 的项 ${c.applyItems} / pwsh 步 ${c.applySteps}`);

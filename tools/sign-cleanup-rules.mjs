@@ -32,7 +32,9 @@ const argv = process.argv.slice(2);
 const fileArg = argv.includes('--file') ? argv[argv.indexOf('--file') + 1] : null;
 const RULES = fileArg ? path.join(ROOT, fileArg) : path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
 const FALLBACK = path.join(ROOT, 'src', 'scripts', 'cleanup-fallback.generated.js');
-const PRIV_KEY = path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
+// T1c-L04：发布机密钥可挪位置（与 publish-atomgit 的环境变量口径对齐）；
+// 默认值保持现状，缺文件仍 fail-loud。
+const PRIV_KEY = process.env.TRIM_RULES_PRIVKEY || path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
 
 // 验签真源导出（T1c-M02，v7.2 C09）：check-data-signatures.mjs import 同一份实现，
 // 「改后必须重签」从此在 Node 侧有判红路径——此前全仓只有残留域验签（check-residue-
@@ -99,6 +101,12 @@ function sign() {
 }
 
 function genFallback() {
+  // T1c-M01：--file 是签名器的通用入口，但 gen-fallback 的产物**只服务清理域**
+  // （cleanup.js 的分类兜底）。把残留库灌进去会覆盖清理域真源 —— 直接拒绝。
+  if (fileArg) {
+    console.error('✗ gen-fallback 不接受 --file：前端兜底真源固定绑定 cleanup-rules.json');
+    process.exit(1);
+  }
   const raw = fs.readFileSync(RULES, 'utf8');
   JSON.parse(raw); // 源必须是合法 JSON，坏源直接抛错终止
   // 以 JSON.parse(字符串字面量) 内联，而非对象字面量直拼——数据源经 JSON.stringify 转义后

@@ -17,7 +17,7 @@
 
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { WINERROR_CODES } from './winerror-codes.source.mjs';
 
@@ -52,7 +52,9 @@ export function projectWinerrorDoc() {
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
 
-if (process.argv.includes('--check')) {
+const IS_MAIN = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (IS_MAIN && process.argv.includes('--check')) {
   const want = projectWinerrorDoc();
   let have = '';
   try {
@@ -68,5 +70,7 @@ if (process.argv.includes('--check')) {
   process.exit(0);
 }
 
-writeFileSync(OUT, projectWinerrorDoc(), 'utf8');
-console.log(`✓ 已落盘 ${OUT}（${JSON.parse(projectWinerrorDoc()).codes.length} 个错误码）`);
+if (IS_MAIN) {
+  writeFileSync(OUT, projectWinerrorDoc(), 'utf8');
+  console.log(`✓ 已落盘 ${OUT}（${JSON.parse(projectWinerrorDoc()).codes.length} 个错误码）`);
+}

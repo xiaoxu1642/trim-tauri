@@ -23,8 +23,10 @@
 'use strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, '')).replace(/\\/g, '/'), '..');
+// T1c-M03：fileURLToPath 才能还原 %20/中文（pathname 原样保留百分号编码）。
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLEANUP = path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
 const RESIDUE = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
 const SCHEMA = path.join(ROOT, 'tools', 'rule-schema.json');

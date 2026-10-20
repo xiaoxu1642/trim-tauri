@@ -9,17 +9,19 @@
 //   --check：只比对不写盘（差异即退出码 1，可用于门禁）
 //   --refresh-headers：正文一致时也重写文件。用于 PROVENANCE 头的口径变更
 //     （审查 M22b：来源行从绝对路径改成仓库内相对路径后，当时在册的 63 个正文没变的
-//     文件仍留着旧绝对路径）。S3 退役后 MAPPING 只剩 2 项，这个数不会再是 63。
+//     文件仍留着旧绝对路径）。S3 退役后 MAPPING 项数以 ps-mapping.mjs 现算为准，本注释不记数。
 //     —— 重写后必须逐字节核对 CR/BOM 未被吃掉（`*.ps1` 是 `-text`，AGENTS.md §5.1）。
 
 import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { MAPPING, withProvenance, stripProvenance, loadBody } from './ps-mapping.mjs';
 
 const require = createRequire(import.meta.url);
-const PSDIR = join(new URL('..', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\'), 'src-tauri', 'ps');
+// T1c-M03：URL.pathname 不做百分号解码，路径含空格/中文即错位；统一 fileURLToPath。
+const PSDIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'ps');
 const CHECK_ONLY = process.argv.includes('--check');
 const REFRESH_HEADERS = process.argv.includes('--refresh-headers');
 

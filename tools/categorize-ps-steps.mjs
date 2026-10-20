@@ -1,6 +1,9 @@
 // categorize-ps-steps.mjs —— 统计数据层 pwsh 步骤的指令模式，评估原生化覆盖面
 import { readFileSync } from 'node:fs';
-const d = JSON.parse(readFileSync('src-tauri/data/optimizer-runtime.json', 'utf8'));
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const d = JSON.parse(readFileSync(join(ROOT, 'src-tauri', 'data', 'optimizer-runtime.json'), 'utf8'));
 
 const buckets = new Map();
 const push = (k, v) => {

@@ -21,7 +21,8 @@ import { createRequire } from 'node:module';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { ORIGIN } from './ps-origin.mjs';
 
@@ -31,8 +32,8 @@ const FIXED_DIR = DIR_IDX >= 0 ? ARGV[DIR_IDX + 1] : null;
 const FIXTURES_ONLY = ARGV.includes('--fixtures-only');
 
 const require = createRequire(import.meta.url);
-// 与 sync-ps-from-js.mjs 同一套路径取法（Windows 下把 URL pathname 转成反斜杠路径）
-const ROOT = new URL('..', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\');
+// T1c-M03 同形态：fileURLToPath 才还原空格/中文路径。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CRATE = join(ROOT, 'src-tauri');
 
 // S3：cleanup 域 PS 脚本已删除，本门禁不再适用

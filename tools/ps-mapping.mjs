@@ -111,7 +111,8 @@ function relSource(absolute) {
   if (norm.startsWith(REPO_ROOT.replace(/\\/g, '/'))) {
     return norm.slice(REPO_ROOT.length + 1);
   }
-  return norm;
+  // T1c-L03：仓外绝对路径不得原样写进 .ps1（AGENTS §2）；不可达时也要 fail-loud。
+  throw new Error(`映射源不在仓库内（${absolute}）——PROVENANCE 头只允许仓内相对路径`);
 }
 
 /**
@@ -162,9 +163,38 @@ export function loadTemplate(tpl, requireFn, readFileFn) {
   return new Function(...names, 'return `' + src + '`')(...values);
 }
 
+/**
+ * 三分支离线自检（T1c-L02）：inline / template / sentinelPath 当前没有 MAPPING 项使用，
+ * 但代码必须保持可用。合成夹具只走内存，不触盘、不执行外部进程。
+ */
+export function selfTestBranches() {
+  const inline = loadBody(
+    { inline: { file: 'x.js', varName: 'BODY' } },
+    () => { throw new Error('inline 不应 require'); },
+    () => 'const BODY = `hi ${1 + 1}`;',
+  );
+  if (inline !== 'hi 2') throw new Error(`inline 分支失真：${inline}`);
+
+  const template = loadBody(
+    { template: { file: 'x.js', varName: 'TPL', deps: { NAME: 'dep.js' } } },
+    () => ({ NAME: 'world' }),
+    () => 'const TPL = `hello ${NAME} / \\${X_PLACEHOLDER}`;',
+  );
+  if (template !== 'hello world / ${X_PLACEHOLDER}') {
+    throw new Error(`template 分支失真：${template}`);
+  }
+
+  const sentinel = loadBody(
+    { js: 'x.js', call: 'f', sentinelPath: 'C:\\tmp\\x.exe' },
+    () => ({ f: () => 'run "C:\\tmp\\x.exe"' }),
+  );
+  if (sentinel !== 'run "@@TRIM_INSTALLER_PATH@@"') {
+    throw new Error(`sentinelPath 分支失真：${sentinel}`);
+  }
+}
+
 /** 生成带来源标记的 .ps1 全文 */
-export function withProvenance(entry, body) {
-  // 源坐标一律走 relSource()：绝对路径不得进跟踪文件（审查 M22）
+export function withProvenance(entry, body) {  // 源坐标一律走 relSource()：绝对路径不得进跟踪文件（审查 M22）
   const argsText = (entry.args || [])
     .map((a) => (entry.sentinelPath && a === entry.sentinelPath ? JSON.stringify(INSTALLER_PATH_TOKEN) : JSON.stringify(a)))
     .join(', ');

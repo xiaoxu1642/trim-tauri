@@ -30,12 +30,23 @@ import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { MAPPING, stripProvenance, loadBody, withProvenance } from './ps-mapping.mjs';
+import { MAPPING, stripProvenance, loadBody, withProvenance, selfTestBranches } from './ps-mapping.mjs';
 
 const require = createRequire(import.meta.url);
-const PSDIR = join(new URL('..', import.meta.url).pathname.replace(/^\//, '').replace(/\//g, '\\'), 'src-tauri', 'ps');
+// T1c-M03 同形态：fileURLToPath 才还原空格/中文路径。
+const PSDIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'ps');
+
+// T1c-L02：inline / template / sentinelPath 三条取正文分支当前无 MAPPING 项使用，
+// 但代码必须保持可用——每次跑本门禁都做一次内存合成自检。
+try {
+  selfTestBranches();
+} catch (e) {
+  console.error(`✗ ps-mapping 三分支自检失败：${e.message}`);
+  process.exit(1);
+}
 
 // 行为层比对中允许差异的字段（运行期天然抖动）
 // cache：内存「系统缓存」逐秒变动；collectedAt：netcheck 采集时刻；
