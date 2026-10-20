@@ -203,6 +203,9 @@ const MUST_MAIN = [
   // 渲染层失陷即可弹 UAC、拿到管理员 CMD，等效提权出口按 §3「不得下放」。
   // 子窗消费面实测为 0（四份子窗 HTML 均未挂 quickcmds.js），改档零功能代价。
   'quickcmds_run',
+  // R1a-M01（P1-W2）：paths:save 是唯一把「任意绝对路径」写进清理配置的渲染面，
+  // 下游会按配置永久删除；子窗无消费方 ⇒ 按 AGENTS §3 判 MAIN（先移最重的一条）。
+  'paths_save',
 ];
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----
@@ -427,7 +430,7 @@ const MUST_READONLY = [
   'paths_browse', // 疑点：起系统文件对话框
   'paths_file_icon',
   'paths_load',
-  'paths_save', // 疑点：写路径配置
+  // 'paths_save' 已按 R1a-M01 迁 MAIN（写路径配置会进入永久删链）。
   'paths_scan',
   'process_manager_close_window',
   'process_manager_open_window',

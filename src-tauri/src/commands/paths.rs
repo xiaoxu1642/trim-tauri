@@ -1,7 +1,7 @@
 //! paths 域（批次 A）：paths:scan / load / save / browse / validate
 //!
-//! 白名单必须与渲染层 pathbinding.js 的 GROUPS 全集（4 组 10 项）保持同源
-//! （审查 SET-1：原实现漏了 4 个「安装路径」key，导致设置页可编辑却静默保存失败）。
+//! 白名单必须与渲染层 pathbinding.js 的 GROUPS 保持同源（键集合以两边文件现算为准，
+//! 注释不记条数）。（审查 SET-1：原实现漏了 4 个「安装路径」key，导致设置页可编辑却静默保存失败）。
 //! P3 顺手修（2026-10-09）：`scannedAt` 从白名单移除 —— 前端那处冗余回写已删
 //! （后端 paths_scan 落盘时自带时间戳），写面收紧到用户真正可编辑的 10 个键。
 //!
@@ -107,7 +107,8 @@ pub fn paths_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_j
 /// paths:save — 保存单个路径（key 白名单 + 长度/空字节校验 + 存在性回执）
 #[tauri::command]
 pub fn paths_save<R: tauri::Runtime>(window: WebviewWindow<R>, key: String, value: String) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    // R1a-M01：本命令写入的路径会被清理扫描原样采纳并永久删除，只在主窗配置页调用。
+    guard::guard(&window, guard::MAIN)?;
     if !ALLOWED_KEYS.contains(&key.as_str()) || value.len() > 1024 || value.contains('\0') {
         return Ok(serde_json::json!({ "success": false, "message": "路径配置无效" }));
     }

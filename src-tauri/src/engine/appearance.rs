@@ -11,7 +11,7 @@ use super::{log, paths};
 use crate::security;
 
 /// 材质合法值（非法值回退 mica，与设置页默认一致）
-const MATERIALS: &[&str] = &["mica", "mica-alt", "acrylic", "thin-acrylic", "none"];
+pub(crate) const MATERIALS: &[&str] = &["mica", "mica-alt", "acrylic", "thin-acrylic", "none"];
 
 /// 外观配置只读展示（写侧唯一入口是 [`update_appearance`]）。
 ///

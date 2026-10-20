@@ -138,7 +138,7 @@ fn read_handshake() -> Option<(String, String, u32)> {
 /// 用户不会失去应用；② 只把 `phase` 改成 `ready` 的改文件者，pid 仍是旧实例自己的，
 /// 当场被识破。
 /// 买不到什么：伪造方填一个当时确实活着的 pid 即可绕过 —— 但那要求它已能写我们 ACL
-/// 保护的数据目录，`new_nonce` 的注释（:59-62）已把这种本机写者划在威胁模型之外。
+/// 保护的数据目录，`new_nonce` 的注释已把这种本机写者划在威胁模型之外。
 #[cfg(windows)]
 fn takeover_writer_gone(pid: u32) -> bool {
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};

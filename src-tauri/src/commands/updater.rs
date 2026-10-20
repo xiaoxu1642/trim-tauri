@@ -428,7 +428,14 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
     // 标志铺垫必须在 spawn **之前**（同步、无 await）：闭包 spawn 后第一行就可能跑到，
     // 瞬时完成时它会先于本函数返回执行 store(false)——铺垫晚了会被那句 false 覆盖成
     // true 永久卡住。先 true 再 spawn，闭包出口与 cancel 各自收 false。
-    DOWNLOADING.store(true, std::sync::atomic::Ordering::Relaxed);
+    // R1a-M02：复验包含网络往返，load 检查后到 store 之间是 TOCTOU 窗口；
+    // 用 CAS 占位，两个并发请求只有一个能进入 spawn。
+    if DOWNLOADING
+        .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(json!({ "ok": false, "error": "already-downloading" }));
+    }
     let task = tauri::async_runtime::spawn(async move {
         // 插件回的是**增量**字节数，累计值、百分比与速度由我们自己算。
         // 每次尝试的开头各自赋值（见下面循环里那两行），所以这里只声明不初始化。
@@ -823,7 +830,7 @@ pub fn join_silent_check_thread() {
     let Some(slot) = SILENT_CHECK_THREAD.get() else {
         return;
     };
-    let handle = slot.lock().ok().and_then(|mut g| g.take());
+    let handle = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(h) = handle {
         let _ = h.join();
     }

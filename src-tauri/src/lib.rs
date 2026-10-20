@@ -1422,6 +1422,37 @@ mod tests {
         );
     }
 
+    /// U-R1a（P1-W2）：命令层并发/档位/形状收口。
+    #[test]
+    fn u_r1a_command_contracts() {
+        assert!(
+            include_str!("commands/paths.rs").contains("guard::guard(&window, guard::MAIN)")
+                && !include_str!("commands/paths.rs").contains("pub fn paths_save<R: tauri::Runtime>(window: WebviewWindow<R>, key: String, value: String) -> Result<serde_json::Value, String> {\n    guard::guard_readonly"),
+            "R1a-M01：paths_save 必须主窗专属"
+        );
+        assert!(
+            include_str!("commands/state.rs").contains("unwrap_or_else(|e| e.into_inner()).take()"),
+            "R1a-L08：待编辑意图的锁中毒必须取内值，不能静默丢"
+        );
+        assert!(
+            include_str!("commands/updater.rs").contains("compare_exchange(false, true"),
+            "R1a-M02：下载中标志必须 CAS 占位"
+        );
+        assert!(
+            include_str!("commands/settings.rs").contains("偏好值必须是布尔"),
+            "R1a-L09：偏好值必须有形状闸"
+        );
+        assert!(
+            include_str!("commands/overview.rs").contains("read_json_or_default")
+                && include_str!("commands/overview.rs").contains("锁内必须复查"),
+            "R1a-L07/L10：缓存读取必须复用读器且锁内复查"
+        );
+        assert!(
+            include_str!("engine/appearance.rs").contains("pub(crate) const MATERIALS"),
+            "R1a-M04：材质枚举必须单一真源"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

@@ -14,7 +14,7 @@
 //! - 写：`security::encrypt_settings_with_oscrypt`（**绝不明文落盘**；无主密钥时回落
 //!   旧版「v10 + 裸 DPAPI」密文，Electron 与本项目两侧都能读）；
 //! - 出口：发往渲染层前统一过 `security::mask_settings`（空值保持空串 = 未配置；
-//!   未知字段一律掩码），掩码回传即「用户未修改」语义。
+//!   `SECRET_FIELDS` 白名单内的字段掩码，白名单外字段不是密钥、不掩码）。
 //!
 //! # 与 Electron 的差异
 //!
@@ -76,6 +76,10 @@ pub async fn settings_set_pref<R: tauri::Runtime>(
     }
     if !PREF_KEYS.contains(&key.as_str()) {
         return json!({ "success": false, "message": "未知的偏好键" });
+    }
+    // R1a-L09：四个偏好键语义都是布尔；副窗不能借 64KB 体积闸灌任意形状进 settings.json。
+    if !value.is_boolean() {
+        return json!({ "success": false, "message": "偏好值必须是布尔" });
     }
     // 值形状闸：上限 64KB（防把 settings.json 灌爆——它每次保存都要整体加解密）
     if serde_json::to_string(&value).map(|s| s.len()).unwrap_or(usize::MAX) > 64 * 1024 {

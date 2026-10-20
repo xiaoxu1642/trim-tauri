@@ -2,8 +2,8 @@
 //!
 //! v0.7.0 用户拍板：主窗那段内联残留面板（三链扫描 + 勾选 + 删除）整块搬进这扇副窗，
 //! 卸载成功后弹的也是它 —— 同一件事不该有两个入口，两个入口迟早长得不一样。
-//! 因此本轮同时把 8 条残留链命令的档位从 `MAIN` 换成窄窗口集 `guard::RESIDUE_WINDOWS`
-//! （= 只有 `residue`），并同步 `check-guard-tiers` 的 E 组与 `check-channel-map` 的 D5。
+//! 因此本轮把残留链命令的档位从 `MAIN` 换成窄窗口集 `guard::RESIDUE_WINDOWS`
+//! （成员与条数以 `node tools/check-guard-tiers.mjs` 现算为准，不在注释记数）。
 //!
 //! `app_id` 走 URL query 传给副窗，**传之前先过执行侧同一对取值闸**
 //! （`valid_uninstall_key_path` / `valid_appx_fullname`，与 `uninstall_residue_scan` 里用的

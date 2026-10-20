@@ -69,7 +69,7 @@ impl PendingEditState {
     }
 
     pub(crate) fn take(&self) -> Option<Value> {
-        self.value.lock().ok()?.take()
+        self.value.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
 

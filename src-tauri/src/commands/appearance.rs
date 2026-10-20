@@ -25,13 +25,9 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::engine::{guard, log, paths, protect};
+use crate::engine::{appearance::MATERIALS, guard, log, paths, protect};
 // 审查 v2-F7：系统工具走绝对路径，不用裸进程名
 use crate::engine::systembin::system_tool;
-
-/// 材质合法值全集（对照上游 `MATERIAL_NATIVE_MAP` 的键；与
-/// `engine::appearance::MATERIALS` 同源，两处必须一起改）
-const MATERIALS: &[&str] = &["mica", "mica-alt", "acrylic", "thin-acrylic", "none"];
 
 /// 背景图扩展名白名单（对照上游 dialog filters 与 bg-list 的正则）
 const BG_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];

@@ -70,6 +70,12 @@ pub async fn overview_metrics<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
     let result = tauri::async_runtime::spawn_blocking(move || {
         // 串行化：重叠请求在此排队，保证任一时刻只有一次采集在跑
         let _serialize = METRICS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // R1a-L10：锁外查缓存后可能已有别的请求采完，锁内必须复查一次。
+        if let Some((at, data)) = METRICS_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            if crate::engine::now_ms() - at < METRICS_CACHE_TTL_MS {
+                return Ok((data, "cache"));
+            }
+        }
         match collect_metrics_native() {
             Ok(data) => Ok((data, "rust")),
             Err(e) => Err(format!("原生采集失败: {e}")),
@@ -123,8 +129,8 @@ pub async fn overview_hardware<R: tauri::Runtime>(
 }
 
 fn load_system_info_cache() -> Option<(i64, Value)> {
-    let text = std::fs::read_to_string(paths::system_info_file()).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
+    // R1a-L07：只读缓存走既有唯一读器，避免第二份 read_to_string+from_str 判据。
+    let v = security::read_json_or_default(&paths::system_info_file());
     let ts = v.get("timestamp")?.as_i64()?;
     let data = v.get("data")?;
     if data.is_null() {

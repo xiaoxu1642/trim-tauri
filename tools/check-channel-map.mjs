@@ -480,7 +480,7 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'paths_app_icon',
   'paths_browse',
   'paths_load',
-  'paths_save',
+  // 'paths_save' 已按 R1a-M01 迁 MAIN，不再属于只读档豁免。
   'paths_scan',
   'process_manager_open_window',
   'realtime_adapters',
