@@ -84,9 +84,15 @@ function runPsVectors(PROTECT, vectors) {
 
 /**
  * 用 JS 权威实现算出夹具内容（不落盘）。
- * @returns {{extras: object, rootsJson: string, roots: object, vectors: Array<{p: string, protected: boolean}>}}
+ *
+ * T1c-M07（v7.2 C09）：`runPs` 默认 **false** —— check-data-parity（MUST_RUN）import
+ * 本函数时不再真实 spawn powershell.exe，也不写全局 %TEMP%（此前跑一次必跑门禁
+ * = 一次真实 PS 5.1 执行，MUST_RUN 入口因此不是只读的）。PS 端执行验证（psVectors）
+ * 只在显式重生成路径产生：`node tools/gen-protect-parity.mjs`（直跑档传 runPs:true）。
+ *
+ * @returns {{extras: object, rootsJson: string, roots: object, vectors: Array<{p: string, protected: boolean}>, psVectors?: Array<boolean>|{error: string}}}
  */
-export function buildParityFixture() {
+export function buildParityFixture({ runPs = false } = {}) {
   const require = createRequire(import.meta.url);
   const PROTECT = require(`${ORIGIN}/src/main/ps-protect-path.js`);
 
@@ -190,8 +196,9 @@ export function buildParityFixture() {
       neverNames: roots.neverNames,
     },
     vectors: vectorResults,
-    // P1-05/S1：PS 端真实执行判定（应与 JS vectors.protected 逐项一致）
-    psVectors: runPsVectors(PROTECT, vectorResults),
+    // P1-05/S1：PS 端真实执行判定（应与 JS vectors.protected 逐项一致）。
+    // 仅显式重生成路径产生（runPs:true）；MUST_RUN 门禁的内存重算不含本字段。
+    ...(runPs ? { psVectors: runPsVectors(PROTECT, vectorResults) } : {}),
   };
 }
 
@@ -201,7 +208,8 @@ export const FIXTURE_PATH = join(REPO_ROOT, 'tools', 'fixtures', 'protect-parity
 // 只有「被直接执行」时才写盘：被 check-data-parity.mjs import 时只借 buildParityFixture()，
 // 不许有落盘副作用（门禁跑一次就把仓库文件改了，等于门禁自己掩盖漂移）。
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const result = buildParityFixture();
+  // 直跑 = 显式重生成路径：这一档才允许 spawn PS 产 psVectors（T1c-M07 的开关意义）
+  const result = buildParityFixture({ runPs: true });
   mkdirSync(join(FIXTURE_PATH, '..'), { recursive: true });
   writeFileSync(FIXTURE_PATH, JSON.stringify(result, null, 2), 'utf8');
   const denied = result.vectors.filter(v => v.protected).length;

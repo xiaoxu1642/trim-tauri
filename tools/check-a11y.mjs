@@ -29,8 +29,26 @@ const SRC = join(ROOT, 'src');
 
 const read = (p) => readFileSync(p, 'utf8');
 const htmlFiles = readdirSync(SRC).filter((f) => f.endsWith('.html')).map((f) => join(SRC, f));
-const jsDir = join(SRC, 'scripts');
-const jsFiles = readdirSync(jsDir).filter((f) => f.endsWith('.js')).map((f) => join(jsDir, f));
+// T1d-K01（v7.2 C09）：语料面从「顶层 scripts」扩到 scripts/** + vendor/**（递归）。
+// src/vendor/litebox.js 是主窗运行件（app.js PAGE_SCRIPTS 在 cleanup/backups 两页注入），
+// 不是只读基线；它里面有 7 处 title="（已随本批迁 data-tip），旧语料面全程看不见。
+const walkJs = (base) => {
+  const out = [];
+  const walk = (dir) => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js')) out.push(p);
+    }
+  };
+  walk(base);
+  return out;
+};
+const jsFiles = [...new Set([...walkJs(join(SRC, 'scripts')), ...walkJs(join(SRC, 'vendor'))])].sort();
+// 采集面地板：语料塌缩（目录改名）时「全部通过」就是空集假绿（现算 48+1，地板取显著下界）
+const JS_CORPUS_FLOOR = 20;
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/');
 
 // ---------- ① 勾选框模板三属性 ----------
@@ -260,8 +278,13 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
   if (subChecked < 3) g.fail(`子窗脚本扫描面 ${subChecked} 个（< 3）⇒ 清单/语料失明`);
 }
 
+// T1d-K01：采集面地板——jsFiles 塌缩（scripts/ 或 vendor/ 改名）时其余断言全是空集假绿
+if (jsFiles.length < JS_CORPUS_FLOOR) {
+  g.fail(`前端 js 语料只有 ${jsFiles.length} 个（< ${JS_CORPUS_FLOOR}）⇒ 采集面塌陷（scripts/** + vendor/** 递归现算），拒绝判绿`);
+}
+
 console.log(
-  `\n扫描：${sources.length} 个源文件 · 勾选框模板 ${checkboxSites} 处 · 提示宿主 ${liveHosts} 处 · data-tip ${tipSites} 处`,
+  `\n扫描：${sources.length} 个源文件（js 语料 ${jsFiles.length} 个） · 勾选框模板 ${checkboxSites} 处 · 提示宿主 ${liveHosts} 处 · data-tip ${tipSites} 处`,
 );
 if (fail > 0) {
   console.error(`check-a11y: 正向对照自检 ${fail} 处失败（判定器失效，本门禁不可信）`);

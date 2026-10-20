@@ -10,7 +10,7 @@
 // 本门禁断言：登记在案的每个找违规型门禁必须 (a) 内置 POSITIVE_CONTROLS 自检块、
 // (b) 实际执行 exit 0（自检与扫描都在门禁自身内跑通）。新增找违规型门禁不登记即红。
 'use strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +47,14 @@ const REGISTRY = [
   { file: 'check-fail-closed.mjs', reason: 'v6-P2：A/B 判定器抽纯函数（tempScriptDowngrades / toStrUnwraps），四样本自检（A 违例必红、A 干净放行、B 违例必红、B 注释行放行）与真仓扫描共用同一实现' },
   { file: 'check-css-tokens.mjs', reason: 'v6-P2：三组判据抽纯函数（radiusViolations / undeclaredTokenRefs / curveOffenders），合成样本自检（违档 5px/2px 必红、档位与胶囊放行；未定义引用必红、已定义与 ALLOW 放行；曲线越集必红、值集内放行）' },
   { file: 'check-tests-helper-parity.mjs', reason: 'X1-M06：tests/ 底座 helper 单一真源——判定器抽 auditContent 纯函数（剥注释后判本地重复定义 / 调用未接真源），6 条合成样本与之共用同一实现（抄 fn main_window() 与 pub async fn invoke() 必红、use common 与全路径 common:: 放行、调 helper 未接真源必红、注释里的定义不误伤）；另设真源清单地板防塌缩恒绿' },
+  // T1b-M02（v7.2 C09）：三条其实已带对照块、却因理由句写「缺合成样本」滞留 PENDING——
+  // 对照块坏了没人红。迁入 REGISTRY 后受第 1/2 组实跑核验。
+  { file: 'check-item-intro.mjs', reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-optimizer-security.mjs', reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-optimizer-groups-sidecar.mjs', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量（内置 6 条对照样本随跑随验，2026-10-20 从 PENDING 迁入）' },
+  // T1c-M02 / T1c-M05（v7.2 C09）两条新门禁：
+  { file: 'check-data-signatures.mjs', reason: '数据产物逐件验签：正向对照三样本（真签名放行 / 正文篡改判红 / 签名换尾判红），对照失效即整条门禁不可信；判定器 import 自 sign-cleanup-rules 单一实现' },
+  { file: 'check-fixture-freshness.mjs', reason: '夹具新鲜度：比对器 isFresh 正反合成样本钉方向（反相 = 全绿假象）；主断言「盘上 ⇄ 生成器导出逐字节」的手改破坏由真破坏验证兜底' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
@@ -68,13 +76,13 @@ const PENDING_CONTROLS = [
   { name: 'check-assets-used', reason: '找违规型：src/assets 零引用文件即红，缺违规样本自检' },
   // check-asset-size 已于 2026-10-14 v3 P2-I 配好内置正向对照并迁入 REGISTRY（本表只减不增）。
   { name: 'check-treemap-layout', reason: '性质型：squarified 布局数学性质（面积和/包含关系），缺「人为破坏性质必须红」样本' },
-  { name: 'check-item-intro', reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径，缺合成样本' },
+  // check-item-intro / check-optimizer-security / check-optimizer-groups-sidecar
+  // 已于 2026-10-20（T1b-M02）证实各自带对照块，迁入 REGISTRY（本表只减不增）。
   { name: 'check-desktop-entry', reason: '对拍型：桌面入口 ⇄ 发布暂存目录合并状态，缺合成样本' },
   { name: 'check-data-parity', reason: '对拍型：data/*.json 派生副本 ⇄ 真源（6+1 个），缺「改一侧必须红」样本' },
   { name: 'check-optimizer-dynamic', reason: '对拍型：dynamic 标记 ⇄ 后端 is_dynamic 分支要求，缺合成样本' },
-  { name: 'check-optimizer-security', reason: '找违规型：扩库夹带关闭安全组件即红，缺违规样本自检' },
   { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
-  { name: 'check-optimizer-groups-sidecar', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量，缺合成样本' },
+  { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
   { name: 'check-version-sync', reason: '对拍型：版本号四处一致，缺「单处漂移必须红」样本' },
   { name: 'check-updater-pubkey', reason: '对拍型：pubkey 形状（base64(minisign)），缺合成样本' },
   { name: 'check-readme-claims', reason: '对拍型：readme 数字 ⇄ 数据真源，缺合成样本' },
@@ -120,7 +128,7 @@ for (const e of REGISTRY) {
   // ② fail-closed 对照串（`正向对照失败` 等 console.error+exit 形态，如
   //    check-escape-delegation / check-html-contract——字符串字面量在代码里，剥注释后仍在）。
   const hasRealControl =
-    /正向对照失败|本门禁失效|必须判红|必须放行|永远不会被测坏|坏成永远放行|判定器没抓住|判定器误红/.test(clean) ||
+    /正向对照失败|本门禁失效|必须判红|必须放行|永远不会被测坏|坏成永远放行|判定器没抓住|判定器误红|判据失灵/.test(clean) ||
     [...clean.matchAll(/(?:^|\n)\s*(?:check|g\.fail)\s*\(/g)].some(
       (m) => /对照|正向|判红/.test(clean.slice(m.index, m.index + 400)),
     );
@@ -172,6 +180,45 @@ check(
   stalePending.length === 0,
   '5. PENDING 白名单不腐烂（不在 MUST_RUN、或已进 REGISTRY 的条目必须删——迁移即收缩）',
   stalePending.join('；'),
+);
+
+// ── 5b~5d（T1b-M02，v7.2 C09）：单向核对补齐的三处盲区 ──
+// ① PENDING 条目**已经带了对照块**却不被本管辖门禁执行（实算三条：item-intro /
+//    optimizer-security / optimizer-groups-sidecar 各带 6/9/6 条合成样本，理由却写着
+//    「缺合成样本」）——对照块坏了没人红。判据与第 1 组同一套剥注释口径。
+const pendingWithControls = PENDING_CONTROLS.filter((e) => {
+  // 自指豁免：本文件的 POSITIVE_CONTROLS 是登记表本身（reason 已写明「自指」），
+  // 与各门禁「剥注释后判据定义文件排除自身」同一纪律。
+  if (e.name === 'check-positive-controls') return false;
+  let text;
+  try {
+    text = readFileSync(join(ROOT, 'tools', `${e.name}.mjs`), 'utf8');
+  } catch {
+    return false;
+  }
+  const clean = text.replace(/^\s*\/\/.*$/gm, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ');
+  return /POSITIVE_CONTROLS|positiveControls|正向对照失败|本门禁失效|必须判红/.test(clean);
+}).map((e) => e.name);
+check(
+  pendingWithControls.length === 0,
+  '5b. PENDING 条目不得已带对照块（带了却不执行 = 坏了没人红；迁入 REGISTRY 或删块）',
+  pendingWithControls.length ? `已带对照仍留 PENDING：${pendingWithControls.join('；')}` : '无',
+);
+// ② manual 型登记此前不核文件存在、不核 reason 声称的样本——本次只补存在性（存在
+//    是「人工验证可执行」的下界；样本条数核对归逐门禁自检）。
+const manualMissing = manualEntries.filter((f) => !existsSync(join(ROOT, 'tools', f)));
+check(
+  manualMissing.length === 0,
+  `5c. manual 型登记 ${manualEntries.length} 条的文件必须存在（此前不核，靠侥幸）`,
+  manualMissing.join('；') || '全部在盘',
+);
+// ③ REGISTRY 条目退役/转 OPTIONAL 后必须同步摘牌（旧判据只查 MUST_RUN − 两表，
+//    查不出「REGISTRY 里有 MUST_RUN 之外的孤儿」⇒ 并集 ≠ MUST_RUN）。
+const registryOrphans = [...registeredNames].filter((n) => !mustRun.includes(n));
+check(
+  registryOrphans.length === 0,
+  '5d. REGISTRY ∪ PENDING == MUST_RUN（双向差集；孤儿登记必须摘牌）',
+  registryOrphans.length ? `REGISTRY 里不在 MUST_RUN 的孤儿：${registryOrphans.join('；')}` : '无孤儿',
 );
 
 if (fail > 0) {

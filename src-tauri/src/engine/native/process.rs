@@ -436,7 +436,7 @@ fn stubborn_enum_tasks() -> Vec<String> {
     out
 }
 
-/// 顽固软件自启阻断（对应 memory_stubborn_block.ps1，S3）
+/// 顽固软件自启阻断（原 PS 时代脚本 memory_stubborn_block.ps1，已退役；S3）
 ///
 /// 2026-10-06 范围扩展（用户拍板）：目标从 MuMu / 网易 UU 远程 / 微软电脑管家 / WPS
 /// 扩到抖音与夸克网盘的全链（服务 / 计划任务 / Run 自启项），见各段注释。

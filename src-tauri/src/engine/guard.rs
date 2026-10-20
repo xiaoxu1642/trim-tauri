@@ -27,11 +27,10 @@ pub const MAIN: &[&str] = &["main"];
 /// 残留链（该应用四类残留扫描 + 执行 + 重启后删除登记）专属窗口集。
 ///
 /// v0.7.0 把主窗内联的残留面板整体搬进 `residue` 副窗，这几条命令的**唯一**渲染层调用方
-/// 就变成了那扇窗。**现状成员共 5 条**（顺序无关，成员与 `tools/check-guard-tiers.mjs`
-/// 的 E 组逐字相等）：`uninstall_residue_scan` / `uninstall_residue_execute` /
-/// `uninstall_pending_add` / `uninstall_pending_list` / `uninstall_pending_revoke`。
-/// `uninstall_dead_scan` / `uninstall_orphan_scan` / `uninstall_orphan_ignore` /
-/// `uninstall_residue_deep_scan` 已随「机-wide 扫描整条退役」删除，不再属于本集。
+/// 就变成了那扇窗。**成员以窗口 label 计、现算口径 = `node tools/check-guard-tiers.mjs`
+/// 的 E2b 组**（勿在此写死条数/命令名——命令侧的消费点会随退役漂移，此前「共 5 条」
+/// 的命令清单就把 label 维度与命令维度混在一行里）。`uninstall_dead_scan` 等
+/// 机-wide 扫描命令已整条退役，不再属于本集。
 /// 这里刻意**不**用 `MAIN`、也刻意**不**放宽到 `APP_WINDOWS` 全集：
 /// - 用 `MAIN`：副窗一调就判越权，功能 100% 不可用（§3 M1~M3 的老坑）；
 /// - 用 `APP_WINDOWS`：注入任一子窗就能拿到「自己扫一遍再删一遍」

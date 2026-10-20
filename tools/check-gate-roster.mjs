@@ -71,6 +71,9 @@ const MUST_RUN = [
   'check-positive-controls',
   'check-review-units',
   'check-tests-helper-parity',
+  // T1c-M02 / T1c-M05（v7.2 C09）：「改后必须重签」与「夹具不许手改」的 Node 侧判红路径
+  'check-data-signatures',
+  'check-fixture-freshness',
   'check-gate-roster',
 ];
 
@@ -153,6 +156,10 @@ if (failed > 0) {
   process.exit(1);
 }
 ok(`门禁运行集合台账对拍一致：磁盘 check ${diskCheck.length} 条 = MUST_RUN ${MUST_RUN.length} + OPTIONAL ${optionalNames.length} + RETIRED ${retiredNames.length}`);
+// T1a-M06（v7.2 C09）：成员名单必须进输出——「51+3+1」三个数答不了「哪条是 RETIRED、
+// 它为什么不算验证」，而 AGENTS §4 明写「必跑/可选/退役一律以本命令现算为准」。
+for (const { name, reason } of OPTIONAL) console.log(`  OPTIONAL: ${name} — ${reason}`);
+for (const { name, reason } of RETIRED) console.log(`  RETIRED: ${name} — ${reason}`);
 
 if (!RUN) {
   console.log(`check-gate-roster: 全部通过（可加 --run 跑完 ${MUST_RUN.length} 条必跑门禁）`);
@@ -174,7 +181,11 @@ for (const name of MUST_RUN) {
     const count = (re) => (out.match(re) || []).length;
     const marks = {
       x: count(/✗/g),
-      skip: count(/(?:^|[^\w])SKIP(?![A-Za-z0-9_])|未校验/g),
+      // T1a-M06（v7.2 C09）：词表补「未验证 / RETIRED（ / 不算验证」——check-ps-extraction
+      // 的「✓ 文本层门禁通过（行为层未验证）」此前被当成纯 ✓ 漏计，自报 SKIP 统计失真。
+      // RETIRED 带（ 全角括号锚定：只认「RETIRED（未执行任何断言）」这类自报形态，
+      // 不把本门禁自己打印的注册表成员名单（`RETIRED: 名字`）误计进去。
+      skip: count(/(?:^|[^\w])SKIP(?![A-Za-z0-9_])|未校验|未验证|RETIRED（|不算验证/g),
       zero: count(/(?:^|[^\w])0\s*(?:个|条|处)(?![\w])/g),
     };
     if (marks.x + marks.skip + marks.zero > 0) selfReported.push({ name, ...marks });

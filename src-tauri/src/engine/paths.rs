@@ -49,7 +49,7 @@ const MIGRATION_FILES: &[&str] = &[
 /// - `peripheral-backup`  外设设置的 .reg 备份，「还原」依赖它
 /// - `fileclean-backup`   删除清单（哪些文件被移进了回收站的凭据），丢了就无从交代删了什么
 ///
-/// 不在列：contextmenu 的注册表备份 —— 实测 `ps/cm_backup.ps1` 写的是
+/// 不在列：contextmenu 的注册表备份 —— 实测 PS 时代脚本 `cm_backup.ps1`（已退役）写的是
 /// `%USERPROFILE%\Desktop\右键菜单备份_<时间戳>`，本来就在桌面、不随数据目录迁移。
 ///
 /// ⚠️ 审查 v2-M19（备份根分叉，2026-09-29 已收口）：这几处写侧原先硬编码
@@ -61,7 +61,7 @@ const MIGRATION_FILES: &[&str] = &[
 /// 落老根，于是老根那份往往更新。新根优先会把用户后来禁用的启动项从界面里抹掉，而系统里它们
 /// 还禁用着——台账取本口径见 `engine::native::startup_ledger_file`（取最近修改的那本）。
 ///
-/// 这条注释原先还把写侧算到 PowerShell 头上（`startup_*.ps1`、`peripheral_apply.ps1`、
+/// 这条注释此前还把写侧算到 PowerShell 头上（`startup_*.ps1`、`peripheral_apply.ps1`、
 /// `cleanup_execute.ps1:706`、`memory_stubborn_block.ps1:40`）——那是 S3 退役前的旧轨坐标，
 /// 现在 `src-tauri/ps/` 只剩 1 个脚本（optimizer_build.ps1）、`grep -i appdata` 零命中，写侧全在 Rust
 /// （`engine/native/` 的启动项与外设备份、`commands/cleanup/backup.rs` 的注册表备份）。

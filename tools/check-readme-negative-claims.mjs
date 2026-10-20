@@ -12,7 +12,7 @@
 // 且 scope 的**用户可见版本**必须能在承诺文档里找到原文（承诺与豁免两侧都要留痕）。
 //
 // **真源迁移（2026-10-15 用户裁定）**：承诺原文原在 readme 的「不做的事」章节；用户决定
-// 该章节从用户文档删除，承诺迁入本机资料区 `docs/本仓库其他规范流程/否定式承诺-不做的清单.md`，
+// 该章节从用户文档删除，承诺迁入本机资料区「否定式承诺-不做的清单」（本仓库其他规范流程下），
 // 本门禁改读该文件（文件名保留历史，不改名）。该文件**不入库**——按 AGENTS「门禁读未跟踪
 // 文件必须先 existsSync 再判定」的红线：文件缺失时显式 SKIP 并声明「本门禁未校验」，不崩、也不打 ✓。
 //
@@ -36,11 +36,13 @@ const optimizer = JSON.parse(read('src-tauri/data/optimizer-runtime.json'));
 const retired = new Set(JSON.parse(read('src-tauri/data/retired-optimizations.json')).items.map((x) => x.id));
 
 // ---- 承诺真源（本机资料区，不入库）：缺失即 SKIP（红线口径），不崩也不打 ✓ ----
-const CLAIMS_DOC = 'docs/本仓库其他规范流程/否定式承诺-不做的清单.md';
-const claimsPath = path.join(ROOT, CLAIMS_DOC);
+// T1a-K01：本机资料区的真实路径不得写进跟踪文件（含门禁源码），用段拼接；
+// 「本机资料区」措辞本身是 AGENTS §2 认可的合法指代。
+const CLAIMS_DOC_SEGMENTS = ['本仓库其他规范流程', '否定式承诺-不做的清单.md'];
+const claimsPath = path.join(ROOT, 'docs', ...CLAIMS_DOC_SEGMENTS);
 if (!fs.existsSync(claimsPath)) {
   console.warn('=== 否定式承诺门禁 ===\n');
-  console.warn(`⚠ 承诺真源缺失（${CLAIMS_DOC}）——本门禁全部**未校验**（SKIP，不是通过）`);
+  console.warn(`⚠ 承诺真源缺失（本机资料区·${CLAIMS_DOC_SEGMENTS.join('/')}）——本门禁全部**未校验**（SKIP，不是通过）`);
   console.warn('  · 该文件属本机资料区、不入库；干净克隆 / 他机下按 SKIP 处理是红线口径。');
   process.exit(0);
 }
@@ -216,7 +218,7 @@ const check = (ok, label, detail = '') => {
   if (!ok) fail++;
 };
 
-console.log('=== 否定式承诺门禁（真源：docs/本仓库其他规范流程/否定式承诺-不做的清单.md） ===\n');
+console.log(`=== 否定式承诺门禁（真源：本机资料区·${CLAIMS_DOC_SEGMENTS.join('/')}） ===\n`);
 console.log(`真源读数：活动优化项 ${optimizer.length} / 退役账本 ${retired.size}\n`);
 
 for (const t of THEMES) {

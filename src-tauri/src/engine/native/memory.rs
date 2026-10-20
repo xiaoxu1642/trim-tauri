@@ -8,7 +8,7 @@ use super::common::*;
 
 /// 原生读取物理内存 / 页面文件 / Cache Bytes
 ///
-/// 字段映射（对照 memory_info.ps1）：
+/// 字段映射（对照原 PS 时代脚本 memory_info.ps1，已退役）：
 /// - total/free/used/load ← GlobalMemoryStatusEx
 /// - cache                 ← GetPerformanceInfo.SystemCache * PageSize
 /// - pageTotal/pageUsed    ← GetPerformanceInfo.CommitLimit/CommitTotal 减去物理量

@@ -80,7 +80,7 @@
      「玻璃感」拆成 颜色 × 透明度 两个自由度：--surface-tint 定基色（RGB 三通道），
      统一 alpha 表定透明度，四个表面 token 全部由参数合成——全仓半透明表面只此一处定义，
      改观感只动这张表，杜绝情境覆写各写一套 alpha 造成漂移。
-     决议（docs规范/白色容器玻璃化收敛-方案设计-2026-09-13）：
+     决议（本机资料区方案设计·白色容器玻璃化收敛，2026-09-13；不入库）：
      ① 三套情境 alpha 统一为一套（0.46/0.62/0.52/0.50）；② 全局玻璃化，玻璃是常态，
      bgBlur=0 仅表示「无模糊」而非「不透明」。 */
   --surface-tint: 15 17 21;
@@ -494,7 +494,7 @@ body {
 /* ---------- 侧边栏（批次：悬浮岛侧边栏 —— 独立悬浮圆角导航卡） ---------- */
 .sidebar {
   width: 232px;
-  /* v3.0 统一白容器参数（docs规范/系统维护任务卡参数.md）：46% 白玻璃 + 10px 圆角，
+  /* v3.0 统一白容器参数（本机资料区·系统维护任务卡参数，不入库）：46% 白玻璃 + 10px 圆角，
      磨砂由文件末尾「全局白容器统一参数」规则无条件供给；
      材质激活时不再有 72%/78% 岛底浓度差异（旧方案已删，全局只保留这一套） */
   background: var(--bg-card);
@@ -5270,7 +5270,7 @@ body.bg-image-on .main-content {
      （.btn 基类在 :root 层就写死 floor + tint），把它们留在 .theme-light 里等于让按钮
      底「依赖脚本必须及时挂上 class」——子窗首帧与 window-material.js 的时序差就是这条
      的根因（v2 §2.3）。var() 取空值会让整条 background 失效回落 transparent，比暗色实底更糟。 */
-  /* v3.0 修复批次（Apple 消色玻璃，docs规范/update/2026-09-14 评估方案 A1）：
+  /* v3.0 修复批次（Apple 消色玻璃，本机资料区 update/2026-09-14 评估方案 A1，不入库）：
      三档 tint 全部中性化（原冰蓝/薰衣草/浅粉属「彩色糖果玻璃」），Apple 的玻璃
      是消色中性材质，靠环境光与原生材质染色，不做彩色 tint */
   --lg-tint-primary: rgba(255, 255, 255, 0.55);
@@ -5606,7 +5606,7 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .netcheck-detail { margin-top: 8px; font-size: var(--fs-secondary); color: var(--warning); }
 .netcheck-item:has(.netcheck-badge.fail) .netcheck-detail { color: var(--danger); }
 
-/* 全局白容器统一参数（v3.0，docs规范/系统维护任务卡参数.md）：
+/* 全局白容器统一参数（v3.0，本机资料区·系统维护任务卡参数，不入库）：
    46% 白玻璃底（--bg-card，各类既有定义）+ --border-default 描边（既有）+
    --radius-medium(10px) 圆角 + 20px 档磨砂，全部无条件生效（不再依赖壁纸/材质激活），
    磨砂随「背景模糊度」滑块联动；系统关透明度时由降级块统一停用。

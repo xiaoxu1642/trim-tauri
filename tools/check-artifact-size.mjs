@@ -50,6 +50,13 @@ export function judgeSizes(current, baseline) {
     if (cur > cap) problems.push(`${role} ${cur} B > 登记 cap ${cap} B（+${cur - cap} B）：确需变大请带理由跑 --write`);
     else if (cur < cap) shrink.push(`${role} ${cap}→${cur}（−${cap - cur} B，确认无误后 --write 收紧）`);
   }
+  // T1b-M04（v7.2 C09）：反向也棘轮——基线登记了、盘上没有的角色不许 continue 掉。
+  // 旧实现三个角色少一个不报（构建不完整/角色改名时「0 命中」照样绿）。
+  for (const role of Object.keys(baseline)) {
+    if (!(role in current)) {
+      problems.push(`基线登记了 ${role}（cap ${baseline[role]} B）但盘上没有该产物 —— 产物缺失不许静默（发版不完整或角色改名，--write 前先查因）`);
+    }
+  }
   return { problems, shrink };
 }
 
@@ -76,14 +83,19 @@ console.log('=== 发版产物体积门禁 ===\n');
   if (shrinkCase.problems.length !== 0 || shrinkCase.shrink.length !== 1) {
     problems.push(`缩小样本应只提示不红：得 ${JSON.stringify(shrinkCase)}`);
   }
-  const unregistered = judgeSizes({ exe: 7 }, { setup: 100 });
+  const unregistered = judgeSizes({ exe: 7, setup: 100 }, { setup: 100 });
   if (unregistered.problems.length !== 1) problems.push(`未登记角色漏判：${JSON.stringify(unregistered.problems)}`);
+  // T1b-M04：反向缺失（基线有、盘上无）必须判红
+  const missingRole = judgeSizes({ setup: 100 }, { setup: 100, exe: 5 });
+  if (missingRole.problems.length !== 1) problems.push(`基线有盘上无漏判：${JSON.stringify(missingRole.problems)}`);
+  const complete = judgeSizes({ setup: 100, exe: 5 }, { setup: 100, exe: 5 });
+  if (complete.problems.length !== 0) problems.push(`角色齐全样本误报：${JSON.stringify(complete.problems)}`);
   if (problems.length) {
     g.fail(`正向对照自检失效：\n  ${problems.join('\n  ')}`);
     g.finish();
     process.exit(1);
   }
-  g.ok('正向对照自检 4 组全部命中（超 cap 必红 / 等值放行 / 缩小只提示 / 未登记必红）');
+  g.ok('正向对照自检 6 组全部命中（超 cap 必红 / 等值放行 / 缩小只提示 / 未登记必红 / 基线有盘上无必红 / 角色齐全放行）');
 }
 
 if (!g.skipUnlessPresent(DIR, 'build-release/（发版产物目录，未跟踪）')) {
@@ -119,7 +131,8 @@ for (const [role, size] of Object.entries(current)) {
 }
 const { problems, shrink } = judgeSizes(current, baseline);
 if (problems.length) g.fail(`产物体积超登记基线：\n  ${problems.join('\n  ')}`);
-else g.ok(`三个产物体积均未超登记 cap（共 ${Object.keys(current).length} 个角色在盘上）`);
+// T1b-M04：「三个产物」是写死词——角色数是动态值，写死词与动态数并存就是 K02/M08 那类口径病
+else g.ok(`产物体积均未超登记 cap（${Object.keys(current).length} 个角色在盘上）`);
 if (shrink.length) g.warn(`收敛提示：${shrink.join('；')}`);
 
 g.finish('产物体积门禁全部通过');

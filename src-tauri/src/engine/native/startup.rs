@@ -31,7 +31,7 @@ fn extract_cmd_path(cmd: &str) -> String {
 /// 可启动文件后缀白名单：图标/定位只认真实落盘的这些类型，半截目录名混不进来。
 const RUNNABLE_EXTS: &[&str] = &["exe", "com", "bat", "cmd", "vbs", "js", "scr", "lnk", "ps1", "cpl", "msc"];
 
-/// 解释器宿主：这类行的真正程序在 Arguments 里（`/c x.exe` / `-File x.ps1` / rundll32 dll），
+/// 解释器宿主：这类行的真正程序在 Arguments 里（`/c x.exe` / `-File <脚本>.ps1` / rundll32 dll），
 /// 命令本体只给得到解释器自己的图标。
 const INTERPRETER_HOSTS: &[&str] = &[
     "cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe",
@@ -149,7 +149,7 @@ fn resolve_running_target(command: &str, arguments: &str, working_dir: &str) -> 
 ///   `C:\Program Files (x86)\ByteDance\douyin\douyin.exe --start_type=autorun`（裸路径带空格），
 ///   `extract_cmd_path` 按第一个空格切出 `C:\Program`，它不是「文件没了」而是「没切对」。
 ///   这个字段是给用户在界面上看的断言（「目标文件不存在」），宁可不下结论，
-///   也不能给一个没证据的判断（AGENTS §9.3）。
+///   也不能给一个没证据的判断（红线依据-竞品反例 §9.3）。
 /// 返回 `Some(原路径)` = 判据成立（文件确实不在）；`None` = 不下结论。
 fn missing_target_of(cmd_path: &str) -> Option<String> {
     let p = cmd_path.trim().trim_matches('"');
@@ -294,7 +294,7 @@ fn scan_task_files() -> Vec<Value> {
     out
 }
 
-/// 启动项扫描（对应 startup_scan.ps1）
+/// 启动项扫描（原 PS 时代脚本 startup_scan.ps1，已退役）
 ///
 /// 注册表 Run/RunOnce + 启动文件夹 + StartupApproved + disabled.json 合并。
 /// 8 条 Run/RunOnce 根（扫描枚举与台账启用恢复**共用同一份**）。
@@ -1035,7 +1035,7 @@ unsafe fn set_approved_bit(hive: HKEY, subkey: &str, value_name: &str, disable: 
 
 
 
-/// 启动项启用/禁用（对应 startup_enable.ps1 / startup_disable.ps1，S3）
+/// 启动项启用/禁用（原 PS 时代脚本 startup_enable.ps1 / startup_disable.ps1，已退役；S3）
 ///
 /// 覆盖：注册表项（StartupApproved blob 为主，删值式为回退）、文件夹项（移动备份）、
 /// 计划任务（schtasks /Change）。disabled.json 记账维护。
@@ -1421,7 +1421,7 @@ fn plan_folder_delete(item: &Value, records: &[Value]) -> Result<FolderDeletePla
 
 
 
-/// 启动项删除（对应 startup_remove.ps1，S3）
+/// 启动项删除（原 PS 时代脚本 startup_remove.ps1，已退役；S3）
 ///
 /// 注册表：reg.exe export 备份整个键 + RegDeleteValueW 删值
 /// 文件夹：复制到 deleted/ 备份，返回 fsDelete 由主进程回收站删除
@@ -1630,7 +1630,7 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
 }
 // ==================== B5 startup_add：新增启动项 ====================
 
-/// 新增启动项（对应 startup_add.ps1，S3）
+/// 新增启动项（原 PS 时代脚本 startup_add.ps1，已退役；S3）
 ///
 /// 写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Run，值为带引号的路径。
 /// 冲突检查：已存在同名启动项时返回原值，不覆盖。

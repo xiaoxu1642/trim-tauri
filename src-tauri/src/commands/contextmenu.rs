@@ -401,7 +401,7 @@ pub async fn contextmenu_icons<R: Runtime>(
     if icon_items.is_empty() {
         return json!({ "success": true, "data": {} });
     }
-    // R1（2026-10-01）：原走 cm_icons.ps1 + `[System.Drawing.Icon]::ExtractAssociatedIcon`，
+    // R1（2026-10-01）：此前走 cm_icons.ps1 + `[System.Drawing.Icon]::ExtractAssociatedIcon`，
     // 那是本域最后一个外部 PowerShell 入口。换成原生 `ExtractIconExW` 索引 0 ——
     // 三件系统 PE 实机对拍像素和与 .NET 完全相等（见 shellicon 的 live_probe 注释）。
     // 图标提取失败不影响主流程，恒返回 success（与旧行为一致：缺图只是没图）。

@@ -13,7 +13,7 @@ use super::registry::*;
 use super::services::*;
 // ==================== B7 runtimes_status：运行库检测 ====================
 
-/// 运行库检测（对应 runtimes_status.ps1，S3）
+/// 运行库检测（原 PS 时代脚本 runtimes_status.ps1，已退役；S3）
 ///
 /// VC++ 2015-2022 关键 dll 名单 —— **按架构分开**（v5 R-1）。
 ///
@@ -233,7 +233,7 @@ pub fn runtimes_status() -> Result<Value, String> {
     }
 }
 
-/// 网络连通性检测（对应 netcheck_status.ps1，S3 简化版）
+/// 网络连通性检测（原 PS 时代脚本 netcheck_status.ps1，已退役；S3 简化版）
 ///
 /// 覆盖：网卡枚举、IP 配置、DHCP 服务、DNS 配置、代理设置、连通性探测。
 /// 网卡高级属性（Get-NetAdapterAdvancedProperty）暂未实现（S2 完善）。

@@ -13,7 +13,7 @@ use super::registry::*;
 // ==================== B3：外设只读查询 ====================
 
 
-/// 外设状态查询（对应 peripheral_query.ps1）
+/// 外设状态查询（原 PS 时代脚本 peripheral_query.ps1，已退役）
 ///
 /// 只读两组：Win32PrioritySeparation 与 MouseDataQueueSize。键盘队列深度与端口路由
 /// 已于 0.6.6 从本窗下线（收编进优化中心 tf_keyboard），不再读取。
@@ -32,7 +32,7 @@ pub fn peripheral_query() -> Result<Value, String> {
 
 // ==================== B9 peripheral_apply：外设优化应用 ====================
 
-/// 外设优化应用（对应 peripheral_apply.ps1，S3）
+/// 外设优化应用（原 PS 时代脚本 peripheral_apply.ps1，已退役；S3）
 ///
 /// 写入 HKLM 注册表值：Win32PrioritySeparation、MouseDataQueueSize。
 /// 键盘队列深度与端口路由已于 0.6.6 从本窗下线（收编进优化中心 tf_keyboard，
@@ -149,7 +149,7 @@ fn peripheral_restore_admit(
     Ok(sections)
 }
 
-/// 从备份恢复外设设置（对应 peripheral_restore.ps1，S3）
+/// 从备份恢复外设设置（原 PS 时代脚本 peripheral_restore.ps1，已退役；S3）
 ///
 /// 找数据目录（含收口前的老根 `%APPDATA%\Trim\peripheral-backup`）里最新一批
 /// `backup_<stamp>_*.reg`，按时间戳分组整组导入（v2-M12：一次 apply 留下多个分片，必须整组还原）。

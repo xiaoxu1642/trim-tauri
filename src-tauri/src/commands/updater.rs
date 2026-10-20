@@ -30,7 +30,8 @@
 //! # 闭环状态（2026-09-25 v0.1.2）
 //!
 //! 1. minisign 密钥对已生成，公钥已回填 `tauri.conf.json` → `plugins.updater.pubkey`。
-//!    v2-L4P-25（A-7）：私钥路径与发版/签名流程只以 AGENTS §7.4 为唯一真源，本文件
+//!    v2-L4P-25（A-7）：私钥路径与发版/签名流程只以发版手册 §7.4 为唯一真源（AGENTS §2
+//!    只留指代、原文在仓库外本机手册），本文件
 //!    不再维护第二份（文档互相抄路径是「红线指向虚无」的温床，L4 D-3 同族教训）。
 //! 2. FEEDS 两条：`atomgit`（https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/raw/）
 //!    与 `github`（https://github.com/xiaoxu1642/trim-tauri/releases/latest/download/），

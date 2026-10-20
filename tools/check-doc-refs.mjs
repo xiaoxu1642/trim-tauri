@@ -7,7 +7,7 @@
 //      「红线指向虚无的文件」是流程性缺陷（L4 D-3 实例：依赖登记处指向一份磁盘上
 //      不存在的迁移方案文档，导致「新 feature 是否登记」永远无法判红）。
 //   2. 源码注释不得再写死签名私钥的第二真源路径（A-7：updater.rs 曾维护一份
-//      私钥路径 + CI 流程，与 AGENTS §7.4 互相漂移）。
+//      私钥路径 + CI 流程，与发版手册 §7.4 互相漂移）。
 // 口径：只检查「看起来像本仓路径」的引用（docs/... 或 `docs\xxx`），排除 URL、
 // 代码目录（src/、src-tauri/、tools/ 等由既有门禁管）、Cargo/registry 路径。
 'use strict';
@@ -84,7 +84,7 @@ if (agentsPresent && docsPresent) {
   check(bad.length === 0, '1b. AGENTS.md 引用的 docs/ 路径全部真实存在', bad.join('；'));
 }
 
-// 2. 源码注释禁止第二真源私钥路径（签发流程唯一真源 = AGENTS §7.4）
+// 2. 源码注释禁止第二真源私钥路径（签发流程唯一真源 = 发版手册 §7.4，仓库外本机手册）
 //
 // v5-K04 批次 7（2026-10-13）修补「三重失明」（T1c 实测）：
 //   ① 令牌黑名单收编 `~/.trim-signing` 变体（`trim-signing` 单词覆盖全部含它的写法）；
@@ -149,6 +149,76 @@ check(
   missingWhitelist.length === 0,
   `2b. 受控例外白名单 ${KEY_PATH_WHITELIST.length} 条全部真实命中（不命中 = 白名单腐烂）`,
   missingWhitelist.map((w) => `${w.file}（${w.why}）`).join('；'),
+);
+
+// ---- 2c. 本机资料区路径零暴露（T1a-K01 / F1a-M07，v7.2 C09） ----
+// AGENTS §2：本机资料区（docs/、AGENTS.md）一律**不写进任何跟踪文件**，连注释也不写；
+// 判据是「换一台机器、做一次干净克隆，这句话还成立吗」。第 2 组只认私钥四词，
+// 认不出「本机资料区被违反」的两种写法：① 历史目录名 `docs规范`（干净克隆里不存在）；
+// ② `docs/`+扩展名的真实路径形态。本组补这两类令牌。
+// 口径（拍板 5，2026-10-20）：只禁**真实路径**；「本机资料区」这个**措辞本身**是 §2
+// 认可的合法指代（不带路径），出现不算违例；`AGENTS §N` 章节引用（339 行）不在本组
+// 判定面（归 check-comment-rot R2，两处不许互抄结论）。
+// 历史叙述行豁免；受控例外 {file, anchor, why}（vendor 只读基线），每条必须真命中 ≥1。
+const LOCAL_DOC_TOKENS = {
+  guiFan: 'docs规范',
+  docsPath: /docs[\\\/][^\s`'")，。；]*\.(?:md|json|mjs|js|ps1|txt|html|css)/g,
+};
+const RE_LOCALDOC_HISTORICAL = /曾经|曾|历史|旧版|原来|此前|过后|退役|早期|过去|一度|之前|原本|旧|已删|原 /;
+const LOCALDOC_SCAN_ROOTS = [
+  ...KEY_SCAN_ROOTS,
+  join(ROOT, 'native-scanner', 'src'),
+  join(ROOT, 'src-tauri', 'capabilities'),
+  join(ROOT, 'src-tauri', 'data'),
+];
+const LOCALDOC_WHITELIST = [
+  {
+    file: 'vendor/upstream-js/src/main/updater.js',
+    anchor: 'docs规范/update/9.12',
+    why: 'vendor 只读基线禁改（§7.3），干净克隆下该行也不成立但上游文件不许动',
+  },
+  {
+    file: 'tools/check-tools-doc-paths.mjs',
+    anchor: "const p = \"docs\\\\\\\\a\\\\\\\\b.md\";",
+    why: '正向对照合成样本（判据自检字符串），非真实引用',
+  },
+];
+const localDocHits = [];
+const localDocWlHits = new Set();
+let localDocScanned = 0;
+for (const base of LOCALDOC_SCAN_ROOTS) {
+  for (const fAbs of walkFiles(base)) {
+    const rel = relative(ROOT, fAbs).replace(/\\/g, '/');
+    // 判据定义文件自身排除（自举命中），与第 2 组同一纪律
+    if (rel === 'tools/check-doc-refs.mjs') continue;
+    localDocScanned++;
+    const lines = readFileSync(fAbs, 'utf8').split(/\r?\n/);
+    lines.forEach((line, i) => {
+      if (RE_LOCALDOC_HISTORICAL.test(line)) return;
+      const hits = [];
+      if (line.includes(LOCAL_DOC_TOKENS.guiFan)) hits.push('docs规范');
+      const pm = line.match(LOCAL_DOC_TOKENS.docsPath);
+      if (pm) hits.push(pm[0]);
+      if (!hits.length) return;
+      const wlIdx = LOCALDOC_WHITELIST.findIndex((w) => w.file === rel && line.includes(w.anchor));
+      if (wlIdx >= 0) {
+        localDocWlHits.add(wlIdx);
+        return;
+      }
+      localDocHits.push(`${rel}:${i + 1} 含 ${hits.join(' + ')}`);
+    });
+  }
+}
+check(
+  localDocHits.length === 0,
+  `2c. 本机资料区路径零暴露（扫 ${localDocScanned} 个文件：src/src 前端/tools/vendor/native-scanner/capabilities/data）`,
+  localDocHits.length ? localDocHits.slice(0, 10).join('；') + (localDocHits.length > 10 ? ` …共 ${localDocHits.length} 处` : '') : '无暴露',
+);
+const missingLocalDocWl = LOCALDOC_WHITELIST.map((w, i) => ({ w, i })).filter(({ i }) => !localDocWlHits.has(i));
+check(
+  missingLocalDocWl.length === 0,
+  `2c-b. 本机资料区豁免白名单 ${LOCALDOC_WHITELIST.length} 条全部真实命中（不命中 = 白名单腐烂）`,
+  missingLocalDocWl.map(({ w }) => `${w.file}（${w.why}）`).join('；'),
 );
 
 // ---- 3. 白名单坐标存在性（P3-7，2026-10-09） ----

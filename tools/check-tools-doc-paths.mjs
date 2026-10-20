@@ -24,7 +24,7 @@
 // 用法：node tools/check-tools-doc-paths.mjs
 'use strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { gate } from './lib/gate.mjs';
@@ -145,13 +145,27 @@ const g = gate(import.meta.url);
 
 // ---------- 真仓扫描 ----------
 const exempt = new Set(EXEMPTS.map((e) => e.file));
-const files = readdirSync(TOOLS).filter((f) => f.endsWith('.mjs'));
+// T1b-L01（v7.2 C09）：扫描面从「顶层 .mjs」扩到 tools/**/*.mjs（含 lib/ 两个共享件）；
+// 旧口径输出「tools/ 下 78 个 .mjs」对 tools/**/*.mjs（现算 80）是错口径，lib/ 里的
+// fs-walk/gate 永远不在射程。exempt 的键仍是**文件名**（EXEMPTS 以 {file} 登记）。
+const files = [];
+{
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.mjs')) files.push(p);
+    }
+  };
+  walk(TOOLS);
+}
 let scanned = 0;
 let hits = 0;
-for (const f of files) {
+for (const abs of files) {
+  const f = relative(TOOLS, abs).replace(/\\/g, '/');
   if (exempt.has(f)) continue;
   scanned++;
-  const raw = readFileSync(join(TOOLS, f), 'utf8');
+  const raw = readFileSync(abs, 'utf8');
   const code = stripCommentsKeepStrings(raw);
   for (const v of judgeDocPaths(code)) {
     const at = /@字节 (\d+)$/.exec(v);
@@ -161,5 +175,5 @@ for (const f of files) {
   }
 }
 if (scanned < 20) g.fail(`扫描面 ${scanned} 个 .mjs（< 20）⇒ 目录读面失明`);
-console.log(`\n扫描：tools/ 下 ${files.length} 个 .mjs（例外 ${exempt.size} 个）→ 实际 ${scanned} 个，命中 ${hits} 处`);
+console.log(`\n扫描：tools/**/*.mjs 共 ${files.length} 个（例外 ${exempt.size} 个）→ 实际 ${scanned} 个，命中 ${hits} 处`);
 g.finish('check-tools-doc-paths: 全部通过');

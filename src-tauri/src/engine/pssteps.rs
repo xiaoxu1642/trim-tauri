@@ -1399,7 +1399,7 @@ fn parse_statement(
             // JS 模板 optimizer-scripts.js:2124 起会生成
             //   `Set-Service -Name '<svc>' -StartupType <Manual|Automatic|Disabled> ...`
             // 只识别 -StartupType 的三种拼法（首字母大写在 JS 侧固定），其他值直接 Err，
-            // 不"猜相近值"（AGENTS §9.3 纪律 ①）。与 `sc.exe config` 走同一个 PsOp::SvcSetStart，
+            // 不"猜相近值"（红线依据-竞品反例 §9.3 纪律 ①）。与 `sc.exe config` 走同一个 PsOp::SvcSetStart，
             // 落地都在下面 execute 分支的 service_set_start_pub。
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             let raw = param(&cmd, "StartupType").ok_or("Set-Service 只支持 -StartupType 分支")?;
@@ -1657,7 +1657,7 @@ fn hive_prefix(h: Hive) -> &'static str {
 /// **5 的措辞按 2026-10-05 实测改过**：原话写「所有权不在 Administrators（多为 TrustedInstaller
 /// 独占）」，但 `Services\TrkWks` 那一类键的 Owner 恰恰是 `BUILTIN\Administrators`，卡住写入的是
 /// **DACL 没给 Administrators 写值权**（Get-Acl 实测：SYSTEM=FullControl、Administrators 只有读）。
-/// 把"所有权"当结论会把人支使去做一件不解决问题的操作（AGENTS §9.3：没有复现证据的主张不许当事实写）。
+/// 把"所有权"当结论会把人支使去做一件不解决问题的操作（红线依据-竞品反例 §9.3：没有复现证据的主张不许当事实写）。
 /// 达标与否由 [`bytes_already_match`] 单独判：已经在目标值的写入不会走到这里。
 fn reg_err(code: u32) -> String {
     match code {

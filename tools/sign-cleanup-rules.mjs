@@ -10,6 +10,8 @@
 //   node tools/sign-cleanup-rules.mjs gen-fallback             从规则 JSON 重新生成前端兜底副本
 //   node tools/sign-cleanup-rules.mjs sign --file <相对路径>    签名其他规则文件（同款密钥/规范化），
 //                                                              如 --file src-tauri/data/uninstall-residue-rules.json
+//   node tools/sign-cleanup-rules.mjs verify [--file <相对路径>] 仓内公钥回读验签（T1c-M02：
+//                                                              改后必须重签的 Node 侧判红路径）
 //
 // 签名私钥是仓库外的本机密钥材料（发布机私有，绝不入仓库），落点以发版手册 §7.4 为准；
 // 受控例外登记见发版手册 §7.3（本工具是「签名工具自身必须知道钥匙在哪」的功能必需方）。
@@ -21,7 +23,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // --file <相对路径>：U-1 起签名工具泛化为「规则文件签名器」（同一密钥、同一规范化），
@@ -32,7 +34,10 @@ const RULES = fileArg ? path.join(ROOT, fileArg) : path.join(ROOT, 'src-tauri', 
 const FALLBACK = path.join(ROOT, 'src', 'scripts', 'cleanup-fallback.generated.js');
 const PRIV_KEY = path.join(os.homedir(), '.trim-signing', 'rules-ed25519-private.pem');
 
-function canonicalBodyText(parsed) {
+// 验签真源导出（T1c-M02，v7.2 C09）：check-data-signatures.mjs import 同一份实现，
+// 「改后必须重签」从此在 Node 侧有判红路径——此前全仓只有残留域验签（check-residue-
+// rule-contract），清理域与优化域被手改/漏签时 Node 侧全绿，损失拖到应用装载才暴露。
+export function canonicalBodyText(parsed) {
   // ⚠️ **数组顶层必须原样序列化**（M4 实测踩到）：`Object.entries(array)`枚举出的是
   // **索引键**，所以下面那段「逐键重建」会把 `[{...}]` 变成 `{"0":{...}}` ——
   // 与 Rust 侧 `serde_json::to_string(&array)` 逐字节不同，签名永远对不上。
@@ -110,10 +115,71 @@ function genFallback() {
   console.log(`已生成: ${FALLBACK}`);
 }
 
-const cmd = argv[0];
-if (cmd === 'sign') sign();
-else if (cmd === 'gen-fallback') genFallback();
-else {
-  console.error('用法: node tools/sign-cleanup-rules.mjs <sign|gen-fallback> [--file <相对路径>]');
-  process.exit(1);
+// ---------------------------------------------------------------------------
+// 验签（T1c-M02）：公钥**真源是 Rust 侧 rules_signature.rs 的 RULES_PUBKEY_PEM**，
+// 这里运行期解析、不抄第二份（§5.16）。low-level verifyBody 供门禁做正反对照。
+// ---------------------------------------------------------------------------
+const RULES_PUBKEY_RS = path.join(ROOT, 'src-tauri', 'src', 'engine', 'rules_signature.rs');
+
+export function loadRulesPubkey() {
+  const src = fs.readFileSync(RULES_PUBKEY_RS, 'utf8');
+  const m = /-----BEGIN PUBLIC KEY-----\\n\\\s*([A-Za-z0-9+/=\\n\\\s]+?)-----END PUBLIC KEY-----/.exec(src);
+  if (!m) throw new Error('rules_signature.rs 解析不到 RULES_PUBKEY_PEM（公钥真源改名/换形态？先修本函数）');
+  const body = m[1].replace(/\\n\\/g, '').replace(/\s+/g, '');
+  return `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----`;
+}
+
+export function verifyBody(bodyText, sigB64) {
+  return crypto.verify(
+    null,
+    Buffer.from(bodyText, 'utf8'),
+    crypto.createPublicKey(loadRulesPubkey()),
+    Buffer.from(sigB64, 'base64'),
+  );
+}
+
+/** 验一个规则文件（对象内联 _sig / 数组 sidecar 两种形态都认）。返回 {ok, why}。 */
+export function verifyRulesFile(fileAbs) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(fileAbs, 'utf8'));
+  } catch (e) {
+    return { ok: false, why: `JSON 解析失败：${e.message.slice(0, 120)}` };
+  }
+  let sigB64 = null;
+  if (Array.isArray(parsed)) {
+    try {
+      sigB64 = JSON.parse(fs.readFileSync(`${fileAbs}.sig.json`, 'utf8'))?.sig ?? null;
+    } catch {
+      return { ok: false, why: '数组顶层应有 sidecar <file>.sig.json，但读不到' };
+    }
+  } else if (parsed && typeof parsed === 'object') {
+    sigB64 = parsed._sig?.sig ?? null;
+  }
+  if (!sigB64) return { ok: false, why: '无签名（缺 _sig / sidecar）——生成器只剥不签时的「零信号」形态' };
+  const ok = verifyBody(canonicalBodyText(parsed), sigB64);
+  return { ok, why: ok ? '' : '签名与规范化正文不符（内容被改过未重签？）' };
+}
+
+function verify() {
+  const r = verifyRulesFile(RULES);
+  if (!r.ok) {
+    console.error(`✗ 验签失败：${path.relative(ROOT, RULES)} — ${r.why}`);
+    process.exit(1);
+  }
+  console.log(`✓ 验签通过：${path.relative(ROOT, RULES)}（公钥 = rules_signature.rs 真源）`);
+}
+
+// 命令分发只在「被直接执行」时进行：check-data-signatures.mjs import 本文件的
+// 验签实现（canonicalBodyText / verifyBody / verifyRulesFile），import 不得有副作用、
+// 更不许把 import 方当成「未知命令」exit(1) 杀掉（首跑实踩）。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const cmd = argv[0];
+  if (cmd === 'sign') sign();
+  else if (cmd === 'gen-fallback') genFallback();
+  else if (cmd === 'verify') verify();
+  else {
+    console.error('用法: node tools/sign-cleanup-rules.mjs <sign|gen-fallback|verify> [--file <相对路径>]');
+    process.exit(1);
+  }
 }

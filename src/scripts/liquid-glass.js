@@ -3,7 +3,7 @@
 // 'trim-liquid-motion' 仅是首帧镜像/迁移来源；旧值 refract 自动迁移为 standard）。
 // 选项三档（2026-10-09 用户裁定）：full / standard / off —— frost 从选项退役
 // （太不明显），仅保留为环境自适应的内部降级档（电池/系统关透明时自动落入）。
-// 材质语义对齐 Apple Liquid Glass（docs规范/update/2026-09-14 五方案评估·B1）：
+// 材质语义对齐 Apple Liquid Glass（本机资料区 update/2026-09-14 五方案评估·B1，不入库）：
 //   full     ≈ clear+ ：完整液态玻璃——分段栏滑块 + 按钮 + 弹层 SVG 物理折射（斯涅尔定律位移贴图）
 //              + RGB 三通道边缘色散 + 高光贴图 + 指针弹性形变 + WebGL 弹层焦散高光
 //   standard ≈ regular：标准液态玻璃——覆盖面同 full，但单通道折射、无色散 / 形变 / WebGL

@@ -37,8 +37,8 @@ pub struct PsOutput {
 
 // ==================== 子进程树兜底（审查 M6） ====================
 //
-// `child.kill()` 只杀 pwsh 本身。脚本里 `& dism.exe ... | Out-String`（cleanup_execute.ps1:573）、
-// `sfc`（maint_sfc.ps1:38）、`Start-Process -Wait` 起的安装器都是 pwsh 的**子孙**，
+// `child.kill()` 只杀 pwsh 本身。脚本里 `& dism.exe ... | Out-String`、
+// `sfc`、`Start-Process -Wait` 起的安装器都是 pwsh 的**子孙**，
 // 它们继续握着 stdout 写端 → 读管道的线程不会返回 → `join()` 一直阻塞。
 // 实测：超时配 5s，真实耗时 24.4s，且成功路径（code=0）一样能被挂住 —— 「超时」形同虚设，
 // 用户看到「超时失败、可重试」后重试，第二个 DISM 就与不可回滚的 /ResetBase 并发跑。
@@ -47,8 +47,9 @@ pub struct PsOutput {
 // 超时那一刻 `TerminateJobObject` 一次干掉整棵树，管道写端全部关闭，读线程随即返回。
 //
 // **刻意不用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`**：多个脚本会用不带 -Wait 的
-// `Start-Process` 故意留下长命进程 —— cleanup_execute.ps1:276-277 重启刚被清理的应用、
-// cm_restart_explorer.ps1:25 拉起 explorer.exe、maint_store.ps1:38 跑 wsreset.exe。
+// `Start-Process` 故意留下长命进程 —— 清理收尾要重启刚被清理的应用、资源管理器
+// 收尾要拉起 explorer.exe、商店修复要跑 wsreset.exe（PS 时代出处均已退役：
+// cleanup_execute.ps1、cm_restart_explorer.ps1、maint_store.ps1——这三个都已是退役脚本）。
 // 那些进程同样是 job 成员，若「关句柄即杀全树」，正常跑完时反而会把用户的 explorer /
 // 应用一起杀掉。所以只在**超时**这一条路径上显式 Terminate，成功路径只 CloseHandle。
 /// 一次性 Job Object 句柄；Drop 只关句柄（**不**杀成员，理由见上）。
@@ -115,8 +116,8 @@ impl Drop for ProcessJob {
 ///
 /// 审查 v2-M8：判据必须与 `:45-49` 那段注释和 AGENTS §5.13 同口径。原实现在宽限期一到
 /// 就无条件 `terminate()`，而调用点（`run_with_exe` 尾部）在**正常退出**路径上同样会走到这里
-/// —— 于是 `cleanup_execute.ps1:276` 重启的被清理应用、`cm_restart_explorer.ps1:25` 拉起的
-/// explorer、`maint_store.ps1:38` 的 wsreset 只要有一个占着 stdout，宽限期一到整棵树被杀，
+/// —— 于是此前 `cleanup_execute.ps1`（已退役）重启的被清理应用、`cm_restart_explorer.ps1`（已退役）拉起的
+/// explorer、`maint_store.ps1`（已退役）的 wsreset 只要有一个占着 stdout，宽限期一到整棵树被杀，
 /// 正是那段注释声明要避开的结局。
 ///
 /// 为什么拆成「纯决策 `await_reader` + 会写日志的 `take_reader`」两层：前者不碰句柄也不写日志，
@@ -837,7 +838,8 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(&old, b"old").unwrap();
         std::fs::write(&fresh, b"fresh").unwrap();
-        // 把 old.ps1 的 mtime 推到 2 小时前（沙箱内文件，不碰真实目录）
+        // 把 old.ps1 的 mtime 推到 2 小时前（沙箱内自造文件名，不碰真实目录；
+        // R3f 白名单登记见 check-comment-rot PS1_MENTION_ALLOW）
         let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
         f.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
             .unwrap();
@@ -1037,7 +1039,7 @@ mod tests {
 
 /// 清理执行层留下的文件（审查 v2-L13 把这里当**唯一已接线的保留期入口**）：
 /// - `<数据目录>\tmp\` 下超过 1 小时的临时脚本（含历史版本遗留在全局可写 `%TEMP%\Trim` 的残留）；
-/// - `cleanup-reg-backup\` 下超额的注册表备份 —— 由 `cleanup_execute.ps1:706` 产出
+/// - `cleanup-reg-backup\` 下超额的注册表备份 —— 此前由 `cleanup_execute.ps1`（已退役）产出
 ///   （**`.ps1` 禁手改**，故修剪只能在 Rust 侧做），文件名带时间戳、全仓零读者，此前无上限增长。
 ///
 /// lstat 不跟随符号链接：非常规文件（链接/设备）直接跳过（审查 1-6）。
@@ -1126,7 +1128,7 @@ fn expired_since(mtime: Option<std::time::SystemTime>, now: std::time::SystemTim
     }
 }
 
-// ==================== 审查 v2-L13：cleanup_execute.ps1 自产的注册表备份修剪 ====================
+// ==================== 审查 v2-L13：清理链（原 PS 时代脚本 cleanup_execute.ps1，已退役）自产的注册表备份修剪 ====================
 
 /// 保留最近多少个**批次**（同一个 `yyyyMMdd_HHmmss` 时间戳算一次清理运行）。
 /// 为什么按批次而不是按份数（`peripheral.rs:222 prune_backups` 是按份数）：

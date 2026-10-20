@@ -42,7 +42,7 @@ const RETIRED = path.join(ROOT, 'src-tauri', 'data', 'retired-optimizations.json
 // 59 = + D 批 收尾 4 项（wu_au_options_notify / wu_no_auto_reboot / sys_transparency_off /
 // devmgr_show_hidden_default）。方案 §3.5 D 批 1-4 里"键路径有把握 + 不与既有语义重叠"
 // 的项已全部落地；TcpAckFrequency / DisableAIFeatures / 蓝牙策略键 / UserPreferencesMask
-// 明确不做的理由写在 OPTIONS 里（AGENTS §9.3 纪律 ①）。
+// 明确不做的理由写在 OPTIONS 里（红线依据-竞品反例 §9.3 纪律 ①）。
 const TIPS_BASELINE = 59;
 
 let fail = 0;

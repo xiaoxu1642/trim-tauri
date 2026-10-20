@@ -106,7 +106,7 @@ unsafe fn explorer_session_candidates() -> Result<(Vec<(u32, String)>, usize, us
     Ok((targets, skipped, candidates))
 }
 
-/// 重启资源管理器（对应 cm_restart_explorer.ps1）
+/// 重启资源管理器（原 PS 时代脚本 cm_restart_explorer.ps1，已退役）
 ///
 /// v6-K03（2026-10-18）：目标从「名字叫 explorer.exe 且同会话」收紧为「同会话且
 /// 镜像路径归一后等于 `%SystemRoot%\explorer.exe`」（[`is_system_explorer_image`]）；
@@ -799,7 +799,7 @@ unsafe fn resolve_native_reg_path(std_path: &str) -> String {
     format!("HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\{rest}")
 }
 
-/// 右键菜单扫描（对应 cm_scan.ps1，S3 简化版）
+/// 右键菜单扫描（原 PS 时代脚本 cm_scan.ps1，已退役；S3 简化版）
 ///
 /// 覆盖：Shell 项 + ShellEx 项（13 场景 × 3 视图）、发送到、Win+X、
 /// 新建菜单、打开方式。UWP/PackagedCom 暂未实现（S2 完善）。
@@ -1125,7 +1125,7 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                 "company": clean_str(&item.company),
                 // 分组键与它的判据来源（pe-product / pe-desc / registry / pe-company / dir /
                 // system / 空=未识别）。界面上「按安装目录识别」这类推断必须能看出来，
-                // 不装作权威结论（AGENTS §9.3：没有证据的主张不进文案）。
+                // 不装作权威结论（红线依据-竞品反例 §9.3：没有证据的主张不进文案）。
                 "owner": clean_str(&owner),
                 "ownerSource": clean_str(&owner_source),
                 "location": clean_str(&item.location),
@@ -1393,7 +1393,7 @@ unsafe fn is_system_com_server(guid: &str) -> bool {
     false
 }
 
-/// 右键菜单启用/禁用（对应 cm_toggle.ps1，S3）
+/// 右键菜单启用/禁用（原 PS 时代脚本 cm_toggle.ps1，已退役；S3）
 ///
 /// 覆盖 7 种 source：shell（四值模型）、shellex（'-' 前缀重命名）、
 /// winx（.lnk.disabled 重命名）、filesystem（Hidden 属性）、

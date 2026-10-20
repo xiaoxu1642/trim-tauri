@@ -157,7 +157,8 @@ pub fn start_boot_watchdog<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
 /// `on_page_load(Finished)` 路径处理，不经过这里。
 #[tauri::command]
 pub fn app_first_paint<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWindow<R>) {
-    // 审查 v2-F15：139 条命令里唯一不走统一 `guard*` 的一条（另外 138 条都走）。
+    // 审查 v2-F15：全仓唯一不走统一 `guard*` 的命令注册——条数现算以
+    // `node tools/check-channel-map.mjs --strict` 为准（勿在此写死数字）。
     // 这里刻意按 label 判定而非 `guard(window, MAIN)`，是因为非 main 是**正常路径**
     // （四个子窗都会发这条通知，见上面注释），用 guard 会把每一次子窗首帧都记成
     // error 级「来源校验失败」，把真正的注入尝试淹掉。

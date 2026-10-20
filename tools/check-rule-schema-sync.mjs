@@ -54,6 +54,53 @@ function vocabViolations(rustText, schema) {
 
 const keysFrom = (text, re) => [...new Set([...text.matchAll(re)].map((m) => m[1]))];
 
+// T1b-K04（v7.2 C09）：两域允许集「刻意两份、禁止合并」（AGENTS §5.20）的机检形态。
+// ① 逐域地板（旧地板把 14+10 字面求和 = 24，单域被削 ≤4 词不可见）；
+// ② 大小写不敏感交集必须**恰为**登记的 8 条共享变量——residue 混进 cleanup 独有的
+//    %TEMP%/%TMP% 一类就是「合并回潮」，交集变 9 即红；删共享变量变 7 同样红；
+// ③ caseInsensitive 逐域钉字面值（cleanup=false / residue=true）——翻 true 等于
+//    静默放宽清理域的 token 比对口径，此前全仓无断言。
+const SHARED_TOKENS_UPPER = [
+  'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'WINDIR', 'PROGRAMDATA',
+  'PROGRAMFILES', 'PROGRAMFILES(X86)', 'SYSTEMROOT',
+];
+const TOKEN_FLOORS = { cleanup: 10, residue: 8 };
+const TOKEN_CASE_PIN = { cleanup: false, residue: true };
+function tokenSeparationViolations(schema) {
+  const bad = [];
+  const perDomain = {};
+  for (const dom of ['cleanup', 'residue']) {
+    const t = schema[dom]?.tokens;
+    perDomain[dom] = Array.isArray(t?.allowed) ? t.allowed.length : 0;
+    if (perDomain[dom] < TOKEN_FLOORS[dom]) {
+      bad.push(`${dom}.tokens.allowed ${perDomain[dom]} 个 < 地板 ${TOKEN_FLOORS[dom]}（单域收缩不可见，旧地板是两域求和）`);
+    }
+    if (t?.caseInsensitive !== TOKEN_CASE_PIN[dom]) {
+      bad.push(`${dom}.tokens.caseInsensitive = ${JSON.stringify(t?.caseInsensitive)}，契约钉死 ${TOKEN_CASE_PIN[dom]}（翻向 = 比对口径放宽/收紧）`);
+    }
+  }
+  const ci = (x) => x.toUpperCase();
+  const cSet = new Set((schema.cleanup?.tokens?.allowed ?? []).map(ci));
+  const rSet = new Set((schema.residue?.tokens?.allowed ?? []).map(ci));
+  const inter = [...cSet].filter((x) => rSet.has(x));
+  const onlyC = [...cSet].filter((x) => !rSet.has(x));
+  const onlyR = [...rSet].filter((x) => !cSet.has(x));
+  const interBad = inter.filter((x) => !SHARED_TOKENS_UPPER.includes(x));
+  const missingShared = SHARED_TOKENS_UPPER.filter((x) => !inter.includes(x));
+  if (inter.length !== SHARED_TOKENS_UPPER.length || interBad.length || missingShared.length) {
+    bad.push(
+      `两域 token 交集 ${inter.length} 条（登记 ${SHARED_TOKENS_UPPER.length} 条）` +
+      (interBad.length ? `；未登记的交集成员：${interBad.join('/')}` : '') +
+      (missingShared.length ? `；登记的共享变量缺失：${missingShared.join('/')}` : '') +
+      '——交集变了 = 两域允许集被合并/删改（AGENTS §5.20 禁止）',
+    );
+  }
+  if (onlyC.length === 0 || onlyR.length === 0) {
+    bad.push('两域 allowed 出现包含关系（一域被另一域吞并）——「刻意两份」的红线被合并');
+  }
+  return { bad, perDomain, inter: inter.length };
+}
+
 /// floors=true 时对「现算出的键数量」施加地板：抓取口径失效（正则过时/代码改写）与
 /// 「真的没有查询」都会让本门禁退化成恒绿 —— 用地板把前者钉红（§4.1 找违规型门禁纪律）。
 function queryKeyViolations(rulesText, residueText, schema, { floors = true } = {}) {
@@ -188,7 +235,14 @@ check(
 );
 const q = queryKeyViolations(rulesText, residueText, schema);
 check(q.bad.length === 0, `3. 查询键存在性（${q.counts.join(' / ')}）`, q.bad.join('；'));
-check(q.tokenCount >= 20, `4. tokens 结构齐备（两域合计 ${q.tokenCount} 个登记词）`);
+// T1b-K04：旧断言 4 把两域字面求和（14+10=24）当对象数，单域被削 ≤4 词不可见。
+// 改逐域地板 + 交集恰等登记 + caseInsensitive 逐域钉死。
+const sep = tokenSeparationViolations(schema);
+check(
+  sep.bad.length === 0,
+  `4. 两域允许集分离（cleanup ${sep.perDomain.cleanup} / residue ${sep.perDomain.residue} / 大小写不敏感交集 ${sep.inter}）`,
+  sep.bad.join('；'),
+);
 
 if (fail > 0) {
   console.error('check-rule-schema-sync: 存在漂移');

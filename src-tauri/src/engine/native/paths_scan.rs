@@ -237,7 +237,7 @@ fn glob_first_dir(pattern: &str) -> String {
     }
 }
 
-/// 安装路径扫描（对应 paths_scan.ps1，S3 简化版）
+/// 安装路径扫描（原 PS 时代脚本 paths_scan.ps1，已退役；S3 简化版）
 ///
 /// 覆盖：规则表达式解析、卸载注册表枚举、App Paths、应用安装路径多级兜底、
 /// 用户数据目录、缓存目录、glob 匹配。开始菜单 .lnk 目标解析暂未实现（S2 用 IShellLink COM）。

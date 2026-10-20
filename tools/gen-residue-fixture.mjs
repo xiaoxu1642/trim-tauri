@@ -10,7 +10,7 @@
 'use strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
@@ -247,7 +247,28 @@ const doc = {
   runValueVectors,
   packages,
 };
-fs.writeFileSync(OUT, JSON.stringify(doc, null, 2) + '\n', 'utf8');
-console.log(
-  `已生成 ${path.relative(ROOT, OUT)}：regVectors ${regVectors.length} 条（拒绝 ${regVectors.filter((v) => v.blocked).length} / 放行 ${regVectors.filter((v) => !v.blocked).length}），runValueVectors ${runValueVectors.length} 条（放行 ${runValueVectors.filter((v) => v.gate === 'allowed').length} / 拒绝 ${runValueVectors.filter((v) => v.gate === 'denied').length} / 不管辖 ${runValueVectors.filter((v) => v.gate === 'not-governed').length}），packages ${packages.length} 条（拒绝 ${packages.filter((c) => !c.ok).length} / 放行 ${packages.filter((c) => c.ok).length}）`,
-);
+const docText = `${JSON.stringify(doc, null, 2)}\n`;
+
+/** 夹具文本（唯一实现）：check-fixture-freshness.mjs import 同一份做逐字节对拍（T1c-M05）。
+ *  import 本模块只做纯计算不落盘——写盘仅发生在直跑路径。 */
+export function fixtureText() {
+  return docText;
+}
+
+// 只有「被直接执行」时才落盘/校验：被 check-fixture-freshness.mjs import 时只借
+// fixtureText()，不许有落盘副作用（同 gen-finder-delete-modes 的纪律）。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv.includes('--check')) {
+    const have = fs.readFileSync(OUT, 'utf8');
+    if (have !== docText) {
+      console.error('✗ 盘上 residue-contract.json 与生成器输出不一致——夹具被手改或用例改后未重跑。重跑：node tools/gen-residue-fixture.mjs');
+      process.exit(1);
+    }
+    console.log(`✓ residue-contract.json 与生成器输出逐字节一致（packages ${packages.length} / regVectors ${regVectors.length}）`);
+    process.exit(0);
+  }
+  fs.writeFileSync(OUT, docText, 'utf8');
+  console.log(
+    `已生成 ${path.relative(ROOT, OUT)}：regVectors ${regVectors.length} 条（拒绝 ${regVectors.filter((v) => v.blocked).length} / 放行 ${regVectors.filter((v) => !v.blocked).length}），runValueVectors ${runValueVectors.length} 条（放行 ${runValueVectors.filter((v) => v.gate === 'allowed').length} / 拒绝 ${runValueVectors.filter((v) => v.gate === 'denied').length} / 不管辖 ${runValueVectors.filter((v) => v.gate === 'not-governed').length}），packages ${packages.length} 条（拒绝 ${packages.filter((c) => !c.ok).length} / 放行 ${packages.filter((c) => c.ok).length}）`,
+  );
+}

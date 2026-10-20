@@ -799,7 +799,7 @@
    * 刻意只说「已请求」：走的是 quickcmds 白名单里那条 `ms-settings:windowsdefender`
    * （URI 由微软文档给定），ShellExecute 返回成功只代表请求交出去了，
    * 本机有没有装了安全中心、页面能不能落地都由系统决定 —— Trim 不代扫描，
-   * 也不替用户判定是不是恶意（AGENTS §9.3：没有复现证据的话术不进文案）。
+   * 也不替用户判定是不是恶意（红线依据-竞品反例 §9.3：没有复现证据的话术不进文案）。
    */
   async function openSecurityCenter() {
     if (!window.api?.quickCmds?.run) {

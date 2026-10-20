@@ -46,7 +46,7 @@ fn note_unexpanded_in_detail(expanded: &str, raw: &str, unresolved: &mut Vec<Str
     true
 }
 
-/// 清理条目明细枚举（对应 cleanup_detail.ps1，S3）
+/// 清理条目明细枚举（原 PS 时代脚本 cleanup_detail.ps1，已退役；S3）
 ///
 /// 输入 rule JSON 和目标路径，返回 {kind, total, truncated, files, unresolved}。
 /// 复杂 glob/排除规则回退 PS（commands 层判定）。
@@ -629,7 +629,7 @@ fn classify_outcome(
     }
 }
 
-/// 清理执行（对应 cleanup_execute.ps1，S3）
+/// 清理执行（原 PS 时代脚本 cleanup_execute.ps1，已退役；S3）
 ///
 /// 三类目标模型全部原生化（v0.1.6 真机修复）：fileKeys（含段级 glob 展开）、
 /// regKeys（先备份后删，fail-closed）、special=dism。to_recycle=true 时文件只

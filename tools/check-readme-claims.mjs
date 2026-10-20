@@ -136,6 +136,28 @@ if (psClaims.length === 0) {
   console.log(`   ↳ 真源分账：正向 ${psTruth.applyItems} 项/${psTruth.applySteps} 步，恢复 ${psTruth.restoreItems} 项/${psTruth.restoreSteps} 步，合计 ${psTruth.applySteps + psTruth.restoreSteps} 步`);
 }
 
+// 8b（T1b-M05，v7.2 C09）：同一句承诺里的另外三个数（38/40 步 Rust 原生、只剩 2 步
+// AppX）属**命令层/原生执行账**——第二真源在 check-ps-callsites 的三张登记表，
+// 本门禁不 import 它（两账不许互相代表，也不许在这里复刻第二份现算）。但「同句
+// 只钉一本」等于后两个数零覆盖：这里把它们钉成**声明形态**——数字或措辞一改，
+// 下面的 0 命中判红会立刻把这句拖回审查视野，谁改谁同步来钉。
+{
+  const pins = [
+    { label: '8b-1. 「38/40 步由 Rust 原生引擎完成」声明在场', re: /执行时\s*38\/40\s*步由 Rust 原生引擎完成/g },
+    { label: '8b-2. 「真正起 PowerShell 5.1 的只剩 2 步（两个 AppX 移除项）」声明在场', re: /只剩\s*2\s*步（两个 AppX 移除项）/g },
+  ];
+  for (const { label, re } of pins) {
+    const hits = [...readme.matchAll(re)];
+    check(
+      hits.length === 1,
+      `${label}（恰好 1 处）`,
+      hits.length === 0
+        ? 'readme 中未找到该声明——数字改了/措辞改了/句子删了都必须同步改本断言并复核命令层账'
+        : hits.length > 1 ? `出现 ${hits.length} 处（承诺句不该复制多份）` : '在场',
+    );
+  }
+}
+
 console.log('');
 
 // ---------- 9~12（审查 M-8 补，2026-10-03）：分域明细 / 右键分类数 / 内存区域数 / 网络诊断数 ----------

@@ -1529,7 +1529,7 @@
     // v3.3.0（用户裁定）：执行选项 UI 已移除，固定语义——常规清理**不进回收站、直接永久删**。
     // 审查 v2-M20 订正：后半句原先写「回收站优先删除逻辑仍在主进程 trashOrUnlink 内」，那是
     // Electron 轨的事实；本轨（Tauri/Rust）没有 trashOrUnlink，`toRecycle=false` 使
-    // `cleanup.rs` 的回收站支对该链不可达，永久删发生在 `cleanup_execute.ps1` 里，**刻意不做
+    // `cleanup.rs` 的回收站支对该链不可达，永久删发生在 Rust 原生 cleanup_execute（原 PS 时代同名脚本已退役）里，**刻意不做
     // 永久删除兜底之外的补救**。红线口径已按这条裁定改写在 AGENTS §3（含"唯一例外"表述）。
     // 2026-10-04 审计 §5.5：force 是载荷兼容残留——「PS 闸」已随 S3 纯原生删除，
     // 主进程对 force 无任何判定语义（只进日志对账）。risk 确认弹窗的真实用途是

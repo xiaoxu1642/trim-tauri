@@ -583,7 +583,7 @@
    * 「更新已完成」确认（新版本实例首启一次）。
    * 文案只说主进程**真的做到**的事：清理结果由 updater:completion 如实回报
    * （cleaned / cleanFailed），程序文件的替换是 NSIS 覆盖安装做的，
-   * 不写「旧版代码文件已删除」这种我们没做过的话（AGENTS §9.3）。
+   * 不写「旧版代码文件已删除」这种我们没做过的话（红线依据-竞品反例 §9.3）。
    */
   function completionDescOf(info) {
     const via = info.via ? '本次经 ' + viaLabel(String(info.via)) + ' 下载。' : '';

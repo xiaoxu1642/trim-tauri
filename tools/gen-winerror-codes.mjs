@@ -8,9 +8,14 @@
 // ——v3 约束「无消费者的字段禁止入库」，所以生成时投影掉，只落 code/title/detail。
 // check-data-parity.mjs 的 P4b 组按同一投影对拍。
 //
-// 用法：node tools/gen-winerror-codes.mjs（改源后必须重跑；不重跑 = 注解用旧表）。
+// 用法：node tools/gen-winerror-codes.mjs            重算并落盘（改源后必须重跑）
+//       node tools/gen-winerror-codes.mjs --check    只读校验：盘上产物 ⇄ 投影逐字节比
+//                                                    （T1c-M05：手改产物即红；门禁 import 同一实现）
+//
+// 投影函数导出（T1c-M05）：check-fixture-freshness.mjs import 同一份实现做逐字节对拍，
+// 「投影口径」不再允许在门禁里抄第二份。
 
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,12 +41,32 @@ for (const c of WINERROR_CODES) {
   }
 }
 
-const doc = {
-  version: 1,
-  _comment:
-    '由 tools/gen-winerror-codes.mjs 从 tools/winerror-codes.source.mjs 生成，勿手改——改源后重跑生成器。维护错误码人话表（P1-A / Dism++ D-04b）。',
-  codes: WINERROR_CODES.map((c) => ({ code: c.code, title: c.title, detail: c.detail })),
-};
+/** 投影（唯一实现）：源表 → 运行期 JSON 文本（含末尾换行）。生成与校验共用。 */
+export function projectWinerrorDoc() {
+  const doc = {
+    version: 1,
+    _comment:
+      '由 tools/gen-winerror-codes.mjs 从 tools/winerror-codes.source.mjs 生成，勿手改——改源后重跑生成器。维护错误码人话表（P1-A / Dism++ D-04b）。',
+    codes: WINERROR_CODES.map((c) => ({ code: c.code, title: c.title, detail: c.detail })),
+  };
+  return `${JSON.stringify(doc, null, 2)}\n`;
+}
 
-writeFileSync(OUT, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
-console.log(`✓ 已落盘 ${OUT}（${doc.codes.length} 个错误码）`);
+if (process.argv.includes('--check')) {
+  const want = projectWinerrorDoc();
+  let have = '';
+  try {
+    have = readFileSync(OUT, 'utf8');
+  } catch (e) {
+    fail(`产物不可读：${e.message}`);
+  }
+  if (have !== want) {
+    console.error('✗ 盘上 winerror-codes.json 与投影不一致——产物被手改或源改后未重跑。重跑：node tools/gen-winerror-codes.mjs');
+    process.exit(1);
+  }
+  console.log(`✓ winerror-codes.json 与投影逐字节一致（${JSON.parse(want).codes.length} 个错误码）`);
+  process.exit(0);
+}
+
+writeFileSync(OUT, projectWinerrorDoc(), 'utf8');
+console.log(`✓ 已落盘 ${OUT}（${JSON.parse(projectWinerrorDoc()).codes.length} 个错误码）`);

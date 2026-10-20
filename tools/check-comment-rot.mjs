@@ -252,7 +252,12 @@ const TOLERATED_FILES = new Map([
 
 // 陈述过去的注释不判红（「v3 C-1 把 contextmenu::to_wide16 收敛到此」是史实，
 // 该符号确实已删——这正是注释在说明的事，不是腐烂）
-const RE_HISTORICAL = /曾经|曾|历史|旧版|原来|此前|过后|退役|早期|过去|一度|之前|原本|旧|收敛到此|已删|统一走|v\d|原 /;
+// T1b-K02（v7.2 C09）：`v\d` 从豁免词表移除。本仓 `v2-F15`/`v6-K13` 是引用编号习惯
+// （不是过去时），把「写过批次号的注释」整片划出判定面，等于给现在时的结构声称
+// 开了无边界后门——实测 3125 行豁免里 1515 行只因含 `v<数字>`，其中就藏着
+// app.rs「139 条命令」这种真腐烂。过去时语义由其余词（曾经/旧版/此前/退役…）承担，
+// 带 `v` 的史实句要豁免就用过去时措辞写，不靠批次号自动豁免。
+const RE_HISTORICAL = /曾经|曾|历史|旧版|原来|此前|过后|退役|早期|过去|一度|之前|原本|旧|收敛到此|已删|统一走|原 /;
 
 const rotSymbols = [];
 const rotFiles = [];
@@ -455,16 +460,38 @@ const rotNumbers = [];
 const rotConstEq = [];
 const rotFileLine = [];
 const rotKb = [];
+const rotPs1 = [];
+// T1b-K03（R3f）：`.ps1` 提及判定面。白名单登记 {file, anchor, reason}（§5.19 禁行号），
+// 每条必须真命中 ≥1 次，否则判「白名单腐烂」。
+const RE_PS1_MENTION = /`?([\w.-]+\.ps1)(?::(\d+))?`?/g;
+const psOnDisk = existsSync(PS_DIR)
+  ? new Set(readdirSync(PS_DIR).filter((f) => f.endsWith('.ps1')))
+  : new Set();
+const PS1_MENTION_ALLOW = [
+  // 测试沙箱自造文件名（pwsh/mod.rs 超时用例把 old.ps1 的 mtime 推前）——
+  // 非仓内坐标、非史实，按 §5.19 用 anchor 登记；改名即腐烂（命中 0 判红）。
+  { file: 'src-tauri/src/pwsh/mod.rs', anchor: 'old.ps1', reason: '测试沙箱自造文件名（超时用例推 mtime），非仓内脚本引用' },
+];
+const ps1AllowUsed = new Set();
+// T1b-K01（v7.2 C09）：逐形态对象数。旧地板把四类加总（实算 16），而 R3a 的 .ps1
+// 形态与 R3c 的 file:行 形态在真语料上都是 0——加总被 R3b/R3d 喂饱后，
+// 「R3c 摘网不会有任何信号」。现在每形态单独计数：真语料 0 对象的形态必须
+// 在 CONTROLLED_R3_FORMS 里登记（对应下方自检块的合成对照），没登记的 0 对象形态判红。
+const r3FormCounts = R3_PATTERNS.map((p) => ({ label: p.label, n: 0 }));
+let constEqObjects = 0;
+let fileLineObjects = 0;
+let kbObjects = 0;
 let r3Objects = 0; // 断言对象计数（0 ⇒ 语料/模式失明，是 T1-M01 的复现形态）
 for (const [rel, cs] of commentsByFile) {
   for (const c of cs) {
     if (RE_HISTORICAL.test(c.text)) continue;
-    for (const p of R3_PATTERNS) {
+    for (const [pi, p] of R3_PATTERNS.entries()) {
       if (p.expect < 0) continue;
       p.re.lastIndex = 0;
       let m;
       while ((m = p.re.exec(c.text)) !== null) {
         r3Objects++;
+        r3FormCounts[pi].n++;
         if (Number(m[1]) !== p.expect) rotNumbers.push(`${rel}:${c.line} 写「${m[0]}」现算 ${p.expect}（${p.label}）`);
       }
     }
@@ -472,6 +499,7 @@ for (const [rel, cs] of commentsByFile) {
     let m;
     while ((m = RE_CONST_EQ.exec(c.text)) !== null) {
       r3Objects++;
+      constEqObjects++;
       if (ALLOW_EXTERNAL_CONST.has(m[1])) continue; // 外部 API 常量（见登记表）
       const actual = constValueOf(m[1]);
       if (actual === null) rotConstEq.push(`${rel}:${c.line} 写 \`${m[1]}=${m[2]}\`，但全仓找不到该常量的数值定义`);
@@ -480,6 +508,7 @@ for (const [rel, cs] of commentsByFile) {
     RE_FILE_LINE.lastIndex = 0;
     while ((m = RE_FILE_LINE.exec(c.text)) !== null) {
       r3Objects++;
+      fileLineObjects++;
       const p = join(ROOT, m[1]);
       if (!existsSync(p)) { rotFileLine.push(`${rel}:${c.line} 引用 ${m[1]}:${m[2]}，但文件不存在`); continue; }
       const lineNo = Number(m[2]);
@@ -489,8 +518,21 @@ for (const [rel, cs] of commentsByFile) {
     RE_KB_CLAIM.lastIndex = 0;
     while ((m = RE_KB_CLAIM.exec(c.text)) !== null) {
       r3Objects++;
+      kbObjects++;
       const allowed = KB_SPEC_ALLOW.some((a) => rel === a.file && c.text.includes(a.needle));
       if (!allowed) rotKb.push(`${rel}:${c.line} 写「${m[0]}」—— 测量型精确体积必腐烂；约定常量请登记 KB_SPEC_ALLOW，其余改「约百 KB 量级」措辞`);
+    }
+    // T1b-K03（R3f）：`.ps1` 提及的 basename 必须在 `src-tauri/ps/` 真实存在。
+    // 本仓 PS 产物现算只剩 1 个脚本；历史脚本名必须以过去时措辞出现（史实句豁免走
+    // RE_HISTORICAL），不许用现在时引用一个干净克隆里必然落空的文件。
+    // 自造名（测试沙箱/示例）走 {file, anchor, reason} 登记制，每条必须真命中 ≥1。
+    RE_PS1_MENTION.lastIndex = 0;
+    while ((m = RE_PS1_MENTION.exec(c.text)) !== null) {
+      const base = m[1];
+      if (psOnDisk.has(base)) continue;
+      const allowedIdx = PS1_MENTION_ALLOW.findIndex((a) => rel === a.file && c.text.includes(a.anchor));
+      if (allowedIdx >= 0) { ps1AllowUsed.add(allowedIdx); continue; }
+      rotPs1.push(`${rel}:${c.line} 提及「${base}」，但 src-tauri/ps/ 里没有这个脚本（PS 产物已退役；史实请用过去时措辞，示例名请登记 PS1_MENTION_ALLOW）`);
     }
   }
 }
@@ -514,11 +556,56 @@ check(
   'R3d. 注释不写精确 KB 体积（改量级措辞，防体积漂移腐烂）',
   rotKb.length ? rotKb.slice(0, 10).join('；') : '无腐烂',
 );
+check(
+  rotPs1.length === 0,
+  `R3f. 注释提及的 .ps1 脚本必须在 src-tauri/ps/ 存在（现算盘上 ${psOnDisk.size} 个）`,
+  rotPs1.length ? rotPs1.slice(0, 10).join('；') + (rotPs1.length > 10 ? ` …共 ${rotPs1.length} 处` : '') : '无死引用',
+);
+// T1b-K03：白名单每条必须真命中 ≥1（§5.19「不命中=腐烂」纪律，抄 doc-refs 2b 组）
+check(
+  ps1AllowUsed.size === PS1_MENTION_ALLOW.length,
+  `R3f 白名单对账（登记 ${PS1_MENTION_ALLOW.length} 条 / 真命中 ${ps1AllowUsed.size} 条）`,
+  ps1AllowUsed.size !== PS1_MENTION_ALLOW.length
+    ? '存在从未命中的豁免条目——示例名已改名或登记已腐烂，删掉该条'
+    : '',
+);
 // 扫描面地板：四类数字断言的对象总数为 0 ⇒ 模式/语料失明（T1-M01 的复现形态），判红
 check(
   r3Objects >= 3,
   `R3 扫描面地板（数字断言对象 ${r3Objects} 处 ≥ 3）`,
   r3Objects < 3 ? '断言对象趋零 ⇒ 语料或模式失明' : '',
+);
+// T1b-K01：逐形态盲区核对。真语料 0 对象的形态必须有合成对照（下方自检块），
+// 否则判红——「0 对象 + 无对照」= 判据死了没人知道。
+const CONTROLLED_R3_FORMS = new Set([
+  0, // .ps1 脚本数：自检块有 99999 合成样本（正反向）
+  1, // 门禁条数：本批补的合成对照
+  2, // 注册命令条数：自检块有合成样本
+  3, // NAME=NUM（RE_CONST_EQ）：自检块 THROTTLE_MS / NO_SUCH_CONST 两向
+  4, // file:行（RE_FILE_LINE）：自检块真坐标 / 幽灵坐标两向
+  5, // KB 体积（RE_KB_CLAIM）：自检块量级措辞 / 测量型两向
+]);
+const zeroForms = [
+  ...r3FormCounts.filter((f) => f.n === 0).map((f) => f.label),
+  ...(constEqObjects === 0 ? ['NAME=NUM'] : []),
+  ...(fileLineObjects === 0 ? ['file:行'] : []),
+  ...(kbObjects === 0 ? ['KB 体积'] : []),
+];
+const uncontrolledZeros = zeroForms.filter((l) => {
+  if (l === '.ps1 脚本数') return !CONTROLLED_R3_FORMS.has(0);
+  if (l === '门禁条数') return !CONTROLLED_R3_FORMS.has(1);
+  if (l === '注册命令条数') return !CONTROLLED_R3_FORMS.has(2);
+  if (l === 'NAME=NUM') return !CONTROLLED_R3_FORMS.has(3);
+  if (l === 'file:行') return !CONTROLLED_R3_FORMS.has(4);
+  if (l === 'KB 体积') return !CONTROLLED_R3_FORMS.has(5);
+  return true;
+});
+check(
+  uncontrolledZeros.length === 0,
+  `R3 逐形态盲区核对（.ps1 ${r3FormCounts[0].n} / 门禁 ${r3FormCounts[1].n} / 命令 ${r3FormCounts[2].n} / NAME=NUM ${constEqObjects} / file:行 ${fileLineObjects} / KB ${kbObjects}）`,
+  uncontrolledZeros.length
+    ? `这些形态真语料 0 对象且无合成对照：${uncontrolledZeros.join('、')}——补对照样本或登记 CONTROLLED_R3_FORMS`
+    : '0 对象形态均有合成对照，其余形态对象数 > 0',
 );
 
 // ────────────────────────────────────────────────────────────────────
@@ -626,6 +713,33 @@ const POSITIVE_CONTROLS = (() => {
   const gm = R3_PATTERNS[2].re.exec(cmdGood);
   if (!gm || Number(gm[1]) !== registeredCmdCount) problems.push('R3a 失效：现算命令条数被判红');
 
+  // R3a 门禁条数（T1b-K01 补）：该形态真语料 0 对象，判据活性只能靠合成样本证明
+  R3_PATTERNS[1].re.lastIndex = 0;
+  const gateSynth = `// 共 ${gateCount + 1} 条 Node 门禁`;
+  if (!R3_PATTERNS[1].re.test(gateSynth)) problems.push('R3a 失效：门禁条数合成样本未被抓到');
+  const gateGood = `// 共 ${gateCount} 条 Node 门禁`;
+  R3_PATTERNS[1].re.lastIndex = 0;
+  const gGood = R3_PATTERNS[1].re.exec(gateGood);
+  if (!gGood || Number(gGood[1]) !== gateCount) problems.push('R3a 失效：现算门禁条数被判红');
+
+  // R3f（T1b-K03）：盘上不存在的 .ps1 必须被抓；盘上真名必须放行
+  {
+    const onDisk = [...psOnDisk][0];
+    if (!onDisk) {
+      problems.push('R3f 失效：src-tauri/ps/ 为空，R3f 的放行腿无法自证（登记 RETIRED 前先想清楚）');
+    } else {
+      const badLine = '// 对应 retired_probe_xyz.ps1 的旧语义';
+      RE_PS1_MENTION.lastIndex = 0;
+      const bm = RE_PS1_MENTION.exec(badLine);
+      if (!bm || psOnDisk.has(bm[1])) problems.push('R3f 失效：不存在的 .ps1 提及未被抓到');
+      const goodLine = `// 对应 ${onDisk} 的现役脚本`;
+      RE_PS1_MENTION.lastIndex = 0;
+      const gm2 = RE_PS1_MENTION.exec(goodLine);
+      if (!gm2 || !psOnDisk.has(gm2[1])) problems.push('R3f 失效：盘上真名被判为死引用');
+      RE_PS1_MENTION.lastIndex = 0;
+    }
+  }
+
   // R3b：不存在的常量必须现算 null；真实常量（mouse-trail.js THROTTLE_MS=22）必须现算到
   if (constValueOf('NO_SUCH_CONST_XYZ') !== null) problems.push('R3b 失效：不存在的常量现算不为 null');
   if (constValueOf('THROTTLE_MS') !== 22) problems.push('R3b 失效：真实常量 THROTTLE_MS 现算不到 22');
@@ -647,7 +761,7 @@ const POSITIVE_CONTROLS = (() => {
     for (const p of problems) console.error(`✗ ${p}`);
     process.exit(1);
   }
-  console.log('✓ 正向对照自检通过（三条断言均可判红，且真样本不假红）');
+  console.log('✓ 正向对照自检通过（六形态判据均可判红，且真样本不假红；0 对象形态由合成对照证明活性）');
   return true;
 })();
 

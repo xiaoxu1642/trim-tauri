@@ -18,7 +18,7 @@
 //   --verbose  额外打印每条漂移的字段名（默认只打印前若干条）
 // 退出码：0 = 各组逐条一致；1 = 任一组漂移或源不可读
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
@@ -171,7 +171,14 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
   try { committed = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8')); }
   catch (e) { check(false, 'P4 protect-parity 夹具 ⇄ JS 权威实现', `读不到：${e.message.slice(0, 80)}`); }
   if (committed) {
+    // T1c-M07（v7.2 C09）：runPs 默认 false ⇒ 本门禁（MUST_RUN）不再真实 spawn
+    // powershell.exe。内存重算不含 psVectors，比对前两边都剥掉该字段——
+    // psVectors 的口径由「显式重生成路径」（node tools/gen-protect-parity.mjs）
+    // 负责，它的 PS↔JS 一致性在生成时当场断言并打印。
     const fresh = buildParityFixture();
+    const stripPs = (f) => { const c = { ...f }; delete c.psVectors; return c; };
+    const freshNoPs = stripPs(fresh);
+    const committedNoPs = stripPs(committed);
     // 夹具冻的是**出生机**的用户目录（JS 权威实现的默认清单读 process.env，
     // `protect.rs` 那条用例也读自己进程的 env）—— 实测把 USERPROFILE 换成别的值，
     // `cargo test --lib protect::` 立刻红。所以这里分两档，既不放纵漂移也不误报：
@@ -190,14 +197,14 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
     const neutral = (v) => !/users[\\/]/i.test(typeof v === 'string' ? v : JSON.stringify(v));
     const detail = [];
     if (isBirthMachine) {
-      if (JSON.stringify(fresh) !== JSON.stringify(committed)) detail.push('整串不一致 ⇒ 基线被重拷过或夹具被手改');
+      if (JSON.stringify(freshNoPs) !== JSON.stringify(committedNoPs)) detail.push('整串不一致 ⇒ 基线被重拷过或夹具被手改');
     } else {
       const pick = (f) => ({
         roots: Object.fromEntries(Object.entries(f.roots).map(([k, v]) => [k, v.filter(neutral)])),
         vectors: f.vectors.filter(v => neutral(v.p)).map(v => `${v.p}=${v.protected}`).sort(),
       });
-      const a = JSON.stringify(pick(fresh));
-      const b = JSON.stringify(pick(committed));
+      const a = JSON.stringify(pick(freshNoPs));
+      const b = JSON.stringify(pick(committedNoPs));
       if (a !== b) detail.push('机器中立部分不一致 ⇒ 基线口径变了');
     }
     const denied = fresh.vectors.filter(v => v.protected).length;
@@ -240,21 +247,63 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
 
 
 // ---------------------------------------------------------------------------
-// 报告项（不参与判定）：附录 G 里「本仓无再生成路径 / 无消费者」的两个数据文件。
-// 它们没有可对拍的上游真源，判红无意义，但「无人守护」这件事必须每次都被看见。
+// 第 4.5 组（T1b-K05，v7.2 C09）：「无对拍对象」从报告句升格为断言。
+// 旧实现是一段 console.log——两件文件被整体删除后门禁仍 exit 0（组 5 地板
+// checkedNames<20 也拦不住：实算 37 个点名里这两件各贡献 1 个，删掉仍 35≥20）。
+// 现在改成真断言：① 件必须存在；② 「没有对拍」本身必须逐件登记理由（登记式
+// 棘轮，件数进断言对象计数）——「无人守护」必须每次都被看见，且被机器看见。
 // ---------------------------------------------------------------------------
-console.log('\n※ 无对拍对象（本仓既无再生成路径、也无门禁，改动只能靠人肉核对）：');
-for (const rel of [join('src-tauri', 'data', 'reg-ownership.json'), join('src-tauri', 'data', 'retired-optimizations.json')]) {
-  const abs = join(REPO_ROOT, rel);
-  let extra = '';
-  try {
-    const j = JSON.parse(readFileSync(abs, 'utf8'));
-    extra = Array.isArray(j) ? `（${j.length} 条）` : `（键 ${Object.keys(j).slice(0, 4).join(',')}）`;
-  } catch { extra = '（读不到）'; }
-  console.log(`  · ${rel.replace(/\\/g, '/')} ${existsSync(abs) ? extra : '缺失'}`);
+const NO_PARITY_REGISTRY = [
+  {
+    rel: join('src-tauri', 'data', 'reg-ownership.json'),
+    why: '无 Rust 消费方（现算 grep 0 命中）、暂无第二真源可对拍；登记 = 让「无人守护」可见',
+  },
+  {
+    rel: join('src-tauri', 'data', 'retired-optimizations.json'),
+    why: '退役目录：唯一消费方 catalog.rs include_str!（只读），无对拍上游',
+  },
+];
+{
+  const noParityProblems = [];
+  for (const { rel, why } of NO_PARITY_REGISTRY) {
+    const abs = join(REPO_ROOT, rel);
+    if (!existsSync(abs)) {
+      noParityProblems.push(`${rel.replace(/\\/g, '/')} 缺失（登记理由：${why}）——登记还在、文件没了 = 被人删了没走处置`);
+      continue;
+    }
+    try {
+      const j = JSON.parse(readFileSync(abs, 'utf8'));
+      const shape = Array.isArray(j) ? `${j.length} 条` : `键 ${Object.keys(j).length}`;
+      console.log(`  · 无对拍对象（已登记）：${rel.replace(/\\/g, '/')}（${shape}）`);
+    } catch (e) {
+      noParityProblems.push(`${rel.replace(/\\/g, '/')} JSON 损坏：${e.message.slice(0, 80)}`);
+    }
+  }
+  const regRels = new Set(NO_PARITY_REGISTRY.map((r) => r.rel.replace(/\\/g, '/')));
+  // 「已归属」清单（显式登记，不是后缀排除）：这些文件各自有对拍组或专属门禁。
+  // 新增 data/*.json 既不在此表、也不在 NO_PARITY_REGISTRY ⇒ 红（R-D 的三档处置纪律）。
+  const PARITY_COVERED = new Set([
+    'cleanup-postactions.json', 'cleanup-rules.json', 'item-intro.json',
+    'maintenance-tasks.json', 'optimizer-defaults.json', 'optimizer-groups.json',
+    'optimizer-nara-panel.json', 'optimizer-privacy-panel.json', 'optimizer-provenance.json',
+    'optimizer-runtime.json', 'optimizer-runtime.json.sig.json', 'optimizer-scope.json',
+    'optimizer-security.json', 'optimizer-subitems.json', 'optimizer-writes.json',
+    'uninstall-residue-rules.json', 'winerror-codes.json',
+  ]);
+  const dataDir = join(REPO_ROOT, 'src-tauri', 'data');
+  const unregistered = readdirSync(dataDir)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => `src-tauri/data/${f}`)
+    .filter((rel) => !regRels.has(rel) && !PARITY_COVERED.has(rel.split('/').pop()));
+  if (unregistered.length > 0) {
+    noParityProblems.push(`src-tauri/data/ 出现未登记的数据文件（无对拍对象清单没跟上）：${unregistered.join('、')}`);
+  }
+  check(
+    noParityProblems.length === 0,
+    `4.5. 无对拍对象逐件登记（${NO_PARITY_REGISTRY.length} 件，缺失/损坏/漏登记即红）`,
+    noParityProblems.join('；') || '两件在盘、理由在册',
+  );
 }
-
-console.log(`\n${fail === 0 ? '✓ 数据对拍各组全部一致' : `${fail} 项未通过`}`);
 
 // ==================== 第 5 组：_comment 点名的仓内坐标必须存活 ====================
 // v5 批次 9（门禁候选 8；v4 D1-M03 + 本轮真死 1 条）：数据 JSON 的 _comment 是
@@ -287,7 +336,15 @@ console.log(`\n${fail === 0 ? '✓ 数据对拍各组全部一致' : `${fail} �
   let checkedNames = 0;
   for (const f of readdirSync(dataDir)) {
     if (!f.endsWith('.json')) continue;
-    const v = JSON.parse(readFileSync(pathMod.join(dataDir, f), 'utf8'));
+    // T1b-M01：JSON.parse 套 try——损坏件必须以判红点名，不许拿 node 堆栈当失败输出
+    let v;
+    try {
+      v = JSON.parse(readFileSync(pathMod.join(dataDir, f), 'utf8'));
+    } catch (e) {
+      fail++;
+      console.error(`✗ 5. _comment 坐标存活：${f} JSON 损坏（${e.message.slice(0, 80)}）`);
+      continue;
+    }
     const comment = v && typeof v === 'object' && !Array.isArray(v) ? v._comment : null;
     if (typeof comment !== 'string') continue;
     for (const m of comment.matchAll(extRe)) {
@@ -329,5 +386,9 @@ console.log(`\n${fail === 0 ? '✓ 数据对拍各组全部一致' : `${fail} �
   if (gaps.length > 0) fail++, console.error(`✗ 6. 备份根 prune 覆盖面缺口：${gaps.join('；')}`);
   else console.log(`✓ 6. 备份根 prune 覆盖面：${PRUNE_COVERAGE.length} 个备份根都有对应裁剪出口`);
 }
+
+// T1b-M01：汇总行必须在**全部判定组之后**（旧实现在第 5/6 组之前就打「全部一致」，
+// 实跑输出顺序可见）。这是末尾唯一的汇总出口。
+console.log(`\n${fail === 0 ? '✓ 数据对拍各组全部一致' : `${fail} 项未通过`}`);
 
 process.exit(fail === 0 ? 0 : 1);

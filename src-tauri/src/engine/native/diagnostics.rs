@@ -11,7 +11,7 @@ use windows::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCl
 use super::common::*;
 // ==================== B10 sysdisk：系统盘介质探测 ====================
 
-/// 系统盘介质类型探测（对应 sysdisk.ps1，S3）
+/// 系统盘介质类型探测（原 PS 时代脚本 sysdisk.ps1，已退役；S3）
 ///
 /// 通过注册表 SCSI 设备信息 + 型号关键字判断 SSD/HDD。
 /// 返回 {letter, media, busType, model, isSsd, known, detector}。
@@ -123,7 +123,7 @@ fn extract_model_from_instance(instance: &str) -> Option<String> {
 
 // ==================== B3 device_info：设备信息采集 ====================
 
-/// 设备信息采集（对应 device_info.ps1，S3）
+/// 设备信息采集（原 PS 时代脚本 device_info.ps1，已退役；S3）
 ///
 /// 从注册表和系统 API 读取：系统版本、CPU、GPU、主板、磁盘、显示器、内存。
 /// WMI 专有字段（如显存精确值、显示器 EDID）尽量从注册表读取，缺失字段留空。

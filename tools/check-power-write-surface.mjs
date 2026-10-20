@@ -115,9 +115,11 @@ function judgeItem(o) {
   return hits.map((h) => ({ ...h, id: o.id }));
 }
 
-/** 剥注释（// 与 /* *​/ 两种）：注释里的提及不是可执行写面。 */
+/** 剥注释（// 与 /* *​/ 两种）：注释里的提及不是可执行写面。
+ *  T1b-M03（v7.2 C09）：`//` 前不得是 `:`——否则 `https://…` 之后的整行被当注释
+ *  擦掉，同行后置的写命令对判据失明（假阴性通道）。 */
 function stripComments(text) {
-  return String(text).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  return String(text).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(?<!:)\/\/[^\n]*/g, ' ');
 }
 
 // ===========================================================================
@@ -139,13 +141,35 @@ const ALLOW = [
   // { file: 'src-tauri/src/engine/native/syspanel.rs', match: h => h.detail === 'powercfg setactive', why: '开启卓越性能/隐藏流程·激活（P1-2）' },
   // { file: 'src-tauri/src/engine/native/syspanel.rs', match: h => h.detail === 'powercfg delete', why: '隐藏高性能·删除（P1-2，导出在前、失败回滚）' },
   // { file: 'src-tauri/src/engine/native/syspanel.rs', match: h => h.detail === 'powercfg import', why: '隐藏高性能·恢复导入（P1-2）' },
+
+  // ---- T1b-M03（v7.2 C09）漫游面新增的四条登记（walkFiles 派生后首次现算命中）：
+  {
+    file: 'src-tauri/src/commands/optimizer/external_scan.rs',
+    match: (h) => h.rule === 'power-ns',
+    why: '外部优化器足迹检测的只读判据常量（Session Manager\\Power 等）——本文件只读注册表做检出，不写',
+  },
+  {
+    file: 'src-tauri/data/cleanup-rules.json',
+    match: (h) => h.rule === 'power-ns',
+    why: '清理规则库的睡眠研究数据清理（%WINDIR%\\System32\\SleepStudy 的 ETL 产物，用户显式执行的清理项）——非漫游改电源配置',
+  },
+  {
+    file: 'src/scripts/cleanup-fallback.generated.js',
+    match: (h) => h.rule === 'power-ns',
+    why: 'cleanup-rules.json 的前端生成副本（P1 路已对拍，随源件同登记）',
+  },
+  {
+    file: 'src-tauri/data/retired-optimizations.json',
+    match: (h) => h.rule === 'powercfg-write' && h.detail === 'powercfg h',
+    why: '退役台账 note 原文引用 powercfg /h——描述已退役项的史实叙述，非可执行写面',
+  },
 ];
 
 // ===========================================================================
 // 扫描面
 // ===========================================================================
 const hits = []; // {file, rule, detail, id?, where?, anchor?}
-const stats = { runtime: 0, vendorOpts: 0, vendorJs: 0, nara: 0, src: 0 };
+const stats = { runtime: 0, vendorOpts: 0, vendorJs: 0, nara: 0, src: 0, roam: 0 };
 
 // 1) optimizer-runtime.json（数据层真源产物）
 {
@@ -191,6 +215,49 @@ try {
   }
 }
 
+// 4b) 数据层 JSON 全量 + 前端 js 全量 + src-tauri/src 全量 .rs（T1b-M03）：
+// 旧实现是硬编码 5 路清单——新增 data/*.json、src/scripts/*.js、commands/uninstall/*.rs
+// 里的 powercfg 写入不会自动进入判定（A1 地板钉的是 5 路的数量，不是路数完备性）。
+// 改为 walkFiles 派生：四个已知焦点文件仍单列（地板不变），其余文件进入漫游面，
+// 命中即红（除非登记进 ALLOW）——新增写点不再可能静默绕过。
+{
+  const walkAll = (base, exts) => {
+    const out = [];
+    const walk = (dir) => {
+      let entries;
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name === 'target' || e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (exts.some((x) => e.name.endsWith(x))) out.push(p);
+      }
+    };
+    walk(base);
+    return out;
+  };
+  const FOCUS = new Set([
+    join(REPO_ROOT, 'src-tauri', 'src', 'engine', 'native', 'syspanel.rs'),
+    join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'syspanel.rs'),
+    join(REPO_ROOT, 'src-tauri', 'src', 'engine', 'pssteps.rs'),
+    join(REPO_ROOT, 'src-tauri', 'src', 'engine', 'systembin.rs'),
+  ]);
+  const extra = [
+    ...walkAll(join(REPO_ROOT, 'src-tauri', 'src'), ['.rs']),
+    ...walkAll(join(REPO_ROOT, 'src-tauri', 'data'), ['.json']),
+    ...walkAll(join(REPO_ROOT, 'src', 'scripts'), ['.js']),
+  ].filter((p) => !FOCUS.has(p) && !p.replace(/\\/g, '/').endsWith('optimizer-runtime.json') && !p.replace(/\\/g, '/').endsWith('optimizer-nara-panel.json'));
+  stats.roam = 0;
+  for (const abs of extra) {
+    const rel = abs.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
+    // 生成副本/只读基线由 P1/P2 路判定（cleanup-fallback 是 cleanup-rules 的派生件）
+    const text = stripComments(readFileSync(abs, 'utf8'));
+    const hs = [...powercfgHits(text), ...powerNsHits({ text })];
+    stats.roam++;
+    for (const h of hs) hits.push({ file: rel, ...h });
+  }
+}
+
 // 5) 源码文本（剥注释）：电源面板后端 + PS 执行层
 {
   const SRC_FILES = [
@@ -212,9 +279,9 @@ try {
 
 // A1. 扫描面地板：任何一路塌缩（目录改名/数组读空）都会让下面的「0 命中」变成假绿
 check(
-  stats.runtime >= 100 && stats.vendorOpts >= 100 && stats.vendorJs >= 15 && stats.nara === 1 && stats.src === 4,
-  `A1. 扫描面完整（runtime ${stats.runtime} 项 / vendor OPTIONS ${stats.vendorOpts} 项 / vendor js ${stats.vendorJs} 个 / 面板 1 / 源码 4）`,
-  stats.runtime < 100 || stats.vendorOpts < 100 ? '数据层读空 —— 判定器在读错对象，先修本门禁' : '',
+  stats.runtime >= 100 && stats.vendorOpts >= 100 && stats.vendorJs >= 15 && stats.nara === 1 && stats.src === 4 && stats.roam >= 100,
+  `A1. 扫描面完整（runtime ${stats.runtime} 项 / vendor OPTIONS ${stats.vendorOpts} 项 / vendor js ${stats.vendorJs} 个 / 面板 1 / 源码 4 / 漫游面 ${stats.roam} 文件）`,
+  stats.runtime < 100 || stats.vendorOpts < 100 || stats.roam < 100 ? '数据层或漫游面读空 —— 判定器在读错对象，先修本门禁' : '',
 );
 
 // A2. 命中 ⇄ ALLOW 逐条对拍（双棘轮）
@@ -307,6 +374,6 @@ if (fail > 0) {
   process.exit(1);
 }
 console.log(
-  `判断通过：电源写面只剩已登记的 ${ALLOW.length} 条（编辑器导出/只读导航）；` +
-    '其余 powercfg 写与电源命名空间写入全零（runtime/vendor/面板/源码五路扫描）',
+  `判断通过：电源写面只剩已登记的 ${ALLOW.length} 条（编辑器导出/只读导航/检测判据/清理规则/退役台账）；` +
+    '其余 powercfg 写与电源命名空间写入全零（runtime/vendor/面板/源码/漫游面全量扫描）',
 );

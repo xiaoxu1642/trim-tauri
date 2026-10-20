@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // check-version-sync.mjs — 版本号四处一致门禁（J1，2026-09-29）
 //
-// 为什么要有这条：AGENTS §7.1 一直要求「三处同步」，但那是人工纪律——发版时我手工 grep
+// 为什么要有这条：发版纪律一直要求「三处同步」，但那是人工纪律——发版时我手工 grep
 // 三处确认，改漏一处不会有任何东西报警。竞品分析里正好有一个现成的事故形态：
 // 杰瑞调机助手 asar 内 package.json 是 3.1.75、exe 文件版本是 3.1.54，于是「检查更新按
 // 3.1.75 比对、卸载列表显示 3.1.54」，产物与安装器不再一一对应。
@@ -111,9 +111,11 @@ check(
 //（2026-10-05：Gitee 线换成 AtomGit，本组从 latest-gitee.json 平移到新清单名。）
 const atomgitManifestPath = 'latest-atomgit.json';
 let atomgitVer = '';
+let atomgitManifest = null;
 let atomgitRawErr = '';
 try {
-  atomgitVer = String(JSON.parse(read(atomgitManifestPath)).version ?? '');
+  atomgitManifest = JSON.parse(read(atomgitManifestPath));
+  atomgitVer = String(atomgitManifest.version ?? '');
 } catch (e) {
   atomgitRawErr = e.message;
 }
@@ -125,6 +127,44 @@ check(
       : atomgitVer === confVer ? `双方均为 ${atomgitVer}`
         : `分叉：清单=${atomgitVer} / conf=${confVer} —— 发版时漏跑 tools/publish-atomgit.mjs？`,
 );
+
+// 8a) T1b-K06/M07（v7.2 C09）：version 之外的零覆盖字段进判定面。M-18 的病灶
+// 恰好落在只钉 version 看不见的四个字段上（url 指旧产物 / signature 形状错 /
+// pub_date 漂移）。判据照 freshness 的形状在此自带一份实现——不许 import
+// OPTIONAL 门禁本体（§5.12）。pub_date 的时效性无静态真源，不在此判（记录在案）。
+{
+  const problems = [];
+  if (atomgitManifest) {
+    const platUrl = String(atomgitManifest?.platforms?.['windows-x86_64']?.url ?? '');
+    const sig = String(atomgitManifest?.signature ?? '');
+    const platSig = String(atomgitManifest?.platforms?.['windows-x86_64']?.signature ?? '');
+    if (!platUrl) problems.push('缺 platforms[windows-x86_64].url（客户端下载地址字段整体缺席）');
+    else if (!platUrl.includes(confVer)) problems.push(`url 不含当前版本 ${confVer} ⇒ 指向旧版产物（M-18 同形态）`);
+    if (!sig) problems.push('缺 signature 字段');
+    else {
+      // 形状判据与 check-release-freshness 3b 同口径（一层 base64 的四行 minisign 文本）
+      const inner = Buffer.from(sig, 'base64').toString('utf8').split(/\r?\n/).filter((l) => l.length);
+      const shapeOk = inner.length === 4
+        && inner[0].startsWith('untrusted comment: ')
+        && inner[2].startsWith('trusted comment: ')
+        && Buffer.from(inner[1], 'base64').length === 74
+        && Buffer.from(inner[3], 'base64').length === 64;
+      if (!shapeOk) problems.push(`signature 不是「一层 base64 的四行 minisign 文本」（解出 ${inner.length} 行）`);
+      else if (!new RegExp(`version:${confVer.replace(/\./g, '\\.')}`).test(inner[2])) {
+        problems.push(`signature trusted comment 缺 version:${confVer}（requireSignedVersion 会判 MissingSignedVersion）`);
+      }
+      if (platSig && platSig !== sig) problems.push('顶层 signature 与 platforms.windows-x86_64.signature 不一致');
+    }
+    if (typeof atomgitManifest?.pub_date !== 'string' || !atomgitManifest.pub_date) {
+      problems.push('缺 pub_date（updater 判「是否算新版本」的字段整体缺席）');
+    }
+  }
+  check(
+    problems.length === 0,
+    `8a. ${atomgitManifestPath} 的 url/signature/pub_date 与当前版本对齐（不止钉 version）`,
+    problems.join('；') || 'url 含当前版本 / signature 形状与版本正确 / pub_date 在场',
+  );
+}
 
 // 8b) 仓根**不该再存在**的清单文件（双向：文件回来了就红，防「删了又被人拷回来」）。
 // 这不是洁癖：M-18 里那份 latest.json「看起来像官方清单、内容是上一版+旧签名」，
