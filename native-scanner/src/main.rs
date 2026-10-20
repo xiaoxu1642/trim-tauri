@@ -46,8 +46,22 @@ impl Sink for StdoutSink {
     }
 }
 
-fn parse_u64(s: &str) -> u64 {
-    s.parse().unwrap_or(0)
+/// v7.2-C03（N1b-M05）：畸形数值不再折成 0——CLI 是调试入口，`--count abc`
+/// 旧形态静默变 0（再被 max(1) 兜成 1），判据面与输入面脱钩。改 fail-closed：
+/// 畸形 = stderr 留痕 + exit 2。
+fn parse_u64(s: &str) -> Option<u64> {
+    s.parse().ok()
+}
+
+/// 数值参数取值（N1b-M05）：畸形即致命，统一出口。
+fn parse_u64_or_fatal(s: &str, flag: &str) -> u64 {
+    match parse_u64(s) {
+        Some(v) => v,
+        None => {
+            eprintln!("[finder-warn] {} 数值畸形: {:?}（fail-closed exit 2）", flag, s);
+            std::process::exit(2);
+        }
+    }
 }
 
 fn main() {
@@ -74,7 +88,7 @@ fn main() {
             let mut i = 1;
             while i < args.len() {
                 if args[i] == "--min-size" && i + 1 < args.len() {
-                    min_size = parse_u64(&args[i + 1]);
+                    min_size = parse_u64_or_fatal(&args[i + 1], "--min-size");
                     i += 2;
                 } else {
                     roots.push(args[i].clone());
@@ -93,7 +107,7 @@ fn main() {
             let mut i = 1;
             while i < args.len() {
                 if args[i] == "--count" && i + 1 < args.len() {
-                    count = parse_u64(&args[i + 1]) as usize;
+                    count = parse_u64_or_fatal(&args[i + 1], "--count") as usize;
                     i += 2;
                 } else {
                     roots.push(args[i].clone());
@@ -123,7 +137,7 @@ fn main() {
             let mut i = 1;
             while i < args.len() {
                 if args[i] == "--min-size-mb" && i + 1 < args.len() {
-                    min_mb = parse_u64(&args[i + 1]);
+                    min_mb = parse_u64_or_fatal(&args[i + 1], "--min-size-mb");
                     i += 2;
                 } else {
                     i += 1;
@@ -211,17 +225,31 @@ fn main() {
                 i += 2;
             }
             let mut items: Vec<(String, OsString)> = Vec::new();
+            // v7.2-C03（N1b-M05）：畸形目标（kind 不是 file/dir、路径空/以 - 开头、
+            // 或不成对）原先静默丢弃且退出码 0——「没删」伪装成「删完」。改
+            // fail-closed：任一畸形即 stderr 留痕 + exit 2，**不执行任何删除**
+            //（成对性破坏后剩余参数的位置语义已不可信，不许部分执行）。
+            let mut malformed = 0usize;
             while i + 1 < raw.len() {
                 let kind = args[i].to_lowercase();
                 let p = &args[i + 1];
                 if (kind == "file" || kind == "dir") && !p.is_empty() && !p.starts_with('-') {
                     items.push((kind, raw[i + 1].clone()));
+                } else {
+                    malformed += 1;
+                    eprintln!("[finder-warn] delete 畸形目标（kind={kind:?}, path={p:?}），已拒绝");
                 }
                 i += 2;
             }
             if items.is_empty() {
                 println!("delete [--protect <json>] <file|dir> <path>...");
+                if malformed > 0 {
+                    std::process::exit(2);
+                }
                 return;
+            }
+            if malformed > 0 {
+                std::process::exit(2);
             }
             scan::delete(&items, protect_json.as_deref(), &sink);
         }

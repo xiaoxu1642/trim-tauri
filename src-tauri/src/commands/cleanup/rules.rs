@@ -19,9 +19,10 @@ use super::state::*;
 
 /// 内置规则库（gen 产物，与上游 `src/data/cleanup-rules.json` 逐字节一致；本仓副本已移出 frontendDist（审查 M14），故编译期从 `src-tauri/data/` 取）
 pub(super) const BUILTIN_RULES_JSON: &str = include_str!("../../../data/cleanup-rules.json");
-/// 可删文件清单防呆上限（D13）
-pub(super) const PLAN_CAP_PER_ITEM: usize = 100_000;
-pub(super) const PLAN_CAP_TOTAL: usize = 1_000_000;
+/// 可删文件清单防呆上限（D13）——**单一真源 = 扫描侧 `trim_finder::cleanup_scan`
+/// 同名常量**（v7.2-C03/N1a-L01：旧形态两侧各写一份字面量、无任何对拍，写侧
+/// 改了读侧不会红；re-export 后等值由构造保证）。
+pub(super) use trim_finder::cleanup_scan::{PLAN_CAP_PER_ITEM, PLAN_CAP_TOTAL};
 /// 执行侧清理项条数硬上限（审查 v2-L3）
 ///
 /// 结论先说：执行链**不是无界**的 —— `cleanup_execute` 只认最近一次扫描快照里的项，

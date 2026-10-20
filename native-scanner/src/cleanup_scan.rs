@@ -931,7 +931,15 @@ fn walk_deletable(
     }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
-        Err(_) => return, // IgnoreInaccessible
+        // v7.2-C03（N1a-M04）：「扫失败」与「确无结果」在输出上必须可分辨——
+        // IgnoreInaccessible 语义保留（跳过继续），但 stderr 留痕。
+        Err(e) => {
+            err_line(&format!(
+                "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
+                dir.display()
+            ));
+            return;
+        }
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
@@ -1132,7 +1140,15 @@ fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mu
     let mut out = Vec::new();
     let rd = match fs::read_dir(pd) {
         Ok(r) => r,
-        Err(_) => return out,
+        // v7.2-C03（N1a-M04）：glob 段级列目录失败原先静默返回空 ⇒ 「展开为空」
+        // 与「目录不可读」同形。留痕后按空返回（不改变展开语义）。
+        Err(e) => {
+            err_line(&format!(
+                "[trim-scanner] read_dir {} 失败: {e}（glob 段展开按空处理）",
+                pd.display()
+            ));
+            return out;
+        }
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
@@ -1354,6 +1370,17 @@ pub fn checklocked_json(stdin_text: &str) -> (i32, String, String) {
     capture(None, || checklocked_body(stdin_text))
 }
 
+/// v7.2-C03（N1a-M02）：占用检测单文件判定——true = 应查 RM 并输出 @@LOCKED@@。
+/// 受保护文件恒 false：旧形态 `scan_deletable=false` 把「受保护」折叠进「被占用」
+///（一律送 RM 查询并输出），其持有进程因此进主进程一次性 kill 白名单——保护面
+/// 以「占用」的名义变成 kill 候选。独立成函数只为判据可测（破坏自证 §4.1）。
+fn occupied_report_warranted(path: &str, protect: Option<&str>) -> bool {
+    if crate::scan::is_protected_path(path, protect) {
+        return false;
+    }
+    !file_deletable(Path::new(path))
+}
+
 /// checklocked 主流程：逐文件独占探测 → 被占用的查 RM → 行协议输出
 fn checklocked_body(input: &str) -> i32 {
     if input.trim().is_empty() {
@@ -1384,7 +1411,8 @@ fn checklocked_body(input: &str) -> i32 {
         if Path::new(path).metadata().is_err() {
             continue; // 不存在 → 执行阶段自然跳过，不算占用
         }
-        if scan_deletable(Path::new(path), protect) {
+        // v7.2-C03（N1a-M02）：受保护 ≠ 被占用——判定收进 [`occupied_report_warranted`]。
+        if !occupied_report_warranted(path, protect) {
             continue;
         }
         let procs = rstrtmgr::query_lockers(path);
@@ -1791,8 +1819,10 @@ pub fn classify_exclude_entry(ep: &str, excl_dirs: &mut Vec<String>, excl_files:
     }
 }
 
-const PLAN_CAP_PER_ITEM: usize = 100_000;
-const PLAN_CAP_TOTAL: usize = 1_000_000;
+// v7.2-C03（N1a-L01）：单一真源提升为 pub——主仓读侧（commands/cleanup/rules.rs）
+// 改为 re-export 本常量，旧形态两侧各写一份字面量、无对拍，写侧改了读侧不会红。
+pub const PLAN_CAP_PER_ITEM: usize = 100_000;
+pub const PLAN_CAP_TOTAL: usize = 1_000_000;
 
 struct FkResult {
     total_size: i64,
@@ -1912,7 +1942,23 @@ fn walk_fk_dll(
     }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
-        Err(_) => return, // IgnoreInaccessible
+        // v7.2-C03（N1a-M04）：留痕同 walk_deletable；depth==0 = fileKeys 根级，
+        // 根级失败原先零探针 ⇒「扫失败」与「确无结果」在输出上长得一模一样，
+        // 此行即根级 missing 探针。
+        Err(e) => {
+            if depth == 0 {
+                err_line(&format!(
+                    "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
+                    dir.display()
+                ));
+            } else {
+                err_line(&format!(
+                    "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
+                    dir.display()
+                ));
+            }
+            return;
+        }
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
@@ -1942,8 +1988,8 @@ fn walk_fk_dll(
         }
         let full_s = ent.path().to_string_lossy().to_string();
         let low = full_s.to_lowercase();
-        // excludeKeys 过滤（dir 前缀 / file 全路径；PS 原语义只在快照分支生效，此处防御性保留，
-        // 因 hasExcl 时调用方必选快照模式，本分支实际不含排除清单）
+        // excludePaths 过滤（dir 前缀 / file 全路径；声明排除时调用方必选快照模式，
+        // 本分支实际不含排除清单——防御性保留同一谓词）
         if excl_dirs.iter().any(|d| low.starts_with(&format!("{}\\", d))) || excl_files.iter().any(|f| *f == low) {
             continue;
         }
@@ -1993,7 +2039,22 @@ fn walk_fk_snapshot(
     }
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
-        Err(_) => return,
+        // v7.2-C03（N1a-M04）：与 walk_fk_dll 同口径——根级（depth==0）失败给
+        // 根级 missing 探针，子目录失败按不可达留痕。
+        Err(e) => {
+            if depth == 0 {
+                err_line(&format!(
+                    "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
+                    dir.display()
+                ));
+            } else {
+                err_line(&format!(
+                    "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
+                    dir.display()
+                ));
+            }
+            return;
+        }
     };
     for ent in rd.flatten() {
         if crate::is_reparse(&ent) {
@@ -2052,7 +2113,14 @@ fn walk_fk_snapshot(
         acc.total_count += 1;
         let size = md.len();
         let bt = birthtime_ns(&md);
-        if skip_lock || scan_deletable(Path::new(&full_s), protect) {
+        // v7.2-C03（N1a-M01）：skip_lock 只豁免**独占探测**（执行侧会临时停占用
+        // 进程，逐文件探测会整批误判 locked），**不豁免 R10 保护过滤**——旧形态
+        // `skip_lock ||` 短路把保护判据整条旁路，受保护路径直进可删清单（注释
+        // 宣称的「六个枚举出口全走保护判据」与代码不符的实锤点）。先过保护闸，
+        // 再按 skip_lock 决定是否独占探测。
+        if !crate::scan::is_protected_path(&full_s, protect)
+            && (skip_lock || file_deletable(Path::new(&full_s)))
+        {
             acc.deletable_count += 1;
             let before = acc.truncated;
             acc.push_budget(full_s, size, bt);
@@ -2070,21 +2138,22 @@ fn walk_fk_snapshot(
 fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_days: Option<u64>, protect: Option<&str>) -> FkResult {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let skip_lock = rule.get("restartProcesses").map(|v| v.ps_count()).unwrap_or(0) > 0;
-    let has_excl = rule.get("excludeKeys").map(|v| v.ps_count()).unwrap_or(0) > 0;
     // 规则级 excludePaths（C-2，2026-09-28 开门）：字符串数组，与全局排除名单同口径
     // （%VAR% 展开 / 目录=前缀排除、文件=精确排除，按磁盘实况分类，见
     // classify_exclude_entry —— 原按扩展名推断的判据会把带点目录误 routed，§4.9）。
-    // excludeKeys（对象型、reg 面）仍被门禁 A2 禁用，回潮即红。走 excludePaths
-    // 同样要求快照模式（逐文件过滤必须在受控枚举里做，DLL 快照模式没有排除通道）。
+    // v7.2-C03（N1a-L02）：excludeKeys 的读取点整组摘除——它已进 itemBannedKeys
+    //（字段表单一真源），且门禁 A2 禁用回潮即红；旧形态本文件仍留 3 个读取点
+    //（has_excl 计数 / snapshot_mode 分支 / 排除面构造）并影响分支选择，读侧
+    // 与字段表真源从此分叉。排除语义统一走 excludePaths。
     let has_expaths = rule.get("excludePaths").map(|v| v.ps_count()).unwrap_or(0) > 0;
     let any_recurse_false = rule
         .get("fileKeys")
         .and_then(|v| v.as_arr())
         .map(|arr| arr.iter().any(|fk| fk.get("recurse") == Some(&Json::Bool(false))))
         .unwrap_or(false);
-    let snapshot_mode = skip_lock || has_excl || has_expaths || any_recurse_false;
+    let snapshot_mode = skip_lock || has_expaths || any_recurse_false;
     let guard = rule_age_guard_of(rule, global_min_age_days);
-    // 规则级 excludePaths 的过滤面（excludeKeys 本身仍被门禁 A2 禁用）。
+    // 规则级 excludePaths 的过滤面（excludeKeys 读取点已随 N1a-L02 摘除）。
     // U1-b（2026-10-01）：全局排除名单整链下线，这里不再有全局种子；
     // 执行侧 cleanup_execute 用同一谓词复核，两侧口径仍然一致。
     let mut excl_dirs: Vec<String> = Vec::new();
@@ -2099,27 +2168,6 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
             // 分类按磁盘实况（§4.9）：禁再退回「按扩展名推断」——带点目录会被
             // routed 进文件表、排除静默失效、子树照删（check-scan-rule-diff E9 组钉着）
             classify_exclude_entry(&ep, &mut excl_dirs, &mut excl_files);
-        }
-    }
-    if let Some(arr) = rule.get("excludeKeys").and_then(|v| v.as_arr()) {
-        for ex in arr {
-            // reg 型排除键不属于文件过滤面（PS: -or -not $ex.path -or $ex.type -eq 'reg' → skip）
-            if ex.get("type").and_then(|t| t.as_str()) == Some("reg") {
-                continue;
-            }
-            let Some(ep0) = ex.get("path").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let ep = expand_env_path(ep0).trim_end_matches('\\').to_lowercase();
-            if ep.is_empty() {
-                continue;
-            }
-            report_unexpanded_token("excludeKeys[].path", rid, &ep);
-            if ex.get("type").and_then(|t| t.as_str()) == Some("dir") {
-                excl_dirs.push(ep);
-            } else {
-                excl_files.push(ep);
-            }
         }
     }
 
@@ -3518,5 +3566,93 @@ mod tests {
             (0, format!("{}\n", lines[0])),
             "capture 结束后必须复位，否则 CLI 路径会被连带改成不攒副本"
         );
+    }
+
+    /// v7.2-C03（N1a-M01）破坏自证：skip_lock（restartProcesses 声明）只豁免独占
+    /// 探测，**不豁免 R10 保护闸**。受保护根下的文件即便声明 restartProcesses 也
+    /// 不得进可删清单。破坏形态 = 恢复旧 `skip_lock || scan_deletable(..)` 短路
+    ///（保护判据被整条旁路）⇒ deletable_count 变 1 ⇒ 本用例红。
+    #[test]
+    fn filekeys_skip_lock_不豁免保护闸() {
+        let root = std::env::temp_dir().join(format!("trim-fk-prot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("victim.tmp"), b"x").unwrap();
+        let root_s = root.to_string_lossy().replace('/', "\\");
+        let root_key = root_s.to_lowercase();
+        let root_key = root_key.trim_end_matches('\\').to_string();
+        let protect = format!(
+            r#"{{"subtree":["{}"],"exact":[],"anyDrive":[],"neverNames":[]}}"#,
+            root_key.replace('\\', "\\\\")
+        );
+        // 注意：规则**不带 minAge***（AgeGuard::Off）——带 minAgeDays:0 会把 cutoff
+        // 压到「现在」，新落盘的样本恒判太新 ⇒ 探针永不命中（假绿，P2-1 教训）。
+        let rule = parse_json(&format!(
+            r#"{{"id":"t","restartProcesses":["svc"],"fileKeys":[{{"path":"{}"}}]}}"#,
+            root_s.replace('\\', "\\\\")
+        ))
+        .unwrap();
+        let st = get_file_key_deletable(&rule, &mut 0, None, Some(&protect));
+        assert!(
+            st.files.is_empty(),
+            "受保护根下的文件不得进可删清单（skip_lock 也不例外）：{:?}",
+            st.files
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// v7.2-C03（N1a-M02）破坏自证：受保护文件不得报「被占用」（其持有进程不得
+    /// 进 kill 白名单）；非受保护文件的两个方向都要保住——可独占打开 ⇒ 不报、
+    /// 真被独占持有 ⇒ 照报（占用检测的正常面不许回归）。破坏形态 = 删掉
+    /// [`occupied_report_warranted`] 里的保护早退 ⇒ 第一条断言红。
+    #[test]
+    fn checklocked_受保护文件不进占用报告() {
+        let root = std::env::temp_dir().join(format!("trim-locked-prot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let f = root.join("busy.tmp");
+        fs::write(&f, b"x").unwrap();
+        let root_s = root.to_string_lossy().replace('/', "\\");
+        let root_key = root_s.to_lowercase();
+        let root_key = root_key.trim_end_matches('\\').to_string();
+        let protect = format!(
+            r#"{{"subtree":["{}"],"exact":[],"anyDrive":[],"neverNames":[]}}"#,
+            root_key.replace('\\', "\\\\")
+        );
+        let f_s = f.to_string_lossy().replace('/', "\\");
+        // 先用独占句柄把文件真正锁住：破坏态（保护早退被删）下 warranted =
+        // !file_deletable = true，第一条断言才会红——文件没被锁住时打断前后同判
+        //（探针必须先验证命中，P2-1 教训）。
+        let hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&f)
+                .unwrap()
+        };
+        assert!(
+            !occupied_report_warranted(&f_s, Some(&protect)),
+            "受保护文件不得报「被占用」（哪怕它真被独占持有）"
+        );
+        drop(hold);
+        assert!(
+            !occupied_report_warranted(&f_s, None),
+            "非受保护且可独占打开的文件不算被占用"
+        );
+        let hold2 = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&f)
+                .unwrap()
+        };
+        assert!(
+            occupied_report_warranted(&f_s, None),
+            "被独占持有的非受保护文件必须仍报占用（正常占用面）"
+        );
+        drop(hold2);
+        let _ = fs::remove_dir_all(&root);
     }
 }

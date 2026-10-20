@@ -15,6 +15,12 @@ use tauri::WebviewWindow;
 use trim_finder::cleanup_scan;
 use super::rules::*;
 use super::state::*;
+
+/// @@PLANFILE@@ 行字段长度上限（2026-10-04 审计 §3.4 落地的读侧防线；
+/// v7.2-C03/N1a-L01：从内联字面量提成具名常量，与单源后的 PLAN_CAP_* 成对登记）。
+const PLANFILE_ID_MAX_CHARS: usize = 160;
+const PLANFILE_PATH_MAX_CHARS: usize = 2000;
+
 // ==================== cleanup:scan ====================
 
 /// 扫描累积器（对照 cleanup:scan 的 data / planBuf / planTruncated / planTotalRows）
@@ -58,7 +64,11 @@ impl ScanAccum {
             let path = pf.get("path").and_then(|v| v.as_str());
             match (id, path) {
                 (Some(id), Some(path)) => {
-                    if id.chars().count() <= 160 && path.chars().count() <= 2000 {
+                    // v7.2-C03（N1a-L01）：160/2000 从字面量提成具名常量（与上方
+                    // 单源 PLAN_CAP 成对登记的字段长度上限）。
+                    if id.chars().count() <= PLANFILE_ID_MAX_CHARS
+                        && path.chars().count() <= PLANFILE_PATH_MAX_CHARS
+                    {
                         let arr = self.plan.entry(id.to_string()).or_default();
                         if arr.len() < PLAN_CAP_PER_ITEM {
                             let size = js_num_or_zero(pf.get("size"));
@@ -80,9 +90,11 @@ impl ScanAccum {
                         // （`\\?\` + 深树，MAX_PATH 是 32767）就这么从「明细」列表和
                         // 占用检测候选集里消失，无任何痕迹。
                         self.count_malformed(&format!(
-                            "@@PLANFILE@@ 行超长（id {} 字符 / path {} 字符，上限 160 / 2000）",
+                            "@@PLANFILE@@ 行超长（id {} 字符 / path {} 字符，上限 {} / {}）",
                             id.chars().count(),
-                            path.chars().count()
+                            path.chars().count(),
+                            PLANFILE_ID_MAX_CHARS,
+                            PLANFILE_PATH_MAX_CHARS
                         ));
                     }
                 }

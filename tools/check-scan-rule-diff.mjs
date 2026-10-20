@@ -286,11 +286,13 @@ check(
 // first_unexpanded_token 此前只有 fileKeys 主路径一处调用，其余路径字段拿到未解析
 // 展开结果后静默按原文处理——「配置了却永远 0 命中」没有任何对账依据。修复后统一
 // 走 report_unexpanded_token（只留痕不改判定）。这里钉两点：① 出口存在且走 err_line
-// ② 8 处字段接线一个不少（少一处 = 那个字段的 0 命中重新失明）。
+// ② 7 处字段接线一个不少（少一处 = 那个字段的 0 命中重新失明）。
+// v7.2-C03（N1a-L02）：excludeKeys[].path 接线随读取点整组摘除（字段已进
+// itemBannedKeys 单一真源、门禁 A2 禁回潮），接线数 8 → 7。
 const e10calls = (cleanRs.match(/report_unexpanded_token\(/g) || []).length;
 check(
-  /fn report_unexpanded_token\(/.test(cleanRs) && e10calls === 9,
-  'E10a. 未解析 token 统一留痕出口存在，8 处字段接线全部在位（含定义共 9 处）',
+  /fn report_unexpanded_token\(/.test(cleanRs) && e10calls === 8,
+  'E10a. 未解析 token 统一留痕出口存在，7 处字段接线全部在位（含定义共 8 处）',
   `实际 ${e10calls} 处`,
 );
 for (const field of [
@@ -300,7 +302,6 @@ for (const field of [
   'regKeys[0].path(detect回退)',
   'regKeys[].path',
   'excludePaths[]',
-  'excludeKeys[].path',
   'configured',
 ]) {
   check(

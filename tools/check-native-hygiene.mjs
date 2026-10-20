@@ -414,6 +414,9 @@ for (const f of unreachable) g.fail(`${relative(ROOT, f).replace(/\\/g, '/')}：
 const WALK_DEPTH_SITES = [
   { file: 'src-tauri/src/engine/native/cleanup.rs', name: '执行侧删除遍历', token: 'ENGINE_WALK_MAX_DEPTH' },
   { file: 'native-scanner/src/cleanup_scan.rs', name: '清理扫描遍历（两处递归共用）', token: 'MAX_WALK_DEPTH' },
+  // v7.2-C03（N1a-L04）：第三个深度上限入棘轮——fileKeys 快照遍历对齐 PS -Depth 24，
+  // 与工程护栏 MAX_WALK_DEPTH 目的不同、数值不同，但同样是「删掉判据门禁照绿」的假绿面。
+  { file: 'native-scanner/src/cleanup_scan.rs', name: 'fileKeys 快照遍历（对齐 PS -Depth 24）', token: 'FK_SNAPSHOT_MAX_DEPTH' },
 ];
 for (const s of WALK_DEPTH_SITES) {
   const f = join(ROOT, s.file);

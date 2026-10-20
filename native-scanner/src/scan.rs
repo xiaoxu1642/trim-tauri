@@ -154,6 +154,13 @@ impl<'a> ScanBeat<'a> {
     fn total(&self) -> u64 {
         self.counter.load(Ordering::Relaxed)
     }
+
+    /// 诊断留痕（v7.2-C03/N1b-M01）：「扫失败」事件的 stderr 出口，与心跳共用
+    /// 同一 sink（`Sink::warn` ⇒ `[finder-warn]` 行）。dir_size 这类没有 sink
+    /// 参数、只有 beat 的枚举出口从这里走，不再静默。
+    fn warn(&self, msg: &str) {
+        self.sink.warn(msg);
+    }
 }
 
 fn eprint_err(e: &std::io::Error, what: &str, sink: &dyn Sink) {
@@ -421,7 +428,16 @@ fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
     while let Some(d) = stack.pop() {
         let rd = match fs::read_dir(&d) {
             Ok(r) => r,
-            Err(_) => continue,
+            // v7.2-C03（N1b-M01）：「扫失败」不再静默伪装成「没有 / 0 字节」——
+            // dir_size 的返回值直接进体积排行，读不到 = 少报，stderr 必须留痕
+            // 让少报发生在哪可对账（留痕不改变统计口径）。
+            Err(e) => {
+                match beat {
+                    Some(b) => b.warn(&format!("read_dir {} 失败: {e}", d.display())),
+                    None => eprintln!("[finder-warn] read_dir {} 失败: {e}", d.display()),
+                }
+                continue;
+            }
         };
         // 本目录直属文件数（P2-J：心跳按「访问完一个目录」结算一次）
         let mut files: u64 = 0;
@@ -645,7 +661,13 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
         let t0 = std::time::Instant::now();
         let rd = match fs::read_dir(root) {
             Ok(r) => r,
-            Err(_) => continue,
+            // v7.2-C03（N1b-M01）：根级 read_dir 失败原先整根静默跳过，输出与
+            // 「该目录没有内容」一模一样（N1b-M01 的 analyze 侧）。留痕后继续，
+            // 不改变其余根的处理。
+            Err(e) => {
+                eprint_err(&e, &format!("read_dir {}", root.display()), sink);
+                continue;
+            }
         };
         let mut subdirs: Vec<PathBuf> = Vec::new();
         let (mut top_total, mut top_files) = (0u64, 0u64);
@@ -822,11 +844,32 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     // 于是只留最后一个根（默认四个根 ⇒ 下载/桌面/文档三根的重复永远查不出），
     // 而进度条走满、`success:true`、UI 显示「未发现重复文件」——把「没扫」伪装成「没有」。
     let ctx = ScanCtx::new();
-    for r in roots {
-        if let Some(p) = canonical(r) {
-            // 目录不存在时 walk_level 内部仅告警跳过，不影响其余目录
-            walk_level(&p, &ctx, 0, 0, sink);
+    // v7.2-C03（N1b-M04）：根与根重叠去重——已扫根的子树不再整棵重扫。旧实现
+    // 对「选了 `C:\` 又选 `C:\Users`」这类重叠输入零去重：同一文件枚举两份进
+    // 同一体积桶，自成「内容重复组」，而 candidate 其实是唯一副本（组里两个
+    // 成员是同一条路径）。判据 = canonical 形态小写后的前缀含边界比对；
+    // 先按键长排序（宽根/父根恒先扫），与用户传根的顺序无关。
+    let mut canon_roots: Vec<(String, PathBuf)> = roots
+        .iter()
+        .filter_map(|r| canonical(r))
+        .map(|p| {
+            let key = p.to_string_lossy().to_lowercase();
+            let key = key.trim_end_matches('\\').to_string();
+            (key, p)
+        })
+        .collect();
+    canon_roots.sort_by_key(|(k, _)| k.len());
+    let mut walked_roots: Vec<String> = Vec::new();
+    for (k, p) in &canon_roots {
+        if walked_roots
+            .iter()
+            .any(|w| k == w || k.starts_with(&format!("{}\\", w)))
+        {
+            continue;
         }
+        walked_roots.push(k.clone());
+        // 目录不存在时 walk_level 内部仅告警跳过，不影响其余目录
+        walk_level(p, &ctx, 0, 0, sink);
     }
     let files = ctx.finish(sink);
     let total = files.len() as f64;
@@ -1204,12 +1247,18 @@ fn created_too_new(m: &fs::Metadata) -> bool {
 }
 
 /// Unix 天数 → 公历年（Howard Hinnant civil_from_days 算法，含闰年修正）。
+/// v7.2-C03（N1b-K02）：补上原算法的**月序修正项 mp**。旧实现停在 era 年
+///（岁首 = 3 月 1 日）——每年 1–2 月，上一年 3 月起的条目会与「当前」同算一个
+/// era 年，被当成本年新建送进可删候选。`mp/10` 在 1–2 月（mp=10/11）取 1，
+/// 把 era 年拨回真实日历年；3–12 月取 0，行为不变。
 fn civil_year(days_since_epoch: i64) -> i64 {
     let z = days_since_epoch + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    yoe + era * 400 + mp / 10
 }
 
 /// 用户拍板 2026-09-28 八轮：**2025 年及更早**创建的条目不进候选（实测扫出 2017 年的
@@ -1251,7 +1300,12 @@ fn load_empty_ignore() -> HashSet<String> {
             for line in txt.lines() {
                 let l = line.trim();
                 if !l.is_empty() {
-                    s.insert(l.to_lowercase());
+                    // v7.2-C03（N1b-K03/L03）：名单键与判据键**同过 lexically_normalize**。
+                    // 旧实现名单键只 trim+lowercase：用户点「忽略」写入的是展示形态
+                    //（`C:/...` 正斜杠、无 `\\?\` 前缀），而判据侧是 canonicalize 的
+                    // `\\?\C:\...` 反斜杠形态——分隔符方向与 verbatim 前缀两维都不同源
+                    // ⇒ 恒不命中，用户显式排除的目录静默进可删集合（取证 N1b-U02 实锤）。
+                    s.insert(lexically_normalize(l));
                 }
             }
         }
@@ -1260,7 +1314,8 @@ fn load_empty_ignore() -> HashSet<String> {
 }
 
 fn empty_ignored(set: &HashSet<String>, p: &Path) -> bool {
-    set.contains(&p.to_string_lossy().to_lowercase())
+    // v7.2-C03（N1b-K03/L03）：与名单键同过 lexically_normalize（见 load_empty_ignore）。
+    set.contains(&lexically_normalize(&p.to_string_lossy()))
 }
 
 /// 用户拍板 2026-09-28：跳过 `.` 开头的目录（.claude/.dotnet/.workbuddy 等应用
@@ -1989,12 +2044,32 @@ fn normalize_plain(s: &str) -> String {
         prefix = body[..2].to_string();
         body = &body[2..];
     } else if body.starts_with(r"\\") {
-        let mut it = body[2..].split(|c| c == '\\' || c == '/').filter(|c| !c.is_empty());
-        let server = it.next().unwrap_or("");
-        let share = it.next().unwrap_or("");
-        if !server.is_empty() && !share.is_empty() {
-            prefix = format!(r"\\{}\{}", server, share);
-            body = "";
+        // v7.2-C03（N1b-K01，N1a-K01 同根）：share 之后的体**留在 body 继续折组件**。
+        // 旧实现拆出 server/share 后把 body 整段置空，UNC「share 之后的整段」被丢弃
+        // ⇒ 任何 UNC 目标上，凭据面（never_names）与保护前缀比对（subtree/exact）
+        // 整体失明：候选 `\\srv\share\dir\creds.env` 归一后只剩 `\\srv\share\`，
+        // 与 share 根自身同键，子路径判定全部落空。盘符分支的「根 + 剩余体」两段式
+        // 折叠在此对齐。
+        // v7.2-C03（N1b-L04）：只有 server 没有 share 的 `\\srv` 保留为 UNC 形根
+        //（`\\srv\`），不再折成相对键 `srv` 与相对路径同键——同一函数对三种根形态
+        //（盘符 / server+share / server-only）统一为「不可折叠根 + 剩余体」。
+        let rest = &body[2..];
+        let (server, after_server) = match rest.find(|c| c == '\\' || c == '/') {
+            Some(i) => (&rest[..i], &rest[i + 1..]),
+            None => (rest, ""),
+        };
+        if !server.is_empty() {
+            let (share, after_share) = match after_server.find(|c| c == '\\' || c == '/') {
+                Some(j) => (&after_server[..j], &after_server[j + 1..]),
+                None => (after_server, ""),
+            };
+            if !share.is_empty() {
+                prefix = format!(r"\\{}\{}", server, share);
+                body = after_share;
+            } else {
+                prefix = format!(r"\\{}", server);
+                body = "";
+            }
         }
     }
     let mut comps: Vec<&str> = Vec::new();
@@ -2039,6 +2114,12 @@ struct ProtectRoots {
     // 与主侧 engine::protect / JS 权威 / PS 端同源；此前注入 JSON 里的 neverNames
     // 被静默忽略（A2），此处补上，纵深防御层不再是哑的。
     never_names: Vec<String>,
+    // v7.2-C03（N1b-M03）：注入了 `--protect` 文本但解析失败 ⇒ **fail-closed**。
+    // 旧实现静默回落 default_from_env 内置清单——注入失败意味着主进程的权威清单
+    // （比内置大得多）没加载进来，回落 = 放行面静默变大。置位后 is_protected_path
+    // 对一切路径判受保护（「无法判定 ⇒ 拦」，与主仓同口径）；未注入（None）仍走
+    // 内置兜底，那是 CLI 手测的合法形态。
+    poisoned: bool,
 }
 
 /// 仅 `*` 的 glob 与段名是否匹配（* = 任意字符含空）；never_names 不含 `?`。
@@ -2112,14 +2193,25 @@ impl ProtectRoots {
                     if let Some(arr) = v.get(key).and_then(Json::as_arr) {
                         for it in arr {
                             if let Some(s) = it.as_str() {
-                                dst.push(s.to_ascii_lowercase());
+                                // v7.2-C03（N1b-M03）：清单侧与判据侧**同形态**——
+                                // 判据侧先 to_long_path 触盘展开（8.3 短名 → 长名）再
+                                // lexically_normalize；清单侧旧实现只 to_ascii_lowercase，
+                                // 两个维度都不同源：verbatim 前缀/正斜杠词法错开一位，
+                                // 短名注入根（%TEMP%=ADMINI~1 场景）与展开后的候选永错开
+                                // ⇒ 保护根静默失明（本批探针实测命中）。
+                                dst.push(lexically_normalize(&to_long_path(s)));
                             }
                         }
                     }
                 }
                 out
             }
-            Err(_) => ProtectRoots::default_from_env(),
+            // v7.2-C03（N1b-M03）：解析失败不再静默回落内置清单（放行面变大），
+            // 改为 poison：is_protected_path 对一切路径判受保护（见结构体注释）。
+            Err(_) => ProtectRoots {
+                poisoned: true,
+                ..ProtectRoots::default_from_env()
+            },
         }
     }
 
@@ -2154,6 +2246,7 @@ impl ProtectRoots {
             any_drive: vec!["system volume information".to_string()],
             // CLI 兜底（无注入）时仍内置默认凭据名单，与 JS NEVER_NAMES 同源
             never_names: default_never_names(),
+            poisoned: false,
         }
     }
 }
@@ -2198,7 +2291,16 @@ pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
     // v3.7.2：先触盘展开短名再归一化——磁盘上存在的短名（运行时环境喂进来的
     // %TEMP% 类路径）展开后正常参与 subtree/exact/anyDrive 判定；展开不掉
     // （目标不存在）原样返回，contains_short_name 仍 fail-closed。
-    let norm = lexically_normalize(&to_long_path(p));
+    // v7.2-C03（N1a-L03）：绝对路径且字面不含 `~数字` 时跳过 GetLongPathNameW——
+    // 无短名组件时它对归一化结果是恒等，却要每候选文件付一次 syscall 与千字节级
+    // 缓冲分配。与 cleanup_scan 枚举出口的前置短路同用一份判据（contains_short_name）；
+    // 保守方向一致：判据 true ⇒ 照常展开，只会多付一次、不会漏展开。
+    let expanded: String = if Path::new(p).is_absolute() && !crate::contains_short_name(p) {
+        p.to_string()
+    } else {
+        to_long_path(p)
+    };
+    let norm = lexically_normalize(&expanded);
     if norm.is_empty() {
         return true;
     }
@@ -2208,6 +2310,18 @@ pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
     }
     if bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'\\' {
         return true; // 盘符根，例如 C:\
+    }
+    // v7.2-C03（N1a-M03）：无根形态 fail-closed。相对路径不做 CWD/盘根展开——
+    // 展开结果随进程 CWD 漂移、键不稳定；真机取证（探针场景 C 3/3）主进程对相对
+    // 路径主拦，扫描侧同判受保护，不再留「按当前盘根解析后放行」的口子。
+    //（走到这里的 `C:` / `C:\` 已在上方拦掉，剩余无根形态 = 相对/盘根相对。）
+    let rooted = (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\')
+        || norm.starts_with(r"\\");
+    if !rooted {
+        return true;
     }
     // v6-K02（P0-1，与主仓 normalize_for_compare 的 fail-closed 契约对拍）：归一后
     // 仍带 `\\?\` / `\\.\` / `\??\` 前缀 = 不可折回形态（Volume{GUID}/GLOBALROOT/
@@ -2222,6 +2336,10 @@ pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
         return true;
     }
     with_protect_roots(protect_json, |r| {
+        // v7.2-C03（N1b-M03）：注入解析失败 ⇒ 无法判定权威保护面 ⇒ 一律判拦。
+        if r.poisoned {
+            return true;
+        }
         // anyDrive：至少 "X:\" + 目录名，其后为同名根或子树
         for nm in &r.any_drive {
             if nm.is_empty() {
@@ -4077,5 +4195,141 @@ mod depth_cap_tests {
             !got,
             "E-3 方向 B：删除侧复检也必须对用户目录子树判「非空」（这会是一棵空树，旧实现返回 true）"
         );
+    }
+
+    /// v7.2-C03（N1b-K01 / N1a-K01 同根）破坏自证：share 之后的体必须留在键里。
+    /// 旧实现把 body 置空 ⇒ `\\srv\share\dir\creds.env` 归一只剩 `\\srv\share\`，
+    /// 与 share 根自身同键，凭据面/保护前缀比对在任何 UNC 目标上失明。
+    #[test]
+    fn normalize_plain_保留unc_share之后的体() {
+        assert_eq!(
+            normalize_plain(r"\\SRV\share\Dir\creds.env"),
+            r"\\srv\share\dir\creds.env"
+        );
+        // 保护面语义正向：subtree=\\srv\share\dir 必须罩住其下文件
+        assert!(is_protected_path(
+            r"\\srv\share\dir\creds.env",
+            Some(r#"{"subtree":["\\\\srv\\share\\dir"],"exact":[],"anyDrive":[],"neverNames":[]}"#),
+        ));
+    }
+
+    /// v7.2-C03（N1b-L04）破坏自证：只有 server 没有 share 的 `\\srv` 保留 UNC 形根，
+    /// 不折成相对键 `srv` 与相对路径同键（同一函数三种根形态统一「根 + 剩余体」）。
+    #[test]
+    fn normalize_plain_server无share不折成相对键() {
+        let k = normalize_plain(r"\\SRV");
+        assert_eq!(k, r"\\srv\");
+        assert_ne!(k, "srv", "server-only 不得与相对路径同键");
+    }
+
+    /// v7.2-C03（N1b-K02）破坏自证：era 年岁首 = 3 月 1 日。旧实现缺月序修正，
+    /// 「2025-03-01 创建」与「2026-01-15 的当前时刻」同为 era 年 2025 ⇒ 每年
+    /// 1–2 月把上一年 3 月起的条目当本年新建送进可删候选。两值必须不等。
+    #[test]
+    fn civil_year_一二月归日历年() {
+        // days_from_civil（Hinnant 反向），测试不引外部 crate
+        let d = |y: i64, m: i64, day: i64| -> i64 {
+            let y = if m <= 2 { y - 1 } else { y };
+            let era = y.div_euclid(400);
+            let yoe = y - era * 400;
+            let mp = if m > 2 { m - 3 } else { m + 9 };
+            let doy = (153 * mp + 2) / 5 + day - 1;
+            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            era * 146_097 + doe - 719_468
+        };
+        assert_eq!(civil_year(0), 1970, "纪元日");
+        assert_eq!(civil_year(d(2024, 2, 29)), 2024, "闰日");
+        assert_eq!(civil_year(d(2025, 3, 1)), 2025);
+        assert_eq!(civil_year(d(2026, 1, 15)), 2026);
+        assert_eq!(civil_year(d(2026, 2, 28)), 2026);
+        assert_eq!(civil_year(d(2026, 12, 31)), 2026);
+        assert_ne!(
+            civil_year(d(2025, 3, 1)),
+            civil_year(d(2026, 1, 15)),
+            "上一年 3 月起的条目不得与次年 1–2 月同历元（K02 的红形态）"
+        );
+    }
+
+    /// v7.2-C03（N1b-K03）破坏自证：名单键（展示形态 `C:/...` 正斜杠）与判据键
+    ///（canonicalize 的 `\\?\C:\...`）必须同过 lexically_normalize。旧实现名单键
+    /// 只 trim+lowercase ⇒ 恒不命中，显式排除静默失效（取证 N1b-U02 实锤形态）。
+    #[test]
+    fn empty_ignored_名单键与判据键同过词法归一() {
+        let mut set = HashSet::new();
+        set.insert(lexically_normalize("C:/Users/x/缓存"));
+        assert!(
+            empty_ignored(&set, Path::new(r"\\?\C:\Users\x\缓存")),
+            "正斜杠展示键必须命中 verbatim 判据键"
+        );
+        assert!(
+            !empty_ignored(&set, Path::new(r"\\?\C:\Users\x\其他")),
+            "不同目录不得误伤"
+        );
+    }
+
+    /// v7.2-C03（N1b-M03）破坏自证：注入 `--protect` 但解析失败 ⇒ poison 全拦
+    ///（旧实现静默回落内置清单 = 放行面变大）；未注入（CLI 兜底）不 poison。
+    #[test]
+    fn is_protected_path_注入解析失败_poison全拦() {
+        assert!(
+            is_protected_path(r"D:\随便\什么\file.tmp", Some("{oops")),
+            "注入解析失败必须 fail-closed"
+        );
+        assert!(
+            !is_protected_path(r"D:\随便\什么\file.tmp", None),
+            "未注入走内置兜底，合法路径不受影响"
+        );
+    }
+
+    /// v7.2-C03（N1a-M03）破坏自证：相对路径不做 CWD/盘根展开、fail-closed。
+    /// 真机取证（探针场景 C 3/3）主进程对相对路径主拦；旧实现扫描侧无根形态
+    /// 不命中任何保护根 ⇒ 放行（主拦扫放）。
+    #[test]
+    fn is_protected_path_相对路径fail_closed() {
+        assert!(is_protected_path(r"Windows\Temp\x.tmp", None), "相对路径");
+        assert!(is_protected_path(r"\Users\x\a.txt", None), "盘根相对");
+        assert!(
+            !is_protected_path(r"D:\some\where\a.txt", None),
+            "有根形态不受影响"
+        );
+    }
+
+    /// v7.2-C03（N1b-M04）破坏自证：父根+子根重叠输入，同一文件只允许枚举一次。
+    /// 旧实现零去重：同文件两份进同一体积桶自成「重复组」（candidate 其实是
+    /// 唯一副本）。子根故意排在父根前面——去重必须与传参顺序无关。
+    #[test]
+    fn duplicates_根重叠同一文件只枚举一次() {
+        struct DupSink(std::sync::Mutex<Vec<String>>);
+        impl Sink for DupSink {
+            fn item(&self, _p: &Path, line: &str) {
+                self.0.lock().unwrap().push(line.to_string());
+            }
+            fn progress(&self, _: u64) {}
+            fn scanned(&self, _: u64) {}
+            fn warn(&self, _: &str) {}
+        }
+        let base = std::env::temp_dir().join(format!("trim-dup-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("sub")).unwrap();
+        let content = vec![b'x'; 64];
+        fs::write(base.join("sub").join("only_one.dat"), &content).unwrap();
+        fs::write(base.join("other_two.dat"), &content).unwrap();
+        let parent = fs::canonicalize(&base).unwrap().to_string_lossy().to_string();
+        let child = fs::canonicalize(base.join("sub"))
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let sink = DupSink(std::sync::Mutex::new(Vec::new()));
+        duplicates(&[child, parent], 1, &sink);
+        let lines = sink.0.into_inner().unwrap();
+        let hits = lines
+            .iter()
+            .filter(|l| l.contains("only_one.dat"))
+            .count();
+        assert_eq!(
+            hits, 1,
+            "重叠根下同一文件只允许枚举一次（旧实现 = 2，自成重复组）：{lines:?}"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 }
