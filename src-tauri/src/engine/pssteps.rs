@@ -1396,7 +1396,7 @@ fn parse_statement(
         }
         "Set-Service" => {
             // v0.4.9 D 批 3（RAINZ 对标 §3.5）：优化项「服务改 Manual 而非 Disabled」走这条。
-            // JS 模板 optimizer-scripts.js:2124 起会生成
+            // JS 模板 `vendor/upstream-js/src/scripts-powershell/optimizer-scripts.js:2124` 起会生成
             //   `Set-Service -Name '<svc>' -StartupType <Manual|Automatic|Disabled> ...`
             // 只识别 -StartupType 的三种拼法（首字母大写在 JS 侧固定），其他值直接 Err，
             // 不"猜相近值"（红线依据-竞品反例 §9.3 纪律 ①）。与 `sc.exe config` 走同一个 PsOp::SvcSetStart，

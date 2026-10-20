@@ -201,7 +201,7 @@
   --bg-hover: #ECE9F5;
 
   /* 品牌强调色（浅色覆盖 · 雾屿 V1，2026-09-15）：薰衣草 #6A59C9。
-     对比度实测（WCAG 2.1 相对亮度公式，非目测）：
+     对比度实测（WCAG 2.1 相对亮度公式，非目测；现算入口：`node tools/check-contrast.mjs`）：
        白字 / accent        = 5.41:1  ✓ AA
        accent 字 / 应用底色  = 4.96:1  ✓ AA   ← 原注释写的"≈5.4"是把它和白字那组混了
        accent 字 / soft 底   = 4.60:1  ✓ AA   ← 审查 L18：soft 原为 0.08 时只有 4.48，破 AA
@@ -2235,7 +2235,7 @@ body.electron-mica {
 
 body.electron-mica .titlebar {
   /* 标题栏不参与 Mica/主题渲染，需与原生按钮覆盖层保持完全同色。
-     恒浅色下被 7152 行 #f7f8fb 覆盖，此处仅作回退色，与 TITLEBAR_OVERLAY 同步。 */
+     恒浅色下会被后续 #f7f8fb 覆盖，此处仅作回退色，与 TITLEBAR_OVERLAY 同步。 */
   background: #f7f8fb;
 }
 
@@ -4868,7 +4868,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
    文字可读性由各白容器自身的 46% 白玻璃 + 磨砂承担（与导入图片模式同规则） */
 body.theme-light[data-preset-bg] .main-content { background: transparent; }
 body[data-preset-bg] .app-wallpaper::before { display: block !important; }
-/* （玻璃皮肤磨砂层已合并至 197-228 行的 data-skin="glass" 主块，此处不再重复定义） */
+/* （玻璃皮肤磨砂层已合并至 `body[data-skin="glass"]` 主块，此处不再重复定义） */
 
 /* 审查 C2-1：本块原是「碳墨浅色」旧调色板的字面值覆写（#1c1e24/#f5f6f8/#505766 等），
    绕过 token 且与雾屿 V1 浅色 token（--fg-primary #292536 / --bg-app #F6F4FB）漂移。

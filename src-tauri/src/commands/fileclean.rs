@@ -1,6 +1,6 @@
-//! fileclean 域（D 批）：fileclean:scan / read-image / delete-file / execute
+//! fileclean 域（D 批）：fileclean:scan / delete-file / execute
 //!
-//! 对照 Electron main.js 7086-7334。QQ/微信文件清理：
+//! 对照 Electron `vendor/upstream-js/main.js` 7086-7334。QQ/微信文件清理：
 //! 扫描选定目录（深度 ≤4、上限 2000 项）→ 分类 image/video/cache/data →
 //! 只允许删除本窗口本次扫描结果内的文件；删除一律回收站优先 + 删除清单落盘。
 //!
@@ -11,7 +11,8 @@
 //!   recv*/msg* 目录（FC-2：根层 .dat 是账号数据库，.db 永不归 data，FC-3）。
 //! - 扫描结果按「窗口 label + type」分槽；读图/删文件/批量删全部过本槽白名单。
 //! - data 类只收 `.dat`（排除 .db/.adb/.aes 等数据库/密钥文件）。
-//! - read-image 仅图片扩展名 + ≤10MB，base64 dataURL。
+//! - 读图通道 `fileclean:read-image` 已随预览链退役（`IMAGE_MAX_BYTES` 同批删除），
+//!   现注册面只有 scan / delete-file / execute 三条。
 //! - 危险操作前 flush_sync；success 语义=通道执行成功（失败明细随 data 返回）。
 
 use std::collections::{HashMap, HashSet, VecDeque};

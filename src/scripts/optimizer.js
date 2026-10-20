@@ -1445,7 +1445,7 @@
     const privacyCol = renderPrivacyCol();
     root.innerHTML = `<div class="opt-kanban">${naraCol}${privacyCol}` + order.map(group => {
       // 审查 M20：不再按分类注入离表 hex。`--c` / `--cf` 的 CSS 兜底本身就是
-      // `var(--accent)` / `var(--accent-text)`（main.css:6335、:2589），少注入一层
+      // `var(--accent)` / `var(--accent-text)`（main.css 的同名 token），少注入一层
       // 反而让主题与自定义 accent（pathbinding.applyAccent）能正常驱动看板配色。
       const items = byGroup[group];
       // 外设调优：列头提供「更多调优项」入口 → 打开外设优化窗口（Win32PrioritySeparation 等深度调优）

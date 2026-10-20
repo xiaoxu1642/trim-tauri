@@ -286,7 +286,7 @@ check(
 );
 
 // ---- A2. 手写判定豁免双向棘轮 ----
-// 统一 guard 会在拒绝时写日志（`guard.rs:29-32`），手写 `label() != "main"` 不会 ——
+// 统一 guard 会在拒绝时写日志（`engine/guard.rs` 的 `guard()` 注释），手写 `label() != "main"` 不会 ——
 // 静默拒绝会掩盖注入尝试，所以「不走统一 guard」必须是有意为之且被登记。
 const handwritten = [...tiers.entries()].filter(([, v]) => v.tier === 'HANDWRITTEN').map(([k]) => k);
 const unregistered = handwritten.filter((n) => !EXEMPT[n]); // 代码里手写了但清单没登记

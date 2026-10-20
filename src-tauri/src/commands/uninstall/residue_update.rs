@@ -356,7 +356,8 @@ pub(super) fn validate_residue_package(pkg: &Value) -> Result<(), String> {
             return Err(format!("规则 {id}: {reason}"));
         }
         // 条目级版本戳必须与顶层一致（V2 P2-A1，与清理库同口径）：
-        // 残留规则只有 6 条，但一旦开始按批补充，"这条是哪一版加的"必须能答
+        // 残留规则条数不在此记数（以 `node tools/check-data-parity.mjs` 对数据文件现算为准）；
+        // 一旦开始按批补充，"这条是哪一版加的"必须能答
         match rule.get("ver").and_then(Value::as_f64) {
             None => {
                 return Err(format!(

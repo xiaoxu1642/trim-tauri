@@ -10,7 +10,7 @@
 
   const MODAL_ID = 'updaterModal';
   // v3.6.5 M1-1：签名校验失败时引导用户手动下载的唯一出口。走既有 app:open-external
-  // 通道（主进程强制 https-only，见 main.js:1041-1048），故此处不会出现非 https 目标。
+  // 通道（主进程强制 https-only，见 `vendor/upstream-js/main.js:1041-1048`），故此处不会出现非 https 目标。
   const RELEASES_URL = 'https://github.com/xiaoxu1642/trim-tauri/releases/latest';
 
   // 主进程推送的状态负载：phase/idle/checking/available/latest/downloading/ready/error

@@ -15,7 +15,7 @@ use tauri::WebviewWindow;
 //
 // 落点口径（N1，2026-09-29）：**写恒新根**（`backup_write_dir`），**读跨两根**
 // （`backup_read_entries` / `resolve_backup_file`）。上游 Electron 轨的 PS 写的是
-// `%APPDATA%\Trim\cleanup-reg-backup`（`vendor/upstream-js` cleanup-scripts.js:1411），
+// `%APPDATA%\Trim\cleanup-reg-backup`（`vendor/upstream-js/src/scripts-powershell/cleanup-scripts.js:1411`），
 // 只读新根会让升级用户的老批备份在列表里凭空消失，与「这台机器没做过可还原操作」无法区分。
 
 /// 备份根标识：列表项要告诉用户这份来自当前数据目录还是升级前的老根
@@ -152,7 +152,8 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
 // native::cleanup_execute 在永久删除前把文件复制到 cleanup-files-backup\<规则id>\ 下
 // （文件名 `<批次ms>_<序号>_<原名>`，N10 补的批次段），
 // 并落 manifest-<ts>.json（条目=备份相对名 ↔ 原始路径）。备份是语义增强不是删除
-// 前提：复制失败/超上限照常删除并记账（native.rs 内有 64MB/文件、256MB/批次上限）。
+// 前提：复制失败/超上限照常删除并记账（上限常量见 `engine/native/cleanup.rs` 的
+// `FILES_BACKUP_MAX_FILE_BYTES` / `FILES_BACKUP_MAX_BATCH_BYTES`）。
 
 pub(super) const FILES_BACKUP_SUB: &str = "cleanup-files-backup";
 

@@ -35,7 +35,7 @@ fn cache_file() -> std::path::PathBuf {
 /// 读持久缓存；CM-9：所有项必须带 nativeRegPath 字符串才可用。
 ///
 /// 同一条判据再加 `ownerSource`（2026-10-05 按软件分组）：升级前留下的缓存里没有这个键，
-/// 直接拿来用会让整页 172 项全落进「未识别」组 —— 那不是"缓存能用"，那是把新功能显示成坏了。
+/// 直接拿来用会让整页条目全落进「未识别」组 —— 那不是"缓存能用"，那是把新功能显示成坏了。
 /// 判据缺失就当没有缓存、走一次真实扫描，代价是首次进页面慢几秒，比静默错分组划算。
 ///
 /// 返回 `(data, timestamp)`（性能 v3 ⑤，形状照 `startup.rs::load_cache`）：此前只回 `Vec<Value>`
@@ -564,7 +564,8 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
     let mut pids: Vec<u32> = Vec::new();
     unsafe {
         // 审查 v2-F12：快照句柄必须在离开本块前释放。同 bundle 另 6 处
-        // `CreateToolhelp32Snapshot` 均成对 `CloseHandle`（`native.rs:109/159` 等），此处是漏网。
+        // `CreateToolhelp32Snapshot` 均成对 `CloseHandle`（`engine/native/process.rs` /
+        // `engine/native/contextmenu.rs` 的同类枚举等），此处是漏网。
         let snap_res = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         let snap = match snap_res {
             Ok(s) => s,

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---------- ⓪ localStorage 键前缀迁移（winclean-* → trim-*，2026-10-07） ----------
-  // 历史前缀来自 Electron 时代的项目名，与现在身份不一致（AGENTS §0.2「已知残留」）。
+  // 历史前缀来自 Electron 时代的项目名，与现在身份不一致。
   // ds.js 是全部页面（主窗 + 五子窗）最早必挂的脚本，且排在它前面的
   // tauri-api/window-material/theme-boot/splash 都不碰这些键——迁移放这里，
   // 保证任何业务读写发生前旧值已搬进新键。**无条件覆盖**：用户降级回旧版时旧版

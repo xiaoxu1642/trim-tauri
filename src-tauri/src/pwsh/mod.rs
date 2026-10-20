@@ -405,7 +405,7 @@ fn run_with_exe(
     // 快照（审查 v2-M8）：正常路径靠 EOF 投递的完整串，降级路径靠这里。
     // 少了它，Job 建不起来时（`job = None`，`:381-387` 的显式降级）terminate 无事可做，
     // 宽限期到点只能 `unwrap_or_default()` 交出**空 stdout** —— 上层按「code!=0 + 空 stdout」
-    // 判成「脚本根本没跑」，`@@RESULT@@` 型判定（optimizer.rs:701）全线误判。
+    // 判成「脚本根本没跑」，`@@RESULT@@` 型判定（`commands/optimizer.rs` 的解析链）全线误判。
     // 用 Arc 而非借用：读线程要 `'static`，而快照必须活到调用方取完结果为止。
     let snap_out: Arc<Snapshot> = Arc::new(Snapshot::default());
     let snap_err: Arc<Snapshot> = Arc::new(Snapshot::default());
@@ -1146,7 +1146,7 @@ fn expired_since(mtime: Option<std::time::SystemTime>, now: std::time::SystemTim
 // ==================== 审查 v2-L13：清理链（原 PS 时代脚本 cleanup_execute.ps1，已退役）自产的注册表备份修剪 ====================
 
 /// 保留最近多少个**批次**（同一个 `yyyyMMdd_HHmmss` 时间戳算一次清理运行）。
-/// 为什么按批次而不是按份数（`peripheral.rs:222 prune_backups` 是按份数）：
+/// 为什么按批次而不是按份数（`commands/peripheral.rs` 的 `prune_backups` 是按份数）：
 /// 一次运行会为一条规则的每个 reg 键各导出一份 `_<n>.reg`，半份批次既不可回溯也不可导入。
 const REG_BACKUP_KEEP_BATCHES: usize = 10;
 
@@ -1157,7 +1157,7 @@ const REG_BACKUP_KEEP_BATCHES: usize = 10;
 /// 老根的超额文件宁可留在盘上（读取兜底仍可见、可还原），也不许被我们清掉。
 ///
 /// **为什么这里没有逐文件过 `is_path_protected`（与整改单的点名校法不同，实测依据）**：
-/// `protect.rs:282` 把 `%APPDATA%\Trim` 整棵列为 subtree 受保护根（注释原文
+/// `protect.rs` 的 `ProtectRoots::subtree` 把 `%APPDATA%\Trim` 整棵列为受保护根（注释原文
 /// 「应用自身数据目录整棵不许碰」），而备份文件必然位于该根之下 ⇒
 /// `is_path_protected` 对**每一个**候选恒为 true，加上这道闸门只会让修剪变成
 /// 100% 空操作（假绿，见测试 `受保护根口径下逐文件闸门必然全拦`）。

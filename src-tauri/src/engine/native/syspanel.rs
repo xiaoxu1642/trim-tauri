@@ -1748,7 +1748,8 @@ pub fn pagefile_state() -> Value {
     let managed = read_reg_value_text(hive_hklm(), sub, "AutomaticManagedPagefile")
         .map(|(_, v)| v.eq_ignore_ascii_case("TRUE"))
         .unwrap_or(false);
-    // `read_reg_value_faithful` 把 REG_MULTI_SZ 各元素以 `\0` 连接（registry.rs:359），
+    // `read_reg_value_faithful` 把 REG_MULTI_SZ 各元素以 `\0` 连接（`registry.rs` 的
+    // `read_reg_value_faithful` REG_MULTI_SZ 分支），
     // 这里按 `\0` split 即可 —— 不再手写 MULTI_SZ 解码器，避免与 registry 层出现两份口径。
     let raw: Vec<String> = read_reg_value_faithful(hive_hklm(), sub, "PagingFiles")
         .map(|(_kind, s)| s.split('\0').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect())

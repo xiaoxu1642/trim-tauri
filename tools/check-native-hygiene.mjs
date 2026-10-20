@@ -500,7 +500,7 @@ let n7sites = 0;
 // 注释不算——stripRust 已剥）出现 `.unwrap()/.expect(/panic!(/unreachable!(/todo!(
 // /unimplemented!(` ⇒ 必须逐文件登记（{file, count, reason}），计数对不上即红——
 // 「登记后偷偷加一处」与「登记后偷偷删一处（登记失效信号）」都拦。
-// 现存 7 处全部是登记例外：util.rs 的 panic 是**编译期** const 布局断言（只在编译错
+// 现存 8 处全部是登记例外（3+2+1+1+1，以 `PANIC_ALLOW` 现算为准）：util.rs 的 panic 是**编译期** const 布局断言（只在编译错
 // 时触发）；lib.rs 的 expect 是启动期窗口/运行时创建（无 UI 可落，fail-fast 唯一选择）；
 // 三份生成器产物 JSON 的 expect 由 contract_tests 钉住合法性（对 build 产物 fail-fast 正确）。
 // 其余生产 unwrap 已在 P2 批全部结构化消灭（services/fileclean/contextmenu/bcd/

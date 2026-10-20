@@ -56,7 +56,9 @@ const RE_NAME_LITERAL = /['"`](--[A-Za-z0-9_-]+)['"`]/g;
  *   · --c / --cf：AGENTS.md §2「分类/分组不得用离表色（审查 M20）」点名的姿势本身——
  *     看板与卡片的分组标识色走 `var(--c, var(--accent))` / `var(--cf, var(--accent-text))`
  *     的 token 兜底；M20 删掉了注入侧（GROUP_ACCENT / CAT_META.color），所以全仓无人写入
- *     是**预期状态**，不是 v2-L6 那种写错名字的架空。main.css 里 21 处引用都带兜底。
+ *     是**预期状态**，不是 v2-L6 那种写错名字的架空。main.css / main-pages.css 里
+ *     `var(--c[,)]` 的引用都带兜底（条数现算：`grep -o "var(--c[,)]" src/styles/*.css | wc -l`，
+ *     不在注释里手抄）。
  */
 const ALLOW_UNDECLARED = new Map([
   ['--c', 'M20 分组色 token 兜底钩子（AGENTS §2），无写入方是预期'],

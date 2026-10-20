@@ -13,7 +13,7 @@
 //!
 //! ⚠️ 已知联动缺口：`bg-list` / `bg-import` 回传的绝对路径，渲染层 `pathbinding.js`
 //! 会拼成 `file:///` 作为 `<img src>` 与背景图。Tauri 页源是 `http://tauri.localhost`，
-//! Chromium 拦 `file:` 子资源 —— 与已登记的 P1 项（fonts copyUrl / fileclean:read-image）
+//! Chromium 拦 `file:` 子资源 —— 与已登记的 P1 项（fonts copyUrl / 背景图 file: 直链）
 //! 同因，需启用 asset 协议（`tauri.conf.json` assetProtocol scope + index.html CSP 的
 //! `img-src asset: http://asset.localhost`）后才会真正显示。本模块**保持上游返回契约不变**，
 //! 不改成 dataURL（那是渲染层共享代码，改一处要动两侧）。

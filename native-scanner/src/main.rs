@@ -195,7 +195,7 @@ fn main() {
             std::process::exit(code);
         }
         "ov-metrics" => {
-            // v3.7.1 R2b：系统概览高频指标（字段契约 = overview-scripts.js:60-74）
+            // v3.7.1 R2b：系统概览高频指标（字段契约 = `vendor/upstream-js/src/scripts-powershell/overview-scripts.js:60-74`）
             let code = perf::run_ov_metrics();
             let _ = std::io::Write::flush(&mut std::io::stdout());
             std::process::exit(code);

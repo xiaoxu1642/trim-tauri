@@ -15,8 +15,8 @@
 //!
 //! 断言：
 //! 1. 从 Local State 解出 32 字节 OSCrypt 主密钥；
-//! 2. 主密钥 + AES-256-GCM 解开两条 v10 密文，明文逐字节一致（`safestorage.rs:138` 记的
-//!    Phase 0 实测是 **AAD 为空**，不是本文件以前写的 "AAD=v10"）；
+//! 2. 主密钥 + AES-256-GCM 解开两条 v10 密文，明文逐字节一致（`safestorage.rs` 的
+//!    `aes_gcm_open` 注释记的 Phase 0 实测是 **AAD 为空**，不是本文件以前写的 "AAD=v10"）；
 //! 3. 无主密钥时必须明确报 `MissingKey`，不许胡乱尝试；
 //! 4. .NET ProtectedData 裸 DPAPI 可直接解，证明 DPAPI 层跨实现同口径。
 //!

@@ -291,7 +291,7 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
 /// + 父目录不是 reparse point。
 ///
 /// 为什么不共用 `is_path_protected` 就够了：那份清单服务的是「清理别误删系统」，实测其
-/// subtree 只有 `%WINDIR%\System32\config` 一棵（protect.rs:286），`System32\drivers` 这类
+/// subtree 只有 `%WINDIR%\System32\config` 一棵（`protect.rs` 的 `ProtectRoots::subtree` 默认根），`System32\drivers` 这类
 /// 并不在册。删除侧不碰它靠的是「规则库根本不会产出那种目标」，而还原侧的路径来自磁盘上
 /// 一份可被改写的 manifest，不能拿「没人会那么写」当防线。
 ///
@@ -653,7 +653,7 @@ mod tests {
             "%WINDIR% 整棵必须拒——注意这条**不是**靠 is_path_protected 拿到的（它的 subtree 只含 System32\\config）"
         );
         // 断言对象必须是**真的在册**那条：`roots()` 默认 subtree 是 `%APPDATA%\Trim`（老根）
-        // 与 `%WINDIR%\System32\config`（protect.rs:286），当前数据目录 `com.xiaoxu.trim`
+        // 与 `%WINDIR%\System32\config`（`protect.rs` 的 `ProtectRoots::subtree` 默认根），当前数据目录 `com.xiaoxu.trim`
         // 并不在其中——上一轮我按「应用自身数据目录在册」写断言，跑出来是放行，事实纠正于此。
         let legacy = format!(
             "{}\\Trim\\startup.json",

@@ -16,9 +16,8 @@
 //! `copyUrl` 与 Electron 同为 `pathToFileURL(copyPath).href`（`file:///...`）。
 //! Tauri 页面源是 `http://tauri.localhost`，Chromium 会拦截从 web 源加载 `file:` 子资源，
 //! 因此该 URL 上的 `@font-face` 可能加载失败（Electron 页面是 file: 源，不受此限）。
-//! 处置与 B3 记载一致：待 asset 协议（`asset:`/`http://asset.localhost`）启用时，
-//! 由 `fileclean:read-image` 等通道一并改造（需同步调整 index.html 的 CSP 与
-//! tauri.conf.json 的 assetProtocol scope）。当前契约字段不变，先如实登记。
+//! 处置与 B3 记载一致：待 asset 协议（`asset:`/`http://asset.localhost`）启用时一并改造
+//! （需同步调整 index.html 的 CSP 与 tauri.conf.json 的 assetProtocol scope）。
 //!
 //! 需要加入 lib.rs `generate_handler!` 的完整行：
 //!   commands::fonts::fonts_list,

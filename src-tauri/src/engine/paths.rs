@@ -19,8 +19,9 @@ const PORTABLE_MARKER: &str = "Trim.portable";
 
 /// 从旧数据目录一次性搬迁的文件清单。
 /// 判据只有一条：**丢了用户就恢复不了 / 要重做** 的才进这里。
-/// - 前 6 项是 D5 原有清单（含 `Local State` = OSCrypt 主密钥载体）—— 审查 v2-L10 订正计数：
-///   `checkup.json` 按判据移出后（M15），"前 7 项"这个数字就已经不对了，注释一直没跟着改
+/// - D5 原有清单含 `Local State` = OSCrypt 主密钥载体；`checkup.json` 与
+///   `system-info.json` 按「可重扫缓存」判据移出（见各自条目），清单长度不在注释里记数，
+///   以 `MIGRATION_FILES` 数组现算为准
 /// - `optimizer-backups.json` = 优化项的**值级注册表备份**；不搬过去，「还原」就只能
 ///   退化成反向判据，原来那个具体值再也回不来了（用户改完 Defender/UAC 想还原会失败）
 /// - `bench-history.json` = 用户的历史测速/测速记录，重跑成本高且属个人数据

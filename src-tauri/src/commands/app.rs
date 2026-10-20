@@ -162,7 +162,7 @@ pub fn app_first_paint<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWind
     // 这里刻意按 label 判定而非 `guard(window, MAIN)`，是因为非 main 是**正常路径**
     // （四个子窗都会发这条通知，见上面注释），用 guard 会把每一次子窗首帧都记成
     // error 级「来源校验失败」，把真正的注入尝试淹掉。
-    // 但**留痕不能省**：`guard.rs:29-32` 写明「静默拒绝会掩盖注入尝试」，
+    // 但**留痕不能省**：`engine/guard.rs` 的 `guard()` 注释写明「静默拒绝会掩盖注入尝试」，
     // 所以非 main 时至少留一条 debug，未知 label 才升级为 warn。
     let label = window.label().to_string();
     if label != "main" {

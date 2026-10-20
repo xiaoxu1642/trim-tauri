@@ -2,7 +2,7 @@
 //!
 //! 四个子命令（契约以现有渲染层读取字段为准，v2 铁律）：
 //!   diskbench   磁盘测速（nobuf 默认，QD=每线程在途上限，OVERLAPPED event 等待）
-//!   ov-metrics  系统概览高频指标（字段与 overview-scripts.js:60-74 一一对应）
+//!   ov-metrics  系统概览高频指标（字段与 `vendor/upstream-js/src/scripts-powershell/overview-scripts.js:60-74` 一一对应）
 //!   net-sample  实时网速采样（--daemon 常驻，每秒一行 JSON，差分在 Rust）
 //!   mem-clean   内存清理（NtSetSystemInformation 逐字平移，双特权，82/84 黑名单继承）
 //!
@@ -821,7 +821,7 @@ fn mem_clean_core(want: &[String]) -> Result<String, String> {
         }
     }
     unsafe {
-        // 双特权，缺一不可（memory-scripts.js:72-99 同口径）
+        // 双特权，缺一不可（`vendor/upstream-js/src/scripts-powershell/memory-scripts.js:72-99` 同口径）
         let _ = enable_privilege("SeProfileSingleProcessPrivilege");
         let _ = enable_privilege("SeIncreaseQuotaPrivilege");
         let before = avail_phys_bytes();
