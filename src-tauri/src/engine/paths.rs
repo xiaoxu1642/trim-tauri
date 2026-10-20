@@ -109,17 +109,73 @@ fn appdata_dir() -> PathBuf {
 /// 本应用数据目录（便携模式为 exe 目录 data 子目录）
 pub fn app_data_dir() -> &'static PathBuf {
     DATA_DIR.get_or_init(|| {
-        let dir = if is_portable() {
-            exe_dir().join("data")
-        } else {
-            appdata_dir().join(IDENTIFIER)
-        };
-        // N2（2026-09-29）：数据根一旦确定就把根注入原生扫描器。放在这里而不是各处记得调，
-        // 理由是「谁能拿到数据根，谁就顺手把scanner 的名单根定下来」——漏注入的后果是
-        // 排除/忽略名单按空处理，删除面**变大**（用户明确排除过的东西重新进候选），
-        // 那比多排除更危险。`tools/check-fail-closed.mjs` D 段钉住这条注入。
-        trim_finder::util::set_data_roots(dir.clone(), legacy_data_dir());
-        dir
+        // C08（v7.2 R6b-M01🔴）：测试数据根优先。两侧注入互不越界，详见
+        // [`lib_test_data_root`] 的文档——顺序即语义：测试根不可能是生产根。
+        //
+        // 两轨各自包在 cfg 里（而不是 cfg(test) 块 + 裸生产代码）：lib 单测构建下
+        // 生产轨整段不存在，不会有「return 之后不可达」的 unreachable_code 警告
+        // （AGENTS §4 零警告线；集成测试链的是非 cfg(test) 的 rlib，走不到本块）。
+        #[cfg(test)]
+        {
+            let root = lib_test_data_root().clone();
+            // 扫描器的名单根与主进程同源注入（N2 口径）：测试根下同样隔离，
+            // 否则排除/忽略名单会读到真实根的用户名单，删除面在测试里失真。
+            trim_finder::util::set_data_roots(root.clone(), legacy_data_dir());
+            return root;
+        }
+        #[cfg(not(test))]
+        {
+            // 集成测试启动器（tests/common/mod.rs）注入；普通 release 进程
+            // 不经 cargo test 运行、没有这个变量 ⇒ 生产行为逐字节不变。
+            if let Ok(root) = std::env::var("TRIM_TEST_DATA_ROOT") {
+                if !root.is_empty() {
+                    let dir = PathBuf::from(root);
+                    trim_finder::util::set_data_roots(dir.clone(), legacy_data_dir());
+                    return dir;
+                }
+            }
+            let dir = if is_portable() {
+                exe_dir().join("data")
+            } else {
+                appdata_dir().join(IDENTIFIER)
+            };
+            // N2（2026-09-29）：数据根一旦确定就把根注入原生扫描器。放在这里而不是各处记得调，
+            // 理由是「谁能拿到数据根，谁就顺手把scanner 的名单根定下来」——漏注入的后果是
+            // 排除/忽略名单按空处理，删除面**变大**（用户明确排除过的东西重新进候选），
+            // 那比多排除更危险。`tools/check-fail-closed.mjs` D 段钉住这条注入。
+            trim_finder::util::set_data_roots(dir.clone(), legacy_data_dir());
+            dir
+        }
+    })
+}
+
+/// lib 单测的隔离数据根（C08 / v7.2，R6b-M01🔴 的修复载体）。
+///
+/// 背景：`cargo test` 曾把测试夹具写进**真实**数据根——`optimization-state.json` 的
+/// `prefs.recent` 被 `e10` 夹具覆盖成 `id0..id11`，用户「最近使用」整列失真
+/// （2026-10-19 现场：10 个 `__cleanup*` 假条目，mtime 22:26:54，小旭拍板留作证据）。
+///
+/// 机制分两侧，**互不越界**：
+/// - lib 单测（本 crate 被 `cargo test` 编译为单测二进制时 `cfg(test)` 为真）：
+///   无条件走本函数，不依赖环境变量——编译进单测二进制的只有测试代码，没有生产
+///   调用方，无需开关，也就不存在「忘设变量」的假绿路径。
+/// - 集成测试（`tests/` 链接的是**非** `cfg(test)` 的 rlib，走不到本分支）：由测试
+///   启动器 `tests/common/mod.rs` 注入 `TRIM_TEST_DATA_ROOT` 环境变量。普通 release
+///   进程不经 cargo test 运行、拿不到该变量 ⇒ 「不得据此改生产数据根」由
+///   「它根本没有这个变量」保证，而不是靠约定。
+///
+/// 进程内首次调用即清根：上一次 cargo test 的残留会让「初始状态」类断言假红/假绿
+/// （paths 迁移用例与 optimization_state 夹具都踩过「判红实验留残留」）。
+#[cfg(test)]
+pub(crate) fn lib_test_data_root() -> &'static PathBuf {
+    static LIB_ROOT: OnceLock<PathBuf> = OnceLock::new();
+    LIB_ROOT.get_or_init(|| {
+        let root = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("target/test-data-root/lib");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("测试数据根可创建");
+        root
     })
 }
 

@@ -83,11 +83,19 @@ fn quickcmds_run_rejects_unknown_id() {
 
 /// diskbench:run 路径白名单（SP-1）：系统目录不在「用户目录/TEMP/AppData」内。
 /// 防的是：任意路径落盘测速（往系统盘刷数据、污染只读目录）。
+///
+/// X1-M03（v7.2 C08）补拒因点名：此前只断 `success:false`，白名单闸被摘掉时
+/// `C:\Windows` 会真去落盘测速、失败也回 `success:false` ⇒ 用例照绿——
+/// 正是它自己注释声明要防的事。needle 取自 diskbench.rs 白名单分支的文案。
 #[test]
 fn diskbench_run_rejects_outside_whitelist() {
     let w = main_window();
     let res = invoke(&w, "diskbench_run", json!({ "options": { "path": "C:\\Windows" } }));
     assert_eq!(res["success"], json!(false), "白名单外路径必须被拒: {res}");
+    assert!(
+        message_of(&res).contains("测速路径受限"),
+        "拒因必须点名白名单闸（否则「闸没了但测速自己失败」会冒充绿灯）: {res}"
+    );
 }
 
 /// finder:delete 快照闸门：未扫描过的路径先判「已过期」。
@@ -241,6 +249,27 @@ fn netcheck_collect_shape() {
     let w = main_window();
     let res = invoke(&w, "netcheck_collect", json!({}));
     assert!(res["success"].is_boolean(), "success 必须是布尔: {res}");
+    // X1-L02（v7.2 C08）：原实现只断「success 是布尔」⇒ 检测整条失败
+    // （success:false、压根没有 items）也绿；同文件兄弟 runtimes_collect_shape
+    // （:208-234）已按 v5 P2 补齐渲染层口径，这里是唯一没跟上的——一文件内双标。
+    // 按 §4.1 纪律③「形状断言对渲染层消费口径写」对齐：netcheck.js:180 对
+    // `resp.data.items` 直接取用（非数组 ⇒ 整页 setAll('pending') + 报错），
+    // :189-192 按 id 索引并给 status 缺省 'unknown'，:199-201 只认 fail/warn。
+    assert!(res["success"].as_bool().unwrap_or(false), "本机网络检测整条失败: {res}");
+    let items = res["data"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data.items 必须是数组（前端 :180 直接取用）: {res}"));
+    for it in items {
+        let id = it["id"].as_str().unwrap_or("");
+        assert!(!id.is_empty(), "条目缺 id（前端按 id 建索引）: {it}");
+        assert!(
+            matches!(
+                it["status"].as_str(),
+                Some("ok") | Some("warn") | Some("fail") | Some("info") | Some("unknown")
+            ),
+            "{id} 的 status 不在前端消费枚举内（:192 兜底 unknown）: {it}"
+        );
+    }
 }
 
 // ==================== 子窗口来源校验档位（审查 M1~M3 回归网） ====================
@@ -305,25 +334,46 @@ fn subwindow_cannot_call_stubborn_commands() {
 
 /// 主窗调用不得被档位拒杀（防「升档升过头」把功能锁死）：
 /// 非管理员时应在档位之后落到 needAdmin，而不是来源校验失败。
+///
+/// X1-K01（v7.2 C08）：原实现在提权态下 `eprintln! + return`——**0 断言计 passed**，
+/// 主 agent 报的 686 passed 里这条从来没断过任何东西（本机恒提权态 ⇒ 恒空跑）。
+/// 修法 = 「任何权限态都有断言对象」：
+/// - 非管理员腿（原样）：正向调用 + needAdmin/结果回执断言；
+/// - 提权态：正向调用会**真实**结束进程/改服务启动类型/删计划任务，不执行；
+///   改跑同族反向腿——档位层判定（`guard` 先于命令体）在任何权限态下都安全，
+///   且可判红（档位放错即红）。这样两种环境各有一条能红的断言，
+///   「静默跳过计 passed」不再可能。
 #[test]
 fn main_window_reaches_stubborn_commands() {
-    // 管理员身份下这两条命令会**真的**结束进程 / 改服务启动类型并删计划任务，
-    // 测试机不做真实执行 —— 该分支如实标注为未覆盖（真机验收项）。
-    if trim_tauri_lib::engine::sysinfo::is_admin() {
-        eprintln!("⚠ main_window_reaches_stubborn_commands 跳过：当前为管理员权限，正向调用会造成真实系统变更");
-        return;
+    let admin = trim_tauri_lib::engine::sysinfo::is_admin();
+    if admin {
+        eprintln!(
+            "⚠ main_window_reaches_stubborn_commands：提权态，正向腿不执行（真实系统变更），改跑反向腿"
+        );
     }
     for cmd in ["memory_stubborn_kill", "memory_stubborn_block"] {
-        let w = main_window();
-        let text = invoke_text(&w, cmd, json!({}));
-        assert!(
-            !text.contains("IPC 来源校验失败"),
-            "主窗调 {cmd} 不得被档位拒杀，回执 {text}"
-        );
-        assert!(
-            text.contains("needAdmin") || text.contains("killed") || text.contains("failedCount"),
-            "主窗调 {cmd} 应越过档位进入命令体（needAdmin 或结果回执），回执 {text}"
-        );
+        if !admin {
+            let w = main_window();
+            let text = invoke_text(&w, cmd, json!({}));
+            assert!(
+                !text.contains("IPC 来源校验失败"),
+                "主窗调 {cmd} 不得被档位拒杀，回执 {text}"
+            );
+            assert!(
+                text.contains("needAdmin") || text.contains("killed") || text.contains("failedCount"),
+                "主窗调 {cmd} 应越过档位进入命令体（needAdmin 或结果回执），回执 {text}"
+            );
+        }
+        // 两态都跑的反向腿：子窗必须在档位处被拒（v2-H2：主窗专属高危通道）。
+        // 破坏自证：把任一命令的 guard(MAIN) 放回 guard_readonly ⇒ 本腿红。
+        for label in sub_windows() {
+            let sub = window_with_label(label);
+            let text = invoke_text(&sub, cmd, json!({}));
+            assert!(
+                text.contains("IPC 来源校验失败"),
+                "{label} 窗调 {cmd} 必须被拒（v2-H2：主窗专属高危通道），回执 {text}"
+            );
+        }
     }
 }
 

@@ -70,6 +70,7 @@ const MUST_RUN = [
   'check-comment-rot',
   'check-positive-controls',
   'check-review-units',
+  'check-tests-helper-parity',
   'check-gate-roster',
 ];
 

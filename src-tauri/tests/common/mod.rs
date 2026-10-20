@@ -8,7 +8,7 @@
 //! 用法（tests/<name>.rs 顶部）：
 //! ```text
 //! mod common;
-//! use common::{main_window, invoke, ipc};
+//! use common::{main_window, invoke, ipc_fire_no_assert};
 //! ```
 //!
 //! 约束（与 ipc_smoke.rs 文件头一致，改动前先读那里）：
@@ -18,6 +18,17 @@
 //! - 参数名按 tauri 宏默认 `rename_all = "camelCase"`。
 //! - 命令清单来自 `trim_tauri_lib::build_app`——与生产共用同一份 `generate_handler!`，
 //!   新命令漏注册在这里会直接 panic（「命令未注册」），不会静默漂移。
+//!
+//! C08（v7.2 X1-M02）口径订正：「共用 generate_handler!」只保证**漏注册会 panic**，
+//! 不保证**被调用**——两个是不变量强度不同的事实，此前这条注释把前者写成了后者。
+//! 「哪些命令在 tests/ 里有调用方」以现算为准（工具：`tools/check-tests-helper-parity.mjs`
+//! 的调用面清单段，数字不写进注释，防止下次漂移又骗人）。
+//!
+//! C08（v7.2 R6b-M01🔴）数据根隔离：每个测试进程首次建窗前注入
+//! `TRIM_TEST_DATA_ROOT`（按测试二进制名分根），`paths::app_data_dir()` 据此
+//! 把全部数据目录写侧重定向到 `target/test-data-root/<bin>`——测试夹具不再
+//! 写穿真实 `%APPDATA%\com.xiaoxu.trim`。普通 release 进程没有这个变量，
+//! 生产行为不变（机制全貌见 `paths::lib_test_data_root` 的文档）。
 //!
 //! `allow(dead_code)`：共享 fixture 在每个测试 crate 独立编译，各文件只取所需，
 //! 未引用的 helper 会触发 dead-code 警告并撞 AGENTS §4「0 警告」验收线——
@@ -41,13 +52,82 @@ pub fn main_window() -> WebviewWindow<MockRuntime> {
 ///
 /// label 合法性不做测试侧硬编码校验：guard 档位本身就按 APP_WINDOWS 判，
 /// 传未知 label 的窗口调任何带档位的命令会被来源校验拒杀——这正是档位回归的测点。
+///
+/// C08（v7.2 R6b-M01🔴）：建窗前先确保测试数据根已注入（进程内只做一次）。
+/// 顺序即语义——必须在任何可能触达 `paths::app_data_dir()` 的调用之前，
+/// 否则 DATA_DIR 的 OnceLock 会把真实根先定死，后面再设变量就无效了。
 pub fn window_with_label(label: &str) -> WebviewWindow<MockRuntime> {
+    ensure_test_data_root();
     let app = trim_tauri_lib::build_app(mock_builder())
         .build(mock_context(noop_assets()))
         .expect("测试 App 构建失败");
     WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
         .build()
         .unwrap_or_else(|e| panic!("测试窗口 {label} 创建失败: {e}"))
+}
+
+/// C08（v7.2 R6b-M01🔴）：把本测试进程的数据根重定向到 `target/test-data-root/<bin>`。
+///
+/// 两个设计点：
+/// - **按测试二进制分根**（`current_exe` 的 stem，剥掉 cargo 追加的 `-<hash>`）：
+///   `ipc_smoke` / `module_smoke` / `safestorage_compat` 是各自独立的进程，
+///   共用一个根会在并行跑时互踩（都写 `optimization-state.json`）。
+/// - **进程内首次调用即清根**：上一次 cargo test 的残留会让「初始状态」类断言
+///   假红/假绿（判红实验跑过之后里面会留残留，optimization_state 夹具踩过两次）。
+///
+/// 环境变量名与 `paths::app_data_dir()` 的读取侧互为契约：改一侧必须同步另一侧
+/// （`tools/check-fail-closed.mjs` 有 D 段钉注入，本变量名由其对拍兜底）。
+fn ensure_test_data_root() {
+    static ONCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let stem = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            // cargo 的测试二进制名 = `<name>-<hash>`（如 `ipc_smoke-4a3f2b1c`），
+            // 剥掉后缀让根目录名跨构建稳定，否则每次构建都换新根、旧的无限堆积。
+            // 本仓三个测试文件名均不含连字符，取首段无歧义。
+            .map(|s| s.split('-').next().unwrap_or("shared").to_string())
+            .unwrap_or_else(|| "shared".to_string());
+        let root = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("target/test-data-root")
+            .join(stem);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("测试数据根可创建");
+        // edition 2021：set_var 尚非 unsafe。进程内并行用例写入同一个值，
+        // 与 DATA_DIR 的 OnceLock 首次 init 竞态无害（值相同，谁先设都一样）。
+        std::env::set_var("TRIM_TEST_DATA_ROOT", &root);
+        root
+    });
+}
+
+/// C08（v7.2 X1-M05）：清空全部快照槽（测试底座隔离出口）。
+///
+/// 槽是进程级 static，并行用例共用同一 label 槽——helper 只给出口，
+/// **并发语义由调用方声明**：快照类断言（依赖「某窗最近一次扫描」的用例）
+/// 不得对同一 label 并发跑；确实要并行的域先确认各自的 `domain_key` 不同。
+pub fn reset_snapshots() {
+    trim_tauri_lib::engine::snapshot::clear_all();
+}
+
+/// C08（v7.2 X1-M04）：**缺样本的统一出口**——打印跳过标记、记入进程台账，
+/// 返回 `true`（调用方据此 `return`：本条不判红，也不冒充通过）。
+///
+/// 修的是同一份文件里两个相反方向的病态：
+/// - 真机组（`--ignored`）：本机没有样本时 `assert!(!x.is_empty())` 直接判红，
+///   把「这台机器没有装机清单」记成代码缺陷——发布前门禁被环境噪声堵住；
+/// - 快速组：缺文件时 `Err(_) => {}` 静默只剩形状断言，用例自述的回归目的
+///   （如条数对拍）根本没跑，却与跑全了的一样计 ok（§4.1 定义的碰巧绿）。
+///
+/// 台账（进程级 Vec）让「本轮哪些判据无对象」可点名；`eprintln!` 带
+/// `⚠ [skip-sample]` 前缀，发布前门禁按仓库约定 `--nocapture` 跑即可见。
+pub fn skip_and_record(what: &str) -> bool {
+    static SKIPPED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    eprintln!("⚠ [skip-sample] {what}");
+    if let Ok(mut v) = SKIPPED.lock() {
+        v.push(what.to_string());
+    }
+    true
 }
 
 /// 四个子窗 label（剔除主窗），从 `engine::guard::APP_WINDOWS` 派生——
@@ -61,8 +141,18 @@ pub fn sub_windows() -> Vec<&'static str> {
         .collect()
 }
 
-/// 经真实 IPC 调用链发一条命令（不取回执——只断「不被拒杀」的档位场景用）。
-pub fn ipc(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) {
+/// 经真实 IPC 调用链发一条命令（**不取回执**——只用于「别被拒杀」的档位场景）。
+///
+/// X1-L01（v7.2 C08）：本 helper **不构成断言**——回执被整体丢弃，
+/// 「命令跑没跑、成没成」一概不知。原名叫 `ipc`，与同文件的 `invoke` /
+/// `invoke_text` 摆在一起时，读起来像第三条取证通道，`AGENTS.md` §4.2 的
+/// 单一真源清单也曾据此把它当断言件引用。改名 `ipc_fire_no_assert` 让
+/// 「不开火验证」写在名字上：调用它之后必须另配 `invoke_text` +
+/// `assert_guard_passed`（或明确的负例断言），否则该场景等于没测。
+///
+/// 现算全仓 0 引用（保留是为档位场景的「只求不拒杀」形态留件，不是死代码——
+/// 一旦出现调用方而没配断言，这条注释就是它的对照判据）。
+pub fn ipc_fire_no_assert(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) {
     let req = ipc_request(cmd, args);
     let _ = get_ipc_response(window, req);
 }

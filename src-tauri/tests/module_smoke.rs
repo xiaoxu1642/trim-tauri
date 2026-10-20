@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{invoke, invoke_text, main_window, sub_windows, window_with_label};
+use common::{invoke, invoke_text, main_window, skip_and_record, sub_windows, window_with_label};
 use serde_json::json;
 use trim_tauri_lib::engine::guard::APP_WINDOWS;
 
@@ -118,6 +118,14 @@ fn paths_load_shape() {
 
 /// paths:save 负例：key 白名单外的写入必须在落盘前被拒。
 /// 防的是：渲染层被注入后借路径通道往配置里塞任意键（配置面越权）。
+///
+/// X1-M03（v7.2 C08）两点补强：
+/// ① 拒因点名——此前只断 `success:false`，白名单闸被摘掉时 `__trim_smoke_key__`
+///    会经 `atomic_write_json` 落进用户配置（落盘成功 ⇒ success:true 会红，但
+///    「闸没了、写入又因别的原因失败」同样只回 success:false ⇒ 冒充绿灯）。
+///    needle 取自 paths.rs 白名单分支的「路径配置无效」。
+/// ② 落点说明——本命令读写的 `paths.json` 在 `paths::paths_config_file()` 下，
+///    C08 数据根隔离后已重定向到 `target/test-data-root/<bin>`，不再写穿用户配置。
 #[test]
 fn paths_save_rejects_unknown_key() {
     let w = main_window();
@@ -127,6 +135,10 @@ fn paths_save_rejects_unknown_key() {
         json!({ "key": "__trim_smoke_key__", "value": "C:\\x" }),
     );
     assert_eq!(res["success"], json!(false), "白名单外 key 必须被拒: {res}");
+    assert!(
+        common::message_of(&res).contains("路径配置无效"),
+        "拒因必须点名白名单闸（同族对照 settings_set_pref 点名「未知的偏好键」）: {res}"
+    );
 }
 
 /// 子窗档位通用式：guard_readonly 档命令从**每个**子窗 label 都应能越过档位
@@ -441,11 +453,18 @@ fn pending_add_rejects_protected_paths_and_over_limit() {
 
 /// v6-K11：外设备份还原必须带**显式高危确认字段** `confirmedHighRisk=true`。
 ///
-/// 拒杀顺序：窗口档位 → 确认字段 → 提权检查。确认闸在 is_admin 之前，所以本用例
+/// 拒杀顺序：窗口档位 → 确认字段 → 提权检查。确认闸在 is_admin 之前，所以负例腿
 /// 在任何提权态下都零副作用（不读备份目录、不碰注册表）。缺字段/false 都必须拒——
 /// 「裸调用」正是渲染层漏传或 IPC 注入的形态。
-/// 破坏自证：把命令签名里的 `confirmed_high_risk` 闸删掉 ⇒ 本用例红（裸调用落到
-/// needAdmin 或真实导入）。
+/// 破坏自证：把命令签名里的 `confirmed_high_risk` 闸删掉 ⇒ 负例腿红（裸调用落到
+/// needAdmin 或真实导入，`message.contains("confirmedHighRisk")` 不再成立）。
+///
+/// X1-M01（v7.2 C08）补**正向腿**——此前只有负例，闸「把 true 也一并拒」的过度
+/// 收紧形态整网无覆盖（负例两条对这种形态全绿）。正向腿零副作用的两态保证：
+/// - 非提权态：闸之后紧跟 is_admin 检查，停在 needAdmin，不读备份、不碰注册表；
+/// - 提权态：native 读「新根（C08 测试空根）+ 老根兜底」，仅当两个候选里都找不到
+///   备份文件时才放行（no-backup 只读分支）；老根有真实备份则跳过正向调用——
+///   那种机器上导入的是用户自己的备份、仍属真实系统变更，正向腿改由负例腿守闸。
 #[test]
 fn peripheral_restore_requires_explicit_high_risk_field() {
     let w = main_window();
@@ -458,6 +477,118 @@ fn peripheral_restore_requires_explicit_high_risk_field() {
     // 显式 false 同样拒（只有 === true 放行，见渲染层封装）
     let falsy = invoke(&w, "peripheral_restore_backup", json!({ "confirmedHighRisk": false }));
     assert_eq!(falsy["success"], json!(false), "false 必须拒: {falsy}");
+    assert!(
+        common::message_of(&falsy).contains("confirmedHighRisk"),
+        "false 的拒因同样应点名字段: {falsy}"
+    );
+
+    // 正向腿：显式 true 必须越过确认闸（不再出现确认闸拒因）。
+    // 破坏自证：把闸写成恒拒（如 `!= Some(false)`）⇒ 负例腿全绿而本腿红。
+    let backups_present = trim_tauri_lib::engine::paths::backup_read_dirs("peripheral-backup")
+        .iter()
+        .any(|d| {
+            std::fs::read_dir(d)
+                .map(|rd| rd.flatten().any(|e| e.path().is_file()))
+                .unwrap_or(false)
+        });
+    if !trim_tauri_lib::engine::sysinfo::is_admin() || !backups_present {
+        let passed = invoke(&w, "peripheral_restore_backup", json!({ "confirmedHighRisk": true }));
+        assert_eq!(
+            passed["success"],
+            json!(false),
+            "两种安全态都不该真去还原（非提权→needAdmin；无备份→no-backup）: {passed}"
+        );
+        assert!(
+            !common::message_of(&passed).contains("confirmedHighRisk"),
+            "显式确认后不应再被确认闸拒（过度收紧形态，负例腿抓不到）: {passed}"
+        );
+    } else {
+        eprintln!(
+            "⚠ peripheral_restore 正向腿跳过：提权态且老根存在真实备份，\
+             正向调用会真实导入（负例腿仍全量断言）"
+        );
+    }
+}
+
+/// X1-M01（v7.2 C08）：`optimizer_run` 的高危确认闸此前零回归网。
+///
+/// 判据结构（`preflight_reason`，apply.rs）：**is_admin 先于确认闸** ⇒ 两态各有一条
+/// 能红的断言腿，不存在「某权限态静默跳过计 passed」（照 X1-K01 的两态腿模式）：
+/// - 提权态：is_admin 已过，缺确认必须落在 `needConfirm: true` —— 这条腿直接守着
+///   确认闸本身，闸被摘掉/改松 ⇒ 红；
+/// - 非提权态：必须落在 `needAdmin: true` —— 守着「is_admin 先行」的判据顺序，
+///   顺序若被改成确认闸先行，本态会看到 needConfirm ⇒ 红。
+/// 零副作用：两种拒绝都在执行链之前早退，不组装步骤、不落盘。
+/// 高危 id **动态取**（目录里第一个 `risk=="high"`）：写死 id 会在目录退役时假红，
+/// 而目录本身是 `include_str!` 进二进制的，退役即编译期事实。
+#[test]
+fn optimizer_run_high_risk_confirm_gate_has_two_state_legs() {
+    let w = main_window();
+    let list = invoke(&w, "optimizer_list", json!({}));
+    let rows = list["data"]
+        .as_array()
+        .expect("optimizer_list 回执 data 应为数组（渲染层直接 .map）");
+    let high_id = rows
+        .iter()
+        .find(|r| r.get("risk").and_then(|v| v.as_str()) == Some("high"))
+        .and_then(|r| r.get("id").and_then(|v| v.as_str()))
+        .expect("目录里应存在 risk==high 的优化项（高危确认闸的服役对象）");
+    let res = invoke(
+        &w,
+        "optimizer_run",
+        json!({ "optionId": high_id, "params": { "confirmedHighRisk": false } }),
+    );
+    assert_eq!(res["success"], json!(false), "高危项缺确认必须拒: {res}");
+    if trim_tauri_lib::engine::sysinfo::is_admin() {
+        assert_eq!(
+            res["needConfirm"],
+            json!(true),
+            "提权态下高危缺确认应命 needConfirm（确认闸本身）: {res}"
+        );
+    } else {
+        assert_eq!(
+            res["needAdmin"],
+            json!(true),
+            "非提权态下 is_admin 先行，应命 needAdmin（判据顺序）: {res}"
+        );
+    }
+}
+
+/// X1-M01（v7.2 C08）：syspanel 三条写侧出口的 `confirmedHighRisk` 闸此前零回归网。
+///
+/// 与 optimizer_run 不同，这三条的确认闸是**命令体第一道**（guard 之后、任何系统
+/// 调用之前）⇒ 非提权态也可达，本机恒提权态也一样可达（闸不看权限）。
+/// 破坏自证：摘掉任一闸 ⇒ 对应调用落到命令体——`pagefile_apply` 还有
+/// `validate_pagefile` 第二道（managed=false + entries=[] 必拒），另两条传不存在
+/// 的 GUID/powercfg 必错——但两种落点的文案都不含「二次确认」⇒ 本用例红。
+/// 零副作用：`confirmedHighRisk` 恒为 false，永远到不了真实删除/写入。
+#[test]
+fn syspanel_high_risk_confirm_gates_reject_unconfirmed() {
+    let w = main_window();
+    let cases: &[(&str, serde_json::Value)] = &[
+        // 不存在任何真实电源方案的伪造 GUID：闸若失守，命令体按「方案不存在」拒，
+        // 而不是真去删 Balanced（双防线之一）。
+        (
+            "syspanel_power_plan_delete",
+            json!({ "guid": "00000000-0000-0000-0000-trimnosuchplan", "confirmedHighRisk": false }),
+        ),
+        ("syspanel_power_hide_high_performance", json!({ "confirmedHighRisk": false })),
+        // managed=false + entries=[] 是「全关虚拟内存」形态：validate_pagefile 必拒
+        // （双防线之二）；确认闸失守时落点也不是删除。
+        (
+            "syspanel_pagefile_apply",
+            json!({ "managed": false, "entries": [], "confirmedHighRisk": false }),
+        ),
+    ];
+    for (cmd, args) in cases {
+        // 三条命令签名都是 Result<Value, String>：闸拒走 Err，回执不是 JSON，
+        // 必须用 invoke_text 取文本（invoke 会 panic）。
+        let text = invoke_text(&w, cmd, args.clone());
+        assert!(
+            text.contains("二次确认"),
+            "{cmd} 缺 confirmedHighRisk 必须点名「二次确认」后拒: {text}"
+        );
+    }
 }
 
 /// M5 D1：卸载域注册表备份的列表/还原两条通道都是 MAIN 档。
@@ -627,6 +758,11 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
 ///
 /// 成本：按程序逐个扫（含开始菜单/跳转列表目录读），耗时随装机清单变化，
 /// 故不进快速组。跑法：`cargo test --test module_smoke -- --ignored`
+///
+/// X1-M04（v7.2 C08）缺样本口径：两处「本机无对象」原先是硬 assert 判红——把
+/// 「这台机器没有桌面程序 / 没有注册表寻址程序」记成代码缺陷，发布前门禁被
+/// 环境噪声堵住。改成 `skip_and_record` 明示跳过：本机无样本 ≠ 判据失效，
+/// 但也不许静默计通过。
 #[test]
 #[ignore = "逐个程序残留扫描会读多目录且依赖装机清单，发布前门禁跑"]
 fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
@@ -638,7 +774,10 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
     let apps = list["data"]["apps"].as_array().cloned().unwrap_or_default();
     // 条目里的寻址键是 `id`（`HKLM|<卸载子路径>` / `APPX|<包全名>`），不是 appId
     let sample: Vec<&Value> = apps.iter().take(8).collect();
-    assert!(!sample.is_empty(), "本机没有桌面程序可采样，本用例失去意义");
+    if sample.is_empty() {
+        skip_and_record("residue_scan：本机没有桌面程序可采样（A1 放行回测无对象）");
+        return;
+    }
 
     // 列表档位是 MAIN（主窗取）、残留扫描在窄窗口集内（residue 副窗取）——两窗分工不可互换
     let wr = window_with_label(RESIDUE_LABEL);
@@ -701,7 +840,10 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
             "{app_id} 在清单里就说明它的卸载键存在，扫描必须产出该候选（A1 误杀信号）"
         );
     }
-    assert!(checked > 0, "样本里没有可用的注册表寻址程序");
+    if checked == 0 {
+        skip_and_record("residue_scan：样本里没有可用的注册表寻址程序（APPX 专属机器）");
+        return;
+    }
 }
 
 // 需要真实环境的验证（pwsh / 扫盘 / 网络 / 改系统），复制下面这个骨架进来：
@@ -720,6 +862,10 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
 /// 所以这里钉三条 —— 字段形状（要么没有、要么是个真实存在的 .lnk）、至少有一行命中
 /// （一台装过软件、桌面有快捷方式的机器全空 = 匹配或根目录断了）、以及它不越界
 /// （只落在四个快捷方式根里，不指向任意路径）。
+///
+/// X1-M04（v7.2 C08）缺样本口径：两处「本机无对象」原先是硬 assert 判红
+/// （无已安装程序 / 无一行匹配快捷方式）——干净克隆或精简机上跑发布前门禁会被
+/// 环境噪声堵住。改成 `skip_and_record` 明示跳过。
 #[test]
 #[ignore = "读桌面与开始菜单，发布前门禁跑"]
 fn uninstall_list_rows_carry_resolvable_shortcuts() {
@@ -727,7 +873,10 @@ fn uninstall_list_rows_carry_resolvable_shortcuts() {
     let res = invoke(&w, "uninstall_list", json!({ "scope": "user" }));
     assert_eq!(res["success"], json!(true), "列表应成功: {res}");
     let apps = res["data"]["apps"].as_array().cloned().unwrap_or_default();
-    assert!(!apps.is_empty(), "本机应有已安装程序，否则这条用例证明不了什么");
+    if apps.is_empty() {
+        skip_and_record("shortcuts：本机没有已安装程序可采样（第四源回归无对象）");
+        return;
+    }
     let mut hit = 0usize;
     for a in &apps {
         let p = match a.get("shortcutPath").and_then(|v| v.as_str()) {
@@ -744,7 +893,10 @@ fn uninstall_list_rows_carry_resolvable_shortcuts() {
         );
     }
     println!("带 shortcutPath 的行数: {hit} / {}", apps.len());
-    assert!(hit > 0, "全机没有任何一行匹配到快捷方式 = 索引或匹配链断了");
+    if hit == 0 {
+        skip_and_record("shortcuts：全机没有任何一行匹配到快捷方式（索引或匹配链待查，本机无对象）");
+        return;
+    }
 }
 
 /// 探针清场守卫：断言失败（panic 走 unwind）也必须把注册表键与临时文件收掉，
@@ -771,6 +923,11 @@ impl Drop for RestoreProbeGuard {
 /// 用一次性探针键 `HKCU\Software\TrimRestoreProbe`（不碰任何真实软件键）。
 /// 顺带在同一条真链上钉封条闸门：写一条错摘要后再还原必须被硬拒——
 /// 否则「封条」只是注释里的承诺。
+///
+/// C08（v7.2 R6b-M01🔴）次序纪律：`paths::app_data_dir()` 的 OnceLock **首次调用即定死**，
+/// 而测试根靠 `main_window()` 注入环境变量——本用例原先先取数据根再建窗，并行竞态下
+/// 可能把真实根定死，假 .reg 就此写进用户备份目录。现在建窗先行（顺序即语义），
+/// 且真机组跑 `--ignored` 时同样落在 `target/test-data-root/<bin>` 下。
 #[test]
 #[ignore = "真跑 reg import 写注册表（一次性 HKCU 探针键），发布前门禁跑"]
 fn reg_backup_restore_writes_registry_end_to_end() {
@@ -778,6 +935,8 @@ fn reg_backup_restore_writes_registry_end_to_end() {
     use windows::Win32::System::Registry::HKEY_CURRENT_USER;
     let sub = r"Software\TrimRestoreProbe";
     let probe_val = || native::read_reg_value_text(HKEY_CURRENT_USER, sub, "probe").map(|(_, s)| s);
+    // 建窗先行：注入 TRIM_TEST_DATA_ROOT，之后每次 app_data_dir() 都落测试根
+    let w = main_window();
     let dir = paths::app_data_dir().join("uninstall-reg-backup");
     std::fs::create_dir_all(&dir).expect("备份目录应可建");
     let name = "1790000000001_TrimRestoreProbe.reg";
@@ -792,7 +951,6 @@ fn reg_backup_restore_writes_registry_end_to_end() {
     )
     .expect("备份应可写");
 
-    let w = main_window();
     let res = invoke(&w, "uninstall_reg_backup_restore", json!({ "file": name }));
     assert_eq!(res["success"], json!(true), "无封条（missing）的合法备份应可还原: {res}");
     assert_eq!(
@@ -822,6 +980,12 @@ fn reg_backup_restore_writes_registry_end_to_end() {
 ///
 /// 正向特征刻意取"降级为 INFO"而不是"没报来源校验失败"：后者在命令整条消失时也会成立
 /// （v2-M16② 的老坑）。
+///
+/// C08/X1-M03 落点口径：`log_write` 在测试进程**不落盘**——`log_sink_enabled()` 靠
+/// 「exe 落在 target/<profile>/deps」判测试进程（`集成测试进程不写生产日志` 用例钉的
+/// 就是它），`write_log` 直接返回行文本。因此本用例既不写生产日志目录、也不写测试
+/// 数据根；断言的全部是返回值。C08 的 `TRIM_TEST_DATA_ROOT` 是第二层保险：
+/// 万一 sink 判据失效，落点也会是测试根而非用户日志。
 #[test]
 fn log_write_is_readonly_tier_and_sanitizes_renderer_input() {
     let evil = "第一行\n[2099-01-01 00:00:00] [ERROR] 伪造行";
@@ -944,6 +1108,11 @@ fn residue_execute_still_accepts_call_without_backup_arg() {
 /// 现在文件落 `temp_script_dir()`（应用私有 tmp，AGENTS §3 指定的临时产物位置）；
 /// 让 `cleanup_reg_backup_restore` 读到文件的唯一位置就是两个用户备份根，那正是本条要根除
 /// 的写入面。「命令链确实调了这道闸」由 backup.rs 的单点调用维持，调用点登记见 P3-5。
+///
+/// C08（v7.2 R6b-M01🔴）落点口径：`temp_script_dir()` = `app_data_dir()/tmp`，集成测试
+/// 进程里已重定向到 `target/test-data-root/<bin>`——即便 Drop 没跑，残留也只在测试根。
+/// 次序纪律：本用例的子窗档位段先建窗、`temp_script_dir()` 在后 ⇒ 环境变量先于首次
+/// `app_data_dir()`（新增「直接取数据根」的步骤时刻核对这条，见 reg_backup 真机用例）。
 #[test]
 fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
     use trim_tauri_lib::engine::paths;
@@ -1117,8 +1286,12 @@ fn batch_preflight_response_shape_matches_renderer_contract() {
 /// 一旦出现负数或小数，说明计时口径被改坏（或经过了 lossy 转换）——
 /// 而耗时会进日志给人看，负数会被读成「系统时钟回拨」这类无法解释的现象。
 ///
-/// 快速组只跑 `memory_clean` 的**形状面**（用不存在的 items 触发参数校验早退，
-/// 不进清理链）。contextmenu / startup 两域要真删文件才有results，一律 `#[ignore]`。
+/// 快速组只跑 `memory_clean` 的**形状面**（用不存在的区域 id 触发参数校验早退）。
+/// contextmenu / startup 两域要真删文件才有 results，一律 `#[ignore]`。
+///
+/// 零副作用的两态口径（X1-M03 补）：提权态下 is_admin 已过、会进原生引擎，但
+/// 白名单 fail-closed 在任何 `NtSetSystemInformation` 之前（perf.rs:818-822），
+/// 非法 id 整批拒、一个区域都不会被碰；非提权态在 is_admin 处早退。
 #[test]
 fn memory_clean_results_shape_carries_elapsed() {
     // 反向前提：确认耗时字段的产出侧确实存在（否则下面这条形状断言会恒空）
@@ -1135,10 +1308,16 @@ fn memory_clean_results_shape_carries_elapsed() {
         perf.contains("\"elapsedMs\"") && perf.contains(".elapsed()"),
         "内存清理的耗时字段在产出侧消失了 —— E4 的实现被回退了？"
     );
-    // 反向前提：非管理员环境下 needAdmin 早退，不进清理链（快速组零副作用）
     let w = main_window();
     let res = invoke(&w, "memory_clean", json!({ "items": ["__不存在的区域__"] }));
     assert_eq!(res["success"], json!(false), "非法区域 id 必须拒: {res}");
+    // X1-M03：拒因要点名——提权态=原生白名单（「非法区域 id」），非提权态=needAdmin。
+    // 只断 success:false 分不清「闸拦住了」与「闸没了但别的原因失败」。
+    assert!(
+        common::message_of(&res).contains("非法区域 id")
+            || common::message_of(&res).contains("需要管理员权限"),
+        "拒因必须可点名（提权态=原生白名单 fail-closed；非提权态=needAdmin）: {res}"
+    );
 }
 
 /// `elapsedMs` 的**类型**契约对着渲染层消费口径断。
@@ -1437,8 +1616,16 @@ fn finder_ignore名单_档位与负例() {
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
     let w = main_window();
     // ② 不存在的目录：在读取 / 写盘之前拒绝
+    // X1-M03（v7.2 C08）补拒因点名：只断 success:false 分不清「存在性闸拦住了」与
+    // 「闸没了、写名单自己失败」。needle 取自 finder.rs:1007-1008 的存在性分支。
+    // 落点说明：真写路径写 `empty-ignore.txt`（`app_data_dir()` 下），C08 数据根
+    // 隔离后已重定向到测试根；本负例在写盘前被拒，两种形态都不碰名单。
     let res = invoke(&w, "finder_ignore_folder", json!({ "path": "C:\\__trim_test_missing__" }));
     assert_eq!(res["success"], json!(false), "不存在的目录必须拒: {res}");
+    assert!(
+        common::message_of(&res).contains("只能忽略本机存在的文件夹"),
+        "拒因必须点名存在性闸: {res}"
+    );
     // ③ 不在名单的条目 → missing 且零副作用（不写盘）
     let res = invoke(&w, "finder_ignore_remove", json!({ "path": "C:\\__trim_test_missing__" }));
     assert_eq!(res["success"], json!(false), "不在名单的条目必须拒: {res}");
@@ -1629,26 +1816,43 @@ fn startup_toggle_runonce_probe_uses_backup_delete() {
 /// v4 修复回归（快速组）：测速历史回执与**磁盘真值**自比对 ——/// 同一回归的另一受害者：`bench-history.json` 也是裸数组，被对象读器判损坏后
 /// 列表恒空（文件里明明有记录）。本用例不依赖装机数据：文件不存在时只验形状，
 /// 存在时必须条数一致（采集与判定拆开：真值取自文件本身，不是硬编码期望）。
+///
+/// X1-M04（v7.2 C08）两方向口径声明（此前同文件内两个相反方向都不合规）：
+/// - **缺样本**（本机无该文件）：条数对拍无对象 ⇒ `skip_and_record` 明示跳过，
+///   不再 `Err(_) => {}` 静默绿——那条支路让「数组读器回归」这个立项目的碰巧绿；
+/// - **合法损坏态**：按 §5.26，`bench-history.json` 是「只读缓存、损坏静默降级」的
+///   合法状态，命令回空数组是设计行为 ⇒ 不判红，同样走 skip 并说明。
+/// 另外修了一个次序隐患：`join_data` 会首次定死 `app_data_dir()` 的 OnceLock，
+/// 必须先建窗注入测试根再取路径（与 reg_backup 真机用例同一条纪律）。
 #[test]
 fn bench_history_list_matches_file_truth() {
+    let w = main_window();
     let f = trim_tauri_lib::engine::paths::join_data("bench-history.json");
     let raw = std::fs::read_to_string(&f);
-    let w = main_window();
     let res = invoke(&w, "bench_history_list", json!({}));
     assert_eq!(res["success"], json!(true), "列表应成功: {res}");
     assert!(res["data"].is_array(), "data 必须是数组: {res}");
     let n_cmd = res["data"].as_array().map(|a| a.len()).unwrap_or(usize::MAX);
     match raw {
-        Ok(text) => {
-            let v: serde_json::Value =
-                serde_json::from_str(&text).expect("本机历史文件应为合法 JSON（否则先修数据再跑）");
-            let n_file = v.as_array().map(|a| a.len()).unwrap_or(0);
-            assert_eq!(
-                n_cmd, n_file,
-                "回执条数必须与磁盘真值一致（数组读器回归时命令恒 0）: file={n_file} cmd={n_cmd}"
-            );
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => {
+                let n_file = v.as_array().map(|a| a.len()).unwrap_or(0);
+                assert_eq!(
+                    n_cmd, n_file,
+                    "回执条数必须与磁盘真值一致（数组读器回归时命令恒 0）: file={n_file} cmd={n_cmd}"
+                );
+            }
+            // 合法损坏态（§5.26）：降级是设计行为，不当代码缺陷判红
+            Err(e) => {
+                skip_and_record(&format!(
+                    "bench_history：本机历史文件存在但非合法 JSON（{e}）——按 §5.26 属合法降级态，条数对拍不判红"
+                ));
+            }
+        },
+        // 缺样本：形状断言已跑（上面两条），对拍段无对象——明示跳过而非静默绿
+        Err(_) => {
+            skip_and_record("bench_history：本机无 bench-history.json，条数对拍无对象（形状断言已跑）");
         }
-        Err(_) => { /* 本机没有历史文件：无从对拍，只验形状（回执仍是空数组） */ }
     }
 }
 
@@ -1659,15 +1863,27 @@ fn bench_history_list_matches_file_truth() {
 /// ② 是否已超过写侧的 500 条整批上限（`commands/startup.rs` 的 `items.len() > 500` 判拒）——
 ///    超了才说明「全选一键禁用」本就有问题，没超就说明加上限只是凭空引入风险。
 /// 只读数、不改判据；结论用于决定这条要不要动手。
+///
+/// X1-M04（v7.2 C08）：本条是自述「**非回归判据**」的取数探针，却挂着硬断言
+/// （枚举失败 `.expect` 炸、启动项为空 `assert!` 红）——与回归用例混居在发布前
+/// 门禁批次里，本机无样本就把门禁堵住。按探针定位改成**只打印**：枚举失败与
+/// 空样本都走 `skip_and_record` 明示无对象，拿数走 `println!`。
 #[test]
 #[ignore = "真机实测：读注册表与计划任务，非回归判据，取数时手动 --ignored 跑"]
 fn startup_scan_真实条数与写侧上限关系实测() {
-    let items = trim_tauri_lib::engine::native::startup_scan().expect("本机启动项枚举应成功（失败先查环境，别改判据）");
+    let Ok(items) = trim_tauri_lib::engine::native::startup_scan() else {
+        skip_and_record("startup_scan：本机启动项枚举失败（取数探针无对象，先查环境再谈判据）");
+        return;
+    };
     let mut by_source: std::collections::BTreeMap<String, usize> = Default::default();
     for it in &items {
         *by_source
             .entry(it.get("source").and_then(|v| v.as_str()).unwrap_or("?").to_string())
-            .or_default() += 1;
+            .or_insert(0) += 1;
+    }
+    if items.is_empty() {
+        skip_and_record("startup_scan：本机启动项为空（取数探针无对象；真为空该去查判据退化，但那不是本条的断言）");
+        return;
     }
     let over_write_cap = items.len() > 500;
     println!(
@@ -1678,7 +1894,6 @@ fn startup_scan_真实条数与写侧上限关系实测() {
         items.iter().filter(|i| i.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)).count(),
         items.iter().filter(|i| i.get("enabled").and_then(|v| v.as_bool()) == Some(false)).count(),
     );
-    assert!(!items.is_empty(), "本机启动项不应为空（真为空说明判据退化，不是「没有启动项」）");
 }
 
 /// P0-A2（2026-10-16 总方案 v2 §3）：匹配器归一后，扫描侧 `wildcard_match` 是
