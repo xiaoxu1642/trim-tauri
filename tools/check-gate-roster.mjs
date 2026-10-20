@@ -82,6 +82,23 @@ const GATE_ARGS = {
   'check-channel-map': ['--strict'],
 };
 
+// T1b-L09：副作用档。`--run --tier=readonly` 跳过会 spawn 外部进程/写盘的门禁；
+// 不带 --tier 时维持原行为（全跑，供发版/收尾验收）。
+const SIDE_EFFECT = new Map([
+  ['check-ps-extraction', 'spawn 真实 pwsh（--run 档）'],
+  ['check-scan-rule-diff', 'spawn cargo test'],
+  ['check-data-parity', 'spawn PowerShell 解析数据产物'],
+  ['check-positive-controls', 'spawn 全部 REGISTRY 门禁'],
+  ['check-headless-cli', 'spawn cargo build + 真实扫描（OPTIONAL）'],
+]);
+const RUN = process.argv.includes('--run');
+const TIER_ARG = (process.argv.find((a) => a.startsWith('--tier=')) || '').split('=')[1] || '';
+if (TIER_ARG && TIER_ARG !== 'readonly') {
+  console.error(`✗ 未知 --tier=${TIER_ARG}（只支持 readonly）`);
+  process.exit(1);
+}
+const READONLY_TIER = TIER_ARG === 'readonly';
+
 // 刻意不在必跑清单的门禁注册表。新增可选/退役门禁必须在这里登记（带理由），
 // 否则磁盘多出一个 check 文件而两处注册表都没有 → 红。
 const OPTIONAL = [
@@ -99,7 +116,6 @@ const RETIRED = [
   { name: 'check-ps-substitution', reason: '已退役（v2-D2）：外部 PS7 通道删除后无对象' },
 ];
 
-const RUN = process.argv.includes('--run');
 let failed = 0;
 const fail = (msg) => { console.error(`✗ ${msg}`); failed++; };
 const ok = (msg) => console.log(`✓ ${msg}`);
@@ -108,6 +124,9 @@ const diskAll = readdirSync(TOOLS).filter((f) => f.endsWith('.mjs'));
 const diskCheck = diskAll.filter((f) => /^check-.*\.mjs$/.test(f)).map((f) => f.replace(/\.mjs$/, ''));
 const optionalNames = OPTIONAL.map((o) => o.name);
 const retiredNames = RETIRED.map((o) => o.name);
+for (const key of SIDE_EFFECT.keys()) {
+  if (!MUST_RUN.includes(key) && !optionalNames.includes(key)) fail(`SIDE_EFFECT 登记的 ${key} 不在 MUST_RUN / OPTIONAL 里`);
+}
 
 // ── 1. 注册表内部一致性 ──
 const dup = MUST_RUN.filter((n, i) => MUST_RUN.indexOf(n) !== i);
@@ -160,6 +179,7 @@ ok(`门禁运行集合台账对拍一致：磁盘 check ${diskCheck.length} 条 
 // 它为什么不算验证」，而 AGENTS §4 明写「必跑/可选/退役一律以本命令现算为准」。
 for (const { name, reason } of OPTIONAL) console.log(`  OPTIONAL: ${name} — ${reason}`);
 for (const { name, reason } of RETIRED) console.log(`  RETIRED: ${name} — ${reason}`);
+for (const [name, why] of SIDE_EFFECT) console.log(`  SIDE_EFFECT: ${name} — ${why}`);
 
 if (!RUN) {
   console.log(`check-gate-roster: 全部通过（可加 --run 跑完 ${MUST_RUN.length} 条必跑门禁）`);
@@ -168,8 +188,14 @@ if (!RUN) {
 
 // ── 5. --run：按 MUST_RUN 顺序跑完全部必跑门禁 ──
 let runFailed = 0;
+let runSkipped = 0;
 const selfReported = [];
 for (const name of MUST_RUN) {
+  if (READONLY_TIER && SIDE_EFFECT.has(name)) {
+    console.log(`– SKIP ${name}（--tier=readonly 跳过副作用：${SIDE_EFFECT.get(name)}）`);
+    runSkipped++;
+    continue;
+  }
   const args = [join(TOOLS, `${name}.mjs`), ...(GATE_ARGS[name] || [])];
   const res = spawnSync(process.execPath, args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (res.status === 0) {
@@ -210,4 +236,4 @@ if (selfReported.length > 0) {
     console.log(`  · ${s.name}: ✗${s.x} / SKIP·未校验${s.skip} / 0 对象${s.zero}`);
   }
 }
-console.log(`check-gate-roster --run: ${MUST_RUN.length} 条必跑门禁全部通过`);
+console.log(`check-gate-roster --run: ${MUST_RUN.length} 条必跑门禁全部通过${runSkipped ? `（SKIP ${runSkipped} 条副作用门禁，未校验）` : ''}`);

@@ -326,6 +326,17 @@ const check = (ok, label, detail = '') => {
   if (!ok) fail++;
 };
 
+// T1b-L04：`REG_MICROSOFT_LEAF_ALLOW` 的 TRACING 两条此前没有任何夹具向量。
+// 这里证明它们可达：产品键放行、TRACING 容器本身仍拒。
+check(
+  regTargetBlockReason('HKLM\\SOFTWARE\\MICROSOFT\\TRACING\\ProductA') === null,
+  '注册表白名单：TRACING 下的产品键放行（TRACING 豁免项可达）',
+);
+check(
+  regTargetBlockReason('HKLM\\SOFTWARE\\MICROSOFT\\TRACING') !== null,
+  '注册表白名单：TRACING 容器本身仍拒（豁免不外推到容器）',
+);
+
 // ---- A8 干跑预览：只回答「这条规则装上后会不会被装载侧拒」 ----
 // 用法：node tools/check-residue-rule-contract.mjs --preview <候选json>
 // 只做 validateResiduePackage 一件事（注册表禁删面在它内部）：不读真实规则库、不验签、不落盘。

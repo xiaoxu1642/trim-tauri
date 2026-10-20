@@ -10,12 +10,15 @@
 // ⇒ explorer；其余 ⇒ none。
 'use strict';
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
 
 const g = gate(import.meta.url);
-
-const rulesPkg = JSON.parse(fs.readFileSync('src-tauri/data/cleanup-rules.json', 'utf8'));
-const postPkg = JSON.parse(fs.readFileSync('src-tauri/data/cleanup-postactions.json', 'utf8'));
+// T1b-L08：钉绝对根，不依赖调用方 CWD（--run 传 cwd: ROOT 只是掩盖）。
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const rulesPkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json'), 'utf8'));
+const postPkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'src-tauri', 'data', 'cleanup-postactions.json'), 'utf8'));
 const table = postPkg.postActions || {};
 
 // 收集全部清理项：{id, paths: [目标路径串...]}
@@ -52,8 +55,14 @@ for (const it of items) {
 }
 
 // 反向护栏：侧表不许登记「机械规则推不出来」的项（防手工塞私货/规则被放宽却不报警）
-for (const id of Object.keys(table)) {
-  if (table[id] === 'explorer' && !explorerFound.includes(id)) {
+const knownIds = new Set(items.map((it) => it.id));
+for (const [id, action] of Object.entries(table)) {
+  if (!knownIds.has(id)) {
+    problems++;
+    g.fail(`${id}：规则库已无此项，侧表仍登记 ${action}（退役规则必须同步摘除，none 方向同样适用）`);
+    continue;
+  }
+  if (action === 'explorer' && !explorerFound.includes(id)) {
     problems++;
     g.fail(`${id}：侧表标 explorer，但目标路径推不出该结论（机械规则不认，来源是什么？）`);
   }

@@ -70,17 +70,13 @@ try {
 const byId = new Map((Array.isArray(runtime) ? runtime : []).map((o) => [o.id, o]));
 
 /**
- * 从一项的 pwsh 文本里抽出第一个 `@("a","b",…)` 数组的内容。
- *
- * 为什么要解析而不是登记：清单的真源是脚本本身，解析让「侧表与脚本不一致」
- * 变成一条**可机检的断言**；手抄则永远是两份各自漂移的真源。
- * 只认双引号（数据层这三个项的脚本全是双引号），单引号形态直接判红而不是猜。
+ * 从一段 pwsh 文本里抽出**全部** `@("a","b",…)` 数组（T1b-L02：旧实现只看 steps[0]
+ * 的第一个数组，restore 与后续 steps 里的清单整本漏掉）。
  */
-function extractArray(pwsh) {
-  if (typeof pwsh !== 'string') return null;
-  const m = pwsh.match(/@\(((?:"[^"]*"\s*,?\s*)+)\)/);
-  if (!m) return null;
-  return [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+function extractArrays(pwsh) {
+  if (typeof pwsh !== 'string') return [];
+  return [...pwsh.matchAll(/@\(((?:"[^"]*"\s*,?\s*)+)\)/g)]
+    .map((m) => [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]));
 }
 
 // ---- 1. 结构与必登项 ----
@@ -97,12 +93,15 @@ for (const id of REQUIRED) {
   const opt = byId.get(id);
   if (!check(!!opt, `2. ${id} 在 optimizer-runtime.json 里存在`)) continue;
 
-  const step = (opt.steps ?? [])[0] ?? {};
-  const fromScript = extractArray(step.pwsh);
-  if (!check(Array.isArray(fromScript), `2. ${id} 的 pwsh 里有可解析的 @("...") 清单`,
-    step.pwsh ? '引号形态或数组结构变了' : '第一个 step 没有 pwsh')) {
+  const allPwsh = [...(opt.steps ?? []), ...(opt.restore ?? [])]
+    .map((s) => s.pwsh || '')
+    .join('\n');
+  const arrays = extractArrays(allPwsh);
+  if (!check(arrays.length === 1, `2. ${id} 的 steps/restore 里恰好一个 @("...") 清单`,
+    arrays.length === 0 ? '没有可解析清单' : `实得 ${arrays.length} 个（侧表只登记一本账，需扩展契约）`)) {
     continue;
   }
+  const fromScript = arrays[0];
 
   const full = row.targets;
   if (!check(Array.isArray(full) && full.length > 0, `2. ${id} 的 targets 是非空数组`)) continue;

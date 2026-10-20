@@ -56,10 +56,6 @@ console.log('=== 本地简介库语义门禁（RAINZ 对标 §3.4）===\n');
 function readJson(abs) {
   return JSON.parse(fs.readFileSync(abs, 'utf8'));
 }
-function existsJson(rel) {
-  try { readJson(join(rel)); return true; } catch { return false; }
-}
-function join(...parts) { return path.join(ROOT, ...parts); }
 
 const intro = readJson(INTRO);
 const catalog = readJson(CATALOG);

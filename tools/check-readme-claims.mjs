@@ -12,7 +12,7 @@
 //   高风险项数   = 其中 risk === 'high' 的条数
 //   无还原高风险 = 其中 risk==='high' 且 restoreAvailable===false 的条数
 //   展示分组数   = optimizer.js GROUP_ORDER 数组长度（前端展示口径的唯一真源，
-//                  数据层原始分组经重映射归并到这 12 组，两者不等是设计不是漂移）
+//                  数据层原始分组经重映射归并到最终展示组（现算 8），两者不等是设计不是漂移）
 //   前端可见项   = 优化项总数 − 聚合进虚拟卡的 runId 数 + 虚拟卡数 − HIDE_ON_SSD 长度
 //                  （SSD 视角；HIDE_ON_HDD 当前为空数组，若日后非空需在此同步口径）
 //   pwsh 项/步   = tools/count-ps-steps.mjs 的 countPsSteps()（v2-R6：readme 那句
@@ -108,7 +108,7 @@ assertAllEqual('3. 优化项总数 = optimizer-runtime.json 实数', /共\s*(\d+
 // M-B5 原始形态只挡住了一半。
 assertAllEqual('3b. 优化项总数（使用步骤措辞，无「共」字）', /(\d+)\s*个优化项按\s*\d+\s*个分组/g, optTotal);
 assertAllEqual('3c. 优化项总数（重要提示措辞）', /(\d+)\s*项里有\s*\d+\s*项高风险/g, optTotal);
-assertAllEqual('4. 优化项按 N 个分组 = GROUP_ORDER 长度', /个优化项按\s*(\d+)\s*个分组/g, groupCount);
+assertAllEqual('4. 优化项按 N 个分组 = GROUP_FALLBACK.default 长度', /个优化项按\s*(\d+)\s*个分组/g, groupCount);
 // 5/6 的两种措辞各配一条单捕获组正则（「§重要提示」与「§注意事项」两处口径都要钉）
 assertAllEqual('5a. 高风险项数（重要提示措辞）', /项里有\s*(\d+)\s*项高风险/g, optHigh);
 assertAllEqual('5b. 高风险项数（注意事项措辞）', /(\d+)\s*项高风险里/g, optHigh);

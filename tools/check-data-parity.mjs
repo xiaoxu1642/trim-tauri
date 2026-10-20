@@ -1,6 +1,6 @@
 // check-data-parity.mjs —— 「派生数据 ⇄ 上游真源」双源对拍门禁（审查 v2-M17）
 //
-// 为什么需要它：本仓有 6 个 `src-tauri/data/*.json` 与 1 个 `src/scripts/*.generated.js`，
+// 为什么需要它：本仓有一批 `src-tauri/data/*.json` 与 `src/scripts/*.generated.js`，
 // 全部是**派生物**，但仓库里既没有再生成脚本、也没有任何一条断言（v2-M17 实测
 // `grep -rn "data/" tools/*.mjs` = 0 命中）。附录 G 当时逐条深比对是「零漂移」——
 // 可「一致」和「有断言守着」是两件事：前者会漂，且漂移的表现是**静默**：

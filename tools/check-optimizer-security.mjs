@@ -118,31 +118,33 @@ function classify(opt) {
   const DEF = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows Defender';
   const fake = (section, line) =>
     classify({ steps: [{ reg: `Windows Registry Editor Version 5.00\r\n\r\n[${section}]\r\n${line}\r\n` }] });
+  const fakeCmd = (text) => classify({ steps: [{ pwsh: text }] });
 
-  const fire = [
-    [POL_SYS, '"EnableLUA"=dword:00000000', 'uac-off'],
-    [DG, '"EnableVirtualizationBasedSecurity"=dword:00000000', 'vbs-off'],
-    [WU_AU, '"NoAutoUpdate"=dword:00000001', 'wu-off'],
-    [DEF, '"DisableAntiSpyware"=dword:00000001', 'defender-off'],
+  // T1b-M09：13 条规则逐条配「命中 + 静默」，不再只覆盖其中 4 条。
+  const cases = [
+    { id: 'uac-off', hit: () => fake(POL_SYS, '"EnableLUA"=dword:00000000'), miss: () => fake(POL_SYS, '"EnableLUA"=dword:00000001') },
+    { id: 'vbs-off', hit: () => fake(DG, '"EnableVirtualizationBasedSecurity"=dword:00000000'), miss: () => fake(DG, '"EnableVirtualizationBasedSecurity"=dword:00000001') },
+    { id: 'hvci-off', hit: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity', '"Enabled"=dword:00000000'), miss: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity', '"Enabled"=dword:00000001') },
+    { id: 'driver-blocklist-off', hit: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\CI\\Config', '"VulnerableDriverBlocklistEnable"=dword:00000000'), miss: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\CI\\Config', '"VulnerableDriverBlocklistEnable"=dword:00000001') },
+    { id: 'defender-off', hit: () => fake(DEF, '"DisableAntiSpyware"=dword:00000001'), miss: () => fake(DEF, '"DisableAntiSpyware"=dword:00000000') },
+    { id: 'smartscreen-off', hit: () => fake('HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\System', '"EnableSmartScreen"=dword:00000000'), miss: () => fake('HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\System', '"EnableSmartScreen"=dword:00000001') },
+    { id: 'firewall-off', hit: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\StandardProfile', '"EnableFirewall"=dword:00000000'), miss: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\StandardProfile', '"EnableFirewall"=dword:00000001') },
+    { id: 'wu-off', hit: () => fake(WU_AU, '"NoAutoUpdate"=dword:00000001'), miss: () => fake(WU_AU, '"NoAutoUpdate"=dword:00000000') },
+    { id: 'restore-off', hit: () => fake('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore', '"DisableSR"=dword:00000001'), miss: () => fake('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore', '"DisableSR"=dword:00000000') },
+    { id: 'bcdedit-integrity', hit: () => fakeCmd('bcdedit /set nointegritychecks on'), miss: () => fakeCmd('bcdedit /set nointegritychecks off') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('sc config WinDefend start= 4'), miss: () => fakeCmd('sc config WinDefend start= 2') },
+    { id: 'restore-off-cmd', hit: () => fakeCmd('Disable-ComputerRestore -Drive C:\\'), miss: () => fakeCmd('Enable-ComputerRestore -Drive C:\\') },
+    { id: 'defender-cmd', hit: () => fakeCmd('Set-MpPreference -DisableRealtimeMonitoring $true'), miss: () => fakeCmd('Set-MpPreference -DisableRealtimeMonitoring $false') },
   ];
-  const silent = [
-    // 反向：**写成「开」不许报** —— 第一版判据只比键名，把 perf_wu_enable（恢复自动更新）
-    // 误判成了降级项；下面四条各钉一个方向。
-    [POL_SYS, '"EnableLUA"=dword:00000001', 'uac-off'],
-    [DG, '"EnableVirtualizationBasedSecurity"=dword:00000001', 'vbs-off'],
-    [WU_AU, '"NoAutoUpdate"=dword:00000000', 'wu-off'],
-    [DEF, '"DisableAntiSpyware"=dword:00000000', 'defender-off'],
-    [POL_SYS, '"EnableLUA"=-', 'uac-off'], // 删除键 ≠ 降级
-  ];
-  const badFire = fire
-    .filter(([sec, line, id]) => !fake(sec, line).includes(id))
-    .map(([, line, id]) => `${id} 未命中「${line}」`);
-  const badSilent = silent
-    .filter(([sec, line, id]) => fake(sec, line).includes(id))
-    .map(([, line, id]) => `${id} 误报「${line}」`);
+  const badFire = cases
+    .filter((c) => !c.hit().includes(c.id))
+    .map((c) => `${c.id} 未命中正样本`);
+  const badSilent = cases
+    .filter((c) => c.miss().includes(c.id))
+    .map((c) => `${c.id} 误报反样本`);
   check(
     badFire.length === 0 && badSilent.length === 0,
-    `正向/反向对照自检（${fire.length} 命中 + ${silent.length} 静默）`,
+    `正向/反向对照自检（${cases.length} 条规则 × 命中+静默）`,
     [...badFire, ...badSilent].join('；'),
   );
 }
