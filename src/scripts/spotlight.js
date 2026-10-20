@@ -8,13 +8,10 @@
   'use strict';
 
   // 审查v4-M1：reduced-motion 实时求值——原实现模块加载时固化并提前 return，
-  // 运行中切换系统「减少动态效果」偏好永不生效
-  // 性能 v3 ②：缓存 MediaQueryList **对象**本身、每次仍读它的 .matches（照样实时），
-  // 省掉的只是每个 pointermove 一次 matchMedia() 分配。
-  var rmQuery = null;
+  // 运行中切换系统「减少动态效果」偏好永不生效。
+  // A3-L06：MediaQueryList 对象的缓存与实时求值统一由 ds.reducedMotion() 承担。
   function isReducedMotion() {
-    if (!rmQuery && window.matchMedia) rmQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-    return !!(rmQuery && rmQuery.matches);
+    return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
   }
 
   var HOST_SELECTOR = '.btn, .filter-tab, .maint-tab, .material-card, .radio-row';

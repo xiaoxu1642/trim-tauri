@@ -422,7 +422,7 @@ const DOUYIN_ICON = 'data:image/x-icon;base64,AAABAAcAEBAAAAAAIABlAgAAdgAAABgYAA
   function crossfadeBg(fadeVar, applyFn) {
     const root = document.documentElement;
     let reduced = false;
-    try { reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
+    try { reduced = !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion()); } catch (e) {}
     if (reduced) { applyFn(); return; }
     if (root.style.getPropertyValue(fadeVar) === '0') {
       applyFn();

@@ -57,7 +57,7 @@
       const button = event.target?.closest?.('.btn');
       if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return;
       // 偏好减弱动效时完全不建节点，避免 animationend 不触发造成的泄漏
-      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      if (window.ds?.reducedMotion?.()) return;
       const rect = button.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
       const ripple = document.createElement('span');
@@ -133,7 +133,7 @@
       // 展开后将子菜单滚动到导航可见区域，避免窗口较矮时看不到全部分类
       // 审查 L16：CSS 的 prefers-reduced-motion 通配归零管不到 JS 传进去的 scroll 选项，
       // 必须在这里自己求值 —— 否则系统关掉动画的用户仍会被这段 smooth 滚动推着走。
-      const reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      const reduce = !!window.ds?.reducedMotion?.();
       document.querySelector(`[data-nav-submenu="${key}"]`)?.scrollIntoView({
         block: 'nearest',
         behavior: reduce ? 'auto' : 'smooth',

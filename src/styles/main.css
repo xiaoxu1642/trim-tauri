@@ -1987,12 +1987,14 @@ select.field-input { cursor: pointer; appearance: auto; }
   line-height: 1.6;
 }
 .empty-state-cta { margin-top: 16px; }
-/* A1-L07：读取失败态与「确实为空」共用结构件，但用危险色区分，避免各域自建。 */
+/* A1-L07：读取失败态与「确实为空」共用结构件，但用危险色区分，避免各域自建。
+   --danger-text 是「危险实底上的前景」，不能拿来当普通底上的图标/文字色
+   （暗色它是深墨，与同色 8% 浅染底对比度只有 1.09:1）。 */
 .empty-state--error .empty-state-icon {
-  background: color-mix(in srgb, var(--danger-text) 8%, transparent);
-  color: var(--danger-text);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
-.empty-state--error .empty-state-title { color: var(--danger-text); }
+.empty-state--error .empty-state-title { color: var(--danger); }
 
 /* ================================================================
    优化电脑（Optimizer）页面
@@ -4208,7 +4210,7 @@ img.ctx-col-icon {
   cursor: pointer;
 }
 .nara-checkrow:hover,
-.nara-checkrow:focus-visible { background: var(--bg-card-hover); outline: none; }
+.nara-checkrow:has(.checkbox:focus-visible) { background: var(--bg-card-hover); }
 .nara-checkrow.is-optimized { cursor: default; opacity: 0.62; }
 .nara-checkrow.is-optimized:hover { background: transparent; }
 .nara-checkrow .checkbox.disabled { opacity: 0.55; }
@@ -4670,7 +4672,8 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
 }
 .skin-row select:focus-visible {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-light);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .skin-row select option {
   background: var(--bg-elevated);

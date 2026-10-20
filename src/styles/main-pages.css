@@ -1906,7 +1906,10 @@
   color: var(--fg-tertiary);
   transition: border-color var(--duration-fast) var(--ease-standard);
 }
-.qc-search-wrap:focus-within { border-color: var(--accent); }
+.qc-search-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
 .qc-search-wrap input {
   flex: 1 1 auto;
   border: none;

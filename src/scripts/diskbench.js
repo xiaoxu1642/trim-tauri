@@ -235,8 +235,14 @@
     backdrop.addEventListener('click', e => {
       if (e.target === backdrop) closeHistory();
     });
-    // Esc 关闭：与同一弹窗的遮罩点击、关闭按钮三条退出路径齐平
-    const onEsc = e => { if (e.key === 'Escape') closeHistory(); };
+    // A3-M04：Esc 关闭：与同一弹窗的遮罩点击、关闭按钮三条退出路径齐平。
+    // 历史弹窗是自建 .preview-backdrop，其上层还可能叠 modal.confirm（.usage-backdrop）——
+    // 上层开着时 Esc 归上层，一次只关一层。
+    const onEsc = e => {
+      if (e.key !== 'Escape') return;
+      if (document.querySelector('.usage-backdrop')) return;
+      closeHistory();
+    };
     document.addEventListener('keydown', onEsc);
     backdrop._onEsc = onEsc;
     // 焦点圈闭 + 关闭时归还（release 内部会还原 prevFocus）

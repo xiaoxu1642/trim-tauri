@@ -159,7 +159,7 @@
   })();
 
   function prefersReduceMotion() {
-    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
   }
 
   function normalizeMode(v) {
@@ -1169,10 +1169,12 @@
 
     // LG-5（2026-09-15）：系统「减少动态效果」偏好运行中切换 → 实时重求值并按需挂/摘指针监听
     try {
-      const rmMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
-      const onRmChange = () => syncReduceMotion();
-      if (typeof rmMQ.addEventListener === 'function') rmMQ.addEventListener('change', onRmChange);
-      else if (typeof rmMQ.addListener === 'function') rmMQ.addListener(onRmChange);
+      const rmMQ = window.ds?.reducedMotionQuery?.();
+      if (rmMQ) {
+        const onRmChange = () => syncReduceMotion();
+        if (typeof rmMQ.addEventListener === 'function') rmMQ.addEventListener('change', onRmChange);
+        else if (typeof rmMQ.addListener === 'function') rmMQ.addListener(onRmChange);
+      }
     } catch (e) { /* 老环境无该媒体查询，忽略 */ }
     if (window.api?.appearance?.getEnv) {
       window.api.appearance.getEnv().then((env) => {

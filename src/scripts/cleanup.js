@@ -1777,7 +1777,7 @@
   }
 
   // 删除按钮是**运行时注入**进灯箱控制条的——上游 LiteBox 没有删除概念，
-  // 不改它的源码（vendored 文件除已登记的两处受控适配外与上游一致，便于同步）。
+  // 不改它的源码（vendored 文件除文件头登记的受控适配外与上游一致，便于同步）。
   function liteboxInjectDeleteButton() {
     const dialog = window.liteBox?.dialog;
     if (!dialog || dialog.querySelector('#liteboxDeleteBtn')) return;
@@ -1787,6 +1787,8 @@
     btn.id = 'liteboxDeleteBtn';
     btn.type = 'button';
     btn.setAttribute('data-tip', '删除当前图片（进回收站）');
+    // 图标按钮无可见文本：可访问名必须显式给，不能只靠 data-tip 的 aria-describedby
+    btn.setAttribute('aria-label', '删除当前图片（进回收站）');
     btn.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5z"/><path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v.5h-3V2a1 1 0 0 0-1-1h-3zm1 3h9v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4z"/></svg>';
     btn.addEventListener('click', () => { liteboxDeleteCurrent(); });
     controls.appendChild(btn);

@@ -457,7 +457,7 @@
             <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="true">
               <span class="empty-pane-chevron" aria-hidden="true">▾</span>
               <span class="empty-pane-title">空文件</span>
-              <span class="empty-pane-count" id="emptyPaneCountFiles">0</span>
+              <span class="empty-pane-count" id="emptyPaneCountFiles" role="status" aria-live="polite">0</span>
               <span class="empty-pane-sub">0 字节 · 创建满 14 天</span>
             </button>
             <div class="empty-pane-body" id="emptyFilesBox"></div>
@@ -466,7 +466,7 @@
             <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="false">
               <span class="empty-pane-chevron" aria-hidden="true">▾</span>
               <span class="empty-pane-title">空目录</span>
-              <span class="empty-pane-count" id="emptyPaneCountDirs">0</span>
+              <span class="empty-pane-count" id="emptyPaneCountDirs" role="status" aria-live="polite">0</span>
               <span class="empty-pane-sub">树内只含空文件与空子目录 · 创建满 14 天</span>
             </button>
             <div class="empty-pane-body" id="emptyDirsBox"></div>
@@ -596,7 +596,7 @@
             <input type="checkbox" id="maintSelAll" />
             <span>全选</span>
           </label>
-          <span class="maint-batch-count" id="maintSelCount">已选 0 项</span>
+          <span class="maint-batch-count" id="maintSelCount" role="status" aria-live="polite">已选 0 项</span>
           <div class="maint-batch-actions">
             <button class="btn btn-secondary btn-small" id="btnMaintRunSelected" data-tip="按顺序执行勾选的项目">执行选中</button>
             <button class="btn btn-accent btn-small" id="btnMaintRunAll" data-tip="按顺序执行当前分类下的全部项目">全部执行</button>
@@ -604,7 +604,7 @@
           </div>
           <div class="maint-batch-progress" id="maintBatchProgress" style="display:none">
             <div class="maint-batch-progress-bar"><div class="maint-batch-progress-fill" id="maintBatchProgressFill"></div></div>
-            <span class="maint-batch-progress-text" id="maintBatchProgressText"></span>
+            <span class="maint-batch-progress-text" id="maintBatchProgressText" role="status" aria-live="polite"></span>
           </div>
         </div>
         <div class="filter-tabs maint-cat-tabs" id="maintTabs"><!-- 分类计数标签：由 JS 生成（窗口界面升级3 收编进分段体系） --></div>
@@ -651,7 +651,7 @@
         </div>
         <div class="rt-radar-wrap">
           <div id="rtRadar"><!-- 雷达图：由 runtimes.js 渲染内联 SVG --></div>
-          <div class="rt-summary" id="rtSummary">尚未扫描 · 点击「开始扫描」检测本机运行库</div>
+          <div class="rt-summary" id="rtSummary" role="status" aria-live="polite">尚未扫描 · 点击「开始扫描」检测本机运行库</div>
         </div>
         <div class="rt-list" id="runtimesList"><!-- 检测结果条目：由 JS 渲染 --></div>
       </div>
@@ -898,7 +898,7 @@
             </div>
             <p class="benchmark-note">测试会在目标磁盘创建临时文件，完成后自动删除。当前采用单队列单线程模型，块大小用于模拟不同负载。</p>
           </section>
-          <section class="benchmark-panel benchmark-status-panel"><div class="panel-kicker">状态</div><div class="benchmark-status" id="diskBenchStatus">等待测试</div><div class="benchmark-status-detail">顺序测试模拟大文件传输，随机测试模拟系统与应用的小文件 I/O。</div></section>
+          <section class="benchmark-panel benchmark-status-panel"><div class="panel-kicker">状态</div><div class="benchmark-status" id="diskBenchStatus" role="status" aria-live="polite">等待测试</div><div class="benchmark-status-detail">顺序测试模拟大文件传输，随机测试模拟系统与应用的小文件 I/O。</div></section>
         </div>
         <div class="benchmark-results">
           <div class="benchmark-result-group"><h3>顺序读写</h3><div class="benchmark-result-grid"><div><span>顺序读取</span><strong id="diskSeqRead">--</strong></div><div><span>顺序写入</span><strong id="diskSeqWrite">--</strong></div></div></div>
@@ -1030,21 +1030,21 @@
           <div class="summary-card">
             <div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.3 6.5a8 8 0 1 0 11.4 0"/></svg></div>
             <div class="summary-info">
-              <div class="summary-value" id="startupTotal">-</div>
+              <div class="summary-value" id="startupTotal" role="status" aria-live="polite">-</div>
               <div class="summary-label">启动项总数</div>
             </div>
           </div>
           <div class="summary-card">
             <div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.3l2.5 2.5 4.9-5.4"/></svg></div>
             <div class="summary-info">
-              <div class="summary-value" id="startupEnabled">-</div>
+              <div class="summary-value" id="startupEnabled" role="status" aria-live="polite">-</div>
               <div class="summary-label">当前启用</div>
             </div>
           </div>
           <div class="summary-card">
             <div class="summary-icon" style="--icon-bg: var(--warning-soft); color: var(--warning)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M6.2 6.2l11.6 11.6"/></svg></div>
             <div class="summary-info">
-              <div class="summary-value" id="startupDisabled">-</div>
+              <div class="summary-value" id="startupDisabled" role="status" aria-live="polite">-</div>
               <div class="summary-label">已禁用</div>
             </div>
           </div>
@@ -1084,7 +1084,7 @@
         <div class="card-panel">
           <div class="card-panel-head">
             <h3>启动项列表</h3>
-            <span class="opt-group-count" id="startupListCount">0 项</span>
+            <span class="opt-group-count" id="startupListCount" role="status" aria-live="polite">0 项</span>
           </div>
           <div class="startup-list" id="startupList">
             <div class="empty-state">

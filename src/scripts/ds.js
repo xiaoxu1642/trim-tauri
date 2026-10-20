@@ -26,8 +26,19 @@
 
   const ds = { version: '1.0.0' };
 
+  // reduced-motion 的唯一求值口径：缓存 MediaQueryList **对象**（监听 change 需要同一对象），
+  // 每次读它的 .matches 仍是实时值。所有脚本一律走 window.ds.reducedMotion()，
+  // 不许各自再写 matchMedia('(prefers-reduced-motion: reduce)')（A3-L06）。
+  let reducedMotionMQ = null;
+  function reducedMotionQuery() {
+    if (!reducedMotionMQ && window.matchMedia) {
+      reducedMotionMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+    }
+    return reducedMotionMQ;
+  }
   function reducedMotion() {
-    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    const mq = reducedMotionQuery();
+    return !!(mq && mq.matches);
   }
 
   // 审查 v2-L7：这里原本有**第二张转义表**（`'` → `&#039;`），与文件下方 ⑩ 的唯一真源
@@ -552,6 +563,7 @@
   // WAAPI/scrollIntoView 的选项；各文件此前各写各的 matchMedia 求值。挂到 ds 后，
   // 新交互统一走 window.ds.reducedMotion()（AGENTS §2「新交互先查 ds 有没有现成件」）。
   ds.reducedMotion = reducedMotion;
+  ds.reducedMotionQuery = reducedMotionQuery;
 
   /**
    * P3-1（可达性）：`span/div.checkbox` 伪装控件的键盘激活。

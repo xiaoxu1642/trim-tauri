@@ -373,7 +373,13 @@
     els.close = $('mwCloseBtn');
     els.refresh?.addEventListener('click', () => load());
     els.close?.addEventListener('click', closeWindow);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeWindow(); });
+    // A3-M03：Esc 只关最上层——本窗会起 modal.confirm（.usage-backdrop），确认框开着时
+    // Esc 归它，不能连子窗一起关。同 residue-window/process-manager 的守卫口径。
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      if (document.querySelector('.usage-backdrop')) return;
+      closeWindow();
+    });
     applyTheme();
     load();
   }

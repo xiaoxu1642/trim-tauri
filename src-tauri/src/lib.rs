@@ -1091,6 +1091,115 @@ mod tests {
         );
     }
 
+    /// U-A3（P1-W1）：键盘/读屏可达性的落点契约。渲染层行为本身需真机，
+    /// 这里钉住「改回去就红」的源码形状。
+    #[test]
+    fn u_a3_accessibility_contracts() {
+        let litebox = include_str!("../../src/vendor/litebox.js");
+        assert!(
+            litebox.contains("if (e.ctrlKey || e.altKey || e.metaKey || !consumed) return;"),
+            "A3-M01：灯箱 keydown 只许拦截自己消费的键，Tab/修饰键必须交还浏览器"
+        );
+        assert!(
+            !litebox.contains(".title =") && !litebox.contains("|| e.title"),
+            "A3-M02：灯箱不许再把 title 当描述/提示（红线：data-tip）"
+        );
+        assert!(
+            litebox.contains("this.getElem('.lightbox-image').alt = caption"),
+            "A3-M02：图片描述必须落到 alt"
+        );
+
+        assert!(
+            include_str!("../../src/scripts/models-window.js").contains("A3-M03")
+                && include_str!("../../src/scripts/models-window.js")
+                    .contains("if (document.querySelector('.usage-backdrop')) return;"),
+            "A3-M03：模型子窗 Esc 必须先判叠层"
+        );
+        assert!(
+            include_str!("../../src/scripts/diskbench.js").contains("A3-M04"),
+            "A3-M04：盘测历史弹窗 Esc 必须先判叠层"
+        );
+
+        let optimizer = include_str!("../../src/scripts/optimizer.js");
+        assert!(
+            !optimizer.contains("row.setAttribute('aria-checked'"),
+            "A3-M05：aria-checked 不许写在无 role 的行 div 上"
+        );
+        assert_eq!(
+            optimizer.matches("box.setAttribute('aria-checked'").count(),
+            4,
+            "A3-M05：四个写点（pick 两处 + nara/privacy 行勾选）都必须落在 .checkbox 上"
+        );
+
+        let html = include_str!("../../src/index.html");
+        for host in [
+            "id=\"maintSelCount\"",
+            "id=\"maintBatchProgressText\"",
+            "id=\"emptyPaneCountFiles\"",
+            "id=\"emptyPaneCountDirs\"",
+            "id=\"rtSummary\"",
+            "id=\"diskBenchStatus\"",
+            "id=\"startupTotal\"",
+            "id=\"startupEnabled\"",
+            "id=\"startupDisabled\"",
+            "id=\"startupListCount\"",
+        ] {
+            assert!(
+                html.contains(&format!("{host} role=\"status\" aria-live=\"polite\"")),
+                "A3-M06/L01：{host} 是异步文本宿主，必须有 role=status + aria-live"
+            );
+        }
+        assert!(
+            include_str!("../../src/residue-window.html")
+                .contains("id=\"rsFootHint\" role=\"status\" aria-live=\"polite\""),
+            "A3-M06：残留子窗底部提示必须有 aria-live"
+        );
+
+        assert!(
+            include_str!("../../src/styles/litebox.css").contains("prefers-reduced-motion:reduce")
+                && include_str!("../../src/styles/litebox.css").contains("button:focus-visible"),
+            "A3-L05：灯箱样式必须自带减动效归零与焦点环（不能只靠挂载点恰好是 body 子代）"
+        );
+        assert!(
+            include_str!("../../src/styles/main.css").contains(".nara-checkrow:has(.checkbox:focus-visible)"),
+            "A3-L02：焦点实际落在内层 .checkbox，焦点规则必须指向它"
+        );
+        assert!(
+            include_str!("../../src/styles/main-pages.css")
+                .contains(".qc-search-wrap:focus-within {\n  border-color: var(--accent);\n  box-shadow: 0 0 0 2px var(--accent-light);"),
+            "A3-L03：搜索框 outline:none 后必须有可见的 2px 替代环"
+        );
+        assert!(
+            include_str!("../../src/styles/main.css").contains(".skin-row select:focus-visible {\n  border-color: var(--accent);\n  outline: 2px solid var(--accent);"),
+            "A3-L04：下拉框焦点环必须是实色 outline，不能只有 1px 浅色阴影"
+        );
+
+        let ds = include_str!("../../src/scripts/ds.js");
+        assert!(
+            ds.contains("ds.reducedMotionQuery = reducedMotionQuery;"),
+            "A3-L06：MediaQueryList 的缓存/求值必须由 ds 唯一持有"
+        );
+        for (name, src) in [
+            ("app.js", include_str!("../../src/scripts/app.js")),
+            ("liquid-glass.js", include_str!("../../src/scripts/liquid-glass.js")),
+            ("mouse-trail.js", include_str!("../../src/scripts/mouse-trail.js")),
+            ("pathbinding.js", include_str!("../../src/scripts/pathbinding.js")),
+            ("spotlight.js", include_str!("../../src/scripts/spotlight.js")),
+            ("tilt.js", include_str!("../../src/scripts/tilt.js")),
+        ] {
+            assert!(
+                !src.contains("matchMedia('(prefers-reduced-motion: reduce)')"),
+                "A3-L06：{name} 不许再自建 reduced-motion 求值"
+            );
+        }
+
+        assert!(
+            include_str!("../../src/scripts/cleanup.js")
+                .contains("btn.setAttribute('aria-label', '删除当前图片（进回收站）');"),
+            "A3-U03：灯箱运行时注入的图标按钮必须有可访问名"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

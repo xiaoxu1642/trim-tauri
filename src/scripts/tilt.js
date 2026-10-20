@@ -85,13 +85,10 @@
   }
 
   // 审查v4-M1：reduced-motion 改为事件回调内实时求值——原实现模块加载时求值一次，
-  // reduce 时监听器根本不挂载（关闭偏好后永不生效），运行中开启偏好同样不生效
-  // 性能 v3 ②：缓存的是 MediaQueryList **对象**本身，每次仍读它的 .matches（照样实时，
-  // 系统偏好一改立刻跟着变），省掉的只是每事件一次 matchMedia() 分配。
-  var rmQuery = null;
+  // reduce 时监听器根本不挂载（关闭偏好后永不生效），运行中开启偏好同样不生效。
+  // A3-L06：MediaQueryList 对象的缓存与实时求值统一由 ds.reducedMotion() 承担。
   function isReducedMotion() {
-    if (!rmQuery && window.matchMedia) rmQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-    return !!(rmQuery && rmQuery.matches);
+    return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
   }
 
   // 排除判定（面板内含「启动项列表 / 扫描结果表格」则整块不倾斜，需求指定）：

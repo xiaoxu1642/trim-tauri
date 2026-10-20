@@ -1040,7 +1040,9 @@
         const on = set.has(id);
         box.classList.toggle('checked', on);
         box.innerHTML = on ? checkSvg() : '';
-        row.setAttribute('aria-checked', on ? 'true' : 'false');
+        // ARIA 状态必须写在承载 role="checkbox" 的 span 上；写行 div 的话
+        // 聚焦 span 时读屏永远念首次渲染的旧态。
+        box.setAttribute('aria-checked', on ? 'true' : 'false');
         updateNaraRunCount();
         return;
       }
@@ -1363,7 +1365,7 @@
         const box = row.querySelector('.checkbox');
         box.classList.toggle('checked', on);
         box.innerHTML = on ? checkSvg() : '';
-        row.setAttribute('aria-checked', on ? 'true' : 'false');
+        box.setAttribute('aria-checked', on ? 'true' : 'false');
         updatePrivacyRunCount();
         return;
       }

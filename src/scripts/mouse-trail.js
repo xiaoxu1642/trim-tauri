@@ -12,7 +12,7 @@
   // 审查v4-M1：reduced-motion 必须使用时实时求值，禁止模块加载时固化快照
   // （固化会导致运行中切换系统「减少动态效果」偏好永不生效，9.6-B8 / v4-M1）
   function isReducedMotion() {
-    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
   }
 
   let enabled = false;
@@ -95,10 +95,11 @@
   function init() {
     setEnabled(readEnabled());
     // 系统偏好运行中切换即时联动：开启→停用并移除图层（走 C6 路径清理节点），关闭→恢复
-    if (window.matchMedia) {
-      window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', () => {
-        setEnabled(readEnabled());
-      });
+    const rmMQ = window.ds?.reducedMotionQuery?.();
+    if (rmMQ) {
+      const onChange = () => setEnabled(readEnabled());
+      if (typeof rmMQ.addEventListener === 'function') rmMQ.addEventListener('change', onChange);
+      else if (typeof rmMQ.addListener === 'function') rmMQ.addListener(onChange);
     }
     document.addEventListener('pointermove', (e) => spawn(e.clientX, e.clientY), { passive: true });
     const toggle = document.getElementById('mouseTrailToggle');

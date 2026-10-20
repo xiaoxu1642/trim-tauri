@@ -1,13 +1,17 @@
 // LiteBox v1.0.8 —— vendor 自 https://github.com/OblivionOcean/LiteBox（MIT License）。
 // 纯原生 JS 图片灯箱（<dialog> + CSS transform），零外部依赖，符合本仓「零框架/零 npm
-// 依赖」红线。除以下三处**受控适配**外与上游逐字节一致，便于后续同步（改任一处请同步登记）：
+// 依赖」红线。除以下**受控适配**外与上游逐字节一致，便于后续同步（改任一处请同步登记）：
 //   ① 文件末尾实例化加 readyState 守卫（本仓由 app.js 进页时动态注入本脚本，
 //      DOMContentLoaded 早已发生——check-idle-scripts 门禁要求，与 updater-ui.js 同款）；
 //   ② click() 的 total 计数改为「按灯箱图是否在 range 内二分」（range 收窄后原「减 1」
 //      少算一张，最后一张之后无法回绕到第一张）；
 //   ③ navigate() 的翻页目标从 document 改为 range（否则会翻到主窗其它页的 <img>）；
 //   ④ 构造模板里灯箱自带 img 的空 src 换成 1x1 透明占位——空 src 被浏览器解析成当前页
-//      URL，启动即触发一次必然失败的资源请求（真机日志 IMG http://127.0.0.1:1430/）。
+//      URL，启动即触发一次必然失败的资源请求（真机日志 IMG http://127.0.0.1:1430/）；
+//   ⑤ keydown 只拦截自身消费的键（原样对 open 态每一个 keydown 都 preventDefault，
+//      Tab/Shift+Tab 无法离开按钮组，Ctrl+* 也被吞）——其余按键与修饰键交还浏览器；
+//   ⑥ 去掉图片的 title 回退与 `.title=` 赋值：本仓红线「提示用 data-tip 不用 title」，
+//      图片描述走 caption 文本 + img.alt，读屏与视觉提示同源。
 // 本仓消费方式见 cleanup.js 的 openPreview：range 收窄到预览容器，全局 img 点击不劫持。
 
 class Litebox {
@@ -39,6 +43,13 @@ class Litebox {
         // 键盘快捷键
         document.addEventListener('keydown', (e) => {
             if (!this.dialog.hasAttribute('open')) return; // 如果灯箱未打开则忽略按键事件
+            // 受控适配⑤：只拦自己消费的键。原样在这里无条件 preventDefault，
+            // 会把 Tab/Shift+Tab 和 Ctrl+* 一起吞掉，键盘用户困在灯箱按钮组里。
+            const key = e.key;
+            const consumed = key === 'Escape' || key === 'ArrowLeft' || key === 'ArrowRight'
+                || key === '+' || key === '=' || key === '-' || key === '_'
+                || key === '0' || key === 'r' || key === 'R';
+            if (e.ctrlKey || e.altKey || e.metaKey || !consumed) return;
             e.preventDefault();
             switch (e.key) {
                 case 'Escape':
@@ -79,7 +90,7 @@ class Litebox {
             this.current = Array.from(allImg).indexOf(e) + 1;
             if (e.classList.contains('lightbox-image')) return; // 防止灯箱图片被点击
             if (e.preventDefault) e.preventDefault();
-            this.set(e.getAttribute("data-src") || e.src, e.getAttribute("data-caption") || e.alt || e.title || "", e.alt || e.title || "");
+            this.set(e.getAttribute("data-src") || e.src, e.getAttribute("data-caption") || e.alt || "");
             this.show();
         }
     }
@@ -105,10 +116,10 @@ class Litebox {
         this.resetLightbox();
     }
 
-    set(url, caption, title) {
+    set(url, caption) {
         this.getElem('.lightbox-image').style.opacity = '0';
         this.getElem('.lightbox-image').src = url;
-        this.getElem('.lightbox-image').title = title || '';
+        this.getElem('.lightbox-image').alt = caption || '灯箱图片';
         this.getElem('.caption').textContent = caption || '';
         this.getElem('.lightbox-image').onload = () => {
             this.getElem('.lightbox-image').style.opacity = '1';
