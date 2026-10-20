@@ -707,9 +707,52 @@ enum Cleaned {
     Failed,
 }
 
+/// 「两个目录是同一个真实目录」的判据（A6-M04 / v7.2 C07）：
+/// 两侧都取 `canonicalize` 后的真实路径，再按引擎唯一的词法归一键 `paths::path_key` 比。
+/// 解析失败（不存在/无权限）一律 false（fail-closed：宁可不删）。
+fn same_real_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (Ok(ra), Ok(rb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) else {
+        return false;
+    };
+    crate::engine::paths::path_key(&ra.to_string_lossy())
+        == crate::engine::paths::path_key(&rb.to_string_lossy())
+}
+
+/// 「这个文件就在下载目录里」的**唯一**判据（A6-M04 / v7.2 C07）。两道，缺一不可：
+///
+/// ① **父目录不得是解析点**（junction / symlink / 云占位符，走 `protect::is_reparse`
+///    的 0x400 属性位口径）。这一道是主闸：下载目录被换成指向别处的 junction 时，
+///    父目录**本身**就是那个解析点，而 `canonicalize` 会把两侧一起解析到同一目标 ——
+///    只比真实目录看不出差别（反例：标记里写 `C:\Users\X\Downloads\Trim_x.exe`、
+///    而 `Downloads` 是指向 `System32` 的 junction ⇒ 旧词法闸与「只比真实目录」都放行，
+///    删掉的是 System32 里的同名文件）。
+/// ② 再比**真实目录**（canonicalize + 统一键）：8.3 短名、大小写、尾分隔符这些
+///    「词法不同但同一目录」的写法在这里收口，不会把合法清理误拒。
+///
+/// 判据只看父目录、不要求文件存在：文件不存在时后续 `remove_file` 走 NotFound 档。
+fn install_file_in_downloads(path: &std::path::Path, downloads: &std::path::Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    match std::fs::symlink_metadata(parent) {
+        Ok(md) if crate::engine::protect::is_reparse(&md) => return false,
+        Ok(_) => {}
+        Err(_) => return false,
+    }
+    same_real_dir(parent, downloads)
+}
+
 /// 只删「我们自己放进下载目录的那一个文件」：文件名必须还是发布名形状
 /// （`Trim_<版本>_x64-setup.exe`），且必须真的在某个 Downloads 目录下。
 /// 标记里的路径来自磁盘上的一份 JSON，虽然只有本应用写得进去，但删除出口一律不信任输入。
+///
+/// A6-M04（v7.2 C07）：判定的目录与删除的目录必须是**同一个对象**。旧写法只用词法
+/// `p.parent() == USERPROFILE\Downloads` 判定（不触盘、不 canonicalize、不判 reparse），
+/// 删除却由 OS 跟随解析点执行 ⇒ 下载目录被换成链接、或路径带 8.3 短名时，
+/// 「判定的目录」与「真删文件的目录」不是同一个对象，等于把删除权力交给一条从未被检查的
+/// 解析链。现在统一走 [`install_file_in_downloads`]（解析点先拒 + 真实目录比对）。
+/// 同仓同类出口（`security/mod.rs` 回收前 reparse 判、`paths.rs` prune 自带 reparse 拒）
+/// 都是这个姿势，本处是漏网的那一条。
 fn clean_installer(path: &str) -> Cleaned {
     if path.is_empty() {
         return Cleaned::Nothing;
@@ -717,12 +760,19 @@ fn clean_installer(path: &str) -> Cleaned {
     let p = std::path::Path::new(path);
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let shape_ok = name.starts_with("Trim_") && name.ends_with("_x64-setup.exe") && !name.contains("..");
-    let in_downloads = std::env::var_os("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .map(|h| p.parent() == Some(h.join("Downloads").as_path()))
-        .unwrap_or(false);
-    if !shape_ok || !in_downloads {
-        log::write_log("warn", &format!("[updater] 清理跳过：安装包路径不在下载目录或文件名不合形状: {path}"));
+    if !shape_ok {
+        log::write_log("warn", &format!("[updater] 清理跳过：安装包文件名不合发布名形状: {path}"));
+        return Cleaned::Nothing;
+    }
+    let Some(home) = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from) else {
+        log::write_log("warn", &format!("[updater] 清理跳过：取不到用户目录，无法确认下载目录: {path}"));
+        return Cleaned::Nothing;
+    };
+    if !install_file_in_downloads(p, &home.join("Downloads")) {
+        log::write_log(
+            "warn",
+            &format!("[updater] 清理跳过：安装包不在（或经解析点绕到）下载目录: {path}"),
+        );
         return Cleaned::Nothing;
     }
     match std::fs::remove_file(p) {
@@ -965,5 +1015,69 @@ mod tests {
             assert!(CHECKING.load(Ordering::SeqCst));
         }
         assert!(!CHECKING.load(Ordering::SeqCst), "离开作用域后必须已复位");
+    }
+
+    /// A6-M04（v7.2 C07）：判定「同一个真实目录」的判据必须在**真实磁盘**上成立：
+    /// 同一目录的不同写法（`.` 段 / 大小写）判同，不同目录与解析不出的路径判异。
+    /// （解析点被判据拦在最前面那一道，见 `install_file_in_downloads_refuses_link_parent`；
+    /// 本用例只钉「真的会去 canonicalize 再比」，不是字面比较。）
+    #[test]
+    fn same_real_dir_resolves_before_compare() {
+        let root = std::env::temp_dir().join(format!("trim-updater-samedir-{}", std::process::id()));
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(&dl).expect("建临时目录失败");
+        assert!(same_real_dir(&dl, &dl.join(".")), "同一目录带 . 段必须判同");
+        assert!(same_real_dir(&dl, &root.join("Downloads")), "同一路径不同 PathBuf 必须判同");
+        assert!(same_real_dir(&dl, &root.join("downloads")), "Windows 目录名大小写不敏感，必须判同");
+        assert!(!same_real_dir(&dl, &root), "父目录与下载目录不是同一对象");
+        assert!(
+            !same_real_dir(&dl, &root.join("NoSuchDir")),
+            "解析失败必须 fail-closed（false），不许回落到词法比较"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A6-M04（v7.2 C07）的核心反例：下载目录**本身就是一条链接**时，删除权力不得
+    /// 交给它 —— 判定与删除必须指向同一个对象。
+    ///
+    /// 旧实现拿 `p.parent() == USERPROFILE\Downloads` 做词法比较：父目录文本与下载目录
+    /// 文本**完全相同** ⇒ 判真放行，而 `remove_file` 跟随链接删掉的是链接目标里的文件
+    /// （把 Downloads 换成指向 System32 的 junction，就是一次任意文件删除）。
+    /// 现在主闸是「父目录不得是解析点」，这一条必须拒；无建链权限的环境显式跳过
+    /// （与 cleanup.rs `collect_files_skips_reparse_children` 同口径：环境性跳过要留痕）。
+    #[test]
+    fn install_file_in_downloads_refuses_link_parent() {
+        let root = std::env::temp_dir().join(format!("trim-updater-junction-{}", std::process::id()));
+        let real_dl = root.join("RealDownloads");
+        let elsewhere = root.join("Elsewhere");
+        let link = root.join("Downloads");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&real_dl).expect("建真实下载目录");
+        std::fs::create_dir_all(&elsewhere).expect("建链接目标目录");
+        if let Err(e) = std::os::windows::fs::symlink_dir(&elsewhere, &link) {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("⚠ 跳过：本环境无建链权限（{e}）——下载目录被换成链接的用例需管理员或开发者模式");
+            return;
+        }
+        let name = "Trim_1.0.0_x64-setup.exe";
+        // ① 主闸：父目录是解析点 ⇒ 拒。旧词法判据在这里判真（两段文本完全相同）。
+        assert!(
+            !install_file_in_downloads(&link.join(name), &link),
+            "下载目录本身是链接时必须拒绝（词法判据会放行，那样删的是链接目标里的文件）"
+        );
+        // ② 对照腿：真实下载目录必须放行 —— 否则整条清理被误拒，等于修坏了功能。
+        assert!(
+            install_file_in_downloads(&real_dl.join(name), &real_dl),
+            "正常下载目录里的同名文件必须放行"
+        );
+        // ③ 别的真实目录（也不是链接）必须拒
+        assert!(!install_file_in_downloads(&elsewhere.join(name), &real_dl), "不同目录必须拒");
+        // ④ 父目录不存在 ⇒ fail-closed
+        assert!(
+            !install_file_in_downloads(&root.join("NoSuchDir").join(name), &real_dl),
+            "父目录解析失败必须 fail-closed"
+        );
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

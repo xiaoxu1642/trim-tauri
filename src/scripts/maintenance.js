@@ -490,57 +490,72 @@
     updateBatchbar();
     renderList();
 
-    for (const [idx, task] of list.entries()) {
-      if (batch.cancelRequested) {
-        appendOutput(`—— 已取消：跳过「${task.title}」及后续项目 ——`);
-        break;
-      }
-      // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
-      batchRemainingIds = list.slice(idx).map(t => t.id);
-      running = task.id;
-      appendOutput(`—— [${batch.done + 1}/${batch.total}] ${task.title} ——`);
-      updateBatchbar();
-
-      // v4-K03：逐项确认经 confirmAndRunOne —— admin 项在此弹**红色**确认（带
-      // 该项自己的 dangerHint），用户取消即停止后续。此前批量链只弹一次普通
-      // confirm 就循环 runOne，netstack/dns 的红档与独占承诺被整批放过。
-      const st = await confirmAndRunOne(task);
-      if (st === 'cancelled' || st === 'aborted') {
-        appendOutput(st === 'cancelled'
-          ? `—— 已在确认框取消「${task.title}」，跳过本项及后续项目 ——`
-          : '—— 高危确认对话框不可用，批量已停止 ——');
-        batch.cancelRequested = true;
-        running = null;
+    // F4a2-M03（v7.2 C07）：整段批量体必须有 catch/finally。
+    // 旧实现全程无 catch：`confirmAndRunOne` 的确认件 reject、或循环里任何一次抛错，
+    // 都会让 `batch` 永不为 null ⇒ `busy` 禁掉全部复选框与「执行」按钮、进度条停走、
+    // `hideOutput()`（因 `!batch`）永不收面板 —— 维护页被永久卡在「批量执行中」。
+    // elevating 分支原先也直接 return 而不清 batch，同样残留。
+    // 状态机的进出必须成对：所有出口（正常结束 / 提前 return / 抛错）都归 finally 收口。
+    try {
+      for (const [idx, task] of list.entries()) {
+        if (batch.cancelRequested) {
+          appendOutput(`—— 已取消：跳过「${task.title}」及后续项目 ——`);
+          break;
+        }
+        // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
+        batchRemainingIds = list.slice(idx).map(t => t.id);
+        running = task.id;
+        appendOutput(`—— [${batch.done + 1}/${batch.total}] ${task.title} ——`);
         updateBatchbar();
-        break;
-      }
-      if (st === 'elevating') {
-        // 提权已获同意，应用即将以管理员身份重启——剩余批次已持久化，中止循环
-        appendOutput('—— 应用即将以管理员身份重启，批量已暂停，重启后将自动恢复勾选 ——');
-        batch.fail++;
+
+        // v4-K03：逐项确认经 confirmAndRunOne —— admin 项在此弹**红色**确认（带
+        // 该项自己的 dangerHint），用户取消即停止后续。此前批量链只弹一次普通
+        // confirm 就循环 runOne，netstack/dns 的红档与独占承诺被整批放过。
+        const st = await confirmAndRunOne(task);
+        if (st === 'cancelled' || st === 'aborted') {
+          appendOutput(st === 'cancelled'
+            ? `—— 已在确认框取消「${task.title}」，跳过本项及后续项目 ——`
+            : '—— 高危确认对话框不可用，批量已停止 ——');
+          batch.cancelRequested = true;
+          running = null;
+          updateBatchbar();
+          break;
+        }
+        if (st === 'elevating') {
+          // 提权已获同意，应用即将以管理员身份重启——剩余批次已持久化，中止循环
+          appendOutput('—— 应用即将以管理员身份重启，批量已暂停，重启后将自动恢复勾选 ——');
+          batch.fail++;
+          batch.done++;
+          running = null;
+          updateBatchbar();
+          return;
+        }
+        if (st === 'ok' || st === 'warn') batch.ok++; else batch.fail++;
         batch.done++;
         running = null;
         updateBatchbar();
-        return;
       }
-      if (st === 'ok' || st === 'warn') batch.ok++; else batch.fail++;
-      batch.done++;
+
+      const cancelled = batch.cancelRequested;
+      const summary = `成功 ${batch.ok} 项 · 失败 ${batch.fail} 项${cancelled ? ' · 已取消剩余' : ''}`;
+      appendOutput(`===== 批量执行结束：${summary} =====`);
+      window.app?.toast?.(
+        cancelled ? 'warning' : (batch.fail ? 'warning' : 'success'),
+        cancelled ? `批量执行已取消（${summary}）` : (batch.fail ? `批量执行完成：${summary}` : `批量执行全部完成：${summary}`),
+        1000
+      );
+    } catch (e) {
+      // 抛出也必须留痕（面板通常已经显示，这里补一行让「为什么停了」可查）
+      const msg = (e && e.message) || String(e);
+      appendOutput(`—— 批量执行异常中止：${msg} ——`);
+      window.app?.toast?.('error', `批量执行异常中止：${msg}`);
+    } finally {
+      batchRemainingIds = null;
+      batch = null;
       running = null;
       updateBatchbar();
+      renderList();
     }
-    batchRemainingIds = null;
-
-    const cancelled = batch.cancelRequested;
-    const summary = `成功 ${batch.ok} 项 · 失败 ${batch.fail} 项${cancelled ? ' · 已取消剩余' : ''}`;
-    appendOutput(`===== 批量执行结束：${summary} =====`);
-    window.app?.toast?.(
-      cancelled ? 'warning' : (batch.fail ? 'warning' : 'success'),
-      cancelled ? `批量执行已取消（${summary}）` : (batch.fail ? `批量执行完成：${summary}` : `批量执行全部完成：${summary}`),
-      1000
-    );
-    batch = null;
-    updateBatchbar();
-    renderList();
   }
 
   function cancelBatch() {

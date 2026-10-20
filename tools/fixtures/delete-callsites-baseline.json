@@ -7,7 +7,8 @@
     "src-tauri/src/commands/uninstall/backup_report.rs": 3,
     "src-tauri/src/commands/uninstall/pending_delete.rs": 4,
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 8,
-    "src-tauri/src/engine/native/cleanup.rs": 38,
+    "src-tauri/src/commands/updater.rs": 4,
+    "src-tauri/src/engine/native/cleanup.rs": 40,
     "src-tauri/src/engine/native/contextmenu.rs": 2,
     "src-tauri/src/engine/native/maintenance.rs": 2,
     "src-tauri/src/engine/native/peripheral.rs": 2,
@@ -49,6 +50,7 @@
   },
   "remove_dir": {
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 1,
+    "src-tauri/src/commands/updater.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 2
   },
   "RegDeleteValueW": {

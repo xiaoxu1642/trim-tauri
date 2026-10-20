@@ -304,6 +304,19 @@
     ctrl.footer.querySelector('#btnPeriReset')?.addEventListener('click', async (e) => {
       if (!window.api?.peripheralWindow?.apply) { toast('info', '请在 Trim 应用内使用该功能'); return; }
       const btn = e.currentTarget;
+      // F4a2-M04（v7.2 C07）：「恢复 Windows 默认」是**写系统**出口（HKLM，需管理员，
+      // 重启后才生效），却一点即写、零确认——而同弹窗内只读回放本应用备份的
+      // 「还原修改前的值」反倒是完整红色确认（确认等级按出口不一致，maintenance.js 记过同一形态）。
+      // 确认三要素：标题点明写回的是出厂值、正文说清「不是你先前的自定义值」、
+      // 补充行说明需管理员且改后需重启。
+      const ok = await window.app?.confirmDanger?.(
+        '恢复 Windows 默认外设值',
+        '将把「Win32 计时精度」与「鼠标队列大小」写回 Windows 出厂默认值（win32=2 / mouse=100）。\n这不是你修改前的值——想回到改动前请用「还原修改前的值」（导入备份）。',
+        '仍然恢复默认',
+        '取消',
+        '该操作写入 HKLM，需要管理员权限；应用后需重启电脑才会生效。'
+      );
+      if (!ok) return;
       btn.disabled = true;
       try {
         const resp = await window.api.peripheralWindow.apply({

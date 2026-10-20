@@ -49,29 +49,17 @@ pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Valu
 
 /// `%VAR%` 展开。**任一变量取不到就返回 None**：把没展开的串继续往下判，等于
 /// 拿一个本机根本不存在的路径去判"落点已消失"，那是自己造出来的假阳性。
+///
+/// A6-M01（v7.2 C07）：展开本身不再自实现——全仓唯一展开器是扫描器的
+/// `expand_env_path`（对未定义/空值变量**保留原文**），本函数只负责把它转成
+/// 本域要的 `Option` 语义：拿 `first_unexpanded_token` 判残留，有残留即 None。
+/// 这样三个域（本文件 / 快捷指令 / 扫描器）对「变量取不到」只有一个结论来源，
+/// 且展开与残留检测同源（§5.16 N6）。
 pub(super) fn expand_pct(s: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find('%') {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i + 1..];
-        match tail.find('%') {
-            Some(j) => {
-                let name = &tail[..j];
-                if name.is_empty() {
-                    out.push('%');
-                } else {
-                    out.push_str(&std::env::var(name).ok()?);
-                }
-                rest = &tail[j + 1..];
-            }
-            None => {
-                out.push('%');
-                rest = tail;
-            }
-        }
+    let out = trim_finder::cleanup_scan::expand_env_path(s);
+    if trim_finder::cleanup_scan::first_unexpanded_token(&out).is_some() {
+        return None;
     }
-    out.push_str(rest);
     Some(out)
 }
 

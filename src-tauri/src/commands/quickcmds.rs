@@ -188,43 +188,21 @@ fn tokenize_quick_cmd(cmd: &str) -> Vec<String> {
     out
 }
 
-/// 大小写不敏感替换（JS `String.replace(/%temp%/gi, ...)`）
-fn replace_ci(input: &str, needle: &str, value: &str) -> String {
-    let needle_lower = needle.to_lowercase();
-    let chars: Vec<char> = input.chars().collect();
-    let n = needle.chars().count();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if n > 0 && i + n <= chars.len() {
-            let window: String = chars[i..i + n].iter().collect();
-            if window.to_lowercase() == needle_lower {
-                out.push_str(value);
-                i += n;
-                continue;
-            }
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
-}
-
-/// `expandQuickEnv`：%temp% → os.tmpdir()、%appdata% → APPDATA、%userprofile% → os.homedir()
+/// 快捷指令里的 `%VAR%` 展开：**直接委托扫描器的唯一实现**（A6-M01 / §5.16 N6）。
+///
+/// 历史形态是本文件自带一份 `expandQuickEnv`（链式三趟 `replace_ci`：%temp%、%appdata%、
+/// %userprofile% 各跑一遍）——同一条链上于是有三份展开器（本处 / `uninstall/dead.rs`
+/// 的 `expand_pct` / 扫描器 `expand_env_path`），对「变量取不到」分别给出 空串 /
+/// `None` / 保留原文 三种结论。收敛后失败语义只由 `expand_env_path` 定义：**保留原文**，
+/// 由调用方用 `first_unexpanded_token` 显式识别（见 `run_quick_cmd` 的元字符闸旁）。
+/// 链式改成单趟也顺带修掉旧行为：前一轮插入的值（例如 `TEMP` 里恰好含 `%APPDATA%`）
+/// 会被后一轮再扫描一次，占位符只该替换一次。
+///
+/// QUICKCMDS 里现算只用到 `%temp%` / `%appdata%` / `%userprofile%` 三个令牌，
+/// 都是本机常驻环境变量；缺失时按上面的口径保留原文而不是塌成空串（空串会被拼成
+/// 盘符相对路径再交给 explorer，症状比「打不开」更隐蔽）。
 fn expand_quick_env(t: &str) -> String {
-    let tmp = std::env::temp_dir()
-        .to_string_lossy()
-        .trim_end_matches(['\\', '/'])
-        .to_string();
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| {
-        let drive = std::env::var("HOMEDRIVE").unwrap_or_default();
-        let path = std::env::var("HOMEPATH").unwrap_or_default();
-        format!("{drive}{path}")
-    });
-    let out = replace_ci(t, "%temp%", &tmp);
-    let out = replace_ci(&out, "%appdata%", &appdata);
-    replace_ci(&out, "%userprofile%", &home)
+    trim_finder::cleanup_scan::expand_env_path(t)
 }
 
 /// `/^[a-z][a-z0-9+.-]*:/i`（URI scheme 判定，仅无参数时走 openExternal）
@@ -322,6 +300,11 @@ fn spawn_detached(exe: &str, args: &[String]) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// 元字符闸（A6-L02）：判据只此一份，任何要交给 shell 的字节都必须先过它。
+fn has_rejected_metachar(s: &str) -> bool {
+    s.chars().any(|c| QUICKCMD_METACHAR.contains(&c))
+}
+
 /// `runQuickCmd`：返回 (ok, message)
 fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
     let toks: Vec<String> = tokenize_quick_cmd(cmd)
@@ -334,10 +317,7 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
     if exe.is_empty() {
         return (false, "空指令".into());
     }
-    if toks
-        .iter()
-        .any(|t| t.chars().any(|c| QUICKCMD_METACHAR.contains(&c)))
-    {
+    if toks.iter().any(|t| has_rejected_metachar(t)) {
         log::write_log("error", &format!("快捷指令含被拒元字符，拒绝执行: {id}"));
         return (false, "指令包含不允许的字符".into());
     }
@@ -390,6 +370,14 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
             Some((_, rest)) => expand_quick_env(rest.trim_start()),
             None => String::new(),
         };
+        // A6-L02：上面那道元字符闸跑在 `toks`（切分+剥引号+展开）上，而这里交给
+        // `shell_open_params` 的 `params` 是从原始串重切、再展开一次的另一份字节 ——
+        // 两份不同源时会出现「判定的字节 ≠ 执行的字节」（AGENTS §5.16 的横向反模式）。
+        // 判据对**即将下发的 params 本身**再跑一遍，两份字节就都被覆盖了。
+        if has_rejected_metachar(&params) {
+            log::write_log("error", &format!("快捷指令参数含被拒元字符，拒绝执行: {id}"));
+            return (false, "指令包含不允许的字符".into());
+        }
         if shell_open_params(&target, (!params.is_empty()).then_some(params.as_str()), id, "consoleOpen") {
             return (true, String::new());
         }
@@ -551,12 +539,37 @@ mod tests {
         }
     }
 
+    /// A6-M01（v7.2 C07）：`%VAR%` 展开必须委托扫描器的唯一实现，
+    /// 失败语义只由那一份定义（取不到 ⇒ **保留原文**），并由调用方用
+    /// `first_unexpanded_token` 显式识别——本文件不再自带链式替换器。
     #[test]
-    fn env_expansion_matches_js() {
-        assert_eq!(replace_ci("explorer %TEMP%", "%temp%", "C:\\T"), "explorer C:\\T");
+    fn quick_env_delegates_to_scanner_expander() {
+        for (raw, var) in [
+            ("explorer %temp%", "temp"),
+            ("explorer %appdata%", "appdata"),
+            (r"explorer %userprofile%\Documents", "userprofile"),
+        ] {
+            let out = expand_quick_env(raw);
+            assert_eq!(
+                out,
+                trim_finder::cleanup_scan::expand_env_path(raw),
+                "{var}：快捷指令的展开与扫描器不同源"
+            );
+            if std::env::var_os(var).is_some() {
+                assert_eq!(
+                    trim_finder::cleanup_scan::first_unexpanded_token(&out),
+                    None,
+                    "{var} 本机存在却没展开：{out}"
+                );
+            }
+        }
+        // 取不到的变量：保留原文，且残留检测能点名——不许塌成空串（旧实现的三趟替换
+        // 会把 unknown 令牌原样留下、却把**空值变量**塌成空段，两种失败语义不一致）。
+        let kept = expand_quick_env(r"explorer %TRIM_NO_SUCH_VAR_9F%\x");
+        assert_eq!(kept, r"explorer %TRIM_NO_SUCH_VAR_9F%\x");
         assert_eq!(
-            replace_ci("explorer %userprofile%\\Documents", "%userprofile%", "C:\\U"),
-            "explorer C:\\U\\Documents"
+            trim_finder::cleanup_scan::first_unexpanded_token(&kept).as_deref(),
+            Some("TRIM_NO_SUCH_VAR_9F")
         );
     }
 

@@ -92,7 +92,15 @@ pub(super) fn snapshot_by_id(items: &[Value]) -> HashMap<String, Value> {
     map
 }
 
-/// `path.resolve` 的词法折叠等价物（不触盘；用于快照 path 比对）
+/// 快照 path 比对键：先按 cwd 把相对路径折成绝对（原 `path.resolve` 语义），再交给
+/// 引擎唯一的词法归一键 `paths::path_key`（= `protect::normalize_lexical`，折分隔符、
+/// 折 `.`/`..`、去尾点尾空格、verbatim `\\?\` 折回、统一小写）。
+///
+/// A6-M03（v7.2 C07）：本函数此前是**第三份**词法折叠实现——自己 hand-roll 前缀/段折叠，
+/// 不折尾点尾空格、不认 verbatim、大小写靠调用方临时补 `.to_lowercase()`；同一件事在
+/// `commands/startup.rs::validate_snapshot_items` 用的是 `paths::path_key`。两域对同一份
+/// 路径的两种写法会给出不同结论（一边判「路径被改写」拒，一边放行）。`paths.rs` 明文
+/// 要求路径归一并轨为一份，本处就是漏网的那份。
 pub(super) fn path_resolve(p: &str) -> String {
     let text = if Path::new(p).is_absolute() {
         p.to_string()
@@ -102,42 +110,7 @@ pub(super) fn path_resolve(p: &str) -> String {
             Err(_) => p.to_string(),
         }
     };
-    let bytes = text.as_bytes();
-    let prefix_len = if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        2
-    } else if text.starts_with(r"\\") {
-        let parts: Vec<&str> = text[2..]
-            .split(|c| c == '\\' || c == '/')
-            .filter(|c| !c.is_empty())
-            .collect();
-        if parts.len() >= 2 {
-            2 + parts[0].len() + 1 + parts[1].len()
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-    let (prefix, body) = text.split_at(prefix_len.min(text.len()));
-    let mut segs: Vec<&str> = Vec::new();
-    for c in body.split(|c| c == '\\' || c == '/') {
-        if c.is_empty() || c == "." {
-            continue;
-        }
-        if c == ".." {
-            segs.pop();
-            continue;
-        }
-        segs.push(c);
-    }
-    let joined = segs.join("\\");
-    if prefix.is_empty() {
-        joined
-    } else if joined.is_empty() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}\\{joined}")
-    }
+    crate::engine::paths::path_key(&text)
 }
 
 /// 对照 `validateSnapshotItems`：全部命中本窗口快照且 path 未被改写才放行
@@ -160,10 +133,9 @@ pub(super) fn validate_snapshot_items(items: Option<&Value>, snapshot: &HashMap<
             // M-5（审查 2026-10-07）：Windows 路径大小写不敏感，比较前统一小写，
             // 否则 `C:\Users\X\a.log` 与 `c:\users\x\A.LOG` 这类同路径不同写法
             // 会被判成「路径被改写」而误拒合法清理。
-            if !a.is_empty()
-                && !b.is_empty()
-                && path_resolve(a).to_lowercase() != path_resolve(b).to_lowercase()
-            {
+            // A6-M03（v7.2 C07）：大小写已由 `path_resolve` → `paths::path_key` 统一折掉，
+            // 调用点不再各补一次 `.to_lowercase()`（那正是两份口径的来源）。
+            if !a.is_empty() && !b.is_empty() && path_resolve(a) != path_resolve(b) {
                 return None;
             }
         }
@@ -458,5 +430,27 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
             src.contains("for w in plan_delta_warnings("),
             "接线形态变了（不再是逐条 write_log 的循环）——请同步改本断言并复核判红"
         );
+    }
+
+    /// A6-M03（v7.2 C07）：快照 path 比对键必须与引擎唯一的词法归一键同源
+    /// （`paths::path_key` = `protect::normalize_lexical`）。
+    ///
+    /// 旧实现是本域自带的第三份 hand-roll 折叠：不折 verbatim `\\?\`、不折尾点尾空格、
+    /// 大小写靠调用方临时补 `.to_lowercase()`，而 `commands/startup.rs` 同一件事用的是
+    /// `paths::path_key` ⇒ 同一份路径在清理域与启动项域得到不同结论。这里拿几组
+    /// 「Win32 认是同一个对象」的写法钉住：必须折成同一个键。
+    #[test]
+    fn 快照路径键_与引擎归一同源() {
+        let base = path_resolve(r"C:\Windows\Temp\x.log");
+        for same in [
+            r"\\?\C:\Windows\Temp\x.log", // verbatim 前缀（OS 折回语义）
+            r"c:/windows/temp/x.log",     // 正斜杠 + 小写
+            r"C:\Windows\Temp\\x.log",    // 重复分隔符
+            r"C:\Windows\.\Temp\x.log",   // 点段
+            r"C:\Windows\Temp\x.log.",    // 尾点（Win32 忽略）
+        ] {
+            assert_eq!(path_resolve(same), base, "同一路径的不同写法必须得到同一个键: {same}");
+        }
+        assert_ne!(path_resolve(r"C:\Windows\Temp\x2.log"), base, "不同文件不得被折成同一键");
     }
 }

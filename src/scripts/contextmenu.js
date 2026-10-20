@@ -315,7 +315,9 @@
         const item = items.find(i => getItemKey(i) === key);
         if (!item) return;
         if (e.target.closest('.checkbox')) {
-          toggleItemEnabled(item);
+          // F4a2-M06：异步链（确认件 + 写系统）由 toggleItemsWithGuard 的 catch 收口，
+          // 这里显式 void 表明「刻意不等」，别再退回裸调当同步用。
+          void toggleItemEnabled(item);
           return;
         }
         if (window.getSelection && window.getSelection().toString()) return;
@@ -327,7 +329,7 @@
     container.querySelectorAll('[data-owner-selectall]').forEach(btn => {
       btn.addEventListener('click', () => {
         const g = groups.find(x => x.label === btn.dataset.ownerSelectall);
-        if (g) toggleOwnerItems(g.label, g.items);
+        if (g) void toggleOwnerItems(g.label, g.items);
       });
     });
 
@@ -711,28 +713,39 @@
       }
       return;
     }
-    toggleItemsWithGuard([{ item, enabled: item.enabled === false }]);
+    // 返回 promise 供调用方 await；不 await 也不会冒泡（拒绝已在 guard 内收口）
+    return toggleItemsWithGuard([{ item, enabled: item.enabled === false }]);
   }
 
   // CM-13（2026-09-19，批次 A）：open / explore 等基础打开动词与快捷方式 open 处理器，
   // 禁用后用户感知是「双击打不开了」，必须先过红色二次确认（对齐参考实现的 ProtectOpenItem）。
   // 判据来自扫描端 confirmRequired，渲染层不自己猜键名。
+  //
+  // F4a2-M06（v7.2 C07）：整条 confirm→执行链收进**一个带 catch 的出口**。
+  // 调用方（行点击 / 列底「全选本软件」）此前把本函数当同步函数裸调，而函数体内
+  // `await confirmDanger` 在 try 之外 —— 确认件 reject（组件缺席、桥异常、用户关窗路径）
+  // 时既不 toast 也不落 applyToggles，用户症状是「点了勾选框没反应」，控制台只剩一条
+  // unhandled rejection。同文件 restartExplorer 已修掉同一形态，本处是漏网的一处。
   async function toggleItemsWithGuard(payloads) {
     if (!payloads.length) return;
-    const risky = payloads.filter(p => p.item && p.item.confirmRequired && p.enabled === false);
-    if (risky.length && window.api?.contextmenu?.toggle) {
-      const lines = risky.map(p => '· ' + p.item.name + '：' + (p.item.confirmReason || '基础打开动词，禁用后双击与默认打开行为可能改变')).join('\n');
-      const ok = await window.app?.confirmDanger(
-        '禁用基础打开项',
-        `即将禁用 ${risky.length} 项：\n${lines}`,
-        '确认禁用',
-        '取消',
-        '这类项承载资源管理器的默认「打开/浏览」行为，禁用后可能出现双击无反应，需重新启用才能恢复。'
-      );
-      if (!ok) return;
+    try {
+      const risky = payloads.filter(p => p.item && p.item.confirmRequired && p.enabled === false);
+      if (risky.length && window.api?.contextmenu?.toggle) {
+        const lines = risky.map(p => '· ' + p.item.name + '：' + (p.item.confirmReason || '基础打开动词，禁用后双击与默认打开行为可能改变')).join('\n');
+        const ok = await window.app?.confirmDanger(
+          '禁用基础打开项',
+          `即将禁用 ${risky.length} 项：\n${lines}`,
+          '确认禁用',
+          '取消',
+          '这类项承载资源管理器的默认「打开/浏览」行为，禁用后可能出现双击无反应，需重新启用才能恢复。'
+        );
+        if (!ok) return;
+      }
+      // 保护项只拦「禁用方向」：已经禁用的要恢复启用时无需吓阻
+      await applyToggles(payloads);
+    } catch (e) {
+      window.app?.toast('error', '切换未执行：' + ((e && e.message) || e));
     }
-    // 保护项只拦「禁用方向」：已经禁用的要恢复启用时无需吓阻
-    await applyToggles(payloads);
   }
 
   async function toggleOwnerItems(owner, ownerItems) {
@@ -741,16 +754,22 @@
     const target = !toggleableItems.every(it => it.enabled !== false);
     const affected = toggleableItems.filter(it => (it.enabled !== false) !== target);
     if (!affected.length) return;
-    if (affected.length > 3) {
-      const ok = await window.app?.confirm(
-        '批量切换',
-        `即将${target ? '启用' : '禁用'}「${owner}」的 ${affected.length} 个右键菜单项（切换为可逆操作）。\n\n是否继续？`,
-        '确认切换'
-      );
-      if (!ok) return;
+    // F4a2-M06：本函数自己的确认件同样可能 reject（同族形态），走同一个带 catch 的出口。
+    try {
+      if (affected.length > 3) {
+        const ok = await window.app?.confirm(
+          '批量切换',
+          `即将${target ? '启用' : '禁用'}「${owner}」的 ${affected.length} 个右键菜单项（切换为可逆操作）。\n\n是否继续？`,
+          '确认切换'
+        );
+        if (!ok) return;
+      }
+      // CM-13：批量路径同样要过基础打开项的红色确认（否则「全选本软件」可一键禁掉 open 动词）
+      // F4a2-M06：await 到底（本函数已是 async），拒绝由 toggleItemsWithGuard 内部收口。
+      await toggleItemsWithGuard(affected.map(item => ({ item, enabled: target })));
+    } catch (e) {
+      window.app?.toast('error', '批量切换未执行：' + ((e && e.message) || e));
     }
-    // CM-13：批量路径同样要过基础打开项的红色确认（否则「全选本软件」可一键禁掉 open 动词）
-    toggleItemsWithGuard(affected.map(item => ({ item, enabled: target })));
   }
 
   // v3.2.1：refresh=false 优先读持久缓存（首启扫描一次落盘，之后一直读文件，init 时自动加载）；

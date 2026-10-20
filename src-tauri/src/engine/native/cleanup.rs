@@ -22,16 +22,42 @@ use super::registry::*;
 const DISM_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 // ==================== B10 cleanup_detail：条目明细枚举 ====================
 
+/// 明细（预览/计数）侧的未解析变量出口（A6-L01 / v7.2 C07）。
+///
+/// 与执行侧 `cleanup_execute` 用**同一道** fail-closed 判据：展开后仍残留 `%TOKEN%`
+/// 的路径不参与枚举/计数，并把令牌显式记进 `unresolved` 带给调用方。旧实现只在
+/// 计数侧 `expand_env`、不判残留 —— 未解析模板在这里塌成 `read_dir` 失败、条目
+/// 报「0 项」，而同一模板在执行侧是「跳过并报 skip 原因」：同一道 P0 判据只长在
+/// 链路一半上，用户看到「扫描 0 项 / 执行被跳过」两个互不解释的结论。
+///
+/// 返回 true = 已记残留、调用方必须 `continue`（不枚举、不计数）。
+fn note_unexpanded_in_detail(expanded: &str, raw: &str, unresolved: &mut Vec<String>) -> bool {
+    let Some(tok) = first_unexpanded_token(expanded) else {
+        return false;
+    };
+    let tag = format!("%{tok}%");
+    if !unresolved.iter().any(|u| *u == tag) {
+        unresolved.push(tag.clone());
+    }
+    crate::engine::log::write_log(
+        "warn",
+        &format!("cleanup_detail 路径变量 {tag} 未解析，相关目标已跳过（原始模板 {raw}）"),
+    );
+    true
+}
+
 /// 清理条目明细枚举（对应 cleanup_detail.ps1，S3）
 ///
-/// 输入 rule JSON 和目标路径，返回 {kind, total, truncated, files}。
+/// 输入 rule JSON 和目标路径，返回 {kind, total, truncated, files, unresolved}。
 /// 复杂 glob/排除规则回退 PS（commands 层判定）。
 pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> {
     let cap = 600usize;
+    // A6-L01：与 cleanup_execute 的 `unresolved` 同名字段、同语义（未解析的令牌）
+    let mut unresolved: Vec<String> = Vec::new();
 
     // special=dism
     if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
-        return Ok(json!({"kind": "dism", "total": 0, "truncated": false, "files": []}));
+        return Ok(json!({"kind": "dism", "total": 0, "truncated": false, "files": [], "unresolved": []}));
     }
 
     // regKeys 型
@@ -42,11 +68,12 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                 let path = rk.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 if path.is_empty() { continue; }
                 let expanded = expand_env(path);
+                if note_unexpanded_in_detail(&expanded, path, &mut unresolved) { continue; }
                 if let Some((hive, rest)) = parse_reg_path(&expanded) {
                     count += unsafe { reg_count_key(hive, &rest, rk.get("value").is_some()) };
                 }
             }
-            return Ok(json!({"kind": "reg", "total": count, "truncated": false, "files": []}));
+            return Ok(json!({"kind": "reg", "total": count, "truncated": false, "files": [], "unresolved": unresolved}));
         }
     }
 
@@ -62,6 +89,7 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                 let pattern = fk.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
                 let recurse = fk.get("recurse").and_then(|v| v.as_bool()).unwrap_or(true);
                 let expanded = expand_env(path);
+                if note_unexpanded_in_detail(&expanded, path, &mut unresolved) { continue; }
                 // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）
                 for base in expand_glob_dirs(&expanded) {
                     if let Ok(meta) = std::fs::metadata(&base) {
@@ -79,7 +107,7 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                     enumerate_files(&base, pattern, recurse, &mut files, &mut total, &mut seen, cap);
                 }
             }
-            return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files}));
+            return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved}));
         }
     }
 
@@ -89,10 +117,10 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
         let mut total = 0usize;
         let mut seen = std::collections::HashSet::new();
         enumerate_files(target_path, "*", true, &mut files, &mut total, &mut seen, cap);
-        return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files}));
+        return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved}));
     }
 
-    Ok(json!({"kind": "files", "total": 0, "truncated": false, "files": []}))
+    Ok(json!({"kind": "files", "total": 0, "truncated": false, "files": [], "unresolved": unresolved}))
 }
 
 /// 段级 glob 展开（规则库 `%...\*\...` 形态，真机 v0.1.6 反馈）：路径中含 `*`
@@ -678,7 +706,7 @@ fn cleanup_execute_with_backup_root(
             if p.is_empty() || bt <= 0 {
                 continue;
             }
-            identity.entry(p.to_lowercase()).or_insert((sz.max(0) as u64, bt as u64));
+            identity.entry(crate::engine::paths::path_key(p)).or_insert((sz.max(0) as u64, bt as u64));
         }
     }
 
@@ -1179,6 +1207,11 @@ let mut freed = 0i64;
     // Kudu S2（2026-10-16）：身份证比对不通过的拒绝（同 protected/reparse 口径：独立计数、留痕）
     let mut identity_blocked = 0i64;
     let mut identity_samples: Vec<String> = Vec::new();
+    // A6-M02（v7.2 C07）：本规则里「快照没有该路径基线」的文件数。键已归一（paths::path_key），
+    // 所以 miss 只剩两种真实来源：条目被 CAP 截断、或扫描侧没给 birthtimeNs。这一档语义仍是
+    // 「不拦」（W2：无基线不拦），但必须计数外发 —— 否则「键形态不同源」与「本来就没基线」
+    // 在回执里长得一模一样，Kudu S2 的护栏一旦静默失效就再也无从察觉。
+    let mut identity_unbaselined = 0i64;
     // K12（v6）：本规则逐文件失败明细（{path, reason}，reason = occupied/denied）——
     // 「登记到重启后删除」的登记面只认这个清单，不再拿条目目标路径全量顶替
     // （全量 = 把成功项也送去永久删）。只收可延期两档：被占用与权限不足；
@@ -1228,21 +1261,31 @@ let mut freed = 0i64;
                 // Kudu S2（2026-10-16）：身份证比对守卫——路径在扫描后指向了**另一个**文件
                 //（被替换/重定向）时拒绝；size 一并对照（内容长大同样算不一致，fail-closed，
                 // 用户看到的是明确计数而非不明所以的删除）。birthtimeNs=0 = 无基线不拦。
-                if let Some((base_size, base_bt)) = identity.get(&path.to_lowercase()) {
-                    if let Ok(md) = std::fs::symlink_metadata(path) {
-                        let now_bt = birthtime_ns_of(&md);
-                        let now_size = md.len();
-                        if now_bt != 0 && (now_bt != *base_bt || now_size != *base_size) {
-                            identity_blocked += 1;
-                            if identity_samples.len() < 5 {
-                                identity_samples.push(format!(
-                                    "{path}（扫描时 {base_size} 字节/出生 {base_bt}，现状 {now_size} 字节/出生 {now_bt}）"
-                                ));
+                //
+                // A6-M02（v7.2 C07）：记账与查找必须走**同一份归一键**。记账侧（快照 JSON 的
+                // items[].files[].path）与查找侧（执行侧重新遍历的 files）在旧实现里都只做
+                // 裸 `to_lowercase()`，与全仓声明的 `paths::path_key`（折分隔符 / 折 `.`/`..` /
+                // 去尾点尾空格 / verbatim 折回）不同源 ⇒ 尾分隔符、正斜杠、`..` 段、`\\?\`
+                // 任一写法差异都让 get 落 None，然后**直落删除支**：Kudu S2「扫描后被替换」
+                // 的护栏在该形态下静默失效且方向是放行。miss 一律计一档（见 identity_unbaselined）。
+                match identity.get(&crate::engine::paths::path_key(path)) {
+                    Some((base_size, base_bt)) => {
+                        if let Ok(md) = std::fs::symlink_metadata(path) {
+                            let now_bt = birthtime_ns_of(&md);
+                            let now_size = md.len();
+                            if now_bt != 0 && (now_bt != *base_bt || now_size != *base_size) {
+                                identity_blocked += 1;
+                                if identity_samples.len() < 5 {
+                                    identity_samples.push(format!(
+                                        "{path}（扫描时 {base_size} 字节/出生 {base_bt}，现状 {now_size} 字节/出生 {now_bt}）"
+                                    ));
+                                }
+                                continue;
                             }
-                            continue;
                         }
+                        // 元数据读不到（已不存在等）：交给删除原语的 gone/失败档，不在守卫里吞
                     }
-                    // 元数据读不到（已不存在等）：交给删除原语的 gone/失败档，不在守卫里吞
+                    None => identity_unbaselined += 1,
                 }
                 // C-4：删前备份（只对将真正删除的文件；复制失败不阻塞删除）
                 if *size <= FILE_BACKUP_MAX_FILE
@@ -1406,6 +1449,9 @@ let mut freed = 0i64;
             "reparseBlocked": reparse_blocked,
             // Kudu S2：身份证不符的拒绝，同样独立外发。
             "identityChanged": identity_blocked,
+            // A6-M02（v7.2 C07）：本次有多少文件**查不到快照基线**（无基线不拦，但要看得见）。
+            // 与 identityChanged 成对：前者是「比对了且不一致」，本字段是「压根没得比」。
+            "identityUnbaselined": identity_unbaselined,
             // R4（2026-10-15）：两个新档同样独立外发、不进 residual（denied 的出路是
             // 提权、gone 无需处理，都不是「重试」）；渲染层按字段分档提示。
             "denied": denied,
@@ -2678,6 +2724,69 @@ mod cleanup_engine_contract_tests {
         assert!(
             !msg.contains("被占用"),
             "重复行消除后不得残留 NotFound 误报的「被占用」: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A6-L01（v7.2 C07）：明细（预览/计数）侧的未解析变量必须显式记残留，
+    /// 不许塌成「0 项」。反例模板在旧实现里只会让 `read_dir` 失败 ⇒ 条目报 0 项，
+    /// 与执行侧「跳过并报 skip 原因」两个结论互不解释。
+    #[test]
+    fn 明细侧未解析变量必须显式记残留() {
+        let rule = json!({
+            "id": "detail-unresolved",
+            "name": "明细残留探测",
+            "fileKeys": [{"path": r"%TRIM_NO_SUCH_VAR_A6L01%\x", "pattern": "*", "recurse": true}]
+        });
+        let d = cleanup_detail(&rule, "").expect("明细枚举不该失败");
+        assert_eq!(d["total"].as_i64(), Some(0), "未解析路径不得产出条目: {d}");
+        let un = d["unresolved"]
+            .as_array()
+            .expect("明细必须带 unresolved 字段（与执行侧同名同语义）");
+        assert_eq!(un.len(), 1, "未解析令牌必须显式记一档: {un:?}");
+        assert_eq!(un[0], json!("%TRIM_NO_SUCH_VAR_A6L01%"));
+    }
+
+    /// A6-M02（v7.2 C07）：身份证的记账键与查找键必须同源（`paths::path_key`）。
+    ///
+    /// 反例形态：快照里记的是同一文件的**别名写法**（多一个 `..` 段 + 大写扩展名）。
+    /// 旧实现两侧都只做裸 `to_lowercase()` ⇒ 键对不上 ⇒ `get` 落 None ⇒ 直落删除支，
+    /// 「扫描后被替换」的护栏静默失效**且方向是放行**（这里的基线 size 故意写成 99，
+    /// 真实文件是 10 字节）。归一之后必须命中基线并拒绝删除，且不得落「无基线」档。
+    #[test]
+    fn 身份证键_别名写法也必须命中基线() {
+        let dir = std::env::temp_dir().join(format!("trim-identity-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.log");
+        std::fs::write(&f, b"0123456789").unwrap();
+        let dir_s = dir.to_string_lossy().to_string();
+        // 同一文件的别名：`<dir>\sub\..\A.LOG`（词法折叠后 = `<dir>\a.log`）
+        let aliased = format!("{dir_s}\\sub\\..\\A.LOG");
+
+        let rules = json!({"groups":[{"items":[{
+            "id": "alias", "name": "身份证别名探测",
+            "fileKeys": [{"path": dir_s, "pattern": "a.log", "recurse": false}]
+        }]}]});
+        let items = vec![json!({
+            "id": "alias", "name": "身份证别名探测", "path": dir_s,
+            "files": [{"path": aliased, "size": 99, "birthtimeNs": 1}]
+        })];
+
+        let bk = BackupSandbox::new("identity-alias");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("不应 Err");
+        let d = &res.details[0];
+        assert!(f.exists(), "基线 size 不符（99 vs 10）必须拒绝删除: {d}");
+        assert_eq!(
+            d["identityChanged"].as_i64(),
+            Some(1),
+            "别名写法必须命中同一条基线并判不一致: {d}"
+        );
+        assert_eq!(
+            d["identityUnbaselined"].as_i64(),
+            Some(0),
+            "归一后不得落「无基线」档（落了说明键仍不同源）: {d}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

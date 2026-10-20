@@ -621,6 +621,26 @@
     el('btnStartupDelete').disabled = !sel.length;
   }
 
+  // 回执三态判序（F4a2-M02 / v7.2 C07）：**命令层整体拒绝** ≠ 部分失败 ≠ 全成。
+  //
+  // 后端 `commands/startup.rs` 有一批「无 data 的整批拒绝」返回（不是最近一次扫描结果 /
+  // 台账损坏 / 入参越界…）。旧写法把它们一律渲染成「部分失败：0 项未生效」——真实原因
+  // 丢掉（用户只看到「0 项未生效」），而且 `(data.results || [])` 此时为空 ⇒ 每个选中项都
+  // 落进「没有 error 就算成功」那一支，整批从未执行的项被记进防恢复台账，与 F4a2-K01
+  // 合成「3 次扫描后弹红色确认删自己没关过的项」。
+  // 判序：先认 success（同 contextmenu.js 的正解姿势），data 缺席 = 命令层拒绝 ⇒ 如实报错并中止。
+  function classifyReceipt(resp, act) {
+    const data = (resp && resp.data) || null;
+    if (!resp || resp.success !== true) {
+      if (!data) {
+        window.app?.toast('error', `${act}被拒绝：${(resp && resp.message) || '本次操作未执行'}`);
+        return { rejected: true, partial: false, data: null, results: [] };
+      }
+      return { rejected: false, partial: true, data, results: data.results || [] };
+    }
+    return { rejected: false, partial: false, data, results: (data && data.results) || [] };
+  }
+
   async function doToggle(selItems, enable) {
     if (!selItems.length) return;
     const act = enable ? '启用' : '禁用';
@@ -643,20 +663,23 @@
       // 后端回执形状是 `{success: bool, data: {success: n, failed: n, results}}`——
       // 顶层 success 是布尔，计数在 data 里。读错层级会渲染「成功 true 项」，
       // 且失败清单一律为空、失败项还被记进防恢复指纹。
-      const data = (resp && resp.data) || {};
-      const failed = Number(data.failed) || 0;
-      if (resp && resp.success) {
-        window.app?.toast('success', `${act}完成，成功 ${Number(data.success) || 0} 项`);
+      const r = classifyReceipt(resp, act);
+      if (r.rejected) return;
+      const failed = Number(r.data && r.data.failed) || 0;
+      if (!r.partial) {
+        window.app?.toast('success', `${act}完成，成功 ${Number(r.data && r.data.success) || 0} 项`);
       } else {
         window.app?.toast('warning', `${act}部分失败：${failed} 项未生效`);
       }
-      const failedIds = new Set((data.results || []).filter(r => r.status === 'error').map(r => r.id));
-      // 防恢复跟踪：禁用成功 → 记录指纹；手动启用成功 → 清除跟踪
+      const failedIds = new Set(r.results.filter(x => x.status === 'error').map(x => x.id));
+      // 防恢复跟踪：禁用成功 → 记录指纹；手动启用成功 → 清除跟踪。
+      // 只认 `status === 'ok'`（F4a2-M02）：skip/deferred/无结果都不等于「已生效」，
+      // 旧写法「没有 error 就算成功」会把未执行项写进台账。
       if (!enable) {
         const defend = loadStore(DEFEND_KEY, {});
         selItems.forEach(i => {
-          const r = (data.results || []).find(x => x.id === i.id);
-          if (!r || r.status !== 'error') {
+          const hit = r.results.find(x => x.id === i.id);
+          if (hit && hit.status === 'ok') {
             const fp = fpOf(i);
             defend[fp] = { name: i.name || '未命名', strikes: defend[fp]?.strikes || 0 };
           }
@@ -664,7 +687,10 @@
         saveStore(DEFEND_KEY, defend);
       } else {
         const defend = loadStore(DEFEND_KEY, {});
-        selItems.forEach(i => { delete defend[fpOf(i)]; });
+        selItems.forEach(i => {
+          const hit = r.results.find(x => x.id === i.id);
+          if (hit && hit.status === 'ok') delete defend[fpOf(i)];
+        });
         saveStore(DEFEND_KEY, defend);
       }
       // 刷新：成功的项状态变更后重扫；有失败项时当前列表保持原样（失败明细已 toast）
@@ -697,12 +723,14 @@
         if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行删除');
         return;
       }
-      if (resp && resp.success) {
+      const r = classifyReceipt(resp, '删除');
+      if (r.rejected) return;
+      if (!r.partial) {
         // F4a-M03（v4）：顶层 `success` 是**布尔**，把计数读它只会渲染「成功 true 项」；
         // 计数在 data 里（与 doToggle 同口径）。
-        window.app?.toast('success', `删除完成，成功 ${Number(resp.data?.success) || 0} 项`);
+        window.app?.toast('success', `删除完成，成功 ${Number(r.data && r.data.success) || 0} 项`);
       } else {
-        window.app?.toast('warning', `删除部分失败：${Number(resp.data?.failed) || 0} 项未生效`);
+        window.app?.toast('warning', `删除部分失败：${Number(r.data && r.data.failed) || 0} 项未生效`);
       }
       await scan(true);
     } catch (e) {
