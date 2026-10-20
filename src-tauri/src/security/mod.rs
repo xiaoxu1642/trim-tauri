@@ -7,7 +7,7 @@
 //! - 密钥：`dpapi:v1:` 经 OSCrypt 主密钥解密；**绝不明文落盘**；发往渲染层前统一掩码，
 //!   空值保持空串（表示未配置，不伪装成已配置），幂等（掩码重复调用结果不变）。
 
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,9 +44,8 @@ static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// 注意隔离强度**按调用点不同**（这条不能一概而论）：
 /// - `write_temp_script` 用 `create_new(true)` + 重试，弱熵下也拿不到已存在的文件；
-/// - [`atomic_write_file`] 用 `File::create`（截断、跟随符号链接），**没有**独占创建
-///   保护——那处的临时名独占性完全依赖这个后缀的不可预测性，所以降级路径必须
-///   照样产出长度固定、随每次调用变化的串，不能退化成可推算的常量。
+/// - [`atomic_write_file`] 同样用 `create_new(true)`（A6-L03）：临时名撞上已存在件
+///   （含同名前缀的 reparse）时直接失败、不覆盖。
 pub fn crypto_random_hex(len_bytes: usize) -> String {
     use windows::Win32::Security::Cryptography::{
         BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -121,15 +120,26 @@ pub fn atomic_write_file(path: &Path, contents: &[u8]) -> Result<(), String> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
     let temp = dir.join(format!(".{name}.{}.tmp", random_suffix()));
+    let mut opened = false;
     let result = (|| -> Result<(), String> {
-        let mut f = File::create(&temp).map_err(|e| e.to_string())?;
+        // A6-L03：create_new 只认「本次新建」的临时件；撞名（含 reparse）直接失败，
+        // 不截断/不跟随别人预先放好的对象。
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| e.to_string())?;
+        opened = true;
         f.write_all(contents).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
         drop(f);
         fs::rename(&temp, path).map_err(|e| e.to_string())
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        // 只有 open 成功过才可能留下自己的临时件；open 失败时绝不删别人的同名文件。
+        if opened {
+            let _ = fs::remove_file(&temp);
+        }
         return result;
     }
     flush_dir_for_persistence(dir);

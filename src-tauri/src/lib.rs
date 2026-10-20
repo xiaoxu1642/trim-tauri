@@ -1261,6 +1261,44 @@ mod tests {
         );
     }
 
+    /// U-A6（P1-W1）：判定的字节必须与执行的字节同源。
+    #[test]
+    fn u_a6_byte_identity_contracts() {
+        let security = include_str!("security/mod.rs");
+        assert!(
+            security.contains(".create_new(true)") && security.contains("if opened"),
+            "A6-L03：原子写临时件必须 create_new，且 open 失败时不得删别人的同名文件"
+        );
+        assert!(
+            include_str!("engine/delete_manifest.rs").contains("fn batch_time_key"),
+            "A6-M05：删除清单裁剪/读取必须按解析出的批次时刻排序（C07 前修防回退）"
+        );
+        assert!(
+            security.contains("fn prune_quarantined_depth"),
+            "A6-M06：隔离件回收必须递归到子目录产出点（C11 前修防回退）"
+        );
+
+        assert!(
+            include_str!("diag/mod.rs").contains("pub fn strip_diag_lines")
+                && include_str!("pwsh/mod.rs").contains("strip_diag_lines(&stdout, diag_op)"),
+            "A6-M07：DIAG 清洗必须无条件执行，不能以调用点登记为条件"
+        );
+
+        let net = include_str!("engine/native/runtimes_net.rs");
+        assert!(
+            !net.contains("winhttp_proxy_configured") && net.contains("fn winhttp_proxy_native"),
+            "A6-M08：WinHTTP 代理必须走 API，不得回到本地化 stdout 判据"
+        );
+        assert!(
+            include_str!("engine/native/maintenance.rs").contains("<Enabled>false</Enabled>"),
+            "A6-L04：任务禁用态必须读 XML，不得匹配本地化列文本"
+        );
+        assert!(
+            include_str!("commands/fileclean.rs").contains("\"manifestPath\": manifest_path"),
+            "A6-L05：manifestPath 必须回执实际写入的对象，不是裸文件名"
+        );
+    }
+
     /// R8-M04：握手返回值必须被消费，builder 分支必须据此补注册单实例。
     #[test]
     fn m04_elevated_takeover_result_is_consumed() {

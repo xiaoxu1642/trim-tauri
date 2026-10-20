@@ -271,21 +271,35 @@ fn oper_status_text(oper: windows::Win32::NetworkManagement::Ndis::IF_OPER_STATU
     else { "Unknown" }
 }
 
-/// WinHTTP 代理键行（英文 `Proxy Server(s) :` / 中文 `代理服务器 :`）。
-/// 只认键行，`Direct access (no proxy server).` 不是键行（R5b-M04）。
-fn winhttp_proxy_line(out: &str) -> Option<&str> {
-    out.lines().find(|l| {
-        let t = l.trim_start();
-        t.to_ascii_lowercase().starts_with("proxy server") || t.starts_with("代理服务器")
-    })
-}
-
-/// WinHTTP 是否配置了代理：键行冒号后必须有实际值（`(none)` 视为未配置）。
-fn winhttp_proxy_configured(out: &str) -> bool {
-    winhttp_proxy_line(out)
-        .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
-        .map(|v| !v.is_empty() && !v.eq_ignore_ascii_case("(none)"))
-        .unwrap_or(false)
+/// 读取 WinHTTP 默认代理（A6-M08）：走 WinHTTP API，不再解析 `netsh` 的本地化 stdout。
+///
+/// 返回 `Some(Some(server))` = 已配置命名代理；`Some(None)` = 明确未配置；
+/// `None` = API 读取失败（未知，不得当成「无代理」）。PWSTR 由系统分配，必须 GlobalFree。
+fn winhttp_proxy_native() -> Option<Option<String>> {
+    use windows::Win32::Foundation::{GlobalFree, HGLOBAL};
+    use windows::Win32::Networking::WinHttp::{
+        WinHttpGetDefaultProxyConfiguration, WINHTTP_ACCESS_TYPE_NAMED_PROXY, WINHTTP_PROXY_INFO,
+    };
+    let mut info = WINHTTP_PROXY_INFO::default();
+    unsafe {
+        WinHttpGetDefaultProxyConfiguration(&mut info).ok()?;
+        let proxy = if info.lpszProxy.is_null() {
+            None
+        } else {
+            Some(info.lpszProxy.to_string().unwrap_or_default())
+        };
+        if !info.lpszProxy.is_null() {
+            let _ = GlobalFree(Some(HGLOBAL(info.lpszProxy.0 as _)));
+        }
+        if !info.lpszProxyBypass.is_null() {
+            let _ = GlobalFree(Some(HGLOBAL(info.lpszProxyBypass.0 as _)));
+        }
+        if info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY {
+            Some(proxy.filter(|s| !s.trim().is_empty()))
+        } else {
+            Some(None)
+        }
+    }
 }
 
 /// 网络连通性检测（原 PS 时代脚本 netcheck_status.ps1，已退役；S3 简化版）
@@ -542,24 +556,10 @@ pub fn netcheck_status() -> Result<Value, String> {
             let _ = RegCloseKey(ghk);
             g
         } else { false };
-        // WinHTTP 代理（探测：v4 R5-M07 带超时）
-        // v6-K01（P0-2）：解析失败与执行失败同语义（.ok() 的 None 分支）
-        let winhttp_out = crate::engine::systembin::system_tool("netsh")
-            .map_err(std::io::Error::other)
-            .and_then(|exe| {
-                crate::engine::systembin::quiet_cmd_timeout(
-                    exe,
-                    &["winhttp", "show", "proxy"],
-                    crate::engine::systembin::PROBE_TIMEOUT,
-                )
-            })
-            .ok()
-            .map(|o| crate::engine::systembin::decode_native_output(&o.stdout));
-        // R5b-M04（v7.2 C06）：旧判据把 en-US 的 "Direct access (no proxy server)."
-        // 里的 "proxy" 当成已配置代理（`DIRECT` 大小写还不命中），无代理的英文机因此
-        // 被推荐一条会改系统 WinHTTP 配置的修复。判据改成「Current setting 段里
-        // 存在以 Proxy server(s)/代理服务器 开头且冒号后有值的行」。
-        let winhttp_has_proxy = winhttp_out.as_ref().map(|o| winhttp_proxy_configured(o)).unwrap_or(false);
+        // A6-M08：WinHTTP 代理走 WinHTTP API，判据不再依赖 `netsh` 的本地化输出；
+        // API 读取失败是「未知」，不能当成「无代理」。
+        let winhttp_proxy = winhttp_proxy_native();
+        let winhttp_has_proxy = matches!(winhttp_proxy, Some(Some(_)));
         fn mask_proxy(s: &str) -> String {
             let body = s;
             // 去掉 scheme
@@ -598,16 +598,13 @@ pub fn netcheck_status() -> Result<Value, String> {
         } else {
             proxy_evidence.push("用户代理（WinINET）：未启用".to_string());
         }
+        if let Some(Some(server)) = &winhttp_proxy {
+            proxy_evidence.push(format!("系统代理（WinHTTP）：{}", mask_proxy(server)));
+        }
+        if winhttp_proxy.is_none() {
+            proxy_evidence.push("系统代理（WinHTTP）：读取失败，未判定".to_string());
+        }
         if winhttp_has_proxy {
-            if let Some(o) = &winhttp_out {
-                // 提取代理服务器：只认键行（大小写不敏感），值取首个冒号之后。
-                if let Some(line) = winhttp_proxy_line(o) {
-                    let server = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("").to_string();
-                    if !server.is_empty() {
-                        proxy_evidence.push(format!("系统代理（WinHTTP）：{}", mask_proxy(&server)));
-                    }
-                }
-            }
             if proxy_status == "ok" { proxy_status = "warn"; }
             proxy_detail = "WinHTTP 层配置了代理，可能影响系统服务联网".to_string();
             proxy_repair = json!({"id": "reset-winhttp"});
@@ -901,26 +898,17 @@ mod tests {
         assert_eq!(oper_status_text(IfOperStatusLowerLayerDown), "LowerLayerDown");
     }
 
-    /// R5b-M04：WinHTTP 判据必须按「键行 + 冒号后有值」判，不能被本地化文案里的
-    /// "proxy" 字样骗到（en-US 无代理时输出 `Direct access (no proxy server).`）。
+    /// A6-M08：WinHTTP 判据必须走 API，不得回到本地化 stdout。
+    /// 用 concat! 拼锚点，避免本测试源码里的字面量自命中。
     #[test]
-    fn winhttp_代理判据不随语言假阳() {
-        let en_direct = "Current WinHTTP proxy settings:\n\n    Direct access (no proxy server).\n";
-        assert!(!winhttp_proxy_configured(en_direct), "英文无代理输出不得判成已配置");
-        let en_proxy = "Current WinHTTP proxy settings:\n\n    Proxy Server(s) :  http://127.0.0.1:7890\n    Bypass List     :  (none)\n";
-        assert!(winhttp_proxy_configured(en_proxy), "英文有代理必须命中");
-        let zh_direct = "当前的 WinHTTP 代理服务器设置:\n\n    直接访问(没有代理服务器)。\n";
-        assert!(!winhttp_proxy_configured(zh_direct));
-        let zh_proxy = "当前的 WinHTTP 代理服务器设置:\n\n    代理服务器:  http://127.0.0.1:7890\n";
-        assert!(winhttp_proxy_configured(zh_proxy), "中文有代理必须命中");
-        assert!(!winhttp_proxy_configured("Proxy Server(s) :  (none)"), "(none) 视为未配置");
-        // 判据自测通过不等于接线正确：netcheck_status 必须调用同一个函数。
-        // 用 concat! 拼锚点，避免本测试源码里的字面量自命中。
-        let needle = concat!("winhttp_proxy_configured", "(o)");
-        assert!(
-            include_str!("runtimes_net.rs").contains(needle),
-            "netcheck_status 没有走 winhttp_proxy_configured（判据与调用点分叉）"
-        );
+    fn winhttp_代理判据不依赖本地化输出() {
+        let src = include_str!("runtimes_net.rs");
+        let call = concat!("let winhttp_proxy = winhttp_proxy_", "native();");
+        assert!(src.contains(call), "netcheck_status 必须调用 winhttp_proxy_native()");
+        let old_fn = concat!("winhttp_proxy_", "configured");
+        assert!(!src.contains(old_fn), "不得恢复按本地化 stdout 的旧判据");
+        let netsh = concat!("\"winhttp\", \"show\", ", "\"proxy\"");
+        assert!(!src.contains(netsh), "不得再依赖 netsh winhttp show proxy 的文案");
     }
 
     /// v5 R-1：x86 名单里不得出现 `vcruntime140_1.dll`。

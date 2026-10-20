@@ -515,7 +515,7 @@ pub async fn fileclean_delete_file<R: Runtime>(
             "size": size,
             "recycled": recycled
         });
-        delete_manifest::save_delete_manifest(&batch, &[entry]);
+        let manifest_path = delete_manifest::save_delete_manifest(&batch, &[entry]);
         // 从槽中移除（槽归发起扫描的窗口所有，见 `scope_owner`：删完必须让
         // in_scope 集合同步收缩，否则同一次扫描里可以再「删」一次不存在的路径）
         let owner = scope_owner(window.label());
@@ -527,7 +527,8 @@ pub async fn fileclean_delete_file<R: Runtime>(
             }
         }
         log::write_log("info", &format!("删除预览图片（回收站）: {file_path}"));
-        json!({ "success": true, "recycled": recycled, "manifestPath": format!("deleted-{batch}.json") })
+        json!({ "success": true, "recycled": recycled,
+            "manifestPath": manifest_path.as_ref().map(|p| p.to_string_lossy().to_string()) })
     } else {
         json!({ "success": false, "message": msg })
     }

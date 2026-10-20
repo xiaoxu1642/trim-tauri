@@ -419,11 +419,9 @@ fn run_with_exe(
         stderr.push_str(&format!("\n{label} 执行超时"));
         code = -1;
     }
-    // @@DIAG@@ 诊断行转日志并从 stdout 剔除（与 extractDiagLines 同口径）
-    let stdout_clean = match diag_op {
-        Some(op) => crate::diag::extract_diag_lines(&stdout, op),
-        None => stdout,
-    };
+    // @@DIAG@@ 诊断行转日志并从 stdout 剔除（与 extractDiagLines 同口径）。
+    // A6-M07：清洗无条件执行——未登记 op 的调用点也不能把 DIAG 原样交给协议判据。
+    let stdout_clean = crate::diag::strip_diag_lines(&stdout, diag_op);
     if code != 0 && !stderr.trim().is_empty() {
         log::write_log("warn", &format!("PowerShell 退出码 {code}: {}", stderr.trim()));
     }

@@ -45,15 +45,25 @@ fn split_diag_lines(stdout: &str) -> DiagSplit {
 /// 从 stdout 提取 @@DIAG@@ 行写入日志，返回清洗后的 stdout（诊断行一律不留在输出里）。
 /// `op` 为操作名（写入日志的 op= 字段）。
 pub fn extract_diag_lines(stdout: &str, op: &str) -> String {
+    strip_diag_lines(stdout, Some(op))
+}
+
+/// 无条件清洗 @@DIAG@@ 行（A6-M07）：是否写诊断日志取决于调用点是否登记 `op`，
+/// 但**剔除协议行不取决于**它——脚本吐了 DIAG，未登记 op 的调用点也不能把原始行
+/// 交给上层协议判据。畸形行即使 op 未登记也告警。
+pub fn strip_diag_lines(stdout: &str, op: Option<&str>) -> String {
     let split = split_diag_lines(stdout);
-    for d in &split.diagnostics {
-        crate::engine::log::write_log("error", &format_diag(op, d));
+    if let Some(op) = op {
+        for d in &split.diagnostics {
+            crate::engine::log::write_log("error", &format_diag(op, d));
+        }
     }
     if split.malformed > 0 {
         crate::engine::log::write_log(
             "warn",
             &format!(
-                "诊断行协议异常：op={op} 有 {} 行 @@DIAG@@ 无法解析（已从输出中移除）",
+                "诊断行协议异常：op={} 有 {} 行 @@DIAG@@ 无法解析（已从输出中移除）",
+                op.unwrap_or("(未登记 diag)"),
                 split.malformed
             ),
         );
@@ -149,5 +159,14 @@ mod tests {
         assert_eq!(split.clean, input);
         assert_eq!(split.malformed, 0);
         assert!(split.diagnostics.is_empty());
+    }
+
+    /// A6-M07：op 未登记的调用点也必须把 DIAG 行剔掉（日志可以少写，协议行不能回流）。
+    #[test]
+    fn 未登记op时仍剔除诊断行() {
+        let input = "@@DIAG@@{\"failure_stage\":\"ok\"}\n@@DONE@@\n";
+        let out = strip_diag_lines(input, None);
+        assert!(!out.contains(DIAG_PREFIX), "DIAG 不得留在回传 stdout: {out:?}");
+        assert!(out.contains("@@DONE@@"), "上层协议行必须保留: {out:?}");
     }
 }
