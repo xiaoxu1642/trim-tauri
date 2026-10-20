@@ -1248,7 +1248,16 @@ let mut freed = 0i64;
                 if *size <= FILE_BACKUP_MAX_FILE
                     && backup_total + *size <= FILE_BACKUP_MAX_BATCH
                 {
-                    let seq = deleted as u32 + backup_skipped as u32 + failed as u32;
+                    // R5a-K01（v7.2 C11）：序号段必须覆盖**全部**会在本循环里推进的结局
+                    // 计数（denied/gone 在本文件 :1288/:1296 增）。R4 拆档时漏并这两个：
+                    // 落 denied/gone 的文件已产出副本却不推进 seq ⇒ 同规则同批次同名文件
+                    // 算出逐字节相同的 rel，`copy` 原地顶替——gone 档的副本是该文件仅存
+                    // 字节（本域不进回收站），顶替即永久丢失。
+                    let seq = deleted as u32
+                        + backup_skipped as u32
+                        + failed as u32
+                        + denied as u32
+                        + gone as u32;
                     let fname = std::path::Path::new(path)
                         .file_name()
                         .map(|s| s.to_string_lossy().to_string())

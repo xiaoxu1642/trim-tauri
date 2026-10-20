@@ -862,6 +862,9 @@ pub async fn optimizer_run<R: Runtime>(
 
     // B-2：@@RECYCLE@@ 协议——受保护路径拒绝，其余进回收站（PS 侧只枚举不删除）
     let (mut rec_ok, mut rec_fail, mut rec_malformed) = (0i64, 0i64, 0i64);
+    // R3-M03（v7.2 C01）：@@RECYCLE@@ 出口的单批上限（口径对齐 FINDER_DELETE_MAX）。
+    const RECYCLE_EXIT_MAX_ITEMS: i64 = 500;
+    let mut rec_seen: i64 = 0;
     {
         let mut seen = std::collections::HashSet::new();
         for raw in stdout.lines() {
@@ -886,9 +889,20 @@ pub async fn optimizer_run<R: Runtime>(
             if p.is_empty() || !seen.insert(p.to_string()) {
                 continue;
             }
-            if protect::is_path_protected(p) {
+            // R3-M03（v7.2 C01）：单批上限——PS 输出被截断/掺噪声/失控时，回收站出口
+            // 不能无界吞路径。口径对齐 finder 的 FINDER_DELETE_MAX(500)。
+            if rec_seen >= RECYCLE_EXIT_MAX_ITEMS {
                 rec_fail += 1;
-                log::write_log("warn", &format!("优化回收站协议拒绝受保护路径: {p}"));
+                log::write_log("warn", &format!("优化回收站协议超出单批上限 {RECYCLE_EXIT_MAX_ITEMS}，已拒: {p}"));
+                continue;
+            }
+            rec_seen += 1;
+            // C01（v7.2 R3-M03）：此前只过 `is_path_protected` 第一道闸——
+            // %WINDIR% 子孙（exact 语义管不到）与 reparse 件都会进回收站。
+            // 四道组合闸收口到 validate_mutation_target（拒因唯一真源）。
+            if let Err(why) = protect::validate_mutation_target(p) {
+                rec_fail += 1;
+                log::write_log("warn", &format!("优化回收站协议拒绝: {why}"));
                 continue;
             }
             // 审查 v2-F1：走 `_os` 版。路径来自 PS stdout 的 @@RECYCLE@@ 协议，

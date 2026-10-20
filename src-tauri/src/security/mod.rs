@@ -343,7 +343,22 @@ pub fn prune_quarantined(dir: &Path) -> usize {
 const QUARANTINE_KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// 执行体（不写日志，便于在一次性沙箱里断言真实删除行为而不污染应用日志目录）
+///
+/// R7-M03（v7.2 C11）：改**递归**扫描——4 个隔离产出点里 3 个落在子目录
+/// （`cleanup/rules.json`、`uninstall/residue-rules.json`、`uninstall/residue-learned.json`，
+/// 只有 `pending_delete` 的在根），单层 `read_dir` 看不见它们的 `<file>.corrupt-<ts>`，
+/// 正是上文自述要消灭的「堆一排没人读的坏件」。机制照 pwsh 层 v2-L13 的先例
+/// （递归 + 限深 + reparse 拒）；**裁根仍只传 `app_data_dir()`**（AGENTS §6 老根不裁）。
 fn prune_quarantined_in(dir: &Path, now: SystemTime) -> usize {
+    prune_quarantined_depth(dir, now, 0)
+}
+
+const QUARANTINE_SCAN_MAX_DEPTH: usize = 6;
+
+fn prune_quarantined_depth(dir: &Path, now: SystemTime, depth: usize) -> usize {
+    if depth > QUARANTINE_SCAN_MAX_DEPTH {
+        return 0;
+    }
     let now_ms = now
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -352,6 +367,12 @@ fn prune_quarantined_in(dir: &Path, now: SystemTime) -> usize {
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
+        // 先递归子目录（隔离产出点是数据根下的 .json 本体，子目录里不会再有
+        // 本模块的产出，但规则库的层级将来可能加深——限深 6 层足够且防失控）
+        if entry.path().is_dir() {
+            removed += prune_quarantined_depth(&entry.path(), now, depth + 1);
+            continue;
+        }
         let Some(ts) = quarantine_stamp(&name) else { continue };
         // 时间戳取文件名里的隔离时刻（不是 mtime）：复制/搬运过的件仍按原时刻判龄期
         if now_ms.saturating_sub(ts) > QUARANTINE_KEEP.as_millis() {

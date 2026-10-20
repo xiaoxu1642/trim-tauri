@@ -295,8 +295,11 @@ pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
     if !valid_restore_target(original) {
         return json!({ "success": false, "message": "原始路径非法，已拒绝还原" });
     }
-    if crate::engine::protect::is_path_protected(original) {
-        return json!({ "success": false, "message": "原始路径现为受保护路径，已拒绝还原" });
+    // C01（v7.2 R4-M01）：写回目标此前只判词法保护面——reparse/别名/系统命名空间
+    // 三面全缺，篡改清单可把备份写到受保护面覆盖不到的位置。四道组合闸收口到
+    // `validate_mutation_target`（不覆盖语义在下方 `dst.exists()` 早退，保持不变）。
+    if let Err(why) = crate::engine::protect::validate_mutation_target(original) {
+        return json!({ "success": false, "message": why });
     }
     // 副本必须与清单同根（老根清单的副本躺在老根），不能固定用新根拼（N1）
     let Some(root) = mpath.parent() else {

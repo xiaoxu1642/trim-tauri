@@ -161,9 +161,32 @@ fn prune_backups(keep: usize) {
         batches.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, names) in batches.into_iter().skip(keep) {
             for name in names {
+                // R1b-M02（v7.2 C01）：① reparse 拒——链接件进回收站等于把它指向的
+                // 实体卷进来，照 paths.rs::prune_backups_ext 的「读不到元数据也按
+                // reparse」口径；② 边车封条与主文件同生同死——封条名
+                // `<file>.reg.meta.json` 不以 .reg 结尾，`backup_batch_of` 永不计数、
+                // 永不修剪，只删主文件会留下孤儿封条（还原侧按 missing/mismatch 拒）。
                 let p = dir.join(&name);
+                let reparse = |q: &std::path::Path| {
+                    std::fs::symlink_metadata(q)
+                        .map(|m| crate::engine::protect::is_reparse(&m))
+                        .unwrap_or(true)
+                };
+                if reparse(&p) {
+                    log::write_log("warn", &format!("旧外设备份是 reparse 点，跳过修剪: {name}"));
+                    continue;
+                }
                 if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()) {
                     log::write_log("warn", &format!("旧外设备份移入回收站失败: {name} -> {e}"));
+                    continue;
+                }
+                let mut seal = name.clone();
+                seal.push_str(".meta.json");
+                let seal_path = dir.join(&seal);
+                if seal_path.is_file() && !reparse(&seal_path) {
+                    if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(seal_path.as_os_str()) {
+                        log::write_log("warn", &format!("旧外设备份封条移入回收站失败: {seal} -> {e}"));
+                    }
                 }
             }
         }

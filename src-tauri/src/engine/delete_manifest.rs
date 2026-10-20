@@ -94,28 +94,44 @@ fn prune_manifests(dir: &Path) {
 
 /// 读最近批次清单并扁平化（最多 max 条，最近批次在前）。
 /// 返回 `(items, dir)`；目录不存在时 items 为空（对照 finder:delete-manifest）。
+///
+/// R6b-M03（v7.2 C11）：读侧补老根兜底——本文件此前读写同指新根，违反
+/// paths.rs 的三段口径（写只新根 / **读带老根兜底** / 裁只裁新根，restore_pack
+/// 同单元已照做）；便携模式下老根 `%APPDATA%\Trim\fileclean-backup` 的误删追溯
+/// 凭据整批不可见。同名批次清单只取新根那份；裁剪侧保持只裁新根不动。
 pub fn list_manifest_items(max: usize) -> (Vec<Value>, String) {
-    let dir = backup_dir();
-    if !dir.is_dir() {
-        return (Vec::new(), dir.to_string_lossy().to_string());
+    let primary = backup_dir();
+    let dirs = crate::engine::paths::backup_read_dirs("fileclean-backup");
+    // (完整路径, 文件名)：新根先扫，同名（同批次段）天然只留新根那份
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for dir in &dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let Some(name) = e.file_name().to_str().map(String::from) else { continue };
+            if !(name.starts_with("deleted-") && name.ends_with(".json")) {
+                continue;
+            }
+            let key = name.to_lowercase();
+            if seen.iter().any(|s| *s == key) {
+                continue;
+            }
+            seen.push(key);
+            files.push((dir.join(&name), name));
+        }
     }
-    let mut files: Vec<String> = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().map(String::from))
-            .filter(|f| f.starts_with("deleted-") && f.ends_with(".json"))
-            .collect(),
-        Err(_) => return (Vec::new(), dir.to_string_lossy().to_string()),
-    };
-    files.sort();
-    files.reverse();
+    if files.is_empty() {
+        return (Vec::new(), primary.to_string_lossy().to_string());
+    }
+    // 最近批次在前：文件名内嵌批次时间戳，字典序即时序（同 delete_manifest 写侧）
+    files.sort_by(|a, b| b.1.cmp(&a.1));
 
     let mut items: Vec<Value> = Vec::new();
-    for f in files {
+    for (path, _name) in files {
         if items.len() >= max {
             break;
         }
-        let text = match std::fs::read_to_string(dir.join(&f)) {
+        let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(_) => continue,
         };
@@ -139,7 +155,7 @@ pub fn list_manifest_items(max: usize) -> (Vec<Value>, String) {
             }
         }
     }
-    (items, dir.to_string_lossy().to_string())
+    (items, primary.to_string_lossy().to_string())
 }
 
 /// 确保清单目录存在（open-backup-dir 用）

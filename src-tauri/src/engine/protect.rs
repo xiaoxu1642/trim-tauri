@@ -678,6 +678,52 @@ pub fn is_system_namespace(p: &str) -> bool {
     low == rn.low || low.starts_with(&format!("{}\\", rn.low))
 }
 
+/// C01（v7.2 `R1d-K01`🔴 / `R2a-M01` / `R3-M03` / `R4-M01` / `R1b-M02`）：
+/// **破坏性目标共同判据**——文件面删除/写回/修剪出口共用的组合闸。
+///
+/// 闸序（方案 C01 拍死的顺序，别调换）：**作用域（调用方先行）→ 受保护面 →
+/// 别名面 → 系统命名空间 → reparse**。「作用域」（快照成员 / 扫描槽 in_scope）是
+/// 每个出口自己的语义（本函数没有快照可查），由调用方判完再进来做纵深；
+/// 剩下四道此前分散在 32 处出口、大多只接了第一道（`is_system_namespace` 全 A 族
+/// 只有 1 处在用）——本函数是它们的单一真源。
+///
+/// 红线（AGENTS §2 / 方案 C01）：本函数**只判定**——不删除、不写回、不收
+/// `to_recycle`。回收站、常规清理永久删、固定备份根 prune、还原写回四个破坏性
+/// 出口各自保留显式动作类型与测试；`R1b-M02` 的封条同生同死、`R3-M03` 的单批
+/// 上限、`R4-M01` 的不覆盖语义由出口自己负责，不许被共同判据吞掉
+/// （`check-delete-exits.mjs` C01 组断言钉住这条）。
+///
+/// 逐闸依据：
+/// - 受保护面 [`is_path_protected`]：词法保护根（`%WINDIR%` 是 exact 语义、管不到子孙）；
+/// - 别名面 [`final_path_protected`]：junction/短名解析后父目录落进保护面；
+/// - 系统面 [`is_system_namespace`]：`R1d-K01` 的根因——`Prefetch`、
+///   `WinSxS\Temp`、`System32\winevt\Logs` 等系统目录子孙会穿过上面两道；
+/// - reparse：目标本体带 `FILE_ATTRIBUTE_REPARSE_POINT` 位（junction/链接/云占位符）
+///   时删除/写回的实际落点不可控，按拒。目标不存在时跳过本闸（还原写回的目标
+///   合法地可以不存在；`symlink_metadata` 不跟随链接，拿到的是链接本体属性位）。
+///
+/// 返回 `Err(中文拒因)`：拒因在本函数唯一真源，五个消费出口不许各写一份。
+pub fn validate_mutation_target(p: &str) -> Result<(), String> {
+    if p.is_empty() {
+        return Err("目标路径为空".to_string());
+    }
+    if is_path_protected(p) {
+        return Err(format!("受保护的系统/用户路径，已拒绝：{p}"));
+    }
+    if final_path_protected(p) {
+        return Err(format!("解析后指向受保护路径，已拒绝：{p}"));
+    }
+    if is_system_namespace(p) {
+        return Err(format!("目标位于系统命名空间（SystemRoot 子树），已拒绝：{p}"));
+    }
+    if let Ok(md) = std::fs::symlink_metadata(p) {
+        if is_reparse(&md) {
+            return Err(format!("目标是 reparse 点（junction/链接/占位符），已拒绝：{p}"));
+        }
+    }
+    Ok(())
+}
+
 /// 注入 PS / 原生删除的清单 JSON（元素已是归一化小写绝对路径，PS 只做字符串比较）。
 /// 键顺序与 JS `JSON.stringify` 一致（subtree/exact/anyDrive），便于双侧对拍逐字节比较。
 pub fn protected_roots_json() -> String {
@@ -1662,5 +1708,40 @@ mod tests {
         // ④ 父目录不存在的路径不误报（解析失败 fail-open 到删除原语的真实档）
         let ghost = dir.join("no-such-dir").join("probe.txt");
         assert!(!final_path_protected(&ghost.to_string_lossy()), "不存在路径不得误报");
+    }
+
+    /// C01（v7.2 R1d-K01🔴）核心回归：`%WINDIR%` 子孙此前能穿过 exact 语义的
+    /// 保护面闸（Prefetch / WinSxS\Temp 等真实存在目录的 `protected=false` 向量，
+    /// 见 `tools/fixtures/protect-parity.json`）。组合闸的系统面必须拦下。
+    /// 破坏自证：把 `validate_mutation_target` 里的 `is_system_namespace` 闸删掉
+    /// ⇒ 本用例红（该目标会落到 Ok(())）。
+    #[test]
+    fn c01_系统命名空间子孙必须拒() {
+        let err = validate_mutation_target(r"C:\Windows\Prefetch\__trim_probe__.pf")
+            .expect_err("%WINDIR% 子孙必须被组合闸拦下");
+        assert!(
+            err.contains("系统命名空间"),
+            "拒因必须点名系统面闸（唯一真源文案）: {err}"
+        );
+    }
+
+    /// 保护面本体（%WINDIR% exact）同拒——组合闸第一道在位。
+    #[test]
+    fn c01_保护面本体必须拒() {
+        assert!(validate_mutation_target(r"C:\Windows").is_err());
+    }
+
+    /// 空路径 fail-closed。
+    #[test]
+    fn c01_空路径必须拒() {
+        assert!(validate_mutation_target("").is_err());
+    }
+
+    /// 无辜路径放行：不存在的普通路径四闸全过（reparse 闸对不存在目标跳过——
+    /// 还原写回的目标合法地可以不存在）。破坏自证：给本用例的目标塞进任一
+    /// 保护根/系统子树 ⇒ 红。
+    #[test]
+    fn c01_无辜路径放行() {
+        assert!(validate_mutation_target(r"C:\__trim_c01_clean__\probe.bin").is_ok());
     }
 }

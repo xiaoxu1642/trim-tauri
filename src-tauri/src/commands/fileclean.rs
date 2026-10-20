@@ -479,9 +479,11 @@ pub async fn fileclean_delete_file<R: Runtime>(
     // `is_path_protected` 纵深。扫描槽是「主窗那次扫到了什么」，受保护目录是「系统/用户
     // 关键目录」——两者判定面不同（用户把扫描根指到受保护目录时，槽里也会装满这些路径），
     // 因此不能互相替代。放在 in_scope 之后、删除之前。
-    if protect::is_path_protected(&file_path) {
-        log::write_log("warn", &format!("受保护路径，拒绝删除: {file_path}"));
-        return json!({ "success": false, "message": "受保护路径，已拒绝删除" });
+    // C01（v7.2 R1d-K01🔴）：四道组合闸收口到 validate_mutation_target——补上
+    // `is_system_namespace`（%WINDIR% 子孙此前会穿过 exact 语义的保护面）与 reparse。
+    if let Err(why) = protect::validate_mutation_target(&file_path) {
+        log::write_log("warn", &format!("拒绝删除: {why}"));
+        return json!({ "success": false, "message": why });
     }
 
     let is_file = std::fs::metadata(&file_path)
@@ -560,10 +562,11 @@ pub async fn fileclean_execute<R: Runtime>(
         if !in_scope(&scope, p) {
             return json!({ "success": false, "message": "包含不在扫描范围内的路径，已拒绝整批" });
         }
-        // 审查 v2-L2：与 delete-file 同一口径，批量删除同样要过 is_path_protected 纵深
-        if protect::is_path_protected(p) {
-            log::write_log("warn", &format!("批量删除含受保护路径，拒绝整批: {p}"));
-            return json!({ "success": false, "message": "包含受保护路径，已拒绝整批" });
+        // 审查 v2-L2：与 delete-file 同一口径，批量删除同样要过保护纵深。
+        // C01（v7.2 R1d-K01🔴）：四道组合闸（含 %WINDIR% 子孙的系统面与 reparse）。
+        if let Err(why) = protect::validate_mutation_target(p) {
+            log::write_log("warn", &format!("批量删除拒绝整批: {why}"));
+            return json!({ "success": false, "message": format!("包含不可删除的目标，已拒绝整批：{why}") });
         }
         if std::fs::metadata(p).map(|m| !m.is_file()).unwrap_or(true) {
             return json!({ "success": false, "message": "包含非普通文件，已拒绝整批" });

@@ -626,7 +626,13 @@ pub(super) fn residue_rules_hits(
                     }
                     let p = Path::new(&target);
                     let exists = if kind == "folder" { p.is_dir() } else { p.is_file() };
-                    if !exists || protect::is_path_protected(&target) {
+                    // R2a-M01（v7.2 C01）：补「系统命名空间」闸——`is_path_protected` 对
+                    // %WINDIR% 是 exact 语义，`System32\DriverStore\Temp` 这类真实存在的
+                    // 子孙目录会穿过保护面、被产成默认勾选的删除候选。与 residue.rs 的
+                    // InstallLocation/exeParent 两个产源臂、pending_delete 的 PFRO 登记闸
+                    // 同一函数（`tools/rule-schema.json` 的 tokens.allowed 含 WINDIR/
+                    // SYSTEMROOT，装载闸不判系统面 ⇒ 护栏只能在这里）。
+                    if !exists || protect::is_path_protected(&target) || protect::is_system_namespace(&target) {
                         continue;
                     }
                     out.push(json!({

@@ -595,34 +595,25 @@ pub async fn finder_delete<R: tauri::Runtime>(
     if valid_safe.is_empty() {
         return json!({ "success": false, "message": "没有可删除的项" });
     }
-    // 受保护路径：命中即整批拒绝（与 Electron 文案一致）
-    if let Some(hit) = valid_safe.iter().find(|it| protect::is_path_protected(&it.path)) {
-        log::write_log("warn", &format!("finder 删除拒绝: 受保护路径 {}", hit.path));
+    // C01（v7.2 R1d-K01🔴）：受保护面/别名面/系统面/reparse 四道组合闸。
+    // 此前只有 protect + 别名解析两道，`is_system_namespace` 缺席 ⇒ `%WINDIR%`
+    // 子孙（Prefetch、WinSxS\Temp 等）能进回收站——protect 对 %WINDIR% 是 exact
+    // 语义管不到子孙。拒因文案来自 `validate_mutation_target` 唯一真源；
+    // 快照成员（作用域）闸在上面已判完，这里做纵深。单遍循环取第一个拒因，
+    // 不对命中项二次调用（别名面一行 canonicalize 的 IO）。
+    let mut reject: Option<String> = None;
+    for it in &valid_safe {
+        if let Err(why) = protect::validate_mutation_target(&it.path) {
+            reject = Some(why);
+            break;
+        }
+    }
+    if let Some(why) = reject {
+        log::write_log("warn", &format!("finder 删除拒绝: {why}"));
         return json!({
             "success": false,
-            "message": format!("包含受保护的系统路径，已拒绝：{}", hit.path)
+            "message": format!("包含不可删除的目标，已整批拒绝：{why}")
         });
-    }
-    // Kudu S2（2026-10-16）：字面比对漏掉的**别名指向**（junction / 短名父目录解析后
-    // 落在受保护路径）——同判整批拒绝；按父目录 memo（一批通常只跨少数几个目录）。
-    {
-        let mut memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-        let alias_hit = valid_safe.iter().find(|it| {
-            let key = std::path::Path::new(&it.path)
-                .parent()
-                .map(|d| d.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            *memo
-                .entry(key)
-                .or_insert_with(|| protect::final_path_protected(&it.path))
-        });
-        if let Some(hit) = alias_hit {
-            log::write_log("warn", &format!("finder 删除拒绝（别名解析后指向受保护路径）: {}", hit.path));
-            return json!({
-                "success": false,
-                "message": format!("包含解析后指向受保护路径的目标，已拒绝：{}", hit.path)
-            });
-        }
     }
 
     // 删除前预检（FD-4）：目标不存在/类型不符/空目录已非空 → 跳过

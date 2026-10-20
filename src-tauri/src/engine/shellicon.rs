@@ -186,12 +186,22 @@ fn cache_key(channel: &str, path: &Path) -> Option<String> {
     Some(full[..16].to_string())
 }
 
+/// R6b-L02（v7.2 C11）：引擎级回收一律回收站优先（AGENTS §3，与 delete_manifest /
+/// restore_pack 同口径），reparse 件跳过——链接件进回收站等于把它指向的实体卷进来。
+/// 只对自产命名形态的文件调用；回收站失败不回退永久删（宁可留残，不冒险）。
+fn recycle_own(p: &Path) -> bool {
+    let safe = std::fs::symlink_metadata(p)
+        .map(|m| m.is_file() && !crate::engine::protect::is_reparse(&m))
+        .unwrap_or(false);
+    safe && trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()).is_ok()
+}
+
 /// 读缓存。魔数不符按未命中处理并删文件——半截/损坏文件留在原地会让这个键永远命中坏数据。
 fn cached_png(dir: &Path, key: &str) -> Option<Vec<u8>> {
     let file = dir.join(format!("{key}.png"));
     let bytes = std::fs::read(&file).ok()?;
     if !bytes.starts_with(&PNG_MAGIC) {
-        let _ = std::fs::remove_file(&file);
+        let _ = recycle_own(&file);
         return None;
     }
     Some(bytes)
@@ -231,7 +241,7 @@ fn prune_icon_cache(dir: &Path) {
     files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let excess = files.len() - CACHE_KEEP;
     for (_, p) in files.iter().take(excess) {
-        let _ = std::fs::remove_file(p);
+        let _ = recycle_own(p);
     }
 }
 

@@ -110,6 +110,13 @@ const MUST_PROTECT = [
   // （cm_remove 与其 RegDeleteTreeW/回收站出口一并删除；toggle 不删文件）。
 ];
 
+// C01（v7.2）：保护闸的两种在位形态。v7.2 之后出口闸收口到
+// `protect::validate_mutation_target`（组合闸：受保护面→别名面→系统面→reparse），
+// 命令体里出现组合闸调用 = 受保护面在位（组合闸内部必调 is_path_protected，
+// 由下方 C01 断言组钉死组合闸本身不许掉闸）。
+const PROTECT_MARKERS = ['is_path_protected', 'validate_mutation_target'];
+const bodyHasProtect = (body) => PROTECT_MARKERS.some((m) => body.includes(m));
+
 // 二跳出口的正向棘轮（审查 L-4）：protect 不在命令体内、而在本仓 helper 里。
 // 登记 {命令, helper}，钉住 helper 体内的 protect 调用——helper 改名/protect 被删/
 // 搬出 src 均红。（2026-10-12：原首条 cleanup_retry_failed_delete /
@@ -140,7 +147,39 @@ const MUST_PROTECT_VIA_HELPER = [
   // `cleanup_execute_with_backup_root`，`cleanup_execute` 退化为一行转发。protect 闸随
   // 实现体移动，本表 helper 名同步跟随；该函数再改名/搬走时 2b 依旧判红。
   ['cleanup_execute', 'cleanup_execute_with_backup_root', 'src/engine/native/cleanup.rs'],
+  // R1b-M02（v7.2 C01）：外设备份修剪此前整体在本发现网之外——prune_backups 是独立
+  // fn，命令体扫描看不到二跳委托，护栏被动过零告警。它的闸不是文件面 protect
+  // （裁根是固定的 backup_write_dir 单根，protect 对自有数据目录恒拒无判定意义），
+  // 而是 reparse 拒 + 封条同生同死 ⇒ 第四段指名本行的必须标记（2b 支持自定义）。
+  ['peripheral_apply', 'prune_backups', 'src/commands/peripheral.rs', 'is_reparse'],
 ];
+
+// ==================== C01 断言组（v7.2 R1d-K01/R2a-M01/R3-M03/R4-M01/R1b-M02） ====================
+// 判定器全部抽成纯函数，与下方 POSITIVE_CONTROLS 的合成样本共用同一实现。
+
+/** C01-a/b：组合闸本体必须四闸俱全、且不得含任何删除/写回原语（只判定不执行）。 */
+function judgeValidatorBody(body) {
+  const issues = [];
+  for (const gate of ['is_path_protected', 'final_path_protected', 'is_system_namespace', 'is_reparse']) {
+    if (!body.includes(gate)) issues.push(`组合闸缺 ${gate} 闸`);
+  }
+  // 方案 C01 红线：函数不执行删除/写回、不收 to_recycle——共同判据吞掉四个
+  // 破坏性出口的显式动作类型即红。
+  const forbidden = [...DELETE_MARKERS, 'std::fs::copy', 'to_recycle'];
+  for (const f of forbidden) {
+    if (body.includes(f)) issues.push(`共同判据体内出现 ${f}（只判定不执行，出口语义不许被吞）`);
+  }
+  return issues;
+}
+
+/** C01-c：成对棘轮——文件面产源/出口文件里 is_path_protected 与 is_system_namespace 必须共现。 */
+function judgeProtectPair(src) {
+  const issues = [];
+  if (src.includes('is_path_protected') && !src.includes('is_system_namespace')) {
+    issues.push('有 is_path_protected 却无 is_system_namespace——%WINDIR% 子孙会穿过保护面（两闸必须成对）');
+  }
+  return issues;
+}
 
 // 审查 L-5（2026-10-03）二跳盲区登记（只登记不改，按白名单纪律）：
 // diskbench_run 的 remove_dir_all 住在 helper cleanup_residue 里，命令体不含删除标记，
@@ -287,7 +326,7 @@ check(dualRegistered.length === 0, '1e. 同一命令不得同时登记在正向�
 const missMUST = MUST_PROTECT.filter((k) => !bodies.has(k));
 check(missMUST.length === 0, '1c. 正向清单命令全部在源码中定位到函数体', missMUST.length ? missMUST.join(', ') : `${MUST_PROTECT.length}/${MUST_PROTECT.length}`);
 
-const lostProtect = MUST_PROTECT.filter((k) => bodies.has(k) && !bodies.get(k).body.includes('is_path_protected'));
+const lostProtect = MUST_PROTECT.filter((k) => bodies.has(k) && !bodyHasProtect(bodies.get(k).body));
 check(lostProtect.length === 0, '2. 正向出口的 is_path_protected 前置不许掉（双向棘轮）',
   lostProtect.length ? lostProtect.map((k) => `${k}(${bodies.get(k).file})`).join(', ') : `${MUST_PROTECT.length} 条全部在位`);
 
@@ -295,12 +334,12 @@ check(lostProtect.length === 0, '2. 正向出口的 is_path_protected 前置不�
 //     helper 体内的 is_path_protected 被删即红。
 {
   const helperIssues = [];
-  for (const [cmd, helper, file] of MUST_PROTECT_VIA_HELPER) {
+  for (const [cmd, helper, file, marker = 'is_path_protected'] of MUST_PROTECT_VIA_HELPER) {
     if (!commands.includes(cmd)) { helperIssues.push(`命令 ${cmd} 已不在 generate_handler! 清单——登记陈旧`); continue; }
     const r = resolveHelperBody(helper, file);
     if (r.err) { helperIssues.push(r.err); continue; }
     if (!r.body) { helperIssues.push(`${cmd} 的 helper ${helper} 未能在源码中定位（改名/搬走了？）`); continue; }
-    if (!r.body.body.includes('is_path_protected')) helperIssues.push(`${helper}(${r.body.file}) 体内已无 is_path_protected——${cmd} 的删除闸被拆`);
+    if (!r.body.body.includes(marker)) helperIssues.push(`${helper}(${r.body.file}) 体内已无 ${marker}——${cmd} 的删除闸被拆`);
   }
   check(helperIssues.length === 0, '2b. 二跳出口的 helper 体内 is_path_protected 在位（L-4 棘轮）',
     helperIssues.length ? helperIssues.join('；') : `${MUST_PROTECT_VIA_HELPER.length} 条 helper 链全部在位`);
@@ -311,16 +350,19 @@ const exemptMissing = [];
 for (const [name, { file, body }] of bodies) {
   const hit = DELETE_MARKERS.find((mk) => body.includes(mk));
   if (!hit) continue;
-  if (body.includes('is_path_protected')) continue;
+  if (bodyHasProtect(body)) continue;
   if (EXEMPTS.has(name)) continue;
-  if (HELPER_CMDS.has(name)) {
+    if (HELPER_CMDS.has(name)) {
     // 闸门在 helper 体内，由 2b 钉住；命令体自身没有 protect 是**登记形态**而非缺口。
     // 反向盲区：若某天命令体自己开始删文件（不再委托 helper），命令体里出现删除标记
     // 而 protect 仍只在 helper 里，就成了「新出口未被棘轮覆盖」。那种情况必须红。
     const helperResolved = MUST_PROTECT_VIA_HELPER
       .filter(([cmd]) => cmd === name)
-      .map(([, helper, f]) => resolveHelperBody(helper, f))
-      .some((r) => !r.err && r.body && r.body.body.includes('is_path_protected'));
+      .map(([, helper, f, marker = 'is_path_protected']) => {
+        const r = resolveHelperBody(helper, f);
+        return !r.err && r.body && r.body.body.includes(marker);
+      })
+      .some(Boolean);
     if (!helperResolved) {
       unknownExits.push(`${name}(${file}) 命令体命中删除标记 [${hit}]，而其 helper 体内已无 is_path_protected——新出口未被棘轮覆盖`);
     }
@@ -352,6 +394,43 @@ if (missing.length > missingCmds.length) {
   console.log(`ℹ 豁免/正向清单内未定位的命令（受控性由登记理由兜住）：${missing.filter((n) => EXEMPTS.has(n) || MUST_PROTECT.includes(n) || HELPER_CMDS.has(n)).join(', ')}`);
 }
 
+// ---- C01 断言组（v7.2）----
+{
+  // C01-a/b：组合闸本体（protect.rs::validate_mutation_target，指名文件——
+  // 同名判定不许歧义）。
+  const validatorPath = path.join(ROOT, 'src', 'engine', 'protect.rs');
+  const validatorSrc = stripRustComments(fs.readFileSync(validatorPath, 'utf8'));
+  const vm = validatorSrc.match(/\bfn\s+validate_mutation_target\s*[<(]/);
+  let validatorBody = '';
+  if (vm) {
+    let i = validatorSrc.indexOf('{', vm.index);
+    let depth = 0;
+    for (; i < validatorSrc.length && i >= 0; i++) {
+      if (validatorSrc[i] === '{') depth++;
+      else if (validatorSrc[i] === '}') { depth--; if (depth === 0) break; }
+    }
+    validatorBody = validatorSrc.slice(vm.index, i);
+  }
+  if (!vm || !validatorBody) {
+    check(false, 'C01-a. 组合闸 validate_mutation_target 在 protect.rs 中定位到', '缺失——共同判据被删，C01 整组回退');
+  } else {
+    const issues = judgeValidatorBody(validatorBody);
+    check(issues.length === 0, 'C01-a. 组合闸四闸俱全且只判定不执行（受保护面→别名面→系统面→reparse，无删除原语）',
+      issues.length ? issues.join('；') : '在位');
+  }
+  // C01-c：成对棘轮（R2a 彻底方案）——residue* 与 pending_delete 的文件面产源/出口，
+  // is_path_protected 与 is_system_namespace 必须共现，出现孤立即红。
+  const pairFiles = srcFiles.filter((f) => /uninstall[/\\](residue|pending_delete)/.test(path.relative(ROOT, f)));
+  const pairIssues = [];
+  for (const f of pairFiles) {
+    for (const issue of judgeProtectPair(stripRustComments(fs.readFileSync(f, 'utf8')))) {
+      pairIssues.push(`${path.relative(ROOT, f).replace(/\\/g, '/')}: ${issue}`);
+    }
+  }
+  check(pairIssues.length === 0, `C01-c. 删除产源/出口两闸成对（is_path_protected ⇄ is_system_namespace，扫 ${pairFiles.length} 个文件）`,
+    pairIssues.length ? pairIssues.join('；') : '全部成对');
+}
+
 console.log('');
 if (fail > 0) {
   console.error('门禁失败：删除出口枚举存在未受控项');
@@ -367,10 +446,23 @@ const POSITIVE_CONTROLS = (() => {
   // ② 真实调用仍然命中
   const sample2 = stripRustComments('fn y() { let _ = remove_file(p); }');
   checks.push(['真实调用仍命中', sample2.includes('remove_file')]);
+  // ③ C01-a：四闸俱全的组合闸放行
+  const goodValidator =
+    'fn validate_mutation_target(p: &str) -> Result<(), String> { if is_path_protected(p) { return Err("x".into()); } if final_path_protected(p) { return Err("x".into()); } if is_system_namespace(p) { return Err("x".into()); } if is_reparse(&md) { return Err("x".into()); } Ok(()) }';
+  checks.push(['C01 四闸俱全的组合闸放行', judgeValidatorBody(stripRustComments(goodValidator)).length === 0]);
+  // ④ C01-a：缺系统面闸必须红（R1d-K01 的病灶形态）
+  const missingSystem = goodValidator.replace('if is_system_namespace(p) { return Err("x".into()); } ', '');
+  checks.push(['C01 缺 is_system_namespace 判红', judgeValidatorBody(stripRustComments(missingSystem)).length > 0]);
+  // ⑤ C01-b：组合闸里塞删除原语必须红（共同判据吞出口形态）
+  const swallowing = goodValidator.replace('Ok(())', 'let _ = remove_file(p); Ok(())');
+  checks.push(['C01 组合闸含删除原语判红', judgeValidatorBody(stripRustComments(swallowing)).length > 0]);
+  // ⑥ C01-c：成对棘轮两向（孤立即红 / 成对放行）
+  checks.push(['C01 成对棘轮：孤立 protect 判红', judgeProtectPair('fn a() { is_path_protected(p); }').length > 0]);
+  checks.push(['C01 成对棘轮：两闸共现放行', judgeProtectPair('fn a() { is_path_protected(p); is_system_namespace(p); }').length === 0]);
   for (const [label, ok] of checks) {
     if (!ok) { console.error(`✗ 正向对照失败：${label}——判定器已失效，本门禁的 ✓ 不可信`); process.exit(1); }
   }
-  console.log('✓ 正向对照自检通过（剥离 + 命中两向）');
+  console.log(`✓ 正向对照自检通过（剥离 + 命中 + C01 四向，共 ${checks.length} 组）`);
   return true;
 })();
 

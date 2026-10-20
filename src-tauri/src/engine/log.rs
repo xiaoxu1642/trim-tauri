@@ -241,8 +241,16 @@ pub fn prune_old_logs() {
         }
         let Ok(meta) = entry.metadata() else { continue };
         let mtime = meta.modified().unwrap_or(SystemTime::now());
-        if mtime < cutoff && fs::remove_file(entry.path()).is_ok() {
-            removed += 1;
+        // R6b-L02（v7.2 C11）：引擎级裁剪一律回收站优先（AGENTS §3，与
+        // delete_manifest / restore_pack 同口径）；reparse 件跳过——链接件进
+        // 回收站等于把它指向的实体卷进来。回收站失败不回退永久删。
+        if mtime < cutoff {
+            let safe = fs::symlink_metadata(entry.path())
+                .map(|m| m.is_file() && !crate::engine::protect::is_reparse(&m))
+                .unwrap_or(false);
+            if safe && trim_finder::scan::recycle::send_to_trash_os(entry.path().as_os_str()).is_ok() {
+                removed += 1;
+            }
         }
     }
     if removed > 0 {
