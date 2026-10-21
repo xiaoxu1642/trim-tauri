@@ -86,7 +86,10 @@ function sliceFn(text, anchorRe, closeAt, label) {
 
 // ── A 组：bgOpacity → 雾化 换算的跨语言口径对拍 ──────────────────────────────
 const RS_APPEARANCE = argPath('--rust', 'src-tauri/src/engine/appearance.rs');
-const JS_PATHBINDING = argPath('--js', 'src/scripts/pathbinding.js');
+// F4a2-L11：外观偏好这一族符号（键表 / 镜像读写 / 增量推 / 雾化换算与迁移）拆分后
+// 整族住在 `pathbinding-appearance.js`；本门禁按**单文件**抽这族符号，路径跟着族的主人走，
+// 不放宽成「多文件里搜一搜」——那会把「这族符号住哪儿」这条契约本身弄丢。
+const JS_PATHBINDING = argPath('--js', 'src/scripts/pathbinding-appearance.js');
 
 function normalizeSpaces(s) { return s.replace(/\s+/g, ' ').trim(); }
 
@@ -348,7 +351,10 @@ console.log('\n[C] 外观域真源迁后端（键表对拍 / 迁移口径 / 四�
   }
   const adoptsBackend = /if\s*\(\s*b\s*!=\s*null\s*\)[\s\S]{0,260}ap\[spec\.key\]\s*=\s*mirrorVal/.test(pathbindingJs);
   const migratesMirror = /migrate\.push\(\s*\[spec\.key\s*,\s*want\]\s*\)/.test(pathbindingJs);
-  const writesBoth = /function saveAppearance[\s\S]{0,260}queueAppearancePush\s*\(/.test(pathbindingJs);
+  // F4a2-L11 拆分后由该代理实测出的**假阴性**：原先写的是 `function saveAppearance[\s\S]{0,260}`
+  // ——前缀匹配，函数被改名成 saveAppearanceV2 也照样命中，等于「只要前缀还在，写入侧就不判红」。
+  // 收成「函数名后必须紧跟左括号」，与 C5 的 queueAppearancePush 同一口径。
+  const writesBoth = /function saveAppearance\s*\([\s\S]{0,260}queueAppearancePush\s*\(/.test(pathbindingJs);
   const oldKeyAlive = /const APPEARANCE_KEY\s*=\s*'trim-appearance'/.test(pathbindingJs);
   if (!adoptsBackend) bad('C6 后端值采纳分支不见了 ⇒ 迁了等于没迁（后端真源不覆盖界面）');
   if (!migratesMirror) bad('C6 后端未设置时的迁移分支不见了 ⇒ 存量用户的状态永远进不了真源');

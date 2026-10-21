@@ -185,7 +185,11 @@
     netcheck: ['scripts/netcheck.js'],
     runtimes: ['scripts/runtimes.js'],
     quickcmds: ['scripts/quickcmds-data.js', 'scripts/quickcmds.js'],
-    settings: ['scripts/pathbinding.js'],
+    // 设置页：路径绑定 + 四个外观面。顺序即依赖序（外观层最先，入口最后装配）；
+    // 两个清单（本表与 IDLE_SCRIPTS）必须同序列全，见 IDLE_SCRIPTS 上方的说明。
+    settings: ['scripts/pathbinding-appearance.js', 'scripts/pathbinding-accent.js',
+      'scripts/pathbinding-background.js', 'scripts/pathbinding-material.js',
+      'scripts/pathbinding-wallpaper.js', 'scripts/pathbinding.js'],
     // Windows设置 页：syspanel.js + 「Windows 更新」三态（走 optimizer.js 的 executeOption；看板渲染依赖 xtable，须前置同注入）。
     'windows-settings': ['scripts/xtable.js', 'scripts/optimizer.js', 'scripts/syspanel.js']
   };
@@ -196,13 +200,20 @@
     'maintenance', 'memoryclean', 'netcheck', 'netspeed', 'optimizer', 'overview',
     'pathbinding', 'quickcmds', 'realtime', 'runtimes', 'startup', 'syspanel', 'sysrestore'
   ]);
-  // 首帧后空闲加载：视觉增强 + 自动更新 UI（不阻塞首帧）。pathbinding 也放这里——cleanup.js 的 QQ/微信文件清理
-  // 会读它的路径配置，空闲期预取可避免用户点扫描时配置还没就位。
+  // 首帧后空闲加载：视觉增强 + 自动更新 UI（不阻塞首帧）。pathbinding 家族也放这里——cleanup.js 的
+  // QQ/微信文件清理会读它的路径配置，空闲期预取可避免用户点扫描时配置还没就位。
+  // 家族内六项的先后就是依赖序：外观层（镜像/真源口径）最先，入口 pathbinding.js 最后装配；
+  // 入口若排前面，init 会在面板模块求值前跑，各面 init 全是 undefined。
   const IDLE_SCRIPTS = [
     'scripts/mouse-trail.js',
     'scripts/tilt.js',
     'scripts/spotlight.js',
     'scripts/updater-ui.js',
+    'scripts/pathbinding-appearance.js',
+    'scripts/pathbinding-accent.js',
+    'scripts/pathbinding-background.js',
+    'scripts/pathbinding-material.js',
+    'scripts/pathbinding-wallpaper.js',
     'scripts/pathbinding.js'
   ];
   const _scriptLoaded = new Set();
@@ -248,7 +259,7 @@
 
   // 脚本加载完成后补一次 init（此前由启动时的 safeInit 统一调用，改成按需加载后必须在这里补，
   // 否则模块只挂了 window.X 却没绑任何事件）。审查 K3：按模块名记账、只放第一次过去 ——
-  // IDLE_SCRIPTS 与 PAGE_SCRIPTS 有交集（pathbinding 同时在两侧），单靠「脚本是否新加载」判不住重复。
+  // IDLE_SCRIPTS 与 PAGE_SCRIPTS 有交集（pathbinding 家族六项同时在两侧），单靠「脚本是否新加载」判不住重复。
   function initModuleByName(name) {
     if (!MODULES_NEEDING_INIT.has(name) || _initedModules.has(name)) return;
     _initedModules.add(name);
