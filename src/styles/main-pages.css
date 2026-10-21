@@ -1767,7 +1767,7 @@
   padding: 0 7px;
   border-radius: var(--radius-btn);
 }
-.maint-nara-banner__btn { margin-left: auto; flex: 0 0 auto; }
+/* .maint-nara-banner__btn 随 2026-10-22 撤横幅一并删除（横幅不再产出该按钮） */
 
 /* 系统维护：批量操作栏（全选 / 已选计数 / 执行选中 / 全部执行 / 取消 / 进度） */
 .maint-batchbar {

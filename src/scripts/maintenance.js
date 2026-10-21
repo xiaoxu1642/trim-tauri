@@ -12,7 +12,6 @@
   // C3：永劫专项面板侧表（hiddenFromMaintenance 过滤用）
   let NARA_PANEL_MAINT = null;
   let NARA_MAINT_FILTERED_IDS = null;  // 被 hiddenFromMaintenance 过滤的 id Set（null=未过滤，Set=过滤过）
-  let NARA_MAINT_FILTERED_TITLES = []; // 被过滤任务的用户可读标题（横幅显示标题，不暴露裸 id）
   const status = new Map();     // taskId -> 'idle'|'running'|'ok'|'warn'|'error'
   const selected = new Set();   // 批量勾选的 taskId（跨分类保留）
   let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested } | null
@@ -226,23 +225,17 @@
     const el = document.getElementById('maintList');
     if (!el) return;
     const list = visibleTasks();
-    // C3：迁移横幅（网络类 3 项已收拢到永劫专项面板）。主窗不挂 ds.css 的 alert/btn 组件，
-    // 用本页 scoped 类 maint-nara-banner + 通用 btn（2026-10-11 真机实测 ds-alert/ds-btn 无样式）。
-    const migrationHint = NARA_MAINT_FILTERED_IDS && NARA_MAINT_FILTERED_IDS.size
-      ? `<div class="maint-nara-banner">
-          <strong>网络类维护任务已收拢</strong>
-          <span>${escapeHtml(NARA_MAINT_FILTERED_TITLES.join('、'))} 已移至「电脑优化中心 → 永劫无间专项」面板</span>
-          <button type="button" class="btn btn-secondary btn-small maint-nara-banner__btn" data-nara-goto>前往</button>
-        </div>` : '';
+    // 2026-10-22 用户裁定：撤下「网络类维护任务已收拢到永劫专项面板」迁移横幅。
+    // 迁移已跨多个版本，新老用户都不需要这条指引（与优化中心 2026-09-27 撤「网络栈优化已移至
+    // 系统维护」横幅同一判断）；被收拢的 3 项仍由 NARA_MAINT_FILTERED_IDS 过滤，功能面不变。
     if (!list.length) {
-      el.innerHTML = migrationHint + (window.emptyState
+      el.innerHTML = (window.emptyState
         ? window.emptyState({ icon: 'search', title: '暂无维护任务', desc: '加载任务清单中，请稍后重试' })
         : '<div class="xtable-empty">暂无任务</div>');
-      bindNaraHintClicks(el);
       return;
     }
     const busy = !!running || !!batch;
-    el.innerHTML = migrationHint + list.map(t => {
+    el.innerHTML = list.map(t => {
       const st = status.get(t.id) || 'idle';
       const isRunning = running === t.id;
       const isSelected = selected.has(t.id);
@@ -287,19 +280,9 @@
         if (task) openMaintDetail(task);
       });
     });
-    bindNaraHintClicks(el);
   }
 
-  // C3：迁移横幅按钮 → 跳转到优化中心（由 app.js 跨页 API 提供）
-  function bindNaraHintClicks(root) {
-    if (!root) return;
-    root.querySelectorAll('[data-nara-goto]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        window.app?.switchPage?.('optimizer');
-      });
-    });
-  }
+  // C3 迁移横幅已按 2026-10-22 用户裁定撤下，其按钮绑定器一并删除（`data-nara-goto` 不再产出）。
 
   // ==================== 批量操作栏 ====================
   function updateBatchbar() {
@@ -594,9 +577,6 @@
           const hiddenIds = new Set(NARA_PANEL_MAINT.hiddenFromMaintenance || []);
           if (hiddenIds.size) {
             NARA_MAINT_FILTERED_IDS = hiddenIds;
-            // 横幅展示用户可读标题（按侧表顺序），拿不到标题才回落 id
-            NARA_MAINT_FILTERED_TITLES = (NARA_PANEL_MAINT.hiddenFromMaintenance || [])
-              .map(id => data.find(t => t.id === id)?.title || id);
             data = data.filter(t => !hiddenIds.has(t.id));
           } else {
             NARA_MAINT_FILTERED_IDS = null;

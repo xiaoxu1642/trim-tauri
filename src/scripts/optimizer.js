@@ -1739,11 +1739,10 @@
   // 的记录保留，下次启动继续提示——还原失败不清账）。
   async function loadStateOverview() {
     if (!window.api?.optimizer?.stateOverview) return;
-    // F4b-U02：先给两条横幅预留等高空槽，异步结果回来时只显示/只隐藏内容，看板不被出没挤动。
+    // F4b-U02（2026-10-22 用户裁定改为「允许收起」）：不再预留给等高槽——横幅只在有内容时出现，
+    // 结果回来若没有内容就整条收起，接受下方看板的一次位移（原「占位等高」口径就此作废）。
     const slotStale = document.getElementById('optimizerStaleBanner');
     const slotRetired = document.getElementById('optimizerRetiredBanner');
-    bannerReserve(slotStale);
-    bannerReserve(slotRetired);
     let overviewOk = false;
     try {
       const resp = await window.api.optimizer.stateOverview();
@@ -1801,16 +1800,15 @@
     window.app?.toast('info', `检测到上次因提权重启中断的优化批次（${valid.length} 项），已恢复勾选，可点「执行所选优化」继续`, 6000);
   }
 
-  // ==================== 横幅占位（F4b-U02，2026-10-21 拍板）====================
-  // 横幅的 display:none↔flex 出没会把下方看板整块挤动（AGENTS §2「会占位的提示条两态必须
-  // 等高或保留占位」同一口径）。改为：收起=保留等高不可见空槽；出提示前按「盒子自身高度 +
-  // 两行实测行高」预留，不写死像素。像素级等高仍需 CSS 定 min-height（跨面）。
+  // ==================== 横幅两态（F4b-U02；2026-10-22 用户改判「允许收起」）====================
+  // 原口径（2026-10-21）是「收起=保留等高空槽，看板不被挤动」。用户 2026-10-22 改判为**允许收起**：
+  // 横幅没内容就整条隐藏、接受下方看板的一次位移——空一块的观感比跳一下更差。
+  // `bannerIdle` 保留成「收起」的语义（调用点不变），`bannerReserve` 已删除（不再预留给等高槽）。
   function bannerIdle(banner) {
     if (!banner) return;
-    const h = banner.offsetHeight;
-    banner.style.display = 'flex';
-    if (h > 0) banner.style.minHeight = h + 'px';
-    banner.style.visibility = 'hidden';
+    banner.style.display = 'none';
+    banner.style.minHeight = '';
+    banner.style.visibility = '';
     banner.style.pointerEvents = 'none';
   }
   function bannerActive(banner) {
@@ -1819,18 +1817,7 @@
     banner.style.visibility = '';
     banner.style.pointerEvents = '';
   }
-  // 预留空槽：只在真的会去读状态总览的路径上调用（预览/降级路径永远不出横幅，不占位）。
-  function bannerReserve(banner) {
-    if (!banner) return;
-    banner.style.display = 'flex';
-    banner.style.visibility = 'hidden';
-    banner.style.pointerEvents = 'none';
-    const span = banner.querySelector('span');
-    const lh = parseFloat(window.getComputedStyle(span || banner).lineHeight);
-    const extra = Number.isFinite(lh) ? lh * 2 : 0;
-    banner.style.minHeight = Math.round(banner.offsetHeight + extra) + 'px';
-  }
-  // 状态总览读不到 ⇒ 本次会话不会有横幅，把预留的空槽释放，不留无谓空白。
+  // 状态总览读不到 ⇒ 本次会话不会有横幅，直接收起。
   function bannerRelease(banner) {
     if (!banner) return;
     banner.style.display = 'none';
