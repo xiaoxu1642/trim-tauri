@@ -698,6 +698,100 @@ mod tests {
         }
     }
 
+    /// 审查 v7 D1-M01：上一条断言只断「清单形状」，**便携档整条失效时它照样绿**。这里补的是可达性。
+    ///
+    /// 根因：asset 协议的 `$APPDATA` 由 Tauri 从 identifier 直接推出（`BaseDirectory::AppData`），
+    /// 完全不感知本仓的便携判定；便携档数据根是 exe 同级 `data`，于是 `backgrounds` / `fonts`
+    /// 两个实际写入目录必然落在任何 allow pattern 之外 —— 症状是背景图与导入字体预览结构性 403。
+    ///
+    /// 为什么便携态那条断言写的是「必须不命中」而不是「必须命中」：`scope` 是编译期静态清单
+    /// （tauri-build 把 conf 烘进二进制），运行期才知道的可移动盘符写不进去。真闭合只能走
+    /// 运行期 `asset_protocol_scope().allow_directory()`（本仓已有同款机制：
+    /// `commands/cleanup/preview_assets.rs` 的逐文件放行），**不是**往 conf 里塞 pattern，
+    /// 也不是把便携根挪回 `%APPDATA%`（那等于取消「数据随盘走」）。
+    ///
+    /// 判红方式：① 从 conf 删掉 `backgrounds/**` ⇒ 标准档 `reached` 少一项；
+    /// ② 把便携根改到 `%APPDATA%` 之下 ⇒ 便携档两条断言同时红（「随盘走」的语义也就没了）。
+    #[test]
+    fn asset_scope_reachability_split_by_data_root_state() {
+        // 静态代理：清单今天的形态是 `$APPDATA/<目录>/**`，`**` 在 Tauri 的
+        // require_literal_separator 下仍跨段命中 ⇒ 可达性退化成「目标目录是否落在该目录之下」。
+        // 形态一变（出现扩展名 glob、单层 `*`、别的根）这个代理就不成立，必须判红逼人来复核，
+        // 不许静默放宽（AGENTS §5.6：glob 语法没实测前宁可不改）。
+        let appdata = appdata_dir();
+        if appdata.as_os_str().is_empty() {
+            eprintln!("skip: 本机无 APPDATA 环境变量，两态数据根无从计算（不判绿也不判红）");
+            return;
+        }
+        let conf = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"))
+            .expect("读不到 tauri.conf.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&conf).expect("tauri.conf.json 不是合法 JSON");
+        let allow = v["app"]["security"]["assetProtocol"]["scope"]["allow"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        // 基目录 = Tauri 展开 `$APPDATA` 的实际落点（已含 identifier，见上一条断言）
+        let base = appdata.join(IDENTIFIER);
+        let mut pattern_dirs: Vec<String> = Vec::new();
+        for item in &allow {
+            let s = item.as_str().unwrap_or("");
+            let rest = s
+                .strip_prefix("$APPDATA/")
+                .unwrap_or_else(|| panic!("asset scope 只能用 $APPDATA 根（当前：{s}）"));
+            let dir = rest
+                .strip_suffix("/**")
+                .unwrap_or_else(|| panic!("清单形态变了，静态代理不再成立、需按上游 glob 语义复核：{s}"));
+            pattern_dirs.push(dir.to_string());
+        }
+        assert!(!pattern_dirs.is_empty(), "asset 清单为空，本断言的口径需要先同步");
+
+        // 目录名的第二处真源：这两个目录同时是「必须随盘走」的迁移对象，名字对不上就是分叉。
+        let served: &[&str] = &["backgrounds", "fonts"];
+        for name in served {
+            assert!(
+                MIGRATION_DIRS.contains(name),
+                "asset 可达目录 {name} 不在迁移清单里：便携档连目录都不会带过去，可达性更无从谈起"
+            );
+        }
+
+        let covered = |dir: &std::path::Path| -> Option<String> {
+            pattern_dirs
+                .iter()
+                .find(|p| dir.starts_with(base.join(p.as_str())))
+                .cloned()
+        };
+
+        // 标准档：两个目录各必须命中一条 pattern，命中对象点名到目录名（不是「没报错」）。
+        let standard_root = base.clone();
+        let mut reached_standard: Vec<String> = Vec::new();
+        for name in served {
+            if let Some(p) = covered(&standard_root.join(name)) {
+                reached_standard.push(format!("{name}<-{p}"));
+            }
+        }
+        assert_eq!(
+            reached_standard.len(),
+            served.len(),
+            "标准档 asset 可达性缺口（实际命中：{reached_standard:?}，应为 backgrounds/fonts 各一条）"
+        );
+
+        // 便携档：数据根 = exe 同级 data（这里直接算，不走 app_data_dir()——lib 单测下它返回隔离根）。
+        let portable_root = exe_dir().join("data");
+        assert!(
+            !portable_root.starts_with(&appdata),
+            "便携根落回 %APPDATA% 之下 ⇒ 「数据随盘走」不成立，本断言与上面的标准档口径都要重定：{portable_root:?}"
+        );
+        let reached_portable: Vec<String> = served
+            .iter()
+            .filter_map(|name| covered(&portable_root.join(name)).map(|p| format!("{name}<-{p}")))
+            .collect();
+        assert!(
+            reached_portable.is_empty(),
+            "静态清单居然覆盖了便携根 —— 说明有人往 conf 里塞了非 $APPDATA 根或改了便携根，运行期放行这条腿的必要性必须重新裁决：{reached_portable:?}"
+        );
+    }
+
     /// v2-M19 备份根收口的口径：写入恒新根，读取第一位=写入根、后面挂老根兜底。
     /// 两根在开发/标准形态下必然不同（`com.xiaoxu.trim` vs `Trim`），所以候选是 2 条；
     /// 断言写成"包含老根"而不是"第二条就是老根"，是为了让以后加第三本历史根（CleanTool）

@@ -41,8 +41,23 @@ pub(crate) const AI_ENGINE_ORDER: &[&str] = &["baidu", "metaso", "zhihu"];
 pub(crate) const AI_MODEL_KEYS: &[&str] = &["baidu_pro", "zhihu", "metaso", "custom"];
 
 /// UI 偏好键白名单（v4 P2-13 渲染层真源迁移；get/set 两命令同源，防任意写）。
-/// 消费方：startup（防恢复三键合一）/ residue 副窗（备份开关）/ liquid-glass / mouse-trail。
-pub(crate) const PREF_KEYS: &[&str] = &["startupDefend", "residueBackupPack", "liquidMotion", "mouseTrail"];
+/// 消费方：startup（防恢复三键合一）/ residue 副窗（备份开关）/ liquid-glass / mouse-trail /
+/// 卸载页（还原点开关）。
+///
+/// `uninstallRestorePoint`（v7.2 P1 · F4a1-M08 的后端一半）：它与 `residueBackupPack` 是
+/// **同一类东西**——都决定「删除动作前是否先给用户加一层保护」，判定形状也相同
+/// （布尔、读不到按未开启最保守）。原先它只活在渲染层 `localStorage` 的
+/// `trim.uninstall.restorePoint`，一次存储被清就把开关静默拨回关，卸载前不再建还原点，
+/// 而界面上的勾选框会跟着一起跑。AGENTS §0.2 的红线是「配置真源在数据目录，
+/// localStorage 只是镜像」，所以这里给它留位；**渲染层改为读写本键并把老键降级为镜像
+/// 属跨面**（本批不改 `src/**`），老键在迁移完成前不得删除，否则直接断掉存量用户的状态。
+pub(crate) const PREF_KEYS: &[&str] = &[
+    "startupDefend",
+    "residueBackupPack",
+    "uninstallRestorePoint",
+    "liquidMotion",
+    "mouseTrail",
+];
 
 /// settings:get-prefs —— UI 偏好键的批量读取（五窗可调：副窗也要读）。
 /// 缺失键返回 null（前端据此区分「未设置」与「已设置」）。

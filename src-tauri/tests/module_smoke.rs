@@ -167,8 +167,9 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
 
 // ==================== P2-13：UI 偏好键后端真源（get-prefs / set-pref） ====================
 
-/// 形状断言：get-prefs 必须把**四个白名单键**全部带回（值为 null 也算在场）——
+/// 形状断言：get-prefs 必须把**全部白名单键**带回（值为 null 也算在场）——
 /// 缺键会让渲染层把「未设置」读成 undefined 再塌成默认值，三态语义就没了。
+/// 断的是 keys 全表，所以 `PREF_KEYS` 增删键时必须同步改这里，别把条数写死进注释。
 /// （只读命令，读的是真实 settings.json，与 settings_load 同列的零副作用读。）
 #[test]
 fn settings_get_prefs_shape_lists_all_whitelist_keys() {
@@ -180,8 +181,60 @@ fn settings_get_prefs_shape_lists_all_whitelist_keys() {
     keys.sort();
     assert_eq!(
         keys,
-        ["liquidMotion", "mouseTrail", "residueBackupPack", "startupDefend"],
-        "白名单四键必须逐个在场（值为 null 也算在场）: {res}"
+        [
+            "liquidMotion",
+            "mouseTrail",
+            "residueBackupPack",
+            "startupDefend",
+            "uninstallRestorePoint",
+        ],
+        "白名单全部键必须逐个在场（值为 null 也算在场）: {res}"
+    );
+}
+
+/// F4a1-M08（v7.2 P1）：新增的 `uninstallRestorePoint` 与 `residueBackupPack` 同形状，
+/// 所以「键进白名单」和「值形状闸」是一对约束——谁能单独放宽一侧，另一侧就失真
+/// （把布尔键改成收字符串 = 借体积闸灌任意形状进 settings.json，R1a-L09 的闸等于被拆）。
+/// 这条同时钉住老 `localStorage` 键名不得被当成后端键接受，防迁移期出现两套真源。
+///
+/// 进 `#[ignore]` 而不是快速组：`set-pref` 是写盘命令（§4.2 纪律②）。写的是集成测试
+/// 注入的 `TRIM_TEST_DATA_ROOT`，不碰用户真实 `settings.json`，但仍算触盘。
+#[test]
+#[ignore = "写 settings.json（集成测试注入的数据根，非用户真实目录），发布前门禁跑"]
+fn settings_set_pref_accepts_only_boolean_for_restore_point_key() {
+    let w = main_window();
+    // 正向：布尔必须收（新键与 residueBackupPack 同形状）
+    let ok = invoke(
+        &w,
+        "settings_set_pref",
+        json!({ "key": "uninstallRestorePoint", "value": false }),
+    );
+    assert_eq!(ok["success"], json!(true), "布尔值必须被收: {ok}");
+    // 反向对照：字符串必须被值形状闸拒（拒的是形状，不是键名）
+    let bad = invoke(
+        &w,
+        "settings_set_pref",
+        json!({ "key": "uninstallRestorePoint", "value": "1" }),
+    );
+    assert_eq!(
+        bad["success"],
+        json!(false),
+        "非布尔值不得进 PREF_KEYS 白名单键: {bad}"
+    );
+    assert!(
+        common::message_of(&bad).contains("必须是布尔"),
+        "拒绝理由必须点名值形状，实得 {bad}"
+    );
+    // 未知键仍然当场拒（新键进表不等于把白名单打开）
+    let unknown = invoke(
+        &w,
+        "settings_set_pref",
+        json!({ "key": "trim.uninstall.restorePoint", "value": true }),
+    );
+    assert_eq!(
+        unknown["success"],
+        json!(false),
+        "老 localStorage 键名不得被当成后端键接受: {unknown}"
     );
 }
 

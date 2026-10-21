@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "注册表键归属表（M4/M5，2026-09-14 优化中心重复点审查）。背景：同一个注册表键被两个模块各自写入自己的值名时，任何一方的「还原」都会按整键回滚或连坐删掉对方写入的值，且用户无从判断该值当初是谁写的。本表为共享键逐值声明唯一写入方。v2-L4P-42（C-7）勘误：原注释声称由一个专设校验脚本（连同 npm test，均随 Electron 时代退役、盘上已不存在）校验，本表当前**无自动校验**，仅有 check-data-parity.mjs 的「无对拍对象」显式提示；改动只能靠人工核对，勿再引用虚无脚本。新增共享键时在此登记并人工核对写入方唯一性。",
+  "_comment": "注册表键归属表（M4/M5，2026-09-14 优化中心重复点审查）。背景：同一个注册表键被两个模块各自写入自己的值名时，任何一方的「还原」都会按整键回滚或连坐删掉对方写入的值，且用户无从判断该值当初是谁写的。本表按「键 + 值名」逐条登记写入方：owner 只记主导方。v7 审查 D1-M02 修正：旧文本「本表为共享键逐值声明唯一写入方」与现行数据自相矛盾——表里允许（也确实存在）同一值名有两个写入方，此时 owner 不再是排他声明，双方与还原次序必须在 note 里点名（现算唯一一例见 MOUSEDATAQUEUESIZE）。角色说明：本表零消费方（既不进任何 include_str!，也没有运行期读取，conf 无 bundle.resources ⇒ 连安装包都不进），是给人读的台账而不是运行期数据；把它当运行期数据对待的判据一律不成立。v2-L4P-42（C-7）勘误：原注释声称由一个专设校验脚本（连同 npm test，均随 Electron 时代退役、盘上已不存在）校验，本表当前**无自动校验**，仅有 check-data-parity.mjs 的「无对拍对象」显式提示；改动只能靠人工核对，勿再引用虚无脚本。新增键值时在此登记并人工核对写入方是否唯一；不唯一就按上面的口径把双方与还原次序都写进 note，勿只填一个 owner。",
   "modules": {
     "optimizer": "电脑优化中心（写入目录真源 src-tauri/data/optimizer-runtime.json；上游基线 vendor/upstream-js/src/scripts-powershell/optimizer-scripts.js 的 OPTIONS，经 sync-ps-from-js 同步生成 src-tauri/ps 内嵌脚本）",
     "maintenance": "系统维护（写入任务真源 src-tauri/data/maintenance-tasks.json；上游基线 vendor/upstream-js/src/scripts-powershell/maintenance-scripts.js 的 TASKS）",
