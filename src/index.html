@@ -2,13 +2,13 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="theme-color" content="#f3f3f3" />
+  <meta name="theme-color" content="#F6F4FB" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file: asset: http://asset.localhost; font-src 'self' file: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; frame-src https://www.speedtest.cn https://test.ustc.edu.cn;" />
   <title>Trim</title>
   <link rel="icon" href="./assets/ico/Trim.ico" />
   <link rel="stylesheet" href="styles/main.css" />
   <!-- P0 子窗 CSS 按需：主窗专属页面样式单独一份，排在 main.css 之后、ds.css 之前
-       （层叠顺序与拆分前一致）；四个子窗不链接本文件，各自少解析 91,480 B。 -->
+       （层叠顺序与拆分前一致）；三个子窗不链接本文件，收益现算（wc -c 该文件）不手抄。 -->
   <link rel="stylesheet" href="styles/main-pages.css" />
   <link rel="stylesheet" href="styles/ds.css" />
   <!-- LiteBox 图片灯箱（vendor 自 OblivionOcean/LiteBox v1.0.8，MIT，纯原生零依赖）。
@@ -1524,20 +1524,20 @@
   </div>
 
   <!-- v3.7.0 议题五：渲染脚本按需加载（清单见 app.js 的 PAGE_SCRIPTS / IDLE_SCRIPTS，字节由门禁现算）。
-       两条硬约束：splash.js 是 body 末尾脚本第一个；ds.js 先于一切 window.ds 使用方。
-       v3 C：清理域两份脚本也从本文件摘出、按需注入。 -->
+       硬约束：tauri-api.js 是 body 末尾第一个脚本、splash.js 第二（F3-L06 统一口径）；
+       ds.js 先于一切 window.ds 使用方。v3 C：清理域两份脚本也从本文件摘出、按需注入。 -->
   <!-- Tauri 适配层（迁移方案 D1，Phase 0 起）：脚本链最前加载，完整复刻 window.api；
-       Electron 下自动 no-op（由 preload.js 接管），不影响双轨。不使用 window.ds，
+       桥未就绪时自动 no-op，不影响双轨。不使用 window.ds，
        不打破 ds.js 先于其使用方的约束。 -->
   <!-- 性能批次①（2026-10-14）：body 末尾这批标签统一加 defer —— 下载与 HTML 解析并行，
-       执行序仍按文档序，所以「ds.js 先于 window.ds 使用方」「splash.js 是 body 末尾第一
-       个执行」两条硬约束不破；defer 脚本必在 DOMContentLoaded 之前执行完，黑闪握手
+       执行序仍按文档序，所以「ds.js 先于 window.ds 使用方」「tauri-api 第一、splash 第二」
+       硬约束不破；defer 脚本必在 DOMContentLoaded 之前执行完，黑闪握手
        （tauri-api.js 的 notifyFirstPaint 等的就是 DCL）不受影响。
        动态注入的 PAGE_SCRIPTS / IDLE_SCRIPTS 永远晚于 defer，方向安全。
-       body 最顶上的 theme-boot.js 刻意不加 defer：它要在首次绘制前把主题类挂上，
-       加 defer 会让它晚于首帧，出现「先白后暗」闪。 -->
+       theme-boot.js 在 body 内同步执行、无 defer（首屏门禁 F2 的豁免位）：它要在首次
+       绘制前把主题类挂上，加 defer 会让它晚于首帧，出现「先白后暗」闪。 -->
   <script src="scripts/tauri-api.js" defer></script>
-  <!-- 启动页（v2.7.0）：独立无依赖，最先执行，盖住整窗直到 FLIP 落位完成 -->
+  <!-- 启动页（v2.7.0）：独立无依赖，defer 序仅晚于 tauri-api.js，盖住整窗直到 FLIP 落位完成 -->
   <script src="scripts/splash.js" defer></script>
   <!-- 硬约束（审查 2-6）：ds.js（window.ds 设计系统运行时）必须先于一切 window.ds 使用方加载（theme/modal/xtable 等） -->
   <script src="scripts/ds.js" defer></script>

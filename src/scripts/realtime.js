@@ -58,6 +58,7 @@
     lossBusy: false,
     mockT: 0,
     lastErrAt: 0,         // 采集失败节流时间戳
+    lossErrAt: 0,         // 丢包检测失败节流时间戳（L09：静默≠正常，失败要留痕）
     elevationAsked: false, // 是否已提示过提权
     recording: false,     // 是否正在记录网速数据
     recordStart: 0,       // 本次记录开始时间戳
@@ -299,7 +300,13 @@
           };
         }
       } catch (e) {
-        // 丢包检测失败不阻断流量监控，静默
+        // 丢包检测失败不阻断流量监控，但「只有注释的静默」会把持续故障伪装成正常
+        // （同文件采样失败有节流 toast，这里至少补一条同口径节流的 warn 日志）
+        const now = Date.now();
+        if (now - state.lossErrAt > 10000) {
+          state.lossErrAt = now;
+          window.app?.log?.('warn', '丢包检测失败: ' + ((e && e.message) || e));
+        }
       }
     }
     // 审查 2026-09-27 L3：预览模式模拟丢包的 else 分支已删——Tauri 轨 window.api
@@ -772,8 +779,10 @@
       footerHtml: `
           <span class="pw-last-scan"></span>
           <span class="model-picker-spacer"></span>
-          <button class="btn btn-primary rt-close-btn" type="button">关闭</button>`
+          <button class="btn btn-primary rt-close-btn" type="button">关闭</button>`,
+      onClose() { reportCtrls.delete(ctrl); }
     });
+    reportCtrls.add(ctrl);
     ctrl.footer.querySelector('.rt-close-btn').addEventListener('click', () => ctrl.close());
     // 渲染图表（等待布局完成）
     requestAnimationFrame(() => {
@@ -824,8 +833,10 @@
           <span class="pw-last-scan">${loadError ? '读取失败' : `共 ${reports.length} 份 · 超 7 天自动清理`}</span>
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary rt-clear-all" type="button">清空全部</button>
-          <button class="btn btn-primary rt-close-btn" type="button">关闭</button>`
+          <button class="btn btn-primary rt-close-btn" type="button">关闭</button>`,
+      onClose() { reportCtrls.delete(ctrl); }
     });
+    reportCtrls.add(ctrl);
     const backdrop = ctrl.backdrop;
     ctrl.footer.querySelector('.rt-close-btn').addEventListener('click', () => ctrl.close());
     // 查看详情
@@ -912,8 +923,15 @@
     });
   }
 
+  // v3.2.0：工厂弹窗关闭即销毁 DOM。兜底清理必须走 ctrl.close() 而不是 el.remove()——
+  // el.remove() 会让 modal 工厂的 document keydown Esc 监听不摘、focusTrap.release()
+  // 不调（焦点不归还），每开一次历史报告/详情就留一条僵尸监听（F4b-L01）。
+  const reportCtrls = new Set();
+
   function closeReportBackdrops() {
-    // v3.2.0：工厂弹窗关闭即销毁 DOM，此处兜底清理残留在文档中的报告弹窗
+    reportCtrls.forEach(c => { try { c.close(); } catch (e) { /* 已关闭的实例忽略 */ } });
+    reportCtrls.clear();
+    // 兜底：不在登记里的陈旧 .rt-report-backdrop（理论上不应存在）直接摘 DOM
     document.querySelectorAll('.rt-report-backdrop').forEach(el => el.remove());
   }
 

@@ -93,6 +93,38 @@ export function judgeOverlap(staticRels, onDemand) {
   const set = new Set(staticRels);
   return [...onDemand].filter((r) => set.has(r));
 }
+/** F5：首帧握手唯一性（F3-M08）。入参为**剥过注释**的 tauri-api.js 与 app.js 源码。
+ *  规则：① notifyFirstPaint() 的调用有且只有 1 处（守卫曾把症状盖住——后端只认首个
+ *  通知，但白名单/审计看到的是「一次握手发了两回」）；② 幂等守卫必须与 notifyFirstPaint
+ *  **同作用域**（本件整体包在 IIFE 里，「模块作用域」= IIFE 体内，文件深度恒非 0；
+ *  `var sent` 缩进函数体内 = 每次 call 一份新标志，假幂等）；③ app.js 不得再有调用点。 */
+export function judgeFirstPaintHandshake(apiCode, appCode) {
+  const bad = [];
+  const depthAt = (code, idx) => {
+    let d = 0;
+    for (let i = 0; i < idx; i++) {
+      const c = code[i];
+      if (c === '{' || c === '(' || c === '[') d++;
+      else if (c === '}' || c === ')' || c === ']') d--;
+    }
+    return d;
+  };
+  const invocations = [...apiCode.matchAll(/notifyFirstPaint\s*\(\s*\)\s*;/g)].length;
+  if (invocations !== 1) bad.push(`tauri-api.js 里 notifyFirstPaint() 调用 ${invocations} 处 ≠ 1`);
+  const fnDecl = apiCode.match(/function\s+notifyFirstPaint\s*\(/);
+  if (!fnDecl) bad.push('tauri-api.js 里找不到 notifyFirstPaint 定义');
+  const decl = apiCode.match(/var\s+firstPaintSent\b/);
+  if (!decl) {
+    bad.push('tauri-api.js 里找不到 firstPaintSent 守卫声明');
+  } else if (fnDecl && depthAt(apiCode, decl.index) !== depthAt(apiCode, fnDecl.index)) {
+    bad.push(`firstPaintSent 守卫（深度 ${depthAt(apiCode, decl.index)}）与 notifyFirstPaint 定义（深度 ${depthAt(apiCode, fnDecl.index)}）不同作用域 —— 守卫缩进函数体内 = 每次 call 一份新标志，假幂等`);
+  }
+  // app.js 侧判「出现即违例」：剥注释后任何形态（直接调用、`?.()` 可选链、别名引用）
+  // 都算残留触发点，不给调用写法留缝（2026-10-21 破坏验证实测 `?.()` 漏判后收紧）
+  const appCalls = [...appCode.matchAll(/notifyFirstPaint\b/g)].length;
+  if (appCalls > 0) bad.push(`app.js 里仍有 ${appCalls} 处 notifyFirstPaint 引用（只许 tauri-api.js 末尾发一次）`);
+  return bad;
+}
 
 // ---------- 解析 ----------
 function parseHtml() {
@@ -164,6 +196,21 @@ function selfCheck() {
   // F4
   expect('F4 重叠未命中', judgeOverlap(['scripts/a.js'], new Set(['scripts/a.js'])), ['scripts/a.js']);
   expect('F4 无重叠误报', judgeOverlap(['scripts/a.js'], new Set(['scripts/b.js'])), []);
+  // F5（F3-M08）：合规样本 + 三种违例形态
+  const okApi =
+    'var firstPaintSent = false; function notifyFirstPaint() { if (firstPaintSent) return; firstPaintSent = true; } notifyFirstPaint();';
+  expect('F5 合规样本误报', judgeFirstPaintHandshake(okApi, ''), []);
+  expect(
+    'F5 双调用未命中',
+    judgeFirstPaintHandshake('var firstPaintSent = false; function notifyFirstPaint() {} notifyFirstPaint(); notifyFirstPaint();', '').length > 0,
+    true,
+  );
+  expect(
+    'F5 守卫缩回函数体内（假幂等）未命中',
+    judgeFirstPaintHandshake('function notifyFirstPaint() { var firstPaintSent = false; if (firstPaintSent) return; firstPaintSent = true; } notifyFirstPaint();', '').length > 0,
+    true,
+  );
+  expect('F5 app.js 残留调用未命中', judgeFirstPaintHandshake(okApi, 'notifyFirstPaint();').length > 0, true);
 
   if (problems.length) {
     g.fail(`正向对照自检失效（本门禁的断言不可信）：\n  ${problems.join('\n  ')}`);
@@ -181,7 +228,7 @@ if (!g.skipUnlessPresent(HTML, 'src/index.html')) {
   process.exit(0);
 }
 const { groups: selfGroups } = selfCheck();
-g.ok(`正向对照自检 ${selfGroups} 组全部命中（F2 违例必红 + 合规必放行、F1 超上限 + 跌破下限 + 干净放行、F4 重叠必红 + 无重叠放行）`);
+g.ok(`正向对照自检 ${selfGroups} 组全部命中（F2 违例必红 + 合规必放行、F1 超上限 + 跌破下限 + 干净放行、F4 重叠必红 + 无重叠放行、F5 合规放行 + 双调用/假幂等/残留调用必红）`);
 
 const { scripts, css, htmlSize } = parseHtml();
 
@@ -226,6 +273,17 @@ if (!od.okPage || !od.okIdle) {
   const dup = judgeOverlap(scripts.map((s) => s.rel), od.set);
   if (dup.length) g.fail(`F4 ${dup.length} 个脚本既在 index.html 静态挂载、又在按需清单里（白挂字节或没摘净）：${JSON.stringify(dup)}`);
   else g.ok(`F4 首屏清单与按需清单（${od.set.size} 项）无重叠`);
+}
+
+// F5 首帧握手唯一性（F3-M08）：判前先剥注释——注释里引用函数名属文档，不是调用点
+{
+  const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+  const fpBad = judgeFirstPaintHandshake(
+    strip(readFileSync(join(SRC, 'scripts', 'tauri-api.js'), 'utf8')),
+    strip(readFileSync(join(SRC, 'scripts', 'app.js'), 'utf8')),
+  );
+  if (fpBad.length) g.fail(`F5 首帧握手唯一性破坏：${fpBad.join('；')}`);
+  else g.ok('F5 首帧握手触发点唯一（tauri-api.js 末尾 1 处）、守卫 firstPaintSent 在模块作用域、app.js 无残留调用');
 }
 
 g.finish('首屏门禁全部通过');

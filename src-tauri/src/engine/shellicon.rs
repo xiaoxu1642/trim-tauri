@@ -34,6 +34,29 @@
 //!
 //! 失效与损坏一律静默降级（§6 只读缓存口径）：读失败或 PNG 魔数不符删文件回提取，
 //! 写失败只影响这一次不重试。孤儿（升级后换键留下的旧文件）按写入计数批量回收。
+//!
+//! ## 入参契约（R6b-M11，此前实现侧留空、注释侧被别处宣称）
+//!
+//! 本模块的两条公开入口会把入参交给 `SHGetFileInfoW(SHGFI_ICON)` / `ExtractIconExW`。
+//! 前者问的是**外壳**：它会走该文件类型注册的 `IExtractIcon` 处理器，也就是说
+//! 「交进来一个路径」= 「驱动外壳去解析这个路径」，可能加载第三方扩展。所以：
+//!
+//! - **本模块自己只守一条**：交进来的必须是普通文件系统路径（[`guard_icon_source`]：
+//!   非空、绝对、非 `::` 外壳命名空间形态、且能被 `protect::normalize_for_compare`
+//!   判定形态——判不出来的设备路径/不可折回命名空间按 fail-closed 拒）。
+//!   这条拦不住「合法路径但不该被图标链加载」那种情况，那是下一层的活。
+//! - **域内白名单归调用方**，现算三个调用点各自的来源可信度不同：
+//!   `commands/paths.rs` 的应用图标候选清单（内部拼出来的绝对路径）、
+//!   `commands/paths.rs` 的 `paths:file-icon`（**渲染层任意串**）、
+//!   `commands/contextmenu.rs` 的 CLSID `InprocServer32` 展平值（注册表内容）。
+//!   谁给的路径、能不能加载，由那一侧设闸——本模块**不设系统目录/扩展名白名单**，
+//!   因为图标链的合法来源本来就在 `%WINDIR%`（`shell32.dll,-1` 这类经典引用）与
+//!   `.ico/.exe/.dll/目录` 四个面之内，按「非白名单扩展名一律拒」会在自己的调用点上打断功能。
+//! - 另需如实记一笔：`engine/protect.rs` 在 K01（右键图标资源串 `@C:\…\x.dll,-1`）
+//!   那段把「白名单外一律不加载 DLL」列为该判据的消费方之一，而现算
+//!   `is_system_namespace` 的消费点**不含任何图标链** —— 那条约束目前在注释里、
+//!   不在代码里。要把它落成闸门，得在调用点侧统一加 `guard_icon_source` + 域内白名单
+//!   （跨面改动，本批只在单元内补了命名空间这一条）。
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -58,9 +81,40 @@ unsafe fn destroy_icon_logged(hicon: HICON) {
     }
 }
 
+/// 图标来源的**命名空间约束**（R6b-M11）：`None` = 放行，`Some(原因)` = 拒。
+///
+/// 判据一律复用 `protect::normalize_for_compare` 的 fail-closed 契约（`!ok` 即拦），
+/// 本模块**不另立一套路径分类**（AGENTS §5.16）。它管的是「这条串能不能当成文件系统
+/// 路径交给外壳」，不是「这个文件允不允许被加载」——后者归调用方，见模块头「入参契约」。
+pub fn guard_icon_source(path: &Path) -> Option<&'static str> {
+    let raw = path.to_string_lossy();
+    if raw.trim().is_empty() {
+        return Some("路径为空");
+    }
+    // 外壳命名空间形态（`::{GUID}…`）不是文件系统路径：它按 PIDL 解析，驱动的是外壳
+    // 文件夹而不是某个文件。归一化函数不会把它判成不可折回形态（它连盘符都没有），
+    // 所以这一条必须单独拦，且必须拦在归一化之前。
+    if raw.starts_with("::") {
+        return Some("外壳命名空间路径（:: 前缀）不作为图标来源");
+    }
+    let n = crate::engine::protect::normalize_for_compare(&raw);
+    if !n.ok {
+        return Some("路径形态无法判定（设备路径 / 不可折回命名空间），已拒绝");
+    }
+    // 相对路径会按**当前工作目录**解析：图标请求是渲染层发的，工作目录不是它能预测的，
+    // 「按 CWD 拼出来的那个文件」既可能命中无关文件也可能根本不存在，一律不收
+    if !path.is_absolute() {
+        return Some("图标来源必须是绝对路径（相对路径按当前工作目录解析）");
+    }
+    None
+}
+
 /// 提取文件/目录图标并编码为 PNG dataURL（外壳视角：文件类型图标）。
 /// 失败返回 Err（调用方按 `{success:false, dataUrl:null}` 回落，与 Electron 版一致）。
 pub fn file_icon_data_url(path: &Path) -> Result<String, String> {
+    if let Some(reason) = guard_icon_source(path) {
+        return Err(format!("图标来源不受信: {reason}"));
+    }
     icon_data_url_cached("shell", path, shell_icon_png)
 }
 
@@ -68,6 +122,9 @@ pub fn file_icon_data_url(path: &Path) -> Result<String, String> {
 /// 右键菜单 CLSID 图标链用：`InprocServer32` 指向的 dll/exe 要显示它自己带的图标，
 /// 不是「DLL 文件类型」图标。文件没有内嵌图标时返回 Err，由调用方决定回落姿势。
 pub fn first_icon_data_url(path: &Path) -> Result<String, String> {
+    if let Some(reason) = guard_icon_source(path) {
+        return Err(format!("图标来源不受信: {reason}"));
+    }
     icon_data_url_cached("pe-first", path, |p| {
         if !p.is_file() {
             return Err("路径不是已存在的文件".into());
@@ -436,6 +493,84 @@ mod tests {
     fn 缺件必须报错而不是交出空图() {
         assert!(first_icon_data_url(Path::new(r"C:\不存在\a.dll")).is_err());
         assert!(file_icon_data_url(Path::new(r"C:\不存在\a.dll")).is_err());
+    }
+
+    /// R6b-M11：单元内必须有一条命名空间约束（此前两条公开入口只做 `exists()`/`is_file()`，
+    /// 等于「任何串都可以驱动外壳」）。这里判红的是**拦得住什么**与**放行必须放什么**：
+    /// 把 `guard_icon_source` 整个删掉 ⇒ 前三组断言红；把绝对路径那条判据写严成
+    /// 「必须有扩展名」⇒ 目录那组红（图标链的合法来源里本来就有目录与 `.ico`）。
+    #[test]
+    fn 图标来源必须先是普通文件系统路径() {
+        // 拦：设备路径 / 不可折回命名空间 / 外壳命名空间串 / 相对路径 / 空串
+        let hostile = [
+            r"\\.\PhysicalDrive0",
+            r"\\.\PIPE\x",
+            r"\??\C:\Windows\System32\shell32.dll",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\a.dll",
+            r"\\?\GLOBALROOT\Device\Harddisk0\a.dll",
+            "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+            r"::\Control Panel",
+            r"app.exe",
+            r"a\b\c.dll",
+            "",
+            "   ",
+        ];
+        for h in hostile {
+            let got = guard_icon_source(Path::new(h));
+            assert!(got.is_some(), "命名空间约束放过了 {h:?}");
+        }
+        // 两条公开入口自己也要在**触盘之前**把它拒掉，且点名理由
+        let dev = first_icon_data_url(Path::new(r"\\.\PhysicalDrive0")).unwrap_err();
+        assert!(dev.contains("图标来源不受信"), "PE 通道未走闸门: {dev}");
+        let pidl = file_icon_data_url(Path::new("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")).unwrap_err();
+        assert!(pidl.contains("外壳命名空间"), "外壳通道未拦 PIDL 形态: {pidl}");
+
+        // 放：本域真实需要的四类来源。少放任何一类都会在自己的调用点上打断功能
+        // （paths:app-icon 的目录兜底、paths:file-icon 的 .ico、contextmenu 的系统 DLL）
+        let windir = std::env::var("SystemRoot").unwrap_or_default();
+        let has_windir = !windir.is_empty() && Path::new(&windir).is_dir();
+        let mut allowed: Vec<String> = vec![
+            r"C:\Program Files\Some App\app.exe".to_string(),
+            r"C:\Some Dir\icon.ico".to_string(),
+            r"C:\Program Files\Some App".to_string(),
+            r"\\srv\share\app.dll".to_string(),
+        ];
+        if has_windir {
+            // SystemRoot 取不到时不塞这条：拼出来的是「\System32\…」这种非绝对串，
+            // 会被闸门正当拒掉，那样用例红在样本而不是红在实现
+            allowed.insert(0, format!(r"{windir}\System32\shell32.dll"));
+        }
+        for a in &allowed {
+            assert!(guard_icon_source(Path::new(a)).is_none(), "闸门误拒合法图标来源: {a}");
+        }
+        assert!(allowed.len() >= 4, "放行的样本太少，这条断言等于没测: {}", allowed.len());
+    }
+
+    /// 真机探针：闸门不得挡住本域实际要提图标的三类来源（系统 DLL / 应用 EXE / 目录），
+    /// 并且加了闸门之后两条通道的产出仍与闸门前的口径一致（能拿到 dataURL）。
+    /// 单测只能断词法形态，「`SHGetFileInfoW` 会不会因为这条判据收不到图」必须实机看。
+    /// 只跑档位：`cargo test --lib -- --ignored`（发布前门禁）。
+    #[test]
+    #[ignore = "真实调用 Win32 图标 API（只读），发布前门禁跑"]
+    fn 真机_闸门不挡合法图标来源() {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let samples = [
+            PathBuf::from(&root).join("System32").join("shell32.dll"),
+            PathBuf::from(&root).join("explorer.exe"),
+            PathBuf::from(&root).join("System32"), // 目录：外壳发通用文件夹图标
+        ];
+        let mut probed = 0usize;
+        for p in &samples {
+            if !p.exists() {
+                println!("{}: 缺件，跳过", p.display());
+                continue;
+            }
+            assert!(guard_icon_source(p).is_none(), "闸门误拒 {}", p.display());
+            let shell = file_icon_data_url(p).expect("外壳通道必须出图");
+            assert!(shell.starts_with("data:image/png;base64,"), "dataURL 前缀不对: {}", p.display());
+            probed += 1;
+        }
+        assert!(probed >= 2, "实机样本不足（probed={probed}），闸门未挡功能的结论不成立");
     }
 
     // ===== 磁盘缓存 =====

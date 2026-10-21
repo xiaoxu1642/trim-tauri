@@ -2,8 +2,17 @@
 //!
 //! 读取损坏时先隔离（quarantine）再降级空对象；`bgOpacity` 是历史遗留的
 //! 「图片不透明度」语义，需一次性换算为「雾化强度」（0=纯图，100=全雾），
-//! 用 `bgOpacityFog` 标记防重复迁移——与渲染层 pathbinding 的 localStorage
-//! 迁移同款换算，两侧镜像必须一致。
+//! 用 `bgOpacityFog` 标记防重复迁移。
+//!
+//! R6b-L07 如实记录（旧自述写的是「与渲染层 pathbinding 同款换算，两侧镜像必须一致」，
+//! 那句话既没说清差异、也没有任何东西保证它）：
+//! - Rust 侧换算是 [`bg_opacity_to_fog`]，本文件唯一一份，带 `.round()`；
+//! - 渲染层 `src/scripts/pathbinding.js` 的同名迁移是 `100 - ap.bgOpacity`，
+//!   **不取整**、非数值走 JS 强转（Rust 侧 `as_f64` 取不到就直接跳过不迁）；
+//! - 现算**没有任何门禁对拍这两处**，所以「一致」只是巧合级别的近似：整数 `bgOpacity`
+//!   两边同值，小数才会分叉（如 33.4 → Rust 67 / JS 66.6）。
+//! 真要收口只有两条路：把渲染层那条改成调用同一口径（跨语言只能共享判据文本，
+//! 见 AGENTS §5.16），或加一条 Node 门禁对拍两侧向量。本批只做 Rust 侧单一真源 + 措辞更正。
 
 use serde_json::Value;
 
@@ -72,6 +81,17 @@ pub fn normalize_material(raw: Option<&str>) -> String {
     }
 }
 
+/// `bgOpacity`（图片不透明度）→ 雾化强度（Rust 侧**唯一一份**换算，R6b-L07）。
+///
+/// 语义：0=纯图（完全不雾化）⇄ 100=全雾，所以是取反；`round()` 是因为落盘值要能被
+/// CSS 的 `calc()` 与 `--bg-blur` 直接用（小数百分比串在前端只是观感差异，但两次迁移
+/// 叠加时会拿带小数的旧值再取反，越迁越飘）。
+///
+/// 与渲染层的差异（不取整、强转）**不在这里兜**：见模块头，跨语言只共享判据不共享结论。
+pub fn bg_opacity_to_fog(opacity: f64) -> f64 {
+    (100.0 - opacity).round()
+}
+
 /// 启动时执行一次 bgOpacity 语义迁移（幂等）
 pub fn migrate_bg_opacity_fog() {
     // 先只读判定：不需要迁移时**不写盘**（update_appearance 的闭包跑完必落盘，
@@ -90,10 +110,7 @@ pub fn migrate_bg_opacity_fog() {
         if obj.get("bgOpacityFog").and_then(|v| v.as_bool()) == Some(true) {
             return Ok(());
         }
-        obj.insert(
-            "bgOpacity".into(),
-            serde_json::json!((100.0 - opacity).round()),
-        );
+        obj.insert("bgOpacity".into(), serde_json::json!(bg_opacity_to_fog(opacity)));
         obj.insert("bgOpacityFog".into(), serde_json::json!(true));
         Ok(())
     });
@@ -105,4 +122,47 @@ pub fn migrate_bg_opacity_fog() {
         "info",
         "appearance.json 雾化度语义已迁移（旧图片不透明度 → 雾化强度）",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R6b-L07：换算只有一份，且口径要能被钉住——把 `(100.0 - opacity).round()`
+    /// 改成不取整（与渲染层一样）或改成 `opacity - 100.0`，下面的向量立刻红。
+    #[test]
+    fn 雾化换算的向量与取整口径() {
+        assert_eq!(bg_opacity_to_fog(0.0), 100.0, "不透明度 0（全透明图）= 全雾");
+        assert_eq!(bg_opacity_to_fog(100.0), 0.0, "不透明度 100（纯图）= 不雾化");
+        assert_eq!(bg_opacity_to_fog(50.0), 50.0, "中点必须自反");
+        // 取整是这条判据的一部分：落盘值要能直接进 CSS
+        assert_eq!(bg_opacity_to_fog(33.4), 67.0, "必须取整（渲染层不取整，差异见模块头）");
+        assert_eq!(bg_opacity_to_fog(33.2), 67.0);
+        assert_eq!(bg_opacity_to_fog(0.5), 100.0, "0.5 取整按 round 的就近偶数/进位口径必须稳定");
+        // 迁移幂等：取反两次回到原值（整数区间内），否则「重跑一次迁移」会改数据
+        let v = bg_opacity_to_fog(bg_opacity_to_fog(35.0));
+        assert_eq!(v, 35.0, "整数取值必须可逆");
+    }
+
+    /// 迁移只认「数值 + 未标记」的形态：`as_f64` 取不到（字符串/布尔/null）时**不动盘**，
+    /// 这一条与渲染层的强转是已知差异（模块头已如实记录），此处把 Rust 侧行为钉住，
+    /// 免得以后有人把「跳过」当成「漏了一个分支」。
+    #[test]
+    fn 迁移前置判定只走数值形态() {
+        for not_number in [
+            serde_json::json!("60"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!([60]),
+        ] {
+            let mut ap = serde_json::Map::new();
+            ap.insert("bgOpacity".into(), not_number.clone());
+            let v: Value = Value::Object(ap);
+            // 与 migrate_bg_opacity_fog 里的 needs 判据同一条：非数值 ⇒ 不迁移
+            assert!(
+                !v.get("bgOpacity").and_then(|x| x.as_f64()).is_some(),
+                "{not_number} 不该被当成可迁移的不透明度"
+            );
+        }
+    }
 }

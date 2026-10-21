@@ -60,6 +60,13 @@ pub(super) const SIDE_TRACE_CAP: usize = 20;
 pub(super) const PROGRAM_EXE_CAP: usize = 16;
 /// 应用归属的服务 / 驱动残留候选上限（回执按 bucket 分四组，超过即截断并在 notes 说明）
 pub(super) const SERVICE_RESIDUE_CAP: usize = 60;
+/// 单批执行目标上限（**请求规模**闸，不是候选上限）。
+///
+/// R2a-L02：从 `uninstall_residue_execute` 的字面量 200 提成常量，为的是让
+/// 「各产源上限和 / 单批上限 / 快照容量」三个数能被一条用例现算对账
+/// （`residue_trace_tests::r2a_l02_三个上限互相对得上`）。回执文案跟着常量走，
+/// 不再出现第二份「200」。
+pub(super) const RESIDUE_EXECUTE_MAX: usize = 200;
 
 /// 一个服务键是否**属于这个应用**（纯函数，可单测）。两条判据任一成立即算归属：
 /// 1. `ImagePath` 解析出的落点在该应用的安装目录之下（大小写不敏感、按 `\` 段前缀比较，
@@ -449,16 +456,21 @@ pub(super) unsafe fn tracing_hits(exes_lc: &[String], cap: usize) -> Vec<String>
     out
 }
 
+/// JumpList 自动目标根（`%APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations`）。
+///
+/// R2a-L04：取根与扫描**拆开**成两个函数，是为了让 4MB 护栏能被真实磁盘样本证伪 ——
+/// 根的解析原先埋在 `jumplist_hits` 里读死 env，用例除了源码形状外无从判红。
+pub(super) fn jumplist_root() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(base).join(r"Microsoft\Windows\Recent\AutomaticDestinations"))
+}
+
 /// JumpList 自动目标反查（对象级）：`.destinations-ms` 文件是 OLE 复合文档，
 /// AppID 为不可逆哈希，无法按应用名映射——改为字节级包含判定：文件原始字节里
 /// 出现安装目录 / exe 路径的 UTF-16LE 编码即命中（同前缀目录树的程序会共享命中，
 /// 因此保持 medium + 默认不勾）。
-pub(super) fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
-    let Some(base) = std::env::var_os("APPDATA") else {
-        return Vec::new();
-    };
-    let root = PathBuf::from(base).join(r"Microsoft\Windows\Recent\AutomaticDestinations");
-    let Ok(rd) = std::fs::read_dir(&root) else {
+pub(super) fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize, root: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     let mut needles: Vec<Vec<u8>> = Vec::new();
@@ -476,6 +488,8 @@ pub(super) fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec
         return Vec::new();
     }
     let mut out = Vec::new();
+    // 正常目标文件 <1MB；超 4MB 视为异常，不读也不入候选（R2a-L04）
+    const MAX_DEST_BYTES: u64 = 4 * 1024 * 1024;
     for ent in rd.flatten() {
         let p = ent.path();
         let is_dest = p
@@ -486,11 +500,16 @@ pub(super) fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec
         if !is_dest {
             continue;
         }
-        // 正常目标文件 <1MB；超 4MB 视为异常直接跳过（防把巨型文件读进内存）
-        let Ok(bytes) = std::fs::read(&p) else { continue };
-        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+        // R2a-L04：4MB 护栏必须在**读之前**生效。旧写法先 `fs::read` 整个文件再判
+        // `bytes.len() > 4MB`，「防把巨型文件读进内存」这句自述当场不成立
+        // （AutomaticDestinations 里躺一个几十 MB 的文件就足以把整轮扫描的内存顶上去）。
+        // 改成先按目录项元数据判长度与类型：`DirEntry::metadata` 不跟随重解析点，
+        // 判不到元数据就当不可读跳过；`is_file` 同时挡住"目录名叫 x.destinations-ms"。
+        let Ok(md) = ent.metadata() else { continue };
+        if !md.is_file() || md.len() == 0 || md.len() > MAX_DEST_BYTES {
             continue;
         }
+        let Ok(bytes) = std::fs::read(&p) else { continue };
         if needles.iter().any(|n| {
             bytes
                 .windows(n.len())
@@ -505,6 +524,28 @@ pub(super) fn jumplist_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec
     out
 }
 
+
+/// 给没有 `bucket` 的候选补分桶（v0.7.0 四类口径，唯一实现）。
+///
+/// R2a-L10：这条函数存在的意义是「已经有 bucket 的绝不覆盖」。它必须只在**服务/驱动候选
+/// 已经入列之后**调用一次 —— 旧写法把它放在服务块之前，于是 `continue` 那一支在生产里
+/// 恒不命中（当时唯一自带 bucket 的候选来自 APPX 早退分支，那条根本走不到这里），
+/// 而注释写的是「靠已存在即跳过避免被这里覆盖」= 把一个尚未发生的顺序事实说成已经生效的护栏。
+/// 前端按这个字段分四组渲染，所以取值只许是 `service` / `driver` / `registry` / `file`。
+pub(super) fn fill_missing_buckets(findings: &mut [Value]) {
+    for f in findings.iter_mut() {
+        if f.get("bucket").is_some() {
+            continue;
+        }
+        let bucket = match f.get("kind").and_then(Value::as_str) {
+            Some("reg_key") | Some("reg_value") => "registry",
+            _ => "file",
+        };
+        if let Some(obj) = f.as_object_mut() {
+            obj.insert("bucket".into(), json!(bucket));
+        }
+    }
+}
 
 /// 卸载域·残留扫描（方案 M3 MVP + U-2 固定系统侧痕）。
 ///
@@ -773,15 +814,19 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                     "contribs": contribs(&items),
                 }));
             }
-            for target in jumplist_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
-                let mut items = trace_src.clone();
-                items.push(("jumplistHit", "JumpList 自动目标缓存里留着这个程序的 exe 条目".to_string()));
-                findings.push(json!({
-                    "kind": "file", "target": target,
-                    "reason": "JumpList 自动目标缓存引用此程序路径",
-                    "confidence": "medium", "risk": "low", "defaultChecked": false,
-                    "contribs": contribs(&items),
-                }));
+            // R2a-L04：根由 `jumplist_root()` 现取（取不到 env 就当这一臂不采集），
+            // 扫描侧与用例走同一个函数体，护栏才可能被真实磁盘样本证伪。
+            if let Some(jl_root) = jumplist_root() {
+                for target in jumplist_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP, &jl_root) {
+                    let mut items = trace_src.clone();
+                    items.push(("jumplistHit", "JumpList 自动目标缓存里留着这个程序的 exe 条目".to_string()));
+                    findings.push(json!({
+                        "kind": "file", "target": target,
+                        "reason": "JumpList 自动目标缓存引用此程序路径",
+                        "confidence": "medium", "risk": "low", "defaultChecked": false,
+                        "contribs": contribs(&items),
+                    }));
+                }
             }
         }
         // 高置信：签名残留规则库命中（U-1）——已知程序知识库，双条件命中 +
@@ -816,21 +861,9 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                 }
             }
         }
-        // ---- 每条候选落一个 bucket（v0.7.0 四类口径）：只有四个取值 ----
-        // 既有的文件/目录/快捷方式归 file，注册表键/值归 registry；下面新加的服务/驱动候选
-        // 自带 bucket，靠「已存在即跳过」避免被这里覆盖成 registry。前端按这个字段分四组渲染。
-        for f in findings.iter_mut() {
-            if f.get("bucket").is_some() {
-                continue;
-            }
-            let bucket = match f.get("kind").and_then(Value::as_str) {
-                Some("reg_key") | Some("reg_value") => "registry",
-                _ => "file",
-            };
-            if let Some(obj) = f.as_object_mut() {
-                obj.insert("bucket".into(), json!(bucket));
-            }
-        }
+        // ---- 每条候选落一个 bucket（v0.7.0 四类口径）：见 `fill_missing_buckets`。
+        // R2a-L10：回填**必须排在服务/驱动块之后**（原来排在前面，护栏恒不命中），
+        // 所以下面先产服务/驱动候选（自带 bucket），最后统一补桶。
         // ---- v0.7.0：应用归属的服务 / 驱动残留（复用 services_orphan 的服务表）----
         // 只报「落点已失踪」那一类：服务键还在、ImagePath 指向的二进制已不存在，且归属判据成立。
         // 落点仍存在的服务是「还在用」，一律不报。服务表读不到（readable=false）时不产候选、
@@ -892,16 +925,30 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                 notes.push(format!("服务/驱动残留候选已达上限 {SERVICE_RESIDUE_CAP} 条，其余省略"));
             }
         }
+        // R2a-L10：补桶放在**全部产源之后**（含上面的服务/驱动块），否则「已有 bucket 不覆盖」
+        // 这一支在生产里恒不命中，护栏只剩注释。
+        fill_missing_buckets(&mut findings);
         (findings, display_name, notes)
     })
     .await
     .unwrap_or((Vec::new(), String::new(), Vec::new()));
 
     // 快照落槽：执行只认这份集合（四类都进同一个 "app" 桶）
-    let (finding_list, app_name, notes) = findings;
+    let (finding_list, app_name, mut notes) = findings;
+    let scanned = finding_list.len();
     let label = window.label().to_string();
-    residue_snapshot_put(&label, "app", finding_list.clone());
-    json!({ "success": true, "data": { "appName": app_name, "findings": finding_list, "notes": notes } })
+    // R2a-L02：渲染层必须拿到**快照真正接受的那一份**，不是扫描产出的全量。
+    // 旧写法回全量、槽里只留 `merged.truncate(SNAPSHOT_CAP)` 截完的前若干条（截掉的正是
+    // 这一次刚扫出来的尾部）⇒「面板看得见、快照里没有」，用户按面板全选点删除，
+    // 整批被快照闸判成「不在本次扫描快照中」。容量溢出从此是**可见事实**而不静默。
+    let accepted = residue_snapshot_put(&label, "app", finding_list);
+    if accepted.len() < scanned {
+        notes.push(format!(
+            "本会话执行快照容量上限 {SNAPSHOT_CAP} 已用满，本次 {} 条候选未进入可执行集合（重新扫描可换入，或先处理已列出的候选）",
+            scanned - accepted.len()
+        ));
+    }
+    json!({ "success": true, "data": { "appName": app_name, "findings": accepted, "notes": notes } })
 }
 
 // ==================== uninstall:residue-execute ====================
@@ -911,33 +958,80 @@ pub(super) fn detail(kind: &str, target: &str, status: &str, message: &str) -> V
     json!({ "kind": kind, "target": target, "status": status, "message": message })
 }
 
-/// HiBit §H3 的回写侧：把这一轮用户**实际删掉**的落点沉淀进本机学习库。
+/// 备份文件的展示名（R2a-L12：明细与报告里要能指认「这条删除对应哪一份 .reg」）。
 ///
-/// 只学 status=="ok" 的行 —— 失败行学进去会让下一轮把「这台机器上删不掉的路径」
-/// 当成已知残留反复推荐。归属身份（displayName / publisher / 卸载键末段）一律
-/// **现读注册表**，不从渲染层回传：与 `uninstall_run` 同一条纪律（app_id 只当寻址键）。
-/// 学不到（合成 MACHINE id、APPX 包、键已不存在、没有一条落点过得了归属判定）就整条不写，
-/// 而不是写一份"大概是这样"的记录 —— 学习库是下一轮的删除建议来源。
-pub(super) fn learn_from_deletions(app_id: &str, details: &[Value]) -> usize {
-    let Some((hive_str, key_path)) = app_id.split_once('|') else {
-        return 0; // APPX|… 与 MACHINE|all 都没有卸载键身份，学不了
-    };
-    let reg_full = format!("{hive_str}\\{key_path}");
-    let Some((hive, rest)) = parse_reg_target(&reg_full) else {
-        return 0;
-    };
+/// 只取 file_name、不带目录 —— 报告明细是给用户的凭据，把数据根绝对路径写进去没有额外
+/// 价值，而还原入口本来就按文件名找实体（`paths::resolve_backup_file`）。
+///
+/// 只认 `.reg` 形状：回执里点名的那个文件名必须**是一份 .reg 备份**。
+/// 路径不是 .reg 时没有可指认的备份，交出它的文件名等于在凭据里冒充一份备份 ⇒ 报空。
+pub(super) fn reg_backup_file_name(p: &Path) -> String {
+    if !p.extension().map(|e| e.eq_ignore_ascii_case("reg")).unwrap_or(false) {
+        return String::new();
+    }
+    p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// 快照闸的存在性判定（**唯一实现**）：`kind` 全等 + `target` 大小写不敏感。
+///
+/// R2a-L02：抽成函数不是为了少写三行，而是「面板清单 ⊆ 快照」这条断言必须用**执行侧
+/// 同一个判据**来核（§5.16/N6）—— 测试里另写一份 `contains`/大小写比较，等于给同一条闸
+/// 两个答案，快照匹配口径一改（比如改成逐字节相等）测试还继续绿。
+pub(super) fn snapshot_has(snap: &[Value], kind: &str, target: &str) -> bool {
+    snap.iter().any(|f| {
+        f["kind"].as_str() == Some(kind)
+            && f["target"].as_str().map(|s| s.eq_ignore_ascii_case(target)).unwrap_or(false)
+    })
+}
+
+/// 执行目标去重（纯函数，可测）。返回 `(去重后的目标, 被合并掉的条数)`。
+///
+/// R2a-L05：快照闸按 `(kind,target)` **存在性**判，重复项每条都过得到 ⇒ 同一目标被提交
+/// 两次时，第一行删成功、第二行落到 `reg_key` 分支时键已经没了，回执记一行「注册表删除
+/// 失败」，`failCount` 虚高、用户看到「删了一半」。大小写不敏感与 `snapshot_has` 同口径
+/// （快照匹配本来就是大小写不敏感的，去重比它更严会留下"两个不同写法都提交"的空档）。
+pub(super) fn dedupe_targets(wanted: Vec<(String, String)>) -> (Vec<(String, String)>, usize) {
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let total = wanted.len();
+    let kept: Vec<(String, String)> = wanted
+        .into_iter()
+        .filter(|(k, t)| seen.insert((k.to_lowercase(), t.to_lowercase())))
+        .collect();
+    let dropped = total - kept.len();
+    (kept, dropped)
+}
+
+/// 执行侧现读的归属身份（displayName / publisher / 卸载键末段）。
+///
+/// R2a-M02：**必须在批次里任何变更发生之前调用**。扫描侧把「卸载注册表项仍存在」标成
+/// `confidence:"high"` + `defaultChecked:true`，于是最常见那一批的第一个变更就是
+/// `reg_key_remove` 把这个键删掉；旧写法在批次**结束后**才现读身份 ⇒ 键已经没了 ⇒
+/// `display_name` 恒空 ⇒ 「用户真的删掉了落点」这条主路径永远产不出学习记录
+/// （HiBit §H3 的第二层在生产主路径上等价未接线），而且整条链一行日志都不留。
+///
+/// 身份一律后端现读、不从渲染层回传（与 `uninstall_run` 同一条纪律：app_id 只当寻址键）。
+/// `None` = 拿不到可学的身份（APPX / 合成 MACHINE id / 键已不在 / 没有 DisplayName）。
+pub(super) fn residue_identity(app_id: &str) -> Option<(String, String, String)> {
+    let (hive_str, key_path) = app_id.split_once('|')?;
+    let (hive, rest) = parse_reg_target(&format!("{hive_str}\\{key_path}"))?;
     let read_sz = |name: &str| -> String {
         crate::engine::native::read_reg_value_text(hive, rest.as_str(), name)
             .map(|(_, v)| v)
             .unwrap_or_default()
     };
     let display_name = read_sz("DisplayName");
-    let publisher = read_sz("Publisher");
     if display_name.trim().is_empty() {
-        return 0; // 没有程序名就当双条件组的另一半也凑不齐，校验器会整包拒
+        return None; // 没有程序名就当双条件组的另一半也凑不齐，校验器会整包拒
     }
-    // kind 口径对齐：执行明细里的目录行写作 `dir`（原生删除侧的回执），学习库 schema 要 `folder`
-    let mut entries: Vec<(&str, String)> = Vec::new();
+    Some((display_name, read_sz("Publisher"), key_path.to_string()))
+}
+
+/// 执行明细 → 学习库可学落点（纯函数，可测）。
+///
+/// 只学 status=="ok" 的行 —— 失败行学进去会让下一轮把「这台机器上删不掉的路径」当成
+/// 已知残留反复推荐。kind 口径对齐：原生删除侧的目录行写作 `dir`，学习库 schema 要 `folder`。
+pub(super) fn learnable_entries(details: &[Value]) -> Vec<(&'static str, String)> {
+    let mut entries: Vec<(&'static str, String)> = Vec::new();
     for d in details {
         if d["status"].as_str() != Some("ok") {
             continue;
@@ -952,12 +1046,47 @@ pub(super) fn learn_from_deletions(app_id: &str, details: &[Value]) -> usize {
         let Some(t) = d["target"].as_str() else { continue };
         entries.push((mapped, t.to_string()));
     }
+    entries
+}
+
+/// HiBit §H3 的回写侧：把这一轮用户**实际删掉**的落点沉淀进本机学习库。
+///
+/// 归属身份由调用方在变更之前现读好递进来（`residue_identity`，R2a-M02）；本函数不碰注册表，
+/// 因此「学不学」与「本批删了哪个键」就此解耦。
+/// 学不到（合成 MACHINE id、APPX 包、键已不存在、没有一条落点过得了归属判定）就整条不写，
+/// 而不是写一份"大概是这样"的记录 —— 学习库是下一轮的删除建议来源。
+pub(super) fn learn_from_deletions(
+    app_id: &str,
+    details: &[Value],
+    identity: Option<(String, String, String)>,
+) -> usize {
+    // R2a-M02：0 条必须**分因**留痕。「没学到」与「学到 0 条」在过去是同一种沉默，
+    // 日志里分不清是身份读不到、本轮没删成、还是落点全不过归属判定，运维与下一轮审查无从判断。
+    let Some((display_name, publisher, key_path)) = identity else {
+        log::write_log(
+            "info",
+            &format!("本机学习库本轮未回写（原因=无卸载键归属身份：APPX/合成 id/键已不在）: {app_id}"),
+        );
+        return 0;
+    };
+    let entries = learnable_entries(details);
     if entries.is_empty() {
+        log::write_log(
+            "info",
+            &format!("本机学习库本轮未回写（原因=本轮没有一条 status=ok 的可学落点）: {app_id}"),
+        );
         return 0;
     }
     let mut doc = learned::load().unwrap_or_else(learned::empty_doc);
-    let added = learned::learn(&mut doc, &display_name, &publisher, key_path, &entries, crate::engine::now_ms());
+    let added = learned::learn(&mut doc, &display_name, &publisher, &key_path, &entries, crate::engine::now_ms());
     if added == 0 {
+        log::write_log(
+            "info",
+            &format!(
+                "本机学习库本轮未回写（原因={} 条已删落点全部不过归属/形状判定）: {app_id}",
+                entries.len()
+            ),
+        );
         return 0;
     }
     match learned::save(&doc) {
@@ -1151,8 +1280,28 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     if let Err(msg) = guard::guard(&window, guard::RESIDUE_WINDOWS) {
         return json!({ "success": false, "message": msg });
     }
-    if targets.is_empty() || targets.len() > 200 {
-        return json!({ "success": false, "message": "targets 为空或超过 200 项上限" });
+    if targets.is_empty() || targets.len() > RESIDUE_EXECUTE_MAX {
+        return json!({
+            "success": false,
+            "message": format!("targets 为空或超过 {RESIDUE_EXECUTE_MAX} 项上限")
+        });
+    }
+    // R2a-L07：app_id 形状复验必须与扫描入口**同一对闸**（`valid_uninstall_key_path` /
+    // `valid_appx_fullname`，§5.16/N6 不许在第二处写「看起来等价」的校验）。
+    // 快照闸证明得了「这些目标来自本会话扫描」，证明不了「这个 app_id 是什么形状」——
+    // 而 app_id 在这里不是纯寻址键：它拼进批次报告的 appId 字段，还决定 `learn_from_deletions`
+    // 写进学习库的 `uninstallKey` 匹配组（下轮的推荐依据）。同一条域内纪律「app_id 只当寻址键、
+    // 形状必须复验」在同一个命令的两个阶段不该有两种答案。
+    // 位置刻意排在 targets 规模闸之后：那条是既有早退（回归网按它的文案判绿），挪序会白撞红。
+    let Some((hive_str, key_path)) = app_id.split_once('|') else {
+        return json!({ "success": false, "message": "app_id 格式错误" });
+    };
+    if hive_str.eq_ignore_ascii_case("APPX") {
+        if !valid_appx_fullname(key_path) {
+            return json!({ "success": false, "message": "app_id 不是合法的包全名" });
+        }
+    } else if !valid_uninstall_key_path(key_path) {
+        return json!({ "success": false, "message": "app_id 不是合法的卸载键路径" });
     }
     let label = window.label().to_string();
     // 快照校验：kind+target 逐一命中（方案 M4 验收「任意单项不得绕过快照」）
@@ -1160,7 +1309,7 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
         let store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
         store.get(&label).map(|(_, f)| f.clone()).unwrap_or_default()
     };
-    let wanted: Vec<(String, String)> = targets
+    let submitted: Vec<(String, String)> = targets
         .iter()
         .map(|t| {
             (
@@ -1169,16 +1318,15 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             )
         })
         .collect();
-    if wanted.iter().any(|(k, t)| k.is_empty() || t.is_empty()) {
+    if submitted.iter().any(|(k, t)| k.is_empty() || t.is_empty()) {
         return json!({ "success": false, "message": "targets 存在缺失 kind/target 的项" });
     }
-    let known = |k: &str, t: &str| {
-        snap.iter().any(|f| {
-            f["kind"].as_str() == Some(k)
-                && f["target"].as_str().map(|s| s.eq_ignore_ascii_case(t)).unwrap_or(false)
-        })
-    };
-    let stale: Vec<&(String, String)> = wanted.iter().filter(|(k, t)| !known(k, t)).collect();
+    // R2a-L05：重复提交同一目标先合并（判据与理由见 `dedupe_targets`）
+    let (wanted, dropped_dup) = dedupe_targets(submitted);
+    if dropped_dup > 0 {
+        log::write_log("info", &format!("uninstall_residue_execute 合并 {dropped_dup} 条重复目标（同一目标只变更一次）"));
+    }
+    let stale: Vec<&(String, String)> = wanted.iter().filter(|(k, t)| !snapshot_has(&snap, k, t)).collect();
     if !stale.is_empty() {
         return json!({ "success": false, "message": format!("{} 项不在本次扫描快照中（目标已过期或请求被篡改），请重新扫描后再试", stale.len()) });
     }
@@ -1188,8 +1336,14 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     let batch_id = delete_manifest::new_batch_id();
     let batch_for_pack = batch_id.clone();
     let want_backup = backup.unwrap_or(false);
-    let app_id = app_id.clone();
+    // 闭包内只读这份身份用，命令体后面还要用 app_id 落报告与回执 —— 给闭包一份自己的名字，
+    // 别把外层 app_id move 进去。
+    let app_id_for_batch = app_id.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
+        // R2a-M02：归属身份**必须在任何变更之前现读**（顺序由 `r2a_m02_*` 用例的源码序断言钉）。
+        // 默认勾选的卸载键就在下面第一个变更里被整树删掉，批次结束后再读恒空 ⇒ 最常见
+        // 那一批永远学不到。这份身份随 (details, pack) 一起返回，交给 learn_from_deletions。
+        let identity = residue_identity(&app_id_for_batch);
         // 勾了备份却建包失败 ⇒ 整批不删。静默降级成「只删不备」是把用户的决定改成她没选的那件事
         let mut pack = match want_backup {
             true => match crate::engine::restore_pack::Pack::begin(&batch_for_pack) {
@@ -1215,7 +1369,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             let (kind, target, hive, rest) = ("reg_key", target.as_str(), *hive, rest.as_str());
             let backup_dir = uninstall_reg_backup_dir();
             let _ = std::fs::create_dir_all(&backup_dir);
-            let file = backup_dir.join(format!("{}_{}.reg", crate::engine::now_ms(), rest.rsplit('\\').next().unwrap_or("key")));
+            // R2a-L06：文件名由 `new_reg_backup_file` 这一个出口生成（撞名顺次让路，
+            // 不再各处自拼 `{毫秒}_{末段}.reg` 互相覆盖）
+            let file = new_reg_backup_file(&backup_dir, crate::engine::now_ms(), rest.rsplit('\\').next().unwrap_or("key"));
             let Some(file_str) = file.to_str() else {
                 details.push(detail(kind, target, "fail", "备份路径无法表示为文本，拒绝删除"));
                 continue;
@@ -1251,7 +1407,21 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 let _ = p.include_reg_backup(&file);
             }
             if crate::engine::native::reg_key_remove(hive, rest, true) {
-                details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
+                // R2a-L12：回执必须把「备份记的是**删除之前那次 export** 的内容」这件事摊开。
+                // export 与删除之间键内容若被改动，还原是「合并加回」而不是回滚
+                // （`uninstall_reg_backup_restore` 自述），而且不会报错。这里不假装能查出内容
+                // 漂移（`RegDeleteTreeW` 的 Ok 已含「整树删除成功」语义，删后复查 `reg_key_exists`
+                // 不会给出第二个答案），改的是**可核对性**：把这份备份的文件名写进明细与报告，
+                // 用户/事后审查能把「删的这条」与「留的哪份 .reg」逐条对上。
+                let backup_file = reg_backup_file_name(&file);
+                let mut d = detail(
+                    kind,
+                    target,
+                    "ok",
+                    &format!("已删除（删除前已导出备份 {backup_file}，还原按该备份内容合并加回）"),
+                );
+                d["backupFile"] = json!(backup_file);
+                details.push(d);
             } else {
                 details.push(detail(kind, target, "fail", "注册表删除失败"));
             }
@@ -1267,7 +1437,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             let backup_dir = uninstall_reg_backup_dir();
             let _ = std::fs::create_dir_all(&backup_dir);
             let leaf = rest.rsplit('\\').next().unwrap_or("key");
-            let file = backup_dir.join(format!("{}_{}.reg", crate::engine::now_ms(), leaf));
+            // R2a-L06：与 reg_key 分支同一个出口生文件名。这一支的末段是**父键**叶子，
+            // 同一批多条 MuiCache / 防火墙值天然同末段，是撞名覆盖的主形态。
+            let file = new_reg_backup_file(&backup_dir, crate::engine::now_ms(), leaf);
             let Some(file_str) = file.to_str() else {
                 details.push(detail(kind, target, "fail", "备份路径无法表示为文本，拒绝删除"));
                 continue;
@@ -1305,7 +1477,16 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 }
             }
             if crate::engine::native::reg_restore_delete(hive, rest, value_name) {
-                details.push(detail(kind, target, "ok", "已删除（备份已留存）"));
+                // R2a-L12：同 reg_key 分支，把对应的备份文件名写进明细（还原是「合并加回」）
+                let backup_file = reg_backup_file_name(&file);
+                let mut d = detail(
+                    kind,
+                    target,
+                    "ok",
+                    &format!("已删除（删除前已导出父键备份 {backup_file}，还原按该备份内容合并加回）"),
+                );
+                d["backupFile"] = json!(backup_file);
+                details.push(d);
             } else {
                 details.push(detail(kind, target, "fail", "注册表值删除失败"));
             }
@@ -1471,19 +1652,20 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             },
             None => None,
         };
-        Ok((details, pack_out))
+        Ok((details, pack_out, identity))
     })
     .await;
 
     match report {
-        Ok(Ok((details, pack_out))) => {
+        Ok(Ok((details, pack_out, identity))) => {
             let ok_count = details.iter().filter(|d| d["status"] == "ok").count();
             let fail_count = details.iter().filter(|d| d["status"] == "fail").count();
-            // 批次报告（方案 M4）：动作级明细落盘，失败如实呈现
-            let report_path = crate::engine::paths::app_data_dir()
-                .join("uninstall-reports")
-                .join(format!("{batch_id}.json"));
-            let _ = std::fs::create_dir_all(report_path.parent().unwrap_or(Path::new(".")));
+            // 批次报告（方案 M4）：动作级明细落盘，失败如实呈现。
+            // R2a-L03：报告根取自 backup_report 那**一个**入口，与 report-list / report-get
+            // 同函数 —— 本根此前在仓内有第二处直拼，改一处会让另一处读到空目录。
+            let reports_dir = uninstall_reports_dir();
+            let report_path = reports_dir.join(format!("{batch_id}.json"));
+            let _ = std::fs::create_dir_all(&reports_dir);
             let _ = crate::security::atomic_write_json(
                 &report_path,
                 &json!({
@@ -1494,13 +1676,34 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                     "restorePack": pack_out,
                 }),
             );
+            // R2a-L03：写完即裁。这个根此前**只写不裁**（同域两处 `.reg` 备份都调了
+            // `paths::prune_backups`，报告根是唯一漏的那个），批次一多就无界涨；
+            // 而列表侧最多只显示 REPORT_KEEP 份 ⇒「看不到」与「还留着」两套答案。
+            // 保留份数与列表可见份数同源；出口走回收站、只裁新根（prune_backups_ext 既有口径）。
+            crate::engine::paths::prune_backups_ext(&reports_dir, REPORT_KEEP, &["json"]);
             log::write_log("info", &format!("uninstall_residue_execute {app_id}: 成功 {ok_count} 失败 {fail_count}（报告 {batch_id}）"));
             // HiBit §H3 回写：学到几条就记几条，0 条不写文件也不报错（学习是附加价值）。
             // 放在报告落盘之后：报告是「删了什么」的凭据，不能被学习链的不确定性挡住。
-            let learned_added = learn_from_deletions(&app_id, &details);
+            // R2a-M02：身份用的是**变更前**现读的那一份（`residue_identity`），0 条现在
+            // 在函数内分因写 info —— 「没学到」不再与「学到 0 条」共用同一种沉默。
+            let learned_added = learn_from_deletions(&app_id, &details, identity);
             if learned_added > 0 {
                 log::write_log("info", &format!("本机学习库新增 {learned_added} 条落点（下轮同程序残留直接命中）"));
             }
+            // R2a-M03：本批「删除没有成功」的**文件**路径记进命令体侧的失败回执台账。
+            // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据 ——
+            // 旧写法这道约束只在渲染层（residue-window.js 的失败文件筛选）维持，
+            // 命令体内没有任何判据，换一个消费方即整条绕过。
+            // 口径与渲染层同源：`status != ok && kind == file`（目录后端本就拒登记）。
+            crate::engine::delete_failed::record(
+                &label,
+                crate::engine::delete_failed::DOMAIN_RESIDUE,
+                details
+                    .iter()
+                    .filter(|d| d["status"] != "ok" && d["kind"] == "file")
+                    .filter_map(|d| d["target"].as_str().map(str::to_string))
+                    .collect(),
+            );
             json!({ "success": true, "data": {
                 "details": details, "okCount": ok_count, "failCount": fail_count,
                 "reportPath": report_path.to_string_lossy(),

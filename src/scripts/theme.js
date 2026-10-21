@@ -4,9 +4,12 @@
 (function () {
   'use strict';
 
-  const IS_ELECTRON = !!window.api?.app;
+  // F3-L08：真实语义是「桥是否就绪」—— Tauri 轨下桥就绪即 true，与「是不是 Electron」无关，
+  // 旧名会让后来者把就绪判断误读成环境判断。
+  const HAS_BRIDGE = !!window.api?.app;
 
-  // 应用 Mica 模式（Electron + Windows 11 时背景透明，让原生 Mica 透出）
+  // 应用 Mica 模式（electron-mica 是历史沿用的类名；桥就绪且系统支持时背景透明，
+  // 让原生 Mica 透出）
   function applyMicaMode(enabled) {
     document.body.classList.toggle('electron-mica', enabled);
   }
@@ -16,9 +19,10 @@
     // main.css 暗色玻璃 token 已同步删除）
     document.body.classList.add('theme-light');
 
-    // 标题栏是独立系统表面，固定浅色
+    // 标题栏是独立系统表面，固定浅色。F3-L01：与 4 份 HTML 的静态 meta theme-color 统一到雾屿底色 token
+    // （main.css 的 --bg-app 同值）—— 静态值首帧即被本行覆盖，两处各写一个离表色等于首帧与稳定态各说各话。
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', '#f7f8fb');
+    if (meta) meta.setAttribute('content', '#F6F4FB');
 
     ensureRingGradientDef();
   }
@@ -51,10 +55,9 @@
   function applySkinAndPreset() {
     let ap = {};
     try { ap = JSON.parse(localStorage.getItem('trim-appearance') || '{}') || {}; } catch (e) {}
-    // 背景模糊度（设置页整合4）：>0 挂 body[data-skin="glass"] 并按百分比缩放模糊半径
-    // （100% = 26px，与原液态玻璃一致；与 pathbinding.js 的 GLASS_MAX_BLUR_PX 共用同一约定，
-    // 改动需两处同步）。v3.0 全局玻璃化：0% 仅表示「无磨砂」，容器仍为玻璃 alpha
-    // （表面 token 真源即玻璃值），不再有「经典不透明面板」态。旧 skin 键按 glass=100% / classic=0% 折算迁移。
+    // 背景模糊度（设置页整合4）：>0 挂 body[data-skin="glass"] 并按百分比缩放模糊半径（100% = 26px，与原液态玻璃
+    // 一致；与 pathbinding.js 的 GLASS_MAX_BLUR_PX 共用同一约定，改动需两处同步）。v3.0 全局玻璃化：0% 仅表示「无
+    // 磨砂」，容器仍为玻璃 alpha（表面 token 真源即玻璃值），不再有「经典不透明面板」态。旧 skin 键按 glass=100%/classic=0% 折算迁移。
     let blur = ap.bgBlur;
     let dirty = blur == null;
     if (dirty) {
@@ -62,9 +65,8 @@
       ap.bgBlur = blur;
       delete ap.skin;
     }
-    // 首次启动（键不存在）的外观默认：预设壁纸 Doll·手办 + 壁纸模糊 20%。判据一律是
-    // 「键不存在」而不是「值为空」——用户显式选过「无背景」存的是 ''、拖到 0% 存的是 0，
-    // 那是选择不是缺省，覆盖它等于替用户改设置。落默认值同时写回，让设置页读到同一个值。
+    // 首次启动（键不存在）的外观默认：预设壁纸 Doll·手办 + 壁纸模糊 20%。判据一律是「键不存在」而不是「值为空」——
+    // 用户显式选过「无背景」存的是 ''、拖到 0% 存的是 0，那是选择不是缺省，覆盖它等于替用户改设置。落默认值同时写回。
     if (ap.presetBg == null) {
       ap.presetBg = window.ds?.DEFAULT_PRESET_BG || '';
       dirty = true;
@@ -84,9 +86,8 @@
       delete document.body.dataset.skin;
       document.documentElement.style.removeProperty('--glass-blur');
     }
-    // 壁纸层模糊（--bg-blur）此前只有设置页脚本 pathbinding.js 会写，而它是进「设置」页
-    // 才延迟加载 ⇒ 重启后没打开过设置页，壁纸一直是清晰的（存过的值和默认值都不生效）。
-    // 启动期按同一套换算补上，设置页拖动时覆盖的是同一个属性。
+    // 壁纸层模糊（--bg-blur）此前只有设置页脚本 pathbinding.js 会写，而它是进「设置」页才延迟加载 ⇒ 重启后没打开过
+    // 设置页，壁纸一直是清晰的（存过的值和默认值都不生效）。启动期按同一套换算补上，设置页拖动时覆盖的是同一个属性。
     if (typeof ap.wallpaperBlur === 'number') {
       const wpMax = window.ds?.WALLPAPER_MAX_BLUR_PX || 20;
       document.documentElement.style.setProperty('--bg-blur', (ap.wallpaperBlur / 100 * wpMax).toFixed(1) + 'px');
@@ -108,8 +109,8 @@
     applyTheme();
     applySkinAndPreset();
 
-    // Electron 模式：检测 Mica 支持，启用透明背景
-    if (IS_ELECTRON && window.api?.app?.getInfo) {
+    // 桥就绪：检测 Mica 支持，启用透明背景
+    if (HAS_BRIDGE && window.api?.app?.getInfo) {
       try {
         const info = await window.api.app.getInfo();
         // 无论系统是否支持 DWM 材质，都同步渲染层状态：不支持时仍使用

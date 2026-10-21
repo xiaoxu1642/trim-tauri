@@ -451,6 +451,56 @@ fn pending_add_rejects_protected_paths_and_over_limit() {
     );
 }
 
+/// R2a-M03：登记「重启后删除」的第一道约束（只收删除失败项）必须有**命令体**判据。
+///
+/// 旧写法这道约束只由渲染层维持 —— `cleanup.js` 的 `collectFailedPaths` 与
+/// `residue-window.js` 的失败文件筛选各筛一遍，命令体里零判据 ⇒ 换一个消费方、
+/// 或渲染层被改一句，任意文件都能进 PFRO 这个**永久删**出口（不进回收站、不可还原）。
+///
+/// 判红自证：把 `uninstall_pending_add` 闸循环里
+/// `delete_failed::is_failed_in_session(t)` 那道闸删掉 ⇒ 首条断言红
+/// （未登记过的目标改由「不是存在的文件」拦下，回执文案不再写「删除失败回执」）。
+///
+/// 零副作用：两个目标都是**不存在的路径** ⇒ 未登记那个在闸上被拒、登记过的那个走到
+/// is_file 才被拒，全程不写 PFRO、不写待删台账。
+#[test]
+fn pending_add_only_accepts_delete_failed_receipt_targets() {
+    let w = window_with_label(RESIDUE_LABEL);
+    let failed = "C:\\trim-nonexistent-failed-receipt.bin";
+    let not_failed = "C:\\trim-nonexistent-no-receipt.bin";
+    trim_tauri_lib::engine::delete_failed::record(
+        RESIDUE_LABEL,
+        trim_tauri_lib::engine::delete_failed::DOMAIN_RESIDUE,
+        vec![failed.to_string()],
+    );
+    let res = invoke(
+        &w,
+        "uninstall_pending_add",
+        json!({ "targets": [failed, not_failed] }),
+    );
+    assert_eq!(res["success"], json!(true), "闸在命令体内逐项 skip，不整批失败: {res}");
+    assert_eq!(res["data"]["added"], json!(0), "两个目标都不得登记: {res}");
+    let rows = res["data"]["details"].as_array().expect("details 应为数组");
+    assert_eq!(rows.len(), 2, "两个目标都应有逐项回执: {res}");
+    let row_failed = rows
+        .iter()
+        .find(|r| r["target"] == json!(failed))
+        .unwrap_or_else(|| panic!("应有登记过那个目标的回执: {res}"));
+    assert!(
+        !row_failed["message"].as_str().unwrap_or("").contains("删除失败回执"),
+        "命中删除失败回执的目标不得被这道闸拒: {row_failed}"
+    );
+    let row_not = rows
+        .iter()
+        .find(|r| r["target"] == json!(not_failed))
+        .unwrap_or_else(|| panic!("应有未登记目标的回执: {res}"));
+    assert_eq!(row_not["status"], json!("skip"), "未命中必须 skip 而非 fail: {row_not}");
+    assert!(
+        row_not["message"].as_str().unwrap_or("").contains("删除失败回执"),
+        "未命中删除失败回执的目标必须被命令体闸拒: {row_not}"
+    );
+}
+
 /// v6-K11：外设备份还原必须带**显式高危确认字段** `confirmedHighRisk=true`。
 ///
 /// 拒杀顺序：窗口档位 → 确认字段 → 提权检查。确认闸在 is_admin 之前，所以负例腿
@@ -2142,3 +2192,253 @@ fn u_r1d_diskbench_越界路径拒绝后单飞位不放脏() {
         "早退路径必须释放单飞位（RAII Drop），否则第二次请求被误判进行中: {second}"
     );
 }
+
+// ==================== U-R1b 留尾（v7.2 P1-W2）：regedit 回执 / 缓存域锁 / 阻塞池 ====================
+
+fn r1b_src(rel: &str) -> String {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri 的父目录是仓根")
+        .join(rel);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读得到 {rel}：{e}"))
+}
+
+/// 取 `[start_anchor, end_anchor)` 之间的源码片段（按函数切，避免跨函数误命中）
+fn r1b_between(src: &str, start_anchor: &str, end_anchor: &str) -> String {
+    let a = src
+        .find(start_anchor)
+        .unwrap_or_else(|| panic!("找不到起点锚 {start_anchor}"));
+    let b = src[a..]
+        .find(end_anchor)
+        .unwrap_or_else(|| panic!("在 {start_anchor} 之后找不到终点锚 {end_anchor}"));
+    src[a..a + b].to_string()
+}
+
+/// `R1b-L06`：关旧 regedit 窗必须**读 `PostMessageW` 返回值**再计数，并把「看到几扇窗 /
+/// 关掉几扇 / 没关掉几扇」带到回执上。
+///
+/// 为什么用源码契约而不是 `invoke`：这条判据只在真机上有提权 regedit 时才分叉（UIPI 把投递
+/// 拦成 Err），MockRuntime 里 `EnumWindows` 回调根本不跑。断言锁的是「计数绑在返回值上」这个
+/// 形状——把 `.is_ok()` 去掉或改回无条件自增，本条必红。
+#[test]
+fn u_r1b_regedit_关窗计数绑在投递返回值上() {
+    let src = r1b_src("src-tauri/src/commands/contextmenu.rs");
+    let cb = r1b_between(
+        &src,
+        "unsafe extern \"system\" fn close_regedit_wndproc",
+        "struct RegEditOpenOutcome",
+    );
+    assert!(
+        cb.contains("PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).is_ok()"),
+        "WM_CLOSE 的返回值必须判（未命中＝又退回 `let _ =` 把返回值丢了）"
+    );
+    let seen_at = cb.find("ctx.seen += 1;").expect("命中窗要计 seen");
+    let ok_at = cb.find(".is_ok()").expect("有返回值判定");
+    let closed_at = cb.find("ctx.closed += 1;").expect("投递成功要计 closed");
+    assert!(seen_at < ok_at && ok_at < closed_at, "顺序必须是 seen → 判返回值 → closed");
+    assert!(!cb.contains("ctx.hits"), "旧口径 hits 计数必须消失（留着就是两套账）");
+    // 回执三件套：投递成功数与「有窗但没关掉」数必须同时外发
+    let cmd = r1b_between(
+        &src,
+        "pub async fn contextmenu_open_in_regedit",
+        "// ==================== open-in-regedit",
+    );
+    for key in ["\"regeditWindows\"", "\"closedWindows\"", "\"staleWindows\""] {
+        assert!(cmd.contains(key), "回执缺字段 {key}（渲染层无从区分定位可靠与旧窗未关）");
+    }
+    assert_eq!(
+        src.matches("Ok(RegEditOpenOutcome {").count(),
+        2,
+        "两条拉起成功路径各带一份窗数（少一条＝那条回执恒为 0）"
+    );
+    assert!(src.contains("if ctx.closed > 0 {"), "只有真有关窗成功才值得等那 500ms");
+}
+
+/// `R1b-L09`：本域缓存的读-改-写整段必须共用一把域内锁，**含那个「读」**。
+///
+/// 锁只包住写、不包住读，`scan` 就能插在 `toggle` 的读与写之间，回写的仍是旧快照——
+/// 这正是 AGENTS §5.28「`update_json` 内部的锁只保护走它的路径」。
+/// 破坏方式：把 toggle 里的 `cm_cache_guard()` 挪到 `snapshot::get` 之后，本条即红。
+#[test]
+fn u_r1b_右键菜单缓存读写段共用域内锁() {
+    let src = r1b_src("src-tauri/src/commands/contextmenu.rs");
+    assert!(
+        src.contains("static CM_CACHE_LOCK: std::sync::Mutex<()>"),
+        "本域必须有自有的缓存锁（§5.28）"
+    );
+    let guard_needle = "let _g = cm_cache_guard();";
+    let mut guard_at: Vec<usize> = Vec::new();
+    let mut from = 0usize;
+    while let Some(i) = src[from..].find(guard_needle) {
+        guard_at.push(from + i);
+        from = from + i + guard_needle.len();
+    }
+    assert_eq!(guard_at.len(), 2, "两处写入段各取一次锁（scan 全量写 / toggle 回写）");
+    let mut save_at: Vec<usize> = Vec::new();
+    from = 0;
+    while let Some(i) = src[from..].find("save_cache(&") {
+        save_at.push(from + i);
+        from = from + i + "save_cache(&".len();
+    }
+    assert_eq!(save_at.len(), 2, "缓存写入点仍是两处");
+    for s in &save_at {
+        assert!(
+            guard_at.iter().any(|g| g < s),
+            "存在取锁之前发生的缓存写入（idx={s}）"
+        );
+    }
+    // toggle 必须是「先取锁 → 再读快照 → 后写缓存」
+    let body = r1b_between(&src, "pub async fn contextmenu_toggle", "pub async fn contextmenu_icons");
+    let g = body.find(guard_needle).expect("toggle 回写段必须取域内锁");
+    let r = body
+        .find("let mut snap2 = snapshot::get(")
+        .expect("toggle 回写段要读快照");
+    let w = body.rfind("save_cache(&").expect("toggle 回写段要写缓存");
+    assert!(g < r, "读快照必须在锁内（否则 scan 插在读写之间，回写旧快照）");
+    assert!(r < w, "写缓存必须仍在同一把锁内");
+}
+
+/// `R1b-M04`：`startup:delete` 的全段同步 IO（原生删除 + 逐项回收站 + 删除清单落盘）
+/// 必须整体在 `spawn_blocking` 闭包内，不许留在 async 体内占 worker。
+///
+/// 启动项台账锁仍跨整段持有是**刻意的**（§5.28 要求读-改-写整体串行），本条改的是
+/// 「在哪个线程上等锁」：三条同步 IO 命令都在阻塞池里，async worker 不再被 30s×N 占住。
+/// 破坏方式：把 `send_to_trash_os` 那个循环挪回 spawn_blocking 之外，本条即红。
+#[test]
+fn u_r1b_startup_delete_同步io整段在阻塞池内() {
+    let src = r1b_src("src-tauri/src/commands/startup.rs");
+    let body = r1b_between(&src, "pub async fn startup_delete", "fn bump_counter");
+    let sb = body
+        .find("spawn_blocking")
+        .expect("startup:delete 必须走阻塞池（同本文件 scan/toggle）");
+    for (name, needle) in [
+        ("原生删除", "crate::engine::native::startup_delete(&safe)"),
+        ("回收站出口", "trim_finder::scan::recycle::send_to_trash_os"),
+        ("删除清单落盘", "delete_manifest::save_delete_manifest"),
+        ("日志刷盘", "log::flush_sync()"),
+    ] {
+        let at = body
+            .find(needle)
+            .unwrap_or_else(|| panic!("找不到{name}的写入点：{needle}"));
+        assert!(at > sb, "{name} 被挪回 async 体内了（idx={at} ≤ spawn_blocking idx={sb}）");
+    }
+    assert_eq!(
+        body.matches("async_runtime::spawn_blocking").count(),
+        1,
+        "startup:delete 只许一层阻塞池（写成嵌套会把回执 Err 分支变哑）"
+    );
+}
+
+// ==================== U-R2a（v7.2 P1-W2）· uninstall 残留链命令边界 ====================
+//
+// 本单元 14 条里，判定本体与顺序契约都落在 lib 单测（`residue_trace_tests`），这里只补
+// **只有经真实 IPC 才成立**的两件事：命令入口的档位/闸顺序，和渲染层直接消费的回执形状。
+// 两条都是零副作用（负例拦在任何删除之前；读侧只碰隔离的测试数据根）。
+
+/// R2a-L07：执行入口必须复验 app_id 形状，且用的是**扫描侧那同一对闸**。
+///
+/// 正向 + 反向成对写（AGENTS §4.1：只断"没报错"不算验收）：
+/// - 反例（形状非法）必须停在 app_id 闸，拒因点名；
+/// - 对照例（形状合法但没扫描过）必须**越过** app_id 闸、停在快照闸 ——
+///   这条证明我没把合法路径一并打死（错修法的症状恰恰是两条都给同一个拒因）。
+#[test]
+fn u_r2a_l07_执行入口复验app_id形状() {
+    let w = window_with_label("residue");
+    let one_target = json!({ "targets": [ { "kind": "folder", "target": r"C:\Apps\Acme" } ] });
+
+    // ① 合成/非法键段：`MACHINE|all` 的 `all` 不是枚举根下的直接子键
+    let mut args = one_target.clone();
+    args["appId"] = json!("MACHINE|all");
+    let res = invoke(&w, "uninstall_residue_execute", args);
+    assert_eq!(res["success"], json!(false), "非法 app_id 形状必须拒: {res}");
+    assert!(
+        common::message_of(&res).contains("不是合法的卸载键路径"),
+        "拒因必须点名形状闸，不能是别的早退: {res}"
+    );
+
+    // ② 缺 `|` 分隔：形状闸的第一道
+    let mut args = one_target.clone();
+    args["appId"] = json!("no-separator");
+    let res = invoke(&w, "uninstall_residue_execute", args);
+    assert!(
+        common::message_of(&res).contains("app_id 格式错误"),
+        "缺分隔符必须停在格式闸: {res}"
+    );
+
+    // ③ APPX 形态走另一条闸：非法包全名（含空格）必须被 `valid_appx_fullname` 拒
+    let mut args = one_target.clone();
+    args["appId"] = json!("APPX|Not A Valid Package Name");
+    let res = invoke(&w, "uninstall_residue_execute", args);
+    assert!(
+        common::message_of(&res).contains("不是合法的包全名"),
+        "APPX 形态必须复验包全名: {res}"
+    );
+
+    // ④ 对照：形状合法（真实枚举根下的直接子键）必须越过形状闸、停在快照闸
+    let mut args = one_target.clone();
+    args["appId"] = json!(GHOST_APP_ID);
+    let res = invoke(&w, "uninstall_residue_execute", args);
+    assert_eq!(res["success"], json!(false), "无快照仍必须整批拒: {res}");
+    assert!(
+        common::message_of(&res).contains("不在本次扫描快照"),
+        "合法形状不得被形状闸误杀（越过它才轮到快照闸），实得拒因 {:?}",
+        common::message_of(&res)
+    );
+
+    // ⑤ 规模闸与形状闸互不代替：超上限仍按规模拒（文案跟着常量走）
+    let many: Vec<serde_json::Value> = (0..201)
+        .map(|i| json!({ "kind": "file", "target": format!(r"C:\Apps\Acme\{i}.txt") }))
+        .collect();
+    let res = invoke(&w, "uninstall_residue_execute", json!({ "appId": GHOST_APP_ID, "targets": many }));
+    assert!(
+        common::message_of(&res).contains("超过 200 项上限"),
+        "规模闸的文案必须由常量生成（改数字时本条判红）: {:?}",
+        common::message_of(&res)
+    );
+}
+
+/// R2a-L03：批次报告列表的形状与「先挑文件名、再解析」的口径。
+///
+/// 夹具写在**隔离的测试数据根**（`TRIM_TEST_DATA_ROOT`，C08）里的 `uninstall-reports/`，
+/// 不碰用户目录。正向特征点名"回来的 batchId 集合与顺序"，反向对照点名"非法名不进列表、
+/// 但计入 totalCount 之外的口径"——旧写法是边读边收再截断，缺这两条就没人能抓住它。
+#[test]
+fn u_r2a_l03_报告列表按文件名取用并保留真实份数() {
+    // 次序纪律：先建窗（注入测试数据根），再取 app_data_dir()
+    let w = main_window();
+    let dir = trim_tauri_lib::engine::paths::app_data_dir().join("uninstall-reports");
+    let _ = std::fs::create_dir_all(&dir);
+    let row = |batch: &str, ok: usize| {
+        json!({ "batchId": batch, "appId": "HKLM|SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Acme",
+                "time": "2026-10-21T00:00:00Z",
+                "details": [ { "kind": "reg_key", "target": "HKCU\\Software\\Acme", "status": "ok" },
+                             { "kind": "file", "target": r"C:\Apps\Acme\a.txt", "status": if ok >= 2 { "fail" } else { "skip" } } ] })
+    };
+    let newest = "2026-10-21T00-00-00-002Z";
+    let older = "2026-10-21T00-00-00-001Z";
+    std::fs::write(dir.join(format!("{newest}.json")), row(newest, 2).to_string()).unwrap();
+    std::fs::write(dir.join(format!("{older}.json")), row(older, 1).to_string()).unwrap();
+    // 反向对照：非法 batchId（含空格）与坏 JSON 都不得进列表
+    std::fs::write(dir.join("2026 10 21 有 空格.json"), row("x", 1).to_string()).unwrap();
+    std::fs::write(dir.join("2026-10-21T00-00-00-003Z.json"), "{坏掉的 json").unwrap();
+    std::fs::write(dir.join("readme.txt"), b"not a report").unwrap();
+
+    let res = invoke(&w, "uninstall_report_list", json!({}));
+    common::assert_guard_passed(&res.to_string(), "主窗调 uninstall_report_list", &["reports"]);
+    let reports = res["data"]["reports"]
+        .as_array()
+        .unwrap_or_else(|| panic!("reports 必须是数组（渲染层直接 .map）: {res}"));
+    let ids: Vec<&str> = reports.iter().map(|r| r["batchId"].as_str().unwrap_or("")).collect();
+    assert_eq!(ids, vec![newest, older], "必须只列合法且可解析的两份、最新在前: {res}");
+    // totalCount 的口径是「盘上名字过闸的份数」，与「读得出内容的份数」脱钩：
+    // 坏 JSON 那份必须**计入总数但不进列表**——把两份答案并成一个数字，
+    // 用户就再也看不出「报告在盘上但读不出来」这件事。
+    assert_eq!(res["data"]["totalCount"], json!(3), "合法命名的三份都要计入总数（含读不出内容的那份）: {res}");
+    // 明细计数在列表页就给全（前端按 okCount/failCount/skipCount 拼三态）
+    assert_eq!(reports[0]["okCount"], json!(1), "{:?}", reports[0]);
+    assert_eq!(reports[0]["failCount"], json!(1), "{:?}", reports[0]);
+    assert_eq!(reports[1]["skipCount"], json!(1), "{:?}", reports[1]);
+    assert!(reports[0]["appId"].is_string() && reports[0]["time"].is_string(), "点开明细要用的字段不得塌成 null");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

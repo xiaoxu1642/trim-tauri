@@ -12,9 +12,8 @@
     const m = line.match(/^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.*)$/);
     if (!m) return `<div class="log-line"><span class="log-message">${escapeHtml(line)}</span></div>`;
     const [, time, level, message] = m;
-    // 审查 L15：`level` 取自磁盘日志文件，是全仓唯一未转义就进 class 属性的外部文本 ——
-    // 里面一个 `"` 就能逃出属性、挂上任一 class。白名单比对后原样输出（main.css 的选择器
-    // 就是 `.log-level.INFO` 这种大写形态），表外一律退回中性的 log-level 基样式。
+    // 审查 L15：`level` 取自磁盘日志文件，是全仓唯一未转义就进 class 属性的外部文本 —— 里面一个 `"` 就能逃出属性、
+    // 挂上任一 class。白名单比对后原样输出（main.css 的选择器就是 `.log-level.INFO` 这种大写形态），表外一律退回中性的 log-level 基样式。
     const levelCls = ['INFO', 'WARN', 'WARNING', 'ERROR', 'DEBUG'].includes(level) ? ` ${level}` : '';
     return `<div class="log-line">
       <span class="log-time">${escapeHtml(time)}</span>
@@ -61,11 +60,17 @@
       window.app?.toast('error', '导出失败：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
       return;
     }
-    const result = await window.api.log.export();
-    if (result.success) {
-      window.app?.toast('success', `日志已导出到: ${result.path}`);
-    } else if (result.message !== '已取消') {
-      window.app?.toast('error', result.message);
+    // F3-M05：本模块三个 IPC 出口里唯一没 catch 的一个（read/write 都有）——原生保存框的取消/IO 失败/文件占用走的是
+    // reject 而不是 success=false，旧代码整链静默，用户以为导出成功且日志里零痕迹。失败必须给可见反馈。
+    try {
+      const result = await window.api.log.export();
+      if (result.success) {
+        window.app?.toast('success', `日志已导出到: ${result.path}`);
+      } else if (result.message !== '已取消') {
+        window.app?.toast('error', result.message);
+      }
+    } catch (e) {
+      window.app?.toast('error', '导出日志失败：' + ((e && e.message) || e));
     }
   }
 

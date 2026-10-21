@@ -9,17 +9,27 @@
 use serde_json::Value;
 use super::helpers::*;
 
-/// 快照槽按 origin 分桶替换。
+/// 单轮执行快照容量：一个 label 的槽里最多同时存多少条候选（跨 origin 合计）。
+///
+/// R2a-L02：从 `residue_snapshot_put` 函数内的私有 const 提成模块常量，为的是让
+/// 「各产源上限之和 / 单批执行上限 / 快照容量」三者能被一条用例现算对账
+/// （`residue_trace_tests` 的 `r2a_l02_*`）—— 数字只许有一份出处。
+pub(super) const SNAPSHOT_CAP: usize = 400;
+
+/// 快照分桶替换，**返回真正落进快照的那一份**（渲染层必须展示这份，不是扫描产出的全量）。
 ///
 /// 为什么不能整槽覆盖：面板现在同时展示多组候选，先扫的那组会在后一次扫描后被
 /// 快照闸判成「不在本次扫描快照中」，用户看到的勾选项点下去就报错。
 /// M4 的应用数据遗留链其实已经有这个坑（它覆盖掉单程序残留的快照），一并收口。
-pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Value>) {
-    const SNAPSHOT_CAP: usize = 400;
+///
+/// R2a-L02（面板与快照必须同源）：槽位装不下时旧写法是 `merged.truncate(SNAPSHOT_CAP)`，
+/// 截掉的是**尾部 = 这一次刚扫出来的候选**，而命令仍把那一批全量回给渲染层 ⇒
+/// 「面板看得见、快照里没有」，用户勾完点删除整批判过期。现在按剩余容量当场取舍并
+/// 返回接受的子集，容量语义从"悄悄丢"变成"调用方拿得到事实"，也就此不再有保头砍尾这第二种答案。
+pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Value>) -> Vec<Value> {
     // v4 P2-F（R2-M02）：origin 由**本函数**逐条打标 —— 生产侧此前 0 处赋值（候选对象
     // 里根本没有该字段），而下面的分桶过滤按 `origin != Some(origin)` 判：没有字段 ⇒
-    // `None != Some(_)` 恒真 ⇒ 旧条目永不被清 ⇒ 重扫只累加（触顶 400 后 truncate 是
-    // 从头部截，等于**保旧砍新**：用户刚扫出来的候选反而被丢）。在入口统一打标后，
+    // `None != Some(_)` 恒真 ⇒ 旧条目永不被清 ⇒ 重扫只累加。在入口统一打标后，
     // 调用方不写 origin 也成立（「谁调谁负责每条形」这条纪律不再外漏成一个必踩的坑）。
     let findings: Vec<Value> = findings
         .into_iter()
@@ -40,11 +50,11 @@ pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Valu
                 .collect()
         })
         .unwrap_or_default();
-    merged.extend(findings);
-    if merged.len() > SNAPSHOT_CAP {
-        merged.truncate(SNAPSHOT_CAP);
-    }
+    let room = SNAPSHOT_CAP.saturating_sub(merged.len());
+    let accepted: Vec<Value> = findings.into_iter().take(room).collect();
+    merged.extend(accepted.iter().cloned());
     store.insert(label.to_string(), (crate::engine::now_ms(), merged));
+    accepted
 }
 
 /// `%VAR%` 展开。**任一变量取不到就返回 None**：把没展开的串继续往下判，等于

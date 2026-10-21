@@ -31,7 +31,7 @@ pub(super) fn uninstall_reg_backup_dir() -> PathBuf {
     crate::engine::paths::backup_write_dir(UNINSTALL_REG_BACKUP_SUB)
 }
 
-/// 备份文件名准入：只认生成器产出的形状（`<毫秒>_<键末段>.reg`），
+/// 备份文件名准入：只认生成器产出的形状（`<毫秒>_<键末段>.reg`，撞名时末段后带 `_序号`），
 /// 路径穿越（`..` / `\` / `/`）与非 .reg 一律拒绝——还原是**写注册表**的通道
 pub(super) fn valid_uninstall_backup_name(name: &str) -> bool {
     let n = name.trim();
@@ -39,6 +39,34 @@ pub(super) fn valid_uninstall_backup_name(name: &str) -> bool {
         && n.len() <= 120
         && n.ends_with(".reg")
         && n.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// 生成一份卸载域 `.reg` 备份的落盘路径（两处 export 共用的唯一出口，§5.16/N6）。
+///
+/// R2a-L06：名字**必须唯一**。旧写法在两个分支各拼一次 `{now_ms()}_{键末段}.reg`，而
+/// `reg_value` 分支的末段是**父键叶子** —— 同一批里多条 MuiCache / 防火墙值同父键 ⇒ 末段
+/// 相同，`now_ms()` 一旦落在同一毫秒（两条目标之间没有别的耗时动作时真会发生），后一份
+/// `.reg` 连同它的封条 `<文件名>.meta.json` 一起盖掉前一份，回执却仍写「备份已留存」，
+/// 前一条目标的还原依据静默丢失。
+///
+/// 口径：首份文件名与旧形状逐字节相同（列表/还原侧按 `<毫秒>_<末段>.reg` 解析、
+/// `prune_backups_ext` 按扩展名计数，都不受影响）；只有实体已存在时才顺次加 `_2`、`_3`。
+/// 判据走真实磁盘（`exists`），因此配套用例必须有可判红的正向对照（同名占位文件）。
+pub(super) fn new_reg_backup_file(dir: &std::path::Path, stamp_ms: i64, leaf: &str) -> std::path::PathBuf {
+    let base = format!("{stamp_ms}_{leaf}");
+    let mut n = 1u32;
+    loop {
+        let name = if n == 1 {
+            format!("{base}.reg")
+        } else {
+            format!("{base}_{n}.reg")
+        };
+        let p = dir.join(&name);
+        if !p.exists() {
+            return p;
+        }
+        n += 1;
+    }
 }
 
 // 封条与 `.reg` 严格解析的**实现已移到 `engine::reg_backup`**（N9）：清理域那条还原链
@@ -215,6 +243,25 @@ pub(super) fn uninstall_reports_dir() -> PathBuf {
     crate::engine::paths::app_data_dir().join("uninstall-reports")
 }
 
+/// 批次报告保留份数 = 列表可见份数（R2a-L03，一份数字两个消费点）：
+/// 写完即按这份数裁根（`residue.rs` 的落盘处调 `paths::prune_backups_ext`），
+/// 列表侧最多也只显示这么多 ⇒ 不会出现「列表看不到、盘上还留着」的第二个答案。
+/// 口径对齐同域备份类保留（删除清单 `MANIFEST_KEEP=50`、`.reg` 备份 `BACKUP_KEEP=50`）。
+pub(super) const REPORT_KEEP: usize = 50;
+
+/// 从盘上的报告文件名里挑出**要解析的那一批**（纯函数，可测，不碰磁盘）。
+///
+/// N8 的同一条教训在报告根复现：NTFS 枚举序≈文件名升序，而 batch_id 是 ISO 时间戳
+/// （字典序即时序）。旧写法是「边读边收、收完排序再 `truncate(50)`」——排序前已经把
+/// 每一份都 `read_to_string` + `from_str` 解析过（几百份报告 = 几百次全量读盘），
+/// 且一旦有人为省事改成「收满 50 就 break」，截走的是**最旧** 50 份。
+/// 这里把「挑哪几份」与「解析内容」拆开：先按文件名取最新 `keep` 份，再去读那几份。
+pub(super) fn select_report_stems(mut stems: Vec<String>, keep: usize) -> Vec<String> {
+    stems.sort_by(|a, b| b.cmp(a));
+    stems.truncate(keep);
+    stems
+}
+
 /// batch_id 准入：new_batch_id 形如 `2026-09-28T12-30-45-123Z`（ISO 去 :/.），
 /// 字符集限定 [A-Za-z0-9-]（含 T/Z）——路径穿越（..、\、/）与非报告文件名一律拒绝。
 pub(super) fn valid_batch_id(id: &str) -> bool {
@@ -232,7 +279,9 @@ pub fn uninstall_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Val
     let Ok(rd) = std::fs::read_dir(uninstall_reports_dir()) else {
         return json!({ "success": true, "data": { "reports": [] } });
     };
-    let mut items: Vec<Value> = Vec::new();
+    // R2a-L03：第一趟只列文件名（不读内容），按序取最新 REPORT_KEEP 份，第二趟才解析。
+    // totalCount 仍报盘上真实份数（= 文件名过闸的条数），与「解析成功几条」脱钩。
+    let mut stems: Vec<String> = Vec::new();
     for ent in rd.flatten() {
         let p = ent.path();
         if p.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -244,6 +293,13 @@ pub fn uninstall_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Val
         if !valid_batch_id(stem) {
             continue;
         }
+        stems.push(stem.to_string());
+    }
+    let total_count = stems.len();
+    let dir = uninstall_reports_dir();
+    let mut items: Vec<Value> = Vec::new();
+    for stem in select_report_stems(stems, REPORT_KEEP) {
+        let p = dir.join(format!("{stem}.json"));
         let Ok(text) = std::fs::read_to_string(&p) else {
             continue;
         };
@@ -266,17 +322,8 @@ pub fn uninstall_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Val
             "okCount": ok, "failCount": fail, "skipCount": skip,
         }));
     }
-    // 文件名即 ISO 时间戳，倒序 = 最新在前。
-    // N8：必须**先全量收集再排序再截断**。NTFS 枚举序≈文件名升序，在循环里 `break` 到 50
-    // 截走的是**最旧** 50 份，随后那次排序只是在旧账里排座次 ⇒ 批次一过 50，用户刚做完
-    // 的那次清理报告就不在列表里（与 N1 同症状、不同成因）。
-    items.sort_by(|a, b| {
-        let ka = a["batchId"].as_str().unwrap_or("");
-        let kb = b["batchId"].as_str().unwrap_or("");
-        kb.cmp(ka)
-    });
-    let total_count = items.len();
-    items.truncate(50);
+    // 文件名即 ISO 时间戳，`select_report_stems` 已按「最新在前」排好并裁到 REPORT_KEEP，
+    // 这里不再二次排序（N8：截断必须发生在排序之后，而排序只看文件名就够）。
     json!({ "success": true, "data": { "reports": items, "totalCount": total_count } })
 }
 
@@ -363,6 +410,58 @@ pub(super) mod backup_visibility_tests {
         let entries = vec![(root.join("1700000000009_Dir.reg"), false)];
         assert!(render_reg_backups(entries).is_empty(), "同名目录不得当备份列出——还原侧会按文件读它并失败");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R2a-L06：同毫秒 + 同父键叶子（MuiCache / 防火墙规则多条值行就是这种形状）必须
+    /// 给出**不同**的落盘名，否则后一份 `.reg` 连同封条盖掉前一份，还原依据静默丢失。
+    /// 正向对照（能判红）：把 `new_reg_backup_file` 退回单次 `join` 拼名 ⇒ 第二条与第一条
+    /// 逐字节相同，本用例当场红。
+    #[test]
+    fn 同毫秒同末段必须给出不同备份文件名() {
+        let root = sandbox("unique-reg-name");
+        let ms = 1_700_000_000_000i64;
+        let first = new_reg_backup_file(&root, ms, "MuiCache");
+        // 首份必须与旧形状逐字节相同（列表按 `<毫秒>_<末段>.reg` 解析、还原按名字找实体）
+        assert_eq!(first.file_name().unwrap().to_string_lossy(), "1700000000000_MuiCache.reg");
+        // 实体不存在时不占用序号：同名仍可复用（幂等重跑不该凭空多出一个 _2）
+        assert_eq!(new_reg_backup_file(&root, ms, "MuiCache"), first);
+        std::fs::write(&first, b"x").unwrap();
+        let second = new_reg_backup_file(&root, ms, "MuiCache");
+        assert_ne!(second, first, "同毫秒同末段必须让路，不得覆盖上一份还原依据");
+        assert_eq!(second.file_name().unwrap().to_string_lossy(), "1700000000000_MuiCache_2.reg");
+        std::fs::write(&second, b"x").unwrap();
+        let third = new_reg_backup_file(&root, ms, "MuiCache");
+        assert_eq!(third.file_name().unwrap().to_string_lossy(), "1700000000000_MuiCache_3.reg");
+        // 生成的名字必须过还原侧白名单（否则「备份留了、还原入口拒收」）
+        for p in [&first, &second, &third] {
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            assert!(valid_uninstall_backup_name(&n), "生成的备份名过不了还原白名单: {n}");
+            // 列表侧的时间戳解析必须仍取到首段毫秒（加了 _序号 也不掉）
+            assert_eq!(n.split('_').next().unwrap().parse::<i64>().unwrap(), ms, "首段不再是毫秒: {n}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R2a-L03：报告根的「取哪几份」必须是**排序后**截断。
+    /// 输入 52 个 ISO batch_id，**刻意按升序给**（= NTFS 枚举序，也就是线上真实形态）：
+    /// 这样「不排序直接 truncate」的写法会留下最旧的 50 个，本用例当场红 ——
+    /// 断乱序是抓不到这个形态的（乱序下最旧/最新都可能被留下，变成掷硬币）。
+    #[test]
+    fn 报告挑选先排序后截断丢掉的最旧() {
+        let iso = |i: u32| format!("2026-10-21T00-00-00-{i:03}Z");
+        let all: Vec<String> = (0..52u32).map(iso).collect();
+        let picked = select_report_stems(all.clone(), REPORT_KEEP);
+        assert_eq!(picked.len(), REPORT_KEEP, "取用份数必须等于 REPORT_KEEP");
+        assert_eq!(picked[0], iso(51), "首位必须是最新那份");
+        assert!(
+            picked.windows(2).all(|w| w[0] >= w[1]),
+            "必须最新在前（渲染层不再二次排序）: {picked:?}"
+        );
+        let dropped: Vec<&String> = all.iter().filter(|x| !picked.contains(x)).collect();
+        assert_eq!(dropped, vec![&iso(0), &iso(1)], "被丢掉的必须是最旧的两份: {dropped:?}");
+        // keep 大于现存份数时不许凭空造条目
+        assert_eq!(select_report_stems(vec![iso(7)], REPORT_KEEP).len(), 1);
+        assert!(select_report_stems(Vec::new(), REPORT_KEEP).is_empty());
     }
 }
 

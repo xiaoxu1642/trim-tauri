@@ -4,16 +4,13 @@
 // 选项三档（2026-10-09 用户裁定）：full / standard / off —— frost 从选项退役
 // （太不明显），仅保留为环境自适应的内部降级档（电池/系统关透明时自动落入）。
 // 材质语义对齐 Apple Liquid Glass（本机资料区 update/2026-09-14 五方案评估·B1，不入库）：
-//   full     ≈ clear+ ：完整液态玻璃——分段栏滑块 + 按钮 + 弹层 SVG 物理折射（斯涅尔定律位移贴图）
-//              + RGB 三通道边缘色散 + 高光贴图 + 指针弹性形变 + WebGL 弹层焦散高光
-//   standard ≈ regular：标准液态玻璃——覆盖面同 full，但单通道折射、无色散 / 形变 / WebGL
-//   frost    = 环境自适应内部档（不在选项里）：磨砂玻璃，仅 backdrop blur（CSS 驱动），无折射滤镜
-//   off      = 实底：隐藏滑块、恢复实底按钮，不注入任何滤镜
-// 技术来源：
-//   - 位移贴图：圆角矩形角环 + 斯涅尔折射轮廓（厚度 / 斜边宽 / 折射率），参考 liquid实现2
-//   - 色散：R/G/B 三次 feDisplacementMap 不同 scale 后按 screen 混合，参考 liquid实现3
-//   - 高光：独立 specular 贴图在滤镜链内合成，参考 liquid实现2
-//   - 指针弹性形变：边缘激活区内的方向性缩放 + 平移，参考 liquid实现3
+//   full ≈ clear+：完整液态玻璃——滑块 + 按钮 + 弹层 SVG 物理折射（斯涅尔定律位移贴图）+ RGB 三通道边缘色散
+//                  + 高光贴图 + 指针弹性形变 + WebGL 弹层焦散高光
+//   standard ≈ regular：覆盖面同 full，但单通道折射、无色散 / 形变 / WebGL
+//   frost = 环境自适应内部档（不在选项里）：磨砂玻璃，仅 backdrop blur（CSS 驱动），无折射滤镜
+//   off = 实底：隐藏滑块、恢复实底按钮，不注入任何滤镜
+// 技术来源：位移贴图与高光参考 liquid实现2（圆角矩形角环 + 斯涅尔折射轮廓：厚度/斜边宽/折射率），
+// 色散与指针弹性形变参考 liquid实现3（R/G/B 三次 feDisplacementMap 不同 scale 后 screen 混合；边缘激活区内方向性缩放 + 平移）。
 // 能力检测失败（backdrop-filter 不支持引用 SVG 滤镜）自动降级 frost。
 // 性能护栏：贴图/滤镜按尺寸缓存复用；折射按环带像素量计费 + 面积兜底（B2）；
 //           折射元素数量与滤镜桶数量有上限；prefers-reduced-motion 时禁用指针形变与 WebGL 动画。
@@ -28,26 +25,22 @@
   // 点击导航时选中玻璃块从旧项纵向平滑滑到新项（弹簧回弹 + 轻微挤压），替换硬切背景
   const BAR_SELECTOR = '.filter-tabs, .maint-tabs, #sidebar';
   const TAB_SELECTOR = '.filter-tab, .maint-tab, .nav-item';
-  // 按钮语义名单：决定「谁是按钮」= full 档的指针弹性形变（.lg-elastic）。
-  // 2026-10-14 像素实测：位移贴图会把相邻行分隔线与文字拽进元素（同页两个色差 14 个单位）；
-  // 按钮与输入框（2026-10-15 快捷指令搜索框整块发黑，同族）都已退出折射——底色只由 CSS
-  // 的 --lg-glass-floor 自证（机检 check-contrast F1/F6）。
+  // 按钮语义名单：决定「谁是按钮」= full 档的指针弹性形变（.lg-elastic）。2026-10-14 像素实测：位移贴图会把相邻行
+  // 分隔线与文字拽进元素（同页两个色差 14 个单位）；按钮与输入框（2026-10-15 快捷指令搜索框整块发黑，同族）都已退出
+  // 折射——底色只由 CSS 的 --lg-glass-floor 自证（机检 check-contrast F1/F6）。
   const BUTTON_SELECTOR = '.btn-primary, .btn-accent, .btn-secondary';
-  // v3 评估 C/L3：输入框与下拉纳入玻璃体系（field-input 同时挂在 input 与 select 上）。
-  // 归类为 control：无折射（2026-10-15 退出，与按钮同族的 backdrop 渲染缺陷）、
-  // 无弹性形变（输入中形变会干扰打字）、无 shimmer
+  // v3 评估 C/L3：输入框与下拉纳入玻璃体系（field-input 同时挂在 input 与 select 上），归类为 control：无折射
+  //（2026-10-15 退出，与按钮同族的 backdrop 渲染缺陷）、无弹性形变（输入中形变会干扰打字）、无 shimmer
   const INPUT_SELECTOR = '.field-input';
   // 折射池全量扫描目标（按钮 + 输入控件 + 浮层）
   const REFRACT_SELECTOR = BUTTON_SELECTOR + ', ' + INPUT_SELECTOR;
-  // 悬浮玻璃层：统一弹窗 / 右键详情 / ds 下拉菜单（动态创建，由 MutationObserver 跟挂）。
-  // v3.0 修复批次（B4 扩覆盖面）：--bg-card 透明化后 ds-menu 底色改由 CSS floor+blur
-  // 兜底（main.css 菜单段），full/standard 档再由本引擎叠加折射与 shimmer
+  // 悬浮玻璃层：统一弹窗 / 右键详情 / ds 下拉菜单（动态创建，由 MutationObserver 跟挂）。v3.0 修复批次（B4 扩覆盖面）：
+  // --bg-card 透明化后 ds-menu 底色改由 CSS floor+blur 兜底（main.css 菜单段），full/standard 档再由本引擎叠加折射与 shimmer
   const FLOATING_SELECTOR = '.usage-modal, .ctx-detail-modal, .ds-menu';
   // 折射元素上限：滤镜链是像素级操作，数量失控会掉帧，超出的退化为磨砂
   const MAX_REFRACT = 28;
-  // 折射预算（v2 评估 B2 环带计费）：位移贴图只在边缘环带非零，主计费按环带像素量
-  // ring ≈ 2×(w+h)×bezel（bezel 与 buildMaps 同式）——宽工具行/大卡片/弹层与方框同权，
-  // 不再因整面积超限一刀切退化纯 blur（Apple 的玻璃主体恰是大面板）。
+  // 折射预算（v2 评估 B2 环带计费）：位移贴图只在边缘环带非零，主计费按环带像素量 ring ≈ 2×(w+h)×bezel（bezel 与
+  // buildMaps 同式）——宽工具行/大卡片/弹层与方框同权，不再因整面积超限一刀切退化纯 blur（Apple 的玻璃主体恰是大面板）。
   // 但 feDisplacementMap 仍按元素整面积处理，故保留面积兜底防极端大面板
   const RING_BEZEL_MAX = 26;        // 与 buildMaps 的 bezel 上限一致
   const MAX_RING_PIXELS = 96000;    // 环带预算：420² 方框≈44k、1200×160 工具行≈24k、560×420 弹层≈18k
@@ -78,27 +71,21 @@
 
   const states = new Map();      // bar -> { thumb, filterId, mapW, mapH }（分段栏滑块）
   const glassStates = new Map(); // el  -> { kind, w, h, radius, blur, refract }
-  // 容量上限（性能 v3 ①，写法对齐 MAP_CACHE_MAX / FILTER_BUCKETS_MAX）：glassStates 此前
-  // 没有上限——MAX_REFRACT 28 只管折射名额、FILTER_BUCKETS_MAX 48 只管滤镜桶，纯磨砂元素
-  // 照样逐个进 Map 并被 glassRo.observe（观察集与 Map 同尺寸）。
-  // 现算挂载面：index.html 静态命中 84 个候选（btn-primary 13 + btn-accent 6 +
-  // btn-secondary 56 + field-input 8 + usage-modal 1），但零尺寸（未激活页 / 未显示弹窗）
-  // 在 measureGlass 就被挡下；卸载页每应用 3 个 .btn-secondary，百应用即 300+ 同时在场。
-  // 512 给到静态面的 6 倍余量，只在「DOM 里同时存在上千克个玻璃候选」时才生效——
-  // 那种量级继续 observe 才是本条要兜的风险。
-  // 超限的降级是「不再挂新元素」（不 observe、不挂弹性、不写行内 backdropFilter），
-  // **不回改已挂元素**：已挂元素的视觉终值一个都不动；未挂元素走 main.css 的 CSS floor，
+  // 容量上限（性能 v3 ①，写法对齐 MAP_CACHE_MAX / FILTER_BUCKETS_MAX）：glassStates 此前没有上限——
+  // MAX_REFRACT 28 只管折射名额、FILTER_BUCKETS_MAX 48 只管滤镜桶，纯磨砂元素照样逐个进 Map 并被 glassRo.observe。
+  // 现算挂载面：index.html 静态命中 84 个候选（btn-primary 13 + btn-accent 6 + btn-secondary 56 + field-input 8 +
+  // usage-modal 1），但零尺寸（未激活页/未显示弹窗）在 measureGlass 就被挡下；卸载页每应用 3 个 .btn-secondary，百应用即 300+。
+  // 512 给到静态面 6 倍余量，只在「DOM 里同时存在上千克个玻璃候选」时生效。超限的降级是「不再挂新元素」（不 observe、
+  // 不挂弹性、不写行内 backdropFilter），**不回改已挂元素**：已挂元素的视觉终值一个都不动；未挂元素走 main.css 的 CSS floor，
   // 名额腾出后由 scheduleScan 下一轮补挂（与零尺寸元素延迟入场同一条路径）。
   const GLASS_STATES_MAX = 512;
   const elasticEls = new Set();  // full 模式参与弹性形变的按钮
   let refractCount = 0;
 
-  // P2-13（2026-10-09）：真源迁后端 settings.json 的 `liquidMotion` 键（AGENTS §0.2）；
-  // localStorage 降级为「同步初值 + 迁移来源 + 镜像」—— 玻璃档不能在 init 等 IPC，
-  // 否则首帧闪实底；后端回读只做采纳/迁移，且晚于首帧也不推翻已渲染的档位。
-  // 2026-10-09 用户裁定：磨砂档从**选项**退役（太不明显，与标准几乎不可辨），选项只剩
-  // 完整/标准/关闭三档；frost 仍保留为环境自适应内部档（电池供电/系统关透明时由
-  // applyEnv 以 persist:false 落入，不写用户偏好）。存量偏好为 frost 的按 standard 归一。
+  // P2-13（2026-10-09）：真源迁后端 settings.json 的 `liquidMotion` 键（AGENTS §0.2）；localStorage 降级为「同步初值
+  // + 迁移来源 + 镜像」—— 玻璃档不能在 init 等 IPC，否则首帧闪实底；后端回读只做采纳/迁移，且晚于首帧也不推翻已渲染的档位。
+  // 2026-10-09 用户裁定：磨砂档从**选项**退役（太不明显，与标准几乎不可辨），选项只剩完整/标准/关闭三档；frost 仍保留为
+  // 环境自适应内部档（电池供电/系统关透明时由 applyEnv 以 persist:false 落入，不写用户偏好）。存量 frost 偏好按 standard 归一。
   const USER_MODES = ['full', 'standard', 'off'];
   let modePref = readLsMode();
   let modePrefDirty = false;
@@ -167,7 +154,7 @@
     return MODES.indexOf(v) > -1 ? v : 'standard';
   }
 
-  // ============ 位移贴图（斯涅尔折射轮廓） ============
+  // 位移贴图（斯涅尔折射轮廓）
   const mapCache = new Map(); // 'w x h r' -> { url, specUrl }
   const MAP_CACHE_MAX = 48;
 
@@ -302,7 +289,7 @@
     return entry;
   }
 
-  // ============ SVG 滤镜装配（共享 defs，按 模式x尺寸x圆角 桶复用） ============
+  // SVG 滤镜装配（共享 defs，按 模式x尺寸x圆角 桶复用）
   const svgNS = 'http://www.w3.org/2000/svg';
   const xlinkNS = 'http://www.w3.org/1999/xlink';
   let sharedDefs = null;
@@ -436,18 +423,14 @@
     el.style.webkitBackdropFilter = value;
   }
 
-  // ============ 元素玻璃挂载（按钮 / 弹层） ============
-  // 性能 v3 ①：拆成「读趟 measureGlass / 写趟 commitGlass」两趟。
-  // 原 attachGlass 逐元素做 matches → getBoundingClientRect → getComputedStyle(半径) →
-  // 写两条行内 backdropFilter → classList.add('lg-elastic') → glassRo.observe，
-  // 而 scheduleScan 对 N 个候选逐个跑它 ⇒ 同帧读写交错，每次读都被上一元素的写判脏，
-  // 强制样式重算 + 回流 N 次。两趟化后读全部发生在写之前，整趟只脏一次布局。
-  // 等价性前提（改任一写法都要复核这条）：本引擎的写不改布局终值——
-  //   · .lg-elastic 的 transform 变量默认恒等（--lg-tx/ty 0px、--lg-sx/sy 1、--lg-press 1），
-  //     加 class 前后的 getBoundingClientRect 同一个盒子；
-  //   · shimmer 画布是 position:absolute/inset:0、sharedDefs 的 <svg> 是 position:absolute
-  //     零尺寸，都不入流、不改宿主尺寸；
-  //   · backdrop-filter 不参与布局。
+  // 元素玻璃挂载（按钮 / 弹层）
+  // 性能 v3 ①：拆成「读趟 measureGlass / 写趟 commitGlass」两趟 —— 旧版单元素直挂路径（已随 F5-L11 删除、零调用方）
+  // 对 N 个候选逐个跑 matches → getBoundingClientRect → getComputedStyle(半径) → 写两条行内 backdropFilter →
+  // classList.add('lg-elastic') → glassRo.observe，同帧读写交错、每次读都被上一元素的写判脏，强制样式重算 + 回流 N 次；
+  // 两趟化后读全部发生在写之前，整趟只脏一次布局。
+  // 等价性前提（改任一写法都要复核这条）：本引擎的写不改布局终值——.lg-elastic 的 transform 变量默认恒等
+  // （--lg-tx/ty 0px、--lg-sx/sy 1、--lg-press 1），加 class 前后 getBoundingClientRect 同一个盒子；shimmer 画布与
+  // sharedDefs 的 <svg> 都是 position:absolute 不入流、不改宿主尺寸；backdrop-filter 不参与布局。
   // 读趟：只做几何/样式读取（rect + computed 圆角），一律不碰 DOM
   function measureGlass(el) {
     if (glassStates.has(el) || !el.isConnected) return null;
@@ -501,12 +484,7 @@
     }
   }
 
-  function attachGlass(el) {
-    const m = measureGlass(el);
-    if (m) commitGlass(m);
-  }
-
-  // 一趟读几何、再一趟写样式（供批量挂载用：单个元素走 attachGlass 即可）
+  // 一趟读几何、再一趟写样式（批量挂载入口；单个元素传 [el] 即可）
   function attachGlassAll(els) {
     const measured = [];
     for (const el of els) {
@@ -516,8 +494,9 @@
     for (const m of measured) commitGlass(m);
   }
 
-  // 折射资格回升（修复实锤6）：元素缩小回预算内 / 折射名额或滤镜桶腾出后，
-  // 把停在纯 blur 的元素升回折射。只升不降，降级路径在 glassRo 与 attachGlass
+    // 折射资格回升（修复实锤6）：元素缩小回预算内 / 折射名额或滤镜桶腾出后，
+    // 把停在纯 blur 的元素升回折射。只升不降，降级路径在 glassRo 回调与
+    // scheduleScan 的 tryUpgradeGlass 重估（F5-L11：原注释指向已删除的 attachGlass）
   function tryUpgradeGlass(el, st) {
     if (st.refract || st.noFilter || el.isConnected === false) return;
     if (mode !== 'full' && mode !== 'standard') return;
@@ -558,18 +537,6 @@
     refractCount = 0;
   }
 
-  function attachIfNew(el) {
-    if (!el || !el.matches) return;
-    const sel = REFRACT_SELECTOR + ',' + FLOATING_SELECTOR;
-    const found = [];
-    if (el.matches(sel)) found.push(el);
-    // 容器节点：扫描其内部（弹窗整体插入 body 时一次带出全部按钮）
-    if (el.querySelectorAll) {
-      for (const inner of el.querySelectorAll(sel)) found.push(inner);
-    }
-    attachGlassAll(found);
-  }
-
   // 清理已脱离文档的元素，防止 states 泄漏
   function sweepDetached() {
     glassStates.forEach((st, el) => {
@@ -586,7 +553,13 @@
       const el = entry.target;
       const st = glassStates.get(el);
       if (!st) return;
-      const w = Math.round(entry.contentRect.width), h = Math.round(entry.contentRect.height);
+      // F5-M01：尺寸读数必须与 measureGlass 同一口径（getBoundingClientRect = border-box）。原 entry.contentRect 是
+      // content-box——全局 box-sizing:border-box 下带 border/padding 的玻璃元素（.usage-modal 的 1px 边、.ds-menu 的
+      // padding）初始通知必与首挂读数不等，每个浮层一挂就白拆白建一次滤镜（同步重跑两张位移/高光贴图），还留下引用
+      // 计数 0 的死桶占 FILTER_BUCKETS_MAX 名额，折射名额比上限更早被占满。隐藏中量得 0 时跳过，等可见后再结算。
+      const rect = el.getBoundingClientRect();
+      const w = Math.round(rect.width), h = Math.round(rect.height);
+      if (!w || !h) return;
       if (w === st.w && h === st.h) return;
       st.w = w; st.h = h;
       if (st.refract) {
@@ -629,7 +602,7 @@
     }, 120);
   }
 
-  // ============ 指针弹性形变 + 高光跟随（full 模式） ============
+  // 指针弹性形变 + 高光跟随（full 模式）
   let elasticRaf = 0;
   const pointer = { x: -1e5, y: -1e5 };
 
@@ -703,7 +676,7 @@
     if (el) el.style.removeProperty('--lg-press');
   }
 
-  // ============ WebGL 弹层焦散高光（full 模式，弹层点睛） ============
+  // WebGL 弹层焦散高光（full 模式，弹层点睛）
   const shimmer = {
     items: new Map(), // el -> { canvas, gl, glState, raf, ro, last }
 
@@ -836,7 +809,7 @@
     }
   };
 
-  // ============ 分段栏滑块（原有机制，贴图换成物理折射版） ============
+  // 分段栏滑块（原有机制，贴图换成物理折射版）
   // v3.2.0：#sidebar 也是 bar，active 查找同步覆盖 .nav-item
   function findActiveTab(bar) {
     // 侧边栏：测速父项在其子页（diskbench/netcheck/netspeed）也带 .active（分组高亮），
@@ -997,10 +970,8 @@
           state.thumb.classList.add('lg-no-anim');
           state.thumb.style.setProperty('--lg-x', state.lastX + 'px');
           // v3.2.0：侧边栏纵向坐标一并恢复（top=0 + --lg-y），否则重建后瞬跳回顶部。
-          // 修复（目检实锤）：此恢复只属于纵向栏——横向栏的 Y 走 top（placeThumb 会重写），
-          // 这里若也无条件写 --lg-y=lastY，随后的 placeThumb 只写 top 不清 --lg-y，
-          // top(4px)+transform(4px) 双重叠加，横向滑块整体下移一个 padding（维护/快捷
-          // 指令页每次数据刷新重渲染栏内容，必现；文字因此不在滑块垂直中央）。
+          // 修复（目检实锤）：此恢复只属于纵向栏——横向栏的 Y 走 top（placeThumb 会重写），这里若也无条件写 --lg-y=lastY，
+          // 随后的 placeThumb 只写 top 不清 --lg-y ⇒ top+transform 双重叠加、横向滑块整体下移一个 padding（维护/快捷指令页重渲染必现）。
           if (isSidebarBar(bar) && typeof state.lastY === 'number') {
             state.thumb.style.top = '0px';
             state.thumb.style.setProperty('--lg-y', state.lastY + 'px');
@@ -1021,12 +992,11 @@
     schedulePlace(bar, false);
   }
 
-  // 审查 v2-M22（v1 L14 未修部分）：states 此前**全文无 delete** —— 维护页 / 快捷指令页
-  // 每次重渲染都会换掉整条 bar，旧条目（连同 bar、thumb 子树、MutationObserver、
-  // sharedDefs 里的滤镜节点）被 Map 永久持有，切页越多攒越多。
+  // 审查 v2-M22（v1 L14 未修部分）：states 此前**全文无 delete** —— 维护页/快捷指令页每次重渲染都会换掉整条 bar，旧条目
+  //（连同 bar、thumb 子树、MutationObserver、sharedDefs 里的滤镜节点）被 Map 永久持有，切页越多攒越多。
   // 回收必须与 mountBar 严格配对：取消在途 rAF → 断观察者 → 摘滤镜节点 → 摘 thumb → 删条目。
-  // 刻意不动的护栏（AGENTS §7 / 报告 §7 点名保留）：MAX_REFRACT 28、420px/环带像素预算、
-  // MAP_CACHE_MAX 48、FILTER_BUCKETS_MAX 48、scheduleScan 的 120ms 节流——这里只补配对，不放开任何上限。
+  // 刻意不动的护栏（AGENTS §7 / 报告 §7 点名保留）：MAX_REFRACT 28、420px/环带像素预算、MAP_CACHE_MAX 48、
+  // FILTER_BUCKETS_MAX 48、scheduleScan 的 120ms 节流——这里只补配对，不放开任何上限。
   function detachBar(bar, state) {
     if (state.raf) cancelAnimationFrame(state.raf);
     state.raf = 0;
@@ -1062,7 +1032,7 @@
     });
   }
 
-  // ============ 模式切换 ============
+  // 模式切换
   function applyModeClass() {
     const body = document.body;
     MODES.forEach((m) => body.classList.toggle('lg-mode-' + m, mode === m));
@@ -1091,7 +1061,8 @@
     } else {
       // full↔standard 滤镜链不同（色散差异），先清后挂
       if (attachedMode && attachedMode !== mode) detachAllGlass();
-      // 不支持折射时滑块/按钮自动退化为磨砂（placeThumb / attachGlass 内处理）
+      // 不支持折射时滑块/按钮自动退化为磨砂（placeThumb 内处理；玻璃元素走
+      // attachGlassAll → commitGlass 的纯磨砂分支，F5-L11：原注释指向已删除的 attachGlass）
       attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
       attachedMode = mode;
     }
@@ -1122,7 +1093,7 @@
 
   function getMode() { return mode; }
 
-  // ============ 事件接线 ============
+  // 事件接线
   let bodyMo = null;
 
   // LG-5（2026-09-15）：reduced-motion 实时求值——原实现 init 时读一次固化，
@@ -1148,6 +1119,10 @@
     reduceMotion = prefersReduceMotion();
     document.body.classList.toggle('lg-reduce-motion', reduceMotion);
     if (reduceMotion !== was) bindReducePointerListeners(!reduceMotion);
+    // F5-M02：成对回收——翻到 reduce 时在途 WebGL 焦散画布必须销毁。CSS 的 @media reduce 只 display:none 藏画布，
+    // rAF 循环与 shader 照跑（无效 GPU/CPU 功耗，与本文件自带的电池降级口径不对等）；shimmer.attach 已拒绝新元素，
+    // 这里补齐存量回收。反向（reduce 关闭）不用补挂：浮层重开/下一轮扫描自然回来。
+    if (reduceMotion && !was) shimmer.destroyAll();
   }
 
   function init() {

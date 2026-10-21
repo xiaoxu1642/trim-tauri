@@ -67,7 +67,9 @@ pub use preview_assets::{cleanup_allow_preview_assets, __cmd__cleanup_allow_prev
 mod recycle_bin;
 pub use recycle_bin::{cleanup_recycle_stats, __cmd__cleanup_recycle_stats, __tauri_command_name_cleanup_recycle_stats, cleanup_empty_recycle_bin, __cmd__cleanup_empty_recycle_bin, __tauri_command_name_cleanup_empty_recycle_bin, cleanup_open_recycle_bin, __cmd__cleanup_open_recycle_bin, __tauri_command_name_cleanup_open_recycle_bin};
 mod rules;
-pub use rules::{data_rules_dir, rules_watermark, rules_value, rules_value_arc, cleanup_rules, __cmd__cleanup_rules, __tauri_command_name_cleanup_rules};
+// R4-L08：`data_rules_dir` 不在台账里了 —— 全仓零消费点（只有本行 re-export 它），
+// 根目录口径的真源是 `engine::paths`；「pub 且被 re-export」不等于「已接入」。
+pub use rules::{rules_watermark, rules_value, rules_value_arc, cleanup_rules, __cmd__cleanup_rules, __tauri_command_name_cleanup_rules};
 mod scan_execute;
 pub use scan_execute::{cleanup_scan, cleanup_scan_headless, __cmd__cleanup_scan, __tauri_command_name_cleanup_scan, cleanup_execute, __cmd__cleanup_execute, __tauri_command_name_cleanup_execute, cleanup_item_detail, __cmd__cleanup_item_detail, __tauri_command_name_cleanup_item_detail, cleanup_check_locked, __cmd__cleanup_check_locked, __tauri_command_name_cleanup_check_locked, cleanup_query_locked, __cmd__cleanup_query_locked, __tauri_command_name_cleanup_query_locked, cleanup_kill_locked_processes, __cmd__cleanup_kill_locked_processes, __tauri_command_name_cleanup_kill_locked_processes};
 mod state;

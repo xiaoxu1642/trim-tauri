@@ -507,33 +507,112 @@ unsafe fn uptime_text() -> String {
     else { format!("{} 分钟", mins) }
 }
 
-unsafe fn os_version_strings() -> (String, String, String) {
-    // RtlGetVersion（避开 manifest 兼容清单）；caption 取注册表 ProductName（与 PS 的
-    // 本地化 Caption 措辞可能有别，已知差异，见交付报告）
-    let mut vi = [0u8; 276]; // OSVERSIONINFOW
-    vi[0..4].copy_from_slice(&276u32.to_le_bytes());
-    RtlGetVersion(vi.as_mut_ptr());
-    let rd = |o: usize| u32::from_le_bytes([vi[o], vi[o + 1], vi[o + 2], vi[o + 3]]);
-    // OSVERSIONINFOW 布局：0=size, 4=major, 8=minor, 12=buildNumber, 16=platformId
-    let (major, minor, build) = (rd(4), rd(8), rd(12));
-    let caption = reg_get_string(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName")
-        .unwrap_or_else(|| "Windows".to_string());
-    (caption, format!("{}.{}.{}", major, minor, build), build.to_string())
+/// RtlGetVersion 的返回码：STATUS_SUCCESS = 0。
+/// 旧写法把返回码直接丢弃（N1b-L01）—— 失败时结构体还是全零，于是把
+/// 「一个都不存在的版本号 0.0.0」当读数报给用户，界面上与真实读数同形。
+const STATUS_SUCCESS: i32 = 0;
+
+/// 版本三元组的三态换算（纯函数，便于断言；N1b-L01）。
+/// `None` = 调用失败（返回码非 0）⇒ 出口必须给空串「没读到」，不许给 `0.0.0`。
+fn os_version_fields(status: i32, major: u32, minor: u32, build: u32) -> Option<(String, String)> {
+    if status != STATUS_SUCCESS {
+        return None;
+    }
+    Some((format!("{major}.{minor}.{build}"), build.to_string()))
 }
 
-unsafe fn reg_get_string(sub: &str, name: &str) -> Option<String> {
+/// REG_SZ 取值的三态判定（纯函数，便于断言；N1b-L01）。
+/// 三条出口彼此可分：`Ok(Some(s))` = 读到字符串值；`Ok(None)` = 值不存在/长度为 0；
+/// `Err(())` = **类型不是 REG_SZ** 或不是良构 UTF-16（"形状不符"不是"读不到"，
+/// 更不是"确实没有"——旧写法取了 `typ` 却不校验，REG_MULTI_SZ/REG_DWORD 被
+/// lossy 解码成乱码照样返回 Some）。
+fn reg_sz_value(typ: u32, bytes: &[u8]) -> Result<Option<String>, ()> {
+    // REG_SZ = 1；REG_EXPAND_SZ 不在此列（ProductName 是 REG_SZ，
+    // 顺手放开等于给这条通道多开一个没验过的形状）
+    if typ != 1 {
+        return Err(());
+    }
+    // 奇数字节 = 半条 UTF-16 码元（不是「值为空」，是形状不合）
+    if bytes.len() % 2 != 0 {
+        return Err(());
+    }
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let u16s: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    // 去掉尾部 NUL（REG_SZ 常带一个终止符，也可能带两个）
+    let end = u16s
+        .iter()
+        .rposition(|&c| c != 0)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if end == 0 {
+        // 值存在但整串是终止符 = 「确实没有内容」，与下面的「解不出」是两回事
+        return Ok(None);
+    }
+    match crate::util::decode_wide_exact(&u16s[..end]) {
+        Some(s) => Ok(Some(s)),
+        None => Err(()),
+    }
+}
+
+unsafe fn os_version_strings() -> (String, bool, Option<String>, Option<String>) {
+    // RtlGetVersion（避开 manifest 兼容清单）；caption 取注册表 ProductName（与 PS 的
+    // 本地化 Caption 措辞可能有别，已知差异，见交付报告）
+    // N1b-L01：缓冲区从 `[0u8; 276]` + 魔数偏移换成 `OSVERSIONINFOW`（尺寸/偏移在
+    // util::ffi 里由 `const _` 编译期钉住，与同文件 RM_PROCESS_INFO 同一标准）；
+    // 返回码必须查，失败 ⇒ version/build 走「没读到」（空串），不编造 0.0.0。
+    let mut vi = crate::util::ffi::OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<crate::util::ffi::OSVERSIONINFOW>() as u32,
+        dwMajorVersion: 0,
+        dwMinorVersion: 0,
+        dwBuildNumber: 0,
+        dwPlatformId: 0,
+        szCSDVersion: [0u16; 128],
+    };
+    let status = RtlGetVersion(&mut vi as *mut _ as *mut u8);
+    // caption 的「读不到」不再伪装成读数：第二位 = 是否真读到 ProductName。
+    // 「Windows」是刻意保留的通用兜底标签（界面上不空格子），但它**不进** okSystem 位。
+    let product = reg_get_string(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName");
+    let caption_read = matches!(product, Ok(Some(_)));
+    let caption = product.unwrap_or(None).unwrap_or_else(|| "Windows".to_string());
+    let fields = os_version_fields(status, vi.dwMajorVersion, vi.dwMinorVersion, vi.dwBuildNumber);
+    match fields {
+        Some((version, build)) => (caption, caption_read, Some(version), Some(build)),
+        // 读不到：None ⇒ 出口给空串（渲染层按「有值才拼这段」处理）
+        None => (caption, caption_read, None, None),
+    }
+}
+
+/// 取一个 REG_SZ 值。三条出口彼此可分（N1b-L01 三态口径）：
+/// `Ok(Some(s))` = 读到字符串；`Ok(None)` = 键开到了但没有该值/值为空；
+/// `Err(())` = 打不开键、或**形状不合**（类型不是 REG_SZ、半条码元、孤立代理项）。
+/// 「形状不符」不是「读不到」更不是「确实没有」，旧写法三者折成一条 `Option` 且把
+/// 非字符串类型 lossy 解码成乱码照样当 Some 返回。
+/// 为什么这里不留痕：本函数被 ov-metrics 每 ~2.5s 调一次，写 stderr 会刷屏
+/// （且 GUI 子系统里那几个字本来就蒸发）；形状不合统一并进 `okSystem` 位上抛。
+unsafe fn reg_get_string(sub: &str, name: &str) -> Result<Option<String>, ()> {
     let sub_w = wide(sub);
     let name_w = wide(name);
     let mut hk: isize = 0;
-    if RegOpenKeyExW(0x8000_0002u32 as isize /*HKLM*/, sub_w.as_ptr(), 0, 0x20019 /*KEY_READ*/, &mut hk) != 0 { return None; }
-    let mut out = None;
+    if RegOpenKeyExW(0x8000_0002u32 as isize /*HKLM*/, sub_w.as_ptr(), 0, 0x20019 /*KEY_READ*/, &mut hk) != 0 {
+        return Err(());
+    }
+    let mut out = Err(());
     let (mut typ, mut len) = (0u32, 0u32);
-    if RegQueryValueExW(hk, name_w.as_ptr(), std::ptr::null_mut(), &mut typ, std::ptr::null_mut(), &mut len) == 0 && len > 0 && len < 4096 {
-        let mut buf = vec![0u8; len as usize];
-        let mut len2 = len;
-        if RegQueryValueExW(hk, name_w.as_ptr(), std::ptr::null_mut(), &mut typ, buf.as_mut_ptr(), &mut len2) == 0 {
-            let u16s: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-            out = Some(String::from_utf16_lossy(&u16s).trim_end_matches('\0').to_string());
+    if RegQueryValueExW(hk, name_w.as_ptr(), std::ptr::null_mut(), &mut typ, std::ptr::null_mut(), &mut len) == 0 {
+        if len == 0 || len >= 4096 {
+            // len==0 = 值不存在（不是「解不出」）；len 荒谬（≥4096）按形状不合
+            out = if len == 0 { Ok(None) } else { Err(()) };
+        } else {
+            let mut buf = vec![0u8; len as usize];
+            let mut len2 = len;
+            if RegQueryValueExW(hk, name_w.as_ptr(), std::ptr::null_mut(), &mut typ, buf.as_mut_ptr(), &mut len2) == 0 {
+                out = reg_sz_value(typ, &buf[..(len2 as usize).min(buf.len())]);
+            }
         }
     }
     RegCloseKey(hk);
@@ -626,16 +705,22 @@ pub fn ov_metrics_json() -> String {
             }
             windows_sys::Win32::Foundation::CloseHandle(snap);
         }
-        let (caption, version, build) = os_version_strings();
+        let (caption, caption_read, version, build) = os_version_strings();
+        // N1b-L01：系统段单独给一位（与 okCpu/okMemory/okDisks/okProcesses 同族）。
+        // 读不到时 version/build 一律是空串而不是「0.0.0」——空串 + okSystem:false 才是
+        // 「没读到」的形状；将来上层要按位决定回落粒度就有可对账的入口（本轮宿主未消费）。
+        let ok_system = caption_read && version.is_some() && build.is_some();
         let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
         let user = std::env::var("USERNAME").unwrap_or_default();
         let success = metrics_success(cpu_ok, mem_ok);
         let json = format!(
-            "{{\"success\":{},\"okCpu\":{},\"okMemory\":{},\"okDisks\":{},\"okProcesses\":{},\"cpu\":null,\"cpuRaw\":{},\"memory\":{{\"total\":{},\"free\":{},\"used\":{},\"percent\":{:.1}}},\"disks\":[{}],\"uptime\":\"{}\",\"processes\":{},\"system\":{{\"caption\":\"{}\",\"version\":\"{}\",\"build\":\"{}\",\"computerName\":\"{}\",\"userName\":\"{}\"}}}}",
-            success, cpu_ok, mem_ok, disks_probed && !disks.is_empty(), snap_ok,
+            "{{\"success\":{},\"okCpu\":{},\"okMemory\":{},\"okDisks\":{},\"okProcesses\":{},\"okSystem\":{},\"cpu\":null,\"cpuRaw\":{},\"memory\":{{\"total\":{},\"free\":{},\"used\":{},\"percent\":{:.1}}},\"disks\":[{}],\"uptime\":\"{}\",\"processes\":{},\"system\":{{\"caption\":\"{}\",\"version\":\"{}\",\"build\":\"{}\",\"computerName\":\"{}\",\"userName\":\"{}\"}}}}",
+            success, cpu_ok, mem_ok, disks_probed && !disks.is_empty(), snap_ok, ok_system,
             cpu_raw, total, free, used, mem_percent, disks.join(","),
             json_escape(&uptime_text()), processes,
-            json_escape(&caption), json_escape(&version), json_escape(&build),
+            json_escape(&caption),
+            json_escape(version.as_deref().unwrap_or("")),
+            json_escape(build.as_deref().unwrap_or("")),
             json_escape(&computer), json_escape(&user)
         );
         json
@@ -665,6 +750,12 @@ pub struct NetSampler {
     /// ifIndex → (上一帧 rx, 上一帧 tx, 采样时刻的**单调**毫秒)。
     /// 每帧结束按「本帧接口表里存在的 ifIndex」剪枝（审查 v2-L18），否则常驻形态下会无界增长。
     prev: std::collections::HashMap<u32, (u64, u64, u64)>,
+    /// 最近一次「读接口表失败」的返回码（N1b-M06）。
+    /// `sample_frame()` 的签名不许动（宿主 `commands/realtime.rs` 按 `Option` 分支），
+    /// 所以这条三态只能**带外**可读：成功采样清 None，失败置码。
+    /// 为什么必须留：旧形态把「GetIfTable2 挂了」与「这台机器没插网卡/首拍无基线」
+    /// 一起折成 `None`，上层只能画「没有网络」，用户与排障者都无从分辨。
+    last_error: Option<i32>,
 }
 
 impl NetSampler {
@@ -674,20 +765,61 @@ impl NetSampler {
 
     /// 采一帧：返回 `Some(json行)`；首拍或当前无符合条件的物理网卡时返回 `None`
     /// （调用方据此保持"空列表而非报错"的上层语义）。
+    /// **读表失败也返回 `None`**，但可用 [`NetSampler::last_error`] 取出 NTSTATUS 分辨
+    /// 到底是哪一种（宿主把它写进日志即可，不需要改这条通道的形状）。
     pub fn sample_frame(&mut self) -> Option<String> {
-        read_if_table_frame(&mut self.prev)
+        match read_if_table_frame(&mut self.prev) {
+            Ok(line) => {
+                self.last_error = None;
+                line
+            }
+            Err(code) => {
+                self.last_error = Some(code);
+                None
+            }
+        }
+    }
+
+    /// 最近一次读接口表的失败码；`None` = 上一次读表是成功的（N1b-M06）。
+    pub fn last_error(&self) -> Option<i32> {
+        self.last_error
     }
 }
 
-/// 读一次 GetIfTable2 并按上一帧差分出一行 JSON（CLI 与 lib 共用同一实现）
+/// `GetIfTable2` 返回 0 却给了空指针：调用约定上不该发生，但必须与「确无网卡」分开记。
+/// 本 crate 不引新状态码，用固定的负值表示这一形态。
+const NET_READ_NULL_TABLE: i32 = -1;
+
+/// 读一次接口的失败判据（纯函数，便于断言；N1b-M06）。
+/// `Some(code)` = 读不到（携带原始返回码）；`None` = 读到了表。
+fn if_table_read_failure(rc: i32, table_null: bool) -> Option<i32> {
+    if rc != STATUS_SUCCESS {
+        return Some(rc);
+    }
+    if table_null {
+        return Some(NET_READ_NULL_TABLE);
+    }
+    None
+}
+
+/// 读一次 GetIfTable2 并按上一帧差分出一行 JSON（CLI 与 lib 共用同一实现）。
+/// 返回 `Err(码)` = 读表失败；`Ok(None)` = 读到了但本帧不产出（首拍无基线 / 无符合条件的物理网卡）；
+/// `Ok(Some(line))` = 有帧。三态不许再折成一条 `Option`（N1b-M06）。
 fn read_if_table_frame(
     prev: &mut std::collections::HashMap<u32, (u64, u64, u64)>,
-) -> Option<String> {
+) -> Result<Option<String>, i32> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
     unsafe {
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-        if GetIfTable2(&mut table) != 0 || table.is_null() {
-            return None;
+        let rc = GetIfTable2(&mut table);
+        // GetIfTable2 报的是 WIN32_ERROR（u32），本模块的错误码通道是 i32
+        // （`last_error()` 的契约，宿主按 `code as u32` 回打原始十六进制）。
+        // WIN32_ERROR 的实际取值远小于 0x8000_0000，转换无损；
+        // 通道里的负值只留给本 crate 自己的哨兵（NET_READ_NULL_TABLE = -1）。
+        let rc = rc as i32;
+        if let Some(code) = if_table_read_failure(rc, table.is_null()) {
+            // 失败路径不 free：table 仍是 null（或调用方给的野值未产生），无泄漏
+            return Err(code);
         }
         let now = now_ms();
         // 帧间差分走单调时钟（审查 v2-L18）：`t` 字段本身是对外契约里的 epoch 毫秒
@@ -731,18 +863,44 @@ fn read_if_table_frame(
         // 做差分，画出一个假尖峰。按本帧实际存在的接口集合剪枝。
         prev.retain(|k, _| present.contains(k));
         if adapters.is_empty() {
-            return None;
+            // 读到表了但本帧不产出：首拍无基线，或确无符合条件的物理网卡。
+            // 这一支与上面「读表失败」必须是两条出口（N1b-M06），调用方靠 last_error 分。
+            return Ok(None);
         }
-        Some(format!("{{\"t\":{},\"adapters\":[{}]}}", now, adapters.join(",")))
+        Ok(Some(format!(
+            "{{\"t\":{},\"adapters\":[{}]}}",
+            now,
+            adapters.join(",")
+        )))
     }
 }
 
 pub fn run_net_sample(args: &[String]) -> i32 {
     let interval = arg_value(args, "interval").map(|v| v.parse::<u64>().unwrap_or(1000)).unwrap_or(1000).clamp(200, 10_000);
     let mut sampler = NetSampler::new();
+    // 只在「失败码变化」的那一拍出声：本函数是 1s 一轮的常驻循环，
+    // 每拍都写 stderr 会把真留痕淹掉（lib 直调侧由宿主读 last_error，不经过这里）。
+    let mut reported: Option<i32> = None;
     loop {
-        if let Some(line) = sampler.sample_frame() {
-            if out_line(&line).is_err() { return 0; } // 管道断裂 = 父进程已退出
+        match sampler.sample_frame() {
+            Some(line) => {
+                if out_line(&line).is_err() { return 0; } // 管道断裂 = 父进程已退出
+            }
+            None => {
+                let err = sampler.last_error();
+                if err.is_some() && err != reported {
+                    if let Some(code) = err {
+                        eprintln!(
+                            "[finder-warn] net-sample 读接口表失败（GetIfTable2 返回 0x{:08X}）——\
+                             这与「本机没有可用网卡」是两种结论",
+                            code as u32
+                        );
+                    }
+                    reported = err;
+                } else if err.is_none() {
+                    reported = None;
+                }
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(interval));
     }
@@ -774,8 +932,13 @@ const MEM_ITEMS: [(&str, u32, u32, u8, &str); 5] = [
     ("combine", SYS_COMBINE_PHYSICAL_MEMORY_INFORMATION, 0, 1, "合并物理内存页"),
 ];
 
+/// 把特权加进当前进程令牌。**返回 true 的含义是「真的加上了」**，不是
+/// 「AdjustTokenPrivileges 没报错」——N1b-M06：`AdjustTokenPrivileges` 在请求的特权
+/// 不在令牌里时**照样返回非 0**，只把 LastError 置成 `ERROR_NOT_ALL_ASSIGNED`，
+/// 旧写法 `!= 0` 直接当成功，于是调用方把「没提权」当成「已提权」，
+/// 而 `let _ =` 又把这个布尔整个丢掉。
 unsafe fn enable_privilege(name: &str) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError, CloseHandle, ERROR_NOT_ALL_ASSIGNED};
     use windows_sys::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
@@ -790,7 +953,11 @@ unsafe fn enable_privilege(name: &str) -> bool {
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Luid = luid;
         tp.Privileges[0].Attributes = 2; // SE_PRIVILEGE_ENABLED
-        res = AdjustTokenPrivileges(token, 0, &mut tp, 0, std::ptr::null_mut(), std::ptr::null_mut()) != 0;
+        // ATP 自己不清 LastError，不先归零就会把更早的残留码读成本次的失败原因
+        SetLastError(0);
+        if AdjustTokenPrivileges(token, 0, &mut tp, 0, std::ptr::null_mut(), std::ptr::null_mut()) != 0 {
+            res = GetLastError() != ERROR_NOT_ALL_ASSIGNED;
+        }
     }
     CloseHandle(token);
     res
@@ -809,6 +976,22 @@ unsafe fn avail_phys_bytes() -> Option<u64> {
     }
 }
 
+/// 释放量的三态判定（纯函数，便于断言；N1b-M06）。
+///
+/// `measured = false` 必须与「确实没释放」区分开，两种形态都算：
+/// ① 前后两次 `GlobalMemoryStatusEx` 至少一次读不到（v5 M-2 已修的那半）；
+/// ② 本次选中的区域**一个都没执行成功**（全失败 / 空集）。此时 `freed` 报的是
+///    「这几秒整机可用内存的净变化」，与他人进程的活动不可分，却标着
+///    `freedMeasured:true` —— 等于把「本模块什么都没做成」伪装成「测到了释放量」。
+/// 数值口径不变：`freed` 仍是 saturating 差（后小于前给 0，不出负数）。
+fn mem_freed_verdict(before: Option<u64>, after: Option<u64>, statuses: &[i32]) -> (u64, bool) {
+    let any_region_ok = statuses.iter().any(|&s| s == STATUS_SUCCESS);
+    match (before, after) {
+        (Some(b), Some(a)) if any_region_ok => (a.saturating_sub(b), true),
+        _ => (0, false),
+    }
+}
+
 /// 内存清理核心：Ok = 最终结果 JSON；Err = 失败原因消息（CLI 侧原样直写 stdout）。
 /// 白名单校验与原行为逐字一致（`--items` 缺失在 CLI 包装里处理，不进核心）。
 fn mem_clean_core(want: &[String]) -> Result<String, String> {
@@ -822,10 +1005,16 @@ fn mem_clean_core(want: &[String]) -> Result<String, String> {
     }
     unsafe {
         // 双特权，缺一不可（`vendor/upstream-js/src/scripts-powershell/memory-scripts.js:72-99` 同口径）
-        let _ = enable_privilege("SeProfileSingleProcessPrivilege");
-        let _ = enable_privilege("SeIncreaseQuotaPrivilege");
+        // N1b-M06：旧写法 `let _ =` 把返回值整个丢掉。现在 true 的含义是「令牌里真的
+        // 加上了」（AdjustTokenPrivileges 的 `ERROR_NOT_ALL_ASSIGNED` 已查），并把两位
+        // 如实带进回执的 `privileges` 段：没提权时 5 个区域全会被系统拒绝，界面上要能
+        // 说出「是缺特权」而不是「清了但没释放」。
+        let priv_profile = enable_privilege("SeProfileSingleProcessPrivilege");
+        let priv_quota = enable_privilege("SeIncreaseQuotaPrivilege");
         let before = avail_phys_bytes();
         let mut results: Vec<String> = Vec::new();
+        // 本次**实际执行**的区域 NTSTATUS（判「有没有真做成一件事」用，见 mem_freed_verdict）
+        let mut statuses: Vec<i32> = Vec::new();
         for (id, cls, val, kind, label) in MEM_ITEMS.iter() {
             if !want.iter().any(|w| w == id) { continue; }
             // E4：每区域耗时（方案 §3.5 E4）。计时**包住 NtSetSystemInformation 调用**，
@@ -848,20 +1037,19 @@ fn mem_clean_core(want: &[String]) -> Result<String, String> {
                 )
             };
             let elapsed_ms = t0.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            statuses.push(status);
             results.push(format!("{{\"id\":\"{}\",\"name\":\"{}\",\"ok\":{},\"status\":{},\"elapsedMs\":{elapsed_ms}}}", id, label, status == 0, status));
         }
         let after = avail_phys_bytes();
         // v5 M-2：任一端读失败 ⇒ 差值不可信，如实回 0 并置 freedMeasured=false，让渲染层
         // 说「未测到释放量」而不是「释放 0 B」（后者看着像"确实没释放"，是两种不同的结论）。
+        // N1b-M06：判定收进 `mem_freed_verdict`，多并一条「本轮一个区域都没做成」的形态。
         // 口径提醒：freed 本来就是「这几秒内全系统可用内存的净变化」，不是本模块独占成果 ——
         // 期间其它进程分配/释放、系统自行回收都算得进来，UI 文案不得写成"本模块释放了 X"。
-        let (freed, measured) = match (before, after) {
-            (Some(b), Some(a)) => (a.saturating_sub(b), true),
-            _ => (0, false),
-        };
+        let (freed, measured) = mem_freed_verdict(before, after, &statuses);
         Ok(format!(
-            "{{\"before\":{},\"after\":{},\"freed\":{},\"freedMeasured\":{},\"results\":[{}]}}",
-            before.unwrap_or(0), after.unwrap_or(0), freed, measured, results.join(",")
+            "{{\"before\":{},\"after\":{},\"freed\":{},\"freedMeasured\":{},\"privileges\":{{\"seProfileSingleProcess\":{},\"seIncreaseQuota\":{}}},\"results\":[{}]}}",
+            before.unwrap_or(0), after.unwrap_or(0), freed, measured, priv_profile, priv_quota, results.join(",")
         ))
     }
 }
@@ -962,5 +1150,125 @@ mod tests {
         let dms = (b - a) / 1_000_000;
         assert!((15..3_000).contains(&dms), "单调时钟量级不对（差了 {dms} ms）");
         assert!(mono_ms() > 0);
+    }
+
+    /// v7.2 W4（N1b-L01）破坏自证：`RtlGetVersion` 的返回码必须进判定。
+    /// 旧写法丢弃返回码 ⇒ 失败时把全零结构体读成「0.0.0」，一个都不存在的版本号
+    /// 与真实读数在界面上同形。正向点名：失败给 None，成功给逐字三元组。
+    #[test]
+    fn os_version_fields_把调用失败与读数分开() {
+        // 尺寸不被接受（STATUS_INFO_LENGTH_MISMATCH）与任意非 0 码一律 None
+        assert_eq!(
+            os_version_fields(STATUS_INFO_LENGTH_MISMATCH, 0, 0, 0),
+            None,
+            "调用失败不得折成 0.0.0"
+        );
+        assert_eq!(os_version_fields(1, 10, 0, 22631), None, "非 0 就是失败，哪怕字段看着像读数");
+        assert_eq!(
+            os_version_fields(0, 10, 0, 22631),
+            Some(("10.0.22631".to_string(), "22631".to_string())),
+            "成功时 version 是 major.minor.build、build 是单独的十进制串"
+        );
+        // 真读到 0.0.0 也要照常输出（判据是返回码，不是「值看着不像版本」）
+        assert_eq!(
+            os_version_fields(0, 0, 0, 0),
+            Some(("0.0.0".to_string(), "0".to_string()))
+        );
+    }
+
+    /// v7.2 W4（N1b-L01）：注册表取值的三态与类型校验。
+    /// 旧写法取了 `typ` 却不校验，REG_DWORD/REG_MULTI_SZ 被 lossy 解码成乱码照样当 Some，
+    /// 孤立代理项也被换成 U+FFFD 当正常名字返回。
+    #[test]
+    fn reg_sz_value_只认_reg_sz_且拒绝有损解码() {
+        let utf16 = |s: &str| -> Vec<u8> {
+            let mut v: Vec<u8> = s
+                .encode_utf16()
+                .flat_map(|c| c.to_le_bytes())
+                .collect();
+            v.extend([0u8, 0u8]); // 终止符
+            v
+        };
+        // REG_SZ = 1：正常读到，尾部 NUL 被裁掉
+        assert_eq!(
+            reg_sz_value(1, &utf16("Windows 11 专业版")),
+            Ok(Some("Windows 11 专业版".to_string()))
+        );
+        // REG_EXPAND_SZ(2) / REG_MULTI_SZ(7) / REG_DWORD(4) 都不是本通道认的形状
+        for bad_typ in [2u32, 4, 7, 11] {
+            assert_eq!(
+                reg_sz_value(bad_typ, &utf16("x")),
+                Err(()),
+                "类型 {bad_typ} 不是 REG_SZ，必须判形状不合"
+            );
+        }
+        // 半条码元 = 形状不合（不是「值为空」）
+        assert_eq!(reg_sz_value(1, &[0x41]), Err(()));
+        // 孤立代理项 = 非良构 UTF-16 ⇒ 形状不合，不许 lossy 成含 U+FFFD 的假名字
+        let lone = [0x3Du8, 0xD8u8, 0x00, 0x00];
+        assert_eq!(reg_sz_value(1, &lone), Err(()), "孤立代理项必须判形状不合");
+        // 只有 NUL = 空值 ⇒「确实没有」，与上面两种不同
+        assert_eq!(reg_sz_value(1, &[0u8, 0u8]), Ok(None));
+        assert_eq!(reg_sz_value(1, &[]), Ok(None), "零长度 = 值不存在");
+    }
+
+    /// v7.2 W4（N1b-M06）：`GetIfTable2` 的失败必须与「本帧没有可输出的网卡」分得开。
+    /// 旧写法两条都 `return None` ⇒ 渲染层只能画「没有网络」，API 挂了没人知道。
+    #[test]
+    fn if_table_read_failure_把读不到与确无网卡分开() {
+        // 返回码非 0 ⇒ 带上原始码（宿主/CLI 能说出是哪个 NTSTATUS）
+        assert_eq!(if_table_read_failure(STATUS_INFO_LENGTH_MISMATCH, false), Some(STATUS_INFO_LENGTH_MISMATCH));
+        assert_eq!(if_table_read_failure(5, true), Some(5));
+        // 返回码 0 却给空指针：调用约定违例，也只能算「读不到」
+        assert_eq!(if_table_read_failure(0, true), Some(NET_READ_NULL_TABLE));
+        // 真读到表 ⇒ 不是失败（后面 adapters 为空是「确无符合条件网卡」，另一条出口）
+        assert_eq!(if_table_read_failure(0, false), None);
+    }
+
+    /// v7.2 W4（N1b-M06）：mem-clean 的释放量三态。
+    /// 旧写法只查「前后两次读数是否在」，于是 5 个区域全被系统拒绝时照样
+    /// `freedMeasured:true` 报出一个由别人进程造成的差值。
+    #[test]
+    fn mem_freed_verdict_全失败时不谎称测到释放() {
+        // ① 正常：一端成功 + 两次读数都在 ⇒ 差值可信
+        assert_eq!(mem_freed_verdict(Some(100), Some(180), &[0]), (80, true));
+        assert_eq!(
+            mem_freed_verdict(Some(100), Some(180), &[-1073741772, 0]),
+            (80, true),
+            "部分区域失败但有一端成功 ⇒ 仍按测到处理（差值口径不变）"
+        );
+        // ② 本模块一个区域都没做成 ⇒ 不成立，freed 归零并明说没测到
+        assert_eq!(mem_freed_verdict(Some(100), Some(180), &[-1073741772, -1073741772]), (0, false));
+        assert_eq!(mem_freed_verdict(Some(100), Some(180), &[]), (0, false), "空集 = 没执行任何区域");
+        // ③ 任一端读不到（v5 M-2 那半，不许被本次改动弄丢）
+        assert_eq!(mem_freed_verdict(None, Some(180), &[0]), (0, false));
+        assert_eq!(mem_freed_verdict(Some(100), None, &[0]), (0, false));
+        // ④ 成功但可用内存没涨（或被别人吃掉）⇒ 测到了，值是 0
+        assert_eq!(mem_freed_verdict(Some(180), Some(100), &[0]), (0, true));
+    }
+
+    /// v7.2 W4（N1b-L01）真机探针（**只写不跑**）：真实 `RtlGetVersion` + 真实注册表。
+    /// 钉的是「这台机器上返回码确实是 0，且三元组不是被兜出来的空串」——
+    /// 单元用例只能证纯函数的分档，证不到 API 实际接受我们填的 276 字节尺寸。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机探针：调 RtlGetVersion 与读 HKLM ProductName（只读，无副作用）"]
+    fn 真机系统版本段读得到且形状合() {
+        let (caption, caption_read, version, build) = unsafe { os_version_strings() };
+        assert!(caption_read, "ProductName 必须真读到（不是兜底的通用标签）：{caption}");
+        assert!(caption.contains("Windows"), "caption 里必须带产品名：{caption}");
+        let v = version.expect("RtlGetVersion 必须返回 0，否则这里才是 None");
+        let b = build.expect("build 与 version 同进退");
+        let major: u32 = v
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("version 首段必须是数字");
+        assert!(major >= 6, "Windows NT 系主版本不可能小于 6：{v}");
+        assert_eq!(v.rsplit('.').next().unwrap(), b.as_str(), "build 必须与 version 末段一致");
+        assert!(
+            !b.is_empty() && b.chars().all(|c| c.is_ascii_digit()),
+            "build 必须是十进制数字串：{b}"
+        );
     }
 }

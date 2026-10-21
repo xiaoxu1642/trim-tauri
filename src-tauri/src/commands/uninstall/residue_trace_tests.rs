@@ -1111,3 +1111,383 @@ use super::residue_update::*;
         // 落点缺失、安装目录也为空时不靠空字符串误判
         assert!(!service_belongs_to_app("Other", None, &tokens, ""));
     }
+
+    // ==================== U-R2a（v7.2 P1-W2）· uninstall 残留链 14 条单元契约 ====================
+    //
+    // 一条用例钉一个条目，断言一律点名「做到了什么」（AGENTS §4.1）：期望集合逐字给出，
+    // 并按「正向 + 反向对照」成对写（只断"没报错"的不算验收）。
+    // 源码形态断言只用于两类对象：① 顺序（谁先谁后是语义本身）② 唯一出口（同一判据
+    // 出现第二份即红，§5.16/N6）。锚点一律是 file + 判别性子串，禁行号（§5.19）。
+    // 依赖真实注册表的两条另写 `#[ignore]` 真机探针（本档位不跑，见各自文档注释）。
+
+    /// R2a-L01：hive 前缀的定长字节切片必须先过字符边界。
+    /// 判红自证：把 `parse_reg_target` 的判断退回 `t[..prefix.len()]` ⇒ ①②两条当场 panic。
+    #[test]
+    fn r2a_l01_非ascii键名不再踩切片边界() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        // ① 主形态：`HKEY_CURRENT_USER\` 前缀长 18，而本串第 18 字节落在「信」内部
+        //    （`HKCU\Software\` = 14 字节，后面「微信」各 3 字节）——旧写法在这里直接 panic，
+        //    panic 沿 learned::load 把整轮残留扫描带崩，连隔离损坏文件的路径都到不了。
+        let (hk, rest) = parse_reg_target(r"HKCU\Software\微信").expect("HKCU 前缀必须解析成功");
+        assert_eq!(hk.0, HKEY_CURRENT_USER.0, "hive 必须是 HKCU");
+        assert_eq!(rest, r"Software\微信", "非 ASCII 叶名必须原样留在子键路径里");
+        // ② 根本不是 hive 的 CJK 串（第 18 字节同样落在「飞」内）：必须 None，不许 panic
+        assert!(parse_reg_target(r"软件\微软\讯飞\钉钉").is_none(), "非 HKCU/HKLM 一律拒");
+        // ③ 长前缀的大小写混写照常命中，且多余的 `\` 被剥掉（既有语义不变）
+        let (hk, rest) = parse_reg_target(r"hkey_local_machine\Software\Acme").expect("长前缀必须命中");
+        assert_eq!(hk.0, HKEY_LOCAL_MACHINE.0);
+        assert_eq!(rest, r"Software\Acme");
+        // ④ 只有前缀、没有子键路径 → None（字节判据 `t.len() > prefix.len()` 的既有语义）
+        assert!(parse_reg_target("HKCU\\").is_none(), "裸前缀不算目标");
+        // ⑤ 中文叶名紧跟短前缀：前三条前缀的 `get` 都拿不到边界（18/19 都落在「网易」内），
+        //    必须逐条 continue 之后由 `HKLM\`（第 5 字节是边界）命中 —— 旧写法在这条上同样 panic
+        let (_, rest) = parse_reg_target(r"HKLM\SOFTWARE\网易大神").expect("HKLM 短前缀必须命中");
+        assert_eq!(rest, r"SOFTWARE\网易大神");
+    }
+
+    /// R2a-L11（§5.16/N6）：本单元「按注册表回报长度分配」只许共用同一份上限。
+    /// 判红自证：给任一文件再加一处 `let mut buf = vec![0u8; size as usize];` 而不配
+    /// `> MAX_REG_STR_BYTES` ⇒ 两个计数当场不等。
+    #[test]
+    fn r2a_l11_按回报长度分配共用同一份上限() {
+        const ALLOC: &str = "let mut buf = vec![0u8; size as usize];";
+        const CEILING: &str = "> MAX_REG_STR_BYTES";
+        // 闭包写不出「返回借用入参」的生命周期关系（返回类型会退化成入参的更短那个），
+        // 所以这条纯函数用 fn 写：省略号写法把输出生命周期绑到入参上。
+        fn prod(src: &str) -> &str {
+            src.split("#[cfg(test)]").next().unwrap_or(src)
+        }
+        let helpers = prod(include_str!("helpers.rs"));
+        let pending = prod(include_str!("pending_delete.rs"));
+        let allocs = helpers.matches(ALLOC).count() + pending.matches(ALLOC).count();
+        let ceilings = helpers.matches(CEILING).count() + pending.matches(CEILING).count();
+        // 正向特征：现算的分配点集合必须是「三处」（helpers 两处 + PFRO 一处），
+        // 少一处说明锚点被改写、用例本身已失效，不许悄悄退化成恒等式。
+        assert_eq!(allocs, 3, "分配点锚点失配（helpers reg_sz/reg_multi_sz + pending_delete read_pfro）: {allocs}");
+        assert_eq!(allocs, ceilings, "每处按回报长度分配都必须有一道 MAX_REG_STR_BYTES 上限: 分配 {allocs} / 上限 {ceilings}");
+    }
+
+    /// R2a-L02：快照装不下时，**返回给渲染层的那一份必须恰是快照接受的同一份**。
+    /// 正向特征：接受的条数、条目身份、以及「用执行侧同一个判据能查到」三件事逐条点名；
+    /// 反向对照：被丢弃的那条用同一判据查不到（旧写法在这里是"面板有、快照没有"）。
+    #[test]
+    fn r2a_l02_面板清单恰是快照接受的那一份() {
+        let label = "test-r2a-snapshot-overflow";
+        let mk = |n: usize, tag: &str| -> Vec<Value> {
+            (0..n).map(|i| json!({ "kind": "reg_key", "target": format!(r"HKCU\Software\{tag}{i}") })).collect()
+        };
+        // 先把另一桶灌到容量边界：dead 桶占 SNAPSHOT_CAP-1 ⇒ app 桶只剩 1 个位置
+        let dead = residue_snapshot_put(label, "dead", mk(SNAPSHOT_CAP - 1, "dead"));
+        assert_eq!(dead.len(), SNAPSHOT_CAP - 1, "前置夹具必须真的占满除 1 格外的容量");
+        let accepted = residue_snapshot_put(label, "app", mk(50, "app"));
+        assert_eq!(accepted.len(), 1, "只剩 1 个位置时快照必须只接受 1 条（旧写法返回全量 50 条给面板）");
+        assert_eq!(accepted[0]["target"].as_str(), Some(r"HKCU\Software\app0"));
+        let stored: Vec<Value> = residue_snapshots()
+            .lock()
+            .map(|g| g.get(label).cloned().unwrap_or_default().1)
+            .unwrap_or_default();
+        assert_eq!(stored.len(), SNAPSHOT_CAP, "槽内总量必须正好是容量上限，不得超");
+        // 用**执行侧同一个判据**核（snapshot_has）——测试不另写一份比较（§5.16/N6）
+        let k = accepted[0]["kind"].as_str().unwrap();
+        let t = accepted[0]["target"].as_str().unwrap();
+        assert!(snapshot_has(&stored, k, t), "面板拿到的这条必须能过快照闸");
+        assert!(!snapshot_has(&stored, "reg_key", r"HKCU\Software\app1"), "被丢弃的条目不得留在快照里");
+        assert!(!stored.iter().any(|f| f["origin"].as_str() == Some("app") && *f != accepted[0]), "app 桶只能有返回的那一条");
+        let _ = residue_snapshots().lock().map(|mut g| g.remove(label));
+    }
+
+    /// R2a-L02：三个上限现算对账（数字只许有一份出处，关系靠常量算、不手抄）。
+    #[test]
+    fn r2a_l02_三个上限互相对得上() {
+        // 代码侧各产源臂上限：目录/快捷方式两趟 NAME_HIT_CAP + 五路侧痕 SIDE_TRACE_CAP + 服务桶
+        let code_arms = 2 * NAME_HIT_CAP + 5 * SIDE_TRACE_CAP + SERVICE_RESIDUE_CAP;
+        assert!(
+            code_arms <= SNAPSHOT_CAP,
+            "各产源臂上限和 {code_arms} 必须 ≤ 快照容量 {SNAPSHOT_CAP}，否则扫描出的候选整批落不进快照"
+        );
+        assert!(
+            RESIDUE_EXECUTE_MAX <= SNAPSHOT_CAP,
+            "单批执行上限 {RESIDUE_EXECUTE_MAX} 必须 ≤ 快照容量 {SNAPSHOT_CAP}，否则合法批次永远无法一次执行"
+        );
+        // 报告根：保留份数与列表可见份数同源（一个数字两个消费点）
+        assert_eq!(REPORT_KEEP, 50, "报告保留份数若改动必须同步列表侧（本断言点名现算值）");
+    }
+
+    /// R2a-L04：4MB 护栏必须挡在**读之前**（拿真实磁盘样本证伪，不是源码形状）。
+    /// 正向特征：小文件命中、超阈值文件不命中且不计入候选；判红自证：把元数据判据删掉，
+    /// 巨型那条会因字节包含命中而回到结果里 ⇒ 当场红。
+    #[test]
+    fn r2a_l04_巨型目标文件在读之前就被挡下() {
+        let root = crate::engine::paths::temp_script_dir().expect("应用私有 tmp 目录")
+            .join(format!("trim-r2a-l04-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let needle = r"c:\apps\acme\acme.exe";
+        let bytes: Vec<u8> = needle.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        // ① 正常尺寸且含线索 —— 必须命中
+        let small = root.join("11111111111111111111111111111111_0011a000.destinations-ms");
+        std::fs::write(&small, [&bytes[..], b"pad".as_slice()].concat()).unwrap();
+        // ② 同样含线索但超过 4MB —— 必须在读之前被挡下
+        let huge = root.join("22222222222222222222222222222222_0011a000.destinations-ms");
+        {
+            let mut f = std::fs::File::create(&huge).unwrap();
+            std::io::Write::write_all(&mut f, &bytes).unwrap();
+            f.set_len(4 * 1024 * 1024 + 1).unwrap();
+        }
+        // ③ 空文件（旧写法靠 bytes.is_empty() 挡）—— 同样不命中
+        std::fs::write(root.join("33333333333333333333333333333333_0011a000.destinations-ms"), b"").unwrap();
+        // ④ 同名目录（元数据 is_file 判据）—— 不命中也不报错
+        std::fs::create_dir_all(root.join("44444444444444444444444444444444_0011a000.destinations-ms")).unwrap();
+        // ⑤ 非 .destinations-ms 的巨型文件不得被打开（扩展名闸在先）
+        std::fs::write(root.join("ignored.txt"), &bytes).unwrap();
+
+        let hits = jumplist_hits(&[needle.to_string()], "", 20, &root);
+        assert_eq!(hits.len(), 1, "只应命中那一份正常尺寸的目标文件: {hits:?}");
+        assert!(hits[0].replace('\\', "/").ends_with("0011a000.destinations-ms"));
+        assert!(hits[0].contains("11111111111111111111111111111111"), "命中的必须是小的那份: {hits:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R2a-L05：重复提交的同一目标合并成一次变更。
+    /// 正向特征：点名保留下来的 `(kind,target)` 集合与被合并掉的条数（旧写法两条都留下，
+    /// 第二条落到删除分支时目标已不在 ⇒ 回执记 fail、failCount 虚高）。
+    #[test]
+    fn r2a_l05_重复目标合并成一次变更() {
+        let submitted = vec![
+            ("reg_key".to_string(), r"HKCU\Software\Acme".to_string()),
+            ("folder".to_string(), r"C:\Apps\Acme".to_string()),
+            // 大小写不同的同一路径：与 snapshot_has 同口径，必须算重复
+            ("reg_key".to_string(), r"hkcu\software\acme".to_string()),
+            // kind 不同 ⇒ 不是重复（快照按 (kind,target) 判，去重必须同判据）
+            ("file".to_string(), r"C:\Apps\Acme".to_string()),
+            ("reg_key".to_string(), r"HKCU\Software\Acme".to_string()),
+        ];
+        let (kept, dropped) = dedupe_targets(submitted);
+        assert_eq!(dropped, 2, "应合并掉 2 条: {kept:?}");
+        let got: Vec<(&str, &str)> = kept.iter().map(|(k, t)| (k.as_str(), t.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("reg_key", r"HKCU\Software\Acme"),
+                ("folder", r"C:\Apps\Acme"),
+                ("file", r"C:\Apps\Acme"),
+            ],
+            "保留集合必须逐条点名，且顺序按首次出现"
+        );
+        // 空输入不得凭空造条目
+        let (empty_kept, empty_dropped) = dedupe_targets(Vec::new());
+        assert!(empty_kept.is_empty() && empty_dropped == 0, "空输入必须原样回空");
+    }
+
+    /// R2a-L10：补桶只补**没带 bucket** 的候选，服务/驱动桶必须原样保留。
+    /// 判红自证：删掉 `if f.get("bucket").is_some() { continue; }` ⇒ 第一个断言当场红；
+    /// 把调用点挪回服务块之前 ⇒ 第二个断言（顺序）红。
+    #[test]
+    fn r2a_l10_补桶不得覆盖自带的服务桶() {
+        let mut findings = vec![
+            json!({ "kind": "reg_key", "target": "HKLM\\A", "bucket": "service" }),
+            json!({ "kind": "reg_key", "target": "HKLM\\B", "bucket": "driver" }),
+            json!({ "kind": "reg_key", "target": "HKCU\\C" }),
+            json!({ "kind": "reg_value", "target": r"HKCU\C::v" }),
+            json!({ "kind": "folder", "target": r"C:\Apps\A" }),
+            json!({ "kind": "shortcut", "target": r"C:\Start\A.lnk" }),
+        ];
+        fill_missing_buckets(&mut findings);
+        let buckets: Vec<&str> = findings.iter().map(|f| f["bucket"].as_str().unwrap_or("")).collect();
+        assert_eq!(
+            buckets,
+            vec!["service", "driver", "registry", "registry", "file", "file"],
+            "自带桶必须原样保留，其余按 kind 归 registry/file"
+        );
+        // 顺序契约：扫描体里补桶必须排在服务/驱动候选入列**之后**（否则护栏恒不命中）
+        let prod = include_str!("residue.rs").split("#[cfg(test)]").next().unwrap_or("");
+        let i_push = prod.find("\"bucket\": bucket,").expect("找不到服务/驱动候选的 push");
+        let i_fill = prod.find("fill_missing_buckets(&mut findings)").expect("找不到补桶调用点");
+        assert!(i_push < i_fill, "服务/驱动候选必须先入列，补桶的「已存在即跳过」才是真护栏");
+    }
+
+    /// R2a-L06：两处 export 必须走同一个文件名出口（撞名让路）。
+    /// 判红自证：任何一处退回自己 `join(format!("{}_{}.reg", ...))` ⇒ 计数红。
+    #[test]
+    fn r2a_l06_两处export共用唯一文件名出口() {
+        let prod = include_str!("residue.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(
+            prod.matches("new_reg_backup_file(&backup_dir, crate::engine::now_ms(),").count(),
+            2,
+            "reg_key 与 reg_value 两处都必须经 new_reg_backup_file 生成落盘名"
+        );
+        assert_eq!(
+            prod.matches("format!(\"{}_{}.reg\"").count(),
+            0,
+            "执行侧不得再留第二处自拼备份名（撞名会连封条一起覆盖）"
+        );
+    }
+
+    /// R2a-L07：执行入口的形状闸必须与扫描入口**同一对函数**（§5.16/N6 只许一份判据）。
+    /// 判红自证：把执行侧那两条闸删掉 ⇒ 计数从 2 掉到 1 当场红。
+    #[test]
+    fn r2a_l07_执行侧形状闸与扫描侧同一对() {
+        let prod = include_str!("residue.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(
+            prod.matches("valid_uninstall_key_path(key_path)").count(),
+            2,
+            "卸载键形状闸必须在扫描与执行两处各出现一次（不许出现第三份自写校验）"
+        );
+        assert_eq!(
+            prod.matches("valid_appx_fullname(key_path)").count(),
+            2,
+            "Appx 包全名闸必须在扫描与执行两处各出现一次"
+        );
+        // 形状集合本身由 helpers/appx 各自的用例钉（这里只钉「两个阶段走同一对闸」）
+        assert!(valid_uninstall_key_path(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Acme"));
+        assert!(!valid_uninstall_key_path("all"), "MACHINE|all 的键段必须过不了形状闸");
+    }
+
+    /// R2a-L12：注册表两类 ok 行必须点名「对应哪一份备份」，旧的一句泛称不再存在。
+    #[test]
+    fn r2a_l12_注册表ok行点名备份文件() {
+        let prod = include_str!("residue.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(prod.matches("删除前已导出").count(), 2, "reg_key 与 reg_value 两条 ok 文案都要点名备份");
+        assert_eq!(prod.matches("\"backupFile\"").count(), 2, "两条 ok 明细都要带上备份文件名");
+        assert_eq!(prod.matches("已删除（备份已留存）").count(), 0, "「备份已留存」这种无法核对的泛称必须已撤掉");
+        // 展示名只给文件名，不给数据根绝对路径
+        assert_eq!(reg_backup_file_name(std::path::Path::new(r"C:\data\uninstall-reg-backup\1_A.reg")), "1_A.reg");
+        assert_eq!(reg_backup_file_name(std::path::Path::new("not-a-path")), "");
+    }
+
+    /// R2a-L03：报告根只有一个入口、写完就裁（同域 `.reg` 备份的既有口径）。
+    #[test]
+    fn r2a_l03_报告根唯一入口且写完即裁() {
+        let prod = include_str!("residue.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(prod.matches("join(\"uninstall-reports\")").count(), 0, "执行侧不得再直拼报告根（与列表侧分叉）");
+        assert_eq!(prod.matches("uninstall_reports_dir()").count(), 1, "报告根必须经唯一入口取");
+        assert_eq!(
+            prod.matches("prune_backups_ext(&reports_dir, REPORT_KEEP, &[\"json\"])").count(),
+            1,
+            "报告落盘后必须按 REPORT_KEEP 裁一次（这个根此前只写不裁）"
+        );
+    }
+
+    /// R2a-M02：归属身份现读必须排在**第一个注册表变更之前**。
+    /// 判红自证：把 `residue_identity` 的调用挪回 await 之后 ⇒ 顺序断言当场红；
+    /// 挪动 `reg_key_remove` 也红（两侧都是锚点）。
+    #[test]
+    fn r2a_m02_身份现读先于第一个变更() {
+        let prod = include_str!("residue.rs").split("#[cfg(test)]").next().unwrap_or("");
+        let i_id = prod.find("let identity = residue_identity(&").expect("找不到归属身份现读点");
+        let i_del = prod.find("reg_key_remove(hive, rest, true)").expect("找不到卸载键删除调用点");
+        assert!(
+            i_id < i_del,
+            "身份必须在删键之前现读：删完再读 DisplayName 恒空，最常见那一批永远学不到（M02）"
+        );
+        // 身份随批次结果一起带回命令边界，学习链不再自己回读注册表
+        assert_eq!(
+            prod.matches("learn_from_deletions(&app_id, &details, identity)").count(),
+            1,
+            "回写侧必须用带回的身份（旧写法在批次结束后再读一次注册表）"
+        );
+        assert_eq!(
+            prod.matches("fn learn_from_deletions(app_id: &str, details: &[Value]) -> usize").count(),
+            0,
+            "旧签名（函数体内自己回读注册表）不得复活"
+        );
+    }
+
+    /// R2a-M02：可学落点的映射表（纯函数，不碰学习库文件）。
+    /// 正向特征：点名"进得来的是哪三条"，反向对照点名"被挡掉的是哪几条"。
+    #[test]
+    fn r2a_m02_可学落点映射与kind口径对齐() {
+        let details = vec![
+            json!({ "kind": "dir", "target": r"C:\Apps\A", "status": "ok" }),
+            json!({ "kind": "folder", "target": r"C:\Apps\B", "status": "ok" }),
+            json!({ "kind": "file", "target": r"C:\Apps\A\a.txt", "status": "ok" }),
+            json!({ "kind": "reg_key", "target": r"HKCU\Software\A", "status": "ok" }),
+            // 失败行不得学（否则下轮把"删不掉的路径"当已知残留反复推荐）
+            json!({ "kind": "file", "target": r"C:\Apps\locked.txt", "status": "fail" }),
+            json!({ "kind": "file", "target": r"C:\Apps\denied.txt", "status": "skip" }),
+            // shortcut / reg_value 是签名库独有 kind，学习库允许集维持不变
+            json!({ "kind": "shortcut", "target": r"C:\Start\A.lnk", "status": "ok" }),
+            json!({ "kind": "reg_value", "target": r"HKCU\C::v", "status": "ok" }),
+            // 缺 target 的行不得凭空造条目
+            json!({ "kind": "file", "status": "ok" }),
+        ];
+        let got = learnable_entries(&details);
+        let mapped: Vec<(&str, &str)> = got.iter().map(|(k, t)| (*k, t.as_str())).collect();
+        assert_eq!(
+            mapped,
+            vec![
+                ("folder", r"C:\Apps\A"),
+                ("folder", r"C:\Apps\B"),
+                ("file", r"C:\Apps\A\a.txt"),
+                ("reg_key", r"HKCU\Software\A"),
+            ],
+            "只收 ok 的三类落点，且 dir 必须归一成 folder（学习库 schema 口径）"
+        );
+        assert!(learnable_entries(&[]).is_empty(), "空明细不得造条目");
+    }
+
+    /// R2a-M02 真机探针（`#[ignore]`，发布前实跑）：`residue_identity` 走的
+    /// `engine::native::read_reg_value_text` 是真实注册表读，MockRuntime 覆盖不到。
+    /// 要验三件事：① 真实卸载键能读到非空 DisplayName；② 返回的 key_path 恰是 app_id
+    /// 竖线后那一段（学习库的 uninstallKey 匹配组就是它）；③ 键不存在时是 None 而不是崩。
+    /// 跑法：`cargo test --release -- --ignored r2a`（需管理员无关，只读 HKLM/HKCU）。
+    #[test]
+    #[ignore = "真机现读卸载键身份（需本机注册表样本）"]
+    fn live_r2a_m02_现读真实卸载键身份() {
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        const ROOT: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+        let mut checked = 0usize;
+        let mut sample: Option<(String, String)> = None;
+        for name in unsafe { reg_enum_subkeys(HKEY_LOCAL_MACHINE, ROOT, 256) } {
+            let app_id = format!("HKLM|{ROOT}\\{name}");
+            if let Some((display_name, publisher, key_path)) = residue_identity(&app_id) {
+                checked += 1;
+                assert!(!display_name.trim().is_empty(), "读到身份却给了空显示名: {app_id}");
+                assert_eq!(key_path, format!(r"{ROOT}\{name}"), "key_path 必须是 app_id 竖线后那一段");
+                if publisher.trim().is_empty() && sample.is_none() {
+                    sample = Some((display_name.clone(), name.clone()));
+                }
+            }
+        }
+        if checked == 0 {
+            eprintln!("⚠ [skip-sample] 本机 {ROOT} 下没有可读 DisplayName 的卸载键，本探针未取证");
+            return;
+        }
+        // 反向对照：一个必然不存在的键只能得到 None（不是崩、也不是空串身份）
+        assert!(residue_identity(&format!("HKLM|{ROOT}\\TrimNoSuchApp-9f3a")).is_none());
+        // APPX / 合成 id 没有卸载键身份
+        assert!(residue_identity("MACHINE|all").is_none());
+        assert!(residue_identity("APPX|Microsoft.Windows.Notepad_8wekyb3d8bbwe__8wekyb3d8bbwe").is_none());
+        eprintln!("✓ [live-r2a] 现读到 {checked} 份真实身份，样例: {sample:?}");
+    }
+
+    /// R2a-L01 真机探针（`#[ignore]`）：审查档位的只读枚举只能证明「本机当下没有
+    /// 非 ASCII 一级子键」，换一台机器未必。本探针把「现算全量 + 逐条解析不 panic」
+    /// 固定成发版前实跑项（报告 §3 U01 的收口）。
+    /// 跑法：`cargo test --release -- --ignored live_r2a_l01`。
+    #[test]
+    #[ignore = "真机枚举注册表一级子键并逐条过 hive 前缀解析"]
+    fn live_r2a_l01_真实键名全量过hive解析() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        let mut total = 0usize;
+        let mut non_ascii = 0usize;
+        for (hive, hive_name, root) in [
+            (HKEY_CURRENT_USER, "HKCU", r"Software"),
+            (HKEY_LOCAL_MACHINE, "HKLM", r"SOFTWARE"),
+            (HKEY_LOCAL_MACHINE, "HKLM", r"SOFTWARE\WOW6432Node"),
+        ] {
+            for name in unsafe { reg_enum_subkeys(hive, root, 4096) } {
+                total += 1;
+                if !name.is_ascii() {
+                    non_ascii += 1;
+                }
+                // 旧写法在这里对非 ASCII 叶名直接 panic（本探针的意义就是让它跑到底）
+                let parsed = parse_reg_target(&format!("{hive_name}\\{root}\\{name}"));
+                assert!(parsed.is_some(), "真实键名解析失败: {hive_name}\\{root}\\{name}");
+                assert_eq!(parsed.unwrap().1, format!(r"{root}\{name}"), "子键路径必须原样保留: {name}");
+            }
+        }
+        assert!(total > 0, "三根一级子键枚举为空 ⇒ 探针未取证（注册表读失败要查根因）");
+        eprintln!("✓ [live-r2a] 现算一级子键 {total} 条，其中非 ASCII {non_ascii} 条，全部无 panic");
+    }
+

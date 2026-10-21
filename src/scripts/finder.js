@@ -14,6 +14,11 @@
   // 空文件/空目录页每页渲染条数。再大单次 innerHTML 拼接 + DOM 解析就会秒级卡顿。
   const EMPTY_PAGE_SIZE = 1000;
 
+  // M03：批量删除的分批大小，与后端 commands/finder.rs 的 FINDER_DELETE_MAX 上限同值——
+  // 后端对超限批次静默截断，前端必须按同一上限分批调用，确认文案承诺的总量才兑现得到。
+  // 改任一侧都必须同步对拍（同一判定不写两套实现，跨语言只共享口径）。
+  const FINDER_DELETE_BATCH = 500;
+
   // 每个页签独立状态
   const st = {
     // v2-L4P-18（F-3）：pageDup 重复文件页当前页码（按组累加行预算分页，见 renderDups）
@@ -106,6 +111,20 @@
   function formatSize(bytes) { return window.ds.fmtBytes(bytes); }
 
   function esc(s) { return window.ds.esc(s); }
+
+  // L05：扫描/全选/删除三个入口的 async handler 收口——handler 一旦 reject 就是浮动
+  // Promise（用户侧「点了没反应」）；且 runScan/onDelete 的按钮文案写在
+  // querySelector('span') 上，DOM 形状漂移时 finally 里抛错会把按钮永久焊死在
+  // disabled。与 optimizer.js 的 guardAsync 同口径：捕获后落 toast + 日志，绝不静默。
+  function guardAsync(label, handler) {
+    return (...args) => {
+      Promise.resolve(handler(...args)).catch((e) => {
+        const msg = (e && e.message) || e;
+        window.app?.toast?.('error', label + '失败: ' + msg);
+        window.app?.log?.('error', label + '异常: ' + msg);
+      });
+    };
+  }
 
   // Unix 秒 → YYYY-MM-DD（创建日期列，2026-09-28 用户要求；0/缺失显示 —）
   function fmtDate(ts) {
@@ -580,7 +599,11 @@
         renderAn();
         window.app?.toast?.('success', '已移入回收站（清空回收站后释放空间）');
       } else {
-        window.app?.toast?.('warning', '删除失败（可能被占用）');
+        // M04：非 ok 不再一律报「可能被占用」——受保护拒绝/文件名异常/预检跳过
+        // 按回执计数分档，与批量出口共用同一份 reportDeleteOutcome；
+        // 计数全零的异常回执才落通用文案兜底。
+        const tiered = reportDeleteOutcome(resp.data);
+        if (!tiered) window.app?.toast?.('warning', '删除失败（可能被占用）');
       }
     } catch (e) {
       window.app?.toast?.('error', '删除失败: ' + e.message);
@@ -612,7 +635,9 @@
         renderAn();
         window.app?.toast?.('success', '已移入回收站（清空回收站后释放空间）');
       } else {
-        window.app?.toast?.('warning', '删除失败（可能被占用）');
+        // M04：同 anDelete——分档原因由 reportDeleteOutcome 统一判定
+        const tiered = reportDeleteOutcome(resp.data);
+        if (!tiered) window.app?.toast?.('warning', '删除失败（可能被占用）');
       }
     } catch (e) {
       window.app?.toast?.('error', '删除失败: ' + e.message);
@@ -754,12 +779,21 @@
   }
 
   function renderAnTreemap(layer) {
+    // L10：treemap 的三处隐式依赖收口成命名常量——逻辑坐标 100×46、文字显隐阈值
+    // 与 main-pages.css 的 .an-tm-box 高度互为依赖：改 CSS 高度会静默改变「格子放
+    // 不放下文字」。CSS 侧的回指注释与 check-treemap-layout 的三处联动断言属
+    // 白名单外文件，跨面待主 agent；JS 侧先收成常量并在此留痕。
+    const AN_TM_LOGIC_W = 100;   // 逻辑宽（百分比坐标系）
+    const AN_TM_LOGIC_H = 46;    // 逻辑高（px 语义，对应 .an-tm-box 的 CSS 高度）
+    const AN_TM_NAME_MIN_W = 11; // 放得下名字的最小格宽
+    const AN_TM_NAME_MIN_H = 8;  // 放得下名字的最小格高
+    const AN_TM_SUB_MIN_H = 15;  // 放得下大小副行的最小格高
     const box = document.getElementById('anTreemapSection');
     if (!box) return;
     const dirs = (layer && layer.dirs) || [];
     if (dirs.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; } // 单项画了没信息量
     const shown = dirs.slice(0, 24); // 上限：再多格子小到无法点，也只是噪声
-    const cells = anTreemapLayout(shown, 100, 46); // 逻辑坐标系（百分比 × 高度 px 由 CSS 换算）
+    const cells = anTreemapLayout(shown, AN_TM_LOGIC_W, AN_TM_LOGIC_H);
     // 「占本层」的分母必须是本层总量（summary 优先，退回所有子目录之和）——
     // 用铺开的 24 格面积当分母会把占比虚高 N/24 倍，读屏/悬浮都在播报错数字。
     const layerTotal = (layer.summary && layer.summary.size > 0)
@@ -772,15 +806,15 @@
       const name = nameOf(c.item.path);
       const pct = (Number(c.item.size) || 0) / layerTotal * 100;
       const sizeText = formatSize(Number(c.item.size));
-      // 只有放得下才写字：小格子标名会溢出成一片糊，不如留白 + data-tip
-      const label = (c.w > 11 && c.h > 8) ? `<div class="an-tm-cell-name">${esc(name)}</div>` : '';
-      const sub = (c.w > 11 && c.h > 15) ? `<div class="an-tm-cell-size">${esc(sizeText)}</div>` : '';
+      // 只有放得下才写字：小格子标名会溢出成一片糊，不如留白 + data-tip（阈值见上方常量）
+      const label = (c.w > AN_TM_NAME_MIN_W && c.h > AN_TM_NAME_MIN_H) ? `<div class="an-tm-cell-name">${esc(name)}</div>` : '';
+      const sub = (c.w > AN_TM_NAME_MIN_W && c.h > AN_TM_SUB_MIN_H) ? `<div class="an-tm-cell-size">${esc(sizeText)}</div>` : '';
       // 格子用 role=button + tabindex：div 挂 click 等于键盘用户到不了这一层，
       // 而下钻是这页的主交互（2026-09-29 目检反馈：只有下方列表能点）
       html += `<div class="an-tm-cell" role="button" tabindex="0" data-an-drill="${esc(c.item.path)}"
         aria-label="下钻到 ${esc(name)}，${esc(sizeText)}，占本层 ${pct.toFixed(1)}%"
         data-tip="${esc(c.item.path)} · ${esc(sizeText)} · ${pct.toFixed(1)}%"
-        style="left:${c.x}%;top:${(c.y / 46 * 100)}%;width:${c.w}%;height:${(c.h / 46 * 100)}%">
+        style="left:${c.x}%;top:${(c.y / AN_TM_LOGIC_H * 100)}%;width:${c.w}%;height:${(c.h / AN_TM_LOGIC_H * 100)}%">
         ${label}${sub}</div>`;
     });
     html += '</div>';
@@ -999,7 +1033,12 @@
     } finally {
       stopFakeProgress(cfg);
       s.scanning = false;
-      if (scanBtn) { scanBtn.disabled = false; scanBtn.querySelector('span').textContent = '开始扫描'; }
+      // L05：span 判空——形状漂移时不许把按钮永久焊死在 disabled
+      if (scanBtn) {
+        scanBtn.disabled = false;
+        const sp = scanBtn.querySelector('span');
+        if (sp) sp.textContent = '开始扫描';
+      }
       updateAllButtons();
       setTimeout(() => hideProgress(cfg), 600);
     }
@@ -1091,6 +1130,27 @@
     render(key);
   }
 
+  // M04：删除回执的分档消费唯一实现——受保护拒绝/文件名异常/预检跳过各有各的原因，
+  // 禁止再出现「非 ok 一律报可能被占用」的第二套判据（单项出口此前没吃到这套消费，
+  // 同一判据两套实现、错的正是用户最常触发的分析器行内删除）。三条删除出口共用。
+  function reportDeleteOutcome(data) {
+    const d = data || {};
+    const busyCount = Number(d.failedBusy) || 0;
+    const refusedCount = Number(d.failedRefused) || 0;
+    const nameCount = Number(d.failedName) || 0;
+    if (busyCount > 0) window.app?.toast?.('warning', `${busyCount} 项删除失败（可能被占用）`);
+    if (refusedCount > 0) window.app?.toast?.('warning', `${refusedCount} 项未删除：位于受保护路径或为链接/junction，已按安全清单拒绝`);
+    if (nameCount > 0) window.app?.toast?.('warning', `${nameCount} 项未删除：文件名无法无损处理，安全判定不可靠`);
+    const skippedCount = Number(d.skipped) || 0;
+    const unhandledCount = Number(d.unhandled) || 0;
+    if (skippedCount > 0) {
+      window.app?.toast?.('warning',
+        `${skippedCount} 项已跳过（空目录复检未通过或目标已变化）`
+        + (unhandledCount > 0 ? `，其中 ${unhandledCount} 项文件名无法无损处理` : ''));
+    }
+    return busyCount + refusedCount + nameCount + skippedCount + unhandledCount;
+  }
+
   async function onDelete(key) {
     const cfg = CFG[key];
     const s = st[key];
@@ -1110,17 +1170,32 @@
     if (!ok) return;
     s.deleting = true;
     const db = document.getElementById(cfg.deleteBtn);
-    if (db) { db.disabled = true; db.querySelector('span').textContent = '删除中...'; }
+    // L05：span 取值判空——按钮 DOM 形状漂移时不许把删除链路整个带崩
+    if (db) { db.disabled = true; const sp = db.querySelector('span'); if (sp) sp.textContent = '删除中...'; }
     setProgress(cfg, 0, '开始删除...');
     try {
-      const resp = await window.api.finder.delete(items);
-      // 审查 FD-1（2026-09-15）：success 现表示「通道执行成功」，失败明细随 data 如实回传。
-      // 仅当通道级失败（无 data）才抛错，避免把「部分失败」升级为整批错报（已删项必须照常移除）。
-      if (!resp || (!resp.success && !resp.data)) throw new Error((resp && resp.message) || '删除失败');
-      const data = resp.data || {};
+      // M03：后端对单次删除批次有上限且超限静默截断——全选数万级结果时单次出口只
+      // 兑现头一截，而确认文案按全量报数。前端按同一上限分批循环跑完全量，
+      // 各批回执计数聚合后统一汇报。
+      const data = {
+        details: [], recycled: 0, totalFreed: 0, success: 0,
+        failedBusy: 0, failedRefused: 0, failedName: 0, skipped: 0, unhandled: 0
+      };
+      for (let i = 0; i < items.length; i += FINDER_DELETE_BATCH) {
+        if (i > 0) setProgress(cfg, Math.min(99, Math.round(i / items.length * 100)), `删除中... ${i}/${items.length} 项`);
+        const resp = await window.api.finder.delete(items.slice(i, i + FINDER_DELETE_BATCH));
+        // 审查 FD-1（2026-09-15）：success 现表示「通道执行成功」，失败明细随 data 如实回传。
+        // 仅当通道级失败（无 data）才抛错，避免把「部分失败」升级为整批错报（已删项必须照常移除）。
+        if (!resp || (!resp.success && !resp.data)) throw new Error((resp && resp.message) || '删除失败');
+        const d = resp.data || {};
+        (d.details || []).forEach(x => data.details.push(x));
+        for (const k of ['recycled', 'totalFreed', 'success', 'failedBusy', 'failedRefused', 'failedName', 'skipped', 'unhandled']) {
+          data[k] += Number(d[k]) || 0;
+        }
+      }
       setProgress(cfg, 100, '删除完成');
       // 从结果中移除已删除项
-      const removed = new Set((data.details || []).filter(d => d.status === 'ok').map(d => d.path));
+      const removed = new Set(data.details.filter(d => d.status === 'ok').map(d => d.path));
       if (removed.size) s.results = s.results.filter(r => !removed.has(r.path));
       removed.forEach(p => s.selected.delete(p));
       render(key);
@@ -1132,30 +1207,15 @@
           ? `删除完成！${recycledCount} 项已移入回收站（共 ${freedText}，清空回收站后释放）`
           : `删除完成！共 ${freedText}`);
       }
-      // R4（2026-10-15）：失败按因分档——受保护/链接拒绝与文件名异常此前被并进
-      // 「（可能被占用）」一句里，用户去关程序而真因在保护清单。data.failed 是总失败数
-      // （= 三档之和，后端保证），不单独报，避免同一批弹两遍。
-      const busyCount = Number(data.failedBusy) || 0;
-      const refusedCount = Number(data.failedRefused) || 0;
-      const nameCount = Number(data.failedName) || 0;
-      if (busyCount > 0) window.app?.toast?.('warning', `${busyCount} 项删除失败（可能被占用）`);
-      if (refusedCount > 0) window.app?.toast?.('warning', `${refusedCount} 项未删除：位于受保护路径或为链接/junction，已按安全清单拒绝`);
-      if (nameCount > 0) window.app?.toast?.('warning', `${nameCount} 项未删除：文件名无法无损处理，安全判定不可靠`);
-      // 预检剔除的项此前不上屏：纯目录批次（默认勾选的折叠父目录若被误跳）会
-      // 「全程无声」，用户以为删完了。skipped / unhandled 必须显式说出来。
-      const skippedCount = Number(data.skipped) || 0;
-      const unhandledCount = Number(data.unhandled) || 0;
-      if (skippedCount > 0) {
-        window.app?.toast?.('warning',
-          `${skippedCount} 项已跳过（空目录复检未通过或目标已变化）`
-          + (unhandledCount > 0 ? `，其中 ${unhandledCount} 项文件名无法无损处理` : ''));
-      }
+      // R4（2026-10-15）：失败按因分档——受保护/链接拒绝与文件名异常不能并进
+      // 「（可能被占用）」一句里。分档消费收口到 reportDeleteOutcome 单一实现（M04）。
+      reportDeleteOutcome(data);
     } catch (e) {
       hideProgress(cfg);
       window.app?.toast?.('error', '删除失败: ' + e.message);
     } finally {
       s.deleting = false;
-      if (db) { db.disabled = s.selected.size === 0; db.querySelector('span').textContent = '删除选中'; }
+      if (db) { db.disabled = s.selected.size === 0; const sp = db.querySelector('span'); if (sp) sp.textContent = '删除选中'; }
       updateAllButtons();
       setTimeout(() => hideProgress(cfg), 600);
     }
@@ -1237,9 +1297,10 @@
     applyEmptyCollapse();
     for (const key of Object.keys(CFG)) {
       const cfg = CFG[key];
-      document.getElementById(cfg.scanBtn)?.addEventListener('click', () => runScan(key));
-      document.getElementById(cfg.selectBtn)?.addEventListener('click', () => onSelect(key));
-      document.getElementById(cfg.deleteBtn)?.addEventListener('click', () => onDelete(key));
+      // L05：三个入口的 async handler 统一套 guardAsync，浮动拒绝不再静默
+      document.getElementById(cfg.scanBtn)?.addEventListener('click', guardAsync('扫描', () => runScan(key)));
+      document.getElementById(cfg.selectBtn)?.addEventListener('click', guardAsync('全选', () => onSelect(key)));
+      document.getElementById(cfg.deleteBtn)?.addEventListener('click', guardAsync('删除选中', () => onDelete(key)));
       // 表格复选框委托 + 分页翻页 + 折叠栏目头（dups 的表名为 dupTable；empty 用自己表 id）
       document.getElementById(cfg.table)?.addEventListener('click', e => onTableClick(e, cfg.table, key));
       // P3-1（可达性）：表格勾选框键盘激活（Space/Enter ⇒ 合成 click 走同一 onTableClick）

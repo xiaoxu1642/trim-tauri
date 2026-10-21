@@ -158,6 +158,16 @@ pub(super) fn read_pfro() -> Result<Vec<String>, String> {
             }
             return Ok(Vec::new());
         }
+        // R2a-L11（§5.16/N6）：按注册表回报的 size 直接分配之前，必须先过 helpers 那份
+        // `MAX_REG_STR_BYTES` fail-closed 上限 —— `reg_sz` / `reg_multi_sz` 都有这道，
+        // 唯独 PFRO 这条没有，同单元两份「按回报长度分配」只剩一份有护栏。PFRO 只有
+        // 管理员可写 ⇒ 不是攻击面，但「读-改-写整值」的入口一旦 OOM 就是整个域丢撤回凭据。
+        if size > MAX_REG_STR_BYTES {
+            let _ = RegCloseKey(hk);
+            return Err(format!(
+                "PFRO 回报长度 {size} 超过单值上限 {MAX_REG_STR_BYTES}，拒绝读取（更不得改写）"
+            ));
+        }
         let mut buf = vec![0u8; size as usize];
         let ok = RegQueryValueExW(
             hk,
@@ -478,6 +488,17 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
             // 这行同时是 check-delete-exits MUST_PROTECT 正向棘轮的钉住点，不许挪进 helper。
             if protect::is_path_protected(t) {
                 rows.push(json!({ "target": t, "status": "skip", "message": "目标位于受保护路径（或无法归一化），拒绝登记重启后删除" }));
+                continue;
+            }
+            // R2a-M03：五道约束的第一道「只收回收站失败项」的命令体判据 ——
+            // 目标必须命中本会话某个删除域的**删除失败回执**（残留链与清理链的
+            // 命令体在删除失败时各自登记，见 engine::delete_failed）。命中不了就拒。
+            // 这道闸此前只存在于渲染层（cleanup.js 的 collectFailedPaths 与
+            // residue-window.js 的失败文件筛选各筛一遍），命令体里零判据 ⇒ 换一个
+            // 消费方、或渲染层被改一句，任意文件都能进 PFRO 这个**永久删**出口
+            // （不进回收站、不可还原）。
+            if !crate::engine::delete_failed::is_failed_in_session(t) {
+                rows.push(json!({ "target": t, "status": "skip", "message": "不是本次删除失败回执里的文件，拒绝登记重启后删除" }));
                 continue;
             }
             // v6-K05：系统命名空间 + 别名复检（与 residue 执行侧同口径）

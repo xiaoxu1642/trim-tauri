@@ -2,9 +2,9 @@
   "version": 1,
   "_comment": "注册表键归属表（M4/M5，2026-09-14 优化中心重复点审查）。背景：同一个注册表键被两个模块各自写入自己的值名时，任何一方的「还原」都会按整键回滚或连坐删掉对方写入的值，且用户无从判断该值当初是谁写的。本表为共享键逐值声明唯一写入方。v2-L4P-42（C-7）勘误：原注释声称由一个专设校验脚本（连同 npm test，均随 Electron 时代退役、盘上已不存在）校验，本表当前**无自动校验**，仅有 check-data-parity.mjs 的「无对拍对象」显式提示；改动只能靠人工核对，勿再引用虚无脚本。新增共享键时在此登记并人工核对写入方唯一性。",
   "modules": {
-    "optimizer": "电脑优化中心（src/scripts-powershell/optimizer-scripts.js 的 OPTIONS）",
-    "maintenance": "系统维护（src/scripts-powershell/maintenance-scripts.js 的 TASKS）",
-    "cleanup": "磁盘清理（src/data/cleanup-rules.json 的 regKeys）",
+    "optimizer": "电脑优化中心（写入目录真源 src-tauri/data/optimizer-runtime.json；上游基线 vendor/upstream-js/src/scripts-powershell/optimizer-scripts.js 的 OPTIONS，经 sync-ps-from-js 同步生成 src-tauri/ps 内嵌脚本）",
+    "maintenance": "系统维护（写入任务真源 src-tauri/data/maintenance-tasks.json；上游基线 vendor/upstream-js/src/scripts-powershell/maintenance-scripts.js 的 TASKS）",
+    "cleanup": "磁盘清理（src-tauri/data/cleanup-rules.json 的 regKeys）",
     "peripheral": "外设优化弹窗（src/scripts/peripheral.js 的分组写入）"
   },
   "entries": [
@@ -155,7 +155,7 @@
       "name": "MOUSEDATAQUEUESIZE",
       "owner": "peripheral",
       "source": "mouse（外设优化鼠标组）",
-      "note": "鼠标队列深度归外设优化；tf_keyboard 已于 0.6.6 停止写该键（避免优化中心的推理还原与窗口的 .reg 备份还原互相连坐）"
+      "note": "共享键（v7 审查 D1-M02 修正）：现数据下有两个写入方——外设弹窗（src/scripts/peripheral.js 的 mouse 组）与优化中心 nara_mouse_queue（src-tauri/data/optimizer-runtime.json，永劫面板 hiddenFromOptimizer 项，仍可执行可还原）；原 note「tf_keyboard 已于 0.6.6 停止写该键」与现数据不符，0.6.6 下线的是键盘队列与端口路由，鼠标侧从未停写。任一方还原都会整键回滚、连坐掉对方写入的值：两侧都已应用时，还原须按与写入相反的次序成对进行（后写的先还原），或用优化中心「状态不明一键还原」统一回滚。"
     }
   ]
 }

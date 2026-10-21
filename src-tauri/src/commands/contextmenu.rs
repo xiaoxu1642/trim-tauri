@@ -59,6 +59,16 @@ fn load_cache() -> Option<(Vec<Value>, i64)> {
     Some((arr.clone(), ts))
 }
 
+/// R1b-L09：本域缓存的写入是「读快照 → 改 → 整表覆写缓存 + 快照」的读-改-写，
+/// `security::atomic_write_json` 里的锁只保护单次落盘、护不住这两步之间（AGENTS §5.28）。
+/// 同窗 scan（全量新数据）与 toggle 回写（旧快照 + 增量）交错时，后写的那份会覆盖前一份，
+/// 缓存与快照从此不同源。两处写入段共用这一把域内锁。
+static CM_CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn cm_cache_guard() -> std::sync::MutexGuard<'static, ()> {
+    CM_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn save_cache(items: &[Value]) {
     let payload = json!({
         "timestamp": crate::engine::now_ms(),
@@ -226,8 +236,11 @@ pub async fn contextmenu_scan<R: Runtime>(
     };
     let normalized = normalize_ids(data);
     log::write_log("info", &format!("扫描右键菜单完成: {} 项", normalized.len()));
-    snapshot::set(&snapshot::domain_key(&label, "contextmenu"), snapshot::by_id(&normalized));
-    save_cache(&normalized);
+    {
+        let _g = cm_cache_guard();
+        snapshot::set(&snapshot::domain_key(&label, "contextmenu"), snapshot::by_id(&normalized));
+        save_cache(&normalized);
+    }
     json!({ "success": true, "data": normalized })
 }
 
@@ -315,6 +328,9 @@ pub async fn contextmenu_toggle<R: Runtime>(
 
     // CM-12：回写新路径/屏蔽态到快照 + 缓存
     if let Some(results) = data.get("results").and_then(|v| v.as_array()) {
+        // R1b-L09：读快照与写缓存整段串行（读-改-写的「读」也必须在锁内，
+        // 否则 scan 在两步之间插进来，回写的仍是旧快照）。
+        let _g = cm_cache_guard();
         let mut touched = false;
         let mut snap2 = snapshot::get(&snapshot::domain_key(window.label(), "contextmenu")).unwrap_or_default();
         // v6-P2（R5/A5 panic 族）：旧写法先 filter「id 是字符串」再在十行后 `.unwrap()`
@@ -504,7 +520,15 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
         .await
         .unwrap_or_else(|e| Err(format!("后台任务异常: {e}")));
     match spawned {
-        Ok(elevated) => json!({ "success": true, "elevated": elevated }),
+        // R1b-L06：`closed` 只统计 WM_CLOSE 投递成功的窗；`staleWindows` 是「有窗但没关掉」，
+        // 渲染层要能据此区分「定位可靠」与「旧窗可能把 LastKey 覆写回去」。
+        Ok(o) => json!({
+            "success": true,
+            "elevated": o.elevated,
+            "regeditWindows": o.seen,
+            "closedWindows": o.closed,
+            "staleWindows": o.seen - o.closed
+        }),
         Err(e) => {
             log::write_log("warn", &format!("打开注册表编辑器失败: {e}"));
             json!({ "success": false, "message": "打开注册表编辑器失败" })
@@ -520,10 +544,12 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
 //   3) 写 LastKey 失败不阻断拉起（对齐原脚本 catch{}），只留日志；
 //   4) Start-Process 失败（ShellExecuteW 返回 ≤32）转 "runas" 弹 UAC，并如实上报 elevated。
 
-/// 枚举回调：把属于 regedit.exe 的可见顶层窗口关掉
+/// 枚举回调上下文：`seen` = 命中 regedit.exe 的可见顶层窗数，`closed` = 其中 WM_CLOSE
+/// 投递成功（返回值可判）的窗数。两者分开是因为提权 regedit 的窗会被 UIPI 静默拦截。
 struct RegEditCloseCtx {
     pids: Vec<u32>,
-    hits: usize,
+    seen: usize,
+    closed: usize,
 }
 
 /// EnumWindows 回调：把属于 regedit.exe 的可见顶层窗口关掉。
@@ -541,15 +567,28 @@ unsafe extern "system" fn close_regedit_wndproc(hwnd: HWND, lparam: LPARAM) -> B
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid != 0 && ctx.pids.contains(&pid) && IsWindowVisible(hwnd).as_bool() {
-        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-        ctx.hits += 1;
+        ctx.seen += 1;
+        // R1b-L06：必须读返回值。PostMessageW 在 windows 0.61 侧返回 Result，UIPI 拦截
+        // （目标是提权 regedit）时返回 Err；旧写法无论如何都计数，于是「白等 500ms、
+        // 旧窗其实没关」被报成成功，而 regedit 退出时会覆写 LastKey ⇒ 定位静默失效。
+        if PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).is_ok() {
+            ctx.closed += 1;
+        }
     }
     BOOL(1) // 继续枚举
 }
 
+/// open-in-regedit 的执行结果：除「是否走 RunAs」外，必须把旧 regedit 窗的关闭情况
+/// 带出去（R1b-L06）——一个都没关掉时 LastKey 会被旧实例退出覆写，定位静默失效。
+struct RegEditOpenOutcome {
+    elevated: bool,
+    seen: usize,
+    closed: usize,
+}
+
 /// 关旧 regedit → 写 LastKey → 拉起 regedit（失败转 RunAs）。
-/// 返回 Ok(elevated)；Err 表示两次拉起均失败。
-fn open_regedit_native(last_key: &str) -> Result<bool, String> {
+/// 返回 Ok(outcome)；Err 表示两次拉起均失败。
+fn open_regedit_native(last_key: &str) -> Result<RegEditOpenOutcome, String> {
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -598,17 +637,26 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
     }
 
     // 2. 关旧 regedit 主窗（有进程才需要；对齐原脚本只在 $running 非空时关+睡）
-    if !pids.is_empty() {
-        let mut ctx = RegEditCloseCtx { pids, hits: 0 };
+    let mut ctx = RegEditCloseCtx { pids, seen: 0, closed: 0 };
+    if !ctx.pids.is_empty() {
         unsafe {
             let _ = EnumWindows(
                 Some(close_regedit_wndproc),
                 LPARAM(&mut ctx as *mut RegEditCloseCtx as isize),
             );
         }
-        if ctx.hits > 0 {
+        if ctx.closed > 0 {
             // 给 regedit 一点退出时间，避免它退出时把 LastKey 覆写回去
             std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if ctx.seen > ctx.closed {
+            log::write_log(
+                "warn",
+                &format!(
+                    "有 {} 个旧注册表编辑器窗口未能关闭（提权进程会被 UIPI 拦掉投递），LastKey 定位可能失效",
+                    ctx.seen - ctx.closed
+                ),
+            );
         }
     }
 
@@ -672,7 +720,7 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
         )
     };
     if open.0 as usize > 32 {
-        return Ok(false);
+        return Ok(RegEditOpenOutcome { elevated: false, seen: ctx.seen, closed: ctx.closed });
     }
     let runas = unsafe {
         ShellExecuteW(
@@ -685,7 +733,7 @@ fn open_regedit_native(last_key: &str) -> Result<bool, String> {
         )
     };
     if runas.0 as usize > 32 {
-        return Ok(true);
+        return Ok(RegEditOpenOutcome { elevated: true, seen: ctx.seen, closed: ctx.closed });
     }
     Err(format!(
         "ShellExecuteW 两次拉起均失败（open={}, runas={}）",

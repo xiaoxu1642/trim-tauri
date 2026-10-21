@@ -10,12 +10,12 @@
     {
       "id": "clear_recent_docs_on_exit",
       "title": "退出时清除最近打开的文件历史",
-      "note": "C3（2026-09-14 重复点审查）：与「磁盘清理 - 隐私历史」的 explorerRecentDocs / recentFiles 目标相同，只保留磁盘清理那一套，故下线；本机若留有备份记录，启动时自动还原 ClearRecentDocsOnExit。"
+      "note": "C3（2026-09-14 重复点审查）：与「磁盘清理 - 隐私历史」的 explorerRecentDocs / recentFiles 目标相同，只保留磁盘清理那一套，故下线；本机若留有备份记录，启动概览会把它列为「待还原」，需你点确认后才按原值写回 ClearRecentDocsOnExit（不做启动静默写回）。"
     },
     {
       "id": "always_unload_dll",
       "title": "总是从内存中卸载无用的 DLL",
-      "note": "N3（2026-09-14 重复点审查）：与「内存清理 - 进程工作集」目标重叠，且 AlwaysUnloadDLL 为传统优化项、现代 Windows 部分组件已不再读取，收益存疑故下线；本机若留有备份记录，启动时自动还原该键值。"
+      "note": "N3（2026-09-14 重复点审查）：与「内存清理 - 进程工作集」目标重叠，且 AlwaysUnloadDLL 为传统优化项、现代 Windows 部分组件已不再读取，收益存疑故下线；本机若留有备份记录，启动概览会把它列为「待还原」，需你点确认后才按原值写回该键值（不做启动静默写回）。"
     },
     {
       "id": "ssd_opt",
@@ -30,7 +30,7 @@
     {
       "id": "maps_off",
       "title": "禁用下载地图管理器",
-      "note": "第六大点-B（2026-09-14）：MapsBroker 本就在 tf_svc_bulk 清单内，属纯重复项；本机若留有备份记录，启动时自动还原该服务 Start 值。"
+      "note": "第六大点-B（2026-09-14）：MapsBroker 本就在 tf_svc_bulk 清单内，属纯重复项；本机若留有备份记录，启动概览会把它列为「待还原」，需你点确认后才按原值写回该服务 Start 值（不做启动静默写回）。"
     },
     {
       "id": "mem_compress",
@@ -60,7 +60,7 @@
     {
       "id": "edge_game_assistant_overlay_off",
       "title": "禁用 Edge 游戏助手覆盖层",
-      "note": "第六大点-B（2026-09-14）：唯一动作是写 HubsSidebarEnabled=0，与「禁用 Edge 边栏」(edge_sidebar_off) 完全相同（Edge 未提供独立的游戏助手策略键），属纯重复项；需要该效果时用「禁用 Edge 边栏」。本机若留有备份记录，启动时自动还原该键值。"
+      "note": "第六大点-B（2026-09-14）：唯一动作是写 HubsSidebarEnabled=0，与「禁用 Edge 边栏」(edge_sidebar_off) 完全相同（Edge 未提供独立的游戏助手策略键），属纯重复项；需要该效果时用「禁用 Edge 边栏」。本机若留有备份记录，启动概览会把它列为「待还原」，需你点确认后才按原值写回该键值（不做启动静默写回）。"
     },
     {
       "id": "tasks_stubborn_strategy",

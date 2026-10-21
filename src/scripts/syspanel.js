@@ -1,8 +1,11 @@
 // syspanel.js — 电源计划读写 + 逐设置编辑 + 虚拟内存读写（P2 §3.6 RAINZ 对标；v5 P1 编辑器）
 // 挂在「Windows设置」页（2026-10-15 从设置页迁出、独立成侧边栏入口）；由 app.js 的
 // PAGE_SCRIPTS['windows-settings'] 按需注入、MODULES_NEEDING_INIT 显式调 init。
-// 十三条通道都走 window.api.syspanel.*（对应 CHANNEL_MAP 十三个键）；后端一律 `guard(MAIN)`。
-// 转义与字节格式化一律走 window.ds（AGENTS §2 硬红线，本地 escape 不许新增）。
+// 十八条通道都走 window.api.syspanel.*（对应 CHANNEL_MAP 十八个键）；后端一律 `guard(MAIN)`。
+// 转义直接调 window.ds 的真源（不留 esc/escAttr 本地薄包装——check-escape-delegation 棘轮
+// 只认 escapeHtml/escapeAttr 命名，短名包装会落进盲区）；字节格式化唯一真源是 ds.fmtBytes，
+// renderPagefile 的本地 fmt 只做「MB 数值 → 字节」换算后转调（ds 没有 MB 入参的等价导出，
+// 特此登记；不许再出现第二种精度）。
 (function () {
   'use strict';
 
@@ -19,9 +22,6 @@
   let editorBusy = false;
   /** 提权意图暂存：app.js 交付时本模块可能还没 init，先收着等 init 消费 */
   let pendingEditIntent = null;
-
-  function esc(t) { return window.ds.esc(t); }
-  function escAttr(t) { return window.ds.escAttr(t); }
 
   function mountPower() { return document.getElementById('syspanelPowerBody'); }
   function mountPagefile() { return document.getElementById('syspanelPagefileBody'); }
@@ -931,7 +931,7 @@
 
   function renderPowerEmpty(msg) {
     const el = mountPower();
-    if (el) el.innerHTML = `<p class="empty-state"><span>${esc(msg)}</span></p>`;
+    if (el) el.innerHTML = `<p class="empty-state"><span>${window.ds.esc(msg)}</span></p>`;
   }
 
   /** 列表与「新建电源计划」弹窗共用的排序：内置三档在前，其余按中文名排。 */
@@ -972,10 +972,10 @@
       const deleteBtn = known ? ''
         : `<button type="button" class="btn btn-secondary btn-small syspanel-pwr-act-danger" data-act="delete">删除</button>`;
       return `
-        <div class="syspanel-power-tile" data-active="${isActive ? '1' : ''}" data-guid="${escAttr(guid)}" data-name="${escAttr(name)}">
+        <div class="syspanel-power-tile" data-active="${isActive ? '1' : ''}" data-guid="${window.ds.escAttr(guid)}" data-name="${window.ds.escAttr(name)}">
           <span class="syspanel-power-tile-main">
-            <span class="syspanel-power-tile-name">${esc(name)}${isActive ? ' <span class="syspanel-badge">当前</span>' : ''}</span>
-            ${tip ? `<span class="syspanel-power-tile-tip" data-tip="${escAttr(tip)}">${esc(tip)}</span>` : ''}
+            <span class="syspanel-power-tile-name">${window.ds.esc(name)}${isActive ? ' <span class="syspanel-badge">当前</span>' : ''}</span>
+            ${tip ? `<span class="syspanel-power-tile-tip" data-tip="${window.ds.escAttr(tip)}">${window.ds.esc(tip)}</span>` : ''}
           </span>
           <span class="syspanel-power-tile-actions">
             <button type="button" class="btn btn-secondary btn-small" data-act="apply"${isActive ? ' disabled data-tip="这已经是当前方案"' : ''}>应用</button>
@@ -997,7 +997,7 @@
         ? '<button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPowerRestoreHp" data-tip="把备份的「高性能」导回系统（同名等效方案）">还原高性能</button>'
         : '');
     el.innerHTML = `
-      <div class="syspanel-power-current">当前方案：<strong>${esc(activeName || '未知')}</strong></div>
+      <div class="syspanel-power-current">当前方案：<strong>${window.ds.esc(activeName || '未知')}</strong></div>
       <div class="syspanel-power-grid">${cards}</div>
     `;
     // G-04 工具组（2026-10-16 用户点名）：移到卡片头部「新建电源计划」与「刷新」之间——
@@ -1086,8 +1086,8 @@
       id: 'syspanelPwrNameModal',
       title,
       bodyHtml: `
-        <p class="syspanel-pwr-modal-hint">${esc(hint)}</p>
-        <input type="text" class="syspanel-pwr-input" id="syspanelPwrNameInput" value="${escAttr(initial)}" maxlength="200" />
+        <p class="syspanel-pwr-modal-hint">${window.ds.esc(hint)}</p>
+        <input type="text" class="syspanel-pwr-input" id="syspanelPwrNameInput" value="${window.ds.escAttr(initial)}" maxlength="200" />
       `,
       footerHtml: `
         <button type="button" class="btn btn-secondary" data-modal-cancel>取消</button>
@@ -1126,7 +1126,7 @@
     const activeGuid = String(lastPowerState?.activeGuid || '').toLowerCase();
     const baseOpts = opts.map((o) => {
       const isActive = String(o.guid || '').toLowerCase() === activeGuid;
-      return `<option value="${escAttr(String(o.guid || ''))}"${isActive ? ' selected' : ''}>${esc(String(o.name || o.guid))}${isActive ? '（当前）' : ''}</option>`;
+      return `<option value="${window.ds.escAttr(String(o.guid || ''))}"${isActive ? ' selected' : ''}>${window.ds.esc(String(o.name || o.guid))}${isActive ? '（当前）' : ''}</option>`;
     }).join('');
     if (!window.modal?.create) { pwrToast('warning', '当前环境不支持新建电源计划'); return; }
     const ctrl = window.modal.create({
@@ -1138,7 +1138,7 @@
           <select class="syspanel-pwr-input syspanel-pwr-modal-select" id="syspanelPwrNewBase">${baseOpts}</select>
         </label>
         <label class="syspanel-pwr-modal-field" for="syspanelPwrNewName">方案名称
-          <input type="text" class="syspanel-pwr-input" id="syspanelPwrNewName" value="${escAttr(nextDefaultPlanName())}" maxlength="200" />
+          <input type="text" class="syspanel-pwr-input" id="syspanelPwrNewName" value="${window.ds.escAttr(nextDefaultPlanName())}" maxlength="200" />
         </label>
       `,
       footerHtml: `
@@ -1447,7 +1447,7 @@
       dump,
       origin: new Map(),   // key → {ac, dc} 原始值
       changes: new Map(),  // key → {subgroupGuid, settingGuid, ac, dc}；只有净变化才在表里
-      invalidKeys: new Set(), // 输入形状不合法（非整数/超 u32）的 key，不提交
+      invalidKeys: new Map(), // 输入形状不合法（非整数/超 u32）的 key → 形状错误原因；不提交
       failedKeys,          // 系统拒绝解锁的设置，列表里禁用
       searchText: new Map(), // v5 P2 搜索索引：key → 拼接后的可搜文本（小写）
       compareCache: new Map(), // v5 P2 对照缓存：key → { loading, rows }
@@ -1483,6 +1483,13 @@
       width: 'min(1180px, 94vw)',
       onRequestClose: () => { editorCancel(); return false; },
     });
+    // footer 三键由 modal.create 建在 footer，不属于 renderEditor 重写的挂载点；
+    // 绑定只能在这里做一次。「外部改动自动重读」会重跑 renderEditor，绑定若放在那里，
+    // 每次重绘都给同一批 footer 节点再叠一个监听 ⇒ 同帧连弹 N 个确认框，且第 1 个流程
+    // exitEditor 置空 editor 后，其余流程读 editor.schemeGuid 抛 TypeError、被吞成「保存异常」。
+    document.getElementById('btnSyspanelPwrCancel')?.addEventListener('click', editorCancel);
+    document.getElementById('btnSyspanelPwrSave')?.addEventListener('click', () => editorSave(false));
+    document.getElementById('btnSyspanelPwrSaveApply')?.addEventListener('click', () => editorSave(true));
     renderEditor();
   }
 
@@ -1512,16 +1519,16 @@
         // 用 is-locked 弱化视觉，点击仍可选中并在详情区看到拒绝原因。
         return `
           <button type="button" class="syspanel-pwr-item${changed ? ' is-changed' : ''}${failed ? ' is-locked' : ''}"
-                  data-key="${escAttr(key)}" data-tip="${escAttr(tip)}">
-            <span class="syspanel-pwr-item-name">${esc(String(s.name || s.guid))}</span>
-            <span class="syspanel-pwr-item-sum">${esc(pwrValueSummary(s, key))}</span>
+                  data-key="${window.ds.escAttr(key)}" data-tip="${window.ds.escAttr(tip)}">
+            <span class="syspanel-pwr-item-name">${window.ds.esc(String(s.name || s.guid))}</span>
+            <span class="syspanel-pwr-item-sum">${window.ds.esc(pwrValueSummary(s, key))}</span>
           </button>`;
       }).join('');
       return `
-        <div class="syspanel-pwr-group" data-group="${escAttr(gGuid)}">
+        <div class="syspanel-pwr-group" data-group="${window.ds.escAttr(gGuid)}">
           <button type="button" class="syspanel-pwr-group-head" aria-expanded="${collapsed ? 'false' : 'true'}">
             <span class="syspanel-pwr-caret" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
-            <span class="syspanel-pwr-group-name">${esc(gName)}</span>
+            <span class="syspanel-pwr-group-name">${window.ds.esc(gName)}</span>
             <span class="syspanel-pwr-group-meta"></span>
           </button>
           <div class="syspanel-pwr-group-items"${collapsed ? ' hidden' : ''}>${itemsHtml}</div>
@@ -1534,7 +1541,7 @@
     el.innerHTML = `
       <div class="syspanel-pwr-editor">
         <div class="syspanel-pwr-editor-head">
-          <div class="syspanel-pwr-editor-title" data-tip="${escAttr(ed.schemeGuid)}">编辑方案：<strong>${esc(ed.schemeName)}</strong></div>
+          <div class="syspanel-pwr-editor-title" data-tip="${window.ds.escAttr(ed.schemeGuid)}">编辑方案：<strong>${window.ds.esc(ed.schemeName)}</strong></div>
           <label class="syspanel-pwr-dc-toggle" data-tip="台式机默认隐藏电池列；笔记本或需要配置电池策略时勾选">
             <input type="checkbox" id="syspanelPwrDcToggle"${ed.dcVisible ? ' checked' : ''}>
             <span>显示电池（DC）设置</span>
@@ -1569,9 +1576,6 @@
       });
       renderDetail();
     });
-    document.getElementById('btnSyspanelPwrCancel')?.addEventListener('click', editorCancel);
-    document.getElementById('btnSyspanelPwrSave')?.addEventListener('click', () => editorSave(false));
-    document.getElementById('btnSyspanelPwrSaveApply')?.addEventListener('click', () => editorSave(true));
     document.getElementById('syspanelPwrSearch')?.addEventListener('input', applySearchFilter);
     refreshGroupMeta();
     refreshCount();
@@ -1693,12 +1697,12 @@
         const curIdx = inEnum ? possible.findIndex((v) => Number(v) === Number(val)) : -1;
         const curName = val !== null && val !== undefined ? pwrEnumDisplayName(s, val, curIdx) : '';
         const curOpt = (!inEnum && val !== null && val !== undefined)
-          ? `<option value="${escAttr(String(val))}" selected>${esc(curName ? `${val}（${curName}）` : String(val))}（当前值）</option>`
+          ? `<option value="${window.ds.escAttr(String(val))}" selected>${window.ds.esc(curName ? `${val}（${curName}）` : String(val))}（当前值）</option>`
           : '';
         const opts = possible
           .map((v, i) => {
             const zhName = pwrEnumDisplayName(s, v, i);
-            return `<option value="${escAttr(String(v))}"${Number(val) === Number(v) ? ' selected' : ''}>${esc(zhName ? `${v}（${zhName}）` : String(v))}</option>`;
+            return `<option value="${window.ds.escAttr(String(v))}"${Number(val) === Number(v) ? ' selected' : ''}>${window.ds.esc(zhName ? `${v}（${zhName}）` : String(v))}</option>`;
           })
           .join('');
         control = `<select class="syspanel-pwr-input" id="${inputId}" data-side="${side}"${dis}>${curOpt}${opts}</select>`;
@@ -1713,9 +1717,9 @@
         const stepAttr = stepNum !== null ? ` step="${stepNum}"` : '';
         control = `<input type="number" class="syspanel-pwr-input" id="${inputId}" data-side="${side}" value="${val === null || val === undefined ? '' : Number(val)}"${minAttr}${maxAttr}${stepAttr}${dis}>`;
       }
-      const unitSpan = unit ? ` <span class="syspanel-pwr-unit">${esc(unit)}</span>` : '';
+      const unitSpan = unit ? ` <span class="syspanel-pwr-unit">${window.ds.esc(unit)}</span>` : '';
       return `<div class="syspanel-pwr-field">
-        <label class="syspanel-pwr-field-label" for="${inputId}">${esc(label)}</label>
+        <label class="syspanel-pwr-field-label" for="${inputId}">${window.ds.esc(label)}</label>
         <span class="syspanel-pwr-field-control">${control}${unitSpan}</span>
       </div>`;
     };
@@ -1731,14 +1735,14 @@
         return zhName ? `${v}=${zhName}` : String(v);
       }).join(' / ')}`);
     }
-    const metaHtml = metaParts.length ? `<div class="syspanel-pwr-detail-meta">${esc(metaParts.join('；'))}</div>` : '';
+    const metaHtml = metaParts.length ? `<div class="syspanel-pwr-detail-meta">${window.ds.esc(metaParts.join('；'))}</div>` : '';
     // 调优参考（社区经验口径）：只在表里有 rec 的设置上出现，四象限各一格
     const zhEntry = pwrZh(s.guid);
     const rec = zhEntry && zhEntry.rec;
     const recCell = (label, cell) => `<div class="syspanel-pwr-rec-cell">
-        <span class="syspanel-pwr-rec-k">${esc(label)}</span>
-        <span class="syspanel-pwr-rec-v">${esc(cell.v)}</span>
-        <p class="syspanel-pwr-rec-why">${esc(cell.why)}</p>
+        <span class="syspanel-pwr-rec-k">${window.ds.esc(label)}</span>
+        <span class="syspanel-pwr-rec-v">${window.ds.esc(cell.v)}</span>
+        <p class="syspanel-pwr-rec-why">${window.ds.esc(cell.why)}</p>
       </div>`;
     const recHtml = rec ? `
       <div class="syspanel-pwr-rec">
@@ -1754,10 +1758,10 @@
     const regeditBtn = `<button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPwrRegedit" data-tip="打开注册表编辑器并定位到该设置">在注册表中查看</button>`;
     box.innerHTML = `
       <div class="syspanel-pwr-field">
-        <div class="syspanel-pwr-detail-name">${esc(pwrDisplayName(s))}</div>
+        <div class="syspanel-pwr-detail-name">${window.ds.esc(pwrDisplayName(s))}</div>
         ${regeditBtn}
       </div>
-      <div class="syspanel-pwr-detail-desc">${desc ? esc(desc) : '<span class="syspanel-pwr-muted">（该系统设置没有提供说明）</span>'}</div>
+      <div class="syspanel-pwr-detail-desc">${desc ? window.ds.esc(desc) : '<span class="syspanel-pwr-muted">（该系统设置没有提供说明）</span>'}</div>
       <div class="syspanel-pwr-detail-rows">
         ${controlHtml('ac', '接通电源（AC）')}
         ${editor.dcVisible ? controlHtml('dc', '使用电池（DC）') : ''}
@@ -1775,26 +1779,35 @@
     const mount = document.getElementById('syspanelPwrCompare');
     if (!mount || !editor) return;
     const cached = editor.compareCache.get(key);
-    if (cached && !cached.loading) { renderCompare(mount, key, cached.rows); return; }
+    if (cached && !cached.loading) { renderCompare(mount, key, cached.rows, cached.msg); return; }
     if (cached && cached.loading) return;
-    editor.compareCache.set(key, { loading: true, rows: [] });
+    editor.compareCache.set(key, { loading: true, rows: null, msg: '' });
     window.api.syspanel.powerSettingsCompare(s.subgroupGuid, s.guid)
       .then((resp) => {
         // A1-L03：失败态不能与「对照为空」同形（rows:[] 会清空容器）。
         const rows = resp && resp.success && Array.isArray(resp.data?.rows) ? resp.data.rows : null;
-        editor?.compareCache.set(key, { loading: false, rows });
+        const msg = rows === null ? String((resp && resp.message) || '读取失败') : '';
+        if (rows === null) {
+          // F4c-M05：失败要留排查痕迹——空态只是给用户看的，日志才是排查入口。
+          window.app?.log?.('warn', `电源方案对照读取失败（${s.guid}）：${msg}`);
+        }
+        editor?.compareCache.set(key, { loading: false, rows, msg });
         if (editor && editor.selectedKey === key) {
           const m2 = document.getElementById('syspanelPwrCompare');
-          if (m2) renderCompare(m2, key, rows);
+          if (m2) renderCompare(m2, key, rows, msg);
         }
       })
-      .catch(() => editor?.compareCache.set(key, { loading: false, rows: null }));
+      .catch((e) => {
+        const msg = String((e && e.message) || e);
+        window.app?.log?.('warn', `电源方案对照读取异常（${s.guid}）：${msg}`);
+        editor?.compareCache.set(key, { loading: false, rows: null, msg });
+      });
   }
 
-  function renderCompare(mount, key, rows) {
+  function renderCompare(mount, key, rows, msg) {
     if (!editor) return;
     if (rows === null) {
-      mount.innerHTML = '<div class="empty-state"><p>电源方案对照读取失败</p></div>';
+      mount.innerHTML = `<div class="empty-state"><p>电源方案对照读取失败：${window.ds.esc(msg || '未知原因')}</p></div>`;
       return;
     }
     if (!rows.length) { mount.innerHTML = ''; return; }
@@ -1804,8 +1817,8 @@
       const suffix = editing ? '（正在编辑）' : (r.active ? '（当前使用）' : '');
       const value = editor.dcVisible ? `${fmt(r.ac)} / ${fmt(r.dc)}` : fmt(r.ac);
       return `<div class="syspanel-pwr-compare-row${editing ? ' is-active' : ''}">
-        <span class="syspanel-pwr-compare-k">${esc(String(r.schemeName || r.schemeGuid) + suffix)}</span>
-        <span class="syspanel-pwr-compare-v">${esc(value)}</span>
+        <span class="syspanel-pwr-compare-k">${window.ds.esc(String(r.schemeName || r.schemeGuid) + suffix)}</span>
+        <span class="syspanel-pwr-compare-v">${window.ds.esc(value)}</span>
       </div>`;
     }).join('');
     mount.innerHTML = `
@@ -1837,11 +1850,14 @@
     if (raw === '') return; // 清空中途态：不改动、不标红
     const shapeErr = valueShapeError(raw);
     if (shapeErr) {
-      editor.invalidKeys.add(key);
+      editor.invalidKeys.set(key, shapeErr);
       ctrl.classList.add('is-invalid');
+      // F4c-L11：失败原因就地可操作——红框悬停即见原因，不逼用户猜。
+      ctrl.setAttribute('data-tip', `不会提交：${shapeErr}`);
     } else {
       editor.invalidKeys.delete(key);
       ctrl.classList.remove('is-invalid');
+      ctrl.removeAttribute('data-tip');
       applyLocalChange(key, s, side, Number(raw));
     }
     refreshItemMark(key);
@@ -1977,7 +1993,13 @@
     const n = editor.changes.size;
     const invalid = editor.invalidKeys.size;
     let text = n > 0 ? `本次将写入 ${n} 条修改` : '本次将写入 0 条修改';
-    if (invalid > 0) text += `（另有 ${invalid} 条输入无效，不会提交）`;
+    if (invalid > 0) {
+      // F4c-L11：只报条数用户不知道是哪条、为什么——逐条点名「设置名：原因」。
+      const reasons = Array.from(editor.invalidKeys.entries())
+        .map(([k, m]) => `${findSetting(k) ? pwrDisplayName(findSetting(k)) : k}：${m}`)
+        .join('；');
+      text += `（另有 ${invalid} 条输入无效，不会提交：${reasons}）`;
+    }
     el.textContent = text;
     el.classList.toggle('is-dirty', n > 0);
     const saveBtn = document.getElementById('btnSyspanelPwrSave');
@@ -2088,13 +2110,13 @@
           const initMb = Number(e.initialMb) || 0;
           const maxMb = Number(e.maxMb) || 0;
           const fmt = (n) => (n === 0 ? '0 MB' : (n >= 1024 ? window.ds.fmtBytes(n * 1024 * 1024) : n + ' MB'));
-          return `<tr><td>${esc(e.path || '(未设置)')}</td><td>${esc(fmt(initMb))}</td><td>${esc(fmt(maxMb))}</td></tr>`;
+          return `<tr><td>${window.ds.esc(e.path || '(未设置)')}</td><td>${window.ds.esc(fmt(initMb))}</td><td>${window.ds.esc(fmt(maxMb))}</td></tr>`;
         }).join('')
       : '<tr><td colspan="3" class="empty-cell">未读到 PagingFiles 项（可能全在托管模式）</td></tr>';
     // 提示只留卡片头没覆盖的那一条事实：「改前自动备份 · 需重启生效」卡片头已写；
     // 而原实现把 markdown 的 ** 直接写进了 HTML（页面上显示成两颗星号），整段三行也太长。
     el.innerHTML = `
-      <p class="syspanel-pf-mode">${esc(modeText)}</p>
+      <p class="syspanel-pf-mode">${window.ds.esc(modeText)}</p>
       <table class="syspanel-pf-table">
         <thead><tr><th>路径</th><th>初始大小</th><th>最大值</th></tr></thead>
         <tbody>${rows}</tbody>
@@ -2127,7 +2149,7 @@
     });
     const renderRows = (list) => list.map((e, i) => `
       <tr>
-        <td><input type="text" class="syspanel-pf-input syspanel-pf-drive" data-idx="${i}" value="${escAttr(e.drive)}" maxlength="2" data-tip="盘符，如 C: 或 D:" /></td>
+        <td><input type="text" class="syspanel-pf-input syspanel-pf-drive" data-idx="${i}" value="${window.ds.escAttr(e.drive)}" maxlength="2" data-tip="盘符，如 C: 或 D:" /></td>
         <td><input type="number" class="syspanel-pf-input" data-idx="${i}" data-field="initialMb" value="${e.initialMb}" min="0" max="1048576" step="1" /></td>
         <td><input type="number" class="syspanel-pf-input" data-idx="${i}" data-field="maxMb" value="${e.maxMb}" min="0" max="1048576" step="1" /></td>
         <td><button type="button" class="btn btn-secondary btn-small" data-pf-remove="${i}">删除</button></td>
@@ -2196,13 +2218,14 @@
       window.app?.toast?.('warning', '当前环境不支持写虚拟内存');
       return;
     }
-    // 高危二次确认：AGENTS §3 危险能力显式确认。文案里明说蓝屏风险与重启需求，
-    // 免得用户只看到"应用"按钮就点下去。位置参数形态（AGENTS §5 confirm 禁对象）。
+    // 高危二次确认：文案里明说蓝屏风险与重启需求，
+    // 免得用户只看到"应用"按钮就点下去。位置参数形态（对象形态会把对象当 title、
+    // 回调永不执行；判据真源 = app.js 的 confirm 工厂注释与 tools/check-confirm-danger.mjs 门禁）。
     const ok = await window.app?.confirmDanger?.(
       '修改虚拟内存配置',
       `即将把虚拟内存改为「${managed ? '系统托管' : '手动配置（' + entries.length + ' 个卷）'}」。\n`
         + '\n必须知道：\n'
-        + '· 需要**重启**才生效；\n'
+        + '· 需要重启才生效；\n'
         + '· 全部关完会让物理内存耗尽时直接蓝屏，Trim 参数校验层会拒这种配置；\n'
         + '· 改前当前配置已备份，可通过导入备份 JSON 手动回退。',
       '我已了解，应用',
@@ -2218,7 +2241,7 @@
       const resp = await window.api.syspanel.pagefileApply(!!managed, entries, !!ok);
       if (resp && resp.success) {
         const data = resp.data || {};
-        window.app?.toast?.('info', '虚拟内存配置已写入并回读校验通过；**需要重启生效**');
+        window.app?.toast?.('info', '虚拟内存配置已写入并回读校验通过；需要重启生效');
         // 重渲染只读视图（走 loadPagefile）
         await loadPagefile();
         if (data.backupPath) {
@@ -2269,12 +2292,12 @@
       const resp = await window.api.syspanel.pagefileState();
       const data = resp && resp.success ? resp.data : null;
       if (!data) {
-        mountPagefile().innerHTML = `<p class="empty-state"><span>${esc((resp && resp.message) || '读取虚拟内存失败')}</span></p>`;
+        mountPagefile().innerHTML = `<p class="empty-state"><span>${window.ds.esc((resp && resp.message) || '读取虚拟内存失败')}</span></p>`;
         return;
       }
       renderPagefile(data);
     } catch (e) {
-      mountPagefile().innerHTML = `<p class="empty-state"><span>读取失败：${esc(e && e.message ? e.message : String(e))}</span></p>`;
+      mountPagefile().innerHTML = `<p class="empty-state"><span>读取失败：${window.ds.esc(e && e.message ? e.message : String(e))}</span></p>`;
     }
   }
 
@@ -2325,14 +2348,14 @@
       </div>
       <div class="qc-grid">
         ${WU_CARDS.map(w => `
-        <div class="qc-card" data-tip="${escAttr(w.tip)}">
+        <div class="qc-card" data-tip="${window.ds.escAttr(w.tip)}">
           <div class="qc-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">${w.icon}</svg></div>
           <div class="qc-body">
-            <div class="qc-name">${esc(w.name)}</div>
-            <div class="qc-desc">${esc(w.desc)}</div>
+            <div class="qc-name">${window.ds.esc(w.name)}</div>
+            <div class="qc-desc">${window.ds.esc(w.desc)}</div>
           </div>
           <div class="qc-actions">
-            <button type="button" class="btn btn-secondary btn-small" data-wu-run="${escAttr(w.id)}">${esc(w.btn)}</button>
+            <button type="button" class="btn btn-secondary btn-small" data-wu-run="${window.ds.escAttr(w.id)}">${window.ds.esc(w.btn)}</button>
           </div>
         </div>`).join('')}
       </div>`;
@@ -2374,7 +2397,7 @@
         <p class="syspanel-pwr-modal-hint">选择暂停截止日期（明天起、最长 ${maxDays} 天）：到期系统自动恢复更新，期间更新服务照常运行。</p>
         <label class="opt-inline">暂停到
           <input type="date" class="field-input opt-choice-date" id="syspanelWuPauseDate"
-            min="${escAttr(O.dateInputValue(1))}" max="${escAttr(O.dateInputValue(maxDays))}" />
+            min="${window.ds.escAttr(O.dateInputValue(1))}" max="${window.ds.escAttr(O.dateInputValue(maxDays))}" />
         </label>
         <p class="opt-choice-days" id="syspanelWuPauseDays">请选择日期</p>`,
       footerHtml: `

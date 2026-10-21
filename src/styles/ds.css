@@ -1,18 +1,17 @@
-/* ============================================================
-   Trim 2.0 Design-System 组件层（高频五件套：Dialog / Switch /
-   Progress / Slider / Badge）。行为规格参考 shadcn/ui（Radix）源码，
-   视觉全部走 main.css 的 Fluent token（碳墨×薰衣草，8px 圆角系统工具感）。
+/* Trim 2.0 Design-System 组件层（高频五件套：Dialog / Switch / Progress / Slider / Badge）。
+   行为规格参考 shadcn/ui（Radix）源码，视觉全部走 main.css 的 Fluent token。
    Dialog 的行为层（焦点陷阱/焦点归还）在 scripts/modal.js 实现（B10）。
-   本文件必须在 main.css 之后加载；归 design-system/ 文档约定约束。
-   ============================================================ */
+   本文件必须在 main.css 之后加载；归 design-system/ 文档约定约束。 */
 
-/* ---------- ① Badge（规范徽章：新代码统一用 .ds-badge） ---------- */
+/* ① Badge（规范徽章：新代码统一用 .ds-badge） */
 .ds-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
-  font-weight: 600;
+  /* 字号/字重乘全局滑块 scale（fontmanager 写到 documentElement）：五窗共用件的文本必须
+     跟随用户字号设置，裸值会与同屏按 --fs-* 放大的正文脱节。缺省 1 = 原值。 */
+  font-size: calc(11.5px * var(--font-size-scale, 1));
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   line-height: 1.6;
   padding: 2px 10px;
   border-radius: 999px;
@@ -27,7 +26,6 @@
   background: currentColor;
   flex-shrink: 0;
 }
-.ds-badge.dotless::before { display: none; }
 .ds-badge.ok      { background: var(--success-soft); color: var(--success); }
 .ds-badge.warn    { background: var(--warning-soft); color: var(--warning); }
 .ds-badge.bad     { background: var(--danger-soft);  color: var(--danger); }
@@ -35,18 +33,16 @@
 .ds-badge.accent  { background: var(--accent-soft);  color: var(--accent); }
 
 /* 旧徽章类别名：视觉收敛到同一 token 语义（只覆盖颜色，不改各处既定形状/尺寸）。
-   原规则硬编码 rgba 色值（main.css 1224/1409/4847 等），此处后置覆盖。 */
+   覆盖对象 = main.css 的 .category-risk.low / .badge.off / .startup-badge.off 等同选择器
+   同特异度规则（硬编码 rgba；按选择器锚点指认，登记行号会随增删漂移）。 */
 .category-risk.low        { background: var(--success-soft); color: var(--success); }
 .category-risk.medium     { background: var(--warning-soft); color: var(--warning); }
 .category-risk.high       { background: var(--danger-soft);  color: var(--danger); }
-.badge.third-party        { background: var(--warning-soft); color: var(--warning); }
-.badge.system             { background: var(--success-soft); color: var(--success); }
-.badge.protected          { background: var(--danger-soft);  color: var(--danger); }
 .badge.off                { background: var(--bg-input);     color: var(--fg-tertiary); }
 .startup-badge.on         { background: var(--success-soft); color: var(--success); }
 .startup-badge.off        { background: var(--warning-soft); color: var(--warning); }
 
-/* ---------- ② Slider（input[type=range] Fluent 化） ---------- */
+/* ② Slider（input[type=range] Fluent 化） */
 /* 轨道随值填充：JS（ds.slider.sync）维护 --val 百分比；自动初始化只接管
    无任何样式的裸 range（如背景透明度），带既定样式的（fm-slider）不碰。 */
 input[type="range"].ds-slider {
@@ -76,7 +72,7 @@ input[type="range"].ds-slider:focus-visible {
   outline-offset: 4px;
 }
 
-/* ---------- ③ Progress 环形（线形沿用 main.css .progress-bar/.progress-fill） ---------- */
+/* ③ Progress 环形（线形沿用 main.css .progress-bar/.progress-fill） */
 .ds-ring {
   position: relative;
   display: inline-flex;
@@ -94,8 +90,8 @@ input[type="range"].ds-slider:focus-visible {
 }
 .ds-ring-text {
   position: absolute;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: calc(12px * var(--font-size-scale, 1));
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   color: var(--fg-primary);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
@@ -108,28 +104,31 @@ input[type="range"].ds-slider:focus-visible {
   display: inline-flex;
 }
 
-/* ---------- ④ Switch（.toggle-switch 的 token 修正，结构沿用 main.css） ---------- */
+/* ④ Switch（.toggle-switch 的 token 修正，结构沿用 main.css） */
 /* 原规则选中态滑块硬编码 #ffffff：深色主题下白块压在薰衣草紫上仅 ≈2:1；
    改用 --accent-text（深色 #171832 / 浅色 #FFFFFF），对强调色对比 ≈7:1。 */
 .toggle-switch input:checked + .toggle-track .toggle-thumb {
   background: var(--accent-text);
 }
 
-/* 徽章紧凑变体（看板行/密集列表用：10px、去大间距；点径 4px） */
-.ds-badge.sm { font-size: 10px; padding: 1px 7px; gap: 4px; }
+/* 徽章紧凑变体（看板行/密集列表用；去大间距） */
+.ds-badge.sm { font-size: calc(10px * var(--font-size-scale, 1)); padding: 1px 7px; gap: 4px; }
 .ds-badge.sm::before { width: 4px; height: 4px; }
 
-/* ---------- ⑥ Tooltip（ds.js data-tip 委托的单例浮层） ---------- */
+/* ⑥ Tooltip（ds.js data-tip 委托的单例浮层） */
 .ds-tooltip {
   position: fixed;
-  z-index: 1200;
+  /* z 层：本浮层与 .ds-menu 都挂 body，与各遮罩是同级兄弟，层序只认 z-index——必须压过
+     全仓遮罩/浮层实值（遮罩 2000/10000、toast 10001、横幅 12000），否则弹窗内的 data-tip
+     提示与弹出菜单整体被遮罩盖住。 */
+  z-index: 13000;
   max-width: 280px;
   padding: 6px 10px;
   border-radius: 6px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   color: var(--fg-primary);
-  font-size: 12px;
+  font-size: calc(12px * var(--font-size-scale, 1));
   line-height: 1.55;
   /* 提示里的 \n 是内容（多条件判定依据、多路径目标清单），不是排版噪音 */
   white-space: pre-line;
@@ -141,26 +140,25 @@ input[type="range"].ds-slider:focus-visible {
 }
 .ds-tooltip.on { opacity: 1; transform: none; }
 
-/* ---------- ⑦ DropdownMenu（ds.menu 弹出菜单） ---------- */
+/* ⑦ DropdownMenu（ds.menu 弹出菜单） */
 .ds-menu {
   position: fixed;
   z-index: 1200;
   min-width: 168px;
   padding: 4px;
   /* 口径 v2·B 类（宿主承载面）：菜单不是按钮，逐项给 .ds-menu-item 加 floor 解决不了
-     「整张菜单透出壁纸」——底必须由菜单容器自己成立。原先只有 body.electron-mica 那条
-     带 floor，无材质态就只剩 --bg-card（alpha 0）。这里按同一 floor + elevated 口径补齐，
-     使两种材质路径各自都成立（main.css 的 electron-mica 段只额外提供磨砂）。 */
+     「整张菜单透出壁纸」——底必须由菜单容器自己成立。原先只有 body.electron-mica 那条带
+     floor，无材质态就只剩 --bg-card（alpha 0）。按同一 floor + elevated 口径补齐，两种
+     材质路径各自成立（main.css 的 electron-mica 段只额外提供磨砂）。 */
   background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-btn);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
-  /* v3.5.1 动效审查 M5：菜单由 ds.js 按触发点定位（position:fixed + left/top），
-     原先无任何入场、凭空出现。这里用 @starting-style 补「从触发器方向长出」的
-     轻微缩放，点明空间来源；不依赖 JS 加类，浏览器不支持时自动退化为瞬时出现。
-     v2-L6：--ds-menu-origin 是当年为「按触发点翻转原点」预留的钩子，ds.js 从未写入过它
-     （全仓零命中）⇒ 恒吃 top left。先把实际生效值写死，钩子要接线时连同 menu() 的
-     上下翻转判断一起补回来，别再留一条静默失效的间接层。 */
+  /* v3.5.1 动效审查 M5：菜单由 ds.js 按触发点定位（position:fixed + left/top），原先无入场
+     凭空出现。用 @starting-style 补「从触发器方向长出」的轻微缩放点明空间来源，不依赖 JS
+     加类，浏览器不支持时自动退化为瞬时出现。v2-L6：--ds-menu-origin 是当年为「按触发点
+     翻转原点」预留的钩子，ds.js 从未写入（全仓零命中）⇒ 恒吃 top left。先写死实际生效值，
+     钩子要接线时连同 menu() 的上下翻转判断一起补回来，别再留静默失效的间接层。 */
   transform-origin: top left;
   transition: opacity var(--duration-fast) var(--ease-emphasized), transform var(--duration-fast) var(--ease-emphasized);
 }
@@ -189,7 +187,7 @@ input[type="range"].ds-slider:focus-visible {
 .ds-menu-item[aria-disabled="true"] { opacity: 0.4; cursor: default; }
 .ds-menu-item[aria-disabled="true"]:hover { background: none; color: var(--fg-primary); }
 
-/* ---------- ⑧ Skeleton（加载骨架，扫描/加载期占位） ---------- */
+/* ⑧ Skeleton（加载骨架，扫描/加载期占位） */
 .ds-skeleton-row {
   display: flex;
   align-items: center;
@@ -208,7 +206,7 @@ input[type="range"].ds-slider:focus-visible {
 .ds-skeleton-block.short { flex-shrink: 0; }
 @keyframes ds-shimmer { to { background-position: -200% 0; } }
 
-/* ---------- ⑤ 减弱动效：组件层一律不产生过渡 ---------- */
+/* ⑤ 减弱动效：组件层一律不产生过渡 */
 @media (prefers-reduced-motion: reduce) {
   .ds-ring-fill,
   input[type="range"].ds-slider::-webkit-slider-thumb { transition: none; }

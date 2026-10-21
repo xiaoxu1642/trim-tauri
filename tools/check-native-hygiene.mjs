@@ -268,7 +268,7 @@ const CLEANUP_SNAPSHOT_SITES = [
   { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '.insert(label.clone(), HashMap::new());' },
   { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '\n        let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());' },
   { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '\n            let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());' },
-  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'let label = window.label().to_string();\n    let snapshot = snapshots()' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'reset_lock_whitelist(&label);\n    let snapshot = snapshots()' },
 ];
 /** N9-C 登记表：两张跨窗快照表（与取它的访问器同文件，注释见 helpers.rs 头） */
 const SNAPSHOT_TABLES = [
@@ -500,8 +500,8 @@ let n7sites = 0;
 // 注释不算——stripRust 已剥）出现 `.unwrap()/.expect(/panic!(/unreachable!(/todo!(
 // /unimplemented!(` ⇒ 必须逐文件登记（{file, count, reason}），计数对不上即红——
 // 「登记后偷偷加一处」与「登记后偷偷删一处（登记失效信号）」都拦。
-// 现存 8 处全部是登记例外（3+2+1+1+1，以 `PANIC_ALLOW` 现算为准）：util.rs 的 panic 是**编译期** const 布局断言（只在编译错
-// 时触发）；lib.rs 的 expect 是启动期窗口/运行时创建（无 UI 可落，fail-fast 唯一选择）；
+// 全部登记例外（逐文件条数以 `PANIC_ALLOW` 现算为准，本行不抄总数）：util.rs 的 panic 是**编译期**
+// const 布局断言（只在编译错时触发）；lib.rs 的 expect 是启动期窗口/运行时创建（无 UI 可落，fail-fast 唯一选择）；
 // 三份生成器产物 JSON 的 expect 由 contract_tests 钉住合法性（对 build 产物 fail-fast 正确）。
 // 其余生产 unwrap 已在 P2 批全部结构化消灭（services/fileclean/contextmenu/bcd/
 // game_platform_orphan 五处：match/filter_map/let-else/&'static str 收紧）。
@@ -533,7 +533,7 @@ function panicViolations(src) {
   }
 }
 const PANIC_ALLOW = [
-  { file: 'native-scanner/src/util.rs', count: 3, reason: '编译期 const 布局断言（RM_PROCESS_INFO 668/12/652），panic 只可能发生在编译错' },
+  { file: 'native-scanner/src/util.rs', count: 6, reason: '编译期 const 布局断言两族（RM_PROCESS_INFO 668/12/652 + OSVERSIONINFOW 276/4/12），panic 只可能发生在编译错' },
   { file: 'src-tauri/src/lib.rs', count: 2, reason: '启动期 main 窗口创建 / Tauri 运行时构建失败——无 UI 可落，fail-fast 是唯一选择' },
   { file: 'src-tauri/src/commands/cleanup/rules.rs', count: 1, reason: '生成器产物 cleanup-postactions.json 的 expect，合法性由 contract_tests 钉住（对 build 产物 fail-fast 正确）' },
   { file: 'src-tauri/src/commands/maintenance.rs', count: 1, reason: '生成器产物 maintenance-tasks.json 的 expect，同上' },

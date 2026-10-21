@@ -26,8 +26,14 @@
 //! ## 三条实测出来的绑定事实（不是推断，逐条查过 windows 0.61 源码）
 //! 1. `IWbemLocator` **只有 `ConnectServer`，没有 `CreateService`**；
 //! 2. 全 crate **不导出 `CLSID_WbemLocator`**，只能手写 GUID 常量；
-//! 3. 属性读取要 `VARIANT`，连带需要 `Win32_System_Variant` feature（两个 feature 都是新开的，
-//!    已登记进《依赖清单》）。
+//! 3. 属性读取要 `VARIANT`，连带需要 `Win32_System_Variant` feature。
+//!    依赖准入的可见落点是**同仓 `Cargo.toml` 的逐条注释**（跟踪面里唯一看得见的地方）。
+//!    这里此前写的是「两个 feature 都是新开的，已登记进《依赖清单》」——一句话两重失真
+//!    （R6b-L11）：① 现算 `windows` feature 的变更记录里**没有** Wmi / Variant / Devices
+//!    这几条，「已登记」这件事并没有发生；② 它指向的是仓库外的本机资料区文档，
+//!    换一台机器做一次干净克隆这句话就不成立（AGENTS §2「跟踪文件不得关联未跟踪路径」）。
+//!    另记一条未定性的：`Win32_System_Variant` 是否编译必需——现算全仓没有 VARIANT
+//!    调用点（本模块属性侧走 `GetObjectText`），定性要实跑 cargo，本批禁止 cargo ⇒ 未验证。
 //!
 //! ## 刻意不做的事
 //! - **不创建还原点**（`SRSetRestorePointW` 的静态可用性另见 `pwsh` 侧记录：本机

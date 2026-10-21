@@ -1,6 +1,7 @@
 // runtimes.js - 运行库修复（v3.3.0 第一期）
 // 三段式页面：说明区（index.html 静态）+ 中心雷达图（内联 SVG，token 化）+ 条目列表。
-// 全程只读检测；一键修复走 confirmDanger 红色确认 → install（只传 actionId）→
+// 全程只读检测；一键修复走 app.confirm 的 danger 形态（红色确认；app.js 里 confirmDanger
+// 就是它的包装，二者等价——注释与实现用同一个名字，避免「形似不合」误读）→ install（只传 actionId）→
 // 主进程下载（白名单+双校验）+ 静默安装 → 返回最新 items 直接刷新。
 // 链路骨架复刻 netcheck.js；第一期覆盖 VC++ / .NET / DirectX 三大类（方案 §2）。
 (function () {
@@ -28,6 +29,7 @@
   const RANK = { fail: 0, warn: 1, ok: 2, info: 3, unknown: 4, scanning: 5, idle: 6 };
 
   let items = [];          // 最近一次检测结果
+  let scanned = false;     // F4c-M07：「已扫描但确无结果」与「尚未扫描」必须分开记账
   let scanning = false;
   const repairedSet = new Set(); // v3.5.3：本会话修复成功的条目（行内「已修复」标记）
 
@@ -93,11 +95,17 @@
     const root = document.getElementById('runtimesList');
     if (!root) return;
     if (!items.length) {
-      root.innerHTML = `<div class="empty-state"><p>尚未扫描。点击「开始扫描」检测本机运行库状态。</p></div>`;
+      // F4c-M07：成功回执但零条结果时，若仍显示「尚未扫描」会与摘要「共 0 项，全部正常」
+      // 互相矛盾——两种空态按 scanned 分开写。
+      root.innerHTML = `<div class="empty-state"><p>${scanned ? '本机没有可检测的运行库条目。' : '尚未扫描。点击「开始扫描」检测本机运行库状态。'}</p></div>`;
       return;
     }
     root.innerHTML = items.map(it => {
       const meta = ITEM_META[it.id] || { name: it.id, desc: '' };
+      // F4c-L16：status 是本行唯一未转义的后端插值；后端受枚举约束（属 R 口径），
+      // 但渲染层不做白名单假设——class 属性与文本两侧都过 ds.esc（escAttr 与 esc 同字符集）。
+      const stClass = escapeHtml(it.status);
+      const stText = escapeHtml(STATUS_LABEL[it.status] || it.status);
       const evid = Array.isArray(it.evidence) ? it.evidence : [];
       const canRepair = !!(it.repair && it.repair.id);
       // RAINZ 对标 B1：dx9 现在判 warn（缺件但无自动修复路径），所以「暂无一键修复」这句
@@ -113,7 +121,7 @@
       return `
       <div class="rt-item" data-id="${escapeHtml(it.id)}">
         <div class="rt-item-head">
-          <span class="rt-badge ${it.status}">${STATUS_LABEL[it.status] || it.status}</span>
+          <span class="rt-badge ${stClass}">${stText}</span>
           <div class="rt-item-copy">
             <div class="rt-item-name">${escapeHtml(meta.name)}</div>
             <div class="rt-item-desc">${escapeHtml(meta.desc)}</div>
@@ -165,6 +173,7 @@
       const resp = await window.api.runtimes.collect();
       if (!resp || !resp.success) throw new Error((resp && resp.message) || '运行库检测失败');
       items = resp.data.items;
+      scanned = true;
       renderList();
       updateRadar();
       renderSummary(resp.data.summary);

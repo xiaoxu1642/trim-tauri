@@ -52,7 +52,11 @@ pub(super) struct VendorProductRaw {
 /// 这是「拿表里的名字撞表里的名字」，不是自由猜测）。
 fn matches_alive(name: &str, alive_names: &HashSet<String>) -> bool {
     let n = name.trim().to_lowercase();
-    if n.len() < super::residue::NAME_MIN_EXACT {
+    // R2a-L08：阈值 `NAME_MIN_EXACT` 的量纲是**字符**，本域其余阈值一律
+    // `chars().count()`（`residue.rs` 的名称启发、`residue_update.rs` 的规则短词）。
+    // 原先写 `n.len()` 是字节数 —— 一个汉字 3 字节就过阈，1 个中文字敢去撞卸载列表，
+    // 单字互含会命中一大片（同下面 1 字符英文一律不撞的理由）。
+    if n.chars().count() < super::residue::NAME_MIN_EXACT {
         return false;
     }
     alive_names.iter().any(|d| d.contains(&n) || n.contains(d.as_str()))
@@ -243,6 +247,12 @@ mod tests {
         assert!(!matches_alive("a", &alive(&["abc"])));
         assert!(matches_alive("ab", &alive(&["abc"])));
         assert!(matches_alive("ACME", &alive(&["acme viewer"])));
+        // R2a-L08 正向对照：阈值量纲是**字符**。旧写法 `n.len()`（字节）下「微」= 3 字节
+        // 直接过阈，于是 1 个中文字会去互含命中「微信输入法」——把「程序还在」判成命中，
+        // 厂商键整批不报（本断言在改回 len() 的刹那判红）。
+        assert!(!matches_alive("微", &alive(&["微信输入法"])));
+        // 2 个中文字（= 6 字节）过阈，互含照常成立
+        assert!(matches_alive("微信", &alive(&["微信输入法 4.0"])));
     }
 
     #[test]

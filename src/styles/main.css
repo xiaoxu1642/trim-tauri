@@ -1,7 +1,5 @@
-/* ================================================================
-   Trim - Windows 11 Fluent Design 样式表
-   特性：Mica 背景、Acrylic 模糊、Segoe UI Variable、流畅动画
-   ================================================================ */
+/* Trim - Windows 11 Fluent Design 样式表
+   特性：Mica 背景、Acrylic 模糊、Segoe UI Variable、流畅动画 */
 
 /* ---------- 内嵌字体：MiSans 已于 2026-10-14 整链移除（小旭裁定）----------
    移除理由与数字：`MiSansVF.ttf` 单文件 20,093,424 B，占 src/assets 的 92.94%、
@@ -76,7 +74,7 @@
   /* 审查 3-1：不透明表面（prefers-reduced-transparency 降级时玻璃/材质面回退到此色） */
   --surface-solid: #171A21;
 
-  /* ==================== 表面参数唯一真源（v3.0 白色容器玻璃化收敛） ====================
+  /* 表面参数唯一真源（v3.0 白色容器玻璃化收敛）
      「玻璃感」拆成 颜色 × 透明度 两个自由度：--surface-tint 定基色（RGB 三通道），
      统一 alpha 表定透明度，四个表面 token 全部由参数合成——全仓半透明表面只此一处定义，
      改观感只动这张表，杜绝情境覆写各写一套 alpha 造成漂移。
@@ -256,17 +254,14 @@
   --shadow-island-flyout: 0 4px 10px rgba(58, 48, 120, 0.10), 0 14px 36px rgba(58, 48, 120, 0.16);
 }
 
-/* ================================================================
-   设计系统扩展：玻璃皮肤引擎 + 预设背景
-   - 背景模糊度（设置页整合4）：body[data-skin="glass"] 由设置页
-     「背景模糊度」滑块驱动（0-100% 无级），模糊半径走 --glass-blur
-     随百分比缩放（100% = 26px，与原液态玻璃皮肤观感一致）；0% 时
-     移除 data-skin 仅表示「无磨砂」，容器仍为玻璃 alpha（v3.0 全局
-     玻璃化：玻璃是常态，不再有「经典不透明面板」态）。原「皮肤：
-     经典/液态玻璃」二选一下拉已被该滑块取代。
-   - 预设背景：body[data-preset-bg="graphite"] 选择底层
-     渐变墙纸（z-index:-1 垫底，可与上方图片水印叠加，互不冲突）。
-   ================================================================ */
+/* 设计系统扩展：玻璃皮肤引擎 + 预设背景
+   - 背景模糊度（设置页整合4）：body[data-skin="glass"] 由设置页「背景模糊度」滑块
+     驱动（0-100% 无级），模糊半径走 --glass-blur 随百分比缩放（100% = 26px，与原液态
+     玻璃皮肤观感一致）；0% 时移除 data-skin 仅表示「无磨砂」，容器仍为玻璃 alpha
+     （v3.0 全局玻璃化：玻璃是常态，不再有「经典不透明面板」态）。原「皮肤：经典/液态
+     玻璃」二选一下拉已被该滑块取代。
+   - 预设背景：body[data-preset-bg="graphite"] 选择底层渐变墙纸（z-index:-1 垫底，
+     可与上方图片水印叠加，互不冲突）。 */
 
 /* 玻璃皮肤（v3.0 全局玻璃化）：表面 alpha 已由 :root 真源统一供给（玻璃为常态），
    本块只负责玻璃装饰层——描边/高光/光泽渐变；「背景模糊度」滑块驱动
@@ -418,9 +413,7 @@ body {
   border: 2px solid transparent;
 }
 
-/* ================================================================
-   标题栏（原生 titleBarOverlay 提供右上角窗口控制按钮）
-   ================================================================ */
+/* 标题栏（原生 titleBarOverlay 提供右上角窗口控制按钮） */
 .titlebar {
   height: 36px;
   flex-shrink: 0;
@@ -462,9 +455,7 @@ body {
   letter-spacing: 0;
 }
 
-/* ================================================================
-   布局（弹性布局，自动撑满窗口）
-   ================================================================ */
+/* 布局（弹性布局，自动撑满窗口） */
 .layout {
   display: flex;
   flex: 1 1 auto;
@@ -861,9 +852,7 @@ body {
   flex-wrap: wrap;
 }
 
-/* ================================================================
-   按钮
-   ================================================================ */
+/* 按钮 */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -981,10 +970,8 @@ body {
   border-color: color-mix(in srgb, var(--warning) 82%, #000);
 }
 
-/* ================================================================
-   确认弹窗正文与红色警示块（confirm dangerHint / warningHint）
-   dangerHint/warningHint 为结构化纯文本，由 modal.confirm 模板统一转义渲染
-   ================================================================ */
+/* 确认弹窗正文与红色警示块（confirm dangerHint / warningHint）
+   dangerHint/warningHint 为结构化纯文本，由 modal.confirm 模板统一转义渲染 */
 .confirm-message {
   font-size: 13px;
   line-height: 1.7;
@@ -1072,9 +1059,7 @@ body {
   margin-top: 2px;
 }
 
-/* ================================================================
-   进度条
-   ================================================================ */
+/* 进度条 */
 .progress-section {
   background: var(--bg-card);
   border: 1px solid var(--border-default);
@@ -1113,9 +1098,7 @@ body {
   100% { transform: translateX(100%); }
 }
 
-/* ================================================================
-   分类列表
-   ================================================================ */
+/* 分类列表 */
 .category-list {
   background: var(--bg-card);
   border: 1px solid var(--border-default);
@@ -1191,7 +1174,7 @@ body {
   border-bottom: none;
 }
 
-/* ==================== 二级分类（Windows 系统） ==================== */
+/* 二级分类（Windows 系统） */
 .sub-group {
   position: relative;
 }
@@ -1333,9 +1316,7 @@ body {
 .category-risk.medium { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
 .category-risk.high { background: rgba(var(--danger-rgb), 0.15); color: var(--danger); }
 
-/* ================================================================
-   筛选标签
-   ================================================================ */
+/* 筛选标签 */
 .filter-tabs {
   display: flex;
   gap: 4px;
@@ -1386,14 +1367,12 @@ body {
   color: var(--fg-primary);
 }
 
-/* ================================================================
-   液态玻璃滑块（liquid-glass.js 2.0 挂载）
+/* 液态玻璃滑块（liquid-glass.js 2.0 挂载）
    - 滑块是栏内绝对定位的玻璃胶囊，点击标签时弹簧滑动跟随
-   - full/standard = backdrop-filter 引用 SVG 物理折射位移贴图（JS 注入，
-     full 额外带 RGB 色散 / 指针弹性形变 / WebGL 弹层焦散）
-   - frost  = 常规 backdrop blur 磨砂；off = 隐藏滑块，恢复实底选中态
-   - lg-mode-* 类由 liquid-glass.js 挂在 body 上，未初始化前不生效
-   ================================================================ */
+   - full/standard = backdrop-filter 引用 SVG 物理折射位移贴图（JS 注入，full 额外带
+     RGB 色散 / 指针弹性形变 / WebGL 弹层焦散）
+   - frost = 常规 backdrop blur 磨砂；off = 隐藏滑块，恢复实底选中态
+   - lg-mode-* 类由 liquid-glass.js 挂在 body 上，未初始化前不生效 */
 .filter-tabs,
 .maint-tabs {
   position: relative;
@@ -1453,9 +1432,7 @@ body.lg-reduce-motion .lg-thumb {
   z-index: 0;
 }
 
-/* ================================================================
-   v3.2.0 侧边岛玻璃选中滑块：#sidebar 纳入滑块引擎（liquid-glass.js）
-   ================================================================ */
+/* v3.2.0 侧边岛玻璃选中滑块：#sidebar 纳入滑块引擎（liquid-glass.js） */
 /* 滑块包含块：滑块挂在 .nav-scroll 内（随 nav 滚动自然跟随），岛本体同时给
    relative 兜底（mount 容器缺失时滑块仍正确定位） */
 .sidebar,
@@ -1478,9 +1455,7 @@ body.lg-reduce-motion .lg-thumb {
   flex-shrink: 0;
 }
 
-/* ================================================================
-   磁盘清理四合一（分段式子视图，原五个独立页面收拢）
-   ================================================================ */
+/* 磁盘清理四合一（分段式子视图，原五个独立页面收拢） */
 .cleanup-view {
   display: none;
 }
@@ -1549,7 +1524,7 @@ body.lg-reduce-motion .lg-thumb {
    不是装饰件，不能豁免。按门禁自带的修法备忘把浓度降到 10%：亮 4.54 / 暗 5.57。 */
 .badge.off { background: rgba(120, 120, 130, 0.1); color: var(--fg-tertiary); }
 
-/* ==================== 右键菜单分类分组 ==================== */
+/* 右键菜单分类分组 */
 .ctx-cat-group {
   position: relative;
 }
@@ -1656,9 +1631,7 @@ body.lg-reduce-motion .lg-thumb {
   50% { opacity: 0.5; }
 }
 
-/* ================================================================
-   日志查看器
-   ================================================================ */
+/* 日志查看器 */
 .log-viewer {
   background: transparent;
   border: 1px solid var(--border-default);
@@ -1944,9 +1917,7 @@ select.field-input { cursor: pointer; appearance: auto; }
   font-size: var(--fs-meta);
 }
 
-/* ================================================================
-   空状态
-   ================================================================ */
+/* 空状态 */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -1996,9 +1967,7 @@ select.field-input { cursor: pointer; appearance: auto; }
 }
 .empty-state--error .empty-state-title { color: var(--danger); }
 
-/* ================================================================
-   优化电脑（Optimizer）页面
-   ================================================================ */
+/* 优化电脑（Optimizer）页面 */
 .optimizer-banner {
   display: flex;
   align-items: center;
@@ -2092,9 +2061,7 @@ select.field-input { cursor: pointer; appearance: auto; }
 .toast-progress-fill.done { background: var(--success); }
 .toast-progress-fill.failed { background: var(--danger); }
 
-/* ================================================================
-   通知 Toast
-   ================================================================ */
+/* 通知 Toast */
 /* 2026-10-15 用户裁定：顶部居中、从上往下弹出（原右上角会遮住页面右上角按钮）。 */
 .toast-container {
   position: fixed;
@@ -2185,10 +2152,8 @@ select.field-input { cursor: pointer; appearance: auto; }
   to { transform: translateY(-120%); opacity: 0; }
 }
 
-/* ================================================================
-   模态对话框：已统一为 .usage-backdrop > .usage-modal 三段式
-   （见下方「安装路径绑定 / 使用说明」弹窗样式，及弹窗视觉统一层）
-   ================================================================ */
+/* 模态对话框：已统一为 .usage-backdrop > .usage-modal 三段式
+   （见下方「安装路径绑定 / 使用说明」弹窗样式，及弹窗视觉统一层） */
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -2198,18 +2163,14 @@ select.field-input { cursor: pointer; appearance: auto; }
   to { transform: scale(1); opacity: 1; }
 }
 
-/* ================================================================
-   响应式
-   ================================================================ */
+/* 响应式 */
 @media (max-width: 800px) {
   .page-actions { justify-content: stretch; }
   .page-actions .btn { flex: 1; }
   .external-test-panel iframe { height: 400px; }
 }
 
-/* ================================================================
-   减弱动效（可访问性）
-   ================================================================ */
+/* 减弱动效（可访问性） */
 @media (prefers-reduced-motion: reduce) {
   /* P3-3（F1）：`::-webkit-slider-thumb` 是厂商伪元素，上面两式（::before/::after）
      覆盖不到 —— 字体管理滑块的悬停/按压缩放过渡在 RM 下必须归零
@@ -2219,11 +2180,9 @@ select.field-input { cursor: pointer; appearance: auto; }
   }
 }
 
-/* ================================================================
-   Windows 11 原生 Mica 模式（Electron 30+ / Win11 22H2+）
+/* Windows 11 原生 Mica 模式（Electron 30+ / Win11 22H2+）
    body 添加 .electron-mica 类后，背景改为透明，
-   由 Windows 系统渲染的 Mica / Mica Alt 直接透出
-   ================================================================ */
+   由 Windows 系统渲染的 Mica / Mica Alt 直接透出 */
 body.electron-mica {
   /* 安全网底色（Win11 27H2 实测）：DWM 材质层在最大化/还原后可能永久失效，
      body 全透明时窗口会透出纯黑（2026-09-03 实测运行中重设材质也无法恢复）。
@@ -2263,11 +2222,9 @@ body.electron-mica .main-content {
   background: transparent;
 }
 
-/* ================================================================
-   最大化期间（body.win-maximized，由 app.js 依据 window:resized 同步）
+/* 最大化期间（body.win-maximized，由 app.js 依据 window:resized 同步）
    Win11 27H2：最大化后 DWM 材质层不随客户区扩展且易残留黑帧，
-   渲染层改用不透明底色自绘整个客户区，还原后自动恢复透明透出材质。
-   ================================================================ */
+   渲染层改用不透明底色自绘整个客户区，还原后自动恢复透明透出材质。 */
 body.electron-mica.win-maximized {
   /* 最大化期间 DWM 材质层不随客户区扩展：100% 不透明自绘整个客户区，
      还原后回到 body 的 88% 安全网底色继续透出材质。 */
@@ -2314,11 +2271,9 @@ body.win-maximized .sidebar {
   box-shadow: none;
 }
 
-/* ================================================================
-   四种窗口材质差异化显示（body[data-material] 由 theme.js/pathbinding.js 同步）
+/* 四种窗口材质差异化显示（body[data-material] 由 theme.js/pathbinding.js 同步）
    Mica=柔和云母（默认） / Mica Alt(tabbed)=层次云母（着色更清晰）
-   亚克力=磨砂玻璃（中等着色+高光渗透） / 细亚克力=更透亮（最轻着色）
-   ================================================================ */
+   亚克力=磨砂玻璃（中等着色+高光渗透） / 细亚克力=更透亮（最轻着色） */
 /* Mica Alt：层次感更强的分区着色。
    批次：悬浮岛侧边栏 —— 四材质对岛的区分着色已并入下方「材质 2.0」段的岛规则
    （mica-alt 82% / acrylic 68% / thin-acrylic 58% --surface-solid 调配），旧贴边着色删除 */
@@ -2341,10 +2296,7 @@ body.electron-mica[data-material="acrylic"] .main-content::before {
 /* 细亚克力：更透亮，着色最轻，无附加层
    （批次：悬浮岛侧边栏 —— 旧 .sidebar 着色已并入「材质 2.0」段岛规则） */
 
-/* ================================================================
-   Fluent Design 精修（Win11 25H2/26H1）
-   焦点环 / 键盘导航 / 控件微交互
-   ================================================================ */
+/* Fluent Design 精修（Win11 25H2/26H1）：焦点环 / 键盘导航 / 控件微交互 */
 
 /* Reveal Focus 风格焦点环（键盘导航时显示） */
 :focus-visible {
@@ -2400,9 +2352,7 @@ input[type="radio"]:focus-visible {
   will-change: transform;
 }
 
-/* ================================================================
-   高对比度模式支持（辅助功能）
-   ================================================================ */
+/* 高对比度模式支持（辅助功能） */
 @media (prefers-contrast: more) {
   :root {
     --border-default: rgba(255, 255, 255, 0.3);
@@ -2510,9 +2460,7 @@ input[type="radio"]:focus-visible {
   }
 }
 
-/* ================================================================
-   磁盘测速 - 功能解释说明（MD渲染 Toast）
-   ================================================================ */
+/* 磁盘测速 - 功能解释说明（MD渲染 Toast） */
 .toast-bench-guide {
   width: min(640px, calc(100vw - 48px));
   max-width: 640px;
@@ -2713,10 +2661,8 @@ input[type="radio"]:focus-visible {
   100% { background-position: -200% 0; }
 }
 
-/* ================================================================
-   第四轮新增：全局圆角视觉规范（三级分层，深浅主题一致）
-   外层大面板大圆角 / 内部子控件小圆角，边框阴影同步裁剪
-   ================================================================ */
+/* 第四轮新增：全局圆角视觉规范（三级分层，深浅主题一致）
+   外层大面板大圆角 / 内部子控件小圆角，边框阴影同步裁剪 */
 /* 小控件统一小圆角 */
 .checkbox,
 .filter-tab,
@@ -2732,9 +2678,7 @@ input[type="radio"]:focus-visible {
   overflow: hidden;
 }
 
-/* ================================================================
-   第四轮新增：详细信息表格（Windows 资源管理器风格）
-   ================================================================ */
+/* 第四轮新增：详细信息表格（Windows 资源管理器风格） */
 /* 内容容器改为纵向块布局：表格占满整行（替代旧的网格卡片） */
 .category-group-content,
 .sub-group-content,
@@ -2972,9 +2916,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   background: rgba(var(--info-rgb), 0.35);
 }
 
-/* ================================================================
-   第四轮新增：详情弹窗注册表路径点击跳转（regedit 定位）
-   ================================================================ */
+/* 第四轮新增：详情弹窗注册表路径点击跳转（regedit 定位） */
 .ctx-reg-jump {
   cursor: pointer;
   border-bottom: 1px dashed var(--accent);
@@ -2988,9 +2930,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 .ctx-reg-jump:active { opacity: 0.7; }
 .ctx-reg-jump.jumping { opacity: 0.55; }
 
-/* ================================================================
-   第五轮：侧边栏分类树导航（替换下拉，与测速分组视觉一致）
-   ================================================================ */
+/* 第五轮：侧边栏分类树导航（替换下拉，与测速分组视觉一致） */
 /* 分类树子菜单：完全展开在侧边栏内，滚动统一交给 .nav-section；
    不设独立滚动容器、不阻断滚动链，保证鼠标在展开项上滚动时可带动整个侧边栏，
    侧边栏滚满后再联动主内容区。 */
@@ -3010,19 +2950,15 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   overflow-x: hidden;
 }
 
-/* ================================================================
-   窗口最大化/缩放命中区域稳定性
+/* 窗口最大化/缩放命中区域稳定性
    原生 Mica 和标题栏 overlay 不使用 CSS blur/transform 合成层，
-   避免 Chromium 在客户区变化后保留过期的鼠标命中缓存。
-   ================================================================ */
+   避免 Chromium 在客户区变化后保留过期的鼠标命中缓存。 */
 .electron-mica .titlebar,
 .electron-mica .sidebar {
   /* v3.0：旧的「岛不磨砂」禁令已删——侧边岛纳入全局白容器统一参数（磨砂随滑块联动） */
 }
 
-/* ================================================================
-   实时网速监控
-   ================================================================ */
+/* 实时网速监控 */
 /* 网卡选择器（页头操作区） */
 .realtime-adapter-field {
   display: inline-flex;
@@ -3130,9 +3066,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   color: var(--danger);
 }
 
-/* ================================================================
-   使用说明弹窗（显示 readme.md）
-   ================================================================ */
+/* 使用说明弹窗（显示 readme.md） */
 .usage-backdrop {
   position: fixed;
   inset: 0;
@@ -3475,11 +3409,9 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   opacity: 0.6;
 }
 
-/* ================================================================
-   弹窗样式统一（以「设置 - 使用说明」弹窗为基准）
+/* 弹窗样式统一（以「设置 - 使用说明」弹窗为基准）
    —— 所有新增弹窗（大模型选择 / 安装路径绑定 / 启动项简介）均复用
-      usage-backdrop + usage-modal，右键管理与优化中心弹窗在此对齐同一视觉语言
-   ================================================================ */
+      usage-backdrop + usage-modal，右键管理与优化中心弹窗在此对齐同一视觉语言 */
 .usage-footer {
   display: flex;
   align-items: center;
@@ -3522,11 +3454,9 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   color: var(--fg-secondary);
 }
 
-/* ================================================================
-   一行式功能入口卡片（内存清理 → 运行中的进程）
+/* 一行式功能入口卡片（内存清理 → 运行中的进程）
    左标题 / 中内容回显区 / 右「去管理」按钮 + 下方提示行，
-   视觉与设置页功能入口卡片一致（Fluent Design、白色圆角容器）
-   ================================================================ */
+   视觉与设置页功能入口卡片一致（Fluent Design、白色圆角容器） */
 .process-entry-card {
   display: flex;
   align-items: center;
@@ -3611,9 +3541,7 @@ input[type="range"].fm-slider:disabled,
   .fm-row { flex-wrap: wrap; }
 }
 
-/* ================================================================
-   简介面板（本地简介 + 联网 AI 简介，三个模块共用）
-   ================================================================ */
+/* 简介面板（本地简介 + 联网 AI 简介，三个模块共用） */
 .intro-panel { display: flex; flex-direction: column; gap: 10px; }
 .intro-block {
   border: 1px solid var(--border-default);
@@ -3727,6 +3655,14 @@ input[type="range"].fm-slider:disabled,
 .model-picker-state.ok { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
 .model-picker-state.warn { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
 .model-picker-state.off { color: var(--fg-tertiary); }
+/* 与上面 .model-picker-* 同族：子窗只挂 main.css + ds.css，挪进 main-pages.css 面板就整块无样式 */
+.model-picker-modal { max-width: 680px; }
+.model-picker-body { padding-top: 6px; }
+.model-picker-tip { margin: 0 0 12px; font-size: var(--fs-meta); line-height: 1.7; color: var(--fg-secondary); }
+.model-picker-list { display: flex; flex-direction: column; gap: 8px; }
+.model-picker-copy { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.model-picker-name { font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
+.model-picker-desc { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
 .pw-group {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
@@ -3756,9 +3692,7 @@ input[type="range"].fm-slider:disabled,
 .pw-empty { text-align: center; color: var(--fg-tertiary); padding: 32px 0; font-size: var(--fs-secondary); }
 .startup-intro-modal { max-width: 760px; }
 
-/* ================================================================
-   大模型管理（设置页应用内弹窗，复用 usage-modal 三段式结构）
-   ================================================================ */
+/* 大模型管理（设置页应用内弹窗，复用 usage-modal 三段式结构） */
 .models-modal { max-width: 940px; }
 
 /* ---------- 以下为原独立窗口遗留结构（old/20260830-大模型管理弹窗化），保留通用分组样式 ---------- */
@@ -3963,9 +3897,7 @@ body.mw-window {
 }
 .rt-sr-panel-head h3 { margin: 0; font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
 
-/* ================================================================
-   系统概览：可点击跳转的资源卡片（内存 / 磁盘，整卡可点）
-   ================================================================ */
+/* 系统概览：可点击跳转的资源卡片（内存 / 磁盘，整卡可点） */
 .overview-jump-card {
   position: relative;
   cursor: pointer;
@@ -3978,9 +3910,7 @@ body.mw-window {
 }
 .overview-jump-card:active { transform: scale(0.985); }
 
-/* ================================================================
-   内存清理页面（与磁盘清理页同风格：summary-cards + xtable）
-   ================================================================ */
+/* 内存清理页面（与磁盘清理页同风格：summary-cards + xtable） */
 .mem-panel {
   margin-top: 16px;
   background: var(--bg-card);
@@ -4092,7 +4022,7 @@ body.mw-window {
   color: var(--fg-tertiary);
 }
 
-/* ==================== 批次 B：生效条 ==================== */
+/* 批次 B：生效条 */
 /* 只用既有 token；卡片范式与 .ctx-col 一致（bg-card + border-default + 顶部 3px 强调边 + radius-medium） */
 .ctx-apply-bar {
   display: flex;
@@ -4382,7 +4312,7 @@ img.ctx-col-icon {
 /* 维护与特殊操作域：视觉分组但语义隔离（文档 §2.2）——描边强化 + 组头行内提示 */
 .category-group.special-group { border-color: color-mix(in srgb, var(--danger) 30%, var(--border-default)); }
 
-/* ==================== 运行库修复（v3.3.0 第一期） ==================== */
+/* 运行库修复（v3.3.0 第一期） */
 /* 说明卡：一句话讲清用途 + 覆盖范围 */
 .rt-intro-card {
   background: var(--bg-card);
@@ -4680,9 +4610,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   color: var(--fg-primary);
 }
 
-/* ================================================================
-   系统维护修复组（P2-16）
-   ================================================================ */
+/* 系统维护修复组（P2-16） */
 
 /* 系统维护：分类计数标签 */
 .maint-tabs {
@@ -4854,12 +4782,9 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
 /* 果冻动效（jello）已移除：其 scale3d 关键帧会让按钮在点击时视觉膨胀，
    与第二轮需求「所有红框按钮改为点击波纹」冲突，改由 .btn-ripple 单一反馈承担。 */
 
-/* ================================================================
-   Trim 2.0 final visual layer
-   Raycast/Linear-inspired: carbon surface ladder, hairline borders,
-   lavender reserved for actions and state. Theme selectors stay scoped
-   to the body state so light mode and appearance controls remain live.
-   ================================================================ */
+/* Trim 2.0 final visual layer
+   碳墨表面阶梯 + 细描边，薰衣草只留给动作与状态；主题选择器锁在 body 状态上，
+   浅色模式与外观控件保持可用。 */
 
 /* Appearance controls: keep the selected preset visible behind a readable
    surface, and let the glass skin provide the intended blur/highlight layer. */
@@ -4995,13 +4920,10 @@ body.theme-light .ov-res-sub { color: var(--fg-secondary); }
 }
 body.theme-light .mouse-trail-label { color: var(--fg-primary); }
 
-/* ================================================================
-   主题图扩展到内容区（消除「白底割裂」）
-   预设背景 data-preset-bg（graphite）激活时，主题图片不
-   应该只停在内容区边缘之外——把主内容区上的各白色面板统一改为半透明磨砂，
-   让主题图透到面板上，与侧边栏/背景连成同一套视觉。
-   仅预设背景存在时生效，不影响无预设时的常规不透明卡片。
-   ================================================================ */
+/* 主题图扩展到内容区（消除「白底割裂」）
+   预设背景 data-preset-bg（graphite）激活时，主题图片不应只停在内容区边缘之外——
+   把主内容区上的各白色面板统一改为半透明磨砂，让主题图透到面板上，与侧边栏/背景
+   连成同一套视觉。仅预设背景存在时生效，不影响无预设时的常规不透明卡片。 */
 
 /* 1) 设计令牌：v3.0 全局玻璃化后，:root 真源的表面 token 本身即玻璃值，
       原 body.theme-light[data-preset-bg] 的一套 rgba 覆写已删除（统一 alpha 表），
@@ -5031,21 +4953,16 @@ body.theme-light[data-preset-bg] .maint-output {
    统一供给，容器自身保持透明，避免「壁纸模糊 + 容器再模糊」双重叠影；
    原残缺选择器（无声明块）还会吞并下方 body.bg-image-on 规则，一并清除。 */
 
-/* ================================================================
-   自定义背景图（bg-image-on）下主内容区保底底色
+/* 自定义背景图（bg-image-on）下主内容区保底底色
    背景图画在全窗壁纸层 .app-wallpaper::before（z-index:-1 容器内层），.main-content 默认透明；
-   当导入图片与文字/卡片对比度不足时内容会"融入"背景呈空白，而标题栏
-   在 .layout 之外不受影响。这里给主内容区一个基于 --bg-base 的保底底色，
-   深/浅模式自动适配，且保留背景图隐约透出。
-   ================================================================ */
-/* ================================================================
-   自定义背景图（bg-image-on）与主内容区
+   导入图片与文字/卡片对比度不足时内容会"融入"背景呈空白，而标题栏在 .layout 之外不受影响。
+   这里给主内容区一个基于 --bg-base 的保底底色，深/浅模式自动适配，且保留背景图隐约透出。 */
+/* 自定义背景图（bg-image-on）与主内容区
    背景图画在 .app-wallpaper::after（容器 z-index:-1），内容层 z-index:2。原先给
-   .main-content 铺 86% 保底底色，加上图层自身 opacity（默认 15%）后
-   图案透出度仅 ≈2%，导入的图片在主内容区完全不可见。现改为完全透明：
-   图按用户设置的透明度直接可见；卡片/表格等白底组件自身不透明，可读性
-   不受影响。主题/材质/背景等外观层优先级最高，不被内容底色锁死。
-   ================================================================ */
+   .main-content 铺 86% 保底底色，加上图层自身 opacity（默认 15%）后图案透出度仅 ≈2%，
+   导入的图片在主内容区完全不可见。现改为完全透明：图按用户设置的透明度直接可见；
+   卡片/表格等白底组件自身不透明，可读性不受影响。主题/材质/背景等外观层优先级最高，
+   不被内容底色锁死。 */
 body.bg-image-on .main-content {
   background: transparent;
 }
@@ -5249,25 +5166,19 @@ body.bg-image-on .main-content {
 }
 .un-icon img { width: 100%; height: 100%; object-fit: contain; }
 
-/* ================================================================
-   窗口材质 2.0 + 液态玻璃 2.0（文件末位覆盖层 · 窗口界面升级2）
-   ----------------------------------------------------------------
-   材质可见度根因：上文「Trim 2.0 final visual layer」按主题把 body/
-   侧栏/内容区钉成不透明，叠加 88% 安全网后原生 Mica/亚克力最多透出
-   ~10%。本段位于文件末位，在材质激活时重设表面阶梯：
-     · body 安全网按材质分级半透明（Mica 55% → 细亚克力 26%）；
-       浅色主题用 #E9EAF6 / #C9E1F8 浅玻璃色板，材质透出柔和淡彩
-     · layout / main-content 全透明，侧栏只留极轻着色 + 局部磨砂
-     · 卡片 / 输入 / 浮层经 token 改 rgba + backdrop blur 玻璃化
-       （主窗与三个子窗口共用 token，一次覆盖全部生效）
-     · 「无材质(none)」回退不透明；最大化(win-maximized)护栏保持
-       100% 自绘不透明（DWM 材质层不随客户区扩展，见 2866 段结论）
+/* 窗口材质 2.0 + 液态玻璃 2.0（文件末位覆盖层 · 窗口界面升级2）
+   材质可见度根因：上文「Trim 2.0 final visual layer」按主题把 body/侧栏/内容区钉成
+   不透明，叠加 88% 安全网后原生 Mica/亚克力最多透出 ~10%。本段位于文件末位，在材质
+   激活时重设表面阶梯：body 安全网按材质分级半透明（Mica 55% → 细亚克力 26%，浅色主题
+   #E9EAF6 / #C9E1F8 淡彩）；layout / main-content 全透明，侧栏只留极轻着色 + 局部磨砂；
+   卡片 / 输入 / 浮层经 token 改 rgba + backdrop blur 玻璃化（主窗与三子窗共用 token，
+   一次覆盖全部生效）；「无材质(none)」回退不透明，最大化(win-maximized)护栏保持 100%
+   自绘不透明（DWM 材质层不随客户区扩展，结论见本文件 win-maximized 段）。
    液态玻璃四档（body.lg-mode-*，liquid-glass.js 挂载），材质语义对齐 Apple：
-     full ≈ clear+（折射+色散+弹性+焦散）/ standard ≈ regular（折射无色散）/
-     frost = regular 降级（性能/环境回退，仅 CSS 磨砂）/ off = 实底；
-     full / standard：按钮换中性玻璃 tint（去主题色实底）+ SVG 折射；
-     full 额外有指针弹性形变(.lg-elastic)与 WebGL 弹层焦散(.lg-shimmer-canvas)
-   ================================================================ */
+   full ≈ clear+（折射+色散+弹性+焦散）/ standard ≈ regular（折射无色散）/
+   frost = regular 降级（性能/环境回退，仅 CSS 磨砂）/ off = 实底；
+   full / standard 按钮换中性玻璃 tint（去主题色实底）+ SVG 折射，full 额外有
+   指针弹性形变(.lg-elastic)与 WebGL 弹层焦散(.lg-shimmer-canvas)。 */
 
 /* ---------- 液态玻璃 tint token（不依赖材质开关，lg 四档都可能用到） ----------
    v2.8.0：清理死代码——原 :root 的**暗色**玻璃 token（alpha 0.22 那一套）因应用恒挂
@@ -5550,14 +5461,11 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
   .mt-switch-track, .mt-switch-knob { transition: none; }
 }
 
-/* ================================================================
-   设置页整合4 · 背景模糊度裁定层（v3.0 修复批次退役说明）
-   原「按皮肤以更高特异性覆盖容器 blur」的三组裁定规则已整体退役：
-   v3.0 全局玻璃化后容器自身不再持有 backdrop-filter，滑块改经两条
-   链路生效——① :root --glass-blur 派生四档（faint/soft/mid/strong），
-   供 frost 档兜底与菜单/tooltip 磨砂等余留消费方；② 壁纸层 --bg-blur
-   （.app-wallpaper::before）。系统关透明度时 --glass-blur 归零自动全停。
-   ================================================================ */
+/* 设置页整合4 · 背景模糊度裁定层（v3.0 修复批次退役说明）
+   原「按皮肤以更高特异性覆盖容器 blur」的三组裁定规则已整体退役：v3.0 全局玻璃化后
+   容器自身不再持有 backdrop-filter，滑块改经两条链路生效——① :root --glass-blur 派生
+   四档（faint/soft/mid/strong），供 frost 档兜底与菜单/tooltip 磨砂等余留消费方；
+   ② 壁纸层 --bg-blur（.app-wallpaper::before）。系统关透明度时 --glass-blur 归零自动全停。 */
 
 /* ==================== 审查 3-1/6-1：系统「透明度效果」降级 ==================== */
 /* Windows 11 辅助功能关闭「透明度效果」（prefers-reduced-transparency: reduce）时：
@@ -5856,7 +5764,7 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
 .splash-enter:hover { background: var(--splash-brand-hover); transform: translateY(-1px); }
 .splash-enter:focus-visible { outline: 2px solid #8B5CF6; outline-offset: 3px; }
 
-/* ==================== v2.8.0 批次样式 ==================== */
+/* v2.8.0 批次样式 */
 
 /* 内嵌实拍壁纸预设（v2.8.0）：与渐变预设同管道（data-preset-bg），底图铺满 + 顶部雾化渐变保可读性；
    图片随包分发（src/assets/bg/，经 asar 读取），轮换只切 data-preset-bg 属性值 */
@@ -5934,7 +5842,7 @@ body[data-preset-bg] .app-wallpaper::before {
   transform: none !important;
 }
 
-/* ==================== 背景贯通标题栏批次（2026-09-28，B 方案） ====================
+/* 背景贯通标题栏批次（2026-09-28，B 方案）
    有壁纸（预设 data-preset-bg 或导入图 bg-image-on）时标题栏放行壁纸：全窗壁纸层
    .app-wallpaper（z-index:-1）已铺到窗口顶部，标题栏透明即视觉贯通、无分割线。
    无壁纸时保持上方既有实色规则——无壁纸还透明会让 body 88% 黑闪安全网单独承压，
@@ -5946,15 +5854,14 @@ body.bg-image-on .titlebar {
   background: transparent;
 }
 
-/* ==================== 材质态标题栏贯通（2026-10-11 用户实测裁定） ====================
+/* 材质态标题栏贯通（2026-10-11 用户实测裁定）
    「背景没有覆盖到标题栏」的根因：材质（electron-mica）非最大化时，body 顶 `--mat-veil`
    半透明纱、.layout/.main-content 全透明 —— 桌面经原生 Mica 透出的"背景"在内容区可见，
    唯独标题栏还自绘不透明底（#F3F3F3 / theme-light 的 --bg-app），顶部 36px 成为一条
    材质断层。修法：标题栏同样放行 —— 不铺自己的底色，让 body 的 veil 与内容区一样透出。
    红线不受影响：win-maximized 被 :not() 排除（最大化仍走上方实色规则）；data-material="none"
-   时 --mat-veil 本身就是不透明 --bg-base，透出的仍是不透明底。
-   特异性 (0,3,1) 高于 electron-mica / theme-light 两个 (0,2,1) 分支，且本块同样排在
-   全部 .titlebar 底色规则之后，双保险。 */
+   时 --mat-veil 本身就是不透明 --bg-base。特异性 (0,3,1) 高于 electron-mica / theme-light
+   两个 (0,2,1) 分支，且本块同样排在全部 .titlebar 底色规则之后，双保险。 */
 body.electron-mica:not(.win-maximized) .titlebar {
   background: transparent;
 }
@@ -6015,9 +5922,7 @@ body.electron-mica:not(.win-maximized) .titlebar-title {
   font-size: 11px;
 }
 
-/* ================================================================
-   全窗 prefers-reduced-motion 归零段（五窗都加载本文件）
-   ================================================================
+/* 全窗 prefers-reduced-motion 归零段（五窗都加载本文件）
    v5-K05 批次 8（2026-10-13）：本段曾在 P0 子窗 CSS 按需（6a8f02b）时被搬进
    只主窗加载的 main-pages.css，四子窗动效归零整段失效（可达动效 32/19/14/16 条
    照播）而门禁的「main+pages 合并判」照绿——搬错文件被合并集掩盖。现搬回本文件，

@@ -760,7 +760,11 @@
   // 空分类已删除；如日后新增该分组任务，在此补回即可
   // 2026-10-11：「隐私防护」chip 撤下（整组进隐私自护面板，与 GROUP_FALLBACK.default 同步）；
   // 同日内存优化/显卡优化/系统精简并入系统调校，chip 从 12 → 8 个
-  const OPT_CATEGORIES = ['全部', '性能调优', '音频优化', '外设调优', '桌面体验', '任务调度', '系统服务', '系统调校', '浏览器优化'];
+  // F4b-M07：分类 chip 清单**必须由 GROUP_ORDER 派生**，不再手抄第二份分组字面量——
+  // 此前的硬编码副本让「改侧表新增组 = 看板出现但没有 chip、删/改名组 = chip 常驻空
+  // 分类」，恰好抵消侧表搬家的目的。init 里 applyGroupSidecar 在 renderCatNav 之前
+  // 执行，派生是安全的；GROUP_ORDER 随侧表动态覆盖，故这里只能是函数而非常量。
+  function optCategories() { return ['全部', ...GROUP_ORDER]; }
 
   function getSavedCategory() {
     try {
@@ -769,12 +773,12 @@
       // 「网络优化」已移至系统维护-网络连接。localStorage 里的旧选中项直接迁到新分类。
       if (v === '系统清理' || v === '系统精简' || v === '内存优化' || v === '显卡优化') return '系统调校';
       if (v === '网络优化') return '全部';
-      return OPT_CATEGORIES.indexOf(v) > -1 ? v : '全部';
+      return optCategories().indexOf(v) > -1 ? v : '全部';
     } catch (e) { return '全部'; }
   }
 
   function setCategory(cat) {
-    activeCategory = OPT_CATEGORIES.indexOf(cat) > -1 ? cat : '全部';
+    activeCategory = optCategories().indexOf(cat) > -1 ? cat : '全部';
     try { localStorage.setItem(OPT_CATEGORY_KEY, activeCategory); } catch (e) {}
     // 高亮页内「电脑优化中心」分类分段栏（原侧边栏分类子菜单）
     document.querySelectorAll('#optimizerCatNav .filter-tab').forEach(el => {
@@ -785,11 +789,11 @@
     renderGroups(OPTIONS);
   }
 
-  // 渲染分类分段栏（按 OPT_CATEGORIES 生成，含侧边栏旧版未展示的分类）
+  // 渲染分类分段栏（按 optCategories() 生成——GROUP_ORDER 派生，含侧边栏旧版未展示的分类）
   function renderCatNav() {
     const nav = document.getElementById('optimizerCatNav');
     if (!nav) return;
-    nav.innerHTML = OPT_CATEGORIES.map(cat =>
+    nav.innerHTML = optCategories().map(cat =>
       `<button class="filter-tab${cat === activeCategory ? ' active' : ''}" data-optcat="${escapeHtml(cat)}" role="tab" aria-selected="${cat === activeCategory}">${escapeHtml(cat)}</button>`
     ).join('');
     nav.querySelectorAll('[data-optcat]').forEach(btn => {
@@ -1627,7 +1631,8 @@
   function startOptimizedCheck() {
     if (!window.api?.optimizer?.checkOptimized) return; // 预览模式不检测
     // 启动静默全量体检：**不传 id**，后端按 collect_checks 的单一真源检测整个目录
-    // （reg/service.startType/侧表 regWrites 全覆盖，本机实测 125 项约 10ms、纯只读）。
+    // （reg/service.startType/侧表 regWrites 全覆盖；条数与时耗一律以 check-data-parity
+    // 现算为准，不在注释里手抄静态数字）、纯只读。
     // 不要再在前端手抄一份「哪些项能检」的 steps 过滤——旧过滤只认 reg 串与
     // service.disable，实测漏掉 18 个后端可检测项（startType 项、侧表覆盖项），
     // 其中 4 个在本机早已被外部途径优化（含 VBS 被系统设置关闭），界面却不打
@@ -2443,14 +2448,11 @@
         } else {
           markOptimizedIfApplicable(opt);
         }
-        // 若弹窗还开着（还原时）则刷新按钮态；若已关闭则刷新列表灰态
-        // （v3.2.0：activeOption 在弹窗关闭时置空，存在即代表弹窗开着）
-        if (activeOption && activeOption.id === opt.id) {
-          // 重新打开以刷新按钮态（已优化 ↔ 未优化）
-          openModal(opt);
-        } else {
-          applyOptimizedStyles();
-        }
+        // F4b-L08：四条入口（详情弹窗的执行/恢复/修复按钮、批量与面板链）都在调用
+        // 本函数前 closeOptModal() 把 activeOption 置空——「弹窗还开着则重开刷新按钮
+        // 态」分支实际不可达，留着会误导维护者以为存在弹窗刷新路径。此处只剩列表
+        // 灰态可刷；将来若真有「弹窗开着走完执行链」的新入口，须单独决定按钮态刷新。
+        applyOptimizedStyles();
         return true;
       }
       // 复核 N3（提权半闭环，2026-09-16）：服务端 OPT-1 门禁返回 needAdmin 时，
@@ -2980,6 +2982,10 @@
         if (np && np.success && np.data) NARA_PANEL = np.data;
         // 2026-10-11：隐私自护面板侧表（同上）
         if (pp && pp.success && pp.data) PRIVACY_PANEL = pp.data;
+        // F4b-M02：入口按钮与看板点击的监听绑定**不依赖**目录数据分支——原实现把
+        // bindEvents 埋进 success 分支且无 else，目录读取失败（验签失败按空目录返回、
+        // IPC reject 等）时页面空白、所有按钮零监听，点了毫无反应且零报错。
+        bindEvents();
         if (res && res.success && Array.isArray(res.data)) {
           const optsAll = filterByDiskType(res.data);
           ALL_OPTIONS = optsAll;
@@ -2998,15 +3004,24 @@
           loadAppliedLocal();
           renderCatNav();
           setCategory(activeCategory);
-          bindEvents();
           // 安全托底：异步批量检测注册表项是否已优化（不阻塞首屏，结果回来后增量灰化）
           startOptimizedCheck();
           // v2.6.0（P0-1）：启动扫描已应用记账 + 未完成还原横幅 + 退役迁移结果回报
           loadStateOverview();
           // 审查 2026-09-27 M8：恢复上次因提权重启中断的批量勾选
           restorePendingBatch();
+        } else {
+          // F4b-M02：目录读取失败/形状不符是三态之一，显式报错 + 失败态降级文案，
+          // 不再落进「需在应用内运行」的浏览器预览归因（与 netcheck 的三态口径同款）。
+          window.app?.toast?.('error', '优化目录读取失败：' + ((res && res.message) || '无回执'));
+          window.app?.log?.('error', '优化目录读取失败：' + ((res && res.message) || '无回执'));
+          renderFallback('优化目录未能读取');
         }
-      }).catch(() => renderFallback());
+      }).catch((e) => {
+        // F4b-M02：分支内任一处抛错不再伪装成「浏览器预览模式」——归因如实落日志。
+        window.app?.log?.('error', '优化中心初始化异常: ' + ((e && e.message) || e));
+        renderFallback('页面初始化异常');
+      });
       window.api.optimizer.onProgress(({ percent }) => {
         if (typeof percent === 'number') setProgressToastProgress(percent);
       });
@@ -3039,10 +3054,19 @@
     }
   }
 
-  function renderFallback() {
-    renderCatNav(); // 浏览器预览模式下也渲染分类栏，保持布局一致
+  function renderFallback(reason) {
+    // F4b-M02：reason 非空 = 目录读取失败/初始化异常，必须与「浏览器预览模式」的
+    // 降级文案区分开——把失败归因成预览模式会误导用户去怀疑运行环境而不是查日志。
+    renderCatNav(); // 预览/降级模式下也渲染分类栏，保持布局一致
     const root = document.getElementById('optimizerGroups');
-    if (root) root.innerHTML = window.emptyState
+    if (!root) return;
+    if (reason) {
+      root.innerHTML = window.emptyState
+        ? window.emptyState({ icon: 'search', title: '优化中心加载失败', desc: reason + '。请重启应用重试；若持续失败请到「日志」页排查。' })
+        : `<div class="empty-state"><p>${escapeHtml(reason)}，优化中心未能加载，请重启应用重试。</p></div>`;
+      return;
+    }
+    root.innerHTML = window.emptyState
       ? window.emptyState({ icon: 'search', title: '优化选项需在应用内运行', desc: '当前为浏览器预览模式，请在 Electron 应用内打开「电脑优化中心」使用全部功能' })
       : `<div class="empty-state"><p>当前为浏览器预览模式，优化选项需在 Electron 应用内运行。</p></div>`;
   }

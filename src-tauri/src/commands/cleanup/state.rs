@@ -1,8 +1,17 @@
 //! 运行期状态：路径绑定配置（loadPathsConfig 对照）、分槽快照与回收失败槽、
 //! 锁定进程白名单，以及 JS 数值/字符串口径的强转助手。
 //!
-//! 「执行只认本次会话快照里的槽」是本域的硬约束：validate_snapshot_items + in_scope
-//! 决定能不能删，跳过它等于给用户的手抖开一条直通删除的通道。
+//! 「执行只认本次会话快照里的槽」是本域的硬约束。删除闸在本域的**实际两道**是
+//! （R4-L09：旧文案写的 `in_scope` 在本域零调用，它只是 `commands/fileclean.rs` 的
+//! 私有判据，写在这里等于声称有一道不存在的闸）：
+//! 1. 本域 [`validate_snapshot_items`] —— 条目 id 必须全部命中本窗口最近一次扫描
+//!    快照，且 path 与快照那份同源（`path_resolve` 折到引擎唯一词法归一键）；不命中
+//!    整批拒绝，渲染层给的 path 只用于比对、永不进删除链。
+//! 2. 执行侧 `engine::native::cleanup_execute` 的三面复检 —— 受保护路径
+//!    （词法面 `protect::is_path_protected` + 别名面 `protect::final_path_protected`）、
+//!    删除瞬间的父链链接复检（`protect::is_reparse` 的 0x400 属性位口径）、
+//!    以及 Kudu S2 文件身份证（大小 + birthtime）比对。
+//! 跳过第 1 道等于给用户的手抖开一条直通删除的通道；第 2 道是它的兜底，不是替代。
 //! js_number/js_truthy 这些是把 Rust 值喂回 JS 口径的比较逻辑，改它们要对照前端。
 
 use crate::engine::paths;
@@ -76,6 +85,31 @@ pub(super) fn snapshots() -> &'static Mutex<HashMap<String, HashMap<String, Valu
 }
 pub(super) fn lock_whitelist() -> &'static Mutex<HashMap<String, Vec<Value>>> {
     LOCK_WHITELIST.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 一次性白名单槽的**唯一写入口**之一：置空（R4-M03）。
+///
+/// 三条纪律都收在本节这两个函数里，`cleanup:check-locked` 与 `cleanup:query-locked`
+/// 都不许自己 `insert`：
+/// - **先置空**：检测/查询一进场就把本槽清空。否则「上一次成功检测拿到的名单」会在
+///   「这一次注定失败的检测」之后仍可被 `cleanup:kill-locked-processes` 结束 ——
+///   与该命令函数头第③条承诺（结束只认**本次**查询写下的名单）相反。
+/// - **名单只在成功路径写**：失败路径留空名单（= 结束进程拿到空集，什么都不杀）。
+/// - 槽键 = `window.label()`，两条命令同键同语义（都是主窗档 ⇒ 同一个 `main` 槽）。
+pub(super) fn reset_lock_whitelist(label: &str) {
+    lock_whitelist()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(label.to_string(), Vec::new());
+}
+
+/// 一次性白名单槽的**唯一写入口**之二：写入本次检测确认的名单（覆盖式）。
+/// `cleanup:kill-locked-processes` 用 `remove` 一次性取走，反复读不到陈旧快照。
+pub(super) fn store_lock_whitelist(label: &str, whitelist: Vec<Value>) {
+    lock_whitelist()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(label.to_string(), whitelist);
 }
 
 /// 对照 `snapshotById`
@@ -281,9 +315,9 @@ pub(super) fn js_truthy(v: &Value) -> bool {
     }
 }
 
-/// 数字按 JS `String(n)` 呈现（整数不带 `.0`）
-
-
+// 注：版本号文案助手（数字按 JS `String(n)` 呈现、整数不带 `.0`）的唯一消费者是契约用例，
+// 已收进 contract_tests；R4-L06 把它原先留在本行上方的孤儿 `///` 摘掉——那句 doc 注释会被
+// Rust 归给下面的 `mod tests`，读起来像「本模块文档」。
 #[cfg(test)]
 mod tests {
     use super::*;

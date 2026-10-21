@@ -48,11 +48,13 @@
       if (resp && resp.success) return resp.processes || [];
       throw new Error((resp && resp.message) || '读取失败');
     }
+    // L03：预览态演示数据必须显式带「演示」标识（AGENTS §2：Mock 演示态不许伪装成
+    // 真实数据）——进程名后缀会随进程树、结束确认文案一并露出，用户不会把假进程表当真。
     return [
-      { Id: 1204, ProcessName: 'explorer', mem: 210 * 1048576, Path: 'C:\\Windows\\explorer.exe' },
-      { Id: 3312, ProcessName: 'chrome', mem: 890 * 1048576, Path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
-      { Id: 4313, ProcessName: 'chrome', mem: 420 * 1048576, Path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
-      { Id: 668, ProcessName: 'Code', mem: 720 * 1048576, Path: 'C:\\Users\\CHENG\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' }
+      { Id: 1204, ProcessName: 'explorer（演示）', mem: 210 * 1048576, Path: 'C:\\Windows\\explorer.exe' },
+      { Id: 3312, ProcessName: 'chrome（演示）', mem: 890 * 1048576, Path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
+      { Id: 4313, ProcessName: 'chrome（演示）', mem: 420 * 1048576, Path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
+      { Id: 668, ProcessName: 'Code（演示）', mem: 720 * 1048576, Path: 'C:\\Users\\CHENG\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe' }
     ];
   }
 

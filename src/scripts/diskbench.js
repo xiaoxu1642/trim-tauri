@@ -51,24 +51,26 @@
     if (button) button.disabled = true;
     if ($('diskBenchStatus')) $('diskBenchStatus').textContent = '准备测试...';
     ensureProgressBar();
-    // 时长仅允许 4/8/16 秒，异常值回落 8 秒
-    const rawDuration = Number($('diskDuration')?.value || 8);
-    const duration = [4, 8, 16].includes(rawDuration) ? rawDuration : 8;
-    const options = {
-      path: ($('diskBenchPath')?.value || '').trim(), // 空路径由主进程白名单校验拒绝，不再回落硬编码开发机路径
-      blockSize: Number($('diskBlockSize')?.value || 1048576),
-      // v3.7.1 R1：QD=每线程在途上限、线程数真实生效（Rust OVERLAPPED 并发）；白名单与主进程一致
-      queueDepth: [1, 8, 32].includes(Number($('diskQueueDepth')?.value)) ? Number($('diskQueueDepth').value) : 1,
-      threads: [1, 4, 8].includes(Number($('diskThreads')?.value)) ? Number($('diskThreads').value) : 1,
-      duration
-    };
-    // 订阅后端真实进度
-    if (window.api?.diskbench?.onProgress) {
-      progressUnsub = window.api.diskbench.onProgress(d => {
-        if (d && typeof d.percent === 'number') setProgress(d.percent, d.phase);
-      });
-    }
+    // L06：参数组装与进度订阅并入 try——原实现 running=true 之后、try 之前有约
+    // 20 行可抛代码，一旦抛出 running 永久为 true、按钮永久禁用；finally 统一复位。
     try {
+      // 时长仅允许 4/8/16 秒，异常值回落 8 秒
+      const rawDuration = Number($('diskDuration')?.value || 8);
+      const duration = [4, 8, 16].includes(rawDuration) ? rawDuration : 8;
+      const options = {
+        path: ($('diskBenchPath')?.value || '').trim(), // 空路径由主进程白名单校验拒绝，不再回落硬编码开发机路径
+        blockSize: Number($('diskBlockSize')?.value || 1048576),
+        // v3.7.1 R1：QD=每线程在途上限、线程数真实生效（Rust OVERLAPPED 并发）；白名单与主进程一致
+        queueDepth: [1, 8, 32].includes(Number($('diskQueueDepth')?.value)) ? Number($('diskQueueDepth').value) : 1,
+        threads: [1, 4, 8].includes(Number($('diskThreads')?.value)) ? Number($('diskThreads').value) : 1,
+        duration
+      };
+      // 订阅后端真实进度
+      if (window.api?.diskbench?.onProgress) {
+        progressUnsub = window.api.diskbench.onProgress(d => {
+          if (d && typeof d.percent === 'number') setProgress(d.percent, d.phase);
+        });
+      }
       let result = MOCK;
       let engine = '';
       if (window.api?.diskbench) {
@@ -77,7 +79,8 @@
         result = response.data;
         engine = response.engine || '';
       } else {
-        // 演示模式：按 3×duration 模拟进度
+        // 演示模式：按 3×duration 模拟进度（数据与状态行都必须带「演示」标识，L03）
+        engine = 'demo';
         const totalMs = duration * 3 * 1000;
         const started = Date.now();
         while (Date.now() - started < totalMs) {
@@ -92,7 +95,9 @@
       if ($('diskBenchStatus')) {
         // 引擎标识：原生 Rust 引擎结果与旧 PowerShell buffered 记录不可直接对比（nobuf 绕过文件系统缓存）
         $('diskBenchStatus').textContent = engine === 'rust' ? '测试完成（原生 Rust 引擎）'
-          : engine === 'powershell' ? '测试完成（PowerShell 引擎）' : '测试完成';
+          : engine === 'powershell' ? '测试完成（PowerShell 引擎）'
+          : engine === 'demo' ? '测试完成（演示数据，非本机实测）'
+          : '测试完成';
       }
       window.app?.toast('success', '磁盘测速完成，测试文件已清理');
       // 保存历史记录
@@ -103,14 +108,16 @@
     } finally {
       running = false;
       if (button) button.disabled = false;
-      if (progressUnsub) { progressUnsub(); progressUnsub = null; }
+      // L06：unlisten 返回 Promise，包一层 catch——reject 不能再变成浮动拒绝
+      if (progressUnsub) { Promise.resolve(progressUnsub()).catch(() => {}); progressUnsub = null; }
       removeProgressBar();
     }
   }
 
   // ==================== 历史记录 ====================
   async function saveHistoryRecord(result, options, engine = '') {
-    if (!window.api?.benchHistory) return;
+    // 演示数据不落历史：历史记录页没有引擎字段可标「演示」，落进去会被当成真实测速结果
+    if (!window.api?.benchHistory || engine === 'demo') return;
     try {
       await window.api.benchHistory.add({
         path: options.path,
@@ -202,7 +209,7 @@
               </thead>
               <tbody>
                 ${records.map(r => `
-                  <tr data-record-id="${r.id}">
+                  <tr data-record-id="${window.ds.escAttr(String(r.id))}">
                     <td class="bench-history-time">${formatTime(r.timestamp)}</td>
                     <td class="bench-history-path" data-tip="${escapeHtml(r.path || '')}">${escapeHtml(r.path || '--')}</td>
                     <td>${formatBlock(r.blockSize)} / QD${r.queueDepth} / ${r.threads}T / ${r.duration}s${r.engine === 'rust' ? '（原生）' : r.engine === 'powershell' ? '（PS）' : ''}</td>
@@ -211,7 +218,7 @@
                     <td class="bench-history-val">${Number(r.randomRead).toFixed(1)} MB/s</td>
                     <td class="bench-history-val">${Math.round(r.iops)}</td>
                     <td class="bench-history-val">${Number(r.latency).toFixed(3)} ms</td>
-                    <td><button class="bench-history-delete" data-delete-id="${r.id}" data-tip="删除此记录">&times;</button></td>
+                    <td><button class="bench-history-delete" data-delete-id="${window.ds.escAttr(String(r.id))}" data-tip="删除此记录">&times;</button></td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -304,6 +311,10 @@
 
   // ==================== 功能解释说明（MD 渲染） ====================
   let guideCache = null;
+  // M09：guide 常驻条挂进 app.js 的 Toast 台账——原实现自建 DOM 直插容器，既不受
+  // 同屏条数上限约束（FIFO 挤不出），点空白也关不掉（只遍历 activeToasts），
+  // 每点一次「功能说明」就堆一条常驻条。与 optimizer 的进度 Toast 同一口径。
+  let guideToastEntry = null;
 
   // 轻量 Markdown 渲染器：标题/粗体/行内代码/表格/列表/引用/分隔线
   function renderMarkdown(md) {
@@ -334,7 +345,13 @@
     }
 
     function inline(text) {
+      // F4b-L04 能力对齐：与 app.js 的 renderMarkdown 同一行内语义——图片语法剔除
+      // （CSP 的 img-src 不放行外链图，渲染出来是碎图）、http(s) 链接出锚点、其余
+      // 链接降级纯文本。两份渲染器收敛成一份需 app.js 导出（白名单外，跨面待主 agent）。
       return escapeHtml(text)
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replace(/`([^`]+)`/g, '<code>$1</code>');
     }
@@ -396,6 +413,8 @@
         if (!resp.ok) throw new Error('MD 文件加载失败');
         guideCache = await resp.text();
       }
+      // M09：先收掉上一份 guide 条，再建新的——重复点击不再无限堆叠
+      if (guideToastEntry) { try { guideToastEntry.remove(); } catch (e) { /* 已移除则忽略 */ } guideToastEntry = null; }
       // 使用 guide 风格 Toast 展示渲染后的 MD
       const container = document.getElementById('toastContainer');
       if (!container) return;
@@ -410,12 +429,19 @@
         <button class="toast-close" type="button" aria-label="关闭说明" data-tip="关闭">&times;</button>
       `;
       container.appendChild(el);
-      const remove = () => {
-        if (el.classList.contains('removing')) return;
-        el.classList.add('removing');
-        setTimeout(() => el.remove(), 200);
+      const entry = {
+        el,
+        remove: () => {
+          if (el.classList.contains('removing')) return;
+          el.classList.add('removing');
+          // M09：从台账摘除（app.js 的 FIFO 挤出与「点空白关最顶层」都依赖账实一致）
+          window.app?.unregisterToast?.(entry);
+          setTimeout(() => el.remove(), 200);
+        }
       };
-      el.querySelector('.toast-close')?.addEventListener('click', remove);
+      el.querySelector('.toast-close')?.addEventListener('click', entry.remove);
+      guideToastEntry = entry;
+      window.app?.registerToast?.(entry);
       // 常驻显示直到用户关闭
     } catch (e) {
       window.app?.toast('error', '加载功能说明失败: ' + e.message);

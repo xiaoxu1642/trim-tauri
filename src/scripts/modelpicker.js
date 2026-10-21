@@ -22,6 +22,19 @@
 
   function escapeHtml(text) { return window.ds.esc(text); }
 
+  // 反馈出口必须两窗可用（F3-M07）：本件除主窗外还挂在残留副窗，那里没有 window.app
+  // （主窗才有 toast/log），原先那 8 处 `window.app?.toast` 在副窗是**静默 no-op** ——
+  // 用户点「选择模型」看到弹窗、保存失败却什么提示都没有。副窗的出口是 subToast
+  // （与 intro.js 的 toastOut 同口径，AGENTS §2「子窗高危确认要有反馈」）。
+  function toastOut(type, msg) {
+    if (window.app?.toast) window.app.toast(type, msg);
+    else window.subToast?.stack?.(type, msg);
+  }
+  function logOut(level, msg) {
+    if (window.app?.log) window.app.log(level, msg);
+    else { try { window.api?.log?.write?.(level, msg); } catch (e) { /* 日志通道不可用则静默 */ } }
+  }
+
   async function loadSettings(force) {
     if (settingsCache && !force) return settingsCache;
     try {
@@ -121,7 +134,7 @@
         backdrop.querySelectorAll('.model-picker-item').forEach(item => {
           item.addEventListener('click', () => {
             if (item.classList.contains('unusable')) {
-              window.app?.toast('warning', '该模型尚未启用，请先到「设置 - 大模型管理」中启用并保存');
+              toastOut('warning', '该模型尚未启用，请先到「设置 - 大模型管理」中启用并保存');
               return;
             }
             backdrop.querySelectorAll('.model-picker-item').forEach(i => i.classList.remove('active'));
@@ -135,10 +148,10 @@
           // 关窗/开窗这类出口动作必须给可见回执。
           if (window.api?.modelsWindow?.open) {
             window.api.modelsWindow.open().catch((e) => {
-              window.app?.toast('error', '打开「大模型管理」窗口失败：' + ((e && e.message) || e));
+              toastOut('error', '打开「大模型管理」窗口失败：' + ((e && e.message) || e));
             });
           } else {
-            window.app?.toast('warning', '当前环境不支持打开大模型管理窗口');
+            toastOut('warning', '当前环境不支持打开大模型管理窗口');
           }
         });
 
@@ -150,24 +163,24 @@
             if (window.api?.models?.setScope) {
               const resp = await window.api.models.setScope(scopeKey, key);
               if (resp && resp.success) {
-                window.app?.toast('success', `「${meta.label}」AI 简介模型已切换`);
-                window.app?.log('info', `切换 ${meta.label} AI 简介模型: ${key}`);
+                toastOut('success', `「${meta.label}」AI 简介模型已切换`);
+                logOut('info', `切换 ${meta.label} AI 简介模型: ${key}`);
                 close(true);
                 return;
               }
-              window.app?.toast('error', (resp && resp.message) || '保存失败');
+              toastOut('error', (resp && resp.message) || '保存失败');
               return;
             }
-            window.app?.toast('warning', '当前环境不支持保存模型选择');
+            toastOut('warning', '当前环境不支持保存模型选择');
           } catch (e) {
-            window.app?.toast('error', '保存失败: ' + e.message);
+            toastOut('error', '保存失败: ' + e.message);
           }
         });
       }).catch((e) => {
         // NEW-4（L3 2026-10-01）：设置加载/弹窗渲染链失败必须结算 open() 的 Promise，
         // 否则调用方 await 永久挂起（「点了没反应」）；此时弹窗可能尚未创建，
         // 按「未切换」结算并显性留痕。
-        window.app?.log?.('warn', '模型选择弹窗打开失败: ' + ((e && e.message) || e));
+        logOut('warn', '模型选择弹窗打开失败: ' + ((e && e.message) || e));
         pickerCtrl = null;
         if (openResolve) { openResolve(false); openResolve = null; }
       });

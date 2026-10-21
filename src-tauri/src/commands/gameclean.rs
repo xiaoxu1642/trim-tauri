@@ -7,12 +7,14 @@
 //! C 类二期后含 Origin/Battle.net/Uplay/GOG；redist 输出仍按 Steam/Epic/WeGame 三家分桶，
 //! 新平台只进平台索引），本文件不重写 vdf/acf 解析（§5.16/N6）。
 //!
-//! 本文件同时扮演两个角色：
-//!  1. **库模块**（批次 B 新主路径）：`collect_redist_by_platform` 供 `scan_execute.rs`
-//!     在常规清理扫描后回填 `steamRedistCache/epicRedistCache/wegameRedistCache` 三条规则
-//!     的 size 与 plan；scan_execute 消费返回的 `GameRedistResult`。
-//!  2. **命令壳**（P2-02 旧视图，批次 B 拆除中）：`gameclean_scan` 与 finder 外部槽闭环
-//!     保留至 cleanup 扫描回填链完全通电。
+//! 本文件只有一个角色：**库模块**（批次 B 主路径）——`collect_redist_by_platform` 供
+//! `scan_execute.rs` 在常规清理扫描后回填 `steamRedistCache/epicRedistCache/wegameRedistCache`
+//! 三条规则的 size 与 plan；scan_execute 消费返回的 `GameRedistResult`。
+//!
+//! R2a-L09（2026-10-21 现算更正）：这里原先自述「同时扮演命令壳 `gameclean_scan` 与 finder
+//! 外部槽闭环」——全仓（含 `src/scripts`、`tauri-api.js` 的 RETIRED 台账、`lib.rs` 的
+//! `generate_handler!`）现算 0 处该命令，本文件也没有任何 `#[tauri::command]`。留着这句
+//! 的代价是下一轮按注释去找一个不存在的 IPC 面。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

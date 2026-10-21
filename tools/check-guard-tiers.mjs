@@ -96,6 +96,10 @@ const MUST_MAIN = [
   // 调它」判 MAIN——比 readonly 紧；与 check-locked 的 readonly 不冲突（那条的候选
   // 来自扫描快照，子窗确认链也要用）。
   'cleanup_query_locked',
+  // R4-U03（2026-10-20 用户裁定）：`cleanup:rules` 一次向渲染层下发**整库**（含每条规则
+  // 的删除路径与 regKeys 目标）。现算唯一调用点 = 主窗磁盘清理页（cleanup.js），
+  // 三个子窗零调用点 ⇒ 按 AGENTS §3「谁真的需要调它」收回主窗独占，不给 readonly。
+  'cleanup_rules',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
   'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
   'contextmenu_open_in_regedit', // v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC
@@ -398,7 +402,8 @@ const MUST_READONLY = [
   'cleanup_file_backup_list',
   'cleanup_item_detail',
   'cleanup_reg_backup_list',
-  'cleanup_rules',
+  // R4-U03：`cleanup_rules` 已收回主窗独占，登记在上面 MUST_MAIN（本表是双向棘轮，
+  // 留在这里是红）
   'cleanup_scan',
   'contextmenu_icons',
   'contextmenu_scan',

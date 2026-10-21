@@ -1,16 +1,14 @@
 // modal.js - 统一弹窗服务与弹窗 IPC 通道
-// 1) IPC 接入：MutationObserver 监听 document.body，任何模块的弹窗
-//    （动态增删的 *-backdrop 容器，或 #usageBackdrop 这类 display 切换的静态弹窗）
-//    打开/关闭都会自动经 window.api.modal IPC 记录日志，各模块零改造；
-// 2) 统一骨架：window.modal.create()/confirm() 生成与「设置 → 安装路径绑定」
-//    一致的 usage-backdrop > usage-modal 三段式弹窗（header/body/footer），
-//    供新弹窗直接复用。
+// 1) IPC 接入：MutationObserver 监听 document.body，任何模块的弹窗（动态增删的 *-backdrop 容器，或 #usageBackdrop
+//    这类 display 切换的静态弹窗）打开/关闭都自动经 window.api.modal IPC 记录日志，各模块零改造。
+// 2) 统一骨架：window.modal.create()/confirm() 生成与「设置 → 安装路径绑定」一致的 usage-backdrop > usage-modal
+//    三段式弹窗（header/body/footer），供新弹窗直接复用。
 (function () {
   'use strict';
 
   function escapeHtml(text) { return window.ds.esc(text); }
 
-  // ---------- 空状态组件（扫描型页面统一空态视觉） ----------
+  // 空状态组件（扫描型页面统一空态视觉）
   // 用法：emptyState({ icon, title, desc, cta: { text, target } })
   // icon: 'search' | 'box' | 'shield' | 'disk'；cta.target 为要触发的按钮 id，
   // 由 app.js 的全局委托点击转发到目标按钮（如 btnScan / btnScanStartup）。
@@ -35,9 +33,8 @@
     ].join('');
   }
 
-  // A1-L07（v7.2 P1）：读取失败与「确实为空」必须外观可分。
-  // 旧实现全仓只有空态件，失败只能用空态表达；这里补一个共享的失败态件，
-  // 由各域复用（role=alert 让读屏也能认领）。
+  // A1-L07（v7.2 P1）：读取失败与「确实为空」必须外观可分——旧实现全仓只有空态件，失败只能用空态表达；
+  // 这里补一个共享的失败态件，由各域复用（role=alert 让读屏也能认领）。
   const ERROR_ICON = '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>';
   function errorState({ title = '读取失败', desc = '', cta = null } = {}) {
     return [
@@ -52,8 +49,15 @@
     ].join('');
   }
 
+  // F3-M06：modal:* 在契约层按「动态派发」放行 —— invoke 的 reject 不进同步 catch，每次弹窗开/关各挂一条未捕获
+  // Promise；档位一收紧或通道改名，症状是按弹窗次数刷错误日志而非当场暴露。持有返回值显式吞掉（不阻塞弹窗的语义
+  // 不变）并计数留痕，供排查「上报从何时开始失败」。
+  var _reportFailures = 0;
   function report(method, info) {
-    try { window.api?.modal?.[method]?.(info || {}); } catch (e) { /* 日志失败不阻塞弹窗 */ }
+    try {
+      var p = window.api?.modal?.[method]?.(info || {});
+      if (p && typeof p.catch === 'function') p.catch(function () { _reportFailures++; });
+    } catch (e) { /* 同步失败同样不阻塞弹窗 */ }
   }
 
   function isModalNode(node) {
@@ -66,8 +70,11 @@
     return { id: node.id || '', title: title.slice(0, 40) };
   }
 
-  // ---------- 弹窗 IPC：监听全部弹窗的打开/关闭 ----------
+  // 弹窗 IPC：监听全部弹窗的打开/关闭
   const visible = new WeakSet();
+  // F3-L04：create() 出厂的 ctrl 登记表 —— closeAll 据此逐个走各弹窗自己的 close()
+  // 终点（escHandler 解绑 / 焦点陷阱释放 / onClose 回调），不再用 display:none 绕行。
+  const liveCtrls = new Set();
 
   function syncNode(node) {
     if (!isModalNode(node)) return;
@@ -98,10 +105,9 @@
   });
 
   function startObserver() {
-    // P3-4（F3-M02）：必须开 subtree —— 无 subtree 时 attributes 只观察 body 自身，
-    // 静态弹窗（如 #usageBackdrop，body 的直接子元素）display 切换属**子元素**的属性
-    // 变更，观察不到 ⇒ 「使用说明」弹窗的开合从来不进日志；subtree 下全树的
-    // style 变更都会过一遍 syncNode（非 backdrop 节点即时跳过，开销可忽略）。
+    // P3-4（F3-M02）：必须开 subtree —— 无 subtree 时 attributes 只观察 body 自身，静态弹窗（如 #usageBackdrop，body 的
+    // 直接子元素）display 切换属**子元素**的属性变更，观察不到 ⇒「使用说明」弹窗的开合从来不进日志；
+    // subtree 下全树的 style 变更都会过一遍 syncNode（非 backdrop 节点即时跳过，开销可忽略）。
     observer.observe(document.body, {
       childList: true,
       attributes: true,
@@ -115,21 +121,18 @@
     startObserver();
   }
 
-  // M2（v3.6.5）M2-5：补销毁契约——observer 与 DOMContentLoaded 监听原本没有解绑路径。
-  // 约束/时机说明（不主动调用）：本模块的 MutationObserver 与弹窗 open/close 的 IPC 上报
-  // 在渲染进程整个生命周期内都需要存在（弹窗可在任意时刻打开），静态下不存在「观察器
-  // 可以安全摘除」的确定时机；因此这里只提供 destroy 契约（供窗口级回收复用），
-  // 由调用方按需调用，不在此处猜测时机自行调用。重复调用安全。
+  // M2（v3.6.5）M2-5：补销毁契约——observer 与 DOMContentLoaded 监听原本没有解绑路径。本模块的 MutationObserver 与
+  // 弹窗 open/close 的 IPC 上报在渲染进程整个生命周期内都需要存在（弹窗可在任意时刻打开），静态下不存在「观察器可以
+  // 安全摘除」的确定时机；因此只提供 destroy 契约供窗口级回收复用，由调用方按需调用、不在此猜测时机自行调用。重复调用安全。
   function stopObserver() {
     try { observer.disconnect(); } catch (e) { /* 尚未开始观察时断开无副作用 */ }
     document.removeEventListener('DOMContentLoaded', startObserver);
   }
 
-  // ---------- 统一弹窗骨架工厂 ----------
-  // opts: { id, title, bodyHtml, footerHtml, backdropClass, modalClass,
-  //         bodyClass, footerClass, width, onRequestClose(reason)->false 可阻止关闭,
-  //         iconSvg, metaHtml }（v3.2.0 弹窗统一批次：header 左侧可选图标 + 标题下元信息行，
-  //         供优化中心详情等带徽章头的弹窗复用；iconSvg/metaHtml 为调用方生成的可信 HTML）
+  // 统一弹窗骨架工厂
+  // opts: { id, title, bodyHtml, footerHtml, backdropClass, modalClass, bodyClass, footerClass, width,
+  //         onRequestClose(reason)->false 可阻止关闭, iconSvg, metaHtml }（v3.2.0 弹窗统一批次：header 左侧可选图标 +
+  //         标题下元信息行，供优化中心详情等带徽章头的弹窗复用；iconSvg/metaHtml 为调用方生成的可信 HTML）
   // 返回 { backdrop, modal, body, footer, close() }；关闭时触发 opts.onClose(reason)
   function create(opts = {}) {
     const id = opts.id || 'modal-' + Date.now();
@@ -181,12 +184,14 @@
       close() {
         if (closed) return;
         closed = true;
+        liveCtrls.delete(ctrl); // F3-L04：关闭即出登记表
         document.removeEventListener('keydown', escHandler);
         backdrop.remove();
         trap.release();
         if (opts.onClose) opts.onClose('close');
       }
     };
+    liveCtrls.add(ctrl);
 
     function requestClose(reason) {
       if (closed) return;
@@ -208,11 +213,9 @@
     return ctrl;
   }
 
-  // 便捷确认框：返回 Promise<boolean>（任意方式关闭都 resolve false）
-  // danger=true 渲染红色确认按钮（规范要求：高风险操作必须红色二次确认）。
-  // D10：warning=true 渲染黄色确认按钮（中风险操作），与 danger 互斥。
-  // dangerHint/warningHint 为结构化警示文案：纯文本由模板统一转义渲染，
-  // 调用方禁止自行拼接 HTML 字符串（会被 escapeHtml 转义成字面文本）。
+  // 便捷确认框：返回 Promise<boolean>（任意方式关闭都 resolve false）。danger=true 渲染红色确认按钮（规范要求：
+  // 高风险操作必须红色二次确认）；D10：warning=true 渲染黄色确认按钮（中风险操作），与 danger 互斥。
+  // dangerHint/warningHint 为结构化警示文案：纯文本由模板统一转义渲染，调用方禁止自行拼接 HTML 字符串（会被 escapeHtml 转义成字面文本）。
   function confirm({ title = '确认', message = '', confirmText = '确认', cancelText = '取消', danger = false, warning = false, dangerHint = '', warningHint = '' }) {
     return new Promise(resolve => {
       let settled = false;
@@ -233,16 +236,12 @@
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary" data-confirm="cancel" type="button">${escapeHtml(cancelText)}</button>
           <button class="btn ${severity === 'danger' ? 'btn-danger' : (severity === 'warning' ? 'btn-warning' : 'btn-primary')}" data-confirm="ok" type="button">${escapeHtml(confirmText)}</button>`,
-        // ⚠️ 焦点落点：统一落在**主按钮**（含高危的红色「仍然执行」）。
-        //
-        // 原口径是高危聚焦「取消」（B10，防回车误触）。2026-10-03 用户实测后推翻：
-        // 用户能走到这一步的前提是**已经主动点了「立即执行」**，即确认意愿已表达；
-        // 这时把焦点扣在「取消」上，等于用默认焦点替用户否决定��� —— 用户按回车
-        // （肌肉记忆）就变成「拒绝」，表现为「怎么点都不执行」。
-        //
-        // 风险并未丢失，护栏换了更强的位置：① 按钮本身是红色 + 文案是「仍然执行」，
-        // 不是无脑回车能滑过去的「确定」；② Esc 与点击遮罩/取消键都仍是取消；
-        // ③ 警示文案由 dangerHint 结构化渲染在正文下方，不需要靠焦点位置强调。
+        // ⚠️ 焦点落点：统一落在**主按钮**（含高危的红色「仍然执行」）。原口径是高危聚焦「取消」（B10，防回车误触），
+        // 2026-10-03 用户实测后推翻：能走到这一步的前提是已经主动点了「立即执行」、确认意愿已表达，
+        // 这时把焦点扣在「取消」上，等于用默认焦点替用户拒绝 —— 用户按回车���
+        // （肌肉记忆）就变成「拒绝」，表现为「怎么点都不执行」。风险并未丢失，护栏换了更强的位置：① 按钮本身是红色 +
+        // 文案是「仍然执行」，不是无脑回车能滑过去的「确定」；② Esc 与点击遮罩/取消键都仍是取消；③ 警示文案由
+        // dangerHint 结构化渲染在正文下方，不需要靠焦点位置强调。
         initialFocus: '[data-confirm="ok"]',
         onClose() { finish(false); }
       });
@@ -251,18 +250,17 @@
     });
   }
 
-  // 关闭当前全部弹窗（退出/全局收起时用）
+  // 关闭当前全部弹窗（退出/全局收起时用）。F3-L04：create() 出厂的弹窗必须走各自 ctrl.close() —— 旧实现只置
+  // display:none，escHandler 解绑 / 焦点陷阱释放 / onClose（confirm 的 resolve）全都不走，一旦接线就是
+  // 「Promise 永不 resolve + 监听泄漏」。display 切换的静态弹窗（不经 create()，如 #usageBackdrop）保留
+  // display:none 处理，开合日志由观察器按 style 变更上报。
   function closeAll() {
-    Array.from(document.body.children).forEach(node => {
+    Array.from(liveCtrls).forEach(function (ctrl) {
+      try { ctrl.close(); } catch (e) { /* 单个失败不阻断其余 */ }
+    });
+    Array.from(document.body.children).forEach(function (node) {
       if (isModalNode(node) && node.style.display !== 'none') {
         node.style.display = 'none';
-        // P3-4（F3-M02）：必须**显式上报** —— 旧实现只把节点移出 visible，
-        // 观察器回调随后看到「已隐藏且不在 visible」，close 日志被这条提前的簿记吞掉
-        // （批量关窗从此不进日志，「弹窗为什么全关了」无从追溯）。
-        if (visible.has(node)) {
-          visible.delete(node);
-          report('close', infoOf(node));
-        }
       }
     });
   }

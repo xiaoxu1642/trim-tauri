@@ -1,9 +1,20 @@
-//! A3 PnP 设备原生侧 —— **只读 spike**（v2-R5，2026-10-01）
+//! A3 PnP 设备原生侧 —— 枚举（v2-R5，2026-10-01）+ 写入面（2026-10-11 起在册）
 //!
-//! v2 R5 的次序是「枚举先行、删除最后、设备先 spike」，本模块只做第一步。
+//! v2 R5 的次序是「枚举先行、删除最后、设备先 spike」，本模块第一步做的是只读枚举。
+//! **但「只读 spike、不调用 CM_Disable_DevNode」这句自述在本模块已经是假的**（R6b-M09）：
+//! 2026-10-11 起 `tf_dev_disable` 的原生化把写入面接了进来，本文件确有
+//! `CM_Disable_DevNode(h.devinst, CM_DISABLE_PERSIST)` 与 `CM_Enable_DevNode` 两个调用点
+//! （见 `set_devices_enabled`）。`CM_DISABLE_PERSIST` 是**重启后仍生效**的系统写面，
+//! 按「未接线 spike」处理任何复核都会跳过它——这正是原措辞的实际危害（不是错删，是误导）。
+//!
+//! 扇入口径**不在这里记数字**（数字会随调用点漂移，本仓已多次被现算证伪）：
+//! 现算入口 = `node tools/check-review-units.mjs` 与 AGENTS §1.6 的扇入核对，
+//! 写入面的执行链与超时台账见 `engine/pssteps.rs` 的 `set_devices_enabled` 调用点
+//! 与 `tools/check-ps-callsites.mjs` 登记表。
+//!
 //! 目标步骤 `tf_dev_disable`（2026-10-11 起音频控制器/打印队列并入它的逐项清单，
 //! 原 tf_dev_audio / tf_dev_printer 两项退役）是 `risk: medium`、设备可在设备管理器
-//! 重新启用，但本模块仍**不调用** `CM_Disable_DevNode`（v2-R5 只做只读 spike），只回答：
+//! 重新启用。枚举侧只回答一个问题：
 //!
 //! > 原生能不能复现 `Get-PnpDevice | Where { FriendlyName -eq X -and Status -eq 'OK' }`
 //! > 这个**双条件**判定？
@@ -198,19 +209,42 @@ unsafe fn display_name_of(devinst: u32) -> String {
     desc_of(devinst).map(|d| d.trim().to_string()).unwrap_or_default()
 }
 
+/// 单次按名查询最多收集/操作的实例数。防御的是「同名设备异常多时不无限收集」，
+/// 但**超过上限不再静默**：见 [`FindOutcome`] 与 `PnpSetReport::truncated`（R6b-L04）。
+const MAX_MATCHES_PER_NAME: usize = 32;
+
+/// 一次按名查询的结果：`hits` 至多 [`MAX_MATCHES_PER_NAME`] 条，`matched_total` 是
+/// **真实命中总数**（含被上限挡掉的那些）。两者不等即发生了截断。
+///
+/// 为什么要带总数（R6b-L04）：旧实现在 `hits.len() >= 32` 处直接 `break`，既不计数也不告警，
+/// `set_devices_enabled` 因此可以回执「请求 N 个名字 / 启用 M 个实例」而把第 33 台起的实例
+/// 静默漏掉——启用方向尤其危险，用户以为整批恢复，实际还有一台停在禁用状态。
+/// 现在扫描**不提前退出**（同名 ≤ 上限时本来就要扫完全表，代价不变），命中数照记，
+/// 截断事实由调用方上报。
+#[derive(Debug, Default)]
+pub struct FindOutcome {
+    pub hits: Vec<DevHit>,
+    pub matched_total: usize,
+}
+
+impl FindOutcome {
+    /// 是否因为上限丢过实例（截断）。
+    pub fn truncated(&self) -> bool {
+        self.matched_total > self.hits.len()
+    }
+}
+
 /// 按 `Get-PnpDevice` 的 `FriendlyName` 口径（见 `display_name_of`）**精确**匹配
 /// （大小写不敏感，等价于 PowerShell 的 `-eq`）查找设备实例，并带 `Status` 判定。
 ///
 /// 刻意不做"包含匹配"或相似度：v2 要求双条件，而名字匹配一旦放宽，
 /// 选中的可能就是另一个同名设备。
-pub fn find_by_friendly_name(want: &str) -> Result<Vec<DevHit>, String> {
+pub fn find_by_friendly_name(want: &str) -> Result<FindOutcome, String> {
     let want_low = want.trim().to_lowercase();
     let ids = device_ids()?;
-    let mut hits = Vec::new();
+    let mut hits: Vec<DevHit> = Vec::new();
+    let mut matched_total = 0usize;
     for id in ids {
-        if hits.len() >= 32 {
-            break; // 防御：同名设备异常多时不无限收集
-        }
         let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
         let mut devinst = 0u32;
         unsafe {
@@ -226,6 +260,11 @@ pub fn find_by_friendly_name(want: &str) -> Result<Vec<DevHit>, String> {
             if CM_Get_DevNode_Status(&mut flags, &mut problem, devinst, 0).0 != 0 {
                 continue;
             }
+            matched_total += 1;
+            // 满了不再收，但**继续数**：截断必须是可上报的事实，不是循环的终点
+            if hits.len() >= MAX_MATCHES_PER_NAME {
+                continue;
+            }
             hits.push(DevHit {
                 devinst,
                 instance: id,
@@ -239,7 +278,7 @@ pub fn find_by_friendly_name(want: &str) -> Result<Vec<DevHit>, String> {
             });
         }
     }
-    Ok(hits)
+    Ok(FindOutcome { hits, matched_total })
 }
 
 /// 全部设备的实例 ID + FriendlyName + 状态，供实机对照 `Get-PnpDevice` 全量计数。
@@ -473,6 +512,9 @@ pub struct PnpSetReport {
     pub not_found: Vec<String>,
     /// FFI 返回非 CR_SUCCESS 的失败明细
     pub errors: Vec<String>,
+    /// 命中数超过 `MAX_MATCHES_PER_NAME` 因而**只处理了前若干台**的名字
+    /// （R6b-L04：截断必须可见，旧实现是在枚举处 `break` 静默丢掉第 33 台起的全部实例）
+    pub truncated: Vec<String>,
 }
 
 impl PnpSetReport {
@@ -485,6 +527,15 @@ impl PnpSetReport {
         );
         if !self.not_found.is_empty() {
             s.push_str(&format!("（{} 个名字无 Status=OK 设备，已跳过）", self.not_found.len()));
+        }
+        // 截断单独报出来：漏掉的实例数算不出来（只知超过上限），但「哪些名字没处理全」
+        // 必须能被看见，否则摘要读起来像"全部完成"
+        if !self.truncated.is_empty() {
+            s.push_str(&format!(
+                "（{} 个名字命中超过 {MAX_MATCHES_PER_NAME} 台，仅处理前 {MAX_MATCHES_PER_NAME} 台：{}）",
+                self.truncated.len(),
+                self.truncated.join("、")
+            ));
         }
         s
     }
@@ -512,7 +563,12 @@ pub fn set_devices_enabled(names: &[String], enable: bool) -> Result<PnpSetRepor
             report.errors.push("设备名为空（拒绝执行，请检查步骤脚本）".to_string());
             continue;
         }
-        let hits = find_by_friendly_name(name)?;
+        let found = find_by_friendly_name(name)?;
+        if found.truncated() {
+            // 命中超过上限：记进报告，让「这个名称只处理了前 32 台」出现在回执里
+            report.truncated.push(name.clone());
+        }
+        let hits = &found.hits;
         // 禁用只选 Status=OK 的（对齐 PS Where Status -eq 'OK'，不动已停用/有问题的设备）；
         // 启用**不能**加这个过滤——目标此刻正是被禁用状态（status_ok=false），
         // 过滤掉就永远启不回来（2026-10-11 真机往返抓到的假成功：not_found 计跳过、
@@ -596,9 +652,19 @@ mod tests {
             "High Definition Audio 控制器",
             "系统扬声器",
         ] {
-            let hits = find_by_friendly_name(want).unwrap_or_else(|e| panic!("{want}: 枚举失败 {e}"));
+            let found = find_by_friendly_name(want).unwrap_or_else(|e| panic!("{want}: 枚举失败 {e}"));
+            let hits = &found.hits;
             let ok = hits.iter().filter(|h| h.status_ok).count();
-            println!("{want}: 命中 {} 台，其中 Status=OK {ok} 台", hits.len());
+            println!(
+                "{want}: 命中 {} 台（真实总数 {}），其中 Status=OK {ok} 台",
+                hits.len(),
+                found.matched_total
+            );
+            assert_eq!(
+                hits.len(),
+                found.matched_total.min(MAX_MATCHES_PER_NAME),
+                "收集数必须等于「真实命中数与上限取小」：提前 break 会少收，matched_total 漏计会多收",
+            );
             for h in hits.iter().take(3) {
                 println!(
                     "   {} started={} has_problem_bit={} prob={} raw=0x{:X} F=[{}] D=[{}]",
@@ -656,12 +722,16 @@ mod tests {
             .map(|h| (h.instance.clone(), h.desc.clone()));
         match probe {
             Some((instance, desc)) => {
-                let hits = find_by_friendly_name(&desc).expect("按 DeviceDesc 回退名查询失败");
+                let found = find_by_friendly_name(&desc).expect("按 DeviceDesc 回退名查询失败");
                 assert!(
-                    hits.iter().any(|h| h.instance == instance),
+                    found.hits.iter().any(|h| h.instance == instance),
                     "设备 {instance} 的 FriendlyName 为空、DeviceDesc=[{desc}]，按该名字却查不到它 —— 回退链断了"
                 );
-                println!("回退链：按 DeviceDesc「{desc}」查到 {} 台，含源实例", hits.len());
+                println!(
+                    "回退链：按 DeviceDesc「{desc}」查到 {} 台（真实总数 {}），含源实例",
+                    found.hits.len(),
+                    found.matched_total
+                );
             }
             None => println!("回退链：本机没有「FriendlyName 为空但有 DeviceDesc」的设备，本轮未覆盖（不算失败）"),
         }
@@ -767,8 +837,9 @@ foreach ($n in $names) { Get-PnpDevice | Where-Object { $_.FriendlyName -eq $n -
     fn live_probe_设备禁用启用往返() {
         let mut target: Option<(String, DevHit)> = None;
         for want in ["System Speaker", "系统扬声器"] {
-            if let Ok(hits) = find_by_friendly_name(want) {
-                if let Some(h) = hits
+            if let Ok(found) = find_by_friendly_name(want) {
+                if let Some(h) = found
+                    .hits
                     .into_iter()
                     .filter(|h| h.status_ok && h.instance != "HTREE\\ROOT\\0")
                     .next()
@@ -790,11 +861,89 @@ foreach ($n in $names) { Get-PnpDevice | Where-Object { $_.FriendlyName -eq $n -
         // 再查一次：它应当不再 Status=OK
         let after_off = find_by_friendly_name(&one[0]).unwrap_or_default();
         assert!(
-            after_off.iter().all(|x| !x.status_ok || x.devinst != h.devinst),
+            after_off
+                .hits
+                .iter()
+                .all(|x| !x.status_ok || x.devinst != h.devinst),
             "禁用后设备仍 Status=OK"
         );
         let on = set_devices_enabled(&one, true).expect("启用枚举失败");
         println!("启用报告: {:?}", on);
         assert_eq!(on.errors.len(), 0, "恢复启用失败: {:?}", on.errors);
+        // 启用方向的回执必须与真实命中数一致，否则「第 33 台起被静默漏掉」（R6b-L04）
+        // 又会变成一个看不见的洞：摘要要么报出截断、要么命中总数不超过上限。
+        let summary = on.summary_line(true);
+        let recount = find_by_friendly_name(&one[0]).unwrap_or_default();
+        assert_eq!(
+            summary.contains("命中超过"),
+            !on.truncated.is_empty(),
+            "摘要的截断声明必须与报告的 truncated 同步: {summary} / truncated={:?}",
+            on.truncated
+        );
+        assert!(
+            recount.matched_total <= MAX_MATCHES_PER_NAME || !on.truncated.is_empty(),
+            "命中 {}/上限 {MAX_MATCHES_PER_NAME} 超过上限却没记进 truncated: {:?}",
+            recount.matched_total,
+            on.truncated
+        );
+    }
+
+    /// R6b-L04（纯逻辑，判红）：截断必须出现在回执文本里，且点名到具体名字。
+    /// 旧实现只在枚举处 `break`，报告里没有这一档 —— 把 `truncated` 从
+    /// `summary_line` 里去掉，第一条断言即红。
+    #[test]
+    fn 截断必须写进回执摘要() {
+        let rep = PnpSetReport {
+            requested: 3,
+            changed_instances: 64,
+            not_found: vec!["不存在的设备".to_string()],
+            errors: Vec::new(),
+            truncated: vec!["High Definition Audio 控制器".to_string()],
+        };
+        let line = rep.summary_line(true);
+        assert!(line.contains("请求 3 个名字 / 启用 64 个实例"), "基础计数走形了: {line}");
+        assert!(line.contains("1 个名字无 Status=OK 设备，已跳过"), "跳过项必须可见: {line}");
+        assert!(line.contains("命中超过 32 台"), "截断必须被点名: {line}");
+        assert!(
+            line.contains("High Definition Audio 控制器"),
+            "截断要报出是哪个名字，只给条数等于没给: {line}"
+        );
+        // 未截断时不得出现截断字样（否则回执自己造风险）
+        let clean = PnpSetReport {
+            requested: 1,
+            changed_instances: 1,
+            ..Default::default()
+        };
+        assert!(
+            !clean.summary_line(false).contains("命中超过"),
+            "没有截断就不要写截断: {}",
+            clean.summary_line(false)
+        );
+    }
+
+    /// R6b-L04：命中数与收集数的关系由 `FindOutcome::truncated` 判据钉住（纯算术，
+    /// 不依赖这台机器有没有 33 台同名设备）。真机侧那条不变式写在
+    /// `live_probe_设备禁用启用往返` 里。
+    #[test]
+    fn 命中上限的截断判据只认超过() {
+        let mk = |kept: usize, total: usize| FindOutcome {
+            hits: (0..kept)
+                .map(|i| DevHit {
+                    devinst: i as u32,
+                    instance: format!("X\\{i}"),
+                    started: true,
+                    has_problem: false,
+                    status_ok: true,
+                    problem: 0,
+                    raw_flags: 0,
+                    friendly: String::new(),
+                    desc: String::new(),
+                })
+                .collect(),
+            matched_total: total,
+        };
+        assert!(!mk(MAX_MATCHES_PER_NAME, MAX_MATCHES_PER_NAME).truncated(), "恰好到上限不算截断");
+        assert!(mk(MAX_MATCHES_PER_NAME, MAX_MATCHES_PER_NAME + 1).truncated(), "多一台没收到就是截断");
+        assert!(!mk(1, 1).truncated(), "正常命中不得报截断");
     }
 }

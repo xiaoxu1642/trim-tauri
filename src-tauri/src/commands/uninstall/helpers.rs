@@ -26,7 +26,10 @@ pub(super) use crate::engine::native::to_wide;
 /// `vec![0u8; size as usize]`。损坏或恶意写入的值可回报一个超大 size 让分配直接 OOM/panic。
 /// 正常 REG_SZ / REG_MULTI_SZ 远小于此（注册表值本身有 1MB 量级上限），超限一律按
 /// 「读不到」处理（fail-closed），绝不按报告的长度去分配。
-const MAX_REG_STR_BYTES: u32 = 4 * 1024 * 1024;
+///
+/// R2a-L11（§5.16/N6）：本单元「按回报长度分配」只许有这一份上限，`pending_delete::read_pfro`
+/// 同样复用常量 —— 原先那份是 PFRO 独有的「无上限分配」，两份实现只有一处 fail-closed。
+pub(super) const MAX_REG_STR_BYTES: u32 = 4 * 1024 * 1024;
 
 pub(super) unsafe fn reg_sz(hk: windows::Win32::System::Registry::HKEY, name: &str) -> Option<String> {
     use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
@@ -178,11 +181,23 @@ pub(super) fn parse_reg_target(target: &str) -> Option<(windows::Win32::System::
         ("HKEY_LOCAL_MACHINE\\", HKEY_LOCAL_MACHINE),
         ("HKLM\\", HKEY_LOCAL_MACHINE),
     ] {
-        if t.len() > prefix.len()
-            && t[..prefix.len()].eq_ignore_ascii_case(prefix)
+        // R2a-L01：定长字节切片必须先过 `get`。`t.len() > prefix.len()` 只保证**字节**够长，
+        // 而 `&str` 切片要求索引落在字符边界上 —— `HKCU\Software\微信` 的第 18 字节正落在
+        // 「信」内部（`HKCU\Software\` 占 14 字节，两个汉字各 3 字节），旧写法 `t[..18]`
+        // 当场 panic。panic 会沿 `learned::load()` 把整条残留扫描带崩，连「隔离损坏文件」
+        // 那条补救路径都到不了（该文件存在期间扫描恒空）。
+        // 与 `services_orphan::service_key_name`（R2b-M01）同一口径：`get` 成功即证明该
+        // 前缀本身是完整 ASCII，后面的 `t[prefix.len()..]` 起始边界随之成立；`get` 为 None
+        // 意味着前缀根本不可能匹配（目标这一段里有非 ASCII），跳过试下一条即可。
+        if t.len() <= prefix.len()
+            || !t
+                .get(..prefix.len())
+                .map(|head| head.eq_ignore_ascii_case(prefix))
+                .unwrap_or(false)
         {
-            return Some((hive, t[prefix.len()..].trim_start_matches('\\').to_string()));
+            continue;
         }
+        return Some((hive, t[prefix.len()..].trim_start_matches('\\').to_string()));
     }
     None
 }

@@ -369,7 +369,7 @@ fn 没有重解析点时留痕计数必须为零() {
 /// 判红纪律（报告 §9.4）：本用例的夹具自检（无排除时带点目录内文件必须命中）
 /// 先排除「夹具本身坏了」的可能，再断排除生效——避免把隔壁字段的失败误当通过。
 #[test]
-fn excludePaths_带点目录按目录前缀排除() {
+fn exclude_paths_带点目录按目录前缀排除() {
     let root = temp_root("dotdir");
     plant(&root, &[("a.log", 10), ("Vendor.Tool/inside.log", 40)]);
 
@@ -450,7 +450,7 @@ fn 回收站条目只发占位行不枚举任何路径() {
 /// 做前缀排除——那会让 `keep.log` 之外所有 `xxx.log\...` 形态意外豁免，方向虽
 /// 安全但口径混乱；钉住「按实况分类」的另一半）。
 #[test]
-fn excludePaths_指向文件仍按精确匹配排除() {
+fn exclude_paths_指向文件仍按精确匹配排除() {
     let root = temp_root("dotfile");
     plant(&root, &[("a.log", 10), ("keep.log", 30)]);
     let extra = format!(

@@ -24,6 +24,11 @@
   const PAGE_SETTLE_MS = 8000;    // 检测到流量活动后至少等待 8 秒，确保网页完全加载启动
   const POLL_MS = 800;            // 流量采样间隔
   const LATENCY_MS = 2000;        // 延迟采样间隔（recording 阶段）
+  // L02：记录阶段强制收口（复用 realtime.js 的采样数上限 + 时长上界口径）。
+  // 结束判据在 netspeed-detector（要求观察到上传阶段回落），纯下载型测速永不满足 ⇒
+  // 不设上界时每 POLL_MS 采样、每 LATENCY_MS ping 网关会无限续命。到点自动结束并照常出报告。
+  const MAX_RECORD_SAMPLES = 7200;
+  const MAX_RECORD_MS = MAX_RECORD_SAMPLES * POLL_MS;
   let tickInFlight = false;
   let sampleErrorShown = false;
 
@@ -180,8 +185,15 @@
         // 记录阶段：采样点 + 峰值 + 周期性延迟采样
         const now = Date.now();
         const t = now - currentRec.startTime;
+        // L02：时长上界到点自动结束——结束判据依赖上传阶段出现，纯下载型测速
+        // 不能被允许无限记录下去
+        if (t >= MAX_RECORD_MS) { finishDetect('已达最长记录时长，自动结束'); break; }
         const point = { t, down, up, latency: null };
         currentRec.samples.push(point);
+        // L02：采样数组截断（保留最新，丢弃最老），防止超长记录内存无界增长
+        if (currentRec.samples.length > MAX_RECORD_SAMPLES) {
+          currentRec.samples.splice(0, currentRec.samples.length - MAX_RECORD_SAMPLES);
+        }
         currentRec.maxDown = Math.max(currentRec.maxDown, down);
         currentRec.maxUp = Math.max(currentRec.maxUp, up);
         if (t - currentRec.lastLatencyAt >= LATENCY_MS) {
@@ -230,13 +242,16 @@
     if (!window.api?.realtime?.reportSave || !r.samples.length) return false;
     const downs = r.samples.map(s => s.down);
     const ups = r.samples.map(s => s.up);
+    // L02：求极值改 reduce——展开运算符对超大数组会抛 RangeError，采样数上限
+    // 不是「永远不会超」的保证，统计口径自身要安全（与 realtime.js 同一改法）
     try {
       const resp = await window.api.realtime.reportSave({
         createdAt: new Date(r.startTime || Date.now()).toISOString(),
         adapter: `测速站点：${r.label}`,
         durationSec: Math.round((r.endTime - r.startTime) / 1000),
         maxDown: r.maxDown, maxUp: r.maxUp,
-        minDown: Math.min(...downs), minUp: Math.min(...ups),
+        minDown: downs.reduce((a, b) => (b < a ? b : a), Infinity),
+        minUp: ups.reduce((a, b) => (b < a ? b : a), Infinity),
         avgDown: downs.reduce((a, b) => a + b, 0) / downs.length,
         avgUp: ups.reduce((a, b) => a + b, 0) / ups.length,
         samples: r.samples.map(s => ({ t: (r.startTime || 0) + s.t, down: s.down, up: s.up }))
@@ -252,7 +267,8 @@
     // 延迟统计（仅统计有效采样）
     const lats = r.samples.filter(s => Number.isFinite(s.latency) && s.latency > 0).map(s => s.latency);
     const avgLat = lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : null;
-    const minLat = lats.length ? Math.round(Math.min(...lats)) : null;
+    // L02：同上，极值用 reduce（延迟采样点也可能很多）
+    const minLat = lats.length ? Math.round(lats.reduce((a, b) => (b < a ? b : a), Infinity)) : null;
     // 异步保存历史记录，弹窗内提示保存结果
     let saved = false;
     saveToHistory(r).then(ok => {

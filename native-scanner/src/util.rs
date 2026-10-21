@@ -117,6 +117,36 @@ pub(crate) mod ffi {
         pub fn RtlGetVersion(info: *mut u8) -> i32;
     }
 
+    /// `OSVERSIONINFOW`（RtlGetVersion 的出参）。本 crate 过去用 `[0u8; 276]` + 手写
+    /// 字节偏移读它（`rd(4)/rd(8)/rd(12)`），**没有任何编译期布局断言** —— 而同文件对
+    /// `RM_PROCESS_INFO` 恰有 `const _` 断言（标准不一，N1b-L01）。改成有名字的结构体，
+    /// 尺寸与偏移由编译期钉住，读法不再靠魔数。
+    #[repr(C)]
+    pub struct OSVERSIONINFOW {
+        pub dwOSVersionInfoSize: u32,
+        pub dwMajorVersion: u32,
+        pub dwMinorVersion: u32,
+        pub dwBuildNumber: u32,
+        pub dwPlatformId: u32,
+        pub szCSDVersion: [u16; 128],
+    }
+
+    // 布局不变式放编译期（同 RM_PROCESS_INFO 的理由：native-scanner 是 path 依赖、
+    // 非 workspace 成员，它的单测只有显式 --manifest-path 才跑，靠测试兜不住回归）。
+    // 276 = 5×DWORD + 128×WCHAR；尺寸填错时 RtlGetVersion 直接返回 STATUS_INVALID_INFO_CLASS，
+    // 旧实现不查返回码 ⇒ 把失败当成「版本 0.0.0」报给用户。
+    const _: () = {
+        if std::mem::size_of::<OSVERSIONINFOW>() != 276 {
+            panic!("OSVERSIONINFOW 必须是 276 字节：RtlGetVersion 按 dwOSVersionInfoSize 校验尺寸");
+        }
+        if std::mem::offset_of!(OSVERSIONINFOW, dwMajorVersion) != 4 {
+            panic!("dwMajorVersion 偏移必须是 4");
+        }
+        if std::mem::offset_of!(OSVERSIONINFOW, dwBuildNumber) != 12 {
+            panic!("dwBuildNumber 偏移必须是 12：version/build 两个对外字段按它读");
+        }
+    };
+
     #[link(name = "advapi32")]
     extern "system" {
         pub fn RegOpenKeyExW(hKey: isize, lpSubKey: *const u16, ulOptions: u32, samDesired: u32, phkResult: *mut isize) -> i32;
@@ -202,11 +232,30 @@ pub fn legacy_cli_root() -> Option<PathBuf> {
 
 /// JSON 字符串转义（手写，避免为单点需求引入 serde——与既有"零额外依赖"取向一致）
 pub fn json_escape(s: &str) -> String {
+    escape_chars(s, true)
+}
+
+/// 诊断/留痕行里嵌「外部原文」（规则 id、磁盘路径、未解析 token、io::Error 文本）的
+/// 单行化包装。
+///
+/// 为什么必须包（N1a-L05）：stderr 不是指令通道（只有 `@@ITEM@@` / `@@PLANFILE@@` 是），
+/// 所以路径里带引号不构成注入；但原文自带 `\n` 时，一条留痕会被拆成两行 —— 等于凭空
+/// 多出一条不存在的诊断，人工对账与「按行数判定」的机检都会被带偏。
+///
+/// 与 [`json_escape`] **共用同一份转义实现**（§5.16：同一判定不许两份实现，两处各写
+/// 一份控制字符表迟早漂），差别只在 `quotes` 这一档：留痕不是 JSON 通道，把路径里的
+/// `\` 双写成 `\\`、引号写成 `\"` 只伤可读性、不带来任何安全收益。
+pub fn diag_text(s: &str) -> String {
+    escape_chars(s, false)
+}
+
+/// 转义实现本体。`quotes = true` 时额外处理 `"` 与 `\`（JSON 字符串内必需）。
+fn escape_chars(s: &str, quotes: bool) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for ch in s.chars() {
         match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
+            '"' if quotes => out.push_str("\\\""),
+            '\\' if quotes => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -215,6 +264,26 @@ pub fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// 定长 UTF-16 缓冲 → String：**刻意不用 `from_utf16_lossy`**（N1b-M07）。
+///
+/// lossy 把孤立代理项换成 U+FFFD，而 U+FFFD 本身是合法的 Windows 文件名字符，
+/// 于是「GBK 遗留介质拷来的怪名字」与「另一个真叫 `…\u{FFFD}…` 的路径」在字符串层面
+/// 同键 —— 拿它去比保护清单，撞的是别人。解不开就返回 `None`（=「读不到」），
+/// 与「成功但结果与输入相同」分开（[`to_long_path_opt`] 的三态口径）。
+pub fn decode_wide_exact(buf: &[u16]) -> Option<String> {
+    String::from_utf16(buf).ok()
+}
+
+/// 文本形态里是否出现 U+FFFD（lossy 解码的产物标记，N1b-M07）。
+///
+/// 与 [`has_lossy_path`] 是**两条不同的判据**，不要合并：后者问「原生 OsString 是否
+/// 含无法无损解码成 `str` 的字节」，需要原生句柄；前者问「传给我的这个 `str` 是不是
+/// 已经被人 lossy 过一遍」——`is_protected_path` 只拿到 `&str`，够不着原生形态，
+/// 只能靠这个标记判。二者指向同一个结论：文本形态已丢信息 ⇒ 判定不可靠 ⇒ fail-closed。
+pub fn has_lossy_marker(s: &str) -> bool {
+    s.contains('\u{FFFD}')
 }
 
 /// 路径统一为 `/` 分隔并剥掉 `\\?\` 长路径前缀（输出口径，跨平台一致）
@@ -261,10 +330,13 @@ pub fn is_reparse(_ent: &fs::DirEntry) -> bool {
 /// 注意 std::fs::canonicalize 会追加 \\?\ 前缀，与 P3 字符串口径冲突，不能直接用。
 ///
 /// `to_long_path_opt`：区分成败的版本——成功返回长名（**可能与输入相同**：输入本身
-/// 已是长名、无 8.3 组件），失败（不存在 / 无权限 / API 报错）返回 None。
+/// 已是长名、无 8.3 组件），失败（不存在 / 无权限 / API 报错/**名字解不出无损文本**）
+/// 返回 None。
 /// [`to_long_path`] 是展示口径，把失败折叠成「原样返回」，无法区分
 /// 「成功但无短名」与「失败」；短名判定的两个后果相反（前者应把波浪号当字面名
 /// 采信，后者必须 fail-closed），故 protect.rs 改用它（2026-10-12）。
+/// N1b-M07：解码走 [`decode_wide_exact`]，非良构 UTF-16 判「读不到」而不是产出
+/// 一个含 U+FFFD 的假名字（旧实现 `from_utf16_lossy` 会让它去撞另一个真实路径）。
 #[cfg(windows)]
 pub fn to_long_path_opt(p: &str) -> Option<String> {
     use std::ffi::OsStr;
@@ -281,7 +353,7 @@ pub fn to_long_path_opt(p: &str) -> Option<String> {
             while buf.last() == Some(&0) {
                 buf.pop();
             }
-            return Some(String::from_utf16_lossy(&buf));
+            return decode_wide_exact(&buf);
         }
         buf.resize(n as usize, 0); // 缓冲不足，按返回长度重试
     }
@@ -366,6 +438,51 @@ mod tests {
         assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
         assert_eq!(json_escape("x\ny\rz\tw"), "x\\ny\\rz\\tw");
         assert_eq!(json_escape("\u{1}"), "\\u0001");
+    }
+
+    /// N1a-L05：诊断包装后必须是**单行**——路径自带换行不得凭空多出一条留痕。
+    /// 正向点名：命中的是「行数 == 1」与「`\n` 变成字面 `\n` 两字符」，不是「没报错」；
+    /// 同时钉住两档的分工（同一实现、只差 quotes 一档）：留痕不双写反斜杠，
+    /// JSON 通道必须双写 —— 有人把 `diag_text` 改回 `json_escape(s)` 就会在这里判红。
+    #[test]
+    fn diag_text_把外部原文压成单行() {
+        let forged = "C:\\a\\b\n[cleanup-scan] 致命: 我伪造了一行";
+        let one = diag_text(forged);
+        assert_eq!(one.lines().count(), 1, "留痕被路径里的换行拆成多行：{one}");
+        assert!(one.contains("\\n"), "换行必须转义成字面 \\\\n：{one}");
+        assert!(!one.contains('\n'), "包装结果不得再含裸换行");
+        assert!(
+            one.contains(r"C:\a\b"),
+            "留痕档位不该把反斜杠双写成 \\\\（只中性化控制字符）：{one}"
+        );
+        // 对照：JSON 档位必须双写（行协议的逐字节口径不许被诊断档位带跑）
+        assert_eq!(json_escape(r"C:\a"), r"C:\\a", "JSON 档位必须转义反斜杠");
+        // NUL 也必须压掉（Windows 文件名不含 NUL，但规则串/求值原文来自解析错误，
+        // 一旦带控制字符同样破坏行边界）
+        assert_eq!(diag_text("a\u{0}b").lines().count(), 1);
+        assert!(diag_text("a\u{0}b").contains("\\u0000"));
+    }
+
+    /// N1b-M07：定长 UTF-16 的解码判据是「能不能无损解」，不是「先解了再说」。
+    #[test]
+    fn decode_wide_exact_拒绝非良构而不是替换成_fffd() {
+        // 配对代理项（emoji）是合法 UTF-16 ⇒ 正常解出（🎯 = D83C DFAF，U+1F3AF 超出 u16）
+        let ok = decode_wide_exact(&[0xD83C, 0xDFAF]);
+        assert_eq!(ok.as_deref(), Some("🎯"), "配对代理项必须无损解出");
+        // 前导代理项没有后继 ⇒ 非良构 ⇒ None（旧实现给的是 "a\u{FFFD}b"）
+        let lone = decode_wide_exact(&[0x61, 0xD800, 0x62]);
+        assert!(lone.is_none(), "孤立代理项必须判「读不到」，不得给出 lossy 串：{lone:?}");
+        // 尾代理项没有前导，同样判读不到
+        assert!(decode_wide_exact(&[0x61, 0xDCAF]).is_none());
+    }
+
+    /// N1b-M07：U+FFFD 是合法文件名字符，所以「文本里出现 U+FFFD」只能判「不可信」，
+    /// 不能判「一定被 lossy 过」——正反向各点名一次，避免把判据放宽成「含怪字符就放行」。
+    #[test]
+    fn has_lossy_marker_只对_fffd_为真() {
+        assert!(has_lossy_marker("C:\\a\u{FFFD}b"));
+        assert!(!has_lossy_marker("C:\\a\\b"), "普通路径不得被误判");
+        assert!(!has_lossy_marker("C:\\报告 🎯.txt"), "合法 Unicode 名字不得被误判");
     }
 }
 

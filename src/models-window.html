@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="theme-color" content="#f3f3f3" />
+  <meta name="theme-color" content="#F6F4FB" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file: asset: http://asset.localhost; font-src 'self' file: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
   <title>大模型管理</title>
   <link rel="icon" href="./assets/ico/Trim.ico" />
@@ -44,9 +44,10 @@
   </div>
 
   <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——窗口材质件与业务件在加载期就会读
-       window.api，必须先生效；Electron 下自动 no-op（由 preload.js 接管） -->
+       window.api，必须先生效；桥未就绪时自动 no-op -->
   <script src="scripts/tauri-api.js"></script>
-  <!-- 子窗口材质/主题同步：electron-mica + data-material + 主题类（预览窗不加载） -->
+  <!-- 子窗口材质/主题同步：electron-mica + data-material + 主题类（窗口清单以
+       engine::guard::APP_WINDOWS 的子窗集合为准，不在此点名例外，F3-M02） -->
   <script src="scripts/window-material.js"></script>
   <!-- 审查 M17：本窗的删除确认与 data-tip 都走 window.ds；liquid-glass 的
        reducedMotion 求值也走 window.ds（U-A3），必须排在它之前。 -->

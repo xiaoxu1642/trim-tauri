@@ -294,7 +294,11 @@
     }
     function logOut(level, msg) {
       if (window.app?.log) window.app.log(level, msg);
-      else { try { window.api?.log?.write?.(level, msg); } catch (e) { /* 日志通道不可用则静默 */ } }
+      else {
+        // F3-L02：log_write 的 reject 不进同步 catch，须显式吞掉（副窗日志通道不可用
+        // 属环境降级，不该把「记一条日志失败」再变成一条全局未捕获拒绝）
+        try { window.api?.log?.write?.(level, msg)?.catch?.(function () {}); } catch (e) { /* 日志通道不可用则静默 */ }
+      }
     }
     function openModelsWindow() {
       if (!window.api?.modelsWindow?.open) {

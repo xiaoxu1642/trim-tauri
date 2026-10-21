@@ -349,6 +349,10 @@ const DEAD_TOKEN_ALLOW = new Map([
   // 语义色/交互态：保留档
   ['--accent-glow', 'accent 发光态（当前未接入，保留交互态档）'],
   ['--accent-press', 'accent 按下态（当前未接入，保留交互态档）'],
+  // 受保护色一族：U-F1b 删掉 ds.css 的 .badge.system/.protected 死规则后整族零消费。
+  // 整族删除属 U-F1a-L01（死 token 24 个）射程，且要同步 TRIPLET_BASES 与浅底预期值表，
+  // 故本批先登记、不在收红阶段顺手删（AGENTS §4.1：登记必须写清由谁收口）。
+  ['--protected', '受保护色主档（U-F1b 删死 badge 规则后整族零消费；待 U-F1a-L01 连同 -soft/-rgb 一并删）'],
   ['--protected-rgb', '受保护色 RGB 档（当前 UI 未使用；与 --protected 同值）'],
   ['--protected-soft', '受保护色浅染档（当前 UI 未使用；与 --protected 同值）'],
   // 尺寸/阴影：兼容或预留档

@@ -21,6 +21,13 @@
 //! 备份是**用户可选**的（默认关，2026-09-29 裁定）：整目录几百 MB 时静默打包既慢又占盘，
 //! 而 HiBit 那份 104 MB 的备份 zip 长留 AppData 正是反面样本。所以这里同时有体积上限与
 //! 批次保留数，且超限是「拒绝备份 ⇒ 该目标不删」，不是「备份一半继续删」。
+//!
+//! 两条上限与两道清理是**还原侧也要走一遍**的（v7.2 P1-W2 · R6b-M04/M05）：
+//! - manifest 是磁盘上一份可被改写的东西，所以还原按「条目声明字节数」逐块早退，
+//!   并沿用同一条 `MAX_BATCH_BYTES` 做整批累计闸 —— 不看上限就会先把盘写满再报「字节数不符」。
+//! - `Pack` 实现了 `Drop`：`begin` 之后、`finish` 之前返回 Err 的调用点很多，不清理就会
+//!   留下「`list()` 看不见（缺 manifest）、`total_bytes()` 却按 payload.zip 计数」的半成品目录；
+//!   但包里**已经有内容**时刻意不删——那可能是已删目标的唯一副本，删它等于删用户的还原依据。
 
 use std::io::{Read, Write};
 use std::os::windows::fs::MetadataExt;
@@ -31,7 +38,7 @@ use sha2::{Digest as _, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::engine::{log, paths, protect};
+use crate::engine::{hash, log, paths, protect};
 
 /// 还原包目录名（备份类目录，写入恒走 `paths::backup_write_dir`，读取带老根兜底）
 const SUB: &str = "uninstall-restore-pack";
@@ -62,14 +69,39 @@ pub struct Entry {
 
 /// zip 条目名：原路径（大写归一 + 反斜杠统一）的 sha256 前 16 位。
 /// 同一目录在不同机器/不同大小写下必须得到同一个键，否则 list 与 restore 对不上。
+///
+/// R6b-L01（v7.2 P1-W2）：摘要与 hex 编码**不再自持一份**（此前本文件有私有
+/// `hex_digest` + 3 处 `Sha256` 用法，与 `engine::hash` 同判据两套实现，AGENTS §5.16）。
+/// 全量摘要走 `hash::sha256_bytes`/`hash::sha256_file`；只有「边读源边写 zip 边算哈希」
+/// 的单趟循环保留增量 `Sha256`，但其收尾编码同样走 `hash::to_hex`。
 pub fn zip_key_of(path: &str) -> String {
     let norm = path.replace('/', "\\").to_uppercase();
-    let hex = hex_digest(&Sha256::digest(norm.as_bytes()));
+    let hex = hash::sha256_bytes(norm.as_bytes());
     hex[..16].to_string()
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// 批次号形态判据的**唯一实现**（R6b-L10）：`begin` 与 `restore` 同一条闸门。
+///
+/// 此前只有 `restore` 校验（5 项形态判据），`begin` 拿到什么串就 `create_dir_all` +
+/// `File::create` 什么目录 —— 现算唯一调用点传的是内部 `new_batch_id()`，今天不可达，
+/// 但那是纵深缺口：一旦有调用方把渲染层给的串直接传进来，`begin` 就是「按任意名字建目录
+/// 并写 payload.zip」的入口。两侧共用本函数，判据不会各写各的再漂移。
+///
+/// 长度闸按**字符数**（`paths::exceeds_char_len` 是唯一口径，不用 UTF-8 字节数）。
+fn batch_id_reject_reason(id: &str) -> Option<&'static str> {
+    if id.is_empty() {
+        return Some("批次号为空");
+    }
+    if paths::exceeds_char_len(id, 120) {
+        return Some("批次号超过 120 字符");
+    }
+    if id.contains("..") {
+        return Some("批次号含 ..");
+    }
+    if id.contains('/') || id.contains('\\') {
+        return Some("批次号含路径分隔符");
+    }
+    None
 }
 
 fn write_root() -> PathBuf {
@@ -80,25 +112,59 @@ fn write_root() -> PathBuf {
 pub struct Pack {
     dir: PathBuf,
     batch_id: String,
-    zip: ZipWriter<std::fs::File>,
+    /// `Option` 是为了给 `impl Drop`（R6b-M04）让路：`ZipWriter` 需要被 `take()` 出来
+    /// 收尾，而实现了 `Drop` 的类型不允许把字段移出去。
+    zip: Option<ZipWriter<std::fs::File>>,
     entries: Vec<Entry>,
     total: u64,
     reg_copied: usize,
+    /// `finish` 成功落 manifest 后置位；未置位的 Pack 被丢弃 ⇒ 半成品目录要清掉
+    finished: bool,
+}
+
+impl Drop for Pack {
+    /// 异常路径（`begin` 之后、`finish` 之前返回 Err）不把半成品包目录留成不可见孤儿：
+    /// `list()` 因缺 manifest 会 `continue` 掉（用户看不见），`total_bytes()` 却按
+    /// `payload.zip` 计数（占用看得见、来源看不见），`prune()` 要等攒够
+    /// `KEEP_BATCHES` 才清（可长留 20 个）。
+    ///
+    /// **只在包里还没有任何内容时删**：调用方是「先入包、后删除」的顺序，一旦
+    /// `entries` 或 `.reg` 副本已经写进去，这个目录就可能是已删内容的唯一副本，
+    /// 那时删它等于删用户的还原依据（AGENTS §2/§3 红线），宁可留残由 `prune` 兜。
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if !self.entries.is_empty() || self.reg_copied > 0 {
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 impl Pack {
     pub fn begin(batch_id: &str) -> Result<Pack, String> {
+        if let Some(reason) = batch_id_reject_reason(batch_id) {
+            return Err(format!("批次号格式不合法（{reason}），未建包"));
+        }
         let dir = write_root().join(batch_id);
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建还原包目录失败: {e}"))?;
-        let file = std::fs::File::create(dir.join(ZIP_NAME))
-            .map_err(|e| format!("创建 payload.zip 失败: {e}"))?;
+        let file = match std::fs::File::create(dir.join(ZIP_NAME)) {
+            Ok(f) => f,
+            Err(e) => {
+                // 目录已建、文件没建起来 ⇒ 不留空目录（它同样不会被 list 看见）
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(format!("创建 payload.zip 失败: {e}"));
+            }
+        };
         Ok(Pack {
             dir,
             batch_id: batch_id.to_string(),
-            zip: ZipWriter::new(file),
+            zip: Some(ZipWriter::new(file)),
             entries: Vec::new(),
             total: 0,
             reg_copied: 0,
+            finished: false,
         })
     }
 
@@ -113,6 +179,8 @@ impl Pack {
         let key = zip_key_of(orig_path);
         let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         self.zip
+            .as_mut()
+            .ok_or_else(|| "还原包已收尾，拒绝继续写入".to_string())?
             .start_file(&key, opts)
             .map_err(|e| format!("写入 zip 条目失败: {e}"))?;
         let mut hasher = Sha256::new();
@@ -131,6 +199,8 @@ impl Pack {
             }
             hasher.update(&buf[..n]);
             self.zip
+                .as_mut()
+                .ok_or_else(|| "还原包已收尾，拒绝继续写入".to_string())?
                 .write_all(&buf[..n])
                 .map_err(|e| format!("写入 zip 内容失败: {e}"))?;
         }
@@ -139,7 +209,7 @@ impl Pack {
             zip_key: key,
             kind: "file".into(),
             size: written,
-            sha256: hex_digest(&hasher.finalize()),
+            sha256: hash::to_hex(&hasher.finalize()),
             orig_path: orig_path.to_string(),
         })
     }
@@ -217,24 +287,33 @@ impl Pack {
 
     /// 收尾：落 manifest.tsv 并把目录裁到最近 KEEP_BATCHES 批。
     /// manifest 是还原的唯一依据，写失败必须让调用方知道（内容已在 zip 里，但没了映射）。
-    pub fn finish(self) -> Result<Value, String> {
-        let Pack { dir, batch_id, zip, entries, total, reg_copied } = self;
+    ///
+    /// 参数是 `mut self` 而不是解构 `self`：`Pack` 实现了 `Drop`（R6b-M04），解构字段
+    /// 会被编译器拒绝；`zip` 用 `take()` 取走收尾，其余字段全程只借不移。
+    /// 只有 manifest **已经落盘**才把 `finished` 置位 —— 在那之前任何一步失败，
+    /// `Drop` 都会把这个还没内容的半成品目录清掉（有内容时 `Drop` 刻意不删，见其注释）。
+    pub fn finish(mut self) -> Result<Value, String> {
+        let zip = self
+            .zip
+            .take()
+            .ok_or_else(|| "还原包已收尾，不能重复 finish".to_string())?;
         zip.finish().map_err(|e| format!("收尾 payload.zip 失败: {e}"))?;
-        let body = render_manifest(&entries);
+        let body = render_manifest(&self.entries);
         // 审查 L-6/L-7b：manifest 是还原的唯一依据。原为手写 tmp+rename（无 fsync，
         // 断电可留半截），收敛到 security::atomic_write_file 单一出口（temp→fsync→rename，
         // 失败自动清临时件），与 reg_backup / cleanup 备份清单同口径。
-        crate::security::atomic_write_file(&dir.join(MANIFEST_NAME), body.as_bytes())
+        crate::security::atomic_write_file(&self.dir.join(MANIFEST_NAME), body.as_bytes())
             .map_err(|e| format!("写 manifest 失败: {e}"))?;
+        self.finished = true;
         prune(&write_root());
         Ok(json!({
-            "id": batch_id,
-            "dir": dir.to_string_lossy(),
+            "id": self.batch_id,
+            "dir": self.dir.to_string_lossy(),
             // 字段名与 `list()` 保持一致（files/dirs），否则界面上同一个概念会有两个键
-            "files": entries.iter().filter(|e| e.kind == "file").count(),
-            "dirs": entries.iter().filter(|e| e.kind == "dir").count(),
-            "bytes": total,
-            "regCopies": reg_copied,
+            "files": self.entries.iter().filter(|e| e.kind == "file").count(),
+            "dirs": self.entries.iter().filter(|e| e.kind == "dir").count(),
+            "bytes": self.total,
+            "regCopies": self.reg_copied,
         }))
     }
 }
@@ -253,6 +332,12 @@ fn render_manifest(entries: &[Entry]) -> String {
 }
 
 /// 解析 manifest。表头版本不认识 ⇒ 整包拒绝（宁可不还原，也不按猜的字段还原）。
+///
+/// R6b-M06：`kind` 必须是 `file`/`dir` 之一，字节数不得超过写侧的 `MAX_FILE_BYTES`，
+/// 违者**整包拒绝**，与「字节数非法」同一判据。此前非 `file`/`dir` 的第三条值（半截写、
+/// 手改、位翻）既不还原也不计失败：还原只按 `["dir","file"]` 两趟取值，那种条目会
+/// 凭空消失，渲染层据此照样弹「已还原 N 项」——正是模块头「还原时哈希不符一律报错并停下，
+/// 不静默跳过」这条自述禁止的事。
 pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
     let mut lines = text.lines();
     match lines.next() {
@@ -269,9 +354,20 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
         if parts.len() != 5 {
             return Err(format!("manifest 第 {} 行字段数异常", i + 2));
         }
+        if parts[1] != "file" && parts[1] != "dir" {
+            return Err(format!("manifest 第 {} 行类型不是 file/dir: {}", i + 2, parts[1]));
+        }
         let size = parts[2]
             .parse::<u64>()
             .map_err(|_| format!("manifest 第 {} 行字节数非法", i + 2))?;
+        // 声明字节数与写侧上限对齐：写侧就不可能产出超过 MAX_FILE_BYTES 的条目，
+        // 盘上出现更大的串只能是被改写过（R6b-M05 的第一道闸，restore 循环前就拦）
+        if size > MAX_FILE_BYTES {
+            return Err(format!(
+                "manifest 第 {} 行声明字节数 {size} 超过单文件上限 {MAX_FILE_BYTES}",
+                i + 2
+            ));
+        }
         out.push(Entry {
             zip_key: parts[0].to_string(),
             kind: parts[1].to_string(),
@@ -386,16 +482,19 @@ pub fn list(limit: usize) -> Vec<Value> {
 }
 
 /// 还原一个批次。逐条自检：zip 里有没有、哈希对不对、路径准不准、目标是否已存在。
-/// 任何一条不成立都记成失败原因，不静默跳过；返回体带 ok/failed/conflict/skipped 四档。
+/// 任何一条不成立都记成失败原因，不静默跳过。
+///
+/// 返回体三档：`restored` / `conflicts` / `failed`（逐项对象带 path+reason）。
+/// 这里刻意**没有** skipped 档，也从未有过：此前本函数的自述写着「返回体带
+/// ok/failed/conflict/skipped 四档」，那是一条与实现不符的承诺（R6b-M06 复核），
+/// 而「有条目被跳过」这件事本身已经由 `parse_manifest` 的 kind 白名单堵死——
+/// 形态不对的 manifest 整包拒绝，不会挑一条丢掉。
+/// `conflicts`（目标已存在）同时也计入 `failed`：渲染层只读 `failed.length` 与 `restored`，
+/// 冲突必须是用户看得见的东西，不能只藏在一个没有消费者的计数里。
 pub fn restore(batch_id: &str) -> Result<Value, String> {
-    // batch_id 来自渲染层，先当「不可信文件名」处理：只允许既有生成器产出的形状
-    if batch_id.is_empty()
-        || batch_id.len() > 120
-        || batch_id.contains("..")
-        || batch_id.contains('/')
-        || batch_id.contains('\\')
-    {
-        return Err("批次号格式不合法".to_string());
+    // batch_id 来自渲染层，先当「不可信文件名」处理：判据与 `Pack::begin` 同一条（R6b-L10）
+    if let Some(reason) = batch_id_reject_reason(batch_id) {
+        return Err(format!("批次号格式不合法（{reason}）"));
     }
     let root = paths::backup_read_dirs(SUB)
         .into_iter()
@@ -413,6 +512,8 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
     let mut ok = 0usize;
     let mut conflicts = 0usize;
     let mut failed: Vec<Value> = Vec::new();
+    // 已解出的字节数（整批累计，用于 R6b-M05 的 `MAX_BATCH_BYTES` 早退闸）
+    let mut restored_bytes: u64 = 0;
     // 先目录后文件：文件写进还没建的目录里必然失败，顺序错了会把整批判成失败
     for pass in ["dir", "file"] {
         for e in entries.iter().filter(|e| e.kind == pass) {
@@ -467,11 +568,22 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
             };
             let mut io_err = None;
             let mut n_total = 0u64;
+            // R6b-M05：解包写盘必须有上限。模块头把 manifest 建模成「磁盘上一份可被改写的
+            // 东西」，同一威胁模型下条目声明的 `size` 与 zip 实际
+            // 解出来的字节不符时，写侧的两道上限（`MAX_FILE_BYTES`/`MAX_BATCH_BYTES`）
+            // 在还原侧此前一道都没有 ⇒ 先把盘写满，再在循环**结束后**才报「字节数不符」。
+            // 现在按「声明字节数」逐块早退（声明值本身又被 parse_manifest 卡在
+            // `MAX_FILE_BYTES` 内），并给整批加与写侧同一条 `MAX_BATCH_BYTES` 累计闸。
+            let entry_cap = e.size.min(MAX_FILE_BYTES);
             loop {
                 match rf.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
                         n_total += n as u64;
+                        if n_total > entry_cap || restored_bytes + n_total > MAX_BATCH_BYTES {
+                            io_err = Some("解包字节数超过上限，已中止".to_string());
+                            break;
+                        }
                         hasher.update(&buf[..n]);
                         if let Err(err) = wr.write_all(&buf[..n]) {
                             io_err = Some(format!("写入失败: {err}"));
@@ -486,7 +598,8 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
             }
             drop(wr);
             drop(rf);
-            let got = hex_digest(&hasher.finalize());
+            restored_bytes += n_total;
+            let got = hash::to_hex(&hasher.finalize());
             let reason = io_err.or_else(|| {
                 if got != e.sha256 {
                     Some(format!("哈希不符（备份后内容被人改过）: 期望 {} 实得 {}", e.sha256, got))
@@ -523,18 +636,11 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
     }))
 }
 
+/// 文件摘要：**转接** `engine::hash::sha256_file`（R6b-L01，AGENTS §5.16）。
+/// 保留这个本地名字只是因为还原侧要的是「读不到 = 当作不匹配」的 Option 口径，
+/// 而不是又抄一份「读文件 + 增量哈希 + 转 hex」——那份实现已经在 `hash` 里。
 fn file_sha256(path: &Path) -> Option<String> {
-    let mut f = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        let n = f.read(&mut buf).ok()?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Some(hex_digest(&hasher.finalize()))
+    hash::sha256_file(path).ok()
 }
 
 /// 只保留最近 KEEP_BATCHES 个批次目录（batch_id 字典序即时序，与 delete_manifest 同口径）。
@@ -608,6 +714,10 @@ mod tests {
 
     /// manifest 是还原的唯一依据：表头不认识、字段数不对、字节数非法都必须整包拒绝，
     /// 不能「跳过坏行继续还原」——跳过坏行等于用户以为全恢复了，实际少了一批文件。
+    ///
+    /// R6b-M06 追加两档：`kind` 不是 `file`/`dir`、声明字节数超过 `MAX_FILE_BYTES`
+    /// 同样必须整包拒绝。前者是「既不还原也不计失败」的静默消失面（还原只按
+    /// `["dir","file"]` 两趟取值），后者是 R6b-M05 的第一道闸。
     #[test]
     fn manifest_rejects_malformed_lines() {
         assert!(parse_manifest("").is_err(), "空文本必须拒");
@@ -621,6 +731,34 @@ mod tests {
             parse_manifest("trim-restore-pack\t1\nk\tfile\t非数字\tab\tC:\\a").is_err(),
             "字节数非法必须拒"
         );
+        // kind 白名单（R6b-M06）：第三条值必须点名拒掉，理由是错误串里要能看见是哪一行、哪个值
+        for bad_kind in ["reg", "File", "link", "", "-"] {
+            let e = parse_manifest(&format!(
+                "trim-restore-pack\t1\nk\t{bad_kind}\t12\tab\tC:\\a"
+            ))
+            .expect_err("非 file/dir 的类型必须整包拒绝");
+            assert!(
+                e.contains("类型不是 file/dir") && e.contains("第 2 行"),
+                "kind 拒绝必须点名行号与非法值，实得: {e}"
+            );
+        }
+        // 声明字节数超过写侧单文件上限 ⇒ 盘上出现这种串只能是被改写过（R6b-M05 第一道闸）
+        let tampered = format!(
+            "trim-restore-pack\t1\nk\tfile\t{}\tab\tC:\\a",
+            MAX_FILE_BYTES + 1
+        );
+        assert!(
+            parse_manifest(&tampered)
+                .err()
+                .is_some_and(|e| e.contains("超过单文件上限")),
+            "声明字节数超过 MAX_FILE_BYTES 必须整包拒绝"
+        );
+        // 边界：恰好等于上限不算篡改（写侧允许的最大条目）
+        assert!(parse_manifest(&format!(
+            "trim-restore-pack\t1\nk\tfile\t{}\tab\tC:\\a",
+            MAX_FILE_BYTES
+        ))
+        .is_ok());
         // 路径里出现制表符不能被切成两个字段：输入与期望都用同一个串，别拿转义口径互相冒充
         let path_with_tab = format!("C:\\a{}b", '\t');
         let ok = parse_manifest(&format!(
@@ -628,6 +766,134 @@ mod tests {
         ))
         .expect("应可解析");
         assert_eq!(ok[0].orig_path, path_with_tab);
+    }
+
+    /// R6b-L10：批次号判据只有一份，`begin` 与 `restore` 都必须走它。
+    /// 断言对象是**同一批串在两侧得到同一结论**（此前 begin 完全不校验，
+    /// 传进渲染层串就是「按任意名字建目录并写 payload.zip」的入口）。
+    #[test]
+    fn 批次号判据在写入侧与还原侧同一份() {
+        for bad in ["", "..\\..\\x", "a/b", r"a\b", &"x".repeat(200), "..", "a..b"] {
+            let reason = batch_id_reject_reason(bad).expect("判据自身必须给出理由");
+            let b = Pack::begin(bad)
+                .err()
+                .unwrap_or_else(|| panic!("begin 必须拒绝批次号 {bad:?}"));
+            let r = restore(bad)
+                .err()
+                .unwrap_or_else(|| panic!("restore 必须拒绝批次号 {bad:?}"));
+            // 两个入口都必须把**同一个理由**原样交出来：两套实现的典型症状就是理由分叉
+            assert!(
+                b.contains("批次号格式不合法") && b.contains(reason),
+                "begin 对 {bad:?} 的拒绝理由异常: {b}"
+            );
+            assert!(
+                r.contains("批次号格式不合法") && r.contains(reason),
+                "restore 对 {bad:?} 的拒绝理由异常: {r}"
+            );
+        }
+        // 生成器形态（new_batch_id 的 ISO 去 :/.）必须放行，否则 begin 与 restore 双双打死合法批次
+        let shaped = crate::engine::delete_manifest::new_batch_id();
+        assert!(
+            batch_id_reject_reason(&shaped).is_none(),
+            "既有生成器的形态不得被新闸打死: {shaped}"
+        );
+        // 中文/多字节批次名：长度闸按**字符数**口径（`paths::exceeds_char_len` 是唯一真源），
+        // 120 个汉字 = 360 字节，按字节口径会被误拒
+        let cjk = "批次".repeat(60);
+        assert_eq!(
+            cjk.len(),
+            360,
+            "样本自身的前提：字符数与字节数必须不同，否则这条断言没在测东西"
+        );
+        assert!(
+            batch_id_reject_reason(&cjk).is_none(),
+            "120 字符的中文批次名要按字符数放行（实得 {} 字符 / {} 字节）",
+            cjk.chars().count(),
+            cjk.len()
+        );
+        assert!(
+            batch_id_reject_reason(&"批".repeat(121)).is_some(),
+            "超过 120 字符必须拒"
+        );
+    }
+
+    /// R6b-M04：`begin` 之后没有 `finish` 就被丢弃（调用方在 begin 与 finish 之间
+    /// `return Err`）⇒ 目录必须被清掉，不能留成「list() 看不见、total_bytes() 却计数」的孤儿。
+    /// 判红自证：删掉 `impl Drop for Pack` 里的 remove_dir_all ⇒ 第二条断言立刻红。
+    #[test]
+    fn 未收尾的还原包不留目录() {
+        let batch = format!("drop-empty-{}", crate::engine::now_ms());
+        let dir = paths::backup_write_dir(SUB).join(&batch);
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let pack = Pack::begin(&batch).expect("begin 应建包");
+            assert!(dir.is_dir(), "前置条件：begin 必须已经把目录建出来");
+            drop(pack);
+        }
+        assert!(
+            !dir.exists(),
+            "未 finish 且没有任何内容的半成品包必须被 Drop 清掉，实得目录仍在: {}",
+            dir.display()
+        );
+    }
+
+    /// R6b-M04 的反向半条：**已经有内容**的包绝不能被 Drop 顺手删掉。
+    /// 调用顺序是「先入包、后删除」，包一旦有条目就可能是已删内容的唯一副本，
+    /// 删它等于删用户的还原依据（AGENTS §2/§3）。判红自证：把 Drop 里的
+    /// `entries.is_empty()` 前置条件去掉 ⇒ 本用例红。
+    #[test]
+    fn 已入包内容的还原包不被丢弃路径删掉() {
+        let stamp = crate::engine::now_ms();
+        let batch = format!("drop-kept-{stamp}");
+        let dir = paths::backup_write_dir(SUB).join(&batch);
+        let probe = paths::lib_test_data_root().join(format!("probe-{stamp}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&probe).expect("建探针目录");
+        std::fs::write(probe.join("only.txt"), "唯一副本".as_bytes()).expect("写探针文件");
+        {
+            let mut pack = Pack::begin(&batch).expect("begin 应建包");
+            let n = pack.add_target(&probe).expect("探针目录入包");
+            assert!(n >= 2, "目录本体 + 1 个文件至少 2 条，实得 {n}");
+            drop(pack); // 不调 finish
+        }
+        let kept = dir.is_dir();
+        let manifest_absent = !dir.join(MANIFEST_NAME).exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&probe);
+        assert!(
+            kept && manifest_absent,
+            "入过内容的包必须留在原处等 prune（Drop 不得删还原依据）；kept={kept} manifest_absent={manifest_absent}"
+        );
+    }
+
+    /// R6b-L01：本模块的摘要判据必须**转接** `engine::hash`，不许留第二份实现。
+    /// 断言写法是「与真源逐字节相等」，不是「看起来对」：一旦有人把私有 hex 编码抄回来，
+    /// 这条会在某侧口径变化（大小写/补零）时红。
+    #[test]
+    fn 摘要判据转接_hash_真源() {
+        for p in [r"C:\App\a.txt", r"c:\app\A.TXT", r"C:/中文目录/文件.bin"] {
+            let norm = p.replace('/', "\\").to_uppercase();
+            assert_eq!(
+                zip_key_of(p),
+                crate::engine::hash::sha256_bytes(norm.as_bytes())[..16],
+                "zip_key_of 必须等于 hash 真源的前 16 位（{p}）"
+            );
+        }
+        // file_sha256 只是 Option 口径的转接，不是另一份读+哈希实现
+        let probe = paths::lib_test_data_root().join("digest-delegate.txt");
+        std::fs::write(&probe, b"abc").expect("写样本");
+        let local = file_sha256(&probe);
+        let truth = crate::engine::hash::sha256_file(&probe).ok();
+        let _ = std::fs::remove_dir_all(&probe);
+        assert_eq!(
+            local, truth,
+            "file_sha256 必须与 hash::sha256_file 给同一个串（两侧各写一份迟早漂）"
+        );
+        assert_eq!(
+            local.as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+            "已知向量必须命中，否则转接的是错的那一份"
+        );
     }
 
     /// 条目键必须**只由路径决定**：大小写、分隔符写法不影响它，否则 list 与 restore 对不上；
@@ -700,15 +966,19 @@ mod tests {
     /// 并且**故意破坏 zip 条目**后还原必须点名失败，而不是静默少还一个文件。
     ///
     /// 判据写法照 AGENTS §4.1 纪律：断言「还原后逐字节相等」而不是「命令返回成功」——
-    /// 后者对「什么都没还原」也成立。探针目录在应用私有 tmp 下，Drop 守卫整目录删除。
+    /// 后者对「什么都没还原」也成立。
+    ///
+    /// R6b-L09（措辞↔代码对齐）：探针目录**确实**在应用私有根下——C08 之后 `cfg(test)`
+    /// 的 `paths::app_data_dir()` 就是 lib 单测隔离数据根，本用例取它的子目录，
+    /// 不再用全局 `%TEMP%`（AGENTS §3 私有 tmp 口径）。Drop 守卫连探针目录带还原包
+    /// 整批删除，断言 panic 也收。刻意**不用**老根 `%APPDATA%\Trim` 与 `%WINDIR%`：
+    /// 那两棵在 protect 的 subtree 面里，还原准入会逐条拒掉，用例红在设计而不是红在实现。
     #[test]
-    #[ignore = "真写盘（应用私有 tmp 下的探针目录），发布前门禁跑"]
+    #[ignore = "真写盘（lib 单测隔离数据根下的探针目录），发布前门禁跑"]
     fn pack_then_restore_restores_bytes_end_to_end() {
         let stamp = crate::engine::now_ms();
         let batch = format!("test-{stamp}");
-        // 探针目录**不能**放在应用数据目录下：那条根在 is_path_protected 的 subtree 里，
-        // 还原准入会逐条拒掉，用例红在设计而不是红在实现
-        let root = std::env::temp_dir().join(format!("trim-rp-{stamp}"));
+        let root = paths::lib_test_data_root().join(format!("probe-{stamp}"));
         struct Guard {
             probe: PathBuf,
             pack: PathBuf,
@@ -776,6 +1046,88 @@ mod tests {
         assert!(
             broken["restored"].as_u64().unwrap_or(0) >= 1,
             "坏条目之外的项仍应还原，实得 {broken}"
+        );
+    }
+
+    /// R6b-M05 真机探针（真写盘 / 真打包）：manifest 声明 KB 级、zip 里实际是 MB 级时，
+    /// 还原必须在**写盘阶段早退**，目标目录里不得出现按实际字节数写满的文件。
+    ///
+    /// 修前实现只在循环**结束后**比 `n_total != e.size` —— 同一威胁模型下（模块头把
+    /// manifest 建模成「磁盘上一份可被改写的东西」）`payload.zip` 一样可改，于是
+    /// 「先把盘写满，再报字节数不符，再删 tmp」。zip crate 不自带解压上限，闸只能设在这里。
+    ///
+    /// 判红自证：删掉循环里 `n_total > entry_cap` 那一条早退 ⇒ 最后一条断言红
+    /// （tmp 被写成 1MB 才失败），或失败原因变成「哈希不符/字节数不符」而不是「超过上限」。
+    ///
+    /// 只跑档位：`cargo test --lib -- --ignored`（发布前门禁）。整批累计那条
+    /// （`MAX_BATCH_BYTES`）需要 2GB 级样本，本探针不覆盖，如实记未验证。
+    #[test]
+    #[ignore = "真写盘 + 真打包（lib 单测隔离数据根下），发布前门禁跑"]
+    fn 解包字节上限在写盘前早退() {
+        let stamp = crate::engine::now_ms();
+        let batch = format!("cap-{stamp}");
+        let probe_root = paths::lib_test_data_root().join(format!("probe-cap-{stamp}"));
+        let pack_dir = paths::backup_write_dir(SUB).join(&batch);
+        struct G {
+            a: PathBuf,
+            b: PathBuf,
+        }
+        impl Drop for G {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.a);
+                let _ = std::fs::remove_dir_all(&self.b);
+            }
+        }
+        let _g = G { a: probe_root.clone(), b: pack_dir.clone() };
+
+        std::fs::create_dir_all(&probe_root).expect("建探针目录");
+        std::fs::write(probe_root.join("big.bin"), vec![0xA5u8; 1024 * 1024]).expect("写 1MB 样本");
+        let mut pack = Pack::begin(&batch).expect("建包");
+        pack.add_target(&probe_root).expect("探针目录入包");
+        pack.finish().expect("收尾");
+        std::fs::remove_dir_all(&probe_root).expect("删探针目录（制造只能靠还原找回的现场）");
+
+        // 把第一条 file 条目的**声明字节数**改成 1024（zip 里实际 1MB），模拟被改写的 manifest
+        let mpath = pack_dir.join(MANIFEST_NAME);
+        let text = std::fs::read_to_string(&mpath).expect("manifest 应在");
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        let mut rewritten: Vec<String> = vec![lines[0].clone()];
+        let mut tampered = false;
+        for l in &lines[1..] {
+            let p: Vec<&str> = l.splitn(5, '\t').collect();
+            if !tampered && p.len() == 5 && p[1] == "file" {
+                rewritten.push(format!("{}\t{}\t1024\t{}\t{}", p[0], p[1], p[3], p[4]));
+                tampered = true;
+            } else {
+                rewritten.push(l.clone());
+            }
+        }
+        assert!(tampered, "manifest 里必须有一条 file 条目可改写");
+        std::fs::write(&mpath, format!("{}\n", rewritten.join("\n"))).expect("改写 manifest");
+
+        let out = restore(&batch).expect("整批不报错，失败要逐项列出来");
+        let fails = out["failed"].as_array().cloned().unwrap_or_default();
+        assert!(
+            fails
+                .iter()
+                .any(|f| f["reason"].as_str().unwrap_or("").contains("解包字节数超过上限")),
+            "声明 1KB / 实际 1MB 的条目必须按声明数早退并点名，实得 {out}"
+        );
+        // 早退的**实物证据**：目标目录里不得出现按实际字节数（1MB）写出来的文件
+        let oversize: Vec<String> = std::fs::read_dir(&probe_root)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        let p = e.path();
+                        let len = std::fs::metadata(&p).ok()?.len();
+                        (len > 1024).then(|| format!("{}={}", p.display(), len))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            oversize.is_empty(),
+            "早退必须发生在写盘**之前**，不得留下超过声明字节的半成品: {oversize:?}"
         );
     }
 }

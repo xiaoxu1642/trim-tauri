@@ -12,6 +12,9 @@
 //      Tab/Shift+Tab 无法离开按钮组，Ctrl+* 也被吞）——其余按键与修饰键交还浏览器；
 //   ⑥ 去掉图片的 title 回退与 `.title=` 赋值：本仓红线「提示用 data-tip 不用 title」，
 //      图片描述走 caption 文本 + img.alt，读屏与视觉提示同源。
+//   ⑦ click() 的位置写入 this.currentIndex（原写 this.current，而计数器/翻页读的是
+//      currentIndex——双变量互不相认：计数器恒显示 0/N、首次翻页原地重显同一张。
+//      合一后「当前第几张」单一来源；navigate 经 click({target}) 回填同一索引）；
 // 本仓消费方式见 cleanup.js 的 openPreview：range 收窄到预览容器，全局 img 点击不劫持。
 
 class Litebox {
@@ -87,7 +90,9 @@ class Litebox {
             const lightboxImg = this.getElem('.lightbox-image');
             const inRange = lightboxImg ? this.range.contains(lightboxImg) : false;
             this.total = allImg.length - (inRange ? 1 : 0);
-            this.current = Array.from(allImg).indexOf(e) + 1;
+            // 本仓受控适配⑦：位置写入 currentIndex（计数器与 navigate 都读它）。
+            // 原样写 this.current 是上游的死变量——本仓无任何读者，留着只会再漂移。
+            this.currentIndex = Array.from(allImg).indexOf(e) + 1;
             if (e.classList.contains('lightbox-image')) return; // 防止灯箱图片被点击
             if (e.preventDefault) e.preventDefault();
             this.set(e.getAttribute("data-src") || e.src, e.getAttribute("data-caption") || e.alt || "");

@@ -1,8 +1,10 @@
 /* main-pages.css —— 主窗口专属页面样式（P0 子窗 CSS 按需）
-   分箱判据：本文件里每一条选择器都不被 preview / models / residue / process-manager
-   四个子窗的 HTML 与其加载脚本引用，所以子窗不再解析它们。
+   分箱判据：本文件里每一条选择器都不被 models / residue / process-manager 三个子窗
+   的 HTML 与其加载脚本引用（preview 子窗已于 2026-10 整链退役），子窗不再解析它们；
+   分箱面以 tools/check-subwindow-css.mjs 的 SUB_HTML 现算为准。
    加载方唯一 —— index.html，且必须排在 main.css 之后、ds.css 之前（层叠顺序与拆分前一致）。
-   漂移防线见 tools/check-subwindow-css.mjs：本文件一旦出现被子窗语料引用的选择器即判红。 */
+   漂移防线：本文件一旦出现被子窗语料引用的选择器即判红。
+   新增 calc 刻意用无空格紧缩写法：本文件随首屏静态加载，为 F1 首屏字节预算省字节。 */
 
 /* 标题栏底部分割线已删除（背景贯通标题栏批次，用户拍板）：壁纸贯通后顶部
    不再有「标题栏 vs 内容区」的材质断层，分割线反而多余；无壁纸态两区同为
@@ -58,19 +60,17 @@
 }
 .lock-app-count {
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-tertiary);
 }
 .lock-critical-note {
   margin-top: 10px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   line-height: 1.6;
   color: var(--warning);
 }
 
-/* ================================================================
-   摘要卡片
-   ================================================================ */
+/* 摘要卡片 */
 .summary-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -120,20 +120,12 @@
   color: var(--fg-primary);
 }
 
-/* ================================================================
-   右键菜单列表
-   ================================================================ */
+/* 右键菜单列表 */
 .contextmenu-list {
   background: var(--bg-card);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
   overflow: hidden;
-}
-
-#speedChart {
-  width: 100%;
-  height: 200px;
-  display: block;
 }
 
 .log-line {
@@ -150,9 +142,7 @@
   word-break: break-word;
 }
 
-/* ================================================================
-   设置页面
-   ================================================================ */
+/* 设置页面 */
 .settings-grid {
   display: grid;
   /* 双列 Grid 兜底：当前所有区块均声明通栏（见下方 1/-1 规则），
@@ -193,7 +183,7 @@
   color: var(--accent);
   border: 1px solid var(--accent);
   border-radius: 999px;
-  font-weight: 400;
+  font-weight: calc(400*var(--font-weight-scale,1));
 }
 .syspanel-pf-mode { margin: 0 0 8px; color: var(--fg-primary); }
 .syspanel-pf-hint {
@@ -213,11 +203,11 @@
   background: var(--bg-hover);
   border-radius: var(--radius-btn);
   color: var(--fg-tertiary);
-  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: calc(11px * var(--font-size-scale, 1));
   word-break: break-all;
 }
-/* ===== v5 P1/P2 电源计划编辑器（独立弹窗承载；2026-10-15 用户裁定） =====
+/* v5 P1/P2 电源计划编辑器（独立弹窗承载；2026-10-15 用户裁定）
    伪类/元素级选择器统一加 #syspanelPowerBody 前缀：把特异度抬进 1-* 档避开
    check-subwindow-css S3（main.css 的 :hover/::after/[type] 全在 0-* 档）；纯类规则不加。 */
 .syspanel-pwr-act-danger { color: var(--danger); }
@@ -319,7 +309,7 @@
   flex: none;
   color: var(--fg-tertiary);
   font-size: calc(11px * var(--font-size-scale, 1));
-  font-weight: 400;
+  font-weight: calc(400*var(--font-weight-scale,1));
 }
 .syspanel-pwr-group-items { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 6px 18px; }
 .syspanel-pwr-item {
@@ -344,7 +334,7 @@
   margin-left: auto;
   flex: none;
   color: var(--fg-tertiary);
-  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: calc(11px * var(--font-size-scale, 1));
 }
 .syspanel-pwr-item.is-locked { opacity: 0.65; }
@@ -396,7 +386,7 @@
 /* 调优参考块（社区经验口径；只在本地化表里带 rec 的设置上出现） */
 .syspanel-pwr-rec { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border-default); }
 .syspanel-pwr-rec-title { color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); font-size: var(--fs-meta); }
-.syspanel-pwr-rec-sub { display: block; margin-top: 2px; color: var(--fg-tertiary); font-weight: 400; font-size: calc(11px * var(--font-size-scale, 1)); }
+.syspanel-pwr-rec-sub { display: block; margin-top: 2px; color: var(--fg-tertiary); font-weight: calc(400*var(--font-weight-scale,1)); font-size: calc(11px*var(--font-size-scale,1)); }
 .syspanel-pwr-rec-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px 16px; margin-top: 8px; }
 .syspanel-pwr-rec-k { display: block; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); }
 .syspanel-pwr-rec-v { display: block; margin-top: 2px; color: var(--accent); font-weight: calc(600 * var(--font-weight-scale, 1)); font-size: var(--fs-meta); }
@@ -413,7 +403,7 @@
   margin-left: auto;
   flex: none;
   color: var(--fg-primary);
-  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: calc(11px * var(--font-size-scale, 1));
 }
 .syspanel-pwr-modal-hint { margin: 0 0 6px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.6; }
@@ -429,9 +419,8 @@
 /* 一行多个操作按钮（如检查更新行） */
 .about-row-actions { display: flex; gap: 8px; flex: none; }
 /* v3.2.0：device-info-table 旧外壳声明与 device-info-row 旧版 grid 行声明已删除
-   （现样式见 4974 行起的卡片化版本：行自持边框圆角、容器只管栅格间距） */
-.device-info-label { color: var(--fg-tertiary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
-.device-info-value { color: var(--fg-primary); line-height: 1.55; word-break: break-word; font-family: "Consolas", "Cascadia Code", monospace; font-size: var(--fs-meta); }
+   （现样式见 main.css 的「.device-info-row」卡片化版本：行自持边框圆角、容器只管栅格间距）。
+   .device-info-label/-value 的规则本体在下方「硬件信息」段各一份（审查 F1c-M03：不写重复 prelude）。 */
 
 /* 磁盘基准测试 */
 .benchmark-layout { display: grid; grid-template-columns: 1.45fr 1fr; gap: 16px; margin-bottom: 16px; }
@@ -462,10 +451,7 @@
   flex: 0 0 auto;
 }
 
-/* ========== 优化电脑：胶囊卡片 + 弹窗 ========== */
-.opt-group {
-  margin-bottom: 22px;
-}
+/* 优化电脑：胶囊卡片 + 弹窗 */
 .opt-group-count {
   margin-left: auto;
   font-size: calc(11.5px * var(--font-size-scale, 1));
@@ -476,11 +462,11 @@
   color: var(--c, var(--accent));
 }
 
-/* ========== 优化中心详情弹窗内容样式（v3.2.0 弹窗统一批次） ==========
-   旧 .opt-modal-* 自建外壳（backdrop/shell/head/close/footer）已删除——
-   弹窗骨架统一由 modal.js 工厂供给（usage-backdrop > usage-modal 三段式，
-   与图2「启动项简介」同源）。本段只保留详情内容样式，类名降级 opt-detail-*；
-   图1 专属视觉保留：42×42 齿轮图标（accent 着色）、绿红双列、footer 内存提示位。 */
+/* 优化中心详情弹窗内容样式（v3.2.0 弹窗统一批次）
+   旧 .opt-modal-* 自建外壳（backdrop/shell/head/close/footer）已删除——弹窗骨架统一由
+   modal.js 工厂供给（usage-backdrop > usage-modal 三段式，与图2「启动项简介」同源）。
+   本段只保留详情内容样式，类名降级 opt-detail-*；图1 专属视觉保留：42×42 齿轮图标
+   （accent 着色）、绿红双列、footer 内存提示位。 */
 .opt-detail-icon {
   flex: 0 0 auto;
   width: 42px;
@@ -498,7 +484,7 @@
 .opt-detail-notice {
   margin: 0 0 10px;
   padding: 8px 12px;
-  font-size: 12.5px;
+  font-size: calc(12.5px*var(--font-size-scale,1));
   line-height: 1.5;
   border-radius: var(--radius-small);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
@@ -612,15 +598,14 @@
   color: var(--fg-tertiary);
 }
 
-/* ---------- 逐项选择区（2026-10-03，批量项可自选目标）----------
-   为什么不复用 .opt-choice-*（虚拟合集卡那套单选）：那套是「**互斥单选**」，
-   这里要的是「**多选**」，语义不同。复用一个 radio 样式的类去做 checkbox 是
-   拿视觉骗语义，键盘与读屏行为都会不对。行样式另起一套，但复用了 .checkbox 件。
-
+/* 逐项选择区（2026-10-03，批量项可自选目标）
+   为什么不复用 .opt-choice-*（虚拟合集卡那套单选）：那套是**互斥单选**，这里要的是
+   **多选**，语义不同——拿 radio 样式的类做 checkbox 是视觉骗语义，键盘与读屏行为都会不对。
+   行样式另起一套，但复用了 .checkbox 件。
    ⚠️ 2026-10-04：勾选区已从「详情弹窗内嵌」搬成**独立弹窗**（optimizer.js 的
-   confirmSubitemPick），类名随之从 `opt-pick-` 前缀改成 `pick-` 前缀。原先内嵌版的
-   bar / all / none / count / list / row / name / note / extras 九条规则随之
-   全部变成死规则（grep 全仓无引用），已在本段替换为独立弹窗真正使用的 `pick-` 系列。
+   confirmSubitemPick），类名前缀随之从 `opt-pick-` 改成 `pick-`；内嵌版的
+   bar / all / none / count / list / row / name / note / extras 九条规则全部变成死规则
+   （grep 全仓无引用），已在本段替换为独立弹窗真正使用的 `pick-` 系列。
    下面只保留三条**详情弹窗入口条仍在用**的规则：section / title / hint。 */
 .opt-pick-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
 .opt-pick-title { display: flex; align-items: center; gap: 6px; }
@@ -633,7 +618,7 @@
   background: var(--accent-soft);
   border-radius: var(--radius-small);
 }
-.pick-summary-num { font-size: var(--fs-body); font-weight: 600; color: var(--fg-primary); }
+.pick-summary-num { font-size: var(--fs-body); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
 .pick-summary-hint { font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.55; }
 .pick-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pick-list {
@@ -651,15 +636,15 @@
   background: var(--bg-card-hover);
 }
 .pick-name {
-  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-meta);
-  font-weight: 600;
+  font-weight: calc(600*var(--font-weight-scale,1));
   color: var(--fg-primary);
   word-break: break-all;
 }
 .pick-note { font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.5; }
 .pick-extras { margin-top: 4px; }
-.pick-extras-title { font-size: var(--fs-meta); font-weight: 600; color: var(--fg-secondary); margin-bottom: 4px; }
+.pick-extras-title { font-size: var(--fs-meta); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-secondary); margin-bottom: 4px; }
 /* 附带操作整体比清单淡一档：它默认不执行，是「额外加码」而非「这项本来就会做的事」 */
 .pick-row-extra .pick-name { font-family: inherit; color: var(--fg-secondary); }
 /* ---------- 执行前「先做选择」窗（虚拟合集卡 / dynamic 项共用）----------
@@ -741,9 +726,7 @@
   color: var(--fg-tertiary);
 }
 
-/* ================================================================
-   磁盘测速 - 历史测试记录弹窗
-   ================================================================ */
+/* 磁盘测速 - 历史测试记录弹窗 */
 .bench-history-modal {
   width: min(920px, 94vw);
   height: auto;
@@ -776,17 +759,15 @@
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: "Consolas", "Cascadia Code", monospace;
-  font-size: calc(11px * var(--font-size-scale, 1));
+  font-family: var(--font-mono);
+  font-size: calc(11px*var(--font-size-scale,1));
 }
 .bench-history-val {
   font-variant-numeric: tabular-nums;
   color: var(--fg-primary);
 }
 
-/* ================================================================
-   优雅关闭 Toast（感谢使用）
-   ================================================================ */
+/* 优雅关闭 Toast（感谢使用） */
 .toast-shutdown {
   width: min(360px, calc(100vw - 48px));
   max-width: 360px;
@@ -796,21 +777,15 @@
    UI 未随 Tauri 迁移，JS/HTML 零引用（全仓 grep 证实）；块内还有一条 E3-1
    同族的 `color: white` 不可达兜底（暗色 2.19:1），一并清除 */
 
-/* ================================================================
-   右键菜单详情弹窗（Fluent Design，适配浅色/深色主题）
-   ================================================================ */
+/* 右键菜单详情弹窗（Fluent Design，适配浅色/深色主题） */
 .ctx-detail-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
   /* 刻意设计：详情弹窗遮罩仅极轻磨砂（4px），重模糊会喧宾夺主——独立观感，不并入玻璃档位 */
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1200;
-  /* v3.5.1 动效审查 L1：原引用 @keyframes toastIn，该关键帧全仓从未定义
-     （唯一命中就是这一行）→ 遮罩入场实为空操作。改用已定义的 fadeIn。 */
-  animation: fadeIn var(--duration-base) var(--ease-standard);
+  /* 背景/z-index/animation 只在下方的同选择器规则里写一份（审查 F1c-M03：重复 prelude 后写压前写，改上面等于假编辑） */
 }
 
 .ctx-detail-grid {
@@ -905,9 +880,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ================================================================
-   系统还原点管理
-   ================================================================ */
+/* 系统还原点管理 */
 .text-success { color: var(--success); }
 .text-danger { color: var(--danger); }
 
@@ -970,9 +943,7 @@
   margin-top: 4px;
 }
 
-/* ================================================================
-   系统概览
-   ================================================================ */
+/* 系统概览 */
 /* v2.0：桌面宽度四卡一行；窗口变窄 2×2，再窄单列（不出现页面级横向滚动） */
 .overview-metrics {
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1008,7 +979,7 @@
   padding: 14px 18px;
 }
 .health-card .health-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; }
-.health-status { color: var(--success); font-size: var(--fs-section); font-weight: 650; }
+.health-status { color: var(--success); font-size: var(--fs-section); font-weight: calc(650*var(--font-weight-scale,1)); }
 /* F3（2026-09-15）：健康度按等级着色，如实反馈状态（不再恒绿） */
 .health-card.health-warn .health-status { color: var(--warning); }
 .health-card.health-bad .health-status { color: var(--danger); }
@@ -1027,6 +998,7 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
+/* 合并自文件前部的两条旧规则（审查 F1c-M03：同文件重复 prelude 后写压前写，杂交值无意图） */
 .device-info-label {
   font-size: var(--fs-meta);
   font-weight: calc(500 * var(--font-weight-scale, 1));
@@ -1034,18 +1006,18 @@
   letter-spacing: 0;
 }
 .device-info-value {
+  font-family: var(--font-mono);
   font-size: var(--fs-secondary);
   color: var(--fg-primary);
   line-height: 1.4;
+  word-break: break-word;
   overflow-wrap: anywhere;
 }@media (max-width: 760px) {
 
   .device-info-table { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* ================================================================
-   启动项管理
-   ================================================================ */
+/* 启动项管理 */
 .startup-filter-ops {
   margin-left: auto;
   display: flex;
@@ -1078,7 +1050,7 @@
   border-radius: var(--radius-small);
 }
 .startup-defend-text { flex: 1; min-width: 0; }
-.startup-defend-title { font-size: var(--fs-secondary); font-weight: 600; color: var(--fg-primary); }
+.startup-defend-title { font-size: var(--fs-secondary); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
 .startup-defend-desc { font-size: var(--fs-meta); color: var(--fg-tertiary); margin-top: 2px; line-height: 1.5; }
 .startup-item-check {
   flex-shrink: 0;
@@ -1119,10 +1091,8 @@
   animation: fadeIn var(--duration-base) var(--ease-standard);
 }
 
-/* ================================================================
-   设置页：功能入口三卡片（安装路径绑定 / 大模型管理 / 字体选择）
-   横向排列的 3 个小白色容器：仅图标 + 标题 + 操作按钮，简介移入各弹窗内
-   ================================================================ */
+/* 设置页：功能入口三卡片（安装路径绑定 / 大模型管理 / 字体选择）
+   横向 3 个小白色容器：仅图标 + 标题 + 操作按钮，简介移入各弹窗内 */
 .settings-entry-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1167,10 +1137,7 @@
   line-height: 1.5;
 }
 
-/* ================================================================
-   字体选择弹窗（设置 → 功能入口 → 字体选择）
-   复用 usage-backdrop > usage-modal 三段式结构
-   ================================================================ */
+/* 字体选择弹窗（设置 → 功能入口 → 字体选择）：复用 usage-backdrop > usage-modal 三段式 */
 .font-modal { max-width: 760px; }
 .fm-body { display: flex; flex-direction: column; gap: 14px; }
 .fm-field-label {
@@ -1216,20 +1183,7 @@
   .fm-field-label { padding-top: 0; }
 }
 
-/* ================================================================
-   模型选择弹窗（各模块独立选择 AI 简介模型）
-   ================================================================ */
-.model-picker-modal { max-width: 680px; }
-.model-picker-body { padding-top: 6px; }
-.model-picker-tip { margin: 0 0 12px; font-size: var(--fs-meta); line-height: 1.7; color: var(--fg-secondary); }
-.model-picker-list { display: flex; flex-direction: column; gap: 8px; }
-.model-picker-copy { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.model-picker-name { font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
-.model-picker-desc { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
-
-/* ================================================================
-   安装路径绑定弹窗（分组卡片 + 输入框，样式沿用路径窗口）
-   ================================================================ */
+/* 安装路径绑定弹窗（分组卡片 + 输入框，样式沿用路径窗口） */
 .path-binding-modal { max-width: 960px; }
 .path-binding-body { max-height: calc(100vh - 220px); overflow-y: auto; }
 .pw-body { padding: 16px 20px 20px; }
@@ -1249,20 +1203,7 @@
 .pw-last-scan { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
 .startup-intro-meta { margin-bottom: 12px; font-size: var(--fs-meta); color: var(--fg-tertiary); }
 
-/* ================================================================
-   弹窗视觉统一层
-   所有弹窗容器统一为「大模型管理 / 使用说明 / 安装路径绑定」同款白色圆角卡片：
-   bg-card 背景 + border-strong 边框 + 16px 圆角 + 深阴影 + 模糊遮罩
-   （通用确认框已迁移到 .usage-backdrop > .usage-modal，不再使用 .modal*）
-   ================================================================ */
-/* 右键菜单详情弹窗（ctx-detail-modal） */
-.ctx-detail-backdrop {
-  background: color-mix(in srgb, var(--bg-app) 60%, rgba(0, 0, 0, 0.4));
-}
-
-/* ================================================================
-   实时网速：记录报告弹窗（与「大模型管理」同款白色圆角卡片）
-   ================================================================ */
+/* 实时网速：记录报告弹窗（与「大模型管理」同款白色圆角卡片） */
 .rt-report-modal { max-width: 840px; }
 .rt-report-body { padding: 16px 20px 18px; overflow-y: auto; max-height: calc(100vh - 220px); }
 /* 审查 v3-M1：报告列表读取失败态（不得与「暂无记录」空态同形 —— 失败必须看得出来） */
@@ -1328,9 +1269,7 @@
   .rt-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* ================================================================
-   系统还原点弹窗（电脑优化中心 → 系统还原点）
-   ================================================================ */
+/* 系统还原点弹窗（电脑优化中心 → 系统还原点） */
 .rt-sr-modal { max-width: 880px; }
 .rt-sr-body { padding: 16px 20px 18px; overflow-y: auto; max-height: calc(100vh - 220px); }
 .rt-sr-cards {
@@ -1343,8 +1282,6 @@
   .rt-sr-cards { grid-template-columns: 1fr; }
 }
 
-#ovMemJump { background: var(--protected); }
-#ovDiskJump { background: var(--success); }
 .mem-panel-actions {
   margin-left: auto;
   display: flex;
@@ -1366,11 +1303,11 @@
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 3px;
-  font-size: 14px;
+  font-size: var(--fs-body);
   color: var(--fg-primary);
 }
 .mem-region-desc {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   line-height: 1.6;
   color: var(--fg-tertiary);
   word-break: break-word;
@@ -1380,16 +1317,13 @@
 
 /* 进程轮询状态按钮 + 弹出菜单（轮询 UI 已移除，进程列表迁至独立「应用进程管理」窗口） */
 
-/* ================================================================
-   看板布局（电脑优化中心 / 右键管理 共用）：Grid 自适应列数
-   repeat(auto-fill, minmax(单卡最小宽度, 1fr))：
-   1 卡占满整行，2/3/4… 列随内容区宽度自动增减；
-   任何状态不出现横向滚动条，单卡不小于最小宽度。
-   重排动画由 xtable.js 暴露的 kanbanFLIP（transform + opacity）实现。
-   ================================================================ */
+/* 看板布局（电脑优化中心 / 右键管理 共用）：Grid 自适应列数
+   repeat(auto-fill, minmax(单卡最小宽度, 1fr))：1 卡占满整行，2/3/4… 列随内容区宽度
+   自动增减；任何状态不出现横向滚动条，单卡不小于最小宽度。
+   重排动画由 xtable.js 暴露的 kanbanFLIP（transform + opacity）实现。 */
 .page-summary {
-  font-size: 12px;
-  font-weight: 400;
+  font-size: var(--fs-meta);
+  font-weight: calc(400*var(--font-weight-scale,1));
   color: var(--fg-tertiary);
   margin-left: 10px;
   white-space: nowrap;
@@ -1414,8 +1348,8 @@
 }
 .opt-col-title,
 .ctx-col-title {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: var(--fs-body);
+  font-weight: calc(700*var(--font-weight-scale,1));
   color: var(--fg-primary);
   display: inline-flex;
   align-items: center;
@@ -1426,7 +1360,7 @@
   white-space: normal;
 }
 
-/* ==================== 永劫无间专项面板入口卡（2026-10-11 C3，opt-col 同族白卡） ==================== */
+/* 永劫无间专项面板入口卡（2026-10-11 C3，opt-col 同族白卡） */
 /* 入口卡跟分类卡并列进瀑布流，头部沿用 opt-col-head。头部只放短标题（keep-all 不收缩，
    长标题会与右侧按钮/徽章重叠——2026-10-11 真机实测），分区明细放 body。
    不臆造 ds-* 类：ds.css 只有 badge/ring/menu/tooltip/skeleton，没有 card/row/alert/stack。 */
@@ -1434,7 +1368,7 @@
 .opt-nara-desc {
   margin: 8px 6px 2px;
   padding: 0 2px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   line-height: 1.5;
   color: var(--fg-tertiary);
 }
@@ -1445,17 +1379,17 @@
   gap: 8px;
   padding: 6px 8px;
   border-radius: var(--radius-small);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   color: var(--fg-primary);
 }
-.opt-nara-row__meta { flex: 0 0 auto; font-size: 11px; color: var(--fg-tertiary); white-space: nowrap; }
+.opt-nara-row__meta { flex: 0 0 auto; font-size: calc(11px*var(--font-size-scale,1)); color: var(--fg-tertiary); white-space: nowrap; }
 .nara-card__title {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 9px 14px;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--fs-secondary);
+  font-weight: calc(700*var(--font-weight-scale,1));
   color: var(--fg-primary);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-card-hover);
@@ -1466,7 +1400,7 @@
 #naraPanelBody .nara-checkrow__name:hover,
 #privacyPanelBody .nara-checkrow__name:hover { color: var(--accent); }
 .nara-checkrow__side { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
-.nara-muted { padding: 10px 0; font-size: 12px; color: var(--fg-tertiary); }
+.nara-muted { padding: 10px 0; font-size: var(--fs-meta); color: var(--fg-tertiary); }
 /* footer：全选靠左，执行/关闭靠右 */
 .nara-panel-footer [data-nara-toggle-all] { margin-right: auto; }
 /* BCD 体检横幅：空槽不占位 */
@@ -1479,7 +1413,7 @@
   margin: 0 10px;
   padding: 7px 10px;
   border-radius: var(--radius-small);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   line-height: 1.5;
 }
 .nara-bcd-banner.is-failed { background: var(--bg-card-hover); color: var(--fg-secondary); }
@@ -1490,13 +1424,13 @@
   justify-content: flex-start;
 }
 
-/* ==================== 隐私自护面板入口卡（2026-10-11 WinUtil 借鉴 V3） ==================== */
+/* 隐私自护面板入口卡（2026-10-11 WinUtil 借鉴 V3） */
 /* 弹窗内布局直接复用 .nara-panel/.nara-card/.nara-checkrow（同一种「侧表聚合面板」形态，
    不另起一套类名造视觉分叉）；这里只补入口卡图标色与 footer 布局。 */
 .opt-privacy-icon { color: var(--accent); }
 .privacy-panel-footer [data-privacy-toggle-all] { margin-right: auto; }
 
-/* ==================== 外设优化弹窗（更多调优项） ==================== */
+/* 外设优化弹窗（更多调优项） */
 /* 2026-10-07：外设优化由独立子窗改为应用内弹窗 —— 子窗外壳（.peripheral-window /
    .peri-topbar-left / .peri-back / .peri-body）随窗口一并删除，正文挂在
    window.modal.create 的 .usage-body 里（内边距与滚动由它提供）。 */
@@ -1512,10 +1446,10 @@
   position: absolute; top: -10px; right: 12px;
   padding: 2px 10px; border-radius: 999px;
   background: var(--accent); color: var(--accent-text);
-  font-size: 11px; font-weight: 600; line-height: 1.5;
+  font-size: calc(11px*var(--font-size-scale,1)); font-weight: calc(600*var(--font-weight-scale,1)); line-height: 1.5;
 }
-.peri-value { font-size: 22px; font-weight: 700; color: var(--fg-primary); line-height: 1.15; }
-.peri-regname { margin-top: 2px; font-size: 11px; color: var(--fg-tertiary); }
+.peri-value { font-size: calc(22px*var(--font-size-scale,1)); font-weight: calc(700*var(--font-weight-scale,1)); color: var(--fg-primary); line-height: 1.15; }
+.peri-regname { margin-top: 2px; font-size: calc(11px*var(--font-size-scale,1)); color: var(--fg-tertiary); }
 .peri-desc { margin-top: 5px; font-size: var(--fs-meta); color: var(--fg-secondary); line-height: 1.4; }
 
 /* 「数值解释」子弹窗正文（2026-10-07 起走 window.modal.create 的统一骨架，
@@ -1527,7 +1461,7 @@
   padding: 7px 0;
   border-top: 1px solid var(--border-subtle);
 }
-.peri-explain-row dt { font-size: var(--fs-meta); font-weight: 600; color: var(--fg-primary); }
+.peri-explain-row dt { font-size: var(--fs-meta); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
 .peri-explain-row dd { margin: 0; color: var(--fg-secondary); font-size: var(--fs-meta); line-height: 1.6; }
 .peri-explain-caveat {
   margin: 12px 0 0; padding: 9px 11px;
@@ -1568,7 +1502,7 @@
   gap: 2px 6px;
 }
 .ctx-row-name {
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   line-height: 1.55;
   color: var(--fg-primary);
   word-break: normal;
@@ -1578,7 +1512,7 @@
 /* 位置标签：按软件分组后，「挂在哪个位置」从一级分类降级成行内信息。
    只用既有 token，不按位置注入颜色（§2 M20 分类不得用离表色）。 */
 .ctx-row-where {
-  font-size: 11px;
+  font-size: calc(11px*var(--font-size-scale,1));
   line-height: 1.5;
   color: var(--fg-tertiary);
   background: var(--bg-card-hover);
@@ -1608,7 +1542,7 @@
    只用既有语义 token 着色（AGENTS §5 禁硬编码字面色）；中性灰为主，动作/隐私用警示色 */
 .nature-tag {
   display: inline-block;
-  font-size: 11px;
+  font-size: calc(11px*var(--font-size-scale,1));
   line-height: 1.6;
   padding: 0 7px;
   border-radius: var(--radius-btn);
@@ -1618,7 +1552,7 @@
   white-space: nowrap;
 }
 .special-inline-note {
-  font-size: 11px;
+  font-size: calc(11px*var(--font-size-scale,1));
   line-height: 1.5;
   margin-left: 10px;
   color: var(--danger);
@@ -1638,8 +1572,8 @@
   margin-bottom: 16px;
 }
 .rt-radar-svg { display: block; width: 100%; max-width: 680px; margin: 0 auto; height: auto; }
-.rt-node-name { font-size: 13px; font-weight: 600; fill: var(--fg-primary); }
-.rt-node-state { font-size: 11.5px; fill: var(--fg-tertiary); }
+.rt-node-name { font-size: var(--fs-secondary); font-weight: calc(600*var(--font-weight-scale,1)); fill: var(--fg-primary); }
+.rt-node-state { font-size: calc(11.5px*var(--font-size-scale,1)); fill: var(--fg-tertiary); }
 /* 扫描线匀速旋转；prefers-reduced-motion 下静止（AGENTS §5） */
 .rt-sweep { animation: rt-spin 4s linear infinite; transform-box: view-box; }@media (prefers-reduced-motion: reduce) {
 
@@ -1664,15 +1598,15 @@
 }
 .rt-item-head { display: flex; align-items: center; gap: 12px; }
 .rt-item-copy { flex: 1 1 auto; min-width: 0; }
-.rt-item-name { font-size: 14px; font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
-.rt-item-desc { font-size: 12px; color: var(--fg-tertiary); margin-top: 2px; line-height: 1.6; }
+.rt-item-name { font-size: var(--fs-body); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
+.rt-item-desc { font-size: var(--fs-meta); color: var(--fg-tertiary); margin-top: 2px; line-height: 1.6; }
 .rt-item-evidence {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--border-subtle);
 }
 .rt-evidence-row {
-  font-family: "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-meta);
   color: var(--fg-secondary);
   line-height: 1.7;
@@ -1690,7 +1624,7 @@
 }
 
 .appearance-hint {
-  font-size: 11.5px;
+  font-size: calc(11.5px*var(--font-size-scale,1));
   color: var(--fg-tertiary);
   margin: 10px 0 0;
   line-height: 1.5;
@@ -1703,8 +1637,8 @@
   border-top: 1px solid var(--border-subtle);
 }
 .appearance-sub-head {
-  font-size: 12.5px;
-  font-weight: 700;
+  font-size: calc(12.5px*var(--font-size-scale,1));
+  font-weight: calc(700*var(--font-weight-scale,1));
   color: var(--fg-primary);
   margin: 0 0 8px;
 }
@@ -1721,7 +1655,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 7px 10px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-tertiary);
   cursor: pointer;
   background: var(--bg-card-hover);
@@ -1730,9 +1664,9 @@
 .bg-list-body { max-height: 150px; overflow-y: auto; }
 .bg-list-name { flex: 1; min-width: 0; word-break: break-all; }
 .settings-collapse-chevron {
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   color: var(--fg-tertiary);
-  transition: transform 0.3s ease;
+  transition: transform var(--duration-slow) var(--ease-standard);
 }
 
 /* P3 明细弹窗：文件清单（路径 + 大小，等宽行，超出滚动） */
@@ -1746,15 +1680,15 @@
 .detail-file-path {
   flex: 1;
   min-width: 0;
-  font-family: Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   color: var(--fg-secondary);
   word-break: break-all;
 }
 .detail-file-size { flex: none; color: var(--fg-tertiary); }
-.material-name { font-size: 12.5px; font-weight: 600; color: var(--fg-primary); }
-.material-desc { font-size: 11px; color: var(--fg-tertiary); }
+.material-name { font-size: calc(12.5px*var(--font-size-scale,1)); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
+.material-desc { font-size: calc(11px*var(--font-size-scale,1)); color: var(--fg-tertiary); }
 .skin-row-label {
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   color: var(--fg-secondary);
   flex: none;
 }
@@ -1765,23 +1699,23 @@
   flex-direction: column;
   gap: 10px;
 }
-/* 列表容器：纵向排列、项间距 10px（文档基准参数） */
-.startup-list { flex-direction: column; align-items: stretch; gap: 10px; }
+/* 列表容器：纵向排列、项间距 10px（文档基准参数）；display:flex 缺了 gap 等三条全空转（审查 F1c-M01） */
+.startup-list { display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
 .row-card-actions { flex: 0 0 auto; }
 /* 维护项详解弹窗内容（三段 + AI 解释区） */
 .maint-detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .maint-detail-cat {
-  font-size: 11px; line-height: 1.6; padding: 0 8px;
+  font-size: calc(11px*var(--font-size-scale,1)); line-height: 1.6; padding: 0 8px;
   border-radius: var(--radius-btn); color: var(--fg-secondary);
   background: var(--bg-card-hover); border: 1px solid var(--border-default);
 }
 .maint-detail-block { margin-bottom: 12px; }
-.maint-detail-text { font-size: 12.5px; line-height: 1.7; color: var(--fg-primary); }
+.maint-detail-text { font-size: calc(12.5px*var(--font-size-scale,1)); line-height: 1.7; color: var(--fg-primary); }
 .maint-detail-ai {
   margin-top: 14px; padding-top: 12px;
   border-top: 1px solid var(--border-subtle);
 }
-.maint-detail-ai-hint { font-size: 11.5px; line-height: 1.6; color: var(--fg-tertiary); }
+.maint-detail-ai-hint { font-size: calc(11.5px*var(--font-size-scale,1)); line-height: 1.6; color: var(--fg-tertiary); }
 .maint-card-icon {
   flex: 0 0 auto;
   display: inline-flex;
@@ -1811,19 +1745,19 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--fs-body);
+  font-weight: calc(600*var(--font-weight-scale,1));
   color: var(--fg-primary);
   margin-bottom: 3px;
 }
 .maint-card-desc {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   line-height: 1.6;
   color: var(--fg-tertiary);
 }
 .maint-card-actions { flex: 0 0 auto; }
 .maint-admin-tag {
-  font-size: 11px;
+  font-size: calc(11px*var(--font-size-scale,1));
   line-height: 1.5;
   padding: 0 7px;
   border-radius: var(--radius-btn);
@@ -1831,7 +1765,7 @@
   background: rgba(var(--warning-rgb), 0.14);
 }
 .maint-status {
-  font-size: 11px;
+  font-size: calc(11px*var(--font-size-scale,1));
   line-height: 1.5;
   padding: 0 7px;
   border-radius: var(--radius-btn);
@@ -1850,7 +1784,7 @@
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
 }
-.maint-batch-count { font-size: 12px; color: var(--fg-tertiary); }
+.maint-batch-count { font-size: var(--fs-meta); color: var(--fg-tertiary); }
 .maint-batch-actions {
   display: inline-flex;
   gap: 8px;
@@ -1874,19 +1808,16 @@
   width: 0%;
   background: var(--accent);
   border-radius: var(--radius-badge);
-  transition: width 300ms var(--ease-standard);
+  transition: width var(--duration-slow) var(--ease-standard);
 }
 .maint-batch-progress-text {
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-secondary);
   white-space: nowrap;
 }
 
-/* ================================================================
-   快捷指令页（63 条系统快捷入口）
-   卡片样式对齐图3：独立白色容器 + 图标色块 + 名称 + 分类标签 + 描述
-   ================================================================ */
+/* 快捷指令页（63 条系统快捷入口）：卡片样式对齐图3——独立白色容器 + 图标色块 + 名称 + 分类标签 + 描述 */
 .qc-toolbar {
   display: flex;
   align-items: center;
@@ -1954,7 +1885,7 @@
 }
 .qc-name {
   font-size: var(--fs-body);
-  font-weight: 600;
+  font-weight: calc(600*var(--font-weight-scale,1));
   color: var(--fg-primary);
   /* 完整展示名称：允许自动换行，不截断不省略 */
   white-space: normal;
@@ -1968,11 +1899,11 @@
   margin-left: 10px;
   padding: 2px 10px;
   font-size: var(--fs-meta, 11px);
-  font-weight: 600;
+  font-weight: calc(600*var(--font-weight-scale,1));
   /* 审查 K2/M-2（2026-10-03 L3）：原为字面色 #000000，注释还把适用范围写反了。
-     实测暗色（默认主题）合成底 #191b25 上仅 1.22:1，远低于 AA 4.5:1 ——
-     深墨底上的近黑文字几乎不可见，且 check-contrast 的 color 正则只认 var()
-     所以对这条完全失明。改用语义 token 后：暗 15.1:1 / 亮 14.6:1。 */
+   实测暗色（默认主题）合成底 #191b25 上仅 1.22:1，远低于 AA 4.5:1——深墨底上的近黑文字
+   几乎不可见，且 check-contrast 的 color 正则只认 var()，对这条完全失明。
+   改用语义 token 后：暗 15.1:1 / 亮 14.6:1。 */
   color: var(--fg-primary);
   background: var(--accent-light);
   border: 1px solid var(--border-accent);
@@ -1983,7 +1914,7 @@
 .qc-desc {
   margin-top: 3px;
   font-size: var(--fs-meta, 11px);
-  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-family: var(--font-mono);
   color: var(--fg-tertiary);
   white-space: nowrap;
   overflow: hidden;
@@ -2004,8 +1935,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--fs-secondary);
+  font-weight: calc(600*var(--font-weight-scale,1));
   color: var(--fg-secondary);
   border-bottom: 1px solid var(--border-default);
   background: var(--bg-card-hover);
@@ -2015,8 +1946,8 @@
   padding: 12px 14px;
   max-height: 260px;
   overflow-y: auto;
-  font-family: "Consolas", "Cascadia Code", monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
   line-height: 1.6;
   color: var(--fg-secondary);
   white-space: pre-wrap;
@@ -2024,11 +1955,8 @@
   user-select: text;
 }
 
-/* ================================================================
-   鼠标拖尾动效（Motion.Lab · cursor-trail）
-   作用范围限定在当前窗口（position: fixed 相对视口），
-   图层 pointer-events: none 保证不拦截任何交互。
-   ================================================================ */
+/* 鼠标拖尾动效（Motion.Lab · cursor-trail）
+   作用范围限定在当前窗口（position: fixed 相对视口），图层 pointer-events: none 不拦截交互。 */
 .mouse-trail-layer {
   position: fixed;
   inset: 0;
@@ -2049,7 +1977,8 @@
   opacity: 0.9;
   transform: translate(-50%, -50%) scale(1);
   will-change: transform, opacity;
-  transition: opacity 520ms ease-out, transform 520ms ease-out;
+  /* 520ms 消散时长保留字面：--duration-* 最大 320ms，拖尾淡出需要更长余韵（审查 F1c-L03） */
+  transition: opacity 520ms var(--ease-standard), transform 520ms var(--ease-standard);
 }
 .mouse-trail-dot.is-fading {
   opacity: 0;
@@ -2070,10 +1999,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   .mouse-trail-layer { display: none !important; }
 }
 
-/* ================================================================
-   磁盘清理 · 查找器（重复/大文件/空/AppData）通用样式
-   完全沿用 .card / .table-card / .opt-* 主题语义
-   ================================================================ */
+/* 磁盘清理 · 查找器（重复/大文件/空/AppData）通用样式：完全沿用 .card / .table-card / .opt-* 主题语义 */
 .finder-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -2086,11 +2012,11 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  color: var(--fg-secondary, #5a6b7c);
+  font-size: var(--fs-secondary);
+  color: var(--fg-secondary);
 }
 .opt-hint {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-tertiary);
 }
 .finder-path {
@@ -2099,7 +2025,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 }
 .finder-group-sum {
   margin-left: auto;
-  font-weight: 400;
+  font-weight: calc(400*var(--font-weight-scale,1));
   color: var(--fg-tertiary);
 }
 
@@ -2114,7 +2040,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 }
 .an-tm-cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .an-tm-cell-size { font-size: calc(11px * var(--font-size-scale, 1)); opacity: .75; }
-.finder-role { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.finder-role { font-size: calc(11px*var(--font-size-scale,1)); padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
 
 /* 空文件/空目录结果分页（2026-09-28）：数万条结果一次性渲染会卡死渲染层，每页只挂 1000 条 */
 .finder-pager {
@@ -2125,7 +2051,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   padding: 12px 0 6px;
   border-top: 1px solid var(--border-default);
 }
-.finder-pager-info { color: var(--fg-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.finder-pager-info { color: var(--fg-tertiary); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
 
 /* 空文件/空目录可折叠栏目（2026-09-28 五轮拍板：放弃双栏改横向单列手风琴）。
    视觉对齐优化中心 .opt-col 卡片（顶边 3px accent / radius-medium / shadow-card）；
@@ -2137,7 +2063,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 }
 .empty-pane-count {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: calc(11px*var(--font-size-scale,1));
   color: var(--fg-tertiary);
   background: var(--bg-card-hover);
   border: 1px solid var(--border-subtle);
@@ -2148,21 +2074,18 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 .empty-pane-sub {
   margin-left: auto;
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: calc(11px*var(--font-size-scale,1));
   color: var(--fg-tertiary);
   white-space: nowrap;
 }
-.un-icon-fallback { color: var(--fg-tertiary); font-size: 12px; line-height: 1; }
+.un-icon-fallback { color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1; }
 
-/* ================================================================
-   窗口界面升级3（文件末位覆盖层）
-   ----------------------------------------------------------------
+/* 窗口界面升级3（文件末位覆盖层）
    1) 磁盘清理：分段栏(左) 与当前子视图操作行独立一行左对齐（初版为右对齐同行，按用户要求调整）
    2) 内存卡数值两行封顶（JS 自适应缩字号兜底见 memoryclean.js）
    3) 快捷指令 qc-tabs / 系统维护 maint-cat-tabs 收编 filter-tabs 分段体系
    4) 跟随聚光 · Spotlight（Motion.Lab spotlight-follow 改，仅选择块）
-   5) 窗口材质总开关（Motion.Lab toggle-flip 滑动开关改）
-   ================================================================ */
+   5) 窗口材质总开关（Motion.Lab toggle-flip 滑动开关改） */
 
 /* ---------- 1) 磁盘清理工具栏 ---------- */
 .cleanup-toolbar {
@@ -2190,7 +2113,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   max-width: 100%;
 }
 
-/* ==================== v3.0.0 批次样式（网络检测） ==================== */
+/* v3.0.0 批次样式（网络检测） */
 
 /* ---------- 网络检测（netcheck- 域前缀） ---------- */
 .netcheck-list { display: flex; flex-direction: column; gap: 10px; }
@@ -2202,6 +2125,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   border: 2px solid rgba(var(--info-rgb), 0.35);
   border-top-color: var(--info);
   border-radius: 50%;
+  /* 匀速旋转刻意 linear（无 ease token 对应）；.8s 无 --duration-* token，保留字面 */
   animation: netcheckSpin .8s linear infinite;
 }@media (prefers-reduced-motion: reduce) {
 
@@ -2225,7 +2149,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 /* v3.7.0 议题六 P1：网卡高级属性只读区（三级缩进区分「网卡 / 状态行 / 属性行」） */
 /* v2-L6：--fg 全仓无定义（真源是 --fg-primary/--fg-secondary/--fg-tertiary 三级）且无 fallback
    ⇒ 这条 color 一直被丢弃、实际继承 body 的 --fg-primary；改成显式 --fg-primary，观感不变。 */
-.nic-prop-head { color: var(--fg-primary); font-weight: 600; margin-top: 6px; }
+.nic-prop-head { color: var(--fg-primary); font-weight: calc(600*var(--font-weight-scale,1)); margin-top: 6px; }
 .nic-prop-sub { color: var(--fg-tertiary); }
 .nic-prop-item { padding-left: 14px; }
 
@@ -2250,10 +2174,8 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   pointer-events: none;
 }
 
-/* ================================================================
-   自动更新弹窗（批次：自动更新接入 2026-09-12）
-   仅使用既有 token；圆角 6px；spinner 复用全局 spin 关键帧。
-   ================================================================ */
+/* 自动更新弹窗（批次：自动更新接入 2026-09-12）
+   仅使用既有 token；圆角 6px；spinner 复用全局 spin 关键帧。 */
 .upd-checking {
   display: flex;
   align-items: center;
@@ -2278,7 +2200,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 }
 .upd-version-new {
   font-size: calc(17px * var(--font-size-scale, 1));
-  font-weight: 600;
+  font-weight: calc(600*var(--font-weight-scale,1));
   color: var(--fg-primary);
   font-variant-numeric: tabular-nums;
 }
@@ -2297,7 +2219,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 .upd-dl-label { color: var(--fg-secondary); font-size: var(--fs-secondary); }
 .upd-dl-percent {
   font-size: calc(17px * var(--font-size-scale, 1));
-  font-weight: 600;
+  font-weight: calc(600*var(--font-weight-scale,1));
   color: var(--fg-primary);
   font-variant-numeric: tabular-nums;
 }
@@ -2313,7 +2235,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 }
 .upd-ready-title {
   font-size: calc(15px * var(--font-size-scale, 1));
-  font-weight: 600;
+  font-weight: calc(600*var(--font-weight-scale,1));
   color: var(--fg-primary);
 }
 .upd-ready-desc {
@@ -2340,10 +2262,10 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   .upd-spinner { animation: none; border-top-color: var(--border-default); }
 }
 
-/* ==================== v2.6.0 批次样式 ==================== */
+/* v2.6.0 批次样式 */
 /* 系统体检只读诊断清单样式（.checkup-*）已于 2026-10-12 随首页「体检结论」区块全链路退役 */
 
-/* ==================== v2.7.0 批次样式 ==================== */
+/* v2.7.0 批次样式 */
 /* 去处理/忽略 行内按钮与忽略恢复链接样式同批退役 */
 
 .splash-stage {
@@ -2372,7 +2294,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   background: var(--splash-brand);
 }
 .splash-progress-text {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--splash-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -2385,7 +2307,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   position: relative;
   flex: 1;
   height: 6px;
-  background: rgba(127, 127, 127, 0.18);
+  background: var(--bg-hover);
   border-radius: 999px;
   cursor: pointer;
 }
@@ -2395,13 +2317,13 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   top: 0;
   height: 100%;
   width: 0%;
-  background: var(--accent, #8B8EE0);
+  background: var(--accent);
   border-radius: 999px;
-  transition: width 0.05s linear;
+  transition: width 0.05s linear; /* 贴手回显：50ms linear 刻意不走 --duration-*/--ease-* token（都是百毫秒级缓动，会让填充滞后于拖动） */
 }
 .bbr-val {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--fs-secondary);
+  font-weight: calc(700*var(--font-weight-scale,1));
   font-variant-numeric: tabular-nums;
   color: var(--fg-secondary);
   min-width: 36px;
@@ -2417,4 +2339,4 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 }
 
 /* v3.5.3（2026-09-15）：运行库修复成功后的行内闭环标记 */
-.rt-fixed-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:550;padding:3px 10px;border-radius:999px;background:var(--success-soft);color:var(--success);white-space:nowrap}
+.rt-fixed-badge{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-meta);font-weight:calc(550*var(--font-weight-scale,1));padding:3px 10px;border-radius:999px;background:var(--success-soft);color:var(--success);white-space:nowrap}

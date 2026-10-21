@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="theme-color" content="#f3f3f3" />
+  <meta name="theme-color" content="#F6F4FB" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file: asset: http://asset.localhost; font-src 'self' file: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
   <title>应用卸载残留扫描</title>
   <link rel="icon" href="./assets/ico/Trim.ico" />
@@ -54,14 +54,20 @@
     </div>
   </div>
 
-  <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——业务件在加载期就会读 window.api -->
+  <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——业务件在加载期就会读 window.api；
+       桥未就绪时自动 no-op -->
   <script src="scripts/tauri-api.js"></script>
-  <!-- 子窗口材质/主题同步：与其余子窗同一件（预览窗是唯一例外） -->
+  <!-- 子窗口材质/主题同步：与其余子窗同一件（窗口清单以 engine::guard::APP_WINDOWS
+       的子窗集合为准，不在此点名例外，F3-M02） -->
   <script src="scripts/window-material.js"></script>
   <!-- ds.js：data-tip 委托 + window.ds.esc（本窗所有插值一律走它，见复核 LG-2）。
        modal.js / intro.js 都必须排在它之后——两者的焦点圈闭与转义都按 window.ds 写（§2 M17） -->
   <script src="scripts/ds.js"></script>
   <script src="scripts/modal.js"></script>
+  <!-- F3-M07：模型选择器（必须先于 intro.js）：intro.js 无条件渲染「选择模型」按钮，
+       点击时走 window.modelpicker.open —— 本窗原先没挂本件，按钮点了只会得到
+       「模型选择暂不可用」，是一条常显死按钮。挂上后该按钮在本窗真能用。 -->
+  <script src="scripts/modelpicker.js"></script>
   <!-- 简介面板共用件：本地简介 + 联网 AI 简介（点击查看里的那一块） -->
   <script src="scripts/intro.js"></script>
   <!-- NEW-6：子窗轻量提示共用件（须先于主脚本加载） -->

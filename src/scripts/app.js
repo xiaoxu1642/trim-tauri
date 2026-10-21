@@ -3,16 +3,13 @@
 (function () {
   'use strict';
 
-  // 启动黑闪修复：尽早触发首帧上报（内部等 DOMContentLoaded 后双 rAF 才真正发送，
-  // 主进程收到后才显示主窗口，确保窗口出现即完整 UI）
-  try { window.api?.window?.notifyFirstPaint?.(); } catch (e) {}
+  // 启动黑闪修复：首帧上报只由 tauri-api.js 在自身末尾调用一次 notifyFirstPaint()（内部等 DOMContentLoaded 后双 rAF
+  // 才真正发送，主进程收到后才显示主窗口）。本文件原先在第 8 行又调了一次（F3-M08）：tauri-api 在 defer 序中先于
+  // app.js，那次就是第二次——两份 DCL 监听 + 两次 invoke，而「尽早触发」的前提并不成立（真正发送本来就要等 DCL）。
 
-  // 审查 L13 → v2-M22：全局兜底 unhandledrejection 的真源已挪进 ds.js（⑪ 节）——
-  // 原先只有主窗这一份，四个子窗一条监听都没有，子窗里的异步失败零痕迹。
-  // ds.js 在 index.html 里先于 app.js 加载并置 window.__dsErrGuard，故：
-  //   · 正常路径：ds 那份接管（主窗走 window.logger.write，与此前行为一致），这里不再注册，
-  //     免得一条 rejection 落两行日志；
-  //   · 降级路径：ds.js 缺席（浏览器裸预览 / 加载失败）时，主窗仍要有兜底，就地补装。
+  // 审查 L13 → v2-M22：全局兜底 unhandledrejection 的真源已挪进 ds.js（⑪ 节）——原先只有主窗这一份，四个子窗
+  // 一条监听都没有，子窗里的异步失败零痕迹。ds.js 在 index.html 里先于 app.js 加载并置 window.__dsErrGuard，
+  // 故正常路径不在此注册（免得一条 rejection 落两行日志），只在 ds.js 缺席（裸浏览器预览/加载失败）时就地补装。
   if (!window.__dsErrGuard) {
     window.addEventListener('unhandledrejection', (event) => {
       const reason = event && event.reason;
@@ -20,6 +17,19 @@
       console.error('[Trim] 未处理的 Promise 拒绝:', reason);
       try { window.logger?.write?.('error', '未处理的 Promise 拒绝: ' + text); } catch (e) {}
     });
+  }
+
+  // F3-L03：IPC 订阅的返回值是同步退订函数（tauri-api.js 的 onEvent 契约），此前注册后即弃——接线一旦复用
+  // （init 重跑/窗口级回收）订阅只增不减。统一收账并提供退订出口；当前 init() 单次执行无叠加，出口属窗口级
+  // 回收时的保险，不主动调用（与 modal.destroy 同口径：时机由调用方定，不在这里猜）。
+  const _ipcDisposers = [];
+  function trackSubscription(unsub) {
+    if (typeof unsub === 'function') _ipcDisposers.push(unsub);
+  }
+  function teardownSubscriptions() {
+    while (_ipcDisposers.length) {
+      try { _ipcDisposers.pop()(); } catch (e) { /* 重复退订无副作用，忽略 */ }
+    }
   }
 
   // 侧边栏折叠/展开
@@ -48,9 +58,8 @@
     window.liquidBar?.refreshAll?.(false);
   }
 
-  // Motion.Lab ripple-click：统一提供轻量按压反馈，采用事件委托覆盖动态创建的弹窗按钮。
-  // 波纹节点绝对定位脱离文档流（见 main.css 的 .btn > .btn-ripple），
-  // 并在 animationend 与兜底定时器双重保障下移除，避免 DOM 累积。
+  // Motion.Lab ripple-click：事件委托覆盖动态创建的弹窗按钮。波纹节点绝对定位脱离文档流（见 main.css 的
+  // .btn > .btn-ripple），在 animationend 与兜底定时器双重保障下移除，避免 DOM 累积。
   var RIPPLE_DURATION = 480;
   function setupButtonMotion() {
     document.addEventListener('pointerdown', (event) => {
@@ -104,10 +113,9 @@
     // P3-1（可达性）：展开态同步给箭头按钮（读屏据此播报「已展开/已折叠」）
     item?.querySelector('.nav-parent-toggle')?.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     if (submenu) {
-      // 审查 M-12：折叠态的 max-height:0 + opacity:0 只裁剪绘制，内部按钮仍在 Tab
-      // 序列里 —— 默认全折叠的子菜单（磁盘测速/网络测速/网络检测）会收下看不见的
-      // 焦点。inert 是语义级「不可交互」：焦点与读屏都跳过整个子树，且不需要像
-      // visibility:hidden 那样管 transitionend 时机（inert 不参与 max-height 过渡）。
+      // 审查 M-12：折叠态的 max-height:0 + opacity:0 只裁剪绘制，内部按钮仍在 Tab 序列里——默认全折叠的子菜单
+      // （磁盘测速/网络测速/网络检测）会收下看不见的焦点。inert 是语义级「不可交互」，焦点与读屏都跳过整个子树，
+      // 且不像 visibility:hidden 那样要管 transitionend 时机（inert 不参与 max-height 过渡）。
       submenu.inert = !expanded;
       // 展开时回填带缓冲的 max-height：内容高度 + 缓冲，避免展开后滚动条出现/文本回流导致的轻微裁切
       // （收起时清空内联样式，回退到 CSS 的 max-height:0）
@@ -142,41 +150,32 @@
     return expanded;
   }
 
-  // ==================== 渲染脚本按需加载（v3.7.0 议题五） ====================
-  // 改造前：38 个脚本标签曾全部同步加载、全部在启动时 init()，首屏解析量级约 0.8 MB，
-  // 其中磁盘测速、网络检测、运行库修复、快捷指令等页面用户可能永远不进。
-  // 改造后：非首屏脚本从 index.html 摘出，进入对应页面（或首帧空闲）时动态注入。
-  // 选型说明：动态 <script> 注入与现有 CSP（script-src 'self'）完全兼容，
-  // 无需把 25 个 IIFE 改成 ESM、无需构建步骤、零新增依赖（AGENTS.md §5 红线）。
-  // 数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
+  // 渲染脚本按需加载（v3.7.0 议题五）：非首屏脚本从 index.html 摘出，进入对应页面（或首帧空闲）时动态注入；
+  // 改造前 38 个脚本标签全部同步加载、启动时一次性 init，首屏解析量级约 0.8 MB。
+  // 选型：动态 script 注入与现有 CSP（script-src 只允许 self）完全兼容，无需把 25 个 IIFE 改成 ESM、无需构建
+  // 步骤、零新增依赖（AGENTS.md §5 红线）。数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
   const PAGE_SCRIPTS = {
-    // v3 C（2026-10-02）：磁盘清理域两份脚本从 index.html 摘出，改由进页时按需注入
-    // （fallback 与 cleanup 是首屏最重的两块，不进清理页就不该解析）。
-    // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 会读
-    // window.CLEANUP_RULES_FALLBACK 构建分类，先注入才拿得到兜底数据。
-    // 性能批次①(a)：xtable.js 也摘出首屏（纯库，只挂 window.xtable、不自动 init），
-    // 前置到本清单最前 —— cleanup.js 调 xtable.sortItems / renderHeader / buildLayout /
-    // bindHeader / createVirtualList / middleEllipsis，摘出首屏后不在 cleanup.js 之前
-    // 就位就会当场 ReferenceError。backups 是独立路由但钩子住在 cleanup.js 里，
-    // 所以依赖清单与 cleanup 逐字一致，改一边必须改另一边。
+    // v3 C（2026-10-02）：磁盘清理域两份脚本从 index.html 摘出，进页时按需注入（首屏最重的两块）。
+    // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 要读 window.CLEANUP_RULES_FALLBACK 构建分类。
+    // 性能批次①(a)：xtable.js 摘出首屏后前置到本清单最前 —— cleanup.js 调它的 sortItems / renderHeader /
+    // buildLayout / bindHeader / createVirtualList / middleEllipsis，不在 cleanup.js 之前就 ReferenceError。
+    // backups 是独立路由但钩子住在 cleanup.js 里，依赖清单与 cleanup 逐字一致，改一边必须改另一边。
     cleanup: ['scripts/xtable.js', 'scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
     backups: ['scripts/xtable.js', 'scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
     // 查找器子视图（重复文件/空文件/磁盘分析）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
     uninstall: ['scripts/uninstall.js'],
-    // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载；
-    // peripheral.js 提供「更多调优项」的应用内弹窗（window.peripheral.open），也随本页注入
-    // 性能批次①(a) 的漏项补票（2026-10-14 用户报「看板列叠在一起」）：xtable.js 摘出首屏时
-    // 只按「读不到会抛 ReferenceError」的消费方补了 cleanup/backups，漏了 optimizer/contextmenu
-    // —— 这两页读的是 window.kanbanMasonry，且 `if (window.kanbanMasonry)` 读不到就静默跳过，
-    // 于是 .opt-col / .ctx-col 保持 position:absolute 却没有行内 left/top，全部叠在原点。
-    // 症状是「整页文字两层错位重影」，看起来像 GPU 花屏，实际是布局引擎根本没跑。
+    // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载；peripheral.js 提供
+    // 「更多调优项」的应用内弹窗（window.peripheral.open），也随本页注入。
+    // 性能批次①(a) 的漏项补票（2026-10-14 用户报「看板列叠在一起」）：xtable.js 摘出首屏时只按「读不到会抛
+    // ReferenceError」的消费方补了 cleanup/backups，漏了 optimizer/contextmenu——这两页读 window.kanbanMasonry，
+    // 而读不到时静默跳过，于是 .opt-col / .ctx-col 保持 position:absolute 却没有行内 left/top、全部叠在原点
+    // （症状是整页文字两层错位重影，看着像 GPU 花屏，实际是布局引擎根本没跑）。
     optimizer: ['scripts/xtable.js', 'scripts/optimizer.js', 'scripts/peripheral.js', 'scripts/sysrestore.js'],
-    // 性能批次①(a)：icon-fallback.js 从首屏摘出，前置到这里和 startup ——
-    // contextmenu.js 的 openDetail() 与 startup.js 的 applyStartupIcons() 都在运行时读
-    // window.iconFallback，且读不到时是静默 return（不抛错），症状为「图标兜底失效、
-    // 整页只剩 SVG 色块」，比崩更难查 ⇒ 必须前置才不留坑。
+    // 性能批次①(a)：icon-fallback.js 摘出首屏后前置到这里和 startup —— contextmenu.js 的 openDetail() 与
+    // startup.js 的 applyStartupIcons() 都在运行时读 window.iconFallback，读不到时静默 return（不抛错），
+    // 症状是「图标兜底失效、整页只剩 SVG 色块」，比崩更难查 ⇒ 必须前置才不留坑。
     contextmenu: ['scripts/xtable.js', 'scripts/icon-fallback.js', 'scripts/modelpicker.js', 'scripts/intro.js', 'scripts/contextmenu.js'],
     startup: ['scripts/icon-fallback.js', 'scripts/modelpicker.js', 'scripts/intro.js', 'scripts/startup.js'],
     maintenance: ['scripts/maintenance.js'],
@@ -197,9 +196,8 @@
     'maintenance', 'memoryclean', 'netcheck', 'netspeed', 'optimizer', 'overview',
     'pathbinding', 'quickcmds', 'realtime', 'runtimes', 'startup', 'syspanel', 'sysrestore'
   ]);
-  // 首帧后空闲加载：视觉增强 + 自动更新 UI（不阻塞首帧）。
-  // pathbinding 也放这里——cleanup.js 的 QQ/微信文件清理会读它的路径配置，
-  // 空闲期预取可避免用户点扫描时配置还没就位。
+  // 首帧后空闲加载：视觉增强 + 自动更新 UI（不阻塞首帧）。pathbinding 也放这里——cleanup.js 的 QQ/微信文件清理
+  // 会读它的路径配置，空闲期预取可避免用户点扫描时配置还没就位。
   const IDLE_SCRIPTS = [
     'scripts/mouse-trail.js',
     'scripts/tilt.js',
@@ -209,17 +207,14 @@
   ];
   const _scriptLoaded = new Set();
   const _scriptLoading = new Map();
-  // 审查 K3：模块 init 必须「一次」。ensurePageScripts 每次进页都会重跑（脚本本身去重，
-  // 但 init 没有），于是第 N 次进页就有 N 个 click handler —— 磁盘基准/内存清理这类
-  // 带真实 IO 的按钮会被并发触发 N 遍，监听器与 IPC 订阅也只增不减。
-  // 记账放在调用前：init 抛错也不重试，因为抛错时往往已经绑了一半的监听器，
-  // 重试正好把「重复绑定」从 N+1 变成 N+2 —— 幂等责任留给模块自己的守卫。
+  // 审查 K3：模块 init 必须「一次」。ensurePageScripts 每次进页都会重跑（脚本本身去重，init 没有），于是第 N 次
+  // 进页就有 N 个 click handler —— 磁盘基准/内存清理这类带真实 IO 的按钮会被并发触发 N 遍，监听与 IPC 订阅只增不减。
+  // 记账放在调用前：init 抛错也不重试 —— 抛错时往往已绑了一半监听，重试正好把重复绑定从 N+1 变成 N+2，幂等责任留给模块自己的守卫。
   const _initedModules = new Set();
 
-  // P3-4（F3-M01）：三态返回 —— true=已加载（或本次加载成功）/ false=本次注入失败。
-  // 失败**不记账**（不进 _scriptLoaded）：下次进页会重新注入重试；旧实现失败也 resolve()，
-  // 上游无条件 initModuleOf 会把模块名写进 _initedModules —— 空 init 占台账，
-  // 此后即使补载成功也永不再初始化（页面按钮/订阅全无响应）。
+  // P3-4（F3-M01）：三态返回 —— true=已加载（或本次加载成功）/ false=本次注入失败。失败**不记账**（不进
+  // _scriptLoaded），下次进页会重新注入重试；旧实现失败也 resolve()，上游无条件 initModuleOf 会把模块名写进
+  // _initedModules —— 空 init 占台账，此后即使补载成功也永不再初始化。
   function loadScript(src) {
     if (_scriptLoaded.has(src)) return Promise.resolve(true);
     if (_scriptLoading.has(src)) return _scriptLoading.get(src); // 快速连点去重：同一 src 只注入一次
@@ -251,10 +246,9 @@
     }
   }
 
-  // 脚本加载完成后补一次 init（此前由 app.js 启动时的 safeInit 统一调用，
-  // 改成按需加载后必须在这里补，否则模块只挂了 window.X 却没绑任何事件）
-  // 审查 K3：按模块名记账，只放第一次过去。IDLE_SCRIPTS 与 PAGE_SCRIPTS 有交集
-  // （pathbinding 同时在两侧），单靠「脚本是否新加载」判不住重复。
+  // 脚本加载完成后补一次 init（此前由启动时的 safeInit 统一调用，改成按需加载后必须在这里补，
+  // 否则模块只挂了 window.X 却没绑任何事件）。审查 K3：按模块名记账、只放第一次过去 ——
+  // IDLE_SCRIPTS 与 PAGE_SCRIPTS 有交集（pathbinding 同时在两侧），单靠「脚本是否新加载」判不住重复。
   function initModuleByName(name) {
     if (!MODULES_NEEDING_INIT.has(name) || _initedModules.has(name)) return;
     _initedModules.add(name);
@@ -267,12 +261,10 @@
     initModuleByName(String(src).split('/').pop().replace(/\.js$/, ''));
   }
 
-  // 首帧空闲后预取的非关键脚本：视觉增强 + 自动更新 UI + 路径绑定。
-  // pathbinding 放这里是因为 cleanup.js 的 QQ/微信文件清理要读它的路径配置。
+  // 首帧空闲后预取的非关键脚本清单见上方 IDLE_SCRIPTS。
   function scheduleIdleLoads() {
     const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1000));
     idle(() => { IDLE_SCRIPTS.forEach((src) => loadScript(src).then((ok) => {
-      // P3-4（F3-M01）：失败不 init（空 init 会占 _initedModules 台账，此后补载成功也不再初始化）
       if (ok) initModuleOf(src);
       else window.app?.log?.('warn', '空闲脚本加载失败（未占 init 台账，下次进页重试） ' + src);
     }).catch((e) => {
@@ -307,10 +299,9 @@
     document.querySelectorAll('.cleanup-view').forEach(v => {
       v.classList.toggle('active', v.dataset.cleanupPanel === view);
     });
-    // 操作行与分段栏同行（窗口界面升级3）：仅显示当前子视图的操作按钮。
-    // 选择器必须锁在 #page-cleanup 内 —— `.cleanup-toolbar-actions` 这个类名软件卸载页
-    // 也在用（残留扫描面板同样借用它），全局选会把卸载页工具栏的 active 一并摘掉，
-    // 表现为「刷新列表 / 清理报告 / 残留扫描」整排凭空消失（2026-09-30 用户截图反馈）。
+    // 操作行与分段栏同行（窗口界面升级3）：仅显示当前子视图的操作按钮。选择器必须锁在 #page-cleanup 内 ——
+    // `.cleanup-toolbar-actions` 这个类名软件卸载页也在用（残留扫描面板同样借用它），全局选会把卸载页工具栏的
+    // active 一并摘掉，表现为「刷新列表 / 清理报告 / 残留扫描」整排凭空消失（2026-09-30 用户截图反馈）。
     document.querySelectorAll('#page-cleanup .cleanup-toolbar-actions').forEach(el => {
       el.classList.toggle('active', el.dataset.actionsFor === view);
     });
@@ -473,9 +464,8 @@
       toast('warning', '当前环境不支持权限提升');
       return false;
     }
-    // 已是管理员就别走「确认 → UAC → 重启」：那次重启什么权限也没换来，还会把主窗
-    // 交接进两个实例重叠建窗的路径（2026-10-14 提权后合成层花屏）。后端有同一判据兜底，
-    // 这里只是提前把那句「应用会以管理员身份重启」的误导文案省掉。
+    // 已是管理员就别走「确认 → UAC → 重启」：那次重启什么权限也没换来，还会把主窗交接进两个实例重叠建窗的路径
+    // （2026-10-14 提权后合成层花屏）。后端有同一判据兜底，这里只是提前省掉那句「应用会以管理员身份重启」的误导文案。
     const ADMIN_ALREADY_TIP = '当前已是管理员权限，无需重启应用';
     if (appState.isAdmin === true) {
       toast('info', ADMIN_ALREADY_TIP);
@@ -606,9 +596,8 @@
   function renderMarkdown(md) {
     // 行内元素：**粗体**、`代码`、链接、图片。顺序要紧 —— 图片先于链接被吃掉，
     // 否则 `![alt](url)` 会被链接规则拆成裸 `!`+锚点。
-    // 外链图（readme 顶部的 shields 徽章）一律**剔除**：CSP 的 img-src 不放行 https，
-    // 渲染出来只会是碎图；`<a href>` 只对 http(s) 生效，相对链接（如 update.md）
-    // 降级成纯文本，避免点出一个走不通的死链。
+    // 外链图（readme 顶部的 shields 徽章）一律**剔除**：CSP 的 img-src 不放行 https，渲染出来只会是碎图；
+    // `<a href>` 只对 http(s) 生效，相对链接（如 update.md）降级成纯文本，避免点出一个走不通的死链。
     const escapeHtmlInline = (text) => escapeHtml(text)
       .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
       .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
@@ -691,9 +680,8 @@
     const backdrop = document.getElementById('usageBackdrop');
     if (!backdrop) return;
     backdrop.style.display = 'flex';
-    // 审查 v2-F8：这个弹窗声明了 `role="dialog" aria-modal="true"`，却全程没有焦点管理 ——
-    // 打开时不移焦点、Tab 不圈闭、关闭时不归还，屏幕阅读器与纯键盘用户被留在弹窗背后。
-    // 仓库自己有正确做法（`ds.focusTrap`，modal.js:145 工厂在用），这里直接复用同一件。
+    // 审查 v2-F8：这个弹窗声明了 `role="dialog" aria-modal="true"` 却全程没有焦点管理 —— 打开时不移焦点、Tab 不圈闭、
+    // 关闭时不归还，屏幕阅读器与纯键盘用户被留在弹窗背后。仓库自己有正确做法（`ds.focusTrap`，modal.js:145 工厂在用），这里直接复用同一件。
     const modalEl = backdrop.querySelector('.usage-modal');
     if (window.ds && typeof window.ds.focusTrap === 'function' && modalEl) {
       usageTrap?.release();
@@ -701,9 +689,8 @@
     }
     const body = document.getElementById('usageBody');
     if (!window.api?.app?.readUsage) {
-      // 审查 v2-M21：这条文案原先写「仅在 Electron 环境中可用」——本仓库是 Tauri 轨，
-      // 而且 `app:read-usage` 命令真实存在，走到这个分支只可能是 **桥没就绪**（真故障），
-      // 把故障说成"这功能不在这个版本里"会让用户不再报、也让下一轮排查直接跳过。
+      // 审查 v2-M21：这条文案原先写「仅在 Electron 环境中可用」——本仓库是 Tauri 轨，而且 `app:read-usage` 命令真实
+      // 存在，走到这个分支只可能是 **桥没就绪**（真故障）；把故障说成"这功能不在这个版本里"会让用户不再报、下一轮排查也会直接跳过。
       body.innerHTML = '<div class="empty-state"><p>使用说明未能加载：本地接口未就绪（window.api 缺失），请重启应用后再试</p></div>';
       return;
     }
@@ -799,12 +786,10 @@
     if (el) el.textContent = value;
   }
 
-  // ==================== 关闭流程（v2.7.0） ====================
-  // 关闭编排已全部移交主进程：点击 X → 窗口立即隐藏，断开连接/清理临时文件/保存日志
-  // 等收尾在后台静默进行后自动退出。渲染层不再展示「感谢使用」Toast，也不发送
-  // shutdown:complete —— 该通道与 shutdown:begin 已于 2026-09-29（J3）整链摘除：
-  // begin 是空函数，complete 会让任意应用窗强制 app.exit(0)，而退出早已由
-  // RunEvent::Exit → on_app_exit 承担，留着只是多一个退出面。
+  // 关闭流程（v2.7.0）：编排已全部移交主进程 —— 点击 X → 窗口立即隐藏，断开连接/清理临时文件/保存日志
+  // 等收尾在后台静默进行后自动退出。渲染层不再展示「感谢使用」Toast，也不发送 shutdown:complete：
+  // 该通道与 shutdown:begin 已于 2026-09-29（J3）整链摘除（begin 是空函数，complete 会让任意应用窗强制
+  // app.exit(0)，而退出早已由 RunEvent::Exit → on_app_exit 承担，留着只是多一个退出面）。
 
   // 初始化
   async function init() {
@@ -907,9 +892,8 @@
     // 点击空白区域关闭最顶层 Toast
     document.addEventListener('click', dismissTopToastOnClick);
 
-    // ==================== 窗口尺寸变化修复（最大化/还原/手动缩放） ====================
-    // 只强制一次布局回流，不给标题栏/主布局追加 transform 合成层；后者在
-    // Electron 最大化后可能留下过期的 hit-test 缓存，导致鼠标事件落不到按钮。
+    // 窗口尺寸变化修复（最大化/还原/手动缩放）：只强制一次布局回流，不给标题栏/主布局追加 transform 合成层；
+    // 后者在 Electron 最大化后可能留下过期的 hit-test 缓存，导致鼠标事件落不到按钮。
     let resizeTimer = null;
     function forceHitTestRefresh() {
       void document.documentElement.offsetWidth;
@@ -935,7 +919,8 @@
         forceHitTestRefresh();
       }, 120);
     });
-    window.api?.window?.onResized?.((bounds) => {
+    // F3-L03：订阅返回值收账（窗口级回收时经 window.app.teardownSubscriptions 统一退订）
+    trackSubscription(window.api?.window?.onResized?.((bounds) => {
       // Win11 27H2：最大化期间由渲染层自绘不透明底色，避免 DWM 材质层黑帧；
       // 强制一次回流促使合成器立即提交新帧，消除最大化/还原后的残帧。
       const isMax = !!(bounds && bounds.maximized);
@@ -945,18 +930,21 @@
       }
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(forceHitTestRefresh, 0);
-    });
+    }));
 
     // 日志页面
     document.getElementById('btnRefreshLog')?.addEventListener('click', () => window.logger?.load?.());
-    document.getElementById('btnExportLog')?.addEventListener('click', () => window.logger?.export?.());
+    // F3-M05：export 是 async，处理器必须 await —— 旧写法丢弃 Promise，导出链抛出的
+    // 异常静默落全局网；exportLog 内部已自兜失败提示，这里再兜一手防漏网。
+    document.getElementById('btnExportLog')?.addEventListener('click', async () => {
+      try { await window.logger?.export?.(); } catch (e) { console.warn('[Trim] 导出日志失败:', e); }
+    });
     document.getElementById('btnClearLog')?.addEventListener('click', () => window.logger?.clear?.());
     document.getElementById('btnUsageGuide')?.addEventListener('click', showUsageGuide);
     document.getElementById('btnUsageClose')?.addEventListener('click', closeUsageGuide);
     // 批次：外部链接（GitHub / AtomGit）—— 走受控 IPC，主进程只放行 https
-    // 审查 v2-L8：`openExternal` 返回 Promise，原 `try { ... } catch (_) {}` 只抓同步异常，
-    // reject 会静默落到全局 unhandledrejection（只记日志不弹 toast），用户点了没反应。
-    // 改成 await + 显式失败反馈，通道缺席也要说清。
+    // 审查 v2-L8：`openExternal` 返回 Promise，原 `try { ... } catch (_) {}` 只抓同步异常，reject 会静默落到全局
+    // unhandledrejection（只记日志不弹 toast），用户点了没反应；改成 await + 显式失败反馈，通道缺席也要说清。
     [['btnGitHub', 'https://github.com/xiaoxu1642/trim-tauri/issues'],
      ['btnAtomGit', 'https://atomgit.com/xiaoxiaoxu1642/trim-tauri/issues']].forEach(([id, url]) => {
       document.getElementById(id)?.addEventListener('click', async () => {
@@ -987,12 +975,11 @@
 
     // 初始化各模块
     // v3.7.0 议题五：只初始化首屏已加载的模块；其余改到 ensurePageScripts 加载后按需 init。
-    // 审查 K3：这几个也走 initModuleByName —— 它们同样在 MODULES_NEEDING_INIT 里，
-    // 原先各走一条路径（这里一次 + 首次进页 ensurePageScripts 再一次）等于绑两份。
-    // v3 C 的 P0 修正：这里**不能有 cleanup**。initModuleByName 会先把模块名写进
-    // _initedModules 再调 window.cleanup?.init?.()，而脚本此刻还没注入 —— 记账成功、
-    // init 空转，随后 ensurePageScripts 加载完脚本也因台账已占用而永不重跑，表现为
-    // 清理页按钮全部没绑事件、IPC 订阅缺失。cleanup 的 init 唯一入口是加载完成后那次。
+    // 审查 K3：这几个也走 initModuleByName —— 它们同样在 MODULES_NEEDING_INIT 里，原先各走一条路径
+    // （这里一次 + 首次进页 ensurePageScripts 再一次）等于绑两份。
+    // v3 C 的 P0 修正：这里**不能有 cleanup**。initModuleByName 会先把模块名写进 _initedModules 再调
+    // init，而脚本此刻还没注入 —— 记账成功、init 空转，随后脚本加载完也因台账已占用而永不重跑，
+    // 表现为清理页按钮全部没绑事件、IPC 订阅缺失；cleanup 的 init 唯一入口是加载完成后那次。
     initModuleByName('overview');
     initModuleByName('deviceinfo');
     initModuleByName('fontmanager');
@@ -1025,7 +1012,8 @@
     window.fontmanager?.restore?.();
 
     // 暴露给其它模块（须在页面模块启动逻辑之前，保证其可调用 app 能力）
-    window.app = { toast, confirm, confirmDanger, confirmWarning, showPreviewModeBanner, log, switchPage, loadAppInfo, requestElevation, registerToast, unregisterToast, getState: () => appState };
+    // teardownSubscriptions：F3-L03 的退订出口，窗口级回收复用时由调用方按需调用。
+    window.app = { toast, confirm, confirmDanger, confirmWarning, showPreviewModeBanner, log, switchPage, loadAppInfo, requestElevation, registerToast, unregisterToast, teardownSubscriptions, getState: () => appState };
 
     // 初始加载：恢复上次活跃页（窗口状态记忆），无记录则默认系统概览
     const lastPage = (() => { try { return localStorage.getItem(ACTIVE_PAGE_KEY); } catch (e) { return null; } })();
@@ -1047,28 +1035,31 @@
 
     // B5：提权重启后未检测到新实例时，主进程会保持当前实例运行并通知到这里
     if (window.api?.elevate?.onNotice) {
-      window.api.elevate.onNotice(data => {
+      // F3-L03：订阅返回值收账（同上）
+      trackSubscription(window.api.elevate.onNotice(data => {
         toast('warning', (data && data.message) || '未检测到新实例启动，已保持当前运行状态');
-      });
+      }));
     }
 
     // v5 P1 电源计划编辑接回：订阅必须在首屏脚本层——syspanel.js 进 Windows 设置页才注入，
     // 等它订阅时主进程发的 intent（首帧后仅一次）早已发完，接不回来（V13）。
     // 收到后转交 syspanel；未加载则切页触发注入，其 init 时从 appState 自取。
     if (window.api?.syspanel?.onEditIntent) {
-      window.api.syspanel.onEditIntent((intent) => {
+      // F3-L03：订阅返回值收账（同上）
+      trackSubscription(window.api.syspanel.onEditIntent((intent) => {
         if (!intent || !intent.schemeGuid) return;
         appState.pendingPowerEditIntent = intent;
         if (window.syspanel?.onEditIntent) window.syspanel.onEditIntent(intent);
         else switchPage('windows-settings');
-      });
+      }));
     }
 
     // 内存占用优化：窗口最小化/隐藏后主动回收渲染进程堆内存
     // （主进程经 js-flags --expose-gc 暴露 gc()，同时通过 memory:trim 通知；浏览器模式退化为 visibilitychange）
     const trimRendererMemory = () => { try { window.gc && window.gc(); } catch (e) {} };
     if (window.api?.app?.onMemoryTrim) {
-      window.api.app.onMemoryTrim(trimRendererMemory);
+      // F3-L03：订阅返回值收账（同上）
+      trackSubscription(window.api.app.onMemoryTrim(trimRendererMemory));
     }
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') trimRendererMemory();
@@ -1076,9 +1067,10 @@
 
     // v2.8.0：窗口焦点状态——失焦时 body 挂 win-inactive（视觉纱降低存在感）
     if (window.api?.window?.onFocusState) {
-      window.api.window.onFocusState((state) => {
+      // F3-L03：订阅返回值收账（同上）
+      trackSubscription(window.api.window.onFocusState((state) => {
         document.body.classList.toggle('win-inactive', !(state && state.focused));
-      });
+      }));
     }
 
     // v2.8.0：第三方窗口美化工具兼容性提示（主进程启动后一次性检测的结果，无工具时不可见）

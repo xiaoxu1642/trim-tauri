@@ -8,7 +8,13 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
 
-fn to_hex(bytes: &[u8]) -> String {
+/// 摘要字节 → 小写十六进制（**全仓唯一实现**，AGENTS §5.16）。
+///
+/// 为什么是 `pub`：`restore_pack` 要在「边读边写 zip」的单趟循环里自己持有 `Sha256`
+/// 增量更新（哈希与写盘必须同趟完成），它复用的就是这份编码，而不是再抄一个
+/// `iter().map(|b| format!("{b:02x}"))`。两侧一旦分开，同一内容在 list 侧与 restore
+/// 侧就会算出两个串，manifest 的自检（哈希不符即报错停下）当场失真。
+pub fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push_str(&format!("{b:02x}"));
@@ -42,14 +48,35 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// 用例样本目录一律放在 **lib 单测隔离数据根**下（`paths::lib_test_data_root`，C08），
+    /// 不放全局 `%TEMP%`：原先两条用例在 `%TEMP%` 建 `trim-hash-<pid>` 且只删文件不删目录，
+    /// 每次 cargo test 留一个空目录（本机现算已堆到数百个）。守卫按整个目录删除，
+    /// 断言失败（panic）时同样收掉，不留残留。AGENTS §3「私有 tmp」口径的测试侧。
+    struct SampleDir {
+        dir: std::path::PathBuf,
+    }
+
+    impl SampleDir {
+        fn new(tag: &str) -> Self {
+            let dir = crate::engine::paths::lib_test_data_root().join(format!("hash-{tag}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("建样本目录");
+            Self { dir }
+        }
+    }
+
+    impl Drop for SampleDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     #[test]
     fn sha256_matches_known_vector() {
-        let dir = std::env::temp_dir().join(format!("trim-hash-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let p = dir.join("vec.txt");
+        let s = SampleDir::new("known-vector");
+        let p = s.dir.join("vec.txt");
         std::fs::write(&p, b"abc").unwrap();
         let h = sha256_file(&p).expect("哈希失败");
-        let _ = std::fs::remove_file(&p);
         assert_eq!(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
 
@@ -57,19 +84,20 @@ mod tests {
     /// （AGENTS §5.16「判据不许有两套实现」）。
     #[test]
     fn bytes_and_file_hashes_agree() {
-        let dir = std::env::temp_dir().join(format!("trim-hash2-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let p = dir.join("same.bin");
+        let s = SampleDir::new("bytes-vs-file");
+        let p = s.dir.join("same.bin");
         let body: Vec<u8> = (0..1000u32).flat_map(|i| i.to_le_bytes()).collect();
         std::fs::write(&p, &body).unwrap();
         let from_file = sha256_file(&p).expect("文件哈希失败");
         let from_bytes = sha256_bytes(&body);
-        let _ = std::fs::remove_file(&p);
         assert_eq!(from_file, from_bytes, "同一份内容两种算法给出不同摘要");
         // 已知向量（空串）：锁住 to_hex 的小写与补零口径
         assert_eq!(
             sha256_bytes(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+        // to_hex 外露给增量哈希方复用（restore_pack 的 sha256 自检就靠它）：
+        // 空摘要必须是 64 个 0，少一位补零就断
+        assert_eq!(to_hex(&[0u8; 32]), "0".repeat(64));
     }
 }

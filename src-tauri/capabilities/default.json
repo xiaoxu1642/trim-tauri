@@ -1,17 +1,16 @@
 {
-  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口能力：自绘 caption 需要的窗口命令 + 事件订阅。子窗见 subwindows.json。审查 M4：原 `windows:[\"*\"]` 把 close/set_position/emit-to 一并发给了四个子窗，且 5 项窗口权限全仓无人调用，已删。",
+  "description": "主窗口能力：自绘 caption 需要的窗口命令 + 事件订阅。子窗见 subwindows.json。审查 M4：原 `windows:[\"*\"]` 把 close/set_position/emit-to 一并发给了四个子窗，且 5 项窗口权限全仓无人调用，已删。审查 D1-L01（v7）：`core:default` 展开是上游默认全集 92 条，渲染层实调只有 8 条，故删 `core:default` 与 `core:event:default`，逐条点名 6 条窗口命令 + listen/unlisten + 2 条 deny；menu/tray/path/resources/webview 等空转面（含 window|get_all_windows、webview|internal_toggle_devtools）一并收回。实调清单由渲染层现算核对（tauri-api.js 的 pluginInvoke 与 onEvent），收紧后新增窗口/事件命令必须回来补条目。",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "core:event:default",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-start-resize-dragging",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "core:event:deny-emit",
     "core:event:deny-emit-to"
   ]

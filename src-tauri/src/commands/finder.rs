@@ -1273,6 +1273,9 @@ mod tests {
     /// R4（2026-10-15）：失败分档必须与共享夹具一致（跨 crate 共享的是夹具**字节**，
     /// 判定两级各自独立实现），且三个分档字段真的被渲染层消费——字段名写错 =
     /// 「分档了但没人用」，静默回到「只报总失败数」。
+    /// P1-W2 校正版：契约对象是**字段名 + 被当数消费**，不是「`data.` 前缀」。旧断言
+    /// 按字面 `data.failedBusy` 匹配，前端 M04 把入参折成 `const d = data || {}` 之后
+    /// 当场判红（改名不该破坏跨语言契约，这条本身就是假阳性）。
     #[test]
     fn 删除失败分档_与共享夹具及渲染层消费面一致() {
         let fx = include_str!("../../../tools/fixtures/finder-delete-modes.json");
@@ -1295,10 +1298,19 @@ mod tests {
             }
         }
         assert_eq!(ok_buckets, 1, "夹具必须恰好一个 ok 档（已移入回收站）");
-        // 渲染层消费面：分档字段名必须与 finder.js 的取数一致（否则分档白做）
+        // 渲染层消费面：字段名必须与 finder.js 一致，且每个字段都落在同一条 `Number(` 
+        // 表达式里（只声明不取数 = 分档白做，与字段名写错同一种失效形态）。
         let js = include_str!("../../../src/scripts/finder.js");
-        for field in ["data.failedBusy", "data.failedRefused", "data.failedName"] {
-            assert!(js.contains(field), "finder.js 没有消费分档字段 {field}");
+        for field in ["failedBusy", "failedRefused", "failedName"] {
+            let consumed = js.match_indices(field).any(|(i, _)| {
+                let before = &js[..i];
+                match (before.rfind("Number("), before.rfind('\n')) {
+                    (Some(n), Some(l)) => n > l,
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                }
+            });
+            assert!(consumed, "finder.js 没有把分档字段 {field} 当数消费（必须出现在 Number(…) 内）");
         }
     }
 }

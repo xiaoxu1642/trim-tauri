@@ -338,7 +338,7 @@
     const sorted = xtable.sortItems(items, state, SORT_FNS);
     const head = xtable.renderHeader(columns, state);
     pendingBatches.push({ tableKey, groupKey, columns, rows: sorted });
-    return `<div class="xtable xtable-virtual" data-table="${tableKey}" data-group-key="${groupKey}">${head}<div class="xtable-body"></div></div>`;
+    return `<div class="xtable xtable-virtual" data-table="${window.ds.escAttr(tableKey)}" data-group-key="${window.ds.escAttr(groupKey)}">${head}<div class="xtable-body"></div></div>`;
   }
 
   function previewBtnHtml(item, hasImages, imageCount) {
@@ -368,7 +368,9 @@
         case 'check':
           // P3-1（可达性）：三属性同现（role/tabindex/aria-checked），键盘 Space 激活
           // 由 ds.bindCheckboxKeys 合成 click；aria-checked 在 updateUI 里随选中态同步
-          inner = `<div class="checkbox ${isSelected ? 'checked' : ''}" data-checkbox="${item.id}" role="checkbox" tabindex="0" aria-checked="${isSelected ? 'true' : 'false'}"></div>`;
+          // F4a1-L04：role=checkbox 必须有可访问名——行是 div 非表格语义，读屏
+          // 只报「复选框，未选中」说不出是哪一项，aria-label 显式给条目名。
+          inner = `<div class="checkbox ${isSelected ? 'checked' : ''}" data-checkbox="${item.id}" role="checkbox" tabindex="0" aria-checked="${isSelected ? 'true' : 'false'}" aria-label="${escapeHtml(item.name)}"></div>`;
           break;
         case 'name': {
           // 中缝省略：超长文件名保留首尾（title 仍展示完整原文）
@@ -425,7 +427,10 @@
             : '<span class="xtable-cell-muted">—</span>';
           break;
         case 'risk':
-          inner = `<span class="category-risk ${item.risk}">${RISK_LABELS[item.risk] || item.risk}</span>`;
+          // F4a1-L01：risk 是规则库封闭枚举（low/medium/high），今天没有实际注入面，
+          // 但同一函数里 nature 侧已走转义、这里却两侧直插——口径按「规则库字段渲染前
+          // 一律转义」统一，枚举日后扩档不会变成 class/text 双注入面。
+          inner = `<span class="category-risk ${window.ds.escAttr(item.risk)}">${escapeHtml(RISK_LABELS[item.risk] || item.risk)}</span>`;
           break;
         case 'size': {
           let sizeInner = size !== null && size !== undefined ? formatSize(size) : '<span class="xtable-cell-muted">—</span>';
@@ -457,7 +462,7 @@
       return `<div class="xtable-td" data-cell="${col.key}" style="${style}"${align}>${inner}</div>`;
     }).join('');
 
-    return `<div class="xtable-row" data-id="${item.id}">${cells}</div>`;
+    return `<div class="xtable-row" data-id="${window.ds.escAttr(item.id)}">${cells}</div>`;
   }
 
   // 渲染分类列表（表格视图，支持二级分类）
@@ -534,13 +539,13 @@
         const subGroups = group.subGroups.filter(sg => sg.items.length > 0);
         const totalItems = subGroups.reduce((s, sg) => s + sg.items.length, 0);
         groupEl.innerHTML = `
-          <div class="category-group-header" data-group-toggle="${groupKey}">
+          <div class="category-group-header" data-group-toggle="${window.ds.escAttr(groupKey)}">
             <span class="category-group-icon">${group.icon}</span>
             <span>${escapeHtml(group.title)}</span>
             ${groupKey === 'special' ? '<span class="special-inline-note" data-tip="动作型维护项为不可逆系统操作，默认不勾选">不可逆系统操作 · 默认不勾选</span>' : ''}
-            <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary)" data-group-count="${groupKey}">${totalItems} 项 · ${subGroups.length} 分类</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary)" data-group-count="${window.ds.escAttr(groupKey)}">${totalItems} 项 · ${subGroups.length} 分类</span>
           </div>
-          <div class="category-group-content" data-group-content="${groupKey}">
+          <div class="category-group-content" data-group-content="${window.ds.escAttr(groupKey)}">
             ${subGroups.map(sg => renderSubGroup(groupKey, sg)).join('')}
           </div>
         `;
@@ -550,12 +555,12 @@
         const items = group.items;
         if (!items.length) continue;
         groupEl.innerHTML = `
-          <div class="category-group-header" data-group-toggle="${groupKey}">
+          <div class="category-group-header" data-group-toggle="${window.ds.escAttr(groupKey)}">
             <span class="category-group-icon">${group.icon}</span>
             <span>${escapeHtml(group.title)}</span>
-            <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary)" data-group-count="${groupKey}">${items.length} 项</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary)" data-group-count="${window.ds.escAttr(groupKey)}">${items.length} 项</span>
           </div>
-          <div class="category-group-content" data-group-content="${groupKey}">
+          <div class="category-group-content" data-group-content="${window.ds.escAttr(groupKey)}">
             ${renderTable(groupKey, items, groupKey)}
           </div>
         `;
@@ -651,12 +656,12 @@
   //（该子分组全部项大小）。旧行为把全部项大小拼在「2/5 项」后有歧义，用户会误读为已选大小。
   function renderSubGroup(groupKey, sg) {
     return `
-      <div class="sub-group" data-sub-group="${sg.id}">
-        <div class="sub-group-header" data-sub-toggle="${sg.id}">
+      <div class="sub-group" data-sub-group="${window.ds.escAttr(sg.id)}">
+        <div class="sub-group-header" data-sub-toggle="${window.ds.escAttr(sg.id)}">
           <span class="sub-group-chevron">${chevronSvg()}</span>
-          <div class="checkbox" data-sub-checkbox="${sg.id}" role="checkbox" tabindex="0" aria-checked="false"></div>
+          <div class="checkbox" data-sub-checkbox="${window.ds.escAttr(sg.id)}" role="checkbox" tabindex="0" aria-checked="false" aria-label="${escapeHtml(sg.name)}"></div>
           <span class="sub-group-name">${sg.name}</span>
-          <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary);text-align:right;line-height:1.5" data-sub-meta="${sg.id}"><span data-sub-meta-line1="${sg.id}">${sg.items.length} 项</span><span data-sub-meta-line2="${sg.id}" style="display:block"></span></span>
+          <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary);text-align:right;line-height:1.5" data-sub-meta="${window.ds.escAttr(sg.id)}"><span data-sub-meta-line1="${window.ds.escAttr(sg.id)}">${sg.items.length} 项</span><span data-sub-meta-line2="${window.ds.escAttr(sg.id)}" style="display:block"></span></span>
         </div>
         <div class="sub-group-content">
           ${renderTable(groupKey, sg.items, groupKey + ':' + sg.id)}
@@ -1309,7 +1314,9 @@
       return;
     }
     lockQueryBusy = true;
-    if (btn) { btn.classList.add('busy'); btn.disabled = true; }
+    // F4a1-L08：不给查询按钮挂 busy 类——唯一 .busy 规则挂在 .btn-accent.busy svg 上，
+    // 该按钮是 btn-primary 加了无视觉表现；进行中反馈由 disabled 与结果区文案承担。
+    if (btn) btn.disabled = true;
     // 查询期间先禁用「结束进程」：白名单每次查询覆盖，防在途查询改写名单后被误用
     const killBtn = document.getElementById('lockKillBtn');
     if (killBtn) killBtn.disabled = true;
@@ -1321,7 +1328,7 @@
       resp = null;
     }
     lockQueryBusy = false;
-    if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
+    if (btn) btn.disabled = false;
     if (!resp || !resp.success) {
       lockQueryPath = '';
       lockQueryProcs = [];
@@ -1404,6 +1411,7 @@
       );
       if (!ok) {
         isCleaning = false;
+        setCleaningBtn(false);
         updateUI();
         return;
       }
@@ -1690,13 +1698,9 @@
         // K13：清理后刷新「重启后删除」入口——本批可能刚登记了失败项
         refreshPendingBadge();
         const freed = result.totalFreed || 0;
-        // 审查 M-3：回收站模式下移入回收站的体积不计入 totalFreed，单独展示
-        const recycledBytes = Number(result.recycledBytes) || 0;
-        const recycledCount = Number(result.recycledCount) || 0;
+        // F4a1-L05：原「审查 M-3」分支读 result.recycledBytes/recycledCount——两字段
+        // 在本文件只有读点、后端回执链零写点（v3.3.0 已固定 toRecycle=false），属死分支。
         let toastMsg = `清理完成！释放 ${formatSize(freed)} 空间`;
-        if (recycledCount > 0) {
-          toastMsg += `；另有 ${recycledCount} 项（${formatSize(recycledBytes)}）已移入回收站，清空回收站后才会真正释放`;
-        }
         // P2-06/D-02：本批含 explorer 后置动作且该项确有成功——在完成提示里声明
         // 「重启资源管理器后才重建」（图标/缩略图缓存由资源管理器持有，不重启会看到空白图标）。
         const explorerDone = (result.details || []).some(d => d.status === 'ok' && explorerPickIds.has(d.id));

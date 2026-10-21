@@ -34,7 +34,11 @@ use std::path::Path;
 //   · out_line / err_line 在捕获模式下写内存，否则照旧写真实标准流；
 //   · fatal 在捕获模式下改为 panic（载荷 FatalMarker），由 `capture` 的 catch_unwind
 //     收成 exit code 2 + stderr 行；CLI 路径不进入捕获模式，仍是 flush→stderr→exit(2)；
-//   · 输出字节与退出码因此**逐字不变**（stdout 全部先于 stderr，与原 fatal 的 flush 顺序一致）。
+//     N1a-M05：载荷**不是** FatalMarker 的 panic（引擎自己的越界/unwrap）另给一档退出码
+//     `EXIT_ENGINE_PANIC=3`，并由 hook 把详情落进 CAP.err —— 旧写法把它也折成 2，
+//     于是「引擎 bug」与「用户规则库不合法」在回执上长成一张脸；
+//   · 输出字节与 fatal 的退出码因此**逐字不变**（stdout 全部先于 stderr，与原 fatal 的
+//     flush 顺序一致）；唯一新增的分档是「引擎 panic」的 `EXIT_ENGINE_PANIC`（N1a-M05）。
 //
 // ⚠️ 本文件另有并行任务在改（Sink 化）：本块**只新增**，不改既有函数签名与内部语义。
 
@@ -52,30 +56,86 @@ struct Cap {
     /// `checklocked_json`，以及 `tests/cleanup_scan_rule_diff.rs` 的对拍）必须照旧全量
     /// 攒进 `out` 并 `write_back` ⇒ 由这个开关区分，**逐字节行为不变**。
     discard_out: bool,
+    /// N1a-M05：捕获期间 panic hook 是否已经落过「引擎 panic」行。
+    /// `capture` 的 `Err` 分支据此决定要不要补一行兜底 —— 绝不许交出
+    /// 「退出码非 0 + 空 stderr」那种什么都没说出口的回执。
+    panic_traced: bool,
 }
 
 thread_local! {
-    static CAP: std::cell::RefCell<Cap> =
-        std::cell::RefCell::new(Cap { out: String::new(), err: String::new(), active: false, discard_out: false });
+    static CAP: std::cell::RefCell<Cap> = std::cell::RefCell::new(Cap {
+        out: String::new(),
+        err: String::new(),
+        active: false,
+        discard_out: false,
+        panic_traced: false,
+    });
     /// 逐行回调（数据返回式入口的可选参数；捕获模式下 out_line 顺带回调此行）
     static HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> = std::cell::RefCell::new(None);
 }
 
 /// 捕获串行锁：panic hook 是进程级的，同时只允许一次捕获
 static CAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-/// fatal 的 panic 载荷标记（只有它允许被静默吞掉，其余 panic 仍走原 hook 打印）
+/// fatal 的 panic 载荷标记（只有它允许被静默吞掉，其余 panic 必须留痕）
 struct FatalMarker;
+/// 回执退出码：规则库/输入致命错（`fatal` 已落「致命: …」行）
+const EXIT_FATAL: i32 = 2;
+/// 回执退出码：引擎内部 panic（N1a-M05）。
+/// 为什么必须与 `EXIT_FATAL` 分开：宿主唯一的判据是 `code != 0` + stderr 文本，
+/// 同一个 2 让「扫描器 own 的 bug」与「用户规则库不合法」在回执层长成一张脸，
+/// 而前者是要报障修引擎的、后者是要改规则的。
+const EXIT_ENGINE_PANIC: i32 = 3;
 static HOOK_ONCE: std::sync::Once = std::sync::Once::new();
 
-/// 装一次转发 hook：FatalMarker 静默，其它 panic 交回原 hook（不吞真 bug）
+/// 装一次转发 hook：FatalMarker 静默（fatal 自己落过行），其它 panic **既交回原 hook
+/// 打印、又落进 CAP.err**（不吞真 bug，也不让真 bug 在捕获模式下变成无声回执）。
 fn ensure_panic_hook() {
     HOOK_ONCE.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if info.payload().downcast_ref::<FatalMarker>().is_none() {
+            let is_fatal = info.payload().downcast_ref::<FatalMarker>().is_some();
+            if !is_fatal {
+                // N1a-M05：捕获模式下真 panic 只写进程真实 stderr 等于没写 ——
+                // 本文件 err_line 的注释就写明「GUI 子系统进程没有控制台，那几个字直接蒸发」。
+                // 这里**不能**用 `capturing()`：它走 `borrow()`，而 hook 恰恰可能在 CAP
+                // 已被借用的时刻触发，二次 panic 落在 panic hook 里 = 直接 abort。
+                record_panic_trace(info);
                 prev(info);
             }
         }));
+    });
+}
+
+/// 把 panic 详情写成一行留痕。刻意不走 `err_line`：hook 可能在 CAP 已被借用的
+/// 时刻触发（例如 out_line 里炸），`borrow_mut` 会二次 panic 把现场彻底搞丢。
+fn record_panic_trace(info: &std::panic::PanicHookInfo) {
+    // `PanicHookInfo::message()` 至今仍是 unstable；稳定面只有 payload 家族。
+    // `payload_as_str()` 覆盖 `panic!("...")` 与 `panic_any(&str)` 两种字符串载荷，
+    // 其余载荷（自定义结构体）退化成占位文案 —— 留痕的价值在「有这一行」，不在载荷类型。
+    let msg = info
+        .payload_as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| "(panic 载荷不是字符串)".to_string());
+    let loc = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "位置未知".to_string());
+    let line = format!("[cleanup-scan] 引擎 panic（非规则库致命错）: {msg} @ {loc}");
+    let _ = CAP.try_with(|c| {
+        let mut cap = match c.try_borrow_mut() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        // 非捕获态（CLI 之外的线程、或本线程没在跑扫描）不写内存，交给 prev 打真 stderr
+        if !cap.active {
+            return;
+        }
+        if !cap.panic_traced {
+            // 行边界可信（N1a-L05 同一判据）：panic 消息本体可能带换行
+            cap.err.push_str(&crate::util::diag_text(&line));
+            cap.err.push('\n');
+            cap.panic_traced = true;
+        }
     });
 }
 
@@ -117,6 +177,18 @@ fn out_line(line: &str) {
 /// 而 GUI 子系统进程没有控制台，那几个字直接蒸发 —— 引擎「已按规则降级并留痕」
 /// 的承诺就落空了。2026-10-04 磁盘清理审计 §3.2 把散落的 4 处 `eprintln!` 全部收编。
 fn err_line(line: &str) {
+    // N1a-L05：入站先压成单行（判据见 `util::diag_text`）。为什么包在出口而不是逐个
+    // 调用点：诊断有 20+ 处拼接点，逐点包装挡不住「下一处新调用点忘了包」，而这里的
+    // 语义本就是「一行 stderr」。留痕被路径/规则原文里的换行拆成两行，等于凭空多出
+    // 一条不存在的诊断，人工对账与按行数判定的机检都会被带偏。
+    // 干净文本走借用，不额外分配（read_dir 失败留痕可以一次上千条）。
+    let owned;
+    let line = if line.chars().any(|c| (c as u32) < 0x20) {
+        owned = crate::util::diag_text(line);
+        owned.as_str()
+    } else {
+        line
+    };
     CAP.with(|c| {
         let mut cap = c.borrow_mut();
         if cap.active {
@@ -146,16 +218,30 @@ fn capture(
         // 这里写成 `false` 会让 `discard_out` 变成未用变量、并让
         // `捕获带回调时不攒stdout副本而无回调逐字节照旧` 判红（2026-10-14 实测过一次）。
         cap.discard_out = discard_out;
+        // N1a-M05：每程复位，否则上一程的 hook 留痕会让本程跳过兜底行
+        cap.panic_traced = false;
     });
     HOOK.with(|h| *h.borrow_mut() = hook);
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     HOOK.with(|h| h.borrow_mut().take());
+    // N1a-M05：只有 FatalMarker 才是「规则库/输入致命错」（fatal 已在 err_line 里落过
+    // 「致命: …」行，回执 2 照旧）。其余 panic 是引擎自己的 bug，旧写法一律折成
+    // `(2, "", "")`：hook 的字进了进程真实 stderr，GUI 子系统没有控制台 ⇒ 宿主只看到
+    // 「原生扫描失败: 退出码 2」。这里改成 ① 分档退出码 ② 保证留痕非空。
+    let engine_panic = matches!(&res, Err(e) if e.downcast_ref::<FatalMarker>().is_none());
     let code = match res {
         Ok(c) => c,
-        Err(_) => 2, // fatal 已在 err_line 里落过「致命: …」行
+        Err(_) if engine_panic => EXIT_ENGINE_PANIC,
+        Err(_) => EXIT_FATAL,
     };
     let (out, err) = CAP.with(|c| {
         let mut cap = c.borrow_mut();
+        // 兜底：真 panic 但 hook 一行都没落下来（hook 被别的库抢占、或触发时 CAP 正被借用）
+        // ⇒ 至少留一行，绝不交出「非 0 + 空 stderr」。
+        if engine_panic && !cap.panic_traced && cap.err.is_empty() {
+            cap.err
+                .push_str("[cleanup-scan] 引擎 panic（非规则库致命错）: 未取到 panic 详情\n");
+        }
         cap.active = false;
         // 复位：CAP 是 thread_local，下一次不带回调的捕获必须照旧全量攒 stdout
         cap.discard_out = false;
@@ -2456,7 +2542,7 @@ fn fatal(msg: &str) -> ! {
     if cap {
         std::panic::panic_any(FatalMarker);
     }
-    std::process::exit(2);
+    std::process::exit(EXIT_FATAL);
 }
 
 /// 数据返回式入口（Tauri 进程内直调）：输出收集进内存，绝不写 stdout、绝不 exit。
@@ -2492,6 +2578,13 @@ pub fn run(argv: &[String]) -> i32 {
 
 /// argv = [categories_json, configured_paths_json, (可选) protect_json]；规则 JSON 由调用方读入
 fn scan_body(argv: &[String], input: &str) -> i32 {
+    // N1a-M05：`run_json` 的入口面不校 argv 长度（`run` 校，宿主直调与集成测试都不经过
+    // `run`），而下面两处 `argv[0]/argv[1]` 是裸下标 ⇒ 少传一个参数就是越界 panic，
+    // 正好落进「非 FatalMarker panic 无留痕」那条通道。检查必须落在**捕获体内**：
+    // 在捕获体外调 `fatal` 走的是 `process::exit`，会把宿主进程一起带走。
+    if argv.len() < 2 {
+        fatal("参数不足：需要 categories JSON 与 configuredPaths JSON（run_json 入口同 CLI 口径）");
+    }
     if input.trim().is_empty() {
         fatal("规则库解析失败：stdin 规则 JSON 为空");
     }
@@ -3317,7 +3410,7 @@ mod tests {
     /// 不存在→两表都进）。集成差分用例（tests/cleanup_scan_rule_diff.rs）钉接线，
     /// 本条钉三态语义本身——含「不存在两表都进」这个集成用例造不出来的形态。
     #[test]
-    fn excludePaths_分类器按实况分三态() {
+    fn exclude_paths_分类器按实况分三态() {
         let root = std::env::temp_dir().join(format!("trim-excl-class-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("Vendor.Tool")).unwrap();
@@ -3727,5 +3820,112 @@ mod tests {
         );
         drop(hold2);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// v7.2 W4（N1a-L05）破坏自证：诊断出口的入站单行化 —— 路径/规则原文里的换行
+    /// 不得伪造出第二行留痕（`@@PLANFILE@@` 前缀一旦被伪造进 stderr，按行前缀对账的
+    /// 人工与机检都会把它当成真输出）。
+    /// 判红自证：删掉 `err_line` 里的 `diag_text` 包装 ⇒ `lines().count()` 变 2 当场红。
+    #[test]
+    fn err_line_把外部原文压成一行留痕() {
+        let (code, _out, err) = capture(
+            None,
+            || {
+                err_line("[cleanup-scan] 规则 r1 路径 C:\\temp\n@@PLANFILE@@{\"id\":\"r1\"} 未解析");
+                0
+            },
+        );
+        assert_eq!(code, 0, "本用例只验诊断通道");
+        assert_eq!(
+            err.lines().count(),
+            1,
+            "留痕被换行拆成两行（等于凭空多出一行 @@PLANFILE@@）：{err}"
+        );
+        assert!(err.contains("\\n"), "换行必须转义成字面 \\\\n：{err}");
+        assert!(
+            err.contains(r"C:\temp"),
+            "留痕档位不该双写反斜杠（只中性化控制字符）：{err}"
+        );
+        // 干净文本一字不改（20+ 处既有留痕的逐字节口径不许被这条改动带跑）
+        let (_c2, _o2, err2) = capture(
+            None,
+            || {
+                err_line("[cleanup-scan] 普通留痕，无控制字符");
+                0
+            },
+        );
+        assert_eq!(err2, "[cleanup-scan] 普通留痕，无控制字符\n", "无控制字符时必须逐字节照旧");
+    }
+
+    /// v7.2 W4（N1a-M05）：捕获内三种出口必须分档，不许都折成「退出码 2 + 空 stderr」。
+    /// 点名四件事：① 规则库致命错仍是 2 且带「致命:」行、不被说成引擎 bug；
+    /// ② 真 panic 换档、带消息本体与触发位置；③ panic 消息自带换行也只落一行；
+    /// ④ 上一程的状态不污染下一程（正常捕获仍 0 码、err 空、out 逐字节照旧）。
+    /// 判红自证：把 `capture` 的 `Err(_) => EXIT_ENGINE_PANIC` 改回恒 2，②③ 同时红。
+    #[test]
+    fn 捕获内真panic留痕且与规则库致命错分退出码() {
+        // ① 规则库致命错（载荷 FatalMarker）：回执码与留痕照旧
+        let (code_fatal, _o, err_fatal) = capture(None, || fatal("stdin 规则 JSON 为空"));
+        assert_eq!(
+            code_fatal, EXIT_FATAL,
+            "规则库致命错的回执码不得变（宿主与 CLI 都按它对账）"
+        );
+        assert_eq!(err_fatal.lines().count(), 1, "致命行必须只有一行：{err_fatal}");
+        assert!(
+            err_fatal.contains("致命: stdin 规则 JSON 为空"),
+            "fatal 的留痕必须落进 CAP.err（不是进程 stderr）：{err_fatal}"
+        );
+        assert!(
+            !err_fatal.contains("引擎 panic"),
+            "规则库错不得被说成引擎 bug：{err_fatal}"
+        );
+
+        // ② 引擎真 panic（越界/unwrap 的形态）：换档 + 必须留痕
+        let (code_panic, _o, err_panic) = capture(None, || panic!("故意的样本消息 42"));
+        assert_eq!(
+            code_panic, EXIT_ENGINE_PANIC,
+            "真 panic 必须与规则库致命错分档，否则宿主分不清该修规则还是该修引擎：{code_panic}"
+        );
+        assert!(err_panic.contains("引擎 panic"), "留痕必须点名引擎 panic：{err_panic}");
+        assert!(
+            err_panic.contains("故意的样本消息 42"),
+            "留痕必须带 panic 消息本体（否则无从对账）：{err_panic}"
+        );
+        assert!(
+            err_panic.contains("cleanup_scan.rs"),
+            "留痕必须带触发位置：{err_panic}"
+        );
+        assert!(
+            !err_panic.contains("致命: "),
+            "引擎 bug 不得伪装成规则库致命错：{err_panic}"
+        );
+
+        // ③ panic 消息自带换行 ⇒ 仍然只有一行（与 N1a-L05 同一条出口护栏）
+        let (code3, _o, err3) = capture(None, || panic!("第一行\n第二行"));
+        assert_eq!(code3, EXIT_ENGINE_PANIC);
+        assert_eq!(err3.lines().count(), 1, "panic 留痕也不许多出第二行：{err3}");
+
+        // ④ 复位对照：紧随其后的一次正常捕获必须干净
+        let (code4, out4, err4) = capture(None, || {
+            out_line("@@ITEM@@{}");
+            0
+        });
+        assert_eq!(code4, 0);
+        assert!(err4.is_empty(), "上一程的 panic 状态不得漏进本程：{err4}");
+        assert_eq!(out4, "@@ITEM@@{}\n", "无回调形态的 stdout 必须逐字节照旧");
+    }
+
+    /// v7.2 W4（N1a-M05）：`run_json` 入口少传参数不得变成越界 panic（旧形态正好落进
+    /// 「非 FatalMarker panic ⇒ 无留痕」那条通道）。检查落在捕获体内 ⇒ 走 fatal 一档。
+    #[test]
+    fn run_json_参数不足走致命档而不是越界() {
+        let (code, _out, err) = run_json(&["[]".to_string()], "{}", None);
+        assert_eq!(code, EXIT_FATAL, "参数不足必须是规则库/输入致命错那一档：{code}");
+        assert!(err.contains("参数不足"), "必须说清缺什么：{err}");
+        assert!(!err.contains("引擎 panic"), "不是引擎 bug：{err}");
+        // 对照：参数够（stdin 空仍致命，但报的是规则库那条）
+        let (code2, _o2, err2) = run_json(&["[]".to_string(), "{}".to_string()], "", None);
+        assert_eq!(code2, EXIT_FATAL);
+        assert!(err2.contains("stdin 规则 JSON 为空"), "对照未命中：{err2}");
     }
 }

@@ -229,102 +229,113 @@ pub async fn startup_delete<R: Runtime>(
     log::write_log("info", &format!("启动项删除 {} 项", safe.len()));
 
     // S3：纯 Rust 原生
-    let mut data = match crate::engine::native::startup_delete(&safe) {
-        Ok(d) => {
-            log::write_log("info", "启动项删除原生完成");
-            d
-        }
-        Err(e) => return json!({ "success": false, "message": format!("原生删除失败: {e}") }),
-    };
+    // R1b-M04：原生删除（schtasks/reg.exe 单项最长 30s×N）+ 文件类回收站循环 + 删除清单
+    // 落盘全是同步 IO，旧写法留在 async 体内会占住 tauri 的 worker 线程，整条页面上的
+    // 其他命令一起排队。整段迁 spawn_blocking，口径与本文件 startup_scan / startup_toggle。
+    let spawned = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let mut data = crate::engine::native::startup_delete(&safe)
+            .map_err(|e| format!("原生删除失败: {e}"))?;
+        log::write_log("info", "启动项删除原生完成");
 
-    // 文件类删除：白名单 containment 校验后回收站删除
-    let fs_delete: Vec<Value> = data
-        .get("fsDelete")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|v| !v.is_null())
-        .collect();
+        // 文件类删除：白名单 containment 校验后回收站删除
+        let fs_delete: Vec<Value> = data
+            .get("fsDelete")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| !v.is_null())
+            .collect();
 
-    if !fs_delete.is_empty() {
-        log::flush_sync();
-        // 备份目录候选：新根 `app_data_dir()/startup-backup` 与收口前的老根同名路径
-        // （v2-M19 起两根都只从 `paths::backup_read_dirs` 出，不再各处自己拼 `%APPDATA%\Trim`）。
-        // 这里是「删除范围白名单」而非写入目标，两根都要在册，否则历史备份删不掉。
-        //
-        // v6-K04：候选从 `<根>/deleted` 放宽到**备份根本体**——禁用臂把备份放在
-        // `<根>/files`（startup_files_dir），从来不在 deleted/；旧白名单下「禁用后
-        // 不重扫直接删」的合法备份文件被判「删除路径与快照不符」而拒删（真机 bug）。
-        // 放宽后仍限应用自家备份根，native 侧 backup_in_root_verdict 同一判据。
-        let candidates: Vec<std::path::PathBuf> = paths::backup_read_dirs("startup-backup");
+        if !fs_delete.is_empty() {
+            log::flush_sync();
+            // 备份目录候选：新根 `app_data_dir()/startup-backup` 与收口前的老根同名路径
+            // （v2-M19 起两根都只从 `paths::backup_read_dirs` 出，不再各处自己拼 `%APPDATA%\Trim`）。
+            // 这里是「删除范围白名单」而非写入目标，两根都要在册，否则历史备份删不掉。
+            //
+            // v6-K04：候选从 `<根>/deleted` 放宽到**备份根本体**——禁用臂把备份放在
+            // `<根>/files`（startup_files_dir），从来不在 deleted/；旧白名单下「禁用后
+            // 不重扫直接删」的合法备份文件被判「删除路径与快照不符」而拒删（真机 bug）。
+            // 放宽后仍限应用自家备份根，native 侧 backup_in_root_verdict 同一判据。
+            let candidates: Vec<std::path::PathBuf> = paths::backup_read_dirs("startup-backup");
 
-        let mut manifest: Vec<Value> = Vec::new();
-        for fd in &fs_delete {
-            let p = fd.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let id = fd.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let kind = fd.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            let item = safe.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id));
+            let mut manifest: Vec<Value> = Vec::new();
+            for fd in &fs_delete {
+                let p = fd.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let id = fd.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let kind = fd.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                let item = safe.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id));
 
-            // E4：每项耗时（方案 §3.5 E4）。计时从进入本轮开始，覆盖路径校验与回收站调用；
-            // 失败路径同样计时。⚠️ 只加字段，`success`/`failed` 两个计数不看它。
-            let t_item = std::time::Instant::now();
-            let allowed = if !p.is_empty() && item.is_some() {
-                match kind {
-                    "startup-file" => item
-                        .and_then(|it| it.get("filePath").and_then(|v| v.as_str()))
-                        .map(|fp| path_key(p) == path_key(fp))
-                        .unwrap_or(false),
-                    "backup-file" => candidates.iter().any(|dir| {
-                        // R1b-L04：与引擎同一归一口径（裸 strip_prefix 不折叠 ../verbatim）。
-                        let kp = path_key(p);
-                        let kd = path_key(&dir.to_string_lossy());
-                        kp != kd && kp.starts_with(&format!("{kd}\\"))
-                    }),
-                    _ => false,
+                // E4：每项耗时（方案 §3.5 E4）。计时从进入本轮开始，覆盖路径校验与回收站调用；
+                // 失败路径同样计时。⚠️ 只加字段，`success`/`failed` 两个计数不看它。
+                let t_item = std::time::Instant::now();
+                let allowed = if !p.is_empty() && item.is_some() {
+                    match kind {
+                        "startup-file" => item
+                            .and_then(|it| it.get("filePath").and_then(|v| v.as_str()))
+                            .map(|fp| path_key(p) == path_key(fp))
+                            .unwrap_or(false),
+                        "backup-file" => candidates.iter().any(|dir| {
+                            // R1b-L04：与引擎同一归一口径（裸 strip_prefix 不折叠 ../verbatim）。
+                            let kp = path_key(p);
+                            let kd = path_key(&dir.to_string_lossy());
+                            kp != kd && kp.starts_with(&format!("{kd}\\"))
+                        }),
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+
+                let (ok, msg) = if !allowed {
+                    (false, "删除路径与快照不符，已拒绝".to_string())
+                } else {
+                    // 审查 v2-F1：走 `_os` 版，避免非 UTF-8 文件名在 `&str` 往返中被改写。
+                    match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
+                        Ok(()) => (true, "已移入回收站（已备份）".to_string()),
+                        Err(e) => (false, e),
+                    }
+                };
+
+                if ok {
+                    let name = fd
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| item.and_then(|it| it.get("name").and_then(|v| v.as_str())))
+                        .unwrap_or("");
+                    manifest.push(json!({
+                        "path": p.replace('/', "\\"),
+                        "name": name,
+                        "recycled": true,
+                        "deletedAt": delete_manifest::iso_now()
+                    }));
+                    bump_counter(&mut data, "success");
+                    set_result_entry(&mut data, id, "ok", &msg, &t_item);
+                } else {
+                    bump_counter(&mut data, "failed");
+                    set_result_entry(&mut data, id, "error", &msg, &t_item);
                 }
-            } else {
-                false
-            };
-
-            let (ok, msg) = if !allowed {
-                (false, "删除路径与快照不符，已拒绝".to_string())
-            } else {
-                // 审查 v2-F1：走 `_os` 版，避免非 UTF-8 文件名在 `&str` 往返中被改写。
-                match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
-                    Ok(()) => (true, "已移入回收站（已备份）".to_string()),
-                    Err(e) => (false, e),
-                }
-            };
-
-            if ok {
-                let name = fd
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| item.and_then(|it| it.get("name").and_then(|v| v.as_str())))
-                    .unwrap_or("");
-                manifest.push(json!({
-                    "path": p.replace('/', "\\"),
-                    "name": name,
-                    "recycled": true,
-                    "deletedAt": delete_manifest::iso_now()
-                }));
-                bump_counter(&mut data, "success");
-                set_result_entry(&mut data, id, "ok", &msg, &t_item);
-            } else {
-                bump_counter(&mut data, "failed");
-                set_result_entry(&mut data, id, "error", &msg, &t_item);
+            }
+            if !manifest.is_empty() {
+                let batch = format!("startup-{}", crate::engine::now_ms());
+                delete_manifest::save_delete_manifest(&batch, &manifest);
+            }
+            if let Some(o) = data.as_object_mut() {
+                o.remove("fsDelete");
             }
         }
-        if !manifest.is_empty() {
-            let batch = format!("startup-{}", crate::engine::now_ms());
-            delete_manifest::save_delete_manifest(&batch, &manifest);
+        Ok(data)
+    })
+    .await;
+    let data = match spawned {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => return json!({ "success": false, "message": e }),
+        Err(e) => {
+            log::write_log("warn", &format!("startup:delete 阻塞任务异常: {e}"));
+            return json!({ "success": false, "message": "启动项删除任务异常，结果未知，请重新扫描核对" });
         }
-        if let Some(o) = data.as_object_mut() {
-            o.remove("fsDelete");
-        }
-    }
+    };
 
     let Some(failed) = crate::commands::required_count(&data, "failed") else {
         return json!({

@@ -4,6 +4,7 @@
 //! 单一域专用的实现留在对应 commands/<domain>.rs 内，避免 engine 变成杂物间。
 
 pub mod appearance;
+pub mod delete_failed;
 pub mod delete_manifest;
 pub mod guard;
 pub mod hash;
@@ -12,7 +13,9 @@ pub mod log;
 pub mod native;
 pub mod optimization_state;
 pub mod paths;
-/// A3 PnP 设备原生侧（只读 spike，未接任何 IPC 命令）
+/// A3 PnP 设备原生侧：只读枚举（v2-R5）+ 设备禁用/启用写入面（2026-10-11 起在册，
+/// 经 pssteps 数据层执行链；`CM_DISABLE_PERSIST` 是重启后仍生效的系统写面）。
+/// 「未接任何 IPC 命令」的旧自述已作废，见 `pnp` 模块头（R6b-M09）。
 pub mod pnp;
 pub mod protect;
 pub mod reg_backup;

@@ -1,7 +1,5 @@
-// overview.js - 系统概览模块
-// 实时采集 CPU/内存/磁盘/开机时长，融合硬件信息。
-// 历史：v2.6.0 曾在此挂「体检结论」只读诊断清单，2026-10-12 用户裁定全链路退役，
-// 本文件回归纯实时指标 + 硬件信息展示。
+// overview.js - 系统概览模块：实时采集 CPU/内存/磁盘/开机时长，融合硬件信息。
+// 历史：v2.6.0 曾在此挂「体检结论」只读诊断清单，2026-10-12 用户裁定全链路退役。
 (function () {
   'use strict';
 
@@ -16,12 +14,12 @@
     lastErrAt: 0
   };
 
-  // ===== 格式化工具 =====
+  // 格式化工具
   function fmtBytes(bytes) { return window.ds.fmtBytes(bytes); } // 审查 M18：真源在 ds
   function fmtPercent(p) { return (isFinite(p) ? Math.round(p) : 0) + '%'; }
   function escapeHtml(s) { return window.ds.esc(s); }
   // 进度条风险分档：>=90 危险(danger) / >=75 警告(warning) / 否则正常(accent)。
-  // 颜色统一由 CSS 根据 data-level 取语义 token，不在 JS 内写死颜色。
+  // 颜色由 CSS 按 data-level 取语义 token，不在 JS 内写死颜色。
   function setBar(id, percent) {
     const bar = $(id);
     if (!bar) return;
@@ -31,7 +29,7 @@
     bar.setAttribute('data-level', level);
   }
 
-  // ===== 系统健康度（纯展示层计算，不伪造业务结果）=====
+  // 系统健康度（纯展示层计算，不伪造业务结果）
   // 仅基于已有 CPU / 内存 / 系统盘占用；三项数据都缺失时返回 null（界面显示 -- / 待检测）。
   function computeHealth(cpu, memP, diskP) {
     const hasCpu = isFinite(cpu), hasMem = isFinite(memP), hasDisk = isFinite(diskP);
@@ -57,7 +55,7 @@
     const adviceEl = $('ovHealthAdvice');
     if (!adviceEl) return;
     // F3（2026-09-15）：此前恒写"状态良好"、丢弃 computeHealth 评分（误导 + 死代码）。
-    // 现在如实展示：无数据 → 待检测；有数据 → 按等级着色并显示真实建议。
+    // 现在如实展示：无数据 → 待检测；有数据 → 按等级着色 + 显示真实建议。
     const card = $('ovHealthCard');
     if (card) card.classList.remove('health-good', 'health-warn', 'health-bad');
     if (!h) {
@@ -74,7 +72,7 @@
     if (metaHint) metaHint.textContent = uptime ? ('已运行 ' + uptime) : '';
   }
 
-  // ===== 实时指标渲染 =====
+  // 实时指标渲染
   function renderMetrics(data) {
     const d = data || {};
     // 契约（overview.rs）写明首拍 cpu=null、渲染层显示 `--`；`Number(null)===0`
@@ -134,7 +132,7 @@
     return primary;
   }
 
-  // ===== 硬件信息（首次扫描缓存，后期手动刷新才更新） =====
+  // 硬件信息（首次扫描缓存，后期手动刷新才更新）
   async function loadHardware(force) {
     if (state.hardwareLoaded && !force) return;
     const el = $('ovHardwareRows');
@@ -171,12 +169,11 @@
     }
   }
 
-  // ===== 采集 =====
+  // 采集
   async function tick() {
     // 性能 v3 ④：in-flight 闸门。后端 overview_metrics 一旦慢于 POLL_INTERVAL(2000ms)，
-    // setInterval 会把未完成的 async 调用一层层叠上去，每叠一份就多一次后端采集 +
-    // 多一次 DOM 写（renderMetrics 全量重写卡片）。state 原先只有 running/timer，
-    // 没有在途位；busy 由 try/finally 复位，抛错路径也不会把闸门焊死。
+    // setInterval 会把未完成的 async 调用层层叠上去，每叠一份多一次后端采集 + 一次 DOM 写
+    // （renderMetrics 全量重写卡片）。busy 由 try/finally 复位，抛错路径也不会把闸门焊死。
     if (state.busy) return;
     state.busy = true;
     try {
@@ -214,14 +211,14 @@
     }
   }
 
-  // ===== 控制 =====
+  // 控制
   function start() {
     if (state.running) return;
     state.running = true;
     state.hardwareLoaded = false;
     applyMaximizedLayout();
     tick();
-    // 硬件信息走主进程缓存（毫秒级），立即渲染，避免等首轮指标采集完成才加载
+    // 硬件信息走主进程缓存（毫秒级），立即渲染，不等首轮指标采集完成
     loadHardware();
     state.timer = setInterval(tick, POLL_INTERVAL);
     window.app?.log('info', '系统概览实时监控启动');
@@ -239,11 +236,11 @@
     tick();
   }
 
-  // ==================== 系统信息彩蛋（v3.2.1） ====================
+  // 系统信息彩蛋（v3.2.1）
   // 设置页「系统信息」容器已隐藏（main.css #systemInfoSection display:none），
   // 入口改为首页「系统健康度」卡连点 7 次（2 秒窗口）弹出自绘弹窗展示。
   // 信息 DOM 整块从隐藏容器移入弹窗、关闭时移回（专家模式开关已于 v3.7.0 随默认应用接管整块删除）——
-  // 节点移动不丢失监听器，开关功能不受影响；数据仍由 app.js loadAppInfo 填充。
+  // 节点移动不丢失监听器；数据仍由 app.js loadAppInfo 填充。
   let eggClicks = 0;
   let eggTimer = null;
   let eggModalCtrl = null;
@@ -288,7 +285,7 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
       });
     });
-    // 系统信息彩蛋：健康度卡 2 秒内连点 7 次
+    // 系统信息彩蛋
     $('ovHealthCard')?.addEventListener('click', () => {
       eggClicks++;
       clearTimeout(eggTimer);

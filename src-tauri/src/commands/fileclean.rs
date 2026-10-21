@@ -673,6 +673,20 @@ pub async fn fileclean_execute<R: Runtime>(
         }));
     }
 
+    // R2a-M03：文件清理链的**回收站失败**项记进命令体侧的删除失败回执台账 ——
+    // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据，不再只由
+    // 渲染层（cleanup.js 的 collectFailedPaths）维持。与常规清理链同域（DOMAIN_CLEANUP）：
+    // 两者是 cleanup.js 那条链的两段，回执并进同一槽。
+    crate::engine::delete_failed::record(
+        window.label(),
+        crate::engine::delete_failed::DOMAIN_CLEANUP,
+        details
+            .iter()
+            .filter(|d| d.get("status").and_then(|v| v.as_str()) != Some("ok"))
+            .filter_map(|d| d.get("path").and_then(|v| v.as_str()).map(str::to_string))
+            .collect(),
+    );
+
     if !manifest_entries.is_empty() {
         let batch = delete_manifest::new_batch_id();
         delete_manifest::save_delete_manifest(&batch, &manifest_entries);

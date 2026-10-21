@@ -9,8 +9,8 @@
 //   stack   ：.toast-container + .toast 堆叠，4 秒自动退场（复用 main.css 既有的
 //             .toast-container / .toast 件，宿主容器懒创建）。
 // 全部 textContent 写入、颜色走 main.css token，与主窗 window.app.toast 口径一致。
-// 预览窗的 toast 是单参信息条（pvFileInfo、无自动清除），属第四种最小形态，刻意维持独立。
-// 加载序：本文件必须在各窗主脚本之前（与 ds.js 同层，由四份子窗 HTML 显式挂载）。
+// 加载序：本文件必须在各窗主脚本之前（与 ds.js 同层，由三份子窗 HTML 显式挂载；
+// 窗口清单以 engine::guard::APP_WINDOWS 的子窗集合为准，不在此点名，防退役窗口腐烂）。
 (function () {
   'use strict';
 

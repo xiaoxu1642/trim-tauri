@@ -435,11 +435,14 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   // v0.7.0 摘掉三条：残留副窗挂上了 intro.js（点击查看里的本地简介 + 联网 AI 简介），
   // 于是 aidesc_get / intro_load / models_open_window（「去设置」开大模型管理窗）
   // 真的有了子窗调用点。本表是只许变短的棘轮 —— 有了消费方还留在表里即红。
+  // P1-W3 C14 再摘一条 models_set_scope：同一次改动让残留副窗挂上 modelpicker.js，
+  // 面板里的作用域切换真的由子窗调用它。
   'cleanup_check_locked',
   'cleanup_file_backup_list',
   'cleanup_item_detail',
   'cleanup_reg_backup_list',
-  'cleanup_rules',
+  // 'cleanup_rules' 已按 R4-U03（2026-10-20 裁定）收回 MAIN 档 ⇒ 本表只收只读档豁免，
+  // 留着会让 D5 把它当成「只读档但没有子窗消费方」来判红。
   'cleanup_scan',
   'contextmenu_icons',
   'contextmenu_scan',
@@ -452,7 +455,6 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'fonts_remove_imported',
   'fonts_save_config',
   'memory_info',
-  'models_set_scope',
   'netcheck_collect',
   'optimizer_batch_preflight',
   'optimizer_check_optimized',

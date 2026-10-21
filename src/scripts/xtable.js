@@ -39,10 +39,22 @@
       const ariaSort = state && state.key === col.key
         ? (state.dir === 'asc' ? 'ascending' : 'descending')
         : 'none';
-      const a11y = sortable ? ` tabindex="0" role="columnheader" aria-sort="${ariaSort}"` : '';
+      // F5-M05（P3-1 补全）：ARIA 规定 columnheader 必须被 row 拥有、row 必须被
+      // table/grid 拥有——旧实现只给可排序列发 role，非排序列在行内是无角色子项，
+      // 整棵树又缺 table 祖先，读屏可能把整块当普通 div 忽略，aria-sort 无人播报。
+      // 表头单元格统一 role=columnheader；键盘可达（tabindex）与 aria-sort 仍只归
+      // 可排序列。table 祖先与数据行的 role 由 bindHeader / createVirtualList 补挂
+      // （行 HTML 在调用方手里，本库不重复渲染）。
+      const a11y = ` role="columnheader"` + (sortable ? ` tabindex="0" aria-sort="${ariaSort}"` : '');
+      // F5-L08：label 是调用方传入的文本，必须过 ds.esc 才能拼进 HTML（ds.js 是全仓
+      // 转义唯一真源，AGENTS §2 禁本地转义表；两个宿主页面的加载序都是 ds 先于本库，
+      // 已在 F5 分报告 §7.1 逐页核过）。col.key 仍按字面量插属性位：check-html-contract
+      // 用 `data-col="${col.key}"` 字面量锚定「表头 data-col ⇄ 行单元 data-cell 同源」
+      // 契约，且 key 的允许来源本就是调用方静态常量（现算唯一调用方 cleanup.js 的
+      // COL_* 全为字面量）——要放宽 key 的转义必须先改那条门禁，不许库侧静默换形态。
       return `<div class="xtable-th${sortable ? ' sortable' : ''}${state && state.key === col.key ? ' sorted' : ''}${sortable ? '' : ' no-sort'}"
         data-col="${col.key}" style="${style}" data-align="${align}"${a11y}${sortable ? ' data-tip="点击排序"' : ''}>
-        <span class="xtable-th-label">${col.label}</span>
+        <span class="xtable-th-label">${window.ds.esc(col.label)}</span>
         ${sortable && state ? sortIndicatorHtml(state, col.key) : ''}
         ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动调整列宽"></span>`}
       </div>`;
@@ -71,10 +83,22 @@
     return null;
   }
 
+  // F5-M03：拖拽会话必须全局单例。onMove/onUp 是每次 mousedown 新建的闭包，
+  // 若上一轮 mouseup 因 alt-tab / 锁屏 / 系统菜单打断未送达，旧那组仍挂在
+  // document 上——下一次拖拽（含换到另一列的 resizer）变成两组同写宽度，旧那组
+  // 用已失效的 startX/startW 造成宽度跳变，body.xtable-resizing（col-resize 光标）
+  // 也会残留。注册表放模块级（而不是每个 resizer 一份），换组前先拆旧组。
+  let activeResize = null;
+
   // 绑定表头交互：点击排序 + 拖拽列宽（幂等：重复调用不会重复绑定）
   function bindHeader(container, state, onChange) {
     if (!container) return;
     headerContexts.set(container, { state, onChange });
+    // F5-M05：宿主补 role=table（行 HTML 由调用方渲染，此处连同在场的行/单元格一起
+    // 补挂角色，使 columnheader→row→table 祖先链闭合）；虚拟滚动窗口内后来重渲染的
+    // 行由 createVirtualList 的渲染路径补（见 applyRowRoles）。
+    if (!container.getAttribute('role')) container.setAttribute('role', 'table');
+    applyRowRoles(container);
 
     container.querySelectorAll('.xtable-th.sortable').forEach(th => {
       if (headerBound.has(th)) return;
@@ -110,32 +134,48 @@
     container.querySelectorAll('.xtable-resizer').forEach(rz => {
       if (headerBound.has(rz)) return;
       headerBound.add(rz);
+      // F5-M03：拖拽会话全局单例（见 activeResize 声明处）
       rz.addEventListener('mousedown', e => {
         e.preventDefault();
         e.stopPropagation();
         const key = rz.dataset.resize;
         const th = rz.closest('.xtable-th');
         if (!th) return;
+        if (activeResize) activeResize.teardown();
         const startX = e.clientX;
         const startW = th.getBoundingClientRect().width;
         const onMove = ev => {
           const w = Math.max(48, Math.round(startW + ev.clientX - startX));
           colWidths[key] = w;
-          document.querySelectorAll(`.xtable-th[data-col="${key}"]`).forEach(o => {
+          // 「表头与数据行共用同一组宽度」是 buildLayout 的列对齐不变量：已在场的行
+          // 带着渲染当时写死的 px，只刷表头会让行留在旧宽（拖完即错位，再渲染才自愈）。
+          // 行单元格带 data-cell（cleanup.js 渲染，与表头 data-col 同 key 同源，
+          // check-html-contract 锚定），拖拽时两侧同步刷。
+          document.querySelectorAll(`.xtable-th[data-col="${key}"], .xtable-td[data-cell="${key}"]`).forEach(o => {
             o.style.width = w + 'px';
             o.style.flex = '0 0 auto';
           });
         };
-        const onUp = () => {
+        const teardown = () => {
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
           document.body.classList.remove('xtable-resizing');
+          activeResize = null;
         };
+        const onUp = () => teardown();
+        activeResize = { teardown };
         document.body.classList.add('xtable-resizing');
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
       });
     });
+  }
+
+  // F5-M05：为调用方渲染的行/单元格补 ARIA 角色（幂等：已带 role 的不覆盖）。
+  // 只在宿主已有 role=table 的子树里调用——孤儿 row 同样是不闭合的 ARIA 形状。
+  function applyRowRoles(root) {
+    root.querySelectorAll('.xtable-row').forEach(r => { if (!r.getAttribute('role')) r.setAttribute('role', 'row'); });
+    root.querySelectorAll('.xtable-td').forEach(c => { if (!c.getAttribute('role')) c.setAttribute('role', 'cell'); });
   }
 
   // 排序辅助：valueFns 为 {colKey: item => value}
@@ -154,61 +194,15 @@
     });
   }
 
-  // ==================== 分批渲染（render-batch，对齐 MangoDisk） ====================
-  // 大表格分批插入 DOM：每帧一批（默认 50 行），首屏只渲染一批，
-  // 剩余行折叠在「加载更多」按钮后，点击逐批追加（rAF 调度，不阻塞首帧绘制）。
-  // opts:
-  //   bodyEl     行容器（.xtable-body）
-  //   rows       待渲染数据数组
-  //   renderRow  (item, index) => 行 HTML 字符串
-  //   batchSize  每批行数，默认 50
-  //   onBatch    (start, end) 每批追加后的回调（逐行绑定事件的调用方用于绑定新行；
-  //              已使用事件委托的调用方可省略）
-  // 返回 { loadMore, rendered, done }；幂等：表格被重渲染（bodyEl 脱离文档）后任务自动作废。
-  function createBatch(opts) {
-    const bodyEl = opts.bodyEl;
-    const rows = opts.rows || [];
-    const renderRow = opts.renderRow;
-    const batchSize = Math.max(1, opts.batchSize || 50);
-    const onBatch = typeof opts.onBatch === 'function' ? opts.onBatch : null;
-    let rendered = 0;
-    let scheduled = false;
-
-    function loadMore() {
-      if (scheduled || rendered >= rows.length) return rendered < rows.length;
-      scheduled = true;
-      requestAnimationFrame(() => {
-        scheduled = false;
-        if (!bodyEl || !bodyEl.isConnected) return; // 表格已被重渲染，本次任务作废
-        const start = rendered;
-        const end = Math.min(start + batchSize, rows.length);
-        let html = '';
-        for (let i = start; i < end; i++) html += renderRow(rows[i], i);
-        bodyEl.querySelector('.xtable-more')?.remove();
-        if (html) bodyEl.insertAdjacentHTML('beforeend', html);
-        rendered = end;
-        if (rendered < rows.length) {
-          const more = document.createElement('div');
-          more.className = 'xtable-more';
-          more.innerHTML = `<button class="btn btn-secondary btn-small" type="button">加载更多（还有 ${rows.length - rendered} 项）</button>`;
-          more.querySelector('button').addEventListener('click', () => loadMore());
-          bodyEl.appendChild(more);
-        }
-        if (onBatch) onBatch(start, end);
-      });
-      return true;
-    }
-
-    return {
-      loadMore,
-      get rendered() { return rendered; },
-      get done() { return rendered >= rows.length; }
-    };
-  }
+  // F5-L07：createBatch 已删除——「分批 + 加载更多」渲染路径被 createVirtualList
+  // 全量取代后，它成了零调用方的死导出（现算全仓仅本文件内提及），文档契约
+  //（batchSize/onBatch）无人履行还占 API 面；需要分批渲染时从 git 历史捞回。
 
   // ==================== 中缝省略（middleEllipsis，对齐 MangoDisk） ====================
   // 超长路径/文件名保留首尾两端（首段定位信息 + 尾段文件名/扩展名），中段以「…」折叠。
-  // 配合单元格 title 提示展示完整原文；CSS text-overflow 仍作为列宽不足时的兜底截断。
+  // 完整原文由调用方放进单元格的 data-tip 提示展示（AGENTS §2：提示一律 data-tip，
+  // 原生悬浮提示属性被 check-a11y 判禁；现算调用方 cleanup.js/processes.js 即此用法）。
+  // CSS text-overflow 仍作为列宽不足时的兜底截断。
   // maxChars 为含省略号的总字符预算，默认 60；头部占 60%、尾部占 40%。
   function middleEllipsis(text, maxChars) {
     const s = String(text == null ? '' : text);
@@ -258,6 +252,10 @@
       let html = '';
       for (let i = start; i < end; i++) html += renderRow(rows[i], i);
       windowEl.innerHTML = html;
+      // F5-M05：虚拟滚动的行在滚动中整窗重渲染，bindHeader 时补的 role 覆盖不到新行；
+      // 仅当宿主已有 role=table（ARIA 形状成立，由 bindHeader 设置）时才补，避免
+      // 在没有 table 祖先的表格（如进程管理页的自绘表头）里制造孤儿 row。
+      if (container.closest('[role="table"]')) applyRowRoles(windowEl);
     }
 
     const scheduleRender = () => {
@@ -306,12 +304,21 @@
     };
   }
 
-  window.xtable = { renderHeader, bindHeader, sortItems, buildLayout, createBatch, createVirtualList, middleEllipsis };
+  window.xtable = { renderHeader, bindHeader, sortItems, buildLayout, createVirtualList, middleEllipsis };
 
   // ==================== 瀑布流（Masonry）布局引擎 ====================
   // 绝对定位放置：看板按当前顺序依次放入「最矮列」底部，列数按容器宽度自适应，
   // 1 列时单看板占满整行；容器高度 = 最高列；重排（resize/宽度变化）使用 FLIP 平滑过渡。
   window.kanbanMasonry = (function () {
+    // F5-L10：RM 判定 fail-closed 收口——原 `window.ds?.reducedMotion?.()` 在 ds 缺席时
+    // 得 undefined，FLIP 照飞。ds.reducedMotion() 是全仓统一真源（缓存 MQL、.matches
+    // 实时读，ds.js 已导出）；ds 缺席/媒体查询异常时兜底自证 matchMedia，且判定失败
+    // 一律按 reduce 处理（宁可不动画，不违背「RM 下无动画」红线）。
+    function isReduceMotion() {
+      if (window.ds && typeof window.ds.reducedMotion === 'function') return !!window.ds.reducedMotion();
+      try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return true; }
+    }
+
     function capture(container, selector) {
       const map = new Map();
       container.querySelectorAll(selector).forEach(n => map.set(n, n.getBoundingClientRect()));
@@ -323,7 +330,7 @@
       // M-4（2026-10-03 L3）：看板 FLIP 走 Web Animations API，CSS 的
       // prefers-reduced-motion 通配归零管不到 Element.animate()（独立时间线）。
       // 系统开「减少动态效果」时必须整体跳过，否则窗口宽度变化仍会平移 300ms。
-      if (window.ds?.reducedMotion?.()) return;
+      if (isReduceMotion()) return;
       container.querySelectorAll(selector).forEach(n => {
         const f = first.get(n);
         if (!f) return;
@@ -358,15 +365,18 @@
       if (maxCols && maxCols > 0) colCount = Math.min(colCount, maxCols);
       const colWidth = Math.floor((width - gap * (colCount - 1)) / colCount);
       const heights = new Array(colCount).fill(0);
-      // 先统一设置宽度，保证测得的高度准确
+      // F5-L09：三趟化——先统一写宽度，再单独一趟只读高度（趟内零写入，整趟只付
+      // 一次强制回流），最后写定位。旧第二趟「读 offsetHeight ⇄ 写 left/top」逐张
+      // 交错，每张卡片付一次回流；本仓其余批量动效（liquid-glass 两趟注释、tilt、
+      // spotlight）都是同一纪律，此处是最后一处未收敛的。
       cards.forEach(card => { card.style.width = colWidth + 'px'; });
-      cards.forEach(card => {
-        const h = card.offsetHeight;
+      const cardHeights = cards.map(card => card.offsetHeight);
+      cards.forEach((card, i) => {
         let idx = 0;
-        for (let i = 1; i < colCount; i++) { if (heights[i] < heights[idx]) idx = i; }
+        for (let j = 1; j < colCount; j++) { if (heights[j] < heights[idx]) idx = j; }
         card.style.left = Math.round(idx * (colWidth + gap)) + 'px';
         card.style.top = Math.round(heights[idx]) + 'px';
-        heights[idx] += h + gap;
+        heights[idx] += cardHeights[i] + gap;
       });
       container.style.height = Math.max(...heights) + 'px';
     }
@@ -375,8 +385,11 @@
     // B7：用 ResizeObserver 替代原先 300ms 常驻轮询——容器尺寸变化才触发重排，
     // 彻底消除定时强制回流；容器随重渲染重建时在 check/relayout 里重新挂载观察。
     // 窗口 resize → 防抖 120ms 后重排（带 FLIP 动画）。
-    // 返回 { relayout(animate), dispose() }：渲染层在重新渲染 DOM 后调用 relayout 立即布局，
-    // 页面销毁时调用 dispose 释放观察器与监听。
+    // 返回 { relayout(animate), dispose() }：渲染层在重新渲染 DOM 后调用 relayout 立即布局。
+    // F5-L07：dispose 是设计好的回收口，但现算两处调用方（contextmenu.js / optimizer.js）
+    // 均为页面生命周期单例且**未调用**——「页面销毁时调用 dispose」不是已履行的契约，
+    // 只是待接入的接口；接入属调用方（白名单外）改动。API 保留：移除它会让将来接入
+    // 页面销毁路径时无回收手段（window resize 监听与 RO 都靠它解绑）。
     function attach(getContainer, cardSelector, opts) {
       const gap = (opts && opts.gap) != null ? opts.gap : 14;
       const minCard = (opts && opts.minCard) || 246;

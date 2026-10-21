@@ -9,11 +9,9 @@ use serde_json::{Value, json};
 use super::rules::*;
 use super::state::*;
 
-    /// 首个差异的定位信息（行号 + 两侧原文片段）
-
-    /// PS 模板替换对拍：同一合成输入，JS 生成 vs Rust 生成**逐字节**比较。
-    ///
-
+// R4-L06：这里原本挂着两段孤儿 `///`（「首个差异的定位信息」「PS 模板替换对拍」）——
+// 它们描述的机制都已退役，而 Rust 会把紧邻的 doc 注释归给**下一个 item**，
+// 于是这两段读起来像 `js_num_str` 的文档。退役说明不该靠「挂在谁头上」活着，直接删。
 
 /// 版本号文案（`Number(x)||0` 与 JS String(n) 同口径）——随更新链退役后仅测试消费，收进本文件
 fn js_num_str(n: f64) -> String {
@@ -1036,4 +1034,712 @@ fn 全跳过回执必须_success_false() {
     assert!(cleanup_receipt_success(0, 3, 0), "正常成功必须仍是 true");
     assert!(cleanup_receipt_success(0, 1, 2), "部分成功必须仍是 true");
     assert!(!cleanup_receipt_success(2, 1, 0), "有硬失败必须 false（v5 C-3 既有口径）");
+}
+
+/// R2a-M03：清理域「删除失败文件路径」集合的取法（登记闸白名单的来源）。
+///
+/// 这份集合进 `engine::delete_failed` 台账，`uninstall_pending_add` 凭它核对
+/// 「只收删除失败项」——白名单窄于渲染层要送的那批时，合法登记会被误拒。
+/// 口径：引擎侧逐文件失败明细 `failedFiles[].path` + 「整项失败且路径在行上」的
+/// `error` / `fail` 行。渲染层 `collectFailedPaths` 只取前者 + `error` 行，
+/// 本函数取超集（多收 `fail` 行）：闸要拦的是「从没有失败过的文件」，
+/// 不是「渲染层没提到的失败文件」。
+///
+/// 判红自证：把 `cleanup_failed_paths` 里的 `failedFiles` 分支删掉 ⇒ 首条断言红。
+#[test]
+fn 清理失败路径集合_取逐文件明细与整项失败行() {
+    use crate::commands::cleanup::scan_execute::cleanup_failed_paths;
+    let details = json!([
+        { "id": "a", "status": "ok", "failedFiles": [] },
+        { "id": "b", "status": "partial",
+          "failedFiles": [ { "path": "C:\\占用.bin", "reason": "occupied" },
+                          { "path": "C:\\占用.bin", "reason": "occupied" } ] },
+        { "id": "c", "status": "error", "path": "C:\\整项失败.bin" },
+        { "id": "d", "status": "fail", "path": "C:\\整项失败2.bin" },
+        { "id": "e", "status": "skip" }
+    ]);
+    let paths = cleanup_failed_paths(details.as_array().expect("details 是数组"));
+    assert!(
+        paths.iter().any(|p| p == "C:\\占用.bin"),
+        "逐文件失败明细必须进集合: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "C:\\整项失败.bin"),
+        "error 行自带的路径必须进集合: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "C:\\整项失败2.bin"),
+        "fail 行自带的路径必须进集合: {paths:?}"
+    );
+    assert_eq!(paths.len(), 3, "重复路径必须去重、成功行不得进集合: {paths:?}");
+}
+
+/// R2a-M03 接线钉：三个执行命令都必须把失败路径记进失败回执台账。
+///
+/// 纯函数测试只证明 `cleanup_failed_paths` 取法对，证明不了「回执真的被记进台账」
+/// —— 把 record 调用删掉，上面那条照样全绿，而登记闸会拒掉全部合法登记
+/// （症状：清理/残留明明失败了，登记面却说「不是删除失败回执里的文件」）。
+#[test]
+fn 清理失败回执_三个执行命令都落台账() {
+    let scan_src = include_str!("scan_execute.rs");
+    assert!(
+        scan_src.contains("delete_failed::record"),
+        "cleanup:execute 必须把删除失败路径记进失败回执台账（登记闸只认台账里的路径）"
+    );
+    let fc_src = include_str!("../fileclean.rs");
+    assert!(
+        fc_src.contains("delete_failed::record"),
+        "fileclean:execute 必须把回收站失败的文件记进失败回执台账"
+    );
+    let residue_src = include_str!("../uninstall/residue.rs");
+    assert!(
+        residue_src.contains("delete_failed::record"),
+        "uninstall:residue-execute 必须把删除失败的文件记进失败回执台账"
+    );
+}
+
+// ==================== P1-W2 / U-R4（v7.2 分报告 R4，2026-10-20 批次） ====================
+//
+// 这一批断言的共同取舍：判据对象是**接线与实参形态**，行为测试够不到 —— 够不到的意思就是
+// 「改一处实参 / 摘一处调用，用例照样全绿」（§4.1：只会打印 ✓ 的断言不算验收）。
+// 每条都点名正向特征（命中的条目集合、位置实参清单、调用点计数、分档计数），
+// 并在注释里写清破坏方式，由主 agent 做破坏自证。
+
+/// 按声明头取函数体（到第一个顶格 `}` 为止）。
+///
+/// 为什么自己截：下面要判「早退与置空的先后」「函数体内有没有裸 insert」，
+/// 拿整份文件比会把别的命令算进来。锚点用函数名不用行号（§5.19）。
+fn command_fn_body(code: &str, head: &str) -> String {
+    let i = code
+        .find(head)
+        .unwrap_or_else(|| panic!("找不到 {head} —— 接线断言的锚点漂移了"));
+    let rest = &code[i..];
+    rest[..rest.find("\n}\n").unwrap_or(rest.len())].to_string()
+}
+
+/// 从**以 `(` 开头**的文本取出顶层位置实参清单（嵌套括号里的逗号不当分隔符；空位与尾逗号跳过）。
+fn top_level_args(src: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0usize;
+    for c in src.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                if depth > 1 {
+                    cur.push(c);
+                }
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let t = cur.trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
+                    return out;
+                }
+                cur.push(c);
+            }
+            ',' if depth == 1 => {
+                let t = cur.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+                cur.clear();
+            }
+            _ => {
+                if depth >= 1 {
+                    cur.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 取 `needle`（必须以 `(` 结尾）那一处调用/签名的位置实参清单。
+///
+/// 切片从括号本身开始（needle 全 ASCII ⇒ 字节下标落在字符边界上），
+/// 否则 `top_level_args` 等不到开括号、一个实参都切不出来。
+fn args_at(code: &str, needle: &str) -> Vec<String> {
+    let at = code
+        .find(needle)
+        .unwrap_or_else(|| panic!("找不到 {needle} —— 调用点或签名漂移了"));
+    top_level_args(&code[at + needle.len() - 1..])
+}
+
+/// 取源码里 `head` 之后第一串连续数字（用来把两侧写死的上限数字拉出来对拍）。
+fn number_after(src: &str, head: &str) -> Option<usize> {
+    let at = src.find(head)?;
+    let rest = &src[at + head.len()..];
+    let digits: String = rest
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// R4-M02：永久删钉桩必须**就是**传给删除原语的那个实参。
+///
+/// 缺陷形态（本条要抓的）：命令体里既有 `let to_recycle = false;` 又有
+/// `debug_assert!(!to_recycle`，而调用点第三位写的是字面 `false` —— 那三条断言与实参
+/// 没有任何一条对得上，把实参改成 `true` 后引擎走「只枚举不删除、freed 照计」分支：
+/// 一个文件没删、也没进回收站，回执仍 success:true、释放量照报，`cargo test` 全绿。
+///
+/// 破坏自证：① 把 scan_execute.rs 调用点第三位改回 `false` ⇒ ② 的等值断言红；
+/// ② 把 `let to_recycle = false;` 改名 ⇒ ①②都红；③ 把引擎形参顺序调过来 ⇒ ③ 红。
+#[test]
+fn 永久删钉桩必须是被传进删除原语的实参() {
+    let code = strip_rust_comments(include_str!("scan_execute.rs"));
+    let engine = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+    // ① 钉桩本体在场（v3.3.0 裁定的代码位）
+    assert!(code.contains("let to_recycle = false;"), "命令体里找不到永久删钉桩变量");
+    assert!(code.contains("debug_assert!(!to_recycle"), "钉桩没有被 debug_assert 标成恒不可达");
+    // ② 调用点的位置实参清单（不是「文件里有没有某句话」）
+    let args = args_at(&code, "crate::engine::native::cleanup_execute(");
+    assert_eq!(args.len(), 5, "调用点实参数与引擎签名不符: {args:?}");
+    assert_eq!(
+        args[2], "to_recycle",
+        "第三位必须传钉桩变量本身，不能传字面量 —— 否则改这一处实参，整套契约测试照样全绿（R4-M02）: {args:?}"
+    );
+    assert_eq!(
+        args[3], "auto_rebuild",
+        "第四位必须点名 auto_rebuild —— to_recycle 与它是相邻两个 bool 位置实参，\
+         形参顺序一旦被调即静默互换: {args:?}"
+    );
+    // ③ 与引擎形参名逐位对拍：命令侧传的名字必须正是引擎那一位的形参名
+    let params: Vec<String> = args_at(&engine, "pub fn cleanup_execute(")
+        .iter()
+        .map(|p| p.split(':').next().unwrap_or("").trim().to_string())
+        .collect();
+    assert_eq!(params.len(), 5, "引擎形参清单漂移: {params:?}");
+    assert_eq!(args[2], params[2], "命令侧第三位与引擎 to_recycle 形参不同名: {args:?} vs {params:?}");
+    assert_eq!(args[3], params[3], "命令侧第四位与引擎 auto_rebuild 形参不同名: {args:?} vs {params:?}");
+    // ④ 全仓生产调用点必须恰好这一处（第二条永久删出口 = 分桶复活）
+    assert_eq!(
+        code.matches("native::cleanup_execute(").count(),
+        1,
+        "cleanup_execute 里出现多条删除原语调用点 —— 「固定永久删」的出口必须唯一"
+    );
+}
+
+/// R4-L05：被忽略的入参必须留在回执上（注释原本就承诺「如实回执并写日志」，代码只做了日志那一半）。
+///
+/// 破坏自证：把 `with_ignored_flags` 的两个调用点摘掉 ⇒ ② 计数红；
+/// 把函数改成无条件加字段 ⇒ ① 的第二段红。
+#[test]
+fn 被忽略的_to_recycle_必须留在回执上() {
+    use crate::commands::cleanup::scan_execute::with_ignored_flags;
+    // ① 行为面（纯函数、零副作用）：忽略才加字段，没忽略不许凭空造字段
+    let hit = with_ignored_flags(json!({ "success": true }), true);
+    assert_eq!(hit["toRecycleIgnored"], json!(true), "被忽略的入参没上回执: {hit}");
+    let miss = with_ignored_flags(json!({ "success": true, "message": "m" }), false);
+    assert_eq!(miss, json!({ "success": true, "message": "m" }), "未发生忽略时不得添加字段: {miss}");
+    // ② 接线面：cleanup_execute 的两个出口（Ok / Err）都必须过它，只写日志 = 本条缺陷态
+    let code = strip_rust_comments(include_str!("scan_execute.rs"));
+    assert!(
+        code.contains("let to_recycle_ignored = to_recycle == Some(true);"),
+        "「入参有没有被忽略」没被记成布尔，回执留痕无从判断"
+    );
+    assert_eq!(
+        code.matches("with_ignored_flags(").count(),
+        code.matches("fn with_ignored_flags(").count() + 2,
+        "回执装饰的调用点必须是定义 1 处 + 出口 2 处: {}",
+        code.matches("with_ignored_flags(").count()
+    );
+}
+
+/// R4-M03：占用检测/查询必须**先置空**一次性白名单再判早退；写槽只有 state 里那两个入口。
+///
+/// 缺陷形态：`cleanup_query_locked` 五条早退（缺参 / 盘符相对 / 路径不存在 / 空目录或全
+/// reparse / RM 调用失败）都不写槽 ⇒ 上一次成功检测的名单在这次失败后仍可被「结束进程」
+/// 取走，杀的是没被查过的 PID 集，与该命令函数头第③条承诺相反。
+///
+/// 破坏自证：① 删掉 query-locked 的 `reset_lock_whitelist(&label);` ⇒ 行为面 ① 仍绿但
+/// 接线面「reset 之前只许 1 条早退」立刻红；② 把名单写回改成裸 `.insert(...)` ⇒ 棘轮红；
+/// ③ 在 guard 之后、reset 之前加一条早退 ⇒ 红（正是缺陷态）。
+#[test]
+fn 占用检测失败不得留下上一次的名单() {
+    // ① 行为面（进程内、零副作用）：store 写得进、reset 清空得掉
+    let probe = "__contract_lock_whitelist_probe__";
+    store_lock_whitelist(probe, vec![json!({ "pid": 4242, "app": "probe" })]);
+    let after_store = lock_whitelist()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(probe)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(after_store.len(), 1, "store 必须真的写进本槽（否则下面的 reset 没有对照对象）: {after_store:?}");
+    reset_lock_whitelist(probe);
+    let after_reset = lock_whitelist()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(probe)
+        .cloned()
+        .unwrap_or_default();
+    assert!(after_reset.is_empty(), "reset 之后槽必须为空名单: {after_reset:?}");
+    // 收尾：探针键不许留在进程内表里（同 label 的其他用例会被它顶账）
+    lock_whitelist().lock().unwrap_or_else(|e| e.into_inner()).remove(probe);
+
+    // ② 接线面：两条命令都必须「置空在任何业务早退之前」，成功路径才写名单
+    let code = strip_rust_comments(include_str!("scan_execute.rs"));
+    for head in ["pub async fn cleanup_check_locked", "pub async fn cleanup_query_locked"] {
+        let body = command_fn_body(&code, head);
+        let reset_at = body
+            .find("reset_lock_whitelist(")
+            .unwrap_or_else(|| panic!("{head} 没有先置空一次性白名单（R4-M03）"));
+        let returns_before = body[..reset_at].matches("return json!(").count();
+        assert_eq!(
+            returns_before, 1,
+            "{head} 在置空白名单之前有 {returns_before} 条早退（只允许 guard 那一条）—— \
+             其余早退都会把上一次的名单留给「结束进程」"
+        );
+        assert!(body.contains("store_lock_whitelist("), "{head} 的名单写入没走统一入口");
+        assert!(!body.contains("lock_whitelist()"), "{head} 又自己碰白名单槽（写侧必须只走 state 的两个函数）");
+    }
+    // ③ 棘轮：全命令面对槽的取用只允许「结束进程」那一次 remove
+    assert_eq!(
+        code.matches("lock_whitelist()").count(),
+        1,
+        "命令层直接碰 lock_whitelist() 的地方应为 1（kill 的一次性 remove），实到 {}",
+        code.matches("lock_whitelist()").count()
+    );
+    let kill_body = command_fn_body(&code, "pub fn cleanup_kill_locked_processes");
+    assert!(kill_body.contains(".remove(&label)"), "结束进程必须一次性取走名单（remove 而非 get）");
+    assert_eq!(code.matches("reset_lock_whitelist(").count(), 2, "置空入口必须恰好 check / query 各一处");
+    assert_eq!(code.matches("store_lock_whitelist(").count(), 2, "写名单入口必须恰好 check / query 各一处");
+}
+
+/// R4-L01 / R4-L02：验签通过后的三条早退必须与语义失败**同处置**（留痕 + 隔离），
+/// 且防回滚地板读的是严格数字。
+///
+/// 破坏自证：① 把任一 `quarantine_file(&file, …)` 或 `log::write_log("error", …)` 删掉 ⇒ 计数红；
+/// ② 把地板那两行的 `.and_then(Value::as_f64)` 换回 `.map(js_number)` ⇒ 严格数字断言红。
+#[test]
+fn 验签通过后的早退必须留痕并隔离() {
+    let rules = strip_rust_comments(include_str!("rules.rs"));
+    let body = command_fn_body(&rules, "pub(super) fn read_verified_data_rules");
+    assert_eq!(
+        body.matches("quarantine_file(&file").count(),
+        4,
+        "数据目录装载的隔离动作应为 4 处（解析失败 / groups 形状不合 / rulesVersion 非严格数字 / 语义不合规），实到 {}",
+        body.matches("quarantine_file(&file").count()
+    );
+    assert_eq!(
+        body.matches("\"error\"").count(),
+        4,
+        "每条整包拒绝都必须留一条 error 痕迹（静默回退内置 = 用户只会看到「规则永远是旧的」）"
+    );
+    // 防回滚地板读严格数字（与 validate_cleanup_package 同一口径）
+    assert!(body.contains(".and_then(Value::as_f64)"), "地板读 rulesVersion 没走严格数字: {body}");
+    assert!(
+        !body.contains("map(js_number)"),
+        "地板又用宽松 js_number —— 字符串/布尔会被吞成数字、数组/对象变 NaN，\
+         而 `NaN < floor` 恒假 ⇒ 地板被整个跳过（fail-closed 只剩靠顺序）"
+    );
+    assert!(
+        rules.contains(r#"top.get("rulesVersion").and_then(Value::as_f64)"#),
+        "语义校验侧的严格数字口径漂了（两侧必须同一个判据，§5.16）"
+    );
+}
+
+/// R4-L03：预览放行的长度闸必须按**字符数**，超限必须截断而不是整包拒绝。
+///
+/// 破坏自证：① 把 `p.chars().count()` 改回 `p.len()` ⇒ ① 段红（中文路径被误拒）；
+/// ② 把「截断」改回 `if arr.len() > MAX_PATHS { return success:false }` ⇒ 上限对拍那条红。
+#[test]
+fn 预览放行的长度闸按字符数且超限截断() {
+    use crate::commands::cleanup::preview_assets::filter_preview_paths;
+    // ① 样本必须同时满足「字符数在闸内、字节数越闸」，否则这条断言没有对照对象
+    let cjk = format!("C:\\Users\\测试\\{}", "图".repeat(90));
+    assert!(
+        cjk.chars().count() < 260 && cjk.len() > 260,
+        "样本字符数 {} / 字节数 {} 没有跨越判据分叉点",
+        cjk.chars().count(),
+        cjk.len()
+    );
+    let (kept, reasons) = filter_preview_paths(&[json!(cjk.clone())]);
+    assert_eq!(kept, vec![cjk], "中文路径必须放行（旧判据按字节 ⇒ 实际只允许约 86 字）: {kept:?} {reasons:?}");
+    assert_eq!(reasons, [0, 0, 0], "合法条目不得计任何拒因: {reasons:?}");
+    // ② 真超长（按字符数越闸）必须拒，且计入「超长」那一档
+    let too_long = format!("C:\\{}", "x".repeat(300));
+    assert!(too_long.chars().count() > 260 && too_long.len() == too_long.chars().count());
+    let (kept, reasons) = filter_preview_paths(&[json!(too_long)]);
+    assert!(kept.is_empty(), "超过 260 字符的路径不得放行: {kept:?}");
+    assert_eq!(reasons, [0, 1, 0], "超长必须只计「超长」这一档: {reasons:?}");
+    // ③ 非字符串 / 空串 / 含 NUL 分档计数，不许静默丢
+    let (kept, reasons) = filter_preview_paths(&[json!(123), json!(""), json!("a\0b")]);
+    assert!(kept.is_empty(), "三类非法形态都不得放行: {kept:?}");
+    assert_eq!(reasons, [1, 0, 2], "拒因分档（空 / 超长 / 非串或含 NUL）: {reasons:?}");
+    // ④ 接线：命令侧必须截断 + 如实回执，不再有整包拒绝的文案
+    let src = strip_rust_comments(include_str!("preview_assets.rs"));
+    assert!(src.contains("let truncated = arr.len() > MAX_PATHS;"), "超上限的清单必须走截断形态（截断位还要进回执）");
+    assert!(!src.contains("路径清单超过上限"), "预览对超长清单仍是整包拒绝 —— 消费方拿 success:false 就不开灯箱，大组永远打不开");
+    assert!(src.contains("p.chars().count() > MAX_PATH_CHARS") || src.contains("chars().count() > MAX_PATH_CHARS"), "长度闸没走 MAX_PATH_CHARS");
+}
+
+/// R4-L03 / 同域上限对拍：预览放行上限 ⇄ 条目明细上限必须是同一个数字。
+///
+/// 两侧没有共享常量可指（一在 preview_assets 的常量位、一在 cleanup_item_detail 的分支里），
+/// 旧形态是 500 对 600 ⇒ 明细能列出 600 条、预览只放 500 张，501–600 张的组必然打不开。
+/// 破坏自证：把 `MAX_PATHS` 或明细的 `let cap` 任一改动 ⇒ 等值断言红。
+#[test]
+fn 预览上限与明细上限同一数字() {
+    let preview = strip_rust_comments(include_str!("preview_assets.rs"));
+    let detail_file = strip_rust_comments(include_str!("scan_execute.rs"));
+    let detail = command_fn_body(&detail_file, "pub async fn cleanup_item_detail");
+    let cap_preview = number_after(&preview, "const MAX_PATHS: usize =").expect("preview_assets 里找不到 MAX_PATHS 常量");
+    let cap_detail = number_after(&detail, "let cap =").expect("cleanup_item_detail 里找不到明细上限");
+    assert!(cap_preview > 0 && cap_detail > 0, "两个上限都必须为正数: {cap_preview} / {cap_detail}");
+    assert_eq!(
+        cap_preview, cap_detail,
+        "预览放行上限({cap_preview}) ⇄ 明细枚举上限({cap_detail}) 分叉：明细列得出、预览放不下（§5.16 同判定不许两本账）"
+    );
+}
+
+/// R4-M04（本域可落的部分）：asset scope 只增不减 ⇒ 单次上限之外还必须有累计闸。
+///
+/// 来源快照绑定那一半属跨面改动（放行集要核 fileclean 域的槽），已登记进 P1 汇报。
+/// 破坏自证：删掉 `SESSION_ALLOWED.fetch_add(...)` 或把常量调到 0 ⇒ 本条红。
+#[test]
+fn 预览放行有累计闸且注释与实现相符() {
+    let src = strip_rust_comments(include_str!("preview_assets.rs"));
+    assert!(
+        src.contains("const MAX_SESSION_ALLOWS: usize ="),
+        "会话累计放行上限不见了（asset scope 没有撤销动作，单次上限挡不住逐组点开的累计增长）"
+    );
+    assert_eq!(src.matches("static SESSION_ALLOWED").count(), 1, "累计账只许一份进程内表示");
+    assert!(src.contains("SESSION_ALLOWED.fetch_add(allowed"), "累计账必须只加真的放出去的条数，不是加进来的条数");
+    // 模块注释必须写死「scope 只增不减」——旧文案写成「本次没点开的前端拿不到授权」，
+    // 那是做不到的承诺（同一会话更早点开过的组图恒可读）。
+    let raw = include_str!("preview_assets.rs");
+    assert!(raw.contains("只增不减"), "模块头没登记 asset scope 不可撤销这条约束");
+    assert!(!raw.contains("本次没点开的前端拿不到授权"), "模块头又出现与实现不符的承诺");
+}
+
+/// R4-M05：custom 开关的遍历口径必须与引擎一致 —— 双形态组里 `g.items` 的条目要落得到开关。
+///
+/// 破坏自证：① 把 `collect_group_items` 改回「有 subGroups 就 return」的互斥形态 ⇒ ①②红；
+/// ② 把 `set_enabled_by_id` 的回写删掉 ⇒ ② 红；③ 让它跨组继续找（改完第一处不返回）
+/// ⇒ ③ 的第二条红。
+#[test]
+fn custom开关与引擎同遍历口径_双形态组不落空() {
+    let rules = json!({
+        "rulesVersion": 20260928,
+        "groups": [{
+            "key": "g",
+            "title": "双形态组",
+            "subGroups": [{ "key": "sg", "items": [{ "id": "in_sub", "enabled": true }] }],
+            "items": [{ "id": "in_own", "enabled": true }]
+        }]
+    });
+    // ① 超集口径 + 顺序点名（引擎侧 find_rule_by_id 也是 subGroups 在前）
+    let ids: Vec<String> = collect_group_items(&rules["groups"][0])
+        .iter()
+        .map(|v| v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string())
+        .collect();
+    assert_eq!(ids, vec!["in_sub".to_string(), "in_own".to_string()], "组内条目集合与顺序: {ids:?}");
+    // ② 开关真的落到 g.items 那一条上（旧形态把它当「未知 id」忽略）
+    let mut merged = rules.clone();
+    let custom = json!({ "groups": [{ "key": "c", "items": [{ "id": "in_own", "enabled": false }] }] });
+    assert!(apply_custom_toggles(&mut merged, &custom, "probe.json"), "白名单内的开关不得整文件拒载");
+    assert_eq!(
+        find_cleanup_rule_by_id(&merged, "in_own").and_then(|v| v.get("enabled").cloned()),
+        Some(json!(false)),
+        "双形态组 g.items 条目的开关必须被写入 ——「引擎按哪条动刀」与「开关落点」得是同一个对象"
+    );
+    assert_eq!(
+        find_cleanup_rule_by_id(&merged, "in_sub").and_then(|v| v.get("enabled").cloned()),
+        Some(json!(true)),
+        "没被点名的条目不得被顺手改"
+    );
+    // ③ 首个命中即返回（与引擎同序）：同名条目只改 subGroups 那一份
+    let mut dup = json!({
+        "groups": [{
+            "key": "g",
+            "subGroups": [{ "items": [{ "id": "same", "enabled": true, "where": "sub" }] }],
+            "items": [{ "id": "same", "enabled": true, "where": "own" }]
+        }]
+    });
+    let custom2 = json!({ "groups": [{ "items": [{ "id": "same", "enabled": false }] }] });
+    assert!(apply_custom_toggles(&mut dup, &custom2, "dup.json"));
+    let hit = find_cleanup_rule_by_id(&dup, "same").expect("同 id 必须仍能查到");
+    assert_eq!(hit["where"], json!("sub"), "两侧必须命中同一个对象（引擎 find_rule_by_id 首个命中即返回）: {hit}");
+    // ④ 真库对拍：命令侧的组内条目集合必须全部是引擎查得到的（内置副本 = 发布物自身）
+    let lib: Value = serde_json::from_str(BUILTIN_RULES_JSON).expect("内置清理规则解析失败");
+    let mut listed = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+    for g in lib["groups"].as_array().expect("内置库 groups 必须是数组") {
+        for it in collect_group_items(g) {
+            let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            listed += 1;
+            if crate::engine::native::find_rule_by_id(&lib, &id).is_none() {
+                missing.push(id);
+            }
+        }
+    }
+    assert!(listed >= 150, "真库条目数现算 {listed} 条，低于地板 150（内置库只增不减）= 有一侧的遍历在漏条目");
+    assert!(missing.is_empty(), "命令侧列出但引擎查不到的条目（口径分叉）: {missing:?}");
+    // ⑤ 白名单闸不回退：custom 带禁止字段仍整文件拒载
+    let mut bad = merged.clone();
+    let custom_bad = json!({ "groups": [{ "items": [{ "id": "in_own", "enabled": false, "path": "C:\\x" }] }] });
+    assert!(!apply_custom_toggles(&mut bad, &custom_bad, "bad.json"), "custom 携带禁止字段必须整文件拒载（审查 B-3）");
+}
+
+/// R4-L04：引擎整体失败的对外文案不得再提退役前的「分桶」。
+///
+/// 破坏自证：把 message 改回 `原生执行失败(永久删桶)` ⇒ 第一条红；把留痕日志删掉 ⇒ 第三条红。
+#[test]
+fn 引擎失败的对外文案不得再提退役的分桶() {
+    let code = strip_rust_comments(include_str!("scan_execute.rs"));
+    assert!(!code.contains("永久删桶"), "回执文案里又出现退役前的「桶」字（渲染层把它当 toast 文案，暗示还有另一个桶）");
+    assert!(code.contains("原生执行失败: {e}"), "对外文案必须就是「原生执行失败」");
+    assert!(code.contains("原生执行失败(永久删形态)"), "引擎整体失败的留痕日志不见了（删除形态只在日志里点名）");
+}
+
+/// R4-L06：`///` 不许孤儿挂靠 —— doc 注释会被 Rust 归给**下一个 item**。
+///
+/// 破坏自证：在任一 `#[cfg(test)] mod tests` 上方补一行 `/// 说明` ⇒ 本条红。
+#[test]
+fn doc注释不得挂在测试模块头上() {
+    let files: [(&str, &str); 9] = [
+        ("mod.rs", include_str!("mod.rs")),
+        ("rules.rs", include_str!("rules.rs")),
+        ("state.rs", include_str!("state.rs")),
+        ("scan_execute.rs", include_str!("scan_execute.rs")),
+        ("preview_assets.rs", include_str!("preview_assets.rs")),
+        ("policy.rs", include_str!("policy.rs")),
+        ("recycle_bin.rs", include_str!("recycle_bin.rs")),
+        ("backup.rs", include_str!("backup.rs")),
+        ("contract_tests.rs", include_str!("contract_tests.rs")),
+    ];
+    for (name, src) in files {
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            if !t.starts_with("///") {
+                continue;
+            }
+            // doc 块之后允许空行与属性行，落在第一行「真 item」上
+            let mut j = i + 1;
+            while j < lines.len() {
+                let n = lines[j].trim();
+                if n.is_empty() || n.starts_with("#[") || n.starts_with("//!") {
+                    j += 1;
+                    continue;
+                }
+                break;
+            }
+            let target = lines.get(j).map(|s| s.trim()).unwrap_or("");
+            let targets_test_mod = (target.starts_with("mod ") && target.contains("tests"))
+                || (j > i && lines[j - 1].trim() == "#[cfg(test)]" && target.starts_with("mod "));
+            assert!(
+                !targets_test_mod,
+                "{name}:{} 的 doc 注释挂在测试模块头上（孤儿 ///，读起来像模块文档）: {target}",
+                i + 1
+            );
+        }
+    }
+    // 三条历史孤儿必须已经消失（判据对象是注释原文，所以读未剥注释的文本）
+    let raw_rules = include_str!("rules.rs");
+    assert!(!raw_rules.contains("/// 执行/明细的 PS 超时"), "rules.rs 的 PS 超时孤儿 /// 回来了（该链已随 S3 退役）");
+    let raw_state = include_str!("state.rs");
+    assert!(!raw_state.contains("/// 数字按 JS String(n)"), "state.rs 的 js_num_str 孤儿 /// 回来了");
+    // 本文件自己那两条：判据字符串**分两段拼接**，否则「门禁自己的文案也算语料」会让
+    // 断言永远命中自己（AGENTS §4.1 假阳性②）。
+    let gone_a = "/// 首个差".to_string() + "异定位信息（行号 + 两侧原文片段）";
+    let gone_b = "/// PS 模板替换对拍".to_string() + "：同一合成输入，JS 生成 vs Rust 生成**逐字节**比较。";
+    let raw_self = include_str!("contract_tests.rs");
+    assert!(!raw_self.contains(gone_a.as_str()), "contract_tests 的「首个差异定位」孤儿 /// 回来了");
+    assert!(!raw_self.contains(gone_b.as_str()), "contract_tests 的「PS 模板替换对拍」孤儿 /// 回来了");
+}
+
+/// R4-L06 同族：注释里不许裸写本域已不存在的已退役脚本名（分报告门禁候选③点名的形态）。
+///
+/// 破坏自证：在 scan_execute.rs 的注释里再裸写一次那个名字 ⇒ 本条红。
+#[test]
+fn 注释不得裸写本域已不存在的脚本名() {
+    // 判据对象是**注释文本**，所以读原文而不是剥注释后的结果；
+    // 名字本身同样分两段拼（本文件的说明文字也算语料）。
+    let retired = "DETAIL_".to_string() + "SCRIPT";
+    let src = include_str!("scan_execute.rs");
+    assert!(!src.contains(retired.as_str()), "注释里又点名已随 S3 退役的 PS 明细脚本名");
+}
+
+/// R4-L08：零消费点的「目录别名」不许留在规则域（把存在当接入）。
+#[test]
+fn 规则域不得留零消费点的目录别名() {
+    let rules = strip_rust_comments(include_str!("rules.rs"));
+    let md = strip_rust_comments(include_str!("mod.rs"));
+    assert!(!rules.contains("fn data_rules_dir"), "rules.rs 又出现第二份「规则库根目录」命名");
+    assert!(!md.contains("data_rules_dir"), "mod.rs 台账还在 re-export 它（pub 且被 re-export ≠ 已接入）");
+    // 保留的那份必须是真消费点：data_rules_file 被装载链用着
+    assert!(rules.contains("fn data_rules_file"), "规则库文件读取入口不见了");
+    let load = command_fn_body(&rules, "pub(super) fn read_verified_data_rules");
+    assert!(load.contains("data_rules_file()"), "装载链没吃到 data_rules_file() 这个入口");
+}
+
+/// R4-L09：模块头声称的删除闸必须真在本域存在（不许再写一条零调用的闸名）。
+#[test]
+fn 模块头声称的删除闸必须真在清理域里() {
+    let state = include_str!("state.rs");
+    let head = &state[..state.find("use crate::engine::paths;").unwrap_or(state.len())];
+    assert!(head.contains("validate_snapshot_items"), "模块头必须点名本域真实的第一道闸");
+    // 只禁「把 in_scope 当本域闸来声称」的两种写法（新注释里点名它是为了说明它**不是**闸，
+    // 那属于 §4.1 说的自指语料，不算违例）
+    for claim in ["+ `in_scope`", "in_scope 决定能不能删"] {
+        assert!(
+            !head.contains(claim),
+            "模块头又声称有一道 in_scope 闸 —— 它只是 commands/fileclean.rs 的私有判据，本域零调用（与审查 v5 C-1 同形）: {claim}"
+        );
+    }
+    // 第二道闸必须点名到引擎侧的真名字（三面各一个），不写「等等机制」这种含混话
+    for gate in ["is_path_protected", "final_path_protected", "is_reparse"] {
+        assert!(head.contains(gate), "模块头缺第二道闸的点名 {gate}");
+    }
+    // 反向对照：这些名字在本域确实可达（写进注释的判据必须是真的）
+    let engine = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
+    for gate in ["is_path_protected", "final_path_protected", "is_reparse"] {
+        assert!(engine.contains(gate), "引擎侧找不到 {gate} —— 模块头点了个不存在的闸");
+    }
+}
+
+/// R4-U03（2026-10-20 用户裁定）：`cleanup:rules` 收回主窗独占，读值走 Arc 入口。
+///
+/// 仓外侧同步核对（本断言管不到的两处）：`tools/check-guard-tiers.mjs` 的 MUST_MAIN 增、
+/// MUST_READONLY 删；`tools/check-channel-map.mjs` 的 D5 只读档豁免删。
+/// 破坏自证：把 guard 改回 `guard_readonly` ⇒ 前两条红，且 check-guard-tiers 的 B/D 组红。
+#[test]
+fn rules_出口主窗独占且走_arc_读值() {
+    let rules = strip_rust_comments(include_str!("rules.rs"));
+    let body = command_fn_body(&rules, "pub fn cleanup_rules");
+    assert!(body.contains("guard::guard(&window, guard::MAIN)"), "cleanup:rules 不再是主窗独占: {body}");
+    assert!(!body.contains("guard_readonly"), "cleanup:rules 又走只读档（= 三个子窗可调整库删除路径）");
+    assert!(body.contains("rules_value_arc()"), "读值没走 Arc 入口: {body}");
+    assert!(!body.contains("rules_value()"), "又用兼容入口（命中缓存也整树深克隆）");
+}
+
+/// R4-L07：gameRedist 回填的条数必须过与扫描侧同一条上限，超限如实置截断位。
+///
+/// 破坏自证：① 把 `cap_backfill_files` 的 `take(cap)` 去掉 ⇒ ①②红；
+/// ② 把调用点第二实参改成字面量 500 ⇒ 接线断言红（数字必须来自 PLAN_CAP_PER_ITEM）。
+#[test]
+fn game_redist_回填也受同一条数上限约束() {
+    use crate::commands::cleanup::scan_execute::cap_backfill_files;
+    let files: Vec<(String, u64)> = (0..5).map(|i| (format!("C:\\x\\f{i}"), i as u64)).collect();
+    let (arr, trunc) = cap_backfill_files(&files, 3);
+    assert_eq!(arr.len(), 3, "超限必须截断到上限，实到 {}", arr.len());
+    assert!(trunc, "被上限裁掉必须如实报 truncated");
+    let (arr, trunc) = cap_backfill_files(&files, 5);
+    assert_eq!(arr.len(), 5, "刚好等于上限不得少写条目");
+    assert!(!trunc, "未越上限时 truncated 必须是 false");
+    assert_eq!(arr[0], json!({ "path": "C:\\x\\f0", "size": 0 }), "回填条目形状（无 birthtimeNs = 引擎侧恒无身份证基线）: {}", arr[0]);
+    // 接线：上限取扫描侧同一常量，且超限要在命令侧置 filesTruncated
+    let code = strip_rust_comments(include_str!("scan_execute.rs"));
+    assert!(code.contains("cap_backfill_files(files, PLAN_CAP_PER_ITEM)"), "回填的条数闸没走 PLAN_CAP_PER_ITEM（同判定两本账，§5.16）");
+    assert_eq!(
+        code.matches("cap_backfill_files(").count(),
+        code.matches("fn cap_backfill_files(").count() + 1,
+        "回填闸的调用点必须恰好一处"
+    );
+    assert!(code.contains("if files_truncated {"), "超限没在条目上置 filesTruncated（确认弹窗看不出清单被裁）");
+    assert!(code.contains("无 birthtimeNs 身份证基线"), "「这 3 条无身份证基线」这条事实没在留痕里点名（R4-L07）");
+}
+
+// ==================== 真机探针（只写不跑；本批禁跑 cargo） ====================
+
+/// R4-L01 / R4-L02 的真机探针。
+///
+/// 验的是什么：数据目录那份 `rules.json` **真实存在且真实验签通过**时，装载链的每一条
+/// 早退都必须留下隔离件 —— 也就是「判坏了要看得见」，不再静默吃内置副本。
+/// 为什么不伪造样本：验签要私钥（仓库外的本机密钥材料），伪造出来的坏包只会走到
+/// 「验签失败」那条早退，正好绕开本批改判的三条分支。
+///
+/// 零新增副作用：本用例只读盘 + 调既有装载函数。若真实文件恰好是坏的，装载函数
+/// **本来就会**把它隔离（这正是被测行为），探针不额外改任何东西。
+///
+/// 跑法：`cargo test --lib -- --ignored`（真机档；发版前必跑，见验收纪律）。
+#[test]
+#[ignore]
+fn 真机_数据目录坏规则必须留下隔离件() {
+    use crate::engine::rules_signature;
+    let file = data_rules_file();
+    let Some(text) = std::fs::read_to_string(&file).ok() else {
+        // 数据目录规则不在场（首启动常态）：没有对照对象，如实跳过
+        return;
+    };
+    // 验签失败那条早退刻意不隔离（回退内置、现场留给用户自己看），不在本批判面内
+    if rules_signature::verify_rules_text(&text).is_err() {
+        return;
+    }
+    // 只有「验签通过后被判定为坏」的三种形态才要求隔离件在场
+    let parsed: Option<Value> = serde_json::from_str(&text).ok();
+    let bad_shape = match parsed.as_ref() {
+        None => true,
+        Some(v) => {
+            let groups_ok = v.get("groups").map(|g| g.is_array()).unwrap_or(false);
+            let ver_ok = v.get("rulesVersion").and_then(Value::as_f64).is_some();
+            !groups_ok || !ver_ok
+        }
+    };
+    if !bad_shape {
+        // 合法包：装载链必须真的吃到它（否则「静默回退内置」又把这条判据骗过去了）
+        let got = read_verified_data_rules().expect("验签通过且形状合法的规则必须被装载（None = 静默回退内置）");
+        let want = parsed.as_ref().expect("上面已解析过").get("rulesVersion").and_then(Value::as_f64);
+        assert_eq!(
+            got.get("rulesVersion").and_then(Value::as_f64),
+            want,
+            "装载结果不是数据目录那份（rulesVersion 不符）= 被静默换成了内置副本"
+        );
+        return;
+    }
+    let dir = file.parent().expect("规则文件必须有父目录");
+    let name = file.file_name().expect("规则文件必须有文件名").to_string_lossy().to_string();
+    let needle = format!("{name}.corrupt-");
+    let has_quarantine = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().starts_with(&needle))
+        })
+        .unwrap_or(false);
+    assert!(
+        has_quarantine,
+        "验签通过的坏规则被判坏却没有任何隔离件（{needle}…）—— 静默回退内置，R4-L01/L02 的缺陷态"
+    );
+}
+
+/// R4-L07 的真机探针：真实 gameRedist 目录的回填清单必须受同一条上限约束，
+/// 并且**不许**凭空造出 birthtimeNs（缺基线是事实，引擎按 identityUnbaselined 记账）。
+///
+/// 触真实磁盘（三家平台目录）⇒ 归真机档，禁进快速组。
+/// 跑法：`cargo test --lib -- --ignored`。
+#[test]
+#[ignore]
+fn 真机_game_redist_回填清单受同一上限且无伪造身份证() {
+    use crate::commands::cleanup::scan_execute::cap_backfill_files;
+    let r = crate::commands::gameclean::collect_redist_by_platform();
+    let mut checked = 0usize;
+    for (label, files) in [
+        ("steam", &r.steam.files),
+        ("epic", &r.epic.files),
+        ("wegame", &r.wegame.files),
+    ] {
+        let (arr, trunc) = cap_backfill_files(files, PLAN_CAP_PER_ITEM);
+        assert!(arr.len() <= PLAN_CAP_PER_ITEM, "{label} 回填条数越上限: {}", arr.len());
+        assert_eq!(trunc, files.len() > PLAN_CAP_PER_ITEM, "{label} 截断位与实到条数不符（files={} / arr={})", files.len(), arr.len());
+        for v in &arr {
+            assert!(
+                v.get("birthtimeNs").is_none(),
+                "{label} 回填条目不得凭空造 birthtimeNs 基线: {v}"
+            );
+            assert!(
+                v.get("path").and_then(|x| x.as_str()).map(|p| !p.is_empty()).unwrap_or(false),
+                "{label} 回填条目必须带非空 path: {v}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "真机上三家平台至少要回填一个文件，否则本探针没有对照对象（请换有装运行库的机器跑）");
 }

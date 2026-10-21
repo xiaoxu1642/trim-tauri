@@ -34,7 +34,6 @@ pub(super) const EXECUTE_MAX_ITEMS: usize = 500;
 
 /// 占用检测防呆上限
 pub(super) const PLAN_LOCK_CAP: usize = 20_000;
-/// 执行/明细的 PS 超时（对照 main.js 1357 / 1531）
 /// 对照 JS `JSON.stringify`（紧凑、非 ASCII 原样输出；键序依赖 serde_json 的 preserve_order）
 pub(super) fn json_text(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
@@ -43,18 +42,14 @@ pub(super) fn json_text(v: &Value) -> String {
 
 // ==================== 规则库加载（对照 cleanup-scripts.js 44-195） ====================
 
-/// 规则库根目录（**读**）。收口后新根 = `app_data_dir()\cleanup`
-/// （标准模式 `%APPDATA%\com.xiaoxu.trim\cleanup`，便携模式 exe 同级 `data\cleanup`），
-/// 老根 `%APPDATA%\Trim\cleanup` 只作只读兜底——2026-09-28 决策清单 D1=A。
-///
-/// 本函数原注释写的是「与 Electron 逐字一致，便携模式同样落 Roaming」，那是收口前的口径：
-/// 它造成便携实例下载的规则带不走、标准与便携两实例互相覆盖 `rules.json` 与水位线、
-/// 发版手册 §7.3 的清缓存步骤够不着规则文件。老根仍在 `MIGRATION_DIRS` 里做一次性搬迁，
+/// 规则库文件（**读**）。新根 = `app_data_dir()\cleanup\rules.json`
+/// （标准模式 Roaming 数据目录，便携模式 exe 同级 `data\cleanup`），老根 `%APPDATA%\Trim\cleanup`
+/// 只作只读兜底——2026-09-28 决策清单 D1=A；老根仍在 `MIGRATION_DIRS` 里做一次性搬迁，
 /// 兜底读只服务于「搬迁没跑成」的场景。
-pub fn data_rules_dir() -> PathBuf {
-    paths::data_subdir_for_read("cleanup")
-}
-
+///
+/// 本域不再有 `data_rules_dir()` 这个「目录名的第二名字」：R4-L08 现算它零消费点
+/// （只被 `mod.rs` re-export），而 `paths::data_subdir_for_read` 才是根目录口径的真源
+/// ——「pub 且被 re-export」不等于「已接入」，留着它只会让人以为有第二条读链。
 pub(super) fn data_rules_file() -> PathBuf {
     paths::data_file_for_read("cleanup/rules.json")
 }
@@ -84,31 +79,74 @@ pub(super) fn safe_read_json(file: &Path) -> Option<Value> {
     }
 }
 
-/// 组内条目（`subGroups` 优先，否则 `items`）
+/// 组内条目（**超集口径**：先看 `subGroups` 各 items，再看组自有 `items`，两者都收）
+///
+/// R4-M05：旧形态是「有 `subGroups` 就不再看 `g.items`」的互斥 else，与引擎唯一真源
+/// `find_rule_by_id`（subGroups 优先、自有条目也扫）分叉 —— 同时带两者的组里，`g.items`
+/// 的条目引擎按它动刀、`cleanup:item-detail` 也找得到，**只有 custom 开关落不到**，
+/// 还被日志说成「引用未知条目 id」（把「开关没生效」报成「用户写了不存在的 id」）。
+/// 命令侧禁再写第二份遍历：本函数的走序必须与引擎一致，[`set_enabled_by_id`] 同源同序。
 pub(super) fn collect_group_items(group: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
     if let Some(sgs) = group.get("subGroups").and_then(|v| v.as_array()) {
-        let mut out = Vec::new();
         for sg in sgs {
             if let Some(items) = sg.get("items").and_then(|v| v.as_array()) {
                 out.extend(items.iter().cloned());
             }
         }
-        out
-    } else {
-        group
-            .get("items")
-            .and_then(|v| v.as_array())
-            .map(|a| a.to_vec())
-            .unwrap_or_default()
     }
+    if let Some(items) = group.get("items").and_then(|v| v.as_array()) {
+        out.extend(items.iter().cloned());
+    }
+    out
+}
+
+/// 把 `enabled` 写到规则树里 id 命中的**第一个**条目（返回是否命中）。
+///
+/// 为什么按 id 就地定位、而不是先建 `(组下标, 条目下标)` 索引再回写：索引那份走序
+/// 一旦与引擎的超集遍历不同步就会分叉（R4-M05 的事故形态），而按 id 定位只需与
+/// [`collect_group_items`] 共用同一份顺序。引擎侧 `find_rule_by_id` 也是「首个命中即返回」，
+/// 两侧因此指向同一个对象。
+fn set_enabled_by_id(rules: &mut Value, id: &str, enabled: bool) -> bool {
+    let Some(groups) = rules.get_mut("groups").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    for g in groups.iter_mut() {
+        if let Some(sgs) = g.get_mut("subGroups").and_then(Value::as_array_mut) {
+            for sg in sgs.iter_mut() {
+                if set_enabled_in_items(sg, id, enabled) {
+                    return true;
+                }
+            }
+        }
+        if set_enabled_in_items(g, id, enabled) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 在某个节点（子组或组）的 `items` 里按 id 命中并写 `enabled`。
+/// 命中前提是 `it` 为对象（`get("id")` 对非对象恒 None），故下标赋值不会 panic。
+fn set_enabled_in_items(node: &mut Value, id: &str, enabled: bool) -> bool {
+    let Some(items) = node.get_mut("items").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    for it in items.iter_mut() {
+        if it.get("id").and_then(|v| v.as_str()) == Some(id) {
+            it["enabled"] = Value::Bool(enabled);
+            return true;
+        }
+    }
+    false
 }
 
 /// 进程内防回滚高水位（2026-10-04 审计 §4.7）：磁盘上的水位线文件是「可被删的」
 /// ——用户手工清理、第三方「垃圾清理」工具都可能把 data 目录当缓存扫掉。文件一旦
 /// 消失，只读文件的地板就回落到 `builtin_version`，任何**合法签名**且
-/// rulesVersion >= 内置版本的旧包都会被接受（下方 :954 的比较是 `v < floor`，相等
-/// 通过）。把本进程记录过的最高 rulesVersion 存在进程内并折进地板：删文件丢的是
-/// 跨进程记忆，丢不掉本进程的记忆。AtomicU64 存 f64 bits（版本恒为正数日期戳）。
+/// rulesVersion >= 内置版本的旧包都会被接受（`read_verified_data_rules` 里的比较是
+/// `v < floor`，相等通过）。把本进程记录过的最高 rulesVersion 存在进程内并折进地板：
+/// 删文件丢的是跨进程记忆，丢不掉本进程的记忆。AtomicU64 存 f64 bits（版本恒为正数日期戳）。
 pub(super) static WATERMARK_HIGH: AtomicU64 = AtomicU64::new(0);
 
 /// 读进程内高水位（f64 bits 还原）
@@ -970,14 +1008,45 @@ pub(super) fn read_verified_data_rules() -> Option<Value> {
         return None;
     }
     let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+        // R4-L01：验签**通过后**解析失败 —— 与相邻两条（验签失败、语义失败）同处置：留痕 + 隔离。
+        // 隔离的书面理由「避免每次扫描都重复判同一份坏文件」对这条同样成立：这是一份签了名
+        // 却吃不下的字节，每轮装载都会再读一遍再静默回退，用户端表现为「规则永远只吃到内置
+        // 那份」而日志一条没有。
+        log::write_log(
+            "error",
+            &format!(
+                "数据目录规则验签通过但 JSON 解析失败，已整包拒绝并隔离: {}",
+                file.display()
+            ),
+        );
+        security::quarantine_file(&file, "cleanup-rules 验签通过但解析失败");
         return None;
     };
     if !parsed.get("groups").map(|g| g.is_array()).unwrap_or(false) {
+        log::write_log(
+            "error",
+            &format!(
+                "数据目录规则验签通过但 groups 不是数组，已整包拒绝并隔离: {}",
+                file.display()
+            ),
+        );
+        security::quarantine_file(&file, "cleanup-rules groups 形状不合（验签已通过）");
         return None;
     }
-    let v = parsed.get("rulesVersion").map(js_number).unwrap_or(0.0);
+    // R4-L02：防回滚地板读的必须是**严格数字**（与 validate_cleanup_package 的 rulesVersion
+    // 同口径）。宽松 js_number 会把字符串 "20260928" 与 true 都吞成数字、把数组/对象吞成
+    // NaN，而 `NaN < floor` 恒假 ⇒ 地板被整个跳过，fail-closed 只剩「后置语义校验恰好也拒」
+    // 这一层兜住（靠顺序不靠判据）。非严格数字在这里就按「版本不成立」拒掉。
+    let Some(v) = parsed.get("rulesVersion").and_then(Value::as_f64) else {
+        log::write_log(
+            "error",
+            "数据目录规则的 rulesVersion 不是严格数字（防回滚地板无从比对），已整包拒绝并隔离",
+        );
+        security::quarantine_file(&file, "cleanup-rules rulesVersion 非严格数字");
+        return None;
+    };
     let builtin_version = safe_read_json_from_str(BUILTIN_RULES_JSON)
-        .and_then(|b| b.get("rulesVersion").map(js_number))
+        .and_then(|b| b.get("rulesVersion").and_then(Value::as_f64))
         .unwrap_or(0.0);
     let floor = builtin_version.max(rules_watermark());
     if floor > 0.0 && v < floor {
@@ -1012,28 +1081,11 @@ pub(super) fn safe_read_json_from_str(text: &str) -> Option<Value> {
 /// 自定义开关合并（对照 applyCustomToggles，审查 B-3 fail-closed）
 pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label: &str) -> bool {
     let allowed: [&str; 2] = ["id", "enabled"];
-    // 内置条目 id → (组下标, 条目下标)。M-8（审查 2026-10-07）：原先把这两维压成
-    // `gi * 100_000 + ii` 一个 usize，某组条目数 ≥ 10 万时 ii 会进位撞进下一组
-    //（开关作用到错误条目）。直接用二元组，不设编码上界。
-    let mut by_id: HashMap<String, (usize, usize)> = HashMap::new();
-    let groups_len = rules
-        .get("groups")
-        .and_then(|g| g.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    for gi in 0..groups_len {
-        let items = rules
-            .get("groups")
-            .and_then(|g| g.as_array())
-            .and_then(|a| a.get(gi))
-            .map(collect_group_items)
-            .unwrap_or_default();
-        for (ii, it) in items.iter().enumerate() {
-            if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
-                by_id.insert(id.to_string(), (gi, ii));
-            }
-        }
-    }
+    // R4-M05：这里原先先建「内置条目 id → (组下标, 条目下标)」索引、再按下标回写。
+    // M-8（审查 2026-10-07）把编码键 `gi * 100_000 + ii` 换成二元组只是治了进位撞组，
+    // 没治住**索引那侧的遍历口径**：索引由互斥形态的 collect_group_items 建，双形态组里
+    // `g.items` 的条目根本进不了索引。现在按 id 就地定位（[`set_enabled_by_id`]），
+    // 走序与引擎唯一真源一致，命令侧不再留第二套「先数下标再回写」的账。
     let parsed_groups = parsed
         .get("groups")
         .and_then(|g| g.as_array())
@@ -1067,51 +1119,14 @@ pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label
             let Some(id) = it.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let Some(&(gi, ii)) = by_id.get(id) else {
+            let Some(enabled) = it.get("enabled").and_then(|v| v.as_bool()) else {
+                continue;
+            };
+            if !set_enabled_by_id(rules, id, enabled) {
                 log::write_log(
                     "warn",
                     &format!("[cleanup] 自定义规则 {file_label} 引用未知条目 id: {id}，已忽略"),
                 );
-                continue;
-            };
-            let Some(enabled) = it.get("enabled").and_then(|v| v.as_bool()) else {
-                continue;
-            };
-            if let Some(target) = rules
-                .get_mut("groups")
-                .and_then(|g| g.as_array_mut())
-                .and_then(|a| a.get_mut(gi))
-            {
-                let is_sub = target.get("subGroups").is_some();
-                if is_sub {
-                    if let Some(sgs) = target.get_mut("subGroups").and_then(|v| v.as_array_mut()) {
-                        let mut n = 0usize;
-                        for sg in sgs.iter_mut() {
-                            let len = sg
-                                .get("items")
-                                .and_then(|v| v.as_array())
-                                .map(|a| a.len())
-                                .unwrap_or(0);
-                            if ii < n + len {
-                                if let Some(itm) = sg
-                                    .get_mut("items")
-                                    .and_then(|v| v.as_array_mut())
-                                    .and_then(|a| a.get_mut(ii - n))
-                                {
-                                    itm["enabled"] = Value::Bool(enabled);
-                                }
-                                break;
-                            }
-                            n += len;
-                        }
-                    }
-                } else if let Some(itm) = target
-                    .get_mut("items")
-                    .and_then(|v| v.as_array_mut())
-                    .and_then(|a| a.get_mut(ii))
-                {
-                    itm["enabled"] = Value::Bool(enabled);
-                }
             }
         }
     }
@@ -1270,13 +1285,25 @@ pub(super) fn find_cleanup_rule_by_id(rules: &Value, id: &str) -> Option<Value> 
 // ==================== cleanup:rules ====================
 
 /// cleanup:rules — 向渲染层暴露清理规则唯一数据源（P1-9）
+///
+/// 档位 = **主窗独占**（R4-U03，2026-10-20 用户裁定）：本命令一次下发整库
+/// （含每条规则的删除路径与 regKeys 目标），判据是 AGENTS §3「谁真的需要调它」——
+/// 现算唯一调用点是主窗磁盘清理页（`cleanup.js`），子窗没有一个调它，挂在 readonly
+/// 等于把整库删除面白放开给子窗。同步登记在 `tools/check-guard-tiers.mjs` 的
+/// `MUST_MAIN`（B 组双向棘轮：源码 guard 与该表必须完全相等），并从 `MUST_READONLY`
+/// 与 `tools/check-channel-map.mjs` 的 D5 只读档豁免里删除。
+///
+/// 读值走 [`rules_value_arc`]（装载链唯一实现，命中缓存时只加引用计数）；
+/// `rules_value()` 那条兼容入口的深克隆形态不是本命令该付的代价。
 #[tauri::command]
 pub fn cleanup_rules<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    match rules_value() {
-        Ok(data) => json!({ "success": true, "data": data }),
+    match rules_value_arc() {
+        // 回执要的是 owned `Value`，这一份克隆省不掉（代价与旧兼容入口相同）；
+        // 换掉的是「本命令依赖 rules_value() 那条兼容入口」这件事本身。
+        Ok(data) => json!({ "success": true, "data": (*data).clone() }),
         Err(e) => {
             log::write_log("warn", &format!("读取清理规则失败: {e}"));
             json!({ "success": false, "message": "清理规则读取失败" })

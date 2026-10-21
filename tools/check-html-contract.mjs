@@ -154,6 +154,66 @@ check(
   );
 }
 
+// ---- 7. 依赖边：凡加载 intro.js 的面必须同时加载 modelpicker.js（F3-M07） ----
+// intro.js 无条件渲染「选择模型」按钮，点击时读 window.modelpicker.open；读不到时
+// 降级成 toast「模型选择暂不可用」——按钮常显、点击永远失败（残留副窗的真实案例）。
+// 扫描面 = src/*.html 静态 script 标签 + app.js 的 PAGE_SCRIPTS 每页清单与 IDLE_SCRIPTS
+// （两条动态注入路径都要看，漏一面 = 规则只在静态挂载上生效）。
+const judgeIntroPickerEdges = (surfaces) =>
+  surfaces.filter((s) => s.names.includes('intro.js') && !s.names.includes('modelpicker.js')).map((s) => s.label);
+
+/** 取 from 中 at 处开括号配对到对应闭括号的文本（at<0 或失配返回 ''） */
+const balanced = (from, at) => {
+  if (at < 0) return '';
+  const open = from[at];
+  const close = open === '{' ? '}' : open === '[' ? ']' : '';
+  if (!close) return '';
+  let d = 0;
+  for (let i = at; i < from.length; i++) {
+    if (from[i] === open) d++;
+    else if (from[i] === close) { d--; if (d === 0) return from.slice(at, i + 1); }
+  }
+  return '';
+};
+
+{
+  const surfaces = [];
+  for (const f of htmlFiles) {
+    const clean = stripHtmlComments(readFileSync(join(SRC, f), 'utf8'));
+    surfaces.push({ label: f, names: [...clean.matchAll(/<script[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].split('/').pop()) });
+  }
+  const appJs = readFileSync(join(SRC, 'scripts', 'app.js'), 'utf8');
+  const pageAt = appJs.indexOf('PAGE_SCRIPTS');
+  const idleAt = appJs.indexOf('IDLE_SCRIPTS');
+  if (pageAt < 0 || idleAt < 0) {
+    check(false, '7. 依赖边 intro.js → modelpicker.js', 'app.js 里定位不到 PAGE_SCRIPTS/IDLE_SCRIPTS 锚点 —— 扫描面失明，先修锚点再谈判定');
+  } else {
+    const pageBlock = balanced(appJs, appJs.indexOf('{', pageAt));
+    for (const m of pageBlock.matchAll(/['"]?([\w-]+)['"]?\s*:\s*\[/g)) {
+      const arr = balanced(pageBlock, pageBlock.indexOf('[', m.index));
+      surfaces.push({ label: `app.js PAGE_SCRIPTS.${m[1]}`, names: [...arr.matchAll(/'([^']+)'/g)].map((x) => x[1].split('/').pop()) });
+    }
+    const idleBlock = balanced(appJs, appJs.indexOf('[', idleAt));
+    surfaces.push({ label: 'app.js IDLE_SCRIPTS', names: [...idleBlock.matchAll(/'([^']+)'/g)].map((x) => x[1].split('/').pop()) });
+
+    const edgeBad = judgeIntroPickerEdges(surfaces);
+    // 扫描面地板（§4.1）：含 intro.js 的面为 0 = 清单解析失明、规则恒绿，不许判绿
+    const introFaces = surfaces.filter((s) => s.names.includes('intro.js')).length;
+    check(
+      edgeBad.length === 0 && introFaces > 0,
+      `7. 依赖边：凡加载 intro.js 的面（现算 ${surfaces.length} 面 / 含 intro ${introFaces} 面）必须同时加载 modelpicker.js`,
+      edgeBad.join('；') || (introFaces === 0 ? `扫描面里 0 个 intro.js 面 = 解析失明（现算 ${surfaces.length} 面）` : ''),
+    );
+
+    // 正向对照自检（§4.1）：缺挂必红 / 双挂放行 / 无 intro 放行
+    const selfOk =
+      JSON.stringify(judgeIntroPickerEdges([{ label: 'bad', names: ['intro.js'] }])) === JSON.stringify(['bad']) &&
+      JSON.stringify(judgeIntroPickerEdges([{ label: 'ok', names: ['modelpicker.js', 'intro.js'] }])) === '[]' &&
+      JSON.stringify(judgeIntroPickerEdges([{ label: 'other', names: ['xtable.js'] }])) === '[]';
+    check(selfOk, '7s. 依赖边判定器正向对照（缺挂必红 / 双挂放行 / 无 intro 放行）');
+  }
+}
+
 if (fail > 0) {
   console.error('check-html-contract: 存在违规');
   process.exit(1);

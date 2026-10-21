@@ -1,12 +1,11 @@
 // splash.js - 启动页（v2.7.0 新增，v2.7.1 加速编排，参考 hero-preview/index.html 移植）
-// 结构：WebGL 流线背景（烟→淡紫偏白，流星→黄白，作者 Matthias Hurrle，Trim 改色版）
-//       + 首次进入完整体验（徽章/简介/进度/点击进入），之后每次启动为紧凑模式（Trim+进度，自动进入）；
-//       加载完成后背景淡出（主页内容同步渐显），"Trim" 字样以 FLIP 变换平滑落位到标题栏品牌处
-//       （PowerPoint「平滑」效果）。
-// 进度编排（v2.7.1）：不再纯假进度——app.js 初始化完成会派发 `trim:boot-ready`，
-// 进度条到 92% 后停在原地等真实就绪事件，就绪即收尾进入（紧凑模式最快约 0.5s 进主界面）。
-// 约束：CSP 禁内联脚本，全部逻辑在此文件；v3.6.2 起开屏动画无视系统 reduced-motion 完整播放；
-//       任何异常（目标元素缺失/脚本异常/transitionend 丢失）都有兜底路径保证进入主界面。
+// 结构：WebGL 流线背景（烟→淡紫偏白，流星→黄白，作者 Matthias Hurrle，Trim 改色版）+ 首次进入完整体验
+//       （徽章/简介/进度/点击进入），之后每次启动为紧凑模式（Trim+进度，自动进入）；加载完成后背景淡出
+//       （主页内容同步渐显），"Trim" 字样以 FLIP 变换平滑落位到标题栏品牌处（PowerPoint「平滑」效果）。
+// 进度编排（v2.7.1）：不再纯假进度——app.js 初始化完成会派发 `trim:boot-ready`，进度条到 92% 后停在原地等
+//       真实就绪事件，就绪即收尾进入（紧凑模式最快约 0.5s 进主界面）。
+// 约束：CSP 禁内联脚本，全部逻辑在此文件；v3.6.2 起开屏动画无视系统 reduced-motion 完整播放；任何异常
+//       （目标元素缺失/脚本异常/transitionend 丢失）都有兜底路径保证进入主界面。
 (function () {
   'use strict';
 
@@ -33,22 +32,17 @@
   // 落位目标：标题栏品牌文字（index.html .titlebar-title）
   var titleTarget = document.querySelector('.titlebar-title');
 
-  // v3.6.2 产品决策（用户拍板）：开屏动画是 Trim 品牌资产——WebGL 流线背景、入场、FLIP
-  // 落位，即使系统关闭「显示动画」（SPI_GETCLIENTAREAANIMATION=0 → prefers-reduced-motion:
-  // reduce）也完整播放，不再按系统开关跳过。body.splash-live 标记供 main.css 的
-  // reduced-motion 归零规则排除启动页子树（开屏期间主界面渐显也需要），finish() 摘除。
-  // 注：v3.6.1 曾因 PRM 下「静态卡死还要手点」直接摘除启动页；现将 CSS 归零规则豁免 +
-  // 完整 JS 编排后，入场/进度/FLIP 全链路真实运行，卡死根因不复存在。
-  // M3（v3.6.5）N-3：原先此处声明并求值了
-  //   var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  // 但 v3.6.2 改为「开屏完整播放」后，全文再无任何读取点（仅注释提及），属死变量。
-  // 处理：删除（而非保留作「参考」）——留着会让后来者误以为仍存在 PRM 分支，
-  // 从而错误地在别处依赖它。若将来真要按系统偏好降级，请在真正读取它的位置重新引入。
+  // v3.6.2 产品决策（用户拍板）：开屏动画是 Trim 品牌资产——WebGL 流线背景、入场、FLIP 落位，即使系统关闭
+  // 「显示动画」（SPI_GETCLIENTAREAANIMATION=0 → prefers-reduced-motion: reduce）也完整播放，不再按系统开关跳过。
+  // body.splash-live 标记供 main.css 的 reduced-motion 归零规则排除启动页子树（开屏期间主界面渐显也需要），finish() 摘除。
+  // 注：v3.6.1 曾因 PRM 下「静态卡死还要手点」直接摘除启动页；归零规则豁免 + 完整 JS 编排后，入场/进度/FLIP 全链路
+  // 真实运行，卡死根因不复存在。M3（v3.6.5）N-3：此处原先声明求值的 reduceMotion 在 v3.6.2 后全文再无读取点、属死
+  // 变量，已删除而非留作「参考」——留着会让后来者误以为仍存在 PRM 分支，真要按系统偏好降级就在读取处重新引入。
   try { document.body.classList.add('splash-live'); } catch (e) {}
 
-  // P3-1（可达性）：开屏期背景不可达 —— splash 之外的 body 一级子元素全部 inert
-  //（焦点与读屏都跳过主界面；Tab 不会落进看不见的标题栏/内容区），finish 时逐个解除。
-  // 本文件是 body 末尾第一个脚本，此时 document.body 必然存在；脚本标签不在交互面，跳过。
+  // P3-1（可达性）：开屏期背景不可达 —— splash 之外的 body 一级子元素全部 inert（焦点与读屏都跳过主界面；Tab 不会
+  // 落进看不见的标题栏/内容区），finish 时逐个解除。本文件是 body 末尾第二个脚本（第一个是 tauri-api.js，F3-L06
+  // 统一口径），defer 执行时 document.body 必然存在；脚本标签不在交互面，跳过。
   var sealedEls = [];
   (function sealBackground() {
     if (!document.body) return;
@@ -75,10 +69,9 @@
   var finished = false;
   var bootReady = false;
   var enterScheduled = false;
-  // M3（v3.6.5）N-6：isFirstVisit（及其来源 seen）原先声明在文件末尾的「进度编排」区，
-  // 却在其上方就被读取（onBootReady、tick）——那些读取点目前都是异步回调，不会真的触发
-  // TDZ，但属隐患（将来任何同步路径读取即抛 ReferenceError）。上移到 state 声明区，
-  // 保证所有读取点都晚于声明。
+  // M3（v3.6.5）N-6：isFirstVisit（及其来源 seen）原先声明在文件末尾的「进度编排」区却在其上方就被读取
+  //（onBootReady、tick）——那些读取点目前都是异步回调不会真的触发 TDZ，但属隐患（将来任何同步路径读取即抛
+  // ReferenceError）。上移到 state 声明区，保证所有读取点都晚于声明。
   var seen = false;
   try { seen = localStorage.getItem(SEEN_KEY) === '1'; } catch (e) {}
   var isFirstVisit = !seen;
@@ -101,6 +94,9 @@
     if (finished) return;
     finished = true;
     clearTimeout(hardTimer);
+    // F3-L09：首访用户 15s 不点「点击进入」时 hardTimer 直接走本函数、不经 enterApp() ⇒ markSeen 不执行，下次启动仍被
+    // 当完整首访（且无淡出/FLIP）。本函数是所有进入路径的共同终点，在这里补记账；enterApp 已记过的重复写同值无副作用。
+    markSeen();
     // 开屏结束即摘标，主界面恢复 reduced-motion 无动画常态
     try { document.body.classList.remove('splash-live'); } catch (e) {}
     // P3-1（可达性）：解除开屏期对主界面的 inert 封锁，并摘掉跳过键监听
@@ -213,7 +209,7 @@
     setTimeout(onLand, MORPH_MS + 400); // transitionend 兜底
   }
 
-  // ===== WebGL 流线背景（失败自动退回静态渐变，不阻塞进入） =====
+  // WebGL 流线背景（失败自动退回静态渐变，不阻塞进入）
   (function initCanvas() {
     if (!canvas) return;
     var gl = null;
@@ -331,20 +327,16 @@
     requestAnimationFrame(loop);
   })();
 
-  // ===== 进度编排（v2.7.1：真实事件驱动） =====
-  // timer 只推进到 92%（诚实进度：剩余的是等 app.js 真实初始化完成）；
+  // 进度编排（v2.7.1：真实事件驱动）：timer 只推进到 92%（诚实进度：剩余的是等 app.js 真实初始化完成）；
   // `trim:boot-ready` 到达即跳 100% 并进入；4s 硬兜底防止卡死在启动页。
-  // M3（v3.6.5）N-6：seen / isFirstVisit 已上移到 state 声明区（消除 TDZ 隐患），
-  // 此处只保留依赖它的紧凑模式标记。
+  // M3（v3.6.5）N-6：seen / isFirstVisit 已上移到 state 声明区（消除 TDZ 隐患），此处只保留依赖它的紧凑模式标记。
   if (!isFirstVisit && splash.classList) splash.classList.add('compact'); // 后续启动：仅 Trim + 进度
 
   var PROGRESS_MS = isFirstVisit ? PROGRESS_MS_FIRST : PROGRESS_MS_COMPACT;
-  // 上一次已经写进 DOM 的百分比：pct 每约 5 帧才变一次（round 到整数），
-  // 原先每帧无条件写 width / textContent / aria-valuenow 就是在做同一份样式的重算+重排，
-  // 而这些写入与 WebGL 的 rAF 绘制挤在同一条帧里。pct 没变就跳过写入。
-  // 刻意不用「pct === lastPct 就 return」：那会连下面的续帧调度与 t>=1 的终态分支
-  //（state='done' → showEnterButton / scheduleEnter）一起跳过——预 bootReady 阶段 pct
-  // 会停在 92 一整段（PROGRESS_CAP），早退等于把 tick 的推进链掐断在等事件的那段里。
+  // 上一次已经写进 DOM 的百分比：pct 每约 5 帧才变一次（round 到整数），原先每帧无条件写 width / textContent /
+  // aria-valuenow 就是在做同一份样式的重算+重排，而这些写入与 WebGL 的 rAF 绘制挤在同一条帧里——pct 没变就跳过写入。
+  // 刻意不用「pct === lastPct 就 return」：那会连下面的续帧调度与 t>=1 的终态分支（state='done' → showEnterButton /
+  // scheduleEnter）一起跳过，而预 bootReady 阶段 pct 会停在 92 一整段（PROGRESS_CAP），早退等于掐断 tick 的推进链。
   var lastPct = -1;
 
   function tick(now) {

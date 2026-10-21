@@ -1,31 +1,14 @@
-// tauri-api.js - Tauri 适配层（迁移方案 D1/D2，Phase 0 草案 v0.1）
-// ============================================================================
-// 唯一新增的前端文件，零依赖、零模块加载器，在 index.html 脚本链最前面加载。
-// 职责：完整复刻 preload.js 暴露的 window.api 形状，内部把 Electron IPC 转成
-// Tauri 命令，使 43 个渲染脚本里的 326 处 window.api 调用点零改动。
-//
-// 双轨约定：检测到 window.__TAURI_INTERNALS__ 才接管；Electron 下直接 return，
-// window.api 仍由 preload.js contextBridge 提供（Phase 5 前双轨并存）。
-//
-// 协议来源（Phase 0 第 3 项实测核对，@tauri-apps/api 2.11.1）：
-//   调用：window.__TAURI_INTERNALS__.invoke(cmd, args, options)
-//   回调：window.__TAURI_INTERNALS__.transformCallback(cb, once) -> id
-//         window.__TAURI_INTERNALS__.unregisterCallback(id)
-//   监听：invoke('plugin:event|listen',  { event, target:{kind:'Any'}, handler:id }) -> eventId
-//   退订：__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(event, eventId)（若注入存在）
-//         + invoke('plugin:event|unlisten', { event, eventId })
-//   发事件：invoke('plugin:event|emit', { event, payload })
-//   窗口：invoke('plugin:window|<snake>', { label, ... })
-//         start_resize_dragging 载荷 { label, value: 'NorthEast' 等 8 向字符串 }
-//
-// Phase 0 草案范围：window.api 全形状 + 发送通道 + 事件 + 自绘 caption/拖动/缩放
-// 实测件。未迁 Rust 通道的 invoke 会 reject（与 Electron 缺 handler 同型），
-// 渲染层已有 catch 兜底；逐批迁移时只动 CHANNEL_MAP 与 Rust 侧。
+// tauri-api.js - Tauri 适配层（零依赖、零模块加载器）
+// defer 链首位加载（theme-boot.js 是更早的同步无 IPC 主题脚本；旧注释称「脚本链最前面」与实际不符，F2-L09 订正）。
+// 职责：复刻 preload.js 暴露的 window.api 形状，把 Electron IPC 转成 Tauri 命令，渲染层调用点零改动。
+// 双轨约定：检测到 window.__TAURI_INTERNALS__ 才接管；Electron 下直接 return。
+// 协议按 @tauri-apps/api 2.x 实测：invoke(cmd, args)；回调 transformCallback(cb, once) -> id 与 unregisterCallback(id)；
+// listen/unlisten/emit 走 plugin:event|*，窗口走 plugin:window|<snake>（start_resize_dragging 载荷为 'NorthEast' 等 8 向字符串）。
+// 未迁 Rust 通道的 invoke 会 reject（与 Electron 缺 handler 同型），渲染层有 catch 兜底。
 (function () {
   'use strict';
 
   var internals = window.__TAURI_INTERNALS__;
-  // Electron（或任何非 Tauri 环境）：不接管，preload.js 的 window.api 生效。
   if (!internals) return;
 
   document.documentElement.classList.add('tauri-runtime');
@@ -34,21 +17,16 @@
     document.body.classList.add('tauri-runtime');
   }, { once: true });
 
-  // --------------------------------------------------------------------------
   // 内核调用
-  // --------------------------------------------------------------------------
 
   function currentLabel() {
     return internals.metadata && internals.metadata.currentWindow && internals.metadata.currentWindow.label;
   }
 
-  /**
-   * CHANNEL_MAP：Electron 通道（preload.js 唯一真源）→ Rust snake_case 命令。
-   * D2：本键集合必须恒等于 preload.js 的 invoke 通道集合（133 条）；
-   * Phase 1 起 Node 一致性脚本进门禁，新增通道必须同表登记。
-   * 生成规则：':' 与 '-' 统一转 '_'（此处显式列出，不做运行时隐式推导，
-   * 防止「Rust 有了、前端没接 / 拼错」静默断裂）。
-   */
+  // CHANNEL_MAP：Electron 通道（preload.js 快照为契约锚点）→ Rust snake_case 命令。
+  // 键集合必须与 preload 的 invoke 通道集合对拍；条数以 node tools/check-channel-map.mjs 现算为准
+  // （F2-L06：不写死统计数字，防过期误导）。生成规则：':' 与 '-' 统一转 '_'，显式列出、不做运行时
+  // 隐式推导，防「Rust 有了、前端没接 / 拼错」静默断裂。
   var CHANNEL_MAP = {
     // app 域（onMemoryTrim 是事件，不在此表）
     'app:get-info': 'app_get_info',
@@ -71,7 +49,7 @@
     'log:write': 'log_write',
     'log:read': 'log_read',
     'log:export': 'log_export',
-    // cleanup（21）
+    // cleanup
     'cleanup:rules': 'cleanup_rules',
     'cleanup:allow-preview-assets': 'cleanup_allow_preview_assets',
     'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
@@ -93,7 +71,7 @@
     // runtimes
     'runtimes:collect': 'runtimes_collect',
     'runtimes:install': 'runtimes_install',
-    // finder（4）
+    // finder
     'finder:scan': 'finder_scan',
     'finder:delete': 'finder_delete',
     'finder:delete-manifest': 'finder_delete_manifest',
@@ -101,7 +79,7 @@
     'finder:ignore-folder': 'finder_ignore_folder',
     'finder:ignore-list': 'finder_ignore_list',
     'finder:ignore-remove': 'finder_ignore_remove',
-    // uninstall（7）：卸载域（report/appx-logo 为只读档，其余 MAIN）
+    // uninstall：卸载域（report/appx-logo 为只读档，其余 MAIN）
     'uninstall:list': 'uninstall_list',
     'uninstall:run': 'uninstall_run',
     'uninstall:modify': 'uninstall_modify',
@@ -157,7 +135,7 @@
     // aidesc / diskbench
     'aidesc:get': 'aidesc_get',
     'diskbench:run': 'diskbench_run',
-    // realtime（7）
+    // realtime
     'realtime:adapters': 'realtime_adapters',
     'realtime:sample': 'realtime_sample',
     'realtime:loss': 'realtime_loss',
@@ -203,7 +181,7 @@
     'peripheral:query': 'peripheral_query',
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
-    // quickcmds / optimizer（17）
+    // quickcmds / optimizer
     'quickcmds:run': 'quickcmds_run',
     'optimizer:run': 'optimizer_run',
     'optimizer:list': 'optimizer_list',
@@ -255,11 +233,20 @@
     'syspanel:pagefile-apply': 'syspanel_pagefile_apply'
   };
 
-  /** Electron invoke 通道 → Promise（成功 resolve / 失败 reject，与 ipcRenderer.invoke 同契约）。 */
+  // F2-L03：契约层自身的失败也要进用户侧日志（console 用户看不见）；判 window.api 存在再写，写失败静默——绝不因记日志再抛错。
+  function bridgeLog(level, text) {
+    try {
+      if (window.api && window.api.log) window.api.log.write(level, text).catch(function () {});
+    } catch (e) { /* 上报失败不再抛 */ }
+  }
+
   function invokeChannel(channel, args) {
-    var cmd = CHANNEL_MAP[channel];
-    if (!cmd) return Promise.reject(new Error('tauri-api：未登记通道 ' + channel));
-    return invokeCore(cmd, args || {});
+    // F2-L02：hasOwnProperty 判登记——原型链属性（__proto__/constructor）不算合法通道
+    if (!Object.prototype.hasOwnProperty.call(CHANNEL_MAP, channel)) {
+      bridgeLog('warn', 'tauri-api：未登记通道 ' + channel);
+      return Promise.reject(new Error('tauri-api：未登记通道 ' + channel));
+    }
+    return invokeCore(CHANNEL_MAP[channel], args || {});
   }
 
   function invokeCore(cmd, args) {
@@ -272,47 +259,35 @@
   }
 
   /**
-   * SEND_MAP：preload.js 的 8 条 ipcRenderer.send 通道（与 133 invoke 集合互斥）。
-   * - window:minimize/maximize/close 走窗口插件、app:first-paint 走直连命令，
-   *   均不经过 sendChannel（各自有专用桥接）；
-   * - 其余 4 条 fire-and-forget 在此显式映射。禁止运行时隐式 replace——
-   *   驼峰域（processManager）隐式转换会拼错 Rust snake_case 命令（Phase 0 发现）。
+   * SEND_MAP：fire-and-forget send 通道的显式映射（与 invoke 集合互斥；条数以 check-channel-map 现算为准）。
+   * window:minimize/maximize/close 走窗口插件、app:first-paint 走直连命令，均不经过 sendChannel。
+   * 禁止运行时隐式 replace——驼峰域（processManager）隐式转换会拼错 Rust snake_case 命令（Phase 0 发现）。
    */
   var SEND_MAP = {
     'processManager:report': 'process_manager_report'
   };
 
-  /** Electron ipcRenderer.send 等价（fire-and-forget；Rust 未迁时静默吞错，同 send 无回执语义）。 */
   function sendChannel(channel, args) {
     var cmd = SEND_MAP[channel];
     if (!cmd) {
       console.warn('[tauri-api] 未登记的 send 通道: ' + channel);
+      bridgeLog('warn', 'tauri-api：未登记的 send 通道 ' + channel);
       return Promise.resolve(false);
     }
-    // 审查 L13：send 语义是「不等回执」，但**不等于出错也瞒着** —— 原先 `.catch(function(){})`
-    // 连一行日志都不留，通道名写错或 Rust 侧报错时完全无从发现。
-    //
-    // 审查 v2-F17：这里**额外返回**一个 resolve 为布尔的 promise（成功 true / 失败 false）。
-    // 语义仍是 fire-and-forget —— 不返回 promise 的话，「删图后主窗没同步」这类失败在渲染层
-    // 根本无从感知（readme:56 的「实时同步」因此是假成立）。返回值不改变既有调用方：
-    // 三个忽略它的调用点行为完全不变，需要回执的调用方（预览窗删图）才去 await。
-    // 内部这条 catch 吃掉异常并落日志，故不会冒出 unhandledrejection。
+    // send 语义是「不等回执」但不等于出错也瞒着（审查 L13）：返回布尔 promise 供要回执的调用方 await（v2-F17）。
     return invokeCore(cmd, args || {})
       .then(function () { return true; })
       .catch(function (e) {
         console.error('[tauri-api] send 通道失败 ' + channel + ': ' + ((e && e.message) || e));
+        bridgeLog('error', 'tauri-api：send 通道失败 ' + channel + ': ' + ((e && e.message) || e));
         return false;
       });
   }
 
-  // --------------------------------------------------------------------------
   // 事件：onXxx 必须同步返回 unsubscribe（Electron removeListener 同形状）
-  // --------------------------------------------------------------------------
 
-  /**
-   * 订阅后端事件，handler 收到 payload（已剥掉 Tauri event 信封，
-   * 对齐 preload 里 (_, data) => cb(data)）。返回同步可用的退订函数。
-   */
+  // 订阅后端事件：handler 收到剥掉 Tauri event 信封的 payload（对齐 preload 的 (_, data) => cb(data)），
+  // 返回同步可用的退订函数。
   function onEvent(event, handler) {
     var active = true;
     var offPromise = new Promise(function (resolve) {
@@ -332,38 +307,34 @@
                 typeof window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener === 'function') {
               window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(event, eventId);
             }
-          } catch (e) {}
+          } catch (e) { bridgeLog('warn', 'tauri-api：事件本地退订异常 ' + event); }
           return invokeCore('plugin:event|unlisten', { event: event, eventId: eventId });
         });
       }).catch(function (e) {
         console.error('[tauri-api] 事件订阅失败 ' + event, e);
+        // F2-L08：listen 失败时 transformCallback 已注册的 id 不会自动回收（once=false 只由 unregisterCallback 删除），不显式注销就每次泄漏一个闭包。
+        if (typeof internals.unregisterCallback === 'function') internals.unregisterCallback(callbackId);
+        bridgeLog('error', 'tauri-api：事件订阅失败 ' + event + ': ' + ((e && e.message) || e));
         resolve(function () {});
       });
     });
     return function unsubscribe() {
       if (!active) return;
       active = false;
-      offPromise.then(function (off) { off().catch(function () {}); });
+      offPromise.then(function (off) {
+        off().catch(function () { bridgeLog('warn', 'tauri-api：事件退订失败 ' + event); });
+      });
     };
   }
 
-  // --------------------------------------------------------------------------
   // window.api：逐方法复刻 preload.js（含参数整形，一个都不能走样）
-  // --------------------------------------------------------------------------
 
   var api = {
     /**
-     * 绝对路径 → 页面可直接加载的 URL。
-     *
-     * 为什么要走这里而不是沿用调用方手拼的 `file:///`：Tauri 的页源是
-     * `http://tauri.localhost`，Chromium 会拦掉跨源的 `file:` 子资源，
-     * CSP 里留着 `file:` 也放行不了 —— 表现为「路径正确但图/字体就是不出来」。
-     * 必须走 asset 协议（conf 的 assetProtocol.scope 只放行了 backgrounds 与 fonts）。
-     *
-     * URL 形态按平台不同（Windows 是 `http://asset.localhost/<encoded>`，
-     * macOS/Linux 是 `asset://localhost/<encoded>`），所以**不在前端复刻规则**，
-     * 直接用 Tauri 注入脚本提供的 convertFileSrc。
-     * 取不到时退回 file:///，保证非 Tauri 环境（或注入脚本缺席）不白屏。
+     * 绝对路径 → 页面可加载 URL。页源是 http://tauri.localhost，Chromium 拦掉跨源的 file: 子资源
+     * （CSP 里留着 `file:` 也放行不了 —— 表现为「路径正确但图/字体就是不出来」），必须走 asset 协议
+     * （conf 的 assetProtocol.scope 只放行了 backgrounds 与 fonts）。URL 形态按平台不同，不在前端复刻
+     * 规则，直接用注入脚本提供的 convertFileSrc；取不到时退回 file:///，保证非 Tauri 环境不白屏。
      */
     pathToUrl: function (filePath) {
       if (!filePath) return '';
@@ -468,8 +439,7 @@
       onProgress: function (callback) { return onEvent('runtimes:install-progress', callback); }
     },
 
-    // R1（2026-10-01）：`pwsh` 命名空间随 pwsh:status 通道整链摘除 —— 右键图标改原生取图后
-    // 本应用不再有 PowerShell 7 使用者，「探测 PS7 并回报状态」失去了对象。
+    // R1（2026-10-01）：`pwsh` 命名空间随 pwsh:status 通道整链摘除——右键图标改原生取图后本应用不再有 PS7 使用者，探测失去对象。
 
     finder: {
       scan: function (scanType, opts) {
@@ -526,8 +496,7 @@
       dwmConflict: function () { return invokeChannel('diag:dwm-conflict'); }
     },
 
-    // 审查 v2-F4：`settings:save` 整链摘除（零调用方的死写入通道，AI 配置写入归 models 域）。
-    // 只留 load；将来若真要开配置页，走 `models:save` 而不是复活这条。
+    // 审查 v2-F4：`settings:save` 整链摘除（零调用方的死写入通道，AI 配置写入归 models 域）；将来开配置页走 models:save，别复活这条。
     settings: {
       load: function () { return invokeChannel('settings:load'); },
       // v4 P2-13：偏好键读写（get 返回 {success, data:{键:值|null}}；set 进白名单键）
@@ -662,9 +631,8 @@
     },
 
     residueWindow: {
-      // v0.7.0：残留面板整块搬进这扇窗，卸载成功后带目标进来。
-      // appId 只是「提示后端扫哪个」——真正的取值闸在 Rust 侧（开窗前一次、执行链再一次），
-      // 这里空串一律不送，免得把 `?app=` 空值当成合法目标。
+      // v0.7.0：残留面板整块搬进这扇窗，卸载成功后带目标进来。appId 只是「提示后端扫哪个」，真正的取值闸在 Rust 侧
+      // （开窗前一次、执行链再一次），这里空串一律不送，免得把 `?app=` 空值当成合法目标。
       openWindow: function (appId) {
         return invokeChannel('residue:open-window', appId ? { appId: appId } : undefined);
       },
@@ -686,8 +654,7 @@
       createRestore: function () { return invokeChannel('optimizer:create-restore'); },
       listRestore: function () { return invokeChannel('optimizer:list-restore'); },
       restoreFrequency: function () { return invokeChannel('optimizer:restore-frequency'); },
-      // ids 缺省（不传）= 后端对整个优化目录做一次静默只读体检（启动时全量检测）；
-      // 显式传 id 数组 = 只检指定项。两种都不改任何系统状态。
+      // ids 缺省（不传）= 后端对整个优化目录做一次静默只读体检（启动时全量检测）；显式传 id 数组 = 只检指定项。两种都不改任何系统状态。
       checkOptimized: function (ids) {
         return arguments.length === 0 || ids == null
           ? invokeChannel('optimizer:check-optimized', {})
@@ -738,9 +705,8 @@
       // 提权重启接回编辑态：新实例首帧后主进程发一次（lib.rs），消费者在 app.js。
       onEditIntent: function (callback) { return onEvent('syspanel:edit-intent', callback); },
       pagefileState: function () { return invokeChannel('syspanel:pagefile-state'); },
-      // 高危：confirmedHighRisk 必须由**调用点**传入（v4-K05：此前桥接层硬编码 true，
-      // 等于任何调用点天生「已确认」，后端那道确认闸对渲染层结构性失效）。
-      // 调用点要先弹 red 档确认（syspanel.js 的 applyPagefile），再把凭据传进来。
+      // 高危：confirmedHighRisk 必须由**调用点**传入（v4-K05：此前桥接层硬编码 true，等于任何调用点天生「已确认」，
+      // 后端那道确认闸对渲染层结构性失效）。调用点要先弹 red 档确认（syspanel.js 的 applyPagefile）再传凭据进来。
       pagefileApply: function (managed, entries, confirmedHighRisk) {
         return invokeChannel('syspanel:pagefile-apply', {
           managed: managed,
@@ -764,10 +730,8 @@
     }
   };
 
-  // --------------------------------------------------------------------------
-  // window:focus-state / window:resized：Tauri 核心窗口事件桥接（Phase 0 草案，
-  // A 批双跑对照时逐字段校准；当前载荷形状按 main.js notifyRendererResize 复刻）
-  // --------------------------------------------------------------------------
+  // window:focus-state / window:resized：Tauri 核心窗口事件桥接（Phase 0 草案，A 批双跑对照时逐字段校准；
+  // 当前载荷形状按 main.js notifyRendererResize 复刻）
 
   function bridgeFocusState(callback) {
     var offs = [
@@ -797,17 +761,18 @@
   // 与 onEvent 相同，但语义上标记为 tauri:// 核心窗口事件
   function onTauriWindowEvent(name, cb) { return onEvent(name, cb); }
 
-  // --------------------------------------------------------------------------
   // 黑闪握手：DOMContentLoaded 后双 rAF（200ms 竞速兜底）通知 Rust show()
-  // --------------------------------------------------------------------------
+
+  // 真幂等（F3-M08）：守卫必须在模块作用域——此前 `var sent = false` 是每次调用的闭包变量 ⇒ 两次调用 = 两份 DCL 监听
+  // + 两份双 rAF + 两份 200ms 竞速 + 两次 `app_first_paint` invoke；后端「只认首个通知」把症状盖住了，
+  // 但白名单/审计看到的是「一次握手发了两回」。
+  var firstPaintSent = false;
 
   function notifyFirstPaint() {
-    var sent = false;
     function send() {
-      if (sent) return;
-      sent = true;
-      // app:first-paint 属于 onSafe 的 send 通道（8 条之一），不在 133 invoke 的
-      // CHANNEL_MAP 内，直连 Rust snake_case 命令；不兑现会走 Rust 3s/8s 兜底。
+      if (firstPaintSent) return;
+      firstPaintSent = true;
+      // app:first-paint 属于 onSafe 的 send 通道（8 条之一），不在 133 invoke 的 CHANNEL_MAP 内：直连 Rust snake_case 命令，不兑现会走 Rust 3s/8s 兜底。
       invokeCore('app_first_paint').catch(function () {});
     }
     function arm() {
@@ -821,12 +786,9 @@
     }
   }
 
-  // --------------------------------------------------------------------------
   // 自绘 caption 三按钮 + 拖动 + 8 向缩放命中区（D3，Phase 0 实测件）
   // 样式注入遵守 CSP：style-src 已含 'unsafe-inline'；脚本仍全部外链。
-  // Phase 2 决策定稿后：样式迁入 main.css 既有 token、命中区改走选定方案
-  // （自绘命中区 vs tao 原生 resize 边框），此处为唯一待替换点。
-  // --------------------------------------------------------------------------
+  // Phase 2 定稿后样式迁入 main.css 既有 token、命中区改走选定方案（自绘命中区 vs tao 原生 resize 边框），此处为唯一待替换点。
 
   var EDGE_SIZE = 6;   // 边缘命中厚度 px
   var CORNER_SIZE = 14; // 角区命中 px
@@ -836,18 +798,15 @@
     var style = document.createElement('style');
     style.id = 'tauri-caption-style';
     style.textContent = [
-      // 高度必须与 main.css .titlebar（36px）一致：按钮字形在条内居中，
-      // 46px 时代字形中心比品牌行低 5px（真机目检实锤），齐平即同高。
+      // 高度必须与 main.css .titlebar（36px）一致：46px 时代字形中心比品牌行低 5px（真机目检实锤）。
       '.tauri-caption{position:fixed;top:0;right:0;height:36px;display:flex;z-index:100000;',
       '  -webkit-user-select:none;user-select:none;}',
       '.tauri-caption-btn{width:46px;height:100%;border:0;background:transparent;cursor:default;',
       '  display:flex;align-items:center;justify-content:center;padding:0;color:currentColor;',
       '  font-size:10px;line-height:1;opacity:.72;transition:background .12s ease,opacity .12s ease;}',
       '.tauri-caption-btn svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:1.4;}',
-      // 审查 v2-L5：原先写的是 `rgba(0,0,0,.07)` 与 `#c42b1c` / `#fff` 三个字面色值 ——
-      // 既不随主题走（暗色下 7% 黑的 hover 几乎看不见），白字也违反「实底语义色前景必须
-      // 走 token」的约定。改成设计系统既有 token：hover 底用卡片悬停底，关闭键用 danger 实底
-      // + 规定的实底前景（暗/亮两主题对比度均已验）。
+      // 审查 v2-L5：原先的 `rgba(0,0,0,.07)` 与 `#c42b1c`/`#fff` 三个字面色值既不随主题走（暗色下 7% 黑 hover 几乎看不见）、
+      // 白字又违反「实底语义色前景必须走 token」；改用既有 token（暗/亮两主题对比度均已验）。
       '.tauri-caption-btn:hover{background:var(--bg-card-hover);opacity:1;}',
       '.tauri-caption-btn[data-act=close]:hover{background:var(--danger);color:var(--danger-text);opacity:1;}',
       '.tauri-caption-btn[data-act=maximize] .tauri-cap-restore{display:none;}',
@@ -873,21 +832,17 @@
 
   function injectCaption() {
     if (document.querySelector('.tauri-caption')) return;
-    // 审查 M4：自绘 caption 只给主窗装。两个子窗（models / processManager）
-    // 建窗时没关原生装饰，标题栏本来就由系统提供，这层叠加件在它们身上只是
-    // 一套「点了会去要 close/drag/resize 权限」的空壳 —— 正是它逼着 capabilities 给所有
-    // 窗口发 allow-close。去掉叠加件，权限就能收回主窗一处（见 capabilities/default.json
-    // 与 subwindows.json 的拆分）。
+    // 审查 M4：自绘 caption 只给主窗装。两个子窗（models / processManager）建窗时没关原生装饰，标题栏本来就由系统提供，
+    // 这层叠加件在它们身上只是「点了会去要 close/drag/resize 权限」的空壳——正是它逼着 capabilities 给所有窗口发
+    // allow-close；去掉叠加件，权限就能收回主窗一处（见 capabilities/default.json 与 subwindows.json 的拆分）。
     if (currentLabel() !== 'main') return;
     injectCaptionStyles();
 
     var bar = document.createElement('div');
     bar.className = 'tauri-caption';
-    // 审查 v2-F8：`decorations(false)`（lib.rs:439）已排除原生标题栏，这套自绘按钮是
-    // 最小化/最大化/关闭的**唯一**入口。原先三个按钮都带 `tabindex="-1"`，对纯键盘用户
-    // 完全不可达（`ds.js` 的焦点陷阱选择器也排除 `[tabindex="-1"]`），且 `index.html:32/40`
-    // 还留着「由 Windows 原生 titleBarOverlay 渲染」的过时注释。这里去掉 tabindex 限制，
-    // 并把容器升级为 `role="toolbar"`（三个按钮按 toolbar 语义可 Tab 逐个到达）。
+    // 审查 v2-F8：`decorations(false)`（lib.rs:439）已排除原生标题栏，这套自绘按钮是最小化/最大化/关闭的**唯一**入口。
+    // 原先三个按钮都带 `tabindex="-1"`，纯键盘用户完全不可达（`ds.js` 的焦点陷阱选择器也排除 `[tabindex="-1"]`），且
+    // `index.html:32/40` 还留着「由 Windows 原生 titleBarOverlay 渲染」的过时注释。这里去掉限制，容器升级为 `role="toolbar"`。
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', '窗口控制');
     bar.innerHTML =
@@ -973,9 +928,7 @@
     else document.addEventListener('DOMContentLoaded', injectCaption, { once: true });
   }
 
-  // --------------------------------------------------------------------------
   // 挂载
-  // --------------------------------------------------------------------------
 
   // 与 contextBridge 同语义：只读代理即可满足现有用法（渲染层从不赋值 window.api）
   Object.defineProperty(window, 'api', {
@@ -984,17 +937,13 @@
     configurable: false
   });
 
-  // Phase 0 的 window.__trimSpike 探针已随 commands/spike.rs 一并删除。
-  // 除了探针本身失效，更要紧的是它导出的 `raw: invokeCore` —— 那等于把「直调任意
-  // Rust 命令」的入口挂在 window 上，绕过上面那层手工挑选的 window.api 白名单，
-  // 与本项目「preload 只做白名单转发」的安全前提直接冲突。调试需要看通道名时，
-  // 读 tools/check-channel-map.mjs 的输出即可，不要重新开这个口子。
+  // Phase 0 的 window.__trimSpike 探针已随 commands/spike.rs 一并删除：更要紧的是它导出的 `raw: invokeCore` ——
+  // 那等于把「直调任意 Rust 命令」的入口挂在 window 上，绕过上面手工挑选的 window.api 白名单，与本项目
+  // 「preload 只做白名单转发」的安全前提直接冲突。调试要看通道名就读 tools/check-channel-map.mjs 的输出，不要重开这个口子。
 
-  // 渲染层诊断上报（N3，2026-09-29 借鉴杰瑞调机助手的 boot.log 做法）：
-  // JS 异常与未处理的 Promise 拒绝此前只存在于 DevTools 里，用户侧完全不可见 ——
-  // 白屏、材质不渲染（v2-U4）这类问题因此无从诊断，而 AGENTS §4 现在也不允许
-  // 随手起前台窗口去目检。走**既有** log:write 通道（该通道本轮补了清洗：
-  // 换行、长度、level 白名单），不新开 IPC 面。
+  // 渲染层诊断上报（N3，2026-09-29 借鉴杰瑞调机助手的 boot.log 做法）：JS 异常与未处理的 Promise 拒绝此前只在
+  // DevTools 里、用户侧完全不可见，白屏与材质不渲染（v2-U4）因此无从诊断，而 AGENTS §4 也不允许随手起前台窗口目检。
+  // 走**既有** log:write 通道（本轮补了清洗：换行、长度、level 白名单），不新开 IPC 面。
   (function installRendererDiagnostics() {
     if (window.__trimDiagInstalled) return;
     window.__trimDiagInstalled = true;
@@ -1016,10 +965,8 @@
         report('资源加载失败', (t.tagName || 'ELEMENT') + ' ' + (t.src || t.href));
         return;
       }
-      // ResizeObserver 的「loop completed with undelivered notifications」不是未捕获异常：
-      // 它是浏览器在同帧内尺寸反复变化时自投的投递轮次上限提示，filename 恒为页面根、
-      // lineno 0、没有栈，任何一次正常布局抖动都可能触发。记成 ERROR 级「渲染层异常」
-      // 会把真异常淹掉（2026-09-30 日志里唯一那条就是它）。DevTools 仍留一条 debug。
+      // ResizeObserver「loop completed with undelivered notifications」不是未捕获异常：它是浏览器在同帧内尺寸反复变化时
+      // 自投的投递轮次上限提示（filename 恒为页面根、lineno 0、无栈），记成 ERROR 级会把真异常淹掉（2026-09-30 日志唯一那条就是它）。
       if (/^ResizeObserver loop/i.test(ev.message || '')) {
         try { console.debug('[Trim] ResizeObserver 投递轮次提示（已忽略）:', ev.message); } catch (e) {}
         return;

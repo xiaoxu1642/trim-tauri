@@ -122,6 +122,25 @@ impl ScanAccum {
     }
 }
 
+/// gameRedist 回填清单的条数闸（R4-L07，纯函数）。
+///
+/// 抽成纯函数是为了让「回填也受上限约束」这件事能被断言 —— 它发生在真实扫描之后、
+/// 需要 `collect_redist_by_platform()` 触盘才走得到的位置，MockRuntime 与契约测试都
+/// 够不着；只有把「截断 + 截断位」这一步做成纯函数，才能拿合成输入判红。
+/// 上限真源与扫描侧同一个常量（`PLAN_CAP_PER_ITEM`，经 `rules.rs` 单源 re-export），
+/// 不在本处再写一份数字（AGENTS §5.16）。
+///
+/// 返回 `(写入快照的 files 数组, 是否被截断)`。
+pub(super) fn cap_backfill_files(files: &[(String, u64)], cap: usize) -> (Vec<Value>, bool) {
+    let truncated = files.len() > cap;
+    let arr = files
+        .iter()
+        .take(cap)
+        .map(|(p, s)| json!({ "path": p, "size": *s as i64 }))
+        .collect();
+    (arr, truncated)
+}
+
 /// 扫描核心（P2-B 抽取，2026-10-16）：与窗口/快照解耦——读规则 → 原生扫描 → 组装条目数据。
 ///
 /// `emit` 是进度出口（本轮新增条目 + done/total）：窗口版（`do_cleanup_scan`）注入 emit 闭包
@@ -215,17 +234,46 @@ fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(cats: Vec<Str
             backfill.insert("steamRedistCache", (redist_result.steam.total_size, redist_result.steam.files.clone()));
             backfill.insert("epicRedistCache", (redist_result.epic.total_size, redist_result.epic.files.clone()));
             backfill.insert("wegameRedistCache", (redist_result.wegame.total_size, redist_result.wegame.files.clone()));
+            let mut backfilled_items = 0usize;
+            let mut backfilled_files = 0usize;
             for item in data.iter_mut() {
-                let Some(id) = item.get("id").and_then(|v| v.as_str()) else { continue };
-                let Some((total_size, files)) = backfill.get(id) else { continue };
+                // id 先取成 owned：下面 `item.as_object_mut()` 要可变借用，
+                // 而日志串里还要用 id —— 借用跨进临界区会撞 E0502。
+                let Some(id) = item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) else { continue };
+                let Some((total_size, files)) = backfill.get(id.as_str()) else { continue };
+                // R4-L07：回填清单必须过与扫描侧**同一个** PLAN_CAP_PER_ITEM，并在超限时
+                // 置 filesTruncated。旧形态把整条清单原样塞回 —— 既绕开上限（回填条数无
+                // 上限）又不重算截断位，用户在确认弹窗里看到的清单比实际少且看不出被截断。
+                // 身份证基线：gameclean 只回 `{path,size}`，回填条目**没有 birthtimeNs**，
+                // 引擎 Kudu S2 的 identity 表对这 3 条恒无基线（守卫不生效、方向是放行），
+                // 该事实由 details 的 identityUnbaselined 计数外发；父链 reparse 复检仍兜底。
+                // 要补 birthtime 得改 gameclean 的返回形状（他单元射程）。
+                let (files_arr, files_truncated) = cap_backfill_files(files, PLAN_CAP_PER_ITEM);
                 if let Some(obj) = item.as_object_mut() {
                     obj.insert("size".into(), Value::from(*total_size as i64));
                     obj.insert("exists".into(), Value::Bool(!files.is_empty()));
-                    let files_arr: Vec<Value> = files.iter()
-                        .map(|(p, s)| json!({ "path": p, "size": *s as i64 }))
-                        .collect();
                     obj.insert("files".into(), Value::Array(files_arr));
+                    if files_truncated {
+                        obj.insert("filesTruncated".into(), Value::Bool(true));
+                        log::write_log(
+                            "warn",
+                            &format!(
+                                "gameRedist 回填清单超过 {PLAN_CAP_PER_ITEM} 条上限: {id}（实测 {} 个文件，清单已截断并标注）",
+                                files.len()
+                            ),
+                        );
+                    }
                 }
+                backfilled_items += 1;
+                backfilled_files += files.len();
+            }
+            if backfilled_items > 0 {
+                log::write_log(
+                    "info",
+                    &format!(
+                        "gameRedist 回填: {backfilled_items} 个条目 / {backfilled_files} 个文件（无 birthtimeNs 身份证基线，引擎按 identityUnbaselined 记账）"
+                    ),
+                );
             }
             if !redist_result.notes.is_empty() {
                 log::write_log("info", &format!("gameRedist 回填: {}", redist_result.notes.join("; ")));
@@ -478,13 +526,21 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
     }
     let label = window.label().to_string();
     let force = force.unwrap_or(false);
-    if to_recycle == Some(true) {
+    // R4-L05：参数被忽略必须**上回执**，不能只写日志。函数头原本承诺「收到 true 时如实
+    // 回执并写日志，不静默改写」，代码只落了日志那一半 —— 调用方从回执看不出自己的
+    // 参数没生效（与 C06 回执诚实度同族：被忽略的入参要在回执上留痕）。
+    let to_recycle_ignored = to_recycle == Some(true);
+    if to_recycle_ignored {
         log::write_log(
             "warn",
             "cleanup:execute 收到 to_recycle=true，已按 v3.3.0 裁定忽略（常规清理固定永久删）",
         );
     }
-    let to_recycle = false; // 代码钉桩：契约测试找这句（批次 B 分桶逻辑不直接用它，而是内部两批各写 false/true）
+    // R4-M02：这个钉桩必须**真正决定删除形态**。旧形态下删除原语吃的是字面 `false`，
+    // 钉桩变量在 debug_assert 之后再无消费点、也不进 spawn_blocking 闭包 —— 把实参改成
+    // `true` 会让引擎走「只枚举不删除、freed 照计」分支：一个文件没删也没进回收站，
+    // 回执仍 success:true、释放量照报，而整套契约测试照样全绿。
+    let to_recycle = false; // v3.3.0 用户裁定：常规清理固定永久删
     let auto_rebuild = auto_rebuild.unwrap_or(false);
     let snapshot = snapshots()
         .lock()
@@ -529,7 +585,7 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
             match crate::engine::native::cleanup_execute(
                 &safe_items,
                 &rules,
-                false,
+                to_recycle,
                 auto_rebuild,
                 Some(&progress_cb),
             ) {
@@ -542,7 +598,13 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                     raw_stdout.push_str(&serde_json::to_string(&data).unwrap_or_default());
                     raw_stdout.push('\n');
                 }
-                Err(e) => { first_err = Some(format!("原生执行失败(永久删桶): {e}")); }
+                Err(e) => {
+                    // R4-L04：回给渲染层的 message 不再带「永久删桶」——那是 2026-10-12
+                    // 分桶退役前的词，渲染层把它当 toast 文案，等于当着用户说「还有另一个桶」。
+                    // 桶/删除形态这类内部口径只留在日志里供对账。
+                    log::write_log("error", &format!("原生执行失败(永久删形态): {e}"));
+                    first_err = Some(format!("原生执行失败: {e}"));
+                }
             }
         }
 
@@ -662,6 +724,19 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                 log::write_log("warn", &w);
             }
         }
+        // R2a-M03：本批「删除没有成功」的文件路径记进命令体侧的失败回执台账 ——
+        // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据，
+        // 不再只由渲染层（cleanup.js 的 collectFailedPaths）维持。
+        crate::engine::delete_failed::record(
+            &label,
+            crate::engine::delete_failed::DOMAIN_CLEANUP,
+            cleanup_failed_paths(
+                data.get("details")
+                    .and_then(|d| d.as_array())
+                    .map(|a| a.as_slice())
+                    .unwrap_or(&[]),
+            ),
+        );
         // 成功判据（v6-K10 收口）：硬失败（error ∪ fail，见上面 v5 C-3）为 0
         // **且确实删了东西**——failed==0 但 success/partial 全 0 = 全 skip（太新/
         // 排除/未解析/受保护）或空跑，按「未达成」处理而不是 success:true；
@@ -669,9 +744,28 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
         json!({ "success": cleanup_receipt_success(failed, success, n_partial), "data": data })
     });
     match task.await {
-        Ok(v) => v,
-        Err(e) => json!({ "success": false, "message": e.to_string() }),
+        Ok(v) => with_ignored_flags(v, to_recycle_ignored),
+        Err(e) => with_ignored_flags(
+            json!({ "success": false, "message": e.to_string() }),
+            to_recycle_ignored,
+        ),
     }
+}
+
+/// R4-L05：把「被忽略的入参」写进回执（纯函数，便于断言）。
+///
+/// 判据口径来自 C06 回执诚实度：成功位不得由可选计数派生、失败要带状态位、
+/// **被忽略的入参要在回执上留痕**。本函数只管第三句 —— 渲染层据此能把
+/// 「你勾了进回收站但按裁定没走」显示出来，而不是只在日志里飘一条 warn。
+pub(super) fn with_ignored_flags(receipt: Value, to_recycle_ignored: bool) -> Value {
+    if !to_recycle_ignored {
+        return receipt;
+    }
+    let mut v = receipt;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("toRecycleIgnored".into(), Value::Bool(true));
+    }
+    v
 }
 
 /// v6-K10：清理回执的外层 success 判据（纯函数）。
@@ -706,6 +800,45 @@ pub(super) fn summarize_details(data: &Value) -> (i64, usize, usize, usize) {
         }
     }
     (total, success, partial, skipped)
+}
+
+/// R2a-M03：本批「删除没有成功」的文件路径（纯函数，便于断言）。
+///
+/// 口径与渲染层 `cleanup.js` 的 `collectFailedPaths` 同源，但**更宽**：
+///   · `failedFiles[].path` —— 引擎侧逐文件失败明细（被占用 / 权限不足）；
+///   · `status` 为 `error` / `fail` 且自带 `path` 的行 —— 文件清理链那种「整项失败、
+///     路径在行上」的形状。
+/// 取「更宽」是刻意的：这道集合是**登记闸的白名单**（`pending_add` 凭它核对
+/// 「只收删除失败项」），白名单窄于渲染层要送的那批时，登记会被误拒 —— 闸越宽，
+/// 拦的只是「从没有失败过的文件」，而那正是闸要拦的东西。
+pub(super) fn cleanup_failed_paths(details: &[Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for d in details {
+        if let Some(ff) = d.get("failedFiles").and_then(|v| v.as_array()) {
+            for f in ff {
+                if let Some(p) = f.get("path").and_then(|v| v.as_str()) {
+                    if !p.is_empty() {
+                        out.push(p.to_string());
+                    }
+                }
+            }
+        }
+        let status = d.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "error" || status == "fail" {
+            if let Some(p) = d.get("path").and_then(|v| v.as_str()) {
+                if !p.is_empty() {
+                    out.push(p.to_string());
+                }
+            }
+        }
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for p in out {
+        if !seen.iter().any(|x| x.eq_ignore_ascii_case(&p)) {
+            seen.push(p);
+        }
+    }
+    seen
 }
 
 // ==================== cleanup:item-detail ====================
@@ -743,7 +876,11 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
         .map(|a| !a.is_empty())
         .unwrap_or(false);
     if rule_file_keys_non_empty && has_known {
-        let cap = 600usize; // 与 DETAIL_SCRIPT 的明细上限一致
+        // 明细单次上限 600 条：与引擎侧 cleanup_detail 的枚举上限同值（R4-L06：旧注释裸写
+        // 一个已随 S3 退役的 PS 明细脚本名，那个名字在本域已经不存在，等于给注释里
+        // 编一道读不到的闸）。两侧数字分属命令层与引擎层、没有共享常量可指，
+        // 由 contract_tests 的「预览上限与明细上限同一数字」现算对拍，改其一必须同步另一处。
+        let cap = 600usize;
         let files: Vec<Value> = known_files
             .iter()
             .take(cap)
@@ -886,6 +1023,12 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
         return json!({ "success": false, "message": msg });
     }
     let label = window.label().to_string();
+    // 白名单先置空（R4-M03）：必须在**任何早退之前**。2026-10-04 磁盘清理审计 §3.5 那次
+    // 只做了一半 —— check-locked 有这一步，query-locked 五条早退（缺参 / 盘符相对 /
+    // 路径不存在 / 空目录或全 reparse / RM 调用失败）都不写槽，于是「上一次成功检测拿到的
+    // 名单」在这次检测失败后仍能被「结束进程」杀掉，与本函数头第③条承诺相反。
+    // 写入口径收在 state::reset_lock_whitelist / store_lock_whitelist，两条命令不许各自 insert。
+    reset_lock_whitelist(&label);
     let snapshot = snapshots()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -905,13 +1048,10 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
             &format!("占用检测：候选装配被截断（上限 {PLAN_LOCK_CAP} 个文件），面板会标「已截断」"),
         );
     }
-    lock_whitelist()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(label.clone(), Vec::new());
     // 截断信号由纯函数在装配过程中给出（见 collect_lock_candidates 的注释：
     // 装配后再比 len() 会让那句比较恒假、「被截断」永远报 false）
     if files.is_empty() {
+        // 槽已由上面 reset 置空 ⇒ 这里早退不会留下任何可被结束的名单（R4-M03）
         return json!({
             "success": true, "locked": [], "byApp": {}, "procs": [],
             "lockedByItem": {}, "scanned": 0, "truncated": truncated
@@ -921,7 +1061,6 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
     let scanned = list.len();
     // R10（2026-10-15）：占用检测的可删判定与扫描/执行侧同源——保护清单随候选一起注入
     let payload = json_text(&json!({ "files": list, "protect": crate::engine::protect::protected_roots_json() }));
-    let win = window.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         let (code, stdout, stderr) = cleanup_scan::checklocked_json(&payload);
         if code != 0 {
@@ -953,11 +1092,9 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
     let Some((locked, by_app, procs, locked_by_item, whitelist)) = payload else {
         return json!({ "success": false, "message": err });
     };
-    // 白名单每次检测覆盖（防「检测 A 文件后延时结束 B 进程」的窗口）
-    lock_whitelist()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(win.label().to_string(), whitelist);
+    // 白名单每次检测覆盖（防「检测 A 文件后延时结束 B 进程」的窗口）；
+    // 只有走到这一行（检测全成功）才有名单，失败路径留在前的 reset 上空槽（R4-M03）
+    store_lock_whitelist(&label, whitelist);
     json!({
         "success": true,
         "locked": locked,
@@ -1040,6 +1177,12 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let label = window.label().to_string();
+    // R4-M03：guard 之后**立刻**置空本槽。下面五条早退（缺参 / 盘符相对 / 路径不存在 /
+    // 空目录或全 reparse / RM 调用失败）原本都不写白名单，于是「上一次成功检测拿到的名单」
+    // 在这次注定失败的查询之后仍可被「结束进程」取走 —— 与函数头第③条（结束只认**本次**
+    // 查询写下的一次性白名单）相反。清空放在早退之前，失败即留空名单。
+    reset_lock_whitelist(&label);
     let raw = match path {
         Some(p) if !p.trim().is_empty() => p.trim().to_string(),
         _ => return json!({ "success": false, "message": "缺少要查询的路径" }),
@@ -1079,7 +1222,6 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
         "files": query_files_entries(&files),
         "protect": crate::engine::protect::protected_roots_json()
     }));
-    let win = window.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         let (code, stdout, stderr) = cleanup_scan::checklocked_json(&payload);
         if code != 0 {
@@ -1108,10 +1250,7 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
     };
     // 白名单每次查询覆盖（与 check-locked 同键同语义：紧随其后的结束进程只认这份名单，
     // 防「查询 A 路径后延时结束 B 进程」的窗口）
-    lock_whitelist()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(win.label().to_string(), parsed.whitelist);
+    store_lock_whitelist(&label, parsed.whitelist);
     json!({
         "success": true,
         "path": expanded,

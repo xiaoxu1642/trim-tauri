@@ -199,26 +199,54 @@ fn progress(sink: &dyn Sink, n: u64) {
 /// 另外 `Sink` 回调（`scanned`/`warn`）原本留在 `files` 临界区里 ——
 /// Tauri 侧的实现要拿窗口锁再 `emit`，等于把 rayon 并行重新串起来，且 emit 内任何
 /// panic 会把 `files` 判中毒（M3）。这里把「入桶」收成单一函数，锁内只搬运、回调在锁外。
-/// v5-K02 批次 2（N1-M05）：analyze 家族四函数（dir_size / child_dir_sizes / analyze_dir_deep /
-/// analyze，均无 ScanCtx 句柄）的 reparse 跳过留痕，进程级计数器；只留痕、不进判定，同进程交替跑不同域时数字会混、仅作参考。
-static REPARSE_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-fn note_reparse_skip() {
-    REPARSE_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+/// 留痕计数器（reparse 跳过 / 不可读目录）的**唯一**载体实现（N1b-M02）。
+///
+/// 为什么要有它：这类计数只呈现、不进判定，但它一旦用 `swap(0)` 取数就变成
+/// 「谁先取走谁拿到，后来者拿 0」——宿主每个扫描都进 `spawn_blocking`
+/// （`commands/finder.rs` 那条线），同进程两路 analyze/appdata 交叠即成形，
+/// 第二路的 `skippedReparse` 恒 0，把「跳过了」伪装成「没跳过」。
+/// 故读取一律是**取基线 + 读增量**，计数器本身永不归零（进程级的那个只增不减）。
+///
+/// 区间量的口径提醒：进程级实例是全进程共享的，并发扫描会把别人的增量也算进
+/// 本区间 ⇒ 数字「仅作参考、不参与判定」这条不变（与旧实现的差异只是不再丢账）。
+struct TraceCounter(AtomicU64);
+
+impl TraceCounter {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+    /// 记一次（热路径用 relaxed：这是留痕，不参与任何判定，不需要全序）
+    fn note(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+    /// 取基线快照（**不改**计数器）
+    fn mark(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+    /// 基线之后的增量
+    fn since(&self, base: u64) -> u64 {
+        self.0.load(Ordering::Relaxed).saturating_sub(base)
+    }
+    /// 累计总量（供按实例计数的收尾告警：ScanCtx / EmptyAccum 各归各的扫描）
+    fn total(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
-fn take_reparse_skips() -> u64 {
-    REPARSE_SKIPS.swap(0, std::sync::atomic::Ordering::Relaxed)
+// v5-K02 批次 2（N1-M05）：analyze 家族四函数（dir_size / child_dir_sizes / analyze_dir_deep /
+// analyze，均无 ScanCtx 句柄）的 reparse 跳过留痕，进程级计数器；只留痕、不进判定。
+// N1b-M02：按「基线 + 增量」读，不 swap 清零（并发扫描不互相偷账）。
+static REPARSE_SKIPS: TraceCounter = TraceCounter::new();
+fn note_reparse_skip() {
+    REPARSE_SKIPS.note();
 }
 
 /// 不可读目录的进程级计数（A1-M02，v7.2 C06）：与 reparse 跳过并列的留痕出口。
 /// 只呈现、不进判定；`ScanCtx` 另有一份按扫描实例计数的副本用于收尾告警。
-static UNREADABLE_DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// N1b-M02：与 [`REPARSE_SKIPS`] 同一个 `TraceCounter`（同一判据一份实现，§5.16）。
+static UNREADABLE_DIRS: TraceCounter = TraceCounter::new();
 fn note_unreadable_dir() {
-    UNREADABLE_DIRS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn take_unreadable_dirs() -> u64 {
-    UNREADABLE_DIRS.swap(0, std::sync::atomic::Ordering::Relaxed)
+    UNREADABLE_DIRS.note();
 }
 
 pub struct ScanCtx {
@@ -234,9 +262,9 @@ pub struct ScanCtx {
     ///
     /// ⚠️ **只留痕、不参与任何判定**：`files.len()` / `total` / `truncated` 一律不看它。
     /// 让它进判定就是行为变更（扫描结果数字会变），混进留痕批次里没人审得出。
-    skipped_reparse: AtomicU64,
+    skipped_reparse: TraceCounter,
     /// 不可读目录计数（A1-M02）：与 skipped_reparse 并列，只留痕不进判定。
-    unreadable_dirs: AtomicU64,
+    unreadable_dirs: TraceCounter,
     cap: usize,
 }
 
@@ -250,8 +278,8 @@ impl ScanCtx {
             files: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
             truncated: AtomicBool::new(false),
-            skipped_reparse: AtomicU64::new(0),
-            unreadable_dirs: AtomicU64::new(0),
+            skipped_reparse: TraceCounter::new(),
+            unreadable_dirs: TraceCounter::new(),
             cap,
         }
     }
@@ -259,23 +287,23 @@ impl ScanCtx {
     /// 记一次「因重解析点跳过」。刻意不做去重/不排序：同一junction 被多个根各跳一次
     /// 就该算两次，那是两条不同的扫描路径。
     fn note_reparse_skip(&self) {
-        self.skipped_reparse.fetch_add(1, Ordering::Relaxed);
+        self.skipped_reparse.note();
     }
 
     /// 本次扫描因重解析点跳过的目录数（供留痕与测试；**不进任何判定字段**）。
     pub fn skipped_reparse(&self) -> u64 {
-        self.skipped_reparse.load(Ordering::Relaxed)
+        self.skipped_reparse.total()
     }
 
     /// 记一次「目录读不到」（A1-M02：只留痕不进判定，同时累加进程级计数）。
     fn note_unreadable(&self) {
-        self.unreadable_dirs.fetch_add(1, Ordering::Relaxed);
+        self.unreadable_dirs.note();
         note_unreadable_dir();
     }
 
     /// 本次扫描因权限/IO 读不到的目录数（供收尾告警；**不进任何判定字段**）。
     pub fn unreadable_dirs(&self) -> u64 {
-        self.unreadable_dirs.load(Ordering::Relaxed)
+        self.unreadable_dirs.total()
     }
 
     /// 条目入桶，返回**实际收下**的条数（供心跳计数）。上限满时置 truncated 并告警一次。
@@ -524,6 +552,54 @@ fn analyze_ext_key(name: &str) -> String {
     }
 }
 
+/// 扩展名聚合表的**键数**上限。
+/// 为什么要有：病态目录的扩展名种类可达上万，全收就把「排行」变成了「字典」。
+/// N1b-L02 说的不是这个上限，而是**取舍押在到达顺序上**：旧写法
+/// `exts.len() < 64 || exts.contains_key(..)` 在 rayon 合并期按 HashMap 迭代序喂
+///（迭代序随每进程随机种子变），满员后「谁被拒」就成了随机事件 ⇒ 同一目录两次扫描
+/// 留下不同的 64 个键，扩展名排行不可复现。现在合并前按排序键
+/// **(字节 desc, 键 asc)** 定序，存留集合恒等于「该排序键下的前 64 名」。
+const EXT_BUCKET_CAP: usize = 64;
+
+/// 单笔入桶（三处调用点共用这一份实现，§5.16）：已有键恒累加，新键满员即拒。
+fn ext_note(exts: &mut std::collections::HashMap<String, u64>, key: String, bytes: u64) {
+    if let Some(slot) = exts.get_mut(&key) {
+        *slot += bytes;
+        return;
+    }
+    if exts.len() >= EXT_BUCKET_CAP {
+        return;
+    }
+    exts.insert(key, bytes);
+}
+
+/// 把一份子树扩展名表并进上层聚合表：**先按排序键定序再喂**（N1b-L02）。
+/// 入参是 `HashMap::into_iter().collect()` 出来的 Vec，其顺序本身就是随机的，
+/// 所以排序必须在合并这一层做，不能指望上游给稳定顺序。
+fn ext_merge_sorted(exts: &mut std::collections::HashMap<String, u64>, incoming: &[(String, u64)]) {
+    let mut order: Vec<&(String, u64)> = incoming.iter().collect();
+    order.sort_unstable_by(|a, b| ext_bucket_ordering(*a, *b));
+    for (k, v) in order {
+        ext_note(exts, k.clone(), *v);
+    }
+}
+
+/// 扩展名桶的**唯一**排序键：先按字节降序，字节相同按键名升序。
+/// 为什么必须有第二键：只按字节排序时，同字节的键之间由 HashMap 迭代序决定先后，
+/// Top-16 的截取随进程随机（N1b-L02 的另一半）。合并取舍与输出排行共用这一个比较器，
+/// 免得两处各写一份、其中一处被放宽（§5.16）。
+fn ext_bucket_ordering(a: &(String, u64), b: &(String, u64)) -> std::cmp::Ordering {
+    b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+}
+
+/// 输出用的排行：按 [`ext_bucket_ordering`] 排序后取前 16（唯一实现，出口与用例同一条）。
+fn ext_ranking(exts: std::collections::HashMap<String, u64>) -> Vec<(String, u64)> {
+    let mut list: Vec<(String, u64)> = exts.into_iter().collect();
+    list.sort_by(ext_bucket_ordering);
+    list.truncate(16);
+    list
+}
+
 /// 扩展名（`analyze_ext_key` 的键形态，带前导点）→ 类型家族。
 ///
 /// **磁盘分析页与「老旧大文件」类型过滤的唯一实现**（§5.16：同一判定不许两套——
@@ -562,11 +638,12 @@ const OLDFILE_TOP: usize = 20;
 type OldFile = (u64, u64, PathBuf);
 
 /// du 原语带计数、扩展名聚合与老旧大文件候选。与 dir_size 同口径：跳过 symlink、
-/// 联接点不深入；大小用 DirEntry.metadata 复用（不额外 syscall）。exts 键数上限 64
-/// ——巨型目录的扩展名种类可能上万，聚合表只保留先到的前 64 键（Top-N 语义近似，
-/// 够「看大头」）。`old` 是子树局部 Top-K（分治 Top-K：全局 Top-N 必落在「各子树
-/// Top-N 的并集 ∪ 顶层直属文件」内 —— 若某文件是子树的第 N+1 名，子树内至少 N 个
-/// 比它大，全局名次也 ≥N+1，所以局部截断不丢全局正确性）。
+/// 联接点不深入；大小用 DirEntry.metadata 复用（不额外 syscall）。exts 键数上限
+/// [`EXT_BUCKET_CAP`]——巨型目录的扩展名种类可能上万，聚合表只保留前 64 键（Top-N
+/// 语义近似，够「看大头」）。N1b-L02：存留集合的取舍键是 (字节 desc, 键 asc)，
+/// 不再是「谁先到谁占坑」（见 [`ext_merge_sorted`]）。`old` 是子树局部 Top-K（分治
+/// Top-K：全局 Top-N 必落在「各子树 Top-N 的并集 ∪ 顶层直属文件」内 —— 若某文件是
+/// 子树的第 N+1 名，子树内至少 N 个比它大，全局名次也 ≥N+1，所以局部截断不丢全局正确性）。
 fn analyze_dir_deep(
     dir: &Path,
     exts: &mut std::collections::HashMap<String, u64>,
@@ -622,9 +699,7 @@ fn analyze_dir_deep(
                     }
                     if let Some(name) = ent.file_name().to_str() {
                         let key = analyze_ext_key(name);
-                        if exts.len() < 64 || exts.contains_key(&key) {
-                            *exts.entry(key).or_insert(0) += sz;
-                        }
+                        ext_note(exts, key, sz);
                     }
                 }
                 _ => {}
@@ -698,6 +773,10 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
             continue;
         }
         let t0 = std::time::Instant::now();
+        // N1b-M02：本根的留痕量按「基线 + 增量」读。进程级计数器**不 swap 清零**——
+        // 清零等于把并发扫描（宿主每路都进 spawn_blocking）的留痕偷走，第二路恒报 0。
+        let reparse_base = REPARSE_SKIPS.mark();
+        let unreadable_base = UNREADABLE_DIRS.mark();
         let rd = match fs::read_dir(root) {
             Ok(r) => r,
             // v7.2-C03（N1b-M01）：根级 read_dir 失败原先整根静默跳过，输出与
@@ -747,9 +826,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
                     }
                     if let Some(name) = ent.file_name().to_str() {
                         let key = analyze_ext_key(name);
-                        if exts.len() < 64 || exts.contains_key(&key) {
-                            *exts.entry(key).or_insert(0) += sz;
-                        }
+                        ext_note(&mut exts, key, sz);
                     }
                 }
                 _ => {}
@@ -779,11 +856,10 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
             for (i, v) in t.iter().enumerate() {
                 times[i] += v;
             }
-            for (k, v) in m {
-                if exts.len() < 64 || exts.contains_key(k) {
-                    *exts.entry(k.clone()).or_insert(0) += v;
-                }
-            }
+            // N1b-L02：合并必须走「按 (字节 desc, 键 asc) 定序后喂入」这一份实现。
+            // `m` 来自子树 HashMap 的 into_iter().collect()，顺序随进程随机种子变，
+            // 直接喂就等于把「64 个桶留谁」押在迭代序上。
+            ext_merge_sorted(&mut exts, m);
             for cand in o {
                 old_all.push(std::cmp::Reverse(cand.clone()));
                 if old_all.len() > OLDFILE_TOP {
@@ -809,16 +885,15 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
             ("fileCount", file_count.to_string()),
             ("elapsedMs", t0.elapsed().as_millis().to_string()),
             ("childrenTruncated", if children_truncated { "true" } else { "false" }.to_string()),
-            ("skippedReparse", take_reparse_skips().to_string()), // v5-K02 批次2：本根 reparse 跳过量（只呈现）
-            ("unreadableDirs", take_unreadable_dirs().to_string()), // A1-M02：本根不可读目录数（只呈现）
+            ("skippedReparse", REPARSE_SKIPS.since(reparse_base).to_string()), // v5-K02 批次2：本根 reparse 跳过量（只呈现；N1b-M02 读增量不清零）
+            ("unreadableDirs", UNREADABLE_DIRS.since(unreadable_base).to_string()), // A1-M02：本根不可读目录数（只呈现）
         ]);
         for (cp, sz) in &children {
             item(sink, "analyzer", cp, *sz, &[("kind", "dir".to_string())]);
         }
-        let mut ext_list: Vec<(String, u64)> = exts.into_iter().collect();
-        ext_list.sort_by(|a, b| b.1.cmp(&a.1));
-        ext_list.truncate(16);
-        for (name, sz) in ext_list {
+        // 排行由唯一实现给出（N1b-L02：排序键 = 字节 desc + 键名 asc，出口与本 crate
+        // 用例走同一条，避免「测试自己再排一遍」造成的判据两套）
+        for (name, sz) in ext_ranking(exts) {
             // family：类型家族由 Rust 一处实现（`ext_family`），前端分组渲染与「老旧大文件」
             // 类型过滤共用，不在 JS 侧建第二张映射表（§5.16）
             item(sink, "analyzer", root, sz, &[
@@ -1468,8 +1543,10 @@ struct EmptyAccum {
     visits: AtomicU64,
     /// 因重解析点跳过的目录数（R1-2 留痕）。语义与 `ScanCtx::skipped_reparse` 完全相同，
     /// 两个累加器都要有是因为它们服务两个入口（`empty` 与 `duplicates`），
-    /// 少一个就有一个入口在静默丢目录。
-    skipped_reparse: AtomicU64,
+    /// 少一个就有一个入口在静默丢目录。N1b-M02：载体收成同一个 [`TraceCounter`]，
+    /// 三套留痕机制从此只有「按谁计数」这一处差别（进程级 / 按扫描实例），
+    /// 不再各写一份原子量与读取姿势。
+    skipped_reparse: TraceCounter,
 }
 
 /// 本地批达到这个条数就并入累积器：既让全局计数及时生效（下钻能真的停下来），
@@ -1489,19 +1566,19 @@ impl EmptyAccum {
             truncated: AtomicBool::new(false),
             cap,
             visits: AtomicU64::new(0),
-            skipped_reparse: AtomicU64::new(0),
+            skipped_reparse: TraceCounter::new(),
         }
     }
 
     /// 记一次「因重解析点跳过」（R1-2 留痕，不参与任何判定）。
     fn note_reparse_skip(&self) {
-        self.skipped_reparse.fetch_add(1, Ordering::Relaxed);
+        self.skipped_reparse.note();
     }
 
     /// 本次扫描因重解析点跳过的目录数（测试与留痕用；**不进任何判定字段**）。
     #[cfg_attr(not(test), allow(dead_code))]
     fn skipped_reparse(&self) -> u64 {
-        self.skipped_reparse.load(Ordering::Relaxed)
+        self.skipped_reparse.total()
     }
 
     /// 枚举心跳：每个被遍历的条目调一次，跨过 HEARTBEAT_EVERY 就发一次 scanned。
@@ -1926,11 +2003,14 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
     let mut out: Vec<(String, PathBuf, u64)> = Vec::new();
     for (label, root) in roots {
         let mut cur: Vec<(PathBuf, u64)> = Vec::new();
+        // N1b-M02：本根区间的基线（读增量，不清零 —— 并发扫描互不偷账）
+        let reparse_base = REPARSE_SKIPS.mark();
+        let unreadable_base = UNREADABLE_DIRS.mark();
         child_dir_sizes(&root, &mut cur, &beat);
         // v5-K02 批次2（N1-M05）：本根 reparse 跳过量一次性 warn（同 ScanCtx::finish 姿势，只呈现）
-        let skipped = take_reparse_skips();
+        let skipped = REPARSE_SKIPS.since(reparse_base);
         if skipped > 0 { sink.warn(&format!("应用数据扫描（{label}）：已跳过 {skipped} 个重解析点目录（不深入以避免重复计数）")); }
-        let unreadable = take_unreadable_dirs();
+        let unreadable = UNREADABLE_DIRS.since(unreadable_base);
         if unreadable > 0 { sink.warn(&format!("应用数据扫描（{label}）：有 {unreadable} 个目录读不到（权限或 IO 失败），结果可能不完整")); }
         for (p, sz) in cur {
             if sz >= minb {
@@ -1962,9 +2042,11 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
         } else if p.is_dir() {
             // `None`：v3 §5.6 的零反馈清单只有 analyze/appdata/bigfiles 三条，sizes 不在
             // 其中；接心跳等于给它新增一类输出行（CLI 侧 stdout 会变），属另行拍板的改动面。
+            // N1b-M02：本路径区间的基线，读增量而非清零。
+            let reparse_base = REPARSE_SKIPS.mark();
             let sz = dir_size(p, None);
             total_dirs += 1;
-            item(sink, "size", p, sz, &[("exists", "true".to_string()), ("skippedReparse", take_reparse_skips().to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
+            item(sink, "size", p, sz, &[("exists", "true".to_string()), ("skippedReparse", REPARSE_SKIPS.since(reparse_base).to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
         }
     }
     let _ = (total_files, total_dirs);
@@ -2342,6 +2424,16 @@ fn with_protect_roots<T>(protect_json: Option<&str>, f: impl FnOnce(&ProtectRoot
 /// R10（2026-10-15）：`pub(crate)` 放开给 `cleanup_scan` 的扫描侧过滤——
 /// 判据只此一份，不许在扫描侧另写一套路径保护比对（§5.16/N6）。
 pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
+    // N1b-M07：文本形态里出现 U+FFFD ⇒ 这个名字已经被谁 lossy 解码过一遍（孤立代理项
+    // 被换成 U+FFFD）。U+FFFD 本身是合法的 Windows 文件名字符，所以它可能与**另一个**
+    // 真实存在的路径同键 —— 拿这种串比保护清单，撞的是别人的条目（正是 v6-K02 注释
+    // 描述的形态）。判据侧无法证明它「不是」lossy 产物 ⇒ 按「判定不可靠」直接拦，
+    // 与 `delete()` 的 `has_lossy_path` 前置、主仓「无法判定 ⇒ 拦」同口径。
+    // 注：`to_long_path` 的解码已改走 `decode_wide_exact`（非良构 = 读不到 → 原样返回），
+    // 展开环节不会再注入 U+FFFD，故入口这一判就够了。
+    if crate::util::has_lossy_marker(p) {
+        return true;
+    }
     // v3.7.2：先触盘展开短名再归一化——磁盘上存在的短名（运行时环境喂进来的
     // %TEMP% 类路径）展开后正常参与 subtree/exact/anyDrive 判定；展开不掉
     // （目标不存在）原样返回，contains_short_name 仍 fail-closed。
@@ -2677,10 +2769,63 @@ mod tests {
         let src = include_str!("scan.rs");
         assert!(src.contains("static UNREADABLE_DIRS"), "进程级不可读计数不见了");
         assert!(
-            src.contains("(\"unreadableDirs\", take_unreadable_dirs().to_string())"),
+            src.contains("(\"unreadableDirs\", UNREADABLE_DIRS.since(unreadable_base).to_string())"),
             "analyzer 输出缺 unreadableDirs 字段"
         );
         assert!(src.contains("ctx.note_unreadable();"), "主 walk 的 read_dir 失败没进计数");
+    }
+
+    /// N1b-M02 机制面：留痕计数的读取姿势必须是「取基线 + 读增量」，不许再出现
+    /// `swap(0)`（清零 = 并发扫描互相偷账，第二路恒报 0），三套载体必须共用同一个
+    /// `TraceCounter`。
+    /// 判红自证：把 `TraceCounter` 的任何一处读取改回 `swap`，或给某个载体另写一份
+    /// 原子量，本用例即红。禁项 needle 一律动态拼 —— 本用例自己的代码也算语料，
+    /// 写死的字面量会让「不含 swap」这条断言恒真（§4.1 假阳性 ②）。
+    #[test]
+    fn 留痕计数读增量而不互相清零() {
+        let src = include_str!("scan.rs");
+        for owner in ["REPARSE_SKIPS", "UNREADABLE_DIRS"] {
+            let swap_needle = format!("{owner}.{}0,", "swap(");
+            assert!(
+                !src.contains(swap_needle.as_str()),
+                "留痕取数退回 {owner}.swap(0)：并发扫描会互相清零（N1b-M02）"
+            );
+        }
+        // 载体共用同一类型：反向 needle（另写一份原子量）也动态拼，避免自指命中
+        for field in ["skipped_reparse", "unreadable_dirs"] {
+            let raw_needle = format!("{field}: {}64", "AtomicU6");
+            assert!(
+                !src.contains(raw_needle.as_str()),
+                "留痕载体 {field} 不再是 TraceCounter（三套机制又各写一份实现）"
+            );
+        }
+
+        // 行为面（用自己那个实例，避开进程级计数器被并行用例污染）：
+        // 两个消费者交叠时，各自拿到的必须是自己的增量，且计数器本身只增不减。
+        let c = TraceCounter::new();
+        let consumer_a = c.mark();
+        c.note();
+        c.note();
+        let consumer_b = c.mark();
+        c.note();
+        c.note();
+        c.note();
+        assert_eq!(c.since(consumer_b), 3, "后取基线的消费者必须拿到自己区间的 3 次");
+        assert_eq!(c.since(consumer_a), 5, "先取基线的消费者不得被后一个消费者清零");
+        assert_eq!(c.total(), 5, "读取绝不改计数器（swap 的丢账形态就体现在这里）");
+        // 基线取在计数器已被别的路径加过之后，增量不得回绕成负数/天文数字
+        let later = c.mark();
+        assert_eq!(c.since(later), 0);
+        assert_eq!(c.since(c.total() + 7), 0, "基线晚于当前值时必须给 0");
+
+        // 接线面：两个进程级实例真的走的是这个类型（note → 区间增量含自己这一次）。
+        // 用 >= 而不是 ==：并行用例也会往同一个进程级计数器加，精确相等不可判。
+        let base_r = REPARSE_SKIPS.mark();
+        let base_u = UNREADABLE_DIRS.mark();
+        note_reparse_skip();
+        note_unreadable_dir();
+        assert!(REPARSE_SKIPS.since(base_r) >= 1, "note_reparse_skip 没接进 REPARSE_SKIPS");
+        assert!(UNREADABLE_DIRS.since(base_u) >= 1, "note_unreadable_dir 没接进 UNREADABLE_DIRS");
     }
 
     /// v6-K02（P0-1，与主仓 normalize_lexical 同口径对拍）：不可折回形态保留前缀字面
@@ -4396,6 +4541,153 @@ mod depth_cap_tests {
             hits, 1,
             "重叠根下同一文件只允许枚举一次（旧实现 = 2，自成重复组）：{lines:?}"
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// v7.2 W4（N1b-L02）确定性断言：扩展名 64 桶的**存留集合与排行**只能由排序键
+    /// (字节 desc, 键 asc) 决定，与喂入顺序无关。
+    /// 造 65 个键、字节值互不相同：
+    ///   · 顺序 A = 字节升序（最小的先占坑）；顺序 B = 字节降序（最大的先占坑）。
+    /// 旧写法（`len()<64 || contains_key` 直接喂）下 A 留最小的 64 个、B 留最大的 64 个
+    /// ⇒ 两侧排行逐字节不同 ⇒ 本用例红；合并前定序后两侧都等于「排序键下的前 64 名」。
+    /// 正向点名：命中集合含 `.e65` 而不含 `.e01`，排行 = 字节降序前 16 名。
+    #[test]
+    fn 扩展名64桶存留只由排序键决定而不随喂入顺序() {
+        let rows_asc: Vec<(String, u64)> =
+            (1..=65usize).map(|i| (format!(".e{i:02}"), (i as u64) * 100)).collect();
+        let mut rows_desc = rows_asc.clone();
+        rows_desc.reverse();
+
+        // 一次跑完「入桶 → 排行」，返回可逐字节比对的两段（存留集合 + Top16 序列）
+        let run = |rows: &[(String, u64)]| -> (Vec<String>, Vec<String>) {
+            let mut exts = std::collections::HashMap::new();
+            ext_merge_sorted(&mut exts, rows);
+            let mut kept: Vec<String> = exts.keys().cloned().collect();
+            kept.sort();
+            let ranked: Vec<String> = ext_ranking(exts).into_iter().map(|(n, _)| n).collect();
+            (kept, ranked)
+        };
+
+        let a = run(&rows_asc);
+        let b = run(&rows_desc);
+        assert_eq!(a, b, "同一集合两种喂入顺序给出不同桶集/排行 ⇒ 取舍仍押在到达顺序上");
+        assert_eq!(a.0.len(), EXT_BUCKET_CAP, "满员后必须恰好留 64 个键");
+        assert!(
+            !a.0.contains(&".e01".to_string()) && a.0.contains(&".e65".to_string()),
+            "被拒的必须是排序键末位（字节最小）的 .e01，留住的必须是 .e65：{:#?}",
+            a.0
+        );
+        assert_eq!(
+            a.1,
+            (50..=65usize).rev().map(|i| format!(".e{i:02}")).collect::<Vec<_>>(),
+            "Top-16 必须是字节降序的前 16 名（点名排序键）"
+        );
+
+        // 第二排序键：字节相同 ⇒ 按键名升序（旧写法这里由 HashMap 迭代序决定）
+        let tie: Vec<(String, u64)> =
+            [".z", ".a", ".m"].iter().map(|k| (k.to_string(), 500u64)).collect();
+        let mut tie_rev = tie.clone();
+        tie_rev.reverse();
+        let mut exts = std::collections::HashMap::new();
+        ext_merge_sorted(&mut exts, &tie);
+        let mut exts2 = std::collections::HashMap::new();
+        ext_merge_sorted(&mut exts2, &tie_rev);
+        let ranked = ext_ranking(exts);
+        assert_eq!(
+            ranked,
+            vec![
+                (".a".to_string(), 500u64),
+                (".m".to_string(), 500u64),
+                (".z".to_string(), 500u64)
+            ],
+            "同字节必须按键名升序给出排行"
+        );
+        assert_eq!(ext_ranking(exts2), ranked, "第二排序键也不得随喂入顺序变");
+
+        // 已有键恒累加（满员不得把已存在的键挡掉）
+        let mut full: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for i in 0..EXT_BUCKET_CAP {
+            ext_note(&mut full, format!(".k{i:02}"), 1);
+        }
+        assert_eq!(full.len(), EXT_BUCKET_CAP);
+        ext_note(&mut full, ".k00".to_string(), 9);
+        assert_eq!(full.get(".k00").copied(), Some(10), "满员后已有键必须继续累加");
+        ext_note(&mut full, ".new".to_string(), 9);
+        assert_eq!(full.len(), EXT_BUCKET_CAP, "满员后的新键必须被拒");
+    }
+
+    /// v7.2 W4（N1b-M07）破坏自证：文本形态含 U+FFFD（lossy 解码产物）的键**必须判受保护**。
+    /// 清单全空 ⇒ 普通路径一律放行，这正是「放行面」的对照基准；
+    /// 删掉 is_protected_path 入口那一判 ⇒ 第一条正向断言即红。
+    #[test]
+    fn is_protected_path_lossy_假键判受保护() {
+        let empty_list = r#"{"subtree":[],"exact":[],"anyDrive":[],"neverNames":[]}"#;
+        assert!(
+            !is_protected_path(r"D:\a\b.txt", Some(empty_list)),
+            "对照：空清单不拦普通路径"
+        );
+        assert!(
+            is_protected_path("D:\\a\u{FFFD}b.txt", Some(empty_list)),
+            "含 U+FFFD 的假键必须 fail-closed 判受保护（它可能撞上另一个真实路径）"
+        );
+        assert!(
+            !is_protected_path("D:\\报告 🎯.txt", Some(empty_list)),
+            "合法 Unicode（含配对代理项）不得被误伤"
+        );
+    }
+
+    /// v7.2 W4（N1b-M07）真机探针（**只写不跑**，需真实磁盘且允许建怪名文件）：
+    /// 名字含孤立代理项的**真实存在**的文件，其 lossy 串不在任何保护根下，
+    /// 却必须被判「受保护」（= 删除侧拒绝），证明拦的是「判定不可靠」而不是「清单命中」。
+    /// 建不出来（个别环境/文件系统不允许）⇒ 显式 skip 并说明，不许 expect 炸。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "真机探针：在盘上建含孤立代理项的名字，只读判定后删除"]
+    fn lossy_假键在真实盘上判受保护() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("test-m07-lossy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        if fs::create_dir_all(&base).is_err() {
+            eprintln!("SKIP：建沙箱目录失败（本机不允许写 target），本探针未取证");
+            return;
+        }
+        // base\<D800>x.txt：0xD800 是前导代理项却没有后继 ⇒ to_str() 必为 None
+        let mut wide: Vec<u16> = base.as_os_str().encode_wide().collect();
+        wide.push(b'\\' as u16);
+        wide.push(0xD800);
+        wide.extend("x.txt".encode_utf16());
+        let weird = PathBuf::from(OsString::from_wide(&wide));
+        if fs::write(&weird, b"x").is_err() {
+            let _ = fs::remove_dir_all(&base);
+            eprintln!("SKIP：本机建不出含孤立代理项的文件名，本探针未取证");
+            return;
+        }
+        let lossy_text = weird.to_string_lossy().to_string();
+        assert!(
+            crate::util::has_lossy_path(&weird),
+            "样本形态不对：该名字必须判 lossy（原生形态解不成 str）"
+        );
+        assert!(
+            crate::util::has_lossy_marker(&lossy_text),
+            "lossy 串必须含 U+FFFD，否则探针钉的不是同一条判据：{lossy_text}"
+        );
+        let empty_list = r#"{"subtree":[],"exact":[],"anyDrive":[],"neverNames":[]}"#;
+        assert!(
+            is_protected_path(&lossy_text, Some(empty_list)),
+            "真实存在、不在任何保护根下的 lossy 名字，必须因「判定不可靠」被拦：{lossy_text}"
+        );
+        // 反向对照：同目录下普通名字不受这条判据影响
+        let normal = base.join("normal.txt");
+        if fs::write(&normal, b"x").is_ok() {
+            assert!(
+                !is_protected_path(&normal.to_string_lossy(), Some(empty_list)),
+                "普通路径不得被 lossy 判据误伤"
+            );
+        }
         let _ = fs::remove_dir_all(&base);
     }
 }
