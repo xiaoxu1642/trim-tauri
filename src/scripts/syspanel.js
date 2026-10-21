@@ -2109,7 +2109,9 @@
       ? entries.map((e) => {
           const initMb = Number(e.initialMb) || 0;
           const maxMb = Number(e.maxMb) || 0;
-          const fmt = (n) => (n === 0 ? '0 MB' : (n >= 1024 ? window.ds.fmtBytes(n * 1024 * 1024) : n + ' MB'));
+          // MB → 字节只做一次换算，其余交给真源：原先 <1024 直写「n MB」、≥1024 才转调 ds.fmtBytes，
+          // 同一张表里两种精度（512 显示「512 MB」、1024 显示「1.0 GB」），违反字节格式化单一真源口径。
+          const fmt = (n) => window.ds.fmtBytes(n * 1024 * 1024, { zero: '0 MB' });
           return `<tr><td>${window.ds.esc(e.path || '(未设置)')}</td><td>${window.ds.esc(fmt(initMb))}</td><td>${window.ds.esc(fmt(maxMb))}</td></tr>`;
         }).join('')
       : '<tr><td colspan="3" class="empty-cell">未读到 PagingFiles 项（可能全在托管模式）</td></tr>';

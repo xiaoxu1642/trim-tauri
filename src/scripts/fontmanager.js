@@ -14,11 +14,9 @@
   const IMPORTED_STYLE_ID = 'importedFontFace';
 
   let modal = null;      // { backdrop, select, weightInput, sizeInput, preview, weightVal, sizeVal, tip }
-  let escHandler = null;
   let fontList = [];
   let settings = { family: '微软雅黑', weight: 400, size: 16 };
   let importedFamily = '';
-  let importedUrl = '';
 
   function escapeHtml(text) { return window.ds.esc(text); }
 
@@ -26,14 +24,16 @@
   function injectImportedFace(family, url) {
     document.getElementById(IMPORTED_STYLE_ID)?.remove();
     importedFamily = '';
-    importedUrl = '';
     if (!family || !url) return;
     const style = document.createElement('style');
     style.id = IMPORTED_STYLE_ID;
-    style.textContent = `@font-face { font-family: '${family.replace(/['\\]/g, '')}'; src: url('${url}'); font-display: swap; }`;
+    // CSS 串里绝不裸插值：副本路径含应用数据目录（其中有用户名段），用户名里的单引号会
+    // 提前终结 url('…') ⇒ 整条 @font-face 解析失败，用户「导入字体」后界面毫无变化也毫无报错。
+    // JSON.stringify 只产出双引号串并转义引号/反斜杠/控制符，同时保住含引号的合法路径。
+    style.textContent = '@font-face { font-family: ' + JSON.stringify(String(family))
+      + '; src: url(' + JSON.stringify(String(url)) + '); font-display: swap; }';
     document.head.appendChild(style);
     importedFamily = family;
-    importedUrl = url;
   }
 
   // ---------- 全局应用（三个 CSS 变量驱动 main.css 内全部 calc 字号 / 字重） ----------
@@ -94,7 +94,8 @@
       : '当前没有已导入的字体');
   }
 
-  // 需要改为：调整仅实时预览（只改预览区），点击「应用」才全局生效并保持打开
+  // 约束：拖动（input）只动预览区、不写根变量也不落盘（否则一次拖动 = N 次 settings.json 写）；
+  // 全局生效与持久化的唯一出口是「应用」按钮。
   function bindEvents() {
     if (!modal) return;
     modal.select.addEventListener('change', () => {
@@ -169,9 +170,13 @@
       try {
         const resp = await window.api.fonts.removeImported();
         if (resp && resp.success) {
+          // 先取值再清理：injectImportedFace('','') 会把 importedFamily 归零，
+          // 在它之后比较就等于「当前字体永远不是被删那个」，回退只剩兜底条件——
+          // 副本与清单里另一项同名时，删完界面仍指向已删除的副本 URL。
+          const removedFamily = importedFamily;
           injectImportedFace('', '');
           await load(true);
-          if (settings.family === importedFamily || !fontList.some(f => f.family === settings.family)) {
+          if (settings.family === removedFamily || !fontList.some(f => f.family === settings.family)) {
             settings.family = '微软雅黑';
           }
           applyToRoot();

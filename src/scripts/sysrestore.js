@@ -1,6 +1,7 @@
 // sysrestore.js - 系统还原点管理模块（弹窗版）
 // 入口：电脑优化中心右上角「系统还原点」按钮，弹窗展示（样式与「大模型管理」一致）。
-// 通过系统 API（Get-ComputerRestorePoint / SystemRestore WMI）查看、创建与管理还原点。
+// 出口面以 CHANNEL_MAP 实有键为准：optimizer:list-restore / create-restore / restore-frequency 三个，
+// 本弹窗只做「查看 + 创建 + 恢复默认创建频率」；没有回退出口——回退走 Windows 自带的「系统还原」。
 (function () {
   'use strict';
 

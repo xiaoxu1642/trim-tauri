@@ -54,7 +54,6 @@
   ];
 
   const ALL_KEYS = GROUPS.flatMap(g => g.items.map(i => i.key));
-  const FIRST_LAUNCH_KEY = 'trim-paths-first-launch-done';
 
   let pathConfig = {};
   let icons = {};        // groupId -> dataUrl
@@ -257,14 +256,22 @@
     return 0;
   }
 
+  // 「扫过没有」的唯一判据：scannedAt 能被解析成有效时间。
+  // 页脚文案与首次自动扫描共用它，避免两处各写一份 `new Date()` 口径。
+  function parsedScannedAt(raw) {
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+
   function updateFooter() {
     if (!modal) return;
     // 升级前落盘的 scannedAt 是 Rust 的 Debug 形态（`SystemTime { .. }`）—— `new Date()`
     // 对它返回**truthy 的 Invalid Date**，照字面拼进页脚就是「上次扫描：Invalid Date」。
     // 解析不出（getTime() 非有限值）一律按「未扫描」呈现；重新扫描会写入 ISO-8601
     // （见 commands/paths.rs），正常路径不受影响。
-    const d = pathConfig.scannedAt ? new Date(pathConfig.scannedAt) : null;
-    const at = d && Number.isFinite(d.getTime()) ? d.toLocaleString('zh-CN') : '';
+    const d = parsedScannedAt(pathConfig.scannedAt);
+    const at = d ? d.toLocaleString('zh-CN') : '';
     modal.hint.textContent = at ? `上次扫描：${at}` : '尚未扫描，可点击「重新扫描」自动识别';
   }
 
@@ -320,11 +327,13 @@
       console.error('加载路径配置失败:', e);
     }
 
-    // 首次启动自动扫描（仅在后台静默补全，不弹窗打扰）
-    let firstLaunchDone = false;
-    try { firstLaunchDone = localStorage.getItem(FIRST_LAUNCH_KEY) === 'true'; } catch (e) {}
-    if (!firstLaunchDone) {
-      try { localStorage.setItem(FIRST_LAUNCH_KEY, 'true'); } catch (e) {}
+    // 首次启动自动扫描（仅在后台静默补全，不弹窗打扰）。
+    // 判据只用后端回传的 `scannedAt`：`paths:scan` 每次都唯一产生时间戳并落盘，所以
+    // 「这台机器上到底扫过没有」只有一个口径。原先另存一份 localStorage 标记是第二真源
+    // ——清 WebView2 数据后标记丢了但 scannedAt 还在（对着已有绑定白扫一次），换机器则相反
+    // （标记还在、扫描记录没了，从此再不补扫）。老配置里 scannedAt 若是升级前的 Debug 形态，
+    // 由下方 normalizeScannedAt 归一后仍算「扫过」，不会退化成重新扫描。
+    if (!parsedScannedAt(pathConfig.scannedAt)) {
       setTimeout(() => { autoScan(true); }, 1500);
     }
   }
@@ -627,7 +636,8 @@
         } else {
           materialOn = !next;
           syncMaterialMaster(materialOn);
-          window.app?.toast('error', (resp && resp.message) || '材质开关切换失败');        }
+          window.app?.toast('error', (resp && resp.message) || '材质开关切换失败');
+        }
       } catch (e) {
         materialOn = !next;
         syncMaterialMaster(materialOn);
@@ -662,7 +672,14 @@
         if (!materialOn) return; // 总开关关闭期间材质卡为暂停态
         const m = card.dataset.material;
         refreshMaterialCards(m);
-        const resp = await window.api?.appearance?.setMaterial?.(m);
+        // IPC reject（通道异常/桥未就位）与 resp.success=false 必须走同一条回滚：
+        // 只判 success 会让 reject 直接抛出、乐观高亮永远留着，选中态与窗口真实材质长期不一致
+        let resp = null;
+        try {
+          resp = await window.api?.appearance?.setMaterial?.(m);
+        } catch (e) {
+          resp = { success: false, message: (e && e.message) || String(e) };
+        }
         if (resp && resp.success) {
           // 同步材质标识到 body，CSS 据此做材质差异化着色
           document.body.dataset.material = m;

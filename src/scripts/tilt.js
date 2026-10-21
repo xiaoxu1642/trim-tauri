@@ -156,4 +156,16 @@
   // 滚动/离开窗口时复位，避免残留倾斜姿态（同时作废几何快照，下次进入重新量）
   window.addEventListener('scroll', clearTilt, { passive: true, capture: true });
   document.documentElement.addEventListener('mouseleave', clearTilt);
+
+  // F5-L13：系统「减少动态效果」运行中打开时立刻归零，不能等下一次 mousemove。
+  // 倾斜写的是**行内** transform，main.css 的 RM 归零段没有 !important 压不住它，
+  // 归零前卡片一直保持倾斜姿态（will-change:transform 同样残留），表现为「偏好开了画面还歪着」。
+  // MQL 对象统一走 ds.reducedMotionQuery()（A3-L06：不许各自再写 matchMedia）。
+  (function bindReduceChange() {
+    var mq = window.ds && window.ds.reducedMotionQuery ? window.ds.reducedMotionQuery() : null;
+    if (!mq) return;
+    var onChange = function () { if (isReducedMotion()) clearTilt(); };
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onChange);
+    else if (typeof mq.addListener === 'function') mq.addListener(onChange);
+  })();
 })();

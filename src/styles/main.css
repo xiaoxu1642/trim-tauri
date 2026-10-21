@@ -36,8 +36,10 @@
   --bg-hover: #242936;
   --border-accent: #8B8EE0;
 
-  /* 品牌强调色：薰衣草紫 #8B8EE0（v2.0 碳墨×薰衣草）。
-     实底按钮以 --accent-text 深紫黑 (#171832) 作前景（对比 ≈ 7:1，AA/AAA）；
+  /* 品牌强调色：薰衣草紫 #8B8EE0（v2.0 碳墨×薰衣草）。应用恒挂 theme-light ⇒ 本档暗色值
+     实际不可达，改这里的取值不会反映到界面，但亮色档的同名 token 会。
+     实底按钮以 --accent-text 深紫黑 (#171832) 作前景，WCAG 现算 5.81:1（过 AA、不到 AAA；
+     原注释写「≈7:1」是腐值，别再拿它当 AAA 依据）；
      --accent-soft 为选中态/高亮底色，--accent-glow 为主按钮/进度条辉光。
      运行时自定义强调色由 pathbinding.js applyAccent() 按相对亮度自动选定前景。 */
   --accent: #8B8EE0;
@@ -149,15 +151,21 @@
   /* 2026-09-28 八轮拍板：默认系统字体（MiSans 异步加载导致卡片高度漂移/看板重叠）；
      MiSans 保留 @font-face 内嵌，仅作为设置页字体选项，由 fontmanager 按需切回 */
   --app-font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', '微软雅黑', system-ui, sans-serif;
-  /* 审查 v2-L6：等宽栈此前只有 var(--font-mono, …) 的引用、全仓无定义 ⇒ 两处恒吃各自的 fallback
-     （一处 Consolas 优先、一处 Cascadia 优先，同一诉求两套口径）。补定义并取仓库里出现最多的那一套
-     （Consolas → Cascadia → Courier New → monospace），两处引用随即去掉 fallback。 */
+  /* 审查 v2-L6 + F1a-M06：等宽栈此前只有 var(--font-mono, …) 的引用、全仓无定义 ⇒ 各处恒吃
+     各自的 fallback（一处 Consolas 优先、一处 Cascadia 优先，同一诉求两套口径）。补定义并取
+     仓库里出现最多的那一套（Consolas → Cascadia → Courier New → monospace）。
+     约束：本文件内所有等宽位一律 `var(--font-mono)` **且不带 fallback**——带 fallback 等于
+     把第二套口径原样留在引用点，改 token 不会传下去（`main-pages.css` 已同样收敛，现算零残留）。 */
   --font-mono: 'Consolas', 'Cascadia Code', 'Courier New', monospace;
   --font-size-scale: 1;
   --font-weight-scale: 1;
 
   /* 字号 token：五级字阶（随 --font-size-scale 联动全局字号缩放）
-     page-title=页面大标题 / section=区块标题 / body=正文 / secondary=辅助正文 / meta=次要信息 */
+     page-title=页面大标题 / section=区块标题 / body=正文 / secondary=辅助正文 / meta=次要信息
+     约束（审查 F1a-M03）：本文件的 font-size 只许两种写法——`var(--fs-*)`，或档位表里没有的
+     尺寸走 `calc(Npx * var(--font-size-scale, 1))`。写死 px 会让「设置 → 字号缩放」对那一行
+     静默失效（曾覆盖到高危确认框正文与红色警示块）。唯一豁免：开屏 `.splash-*` 的 clamp/rem
+     视口自适应字号（刻意不跟缩放走）。 */
   --fs-page-title: calc(28px * var(--font-size-scale, 1));
   --fs-section: calc(16px * var(--font-size-scale, 1));
   --fs-body: calc(14px * var(--font-size-scale, 1));
@@ -188,8 +196,11 @@
   /* L4（2026-09-19）：原 #767191 于 --bg-app #F6F4FB 上仅 4.24:1，低于 WCAG AA 正文 4.5:1；
      同色相加深至 #6B657F 达 5.08:1，仍与 --fg-secondary 保持三级层次，不改任何引用点。 */
   --fg-tertiary: #6B657F;
-  /* NEW-5（L3 2026-10-01）：0.34 仅 2.01:1，提至 0.62 → ≈4.2:1（双主题独立值；
-     亮底上 alpha 需比暗侧更高才能过 3:1，且仍弱于 --fg-tertiary 保住灰态层次）。 */
+  /* NEW-5（L3 2026-10-01）：0.34 仅 2.01:1，提至 0.62 → 对 --bg-app #F6F4FB 现算 4.20:1。
+     这条**没过正文 AA 4.5**，靠的是 WCAG 1.4.3 对「非活动组件」的豁免——豁免只在消费点
+     真的都是禁用态时才成立；现在唯一消费点是 `.fm-row option:disabled`（下拉里的禁用项），
+     成立。哪天拿它渲染正常可读文本就是破 AA，不是「层次更弱」，改引用前先补对比度。
+     亮底要压过暗侧同 alpha 才勉强进 3:1，且仍弱于 --fg-tertiary 保住灰态层次。 */
   --fg-disabled: rgba(41, 37, 54, 0.62);
 
   --border-default: rgba(41, 37, 54, 0.09);
@@ -833,11 +844,6 @@ body {
   display: block;
 }
 
-@keyframes pageFadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
 .page-title {
   font-size: calc(28px * var(--font-size-scale, 1));
   font-weight: calc(600 * var(--font-weight-scale, 1));
@@ -852,16 +858,16 @@ body {
   flex-wrap: wrap;
 }
 
-/* 按钮 */
+/* 按钮：本段只给外观与内布局；min-height / border-radius / transition 的**单点定义**
+   在下方「Trim 2.0 final visual layer」段的 `.btn`。两处同特异度 (0,1,0) 时净结果取决于
+   书写顺序，而 `.btn-small` 等变体夹在两段之间，把几何上移到这里会翻转它们的结论。 */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 32px;
   padding: 0 14px;
   border: 1px solid transparent;
-  border-radius: var(--radius-small);
   /* 口径 v2·R1（《按钮底与玻璃兜底统一口径 v2》）：操作面的常态底必须**自身可读**，
      不得依赖 liquid-glass.js 有没有轮到它进 28 个折射名额。--bg-card 的 alpha 是 0
      （语义是「容器透出原生材质」），拿它当独立按钮底就是用户报的「同一按钮在不同页面
@@ -874,15 +880,6 @@ body {
   font-size: var(--fs-secondary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   cursor: pointer;
-  /* 批次②判定：本条**保留** transition: all，不动它。理由：命中 .btn 的规则块很多
-     （.btn-primary / .btn-accent / .btn-secondary / .btn-opt-* 各变体的 background、
-     border-color、color；.lg-elastic 靠 --lg-tx/--lg-sx/--lg-press 改 transform；
-     高对比度段改 border-width；窄窗段改 flex；通用 :focus-visible 改 outline / outline-offset；
-     :disabled 改 opacity；按钮/滑块/聚光三层还各有 background-image 与 opacity）——条数不写死，
-     现算看 `node tools/check-contrast.mjs` 的 F1 逐类点名。白名单要么漏列某个既有过渡
-     （观感退化成瞬跳），要么把 backdrop-filter 收进来（等于没改）。
-     要摘掉折射值那 160ms 的离散过渡，需要单独裁定，不在本批保守范围内。 */
-  transition: all var(--duration-fast) var(--ease-standard);
   white-space: nowrap;
   user-select: none;
 }
@@ -958,8 +955,11 @@ body {
   border-color: color-mix(in srgb, var(--danger) 82%, var(--danger-hover-tint));
 }
 
-/* D10：中风险确认按钮（黄色）。亮色系 --warning 为浅黄配深色前景（--accent-text），
-   暗色系 --warning 为深黄配白前景，两者的 --accent-text 即对应前景色，对比均达标。 */
+/* D10：中风险确认按钮（黄色），前景一律吃 --accent-text——两主题把它各自定义成
+   对应的反差前景，所以这里不需要再分主题覆写。方向（现算 WCAG，勿凭印象改写）：
+   暗色系 --warning 是**亮琥珀 #F5A524** → --accent-text 深墨 #171832 = 8.48:1；
+   亮色系 --warning 是**深褐黄 #875708** → --accent-text 白 #FFFFFF = 6.18:1；
+   hover 各向黑混 18% 后仍 5.74 / 8.14。应用恒挂 theme-light，实际走亮色那一组。 */
 .btn-warning {
   background: var(--warning);
   color: var(--accent-text);
@@ -973,7 +973,7 @@ body {
 /* 确认弹窗正文与红色警示块（confirm dangerHint / warningHint）
    dangerHint/warningHint 为结构化纯文本，由 modal.confirm 模板统一转义渲染 */
 .confirm-message {
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   line-height: 1.7;
   color: var(--fg-secondary);
 }
@@ -983,7 +983,7 @@ body {
   justify-content: space-between;
   gap: 12px;
   padding: 9px 12px;
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   border-bottom: 1px solid var(--border-subtle);
 }
 .lock-app-row:last-child { border-bottom: none; }
@@ -997,7 +997,7 @@ body {
   border-radius: var(--radius-btn);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   font-weight: 600;
   line-height: 1.6;
 }
@@ -1016,7 +1016,7 @@ body {
   border-radius: var(--radius-btn);
   background: var(--warning-soft);
   color: var(--warning);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   font-weight: 600;
   line-height: 1.6;
 }
@@ -1313,7 +1313,7 @@ body {
   min-height: 18px;
 }
 .category-risk.low { background: rgba(var(--success-rgb), 0.15); color: var(--success); }
-.category-risk.medium { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+.category-risk.medium { background: rgba(var(--warning-rgb), 0.15); color: var(--warning); }
 .category-risk.high { background: rgba(var(--danger-rgb), 0.15); color: var(--danger); }
 
 /* 筛选标签 */
@@ -1626,10 +1626,6 @@ body.lg-reduce-motion .lg-thumb {
   font-size: var(--fs-body);
   font-weight: calc(600 * var(--font-weight-scale, 1));
 }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
 
 /* 日志查看器 */
 .log-viewer {
@@ -1637,7 +1633,7 @@ body.lg-reduce-motion .lg-thumb {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
   padding: 12px 16px;
-  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-meta);
   line-height: 1.6;
   color: var(--fg-secondary); /* 审查 C2-2：原 #D4D4D4 绕过 token，收敛到既有 fg 档 */
@@ -1913,7 +1909,7 @@ select.field-input { cursor: pointer; appearance: auto; }
 .info-row span:last-child {
   font-weight: calc(500 * var(--font-weight-scale, 1));
   font-variant-numeric: tabular-nums;
-  font-family: "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-meta);
 }
 
@@ -1976,17 +1972,13 @@ select.field-input { cursor: pointer; appearance: auto; }
   padding: 9px 12px;
   border: 1px solid var(--warning);
   border-radius: var(--radius-small);
-  background: rgba(245, 158, 11, 0.12);
+  background: rgba(var(--warning-rgb), 0.12);
   color: var(--warning);
   font-size: var(--fs-meta);
   line-height: 1.5;
   animation: toastSlideIn var(--duration-base) var(--ease-emphasized);
 }
 
-@keyframes optCardIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 .usage-header-meta {
   margin-top: 6px;
   display: flex;
@@ -2029,9 +2021,6 @@ select.field-input { cursor: pointer; appearance: auto; }
 /* 焦点圈必须画在**行**上而不是 .checkbox 上：自绘勾选框只有 16px 宽，
    焦点圈会被相邻行盖掉，键盘用户看不出焦点落在哪一行（AGENTS §2 键盘可达）。 */
 .pick-row:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
-.opt-choice-extra { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 2px 12px 0 26px; }
-.opt-choice-extra[hidden] { display: none; }
-.opt-choice-extra label { display: flex; align-items: center; gap: 8px; font-size: var(--fs-meta); color: var(--fg-secondary); }
 .btn-opt-ai {
   display: inline-flex;
   align-items: center;
@@ -2194,7 +2183,7 @@ body.electron-mica {
 
 body.electron-mica .titlebar {
   /* 标题栏不参与 Mica/主题渲染，需与原生按钮覆盖层保持完全同色。
-     恒浅色下会被后续 #f7f8fb 覆盖，此处仅作回退色，与 TITLEBAR_OVERLAY 同步。 */
+     恒浅色下会被 `body.theme-light .titlebar` 的 var(--bg-app) 覆写，此处仅作回退色。 */
   background: #f7f8fb;
 }
 
@@ -2537,7 +2526,7 @@ input[type="radio"]:focus-visible {
 
 .guide-content strong { color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
 .guide-content code {
-  font-family: "Consolas", "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: calc(11px * var(--font-size-scale, 1));
   padding: 1px 5px;
   border-radius: var(--radius-badge);
@@ -2645,7 +2634,7 @@ input[type="radio"]:focus-visible {
 }
 
 .ctx-detail-value.mono {
-  font-family: "Consolas", "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: calc(11.5px * var(--font-size-scale, 1));
 }
 
@@ -2874,7 +2863,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   min-width: 0;
 }
 .xtable-cell-path {
-  font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-meta);
   color: var(--fg-tertiary);
 }
@@ -3169,7 +3158,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 .markdown-body li { margin: 4px 0; }
 .markdown-body strong { color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
 .markdown-body code {
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-meta);
   /* 审查 v2-L6：原 var(--bg-code, …) 的 --bg-code 全仓无定义 ⇒ 恒吃这条 fallback，直接落值 */
   background: color-mix(in srgb, var(--accent) 5%, transparent);
@@ -4037,7 +4026,7 @@ body.mw-window {
   border: 1px solid var(--border-default);
   border-left: 3px solid var(--warning);
   border-radius: var(--radius-medium);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   color: var(--fg-primary);
 }
 .ctx-apply-bar[hidden] { display: none; }
@@ -4045,14 +4034,14 @@ body.mw-window {
    不给这条规则就藏不掉归零态的「重启资源管理器」按钮（2026-10-09 用户实测生效条改版） */
 .ctx-apply-bar .btn[hidden] { display: none; }
 .ctx-apply-bar > svg { flex: 0 0 auto; color: var(--warning); }
-.ctx-apply-bar .btn { flex: 0 0 auto; padding: 6px 12px; font-size: 12px; }
+.ctx-apply-bar .btn { flex: 0 0 auto; padding: 6px 12px; font-size: var(--fs-meta); }
 .ctx-apply-dismiss {
   flex: 0 0 auto;
   padding: 4px 6px;
   background: none;
   border: 0;
   border-radius: var(--radius-small);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-tertiary);
   cursor: pointer;
 }
@@ -4072,13 +4061,13 @@ body.mw-window {
   border-top: 3px solid var(--c, var(--accent));
   border-radius: var(--radius-medium);
   box-shadow: var(--shadow-card);
-  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+  transition: box-shadow var(--duration-slow) var(--ease-standard), border-color var(--duration-slow) var(--ease-standard);
 }
 .opt-col:hover,
 .ctx-col:hover {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
 }
-.ctx-col-icon { font-size: 14px; }
+.ctx-col-icon { font-size: var(--fs-body); }
 /* 按软件分组后组头放的是该软件的真实图标（提取自它的 DLL/EXE），
    与条目名并排；提取不到才退占位图。 */
 img.ctx-col-icon {
@@ -4091,7 +4080,7 @@ img.ctx-col-icon {
 .ctx-col-count {
   margin-left: auto;
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: calc(11px * var(--font-size-scale, 1));
   color: var(--fg-tertiary);
   background: var(--bg-card-hover);
   border: 1px solid var(--border-subtle);
@@ -4103,7 +4092,7 @@ img.ctx-col-icon {
 .opt-col-more {
   margin-left: auto;
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: calc(11px * var(--font-size-scale, 1));
   font-weight: 600;
   color: var(--accent);
   background: transparent;
@@ -4136,7 +4125,7 @@ img.ctx-col-icon {
   gap: 10px;
   padding: 7px 8px;
   border-radius: var(--radius-small);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   cursor: pointer;
 }
 .nara-checkrow:hover,
@@ -4152,7 +4141,7 @@ img.ctx-col-icon {
 }
 .peri-section-title {
   display: flex; align-items: center; gap: 8px; margin: 0 0 3px;
-  font-size: 15px; font-weight: 700; color: var(--fg-primary);
+  font-size: calc(15px * var(--font-size-scale, 1)); font-weight: 700; color: var(--fg-primary);
 }
 .peri-section-title svg { color: var(--accent); flex: 0 0 auto; }
 .peri-card {
@@ -4180,7 +4169,7 @@ img.ctx-col-icon {
 .peri-explain-btn {
   display: inline-flex; align-items: center; gap: 4px;
   margin-left: 4px; padding: 1px 9px;
-  font-size: 11px; font-weight: 600; line-height: 1.6;
+  font-size: calc(11px * var(--font-size-scale, 1)); font-weight: 600; line-height: 1.6;
   /* 审查 M-13（2026-10-03 L4）：--accent-text 是 accent 实底专用墨色，配 -soft 染底
      合成后暗 1.13/亮 1.17:1 两主题不可见；--accent 在同底上暗 5.14/亮 4.60:1 达标 */
   color: var(--accent);
@@ -4245,7 +4234,7 @@ img.ctx-col-icon {
 .ctx-row-index {
   flex: 0 0 20px;
   width: 20px;
-  font-size: 11px;
+  font-size: calc(11px * var(--font-size-scale, 1));
   line-height: 1.6;
   color: var(--fg-tertiary);
   text-align: right;
@@ -4256,7 +4245,7 @@ img.ctx-col-icon {
 .opt-row-name {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   line-height: 1.55;
   color: var(--fg-primary);
   word-break: normal;
@@ -4271,7 +4260,7 @@ img.ctx-col-icon {
 }
 .opt-col-selectall,
 .ctx-col-selectall {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   line-height: 1.6;
   padding: 3px 12px;
   border-radius: var(--radius-btn);
@@ -4283,7 +4272,7 @@ img.ctx-col-icon {
     linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   color: var(--fg-secondary);
   cursor: pointer;
-  transition: color 0.3s ease, border-color 0.3s ease, background-color 0.3s ease;
+  transition: color var(--duration-slow) var(--ease-standard), border-color var(--duration-slow) var(--ease-standard), background-color var(--duration-slow) var(--ease-standard);
 }
 .opt-col-selectall:hover,
 .ctx-col-selectall:hover {
@@ -4302,7 +4291,7 @@ img.ctx-col-icon {
   height: 22px;
   border-radius: var(--radius-small);
   color: var(--fg-tertiary);
-  transition: background-color 0.3s ease, color 0.3s ease;
+  transition: background-color var(--duration-slow) var(--ease-standard), color var(--duration-slow) var(--ease-standard);
 }
 .ctx-kanban-row:hover .ctx-row-detail {
   color: var(--fg-secondary);
@@ -4334,7 +4323,7 @@ img.ctx-col-icon {
 @keyframes rt-spin { to { transform: rotate(360deg); } }
 .rt-badge {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: calc(11px * var(--font-size-scale, 1));
   line-height: 1.6;
   padding: 0 9px;
   border-radius: 999px; /* 状态胶囊例外（AGENTS §5 允许） */
@@ -4364,13 +4353,13 @@ img.ctx-col-icon {
   padding: 14px 16px;
 }
 .appearance-card-head h4 {
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--font-size-scale, 1));
   font-weight: 700;
   color: var(--fg-primary);
   margin: 0 0 3px;
 }
 .appearance-card-head p {
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--font-size-scale, 1));
   color: var(--fg-tertiary);
   margin: 0 0 10px;
 }
@@ -4412,7 +4401,7 @@ img.ctx-col-icon {
   align-items: center;
   gap: 8px;
   flex: 1;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-secondary);
 }
 /* 批次：雾化度/模糊度滑块行修正 —— 滑块条改短（用户要求），标签与百分比值
@@ -4431,7 +4420,7 @@ img.ctx-col-icon {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-secondary);
   cursor: pointer;
   border-top: 1px solid var(--border-subtle);
@@ -4443,7 +4432,7 @@ img.ctx-col-icon {
   background: transparent;
   color: var(--fg-tertiary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   padding: 2px 5px;
   border-radius: var(--radius-badge);
 }
@@ -4478,7 +4467,7 @@ body.bg-image-on .app-wallpaper::after {
 /* 设置-显示-背景图片：存放地址链接（点击跳转本地目录） */
 .bg-dir-link {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--accent);
   background: none;
   border: none;
@@ -4498,7 +4487,7 @@ body.bg-image-on .app-wallpaper::after {
   display: inline-block;
   margin-left: 6px;
   padding: 1px 6px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--font-size-scale, 1));
   border-radius: var(--radius-badge);
   background: rgba(var(--warning-rgb), 0.16);
   color: var(--warning);
@@ -4511,13 +4500,13 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   align-items: center;
   gap: 10px;
   padding: 4px 10px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--font-size-scale, 1));
   border-top: 1px solid var(--border-subtle);
 }
 .detail-file-row:first-child { border-top: none; }
 .detail-file-row:hover { background: var(--bg-hover); }
 
-/* 设置页布局回归基础双列 Grid（.settings-grid，1624 行）：
+/* 设置页布局回归基础双列 Grid（`main-pages.css` 的 `.settings-grid` 基类）：
    曾经的「贴右对齐 + 固定 900px」覆盖导致最大化时左侧大面积留白（布局移位），
    实测为错位根因，已移除 —— 各区块宽度由 Grid 均分自适应，任意分辨率下稳定。 */
 
@@ -4541,7 +4530,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
     linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
     linear-gradient(165deg, var(--lg-tint-secondary), var(--lg-tint-tertiary));
   cursor: pointer;
-  transition: border-color 0.3s ease, background-color 0.3s ease;
+  transition: border-color var(--duration-slow) var(--ease-standard), background-color var(--duration-slow) var(--ease-standard);
 }
 .material-card:hover { border-color: var(--border-strong); }
 .material-card.selected {
@@ -4595,7 +4584,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   border-radius: var(--radius-small);
   background: var(--bg-input);
   color: var(--fg-primary);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   font-family: var(--app-font-family);
   cursor: pointer;
   outline: none;
@@ -4624,7 +4613,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   color: var(--fg-secondary);
   /* 口径 v2·A 类（与 .filter-tab 的落法刻意不同，理由写在这儿）：.maint-tabs 是无 padding、
      无描边、宽度铺满一行的换行 pill 列表，floor 打在轨道上会画出一整块白底；
@@ -4646,7 +4635,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
     color-mix(in srgb, var(--accent) 5%, transparent);
 }
 .maint-tab-count {
-  font-size: 11px;
+  font-size: calc(11px * var(--font-size-scale, 1));
   line-height: 1.5;
   padding: 0 7px;
   border-radius: var(--radius-btn);
@@ -4691,7 +4680,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
 /* v3.2.0：系统维护卡片主体可点击（弹出本项详解弹窗），指针暗示 */
 .maint-card { cursor: pointer; }
 .maint-detail-title {
-  font-size: 12px; font-weight: calc(600 * var(--font-weight-scale, 1));
+  font-size: var(--fs-meta); font-weight: calc(600 * var(--font-weight-scale, 1));
   color: var(--fg-secondary); margin-bottom: 4px;
   display: flex; align-items: center; gap: 6px;
 }
@@ -4720,7 +4709,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   font-weight: 600;
   color: var(--fg-primary);
   cursor: pointer;
@@ -4788,10 +4777,6 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
 
 /* Appearance controls: keep the selected preset visible behind a readable
    surface, and let the glass skin provide the intended blur/highlight layer. */
-/* v3.0：预设壁纸激活时内容画布必须全透明——壁纸是用户主动设置的背景，
-   画布再压灰底等于遮盖背景（0.86/0.70 两个历史档位均已删除）；
-   文字可读性由各白容器自身的 46% 白玻璃 + 磨砂承担（与导入图片模式同规则） */
-body.theme-light[data-preset-bg] .main-content { background: transparent; }
 body[data-preset-bg] .app-wallpaper::before { display: block !important; }
 /* （玻璃皮肤磨砂层已合并至 `body[data-skin="glass"]` 主块，此处不再重复定义） */
 
@@ -4819,13 +4804,21 @@ body.theme-light .nav-subdot { background: var(--border-strong); }
 body.theme-light .nav-subdot::after { background: var(--fg-tertiary); }
 body.theme-light .nav-section-title { color: var(--fg-tertiary); }
 
+/* 审查 F1a-M04：`.btn` 几何与过渡的单点定义（上方按钮段只给外观与内布局）。
+   曲线与时长一律走 token（原字面 `180ms ease` 把设计系统的 --ease-standard 换成了浏览器
+   默认 `ease`，属离表退化）。过渡属性仍是白名单而非 `all`：批次②裁定「要摘掉折射值那
+   160ms 的离散过渡需要单独裁定」，白名单漏列的属性（outline / opacity / background-image）
+   会瞬跳——那是既有待裁定项，不在本批扩大范围。 */
 .btn {
   position: relative;
   overflow: hidden;
   isolation: isolate;
   min-height: 36px;
   border-radius: var(--radius-btn);
-  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
 }
 /* 波纹层：必须脱离文档流，否则会成为 .btn 弹性布局的实端子项，
    导致点击瞬间整组按钮重排（见 按钮修复.md）。用 .btn > .btn-ripple
@@ -4857,12 +4850,13 @@ body.theme-light .nav-section-title { color: var(--fg-tertiary); }
 .btn-accent {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
-/* 审查 v3-L3：本组字面值（#171b24/#202631/#a8afbd/#1c1e24/#f0f1f4/#4b505b）映射到
-   既有 token，向雾屿 V1 对齐（细微色差属有意收敛，主题调整不再漏同步）
+/* 审查 C2-1：本组原是「碳墨浅色」旧调色板的字面值覆写（#171b24/#202631/#a8afbd 等），
+   已映射到既有 token。审查 F1a-M05：`.btn-secondary` 的**描边**在这里又写了两份同特异度
+   覆写（暗色档字面 rgba(255,255,255,0.11/0.19) 与亮色档 0.14 都是自造 alpha）——0.19 落在
+   恒浅色的白玻璃按钮上几乎不可见，hover 反馈等于没有。三份覆写全部删掉，层级差归档到
+   上方 `.btn-secondary` 一处（常态 --border-default / hover --border-strong）。
    口径 v2·M2：这两条原有的**底色**覆写（--surface-solid / --bg-hover）已删除——
-   常态底由 `.btn` 单点供给，本组只留暗色下的描边浓度。 */
-.btn-secondary { border-color: rgba(255, 255, 255, 0.11); }
-.btn-secondary:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.19); }
+   常态底由 `.btn` 单点供给，本组不再覆写按钮的底色与描边。 */
 .btn:focus-visible,
 .nav-item:focus-visible,
 .nav-subitem:focus-visible,
@@ -4893,7 +4887,7 @@ body.theme-light .nav-section-title { color: var(--fg-tertiary); }
 }
 
 /* Light mode controls and content keep WCAG-friendly contrast. */
-body.theme-light .btn-secondary { border-color: rgba(20, 24, 40, 0.14); color: var(--fg-primary); }
+body.theme-light .btn-secondary { color: var(--fg-primary); }
 /* 口径 v2·M8（旧注释写的「无材质时 token 本身就是不透明色」自 v3.0 起已不成立，换成
    「操作面与容器分账」）：--bg-card 的 alpha 恒为 0，它**只对容器成立**——容器身后可见的是
    原生材质或窗口底，透过去是设计意图。操作面（按钮 / 分段标签 / 可选卡片）不吃这条口径，
@@ -4974,7 +4968,7 @@ body.bg-image-on .main-content {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-btn);
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   color: var(--fg-primary, #1a2530);
   outline: none;
   min-width: 200px;
@@ -4995,7 +4989,7 @@ body.bg-image-on .main-content {
   align-items: center;
   gap: 5px;
   padding: 4px 12px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-secondary);
   /* 口径 v2·A 类：磁盘芯片是工具条上的独立胶囊，原先常态吃 --bg-card-hover（0.48 白）、
      选中态吃 --accent-light（0.06），两档浓度都来自「容器阶梯」而不是操作面护栏 */
@@ -5022,14 +5016,14 @@ body.bg-image-on .main-content {
   padding: 40px 16px;
   text-align: center;
   color: var(--fg-tertiary);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
 }
 .finder-group-header {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   font-weight: 600;
   color: var(--fg-secondary, #5a6b7c);
   border-top: 1px solid var(--border-subtle); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.06) → 取既有同档 token */
@@ -5042,7 +5036,7 @@ body.bg-image-on .main-content {
 .finder-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--fs-secondary);
 }
 .finder-table thead th {
   text-align: left;
@@ -5137,12 +5131,12 @@ body.bg-image-on .main-content {
 .empty-pane-chevron {
   flex: 0 0 auto;
   color: var(--fg-tertiary);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   transition: transform var(--duration-fast) var(--ease-standard);
 }
 .empty-pane.collapsed .empty-pane-chevron { transform: rotate(-90deg); }
 .empty-pane-title {
-  font-size: 14px;
+  font-size: var(--fs-body);
   font-weight: 700;
   color: var(--fg-primary);
 }
@@ -5200,14 +5194,15 @@ body.bg-image-on .main-content {
      保证 ≥0.45 alpha，任意壁纸上正文（--fg-primary 深色）维持 WCAG AA 对比 */
   --lg-glass-floor: rgba(255, 255, 255, 0.45);
   --lg-glass-fg: var(--fg-primary);
-}
-.theme-light {
+  /* 审查 F1a-M02：描边/高光/质感四档原先**只在 .theme-light 定义**，而消费点一条 fallback
+     都没写——上面那段刚把 tint/floor 上移 :root 的理由对这四档同样成立（子窗首帧与
+     window-material.js 有先后，class 没挂上时 var() 取空值）。`backdrop-filter: blur(..)
+     saturate(var(--glass-satur))` 里 saturate() 拿空值会让**整条 backdrop-filter 作废、
+     连 blur 一起丢**，不是「少一层饱和」。故一并上移，.theme-light 不再重复定义。 */
   --lg-glass-border: rgba(255, 255, 255, 0.75);
   --lg-glass-highlight: rgba(255, 255, 255, 0.85);
-  --lg-glass-fg: var(--fg-primary);
   /* v2.8.0：玻璃质感参数化（原 5 处饱和度/亮度硬编码收敛至此；
      liquid-glass.js 的 SVG 滤镜链与内联 backdrop 同读这两个变量）
-     v3.0：--glass-blur 与全部派生档位已上移 :root 真源（浅暗共用），此处不再重复定义
      v3.0 修复批次：satur 1.65→1.25 / bright 1.04→1.02——Apple 玻璃增艳温和
      （1.1–1.3 区间），1.65 会把彩色 tint 的彩度进一步放大，与消色方向相悖 */
   --glass-satur: 1.25;
@@ -5620,7 +5615,7 @@ body[data-preset-bg] .layout {
   border-radius: var(--radius-badge);
   background: var(--bg-card-hover);
   color: var(--fg-primary);
-  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: calc(12.5px * var(--font-size-scale, 1));
 }
 .upd-notes pre {
@@ -5662,6 +5657,12 @@ body[data-preset-bg] .layout {
   --splash-border: #E0DBF3;
   --splash-muted: #6B6787;
   --splash-ink: #4F4C66;
+  /* 审查 F1a-L06：本节自述「原离表 hex 收敛为本节局部调色板，单一出处」，但退役靛蓝
+     rgba(79,70,229) 仍字面残在两处阴影、#8B5CF6 残在焦点环 —— 调色板漏了三处。补齐 rgb
+     档与焦点档并把它们并回 --splash-brand 同色（品牌色对齐雾屿 V1 时只改了底色，
+     阴影与焦点环没跟着走，属同一处改一半）。 */
+  --splash-brand-rgb: 106, 89, 201;
+  --splash-focus: var(--splash-brand);
   position: fixed;
   inset: 0;
   z-index: 9999;
@@ -5687,7 +5688,7 @@ body[data-preset-bg] .layout {
   background: radial-gradient(ellipse 85% 75% at 50% 46%, rgba(255, 255, 255, .38), rgba(255, 255, 255, 0) 72%);
 }
 .splash-badge {
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   letter-spacing: .08em;
   color: var(--splash-muted);
   /* 刻意设计：启动页独立覆盖层（固定浅色配色），白色徽章底不随玻璃皮肤联动 */
@@ -5695,7 +5696,7 @@ body[data-preset-bg] .layout {
   border: 1px solid var(--splash-border);
   padding: 7px 18px;
   border-radius: 999px;
-  box-shadow: 0 4px 14px -6px rgba(79, 70, 229, .18);
+  box-shadow: 0 4px 14px -6px rgba(var(--splash-brand-rgb), .18);
   /* 刻意设计：启动页是独立覆盖层（固定浅色配色），不随玻璃皮肤/档位联动 */
   animation: splashFadeIn .6s ease-out both;
 }
@@ -5758,11 +5759,11 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
   border-radius: 999px; /* 胶囊按钮例外（AGENTS §5 允许） */
   cursor: pointer;
   opacity: 0;
-  box-shadow: 0 12px 26px -10px rgba(79, 70, 229, .55);
+  box-shadow: 0 12px 26px -10px rgba(var(--splash-brand-rgb), .55);
   transition: background-color .2s ease, transform .2s ease;
 }
 .splash-enter:hover { background: var(--splash-brand-hover); transform: translateY(-1px); }
-.splash-enter:focus-visible { outline: 2px solid #8B5CF6; outline-offset: 3px; }
+.splash-enter:focus-visible { outline: 2px solid var(--splash-focus); outline-offset: 3px; }
 
 /* v2.8.0 批次样式 */
 
@@ -5823,7 +5824,7 @@ body[data-preset-bg] .app-wallpaper::before {
   border-radius: 50%;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
   cursor: grab;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  transition: transform var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
 }
 .bbr-knob:hover {
   transform: translate(-50%, -50%) scale(1.15);
@@ -5882,17 +5883,17 @@ body.electron-mica:not(.win-maximized) .titlebar-title {
   margin: 8px 0 4px;
 }
 .rs-actionbar .toggle-switch { margin-left: auto; }
-.toggle-label { color: var(--fg-secondary); font-size: 12px; }
+.toggle-label { color: var(--fg-secondary); font-size: var(--fs-meta); }
 .rs-mini-btn {
   padding: 2px 8px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   border-radius: var(--radius-btn);
   margin-left: 8px;
 }
 .rs-detail { display: flex; flex-direction: column; gap: 14px; }
 .rs-detail-block { display: flex; flex-direction: column; gap: 6px; }
 .rs-detail-h {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   letter-spacing: .02em;
   color: var(--fg-tertiary);
 }
@@ -5902,14 +5903,14 @@ body.electron-mica:not(.win-maximized) .titlebar-title {
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   color: var(--fg-primary);
-  font-size: 13px;
+  font-size: var(--fs-secondary);
   line-height: 1.5;
 }
 .rs-contrib {
   display: flex;
   gap: 8px;
   align-items: baseline;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--fg-secondary);
 }
 .rs-contrib-code {
@@ -5918,8 +5919,8 @@ body.electron-mica:not(.win-maximized) .titlebar-title {
   border-radius: var(--radius-badge);
   background: var(--accent-soft);
   color: var(--accent);
-  font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--font-size-scale, 1));
 }
 
 /* 全窗 prefers-reduced-motion 归零段（五窗都加载本文件）
@@ -5932,7 +5933,7 @@ body.electron-mica:not(.win-maximized) .titlebar-title {
 @media (prefers-reduced-motion: reduce) {
 
   /* 审查 v2-F11：豁免范围收窄过。原先写成 `body:not(.splash-live) *`，
-     等于开屏期间**整棵 DOM**（含主界面尚未上屏的 shimmer / pulse / spin）都恢复全速，
+     等于开屏期间**整棵 DOM**（含主界面尚未上屏的 shimmer / spin / 骨架波）都恢复全速，
      超出 AGENTS.md §2「唯一豁免：开屏 splash 的**一次性走场**」的字面范围。
      改成只豁免 `#splash` 子树：主界面动效始终受保护，开屏自身仍是豁免的。
      选择器只用简单选择器进 `:not()`（不依赖 Selectors L4 的复杂选择器），
@@ -5949,7 +5950,7 @@ body.electron-mica:not(.win-maximized) .titlebar-title {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
     /* v3.5.1 动效审查 H1：原先只归零 duration，未归零 iteration-count，
-       于是所有 infinite 关键帧（shimmer / pulse / spin / 骨架波 / 旋转扫描）
+       于是所有 infinite 关键帧（shimmer / spin / 骨架波 / 旋转扫描）
        变成「0.01ms 时长 × 无限次」的极高速重启，为想少看动画的用户点满 CPU。
        归零迭代次数后这些动画一次性跑完即停。 */
     animation-iteration-count: 1 !important;

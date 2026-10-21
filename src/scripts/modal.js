@@ -50,13 +50,18 @@
   }
 
   // F3-M06：modal:* 在契约层按「动态派发」放行 —— invoke 的 reject 不进同步 catch，每次弹窗开/关各挂一条未捕获
-  // Promise；档位一收紧或通道改名，症状是按弹窗次数刷错误日志而非当场暴露。持有返回值显式吞掉（不阻塞弹窗的语义
-  // 不变）并计数留痕，供排查「上报从何时开始失败」。
+  // Promise；档位一收紧或通道改名，症状是按弹窗次数刷错误日志而非当场暴露。持有返回值显式吞掉（不阻塞弹窗），
+  // 计数只有**读得到**才算留痕：首次失败发一条告警，之后只累加、不刷屏。
   var _reportFailures = 0;
   function report(method, info) {
     try {
       var p = window.api?.modal?.[method]?.(info || {});
-      if (p && typeof p.catch === 'function') p.catch(function () { _reportFailures++; });
+      if (p && typeof p.catch === 'function') p.catch(function () {
+        if (_reportFailures++ !== 0) return; // 只报首次，之后只累加
+        var msg = '弹窗开合上报失败（modal:* 通道不可用，后续同类失败只计数）';
+        // 子窗不加载 logger.js，退到 console（ds.js 的全局未捕获网仍在）
+        if (window.logger?.write) window.logger.write('warn', msg); else console.warn('[Trim] ' + msg);
+      });
     } catch (e) { /* 同步失败同样不阻塞弹窗 */ }
   }
 

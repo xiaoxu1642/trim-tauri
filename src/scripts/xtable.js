@@ -255,7 +255,12 @@
       // F5-M05：虚拟滚动的行在滚动中整窗重渲染，bindHeader 时补的 role 覆盖不到新行；
       // 仅当宿主已有 role=table（ARIA 形状成立，由 bindHeader 设置）时才补，避免
       // 在没有 table 祖先的表格（如进程管理页的自绘表头）里制造孤儿 row。
-      if (container.closest('[role="table"]')) applyRowRoles(windowEl);
+      // rowgroup 挂在行的直接父级（窗口层）上，让 row→rowgroup→table 的必需拥有关系
+      // 显式成立，不靠浏览器把中间的 generic div 折叠掉这种实现细节。
+      if (container.closest('[role="table"]')) {
+        if (windowEl.getAttribute('role') !== 'rowgroup') windowEl.setAttribute('role', 'rowgroup');
+        applyRowRoles(windowEl);
+      }
     }
 
     const scheduleRender = () => {

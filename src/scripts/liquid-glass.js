@@ -1095,6 +1095,9 @@
 
   // 事件接线
   let bodyMo = null;
+  // F5-L12：onXxx 同步返回 unsubscribe（tauri-api.js 的事件契约），旧实现丢弃返回值 ⇒
+  // 订阅永不退订，与同仓 updater-ui.js 存下来在 beforeunload 解绑的口径分叉。
+  let offEnvState = null;
 
   // LG-5（2026-09-15）：reduced-motion 实时求值——原实现 init 时读一次固化，
   // 运行中切换系统「减少动态效果」偏好永不生效（与同库 spotlight v4-M1 修复口径一致，
@@ -1160,12 +1163,17 @@
       }).catch(() => {});
     }
     if (window.api?.appearance?.onEnvState) {
-      window.api.appearance.onEnvState((env) => {
+      offEnvState = window.api.appearance.onEnvState((env) => {
         if (!env) return;
         envBattery = !!env.onBattery;
         if (typeof env.transparencyOff === 'boolean') envNoTransparency = env.transparencyOff;
         applyEnv();
       });
+      // 每文档至多一条环境订阅，随文档卸载释放（不靠 GC 兜闭包与 Tauri 侧 listener id）
+      window.addEventListener('beforeunload', function () {
+        try { if (offEnvState) offEnvState(); } catch (e) { /* 退订失败不阻塞卸载 */ }
+        offEnvState = null;
+      }, { once: true });
     }
 
     // 点击任意分段标签：栏内 active 切换完成后，滑块带弹簧动画跟随；

@@ -45,8 +45,9 @@
   }
 
   // 字节数/速率格式化 —— P3-5（F4a-M01）：并轨真源 ds.fmtBytes（AGENTS §2 红线；
-  // 展示精度统一为真源口径：B 档取整、KB 及以上 1 位小数）
-  function fmtBytes(n) { return window.ds.fmtBytes(n); }
+  // 展示精度统一为真源口径：B 档取整、KB 及以上 1 位小数）。顶部约束 3 要求「依赖件缺失即优雅
+  // 降级」，ds 侧同守这一条：取不到真源就**不显示数值**，绝不在这里写第二份格式化实现。
+  function fmtBytes(n) { return window.ds ? window.ds.fmtBytes(n) : ''; }
 
   // ---------------- 更新说明渲染 ----------------
   // 背景（v3.5.1）：releaseNotes 原样 textContent 输出，导致两类内容都不可读——
@@ -211,11 +212,37 @@
     return frag;
   }
 
+  // 更新说明里的外链一律走受控出口（口径同 app.js 使用说明那一段）：releaseNotes 来自远端
+  // feed、不是本地可控内容，交给 webview 导航会把整个应用页面顶掉，而本仓没有 Rust 侧
+  // on_navigation 钩子兜底。委托绑在容器上（renderNotes 只清子节点、不换容器），重绘不叠监听。
+  function bindNotesLinks(container) {
+    if (container.dataset.extBound === '1') return;
+    container.dataset.extBound = '1';
+    container.addEventListener('click', async (ev) => {
+      const a = ev.target.closest ? ev.target.closest('a[href]') : null;
+      if (!a) return;
+      const url = a.getAttribute('href') || '';
+      if (!/^https?:\/\//i.test(url)) return;
+      ev.preventDefault();
+      if (typeof window.api?.app?.openExternal !== 'function') {
+        toast('warning', '本地接口未就绪，无法打开链接');
+        return;
+      }
+      try {
+        await window.api.app.openExternal(url);
+      } catch (e) {
+        // openExternal 返回 Promise，同步 try 之外也要接住 reject（同 A2-L01 口径）
+        toast('error', '打开链接失败：' + ((e && e.message) || e));
+      }
+    });
+  }
+
   // 统一入口：HTML 体走白名单重建，其余走 Markdown 子集；全空则回退兜底文案
   function renderNotes(container, raw) {
     if (!container) return;
     const text = String(raw == null ? '' : raw).trim();
     container.textContent = '';
+    bindNotesLinks(container);
     if (!text) {
       container.appendChild(document.createTextNode('本次更新包含问题修复与体验优化。'));
       container.classList.remove('upd-notes-rich');
@@ -386,9 +413,12 @@
         else if (act === 'install') run(window.api.updater.install(), '安装');
         else if (act === 'retry') run(manualCheck(), '检查更新');
         else if (act === 'releases') {
-          // v3.6.5 M1-1：手动下载出口（复用既有 open-external，主进程侧已强制 https）
-          // 审查 v2-L8：同样走 `run` 汇到 error 回流，不另开静默分支
-          run(window.api.openExternal(RELEASES_URL), '打开下载页');
+          // v3.6.5 M1-1：手动下载出口（复用既有 app:open-external，主进程侧已强制 https）
+          // 审查 v2-L8：同样走 `run` 汇到 error 回流，不另开静默分支。
+          // 命名面只能是 api.app.openExternal——api.openExternal 并不存在，直取会在下面的同步
+          // try 里抛 TypeError 被吞成「点了没反应」，而这是红档 fail-closed 后唯一的手动出口。
+          if (typeof window.api?.app?.openExternal !== 'function') toast('warning', '本地接口未就绪，打不开下载页面');
+          else run(window.api.app.openExternal(RELEASES_URL), '打开下载页');
         }
         else if (act === 'later' || act === 'close') closeModal();
       } catch (err) { /* IPC 异常走 error 状态回流，不在按钮回调里抛 */ }
@@ -455,7 +485,7 @@
         ? fmtBytes(state.transferred) + ' / ' + fmtBytes(state.total)
         : '';
     }
-    if (speedEl) speedEl.textContent = state.speed ? window.ds.fmtRate(state.speed) : '';
+    if (speedEl) speedEl.textContent = (state.speed && window.ds) ? window.ds.fmtRate(state.speed) : '';
   }
 
   // ---------------- 设置页行状态 ----------------

@@ -7,9 +7,11 @@
 
   // ---------- ⓪ localStorage 键前缀迁移（winclean-* → trim-*，2026-10-07） ----------
   // 历史前缀来自 Electron 时代的项目名，与现在身份不一致。
-  // ds.js 是全部页面（主窗 + 五子窗）最早必挂的脚本，且排在它前面的
-  // tauri-api/window-material/theme-boot/splash 都不碰这些键——迁移放这里，
-  // 保证任何业务读写发生前旧值已搬进新键。**无条件覆盖**：用户降级回旧版时旧版
+  // 成立前提**不是**「ds.js 是全窗最先执行的脚本」（主窗 theme-boot/tauri-api/splash、
+  // 三份子窗 tauri-api/window-material 都排在它之前），而是：ds.js 是 4 个窗口都挂的最早
+  // 公共件之一，且排在它前面的脚本都不读写 `winclean-` 键（现算该前缀全仓只在本文件出现；
+  // splash 用的是 `trim_splash_seen`，不在迁移命名空间内）——仍保证任何业务读写发生前旧值已搬进新键。
+  // **无条件覆盖**：用户降级回旧版时旧版
   // 仍读写 winclean- 键，再升级回来那才是最新数据，以旧键为准才不丢尾部写入。
   // 正常单次迁移后旧键已删、后续加载 olds 为空，重复执行是幂等的。
   try {
@@ -41,13 +43,13 @@
     return !!(mq && mq.matches);
   }
 
-  // 审查 v2-L7：这里原本有**第二张转义表**（`'` → `&#039;`），与文件下方 ⑩ 的唯一真源
-  // `esc()`（`'` → `&#39;`）并存 —— 字符集相同、解码结果相同，但 §2 要的是「一张表」。
-  // 两份表并存的下场是「改一处漏一处」：某次给 esc 加字符，badgeHtml/menu 不会跟着变。
-  // 现在 ds.js 内部也一律走 esc()（函数声明提升，调用点都在 IIFE 执行完之后，无前向引用问题）。
+  // 审查 v2-L7：这里曾有**第二张转义表**（`'` → `&#039;`）与下方 ⑩ 唯一真源 `esc()`（`&#39;`）并存——
+  // 解码结果相同但 §2 要「一张表」（两份表的下场是改一处漏一处）。ds.js 内部一律走 esc()：
+  // 函数声明提升，调用点都在 IIFE 执行完之后，无前向引用问题。
 
   // ---------- ① Badge ----------
   // 语义类型 → ds.css 变体类；文本经 textContent/转义，防注入。
+  // v7-F1b-L03：`dotless` 旋钮已退役——除本文件签名外零调用方，ds.css 也无对应规则。
   const BADGE_VARIANT = {
     ok: 'ok', success: 'ok',
     warn: 'warn', warning: 'warn',
@@ -55,16 +57,16 @@
     neutral: 'neutral', accent: 'accent'
   };
 
-  function badge(type, text, { dotless = false, title = '', small = false } = {}) {
+  function badge(type, text, { title = '', small = false } = {}) {
     const el = document.createElement('span');
-    el.className = 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (dotless ? ' dotless' : '') + (small ? ' sm' : '');
+    el.className = 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (small ? ' sm' : '');
     if (title) el.setAttribute('data-tip', title); // LG-3（2026-09-15）：data-tip 替代原生 title（下方委托收敛；badgeHtml 同款）
     el.textContent = text == null ? '' : String(text);
     return el;
   }
 
-  function badgeHtml(type, text, { dotless = false, title = '', small = false } = {}) {
-    const cls = 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (dotless ? ' dotless' : '') + (small ? ' sm' : '');
+  function badgeHtml(type, text, { title = '', small = false } = {}) {
+    const cls = 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (small ? ' sm' : '');
     return `<span class="${cls}"${title ? ` data-tip="${escAttr(title)}"` : ''}>${esc(text)}</span>`;
   }
 
@@ -365,9 +367,16 @@
   // ---------- ⑨ focusTrap（弹出层统一焦点管理） ----------
   // modal.js 与各自定义弹窗共用：打开时移焦点入容器（initialFocus 选择器优先），
   // Tab 循环限制在容器内，release() 时归还焦点。
+  // 事件挂 **document** 而非容器（v7-F1b-M01）：focusin/keydown 只从被聚焦元素向上冒泡，容器不是
+  // 「容器外那个元素」的祖先 ⇒ 容器级 onFocusIn 的 contains() 恒真、外逃拉回是恒不生效的 no-op，
+  // 焦点一离开容器 Tab 圈闭也同时失效。挂 document 后叠窗（详情弹窗+高危确认框）会互抢焦点，
+  // 故用活动栈只认最上层那一个。
+  const activeTraps = [];
   function focusTrap(container, { initialFocus = null, active = true } = {}) {
     if (!container) return { release() {} };
     const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const handle = { release: null };
+    const isTop = () => activeTraps[activeTraps.length - 1] === handle;
     function focusables() {
       // 弹窗链路存在 fixed 定位，offsetParent 不可靠，用 getClientRects 判可见
       return Array.from(container.querySelectorAll(
@@ -375,12 +384,14 @@
       )).filter(n => !n.disabled && n.getClientRects().length > 0);
     }
     function onFocusIn() {
+      if (!isTop()) return;
       if (!container.contains(document.activeElement)) {
         const target = focusables()[0];
         if (target) target.focus();
       }
     }
     function onKey(e) {
+      if (!isTop()) return;
       if (e.key !== 'Tab') return;
       const f = focusables();
       if (!f.length) return;
@@ -394,36 +405,39 @@
       const target = (initialFocus && container.querySelector(initialFocus)) || focusables()[0];
       if (target instanceof HTMLElement) target.focus();
     }
+    function release() {
+      document.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('keydown', onKey);
+      const at = activeTraps.indexOf(handle);
+      if (at >= 0) activeTraps.splice(at, 1);
+      // ⚠️ 焦点归还判据（审查 M-14，2026-10-03 L4 修订）：
+      //
+      // 「焦点被劫持」只应指一种状态：容器**还开着**（仍在文档里），而用户已经把
+      // 焦点点到/移到了容器之外 —— 此时抢回焦点才会制造干扰。其余形态都该归还：
+      // 容器已从文档移除（backdrop.remove() 后 activeElement 按规范回落 body）或
+      // 聚焦元素被隐藏（display:none 同样回落 body），这个 body 是**瞬时态**，不是
+      // 「用户点了别处」；activeElement 为 null 亦同理。
+      //
+      // 2026-10-03 上一版把「!cur || cur === body」也判成劫持，导致 close() 里
+      // 「先 remove 后 release」的固定顺序下归还路径整体死亡（回归，M-14）。
+      // 曾据此防的「高危确认框一闪而过」真实根因是 optimizer.js 连续弹确认框时
+      // 相邻两帧互抢焦点，已在同批「合并成一次弹框」根治（optimizer.js 确认执行
+      // 处注释）；叠层确认场景归还目标在仍开着的详情弹窗内，本来就是正确落点。
+      const cur = document.activeElement;
+      const focusStolenElsewhere = !!cur && cur !== document.body
+        && !container.contains(cur) && container.isConnected;
+      if (prevFocus && prevFocus.isConnected && !focusStolenElsewhere) {
+        prevFocus.focus();
+      }
+    }
     if (active) {
-      container.addEventListener('focusin', onFocusIn);
-      container.addEventListener('keydown', onKey);
+      activeTraps.push(handle);
+      document.addEventListener('focusin', onFocusIn);
+      document.addEventListener('keydown', onKey);
       initial();
     }
-    return {
-      release() {
-        container.removeEventListener('focusin', onFocusIn);
-        container.removeEventListener('keydown', onKey);
-        // ⚠️ 焦点归还判据（审查 M-14，2026-10-03 L4 修订）：
-        //
-        // 「焦点被劫持」只应指一种状态：容器**还开着**（仍在文档里），而用户已经把
-        // 焦点点到/移到了容器之外 —— 此时抢回焦点才会制造干扰。其余形态都该归还：
-        // 容器已从文档移除（backdrop.remove() 后 activeElement 按规范回落 body）或
-        // 聚焦元素被隐藏（display:none 同样回落 body），这个 body 是**瞬时态**，不是
-        // 「用户点了别处」；activeElement 为 null 亦同理。
-        //
-        // 2026-10-03 上一版把「!cur || cur === body」也判成劫持，导致 close() 里
-        // 「先 remove 后 release」的固定顺序下归还路径整体死亡（回归，M-14）。
-        // 曾据此防的「高危确认框一闪而过」真实根因是 optimizer.js 连续弹确认框时
-        // 相邻两帧互抢焦点，已在同批「合并成一次弹框」根治（optimizer.js 确认执行
-        // 处注释）；叠层确认场景归还目标在仍开着的详情弹窗内，本来就是正确落点。
-        const cur = document.activeElement;
-        const focusStolenElsewhere = !!cur && cur !== document.body
-          && !container.contains(cur) && container.isConnected;
-        if (prevFocus && prevFocus.isConnected && !focusStolenElsewhere) {
-          prevFocus.focus();
-        }
-      }
-    };
+    handle.release = release;
+    return handle;
   }
 
   // ---------- ⑩ 横向滚动容器滚轮映射 ----------
@@ -482,7 +496,15 @@
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let i = 0, v = n;
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return (i <= 1 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
+    const dp = i <= 1 ? 0 : 1;
+    // 档位按「原值 < 1024」决定、显示值却还要再取整/留一位小数 ⇒ 1023.5~1024 这一段会让
+    // KB 档显示成 1024（MB 档同理显示成 1024.0）；显示值越界时单位跟着进一档（v7-F1b-M04）。
+    const shown = Number(v.toFixed(dp));
+    if (shown >= 1024 && i < units.length - 1) {
+      const ni = i + 1, nv = shown / 1024, nd = ni <= 1 ? 0 : 1;
+      return (nd === 0 ? String(Math.round(nv)) : nv.toFixed(nd)) + ' ' + units[ni];
+    }
+    return (dp === 0 ? String(Math.round(v)) : v.toFixed(dp)) + ' ' + units[i];
   }
   // 速率（v6-K14）：与 fmtBytes 同真源同精度，只加 '/s'。realtime/netspeed/updater 的
   // 本地速率实现已收编到这里——此前三份各自定义小数位与单位上限，同一数字三处不同样子。
@@ -496,14 +518,14 @@
 
   // ---------- ⑪ 全局未处理 rejection 兜底（审查 v2-M22）----------
   // 为什么真源在 ds 而不是 app.js：兜底此前只在 app.js 里有一份，而 **app.js + logger.js
-  // 只有主窗 index.html 加载**——三个子窗（preview / models / processManager）
-  // 一条 rejection 监听都没有，任何漏 catch 的异步调用在子窗里既不留痕也不报错。
-  // AGENTS §2 已把「子窗必须挂 ds.css + ds.js」钉成硬线，所以 ds.js 是唯一能同时到达
-  // 五个窗口的落点；再往各窗脚本里各写一份，等于回到「漏窗」的原点。
+  // 只有主窗 index.html 加载**——三份子窗（models / processManager / residue）一条 rejection
+  // 监听都没有，漏 catch 的异步调用在子窗里既不留痕也不报错。§2 已把「子窗必须挂 ds.css +
+  // ds.js」钉成硬线，ds.js 因此是唯一能同时到达全部 4 个窗口的落点；再往各窗脚本里各写一份，
+  // 等于回到「漏窗」的原点。
   // 落盘路径按窗口分档，两档都走**已有**通道，不开新 IPC：
   //   · 主窗：window.logger.write（logger.js 已在，行为与此前 app.js 那份完全一致）；
-  //   · 子窗：window.api.log.write —— log_write 命令体是 guard_readonly 档，五个 label 全放行，
-  //     所以子窗写得进去；写失败只能 console，**这里再挂 .catch 兜自己**，
+  //   · 子窗：window.api.log.write —— log_write 命令体是 guard_readonly 档，guard::APP_WINDOWS 的
+  //     4 个 label 全放行，所以子窗写得进去；写失败只能 console，**这里再挂 .catch 兜自己**，
   //     否则兜底本身制造一条新 rejection（自我放大）。
   // 只记日志、不弹 toast：后台噪声糊到用户脸上是另一种体验事故；
   // 该给用户看错的调用点各自补显式 catch（v2-M22 ① 已逐个补）。

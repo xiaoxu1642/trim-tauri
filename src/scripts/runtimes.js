@@ -264,7 +264,9 @@
   function init() {
     renderRadar();
     renderList();
-    document.getElementById('btnRuntimesScan')?.addEventListener('click', startCollect);
+    // 必须包一层：直挂 startCollect 会把 MouseEvent 当首参传进去，而首参是 silent 标志位
+    // （真值 ⇒ 手动扫描的成功回执被吞，只剩自动扫描有回执，同一动作两套表现）。
+    document.getElementById('btnRuntimesScan')?.addEventListener('click', () => startCollect());
   }
 
   // 首次进入页面自动扫描一次（只读检测，无副作用；结果不入持久缓存——运行库状态随系统变化低频但真实）

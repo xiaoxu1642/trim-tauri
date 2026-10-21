@@ -168,8 +168,11 @@
         // scope=maintenance：主进程按系统维护专属提示词生成，缓存按任务标题隔离
         const resp = await window.api.aidesc.get(task.title, task.category || '系统维护', false, 'maintenance');
         if (resp && resp.success && resp.data && resp.data.desc) {
+          // 正文用既有件 `.intro-ai-content`（main.css 有规则：字号/行高/次级色 + 起底高度）；
+          // 原先写的 `.intro-ai-text` 在样式表里 0 条规则，AI 正文只能吃父级继承样式，
+          // 与简介面板（intro.js 同族正文）观感不一致。
           aiBox.innerHTML = `
-            <div class="intro-ai-text">${escapeHtml(resp.data.desc)}</div>
+            <div class="intro-ai-content">${escapeHtml(resp.data.desc)}</div>
             <div class="intro-ai-meta">来源：${escapeHtml(resp.data.source || 'AI 大模型')}${resp.data.cached ? ' · 缓存' : ''}</div>`;
         } else if (resp && resp.message === 'disabled') {
           aiBox.innerHTML = '<div class="intro-ai-fail">所选大模型尚未启用，请到「设置 → 软件功能设置项 → 大模型管理」启用后重试。</div>';

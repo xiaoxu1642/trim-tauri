@@ -1526,7 +1526,8 @@
   <!-- v3.7.0 议题五：渲染脚本按需加载（清单见 app.js 的 PAGE_SCRIPTS / IDLE_SCRIPTS，字节由门禁现算）。
        硬约束：tauri-api.js 是 body 末尾第一个脚本、splash.js 第二（F3-L06 统一口径）；
        ds.js 先于一切 window.ds 使用方。v3 C：清理域两份脚本也从本文件摘出、按需注入。 -->
-  <!-- Tauri 适配层（迁移方案 D1，Phase 0 起）：脚本链最前加载，完整复刻 window.api；
+  <!-- Tauri 适配层（迁移方案 D1，Phase 0 起）：本 body 末尾脚本链最前加载（theme-boot.js 是
+       更早的同步无 IPC 件，不在这条链上），完整复刻 window.api；
        桥未就绪时自动 no-op，不影响双轨。不使用 window.ds，
        不打破 ds.js 先于其使用方的约束。 -->
   <!-- 性能批次①（2026-10-14）：body 末尾这批标签统一加 defer —— 下载与 HTML 解析并行，

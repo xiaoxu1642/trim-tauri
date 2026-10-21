@@ -22,8 +22,9 @@
   // 但真源本应是应用私有配置——一次存储清空就把用户打开的「删除前备份」拨回关闭
   //（误拨到关 = 少一层保护）。localStorage 降级为同步初值 + 迁移来源 + 镜像。
   // D2（v4 审查）：读失败/坏值一律走「未开启」方向并留痕（控制台 + 应用日志，log_write
-  // 五窗可调）。误拨到「开」的代价只是删除前多一次打包，方向本身安全；留痕是为了能解释
-  // 「开关为什么回到关」——静默降级正是这条被记下来的原因。
+  // 对 engine::guard::APP_WINDOWS 的全部 label 放行）。误拨到「开」的代价只是删除前多一次
+  // 打包，方向本身安全；留痕是为了能解释「开关为什么回到关」——静默降级正是这条被记下来的
+  // 原因。条数不写在这里（自然语言里的窗口数会随 APP_WINDOWS 增删腐烂）。
   const BACKUP_PREF_KEY = 'trim.residue.backupPack';
   const BACKUP_PREF_BACKEND_KEY = 'residueBackupPack';
   let backupPref = readLsBackupPref();
@@ -167,7 +168,9 @@
     let h = '<table class="finder-table"><thead><tr><th style="width:34px"></th><th>目标</th><th style="width:110px">置信度</th><th style="width:96px">详情</th></tr></thead><tbody>';
     for (const f of rows) {
       const i = state.rows.indexOf(f);
-      const cell = '<span class="checkbox' + (f._checked ? ' checked' : '') + '" data-rcheck="' + i + '" tabindex="0" role="checkbox" aria-checked="' + (f._checked ? 'true' : 'false') + '"></span>';
+      // F4a1-L04：role=checkbox 必须有可访问名——读屏落到这枚 span 时只报「复选框，未选中」
+      // 说不出是哪一项（目标路径是这一行唯一的身份），故把 target 显式给 aria-label。
+      const cell = '<span class="checkbox' + (f._checked ? ' checked' : '') + '" data-rcheck="' + i + '" tabindex="0" role="checkbox" aria-checked="' + (f._checked ? 'true' : 'false') + '" aria-label="' + esc(f.target) + '"></span>';
       h += '<tr class="' + (f._checked ? 'finder-row-selected' : '') + '">'
         + '<td>' + cell + '</td>'
         + '<td><div class="finder-cell"><span class="finder-path-text">' + esc(f.target) + '</span></div>'
@@ -321,10 +324,14 @@
       return;
     }
     const backup = readBackupPref();
+    // F4a1-M09：红色档确认按钮的文案一律「仍然X」（主窗四处同口径：仍然执行/仍然登记/
+    // 仍然清理/仍然结束）。modal.js 的护栏理由是「按钮本身是红色 + 文案是仍然执行，不是
+    // 无脑回车能滑过去的『确定』」——换成动作名就少掉这一条依据。档位本身不变：
+    // 残留删除是批量且注册表侧不可逐项撤销，仍走红色。
     const ok = await confirmViaModal({
       title: '确认清理残留',
       message: '将删除选中的 ' + picked.length + ' 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。',
-      confirmText: '开始清理',
+      confirmText: '仍然清理',
       cancelText: '取消',
       danger: true,
       dangerHint: '低置信项为名称启发式结果，请确认路径确实属于已卸载的程序再勾选。'
@@ -378,7 +385,7 @@
       addBtn.textContent = `重启后删除失败的 ${state.pendingFailed.length} 项…`;
       addBtn.disabled = !state.pendingFailed.length;
     }
-    if (revBtn) {
+    if (revBtn && window.api?.uninstall?.pendingList) {
       window.api.uninstall.pendingList().then(function (r) {
         const entries = (r && r.success && r.data && r.data.entries) || [];
         const degraded = !!(r && r.success && r.data && r.data.degraded);
@@ -404,7 +411,7 @@
     const ok = await confirmViaModal({
       title: '登记重启后删除',
       message: `把 ${state.pendingFailed.length} 个回收站删不掉的文件登记为「下次重启时删除」。这是永久删除：不进回收站、无法还原；重启前可撤回。目录不支持该机制，登记时会被跳过。`,
-      confirmText: '登记',
+      confirmText: '仍然登记',
       cancelText: '取消',
       danger: true,
       dangerHint: '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
@@ -438,12 +445,15 @@
   }
 
   async function revokePendingDeletes() {
+    // F4a1-M09：撤回是**安全方向**（把登记摘掉、文件保持原样），主窗同一动作走黄档
+    // （cleanup.js 的 openPendingListModal）。红色留给「登记=永久删」那一发；两窗档位
+    // 相反会训练用户「红色也可以直接点」，稀释真正不可逆操作的警示强度。
     const ok = await confirmViaModal({
       title: '撤回重启后删除',
       message: '将把已登记的「重启后删除」条目从系统中摘除：相关文件不会被删除，保持原样。',
       confirmText: '撤回全部',
       cancelText: '取消',
-      danger: true
+      warning: true
     });
     if (!ok) return;
     try {
@@ -463,7 +473,7 @@
     if (det) {
       const item = detailSpec(det.dataset.detail);
       if (item) openDetail(item);
-      else toast('warn', '这条详情已经过期，请重新扫描');
+      else toast('warning', '这条详情已经过期，请重新扫描');
       return;
     }
     const t = e.target.closest('[data-rcheck]');
@@ -477,15 +487,6 @@
       if (tr) tr.classList.toggle('finder-row-selected', f._checked);
       updateActionButtons();
     }
-  }
-
-  // 勾选框是 span 不是 input：键盘可达性要自己补（AGENTS §2）
-  function onKeydown(e) {
-    if (e.key !== ' ' && e.key !== 'Enter') return;
-    const t = e.target.closest && e.target.closest('[data-rcheck]');
-    if (!t) return;
-    e.preventDefault();
-    onClick({ target: t });
   }
 
   // 事件委托的宿主是 #rsChainBody；缺件只降级成控制台告警，绝不许把整条初始化带崩
@@ -513,13 +514,15 @@
   document.addEventListener('DOMContentLoaded', function () {
     state.appId = targetFromSearch();
     on('rsChainBody', 'click', onClick);
-    on('rsChainBody', 'keydown', onKeydown);
+    // F4a1-L03：键盘激活走 ds.bindCheckboxKeys（宿主缺失时它自己早退，缺件告警由上一行
+    // 的 on('rsChainBody','click') 给出），不再本窗自写一份伪造 onClick({target}) 的处理器。
+    window.ds?.bindCheckboxKeys?.(el('rsChainBody'), '[data-rcheck]');
     on('rsRescanBtn', 'click', scanAll);
     on('rsBtnClean', 'click', cleanSelected);
     on('rsBtnPending', 'click', addPendingDeletes);
     on('rsBtnPendingRevoke', 'click', revokePendingDeletes);
     on('rsCloseBtn', 'click', function () {
-      window.api.residueWindow.closeWindow().catch(function () { toast('warn', '关闭窗口失败，请手动关闭'); });
+      window.api.residueWindow.closeWindow().catch(function () { toast('warning', '关闭窗口失败，请手动关闭'); });
     });
     on('rsBackupToggle', 'change', function (e) { writeBackupPref(e.target.checked); });
     const toggle = el('rsBackupToggle');
@@ -541,6 +544,11 @@
         scanAll();
       });
     }
+    // F4a1-M10：开窗即刷一次「重启后删除」入口——本窗正是卸载后被自动弹出的那扇窗，
+    // 上一轮（主窗清理失败面板 / 上一次会话）登记的永久删项若不在此现，界面上就没有
+    // 任何「还挂着待删项」的痕迹，等于违背「待删清单可见且重启前可撤回」这条受控例外约束。
+    // 不传参 = 保持 state.pendingFailed 现值，只按 pendingList 回执刷 revBtn 显隐。
+    updatePendingButtons();
     scanAll();
   });
 })();

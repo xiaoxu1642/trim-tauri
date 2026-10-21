@@ -342,7 +342,7 @@
   }
 
   function previewBtnHtml(item, hasImages, imageCount) {
-    return `<button class="fileclean-preview-btn" data-preview="${item.id}" ${hasImages ? '' : 'disabled'} data-tip="${hasImages ? `预览 ${imageCount} 张图片` : '无可预览图片'}">
+    return `<button class="fileclean-preview-btn" data-preview="${window.ds.escAttr(item.id)}" ${hasImages ? '' : 'disabled'} data-tip="${hasImages ? `预览 ${imageCount} 张图片` : '无可预览图片'}">
       <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
       预览${hasImages ? ` (${imageCount})` : ''}
     </button>`;
@@ -370,7 +370,7 @@
           // 由 ds.bindCheckboxKeys 合成 click；aria-checked 在 updateUI 里随选中态同步
           // F4a1-L04：role=checkbox 必须有可访问名——行是 div 非表格语义，读屏
           // 只报「复选框，未选中」说不出是哪一项，aria-label 显式给条目名。
-          inner = `<div class="checkbox ${isSelected ? 'checked' : ''}" data-checkbox="${item.id}" role="checkbox" tabindex="0" aria-checked="${isSelected ? 'true' : 'false'}" aria-label="${escapeHtml(item.name)}"></div>`;
+          inner = `<div class="checkbox ${isSelected ? 'checked' : ''}" data-checkbox="${window.ds.escAttr(item.id)}" role="checkbox" tabindex="0" aria-checked="${isSelected ? 'true' : 'false'}" aria-label="${escapeHtml(item.name)}"></div>`;
           break;
         case 'name': {
           // 中缝省略：超长文件名保留首尾（title 仍展示完整原文）
@@ -454,7 +454,7 @@
             inner = '<button class="fileclean-preview-btn" data-open-recycle type="button" data-tip="回收站条目由系统管理，点击打开系统回收站查看">明细</button>';
           } else {
             // P3：明细按钮——弹窗枚举该条目将删除的具体文件清单（只读）
-            inner = `<button class="fileclean-preview-btn" data-detail="${item.id}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>`;
+            inner = `<button class="fileclean-preview-btn" data-detail="${window.ds.escAttr(item.id)}" data-tip="查看此条目包含的具体文件清单（只读，最多展示 600 条）">明细</button>`;
           }
           break;
       }
@@ -660,7 +660,7 @@
         <div class="sub-group-header" data-sub-toggle="${window.ds.escAttr(sg.id)}">
           <span class="sub-group-chevron">${chevronSvg()}</span>
           <div class="checkbox" data-sub-checkbox="${window.ds.escAttr(sg.id)}" role="checkbox" tabindex="0" aria-checked="false" aria-label="${escapeHtml(sg.name)}"></div>
-          <span class="sub-group-name">${sg.name}</span>
+          <span class="sub-group-name">${escapeHtml(sg.name)}</span>
           <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary);text-align:right;line-height:1.5" data-sub-meta="${window.ds.escAttr(sg.id)}"><span data-sub-meta-line1="${window.ds.escAttr(sg.id)}">${sg.items.length} 项</span><span data-sub-meta-line2="${window.ds.escAttr(sg.id)}" style="display:block"></span></span>
         </div>
         <div class="sub-group-content">
@@ -1171,6 +1171,17 @@
     if (label) label.textContent = cleaning ? '清理中...' : '开始清理';
   }
 
+  // clean() 的每一条出口都必须做同一组复位（互斥标志 / 按钮态 / 计数与禁用态）。
+  // F4a1-M02 的病灶就在这里：置位与复位靠逐个 return 记忆，中风险早退漏了一条
+  // setCleaningBtn(false) ⇒ 用户点「取消」后按钮仍是「清理中...」，而 #btnClean 是
+  // .btn-accent（main.css 的 .busy 规则就挂在这个档位上）⇒ 图标一直转、文案与实情相反。
+  // 收成唯一出口后，新增早退只需想「return 前调 finishClean()」。
+  function finishClean() {
+    isCleaning = false;
+    setCleaningBtn(false);
+    updateUI();
+  }
+
   // v3.3.4：清理前占用检测弹窗。返回：
   //   null            —— 无占用/检测不可用/无计划清单，调用方照常清理
   //   'cancel'        —— 用户关闭弹窗（×/ESC/背景），放弃本次清理
@@ -1410,9 +1421,7 @@
         '删除后可能无法恢复，请确认已了解风险。'
       );
       if (!ok) {
-        isCleaning = false;
-        setCleaningBtn(false);
-        updateUI();
+        finishClean();
         return;
       }
     }
@@ -1427,8 +1436,8 @@
         '部分中风险项可能被应用在使用，清理后若个别程序异常，可通过系统自带方式恢复。'
       );
       if (!ok) {
-        isCleaning = false;
-        updateUI();
+        // F4a1-M02：这一支原先只置 isCleaning=false + updateUI()，漏掉按钮文案与 busy 类
+        finishClean();
         return;
       }
     }
@@ -1466,9 +1475,7 @@
           '这是不可逆操作：清空回收站不经过 Trim 的删除备份，也没有回收站可再还原。'
         );
         if (!ok) {
-          isCleaning = false;
-          setCleaningBtn(false);
-          updateUI();
+          finishClean();
           return;
         }
       }
@@ -1490,9 +1497,7 @@
         '清单截断意味着确认时看到的文件数少于将要清理的文件数；执行后请以日志与实测释放量为准。'
       );
       if (!ok) {
-        isCleaning = false;
-        setCleaningBtn(false);
-        updateUI();
+        finishClean();
         return;
       }
     }
@@ -1506,15 +1511,11 @@
     const lockDecision = await offerCloseLocked(lockIds);
     if (lockDecision === 'aborted') {
       // 确认件缺席（信号与提示都在 offerCloseLocked 内），与用户取消同姿势收尾
-      isCleaning = false;
-      setCleaningBtn(false);
-      updateUI();
+      finishClean();
       return;
     }
     if (lockDecision === 'cancel') {
-      isCleaning = false;
-      setCleaningBtn(false);
-      updateUI();
+      finishClean();
       return;
     }
     if (lockDecision && lockDecision.skipIds) abandonIds = lockDecision.skipIds;
@@ -1736,9 +1737,7 @@
       maybeOfferElevation('清理操作失败，可能需要管理员权限。');
     } finally {
       execProgressSink = null;
-      isCleaning = false;
-      setCleaningBtn(false);
-      updateUI();
+      finishClean();
     }
   }
 
@@ -1769,14 +1768,20 @@
   let liteboxRange = null;
 
   function ensureLiteboxRange() {
-    if (liteboxRange && document.body.contains(liteboxRange)) return liteboxRange;
-    liteboxRange = document.createElement('div');
-    liteboxRange.id = 'liteboxRange';
-    liteboxRange.style.display = 'none';
-    document.body.appendChild(liteboxRange);
+    if (!liteboxRange || !document.body.contains(liteboxRange)) {
+      liteboxRange = document.createElement('div');
+      liteboxRange.id = 'liteboxRange';
+      liteboxRange.style.display = 'none';
+      document.body.appendChild(liteboxRange);
+    }
     // 把 LiteBox 的点击监听从整个 document 收窄到本容器：主窗其它页有自己的
     // <img>（壁纸预览 bgThumb、应用图标回退等），不收窄会把它们也劫持成灯箱。
-    if (window.liteBox?.setRange) window.liteBox.setRange(liteboxRange);
+    // 每次调用都确认一遍收窄是否生效：本函数在 init() 就被调（装载序上 litebox.js 在前），
+    // 但「容器已存在」不等于「range 已是本容器」——liteBox 晚于本脚本实例化时，
+    // 只按容器存在就早退会把劫持窗口原样留下。
+    if (window.liteBox?.setRange && window.liteBox.range !== liteboxRange) {
+      window.liteBox.setRange(liteboxRange);
+    }
     return liteboxRange;
   }
 
@@ -2452,6 +2457,11 @@
   // 导出「本次将清理」的 Markdown 计划清单（2026-10-06 任务四）：扫描勾选后、执行前
   // 一键另存（Rust 侧走保存对话框，口径同日志导出）。只读扫描结果与勾选状态，不触删除链。
   function init() {
+    // F4a1-M03：灯箱的点击监听在 litebox.js 装载那一刻就挂在 document 上，原先只有第一次
+    // 点「预览」才收窄到 #liteboxRange。窗口期内（已进清理页、尚未预览）主窗任何 <img>
+    // 点击都会被劫持成全屏黑底灯箱（卸载列表图标、壁纸缩略图都算），还和该行自己的
+    // click 处理叠加。收窄动作提到装载即做，之后每次 openPreview 仍会确认容器在不在。
+    ensureLiteboxRange();
     renderCategoryList();
     updateUI();
 
@@ -2581,7 +2591,9 @@
     MOCK_SIZES,
     // U1-d：一级「备份还原」页的进页钩子（app.js switchPage 调）
     onBackupsEnter: renderBackupsPage,
-    // 审查 4-2：供 app.js 优雅关闭前判断清理任务是否在执行（执行中最长等待 10 分钟）
+    // 执行中标记：当前**无消费方**（现算 src/scripts 只有本文件自己读 isCleaning）。
+    // 保留导出是给「优雅关闭前判断清理是否在跑」留的位置（执行中最长可到 10 分钟），
+    // 但那条判断并没有被 app.js 接上——旧注释把它写成已有能力，等于给下一个读者假依据。
     isCleaning: () => isCleaning
   };
 })();

@@ -13,6 +13,11 @@
   let ghosts = [];
   // 静默后台重扫在途标记，避免重复触发
   let silentScanning = false;
+  // 逐项回执说明（F4a2-U02，2026-10-20 拍板「展示逐项成功说明」）：后端每条 result 都带
+  // `message`，且 RunOnce 与普通 Run 项说的是两件不同的事——RunOnce 没有 StartupApproved
+  // 批准位（AGENTS §5.30），只能「备份原值后删值」；普通项写的是系统批准位。只报「成功 N 项」
+  // 会把两种**可逆性完全不同**的结果说成同一件事，所以按 id 暂存、由 render() 一次性消费。
+  const receiptNotes = new Map();
 
   // 审查 v2-L5：这里原先给每项挂了 `color: '#16A34A' / '#D97706'` 两个离表 hex，而
   // **全仓没有任何一处读取这个字段** —— 图标配色实际由 main.css 的
@@ -437,6 +442,10 @@
   }
 
   function render() {
+    // 逐项回执只服务「刚做完操作的那一屏」：本次渲染消费完立即清账，否则下次手动重扫
+    // 会把旧说明贴回同名项（id 稳定，故残留一定会贴错）。
+    const notes = new Map(receiptNotes);
+    receiptNotes.clear();
     const enabledCount = items.filter(i => i.enabled).length;
     const disabledCount = items.length - enabledCount;
     el('startupTotal').textContent = items.length;
@@ -514,6 +523,24 @@
       const missingHtml = missing
         ? `<div class="startup-item-cmd" data-tip="这个文件已经不存在（原样来自注册表/任务定义，Trim 未改动）">${escapeHtml(missing)}</div>`
         : '';
+      // 逐项回执说明（F4a2-U02）：文案原样来自后端 `results[].message`，前端不另写结论。
+      // RunOnce 与普通项必须有可见差异——RunOnce 走的是「备份原值 + 删值」，普通 Run 项写的
+      // 是系统批准位，两者的还原路径不同；只在 toast 里说「成功 N 项」用户分辨不出来。
+      const note = notes.get(i.id);
+      let noteHtml = '';
+      if (note) {
+        const isError = note.status === 'error';
+        const isRunOnce = note.message.includes('RunOnce');
+        const lead = (isError || isRunOnce) && window.ds
+          ? window.ds.badgeHtml(isError ? 'bad' : 'warn', isError ? '未生效' : 'RunOnce 项', {
+            small: true,
+            title: isError
+              ? '这一项本次没有生效，具体原因见下面这行说明'
+              : '该项所在容器没有系统批准位，Trim 已备份原值后删除注册表值；点「启用」即按备份还原'
+          })
+          : '';
+        noteHtml = `<div class="startup-item-meta">${lead}${escapeHtml(note.message)}</div>`;
+      }
       const locPath = i.resolvedPath || i.filePath || '';
       // B-6 增强：按钮携带「登记来源」坐标，点击时同时打开软件位置与来源位置
       // （注册表项 → regedit 定位键；计划任务项 → 任务 XML 落盘位置）。
@@ -543,6 +570,7 @@
             <div class="startup-item-title">${escapeHtml(i.name || '未命名')} ${badge}${missingBadge}</div>
             ${cmdHtml}
             ${missingHtml}
+            ${noteHtml}
             <div class="startup-item-meta">${escapeHtml(loc)}${pub}</div>
           </div>
           <div class="startup-item-ops">
@@ -665,11 +693,18 @@
       // 且失败清单一律为空、失败项还被记进防恢复指纹。
       const r = classifyReceipt(resp, act);
       if (r.rejected) return;
+      // 逐项说明先入账，再决定提示语——render() 会一次性消费这些条目
+      (r.results || []).forEach(x => {
+        if (x && x.id && x.message) receiptNotes.set(x.id, { status: String(x.status || ''), message: String(x.message) });
+      });
+      const runOnceCount = (r.results || []).filter(x => x && x.status === 'ok' && String(x.message || '').includes('RunOnce')).length;
       const failed = Number(r.data && r.data.failed) || 0;
       if (!r.partial) {
-        window.app?.toast('success', `${act}完成，成功 ${Number(r.data && r.data.success) || 0} 项`);
+        window.app?.toast('success', `${act}完成，成功 ${Number(r.data && r.data.success) || 0} 项`
+          + (runOnceCount ? `；其中 ${runOnceCount} 项属 RunOnce，已备份原值、启用即还原` : ''));
       } else {
-        window.app?.toast('warning', `${act}部分失败：${failed} 项未生效`);
+        window.app?.toast('warning', `${act}部分失败：${failed} 项未生效`
+          + (runOnceCount ? `；另有 ${runOnceCount} 项属 RunOnce，已备份原值、启用即还原` : ''));
       }
       const failedIds = new Set(r.results.filter(x => x.status === 'error').map(x => x.id));
       // 防恢复跟踪：禁用成功 → 记录指纹；手动启用成功 → 清除跟踪。
@@ -735,24 +770,6 @@
       await scan(true);
     } catch (e) {
       window.app?.toast('error', `删除失败: ${e.message}`);
-    }
-  }
-
-  async function openLocation(targetPath) {
-    if (!targetPath) return;
-    try {
-      const resp = await window.api.startup.openLocation(targetPath);
-      if (!resp || !resp.success) {
-        window.app?.toast('warning', (resp && resp.message) || '打开位置失败');
-        return;
-      }
-      // 目标文件已不在（卸载残留常见）：后端退开到最深的现存上级目录，这里如实说明，
-      // 免得用户以为打开的就是目标所在位置。
-      if (resp.fellBack && resp.opened) {
-        window.app?.toast('info', `目标文件已不在原处，已打开它上层的文件夹：${resp.opened}`);
-      }
-    } catch (e) {
-      window.app?.toast('error', `打开位置失败: ${e.message}`);
     }
   }
 

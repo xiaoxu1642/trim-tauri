@@ -601,7 +601,7 @@
       <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" opacity="0.3">
         <path d="M4 8h16v2H4V8zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/>
       </svg>
-      <p>${msg}</p>
+      <p>${escapeHtml(msg)}</p>
     </div>`;
   }
 

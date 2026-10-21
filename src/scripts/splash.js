@@ -42,10 +42,10 @@
 
   // P3-1（可达性）：开屏期背景不可达 —— splash 之外的 body 一级子元素全部 inert（焦点与读屏都跳过主界面；Tab 不会
   // 落进看不见的标题栏/内容区），finish 时逐个解除。本文件是 body 末尾第二个脚本（第一个是 tauri-api.js，F3-L06
-  // 统一口径），defer 执行时 document.body 必然存在；脚本标签不在交互面，跳过。
+  // 统一口径），defer 执行时 document.body 必然存在（上方 `if (!splash) return` 已保证 splash 是 body 的子节点，
+  // 原先的 !document.body 死守卫因此删掉）；脚本标签不在交互面，跳过。
   var sealedEls = [];
   (function sealBackground() {
-    if (!document.body) return;
     var kids = document.body.children;
     for (var i = 0; i < kids.length; i++) {
       var el = kids[i];

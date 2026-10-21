@@ -43,7 +43,6 @@
   let maximized = false;     // 窗口最大化（指标卡一行展示）
 
   function escapeHtml(s) { return window.ds.esc(s); }
-  function escapeAttr(s) { return window.ds.escAttr(s); }
   function fmtBytes(bytes) { return window.ds.fmtBytes(bytes); } // 审查 M18：真源在 ds
   function fmtPercent(p) { return (isFinite(p) ? Math.round(p) : 0) + '%'; }
   // 审查 v2-L5：原先这里返回两条 `linear-gradient(90deg,#DC2626,#EF4444)` 之类的**字面量**
@@ -445,7 +444,12 @@
       window.app?.toast('warning', '预览模式不支持该操作');
       return;
     }
-    const ok = await window.app.confirmDanger(
+    // F4a1-M11：确认件必须走可选链，与本文件另两处同形。不带可选链的裸调用在
+    // app 或 confirmDanger 缺席时抛 TypeError，只能靠 withMemBusy 的 .catch 播报成
+    // 「操作未完成：…undefined…」——把内部错误当用户结论说。可选链则直接落到下面的
+    // `if (!ok) return`（fail-closed，不执行任何改系统状态的动作）。
+    // 遗留：确认件真缺席时界面仍无提示，属「withMemBusy 收成唯一执行闸门」的射程。
+    const ok = await window.app?.confirmDanger?.(
       '阻止顽固软件开机自启',
       '将把这些软件的后台服务启动类型改为「手动」并立即停止：MuMu 模拟器、网易 UU 远程、微软电脑管家、抖音、夸克网盘。\n' +
       '同时停止 WPS 云文档服务，删除 WPS 更新与消息推送任务、抖音守护任务、夸克网盘更新任务，清理抖音托盘的启动项（保留注册表备份），并关闭 WPS 自动升级。\n\n' +

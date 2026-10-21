@@ -13,16 +13,13 @@
   // 当前列表缓存：id -> 记录（卸载/残留扫描按 id 寻址）
   let apps = [];
   let currentScope = 'user';
-  // 两个独立互斥标志（U-8 根因修复 2026-09-28：原先共用一个 running，卸载流程内
-  // 调 loadApps() 被「running 即返回」的守卫静默吞掉——列表不刷新、残留面板停在
-  // 长列表首屏之下，感知就是"卸载后没有残留扫描"）。
+  // 两个独立互斥标志（U-8 根因修复 2026-09-28）：卸载流程内会调 loadApps()，
+  // 若与枚举共用一个 running，刷新会被「running 即返回」的守卫静默吞掉——列表不刷新、
+  // 残留面板停在长列表首屏之下，感知就是「卸载后没有残留扫描」。
   let running = false;      // 卸载 / 残留清理互斥
   let enumerating = false;  // 列表枚举互斥
   // 最近一次残留扫描结果（渲染与勾选用）
   let currentAppId = '';
-  // 三条链（规则库 / 失效登记 / 卸载记录）共用一个面板与一份快照，分组结果留在这里渲染
-  // 无选中程序时的合成 id：残留不属于任何单个程序，批次报告按它归档（执行侧只用于落报告）
-  const MACHINE_APP_ID = 'MACHINE|all';
 
   // 删前备份偏好（HiBit §H1 还原包）。取「显式关过才算关」以外的最保守解：
   // 读不到 / 读失败一律按关，因为开备份会带来几百 MB 落盘，猜错方向的代价不对称。
@@ -259,12 +256,18 @@
 
   async function loadApps() {
     const listEl = document.getElementById('uninstallList');
+    // F4a1-M07：置位与「置位之后的第一条 DOM 写」都必须在 try 里，且缺件守卫要排在置位**之前**——
+    // 原先 `enumerating = true` 与 startFakeProgress() 都写在 try 之外、listEl.innerHTML 又没有
+    // 守卫（同文件 renderAppList 有），#uninstallList 一旦缺失就抛错：finally 从不执行 ⇒
+    // enumerating 恒真、遮罩层与 busyTicker 定时器残留，此后「刷新」与「切范围」全部静默失效，
+    // 而 ds.js 的全局 rejection 兜底只写日志不弹提示（用户读成「点了没反应」）。
+    if (!listEl) return;
     if (enumerating) return;
     enumerating = true;
-    // 自我安慰式进度：枚举期间进度条爬升封顶 99%，完成即 100% 收尾
-    startFakeProgress(currentScope === 'windows' ? '正在枚举 Windows 应用…' : '正在枚举已安装程序…');
-    listEl.innerHTML = '<div class="finder-empty">正在枚举…</div>';
     try {
+      // 自我安慰式进度：枚举期间进度条爬升封顶 99%，完成即 100% 收尾
+      startFakeProgress(currentScope === 'windows' ? '正在枚举 Windows 应用…' : '正在枚举已安装程序…');
+      listEl.innerHTML = '<div class="finder-empty">正在枚举…</div>';
       const resp = await window.api.uninstall.list(currentScope);
       if (!resp.success) throw new Error(resp.message || '枚举失败');
       apps = resp.data.apps || [];
@@ -339,15 +342,10 @@
       </table>${pages > 1 ? appsPagerHtml(appsPage, pages) : ''}`;
   }
 
-  // Windows 应用（Appx）：按 HiBit 口径分「第三方应用 / Windows 应用」两组
-  function renderWindowsApps() {
-    const third = apps.filter((a) => a.group === 'third');
-    const sys = apps.filter((a) => a.group !== 'third');
-    const section = (title, list, withTotal) => {
-      if (!list.length) return '';
-      // 卸载按钮的禁用属性。三类"不可卸载"要说清差别：NonRemovable 是系统声明不许移除，
-  // staged / 全用户预配是**当前用户删不掉**（Remove-AppxPackage 是用户语义），
-  // 混成一句会让用户以为我们只是没做这个功能。
+  // Windows 应用（Appx）卸载按钮的禁用属性。判据只有一条 `removable === false`（后端把
+  // staged 与全用户预配两类都折进这个布尔位，差别写在 reason 里随带；NonRemovable 的包
+  // 在枚举侧就被过滤掉，根本不进列表），理由文案取后端原话、缺省才兜底。
+  // F4a1-L12：原先这份函数声明嵌在 renderWindowsApps 的箭头函数体中段，读起来像漏了闭合。
   function uninstallBlockAttr(a) {
     if (!a || a.removable === false) {
       const reason = a && a.reason ? a.reason : '系统声明的不可移除包';
@@ -356,7 +354,22 @@
     return '';
   }
 
-  const rows = list.map((a) => `
+  // Windows 应用（Appx）：按 HiBit 口径分「第三方应用 / Windows 应用」两组。
+  // F4a1-L11：分页硬上界原本只在 renderWin32Apps 生效，Appx 仍全量 map 一次性拼接——
+  // 注释声称的「单次 innerHTML 拼接与 DOM 解析钉了上界」只做了一半。这里按**扁平 apps**
+  // 切同一档 APPS_PAGE_SIZE，再在页内分组：控件、越界校正、「本页显示第 X–Y 项」的截断
+  // 告知都与 Win32 共用同一套口径，两档行为一致。
+  function renderWindowsApps() {
+    const total = apps.length;
+    const pages = Math.max(1, Math.ceil(total / APPS_PAGE_SIZE));
+    appsPage = Math.min(Math.max(1, appsPage), pages);
+    const from = (appsPage - 1) * APPS_PAGE_SIZE;
+    const view = apps.slice(from, from + APPS_PAGE_SIZE);
+    const third = view.filter((a) => a.group === 'third');
+    const sys = view.filter((a) => a.group !== 'third');
+    const section = (title, list, withTotal) => {
+      if (!list.length) return '';
+      const rows = list.map((a) => `
         <tr>
           <td><div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div></td>
           <td class="finder-col-size" style="width:190px"><span class="finder-name-text" style="opacity:.7">${esc(a.publisher || '—')}</span></td>
@@ -367,12 +380,19 @@
         </tr>`).join('');
       return `<div class="finder-group-header"><span>${title} · ${list.length} 项</span></div>
         <table class="finder-table">
-          <thead><tr><th>应用名${withTotal ? `<span class="page-summary">共 ${apps.length} 个应用</span>` : ''}</th><th class="finder-col-size" style="width:190px">发布者</th><th class="finder-col-size" style="width:130px">版本</th><th class="finder-col-size" style="width:230px">操作</th></tr></thead>
+          <thead><tr><th>应用名${withTotal ? `<span class="page-summary">共 ${total} 个应用</span>` : ''}</th><th class="finder-col-size" style="width:190px">发布者</th><th class="finder-col-size" style="width:130px">版本</th><th class="finder-col-size" style="width:230px">操作</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
     };
-    // 总数只落在第一张表的表头：两组都在时归「第三方应用」，第三方为空时归「Windows 应用」
-    return section('第三方应用', third, true) + section('Windows 应用', sys, !third.length);
+    // 未显示的部分写在脸上（与 Win32 同一措辞口径，措辞按「本页」，末页也成立）
+    const hidden = total - view.length;
+    const more = hidden > 0
+      ? `<div class="finder-empty">本页显示第 ${from + 1}–${from + view.length} 项，共 ${total} 项；`
+        + `另有 ${hidden} 项未在本页显示，翻页查看后才会为它们补图标</div>`
+      : '';
+    // 总数只落在本页第一张表的表头：两组都在时归「第三方应用」，本页第三方为空时归「Windows 应用」
+    return section('第三方应用', third, true) + section('Windows 应用', sys, !third.length)
+      + more + (pages > 1 ? appsPagerHtml(appsPage, pages) : '');
   }
 
   // ==================== 卸载 ====================
@@ -538,14 +558,6 @@
   }
 
 
-  function setBusy(busy, label) {
-    const overlay = document.getElementById('uninstallBusy');
-    if (overlay) {
-      overlay.style.display = busy ? 'block' : 'none';
-      if (label) overlay.querySelector('.progress-label').textContent = label;
-    }
-  }
-
   // ==================== 自我安慰式进度（用户拍板 2026-09-28） ====================
   // 「Windows应用」枚举（Get-AppxPackage 子进程）耗时秒级且无真百分比——
   // 纯文字「正在枚举…」观感是卡死。改为进度条：从 5% 缓慢爬升封顶 99%，
@@ -662,13 +674,6 @@
     ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeReportModal);
     renderReportList(ctrl);
   }
-
-  // ==================== 初始化 ====================
-  // A3（M3）残留规则库在线更新：刻意做成显式动作、不做定时自动更新——规则库决定
-  // 「什么会被当成残留」，替换它必须是用户点出来的一次操作（删除本身仍要逐项勾选 +
-  // 快照复核 + 注册表先备份，硬闸在后端）。失败必须可见：清理域 v0.2.2 修过
-  // 「异步失败被同步 try/catch 静默吞掉」那一类缺陷，这里不重犯。
-  let rulesUpdating = false;
 
   // ==================== 残留副窗入口（v0.7.0：残留链在这一扇窗里的唯一界面） ====================
   //

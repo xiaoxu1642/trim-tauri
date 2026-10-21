@@ -49,16 +49,17 @@
   }
 
   async function init() {
-    // 设置页「设备信息」板块已移除（系统概览页已展示硬件信息），
-    // 本模块仅保留 normalize 供系统概览复用；首次进入概览时由 overview 拉取缓存。
+    // 设置页「设备信息」板块已移除（系统概览页已展示硬件信息），本模块只剩 normalize 供概览复用
+    // 与这条预热。预热不该打扰用户，但必须留排查痕迹——原先成功与失败同形（空 if 块 + 全静默
+    // catch），概览硬件表空着时分不清「没预热成功」还是「后端本就没数据」。
+    if (!window.api?.overview?.hardware) return;
     try {
-      if (window.api?.overview?.hardware) {
-        const resp = await window.api.overview.hardware({ refresh: false });
-        if (resp && resp.success) {
-          // 预热系统信息缓存，供 overview 硬件表格快速展示
-        }
-      }
-    } catch (e) {}
+      const resp = await window.api.overview.hardware({ refresh: false });
+      if (resp && resp.success) window.app?.log?.('info', '设备信息缓存预热完成');
+      else window.app?.log?.('warn', '设备信息缓存预热未成功：' + ((resp && resp.message) || '无回执'));
+    } catch (e) {
+      window.app?.log?.('warn', '设备信息缓存预热异常：' + ((e && e.message) || e));
+    }
   }
   window.deviceinfo = { init, normalize };
 })();

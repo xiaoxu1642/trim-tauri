@@ -83,7 +83,7 @@
         </h2>
         <p class="peri-section-sub">按需设置 Win32PrioritySeparation 的十进制数值（处理器优先级，越大越偏向前台响应）</p>
       </div>
-      <div class="peri-cards" data-group="win32"></div>
+      <div class="peri-cards" data-group="win32" role="radiogroup" aria-label="处理器调度优先级数值（单选其一）"></div>
     </section>
 
     <section class="peri-section">
@@ -95,7 +95,7 @@
         </h2>
         <p class="peri-section-sub">按需设置 MouseDataQueueSize 的十进制数值（驱动事件缓冲，默认 100，越小延迟越低，过小可能丢事件）</p>
       </div>
-      <div class="peri-cards" data-group="mouse"></div>
+      <div class="peri-cards" data-group="mouse" role="radiogroup" aria-label="鼠标事件队列深度数值（单选其一）"></div>
     </section>
 
     <p class="peri-note" id="periNote">鼠标队列大小修改后需重启电脑生效；当前值以注册表实时读取为准。</p>`;
@@ -121,6 +121,11 @@
     const wrap = root.querySelector(`.peri-cards[data-group="${key}"]`);
     if (!wrap) return;
     const def = GROUPS[key];
+    // 重绘是整批换节点：键盘用户刚聚焦的那张卡会被替换掉，焦点掉回 body ⇒ 方向键走不动。
+    // 先记下重绘前聚焦卡的坐标（同组 + 同值），重绘后按同一坐标把焦点还回去。
+    const active = document.activeElement;
+    const keepFocus = active && active.classList && active.classList.contains('peri-card')
+      && active.dataset.group === key ? String(active.dataset.value) : null;
     wrap.innerHTML = def.options.map(opt => {
       const isRec = opt.value === def.recommended;
       const isSel = selected[key] === opt.value;
@@ -128,8 +133,10 @@
       // 数据源目前是编译期常量，但「常量就不过闸」会让下一次数据层改动带着注入面。
       const esc = window.ds.esc;
       const escA = window.ds.escAttr;
+      // 自绘单选卡必须有 role/aria-checked/tabindex 三件套（AGENTS §2 可达性）：
+      // div 卡不带这三属性时键盘完全选不到值，读屏也念不出「当前选中哪一档」。
       return `
-        <div class="peri-card${isSel ? ' selected' : ''}" data-group="${escA(key)}" data-value="${escA(opt.value)}" data-tip="${escA(def.regName + ' = ' + opt.value)}">
+        <div class="peri-card${isSel ? ' selected' : ''}" role="radio" aria-checked="${isSel ? 'true' : 'false'}" tabindex="0" data-group="${escA(key)}" data-value="${escA(opt.value)}" data-tip="${escA(def.regName + ' = ' + opt.value)}">
           ${isRec ? '<span class="peri-rec">推荐</span>' : ''}
           <span class="peri-radio" aria-hidden="true"></span>
           <div class="peri-value">${esc(opt.value)}</div>
@@ -137,6 +144,10 @@
           <div class="peri-desc">${esc(opt.desc)}</div>
         </div>`;
     }).join('');
+    if (keepFocus != null) {
+      const again = wrap.querySelector(`.peri-card[data-value="${keepFocus}"]`);
+      if (again) again.focus();
+    }
   }
 
   function renderAll(root) { Object.keys(GROUPS).forEach(key => renderGroup(root, key)); }
@@ -232,6 +243,24 @@
       if (!GROUPS[key]) return;
       selected[key] = value;
       renderGroup(ctrl.backdrop, key);
+    });
+
+    // 键盘激活走 ds.bindCheckboxKeys（Space/Enter 合成一次真实 click，复用上面的委托，
+    // 不另写一套选中判定）；方向键是 radiogroup 的额外语义：同组内移动焦点并即时选中。
+    window.ds?.bindCheckboxKeys?.(ctrl.backdrop, '.peri-card');
+    ctrl.backdrop.addEventListener('keydown', (e) => {
+      const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1
+        : (e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0);
+      if (!step) return;
+      const card = e.target.closest && e.target.closest('.peri-card');
+      if (!card) return;
+      e.preventDefault();
+      const cards = Array.from(card.parentElement.querySelectorAll('.peri-card'));
+      const idx = cards.indexOf(card);
+      if (idx < 0 || cards.length < 2) return;
+      const next = cards[(idx + step + cards.length) % cards.length];
+      next.focus();
+      next.click();
     });
 
     ctrl.footer.querySelector('#btnPeriApply')?.addEventListener('click', async (e) => {

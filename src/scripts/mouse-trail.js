@@ -8,11 +8,30 @@
   // 迁移来源 + 镜像。
   const KEY = 'trim-mouse-trail';
   const THROTTLE_MS = 22;      // 生成节流
-  const FADE_MS = 520;         // 与 main.css 的过渡时长保持一致
+  // F5-L14（2026-10-21）：淡出时长不在本文件留第二本账——真源是 main-pages.css
+  // `.mouse-trail-dot` 的 transition（旧注释写的 main.css 是错的文件名，且 520 与 CSS
+  // 各写一份，任一侧改动都会静默漂移，症状是光点早摘（看得见半透明的点被抠掉）或晚摘）。
+  // 改为首次生成时量一次 computed style 并缓存；FALLBACK 只在量不到时兜底，取值刻意
+  // 偏大：晚摘不可见（此时 opacity 已归零）、早摘可见，所以宁长勿短。
+  const FADE_FALLBACK_MS = 1500;
+  let fadeMs = 0;
   // 审查v4-M1：reduced-motion 必须使用时实时求值，禁止模块加载时固化快照
   // （固化会导致运行中切换系统「减少动态效果」偏好永不生效，9.6-B8 / v4-M1）
   function isReducedMotion() {
     return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
+  }
+  // 逗号分隔的 transition-duration 逐项解析取最长一段（多属性过渡要等最慢的那个）；
+  // 单位可能是 s 也可能是 ms，必须按结尾单位换算，否则 0.52s 会算成 520000ms。
+  function maxTransitionMs(spec) {
+    let max = 0;
+    String(spec || '').split(',').forEach((part) => {
+      const s = part.trim();
+      const v = parseFloat(s);
+      if (!Number.isFinite(v) || v <= 0) return;
+      const ms = /ms$/.test(s) ? v : v * 1000;
+      if (ms > max) max = ms;
+    });
+    return max > 0 ? Math.round(max) : 0;
   }
 
   let enabled = false;
@@ -58,11 +77,25 @@
     document.body.appendChild(layer);
     return layer;
   }
+  // F5-M04：勾选框显示的是**用户偏好**，生效态另算。旧实现把 checked 绑到生效态
+  // （= !reduceMotion && 偏好），偏好为 ON 而系统开着「减少动态效果」时勾选框显示 OFF，
+  // 用户点一下被 setEnabled 立即弹回，界面上没有任何一处说明原因——与同库液态玻璃
+  // 「下拉必须仍显示用户选的那一档」的两态口径分叉。降级必须给原因。
+  function syncToggleUi() {
+    const toggle = document.getElementById('mouseTrailToggle');
+    if (!toggle) return;
+    toggle.checked = enabledPref === true;
+    if (enabledPref === true && isReducedMotion()) {
+      toggle.setAttribute('data-tip', '系统已开启「减少动态效果」，鼠标拖尾暂不生效');
+    } else {
+      // 不解释原因时撤掉本行覆盖，让宿主 label 上的功能说明显示出来
+      toggle.removeAttribute('data-tip');
+    }
+  }
   function setEnabled(value) {
     enabled = !isReducedMotion() && Boolean(value);
     document.body.classList.toggle('mouse-trail-on', enabled);
-    const toggle = document.getElementById('mouseTrailToggle');
-    if (toggle) toggle.checked = enabled;
+    syncToggleUi();
     if (!enabled && layer) {
       // C6：关闭时彻底移除图层（原来只清空光点，空 div 一直挂在 DOM 里）
       layer.remove();
@@ -86,8 +119,13 @@
 
     const remove = () => { if (dot.parentNode) dot.remove(); };
     dot.addEventListener('transitionend', remove, { once: true });
-    // 兜底：过渡被跳过（后台窗口、极端节流）时仍能回收节点，杜绝 DOM 累积
-    setTimeout(remove, FADE_MS + 260);
+    // 兜底：过渡被跳过（后台窗口、极端节流）时仍能回收节点，杜绝 DOM 累积。
+    // 时长量一次即记账（含量不到的情形），避免每个光点都付一次 computed style 读。
+    if (fadeMs === 0) {
+      const measured = maxTransitionMs(getComputedStyle(dot).transitionDuration);
+      fadeMs = measured > 0 ? measured : FADE_FALLBACK_MS;
+    }
+    setTimeout(remove, fadeMs + 260);
     // 强制回流，确保初始态被绘制后再切到淡出态，否则 transition 不会触发
     void dot.offsetWidth;
     dot.classList.add('is-fading');

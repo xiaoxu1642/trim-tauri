@@ -107,11 +107,28 @@
 
   const GEAR_ICON = '<path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>';
 
+  // 2026-10-21 拍板（F4b-U01）：六档合并为 4/8/16/32 + 重置默认——AGENTS §2「档位数量以用户
+  // 能分辨的效果为准」，12 与 8、24 与 16 的效果差分辨不出。后端合法档位仍含历史写入值
+  // 6/12/20/24，读数一律过 normalizeSvcTier 保守下调（Rust MEMORY_KB 同步收档属跨面）。
   const MEMORY_OPTIONS = [
-    { gb: 4, label: '4 GB' }, { gb: 8, label: '8 GB' }, { gb: 12, label: '12 GB' },
-    { gb: 16, label: '16 GB' }, { gb: 24, label: '24 GB' }, { gb: 32, label: '32 GB' },
+    { gb: 4, label: '4 GB' }, { gb: 8, label: '8 GB' },
+    { gb: 16, label: '16 GB' }, { gb: 32, label: '32 GB' },
     { gb: 'default', label: '重置为默认' }
   ];
+  // 保留档位序表（升序）：映射的唯一真源，改 MEMORY_OPTIONS 必须同步这里。
+  const SVC_TIER_FLOORS = MEMORY_OPTIONS.filter(m => typeof m.gb === 'number').map(m => m.gb);
+
+  // 注册表读数 → 保留档位：落在两档之间时**向下**取（6→4、12→8、20/24→16），越界按端点档，
+  // 'default' 原样透传（Rust 按字符串认这一档）。不许返回原值——原值不在下拉里会让 select
+  // 落到「无选中项」，按钮态与灰态一起判错。
+  function normalizeSvcTier(v) {
+    if (v === 'default') return 'default';
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    let best = SVC_TIER_FLOORS[0];
+    for (const t of SVC_TIER_FLOORS) { if (t <= n) best = t; else break; }
+    return String(best);
+  }
 
   // SVCHost 内存阈值各档位的优/缺点描述（随下拉联动刷新）
   const MEM_PROS_CONS = {
@@ -123,17 +140,9 @@
       pros: '8GB 内存档位的常用折中值，减少服务进程数的同时保持服务隔离性。',
       cons: '对 8GB 以上机器改善有限；服务过多时仍可能出现单进程负载偏高。'
     },
-    12: {
-      pros: '12GB 内存档位：进一步减少 svchost 进程数，降低系统总体内存占用。',
-      cons: '阈值偏大时服务隔离性下降，个别服务异常可能牵连同组服务。'
-    },
     16: {
-      pros: '16GB 大内存机器上减少 svchost 进程数量，降低调度与内存管理开销。',
-      cons: '大内存下 svchost 拆分本身的开销占比已不高，收益相对有限。'
-    },
-    24: {
-      pros: '24GB 以上大内存减少进程数与调度开销，适合以稳定运行为主的工作站。',
-      cons: '服务隔离性减弱，调试单个服务问题时难度上升。'
+      pros: '16GB 内存机器的折中档：减少 svchost 进程数，降低调度与内存管理开销。',
+      cons: '阈值偏大时服务隔离性下降，个别服务异常可能牵连同组服务；大内存下拆分本身的开销占比已不高，收益相对有限。'
     },
     32: {
       pros: '32GB 及以上内存最大化合并 svchost 进程，降低内存管理与上下文切换开销。',
@@ -1643,7 +1652,14 @@
     if (window.api?.optimizer?.svcMemCurrent) {
       window.api.optimizer.svcMemCurrent().then(r => {
         if (r && r.success && r.gb != null) {
-          svcAppliedGb = r.gb;
+          // 读数先过保留档位映射（F4b-U01）：历史档位 6/12/20/24 保守下调，否则 select
+          // 落不到任何 option、灰态与按钮态互相判错。
+          const tier = normalizeSvcTier(r.gb);
+          if (!tier) return;
+          if (String(r.gb) !== tier) {
+            window.app?.log?.('info', `SVCHost 阈值读数 ${r.gb} GB 已并档，按保守下调记为 ${tier} GB`);
+          }
+          svcAppliedGb = tier;
           appliedChecked.add('svc_mem_gb');
           syncOptimized();
         }
@@ -1723,9 +1739,16 @@
   // 的记录保留，下次启动继续提示——还原失败不清账）。
   async function loadStateOverview() {
     if (!window.api?.optimizer?.stateOverview) return;
+    // F4b-U02：先给两条横幅预留等高空槽，异步结果回来时只显示/只隐藏内容，看板不被出没挤动。
+    const slotStale = document.getElementById('optimizerStaleBanner');
+    const slotRetired = document.getElementById('optimizerRetiredBanner');
+    bannerReserve(slotStale);
+    bannerReserve(slotRetired);
+    let overviewOk = false;
     try {
       const resp = await window.api.optimizer.stateOverview();
-      if (!resp || !resp.success) return;
+      if (!resp || !resp.success) throw new Error((resp && resp.message) || '无回执');
+      overviewOk = true;
       // v2.7.0：主进程首启扫描的持久化结果先灰化（页面未到、扫描未跑完时也有即时反馈）。
       // 审查 v3：这是第二来源，与本机执行落盘（appliedLocal）取并集，不再被实时检测清掉。
       const detected = resp.detected || {};
@@ -1753,7 +1776,12 @@
         });
         showStaleBanner(staleItems);
       }
-    } catch (e) { /* 状态总览失败不影响正常使用 */ }
+    } catch (e) {
+      // 状态总览失败不影响正常使用；本次会话两条横幅都不会出现，释放预留的空槽。
+      bannerRelease(slotStale);
+      bannerRelease(slotRetired);
+      window.app?.log?.('warn', '优化状态总览读取失败: ' + ((e && e.message) || e));
+    }
   }
 
   // 审查 2026-09-27 M8：重启后恢复上次因提权中断的批量——读回预勾选并提示续跑。
@@ -1771,6 +1799,44 @@
     renderGroups(OPTIONS);
     updateSelectedButtonState();
     window.app?.toast('info', `检测到上次因提权重启中断的优化批次（${valid.length} 项），已恢复勾选，可点「执行所选优化」继续`, 6000);
+  }
+
+  // ==================== 横幅占位（F4b-U02，2026-10-21 拍板）====================
+  // 横幅的 display:none↔flex 出没会把下方看板整块挤动（AGENTS §2「会占位的提示条两态必须
+  // 等高或保留占位」同一口径）。改为：收起=保留等高不可见空槽；出提示前按「盒子自身高度 +
+  // 两行实测行高」预留，不写死像素。像素级等高仍需 CSS 定 min-height（跨面）。
+  function bannerIdle(banner) {
+    if (!banner) return;
+    const h = banner.offsetHeight;
+    banner.style.display = 'flex';
+    if (h > 0) banner.style.minHeight = h + 'px';
+    banner.style.visibility = 'hidden';
+    banner.style.pointerEvents = 'none';
+  }
+  function bannerActive(banner) {
+    if (!banner) return;
+    banner.style.display = 'flex';
+    banner.style.visibility = '';
+    banner.style.pointerEvents = '';
+  }
+  // 预留空槽：只在真的会去读状态总览的路径上调用（预览/降级路径永远不出横幅，不占位）。
+  function bannerReserve(banner) {
+    if (!banner) return;
+    banner.style.display = 'flex';
+    banner.style.visibility = 'hidden';
+    banner.style.pointerEvents = 'none';
+    const span = banner.querySelector('span');
+    const lh = parseFloat(window.getComputedStyle(span || banner).lineHeight);
+    const extra = Number.isFinite(lh) ? lh * 2 : 0;
+    banner.style.minHeight = Math.round(banner.offsetHeight + extra) + 'px';
+  }
+  // 状态总览读不到 ⇒ 本次会话不会有横幅，把预留的空槽释放，不留无谓空白。
+  function bannerRelease(banner) {
+    if (!banner) return;
+    banner.style.display = 'none';
+    banner.style.visibility = '';
+    banner.style.pointerEvents = '';
+    banner.style.minHeight = '';
   }
 
   function showStaleBanner(items) {
@@ -1791,7 +1857,7 @@
     } else {
       text.removeAttribute('data-tip');
     }
-    banner.style.display = 'flex';
+    bannerActive(banner);
     const btn = document.getElementById('btnStaleRestore');
     if (btn) {
       btn.onclick = guardAsync('一键还原未完成项', async () => {
@@ -1803,7 +1869,7 @@
           if (!opt) continue;
           try { if (await restoreOption(opt)) okCount++; } catch (e) { /* 单项失败继续 */ }
         }
-        banner.style.display = 'none';
+        bannerIdle(banner);
         renderGroups(OPTIONS);
         window.app?.toast(okCount === ids.length ? 'success' : 'warning',
           `一键还原完成：成功 ${okCount} 项，共 ${ids.length} 项`);
@@ -1844,7 +1910,8 @@
           if (resp && resp.success) {
             window.app?.toast('info', `已忽略这 ${ids.length} 项的启动提醒；重新执行或还原后忽略会自动失效`, 5000);
             // A2-M05：只有记账真的落盘才收起横幅；写失败时保持可见，用户还能重试。
-            banner.style.display = 'none';
+            // F4b-U02：收起=保留等高空槽，不再用 display:none 挤动下方看板。
+            bannerIdle(banner);
           } else {
             window.app?.toast('error', '忽略失败：' + ((resp && resp.message) || '未知原因'));
           }
@@ -1868,7 +1935,7 @@
       + (items.length > 3 ? ` 等 ${items.length} 项` : '');
     text.textContent = `${items.length} 项已退役优化在本机仍留有注册表备份（${names}）。`
       + 'Trim 不会在启动时静默写回系统设置，需要你确认后按备份的原值逐项还原。';
-    banner.style.display = 'flex';
+    bannerActive(banner);
     const btn = document.getElementById('btnRetiredRestore');
     if (!btn) return;
     btn.onclick = guardAsync('退役优化项还原', async () => {
@@ -1902,7 +1969,7 @@
         window.app?.log('warn', `退役优化项还原失败 ${fails.length} 项：${fails.slice(0, 3).join('；')}`);
         window.app?.toast('warning', `${fails.length} 项还原失败（多为缺管理员权限），备份记录已保留`);
       }
-      if (done && !fails.length) banner.style.display = 'none';
+      if (done && !fails.length) bannerIdle(banner);
       btn.disabled = false;
       btn.textContent = '按原值还原';
     });
@@ -2196,12 +2263,13 @@
         window.api.optimizer.svcMemCurrent().then(r => {
           if (!r || !r.success) return;
           if (activeOption !== o) return; // 弹窗已切走，丢弃
-          svcAppliedGb = r.gb;
-          if (r.gb != null) {
+          const tier = r.gb != null ? normalizeSvcTier(r.gb) : null;
+          svcAppliedGb = tier;
+          if (tier) {
             appliedChecked.add(o.id);
             syncOptimized();
+            sel.value = tier;
           }
-          sel.value = (r.gb != null) ? String(r.gb) : sel.value;
           updateVariant();
           syncRunBtnForGear();
         }).catch(() => {});
@@ -2278,7 +2346,7 @@
       if (opt.dynamic && dynCtl) {
         const dynP = dynamicParams(opt.id, preCloseRaw);
         // 本会话立即记录已应用档位：重开弹窗时该档位按钮置灰（只有 mem 档有这个概念）
-        if (opt.id === 'svc_mem_gb') svcAppliedGb = dynP.gb;
+        if (opt.id === 'svc_mem_gb') svcAppliedGb = normalizeSvcTier(dynP.gb);
         // B11：与 runBatch 对齐 —— await + try/catch，避免浮动 Promise 变成
         // unhandled rejection（用户侧表现为「点击后毫无反应」）
         try {

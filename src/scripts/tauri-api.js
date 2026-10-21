@@ -369,9 +369,10 @@
 
     overview: {
       metrics: function () { return invokeChannel('overview:metrics'); },
+      // F2-L01：具名键白名单，不把调用方对象原样透传（后端形参 refresh 为 Option）
       hardware: function (options) {
         if (options === void 0) options = {};
-        return invokeChannel('overview:hardware', options);
+        return invokeChannel('overview:hardware', { refresh: options.refresh });
       }
     },
 
@@ -488,8 +489,10 @@
     },
 
     modal: {
-      open: function (info) { return invokeChannel('modal:open', Object.assign({}, info)); },
-      close: function (info) { return invokeChannel('modal:close', Object.assign({}, info)); }
+      // F2-M01：后端 modal_open/modal_close 的形参名是 info，Tauri 按顶层具名键取参。
+      // 把 info 字段铺到顶层会让后端收到 None、全部弹窗开/关日志塌成同一个标签，必须整形成 { info }。
+      open: function (info) { return invokeChannel('modal:open', { info: Object.assign({}, info) }); },
+      close: function (info) { return invokeChannel('modal:close', { info: Object.assign({}, info) }); }
     },
 
     diag: {
@@ -676,9 +679,10 @@
     },
 
     system: {
+      // F2-L01：具名键白名单（后端 refresh 为 Option，调用方多为无参 ⇒ 只透出 refresh）
       diskType: function (opts) {
         if (opts === void 0) opts = {};
-        return invokeChannel('system:disk-type', opts);
+        return invokeChannel('system:disk-type', { refresh: opts.refresh });
       },
       // 固定磁盘盘符列表（finder 大文件/空文件页盘符点选器，2026-09-28 六轮拍板）
       diskList: function () { return invokeChannel('system:disk-list'); }
@@ -725,7 +729,17 @@
       remove: function (items) { return invokeChannel('startup:delete', { items: items }); },
       openLocation: function (targetPath) { return invokeChannel('startup:openlocation', { path: targetPath }); },
       // B-6 增强：同时打开软件位置与其登记来源（注册表键 / 计划任务落盘文件）
-      openSource: function (coords) { return invokeChannel('startup:open-source', coords); },
+      // F2-L01：写死 5 个具名键再转发，真源不下放到调用方（startup.js）——后端形参 camel→snake 归一。
+      openSource: function (coords) {
+        if (coords === void 0) coords = {};
+        return invokeChannel('startup:open-source', {
+          path: coords.path,
+          source: coords.source,
+          regPath: coords.regPath,
+          taskPath: coords.taskPath,
+          taskName: coords.taskName
+        });
+      },
       add: function () { return invokeChannel('startup:add', {}); }
     }
   };
@@ -772,7 +786,8 @@
     function send() {
       if (firstPaintSent) return;
       firstPaintSent = true;
-      // app:first-paint 属于 onSafe 的 send 通道（8 条之一），不在 133 invoke 的 CHANNEL_MAP 内：直连 Rust snake_case 命令，不兑现会走 Rust 3s/8s 兜底。
+      // app:first-paint 是 onSafe 的 send 通道、不在 invoke 的 CHANNEL_MAP 内：直连 Rust snake_case 命令，
+      // 不兑现会走 Rust 兜底超时。（send/invoke 条数以 node tools/check-channel-map.mjs 现算为准，不写死）
       invokeCore('app_first_paint').catch(function () {});
     }
     function arm() {
@@ -868,7 +883,11 @@
         // NEW-4（L3 2026-10-01）：最大化切换失败必须留痕（与下方拖拽失败同一口径），不能无声
         if (window.app && window.app.log) window.app.log('warn', '窗口最大化切换失败: ' + ((e && e.message) || e));
       });
-      else if (act === 'close') api.window.close();
+      else if (act === 'close') pluginInvoke('close').catch(function (e) {
+        // F2-L04：与 minimize/maximize/drag/resize 同口径留痕——此前 close 是浮动 Promise，
+        // reject 只被 unhandledrejection 兜成「未处理拒绝」，丢的是「哪个按钮失败」的语义。
+        if (window.app && window.app.log) window.app.log('warn', '窗口关闭失败: ' + ((e && e.message) || e));
+      });
     });
 
     ['n', 's', 'w', 'e', 'ne', 'nw', 'se', 'sw'].forEach(function (dir) {
@@ -930,7 +949,9 @@
 
   // 挂载
 
-  // 与 contextBridge 同语义：只读代理即可满足现有用法（渲染层从不赋值 window.api）
+  // F2-L07：这里只锁了 window 上 api 的顶层绑定（writable/configurable=false ⇒ 不可整体替换），
+  // 成员对象不冻结、可写可删——不是 contextBridge 那种深层只读代理。渲染层从不给 window.api 赋值，
+  // 故按现状措辞，别再声称「只读代理」。
   Object.defineProperty(window, 'api', {
     value: api,
     writable: false,
@@ -947,15 +968,18 @@
   (function installRendererDiagnostics() {
     if (window.__trimDiagInstalled) return;
     window.__trimDiagInstalled = true;
-    var MAX_REPORTS = 20; // 一处循环里持续抛错不能把日志刷爆
+    var MAX_REPORTS = 20; // 一处循环里持续抛错不能把日志刷爆（防成环的真正护栏是条数上限，不是 try/catch）
     var sent = 0;
     function report(kind, detail) {
       if (sent >= MAX_REPORTS) return;
       sent += 1;
       try {
-        window.api.log.write('error', '渲染层' + kind + '：' + String(detail == null ? '' : detail).slice(0, 500));
+        // F2-L05：log.write 返回的是 Promise，同步 try/catch 抓不到它的 reject；必须挂 .catch，
+        // try/catch 只兜「window.api.log 不存在」这类同步抛错。
+        window.api.log.write('error', '渲染层' + kind + '：' + String(detail == null ? '' : detail).slice(0, 500))
+          .catch(function () { /* 上报自身失败不再抛，防「记错误导致新错误」 */ });
       } catch (e) {
-        // 上报本身失败绝不再抛：那会变成「记错误导致新错误」的递归
+        // 上报本身失败绝不再抛
       }
     }
     // capture 阶段才能收到 img/link/script 的加载失败（它们不冒泡）

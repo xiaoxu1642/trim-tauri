@@ -19,6 +19,8 @@
   let openResolve = null;
   let pickerCtrl = null;     // v3.2.0：弹窗工厂 ctrl
   let pickerChanged = false; // 本次弹窗内是否切换了模型（close 时交给 resolve）
+  let opening = false;       // F4b-L11：骨架只在 .then 里建成，在途期间 pickerCtrl 恒为 null，
+                             // 只靠 pickerCtrl 判重入挡不住快速连点（两个 .then 各建一份）
 
   function escapeHtml(text) { return window.ds.esc(text); }
 
@@ -73,13 +75,19 @@
 
   // 打开模型选择弹窗；返回 Promise<boolean>，true 表示用户切换了模型
   function open(scope) {
+    // F4b-L11：入口重入防护。弹窗骨架要等 loadSettings 回来才存在，期间 pickerCtrl 仍是 null，
+    // 连点两次会让两个 .then 各建一份骨架；modal 工厂的同 id 去重只摘 DOM、不走 close()
+    // （document keydown 不摘、焦点陷阱不归还）。第二次直接按「未切换」结算，不开第二份。
+    if (opening) return Promise.resolve(false);
     const scopeKey = SCOPE_META[scope] ? scope : 'contextmenu';
     const meta = SCOPE_META[scopeKey];
     close(false);
+    opening = true;
     return new Promise(resolve => {
       openResolve = resolve;
       loadSettings(true).then(data => {
-        // 防重入：若期间已有同名弹窗被挂载（快速重复触发），先移除旧弹窗，避免叠加导致"点两下才能关闭"
+        opening = false;
+        // 同名 DOM 残留兜底（骨架登记丢失、只剩节点时）：正常路径下入口标志位已挡住重入
         document.getElementById('modelPickerBackdrop')?.remove();
         const { list, scopes } = normalize(data || {});
         const current = (scopes && scopes[scopeKey]) || 'metaso';
@@ -181,6 +189,7 @@
         // 否则调用方 await 永久挂起（「点了没反应」）；此时弹窗可能尚未创建，
         // 按「未切换」结算并显性留痕。
         logOut('warn', '模型选择弹窗打开失败: ' + ((e && e.message) || e));
+        opening = false;
         pickerCtrl = null;
         if (openResolve) { openResolve(false); openResolve = null; }
       });

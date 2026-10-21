@@ -85,4 +85,15 @@
   // 滚动只作废几何快照（不灭光斑）：滚动后宿主的视口坐标变了，缓存的 rect 会失准，
   // 下一次 move 重量一次即可（原实现靠每事件重量自动校正，这里改成按需重量）。
   window.addEventListener('scroll', function () { currentRect = null; }, { passive: true, capture: true });
+
+  // F5-L13：系统「减少动态效果」运行中打开时立刻熄灭在途光斑，不能等下一次 pointermove。
+  // 残留的 .spot-active 会让宿主背景/描边保持高亮态；画布虽被 main.css 的 RM 段 display:none
+  // 挡住，行内 --spot-x/--spot-y 与 active 类仍在。MQL 统一走 ds.reducedMotionQuery()（A3-L06）。
+  (function bindReduceChange() {
+    var mq = window.ds && window.ds.reducedMotionQuery ? window.ds.reducedMotionQuery() : null;
+    if (!mq) return;
+    var onChange = function () { if (isReducedMotion()) setCurrent(null); };
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onChange);
+    else if (typeof mq.addListener === 'function') mq.addListener(onChange);
+  })();
 })();
