@@ -18,12 +18,13 @@
 .litebox{--rotate:0deg;--scale:1;--transition-duration:.25s;padding:0;position:fixed;top:0;left:0;width:100%;height:100%;background:#000a;justify-content:center;align-items:center;z-index:1000;pointer-events:none;opacity:0;display:flex!important;transition:opacity var(--transition-duration) ease;max-width:none;max-height:none;margin:0;overflow:hidden;user-select:auto}
 .litebox[open]{opacity:1;pointer-events:all}
 /* stage 包住「会旋转的图片容器」与「不旋转的箭头」：stage 尺寸随容器收缩，
-   箭头 inset 到 stage 内沿，因此贴的是图片边缘而不是窗口边缘。 */
+   箭头 inset 到 stage 内沿；stage 另留 64px 侧边距，因此箭头落在图片外的留白里（2026-10-22 目检后）。 */
+/* 2026-10-22 目检：左右箭头已收进底部工具条（cleanup.js 运行时搬移），stage 不再留侧边距。 */
 .litebox .lightbox-stage{position:relative;display:inline-flex;max-width:90%;max-height:90vh}
 .litebox .lightbox-container{position:relative;max-width:100%;max-height:90vh;transform-origin:center;transition:transform .3s ease;transform:rotateZ(var(--rotate))}
 .litebox .lightbox-image{max-width:100%;max-height:80vh;display:block;margin:0 auto;object-fit:contain;transform-origin:center;box-shadow:0 15px 50px #0009;transition:transform .2s ease;transform:scale(var(--scale));border-radius:6px}
 .litebox .lightbox-controls,.litebox .nav-controls{position:absolute;display:flex;z-index:10}
-.litebox .lightbox-controls{inset:0;align-items:center;justify-content:space-between;padding:0 12px;pointer-events:none}
+.litebox .lightbox-controls{inset:0;align-items:center;justify-content:space-between;padding:0 8px;pointer-events:none}
 .litebox .lightbox-controls button,.litebox .nav-controls button{border:0;border-radius:50%;fill:#fff;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);transition:background-color .2s ease,transform .2s ease,box-shadow .2s ease;box-shadow:0 4px 15px #0000004d}
 .litebox .lightbox-controls button{pointer-events:all;background:#ffffff26;width:48px;height:48px;flex:0 0 auto}
 .litebox .lightbox-controls button:hover{background:#ffffff40;transform:scale(1.08)}

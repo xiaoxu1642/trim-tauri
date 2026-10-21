@@ -1788,18 +1788,37 @@
   // 不改它的源码（vendored 文件除文件头登记的受控适配外与上游一致，便于同步）。
   function liteboxInjectDeleteButton() {
     const dialog = window.liteBox?.dialog;
-    if (!dialog || dialog.querySelector('#liteboxDeleteBtn')) return;
-    const controls = dialog.querySelector('.lightbox-controls');
-    if (!controls) return;
+    if (!dialog) return;
+    // 2026-10-22 目检：左右箭头从「覆盖在图片上的浮层」收进**底部工具条**，
+    // 顺序＝‹ › | + − ⟳ ⛶ | 删除 | 关闭。搬移节点保留上游绑定的事件监听；
+    // 搬完把空的浮层行移除，避免留一条不可见但吃点击的区域。
+    const nav = dialog.querySelector('.nav-controls');
+    const prev = dialog.querySelector('#prev-btn');
+    const next = dialog.querySelector('#next-btn');
+    if (nav && prev && next) {
+      const anchor = nav.querySelector('#zoom-in-btn') || null;
+      nav.insertBefore(prev, anchor);
+      nav.insertBefore(next, anchor);
+      const overlay = dialog.querySelector('.lightbox-controls');
+      if (overlay) overlay.remove();
+    }
+    if (dialog.querySelector('#liteboxDeleteBtn')) return;
+    // 删除按钮必须挂到**底部工具条** `.nav-controls`，并在关闭按钮之前。
+    // 2026-10-22 目检踩坑：挂进 `.lightbox-controls`（左右箭头那一行，space-between）时，
+    // 按钮被推到图片右缘、压在看图内容上——那一行的第三子元素就是「最右」。
+    const closeBtn = nav && nav.querySelector('#close-btn');
+    if (!nav) return;
     const btn = document.createElement('button');
     btn.id = 'liteboxDeleteBtn';
     btn.type = 'button';
+    btn.className = 'lb-action';
     btn.setAttribute('data-tip', '删除当前图片（进回收站）');
-    // 图标按钮无可见文本：可访问名必须显式给，不能只靠 data-tip 的 aria-describedby
+    // 图标+文字：可访问名由可见文字「删除」提供，另显式 aria-label 兜住读屏的缩写场景
     btn.setAttribute('aria-label', '删除当前图片（进回收站）');
-    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5z"/><path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v.5h-3V2a1 1 0 0 0-1-1h-3zm1 3h9v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4z"/></svg>';
+    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5z"/><path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v.5h-3V2a1 1 0 0 0-1-1h-3zm1 3h9v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4z"/></svg><span>删除</span>';
     btn.addEventListener('click', () => { liteboxDeleteCurrent(); });
-    controls.appendChild(btn);
+    if (closeBtn) nav.insertBefore(btn, closeBtn);
+    else nav.appendChild(btn);
   }
 
   // 灯箱当前显示图的原始路径：LiteBox 只存 URL，靠 data-src 反查容器里的源 img。
