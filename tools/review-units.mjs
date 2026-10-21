@@ -277,7 +277,10 @@ export const UNITS = [
   {
     id: 'F4c', owner: 'sub', name: '系统面板与更新脚本（新增前端脚本自动落入）',
     dirs: [{ dir: S, ext: ['.js'], depth: 1 }],
-    generated: [`${S}/cleanup-fallback.generated.js`, `${S}/icon-fallback.js`],
+    // v7.2 P1 · F4c-L15：`icon-fallback.js` 从本表摘掉 —— 它被标 generated 却没有任何生成器
+    // （现算 tools/ 里除本台账外无人点名它），内容是人写的同源兜底取法与订正说明。
+    // 「generated」的语义是**逐行读没有意义**，把手写模块放进来等于静默把它移出精读台账。
+    generated: [`${S}/cleanup-fallback.generated.js`],
     contract: 'syspanel / sysrestore / runtimes / fontmanager / deviceinfo / updater-ui 等（preview-window 已退役）',
     boundary: '本单元是前端脚本的兜底认领位，U4 会点名靠兜底进来的文件',
     gates: ['check-channel-map', 'check-subwindow-init'],

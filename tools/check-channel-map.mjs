@@ -127,6 +127,11 @@ const RETIRED = {
  * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
  */
 const TAURI_ADDED = {
+  // F4a2-M01（P1-W3 Phase2d）：外观域真源从 localStorage 迁到后端 appearance.json 的读回/写入通道。
+  // 刻意**不**复用 settings:set-pref：那条的值闸是「必须是布尔」，外观键是颜色串 / 数值 / 开关的
+  // 混合形状，靠一条布尔闸要么放宽它（等于拆掉「不能借体积闸灌任意形状」）、要么塞不进。
+  'appearance:get-prefs': 'F4a2-M01（2026-10-22，P1-W3）：外观域（强调色/背景图/雾化/壁纸轮换）真源迁到 appearance.json 后的类型化读回通道（主窗档）。上游 Electron 的外观只存渲染层 localStorage，没有后端读回接口',
+  'appearance:set-pref': 'F4a2-M01（2026-10-22，P1-W3）：同上写入通道；与 settings:set-pref 刻意分条——后者值闸只认布尔，本条按键各自声明形状与范围，非法值当场拒且拒因点名键（主窗档）',
   'startup:open-source': '2026-10-13：B-6 增强——点「位置」同时打开软件所在文件夹与登记来源（注册表项写 regedit LastKey 后拉起；计划任务项定位 System32\Tasks 落盘文件）',  'cleanup:allow-preview-assets': '2026-10-13：图片预览改主窗内嵌 LiteBox 后的 asset 按需放行命令（把本次预览的那组图加进 asset scope，替代退役的 fileclean:read-image dataURL 通道）',  'updater:completion': 'S3（2026-10-05）：新版本实例首领取一次「更新已完成」标记（读后即删，主窗档）。上游 Electron 的 ready-to-install 提示由主进程弹，没有渲染层查询接口',
   'uninstall:modify': 'P1-D6（2026-10-01）：修改/修复入口，执行 ModifyPath（主窗档）',
   'uninstall:pending-add': 'P1-B3（2026-10-01）：回收站失败项登记重启后删（主窗档）',

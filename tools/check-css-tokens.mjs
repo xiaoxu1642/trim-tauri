@@ -128,22 +128,41 @@ function curveOffenders(text, easeTokens) {
   const ease = new Set(['0.111,0.222,0.333,1']);
   const cBad = curveOffenders('.x { a: cubic-bezier(0.4,0,0.2,1); }', ease).length;
   const cOk = curveOffenders('.x { a: cubic-bezier(0.111, 0.222, 0.333, 1); }', ease).length;
-  if (!radiusOk || !undefOk || cBad !== 1 || cOk !== 0) {
-    console.error(`✗ 正向对照失败：圆角=${radiusOk} 未定义引用=${undefOk} 曲线越集=${cBad}（应 1） 曲线放行=${cOk}（应 0）——三组判定器至少一组失灵`);
+  // 写入未消费五向，各自独立：① 死槽未登记必红 ② 样式侧真吃了不红 ③ 登记豁免不红
+  // ④ 豁免项已被样式侧消费 ⇒ 登记失效 ⑤ 豁免项的写入点没了 ⇒ 登记失效
+  const j1 = judgeWriteUnconsumed(new Set(['--dead']), new Set(), new Set());
+  const j2 = judgeWriteUnconsumed(new Set(['--used']), new Set(['--used']), new Set());
+  const j3 = judgeWriteUnconsumed(new Set(['--exempt']), new Set(), new Set(['--exempt']));
+  const j4 = judgeWriteUnconsumed(new Set(['--exempt']), new Set(['--exempt']), new Set(['--exempt']));
+  const j5 = judgeWriteUnconsumed(new Set(), new Set(), new Set(['--gone']));
+  const writeOk = j1[0].join() === '--dead' && j1[1].length === 0
+    && j2[0].length === 0 && j2[1].length === 0
+    && j3[0].length === 0 && j3[1].length === 0
+    && j4[0].length === 0 && j4[1].join() === '--exempt'
+    && j5[0].length === 0 && j5[1].join() === '--gone';
+  if (!radiusOk || !undefOk || !writeOk || cBad !== 1 || cOk !== 0) {
+    console.error(`✗ 正向对照失败：圆角=${radiusOk} 未定义引用=${undefOk} 写入未消费=${writeOk} 曲线越集=${cBad}（应 1） 曲线放行=${cOk}（应 0）——四组判定器至少一组失灵`);
     process.exit(1);
   }
-  console.log('✓ 判定器自检：圆角档位 / 未定义引用 / 动效曲线 三组合成样本全对');
+  console.log('✓ 判定器自检：圆角档位 / 未定义引用 / 写入未消费 / 动效曲线 四组合成样本全对');
 }
 
 const defined = new Set();     // 定义面
 const declaredIn = new Map();  // 名字 -> 首个定义位置（报错时给读者一个去处）
 const refs = new Map();        // 名字 -> [{ at, hasFallback }]
+// 第三维度（v7.2 P1 · U-F1a-L08）：JS 运行期**写入**的名字集合，与「CSS 侧是否真吃这个变量」
+// 分开统计。为什么不能只看现有两个方向：定义面把 `setProperty('--x')` 也算定义，于是
+// 「JS 写、CSS 从不读」的死跨语言 API 在正向差集（引用−定义）里根本不存在，
+// 在反向棘轮（定义−引用）里只要登记过就放行 —— `--lg-mx/--lg-my` 就是这么绿了很久的。
+const writeNames = new Set();
+const cssRefs = new Set();     // 只由 src/styles/*.css 的 var() 填充（JS getPropertyValue 不算消费方）
 
 function collect(text, re, fn) {
   for (const m of text.matchAll(re)) fn(m);
 }
 
-function addDefinition(name, at) {
+function addDefinition(name, at, isWrite = false) {
+  if (isWrite) writeNames.add(name);
   if (!defined.has(name)) {
     defined.add(name);
     declaredIn.set(name, at);
@@ -184,7 +203,7 @@ for (const file of [...jsFiles, ...htmlFiles]) {
   const kind = file.slice(-4).toLowerCase();
   const text = kind === '.js' ? blankJsComments(raw) : kind === 'html' ? blankHtmlComments(raw) : raw;
   const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
-  collect(text, RE_SET, (m) => addDefinition(m[1], `${rel}:${lineOf(text, m.index)}`));
+  collect(text, RE_SET, (m) => addDefinition(m[1], `${rel}:${lineOf(text, m.index)}`, true));
   // 内联声明：字符串/模板里的 `--x: v`（style 属性、insertAdjacentHTML、setProperty 的拼接形态）
   for (const m of text.matchAll(RE_DEFINE)) {
     const before = text.slice(Math.max(0, m.index - 6), m.index);
@@ -215,6 +234,9 @@ for (const file of [...cssFiles, ...htmlFiles, ...jsFiles]) {
     // var() 的 fallback 判据：紧跟名字之后的第一个分隔符是逗号（不是括号）才算有兜底
     const hasFallback = /^\s*,/.test(text.slice(m.index + m[0].length));
     addReference(m[1], `${rel}:${lineOf(text, m.index)}`, hasFallback);
+    // 只有 `.css` 里的 var() 才算「样式侧真吃了这个变量」：JS 的 getPropertyValue 读回来
+    // 只可能在脚本里做算术，不产生样式，槽依然是死的 —— 那正是本档要抓的形态。
+    if (isCss) cssRefs.add(m[1]);
   }
   if (rel.endsWith('.js')) {
     collect(text, RE_GET, (m) => addReference(m[1], `${rel}:${lineOf(text, m.index)}`, false));
@@ -343,6 +365,36 @@ if (deadTokens.length || staleDead.length) {
   process.exit(1);
 }
 console.log(`✓ 反向棘轮：${defined.size} 个定义中零消费 ${DEAD_TOKEN_ALLOW.size} 条均有理由`);
+
+// ---- 写入未消费（v7.2 P1 · U-F1a-L08）：JS `setProperty` 写进 DOM、CSS 侧从不 `var()` 读 ----
+// 与上面两档的分工：正向差集管「引用了却没定义」，反向棘轮管「定义了却没人引用」，
+// 本档管**第三个维度**「写了但样式不吃」。前两个方向都看不见死跨语言 API：`setProperty`
+// 把名字算进了定义面，于是「JS 写、CSS 从不读」既不在引用−定义里，也能靠登记在定义−引用里放行。
+// 为什么判红而不做告警档：AGENTS §4.1 的口径是恒绿断言视同没写；死 API 长期挂账的代价是
+// 每次事件都同步做一次无用的写入与读取（`--lg-mx/--lg-my` 当年就附赠一次 getBoundingClientRect）。
+// 与 DEAD_TOKEN_ALLOW 分两张表不是重复实现同一判据：两者的问句不同（是否有 `var()` 消费
+// vs 是否有样式侧消费），同一条豁免要成立必须在各自的问句下写清理由。
+const WRITE_UNCONSUMED = new Map([
+  ['--accent-glow', 'pathbinding.applyAccent 整组派生后写回，样式侧待 pathbinding 单元收口再消费（F4a2 射程）'],
+  ['--accent-press', '同上：按下态与发光态同批派生，只登记一次口径、两条一起挂账'],
+]);
+
+/** 纯函数：返回 [未登记的「写入未消费」, 已失效的登记]，与自检共用同一实现（§5.16） */
+function judgeWriteUnconsumed(writes, cssConsumed, allow) {
+  const bad = [...writes].filter((n) => !cssConsumed.has(n) && !allow.has(n)).sort();
+  const stale = [...allow].filter((n) => !writes.has(n) || cssConsumed.has(n)).sort();
+  return [bad, stale];
+}
+{
+  const [wBad, wStale] = judgeWriteUnconsumed(writeNames, cssRefs, new Set(WRITE_UNCONSUMED.keys()));
+  if (wBad.length || wStale.length) {
+    for (const n of wBad) console.log(`✗ JS 写入但 CSS 从不消费：${n}（补样式消费方，或删写入点并撤登记）`);
+    for (const n of wStale) console.log(`✗ 「写入未消费」登记已失效（写入点已删或样式侧已消费）：${n}`);
+    console.log(`\n写入未消费缺口：${wBad.length} 个未登记 + ${wStale.length} 个失效登记`);
+    process.exit(1);
+  }
+  console.log(`✓ 写入未消费：JS 写入 ${writeNames.size} 个自定义属性，样式侧无消费方的 ${WRITE_UNCONSUMED.size} 条均有登记理由（${[...WRITE_UNCONSUMED.keys()].join(' / ')}）`);
+}
 
 // ---- 三值同步（T1d-M05）：--x ⇄ --x-rgb ⇄ --x-soft 的三通道必须同源 ----
 // `--protected` 一族已于 v7.2 P1 · U-F1a-L01 整族从 `main.css` 退役（ds.css 的死徽章规则

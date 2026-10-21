@@ -79,6 +79,12 @@ const MUST_MAIN = [
   'appearance_bg_import',
   'appearance_bg_list',
   'appearance_bg_open_dir',
+  // 外观域偏好（真源从 localStorage 迁到 appearance.json）：现算消费方只有
+  // `src/scripts/pathbinding.js`，而它只被 `src/index.html` 加载（三个子窗挂的是
+  // `window-material.js`，只管材质）⇒ 按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
+  // 判成 readonly 会同时撞 check-channel-map 的 D5 棘轮（只读档却无子窗调用点即红）。
+  'appearance_get_prefs',
+  'appearance_set_pref',
   'cleanup_execute',
   // G-2 全局年龄策略：读写都只从主窗设置页发起（同 finder_ignore_* 三命令口径）
   'cleanup_age_policy',

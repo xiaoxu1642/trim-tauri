@@ -1,5 +1,5 @@
 // tauri-api.js - Tauri 适配层（零依赖、零模块加载器）
-// defer 链首位加载（theme-boot.js 是更早的同步无 IPC 主题脚本；旧注释称「脚本链最前面」与实际不符，F2-L09 订正）。
+// defer 链首位加载（theme-boot.js 是更早的同步无 IPC 主题脚本）。
 // 职责：复刻 preload.js 暴露的 window.api 形状，把 Electron IPC 转成 Tauri 命令，渲染层调用点零改动。
 // 双轨约定：检测到 window.__TAURI_INTERNALS__ 才接管；Electron 下直接 return。
 // 协议按 @tauri-apps/api 2.x 实测：invoke(cmd, args)；回调 transformCallback(cb, once) -> id 与 unregisterCallback(id)；
@@ -64,7 +64,7 @@
     'cleanup:item-detail': 'cleanup_item_detail',
     'cleanup:age-policy': 'cleanup_age_policy',
     'cleanup:set-age-policy': 'cleanup_set_age_policy',
-    // G-4：回收站清空改 Shell API（选项 B）——查询条目数与体积 / 清空（不可逆）
+    // G-4：回收站条目数/体积查询与清空（清空不可逆；档位理由见 check-guard-tiers）
     'cleanup:recycle-stats': 'cleanup_recycle_stats',
     'cleanup:empty-recycle-bin': 'cleanup_empty_recycle_bin',
     'cleanup:open-recycle-bin': 'cleanup_open_recycle_bin',
@@ -96,8 +96,8 @@
     'uninstall:report-list': 'uninstall_report_list',
     'uninstall:report-get': 'uninstall_report_get',
     'uninstall:appx-logo': 'uninstall_appx_logo',
-    // contextmenu（8→5）：backup/remove/restore 2026-10-09 随「删除链整链退役」用户裁定（D3）
-    // 同撤（命令 + 原生实现 + 桥接 + 前端入口一并摘除；本页只保留启停能力）。
+    // contextmenu（5）：backup/remove/restore 已随 D3 用户裁定整链退役（退役理由与撤除面
+    // 登记在 check-channel-map 的 RETIRED 表），本页只保留启停能力。
     'contextmenu:scan': 'contextmenu_scan',
     'contextmenu:toggle': 'contextmenu_toggle',
     'contextmenu:icons': 'contextmenu_icons',
@@ -123,7 +123,7 @@
     'fonts:import': 'fonts_import',
     'fonts:remove-imported': 'fonts_remove_imported',
     'fonts:save-config': 'fonts_save_config',
-    // appearance（8）
+    // appearance（10）
     'appearance:get-material': 'appearance_get_material',
     'appearance:set-material': 'appearance_set_material',
     'appearance:set-material-enabled': 'appearance_set_material_enabled',
@@ -132,6 +132,8 @@
     'appearance:bg-delete': 'appearance_bg_delete',
     'appearance:bg-list': 'appearance_bg_list',
     'appearance:bg-open-dir': 'appearance_bg_open_dir',
+    'appearance:get-prefs': 'appearance_get_prefs',
+    'appearance:set-pref': 'appearance_set_pref',
     // aidesc / diskbench
     'aidesc:get': 'aidesc_get',
     'diskbench:run': 'diskbench_run',
@@ -175,7 +177,7 @@
     'memory:kill': 'memory_kill',
     'processManager:open-window': 'process_manager_open_window',
     'processManager:close-window': 'process_manager_close_window',
-    // residue 窗口（2）—— v0.5.0 残留扫描副窗（用户裁决 4：扫描全在副窗，主窗只留入口）
+    // residue 副窗：扫描全在副窗，主窗只留入口（用户裁决 4）
     'residue:open-window': 'residue_open_window',
     'residue:close-window': 'residue_close_window',
     'peripheral:query': 'peripheral_query',
@@ -212,7 +214,7 @@
     'startup:openlocation': 'startup_openlocation',
     'startup:open-source': 'startup_open_source',
     'startup:add': 'startup_add',
-    // syspanel（P2 §3.6：电源计划 + 虚拟内存面板，只在主窗 Windows设置 页调用）
+    // syspanel：电源计划 + 虚拟内存面板（只在主窗设置页调用）
     'syspanel:power-plan-get': 'syspanel_power_plan_get',
     'syspanel:power-plan-apply': 'syspanel_power_plan_apply',
     'syspanel:power-settings-dump': 'syspanel_power_settings_dump',
@@ -233,7 +235,7 @@
     'syspanel:pagefile-apply': 'syspanel_pagefile_apply'
   };
 
-  // F2-L03：契约层自身的失败也要进用户侧日志（console 用户看不见）；判 window.api 存在再写，写失败静默——绝不因记日志再抛错。
+  // F2-L03：契约层自身的失败也要进用户侧日志（console 用户看不见）；写失败静默，绝不因记日志再抛错。
   function bridgeLog(level, text) {
     try {
       if (window.api && window.api.log) window.api.log.write(level, text).catch(function () {});
@@ -539,7 +541,9 @@
       importBg: function () { return invokeChannel('appearance:bg-import'); },
       deleteBg: function (file) { return invokeChannel('appearance:bg-delete', { file: file }); },
       listBg: function () { return invokeChannel('appearance:bg-list'); },
-      openBgDir: function () { return invokeChannel('appearance:bg-open-dir'); }
+      openBgDir: function () { return invokeChannel('appearance:bg-open-dir'); },
+      getPrefs: function () { return invokeChannel('appearance:get-prefs'); },
+      setPref: function (key, value) { return invokeChannel('appearance:set-pref', { key: key, value: value }); }
     },
 
     aidesc: {

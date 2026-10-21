@@ -30,6 +30,8 @@ import { styleLinks } from './lib/html-tags.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const S = 'src/styles';
 const SELF_TEST = process.argv.includes('--self-test');
+// 现算输出 ds.css ⇄ main.css 同特异度键集合，供 S3b 棘轮回填基线用（不判红、只打印 JSON 数组）
+const EMIT_DS_PAIRS = process.argv.includes('--emit-ds-pairs');
 const g = gate(import.meta.url);
 
 const MAIN_HTML = 'src/index.html';
@@ -260,26 +262,82 @@ if (mainRules.length < 500 || pagesRules.length < 100 || dsRules.length < 20) {
   else g.ok(`S3. main-pages.css 与 main.css 之间无「同特异度 + 共享 token + 属性相交」对（${pagesRules.length} 条逐条比对）`);
 }
 
-// T1d-M06：ds.css 是**后置覆盖层**（S1b 已钉加载序），同特异度覆盖是设计而非冲突；
-// 这里仍按同一判据计数，让「覆盖面有多大」可见（不判红，避免把设计当回归）。
+// T1d-M06 → v7.2 P1 · U-F1b-L02：ds.css 是**后置覆盖层**（S1b 已钉加载序），存量同特异度覆盖是
+// 设计而非冲突；但「靠加载序压住的双份实现」正是 U-F1b-L02 的成因形态，只计数不判红就等于
+// 允许它再长。这里升级成**棘轮**：键集合 `{归一化选择器|属性}` 与冻结基线对拍，新增即红、
+// 消失只打印（棘轮只收紧不放宽）。判据与 S3 共用同一份 selInfo / declProps（§5.16 不另写一套）。
+// 基线不手抄：`node tools/check-subwindow-css.mjs --emit-ds-pairs` 现算输出后回填本常量。
+const normSelKey = (prelude, prop) => `${prelude.replace(/\s+/g, ' ').trim()}|${prop}`;
+// 基线是**代码里的冻结清单**，不走环境变量：能从外部注入的基线等于没有基线（一注入就永久绿）。
+// 回填姿势：`node tools/check-subwindow-css.mjs --emit-ds-pairs` 现算输出，粘进下面数组。
+// 2026-10-22 现算回填（U-F1b-L02 删掉 main.css 那半之后）：37 条键，其中 .badge.off /
+// .startup-badge.on|off / .ds-badge.warn|ok 四族正是该条目的成因形态，已随条目收敛。
+const DS_PAIR_BASELINE_RAW = [
+  '.badge.off|background', '.badge.off|color',
+  '.ds-badge.ok|background', '.ds-badge.ok|color',
+  '.ds-badge.sm::before|height', '.ds-badge.sm::before|width',
+  '.ds-badge.warn|background', '.ds-badge.warn|color',
+  '.ds-badge::before|background', '.ds-badge::before|border-radius',
+  '.ds-badge::before|content', '.ds-badge::before|flex-shrink',
+  '.ds-badge::before|height', '.ds-badge::before|width',
+  '.ds-menu-item.danger:hover, .ds-menu-item.danger:focus-visible|background',
+  '.ds-menu-item:hover, .ds-menu-item:focus-visible|background',
+  '.ds-menu-item:hover, .ds-menu-item:focus-visible|color',
+  '.ds-menu-item:hover, .ds-menu-item:focus-visible|outline',
+  '.ds-menu-item[aria-disabled="true"]:hover|background',
+  '.ds-menu-item[aria-disabled="true"]:hover|color',
+  '.startup-badge.off|background', '.startup-badge.off|color',
+  '.startup-badge.on|background', '.startup-badge.on|color',
+  '.toggle-switch input:checked + .toggle-track .toggle-thumb|background',
+  'input[type="range"].ds-slider::-webkit-slider-thumb|background',
+  'input[type="range"].ds-slider::-webkit-slider-thumb|border',
+  'input[type="range"].ds-slider::-webkit-slider-thumb|border-radius',
+  'input[type="range"].ds-slider::-webkit-slider-thumb|height',
+  'input[type="range"].ds-slider::-webkit-slider-thumb|width',
+  'input[type="range"].ds-slider:focus-visible|outline',
+  'input[type="range"].ds-slider:focus-visible|outline-offset',
+  'input[type="range"].ds-slider|background',
+  'input[type="range"].ds-slider|border-radius',
+  'input[type="range"].ds-slider|cursor',
+  'input[type="range"].ds-slider|height',
+];
+const DS_PAIR_BASELINE = new Set(DS_PAIR_BASELINE_RAW);
+
+/** 棘轮判据本体（真仓扫描与 selfTest 共用同一实现，§5.16）：返回 [新增键, 消失键] */
+function judgeDsPairs(got, baseline) {
+  return [
+    [...got].filter((k) => !baseline.has(k)).sort(),
+    [...baseline].filter((k) => !got.has(k)).sort(),
+  ];
+}
 {
   const mainIdx = new Map();
   for (const r of mainRules) {
     const s = selInfo(r.prelude);
     for (const t of s.tok) { if (!mainIdx.has(t)) mainIdx.set(t, []); mainIdx.get(t).push({ r, s, props: declProps(r.body) }); }
   }
-  let pairs = 0;
+  const got = new Set();
   for (const r of dsRules) {
     const s = selInfo(r.prelude);
     if (!s.cls.length && !s.ids.length) continue;
     const props = declProps(r.body);
     for (const t of s.tok) {
       for (const m of mainIdx.get(t) || []) {
-        if (m.s.spec === s.spec && [...props].some((p) => m.props.has(p))) { pairs++; break; }
+        if (m.s.spec !== s.spec) continue;
+        for (const p of props) if (m.props.has(p)) got.add(normSelKey(r.prelude, p));
       }
     }
   }
-  g.ok(`S3b. ds.css 后置覆盖 main.css 的同特异度对 ${pairs} 处（S1b 已钉加载序，按设计不判红）`);
+  if (EMIT_DS_PAIRS) {
+    console.log(JSON.stringify([...got].sort()));
+    process.exit(0);
+  }
+  const [grew, vanished] = judgeDsPairs(got, DS_PAIR_BASELINE);
+  if (grew.length) {
+    g.fail(`S3b. ds.css 新增「与 main.css 同特异度且属性相交」的双份实现 ${grew.length} 处：${grew.slice(0, 5).join(' ; ')}（要么删 main.css 那半、让 ds.css 成真源，要么把特异性写清，别靠加载序压）`);
+  } else {
+    g.ok(`S3b. ds.css ⇄ main.css 同特异度对 ${got.size} 处，无新增（基线 ${DS_PAIR_BASELINE.size}，已消失 ${vanished.length} 只打印不判红——棘轮只收紧不放宽）`);
+  }
 }
 
 // ---------- S4 token 真源 ----------
@@ -332,6 +390,16 @@ function selfTest() {
     if (nested.length !== 2) problems.push(`嵌套解析得到 ${nested.length} 条（应为 2）⇒ S3 会漏判`);
     const quoted = parseRules('.zz-quote { content: "a{b}"; }\n.zz-after { color: red; }');
     if (quoted.length !== 2) problems.push(`引号内花括号打断了块边界（得到 ${quoted.length} 条）`);
+  }
+  // ⑥ S3b 棘轮对照：新增键必须抓到、收缩后的集合不得误红、基线里消失的键要数得出来
+  {
+    const base = new Set(['.a|color', '.b|background']);
+    const [grewOk] = judgeDsPairs(new Set(['.a|color', '.b|background', '.c|width']), base);
+    const [grewNone] = judgeDsPairs(new Set(['.a|color']), base);
+    const [, gone] = judgeDsPairs(new Set(['.a|color', '.b|background']), new Set(['.a|color', '.b|background', '.z|height']));
+    if (grewOk.length !== 1 || grewOk[0] !== '.c|width') problems.push(`S3b 对照：新增键没被抓到（实到 ${JSON.stringify(grewOk)}）⇒ 棘轮恒绿`);
+    if (grewNone.length !== 0) problems.push('S3b 对照：收缩后的集合被判成新增 ⇒ 棘轮会误红');
+    if (gone.length !== 1) problems.push('S3b 对照：消失键计数异常（只打印的口径也要求数得出来）');
   }
   return problems;
 }

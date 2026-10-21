@@ -354,6 +354,203 @@ fn settings_set_pref_rejects_unknown_key() {
     assert!(msg.contains("未知的偏好键"), "拒绝理由要点名白名单: {res}");
 }
 
+// ==================== 外观域真源（appearance:get-prefs / set-pref） ====================
+//
+// F4a2-M01：强调色 / 背景图 / 雾化 / 壁纸轮换十一个键的真源从 localStorage 迁到
+// `appearance.json`。这三条用例各钉住一个失效方向：
+// - 形状表与键表脱节（前端推的键被判未知、或后端回了渲染层没准备的键）；
+// - 档位判 MAIN 这条被偷偷放宽（子窗拿到「写用户外观」的通道）；
+// - 形状闸退化成「一律收」或「一律拒」（两种都让界面看起来正常而设置不落地）。
+
+/// 形状断言（按渲染层消费口径写）：`syncAppearanceFromBackend` 逐键读 `data[key]` 并只区分
+/// 「null = 未设置」与「非 null = 后端为准」，所以每个声明键都**必须在场**（缺一个键就会
+/// 被读成 undefined ⇒ 塌成界面默认值，用户设置看起来被吞掉）。`degraded` 必须是布尔——
+/// 渲染层用它决定「本轮不按全部未处理迁移」。
+#[test]
+fn appearance_get_prefs_shape_covers_every_declared_key() {
+    let w = main_window();
+    let res = invoke(&w, "appearance_get_prefs", json!({}));
+    assert_eq!(res["success"], json!(true), "get-prefs 应成功: {res}");
+    assert!(
+        res["degraded"].is_boolean(),
+        "degraded 必须是布尔（渲染层据此区分读失败与未设置）: {res}"
+    );
+    let data = res["data"].as_object().expect("data 必须是对象");
+    let mut keys: Vec<&str> = data.keys().map(|s| s.as_str()).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "accent",
+            "bgBlur",
+            "bgOpacity",
+            "bgOpacityFog",
+            "bgPath",
+            "bgPosX",
+            "bgPosY",
+            "presetBg",
+            "wallpaperBlur",
+            "wallpaperInterval",
+            "wallpaperRotate",
+        ],
+        "外观域声明键必须逐个在场（值为 null 也算在场）: {res}"
+    );
+}
+
+/// 档位负例：外观偏好是**写用户界面状态**的通道，现算消费方只有主窗设置页的 pathbinding
+/// （`src/index.html` 加载，三个子窗挂的是 `window-material.js`）⇒ 判 MAIN。
+/// 这条钉住「放宽成 readonly」的方向：主窗必须真的越过档位（`reached` 点名正向回执），
+/// 每个子窗 label 必须被来源校验拒杀。
+#[test]
+fn appearance_prefs_tier_is_main_window_only() {
+    let w = main_window();
+    let text = invoke_text(&w, "appearance_get_prefs", json!({}));
+    let mut reached: Vec<&str> = Vec::new();
+    common::assert_guard_passed(&text, "主窗读外观偏好", &["success", "data"]);
+    reached.push("main");
+    for label in sub_windows() {
+        let sw = window_with_label(label);
+        let denied = invoke_text(&sw, "appearance_get_prefs", json!({}));
+        assert!(
+            denied.contains("IPC 来源校验失败"),
+            "{label} 窗调外观偏好必须被拒杀，回执 {denied}"
+        );
+        let denied_write = invoke_text(
+            &sw,
+            "appearance_set_pref",
+            json!({ "key": "accent", "value": "#000000" }),
+        );
+        assert!(
+            denied_write.contains("IPC 来源校验失败"),
+            "{label} 窗写外观偏好必须被拒杀（放宽=把写用户外观暴露给子窗），回执 {denied_write}"
+        );
+    }
+    assert_eq!(reached, vec!["main"], "只有主窗应越过档位（实到 {reached:?}）");
+}
+
+/// 形状闸的反向对照（全部**零副作用**：拒发生在落盘之前 ⇒ 进快速组）。
+/// 每条断言都点名「哪个键、拒因里出现什么措辞」——只断 `success == false` 的话，
+/// 校验器整条退化成「一律拒」也照样绿（§4.1 假绿防线）。
+#[test]
+fn appearance_set_pref_rejects_bad_shape_before_writing() {
+    let w = main_window();
+    // (键, 不受信值, 拒因里必须出现的期望形状措辞)
+    let vectors: &[(&str, serde_json::Value, &str)] = &[
+        ("accent", json!("6A59C9"), "#rrggbb"),
+        ("accent", json!("#6A59CG"), "#rrggbb"),
+        ("bgOpacity", json!("20"), "0-100 的百分比数值"),
+        ("bgOpacity", json!(101), "0-100 的百分比数值"),
+        ("bgBlur", json!([12]), "0-100 的百分比数值"),
+        ("wallpaperRotate", json!("1"), "布尔值"),
+        ("presetBg", json!("wp-mountain"), "预设背景"),
+        ("wallpaperInterval", json!(4), "整数秒数的壁纸轮换间隔"),
+        ("wallpaperInterval", json!("10"), "整数秒数的壁纸轮换间隔"),
+        ("bgPath", json!(r"C:\a\b.txt"), "图片文件路径"),
+    ];
+    let mut reached: Vec<String> = Vec::new();
+    for (key, value, expect_in_reason) in vectors {
+        let res = invoke(
+            &w,
+            "appearance_set_pref",
+            json!({ "key": key, "value": value }),
+        );
+        assert_eq!(res["success"], json!(false), "{key}={value} 不该被收: {res}");
+        let msg = common::message_of(&res);
+        assert!(msg.contains(key), "拒因必须点名是哪个键，实得 {msg}");
+        assert!(
+            msg.contains(expect_in_reason),
+            "{key} 的拒因要说明期望形状（含「{expect_in_reason}」），实得 {msg}"
+        );
+        reached.push(format!("{key}=>{expect_in_reason}"));
+    }
+    assert_eq!(
+        reached.len(),
+        vectors.len(),
+        "每条不受信向量都必须各自命中拒因（实到 {reached:?}）——少一条就是用例没在测东西"
+    );
+    // 白名单外的键当场拒（防借外观通道往 appearance.json 塞任意键）
+    let unknown = invoke(
+        &w,
+        "appearance_set_pref",
+        json!({ "key": "__trim_smoke_key__", "value": true }),
+    );
+    assert_eq!(unknown["success"], json!(false), "白名单外键必须被拒: {unknown}");
+    assert!(
+        common::message_of(&unknown).contains("未知的外观键"),
+        "拒因要点名白名单: {unknown}"
+    );
+    // 材质两键不得从通用偏好通道写（它们各自绑着全窗应用 + 广播，绕过命令等于绕过应用链）
+    for material_key in ["material", "materialEnabled"] {
+        let res = invoke(
+            &w,
+            "appearance_set_pref",
+            json!({ "key": material_key, "value": "mica" }),
+        );
+        assert_eq!(res["success"], json!(false), "{material_key} 不得走偏好通道: {res}");
+    }
+}
+
+/// 正向对照 + 写盘往返：合法值必须**收**、get-prefs 必须读回同一个值，且写 `bgOpacity`
+/// 要顺带把雾化标记置真（漏标的话启动期 `migrate_bg_opacity_fog` 会把已是雾化语义的值
+/// 再取反一遍——用户拖到 20% 重启变成 80%，且只有真机重启才看得见）。
+/// 触盘 ⇒ 进 `#[ignore]`：写的是集成测试注入的 `TRIM_TEST_DATA_ROOT`，不碰用户目录。
+#[test]
+#[ignore = "写 appearance.json（集成测试注入的数据根，非用户真实目录），发布前门禁跑"]
+fn appearance_set_pref_accepts_legal_values_roundtrip() {
+    let w = main_window();
+    let mut reached: Vec<String> = Vec::new();
+    let legal: &[(&str, serde_json::Value)] = &[
+        ("accent", json!("#6A59C9")),
+        ("bgOpacity", json!(20)),
+        ("bgPosX", json!(50)),
+        ("presetBg", json!("")),
+        ("wallpaperRotate", json!(true)),
+        ("wallpaperInterval", json!(300)),
+        ("wallpaperBlur", json!(20)),
+        ("bgPath", json!(r"C:\fake\backgrounds\bg_1.png")),
+    ];
+    for (key, value) in legal {
+        let res = invoke(
+            &w,
+            "appearance_set_pref",
+            json!({ "key": key, "value": value }),
+        );
+        assert_eq!(res["success"], json!(true), "{key}={value} 是合法形状，必须被收: {res}");
+        reached.push(key.to_string());
+    }
+    assert_eq!(reached.len(), legal.len(), "合法向量必须逐条走过（实到 {reached:?}）");
+
+    let read = invoke(&w, "appearance_get_prefs", json!({}));
+    for (key, value) in legal {
+        assert_eq!(
+            read["data"][key],
+            *value,
+            "{key} 写进去的值必须原样读回（渲染层按值直接灌控件与 CSS 变量）: {read}"
+        );
+    }
+    // 写 bgOpacity 顺带补标记：这条是「启动期不再二次取反」的唯一机检点
+    assert_eq!(
+        read["data"]["bgOpacityFog"],
+        json!(true),
+        "写 bgOpacity 必须同时把雾化标记置真，否则下次启动会把新值再取反一遍: {read}"
+    );
+
+    // 清除语义：null 删键；删完读回 null（渲染层据此回落到镜像，而不是拿旧值反压界面）
+    let cleared = invoke(
+        &w,
+        "appearance_set_pref",
+        json!({ "key": "accent", "value": null }),
+    );
+    assert_eq!(cleared["success"], json!(true), "null 必须被当清除接受: {cleared}");
+    assert_eq!(cleared["cleared"], json!(true), "回执必须点名这是清除: {cleared}");
+    let after = invoke(&w, "appearance_get_prefs", json!({}));
+    assert_eq!(
+        after["data"]["accent"],
+        json!(null),
+        "清除后该键必须读回 null（在场但未设置）: {after}"
+    );
+}
+
 // ==================== 卸载残留链三道闸（M1 安全收口 2026-09-28） ====================
 //
 // 覆盖对象是**命令边界**而不是判定函数本身（判定函数的正反例在 lib 单测里由

@@ -109,6 +109,48 @@ export function detectOverCap(units, sizeOf, cap) {
 }
 
 /** U5：台账塌缩地板。 */
+/**
+ * U5c 判据本体（纯函数，真仓与合成样本共用同一实现）：台账里标了 `generated` 的件，
+ * 必须能在 `tools/` 的某个**非台账自身**文件里被点名 —— 追不到出处就是把手写模块
+ * 静默移出了精读面（F4c-L15 的成因形态）。
+ * @param {Array<{id:string, generated?:string[]}>} units
+ * @param {(name:string)=>string[]} readersOf 给定 basename，返回点名它的仓内文件（已排除台账自指）
+ */
+export function detectOrphanGenerated(units, readersOf) {
+  const out = [];
+  for (const u of units ?? []) {
+    for (const f of u.generated ?? []) {
+      const base = f.split('/').pop();
+      const readers = readersOf(base);
+      if (!readers.length) out.push(`${u.id} → ${f}（tools/ 里除台账自身外无人点名，找不到生成器）`);
+    }
+  }
+  return out;
+}
+
+/** 现算点名索引：扫 tools/**\/*.mjs（含 lib/），剥掉台账自指两件，返回 basename → 引用方清单。 */
+function buildGeneratedReaderIndex(root) {
+  const SELF = new Set(['review-units.mjs', 'check-review-units.mjs']);
+  const hits = new Map();
+  const scan = (dir, relBase) => {
+    for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
+      if (e.name.startsWith('.')) continue;
+      const rel = relBase ? `${relBase}/${e.name}` : e.name;
+      if (e.isDirectory()) { scan(join(dir, e.name), rel); continue; }
+      if (!e.name.endsWith('.mjs') || SELF.has(e.name)) continue;
+      const text = readFileSync(join(root, dir, e.name), 'utf8');
+      // 交替分支必须**长形式在前**并带尾部锚：`(?:js|json)` 会把 `x.json` 截成 `x.js`
+      // （正则引擎试到 `js` 就收，没有边界要求），于是 .json 生成物永远查不到出处 ⇒ 假红。
+      for (const m of text.matchAll(/([\w.-]+\.(?:json|mjs|js|ps1|rs))(?![\w.-])/g)) {
+        if (!hits.has(m[1])) hits.set(m[1], []);
+        hits.get(m[1]).push(`tools/${rel}`);
+      }
+    }
+  };
+  scan('tools', '');
+  return (base) => hits.get(base) ?? [];
+}
+
 export function detectFloor({ units, cross, anti }) {
   const out = [];
   if (units.length < FLOOR.longitudinal) out.push(`纵向单元 ${units.length} < 地板 ${FLOOR.longitudinal}`);
@@ -234,6 +276,25 @@ const POSITIVE_CONTROLS = [
       });
       return collapsed.out.length >= 3 && noBoundary.out.length === FLOOR.longitudinal
         && real.out.length === 0 && real.dupIds.length === 0;
+    },
+    expect: (v) => v === true,
+  },
+  {
+    // U5c 对照：手写件被误标 generated（无生成器点名）必须抓到；有出处的不得假红；
+    // 真仓台账整表喂进去必须 0 孤儿（否则本轮就是靠这条把 icon-fallback.js 捞回精读面的）。
+    label: 'U5c 标 generated 却无生成器出处必判红 / 可追到出处不假红',
+    run: () => {
+      const index = new Map([['gen.js', ['tools/make-gen.mjs']]]);
+      const readersOf = (base) => index.get(base) ?? [];
+      const orphan = detectOrphanGenerated([{ id: 'F9', generated: ['src/scripts/hand-written.js'] }], readersOf);
+      const okCase = detectOrphanGenerated([{ id: 'F9', generated: ['src/scripts/gen.js'] }], readersOf);
+      const noGenerated = detectOrphanGenerated([{ id: 'F9', files: ['a.js'] }], readersOf);
+      const real = detectOrphanGenerated(
+        UNITS.map((u) => ({ id: u.id, generated: u.generated })),
+        buildGeneratedReaderIndex(ROOT),
+      );
+      return orphan.length === 1 && orphan[0].includes('hand-written.js')
+        && okCase.length === 0 && noGenerated.length === 0 && real.length === 0;
     },
     expect: (v) => v === true,
   },
@@ -393,6 +454,19 @@ const floor = detectFloor({ units: UNITS, cross: CROSS_UNITS, anti: ANTI_UNITS }
 check(floor.out.length === 0 && floor.dupIds.length === 0,
   `U5 地板与完整性（纵向 ${UNITS.length} ≥${FLOOR.longitudinal} · 横切 ${CROSS_UNITS.length} · 反模式 ${ANTI_UNITS.length} · 主审面 4）`,
   [...floor.out, ...floor.dupIds.map((i) => `单元 ID 重复：${i}`)].slice(0, 8).join('、'));
+
+// U5c（v7.2 P1 · F4c-L15）：标了 `generated` 的件必须真能追到生成器。
+// 为什么这条必须判红而不只是打印：`generated` 的语义是「逐行读没有意义」，于是它同时是
+// 一张**免检通行证**——一个手写模块被误标进来，就从精读台账里静默消失（F4c 的
+// `icon-fallback.js` 正是这种：47 行人写的同源兜底取法与订正说明，盘上没有任何生成器）。
+// 判据用「tools/ 里除台账自身外，有没有文件点名这件的 basename」：这不是在证明生成器正确，
+// 只是在证明「它不是我手写的」这件事有一个可查的出处；查不到就把条目退回精读面。
+{
+  const readersOf = buildGeneratedReaderIndex(ROOT);
+  const orphans = detectOrphanGenerated(unitsWithClaims, readersOf);
+  check(orphans.length === 0, 'U5c 生成物台账⇄生成器出处可追（标 generated 却无人点名 = 静默免检）',
+    orphans.slice(0, 8).join('、'));
+}
 
 // 逐单元台账（派单时直接抄这张表，不手抄数字）
 info('\n单元台账（现算，精读行数不含生成物）：');

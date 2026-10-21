@@ -586,7 +586,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::peripheral::peripheral_query,
         commands::peripheral::peripheral_apply,
         commands::peripheral::peripheral_restore_backup,
-        // ---- E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理，8 条）----
+        // ---- E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好，10 条）----
         commands::appearance::appearance_get_material,
         commands::appearance::appearance_set_material,
         commands::appearance::appearance_set_material_enabled,
@@ -595,6 +595,8 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::appearance::appearance_bg_delete,
         commands::appearance::appearance_bg_list,
         commands::appearance::appearance_bg_open_dir,
+        commands::appearance::appearance_get_prefs,
+        commands::appearance::appearance_set_pref,
         // ---- E 批：elevate（UAC 自提权 + 新旧实例交接）----
         commands::elevate::elevate_request,
         // ---- E 批：updater（多线路容灾 + minisign 断代，6 条）----

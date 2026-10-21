@@ -347,6 +347,36 @@
 
   function escapeHtml(text) { return window.ds.esc(text); }
 
+  // F4a2-M01：外观域真源已迁到 `appearance.json`（与材质同文件、同一条读-改-写原语）。
+  // 老键 `trim-appearance` 降级为**镜像 + 兜底初值**，迁移完成前不得删除——存量用户的这套
+  // 状态目前只存在那儿。口径与 F4a1-M08 一致：读时后端优先、后端未设置时用老键现值迁移上去；
+  // 写时两边都写。启动期读这份镜像的第二消费点（`theme.js` 的 applySkinAndPreset）因此
+  // 每次写都必须同步更新镜像。
+  const APPEARANCE_PREF_KEYS = [
+    { key: 'accent' },
+    { key: 'bgPath' },
+    { key: 'bgOpacity' },
+    { key: 'bgOpacityFog' },
+    { key: 'bgPosX' },
+    { key: 'bgPosY' },
+    { key: 'bgBlur' },
+    { key: 'presetBg' },
+    // 镜像存 '1' / ''（复选框时代的字符串哨兵），真源存布尔：换算只许有这一处定义，
+    // 前后端各转一次就是 AGENTS §5.16 判禁止的「同一判定两份实现」。
+    { key: 'wallpaperRotate', toBackend: (v) => v === '1', fromBackend: (v) => (v ? '1' : '') },
+    // 镜像存 <select> 的字符串秒数，真源存整数秒
+    { key: 'wallpaperInterval', toBackend: (v) => Number(v), fromBackend: (v) => String(v) },
+    { key: 'wallpaperBlur' },
+  ];
+
+  // 真源侧的回读快照：null = 尚未回读；对象 = 已回读（值 null = 后端未设置该键）。
+  // 增量推账就记在这份快照上，写失败的键不落账 ⇒ 下一次写会自然重试。
+  let apBackendState = null;
+  let apPushTimer = null;
+  // initAppearance 绑好控件后登记的「按真源值重放界面」出口（后端回读是异步的，晚于首帧展示）。
+  let appearanceApply = null;
+  let wpBlurApply = null;
+
   function loadAppearance() {
     try {
       const v = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || '{}');
@@ -355,6 +385,106 @@
   }
   function saveAppearance(v) {
     try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(v)); } catch (e) {}
+    queueAppearancePush(v);
+  }
+
+  // 写两边的真源半边：整份镜像同步落 localStorage（原有语义，重启首帧仍靠它），真源按键**增量**推。
+  // 增量而不是整表：滑块拖动一次会打上百次 saveAppearance，整表推 = 上百次读-改-写盘。
+  // 150ms 合并窗口内恰好退出的丢失风险由下一次进页的回读兜住——后端缺该键时镜像现值会被推上去。
+  function queueAppearancePush(snapshot) {
+    // 真源尚未回读（apBackendState 为 null）时一律不推：本文件求值期就有两处一次性迁移
+    // （skin→模糊、bgOpacity→雾化）会写镜像，若此刻整表推上去，「后端优先」会被反转成
+    // 「镜像反压后端」——存量用户后端里更新过的值被老镜像盖掉。
+    // 回读失败/降级同样不推：行为退回迁移前（只用镜像），而不是猜后端。
+    if (!apBackendState) return;
+    if (!window.api?.appearance?.setPref) return; // 桥未就位：只写镜像（与迁移前同形）
+    const v = snapshot ? { ...snapshot } : {};
+    clearTimeout(apPushTimer);
+    apPushTimer = setTimeout(() => { pushAppearanceDiff(v); }, 150);
+  }
+
+  async function pushAppearanceDiff(snapshot) {
+    for (const spec of APPEARANCE_PREF_KEYS) {
+      const mirror = snapshot[spec.key];
+      if (mirror == null) {
+        if ((apBackendState || {})[spec.key] == null) continue;
+        await setAppearancePref(spec.key, null); // 镜像里已删除 ⇒ 真源同步清除
+        continue;
+      }
+      const want = spec.toBackend ? spec.toBackend(mirror) : mirror;
+      if (want == null || (typeof want === 'number' && !Number.isFinite(want))) {
+        // 换算不出可信值（老键里的坏数据）：按清除处理，免得真源留着比镜像更旧的值反压界面
+        if ((apBackendState || {})[spec.key] == null) continue;
+        await setAppearancePref(spec.key, null);
+        continue;
+      }
+      if ((apBackendState || {})[spec.key] === want) continue;
+      await setAppearancePref(spec.key, want);
+    }
+  }
+
+  async function setAppearancePref(key, value) {
+    try {
+      const resp = await window.api.appearance.setPref(key, value);
+      if (!resp || resp.success !== true) {
+        // 形状闸拒绝时后端根本没写盘（拒在落盘前），这里只留痕：真源快照不记账，下次写重试
+        writeLog('warn', `外观偏好 ${key} 未写入真源：${(resp && resp.message) || '回执异常'}`);
+        return false;
+      }
+      if (apBackendState) apBackendState[key] = value;
+      return true;
+    } catch (e) {
+      writeLog('warn', `外观偏好 ${key} 未写入真源：${(e && e.message) || e}`);
+      return false;
+    }
+  }
+
+  // 一次性回读（进设置页执行一次）：后端优先合并进镜像，后端缺失的按键迁移上去。
+  // 返回合并后的整份外观值；回读失败/降级返回 null（调用方继续用镜像，行为等同迁移前）。
+  async function syncAppearanceFromBackend() {
+    if (!window.api?.appearance?.getPrefs) return null;
+    let resp = null;
+    try {
+      resp = await window.api.appearance.getPrefs();
+    } catch (e) {
+      writeLog('warn', '外观偏好回读失败：' + ((e && e.message) || e));
+      return null;
+    }
+    if (!resp || resp.success !== true) {
+      writeLog('warn', '外观偏好回读失败：' + ((resp && resp.message) || '回执异常'));
+      return null;
+    }
+    if (resp.degraded === true) {
+      // appearance.json 读失败 ≠ 「全部未设置」：既不采纳也不迁移，继续按镜像展示。
+      // 若此时去推镜像值，等于把用户数据反复推给一个写不进去的文件（写侧本身 fail-closed）。
+      writeLog('warn', '外观配置读取降级，本轮按本地镜像展示');
+      return null;
+    }
+    const data = resp.data || {};
+    apBackendState = { ...data };
+    const ap = loadAppearance();
+    let changed = false;
+    const migrate = [];
+    for (const spec of APPEARANCE_PREF_KEYS) {
+      const b = data[spec.key];
+      if (b != null) {
+        const mirrorVal = spec.fromBackend ? spec.fromBackend(b) : b;
+        if (ap[spec.key] !== mirrorVal) { ap[spec.key] = mirrorVal; changed = true; }
+        continue;
+      }
+      const m = ap[spec.key];
+      if (m == null) continue;
+      const want = spec.toBackend ? spec.toBackend(m) : m;
+      if (want == null || (typeof want === 'number' && !Number.isFinite(want))) continue;
+      migrate.push([spec.key, want]);
+    }
+    if (changed) {
+      // 只落镜像，不走 saveAppearance：那会再排一次增量推，与下面的迁移重复
+      try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(ap)); } catch (e) {}
+      if (typeof appearanceApply === 'function') appearanceApply(ap);
+    }
+    for (const [key, want] of migrate) await setAppearancePref(key, want);
+    return ap;
   }
 
   // 应用强调色：写入 CSS 变量（按钮 / 高亮 / 选中态即时生效）
@@ -715,13 +845,9 @@
       });
     });
 
-    // 强调色
+    // 强调色（初始值与真源回读后的重放统一走文件尾的 appearanceApply）
     const accentInput = document.getElementById('accentColor');
     const accentReset = document.getElementById('btnAccentReset');
-    if (ap.accent && accentInput) {
-      accentInput.value = ap.accent;
-      applyAccent(ap.accent);
-    }
     accentInput?.addEventListener('input', () => {
       applyAccent(accentInput.value);
       const ap2 = loadAppearance();
@@ -743,10 +869,7 @@
       window.app?.toast('success', '已恢复默认强调色');
     });
 
-    // 背景图片
-    refreshBgCurrent(ap);
-    renderBgList(ap);
-    applyBackground(ap.bgPath, ap.bgOpacity, ap.bgPosX, ap.bgPosY);
+    // 背景图片（初始展示走文件尾的 appearanceApply）
     document.getElementById('btnBgImport')?.addEventListener('click', async () => {
       const resp = await window.api?.appearance?.importBg?.();
       if (!resp || resp.canceled) return;
@@ -865,8 +988,6 @@
       else delete document.body.dataset.presetBg;
     }
     const presetBgSelect = document.getElementById('presetBgSelect');
-    if (presetBgSelect) presetBgSelect.value = ap.presetBg || '';
-    applyPresetBg(ap.presetBg);
     presetBgSelect?.addEventListener('change', () => {
       const ap2 = loadAppearance();
       ap2.presetBg = presetBgSelect.value || '';
@@ -915,7 +1036,6 @@
       wpTimer = setInterval(wpTick, wpIntervalMs());
     }
     if (wpRotateToggle) {
-      wpRotateToggle.checked = ap.wallpaperRotate === '1';
       wpRotateToggle.addEventListener('change', () => {
         const ap2 = loadAppearance();
         ap2.wallpaperRotate = wpRotateToggle.checked ? '1' : '';
@@ -924,7 +1044,6 @@
       });
     }
     if (wpIntervalSelect) {
-      wpIntervalSelect.value = ap.wallpaperInterval || '10';
       wpIntervalSelect.addEventListener('change', () => {
         const ap2 = loadAppearance();
         ap2.wallpaperInterval = wpIntervalSelect.value;
@@ -937,7 +1056,6 @@
       if (document.hidden) wpStop();
       else wpSync();
     });
-    wpSync();
     // 背景模糊度滑块（位于「背景图片」卡内，预设背景/导入图片均可叠加）。
     // P2-4（v4）：本读数 span 原与自定义滑块（#bgBlurRange 的 .bbr-val）**撞 id**，
     // getElementById 恒取文档里第一个 ⇒ 原生滑块读数写进了另一套控件的 span、自己恒 0%。
@@ -945,11 +1063,6 @@
     const blurSlider = document.getElementById('bgBlur');
     const blurVal = document.getElementById('bgBlurInputVal');
     if (blurSlider) {
-      blurSlider.value = ap.bgBlur == null ? 0 : ap.bgBlur;
-      if (blurVal) blurVal.textContent = blurSlider.value + '%';
-      // 编程式赋值不触发 input 事件，手动同步轨道填充（ds.slider）
-      window.ds?.slider?.sync?.(blurSlider);
-      applyBgBlur(blurSlider.value);
       // 审查 3-3：视觉即时生效，存储防抖 150ms——一次拖动不再产生上百次同步 localStorage 写
       let blurSaveTimer = null;
       blurSlider.addEventListener('input', () => {
@@ -964,6 +1077,51 @@
         }, 150);
       });
     }
+
+    // 「真源值 → 界面」的唯一重放出口：首帧展示与后端回读后重放共用这一份实现
+    // （AGENTS §5.16：同一判据不许两处各写一份；两处都只是调用点）。
+    appearanceApply = function (resolved) {
+      const cur = resolved || loadAppearance();
+      // 强调色：空值 = 用户没自定义，交回 main.css 的 --accent 默认值（此处不硬编码色值）
+      const aInput = document.getElementById('accentColor');
+      if (cur.accent) {
+        if (aInput) aInput.value = cur.accent;
+        applyAccent(cur.accent);
+      } else {
+        applyAccent(null);
+      }
+      refreshBgCurrent(cur);
+      renderBgList(cur);
+      applyBackground(cur.bgPath, cur.bgOpacity, cur.bgPosX, cur.bgPosY);
+      const pSel = document.getElementById('presetBgSelect');
+      if (pSel) pSel.value = cur.presetBg || '';
+      applyPresetBg(cur.presetBg);
+      const rotate = document.getElementById('wallpaperRotateToggle');
+      if (rotate) rotate.checked = cur.wallpaperRotate === '1';
+      const interval = document.getElementById('wallpaperIntervalSelect');
+      if (interval) interval.value = cur.wallpaperInterval || '10';
+      const bSlider = document.getElementById('bgBlur');
+      if (bSlider) {
+        bSlider.value = cur.bgBlur == null ? 0 : cur.bgBlur;
+        const bVal = document.getElementById('bgBlurInputVal');
+        if (bVal) bVal.textContent = bSlider.value + '%';
+        // 编程式赋值不触发 input 事件，手动同步轨道填充（ds.slider）
+        window.ds?.slider?.sync?.(bSlider);
+        applyBgBlur(bSlider.value);
+      }
+      // 壁纸层模糊的自定义滑块（#bgBlurRange）的读数与轨道由 initBgBlur 自己管，
+      // 这里只调它登记的出口，不再抄一份位置计算。
+      if (typeof wpBlurApply === 'function') {
+        wpBlurApply(typeof cur.wallpaperBlur === 'number'
+          ? cur.wallpaperBlur
+          : (window.ds?.DEFAULT_WALLPAPER_BLUR ?? 0));
+      }
+      wpSync();
+    };
+    appearanceApply(ap);
+    // 后端优先合并 + 老键迁移：异步执行，不挡首帧（首帧按镜像值展示，回读有差异时重放）
+    syncAppearanceFromBackend()
+      .catch((e) => writeLog('warn', '外观偏好回读异常：' + ((e && e.message) || e)));
   }
 
 
@@ -1004,6 +1162,9 @@
       var pct = (clientX - r.left) / r.width * 100;
       setBlur(pct);
     }
+    // 登记给文件头的 appearanceApply：后端回读可能晚于本页初始化，需要一条不改
+    // 「位置计算只有一份」前提的重放路径（此处是唯一的 setBlur 实现）。
+    wpBlurApply = setBlur;
     track.addEventListener('mousedown', function (e) {
       dragging = true;
       range.classList.add('dragging');

@@ -186,6 +186,10 @@ if (appearanceRs && pathbindingJs) {
 
 // ── B 组：保护层偏好的真源对拍（老键作镜像）────────────────────────────────
 const SETTINGS_RS = argPath('--settings', 'src-tauri/src/commands/settings.rs');
+// C 组（F4a2-M01）另需三个面：命令层键表、桥接表、注册表
+const CMD_APPEARANCE_RS = argPath('--cmd-appearance', 'src-tauri/src/commands/appearance.rs');
+const API_JS = argPath('--api', 'src/scripts/tauri-api.js');
+const LIB_RS = argPath('--lib', 'src-tauri/src/lib.rs');
 const JS_UNINSTALL = argPath('--uninstall', 'src/scripts/uninstall.js');
 const settingsRs = readRequired('设置命令层', SETTINGS_RS);
 const uninstallJs = readRequired('卸载页脚本', JS_UNINSTALL);
@@ -276,6 +280,94 @@ if (settingsRs && uninstallJs) {
 }
 
 console.log(`\ncheck-appearance-prefs: 命中断言 ${hits.length} 条，失败 ${failures} 条`);
+// ---- C 组：外观域键表 ⇄ 渲染层键表对拍 + 迁移口径 + 四处同步（v7.2 P1 · F4a2-M01）----
+// 来源：单元代理片段 uF4a2m1-gate.snippet.mjs 的 S2，主 agent 2026-10-22 合并。
+// 抓什么：外观域 11 个键的真源从 localStorage 迁到后端 appearance.json 之后，键表在两侧各有一份
+// 字面量（Rust 的 `APPEARANCE_PREF_KEYS` 与渲染层同名表）。任一侧单独增删键 ⇒ 前端推的键被后端
+// 判成「未知的外观键」，设置写不进真源而界面看着像成功（§4.1 的「没报错」型假绿）。
+// 断言的假绿防线：任何一侧抽不到体或抽空 ⇒ 判红并说明「不是相等，是没抽到」，不打 ✓。
+console.log('\n[C] 外观域真源迁后端（键表对拍 / 迁移口径 / 四处同步）');
+{
+  const cmdRs = readRequired('appearance 命令层', CMD_APPEARANCE_RS);
+  const rsTable = (cmdRs.match(/const APPEARANCE_PREF_KEYS:[^=]*=\s*&?\[([\s\S]*?)\];/) || [])[1];
+  if (!rsTable) {
+    bad('C1 Rust 侧 APPEARANCE_PREF_KEYS 表截不到体 ⇒ 判据无对象（表被改名或删掉等于键白名单消失）');
+  } else {
+    // 条目形态 `("accent", PrefShape::Color)`：一次匹配同时取键名与形状 token。
+    // 不用 `(?!\s*PrefShape::)` 这类负向前瞻——`\s*` 会回溯成「匹配零个空白」，
+    // 于是每个键都被判成没声明形状（AGENTS §4.1 假阳性①，交付方开发期实测命中全部 11 键）。
+    const rsEntries = [...rsTable.matchAll(/\(\s*"([^"]+)"\s*,\s*([A-Za-z_:]+)/g)];
+    const rsKeys = rsEntries.map((m) => m[1]);
+    const jsTable = (pathbindingJs.match(/const APPEARANCE_PREF_KEYS\s*=\s*\[([\s\S]*?)\n\s*\];/) || [])[1];
+    if (!jsTable) {
+      bad('C1 渲染层 APPEARANCE_PREF_KEYS 表截不到体 ⇒ 判据无对象（两侧任一侧消失都必须红）');
+    } else {
+      const jsKeys = [...jsTable.matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1]);
+      const rsSorted = [...rsKeys].sort();
+      const jsSorted = [...jsKeys].sort();
+      const onlyRs = rsSorted.filter((k) => !jsSorted.includes(k));
+      const onlyJs = jsSorted.filter((k) => !rsSorted.includes(k));
+      if (rsSorted.length === 0 || jsSorted.length === 0) {
+        bad(`C1 键表抽空（Rust ${rsSorted.length} / JS ${jsSorted.length}）——不是「一致」，是没抽到`);
+      } else if (onlyRs.length || onlyJs.length) {
+        bad(`C1 外观域键表两侧分叉：只在 Rust ${JSON.stringify(onlyRs)} / 只在 JS ${JSON.stringify(onlyJs)}`
+          + '（症状：前端推的键被后端判成「未知的外观键」，设置写不进真源而界面看着像成功）');
+      } else {
+        ok(`C1 外观域键表两侧逐字相等（${rsSorted.length} 键：${rsSorted.join(', ')}）`);
+      }
+      // C2 形状闸与键表是一对约束：每个键都得挂 PrefShape::（漏一个 = 该键绕过形状声明）
+      const shapeless = rsEntries.filter((m) => !m[2].startsWith('PrefShape')).map((m) => m[1]);
+      if (shapeless.length) bad(`C2 Rust 键表有 ${shapeless.length} 个键没声明 PrefShape:: ${JSON.stringify(shapeless)}`);
+      else ok(`C2 Rust 键表 ${rsEntries.length} 个键都显式声明了 PrefShape（键进表、形状闸漏登记即红）`);
+    }
+    // C3 材质两键不得进通用偏好通道（它们各自绑着全窗应用 + 广播）
+    if (/material/.test(rsTable)) {
+      bad('C3 材质键出现在外观偏好表里 ⇒ appearance:set-material 的应用/广播链会被绕过');
+    } else {
+      ok('C3 材质键不在外观偏好表内（材质仍走 appearance:set-material 的应用链）');
+    }
+    // C4 拒在落盘前：形状校验必须先于写盘调用，否则非法值已经进盘、回执只是补一句道歉
+    const setFn = (cmdRs.match(/pub fn appearance_set_pref[\s\S]*?\n\}/) || [])[0] || '';
+    const idxReject = setFn.indexOf('appearance_pref_reject');
+    const idxUpdate = setFn.indexOf('update_appearance');
+    if (!setFn || idxReject < 0 || idxUpdate < 0) {
+      bad('C4 set-pref 命令体截不到形状校验或写盘调用 ⇒ 无法证明「拒在落盘前」');
+    } else if (idxReject > idxUpdate) {
+      bad('C4 形状校验排到了 update_appearance 之后 ⇒ 非法值已经落盘，回执只是补一句道歉');
+    } else {
+      ok('C4 形状校验先于 update_appearance（非法值零副作用被拒）');
+    }
+  }
+
+  // C5/C6 迁移口径四条（与 B 组卸载页同形，覆盖外观域）
+  const noPushBeforeRead = /function queueAppearancePush[\s\S]*?if\s*\(\s*!apBackendState\s*\)\s*return/.test(pathbindingJs);
+  if (noPushBeforeRead) {
+    ok('C5 真源回读前不推：镜像的一次性迁移写不会把「后端优先」反转成「镜像反压后端」');
+  } else {
+    bad('C5 渲染层回读前不推的闸门不见了 ⇒ 求值期的 skin/雾化迁移会把老镜像整批推上真源，盖掉后端更新过的值');
+  }
+  const adoptsBackend = /if\s*\(\s*b\s*!=\s*null\s*\)[\s\S]{0,260}ap\[spec\.key\]\s*=\s*mirrorVal/.test(pathbindingJs);
+  const migratesMirror = /migrate\.push\(\s*\[spec\.key\s*,\s*want\]\s*\)/.test(pathbindingJs);
+  const writesBoth = /function saveAppearance[\s\S]{0,260}queueAppearancePush\s*\(/.test(pathbindingJs);
+  const oldKeyAlive = /const APPEARANCE_KEY\s*=\s*'trim-appearance'/.test(pathbindingJs);
+  if (!adoptsBackend) bad('C6 后端值采纳分支不见了 ⇒ 迁了等于没迁（后端真源不覆盖界面）');
+  if (!migratesMirror) bad('C6 后端未设置时的迁移分支不见了 ⇒ 存量用户的状态永远进不了真源');
+  if (!writesBoth) bad('C6 saveAppearance 不再触发真源侧 ⇒ 老键成了唯一真源（M01 复发）');
+  if (!oldKeyAlive) bad("C6 老键 'trim-appearance' 常量被删 ⇒ 存量用户状态断链，theme.js 的启动期读点也会塌成默认值");
+  if (adoptsBackend && migratesMirror && writesBoth && oldKeyAlive) {
+    ok('C6 外观域四条口径齐备：后端优先采纳 / 后端未设置时迁移 / 写两边 / 老键不删');
+  }
+
+  // C7 四处同步的另外两处（注册 + CHANNEL_MAP）；前两处由 check-guard-tiers 管
+  const libRegistered = /commands::appearance::appearance_get_prefs/.test(readRequired('lib.rs', LIB_RS))
+    && /commands::appearance::appearance_set_pref/.test(readRequired('lib.rs', LIB_RS));
+  const mapHasBoth = /'appearance:get-prefs'\s*:\s*'appearance_get_prefs'/.test(readRequired('tauri-api.js', API_JS))
+    && /'appearance:set-pref'\s*:\s*'appearance_set_pref'/.test(readRequired('tauri-api.js', API_JS));
+  if (!libRegistered) bad('C7 两条外观偏好命令没全进 lib.rs 的 generate_handler!（漏一处就是命令未注册）');
+  if (!mapHasBoth) bad('C7 CHANNEL_MAP 缺外观偏好通道（渲染层调不到，症状是「设置不落地」而不是报错）');
+  if (libRegistered && mapHasBoth) ok('C7 四处同步落点齐备：Rust 命令 / lib.rs 注册 / CHANNEL_MAP / 档位表（后者由 check-guard-tiers 管）');
+}
+
 if (failures) { console.error('check-appearance-prefs: 判红'); process.exit(1); }
 console.log('check-appearance-prefs: 全部通过');
 process.exit(0);

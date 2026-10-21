@@ -27,7 +27,7 @@ const REGISTRY = [
   { file: 'check-elapsed-facts.mjs', manual: true, reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
   { file: 'check-optimizer-write-contract.mjs', reason: 'v6-K20：G 组 20 条样本喂**生产同一份**判据（judgeSideTableDiff / judgeStoreSeparation / judgeOptionKeys / judgeProvenanceCoverage / judgeDefaultItem；含 2 条干净样本防判据永远红）——生产与对照不再有两套实现，「全通过」日志已移到 G 组之后' },
   { file: 'check-subwindow-init.mjs', reason: '副窗初始化：residue 页两条正向对照（注入坏绑定 + 抽掉真实 id）；models/process 页一条坏绑定对照，抽件对照因无 warn 通道显式 SKIP 并计入汇总' },
-  { file: 'check-subwindow-css.mjs', reason: '子窗 CSS 按需：S1 样式表序列 / S2 引用面 / S3 层叠翻转 / S4 token 真源四组各配正反样本 + 解析器形状对照（@media 内层与花括号字符串）' },
+  { file: 'check-subwindow-css.mjs', reason: '子窗 CSS 按需：S1 样式表序列 / S2 引用面 / S3 层叠翻转 / S4 token 真源四组各配正反样本 + 解析器形状对照（@media 内层与花括号字符串）+ S3b ds.css⇄main.css 同特异度棘轮对照（新增键必抓、收缩不误红、消失键可计数；基线由 --emit-ds-pairs 现算回填，不手抄、不走环境变量）' },
   { file: 'check-a11y.mjs', reason: '可达性四断言：勾选框三属性 / aria-live 宿主 / data-tip 反 title / RM 归零覆盖面各配正反样本自检 + 三类扫描面地板' },
   { file: 'check-contrast.mjs', reason: 'F 组玻璃面 floor 断言配正反向样本自检（P3-2）；F1a~F6b 操作面登记台账七类反例（裸 --bg-card / 后级覆写 / 修饰类另写底 / 台账过期 / background-image 绕开 floor / 语义实底被中性降级 / 折射白名单含未登记类）+ F3b 锚点对照（抹掉 wantRefract 的按钮排除必判红）+ floor 栈合成对照（空栈与只垫 floor 必红、完整栈放行）；A1/B/C 与 token 表等既有组仍缺合成样本' },
   { file: 'check-native-hygiene.mjs', reason: 'N1–N9 各配正反样本自检（裸 output / 定长解码 / 句柄丢弃 / .reg 读取 / 深度护栏 / 取最新 / 快照域 / origin 字面量闸 / 取用点登记闸），+ 模块可达性与扫描面地板' },
@@ -67,7 +67,7 @@ const REGISTRY = [
 // 从本表删除（断言 4/5 会核对两张表与 MUST_RUN 的一致性）。新增必跑门禁一律进 REGISTRY，
 // 进不了就先在这里登记并写明为什么暂缺 —— 不登记即红。
 const PENDING_CONTROLS = [
-  { name: 'check-appearance-prefs', reason: 'P1-W3 Phase2c 新开门禁（A 组换算结构签名 ⇄ B 组偏好键白名单与镜像）：判据本体在真源文件上做文本抽取，**尚无内置合成样本**；单元代理以盘外副本喂过 8 组破坏（Rust 删 round / 基数改 99 / JS 退化 half-up / 删换算函数 / PREF_KEYS 删键 / 删老键字面量 / 执行侧回退直读 localStorage / 写路径缺镜像）全部 EXIT=1，真破坏验证有过、对照块没有 ⇒ 补齐后迁 REGISTRY' },
+  { name: 'check-appearance-prefs', reason: 'P1-W3 Phase2c/d 新开门禁（A 组换算结构签名 ⇄ B 组卸载页偏好白名单与镜像 ⇄ C 组外观域 11 键表两侧对拍 + 迁移口径四条 + 四处同步落点）：判据本体在真源文件上做文本抽取，**尚无内置合成样本**；破坏走的是文件自带的 `--rust/--js/--api/--settings` 盘外副本开关，2026-10-22 主 agent 合并 C 组后实跑两向均判红并点名对象（改渲染层键名 ⇒ C1 报「只在 Rust [bgPosX] / 只在 JS [bgPosXz]」；删 CHANNEL_MAP 一条 ⇒ C7 红），单元代理侧另有六向破坏记录见 uF4a2m1-report.md。补齐合成样本后迁 REGISTRY' },
   { name: 'check-channel-map', reason: '对拍型：桥接表 ⇄ Rust 通道集合双向比对，缺「删/添一侧必须红」的合成样本' },
   { name: 'check-guard-tiers', reason: '对拍型：档位表 ⇄ 命令体 guard 调用逐条核对，缺合成样本' },
   // check-layering 已于 2026-10-18 v6 P2 配好判定器自检并迁入 REGISTRY（本表只减不增）。
