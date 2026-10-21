@@ -185,9 +185,9 @@
     netcheck: ['scripts/netcheck.js'],
     runtimes: ['scripts/runtimes.js'],
     quickcmds: ['scripts/quickcmds-data.js', 'scripts/quickcmds.js'],
-    // 设置页：路径绑定 + 四个外观面。顺序即依赖序（外观层最先，入口最后装配）；
+    // 设置页：路径绑定 + 三个外观面。顺序即依赖序（外观层最先，入口最后装配）；
     // 两个清单（本表与 IDLE_SCRIPTS）必须同序列全，见 IDLE_SCRIPTS 上方的说明。
-    settings: ['scripts/pathbinding-appearance.js', 'scripts/pathbinding-accent.js',
+    settings: ['scripts/pathbinding-appearance.js',
       'scripts/pathbinding-background.js', 'scripts/pathbinding-material.js',
       'scripts/pathbinding-wallpaper.js', 'scripts/pathbinding.js'],
     // Windows设置 页：syspanel.js + 「Windows 更新」三态（走 optimizer.js 的 executeOption；看板渲染依赖 xtable，须前置同注入）。
@@ -202,7 +202,7 @@
   ]);
   // 首帧后空闲加载：视觉增强 + 自动更新 UI（不阻塞首帧）。pathbinding 家族也放这里——cleanup.js 的
   // QQ/微信文件清理会读它的路径配置，空闲期预取可避免用户点扫描时配置还没就位。
-  // 家族内六项的先后就是依赖序：外观层（镜像/真源口径）最先，入口 pathbinding.js 最后装配；
+  // 家族内五项的先后就是依赖序：外观层（镜像/真源口径）最先，入口 pathbinding.js 最后装配；
   // 入口若排前面，init 会在面板模块求值前跑，各面 init 全是 undefined。
   const IDLE_SCRIPTS = [
     'scripts/mouse-trail.js',
@@ -210,7 +210,6 @@
     'scripts/spotlight.js',
     'scripts/updater-ui.js',
     'scripts/pathbinding-appearance.js',
-    'scripts/pathbinding-accent.js',
     'scripts/pathbinding-background.js',
     'scripts/pathbinding-material.js',
     'scripts/pathbinding-wallpaper.js',

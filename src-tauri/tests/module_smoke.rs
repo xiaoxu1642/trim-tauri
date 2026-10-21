@@ -353,8 +353,8 @@ fn settings_set_pref_rejects_unknown_key() {
 
 // ==================== 外观域真源（appearance:get-prefs / set-pref） ====================
 //
-// F4a2-M01：强调色 / 背景图 / 雾化 / 壁纸轮换十一个键的真源从 localStorage 迁到
-// `appearance.json`。这三条用例各钉住一个失效方向：
+// F4a2-M01：背景图 / 雾化 / 壁纸轮换十个键的真源从 localStorage 迁到
+// `appearance.json`（2026-10-22 裁定删除自定义强调色后由十一键收敛为十键）。这三条用例各钉住一个失效方向：
 // - 形状表与键表脱节（前端推的键被判未知、或后端回了渲染层没准备的键）；
 // - 档位判 MAIN 这条被偷偷放宽（子窗拿到「写用户外观」的通道）；
 // - 形状闸退化成「一律收」或「一律拒」（两种都让界面看起来正常而设置不落地）。
@@ -378,7 +378,6 @@ fn appearance_get_prefs_shape_covers_every_declared_key() {
     assert_eq!(
         keys,
         [
-            "accent",
             "bgBlur",
             "bgOpacity",
             "bgOpacityFog",
@@ -412,7 +411,7 @@ fn appearance_prefs_tier_is_main_window_only() {
         let denied_write = invoke_text(
             &sw,
             "appearance_set_pref",
-            json!({ "key": "accent", "value": "#000000" }),
+            json!({ "key": "bgBlur", "value": 10 }),
         );
         assert_guard_rejected(
             &denied_write,
@@ -430,8 +429,6 @@ fn appearance_set_pref_rejects_bad_shape_before_writing() {
     let w = main_window();
     // (键, 不受信值, 拒因里必须出现的期望形状措辞)
     let vectors: &[(&str, serde_json::Value, &str)] = &[
-        ("accent", json!("6A59C9"), "#rrggbb"),
-        ("accent", json!("#6A59CG"), "#rrggbb"),
         ("bgOpacity", json!("20"), "0-100 的百分比数值"),
         ("bgOpacity", json!(101), "0-100 的百分比数值"),
         ("bgBlur", json!([12]), "0-100 的百分比数值"),
@@ -473,6 +470,22 @@ fn appearance_set_pref_rejects_bad_shape_before_writing() {
         common::message_of(&unknown).contains("未知的外观键"),
         "拒因要点名白名单: {unknown}"
     );
+    // 2026-10-22 裁定删除自定义强调色：命令层必须把 accent 当未知键拒掉，
+    // 防的是前端已无写入入口、后端却还留着这条颜色通道（旧客户端/注入调用仍可写）。
+    let legacy_accent = invoke(
+        &w,
+        "appearance_set_pref",
+        json!({ "key": "accent", "value": "#6A59C9" }),
+    );
+    assert_eq!(
+        legacy_accent["success"],
+        json!(false),
+        "accent 已随自定义强调色整链删除，必须被拒: {legacy_accent}"
+    );
+    assert!(
+        common::message_of(&legacy_accent).contains("未知的外观键"),
+        "accent 的拒因必须点名「未知的外观键」: {legacy_accent}"
+    );
     // 材质两键不得从通用偏好通道写（它们各自绑着全窗应用 + 广播，绕过命令等于绕过应用链）
     for material_key in ["material", "materialEnabled"] {
         let res = invoke(
@@ -494,7 +507,6 @@ fn appearance_set_pref_accepts_legal_values_roundtrip() {
     let w = main_window();
     let mut reached: Vec<String> = Vec::new();
     let legal: &[(&str, serde_json::Value)] = &[
-        ("accent", json!("#6A59C9")),
         ("bgOpacity", json!(20)),
         ("bgPosX", json!(50)),
         ("presetBg", json!("")),
@@ -533,13 +545,13 @@ fn appearance_set_pref_accepts_legal_values_roundtrip() {
     let cleared = invoke(
         &w,
         "appearance_set_pref",
-        json!({ "key": "accent", "value": null }),
+        json!({ "key": "bgBlur", "value": null }),
     );
     assert_eq!(cleared["success"], json!(true), "null 必须被当清除接受: {cleared}");
     assert_eq!(cleared["cleared"], json!(true), "回执必须点名这是清除: {cleared}");
     let after = invoke(&w, "appearance_get_prefs", json!({}));
     assert_eq!(
-        after["data"]["accent"],
+        after["data"]["bgBlur"],
         json!(null),
         "清除后该键必须读回 null（在场但未设置）: {after}"
     );

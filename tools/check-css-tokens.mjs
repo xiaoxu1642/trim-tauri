@@ -374,9 +374,11 @@ console.log(`✓ 反向棘轮：${defined.size} 个定义中零消费 ${DEAD_TOK
 // 每次事件都同步做一次无用的写入与读取（`--lg-mx/--lg-my` 当年就附赠一次 getBoundingClientRect）。
 // 与 DEAD_TOKEN_ALLOW 分两张表不是重复实现同一判据：两者的问句不同（是否有 `var()` 消费
 // vs 是否有样式侧消费），同一条豁免要成立必须在各自的问句下写清理由。
+// 2026-10-22 用户裁定删除自定义强调色链路（F1a-U02）后，JS 侧对 `--accent-glow` /
+// `--accent-press` 的写入点整条消失 ⇒ 这两条「写入未消费」豁免**已失效**，必须删掉
+// （留着会被 stale 判据判红，也正好说明这条棘轮在工作）。它们作为**定义**仍零消费，
+// 所以仍在 DEAD_TOKEN_ALLOW 里登记——两张表问的是不同的问题，不能互相顶替。
 const WRITE_UNCONSUMED = new Map([
-  ['--accent-glow', 'pathbinding.applyAccent 整组派生后写回，样式侧待 pathbinding 单元收口再消费（F4a2 射程）'],
-  ['--accent-press', '同上：按下态与发光态同批派生，只登记一次口径、两条一起挂账'],
 ]);
 
 /** 纯函数：返回 [未登记的「写入未消费」, 已失效的登记]，与自检共用同一实现（§5.16） */

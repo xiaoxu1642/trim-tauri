@@ -1227,7 +1227,7 @@
           <div class="settings-section settings-bgtheme-section">
             <div class="appearance-card-head">
               <h4>背景与主题</h4>
-              <p>预设壁纸、导入图片、自动轮换与界面强调色</p>
+              <p>预设壁纸、导入图片与自动轮换</p>
             </div>
                 <div class="appearance-merge-grid">
                   <div class="appearance-merge-col">
@@ -1303,29 +1303,17 @@
                       </div>
                       <p class="appearance-hint">窗口隐藏时自动暂停轮换，省电不打扰</p>
                     </div>
-                                        <!-- 主题颜色选择 + 背景模糊度（v3.0）：左右齐平排列，背景模糊度使用 Motion.Lab range-drag 自定义滑块 -->
+                    <!-- 背景模糊度（v3.0）：Motion.Lab range-drag 自定义滑块 -->
                     <div class="appearance-sub">
-                      <div class="accent-blur-grid">
-                        <div class="accent-blur-col">
-                          <div class="appearance-sub-head">主题颜色选择</div>
-                          <div class="accent-row">
-                            <input type="color" id="accentColor" value="#8B8EE0" data-tip="选择强调色" aria-label="选择界面强调色" />
-                            <button class="btn btn-secondary btn-small" id="btnAccentReset" data-tip="恢复默认强调色">恢复默认</button>
-                          </div>
-                          <p class="appearance-hint">强调色管按钮、高亮与选中态</p>
+                      <div class="appearance-sub-head">背景模糊度</div>
+                      <div class="bg-blur-range" id="bgBlurRange">
+                        <div class="bbr-track">
+                          <div class="bbr-fill"></div>
+                          <div class="bbr-knob"></div>
                         </div>
-                        <div class="accent-blur-col">
-                          <div class="appearance-sub-head">背景模糊度</div>
-                          <div class="bg-blur-range" id="bgBlurRange">
-                            <div class="bbr-track">
-                              <div class="bbr-fill"></div>
-                              <div class="bbr-knob"></div>
-                            </div>
-                            <span class="bbr-val" id="bgBlurVal">0%</span>
-                          </div>
-                          <p class="appearance-hint">拖动滑块模糊壁纸背景，0% 清晰 / 100% 完全磨砂</p>
-                        </div>
+                        <span class="bbr-val" id="bgBlurVal">0%</span>
                       </div>
+                      <p class="appearance-hint">拖动滑块模糊壁纸背景，0% 清晰 / 100% 完全磨砂</p>
                     </div>
                 </div>
           </div>

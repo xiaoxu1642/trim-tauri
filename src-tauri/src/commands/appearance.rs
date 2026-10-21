@@ -457,7 +457,7 @@ fn open_folder(dir: &Path) {
     let _ = crate::engine::systembin::shell_select_in_explorer(&dir.to_string_lossy());
 }
 
-// ==================== 外观域偏好（强调色 / 背景图 / 雾化 / 壁纸轮换） ====================
+// ==================== 外观域偏好（背景图 / 雾化 / 壁纸轮换） ====================
 
 /// 外观域键与形状声明（读回与写入共用**同一张表**，防「键进了表、形状闸漏登记」半边失效）。
 ///
@@ -472,8 +472,6 @@ fn open_folder(dir: &Path) {
 /// 域内不存在第二把不经锁的写路径（lib.rs 保存窗口状态走的也是它）。
 #[derive(Clone, Copy)]
 enum PrefShape {
-    /// `#rrggbb` 颜色串
-    Color,
     /// 背景图文件路径（扩展名必须过 `bg_ext_ok`）
     BgPath,
     /// 0-100 百分比数值
@@ -486,11 +484,12 @@ enum PrefShape {
     Seconds,
 }
 
-/// 外观域键白名单。渲染层 `src/scripts/pathbinding.js` 的 `APPEARANCE_PREF_KEYS` 是
-/// 同一批键的另一份形态（跨语言只共享判据文本、不共享函数，AGENTS §5.16），
+/// 外观域键白名单。渲染层 `src/scripts/pathbinding-appearance.js` 的 `APPEARANCE_PREF_KEYS`
+/// 是同一批键的另一份形态（跨语言只共享判据文本、不共享函数，AGENTS §5.16），
 /// 两侧键名集合靠跨语言对拍门禁钉住——漏一侧的症状是「前端推的键被后端判成未知键」。
+/// 2026-10-22 用户裁定删除自定义强调色，`accent` 已从两侧同批移除；存量 appearance.json
+/// 里的该键是未知键，读取侧不返回、写入侧不迁移（Value 形状天然容忍）。
 const APPEARANCE_PREF_KEYS: &[(&str, PrefShape)] = &[
-    ("accent", PrefShape::Color),
     ("bgPath", PrefShape::BgPath),
     ("bgOpacity", PrefShape::Percent),
     // 与 bgOpacity 同键两套语义（旧=图片不透明度，新=雾化强度）的历史标记；
@@ -518,13 +517,6 @@ const WALLPAPER_INTERVAL_MAX_SECS: u64 = 3600;
 /// 背景图路径长度上界（Windows 完整路径上限留余量；防的是拿外观键当大载荷通道）
 const BG_PATH_MAX_LEN: usize = 1024;
 
-fn is_hex_color(raw: &str) -> bool {
-    let Some(hex) = raw.strip_prefix('#') else {
-        return false;
-    };
-    hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// 背景图路径形状判定。
 /// 刻意**不**校验「必须落在 backgrounds 目录内」：便携/标准模式切换会让 `app_data_dir()`
 /// 换根，同一份设置里的路径前缀跟着变，用当时的数据根去判存量值会误拒用户的有效取景。
@@ -538,7 +530,7 @@ fn is_bg_path_shape(raw: &str) -> bool {
 
 /// 按键形状校验：返回 `Some(理由)` 即拒绝。理由必须点名键与期望形状 ——
 /// 渲染层要把「哪个键被拒」显示出来，只说「值不合法」等于没回执。
-/// `Value::Null` 是**清除**该键，任何白名单键都收（渲染层「重置视角/清除背景图/恢复默认强调色」
+/// `Value::Null` 是**清除**该键，任何白名单键都收（渲染层「重置视角/清除背景图」
 /// 走的就是这条，不留一个只能写不能删的键）。
 fn appearance_pref_reject(key: &str, value: &Value) -> Option<String> {
     if value.is_null() {
@@ -551,10 +543,6 @@ fn appearance_pref_reject(key: &str, value: &Value) -> Option<String> {
     };
     let expect = |what: &str| Some(format!("外观键 {key} 的值不合法：需要{what}"));
     match shape {
-        PrefShape::Color => match value.as_str() {
-            Some(s) if is_hex_color(s) => None,
-            _ => expect("#rrggbb 颜色串"),
-        },
         PrefShape::BgPath => match value.as_str() {
             Some(s) if is_bg_path_shape(s) => None,
             _ => expect("受支持的图片文件路径"),
@@ -938,8 +926,6 @@ mod tests {
     #[test]
     fn 外观形状闸收合法向量() {
         let legal: &[(&str, Value)] = &[
-            ("accent", json!("#6A59C9")),
-            ("accent", json!("#ffffff")),
             ("bgPath", json!(r"C:\Users\x\AppData\Roaming\com.xiaoxu.trim\backgrounds\bg_1.png")),
             ("bgOpacity", json!(0)),
             ("bgOpacity", json!(100)),
@@ -950,7 +936,7 @@ mod tests {
             ("wallpaperRotate", json!(false)),
             ("wallpaperInterval", json!(300)),
             ("wallpaperBlur", json!(20)),
-            // null = 清除任何白名单键（重置视角 / 清除背景图 / 恢复默认强调色走的就是这条）
+            // null = 清除任何白名单键（重置视角 / 清除背景图走的就是这条）
             ("bgPath", Value::Null),
         ];
         let mut reached: Vec<String> = Vec::new();
@@ -969,11 +955,10 @@ mod tests {
     fn 外观形状闸拒非法向量且理由点名键() {
         // 每行 = (键, 非法值, 理由里必须出现的期望形状措辞)
         let illegal: &[(&str, Value, &str)] = &[
-            // 借外观键灌任意形状：字符串数值、颜色串缺 #、超长路径、含控制字符
-            ("accent", json!("6A59C9"), "#rrggbb"),
-            ("accent", json!("#6A59C"), "#rrggbb"),
-            ("accent", json!("#6A59CG"), "#rrggbb"),
-            ("accent", json!(64), "#rrggbb"),
+            // 借外观键灌任意形状：字符串数值、超长路径、含控制字符
+            // 2026-10-22 裁定：自定义强调色整链删除后，`accent` 必须落到「未知的外观键」，
+            // 这条防的是有人把颜色键连同 Color 形状一起加回来（前端已无写入入口）。
+            ("accent", json!("#6A59C9"), "未知的外观键"),
             ("bgOpacity", json!("20"), "0-100 的百分比数值"),
             ("bgOpacity", json!(101), "0-100 的百分比数值"),
             ("bgOpacity", json!(-1), "0-100 的百分比数值"),
@@ -1042,7 +1027,7 @@ mod tests {
     /// 写侧语义（命令闭包与这里共用 [`write_appearance_pref`]，所以这条就是生产路径）：
     /// ① 写 `bgOpacity` 必须同时把雾化标记置真——漏了它，下次启动 `migrate_bg_opacity_fog`
     ///   会把已是雾化语义的值再取反一遍（20% 变 80%），而这个症状只在真机重启后看得见；
-    /// ② `null` = 删键（渲染层的「清除背景图 / 恢复默认强调色 / 重置视角」走的就是这条）；
+    /// ② `null` = 删键（渲染层的「清除背景图 / 重置视角」走的就是这条）；
     /// ③ 其它键不得顺手补标记（否则「标记存在」不再等于「bgOpacity 已迁过」）。
     #[test]
     fn 外观写侧的标记与清除语义() {
@@ -1065,11 +1050,19 @@ mod tests {
         );
 
         let mut cleared = serde_json::Map::new();
+        cleared.insert("bgBlur".into(), json!(30));
+        // 存量 accent 键（2026-10-22 删除自定义强调色后属未知键）不得被相邻键的清除顺手带走：
+        // 渲染层已无写入入口，但盘上旧值仍要给用户留着（回滚旧版本时可读回）。
         cleared.insert("accent".into(), json!("#6A59C9"));
-        write_appearance_pref(&mut cleared, "accent", &Value::Null);
+        write_appearance_pref(&mut cleared, "bgBlur", &Value::Null);
         assert!(
-            !cleared.contains_key("accent"),
+            !cleared.contains_key("bgBlur"),
             "null 必须删键（渲染层清除类操作等的是这个，不是把键留着写个 null）: {cleared:?}"
+        );
+        assert_eq!(
+            cleared.get("accent"),
+            Some(&json!("#6A59C9")),
+            "清除其它键不得顺手删掉存量 accent（未知键按原样保留）: {cleared:?}"
         );
         // 清除 bgOpacity 不能反向把标记置真（值是「未设置」而不是「已换算」）
         let mut clear_opacity = serde_json::Map::new();

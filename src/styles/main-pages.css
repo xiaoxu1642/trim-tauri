@@ -1872,7 +1872,7 @@
   justify-content: center;
   border-radius: var(--radius-btn);
   /* 审查 M20：底色原为 JS 内联的 8 条 linear-gradient + 这里的字面 #fff，
-     两者都不在 token 表内；改为 accent 软底配 accent 前景，随主题与自定义 accent 走 */
+     两者都不在 token 表内；改为 accent 软底配 accent 前景，随主题 token 走 */
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -2327,14 +2327,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   color: var(--fg-secondary);
   min-width: 36px;
   text-align: right;
-}
-
-/* v3.0 批次：主题颜色选择与背景模糊度左右齐平布局 */
-.accent-blur-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-  align-items: start;
 }
 
 /* v3.5.3（2026-09-15）：运行库修复成功后的行内闭环标记 */

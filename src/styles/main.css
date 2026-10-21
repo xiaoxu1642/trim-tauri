@@ -38,7 +38,7 @@
      实底按钮以 --accent-text 深紫黑 (#171832) 作前景，WCAG 现算 5.81:1（过 AA、不到 AAA；
      原注释写「≈7:1」是腐值，别再拿它当 AAA 依据）；
      --accent-soft 为选中态/高亮底色，--accent-glow 为主按钮/进度条辉光。
-     运行时自定义强调色由 pathbinding.js applyAccent() 按相对亮度自动选定前景。 */
+     运行时不再有自定义强调色入口（2026-10-22 裁定）：前景色只由本档 --accent-text 决定。 */
   --accent: #8B8EE0;
   --accent-hover: #A6A9F2;
   --accent-press: #7174CC;
@@ -191,7 +191,7 @@
        accent 字 / soft 底   = 4.60:1  ✓ AA   ← 审查 L18：soft 原为 0.08 时只有 4.48，破 AA
      故 0.08 → 0.06：选中态/高亮底更淡一档，换回那 0.12 的缺口（审查 L18 的第一处修）。
      冷调薰衣草替换原深紫 #5E62C6（方向 A「淡紫雾屿」拍板落地）；
-     已避开默认靛蓝与紫渐变；用户自定义 accent 仍经 pathbinding.applyAccent 运行时覆盖。 */
+     已避开默认靛蓝与紫渐变；运行时不再有自定义强调色覆盖（2026-10-22 裁定），界面恒用本档取值。 */
   --accent: #6A59C9;
   --accent-hover: #5948BD;
   --accent-press: #4D3DA8;
@@ -4324,20 +4324,6 @@ img.ctx-col-icon {
   font-size: calc(11.5px * var(--font-size-scale, 1));
   color: var(--fg-tertiary);
   margin: 0 0 10px;
-}
-.accent-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.accent-row input[type="color"] {
-  width: 46px;
-  height: 32px;
-  padding: 2px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-small);
-  background: transparent;
-  cursor: pointer;
 }
 .bg-current {
   display: flex;

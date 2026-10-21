@@ -5,7 +5,7 @@
 // 的唯一口径，`tools/check-appearance-prefs.mjs` 按**单文件**抽这族符号做跨语言对拍。
 // 拆到别的文件后仍必须整族留在这里，否则「这族符号住哪儿」这条契约本身失去机检对象。
 //
-// 加载顺序：本文件最先（强调色 / 背景图 / 壁纸轮换各面只读这里的出口），
+// 加载顺序：本文件最先（背景图 / 壁纸轮换各面只读这里的出口），
 // `pathbinding.js` 入口最后（它负责把各面装配起来）。各面对镜像的读写一律走
 // `window.pathbindingAppearance`，不许自行碰 localStorage —— 否则损坏降级与键名
 // 变更就会各处各判。
@@ -24,8 +24,10 @@
   // 状态目前只存在那儿。口径与 F4a1-M08 一致：读时后端优先、后端未设置时用老键现值迁移上去；
   // 写时两边都写。启动期读这份镜像的第二消费点（`theme.js` 的 applySkinAndPreset）因此
   // 每次写都必须同步更新镜像。
+  // 2026-10-22 用户裁定删除「用户自定义强调色」：颜色一律以 main.css 的 `--accent` 为准。
+  // 存量镜像与 appearance.json 里的历史 `accent` 键不进这张表 ⇒ 回读不采纳、写入不迁移，
+  // 也不会被推回后端（未知键对 localStorage 对象与 serde_json::Value 都是天然容忍）。
   const APPEARANCE_PREF_KEYS = [
-    { key: 'accent' },
     { key: 'bgPath' },
     { key: 'bgOpacity' },
     { key: 'bgOpacityFog' },

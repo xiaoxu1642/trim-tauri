@@ -1,13 +1,12 @@
 // pathbinding.js - 设置页入口 + 安装路径绑定面
 //
-// 设置页的五类关注点已按契约面拆开，本文件只剩两件：
+// 设置页的四类关注点已按契约面拆开，本文件只剩两件：
 //   1. 路径绑定面：GROUPS 数据表、自动扫描 / 手动编辑 / 浏览选择 / 实时校验，弹窗样式
 //      与「设置 - 使用说明」一致；`window.pathbinding` 这个对外名字也由本文件挂载。
 //   2. 入口装配：设置页按钮、系统信息折叠，以及按固定顺序拉起各面的 init。
 //
 // 加载顺序（两个清单都必须列全且同序）：
 //   pathbinding-appearance.js  外观偏好的镜像与真源口径、重放登记（最先，各面只读它）
-//   pathbinding-accent.js      强调色（CSS 变量组 + 可读前景色）
 //   pathbinding-background.js  背景图（铺底 / 列表 / 视角雾化 / 预设背景 / 壁纸层模糊）
 //   pathbinding-material.js    窗口材质（卡片 + 总开关 + 主进程广播）
 //   pathbinding-wallpaper.js   实拍壁纸轮换（wp-*）
@@ -353,8 +352,8 @@
   }
 
   // ==================== 外观面装配（各面在各自文件里） ====================
-  // 本入口只负责顺序与失败出口；强调色 / 背景图 / 材质 / 壁纸轮换的实现分别在
-  // `pathbinding-accent.js` / `pathbinding-background.js` / `pathbinding-material.js` /
+  // 本入口只负责顺序与失败出口；背景图 / 材质 / 壁纸轮换的实现分别在
+  // `pathbinding-background.js` / `pathbinding-material.js` /
   // `pathbinding-wallpaper.js`，外观偏好的镜像与真源口径在 `pathbinding-appearance.js`。
 
   // 背景图列表的两条失败出口。文案必须留在本文件：Rust 侧源码形状断言
@@ -395,7 +394,6 @@
     const ap = window.pathbindingBackground.init();
     initSystemInfoSection();
     window.pathbindingMaterial.init();
-    window.pathbindingAccent.init();
     window.pathbindingWallpaper.init();
     window.pathbindingAppearance.applyAll(window.pathbindingAppearance.migrateBgOpacityToFog(ap));
     window.pathbindingBackground.initWallpaperBlur();

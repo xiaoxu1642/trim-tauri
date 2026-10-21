@@ -635,6 +635,32 @@ function rustFns(src) {
   }
 }
 
+// N12（v7.2 P3 · N1b-U05 用户裁定「登记」）：扫描器的回收站出口必须仍存在且**仍走回收站**。
+//
+// 为什么单独立一条而不是塞进 check-delete-exits 的 EXEMPTS：那张表按**命令名**与命令体对拍
+// （`exemptStale` 会核对每个键仍有对应命令），native-scanner 的 `pub mod recycle` 不是 IPC 命令，
+// 塞进去会被那条判据当场判红——登记口径不同，不能硬合（§4.1「形似不合」）。
+//
+// 抓什么：`native-scanner/src/scan.rs` 里 `pub mod recycle` 必须在，且在同一个模块体内带
+// `FOF_ALLOWUNDO`（允许撤销＝进回收站）。若有人把这个常数去掉、或改成直接 DeleteFile，
+// 症状是「清理扫描结果时文件被永久删除」，而所有既有门禁只盯 src-tauri 的删除 API，看不见它。
+{
+  const scanRs = (files || []).find((f) => String(f).replace(/\\/g, '/').endsWith('native-scanner/src/scan.rs'));
+  if (!scanRs) {
+    g.fail('N12：扫描面里找不到 native-scanner/src/scan.rs ⇒ 本节未校验（登记对象失踪必须红，不许静默 SKIP）');
+  } else {
+    const text = readFileSync(scanRs, 'utf8');
+    const mod = text.match(/pub mod recycle\s*\{([\s\S]*?)\n\}/);
+    if (!mod) {
+      g.fail('N12：扫描器回收站模块 pub mod recycle 不见了或换了形状 —— 删除出口台账失去登记对象');
+    } else if (!/FOF_ALLOWUNDO/.test(mod[1])) {
+      g.fail('N12：recycle 模块内没有 FOF_ALLOWUNDO ⇒ 该出口可能已从「送回收站」退化成「永久删除」');
+    } else {
+      g.ok('N12：扫描器回收站出口在位且保留 FOF_ALLOWUNDO（进回收站，可撤销）');
+    }
+  }
+}
+
 // 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明；
 // CLEANUP 取用点命中过少 ⇒ N9-B 语料失明（N9 取用点本应 ≥6，命中 0~5 即正则/域前缀出事）
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);
