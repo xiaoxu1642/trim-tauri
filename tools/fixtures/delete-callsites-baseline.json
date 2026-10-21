@@ -20,7 +20,7 @@
   },
   "remove_dir_all": {
     "src-tauri/src/commands/diskbench.rs": 1,
-    "src-tauri/src/commands/fileclean.rs": 6,
+    "src-tauri/src/commands/fileclean.rs": 16,
     "src-tauri/src/commands/gameclean.rs": 4,
     "src-tauri/src/commands/realtime.rs": 2,
     "src-tauri/src/commands/uninstall/backup_report.rs": 4,

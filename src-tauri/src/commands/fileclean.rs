@@ -1,8 +1,14 @@
 //! fileclean 域（D 批）：fileclean:scan / delete-file / execute
 //!
 //! 对照 Electron `vendor/upstream-js/main.js` 7086-7334。QQ/微信文件清理：
-//! 扫描选定目录（深度 ≤4、上限 2000 项）→ 分类 image/video/cache/data →
+//! 扫描**内容根**（见 `QQ_CONTENT_RELS` / `WECHAT_CONTENT_RELS`：每个根深度 ≤`MAX_DEPTH`、
+//! 输出 ≤`MAX_FILES` 项）→ 分类 image/video/cache/data →
 //! 只允许删除本窗口本次扫描结果内的文件；删除一律回收站优先 + 删除清单落盘。
+//!
+//! 为什么不再从配置根递归整棵：QQ NT / 微信 4.0 把可清理内容埋在账号目录的数据子目录里
+//! （配置根下 4-9 层），整根 BFS 的深度预算全花在账号/容器目录上——本机实测旧口径 QQ
+//! 命中 0 项、微信只命中 38 项，同时回执照报 truncated（提示「结果可能不完整」）。
+//! 现在按「清理项声明的路径」分路扫描，每路独立计数/计深，互不顶账。
 //!
 //! 关键安全/语义（与 Electron 逐条对齐）：
 //! - 扫描根只能来自已保存的路径配置（qqFileDir / wechatFileDir），
@@ -40,11 +46,37 @@ use crate::security;
 /// 改法换成把逐条 syscall 去掉（见 `scan_root` 里的 reparse 复核），
 /// 遍历面与判定面一字未动：命中集、先到先得的行序、截断点全部照旧。
 const MAX_FILES: usize = 2000;
-const MAX_DEPTH: usize = 4;
+/// 单个内容根的深度闸。**不是**「内容在第几层」的判据（那由内容根决定），只是防病态树的
+/// 兜底；取 24 与常规清理域 `FK_SNAPSHOT_MAX_DEPTH` 同口径。
+///
+/// 旧值 4 是相对**配置根**计数的，而实测内容在配置根下 4-9 层、在内容根下最多 7 层
+/// （QQ `nt_data\ams\...` 的 Chromium 缓存链），旧口径必然截断主内容（Emoji 就在
+/// 数据根下第 5 层）——所以深度预算必须改挂在内容根上并按实测覆盖，不是「调大上限消提示」。
+const MAX_DEPTH: usize = 24;
 const MAX_PATH_LEN: usize = 400;
-/// 批量删除的单批上限（v7.2 `R1d-L04`）：与 `MAX_FILES` 同值是**现状**，但必须是
-/// 一个有名有姓的闸——旧实现只在扫描侧有上限、删除侧「隐式等于扫描槽大小」，
-/// 于是删除批量口径只能靠读两处代码反推。`finder` 侧同类闸叫 `FINDER_DELETE_MAX`，
+
+/// 每种清理类型的「内容根」相对路径：先按配置根本身试一次，再按配置根的一级子目录
+/// （账号目录）各试一次（见 `expand_content_roots`）。用户既可能把路径配到
+/// `Tencent Files` / `xwechat_files` 这一层，也可能配到单个账号目录。
+///
+/// QQ 的两条对应账号库之外的聊天数据目录（与常规清理规则 `tencentQq` 收窄后的
+/// `nt_data` 口径一致）；微信取账号目录下的缓存/消息/临时/业务子目录。
+/// `all_users` 是微信共享目录：旧整根口径会收 `all_users\whatsnew.dat`，把它保留为内容根
+/// 是为了不让这次收窄**静默缩小**可删集合。
+const QQ_CONTENT_RELS: &[&str] = &[r"nt_qq\nt_data", r"nt_qq\global\nt_data"];
+const WECHAT_CONTENT_RELS: &[&str] = &["cache", "msg", "temp", "business", "all_users"];
+
+fn content_rels(ty: &str) -> &'static [&'static str] {
+    if ty == "qq" {
+        QQ_CONTENT_RELS
+    } else {
+        WECHAT_CONTENT_RELS
+    }
+}
+
+/// 批量删除的单批上限（v7.2 `R1d-L04`）：与 `MAX_FILES` 同值是**基线**，实际闸取
+/// `max(本常量, 槽大小)`（见 `fileclean_execute`）——扫描按内容根分路后单条目可超过 2000，
+/// 固定值会把完整清单整批拒掉。`finder` 侧同类闸叫 `FINDER_DELETE_MAX`，
 /// 两边都显式命名才谈得上对账（跨域批量上限口径不一是本条的根因）。
 const FILECLEAN_DELETE_MAX: usize = 2000;
 // IMAGE_MAX_BYTES 随 fileclean:read-image（base64 dataURL 通道）退役删除：
@@ -203,15 +235,92 @@ fn classify(ext: &str) -> Option<&'static str> {
     }
 }
 
-/// BFS 扫描（不跟随符号链接）。
-/// 返回 (items, 已归类的文件数, 因文件名无法无损表示而未收录的条目数)。
+/// 扫一个内容根：根目录自身的文件也收（内容根的第一层就是内容，不是容器），
+/// 与「配置根的根层文件不收」区分开——后者在 `scan_root` 的 `collect_root_files=false`。
+fn scan_content_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
+    scan_dir(root, true, MAX_DEPTH, MAX_FILES)
+}
+
+/// 扫配置根整棵（旧口径，仅在展开不出任何内容根时兜底），根层文件不收。
+fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
+    scan_dir(root, false, MAX_DEPTH, MAX_FILES)
+}
+
+/// 多个内容根合并：各路独立计数、独立计深，任一路触顶即整体 `truncated`。
+/// 内容根之间天然不相交（账号目录下的不同子目录），不做跨路去重。
+fn scan_lanes(lanes: &[PathBuf]) -> (Vec<Value>, usize, usize, bool) {
+    let mut items: Vec<Value> = Vec::new();
+    let mut scanned = 0usize;
+    let mut unhandled = 0usize;
+    let mut truncated = false;
+    for lane in lanes {
+        let (mut it, s, u, t) = scan_content_root(lane);
+        items.append(&mut it);
+        scanned += s;
+        unhandled += u;
+        truncated |= t;
+    }
+    (items, scanned, unhandled, truncated)
+}
+
+/// 展开内容根：按「配置根本身 + 它的一级子目录」各试一次相对路径，只认存在的普通目录
+/// （reparse 不跟随，与扫描入口同一判据）。结果排序保证同一份盘上结果的扫描顺序与
+/// 截断点稳定，不随 `read_dir` 的枚举顺序漂移。
+fn expand_content_roots(root: &Path, rels: &[&str]) -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = vec![root.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if let Ok(m) = std::fs::symlink_metadata(&p) {
+                if m.is_dir() && !protect::is_reparse(&m) {
+                    bases.push(p);
+                }
+            }
+        }
+    }
+    bases.sort();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for base in &bases {
+        for rel in rels {
+            let p = base.join(rel);
+            if let Ok(m) = std::fs::symlink_metadata(&p) {
+                if m.is_dir() && !protect::is_reparse(&m) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    // 去掉被其它内容根包含的路径（例如 `all_users` 与 `all_users\cache` 同时存在）：
+    // 同一文件被两路各收一次会让项数与总体积翻倍，删除侧也会重复尝试。
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for p in out {
+        if kept.iter().any(|k| p != *k && p.starts_with(k)) {
+            continue;
+        }
+        kept.push(p);
+    }
+    kept
+}
+
+/// BFS 扫描（不跟随符号链接），单个根的预算由调用方决定。
+/// 返回 (items, 已归类的文件数, 因文件名无法无损表示而未收录的条目数, 是否截断)。
 ///
 /// 审查 v2-M5（与 finder 域同源）：本域的删除目标是**渲染层回传的字符串**重建的，
 /// 而 `items[].path` 来自 `to_string_lossy()`。名字里有孤立代理项（GBK 遗留介质、
 /// 字节级拷贝）时，lossy 往返得到的是另一个路径 —— 轻则删不到，重则删掉一个恰好
 /// 用 U+FFFD 命名的无关文件。所以这类条目**根本不收录**（不进槽、不可删），
 /// 并把数量回给上层：不静默丢（v2-M4 同口径）。
-fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
+///
+/// 预算作为参数传入，是为了让「旧口径（整根 + 4 层）」在测试里有一份可复现的对照，
+/// 而不是把常量抄进用例。
+fn scan_dir(
+    root: &Path,
+    collect_root_files: bool,
+    max_depth: usize,
+    max_files: usize,
+) -> (Vec<Value>, usize, usize, bool) {
     let mut items: Vec<Value> = Vec::new();
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     queue.push_back((root.to_path_buf(), 0));
@@ -222,7 +331,7 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
     while let Some((dir, depth)) = queue.pop_front() {
         // v4 P2-E（R1-M05）：截断必须留痕 —— 旧实现静默跳过超深/超限分支，
         // 回执与 UI 都不知道「结果可能不完整」，用户以为扫完了。
-        if items.len() >= MAX_FILES {
+        if items.len() >= max_files {
             truncated = true;
             continue;
         }
@@ -244,7 +353,7 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
         };
         let mut subdirs: Vec<PathBuf> = Vec::new();
         for ent in rd.flatten() {
-            if items.len() >= MAX_FILES {
+            if items.len() >= max_files {
                 truncated = true;
                 break;
             }
@@ -289,8 +398,8 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
                 }
                 subdirs.push(full);
             } else if md.is_file() {
-                // 根层文件不收
-                if depth == 0 {
+                // 配置根的根层文件不收（账号数据库就在这一层）；内容根的根层文件照收
+                if depth == 0 && !collect_root_files {
                     continue;
                 }
                 scanned += 1;
@@ -316,7 +425,7 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
                 }));
             }
         }
-        if depth < MAX_DEPTH {
+        if depth < max_depth {
             for d in subdirs {
                 queue.push_back((d, depth + 1));
             }
@@ -394,8 +503,24 @@ pub async fn fileclean_scan<R: Runtime>(
     let ty2 = ty.clone();
     let root2 = resolved.clone();
     let heavy = is_large_qq_dir(&resolved);
-    let result = tauri::async_runtime::spawn_blocking(move || scan_root(Path::new(&root2))).await;
-    let (items, scanned, unhandled, truncated) = match result {
+    let rels = content_rels(&ty);
+    // 内容根必须从**规范化之后**的根展开（`resolved`）：扫描结果要落在同一个根前缀下，
+    // 删除时的 `in_scope` 才认得出这些路径（8.3 短名/大小写/verbatim 前缀都会让裸配置串
+    // 与规范化串对不上 ⇒ 整批拒绝删除）。
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let root = Path::new(&root2);
+        let lanes = expand_content_roots(root, rels);
+        if lanes.is_empty() {
+            // 旧版布局 / 完全自定义的目录：一路内容根都展开不出来时退回整根扫描。
+            // 这条兜底保住的是「换布局之前的目录仍能扫出文件」，不能让收窄变成静默 0 项。
+            (scan_root(root), 0usize)
+        } else {
+            let n = lanes.len();
+            (scan_lanes(&lanes), n)
+        }
+    })
+    .await;
+    let ((items, scanned, unhandled, truncated), lane_count) = match result {
         Ok(v) => v,
         Err(e) => {
             log::write_log("error", &format!("文件清理扫描任务异常: {e}"));
@@ -418,7 +543,7 @@ pub async fn fileclean_scan<R: Runtime>(
     log::write_log(
         "info",
         &format!(
-            "文件清理扫描完成: {} -> {} 项，{} 字节，枚举 {} 个文件{}{}",
+            "文件清理扫描完成: {} -> {} 项，{} 字节，枚举 {} 个文件{}{}（{}）",
             ty2,
             items.len(),
             total_size,
@@ -429,10 +554,18 @@ pub async fn fileclean_scan<R: Runtime>(
                 String::new()
             },
             if heavy { "（大目录）" } else { "" },
+            if lane_count > 0 {
+                format!("{lane_count} 个内容根")
+            } else {
+                "整根兜底".to_string()
+            },
         ),
     );
     if truncated {
-        log::write_log("warn", &format!("文件清理扫描达上限（{MAX_FILES} 项 / 深度 {MAX_DEPTH}），结果可能不完整: {ty2}"));
+        log::write_log(
+            "warn",
+            &format!("文件清理扫描达上限（每根 {MAX_FILES} 项 / 深度 {MAX_DEPTH}），结果可能不完整: {ty2}"),
+        );
     }
     let _ = window.emit(
         "cleanup:scan-progress",
@@ -591,19 +724,12 @@ pub async fn fileclean_execute<R: Runtime>(
     if files.is_empty() {
         return json!({ "success": false, "message": "没有选中文件" });
     }
-    // v7.2 `R1d-L04`：单批上限显式化。今天扫槽本身封在 MAX_FILES，这条拒不了任何东西；
-    // 写出来是为了让「删除批的口径」是个有名有姓的常量，而不是要从扫描侧反推。
-    // 判红方向选**整批拒**而不是截断：静默少删与 M05（输入被静默丢弃）同罪。
-    if files.len() > FILECLEAN_DELETE_MAX {
-        log::write_log(
-            "warn",
-            &format!("文件清理单批 {} 项超上限（{FILECLEAN_DELETE_MAX}），已整批拒绝", files.len()),
-        );
-        return json!({
-            "success": false,
-            "message": format!("单批最多删除 {FILECLEAN_DELETE_MAX} 项，请减少选择后分批执行")
-        });
-    }
+    // v7.2 `R1d-L04` 的闸保留，但上限口径随扫描侧改：扫描按内容根分路后单条目可产出数千条
+    // （本机实测 QQ 2910 / 微信 2259），而渲染层一次执行只发该条目的整份清单 ⇒ 固定 2000 会把
+    // 「完整扫描」变成「整批拒绝」。上限改成 max(固定闸, 槽大小)：槽本身已被扫描侧按每个内容根
+    // `MAX_FILES` 封顶，仍是一道显式闸（送超过槽大小的批量一律整批拒）。
+    // 判红方向保持**整批拒**而不是截断：静默少删与 M05（输入被静默丢弃）同罪。
+    // 检查必须在取到槽之后（槽大小是上限的一半）。
 
     // 确定槽：用第一项反查（一次 execute 只扫一个 type 的结果）
     let first_path = files
@@ -624,6 +750,18 @@ pub async fn fileclean_execute<R: Runtime>(
         // 让渲染层吃一个未分类错误，不如显式报「会话已过期」（审查 L1）。
         return json!({ "success": false, "message": "扫描会话已过期，请重新扫描后再删除" });
     };
+
+    let batch_max = FILECLEAN_DELETE_MAX.max(scope.files.len());
+    if files.len() > batch_max {
+        log::write_log(
+            "warn",
+            &format!("文件清理单批 {} 项超上限（{batch_max}），已整批拒绝", files.len()),
+        );
+        return json!({
+            "success": false,
+            "message": format!("单批最多删除 {batch_max} 项，请减少选择后分批执行")
+        });
+    }
 
     // 全部命中本槽才放行
     for f in &files {
@@ -938,6 +1076,161 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 内容根展开：账号目录与全局数据目录各成一路，账号库（`nt_db`）不得被当成内容根；
+    /// 配置根直接指向账号目录时也要能展开出 `\nt_qq\nt_data`。
+    #[test]
+    fn 内容根按账号与全局展开且不碰账号库() {
+        let root = std::env::temp_dir().join(format!("trim-fc-lanes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let acc = root.join("1607").join("nt_qq").join("nt_data");
+        let glob = root.join("nt_qq").join("global").join("nt_data");
+        std::fs::create_dir_all(&acc).expect("建账号数据根");
+        std::fs::create_dir_all(&glob).expect("建全局数据根");
+        std::fs::create_dir_all(root.join("nt_qq").join("nt_db")).expect("建账号库");
+
+        let lanes = expand_content_roots(&root, QQ_CONTENT_RELS);
+        let got: Vec<String> = lanes.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        assert_eq!(lanes.len(), 2, "账号与全局各一路、nt_db 不得入选: {got:?}");
+        assert!(got.iter().any(|p| p.ends_with(r"1607\nt_qq\nt_data")), "{got:?}");
+        assert!(got.iter().any(|p| p.ends_with(r"nt_qq\global\nt_data")), "{got:?}");
+        assert!(!got.iter().any(|p| p.contains("nt_db")), "{got:?}");
+
+        let lanes2 = expand_content_roots(&root.join("1607"), QQ_CONTENT_RELS);
+        assert_eq!(lanes2.len(), 1, "配置根=账号目录时应展开出它自己的数据根: {lanes2:?}");
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 嵌套内容根只留外层：否则同一批文件会被两路各收一次（项数/体积翻倍）
+        let wroot = std::env::temp_dir().join(format!("trim-fc-wc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wroot);
+        std::fs::create_dir_all(wroot.join("all_users").join("cache")).expect("建嵌套内容根");
+        let wl = expand_content_roots(&wroot, WECHAT_CONTENT_RELS);
+        assert_eq!(wl.len(), 1, "all_users 覆盖 all_users\\cache，只应留外层: {wl:?}");
+        assert!(wl[0].ends_with("all_users"), "{wl:?}");
+        let _ = std::fs::remove_dir_all(&wroot);
+    }
+
+    /// NT 布局的形状：内容在配置根下 4-6 层、数据根下 3-4 层。
+    /// 旧口径（整根 + 4 层）在这里命中 0 项并把「根本没扫到」报成 truncated；
+    /// 新口径按内容根展开后全收且不截断。两条一起才证明修复不是「调大深度消提示」。
+    #[test]
+    fn nt布局深内容_旧口径零命中_新口径全收() {
+        let root = std::env::temp_dir().join(format!("trim-fc-nt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let acc = root.join("1607").join("nt_qq").join("nt_data");
+        let glob = root.join("nt_qq").join("global").join("nt_data");
+        std::fs::create_dir_all(acc.join("Emoji").join("p1").join("res").join("images").join("sub"))
+            .expect("建账号深目录");
+        std::fs::create_dir_all(glob.join("PokeFace").join("2011").join("res").join("view").join("sub"))
+            .expect("建全局深目录");
+        std::fs::write(acc.join("Emoji").join("p1").join("res").join("images").join("sub").join("a.png"), b"x")
+            .expect("写样本");
+        std::fs::write(glob.join("PokeFace").join("2011").join("res").join("view").join("sub").join("b.png"), b"x")
+            .expect("写样本");
+        // 账号库旁的文件：内容根口径不得把它带进来（旧口径的整根递归从这里穿过去）
+        let db = root.join("1607").join("nt_qq").join("nt_db");
+        std::fs::create_dir_all(&db).expect("建账号库");
+        std::fs::write(db.join("keep.dat"), b"x").expect("写样本");
+
+        let (old, _s, _u, old_trunc) = scan_dir(&root, false, 4, MAX_FILES);
+        assert!(
+            old.iter().all(|v| v["name"] != "a.png" && v["name"] != "b.png"),
+            "旧口径（整根 + 4 层）应命不中 NT 布局的内容: {old:?}"
+        );
+        assert!(old_trunc, "旧口径把「没扫到」报成 truncated——提示的直接成因");
+
+        let lanes = expand_content_roots(&root, QQ_CONTENT_RELS);
+        let (new, _s, _u, trunc) = scan_lanes(&lanes);
+        let mut names: Vec<&str> = new
+            .iter()
+            .map(|v| v["name"].as_str().unwrap_or(""))
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.png", "b.png"], "新口径必须收全两处内容: {names:?}");
+        assert!(!trunc, "内容根下 4 层远不到 {MAX_DEPTH}，不得再报截断");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 一路内容根都展开不出来（旧版扁平布局 / 用户自定义目录）⇒ 退回整根扫描，不得静默 0 项。
+    #[test]
+    fn 无内容根时退回整根扫描() {
+        let root = std::env::temp_dir().join(format!("trim-fc-flat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("123").join("Image")).expect("建扁平布局");
+        std::fs::write(root.join("123").join("Image").join("a.jpg"), b"x").expect("写样本");
+
+        assert!(
+            expand_content_roots(&root, QQ_CONTENT_RELS).is_empty(),
+            "扁平布局不得凭空长出内容根"
+        );
+        let (items, _s, _u, tr) = scan_root(&root);
+        assert_eq!(items.len(), 1, "兜底整根扫描必须仍能收到旧布局文件: {items:?}");
+        assert!(!tr);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 超限样本 ⇒ truncated；不超限 ⇒ false。用的是生产常量本身（写满 `MAX_FILES` + 1 个文件），
+    /// 不是把预算改小后自证。
+    #[test]
+    fn 超限样本触发truncated_不超限不触发() {
+        let base = std::env::temp_dir().join(format!("trim-fc-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let big = base.join("big");
+        std::fs::create_dir_all(&big).expect("建超限根");
+        for i in 0..=MAX_FILES {
+            std::fs::write(big.join(format!("{i}.log")), b"x").expect("写超限样本");
+        }
+        let (items, _s, _u, tr) = scan_lanes(std::slice::from_ref(&big));
+        assert_eq!(items.len(), MAX_FILES, "输出必须封在 {MAX_FILES}");
+        assert!(tr, "超限必须报 truncated（提示的唯一凭据）");
+
+        let small = base.join("small");
+        std::fs::create_dir_all(&small).expect("建小根");
+        for i in 0..10 {
+            std::fs::write(small.join(format!("{i}.log")), b"x").expect("写小样本");
+        }
+        let (items2, _s, _u, tr2) = scan_lanes(std::slice::from_ref(&small));
+        assert_eq!(items2.len(), 10);
+        assert!(!tr2, "没触顶的根必须回 false（否则提示恒亮）");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 真机探针（只读）：用本机真实 QQ/微信目录跑「旧口径 vs 内容根口径」，点名两端项数。
+    /// 没有目录就 SKIP —— 用例本身不依赖本机样本，但「内容根够不够深、还会不会截断」
+    /// 只能拿真实布局验，沙箱里造不出 NT / 微信 4.0 的完整形状。
+    #[test]
+    #[ignore = "真机：读取本机 Documents 下的 QQ/微信目录（只读），复核内容根口径的命中数与截断位"]
+    fn 真机_qq微信内容根口径命中数与截断() {
+        let home = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let cases = [
+            ("qq", home.join("Documents").join("Tencent Files"), QQ_CONTENT_RELS),
+            ("wechat", home.join("Documents").join("xwechat_files"), WECHAT_CONTENT_RELS),
+        ];
+        for (ty, root, rels) in cases {
+            if !root.is_dir() {
+                println!("SKIP：本机没有 {ty} 目录 {}", root.display());
+                continue;
+            }
+            let (old, _s, _u, old_tr) = scan_dir(&root, false, 4, MAX_FILES);
+            let lanes = expand_content_roots(&root, rels);
+            let (new, _s, _u, new_tr) = scan_lanes(&lanes);
+            println!(
+                "{ty}: 内容根 {} 路；旧口径 {} 项/truncated={old_tr}；新口径 {} 项/truncated={new_tr}",
+                lanes.len(),
+                old.len(),
+                new.len()
+            );
+            assert!(!lanes.is_empty(), "{ty}：真实目录必须能展开出内容根");
+            assert!(
+                new.len() >= old.len(),
+                "{ty}：新口径不得比旧口径少收（新 {}/旧 {}）",
+                new.len(),
+                old.len()
+            );
+        }
     }
 
     /// v7.2 `R1d-L06`：本域槽键的唯一真源是 `snapshot::domain_key`。
