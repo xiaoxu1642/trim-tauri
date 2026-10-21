@@ -24,6 +24,12 @@
 // 签名换尾八字节判红」。对照失效（对篡改放行）即本门禁整条断言不可信。
 // 裸数组 + sidecar 那件走 verifyRulesFile 自己的分支，不在这里重复做字节对照。
 //
+// 第 4 段（T1c-U02）是**跨语言规范化对拍**：签名对象是「去掉 _sig 后的紧凑 JSON 文本」，
+// Node 的 canonicalBodyText 与 Rust 的 canonical_body_text / canonical_array_text 是两套
+// 独立实现，分叉的症状是「发布前门禁绿、用户装上后装载侧拒收」。两侧只共享
+// tools/fixtures/rules-canonical/cases.json 的**字节**（input 原文 + expected 手写字面量），
+// 各自用自己的实现重算——不共享判定函数。
+//
 // 用法：node tools/check-data-signatures.mjs
 'use strict';
 import { join, dirname } from 'node:path';
@@ -126,5 +132,69 @@ for (const rel of TARGETS) {
   else g.ok(`${rel} 验签通过`);
 }
 if (bad.length) g.fail(`存在签名不符/缺失的产物（改后必须重签：node tools/sign-cleanup-rules.mjs sign [--file …]）：\n  ${bad.join('\n  ')}`);
+
+// ---------- 4. 跨语言规范化对拍：Node 实现 ⇄ 共享夹具的期望字节（T1c-U02） ----------
+{
+  // 夹具是跟踪文件；input 是规则文件原文、expected 是规范化后的完整文本。
+  // 本段只验 Node 这一侧；Rust 读同一份字节在 rules_signature.rs 的
+  // canonical_fixture_cross_language_parity 里自证。两侧不共享判定函数，只共享字节。
+  const FIXTURE = join(ROOT, 'tools', 'fixtures', 'rules-canonical', 'cases.json');
+  if (g.skipUnlessPresent(FIXTURE, 'rules-canonical 跨语言夹具（跟踪文件，缺了说明克隆不完整）')) {
+    const problems = [];
+    // 比对器（唯一实现）：先钉方向，相同必须判等、不同必须判不等——方向反了后面全是假绿。
+    const sameBytes = (a, b) => a === b;
+    if (!sameBytes('x', 'x') || sameBytes('x', 'y')) {
+      g.fail('正向对照失败：夹具比对器方向反了（相同判不等 / 不同判等）');
+    }
+    const fx = JSON.parse(readFileSync(FIXTURE, 'utf8'));
+    if (fx.schema !== 1) problems.push(`夹具 schema=${fx.schema}，本门禁只认 1`);
+    const cases = Array.isArray(fx.cases) ? fx.cases : [];
+    if (!cases.length) problems.push('夹具没有用例（空夹具会让两侧断言同时空转）');
+    const names = new Set();
+    const forms = new Set();
+    for (const c of cases) {
+      if (!c || typeof c.name !== 'string' || !c.name) {
+        problems.push('存在没有 name 的用例');
+        continue;
+      }
+      if (names.has(c.name)) problems.push(`用例名重复：${c.name}`);
+      names.add(c.name);
+      if (typeof c.input !== 'string' || typeof c.expected !== 'string') {
+        problems.push(`${c.name}：input / expected 必须是字符串（字节级对拍不接受对象形态）`);
+        continue;
+      }
+      if (c.form !== 'object' && c.form !== 'array') {
+        problems.push(`${c.name}：form 只能是 object / array，实际 ${c.form}`);
+        continue;
+      }
+      forms.add(c.form);
+      let parsed;
+      try {
+        parsed = JSON.parse(c.input);
+      } catch (e) {
+        problems.push(`${c.name}：input 不是合法 JSON（${e.message.slice(0, 80)}）`);
+        continue;
+      }
+      if (Array.isArray(parsed) !== (c.form === 'array')) {
+        problems.push(`${c.name}：form=${c.form} 与 input 的真实形状不符`);
+      }
+      const got = canonicalBodyText(parsed);
+      if (!sameBytes(got, c.expected)) {
+        problems.push(
+          `${c.name}：Node 侧规范化字节与夹具 expected 不一致\n    实得 ${JSON.stringify(got)}\n    期望 ${JSON.stringify(c.expected)}`,
+        );
+      }
+    }
+    if (!forms.has('object') || !forms.has('array')) {
+      problems.push('夹具必须同时覆盖对象与裸数组两种形态（少一种等于该形态无对拍）');
+    }
+    if (problems.length) g.fail(`跨语言规范化对拍失败（Node 侧）：\n  ${problems.join('\n  ')}`);
+    else {
+      g.ok(
+        `跨语言规范化对拍 ${cases.length} 例（Node 实现 ⇄ 夹具 expected 逐字节相等）：${[...names].join('、')}`,
+      );
+    }
+  }
+}
 
 g.finish('数据产物验签门禁全部通过');

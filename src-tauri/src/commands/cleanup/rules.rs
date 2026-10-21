@@ -1182,6 +1182,14 @@ pub fn rules_value_arc() -> Result<Arc<Value>, String> {
     Ok(rules)
 }
 
+/// R4-U04：把 custom 文件清单钉成与 `read_dir` 枚举顺序无关的稳定顺序。
+///
+/// 单独成函数是为了让「顺序无关」这条判据有可直接构造的反例（打乱输入 → 输出必同），
+/// 而不用等某个真实文件系统的枚举顺序恰好变化。
+fn sort_custom_paths(custom: &mut [(PathBuf, f64)]) {
+    custom.sort_by(|a, b| a.0.cmp(&b.0));
+}
+
 /// 缓存签名 + 本次目录快照里的 custom 文件清单。
 ///
 /// 签名与清单**必须出自同一次 read_dir**（旧实现就是一次快照两用）：分两次读的话，
@@ -1206,6 +1214,10 @@ fn rules_cache_sig() -> (String, Vec<PathBuf>) {
             custom.push((e.path(), mtime));
         }
     }
+    // R4-U04：`read_dir` 的枚举顺序无保证（跨盘/跨机可不同），而同一规则 id 分散在多个
+    // custom 文件时「谁后应用谁赢」直接取决于这个顺序；签名里的 mtime 列表也按同一顺序
+    // 拼接，顺序抖动会让同一份内容算出两个签名、白掉一次缓存。文件路径是不可变键。
+    sort_custom_paths(&mut custom);
     let (data_mtime, data_size) = std::fs::metadata(data_rules_file())
         .map(|m| {
             let mt = m
@@ -1336,6 +1348,25 @@ pub(super) fn post_action_of(id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 自定义规则文件顺序与目录枚举顺序无关() {
+        let mut first = vec![
+            (PathBuf::from(r"C:\rules\b.json"), 2.0),
+            (PathBuf::from(r"C:\rules\a.json"), 1.0),
+        ];
+        let mut second = vec![
+            (PathBuf::from(r"C:\rules\a.json"), 1.0),
+            (PathBuf::from(r"C:\rules\b.json"), 2.0),
+        ];
+        sort_custom_paths(&mut first);
+        sort_custom_paths(&mut second);
+        let names = |v: &[(PathBuf, f64)]| -> Vec<String> {
+            v.iter().map(|(p, _)| p.to_string_lossy().to_string()).collect()
+        };
+        assert_eq!(names(&first), names(&second), "枚举顺序不同的两次收集必须给出同一顺序");
+        assert_eq!(names(&first), vec![r"C:\rules\a.json", r"C:\rules\b.json"]);
+    }
 
     /// 缓存命中路径的**正向对照**（AGENTS §4.1：恒绿断言不算验收）：第二次取必须拿到
     /// **同一个 `Arc` 对象**（指针相等），而不是「内容相同但重建的一棵树」——

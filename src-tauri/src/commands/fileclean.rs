@@ -92,6 +92,18 @@ fn scope_owner(label: &str) -> &str {
     label
 }
 
+/// 「大目录」判据（仅影响日志后缀，不参与扫描/删除判定）。
+///
+/// R1d-U04：旧实现直接对路径做大小写敏感的 `contains("tencent")`，而 QQ 默认目录是
+/// `Tencent Files`（大写 T）⇒ 默认路径恒判 false；同时子串匹配会把 `...\notencent\...`
+/// 这类同名片段误命中。这里统一走 `path_key` 归一（小写 + 反斜杠 + 去尾分隔符），再按
+/// **目录段**比较：段等于 `tencent` / `tencent files`，或以 `xwechat` 开头。
+fn is_large_qq_dir(resolved: &str) -> bool {
+    path_key(resolved)
+        .split('\\')
+        .any(|seg| seg == "tencent" || seg == "tencent files" || seg.starts_with("xwechat"))
+}
+
 fn config_key(ty: &str) -> &'static str {
     if ty == "qq" {
         "qqFileDir"
@@ -381,8 +393,7 @@ pub async fn fileclean_scan<R: Runtime>(
     let label = window.label().to_string();
     let ty2 = ty.clone();
     let root2 = resolved.clone();
-    let heavy = scan_path.to_string_lossy().contains("tencent")
-        || resolved.to_lowercase().contains("xwechat");
+    let heavy = is_large_qq_dir(&resolved);
     let result = tauri::async_runtime::spawn_blocking(move || scan_root(Path::new(&root2))).await;
     let (items, scanned, unhandled, truncated) = match result {
         Ok(v) => v,
@@ -745,6 +756,17 @@ mod tests {
     fn ext_lowercased() {
         assert_eq!(ext_of("PHOTO.JPG"), "jpg");
         assert_eq!(ext_of("noext"), "");
+    }
+
+    /// R1d-U04：默认 QQ 目录是 `Tencent Files`（大写 T），旧的大小写敏感子串匹配恒 false；
+    /// 同时子串匹配会把 `notencent` 之类同名片段误判成大目录。按目录段比较后两条都钉住。
+    #[test]
+    fn large_dir_matches_by_component_case_insensitively() {
+        assert!(is_large_qq_dir(r"C:\Users\x\Documents\Tencent Files"));
+        assert!(is_large_qq_dir(r"C:\Users\x\Documents\xwechat_files\wxid_1"));
+        assert!(is_large_qq_dir(r"D:\Tencent\QQ\Users"));
+        assert!(!is_large_qq_dir(r"C:\Users\x\notencent\data"));
+        assert!(!is_large_qq_dir(r"C:\Users\x\Documents\Tencent Files Backup2"));
     }
 
     #[test]

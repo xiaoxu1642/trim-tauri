@@ -47,28 +47,14 @@ pub(super) fn driver_files_in(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let Ok(rd) = std::fs::read_dir(root) else {
         return (Vec::new(), vec![format!("列不到目录 {}，本组结果不完整", root.display())]);
     };
+    let (mut out, skipped_reparse, unreadable_entries) = collect_driver_entries(rd);
     let mut notes = Vec::new();
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut skipped_reparse = 0usize;
-    for ent in rd.flatten() {
-        let Ok(ft) = ent.file_type() else { continue };
-        if ft.is_symlink() {
-            skipped_reparse += 1;
-            continue;
-        }
-        if !ft.is_file() {
-            continue;
-        }
-        let path = ent.path();
-        let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
-        if protect::is_reparse(&md) {
-            // 目录项报不出 reparse 位、但 OS 仍按重解析点解释的形态（云占位符等）走这里
-            skipped_reparse += 1;
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("sys")).unwrap_or(false) {
-            out.push(path);
-        }
+    // A1-U01：目录能列、单个目录项读不到时旧实现是裸 `continue` —— 用户看到的
+    // 是「本机就这几个驱动」，与「什么都没扫到」无法区分。条目级失败必须可见。
+    if unreadable_entries > 0 {
+        notes.push(format!(
+            "{unreadable_entries} 个目录项读不到类型或元数据（权限/IO 失败）已跳过，本组结果不完整"
+        ));
     }
     if skipped_reparse > 0 {
         notes.push(format!("{skipped_reparse} 个 reparse/链接形态的目录项已排除（它们不是本机 drivers 目录下的实体文件，跟随过去判等于判到别处）"));
@@ -79,6 +65,52 @@ pub(super) fn driver_files_in(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
         out.truncate(DRIVER_FILE_CAP);
     }
     (out, notes)
+}
+
+/// 目录枚举结果 → (.sys 清单, 排除的 reparse/链接数, 读不到类型/元数据的目录项数)。
+///
+/// 单独接收迭代器是为了让「条目读取失败必须计数」有**可直接构造**的反例：单测注入一个
+/// `Err` 目录项即可，不必等真实文件系统偶发 IO 失败（那种样本不可按需复现）。
+fn collect_driver_entries(
+    entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+) -> (Vec<PathBuf>, usize, usize) {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut skipped_reparse = 0usize;
+    let mut unreadable = 0usize;
+    for ent in entries {
+        let ent = match ent {
+            Ok(e) => e,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        let Ok(ft) = ent.file_type() else {
+            unreadable += 1;
+            continue;
+        };
+        if ft.is_symlink() {
+            skipped_reparse += 1;
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+        let path = ent.path();
+        let Ok(md) = std::fs::symlink_metadata(&path) else {
+            unreadable += 1;
+            continue;
+        };
+        if protect::is_reparse(&md) {
+            // 目录项报不出 reparse 位、但 OS 仍按重解析点解释的形态（云占位符等）走这里
+            skipped_reparse += 1;
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("sys")).unwrap_or(false) {
+            out.push(path);
+        }
+    }
+    (out, skipped_reparse, unreadable)
 }
 
 /// 纯判定：`signer` 注入（真实实现读 Authenticode，单测注入一张表）。
@@ -260,6 +292,22 @@ mod tests {
         let (files, notes) = driver_files_in(Path::new(r"\\\trims-probe-no-such-root-9f3a\nope"));
         assert!(files.is_empty());
         assert!(notes.iter().any(|n| n.contains("本组结果不完整")), "{notes:?}");
+    }
+
+    /// A1-U01：目录项级读取失败必须计数并可构造（注入 Err 迭代项，不赌真实 IO 故障）。
+    /// 同时钉住采集侧「有计数就必须出注记」——只加计数不呈现等于仍然静默。
+    #[test]
+    fn unreadable_entry_is_counted_and_noted() {
+        let entries: Vec<std::io::Result<std::fs::DirEntry>> =
+            vec![Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "probe"))];
+        let (files, skipped, unreadable) = collect_driver_entries(entries.into_iter());
+        assert!(files.is_empty());
+        assert_eq!(skipped, 0);
+        assert_eq!(unreadable, 1, "目录项读取失败没有被计数");
+
+        let src = include_str!("drivers_orphan.rs");
+        assert!(src.contains("if unreadable_entries > 0"), "计数没有接到注记上");
+        assert!(src.contains("个目录项读不到类型或元数据"), "注记文案不见了");
     }
 
     /// R2b-L04 真机反例（**触盘 ⇒ #[ignore]**，AGENTS §4.2 纪律②）：

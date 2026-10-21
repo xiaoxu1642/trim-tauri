@@ -74,6 +74,18 @@ const POWER_SETTING_ATTR_VISIBLE: u32 = 0b0000_0010;
 
 static POWER_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 static POWER_SESSIONS: OnceLock<Mutex<HashMap<String, PowerSettingsSession>>> = OnceLock::new();
+/// 会话落盘的读-改-写互斥（AGENTS §5.28）：磁盘写入的并发方可能来自不同命令线程，
+/// 只靠内存表的锁保护不了「快照 → 序列化 → 原子写」这段窗口。
+static POWER_SESSION_DISK_LOCK: Mutex<()> = Mutex::new(());
+
+/// 编辑会话的落盘文件名（应用数据目录下）。
+///
+/// 方案 §7.1 裁定「必须跨重启可恢复」：用户解锁 → 改值 → 关闭/提权重启 → 再点还原时，
+/// 若会话只在进程内存里，最后一步必回「会话不存在」，等于把已改的属性锁死。
+const POWER_SESSION_FILE: &str = "power-edit-sessions.json";
+
+/// 会话 TTL：过期快照不再代表系统当前属性（用户可能在别处改过），按过期丢弃。
+const POWER_SESSION_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Clone)]
 struct PowerSettingRef {
@@ -84,6 +96,8 @@ struct PowerSettingRef {
 #[derive(Clone)]
 struct PowerSettingsSession {
     scheme_guid: String,
+    /// 会话创建时刻（毫秒）：TTL 判据与落盘排序都靠它。
+    created_ms: i64,
     snapshots: Vec<PowerSettingSnapshot>,
 }
 
@@ -660,6 +674,177 @@ fn power_sessions() -> &'static Mutex<HashMap<String, PowerSettingsSession>> {
 fn new_power_session_id() -> String {
     let seq = POWER_SESSION_SEQ.fetch_add(1, Ordering::SeqCst);
     format!("{}-{}-{seq}", crate::engine::now_ms(), std::process::id())
+}
+
+fn power_sessions_file() -> PathBuf {
+    crate::engine::paths::app_data_dir().join(POWER_SESSION_FILE)
+}
+
+/// 会话 → 落盘形状。GUID 一律用 36 字符小写文本（与 `guid_string` 同形），
+/// 回读侧用 [`parse_guid_str`] 严格解析，不做模糊匹配。
+fn session_to_json(session_id: &str, session: &PowerSettingsSession) -> Value {
+    let snapshots: Vec<Value> = session
+        .snapshots
+        .iter()
+        .map(|s| {
+            json!({
+                "subgroupGuid": guid_string(&s.subgroup),
+                "settingGuid": guid_string(&s.setting),
+                "attributes": s.attributes,
+                "changed": s.changed,
+            })
+        })
+        .collect();
+    json!({
+        "sessionId": session_id,
+        "schemeGuid": session.scheme_guid,
+        "createdMs": session.created_ms,
+        "snapshots": snapshots,
+    })
+}
+
+/// 落盘形状 → 会话。任一字段缺失/形状不对返回 `None`（调用方留痕后跳过该条），
+/// 绝不把「读不懂的快照」猜成可回写的属性。
+fn session_from_json(raw: &Value) -> Option<(String, PowerSettingsSession)> {
+    let session_id = raw.get("sessionId")?.as_str()?.to_string();
+    let scheme_guid = raw.get("schemeGuid")?.as_str()?.to_ascii_lowercase();
+    let created_ms = raw.get("createdMs")?.as_i64()?;
+    let mut snapshots = Vec::new();
+    for s in raw.get("snapshots")?.as_array()? {
+        snapshots.push(PowerSettingSnapshot {
+            subgroup: parse_guid_str(s.get("subgroupGuid")?.as_str()?)?,
+            setting: parse_guid_str(s.get("settingGuid")?.as_str()?)?,
+            attributes: u32::try_from(s.get("attributes")?.as_u64()?).ok()?,
+            changed: s.get("changed").and_then(Value::as_bool).unwrap_or(true),
+        });
+    }
+    Some((
+        session_id,
+        PowerSettingsSession {
+            scheme_guid,
+            created_ms,
+            snapshots,
+        },
+    ))
+}
+
+/// 丢弃 TTL 过期会话。纯函数（时间注入）——「过期必须消失」因此可直接构造反例。
+fn sessions_within_ttl(
+    sessions: HashMap<String, PowerSettingsSession>,
+    now_ms: i64,
+) -> HashMap<String, PowerSettingsSession> {
+    sessions
+        .into_iter()
+        .filter(|(_, s)| now_ms.saturating_sub(s.created_ms) <= POWER_SESSION_TTL_MS)
+        .collect()
+}
+
+/// 从盘上读会话表：不存在 = 空表；解析失败由 `read_json_state` 隔离；结构不符在此隔离。
+/// 单条会话形状不对只跳过该条并留 warn —— 一条坏记录不该让其余可回滚会话一起消失。
+fn load_power_sessions_from_disk(now_ms: i64) -> HashMap<String, PowerSettingsSession> {
+    let path = power_sessions_file();
+    let value = match crate::security::read_json_state(&path) {
+        crate::security::JsonState::Ok(v) => v,
+        crate::security::JsonState::Absent => return HashMap::new(),
+        // 解析失败已在 read_json_state 内 quarantine；IO 失败只留痕（文件可能还在，搬运会误伤）
+        crate::security::JsonState::Corrupt => return HashMap::new(),
+    };
+    let Some(list) = value.get("sessions").and_then(Value::as_array) else {
+        crate::engine::log::write_log(
+            "error",
+            &format!(
+                "电源编辑会话文件结构不符（缺 sessions 数组），已按损坏隔离: {}",
+                path.display()
+            ),
+        );
+        crate::security::quarantine_file(&path, "电源编辑会话结构不符");
+        return HashMap::new();
+    };
+    let mut sessions = HashMap::new();
+    for raw in list {
+        match session_from_json(raw) {
+            Some((id, session)) => {
+                sessions.insert(id, session);
+            }
+            None => {
+                crate::engine::log::write_log(
+                    "warn",
+                    "电源编辑会话条目结构不符，已跳过（该会话不能跨重启回滚）",
+                );
+            }
+        }
+    }
+    sessions_within_ttl(sessions, now_ms)
+}
+
+/// 新增会话并落盘。内存锁内完成「改表 → 快照 → 原子写」：只锁盘会让两次并发
+/// 修改各自拿到旧快照、后写者把先写者的会话抹掉（AGENTS §5.28）。
+fn insert_power_session(session_id: String, session: PowerSettingsSession) {
+    let now_ms = crate::engine::now_ms();
+    let mut map = power_sessions().lock().unwrap_or_else(|e| e.into_inner());
+    map.insert(session_id, session);
+    persist_power_sessions(&map, now_ms);
+}
+
+/// 把当前会话表（裁掉 TTL 过期项）原子写盘。写失败只留 error：解锁本身已成功，
+/// 不能因为「跨重启备份没落盘」把用户刚解锁的会话判失败，但必须让他能查到原因。
+fn persist_power_sessions(sessions: &HashMap<String, PowerSettingsSession>, now_ms: i64) {
+    let mut ids: Vec<&String> = sessions.keys().collect();
+    ids.sort();
+    let list: Vec<Value> = ids
+        .into_iter()
+        .filter(|id| now_ms.saturating_sub(sessions[*id].created_ms) <= POWER_SESSION_TTL_MS)
+        .map(|id| session_to_json(id, &sessions[id]))
+        .collect();
+    let value = json!({ "version": 1, "sessions": list });
+    let _guard = POWER_SESSION_DISK_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = crate::security::atomic_write_json(&power_sessions_file(), &value) {
+        crate::engine::log::write_log(
+            "error",
+            &format!("电源编辑会话落盘失败（进程重启后将无法回滚本次解锁）: {e}"),
+        );
+    }
+}
+
+/// 取会话：内存优先；进程重启后内存表为空，再从盘上恢复（同时裁掉 TTL 过期项）。
+fn power_session_get(session_id: &str) -> Option<PowerSettingsSession> {
+    let now_ms = crate::engine::now_ms();
+    // 先取再判：`if let` 的临时锁守卫会活到整个分支体，分支里再取锁会自锁。
+    let in_memory = {
+        let map = power_sessions().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(session_id).cloned()
+    };
+    if let Some(found) = in_memory {
+        if now_ms.saturating_sub(found.created_ms) <= POWER_SESSION_TTL_MS {
+            return Some(found);
+        }
+        // 内存里也按 TTL 判：长时间不关窗口的进程同样不能让过期快照可回写
+        let _ = drop_power_session(session_id, now_ms);
+        return None;
+    }
+    let disk = load_power_sessions_from_disk(now_ms);
+    if disk.is_empty() {
+        return None;
+    }
+    let mut map = power_sessions().lock().unwrap_or_else(|e| e.into_inner());
+    for (id, session) in disk {
+        map.entry(id).or_insert(session);
+    }
+    map.get(session_id)
+        .filter(|s| now_ms.saturating_sub(s.created_ms) <= POWER_SESSION_TTL_MS)
+        .cloned()
+}
+
+/// 消费会话：内存删除 + 盘上同步删除（同一把内存锁内完成，防并发写回旧快照）。
+fn drop_power_session(session_id: &str, now_ms: i64) -> bool {
+    let mut map = power_sessions().lock().unwrap_or_else(|e| e.into_inner());
+    let removed = map.remove(session_id).is_some();
+    if removed {
+        persist_power_sessions(&map, now_ms);
+    }
+    removed
 }
 
 fn restore_attribute_snapshots(snapshots: &[PowerSettingSnapshot]) {
@@ -1498,16 +1683,15 @@ pub fn power_settings_unlock(scheme_guid: &str) -> Result<Value, String> {
         }));
     }
     let session_id = new_power_session_id();
-    power_sessions()
-        .lock()
-        .map_err(|_| "电源设置会话锁不可用".to_string())?
-        .insert(
-            session_id.clone(),
-            PowerSettingsSession {
-                scheme_guid: scheme_guid.to_ascii_lowercase(),
-                snapshots: snapshots.clone(),
-            },
-        );
+    // 内存先可用，再落盘（盘写失败只留 error：见 persist_power_sessions）
+    insert_power_session(
+        session_id.clone(),
+        PowerSettingsSession {
+            scheme_guid: scheme_guid.to_ascii_lowercase(),
+            created_ms: crate::engine::now_ms(),
+            snapshots: snapshots.clone(),
+        },
+    );
     let snapshot = snapshots
         .into_iter()
         .map(|s| {
@@ -1682,13 +1866,13 @@ pub fn power_settings_apply(
 }
 
 /// 取消编辑：只接受后端 unlock 返回的 session id，按会话快照恢复本会话动过的完整属性字。
+///
+/// 会话可跨进程重启：内存没有时从 `power-edit-sessions.json` 恢复（TTL 过期即视为不存在）；
+/// scheme 校验两道都不放：请求里的方案必须在本机枚举内（`require_listed_scheme`），
+/// 且必须与快照记录的方案一致 —— 否则一份会话就能按伪造 GUID 回写到别的方案。
 pub fn power_settings_revert(scheme_guid: &str, session_id: &str) -> Result<Value, String> {
     let _ = require_listed_scheme(scheme_guid)?;
-    let session = power_sessions()
-        .lock()
-        .map_err(|_| "电源设置会话锁不可用".to_string())?
-        .get(session_id)
-        .cloned()
+    let session = power_session_get(session_id)
         .ok_or_else(|| "电源设置会话不存在或已消费，拒绝按伪造快照回写".to_string())?;
     if !session
         .scheme_guid
@@ -1738,10 +1922,8 @@ pub fn power_settings_revert(scheme_guid: &str, session_id: &str) -> Result<Valu
     }
     let ok = failed.is_empty();
     if ok {
-        let _ = power_sessions()
-            .lock()
-            .map_err(|_| "电源设置会话锁不可用".to_string())?
-            .remove(session_id);
+        // 消费删除：内存 + 盘上同一份会话（AGENTS §5.28：读-改-写在同一个锁域内）
+        drop_power_session(session_id, crate::engine::now_ms());
     }
     Ok(json!({
         "ok": ok,
@@ -1989,6 +2171,57 @@ mod tests {
     fn guid大小写归一化小写() {
         let g = parse_guid_str("8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C").expect("解析失败");
         assert_eq!(guid_string(&g), "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+    }
+
+    /// 方案 §7.1：会话快照必须能跨重启还原 ⇒ 落盘形状必须逐字段可逆；
+    /// 任一字段坏掉只许返回 None（跳过该条），不许猜成可回写属性。
+    #[test]
+    fn 会话快照落盘往返保真且坏形状不猜() {
+        let subgroup = parse_guid_str("238c9fa8-0aad-41ed-83f4-97be242c8f20").expect("GUID");
+        let setting = parse_guid_str("29f6c1db-86da-48c5-9fdb-f2b67b1f44da").expect("GUID");
+        let session = PowerSettingsSession {
+            scheme_guid: "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c".to_string(),
+            created_ms: 123,
+            snapshots: vec![PowerSettingSnapshot {
+                subgroup,
+                setting,
+                attributes: 0b101,
+                changed: true,
+            }],
+        };
+        let raw = session_to_json("s-1", &session);
+        let (id, back) = session_from_json(&raw).expect("合法快照必须能读回");
+        assert_eq!(id, "s-1");
+        assert_eq!(back.scheme_guid, session.scheme_guid);
+        assert_eq!(back.created_ms, 123);
+        assert_eq!(back.snapshots.len(), 1);
+        assert_eq!(guid_string(&back.snapshots[0].subgroup), guid_string(&subgroup));
+        assert_eq!(guid_string(&back.snapshots[0].setting), guid_string(&setting));
+        assert_eq!(back.snapshots[0].attributes, 0b101);
+        assert!(back.snapshots[0].changed);
+
+        let mut missing = raw.clone();
+        missing.as_object_mut().expect("对象").remove("snapshots");
+        assert!(session_from_json(&missing).is_none(), "缺 snapshots 不许读成空快照");
+        let mut bad_guid = raw.clone();
+        bad_guid["snapshots"][0]["subgroupGuid"] = json!("not-a-guid");
+        assert!(session_from_json(&bad_guid).is_none(), "非法 GUID 不许被猜成某个设置");
+    }
+
+    /// TTL：过期会话不得再参与回写（用户可能在别处改过属性，旧快照不是当前值）。
+    #[test]
+    fn 会话超过_ttl_即丢弃() {
+        let mk = |created_ms| PowerSettingsSession {
+            scheme_guid: "x".to_string(),
+            created_ms,
+            snapshots: Vec::new(),
+        };
+        let mut sessions = HashMap::new();
+        sessions.insert("fresh".to_string(), mk(1_000));
+        sessions.insert("expired".to_string(), mk(0));
+        let kept = sessions_within_ttl(sessions, POWER_SESSION_TTL_MS + 500);
+        assert!(kept.contains_key("fresh"));
+        assert!(!kept.contains_key("expired"), "超过 TTL 的会话必须被丢弃");
     }
 
     /// **反向**：形状不对一律不认 —— 长度、hex、分段连字符任一不合都拒。

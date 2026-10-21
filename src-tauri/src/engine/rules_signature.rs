@@ -292,6 +292,85 @@ mod tests {
         assert_eq!(canonical_body_text(&parsed).unwrap(), r#"{"a":1,"b":2,"z":[3]}"#);
     }
 
+    /// T1c-U02：签名规范化的跨语言共享夹具。
+    ///
+    /// 为什么存在：签名对象是「去掉 `_sig` 后的紧凑 JSON 文本」，而算它的是**两套独立实现**
+    /// （本文件的 `canonical_body_text` / `canonical_array_text` ⇄ `tools/sign-cleanup-rules.mjs`
+    /// 的 `canonicalBodyText`）。分叉的症状是「发布前 Node 门禁绿、用户装上后装载侧拒收」。
+    /// 两侧只共享夹具**字节**（input 原文 + expected 手写字面量），各自重算后逐字节比；
+    /// 不许把对方的判定函数抄进来，也不许让夹具从某一侧实现生成（那是自己给自己出题）。
+    ///
+    /// 夹具是仓库跟踪文件，`include_str!` 在干净克隆里也成立；Node 侧由
+    /// `check-data-signatures` 第 4 段对同一份字节断言。
+    #[test]
+    fn canonical_fixture_cross_language_parity() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            form: String,
+            input: String,
+            expected: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            schema: u32,
+            cases: Vec<Case>,
+        }
+
+        const FIXTURE: &str = include_str!("../../../tools/fixtures/rules-canonical/cases.json");
+        let fx: Fixture = serde_json::from_str(FIXTURE).expect("共享夹具不是合法 JSON");
+        assert_eq!(fx.schema, 1, "夹具 schema 与本测试口径不一致");
+        assert!(
+            fx.cases.len() >= 8,
+            "夹具用例数低于覆盖底线（对象带/缺 _sig、裸数组、中文与转义、嵌套、空对象、空数组）"
+        );
+        let mut reached: Vec<&str> = Vec::new();
+        for c in &fx.cases {
+            let parsed: Value = serde_json::from_str(&c.input)
+                .unwrap_or_else(|e| panic!("{}: 夹具 input 不是合法 JSON：{e}", c.name));
+            match c.form.as_str() {
+                "object" => {
+                    assert!(!parsed.is_array(), "{}: form=object 但 input 是数组", c.name);
+                    assert_eq!(
+                        canonical_body_text(&parsed).as_deref(),
+                        Some(c.expected.as_str()),
+                        "{}: Rust 对象规范化字节与夹具 expected 不一致（Node 侧同夹具对拍）",
+                        c.name
+                    );
+                    assert_eq!(
+                        canonical_array_text(&parsed),
+                        None,
+                        "{}: 对象不该被数组规范化接受",
+                        c.name
+                    );
+                }
+                "array" => {
+                    assert!(parsed.is_array(), "{}: form=array 但 input 不是数组", c.name);
+                    assert_eq!(
+                        canonical_array_text(&parsed).as_deref(),
+                        Some(c.expected.as_str()),
+                        "{}: Rust 数组规范化字节与夹具 expected 不一致（Node 侧同夹具对拍）",
+                        c.name
+                    );
+                    assert_eq!(
+                        canonical_body_text(&parsed),
+                        None,
+                        "{}: 数组不该被对象规范化接受（根不是对象时签名面必须 fail-closed）",
+                        c.name
+                    );
+                }
+                other => panic!("{}: 未知 form {other}", c.name),
+            }
+            reached.push(c.name.as_str());
+        }
+        // 正向特征点名：只断「没 panic」等于没断，命中集合必须打印出来
+        eprintln!(
+            "[rules_signature] 规范化夹具对拍命中 {} 例：{}",
+            reached.len(),
+            reached.join("、")
+        );
+    }
+
     /// 真实规则文件验签（D6 规则 1 的历史形态）：本测试给出 Rust 侧结论。
     ///
     /// 对拍状态（0.7.3 更新）：清理库已换轮换新钥签名（0.7.x 改库批次重签时换的钥），

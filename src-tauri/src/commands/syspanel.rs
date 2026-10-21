@@ -51,6 +51,19 @@ fn require_admin_for_power_edit() -> Result<(), String> {
     }
 }
 
+/// 阻塞池任务 join 失败（线程 panic/取消）→ 命令层错误串，成功时摊平内层 Result。
+///
+/// 只改调度不改回执：成功分支仍是各命令原来的 `{ success, data }` 形状。
+fn join_blocking<T, E: std::fmt::Display>(
+    res: Result<Result<T, String>, E>,
+    what: &str,
+) -> Result<T, String> {
+    match res {
+        Ok(inner) => inner,
+        Err(e) => Err(format!("{what}任务异常: {e}")),
+    }
+}
+
 #[tauri::command]
 pub fn syspanel_power_plan_get<R: Runtime>(
     window: WebviewWindow<R>,
@@ -60,21 +73,30 @@ pub fn syspanel_power_plan_get<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn syspanel_power_plan_apply<R: Runtime>(
+pub async fn syspanel_power_plan_apply<R: Runtime>(
     window: WebviewWindow<R>,
     guid: String,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
-    power_plan_apply(&guid).map(|state| json!({ "success": true, "data": state }))
+    // R5b-U01：Power API 写 + 400ms 回读睡眠是阻塞工作，同步命令会占住 runtime worker。
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        power_plan_apply(&guid).map(|state| json!({ "success": true, "data": state }))
+    })
+    .await;
+    join_blocking(res, "应用电源方案")
 }
 
 #[tauri::command]
-pub fn syspanel_power_settings_dump<R: Runtime>(
+pub async fn syspanel_power_settings_dump<R: Runtime>(
     window: WebviewWindow<R>,
     scheme_guid: String,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
-    power_settings_dump(&scheme_guid).and_then(syspanel_ok)
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        power_settings_dump(&scheme_guid).and_then(syspanel_ok)
+    })
+    .await;
+    join_blocking(res, "读取电源设置")
 }
 
 #[tauri::command]
@@ -158,11 +180,15 @@ pub async fn syspanel_power_plan_export<R: Runtime>(
 /// 全部走 `guard(MAIN)`（写侧、系统级、只在主窗触发）；系统级失败按 Win32 错误如实报，
 /// 权限不足（错误码 5）由引擎层给显式提权提示，不谎报「不支持」。
 #[tauri::command]
-pub fn syspanel_power_ultimate_enable<R: Runtime>(
+pub async fn syspanel_power_ultimate_enable<R: Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
-    power_ultimate_enable().and_then(syspanel_ok)
+    let res = tauri::async_runtime::spawn_blocking(|| {
+        power_ultimate_enable().and_then(syspanel_ok)
+    })
+    .await;
+    join_blocking(res, "开启卓越性能")
 }
 
 /// G-04「隐藏高性能」（2026-10-16 裁定，终态 = 导出 + 删除）：高危删除类操作，
@@ -189,27 +215,31 @@ pub fn syspanel_power_restore_high_performance<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn syspanel_power_settings_unlock<R: Runtime>(
+pub async fn syspanel_power_settings_unlock<R: Runtime>(
     window: WebviewWindow<R>,
     scheme_guid: String,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
     // 非管理员只写一次性意图并把 token 交回渲染层；真正的 restart 由 elevate_request(launchToken)
     // 负责，新实例消费到同一 token 后才允许进入编辑会话。
-    let _ = power_settings_dump(&scheme_guid)?;
-    if !crate::engine::sysinfo::is_admin() {
-        let launch_token = crate::commands::elevate::write_pending_edit_intent(&scheme_guid)?;
-        return syspanel_ok(json!({
-            "needsElevation": true,
-            "launchToken": launch_token,
-            "schemeGuid": scheme_guid,
-        }));
-    }
-    power_settings_unlock(&scheme_guid).and_then(syspanel_result_from_data)
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let _ = power_settings_dump(&scheme_guid)?;
+        if !crate::engine::sysinfo::is_admin() {
+            let launch_token = crate::commands::elevate::write_pending_edit_intent(&scheme_guid)?;
+            return syspanel_ok(json!({
+                "needsElevation": true,
+                "launchToken": launch_token,
+                "schemeGuid": scheme_guid,
+            }));
+        }
+        power_settings_unlock(&scheme_guid).and_then(syspanel_result_from_data)
+    })
+    .await;
+    join_blocking(res, "解锁电源设置")
 }
 
 #[tauri::command]
-pub fn syspanel_power_settings_apply<R: Runtime>(
+pub async fn syspanel_power_settings_apply<R: Runtime>(
     window: WebviewWindow<R>,
     scheme_guid: String,
     changes: Vec<PowerSettingChange>,
@@ -217,18 +247,27 @@ pub fn syspanel_power_settings_apply<R: Runtime>(
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
     require_admin_for_power_edit()?;
-    power_settings_apply(&scheme_guid, &changes, apply_active).and_then(syspanel_result_from_data)
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        power_settings_apply(&scheme_guid, &changes, apply_active).and_then(syspanel_result_from_data)
+    })
+    .await;
+    join_blocking(res, "写入电源设置")
 }
 
 #[tauri::command]
-pub fn syspanel_power_settings_revert<R: Runtime>(
+pub async fn syspanel_power_settings_revert<R: Runtime>(
     window: WebviewWindow<R>,
     scheme_guid: String,
     session_id: String,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
     require_admin_for_power_edit()?;
-    power_settings_revert(&scheme_guid, &session_id).and_then(syspanel_result_from_data)
+    // 会话恢复会读盘（可能是进程重启后的第一次读），一并丢进阻塞池
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        power_settings_revert(&scheme_guid, &session_id).and_then(syspanel_result_from_data)
+    })
+    .await;
+    join_blocking(res, "回滚电源设置")
 }
 
 #[tauri::command]

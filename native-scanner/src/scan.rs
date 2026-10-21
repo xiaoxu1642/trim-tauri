@@ -249,6 +249,16 @@ fn note_unreadable_dir() {
     UNREADABLE_DIRS.note();
 }
 
+/// 条目级元数据/类型读不到的进程级计数（A1-U02，v7.2 文件面静默）。
+///
+/// 为什么必须单列：目录读不到会经 [`UNREADABLE_DIRS`] 在收尾时告警，而**单个条目**
+/// 的 `file_type()`/`metadata()` 失败在旧实现里是裸 `continue` —— 目录在、条目消失，
+/// 扫描结果偏小却没有任何一句话解释。这里只留痕、不进判定（与两个既有计数器同口径）。
+static ENTRY_STAT_FAILS: TraceCounter = TraceCounter::new();
+fn note_entry_stat_fail() {
+    ENTRY_STAT_FAILS.note();
+}
+
 pub struct ScanCtx {
     files: Mutex<Vec<ScannedFile>>,
     counter: AtomicU64,
@@ -265,6 +275,8 @@ pub struct ScanCtx {
     skipped_reparse: TraceCounter,
     /// 不可读目录计数（A1-M02）：与 skipped_reparse 并列，只留痕不进判定。
     unreadable_dirs: TraceCounter,
+    /// 条目级类型/元数据读不到的计数（A1-U02）：只留痕不进判定。
+    entry_stat_fails: TraceCounter,
     cap: usize,
 }
 
@@ -280,6 +292,7 @@ impl ScanCtx {
             truncated: AtomicBool::new(false),
             skipped_reparse: TraceCounter::new(),
             unreadable_dirs: TraceCounter::new(),
+            entry_stat_fails: TraceCounter::new(),
             cap,
         }
     }
@@ -299,6 +312,17 @@ impl ScanCtx {
     fn note_unreadable(&self) {
         self.unreadable_dirs.note();
         note_unreadable_dir();
+    }
+
+    /// 记一次「条目类型/元数据读不到」（A1-U02：与目录级同口径，只留痕不进判定）。
+    fn note_entry_stat_fail(&self) {
+        self.entry_stat_fails.note();
+        note_entry_stat_fail();
+    }
+
+    /// 本次扫描条目级读不到的条数（收尾告警用；**不进任何判定字段**）。
+    pub fn entry_stat_fails(&self) -> u64 {
+        self.entry_stat_fails.total()
     }
 
     /// 本次扫描因权限/IO 读不到的目录数（供收尾告警；**不进任何判定字段**）。
@@ -365,6 +389,14 @@ impl ScanCtx {
                 "有 {unreadable} 个目录读不到（权限或 IO 失败），扫描结果可能不完整"
             ));
         }
+        // A1-U02：条目级失败同样必须可见 —— 目录读得到、单个条目读不到时，
+        // 旧实现静默丢条目，用户看到的是「这里就这几个文件」。
+        let entry_fail = self.entry_stat_fails();
+        if entry_fail > 0 {
+            sink.warn(&format!(
+                "有 {entry_fail} 个条目的类型或元数据读不到（权限或 IO 失败），这部分条目未计入，结果可能不完整"
+            ));
+        }
         files
     }
 }
@@ -414,7 +446,11 @@ fn walk_level(
         }
         let ft = match ent.file_type() {
             Ok(t) => t,
-            Err(_) => continue,
+            // A1-U02：条目类型读不到不再裸 continue —— 计一次留痕，收尾统一告警。
+            Err(_) => {
+                ctx.note_entry_stat_fail();
+                continue;
+            }
         };
         if ft.is_symlink() {
             continue; // 非 Windows 兜底：那里 is_reparse 恒 false，symlink 由本分支拦
@@ -430,6 +466,9 @@ fn walk_level(
                 if sz >= min_size {
                     batch.push((ent.path(), sz, md.modified().ok()));
                 }
+            } else {
+                // A1-U02：元数据读不到就不知道大小/时间，只能丢；但丢多少要能数出来。
+                ctx.note_entry_stat_fail();
             }
         }
     }    if !batch.is_empty() {
@@ -2773,6 +2812,42 @@ mod tests {
             "analyzer 输出缺 unreadableDirs 字段"
         );
         assert!(src.contains("ctx.note_unreadable();"), "主 walk 的 read_dir 失败没进计数");
+    }
+
+    /// A1-U02：条目级 `file_type()` / `metadata()` 失败必须计数，并在收尾告警里可见。
+    ///
+    /// 判红自证：删掉 walk_level 任一失败分支的 `note_entry_stat_fail` 调用（计数点
+    /// 由 2 处降到 1 处），或删掉 finish 里的告警，本条即红。
+    #[test]
+    fn entry_stat_failures_are_counted_and_visible() {
+        let src = include_str!("scan.rs");
+        // include_str 会把本用例自己也当语料：判据针动态拼，且只看生产段（§4.1 假阳性②）
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let needle = format!("ctx.{}();", "note_entry_stat_fail");
+        assert!(
+            prod.matches(needle.as_str()).count() >= 2,
+            "walk_level 的条目失败分支没有全部接进计数"
+        );
+        struct Collect(std::sync::Mutex<Vec<String>>);
+        impl Sink for Collect {
+            fn item(&self, _path: &Path, _line: &str) {}
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, msg: &str) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+            }
+        }
+        let ctx = ScanCtx::new();
+        let sink = Collect(std::sync::Mutex::new(Vec::new()));
+        ctx.note_entry_stat_fail();
+        let files = ctx.finish(&sink);
+        assert!(files.is_empty(), "只记失败不该凭空产生条目");
+        assert_eq!(ctx.entry_stat_fails(), 1, "ScanCtx 没有累计条目失败");
+        let warns = sink.0.lock().unwrap_or_else(|e| e.into_inner()).join("\n");
+        assert!(
+            warns.contains("个条目的类型或元数据读不到"),
+            "条目级失败在收尾没有可见告警: {warns}"
+        );
     }
 
     /// N1b-M02 机制面：留痕计数的读取姿势必须是「取基线 + 读增量」，不许再出现

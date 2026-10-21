@@ -167,7 +167,11 @@ pub fn realtime_sample<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Va
     if alive {
         Ok(serde_json::json!({ "success": true, "adapters": [] }))
     } else {
-        Ok(serde_json::json!({ "success": false, "message": "流量采样进程未就绪" }))
+        // R1d-U01：采样器是**进程内线程**（`ensure_sampler` 必置 `stop`），不是独立进程；
+        // 旧文案「流量采样进程未就绪」把用户引向任务管理器。该分支在现行实现下不可达
+        // （`ensure_sampler` 之后 `alive` 恒真），保留它只是防御将来改坏采样器启动逻辑时
+        // 仍有一句诚实的回执，不再声称存在一个可被用户观测的「进程」。
+        Ok(serde_json::json!({ "success": false, "message": "采样器未就绪" }))
     }
 }
 

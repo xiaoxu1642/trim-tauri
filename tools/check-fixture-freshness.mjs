@@ -7,8 +7,9 @@
 // 口径真源，它烂了两边的断言一起烂，且无任何信号。
 //
 // 判据：生成器导出的构造函数（唯一实现）在内存里重算，与盘上产物**逐字节**比。
-// 覆盖三件：residue-contract（gen-residue-fixture）/ winerror-codes（gen-winerror-codes，
-// 产出在 src-tauri/data/）/ finder-delete-modes（gen-finder-delete-modes）。
+// 覆盖四件：residue-contract（gen-residue-fixture）/ winerror-codes（gen-winerror-codes，
+// 产出在 src-tauri/data/）/ finder-delete-modes（gen-finder-delete-modes）/
+// rules-canonical（tools/fixtures/rules-canonical/gen.mjs，签名规范化跨语言共享夹具）。
 // protect-parity 夹具不在本门禁：它的内存重算由 check-data-parity P4 负责
 // （psVectors 需真实 PS，T1c-M07 后 MUST_RUN 档位不含，重生成走显式路径）。
 //
@@ -25,6 +26,7 @@ import { gate } from './lib/gate.mjs';
 import { fixtureText } from './gen-residue-fixture.mjs';
 import { projectWinerrorDoc } from './gen-winerror-codes.mjs';
 import { buildDoc } from './gen-finder-delete-modes.mjs';
+import { buildDoc as buildRulesCanonicalDoc } from './fixtures/rules-canonical/gen.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const g = gate(import.meta.url);
@@ -33,6 +35,7 @@ const TARGETS = [
   { out: 'tools/fixtures/residue-contract.json', build: fixtureText },
   { out: 'src-tauri/data/winerror-codes.json', build: projectWinerrorDoc },
   { out: 'tools/fixtures/finder-delete-modes.json', build: buildDoc },
+  { out: 'tools/fixtures/rules-canonical/cases.json', build: buildRulesCanonicalDoc },
 ];
 
 /** 比对器（唯一实现）：主断言与正向对照共用，不许各写一份。 */

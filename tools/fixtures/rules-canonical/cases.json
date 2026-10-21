@@ -1,0 +1,54 @@
+{
+  "_comment": "签名规范化跨语言共享夹具（T1c-U02）：input 是规则文件原文，expected 是「去掉顶层 _sig 后的紧凑 JSON 文本」（数组形态原样序列化）。Node 与 Rust 各自用自己的实现重算，必须与 expected 逐字节相等。由 tools/fixtures/rules-canonical/gen.mjs 生成，手改即被 check-fixture-freshness 判红。",
+  "schema": 1,
+  "cases": [
+    {
+      "name": "object-inline-sig-middle",
+      "form": "object",
+      "input": "{\n  \"rulesVersion\": 12,\n  \"groups\": [\n    {\n      \"id\": \"temp\",\n      \"paths\": [\"C:\\\\Windows\\\\Temp\", \"C:\\\\Users\\\\Public\\\\Temp\"]\n    }\n  ],\n  \"_sig\": {\n    \"alg\": \"ed25519\",\n    \"sig\": \"AAAA\"\n  },\n  \"tail\": true\n}",
+      "expected": "{\"rulesVersion\":12,\"groups\":[{\"id\":\"temp\",\"paths\":[\"C:\\\\Windows\\\\Temp\",\"C:\\\\Users\\\\Public\\\\Temp\"]}],\"tail\":true}"
+    },
+    {
+      "name": "object-without-sig",
+      "form": "object",
+      "input": "{\"schemaVer\": 2,   \"entryId\": \"nara\", \"enabled\": false, \"ratio\": 1.5}",
+      "expected": "{\"schemaVer\":2,\"entryId\":\"nara\",\"enabled\":false,\"ratio\":1.5}"
+    },
+    {
+      "name": "object-unicode-and-escapes",
+      "form": "object",
+      "input": "{\"name\":\"\\u4e2d\\u6587\",\"note\":\"line\\nbreak\\ttab\",\"quote\":\"a\\\"b\",\"back\":\"c\\\\d\",\"slash\":\"e\\/f\",\"ctrl\":\"\\u0001\",\"raw\":\"中文\"}",
+      "expected": "{\"name\":\"中文\",\"note\":\"line\\nbreak\\ttab\",\"quote\":\"a\\\"b\",\"back\":\"c\\\\d\",\"slash\":\"e/f\",\"ctrl\":\"\\u0001\",\"raw\":\"中文\"}"
+    },
+    {
+      "name": "object-nested",
+      "form": "object",
+      "input": "{\n  \"sections\": [\n    {\"title\": \"隐私\", \"items\": [{\"key\": \"a\", \"on\": true}, {\"key\": \"b\", \"on\": null}]},\n    []\n  ],\n  \"meta\": {\"deep\": {\"deeper\": {\"n\": 0}}}\n}",
+      "expected": "{\"sections\":[{\"title\":\"隐私\",\"items\":[{\"key\":\"a\",\"on\":true},{\"key\":\"b\",\"on\":null}]},[]],\"meta\":{\"deep\":{\"deeper\":{\"n\":0}}}}"
+    },
+    {
+      "name": "object-empty",
+      "form": "object",
+      "input": "{  }",
+      "expected": "{}"
+    },
+    {
+      "name": "object-sig-only",
+      "form": "object",
+      "input": "{\"_sig\":{\"alg\":\"ed25519\",\"sig\":\"AAAA\"}}",
+      "expected": "{}"
+    },
+    {
+      "name": "array-bare-with-inner-sig",
+      "form": "array",
+      "input": "[\n  {\"id\": \"a\", \"risk\": \"low\", \"_sig\": {\"sig\": \"inner-stays\"}},\n  {\"id\": \"b\", \"risk\": \"high\"}\n]",
+      "expected": "[{\"id\":\"a\",\"risk\":\"low\",\"_sig\":{\"sig\":\"inner-stays\"}},{\"id\":\"b\",\"risk\":\"high\"}]"
+    },
+    {
+      "name": "array-empty",
+      "form": "array",
+      "input": "[ ]",
+      "expected": "[]"
+    }
+  ]
+}

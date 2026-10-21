@@ -1,7 +1,10 @@
 //! 命令安全包装（迁移方案 7.3 安全模型对照的 Rust 侧落点）
 //!
 //! Electron：`handleSafe/onSafe` 统一注册 + 来源校验（只读白名单外全校验来源）。
-//! Tauri：capabilities/default.json 权限白名单 + **每个命令显式校验 Window label**。
+//! Tauri：**每个命令显式校验 Window label** 才是命令级真闸门——`capabilities/*.json`
+//! 没有按命令/按通道的清单（它管窗口/事件/插件能力，不是命令级闸门）；渲染层
+//! `tauri-api.js` 的 `CHANNEL_MAP` 是前端通道表兼 preload 白名单，不是第二层安全边界
+//! （它只决定页面能调到哪些命令，改它绕不过这里的 guard）。
 //! 多窗口应用不能裸注册 command——子窗口（processManager/residue…）一旦被注入脚本，
 //! 裸注册会使其能调用主窗口专属的高危通道。故此包装是 Phase 1 起的强制入口。
 //!

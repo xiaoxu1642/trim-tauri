@@ -1276,6 +1276,12 @@ fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mu
     out
 }
 
+/// `\\` 开头（UNC / verbatim）且含通配符：本展开器没有「共享根」概念，
+/// 继续走分段逻辑只会把它当当前盘根下的相对路径（见 `expand_glob_dirs` 内守卫）。
+fn is_unc_glob(p: &str) -> bool {
+    (p.starts_with("\\\\") || p.starts_with("//")) && (p.contains('*') || p.contains('?'))
+}
+
 pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
     // R1-2 留痕：本次展开跳过了多少重解析点目录。
     //
@@ -1297,6 +1303,17 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
     if is_drive_relative(&expanded) {
         err_line(&format!(
             "[cleanup-scan] 盘符相对路径（{expanded}）无盘符语义（未定义环境变量拼接？），已拒绝展开（§4.10）"
+        ));
+        return Vec::new();
+    }
+    // N1a-U01：UNC 通配不属盘符相对（上一守卫刻意放过 `\\` 开头），但下面的分段逻辑
+    // 没有 UNC 根概念 —— 首段会被当成「当前盘根」下的相对目录（`roots.push("\\")`），
+    // 于是当前盘根恰好有同名目录时**静默改道本地**、没有时静默展开为空，两种都没有
+    // 任何留痕。正确展开 UNC 通配需要先枚举共享根，超出本函数能力 ⇒ 显式拒绝。
+    // 约束：只拒「`\\` 开头且含通配」；非通配 UNC 是合法路径，仍走上面的快路径原样返回。
+    if is_unc_glob(&expanded) {
+        err_line(&format!(
+            "[cleanup-scan] UNC 通配路径（{expanded}）无法安全展开（会被按当前盘根相对路径解析），已拒绝"
         ));
         return Vec::new();
     }
@@ -2949,6 +2966,62 @@ fn flush_stdout() {
 
 #[cfg(test)]
 mod tests {
+    /// N1a-U01 反例样本：当前盘根下一个**确实有子目录**的目录名。
+    ///
+    /// 不写死 `Windows`：测试不许依赖本机特定目录；拿运行时枚举结果当「UNC 首段」，
+    /// 修复前它必然会被展开成该目录的子目录（非空），修复后固定为空集。
+    fn drive_root_dir_with_subdir() -> Option<String> {
+        for ent in std::fs::read_dir("\\").ok()?.flatten() {
+            if !ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = ent.file_name().to_string_lossy().to_string();
+            if name.contains('*') || name.contains('?') {
+                continue;
+            }
+            let has_sub = std::fs::read_dir(ent.path())
+                .ok()
+                .map(|rd| rd.flatten().any(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
+                .unwrap_or(false);
+            if has_sub {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// N1a-U01：UNC 通配必须显式拒绝（留诊断），非通配 UNC 不许被同一条守卫误伤。
+    #[test]
+    fn unc_glob_is_rejected_without_touching_plain_unc() {
+        assert!(is_unc_glob(r"\\nas\share\*"));
+        assert!(is_unc_glob("//nas/share/*.tmp"));
+        assert!(!is_unc_glob(r"\\nas\share\folder"));
+        assert!(!is_unc_glob(r"\Foo\*"));
+        assert!(!is_unc_glob(r"C:\Foo\*"));
+
+        let Some(name) = drive_root_dir_with_subdir() else {
+            // 不用 eprintln：本文件的「诊断只走 err_line」门禁把测试代码也算语料。
+            println!("SKIP：当前盘根没有带子目录的目录，UNC 通配反例未取证");
+            return;
+        };
+        let pat = format!("\\\\{name}\\*");
+        let (code, _out, err) = capture(None, || {
+            let got = expand_glob_dirs(&pat, false);
+            assert!(got.is_empty(), "UNC 通配被当作当前盘根相对路径展开: {got:?}");
+            0
+        });
+        assert_eq!(code, 0);
+        assert!(err.contains("UNC 通配"), "拒绝展开必须留可见诊断: {err}");
+
+        let (_, _, err2) = capture(None, || {
+            let _ = expand_glob_dirs(r"\\nas\share\folder", false);
+            0
+        });
+        assert!(
+            !err2.contains("UNC 通配"),
+            "非通配 UNC 是合法路径，不许被这条守卫拒掉: {err2}"
+        );
+    }
 
     /// A1-M01/M02（v7.2 C06）：fileKeys 的 size/exists 三态出口与不可读计数必须保留。
     /// 源码形态断言：删掉任一出口，本条即红（最终数值由真机探针复核）。
