@@ -8055,158 +8055,151 @@
       "key": "special",
       "title": "维护与特殊操作",
       "icon": "<svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" fill=\"currentColor\"><path d=\"M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z\"/></svg>",
-      "subGroups": [
+      "items": [
         {
-          "id": "actions",
-          "name": "系统动作",
-          "icon": "⚠️",
-          "items": [
+          "id": "packageCache",
+          "name": "Windows Installer 补丁缓存",
+          "risk": "medium",
+          "ifDeleted": "删除后，卸载或修复对应 Windows 更新时可能需要重新提供更新安装源（原版安装介质或重新下载）；已装软件的正常使用不受影响，但也别指望删掉能省出可观空间。",
+          "pathPs": "$env:WINDIR + '\\Installer\\$PatchCache$'",
+          "evidence": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
+          "recommended": false,
+          "domain": "special",
+          "group": "actions",
+          "nature": "action",
+          "regenerable": false,
+          "prov": {
+            "source": "builtin",
+            "sourceClass": "dismpp-clue",
+            "ref": "dismpp/Installer目录",
+            "importedAt": "2026-09-14",
+            "reviewedAt": "2026-10-16"
+          },
+          "ver": 20261016,
+          "evidenceItems": [
             {
-              "id": "packageCache",
-              "name": "Windows Installer 补丁缓存",
-              "risk": "high",
-              "ifDeleted": "删除后，卸载或修复对应 Windows 更新时可能需要重新提供更新安装源（原版安装介质或重新下载）；已装软件的正常使用不受影响，但也别指望删掉能省出可观空间。",
-              "pathPs": "$env:WINDIR + '\\Installer\\$PatchCache$'",
-              "evidence": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
-              "recommended": false,
-              "domain": "special",
-              "group": "actions",
-              "nature": "action",
-              "regenerable": false,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "dismpp-clue",
-                "ref": "dismpp/Installer目录",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-10-16"
-              },
-              "ver": 20261016,
-              "evidenceItems": [
-                {
-                  "text": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
-                  "weight": 2
-                },
-                {
-                  "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
-                  "weight": 1
-                }
-              ]
+              "text": "MSI 补丁卸载缓存，删除后已装更新将无法卸载",
+              "weight": 2
             },
             {
-              "id": "recycleBin",
-              "name": "回收站",
-              "risk": "medium",
-              "special": "recycleBin",
-              "evidence": "回收站内容",
-              "recommended": false,
-              "domain": "special",
-              "group": "actions",
-              "nature": "action",
-              "regenerable": false,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "dismpp-clue",
-                "ref": "dismpp/回收站",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-10-16"
-              },
-              "ver": 20261016,
-              "evidenceItems": [
-                {
-                  "text": "回收站内容",
-                  "weight": 2
-                },
-                {
-                  "text": "内容不可再生（系统动作），清空后无法由系统重建，请确认后再勾选",
-                  "weight": 1
-                },
-                {
-                  "text": "清空走系统 Shell API（SHEmptyRecycleBinW），不是按目录永久删；执行前会先列出条目数与体积",
-                  "weight": 1
-                }
-              ]
+              "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
+              "weight": 1
+            }
+          ]
+        },
+        {
+          "id": "recycleBin",
+          "name": "回收站",
+          "risk": "medium",
+          "special": "recycleBin",
+          "evidence": "回收站内容",
+          "recommended": false,
+          "domain": "special",
+          "group": "actions",
+          "nature": "action",
+          "regenerable": false,
+          "prov": {
+            "source": "builtin",
+            "sourceClass": "dismpp-clue",
+            "ref": "dismpp/回收站",
+            "importedAt": "2026-09-14",
+            "reviewedAt": "2026-10-16"
+          },
+          "ver": 20261016,
+          "evidenceItems": [
+            {
+              "text": "回收站内容",
+              "weight": 2
             },
             {
-              "id": "printSpoolCache",
-              "name": "打印后台缓存",
-              "risk": "medium",
-              "fileKeys": [
-                {
-                  "path": "%WINDIR%\\System32\\spool\\PRINTERS",
-                  "pattern": "*",
-                  "recurse": true
-                }
-              ],
-              "restartProcesses": [
-                {
-                  "name": "spoolsv",
-                  "restart": "service",
-                  "service": "Spooler"
-                }
-              ],
-              "evidence": "打印假脱机文件（卡住的打印任务）。原「系统维护 - 清理打印队列」与「电脑优化中心 - PCCleaner 深度清理」整合项（2026-09-14）；旧实现写的 C:\\Windows\\spool\\printers 在现代 Windows 上并不存在。清理时会临时停止并重启 Print Spooler 服务（M3 承接原「系统维护 - 清理打印队列」的能力）",
-              "recommended": false,
-              "domain": "special",
-              "group": "actions",
-              "nature": "action",
-              "regenerable": false,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
-              },
-              "ver": 20261016,
-              "evidenceItems": [
-                {
-                  "text": "打印假脱机文件（卡住的打印任务）。原「系统维护 - 清理打印队列」与「电脑优化中心 - PCCleaner 深度清理」整合项（2026-09-14）；旧实现写的 C:\\Windows\\spool\\printers 在现代 Windows 上并不存在。清理时会临时停止并重启 Print Spooler 服务（M3 承接原「系统维护 - 清理打印队列」的能力）",
-                  "weight": 2
-                },
-                {
-                  "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
-                  "weight": 1
-                },
-                {
-                  "text": "清理后需要重启：Spooler",
-                  "weight": 0
-                }
-              ]
+              "text": "内容不可再生（系统动作），清空后无法由系统重建，请确认后再勾选",
+              "weight": 1
             },
             {
-              "id": "dismComponentCleanup",
-              "name": "组件存储清理 (DISM /ResetBase)",
-              "risk": "high",
-              "ifDeleted": "删除后，已安装的 Windows 更新将无法卸载（不能回滚到更新前状态），系统重置功能也可能受影响；仅在确定不需要卸载任何更新时使用。",
-              "special": "dism",
-              "evidence": "压缩组件存储，更新将不可卸载（由 Windows 官方 DISM 执行，通常需要 10-40 分钟）",
-              "recommended": false,
-              "domain": "special",
-              "group": "actions",
-              "nature": "action",
-              "regenerable": false,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/temp",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
-              },
-              "ver": 20261016,
-              "evidenceItems": [
-                {
-                  "text": "压缩组件存储，更新将不可卸载",
-                  "weight": 2
-                },
-                {
-                  "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
-                  "weight": 1
-                },
-                {
-                  "text": "耗时预期：该操作由 Windows 官方 DISM 执行，通常需要 10-40 分钟，期间 CPU/磁盘占用高属正常，不是卡死",
-                  "weight": 1
-                }
-              ]
+              "text": "清空走系统 Shell API（SHEmptyRecycleBinW），不是按目录永久删；执行前会先列出条目数与体积",
+              "weight": 1
+            }
+          ]
+        },
+        {
+          "id": "printSpoolCache",
+          "name": "打印后台缓存",
+          "risk": "medium",
+          "fileKeys": [
+            {
+              "path": "%WINDIR%\\System32\\spool\\PRINTERS",
+              "pattern": "*",
+              "recurse": true
+            }
+          ],
+          "restartProcesses": [
+            {
+              "name": "spoolsv",
+              "restart": "service",
+              "service": "Spooler"
+            }
+          ],
+          "evidence": "打印假脱机文件（卡住的打印任务）。原「系统维护 - 清理打印队列」与「电脑优化中心 - PCCleaner 深度清理」整合项（2026-09-14）；旧实现写的 C:\\Windows\\spool\\printers 在现代 Windows 上并不存在。清理时会临时停止并重启 Print Spooler 服务（M3 承接原「系统维护 - 清理打印队列」的能力）",
+          "recommended": false,
+          "domain": "special",
+          "group": "actions",
+          "nature": "action",
+          "regenerable": false,
+          "prov": {
+            "source": "builtin",
+            "sourceClass": "windows-doc",
+            "ref": "windows/temp",
+            "importedAt": "2026-09-14",
+            "reviewedAt": "2026-09-27"
+          },
+          "ver": 20261016,
+          "evidenceItems": [
+            {
+              "text": "打印假脱机文件（卡住的打印任务）。原「系统维护 - 清理打印队列」与「电脑优化中心 - PCCleaner 深度清理」整合项（2026-09-14）；旧实现写的 C:\\Windows\\spool\\printers 在现代 Windows 上并不存在。清理时会临时停止并重启 Print Spooler 服务（M3 承接原「系统维护 - 清理打印队列」的能力）",
+              "weight": 2
+            },
+            {
+              "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
+              "weight": 1
+            },
+            {
+              "text": "清理后需要重启：Spooler",
+              "weight": 0
+            }
+          ]
+        },
+        {
+          "id": "dismComponentCleanup",
+          "name": "组件存储清理 (DISM /ResetBase)",
+          "risk": "medium",
+          "ifDeleted": "删除后，已安装的 Windows 更新将无法卸载（不能回滚到更新前状态），系统重置功能也可能受影响；仅在确定不需要卸载任何更新时使用。",
+          "special": "dism",
+          "evidence": "压缩组件存储，更新将不可卸载（由 Windows 官方 DISM 执行，通常需要 10-40 分钟）",
+          "recommended": false,
+          "domain": "special",
+          "group": "actions",
+          "nature": "action",
+          "regenerable": false,
+          "prov": {
+            "source": "builtin",
+            "sourceClass": "windows-doc",
+            "ref": "windows/temp",
+            "importedAt": "2026-09-14",
+            "reviewedAt": "2026-09-27"
+          },
+          "ver": 20261016,
+          "evidenceItems": [
+            {
+              "text": "压缩组件存储，更新将不可卸载",
+              "weight": 2
+            },
+            {
+              "text": "内容不可再生（系统动作），删除后无法由系统重建，请确认后再勾选",
+              "weight": 1
+            },
+            {
+              "text": "耗时预期：该操作由 Windows 官方 DISM 执行，通常需要 10-40 分钟，期间 CPU/磁盘占用高属正常，不是卡死",
+              "weight": 1
             }
           ]
         }
@@ -8216,6 +8209,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "ECvLcDHg1E4pH+5fwLZRrwGErmUfHDK57sLl462VI7vTHoW5X85YdpORn6aJTE+FVT2xxQWEp5O5pDPQ23tzDg=="
+    "sig": "4+5S/45J0VRM1Y2yKu7zna4JJk7d/ClbqzsTpiEAMOoWXkK3ZLjRhKgG7zZb2XVu3Eg0NmwM+dstihsmIUjjBA=="
   }
 }

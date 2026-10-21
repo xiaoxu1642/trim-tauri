@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
+import { allItems } from './lib/rule-shape.mjs';
 
 const g = gate(import.meta.url);
 // T1b-L08：钉绝对根，不依赖调用方 CWD（--run 传 cwd: ROOT 只是掩盖）。
@@ -21,14 +22,8 @@ const rulesPkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'src-tauri', 'data',
 const postPkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'src-tauri', 'data', 'cleanup-postactions.json'), 'utf8'));
 const table = postPkg.postActions || {};
 
-// 收集全部清理项：{id, paths: [目标路径串...]}
-const items = [];
-for (const grp of rulesPkg.groups ?? []) {
-  for (const sg of grp.subGroups ?? []) {
-    for (const it of sg.items ?? []) items.push(it);
-  }
-  for (const it of grp.items ?? []) items.push(it);
-}
+// 收集全部清理项（顶层 items 与 subGroups.items 两层都算，口径见 tools/lib/rule-shape.mjs）
+const items = allItems(rulesPkg);
 
 /** 机械判定：从一条规则的目标位置推导后置动作。 */
 function derivePostAction(it) {

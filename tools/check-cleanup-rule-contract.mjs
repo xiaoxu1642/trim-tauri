@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 import { loadSchema, number as schemaNumber } from './rule-schema.mjs';
 import { ASSERTIONS, validateCleanupPackage, selfTest } from './cleanup-contract.mjs';
+import { allItems } from './lib/rule-shape.mjs';
 
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
 const FIXTURE_REL = path.join('tools', 'fixtures', 'cleanup-contract.json');
@@ -42,14 +43,9 @@ function fail(msg) {
   process.exitCode = 1;
 }
 
-function collectItems(rules) {
-  const items = [];
-  for (const g of rules.groups ?? []) {
-    for (const it of g.items ?? []) items.push(it);
-    for (const sg of g.subGroups ?? []) for (const it of sg.items ?? []) items.push(it);
-  }
-  return items;
-}
+// 条目遍历口径统一走 tools/lib/rule-shape.mjs（顶层 items 与 subGroups.items 两层都算）；
+// 本门禁只保留变量名，避免同一份遍历在三个门禁里各写一遍、扁平化某个域时半数门禁数不到。
+const collectItems = allItems;
 
 function main() {
   // ---- 0. 契约表本身可用（表坏了 ⇒ 两侧判定都会变形，先钉住） ----

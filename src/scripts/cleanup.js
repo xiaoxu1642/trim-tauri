@@ -542,7 +542,6 @@
           <div class="category-group-header" data-group-toggle="${window.ds.escAttr(groupKey)}">
             <span class="category-group-icon">${group.icon}</span>
             <span>${escapeHtml(group.title)}</span>
-            ${groupKey === 'special' ? '<span class="special-inline-note" data-tip="动作型维护项为不可逆系统操作，默认不勾选">不可逆系统操作 · 默认不勾选</span>' : ''}
             <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary)" data-group-count="${window.ds.escAttr(groupKey)}">${totalItems} 项 · ${subGroups.length} 分类</span>
           </div>
           <div class="category-group-content" data-group-content="${window.ds.escAttr(groupKey)}">
@@ -550,8 +549,8 @@
           </div>
         `;
       } else {
-        // 扁平布局：防御分支——当前规则库五个域均带子组（P2 核对 2026-09-27），
-        // 此分支仅在规则库未来出现无子组域 / 旧版兜底数据时生效
+        // 扁平布局：维护与特殊操作域（special）自 2026-10-22 起直接以组顶层 items 承载四项，
+        // 不再有「系统动作」子分组；其余四域仍走子组分支。旧版兜底数据同样落这里。
         const items = group.items;
         if (!items.length) continue;
         groupEl.innerHTML = `

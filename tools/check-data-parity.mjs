@@ -24,6 +24,7 @@ import { join } from 'node:path';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 import { buildParityFixture, FIXTURE_PATH } from './gen-protect-parity.mjs';
+import { allItems } from './lib/rule-shape.mjs';
 
 const VERBOSE = process.argv.includes('--verbose');
 const require = createRequire(import.meta.url);
@@ -112,8 +113,8 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
     check(false, 'P1 cleanup-rules.json ⇄ cleanup-fallback.generated.js', why || '源不可读');
   } else {
     const same = JSON.stringify(parsed) === JSON.stringify(rules);
-    let items = 0;
-    for (const g of (rules.groups || [])) for (const sg of (g.subGroups || [])) items += (sg.items || []).length;
+    // 条目计数口径统一走 tools/lib/rule-shape.mjs（顶层 items 与 subGroups.items 两层都算）
+    const items = allItems(rules).length;
     check(same && items > 0,
       `P1 清理规则库 ⇄ 前端兜底副本（组 ${rules.groups?.length ?? '?'} / 项 ${items}，含 _sig 与 rulesVersion ${rules.rulesVersion}）`,
       same ? '' : 'JSON.stringify 不等（内容或键序已漂移；改规则 JSON 后需重新生成副本）');

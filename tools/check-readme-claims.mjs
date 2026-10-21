@@ -7,7 +7,8 @@
 // 「readme 数字与实现一致」从人工纪律变成可机检断言。
 //
 // 对拍口径（全部来自数据真源，不在本门禁里维护第二份数字）：
-//   清理项总数   = cleanup-rules.json  groups[].subGroups[].items 逐层求和
+//   清理项总数   = cleanup-rules.json  groups[].subGroups[].items ∪ groups[].items
+//                  （两种组形状都算；遍历口径统一走 tools/lib/rule-shape.mjs）
 //   优化项总数   = optimizer-runtime.json 顶层数组长度
 //   高风险项数   = 其中 risk === 'high' 的条数
 //   无还原高风险 = 其中 risk==='high' 且 restoreAvailable===false 的条数
@@ -30,6 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { countPsSteps } from './count-ps-steps.mjs';
+import { allItems, groupItems } from './lib/rule-shape.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -44,10 +46,7 @@ console.log('=== readme 承诺数字对拍门禁 ===\n');
 
 // ---------- 数据真源 ----------
 const cleanup = JSON.parse(read('src-tauri/data/cleanup-rules.json'));
-let cleanupTotal = 0;
-for (const g of cleanup.groups ?? []) {
-  for (const sg of g.subGroups ?? []) cleanupTotal += (sg.items ?? []).length;
-}
+const cleanupTotal = allItems(cleanup).length;
 
 const optimizer = JSON.parse(read('src-tauri/data/optimizer-runtime.json'));
 const optItems = Array.isArray(optimizer) ? optimizer : [];
@@ -173,9 +172,7 @@ const DOMAIN_MAP = [
   ['系统', '系统清理'], ['应用', '应用清理'], ['浏览器', '浏览器清理'],
   ['显卡', '图形与加速'], ['特殊', '维护与特殊操作'],
 ];
-const groupCounts = new Map((cleanup.groups ?? []).map((g) => [
-  g.title, (g.subGroups ?? []).reduce((a, s) => a + (s.items ?? []).length, 0),
-]));
+const groupCounts = new Map((cleanup.groups ?? []).map((g) => [g.title, groupItems(g).length]));
 const domainRe = new RegExp(DOMAIN_MAP.map(([short]) => `${short}\\s*(\\d+)`).join('\\s*/\\s*'), 'g');
 const domainClaims = [...readme.matchAll(domainRe)];
 if (domainClaims.length === 0) {
@@ -256,14 +253,8 @@ assertAllEqual('12. 网络检测诊断项数 = ITEM_META 实算', /(\d+)\s*项�
 //     116→105→99 且全靠人眼发现；「99」不是常量——真源永远是数据层实算值
 //     （同口径覆盖顶层 items 与 subGroups.items 两层）。
 let winapp2Count = 0;
-const countClue = (items) => {
-  for (const it of (items ?? [])) {
-    if (it.prov && it.prov.sourceClass === 'winapp2-clue') winapp2Count++;
-  }
-};
-for (const g of cleanup.groups ?? []) {
-  countClue(g.items);
-  for (const sg of g.subGroups ?? []) countClue(sg.items);
+for (const it of allItems(cleanup)) {
+  if (it.prov && it.prov.sourceClass === 'winapp2-clue') winapp2Count++;
 }
 assertAllEqual('13. WinApp2 溯源条数 = sourceClass=winapp2-clue 实算', /(\d+)\s*条精选自\s*WinApp2/g, winapp2Count);
 
