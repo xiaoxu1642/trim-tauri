@@ -1894,6 +1894,289 @@
     window.app?.toast('success', '已删除（可在回收站还原）');
   }
 
+  // ==================== 缩略图抽屉（2026-10-22 用户目检需求） ====================
+  // 灯箱是 vendored 件：抽屉按删除按钮同一姿势在运行时注入，不改上游模板与布局逻辑，
+  // 上游同步时只需重新确认计数器钩子还在。缩略图复用灯箱已算好的 asset URL
+  // （range 里的 img[data-src]），不新开 IPC 通道、不新增命令。
+  let liteboxDrawer = null;
+  let liteboxDrawerIsOpen = false;
+  let liteboxDrawerBound = false;
+  let liteboxDrawerBatchId = null;
+  let liteboxDrawerThumbObserver = null;
+  let liteboxDrawerSrcObserver = null;
+  let liteboxDrawerSuppressCancel = false;
+
+  // 排序 + 按天分组是纯函数，离线自检按下面两个锚点整段抽取执行——判据不许只在
+  // 窗口里成立。「时间未知」必须自成一档并排在最后，不许混进任何一天冒充已知时间。
+  // #region groupImagesByDay
+  function groupImagesByDay(files, nowMs) {
+    const startOfDay = (ms) => {
+      const d = new Date(ms);
+      d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    };
+    const toMs = (v) => {
+      if (typeof v === 'number') return v > 0 ? v : null;
+      const s = String(v == null ? '' : v).trim();
+      if (!s) return null;
+      const n = Number(s);
+      if (Number.isFinite(n)) return n > 0 ? n : null;
+      const t = Date.parse(s);
+      return Number.isFinite(t) && t > 0 ? t : null;
+    };
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const today = startOfDay(now);
+    const yesterdayDate = new Date(today);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterday = yesterdayDate.getTime();
+    const dayLabel = (ms) => {
+      if (ms === today) return '今天';
+      if (ms === yesterday) return '昨天';
+      const d = new Date(ms);
+      const pad = (x) => String(x).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    };
+    const known = [];
+    const unknown = [];
+    for (const f of files || []) {
+      const t = toMs(f && f.mtime);
+      if (t === null) unknown.push(f);
+      else known.push({ file: f, t });
+    }
+    known.sort((a, b) => b.t - a.t);
+    const groups = [];
+    const byDay = new Map();
+    for (const row of known) {
+      const key = startOfDay(row.t);
+      let g = byDay.get(key);
+      if (!g) {
+        g = { key, label: dayLabel(key), items: [] };
+        byDay.set(key, g);
+        groups.push(g);
+      }
+      g.items.push(row.file);
+    }
+    if (unknown.length) groups.push({ key: 'unknown', label: '时间未知', items: unknown });
+    return groups;
+  }
+  // #endregion
+
+  // 当前预览批次的文件（fileclean 扫描结果带 mtime，毫秒字符串；删除会同步收缩本数组）。
+  function liteboxDrawerImageFiles() {
+    const batch = liteboxDrawerBatchId ? fileCleanData.get(liteboxDrawerBatchId) : null;
+    return batch && Array.isArray(batch.files) ? batch.files.filter(f => f.category === 'image') : [];
+  }
+
+  // path → range 源 img。URL 与点击目标都从这一张表取，避免再养一套 index 状态机。
+  function liteboxDrawerSources() {
+    const map = new Map();
+    const range = ensureLiteboxRange();
+    for (const img of range.querySelectorAll('img[data-fullpath]')) {
+      const p = img.getAttribute('data-fullpath');
+      if (p) map.set(p, img);
+    }
+    return map;
+  }
+
+  function liteboxDrawerCurrentSrc() {
+    const img = window.liteBox?.getElem?.('.lightbox-image');
+    return img ? (img.getAttribute('src') || '') : '';
+  }
+
+  // 当前图高亮跟着灯箱图片的 src 走：箭头/键盘翻页都能同步，不必改 LiteBox 的导航逻辑。
+  function liteboxDrawerSyncCurrent() {
+    if (!liteboxDrawer) return;
+    const current = liteboxDrawerCurrentSrc();
+    let active = null;
+    for (const btn of liteboxDrawer.querySelectorAll('.lb-thumb')) {
+      if (current && btn.getAttribute('data-src') === current) {
+        btn.setAttribute('aria-current', 'true');
+        active = btn;
+      } else {
+        btn.removeAttribute('aria-current');
+      }
+    }
+    if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  function liteboxDrawerRender() {
+    if (!liteboxDrawer) return;
+    const files = liteboxDrawerImageFiles();
+    const sources = liteboxDrawerSources();
+    const head = liteboxDrawer.querySelector('.lb-drawer-head');
+    const body = liteboxDrawer.querySelector('.lb-drawer-body');
+    if (!head || !body) return;
+    head.textContent = `${files.length} 张 · 从新到旧`;
+    const current = liteboxDrawerCurrentSrc();
+    const esc = window.ds.esc;
+    const escAttr = window.ds.escAttr;
+    let html = '';
+    for (const g of groupImagesByDay(files, Date.now())) {
+      html += `<div class="lb-drawer-day" role="presentation">${esc(g.label)}</div>`;
+      for (const f of g.items) {
+        const source = sources.get(f.path);
+        const url = source ? (source.getAttribute('data-src') || '') : '';
+        const name = f.name || String(f.path || '').split('\\').pop() || '';
+        const cur = current && url === current ? ' aria-current="true"' : '';
+        html += `<button class="lb-thumb" type="button" role="option" tabindex="0"${cur} data-path="${escAttr(f.path)}" data-src="${escAttr(url)}" aria-label="${escAttr(name)}" data-tip="${escAttr(name)}"><img alt="" width="96" height="96" data-thumb-src="${escAttr(url)}"></button>`;
+      }
+    }
+    if (!html) html = '<div class="lb-drawer-day" role="presentation">没有可预览的图片</div>';
+    body.innerHTML = html;
+  }
+
+  // 懒加载：抽屉关闭即断开；根是抽屉滚动容器，滚到哪加载到哪（不再一次性请求整批图）。
+  function liteboxDrawerWatchThumbs() {
+    const body = liteboxDrawer?.querySelector('.lb-drawer-body');
+    if (!body) return;
+    liteboxDrawerThumbObserver?.disconnect();
+    if (typeof IntersectionObserver !== 'function') {
+      // 内核没有 IO 时退回一次性加载：宁可多请求，也不让抽屉空着。
+      for (const img of body.querySelectorAll('img[data-thumb-src]')) {
+        const url = img.getAttribute('data-thumb-src');
+        if (url) img.src = url;
+      }
+      return;
+    }
+    liteboxDrawerThumbObserver = new IntersectionObserver((entries, obs) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        const img = en.target;
+        const url = img.getAttribute('data-thumb-src');
+        if (url && !img.getAttribute('src')) img.src = url;
+        obs.unobserve(img);
+      }
+    }, { root: body, rootMargin: '200px 0px' });
+    for (const img of body.querySelectorAll('img[data-thumb-src]')) liteboxDrawerThumbObserver.observe(img);
+  }
+
+  function liteboxDrawerWatchCurrent() {
+    const img = window.liteBox?.getElem?.('.lightbox-image');
+    if (!img) return;
+    liteboxDrawerSrcObserver?.disconnect();
+    liteboxDrawerSrcObserver = new MutationObserver(() => liteboxDrawerSyncCurrent());
+    liteboxDrawerSrcObserver.observe(img, { attributes: true, attributeFilter: ['src'] });
+    liteboxDrawerSyncCurrent();
+  }
+
+  function liteboxDrawerSetOpen(open) {
+    const drawer = liteboxDrawerEnsure();
+    if (!drawer || open === liteboxDrawerIsOpen) return;
+    const counter = window.liteBox?.dialog?.querySelector('.counter');
+    liteboxDrawerIsOpen = open;
+    if (counter) {
+      counter.setAttribute('aria-expanded', open ? 'true' : 'false');
+      counter.setAttribute('data-tip', open ? '收起缩略图抽屉' : '展开缩略图抽屉');
+    }
+    if (open) {
+      liteboxDrawerRender();
+      drawer.classList.add('lb-open');
+      liteboxDrawerWatchThumbs();
+      liteboxDrawerWatchCurrent();
+    } else {
+      drawer.classList.remove('lb-open');
+      liteboxDrawerThumbObserver?.disconnect();
+      liteboxDrawerThumbObserver = null;
+      liteboxDrawerSrcObserver?.disconnect();
+      liteboxDrawerSrcObserver = null;
+      // 焦点留在即将隐藏的抽屉里会丢焦点，交还给仍可见的计数器。
+      if (drawer.contains(document.activeElement) && counter) counter.focus();
+    }
+  }
+
+  function liteboxDrawerEnsure() {
+    const dialog = window.liteBox?.dialog;
+    if (!dialog) return null;
+    if (liteboxDrawer && dialog.contains(liteboxDrawer)) return liteboxDrawer;
+    liteboxDrawer = document.createElement('div');
+    liteboxDrawer.className = 'lb-drawer';
+    liteboxDrawer.id = 'liteboxDrawer';
+    liteboxDrawer.setAttribute('role', 'listbox');
+    liteboxDrawer.setAttribute('aria-label', '本批图片缩略图');
+    liteboxDrawer.innerHTML = '<div class="lb-drawer-inner"><div class="lb-drawer-head"></div><div class="lb-drawer-body"></div></div>';
+    dialog.appendChild(liteboxDrawer);
+
+    liteboxDrawer.addEventListener('click', (e) => {
+      const btn = e.target.closest ? e.target.closest('.lb-thumb') : null;
+      if (!btn || !liteboxDrawer.contains(btn)) return;
+      const path = btn.getAttribute('data-path') || '';
+      const range = ensureLiteboxRange();
+      const source = Array.from(range.querySelectorAll('img[data-fullpath]'))
+        .find(el => el.getAttribute('data-fullpath') === path);
+      if (!source) return;
+      // 复用灯箱既有切图入口（与删除后的邻图跳转同一姿势），不自己改 currentIndex。
+      window.liteBox.click({ target: source });
+      liteboxDrawerSyncCurrent();
+    });
+
+    // 方向键在抽屉内移动焦点；Tab 仍按原生顺序走（280 项时不强迫用户敲 280 次 Tab）。
+    liteboxDrawer.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const items = Array.from(liteboxDrawer.querySelectorAll('.lb-thumb'));
+      const at = items.indexOf(document.activeElement);
+      if (at < 0) return;
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = items[Math.max(0, Math.min(items.length - 1, at + step))];
+      if (next) next.focus();
+    });
+
+    if (!liteboxDrawerBound) {
+      liteboxDrawerBound = true;
+      const counter = dialog.querySelector('.counter');
+      if (counter) {
+        counter.setAttribute('role', 'button');
+        counter.setAttribute('tabindex', '0');
+        counter.setAttribute('aria-label', '图片计数与缩略图抽屉');
+        counter.setAttribute('aria-controls', 'liteboxDrawer');
+        counter.setAttribute('aria-expanded', 'false');
+        counter.setAttribute('data-tip', '展开缩略图抽屉');
+        const toggle = () => liteboxDrawerSetOpen(!liteboxDrawerIsOpen);
+        counter.addEventListener('click', toggle);
+        counter.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+          e.preventDefault();
+          toggle();
+        });
+      }
+      // 抽屉打开时 Esc 先关抽屉：capture 抢在灯箱挂在 document 冒泡段的处理器之前；
+      // 抽屉关闭时这里完全放行，Esc 仍按灯箱原语义关灯箱。
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || !liteboxDrawerIsOpen) return;
+        e.preventDefault();
+        e.stopPropagation();
+        // 这一次 Esc 已经花在抽屉上：紧接着的 dialog cancel 也要拦掉，否则浏览器
+        // 默认动作会把灯箱一起关掉。标志只活到当前任务结束（cancel 同步于默认动作）。
+        liteboxDrawerSuppressCancel = true;
+        setTimeout(() => { liteboxDrawerSuppressCancel = false; }, 0);
+        liteboxDrawerSetOpen(false);
+      }, true);
+      // 抽屉外点击只关抽屉；点计数器归上面的 toggle 管，不能被这条重复触发。
+      dialog.addEventListener('click', (e) => {
+        if (!liteboxDrawerIsOpen) return;
+        const counterEl = dialog.querySelector('.counter');
+        if (liteboxDrawer.contains(e.target) || (counterEl && counterEl.contains(e.target))) return;
+        liteboxDrawerSetOpen(false);
+      });
+      // 灯箱被任何路径关掉（Esc/背景/关闭钮）时抽屉必须跟着收，否则下次打开会带着
+      // 上一批缩略图与 observer 复活。
+      dialog.addEventListener('close', () => liteboxDrawerSetOpen(false));
+      // 原生 dialog 的 Esc 关闭是浏览器默认动作，keydown 的 preventDefault 未必兜得住；
+      // 抽屉开着时拦截 cancel，把这一次 Esc 留给抽屉，灯箱保持打开。
+      dialog.addEventListener('cancel', (e) => {
+        if (liteboxDrawerSuppressCancel) {
+          liteboxDrawerSuppressCancel = false;
+          e.preventDefault();
+          return;
+        }
+        if (!liteboxDrawerIsOpen) return;
+        e.preventDefault();
+        liteboxDrawerSetOpen(false);
+      });
+    }
+    return liteboxDrawer;
+  }
+
   function openPreview(id) {
     const data = fileCleanData.get(id);
     if (!data || !data.files) return;
@@ -1936,8 +2219,11 @@
         img.src = url;
         range.appendChild(img);
       }
-      // ③ 注入删除按钮并打开第一张
+      // ③ 注入删除按钮与缩略图抽屉钩子（抽屉默认收起），再打开第一张
+      liteboxDrawerBatchId = id;
       liteboxInjectDeleteButton();
+      liteboxDrawerEnsure();
+      liteboxDrawerSetOpen(false);
       const first = range.querySelector('img');
       if (first) window.liteBox.click({ target: first });
     })();

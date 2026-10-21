@@ -1,25 +1,18 @@
 /* LiteBox v1.0.8 样式 —— vendor 自 https://github.com/OblivionOcean/LiteBox（MIT License）。
    类名 .litebox/.lightbox- 前缀全仓唯一，已核对与 main.css/ds.css 无冲突。
    暗色背景是看图对比场景的刻意设计。本仓受控适配（改任一处请同步登记）：
-   ① 圆角收敛到设计系统档位（5→6 / 20→14）；caption 本就是胶囊形，30→999px
-      （本仓胶囊写法，门禁放行档）；
-   ② 补齐上游引用却从未定义的三个变量缺省（--rotate/--scale/--transition-duration），
-      JS setProperty 运行时覆盖——原样搬过来过渡动画实际是失效的；
-   ③ 补 :focus-visible 焦点环（暗底用白色，2px）——上游 0 条，键盘用户看不到落点；
-   ④ 补 prefers-reduced-motion 归零——上游 0 条，原先只靠挂到 body 直接子代时
-      main.css 的全局通配兜住，挂载点一变就静默失效；
-   ⑤ 布局：左右箭头挂进 `.lightbox-stage`（图片容器外框）内侧——上游挂在整窗 fixed
-      弹层的左右边缘，图片比窗口窄时会飘到图片之外；stage 不参与图片旋转，箭头
-      始终贴图、对称、垂直居中。底部工具条固定「缩放/旋转/重置 → 分隔 → 删除 →
-      关闭」，删除由 cleanup.js 运行时注入到关闭左侧（图标+文字，同一档胶囊）；
-   ⑥ 媒体查询移到文件末尾：上游把它们放在基础规则之前，同特异性下被后者覆盖，
-      移动端尺寸实际从未生效。 */
+   ① 圆角收敛到设计系统档位（5→6 / 20→14），caption 胶囊 30→999px（门禁放行档）；
+   ② 补齐上游未定义的三个变量缺省（--rotate/--scale/--transition-duration），JS 运行时覆盖；
+   ③ 补 :focus-visible 焦点环（暗底白色 2px）；
+   ④ 补 prefers-reduced-motion 归零段（上游 0 条，挂载点一变全局通配就兜不住）；
+   ⑤ 左右箭头挂进 .lightbox-stage 内侧（上游挂整窗边缘，图窄时会飘出图片）；
+      底部工具条固定「缩放/旋转/重置 → 分隔 → 删除 → 关闭」，删除按钮（图标+文字、
+      同一档胶囊）与缩略图抽屉均由 cleanup.js 运行时注入；
+   ⑥ 媒体查询移到文件末尾：上游放在基础规则之前，同特异性下被后者覆盖。 */
 
 .litebox{--rotate:0deg;--scale:1;--transition-duration:.25s;padding:0;position:fixed;top:0;left:0;width:100%;height:100%;background:#000a;justify-content:center;align-items:center;z-index:1000;pointer-events:none;opacity:0;display:flex!important;transition:opacity var(--transition-duration) ease;max-width:none;max-height:none;margin:0;overflow:hidden;user-select:auto}
 .litebox[open]{opacity:1;pointer-events:all}
-/* stage 包住「会旋转的图片容器」与「不旋转的箭头」：stage 尺寸随容器收缩，
-   箭头 inset 到 stage 内沿；stage 另留 64px 侧边距，因此箭头落在图片外的留白里（2026-10-22 目检后）。 */
-/* 2026-10-22 目检：左右箭头已收进底部工具条（cleanup.js 运行时搬移），stage 不再留侧边距。 */
+/* stage 包住「会旋转的图片容器」与「不旋转的箭头」；箭头已收进底部工具条，stage 不再留侧边距。 */
 .litebox .lightbox-stage{position:relative;display:inline-flex;max-width:90%;max-height:90vh}
 .litebox .lightbox-container{position:relative;max-width:100%;max-height:90vh;transform-origin:center;transition:transform .3s ease;transform:rotateZ(var(--rotate))}
 .litebox .lightbox-image{max-width:100%;max-height:80vh;display:block;margin:0 auto;object-fit:contain;transform-origin:center;box-shadow:0 15px 50px #0009;transition:transform .2s ease;transform:scale(var(--scale));border-radius:6px}
@@ -41,9 +34,20 @@
 .litebox .caption,.litebox .counter,.litebox .zoom-level{position:absolute;background:#0006;color:#fff;pointer-events:none}
 .litebox .caption{left:0;right:0;text-align:center;padding:10px 15px;font-size:1.1rem;backdrop-filter:blur(5px);margin:0 auto;border-radius:999px;bottom:0;width:max-content}
 .litebox .counter,.litebox .zoom-level{top:20px;padding:8px 20px;border-radius:14px;font-size:1rem;z-index:10}
-.litebox .counter{left:20px}
+.litebox .counter{left:20px;pointer-events:auto;cursor:pointer}
 .litebox .zoom-level{right:20px}
-.litebox .lightbox-controls button:focus-visible,.litebox .nav-controls button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.litebox .lightbox-controls button:focus-visible,.litebox .nav-controls button:focus-visible,.litebox .counter:focus-visible{outline:2px solid #fff;outline-offset:2px}
+/* 缩略图抽屉：覆盖在图片左侧之上、不改变图片尺寸；手风琴宽度动画走设计系统缓动，
+   RM 归零由文件末尾既有规则统一兜住。 */
+.litebox .lb-drawer{position:absolute;inset:0 auto 0 0;width:0;overflow:hidden;visibility:hidden;background:#000c;border-right:1px solid #ffffff1f;z-index:5;transition:width .24s var(--ease-standard),visibility 0s linear .24s}
+.litebox .lb-drawer.lb-open{width:260px;visibility:visible;transition:width .24s var(--ease-standard)}
+.litebox .lb-drawer-inner{width:260px;height:100%;display:flex;flex-direction:column;padding:64px 10px 10px}
+.litebox .lb-drawer-head{color:#fff;opacity:.72;font-size:12px;padding:0 4px 8px}
+.litebox .lb-drawer-body{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(2,96px);justify-content:center;align-content:start;gap:8px}
+.litebox .lb-drawer-day{grid-column:1/-1;color:#fff;opacity:.62;font-size:12px;padding:6px 2px 0}
+.litebox .lb-thumb{padding:0;border:0;background:none;cursor:pointer;line-height:0}
+.litebox .lb-thumb img{display:block;width:96px;height:96px;object-fit:cover;border-radius:var(--radius-small);background:#ffffff12}
+.litebox .lb-thumb:focus-visible img,.litebox .lb-thumb[aria-current="true"] img{outline:2px solid #fff;outline-offset:1px}
 @media (max-width:768px){.litebox .lightbox-controls button{width:44px;height:44px}.litebox .nav-controls button{width:44px;height:44px}.litebox .nav-controls .lb-action{padding:0 14px}}
 @media (max-width:480px){.litebox .lightbox-controls button{width:38px;height:38px}.litebox .nav-controls button{width:38px;height:38px}.litebox .nav-controls .lb-action{padding:0 12px}.litebox .nav-controls .lb-action span{display:none}}
 @media (prefers-reduced-motion:reduce){.litebox,.litebox *{transition:none!important;animation:none!important}}
