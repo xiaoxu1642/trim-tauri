@@ -184,6 +184,55 @@ pub(super) fn run_cmd_step(cmd: &str) -> std::io::Result<std::process::Output> {
     )
 }
 
+/// 这一步有没有带上四个引擎字段（reg / cmd / service / pwsh）之一。
+///
+/// 为什么单独成函数而不是只在分发链里各写一遍：R3-L01 之后，链尾有两个**有名字**的
+/// 兜底分支（字段存在却没被接住 / 一个字段都没有），两者都以本谓词为分界。契约测试
+/// 直接喂合成 step 判红，不必起窗跑整条执行链。
+/// 判据与预检侧的 [`step_exec_mode`] 同结论（那条把「pwsh 编译不出来」也算 unsupported，
+/// 本谓词只看字段存在性，所以预检拦得住的形态这里只会更多、不会更少）。
+pub(super) fn step_has_engine_field(s: &Value) -> bool {
+    s.get("reg").and_then(Value::as_str).is_some()
+        || s.get("cmd").and_then(Value::as_str).is_some()
+        || s.get("service").is_some()
+        || s.get("pwsh").and_then(Value::as_str).is_some()
+}
+
+/// 「形态未识别」步骤的失败原因文案（执行链末尾 else 与契约测试共用同一份措辞）。
+/// 点名 label 是硬要求：回执里说不出是哪一步，用户与审计者都无从下手。
+pub(super) fn unrecognized_step_reason(label: &str) -> String {
+    format!("步骤「{label}」: 步骤形态未识别（reg/cmd/service/pwsh 四个引擎字段均缺失）")
+}
+
+/// 一行 `@@RECYCLE@@` 协议体的分类结果（只判形状，落地前的四道闸在调用方）。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RecycleLine {
+    /// 形状不合法（解析失败 / 缺 path / path 为空）。携带中文拒因进日志与计数。
+    Malformed(&'static str),
+    /// 同一路径已在本批出现过 —— 去重是正常收敛，不算畸形。
+    Duplicate,
+    /// 形状合法的路径。
+    Path(String),
+}
+
+/// 协议体形状判定。抽成纯函数是给 R3-L07 留判据面：`"path": ""` 与「缺 path」
+/// 必须同口径进畸形计数，而整条 `@@RECYCLE@@` 循环要真起回收站操作，测不动。
+pub(super) fn classify_recycle_line(rest: &str, seen: &mut std::collections::HashSet<String>) -> RecycleLine {
+    let Ok(entry) = serde_json::from_str::<Value>(rest) else {
+        return RecycleLine::Malformed("解析失败");
+    };
+    let Some(p) = entry.get("path").and_then(Value::as_str) else {
+        return RecycleLine::Malformed("缺少 path 字段");
+    };
+    if p.is_empty() {
+        return RecycleLine::Malformed("path 为空字符串");
+    }
+    if !seen.insert(p.to_string()) {
+        return RecycleLine::Duplicate;
+    }
+    RecycleLine::Path(p.to_string())
+}
+
 /// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）
 ///
 /// 支持 reg/cmd/service 三种 step 类型；pwsh 类型交给 pssteps 解释器
@@ -375,6 +424,23 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                     failed_reasons.push(format!("pwsh 步骤「{label}」: {reason}"));
                 }
             }
+        } else if step_has_engine_field(s) {
+            // 走到这里 = 四个引擎字段之一存在却没被上面任何分支接住 ⇒ 分发链与
+            // `step_has_engine_field` 分叉了（新增字段只改了一边）。同样计失败，
+            // 不静默跳过——静默是 R3-L01 那条缺陷的成因，不是解决方案。
+            failed += 1;
+            failed_reasons.push(format!(
+                "步骤「{label}」: 步骤字段形状异常（引擎字段存在但未进入任何执行分支）"
+            ));
+        } else {
+            // R3-L01（v7.2 C04）：四个引擎字段全都不匹配的形态**必须计入失败**。旧链没有
+            // 末尾 else ⇒ 这一步既没执行也不计数，进度照发、回执照报成功，用户看到的是
+            // 「做完了」，事实是「一个字没改」。与 reg/cmd/service/pwsh 各分支的
+            // 「失败计数继续」语义对齐，不再让未知形态享受静默待遇。
+            // 现算盘上 301 个步骤全部单字段合法 ⇒ 本分支暂不可达；不可达不等于不修，
+            // 数据层一旦增补漏字段的步骤就会落在这里（判据面见 contract_tests 的合成用例）。
+            failed += 1;
+            failed_reasons.push(unrecognized_step_reason(label));
         }
 
         // 推送进度
@@ -388,7 +454,13 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
 
 // ==================== 动态步骤 ====================
 
-pub(super) fn memory_steps(gb: &Value) -> Vec<Value> {
+/// SVCHost 拆分阈值步骤。**档位合法性只由本函数判**（未知档位 → `Err`）。
+///
+/// R3-L06（v7.2 C04）：旧实现在档位不在 `MEMORY_KB` 时**静默写 8GB**，只在 label 里自陈
+/// 「已回退」。label 既不进回执 `message`、也不进优化状态记账，回读又判 partial ——
+/// 用户选了一个不存在的档位却拿到「执行成功」，是回执好看但事实失真。
+/// 现在与同域 `perf_wu_pause` 的越界姿势统一为**当场拒绝、不动系统**（见 [`dynamic_steps`]）。
+pub(super) fn memory_steps(gb: &Value) -> Result<Vec<Value>, String> {
     // 入参可能是数字或字符串（"default"）
     let key = match gb {
         Value::String(s) => s.clone(),
@@ -399,13 +471,20 @@ pub(super) fn memory_steps(gb: &Value) -> Vec<Value> {
         (MEMORY_KB_DEFAULT, "重置为默认值".to_string())
     } else if let Some((_, v)) = MEMORY_KB.iter().find(|(k, _)| *k == key.as_str()) {
         (*v, format!("{key}GB"))
+    } else if key.is_empty() {
+        return Err("缺少 SVCHost 阈值档位参数".into());
     } else {
-        (8_388_608, "8GB（请求值异常，已回退到 8GB 阈值）".to_string())
+        let mut tiers: Vec<&str> = MEMORY_KB.iter().map(|(k, _)| *k).collect();
+        tiers.push("default");
+        return Err(format!(
+            "SVCHost 阈值档位「{key}」不在登记档位里（可选：{}）",
+            tiers.join(" / ")
+        ));
     };
-    vec![json!({
+    Ok(vec![json!({
         "label": format!("SVCHost 拆分阈值 {name}"),
         "cmd": format!("reg add \"HKLM\\SYSTEM\\ControlSet001\\Control\" /v SvcHostSplitThresholdInKB /t REG_DWORD /d {kb} /f")
-    })]
+    })])
 }
 
 pub(super) fn wu_pause_steps(days: i64) -> Vec<Value> {
@@ -420,6 +499,38 @@ foreach ($n in @(\"PauseFeatureUpdatesStartTime\",\"PauseQualityUpdatesStartTime
 foreach ($n in @(\"PauseFeatureUpdatesEndTime\",\"PauseQualityUpdatesEndTime\",\"PauseUpdatesExpiryTime\")) {{ New-ItemProperty -Path $base -Name $n -Value $ft -PropertyType QWord -Force | Out-Null }}"
     );
     vec![json!({ "label": format!("暂停 Windows 更新 {d} 天"), "pwsh": pwsh })]
+}
+
+/// 动态项的「参数 → 步骤链」唯一入口。
+///
+/// R3-L06（v7.2 C04）：两条动态项过去在 `assemble_steps` 里各写一套参数口径 ——
+/// `perf_wu_pause` 越界直接拒，`svc_mem_gb` 未知档位静默写 8GB。同一个域、同一类
+/// 「用户给的参数不在登记档位/区间里」，一个拒一个改，改的那个还把痕迹藏在 label 里。
+/// 判据收拢到本函数一处（AGENTS §5.16）：动态项参数不合法一律**当场拒、不动系统**，
+/// 回执点名原因；调用方拿 `Err` 直接出回执，不再走执行链。
+///
+/// 兜底分支同样拒：目录里 `dynamic=true` 但这里没有解析器的项，旧形态返回空步骤 ⇒
+/// 整条链跑 0 步、退出码 0、回执仍报成功。
+pub(super) fn dynamic_steps(option_id: &str, p: &RunParams) -> Result<Vec<Value>, String> {
+    match option_id {
+        "svc_mem_gb" => memory_steps(&p.gb.clone().unwrap_or(Value::Null)),
+        "perf_wu_pause" => {
+            let Some(d) = p.days else {
+                return Err("缺少暂停天数参数".into());
+            };
+            if !d.is_finite() {
+                // 与非数字入参的措辞分开：报「缺少参数」会让排查方向错到前端漏传上，
+                // 而 NaN/Infinity 是参数传了但值不可用。
+                return Err("暂停天数参数不是有效数字".into());
+            }
+            let days = d.trunc() as i64;
+            if !(1..=WU_PAUSE_MAX_DAYS).contains(&days) {
+                return Err(format!("暂停天数需在 1~{WU_PAUSE_MAX_DAYS} 天之间"));
+            }
+            Ok(wu_pause_steps(days))
+        }
+        other => Err(format!("动态优化项「{other}」没有登记的参数解析器，已拒绝执行")),
+    }
 }
 
 pub(super) fn svc_bulk_append_store(mut base: Vec<Value>) -> Vec<Value> {
@@ -506,7 +617,10 @@ impl Drop for OptRunGuard {
 pub(super) enum PreflightReject {
     NeedAdmin,
     NeedHighRiskConfirm,
-    /// 本机编译不出来的 pwsh 步骤。`String` 是 `step_exec_mode` 判出的 execMode。
+    /// 本机执行不了的步骤（`step_exec_mode` 判为 `unsupported`）。`String` 是**步骤 label**，
+    /// 文案要点名到底哪一步执行不了 —— 只报「本机不支持」用户无从下手。
+    /// R3-L01（v7.2 C04）：判据扩到覆盖「四个引擎字段全缺失」的畸形步骤（此前那类返回
+    /// `None`、预检只看 `Some("unsupported")` ⇒ 放行）；本枚举一支覆盖两种「没人能执行」。
     UnsupportedStep(String),
     /// 目标状态已满足（2026-10-11 裁定 7：Defender 已卸载/已禁用时再执行只会往
     /// 缺失的服务键写幽灵 Start、给用户假动作）。String 是给用户看的中文原因。
@@ -586,8 +700,10 @@ pub(super) fn preflight_reason(
         if !arr.is_empty() {
             if let Some(bad) = arr
                 .iter()
-                .find(|s| step_exec_mode(s) == Some("unsupported"))
-                .and_then(|s| s.get("label").and_then(|v| v.as_str()).map(|l| l.to_string()))
+                .find(|s| step_exec_mode(s) == "unsupported")
+                // R3-L01：label 缺失也要拒。旧写法用 `and_then` 取 label，取不到就整条
+                // 不拒 —— 等于「越畸形的步骤越容易通过预检」，与补 else 的初衷相反。
+                .map(|s| s.get("label").and_then(|v| v.as_str()).unwrap_or("未命名步骤").to_string())
             {
                 return Some(PreflightReject::UnsupportedStep(bad));
             }
@@ -646,23 +762,8 @@ pub(super) fn assemble_steps(
         }
         restore.clone()
     } else if is_dynamic {
-        if option_id == "svc_mem_gb" {
-            memory_steps(&p.gb.clone().unwrap_or(Value::Null))
-        } else if option_id == "perf_wu_pause" {
-            let Some(d) = p.days else {
-                return Err("缺少暂停天数参数".into());
-            };
-            if !d.is_finite() {
-                return Err("缺少暂停天数参数".into());
-            }
-            let days = d.trunc() as i64;
-            if !(1..=WU_PAUSE_MAX_DAYS).contains(&days) {
-                return Err(format!("暂停天数需在 1~{WU_PAUSE_MAX_DAYS} 天之间"));
-            }
-            wu_pause_steps(days)
-        } else {
-            Vec::new()
-        }
+        // R3-L06：参数校验不在这里各写一份，见 [`dynamic_steps`]。
+        dynamic_steps(option_id, p)?
     } else if super::subitems::supports_subitems(option_id) {
         // 批量项的子集执行（2026-10-03）。优先级高于 includeStore 分支：
         // 勾了子集就是「我只要这几个」，此时再自动追加商店 5 项是越权。
@@ -880,7 +981,7 @@ pub async fn optimizer_run<R: Runtime>(
     // 性能优化 P1-A（v3 §4.3）：整条步骤链是同步原生调用——PsInline 步骤登记 300s、
     // cmd 步骤登记 60s，过去直接跑在 async 命令体里 ⇒ 占住 runtime worker，
     // 批量执行时一条慢优化项就能把共享池的 worker 按住几分钟。
-    // 本文件此前只有 `restore_point.rs:211` 一处进了阻塞池，这条是那批修复的漏网。
+    // 本文件此前只有 `commands::optimizer::restore_point` 一处进了阻塞池，这条是那批修复的漏网。
     // join 异常并入下面的失败分支（措辞点名「阻塞池任务异常」），不静默吞成成功。
     let win_blk = window.clone();
     let steps_blk = steps.clone();
@@ -943,25 +1044,22 @@ pub async fn optimizer_run<R: Runtime>(
         for raw in stdout.lines() {
             let line = raw.trim();
             let Some(rest) = line.strip_prefix("@@RECYCLE@@") else { continue };
-            let entry = match serde_json::from_str::<Value>(rest) {
-                Ok(v) => v,
-                Err(e) => {
-                    // 审查 M-1（2026-10-03 L3）：畸形行**必须计数并告警**，不能静默丢。
-                    // 与 cleanup/scan_execute.rs 的 count_malformed 同口径：否则 PS 输出被
-                    // 截断/掺噪声时，用户与审计者都无从知道有目录漏进回收站。
+            // 审查 M-1（2026-10-03 L3）：畸形行**必须计数并告警**，不能静默丢。
+            // 与 cleanup/scan_execute.rs 的 count_malformed 同口径：否则 PS 输出被
+            // 截断/掺噪声时，用户与审计者都无从知道有目录漏进回收站。
+            // R3-L07（v7.2 C04）：形状判定收进 `classify_recycle_line` 一处 ——
+            // `"path": ""` 过去与「重复行」共用一个 `continue`，既不计数也不告警，
+            // 与本条自述相反；现在它和「缺 path」「解析失败」同归畸形。
+            let p = match classify_recycle_line(rest, &mut seen) {
+                RecycleLine::Malformed(why) => {
                     rec_malformed += 1;
-                    log::write_log("warn", &format!("优化回收站协议畸形行（解析失败）: {e}"));
+                    log::write_log("warn", &format!("优化回收站协议畸形行（{why}）: {rest}"));
                     continue;
                 }
+                // 重复行按「同一个目录只投一次」去重，属正常收敛，不计畸形。
+                RecycleLine::Duplicate => continue,
+                RecycleLine::Path(p) => p,
             };
-            let Some(p) = entry.get("path").and_then(|v| v.as_str()) else {
-                rec_malformed += 1;
-                log::write_log("warn", "优化回收站协议畸形行（缺少 path 字段）");
-                continue;
-            };
-            if p.is_empty() || !seen.insert(p.to_string()) {
-                continue;
-            }
             // R3-M03（v7.2 C01）：单批上限——PS 输出被截断/掺噪声/失控时，回收站出口
             // 不能无界吞路径。口径对齐 finder 的 FINDER_DELETE_MAX(500)。
             if rec_seen >= RECYCLE_EXIT_MAX_ITEMS {
@@ -973,14 +1071,14 @@ pub async fn optimizer_run<R: Runtime>(
             // C01（v7.2 R3-M03）：此前只过 `is_path_protected` 第一道闸——
             // %WINDIR% 子孙（exact 语义管不到）与 reparse 件都会进回收站。
             // 四道组合闸收口到 validate_mutation_target（拒因唯一真源）。
-            if let Err(why) = protect::validate_mutation_target(p) {
+            if let Err(why) = protect::validate_mutation_target(&p) {
                 rec_fail += 1;
                 log::write_log("warn", &format!("优化回收站协议拒绝: {why}"));
                 continue;
             }
             // 审查 v2-F1：走 `_os` 版。路径来自 PS stdout 的 @@RECYCLE@@ 协议，
             // 含孤立代理项的名字经 `&str` 往返会被改写，导致删错或删不到。
-            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
+            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(&p).as_os_str()) {
                 Ok(()) => rec_ok += 1,
                 Err(e) => {
                     rec_fail += 1;
@@ -1243,8 +1341,9 @@ pub(super) fn read_values_by_backup(want: &[Value]) -> Option<Vec<Value>> {
 ///
 /// B11：原先这里生成 4 行 PS 去读一个 HKLM DWORD，起一个 pwsh 子进程、等它退出、
 /// 再解析 stdout 里的 `KB|<n>` —— 换成直接走注册表 API，语义不变（值缺失/类型不对
-/// 都按 None 处理）。键路径**保持 `ControlSet001` 字面量**：原 PS 与写入侧（`:245` 的
-/// `reg add`）都指它，不换 `CurrentControlSet`，避免「读到活动集、写到 001」的口径分裂。
+/// 都按 None 处理）。键路径**保持 `ControlSet001` 字面量**：原 PS 与写入侧（本文件
+/// `commands::optimizer::apply::memory_steps` 产的 `reg add`）都指它，不换 `CurrentControlSet`，
+/// 避免「读到活动集、写到 001」的口径分裂。
 pub(super) fn svc_mem_current_kb() -> Option<i64> {
     crate::engine::native::read_hklm_dword(
         r"SYSTEM\ControlSet001\Control",

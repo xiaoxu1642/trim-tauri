@@ -35,8 +35,9 @@ use crate::engine::protect;
 /// 单根子键枚举上限。
 ///
 /// `HKLM\SOFTWARE\Classes` 是注册表里最大的几棵树之一（真机上万条），全量枚举 + 逐条
-/// 读默认值会让一次深扫多花数秒。这里给的是「够用且可控」的上限，触发时由 notes 如实
-/// 说明本轮只看了前 N 条 —— 残缺必须可见，不能渲染成「本机干净」。
+/// 读默认值会让一次深扫多花数秒。这里给的是「够用且可控」的上限；R2b-L01 之前它只写在
+/// 注释里、触发时**静默**当「本机干净」渲染，现在采集侧一律按「多问一条」现算截断并出
+/// note（见 [`collect_com_raws`] / [`collect_filetype_raws`]）。
 const CLASSES_ENUM_CAP: usize = 4000;
 
 // ==================== COM / CLSID ====================
@@ -132,18 +133,26 @@ pub(super) fn server_path(raw: &str) -> Option<String> {
     Some(expanded)
 }
 
-/// 采集三个视图的 CLSID 子键（只读）。返回 (条目, 是否有任一根枚举到内容)。
-pub(super) unsafe fn collect_com_raws() -> (Vec<ComRaw>, bool) {
+/// 采集三个视图的 CLSID 子键（只读）。返回 (条目, 是否有任一根枚举到内容, 残缺注记)。
+///
+/// R2b-L01：枚举上限走「多问一条」现算截断（同 `game_platform_orphan::subkey_dir_values`
+/// 的 `hit_guard` 姿势）——`reg_enum_subkeys` 读满就停，只看返回条数分不开「恰好读满」与
+/// 「被截断」；本文件头承诺的「残缺必须可见」必须有现算依据，不许靠上限反推。
+pub(super) unsafe fn collect_com_raws() -> (Vec<ComRaw>, bool, Vec<String>) {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegCloseKey};
     let mut out = Vec::new();
+    let mut notes = Vec::new();
     let mut any = false;
     for view in [ComView::HklmX64, ComView::HklmWow6432, ComView::Hkcu] {
         let hive = if view == ComView::Hkcu { HKEY_CURRENT_USER } else { HKEY_LOCAL_MACHINE };
-        let names = reg_enum_subkeys(hive, view.root(), CLASSES_ENUM_CAP);
+        let names = reg_enum_subkeys(hive, view.root(), CLASSES_ENUM_CAP + 1);
         if !names.is_empty() {
             any = true;
         }
-        for clsid in names {
+        if names.len() > CLASSES_ENUM_CAP {
+            notes.push(enum_truncated_note(view.root(), view.label()));
+        }
+        for clsid in names.into_iter().take(CLASSES_ENUM_CAP) {
             // 只看 `{GUID}` 形态：`Classes\CLSID` 下偶尔混进非 GUID 名（安装器的临时项），
             // 那些不属于「COM 注册」，报了只是噪音。
             if !clsid.starts_with('{') || !clsid.ends_with('}') {
@@ -163,20 +172,78 @@ pub(super) unsafe fn collect_com_raws() -> (Vec<ComRaw>, bool) {
             out.push(ComRaw { view, clsid, inproc, local });
         }
     }
-    (out, any)
+    (out, any, notes)
+}
+
+/// 「这棵根被枚举上限截断」的注记（唯一措辞真源，三处采集共用）。
+fn enum_truncated_note(root: &str, where_label: &str) -> String {
+    format!("根 {root}（{where_label}）的子键数达到枚举上限 {CLASSES_ENUM_CAP}，本轮只判前 {CLASSES_ENUM_CAP} 条 —— 本组结果不完整，不是「本机干净」")
+}
+
+/// 单个服务器值的探测结果（`Absent` 与 `Unparseable` 是两回事，见 [`ComProbe`]）。
+enum ServerCell {
+    /// 键或默认值不存在
+    Absent,
+    /// 值存在但形态取不出可信路径（引号未闭合 / 变量展开不了 / 后缀不认识）
+    Unparseable,
+    /// 取出路径且本机仍在
+    Alive,
+    /// 取出路径且本机已不存在
+    Missing(String),
+}
+
+fn probe_server_cell(raw: Option<&str>, present: &dyn Fn(&str) -> bool) -> ServerCell {
+    let Some(v) = raw.map(str::trim) else { return ServerCell::Absent };
+    if v.is_empty() {
+        return ServerCell::Absent;
+    }
+    match server_path(v) {
+        None => ServerCell::Unparseable,
+        Some(p) => if present(&p) { ServerCell::Alive } else { ServerCell::Missing(p) },
+    }
+}
+
+/// `classify_com` 的结果。**三种「不报」必须分开计数**（R2b-L02，姿势照 `run_findings` 的
+/// `alive` / `no_target` / `unparseable` 三计）：旧实现把 `Option::None` 一律记成「没有
+/// 可取出的服务器路径」，于是「组件仍在用」被计成「取不出路径」、「形态解不出」也被计成
+/// 「取不出路径」——note 报的数与给的因都不对，用户据此判断「这组里有多少条我扫不动」就
+/// 失去事实。
+pub(super) enum ComProbe {
+    /// 服务器路径可取出且本机已失踪 ⇒ 候选
+    Missing { class: &'static str, reason: &'static str, path: String },
+    /// 服务器路径可取出且本机仍在（仍在使用的正常注册，不打扰用户）
+    Alive,
+    /// 两个服务器值都不存在 ⇒ 不属于「文件型 COM 注册」（TypeLib / ProgID 等形态）
+    NoServer,
+    /// 值存在但形态解不出可信路径 ⇒ 无证据，不猜
+    Undecodable,
 }
 
 /// 纯判定：`present` 注入「这个路径在本机存在吗」（单测因此不碰磁盘）。
 ///
-/// `InprocServer32` 与 `LocalServer32` 都读不到 ⇒ 不报：这类 CLSID 多半是
-/// `TypeLib` / `ProgID` / `TreatAs` 之类的注册形态，没有服务器路径，判不了就不猜。
-pub(super) fn classify_com(raw: &ComRaw, present: &dyn Fn(&str) -> bool) -> Option<(&'static str, &'static str, String)> {
-    let inproc = raw.inproc.as_deref().and_then(server_path);
-    let local = raw.local.as_deref().and_then(server_path);
-    match (inproc, local) {
-        (Some(p), _) if !present(&p) => Some(("com_inproc_missing", "InprocServer32 指向的组件在本机已不存在", p)),
-        (None, Some(p)) if !present(&p) => Some(("com_local_missing", "LocalServer32 指向的程序在本机已不存在", p)),
-        _ => None,
+/// 优先级保留旧口径：`InprocServer32` 只要**取出了路径**（无论存活与否）就压过
+/// `LocalServer32`——Inproc 存活时绝不因 LocalServer32 缺席而报（有断言钉着）。
+/// 两个服务器值都判不出失踪 ⇒ 不报。
+pub(super) fn classify_com(raw: &ComRaw, present: &dyn Fn(&str) -> bool) -> ComProbe {
+    use ServerCell as C;
+    let inproc = probe_server_cell(raw.inproc.as_deref(), present);
+    let local = probe_server_cell(raw.local.as_deref(), present);
+    match (&inproc, &local) {
+        (C::Missing(p), _) => ComProbe::Missing {
+            class: "com_inproc_missing",
+            reason: "InprocServer32 指向的组件在本机已不存在",
+            path: p.clone(),
+        },
+        // Inproc 存活 ⇒ 整条按「仍在用」处理（不再看 LocalServer32）
+        (C::Alive, _) => ComProbe::Alive,
+        (C::Absent | C::Unparseable, C::Missing(p)) => ComProbe::Missing {
+            class: "com_local_missing",
+            reason: "LocalServer32 指向的程序在本机已不存在",
+            path: p.clone(),
+        },
+        (C::Absent | C::Unparseable, C::Alive) => ComProbe::Alive,
+        (C::Absent, C::Absent) => ComProbe::NoServer,
+        _ => ComProbe::Undecodable,
     }
 }
 
@@ -184,14 +251,29 @@ pub(super) fn classify_com(raw: &ComRaw, present: &dyn Fn(&str) -> bool) -> Opti
 pub(super) fn com_findings(raws: &[ComRaw], present: &dyn Fn(&str) -> bool, cap: usize) -> (Vec<Value>, Vec<String>) {
     let mut out = Vec::new();
     let mut notes = Vec::new();
+    let mut alive = 0usize;
     let mut no_server = 0usize;
+    let mut undecodable = 0usize;
     for raw in raws {
-        let Some((class, reason, path)) = classify_com(raw, present) else {
-            no_server += 1;
-            continue;
+        let (class, reason, path) = match classify_com(raw, present) {
+            ComProbe::Missing { class, reason, path } => (class, reason, path),
+            ComProbe::Alive => {
+                alive += 1;
+                continue;
+            }
+            ComProbe::NoServer => {
+                no_server += 1;
+                continue;
+            }
+            ComProbe::Undecodable => {
+                undecodable += 1;
+                continue;
+            }
         };
         if out.len() >= cap {
-            notes.push(format!("COM/CLSID 候选已达上限 {cap} 条，其余省略"));
+            // 上限是**候选**上限，不是扫描量：被截掉的是已经判成失踪的条目，
+            // 所以注记必须点名「已判出的还有多少没列出来」，而不是只报一个数字。
+            notes.push(format!("COM/CLSID 候选已达上限 {cap} 条，其余已判出的省略（本组结果不完整）"));
             break;
         }
         let target = raw.target();
@@ -223,7 +305,13 @@ pub(super) fn com_findings(raws: &[ComRaw], present: &dyn Fn(&str) -> bool, cap:
         }));
     }
     if no_server > 0 {
-        notes.push(format!("{no_server} 条 CLSID 没有可取出的服务器路径（可能是 TypeLib/ProgID 等注册形态），已按不可判定跳过"));
+        notes.push(format!("{no_server} 条 CLSID 没有可取出的服务器路径（既无 InprocServer32 也无 LocalServer32 值，可能是 TypeLib/ProgID 等注册形态），已按不可判定跳过"));
+    }
+    if undecodable > 0 {
+        notes.push(format!("{undecodable} 条 CLSID 的服务器值形态解不出可信路径（引号未闭合 / 变量展开不了 / 后缀不认识），已按无证据跳过——判不准的方向是少报"));
+    }
+    if alive > 0 {
+        notes.push(format!("{alive} 条 CLSID 登记的可执行组件仍在本机（正常注册，不作为残留）"));
     }
     (out, notes)
 }
@@ -287,6 +375,9 @@ pub(super) struct FileTypeRaws {
     pub(super) apps: Vec<AppRegRaw>,
     /// 是否有任一根枚举到内容
     pub(super) any: bool,
+    /// 残缺注记（枚举截断 / 目录列不到）——R2b-L01：截断必须随结果一起回传，
+    /// 不能只在注释里承诺。
+    pub(super) notes: Vec<String>,
 }
 
 /// 采集扩展名键与 Applications 子键（只读）。
@@ -298,14 +389,19 @@ pub(super) unsafe fn collect_filetype_raws() -> FileTypeRaws {
     let mut file_types = Vec::new();
     let mut apps = Vec::new();
     let mut any = false;
+    let mut notes = Vec::new();
     for hive_kind in [ClassesHive::Hklm, ClassesHive::Hkcu] {
         let hive = if hive_kind == ClassesHive::Hkcu { HKEY_CURRENT_USER } else { HKEY_LOCAL_MACHINE };
         let root = hive_kind.classes_root();
-        let names = reg_enum_subkeys(hive, root, CLASSES_ENUM_CAP);
+        // 同 `collect_com_raws`：多问一条才能把「读满」与「截断」分开
+        let names = reg_enum_subkeys(hive, root, CLASSES_ENUM_CAP + 1);
         if !names.is_empty() {
             any = true;
         }
-        for name in names {
+        if names.len() > CLASSES_ENUM_CAP {
+            notes.push(enum_truncated_note(root, hive_kind.hive_label()));
+        }
+        for name in names.into_iter().take(CLASSES_ENUM_CAP) {
             if name.starts_with('.') && name.len() > 1 {
                 let Some(hk) = open_key_read(hive, &format!("{root}\\{name}")) else { continue };
                 let progid = reg_sz(hk, "").unwrap_or_default();
@@ -316,14 +412,18 @@ pub(super) unsafe fn collect_filetype_raws() -> FileTypeRaws {
                 continue;
             }
             if name.eq_ignore_ascii_case("Applications") {
-                let app_names = reg_enum_subkeys(hive, &format!("{root}\\Applications"), CLASSES_ENUM_CAP);
-                for app in app_names {
+                let app_root = format!("{root}\\Applications");
+                let app_names = reg_enum_subkeys(hive, &app_root, CLASSES_ENUM_CAP + 1);
+                if app_names.len() > CLASSES_ENUM_CAP {
+                    notes.push(enum_truncated_note(&app_root, hive_kind.hive_label()));
+                }
+                for app in app_names.into_iter().take(CLASSES_ENUM_CAP) {
                     apps.push(AppRegRaw { hive: hive_kind, name: app });
                 }
             }
         }
     }
-    FileTypeRaws { file_types, apps, any }
+    FileTypeRaws { file_types, apps, any, notes }
 }
 
 /// 产出文件类型候选：默认值 ProgID 指向的 `Classes\<ProgID>` 键**此刻不存在**。
@@ -338,7 +438,7 @@ pub(super) fn filetype_findings(raws: &[FileTypeRaw], progid_exists: &dyn Fn(&st
             continue;
         }
         if out.len() >= cap {
-            notes.push(format!("文件类型候选已达上限 {cap} 条，其余省略"));
+            notes.push(format!("文件类型候选已达上限 {cap} 条，其余已判出的省略（本组结果不完整）"));
             break;
         }
         let target = raw.target();
@@ -383,7 +483,7 @@ pub(super) fn app_reg_findings(raws: &[AppRegRaw], exe_present: &dyn Fn(&str) ->
             continue;
         }
         if out.len() >= cap {
-            notes.push(format!("Applications 候选已达上限 {cap} 条，其余省略"));
+            notes.push(format!("Applications 候选已达上限 {cap} 条，其余已判出的省略（本组结果不完整）"));
             break;
         }
         let target = raw.target();
@@ -568,5 +668,60 @@ mod tests {
             assert_eq!(it["defaultChecked"], false);
             assert_eq!(it["kind"], "reg_key");
         }
+        // 上限注记必须说清「这是截断、本组不完整」，只报一个数字会被读成「本机只有这些」
+        assert!(notes.iter().any(|n| n.contains("已达上限") && n.contains("本组结果不完整")), "{notes:?}");
+    }
+
+    /// R2b-L02：三种「不报」各计各的、各说一句因。把「组件仍在用」折进「取不出服务器
+    /// 路径」会让 note 的数与因同时失真。
+    #[test]
+    fn three_kinds_of_non_reporting_are_counted_and_worded_separately() {
+        let raws = vec![
+            // 1 候选
+            com("{AAAAAAAA-AAAAAAAA-AAAAAAAA-AAAAAAAAAAAA}", Some(r"C:\Gone\a.dll"), None),
+            // alive：路径取出来了，本机还在
+            com("{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBBBB}", Some(r"C:\Live\b.dll"), None),
+            // no_server：两个服务器值都不存在
+            com("{CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCCCCCC}", None, None),
+            // undecodable：值存在但形态解不出可信路径（未登记的变量）
+            com("{DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDDDD}", Some(r"%NO_SUCH_TOKEN_XYZ%\d.dll"), None),
+        ];
+        let (items, notes) = com_findings(&raws, &|p: &str| p.starts_with(r"C:\Live"), 10);
+        assert_eq!(items.len(), 1);
+        let joined = notes.join("\n");
+        assert!(joined.contains("1 条 CLSID 登记的可执行组件仍在本机"), "alive 计数缺失: {notes:?}");
+        assert!(joined.contains("1 条 CLSID 没有可取出的服务器路径"), "no_server 计数缺失: {notes:?}");
+        assert!(joined.contains("1 条 CLSID 的服务器值形态解不出可信路径"), "undecodable 计数缺失: {notes:?}");
+        // 三条不报各出一条注记：折成一条即回到「数与因都不对」的原缺陷
+        assert_eq!(notes.len(), 3, "三种不报必须各出一条注记: {notes:?}");
+    }
+
+    /// R2b-L04 同族的空值口径：空串默认值属「没登记服务器」，不该计进「解不出形态」。
+    #[test]
+    fn blank_server_value_counts_as_no_server_not_undecodable() {
+        let raws = vec![com("{EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEEEEEE}", Some("   "), Some(""))];
+        let (_, notes) = com_findings(&raws, &|_: &str| false, 10);
+        assert!(notes.iter().any(|n| n.contains("没有可取出的服务器路径")), "{notes:?}");
+        assert!(!notes.iter().any(|n| n.contains("形态解不出可信路径")), "{notes:?}");
+    }
+
+    /// **真机、只读、#[ignore]**（AGENTS §4.2 纪律②：现读注册表不进快速组）：
+    /// 证明「枚举截断可见」这条在真数据上成立。本机 `Classes` 子键不足上限时用例主动
+    /// skip 并说明——它验的是「触顶时有没有注记」，不是「本机一定触顶」。
+    #[test]
+    #[ignore = "真机现读 HKLM\\SOFTWARE\\Classes，只读、不改系统"]
+    fn real_classes_enum_truncation_is_visible() {
+        let total = unsafe { reg_enum_subkeys(windows::Win32::System::Registry::HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes", CLASSES_ENUM_CAP + 1) };
+        let (_, _, notes) = unsafe { collect_com_raws() };
+        if total.len() <= CLASSES_ENUM_CAP {
+            // 没触顶就不能判红，只能如实说明缺样本
+            assert!(notes.iter().all(|n| !n.contains("本组结果不完整")), "未触顶却报截断: {notes:?}");
+            return;
+        }
+        assert!(
+            notes.iter().any(|n| n.contains(&format!("{CLASSES_ENUM_CAP}")) && n.contains("本组结果不完整")),
+            "Classes 枚举已触顶（读到 {} > {CLASSES_ENUM_CAP}）却没出截断注记: {notes:?}",
+            total.len()
+        );
     }
 }

@@ -111,6 +111,49 @@ function topLevelKeys(lit) {
   return out;
 }
 
+/** 跳过 Rust 字符串字面量（含转义），返回收尾引号的下标；`r"..."` 的裸串靠双反斜杠极少，按普通串处理足够配平。 */
+function skipString(src, i) {
+  let j = i + 1;
+  while (j < src.length) {
+    if (src[j] === '\\') { j += 2; continue; }
+    if (src[j] === '"') return j;
+    j++;
+  }
+  return j;
+}
+
+/**
+ * 取 Rust 函数体（`fn <name>(` 之后第一个配平的 `{...}`，字符串/注释里的花括号不算）。
+ * R3-L06 之后参数校验住在 `dynamic_steps` 里，判据必须能切出这个函数体，
+ * 否则「合并成一处」就等于「从门禁面上消失」。
+ */
+function rustFnBody(src, name) {
+  const at = src.search(new RegExp(`fn ${name}\\s*[(<]`));
+  if (at < 0) return '';
+  const open = src.indexOf('{', at);
+  if (open < 0) return '';
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    const c = src[i];
+    if (c === '/' && src[i + 1] === '/') { i = src.indexOf('\n', i); if (i < 0) break; continue; }
+    if (c === '"') { i = skipString(src, i); continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return src.slice(open, i + 1); }
+  }
+  return '';
+}
+
+/** 取 match 臂体：`"id" =>` 之后到下一个同缩进臂或函数体结尾。 */
+function armSlice(body, id) {
+  if (!body) return '';
+  const m = new RegExp(`^\\s*"${id}"\\s*=>`, 'm').exec(body);
+  if (!m) return '';
+  const start = m.index + m[0].length;
+  const rest = body.slice(start);
+  const next = rest.search(/^\s{4}"[a-z0-9_]+" =>|^\s{4}_\s*=>/m);
+  return next < 0 ? rest.slice(0, 1200) : rest.slice(0, next);
+}
+
 // ---- A1：数据层 dynamic 集合 ⇄ 前端分派表键集合 ----
 let options = null;
 try { options = JSON.parse(dataJson); } catch { /* 下面判红 */ }
@@ -136,14 +179,26 @@ if (!Array.isArray(options)) {
     );
 
     // ---- A2 / A3：Rust 分支与字段名 ----
+    // R3-L06（v7.2 P2）之后，「档位合法性」从各分支里合并进了 `dynamic_steps` 一处，
+    // 所以旧的解析姿势（在 `let is_dynamic` 之后 4000 字符里找 `option_id == "<id>"`）
+    // 会同时瞎两条：那个窗口里只剩 `tf_svc_bulk` 的批量分支，而 svc_mem_gb / perf_wu_pause
+    // 改成了 match 臂（`"svc_mem_gb" => ...`）并且住在 dynamic_steps 函数体内。
+    // 判据本体没变——「每个 dynamic id 在 Rust 侧有对应判断」与「该判断必须读自己的 param 字段」
+    // 仍然逐 id 成立；变的是**形状**，所以这里改成两条来源：dispatch 分支 + dynamic_steps 的 match 臂。
     const dynBlockStart = rustOpt.indexOf('let is_dynamic');
-    const branchIds = dynBlockStart < 0 ? [] :
+    const dispatchIds = dynBlockStart < 0 ? [] :
       [...rustOpt.slice(dynBlockStart, dynBlockStart + 4000)
         .matchAll(/option_id == "([^"]+)"/g)].map((m) => m[1]);
+    const stepsBody = rustFnBody(rustOpt, 'dynamic_steps');
+    const armIds = stepsBody
+      ? [...stepsBody.matchAll(/^\s*"([a-z0-9_]+)"\s*=>/gm)].map((m) => m[1])
+      : [];
+    const branchIds = [...new Set([...dispatchIds, ...armIds])];
     check(
-      dynBlockStart >= 0 && branchIds.length > 0 && dynIds.every((i) => branchIds.includes(i)),
-      `A2. 每个 dynamic id 在 Rust is_dynamic 分支有对应判断（Rust 侧 ${branchIds.join(', ') || '无'}）`,
-      dynBlockStart < 0 ? 'optimizer.rs 里找不到 let is_dynamic' : ''
+      dynBlockStart >= 0 && !!stepsBody && branchIds.length > 0 && dynIds.every((i) => branchIds.includes(i)),
+      `A2. 每个 dynamic id 在 Rust 侧有对应判断（分派 ${dispatchIds.join(', ') || '无'} ⇄ dynamic_steps 臂 ${armIds.join(', ') || '无'}）`,
+      dynBlockStart < 0 ? 'apply.rs 里找不到 let is_dynamic'
+        : !stepsBody ? 'apply.rs 里找不到 dynamic_steps 函数体 ⇒ 参数校验侧整个不在判据面里' : ''
     );
 
     const runParams = objectLiteral(rustOpt, /pub struct RunParams/) || '';
@@ -154,14 +209,17 @@ if (!Array.isArray(options)) {
       const pm = block && /paramKey: '([^']+)'/.exec(block);
       if (!pm) { fieldOk = false; lines.push(`${id}: 缺 paramKey`); continue; }
       const key = pm[1];
-      // 该 id 的 Rust 分支体内必须读 p.<key>
-      const idAt = rustOpt.indexOf(`option_id == "${id}"`, Math.max(dynBlockStart, 0));
-      const body = idAt < 0 ? '' : rustOpt.slice(idAt, idAt + 1200);
+      // 该 id 的判断体（match 臂优先，其次分派分支）内必须读 p.<key>
+      const armBody = armSlice(stepsBody, id);
+      const body = armBody || (() => {
+        const idAt = rustOpt.indexOf(`option_id == "${id}"`, Math.max(dynBlockStart, 0));
+        return idAt < 0 ? '' : rustOpt.slice(idAt, idAt + 1200);
+      })();
       const readsOwn = new RegExp(`p\\.${key}\\b`).test(body);
       const declared = new RegExp(`(^|\\n)\\s*(pub )?${key}:\\s*Option<`).test(runParams);
       if (!readsOwn || !declared) {
         fieldOk = false;
-        lines.push(`${id}: paramKey=${key} 但 ${!readsOwn ? 'Rust 分支没读 p.' + key : !declared ? 'RunParams 里没有 ' + key : ''}`);
+        lines.push(`${id}: paramKey=${key} 但 ${!readsOwn ? `判断体（${armBody ? 'match 臂' : '分派分支'}）没读 p.${key}` : !declared ? 'RunParams 里没有 ' + key : ''}`);
       }
     }
     check(fieldOk, `A3. 前端 paramKey ⇄ Rust 读取字段 ⇄ RunParams 声明（${jsIds.length} 项）`,

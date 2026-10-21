@@ -7,6 +7,16 @@
 //!   `MAX_KEYS_PER_OWNER`，`learned` 复用它的 `tokens_of`；
 //! - `running_process_dirs`：保留为内部工具（当前无生产调用方，见其上的 `allow(dead_code)`）。
 //!
+//! **名实对照（R2b-L07，读到这里请先看这段再判断要不要改）**：
+//! - 本文件**不**读、也从不读 `reg-ownership` 归属表 —— 那张表是注册表键的**写入方台账**
+//!   （零消费方，既不进 `include_str!` 也不进安装包），与本文件的 `learned`（本机学习库，
+//!   记「这个落点被这个程序写过」）只是名字像。v7 审查里「ownership.rs 消费 reg-ownership.json」
+//!   这条前提就是被文件名误导的，现算已证伪，别再据此改判据。
+//! - 文件名保留 `ownership.rs` 是**刻意的不重命名**：改名为 `learned.rs`/`footprint.rs` 一类
+//!   要同步 `mod.rs` 声明与 `#[allow(dead_code)]` 逐模块标注、`include_str!`/文档互引、
+//!   按契约面点名文件的门禁判据、以及按文件名登记的豁免表（AGENTS §5.22 的五处同步），
+//!   收益只有可读性、风险是漏一处即编译面/门禁双红，故由主 agent 单独拍板，本轮只补注释。
+//!
 //! 只读判定 + 台账写入，不删任何用户文件。
 
 use crate::engine::{delete_manifest, protect};

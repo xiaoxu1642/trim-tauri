@@ -230,8 +230,27 @@ fn resolve_path(s: &str) -> Option<String> {
 
 /// 去尾部空白与点号（Win32 路径比较忽略它们）+ 尾分隔符（`C:\` → `C:`，
 /// 但 `C:` 本身不被削成空串）。
+/// 裁掉路径的**分量级**尾点/尾空格 + 整串尾分隔符。
+///
+/// 原先只裁整串末尾（`s.trim_end_matches([' ', '.'])`），于是
+/// `C:\Windows.\System32\acme.sys` 归一后仍是 `windows.` 那一段带着尾点——
+/// Windows 在解析时是**逐分量**剥掉尾点/尾空格的，这个形态指向的就是
+/// `C:\Windows\System32\acme.sys`，而按整串裁的归一结果与受保护根的字符串比较对不上，
+/// 第 5 道「服务目录前缀」判据就形同虚设（v7.2 P2 · R2b-L05 的修复面实测出来的绕过，
+/// 与 0.4.5 批次修的 UNC / `\\?\` / 8.3 短名是同一族：归一化没跟上 OS 的解析语义）。
+///
+/// 刻意**不**把分量裁成空串：`C:\a\.\b` 这类纯点分段由上游 `resolve_path` 折叠掉了，
+/// 万一还有 `...` 这种非空形态，裁空会让两个不同路径塌成同一个键（K02 穿闸的同族风险），
+/// 所以宁可保留原样、让它走「不匹配 ⇒ 不判受保护」这条可见失败，也不制造塌并。
 fn trim_tail(s: &str) -> String {
-    let mut t = s.trim_end_matches([' ', '.']).to_string();
+    let per_component: Vec<String> = s
+        .split(['\\', '/'])
+        .map(|seg| {
+            let trimmed = seg.trim_end_matches([' ', '.']);
+            if trimmed.is_empty() && !seg.is_empty() { seg.to_string() } else { trimmed.to_string() }
+        })
+        .collect();
+    let mut t = per_component.join("\\");
     while t.len() > 1 && (t.ends_with('\\') || t.ends_with('/')) {
         t.pop();
     }
@@ -1356,6 +1375,11 @@ mod tests {
             format!(r"\\?\{d}\Windows\System32\drivers\x.sys"),
             format!("{d}\\Windows\\System32\\"),   // 尾分隔符
             format!("{d}\\WINDOWS\\SYSTEM32"),     // 大小写
+            // v7.2 P2 · R2b-L05 修复面实测出的绕过：OS 是**逐分量**剥尾点/尾空格，
+            // 整串裁法留下 `windows.` 这一段，与受保护根比不上 ⇒ 第 5 道形同虚设。
+            format!("{d}\\Windows.\\System32\\acme.sys"),   // 中间分量尾点
+            format!("{d}\\Windows \\System32"),             // 中间分量尾空格
+            format!(r"\\?\{d}\Windows.\System32"),          // verbatim 折回后同一条
         ] {
             assert!(is_system_namespace(&hit), "非规范形态逃过系统命名空间判据: {hit}");
         }
@@ -1364,6 +1388,35 @@ mod tests {
             assert!(is_system_namespace(form), "设备路径必须 fail-closed: {form}");
         }
         assert!(is_system_namespace(""), "不可判按拒（fail-closed）");
+    }
+
+    /// v7.2 P2 · R2b-L05：尾点/尾空格是**逐分量**剥的，不是只剥整串末尾。
+    ///
+    /// 双向都钉：① 分量级尾点必须与规范写法归一到同一个键（差一个点就比不上受保护根，
+    /// 服务删除的第 5 道判据会被整段绕过）；② 整段都是点的分量**不得**裁成空串再塌并——
+    /// 两个不同路径算成同一个键就是 K02 穿闸的同族风险。
+    /// 判红自证：把 `trim_tail` 改回只裁整串末尾 ⇒ ① 红；改成无条件裁空 ⇒ ② 红。
+    #[test]
+    fn per_component_tail_dots_trimmed_without_collapsing() {
+        for (odd, canonical) in [
+            (r"C:\Windows.\System32\acme.sys", r"C:\Windows\System32\acme.sys"),
+            (r"C:\Windows \System32", r"C:\Windows\System32"),
+            (r"\\?\C:\Windows.\System32", r"C:\Windows\System32"),
+            (r"\\srv\share.\pub\x", r"\\srv\share\pub\x"),
+        ] {
+            assert_eq!(
+                normalize_lexical(odd),
+                normalize_lexical(canonical),
+                "分量级尾点没剥：{odd} 与 {canonical} 归一后不是同一个键"
+            );
+        }
+        assert_ne!(
+            normalize_lexical(r"C:\a\...\b"),
+            normalize_lexical(r"C:\a\b"),
+            "纯点分量被裁空塌并：两个不同路径算成了同一个键"
+        );
+        // verbatim 不可折回形态仍按字面键口径（P0-1 的既有契约，不能被本改动带偏）
+        assert_eq!(normalize_lexical(r"\\.\C:\Windows."), r"\\.\c:\windows.");
     }
 
     /// v5-K02 批次 1（R6a-M02）：判据层与比较键层共用同一词法归一。

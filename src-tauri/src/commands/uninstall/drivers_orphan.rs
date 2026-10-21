@@ -18,30 +18,67 @@ use std::path::{Path, PathBuf};
 use super::authenticode;
 use super::residue_update::contribs;
 use super::services_orphan::referenced_landings;
+use crate::engine::protect;
 
 /// 单目录枚举上限（本机 drivers 常规定在几百个量级）
 const DRIVER_FILE_CAP: usize = 1200;
 /// 候选上限
 pub(super) const DRIVER_FINDING_CAP: usize = 60;
 
-/// `%SystemRoot%\System32\drivers\*.sys`（只读列目录，不跟随重解析点）。
-pub(super) fn driver_files() -> Vec<PathBuf> {
+/// `%SystemRoot%\System32\drivers` 下的 `.sys` 文件清单（只读列目录）。
+///
+/// 返回 (文件, 残缺注记)。R2b-L01：枚举上限此前是**静默**截断（`sort()` 后 `truncate()`），
+/// 用户看到的是「这台机器的 drivers 就这么几个」；现在触顶即出注记。
+/// R2b-L04：文件头与旧注释都写着「不跟随重解析点」，但旧实现用 `Path::is_file()` —— 那是
+/// `metadata()`（**跟随** reparse）的包装，一个指向别处的 `.sys` 链接会被当成本机驱动文件
+/// 送去读签名并参与孤儿判定。现按 `list_run.rs::bounded_dir_size_in` 的既有正解改口径：
+/// `DirEntry::file_type()`（不跟随）先筛，再用 `symlink_metadata` + [`protect::is_reparse`]
+/// 的属性位复核（与删除出口的 reparse 判据同一份实现，§5.16/N6 禁止在这里再写一份）。
+pub(super) fn driver_files() -> (Vec<PathBuf>, Vec<String>) {
     let root = match std::env::var_os("SystemRoot") {
         Some(r) => Path::new(&r).join("System32").join("drivers"),
-        None => return Vec::new(),
+        None => return (Vec::new(), vec!["读不到 SystemRoot，drivers 目录未采集，本组结果不完整".to_string()]),
     };
-    let Ok(rd) = std::fs::read_dir(&root) else { return Vec::new() };
-    let mut out: Vec<PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("sys")).unwrap_or(false)
-        })
-        .collect();
+    driver_files_in(&root)
+}
+
+/// 同上，但根目录可注入 —— 真机反例用例需要一个可写的根（System32 不能拿来造样本）。
+pub(super) fn driver_files_in(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return (Vec::new(), vec![format!("列不到目录 {}，本组结果不完整", root.display())]);
+    };
+    let mut notes = Vec::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut skipped_reparse = 0usize;
+    for ent in rd.flatten() {
+        let Ok(ft) = ent.file_type() else { continue };
+        if ft.is_symlink() {
+            skipped_reparse += 1;
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+        let path = ent.path();
+        let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
+        if protect::is_reparse(&md) {
+            // 目录项报不出 reparse 位、但 OS 仍按重解析点解释的形态（云占位符等）走这里
+            skipped_reparse += 1;
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("sys")).unwrap_or(false) {
+            out.push(path);
+        }
+    }
+    if skipped_reparse > 0 {
+        notes.push(format!("{skipped_reparse} 个 reparse/链接形态的目录项已排除（它们不是本机 drivers 目录下的实体文件，跟随过去判等于判到别处）"));
+    }
     out.sort();
-    out.truncate(DRIVER_FILE_CAP);
-    out
+    if out.len() > DRIVER_FILE_CAP {
+        notes.push(format!("drivers 目录的 .sys 数超过枚举上限 {DRIVER_FILE_CAP}（实际列到 {}），本轮只判前 {DRIVER_FILE_CAP} 个 —— 本组结果不完整", out.len()));
+        out.truncate(DRIVER_FILE_CAP);
+    }
+    (out, notes)
 }
 
 /// 纯判定：`signer` 注入（真实实现读 Authenticode，单测注入一张表）。
@@ -114,10 +151,17 @@ pub(super) fn driver_findings(
 pub(super) unsafe fn collect_driver_findings(
     service_entries: &[super::services_orphan::ServiceEntry],
 ) -> (Vec<Value>, Vec<Value>, Vec<String>, usize) {
-    let files = driver_files();
+    let (files, mut notes) = driver_files();
     let count = files.len();
     let referenced = referenced_landings(service_entries);
-    let (c, p, n) = driver_findings(&files, &referenced, &|p: &str| authenticode::signer_subject(p), DRIVER_FINDING_CAP);
+    let (c, p, mut n) = driver_findings(&files, &referenced, &|p: &str| authenticode::signer_subject(p), DRIVER_FINDING_CAP);
+    // 采集侧的残缺注记（截断/排除的 reparse/列不到目录）与判定侧的注记合并，
+    // 同一句话不因来自哪一侧而重复（R2b-L01）
+    for note in notes.drain(..) {
+        if !n.contains(&note) {
+            n.push(note);
+        }
+    }
     (c, p, n, count)
 }
 
@@ -207,5 +251,46 @@ mod tests {
     fn empty_listing_is_reported_as_incomplete_not_clean() {
         let (_, _, notes) = driver_findings(&[], &referenced_set(&[]), &|_p: &str| None, 60);
         assert!(notes.iter().any(|n| n.contains("本组结果不完整")));
+    }
+
+    /// R2b-L01：列不到目录时采集侧也要出残缺注记（旧实现只把 `Vec::new()` 交回去，
+    /// 渲染层读成「本机 drivers 干净」）。只读、不写盘，故可留在快速组。
+    #[test]
+    fn unopenable_root_yields_incomplete_note() {
+        let (files, notes) = driver_files_in(Path::new(r"\\\trims-probe-no-such-root-9f3a\nope"));
+        assert!(files.is_empty());
+        assert!(notes.iter().any(|n| n.contains("本组结果不完整")), "{notes:?}");
+    }
+
+    /// R2b-L04 真机反例（**触盘 ⇒ #[ignore]**，AGENTS §4.2 纪律②）：
+    /// 同目录下「真实 .sys」与「指向它的 .sys 符号链接」并存时，链接必须被排除并留注记。
+    /// 旧实现用 `Path::is_file()`（跟随 reparse）会把链接也列成驱动文件。
+    #[test]
+    #[ignore = "真机建符号链接（依赖本机开发者模式/权限），只在发版前 --ignored 取证"]
+    fn real_symlink_sys_is_not_collected_as_driver_file() {
+        let base = crate::engine::paths::temp_script_dir().expect("应用私有 tmp 目录");
+        let root = base.join("trim-driver-probe");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("建样本目录");
+        let real = root.join("zz_probe_real.sys");
+        std::fs::write(&real, b"MZ").expect("写样本 .sys");
+        let link = root.join("zz_probe_link.sys");
+        if let Err(e) = std::os::windows::fs::symlink_file(&real, &link) {
+            let _ = std::fs::remove_dir_all(&root);
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("SKIP real_symlink_sys_is_not_collected_as_driver_file: 本机不允许创建符号链接（未开开发者模式），该反例未取证");
+                return;
+            }
+            panic!("建符号链接失败（非权限原因，需排查）: {e}");
+        }
+        let (files, notes) = driver_files_in(&root);
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()))
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(names.iter().any(|n| n == "zz_probe_real.sys"), "真实 .sys 应被列到: {names:?}");
+        assert!(!names.iter().any(|n| n == "zz_probe_link.sys"), "符号链接被当成本机驱动文件（R2b-L04 复发）: {names:?}");
+        assert!(notes.iter().any(|n| n.contains("reparse") || n.contains("链接")), "排除的链接必须留可见注记: {notes:?}");
     }
 }

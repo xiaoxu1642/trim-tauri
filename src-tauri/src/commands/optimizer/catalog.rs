@@ -23,9 +23,10 @@ pub(super) const BUILD_SENTINEL: &str = include_str!("../../../ps/optimizer_buil
 /// 优化项目录。**装载前先验 ed25519 签名**（M4）。
 ///
 /// fail-closed：验签失败时返回**空 vec**（不是「返回未校验的数据」）。调用方看到
-/// 的是「优化目录不可用」这一条明确事实，而不是「126 项都生效了但一个都没验过」。
+/// 的是「优化目录不可用」这一条明确事实，而不是「目录里所有项都生效了但一个都没验过」。
 /// 优化项是**会改用户系统**的目录 —— 未校验就装载等于把「数据文件被换掉」这件事
-/// 变成静默生效的劫持面。
+/// 变成静默生效的劫持面。项数不在注释里写死（随数据层增补必腐烂），要引用就现算
+/// `commands::optimizer::catalog::options` 的返回长度。
 pub(super) fn options() -> &'static Vec<Value> {
     static OPTS: OnceLock<Vec<Value>> = OnceLock::new();
     OPTS.get_or_init(|| {
@@ -281,7 +282,7 @@ pub(super) fn defaults_of(option_id: &str) -> Option<Value> {
 /// 真正的威胁是「构建产物里的数据文件被换掉」，那在 `include_str!` 的时点就定了。
 ///
 /// ⚠️ **验签失败不许降级放行**：返回 `Err` 让 `options()` 走不到数据，
-/// 调用方看到的是「优化目录不可用」而不是「126 项全都没校验过」。
+/// 调用方看到的是「优化目录不可用」而不是「全部项都没校验过」。
 pub(super) fn verify_optimizer_signature() -> Result<(), String> {
     static ONCE: OnceLock<Result<(), String>> = OnceLock::new();
     ONCE.get_or_init(|| {

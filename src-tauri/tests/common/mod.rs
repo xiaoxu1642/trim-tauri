@@ -181,17 +181,36 @@ pub fn invoke_text(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) 
     }
 }
 
+/// 来源校验拒杀回执的文案标记——**唯一真源**（生产侧文案见 `engine::guard::guard`）。
+///
+/// 为什么收成常量：拒侧此前在每条用例里手写同一串，与「helper 单一真源」口径不一致；
+/// `guard()` 改文案时散点会齐刷刷判红，而「改文案」本该只红在一处。
+pub const GUARD_REJECT_MARK: &str = "IPC 来源校验失败";
+
 /// 断言「命令确实越过了档位、跑进后面的逻辑」，而不只是「没被来源校验拒杀」。
 /// 审查 v2-M16② 教训：只断「不含 IPC 来源校验失败」时，命令整条消失也是绿的，
 /// 档位回归网会被无声架空。必须由调用方点名正向特征（期望回执含其一）。
 pub fn assert_guard_passed(text: &str, ctx: &str, reached: &[&str]) {
     assert!(
-        !text.contains("IPC 来源校验失败"),
+        !text.contains(GUARD_REJECT_MARK),
         "{ctx}: 被来源校验拒杀，回执 {text}"
     );
     assert!(
         reached.iter().any(|k| text.contains(k)),
         "{ctx}: 拿不到任何「已越过档位」的正向回执（期望含其一：{reached:?}），回执 {text}"
+    );
+}
+
+/// `assert_guard_passed` 的成对侧：断言这次调用**就是被来源校验拒杀**的。
+///
+/// 拒侧此前没有 helper，各用例手写 `text.contains("…")` 加一条临时消息；换个窗口 label
+/// 或换条命令时，判红消息有没有点名「谁被拒」全靠写用例的人当场想到。这里把
+/// 「命中拒杀串」与「点名是哪次调用」钉成一个动作，判定强度与原来逐字等价——
+/// 仍是「回执含拒杀标记」，不新增也不减少条件。
+pub fn assert_guard_rejected(text: &str, ctx: &str) {
+    assert!(
+        text.contains(GUARD_REJECT_MARK),
+        "{ctx}: 期望被来源校验拒杀（回执应含「{GUARD_REJECT_MARK}」），实得 {text}"
     );
 }
 

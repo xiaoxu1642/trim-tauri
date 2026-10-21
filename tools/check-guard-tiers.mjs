@@ -183,6 +183,13 @@ const MUST_MAIN = [
   // restore 往磁盘写文件，档位方向写错会锁死功能（M1~M3 教训的反面）
   'uninstall_batch_list',
   'uninstall_batch_restore',
+  // R2b-L08（v7.2 P2，2026-10-22）：原先登记在只读档的理由是「疑点：写 logo 缓存文件」，
+  // 与本命令的实现相反——它一个字节都不写，只读 `\WindowsApps\` 下的 .png 回 base64。
+  // 消费面现算只有主窗：唯一调用点 `src/scripts/uninstall.js:183`，而 uninstall.js 只由
+  // app.js 的 `uninstall: ['scripts/uninstall.js']` 按需加载、app.js 只出现在 index.html；
+  // 三个副窗页面各挂自己的 *-window.js，`rg appxLogo src/*.html` 零命中
+  // ⇒ 按 AGENTS §3「只有主窗会调的通道不给 readonly」收归 MAIN，改档不锁死任何副窗功能。
+  'uninstall_appx_logo',
   // P2 §3.6（2026-10-03 RAINZ 对标）：系统面板三条 —— 电源方案写侧、系统级、
   // 只在主窗 settings 页有入口；pagefile_state 虽只读但同域同档，
   // 免得下一批加写侧时又要改档位（AGENTS §3 M1~M3 教训的"反向"：判档要看**下一批**会不会翻）。
@@ -468,7 +475,6 @@ const MUST_READONLY = [
   'settings_set_pref',
   'startup_openlocation', // 疑点：打开资源管理器目录
   'startup_scan',
-  'uninstall_appx_logo', // 疑点：写 logo 缓存文件
 ];
 const actualReadonly = [...tiers.entries()].filter(([, v]) => v.tier === 'READONLY').map(([k]) => k).sort();
 const wantReadonly = [...MUST_READONLY].sort();

@@ -494,8 +494,9 @@ pub(super) fn reg_targets(o: &Value) -> Value {
 ///
 /// **`ids = None` = 静默全量体检整个目录**（2026-10-06 用户需求）：渲染层启动时
 /// 调一次把「系统里已完成、但不是经 Trim 做的」优化（例：用户在 Windows 安全中心
-/// 关了 VBS）也标成已优化，防重复执行。全程只读、不写任何键——本机实测 125 项 11ms
-/// （全原生注册表/SCM 读取，零 PowerShell）。**可检测性的唯一真源在
+/// 关了 VBS）也标成已优化，防重复执行。全程只读、不写任何键，且**零 PowerShell**（全原生
+/// 注册表/SCM 读取）。项数与耗时都是本机测量、随数据层增补变化，要引用就现算
+/// `commands::optimizer::catalog::options` 的返回长度，不在注释里钉死。**可检测性的唯一真源在
 /// [`collect_checks`]**：产不出断言的项（纯 pwsh/cmd 且无侧表）不进结果，
 /// 渲染层不许自己再维护一份「哪些项能检」的过滤——那份手写过滤实测漏掉 18 个
 /// 后端可检测项（其中 4 个在本机已优化），VBS 漏标就是这类分叉。
@@ -726,25 +727,31 @@ pub(super) fn scope_checks<'a>(checks: &'a [Check], picked: Option<&[String]>) -
 /// 这一步**实际由谁执行**：`native`（主进程原生解释器）/ `inbox-ps`（收件箱 Windows
 /// PowerShell 5.1，系统自带）/ `proc`（直接起进程）/ `unsupported`（编译不出来）。
 ///
-/// 为什么要在后端算并随 `optimizer:list` 下发：数据层里标 `pwsh` 的 56 个步骤，实测有
-/// 45 个走的是原生解释器（`cargo test --lib data_layer_coverage_report -- --nocapture`
-/// 现算），前端却一律显示「执行 PowerShell 内联脚本」——那是在谎报执行引擎，用户据此
+/// 为什么要在后端算并随 `optimizer:list` 下发：数据层标 `pwsh` 的步骤里多数其实走原生
+/// 解释器，分账**现算入口** = `cargo test --lib data_layer_coverage_report -- --nocapture`
+/// （本函数就是它打印的那本账的判据），前端却一律显示「执行 PowerShell 内联脚本」——那是在
+/// 谎报执行引擎，用户据此
 /// 认为本应用依赖 PowerShell（并以为要装 PowerShell 7）。判据只有一份：直接问编译器。
-pub(super) fn step_exec_mode(s: &Value) -> Option<&'static str> {
+///
+/// R3-L01（v7.2 C04）：返回类型从 `Option<&'static str>` 收成 `&'static str`。旧形态下
+/// 「四个引擎字段全缺失」落进 `None`，而预检只拦 `Some("unsupported")` —— 于是同一份
+/// 「这一步没人能执行」的事实，预检放行、执行侧静默跳过，两处都报好看。现在统一判
+/// `unsupported`：预检当场拒，执行侧的 else 分支只是兜底。
+pub(super) fn step_exec_mode(s: &Value) -> &'static str {
     if let Some(ps) = s.get("pwsh").and_then(Value::as_str) {
-        return Some(match crate::engine::pssteps::compile(ps) {
+        return match crate::engine::pssteps::compile(ps) {
             Ok(ops) if ops.iter().any(|o| matches!(o, crate::engine::pssteps::PsOp::PsInline { .. })) => "inbox-ps",
             Ok(_) => "native",
             Err(_) => "unsupported",
-        });
+        };
     }
     if s.get("cmd").is_some() {
-        return Some("proc");
+        return "proc";
     }
     if s.get("reg").is_some() || s.get("service").is_some() {
-        return Some("native");
+        return "native";
     }
-    None
+    "unsupported"
 }
 
 /// 给一行选项的 steps[] / restore[] 每项补 `execMode`（响应侧字段，不进数据层文件）。
@@ -752,7 +759,8 @@ pub(super) fn tag_exec_modes(row: &mut Value) {
     for key in ["steps", "restore"] {
         if let Some(arr) = row.get_mut(key).and_then(|v| v.as_array_mut()) {
             for s in arr.iter_mut() {
-                if let (Some(mode), Some(map)) = (step_exec_mode(s), s.as_object_mut()) {
+                let mode = step_exec_mode(s);
+                if let Some(map) = s.as_object_mut() {
                     map.insert("execMode".into(), json!(mode));
                 }
             }
@@ -773,7 +781,8 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
-    // B4：备份表读**一次**（126 项循环里每项读一次会重复解同一份备份表 JSON ×126）
+    // B4：备份表读**一次**（目录项循环里每项读一次，会把同一份备份表 JSON 重复解
+    // N 遍，N = `commands::optimizer::catalog::options` 的返回长度）
     let backups = load_opt_backups();
     let rows: Vec<Value> = options()
         .iter()

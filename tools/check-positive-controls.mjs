@@ -86,7 +86,7 @@ const PENDING_CONTROLS = [
   // 已于 2026-10-20（T1b-M02）证实各自带对照块，迁入 REGISTRY（本表只减不增）。
   { name: 'check-desktop-entry', reason: '对拍型：桌面入口 ⇄ 发布暂存目录合并状态，缺合成样本' },
   { name: 'check-data-parity', reason: '对拍型：data/*.json 派生副本 ⇄ 真源（6+1 个），缺「改一侧必须红」样本' },
-  { name: 'check-optimizer-dynamic', reason: '对拍型：dynamic 标记 ⇄ 后端 is_dynamic 分支要求，缺合成样本' },
+  { name: 'check-optimizer-dynamic', reason: '对拍型：dynamic 标记 ⇄ 后端分支要求，缺合成样本；R3-L06（v7.2 P2）把参数校验合并进 dynamic_steps 后，A2/A3 的解析面已扩成「分派分支 + match 臂」两处来源（只找 `option_id ==` 会同时瞎两条），并经真破坏验证——把 svc_mem_gb 臂里的 `p.gb` 读取摘掉 ⇒ A3 判红且点名「判断体（match 臂）没读 p.gb」，恢复回绿' },
   { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
   { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
   { name: 'check-version-sync', reason: '对拍型：版本号四处一致，缺「单处漂移必须红」样本' },

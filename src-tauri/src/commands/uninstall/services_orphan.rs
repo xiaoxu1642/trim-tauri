@@ -203,13 +203,9 @@ pub(super) unsafe fn service_key_delete_block_reason(target: &str) -> Option<Str
             return Some(format!("读不到落点元数据（{landing}: {e}），按「无法判断」拒绝"));
         }
     }
-    // %windir% 取不到 ⇒ 第 5 道闸无法判 ⇒ 按不确定处理，拒
-    let windir = std::env::var("SystemRoot").or_else(|_| std::env::var("WINDIR")).unwrap_or_default();
-    if windir.trim().is_empty() {
-        return Some("读不到 %SystemRoot%，无法判断落点是否属于 Windows 自身组件".to_string());
-    }
-    if landing.to_lowercase().starts_with(&windir.to_lowercase()) {
-        return Some(format!("落点在系统目录内（{landing}），按 Windows 自身组件对待，不删"));
+    // 第 5 道闸（R2b-L05，删除面准入）：共用 protect 的词法归一 + 目录边界
+    if let Some(reason) = landing_namespace_reject(&landing) {
+        return Some(reason);
     }
     // K07：值面四道闸（Type/Start/依赖/反作弊）收进纯函数——唯一实现，可测
     service_key_value_block_reason(&name, &landing, svc_type, start, &depends)
@@ -230,6 +226,32 @@ pub(super) fn classify_landing(md: Result<std::fs::Metadata, std::io::Error>) ->
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => LandingState::Missing,
         Err(e) => LandingState::Unknown(e.to_string()),
     }
+}
+
+/// 第 5 道闸的**落点命名空间**判据（R2b-L05；返回 `Some(拒因)` = 不许进删除链）。
+///
+/// 根因：旧写法是 `landing.to_lowercase().starts_with(&windir.to_lowercase())` —— 只做
+/// 小写前缀比较，没过 `protect` 的词法归一。落点由 `dead_landing` 从注册表原串解析，
+/// 原串里的 `\\?\C:\Windows\…`（verbatim，OS 完全认得）、尾点/尾分隔符、8.3 短名写法
+/// 都不会命中那个前缀比较，于是「微软组件的替身判据」被同一目录的另一种写法绕过。
+/// 这条闸挡的是 `HKLM\SYSTEM` 整棵禁删面上的唯一窄口子，绕过即把 Windows 自身组件的
+/// 服务键放进删除链 —— 属删除面准入，不是显示问题。
+///
+/// 口径共用 [`crate::engine::protect::is_system_namespace`]：它内部走唯一的
+/// `normalize_for_compare`（verbatim 折回、`.`/`..` 折叠、尾点尾空格去除、8.3 短名触盘展开）
+/// + **目录边界**（等于系统根或落在 `<系统根>\` 之下），且归一失败 / 展不掉短名 /
+/// 取不到 SystemRoot 一律按「在系统命名空间内」处理（fail-closed，与 §3 回收站优先同向）。
+/// 在本文件再写一份归一属 AGENTS §5.16/N6 禁止的第二实现。
+pub(super) fn landing_namespace_reject(landing: &str) -> Option<String> {
+    if std::env::var("SystemRoot").or_else(|_| std::env::var("WINDIR")).unwrap_or_default().trim().is_empty() {
+        // 拒因单独成句：这条不是「落点在系统目录」，而是「这道闸无法判」，
+        // 报告里混成一句话会让用户以为已经确认过归属。
+        return Some("读不到 %SystemRoot%，第 5 道闸无法判断落点归属，按不确定处理".to_string());
+    }
+    if crate::engine::protect::is_system_namespace(landing) {
+        return Some(format!("落点在系统目录内（{landing}），按 Windows 自身组件对待，不删"));
+    }
+    None
 }
 
 /// 服务键**值面**四道闸（K07：从 `service_key_delete_block_reason` 抽出，纯函数）：
@@ -481,15 +503,28 @@ pub(super) fn state_label(state: Option<u32>) -> &'static str {
     }
 }
 
-/// 枚举服务表（只读）。返回 (条目, 是否至少读到一个键)。
+/// 枚举服务表（只读）。返回 (条目, 是否至少读到一个键, 残缺注记)。
 ///
 /// `ok=false` = 连 `Services` 根都打不开，调用方必须整组不产候选并写 note：
 /// 拿空清单去做「已卸载」判定，等于把全部服务算成残留。
-pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, bool) {
+///
+/// R2b-L01：枚举上限此前静默生效（读满就当「本机服务就这些」），现在按「多问一条」
+/// 现算触顶并回注记 —— 服务表被截断时，`drivers_orphan` 的「没有任何服务引用」判据
+/// 会把截掉的那批驱动全算成孤儿，方向是**扩大删除面**，比少报更危险。
+pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, bool, Vec<String>) {
     use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RegCloseKey};
-    let names = reg_enum_subkeys(HKEY_LOCAL_MACHINE, SERVICES_ROOT, cap.min(SERVICE_ENUM_CAP));
+    let limit = cap.min(SERVICE_ENUM_CAP);
+    let names = reg_enum_subkeys(HKEY_LOCAL_MACHINE, SERVICES_ROOT, limit + 1);
+    let mut notes = Vec::new();
+    if names.len() > limit {
+        notes.push(format!(
+            "服务表子键数达到枚举上限 {limit}（实际列到 {}），本轮只判前 {limit} 条（服务表不完整，孤儿驱动判据据此会偏宽）",
+            names.len()
+        ));
+    }
+    let names: Vec<String> = names.into_iter().take(limit).collect();
     if names.is_empty() {
-        return (Vec::new(), false);
+        return (Vec::new(), false, notes);
     }
     let mut out = Vec::with_capacity(names.len());
     for name in names {
@@ -508,7 +543,7 @@ pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, 
         });
         let _ = RegCloseKey(hk);
     }
-    (out, true)
+    (out, true, notes)
 }
 
 /// 全部服务落点的归一集合（小写、去尾 `\`）—— `drivers_orphan` 用它反查未被引用的 sys。
@@ -962,6 +997,47 @@ mod tests {
         }
     }
 
+    /// R2b-L05：第 5 道闸必须认得**同一个目录的另一种写法**。旧写法只做小写前缀比较，
+    /// `\\?\C:\Windows\…`（verbatim，OS 认得）、尾点、`..\` 折叠、正斜杠都不命中它。
+    /// 本用例把 protect 的词法归一**实际会折叠**的形态各钉一次，并留「不在系统目录」的
+    /// 正对照（否则判据退化成「什么都拒」也会绿）。
+    ///
+    /// 分量级尾点（`{windir}.\System32\…`）**也钉**：本用例交付时该形态被如实移出断言，
+    /// 因为 `normalize_lexical` 的 `trim_tail` 当时只裁整串末尾、不裁中间分量（跨面记进报告）。
+    /// 主 agent 已在 protect 面修成逐分量裁（v7.2 P2 · R2b-L05 收口，同批改动的
+    /// `per_component_tail_dots_trimmed_without_collapsing` 钉双向：既要求剥掉，
+    /// 也要求纯点分量不得裁空塌并），这里把反例拿回来钉在第 5 道闸的实际消费点上——
+    /// 归一层的单测证明不了这道闸真的用了它。
+    #[test]
+    fn namespace_gate_catches_verbatim_and_tail_dot_forms() {
+        let windir = match std::env::var("SystemRoot") {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("SKIP namespace_gate_catches_verbatim_and_tail_dot_forms: 本机没有 %SystemRoot%，第 5 道闸本就按无法判处理");
+                return;
+            }
+        };
+        for landing in [
+            format!(r"{windir}\System32\acme.sys"),
+            format!(r"{}\System32\acme.sys", windir.to_uppercase()),
+            format!(r"\\?\{windir}\System32\acme.sys"),
+            format!(r"\\?\{windir}\System32\acme.sys."),
+            format!(r"{windir}\System32\acme.sys "),
+            format!(r"{windir}\Temp\..\System32\acme.sys"),
+            format!("{windir}/System32/acme.sys"),
+            format!(r"{windir}.\System32\acme.sys"),
+            format!(r"{windir} \System32\acme.sys"),
+        ] {
+            assert!(
+                landing_namespace_reject(&landing).is_some(),
+                "同一系统目录的另一种写法绕过了第 5 道闸: {landing}"
+            );
+        }
+        // 正对照：第三方落点不得被这道闸挡掉（挡死了就等于窄口子整条关着，用例失去意义）
+        let outside = r"C:\Program Files\TrimProbeAcme\acme.sys";
+        assert_eq!(landing_namespace_reject(outside), None, "非系统目录被误拒: {outside}");
+    }
+
     /// R2b-M01：定长字节切片必须落在字符边界外时返回 None 而不是 panic。
     /// 前缀 39 字节 + 一个 CJK 字符（3 字节）⇒ 第 39 字节落在「测」中间。
     #[test]
@@ -976,10 +1052,17 @@ mod tests {
         );
     }
 
-    /// **真机、只读**：Windows 自身的几条服务必须一律被拒（八道判据里至少命中一条）。
-    /// 这条是窄口子最重要的负向保险：它证明「现读判据」真的在挡系统组件，
-    /// 而不是只在假数据上成立。读 HKLM\...\Services 不需要管理员。
+    /// **真机、只读、#[ignore]**（R2b-L11）：Windows 自身的几条服务必须一律被拒（八道判据里
+    /// 至少命中一条）。这条是窄口子最重要的负向保险：它证明「现读判据」真的在挡系统组件，
+    /// 而不是只在假数据上成立。
+    ///
+    /// 为什么必须进 ignore 组（AGENTS §4.2 纪律②「触盘/改系统面的一律进 #[ignore]」，本条
+    /// 是现读 HKLM + 现读文件系统）：用例依赖**本机恰好装着这几条服务且未被策略改名**。
+    /// 换一台没有 `W32Time`、或组策略把服务 ImagePath 改成非 SystemRoot 形态的机器，
+    /// 断言会因「键打不开」之外的原因判红 —— 那是样本缺失，不是判据退化。本文件其余真机面
+    /// 同样进 ignore 组，口径一致。
     #[test]
+    #[ignore = "真机现读 HKLM\\...\\Services 与文件系统，换机样本不稳定；发版前 --ignored 取证跑"]
     fn real_windows_services_are_rejected() {
         for name in ["Winmgmt", "RpcSs", "Schedule", "BITS", "W32Time"] {
             let target = format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{name}");

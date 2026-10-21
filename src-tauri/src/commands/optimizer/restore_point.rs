@@ -116,7 +116,7 @@ pub async fn optimizer_check_restore<R: Runtime>(window: WebviewWindow<R>) -> Va
     }
     // 性能优化 P1-A（v3 §4.3）：这条查询要起一个 powershell.exe 跑 WMI（登记超时 30s），
     // 过去直接跑在 async 命令体里 ⇒ 占住 runtime worker。来源校验已在本层做完、
-    // 执行体不再碰 window，所以整段可原样搬进阻塞池（对照本文件 :211 create_restore_inner）。
+    // 执行体不再碰 window，所以整段可原样搬进阻塞池（对照本文件 `commands::optimizer::restore_point::create_restore_inner`）。
     match tauri::async_runtime::spawn_blocking(restore_check_body).await {
         Ok(v) => v,
         Err(e) => {
@@ -306,7 +306,8 @@ try { $rpPre = @(Get-ComputerRestorePoint -ErrorAction Stop); Write-Output ('RPC
     // 性能优化 P1-A（v3 §3.2 合批之一）：前计数原先单独起一个 powershell.exe 跑
     // Get-ComputerRestorePoint（`count_restore_points()` 每次调用一个新进程，登记 30s），
     // 纯为拿「创建前有几个还原点」。预检本来就要跑一次 CIM，把计数搭进同一进程同一批输出，
-    // 省掉一次冷启动——本仓注释记录 PS 冷启动在 2~9s 之间飘（pwsh/mod.rs:942-944）。
+    // 省掉一次冷启动——本仓注释记录 PS 冷启动在 2~9s 之间飘（`src-tauri/src/pwsh/mod.rs` 的
+    // M6 作业对象用例注释里有这条实测）。
     // ⚠️ 计数那行必须带 `-ErrorAction Stop`：预检脚本头是 SilentlyContinue，不加的话
     //   WMI 失败会变成「拿到 0 个」而不是「读失败」，直接破坏 v4 P2-E / R3-M05 立的
     //   「轮询期读失败 ≠ 没增长」三态区分。失败时只出 RPERROR|、不出 RPCOUNT| ⇒ before=None。
@@ -378,8 +379,8 @@ try { $rpPre = @(Get-ComputerRestorePoint -ErrorAction Stop); Write-Output ('RPC
             return json!({ "success": false, "message": "频率覆写值备份保存失败，已中止创建（不留无法回收的中间状态）" });
         }
     }
-    // v5 P2：`record_pending` 的契约明写着「false = 写入失败，调用方必须中止」
-    // （optimization_state.rs:53）。这条路径会真的创建还原点（改系统），账留不下就等于
+    // v5 P2：`engine::optimization_state::record_pending` 的契约明写着「false = 写入失败，
+    // 调用方必须中止」。这条路径会真的创建还原点（改系统），账留不下就等于
     // "改了系统但没有任何记录"—— 崩溃后连「未完成还原」横幅都不会提示。
     // kinds 与内联前数据层两步（reg + pwsh）等价，概览展示口径不变。
     if !opt_state::record_pending(

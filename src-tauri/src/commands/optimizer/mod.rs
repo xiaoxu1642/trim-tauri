@@ -1,4 +1,7 @@
-//! optimizer 域（D 批）：优化中心 17 条通道
+//! optimizer 域（D 批）：优化中心的全部 IPC 通道。
+//! 通道条数不在本行写死（新增命令必然让它腐烂），现算入口 =
+//! `node tools/check-guard-tiers.mjs`（命令面按 `MUST_MAIN`/`MUST_READONLY` 两张表对账）
+//! 与 `src/scripts/tauri-api.js` 里 `optimizer:` 前缀的 CHANNEL_MAP 条目数。
 //!
 //! 对照 Electron main.js 2825-3875、5145-5174 + src/scripts-powershell/optimizer-scripts.js。
 //!

@@ -520,7 +520,18 @@ unsafe fn collect_wegame(index: &mut PlatformIndex, notes: &mut Vec<String>) {
             r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
         ),
     ] {
-        for key in reg_enum_subkeys(hive, sub, 800) {
+        // R2b-L01：同 `subkey_dir_values` 的 `hit_guard` 姿势 —— 多问一条才能把「恰好读满」
+        // 与「被上限截断」分开。静默截断会把「卸载键很多、只看了前 800 条」渲染成
+        // 「本机没有 WeGame 安装记录」，而下游按 `unreadable` 判「读不到」的口径也随之失真。
+        const WEGAME_UNINSTALL_ENUM_CAP: usize = 800;
+        let keys = reg_enum_subkeys(hive, sub, WEGAME_UNINSTALL_ENUM_CAP + 1);
+        if keys.len() > WEGAME_UNINSTALL_ENUM_CAP {
+            notes.push(format!(
+                "卸载根 {sub} 子键数达到枚举上限 {WEGAME_UNINSTALL_ENUM_CAP}（实际列到 {}），本轮只判前 {WEGAME_UNINSTALL_ENUM_CAP} 条（WeGame 安装目录判定可能不完整）",
+                keys.len()
+            ));
+        }
+        for key in keys.into_iter().take(WEGAME_UNINSTALL_ENUM_CAP) {
             let sk = to_wide(&format!("{sub}\\{key}"));
             use windows::Win32::System::Registry::{KEY_READ, RegCloseKey, RegOpenKeyExW};
             let mut hk = windows::Win32::System::Registry::HKEY::default();

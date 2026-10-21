@@ -284,9 +284,19 @@ catch {{ Write-Output ('ERR:' + $_.Exception.Message); exit 1 }}",
 /// uninstall:appx-logo — 读取 Appx Logo PNG → dataURL（U-3）。
 /// SHGetFileInfoW 对 .png 只出「文件类型图标」，不是图像内容，故走直接读文件；
 /// 准入收紧到 `\WindowsApps\` 下的 .png（Appx 安装资产），防变成任意文件读。
+///
+/// 档位（R2b-L08，2026-10-22 按 AGENTS §3 重新裁档）：**主窗专属 MAIN**。
+/// 原先挂 `guard_readonly` 的登记理由是「疑点：写 logo 缓存文件」，与实现不符——本命令
+/// 一个字节都不写，只做 `\WindowsApps\` 内 `.png` 的读取与 base64。裁档依据是消费面现算：
+/// `window.api.uninstall.appxLogo` 的唯一调用方是主窗的 `scripts/uninstall.js`
+/// （副窗页面不加载该脚本），而 §3 写明「只有主窗会调的通道不给 readonly」。
+/// 保留放宽的代价不是「现在坏在哪」，而是任何子窗渲染层都能读到 `\WindowsApps\` 下的
+/// 任意 PNG 内容（Appx 包资产可含用户数据），所以按窄的那一档走。
+/// ⚠️ 档位改动必须同步 `tools/check-guard-tiers.mjs`（从 MUST_READONLY 移到 MUST_MAIN），
+/// 否则该门禁 E1 集合对账判红；前端 `tauri-api.js` 的「只读档」注释同属跨面（本文件不改前端）。
 #[tauri::command]
 pub fn uninstall_appx_logo<R: tauri::Runtime>(window: WebviewWindow<R>, logo_path: String) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
     let p = logo_path.trim();

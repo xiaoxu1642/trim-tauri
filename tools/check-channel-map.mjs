@@ -482,7 +482,9 @@ const D5_READONLY_WITHOUT_SUB_CONSUMER = new Set([
   'runtimes_collect',
   'startup_openlocation',
   'startup_scan',
-  'uninstall_appx_logo',
+  // uninstall_appx_logo 原先在此表内；R2b-L08 已把它收归 MAIN（只读档里不再有它），
+  // 留着就是失效豁免——D5 的判据是「只读档的放宽要有子窗消费方支撑」，非只读命令不占这张表。
+  // 处置口径与本表 cleanup_rules 那一条既有写法同类：摘条目，不为「已迁 MAIN」新增分支。
 ]);
 
 /** T1a-M08：D5 每条豁免必须有理由（按域归并；不属于任何域的条目会判红）。 */

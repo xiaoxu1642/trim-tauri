@@ -19,6 +19,16 @@ use super::residue_update::contribs;
 /// 按 `no_data` 而不是「这台机器没有残留授权」上报（方案 §6：真机没样本也要能自证扫过）。
 pub(super) const CONSENT_SUBKEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\ConsentStore\NonPackaged";
 
+/// 32 位视图根。**不能**用 `format!(r"SOFTWARE\WOW6432Node\{}", CONSENT_SUBKEY)` 拼：
+/// `CONSENT_SUBKEY` 自己已经带 `SOFTWARE\`，拼出来是
+/// `SOFTWARE\WOW6432Node\SOFTWARE\Microsoft\…` 这棵**不存在的键**（`open_key_read` 恒失败，
+/// 那一根静默不采集，`readable_roots` 还照常 +1 的前提是它被打开过）。
+/// R2b-L09 的用例顺带把它现算出来了：该串归一后既不等于也不落在 `REG_MICROSOFT_ROOTS`
+/// 任一条之下，`reg_value_gate` 会给 `NotGoverned` 而不是 `Denied` —— 双 `SOFTWARE` 的形态
+/// 连「Microsoft 树内」这一层都判不出来，留着就是给将来的执行面留一个判据盲区。
+pub(super) const CONSENT_SUBKEY_WOW6432: &str =
+    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\ConsentStore\NonPackaged";
+
 /// 单根枚举值上限（授权条目随程序数量线性增长，给足但设限）
 const CONSENT_VALUE_CAP: usize = 1024;
 pub(super) const CAPABILITY_FINDING_CAP: usize = 80;
@@ -50,6 +60,15 @@ pub(super) fn decode_nonpackaged_name(name: &str) -> Option<String> {
 }
 
 /// 值名 → 报告里的键前缀（保留原 hive 写法，与执行侧 `HKLM\<子路径>` 口径一致）。
+///
+/// **这棵树的目标此刻一律不可执行，且这不是本模块的疏漏而是已钉住的口径**
+/// （R2b-L09）：`kind` 是 `reg_value`、target 形如 `HKLM\<CONSENT_SUBKEY>::值名`，
+/// 而执行侧唯一的 `reg_value` 形状/准入判据是 [`super::run_keys::reg_value_gate`]——
+/// 它只给六条 Run/RunOnce 根开窄口子，其余落在 Microsoft 树内的父键按 A1 整棵拒删。
+/// ConsentStore 恰好在 `SOFTWARE\Microsoft\` 之下，所以二阶段把本组接进执行链时**必然**
+/// 整组判 `Denied`。两个模块此前对「第二阶段」的假设互不知情，现在由
+/// `capability_targets_are_currently_unexecutable` 用例把这一事实钉住：
+/// 谁将来给 ConsentStore 开闸，就必须同时改那条用例（不许静默留坑）。
 pub(super) fn capability_target(hive_label: &str, subkey: &str, value_name: &str) -> String {
     format!("{hive_label}\\{subkey}::{value_name}")
 }
@@ -76,7 +95,11 @@ pub(super) fn capability_findings(
             continue;
         }
         if out.len() >= cap {
-            notes.push(format!("能力授权残留已达上限 {cap} 条，其余省略"));
+            // R2b-L03：`cap` 是「本根剩余额度」，用户要看的却是「本组全局上限」。
+            // 只写剩余额度时，额度用尽那一轮会渲染成「已达上限 0 条」这种自相矛盾的话。
+            notes.push(format!(
+                "能力授权残留候选已达上限 {CAPABILITY_FINDING_CAP} 条（本轮剩余额度 {cap}），其余省略（本组结果不完整）"
+            ));
             break;
         }
         out.push(json!({
@@ -110,15 +133,35 @@ pub(super) unsafe fn collect_capability_findings() -> (Vec<Value>, Vec<String>) 
     let mut total_undecodable = 0usize;
     for (label, hive, sub) in [
         ("HKLM", HKEY_LOCAL_MACHINE, CONSENT_SUBKEY.to_string()),
-        ("HKLM", HKEY_LOCAL_MACHINE, format!(r"SOFTWARE\WOW6432Node\{}", CONSENT_SUBKEY)),
+        ("HKLM", HKEY_LOCAL_MACHINE, CONSENT_SUBKEY_WOW6432.to_string()),
         ("HKCU", HKEY_CURRENT_USER, CONSENT_SUBKEY.to_string()),
     ] {
         let Some(hk) = super::helpers::open_key_read(hive, &sub) else { continue };
-        let names = super::helpers::reg_value_names(hk, CONSENT_VALUE_CAP);
+        // R2b-L01：多问一条才能把「恰好读满」与「被上限截断」分开（同 com_orphan 的姿势）
+        let names = super::helpers::reg_value_names(hk, CONSENT_VALUE_CAP + 1);
+        let truncated = names.len() > CONSENT_VALUE_CAP;
         let _ = RegCloseKey(hk);
+        let names: Vec<String> = names.into_iter().take(CONSENT_VALUE_CAP).collect();
         readable_roots += 1;
-        let (items, undec, _n) = capability_findings(label, &sub, &names, &|p: &str| Path::new(p).exists(), CAPABILITY_FINDING_CAP.saturating_sub(all.len()));
+        if truncated {
+            notes.push(format!("根 {sub} 的值名数达到枚举上限 {CONSENT_VALUE_CAP}，本轮只判前 {CONSENT_VALUE_CAP} 条（本组结果不完整）"));
+        }
+        if all.len() >= CAPABILITY_FINDING_CAP {
+            // R2b-L03：全局额度已用尽 —— 本根整批不采，但必须留痕，
+            // 否则用户读到的是「前面几根的 80 条就是全部残留」。
+            notes.push(format!("能力授权候选已达全局上限 {CAPABILITY_FINDING_CAP} 条，根 {sub} 本轮未纳入采集（本组结果不完整）"));
+            continue;
+        }
+        let (items, undec, inner_notes) =
+            capability_findings(label, &sub, &names, &|p: &str| Path::new(p).exists(), CAPABILITY_FINDING_CAP.saturating_sub(all.len()));
         total_undecodable += undec;
+        // R2b-L03：内层 notes 此前被 `_n` 丢掉 ⇒ 截断只发生在采集侧、渲染层看不见。
+        // 三根共用一份注集，同措辞去重（合并后仍各算一次，不会把一个上限报成三条）
+        for n in inner_notes {
+            if !notes.contains(&n) {
+                notes.push(n);
+            }
+        }
         all.extend(items);
     }
     if readable_roots == 0 {
@@ -193,6 +236,48 @@ mod tests {
         let names: Vec<String> = (0..5).map(|i| format!(r"C:\Apps\Gone{i}\g.exe#cap")).collect();
         let (out, _u, notes) = capability_findings("HKLM", CONSENT_SUBKEY, &names, &|_: &str| false, 2);
         assert_eq!(out.len(), 2);
-        assert!(notes.iter().any(|n| n.contains("已达上限")));
+        assert!(notes.iter().any(|n| n.contains("已达上限") && n.contains("本组结果不完整")));
+        // R2b-L03：注记里的数字必须是**全局上限**，不是剩余额度（旧写法在额度用尽时
+        // 会渲染成「已达上限 0 条」）
+        let used_up = capability_findings("HKLM", CONSENT_SUBKEY, &names, &|_: &str| false, 0);
+        assert!(used_up.0.is_empty());
+        assert!(
+            used_up.2.iter().any(|n| n.contains(&format!("已达上限 {CAPABILITY_FINDING_CAP} 条"))),
+            "剩余额度为 0 时注记仍要点名全局上限: {:?}",
+            used_up.2
+        );
+    }
+
+    /// R2b-L09：本组产出的 `reg_value` 目标此刻**整组不可执行**（执行侧判据拒），
+    /// 这条用例是两模块之间唯一的知情渠道。哪天 ConsentStore 开闸，本用例必红，
+    /// 就必须同时改 `capability_target` 的注释与二阶段方案。
+    #[test]
+    fn capability_targets_are_currently_unexecutable() {
+        for (label, sub) in [
+            ("HKLM", CONSENT_SUBKEY.to_string()),
+            ("HKLM", CONSENT_SUBKEY_WOW6432.to_string()),
+            ("HKCU", CONSENT_SUBKEY.to_string()),
+        ] {
+            let t = capability_target(label, &sub, r"C:\Apps\Gone\g.exe#InternetClient");
+            match super::super::run_keys::reg_value_gate(&t) {
+                super::super::run_keys::RegValueGate::Denied(reason) => assert!(
+                    reason.contains("Microsoft"),
+                    "拒因应点名 Microsoft 系统命名空间，实际: {reason}"
+                ),
+                // RegValueGate 没有 Debug，只能把两种「不该出现」的结论分开点名
+                super::super::run_keys::RegValueGate::Allowed => {
+                    panic!("ConsentStore 目标被判成 Allowed —— 开闸了请同步 capability_target 注释与本用例")
+                }
+                super::super::run_keys::RegValueGate::NotGoverned => {
+                    panic!("reg_value_gate 不再管辖 ConsentStore 目标 —— 口径已变，请同步本注释")
+                }
+            }
+        }
+        // 正对照：六条 Run 根之一的具名值必须放行 —— 否则上面只是「什么都拒」的假绿
+        let run_t = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run::Acme";
+        assert!(
+            matches!(super::super::run_keys::reg_value_gate(run_t), super::super::run_keys::RegValueGate::Allowed),
+            "Run 根的具名值应放行（正对照失效说明判据被整体改坏）"
+        );
     }
 }

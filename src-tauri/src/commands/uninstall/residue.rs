@@ -869,7 +869,10 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 落点仍存在的服务是「还在用」，一律不报。服务表读不到（readable=false）时不产候选、
         // 只留 note —— 拿空表去判「已卸载」等于把全部服务算成残留。
         let mut notes: Vec<String> = Vec::new();
-        let (svc_entries, svc_readable) = services_orphan::collect_service_entries(2048);
+        let (svc_entries, svc_readable, svc_enum_notes) = services_orphan::collect_service_entries(2048);
+        // R2b-L01：服务表枚举触顶的残缺注记必须随表一起可见——截断过的服务表会让下面
+        // 「没有任何服务引用」那类判据偏宽（drivers_orphan 同一条 note 里已点名这个方向）。
+        notes.extend(svc_enum_notes);
         if !svc_readable {
             notes.push("服务表读不到（HKLM\\SYSTEM\\CurrentControlSet\\Services 打不开），服务与驱动两类残留本组未采集".to_string());
         } else {

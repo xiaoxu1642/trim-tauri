@@ -1757,7 +1757,28 @@ mod startup_housekeeping_tests {
         assert!(!latch.try_schedule(), "8s 兜底不得再排一次");
     }
 
+    /// 顺序锚点：必须是被比动作的**调用点全形**，且在 setup 体内恰好出现一次。
+    /// 只写函数名会撞上注释里的同名散文——`find` 取到注释位置时，即便调用点真被挪走，
+    /// 位置比较照样通过（这就是「只断名字在不在」之外的第二种假绿）。
+    fn call_site(anchor: &str) -> usize {
+        let body = setup_body();
+        let hits = body.matches(anchor).count();
+        assert_eq!(
+            hits, 1,
+            "顺序锚点 {anchor} 在 setup 体内命中 {hits} 次（应为恰好一处调用点）——位置比较取到的可能不是调用位置"
+        );
+        body.find(anchor)
+            .unwrap_or_else(|| panic!("setup 体内找不到顺序锚点 {anchor} —— 启动期结构变了，锚点要同步"))
+    }
+
     /// v3 B1/B2 的分界：回收类任务不许回到首帧前的同步路径，迁移与安全边界不许被挪走。
+    ///
+    /// 为什么后半段必须比先后、不能只比「名字在不在」：把 `apply_material` 与 `init_env`
+    /// 两个调用对调后，两个名字都还在 setup 体内 ⇒ `contains` 版照样绿，而它自述要防的
+    /// 根因（电池模式/系统透明开关的降级被随后的 `apply_material` 覆盖）正好复发。
+    /// 同理 `start_boot_watchdog` 挪到 `manage(ShowState)` 之前时，读状态走的是
+    /// `try_state`、不 panic，只是看门狗静默不报——启动诊断失明同样全绿。
+    /// 所以这里按源码位置比「谁必须先落地」，不重排动作本身（动作顺序由 setup 体负责）。
     #[test]
     fn only_migrations_and_safety_stay_before_show() {
         let body = setup_body();
@@ -1779,6 +1800,38 @@ mod startup_housekeeping_tests {
             "init_env",
         ] {
             assert!(body.contains(name), "首帧前必须完成的 {name} 不见了（v3 B1）");
+        }
+        // 首帧前必须完成的动作之间的相对先后，逐对点名（前一项必须先于后一项）。
+        for (earlier, later, why) in [
+            (
+                "appearance::migrate_bg_opacity_fog();",
+                "appearance::load_appearance();",
+                "档位迁移必须先于读 appearance.json，否则窗口状态恢复读到的是迁移前的旧值",
+            ),
+            (
+                "engine::protect::configure_from_app(app.handle());",
+                "show_main_window_when_ready(&main_thread_handle, cause);",
+                "受保护路径清单必须在任何 show 路径之前配好，否则兜底显示出来的窗口跑在没有保护清单的状态里",
+            ),
+            (
+                "apply_material(&window, &appearance::effective_material());",
+                "commands::appearance::init_env(app.handle());",
+                "环境自适应（电池降级 / 系统透明开关）必须晚于初始材质落地，否则降级结果被随后的 apply_material 覆盖（v3 B1 原根因）",
+            ),
+            (
+                "app.manage(ShowState {",
+                "commands::app::start_boot_watchdog(app.handle().clone());",
+                "首帧看门狗读的就是 ShowState，排到 manage 之前不会 panic、只会静默不报（启动诊断失明）",
+            ),
+            (
+                "commands::appearance::init_env(app.handle());",
+                "show_main_window_when_ready(&main_thread_handle, cause);",
+                "材质与环境自适应必须在 show 之前就绪，否则用户看到一次降级跳变（黑闪同族的观感回归）",
+            ),
+        ] {
+            let a = call_site(earlier);
+            let b = call_site(later);
+            assert!(a < b, "{earlier} 必须排在 {later} 之前：{why}（实测位置 {a} >= {b}）");
         }
     }
 

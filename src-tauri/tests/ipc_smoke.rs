@@ -13,9 +13,13 @@
 //! 命令清单来自 `trim_tauri_lib::build_app`——与生产入口共用同一份 `generate_handler!`，
 //! 测试里不再复制清单，新增命令漏测不会静默漂移。
 //!
-//! 已知不覆盖（如实登记）：子窗口（preview / processManager / models）的
-//! 「建窗 → 加载 → 自关」链路依赖真实 WebView 行为，mock runtime 覆盖不到，
-//! 留 Phase 2 手动验收；**不**为此引入 WebDriver/tauri-driver 依赖。
+//! 已知不覆盖（如实登记）：**盲区成员不在此手抄**——窗口真源是
+//! `engine::guard::APP_WINDOWS`（子窗 label 由 `common::sub_windows()` 从它派生）。
+//! 该常量里的**每一个 label**（含主窗）的「建窗 → 加载 → 自关」链路都依赖真实 WebView 行为，
+//! mock runtime 覆盖不到，留手动验收；**不**为此引入 WebDriver/tauri-driver 依赖。
+//! （审查 X1-L04 订正：此前这段按记忆点名子窗，既点了已退役的那一个、又漏了现役的那一个
+//! ——自然语言清单不在注释防腐蚀门禁的三种可机检形状里，抓不到这种漂移，
+//! 所以改成只指真源、不列成员。）
 //! （审查 M1~M3 后补：子窗 label 的**来源校验档位**已可 mock 覆盖，见文件末尾
 //!  「子窗口来源校验档位」一组；仍不覆盖的是真实建窗与页面加载。）
 
@@ -52,7 +56,9 @@ fn settings_load_masks_dpapi_secrets() {
 }
 
 /// fonts:list 形状：`success` 为布尔、`data.list` 为数组。
-/// 防的是：形状漂移让渲染层字体下拉渲染崩掉（前端按 data.list 直接 map）。
+/// 钉的是**后端契约本身**，不做「前端会兜底」的假设：渲染层 `fontmanager.js` 现算确有
+/// `resp.data.list || []` 兜底，但兜底把形状漂移吞成「列表为空」——用户看到的是没有字体，
+/// 不是页面崩。本用例要的是漂移当场判红，而不是依赖某一侧恰好写了兜底。
 #[test]
 fn fonts_list_shape() {
     let w = main_window();
@@ -62,7 +68,10 @@ fn fonts_list_shape() {
 }
 
 /// bench_history_list 形状：`success` 恒 true、`data` 恒为数组（无记录时空数组）。
-/// 防的是：空历史被返回成 null 让「跑分记录」页报错。
+/// 钉的是**后端契约本身**，不做「前端会兜底」的假设：渲染层 `diskbench.js` 现算确有
+/// `resp.data || []` 兜底，但兜底把「空历史」与「形状塌成 null」压成同一表现——跑分页只是
+/// 不显示记录，看不出契约被破坏。形状漂移必须在本层当场判红；
+/// 与磁盘真值的条数对拍在 `module_smoke.rs` 的 `bench_history_list_matches_file_truth`（此处不重复钉）。
 #[test]
 fn bench_history_list_shape() {
     let w = main_window();

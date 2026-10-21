@@ -578,19 +578,300 @@ fn strip_js_comments(src: &str) -> String {
         assert_eq!(secs[1].0, "HKEY_CURRENT_USER\\SOFTWARE\\B");
     }
 
+    /// R3-L06（v7.2 C04）：动态项参数**不合法即拒**，两条动态项同姿势。
+    ///
+    /// 旧形态是 `perf_wu_pause` 越界拒、`svc_mem_gb` 未知档位**静默写 8GB**（只在 label
+    /// 里自陈回退，label 不进 `message` 也不进记账），回读再判 partial —— 用户拿到一份
+    /// 「执行成功但事实失真」的回执。现在判据只在 `dynamic_steps` 一处，两个分支不许各写一份。
     #[test]
-    fn memory_steps_table_and_fallback() {
-        let cmd_of = |gb: Value| {
-            let s = memory_steps(&gb);
-            s[0].get("cmd").and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    fn memory_steps_未知档位拒绝对不静默改阈值() {
+        let cmd_of = |gb: Value| -> String {
+            memory_steps(&gb)
+                .expect("合法档位不该被拒")
+                .remove(0)
+                .get("cmd")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
         };
+        // 正向对照：点名「做到了什么」，避免只在没有数据的环境里碰巧绿
+        let mut reached: Vec<String> = Vec::new();
         assert!(cmd_of(json!("default")).contains(&MEMORY_KB_DEFAULT.to_string()));
+        reached.push("default".into());
         assert!(cmd_of(json!("8")).contains("8388608"));
-        // 异常档位回退 8GB 阈值，且文案如实标注
-        let steps = memory_steps(&json!(99));
-        assert!(steps[0].get("cmd").unwrap().as_str().unwrap().contains("8388608"));
-        assert!(steps[0].get("label").unwrap().as_str().unwrap().contains("回退"));
+        reached.push("8GB".into());
+        assert!(cmd_of(json!(16)).contains("16777216"));
+        reached.push("数字 16GB".into());
+        assert_eq!(
+            reached,
+            vec!["default".to_string(), "8GB".to_string(), "数字 16GB".to_string()],
+            "合法档位这条正向对照没跑满"
+        );
+        // 未知档位 / 缺参一律 Err，且 Err 文案点名请求值与可选集
+        for bad in [json!(99), json!("64"), json!(null), json!("")] {
+            let e = memory_steps(&bad).expect_err("这个档位必须被拒，不许静默回退到 8GB");
+            assert!(e.contains("档位") || e.contains("缺少"), "拒因措辞不对: {e}");
+        }
+        // 关键反例：请求 99GB 绝不能产出写 8388608 的步骤
+        assert!(memory_steps(&json!(99)).is_err(), "99GB 被静默回退成 8GB 阈值");
     }
+
+    /// R3-L06：`dynamic_steps` 是两条动态项的唯一参数闸；正向对照点名命中的分支。
+    #[test]
+    fn dynamic_steps_两个分支同姿势未知动态项也不放空() {
+        let run = |id: &str, params: Value| -> Result<usize, String> {
+            let p: RunParams = serde_json::from_value(params).expect("RunParams 反序列化");
+            dynamic_steps(id, &p).map(|s| s.len())
+        };
+        let mut reached: Vec<String> = Vec::new();
+        assert_eq!(run("svc_mem_gb", json!({"gb": "16"})), Ok(1));
+        reached.push("svc_mem_gb 合法档位".into());
+        assert_eq!(run("perf_wu_pause", json!({"days": 7})), Ok(1));
+        reached.push("perf_wu_pause 合法天数".into());
+        // 缺参 / 非数字 / 越界 —— 三种都拒，且与 svc_mem_gb 同为 Err
+        for (id, params) in [
+            ("svc_mem_gb", json!({})),
+            ("svc_mem_gb", json!({"gb": 99})),
+            ("perf_wu_pause", json!({})),
+            ("perf_wu_pause", json!({"days": null})),
+            ("perf_wu_pause", json!({"days": 0})),
+            ("perf_wu_pause", json!({"days": 36})),
+            // 目录里 dynamic=true 但这里没有解析器：旧形态返回空步骤 ⇒ 跑 0 步还报成功
+            ("tf_appx", json!({"days": 7})),
+        ] {
+            assert!(run(id, params.clone()).is_err(), "{id} {params} 必须拒绝而不是放空步骤");
+        }
+        assert_eq!(reached.len(), 2, "正向对照应命中两条: {reached:?}");
+    }
+
+    /// R3-L01：四个引擎字段全缺失的步骤 —— 预检与执行链必须同判「执行不了」。
+    ///
+    /// 旧链没有末尾 else，且 `step_exec_mode` 对同形态返回 `None`（预检只拦
+    /// `Some("unsupported")`）⇒ 这一步既不计失败也不被预检拦住，回执照报成功。
+    /// 盘上 301 个步骤全部单字段合法 ⇒ 分支暂不可达，所以判据靠合成 step 直接喂判定体。
+    #[test]
+    fn r3_l01_未知形态步骤被判据接住() {
+        let mut reached: Vec<String> = Vec::new();
+        // 合成形态：四字段全缺
+        let bad = json!({"label": "四字段全缺的畸形步骤", "reg2": "HKLM\\\\X"});
+        assert!(!step_has_engine_field(&bad), "四字段全缺却被判为有引擎字段");
+        assert_eq!(step_exec_mode(&bad), "unsupported", "预检侧判据与执行链不同结论");
+        let reason = unrecognized_step_reason(
+            bad.get("label").and_then(Value::as_str).unwrap_or_default(),
+        );
+        assert!(reason.contains("四字段全缺的畸形步骤"), "回执文案没点名步骤: {reason}");
+        assert!(reason.contains("形态未识别"), "拒因措辞分叉: {reason}");
+        reached.push("四字段全缺".into());
+        // 四个合法字段各命中一条正向对照 —— 谓词若被改宽，这里先红
+        for (k, v) in [
+            ("reg", json!("Windows Registry Editor Version 5.00")),
+            ("cmd", json!("reg add x /f")),
+            ("service", json!("wuauserv")),
+            ("pwsh", json!("sc query x")),
+        ] {
+            assert!(step_has_engine_field(&json!({ "label": k, k: v })), "{k} 字段应被判为引擎字段");
+            reached.push(k.to_string());
+        }
+        assert_eq!(reached.len(), 5, "正向对照没跑满: {reached:?}");
+        // 全量对账：盘上每个步骤的「有引擎字段」与「execMode 非 unsupported（除 pwsh 编译失败）」
+        // 必须同结论 —— 分发链与谓词任一侧改写都会红。
+        let mut checked = 0usize;
+        for o in options() {
+            for key in ["steps", "restore"] {
+                for s in o.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                    if !step_has_engine_field(&s) {
+                        panic!(
+                            "数据层出现四字段全缺的步骤：{} / {} / {}",
+                            o.get("id").and_then(Value::as_str).unwrap_or("?"),
+                            key,
+                            s.get("label").and_then(Value::as_str).unwrap_or("")
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 300, "步骤总数异常（现算 {checked}），这条对照已经测不到东西");
+    }
+
+    /// R3-L07：`"path": ""` 与「缺 path」「解析失败」同归畸形；重复行只去重不计畸形。
+    #[test]
+    fn r3_l07_回收站协议空路径计入畸形() {
+        let mut seen = std::collections::HashSet::new();
+        let mut reached: Vec<String> = Vec::new();
+        assert_eq!(
+            classify_recycle_line(r#"{"path":"C:\\a"}"#, &mut seen),
+            RecycleLine::Path("C:\\a".into())
+        );
+        reached.push("合法路径".into());
+        assert!(matches!(
+            classify_recycle_line(r#"{"path":""}"#, &mut seen),
+            RecycleLine::Malformed("path 为空字符串")
+        ), "空 path 必须判畸形（旧形态与重复行共用 continue、不计数不告警）");
+        reached.push("空 path".into());
+        assert!(matches!(
+            classify_recycle_line(r#"{"name":"x"}"#, &mut seen),
+            RecycleLine::Malformed("缺少 path 字段")
+        ));
+        reached.push("缺 path".into());
+        assert!(matches!(
+            classify_recycle_line("not-json", &mut seen),
+            RecycleLine::Malformed("解析失败")
+        ));
+        reached.push("解析失败".into());
+        assert_eq!(
+            classify_recycle_line(r#"{"path":"C:\\a"}"#, &mut seen),
+            RecycleLine::Duplicate,
+            "重复行是正常收敛，不得混进畸形计数"
+        );
+        reached.push("重复行".into());
+        assert_eq!(reached.len(), 5, "五种形状必须逐条命中: {reached:?}");
+    }
+
+    /// R3-L04：`option_targets` 上方那段 R3-M03 注释曾被粘贴两遍。
+    /// 重复注释会把「同一段约束有两个真源」的假象带进后续审查，这里钉成一条。
+    #[test]
+    fn r3_l04_备份基线注释不得重复粘贴() {
+        let src = include_str!("backup_restore.rs");
+        let anchor = "枚举复用 apply.rs 的 STORE_SERVICES";
+        let n = src.matches(anchor).count();
+        assert_eq!(n, 1, "这段约束注释出现 {n} 遍（应为 1）——同一段被粘贴了多次");
+        // 正向对照：紧邻代码的那一份必须还在（删错份同样要红）
+        let at = src.find(anchor).expect("保留的那一份注释不见了");
+        let after = &src[at..];
+        assert!(
+            after.contains("if option_id == \"tf_svc_bulk\""),
+            "保留的注释没有紧邻它描述的代码块"
+        );
+    }
+
+    /// R3-L03：注释锚点必须**门禁看得见**。
+    ///
+    /// `tools/check-comment-rot.mjs` 的 `RE_FILE_LINE` 只匹配带仓内前缀的
+    /// `src/…`|`src-tauri/…`|`tools/…`|`native-scanner/…` 路径，裸文件名（`mod.rs:211`）
+    /// 与不带目录前缀的 `:NNN` 都落在判定面之外 —— 「失效但看不见」比「失效」更久。
+    /// 本域改用 Rust 模块符号锚（同一门禁的 R1 段按 `defIndex` 校验存在性）。
+    #[test]
+    fn r3_l03_注释锚点不得用门禁看不见的裸行号() {
+        let files = [
+            ("apply.rs", include_str!("apply.rs")),
+            ("catalog.rs", include_str!("catalog.rs")),
+            ("overview.rs", include_str!("overview.rs")),
+            ("subitems.rs", include_str!("subitems.rs")),
+            ("restore_point.rs", include_str!("restore_point.rs")),
+            ("backup_restore.rs", include_str!("backup_restore.rs")),
+            ("bcd.rs", include_str!("bcd.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+        ];
+        let bare = bare_line_anchor_hits;
+        for (name, src) in files {
+            for hit in bare(src) {
+                panic!("{name} 残留裸行号锚点 `{hit}`——check-comment-rot 的 RE_FILE_LINE 看不见它，改成符号锚");
+            }
+        }
+        // 正向对照：本域确实有被门禁看得见、也确实解析得到的符号锚
+        let applied = include_str!("restore_point.rs");
+        assert!(
+            applied.contains("`engine::optimization_state::record_pending`"),
+            "restore_point.rs 的 record_pending 契约锚没落成符号锚"
+        );
+        assert!(
+            include_str!("apply.rs").contains("`commands::optimizer::apply::memory_steps`"),
+            "apply.rs 的 reg add 锚没落成符号锚"
+        );
+    }
+
+    /// 扫出**门禁看不见**的行号锚点两种形态（不引 regex crate：零新增依赖，AGENTS §2）。
+    ///
+    /// ① `裸文件名.rs:数字` —— 往回吃路径字符，只要 token 里没有 `/`，`tools/check-comment-rot.mjs`
+    ///    的 `RE_FILE_LINE`（要求 `src|src-tauri|tools|native-scanner/…`）就匹配不到 ⇒ 锚点烂了
+    ///    也没人报。带目录前缀的形态合法，不在此列。
+    /// ② `` `:数字` `` —— 本文件内自指的裸行号，同样不匹配。
+    fn bare_line_anchor_hits(src: &str) -> Vec<String> {
+        let c: Vec<char> = src.chars().collect();
+        let mut out: Vec<String> = Vec::new();
+        let mut i = 0usize;
+        while i + 4 < c.len() {
+            // 形态 ①：`.rs:` + 数字
+            if c[i] == '.' && c[i + 1] == 'r' && c[i + 2] == 's' && c[i + 3] == ':' && c[i + 4].is_ascii_digit()
+            {
+                let mut s = i;
+                while s > 0
+                    && (c[s - 1].is_alphanumeric()
+                        || c[s - 1] == '_'
+                        || c[s - 1] == '-'
+                        || c[s - 1] == '.'
+                        || c[s - 1] == '/'
+                        || c[s - 1] == '\\')
+                {
+                    s -= 1;
+                }
+                let mut e = i + 4;
+                while e < c.len() && c[e].is_ascii_digit() {
+                    e += 1;
+                }
+                let token: String = c[s..e].iter().collect();
+                // 带仓内目录前缀（`src-tauri/src/…/x.rs:12`）的锚点门禁能解析，放行
+                if !token.contains('/') && !token.contains('\\') {
+                    out.push(token);
+                }
+                i = e;
+                continue;
+            }
+            // 形态 ②：反引号紧贴的裸 `:数字`
+            if c[i] == '`' && c[i + 1] == ':' && c[i + 2].is_ascii_digit() {
+                let mut e = i + 2;
+                while e < c.len() && c[e].is_ascii_digit() {
+                    e += 1;
+                }
+                let token: String = c[i..e].iter().collect();
+                if !token.starts_with("`:@@") {
+                    out.push(token);
+                }
+                i = e;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// R3-L05：`bcd.rs` 的注释与实现必须同结论，且不养「无人消费的第二个外呼进程」。
+    ///
+    /// 旧注释写「任一枚举失败 → 对应 map 为空、整体不报错」，实现是 `?` 直接 `Err` 上抛、
+    /// 整条命令 `success:false`；`{globalsettings}` 那次 bcdedit 的结果传到 `_globals`
+    /// 就没人读了。这里钉两件事：注释不许再写成「不报错」，生产面不许再为 globalsettings
+    /// 起第二个进程（要起就得同时给出消费它的判据）。
+    #[test]
+    fn r3_l05_bcd注释与外呼进程口径() {
+        let src = include_str!("bcd.rs");
+        // 切掉 `mod tests` 之后的测试面，只判生产段
+        let prod = &src[..src.find("mod tests").expect("找不到单测段起点")];
+        assert!(
+            !prod.contains("整体不报错"),
+            "注释又把失败姿势写成「整体不报错」——实现是 fail-closed 上抛"
+        );
+        assert!(
+            !prod.contains("网络错误"),
+            "bcdedit 是本地系统工具，注释不该指引到网络"
+        );
+        assert_eq!(
+            prod.matches("run_bcd_enum(").count(),
+            2,
+            "run_bcd_enum 生产侧调用点数变了（应为 1 定义 + 1 调用）——globalsettings 那次外呼被加回来了？"
+        );
+        assert!(
+            !prod.contains("{globalsettings}"),
+            "生产面又为 {{globalsettings}} 起枚举：要么给出消费它的判据，要么别再起进程"
+        );
+        // 正向对照：`{current}` 这条唯一外呼仍在，且失败姿势是上抛
+        assert!(prod.contains("run_bcd_enum(\"{current}\")"), "{{current}} 枚举不见了");
+        assert!(
+            prod.contains("enum_current_map() -> Result<BcdMap, String>"),
+            "枚举函数签名变了，fail-closed 口径需要重新核对"
+        );
+    }
+
 
     /// 回归 2026-09-30（用户机实测）：cmd 步骤的引号形状。旧写法 `args(["/c", cmd])` 让子进程
     /// 收到 `\"…\"`，reg.exe 于是把值写进键名尾随一个引号的垃圾键
@@ -601,7 +882,7 @@ fn strip_js_comments(src: &str) -> String {
     /// 格式的话，生产改回去它是测不出来的。
     #[test]
     fn cmd_step_line_survives_cmd_quote_stripping() {
-        let steps = memory_steps(&json!("16"));
+        let steps = memory_steps(&json!("16")).expect("16GB 是登记档位，不该被拒");
         let probe = steps[0]
             .get("cmd")
             .and_then(|v| v.as_str())
@@ -1096,12 +1377,12 @@ fn strip_js_comments(src: &str) -> String {
     fn 执行引擎按编译器实算而非按数据层标签() {
         assert_eq!(
             step_exec_mode(&json!({"pwsh": "New-ItemProperty -Path 'HKCU:\\Software\\trim-test' -Name a -Value 1 -PropertyType DWord -Force"})),
-            Some("native"),
+            "native",
             "能被原生解释器吃下的 pwsh 步骤必须报 native"
         );
         assert_eq!(
             step_exec_mode(&json!({"pwsh": "Remove-AppxPackage -AllUsers -Name '*X*' -ErrorAction SilentlyContinue"})),
-            Some("inbox-ps"),
+            "inbox-ps",
             "AppX 移除无原生投影，只能逐字交收件箱 PowerShell，必须如实报 inbox-ps"
         );
         // 设备禁用模式必须编译成原生 PnpSetState（2026-10-11 tf_dev_disable 原生化）
@@ -1109,18 +1390,30 @@ fn strip_js_comments(src: &str) -> String {
 foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq \"OK\" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }";
         assert_eq!(
             step_exec_mode(&json!({"pwsh": pnp_script})),
-            Some("native"),
+            "native",
             "Get-PnpDevice|Disable-PnpDevice 双条件模式必须走原生 FFI"
         );
         // 白名单已收紧：MMAgent/PnpDevice cmdlet 不再被 PsInline 接受 → unsupported（compile Err）
         assert_eq!(
             step_exec_mode(&json!({"pwsh": "Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue"})),
-            Some("unsupported"),
+            "unsupported",
             "tf_mmagent 退役后 Disable-MMAgent 不再在 PsInline 白名单"
         );
-        assert_eq!(step_exec_mode(&json!({"cmd": "taskkill /f /im x.exe"})), Some("proc"));
-        assert_eq!(step_exec_mode(&json!({"reg": "Windows Registry Editor Version 5.00"})), Some("native"));
-        assert_eq!(step_exec_mode(&json!({"label": "无引擎字段"})), None);
+        assert_eq!(step_exec_mode(&json!({"cmd": "taskkill /f /im x.exe"})), "proc");
+        assert_eq!(step_exec_mode(&json!({"reg": "Windows Registry Editor Version 5.00"})), "native");
+        // R3-L01（v7.2 C04）：四个引擎字段全缺失的形态判 unsupported，**不再返回 None**。
+        // 旧口径下预检只拦 `Some("unsupported")` ⇒ 这类步骤被放行、执行侧静默跳过、
+        // 回执照报成功。现在预检与执行侧对同一形态同姿势。
+        assert_eq!(
+            step_exec_mode(&json!({"label": "无引擎字段"})),
+            "unsupported",
+            "无引擎字段的步骤必须与「编译不出来」同判，否则预检放行"
+        );
+        assert_eq!(
+            step_exec_mode(&json!({})),
+            "unsupported",
+            "空对象步骤同样要判 unsupported"
+        );
     }
 
     /// 把 `data_layer_coverage_report` 的「编译失败 0」从一次性打印升级成常驻断言：
@@ -1138,8 +1431,8 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
                         continue;
                     }
                     match step_exec_mode(&s) {
-                        Some("native") => native += 1,
-                        Some("inbox-ps") => inbox += 1,
+                        "native" => native += 1,
+                        "inbox-ps" => inbox += 1,
                         other => bad.push(format!("{}: {:?} ← {}", o.get("id").and_then(|v| v.as_str()).unwrap_or("?"), other, s.get("label").and_then(|v| v.as_str()).unwrap_or(""))),
                     }
                 }

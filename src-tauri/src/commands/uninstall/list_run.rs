@@ -1192,10 +1192,10 @@ pub async fn uninstall_run<R: tauri::Runtime>(
     let key_path = key_path.to_string();
     let res = tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
-        let (hive, hive_name) = if hive_str.eq_ignore_ascii_case("HKCU") {
-            (HKEY_CURRENT_USER, "HKCU")
+        let hive = if hive_str.eq_ignore_ascii_case("HKCU") {
+            HKEY_CURRENT_USER
         } else if hive_str.eq_ignore_ascii_case("HKLM") {
-            (HKEY_LOCAL_MACHINE, "HKLM")
+            HKEY_LOCAL_MACHINE
         } else {
             return Err("app_id hive 只支持 HKCU/HKLM".to_string());
         };
@@ -1441,7 +1441,9 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             } else {
                 format!("「{display_name}」的卸载器已执行完毕")
             },
-            "_hive": hive_name,
+            // R2b-L06：此前这里回一个 `"_hive"` 字段，全仓零消费者（`rg "_hive" src/` 无命中），
+            // 属跟踪文件里的**死契约字段**——留着等于让渲染层以为可以依赖它，而它没有任何
+            // 断言钉着、改名或删除都不会有人判红。hive 信息已在 `app_id` 里，回执不再夹带无主字段。
         }))
     })
     .await;

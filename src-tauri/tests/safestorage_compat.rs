@@ -31,7 +31,11 @@
 //!   Electron 密文，把它替进 electron1/electron2 再跑一次即可，断言不用改。
 //! - 复现样本：pwsh 7 脚本读 Local State → 剥 5 字节 `DPAPI` 前缀 → ProtectedData::Unprotect
 //!   → AesGcm(nonce 12B, 空 AAD) 加密 → `v10 + nonce + ct + tag` base64 加 `dpapi:v1:` 前缀。
-//!   样本含真实主密钥的 DPAPI 包裹串与明文探针，只写 `%TEMP%\trim-dpapi-probe\`，用完删。
+//!   样本含真实主密钥的 DPAPI 包裹串与明文探针 ⇒ **只写应用私有 tmp**
+//!   （`engine::paths::temp_script_dir()`，即数据目录下的 `tmp/`），不写全局可写的 `%TEMP%`：
+//!   提权场景里 %TEMP% 的样本存在 TOCTOU 窗口，且这条与本文件的 reg_backup 用例本就该同一口径
+//!   （X1-L08）。样本**跑完立刻删**；任何密钥材料一律不得复制进跟踪文件、也不得写进报告或新文件
+//!   ——密钥不明文回渲染层、掩码即视为未修改（AGENTS §3）。
 
 use base64::Engine;
 use trim_tauri_lib::safestorage::{

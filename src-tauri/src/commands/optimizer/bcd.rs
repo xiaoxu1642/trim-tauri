@@ -1,8 +1,8 @@
 //! BCD 枚举与条件命中判定（2026-10-11 C3）
 //!
 //! 三侧职责（只读）：
-//!   1. 枚举：`bcdedit /enum {current}` + `{globalsettings}` 原始 stdout →
-//!      `BcdMap { current: HashMap<name, value>, globals: HashMap<name, value> }`
+//!   1. 枚举：`bcdedit /enum {current}` 原始 stdout → `BcdMap { name → value }`
+//!      （R3-L05：全局设置那一张曾被一并枚举但无人消费，那条外呼已删）
 //!   2. 判定：5 行面板各三态 → `BcdRowState { kind: "unhit"|"optimized"|"executable", ... }`
 //!   3. 通道：`optimizer:bcd-enum`（guard::MAIN，只读）下发整面板状态
 //!
@@ -163,14 +163,21 @@ fn split_name_value(line: &str) -> Option<(&str, &str)> {
     Some((name, value))
 }
 
-/// 跑 `bcdedit /enum {current}` + `/enum {globalsettings}`，返回两张 map
+/// 跑 `bcdedit /enum {current}` 并解析成 map
 ///
-/// 任一枚举失败（退出码非 0）→ 对应 map 为空、整体不报错（前端拿到的是缺失态）。
-/// 超时 → 函数直接返回 Err（fail-closed），调用方决定是报网络错误还是降级。
-pub fn enum_bcd_maps() -> Result<(BcdMap, BcdMap), String> {
+/// R3-L05（v7.2 C04）：本函数只做 `{current}` 一枚举。**旧形态还起了第二个 bcdedit 进程
+/// 枚举全局设置那一张**，但那张 map 一路传到 `evaluate_row` 的 `_globals` 形参就没人读了
+/// （面板 5 行登记元素全在 `{current}`）——开一次面板白付一个进程加一份超时预算，所以连
+/// 唯一读者一起删掉这条外呼；将来面板要托管全局设置元素，再按需要重新枚举。
+///
+/// **失败姿势是 fail-closed 上抛**：任一枚举退出码非 0 或 spawn 失败都 `Err`，命令层据此
+/// 回 `success:false` 加中文原因。旧注释把它写成「拿不到就当元素不存在」的宽容形态，
+/// 与本实现相反 —— 降级会把「bcdedit 拒绝了 / 解码断了」渲染成缺失态，用户以为可以执行。
+/// 超时同样 `Err`（`BCDEDIT_ENUM_TIMEOUT`）：bcdedit 是**本地**系统工具，旧注释里往远端
+/// 连接指引排查方向的措辞已经改掉。
+pub fn enum_current_map() -> Result<BcdMap, String> {
     let current = run_bcd_enum("{current}")?;
-    let globals = run_bcd_enum("{globalsettings}")?;
-    Ok((parse_bcd_enum(&current), parse_bcd_enum(&globals)))
+    Ok(parse_bcd_enum(&current))
 }
 
 fn run_bcd_enum(identifier: &str) -> Result<String, String> {
@@ -272,7 +279,7 @@ fn vsm_protection_hit(current: &BcdMap) -> bool {
 /// `ALL_ROW_IDS`（全 &'static）、测试传字面量，同样满足。旧实现里
 /// `ALL_ROW_IDS.iter().find(...).expect(...)` 对非成员 id 会 panic 掉 IPC 线程；
 /// 现在非成员 id 走 `row_targets` 的空表兜底 ⇒ elements 空 ⇒ 判 Unhit，fail-closed。
-pub fn evaluate_row(row_id: &'static str, current: &BcdMap, _globals: &BcdMap) -> BcdRowState {
+pub fn evaluate_row(row_id: &'static str, current: &BcdMap) -> BcdRowState {
     let targets = row_targets(row_id);
     let static_id = row_id;
     let mut elements = Vec::with_capacity(targets.len());
@@ -280,7 +287,8 @@ pub fn evaluate_row(row_id: &'static str, current: &BcdMap, _globals: &BcdMap) -
     let mut any_needs = false;
 
     for (name, target) in &targets {
-        // BCD 面板登记元素全在 {current}，globals 暂不消费
+        // 面板登记元素全在 {current}（R3-L05：globals 那条枚举已随其唯一读者一起删除，
+        // 不要再"顺手"加回来——加回来就得同时给出消费它的判据）
         let map = current;
         let exists = map.contains_key(*name);
         any_exists = any_exists || exists;
@@ -400,15 +408,15 @@ pub async fn optimizer_bcd_enum<R: Runtime>(window: WebviewWindow<R>) -> Value {
         return json!({ "success": false, "message": msg });
     }
 
-    let (current, globals) = match enum_bcd_maps() {
-        Ok(maps) => maps,
+    let current = match enum_current_map() {
+        Ok(map) => map,
         Err(msg) => return json!({ "success": false, "message": msg }),
     };
 
     let rows: Vec<Value> = ALL_ROW_IDS
         .iter()
         .map(|&id| {
-            let state = evaluate_row(id, &current, &globals);
+            let state = evaluate_row(id, &current);
             json!({
                 "rowId": state.row_id,
                 "kind": state.kind.as_str(),
@@ -497,7 +505,7 @@ custom:16000067         Yes
     #[test]
     fn evaluate_timer_row() {
         let map = parse_bcd_enum(SAMPLE_CURRENT);
-        let state = evaluate_row("nara_bcd_timer", &map, &BcdMap::new());
+        let state = evaluate_row("nara_bcd_timer", &map);
         // 本台 disabledynamictick=Yes ✓, useplatformtick=Yes ✓, useplatformclock 不存在 ✓
         assert_eq!(state.kind, BcdRowKind::Optimized);
         assert!(!state.protection_hit);
@@ -508,7 +516,7 @@ custom:16000067         Yes
         let map = parse_bcd_enum(SAMPLE_CURRENT);
         // hypervisorlaunchtype=Off ✓, vsmlaunchtype=Off ✓
         // isolatedcontext 不存在 = 系统默认 No ✓ → 全部已优化
-        let state = evaluate_row("nara_bcd_vsm", &map, &BcdMap::new());
+        let state = evaluate_row("nara_bcd_vsm", &map);
         assert_eq!(state.kind, BcdRowKind::Optimized);
         assert!(!state.protection_hit);
     }
@@ -518,7 +526,7 @@ custom:16000067         Yes
         let mut map = BcdMap::new();
         map.insert("hypervisorlaunchtype".into(), "Auto".into());
         map.insert("isolatedcontext".into(), "Yes".into());
-        let state = evaluate_row("nara_bcd_vsm", &map, &BcdMap::new());
+        let state = evaluate_row("nara_bcd_vsm", &map);
         assert!(state.protection_hit);
         assert_eq!(state.kind, BcdRowKind::Unhit); // 保护态直接 unhit
     }
@@ -526,7 +534,7 @@ custom:16000067         Yes
     #[test]
     fn evaluate_boot_row_unhit() {
         let map = BcdMap::new(); // 空 BCD（所有元素都未出现）
-        let state = evaluate_row("nara_bcd_boot", &map, &BcdMap::new());
+        let state = evaluate_row("nara_bcd_boot", &map);
         assert_eq!(state.kind, BcdRowKind::Unhit);
     }
 
@@ -534,7 +542,7 @@ custom:16000067         Yes
     fn evaluate_boot_row_executable() {
         let mut map = BcdMap::new();
         map.insert("timeout".into(), "30".into());
-        let state = evaluate_row("nara_bcd_boot", &map, &BcdMap::new());
+        let state = evaluate_row("nara_bcd_boot", &map);
         assert_eq!(state.kind, BcdRowKind::Executable); // timeout=30 ≠ 0
         assert!(state.elements.iter().find(|e| e.name == "timeout").unwrap().needs_change);
     }
@@ -543,14 +551,14 @@ custom:16000067         Yes
     fn evaluate_lowmem_row_unhit() {
         // 常态：本台没有 firstmegabytepolicy 等危险元素 → unhit
         let map = parse_bcd_enum(SAMPLE_CURRENT);
-        let state = evaluate_row("nara_bcd_lowmem", &map, &BcdMap::new());
+        let state = evaluate_row("nara_bcd_lowmem", &map);
         assert_eq!(state.kind, BcdRowKind::Unhit);
     }
 
     #[test]
     fn evaluate_irq_row_optimized() {
         let map = parse_bcd_enum(SAMPLE_CURRENT);
-        let state = evaluate_row("nara_bcd_irq", &map, &BcdMap::new());
+        let state = evaluate_row("nara_bcd_irq", &map);
         // configaccesspolicy=Default ✓
         // msi 不存在 = 默认 Default ✓
         // usephysicaldestination=No ✓
@@ -597,7 +605,7 @@ custom:16000067         Yes
                 .map(|(n, t)| (n.to_string(), t.to_string()))
                 .collect();
             assert_eq!(
-                evaluate_row(row_id, &base, &BcdMap::new()).kind,
+                evaluate_row(row_id, &base).kind,
                 BcdRowKind::Optimized,
                 "{row_id} 连基线都没判成达标，夹具与 row_targets 已不同步"
             );
@@ -608,7 +616,7 @@ custom:16000067         Yes
                     name.to_string(),
                     if *target == "__DELETE__" { "Yes".to_string() } else { format!("{target}-偏离") },
                 );
-                let st = evaluate_row(row_id, &mutated, &BcdMap::new());
+                let st = evaluate_row(row_id, &mutated);
                 assert_eq!(st.kind, BcdRowKind::Executable, "{row_id} 的 {name} 偏离目标值却没判待优化: {st:?}");
                 assert!(
                     st.elements.iter().any(|e| e.name == *name && e.needs_change),
@@ -621,7 +629,7 @@ custom:16000067         Yes
                 missing.remove(*name);
             }
             assert_eq!(
-                evaluate_row(row_id, &missing, &BcdMap::new()).kind,
+                evaluate_row(row_id, &missing).kind,
                 BcdRowKind::Unhit,
                 "{row_id} 登记元素全缺失却没判未命中（等于把没配过当成配好了）"
             );
@@ -639,10 +647,9 @@ custom:16000067         Yes
     #[test]
     #[ignore = "真机探针：调用真实 bcdedit /enum"]
     fn 本机bcd枚举必须真出元素() {
-        let (current, globals) = enum_bcd_maps()
+        let current = enum_current_map()
             .expect("bcdedit /enum 失败：解码或退出码有问题，不许把它当权限问题报给用户");
         assert!(!current.is_empty(), "{{current}} 解析出 0 个元素，解析或解码断了");
-        assert!(!globals.is_empty(), "{{globalsettings}} 解析出 0 个元素，解析或解码断了");
         // 点名命中对象：引导加载器条目必然带 device / osdevice / path 之一
         let hit = ["device", "osdevice", "path"]
             .iter()

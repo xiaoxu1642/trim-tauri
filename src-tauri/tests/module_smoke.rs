@@ -14,7 +14,10 @@
 
 mod common;
 
-use common::{invoke, invoke_text, main_window, skip_and_record, sub_windows, window_with_label};
+use common::{
+    assert_guard_rejected, invoke, invoke_text, main_window, skip_and_record, sub_windows,
+    window_with_label, GUARD_REJECT_MARK,
+};
 use serde_json::json;
 use trim_tauri_lib::engine::guard::APP_WINDOWS;
 
@@ -75,10 +78,7 @@ fn sub_windows_matches_capabilities_manifest() {
 fn unknown_label_window_is_rejected() {
     let w = window_with_label("__trim_injected__");
     let text = invoke_text(&w, "settings_load", json!({}));
-    assert!(
-        text.contains("IPC 来源校验失败"),
-        "未知 label 调 settings_load 必须被拒，回执 {text}"
-    );
+    assert_guard_rejected(&text, "未知 label 调 settings_load 必须被拒");
 }
 
 // ==================== 各模块零副作用读命令形状 ====================
@@ -197,10 +197,7 @@ fn paths_file_icon_tier_stays_readonly_and_unknown_label_still_rejected() {
         "paths_file_icon",
         json!({ "filePath": r"\\srv\share\a.ico" }),
     );
-    assert!(
-        alien.contains("IPC 来源校验失败"),
-        "未知 label 必须仍被来源校验拒，实到 {alien}"
-    );
+    assert_guard_rejected(&alien, "未知 label 必须仍被来源校验拒");
 }
 
 /// 真机正向探针（发版前必须实跑）：系统 dll 的图标**必须还取得到**。
@@ -238,8 +235,8 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "settings_load", json!({}));
         assert!(
-            !text.contains("IPC 来源校验失败"),
-            "{label} 窗调 guard_readonly 档命令不得被拒杀，回执 {text}"
+            !text.contains(GUARD_REJECT_MARK),
+            "{label} 窗调 settings:load 不得被拒杀，回执 {text}"
         );
         // 正向特征：settings:load 返回体是 JSON 且含 success 字段
         assert!(
@@ -334,7 +331,7 @@ fn settings_get_prefs_reaches_every_subwindow() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "settings_get_prefs", json!({}));
         assert!(
-            !text.contains("IPC 来源校验失败"),
+            !text.contains(GUARD_REJECT_MARK),
             "{label} 窗调 get-prefs 不得被拒杀，回执 {text}"
         );
         assert!(text.contains("success"), "{label} 窗应越过档位进入命令体，回执 {text}");
@@ -411,18 +408,15 @@ fn appearance_prefs_tier_is_main_window_only() {
     for label in sub_windows() {
         let sw = window_with_label(label);
         let denied = invoke_text(&sw, "appearance_get_prefs", json!({}));
-        assert!(
-            denied.contains("IPC 来源校验失败"),
-            "{label} 窗调外观偏好必须被拒杀，回执 {denied}"
-        );
+        assert_guard_rejected(&denied, &format!("{label} 窗调外观偏好必须被拒杀"));
         let denied_write = invoke_text(
             &sw,
             "appearance_set_pref",
             json!({ "key": "accent", "value": "#000000" }),
         );
-        assert!(
-            denied_write.contains("IPC 来源校验失败"),
-            "{label} 窗写外观偏好必须被拒杀（放宽=把写用户外观暴露给子窗），回执 {denied_write}"
+        assert_guard_rejected(
+            &denied_write,
+            &format!("{label} 窗写外观偏好必须被拒杀（放宽=把写用户外观暴露给子窗）"),
         );
     }
     assert_eq!(reached, vec!["main"], "只有主窗应越过档位（实到 {reached:?}）");
@@ -587,7 +581,7 @@ fn assert_window_tier(cmd: &str, args: serde_json::Value, needle: &str, allowed:
         let text = invoke_text(&w, cmd, args.clone());
         if allowed.contains(label) {
             assert!(
-                !text.contains("IPC 来源校验失败"),
+                !text.contains(GUARD_REJECT_MARK),
                 "{label} 窗调 {cmd} 不该被档位拒杀，回执 {text}"
             );
             assert!(
@@ -596,10 +590,7 @@ fn assert_window_tier(cmd: &str, args: serde_json::Value, needle: &str, allowed:
             );
             reached.push(label);
         } else {
-            assert!(
-                text.contains("IPC 来源校验失败"),
-                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
-            );
+            assert_guard_rejected(&text, &format!("{label} 窗调 {cmd} 必须被来源校验拒杀"));
         }
     }
     assert_eq!(
@@ -678,10 +669,7 @@ fn uninstall_run_is_main_only_and_passes_guard_from_main() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "uninstall_run", json!({ "appId": GHOST_APP_ID }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调卸载命令必须被来源校验拒杀，回执 {text}"
-        );
+        assert_guard_rejected(&text, &format!("{label} 窗调卸载命令必须被来源校验拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -703,10 +691,7 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "uninstall_modify", json!({ "appId": GHOST_APP_ID }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调修改/修复命令必须被来源校验拒杀，回执 {text}"
-        );
+        assert_guard_rejected(&text, &format!("{label} 窗调修改/修复命令必须被来源校验拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -989,19 +974,13 @@ fn reg_backup_channels_are_main_only() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let list = invoke_text(&w, "uninstall_reg_backup_list", json!({}));
-        assert!(
-            list.contains("IPC 来源校验失败"),
-            "{label} 窗调卸载域备份列表必须被来源校验拒杀，回执 {list}"
-        );
+        assert_guard_rejected(&list, &format!("{label} 窗调卸载域备份列表必须被来源校验拒杀"));
         let restore = invoke_text(
             &w,
             "uninstall_reg_backup_restore",
             json!({ "file": "..\\..\\evil.reg" }),
         );
-        assert!(
-            restore.contains("IPC 来源校验失败"),
-            "{label} 窗调卸载域备份还原必须被拒杀，回执 {restore}"
-        );
+        assert_guard_rejected(&restore, &format!("{label} 窗调卸载域备份还原必须被拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -1038,10 +1017,7 @@ fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "uninstall_dir_size", json!({ "path": "C:\\Windows\\Temp" }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调体积兜底必须被拒杀，回执 {text}"
-        );
+        assert_guard_rejected(&text, &format!("{label} 窗调体积兜底必须被拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -1088,10 +1064,7 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_restore_reg", json!({ "optionId": "any" }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调优化项还原必须被拒杀，回执 {text}"
-        );
+        assert_guard_rejected(&text, &format!("{label} 窗调优化项还原必须被拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -1368,7 +1341,7 @@ fn reg_backup_restore_writes_registry_end_to_end() {
 /// （v2-M16② 的老坑）。
 ///
 /// C08/X1-M03 落点口径：`log_write` 在测试进程**不落盘**——`log_sink_enabled()` 靠
-/// 「exe 落在 target/<profile>/deps」判测试进程（`集成测试进程不写生产日志` 用例钉的
+/// 「exe 落在 target/<profile>/deps」判测试进程（`integration_tests_do_not_write_prod_log` 用例钉的
 /// 就是它），`write_log` 直接返回行文本。因此本用例既不写生产日志目录、也不写测试
 /// 数据根；断言的全部是返回值。C08 的 `TRIM_TEST_DATA_ROOT` 是第二层保险：
 /// 万一 sink 判据失效，落点也会是测试根而非用户日志。
@@ -1402,10 +1375,7 @@ fn log_write_is_readonly_tier_and_sanitizes_renderer_input() {
     }
     let w = window_with_label("not-a-trim-window");
     let text = invoke_text(&w, "log_write", json!({ "level": "error", "message": "x" }));
-    assert!(
-        text.contains("IPC 来源校验失败"),
-        "未知 label 必须被来源校验拒杀，回执 {text}"
-    );
+    assert_guard_rejected(&text, "未知 label 必须被来源校验拒杀");
 }
 
 // ==================== HiBit §H1 卸载还原包（batch-list / batch-restore）====================
@@ -1419,15 +1389,9 @@ fn batch_pack_channels_are_main_only() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let list = invoke_text(&w, "uninstall_batch_list", json!({}));
-        assert!(
-            list.contains("IPC 来源校验失败"),
-            "{label} 窗调还原包列表必须被拒杀，回执 {list}"
-        );
+        assert_guard_rejected(&list, &format!("{label} 窗调还原包列表必须被拒杀"));
         let restore = invoke_text(&w, "uninstall_batch_restore", json!({ "batchId": "x" }));
-        assert!(
-            restore.contains("IPC 来源校验失败"),
-            "{label} 窗调整批还原必须被拒杀（它往磁盘写文件），回执 {restore}"
-        );
+        assert_guard_rejected(&restore, &format!("{label} 窗调整批还原必须被拒杀（它往磁盘写文件）"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -1509,10 +1473,7 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let r = invoke_text(&w, "cleanup_reg_backup_restore", json!({ "file": "1_x.reg" }));
-        assert!(
-            r.contains("IPC 来源校验失败"),
-            "{label} 窗调清理域备份还原必须被拒杀，回执 {r}"
-        );
+        assert_guard_rejected(&r, &format!("{label} 窗调清理域备份还原必须被拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -1581,7 +1542,7 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
 /// **非 test 构建**的 lib，`cfg!(test)` 是 false —— 那条路径只能靠「产物落在 deps 目录」
 /// 这一判据兜住。本用例就是那条判据的活体证据：判据失效时它会红，而不是让污染静默回来。
 #[test]
-fn 集成测试进程不写生产日志() {
+fn integration_tests_do_not_write_prod_log() {
     assert!(
         !trim_tauri_lib::engine::log::log_sink_enabled(),
         "集成测试进程打开了生产日志落盘 —— 测试夹具会再次灌进用户的「操作日志」"
@@ -1602,7 +1563,7 @@ fn batch_preflight_is_readonly_for_all_app_windows() {
         let w = window_with_label(&label);
         let text = invoke_text(&w, "optimizer_batch_preflight", json!({ "ids": ["svc_w32time_manual"] }));
         assert!(
-            !text.contains("IPC 来源校验失败"),
+            !text.contains(GUARD_REJECT_MARK),
             "{label} 窗调只读预检竟被拒杀（档位应与 optimizer_check_optimized 同档）: {text}"
         );
         assert!(
@@ -1716,7 +1677,7 @@ fn memory_clean_results_shape_carries_elapsed() {
 /// 2026-10-09（D3）：contextmenu 域随右键删除链整链退役（载体 remove + 嵌套 push_result
 /// 已删），本断言的登记面同步收缩到 startup / perf 两个域。
 #[test]
-fn elapsed_ms_是每项必有的非负整数() {
+fn elapsed_ms_present_and_non_negative_per_item() {
     // 静态口径：产出域的源码里，写入 results 的那一处必须带 elapsedMs。
     // needle 要**精确到该域的那一处**，不能只查字段名 —— perf.rs 的 diskbench
     // 早就有一个 `elapsedMs`（`perf.rs:369`），只查字段名的话这条断言在
@@ -1754,7 +1715,7 @@ fn elapsed_ms_是每项必有的非负整数() {
 /// 且读值/写值会触真实 Power API；导出还会拉起 `powercfg.exe` —— 不属快速组零副作用命令。
 /// 断言改为「命令体必须走统一 success/data 包装」，锁的正是那次漂移本身。
 #[test]
-fn syspanel_回执必须是_success_data_包装() {
+fn syspanel_reply_wrapped_in_success_data() {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/commands/syspanel.rs");
     let src = std::fs::read_to_string(&p).expect("读得到 src-tauri/src/commands/syspanel.rs");
@@ -1817,7 +1778,7 @@ fn syspanel_回执必须是_success_data_包装() {
 /// （`ultimate_enable` / `restore_high_performance` 无入参可畸形，保持 `{}`；
 /// 它们的命令体行为由 native 层真机探针与发版手册覆盖。）
 #[test]
-fn syspanel_power_编辑命令_is_main_only() {
+fn syspanel_power_edit_command_is_main_only() {
     // 伪造 GUID：命令体按「方案不存在」拒绝（powercfg 对不存在 GUID 必报错），
     // 不指向任何真实电源方案。
     const NO_SUCH_GUID: &str = "00000000-0000-0000-0000-trimnosuchplan";
@@ -1845,10 +1806,7 @@ fn syspanel_power_编辑命令_is_main_only() {
         let w = window_with_label(label);
         for (cmd, args) in cases {
             let text = invoke_text(&w, cmd, args.clone());
-            assert!(
-                text.contains("IPC 来源校验失败"),
-                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
-            );
+            assert_guard_rejected(&text, &format!("{label} 窗调 {cmd} 必须被来源校验拒杀"));
             rejected.push(format!("{label}:{cmd}"));
         }
     }
@@ -1867,10 +1825,7 @@ fn optimizer_stale_dismiss_is_main_only() {    let mut rejected: Vec<&str> = Vec
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_stale_dismiss", json!({ "ids": ["x"] }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调 optimizer_stale_dismiss 必须被来源校验拒杀，回执 {text}"
-        );
+        assert_guard_rejected(&text, &format!("{label} 窗调 optimizer_stale_dismiss 必须被来源校验拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -1884,10 +1839,7 @@ fn optimizer_external_scan_is_main_only() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_external_scan", json!({}));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调 optimizer_external_scan 必须被来源校验拒杀，回执 {text}"
-        );
+        assert_guard_rejected(&text, &format!("{label} 窗调 optimizer_external_scan 必须被来源校验拒杀"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -1897,7 +1849,7 @@ fn optimizer_external_scan_is_main_only() {
 /// MockRuntime 没有真实扫描（快照为空）⇒ 任意非空 path 必须被拒——这正好是
 /// 「任意目录读暴露面」的拒收面；空 path 走规则自身枚举，不得触发该拒绝。
 #[test]
-fn cleanup_item_detail_path_不在快照时被拒() {
+fn cleanup_item_detail_path_rejected_without_snapshot() {
     let w = main_window();
     // ① 任意非空 path（快照为空 = 必然不同源）必须被拒
     let text = invoke_text(
@@ -1931,7 +1883,7 @@ fn cleanup_item_detail_path_不在快照时被拒() {
 /// 无原值则删值）—— 幂等且只动这一个键，但按纪律②「改系统的进发布前门禁组」。
 #[test]
 #[ignore = "管理员环境会真写注册表（恢复频率键，幂等；顺带清本机 0x0 残留），发布前门禁跑"]
-fn optimizer_restore_frequency_主窗越档且回执确定() {
+fn optimizer_restore_frequency_main_window_passes_with_deterministic_reply() {
     let w = main_window();
     let res = invoke(&w, "optimizer_restore_frequency", json!({}));
     let text = res.to_string();
@@ -1960,14 +1912,14 @@ fn optimizer_restore_frequency_主窗越档且回执确定() {
 
 /// 同一命令的子窗侧：一律被来源校验拒杀（MAIN 档，guard 先于一切 ⇒ 零副作用，留快速组）。
 #[test]
-fn optimizer_restore_frequency_子窗一律拒杀() {
+fn optimizer_restore_frequency_subwindows_always_rejected() {
     let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_restore_frequency", json!({}));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调 optimizer_restore_frequency 必须被来源校验拒杀，回执 {text}"
+        assert_guard_rejected(
+            &text,
+            &format!("{label} 窗调 optimizer_restore_frequency 必须被来源校验拒杀"),
         );
         rejected.push(label);
     }
@@ -1981,7 +1933,7 @@ fn optimizer_restore_frequency_子窗一律拒杀() {
 /// 被拒（不存在的目录 / 不在名单的条目）—— 快速组零副作用；
 /// 真写名单的路径留给真机验收（§4.1：MockRuntime 覆盖不到真实 IO 后果）。
 #[test]
-fn finder_ignore名单_档位与负例() {
+fn finder_ignore_list_guard_tiers_and_negative_cases() {
     // ① 子窗一律拒杀
     let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
@@ -1992,10 +1944,7 @@ fn finder_ignore名单_档位与负例() {
             ("finder_ignore_remove", json!({ "path": "C:\\__trim_test_missing__" })),
         ] {
             let text = invoke_text(&w, cmd, args);
-            assert!(
-                text.contains("IPC 来源校验失败"),
-                "{label} 窗调 {cmd} 必须被来源校验拒杀，回执 {text}"
-            );
+            assert_guard_rejected(&text, &format!("{label} 窗调 {cmd} 必须被来源校验拒杀"));
         }
         rejected.push(label);
     }
@@ -2033,9 +1982,9 @@ fn quickcmds_run_is_main_only() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "quickcmds_run", json!({ "id": "__trim_smoke_unknown__" }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调快捷指令必须被来源校验拒杀（v4-K04 升 MAIN），回执 {text}"
+        assert_guard_rejected(
+            &text,
+            &format!("{label} 窗调快捷指令必须被来源校验拒杀（v4-K04 升 MAIN）"),
         );
         rejected.push(label);
     }
@@ -2199,7 +2148,8 @@ fn startup_toggle_runonce_probe_uses_backup_delete() {
     assert!(reg_query(), "启用后原值必须已恢复");
 }
 
-/// v4 修复回归（快速组）：测速历史回执与**磁盘真值**自比对 ——/// 同一回归的另一受害者：`bench-history.json` 也是裸数组，被对象读器判损坏后
+/// v4 修复回归（快速组）：测速历史回执与**磁盘真值**自比对 ——
+/// 同一回归的另一受害者：`bench-history.json` 也是裸数组，被对象读器判损坏后
 /// 列表恒空（文件里明明有记录）。本用例不依赖装机数据：文件不存在时只验形状，
 /// 存在时必须条数一致（采集与判定拆开：真值取自文件本身，不是硬编码期望）。
 ///
@@ -2217,7 +2167,9 @@ fn bench_history_list_matches_file_truth() {
     let raw = std::fs::read_to_string(&f);
     let res = invoke(&w, "bench_history_list", json!({}));
     assert_eq!(res["success"], json!(true), "列表应成功: {res}");
-    assert!(res["data"].is_array(), "data 必须是数组: {res}");
+    // X1-L03：`data` 是数组这条形状契约由 ipc_smoke 的 `bench_history_list_shape` 钉，
+    // 本用例不再逐字重复一遍——这里只把 data 取成数组用于条数对拍，取不到记 MAX，
+    // 与磁盘真值一比即判红（重复断言只会让同一处漂移在两个文件里各红一次）。
     let n_cmd = res["data"].as_array().map(|a| a.len()).unwrap_or(usize::MAX);
     match raw {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
@@ -2235,9 +2187,9 @@ fn bench_history_list_matches_file_truth() {
                 ));
             }
         },
-        // 缺样本：形状断言已跑（上面两条），对拍段无对象——明示跳过而非静默绿
+        // 缺样本：条数对拍无对象——明示跳过而非静默绿（形状契约由 ipc_smoke 钉，见上）
         Err(_) => {
-            skip_and_record("bench_history：本机无 bench-history.json，条数对拍无对象（形状断言已跑）");
+            skip_and_record("bench_history：本机无 bench-history.json，条数对拍无对象（形状契约见 ipc_smoke）");
         }
     }
 }
@@ -2256,7 +2208,7 @@ fn bench_history_list_matches_file_truth() {
 /// 空样本都走 `skip_and_record` 明示无对象，拿数走 `println!`。
 #[test]
 #[ignore = "真机实测：读注册表与计划任务，非回归判据，取数时手动 --ignored 跑"]
-fn startup_scan_真实条数与写侧上限关系实测() {
+fn startup_scan_real_count_vs_writer_cap_probe() {
     let Ok(items) = trim_tauri_lib::engine::native::startup_scan() else {
         skip_and_record("startup_scan：本机启动项枚举失败（取数探针无对象，先查环境再谈判据）");
         return;
@@ -2289,7 +2241,7 @@ fn startup_scan_真实条数与写侧上限关系实测() {
 /// 与多星回溯——`*Cache*` 必须命中 "Code Cache" 这类中间还有内容的形态
 /// （修前执行侧只认第一个 `*`，恒不匹配）。
 #[test]
-fn wildcard_match_多星与大小写不敏感() {
+fn wildcard_match_multi_star_and_case_insensitive() {
     use trim_finder::cleanup_scan::wildcard_match;
     // 样本与 cleanup.rs 内委托用例同源：真实规则段形态 + 大小写形态 + ? + 负样本
     assert!(wildcard_match("CacheStorage", "*Cache*"), "*Cache* 应命中 CacheStorage");
@@ -2314,18 +2266,12 @@ fn wildcard_match_多星与大小写不敏感() {
 fn cleanup_query_locked_is_main_only() {
     let w = window_with_label("__trim_injected__");
     let text = invoke_text(&w, "cleanup_query_locked", json!({ "path": r"C:\Windows" }));
-    assert!(
-        text.contains("IPC 来源校验失败"),
-        "未知 label 调占用查询必须被拒（主窗档），回执 {text}"
-    );
+    assert_guard_rejected(&text, "未知 label 调占用查询必须被拒（主窗档）");
     let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "cleanup_query_locked", json!({ "path": r"C:\Windows" }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调占用查询必须被来源校验拒杀（主窗档），回执 {text}"
-        );
+        assert_guard_rejected(&text, &format!("{label} 窗调占用查询必须被来源校验拒杀（主窗档）"));
         rejected.push(label);
     }
     assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
@@ -2336,15 +2282,18 @@ fn cleanup_query_locked_is_main_only() {
 /// 早退发生在任何 RM 注册之前 ⇒ 零副作用，可做 MockRuntime 快测。
 #[test]
 fn cleanup_query_locked_reports_missing_path_honestly() {
-    let mut missing = std::env::temp_dir().join(format!(
-        "__trim_smoke_no_such_query_{}__",
-        std::process::id()
-    ));
+    // 先建窗再取路径：`temp_script_dir()` 首次调用会定死 `app_data_dir()` 的 OnceLock，
+    // 抢在建窗之前就把测试根定到真实 %APPDATA%（C08 数据根隔离的次序纪律）。
+    let w = main_window();
+    // X1-L08：探针落点统一到应用私有 tmp（AGENTS §3 指定的临时产物位置），不再用全局可写的
+    // %TEMP%——提权场景里 %TEMP% 的探针存在 TOCTOU 窗口，同文件的 reg_backup 用例早就是私有 tmp。
+    let mut missing = trim_tauri_lib::engine::paths::temp_script_dir()
+        .expect("私有 tmp 应可用")
+        .join(format!("__trim_smoke_no_such_query_{}__", std::process::id()));
     // 「不存在」是断言前提：极端残留（同名历史产物）时加后缀再探测
     while missing.exists() {
         missing.push("_");
     }
-    let w = main_window();
     let res = invoke(&w, "cleanup_query_locked", json!({ "path": missing.to_string_lossy() }));
     assert_eq!(res["success"], json!(false), "不存在的路径不得装「无占用」: {res}");
     assert!(
@@ -2369,7 +2318,12 @@ fn cleanup_query_locked_reports_missing_path_honestly() {
 #[ignore = "真机探针：起 powershell 持文件句柄（自建自清），发布前门禁跑"]
 #[cfg(windows)]
 fn cleanup_query_locked_probe_names_locking_process() {
-    let dir = std::env::temp_dir().join(format!("__trim_lock_probe_{}__", std::process::id()));
+    // 先建窗（注入测试数据根），再取探针目录——`temp_script_dir()` 首次调用定 OnceLock 的次序纪律。
+    // X1-L08：探针不再落全局可写的 %TEMP%（提权场景 TOCTOU），与 reg_backup 用例同走应用私有 tmp。
+    let w = main_window();
+    let dir = trim_tauri_lib::engine::paths::temp_script_dir()
+        .expect("私有 tmp 应可用")
+        .join(format!("__trim_lock_probe_{}__", std::process::id()));
     std::fs::create_dir_all(&dir).expect("建探针目录失败");
     let file = dir.join("probe.txt");
     std::fs::write(&file, b"trim lock probe").expect("写探针文件失败");
@@ -2425,7 +2379,6 @@ fn cleanup_query_locked_probe_names_locking_process() {
             .unwrap_or(false)
     };
 
-    let w = main_window();
     // ① 文件形态：查询必须点名 holder（最多 20 次 × 500ms，容忍 RM 会话建立延迟）
     let mut hit_file = false;
     for _ in 0..20 {
@@ -2458,7 +2411,7 @@ fn cleanup_query_locked_probe_names_locking_process() {
 /// 或 async 化后 `window` 生命周期写坏，症状都是「命令不存在/回执为空」。
 /// 负例（非法报告名）在触盘之前就被拒，因此属零副作用快速组。
 #[test]
-fn u_r1d_同步命令转阻塞池后出口仍可达() {
+fn u_r1d_sync_command_blocking_pool_exit_still_reachable() {
     let w = main_window();
     // ① 清单读取：回执形状（items 必须是数组、dir 是字符串）——渲染层直接 .map
     let res = invoke(&w, "finder_delete_manifest", json!({}));
@@ -2493,7 +2446,7 @@ fn u_r1d_同步命令转阻塞池后出口仍可达() {
 /// 提权态跑则先 collect 再 repair，两种形态都要求 repair 的回执非绿（判「不在快照内」
 /// 或 needAdmin），不许出现 success:true。
 #[test]
-fn u_r1d_netcheck_快照作废后修复不绿() {
+fn u_r1d_netcheck_stale_snapshot_does_not_pass() {
     let w = main_window();
     // 先做一次采集：成功则本窗槽有账，失败/需提权则槽为空——两种都继续往下判
     let _ = invoke(&w, "netcheck_collect", json!({}));
@@ -2510,7 +2463,7 @@ fn u_r1d_netcheck_快照作废后修复不绿() {
 /// 否则一条越界请求把 `DISKBENCH_RUNNING` 置 true 后又从早退分支返回，
 /// 后续所有测速都被误判「进行中」（RAII guard 恰好防住这个形态，故点名顺序）。
 #[test]
-fn u_r1d_diskbench_越界路径拒绝后单飞位不放脏() {
+fn u_r1d_diskbench_single_flight_not_dirty_after_path_reject() {
     let w = main_window();
     let bad = json!({ "options": { "path": "C:\\__trim_probe_outside_whitelist__" } });
     let first = invoke(&w, "diskbench_run", bad.clone());
@@ -2557,7 +2510,7 @@ fn r1b_between(src: &str, start_anchor: &str, end_anchor: &str) -> String {
 /// 拦成 Err），MockRuntime 里 `EnumWindows` 回调根本不跑。断言锁的是「计数绑在返回值上」这个
 /// 形状——把 `.is_ok()` 去掉或改回无条件自增，本条必红。
 #[test]
-fn u_r1b_regedit_关窗计数绑在投递返回值上() {
+fn u_r1b_regedit_close_count_bound_to_post_result() {
     let src = r1b_src("src-tauri/src/commands/contextmenu.rs");
     let cb = r1b_between(
         &src,
@@ -2596,7 +2549,7 @@ fn u_r1b_regedit_关窗计数绑在投递返回值上() {
 /// 这正是 AGENTS §5.28「`update_json` 内部的锁只保护走它的路径」。
 /// 破坏方式：把 toggle 里的 `cm_cache_guard()` 挪到 `snapshot::get` 之后，本条即红。
 #[test]
-fn u_r1b_右键菜单缓存读写段共用域内锁() {
+fn u_r1b_context_menu_cache_read_write_share_domain_lock() {
     let src = r1b_src("src-tauri/src/commands/contextmenu.rs");
     assert!(
         src.contains("static CM_CACHE_LOCK: std::sync::Mutex<()>"),
@@ -2641,7 +2594,7 @@ fn u_r1b_右键菜单缓存读写段共用域内锁() {
 /// 「在哪个线程上等锁」：三条同步 IO 命令都在阻塞池里，async worker 不再被 30s×N 占住。
 /// 破坏方式：把 `send_to_trash_os` 那个循环挪回 spawn_blocking 之外，本条即红。
 #[test]
-fn u_r1b_startup_delete_同步io整段在阻塞池内() {
+fn u_r1b_startup_delete_sync_io_whole_in_blocking_pool() {
     let src = r1b_src("src-tauri/src/commands/startup.rs");
     let body = r1b_between(&src, "pub async fn startup_delete", "fn bump_counter");
     let sb = body
@@ -2678,7 +2631,7 @@ fn u_r1b_startup_delete_同步io整段在阻塞池内() {
 /// - 对照例（形状合法但没扫描过）必须**越过** app_id 闸、停在快照闸 ——
 ///   这条证明我没把合法路径一并打死（错修法的症状恰恰是两条都给同一个拒因）。
 #[test]
-fn u_r2a_l07_执行入口复验app_id形状() {
+fn u_r2a_l07_execute_entry_revalidates_app_id_shape() {
     let w = window_with_label("residue");
     let one_target = json!({ "targets": [ { "kind": "folder", "target": r"C:\Apps\Acme" } ] });
 
@@ -2739,7 +2692,7 @@ fn u_r2a_l07_执行入口复验app_id形状() {
 /// 不碰用户目录。正向特征点名"回来的 batchId 集合与顺序"，反向对照点名"非法名不进列表、
 /// 但计入 totalCount 之外的口径"——旧写法是边读边收再截断，缺这两条就没人能抓住它。
 #[test]
-fn u_r2a_l03_报告列表按文件名取用并保留真实份数() {
+fn u_r2a_l03_report_list_uses_filename_keeps_real_count() {
     // 次序纪律：先建窗（注入测试数据根），再取 app_data_dir()
     let w = main_window();
     let dir = trim_tauri_lib::engine::paths::app_data_dir().join("uninstall-reports");
