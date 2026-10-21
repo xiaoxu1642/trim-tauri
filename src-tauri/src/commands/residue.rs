@@ -117,7 +117,7 @@ pub async fn residue_open_window<R: tauri::Runtime>(
     let builder = crate::with_browser_args(builder);
     match builder.parent(&window) {
         Ok(b) => match b.build() {
-            Ok(_) => Ok(json!({ "success": true })),
+            Ok(w) => Ok(super::window_built_receipt(&w, TITLE)),
             Err(e) => {
                 log::write_log("error", &format!("创建「应用卸载残留扫描」窗口失败: {e}"));
                 Ok(json!({ "success": false, "message": format!("创建「应用卸载残留扫描」窗口失败: {e}") }))

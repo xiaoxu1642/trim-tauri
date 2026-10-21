@@ -76,7 +76,7 @@ pub async fn process_manager_open_window<R: tauri::Runtime>(
     let builder = crate::with_browser_args(builder);
     match builder.parent(&window) {
         Ok(builder) => match builder.build() {
-            Ok(_) => Ok(json!({ "success": true })),
+            Ok(w) => Ok(super::window_built_receipt(&w, TITLE)),
             Err(e) => {
                 log::write_log("error", &format!("创建「应用进程管理」窗口失败: {e}"));
                 Ok(json!({
