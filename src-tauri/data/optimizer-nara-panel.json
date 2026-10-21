@@ -1,5 +1,5 @@
 {
-  "_comment": "永劫无间优化专项面板侧表（2026-10-11 用户拍板 C3）。entryId 驱动主窗入口卡；sections 驱动面板渲染；hiddenFromOptimizer 从优化中心隐藏这些 id（面板与优化中心互斥展示）；hiddenFromMaintenance 从系统维护页隐藏这 3 个维护任务（收拢进面板的网络分区）。与 optimizer-runtime.json 同属数据层但独立签名（sidecar）。BCD 分区 admin=true 表示该区执行需管理员提权。",
+  "_comment": "永劫无间优化专项面板侧表（2026-10-11 用户拍板 C3）。entryId 驱动主窗入口卡；sections 驱动面板渲染；hiddenFromOptimizer 从优化中心隐藏这些 id（面板与优化中心互斥展示）；hiddenFromMaintenance 从系统维护页隐藏这 3 个维护任务（收拢进面板的网络分区）。与 optimizer-runtime.json 同属数据层，但签名姿势不同：本件是顶层对象带**内联 `_sig`**（runtime 那份是顶层裸数组、签名走同名 sidecar 文件），两件都由 `check-data-signatures` 逐件验签、由 `catalog.rs` 装载期验签（拒收 = 不下发 + error 日志）。BCD 分区 admin=true 表示该区执行需管理员提权。",
   "schemaVer": 1,
   "entryId": "nara_prio",
   "sections": [
@@ -86,6 +86,6 @@
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "sY5miW66BSKpIKcEScFJr3arIcmmKtFuZJYSaX2rhQWdXtKx/jKyPsXRsUyQ8puzZHxrU+9CS1U8O+5NFgfoCA=="
+    "sig": "Ii3Tq5oJXVKxjWFqUn6MmrL+KRLeuPp1cE2s+Eh1b+mgDLAAU2+JB4PPz35zq5QpWKbqNhJsNlhKUXLbTfdsAg=="
   }
 }

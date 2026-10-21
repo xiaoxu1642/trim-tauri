@@ -465,6 +465,8 @@
       };
     }
 
+    // F5-L07 现算：layout 是内部自用（attach/force 直接调本函数），对外零消费方；留在导出面是给
+    // 「只要一次性布局、不要监听」的调用方留的口，摘除与否待主 agent 裁定（与 dispose 同一类）。
     return { layout, attach };
   })();
 })();

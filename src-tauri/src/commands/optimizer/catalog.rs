@@ -165,12 +165,10 @@ pub(super) const GROUPS_JSON: &str = include_str!("../../../data/optimizer-group
 /// 下发完整 JSON 到渲染层，驱动面板分区、入口卡、优化中心隐藏、维护页隐藏四处消费。
 pub(super) const NARA_PANEL_JSON: &str = include_str!("../../../data/optimizer-nara-panel.json");
 
-/// C3：永劫无间专项面板侧表整体下发。
-pub(super) fn nara_panel_sidecar() -> Value {
-    static CACHE: OnceLock<Value> = OnceLock::new();
-    CACHE
-        .get_or_init(|| serde_json::from_str(NARA_PANEL_JSON).expect("optimizer-nara-panel.json 合法"))
-        .clone()
+/// C3：永劫无间专项面板侧表整体下发（**装载前验签**，见 `load_verified_panel`）。
+pub(super) fn nara_panel_sidecar() -> Option<Value> {
+    static CACHE: OnceLock<Option<Value>> = OnceLock::new();
+    load_verified_panel(NARA_PANEL_JSON, "optimizer-nara-panel.json", &CACHE)
 }
 
 /// 隐私自护面板侧表（2026-10-11，WinUtil 借鉴方案 V3）。
@@ -178,11 +176,56 @@ pub(super) fn nara_panel_sidecar() -> Value {
 /// statusLabels 给 tf_defender 特判态提供「已禁用」文案。
 pub(super) const PRIVACY_PANEL_JSON: &str = include_str!("../../../data/optimizer-privacy-panel.json");
 
-/// 隐私自护面板侧表整体下发（缓存与解析失败处理同 nara）。
-pub(super) fn privacy_panel_sidecar() -> Value {
-    static CACHE: OnceLock<Value> = OnceLock::new();
-    CACHE
-        .get_or_init(|| serde_json::from_str(PRIVACY_PANEL_JSON).expect("optimizer-privacy-panel.json 合法"))
+/// 隐私自护面板侧表整体下发（验签与降级口径同 nara）。
+pub(super) fn privacy_panel_sidecar() -> Option<Value> {
+    static CACHE: OnceLock<Option<Value>> = OnceLock::new();
+    load_verified_panel(PRIVACY_PANEL_JSON, "optimizer-privacy-panel.json", &CACHE)
+}
+
+/// 带内联 `_sig` 的面板侧表装载实现只有这一份（v7.2 P1 · D1-M03）。
+///
+/// 为什么这两件也必须验签，而同目录其它侧表不必：面板表**带签名**（`_sig` 由
+/// `sign-cleanup-rules.mjs` 用发布私钥签出），签名一旦存在就是对外承诺「这份数据没人
+/// 动过」。原先装载只做 `from_str(...).expect("合法")` —— 手改正文而不重签的产物照样
+/// 编进二进制、照样下发渲染层，承诺变成空话；而「改了忘重签」在发布前也没有任何一条腿
+/// 会红（Node 侧那条腿本轮由 `check-data-signatures` 补齐）。
+///
+/// fail-closed 的形状：验签失败或验签通过后解析失败 ⇒ **None（拒收）** + 一条 `error` 日志，
+/// 调用方回 `success:false`。不 panic（panic 会把「面板打不开」升级成「整窗崩」），
+/// 也不降级放行（放行等于没有验签）。口径与 `options()` / 清理规则库的
+/// `read_verified_data_rules` 同族。
+///
+/// 为什么不回退成「空对象继续下发」：空对象会让 `hiddenFromOptimizer` 过滤集突然变空，
+/// 被面板收走的优化项**全部回落到主列表**——那是数据可用时的正常形态，用户与日志都看不出
+/// 发生过拒收。`success:false` 至少让渲染层有机会报「面板不可用」。
+///
+/// 签名对象是 `include_str!` 编译期内嵌的那份字节，运行期没人能改，故只验一次并缓存结论。
+pub(super) fn load_verified_panel(
+    text: &str,
+    label: &str,
+    cache: &OnceLock<Option<Value>>,
+) -> Option<Value> {
+    cache
+        .get_or_init(|| {
+            if let Err(reason) = crate::engine::rules_signature::verify_rules_text(text) {
+                crate::engine::log::write_log(
+                    "error",
+                    &format!("{label} 签名校验失败，已拒绝装载: {reason}"),
+                );
+                return None;
+            }
+            match serde_json::from_str::<Value>(text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    // 与上一条同处置：这是一份签了名却吃不下的字节，不是「没有签名」。
+                    crate::engine::log::write_log(
+                        "error",
+                        &format!("{label} 验签通过后解析失败，已拒绝装载: {e}"),
+                    );
+                    None
+                }
+            }
+        })
         .clone()
 }
 

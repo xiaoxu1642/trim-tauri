@@ -257,7 +257,14 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
 // ---------------------------------------------------------------------------
 const NO_PARITY_REGISTRY = [
   {
-    rel: join('src-tauri', 'data', 'reg-ownership.json'),
+    // v7.2 P1 D1-M02（2026-10-21 用户裁定）：这份表从 `src-tauri/data/` 挪到 `tools/`。
+    // 判据是「它到底是不是运行期数据」——现算它零消费方：不进任何 `include_str!`、运行期不读、
+    // conf 无 `bundle.resources` ⇒ 连安装包都不进。留在 data/ 里会被下一任维护者当成
+    // 「和清理规则同姿势的数据」而去查它的签名/装载/裁剪链路，白花一轮。
+    // 它的真实角色是**给人读的归属台账**，与 `rule-schema.json` 同侧（规格/契约面）。
+    // 挪走之后第 5 组的 `_comment` 坐标存活检查必须跟着把本件纳入扫描面（见 COMMENT_SCAN_EXTRA），
+    // 否则「移动」这件事会把 37 个坐标的对拍保护一起搬空。
+    rel: join('tools', 'reg-ownership.json'),
     why: '无 Rust 消费方（现算 grep 0 命中）、暂无第二真源可对拍；登记 = 让「无人守护」可见',
   },
   {
@@ -336,12 +343,23 @@ const NO_PARITY_REGISTRY = [
   const extRe = /\b([\w-]+(?:\.[\w-]+)*\.(?:rs|mjs|json|js|ps1))\b/g;
   const dead = [];
   let checkedNames = 0;
-  for (const f of readdirSync(dataDir)) {
-    if (!f.endsWith('.json')) continue;
+  // 扫描面 = `src-tauri/data/*.json` + 无对拍登记表里那些**不在 data/ 的件**。
+  // 后者必须自动跟着登记走：归属台账被挪出 data/ 之后，如果本组还只扫 data/，
+  // 「移动」就等于把它 _comment 里几十个坐标的对拍保护一起搬空（D1-M02 的真实风险）。
+  const scanTargets = readdirSync(dataDir)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => ({ label: f, abs: pathMod.join(dataDir, f) }))
+    .concat(
+      NO_PARITY_REGISTRY.map((r) => r.rel.replace(/\\/g, '/'))
+        .filter((rel) => !rel.startsWith('src-tauri/data/'))
+        .map((rel) => ({ label: rel, abs: join(REPO_ROOT, rel) })),
+    );
+  for (const { label, abs } of scanTargets) {
+    const f = label;
     // T1b-M01：JSON.parse 套 try——损坏件必须以判红点名，不许拿 node 堆栈当失败输出
     let v;
     try {
-      v = JSON.parse(readFileSync(pathMod.join(dataDir, f), 'utf8'));
+      v = JSON.parse(readFileSync(abs, 'utf8'));
     } catch (e) {
       fail++;
       console.error(`✗ 5. _comment 坐标存活：${f} JSON 损坏（${e.message.slice(0, 80)}）`);

@@ -17,9 +17,6 @@
      不再有任何不透明的经典实心态；实色回退只保留给 prefers-reduced-transparency 降级块
      与 win-maximized 最大化护栏（见文档 白色容器玻璃化收敛-方案设计-2026-09-13）。 */
   --bg-base: #0F1115;
-  --bg-mica: rgba(15, 17, 21, 0.88);
-  --bg-acrylic: rgba(23, 26, 33, 0.72);
-  --bg-overlay: rgba(0, 0, 0, 0.55);
 
   --fg-primary: #F4F6FA;
   --fg-secondary: #C3C9D4;
@@ -65,14 +62,13 @@
   --warning-soft: rgba(245, 165, 36, 0.14);
   --danger-soft: rgba(240, 82, 77, 0.14);
   --info-soft: rgba(77, 157, 224, 0.14);
-  /* 审查 5-3：受保护/紫色语义（原覆盖层字面 var(--protected) 收敛）+ rgb 三元组（供 rgba(var(--x-rgb), a) 形态） */
-  --protected: #A78BFA;
-  --protected-soft: rgba(167, 139, 250, 0.14);
+  /* 受保护色一族（--protected / -soft / -rgb）已退役：ds.css 的死徽章规则删掉后全仓零消费，
+     受保护项的标识色一律走 --c / --accent-soft 兜底，不再单独开语义色档。
+     rgb 三元组与上方 hex 主档同源：改主档必须同改这里，否则 rgba(var(--x-rgb), a) 形态吃旧色。 */
   --warning-rgb: 245, 165, 36;
   --success-rgb: 52, 199, 123;
   --danger-rgb: 240, 82, 77;
   --info-rgb: 77, 157, 224;
-  --protected-rgb: 167, 139, 250;
   /* 审查 3-1：不透明表面（prefers-reduced-transparency 降级时玻璃/材质面回退到此色） */
   --surface-solid: #171A21;
 
@@ -95,50 +91,34 @@
   --bg-card-hover: rgb(var(--surface-tint) / var(--surface-alpha-card-hover));
   --bg-elevated: rgb(var(--surface-tint) / var(--surface-alpha-elevated));
   --bg-input: rgb(var(--surface-tint) / var(--surface-alpha-input));
-  /* 表面阶梯别名（v2.0 命名，与上方等价，供新组件使用） */
-  --bg-surface-1: var(--bg-card);
+  /* 表面阶梯别名（v2.0 命名，与上方等价）：只留在用的这一档，新增消费方再补档 */
   --bg-surface-2: var(--bg-elevated);
-  --bg-surface-3: var(--bg-input);
   /* 开关/复选圆钮前景（v3.0 收敛：原 3 处写死 white/#ffffff） */
   --knob-bg: #ffffff;
 
-  /* 玻璃模糊档位（v3.0 收敛写实值）：全部档位由 --glass-blur 派生。
-     --glass-blur 基准 26px（与 ds.GLASS_MAX_BLUR_PX 一致），挂玻璃皮肤后由
-     「背景模糊度」滑块实时改写；未挂皮肤时回落基准值，各档位观感与收敛前一致。
-     faint≈12px / soft≈15.6px（沿用既有 0.6 先例）/ mid≈20px / strong≈40px（弹窗级）。 */
+  /* 玻璃模糊档位：基准值与 ds.GLASS_MAX_BLUR_PX 同值（check-css-tokens 逐值对拍），挂玻璃皮肤后由
+     「背景模糊度」滑块实时改写，未挂皮肤时回落基准值。mid 档 = 主档 ×0.77，
+     reduced-motion 段的实底折算走 ×0.6（与已退役的 soft 档同系数，不要顺手改成乘 mid）。
+     弱/柔/强三档全仓零消费已删——加档前先确认有消费方，档位表不留「四档」的空名头。 */
   --glass-blur: 26px;
-  --glass-blur-faint: calc(var(--glass-blur) * 0.46);
-  --glass-blur-soft: calc(var(--glass-blur) * 0.6);
   --glass-blur-mid: calc(var(--glass-blur) * 0.77);
-  --glass-blur-strong: calc(var(--glass-blur) * 1.54);
 
   /* 层级：卡片默认无投影，投影仅用于浮层/弹窗/Toast */
   --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.5);
   --shadow-card: none;
-  --shadow-tooltip: 0 4px 12px rgba(0, 0, 0, 0.45);
-  /* 批次：悬浮岛侧边栏 —— 岛浮影（两级克制投影，弱于弹窗级 --shadow-flyout）；
-     flyout 为收起态悬停浮出时的加强档（B 档） */
+  /* 批次：悬浮岛侧边栏 —— 岛浮影（两级克制投影，弱于弹窗级 --shadow-flyout） */
   --shadow-island: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 18px rgba(0, 0, 0, 0.26);
-  --shadow-island-flyout: 0 4px 10px rgba(0, 0, 0, 0.40), 0 14px 36px rgba(0, 0, 0, 0.42);
 
-  /* 圆角刻度：4 徽章 / 6 输入·次级控件 / 8 按钮 / 10 普通卡片 / 14 大卡·弹窗 */
+  /* 圆角刻度：4 徽章 / 6 输入·次级控件 / 8 按钮 / 10 普通卡片 / 14 大卡·弹窗
+     （--radius-xl 与 large 同值却暗示「比 large 更大」，零消费已删——档位以能分辨的效果为准） */
   --radius-badge: 4px;
   --radius-small: 6px;
   --radius-btn: 8px;
   --radius-medium: 10px;
   --radius-large: 14px;
-  --radius-xl: 14px;
 
-  /* 间距 Token 刻度（UI 设计系统）：1=4px，依 4px 网格递增 */
-  --spacing-1: 4px;
-  --spacing-2: 8px;
-  --spacing-3: 12px;
-  --spacing-4: 16px;
-  --spacing-5: 20px;
-  --spacing-6: 24px;
-  --spacing-8: 32px;
-  --spacing-10: 40px;
-  --spacing-12: 48px;
+  /* 间距 Token 刻度（1=4px 的 4px 网格）整表零消费已删：本仓布局间距历来写实测值，
+     留一张没人吃的栅格只会让「改栅格=改全局」的假设失真。 */
 
   --duration-fast: 160ms;
   --duration-base: 220ms;
@@ -160,13 +140,13 @@
   --font-size-scale: 1;
   --font-weight-scale: 1;
 
-  /* 字号 token：五级字阶（随 --font-size-scale 联动全局字号缩放）
-     page-title=页面大标题 / section=区块标题 / body=正文 / secondary=辅助正文 / meta=次要信息
+  /* 字号 token：四级字阶（随 --font-size-scale 联动全局字号缩放）
+     section=区块标题 / body=正文 / secondary=辅助正文 / meta=次要信息
      约束（审查 F1a-M03）：本文件的 font-size 只许两种写法——`var(--fs-*)`，或档位表里没有的
      尺寸走 `calc(Npx * var(--font-size-scale, 1))`。写死 px 会让「设置 → 字号缩放」对那一行
      静默失效（曾覆盖到高危确认框正文与红色警示块）。唯一豁免：开屏 `.splash-*` 的 clamp/rem
-     视口自适应字号（刻意不跟缩放走）。 */
-  --fs-page-title: calc(28px * var(--font-size-scale, 1));
+     视口自适应字号（刻意不跟缩放走）。
+     页面大标题（28px）不在字阶表里，按上面第二条走 calc 形态，不留同值的空档位。 */
   --fs-section: calc(16px * var(--font-size-scale, 1));
   --fs-body: calc(14px * var(--font-size-scale, 1));
   --fs-secondary: calc(13px * var(--font-size-scale, 1));
@@ -179,17 +159,12 @@
    里重申 --surface-tint 与四个合成声明，var() 才会按白基色重新解析。 */
 .theme-light {
   --bg-base: #F6F4FB;
-  --bg-mica: rgba(246, 244, 251, 0.88);
-  --bg-acrylic: rgba(255, 255, 255, 0.72);
   --surface-tint: 255 255 255;
   --bg-card: rgb(var(--surface-tint) / var(--surface-alpha-card));
   --bg-card-hover: rgb(var(--surface-tint) / var(--surface-alpha-card-hover));
   --bg-elevated: rgb(var(--surface-tint) / var(--surface-alpha-elevated));
   --bg-input: rgb(var(--surface-tint) / var(--surface-alpha-input));
-  --bg-surface-1: var(--bg-card);
   --bg-surface-2: var(--bg-elevated);
-  --bg-surface-3: var(--bg-input);
-  --bg-overlay: rgba(30, 25, 52, 0.38);
 
   --fg-primary: #292536;
   --fg-secondary: #5C5770;
@@ -242,27 +217,18 @@
   --warning-soft: rgba(135, 87, 8, 0.12);
   --danger-soft: rgba(172, 42, 39, 0.1);
   --info-soft: rgba(29, 100, 147, 0.12);
-  /* 审查 5-3：同上（浅色主题对应组）。
-     审查 L18：#7C5CE6 于浅底 4.25:1、于自身 soft 底 3.67:1，都不达 AA —— 它是
-     accent 那批加深时被漏掉的一组；同色相加深至 #6A45D6 后为 5.60 / 4.72。
-     soft 与 -rgb 三个值必须同步改，否则 rgba(var(--protected-rgb),a) 形态还是旧色。 */
-  --protected: #6A45D6;
-  --protected-soft: rgba(106, 69, 214, 0.12);
   --warning-rgb: 135, 87, 8;
   --success-rgb: 21, 107, 66;
   --danger-rgb: 172, 42, 39;
   --info-rgb: 29, 100, 147;
-  --protected-rgb: 106, 69, 214;
   /* 审查 3-1：浅色不透明表面 */
   --surface-solid: #FFFFFF;
 
   /* 浅色下白卡需轻投影分离；浮层投影更深 */
   --shadow-flyout: 0 8px 24px rgba(58, 48, 120, 0.16);
   --shadow-card: 0 1px 3px rgba(58, 48, 120, 0.07);
-  --shadow-tooltip: 0 4px 12px rgba(58, 48, 120, 0.14);
   /* 批次：悬浮岛侧边栏 —— 浅色岛浮影（冷墨低透明，浅色下投影更克制） */
   --shadow-island: 0 1px 2px rgba(58, 48, 120, 0.06), 0 6px 18px rgba(58, 48, 120, 0.10);
-  --shadow-island-flyout: 0 4px 10px rgba(58, 48, 120, 0.10), 0 14px 36px rgba(58, 48, 120, 0.16);
 }
 
 /* 设计系统扩展：玻璃皮肤引擎 + 预设背景
@@ -1312,9 +1278,8 @@ body {
   flex: 0 0 auto;
   min-height: 18px;
 }
-.category-risk.low { background: rgba(var(--success-rgb), 0.15); color: var(--success); }
-.category-risk.medium { background: rgba(var(--warning-rgb), 0.15); color: var(--warning); }
-.category-risk.high { background: rgba(var(--danger-rgb), 0.15); color: var(--danger); }
+/* 风险档（low/medium/high）的染底与前景唯一真源在 ds.css：本文件不留第二份同特异度声明
+   （审查 F1b-L02：两份 background+color 并立时净结果只由加载序决定，等于隐性覆盖）。 */
 
 /* 筛选标签 */
 .filter-tabs {
@@ -1519,10 +1484,7 @@ body.lg-reduce-motion .lg-thumb {
 }
 .badge.system { background: rgba(var(--success-rgb), 0.15); color: var(--success); }
 .badge.protected { background: rgba(var(--danger-rgb), 0.15); color: var(--danger); }
-/* 审查 K1 连带（2026-10-03 L3）：染底 0.18 在亮色主题下与 --fg-tertiary 只有 4.14:1，
-   低于 AA 4.5。该徽章承载真实文本（cleanup.js 的「旧版」、contextmenu.js 的分类标签），
-   不是装饰件，不能豁免。按门禁自带的修法备忘把浓度降到 10%：亮 4.54 / 暗 5.57。 */
-.badge.off { background: rgba(120, 120, 130, 0.1); color: var(--fg-tertiary); }
+/* badge.off 的染底与前景唯一真源在 ds.css（审查 K1 的 AA 约束随该档一并迁过去）。 */
 
 /* 右键菜单分类分组 */
 .ctx-cat-group {
@@ -3324,8 +3286,8 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   padding: 2px 8px;
   border-radius: 999px;
 }
-.startup-badge.on { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
-.startup-badge.off { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+/* on/off 两档的染底与前景唯一真源在 ds.css（同 .category-risk 那条口径，审查 F1b-L02）；
+   ghost 档只有本文件一份，不属重复实现。 */
 .startup-badge.ghost { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 /* v3.7.0 议题二 P0：缓存年龄横幅（数据来自 N 分钟前的扫描 · 立即重新扫描） */
@@ -5176,7 +5138,8 @@ body.bg-image-on .main-content {
 
 /* ---------- 液态玻璃 tint token（不依赖材质开关，lg 四档都可能用到） ----------
    v2.8.0：清理死代码——原 :root 的**暗色**玻璃 token（alpha 0.22 那一套）因应用恒挂
-   theme-light 而永不生效（「固定浅色」是产品决策，见 readme），删除后只留 --lg-glass-fg。
+   theme-light 而永不生效（「固定浅色」是产品决策，见 readme），当时只留 --lg-glass-fg，
+   该前景槽档后经全仓引用面现算同样零消费、一并退役。
    口径 v2·R7（2026-10-14）把 :root 重新填上基准值是**中性白玻璃那一套**（下面四行），
    与当年被删的暗色 alpha 不是同一份东西：它现在被 .btn 等常态操作面直接消费。 */
 :root {
@@ -5193,7 +5156,6 @@ body.bg-image-on .main-content {
   /* 对比度护栏（方案 A5）：玻璃浮层的最小白底——与 --bg-elevated 叠加复合后
      保证 ≥0.45 alpha，任意壁纸上正文（--fg-primary 深色）维持 WCAG AA 对比 */
   --lg-glass-floor: rgba(255, 255, 255, 0.45);
-  --lg-glass-fg: var(--fg-primary);
   /* 审查 F1a-M02：描边/高光/质感四档原先**只在 .theme-light 定义**，而消费点一条 fallback
      都没写——上面那段刚把 tint/floor 上移 :root 的理由对这四档同样成立（子窗首帧与
      window-material.js 有先后，class 没挂上时 var() 取空值）。`backdrop-filter: blur(..)

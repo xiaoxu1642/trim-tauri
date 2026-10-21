@@ -53,8 +53,13 @@ const REGISTRY = [
   { file: 'check-optimizer-security.mjs', reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
   { file: 'check-optimizer-groups-sidecar.mjs', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量（内置 6 条对照样本随跑随验，2026-10-20 从 PENDING 迁入）' },
   // T1c-M02 / T1c-M05（v7.2 C09）两条新门禁：
-  { file: 'check-data-signatures.mjs', reason: '数据产物逐件验签：正向对照三样本（真签名放行 / 正文篡改判红 / 签名换尾判红），对照失效即整条门禁不可信；判定器 import 自 sign-cleanup-rules 单一实现' },
+  { file: 'check-data-signatures.mjs', reason: '数据产物逐件验签（D1-M03 扩到五件）：签名面现算 ⇄ 登记面双向对账（摘一件必红、塞一件无签名的必红，两向均在 2026-10-21 实跑判红并点名对象）+ 四件内联 _sig 产物逐件字节对照（正文追加空格 / 签名换尾八字节必须拒）；判定 import 自 sign-cleanup-rules 单一实现。段序=对账→对照→逐件验签，真样本验签不过归第 3 段以「改后必须重签」点名，不再冒充「判定器不可信」' },
   { file: 'check-fixture-freshness.mjs', reason: '夹具新鲜度：比对器 isFresh 正反合成样本钉方向（反相 = 全绿假象）；主断言「盘上 ⇄ 生成器导出逐字节」的手改破坏由真破坏验证兜底' },
+  {
+    file: 'check-pending-batch-limit.mjs',
+    selfTestArgs: ['--selftest'],
+    reason: 'IPC 载荷上限跨语言单源：8 组合成样本与现盘判定共用同一 judge（前端导出值改 33 必红 / 后端锚点消失必红 / 前端锚点重复必红 / 消费面字面量副本回归必红 / 漏读导出必红（reached 只 1 个）/ 非消费文件偷抄必红 / 注释里的举例不判红 / 干净样本不假红）；对照块每次运行都跑，不再只在 --selftest 才跑',
+  },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
@@ -62,6 +67,7 @@ const REGISTRY = [
 // 从本表删除（断言 4/5 会核对两张表与 MUST_RUN 的一致性）。新增必跑门禁一律进 REGISTRY，
 // 进不了就先在这里登记并写明为什么暂缺 —— 不登记即红。
 const PENDING_CONTROLS = [
+  { name: 'check-appearance-prefs', reason: 'P1-W3 Phase2c 新开门禁（A 组换算结构签名 ⇄ B 组偏好键白名单与镜像）：判据本体在真源文件上做文本抽取，**尚无内置合成样本**；单元代理以盘外副本喂过 8 组破坏（Rust 删 round / 基数改 99 / JS 退化 half-up / 删换算函数 / PREF_KEYS 删键 / 删老键字面量 / 执行侧回退直读 localStorage / 写路径缺镜像）全部 EXIT=1，真破坏验证有过、对照块没有 ⇒ 补齐后迁 REGISTRY' },
   { name: 'check-channel-map', reason: '对拍型：桥接表 ⇄ Rust 通道集合双向比对，缺「删/添一侧必须红」的合成样本' },
   { name: 'check-guard-tiers', reason: '对拍型：档位表 ⇄ 命令体 guard 调用逐条核对，缺合成样本' },
   // check-layering 已于 2026-10-18 v6 P2 配好判定器自检并迁入 REGISTRY（本表只减不增）。

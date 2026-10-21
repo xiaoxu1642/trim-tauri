@@ -49,14 +49,17 @@
 //!   `commands/paths.rs` 的应用图标候选清单（内部拼出来的绝对路径）、
 //!   `commands/paths.rs` 的 `paths:file-icon`（**渲染层任意串**）、
 //!   `commands/contextmenu.rs` 的 CLSID `InprocServer32` 展平值（注册表内容）。
-//!   谁给的路径、能不能加载，由那一侧设闸——本模块**不设系统目录/扩展名白名单**，
+//!   闸门落点是 `commands::paths::icon_source_reject_reason`（R6b-M11 的调用点那一半，
+//!   三处共用同一份判据）：它先过本模块的 [`guard_icon_source`]，再只收**本机盘符命名空间**
+//!   下的绝对路径。本模块**不设系统目录/扩展名白名单**，
 //!   因为图标链的合法来源本来就在 `%WINDIR%`（`shell32.dll,-1` 这类经典引用）与
 //!   `.ico/.exe/.dll/目录` 四个面之内，按「非白名单扩展名一律拒」会在自己的调用点上打断功能。
 //! - 另需如实记一笔：`engine/protect.rs` 在 K01（右键图标资源串 `@C:\…\x.dll,-1`）
 //!   那段把「白名单外一律不加载 DLL」列为该判据的消费方之一，而现算
-//!   `is_system_namespace` 的消费点**不含任何图标链** —— 那条约束目前在注释里、
-//!   不在代码里。要把它落成闸门，得在调用点侧统一加 `guard_icon_source` + 域内白名单
-//!   （跨面改动，本批只在单元内补了命名空间这一条）。
+//!   `is_system_namespace` 的消费点**不含任何图标链** —— 图标链的白名单是上面那条
+//!   「本机盘符命名空间」，不是 `is_system_namespace`（后者只覆盖 `%SystemRoot%` 子树，
+//!   用它当图标闸会把 Program Files 下的合法扩展图标整批打死）。protect 那句宣称
+//!   与本链无涉，措辞对齐属跨面，见 `engine/protect.rs` 的 K01 段。
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};

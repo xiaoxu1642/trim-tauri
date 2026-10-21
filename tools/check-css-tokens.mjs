@@ -323,43 +323,15 @@ if (curveSites === 0) {
 
 // ---- 反向棘轮（T1d-M01）：定义但全仓零消费的 token 必须逐条登记理由 ----
 // 与 ALLOW_UNDECLARED（引用无定义）方向相反；新增死 token 不在表内即红。
+// 零消费 token 的登记台账（反向棘轮：定义了但全仓无 `var()` 消费的档位）。
+// v7.2 P1 · U-F1a-L01 / U-F1b-L02（2026-10-22）整批退役 27 条：这些档位已从 `main.css`
+// 定义面删除，登记留在表里会被下一条 `staleDead` 判红 —— 而「判红」正是这条断言存在的意义
+// （登记必须与盘上现状同步，否则台账会变成一堆「理由」的化石）。
+// 仍保留的两条是 pathbinding 的交互态档：定义有意先落、消费方在渲染层后续接入，删了等于
+// 把「等接入」这件事从台账里抹掉，下一任只能重新发现。
 const DEAD_TOKEN_ALLOW = new Map([
-  // spacing：布局档位表（保留栅格档，当前页面未消费；新增布局优先走它）
-  ['--spacing-1', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-2', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-3', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-4', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-5', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-6', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-8', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-10', '布局间距档位（当前未消费，保留栅格表）'],
-  ['--spacing-12', '布局间距档位（当前未消费，保留栅格表）'],
-  // 材质/玻璃：保留的语义档，当前只消费主档
-  ['--bg-acrylic', '材质层语义档（当前未消费，保留给亚克力面）'],
-  ['--bg-mica', '材质层语义档（当前未消费，保留给 Mica 面）'],
-  ['--bg-overlay', '浮层底色档（当前未消费，保留给覆盖层）'],
-  ['--bg-surface-1', '表面层级档（当前未消费，保留给分层卡片）'],
-  ['--bg-surface-3', '表面层级档（当前未消费，保留给分层卡片）'],
-  ['--glass-blur-faint', '液态玻璃模糊三档之一（当前只消费 --glass-blur 主档，保留弱/中档）'],
-  ['--glass-blur-soft', '液态玻璃模糊三档之一（当前只消费 --glass-blur 主档，保留弱/中档）'],
-  ['--glass-blur-strong', '液态玻璃模糊三档之一（当前只消费 --glass-blur 主档，保留强档）'],
-  ['--lg-glass-fg', '液态玻璃前景状态槽（当前未消费，保留给运行时材质调试）'],
-  ['--lg-mx', '液态玻璃指针位置状态槽（JS 写入、样式当前未消费）'],
-  ['--lg-my', '液态玻璃指针位置状态槽（JS 写入、样式当前未消费）'],
-  // 语义色/交互态：保留档
   ['--accent-glow', 'accent 发光态（当前未接入，保留交互态档）'],
   ['--accent-press', 'accent 按下态（当前未接入，保留交互态档）'],
-  // 受保护色一族：U-F1b 删掉 ds.css 的 .badge.system/.protected 死规则后整族零消费。
-  // 整族删除属 U-F1a-L01（死 token 24 个）射程，且要同步 TRIPLET_BASES 与浅底预期值表，
-  // 故本批先登记、不在收红阶段顺手删（AGENTS §4.1：登记必须写清由谁收口）。
-  ['--protected', '受保护色主档（U-F1b 删死 badge 规则后整族零消费；待 U-F1a-L01 连同 -soft/-rgb 一并删）'],
-  ['--protected-rgb', '受保护色 RGB 档（当前 UI 未使用；与 --protected 同值）'],
-  ['--protected-soft', '受保护色浅染档（当前 UI 未使用；与 --protected 同值）'],
-  // 尺寸/阴影：兼容或预留档
-  ['--radius-xl', '圆角兼容别名（14px，全仓零引用；保留旧样式兼容）'],
-  ['--fs-page-title', '页面标题字号档（当前未消费，保留字号表档位）'],
-  ['--shadow-island-flyout', '浮岛浮层阴影档（当前未消费，保留浮层阴影）'],
-  ['--shadow-tooltip', '提示气泡阴影档（当前未消费，保留提示阴影）'],
 ]);
 
 const deadTokens = [...defined].filter((n) => !refs.has(n) && !DEAD_TOKEN_ALLOW.has(n)).sort();
@@ -373,7 +345,9 @@ if (deadTokens.length || staleDead.length) {
 console.log(`✓ 反向棘轮：${defined.size} 个定义中零消费 ${DEAD_TOKEN_ALLOW.size} 条均有理由`);
 
 // ---- 三值同步（T1d-M05）：--x ⇄ --x-rgb ⇄ --x-soft 的三通道必须同源 ----
-const TRIPLET_BASES = ['--warning', '--success', '--danger', '--info', '--protected'];
+// `--protected` 一族已于 v7.2 P1 · U-F1a-L01 整族从 `main.css` 退役（ds.css 的死徽章规则
+// 先删掉后整族零消费），故不再列入三元组基名表 —— 留在表里会让下一条断言去找已不存在的定义。
+const TRIPLET_BASES = ['--warning', '--success', '--danger', '--info'];
 function judgeTriplets(defs) {
   const bad = [];
   for (const base of TRIPLET_BASES) {
@@ -420,7 +394,6 @@ const tripletProblems = [];
     '--success': '#3DBE7B', '--success-rgb': '61, 190, 123', '--success-soft': 'rgba(61, 190, 123, 0.14)',
     '--danger': '#F0524D', '--danger-rgb': '240, 82, 77', '--danger-soft': 'rgba(240, 82, 77, 0.14)',
     '--info': '#4DA3F0', '--info-rgb': '77, 163, 240', '--info-soft': 'rgba(77, 163, 240, 0.14)',
-    '--protected': '#6A45D6', '--protected-rgb': '106, 69, 214', '--protected-soft': 'rgba(106, 69, 214, 0.1)',
   };
   const bad = { ...good, '--danger-rgb': '240, 82, 78' };
   if (judgeTriplets(good).length !== 0 || judgeTriplets(bad).length !== 1) {

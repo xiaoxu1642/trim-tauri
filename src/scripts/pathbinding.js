@@ -453,11 +453,28 @@
     }, BG_FADE_MS);
   }
 
-  // 批次：雾化度语义反转迁移 —— 旧值存的是「图片不透明度」（100=纯图），新值为「雾化强度」
-  // （0=纯图，100=全雾）。一次性换算 100-v（迁移前后视觉效果一致）并打 bgOpacityFog 标记防重复。
+  // 批次：雾化度语义反转 —— 旧值存的是「图片不透明度」（100=纯图），新值为「雾化强度」
+  // （0=纯图，100=全雾），所以是取反。
+  // R6b-L07（AGENTS §5.16：同一判定不许两侧各写一份）：这条换算在 Rust 侧
+  // `src-tauri/src/engine/appearance.rs` 的 bg_opacity_to_fog 有同一判定的另一份实现，
+  // 跨语言只能共享判据不能共享函数，两侧口径（取反基数 + 是否取整）由跨语言对拍门禁钉住。
+  // 不同步改两侧的症状是两次迁移叠加后落盘值分叉（旧值 33.4 → 一侧取整成 67、一侧留 66.6），
+  // 而小数百分比进 CSS 的 calc 与 --bg-blur 时观感也会不一致。
+  // 取整口径要跟上 Rust 的 f64::round()「半值远离 0」：旧值越界（>100）时 100-v 为负，
+  // 直接用 Math.round 会朝 +∞ 取半，两边又分叉一次。
+  function bgOpacityToFog(opacity) {
+    const d = 100 - opacity;
+    return d < 0 ? -Math.round(-d) : Math.round(d);
+  }
+
+  // 一次性迁移（幂等，打 bgOpacityFog 标记防重复）。
+  // 只换算有限数值：非数值不动，与 Rust 侧 as_f64 取不到即跳过同口径——旧实现走 JS 强转，
+  // 字符串会算出 NaN 再经 JSON 序列化成 null，把坏值洗成另一种坏值（Rust 侧压根不写盘）。
+  // 标记仍要照打：滑块写回的是雾化语义值且不碰标记，本函数是渲染层唯一的防重复入口，
+  // 「旧值缺失也打标记」少了它会让下一次加载把新值再取反一遍。
   function migrateBgOpacityToFog(ap) {
     if (ap.bgOpacityFog === true) return ap;
-    if (ap.bgOpacity != null) ap.bgOpacity = 100 - ap.bgOpacity;
+    if (Number.isFinite(ap.bgOpacity)) ap.bgOpacity = bgOpacityToFog(ap.bgOpacity);
     ap.bgOpacityFog = true;
     saveAppearance(ap);
     return ap;

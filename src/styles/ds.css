@@ -32,9 +32,13 @@
 .ds-badge.neutral { background: var(--bg-input);     color: var(--fg-tertiary); }
 .ds-badge.accent  { background: var(--accent-soft);  color: var(--accent); }
 
-/* 旧徽章类别名：视觉收敛到同一 token 语义（只覆盖颜色，不改各处既定形状/尺寸）。
-   覆盖对象 = main.css 的 .category-risk.low / .badge.off / .startup-badge.off 等同选择器
-   同特异度规则（硬编码 rgba；按选择器锚点指认，登记行号会随增删漂移）。 */
+/* 旧徽章类别名的染底与前景**唯一真源**（形状/尺寸仍在 main.css 的基类里）：
+   全部走 --*-soft / --bg-input token，不再留硬编码 rgba。
+   审查 F1b-L02：main.css 原有同选择器、同特异度 0-2-0、同属性的第二份实现，净结果只由
+   「ds.css 排在 main.css 之后」决定——那种级联已经删掉，改这里就是改界面，不必再去
+   main.css 找一份并不生效的旧值。
+   badge.off 承载真实文本（cleanup.js 的「旧版」、contextmenu.js 的分类标签），
+   不是装饰件：染底与 --fg-tertiary 必须达 AA 4.5:1，取值以 check-contrast 的逐组合现算为准。 */
 .category-risk.low        { background: var(--success-soft); color: var(--success); }
 .category-risk.medium     { background: var(--warning-soft); color: var(--warning); }
 .category-risk.high       { background: var(--danger-soft);  color: var(--danger); }

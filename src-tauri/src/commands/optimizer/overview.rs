@@ -882,7 +882,13 @@ pub async fn optimizer_nara_panel<R: Runtime>(window: WebviewWindow<R>) -> Value
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    json!({ "success": true, "data": nara_panel_sidecar() })
+    // D1-M03：装载侧返回 None 只有一种原因——签名不符（日志已落 error）。
+    // 这里必须报失败而不是 `data: {}`：空表会让 hiddenFromOptimizer 过滤集塌空，
+    // 用户看到的是「面板没了、那批项又回到主列表」，与「数据被换掉过」是两件事。
+    match nara_panel_sidecar() {
+        Some(data) => json!({ "success": true, "data": data }),
+        None => json!({ "success": false, "message": "永劫专项面板侧表验签未通过，已拒收（详见应用日志）" }),
+    }
 }
 
 /// optimizer:privacy-panel —— 隐私自护面板侧表下发（2026-10-11，WinUtil 借鉴 V3）
@@ -895,7 +901,10 @@ pub async fn optimizer_privacy_panel<R: Runtime>(window: WebviewWindow<R>) -> Va
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    json!({ "success": true, "data": privacy_panel_sidecar() })
+    match privacy_panel_sidecar() {
+        Some(data) => json!({ "success": true, "data": data }),
+        None => json!({ "success": false, "message": "隐私自护面板侧表验签未通过，已拒收（详见应用日志）" }),
+    }
 }
 
 /// optimizer:svc-mem-current —— 当前 SVCHost 拆分阈值档位

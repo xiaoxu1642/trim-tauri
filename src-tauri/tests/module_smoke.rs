@@ -141,6 +141,92 @@ fn paths_save_rejects_unknown_key() {
     );
 }
 
+// ==================== R6b-M11：图标来源的域内白名单 ====================
+
+/// paths:file-icon —— 远程/外壳命名空间来源必须在**交给外壳之前**被域内白名单拒掉，
+/// 且拒因进回执。只断 `success:false` 不够：那个形状分不清「闸门拒的」与「提取失败的」，
+/// 属 §4.1「没报错」型假绿。正向特征点名（`reached`）：三条向量各自命中的理由逐条数得出来。
+#[test]
+fn paths_file_icon_rejects_remote_namespace_before_touching_shell() {
+    let w = main_window();
+    let mut reached: Vec<String> = Vec::new();
+    for (probe, expect_in_reason) in [
+        (r"\\srv\share\app\tool.exe", "本机盘符命名空间"),
+        (r"\\?\UNC\srv\share\a.dll", "本机盘符命名空间"),
+        ("::{42aedc87-2188-41fd-b9a3-0c966feabec1}", ":: 前缀"),
+    ] {
+        let res = invoke(&w, "paths_file_icon", json!({ "filePath": probe }));
+        assert_eq!(res["success"], json!(false), "不受信来源 {probe} 竟回执成功: {res}");
+        assert!(res["dataUrl"].is_null(), "被拒时 dataUrl 必须显式为 null: {res}");
+        let msg = common::message_of(&res);
+        assert!(
+            msg.contains(expect_in_reason),
+            "来源 {probe} 的拒因应点名「{expect_in_reason}」，实到「{msg}」"
+        );
+        reached.push(format!("{probe}=>{expect_in_reason}"));
+    }
+    assert_eq!(
+        reached.len(),
+        3,
+        "三条不受信向量必须逐条命中（实到 {reached:?}）——少一条就是用例没在测东西"
+    );
+}
+
+/// paths:file-icon 的档位仍是 readonly（子窗可调）：这条改动不许顺手改窄或改宽。
+/// 子窗用**必然被域内白名单拒**的串调用：拿到「命名空间拒因」而不是「IPC 来源校验失败」，
+/// 即证明闸门顺序是「来源校验 → 域内白名单」，且档位没被这次改动动过。
+#[test]
+fn paths_file_icon_tier_stays_readonly_and_unknown_label_still_rejected() {
+    let mut reached_labels: Vec<&str> = Vec::new();
+    for label in sub_windows() {
+        let w = window_with_label(label);
+        let text = invoke_text(&w, "paths_file_icon", json!({ "filePath": r"\\srv\share\a.ico" }));
+        common::assert_guard_passed(
+            &text,
+            &format!("子窗 {label} 调 paths:file-icon"),
+            &["本机盘符命名空间"],
+        );
+        reached_labels.push(label);
+    }
+    assert!(
+        !reached_labels.is_empty(),
+        "一个子窗 label 都没走到（sub_windows() 派生自 engine::guard::APP_WINDOWS，为空说明底座变了）"
+    );
+    let alien = invoke_text(
+        &window_with_label("__trim_injected__"),
+        "paths_file_icon",
+        json!({ "filePath": r"\\srv\share\a.ico" }),
+    );
+    assert!(
+        alien.contains("IPC 来源校验失败"),
+        "未知 label 必须仍被来源校验拒，实到 {alien}"
+    );
+}
+
+/// 真机正向探针（发版前必须实跑）：系统 dll 的图标**必须还取得到**。
+/// 这条钉的是「白名单只按来源命名空间收放」这个口径没被改成按扩展名 / 按系统目录一律拒 ——
+/// 那种改法会让进程列表 / 启动项 / 卸载列表三处图标整批空掉，而上面两条词法用例在
+/// MockRuntime 下只断拒侧、看不出来。触 GDI + 读真实盘，故 `#[ignore]`。
+#[test]
+#[ignore = "真机：SHGetFileInfoW 取系统 dll 图标（只读，发布前人工跑）"]
+fn paths_file_icon_still_serves_local_system_dll_icon() {
+    let w = main_window();
+    let res = invoke(
+        &w,
+        "paths_file_icon",
+        json!({ "filePath": r"C:\Windows\System32\shell32.dll" }),
+    );
+    assert_eq!(res["success"], json!(true), "系统 dll 图标被拒，回执 {res}");
+    let url = res["dataUrl"]
+        .as_str()
+        .unwrap_or_else(|| panic!("dataUrl 不是字符串，回执 {res}"));
+    assert!(
+        url.starts_with("data:image/png;base64,"),
+        "图标应是 PNG dataURL，实到前缀 {}",
+        &url[..24.min(url.len())]
+    );
+}
+
 /// 子窗档位通用式：guard_readonly 档命令从**每个**子窗 label 都应能越过档位
 /// （以 settings_load 为载体；真数据断言在各模块自己的用例里）。
 /// 防的是：M1~M3 那类「子窗专属通道被按 MAIN 校验锁死」的镜像缺陷——

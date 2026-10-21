@@ -653,20 +653,10 @@
     elasticRaf = requestAnimationFrame(updateElastics);
   }
 
-  // 高光渐变随指针流动（CSS 变量驱动 ::before radial specular 光斑）。
-  // 修复实锤4：只往消费方 .lg-elastic 写入——弹层光效由 WebGL shimmer 承担（full 档），
-  // 原先对弹层写入 --lg-mx/--lg-my 无任何读取方，属死变量。
-  // 值必须带 %：CSS radial-gradient 的 circle at 位置吃 <percentage>，无单位数字会让
-  // 整条渐变在 computed-value 阶段非法回退为 none
-  function onPointerOver(e) {
-    const el = e.target && e.target.closest ? e.target.closest('.lg-elastic') : null;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    el.style.setProperty('--lg-mx', (((e.clientX - r.left) / r.width) * 100).toFixed(1) + '%');
-    el.style.setProperty('--lg-my', (((e.clientY - r.top) / r.height) * 100).toFixed(1) + '%');
-  }
-
+  // 指针高光曾走 CSS 变量：onPointerOver 往 .lg-elastic 写 --lg-mx/--lg-my，但全仓 var()
+  // 消费 0 次（光斑实际由 spotlight.js 的 --spot-x/--spot-y 驱动），弹层光效由 WebGL
+  // shimmer 承担——写入点与 pointerover 监听整条退役（审查 F1a-L08：死跨语言 API 会骗过
+  // 「引用−定义」正向差集，还每次 pointerover 都同步读一次 getBoundingClientRect）。
   function onPressIn(e) {
     const el = e.target && e.target.closest ? e.target.closest('.lg-elastic') : null;
     if (el) el.style.setProperty('--lg-press', '0.96');
@@ -1105,13 +1095,11 @@
   function bindReducePointerListeners(add) {
     if (add) {
       document.addEventListener('pointermove', onPointerMove, { passive: true });
-      document.addEventListener('pointerover', onPointerOverSheenSafe, true);
       document.addEventListener('pointerdown', onPressIn, true);
       document.addEventListener('pointerup', onPressOut, true);
       document.addEventListener('pointercancel', onPressOut, true);
     } else {
       document.removeEventListener('pointermove', onPointerMove, { passive: true });
-      document.removeEventListener('pointerover', onPointerOverSheenSafe, true);
       document.removeEventListener('pointerdown', onPressIn, true);
       document.removeEventListener('pointerup', onPressOut, true);
       document.removeEventListener('pointercancel', onPressOut, true);
@@ -1212,11 +1200,6 @@
     states.forEach((state) => {
       if (state.thumb) state.thumb.style.display = mode === 'off' ? 'none' : '';
     });
-  }
-
-  // pointerover 需要元素已挂玻璃才有意义，包一层防呆
-  function onPointerOverSheenSafe(e) {
-    if (mode === 'full') onPointerOver(e);
   }
 
   window.liquidBar = {

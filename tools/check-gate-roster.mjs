@@ -45,6 +45,11 @@ const MUST_RUN = [
   'check-subwindow-css',
   'check-idle-scripts',
   'check-escape-delegation',
+  // P1-W3 Phase2c（2026-10-22）：单元代理片段落成真门禁。两条各钉一支跨语言/跨文件单源：
+  // check-pending-batch-limit 钉「IPC 载荷上限只许在 Rust 一处」，check-appearance-prefs 钉
+  // 「bgOpacity→雾化 换算结构签名 ⇄ 保护层偏好键的 PREF_KEYS 白名单 + 老键只作镜像」。
+  'check-pending-batch-limit',
+  'check-appearance-prefs',
   'check-subwindow-init',
   'check-confirm-danger',
   'check-treemap-layout',

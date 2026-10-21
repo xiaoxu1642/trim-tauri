@@ -417,10 +417,10 @@
       dangerHint: '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
     });
     if (!ok) return;
-    // K12（v6）：后端单批上限 32（PENDING_ADD_MAX_ITEMS）——残留执行一批最多 200 个
-    // 目标，失败文件可能超 32，旧流程一次性全送必被整批拒「请分批登记」。按 32 切片
-    // 顺序登记、聚合回执。
-    const PENDING_BATCH = 32;
+    // K12（v6）：残留执行一批最多 200 个目标，失败文件可能超后端单批上限，旧流程一次性全送
+    // 必被整批拒「请分批登记」，故按上限切片顺序登记、聚合回执。上限不写在这里：真源在 Rust，
+    // 读 tauri-api.js 的导出（F4a1-L09 撤掉了此处的本地字面量副本）。
+    const PENDING_BATCH = window.ipcLimits.pendingAddMaxItems;
     try {
       let added = 0;
       let skipped = 0;

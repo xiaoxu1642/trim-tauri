@@ -399,21 +399,67 @@
   // §2.3（2026-10-06 拍板）：卸载前可选创建系统还原点。默认关；失败只提示、不拦卸载
   // —— 还原点是保护，不是前置条件（对齐 HiBit 语义）。复用 optimizer 域现有命令，
   // Rust 侧零改动：check_restore 是 readonly 档、create_restore 是 MAIN 档，主窗都能调。
+  // F4a1-M08（AGENTS §0.2：配置真源在数据目录，localStorage 只是镜像）：这个开关原先只活在
+  // localStorage，一次存储被清就把用户打开的「卸载前建还原点」静默拨回关（少一层保护），
+  // 而界面上的勾选框跟着一起跑。真源迁 `src-tauri/src/commands/settings.rs` 的 PREF_KEYS
+  // 白名单键 uninstallRestorePoint（值只接受布尔，语义与副窗「删除前备份」同一类保护层开关）。
+  // 口径：**读时后端优先、老键兜底**——初值先取老键，随后 getPrefs 回读：后端是布尔就采纳
+  // 并把老键与勾选框同步过去；后端读不到/非布尔（未设置）就把本地现值一次性迁移上去。
+  // **写时两边都写**——老键继续写（镜像，兼下次冷启动的兜底初值），setPref 写真源；
+  // 老键在迁移完成前不得删除：存量用户的这项状态只存在那儿。
+  // D2（v4 审查）：读失败/坏值一律走「未开启」方向 + 留痕（同残留副窗备份开关的口径）。
   const RESTORE_PREF_KEY = 'trim.uninstall.restorePoint';
-  // D2（v4 审查）：读失败/坏值走「未开启」方向 + 留痕（同残留副窗备份开关的口径）。
-  function readRestorePref() {
+  const RESTORE_PREF_BACKEND_KEY = 'uninstallRestorePoint';
+  let restorePref = readLsRestorePref();
+  let restorePrefDirty = false;
+
+  function readLsRestorePref() {
     let raw = null;
     try { raw = localStorage.getItem(RESTORE_PREF_KEY); }
     catch (e) {
-      window.app?.log?.('warn', `卸载页还原点开关偏好读取失败，已按未开启处理: ${e.message}`);
+      window.app?.log?.('warn', `卸载页还原点开关镜像读取失败，已按未开启处理: ${e.message}`);
       return false;
     }
     if (raw === '1') return true;
     if (raw !== null && raw !== '' && raw !== '0') {
-      window.app?.log?.('warn', `卸载页还原点开关偏好值异常（${raw}），已按未开启处理`);
+      window.app?.log?.('warn', `卸载页还原点开关镜像值异常（${raw}），已按未开启处理`);
     }
     return false;
   }
+  function readRestorePref() { return restorePref === true; }
+  function writeRestorePref(on) {
+    restorePref = on === true;
+    restorePrefDirty = true;
+    try { localStorage.setItem(RESTORE_PREF_KEY, restorePref ? '1' : '0'); }
+    catch (e) { window.app?.log?.('warn', `卸载页还原点开关镜像写入失败（真源仍写后端）: ${e.message}`); }
+    try {
+      window.api?.settings?.setPref?.(RESTORE_PREF_BACKEND_KEY, restorePref)?.catch?.((e) => {
+        window.app?.log?.('warn', `卸载页还原点开关偏好写入配置失败: ${e && (e.message || e)}`);
+      });
+    } catch (e) {
+      window.app?.log?.('warn', `卸载页还原点开关偏好写入配置异常: ${e && (e.message || e)}`);
+    }
+  }
+
+  // 后端真源回读：boolean ⇒ 采纳并同步勾选框与镜像；非 boolean（未设置/坏值）⇒ 把本地现值
+  // 一次性迁移上去。restorePrefDirty 时跳过采纳（读回的是本轮写入前的旧值，别让旧值盖掉新选择）。
+  (async function syncRestorePref() {
+    try {
+      const resp = await window.api?.settings?.getPrefs?.();
+      if (!resp || !resp.success || restorePrefDirty) return;
+      const v = resp.data?.[RESTORE_PREF_BACKEND_KEY];
+      if (typeof v === 'boolean') {
+        if (v !== restorePref) {
+          restorePref = v;
+          try { localStorage.setItem(RESTORE_PREF_KEY, v ? '1' : '0'); } catch (e) { /* 镜像写失败不影响（真源已就位） */ }
+          const t = document.getElementById('uninstallRestoreToggle');
+          if (t) t.checked = v;
+        }
+      } else {
+        writeRestorePref(restorePref); // 迁移：后端没有值，把本地现值推上去
+      }
+    } catch (e) { /* 真源不可用按本地镜像工作，本次选择不静默丢弃 */ }
+  })();
 
   async function createRestorePointIfEnabled() {
     const check = window.api?.optimizer?.checkRestore;
@@ -711,14 +757,11 @@
     });
     document.getElementById('uninstallBtnRefresh')?.addEventListener('click', loadApps);
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
-    // §2.3：还原点开关的偏好持久化（新式命名对齐 trim.residue.backupPack；读失败按默认关）
+    // §2.3：还原点开关的偏好持久化（真源 settings.json，localStorage 键降级为镜像；见本文件开关定义处）
     const restoreToggle = document.getElementById('uninstallRestoreToggle');
     if (restoreToggle) {
       restoreToggle.checked = readRestorePref();
-      restoreToggle.addEventListener('change', () => {
-        try { localStorage.setItem(RESTORE_PREF_KEY, restoreToggle.checked ? '1' : '0'); }
-        catch (e) { window.app?.log?.('warn', `卸载页还原点开关偏好写入失败（本次会话有效）: ${e.message}`); }
-      });
+      restoreToggle.addEventListener('change', () => { writeRestorePref(restoreToggle.checked); });
     }
     document.getElementById('uninstallList')?.addEventListener('click', (e) => {
       // 翻页：整表重绘 → 索引换代（renderGen+1），在途的旧世代回写全部作废，

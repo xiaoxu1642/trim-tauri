@@ -606,6 +606,46 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
     ])
 }
 
+// ==================== asset 协议运行期放行（D1-M01） ====================
+
+/// 需要在运行期放行进 asset 协议的数据根子目录名。
+///
+/// 这两个名字同时是：`tauri.conf.json` 静态清单点名的两个目录、`engine::paths` 迁移清单
+/// 里的两个目录、`commands::appearance`（背景图）与 `commands::fonts`（导入字体副本）的
+/// 写入目录。任何一侧改名而不改另一侧 ⇒ 放行的是一棵空目录，症状和没放行一模一样，
+/// 所以由本文件的用例把「清单 / 目录名 / conf 文档」钉成一条断言。
+const ASSET_SCOPE_DATA_DIRS: [&'static str; 2] = ["backgrounds", "fonts"];
+
+/// 把**当前数据根**下的资产目录放行进 asset 协议（D1-M01 的闭合腿）。
+///
+/// 为什么必须在运行期做：`tauri.conf.json` 的 `scope.allow` 由 tauri-build 在**编译期**烘进
+/// 二进制，且只能用 `$APPDATA` 根展开（`$APPDATA` = identifier 推出的 `%APPDATA%\com.xiaoxu.trim`，
+/// 不读本仓的便携判定）。便携档的数据根是 exe 同级 `data/`，盘符只有插盘后才知道 ⇒
+/// 静态清单对便携档恒不命中，壁纸与导入字体预览结构性 403。往清单里塞非 `$APPDATA` 根会
+/// 被 `engine::paths` 的清单形状断言判红，把便携根挪回 `%APPDATA%` 等于取消「数据随盘走」，
+/// 两条都不是闭合口。所以两档统一在这里按 `paths::app_data_dir()` 放行，conf 清单保留作文档。
+///
+/// 为什么排在**建窗之前**：页面一加载就会为壁纸发 `asset:` 请求，排在 setup 后段是和首帧抢时序。
+///
+/// `recursive = false` 的口径来自两目录的真实形状：壁纸与字体都是数据根子目录的**直接子项**
+/// （`appearance:bg-delete` 明确拒子目录逃逸），放递归等于多送一层可读面。
+/// 放行动作本身与目录是否存在无关（scope 记的是 pattern），所以建目录失败只留痕、不撤放行。
+fn grant_asset_scope_on_data_dirs<R: Runtime>(app: &AppHandle<R>) {
+    let scope = app.asset_protocol_scope();
+    for name in ASSET_SCOPE_DATA_DIRS {
+        let dir = paths::app_data_dir().join(name);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::write_log(
+                "warn",
+                &format!("asset 放行前建立数据子目录 {name} 失败: {e}（放行仍登记，读不到文件属预期）"),
+            );
+        }
+        if let Err(e) = scope.allow_directory(&dir, false) {
+            log::write_log("warn", &format!("asset 协议放行 {name} 失败: {e}"));
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ---------- 提权接管握手：必须早于任何建窗 ----------
@@ -660,6 +700,10 @@ pub fn run() {
     builder
         .setup(move |app| {
             app.manage(commands::state::PendingEditState::new(pending_edit_intent));
+            // D1-M01：便携档的 asset 可达面只能运行期给（见 grant_asset_scope_on_data_dirs）。
+            // 必须排在建窗之前 —— 建窗后 WebView 立刻开始加载页面，壁纸那条 asset 请求
+            // 会在放行登记之前就发出去。
+            grant_asset_scope_on_data_dirs(app.handle());
             // 窗口在代码中创建（而非 tauri.conf.json 声明），唯一原因：需要
             // additional_browser_args 显式透传 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
             // ——实测 Tauri/wry 2.11 自带默认浏览器参数时，WebView2 加载器会忽略该环境变量，
@@ -1758,5 +1802,69 @@ mod startup_housekeeping_tests {
         ] {
             assert_eq!(src.matches(name).count(), 1, "{name} 出现不止一处——回收口径出现第二真源");
         }
+    }
+}
+
+/// D1-M01 的两条常驻断言：放行清单与 conf 文档同源、接线排在建窗之前且是非递归口径。
+///
+/// 为什么放在本文件而不是 tests/：断言的对象就是「lib.rs 的 setup 里到底有没有这条接线」，
+/// 属源码结构不变量，只有 include_str! 自检能钉住；运行期那半条（真机插盘 + DevTools 看
+/// `asset:` 返回码）在无窗口档位里取不到证据，发版前必须人工跑一次。
+#[cfg(test)]
+mod asset_scope_grant_tests {
+    use super::ASSET_SCOPE_DATA_DIRS;
+
+    const SELF: &str = include_str!("lib.rs");
+
+    /// 只取生产段（同 `startup_housekeeping_tests::prod` 的截断口径）：断言里写的字面量
+    /// 本身含被数的模式，整份文件一起扫会把自己算进接线数。
+    fn prod() -> &'static str {
+        let cut = SELF
+            .find("#[cfg(test)]")
+            .expect("找不到 #[cfg(test)]——断言的截断锚点变了");
+        &SELF[..cut]
+    }
+
+    /// 运行期放行的两个目录名必须与静态清单点名的同一对面。
+    /// 名字一旦分叉（改名 / 只改一侧），便携档放行的是一棵空目录，症状与没放行完全相同。
+    #[test]
+    fn 放行的数据子目录与静态清单点名同一对面() {
+        const CONF: &str = include_str!("../tauri.conf.json");
+        let mut reached: Vec<String> = Vec::new();
+        for name in ASSET_SCOPE_DATA_DIRS {
+            let pat = format!("{name}/**");
+            assert!(
+                CONF.contains(&pat),
+                "tauri.conf.json 的 asset 清单不再点名 {name} —— 运行期放行清单与「清单作文档」这条约定分叉"
+            );
+            reached.push(pat);
+        }
+        // 正向断言点名命中的到底是哪两条：只断「没报错」的话，两条名字被同时改成别的也会绿
+        assert_eq!(
+            reached,
+            vec!["backgrounds/**".to_string(), "fonts/**".to_string()],
+            "放行清单内容与预期两目录不符"
+        );
+    }
+
+    /// 接线位置与递归口径：必须在建窗之前、必须是直接子项放行。
+    #[test]
+    fn 放行接线排在建窗之前且只放直接子项() {
+        let src = prod();
+        let grant = src
+            .find("grant_asset_scope_on_data_dirs(app.handle());")
+            .expect("setup 里没有 asset 放行接线——D1-M01 的运行期闭合腿被摘掉了");
+        let build = src
+            .find("WebviewWindowBuilder::new(app, MAIN_LABEL")
+            .expect("主窗建窗点找不到——lib.rs 结构变了，本断言的锚点要同步");
+        assert!(
+            grant < build,
+            "放行排到了建窗之后：页面加载会赶在 scope 登记之前发出 asset 请求"
+        );
+        assert_eq!(
+            src.matches("scope.allow_directory(&dir, false)").count(),
+            1,
+            "allow_directory 只允许一处接线、且固定非递归口径（两目录都是数据根子目录的直接子项）"
+        );
     }
 }

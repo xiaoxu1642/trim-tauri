@@ -2507,7 +2507,7 @@ let ov = include_str!("overview.rs");
     /// 必须是分区成员，且 tf_defender 生效文案为「已禁用」。
     #[test]
     fn 隐私自护侧表形状与目录对拍() {
-        let panel = privacy_panel_sidecar();
+        let panel = privacy_panel_sidecar().expect("隐私面板侧表必须验签通过并解析成功（失败即 D1-M03 的拒收路径）");
 
         let sections = panel.get("sections").and_then(Value::as_array).expect("sections 数组");
         assert_eq!(sections.len(), 4, "隐私面板固定 4 个分区，实际 {}", sections.len());
@@ -2560,6 +2560,45 @@ let ov = include_str!("overview.rs");
         assert!(
             a.contains(&"tf_defender"),
             "statusLabels 的 id 必须是分区成员"
+        );
+    }
+
+    /// D1-M03：两块面板侧表的**验签与拒收**（v7.2 P1 本轮新立的装载闸）。
+    ///
+    /// 三条断言各自钉一种失真，缺一即回到「签了名但没人看」的状态：
+    /// ① 内嵌真样本必须拿得到数据，且点名命中的对象（`sections` 条数）——
+    ///    只断「不是 None」会被「解析出空对象」骗过；
+    /// ② 正文改一个字符、签名照抄 ⇒ 必须 None（这条抓的就是本轮要防的那个缺口：
+    ///    改了不重签的产物原先照样编进二进制、照样下发渲染层）；
+    /// ③ 完全没有签名的字节 ⇒ 必须 None（`_sig` 缺失与验签不符是两回事，但都算拒收）。
+    /// 破坏方向可复证：把 ② 的 `replace` 改成原文，`is_none()` 立刻判红。
+    #[test]
+    fn 面板侧表装载必须验签通过否则拒收() {
+        // 局部缓存：生产用 static，测试各用一份 OnceLock，避免用例间相互污染装载结论。
+        let nara_cache = std::sync::OnceLock::new();
+        let parsed = load_verified_panel(NARA_PANEL_JSON, "optimizer-nara-panel.json", &nara_cache)
+            .expect("内嵌 nara 面板必须验签通过（失败请先看 error 日志，别改判据）");
+        let sections = parsed
+            .get("sections")
+            .and_then(Value::as_array)
+            .expect("nara 面板 sections 数组");
+        assert!(!sections.is_empty(), "验签通过却拿不到分区 = 装载形状与判据分叉");
+
+        // ② 签名覆盖的是规范化后的**正文**，所以改字符串值（而非缩进）才会命中。
+        let tampered = PRIVACY_PANEL_JSON.replace("\"已禁用\"", "\"已禁用 \"");
+        assert_ne!(tampered, PRIVACY_PANEL_JSON, "样本没改成功：破坏未落盘，本断言等于没写");
+        let bad_cache = std::sync::OnceLock::new();
+        assert!(
+            load_verified_panel(&tampered, "optimizer-privacy-panel.json", &bad_cache).is_none(),
+            "正文被改过、签名照抄却仍被装载 —— 验签闸对改内容失明"
+        );
+
+        // ③ 无签名件同样拒收（防止「把 _sig 整段删掉」当成绕过验签的出口）。
+        let nosig_cache = std::sync::OnceLock::new();
+        assert!(
+            load_verified_panel(r#"{"sections":[]}"#, "optimizer-privacy-panel.json", &nosig_cache)
+                .is_none(),
+            "没有 _sig 的字节必须被拒收，否则删签名就成了放行通道"
         );
     }
 

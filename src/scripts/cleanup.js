@@ -1960,9 +1960,9 @@
     return [...new Set(paths)].filter(Boolean);
   }
 
-  // K12：单批登记上限（与后端 PENDING_ADD_MAX_ITEMS 一致）——失败文件动辄上百，
-  // 旧流程一次性全送，>32 必被后端整批拒「请分批登记」。前端按 32 切片顺序登记。
-  const PENDING_ADD_BATCH = 32;
+  // K12：失败文件动辄上百，一次性全送会被后端整批拒「请分批登记」，故按后端单批上限切片顺序登记。
+  // 上限不写在这里：真源在 Rust，读 tauri-api.js 的导出（F4a1-L09 撤掉了此处的本地字面量副本）。
+  const PENDING_ADD_BATCH = window.ipcLimits.pendingAddMaxItems;
 
   function offerCleanupRetryPanel(items, execDetails) {
     if (!window.modal?.create) {
@@ -2042,7 +2042,7 @@
       if (!ok) return;
       pendingBtn.disabled = true;
       pendingBtn.textContent = '正在登记...';
-      // K12：按 32/批切片顺序登记，聚合回执（单批超限会被后端整批拒）
+      // K12：按 PENDING_ADD_BATCH 切片顺序登记并聚合回执（单批超限会被后端整批拒）
       let added = 0;
       let skipped = 0;
       const failedRows = [];

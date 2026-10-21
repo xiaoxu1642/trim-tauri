@@ -194,6 +194,14 @@ fn clsid_inproc_server(clsid: &str) -> Option<std::path::PathBuf> {
         }
         let expanded = trim_finder::cleanup_scan::expand_env_path(dll);
         let path = std::path::PathBuf::from(expanded.trim());
+        // R6b-M11：注册表内容是这条链的来源命名空间，`InprocServer32` 的默认值完全可以
+        // 由某个 HKCU 注册写进来。图标提取的副作用是「让外壳去解析这个路径」，所以这里
+        // 复用 paths 域那份**来源命名空间白名单**（同一判据不留第二份，AGENTS §5.16）。
+        // 必须排在 `is_file()` 之前：UNC 形态的 `is_file()` 自身就会发起远程名解析。
+        if let Some(reason) = crate::commands::paths::icon_source_reject_reason(&path) {
+            log::write_log("warn", &format!("CLSID 图标来源不受信，跳过该视图: {reason}"));
+            continue;
+        }
         if path.is_file() {
             return Some(path);
         }

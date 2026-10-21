@@ -958,6 +958,12 @@
     configurable: false
   });
 
+  // F4a1-L09：跨语言数值契约的唯一前端导出面。真源在 Rust 的 PENDING_ADD_MAX_ITEMS，两边由
+  // tools/check-pending-batch-limit.mjs 对拍：渲染层要按批切片就读这里，各页再抄一份字面量就是
+  // 「后端下调、前端整批被拒请分批登记」那条静默断裂（§5.16）。不塞进 var api = {}：那是
+  // check-channel-map D4 的形状解析面，非方法键会把相邻通道挂错路径。
+  Object.defineProperty(window, 'ipcLimits', { value: { pendingAddMaxItems: 32 } });
+
   // Phase 0 的 window.__trimSpike 探针已随 commands/spike.rs 一并删除：更要紧的是它导出的 `raw: invokeCore` ——
   // 那等于把「直调任意 Rust 命令」的入口挂在 window 上，绕过上面手工挑选的 window.api 白名单，与本项目
   // 「preload 只做白名单转发」的安全前提直接冲突。调试要看通道名就读 tools/check-channel-map.mjs 的输出，不要重开这个口子。
