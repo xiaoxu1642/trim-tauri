@@ -1064,6 +1064,40 @@ body {
   100% { transform: translateX(100%); }
 }
 
+/* 卸载忙碌条（2026-10-22 用户裁定：假进度改计时 + 可收起）：卸载器/枚举的耗时由外部
+   程序自己掌握，读不到真百分比，原先那条会自己爬到 99% 的条是给用户假承诺；改成只报
+   已等待时长。说明行可收起，让用户在几十秒的等待里继续看下面的列表。 */
+.uninstall-busy-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.uninstall-busy-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.uninstall-busy-elapsed {
+  font-size: var(--fs-meta);
+  color: var(--fg-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.uninstall-busy-detail {
+  margin: 8px 0 0;
+  font-size: var(--fs-meta);
+  color: var(--fg-tertiary);
+  line-height: 1.5;
+}
+
+.uninstall-busy.collapsed .uninstall-busy-detail {
+  display: none;
+}
+
 /* 分类列表 */
 .category-list {
   background: var(--bg-card);
@@ -5645,6 +5679,10 @@ body[data-preset-bg] .layout {
 }
 .splash-intro {
   font-size: clamp(1rem, 2.2vw, 1.2rem);
+  /* 实测（CDP 读 CSSOM）：本行原先不声明 line-height，只能继承 body 的 21px 固定行高，
+     而字号是 16~19.2px ⇒ 行距只有 1.1~1.3 倍，中文长句挤成一片（用户反馈的「行贴行」）。
+     中文正文舒适区是 1.6~1.8，这里取 1.6；字号与 clamp 区间不动。 */
+  line-height: 1.6;
   color: var(--splash-ink);
   max-width: 30em;
   animation: splashFadeIn .6s ease-out .18s both;

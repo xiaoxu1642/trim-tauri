@@ -257,7 +257,7 @@
   async function loadApps() {
     const listEl = document.getElementById('uninstallList');
     // F4a1-M07：置位与「置位之后的第一条 DOM 写」都必须在 try 里，且缺件守卫要排在置位**之前**——
-    // 原先 `enumerating = true` 与 startFakeProgress() 都写在 try 之外、listEl.innerHTML 又没有
+    // 原先 `enumerating = true` 与 startBusyBar() 都写在 try 之外、listEl.innerHTML 又没有
     // 守卫（同文件 renderAppList 有），#uninstallList 一旦缺失就抛错：finally 从不执行 ⇒
     // enumerating 恒真、遮罩层与 busyTicker 定时器残留，此后「刷新」与「切范围」全部静默失效，
     // 而 ds.js 的全局 rejection 兜底只写日志不弹提示（用户读成「点了没反应」）。
@@ -265,8 +265,8 @@
     if (enumerating) return;
     enumerating = true;
     try {
-      // 自我安慰式进度：枚举期间进度条爬升封顶 99%，完成即 100% 收尾
-      startFakeProgress(currentScope === 'windows' ? '正在枚举 Windows 应用…' : '正在枚举已安装程序…');
+      // 等待条：枚举没有可读的百分比，只报已等待时长（见本文件等待条定义处）
+      startBusyBar(currentScope === 'windows' ? '正在枚举 Windows 应用…' : '正在枚举已安装程序…');
       listEl.innerHTML = '<div class="finder-empty">正在枚举…</div>';
       const resp = await window.api.uninstall.list(currentScope);
       if (!resp.success) throw new Error(resp.message || '枚举失败');
@@ -282,7 +282,7 @@
       listEl.innerHTML = `<div class="finder-empty">枚举失败：${esc(String(e.message || e))}</div>`;
       window.app?.toast?.('error', '枚举失败: ' + (e.message || e));
     } finally {
-      finishFakeProgress();
+      finishBusyBar();
       enumerating = false;
     }
   }
@@ -466,16 +466,16 @@
     const create = window.api?.optimizer?.createRestore;
     if (!check || !create) return; // 通道缺失按「无此能力」处理，不拦卸载
     // 先查环境：检查链路明确失败多为系统还原未启用——如实提示并跳过，省一次数十秒的无效创建
-    startFakeProgress('正在检查系统还原点环境…');
+    startBusyBar('正在检查系统还原点环境…');
     let probe = null;
     try { probe = await check(); } catch (e) { probe = null; }
     if (probe && probe.success === false) {
       window.app?.toast?.('warning', '系统还原点检查未通过（系统还原可能未启用），将继续卸载');
-      finishFakeProgress();
+      finishBusyBar();
       return;
     }
-    // 创建中给独立进度提示：创建还原点耗时可到数十秒，沿用卸载等待的假进度条避免「像卡死」
-    startFakeProgress('正在创建系统还原点…可能需要数十秒');
+    // 创建中给独立提示：创建还原点耗时可到数十秒，沿用同一条等待条避免「像卡死」
+    startBusyBar('正在创建系统还原点…可能需要数十秒');
     try {
       const cr = await create();
       if (cr && cr.success) {
@@ -486,7 +486,7 @@
     } catch (e) {
       window.app?.toast?.('warning', '还原点创建失败，将继续卸载: ' + (e.message || e));
     } finally {
-      finishFakeProgress();
+      finishBusyBar();
     }
   }
 
@@ -514,7 +514,7 @@
       if (readRestorePref()) {
         await createRestorePointIfEnabled();
       }
-      startFakeProgress(isAppx ? '正在移除 Windows 应用…' : '卸载器运行中…等待卸载完成');
+      startBusyBar(isAppx ? '正在移除 Windows 应用…' : '卸载器运行中…等待卸载完成');
       const resp = await window.api.uninstall.run(appId);
       if (!resp.success) throw new Error(resp.message || '卸载失败');
       const d = resp.data || {};
@@ -568,7 +568,7 @@
       window.app?.toast?.('error', '卸载失败: ' + (e.message || e));
       window.app?.toast?.('info', '卸载程序没有执行完成；它已存在的文件与注册表项不会被自动改动——可点「重新扫描」清点残留后逐项确认删除');
     } finally {
-      finishFakeProgress();
+      finishBusyBar();
       running = false;
     }
   }
@@ -589,7 +589,7 @@
     );
     if (!ok) return;
     running = true;
-    startFakeProgress(`正在启动${label}程序…`);
+    startBusyBar(`正在启动${label}程序…`);
     try {
       const resp = await window.api.uninstall.modify(appId, mode);
       if (!resp.success) throw new Error(resp.message || `${label}失败`);
@@ -598,45 +598,72 @@
     } catch (e) {
       window.app?.toast?.('error', `${label}失败: ` + (e.message || e));
     } finally {
-      finishFakeProgress();
+      finishBusyBar();
       running = false;
     }
   }
 
 
-  // ==================== 自我安慰式进度（用户拍板 2026-09-28） ====================
-  // 「Windows应用」枚举（Get-AppxPackage 子进程）耗时秒级且无真百分比——
-  // 纯文字「正在枚举…」观感是卡死。改为进度条：从 5% 缓慢爬升封顶 99%，
-  // 完成即 100% 收尾隐藏。卸载等待也复用同一条（卸载器耗时未知，同口径）。
+  // ==================== 等待条：计时 + 可收起（用户拍板 2026-10-22） ====================
+  // 取代 2026-09-28 的「自我安慰式进度条」：Windows 应用枚举、卸载器等待、还原点创建
+  // 都没有可读的百分比，那条自己从 5% 爬到 99% 的宽度是给用户的假承诺。现在只报已经
+  // 等了多久，说明行可收起——长等待里下方列表不被挤走。
   let busyTicker = null;
+  let busyHideTimer = null;
+  let busySince = 0;
 
-  function startFakeProgress(label) {
-    stopFakeProgress();
+  function fmtWaited(ms) {
+    const total = Math.floor(ms / 1000);
+    const mm = String(Math.floor(total / 60)).padStart(2, '0');
+    return `${mm}:${String(total % 60).padStart(2, '0')}`;
+  }
+
+  function startBusyBar(label) {
+    stopBusyBar();
     const overlay = document.getElementById('uninstallBusy');
     if (!overlay) return;
     overlay.style.display = 'block';
-    if (label) overlay.querySelector('.progress-label').textContent = label;
-    const fill = overlay.querySelector('.progress-fill');
-    let v = 5;
+    // 新一轮操作要把上一轮的收起状态复位，否则说明行一直是隐藏的
+    overlay.classList.remove('collapsed');
+    const toggle = document.getElementById('uninstallBusyToggle');
+    if (toggle) { toggle.textContent = '收起'; toggle.setAttribute('aria-expanded', 'true'); }
+    if (label) {
+      const labelEl = document.getElementById('uninstallBusyLabel');
+      if (labelEl) labelEl.textContent = label;
+    }
+    busySince = Date.now();
+    const elapsed = document.getElementById('uninstallBusyElapsed');
+    if (elapsed) elapsed.textContent = '已等待 00:00';
     busyTicker = setInterval(() => {
-      v = Math.min(99, v + Math.max(0.3, (99 - v) * 0.02));
-      if (fill) fill.style.width = v + '%';
-    }, 350);
+      if (elapsed) elapsed.textContent = '已等待 ' + fmtWaited(Date.now() - busySince);
+    }, 1000);
   }
 
-  function finishFakeProgress() {
-    stopFakeProgress();
-    const fill = document.querySelector('#uninstallBusy .progress-fill');
-    if (fill) fill.style.width = '100%';
-    setTimeout(() => {
-      const overlay = document.getElementById('uninstallBusy');
+  function finishBusyBar() {
+    stopBusyBar();
+    const overlay = document.getElementById('uninstallBusy');
+    // 延时收起是为了让「检查环境 → 创建还原点」这种连续两轮之间不闪断；下一轮 start
+    // 会把它取消掉，否则新显示的条会在 350ms 后被上一次的定时器收走。
+    busyHideTimer = setTimeout(() => {
+      busyHideTimer = null;
       if (overlay) overlay.style.display = 'none';
-      if (fill) fill.style.width = '0%';
     }, 350);
   }
 
-  function stopFakeProgress() {
+  function stopBusyBar() {
     if (busyTicker) { clearInterval(busyTicker); busyTicker = null; }
+    if (busyHideTimer) { clearTimeout(busyHideTimer); busyHideTimer = null; }
+  }
+
+  function initBusyToggle() {
+    const overlay = document.getElementById('uninstallBusy');
+    const toggle = document.getElementById('uninstallBusyToggle');
+    if (!overlay || !toggle) return;
+    toggle.addEventListener('click', () => {
+      const collapsed = overlay.classList.toggle('collapsed');
+      toggle.textContent = collapsed ? '展开' : '收起';
+      toggle.setAttribute('aria-expanded', String(!collapsed));
+    });
   }
 
 
@@ -757,6 +784,7 @@
     });
     document.getElementById('uninstallBtnRefresh')?.addEventListener('click', loadApps);
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
+    initBusyToggle();
     // §2.3：还原点开关的偏好持久化（真源 settings.json，localStorage 键降级为镜像；见本文件开关定义处）
     const restoreToggle = document.getElementById('uninstallRestoreToggle');
     if (restoreToggle) {

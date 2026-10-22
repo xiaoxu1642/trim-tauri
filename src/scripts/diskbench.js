@@ -429,6 +429,21 @@
         <button class="toast-close" type="button" aria-label="关闭说明" data-tip="关闭">&times;</button>
       `;
       container.appendChild(el);
+      // 说明书里的外链必须走受控出口：webview 直接导航会被 CSP 与窗口策略拒掉，
+      // 用户看到的是「点了没反应」（与 app.js 使用说明同一口径）。
+      el.querySelectorAll('.guide-content a[href]').forEach((a) => {
+        a.addEventListener('click', async (ev) => {
+          ev.preventDefault();
+          const url = a.getAttribute('href') || '';
+          if (!/^https?:\/\//i.test(url)) return;
+          // openExternal 返回 Promise，同步 try/catch 抓不到 reject。
+          try {
+            await window.api?.app?.openExternal?.(url);
+          } catch (e) {
+            window.app?.toast?.('error', '打开链接失败：' + ((e && e.message) || e));
+          }
+        });
+      });
       const entry = {
         el,
         remove: () => {

@@ -569,11 +569,16 @@
           </div>
         </div>
 
-        <div class="progress-section" id="uninstallBusy" style="display:none" role="status" aria-live="polite">
-          <div class="progress-header">
-            <span class="progress-label">卸载器运行中…</span>
+        <div class="progress-section uninstall-busy" id="uninstallBusy" style="display:none" role="status" aria-live="polite">
+          <div class="uninstall-busy-head">
+            <span class="progress-label" id="uninstallBusyLabel">卸载器运行中…</span>
+            <span class="uninstall-busy-side">
+              <span class="uninstall-busy-elapsed" id="uninstallBusyElapsed" aria-live="off">已等待 00:00</span>
+              <button class="btn btn-small uninstall-busy-toggle" type="button" id="uninstallBusyToggle"
+                aria-expanded="true" aria-controls="uninstallBusyDetail" data-tip="收起说明行，继续浏览下方列表">收起</button>
+            </span>
           </div>
-          <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>
+          <p class="uninstall-busy-detail" id="uninstallBusyDetail">耗时由外部程序自己掌握，应用读不到百分比，所以这里只显示已经等待的时间。</p>
         </div>
 
         <div class="table-card" id="uninstallList"></div>
