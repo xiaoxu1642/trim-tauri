@@ -765,14 +765,25 @@ fn js_num_str(n: f64) -> String {
         it["prov"]["sourceClass"] = json!("imported");
         expect_reject(it, "prov.sourceClass「imported」");
 
-        // A15 ifDeleted（P2-1，2026-10-16）：high 必填；写了就必须是非空字符串
+        // A15 ifDeleted（P2-1 2026-10-16 起 high 必填；2026-10-23 扩到「除最低档外全必填」）：
+        // 判据是 riskLevels 的下标，所以 medium 与 high 都要拒，而最低档（ok_item 默认 low）
+        // 缺字段必须仍然放行——收紧过头会把批量项全打死，那也是一种假安全。
+        let mut it = ok_item();
+        it["risk"] = json!("medium");
+        expect_reject(it, "risk=medium 必须提供 ifDeleted");
+        let mut it = ok_item();
+        it["risk"] = json!("medium");
+        it["ifDeleted"] = json!("删的是测试目标，重建需重新下载（自检）");
+        validate_cleanup_package(&ok_pkg(it)).expect("medium 带 ifDeleted 必须放行");
         let mut it = ok_item();
         it["risk"] = json!("high");
-        expect_reject(it, "ifDeleted");
+        expect_reject(it, "risk=high 必须提供 ifDeleted");
         let mut it = ok_item();
         it["risk"] = json!("high");
         it["ifDeleted"] = json!("删除后测试目标不可恢复（自检）");
         validate_cleanup_package(&ok_pkg(it)).expect("high 带 ifDeleted 必须放行");
+        // 默认 low：不写 ifDeleted 仍然合法（这条是防「收紧过头打死批量项」的正向对照）
+        validate_cleanup_package(&ok_pkg(ok_item())).expect("low 缺 ifDeleted 必须放行");
         let mut it = ok_item();
         it["ifDeleted"] = json!("   ");
         expect_reject(it, "ifDeleted");

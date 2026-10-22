@@ -708,11 +708,11 @@ pub(super) fn check_cleanup_item(
     if !c.risk_levels.iter().any(|r| r == risk) {
         return Err(format!("规则 {id}: risk「{risk}」不在 {:?} 之内", c.risk_levels));
     }
-    // A15 / P2-1（2026-10-16）：ifDeleted（删除后果人话）——high 必填、medium 可选、
-    // low 不强制；写了就必须是非空字符串且不超 max_text。与 Node 门禁
-    // cleanup-contract.mjs 的 A15 同口径（共享夹具双向核对，任一侧放宽另一侧红）。
-    // 「high」= 契约表 cleanup.riskLevels 的最高档（枚举升序，high 为末值）；
-    // 高危动作执行前用户必须被告知「删了会怎样」，缺字段 = 知情权静默降级，拒载。
+    // A15 / P2-1（2026-10-16 起 high 必填；2026-10-23 扩到「除最低档外全必填」）。
+    // 判据取契约表 cleanup.riskLevels 的**下标**而不是点档名：枚举升序，index 0 是最低档。
+    // 为什么不写死 "high"：清理库现在 0 条 high，「high 必填」实际等于没有约束；medium 同样
+    // 会弹确认框、同样走永久删（v3.3.0 裁定不进回收站），知情权不该按档名分叉。
+    // 与 Node 门禁 cleanup-contract.mjs 的 A15 同口径（共享夹具双向核对，任一侧放宽另一侧红）。
     if let Some(v) = it.get("ifDeleted") {
         let ok = v
             .as_str()
@@ -722,9 +722,10 @@ pub(super) fn check_cleanup_item(
             return Err(format!("规则 {id}: ifDeleted 必须是非空字符串且不超过 {} 字", c.max_text));
         }
     }
-    if risk == "high" && it.get("ifDeleted").is_none() {
+    let tier_idx = c.risk_levels.iter().position(|r| r == risk);
+    if matches!(tier_idx, Some(i) if i > 0) && it.get("ifDeleted").is_none() {
         return Err(format!(
-            "规则 {id}: risk=high 必须提供 ifDeleted（删除后果，高危确认前必须告知）"
+            "规则 {id}: risk={risk} 必须提供 ifDeleted（除最低档外，弹确认框前必须告知「删了会怎样」）"
         ));
     }
     for f in ["evidence", "domain", "group", "nature", "name"] {

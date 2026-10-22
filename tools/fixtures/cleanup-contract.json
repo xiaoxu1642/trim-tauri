@@ -103,6 +103,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2120,6 +2121,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2205,6 +2207,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2291,6 +2294,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2373,6 +2377,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2440,6 +2445,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2536,6 +2542,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2631,6 +2638,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2727,6 +2735,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2821,6 +2830,7 @@
                     "id": "selftest-sub",
                     "name": "子组项",
                     "risk": "medium",
+                    "ifDeleted": "夹具样本：不指向本机任何真实路径，只用于两侧对拍（A15 除最低档外必填）。",
                     "evidence": "只作用于测试目录",
                     "recommended": false,
                     "domain": "app",
@@ -2850,6 +2860,52 @@
                     "ver": 20260928
                   }
                 ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "A15 medium 缺 ifDeleted（2026-10-23 扩档：除最低档外全必填，两侧同判据）",
+      "ok": false,
+      "mustTrigger": [
+        "A15"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "icon": "gear",
+            "items": [
+              {
+                "id": "c-a15-medium-missing",
+                "name": "中危无后果",
+                "risk": "medium",
+                "evidence": "e",
+                "recommended": false,
+                "domain": "system",
+                "group": "g1",
+                "nature": "action",
+                "regenerable": false,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "importedAt": "2026-09-30",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTest",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
               }
             ]
           }
