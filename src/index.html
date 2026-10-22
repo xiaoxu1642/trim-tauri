@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="theme-color" content="#F6F4FB" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file: asset: http://asset.localhost; font-src 'self' file: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; frame-src https://www.speedtest.cn https://test.ustc.edu.cn;" />
+  <!-- 刻意不写 frame-ancestors：CSP 走 meta 下发时该指令会被浏览器整条忽略（规范只认
+       HTTP 响应头，report-uri / sandbox 同例），写了只是让 DevTools 每次刷一条
+       「ignored when delivered via a <meta> element」的假护栏。挡外部嵌套在本应用里
+       也不是真需求（WebView2 自建窗口）；真正生效的是下面 frame-src 那份白名单。 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: file: asset: http://asset.localhost; font-src 'self' file: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-src https://www.speedtest.cn https://test.ustc.edu.cn;" />
   <title>Trim</title>
   <link rel="icon" href="./assets/ico/Trim.ico" />
   <link rel="stylesheet" href="styles/main.css" />
