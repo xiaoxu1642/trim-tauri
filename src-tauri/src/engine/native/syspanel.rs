@@ -2573,13 +2573,98 @@ mod tests {
         assert_eq!(lines[1], "D:\\pagefile.sys 0 0", "小写盘符应归一到大写");
     }
 
-    /// 端到端跑一次 pagefile_apply 需要真 admin + 真重启，属发布前手工核对；
-    /// CI 上不进默认测试。这里断的是**未 admin 或未确认时**必然 Err，不真写。
+    /// 端到端跑一次 pagefile_apply，属发布前手工核对（真 admin 才走真写段）。
+    ///
+    /// 旧形状把返回值直接丢弃，且「未 admin 时 Err 也算跑通」⇒ 「真写能过一遍」这句结论
+    /// 底下没有任何断言（v7.2 P3 X 档实测坐实：exit 0 但注册表 LastWriteTime 未变）。
+    /// 现按「采集与判定分离」重写，两种环境都要能判红：
+    ///  - 非 admin：断言 fail-closed 方向（必须 Err 且错因点名管理员），真写段显式 SKIP；
+    ///  - admin：**按现场值幂等回写**（managed 与 PagingFiles 原样写回），执行链（留底→写两键
+    ///    →回读）真跑一遍而系统语义零变化；跑后逐字段回读必须等于跑前，不等就立即按快照
+    ///    还原并判红（不靠「应该没改」结案）。
+    ///
+    /// 为什么选幂等回写而不是「改成另一种值再改回来」：后者会在「写入成功、还原失败」时
+    /// 把机器留在另一种分页配置上（还要重启才恢复），前者最坏情况也只是重写同一个值。
     #[test]
-    #[ignore = "真写 pagefile_apply 会改本机 HKLM + 需重启，只在发布前手工核对不崩不 hang"]
+    #[ignore = "真写段会打开 HKLM 写面（幂等回写、语义不变），只在发布前手工核对"]
     fn 端到端真写能过一遍() {
-        // 走一次 managed=true（相对无损、系统自管），验证执行链不崩；
-        // 未 admin 环境会直接 Err，不阻断测试通过（Err 也算跑通）。
-        let _ = pagefile_apply(true, &[]);
+        use crate::engine::sysinfo::is_admin;
+
+        let before = pagefile_state();
+        let managed_before = before["managed"].as_bool().unwrap_or(false);
+        // 现场 PagingFiles 解析回写侧入参：只有用现场值当目标，才谈得上「幂等」
+        let entries_before: Vec<PagefileEntry> = before["entries"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| {
+                        let path = x["path"].as_str()?;
+                        let drive = path.get(..2)?;
+                        Some(e(drive, x["initialMb"].as_u64()? as u32, x["maxMb"].as_u64()? as u32))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !is_admin() {
+            let err =
+                pagefile_apply(true, &[]).expect_err("非 admin 必须 fail-closed，不得静默返回 Ok");
+            assert!(err.contains("管理员"), "非 admin 的错因漂了：{err}");
+            eprintln!("SKIP 真写段：当前非管理员，只验了 fail-closed 方向；HKLM 未被触碰");
+            return;
+        }
+        // 现场形态本身不合法（如全关、零卷）时不存在可回写的目标 ⇒ 按不可取证 SKIP，
+        // 不许为了「跑通」擅自换一个目标值。
+        if let Err(err) = validate_pagefile(managed_before, &entries_before) {
+            eprintln!("SKIP 真写段：现场形态不可作为写侧目标回写（{err}）；HKLM 未被触碰");
+            return;
+        }
+
+        let reached = if managed_before {
+            "managed=true 幂等回写"
+        } else {
+            "managed=false 按现场卷幂等回写"
+        };
+        let got =
+            pagefile_apply(managed_before, &entries_before).unwrap_or_else(|err| panic!("真写失败：{err}"));
+        // 「留底先于动手」是 pagefile_apply 自己的顺序契约，回执里的备份必须真实存在
+        let backup = got["backupPath"].as_str().unwrap_or_default().to_string();
+        assert!(!backup.is_empty() && std::path::Path::new(&backup).exists(), "回执备份未落盘：{backup:?}");
+
+        let after = pagefile_state();
+        if after != before {
+            let _ = pagefile_apply(managed_before, &entries_before);
+            let restored = pagefile_state();
+            assert_eq!(
+                restored, before,
+                "apply 后现场与跑前不一致且还原失败——手动还原依据：备份 {backup}"
+            );
+            panic!("apply 返回 Ok 但现场被改动（已被还原）：{after} vs {before}");
+        }
+        eprintln!(
+            "OK {reached}：managed={managed_before}、{} 个卷、备份 {backup}",
+            entries_before.len()
+        );
+    }
+
+    /// 防退化哨兵：真写用例一旦回到「丢弃返回值 / 不回读现场」的形状就判红。
+    /// 判据切的是函数体，本条写在它之后、不进 body，故不会自匹配（§4.1 的自指坑）。
+    #[test]
+    fn 端到端真写用例保留返回值与现场回读() {
+        let src = include_str!("syspanel.rs");
+        let body = src
+            .split("fn 端到端真写能过一遍()")
+            .nth(1)
+            .and_then(|s| s.split("\n    }").next())
+            .unwrap_or_else(|| panic!("端到端真写用例被改名或删除——哨兵失去判定对象"));
+        assert!(
+            !body.contains(std::concat!("let _ = page", "file_apply(true")),
+            "真写用例退化回收值丢弃形状（结构性假绿复发）"
+        );
+        assert!(body.contains("pagefile_state()"), "真写用例不再回读现场 ⇒ 无法证明语义未变");
+        assert!(
+            body.contains("expect_err") && body.contains("is_admin()"),
+            "真写用例缺了非 admin 的 fail-closed 判定 ⇒ 会在无权限环境里碰巧绿"
+        );
     }
 }

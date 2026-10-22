@@ -77,7 +77,12 @@ pub fn window_with_label(label: &str) -> WebviewWindow<MockRuntime> {
 ///
 /// 环境变量名与 `paths::app_data_dir()` 的读取侧互为契约：改一侧必须同步另一侧
 /// （`tools/check-fail-closed.mjs` 有 D 段钉注入，本变量名由其对拍兜底）。
-fn ensure_test_data_root() {
+///
+/// **可见性必须是 `pub`**：只有 `main_window`/`window_with_label` 会调它，而
+/// 直接调引擎函数的真机 `#[ignore]` 探针（启动项台账、pref 写入那一族）不建窗——
+/// 那样数据根隔离就变成「同一进程里恰好有用例先建过窗」的竞态结果，
+/// 单条 `--ignored` 跑时 `disabled.json` 会落到用户真实数据目录。探针要自己点名隔离。
+pub fn ensure_test_data_root() {
     static ONCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
         let stem = std::env::current_exe()

@@ -15,8 +15,8 @@
 mod common;
 
 use common::{
-    assert_guard_rejected, invoke, invoke_text, main_window, skip_and_record, sub_windows,
-    window_with_label, GUARD_REJECT_MARK,
+    assert_guard_rejected, ensure_test_data_root, invoke, invoke_text, main_window,
+    skip_and_record, sub_windows, window_with_label, GUARD_REJECT_MARK,
 };
 use serde_json::json;
 use trim_tauri_lib::engine::guard::APP_WINDOWS;
@@ -2023,6 +2023,8 @@ fn quickcmds_run_is_main_only() {
 #[test]
 #[ignore = "真写 HKCU Run 探针值 + StartupApproved blob（自建自清），发布前门禁跑"]
 fn startup_toggle_registry_probe_disable_and_enable() {
+    // 本条不建窗，必须自己点名数据根，否则禁用台账落用户真实目录（见 helper 文档）
+    ensure_test_data_root();
     use trim_tauri_lib::engine::native::{hive_hkcu, read_reg_binary_opt, startup_toggle};
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -2088,19 +2090,7 @@ const RUNONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
 
 /// RunOnce 探针项（与扫描产出的字段形状一致）。
 fn runonce_probe_item() -> serde_json::Value {
-    json!({
-        "id": format!("reg|HKEY_CURRENT_USER\\{RUNONCE_KEY}|TrimProbeRunOnceX"),
-        "name": "TrimProbeRunOnceX",
-        "source": "registry",
-        "hive": "HKCU",
-        "regPath": format!("HKEY_CURRENT_USER\\{RUNONCE_KEY}"),
-        "valueName": "TrimProbeRunOnceX",
-        "valueType": "String",
-        "valueData": r"C:\Windows\System32\notepad.exe",
-        "filePath": "",
-        "taskPath": "",
-        "taskName": "",
-    })
+    runonce_probe_item_named("TrimProbeRunOnceX", r"C:\Windows\System32\notepad.exe")
 }
 
 /// 真机 `#[ignore]` 探针：RunOnce 项的禁用必须走「备份 + 删值」。
@@ -2112,6 +2102,7 @@ fn runonce_probe_item() -> serde_json::Value {
 #[test]
 #[ignore = "真写 HKCU RunOnce 探针值（自建自清），发布前门禁跑"]
 fn startup_toggle_runonce_probe_uses_backup_delete() {
+    ensure_test_data_root();
     use trim_tauri_lib::engine::native::startup_toggle;
 
     const NAME: &str = "TrimProbeRunOnceX";
@@ -2158,6 +2149,187 @@ fn startup_toggle_runonce_probe_uses_backup_delete() {
     let res2 = startup_toggle(&[runonce_probe_item()], true).expect("启用不应整批失败");
     assert_eq!(res2["failed"], json!(0), "启用应成功（从台账恢复原值）: {res2}");
     assert!(reg_query(), "启用后原值必须已恢复");
+}
+
+/// R5a-U03 探针的两条同名项（Cleanup 的 Drop 里要重建，故抽成文件级函数、不捕获引用）。
+fn r5a_same_name_items() -> (serde_json::Value, serde_json::Value) {
+    const NAME: &str = "TrimProbeSameNameX";
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let mk = |reg_path: &str, data: &str| {
+        json!({
+            "id": format!("reg|{reg_path}|{NAME}"),
+            "name": NAME,
+            "source": "registry",
+            "hive": "HKCU",
+            "regPath": reg_path,
+            "valueName": NAME,
+            "valueType": "String",
+            "valueData": data,
+            "filePath": "",
+            "taskPath": "",
+            "taskName": "",
+        })
+    };
+    (
+        mk(
+            &format!("HKEY_CURRENT_USER\\{RUN_KEY}"),
+            r"C:\Windows\System32\notepad.exe",
+        ),
+        runonce_probe_item_named(NAME, r"C:\Windows\System32\mspaint.exe"),
+    )
+}
+
+/// 按指定值名造一条 RunOnce 项（默认探针用 `TrimProbeRunOnceX`，同名探针要换成共用名）。
+fn runonce_probe_item_named(name: &str, data: &str) -> serde_json::Value {
+    json!({
+        "id": format!("reg|HKEY_CURRENT_USER\\{RUNONCE_KEY}|{name}"),
+        "name": name,
+        "source": "registry",
+        "hive": "HKCU",
+        "regPath": format!("HKEY_CURRENT_USER\\{RUNONCE_KEY}"),
+        "valueName": name,
+        "valueType": "String",
+        "valueData": data,
+        "filePath": "",
+        "taskPath": "",
+        "taskName": "",
+    })
+}
+
+/// 真机 `#[ignore]` 探针（v7.2 `R5a-U03`）：**同名**启动值分处 `Run` 与 `RunOnce` 时互不顶账。
+///
+/// 为什么要专门造同名这一态：两条项的 `valueName` 相同、`regPath` 不同，而一次禁用要同时动
+/// 三处（值本体、`StartupApproved\Run` 批准位、Trim 自己的台账）。批准位只在 `Run`/`Run32`/
+/// `StartupFolder` 存在（§5.30），RunOnce 只能走「备份 + 删值」——记账键一旦只取叶名，
+/// 两条同名项就会互相顶账，症状是「禁了 RunOnce 那条，Run 那条显示已禁用」而它的值照样自启。
+/// 读侧 R5a-M01 已按 `is_run_once` 不采信批准位，**写侧的同名分账此前没有任何真机断言**：
+/// 上面两条探针刻意用了两个不同探针名，天然避开碰撞，所以测不到这一态。
+///
+/// 判红点（每条都是「回执成功、现场错」的形态）：
+///  - 禁 RunOnce 后 `Run` 下的同名值消失 ⇒ 写侧按叶名删错了对象；
+///  - 禁 RunOnce 后 `StartupApproved\Run` 的批准位翻回 02 ⇒ RunOnce 的操作串进了 Run 的批准位；
+///  - 启 RunOnce 恢复出来的不是它自己的原值 ⇒ 台账同名顶账。
+#[test]
+#[ignore = "真写 HKCU Run/RunOnce 同名探针值 + StartupApproved\\Run（自建自清），发布前门禁跑"]
+fn u_r5a_same_name_run_and_runonce_no_cross_account() {
+    ensure_test_data_root();
+    use trim_tauri_lib::engine::native::{hive_hkcu, read_reg_binary_opt, startup_toggle};
+
+    const NAME: &str = "TrimProbeSameNameX";
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const SA_KEY: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    const RUN_DATA: &str = r"C:\Windows\System32\notepad.exe";
+    const RUNONCE_DATA: &str = r"C:\Windows\System32\mspaint.exe";
+
+    let reg_delete = |key: &str| {
+        let _ = std::process::Command::new("reg")
+            .args(["delete", key, "/v", NAME, "/f"])
+            .output();
+    };
+    let reg_add = |key: &str, data: &str| {
+        std::process::Command::new("reg")
+            .args(["add", key, "/v", NAME, "/t", "REG_SZ", "/d", data, "/f"])
+            .output()
+            .expect("reg.exe 可执行")
+            .status
+            .success()
+    };
+    // 值本体走 reg.exe 回读：断言对象必须是注册表真实状态，不是 startup_toggle 的回执
+    let value_of = |key: &str| -> Option<String> {
+        let out = std::process::Command::new("reg")
+            .args(["query", key, "/v", NAME])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines()
+            .map(|l| l.trim())
+            .find_map(|l| {
+                l.strip_prefix(NAME)
+                    .and_then(|rest| rest.split_whitespace().last())
+            })
+            .map(|s| s.to_string())
+    };
+
+    let (run_item, runonce_item) = r5a_same_name_items();
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            // 尽力复原：先把两条都试着启用（台账无记录时它会失败，无害），再删三处探针值
+            let (r, o) = r5a_same_name_items();
+            let _ = trim_tauri_lib::engine::native::startup_toggle(&[r, o], true);
+            for key in [SA_KEY, RUN_KEY, RUNONCE_KEY] {
+                let _ = std::process::Command::new("reg")
+                    .args(["delete", &format!(r"HKCU\{key}"), "/v", NAME, "/f"])
+                    .output();
+            }
+        }
+    }
+    let _guard = Cleanup;
+
+    for key in [SA_KEY, RUN_KEY, RUNONCE_KEY] {
+        reg_delete(&format!("HKCU\\{key}"));
+    }
+    assert!(reg_add(&format!("HKCU\\{RUN_KEY}"), RUN_DATA), "建 Run 同名值失败");
+    assert!(
+        reg_add(&format!("HKCU\\{RUNONCE_KEY}"), RUNONCE_DATA),
+        "建 RunOnce 同名值失败"
+    );
+
+    // ① 禁 Run ⇒ 批准位落 StartupApproved\Run，bit0 置位
+    let r1 = startup_toggle(&[run_item.clone()], false).expect("禁用 Run 不应整批失败");
+    assert_eq!(r1["failed"], json!(0), "禁用 Run 应成功: {r1}");
+    let blob1 =
+        read_reg_binary_opt(hive_hkcu(), SA_KEY, NAME).expect("禁用 Run 后批准位应写出");
+    assert!(blob1.starts_with("03"), "Run 的批准位 bit0 应置位，实际 {blob1}");
+
+    // ② 禁 RunOnce（同名）——本探针的核心一步
+    let r2 = startup_toggle(&[runonce_item.clone()], false).expect("禁用 RunOnce 不应整批失败");
+    assert_eq!(r2["failed"], json!(0), "禁用 RunOnce 应成功: {r2}");
+    assert_eq!(
+        value_of(&format!("HKCU\\{RUN_KEY}")).as_deref(),
+        Some(RUN_DATA),
+        "禁 RunOnce 把 Run 下的同名值一起弄掉了 ⇒ 写侧按叶名删错对象"
+    );
+    let blob2 = read_reg_binary_opt(hive_hkcu(), SA_KEY, NAME).expect("批准位应仍在");
+    assert!(
+        blob2.starts_with("03"),
+        "RunOnce 的禁用串改了 Run 的批准位（应仍为 03，实际 {blob2}）"
+    );
+    assert!(
+        value_of(&format!("HKCU\\{RUNONCE_KEY}")).is_none(),
+        "RunOnce 同名值必须走删值——批准位键对它不存在，写批准位是死数据"
+    );
+
+    // ③ 启 RunOnce ⇒ 只恢复它自己的原值，且不波及 Run
+    let r3 = startup_toggle(&[runonce_item], true).expect("启用 RunOnce 不应整批失败");
+    assert_eq!(r3["failed"], json!(0), "启用 RunOnce 应成功: {r3}");
+    assert_eq!(
+        value_of(&format!("HKCU\\{RUNONCE_KEY}")).as_deref(),
+        Some(RUNONCE_DATA),
+        "台账同名顶账：RunOnce 恢复出来的不是它自己的值"
+    );
+    assert_eq!(
+        value_of(&format!("HKCU\\{RUN_KEY}")).as_deref(),
+        Some(RUN_DATA),
+        "启用 RunOnce 波及了 Run 下的同名值"
+    );
+
+    // ④ 启 Run ⇒ 批准位翻回 02，两条各自归位
+    let r4 = startup_toggle(&[run_item], true).expect("启用 Run 不应整批失败");
+    assert_eq!(r4["failed"], json!(0), "启用 Run 应成功: {r4}");
+    let blob4 = read_reg_binary_opt(hive_hkcu(), SA_KEY, NAME).expect("批准位应仍在");
+    assert!(blob4.starts_with("02"), "Run 启用后 bit0 应清零，实际 {blob4}");
+
+    eprintln!(
+        "OK R5a-U03：同名值四次切换互不顶账（批准位 {}→{}→{}）",
+        &blob1[0..2],
+        &blob2[0..2],
+        &blob4[0..2]
+    );
 }
 
 /// v4 修复回归（快速组）：测速历史回执与**磁盘真值**自比对 ——
@@ -2491,6 +2663,55 @@ fn u_r1d_diskbench_single_flight_not_dirty_after_path_reject() {
         second["busy"],
         json!(true),
         "早退路径必须释放单飞位（RAII Drop），否则第二次请求被误判进行中: {second}"
+    );
+}
+
+/// 真机 `#[ignore]` 探针（v7.2 `R1d-U03`）：diskbench **成功分支**跑完后盘上不得留残。
+///
+/// 为什么非真机不可：成功分支（`measured == true`）刻意不做应用侧清理，全靠原生引擎
+/// 自删自己的测试目录——「原生侧会删」目前是假设、不是断言（`commands/diskbench.rs`
+/// 的 R1d-M09 注释自己标了「本轮档位未验」）。上面那条只覆盖早退分支，攒残留的那条路径
+/// 整条无人验；而世代号命名会把「一个空残留」变成「一串空残留」。
+#[test]
+#[ignore = "真读写盘（独占测速，秒级到十几秒），只在发布前手工核对"]
+fn u_r1d_diskbench_leaves_no_residue_on_success() {
+    let w = main_window();
+    let root =
+        std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    let listed = |dir: &std::path::Path| -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                    .filter(|n| n.starts_with("trim-diskbench"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let before = listed(&root);
+    let got = invoke(
+        &w,
+        "diskbench_run",
+        json!({ "options": { "path": root.to_string_lossy() } }),
+    );
+    assert_eq!(
+        got["success"],
+        json!(true),
+        "白名单内路径没测成功就没有走到成功分支，本探针不成立：{got}"
+    );
+    let after = listed(&root);
+    let fresh: Vec<&String> = after.iter().filter(|n| !before.contains(n)).collect();
+    assert!(
+        fresh.is_empty(),
+        "成功分支在 {} 留下原生引擎未自删的残留 {fresh:?}（跑前 {before:?}）——\
+         世代号会让它每跑一次多攒一个",
+        root.display()
+    );
+    eprintln!(
+        "OK R1d-U03：测速目录 {}、跑前残留 {} 条、跑后 {} 条、新增 0 条",
+        root.display(),
+        before.len(),
+        after.len()
     );
 }
 
