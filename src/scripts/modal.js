@@ -221,22 +221,33 @@
   // 便捷确认框：返回 Promise<boolean>（任意方式关闭都 resolve false）。danger=true 渲染红色确认按钮（规范要求：
   // 高风险操作必须红色二次确认）；D10：warning=true 渲染黄色确认按钮（中风险操作），与 danger 互斥。
   // dangerHint/warningHint 为结构化警示文案：纯文本由模板统一转义渲染，调用方禁止自行拼接 HTML 字符串（会被 escapeHtml 转义成字面文本）。
-  function confirm({ title = '确认', message = '', confirmText = '确认', cancelText = '取消', danger = false, warning = false, dangerHint = '', warningHint = '' }) {
+  // consequences=[{name,text}] 渲染「删除后果」区；默认只展前 foldAfter 条，其余收进展开按钮
+  // （理由见下面 rowsHtml 处的注释）。
+  function confirm({ title = '确认', message = '', confirmText = '确认', cancelText = '取消', danger = false, warning = false, dangerHint = '', warningHint = '', consequences = null, foldAfter = 3 }) {
     return new Promise(resolve => {
       let settled = false;
       const finish = v => { if (!settled) { settled = true; resolve(v); } };
       const severity = danger ? 'danger' : (warning ? 'warning' : '');
-      const hintHtml = (dangerHint && danger) ? `
-          <div class="confirm-danger-hint" role="alert"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg><span>${escapeHtml(dangerHint)}</span></div>
-        ` : ((warningHint && warning) ? `
-          <div class="confirm-warning-hint" role="alert"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg><span>${escapeHtml(warningHint)}</span></div>
-        ` : '');
+      // 两种警示块共用同一枚图标（原先各抄一份 path）
+      const icon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>';
+      const hintHtml = (dangerHint && danger) ? `<div class="confirm-danger-hint" role="alert">${icon}<span>${escapeHtml(dangerHint)}</span></div>`
+        : ((warningHint && warning) ? `<div class="confirm-warning-hint" role="alert">${icon}<span>${escapeHtml(warningHint)}</span></div>` : '');
+      // 默认只展三条（实测 1609px 对可视 659px，按钮常驻 ⇒ 能一行不读就确认）；零新增 CSS：
+      // 复用 .confirm-message 与 btn-secondary，折叠切 display。
+      const rows = Array.isArray(consequences) ? consequences.filter(c => c && c.name && c.text) : [];
+      const li = (c) => `<li><b>${escapeHtml(c.name)}</b>：${escapeHtml(c.text)}</li>`;
+      const rest = rows.slice(foldAfter);
+      const label = `展开其余 ${rest.length} 条后果`;
+      const rowsHtml = rows.length
+        ? `<b>删除后果：</b><ul>${rows.slice(0, foldAfter).map(li).join('')}</ul>` +
+          (rest.length ? `<button class="btn btn-secondary" type="button" data-more>${label}</button><ul data-more-p>${rest.map(li).join('')}</ul>` : '')
+        : '';
       const ctrl = create({
         // 每个确认框使用唯一 id：允许多个确认框并存（如连续的批量高危确认），
         // 避免固定 id 互相顶掉导致前一个 Promise 永不 resolve
         id: 'confirmModal-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
         title,
-        bodyHtml: `<div class="confirm-message">${escapeHtml(message).replace(/\n/g, '<br>')}</div>${hintHtml}`,
+        bodyHtml: `<div class="confirm-message">${escapeHtml(message).replace(/\n/g, '<br>')}${rowsHtml}</div>${hintHtml}`,
         footerHtml: `
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary" data-confirm="cancel" type="button">${escapeHtml(cancelText)}</button>
@@ -252,6 +263,18 @@
       });
       ctrl.footer.querySelector('[data-confirm="ok"]').addEventListener('click', () => { finish(true); ctrl.close(); });
       ctrl.footer.querySelector('[data-confirm="cancel"]').addEventListener('click', () => ctrl.close());
+      // 展开件：初态折叠（display:none 也移出 Tab 序），ARIA 交给 ds.accordion
+      const more = ctrl.modal.querySelector('[data-more]');
+      if (more) {
+        const panel = ctrl.modal.querySelector('[data-more-p]');
+        panel.style.display = 'none';
+        if (window.ds && window.ds.accordion) window.ds.accordion.enhance(more, panel);
+        more.addEventListener('click', () => {
+          const show = panel.style.display === 'none';
+          panel.style.display = show ? '' : 'none';
+          more.textContent = show ? '收起' : label;
+        });
+      }
     });
   }
 

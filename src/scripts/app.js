@@ -431,7 +431,9 @@
       danger: !!opts.danger,
       dangerHint: String(opts.dangerHint || ''),
       warning: !!opts.warning,
-      warningHint: String(opts.warningHint || '')
+      warningHint: String(opts.warningHint || ''),
+      // 删除后果区：结构化传入、缺席即不渲染
+      consequences: Array.isArray(opts.consequences) ? opts.consequences : null
     });
   }
 
@@ -440,28 +442,30 @@
   // NEW-1 归一兜底：首参误传单对象（L3 审查 2026-10-01 回归形态）时按字段还原为位置参数，
   // 防止对象被当 title 渲染成 "[object Object]"、message 与「不可恢复」警示整段丢失；
   // 调用形态回归由 tools/check-confirm-danger.mjs 静态拦截，这里是运行时最后防线。
-  function confirmDanger(title, message, confirmText = '确认', cancelText = '取消', dangerHint = '') {
+  function confirmDanger(title, message, confirmText = '确认', cancelText = '取消', dangerHint = '', consequences = null) {
     if (title && typeof title === 'object' && !Array.isArray(title)) {
       const o = title;
       return confirmDanger(o.title, o.message,
         o.confirmText != null ? o.confirmText : confirmText,
         o.cancelText != null ? o.cancelText : cancelText,
-        o.dangerHint != null ? o.dangerHint : dangerHint);
+        o.dangerHint != null ? o.dangerHint : dangerHint,
+        o.consequences != null ? o.consequences : consequences);
     }
-    return confirm(title, message, confirmText, cancelText, { danger: true, dangerHint });
+    return confirm(title, message, confirmText, cancelText, { danger: true, dangerHint, consequences });
   }
 
   // D10：中风险操作语义化入口（黄色确认）。中风险清理项勾选清理前的二次确认，
   // 与高风险红色确认分级，视觉与文案均低一档。归一兜底同 confirmDanger（NEW-1）。
-  function confirmWarning(title, message, confirmText = '确认', cancelText = '取消', warningHint = '') {
+  function confirmWarning(title, message, confirmText = '确认', cancelText = '取消', warningHint = '', consequences = null) {
     if (title && typeof title === 'object' && !Array.isArray(title)) {
       const o = title;
       return confirmWarning(o.title, o.message,
         o.confirmText != null ? o.confirmText : confirmText,
         o.cancelText != null ? o.cancelText : cancelText,
-        o.warningHint != null ? o.warningHint : warningHint);
+        o.warningHint != null ? o.warningHint : warningHint,
+        o.consequences != null ? o.consequences : consequences);
     }
-    return confirm(title, message, confirmText, cancelText, { danger: false, warning: true, warningHint });
+    return confirm(title, message, confirmText, cancelText, { danger: false, warning: true, warningHint, consequences });
   }
 
   // 审查v4-L8：浏览器预览模式（preload 未注入 window.api）的全局提示横幅。

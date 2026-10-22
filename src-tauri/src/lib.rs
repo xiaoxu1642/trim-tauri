@@ -1093,12 +1093,12 @@ mod tests {
         // 修掉，但后果此前**只进 row tooltip**，用户点确认那一刻看的弹窗里没有它；
         // 且无 tabindex 的 span 拿不到焦点 ⇒ 键盘/读屏永远看不到。现钉三处接线。
         assert!(
-            cleanup.contains("const withConsequences = (list, text) =>"),
-            "F4a1-M01：确认弹窗必须拼入删除后果（扫描回执不带该字段，弹窗不能只列名字）"
+            cleanup.contains("const consequenceItems = (list) => list"),
+            "F4a1-M01：确认弹窗必须拿到结构化的删除后果（扫描回执不带该字段，弹窗不能只列名字）"
         );
         assert!(
-            cleanup.contains("withConsequences(highRisk,") && cleanup.contains("withConsequences(mediumRisk,"),
-            "F4a1-M01：两档确认（红/黄）都要拼后果，只做一档等于另一档继续看不见"
+            cleanup.contains("consequenceItems(highRisk)") && cleanup.contains("consequenceItems(mediumRisk)"),
+            "F4a1-M01：两档确认（红/黄）都要传后果，只做一档等于另一档继续看不见"
         );
         assert!(
             cleanup.contains("const focusable = item.ifDeleted ? ' tabindex=\"0\"' : '';"),
@@ -1109,6 +1109,35 @@ mod tests {
         assert!(
             !cleanup.contains("个高风险项（如"),
             "F4a1-M01：高风险确认不得用库外/档位不符的例子撑场面，宁可不举例"
+        );
+        // 补齐 ifDeleted 之后新出现的问题：后果区变成 1609px 长墙（可视 659px），
+        // 而确认按钮常驻 footer ⇒ 用户可以一行不读就确认。故钉折叠机制三件事：
+        // 只展前 N 条、溢出部分收在 collapsed 里、展开件存在。
+        let modaljs = include_str!("../../src/scripts/modal.js");
+        assert!(
+            modaljs.contains("rows.slice(0, foldAfter)") && modaljs.contains("rows.slice(foldAfter)"),
+            "F4a1-M01：后果区必须按 foldAfter 切成「直展」与「折叠」两段，全展等于没解决长墙"
+        );
+        assert!(
+            modaljs.contains("panel.style.display = 'none';"),
+            "F4a1-M01：折叠的那段必须默认不可见（display:none 才同时把它移出 Tab 序）"
+        );
+        assert!(
+            modaljs.contains("展开其余") && modaljs.contains("data-more"),
+            "F4a1-M01：必须给出「展开其余 N 条后果」的入口，不能把溢出内容做成看不见"
+        );
+        // ARIA 只许有一份实现（§5.16）：折叠态的 aria-expanded/aria-hidden 由 ds.accordion 同步
+        assert!(
+            modaljs.contains("window.ds.accordion.enhance(more, panel)"),
+            "F4a1-M01：展开件的 ARIA 必须复用 ds.accordion，不在弹窗里手搓第二套同步"
+        );
+        assert!(
+            appjs.contains("consequences: Array.isArray(opts.consequences) ? opts.consequences : null"),
+            "F4a1-M01：app.confirm 必须把后果透传给 modal，否则 cleanup.js 传了也到不了弹窗"
+        );
+        assert!(
+            appjs.matches("o.consequences != null ? o.consequences : consequences").count() == 2,
+            "F4a1-M01：confirmDanger/confirmWarning 的 NEW-1 归一兜底都要带上后果，漏一处就是对象形态调用静默无后果"
         );
     }
 

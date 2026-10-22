@@ -1439,13 +1439,12 @@
     // F4a1-M01 的残留射程（2026-10-23 复核）：删除后果此前只出现在行 tooltip 上，
     // 而用户做决定那一刻看的是这枚确认弹窗——扫描回执结构上不带 ifDeleted（它是规则库
     // 字段，不经扫描通道），所以弹窗文案光靠 r.* 拼不出后果。改为按档位回查规则元数据，
-    // 把后果附在名单后面；没有登记 ifDeleted 的条目（low 档不强制）保持原样，不编话。
-    const withConsequences = (list, text) => {
-      const lines = list
-        .map(r => { const m = getItemById(r.id); return m && m.ifDeleted ? `• ${r.name}：${m.ifDeleted}` : null; })
-        .filter(Boolean);
-      return lines.length ? `${text}\n\n删除后果：\n${lines.join('\n')}` : text;
-    };
+    // 把后果**结构化**交给确认件渲染（默认展前 3 条，其余收进「展开其余 N 条后果」——
+    // 全选时 22 条后果实测 1609px 对可视 659px，长墙等于没有）。没有登记 ifDeleted 的
+    // 条目不进这个列表，不编话。
+    const consequenceItems = (list) => list
+      .map(r => { const m = getItemById(r.id); return m && m.ifDeleted ? { name: r.name, text: m.ifDeleted } : null; })
+      .filter(Boolean);
 
     // 高风险二次确认（红色，删除类操作规范要求）。
     // 文案不再举例：现库清理域没有 high 档条目（high 只在优化面板用），这一支是给将来
@@ -1453,10 +1452,11 @@
     if (highRisk.length > 0) {
       const ok = await window.app?.confirmDanger(
         '高风险操作确认',
-        withConsequences(highRisk, `您选择了 ${highRisk.length} 个高风险项：\n${highRisk.map(r => '• ' + r.name).join('\n')}`),
+        `您选择了 ${highRisk.length} 个高风险项：\n${highRisk.map(r => '• ' + r.name).join('\n')}`,
         '确认清理',
         '取消',
-        '删除后可能无法恢复，请确认已了解风险。'
+        '删除后可能无法恢复，请确认已了解风险。',
+        consequenceItems(highRisk)
       );
       if (!ok) {
         finishClean();
@@ -1468,10 +1468,11 @@
     if (mediumRisk.length > 0) {
       const ok = await window.app?.confirmWarning(
         '中风险操作确认',
-        withConsequences(mediumRisk, `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + r.name).join('\n')}`),
+        `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + r.name).join('\n')}`,
         '确认清理',
         '取消',
-        '部分中风险项可能被应用在使用，清理后若个别程序异常，可通过系统自带方式恢复。'
+        '部分中风险项可能被应用在使用，清理后若个别程序异常，可通过系统自带方式恢复。',
+        consequenceItems(mediumRisk)
       );
       if (!ok) {
         // F4a1-M02：这一支原先只置 isCleaning=false + updateUI()，漏掉按钮文案与 busy 类
