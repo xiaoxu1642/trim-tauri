@@ -1076,6 +1076,40 @@ mod tests {
             ctx.contains("演示数据（未读写系统） · "),
             "F4a2-M05：看板汇总必须带演示标识"
         );
+        // F4a2-M05 的剩余射程（2026-10-23 复核）：横幅函数长期**零调用方**——分报告写的是
+        // 「overview.js 调它」，现算该文件并未调用，前提被证伪。各页的演示提示只在用户
+        // 操作时出现，进页第一眼没有任何东西说明数字是假的。现钉两件事：init 确有接线、
+        // 函数自带按 id 幂等守卫（否则重复 init 会叠出两条横幅）。
+        let appjs = include_str!("../../src/scripts/app.js");
+        assert!(
+            appjs.contains("if (!window.api) showPreviewModeBanner();"),
+            "F4a2-M05：预览模式横幅必须在 init 接线——函数存在 ≠ 用户看得见"
+        );
+        assert!(
+            appjs.contains("if (document.getElementById('previewModeBanner')) return;"),
+            "F4a2-M05：横幅必须自带幂等守卫"
+        );
+        // F4a1-M01 的新射程（同日复核）：原报告说「后果字段被投影裁掉」那半已由 3134222
+        // 修掉，但后果此前**只进 row tooltip**，用户点确认那一刻看的弹窗里没有它；
+        // 且无 tabindex 的 span 拿不到焦点 ⇒ 键盘/读屏永远看不到。现钉三处接线。
+        assert!(
+            cleanup.contains("const withConsequences = (list, text) =>"),
+            "F4a1-M01：确认弹窗必须拼入删除后果（扫描回执不带该字段，弹窗不能只列名字）"
+        );
+        assert!(
+            cleanup.contains("withConsequences(highRisk,") && cleanup.contains("withConsequences(mediumRisk,"),
+            "F4a1-M01：两档确认（红/黄）都要拼后果，只做一档等于另一档继续看不见"
+        );
+        assert!(
+            cleanup.contains("const focusable = item.ifDeleted ? ' tabindex=\"0\"' : '';"),
+            "F4a1-M01：写了后果的单元格必须可聚焦（data-tip 的展示判据含 focusin）"
+        );
+        // 文案护栏（2026-10-23 现算）：清理库当前没有 high 档条目，旧文案点名的
+        // Windows.old 不在库里、WinSxS 实为 medium——「举例」会变成对用户不存在承诺的暗示。
+        assert!(
+            !cleanup.contains("个高风险项（如"),
+            "F4a1-M01：高风险确认不得用库外/档位不符的例子撑场面，宁可不举例"
+        );
     }
 
     /// U-A1（v7.2 P1）：前端三态与共享失败态的源码契约。

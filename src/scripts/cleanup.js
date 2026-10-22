@@ -414,7 +414,11 @@
             tipLines.push('删除后果：');
             tipLines.push(item.ifDeleted);
           }
-          inner = `<span class="xtable-cell-text" data-tip="${escapeHtml(tipLines.join('\n'))}">${escapeHtml(xtable.middleEllipsis(item.name, 40))}</span>`;
+          // F4a1-M01 残留射程（2026-10-23）：data-tip 的展示判据含 focusin，但无 tabindex
+          // 的 span 拿不到焦点 ⇒ 键盘/读屏用户永远看不到后果。只对**确实写了后果**的条目
+          // 开放焦点（现算全库 3 条），不给 187 行的每个名称格都加停靠点。
+          const focusable = item.ifDeleted ? ' tabindex="0"' : '';
+          inner = `<span class="xtable-cell-text"${focusable} data-tip="${escapeHtml(tipLines.join('\n'))}">${escapeHtml(xtable.middleEllipsis(item.name, 40))}</span>`;
           break;
         }
         case 'path':
@@ -1432,11 +1436,24 @@
     const highRisk = risky.filter(r => r.risk === 'high');
     const mediumRisk = risky.filter(r => r.risk === 'medium');
 
-    // 高风险二次确认（红色，删除类操作规范要求）
+    // F4a1-M01 的残留射程（2026-10-23 复核）：删除后果此前只出现在行 tooltip 上，
+    // 而用户做决定那一刻看的是这枚确认弹窗——扫描回执结构上不带 ifDeleted（它是规则库
+    // 字段，不经扫描通道），所以弹窗文案光靠 r.* 拼不出后果。改为按档位回查规则元数据，
+    // 把后果附在名单后面；没有登记 ifDeleted 的条目（low 档不强制）保持原样，不编话。
+    const withConsequences = (list, text) => {
+      const lines = list
+        .map(r => { const m = getItemById(r.id); return m && m.ifDeleted ? `• ${r.name}：${m.ifDeleted}` : null; })
+        .filter(Boolean);
+      return lines.length ? `${text}\n\n删除后果：\n${lines.join('\n')}` : text;
+    };
+
+    // 高风险二次确认（红色，删除类操作规范要求）。
+    // 文案不再举例：现库清理域没有 high 档条目（high 只在优化面板用），这一支是给将来
+    // 真升档时兜底的；旧文案点名的 Windows.old 不在库里、WinSxS 实为 medium，举例即误导。
     if (highRisk.length > 0) {
       const ok = await window.app?.confirmDanger(
         '高风险操作确认',
-        `您选择了 ${highRisk.length} 个高风险项（如 Windows.old、WinSxS）：\n${highRisk.map(r => '• ' + r.name).join('\n')}`,
+        withConsequences(highRisk, `您选择了 ${highRisk.length} 个高风险项：\n${highRisk.map(r => '• ' + r.name).join('\n')}`),
         '确认清理',
         '取消',
         '删除后可能无法恢复，请确认已了解风险。'
@@ -1451,7 +1468,7 @@
     if (mediumRisk.length > 0) {
       const ok = await window.app?.confirmWarning(
         '中风险操作确认',
-        `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + r.name).join('\n')}`,
+        withConsequences(mediumRisk, `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + r.name).join('\n')}`),
         '确认清理',
         '取消',
         '部分中风险项可能被应用在使用，清理后若个别程序异常，可通过系统自带方式恢复。'
