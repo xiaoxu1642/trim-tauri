@@ -591,7 +591,7 @@
     const t = e.target;
     if (!(t instanceof Element)) return;
     // 点击交互控件 / 弹窗 / Toast 本体时保留原有功能，不触发关闭
-    if (t.closest('button, a, input, select, textarea, label, .toast, .usage-backdrop, .preview-backdrop, .ctx-detail-backdrop, .nav-item, .nav-subitem, .filter-tab, .checkbox, .context-item, .category-item, .ctx-cat-header, [contenteditable]')) return;
+    if (t.closest('button, a, input, select, textarea, label, .toast, .usage-backdrop, .ctx-detail-backdrop, .nav-item, .nav-subitem, .filter-tab, .checkbox, .context-item, .category-item, .ctx-cat-header, [contenteditable]')) return;
     // 自顶向下找最近添加且未移除的 Toast（关闭流程 Toast 不可手动关闭）
     for (let i = activeToasts.length - 1; i >= 0; i--) {
       const entry = activeToasts[i];

@@ -150,13 +150,20 @@
     } catch (e) { return iso; }
   }
 
+  // 历史测试记录弹窗（2026-10-22 用户点名改自绘弹窗骨架）：原先它自建一层皮，与
+  // .usage-modal 并列成第二份弹窗实现——不套统一材质、z 层 2000 压在 confirm（10000）
+  // 之下、Esc 与焦点圈闭全要自己写一遍。现收进 modal.js 工厂，那层皮随之下线。
+  // ctrl 句柄留着是为了「再点一次先 close 上一份」：modal.create 对同 id 只 remove DOM、
+  // 不走 close()，上一份挂在 document 上的 Esc 监听与 ds.focusTrap 就摘不干净。
+  let historyCtrl = null;
+
   async function showHistory() {
     if (!window.api?.benchHistory) {
       window.app?.toast('info', '历史记录功能仅在应用模式下可用');
       return;
     }
-    // 移除已有弹窗
-    closeHistory();
+    // 先收上一份再取数：与旧实现同一条「重开即刷新」路径
+    if (historyCtrl) historyCtrl.close();
     let records = [];
     try {
       const resp = await window.api.benchHistory.list();
@@ -171,23 +178,11 @@
       return;
     }
 
-    const backdrop = document.createElement('div');
-    backdrop.className = 'preview-backdrop';
-    backdrop.id = 'benchHistoryBackdrop';
-    backdrop.innerHTML = `
-      <div class="preview-modal bench-history-modal">
-        <div class="preview-header">
-          <div class="preview-header-info">
-            <div class="preview-title">历史测试记录</div>
-            <div class="preview-count">${records.length} 条记录</div>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center">
-            ${records.length > 0 ? '<button class="btn btn-secondary btn-small" id="benchHistoryClear">清空全部</button>' : ''}
-            <button class="preview-close" id="benchHistoryClose" data-tip="关闭">&times;</button>
-          </div>
-        </div>
-        <div class="bench-history-body">
-          ${records.length === 0 ? `
+    const ctrl = window.modal.create({
+      id: 'benchHistoryBackdrop',
+      title: '历史测试记录',
+      metaHtml: `<span class="bench-history-count">${records.length} 条记录</span>`,
+      bodyHtml: records.length === 0 ? `
             <div class="bench-history-empty">
               <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" opacity="0.3"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L8.9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
               <p>暂无测试记录，完成一次测试后自动保存</p>
@@ -223,51 +218,31 @@
                 `).join('')}
               </tbody>
             </table>
-          `}
-        </div>
-      </div>
-    `;
-    // 审查 v2-F8：这个自建弹窗原先既没有 `role`/`aria-modal`，也没有 Esc 关闭和焦点管理，
-    // 只有遮罩点击和一个关闭按钮 —— 键盘用户进得去出不来。与「使用说明」弹窗同族，
-    // 一并补上语义声明 + Esc + `ds.focusTrap`。
-    const modalEl = backdrop.querySelector('.preview-modal');
-    if (modalEl) {
-      modalEl.setAttribute('role', 'dialog');
-      modalEl.setAttribute('aria-modal', 'true');
-      modalEl.setAttribute('aria-label', '历史测试记录');
-    }
-    document.body.appendChild(backdrop);
-
-    $('benchHistoryClose')?.addEventListener('click', closeHistory);
-    backdrop.addEventListener('click', e => {
-      if (e.target === backdrop) closeHistory();
+      `,
+      // 空表不给 footer：footerHtml === undefined 才是不建这层（传空串会留一条空白栏）
+      footerHtml: records.length > 0
+        ? '<button class="btn btn-secondary btn-small" type="button" data-history-clear data-tip="删除全部测试记录，不可恢复">清空全部</button>'
+        : undefined,
+      // 9 列表格的 min-content 实测 946px（时间戳 / 完整路径 / 五个数值列都不可折），
+      // 加上 .usage-body 左右各 30px 内边距 ⇒ 1020 才不横向溢出；旧版 920 宽一直横向
+      // 溢出 68px，只是以前没量过。窗口最小宽 1387（lib.rs MIN_WIDTH），放得下。
+      width: 1020,
+      onClose: () => { historyCtrl = null; },
     });
-    // A3-M04：Esc 关闭：与同一弹窗的遮罩点击、关闭按钮三条退出路径齐平。
-    // 历史弹窗是自建 .preview-backdrop，其上层还可能叠 modal.confirm（.usage-backdrop）——
-    // 上层开着时 Esc 归上层，一次只关一层。
-    const onEsc = e => {
-      if (e.key !== 'Escape') return;
-      if (document.querySelector('.usage-backdrop')) return;
-      closeHistory();
-    };
-    document.addEventListener('keydown', onEsc);
-    backdrop._onEsc = onEsc;
-    // 焦点圈闭 + 关闭时归还（release 内部会还原 prevFocus）
-    if (window.ds && typeof window.ds.focusTrap === 'function' && modalEl) {
-      backdrop._trap = window.ds.focusTrap(modalEl, { initialFocus: '#benchHistoryClose' });
-    }
+    historyCtrl = ctrl;
 
     // 删除单条记录
-    backdrop.querySelectorAll('[data-delete-id]').forEach(btn => {
+    ctrl.body.querySelectorAll('[data-delete-id]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.deleteId;
         try {
           await window.api.benchHistory.delete(id);
           btn.closest('tr')?.remove();
-          const countEl = backdrop.querySelector('.preview-count');
-          const remaining = backdrop.querySelectorAll('tbody tr').length;
+          const remaining = ctrl.body.querySelectorAll('tbody tr').length;
+          const countEl = ctrl.modal.querySelector('.bench-history-count');
           if (countEl) countEl.textContent = `${remaining} 条记录`;
-          if (remaining === 0) { closeHistory(); setTimeout(showHistory, 100); }
+          // 删空要整体重开：footer（清空全部）与空态插图不是一个形状，逐条改 DOM 改不出来
+          if (remaining === 0) { ctrl.close(); setTimeout(showHistory, 100); }
           window.app?.toast('success', '记录已删除');
         } catch (e) {
           window.app?.toast('error', '删除失败: ' + e.message);
@@ -276,7 +251,7 @@
     });
 
     // 清空全部
-    $('benchHistoryClear')?.addEventListener('click', async () => {
+    ctrl.footer?.querySelector('[data-history-clear]')?.addEventListener('click', async () => {
       // 审查 v2-L6：清空全部记录是不可恢复的删除操作，原先用普通 confirm（无红色危险
       // 样式）。改走 confirmDanger（签名是位置参数，不是对象 + onOk）。
       const ok = await window.app?.confirmDanger?.(
@@ -289,22 +264,13 @@
       if (!ok) return;
       try {
         await window.api.benchHistory.clear();
-        closeHistory();
+        ctrl.close();
         setTimeout(showHistory, 100);
         window.app?.toast('success', '历史记录已清空');
       } catch (e) {
         window.app?.toast('error', '清空失败: ' + e.message);
       }
     });
-  }
-
-  function closeHistory() {
-    const el = document.getElementById('benchHistoryBackdrop');
-    if (el) {
-      if (el._onEsc) document.removeEventListener('keydown', el._onEsc);
-      el._trap?.release();
-    }
-    el?.remove();
   }
 
   function escapeHtml(text) { return window.ds.esc(text); }

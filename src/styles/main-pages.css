@@ -685,58 +685,6 @@
   .benchmark-fields { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
 }
 
-/* 图片预览弹窗 */
-.preview-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.75);
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  animation: fadeIn var(--duration-base) var(--ease-standard);
-}
-
-.preview-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border-default);
-  flex-shrink: 0;
-}
-
-.preview-header-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.preview-title {
-  font-size: var(--fs-body);
-  font-weight: calc(600 * var(--font-weight-scale, 1));
-  color: var(--fg-primary);
-}
-
-.preview-count {
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-}
-
-/* 磁盘测速 - 历史测试记录弹窗 */
-.bench-history-modal {
-  width: min(920px, 94vw);
-  height: auto;
-  max-height: 80vh;
-}
-
-.bench-history-body {
-  flex: 1;
-  overflow: auto;
-  padding: 16px 20px;
-  min-height: 120px;
-}
-
 .bench-history-empty {
   display: flex;
   flex-direction: column;

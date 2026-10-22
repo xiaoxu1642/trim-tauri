@@ -2397,54 +2397,8 @@ input[type="radio"]:focus-visible {
   cursor: not-allowed;
 }
 
-.preview-modal {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-large);
-  box-shadow: var(--shadow-flyout);
-  width: min(900px, 92vw);
-  height: min(680px, 88vh);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  animation: modalScaleIn var(--duration-base) var(--ease-emphasized);
-}
-
-.preview-close {
-  width: 32px;
-  height: 32px;
-  border: none;
-  background: transparent;
-  color: var(--fg-secondary);
-  cursor: pointer;
-  border-radius: var(--radius-small);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(18px * var(--font-size-scale, 1));
-  /* 性能批次②：白名单化。本件只有 hover（background / color）与字号缩放
-     （--font-size-scale）两条变化来源；按钮可键盘聚焦，通用 :focus-visible 会改
-     outline / outline-offset。base 圆角与焦点态同值（--radius-small）⇒ 不列入。 */
-  transition: background var(--duration-fast) var(--ease-standard),
-              color var(--duration-fast) var(--ease-standard),
-              font-size var(--duration-fast) var(--ease-standard),
-              outline var(--duration-fast) var(--ease-standard),
-              outline-offset var(--duration-fast) var(--ease-standard);
-}
-.preview-close:hover {
-  background: var(--bg-card-hover);
-  color: var(--fg-primary);
-}
-
 @keyframes spin {
   to { transform: rotate(360deg); }
-}
-
-@media (max-width: 600px) {
-  .preview-modal {
-    width: 96vw;
-    height: 92vh;
-  }
 }
 
 .guide-content {
@@ -2645,7 +2599,6 @@ input[type="radio"]:focus-visible {
 }
 /* 大面板统一大圆角并裁剪内部内容（边框/阴影随圆角裁剪） */
 .toast,
-.preview-modal,
 .ctx-detail-modal {
   overflow: hidden;
 }
