@@ -3774,14 +3774,22 @@ body.mw-window {
   color: var(--fg-secondary);
 }
 .mw-group-title { font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
-/* 模型名称右侧的 API 文档超链接（百度千帆「还没有？去获取API」/ 知乎直答 / 秘塔 AI） */
+/* 模型名称右侧的 API 文档入口（百度千帆「还没有？去获取API」/ 知乎直答 / 秘塔 AI） */
 .mw-doc-link {
   margin-left: 8px;
   font-size: calc(11px * var(--font-size-scale, 1));
   font-weight: calc(400 * var(--font-weight-scale, 1));
   color: var(--accent);
   text-decoration: none;
+  /* 2026-10-22 由 <a target=_blank> 改成 <button>（改走只认白名单 key 的 app:open-doc，
+     没有 href 可给）：成了按钮就得清掉 UA 盒模型，否则标题里冒出一颗灰底圆角按钮。 */
+  display: inline;
+  background: none;
+  border: 0;
   border-bottom: 1px dashed color-mix(in oklab, var(--accent) 55%, transparent);
+  padding: 0;
+  font-family: inherit;
+  line-height: inherit;
   cursor: pointer;
 }
 .mw-doc-link:hover { color: var(--accent-hover); border-bottom-color: var(--accent); }

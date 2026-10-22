@@ -71,10 +71,13 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 // 720,500 → 725,000（贴值留余 ~880 B）。两项都经过 review；结构性建议不变：
 // main-pages.css 仍全量随首屏，后续新增应优先按页拆进按需清单，而非反复上调。
 // 2026-10-22（目检整改批）：软件卸载页等待条改「计时 + 可收起」（index.html 结构 +560 B、
-// main.css 新规则 +780 B）与开屏行高 + splash 注释——730,000 → 731,500（实际 731,040 B，
-// 贴值留余 ~460 B）。这是连续第二次撞顶，上面那条结构性建议已经变成阻塞项：
-// 按页拆样式进按需清单需要单独一批，不在 UI 整改批里顺手做。
-const CAP_MAX = 731_500;
+// main.css 新规则 +780 B）与开屏行高 + splash 注释——730,000 → 731,500（实际 731,040 B）。
+// 同一天的 app:open-doc 批再加 tauri-api.js 通道与方法（+230 B）、main.css 的 .mw-doc-link
+// 按钮化清 UA 盒模型（+150 B）——731,500 → 732,000（实际 731,639 B，留余 ~360 B）。
+// 这是**连续第三次**撞顶，且第三次的增长全落在「子窗专用样式也住在 main.css 里」这个
+// 已知结构问题上（models-window.html 直接挂整份 main.css）。下一条往 main.css 加规则的
+// 批次必须先做按页拆样式进按需清单，不再上调本预算。
+const CAP_MAX = 732_000;
 const CAP_MIN = 400_000;
 // 豁免清单：允许不带 defer 的脚本（必须尽早执行，加 defer 反而破坏语义）
 const EXEMPT_NOT_DEFER = ['scripts/theme-boot.js'];

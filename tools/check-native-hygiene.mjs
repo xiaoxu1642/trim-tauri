@@ -706,6 +706,62 @@ function rustFns(src) {
   }
 }
 
+// N14（2026-10-22 目检批用户裁定「加一条窄命令 app:open-doc」）：窄出口的两侧键集对账。
+//
+// 为什么必须有机检：地址真源搬进 Rust 常量表之后，渲染层只剩 key→文案。两侧一旦分叉，
+// 症状分别是——前端多出的 key：点了得到一条 unknown-key 错误回执（用户读成「按钮坏了」）；
+// Rust 多出的 key：没有任何调用方，是死表。两种都不会自己冒出来，只能对账。
+// 顺带钉住「表里只许 https」：app_open_doc 直接喂 open_https，不再过 app_open_external
+// 那条 scheme 闸，所以这条约束的唯一守卫就是本组。
+{
+  const rsPath = join(ROOT, 'src-tauri/src/commands/app.rs');
+  const jsPath = join(ROOT, 'src/scripts/models-window.js');
+  const rsKeys = (text) => {
+    const at = text.indexOf('const DOC_LINKS');
+    if (at < 0) return null;
+    const block = text.slice(at, text.indexOf('];', at) + 2);
+    return [...block.matchAll(/\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/g)].map((m) => ({ key: m[1], url: m[2] }));
+  };
+  const jsKeys = (text) => {
+    const at = text.indexOf('const DOC_LINKS');
+    if (at < 0) return null;
+    const block = text.slice(at, text.indexOf('};', at) + 2);
+    return [...block.matchAll(/^\s{4}([a-z0-9_]+):\s*\{/gm)].map((m) => m[1]);
+  };
+  // 判定器自证（§4.1 正向对照）：同一套解析喂「两侧一致」与「前端多一个 key」，后者必须判红
+  const rsSample = rsKeys('const DOC_LINKS: &[(&str, &str)] = &[\n    ("a", "https://x/a"),\n];');
+  const jsOkSample = jsKeys('const DOC_LINKS = {\n    a: {\n      label: "x"\n    }\n  };\n');
+  const jsBadSample = jsKeys('const DOC_LINKS = {\n    a: {\n      label: "x"\n    },\n    ghost: {\n      label: "y"\n    }\n  };\n');
+  if (!rsSample || rsSample.length !== 1 || rsSample[0].key !== 'a') {
+    g.fail('N14 对照a：Rust 侧解析器连一样例都读不出 ⇒ 本节将恒绿');
+  } else if (jsOkSample.join() !== 'a') {
+    g.fail(`N14 对照b：JS 侧解析器读不出合规样本（读到 ${JSON.stringify(jsOkSample)}）`);
+  } else if (jsBadSample.join() === 'a') {
+    g.fail('N14 对照c：前端多出的 key 没被解析出来 ⇒ 差集判据失明');
+  }
+  if (!existsSync(rsPath) || !existsSync(jsPath)) {
+    g.fail(`N14：读不到 ${existsSync(rsPath) ? 'models-window.js' : 'app.rs'} ⇒ 本节未校验，不许静默跳过`);
+  } else {
+    const rs = rsKeys(readFileSync(rsPath, 'utf8'));
+    const js = jsKeys(readFileSync(jsPath, 'utf8'));
+    if (!rs || rs.length === 0) g.fail('N14：app.rs 里没有 DOC_LINKS 表或解析为空 ⇒ 窄出口的真源没了');
+    else if (!js || js.length === 0) g.fail('N14：models-window.js 里没有 DOC_LINKS 或解析为空 ⇒ 消费面没了');
+    else {
+      const rsSet = rs.map((r) => r.key);
+      const onlyRust = rsSet.filter((k) => !js.includes(k));
+      const onlyJs = js.filter((k) => !rsSet.includes(k));
+      const nonHttps = rs.filter((r) => !r.url.startsWith('https://'));
+      if (onlyRust.length || onlyJs.length || nonHttps.length) {
+        if (onlyRust.length) g.fail(`N14：Rust 表里有、前端没有的 key ${JSON.stringify(onlyRust)} ⇒ 死表（新增文档没接入口）`);
+        if (onlyJs.length) g.fail(`N14：前端有、Rust 表里没有的 key ${JSON.stringify(onlyJs)} ⇒ 点了必收 unknown-key`);
+        if (nonHttps.length) g.fail(`N14：表里 ${nonHttps.map((r) => r.key).join('/')} 的地址不是 https ⇒ 绕过了 scheme 闸`);
+      } else {
+        g.ok(`N14：app:open-doc 两侧键集一致（${rsSet.length} 条：${rsSet.join(' / ')}），且全部 https`);
+      }
+    }
+  }
+}
+
 // 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明；
 // CLEANUP 取用点命中过少 ⇒ N9-B 语料失明（N9 取用点本应 ≥6，命中 0~5 即正则/域前缀出事）
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);

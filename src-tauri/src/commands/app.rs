@@ -1,4 +1,5 @@
 //! app 域（批次 A）：app:get-info / app:get-theme / app:read-usage / app:open-external
+//! / app:open-doc（子窗窄出口）
 //! 外加窗口生命周期握手 app:first-paint（原 onSafe send 通道，直连命令注册）
 
 use tauri::{AppHandle, WebviewWindow};
@@ -72,6 +73,34 @@ pub fn app_open_external<R: tauri::Runtime>(window: WebviewWindow<R>, url: Strin
         return serde_json::json!({ "ok": false, "reason": "scheme", "protocol": format!("{scheme}:") });
     }
     match open_https(trimmed) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "reason": "open-failed", "message": e }),
+    }
+}
+
+/// 模型子窗「API 文档」入口的**窄出口**：地址只从这张表里取，渲染层传不了任意 URL。
+///
+/// 为什么不复用 `app:open-external`：那条按 `MAIN` 判档，`models` 是子窗、调它必被拒；
+/// 而把它的档位下放到 readonly 换来的是「任何一扇窗都能让系统浏览器打开任意 https」，
+/// 比这条命令本身需要的面宽得多（2026-10-22 目检批用户裁定走窄命令）。
+/// 表里的 key 同时是渲染层 `DOC_LINKS` 的键集，两侧分叉由
+/// `tools/check-native-hygiene.mjs` 的 N14 对账（§5.16 同一份判据不许各写一份）。
+const DOC_LINKS: &[(&str, &str)] = &[
+    ("baidu_pro", "https://cloud.baidu.com/doc/qianfan/s/Kmiy99ziv"),
+    ("zhihu", "https://developer.zhihu.com/docs?key=zhida"),
+    ("metaso", "https://metaso.cn/search-api/playground"),
+];
+
+/// app:open-doc — 只接受白名单 key，打开对应的厂商 API 文档
+#[tauri::command]
+pub fn app_open_doc<R: tauri::Runtime>(window: WebviewWindow<R>, key: String) -> serde_json::Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return serde_json::json!({ "ok": false, "reason": "forbidden", "message": msg });
+    }
+    let Some((_, url)) = DOC_LINKS.iter().find(|(k, _)| *k == key.as_str()) else {
+        return serde_json::json!({ "ok": false, "reason": "unknown-key" });
+    };
+    match open_https(url) {
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "reason": "open-failed", "message": e }),
     }

@@ -127,6 +127,10 @@ const RETIRED = {
  * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
  */
 const TAURI_ADDED = {
+  // 子窗窄出口（2026-10-22 目检批用户裁定）：上游 Electron 的模型子窗用
+  // `shell.openExternal(url)` 直连，渲染层能把任意地址交给系统浏览器；这里反过来只收
+  // 白名单 key，地址真源在 commands/app.rs 的 DOC_LINKS 表，故不登记 app:open-external 的复用。
+  'app:open-doc': '2026-10-22（目检会话）：模型子窗「API 文档」入口——渲染层只传白名单 key，URL 由 Rust 常量表给出（readonly 档：调用方就是子窗，主窗无入口）',
   // CDP 远程调试开关（2026-10-22 用户点名）：上游 Electron 轨的调试口是主进程自己的
   // `--inspect`/webPreferences，渲染层从来没有「查询/设置远程调试」这类通道，故在此登记。
   'settings:cdp-state': '2026-10-22（目检会话）：读 CDP 远程调试三态——本进程是否真暴露端口 / 下次启动的意图 / 是否需要重启。WebView2 的 --remote-debugging-port 只能在浏览器进程创建前定下，运行中改不了，所以不能只回一个布尔（主窗档）',

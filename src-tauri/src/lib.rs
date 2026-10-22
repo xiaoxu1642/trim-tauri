@@ -403,6 +403,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::app::app_get_info,
         commands::app::app_read_usage,
         commands::app::app_open_external,
+        commands::app::app_open_doc,
         commands::app::app_first_paint,
         // ---- A 批：log / diag / modal / window / shutdown / intro ----
         commands::log::log_write,

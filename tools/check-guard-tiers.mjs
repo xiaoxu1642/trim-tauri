@@ -413,6 +413,10 @@ const MUST_READONLY = [
   // 为准」的 M1~M3 教训单独评审。
   'aidesc_get',
   'app_get_info',
+  // 2026-10-22 目检批：模型子窗标题里的「API 文档」入口。按 readonly 档不是「放宽」而是
+  // 「按谁真的需要调它落档」（AGENTS §3）——调用方就是 models 子窗，主窗反而没有入口。
+  // 面比 app:open-external 窄：只接受白名单 key，URL 在 Rust 常量表里，渲染层传不进地址。
+  'app_open_doc',
   'appearance_get_env',
   'appearance_get_material',
   'cleanup_check_locked',

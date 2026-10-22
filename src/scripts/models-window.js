@@ -38,20 +38,20 @@
   const ORDER = ['baidu_pro', 'zhihu', 'metaso', 'custom'];
   const VERIFY_TEXT = 'api是什么，用三十个字简略回答';
 
-  // 各模型 API 文档超链接（显示在分组标题名称右侧，点击用系统浏览器打开）
+  // 各模型 API 文档入口（显示在分组标题名称右侧，点击用系统浏览器打开）。
+  // 这里刻意只留 key→文案：真实地址的唯一真源在 `commands/app.rs` 的 DOC_LINKS 表，
+  // 渲染层传不动 URL（app:open-doc 只认白名单 key）。两侧键集由
+  // tools/check-native-hygiene.mjs 的 N14 对账。
   const DOC_LINKS = {
     baidu_pro: {
-      url: 'https://cloud.baidu.com/doc/qianfan/s/Kmiy99ziv',
       label: '还没有？去获取API',
       tip: '获取百度千帆 Access Key（打开 API 文档）'
     },
     zhihu: {
-      url: 'https://developer.zhihu.com/docs?key=zhida',
       label: 'API 文档',
       tip: '查看知乎直答 API 文档'
     },
     metaso: {
-      url: 'https://metaso.cn/search-api/playground',
       label: 'API 文档',
       tip: '查看秘塔 AI 搜索 API 文档'
     }
@@ -113,7 +113,7 @@
             <svg class="mw-group-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
             <span class="mw-group-icon">${meta.icon}</span>
             <div>
-              <div class="mw-group-title">${escapeHtml(meta.name)}${DOC_LINKS[key] ? `<a class="mw-doc-link" href="${escapeAttr(DOC_LINKS[key].url)}" target="_blank" rel="noopener noreferrer" data-tip="${escapeAttr(DOC_LINKS[key].tip)}">${escapeHtml(DOC_LINKS[key].label)}</a>` : ''}</div>
+              <div class="mw-group-title">${escapeHtml(meta.name)}${DOC_LINKS[key] ? `<button class="mw-doc-link" type="button" data-doc-key="${escapeAttr(key)}" data-tip="${escapeAttr(DOC_LINKS[key].tip)}">${escapeHtml(DOC_LINKS[key].label)}</button>` : ''}</div>
               <div class="mw-group-sub">${escapeHtml(meta.sub)}</div>
             </div>
             <span class="mw-group-meta">${stateBadge(key)}</span>
@@ -227,12 +227,26 @@
     if (!body) return;
     body.querySelectorAll('[data-toggle]').forEach(head => {
       head.addEventListener('click', e => {
-        // 点击「API 文档 / 去获取API」超链接不触发折叠，交由系统浏览器打开
-        if (e.target.closest('a')) return;
+        // 点标题里的「API 文档 / 去获取API」不触发折叠，交给下面的 openDoc 处理
+        if (e.target.closest('a, button')) return;
         const key = head.dataset.toggle;
         const group = head.closest('.mw-group');
         collapsed[key] = !group.classList.contains('collapsed');
         group.classList.toggle('collapsed', !!collapsed[key]);
+      });
+    });
+    body.querySelectorAll('[data-doc-key]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        // 地址不在这一侧：只把白名单 key 交给 app:open-doc，URL 由 Rust 常量表决定。
+        // openDoc 返回 Promise，同步 try/catch 抓不到 reject（A2-L01 同口径）。
+        try {
+          const resp = await window.api?.app?.openDoc?.(btn.dataset.docKey);
+          if (resp && resp.ok === false) {
+            toast('error', '打开文档失败：' + ((resp && (resp.message || resp.reason)) || '未知原因'));
+          }
+        } catch (e) {
+          toast('error', '打开文档失败：' + ((e && e.message) || e));
+        }
       });
     });
     body.querySelectorAll('[data-role="toggleKey"]').forEach(btn => {

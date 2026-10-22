@@ -32,6 +32,7 @@
     'app:get-info': 'app_get_info',
     'app:read-usage': 'app_read_usage',
     'app:open-external': 'app_open_external',
+    'app:open-doc': 'app_open_doc',
     // updater 域（onState 是事件）
     'updater:check': 'updater_check',
     'updater:completion': 'updater_completion',
@@ -355,6 +356,8 @@
       readUsage: function () { return invokeChannel('app:read-usage'); },
       // 裸标量载荷（preload 直传 url 而非对象）：Tauri 命令必须收到具名参数，此处整形为 { url }
       openExternal: function (url) { return invokeChannel('app:open-external', { url: url }); },
+      // 子窗专用窄出口：只传白名单 key，地址在 Rust 侧常量表里（open-external 按主窗判档，子窗调必被拒）
+      openDoc: function (key) { return invokeChannel('app:open-doc', { key: key }); },
       onMemoryTrim: function (callback) { return onEvent('memory:trim', function () { callback(); }); }
     },
 
