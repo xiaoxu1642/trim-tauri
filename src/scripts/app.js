@@ -874,6 +874,11 @@
     // 恢复侧边栏折叠状态
     applySidebarState(getSidebarCollapsed());
 
+    // 浏览器预览模式（preload 未注入 window.api）挂一条常驻横幅：各页的「演示数据」提示
+    // 只在用户操作时才出现，进页第一眼没有任何东西说明「这些数字不是真的」。
+    // showPreviewModeBanner 自带按 id 的幂等守卫，重复调用只有一条。
+    if (!window.api) showPreviewModeBanner();
+
     // 空状态 CTA：委托转发到目标按钮（如「立即扫描」→ btnScan / btnScanStartup）
     document.addEventListener('click', (e) => {
       const btn = e.target && e.target.closest ? e.target.closest('[data-empty-cta]') : null;
