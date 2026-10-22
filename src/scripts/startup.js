@@ -224,7 +224,9 @@
     const escalated = [];
 
     // 1) 黑名单项再次出现（程序重新创建）→ 逐条红色确认后自动删除
-    const blItems = items.filter(i => blacklist.includes(fpOf(i)));
+    // 系统输入链项排除在自动删除之外：后端两臂本来就会拒删，若不在这里挡，
+    // 用户仍会被弹一次注定失败的红色确认框（「点了才报错」的观感）。
+    const blItems = items.filter(i => blacklist.includes(fpOf(i)) && !i.protected);
     for (const it of blItems) {
       const name = it.name || '未命名';
       // SU-2：删除前逐条确认，取消则本次保留
@@ -242,6 +244,7 @@
     for (const fp of Object.keys(defend)) {
       const it = items.find(i => fpOf(i) === fp);
       if (!it) continue; // 本扫描未出现
+      if (it.protected) continue; // 系统输入链不升级删除（strike 计数保留，下次扫描仍只提示）
       if (it.enabled) {
         defend[fp] = { name: defend[fp]?.name || it.name || '未命名', strikes: (defend[fp]?.strikes || 0) + 1 };
         if (defend[fp].strikes >= DEFEND_STRIKES_LIMIT) {
@@ -559,15 +562,25 @@
       const secBtn = missing
         ? `<button class="btn btn-small btn-opt-sec" data-id="${escapeHtml(i.id)}" data-tip="打开系统自带的 Windows 安全中心，由你决定要不要扫描">安全中心</button>`
         : '';
+      // 系统输入链（CTF Loader 那一族）：判据与拦截都在后端两臂（startup_toggle / startup_delete），
+      // 这里只负责「不给按钮 + 说明为什么」，避免用户点了才收到一条 error 回执。
+      // 反向不锁：该项若已被系统或别的工具关掉，「启用」仍然给——拦启用等于替用户把输入法锁死。
+      const guarded = !!i.protected;
+      const guardBadge = guarded
+        ? window.ds.badgeHtml('warn', '系统组件', {
+            small: true,
+            title: i.protectedReason || '系统输入法组件，Trim 不提供禁用与删除'
+          })
+        : '';
       return `
         <div class="startup-item ${i.enabled ? '' : 'disabled'}" data-id="${escapeHtml(i.id)}">
-          <input type="checkbox" class="startup-check startup-item-check" data-id="${escapeHtml(i.id)}" aria-label="选择 ${escapeHtml(i.name || '未命名')}">
+          <input type="checkbox" class="startup-check startup-item-check" data-id="${escapeHtml(i.id)}"${guarded ? ' disabled' : ''} aria-label="选择 ${escapeHtml(i.name || '未命名')}${guarded ? '（系统组件，不可操作）' : ''}">
           <div class="startup-item-icon ${meta.cls}">
             <svg class="startup-item-glyph" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
             <img class="startup-item-icon-img" alt="" width="18" height="18" data-icon-path="${escapeHtml(locPath)}" hidden>
           </div>
           <div class="startup-item-info">
-            <div class="startup-item-title">${escapeHtml(i.name || '未命名')} ${badge}${missingBadge}</div>
+            <div class="startup-item-title">${escapeHtml(i.name || '未命名')} ${badge}${missingBadge}${guardBadge}</div>
             ${cmdHtml}
             ${missingHtml}
             ${noteHtml}
@@ -577,9 +590,11 @@
             ${locBtn}
             ${secBtn}
             ${i.enabled
-              ? `<button class="btn btn-small btn-opt-toggle off" data-id="${escapeHtml(i.id)}" data-act="disable" data-tip="禁用（可逆）">禁用</button>`
+              ? (guarded
+                  ? ''
+                  : `<button class="btn btn-small btn-opt-toggle off" data-id="${escapeHtml(i.id)}" data-act="disable" data-tip="禁用（可逆）">禁用</button>`)
               : `<button class="btn btn-small btn-opt-toggle on" data-id="${escapeHtml(i.id)}" data-act="enable" data-tip="重新启用">启用</button>`}
-            <button class="btn btn-small btn-opt-del" data-id="${escapeHtml(i.id)}" data-act="delete" data-tip="备份后删除">删除</button>
+            ${guarded ? '' : `<button class="btn btn-small btn-opt-del" data-id="${escapeHtml(i.id)}" data-act="delete" data-tip="备份后删除">删除</button>`}
           </div>
         </div>`;
     }).join('') + `
@@ -906,7 +921,9 @@
     el('btnAddStartup')?.addEventListener('click', () => addItem());
     el('startupSelectAll')?.addEventListener('change', (e) => {
       el('startupList').querySelectorAll('.startup-item-check').forEach(c => {
-        c.checked = e.target.checked;
+        // 受保护项的复选框是 disabled 的，但对 disabled input 直接赋值 checked 仍然生效——
+        // 不挡就在这里把系统输入链一起勾上，变成「后端拒、界面报错」。
+        c.checked = e.target.checked && !c.disabled;
       });
       updateBatchButtons();
     });

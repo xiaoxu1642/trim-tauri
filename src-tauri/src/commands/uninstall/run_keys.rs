@@ -186,7 +186,19 @@ pub(super) fn run_findings(raws: &[RunRaw], present: &dyn Fn(&str) -> bool, cap:
     let mut alive = 0usize;
     let mut no_target = 0usize;
     let mut unparseable = 0usize;
+    let mut protected = 0usize;
     for raw in raws {
+        // 输入链护栏：与启动项域共用同一份判据（§5.16，两侧各写一份就会「面板拦得住、残留清单漏过去」）。
+        // 这一族一旦目标解析不到（`present` 判据查不到落点），旧口径会把它当「厂商残留」上报，
+        // 勾上删掉等于亲手关掉输入法；且本类候选是 reg_value，删除走的是注册表值删除、无法回收。
+        let guard_probe = json!({
+            "valueName": raw.value_name,
+            "command": raw.data.clone().unwrap_or_default(),
+        });
+        if crate::engine::native::input_chain_guard_reason(&guard_probe).is_some() {
+            protected += 1;
+            continue;
+        }
         let (class, reason, decoded) = match extract_run_target(raw.data.as_deref()) {
             // 三种「取不出目标」给不同的 class 与措辞（方案 §2.3 R-1 第 2 条）
             RunTarget::NoTarget => {
@@ -235,6 +247,10 @@ pub(super) fn run_findings(raws: &[RunRaw], present: &dyn Fn(&str) -> bool, cap:
                 ("readonlyPhase", "本阶段只读：候选不进执行快照".to_string()),
             ]),
         }));
+    }
+    if protected > 0 {
+        // 必须可见：不报也不说，用户会以为「本机启动项都健康」，而真实原因是判据把它们挡了。
+        notes.push(format!("{protected} 条属系统输入链（CTF Loader 那一族），Trim 不报为可删残留"));
     }
     if alive > 0 {
         notes.push(format!("{alive} 条启动项的目标在本机仍存在，按「仍在使用中」不报"));

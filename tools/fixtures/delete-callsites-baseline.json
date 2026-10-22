@@ -92,7 +92,7 @@
   },
   "startup_delete": {
     "src-tauri/src/commands/startup.rs": 1,
-    "src-tauri/src/engine/native/startup.rs": 1
+    "src-tauri/src/engine/native/startup.rs": 2
   },
   "MoveFileExW": {
     "src-tauri/src/commands/uninstall/pending_delete.rs": 1

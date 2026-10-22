@@ -661,6 +661,51 @@ function rustFns(src) {
   }
 }
 
+// N13（2026-10-22 用户裁定「不允许优化 ctfmon 的自启动与启动链」）：启动链身份护栏的**消费面**对账。
+//
+// 为什么不只在 startup.rs 写单测就算完：判据本体在 Rust，单测看得见它，看不见两个下游消费方——
+//   ① 渲染层 startup.js 是否真的按 protected 收起按钮。后端拒了而界面还给按钮，症状是
+//      「用户点了才收到一条 error 回执」，正是被否掉的观感；
+//   ② 卸载残留清理 run_keys.rs 是否也调判据。启动项面板拦得住、残留清单把它当厂商候选报出来，
+//      勾选删除走的仍是另一条链（§5.16 同一份判据不许两侧各写一份）。
+// 这两处一个在 JS 一个在跨文件 Rust，Rust 侧的结构断言覆盖不到，所以落在 Node 侧。
+{
+  const jsPath = join(ROOT, 'src/scripts/startup.js');
+  const rkPath = join(ROOT, 'src-tauri/src/commands/uninstall/run_keys.rs');
+  if (!existsSync(jsPath)) {
+    g.fail('N13：读不到 src/scripts/startup.js ⇒ 本节未校验（消费面失踪必须红，不许静默跳过）');
+  } else {
+    const js = readFileSync(jsPath, 'utf8');
+    // 判定器自证：同一段判据喂「带闸」与「裸按钮」两种形状，后者必须判红
+    const delBtnGuarded = (text) => {
+      const at = text.indexOf('data-act="delete"');
+      return at >= 0 && /guarded\s*\?\s*''\s*:/.test(text.slice(Math.max(0, at - 220), at));
+    };
+    if (!delBtnGuarded('guarded ? \'\' : <button data-act="delete">')) {
+      g.fail('N13 对照a：带闸样本必须被认成受控（判据失明就是恒绿）');
+    }
+    if (delBtnGuarded('<button data-act="delete">')) {
+      g.fail('N13 对照b：裸按钮样本必须判红');
+    }
+    if (!delBtnGuarded(js)) {
+      g.fail('N13：startup.js 的删除按钮不再由 guarded 控制 ⇒ 后端会拒删，但界面还给按钮');
+    } else if (!/!!i\.protected/.test(js)) {
+      g.fail('N13：渲染层不再消费后端的 protected 字段（后端加了标记而界面当没看见）');
+    } else if (!/&&\s*!i\.protected/.test(js)) {
+      g.fail('N13：防恢复自动删除链不再跳过受保护项（会弹一次注定失败的红色确认框）');
+    } else {
+      g.ok('N13：启动链护栏的消费面在位（按钮受控 + protected 被读 + 自动删除链跳过）');
+    }
+  }
+  if (!existsSync(rkPath)) {
+    g.fail('N13：读不到 run_keys.rs ⇒ 残留侧未校验');
+  } else if (!readFileSync(rkPath, 'utf8').includes('input_chain_guard_reason')) {
+    g.fail('N13：卸载残留清理不再调用启动链判据 ⇒ 启动项拦得住、残留清单漏过去（§5.16 两侧分叉）');
+  } else {
+    g.ok('N13：残留清理侧与启动项域共用同一份启动链判据');
+  }
+}
+
 // 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明；
 // CLEANUP 取用点命中过少 ⇒ N9-B 语料失明（N9 取用点本应 ≥6，命中 0~5 即正则/域前缀出事）
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);

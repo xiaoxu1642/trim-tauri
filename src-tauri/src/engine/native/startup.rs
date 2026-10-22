@@ -276,7 +276,7 @@ fn scan_task_files() -> Vec<Value> {
             // 「by user disabled」这类标记串（GoogleUpdater/抖音真机如此），解析不出
             // 现存文件就留空——前端按空路径回退默认图标，不拿标记串冒充路径。
             let resolved_target = resolve_running_target(&task_to_run, &task_args, &task_workdir);
-            out.push(json!({
+            let mut row = json!({
                 "id": format!("task|{task_path}{task_name}"),
                 "name": task_name,
                 "command": task_to_run,
@@ -298,7 +298,9 @@ fn scan_task_files() -> Vec<Value> {
                 "publisher": "",
                 "resolvedPath": resolved_target,
                 "missingTarget": task_missing,
-            }));
+            });
+            apply_startup_guard(&mut row);
+            out.push(row);
         }
     }
     out
@@ -526,7 +528,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                 };
                 let missing = missing_target_of(&cmd_path).unwrap_or_default();
 
-                results.push(json!({
+                let mut row = json!({
                     "id": format!("reg|{reg_path_full}|{vp}"),
                     "name": vp,
                     "command": value_data,
@@ -549,7 +551,9 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "resolvedPath": cmd_path,
                     // 目标已消失：只报事实（写在哪、找不着），不推断「是病毒」——见 missing_target_of
                     "missingTarget": missing,
-                }));
+                });
+                apply_startup_guard(&mut row);
+                results.push(row);
             }
             let _ = RegCloseKey(hk);
         }
@@ -573,7 +577,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     .or_else(|| read_startup_approved(sa_hive, "StartupFolder", &name_stem));
                 let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
                 let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
-                results.push(json!({
+                let mut row = json!({
                     "id": format!("folder|{full_path}"),
                     "name": name_stem,
                     "command": full_path,
@@ -596,7 +600,9 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "resolvedPath": resolved,
                     // 启动文件夹的项是 read_dir 当场枚举出来的，文件必然在 —— 恒空，但三个来源同形状
                     "missingTarget": "",
-                }));
+                });
+                apply_startup_guard(&mut row);
+                results.push(row);
             }
         }
     }
@@ -1055,6 +1061,77 @@ unsafe fn set_approved_bit(hive: HKEY, subkey: &str, value_name: &str, disable: 
 /// 扫描侧只读不锁：台账写入是原子的，读者看到的要么是旧账要么是新账，无撕裂。
 static STARTUP_LEDGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 系统输入链（CTF Loader）身份保护名单。**整名相等**口径，见 [`input_chain_guard_reason`]。
+///
+/// 这一族一旦被关掉，中文输入法的候选框与切换整体失效；而 Trim 复原它的能力是残缺的：
+/// 启动文件夹项走回收站、注册表值只有 export 备份、RunOnce 又没有批准位（§5.30），
+/// 一旦误禁，界面上没有一条可靠的「一键恢复」——所以判据定成**不可操作**，而不是二次确认。
+const INPUT_CHAIN_GUARDS: &[(&str, &str)] = &[
+    ("ctfmon", "系统输入法组件（CTF Loader）"),
+    ("ctf launch", "系统输入法启动快捷方式（CTF Launch）"),
+];
+
+/// 启动项身份归一：取 basename、小写、去引号与可执行后缀。
+/// 值名（`ctfmon`）、快捷方式 stem（folder 臂的 `name` 就是无扩展名的 `CTF Launch`）、
+/// 目标路径（`C:\Windows\System32\ctfmon.exe`）三形落到同一个键上，才谈得上「一份判据」§5.16。
+fn startup_identity(raw: &str) -> String {
+    let base = raw
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_matches(['"', '\''])
+        .to_lowercase();
+    for ext in [".exe", ".lnk", ".com", ".bat", ".cmd", ".scr"] {
+        if let Some(stripped) = base.strip_suffix(ext) {
+            return stripped.to_string();
+        }
+    }
+    base
+}
+
+/// 命中受保护的启动项则返回中文理由（同时进界面提示与回执），否则 None。
+///
+/// 为什么不用子串匹配：`ctfmonitor_x`、`SomeAppCTFMon` 这类第三方项会被子串一并挡掉，
+/// 误伤面不可控（§4.1 记着模式匹配型判据的两种自家假阳性）。这里只认三形归一后的整名。
+pub fn input_chain_guard_reason(item: &Value) -> Option<&'static str> {
+    let mut seen: Vec<String> = Vec::new();
+    for key in ["valueName", "name", "taskName", "filePath", "resolvedPath"] {
+        if let Some(s) = item.get(key).and_then(|v| v.as_str()) {
+            if !s.trim().is_empty() {
+                seen.push(s.to_string());
+            }
+        }
+    }
+    // command 既按解析出的目标路径比，也按原串 basename 比：Run 值常写成带引号的绝对路径，
+    // extract_cmd_path 在路径不存在时会给空串（ctfmon.exe 被谁挪走过这一支），不能因此漏判。
+    if let Some(cmd) = item.get("command").and_then(|v| v.as_str()) {
+        let target = extract_cmd_path(cmd);
+        if !target.is_empty() {
+            seen.push(target);
+        }
+        seen.push(cmd.to_string());
+    }
+    for raw in seen {
+        let id = startup_identity(&raw);
+        if id.is_empty() {
+            continue;
+        }
+        if let Some((_, reason)) = INPUT_CHAIN_GUARDS.iter().find(|(n, _)| *n == id.as_str()) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// 扫描侧统一打标记：三个来源（registry / folder / task）共用同一份判据，
+/// 否则会出现「面板灰掉了、后端仍然接受禁用」这种两侧分叉（§5.16）。
+fn apply_startup_guard(item: &mut Value) {
+    let reason = input_chain_guard_reason(item);
+    item["protected"] = json!(reason.is_some());
+    item["protectedReason"] = json!(reason.unwrap_or_default());
+}
+
 pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
     let _guard = STARTUP_LEDGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
@@ -1073,6 +1150,19 @@ pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
             let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            // 输入链护栏：只拦**关掉**的方向。系统或别的工具已经把它禁了的时候，
+            // 用户想把它打开是正当操作——拦「启用」反而会把输入法永久关在门外。
+            if !enable {
+                if let Some(reason) = input_chain_guard_reason(item) {
+                    failed += 1;
+                    results.push(json!({
+                        "id": id, "name": name, "status": "error",
+                        "message": format!("{reason}，Trim 不提供禁用")
+                    }));
+                    continue;
+                }
+            }
 
             let result = match source.as_str() {
                 "registry" => toggle_registry_item(item, enable, &mut records),
@@ -1476,6 +1566,17 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
         let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+
+        // 删除方向无条件拦（不像禁用还有「系统本来就关了」的歧义）：CTF Loader 一旦被删，
+        // 界面上没有任何一键恢复路径，只能靠 export 备份手工 reg import。
+        if let Some(reason) = input_chain_guard_reason(item) {
+            failed += 1;
+            results.push(json!({
+                "id": id, "name": name, "status": "error",
+                "message": format!("{reason}，Trim 不提供删除")
+            }));
+            continue;
+        }
 
         match source {
             "registry" => {
@@ -1952,5 +2053,132 @@ mod k09_tests {
             "越界恢复目标不得被创建"
         );
         eprintln!("探针通过：篡改台账启用被拒且台账已恢复（{msg}）");
+    }
+}
+
+#[cfg(test)]
+mod input_chain_tests {
+    use super::*;
+
+    /// 与扫描产出的形状一致的最小启动项（注册表臂）。
+    fn reg_item(value: &str, data: &str) -> Value {
+        json!({
+            "id": format!("reg|HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run|{value}"),
+            "name": value, "source": "registry", "hive": "HKCU",
+            "regPath": r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run",
+            "valueName": value, "valueType": "String", "valueData": data, "command": data,
+            "filePath": "", "taskPath": "", "taskName": "",
+            "resolvedPath": "", "enabled": true,
+        })
+    }
+
+    /// 三形归一必须都命中：值名 / 带引号与大小写的路径 / 启动文件夹 stem / 计划任务名。
+    #[test]
+    fn 输入链三形都认得() {
+        let cases = vec![
+            reg_item("ctfmon", r"C:\Windows\System32\ctfmon.exe"),
+            reg_item("CTFMon", r#""C:\Windows\SysWOW64\ctfmon.exe" "#),
+            json!({"source": "folder", "name": "CTF Launch", "valueName": "",
+                   "filePath": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\CTF Launch.lnk",
+                   "resolvedPath": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\CTF Launch.lnk",
+                   "command": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\CTF Launch.lnk"}),
+            json!({"source": "task", "name": "ctfmon", "taskName": "ctfmon",
+                   "command": r"C:\Windows\System32\ctfmon.exe"}),
+        ];
+        let reached: Vec<&str> = cases
+            .iter()
+            .filter(|i| input_chain_guard_reason(i).is_some())
+            .map(|i| i["name"].as_str().unwrap_or("?"))
+            .collect();
+        assert_eq!(reached.len(), cases.len(), "有形态没命中（判据漏了引号/大小写/stem 归一）: {reached:?}");
+    }
+
+    /// 不误伤：整名不等就不命中。子串匹配会把 `ctfmon_helper` 这类第三方项一起挡掉，
+    /// 那是「判据过宽」的另一种假绿——用户会看到一堆关不掉的项却不知道原因。
+    #[test]
+    fn 不误伤同前缀的第三方项() {
+        for name in ["ctfmon_helper", "ctfmonitor", "MyCTFMonApp", "ctf", "inputswitch"] {
+            let it = reg_item(name, &format!(r"C:\tools\{name}.exe"));
+            assert!(
+                input_chain_guard_reason(&it).is_none(),
+                "同前缀的第三方项被判成系统输入链了：{name}"
+            );
+        }
+    }
+
+    /// 正向断言：禁用方向在动作之前被拒（不碰注册表），回执点名是哪条护栏。
+    #[test]
+    fn 禁用方向被拒且回执点名护栏() {
+        let res = startup_toggle(&[reg_item("ctfmon", r"C:\Windows\System32\ctfmon.exe")], false)
+            .expect("整批不应失败（护栏只让这一条 failed）");
+        assert_eq!(res["success"], json!(0), "受保护项不得算成功: {res}");
+        assert_eq!(res["failed"], json!(1), "应当恰好拒掉一条: {res}");
+        let msg = res["results"][0]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("CTF Loader"), "回执必须点名护栏对象，实得: {msg}");
+    }
+
+    /// 删除方向无条件拒（不像禁用还有「系统本来就关了」的歧义）。
+    #[test]
+    fn 删除方向被拒() {
+        let res = startup_delete(&[reg_item("ctfmon", r"C:\Windows\System32\ctfmon.exe")])
+            .expect("整批不应失败");
+        assert_eq!(res["success"], json!(0), "受保护项不得被删: {res}");
+        let msg = res["results"][0]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("不提供删除"), "回执要点明删除方向，实得: {msg}");
+    }
+
+    /// 结构断言（判据的宽窄双向都要钉）：
+    /// ① 扫描三臂都打标记，防「面板灰了、后端还能操作」；② 护栏只在禁用方向（拦启用会把
+    /// 用户输入法锁死）；③ 计划任务仍跳过 `\Microsoft\` 子树——现在 CTF 计划任务不被列出
+    /// 是这条规则的**顺带效果**，一旦有人放宽它，输入链任务就直接进可操作集了。
+    /// 取生产段用**本 mod 自己的声明**作锚点，不能用第一个 `#[cfg(test)]`：本文件在 673 行就有
+    /// 更早的测试模块，那样切会把 1050 行之后的判据与两臂整体切到段外、判据恒红（§4.1 记过这个坑）。
+    #[test]
+    fn 三臂打标与方向性护栏结构在位() {
+        let src = include_str!("startup.rs");
+        let prod = src
+            .split("#[cfg(test)]\nmod input_chain_tests")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            prod.contains("fn startup_toggle"),
+            "锚点又切错了：生产段里没有 startup_toggle"
+        );
+        // 反向对照：锚点一旦失效（比如文件被换成 CRLF），prod 会退化成整文件、
+        // 下面的判据就开始读到自己写的字符串 ⇒ 恒绿假绿。这一条专门把那种状态判红。
+        assert!(
+            !prod.contains("fn 不误伤同前缀的第三方项"),
+            "锚点未生效：生产段吃进了本 mod 自身，以下判据会在自己的字符串上自匹配"
+        );
+        let marks: usize = prod.matches("apply_startup_guard(&mut row)").count();
+        assert!(marks >= 3, "扫描侧打标调用只剩 {marks} 处（registry/folder/task 三臂必须各一次）");
+        // 方向性判据必须切「护栏块本体」，不能用全文 contains：全文里 `if !enable` 还有别处，
+        // 本批把护栏的 `if !enable` 改成 `if true` 做变异时，全文判据照样绿——判据过宽实测撞实。
+        let toggle_guard = prod
+            .split("// 输入链护栏")
+            .nth(1)
+            .and_then(|s| s.split("let result = match source").next())
+            .unwrap_or_else(|| panic!("启停臂的护栏块不见了（锚点注释被改动，判据失去对象）"));
+        assert!(
+            toggle_guard.contains("input_chain_guard_reason(item)"),
+            "启停臂不再调用判据: {toggle_guard}"
+        );
+        assert!(
+            toggle_guard.contains("if !enable"),
+            "护栏块丢了方向条件——会连「启用」一起拦死，输入法被关掉后就再也打不开"
+        );
+        let delete_guard = prod
+            .split("// 删除方向无条件拦")
+            .nth(1)
+            .and_then(|s| s.split("match source {").next())
+            .unwrap_or_else(|| panic!("删除臂的护栏块不见了"));
+        assert!(
+            delete_guard.contains("input_chain_guard_reason(item)"),
+            "删除臂不再调用判据: {delete_guard}"
+        );
+        assert!(
+            prod.contains("starts_with(\"Microsoft\\\\\")"),
+            "计划任务不再跳过 \\Microsoft\\ 子树：CTF 计划任务将进入可操作集，须同步扩判据"
+        );
     }
 }

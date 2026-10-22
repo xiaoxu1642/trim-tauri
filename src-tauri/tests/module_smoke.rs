@@ -2964,3 +2964,66 @@ fn u_r2a_l03_report_list_uses_filename_keeps_real_count() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 真机 `#[ignore]` 探针（2026-10-22 用户裁定「不允许优化 ctfmon 的自启动与启动链」）：
+/// 自建一个**值名为 ctfmon** 的 HKCU Run 探针值 → 断言真实扫描链给它打了 `protected`、
+/// 禁用与删除两臂都被拒、且那条值与内容**逐字未变** → 自清（`reg delete`，不经 Trim）。
+///
+/// 为什么离线断言不够：`input_chain_tests` 喂的是内存 JSON，证明不了 `startup_scan` 从注册表
+/// 真枚举出来的那一行也带 protected——而那正是界面收起按钮所依据的字段（§1.6 第②问：
+/// 判据走真实注册表 ⇒ 必须配真机探针）。
+///
+/// 值内容写 notepad 而不是 ctfmon.exe：判据认的是**值名**，这样探针若中途失败留下残值，
+/// 最坏也只是多一个记事本自启项，不会把用户的真实输入法换成记事本。
+#[test]
+#[ignore = "真写 HKCU Run 探针值（自建自清），发布前门禁跑"]
+fn u_ctfmon_startup_chain_guard_live() {
+    ensure_test_data_root();
+    use trim_tauri_lib::engine::native::{startup_delete, startup_scan, startup_toggle};
+
+    const NAME: &str = "ctfmon";
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    let reg = |args: &[&str]| std::process::Command::new("reg").args(args).output();
+
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("reg")
+                .args(["delete", RUN_KEY, "/v", "ctfmon", "/f"])
+                .output();
+        }
+    }
+    let _guard = Cleanup;
+
+    // 现场前置：本机已有同名真值时**绝不覆盖**——那是这台机器真实的输入法自启项，
+    // 探针去改它等于自己制造一次故障。没有样本就按不可取证跳过。
+    let pre = reg(&["query", RUN_KEY, "/v", NAME]);
+    if pre.map(|o| o.status.success()).unwrap_or(false) {
+        skip_and_record("HKCU Run 已存在 ctfmon 值（本机真实输入法自启），探针不覆盖 ⇒ 无可用样本");
+        return;
+    }
+    let add = reg(&[
+        "add", RUN_KEY, "/v", NAME, "/t", "REG_SZ", "/d", r"C:\Windows\System32\notepad.exe", "/f",
+    ]);
+    assert!(add.map(|o| o.status.success()).unwrap_or(false), "建探针 Run 值失败，后续断言无对象");
+
+    let items = startup_scan().expect("启动项扫描失败");
+    let hit = items
+        .iter()
+        .find(|i| i["source"] == json!("registry") && i["valueName"].as_str() == Some(NAME))
+        .unwrap_or_else(|| panic!("扫描结果里没有刚建的探针值（HKCU Run 未被枚举？）：{} 条", items.len()));
+    assert_eq!(hit["protected"], json!(true), "扫描侧没打 protected ⇒ 界面仍会给按钮: {hit}");
+
+    let t = startup_toggle(&[hit.clone()], false).expect("禁用不应整批失败");
+    assert_eq!(t["failed"], json!(1), "禁用必须被护栏拒: {t}");
+    let d = startup_delete(&[hit.clone()]).expect("删除不应整批失败");
+    assert_eq!(d["failed"], json!(1), "删除必须被护栏拒: {d}");
+
+    // 定论的一击：两臂都拒过之后，注册表那条值必须原样还在——护栏若是在动作之后才报错，
+    // 这里就会读到「值已消失」。
+    let post = reg(&["query", RUN_KEY, "/v", NAME]).expect("reg.exe 可执行");
+    assert!(post.status.success(), "被拒之后探针值反而没了 ⇒ 护栏没有真的挡在动作之前");
+    let text = String::from_utf8_lossy(&post.stdout);
+    assert!(text.contains("notepad.exe"), "值内容被改动: {text}");
+    eprintln!("OK ctfmon 真机护栏：扫描 protected=true、禁用与删除均被拒、值与内容逐字未变");
+}
+

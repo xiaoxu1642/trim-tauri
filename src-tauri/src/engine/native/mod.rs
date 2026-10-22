@@ -42,7 +42,7 @@ pub use services::{
 };
 pub(crate) use services::win32_of;
 mod startup;
-pub use startup::{startup_scan, startup_toggle, startup_delete, startup_add};
+pub use startup::{input_chain_guard_reason, startup_scan, startup_toggle, startup_delete, startup_add};
 mod syspanel;
 pub use syspanel::{
     PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_plan_apply,
