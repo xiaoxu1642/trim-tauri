@@ -311,10 +311,11 @@
 
   // ==================== 功能解释说明（MD 渲染） ====================
   let guideCache = null;
-  // M09：guide 常驻条挂进 app.js 的 Toast 台账——原实现自建 DOM 直插容器，既不受
-  // 同屏条数上限约束（FIFO 挤不出），点空白也关不掉（只遍历 activeToasts），
-  // 每点一次「功能说明」就堆一条常驻条。与 optimizer 的进度 Toast 同一口径。
-  let guideToastEntry = null;
+  // 2026-10-22 用户裁定：说明书从常驻 Toast 改成自绘弹窗。原先即便 M09 已把它挂进
+  // Toast 台账，形态仍然是错的——一份长文档压在玻璃底上、透出下面的表单文字，读不动。
+  // ctrl 句柄留着是为了「再点一次先 close 上一份」：modal.create 对同 id 只 remove DOM、
+  // 不走 close()，上一份挂在 document 上的 Esc 监听与 ds.focusTrap 就摘不干净。
+  let guideModalCtrl = null;
 
   // 轻量 Markdown 渲染器：标题/粗体/行内代码/表格/列表/引用/分隔线
   function renderMarkdown(md) {
@@ -413,54 +414,37 @@
         if (!resp.ok) throw new Error('MD 文件加载失败');
         guideCache = await resp.text();
       }
-      // M09：先收掉上一份 guide 条，再建新的——重复点击不再无限堆叠
-      if (guideToastEntry) { try { guideToastEntry.remove(); } catch (e) { /* 已移除则忽略 */ } guideToastEntry = null; }
-      // 使用 guide 风格 Toast 展示渲染后的 MD
-      const container = document.getElementById('toastContainer');
-      if (!container) return;
-      const el = document.createElement('div');
-      el.className = 'toast info toast-guide toast-bench-guide';
-      el.innerHTML = `
-        <div class="toast-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M11 7h2v2h-2zm0 4h2v6h-2zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/></svg></div>
-        <div class="toast-message">
-          <div class="toast-title">磁盘测速功能解释说明</div>
-          <div class="guide-content">${renderMarkdown(guideCache)}</div>
-        </div>
-        <button class="toast-close" type="button" aria-label="关闭说明" data-tip="关闭">&times;</button>
-      `;
-      container.appendChild(el);
-      // 说明书里的外链必须走受控出口：webview 直接导航会被 CSP 与窗口策略拒掉，
-      // 用户看到的是「点了没反应」（与 app.js 使用说明同一口径）。
-      el.querySelectorAll('.guide-content a[href]').forEach((a) => {
-        a.addEventListener('click', async (ev) => {
-          ev.preventDefault();
-          const url = a.getAttribute('href') || '';
-          if (!/^https?:\/\//i.test(url)) return;
-          // openExternal 返回 Promise，同步 try/catch 抓不到 reject。
-          try {
-            await window.api?.app?.openExternal?.(url);
-          } catch (e) {
-            window.app?.toast?.('error', '打开链接失败：' + ((e && e.message) || e));
-          }
-        });
-      });
-      const entry = {
-        el,
-        remove: () => {
-          if (el.classList.contains('removing')) return;
-          el.classList.add('removing');
-          // M09：从台账摘除（app.js 的 FIFO 挤出与「点空白关最顶层」都依赖账实一致）
-          window.app?.unregisterToast?.(entry);
-          setTimeout(() => el.remove(), 200);
-        }
-      };
-      el.querySelector('.toast-close')?.addEventListener('click', entry.remove);
-      guideToastEntry = entry;
-      window.app?.registerToast?.(entry);
-      // 常驻显示直到用户关闭
     } catch (e) {
       window.app?.toast('error', '加载功能说明失败: ' + e.message);
+      return;
     }
+    if (guideModalCtrl) guideModalCtrl.close();
+    // md 第一行是与弹窗标题同名的一级标题，正文里再出一遍是重复，掐掉
+    const bodyMd = guideCache.replace(/^#\s+磁盘测速功能解释说明\s*\r?\n/, '');
+    const ctrl = window.modal.create({
+      id: 'benchGuideBackdrop',
+      title: '磁盘测速功能解释说明',
+      bodyHtml: `<div class="guide-content">${renderMarkdown(bodyMd)}</div>`,
+      footerHtml: '<button class="btn btn-secondary" type="button" data-guide-close>知道了</button>',
+      onClose: () => { guideModalCtrl = null; },
+    });
+    guideModalCtrl = ctrl;
+    ctrl.footer?.querySelector('[data-guide-close]')?.addEventListener('click', () => ctrl.close());
+    // 说明书里的外链必须走受控出口：webview 直接导航会被 CSP 与窗口策略拒掉，
+    // 用户看到的是「点了没反应」（与 app.js 使用说明同一口径）。
+    ctrl.body.querySelectorAll('.guide-content a[href]').forEach((a) => {
+      a.addEventListener('click', async (ev) => {
+        ev.preventDefault();
+        const url = a.getAttribute('href') || '';
+        if (!/^https?:\/\//i.test(url)) return;
+        // openExternal 返回 Promise，同步 try/catch 抓不到 reject。
+        try {
+          await window.api?.app?.openExternal?.(url);
+        } catch (e) {
+          window.app?.toast?.('error', '打开链接失败：' + ((e && e.message) || e));
+        }
+      });
+    });
   }
 
   function init() {

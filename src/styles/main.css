@@ -2447,21 +2447,6 @@ input[type="radio"]:focus-visible {
   }
 }
 
-/* 磁盘测速 - 功能解释说明（MD渲染 Toast） */
-.toast-bench-guide {
-  width: min(640px, calc(100vw - 48px));
-  max-width: 640px;
-  max-height: min(70vh, 600px);
-  display: flex;
-  align-items: flex-start;
-}
-
-.toast-bench-guide .toast-message {
-  overflow-y: auto;
-  max-height: calc(70vh - 60px);
-  padding-right: 6px;
-}
-
 .guide-content {
   font-size: calc(12.5px * var(--font-size-scale, 1));
   color: var(--fg-secondary);
