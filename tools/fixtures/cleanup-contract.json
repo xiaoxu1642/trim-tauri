@@ -803,6 +803,124 @@
       }
     },
     {
+      "label": "A3 两条规则 pathPs 同根（登记面扩到目录型，2026-10-23）",
+      "ok": false,
+      "mustTrigger": [
+        "A3"
+      ],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-a3ps-a",
+                "name": "目录型甲",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "pathPs": "$env:LOCALAPPDATA + '\\TrimTestPs'",
+                "ver": 20260928
+              },
+              {
+                "id": "c-a3ps-b",
+                "name": "目录型乙（与甲同根，只差大小写）",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "pathPs": "$env:LOCALAPPDATA + '\\trimtestps'",
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "合法：目录型与文件型混排、根互不相同（防 A3 的 ps 面收紧过头）",
+      "ok": true,
+      "mustTrigger": [],
+      "pkg": {
+        "version": 2,
+        "rulesVersion": 20260928,
+        "groups": [
+          {
+            "key": "g1",
+            "title": "自检组",
+            "items": [
+              {
+                "id": "c-ps-ok-a",
+                "name": "目录型独立根",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "pathPs": "$env:LOCALAPPDATA + '\\TrimTestPsA'",
+                "ver": 20260928
+              },
+              {
+                "id": "c-ps-ok-b",
+                "name": "文件型另一根",
+                "risk": "low",
+                "evidence": "e",
+                "recommended": true,
+                "domain": "system",
+                "group": "g1",
+                "nature": "log",
+                "regenerable": true,
+                "prov": {
+                  "source": "builtin",
+                  "sourceClass": "independent",
+                  "ref": "r",
+                  "reviewedAt": "2026-09-30"
+                },
+                "fileKeys": [
+                  {
+                    "path": "%LOCALAPPDATA%\\TrimTestPsC",
+                    "pattern": "*",
+                    "recurse": true
+                  }
+                ],
+                "ver": 20260928
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "label": "A4 deleteMode 回潮",
       "ok": false,
       "mustTrigger": [

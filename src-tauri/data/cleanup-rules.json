@@ -2474,7 +2474,8 @@
             {
               "id": "wechatCache",
               "name": "微信缓存",
-              "risk": "low",
+              "risk": "medium",
+              "ifDeleted": "删除后微信聊天里正在传输或未保存的文件需重新拉取，已另存到本地位置的文件不受影响。",
               "pathPs": "''",
               "globCandidatesPs": [
                 "($env:USERPROFILE + '\\Documents\\xwechat_files\\*\\temp')",
@@ -2494,7 +2495,7 @@
                 "sourceClass": "independent",
                 "ref": "apps",
                 "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
+                "reviewedAt": "2026-10-23"
               },
               "ver": 20261016,
               "evidenceItems": [
@@ -8209,6 +8210,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "4+5S/45J0VRM1Y2yKu7zna4JJk7d/ClbqzsTpiEAMOoWXkK3ZLjRhKgG7zZb2XVu3Eg0NmwM+dstihsmIUjjBA=="
+    "sig": "9ux06wcvxHhFlO9Cw2Qk0TOYUkYfSQTFFQeDuTCi/CnAVleCXTlpByUXVz+5Nr6IcJ/ZKuvuqdigdMUWEhQADA=="
   }
 }

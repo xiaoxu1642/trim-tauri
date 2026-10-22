@@ -64,6 +64,9 @@ const MUST_RUN = [
   'check-optimizer-write-contract',
   'check-power-write-surface',
   'check-cleanup-postactions',
+  // 2026-10-23：磁盘清理页体积汇总的单一去重口径（dedupSize）兜点 —— 跨条目重叠只在这
+  // 一处扣减，界面对「再写一句 reduce/+= 直接累加」无症状（真机曾虚高 1.6 倍），只能机检拦。
+  'check-cleanup-aggregates',
   'check-desc-vs-writes',
   'check-elapsed-facts',
   'check-version-sync',

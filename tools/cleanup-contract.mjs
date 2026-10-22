@@ -21,7 +21,7 @@ import { collectTokens, makeTokenChecker } from './rule-tokens.mjs';
 export const ASSERTIONS = {
   A1: '每个 %TOKEN% 都在契约表 cleanup.tokens 登记集内',
   A2: '扫描/执行口径一致的字段形态（/ 分隔符、? 通配、多星 pattern、excludePaths 的 :: 混用）',
-  A3: '目标精确重复（file/reg 指纹去重）',
+  A3: '目标精确重复（file/reg/ps 指纹去重）',
   A4: '已裁决移除的字段回潮（契约表 cleanup.itemBannedKeys）',
   A5: '根结构底线（rulesVersion 为正数、groups 非空、数量与深度上限）',
   A6: '准入必填字段与溯源形态（含 risk / sourceClass 枚举、布尔字段）',
@@ -84,6 +84,13 @@ function targetFingerprints(it) {
   for (const rk of it.regKeys ?? []) {
     if (!rk || typeof rk !== 'object') continue;
     fps.push(`reg|${String(rk.path ?? '').toLowerCase()}|${rk.value ?? ''}`);
+  }
+  // pathPs（目录型整树统计）与 Rust 装载侧 `rules.rs` 的 `ps|` 键同姿势：登记原始模板文本、
+  // 只做字面同根的精确重复。父子包含关系不在这一层（归 check-cleanup-rule-contract 的重叠台账）。
+  // 退化位 `''`（求值为空、整条永不生效）不入册 —— 判据与 Rust 侧同一句：串里没有任何指向
+  // 路径的内容就跳过，不复刻扫描器的求值器。
+  if (typeof it.pathPs === 'string' && (it.pathPs.includes('$env:') || /[0-9A-Za-z]/i.test(it.pathPs))) {
+    fps.push(`ps|${it.pathPs.toLowerCase()}`);
   }
   return fps;
 }

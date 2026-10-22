@@ -22,7 +22,8 @@ const REGISTRY = [
   { file: 'check-delete-exits.mjs', reason: '删除出口枚举：剥离/命中两向自检' },
   { file: 'check-escape-delegation.mjs', reason: 'escape 委托：非委托样本自检' },
   { file: 'check-html-contract.mjs', reason: 'HTML 合同：内联 script 样本自检' },
-  { file: 'check-cleanup-rule-contract.mjs', reason: '规则契约：37 条反例自检（既有范本）' },
+  { file: 'check-cleanup-rule-contract.mjs', reason: '规则契约：37 条反例自检（既有范本）+ 4c 跨条目整树覆盖判据 8 组合成样本（真机形态必判红 / recurse:false 父条与兄弟目录不得过严 / 同根双向 / 路径含 ++ 不误判未知 / 空字面量必报不可判），台账双向咬合：缺行与陈旧行各判红一条' },
+  { file: 'check-cleanup-aggregates.mjs', reason: '磁盘清理页体积汇总单一口径（dedupSize）：三个判定器（judgeAggregates 累加形态 / judgeDedupShape 本体形态 / judgeCallSites 调用点）与实仓扫描共用同一实现——12 条累加形态样本（F1 reduce 内联相加 / F2 sizeNumber 映射后紧跟 reduce 相加 / F3 体外 += / F3b 体外 x = x + / F4 两条体积相加写进 Map 各配违例并**逐条断言命中数**、同页两形态必须报 2 条、模板串插值里的累加必抓、正则字面量字符类不得让扫描器原地打转（真挂过）、dedupSize 体内累加与计数类 reduce、注释里的违例形态三类合规样本必须 0 命中）+ 5 条本体样本（S1 引用 overlapsWith / S2 扣减走 sizeNumber / S3「两端都在集合内」的门 / S4 非负兜底，逐条被摘必红、齐备本体 0 问题）+ 3 条计数与解析对照（四处调用点数得全、声明自身不计入、无本体必须返回 null）；真仓侧豁免台账双向咬合：两条锚点各命中 1 处并各认领一条违规，登记不命中即红；**调用点地板与页内 sizeNumber 扫描面地板两组靠真仓现算兜底**（无合成盘上样本）' },
   { file: 'check-rule-schema-sync.mjs', reason: '契约表⇄Rust 装载侧：5 条判定器自检（干净样本 / token 注入 / 缺键查询 / 路径漂移 / 剥离失败）' },
   { file: 'check-elapsed-facts.mjs', manual: true, reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
   { file: 'check-optimizer-write-contract.mjs', reason: 'v6-K20：G 组 20 条样本喂**生产同一份**判据（judgeSideTableDiff / judgeStoreSeparation / judgeOptionKeys / judgeProvenanceCoverage / judgeDefaultItem；含 2 条干净样本防判据永远红）——生产与对照不再有两套实现，「全通过」日志已移到 G 组之后' },
@@ -32,7 +33,7 @@ const REGISTRY = [
   { file: 'check-contrast.mjs', reason: 'F 组玻璃面 floor 断言配正反向样本自检（P3-2）；F1a~F6b 操作面登记台账七类反例（裸 --bg-card / 后级覆写 / 修饰类另写底 / 台账过期 / background-image 绕开 floor / 语义实底被中性降级 / 折射白名单含未登记类）+ F3b 锚点对照（抹掉 wantRefract 的按钮排除必判红）+ floor 栈合成对照（空栈与只垫 floor 必红、完整栈放行）；A1/B/C 与 token 表等既有组仍缺合成样本' },
   { file: 'check-native-hygiene.mjs', reason: 'N1–N9 各配正反样本自检（裸 output / 定长解码 / 句柄丢弃 / .reg 读取 / 深度护栏 / 取最新 / 快照域 / origin 字面量闸 / 取用点登记闸），+ 模块可达性与扫描面地板' },
   { file: 'check-confirm-danger.mjs', reason: 'confirmedHighRisk 字面量判定器配正反样本自检（P3-5）；调用形态两组仍靠扫描面塌陷地板兜底' },
-  { file: 'check-idle-scripts.mjs', manual: true, reason: 'loadScript 三态断言配「违例 3 条全命中 / 合规放行」样本自检（P3-4）；守卫与启动名单两组仍靠扫描面地板兜底' },
+  { file: 'check-idle-scripts.mjs', manual: true, reason: 'loadScript 三态 + 数组序 init 断言配「违例 4 条全命中 / 合规放行」样本自检（P3-4；2026-10-23 加第 4 条：逐条挂 .then 的完成序形状必判红）；守卫与启动名单两组仍靠扫描面地板兜底' },
   { file: 'check-comment-rot.mjs', manual: true, reason: '注释腐烂：三条断言各配正反向对照（不存在路径/章节号/数字必判红 + 真实样本不假红）；另经真破坏验证——关掉待修豁免表后 8 处真实腐烂全被抓到，exit 1' },
   { file: 'check-review-units.mjs', selfTestArgs: ['--self-test'], reason: '审查单元台账：U1–U5 五条断言各配合成正反向样本（超上限/重复点名/未认领/台账塌缩必判红，干净表不假红）；另经真破坏验证——改名+降上限+抬地板三处同时判红，exit 1' },
   // v3 P2-I 新增三条：判据抽出成纯函数后与自检共用同一实现（不在别处抄第二套判据）

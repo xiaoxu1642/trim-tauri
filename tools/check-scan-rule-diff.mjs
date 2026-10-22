@@ -317,8 +317,8 @@ for (const field of [
 // 这里钉判据定义与两侧接线数；行为面由 tests/ 的「盘符相对」用例与执行侧端到端用例承担。
 const e11scan = (cleanRs.match(/is_drive_relative\(/g) || []).length;
 check(
-  /pub fn is_drive_relative\(/.test(cleanRs) && e11scan === 7,
-  'E11a. 判据单点定义 + 扫描侧 6 处接线（expand_glob_dirs 咽喉 / detect 三处 / candidatesPs / pathPs 主路径）',
+  /pub fn is_drive_relative\(/.test(cleanRs) && e11scan === 8,
+  'E11a. 判据单点定义 + 扫描侧 7 处接线（expand_glob_dirs 咽喉 / detect 三处 / detect 候选档 / candidatesPs / pathPs 主路径）',
   `实际 ${e11scan} 处`,
 );
 const e11exec = (execCleanupRs.match(/is_drive_relative\(/g) || []).length;

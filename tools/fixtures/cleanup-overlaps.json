@@ -1,0 +1,67 @@
+{
+ "_说明": "清理规则「跨条目整树覆盖」台账：由 `node tools/check-cleanup-rule-contract.mjs --emit-overlaps` 现算回填，禁止手抄。每一行都是一处「逐条相加会算两遍」的实据；新增行必须伴随评审结论（合并 / 排除 / 明确共存），删行必须确认该覆盖关系真的消失了。",
+ "pairs": [
+  {
+   "parentId": "directXShaderCache",
+   "childId": "microsoftDirectxShaderCache",
+   "parentTarget": "$env:LOCALAPPDATA + '\\D3DSCache'",
+   "childTarget": "%LOCALAPPDATA%\\D3DSCache",
+   "sameDir": true
+  },
+  {
+   "parentId": "nvidiaCache",
+   "childId": "nvidiaShaderCache",
+   "parentTarget": "$env:LOCALAPPDATA + '\\NVIDIA'",
+   "childTarget": "%LOCALAPPDATA%\\NVIDIA\\*Cache",
+   "sameDir": false
+  },
+  {
+   "parentId": "nvidiaNvCache",
+   "childId": "nvidiaShaderCache",
+   "parentTarget": "$env:PROGRAMDATA + '\\NVIDIA Corporation\\NV_Cache'",
+   "childTarget": "%PROGRAMDATA%\\NVIDIA Corporation\\NV_Cache",
+   "sameDir": true
+  },
+  {
+   "parentId": "nvidiaShaderCache",
+   "childId": "nvidiaNvCache",
+   "parentTarget": "%PROGRAMDATA%\\NVIDIA Corporation\\NV_Cache",
+   "childTarget": "$env:PROGRAMDATA + '\\NVIDIA Corporation\\NV_Cache'",
+   "sameDir": true
+  },
+  {
+   "parentId": "qqCache",
+   "childId": "qqTemp",
+   "parentTarget": "$env:APPDATA + '\\Tencent\\QQ'",
+   "childTarget": "$env:APPDATA + '\\Tencent\\QQ\\Temp'",
+   "sameDir": false
+  },
+  {
+   "parentId": "thumbnailCacheFiles",
+   "childId": "iconCacheFiles",
+   "parentTarget": "$env:LOCALAPPDATA + '\\Microsoft\\Windows\\Explorer'",
+   "childTarget": "%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer",
+   "sameDir": true
+  },
+  {
+   "parentId": "winsatCache",
+   "childId": "windowsSystemAssessmentTool",
+   "parentTarget": "$env:WINDIR + '\\Performance\\WinSAT'",
+   "childTarget": "%WINDIR%\\Performance\\WinSAT",
+   "sameDir": true
+  },
+  {
+   "parentId": "winSxsTempFile",
+   "childId": "winSxsTempFile2",
+   "parentTarget": "$env:WINDIR + '\\WinSxS\\Temp'",
+   "childTarget": "$env:WINDIR + '\\WinSxS\\Temp\\PendingRename'",
+   "sameDir": false
+  }
+ ],
+ "unresolved": [
+  {
+   "id": "wechatCache",
+   "expr": "''"
+  }
+ ]
+}

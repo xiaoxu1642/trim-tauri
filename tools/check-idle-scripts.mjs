@@ -133,7 +133,12 @@ check(
 // 也永不再初始化（断网进页 = 该页按钮全无响应且无从自愈）。判据三条：
 //   ① onerror 分支不得把 src 计入 _scriptLoaded（失败可重试）；
 //   ② ensurePageScripts 必须按加载结果守护 init（`if (ok) initModuleOf(src)`）；
-//   ③ scheduleIdleLoads 的 .then 必须判 ok 后再 init。
+//   ③ scheduleIdleLoads 的 init 必须判加载结果后再执行；
+//   ④ scheduleIdleLoads 的 init 必须**按数组序串行**（2026-10-23）：旧形状对 IDLE_SCRIPTS
+//      逐条 `.forEach(... .then(init))`，init 的执行序跟的是**完成序**，而清单注释声称
+//      「家族内五项的先后就是依赖序」——那条约束从未被强制，外观层晚完成一步，
+//      pathbinding 的 init 就读 window.pathbindingAppearance.load() 当场抛
+//      （真机 console：`模块 pathbinding 初始化失败`，且台账已占用、整场半初始化）。
 function loadScriptViolations(jsText) {
   const out = [];
   const onerr = jsText.match(/s\.onerror\s*=\s*\(\)\s*=>\s*\{([\s\S]*?)\};/);
@@ -146,21 +151,36 @@ function loadScriptViolations(jsText) {
   }
   const idle = jsText.match(/function scheduleIdleLoads\(\)\s*\{([\s\S]*?)\n  \}/);
   if (!idle) out.push('scheduleIdleLoads 没找到（形状变了？同步本门禁）');
-  else if (!/then\(\(ok\)\s*=>/.test(idle[1])) out.push('scheduleIdleLoads 的 .then 未判加载结果');
+  else {
+    if (!/if\s*\(ok\)\s*initModuleOf\(src\)/.test(idle[1])) {
+      out.push('scheduleIdleLoads 未按加载结果守护 init（失败也会占 _initedModules 台账）');
+    }
+    if (/IDLE_SCRIPTS\.forEach\(/.test(idle[1]) || !/for\s*\(/.test(idle[1])) {
+      out.push('scheduleIdleLoads 的 init 未走数组序（逐条挂 .then = 跟完成序，家族依赖序形同虚设）');
+    }
+  }
   return out;
 }
 {
   const POSITIVE_CONTROLS = {
     bad: "s.onerror = () => { _scriptLoading.delete(src); _scriptLoaded.add(src); resolve(); };\n" +
       "async function ensurePageScripts(page) {\n    await loadScript(src);\n    initModuleOf(src);\n  }\n" +
-      "function scheduleIdleLoads() {\n    loadScript(src).then(() => initModuleOf(src));\n  }\n",
+      "function scheduleIdleLoads() {\n    IDLE_SCRIPTS.forEach((src) => loadScript(src).then(() => initModuleOf(src)));\n  }\n",
     good: "s.onerror = () => { _scriptLoading.delete(src); resolve(false); };\n" +
       "async function ensurePageScripts(page) {\n    const ok = await loadScript(src);\n    if (ok) initModuleOf(src);\n  }\n" +
-      "function scheduleIdleLoads() {\n    loadScript(src).then((ok) => { if (ok) initModuleOf(src); });\n  }\n",
+      "function scheduleIdleLoads() {\n    const loads = IDLE_SCRIPTS.map((src) => ({ src, p: loadScript(src) }));\n" +
+      "    for (const { src, p } of loads) {\n      const ok = await p;\n      if (ok) initModuleOf(src);\n    }\n  }\n",
   };
+  const badHits = loadScriptViolations(POSITIVE_CONTROLS.bad);
+  const goodHits = loadScriptViolations(POSITIVE_CONTROLS.good);
   check(
-    loadScriptViolations(POSITIVE_CONTROLS.bad).length === 3 && loadScriptViolations(POSITIVE_CONTROLS.good).length === 0,
-    'loadScript 三态判定器自检（违例 3 条全命中 / 合规样本放行）',
+    badHits.length === 4 && goodHits.length === 0,
+    'loadScript 三态 + 数组序 init 判定器自检（违例 4 条全命中 / 合规样本放行）',
+    badHits.length !== 4
+      ? `实到 ${badHits.length}：${badHits.join('；')}`
+      : goodHits.length
+        ? `合规样本被判红：${goodHits.join('；')}`
+        : '',
   );
   const real = loadScriptViolations(appJs);
   check(

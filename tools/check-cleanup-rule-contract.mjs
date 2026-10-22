@@ -26,9 +26,12 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 import { loadSchema, number as schemaNumber } from './rule-schema.mjs';
 import { ASSERTIONS, validateCleanupPackage, selfTest } from './cleanup-contract.mjs';
 import { allItems } from './lib/rule-shape.mjs';
+import { findWholeTreeOverlaps } from './lib/rule-overlap.mjs';
 
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
 const FIXTURE_REL = path.join('tools', 'fixtures', 'cleanup-contract.json');
+// 跨条目整树覆盖台账（现算回填，见 4c）
+const OVERLAP_REL = path.join('tools', 'fixtures', 'cleanup-overlaps.json');
 
 // P1-4 winapp2Version 冻结棘轮：它只是历史素材基线，不再是扩库成果指标，
 // 禁止随「计划同步」「看到新版库」抬值。确需抬值必须改契约表并写明依据（版本、日期、决策）。
@@ -191,29 +194,141 @@ function main() {
   } else if (typeof rules.rulesVersion !== 'number' || rules.rulesVersion < minVer) {
     fail(`[A5] rulesVersion 必须是不低于 ${minVer} 的数字`);
   }
-  // 4c 父子路径重叠 → 人工复核清单（非致命，P1-2）
-  const filePaths = [];
-  for (const it of items) {
-    for (const fk of it.fileKeys ?? []) {
-      filePaths.push({ id: it.id, path: (fk.path ?? '').toLowerCase().replace(/\\+$/, '') });
+  // 4c 跨条目整树覆盖：由「不判红的人工复核清单」升级为**判红棘轮**（2026-10-23）
+  //
+  // 旧形态瞎在三处，每一条都被这次真机实测踩到：只收 fileKeys（`nvidiaCache` 是 pathPs，
+  // 根本不入表）、`a.path.includes('*') || b.path.includes('*')` 直接跳过（`%LOCALAPPDATA%\NVIDIA\*Cache`
+  // 正是那个把 DXCache/GLCache 罩住的通配根）、且只打印不判红。判据本体在
+  // `tools/lib/rule-overlap.mjs`（唯一实现，下面 4c-selftest 的合成样本与生产共用它）。
+  // 台账 `tools/fixtures/cleanup-overlaps.json` 由 `--emit-overlaps` **现算回填**，
+  // 不手抄、不许随行号或本机路径变化；双向对账：新出现而未裁决的覆盖对判红，
+  // 台账里已不存在的陈旧登记同样判红（否则旧条目会给新重叠打掩护）。
+  const ovPath = path.join(ROOT, OVERLAP_REL);
+  const { pairs: ovPairs, unresolved: ovUnresolved } = findWholeTreeOverlaps(items);
+  const ovKey = (p) => `${p.parentId}\n${p.childId}\n${p.parentTarget}\n${p.childTarget}`;
+  if (process.argv.includes('--emit-overlaps')) {
+    const body = {
+      _说明:
+        '清理规则「跨条目整树覆盖」台账：由 `node tools/check-cleanup-rule-contract.mjs --emit-overlaps` 现算回填，禁止手抄。' +
+        '每一行都是一处「逐条相加会算两遍」的实据；新增行必须伴随评审结论（合并 / 排除 / 明确共存），删行必须确认该覆盖关系真的消失了。',
+      pairs: ovPairs,
+      unresolved: ovUnresolved,
+    };
+    fs.writeFileSync(ovPath, JSON.stringify(body, null, 1) + '\n', 'utf8');
+    console.log(`✓ 已现算回填覆盖台账：${ovPairs.length} 条有向覆盖关系 / ${ovUnresolved.length} 条不可判形态 → ${OVERLAP_REL}`);
+  } else {
+    let ledger = null;
+    try {
+      ledger = JSON.parse(fs.readFileSync(ovPath, 'utf8'));
+    } catch (e) {
+      fail(`[A16] 覆盖台账 ${OVERLAP_REL} 不可读：${e.message}（要用 --emit-overlaps 现算回填，不许手抄，也不许当成「没有重叠」放行）`);
+    }
+    if (ledger) {
+      const wasPairs = new Map((Array.isArray(ledger.pairs) ? ledger.pairs : []).map((p) => [ovKey(p), p]));
+      const nowPairs = new Map(ovPairs.map((p) => [ovKey(p), p]));
+      for (const [k, p] of nowPairs) {
+        if (wasPairs.has(k)) continue;
+        fail(
+          `[A16] 新增跨条目整树覆盖未经裁决：${p.parentId}（「${p.parentTarget}」）整树覆盖 ${p.childId}（「${p.childTarget}」）` +
+            '—— 同一批文件会被逐条相加算两遍；要么合并/排除规则，要么 --emit-overlaps 现算回填并在评审里写明共存结论',
+        );
+      }
+      for (const [k, p] of wasPairs) {
+        if (nowPairs.has(k)) continue;
+        fail(`[A16] 覆盖台账里的陈旧条目已不成立：${p.parentId} ⊃ ${p.childId}（「${p.parentTarget}」/「${p.childTarget}」）—— 必须删行，留着会给新重叠打掩护`);
+      }
+      const wasUn = new Map((Array.isArray(ledger.unresolved) ? ledger.unresolved : []).map((u) => [`${u.id}\n${u.expr}`, u]));
+      const nowUn = new Map(ovUnresolved.map((u) => [`${u.id}\n${u.expr}`, u]));
+      for (const [k, u] of nowUn) {
+        if (wasUn.has(k)) continue;
+        fail(`[A16] pathPs 出现判据解析不了的形态：${u.id} = ${JSON.stringify(u.expr)}（本判据对它失明，必须显式裁决而不是静默跳过）`);
+      }
+      for (const [k, u] of wasUn) {
+        if (nowUn.has(k)) continue;
+        fail(`[A16] 不可判形态台账有陈旧条目：${u.id} = ${JSON.stringify(u.expr)}（已不存在，必须删行）`);
+      }
+      console.log(
+        `✓ 跨条目整树覆盖：现算 ${ovPairs.length} 条有向覆盖关系 / ${ovUnresolved.length} 条不可判形态，与台账双向对账一致`,
+      );
     }
   }
-  const overlaps = [];
-  for (let i = 0; i < filePaths.length; i++) {
-    for (let j = 0; j < filePaths.length; j++) {
-      if (i === j) continue;
-      const a = filePaths[i];
-      const b = filePaths[j];
-      if (a.id === b.id || !a.path || !b.path || a.path.includes('*') || b.path.includes('*')) continue;
-      if (b.path.startsWith(a.path + '\\')) overlaps.push([a, b]);
-    }
-  }
-  if (overlaps.length > 0) {
-    console.log(
-      `\n〔人工复核清单〕父子路径重叠 ${overlaps.length} 组（不判红，但每批发布前须有明确合并/排除/共存结论，结论留档于本机资料区）：`,
-    );
-    for (const [parent, child] of overlaps) {
-      console.log(`  · ${parent.id}（${parent.path}）⊃ ${child.id}（${child.path}）`);
+  // 4c-selftest 判据自检：合成样本与生产**共用同一个** findWholeTreeOverlaps
+  // （AGENTS §4.1 正向对照——恒绿型判据必须先证明自己能判红，还要证明没判严）
+  {
+    const samples = [
+      {
+        name: '整树父条罩住通配子条（真机 nvidiaCache ⊃ nvidiaShaderCache 的形态）',
+        items: [
+          { id: 'ap', pathPs: "$env:LOCALAPPDATA + '\\NVIDIA'" },
+          { id: 'ac', fileKeys: [{ path: '%LOCALAPPDATA%\\NVIDIA\\*Cache', pattern: '*', recurse: true }] },
+        ],
+        expectPairs: 1,
+      },
+      {
+        name: '同根但子条只取根级（真机 D3DSCache 的形态）',
+        items: [
+          { id: 'dp', pathPs: "$env:LOCALAPPDATA + '\\D3DSCache'" },
+          { id: 'dc', fileKeys: [{ path: '%LOCALAPPDATA%\\D3DSCache', pattern: '*', recurse: false }] },
+        ],
+        expectPairs: 1,
+      },
+      {
+        name: '双方同根且都整树 ⇒ 两个方向各算一遍',
+        items: [
+          { id: 'ep', pathPs: "$env:PROGRAMDATA + '\\NVIDIA Corporation\\NV_Cache'" },
+          { id: 'ec', fileKeys: [{ path: '%PROGRAMDATA%\\NVIDIA Corporation\\NV_Cache', pattern: '*', recurse: true }] },
+        ],
+        expectPairs: 2,
+      },
+      {
+        name: '父条 recurse:false 不构成整树覆盖（判据不许过严）',
+        items: [
+          { id: 'fp', fileKeys: [{ path: '%LOCALAPPDATA%\\NVIDIA', pattern: '*', recurse: false }] },
+          { id: 'fc', fileKeys: [{ path: '%LOCALAPPDATA%\\NVIDIA\\DXCache', pattern: '*', recurse: true }] },
+        ],
+        expectPairs: 0,
+      },
+      {
+        name: '兄弟目录不重叠（判据不许过严）',
+        items: [
+          { id: 'gp', pathPs: "$env:LOCALAPPDATA + '\\Alpha'" },
+          { id: 'gc', pathPs: "$env:LOCALAPPDATA + '\\Beta'" },
+        ],
+        expectPairs: 0,
+      },
+      {
+        name: '父子关系（非通配、深层子目录）',
+        items: [
+          { id: 'hp', pathPs: "$env:APPDATA + '\\Tencent\\QQ'" },
+          { id: 'hc', pathPs: "$env:APPDATA + '\\Tencent\\QQ\\Temp'" },
+        ],
+        expectPairs: 1,
+      },
+      {
+        name: '路径里的 ++ 是路径字符，不得误报成未知形态',
+        items: [{ id: 'ip', pathPs: "$env:LOCALAPPDATA + '\\Dism++Backup'" }],
+        expectPairs: 0,
+        expectUnresolved: 0,
+      },
+      {
+        name: '空字面量 pathPs 必须显式报不可判（静默跳过就是旧门禁的失明方式）',
+        items: [{ id: 'jp', pathPs: "''" }],
+        expectPairs: 0,
+        expectUnresolved: 1,
+      },
+    ];
+    for (const s of samples) {
+      const r = findWholeTreeOverlaps(s.items);
+      if (r.pairs.length !== s.expectPairs) {
+        fail(
+          `[A16-selftest] 样本「${s.name}」应判出 ${s.expectPairs} 条覆盖关系，实到 ${r.pairs.length}` +
+            `（${r.pairs.length > s.expectPairs ? '判据过严会把合法规则打死' : '判据坏成永远放行'}）：` +
+            r.pairs.map((p) => `${p.parentId}⊃${p.childId}`).join(','),
+        );
+      }
+      if (s.expectUnresolved !== undefined && r.unresolved.length !== s.expectUnresolved) {
+        fail(`[A16-selftest] 样本「${s.name}」的不可判形态应报 ${s.expectUnresolved} 条，实到 ${r.unresolved.length}`);
+      }
     }
   }
   // 4d 上限口径提示（阈值本身由校验器把关，这里只报当前水位，防"贴着上限"无人察觉）
