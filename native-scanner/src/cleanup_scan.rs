@@ -968,7 +968,12 @@ pub fn wildcard_match(name: &str, pattern: &str) -> bool {
 // ==================== ListDeletable 口径枚举（对齐 TrimFastSize.cs） ====================
 
 pub struct DeletableResult {
-    pub files: Vec<(String, u64)>, // 可删文件（探测通过）。仅 collect_files=true 时填充
+    /// 可删文件清单（探测通过）。仅 `collect_files=true` 时填充。
+    /// 第三位 = Kudu S2 的出生时间（UNIX 纳秒，0 = 读不到 = 无身份证基线）。
+    /// 为什么把 birthtime 塞进同一个元组而不是让调用方再读一次 metadata：身份证基线的
+    /// size 与出生时间必须来自**同一次读取**，否则两次读之间被改写的文件会拿到
+    /// 「新 size + 旧出生」的混配，执行侧比对必然失配。
+    pub files: Vec<(String, u64, u64)>, // 路径 / 字节 / birthtimeNs
     pub total: u64,                // 枚举到的全部文件数（被占用数 = total - deletable_count）
     /// 可删文件的**个数**与**字节和**，两种模式下都填。
     ///
@@ -991,6 +996,10 @@ pub struct DeletableResult {
     /// 与 `skipped_reparse` 并列呈现：候选比 Explorer 少时，除了 junction，
     /// 「有目录读不到」也必须有解释出口。
     pub unreadable_dirs: u64,
+    /// 清单到达 `cap` 后仍有可删文件未收进 `files`。
+    /// size / deletable_count 不受影响（仍按全量累加），只有**清单**被截断——
+    /// 与 FkResult.truncated 同语义，外发字段名统一走 `filesTruncated`。
+    pub files_truncated: bool,
 }
 
 /// 单遍递归枚举 + 探测。口径：跳 ReparsePoint（不深入）、目录不计数、
@@ -1014,6 +1023,7 @@ fn walk_deletable(
     res: &mut DeletableResult,
     depth: usize,
     collect_files: bool,
+    cap: Option<usize>,
 ) {
     if depth >= crate::scan::MAX_WALK_DEPTH {
         err_line(&format!("[trim-scanner] depth cap reached at {}", dir.display()));
@@ -1042,7 +1052,7 @@ fn walk_deletable(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            walk_deletable(&ent.path(), all, pattern, guard, excl_dirs, excl_files, protect, res, depth + 1, collect_files);
+            walk_deletable(&ent.path(), all, pattern, guard, excl_dirs, excl_files, protect, res, depth + 1, collect_files, cap);
             continue;
         }
         if !ft.is_file() {
@@ -1066,14 +1076,19 @@ fn walk_deletable(
             continue;
         }
         res.total += 1;
-        let size = md.map(|m| m.len()).unwrap_or(0);
+        let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
         if scan_deletable(&full, protect) {
             // 计数与字节和**两种模式都记**（统计口径的唯一数据源）；
             // 路径字符串只在真要交给调用方时才留（审计 §3.3）。
             res.deletable_count += 1;
             res.deletable_bytes += size;
             if collect_files {
-                res.files.push((full.to_string_lossy().to_string(), size));
+                // birthtime 与 size 取自同一份 metadata（`md` 已在手上，零额外 IO）
+                let bt = md.as_ref().map(birthtime_ns).unwrap_or(0);
+                match cap {
+                    Some(n) if res.files.len() >= n => res.files_truncated = true,
+                    _ => res.files.push((full.to_string_lossy().to_string(), size, bt)),
+                }
             }
         }
     }
@@ -1087,7 +1102,27 @@ pub fn list_deletable(
     excl_files: &[String],
     protect: Option<&str>,
 ) -> DeletableResult {
-    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, protect, true)
+    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, protect, true, None)
+}
+
+/// 带**清单上限**的收集模式（2026-10-23 新增，pathPs 整树条目专用）。
+///
+/// 为什么不直接复用 `list_deletable`：后者无界物化，`%TEMP%` / `%WINDIR%\Temp` 这类
+/// 无界树会把几十万条堆字符串一次性留在内存里；而 PLAN_CAP 是**跨条目**预算
+/// （单条目 10 万 / 全扫描 100 万），必须在枚举当场施加，不能"先全收再截断"——
+/// 与 FkAcc 的预算施加姿势一致（§3.4 那条「上限必须在装配过程中生效」的教训）。
+/// 超预算后 size / deletable_count 仍按全量累加（体积不能谎报），只有清单停止追加，
+/// 并把 `files_truncated` 置真外发成 `filesTruncated`，让用户在确认环节看得见。
+pub fn list_deletable_capped(
+    root_str: &str,
+    pattern: &str,
+    guard: AgeGuard,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    protect: Option<&str>,
+    cap: usize,
+) -> DeletableResult {
+    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, protect, true, Some(cap))
 }
 
 /// 只算计数与字节和，**不持有每文件路径**（审计 §3.3）。
@@ -1104,7 +1139,7 @@ pub fn list_deletable_stats(
     excl_files: &[String],
     protect: Option<&str>,
 ) -> DeletableResult {
-    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, protect, false)
+    list_deletable_inner(root_str, pattern, guard, excl_dirs, excl_files, protect, false, None)
 }
 
 fn list_deletable_inner(
@@ -1115,6 +1150,7 @@ fn list_deletable_inner(
     excl_files: &[String],
     protect: Option<&str>,
     collect_files: bool,
+    cap: Option<usize>,
 ) -> DeletableResult {
     let all = pattern.is_empty() || pattern == "*";
     let root = Path::new(root_str);
@@ -1129,11 +1165,18 @@ fn list_deletable_inner(
             let mut files = Vec::new();
             let mut deletable_count = 0u64;
             let mut deletable_bytes = 0u64;
+            let mut files_truncated = false;
             if old_enough && !excluded && scan_deletable(root, protect) {
                 deletable_count = 1;
                 deletable_bytes = fl;
                 if collect_files {
-                    files.push((root_str.to_string(), fl));
+                    // 与递归分支同口径：size 与出生时间来自同一次 metadata 读取
+                    let bt = fs::metadata(root).map(|m| birthtime_ns(&m)).unwrap_or(0);
+                    if cap.unwrap_or(usize::MAX) == 0 {
+                        files_truncated = true;
+                    } else {
+                        files.push((root_str.to_string(), fl, bt));
+                    }
                 }
             }
             return DeletableResult {
@@ -1143,6 +1186,7 @@ fn list_deletable_inner(
                 deletable_bytes,
                 skipped_reparse: 0, // 单文件路径不枚举子项，无重解析点可跳
                 unreadable_dirs: 0,
+                files_truncated,
             };
         }
     }
@@ -1153,9 +1197,10 @@ fn list_deletable_inner(
         deletable_bytes: 0,
         skipped_reparse: 0,
         unreadable_dirs: 0,
+        files_truncated: false,
     };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
-    walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, protect, &mut res, 0, collect_files);
+    walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, protect, &mut res, 0, collect_files, cap);
     res
 }
 
@@ -1163,6 +1208,7 @@ fn list_deletable_inner(
 
 // L6（2026-09-19）：missing / nfiles 是 Get-PathDeletableStats 的 PS 侧契约字段，
 // Rust 当前调用方只消费 ok / size；保留字段以维持与 PS 口径的结构对等，显式豁免 dead_code。
+#[derive(Default)]
 #[allow(dead_code)]
 pub struct PathStats {
     pub ok: bool,
@@ -1178,11 +1224,32 @@ pub struct PathStats {
     pub skipped_reparse: u64,
     /// 因权限/IO 失败读不到的目录数（A1-M02，v7.2 C06）。
     pub unreadable_dirs: u64,
+    /// 逐文件清单（路径 / 字节 / birthtimeNs）。仅 `get_path_deletable_stats` 的收集模式
+    /// 填充；统计模式恒空（审计 §3.3 的口径不变）。
+    pub files: Vec<(String, u64, u64)>,
+    /// 清单受 PLAN_CAP 截断（size 仍是全量）。
+    pub files_truncated: bool,
 }
 
-fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>) -> PathStats {
+/// 目录型（pathPs）目标的三态统计。
+///
+/// `collect_files=true` 时同时产出逐文件清单（受 `cap` 约束）——2026-10-23 起 pathPs
+/// 条目也要有身份证基线与跨条目去重依据，而**判据不许另写一份**（§5.16）：这里仍走
+/// `list_deletable_*` 同一套枚举，只是把收集模式与预算开开。
+fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>, collect_files: bool, cap: Option<usize>) -> PathStats {
+    // 单文件目标在收集模式下也要出清单（身份证基线对它是同一件事），代价是多读一次 metadata
+    let single_file_list = |size: u64| -> (Vec<(String, u64, u64)>, bool) {
+        if !collect_files {
+            return (Vec::new(), false);
+        }
+        if cap.unwrap_or(usize::MAX) == 0 {
+            return (Vec::new(), true);
+        }
+        let bt = fs::metadata(path).map(|m| birthtime_ns(&m)).unwrap_or(0);
+        (vec![(path.to_string(), size, bt)], false)
+    };
     if path.is_empty() {
-        return PathStats { ok: false, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 0 };
+        return PathStats { missing: true, ..Default::default() };
     }
     let p = Path::new(path);
     // 存在性用同一套 API 判定（metadata 跟随链接，与 .NET Exists 同源）
@@ -1190,31 +1257,55 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>) 
     if !is_dir {
         if fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
             if !scan_deletable(p, protect) {
-                return PathStats { ok: true, missing: false, size: 0, nfiles: 0, locked: 1, skipped_reparse: 0, unreadable_dirs: 0 };
+                return PathStats { ok: true, missing: false, locked: 1, ..Default::default() };
             }
             return match fs::metadata(p) {
-                Ok(m) => PathStats { ok: true, missing: false, size: m.len(), nfiles: 1, locked: 0, skipped_reparse: 0, unreadable_dirs: 0 },
-                Err(_) => PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 1 },
+                Ok(m) => {
+                    let (files, files_truncated) = single_file_list(m.len());
+                    PathStats {
+                        ok: true,
+                        size: m.len(),
+                        nfiles: 1,
+                        files,
+                        files_truncated,
+                        ..Default::default()
+                    }
+                }
+                Err(_) => PathStats { ok: false, unreadable_dirs: 1, ..Default::default() },
             };
         }
         // 既非目录也非文件 = 不存在
-        return PathStats { ok: true, missing: true, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 0 };
+        return PathStats { ok: true, missing: true, ..Default::default() };
     }
     // 枚举探针：连一个子项都列不出 = 无法统计（ACL 拒绝 / 重解析目标异常），绝不报 0
     let probe_ok = fs::read_dir(p).and_then(|mut rd| rd.next().transpose()).is_ok();
     if !probe_ok {
-        return PathStats { ok: false, missing: false, size: 0, nfiles: 0, locked: 0, skipped_reparse: 0, unreadable_dirs: 1 };
+        return PathStats { ok: false, unreadable_dirs: 1, ..Default::default() };
     }
     // U1-b（2026-10-01）：全局排除名单整链下线。本探针历史上也只吃全局名单（规则级
     // excludePaths 到这层已经丢了规则上下文），传空集即等价于「名单为空」。
-    // 统计口径走 list_deletable_stats：**不物化每文件路径**（审计 §3.3）。
-    // nfiles / size 从 deletable_count / deletable_bytes 取，那是唯一数据源；
+    // nfiles / size 一律从 deletable_count / deletable_bytes 取，那是唯一数据源；
     // 两者口径必须恒等（下面有断言钉住），否则「列表说 N 个、统计说 M 个」会被
-    // 用户读成扫描漏项。
-    let res = list_deletable_stats(path, "*", guard, &[], &[], protect);
+    // 用户读成扫描漏项。统计模式仍**不物化每文件路径**（审计 §3.3）；
+    // 只有 pathPs 支从 2026-10-23 起要走清单，才切到带预算的收集模式（同一份枚举）。
+    let res = if collect_files {
+        list_deletable_capped(path, "*", guard, &[], &[], protect, cap.unwrap_or(usize::MAX))
+    } else {
+        list_deletable_stats(path, "*", guard, &[], &[], protect)
+    };
     let nfiles = res.deletable_count;
     let size = res.deletable_bytes;
-    PathStats { ok: true, missing: false, size, nfiles, locked: res.total - nfiles, skipped_reparse: res.skipped_reparse, unreadable_dirs: res.unreadable_dirs }
+    PathStats {
+        ok: true,
+        missing: false,
+        size,
+        nfiles,
+        locked: res.total - nfiles,
+        skipped_reparse: res.skipped_reparse,
+        unreadable_dirs: res.unreadable_dirs,
+        files: res.files,
+        files_truncated: res.files_truncated,
+    }
 }
 
 // ==================== Resolve-GlobDirs 口径（目录通配逐段展开） ====================
@@ -1556,6 +1647,46 @@ fn checklocked_body(input: &str) -> i32 {
 
 // ==================== 安装检测（Test-RuleDetect 口径） ====================
 
+/// detect 回退链的「候选存在性」一档：`candidatesPs` / `globCandidatesPs` 任一条求值后
+/// 在盘上存在即命中；一个候选都没有时返回 `None`（不替调用方编结论）。
+///
+/// 为什么要有这一档：库里有一类规则**没有固定根**，`pathPs` 写成空字面量 `''`，
+/// 真实目录全靠候选自动发现（现算唯一一条：`wechatCache`，候选是新版
+/// `Documents\xwechat_files\*\temp` 与旧版 `Documents\WeChat Files\*\FileStorage\Cache`）。
+/// 回退链此前只走到「pathPs 求值 → `path_exists("")` = false」就收工，整条规则在
+/// `test_rule_detect` 就被 continue ⇒ 候选再真实也永不生效（本机实测候选目录确有内容，
+/// 条目却在列表里整条隐身）。存在性判据与主循环同源：`resolve_rule_path` / `path_exists` /
+/// `expand_glob_dirs`，§4.10 的盘符相对形态同样按不存在处理，不在这里另立第二套口径。
+fn detect_by_candidates(rule: &Json) -> Option<bool> {
+    let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let mut saw_candidate = false;
+    for key in ["candidatesPs", "globCandidatesPs"] {
+        let Some(arr) = rule.get(key).and_then(|v| v.as_arr()) else { continue };
+        for c in arr {
+            let Some(ce) = c.as_str() else { continue };
+            let Some(cp) = resolve_rule_path(ce) else { continue };
+            saw_candidate = true;
+            if cp.is_empty() {
+                continue;
+            }
+            if is_drive_relative(&cp) {
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {rid} {key} 求值为盘符相对路径（{cp}），detect 已按不存在处理（§4.10）"
+                ));
+                continue;
+            }
+            if cp.contains('*') {
+                if !expand_glob_dirs(&cp, true).is_empty() {
+                    return Some(true);
+                }
+            } else if path_exists(&cp) {
+                return Some(true);
+            }
+        }
+    }
+    if saw_candidate { Some(false) } else { None }
+}
+
 fn test_rule_detect(rule: &Json) -> bool {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     if let Some(d) = rule.get("detect") {
@@ -1622,21 +1753,34 @@ fn test_rule_detect(rule: &Json) -> bool {
     }
     if let Some(pp) = rule.get("pathPs") {
         if let Some(expr) = pp.as_str() {
-            return match resolve_rule_path(expr) {
-                Some(p) => {
+            match resolve_rule_path(expr) {
+                Some(p) if !p.is_empty() => {
                     if is_drive_relative(&p) {
                         // §4.10：盘符相对形态按「不可判定」处理（不命中）
                         err_line(&format!(
                             "[cleanup-scan] 规则 {rid} pathPs 求值为盘符相对路径（{p}），已按不存在处理（§4.10）"
                         ));
-                        false
-                    } else {
-                        path_exists(&p)
+                        return false;
                     }
+                    return path_exists(&p);
+                }
+                // 求值为**空串**：`pathPs:"''"` 是「无固定根、靠候选自动发现」的空位占位，
+                // 空串本身没有存在性可言 —— 判 false 会让整条规则在 detect 就 continue、
+                // 候选再真也永不生效（2026-10-23 实测 wechatCache 就是这条）。改走候选档。
+                Some(_) => {
+                    if let Some(hit) = detect_by_candidates(rule) {
+                        return hit;
+                    }
+                    // 连候选都没有：一条既不指向路径、又不说怎么发现的规则，按不命中收
+                    // （不复活成「恒显示、执行 0 删」那种老形状）
+                    err_line(&format!(
+                        "[cleanup-scan] 规则 {rid} pathPs 求值为空且无任何候选，按不存在处理"
+                    ));
+                    return false;
                 }
                 // 表达式求值失败（受限语法）→ 保守命中，交给主循环 fail-closed 跳过
-                None => true,
-            };
+                None => return true,
+            }
         }
     }
     if let Some(rk) = rule.get("regKeys") {
@@ -2907,7 +3051,21 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
 
         // 目录型统计走可删口径：被占用文件不计入 size，locked 只进协议不进 UI。
         // minAge 时效护栏（P0-M5）：目录型规则的统计与执行侧同口径过滤太新文件。
-        let stats = get_path_deletable_stats(&path, rule_age_guard_of(rule, global_min_age_days), protect);
+        // 2026-10-23：本支同时**物化逐文件清单**（与 fileKeys 支共用 PLAN_CAP 预算），
+        // 让 pathPs 条目也拿到身份证基线、并能参与跨条目精确去重。此前它们只有聚合 size，
+        // `items[].files` 恒空 ⇒ 引擎 Kudu S2 的 identity 表对这些条目完全不生效
+        //（「扫描后被替换」的护栏在该形状下静默失效、方向是放行），去重也只能按根前缀
+        // 反查、把一个子条的字节整段扣给父条。超预算时 size 仍按全量（体积不谎报），
+        // 清单截断位外发 `filesTruncated`，用户在确认环节看得见。
+        let item_cap = PLAN_CAP_PER_ITEM.min(PLAN_CAP_TOTAL.saturating_sub(plan_global_rows));
+        let stats = get_path_deletable_stats(
+            &path,
+            rule_age_guard_of(rule, global_min_age_days),
+            protect,
+            true,
+            Some(item_cap),
+        );
+        plan_global_rows = plan_global_rows.saturating_add(stats.files.len());
         // 统计失败上报 size=null——渲染层对 null 走「—」分支，不用 0 B 冒充可清理
         let size_json = if stats.ok { stats.size.to_string() } else { "null".to_string() };
         // autoPath 命中时 size 即 autoPath 的大小，不再二次枚举
@@ -2929,7 +3087,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             path_candidates.iter().map(|c| jstr(c)).collect::<Vec<_>>().join(",")
         );
 
-        emit_item(&[
+        let mut fields: Vec<(&str, String)> = vec![
             ("id", jstr(cat_id)),
             ("name", jopt_str(name)),
             ("configuredPath", jstr(&evaluated_path)),
@@ -2950,7 +3108,22 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             ("risk", jopt_str(rule.get("risk").and_then(|v| v.as_str()))),
             ("exists", exists_json),
             ("blockedBy", blocked_json),
-        ]);
+        ];
+        if stats.files_truncated {
+            // 与 fileKeys 支同名同义：清单被 PLAN_CAP 截断，确认环节必须告知
+            // 「实际清理范围可能大于列出的清单」（渲染层 cleanup.js 有 filesTruncated 分支）。
+            fields.push(("filesTruncated", "true".to_string()));
+        }
+        emit_item(&fields);
+        for (fp, size, bt) in &stats.files {
+            out_line(&format!(
+                "@@PLANFILE@@{{\"id\":{},\"path\":{},\"size\":{},\"birthtimeNs\":{}}}",
+                jstr(cat_id),
+                jstr(fp),
+                size,
+                bt
+            ));
+        }
         flush_stdout();
     }
     0
@@ -3328,11 +3501,12 @@ mod tests {
             deletable_bytes: 0,
             skipped_reparse: 0,
             unreadable_dirs: 0,
+            files_truncated: false,
         };
-        walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], None, &mut res, 0, true);
+        walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], None, &mut res, 0, true, None);
         assert_eq!(res.files.len(), 1, "浅层文件必须收到：{:?}", res.files);
         assert!(
-            res.files.iter().all(|(p, _)| !p.contains("d69")),
+            res.files.iter().all(|(p, _, _)| !p.contains("d69")),
             "超限深处的文件不得出现：{:?}", res.files
         );
         let _ = fs::remove_dir_all(&root);
@@ -3390,7 +3564,128 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// 审查 L-9：walk_fk_dll 的 recurse 分支同受深度上限保护。
+    /// 目录型（pathPs）收集模式：必须出逐文件清单 + 与 size **同源**的出生时间，
+    /// 且 PLAN_CAP 施加在枚举当场（size 仍全量、只有清单停）。
+    ///
+    /// 为什么要这条（2026-10-23）：pathPs 支历史上只回聚合 size，`items[].files` 恒空
+    /// ⇒ 引擎 Kudu S2 的身份证表对这些条目完全不生效（护栏静默失效、方向是放行），
+    /// 主进程的跨条目去重也只能按根前缀反查、把子条的字节整段扣给父条。
+    /// 判红自证：① 把收集模式的 `collect_files` 传回 false ⇒ 第一条断言红；
+    /// ② 把 `cap` 去掉 ⇒ 截断断言红；③ 出生时间改成再读一次 metadata 之外的口径 ⇒ 第三条红。
+    #[test]
+    fn 目录型收集模式出清单与身份证基线() {
+        let root = std::env::temp_dir().join(format!("trim-ps-collect-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        for (name, body) in [
+            ("a.bin", b"aaaa".as_slice()),
+            ("sub/b.bin", b"bb".as_slice()),
+            ("c.bin", b"ddd".as_slice()),
+        ] {
+            fs::write(root.join(name), body).unwrap();
+        }
+        let p = root.to_str().unwrap();
+
+        // 统计模式口径必须一字不变（§3.3 那份约束不因物化而漂）
+        let stat = get_path_deletable_stats(p, AgeGuard::Off, None, false, None);
+        assert!(stat.ok && stat.files.is_empty() && !stat.files_truncated, "统计模式被改成持有路径");
+        assert_eq!(stat.size, 4 + 2 + 3, "size 必须是全量字节和");
+        assert_eq!(stat.nfiles, 3);
+
+        // 收集模式：cap 给足 ⇒ 三条全出，且每条带与 size 同一次 metadata 的出生时间
+        let full = get_path_deletable_stats(p, AgeGuard::Off, None, true, Some(10));
+        assert!(full.ok, "收集模式必须与统计模式同判成功");
+        assert_eq!(full.files.len(), 3, "清单必须收全：{:?}", full.files);
+        assert!(!full.files_truncated, "未超预算不该标截断");
+        assert_eq!(full.size, 9, "开收集模式后 size 口径不得变");
+        for (path, size, bt) in &full.files {
+            let m = fs::metadata(path).unwrap_or_else(|_| panic!("清单里的路径必须还在盘上: {path}"));
+            assert_eq!(*size, m.len(), "逐文件字节与 metadata 不符: {path}");
+            assert!(*bt > 0, "出生时间为 0 = 无身份证基线，护栏会静默失效: {path}");
+            let exact = m
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+                .unwrap_or(0);
+            assert_eq!(*bt, exact, "身份证基线必须与现读逐位相等（折位即整批拒删）: {path}");
+        }
+
+        // 预算施加在枚举当场：超出的文件不进清单，但 size/nfiles 仍按全量
+        let capped = get_path_deletable_stats(p, AgeGuard::Off, None, true, Some(2));
+        assert_eq!(capped.files.len(), 2, "清单必须停在 cap");
+        assert!(capped.files_truncated, "超预算必须外发截断位，否则用户看不见「清单比实际少」");
+        assert_eq!(capped.size, 9, "截断只影响清单，体积不许跟着谎报");
+        assert_eq!(capped.nfiles, 3, "截断只影响清单，个数不许跟着谎报");
+
+        // 预算为 0（跨条目 PLAN_CAP_TOTAL 耗尽的形状）：一条都不出，但必须标截断
+        let zero = get_path_deletable_stats(p, AgeGuard::Off, None, true, Some(0));
+        assert!(zero.files.is_empty() && zero.files_truncated && zero.size == 9, "零预算必须「空清单 + 截断 + 全量 size」三件齐");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// detect 回退链的候选档（2026-10-23）：`pathPs:"''"` 是「无固定根、靠候选自动发现」的
+    /// 空位占位（现算全库唯一一条 `wechatCache`），旧回退链走到 `path_exists("")` 就判不存在
+    /// ⇒ 整条规则在 `test_rule_detect` 被 continue、候选再真也永不生效。
+    /// 判红自证：① 删掉空串那一支的 `detect_by_candidates` 调用 ⇒ 第一条红（规则仍整条死）；
+    /// ② 把候选档放宽成「有候选就命中」⇒ 第二条红（不许假复活成「恒显示、执行 0 删」）。
+    #[test]
+    fn detect_空路径条目改走候选存在性回退() {
+        let root = std::env::temp_dir().join(format!("trim-detect-cand-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let here = root.to_str().unwrap().to_string();
+        let q = |s: &str| Json::Str(format!("'{}'", s));
+        let arr = |v: Vec<Json>| Json::Arr(v);
+        let obj = |fields: Vec<(&str, Json)>| Json::Obj(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+
+        // ① 候选真实存在 ⇒ 命中（glob 形态与静态形态各一条）
+        let by_glob = obj(vec![
+            ("id", Json::Str("probe-glob".into())),
+            ("pathPs", Json::Str("''".into())),
+            ("globCandidatesPs", arr(vec![q(&format!(r"{}\sub*", here))])),
+        ]);
+        fs::create_dir_all(root.join("subdir")).unwrap();
+        assert!(test_rule_detect(&by_glob), "候选（通配）真实存在时 detect 必须命中，否则整条规则永远隐身");
+        let by_static = obj(vec![
+            ("id", Json::Str("probe-static".into())),
+            ("pathPs", Json::Str("''".into())),
+            ("candidatesPs", arr(vec![q(&here)])),
+        ]);
+        assert!(test_rule_detect(&by_static), "候选（静态）存在时同样必须命中");
+
+        // ② 候选都不存在 ⇒ 不命中（放宽就变成「恒显示、执行 0 删」那个老形状）
+        let miss = obj(vec![
+            ("id", Json::Str("probe-miss".into())),
+            ("pathPs", Json::Str("''".into())),
+            ("candidatesPs", arr(vec![q(&format!(r"{}\NoSuchDir", here))])),
+            ("globCandidatesPs", arr(vec![q(&format!(r"{}\NoSuchGlob\*", here))])),
+        ]);
+        assert!(!test_rule_detect(&miss), "候选全不存在时不得命中");
+
+        // ③ 空路径又没有任何候选 ⇒ 不命中（不替它编一个「恒命中」）
+        let naked = obj(vec![
+            ("id", Json::Str("probe-naked".into())),
+            ("pathPs", Json::Str("''".into())),
+        ]);
+        assert!(!test_rule_detect(&naked), "既无指向又无发现方式时必须不命中");
+
+        // ④ 正向对照：pathPs 非空时仍按它自己的存在性判，候选档不许插一手
+        let normal_hit = obj(vec![
+            ("id", Json::Str("probe-normal".into())),
+            ("pathPs", q(&here)),
+        ]);
+        assert!(test_rule_detect(&normal_hit), "正常 pathPs 命中路径即命中");
+        let normal_miss = obj(vec![
+            ("id", Json::Str("probe-normal-miss".into())),
+            ("pathPs", q(&format!(r"{}\NoSuchDir", here))),
+            ("candidatesPs", arr(vec![q(&here)])),
+        ]);
+        assert!(!test_rule_detect(&normal_miss), "pathPs 非空却不存在时，不得靠候选把它救活（那是另一条规则的根）");
+
+        let _ = fs::remove_dir_all(&root);
+    }
     #[test]
     fn walk_fk_dll_深度超限不再下钻() {
         let root = std::env::temp_dir().join(format!("trim-depth-fk-{}", std::process::id()));

@@ -80,6 +80,57 @@ fn js_num_str(n: f64) -> String {
         }
     }
 
+    /// pathPs 必须进重复目标登记册（与 fileKeys/regKeys 同姿势）。
+    /// 真机依据（2026-10-22 gfx 组）：`nvidiaCache`（pathPs 整树）报的 387,378,791 B 与
+    /// `nvidiaShaderCache` 清单里落在同一目录树下的 162 个文件逐字节相等，而登记册
+    /// 从不收 pathPs ⇒ 装载侧与门禁都看不见 ⇒ 界面逐条相加虚高 1.61×。
+    /// 判红自证：删掉 rules.rs 里 `ps|` 那段登记 ⇒ 第一条断言红；
+    /// 把它写成大小写敏感比较 ⇒ 第二条（不同大小写的同根）红。
+    #[test]
+    fn 目录型同根重复必须整包拒绝() {
+        let pkg = |a: Value, b: Value| {
+            json!({
+                "version": 2,
+                "rulesVersion": 20260928,
+                "groups": [{ "key": "g1", "title": "测试组", "items": [a, b] }]
+            })
+        };
+        let mut p1 = ok_item();
+        p1["id"] = json!("ps-a");
+        p1["pathPs"] = json!(r"$env:LOCALAPPDATA + '\TrimTestCache'");
+        p1["fileKeys"] = json!([{ "path": "%LOCALAPPDATA%\\TrimTestA", "pattern": "*", "recurse": true }]);
+        let mut p2 = ok_item();
+        p2["id"] = json!("ps-b");
+        // 大小写不同的同一根：Windows 路径大小写不敏感，登记必须折成同一个键
+        p2["pathPs"] = json!(r"$env:LOCALAPPDATA + '\trimtestcache'");
+        p2["fileKeys"] = json!([{ "path": "%LOCALAPPDATA%\\TrimTestB", "pattern": "*", "recurse": true }]);
+        let err = validate_cleanup_package(&pkg(p1.clone(), p2.clone()))
+            .expect_err("同根的两条 pathPs 必须整包拒绝");
+        assert!(
+            err.contains("pathPs 与 ps-a 精确重复"),
+            "拒绝原因必须指到前一条 id（且点名是 pathPs 面），实际：{err}"
+        );
+        // 正向对照：不同根的两条照常放行 —— 闸收紧过头会把正常规则打死
+        p2["pathPs"] = json!(r"$env:LOCALAPPDATA + '\TrimTestOther'");
+        if let Err(reason) = validate_cleanup_package(&pkg(p1, p2)) {
+            panic!("不同根的 pathPs 不得被拒: {reason}");
+        }
+        // 退化位对照：`pathPs:"''"` 求值为空、整条在扫描侧 detect 就 continue（现算全库 1 条：
+        // wechatCache），它不是「根」，两条这样的规则各靠 candidatesPs 自动发现，彼此不重复。
+        // 若把它们当精确重复整包拒，就是拿一个不存在的冲突打死合法发布物。
+        let mut d1 = ok_item();
+        d1["id"] = json!("ps-dead-a");
+        d1["pathPs"] = json!("''");
+        d1["fileKeys"] = json!([{ "path": "%LOCALAPPDATA%\\TrimTestDeadA", "pattern": "*", "recurse": true }]);
+        let mut d2 = ok_item();
+        d2["id"] = json!("ps-dead-b");
+        d2["pathPs"] = json!("''");
+        d2["fileKeys"] = json!([{ "path": "%LOCALAPPDATA%\\TrimTestDeadB", "pattern": "*", "recurse": true }]);
+        if let Err(reason) = validate_cleanup_package(&pkg(d1, d2)) {
+            panic!("两条退化位 '' 不得被判 pathPs 精确重复: {reason}");
+        }
+    }
+
     /// 剥掉 Rust 行注释与块注释（保留换行）。
     ///
     /// 为什么本文件需要它：下面几条判据是**读源码形态**的，而源码里大量注释会

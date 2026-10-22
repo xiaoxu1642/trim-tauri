@@ -877,6 +877,29 @@ pub(super) fn check_cleanup_item(
         seen_targets.insert(fp, id.clone());
     }
 
+    // pathPs（目录型整树统计）此前**完全不进重复目标登记册**：两条同根、或一条 pathPs
+    // 整树盖住另一条 fileKeys 子目录，装载侧与门禁都看不见 —— 2026-10-22 真机 gfx 组
+    // `nvidiaCache`（pathPs）报的 387,378,791 B 与 `nvidiaShaderCache` 清单里同树的
+    // 162 个文件逐字节相等，界面逐条相加因此虚高 1.61×。
+    // 这里按与 fileKeys/regKeys **同一姿势**钉「字面同根」的精确重复（登记的是原始模板
+    // 文本，不做变量展开——展开面归 Node 门禁 4c 的父子重叠判据，两侧不互换职责）；
+    // 父子包含关系不在本层判（`%LOCALAPPDATA%\NVIDIA` 与其子目录在字面上就不同）。
+    // 现算：本仓 187 条里 pathPs 同根重复 0 处 ⇒ 新增此闸不改变现网装载结果。
+    // 退化位除外：`pathPs: "''"`（求值为空串，扫描侧在 detect 就 continue、整条永不生效）
+    // 不是「根」，两条这样的规则各自靠 candidatesPs 自动发现，彼此并不重复 —— 入册会把
+    // 假阳重复塞进整包拒绝路径。判据只问「这串里有没有任何指向路径的内容」，不复刻
+    // 扫描器的求值器（那才是 §5.16 要防的第二份实现）。
+    if let Some(pp) = it.get("pathPs").and_then(Value::as_str) {
+        let points_somewhere = pp.contains("$env:") || pp.chars().any(|c| c.is_alphanumeric());
+        if points_somewhere {
+            let fp = format!("ps|{}", pp.to_lowercase());
+            if let Some(prev) = seen_targets.get(&fp) {
+                return Err(format!("规则 {id}: pathPs 与 {prev} 精确重复（{fp}）"));
+            }
+            seen_targets.insert(fp, id.clone());
+        }
+    }
+
     // detect（2026-10-04 审计 §4.11）：安装检测判据，扫描侧 `test_rule_detect`
     // 直接把 `path` 喂给 `path_exists` / `reg_key_exists`。
     //

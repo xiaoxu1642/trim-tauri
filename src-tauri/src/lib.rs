@@ -1171,9 +1171,20 @@ mod tests {
                     .contains("if (document.querySelector('.usage-backdrop')) return;"),
             "A3-M03：模型子窗 Esc 必须先判叠层"
         );
+        // A3-M04（2026-10-22 改版）：盘测历史弹窗收进 `window.modal.create` 骨架后，
+        // 「Esc 先判叠层」由骨架统一负责（按 DOM 序取最顶层）。旧形态是页面自己写
+        // keydown + 「页面上还有 .usage-backdrop 就不关」，那条判据会把「历史弹窗上再叠一层」
+        // 误判成不该关。原断言只钉「注释里有没有 A3-M04 这个标记串」——标记随手写代码一起
+        // 删掉就把机制完好无损的改版判红，钉错了对象；改钉两件事：① 骨架确有按 DOM 序取
+        // 最顶层的判定；② 页面不再自带 Esc 分支（回到手写即重复实现）。
+        let modal = include_str!("../../src/scripts/modal.js");
         assert!(
-            include_str!("../../src/scripts/diskbench.js").contains("A3-M04"),
-            "A3-M04：盘测历史弹窗 Esc 必须先判叠层"
+            modal.contains("all[all.length - 1] !== backdrop"),
+            "A3-M04：弹窗骨架的 Esc 必须先判叠层（按 DOM 序取最顶层）"
+        );
+        assert!(
+            !include_str!("../../src/scripts/diskbench.js").contains("Escape"),
+            "A3-M04：盘测页不许再自带 Esc 分支（叠层判定只此一处）"
         );
 
         let optimizer = include_str!("../../src/scripts/optimizer.js");

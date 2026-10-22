@@ -1218,6 +1218,17 @@ fn cleanup_execute_with_backup_root(
                     "warn",
                     &format!("规则 {id}：根目标不可用，已跳过 —— {target}（{why}）"),
                 );
+            } else {
+                // 空串目标：上面三条判据都带 `!target.is_empty()`，空串会**一路什么都不记**，
+                // 落进 classify_outcome 的最后一个出口报「已清理 0 个文件」+ ok ——
+                // 与 §4.2 那条「假绿成功」是同一个形状，只是漏了空串这一格。
+                // 来源是库里 `pathPs:"''"` 这类空位占位（扫描侧 detect 已于 2026-10-23
+                // 改走候选回退，这里是不信任上游的执行侧兜底：载荷能到这儿就必须有可见结论）。
+                unresolved.push("空目标（规则既无可用根，也无候选可自动发现）".to_string());
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("规则 {id}：目标为空串，已拒绝执行（既无根也无候选）"),
+                );
             }
         }
 
@@ -1283,6 +1294,11 @@ let mut freed = 0i64;
     // 没有第二道兜底，靠 C07 的计数外发保证失守可见——改并发/跨进程写同目录时必须重估。
     let mut final_memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         let mut backup_skipped = 0usize;
+        // 未留副本有两个成因，必须分开：① 超单文件/整批体积上限（本来就不打算留）；
+        // ② 上限内但 `copy` 失败（占用/权限/IO 读不到）。旧形态合成一个数、文案统一
+        // 说「超备份上限」——真机实测那次两档都是几十 KB 的小文件被占用导致复制失败，
+        // 用户却被指去「文件太大」，与 §C06 回执诚实度同族。
+        let mut backup_over_cap = 0usize;
 
         for (path, size) in &files {
             if to_recycle {
@@ -1383,6 +1399,7 @@ let mut freed = 0i64;
                     }
                 } else {
                     backup_skipped += 1;
+                    backup_over_cap += 1;
                 }
                 // 永久删除。R3（2026-10-15）原方案「清只读位 + 重试」经**实测证伪**后退役：
                 // 前提是「只读文件撞 PermissionDenied」，但 Rust std 的 remove_file 在
@@ -1452,7 +1469,18 @@ let mut freed = 0i64;
             String::new()
         };
         let backup_suffix = if backup_skipped > 0 && !to_recycle {
-            format!("；{} 个文件超备份上限未留副本", backup_skipped)
+            let over = backup_over_cap;
+            let failed_copy = backup_skipped - over;
+            let mut s = String::new();
+            if over > 0 {
+                s.push_str(&format!("；{over} 个文件超备份上限未留副本"));
+            }
+            if failed_copy > 0 {
+                s.push_str(&format!(
+                    "；{failed_copy} 个文件副本复制失败未留副本（文件被占用或权限不足，与体积上限无关）"
+                ));
+            }
+            s
         } else {
             String::new()
         };
@@ -2154,7 +2182,7 @@ mod cleanup_engine_contract_tests {
         // 测的是共享判定本身（字段抽取另有 native-scanner 的 `rule_age_guard_of_识别年龄轴三字段`）。
         let scan_hits = |axis: Option<&str>| -> Vec<String> {
             let guard = rule_age_guard(None, Some(3.0), axis);
-            names(list_deletable(&base.to_string_lossy(), "*", guard, &[], &[], None).files.into_iter().map(|(p, _)| p).collect())
+            names(list_deletable(&base.to_string_lossy(), "*", guard, &[], &[], None).files.into_iter().map(|(p, _, _)| p).collect())
         };
         let exec_hits = |axis: Option<&str>| -> (Vec<String>, i64) {
             let res = cleanup_execute(&items, &rule_json(axis), true, false, None).unwrap();
@@ -2381,6 +2409,70 @@ mod cleanup_engine_contract_tests {
         assert!(swapped.exists(), "被换掉的文件必须原样保留（拒绝删除）");
         assert!(!normal.exists(), "未变的文件照常删除");
         assert_eq!(d["freed"].as_i64(), Some(normal_size as i64), "释放量只算真删掉的: {d}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真机反向探针（2026-10-23）：身份证基线**由扫描器现算**，不用手搓数值。
+    ///
+    /// 与 `kudu_s2_文件被换后删除被拒且计数` 的分工：那条用合成基线钉判定逻辑，
+    /// 本条钉「扫描器产出的基线 ⇄ 执行侧现读值」这条数值通道两端对得上——
+    /// 2026-10-22 那次「459 条基线 454 条判不一致、报 976 MB 只清出 1.7 MB」的整批误拒
+    /// 只要复发，本条第一条断言（未改的文件必须真被删）当场红。
+    /// 判红自证：把 `birthtime_ns` 的量纲改成 100ns ticks（或任一端单位漂移）⇒ 第一条红。
+    #[test]
+    fn 反向探针_真实扫描基线下未改必删被改必拦() {
+        let dir = std::env::temp_dir().join(format!("trim-s2-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let keep = dir.join("keep.log");
+        let swap = dir.join("swap.log");
+        std::fs::write(&keep, b"keep-1234567890").unwrap();
+        std::fs::write(&swap, b"swap-1234567890").unwrap();
+        let keep_size = std::fs::metadata(&keep).unwrap().len();
+
+        // 基线走扫描器的带预算收集模式（与 pathPs 生产链路同一入口）
+        let scanned = trim_finder::cleanup_scan::list_deletable_capped(
+            &dir.to_string_lossy(),
+            "*.log",
+            trim_finder::cleanup_scan::rule_age_guard(None, None, None),
+            &[],
+            &[],
+            None,
+            100,
+        );
+        assert_eq!(scanned.files.len(), 2, "扫描器必须收到两个文件: {:?}", scanned.files);
+        let files: Vec<_> = scanned
+            .files
+            .iter()
+            .map(|(p, s, bt)| serde_json::json!({"path": p, "size": *s as i64, "birthtimeNs": *bt as i64}))
+            .collect();
+
+        // 篡改：删掉重建并改大小 ⇒ 出生时间与字节双双变化
+        std::fs::remove_file(&swap).unwrap();
+        std::fs::write(&swap, b"swapped-content-much-longer-after-tamper").unwrap();
+
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"s2e2e","name":"反向探针","pathPs": format!("'{}'", dir.to_string_lossy())
+        }]}]});
+        let items = vec![serde_json::json!({
+            "id":"s2e2e","name":"反向探针","path": dir.to_string_lossy(), "files": files
+        })];
+
+        let bk = BackupSandbox::new("s2e2e");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("不应 Err");
+        let d = &res.details[0];
+        assert!(
+            !keep.exists(),
+            "扫描后未改动的文件必须真被删掉；它没被删就说明基线两端对不上（整批误拒那个形状）: {d}"
+        );
+        assert!(swap.exists(), "被换掉的文件必须原样保留（拒绝删除）");
+        assert_eq!(d["identityChanged"].as_i64(), Some(1), "被换文件必须记一档身份证不符: {d}");
+        assert_eq!(d["freed"].as_i64(), Some(keep_size as i64), "释放量只算真删掉那一个: {d}");
+        assert!(
+            d["message"].as_str().unwrap_or("").contains("与扫描时不一致"),
+            "拒绝理由必须可见，不能只报「已清理 1 个文件」: {d}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2752,6 +2844,27 @@ mod cleanup_engine_contract_tests {
             msg_fk.contains("盘符相对") || msg_fk.contains("未解析") || msg_fk.contains("不可用"),
             "fileKey 型拒绝理由必须可见: {msg_fk}"
         );
+    }
+
+    /// 空串目标在执行侧必须显式 skip（2026-10-23，与 §4.2「假绿成功」同形状的空格）。
+    /// 三条判据都写 `!target.is_empty()` ⇒ 空串一路不记账，落进 classify_outcome 尾部
+    /// 报「已清理 0 个文件」+ ok —— 用户明明选了它，却被告知一切正常。
+    /// 判红自证：删掉 `else { unresolved.push(..) }` 那一格 ⇒ 本用例第一条红（退回 ok）。
+    #[test]
+    fn 空目标必须降为skip并给出理由() {
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"empty-target","name":"空目标探测"
+        }]}]});
+        let items = vec![serde_json::json!({"id":"empty-target","name":"空目标探测","path": ""})];
+        let res = cleanup_execute(&items, &rules, false, false, None).expect("不应 Err");
+        let d = &res.details[0];
+        assert_eq!(d["status"], "skip", "空串目标不得报 ok: {d}");
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("无可用根") || msg.contains("未解析"),
+            "拒绝理由必须可见，让「扫描命中、执行 0 删」可对账: {msg}"
+        );
+        assert!(!msg.contains("已清理 0 个文件"), "「已清理 0 个文件」= 假绿成功（P0 纪律明令禁止）: {msg}");
     }
 
     /// 2026-10-04 审计 §5.3：两条仅大小写不同的规则根指向同一目录时，同一文件

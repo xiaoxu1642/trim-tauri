@@ -71,11 +71,17 @@ impl ScanAccum {
                     {
                         let arr = self.plan.entry(id.to_string()).or_default();
                         if arr.len() < PLAN_CAP_PER_ITEM {
-                            let size = js_num_or_zero(pf.get("size"));
+                            let size = pf.get("size").and_then(Value::as_u64).unwrap_or(0);
                             // Kudu S2（2026-10-16）：身份证基线随快照落地（0/缺 = 无基线，
                             // 删除侧不拦；父链重解析复检仍兜底）。
-                            let bt = js_num_or_zero(pf.get("birthtimeNs"));
-                            arr.push(json!({ "path": path, "size": size as i64, "birthtimeNs": bt as i64 }));
+                            // ⚠️ 出生时间必须**按整数直读**，不许走 `js_num_or_zero`：那是
+                            // `Number(x)||0` 的 f64 桥，而 UNIX 纳秒量级 1.79e18 远超双精度
+                            // 能精确表示的 2^53 ⇒ 落地即被量化到 256ns 整倍数 ⇒ 执行侧现读的
+                            // 精确值几乎必然不等 ⇒ 身份证守卫把整批文件判成「与扫描时不一致」
+                            // 拒删（2026-10-22 真机实测：459 条基线 454 条被拒，界面报 976 MB、
+                            // 实际只清出 1.7 MB）。ticks ≡ 0 (mod 64) 的那 1/64 才会侥幸相等。
+                            let bt = pf.get("birthtimeNs").and_then(Value::as_u64).unwrap_or(0);
+                            arr.push(json!({ "path": path, "size": size, "birthtimeNs": bt }));
                             self.plan_total += 1;
                         } else if self.plan_truncated.insert(id.to_string()) {
                             log::write_log(
@@ -139,6 +145,78 @@ pub(super) fn cap_backfill_files(files: &[(String, u64)], cap: usize) -> (Vec<Va
         .map(|(p, s)| json!({ "path": p, "size": *s as i64 }))
         .collect();
     (arr, truncated)
+}
+
+/// 跨条目重复计账配对（渲染层汇总去重的唯一数据源）。
+///
+/// 为什么要在主进程算：扫描侧每条 item 各自遍历自己的目标（native-scanner 的 `seen`
+/// 只在单条目内生效），而渲染层的汇总历来是逐条相加。2026-10-22 真机实测：gfx 组
+/// `nvidiaCache`（pathPs 整树）报的 387,378,791 B 与 `nvidiaShaderCache` 清单里落在
+/// 同一目录树下的 157 个文件**逐字节相等** ⇒ 界面显示 976 MB、真实可清 608 MB（虚高 1.6×）。
+///
+/// 口径只有一条：**逐文件按 `paths::path_key` 认领**，第一个认领者留下、后来者按
+/// (先到条目, 后到条目) 记一档重叠字节。2026-10-23 扫描器物化 pathPs 清单
+/// （`get_path_deletable_stats(..., collect_files=true, cap)`）之后整树条目也在场，
+/// 原先「拿父条根前缀反查别人清单」那档近似口径随之退役 —— 它会把子条目的字节整段
+/// 扣给父条，和精确认领同时跑还要双重扣减。
+///
+/// 唯一残余边界：清单被 PLAN_CAP 截断（`filesTruncated`）的条目只按**已列出的部分**
+/// 配对，未列出的重叠看不见 ⇒ 汇总偏大（退回旧行为方向，不会把可清量报小）。
+/// pathPs ↔ pathPs 的字面同根由装载侧登记册（`rules.rs` 的 `ps|` 键）与 Node 门禁
+/// `check-cleanup-rule-contract` 的覆盖台账兜住。
+///
+/// 每个无序对只挂在数组里**后到**的那一条上（`overlapsWith`），渲染层按「两端都在勾选
+/// 集合内」扣一次，所以「只勾父条」时父条照样报满、不虚低。
+fn attach_cross_item_pairs(data: &mut [Value]) -> u64 {
+    let mut first_claim: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut pairs: std::collections::HashMap<(usize, usize), (u64, u64)> = std::collections::HashMap::new();
+
+    for (idx, item) in data.iter().enumerate() {
+        let files = item.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+        // 条目内先按归一键去重：同一文件在同一条目里出现两次不算「跨条目重叠」，
+        // 而且认领表只认一次，否则后一条会被同一文件扣两遍
+        let mut seen_in_item: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in files {
+            let Some(p) = f.get("path").and_then(Value::as_str) else { continue };
+            let size = f.get("size").and_then(Value::as_u64).unwrap_or(0);
+            let k = crate::engine::paths::path_key(p);
+            if !seen_in_item.insert(k.clone()) {
+                continue;
+            }
+            match first_claim.get(&k).copied() {
+                Some(owner) if owner != idx => {
+                    let e = pairs.entry((owner.min(idx), owner.max(idx))).or_default();
+                    e.0 += size;
+                    e.1 += 1;
+                }
+                Some(_) => {}
+                None => {
+                    first_claim.insert(k, idx);
+                }
+            }
+        }
+    }
+
+    let mut inflated = 0u64;
+    // 按 key 排序遍历：pairs 是 HashMap，遍历序不稳定 ⇒ 同尺寸输入必须产出逐字节相同的
+    // data（§5.16「判据与数值表不许两套实现」的反例形态就是「顺序随哈希 seed 漂」）
+    let mut keys: Vec<(usize, usize)> = pairs.keys().copied().collect();
+    keys.sort_unstable();
+    for (a, b) in keys {
+        let (bytes, files) = pairs[&(a, b)];
+        inflated += bytes;
+        let other_id = data[a].get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let entry = json!({ "with": other_id, "bytes": bytes, "files": files });
+        if let Some(obj) = data[b].as_object_mut() {
+            let arr = obj
+                .entry("overlapsWith".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Some(v) = arr.as_array_mut() {
+                v.push(entry);
+            }
+        }
+    }
+    inflated
 }
 
 /// 扫描核心（P2-B 抽取，2026-10-16）：与窗口/快照解耦——读规则 → 原生扫描 → 组装条目数据。
@@ -279,6 +357,16 @@ fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(cats: Vec<Str
                 log::write_log("info", &format!("gameRedist 回填: {}", redist_result.notes.join("; ")));
             }
         }
+    }
+    // 跨条目重复计账配对：同一条目集里两条 item 覆盖到同一批文件时，逐条相加会虚高
+    // （2026-10-22 真机：界面 976 MB、真实可清 607 MB）。配对挂在本轮数据上，
+    // 渲染层的汇总一律按「两端都在勾选集合内」扣一次。
+    let inflated = attach_cross_item_pairs(&mut data);
+    if inflated > 0 {
+        log::write_log(
+            "info",
+            &format!("跨条目重复计账 {inflated} 字节（已在配对里登记，渲染层汇总按配对扣减）"),
+        );
     }
     // v2-L4P-34（C-6）：畸形行不再静默——计数进日志，UI 才能区分「真干净」与「协议被打破」
     if malformed.0 > 0 {
@@ -1390,5 +1478,117 @@ mod tests {
                 "id 键必须在场（空串占位，lockedByItem 记账靠它）: {e}"
             );
         }
+    }
+
+    /// 真机抓出的「整批拒删」（2026-10-22 gfx 15 项扫描-清理）：`@@PLANFILE@@` 的
+    /// `birthtimeNs` 是 UNIX 纳秒（量级 1.79e18），旧形态用 `js_num_or_zero`
+    /// （`Number(x)||0` 的 f64 桥）读它 ⇒ 落地即被量化到 256ns 整倍数 ⇒ 执行侧现读的
+    /// 精确值几乎必然不等 ⇒ 身份证守卫把整批文件判成「与扫描时不一致」拒删
+    /// （实测 459 条基线 454 条被拒，界面报 976 MB、实际只清出 1.7 MB）。
+    /// 判红自证：把 `as_u64` 换回 `js_num_or_zero(..) as i64` ⇒ 第一条断言红。
+    #[test]
+    fn planfile_纳秒出生时间必须整数直读() {
+        // 本机 DXCache 文件的真实出生时间（FILETIME×100 粒度 ⇒ 100 的整倍数），
+        // 不是编的样本：日志里「现状」那一栏与它逐位相同。
+        const EXACT_NS: u64 = 1_792_427_260_192_258_000;
+        // 样本自证：必须落在 JS 双精度的精确整数区之外，否则本用例测不到那个缺陷
+        // （换成 100ns ticks 口径也一样超：6.4e16 > 2^53 ⇒ 任何「纳秒/百分之一微秒」量级都危险）
+        assert!(
+            EXACT_NS > (1u64 << 53),
+            "样本量级不足以暴露双精度折位，本用例会变成恒绿"
+        );
+        let line = format!(
+            "@@PLANFILE@@{{\"id\":\"probe\",\"path\":\"C:\\\\a.bin\",\"size\":65536,\"birthtimeNs\":{EXACT_NS}}}"
+        );
+        let mut a = ScanAccum::default();
+        a.ingest_line(&line);
+        let stored = a
+            .plan
+            .get("probe")
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            stored.get("birthtimeNs").and_then(Value::as_u64),
+            Some(EXACT_NS),
+            "纳秒基线只要被折损一位，身份证守卫就把这个文件判成「已替换」而拒删"
+        );
+        assert_eq!(stored.get("size").and_then(Value::as_u64), Some(65536));
+        // 反向对照：同一个数过一遍 f64 桥必然变形（本用例因此不是恒绿），
+        // 而且变出来的正是本机日志里那条「扫描时」基线。
+        let quantized = (EXACT_NS as f64) as u64;
+        assert_eq!(quantized, 1_792_427_260_192_258_048, "量化结果要与真机日志的失真值对上");
+        assert_ne!(quantized, EXACT_NS, "若两者相等本用例失去意义，须换一个不可精确表示的样本");
+    }
+
+    /// 跨条目重复计账配对（真机 2026-10-22 gfx：`nvidiaCache` 整树报的 387,378,791 B
+    /// 与 `nvidiaShaderCache` 清单里同树的 157 个文件逐字节相等，界面因此虚高 1.6×）。
+    /// 自 2026-10-23 扫描器物化 pathPs 清单后，两侧都在同一张精确认领表里，本用例喂的
+    /// 就是物化后的真实形状（父条也带 files）。
+    /// 判红自证：① 把 `Some(owner) if owner != idx` 改成 `Some(_)` ⇒ 第一条红（重叠整批看不见）；
+    /// ② 把配对同时挂到两端 ⇒ 第二条红；③ 去掉 pairs 的 key 排序 ⇒ 复现断言红（序漂）。
+    #[test]
+    fn 两条覆盖同一批文件时只配一次对() {
+        let build = || vec![
+            // 整树型条目（pathPs）物化后的形状：size 是全量，files 是同一批文件
+            json!({"id":"parent","path":"C:\\Users\\me\\AppData\\Local\\NVIDIA","size":300,
+                   "files":[
+                     {"path":"C:\\Users\\me\\AppData\\Local\\NVIDIA\\DXCache\\a.bin","size":100},
+                     {"path":"C:\\Users\\me\\AppData\\Local\\NVIDIA\\DXCache\\b.bin","size":200}
+                   ]}),
+            json!({"id":"child","path":"C:\\Users\\me\\AppData\\Local\\NVIDIA\\DXCache","size":300,
+                   "files":[
+                     {"path":"C:\\Users\\me\\AppData\\Local\\NVIDIA\\DXCache\\a.bin","size":100},
+                     // 大小写与分隔符混写：必须与上一条归一到同一个键（键不稳就是漏配）
+                     {"path":"c:\\users\\ME\\appdata\\local\\nvidia\\dxcache\\b.bin","size":200}
+                   ]}),
+            // 负例：不与任何清单共享文件 ⇒ 不得被配对
+            json!({"id":"elsewhere","path":"C:\\Users\\me\\AppData\\Local\\D3DSCache","size":7,
+                   "files":[{"path":"C:\\Users\\me\\AppData\\Local\\D3DSCache\\c.bin","size":7}]}),
+        ];
+        let mut data = build();
+        let inflated = attach_cross_item_pairs(&mut data);
+        assert_eq!(inflated, 300, "父条已认领的 300 B 必须在子条上配出来");
+        assert_eq!(
+            data[1].get("overlapsWith").and_then(Value::as_array).map(|a| a.len()),
+            Some(1),
+            "一个无序对只能挂在后到的那一条上"
+        );
+        assert_eq!(data[0].get("overlapsWith"), None, "先到条目不带配对，否则渲染层会扣两次");
+        assert_eq!(data[2].get("overlapsWith"), None, "不重叠的条目不得被配对");
+        assert_eq!(data[1]["overlapsWith"][0]["with"], "parent");
+        assert_eq!(data[1]["overlapsWith"][0]["bytes"], 300);
+        assert_eq!(data[1]["overlapsWith"][0]["files"], 2);
+        // 配对遍历序必须稳定（HashMap 直接遍历会让同输入产出不同 data）
+        let mut again = build();
+        attach_cross_item_pairs(&mut again);
+        assert_eq!(serde_json::to_string(&data).unwrap(), serde_json::to_string(&again).unwrap(), "输出序随哈希 seed 漂即为不可复现");
+    }
+
+    /// 清单被 PLAN_CAP 截断的条目只按**已列出的部分**配对：未列出的重叠看不见，
+    /// 汇总因此偏大（退回旧行为方向）。这条把该残余边界钉成显式断言，不许它变成暗坑。
+    #[test]
+    fn 截断条目只按已列出部分配对() {
+        let mut data = vec![
+            json!({"id":"parent","size":300,"filesTruncated":true,
+                   "files":[{"path":"C:\\x\\a.bin","size":100}]}),
+            json!({"id":"child","size":300,
+                   "files":[{"path":"C:\\x\\a.bin","size":100},{"path":"C:\\x\\b.bin","size":200}]}),
+        ];
+        let inflated = attach_cross_item_pairs(&mut data);
+        assert_eq!(inflated, 100, "父条没列出的 b.bin 不该被凭空扣掉");
+        assert_eq!(data[1]["overlapsWith"][0]["files"], 1);
+    }
+
+    /// 同条目内部重复不得计成跨条目重叠（认领表按归一键只认一次）。
+    #[test]
+    fn 两条清单共享同一文件时配到后条() {
+        let mut data = vec![
+            json!({"id":"a","files":[{"path":"C:\\x\\share.log","size":42},{"path":"C:\\x\\own.log","size":8}]}),
+            json!({"id":"b","files":[{"path":"c:\\X\\SHARE.LOG","size":42},{"path":"C:\\x\\share.log","size":42}]}),
+        ];
+        assert_eq!(attach_cross_item_pairs(&mut data), 42, "同条目内重复不得计成跨条目重叠");
+        assert_eq!(data[1]["overlapsWith"][0]["with"], "a");
+        assert_eq!(data[1]["overlapsWith"][0]["files"], 1, "b 里两条指向同一文件，只算一次重叠");
     }
 }
