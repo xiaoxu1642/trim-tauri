@@ -1870,9 +1870,9 @@
             },
             {
               "id": "microsoftEdgeAutoplayPreferences",
-              "name": "Microsoft Edge 媒体兴趣预载缓存",
+              "name": "Microsoft Edge 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "名字里的 Autoplay 沿用上游规则库的旧叫法，实际落点是 User Data\\MEIPreload（媒体兴趣预载数据）。删后浏览器会后台重新拉取，不改你的媒体自动播放权限设置与登录状态。",
+              "ifDeleted": "删的是 Edge 的 MEIPreload 组件数据——媒体互动指数（MEI）预载名单，浏览器靠它决定哪些站点默认允许有声自动播放。名单重新拉取前，这些站点会退回「手动点一次才播」；离线时要等下次联网更新才回来。",
               "evidence": "WinApp2 规则库「Microsoft Edge Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "system",
@@ -6584,9 +6584,9 @@
             },
             {
               "id": "360SecureBrowserAutoplayPreferences",
-              "name": "360 Secure Browser 媒体兴趣预载缓存",
+              "name": "360 Secure Browser 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "沿用上游的 Autoplay 叫法，实际落点是 360 安全浏览器的 User Data\\MEIPreload（媒体兴趣预载数据）。删后浏览器会自行重新拉取，不动你的自动播放权限设置。",
+              "ifDeleted": "删的是 360 安全浏览器 User Data\\MEIPreload 里的媒体互动指数预载名单（决定哪些站点默认可有声自动播放）。重新拉取前那些站点需手动点一次播放；书签、登录与手动设过的站点权限都不在这批目标里。",
               "evidence": "WinApp2 规则库「360 Secure Browser Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -6670,9 +6670,9 @@
             },
             {
               "id": "braveAutoplayPreferences",
-              "name": "Brave 媒体兴趣预载缓存",
+              "name": "Brave 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "删的是 Brave 的 MEIPreload 预载数据，不是自动播放权限设置。浏览器会重新拉取，期间媒体类页面依赖旧预载数据的部分要重新预热，登录与扩展不受影响。",
+              "ifDeleted": "删的是 Brave 的 MEIPreload 预载名单（媒体互动指数数据，用于放行常见媒体站点的有声自动播放）。名单没重新拉回来之前，那些站点会退回需要手动播放一次；Brave Shields 与扩展设置不受影响。",
               "evidence": "WinApp2 规则库「Brave Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -6756,9 +6756,9 @@
             },
             {
               "id": "braveOriginAutoplayPreferences",
-              "name": "Brave Origin 媒体兴趣预载缓存",
+              "name": "Brave Origin 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "删的是这份独立配置（Brave-Origin）下的 MEIPreload 媒体兴趣预载数据，不是自动播放设置。该实例会重新拉取，正式版 Brave 的同类数据不在这批目标里。",
+              "ifDeleted": "删的是这份独立配置（Brave-Origin）自己的 MEIPreload 预载名单，与上面那条正式版 Brave 各存一份。重新拉取前该实例里的媒体站点需要手动播放；正式版的数据不在这批目标里。",
               "evidence": "WinApp2 规则库「Brave Origin Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -6842,9 +6842,9 @@
             },
             {
               "id": "chromiumAutoplayPreferences",
-              "name": "Chromium 媒体兴趣预载缓存",
+              "name": "Chromium 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "落点是 Chromium 的 User Data\\MEIPreload，名为 Autoplay 但内容与自动播放权限无关。删后由浏览器重新拉取，不影响书签、扩展与已保存的密码。",
+              "ifDeleted": "删的是 Chromium 的 MEIPreload 组件数据：媒体互动指数预载名单，决定哪些站点默认允许有声自动播放。名单重新拉取前，这些站点要手动点一次才播；离线环境下会一直等到下次联网更新。",
               "evidence": "WinApp2 规则库「Chromium Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -6928,9 +6928,9 @@
             },
             {
               "id": "googleChromeAutoplayPreferences",
-              "name": "Google Chrome 媒体兴趣预载缓存",
+              "name": "Google Chrome 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "实际落点是 Chrome 各版本目录下的 MEIPreload（媒体兴趣预载数据），与「自动播放」设置无关。删后浏览器后台重新拉取，你的站点权限设置不受影响。",
+              "ifDeleted": "删的是 Chrome 的 MEIPreload（媒体互动指数预载名单）。Chrome 靠它判断哪些站点可以默认有声自动播放：名单重新拉取前，视频站会退回「必须手动点一次」；你自己的 MEI 记录与站点权限设置在别处，不随这批删掉。",
               "evidence": "WinApp2 规则库「Google Chrome Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -7014,9 +7014,9 @@
             },
             {
               "id": "maxthonAutoplayPreferences",
-              "name": "Maxthon 媒体兴趣预载缓存",
+              "name": "Maxthon 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "删的是傲游 User Data\\MEIPreload 的媒体兴趣预载数据，名为 Autoplay 但与自动播放权限无关；浏览器会自行重建，账号与书签不受影响。",
+              "ifDeleted": "删的是傲游的 MEIPreload 预载名单（媒体互动指数数据，用于放行常见媒体站点自动播放）。重新拉取前那些站点需要手动播放一次；账号同步与书签本体不在这批目标里。",
               "evidence": "WinApp2 规则库「Maxthon Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -7057,9 +7057,9 @@
             },
             {
               "id": "qqbrowserAutoplayPreferences",
-              "name": "QQBrowser 媒体兴趣预载缓存",
+              "name": "QQBrowser 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "删的是 QQ 浏览器的 User Data\\MEIPreload 预载数据，不是自动播放设置。重新拉取前的这段时间里，媒体类页面的兴趣判定会退回默认行为。",
+              "ifDeleted": "删的是 QQ 浏览器 User Data\\MEIPreload 里的媒体互动指数预载名单。名单没回来之前，视频类站点会退回需要手动点一次播放；这段时间是联网后随组件更新自动恢复，不是永久失效。",
               "evidence": "WinApp2 规则库「QQBrowser Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -7186,9 +7186,9 @@
             },
             {
               "id": "thoriumAutoplayPreferences",
-              "name": "Thorium 媒体兴趣预载缓存",
+              "name": "Thorium 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "删的是 Thorium 的 MEIPreload 媒体兴趣预载数据，名为 Autoplay 与实际内容无关；浏览器会重新拉取，你的站点权限与登录状态不动。",
+              "ifDeleted": "删的是 Thorium 的 MEIPreload 预载名单（媒体互动指数数据，决定哪些站点默认可有声自动播放）。重新拉取前那些站点要手动播放；扩展、书签与下载记录都不在这批目标里。",
               "evidence": "WinApp2 规则库「Thorium Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -7272,9 +7272,9 @@
             },
             {
               "id": "vivaldiAutoplayPreferences",
-              "name": "Vivaldi 媒体兴趣预载缓存",
+              "name": "Vivaldi 自动播放预载名单",
               "risk": "medium",
-              "ifDeleted": "删的是 Vivaldi 的 User Data\\MEIPreload 预载数据，不是自动播放偏好设置；Vivaldi 会自行重建，工作区、笔记与书签都不在这批目标里。",
+              "ifDeleted": "删的是 Vivaldi 的 MEIPreload 预载名单：媒体互动指数数据，用于放行常见媒体站点的有声自动播放。名单重新拉取前那些站点需手动点一次；工作区、笔记与书签本体都不受影响。",
               "evidence": "WinApp2 规则库「Vivaldi Autoplay Preferences *」登记的缓存目标（1 个路径）",
               "recommended": false,
               "domain": "browser",
@@ -8271,6 +8271,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "rR7j6F+yADQ6vh0+TXPEwFGHJxGGD3uN67fF3Oahw/Rtx7+yPc5wmdlJB8A9RuVKlrJFvSOPTWU27McD6+U2CA=="
+    "sig": "/m/ehznjHHs/kWtcx0nPtBV675iaksyEojZRtpKeJC4VTbkEtfnZNrlB7D9y1xF0Kcg+FCzpTmRZ7ZqUw1DnBw=="
   }
 }
