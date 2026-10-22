@@ -127,6 +127,10 @@ const RETIRED = {
  * 「map 独有」判红；通道摘除后此处的残留条目同样判红（防豁免清单腐化）。
  */
 const TAURI_ADDED = {
+  // CDP 远程调试开关（2026-10-22 用户点名）：上游 Electron 轨的调试口是主进程自己的
+  // `--inspect`/webPreferences，渲染层从来没有「查询/设置远程调试」这类通道，故在此登记。
+  'settings:cdp-state': '2026-10-22（目检会话）：读 CDP 远程调试三态——本进程是否真暴露端口 / 下次启动的意图 / 是否需要重启。WebView2 的 --remote-debugging-port 只能在浏览器进程创建前定下，运行中改不了，所以不能只回一个布尔（主窗档）',
+  'settings:cdp-set': '2026-10-22（目检会话）：写 CDP 手动档偏好（dev 默认开、正式默认关，用户可覆盖）。只改「下次启动的意图」，回执如实带 requiresRestart；偏好落独立明文小文件而非 settings.json，因为读取点在 Builder 之前、不能等解密链（主窗档）',
   // F4a2-M01（P1-W3 Phase2d）：外观域真源从 localStorage 迁到后端 appearance.json 的读回/写入通道。
   // 刻意**不**复用 settings:set-pref：那条的值闸是「必须是布尔」，外观键是颜色串 / 数值 / 开关的
   // 混合形状，靠一条布尔闸要么放宽它（等于拆掉「不能借体积闸灌任意形状」）、要么塞不进。

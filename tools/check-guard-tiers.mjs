@@ -152,6 +152,10 @@ const MUST_MAIN = [
   'residue_open_window',
   'runtimes_install',
   // 'settings_save' 已于 v2-F4 整链摘除（2026-09-26），不再是一条命令
+  // CDP 远程调试开关：消费方只有主窗「系统信息」弹窗（index.html 的 info-row），
+  // 三个子窗与残留/进程副窗都没有调用点 ⇒ 不给 readonly（AGENTS §3「谁真的需要调它」）。
+  'settings_cdp_state',
+  'settings_cdp_set',
   'startup_add',
   'startup_delete',
   'startup_open_source', // B-6 增强：定位登记来源（写 HKCU regedit LastKey + 拉起 regedit/explorer；主窗档）

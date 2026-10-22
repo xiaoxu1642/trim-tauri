@@ -1088,6 +1088,129 @@ pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Valu
 // 让「注册 = 已覆盖」的错觉继续存在（v2-M15 的 D4 门禁正是为此而加）。
 // 若将来真要开 AI 简介配置页，正确做法是给 models 域加字段，而不是复活本通道。
 
+// ==================== CDP 远程调试开关（2026-10-22 目检会话 · 用户点名） ====================
+//
+// 为什么必须有它：这一轮的渲染层取证全靠 CDP（读 CSSOM 实测值、注入焦点采样器）。
+// 原先只有开发者自己在命令行挂 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 才有调试端口，
+// 于是「目检」只能靠肉眼看截图，很多判据（行高实际生效值、焦点轨迹）根本拿不到硬证据。
+//
+// # 为什么开关不能即时生效（界面上必须写「需重启」）
+//
+// WebView2 的 `--remote-debugging-port` 是**浏览器进程创建参数**：进程一起来就定死了，
+// 运行中既打不开也关不掉。所以本开关改的是「下次启动的意图」，界面同时显示
+// `activeNow`（当前进程真开着没）与 `wantOnNextStart`（下次会怎样），两者不一致时
+// `requiresRestart=true`——把这两态合成一态显示，就是在骗用户「已经开了」。
+//
+// # 为什么偏好不走 settings.json
+//
+// 时序，不是保密性：端口必须在 `run()` 顶部、`tauri::Builder` 之前定下，而 settings.json
+// 的读取挂在解密链之后（`protect::configure_from_app` 在 setup 里）。在 Builder 之前去读它，
+// 等于把「数据根 OnceLock 何时定死」提前到旧目录迁移之前。这个文件只有一个布尔，
+// 明文、可直接删，删掉就回默认档。
+
+/// WebView2 远程调试端口。**固定端口**是刻意的：验证侧要能不问自答地连上；
+/// 端口随机就得先从日志里捞端口，而正式环境的用户没有看日志的习惯。
+pub const CDP_PORT: u16 = 9222;
+
+/// 当前进程是否**真的**暴露着 CDP 端口（启动期定下，运行中不再变）。
+static CDP_ACTIVE_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 环境变量名：与 `lib.rs::with_browser_args` 的读取侧互为契约（那边负责把 wry 默认串拼回来，
+/// `additional_browser_args` 是替换不是追加）。改一侧必须同步另一侧。
+const CDP_ENV_KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+
+fn cdp_pref_path() -> std::path::PathBuf {
+    paths::app_data_dir().join("cdp-preference.json")
+}
+
+/// 读手动档偏好：`None` = 从没设过（走默认档），`Some(b)` = 用户显式选过。
+/// 读不到 / 不是对象 / 字段不是布尔一律当「没设过」——这是**降级**不是损坏，
+/// 因为默认档本身就是安全答案（正式环境关）。
+fn read_cdp_pref() -> Option<bool> {
+    let raw = std::fs::read_to_string(cdp_pref_path()).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    v.get("enabled")?.as_bool()
+}
+
+/// 生效意图：dev 构建默认开、正式构建默认关；用户显式设过则以用户为准。
+fn cdp_effective_want() -> bool {
+    read_cdp_pref().unwrap_or(cfg!(debug_assertions))
+}
+
+/// 启动期应用一次，**必须在 `tauri::Builder` 之前调用**（见模块注释）。
+///
+/// 外部已经设过该环境变量时**不覆盖**：`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=... cargo tauri dev`
+/// 是既有工作流，覆盖会把别人的调试现场弄没；此时只据其内容记录生效态。
+pub fn apply_cdp_debug_env_at_startup() {
+    use std::sync::atomic::Ordering;
+    if let Ok(existing) = std::env::var(CDP_ENV_KEY) {
+        if !existing.trim().is_empty() {
+            CDP_ACTIVE_NOW.store(existing.contains("remote-debugging-port"), Ordering::SeqCst);
+            return;
+        }
+    }
+    if cdp_effective_want() {
+        std::env::set_var(CDP_ENV_KEY, format!("--remote-debugging-port={CDP_PORT}"));
+        CDP_ACTIVE_NOW.store(true, Ordering::SeqCst);
+    } else {
+        CDP_ACTIVE_NOW.store(false, Ordering::SeqCst);
+    }
+}
+
+/// settings:cdp-state —— 三态回执（当前生效 / 下次启动意图 / 是否需要重启）。
+/// 主窗专属：只有系统信息弹窗会读它。
+#[tauri::command]
+pub fn settings_cdp_state<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    use std::sync::atomic::Ordering;
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let active = CDP_ACTIVE_NOW.load(Ordering::SeqCst);
+    let want = cdp_effective_want();
+    json!({
+        "success": true,
+        "activeNow": active,
+        "wantOnNextStart": want,
+        "requiresRestart": active != want,
+        "port": CDP_PORT,
+        "devBuild": cfg!(debug_assertions),
+        "manuallySet": read_cdp_pref().is_some(),
+    })
+}
+
+/// settings:cdp-set —— 写手动档偏好。**只改下次启动的意图**，回执里如实带上当前态与重启要求。
+#[tauri::command]
+pub async fn settings_cdp_set<R: tauri::Runtime>(window: WebviewWindow<R>, enabled: bool) -> Value {
+    use std::sync::atomic::Ordering;
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    let active = CDP_ACTIVE_NOW.load(Ordering::SeqCst);
+    let payload = json!({
+        "enabled": enabled,
+        "_comment": "CDP 远程调试手动档。删除本文件即回默认档（dev 开 / 正式关）。端口固定 9222，改动需重启。",
+    });
+    if let Err(e) = security::atomic_write_json(&cdp_pref_path(), &payload) {
+        return json!({ "success": false, "message": format!("写入 CDP 偏好失败：{e}") });
+    }
+    crate::engine::log::write_log(
+        "info",
+        &format!("CDP 远程调试偏好已设为 {enabled}（当前进程 activeNow={active}，需重启才一致）"),
+    );
+    json!({
+        "success": true,
+        "activeNow": active,
+        "wantOnNextStart": enabled,
+        "requiresRestart": true,
+        "port": CDP_PORT,
+        "message": if active == enabled {
+            "已记录；当前进程的状态与之一致"
+        } else {
+            "已记录，但本进程的调试端口无法在运行中改变——重启 Trim 后生效"
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests_private_url {
     //! 审查 K1 回归断言：字面量归一化后必须落进私有判定。这些形式过去全部判「公网」放行，

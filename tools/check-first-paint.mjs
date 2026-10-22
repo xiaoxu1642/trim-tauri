@@ -35,6 +35,8 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 
 // ---- 预算（现算于 2026-10-15，v5 P1 编辑器 + P2 四项落地后）----
 // 沿革：v5 P0 增补 9 条 syspanel 桥接后为 701,385 B，上限 702,000 B（贴值留余）。
+// 沿革：2026-10-22 系统信息弹窗加「远程调试 (CDP)」一行（index.html 一行 + main.css 一条
+//   + app.js 三态函数 + tauri-api.js 两条通道），实测 729,250 B ⇒ 上限 725,000 → 730,000。
 // v5 P1 编辑器按 P0 交接文档预告明确重审（702,000 → 710,000）：主增量是 main-pages.css
 // 的编辑器面板样式（数千字节量级，已并入既有文件并压缩）。
 // v5 P2 同日第三笔（710,000 → 712,000 → 712,500）：用户点名的四项功能（搜索框 / 各方案
@@ -68,7 +70,7 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 // U-A3 可达性（aria-live 宿主 / 焦点环 / 灯箱 alt+caption）约一千五百字节量级——合计 724,117 B。
 // 720,500 → 725,000（贴值留余 ~880 B）。两项都经过 review；结构性建议不变：
 // main-pages.css 仍全量随首屏，后续新增应优先按页拆进按需清单，而非反复上调。
-const CAP_MAX = 725_000;
+const CAP_MAX = 730_000;
 const CAP_MIN = 400_000;
 // 豁免清单：允许不带 defer 的脚本（必须尽早执行，加 defer 反而破坏语义）
 const EXEMPT_NOT_DEFER = ['scripts/theme-boot.js'];

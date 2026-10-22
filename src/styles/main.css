@@ -1865,6 +1865,8 @@ select.field-input { cursor: pointer; appearance: auto; }
   border-bottom: 1px solid var(--border-default);
 }
 .info-row:last-child { border-bottom: none; }
+/* CDP 行：状态文字与开关并排，沿用 info-row 右列排版（间距与 .splash-progress 同档固定 px） */
+.info-cdp-cell { display: inline-flex; align-items: center; gap: 10px; }
 .info-row span:first-child {
   color: var(--fg-tertiary);
 }

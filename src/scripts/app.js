@@ -761,6 +761,7 @@
       setInfo('infoMica', '未启用');
       setInfo('infoUser', '本地用户');
       setInfo('infoAdmin', '否');
+      refreshCdpRow();
       return;
     }
     try {
@@ -786,6 +787,7 @@
       setInfo('infoAdmin', info.isAdmin ? '是 ✓' : '否 ✗');
       // 全局记录管理员状态（供清理失败时建议提权）
       appState.isAdmin = !!info.isAdmin;
+      refreshCdpRow();
     } catch (e) {
       console.error('加载应用信息失败:', e);
     }
@@ -794,6 +796,60 @@
   function setInfo(id, value) {
     const el = document.getElementById(id);
     if (el) el.textContent = value;
+  }
+
+  // ---------- CDP 远程调试行（2026-10-22 用户点名） ----------
+  // 三态分开显示是刻意的：`activeNow`（本进程是否真开着端口）与 `wantOnNextStart`（下次启动会怎样）
+  // 不一致时，界面只写「已开启」就是骗人——WebView2 的调试端口只能在浏览器进程创建前定下。
+  // 本行 DOM 会被 overview.js 整体搬进「系统信息」弹窗，所以弹窗与设置页共用同一份状态。
+  async function refreshCdpRow() {
+    const stateEl = document.getElementById('infoCdpState');
+    const toggle = document.getElementById('cdpToggle');
+    if (!stateEl || !toggle) return;
+    if (!toggle.dataset.cdpBound) {
+      toggle.dataset.cdpBound = '1';
+      toggle.addEventListener('change', onCdpToggleChange);
+    }
+    if (!window.api?.settings?.cdpState) {
+      stateEl.textContent = '不可用（适配层未加载）';
+      toggle.disabled = true;
+      return;
+    }
+    let resp = null;
+    try { resp = await window.api.settings.cdpState(); } catch (e) { resp = null; }
+    if (!resp || !resp.success) {
+      stateEl.textContent = '读取失败';
+      toggle.disabled = true;
+      return;
+    }
+    toggle.checked = !!resp.wantOnNextStart;
+    toggle.disabled = false;
+    const port = resp.port || 9222;
+    stateEl.textContent = resp.activeNow
+      ? (resp.requiresRestart ? `本进程已开 :${port} · 下次将关闭 · 需重启` : `已开启 :${port}`)
+      : (resp.wantOnNextStart ? `未生效 · 下次启动开 :${port} · 需重启` : '已关闭');
+  }
+
+  async function onCdpToggleChange() {
+    const toggle = document.getElementById('cdpToggle');
+    if (!toggle) return;
+    const want = !!toggle.checked;
+    if (!window.api?.settings?.cdpSet) {
+      window.app?.toast?.('error', 'CDP 开关不可用（适配层未加载）');
+      await refreshCdpRow();
+      return;
+    }
+    let resp = null;
+    try { resp = await window.api.settings.cdpSet(want); } catch (e) { resp = null; }
+    if (!resp || !resp.success) {
+      window.app?.toast?.('error', (resp && resp.message) || 'CDP 开关设置失败');
+      // 写失败必须回滚界面：留一个和后端不一致的开关，比不显示更糟
+      await refreshCdpRow();
+      return;
+    }
+    window.app?.toast?.(resp.activeNow === want ? 'success' : 'warning',
+      resp.message || '已记录，重启 Trim 后生效');
+    await refreshCdpRow();
   }
 
   // 关闭流程（v2.7.0）：编排已全部移交主进程 —— 点击 X → 窗口立即隐藏，断开连接/清理临时文件/保存日志

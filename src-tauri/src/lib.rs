@@ -530,6 +530,8 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         // v4 P2-13：UI 偏好键的后端真源（渲染层 localStorage 只是镜像；见 settings.rs）
         commands::settings::settings_get_prefs,
         commands::settings::settings_set_pref,
+        commands::settings::settings_cdp_state,
+        commands::settings::settings_cdp_set,
         commands::models::models_save,
         commands::models::models_set_scope,
         commands::models::models_test,
@@ -650,6 +652,12 @@ fn grant_asset_scope_on_data_dirs<R: Runtime>(app: &AppHandle<R>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ---------- CDP 远程调试参数：必须早于 Builder ----------
+    // WebView2 的 `--remote-debugging-port` 是浏览器进程创建参数，Builder 一旦走起来就再也改不了
+    // （dev 默认开、正式默认关但用户可手动开，见 commands::settings 的 CDP 段注释）。
+    // 放在提权握手之前是有意的：那一串逻辑可能直接 exit(0)，届时端口参数已经定下、不影响任何判定。
+    commands::settings::apply_cdp_debug_env_at_startup();
+
     // ---------- 提权接管握手：必须早于任何建窗 ----------
     // 带旗标的实例一律**不注册**单实例插件：实测 tauri-plugin-single-instance 2.4.5 的
     // Windows 实现里，第二实例发现 mutex 已存在时发完 WM_COPYDATA 就无条件

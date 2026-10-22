@@ -1460,6 +1460,21 @@
               <div class="info-row"><span>Mica 背景</span><span id="infoMica">--</span></div>
               <div class="info-row"><span>用户</span><span id="infoUser">--</span></div>
               <div class="info-row"><span>管理员权限</span><span id="infoAdmin">--</span></div>
+              <!-- CDP 远程调试（2026-10-22 用户点名）。开关改的是**下次启动的意图**：
+                   WebView2 的 --remote-debugging-port 只能在浏览器进程创建前定下，运行中既开不了
+                   也关不掉，所以右侧必须同时显示「当前是否真开着」，两态不一致时明写需重启
+                   ——把两态合成一态显示就是骗用户。默认档由构建决定（dev 开 / 正式关）。
+                   本块 DOM 会被 overview.js 整体搬进「系统信息」弹窗，故弹窗与设置页共用这一行。 -->
+              <div class="info-row">
+                <span>远程调试 (CDP)</span>
+                <span class="info-cdp-cell">
+                  <span id="infoCdpState">--</span>
+                  <label class="toggle-switch" for="cdpToggle" data-tip="开启后，下次启动 Trim 会在 127.0.0.1:9222 暴露 WebView2 调试端口（仅本机回环）。改动需重启生效；开发版默认开启，正式版默认关闭。">
+                    <input type="checkbox" id="cdpToggle" />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  </label>
+                </span>
+              </div>
             </div>
           </div>
         </div>
