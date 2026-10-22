@@ -284,8 +284,28 @@
 
   function escapeHtml(s) { return window.ds.esc(s); }
 
+  // 跨条目重复计账扣减（唯一口径，所有汇总走它）。后端把「两条 item 覆盖到同一批文件」
+  // 配成无序对挂在后到的一条上（overlapsWith）；只有**两端都在本次求和集合内**才扣，
+  // 所以只勾父条时父条照报满、不会为去重而虚低。
+  // 真机依据（2026-10-22 gfx 15 项）：nvidiaCache 整树报的 387,378,791 B 与
+  // nvidiaShaderCache 清单里同树的 162 个文件逐字节相等，逐条相加虚高到 1.61×
+  //（界面 976 MB、真实可清 607 MB）。
+  // 已知边界：配对只覆盖**本次扫描范围内的条目**——只重扫子集会丢掉跨批次的配对，
+  // 那一档退回相加口径（只会偏大、回到旧行为，不会把可清量报小）。全量扫描后即为准确值。
+  function dedupSize(ids) {
+    const set = ids instanceof Set ? ids : new Set(ids);
+    let total = 0;
+    for (const id of set) total += sizeNumber(scanResults.get(id)?.size);
+    for (const id of set) {
+      for (const o of (scanResults.get(id)?.overlapsWith) || []) {
+        if (set.has(o.with)) total -= sizeNumber(o.bytes);
+      }
+    }
+    return total > 0 ? total : 0;
+  }
+
   function groupTotalSize(items) {
-    return items.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
+    return dedupSize(items.map((i) => i.id));
   }
 
   function toggleCollapsible(group, content, key) {
@@ -747,9 +767,9 @@
         const line1 = metaEl && metaEl.querySelector(`[data-sub-meta-line1="${sg.id}"]`);
         const line2 = metaEl && metaEl.querySelector(`[data-sub-meta-line2="${sg.id}"]`);
         if (line1 && line2) { // 双行结构由 renderSubGroup 渲染，缺失则跳过本条刷新
-          const sgAllSize = sgItems.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
+          const sgAllSize = dedupSize(sgItems.map(i => i.id));
           const sgSelected = sgItems.filter(i => selectedIds.has(i.id));
-          const selSize = sgSelected.reduce((s, i) => s + sizeNumber(scanResults.get(i.id)?.size), 0);
+          const selSize = dedupSize(sgSelected.map(i => i.id));
           if (sgSelected.length > 0) {
             line1.textContent = selSize > 0
               ? `${sgSelected.length}/${sgItems.length} 项 · 已选 ${formatSize(selSize)}`
@@ -762,10 +782,8 @@
       }
     }
 
-    // 总览
-    const totalSize = Array.from(selectedIds)
-      .map(id => sizeNumber(scanResults.get(id)?.size))
-      .reduce((a, b) => a + b, 0);
+    // 总览（去重后口径：跨条目重叠只算一次）
+    const totalSize = dedupSize(selectedIds);
     const totalEl = document.getElementById('totalSize');
     const countEl = document.getElementById('selectedCount');
     if (totalEl) totalEl.textContent = formatSize(totalSize);
@@ -1145,7 +1163,7 @@
       // 重新渲染带 size
       renderCategoryList();
       updateUI();
-      const total = Array.from(scanResults.values()).reduce((s, r) => s + sizeNumber(r.size), 0);
+      const total = dedupSize(Array.from(scanResults.keys()));
       window.app?.toast('success', isFullScan
         ? `扫描完成，共发现 ${formatSize(total)} 可清理空间`
         : `扫描完成，已刷新所选 ${scopeIds.length} 项`);
@@ -1156,6 +1174,10 @@
     } finally {
       isScanning = false;
       if (btnScan) btnScan.disabled = false;
+      // 复位标志后必须再刷一次按钮态：try 尾部那次 updateUI 跑在 isScanning 仍为 true 时，
+      // 而 #btnClean 的禁用判据里带着这个标志 ⇒ 扫描完成后「开始清理」一直停在禁用，
+      // 用户要再动一次勾选才点得动（2026-10-22 真机 CDP 实测，扫完 8 分钟仍 disabled=true）。
+      updateUI();
       // 审查 L14：模拟进度的定时器要在 finally 里关掉。Tauri 下 streaming 恒真、这段不执行，
       // 但它是「扫完还在跑的 200ms 定时器」这种泄漏的现成形状，别留给下一次。
       if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
@@ -1661,10 +1683,11 @@
           details: [...(regularResult.details || []), ...fcDetails, ...rcDetails]
         };
       } else {
-        // 预览模式：模拟清理
+        // 预览模式：模拟清理（汇总同样走 dedupSize —— 模拟回执也不该比真实可清量虚高，
+        // 否则「预览看着对、真机数字两套」正是本仓反复钉的口径分叉）
         await new Promise(r => setTimeout(r, 2000));
         result = {
-          totalFreed: allItems.reduce((s, i) => s + sizeNumber(i.size), 0),
+          totalFreed: dedupSize(allItems.map(i => i.id)),
           success: allItems.length,
           failed: 0,
           skipped: 0,

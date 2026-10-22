@@ -272,15 +272,26 @@
   }
 
   // 首帧空闲后预取的非关键脚本清单见上方 IDLE_SCRIPTS。
+  // 取数并发、init 按数组序：原先每条脚本各自挂 .then，init 的执行序跟的是**完成序**，
+  // 而上面 IDLE_SCRIPTS 的注释声称「家族内先后就是依赖序」——那条约束从来没被强制过，
+  // 外观层晚完成一步，pathbinding 的 init 就读 window.pathbindingAppearance.load() 当场抛。
   function scheduleIdleLoads() {
     const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1000));
-    idle(() => { IDLE_SCRIPTS.forEach((src) => loadScript(src).then((ok) => {
-      if (ok) initModuleOf(src);
-      else window.app?.log?.('warn', '空闲脚本加载失败（未占 init 台账，下次进页重试） ' + src);
-    }).catch((e) => {
-      // NEW-4（L3 2026-10-01）：空闲预取脚本加载失败必须留痕——模块不 init 且无声 = 「功能消失」无从排查
-      window.app?.log?.('warn', '空闲脚本加载失败 ' + src + ': ' + ((e && e.message) || e));
-    })); });
+    idle(() => {
+      const loads = IDLE_SCRIPTS.map((src) => ({ src, p: loadScript(src) }));
+      (async () => {
+        for (const { src, p } of loads) {
+          let ok = false;
+          try { ok = await p; } catch (e) {
+            // NEW-4（L3 2026-01）：空闲预取脚本加载失败必须留痕——模块不 init 且无声 = 「功能消失」无从排查
+            window.app?.log?.('warn', '空闲脚本加载失败 ' + src + ': ' + ((e && e.message) || e));
+            continue;
+          }
+          if (ok) initModuleOf(src);
+          else window.app?.log?.('warn', '空闲脚本加载失败（未占 init 台账，下次进页重试） ' + src);
+        }
+      })();
+    });
   }
 
   // 路由
