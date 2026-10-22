@@ -1340,23 +1340,26 @@
                 <div class="appearance-merge-grid">
                   <div class="appearance-merge-col">
                     <div class="material-grid">
+                      <!-- 色板底色一律由 main.css 的 .material-card[data-material] 规则给：
+                           内联 style 优先级更高，会把那批渐变压成纯色块（曾实际发生，CDP 实测
+                           computed background-image: none）。要改观感只改 CSS，不要在这里补底色。 -->
                       <div class="material-card" data-material="mica">
-                        <span class="material-swatch" style="background:#F3F3F3"></span>
+                        <span class="material-swatch"></span>
                         <span class="material-name">Mica</span>
                         <span class="material-desc">柔和云母</span>
                       </div>
                       <div class="material-card" data-material="mica-alt">
-                        <span class="material-swatch" style="background:#E9E9E9"></span>
+                        <span class="material-swatch"></span>
                         <span class="material-name">Mica Alt</span>
                         <span class="material-desc">层次云母</span>
                       </div>
                       <div class="material-card" data-material="acrylic">
-                        <span class="material-swatch" style="background:#D6D6D6"></span>
+                        <span class="material-swatch"></span>
                         <span class="material-name">亚克力</span>
                         <span class="material-desc">磨砂玻璃</span>
                       </div>
                       <div class="material-card" data-material="thin-acrylic">
-                        <span class="material-swatch" style="background:#3A3A3A"></span>
+                        <span class="material-swatch"></span>
                         <span class="material-name">细亚克力</span>
                         <span class="material-desc">更透亮的磨砂</span>
                       </div>
