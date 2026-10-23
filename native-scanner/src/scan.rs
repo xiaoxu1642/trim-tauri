@@ -2325,6 +2325,16 @@ fn star_match(pattern: &str, seg: &str) -> bool {
     pi == pb.len()
 }
 
+/// `child` 是否等于 `base` 或位于其下（按段边界；`C:\WindowsApps` 不是 `C:\Windows`
+/// 的子树）。2026-10-23 扫描提速：此前每个保护根都比一次 `format!("{base}\\")`，
+/// 一次扫描按「文件数 × 根数」分配临时串；改成字节边界判定后零分配、语义不变。
+fn is_same_or_under(child: &str, base: &str) -> bool {
+    child == base
+        || (child.len() > base.len()
+            && child.as_bytes()[base.len()] == b'\\'
+            && child.as_bytes().starts_with(base.as_bytes()))
+}
+
 /// P1-05：凭据文件名默认清单，与 JS 权威 NEVER_NAMES / 主侧 engine::protect 同源。
 fn default_never_names() -> Vec<String> {
     [
@@ -2435,10 +2445,20 @@ struct ProtectCache {
     roots: ProtectRoots,
 }
 
-static PROTECT_CACHE: Mutex<Option<ProtectCache>> = Mutex::new(None);
+static PROTECT_CACHE: std::sync::RwLock<Option<ProtectCache>> = std::sync::RwLock::new(None);
 
+/// 读侧必须允许并行：2026-10-23 起扫描器按目录并行做逐文件保护判定，`Mutex`
+/// 会把并行探针重新串成一条锁队列（等于没并行）。写侧只在注入文本变化时发生。
 fn with_protect_roots<T>(protect_json: Option<&str>, f: impl FnOnce(&ProtectRoots) -> T) -> T {
-    let mut g = PROTECT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let g = PROTECT_CACHE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = g.as_ref() {
+            if c.key.as_deref() == protect_json {
+                return f(&c.roots);
+            }
+        }
+    }
+    let mut g = PROTECT_CACHE.write().unwrap_or_else(|e| e.into_inner());
     let need_rebuild = match g.as_ref() {
         Some(c) => c.key.as_deref() != protect_json,
         None => true,
@@ -2480,10 +2500,18 @@ pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
     // 无短名组件时它对归一化结果是恒等，却要每候选文件付一次 syscall 与千字节级
     // 缓冲分配。与 cleanup_scan 枚举出口的前置短路同用一份判据（contains_short_name）；
     // 保守方向一致：判据 true ⇒ 照常展开，只会多付一次、不会漏展开。
-    let expanded: String = if Path::new(p).is_absolute() && !crate::contains_short_name(p) {
+    let expanded: String = if Path::new(p).is_absolute() && !crate::util::has_short_name_component(p) {
         p.to_string()
     } else {
-        to_long_path(p)
+        // 触盘判短名：`expand_short_path` 是主工程与扫描器共用的唯一实现（N6）——
+        // 「整条展开成功即采信」，结果与输入相同 = 波浪号是字面名而不是短名。
+        // 2026-10-23 前扫描器侧还是旧判据（展开后仍含 `~数字` 就判受保护），把
+        // windowsDownloadCache 里 `Package_for_RollupFix~~amd64~~26100.…` 整棵子树
+        // 静默排除（真机实测 48,033 个文件 / 4.4GB）。展开不掉才 fail-closed。
+        match crate::util::expand_short_path(p) {
+            Some(s) => s,
+            None => return true,
+        }
     };
     let norm = lexically_normalize(&expanded);
     if norm.is_empty() {
@@ -2516,10 +2544,9 @@ pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
     if norm.starts_with(r"\\?\") || norm.starts_with(r"\\.\") || norm.starts_with(r"\??\") {
         return true;
     }
-    // FD-2：短名 fail-closed（与 JS/PS 同位置），判据见 util::contains_short_name
-    if crate::contains_short_name(&norm) {
-        return true;
-    }
+    // 短名展不开已在上面 return；能走到这里的 norm 要么本来没有 `~数字`，要么整条
+    // 展开成功（波浪号是字面名）。这里不再二次判 contains_short_name——那正是
+    // `~~26100` 合成名被误杀的旧判据（2026-10-23 对齐主工程）。
     with_protect_roots(protect_json, |r| {
         // v7.2-C03（N1b-M03）：注入解析失败 ⇒ 无法判定权威保护面 ⇒ 一律判拦。
         if r.poisoned {
@@ -2537,19 +2564,19 @@ pub(crate) fn is_protected_path(p: &str, protect_json: Option<&str>) -> bool {
                 continue;
             }
             let tail = &norm[3..];
-            if tail == nm.as_str() || tail.starts_with(&format!("{}\\", nm.as_str())) {
+            if is_same_or_under(tail, nm) {
                 return true;
             }
         }
         // subtree：本身或其子孙
         for t in &r.subtree {
-            if norm == **t || norm.starts_with(&format!("{}\\", t)) {
+            if is_same_or_under(&norm, t) {
                 return true;
             }
         }
         // exact：本身，或「某受保护根的祖先」（被端掉会连带删掉该受保护根）
         for e in &r.exact {
-            if norm == **e || e.starts_with(&format!("{}\\", norm)) {
+            if is_same_or_under(e, &norm) {
                 return true;
             }
         }

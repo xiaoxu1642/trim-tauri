@@ -383,7 +383,11 @@ pub fn to_long_path(p: &str) -> String {
 /// 现算 0 条根声明含短名 ⇒ 绝大多数调用是恒等却贵）。
 ///
 /// 保守方向：字面量真含 `~1` 的普通文件名会被判 true ⇒ 多做一次展开，
-/// 只损失性能、不损失正确性。
+/// 只损失性能、不损失正确性。**它只回答「要不要试着展开」，不回答「是否短名」**——
+/// 后者必须由 [`expand_short_path`] 触盘判定：Windows 更新缓存里
+/// `Package_for_RollupFix~~amd64~~26100.…` 这类合法长名也命中本判据
+/// （`~~2`），旧实现把「已展开成功但结果仍含 `~数字`」当成短名展不掉，
+/// 整棵子树判受保护（2026-10-23 真机实测 48,033 个文件 / 4.4 GB 被静默排除）。
 pub fn contains_short_name(norm: &str) -> bool {
     let mut pending_tilde = false;
     for c in norm.chars() {
@@ -397,6 +401,87 @@ pub fn contains_short_name(norm: &str) -> bool {
         }
     }
     false
+}
+
+/// 组件是否**可能是** 8.3 短名（保守的必要条件）：主干（首个 `.` 之前）≤ 8 字符，
+/// 且以 `~` + 1~6 位数字结尾，波浪号前至少 1 个字符。
+///
+/// 为什么需要它：`contains_short_name` 只管「要不要怀疑」，而真正触盘展开
+/// （`GetLongPathNameW`）的成本很高。Windows 更新缓存的
+/// `Package_for_RollupFix~~amd64~~26100.9711.1.30` 这类长合成名会被宽松判据怀疑，
+/// 但它的主干远超 8 字符，**不可能是 8.3 短名** —— 2026-10-23 真机实测，一次扫描
+/// 有 4.8 万个文件落在这个形态上，白白付 4.8 万次 GetLongPathNameW（该项 13s 的大头）。
+///
+/// 保守方向：真实 8.3 短名的冲突后缀固定落在主干末尾且总长 ≤ 8 ⇒ 本判据对它恒为真；
+/// 字面名 `Song~1.mp3`（主干 7 字符）会被误判为「可能是短名」，只是多付一次展开，
+/// 展开成功即采信，不影响正确性。
+fn is_short_name_component(seg: &str) -> bool {
+    let stem = seg.split('.').next().unwrap_or(seg);
+    let b = stem.as_bytes();
+    if b.is_empty() || b.len() > 8 {
+        return false;
+    }
+    let mut i = b.len();
+    while i > 0 && b[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i == b.len() || i == 0 || b[i - 1] != b'~' {
+        return false;
+    }
+    let base = i - 1;
+    (1..=6).contains(&base)
+}
+
+/// 路径是否有任一组件可能是 8.3 短名（`is_short_name_component` 的整路径版）。
+pub fn has_short_name_component(p: &str) -> bool {
+    p.split(|c| c == '\\' || c == '/').any(is_short_name_component)
+}
+
+/// 8.3 短名展开的**唯一判据实现**（主工程 `engine::protect::expand_short_path` 委托到
+/// 这里，扫描器 `scan::is_protected_path` 也调它——两侧不许各写一份，AGENTS N6）。
+///
+/// 返回 `Some(路径)` = 整条展开成功；**结果允许与输入逐字节相同**——那说明波浪号是
+/// 字面名而不是短名（`GetLongPathNameW` 对合法长名原样返回）。返回 `None` = 无法证伪：
+/// 非本地盘符路径，或只有祖先能展开、剩余段仍带 `~数字`。
+///
+/// 这条「整条成功即采信」的口径是 2026-10-12 主工程真机修出来的：旧实现把
+/// 「结果与输入相同」当失败，`windowsDownloadCache` 的 `~~26100` 合成名整批误拒。
+/// 2026-10-23 扫描器侧按同一口径对齐（此前只有扫描侧还是旧判据，实测同一目录
+/// 48,033 个文件被排除）。
+pub fn expand_short_path(p: &str) -> Option<String> {
+    let b = p.as_bytes();
+    if !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')) {
+        return None; // 仅处理本地盘符路径，UNC/相对一律不展开（宁可多拦）
+    }
+    // 没有「像 8.3 短名」的组件 ⇒ 无需触盘：调用方是**怀疑**才进来的（宽松判据），
+    // 这里用必要条件把 `~~26100` 这类长合成名直接按字面采信（2026-10-23）。
+    if !has_short_name_component(p) {
+        return Some(p.to_string());
+    }
+    if let Some(full) = to_long_path_opt(p) {
+        return Some(full);
+    }
+    let segs: Vec<&str> = p.split(|c| c == '\\' || c == '/').filter(|c| !c.is_empty()).collect();
+    if segs.len() < 2 {
+        return None;
+    }
+    for i in (1..=segs.len() - 1).rev() {
+        let head = segs[..i].join("\\");
+        let head_has_drive = head.as_bytes().get(1) == Some(&b':');
+        let probe = if head_has_drive { head.clone() } else { format!("{}\\{}", segs[0], head) };
+        let Some(long) = to_long_path_opt(&probe) else { continue };
+        let rest = &segs[i..];
+        if rest.is_empty() {
+            return Some(long);
+        }
+        let rest_joined = rest.join("\\");
+        // 未展开的剩余段带波浪号数字 ⇒ 可能是短名 ⇒ 无法证伪，fail-closed
+        if contains_short_name(&rest_joined) {
+            return None;
+        }
+        return Some(format!("{}\\{}", long.trim_end_matches(['\\', '/']), rest_joined));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -430,6 +515,52 @@ mod tests {
     fn unix_path_strips_prefix_and_normalizes_sep() {
         assert_eq!(unix_path(Path::new(r"\\?\C:\a\b")), "C:/a/b");
         assert_eq!(unix_path(Path::new(r"C:\x\y.txt")), "C:/x/y.txt");
+    }
+
+    /// 2026-10-23：短名展开的**必要形状**。真实短名的冲突后缀固定落在主干末尾且总长 ≤ 8；
+    /// Windows 更新缓存的 `~~26100` 长合成名主干远超 8，不可能是短名 ⇒ 不该触盘。
+    /// 判红自证：把 `is_short_name_component` 改回 `contains_short_name` 的宽松口径，
+    /// 第三条断言立刻红（又会把 4.8 万个长合成名送去 GetLongPathNameW）。
+    #[test]
+    fn 短名必要条件只认真实8dot3形状() {
+        for ok in [
+            r"C:\PROGRA~1\Common Files",
+            r"C:\Users\ADMINI~1\AppData",
+            r"D:\MYFIL~10.TXT",
+        ] {
+            assert!(has_short_name_component(ok), "真实短名形态必须命中：{ok}");
+        }
+        for no in [
+            r"C:\Windows\SoftwareDistribution\Download\b2cbcbeef\Package_for_RollupFix~~amd64~~26100.9711.1.30\x.cab",
+            r"C:\data\long~name.txt",
+            r"C:\data\~1.txt",
+        ] {
+            assert!(!has_short_name_component(no), "长合成名/非短名不得触发展开：{no}");
+        }
+    }
+
+    /// 2026-10-23：字面名里的 `~~数字` 不是 8.3 短名。旧判据把展开成功但结果仍含
+    /// `~数字` 的路径判成「展不掉」，Windows 更新缓存的
+    /// `Package_for_RollupFix~~amd64~~26100.…` 整棵子树因此被静默排除。
+    /// 判红自证：把 `expand_short_path` 的「整条成功即采信」改回「结果与输入相同即失败」，本条红。
+    #[cfg(windows)]
+    #[test]
+    fn expand_short_path_字面波浪号采信而真短名展不开才拒绝() {
+        let dir = std::env::temp_dir().join(format!("trim-expand-~~26100-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("a.txt");
+        std::fs::write(&real, b"x").unwrap();
+        let real_s = real.to_string_lossy().to_string();
+        let got = expand_short_path(&real_s).expect("存在的字面 ~~26100 路径必须整条采信（波浪号不是短名标记）");
+        // 祖先可能是 8.3 短名（本机 TEMP=…\ADMINI~1\…），展开成哪个长名不重要；
+        // 关键是**没有拒绝**，且含字面 `~~26100` 的段原样保留。
+        assert!(got.ends_with("a.txt"), "展开结果必须仍指向该文件：{got}");
+        assert!(got.contains("trim-expand-~~26100-"), "字面波浪号段不得被丢弃：{got}");
+        // 反向对照：不存在的 `~1` 段无法证伪 ⇒ None（fail-closed 仍然保留）
+        let ghost = dir.join("no~1dir").join("x.txt").to_string_lossy().to_string();
+        assert!(expand_short_path(&ghost).is_none(), "展不开的 ~数字 段必须拒绝");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 行协议的前提：控制字符必须被转义，否则一条名字里带制表符的路径就能伪造 `@@ITEM@@` 行

@@ -1012,6 +1012,324 @@ pub struct DeletableResult {
 /// （对齐 pattern 未命中的口径）。
 /// 全局排除名单：命中前缀/全路径的文件不计入 total。
 /// 保护清单（R10）：命中执行侧同源保护根的文件不计入**可删**（total 仍计）。
+/// 单个目录内文件探测的并行执行器（2026-10-23 扫描提速）。
+///
+/// 为什么在这里并行：扫描的真实成本是逐文件 metadata + 保护判定 + 独占打开
+/// （真机实测 windowsDownloadCache 5.4 万文件约 11.6s，几乎全在这一段；本机
+/// 微基准 `file_deletable` 串行 17µs/文件、并行 4.4µs/文件）。**只并行同一目录内的
+/// 文件探测**：目录递归仍在调用线程按原顺序进行，计数与 PLAN_CAP 预算的合并留在
+/// 单线程——不引入跨线程共享状态，清单顺序仍是确定的（同目录按 readdir 顺序）。
+///
+/// 线程数封顶 8：这是 I/O + 实时防护过滤驱动的负载，并发过高只会把机械盘/杀软队列
+/// 打散；池建不起来就退回串行（行为与旧实现一致）。
+fn probe_files<T, F>(files: &[(std::path::PathBuf, String)], f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(&std::path::Path, &str) -> T + Sync + Send,
+{
+    fn pool() -> Option<&'static rayon::ThreadPool> {
+        static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+        POOL.get_or_init(|| {
+            let n = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(1, 8);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .thread_name(|i| format!("trim-scan-{i}"))
+                .build()
+                .ok()
+        })
+        .as_ref()
+    }
+    match pool() {
+        Some(p) => p.install(|| {
+            use rayon::prelude::*;
+            files.par_iter().map(|(p, s)| f(p, s)).collect()
+        }),
+        None => files.iter().map(|(p, s)| f(p, s)).collect(),
+    }
+}
+
+/// 元数据上的 reparse 判定（`crate::is_reparse` 吃的是 DirEntry；并行探测只有路径）。
+/// 命名刻意避开 `is_reparse(` 形态：`check-scan-rule-diff` 的 R1-2a 按这个子串
+/// 找「命中即丢弃」站点，helper 定义被算进去会造出假红。
+fn md_reparse_flag(md: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        md.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        md.file_type().is_symlink()
+    }
+}
+
+/// 单个文件的探测结果（并行段产出、主线程按 readdir 顺序合并）。
+#[derive(Clone, Copy, Default)]
+struct FileProbe {
+    reparse: bool,
+    size: u64,
+    bt: u64,
+    /// 通过 pattern 之外的过滤（年龄 + 排除名单）⇒ 计入 total
+    counted: bool,
+    /// 保护判定与独占打开都通过 ⇒ 计入 deletable / 可删清单
+    deletable: bool,
+}
+
+/// 单文件探测的共享实现：整树预取与逐目录回退调用**同一份**判据（§5.16/N6）。
+///
+/// 返回 `None` = 元数据读不到。missing 的处置由调用方的回退闭包保留原口径
+/// （`walk_deletable` 走 `old_enough_when_missing`，fk 遍历器直接丢弃）。
+/// `skip_lock` 只豁免独占打开，不豁免 R10 保护判定（与三处遍历器原口径一致）。
+fn probe_one(
+    path: &Path,
+    full: &str,
+    guard: AgeGuard,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    protect: Option<&str>,
+    skip_lock: bool,
+) -> Option<FileProbe> {
+    let md = fs::symlink_metadata(path).ok()?;
+    if md_reparse_flag(&md) {
+        return Some(FileProbe { reparse: true, ..Default::default() });
+    }
+    if !guard.old_enough(&md) {
+        return Some(FileProbe { counted: false, ..Default::default() });
+    }
+    let excluded = (!excl_dirs.is_empty() || !excl_files.is_empty())
+        && path_excluded(excl_dirs, excl_files, &full.to_lowercase());
+    if excluded {
+        return Some(FileProbe { counted: false, ..Default::default() });
+    }
+    let deletable = if skip_lock {
+        !crate::scan::is_protected_path(full, protect)
+    } else {
+        scan_deletable(path, protect)
+    };
+    Some(FileProbe {
+        reparse: false,
+        size: md.len(),
+        bt: birthtime_ns(&md),
+        counted: true,
+        deletable,
+    })
+}
+
+/// `walk_deletable` 的回退探测：与旧闭包逐条同口径（含 metadata 读不到时的
+/// `old_enough_when_missing` 分支）。
+fn walk_deletable_probe(
+    path: &Path,
+    full: &str,
+    guard: AgeGuard,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    protect: Option<&str>,
+) -> FileProbe {
+    if let Some(p) = probe_one(path, full, guard, excl_dirs, excl_files, protect, false) {
+        return p;
+    }
+    // 元数据读不到：有护栏按太新；无护栏维持既有口径（后再做保护/独占判定）
+    let old_enough = guard.old_enough_when_missing();
+    let excluded = (!excl_dirs.is_empty() || !excl_files.is_empty())
+        && path_excluded(excl_dirs, excl_files, &full.to_lowercase());
+    let counted = old_enough && !excluded;
+    FileProbe {
+        reparse: false,
+        size: 0,
+        bt: 0,
+        counted,
+        deletable: counted && scan_deletable(path, protect),
+    }
+}
+
+/// fk 遍历器的回退探测：metadata 读不到 = 全 false（与旧闭包一致）。
+fn fk_walk_probe(
+    path: &Path,
+    full: &str,
+    guard: AgeGuard,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    protect: Option<&str>,
+    skip_lock: bool,
+) -> FileProbe {
+    probe_one(path, full, guard, excl_dirs, excl_files, protect, skip_lock).unwrap_or_default()
+}
+
+/// 整树预取上限：超过此数不再收集，剩余文件回退到逐目录按需探测。
+/// 取 2× 单条目上限：覆盖现库所有大树（最大 5.4 万），同时给无界树一个内存/IO 上界。
+const PREFETCH_MAX_FILES: usize = 200_000;
+
+/// 目录项快照（预取阶段生成；walker 直接消费，省掉第二遍 read_dir）。
+///
+/// 顺序 = 原 read_dir 顺序；`File` 已在 `snapshot_dir` 里按 pattern 过滤（未命中的
+/// 文件原 walker 也是 `continue`，不影响任何计数）。
+enum CachedEntry {
+    File { path: std::path::PathBuf, full: String },
+    Dir { path: std::path::PathBuf, reparse: bool },
+    Other,
+}
+
+struct DirSnapshot {
+    entries: Vec<CachedEntry>,
+    /// 本目录枚举时命中的 reparse 目录/其他项数。walker 处理到该目录时一次加总，
+    /// 保证「预算耗尽后不再下钻」时不会把未处理目录的计数算进去。
+    skipped_reparse: u64,
+    /// `Some` = 预取时该目录不可读；walker 按原口径计数并留痕，不静默丢。
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct WalkCache {
+    dirs: std::collections::HashMap<std::path::PathBuf, DirSnapshot>,
+    probes: std::collections::HashMap<std::path::PathBuf, FileProbe>,
+}
+
+/// 读一个目录并转成缓存条目。预取与 walker 的 live 回退共用这一份枚举实现，
+/// 防止「两套目录分类」造成顺序/过滤分叉。
+fn snapshot_dir(dir: &Path, all: bool, pattern: &str) -> Result<DirSnapshot, String> {
+    let rd = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    let mut skipped_reparse = 0u64;
+    for ent in rd.flatten() {
+        let Ok(ft) = ent.file_type() else { continue };
+        if ft.is_dir() {
+            let reparse = crate::is_reparse(&ent);
+            if reparse {
+                skipped_reparse += 1;
+            }
+            out.push(CachedEntry::Dir { path: ent.path(), reparse });
+        } else if ft.is_file() {
+            let name = ent.file_name().to_string_lossy().to_string();
+            if !all && !wildcard_match(&name, pattern) {
+                continue;
+            }
+            let full = ent.path().to_string_lossy().to_string();
+            out.push(CachedEntry::File { path: ent.path(), full });
+        } else {
+            let reparse = crate::is_reparse(&ent);
+            if reparse {
+                skipped_reparse += 1;
+            }
+            out.push(CachedEntry::Other);
+        }
+    }
+    Ok(DirSnapshot { entries: out, skipped_reparse, error: None })
+}
+
+/// 整树预取：串行枚举目录、记录目录快照，并把匹配 pattern 的文件一次性并行探测。
+///
+/// **不改变遍历器的顺序/计数/截断**：递归、去重、PLAN_CAP 仍由原 walker 按原顺序执行；
+/// walker 命中快照时直接用缓存条目与探测结果，不再二次 read_dir/metadata。
+///
+/// 时点差异：目录枚举与独占打开都发生在预取阶段，比旧实现略早。判据与函数未变，
+/// 静态树上输出逐字节一致；动态占用变化仍由执行侧复检兜底。
+fn prefetch_walk(
+    root: &Path,
+    all: bool,
+    pattern: &str,
+    recurse: bool,
+    max_depth: usize,
+    guard: AgeGuard,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    protect: Option<&str>,
+    skip_lock: bool,
+) -> WalkCache {
+    let mut cache = WalkCache::default();
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        if files.len() >= PREFETCH_MAX_FILES {
+            break;
+        }
+        match snapshot_dir(&dir, all, pattern) {
+            Ok(snap) => {
+                let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+                for ent in &snap.entries {
+                    match ent {
+                        CachedEntry::Dir { path, reparse } => {
+                            // 与 walker 同深度口径：下一层 >= max_depth 的目录不会再被读取
+                            if !*reparse && recurse && depth + 1 < max_depth {
+                                subdirs.push(path.clone());
+                            }
+                        }
+                        CachedEntry::File { path, full, .. } => {
+                            files.push((path.clone(), full.clone()));
+                            if files.len() >= PREFETCH_MAX_FILES {
+                                break;
+                            }
+                        }
+                        CachedEntry::Other => {}
+                    }
+                }
+                cache.dirs.insert(dir, snap);
+                // 栈序只为调试可读；walker 的顺序由快照里的 readdir 顺序决定。
+                for sub in subdirs.into_iter().rev() {
+                    stack.push((sub, depth + 1));
+                }
+            }
+            Err(e) => {
+                cache.dirs.insert(dir, DirSnapshot { entries: Vec::new(), skipped_reparse: 0, error: Some(e) });
+            }
+        }
+    }
+    if !files.is_empty() {
+        let probes: Vec<Option<FileProbe>> = probe_files(&files, |path, full| {
+            probe_one(path, full, guard, excl_dirs, excl_files, protect, skip_lock)
+        });
+        for ((path, _), p) in files.into_iter().zip(probes) {
+            if let Some(p) = p {
+                cache.probes.insert(path, p);
+            }
+        }
+    }
+    cache
+}
+
+/// walker 的目录来源：预取快照命中 / live 回退 / 预取时的读失败。
+enum DirView<'a> {
+    Cached(&'a DirSnapshot),
+    Live(DirSnapshot),
+    Error(String),
+}
+
+impl DirView<'_> {
+    fn entries(&self) -> &[CachedEntry] {
+        match self {
+            DirView::Cached(s) => &s.entries,
+            DirView::Live(s) => &s.entries,
+            DirView::Error(_) => &[],
+        }
+    }
+
+    /// 本目录的 reparse 跳过计数：walker 处理到该目录时一次加总。
+    fn skipped_reparse(&self) -> u64 {
+        match self {
+            DirView::Cached(s) => s.skipped_reparse,
+            DirView::Live(s) => s.skipped_reparse,
+            DirView::Error(_) => 0,
+        }
+    }
+}
+
+fn load_dir<'a>(cache: Option<&'a WalkCache>, dir: &Path, all: bool, pattern: &str) -> DirView<'a> {
+    if let Some(c) = cache {
+        if let Some(snap) = c.dirs.get(dir) {
+            return match &snap.error {
+                Some(e) => DirView::Error(e.clone()),
+                None => DirView::Cached(snap),
+            };
+        }
+    }
+    match snapshot_dir(dir, all, pattern) {
+        Ok(snap) => DirView::Live(snap),
+        Err(e) => DirView::Error(e),
+    }
+}
+
 fn walk_deletable(
     dir: &Path,
     all: bool,
@@ -1024,73 +1342,83 @@ fn walk_deletable(
     depth: usize,
     collect_files: bool,
     cap: Option<usize>,
+    cache: Option<&WalkCache>,
 ) {
     if depth >= crate::scan::MAX_WALK_DEPTH {
         err_line(&format!("[trim-scanner] depth cap reached at {}", dir.display()));
         return;
     }
-    let rd = match fs::read_dir(dir) {
-        Ok(r) => r,
+    let view = load_dir(cache, dir, all, pattern);
+    if let DirView::Error(e) = &view {
+        res.unreadable_dirs += 1;
         // v7.2-C03（N1a-M04）：「扫失败」与「确无结果」在输出上必须可分辨——
         // IgnoreInaccessible 语义保留（跳过继续），但 stderr 留痕。
-        Err(e) => {
-            res.unreadable_dirs += 1;
-            err_line(&format!(
-                "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
-                dir.display()
-            ));
-            return;
+        err_line(&format!(
+            "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
+            dir.display()
+        ));
+        return;
+    }
+    // 本目录的 reparse 跳过数在枚举时已统计；只在本目录真正被处理时一次加总
+    // （预算耗尽后不再下钻的目录不会被算进来）。
+    res.skipped_reparse += view.skipped_reparse();
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for ent in view.entries() {
+        match ent {
+            CachedEntry::Dir { path, reparse } => {
+                // reparse 目录只留痕、不深入；普通目录待本层文件合并完后递归。
+                if !*reparse {
+                    subdirs.push(path.clone());
+                }
+            }
+            // snapshot_dir 已按 pattern 过滤；未命中的文件原 walker 也是 continue。
+            CachedEntry::File { path, full, .. } => files.push((path.clone(), full.clone())),
+            CachedEntry::Other => {}
         }
+    }
+    // 逐文件探测：整树预取命中时直接取结果；有缺失才回退到并行/串行探测。
+    // 合并仍按 readdir 顺序（计数器与清单顺序确定）。
+    let probes: Vec<FileProbe> = match cache {
+        Some(c) if files.iter().all(|(p, _)| c.probes.contains_key(p)) => {
+            // `all(contains_key)` 已保证每个 key 存在；缓存本次遍历只读不改，
+            // 这里用 unwrap_or_default 只是去掉生产面 unwrap（N10），不走 live 探测。
+            files.iter().map(|(p, _)| c.probes.get(p).copied().unwrap_or_default()).collect()
+        }
+        Some(c) => probe_files(&files, |path, full| {
+            c.probes
+                .get(path)
+                .copied()
+                .unwrap_or_else(|| walk_deletable_probe(path, full, guard, excl_dirs, excl_files, protect))
+        }),
+        None => probe_files(&files, |path, full| {
+            walk_deletable_probe(path, full, guard, excl_dirs, excl_files, protect)
+        }),
     };
-    for ent in rd.flatten() {
-        if crate::is_reparse(&ent) {
-            res.skipped_reparse += 1; // R1-2：留痕，不参与 total/files 判定
-            continue; // 文件与目录均跳过，且不深入重解析目录
-        }
-        let ft = match ent.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if ft.is_dir() {
-            walk_deletable(&ent.path(), all, pattern, guard, excl_dirs, excl_files, protect, res, depth + 1, collect_files, cap);
+    for ((_, full), p) in files.iter().zip(probes) {
+        if p.reparse {
+            res.skipped_reparse += 1;
             continue;
         }
-        if !ft.is_file() {
-            continue; // 目录项不参与统计（FindFirstFile 对目录 size 恒 0，与 GCI -File 同义）
-        }
-        let name = ent.file_name().to_string_lossy().to_string();
-        if !all && !wildcard_match(&name, pattern) {
-            continue; // 未命中 pattern：不计入 total（对齐 Skip() 在 total++ 之前）
-        }
-        let full = ent.path();
-        if path_excluded(excl_dirs, excl_files, &full.to_string_lossy().to_lowercase()) {
-            continue;
-        }
-        let md = ent.metadata();
-        // 太新不计入 total（fail-closed：有护栏且元数据读不到按太新；无护栏维持既有口径）
-        let old_enough = md
-            .as_ref()
-            .map(|m| guard.old_enough(m))
-            .unwrap_or_else(|_| guard.old_enough_when_missing());
-        if !old_enough {
+        if !p.counted {
             continue;
         }
         res.total += 1;
-        let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
-        if scan_deletable(&full, protect) {
+        if p.deletable {
             // 计数与字节和**两种模式都记**（统计口径的唯一数据源）；
             // 路径字符串只在真要交给调用方时才留（审计 §3.3）。
             res.deletable_count += 1;
-            res.deletable_bytes += size;
+            res.deletable_bytes += p.size;
             if collect_files {
-                // birthtime 与 size 取自同一份 metadata（`md` 已在手上，零额外 IO）
-                let bt = md.as_ref().map(birthtime_ns).unwrap_or(0);
                 match cap {
                     Some(n) if res.files.len() >= n => res.files_truncated = true,
-                    _ => res.files.push((full.to_string_lossy().to_string(), size, bt)),
+                    _ => res.files.push((full.clone(), p.size, p.bt)),
                 }
             }
         }
+    }
+    for sub in subdirs {
+        walk_deletable(&sub, all, pattern, guard, excl_dirs, excl_files, protect, res, depth + 1, collect_files, cap, cache);
     }
 }
 
@@ -1200,7 +1528,20 @@ fn list_deletable_inner(
         files_truncated: false,
     };
     // 根不存在/不可访问 → 空结果（对齐 PS 侧 catch 空语义；根级失败由调用方探针另判 ok=false）
-    walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, protect, &mut res, 0, collect_files, cap);
+    // 整树预取：把逐文件 metadata/保护/独占打开提前并行做掉，遍历顺序仍由 walker 决定。
+    let cache = prefetch_walk(
+        root,
+        all,
+        pattern,
+        true,
+        crate::scan::MAX_WALK_DEPTH,
+        guard,
+        excl_dirs,
+        excl_files,
+        protect,
+        false,
+    );
+    walk_deletable(root, all, pattern, guard, excl_dirs, excl_files, protect, &mut res, 0, collect_files, cap, Some(&cache));
     res
 }
 
@@ -2055,7 +2396,13 @@ pub fn min_age_cutoff(secs: u64) -> std::time::SystemTime {
 
 /// 全路径（小写）是否被排除名单命中。
 pub fn path_excluded(excl_dirs: &[String], excl_files: &[String], low: &str) -> bool {
-    excl_dirs.iter().any(|d| low.starts_with(&format!("{}\\", d))) || excl_files.iter().any(|f| *f == low)
+    // 前缀判定按段边界、不分配临时串：旧写法每个排除目录都 `format!("{d}\\")`，
+    // 一次扫描要按「文件数 × 排除项数」分配（2026-10-23 扫描提速）。
+    let lb = low.as_bytes();
+    excl_dirs.iter().any(|d| {
+        let db = d.as_bytes();
+        lb.len() > db.len() && lb[db.len()] == b'\\' && lb.starts_with(db)
+    }) || excl_files.iter().any(|f| f == low)
 }
 
 /// excludePaths 条目按磁盘实况分类（2026-10-04 审计 §4.9）。
@@ -2193,6 +2540,7 @@ fn walk_fk_dll(
     protect: Option<&str>,
     acc: &mut FkAcc,
     depth: usize,
+    cache: Option<&WalkCache>,
 ) {
     // 审查 L-9：与 walk_deletable 同口径——超限子目录整棵跳过并 stderr 留痕，
     // 防病态深嵌套撑爆递归栈（原先无上限是对 PS 无界递归的口径）。
@@ -2213,75 +2561,75 @@ fn walk_fk_dll(
     if acc.truncated {
         return;
     }
-    let rd = match fs::read_dir(dir) {
-        Ok(r) => r,
+    let view = load_dir(cache, dir, all, pattern);
+    if let DirView::Error(e) = &view {
+        acc.unreadable_dirs += 1;
         // v7.2-C03（N1a-M04）：留痕同 walk_deletable；depth==0 = fileKeys 根级，
         // 根级失败原先零探针 ⇒「扫失败」与「确无结果」在输出上长得一模一样，
         // 此行即根级 missing 探针。
-        Err(e) => {
-            acc.unreadable_dirs += 1;
-            if depth == 0 {
-                err_line(&format!(
-                    "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
-                    dir.display()
-                ));
-            } else {
-                err_line(&format!(
-                    "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
-                    dir.display()
-                ));
-            }
-            return;
+        if depth == 0 {
+            err_line(&format!(
+                "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
+                dir.display()
+            ));
+        } else {
+            err_line(&format!(
+                "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
+                dir.display()
+            ));
         }
-    };
+        return;
+    }
     if depth == 0 {
         acc.root_ok = true;
     }
-    for ent in rd.flatten() {
-        if crate::is_reparse(&ent) {
-            acc.skipped_reparse += 1; // R1-2：留痕，不进 total_size/count/locked 判定
-            continue;
-        }
-        let ft = match ent.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if ft.is_dir() {
-            if recurse {
-                walk_fk_dll(&ent.path(), all, pattern, recurse, guard, excl_dirs, excl_files, protect, acc, depth + 1);
+    // 本目录的 reparse 跳过数在枚举时已统计；只在本目录真正被处理时一次加总。
+    acc.skipped_reparse += view.skipped_reparse();
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for ent in view.entries() {
+        match ent {
+            CachedEntry::Dir { path, reparse } => {
+                if !*reparse && recurse {
+                    subdirs.push(path.clone());
+                }
             }
+            CachedEntry::File { path, full, .. } => files.push((path.clone(), full.clone())),
+            CachedEntry::Other => {}
+        }
+    }
+    // 逐文件探测：整树预取命中时直接取结果；有缺失才回退到并行/串行探测。
+    // 合并与 PLAN_CAP 预算仍留在调用线程按原顺序做。
+    let probes: Vec<FileProbe> = match cache {
+        Some(c) if files.iter().all(|(p, _)| c.probes.contains_key(p)) => {
+            // `all(contains_key)` 已保证每个 key 存在；缓存本次遍历只读不改，
+            // 这里用 unwrap_or_default 只是去掉生产面 unwrap（N10），不走 live 探测。
+            files.iter().map(|(p, _)| c.probes.get(p).copied().unwrap_or_default()).collect()
+        }
+        Some(c) => probe_files(&files, |path, full| {
+            c.probes
+                .get(path)
+                .copied()
+                .unwrap_or_else(|| fk_walk_probe(path, full, guard, excl_dirs, excl_files, protect, false))
+        }),
+        None => probe_files(&files, |path, full| {
+            fk_walk_probe(path, full, guard, excl_dirs, excl_files, protect, false)
+        }),
+    };
+    for ((_, full_s), p) in files.iter().zip(probes) {
+        if p.reparse {
+            acc.skipped_reparse += 1;
             continue;
         }
-        if !ft.is_file() {
-            continue;
-        }
-        // minAge 时效护栏：太新的文件不计入 total（对齐 pattern 未命中的口径）
-        let md = match ent.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !guard.old_enough(&md) {
-            continue;
-        }
-        let full_s = ent.path().to_string_lossy().to_string();
-        let low = full_s.to_lowercase();
-        // excludePaths 过滤（dir 前缀 / file 全路径；声明排除时调用方必选快照模式，
-        // 本分支实际不含排除清单——防御性保留同一谓词）
-        if excl_dirs.iter().any(|d| low.starts_with(&format!("{}\\", d))) || excl_files.iter().any(|f| *f == low) {
-            continue;
-        }
-        let name = ent.file_name().to_string_lossy().to_string();
-        if !all && !wildcard_match(&name, pattern) {
+        if !p.counted {
             continue;
         }
         acc.total_count += 1;
-        let size = md.len();
-        let bt = birthtime_ns(&md);
-        if scan_deletable(Path::new(&full_s), protect) {
+        if p.deletable {
             acc.deletable_count += 1; // 去重前累加（对齐 PS DLL 分支）
-            if acc.seen.insert(low) {
+            if acc.seen.insert(full_s.to_lowercase()) {
                 let before = acc.truncated;
-                acc.push_budget(full_s, size, bt);
+                acc.push_budget(full_s.clone(), p.size, p.bt);
                 if !before && acc.truncated {
                     // 只在**首次**翻转到截断时留一次痕：后续每层都打的话，
                     // 一次扫描能刷出上千行同样的日志，把真留痕淹掉。
@@ -2292,6 +2640,12 @@ fn walk_fk_dll(
                 }
             }
         }
+    }
+    if acc.truncated {
+        return;
+    }
+    for sub in subdirs {
+        walk_fk_dll(&sub, all, pattern, recurse, guard, excl_dirs, excl_files, protect, acc, depth + 1, cache);
     }
 }
 
@@ -2308,103 +2662,84 @@ fn walk_fk_snapshot(
     protect: Option<&str>,
     skip_lock: bool,
     acc: &mut FkAcc,
+    cache: Option<&WalkCache>,
 ) {
     // 遍历预算耗尽 ⇒ 整棵子树不再下钻（2026-10-04 磁盘清理审计 §3.4，理由见
     // walk_fk_dll 里同一条注释）。快照模式的 `seen` 同样在无界增长。
     if acc.truncated {
         return;
     }
-    let rd = match fs::read_dir(dir) {
-        Ok(r) => r,
+    let view = load_dir(cache, dir, all, pattern);
+    if let DirView::Error(e) = &view {
+        acc.unreadable_dirs += 1;
         // v7.2-C03（N1a-M04）：与 walk_fk_dll 同口径——根级（depth==0）失败给
         // 根级 missing 探针，子目录失败按不可达留痕。
-        Err(e) => {
-            acc.unreadable_dirs += 1;
-            if depth == 0 {
-                err_line(&format!(
-                    "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
-                    dir.display()
-                ));
-            } else {
-                err_line(&format!(
-                    "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
-                    dir.display()
-                ));
-            }
-            return;
+        if depth == 0 {
+            err_line(&format!(
+                "[trim-scanner] fileKeys 根级 read_dir 失败: {}（{e}）——输出 0 条 ≠ 目录为空",
+                dir.display()
+            ));
+        } else {
+            err_line(&format!(
+                "[trim-scanner] read_dir {} 失败: {e}（该子树按不可达跳过，不进 total/可删）",
+                dir.display()
+            ));
         }
-    };
+        return;
+    }
     if depth == 0 {
         acc.root_ok = true;
     }
-    for ent in rd.flatten() {
-        if crate::is_reparse(&ent) {
-            acc.skipped_reparse += 1; // R1-2：留痕，不进 total_size/count/locked 判定
-            continue;
-        }
-        let ft = match ent.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if ft.is_dir() {
-            if recurse {
-                // 审查 L-25（2026-10-03 L4）：depth 上限的**口径**（24）对齐 PS
-                // `Get-FileKeySnapshot -Depth 24`，不是缺陷（报告 §10.2 白名单第 6 条已
-                // 裁定）；缺的是**留痕**——walk_deletable / walk_level / walk_fk_dll 三处
-                // 超限都 eprintln，这里静默 `continue` ⇒ 「深处的文件没进清单」和
-                // 「文件本来就不存在」在日志里长得一模一样。补齐 eprintln 与三处同格式。
-                if depth < FK_SNAPSHOT_MAX_DEPTH {
-                    walk_fk_snapshot(&ent.path(), all, pattern, recurse, depth + 1, guard, excl_dirs, excl_files, protect, skip_lock, acc);
-                } else {
-                    err_line(&format!(
-                        "[trim-scanner] depth cap {FK_SNAPSHOT_MAX_DEPTH} reached at {}",
-                        ent.path().display()
-                    ));
+    // 本目录的 reparse 跳过数在枚举时已统计；只在本目录真正被处理时一次加总。
+    acc.skipped_reparse += view.skipped_reparse();
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for ent in view.entries() {
+        match ent {
+            CachedEntry::Dir { path, reparse } => {
+                if !*reparse && recurse {
+                    subdirs.push(path.clone());
                 }
             }
+            CachedEntry::File { path, full, .. } => files.push((path.clone(), full.clone())),
+            CachedEntry::Other => {}
+        }
+    }
+    // 逐文件探测：整树预取命中时直接取结果；有缺失才回退到并行/串行探测。
+    // seen/预算合并仍留主线程按原顺序做。
+    let probes: Vec<FileProbe> = match cache {
+        Some(c) if files.iter().all(|(p, _)| c.probes.contains_key(p)) => {
+            // `all(contains_key)` 已保证每个 key 存在；缓存本次遍历只读不改，
+            // 这里用 unwrap_or_default 只是去掉生产面 unwrap（N10），不走 live 探测。
+            files.iter().map(|(p, _)| c.probes.get(p).copied().unwrap_or_default()).collect()
+        }
+        Some(c) => probe_files(&files, |path, full| {
+            c.probes
+                .get(path)
+                .copied()
+                .unwrap_or_else(|| fk_walk_probe(path, full, guard, excl_dirs, excl_files, protect, skip_lock))
+        }),
+        None => probe_files(&files, |path, full| {
+            fk_walk_probe(path, full, guard, excl_dirs, excl_files, protect, skip_lock)
+        }),
+    };
+    for ((_, full_s), p) in files.iter().zip(probes) {
+        if p.reparse {
+            acc.skipped_reparse += 1;
             continue;
         }
-        if !ft.is_file() {
-            continue;
-        }
-        let name = ent.file_name().to_string_lossy().to_string();
-        if !all && !wildcard_match(&name, pattern) {
-            continue;
-        }
-        // minAge 时效护栏：太新的文件不计入 total（对齐 pattern 未命中的口径）
-        let md = match ent.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !guard.old_enough(&md) {
-            continue;
-        }
-        let full_s = ent.path().to_string_lossy().to_string();
-        let low = full_s.to_lowercase();
-        if excl_dirs.iter().any(|d| low.starts_with(&format!("{}\\", d))) {
-            continue;
-        }
-        if excl_files.iter().any(|f| *f == low) {
+        if !p.counted {
             continue;
         }
         // 快照分支口径：先去重再计数（对齐 Get-FileKeySnapshot 的 seen.Add 前置）
-        if !acc.seen.insert(low.clone()) {
+        if !acc.seen.insert(full_s.to_lowercase()) {
             continue;
         }
         acc.total_count += 1;
-        let size = md.len();
-        let bt = birthtime_ns(&md);
-        // v7.2-C03（N1a-M01）：skip_lock 只豁免**独占探测**（执行侧会临时停占用
-        // 进程，逐文件探测会整批误判 locked），**不豁免 R10 保护过滤**——旧形态
-        // `skip_lock ||` 短路把保护判据整条旁路，受保护路径直进可删清单（注释
-        // 宣称的「六个枚举出口全走保护判据」与代码不符的实锤点）。先过保护闸，
-        // 再按 skip_lock 决定是否独占探测。
-        if !crate::scan::is_protected_path(&full_s, protect)
-            && (skip_lock || file_deletable(Path::new(&full_s)))
-        {
+        if p.deletable {
             acc.deletable_count += 1;
             let before = acc.truncated;
-            acc.push_budget(full_s, size, bt);
+            acc.push_budget(full_s.clone(), p.size, p.bt);
             if !before && acc.truncated {
                 // 首次翻转才留痕（理由同 walk_fk_dll 那处）
                 err_line(&format!(
@@ -2412,6 +2747,24 @@ fn walk_fk_snapshot(
                      剩余子树停止遍历（已记 filesTruncated）"
                 ));
             }
+        }
+    }
+    if acc.truncated {
+        return;
+    }
+    for sub in subdirs {
+        // 审查 L-25（2026-10-03 L4）：depth 上限的**口径**（24）对齐 PS
+        // `Get-FileKeySnapshot -Depth 24`，不是缺陷（报告 §10.2 白名单第 6 条已
+        // 裁定）；缺的是**留痕**——walk_deletable / walk_level / walk_fk_dll 三处
+        // 超限都 eprintln，这里静默 `continue` ⇒ 「深处的文件没进清单」和
+        // 「文件本来就不存在」在日志里长得一模一样。补齐 eprintln 与三处同格式。
+        if depth < FK_SNAPSHOT_MAX_DEPTH {
+            walk_fk_snapshot(&sub, all, pattern, recurse, depth + 1, guard, excl_dirs, excl_files, protect, skip_lock, acc, cache);
+        } else {
+            err_line(&format!(
+                "[trim-scanner] depth cap {FK_SNAPSHOT_MAX_DEPTH} reached at {}",
+                sub.display()
+            ));
         }
     }
 }
@@ -2477,13 +2830,95 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
             let recurse = fk.get("recurse") != Some(&Json::Bool(false));
             for dir in expand_glob_dirs(fp, true) {
                 acc.root_attempted += 1;
+                // 单文件 fileKey（setupapi.dev.log / CatRoot2\dberr.txt 这类规则）：
+                // walk_* 都是目录遍历器，对文件路径 read_dir 只会报 os error 267
+                // 「目录名称无效」→ 条目恒 0 项，而执行侧的单文件分支能删。
+                // 2026-10-23 真机日志里两条根级 read_dir 失败即此形态。
+                if let Ok(md) = fs::symlink_metadata(&dir) {
+                    if md.is_file() && !md_reparse_flag(&md) {
+                        let name = Path::new(&dir)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if !all && !wildcard_match(&name, pattern) {
+                            continue;
+                        }
+                        if !guard.old_enough(&md) {
+                            continue;
+                        }
+                        let low = dir.to_lowercase();
+                        if path_excluded(&excl_dirs, &excl_files, &low) {
+                            continue;
+                        }
+                        acc.root_ok = true;
+                        if snapshot_mode {
+                            if !acc.seen.insert(low) {
+                                continue;
+                            }
+                            acc.total_count += 1;
+                            if !crate::scan::is_protected_path(&dir, protect)
+                                && (skip_lock || file_deletable(Path::new(&dir)))
+                            {
+                                acc.deletable_count += 1;
+                                let before = acc.truncated;
+                                acc.push_budget(dir.clone(), md.len(), birthtime_ns(&md));
+                                if !before && acc.truncated {
+                                    err_line(&format!(
+                                        "[trim-scanner] PLAN_CAP 已耗尽（单条目上限 {PLAN_CAP_PER_ITEM} 行 / 全扫描 {PLAN_CAP_TOTAL} 行），\
+                                         剩余子树停止遍历（已记 filesTruncated）"
+                                    ));
+                                }
+                            }
+                        } else {
+                            acc.total_count += 1;
+                            if scan_deletable(Path::new(&dir), protect) {
+                                acc.deletable_count += 1;
+                                if acc.seen.insert(low) {
+                                    let before = acc.truncated;
+                                    acc.push_budget(dir.clone(), md.len(), birthtime_ns(&md));
+                                    if !before && acc.truncated {
+                                        err_line(&format!(
+                                            "[trim-scanner] PLAN_CAP 已耗尽（单条目上限 {PLAN_CAP_PER_ITEM} 行 / 全扫描 {PLAN_CAP_TOTAL} 行），\
+                                             剩余子树停止遍历（已记 filesTruncated）"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+                // snapshot 遍历器在 depth==24 仍会读取该目录（只在 24 处停止继续下钻），
+                // 所以预取的“可读深度上界”是 25（开区间），不是 FK_SNAPSHOT_MAX_DEPTH。
+                let max_depth = if snapshot_mode {
+                    FK_SNAPSHOT_MAX_DEPTH + 1
+                } else {
+                    crate::scan::MAX_WALK_DEPTH
+                };
+                // 预算已耗尽：walker 会在第一行直接返回，预取纯属浪费（多根规则常见）。
+                let cache = if acc.truncated {
+                    WalkCache::default()
+                } else {
+                    prefetch_walk(
+                        Path::new(&dir),
+                        all,
+                        pattern,
+                        recurse,
+                        max_depth,
+                        guard,
+                        &excl_dirs,
+                        &excl_files,
+                        protect,
+                        if snapshot_mode { skip_lock } else { false },
+                    )
+                };
                 if snapshot_mode {
                     walk_fk_snapshot(
                         Path::new(&dir), all, pattern, recurse, 0, guard,
-                        &excl_dirs, &excl_files, protect, skip_lock, &mut acc,
+                        &excl_dirs, &excl_files, protect, skip_lock, &mut acc, Some(&cache),
                     );
                 } else {
-                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, guard, &excl_dirs, &excl_files, protect, &mut acc, 0);
+                    walk_fk_dll(Path::new(&dir), all, pattern, recurse, guard, &excl_dirs, &excl_files, protect, &mut acc, 0, Some(&cache));
                 }
             }
         }
@@ -2508,7 +2943,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
         // ② 只对绝对路径跳过——GetLongPathNameW 会把相对输入**解析成绝对路径**，
         //   扫描出口虽然恒为绝对（walk 的 root 已展开），但把前提写进判据比依赖它更稳。
         .map(|(p, sz, bt)| {
-            if Path::new(&p).is_absolute() && !crate::contains_short_name(&p) {
+            if Path::new(&p).is_absolute() && !crate::util::has_short_name_component(&p) {
                 (p, sz, bt)
             } else {
                 (crate::to_long_path(&p), sz, bt)
@@ -2737,6 +3172,23 @@ pub fn run(argv: &[String]) -> i32 {
     code
 }
 
+/// 逐条目耗时留痕（2026-10-23 扫描提速）。只记 ≥1s 的条目，避免 187 条刷屏；
+/// 此前真机日志里只有「79 项 / 107 秒」一个总数，哪条慢全靠猜。Drop 形态保证
+/// 所有 `continue` 出口都会记（循环体内分支很多，手放出口必漏）。
+struct SlowRuleTimer {
+    id: String,
+    t0: std::time::Instant,
+}
+
+impl Drop for SlowRuleTimer {
+    fn drop(&mut self) {
+        let ms = self.t0.elapsed().as_millis();
+        if ms >= 1000 {
+            err_line(&format!("[cleanup-scan] 慢条目 {}: {}ms", self.id, ms));
+        }
+    }
+}
+
 /// argv = [categories_json, configured_paths_json, (可选) protect_json]；规则 JSON 由调用方读入
 fn scan_body(argv: &[String], input: &str) -> i32 {
     // N1a-M05：`run_json` 的入口面不校 argv 长度（`run` 校，宿主直调与集成测试都不经过
@@ -2812,6 +3264,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             Some(r) => *r,
             None => continue,
         };
+        let _slow = SlowRuleTimer { id: cat_id.to_string(), t0: std::time::Instant::now() };
 
         // special 分流（非路径型条目，方案 v2 §2.2 G-4 / §2.3）：
         //   · dism —— 组件清理，固定返回「可执行」状态（大小以实际执行结果为准）；
@@ -3503,7 +3956,7 @@ mod tests {
             unreadable_dirs: 0,
             files_truncated: false,
         };
-        walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], None, &mut res, 0, true, None);
+        walk_deletable(&root, true, "*.tmp", AgeGuard::Off, &[], &[], None, &mut res, 0, true, None, None);
         assert_eq!(res.files.len(), 1, "浅层文件必须收到：{:?}", res.files);
         assert!(
             res.files.iter().all(|(p, _, _)| !p.contains("d69")),
@@ -3699,7 +4152,7 @@ mod tests {
         fs::write(root.join("shallow.dll"), b"x").unwrap();
 
         let mut acc = FkAcc::new(0);
-        walk_fk_dll(&root, true, "*.dll", true, AgeGuard::Off, &[], &[], None, &mut acc, 0);
+        walk_fk_dll(&root, true, "*.dll", true, AgeGuard::Off, &[], &[], None, &mut acc, 0, None);
         assert_eq!(acc.files.len(), 1, "浅层文件必须收到：{:?}", acc.files);
         assert!(
             acc.files.iter().all(|(p, _, _)| !p.contains("d69")),
@@ -3748,7 +4201,7 @@ mod tests {
         let mut acc = FkAcc::new(0);
         acc.item_cap = 3;
         acc.global_cap = 3;
-        walk_fk_dll(&root, true, "*.tmp", true, AgeGuard::Off, &[], &[], None, &mut acc, 0);
+        walk_fk_dll(&root, true, "*.tmp", true, AgeGuard::Off, &[], &[], None, &mut acc, 0, None);
         assert!(acc.truncated, "撞上限必须标 truncated（否则界面不显示「已截断」）");
         assert_eq!(acc.files.len(), 3, "输出必须停在上限");
         assert!(
@@ -3762,7 +4215,7 @@ mod tests {
         let mut acc2 = FkAcc::new(0);
         acc2.item_cap = 3;
         acc2.global_cap = 3;
-        walk_fk_snapshot(&root, true, "*.tmp", true, 0, AgeGuard::Off, &[], &[], None, true, &mut acc2);
+        walk_fk_snapshot(&root, true, "*.tmp", true, 0, AgeGuard::Off, &[], &[], None, true, &mut acc2, None);
         assert!(acc2.truncated, "快照分支撞上限必须标 truncated");
         assert_eq!(acc2.files.len(), 3, "快照分支输出必须停在上限");
         assert!(
@@ -3975,6 +4428,64 @@ mod tests {
             per(parallel) * 10000.0 / 1000.0,
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 2026-10-23：单文件 fileKey（setupapi.dev.log / CatRoot2\dberr.txt 这类规则）必须
+    /// 被扫到。旧实现拿文件路径喂 `walk_*`（目录遍历器），`read_dir` 报 os error 267
+    /// 「目录名称无效」→ 条目恒 0 项，而执行侧单文件分支能删。
+    /// 判红自证：删掉 `get_file_key_deletable` 里的单文件分支，count 立刻变 0。
+    #[test]
+    fn filekeys_单文件根必须进清单() {
+        let root = std::env::temp_dir().join(format!("trim-fk-single-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let f = root.join("setupapi.dev.log");
+        fs::write(&f, vec![b'x'; 1024]).unwrap();
+        let file_s = f.to_string_lossy().replace('/', "\\");
+        let rule = parse_json(&format!(
+            r#"{{"id":"t","fileKeys":[{{"path":"{}"}}]}}"#,
+            file_s.replace('\\', "\\\\")
+        ))
+        .unwrap();
+        let st = get_file_key_deletable(&rule, &mut 0, None, None);
+        assert_eq!(st.count, 1, "单文件根必须命中 1 项（旧实现恒 0）：{}", st.count);
+        assert_eq!(st.files.len(), 1, "可删清单必须带上这个文件");
+        assert!(st.files[0].0.ends_with("setupapi.dev.log"));
+        assert_eq!(st.locked, 0, "未被占用的单文件不得记成 locked");
+        // 反向对照：不存在的根仍按「根级 read_dir 失败」留痕，不许伪装成「有 1 项」
+        let ghost = root.join("nope.log").to_string_lossy().replace('/', "\\");
+        let rule2 = parse_json(&format!(
+            r#"{{"id":"t","fileKeys":[{{"path":"{}"}}]}}"#,
+            ghost.replace('\\', "\\\\")
+        ))
+        .unwrap();
+        let st2 = get_file_key_deletable(&rule2, &mut 0, None, None);
+        assert_eq!(st2.count, 0, "不存在的单文件根不得产出可删项");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 2026-10-23 扫描并行化：单个目录里几十个文件走并行探测，结果集必须与串行逐项
+    /// 一致（数量、字节和、清单条数）。这里正向点名「全部命中」而不是「没报错」。
+    #[test]
+    fn 并行探测保持清单全集() {
+        let root = std::env::temp_dir().join(format!("trim-par-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        const N: usize = 64;
+        for i in 0..N {
+            fs::write(root.join(format!("f{i:03}.tmp")), vec![b'x'; 10]).unwrap();
+        }
+        let rule = parse_json(&format!(
+            r#"{{"id":"t","fileKeys":[{{"path":"{}"}}]}}"#,
+            root.to_string_lossy().replace('\\', "\\\\")
+        ))
+        .unwrap();
+        let st = get_file_key_deletable(&rule, &mut 0, None, None);
+        assert_eq!(st.count, N as i64, "并行探测漏文件：{} != {N}", st.count);
+        assert_eq!(st.files.len(), N, "可删清单必须与命中数一致");
+        assert_eq!(st.total_size, (N * 10) as i64, "字节和必须与串行一致");
+        assert_eq!(st.locked, 0, "普通临时文件不得记成 locked");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -4283,6 +4794,65 @@ mod tests {
         assert_eq!(out4, "@@ITEM@@{}\n", "无回调形态的 stdout 必须逐字节照旧");
     }
 
+    /// 真机逐条目计时：对真实规则库的每个条目单独跑一遍扫描，输出「总耗时 + 慢条目排名」。
+    ///
+    /// 为什么必须是独立条目而不是整库一次跑：整库只给一个总秒数，「哪条慢」全靠猜；
+    /// 2026-10-23 真机日志（79 条 / 107 秒）就是这种无从下手的状态。本探针只出数，
+    /// 不改任何判据；取数时 `cargo test --lib 扫描逐条耗时实测 -- --ignored --nocapture`。
+    #[test]
+    #[ignore = "真机实测：对真实规则库逐条目计时，非回归判据，取数时手动 --ignored 跑"]
+    fn 扫描逐条耗时实测() {
+        use std::time::Instant;
+        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src-tauri/data/cleanup-rules.json");
+        let Ok(rules_text) = fs::read_to_string(&rules_path) else {
+            println!("SKIP：规则库不存在（{}）", rules_path.display());
+            return;
+        };
+        let Ok(rules) = parse_json(&rules_text) else {
+            println!("SKIP：规则库解析失败");
+            return;
+        };
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(groups) = rules.get("groups").and_then(|g| g.as_arr()) {
+            for g in groups {
+                if let Some(sgs) = g.get("subGroups").and_then(|s| s.as_arr()) {
+                    for sg in sgs {
+                        if let Some(items) = sg.get("items").and_then(|i| i.as_arr()) {
+                            for it in items {
+                                if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
+                                    ids.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(items) = g.get("items").and_then(|i| i.as_arr()) {
+                    for it in items {
+                        if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
+                            ids.push(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let mut rows: Vec<(u128, usize, String)> = Vec::new();
+        let mut total = std::time::Duration::ZERO;
+        for id in &ids {
+            let cats = format!("[{}]", jstr(id));
+            let t0 = Instant::now();
+            let (code, out, err) = run_json(&[cats, "{}".to_string(), String::new()], &rules_text, None);
+            let dt = t0.elapsed();
+            total += dt;
+            let rows_n = out.lines().filter(|l| l.starts_with("@@PLANFILE@@")).count();
+            rows.push((dt.as_millis(), rows_n, format!("{id}（code={code}，stderr={} 行）", err.lines().count())));
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        println!("共 {} 条，总耗时 {:.1}s；最慢 25 条：", ids.len(), total.as_secs_f64());
+        for (ms, n, name) in rows.iter().take(25) {
+            println!("{ms:>7}ms  plan={n:<6} {name}");
+        }
+    }
+
     /// v7.2 W4（N1a-M05）：`run_json` 入口少传参数不得变成越界 panic（旧形态正好落进
     /// 「非 FatalMarker panic ⇒ 无留痕」那条通道）。检查落在捕获体内 ⇒ 走 fatal 一档。
     #[test]
@@ -4295,5 +4865,147 @@ mod tests {
         let (code2, _o2, err2) = run_json(&["[]".to_string(), "{}".to_string()], "", None);
         assert_eq!(code2, EXIT_FATAL);
         assert!(err2.contains("stdin 规则 JSON 为空"), "对照未命中：{err2}");
+    }
+
+    /// P1-2 前置 golden：落盘小树，记录三个遍历器的**有序文件清单、计数、截断位**。
+    ///
+    /// 为什么先取 golden：目录级并行/预取只许提速，不许改输出顺序与 PLAN_CAP 边界。
+    /// 临时根名带 PID，但打印的是相对路径；文件按固定顺序创建，NTFS readdir 顺序稳定。
+    /// 取数：`cargo test --lib 遍历顺序与截断golden -- --ignored --nocapture`。
+    #[test]
+    #[ignore = "真机顺序/截断 golden：落盘小树，发布前手动跑"]
+    fn 遍历顺序与截断golden_三遍历器() {
+        let root = std::env::temp_dir().join(format!("trim-order-golden-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("s1").join("deep")).unwrap();
+        fs::create_dir_all(root.join("s2")).unwrap();
+        for (dir, name, size) in [
+            (root.clone(), "a.txt", 1u8),
+            (root.clone(), "b.txt", 2),
+            (root.join("s1"), "c.txt", 3),
+            (root.join("s1"), "d.txt", 4),
+            (root.join("s1").join("deep"), "e.txt", 5),
+            (root.join("s2"), "f.txt", 6),
+        ] {
+            fs::write(dir.join(name), vec![b'x'; size as usize]).unwrap();
+        }
+        let root_s = root.to_string_lossy().to_string();
+        let rel = |p: &str| {
+            p.strip_prefix(&root_s)
+                .unwrap_or(p)
+                .trim_start_matches('\\')
+                .trim_start_matches('/')
+                .replace('\\', "/")
+        };
+
+        let d = list_deletable_capped(
+            &root_s,
+            "*.txt",
+            AgeGuard::Off,
+            &[],
+            &[],
+            None,
+            3,
+        );
+        let files: Vec<String> = d.files.iter().map(|(p, _, _)| rel(p)).collect();
+        println!(
+            "GOLDEN_WALK_DELETABLE files={files:?} total={} del={} bytes={} trunc={} reparse={} unreadable={}",
+            d.total, d.deletable_count, d.deletable_bytes, d.files_truncated, d.skipped_reparse, d.unreadable_dirs
+        );
+        // 预取路径 vs 回退路径：同一棵树必须逐项一致（顺序、计数、截断位）。
+        let mut d_fallback = DeletableResult {
+            files: Vec::new(),
+            total: 0,
+            deletable_count: 0,
+            deletable_bytes: 0,
+            skipped_reparse: 0,
+            unreadable_dirs: 0,
+            files_truncated: false,
+        };
+        walk_deletable(&root, true, "*.txt", AgeGuard::Off, &[], &[], None, &mut d_fallback, 0, true, Some(3), None);
+        assert_eq!(d_fallback.files, d.files, "预取与回退路径的文件顺序/内容必须一致");
+        assert_eq!(
+            (
+                d_fallback.total,
+                d_fallback.deletable_count,
+                d_fallback.deletable_bytes,
+                d_fallback.files_truncated,
+                d_fallback.skipped_reparse,
+                d_fallback.unreadable_dirs,
+            ),
+            (
+                d.total,
+                d.deletable_count,
+                d.deletable_bytes,
+                d.files_truncated,
+                d.skipped_reparse,
+                d.unreadable_dirs,
+            ),
+            "预取与回退路径的计数/截断必须一致"
+        );
+
+        let mut acc = FkAcc::new(0);
+        acc.item_cap = 3;
+        acc.global_cap = 100;
+        walk_fk_dll(&root, true, "*.txt", true, AgeGuard::Off, &[], &[], None, &mut acc, 0, None);
+        let files2: Vec<String> = acc.files.iter().map(|(p, _, _)| rel(p)).collect();
+        println!(
+            "GOLDEN_WALK_FK_DLL files={files2:?} total={} del={} trunc={}",
+            acc.total_count, acc.deletable_count, acc.truncated
+        );
+        let cache_dll = prefetch_walk(
+            &root, true, "*.txt", true, crate::scan::MAX_WALK_DEPTH,
+            AgeGuard::Off, &[], &[], None, false,
+        );
+        let mut acc_c = FkAcc::new(0);
+        acc_c.item_cap = 3;
+        acc_c.global_cap = 100;
+        walk_fk_dll(&root, true, "*.txt", true, AgeGuard::Off, &[], &[], None, &mut acc_c, 0, Some(&cache_dll));
+        assert_eq!(acc_c.files, acc.files, "fk_dll 预取与回退路径的文件顺序/内容必须一致");
+        assert_eq!(
+            (acc_c.total_count, acc_c.deletable_count, acc_c.truncated),
+            (acc.total_count, acc.deletable_count, acc.truncated),
+            "fk_dll 预取与回退路径的计数/截断必须一致"
+        );
+
+        let mut acc2 = FkAcc::new(0);
+        acc2.item_cap = 3;
+        acc2.global_cap = 100;
+        walk_fk_snapshot(
+            &root,
+            true,
+            "*.txt",
+            true,
+            0,
+            AgeGuard::Off,
+            &[],
+            &[],
+            None,
+            true,
+            &mut acc2,
+            None,
+        );
+        let files3: Vec<String> = acc2.files.iter().map(|(p, _, _)| rel(p)).collect();
+        println!(
+            "GOLDEN_WALK_FK_SNAPSHOT files={files3:?} total={} del={} trunc={}",
+            acc2.total_count, acc2.deletable_count, acc2.truncated
+        );
+        let cache_snap = prefetch_walk(
+            &root, true, "*.txt", true, FK_SNAPSHOT_MAX_DEPTH,
+            AgeGuard::Off, &[], &[], None, true,
+        );
+        let mut acc2_c = FkAcc::new(0);
+        acc2_c.item_cap = 3;
+        acc2_c.global_cap = 100;
+        walk_fk_snapshot(
+            &root, true, "*.txt", true, 0, AgeGuard::Off, &[], &[], None, true, &mut acc2_c, Some(&cache_snap),
+        );
+        assert_eq!(acc2_c.files, acc2.files, "fk_snapshot 预取与回退路径的文件顺序/内容必须一致");
+        assert_eq!(
+            (acc2_c.total_count, acc2_c.deletable_count, acc2_c.truncated),
+            (acc2.total_count, acc2.deletable_count, acc2.truncated),
+            "fk_snapshot 预取与回退路径的计数/截断必须一致"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
