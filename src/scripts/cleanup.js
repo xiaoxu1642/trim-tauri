@@ -1604,7 +1604,10 @@
       const done = Number(p && p.done) || 0;
       const pct = total > 0 ? Math.min(90, Math.round(5 + ((done - 1) / total) * 85)) : 10;
       const name = p && p.name ? ` · ${String(p.name).slice(0, 24)}` : '';
-      setProgress(pct, total > 0 ? `清理中... ${done}/${total} 项${name}` : '清理中...');
+      // DISM 组件清理单条就要几分钟：进度条按项数折算会停在这一格不动，
+      // 不提示会被当成卡死（2026-10-23 真机反馈）。按 id 判定，规则改名不失效。
+      const hint = p && p.id === 'dismComponentCleanup' ? '（可能需要数分钟，请勿关闭）' : '';
+      setProgress(pct, total > 0 ? `清理中... ${done}/${total} 项${name}${hint}` : '清理中...');
     };
 
     try {

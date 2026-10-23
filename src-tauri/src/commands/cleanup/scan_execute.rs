@@ -675,10 +675,17 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
         if !safe_items.is_empty() {
             // 逐项进度：每项开工前推送（第 k/N 项 + 名称），供渲染层把进度条从
             // 「假走到 90% 再冻结」改为按真实项数推进（2026-10-12 卡死观感修复）。
+            // 2026-10-23：带上 id —— DISM 这类单条要跑几分钟的条目，渲染层要按 id
+            // 给「请勿关闭」提示（按名称匹配会在规则改名时静默失效）。
+            let progress_ids: Vec<String> = safe_items
+                .iter()
+                .map(|it| it.get("id").and_then(Value::as_str).unwrap_or("").to_string())
+                .collect();
             let progress_cb = |done: usize, total: usize, name: &str| {
+                let id = progress_ids.get(done.saturating_sub(1)).map(String::as_str).unwrap_or("");
                 let _ = win.emit(
                     "cleanup:execute-progress",
-                    json!({ "done": done, "total": total, "name": name }),
+                    json!({ "done": done, "total": total, "name": name, "id": id }),
                 );
             };
             match crate::engine::native::cleanup_execute(

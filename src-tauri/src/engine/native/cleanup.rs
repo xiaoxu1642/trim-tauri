@@ -711,6 +711,71 @@ pub fn cleanup_execute(
 /// X1-K01（v4-K09，2026-10-09）：那三个用例（单文件 fileKey / 带点目录排除 / 大小写去重）
 /// 真跑删除链时，临时探针的备份副本会被写进**用户真实数据目录**的 `cleanup-files-backup\`
 /// ——测试假件与用户真备份混居，进程被杀还会永久残留（发版前 #[ignore] 实跑还会读到假基线）。
+/// DISM 在线组件清理的前置判死（2026-10-23 真机：末项空等 2 分 12 秒后退出码 5）。
+///
+/// 退出码 5 = 拒绝访问，最常见的成因不是「本程序没提权」，而是 Windows Modules
+/// Installer（TrustedInstaller）被精简/禁用 —— DISM 起不了 servicing 会话。
+/// 这种环境下重试多少次都一样，而且要空等同样长的时间；前置判死并给出可操作
+/// 原因，比「等两分钟再看一句退出码」有用。返回 `Err(文案)` 表示本条应直接 skip。
+fn dism_preflight() -> Result<(), &'static str> {
+    dism_preflight_with(
+        crate::engine::sysinfo::is_admin(),
+        super::services::service_start_type("TrustedInstaller"),
+    )
+}
+
+/// 纯判据（测试可注入）：`Ok` = 可以尝试 DISM；`Err(文案)` = 直接 skip。
+fn dism_preflight_with(is_admin: bool, start_type: Option<u32>) -> Result<(), &'static str> {
+    if !is_admin {
+        return Err(
+            "需要管理员权限：DISM 组件清理只能在以管理员身份运行时执行（可退出后右键 Trim，选择「以管理员身份运行」再重试）",
+        );
+    }
+    match start_type {
+        None => Err(
+            "Windows Modules Installer（TrustedInstaller）服务不存在或无法读取，DISM 无法执行。请在 services.msc 确认该服务存在后再试",
+        ),
+        Some(super::services::SVC_START_DISABLED) => Err(
+            "Windows Modules Installer（TrustedInstaller）服务已被禁用，DISM 无法执行。请在 services.msc 将「Windows Modules Installer」的启动类型改为「手动」后重试",
+        ),
+        Some(_) => Ok(()),
+    }
+}
+
+/// DISM 失败时给一句可操作的原因（退出码本身对用户不可读）。
+fn dism_failure_hint(code: i32) -> &'static str {
+    match code {
+        5 => "（拒绝访问：多为 Windows Modules Installer 被禁用/未启动，或系统更新正占用组件存储；可先重启再试）",
+        740 => "（需要提升权限：请以管理员身份运行 Trim 后重试）",
+        _ => "",
+    }
+}
+
+/// 从 DISM 输出里挑一行最像错误的信息。
+///
+/// DISM 把真正的错误打在 **stdout**（进度百分比也在里面），旧实现只读 stderr ⇒
+/// 用户永远只看到「退出码 5」。这里优先取含「错误 / Error / 代码」的行，取不到
+/// 再用最后一条非空行，避免把整段进度条塞进界面。
+fn dism_note(o: &std::process::Output) -> String {
+    let err = crate::engine::systembin::decode_native_output(&o.stderr);
+    let out = crate::engine::systembin::decode_native_output(&o.stdout);
+    dism_note_text(&err, &out)
+}
+
+/// [`dism_note`] 的纯判据（测试可注入文本）。
+fn dism_note_text(err: &str, out: &str) -> String {
+    let pick = |text: &str| -> Option<String> {
+        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        lines
+            .iter()
+            .rev()
+            .find(|l| l.contains("错误") || l.contains("Error") || l.contains("代码") || l.contains("code"))
+            .map(|s| s.to_string())
+            .or_else(|| lines.last().map(|s| s.to_string()))
+    };
+    pick(err).or_else(|| pick(out)).unwrap_or_default()
+}
+
 fn cleanup_execute_with_backup_root(
     items: &[Value],
     rules: &Value,
@@ -1004,6 +1069,19 @@ fn cleanup_execute_with_backup_root(
         // 到点 kill 的是 DISM 前端进程本身：CBS/TiWorker 的事务由组件栈自行回滚
         // 或续跑，中断是安全的，最坏结果是本条报失败、用户可重跑。
         if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
+            // 2026-10-23：先判环境。不能跑就秒级 skip，不空等（真机实测空等 2 分 12 秒
+            // 后退出码 5，用户既不知道原因也不知道下一步）。
+            if let Err(reason) = dism_preflight() {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("规则 {id}：DISM 前置检查未通过，已跳过 —— {reason}"),
+                );
+                details.push(json!({
+                    "id": id, "name": name, "status": "skip",
+                    "freed": 0, "message": reason, "fileCount": 0, "ruleVer": rule_ver,
+                }));
+                continue;
+            }
             // v6-K01（P0-2）：解析失败并进 Err 臂（既有「DISM 执行失败」回执口径）
             let dism = crate::engine::systembin::system_tool("dism.exe")
                 .map_err(std::io::Error::other)
@@ -1021,15 +1099,16 @@ fn cleanup_execute_with_backup_root(
                 ),
                 Ok(o) => {
                     // 超时收口时 quiet_cmd_timeout 把原因写进 stderr，必须带给用户，
-                    // 否则「失败但不知道是超时还是 DISM 自己报错」又是一层雾
-                    let note = crate::engine::systembin::decode_native_output(&o.stderr);
-                    let note = note.trim();
+                    // 否则「失败但不知道是超时还是 DISM 自己报错」又是一层雾。
+                    let code = o.status.code().unwrap_or(-1);
+                    let note = dism_note(o);
+                    let hint = dism_failure_hint(code);
                     (
                         "fail",
                         if note.is_empty() {
-                            format!("DISM 清理失败，退出码 {}", o.status.code().unwrap_or(-1))
+                            format!("DISM 清理失败，退出码 {code}{hint}")
                         } else {
-                            format!("DISM 清理失败，退出码 {}：{note}", o.status.code().unwrap_or(-1))
+                            format!("DISM 清理失败，退出码 {code}{hint}：{note}")
                         },
                     )
                 }
@@ -1235,8 +1314,13 @@ fn cleanup_execute_with_backup_root(
         // 去重（§5.3：与扫描侧同口径按大小写不敏感折叠——两条仅大小写不同的
         // 规则根会让同一文件收进两行，旧判据放行重复 ⇒ 释放量重复计数，且第二次
         // remove 返回 NotFound 被记成「1 个被占用」）
-        files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-        files.dedup_by(|a, b| a.0.to_lowercase() == b.0.to_lowercase());
+        // 2026-10-23：排序/去重按**预计算**的小写键。旧比较器每次比较都 to_lowercase()，
+        // 1.5 万文件约 20 万次字符串分配（真机清理明细里 tencentQq 单条就 15,805 个文件）。
+        let mut keyed: Vec<(String, (String, u64))> =
+            files.into_iter().map(|f| (f.0.to_lowercase(), f)).collect();
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        keyed.dedup_by(|a, b| a.0 == b.0);
+        let mut files: Vec<(String, u64)> = keyed.into_iter().map(|(_, f)| f).collect();
 
         // 全局排除名单 + 规则级 excludePaths 过滤：显式记账，不混进「被占用」或「成功 0 删」
         let before_excl = files.len();
@@ -1299,6 +1383,12 @@ let mut freed = 0i64;
         // 说「超备份上限」——真机实测那次两档都是几十 KB 的小文件被占用导致复制失败，
         // 用户却被指去「文件太大」，与 §C06 回执诚实度同族。
         let mut backup_over_cap = 0usize;
+
+        // 2026-10-23：同一条规则的所有副本 parent 恒为 `<备份根>\<规则id>`
+        // （见 backup_rel_name），旧实现逐文件 create_dir_all ——1.5 万文件就是
+        // 1.5 万次多余的 CreateDirectory。这里每规则建一次。
+        let rule_backup_ready = !to_recycle
+            && std::fs::create_dir_all(files_backup_root.join(id)).is_ok();
 
         for (path, size) in &files {
             if to_recycle {
@@ -1386,7 +1476,7 @@ let mut freed = 0i64;
                     // rel 必须同时带**批次段**和**序号段**（N10），见 `backup_rel_name`
                     let rel = backup_rel_name(id, backup_batch_ts, seq, &fname);
                     let dst = files_backup_root.join(&rel);
-                    if std::fs::create_dir_all(dst.parent().unwrap_or(&files_backup_root)).is_ok()
+                    if rule_backup_ready
                         && std::fs::copy(path, &dst).map(|n| n == *size).unwrap_or(false)
                     {
                         backup_total += size;
@@ -3230,5 +3320,61 @@ mod file_backup_retention_tests {
         let _ = std::fs::remove_dir(&sub);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// 真机探针（`#[ignore]`）：DISM 预检读的是真实 SCM，合成状态证明不了
+    /// 「服务名写对、OpenService 在本机能读到」。发布前手动跑，核对输出。
+    #[test]
+    #[ignore = "真机探针：读真实 SCM 的 TrustedInstaller 服务状态"]
+    fn dism_预检真机探针() {
+        let st = super::super::services::service_start_type("TrustedInstaller");
+        println!("TrustedInstaller start_type = {st:?}（禁用=4/手动=3/自动=2）");
+        assert!(st.is_some(), "正常系统必须有 Windows Modules Installer（TrustedInstaller）服务");
+        println!("dism_preflight = {:?}", super::dism_preflight());
+    }
+
+    /// 2026-10-23：DISM 前置判死必须按「管理员 / 服务不存在 / 服务禁用 / 可用」分四档，
+    /// 不能把所有环境问题折成同一句失败。判红自证：把 `Some(_) => Ok(())` 改回
+    /// 无条件 `Ok(())`，前三条立刻红。
+    #[test]
+    fn dism_预检按管理员与服务状态分档() {
+        let denied = super::dism_preflight_with(false, Some(3));
+        assert!(denied.is_err(), "非管理员必须直接拒绝");
+        assert!(denied.unwrap_err().contains("管理员"), "非管理员的原因必须点名权限");
+
+        let missing = super::dism_preflight_with(true, None);
+        assert!(missing.is_err(), "服务读不到必须直接拒绝");
+        assert!(missing.unwrap_err().contains("不存在"), "服务读不到必须点名服务缺失");
+
+        let disabled = super::dism_preflight_with(true, Some(super::super::services::SVC_START_DISABLED));
+        assert!(disabled.is_err(), "服务被禁用必须直接拒绝");
+        assert!(disabled.unwrap_err().contains("禁用"), "服务禁用必须点名启动类型");
+
+        assert!(
+            super::dism_preflight_with(true, Some(super::super::services::SVC_START_MANUAL)).is_ok(),
+            "管理员 + 手动启动的服务必须放行"
+        );
+    }
+
+    /// DISM 的真实错误在 stdout，旧实现只读 stderr ⇒ 用户只看到「退出码 5」。
+    /// 判红自证：把 `pick(err).or_else(|| pick(out))` 改回只读 err，本条红。
+    #[test]
+    fn dism_失败原因优先取错误行而不是整段进度() {
+        let out = "部署映像服务和管理工具\n版本: 10.0.26100.1\n[== 12.3% ==]\n错误: 0x800f081f\n找不到源文件。\n";
+        let note = super::dism_note_text("", out);
+        assert_eq!(note, "错误: 0x800f081f", "必须挑出错误行而不是最后一行进度：{note}");
+        // 反向对照：stderr 有内容时优先用它（超时收口把原因写在 stderr）
+        let note2 = super::dism_note_text("执行超时（1800s）", out);
+        assert_eq!(note2, "执行超时（1800s）", "stderr 有原因时不得被 stdout 顶掉");
+        assert_eq!(super::dism_note_text("", ""), "", "两路都空必须给空串而不是乱猜");
+    }
+
+    /// 退出码 5 必须翻译成用户能动的下一步（改服务/重启），不许只报数字。
+    /// 判红自证：把 `5 => ...` 删掉，本条红。
+    #[test]
+    fn dism_退出码5给出可操作提示() {
+        let hint = super::dism_failure_hint(5);
+        assert!(hint.contains("拒绝访问") && hint.contains("Windows Modules Installer"), "退出码 5 必须点名服务：{hint}");
+        assert_eq!(super::dism_failure_hint(87), "", "未知退出码不许编原因");
     }
 }

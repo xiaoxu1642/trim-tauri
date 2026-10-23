@@ -134,14 +134,11 @@ fn env(name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// 判据唯一实现在 native-scanner 的 util（扫描器与执行侧共用，AGENTS N6）。
+/// 2026-10-23 用「8.3 形状的必要条件」替换了宽松的 `~数字` 判据：长合成名
+/// （`Package_for_RollupFix~~26100…`）不再触发触盘展开；真实短名仍被覆盖。
 fn is_short_name(s: &str) -> bool {
-    let b = s.as_bytes();
-    for i in 0..b.len() {
-        if b[i] == b'~' && i + 1 < b.len() && b[i + 1].is_ascii_digit() {
-            return true;
-        }
-    }
-    false
+    trim_finder::util::has_short_name_component(s)
 }
 
 fn is_bare_drive(s: &str) -> bool {
@@ -360,48 +357,12 @@ pub fn normalize_lexical(p: &str) -> String {
 ///   仍含 `~\d` 则返回 `None`（无法证明它不是短名 ⇒ fail-closed）；剩余段干净则采信
 ///   （>MAX_PATH 的长路径走这条，祖先链已被系统整段转成规范名）；
 /// - **全失败**（不存在/无权限/API 报错）：`None`。
-fn expand_short_path(p: &str) -> Option<String> {
-    let b = p.as_bytes();
-    if !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')) {
-        return None; // 仅处理本地盘符路径，UNC/相对一律不展开（宁可多拦）
-    }
-    if let Some(full) = long_path_or_none(p) {
-        return Some(full);
-    }
-    let segs: Vec<&str> = p.split(|c| c == '\\' || c == '/').filter(|c| !c.is_empty()).collect();
-    if segs.len() < 2 {
-        return None;
-    }
-    for i in (1..=segs.len() - 1).rev() {
-        let head = segs[..i].join("\\");
-        let head_has_drive = head.as_bytes().get(1) == Some(&b':');
-        let probe = if head_has_drive { head.clone() } else { format!("{}\\{}", segs[0], head) };
-        let Some(long) = long_path_or_none(&probe) else { continue };
-        let rest = &segs[i..];
-        if rest.is_empty() {
-            return Some(long);
-        }
-        let rest_joined = rest.join("\\");
-        // 未展开的剩余段带波浪号数字 ⇒ 可能是短名 ⇒ 无法证伪，fail-closed
-        if is_short_name(&rest_joined) {
-            return None;
-        }
-        return Some(format!("{}\\{}", long.trim_end_matches(['\\', '/']), rest_joined));
-    }
-    None
-}
-
-/// GetLongPathNameW 包装：成功返回长名，失败返回 None（与 JS realpathSync 失败对称）。
 ///
-/// 2026-10-12：改走 `trim_finder::to_long_path_opt`——原实现把「成功但结果与输入
-/// 相同」也折叠成空串（视作失败），把「路径本来就是长名、波浪号是字面名」误判成
-/// 「展开不掉」（windowsDownloadCache 33639 个目标被误拒的直接原因，见
-/// `expand_short_path` 注释）。底层同一 API、同一缓冲重试逻辑，只是不再吞掉成败之分。
-/// 注意行为差异（已登记）：realpathSync.native 还会解析符号链接/junction，
-/// GetLongPathNameW 只展开短名。仅当路径含 `~\d` 时才会走到这里，故影响面限于
-/// 「短名 + 链接」同时出现的路径，且此种情况仍由剩余段二次判定兜底。
-fn long_path_or_none(p: &str) -> Option<String> {
-    trim_finder::to_long_path_opt(p)
+/// 2026-10-23：实现搬进 native-scanner 的 util——扫描器侧原来还留着一份旧判据
+/// （展开后仍含 `~数字` 就判受保护），把 windowsDownloadCache 的同一批合成名
+/// 整棵子树静默排除（真机 48,033 个文件 / 4.4GB）。两侧从此调同一个函数（N6）。
+fn expand_short_path(p: &str) -> Option<String> {
+    trim_finder::util::expand_short_path(p)
 }
 
 /// 对照 JS `normalizeForCompare`
@@ -612,17 +573,17 @@ pub fn is_path_protected_with(p: &str, r: &ProtectRoots) -> bool {
             continue;
         }
         let tail = &low[3..];
-        if tail == nm.as_str() || tail.starts_with(&format!("{}\\", nm)) {
+        if same_or_under(tail, nm) {
             return true;
         }
     }
     for t in &r.subtree {
-        if low == *t || low.starts_with(&format!("{}\\", t)) {
+        if same_or_under(&low, t) {
             return true;
         }
     }
     for e in &r.exact {
-        if low == *e || e.starts_with(&format!("{}\\", low)) {
+        if same_or_under(e, &low) {
             return true;
         }
     }
@@ -631,6 +592,15 @@ pub fn is_path_protected_with(p: &str, r: &ProtectRoots) -> bool {
         return true;
     }
     false
+}
+
+/// 按段边界判「等于或位于其下」。2026-10-23：替换 `format!("{base}\\")`——
+/// 逐文件删除链一次要按「文件数 × 保护根数」分配临时串，这里零分配。
+fn same_or_under(child: &str, base: &str) -> bool {
+    child == base
+        || (child.len() > base.len()
+            && child.as_bytes()[base.len()] == b'\\'
+            && child.as_bytes().starts_with(base.as_bytes()))
 }
 
 /// Kudu S2（2026-10-16）：删除侧的「解析后最终路径」比较 —— 别名（junction / symlink /

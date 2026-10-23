@@ -130,41 +130,55 @@ pub(super) unsafe fn service_set_start_type(name: &str, start_type: u32) -> Resu
     r
 }
 
+/// 服务启动类型（从 `SERVICE_BOOT_START` 到 `SERVICE_DISABLED` 的取值，数值以
+/// windows crate 常量为真源）。
+///
+/// 返回 `None` = 服务不存在 / SCM 打不开 / 读配置失败。调用方必须自己决定
+/// 「读不到」算不算拒绝——DISM 预检把 None 当「不可用」（fail-fast），
+/// 而 `service_start_type_is` 沿用旧口径：服务没了不算「优化已生效」。
+///
+/// 2026-10-23：从 [`service_start_type_is`] 提取——DISM 前置检查需要区分
+/// 「不存在」「已禁用」「手动/自动」，布尔判据给不出这三种。
+pub fn service_start_type(name: &str) -> Option<u32> {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
+        QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+    };
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT).ok()?;
+        let name_w = to_wide(name);
+        let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_CONFIG) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = CloseServiceHandle(scm);
+                return None;
+            }
+        };
+        // 两段式：先取需要的字节数，再分配重查（QueryServiceConfigW 的标准用法）
+        let mut needed = 0u32;
+        let _ = QueryServiceConfigW(svc, None, 0, &mut needed);
+        let start = if needed == 0 {
+            None
+        } else {
+            let mut buf = vec![0u8; needed as usize];
+            let cfg = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+            QueryServiceConfigW(svc, Some(cfg), needed, &mut needed)
+                .ok()
+                .map(|_| (*cfg).dwStartType.0)
+        };
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+        start
+    }
+}
+
 /// 服务启动类型是否等于期望值（B11：原 PS `Get-Service ... StartType -eq 'Disabled'` 的原生等价）
 ///
 /// 走 `QueryServiceConfigW`（需要 `SERVICE_QUERY_CONFIG`，不是 `service_status` 用的
 /// `SERVICE_QUERY_STATUS`）。服务不存在 = `false`：检测语义是「这项优化是否已生效」，
 /// 服务没了当然不算生效。
 pub fn service_start_type_is(name: &str, expected: u32) -> bool {
-    use windows::Win32::System::Services::{
-        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
-        QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
-    };
-    unsafe {
-        let Ok(scm) = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) else {
-            return false;
-        };
-        let name_w = to_wide(name);
-        let Ok(svc) = OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_CONFIG) else {
-            let _ = CloseServiceHandle(scm);
-            return false;
-        };
-        // 两段式：先取需要的字节数，再分配重查（QueryServiceConfigW 的标准用法）
-        let mut needed = 0u32;
-        let _ = QueryServiceConfigW(svc, None, 0, &mut needed);
-        if needed == 0 {
-            let _ = CloseServiceHandle(svc);
-            let _ = CloseServiceHandle(scm);
-            return false;
-        }
-        let mut buf = vec![0u8; needed as usize];
-        let cfg = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-        let ok = QueryServiceConfigW(svc, Some(cfg), needed, &mut needed).is_ok();
-        let start = if ok { (*cfg).dwStartType.0 } else { u32::MAX };
-        let _ = CloseServiceHandle(svc);
-        let _ = CloseServiceHandle(scm);
-        ok && start == expected
-    }
+    service_start_type(name) == Some(expected)
 }
 
 /// 服务是否在本机存在（`sc query X` 的原生等价）
